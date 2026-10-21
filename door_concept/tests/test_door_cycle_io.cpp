@@ -89,7 +89,7 @@ static DoorEvent rnd_event(Rng& r)
 {
     DoorEvent e;
     e.t_steady_ns = r.i64();
-    switch (r.upto(6))
+    switch (r.upto(4))
     {
         case 0: e.payload = NodeDeleted{r.u64()}; break;
         case 1:
@@ -105,24 +105,29 @@ static DoorEvent rnd_event(Rng& r)
             u.rt_parent = r.opt<RtEdge>([&] { return RtEdge{r.u64(), r.v3(), r.v3()}; });
             e.payload = std::move(u); break;
         }
-        case 2:
-        {
-            ActuatorCaps c; c.available = r.coin(); c.continuous_angle = r.coin(); c.requires_human = r.coin();
-            c.typical_latency_s = r.f(); c.n_doors = r.i32(); c.note = r.str();
-            c.doors = r.vec(4, [&] { return ProviderDoor{r.str(), r.v2(), r.f()}; });
-            e.payload = ActuatorCapsRefreshed{std::move(c)}; break;
-        }
-        case 3:
-        {
-            ActuatorReply a; a.request_seq = r.u64(); a.has_pending = r.coin(); a.pending_id = r.i32();
-            a.door_name = r.str(); a.opening = r.coin(); a.state = r.str(); a.settled = r.coin();
-            e.payload = std::move(a); break;
-        }
-        case 4: e.payload = UiActuationRequest{r.coin(), r.str()}; break;
-        case 5: e.payload = NodeIdAssigned{r.u64(), r.u64(), r.str()}; break;
+        case 2: e.payload = UiActuationRequest{r.coin(), r.str()}; break;
+        case 3: e.payload = NodeIdAssigned{r.u64(), r.u64(), r.str()}; break;
         default: e.payload = OwnedNodesSwept{r.str(), r.vec(5, [&] { return r.u64(); })}; break;
     }
     return e;
+}
+
+static ActuatorPending rnd_pending(Rng& r) { return ActuatorPending{r.i32(), r.str(), r.coin(), r.str(), r.coin()}; }
+
+static ActuatorCall rnd_call(Rng& r)
+{
+    ActuatorCall c;
+    c.kind = static_cast<ActuatorCallKind>(r.upto(2));
+    c.door_name = r.str(); c.xy_m = r.v2(); c.yaw = r.f(); c.width_m = r.f(); c.open = r.coin();
+    c.world_T_room = r.m4(); c.purpose = r.str(); c.provider_id = r.str();
+    c.poll_in = r.opt<ActuatorPending>([&] { return rnd_pending(r); });
+    c.caps = r.opt<ActuatorCaps>([&] {
+        ActuatorCaps k; k.available = r.coin(); k.continuous_angle = r.coin(); k.requires_human = r.coin();
+        k.typical_latency_s = r.f(); k.n_doors = r.i32(); k.note = r.str();
+        k.doors = r.vec(4, [&] { return ProviderDoor{r.str(), r.v2(), r.f()}; });
+        return k; });
+    c.pending = r.opt<ActuatorPending>([&] { return rnd_pending(r); });
+    return c;
 }
 
 static DoorCycleInput rnd_input(Rng& r)
@@ -206,8 +211,9 @@ static DoorCycleInput rnd_input(Rng& r)
         e.y = r.opt<float>([&] { return r.f(); }); e.yaw = r.opt<float>([&] { return r.f(); });
         return e; });
     in.identity_load = r.opt<IdentityLoad>([&] {
-        return IdentityLoad{r.coin(), r.str(), r.opt<std::uint64_t>([&] { return r.u64(); }), r.str()}; });
+        return IdentityLoad{r.coin(), r.str(), r.opt<std::uint64_t>([&] { return r.u64(); }), r.str(), r.coin(), r.str()}; });
     in.events = r.vec(6, [&] { return rnd_event(r); });
+    in.actuator_calls = r.vec(3, [&] { return rnd_call(r); });
     return in;
 }
 
@@ -225,19 +231,15 @@ static DoorCycleOutput rnd_output(Rng& r)
         d.exist_logodds = r.f(); d.p_exists = r.f(); d.cov = r.m6(); d.flags = static_cast<std::uint32_t>(r.u64());
         return d; });
     o.creates = r.vec(3, [&] {
-        NodeCreateOut c; c.seq = r.u64(); c.kind = static_cast<CreateKind>(r.upto(3)); c.parent = r.u64();
+        NodeCreateOut c; c.seq = r.u64(); c.kind = static_cast<CreateKind>(r.upto(4)); c.parent = r.u64();
         c.name = r.str(); c.preferred_name = r.str(); c.pose = r.m4(); c.width_m = r.f(); c.depth_m = r.f();
         c.height_m = r.f(); c.open_prob = r.opt<float>([&] { return r.f(); }); c.phi = r.opt<float>([&] { return r.f(); });
         c.source_id = r.u64(); c.note = r.str();
         return c; });
     o.deletes = r.vec(3, [&] { return NodeDeleteOut{r.u64(), r.str()}; });
     o.affordances = r.vec(4, [&] {
-        AffordanceOut a; a.owner_id = r.u64(); a.kind = r.str(); a.action = static_cast<AffordanceAction>(r.upto(3));
+        AffordanceOut a; a.create_seq = r.u64(); a.node_id = r.u64(); a.owner_id = r.u64(); a.kind = r.str(); a.action = static_cast<AffordanceAction>(r.upto(3));
         a.epoch = r.i32(); a.p = r.f(); a.value = r.f(); a.x = r.f(); a.y = r.f(); a.yaw = r.f(); a.why = r.str();
-        return a; });
-    o.actuator = r.vec(2, [&] {
-        ActuatorRequestOut a; a.seq = r.u64(); a.door_name = r.str(); a.xy = r.v2(); a.yaw = r.f(); a.width_m = r.f();
-        a.open = r.coin(); a.world_T_room = r.m4(); a.purpose = r.str(); a.provider_id = r.str();
         return a; });
     o.identity_table_csv = r.opt<std::string>([&] { return r.str(); });
     o.anchor = r.opt<AnchorOut>([&] {
@@ -272,10 +274,14 @@ static void collect_includes(const fs::path& file, std::set<fs::path>& seen, std
 int main()
 {
     // ★The agents' locale (CLAUDE.md): a harness left in "C" would answer a different question.
-    const char* loc = std::setlocale(LC_ALL, "es_ES.UTF-8");
-    if (loc == nullptr) loc = std::setlocale(LC_ALL, "");
-    std::print("locale: {}\n", loc ? loc : "(none)");
-    std::locale::global(std::locale::classic());
+    // ★NO std::locale::global(classic()) here: it calls setlocale(LC_ALL, "C") and the test would silently run in "C".
+    if (std::setlocale(LC_ALL, "es_ES.UTF-8") == nullptr) std::setlocale(LC_ALL, "");
+    const char* loc = std::setlocale(LC_ALL, nullptr);
+    const std::string lc_numeric = std::setlocale(LC_NUMERIC, nullptr);
+    std::print("locale: {} (LC_NUMERIC {}, decimal point '{}')\n", loc ? loc : "(none)", lc_numeric,
+               std::localeconv()->decimal_point);
+    CHECK(lc_numeric.starts_with("es_ES"));                       // really running under the agents' locale
+    CHECK(std::string(std::localeconv()->decimal_point) == ",");
 
     const fs::path dir = "/tmp/test_door_cycle_io_dir";
     fs::remove_all(dir);
@@ -305,6 +311,7 @@ int main()
         {
             CHECK(ri->header == h);
             CHECK(ri->cycles.size() == ins.size());
+            CHECK(ri->stop == StopReason::CleanEof and ri->stop_offset == fs::file_size(dir / "in.dcin"));
             for (std::size_t i = 0; i < std::min(ins.size(), ri->cycles.size()); ++i)
                 if (not (ri->cycles[i] == ins[i])) { CHECK(ri->cycles[i] == ins[i]); std::print("  input #{}\n", i); break; }
         }
@@ -381,6 +388,9 @@ int main()
             const std::size_t expect = static_cast<std::size_t>(std::ranges::count_if(ends, [&](std::size_t e) { return e <= cut; }));
             ++checked;
             if (not got or got->cycles.size() != expect) { ++bad; continue; }
+            const bool on_boundary = std::ranges::contains(ends, cut);
+            if (got->stop != (on_boundary ? StopReason::CleanEof : StopReason::Truncated)) { ++bad; continue; }
+            if (got->stop_offset != (expect == 0 ? head.size() : ends[expect - 1])) { ++bad; continue; }
             for (std::size_t i = 0; i < expect; ++i) if (not (got->cycles[i] == ins[i])) { ++bad; break; }
         }
         CHECK(bad == 0);
@@ -392,6 +402,43 @@ int main()
         std::stringstream s(recs[0].substr(0, recs[0].size() / 2), std::ios::in | std::ios::binary);
         CHECK(not read_input(s).has_value());
     }
+
+    // ── 3b. a corrupt record (enum byte out of range) is refused and reported CORRUPT, not truncated ─────────────
+    {
+        DoorCycleOutput o;
+        NodeCreateOut c; c.kind = CreateKind::Anchor; o.creates.push_back(c);
+        const DoorRecordingHeader h{.agent_id = 1, .agent_name = {}, .config_text = {}, .start_steady_ns = 0, .start_wall_ms = 0, .note = {}};
+        const std::string head = bytes_of([&](std::ostream& s) { (void)write_header(s, h, RecordingKind::Output); });
+        std::string rec = bytes_of([&](std::ostream& s) { (void)write(s, o); });
+        const std::string good = head + rec + rec;
+        // the kind byte: header(12) + cycle(8) t_ms(8) room(8) decisions n(8) doors n(8) creates n(8) seq(8) = offset 68
+        std::string bad = rec;
+        CHECK(bad[12 + 56] == static_cast<char>(CreateKind::Anchor));
+        bad[12 + 56] = 9;
+        write_file(dir / "corrupt.dcou", head + rec + bad + rec);
+        const auto got = read_output_file((dir / "corrupt.dcou").string());
+        CHECK(got.has_value());
+        if (got)
+        {
+            CHECK(got->cycles.size() == 1);
+            CHECK(got->stop == StopReason::Corrupt);
+            CHECK(got->stop_offset == head.size() + rec.size());
+        }
+        write_file(dir / "good.dcou", good);
+        const auto g2 = read_output_file((dir / "good.dcou").string());
+        CHECK(g2 and g2->cycles.size() == 2 and g2->cycles[0].creates.at(0).kind == CreateKind::Anchor);
+        // a huge claimed vector count is refused without allocating it
+        std::string huge = rec;
+        const std::uint64_t n = ~std::uint64_t{0} >> 4;
+        std::memcpy(huge.data() + 12 + 24, &n, 8);   // the decisions count
+        write_file(dir / "huge.dcou", head + huge);
+        const auto g3 = read_output_file((dir / "huge.dcou").string());
+        CHECK(g3 and g3->cycles.empty() and g3->stop == StopReason::Corrupt);
+    }
+
+    // ── 3c. ownership: created_by reads the creator from the low 12 bits of a DSR id ───────────────────────────────
+    CHECK(created_by((std::uint64_t{777} << 12) | 21u, 21u));
+    CHECK(not created_by((std::uint64_t{777} << 12) | 22u, 21u));
 
     // ── 4. refusals ──────────────────────────────────────────────────────────────────────────────────────────────
     {
@@ -420,14 +467,20 @@ int main()
             for (const auto& e : fs::recursive_directory_iterator(core))
                 if (e.is_regular_file()) { ++n_files; collect_includes(e.path(), seen, angle); }
         // also scan the quoted files themselves for forbidden QUOTED includes (resolved paths)
+        // ★Two patterns: library names case-INsensitively, and Qt's class headers (<QObject>, <QtCore/…>) case-
+        //   SENSITIVELY — case-insensitive, "Q[A-Z]…" would also flag any lowercase header starting with q.
         static const std::regex forbidden(
-            R"((^|/)(dsr/|Q[A-Z][A-Za-z]*$|Qt[A-Za-z]*/|qt|Ice/|IceUtil|media_transport|mask_ingestor|lidar_ingestor|rgb_ingestor|depth_ingestor|genericworker|specificworker|cortex|fastdds|fastrtps))",
+            R"((^|/)(dsr/|qt[a-z0-9]*/|ice/|iceutil|media_transport|mask_ingestor|lidar_ingestor|rgb_ingestor|depth_ingestor|genericworker|specificworker|cortex|fastdds|fastrtps))",
             std::regex::icase);
+        static const std::regex forbidden_qt(R"((^|/)(Q[A-Z][A-Za-z]*$|Qt[A-Za-z]*/))");
+        const auto bad = [](const std::string& x) { return std::regex_search(x, forbidden) or std::regex_search(x, forbidden_qt); };
+        CHECK(bad("QObject") and bad("QtCore/qobject.h") and bad("dsr/api/dsr_api.h") and bad("Ice/Ice.h"));
+        CHECK(not bad("queue") and not bad("quaternion.h") and not bad("Eigen/Dense"));
         int hits = 0;
         for (const auto& a : angle)
-            if (std::regex_search(a.substr(0, a.find(' ')), forbidden)) { ++hits; std::print("  forbidden include <{}\n", a); }
+            if (bad(a.substr(0, a.find(' ')))) { ++hits; std::print("  forbidden include <{}\n", a); }
         for (const auto& p : seen)
-            if (std::regex_search(p.string(), forbidden)) { ++hits; std::print("  forbidden local include {}\n", p.string()); }
+            if (bad(p.string())) { ++hits; std::print("  forbidden local include {}\n", p.string()); }
         CHECK(n_files >= 2);
         CHECK(hits == 0);
         std::print("core include scan: {} file(s) under src/core, {} reachable local header(s), {} system include(s), {} forbidden\n",

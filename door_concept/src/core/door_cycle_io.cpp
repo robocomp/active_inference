@@ -6,6 +6,7 @@
 // recorded data can be trusted bit for bit.
 #include "door_cycle_io.h"
 
+#include <algorithm>
 #include <cstring>
 #include <fstream>
 #include <istream>
@@ -99,28 +100,28 @@ DCIO_FIELDS(DoorNodeUpserted, x.node, x.rt_parent)
 DCIO_FIELDS(ProviderDoor, x.id, x.xy_mm, x.angle)
 DCIO_FIELDS(ActuatorCaps, x.available, x.continuous_angle, x.requires_human, x.typical_latency_s, x.n_doors, x.note,
             x.doors)
-DCIO_FIELDS(ActuatorCapsRefreshed, x.caps)
-DCIO_FIELDS(ActuatorReply, x.request_seq, x.has_pending, x.pending_id, x.door_name, x.opening, x.state, x.settled)
+DCIO_FIELDS(ActuatorPending, x.id, x.door_name, x.opening, x.state, x.settled)
+DCIO_FIELDS(ActuatorCall, x.kind, x.door_name, x.xy_m, x.yaw, x.width_m, x.open, x.world_T_room, x.purpose, x.provider_id,
+            x.poll_in, x.caps, x.pending)
 DCIO_FIELDS(UiActuationRequest, x.open, x.provider_id)
 DCIO_FIELDS(NodeIdAssigned, x.create_seq, x.node_id, x.name)
 DCIO_FIELDS(OwnedNodesSwept, x.why, x.removed)
 DCIO_FIELDS(DoorEvent, x.t_steady_ns, x.payload)
-DCIO_FIELDS(IdentityLoad, x.file_present, x.csv_text, x.initial_room, x.initial_room_name)
+DCIO_FIELDS(IdentityLoad, x.file_present, x.csv_text, x.initial_room, x.initial_room_name, x.registration_present,
+            x.registration_csv_text)
 DCIO_FIELDS(DoorCycleInput, x.cycle, x.t_steady_ns, x.t_wall_ms, x.rooms, x.walls, x.objects, x.robot, x.camera, x.masks,
             x.mask_stream_ms_since_last_frame, x.bpearl, x.semantic_state, x.semantic, x.rgb_gray, x.depth,
-            x.affordances, x.executing, x.identity_load, x.events)
+            x.affordances, x.executing, x.identity_load, x.events, x.actuator_calls)
 DCIO_FIELDS(DoorStateOut, x.node_id, x.name, x.parent, x.pose, x.width_m, x.depth_m, x.height_m, x.open_prob, x.phi,
             x.phi_sigma, x.exist_logodds, x.p_exists, x.cov, x.flags)
 DCIO_FIELDS(NodeCreateOut, x.seq, x.kind, x.parent, x.name, x.preferred_name, x.pose, x.width_m, x.depth_m, x.height_m,
             x.open_prob, x.phi, x.source_id, x.note)
 DCIO_FIELDS(NodeDeleteOut, x.id, x.why)
-DCIO_FIELDS(AffordanceOut, x.owner_id, x.kind, x.action, x.epoch, x.p, x.value, x.x, x.y, x.yaw, x.why)
-DCIO_FIELDS(ActuatorRequestOut, x.seq, x.door_name, x.xy, x.yaw, x.width_m, x.open, x.world_T_room, x.purpose,
-            x.provider_id)
+DCIO_FIELDS(AffordanceOut, x.create_seq, x.node_id, x.owner_id, x.kind, x.action, x.epoch, x.p, x.value, x.x, x.y, x.yaw, x.why)
 DCIO_FIELDS(AnchorOut, x.door_id, x.x, x.P, x.drivable, x.unseen_ms, x.epoch, x.clear_width, x.note)
 DCIO_FIELDS(DiagRow, x.stream, x.line)
 DCIO_FIELDS(DoorCycleOutput, x.cycle, x.t_ms, x.room_id, x.decisions, x.doors, x.creates, x.deletes, x.affordances,
-            x.actuator, x.identity_table_csv, x.anchor, x.diag)
+            x.identity_table_csv, x.anchor, x.diag)
 DCIO_FIELDS(DoorRecordingHeader, x.agent_id, x.agent_name, x.config_text, x.start_steady_ns, x.start_wall_ms, x.note)
 #undef DCIO_FIELDS
 }  // namespace
@@ -140,6 +141,15 @@ namespace rc::door::core
 {
 namespace
 {
+
+// ─── enum ranges: a byte outside them is corruption, not a new kind ─────────────────────────────────────────────
+// ★One line per serialised enum. A new enum without a line here fails to COMPILE (enum_ok has no overload), so the
+//   check cannot be forgotten.
+constexpr bool enum_ok(SemanticState v)    { return static_cast<unsigned>(v) <= 2u; }
+constexpr bool enum_ok(PixelFormat v)      { return static_cast<unsigned>(v) >= 1u and static_cast<unsigned>(v) <= 3u; }
+constexpr bool enum_ok(CreateKind v)       { return static_cast<unsigned>(v) <= 4u; }
+constexpr bool enum_ok(AffordanceAction v) { return static_cast<unsigned>(v) <= 3u; }
+constexpr bool enum_ok(ActuatorCallKind v) { return static_cast<unsigned>(v) <= 2u; }
 
 // ─── the generic encoders ───────────────────────────────────────────────────────────────────────────────────────
 // bool is stored as one byte 0/1 and REFUSED otherwise on read (a corrupt byte must not become `true`).
@@ -191,7 +201,12 @@ template <class T> void Reader::one(T& x)
         if (v > 1) ok = false;
         x = (v == 1);
     }
-    else if constexpr (std::is_enum_v<T>)                      { std::underlying_type_t<T> v{}; raw(v); x = static_cast<T>(v); }
+    else if constexpr (std::is_enum_v<T>)
+    {
+        std::underlying_type_t<T> v{}; raw(v);
+        x = static_cast<T>(v);
+        if (not enum_ok(x)) ok = false;
+    }
     else if constexpr (std::is_arithmetic_v<T>)                { raw(x); }
     else if constexpr (std::is_same_v<T, std::string>)
     {
@@ -219,9 +234,17 @@ template <class T> void Reader::one(T& x)
         }
         else
         {
+            // ★M-5: grow as elements actually DECODE, never resize to the claimed count up front — n ≤ bytes left only
+            //   bounds the count, and n × sizeof(E) of a large struct could still be gigabytes from one bad length.
             x.clear();
-            x.resize(static_cast<std::size_t>(n));
-            for (auto& v : x) { one(v); if (not ok) return; }
+            x.reserve(static_cast<std::size_t>(std::min<std::uint64_t>(n, left() / sizeof(E) + 1)));
+            for (std::uint64_t i = 0; i < n; ++i)
+            {
+                E v{};
+                one(v);
+                if (not ok) return;
+                x.push_back(std::move(v));
+            }
         }
     }
     else if constexpr (is_optional<T>::value)
@@ -254,19 +277,46 @@ template <class T> bool write_record(std::ostream& os, const T& x)
     return static_cast<bool>(os);
 }
 
-template <class T> std::optional<T> read_record(std::istream& is)
+enum class Got { Ok, Eof, Truncated, Corrupt };
+
+// Read exactly n bytes, growing the buffer in 1 MB steps as data ARRIVES (M-5: a corrupt length near kMaxRecord
+// must not allocate gigabytes before the stream says it has nothing like that many).
+bool read_exact(std::istream& is, std::string& buf, std::uint64_t n)
+{
+    constexpr std::uint64_t kChunk = 1ull << 20;
+    buf.clear();
+    while (buf.size() < n)
+    {
+        const std::size_t want = static_cast<std::size_t>(std::min<std::uint64_t>(kChunk, n - buf.size()));
+        const std::size_t at = buf.size();
+        buf.resize(at + want);
+        if (not is.read(buf.data() + at, static_cast<std::streamsize>(want))) return false;
+    }
+    return true;
+}
+
+template <class T> Got read_record_ex(std::istream& is, T& out)
 {
     std::uint32_t tag = 0;
     std::uint64_t len = 0;
-    if (not is.read(reinterpret_cast<char*>(&tag), sizeof tag)) return std::nullopt;
-    if (not is.read(reinterpret_cast<char*>(&len), sizeof len)) return std::nullopt;
-    if (tag != kRecordTag or len > kMaxRecord) return std::nullopt;
-    std::string buf(static_cast<std::size_t>(len), '\0');
-    if (len > 0 and not is.read(buf.data(), static_cast<std::streamsize>(len))) return std::nullopt;
+    if (not is.read(reinterpret_cast<char*>(&tag), sizeof tag))
+        return is.gcount() == 0 ? Got::Eof : Got::Truncated;
+    if (not is.read(reinterpret_cast<char*>(&len), sizeof len)) return Got::Truncated;
+    if (tag != kRecordTag or len > kMaxRecord) return Got::Corrupt;
+    std::string buf;
+    if (not read_exact(is, buf, len)) return Got::Truncated;
     Reader r{buf.data(), buf.data() + buf.size()};
     T x{};
     r.one(x);
-    if (not r.ok or r.p != r.e) return std::nullopt;   // a record must be consumed EXACTLY: anything else is a mismatch
+    if (not r.ok or r.p != r.e) return Got::Corrupt;   // a record must be consumed EXACTLY: anything else is a mismatch
+    out = std::move(x);
+    return Got::Ok;
+}
+
+template <class T> std::optional<T> read_record(std::istream& is)
+{
+    T x{};
+    if (read_record_ex(is, x) != Got::Ok) return std::nullopt;
     return x;
 }
 
@@ -280,9 +330,17 @@ template <class Rec, class T> std::optional<Rec> read_file(const std::string& pa
     if (not h) return std::nullopt;
     Rec rec;
     rec.header = std::move(*h);
-    while (auto x = read_record<T>(f))   // clean EOF or a truncated tail: stop, keep what is whole
-        rec.cycles.push_back(std::move(*x));
-    return rec;
+    for (;;)
+    {
+        const auto at = static_cast<std::uint64_t>(f.tellg());
+        T x{};
+        const Got g = read_record_ex(f, x);
+        if (g == Got::Ok) { rec.cycles.push_back(std::move(x)); continue; }
+        // clean EOF, a truncated tail, or a corrupt record: stop, keep what is whole, and SAY which
+        rec.stop = g == Got::Eof ? StopReason::CleanEof : g == Got::Truncated ? StopReason::Truncated : StopReason::Corrupt;
+        rec.stop_offset = at;
+        return rec;
+    }
 }
 
 }  // namespace

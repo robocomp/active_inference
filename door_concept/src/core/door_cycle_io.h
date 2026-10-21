@@ -14,12 +14,26 @@
 // nodes' w/h/φ/open_prob, its RT edges, its affordance proposals) are NOT: the core mirrors what it wrote. Two
 // deliberate exceptions, both cheap and both because a foreign agent can touch them: the `epistemic_pending` flag the
 // controller clears on a door node, and the object-node list (names + poses) the name allocator and the obstacle
-// collectors read — it includes our own doors, which the core may ignore in favour of its mirror.
+// collectors read.
+// ★OWN READ-BACKS IN objects[] AND AffordanceFlags ARE FOR FOREIGN MIRROR SOURCES ONLY. objects[] lists our own doors
+// and AffordanceFlags our own target x/y/yaw/epoch because one walk records them with the foreign rows; the core must
+// take ITS doors' geometry and ITS proposals from its own mirror, and may read those rows only where the source is
+// foreign (another room's door seen as a mirror source, a node left by an earlier run, the controller's flags).
 //
-// ★ASYNCHRONOUS INPUTS BECOME EVENTS (spec §6.4). A node deleted, a door node appearing, an actuator reply, a button
-// press — anything that today reaches SpecificWorker between two compute() calls — is latched by the adapter and
-// delivered in the NEXT cycle's `events`, in arrival order, each stamped with its own steady time. The core API stays a
-// single step(input).
+// ★ASYNCHRONOUS INPUTS BECOME EVENTS (spec §6.4). A node deleted, a door node appearing, a button press — anything
+// that today reaches SpecificWorker between two compute() calls — is latched by the adapter and delivered in the NEXT
+// cycle's `events`, in arrival order, each stamped with its own steady time. The core API stays a single step(input).
+// ★Node events are CLOSED-LOOP on our own state (spec §6.1): the adapter records NodeDeleted / DoorNodeUpserted only for
+// nodes NOT created by this agent (created_by() below: the creator is the low agent-id bits of a DSR id, the rule
+// common/affordance_manager/affordance_manager.cpp:620 uses), AND the core ignores upserts/deletes of ids it owns —
+// both sides, so a recording made by a buggy adapter still replays the core's own lifecycle from its own decisions.
+//
+// ★THE ACTUATOR IS A SYNCHRONOUS PORT, NOT AN EVENT (ruling, Task 2 review). DoorActuator::request/poll/refresh_caps
+// are blocking Ice calls whose replies today's code reads in the same cycle; delaying them a cycle would change
+// behaviour. So the core calls an injected ActuatorPort inside step(), and the live port appends each call — kind,
+// arguments, reply — to `actuator_calls`. ★RECORDING ORDER: the adapter builds the input, runs step() with the live
+// port, and only THEN writes the input record (transcript filled in). The replay port consumes the transcript in order
+// inside step(), checking each call's kind and arguments against the recorded ones (a mismatch = the core diverged).
 //
 // ★TIME IS AN INPUT (spec §3.3). The core reads no clock: `t_steady_ns` is the steady clock at the top of the cycle
 // (nanoseconds, because update_ego_motion divides by sub-millisecond dt), `t_wall_ms` the system clock the anchor
@@ -58,6 +72,11 @@ using Mat4d = Eigen::Matrix4d;
 using Mat6d = Eigen::Matrix<double, 6, 6>;
 
 inline constexpr std::uint32_t kCycleIoVersion = 1;
+
+/// DSR ids carry the generating agent's id in their low bits (cortex core/id_generator.h, agent_id_size = 12).
+inline constexpr int kDsrAgentIdBits = 12;
+[[nodiscard]] constexpr bool created_by(std::uint64_t node_id, std::uint32_t agent_id)
+{ return static_cast<std::uint32_t>(node_id & ((std::uint64_t{1} << kDsrAgentIdBits) - 1)) == agent_id; }
 
 // ═══ GRAPH SNAPSHOT (foreign) ═════════════════════════════════════════════════════════════════════════════════════
 
@@ -291,48 +310,19 @@ struct ExecutingEdge
 };
 
 // ═══ EVENTS (asynchronous, latched by the adapter) ════════════════════════════════════════════════════════════════
+// ★Only for nodes NOT created by this agent (see the header note: created_by), and the core ignores ids it owns.
 
 struct NodeDeleted { std::uint64_t id = 0; bool operator==(const NodeDeleted&) const = default; };
 
 /// update_node_signal on an "object" node named door* (modify_node_slot → ensure_instance). The adapter keeps only the
-/// LAST upsert per id per cycle — the signal fires on every attribute write, including our own.
+/// LAST upsert per id per cycle. ⚠`rt_parent` is the RT edge from the node's parent as read; ensure_instance reads
+/// room→node, so the core may use it ONLY when rt_parent->parent is the core's current room (a door hung from a wall,
+/// or from another room, is placed from objects[].room_T_node or not at all).
 struct DoorNodeUpserted
 {
     ObjectInfo node;
-    std::optional<RtEdge> rt_parent;               // the RT edge from its parent (ensure_instance reads room→node)
+    std::optional<RtEdge> rt_parent;
     bool operator==(const DoorNodeUpserted&) const = default;
-};
-
-struct ProviderDoor
-{
-    std::string id;
-    Vec2f xy_mm = Vec2f::Zero();
-    float angle = 0.f;
-    bool operator==(const ProviderDoor&) const = default;
-};
-struct ActuatorCaps
-{
-    bool available = false, continuous_angle = false, requires_human = false;
-    float typical_latency_s = 0.f;
-    int n_doors = 0;
-    std::string note;
-    std::vector<ProviderDoor> doors;
-    bool operator==(const ActuatorCaps&) const = default;
-};
-struct ActuatorCapsRefreshed { ActuatorCaps caps; bool operator==(const ActuatorCapsRefreshed&) const = default; };
-
-/// DoorActuator::request()/poll() result. ★request() is a SYNCHRONOUS Ice call today; through the core boundary its
-/// reply arrives one cycle later as this event (request_seq ties it to the ActuatorRequestOut that asked).
-struct ActuatorReply
-{
-    std::uint64_t request_seq = 0;                 // 0 = a poll() update of the standing request
-    bool has_pending = false;                      // false = request() returned nullopt ("no provider")
-    int  pending_id = -1;
-    std::string door_name;
-    bool opening = true;
-    std::string state;
-    bool settled = false;
-    bool operator==(const ActuatorReply&) const = default;
 };
 
 /// The strip window's open/close buttons (a Qt callback between cycles).
@@ -346,7 +336,7 @@ struct UiActuationRequest
 /// The DSR id a node creation the core asked for got (creations happen in the adapter, after step()).
 struct NodeIdAssigned
 {
-    std::uint64_t create_seq = 0;                  // NodeCreateOut::seq
+    std::uint64_t create_seq = 0;                  // NodeCreateOut::seq / AffordanceOut::create_seq
     std::uint64_t node_id = 0;                     // 0 = the insert failed
     std::string   name;                            // the name it got (DSR names are unique)
     bool operator==(const NodeIdAssigned&) const = default;
@@ -360,8 +350,7 @@ struct OwnedNodesSwept
     bool operator==(const OwnedNodesSwept&) const = default;
 };
 
-using DoorEventPayload = std::variant<NodeDeleted, DoorNodeUpserted, ActuatorCapsRefreshed, ActuatorReply,
-                                      UiActuationRequest, NodeIdAssigned, OwnedNodesSwept>;
+using DoorEventPayload = std::variant<NodeDeleted, DoorNodeUpserted, UiActuationRequest, NodeIdAssigned, OwnedNodesSwept>;
 struct DoorEvent
 {
     std::int64_t t_steady_ns = 0;                  // when the adapter latched it
@@ -369,14 +358,68 @@ struct DoorEvent
     bool operator==(const DoorEvent&) const = default;
 };
 
-/// spec §6.6: the identity table as LOADED (raw text — the core parses it with the same parse_identity_table), and
-/// the room resolved at startup that initialize() enters fresh right after the load.
+// ═══ ACTUATOR PORT TRANSCRIPT (synchronous calls made INSIDE step()) ═══════════════════════════════════════════════
+
+struct ProviderDoor
+{
+    std::string id;
+    Vec2f xy_mm = Vec2f::Zero();
+    float angle = 0.f;
+    bool operator==(const ProviderDoor&) const = default;
+};
+/// DoorActuator::Caps.
+struct ActuatorCaps
+{
+    bool available = false, continuous_angle = false, requires_human = false;
+    float typical_latency_s = 0.f;
+    int n_doors = 0;
+    std::string note;
+    std::vector<ProviderDoor> doors;
+    bool operator==(const ActuatorCaps&) const = default;
+};
+/// DoorActuator::Pending.
+struct ActuatorPending
+{
+    int  id = -1;
+    std::string door_name;
+    bool opening = true;
+    std::string state = "—";
+    bool settled = false;
+    bool operator==(const ActuatorPending&) const = default;
+};
+
+/// One call through the port, in call order. Arguments are stored so the replay port can CHECK them (a different
+/// call = the core diverged from the recorded run); the reply is what the replay port returns.
+enum class ActuatorCallKind : std::uint8_t { RefreshCaps = 0, Request = 1, Poll = 2 };
+struct ActuatorCall
+{
+    ActuatorCallKind kind = ActuatorCallKind::RefreshCaps;
+    // Request arguments (DoorActuator::request)
+    std::string door_name;
+    Vec2f xy_m = Vec2f::Zero();
+    float yaw = 0.f, width_m = 0.f;
+    bool  open = true;
+    Mat4d world_T_room = Mat4d::Identity();
+    std::string purpose, provider_id;
+    // Poll argument: the standing request as passed in
+    std::optional<ActuatorPending> poll_in;
+    // Replies: RefreshCaps → caps; Request → pending (nullopt = "no provider"); Poll → pending (the updated request)
+    std::optional<ActuatorCaps>    caps;
+    std::optional<ActuatorPending> pending;
+    bool operator==(const ActuatorCall&) const = default;
+};
+
+/// Startup loads (spec §6.6 + review I-4): the identity table and the learned world←room registration as LOADED
+/// (raw text — the core parses them with the same parsers), and the room resolved at startup that initialize()
+/// enters fresh right after the load.
 struct IdentityLoad
 {
     bool file_present = false;
-    std::string csv_text;
+    std::string csv_text;                          // etc/door_identities.csv
     std::optional<std::uint64_t> initial_room;
     std::string initial_room_name;
+    bool registration_present = false;
+    std::string registration_csv_text;             // etc/door_world_registration.csv (DoorWorldRegistration)
     bool operator==(const IdentityLoad&) const = default;
 };
 
@@ -408,12 +451,15 @@ struct DoorCycleInput
 
     std::optional<IdentityLoad>  identity_load;    // once, on the first recorded cycle
     std::vector<DoorEvent>       events;           // since the previous cycle, in arrival order
+    std::vector<ActuatorCall>    actuator_calls;   // filled DURING step() by the live port; record written after it
 
     bool operator==(const DoorCycleInput&) const = default;
 };
 
 // ═══ THE OUTPUT ══════════════════════════════════════════════════════════════════════════════════════════════════
-// Every decision the adapter turns into a graph write or an actuator call, plus the diagnostic rows. v1 carries the
+// Every decision the adapter turns into a graph write, plus the diagnostic rows. Actuator calls are NOT here: they are
+// made synchronously through the ActuatorPort inside step() and recorded in DoorCycleInput::actuator_calls (and the
+// DDEC ActuatorRequest decision). v1 carries the
 // shapes the slices are known to need; a slice that needs more bumps the version (the reader refuses other versions).
 
 /// A door's published state after the cycle (what persist_door_belief / the RT-cov publish / attributes write).
@@ -431,7 +477,8 @@ struct DoorStateOut
     bool operator==(const DoorStateOut&) const = default;
 };
 
-enum class CreateKind : std::uint8_t { DoorFromDetection = 0, DoorCopy = 1, EntryMirror = 2, LookAffordance = 3 };
+enum class CreateKind : std::uint8_t { DoorFromDetection = 0, DoorCopy = 1, EntryMirror = 2, LookAffordance = 3,
+                                       Anchor = 4 };   // Anchor: the passage door's robot-relative copy
 struct NodeCreateOut
 {
     std::uint64_t seq = 0;                         // answered by NodeIdAssigned{seq} next cycle
@@ -456,6 +503,8 @@ struct NodeDeleteOut
 enum class AffordanceAction : std::uint8_t { Offer = 0, Refresh = 1, Withdraw = 2, Remove = 3 };
 struct AffordanceOut
 {
+    std::uint64_t create_seq = 0;                  // ≠0 on the Offer that CREATES the node: answered by NodeIdAssigned
+    std::uint64_t node_id = 0;                     // the affordance node once known (0 until its id is assigned)
     std::uint64_t owner_id = 0;                    // the door (or room, for a look)
     std::string   kind;                            // epistemic | approach | open | cross | close | look
     AffordanceAction action = AffordanceAction::Offer;
@@ -463,18 +512,6 @@ struct AffordanceOut
     float p = 0.f, value = 0.f, x = 0.f, y = 0.f, yaw = 0.f;
     std::string why;
     bool operator==(const AffordanceOut&) const = default;
-};
-
-struct ActuatorRequestOut
-{
-    std::uint64_t seq = 0;
-    std::string door_name;
-    Vec2f xy = Vec2f::Zero();
-    float yaw = 0.f, width_m = 0.f;
-    bool open = true;
-    Mat4d world_T_room = Mat4d::Identity();
-    std::string purpose, provider_id;
-    bool operator==(const ActuatorRequestOut&) const = default;
 };
 
 struct AnchorOut
@@ -507,7 +544,6 @@ struct DoorCycleOutput
     std::vector<NodeCreateOut>      creates;
     std::vector<NodeDeleteOut>      deletes;
     std::vector<AffordanceOut>      affordances;
-    std::vector<ActuatorRequestOut> actuator;
     std::optional<std::string>      identity_table_csv;   // save etc/door_identities.csv with this content
     std::optional<AnchorOut>        anchor;               // nullopt = no passage anchor
     std::vector<DiagRow>            diag;
@@ -544,9 +580,24 @@ enum class RecordingKind : std::uint8_t { Input, Output };   // "DCIN" | "DCOU"
 /// The names the brief asked for: read(std::istream&) for an input record.
 [[nodiscard]] inline std::optional<DoorCycleInput> read(std::istream& is) { return read_input(is); }
 
-struct InputRecording  { DoorRecordingHeader header; std::vector<DoorCycleInput>  cycles; };
-struct OutputRecording { DoorRecordingHeader header; std::vector<DoorCycleOutput> cycles; };
-/// Whole file: nullopt if it cannot be opened or its header is refused; otherwise every COMPLETE record.
+/// Why a whole-file read stopped: the end of the file on a record boundary, a record cut short (the writer was
+/// killed / hit the size cap — expected), or a record that is present but does not decode (a real defect).
+enum class StopReason : std::uint8_t { CleanEof = 0, Truncated = 1, Corrupt = 2 };
+struct InputRecording
+{
+    DoorRecordingHeader header;
+    std::vector<DoorCycleInput> cycles;
+    StopReason    stop = StopReason::CleanEof;
+    std::uint64_t stop_offset = 0;                 // byte offset of the record that stopped the read (file size on CleanEof)
+};
+struct OutputRecording
+{
+    DoorRecordingHeader header;
+    std::vector<DoorCycleOutput> cycles;
+    StopReason    stop = StopReason::CleanEof;
+    std::uint64_t stop_offset = 0;
+};
+/// Whole file: nullopt if it cannot be opened or its header is refused; otherwise every COMPLETE record + why it stopped.
 [[nodiscard]] std::optional<InputRecording>  read_input_file(const std::string& path);
 [[nodiscard]] std::optional<OutputRecording> read_output_file(const std::string& path);
 
