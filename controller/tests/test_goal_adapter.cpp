@@ -191,73 +191,78 @@ int main()
         CHECK("route: an empty tour is finished at once", route_goal_step({}, 1, 0, false, 0.25f, 0.06f).finished);
     }
 
-    // ---- 4d. I5: odometry turn sign vs the pose's heading change
+    // ---- 4d. Task 3d (rtD1e leg 5): the odometry turn sign is a BELIEF, not a latch. A relocaliser correction (the pose moved
+    //      more than the odometry predicts plus its covariance) carries ~no evidence for "sign flipped"; agreeing intervals decay
+    //      it; a genuine sustained flip is still detected; nothing latches.
     {
-        OdoSignCheck c;
-        const float dt = 0.1f, w = 0.4f, sig = 0.013f * std::sqrt(dt);
-        for (int k = 0; k < 10; ++k) c.update(w, w * dt, dt, 0.1f, sig);
-        CHECK("I5: consistent turning never contradicts", not c.contradicted());
-        c.update(w, -w * dt, dt, 0.1f, sig); c.update(w, -w * dt, dt, 0.1f, sig);
-        CHECK("I5: two opposite intervals (a pose jump + snap back) do not contradict", not c.contradicted());
-        c.update(w, w * dt, dt, 0.1f, sig);
-        c.update(w, -w * dt, dt, 0.1f, sig); c.update(w, 0.f, dt, 0.1f, sig); c.update(w, -w * dt, dt, 0.1f, sig);
-        CHECK("I5: an interval the pose cannot resolve is neutral (run continues, not reset)", c.run() == 2 and not c.contradicted());
-        c.update(0.05f, -0.05f, dt, 0.1f, sig);
-        CHECK("I5: below the deadband nothing is judged", c.run() == 2);
-        c.update(w, -w * dt, dt, 0.1f, sig);
-        CHECK("I5: a third opposite turning interval in a row contradicts the odometry (latched)", c.contradicted());
-        c.update(w, w * dt, dt, 0.1f, sig);
-        CHECK("I5: latched until reset", c.contradicted());
+        const float dt = 0.1f, w = 0.4f, sy = 0.013f * std::sqrt(dt);
+        const float sp = 0.006f, sc = 0.064f;   // odometry displacement sigma per interval; a correction's scale (pose drift sigma)
+        TurnSignBelief c;
+        for (int k = 0; k < 10; ++k) c.update(w * dt, 0.f, w * dt, 0.f, sy, sp, sc);
+        CHECK("3d: consistent turning is never 'flipped'", not c.flipped() and c.p_flipped() < 0.05f);
+        // rtD1e 439.98-440.17: odometry turning right while the pose's yaw RISES and x/y jump 0.25 m over 3 intervals —
+        // the localiser correcting, the base turning in place (odometry displacement ~0)
+        TurnSignBelief r = c;
+        for (int k = 0; k < 3; ++k) r.update(-0.02f, 0.f, +0.048f, 0.083f, sy, sp, sc);
+        std::printf("   3d: rtD1e correction (3 opposite intervals, 0.08 m jumps): P(flipped) %.4f\n", r.p_flipped());
+        CHECK("3d: a relocaliser correction (pose jumped >> odometry + covariance) is NOT a flipped sign", not r.flipped());
+        // the SAME yaw evidence without the jump: sustained opposite turning — a genuine flip
+        TurnSignBelief f = c; int trip = -1;
+        for (int k = 0; k < 6; ++k) { f.update(w * dt, 0.f, -w * dt, 0.f, sy, sp, sc); if (f.flipped() and trip < 0) trip = k + 1; }
+        CHECK("3d: a genuine sustained sign flip is detected", f.flipped());
+        CHECK("3d: ...within 3 turning intervals", trip > 0 and trip <= 3);
+        // no latch: once the sign agrees again (a bridge fixed), the belief drops and Blind ends
+        for (int k = 0; k < 3; ++k) f.update(w * dt, 0.f, w * dt, 0.f, sy, sp, sc);
+        CHECK("3d: no latch — agreeing intervals bring it back below 1/2", not f.flipped());
+        // an interval with no turn says nothing
+        TurnSignBelief n = c; const float p0 = n.p_flipped();
+        n.update(0.f, 0.f, 0.01f, 0.f, sy, sp, sc);
+        CHECK("3d: an interval without odometry turn is ~neutral (only the switch prior moves it)", std::abs(n.p_flipped() - p0) < 0.02f);
+        // one unexplained opposite interval (a glitch) is decayed by the next agreeing ones
+        TurnSignBelief g = c;
+        g.update(w * dt, 0.f, -w * dt, 0.f, sy, sp, sc);
+        for (int k = 0; k < 2; ++k) g.update(w * dt, 0.f, w * dt, 0.f, sy, sp, sc);
+        CHECK("3d: a one-interval glitch is decayed by agreeing intervals", not g.flipped());
     }
 
-    // ---- 4d'. I5 TIME-ALIGNED: the pose's heading change over [t_a, t_b] (its own time base: the tick minus the pose age)
-    //   against the odometry integrated over the SAME interval. A turn REVERSAL with a 250 ms pose lag, ramped at the
-    //   capability's a_rot, must not trip; a true sign inversion must trip within 3 turning intervals.
+    // ---- 4d'. TIME-ALIGNED (review fix 2.2, kept): the pose's heading change over [t_a, t_b] (its own time base) against the
+    //   odometry integrated over the SAME interval. A turn REVERSAL with a 250 ms pose lag must not trip; a true sign inversion
+    //   must trip within 3 turning intervals.
     {
         const double tick = 0.05, lag = 0.25; const float a_rot = 0.5f / 0.259f, w0 = 0.5f;
         auto run = [&](float odo_sign, int* trip_after) {
-            OdoSignCheck c; std::vector<OdoSample> hist; double yaw_true = 0.0; float w = w0; double prev_pose_t = -1.0; float prev_pose_yaw = 0.f;
-            std::vector<std::pair<double, double>> yaw_hist;   // (t, true yaw)
-            int turning_intervals = 0; *trip_after = -1;
+            TurnSignBelief c; std::vector<OdoSample> hist; double yaw_true = 0.0; float w = w0; double prev_pose_t = -1.0; float prev_pose_yaw = 0.f;
+            std::vector<std::pair<double, double>> yaw_hist;
+            int turning_intervals = 0; *trip_after = -1; bool ever = false;
             for (int k = 0; k < 120; ++k)
             {
                 const double t = k * tick;
-                const float target = t < 2.0 ? w0 : -w0;                 // the reversal at t = 2 s
+                const float target = t < 2.0 ? w0 : -w0;
                 const float step = a_rot * float(tick);
                 w = w < target ? std::min(target, w + step) : std::max(target, w - step);
                 yaw_true += w * tick;
                 yaw_hist.push_back({t, yaw_true});
-                hist.push_back({t, odo_sign * w});                     // fresh odometry
-                const double tp = t - lag;                             // the pose describes the robot at t - lag
+                hist.push_back({t, odo_sign * w, 0.f});
+                const double tp = t - lag;
                 if (tp < 0.0) continue;
                 float yp = 0.f;
                 for (const auto& [ts, y] : yaw_hist) if (ts <= tp + 1e-9) yp = float(y);
                 if (prev_pose_t >= 0.0)
                 {
-                    c.update_interval(hist, prev_pose_t, tp, yp - prev_pose_yaw, 0.1f, 0.013f * std::sqrt(float(tp - prev_pose_t)));
+                    const float dtp = float(tp - prev_pose_t);
+                    c.update_interval(hist, prev_pose_t, tp, yp - prev_pose_yaw, 0.f, 0.013f * std::sqrt(dtp), 0.006f, 0.064f);
                     ++turning_intervals;
-                    if (c.contradicted() and *trip_after < 0) *trip_after = turning_intervals;
+                    ever = ever or c.flipped();
+                    if (c.flipped() and *trip_after < 0) *trip_after = turning_intervals;
                 }
                 prev_pose_t = tp; prev_pose_yaw = yp;
             }
-            return c.contradicted();
+            return ever;
         };
         int trip = -1;
-        CHECK("I5 aligned: a reversal under a 250 ms pose lag does NOT trip", not run(+1.f, &trip));
-        CHECK("I5 aligned: a true sign inversion trips", run(-1.f, &trip));
-        CHECK("I5 aligned: ...within 3 turning intervals", trip > 0 and trip <= 3);
-        // the unaligned comparison (current wheel rate vs the lagged pose) WOULD trip on the same reversal
-        OdoSignCheck naive; double yaw_true = 0.0; float w = w0; std::vector<double> yaws;
-        for (int k = 0; k < 120; ++k)
-        {
-            const double t = k * tick; const float target = t < 2.0 ? w0 : -w0; const float stepw = a_rot * float(tick);
-            const float w_prev = w; w = w < target ? std::min(target, w + stepw) : std::max(target, w - stepw);
-            yaw_true += w * tick; yaws.push_back(yaw_true);
-            const int lagk = k - int(lag / tick + 0.5);
-            if (lagk >= 1) naive.update(0.5f * (w + w_prev), float(yaws[lagk] - yaws[lagk - 1]), float(tick), 0.1f, 0.013f * std::sqrt(float(tick)));
-        }
-        // (information, not a check: with this ramp the unaligned comparison sees ~3 contradicting intervals — at the edge)
-        std::printf("   I5: the unaligned comparison on the same reversal: run %d, %s\n", naive.run(), naive.contradicted() ? "TRIPS" : "does not trip");
+        CHECK("3d aligned: a reversal under a 250 ms pose lag never reads as flipped", not run(+1.f, &trip));
+        CHECK("3d aligned: a true sign inversion is detected", run(-1.f, &trip));
+        CHECK("3d aligned: ...within 3 turning intervals", trip > 0 and trip <= 3);
     }
 
     // ---- 4f. review fix 2, item 1: a policy-tick HOLD is an interruption (PolicyTickGate)

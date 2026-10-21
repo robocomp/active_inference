@@ -201,9 +201,13 @@ public:
     // ★ F1 (local_policy/reachability_belief.h): `stuck` is the tick's Stuck decision — a HOLD, never a hand back by itself;
     //   the verdict is Unreachable when the trapped field disconnects the goal OR the reachability belief hands it back
     //   (Navigator::Step::hand_back). Every hand-back site reads the verdict, nothing else.
+    // ★ Task 3d (rtD1e leg 5): field_m / route_m are OBSERVATIONS — NaN and field_evaluated = false on every tick that built or
+    //   read no field (a Blind / stale / frame-wait / no-map hold; `why` says which); the no-route clock reads only an evaluated
+    //   field (policy_tick_gate.h advance_no_route_clock). The old +inf default made 13 Blind holds read as "no route".
     struct PolicyTick { PolicyVerdict verdict = PolicyVerdict::Held; std::string why; bool stuck = false;
-                        float field_m = std::numeric_limits<float>::infinity();    // priced cost-to-go at the robot
-                        float route_m = std::numeric_limits<float>::infinity(); };  // the cheapest route's metres (Live fix 3)
+                        bool field_evaluated = false;
+                        float field_m = std::numeric_limits<float>::quiet_NaN();    // priced cost-to-go at the robot
+                        float route_m = std::numeric_limits<float>::quiet_NaN(); };  // the cheapest route's metres (Live fix 3)
     // `also_free`: space the planner's map does not hold but the goal may be reached through (a doorway's measured corridor,
     // goal_adapter.h in_doorway_corridor); empty = the map alone. `jambs` (F4): the opening's jambs (the anchor's, and the
     // measured gap's weighted by its score), whose contact risk is added to the field's per-metre density over the corridor
@@ -408,10 +412,13 @@ private:
     float odo_v_ = 0.f, odo_w_ = 0.f;                            // robot_current_advance / angular speed (CCW+), this cycle
     bool odo_valid_ = false;
     std::uint64_t odo_stamp_ms_ = 0;                             // robot_current_speed_timestamp (wall ms) — review M6
-    rc::policy::OdoSignCheck policy_sign_;                       // review I5
+    rc::policy::TurnSignBelief policy_sign_;                     // review I5 → Task 3d: a belief, not a latch (goal_adapter.h)
+    std::optional<Eigen::Vector2f> policy_prev_pose_p_;          // Task 3d: the pose's last position (the correction residual)
+    float policy_pose_xy_std_ = 0.f;                             // Task 3d: room_concept's published pose xy std (0 = none)
+    std::uint64_t policy_clock_prev_ms_ = 0;                     // Task 3d: the last tick the no-route clock saw
     std::optional<float> policy_prev_yaw_;                       // review fix 2.2: the pose's last (time, heading) for I5
     std::optional<double> policy_prev_pose_t_;
-    std::deque<rc::policy::OdoSample> policy_odo_hist_;          // odometry turn rate at its own times (steady s)
+    std::deque<rc::policy::OdoSample> policy_odo_hist_;          // odometry turn rate + speed at their own times (steady s)
     int policy_last_mode_ = -1;
     std::string policy_last_why_;
     std::ofstream policy_csv_;

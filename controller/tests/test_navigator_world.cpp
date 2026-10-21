@@ -195,6 +195,25 @@ int main()
         CHECK("I4 latch: a new goal clears it", l.clock_may_reset(false, false));
         CHECK("I4 latch: a Stuck hold never resets the clock", not l.clock_may_reset(false, true));
     }
+    // ---- Task 3d (rtD1e leg 5): "no route" is an OBSERVATION — the 5-s no-route clock runs only on a field that was built and
+    //      read non-finite at the robot. A Blind / held tick (no field evaluated) never advances it: 13 false Unreachables came
+    //      from Blind holds whose PolicyTick::field_m defaulted to +inf.
+    {
+        using O = NoRouteObs;
+        UnreachLatch l;
+        std::uint64_t since = 0;
+        since = advance_no_route_clock(since, 1000, 950, O::NotEvaluated, false, false, l);
+        CHECK("3d clock: a Blind hold (no field evaluated) never starts the clock", since == 0);
+        since = advance_no_route_clock(since, 1050, 1000, O::Infinite, false, false, l);
+        CHECK("3d clock: a field read non-finite at the robot starts it", since == 1050);
+        since = advance_no_route_clock(since, 1100, 1050, O::NotEvaluated, false, false, l);
+        CHECK("3d clock: a held tick does not ADVANCE it (its interval is shifted out)", since == 1100);
+        std::uint64_t s2 = since;
+        for (std::uint64_t t = 1150; t <= 9000; t += 50) s2 = advance_no_route_clock(s2, t, t - 50, O::NotEvaluated, false, false, l);
+        CHECK("3d clock: 8 s of Blind holds leave it at 0 s of no-route time", 9000 - s2 == 0);
+        since = advance_no_route_clock(since, 1150, 1100, O::Finite, false, false, l);
+        CHECK("3d clock: a finite field resets it", since == 0);
+    }
     std::printf(fails == 0 ? "ALL PASS\n" : "FAILURES (%d failing)\n", fails);
     return fails == 0 ? 0 : 1;
 }

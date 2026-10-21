@@ -86,4 +86,22 @@ public:
 private:
     bool latched_ = false;
 };
+// ★ Task 3d (rtD1e leg 5) — "NO ROUTE" IS AN OBSERVATION. The 5-s no-route clock (report_unreachable_if_no_route) runs only on
+//   a field that was BUILT and READ non-finite at the robot. A tick that evaluated no field — a Blind hold, odometry stale, a
+//   room-frame wait, no planner map — is the absence of evidence about reachability: it never starts the clock and never
+//   ADVANCES it (its interval is shifted out of a running clock). rtD1e: PolicyTick::field_m defaulted to +inf, so 13 Blind holds
+//   read as "no route" and every target was reported Unreachable after 5 s.
+enum class NoRouteObs { NotEvaluated, Infinite, Finite };
+inline std::uint64_t advance_no_route_clock(std::uint64_t since_ms, std::uint64_t now_ms, std::uint64_t prev_tick_ms, NoRouteObs obs,
+                                            bool unreachable, bool stuck, const UnreachLatch& latch)
+{
+    switch (obs)
+    {
+        case NoRouteObs::NotEvaluated:
+            return since_ms != 0 and prev_tick_ms != 0 and now_ms > prev_tick_ms ? since_ms + (now_ms - prev_tick_ms) : since_ms;
+        case NoRouteObs::Infinite: return since_ms != 0 ? since_ms : now_ms;
+        case NoRouteObs::Finite: return latch.clock_may_reset(unreachable, stuck) ? 0 : since_ms;
+    }
+    return since_ms;
+}
 }  // namespace rc::policy

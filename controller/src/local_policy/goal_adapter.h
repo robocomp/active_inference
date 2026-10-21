@@ -206,40 +206,67 @@ inline RouteGoalStep route_goal_step(std::span<const RouteWaypoint> wps, int lap
 //   run, opposite signs extend it. kConsecutive = 3 opposite intervals in a row CONTRADICT the odometry. Why 3: a single
 //   relocalisation step of the pose touches at most TWO intervals (the jump, and the one after if it snaps back), so no
 //   single pose event can trip it, while a truly flipped sign contradicts every turning interval. Latched until reset.
-struct OdoSample { double t = 0.0; float w = 0.f; };   // an odometry turn rate and the time it describes
-class OdoSignCheck
+struct OdoSample { double t = 0.0; float w = 0.f, v = 0.f; };   // odometry turn rate + speed and the time they describe
+// ★ Task 3d (rtD1e leg 5) — THE TURN SIGN IS A BELIEF, NOT A LATCH. The old check latched "contradicted" after 3 opposite
+//   intervals in a row and was cleared only by policy_reset(), which selector-idle and hand-backs never call: a relocaliser
+//   correction smoothed over >= 3 control intervals (439.98-440.17: odometry turning right, the pose's yaw RISING and x/y
+//   jumping 0.25 m in 0.19 s) left the policy Blind for the rest of the run.
+//   Two hidden states: S = the odometry's turn sign is flipped (a persistent fault), not-S. Per interval, with the odometry's
+//   integrated turn theta and the pose's heading change dyaw (sigma_yaw: the relative heading sigma over the interval):
+//     log N(dyaw; -theta, sigma_yaw) - log N(dyaw; +theta, sigma_yaw) = -2 dyaw theta / sigma_yaw^2,
+//   weighted by the probability that the interval is NOT a pose correction. That comes from the TRANSLATION residual
+//   e = |dp_pose| - |odometry displacement|: under no correction e ~ N(0, sigma_p^2) (the odometry's own displacement sigma),
+//   under a correction e ~ N(0, sigma_p^2 + sigma_corr^2) (sigma_corr: the size of a correction the localiser can make — its
+//   published xy std, else the pose's drift sigma), equal priors — the residual decides. An interval in which the pose moved
+//   more than the odometry predicts plus that covariance is explained by the correction and carries ~no evidence for S.
+//   Folded as a two-state chain: S switches with probability kSwitch per interval, which is also its prior — so agreeing
+//   intervals decay it, nothing latches, and a genuine fault is detected again whenever it appears.
+//   PROVISIONAL, stated (not fitted): kSwitch = 0.01 (the same order as UnseenContact::kPriorBlocked's base rate).
+//   Blind iff P(S) > 1/2.
+class TurnSignBelief
 {
 public:
-    static constexpr int kConsecutive = 3;
-    void update(float w_meas, float dyaw_pose, float dt, float w_min, float sigma_yaw)
+    static constexpr float kSwitch = 0.01f;
+    // theta_odo: odometry's integrated turn (rad); disp_odo: its integrated displacement (m); dyaw_pose, dp_pose: the pose's
+    // heading change (rad) and displacement (m) over the same interval
+    void update(float theta_odo, float disp_odo, float dyaw_pose, float dp_pose, float sigma_yaw, float sigma_p, float sigma_corr)
     {
-        if (not (dt > 0.f) or std::abs(w_meas) < w_min or std::abs(dyaw_pose) <= 2.f * sigma_yaw) return;
-        if ((dyaw_pose > 0.f) == (w_meas > 0.f)) run_ = 0;
-        else if (++run_ >= kConsecutive) contradicted_ = true;
+        // the chain's switch step (also the prior on a fresh belief)
+        p_ = p_ * (1.f - kSwitch) + (1.f - p_) * kSwitch;
+        if (not (sigma_yaw > 0.f)) return;
+        const float e = std::abs(dp_pose) - std::abs(disp_odo);
+        const float sn2 = std::max(sigma_p * sigma_p, 1e-12f), sc2 = sn2 + sigma_corr * sigma_corr;
+        // P(correction | e), equal priors: N(e; 0, sc2) / (N(e; 0, sc2) + N(e; 0, sn2)) in log space
+        const float lc = -0.5f * e * e / sc2 - 0.5f * std::log(sc2), ln = -0.5f * e * e / sn2 - 0.5f * std::log(sn2);
+        const float p_corr = 1.f / (1.f + std::exp(ln - lc));
+        last_llr_ = (1.f - p_corr) * (-2.f * dyaw_pose * theta_odo / (sigma_yaw * sigma_yaw));
+        last_p_corr_ = p_corr;
+        const float L = std::log(p_ / (1.f - p_)) + last_llr_;
+        p_ = L > 30.f ? 1.f - 1e-13f : L < -30.f ? 1e-13f : 1.f / (1.f + std::exp(-L));
     }
-    // ★ review fix 2, item 2 — TIME-ALIGNED: the pose's heading change over [t_a, t_b] in the POSE's time base (each pose
-    //   stamp = its tick minus the pose age) against the odometry turn INTEGRATED over the same interval (samples placed at
-    //   their own times, each held until the next). Comparing the current wheel rate with a lagged pose reads every turn
-    //   reversal as a contradiction for one pose lag. An interval the history does not cover judges nothing.
-    void update_interval(std::span<const OdoSample> hist, double t_a, double t_b, float dyaw_pose, float w_min, float sigma_yaw)
+    // TIME-ALIGNED (review fix 2.2): the pose's change over [t_a, t_b] in the POSE's time base against the odometry INTEGRATED
+    // over the same interval (samples held until the next). An interval the history does not cover judges nothing.
+    void update_interval(std::span<const OdoSample> hist, double t_a, double t_b, float dyaw_pose, float dp_pose,
+                         float sigma_yaw, float sigma_p, float sigma_corr)
     {
         const double dt = t_b - t_a;
         if (not (dt > 0.0) or hist.empty() or hist.front().t > t_a + 1e-9) return;
-        double turn = 0.0;
+        double turn = 0.0, disp = 0.0;
         for (std::size_t i = 0; i < hist.size(); ++i)
         {
             const double s0 = hist[i].t, s1 = i + 1 < hist.size() ? hist[i + 1].t : t_b;
             const double lo = std::max(s0, t_a), hi = std::min(s1, t_b);
-            if (hi > lo) turn += double(hist[i].w) * (hi - lo);
+            if (hi > lo) { turn += double(hist[i].w) * (hi - lo); disp += double(hist[i].v) * (hi - lo); }
         }
-        update(static_cast<float>(turn / dt), dyaw_pose, static_cast<float>(dt), w_min, sigma_yaw);
+        update(float(turn), float(disp), dyaw_pose, dp_pose, sigma_yaw, sigma_p, sigma_corr);
     }
-    [[nodiscard]] bool contradicted() const { return contradicted_; }
-    [[nodiscard]] int run() const { return run_; }
-    void reset() { run_ = 0; contradicted_ = false; }
+    [[nodiscard]] bool flipped() const { return p_ > 0.5f; }
+    [[nodiscard]] float p_flipped() const { return p_; }
+    [[nodiscard]] float last_llr() const { return last_llr_; }
+    [[nodiscard]] float last_p_correction() const { return last_p_corr_; }
+    void reset() { *this = TurnSignBelief{}; }
 private:
-    int run_ = 0;
-    bool contradicted_ = false;
+    float p_ = kSwitch, last_llr_ = 0.f, last_p_corr_ = 0.f;
 };
 
 // ★ GOAL IDENTITY — a goal that moved by less than its OWN tolerance is the same goal (its meaning of "there" did not

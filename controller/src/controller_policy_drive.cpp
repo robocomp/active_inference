@@ -76,9 +76,10 @@ void ControllerSession::policy_reset()
     policy_no_field_since_ms_ = 0;
     policy_unreach_latch_.on_new_goal();
     policy_gate_.reset();
-    policy_sign_.reset();          // an operator Stop / a new activity re-arms the check (it is latched otherwise)
+    policy_sign_.reset();          // an operator Stop / a new activity restarts the turn-sign belief (it no longer latches: Task 3d)
     policy_prev_yaw_.reset();
     policy_prev_pose_t_.reset();
+    policy_prev_pose_p_.reset();
     policy_odo_hist_.clear();
     policy_leaf_ = {};
     policy_leaf_room_.clear();
@@ -138,12 +139,49 @@ ControllerSession::PolicyTick ControllerSession::policy_tick(const rc::policy::G
             return out;
         }
     }
-    // ★ review I5: a turn sign the pose contradicts (OdoSignCheck, latched) — Blind: do not drive on a mirrored world
-    if (policy_sign_.contradicted())
+    // ★ review I5 → Task 3d (rtD1e leg 5): the odometry TURN SIGN is a BELIEF (goal_adapter.h TurnSignBelief), folded here — BEFORE
+    //   the Blind check, so a Blind policy keeps observing and Blind ENDS when the belief drops (folded after it, as it was, a
+    //   Blind tick never observed again: a second latch). TIME-ALIGNED (review fix 2.2): the odometry sample describes the base at
+    //   now - its age (wall now minus robot_current_speed_timestamp); the pose describes it at now - the pose age; the pose's
+    //   heading change AND displacement between its last two times are compared with the odometry INTEGRATED over that same
+    //   interval. The history restarts only on a real gap in ticks (PolicyTickGate::kMaxTickGapS) — never on a hold: a Blind hold
+    //   is itself a hold, and clearing on it would never collect the two samples that end it.
     {
-        const std::string why = "Blind — odometry turn sign contradicts the pose (robot_current_angular_speed vs the heading change, "
-                                "3 turning intervals in a row) — check the base/bridge sign";
-        if (why != policy_last_why_) std::println("[policy] {}: {}", who, why);
+        const rc::policy::Pose2 sp = rc::policy::to_policy_pose(robot_pose);
+        const float v_s = odo_valid_ ? odo_v_ : 0.f, w_s = odo_valid_ ? odo_w_ : 0.f;
+        const float pose_age_s = world_model_pose_stamp_age_ms_ >= 0.f ? world_model_pose_stamp_age_ms_ * 1e-3f : 0.f;
+        const auto wall_now = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count());
+        const double odo_age_s = odo_stamp_ms_ != 0 and wall_now > odo_stamp_ms_ ? double(wall_now - odo_stamp_ms_) * 1e-3 : 0.0;
+        const double t_odo = now_s - odo_age_s;
+        if (not policy_odo_hist_.empty() and t_odo - policy_odo_hist_.back().t > rc::policy::PolicyTickGate::kMaxTickGapS)
+        { policy_odo_hist_.clear(); policy_prev_pose_t_.reset(); policy_prev_pose_p_.reset(); }
+        if (policy_odo_hist_.empty() or t_odo > policy_odo_hist_.back().t) policy_odo_hist_.push_back({t_odo, w_s, v_s});
+        while (policy_odo_hist_.size() > 2 and policy_odo_hist_[1].t < now_s - 2.0) policy_odo_hist_.pop_front();
+        const double t_pose = now_s - pose_age_s;
+        if (policy_prev_pose_t_.has_value() and t_pose > *policy_prev_pose_t_)
+        {
+            const std::vector<rc::policy::OdoSample> hist(policy_odo_hist_.begin(), policy_odo_hist_.end());
+            const float dt_pose = static_cast<float>(t_pose - *policy_prev_pose_t_);
+            // sigmas: the relative heading sigma (per 1 s) as a random walk over the interval; the odometry's displacement sigma
+            // (UnseenOdoSigmaM per tick) with the relative xy sigma over the interval; a correction's size = room_concept's
+            // published pose xy std, else the pose's drift sigma
+            const float s_yaw = prm.policy_sigma_rel_yaw_rad * std::sqrt(dt_pose);
+            const float s_p = std::hypot(prm.policy_unseen_odo_sigma_m, prm.policy_sigma_rel_xy_m * std::sqrt(dt_pose));
+            const float s_corr = policy_pose_xy_std_ > 0.f ? policy_pose_xy_std_ : prm.policy_pose_drift_sigma_m;
+            policy_sign_.update_interval(hist, *policy_prev_pose_t_, t_pose,
+                                         std::remainder(sp.yaw - policy_prev_yaw_.value_or(sp.yaw), 2.f * std::numbers::pi_v<float>),
+                                         (sp.p - policy_prev_pose_p_.value_or(sp.p)).norm(), s_yaw, s_p, s_corr);
+        }
+        if (not policy_prev_pose_t_.has_value() or t_pose > *policy_prev_pose_t_)
+        { policy_prev_pose_t_ = t_pose; policy_prev_yaw_ = sp.yaw; policy_prev_pose_p_ = sp.p; }
+    }
+    if (policy_sign_.flipped())
+    {
+        const std::string why = std::format("Blind — odometry turn sign contradicts the pose (P(flipped) {:.2f}: robot_current_angular_speed "
+                                            "vs the heading change, relocaliser corrections discounted) — check the base/bridge sign",
+                                            policy_sign_.p_flipped());
+        if (why.substr(0, 40) != policy_last_why_.substr(0, 40)) std::println("[policy] {}: {}", who, why);
         policy_last_why_ = why;
         policy_last_mode_ = -1;
         hold(why);
@@ -310,32 +348,10 @@ ControllerSession::PolicyTick ControllerSession::policy_tick(const rc::policy::G
     {
         policy_nav_.interrupt();   // drop the committed plan and its prediction UNJUDGED (an interruption is not evidence)
         policy_sent_.clear(); policy_odom_.reset(); policy_unseen_.reset();
-        policy_odo_hist_.clear(); policy_prev_pose_t_.reset();
+        // (Task 3d: the turn-sign history is NOT cleared on a hold — see the belief's fold above)
     }
-    // ── I5 evidence, TIME-ALIGNED (review fix 2.2): the odometry sample describes the base at now - its age (wall now minus
-    //    robot_current_speed_timestamp); the pose describes it at now - the pose age. The pose's heading change between its
-    //    last two times is compared with the odometry INTEGRATED over that same interval (OdoSignCheck::update_interval).
     // Live fix 2 ruling 3: the TRUE pose age (no clamp) — tourP3 had 30 % of rows >= 0.5 s, hidden by the old 0.5 s clamp
     const float pose_age_s = world_model_pose_stamp_age_ms_ >= 0.f ? world_model_pose_stamp_age_ms_ * 1e-3f : 0.f;
-    {
-        const auto wall_now = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::system_clock::now().time_since_epoch()).count());
-        const double odo_age_s = odo_stamp_ms_ != 0 and wall_now > odo_stamp_ms_ ? double(wall_now - odo_stamp_ms_) * 1e-3 : 0.0;
-        const double t_odo = now_s - odo_age_s;
-        if (policy_odo_hist_.empty() or t_odo > policy_odo_hist_.back().t) policy_odo_hist_.push_back({t_odo, w_meas});
-        while (policy_odo_hist_.size() > 2 and policy_odo_hist_[1].t < now_s - 2.0) policy_odo_hist_.pop_front();
-        const double t_pose = now_s - pose_age_s;
-        if (policy_prev_pose_t_.has_value() and t_pose > *policy_prev_pose_t_)
-        {
-            const std::vector<rc::policy::OdoSample> hist(policy_odo_hist_.begin(), policy_odo_hist_.end());
-            const float dt_pose = static_cast<float>(t_pose - *policy_prev_pose_t_);
-            // sigma: the relative yaw sigma (per 1 s) as a random walk over the interval
-            policy_sign_.update_interval(hist, *policy_prev_pose_t_, t_pose,
-                                         std::remainder(pose.yaw - policy_prev_yaw_.value_or(pose.yaw), 2.f * std::numbers::pi_v<float>),
-                                         limits.w_min_eff, prm.policy_sigma_rel_yaw_rad * std::sqrt(dt_pose));
-        }
-        if (not policy_prev_pose_t_.has_value() or t_pose > *policy_prev_pose_t_) { policy_prev_pose_t_ = t_pose; policy_prev_yaw_ = pose.yaw; }
-    }
     if (not policy_odom_.has_value()) policy_odom_ = pose;
     const rc::policy::Pose2 odom_before = *policy_odom_;
     {
@@ -492,6 +508,7 @@ ControllerSession::PolicyTick ControllerSession::policy_tick(const rc::policy::G
         policy_csv_.flush();
     }
     if (out.why.empty()) out.why = d.why;
+    out.field_evaluated = true;   // Task 3d: the field was built and read at the robot this tick
     out.field_m = f_here;
     out.route_m = route_here;
     return out;
@@ -757,14 +774,17 @@ void ControllerSession::drive_with_policy(const ControllerRobotPose &robot_pose,
     }
     // NO FIELD ROUTE: the goal is not reachable on the map from here — the existing no-route clock reports it (5 s, the same
     // liveness bound the planner's no-route hold has: report_unreachable_if_no_route)
-    // review I4 / M4: "no route" = the FIELD at the robot is non-finite; the clock runs on that and nothing else resets it
-    if (not std::isfinite(tick.field_m))
+    // review I4 / M4 + Task 3d: "no route" = the FIELD, BUILT and READ at the robot, is non-finite; a tick that evaluated no field
+    // (Blind / stale / frame wait / no map) neither starts nor advances the clock (policy_tick_gate.h advance_no_route_clock)
     {
-        if (no_route_since_ms_ == 0) no_route_since_ms_ = now;
-        note_why(rc::why::Cause::NoRoute, std::format("{}: the cost-to-go is infinite at the robot — no way to the goal on the map", who));
+        using O = rc::policy::NoRouteObs;
+        const O obs = not tick.field_evaluated ? O::NotEvaluated : std::isfinite(tick.field_m) ? O::Finite : O::Infinite;
+        no_route_since_ms_ = rc::policy::advance_no_route_clock(no_route_since_ms_, now, policy_clock_prev_ms_, obs,
+                                                                tick.verdict == PolicyVerdict::Unreachable, tick.stuck, policy_unreach_latch_);
+        policy_clock_prev_ms_ = now;
+        if (obs == O::Infinite)
+            note_why(rc::why::Cause::NoRoute, std::format("{}: the cost-to-go is infinite at the robot — no way to the goal on the map", who));
     }
-    else if (policy_unreach_latch_.clock_may_reset(tick.verdict == PolicyVerdict::Unreachable, tick.stuck))
-        no_route_since_ms_ = 0;   // F1 (I4): never while an Unreachable verdict is latched for this goal (policy_tick_gate.h)
     // UNREACHABLE: handed back through the protocol (a mouse target is dropped by the no-route clock). F1: a Stuck is a hold —
     // the reachability belief's verdict, not a single Stuck tick, is what hands back
     if (tick.verdict == PolicyVerdict::Unreachable)

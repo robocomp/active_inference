@@ -124,6 +124,8 @@ bool ControllerSession::sync_world_state(std::uint64_t timestamp_ms,
         world_model_pose_stamp_age_ms_ = static_cast<float>(*age);
     else
         world_model_pose_stamp_age_ms_ = -1.f;
+    // Task 3d: room_concept's published pose xy std — the size of a correction the localiser can make (the turn-sign belief)
+    policy_pose_xy_std_ = [&] { const auto u = world_model.read_pose_uncertainty(timestamp_ms); return u.has_value() ? u->xy_std_m : 0.f; }();
     // Task 8 (review C1): the wheels' measured speeds for the local policy — refreshed HERE, every cycle, so a move order
     // (stepped before build_planning_step) reads them fresh too.
     read_base_odometry(world_model, timestamp_ms);
