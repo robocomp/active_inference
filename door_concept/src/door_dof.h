@@ -38,7 +38,8 @@ namespace rc
 // the robot is 0.60 m wide (radius 0.30), a leaf is 0.70–0.90 m, so the decision margin is 0.10–0.30 m and
 // σ*_w must be small enough not to flip "can I fit" (~0.03 m). `s` follows (where the gap is); `h` still
 // carries no demand for a ground robot.
-inline constexpr std::array<DofSpec, DoorBelief::N> kDoorDofs = {{
+// Sized by the REPORTED dimension ([s, w, h]), not DoorBelief::N: d is not a reported DOF (see DoorBelief::kReported).
+inline constexpr std::array<DofSpec, DoorBelief::kReported> kDoorDofs = {{
     {"s", "m", -1.0f},
     {"w", "m", -1.0f},
     {"h", "m", -1.0f},

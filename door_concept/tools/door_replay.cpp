@@ -31,7 +31,7 @@
 //
 // Build + run (from door_concept/):
 //   g++ -std=c++23 -O2 -I/usr/include/eigen3 -I/usr/include/opencv4 tools/door_replay.cpp src/core/door_core.cpp \
-//       src/core/door_fit.cpp src/core/door_existence.cpp src/core/door_cycle_io.cpp src/door_belief.cpp src/door_model.cpp \
+//       src/core/door_fit.cpp src/core/door_existence.cpp src/core/door_cycle_io.cpp src/door_belief.cpp src/door_model.cpp src/epistemic_planner.cpp \
 //       src/door_frame_evidence.cpp ../common/contour_edge/contour_edge_check.cpp \
 //       ../common/contour_edge/contour_edge_project.cpp ../common/contour_edge/contour_depth_check.cpp \
 //       -lzstd -lopencv_core -lopencv_imgproc -o /tmp/door_replay
@@ -60,6 +60,8 @@
 #include "../src/core/door_core.h"
 #include "../src/door_config_fields.h"
 #include "../src/door_identity_table.h"
+#include "../src/door_dof.h"            // the live consumers' DOF table (dashboard, NBV adequacy)
+#include "../src/epistemic_planner.h"   // the live NBV (rc::EpistemicPlanner) — run here as a smoke on every door
 
 using namespace rc::door::core;
 using K = rc::door::DoorDecisionKind;
@@ -427,6 +429,9 @@ int main(int argc, char** argv)
     // every existence channel the core computed this cycle (Task 5b: the silhouette's occupancy vs absence, P(detect), the
     // image-geometry delta). A diagnostic only: it reads the world's fit states after the step and changes nothing.
     std::string trace_door;
+    rc::EpistemicPlanner nbv_smoke(1.8f);   // the live-only consumers' smoke (see the step loop)
+    double belief_smoke_sum = 0.0;
+    long belief_smoke_runs = 0;
     float recess_prior_std = -2.0f;   // < -1.5: keep the recorded config's value
     for (int i = 3; i < argc; ++i)
     {
@@ -550,6 +555,28 @@ int main(int argc, char** argv)
                 if (d.kind == static_cast<std::uint16_t>(K::Existence)) got_exist.push_back(d);
                 if (d.kind == static_cast<std::uint16_t>(K::Remove)) got_remove.push_back(d);
             }
+            // ★THE LIVE-ONLY BELIEF CONSUMERS, AS A SMOKE (fix for the rtD1g crash). The agent reads every door's belief
+            // each cycle in paths the core does not own yet — the epistemic NBV planner, the dashboard's DOF table and
+            // certainty, the published covariance — and one of them (EpistemicPlanner::compute, a DOF table sized for a
+            // 4-state belief against the 3×3 reported Σ) asserted live where no replay could see it. Run them here on
+            // every fitted door, every cycle; built without -DNDEBUG, an index error aborts the replay as it aborted
+            // the agent. The NBV's proposal is not compared with anything (it is not on the tape): this is coverage.
+            for (const auto& [id, st] : world.fit_states())
+            {
+                if (st == nullptr or not st->ai2_initialized) continue;
+                const auto& b = st->ai2_belief;
+                std::vector<Eigen::Vector2f> poly;
+                for (const auto& v : world.room_polygon()) poly.emplace_back(v.x(), v.y());
+                rc::nbv::Sensor sensor;
+                sensor.hfov_rad = 1.2f; sensor.vfov_rad = 0.9f; sensor.height_m = 1.2f;
+                (void)nbv_smoke.compute(b, cfg.door.ai2_range_noise_lat_per_m, cfg.door.ai2_sigma_base_m, sensor, {}, poly);
+                const auto S = b.covariance_reported();
+                double acc = rc::any_sigma_star(rc::kDoorDofs) ? rc::adequacy_gap_nats(rc::kDoorDofs, [&](std::size_t j) { return S(j, j); }) : 0.0;
+                for (std::size_t j = 0; j < rc::kDoorDofs.size(); ++j) acc += S(static_cast<int>(j), static_cast<int>(j));
+                acc += b.covariance()(0, 0) + b.recess_sd();
+                belief_smoke_sum += acc;
+                ++belief_smoke_runs;
+            }
             if (not trace_door.empty())
                 for (const auto& [id, st] : world.fit_states())
                     if (st != nullptr and (trace_door == "*" or st->node_name == trace_door))
@@ -574,6 +601,8 @@ int main(int argc, char** argv)
         world.end_cycle();
     }
     std::println("replayed {} records (cycles {}..{}): stepped {}, media-only {}", n, first, last, stepped, media_only);
+    std::println("live-only belief consumers (NBV planner, DOF table, reported Σ) ran {} times, clean (checksum {:.4g})",
+                 belief_smoke_runs, belief_smoke_sum);
     std::println("removals decided by the core: {}; births without a recorded id: {}; not rebuilt: {} AffExecuting, "
                  "{} AnchorHung, {} ActuatorRequest rows on this tape", world.removed_, world.unmatched_creates_,
                  n_exec, n_anchor, n_act);

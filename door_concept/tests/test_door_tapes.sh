@@ -13,6 +13,9 @@
 #       reaches the −4 floor (it walked tourR1 door_4 there for 45 cycles), nor with Door.RecessPriorStd 0.1, 0.2, 0.3;
 #       and the DECISIONS do not move for 0.03, 0.1, 0.2, 0.3. (At 0.03 the prior pins the leaf 4 σ from where it is —
 #       a mis-specified model — and tourR2's door_2 still reaches the floor, without a removal: printed, not asserted.)
+#   SMOKE  the replay also runs the live-only belief consumers (the NBV planner, the DOF table, the reported Σ) on every
+#       door every cycle, built WITHOUT -DNDEBUG: an index error aborts it, as it aborted the agent (rtD1g). Asserted:
+#       each replay prints its "live-only belief consumers … ran N times, clean" line with N > 0.
 #   D3  NOT A DEFECT, asserted so it stays documented: tourR2's births carry the names the identity table loaded for those
 #       apertures (door_4 IS DOOR_1's remembered name in the 4-row table .bak_tourP9; door_2 is DOOR_0's).
 # The tapes are 1.5 GB each and live outside the repo: DOOR_TAPES (default: the main checkout's crossing dir). Missing
@@ -31,6 +34,7 @@ trap 'rm -rf "$OUT"' EXIT
 cd "$HERE" || exit 2
 g++ -std=c++23 -O2 -w -I/usr/include/eigen3 -I/usr/include/opencv4 tools/door_replay.cpp src/core/door_core.cpp \
     src/core/door_fit.cpp src/core/door_existence.cpp src/core/door_cycle_io.cpp src/door_belief.cpp src/door_model.cpp \
+    src/epistemic_planner.cpp \
     src/door_frame_evidence.cpp ../common/contour_edge/contour_edge_check.cpp ../common/contour_edge/contour_edge_project.cpp \
     ../common/contour_edge/contour_depth_check.cpp -lzstd -lopencv_core -lopencv_imgproc -o "$OUT/door_replay" || { echo "BUILD FAIL"; exit 2; }
 for t in tourR1 tourR2; do
@@ -96,6 +100,12 @@ def decision_check(tape, txt, label):
             fails.append(f"{label}: the allowed change {kind} {name} @{cyc} did not happen ({why[:40]}…)")
     return ref, rep
 
+import glob
+for txt in sorted(glob.glob(f"{out}/*.txt")):
+    m = [re.search(r"live-only belief consumers .* ran (\d+) times, clean", l) for l in open(txt)]
+    m = [x for x in m if x]
+    if not m or int(m[0].group(1)) == 0: fails.append(f"SMOKE {txt.split('/')[-1]}: the live-only belief consumers did not run clean (crash?)")
+    else: print(f"SMOKE {txt.split('/')[-1]}: live-only belief consumers ran {m[0].group(1)} times, clean")
 for tape in ("tourR1", "tourR2"):
     for sd in ("0.03", "0.1", "0.2", "0.3"):
         decision_check(tape, f"{out}/{tape}@{sd}.txt", f"{tape} (RecessPriorStd {sd})")

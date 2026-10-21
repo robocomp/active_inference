@@ -1088,14 +1088,14 @@ void SpecificWorker::refresh_belief_inspector()
         // Σ over the wall-frame [s,w,h]: along-wall offset + panel width + panel height.
         const auto  S = inst.ai2_belief.covariance_reported();
         const auto& s = inst.ai2_belief.state();
-        const std::array<float, rc::DoorBelief::N> v = {s.s, s.w, s.h};
-        for (int j = 0; j < rc::DoorBelief::N; ++j)
+        const std::array<float, rc::DoorBelief::kReported> v = {s.s, s.w, s.h};
+        for (int j = 0; j < rc::DoorBelief::kReported; ++j)
             c.dofs.push_back({rc::kDoorDofs[j].name, rc::kDoorDofs[j].unit, v[j],
                               std::sqrt(std::max(0.0f, S(j, j))), rc::kDoorDofs[j].sigma_star});
 
         // Row-major copy, filled explicitly: Eigen stores column-major, and while Σ is symmetric today an
         // implicit .data() copy would silently transpose if that ever stopped being true.
-        constexpr int N = rc::DoorBelief::N;
+        constexpr int N = rc::DoorBelief::kReported;   // the reported [s, w, h], as S
         c.cov.resize(N * N);
         for (int i = 0; i < N; ++i)
             for (int j = 0; j < N; ++j)

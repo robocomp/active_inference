@@ -169,6 +169,11 @@ class DoorBelief
 {
 public:
     static constexpr int N = 4;   // [s, w, h, d] — d the leaf plane's depth (Task 5b)
+    // ★WHAT THE BELIEF REPORTS is [s, w, h] — the aperture. d is the belief's own nuisance-like state (recess(),
+    // recess_sd()). Every consumer of a reported matrix (Σ, the NBV information, the DOF table, the dashboard, the RT
+    // covariance) is sized by THIS, never by N: a DOF table sized N indexed the 3×3 Σ at (3,3) and killed the agent live
+    // (rtD1g, 2026-10-21, EpistemicPlanner::compute → adequacy_gap_nats).
+    static constexpr int kReported = 3;
     using State = DoorBeliefState;
     using Frame = DoorFrame;
 
@@ -510,8 +515,17 @@ public:
     // when a door's mask stream is stale/dead so Σ grows on the agent's clock instead of freezing.
     void  inflate_for_age(float dt_s, float dt_nominal_s)
     { ai::inflate_for_age<N>(*this, Sigma_, state_, prior_mean_, dt_s, dt_nominal_s); }
+    // The Fisher information on [s, w, h] that observing `pts` would add, with d MARGINALISED: the Schur complement of the
+    // 4×4 information, d regularised by its own current posterior (Σ_dd). Not the raw top-left block — that books, as
+    // information on [s, w, h], every lever the view shares with d, which it cannot tell from d (the NBV would overrate
+    // exactly the views D1/D2 were made of).
     Eigen::Matrix<float, 3, 3> predicted_information(const std::vector<Eigen::Vector3f>& pts, float R) const
-    { return ai::predicted_information<N>(*this, state_, pts, R).topLeftCorner<3, 3>(); }
+    {
+        const Eigen::Matrix<float, N, N> I = ai::predicted_information<N>(*this, state_, pts, R);
+        const float prec_d = 1.0f / std::max(1e-12f, Sigma_(3, 3));
+        const Eigen::Matrix<float, 3, 1> c = I.block<3, 1>(0, 3);
+        return I.topLeftCorner<3, 3>() - (c * c.transpose()) / (I(3, 3) + prec_d);
+    }
 
     // ── Generative-model hooks (engine interface + SDF API) ───────────────────
     // Single thin-box panel SDF in the wall frame, evaluated at room point p for state s. 0 on the surface;
