@@ -135,3 +135,22 @@ re-siting), tests.
   back Unreachable to the producer (as Reach standpoints already are); "occupied" = the occupancy belief with existence
   weights (P(body fits)), not any return within a disc — one stray hit is weak evidence.
 - [ ] Implement; tests + scenarios green; commit by pathspec.
+
+### Task 3d: "no route" is an observation; the turn-sign check is a belief (ruling 2026-10-21, rtD1e leg 5)
+rtD1e leg 5: a room_concept relocalisation (4.4 m, 179°) tripped the odometry turn-sign check, which LATCHES until
+`policy_reset()` (never called on selector-idle / hand-back) ⇒ the policy stayed Blind for the rest of the run, and
+`PolicyTick::field_m` defaults to +inf (controller_session.h:205) so every Blind hold counted as "no route" for the 5-s
+clock (controller_policy_drive.cpp:~761) ⇒ 13 false Unreachable reports, approach_unreachable ×3.
+- [ ] Failing tests: a Blind/held tick (no field built) never advances the no-route clock; the clock runs only on a
+  field actually built and read as non-finite at the robot; a relocaliser-explained pose jump (pose moved more than the
+  odometry-predicted increment + its covariance; room_concept P(lost) high) carries ~no evidence for "turn sign
+  flipped"; agreeing intervals decay that belief; a genuine sign flip (synthetic, sustained) is still detected.
+- [ ] Implement: PolicyTick carries "no field evaluated" explicitly (optional/NaN + hold reason); the turn-sign check
+  becomes an LLR belief (sign flipped vs pose corrected) folded per interval like the reachability belief, no latch;
+  Blind ends when the belief drops. Tests + scenarios green; commit by pathspec.
+
+### Task R1 (room_concept, after 3d): crossing direction as the relocaliser's prior at a room hand-over
+rtD1e: the hand-over into room_1 resolved to the 180°-symmetric mode (P(lost) ≈ 0.5, repeated jumps). The robot is at
+the crossed door, on the new room's side, facing in — a strong prior. First MEASURE how often hand-overs flip across
+rtD1b–e (relocaliser mode/jump events vs gt), then seed/weight the relocaliser mixture with the crossing pose (door
+pose + crossing direction + its σ) — room_concept code, its own tests and estimation scripts.
