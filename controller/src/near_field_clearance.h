@@ -82,8 +82,19 @@ public:
     // not part of the near model (the coverage is what defines it). aggregate == false returns (unseen-contact hypotheses)
     // are kept with their p_exist.
     void set_surfaces(std::span<const policy::Return> denoised);
+    // The room model the ESDF injects (TrajectoryController::build_esdf, inject_model_: the room outline minus the passage
+    // being crossed, and the furniture polygons, each deferring to a LiDAR return near it) as near-model elements — so the
+    // near model sees the SAME obstacle set as the field it replaces. Elements outside the coverage disc are dropped.
+    void set_model(std::span<const NearFieldElement> model);
+    // The edges of a closed polygon as near-model segments, sampled EXACTLY as TrajectoryController samples them for the
+    // ESDF (num = max(1, int(len / spacing)), t = k / num), a sample kept iff keep(q); each maximal run of kept consecutive
+    // samples on one edge becomes ONE segment (a lone sample, a point). sigma: isotropic position sigma.
+    static std::vector<NearFieldElement> polygon_elements(std::span<const Eigen::Vector2f> poly, double sigma, float spacing,
+                                                          const std::function<bool(const Eigen::Vector2f &)> &keep = {});
     // The measured doorway for the goal (F4's two hypotheses, weighted by p_gap). Absent = surfaces only.
-    void set_doorway(const policy::DoorwayRisk &risk);
+    // wall_half_depth_m: half the wall's thickness — each jamb is then its FACE along the normal through the wall's depth
+    // plus the wall's two faces (0 = a thin wall's line).
+    void set_doorway(const policy::DoorwayRisk &risk, double wall_half_depth_m = 0.0);
 
     NearFieldEval evaluate(const Eigen::Vector2f &p) const;
     // The optimiser asks distance(p) and gradient(p) at the same sample: one evaluation serves both (last-point memo).
@@ -92,18 +103,21 @@ public:
     Eigen::Vector2f gradient(const Eigen::Vector2f &p) const { return memo(p).gradient.cast<float>(); }
 
     std::size_t surface_count() const { return surfaces_.size(); }
+    std::size_t model_count() const { return model_.size(); }
     float near_radius() const { return static_cast<float>(R_); }
 
     // A measured opening's two jambs as near-model elements: each the wall continued outward from its edge at the
-    // measured half-width, over one body placement (j.placement_m — the circumscribed diameter, the span a body beside
+    // measured half-width (with wall_half_depth_m > 0: the jamb's face along the normal and the wall's two faces), over one
+    // body placement (j.placement_m — the circumscribed diameter, the span a body beside
     // the opening can reach), with lateral sigma^2 = sigma_lat^2 + sigma_s^2 + sigma_hw^2 and normal sigma^2 =
     // sigma_n^2 + sigma_s^2.
-    static std::vector<NearFieldElement> jamb_elements(const policy::DoorwayJambs &j);
+    static std::vector<NearFieldElement> jamb_elements(const policy::DoorwayJambs &j, double wall_half_depth_m = 0.0);
     // One surface-model return as an element (p -+ seg, S = sigma^2 I + scatter).
     static NearFieldElement element_of(const policy::Return &r);
 
 private:
     struct Moments;   // (mean, variance) with their gradients — defined in the .cpp
+    bool covered(const NearFieldElement &e) const;
     NearFieldEval evaluate_hypothesis(const Eigen::Vector2d &p, std::span<const NearFieldElement> extra,
                                       double far_v, const Eigen::Vector2d &far_g) const;
 
@@ -120,7 +134,7 @@ private:
     double R_ = 0.0, sigma_far_ = 0.0;
     DistFn far_d_;
     GradFn far_g_;
-    std::vector<NearFieldElement> surfaces_;
+    std::vector<NearFieldElement> surfaces_, model_;
     std::vector<NearFieldElement> anchor_jambs_, gap_jambs_;
     double p_gap_ = 0.0;
 };

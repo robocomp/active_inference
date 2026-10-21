@@ -8,6 +8,7 @@
 #include "standpoint_fit.h"      // Task 3c: does an affordance standpoint serve, or is it handed back
 #include "../../common/affordance_manager/affordance_room_scope.h"   // Task 4: explore room_X scopes the contest
 #include "near_field_clearance.h"        // Task 6: [Route] NearFieldClearance — the band's structured near field
+#include "band_cross.h"                 // Task 6 fix round 1: [Route] BandDrivesCross's route through the opening
 #include "local_policy/contact.h"       // Task 6: denoise_returns, the policy's surface model
 
 #include <algorithm>
@@ -15,6 +16,7 @@
 #include <ranges>
 #include <bit>
 #include <chrono>
+#include <unordered_map>
 #include <cmath>
 
 namespace
@@ -2005,7 +2007,7 @@ rc::RouteOptimizerConfig ControllerSession::make_route_optimizer_config() const
     return opt;
 }
 
-ControllerPolygon ControllerSession::smooth_plan(const ControllerPolygon &poly)
+ControllerPolygon ControllerSession::smooth_plan(const ControllerPolygon &poly, bool door_axis_anchors)
 {
     plan_spline_valid_ = false;
     plan_progress_s_ = 0.f;
@@ -2030,7 +2032,7 @@ ControllerPolygon ControllerSession::smooth_plan(const ControllerPolygon &poly)
     //   the curve to the centreline over the last ~2 m — from before the door to the standpoint — makes the
     //   optimiser's own likelihood term carry it straight and centred through. σ = 5 cm: how well the door's axis
     //   is known, not a preference. Only for a door passage's cross step; every other plan has no anchors.
-    if (door_passage_.active() and last_target_info_.has_value() and last_target_info_->from_affordance
+    if (door_axis_anchors and door_passage_.active() and last_target_info_.has_value() and last_target_info_->from_affordance
         and last_target_info_->node_name.ends_with("_cross") and poly.size() >= 2)
     {
         const Eigen::Vector2f goal = last_target_info_->room_pos;
@@ -3179,17 +3181,51 @@ bool ControllerSession::drive_point_target(const ControllerPlanningStep &step,
     // standpoint was 0.4–0.5 m wrong at the doorway and drove the robot into the wall. With an anchor there is no
     // route: execute_plan servoes on it (step_anchor_cross). Without one — not yet written, stale, or no width —
     // the existing room route below runs unchanged.
+    bool band_cross_install = false, band_cross_active = false;
     if (update_cross_anchor(step))
     {
-        if (current_plan_.has_value() or path_controller.is_active())
+        // ★ [Route] BandDrivesCross (Task 6 fix round 1): a cross with an anchor to drive on (fresh, or carried by its held
+        //   gap) gets a ROUTE through the opening (band_cross.h) for the follower + band; waiting for one stays the servo's.
+        const bool band_route = band_drives_cross() and anchor_cross_.has_value() and anchor_cross_->width_m > 0.f
+                                and (anchor_cross_->fresh or gap_carries_cross(step.target.node_name));
+        if (not band_route)
         {
-            path_controller.stop();
-            current_plan_.reset();
-            plan_spline_valid_ = false;
+            if (current_plan_.has_value() or path_controller.is_active())
+            {
+                path_controller.stop();
+                current_plan_.reset();
+                plan_spline_valid_ = false;
+            }
+            no_route_since_ms_ = 0;          // not a planner failure: nothing was asked of the planner
+            short_path_since_ms_ = 0;        // nor a path ending short: there is no path
+            return true;
         }
-        no_route_since_ms_ = 0;          // not a planner failure: nothing was asked of the planner
-        short_path_since_ms_ = 0;        // nor a path ending short: there is no path
-        return true;
+        // The route is built on the ANCHOR's opening (the door — the goal line is the anchor's, as the policy rules) and
+        // rebuilt only when it no longer takes the body through the opening as now measured (band_cross_route_passes: a
+        // physical feasibility test on the measurement). The band deforms it every cycle against the near field.
+        band_cross_active = true;
+        const ControllerRobotPose &cpose = tracker_pose_.has_value() ? *tracker_pose_ : step.robot_pose;
+        const auto g = rc::policy::gap_in_room(anchor_cross_->pose, anchor_cross_->width_m, cpose);
+        const float half_w = std::max(approach_body_.support_radius(0.f, Eigen::Vector2f(1.f, 0.f)),
+                                      approach_body_.support_radius(0.f, Eigen::Vector2f(-1.f, 0.f)));
+        if (band_cross_route_for_ != anchor_latched_for_ or not current_plan_.has_value() or not path_controller.is_active()
+            or not rc::band_cross_route_passes(current_plan_->room_path, g, half_w))
+        {
+            const float front = approach_body_.support_radius(0.f, Eigen::Vector2f(0.f, 1.f));
+            const float standoff = params_ != nullptr ? params_->anchor_cross_standoff_m : 2.0f;
+            // past the protocol's `through` (s >= standoff) by two goal tolerances, as the policy's doorway goal line is
+            const float past = standoff + 2.f * path_controller.goal_threshold();
+            const auto poly = rc::band_cross_polyline(cpose.pos, g, front + rc::kBandCrossWallHalfDepthM, past);
+            current_plan_ = ControllerPathPlan{.room_path = smooth_plan(poly, /*door_axis_anchors=*/false)};
+            if (band_cross_route_for_ != anchor_latched_for_) band_cross_logged_ = false;
+            band_cross_route_for_ = anchor_latched_for_;
+            band_cross_install = true;
+            std::println("[anchor] cross on {}: route THROUGH the opening for the spline ({} points, crossing at e {:+.3f} m of "
+                         "the anchor's {:.2f} m opening)", anchor_cross_->name, poly.size(),
+                         rc::band_cross_offset(current_plan_->room_path, g), anchor_cross_->width_m);
+        }
+        no_route_since_ms_ = 0;
+        short_path_since_ms_ = 0;
     }
     // ★ Task 8 ruling I4: with the local policy driving, DRIVING IS GATED ON THE FIELD, not on this A*. The A* still runs (the
     //   route on the canvas, the legacy consumers of current_plan_), but its failure neither holds the base nor starts the
@@ -3209,7 +3245,7 @@ bool ControllerSession::drive_point_target(const ControllerPlanningStep &step,
         short_path_since_ms_ = 0;
         return true;
     }
-    if (step.target_changed || !current_plan_.has_value())
+    if (not band_cross_active and (step.target_changed || !current_plan_.has_value()))
     {
         // FOOTPRINT PLANNER. The robot's real shape is tested against the grid; obstacles are NOT inflated.
         // Falls back to nothing — if this cannot find a route, the HOLD branch below reports precisely why.
@@ -3337,7 +3373,7 @@ bool ControllerSession::drive_point_target(const ControllerPlanningStep &step,
     }
 
     no_route_since_ms_ = 0;   // a route exists this cycle
-    if (step.target_changed || !path_controller.is_active())
+    if (step.target_changed || !path_controller.is_active() || band_cross_install)
     {
         // Presmoothed: smooth_plan already fitted the C2 curve AND checked every sample against the
         // footprint, so set_path's elastic band and C1 spline would only undo both.
@@ -4076,6 +4112,29 @@ ControllerSession::CrossProtocol ControllerSession::cross_protocol(const Control
 // A STALE anchor (Task 9, fix A) is waited for: after a fresh one in this step the base stops; before, it turns in place
 // toward where the anchor was last published. The wait is bounded by the cross contract's timeout, then Unreachable.
 // The LiDAR-stall EMERGENCY hold sits above all of this in SpecificWorker (compute() is not called at all).
+// [Route] BandDrivesCross: the opening's jambs this cycle — F4's DoorwayRisk exactly as the policy's doorway drive builds it
+// (controller_policy_drive.cpp, jambs_of): the anchor's opening, and the measured gap weighted by its score; each with its
+// along-wall / along-normal sigmas from its own pose, the contact model's shared offset and the LiDAR range sigma per edge.
+rc::policy::DoorwayRisk ControllerSession::band_cross_doorway_risk(const CrossProtocol &cp, const ControllerRobotPose &cpose) const
+{
+    rc::RobotFootprint bare = approach_body_;
+    bare.set_safety_margin(0.f);
+    const float g_body = rc::policy::PolicyInput{}.body_geometry_sigma_m;
+    const float sigma_s = std::hypot(params_ != nullptr ? params_->policy_sigma_rel_xy_m : 0.f, g_body);
+    const float sigma_r = params_ != nullptr ? params_->lidar_range_sigma_m : ControllerParams{}.lidar_range_sigma_m;
+    const float standoff = params_ != nullptr ? params_->anchor_cross_standoff_m : 2.0f;
+    auto jambs_of = [&](const rc::interaction::RelPose &rp, float width)
+    {
+        const auto geo = rc::anchor_cross_geometry(rp);
+        const float sigma_n = std::sqrt(std::max(0.f, geo.n.dot(rp.P.topLeftCorner<2, 2>() * geo.n)));
+        return rc::policy::doorway_jambs(rc::policy::gap_in_room(rp, width, cpose), geo.sigma_lat, sigma_n, sigma_s, sigma_r,
+                                         bare, 1.0f, standoff + 0.05f);
+    };
+    rc::policy::DoorwayRisk risk{jambs_of(cp.anchor_pose, cp.anchor_width), std::nullopt, 0.f};
+    if (cp.on_gap) { risk.gap = jambs_of(cp.drive_pose, cp.drive_width); risk.p_gap = cp.gap_score; }
+    return risk;
+}
+
 void ControllerSession::step_anchor_cross(const ControllerRobotPose &robot_pose,
                                           rc::TrajectoryController &path_controller,
                                           ControllerObstacleTracker &obstacle_tracker,
@@ -4102,6 +4161,24 @@ void ControllerSession::step_anchor_cross(const ControllerRobotPose &robot_pose,
     const CrossProtocol cp = cross_protocol(robot_pose, path_controller, obstacle_tracker, motion_commander, display,
                                             affordance_manager, time_source);
     if (cp.ended) return;
+    // ★ [Route] BandDrivesCross (Task 6 fix round 1): the protocol above ran (its `through` is still the crossing's end); the
+    //   MOTION goes to the follower on the route through the opening drive_point_target installed, with the opening's jambs in
+    //   the band's near field (execute_plan reads band_cross_driving_). Waiting for an anchor (not cp.drive) stays the servo's.
+    if (band_drives_cross() and cp.drive and current_plan_.has_value())
+    {
+        const ControllerRobotPose &cpose = tracker_pose_.has_value() ? *tracker_pose_ : robot_pose;
+        band_cross_risk_ = band_cross_doorway_risk(cp, cpose);
+        band_cross_driving_ = true;
+        if (not band_cross_logged_)
+        {
+            band_cross_logged_ = true;
+            std::println("[anchor] cross on {}: the SPLINE + band drive it ([Route] BandDrivesCross) — jambs of the anchor's "
+                         "{:.2f} m opening{} in the near field; the cross protocol still decides `through`", a.name,
+                         cp.anchor_width, cp.on_gap ? std::format(" and the measured {:.2f} m gap (score {:.2f})", cp.drive_width,
+                                                                  cp.gap_score) : std::string{});
+        }
+        return;
+    }
     const bool drive = cp.drive;
     const rc::interaction::RelPose &drive_pose = cp.drive_pose;
     const float drive_width = cp.drive_width;
@@ -5720,32 +5797,83 @@ void ControllerSession::step_route_band(const DrivenCurve &curve,
     //   contact probability uses — one obstacle model, no second fit), joined to this ESDF by a weight from the model
     //   (near_field_clearance.h). The optimiser is unchanged; it is handed a better field. Off: nothing here runs.
     // The near model's coverage R = the body's circumscribed radius + the route look-ahead the band deforms (to the end of
-    // its window, lead + span control points at h); sigma_far = the ESDF's cell. Returns: the policy's contact band, room
-    // frame, sigma = Lidar range sigma (controller_policy_drive.cpp builds the policy's set the same way), within R plus one
-    // denoising neighbourhood so the fits of the surfaces at the coverage edge see their whole support.
+    // its window, lead + span control points at h); sigma_far = the ESDF's cell.
+    // ★ Fix round 1 (review I-2): the near model sees the SAME obstacle set as the ESDF it replaces near the robot —
+    //   · the LiDAR returns of the ESDF's own buffer (lidar_buffer: the legacy 0.20 m height band, Controller
+    //     TemporaryObstacleMinHeight — NOT the policy's contact band at Lidar.ContactMinHeightM 0.074 m: a return between the
+    //     two would sit in the near model and not in the far one, and the join would disagree about whether it exists). The
+    //     body itself is filtered by its hull (returns_body / self_body_), where the ESDF drops a 0.405 m disc: the near model
+    //     keeps the real returns that disc deleted — stated, the one deliberate difference;
+    //   · the room outline minus the passage being crossed and the furniture polygons — the model build_esdf injects — as
+    //     segments sampled exactly as it samples them, each sample deferring (as there) to a LiDAR return within
+    //     Controller.ModelMergeRadius (Chebyshev, the ESDF's cell-square neighbourhood), position sigma = the relative pose
+    //     sigma (Policy.SigmaRelXY) with the samples' cell quantisation (res / sqrt 12);
+    //   · and, while the band DRIVES a cross ([Route] BandDrivesCross), the opening's jambs (F4's DoorwayRisk, built from the
+    //     cross protocol's anchor and measured gap this cycle) with the wall's half-depth (band_cross.h).
+    const auto band_t0 = std::chrono::steady_clock::now();
+    band_near_elements_ = 0;
     if (params_->route_near_field_clearance and obstacle_tracker != nullptr)
     {
         const float R_near = approach_body_.circumscribed_radius() + static_cast<float>(freeze_after - i_robot) * h;
         const float reach = R_near + rc::policy::kDenoiseRadiusM;
         std::vector<rc::policy::Return> returns;
-        if (auto *buf = obstacle_tracker->contact_buffer(); buf != nullptr)
-        {
-            const auto [cloud_opt] = buf->read_last();
-            if (cloud_opt.has_value())
-            {
-                const auto &[xs, ys, zs] = cloud_opt.value();
-                const std::size_t n = std::min(xs.size(), ys.size());
-                for (std::size_t i = 0; i < n; ++i)
+        std::vector<Eigen::Vector2f> lidar_room;
+        if (auto *buf = obstacle_tracker->lidar_buffer(); buf != nullptr)
+            if (const auto pts = rc::lidar_robot_points_from_buffer(*buf, pose, returns_body(), self_body_); pts.has_value())
+                for (const auto &q_robot : *pts)
                 {
-                    const Eigen::Vector2f q(xs[i], ys[i]);
+                    const Eigen::Vector2f q = pose * q_robot;
                     if (not q.allFinite() or (q - robot_pose.pos).squaredNorm() > reach * reach) continue;
                     returns.push_back({.p = q, .sigma = params_->lidar_range_sigma_m, .p_exist = 1.f});
+                    lidar_room.push_back(q);
                 }
-            }
-        }
         auto nf = std::make_shared<rc::NearFieldClearance>(robot_pose.pos, R_near, path_controller.params.grid_resolution,
                                                            distance, gradient);
         nf->set_surfaces(rc::policy::denoise_returns(returns));
+        // the ESDF's injected model (deferring to the LiDAR as build_esdf does)
+        const float merge = std::max(1e-3f, path_controller.params.model_merge_radius_m);
+        std::unordered_multimap<std::int64_t, Eigen::Vector2f> lidar_hash;   // cells of side `merge`
+        const auto cell_key = [merge](float x, float y, int dx = 0, int dy = 0)
+        {
+            const auto ix = static_cast<std::int64_t>(std::floor(x / merge)) + dx, iy = static_cast<std::int64_t>(std::floor(y / merge)) + dy;
+            return (ix << 32) ^ (iy & 0xffffffff);
+        };
+        for (const auto &r : lidar_room) lidar_hash.emplace(cell_key(r.x(), r.y()), r);
+        const auto lidar_near = [&](const Eigen::Vector2f &q)
+        {
+            for (int dx = -1; dx <= 1; ++dx)
+                for (int dy = -1; dy <= 1; ++dy)
+                {
+                    const auto [lo, hi] = lidar_hash.equal_range(cell_key(q.x(), q.y(), dx, dy));
+                    for (auto it = lo; it != hi; ++it)
+                        if (std::abs(it->second.x() - q.x()) <= merge and std::abs(it->second.y() - q.y()) <= merge) return true;
+                }
+            return false;
+        };
+        // outside the coverage disc a sample is not part of the near model at all (cut first: the test below is per sample)
+        const auto in_reach = [&](const Eigen::Vector2f &q) { return (q - robot_pose.pos).squaredNorm() <= reach * reach; };
+        const auto in_passage = [this](const Eigen::Vector2f &q)
+        {
+            return std::ranges::any_of(door_passages_, [&](const auto &pass)
+                                       { return pass.size() >= 3 and rc::corner_visibility::point_in_polygon(q, pass); });
+        };
+        const double sigma_model = std::hypot(double(params_->policy_sigma_rel_xy_m),
+                                              double(path_controller.params.grid_resolution) / std::sqrt(12.0));
+        const float spacing = 0.05f;   // TrajectoryController::set_room_boundary / set_static_obstacles' default sampling
+        std::vector<rc::NearFieldElement> model;
+        if (room_polygon_.size() >= 3)
+            for (const auto &e : rc::NearFieldClearance::polygon_elements(room_polygon_, sigma_model, spacing,
+                     [&](const Eigen::Vector2f &q) { return in_reach(q) and not in_passage(q) and not lidar_near(q); }))
+                model.push_back(e);
+        for (const auto &obs : obstacle_tracker->obstacle_polygons())
+            if (obs.size() >= 2)
+                for (const auto &e : rc::NearFieldClearance::polygon_elements(obs, sigma_model, spacing,
+                         [&](const Eigen::Vector2f &q) { return in_reach(q) and not lidar_near(q); }))
+                    model.push_back(e);
+        nf->set_model(model);
+        if (band_cross_driving_ and band_cross_risk_.has_value())
+            nf->set_doorway(*band_cross_risk_, rc::kBandCrossWallHalfDepthM);
+        band_near_elements_ = static_cast<int>(nf->surface_count() + nf->model_count());
         distance = [nf](const Eigen::Vector2f &p) { return nf->distance(p); };
         gradient = [nf](const Eigen::Vector2f &p) { return nf->gradient(p); };
     }
@@ -5792,7 +5920,9 @@ void ControllerSession::step_route_band(const DrivenCurve &curve,
     // Logged BEFORE the early return, so a rejected or no-op solve leaves a row too. A band that is on
     // and doing nothing must be visible as such — "enabled" and "working" are different claims, and a
     // run where every solve moved 0.000 m would otherwise look exactly like a working one.
+    band_solve_ms_ = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - band_t0).count();
     log_band_diagnostics(overlay_now_ms_, rep, freeze_before, freeze_after, M);
+    band_solve_ms_ = 0.f;
     if (not rep.ran or rep.rejected) return;
 
     // Hand the follower the deformed geometry WITHOUT resetting it — see update_path_geometry. The
@@ -5830,11 +5960,13 @@ void ControllerSession::ensure_band_csv(bool band_enabled)
                          "# rejected=1 means it solved and the acceptance test reverted it. A band that is\n"
                          "# enabled and inert must be readable as such.\n"
                          "# win_lo/win_hi = deformable control-point index range; ctrl_n = polygon size.\n"
+                         "# solve_ms = this cycle's band wall time (the near field's build + the solve; 0 on a refusal);\n"
+                         "#   near_elems = the near model's surfaces + model segments ([Route] NearFieldClearance; 0 off).\n"
                          "# clr_before/clr_after are the OPTIMISER's min clearance over the route, in the\n"
                          "#   LIVE robot-frame field — not comparable with the run JSON's body clearance.\n"
                          "t_ms,ran,rejected,uvd_violated,iterations,win_lo,win_hi,ctrl_n,"
                          "max_move_m,cost_before,cost_after,clr_before,clr_after,"
-                 "e_kappa,e_clear,e_anchor,e_gauge\n";
+                 "e_kappa,e_clear,e_anchor,e_gauge,solve_ms,near_elems\n";
 }
 
 void ControllerSession::log_band_diagnostics(std::uint64_t t_ms, const rc::RouteOptimizerReport &rep,
@@ -5847,7 +5979,8 @@ void ControllerSession::log_band_diagnostics(std::uint64_t t_ms, const rc::Route
               << freeze_before << ',' << freeze_after << ',' << ctrl_count << ','
               << rep.max_move_m << ',' << rep.cost_before << ',' << rep.cost_after << ','
               << rep.min_clearance_before << ',' << rep.min_clearance_after << ','
-              << rep.e_kappa << ',' << rep.e_clear << ',' << rep.e_anchor << ',' << rep.e_gauge << '\n';
+              << rep.e_kappa << ',' << rep.e_clear << ',' << rep.e_anchor << ',' << rep.e_gauge << ','
+              << band_solve_ms_ << ',' << band_near_elements_ << '\n';
 }
 
 void ControllerSession::report_unreachable_if_no_route(rc::AffordanceManager &affordance_manager,
@@ -6211,13 +6344,19 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
 
     // The door cross on its interaction anchor owns the base (drive_point_target found a fresh one this cycle and
     // installed no route). Its command goes through the same guard chain as the tracker's — see step_anchor_cross.
+    band_cross_driving_ = false;   // [Route] BandDrivesCross: set by step_anchor_cross on a cycle it hands the motion over
     if (anchor_cross_.has_value())
     {
         step_anchor_cross(robot_pose, path_controller, obstacle_tracker, motion_commander, display,
                           affordance_manager, time_source);
         anchor_cross_.reset();
-        refresh_view_only();
-        return;
+        if (not band_cross_driving_)
+        {
+            refresh_view_only();
+            return;
+        }
+        // ★ Task 6 fix round 1: the follower below drives the route through the opening, and the band deforms it against
+        //   the near field with the jambs (step_route_band) — only the DRIVER of the cross changed.
     }
 
     if (!current_plan_.has_value())

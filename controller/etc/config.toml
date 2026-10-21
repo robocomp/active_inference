@@ -949,6 +949,11 @@ overlay_csv_path = "overlay_lag_eval.csv"
 # policy's FITTED surfaces (contact.h denoise_returns), joined to the live ESDF by a weight from the model — no switch
 # radius (near_field_clearance.h). Needs Controller.BandEnabled = true (it is the band's field). false = unchanged.
 NearFieldClearance = false
+# Fix round 1 (coordinator ruling (b)): with NearFieldClearance = true and [Policy] Enabled = false, the spline + band DRIVE
+# a door cross — the route continues through the opening to the cross's goal and the near field holds the opening's jambs
+# (the anchor's, and the measured gap's weighted by its score) — instead of the anchor servo. The crossing's completion stays
+# the cross protocol's (through / near-side gate / timeouts). false = the servo, unchanged. Arm A = every flag false.
+BandDrivesCross = false
 
 [Lidar]
 # Stream watchdog. No fresh sweep for this long while operating => LOCAL EMERGENCY HOLD: the robot is

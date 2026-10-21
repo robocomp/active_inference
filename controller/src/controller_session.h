@@ -194,6 +194,9 @@ public:
     // old chain is switched OFF, not deleted. The protocol halves (arrival → finalize_reached, the cross's through /
     // hand-back, the lock-on and orient completion predicates, Unreachable) are unchanged and shared.
     [[nodiscard]] bool policy_enabled() const { return params_ != nullptr and params_->policy_enabled; }
+    // [Route] BandDrivesCross in force: the spline/band drives a door cross (needs NearFieldClearance; never with the policy)
+    [[nodiscard]] bool band_drives_cross() const
+    { return params_ != nullptr and params_->route_band_drives_cross and params_->route_near_field_clearance and not params_->policy_enabled; }
     // One policy tick toward `spec` (also the relative-motion path, SpecificWorker::step_relative_motion): builds the
     // input, keeps the Navigator's goal (set_goal only when the goal moved beyond its own tolerance), steps it, sends the
     // command, logs policy_decisions.csv and a [policy] line per mode change. `who` names the goal's owner in the logs.
@@ -1245,6 +1248,14 @@ private:
     std::ofstream band_csv_;
     bool band_csv_open_ = false;
     long long band_cycle_ = 0;
+    // ── Task 6: the near field and [Route] BandDrivesCross ──
+    float band_solve_ms_ = 0.f;              // this cycle's band wall time (band_diag.csv solve_ms)
+    int   band_near_elements_ = 0;           // the near model's size this cycle (band_diag.csv near_elems)
+    bool  band_cross_driving_ = false;       // this cycle the cross protocol handed the motion to the follower + band
+    std::optional<rc::policy::DoorwayRisk> band_cross_risk_;   // the opening's jambs this cycle (F4's two hypotheses)
+    std::string band_cross_route_for_;       // the cross whose route through the opening is installed
+    bool  band_cross_logged_ = false;
+    rc::policy::DoorwayRisk band_cross_doorway_risk(const CrossProtocol &cp, const ControllerRobotPose &cpose) const;
     bool route_active_ = false;
     // ── Live tracking accumulator (see live_tracking) ──────────────────────────────────────────────
     // Deliberately NOT hosted in MissionRunner. Sampling that outside a run would fold idle affordance
@@ -1309,7 +1320,9 @@ private:
     // NOT const: it RETAINS the fitted spline so the band can keep deforming it. A plan that is only a
     // list of samples cannot be re-optimised — the control polygon is the decision variable, and
     // throwing it away is what made an affordance route a one-shot fit.
-    ControllerPolygon smooth_plan(const ControllerPolygon &poly);
+    // door_axis_anchors: the [door-axis] centreline anchors for a passage's cross step (false for BandDrivesCross's route,
+    // which is built on the anchor's opening itself).
+    ControllerPolygon smooth_plan(const ControllerPolygon &poly, bool door_axis_anchors = true);
     // Task 14 fix round 4 (try79): the RETURNS' BACKOFF on the tracker path — owns the base while it opens clearance from the
     // live returns, then hands back to the planner (re-plan). `returns_held_since_ms_`: the net has held the tracker's whole
     // command since then (0 = not held). `returns_block_pending_`: the stall judge called a window BLOCKED BY A REAL RETURN.

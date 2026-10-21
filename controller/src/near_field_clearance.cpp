@@ -4,7 +4,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <array>
 #include <limits>
+#include <optional>
 #include <utility>
 
 namespace rc
@@ -114,6 +116,25 @@ NearFieldElement NearFieldClearance::element_of(const policy::Return &r)
     return e;
 }
 
+namespace
+{
+double segment_distance(const NearFieldElement &e, const Eigen::Vector2d &p)
+{
+    const Eigen::Vector2d ab = e.b - e.a;
+    const double L2 = ab.squaredNorm();
+    const double t = L2 > 0.0 ? std::clamp((p - e.a).dot(ab) / L2, 0.0, 1.0) : 0.0;
+    return (e.a + t * ab - p).norm();
+}
+// the largest eigenvalue of the (symmetric) position covariance: the widest the element's distance can spread
+double s2_max(const Eigen::Matrix2d &S)
+{
+    const double h = 0.5 * (S(0, 0) - S(1, 1));
+    return 0.5 * S.trace() + std::sqrt(h * h + S(0, 1) * S(0, 1));
+}
+}  // namespace
+
+bool NearFieldClearance::covered(const NearFieldElement &e) const { return segment_distance(e, centre_) <= R_; }
+
 void NearFieldClearance::set_surfaces(std::span<const policy::Return> denoised)
 {
     memo_valid_ = false;
@@ -124,41 +145,94 @@ void NearFieldClearance::set_surfaces(std::span<const policy::Return> denoised)
     {
         if (not r.p.allFinite() or not (r.p_exist > 0.f)) continue;
         NearFieldElement e = element_of(r);
-        // in the coverage disc iff the segment's nearest point to the centre is
-        const Eigen::Vector2d ab = e.b - e.a;
-        const double L2 = ab.squaredNorm();
-        const double t = L2 > 0.0 ? std::clamp((centre_ - e.a).dot(ab) / L2, 0.0, 1.0) : 0.0;
-        if ((e.a + t * ab - centre_).norm() > R_) continue;
+        if (not covered(e)) continue;   // the coverage disc defines the near model
         (e.p_exist >= 1.0 ? surfaces_ : uncertain).push_back(e);
     }
     // certain surfaces first: an uncertain element enters as a mixture ON the running minimum
     surfaces_.insert(surfaces_.end(), uncertain.begin(), uncertain.end());
 }
 
-std::vector<NearFieldElement> NearFieldClearance::jamb_elements(const policy::DoorwayJambs &j)
+void NearFieldClearance::set_model(std::span<const NearFieldElement> model)
+{
+    memo_valid_ = false;
+    model_.clear();
+    for (const auto &e : model)
+        if (e.p_exist >= 1.0 and covered(e)) model_.push_back(e);
+}
+
+std::vector<NearFieldElement> NearFieldClearance::polygon_elements(std::span<const Eigen::Vector2f> poly, double sigma,
+                                                                   float spacing, const std::function<bool(const Eigen::Vector2f &)> &keep)
+{
+    std::vector<NearFieldElement> out;
+    const int n = static_cast<int>(poly.size());
+    if (n < 2 or not (spacing > 0.f)) return out;
+    Eigen::Matrix2d S = sigma * sigma * Eigen::Matrix2d::Identity();
+    auto emit = [&](const Eigen::Vector2f &a, const Eigen::Vector2f &b)
+    {
+        NearFieldElement e;
+        e.a = a.cast<double>(); e.b = b.cast<double>(); e.S = S;
+        out.push_back(e);
+    };
+    for (int i = 0; i < n; ++i)
+    {
+        const Eigen::Vector2f &a = poly[i];
+        const Eigen::Vector2f &b = poly[(i + 1) % n];
+        // the samples TrajectoryController puts in the ESDF (set_room_boundary / set_static_obstacles)
+        const int num = std::max(1, static_cast<int>((b - a).norm() / spacing));
+        std::optional<Eigen::Vector2f> run_start, run_end;
+        for (int k = 0; k <= num; ++k)
+        {
+            const Eigen::Vector2f q = a + (static_cast<float>(k) / static_cast<float>(num)) * (b - a);
+            if (not keep or keep(q))
+            {
+                if (not run_start) run_start = q;
+                run_end = q;
+            }
+            else if (run_start)
+            {
+                emit(*run_start, *run_end);
+                run_start.reset();
+            }
+        }
+        if (run_start) emit(*run_start, *run_end);
+    }
+    return out;
+}
+
+std::vector<NearFieldElement> NearFieldClearance::jamb_elements(const policy::DoorwayJambs &j, double wall_half_depth_m)
 {
     const Eigen::Vector2d n = j.gap.normal.cast<double>().normalized(), lat(-n.y(), n.x());
     const Eigen::Vector2d c = j.gap.centre.cast<double>();
-    const double hw = 0.5 * j.gap.width, L = j.placement_m;
+    const double hw = 0.5 * j.gap.width, L = j.placement_m, t = std::max(0.0, wall_half_depth_m);
     const double s_lat2 = double(j.sigma_lat_m) * j.sigma_lat_m + double(j.sigma_s_m) * j.sigma_s_m
                         + double(j.sigma_half_width_m) * j.sigma_half_width_m;
     const double s_n2 = double(j.sigma_n_m) * j.sigma_n_m + double(j.sigma_s_m) * j.sigma_s_m;
     const Eigen::Matrix2d S = s_lat2 * lat * lat.transpose() + s_n2 * n * n.transpose();
-    NearFieldElement left, right;
-    left.a = c + hw * lat;  left.b = c + (hw + L) * lat;  left.S = S;
-    right.a = c - hw * lat; right.b = c - (hw + L) * lat; right.S = S;
-    return {left, right};
+    std::vector<NearFieldElement> out;
+    auto seg = [&](const Eigen::Vector2d &a, const Eigen::Vector2d &b) { NearFieldElement e; e.a = a; e.b = b; e.S = S; out.push_back(e); };
+    for (const double side : {1.0, -1.0})
+    {
+        const Eigen::Vector2d edge = c + side * hw * lat, outer = c + side * (hw + L) * lat;
+        if (t > 0.0)
+        {
+            seg(edge - t * n, edge + t * n);              // the jamb's FACE, along the normal, through the wall's depth
+            seg(edge - t * n, outer - t * n);             // the wall's face on the near side
+            seg(edge + t * n, outer + t * n);             // and on the far side
+        }
+        else seg(edge, outer);                            // a thin wall: its line
+    }
+    return out;
 }
 
-void NearFieldClearance::set_doorway(const policy::DoorwayRisk &risk)
+void NearFieldClearance::set_doorway(const policy::DoorwayRisk &risk, double wall_half_depth_m)
 {
     memo_valid_ = false;
-    anchor_jambs_ = jamb_elements(risk.anchor);
+    anchor_jambs_ = jamb_elements(risk.anchor, wall_half_depth_m);
     gap_jambs_.clear();
     p_gap_ = 0.0;
     if (risk.gap.has_value() and risk.p_gap > 0.f)
     {
-        gap_jambs_ = jamb_elements(*risk.gap);
+        gap_jambs_ = jamb_elements(*risk.gap, wall_half_depth_m);
         p_gap_ = std::clamp(double(risk.p_gap), 0.0, 1.0);
     }
 }
@@ -167,6 +241,22 @@ NearFieldEval NearFieldClearance::evaluate_hypothesis(const Eigen::Vector2d &p, 
                                                       double far_v, const Eigen::Vector2d &far_g) const
 {
     const Dual px{p.x(), Eigen::Vector2d(1.0, 0.0)}, py{p.y(), Eigen::Vector2d(0.0, 1.0)};
+    // ★ PREFILTER (numerical, not a model cut). Plain-double distances first: an element whose distance exceeds the nearest
+    //   certain one's by more than 8.5 sqrt(2) s_max (s_max^2 = the widest variance any element here has) is below the
+    //   minimum with probability < Phi(-8.5) ~ 1e-17 — its fold cannot move it. The dual work is done only for the elements
+    //   that can matter. The fold ORDER stays the input order (Clark's sequential approximation is order-dependent: folding
+    //   nearest-first made the value jump where the nearest element changes — measured, |grad - FD| 0.012).
+    const std::array<std::span<const NearFieldElement>, 3> sets{extra, std::span<const NearFieldElement>(model_),
+                                                                std::span<const NearFieldElement>(surfaces_)};
+    double mu_min = std::numeric_limits<double>::infinity(), s2max = 0.0;
+    for (const auto &set : sets)
+        for (const auto &e : set)
+        {
+            s2max = std::max(s2max, s2_max(e.S));
+            if (e.p_exist < 1.0) continue;
+            mu_min = std::min(mu_min, segment_distance(e, p));
+        }
+    const double reach = mu_min + 8.5 * std::sqrt(2.0 * s2max);
     Moments M;
     auto fold = [&](const NearFieldElement &e)
     {
@@ -179,9 +269,10 @@ NearFieldEval NearFieldClearance::evaluate_hypothesis(const Eigen::Vector2d &p, 
         }
         clark_fold(M.m, M.v, mu, s2, e.p_exist);
     };
-    // jambs (certain) before the surfaces' uncertain tail, so every uncertain element folds onto a running minimum
-    for (const auto &e : extra) fold(e);
-    for (const auto &e : surfaces_) fold(e);
+    // jambs and model walls (certain) before the surfaces, whose uncertain tail folds onto a running minimum
+    for (const auto &set : sets)
+        for (const auto &e : set)
+            if (segment_distance(e, p) <= reach) fold(e);
 
     NearFieldEval out;
     out.value = far_v;

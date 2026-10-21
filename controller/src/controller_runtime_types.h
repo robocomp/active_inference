@@ -163,6 +163,10 @@ struct ControllerParams
     // the band's clearance field near the robot becomes the EXPECTED clearance to the local policy's FITTED surfaces
     // (near_field_clearance.h), joined to the live ESDF by a model weight. false = the old field, byte-identical.
     bool  route_near_field_clearance = false;
+    // [Route] BandDrivesCross (Task 6 fix round 1, coordinator ruling (b)): with NearFieldClearance on and the policy off, the
+    // spline + band drive a door CROSS (route through the opening to the cross's goal, the jambs in the near field) instead
+    // of the anchor servo; the crossing's completion stays the cross protocol's. false = the servo, byte-identical.
+    bool  route_band_drives_cross = false;
     // Route optimiser: speed (0) <-> safety (1). Trades PRECISION between the clearance preference and
     // the curvature prior (see RouteOptimizerConfig::safety_bias). 0.5 is exactly the written weights, so
     // it is inert until moved. Live from the UI slider; applies to the next route build or repair.
