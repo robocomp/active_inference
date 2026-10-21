@@ -165,6 +165,9 @@ struct AnchorEvidence
     float p_cam   = 0.f;                              // P(opening in the zed frustum) when a mask was consumed, else 0
     float p_view  = 0.f;                              // P(door in view) = 1 − (1 − p_lidar)(1 − p_cam)
     float sig_bias_yaw = 0.f;                         // Task 10: the persistent bias's yaw σ in the published P (rad)
+    // Task D-B fix (I5): the update's two-hypothesis test of its own fit against its prior (alias_log_ratio).
+    float fit_llr = 0.f;                              // log p(fit displacement | alias) − log p(… | the opening) (alias_log_ratio)
+    float p_fit = 1.f;                                // P(the fit is the opening) — the posterior is the mixture at this weight
     // Task 10 diagnostics (the replay prints them): the frame's model information I_L, its score-space misfit J_s, the gain.
     Eigen::Matrix3f info = Eigen::Matrix3f::Zero(), misfit = Eigen::Matrix3f::Zero(), gain = Eigen::Matrix3f::Zero();
     Eigen::Vector3f info_innov = Eigen::Vector3f::Zero();   // I_L ν: the data-only optimum's pull on the prior mean
@@ -1664,6 +1667,62 @@ inline BiasTerms bias_terms(const anchor_detail::Problem& pb, const Eigen::Vecto
     bt.Js = U * em.eigenvectors() * em.eigenvalues().cwiseMax(0.0).asDiagonal() * em.eigenvectors().transpose() * U.transpose();
     return bt;
 }
+// ─── Task D-B fix (rtD1h leg 5, I5): THE UPDATE TESTS ITS OWN FIT AGAINST ITS PRIOR ───────────────────────────────────────
+// rtD1h t 445.28 s: hung from the room at σ (0.31 m, 0.20 m, 0.10 rad), the FIRST update put the anchor 1.4 m / 84° away
+// (anchor_frames.bin, replayed bit-exact before that tape was overwritten; anchor_replay reproduces the class on
+// door_inputs.bin). Along the line from the prior to that alias the data term moves by HUNDREDS of nats (−β log p: 11 216 at
+// the prior, 10 815 at the alias — 0.054 nats per beam) while the prior can charge at most 127: counted beam by beam, a
+// structure the thin-wall model misdescribes (the open leaf reads as a wall) outvotes the prior a hundredfold, and the fit
+// lands 14σ out with σ 2 cm. Its posterior then claims it with the full precision of the beams.
+// The update now asks the same question belief_lost asks of a belief and a room initialisation, of its own FIT and its own
+// PRIOR (one model, used twice): the fit's displacement from the prior mean, ν = x_fit − x̄, scored under
+//   the fit is the opening : ν ~ N(0, P̄ + P_fit)                          (where the prior says the fit should land)
+//   the fit is an alias    : ν ~ Cauchy(0, P̄ + P_fit + Σ_L)                (Σ_L: the alias scale, one width along and
+//                                                                             across the wall, a quarter turn in yaw)
+// with the prior probability of a capture at THIS update = the prior's own reach of an alias (alias_hazard: ≈ 0.18 from a
+// σ_model room initialisation, ≈ 0 for a converged tracker). The posterior is the two hypotheses' MIXTURE at P(alias),
+// moment-matched: the fit where the prior expected it, the prior where the fit jumped to another basin — continuous, no
+// level. (Within the prior's basin nothing changes: P(alias) ≈ 0 there.)
+// ★Two cures tried first and refuted on these tapes (task-D-B-report.md): scaling the data term by a composite-likelihood
+//  κ (a sandwich of cluster scores) — at the prior it read a wrong prior's pull as misfit (a clean doorway 0.35 m off never
+//  corrected), at the fit the alias's clusters were self-consistent (κ = 1, alias kept); and a structure-level Bayes factor
+//  with a Laplace volume term — the Occam factor then refused every informative update, so the tracker froze on odometry.
+[[nodiscard]] inline double alias_log_ratio(const Eigen::Vector3d& nu_in, const Eigen::Matrix3d& S, double width, double* d2_out = nullptr)
+{
+    Eigen::Vector3d nu = nu_in;
+    nu.z() = std::remainder(nu.z(), 2.0 * M_PI);
+    const double wl = std::max(1e-3, width);
+    const Eigen::Matrix3d SL = S + Eigen::Vector3d(wl * wl, wl * wl, M_PI * M_PI / 4.0).asDiagonal().toDenseMatrix();
+    const Eigen::LLT<Eigen::Matrix3d> llt(S), lltL(SL);
+    if (llt.info() != Eigen::Success or lltL.info() != Eigen::Success or not nu.allFinite()) return 0.0;
+    const double d2 = nu.dot(llt.solve(nu)), dL2 = nu.dot(lltL.solve(nu));
+    if (d2_out != nullptr) *d2_out = d2;
+    const auto logdet = [](const Eigen::LLT<Eigen::Matrix3d>& c) { double l = 0; for (int i = 0; i < 3; ++i) l += 2.0 * std::log(c.matrixL()(i, i)); return l; };
+    const double k = 3.0, v = 1.0;   // ⚑ Cauchy (ν = 1): "no scale" (kAnchorLostDof's convention)
+    const double l_right = -0.5 * d2 - 0.5 * k * std::log(2.0 * M_PI) - 0.5 * logdet(llt);
+    const double l_alias = std::lgamma(0.5 * (v + k)) - std::lgamma(0.5 * v) - 0.5 * k * std::log(v * M_PI) - 0.5 * logdet(lltL)
+                         - 0.5 * (v + k) * std::log1p(dL2 / v);
+    return l_alias - l_right;
+}
+// The probability that an update from this prior can be captured by an alias: the prior's mass outside its own basin,
+// 1 − Π_axes P(|z| < ½ a_i / σ_i), σ the prior's marginal σ in anchor axes and a the alias scale above; ⚑ the basin = half
+// that scale (a definition).
+[[nodiscard]] inline double alias_hazard(const Eigen::Matrix3f& P, float yaw, float width)
+{
+    Eigen::Matrix3f R = Eigen::Matrix3f::Identity();
+    R.topLeftCorner<2, 2>() << std::cos(yaw), std::sin(yaw), -std::sin(yaw), std::cos(yaw);
+    const Eigen::Matrix3f Pa = R * P * R.transpose();   // robot → anchor axes
+    const double wl = std::max(1e-3, double(width));
+    const double half[3] = {0.5 * wl, 0.5 * wl, 0.5 * M_PI_2};
+    double inside = 1.0;
+    for (int i = 0; i < 3; ++i)
+    {
+        const double sd = std::sqrt(std::max(0.0, double(Pa(i, i))));
+        inside *= sd > 0.0 ? std::erf(half[i] / (sd * M_SQRT2)) : 1.0;
+    }
+    return std::clamp(1.0 - inside, 0.0, 1.0);
+}
+
 inline Eigen::Matrix3d sym_sqrt(const Eigen::Matrix3d& A)
 {
     Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> e(0.5 * (A + A.transpose()));
@@ -1748,6 +1807,14 @@ update_door_anchor(const rc::interaction::RelPose& prior, float width, float thi
     //  fewer in-span rays — by ~0.1 m; the closing Laplace mean is one Newton step and kept most of that wander wherever
     //  the true F ripples at the jamb's ray spacing. Converging on the true F first: frame-0 lateral wander 0.092 →
     //  0.037 m, worst over the turn 0.100 → 0.043 m (test turning_away_does_not_drag_anchor). Cost ~+30 %.
+    const M3d P_prior = P;
+    // One minimisation of F from the prior (the three stages below). `restage`: the prior's spreads and the global leaf search
+    // re-done (they were staged above for the first run; a second run under another κ starts from the same place).
+    const auto optimise = [&](bool restage)
+    {
+    x = pb.xbar;
+    P = P_prior;
+    if (restage) { pb.linearise(x, P); pb.select_leaf_configs(x, true); }
     for (int stage = 0; stage < 3; ++stage)
     {
         if (stage > 0)   // stage 0: staged above, at the prior
@@ -1799,6 +1866,8 @@ update_door_anchor(const rc::interaction::RelPose& prior, float width, float thi
         if (not fresh) pb.derivatives(x, g, H);
         P = (pb.Pinv + psd_information(H, pb.Pinv)).llt().solve(M3d::Identity());
     }
+    };
+    optimise(false);
 
     // ─── Laplace at the measurement model's own σ, with the frame's common mode marginalised ─────────────────
     // H = P̄⁻¹ + I_L (I_L = the data's curvature, PSD part). The rays share one LiDAR extrinsic and one wall, so their
@@ -1879,6 +1948,34 @@ update_door_anchor(const rc::interaction::RelPose& prior, float width, float thi
     {
         if (bias != nullptr) bias->L = L0.cast<float>();
         return {prior, AnchorEvidence{}};
+    }
+    // ─── Task D-B fix (I5): the fit against the prior — is the fit the opening, or an alias? (alias_log_ratio) ────────────
+    {
+        const double h = alias_hazard(prior.P, prior.x.z(), width);
+        const M3d S = prior.P.cast<double>() + post.P.cast<double>();
+        double d2 = 0.0;
+        const double llr = alias_log_ratio((post.x - prior.x).cast<double>(), S, double(width), &d2);
+        const double lo = (h > 0.0 ? std::log(h / std::max(1e-300, 1.0 - h)) : -std::numeric_limits<double>::infinity()) + llr;
+        const double q = std::isfinite(lo) ? 1.0 / (1.0 + std::exp(-lo)) : (lo > 0 ? 1.0 : 0.0);   // P(the fit is an alias)
+        const double a = 1.0 - q;
+        ev.fit_llr = float(llr);
+        ev.p_fit = float(a);
+        if (a < 1.0)
+        {
+            // The mixture (1 − a)·prior + a·fit, moment-matched (yaw wrapped about the fit), and the bias factor's convex
+            // combination (P − L Lᵀ ⪰ 0 is kept: L Lᵀ is convex in L).
+            const V3d xf = post.x.cast<double>(), x0 = prior.x.cast<double>();
+            V3d dd = x0 - xf;
+            dd.z() = std::remainder(dd.z(), 2.0 * M_PI);
+            const V3d xm = xf + (1.0 - a) * dd;
+            const V3d ef = xf - xm, e0 = (xf + dd) - xm;
+            const M3d Pm = a * (post.P.cast<double>() + ef * ef.transpose()) + (1.0 - a) * (prior.P.cast<double>() + e0 * e0.transpose());
+            post.x = xm.cast<float>();
+            post.x.z() = float(std::remainder(double(post.x.z()), 2.0 * M_PI));
+            post.P = (0.5 * (Pm + Pm.transpose())).cast<float>();
+            L_new = a * L_new + (1.0 - a) * L0;
+            if (bias != nullptr) bias->L = L_new.cast<float>();
+        }
     }
     x = post.x.cast<double>();
 
