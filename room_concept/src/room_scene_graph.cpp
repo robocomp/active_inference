@@ -1676,7 +1676,7 @@ void RoomSceneGraph::arm_startup_proto(std::uint64_t room_id, const Eigen::Affin
     startup_proto_     = true;
     startup_promoted_  = false;
     recalled_visit_    = false;
-    recall_p_mem_      = 0.f;   // a re-entry restores it (note_recall_memory) after this
+    explored_.reset();          // a re-entry restores its memory (note_recall_memory) after this
     layout_pool_.clear();
     layout_finished_   = false;
     pub_gauge_frozen_  = true;
@@ -2882,7 +2882,7 @@ void RoomSceneGraph::dsr_update_affordance(const rc::RoomConcept::UpdateResult& 
     // an edit. Empty contested set = nothing to test = the pose planner as before.
     // (and a partly remembered room until the explorer is `finished` — room_explored.h; P(explored) from each plan)
     if (layout_explorer_owns_room()) { dsr_update_layout_affordance(res); publish_plan_explored(); return; }
-    if (not recalled_partial()) publish_explored(1.f);   // nothing left for the explorer: p = 1 (room_explored.h)
+    publish_explored(explored_.settled(room_node_name()));   // nothing left for the explorer: p = 1 (room_explored.h)
     if (!epistemic_) return;
 
     auto& planner = epistemic_->epistemic_planner();

@@ -11,6 +11,8 @@
 //      scans; it crosses 0.5 exactly where the explorer says `finished`; nothing standable ⇒ no belief at all;
 //   C. recalled rooms: a complete memory is explored on entry and offers nothing; a partly remembered room starts at
 //      its memory and needs fewer scans than a fresh one to reach the same boundary.
+//   D. the agent's glue (rc::explored::Tracker): only the coverage belief is remembered; a recalled room's explorer
+//      `finished` is terminal (p = 1), like promotion.
 #include "free_space_polygon.h"
 #include "layout_explorer.h"
 #include "room_explored.h"
@@ -221,6 +223,49 @@ void recalled_rooms()
         CHECK(p6 < f6);
     }
 }
+// ── D: the agent's glue (Tracker): what is remembered, and the terminal verdicts ─────────────────────────────────
+void glue_fixtures()
+{
+    {   // I-1: a room left while the refiner holds contested cells is REMEMBERED as surveyed — no re-survey on re-entry
+        Tracker t;
+        t.reset();
+        CHECK(t.plan("room_2", Phase::Survey, 40, 3.f, 0.5f, false).has_value());     // surveying: p < 0.5
+        CHECK(t.memory().recall("room_2").has_value() and *t.memory().recall("room_2") < 0.5f);
+        CHECK(t.settled("room_2") == 1.f);                                             // promoted, nothing contested
+        const auto pc = t.plan("room_2", Phase::Contested, 40, 2.f, 0.1f, false);       // the refiner's question
+        CHECK(pc.has_value() and *pc < 0.1f);                                          // published as is ...
+        CHECK(t.memory().recall("room_2") == std::optional<float>(1.f));               // ... but never remembered
+        t.reset();                                                                     // crossed into room_3
+        t.enter_recalled("room_2", std::nullopt);                                      // and back
+        CHECK(t.p_mem() == 1.f and not t.recalled_partial());                          // no re-survey
+    }
+    {   // a room left mid-survey is remembered as far as it was seen
+        Tracker t;
+        t.reset();
+        const auto p = t.plan("room_4", Phase::Survey, 40, 0.5f / 0.6f * 0.4f, 0.5f, false);   // p = 0.6
+        CHECK(p.has_value() and near(*p, 0.6f));
+        t.reset();
+        t.enter_recalled("room_4", std::nullopt);
+        CHECK(near(t.p_mem(), 0.6f) and t.recalled_partial());
+    }
+    {   // I-2: a partly recalled room's explorer `finished` is the same terminal verdict as promotion: p = 1
+        Tracker t;
+        t.reset();
+        t.enter_recalled("room_5", 0.6f);
+        const auto mid = t.plan("room_5", Phase::RecalledRest, 30, 2.f, 0.5f, false);
+        CHECK(mid.has_value() and *mid >= 0.6f and *mid < 0.9f);
+        const auto fin = t.plan("room_5", Phase::RecalledRest, 30, 0.4f, 0.5f, true);
+        CHECK(fin == std::optional<float>(1.f));                                       // until explored >= 0.9 resolves
+        CHECK(t.memory().recall("room_5") == std::optional<float>(1.f));
+        CHECK(t.settled("room_5") == 1.f);                                             // the pose planner's branch after it
+    }
+    {   // nothing assessable: nothing published, nothing remembered
+        Tracker t;
+        t.reset();
+        CHECK(not t.plan("room_6", Phase::Survey, 0, 0.f, 0.5f, false).has_value());
+        CHECK(not t.memory().recall("room_6").has_value());
+    }
+}
 }   // namespace
 
 int main()
@@ -229,6 +274,7 @@ int main()
     model_laws();
     fresh_room();
     recalled_rooms();
+    glue_fixtures();
     std::println("room_explored_selftest: {}/{} checks passed", checks - failures, checks);
     return failures == 0 ? 0 : 1;
 }

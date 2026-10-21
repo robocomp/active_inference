@@ -265,16 +265,16 @@ private:
     std::int64_t  refine_last_ms_ = 0;
     bool          recalled_visit_ = false;   ///< RE-ENTERED from memory: the outline is not re-refined on this visit
     // ── P(room explored) (room_explored.h, room_scene_graph_explored.cpp) — `room_explored_p` on the room node ──
-    float         recall_p_mem_ = 0.f;              ///< what memory restored for THIS room (0 = a room never seen before)
+    rc::explored::Tracker explored_;                ///< memory by room name + this room's p_mem (the tested glue)
     float         explored_p_ = -1.f;               ///< last value written (-1 = none yet on explored_room_id_)
     std::uint64_t explored_room_id_ = 0;            ///< the node explored_p_ was written on
-    rc::explored::Memory explored_memory_;          ///< by room name: what a re-entry restores within this run
     /// Write the belief on the room node (nullopt = not assessed: nothing is written). Deduplicated on the value.
     void publish_explored(std::optional<float> p);
+    [[nodiscard]] std::string room_node_name() const;   ///< dsr_room_id_'s name ("" = none)
     /// A re-entry: restore p_mem from the recall (or this agent's record) and give the explorer the remembered outline.
     void note_recall_memory(const Recall& recall);
     /// A recalled room memory does not hold completely: the explorer looks for what memory may lack.
-    [[nodiscard]] bool recalled_partial() const { return recalled_visit_ and recall_p_mem_ < 1.f; }
+    [[nodiscard]] bool recalled_partial() const { return recalled_visit_ and explored_.recalled_partial(); }
     /// Who drives afford_room: the layout explorer (proto survey, contested refiner cells, a partly remembered room)
     [[nodiscard]] bool layout_explorer_owns_room() const
     {
@@ -284,8 +284,10 @@ private:
     /// P(explored) from the explorer's last plan (its own price; the wall-map EIG plan has none ⇒ not assessed).
     void publish_plan_explored()
     {
+        using rc::explored::Phase;
+        const Phase ph = recalled_partial() ? Phase::RecalledRest : startup_promoted_ ? Phase::Contested : Phase::Survey;
         const auto& P = layout_last_plan_;
-        publish_explored(rc::explored::belief(P.evaluated, P.best_gain, P.price, recall_p_mem_));
+        publish_explored(explored_.plan(room_node_name(), ph, P.evaluated, P.best_gain, P.price, layout_finished_));
     }
     /// The robot's footprint area, m² — the coverage explorer's price of a trip (plan_coverage's min_gain).
     [[nodiscard]] float footprint_area() const;

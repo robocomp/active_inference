@@ -89,4 +89,53 @@ public:
 private:
     std::unordered_map<std::string, float> by_room_;
 };
+/// Which question the explorer's plan answers.
+enum class Phase
+{
+    Survey,         ///< a proto room: how much of its boundary is still unseen
+    Contested,      ///< promoted: can a look decide one refiner edit — NOT whether the boundary is seen
+    RecalledRest,   ///< a partly remembered room: what memory may lack
+};
+
+/// The agent's glue (RoomSceneGraph calls exactly this): what is published, what is remembered, what is terminal.
+class Tracker
+{
+public:
+    /// A room born or entered with no memory of it.
+    void reset() { recalled_ = false; p_mem_ = 0.f; }
+    /// A re-entry: memory restores p_mem (the recall's own attribute, else this agent's record, else complete).
+    void enter_recalled(const std::string& room, std::optional<float> carried)
+    {
+        recalled_ = true;
+        p_mem_ = restored(carried, memory_.recall(room));
+    }
+    [[nodiscard]] float p_mem() const { return p_mem_; }
+    [[nodiscard]] bool recalled_partial() const { return recalled_ and p_mem_ < 1.f; }
+    /// One explorer plan in `room`. `finished` = the explorer's latched verdict (layout_finished_).
+    [[nodiscard]] std::optional<float> plan(const std::string& room, Phase phase, int evaluated, float best_gain,
+                                            float price, bool finished)
+    {
+        // ★ A recalled room's `finished` is the same terminal verdict as a survey's promotion: nothing reachable is
+        //   left worth a trip, so the boundary question is closed (p = 1). Without it p stuck at 1/(2 − p_mem).
+        if (phase == Phase::RecalledRest and finished) return settled(room);
+        const auto p = belief(evaluated, best_gain, price, phase == Phase::RecalledRest ? p_mem_ : 0.f);
+        // ★ ONLY THE BOUNDARY BELIEF IS REMEMBERED. The contested plan prices a refiner edit; a room is contested only
+        //   once promoted, i.e. after its survey finished — so its memory is 1, whatever the refiner still asks.
+        //   Remembering the refiner's value made the re-entry re-survey the whole remembered outline.
+        if (phase == Phase::Contested) memory_.remember(room, 1.f);
+        else if (p.has_value()) memory_.remember(room, *p);
+        return p;
+    }
+    /// Nothing left for the explorer here (promoted and uncontested, a given layout, a complete or finished memory).
+    float settled(const std::string& room)
+    {
+        memory_.remember(room, 1.f);
+        return 1.f;
+    }
+    [[nodiscard]] const Memory& memory() const { return memory_; }
+private:
+    Memory memory_;
+    bool recalled_ = false;
+    float p_mem_ = 0.f;
+};
 }   // namespace rc::explored

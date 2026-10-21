@@ -276,7 +276,10 @@ inline const std::vector<PredSpec>& preds()
     using enum FieldType;
     using namespace detail;
     static const std::vector<PredSpec> table = {
-        {.name = "explored", .probabilistic = true,   // room_concept's explore readiness (Phase 0 attribute)
+        // explored(room): room_concept's `room_explored_p` on the room node (Task 5, room_concept/src/room_explored.h)
+        // = the room's BOUNDARY has been seen (continuing to survey it no longer pays) — NOT its interior or its objects.
+        // Preference odds (a Luce ratio), not a calibrated probability. Absent = never assessed = unknown.
+        {.name = "explored", .probabilistic = true,
          .fields = {{.name = "room", .type = Ref, .required = true, .ref_kinds = kNode}}},
         {.name = "in_room", .probabilistic = false,   // rc::room::current_room == room
          .fields = {{.name = "room", .type = Ref, .required = true, .ref_kinds = kNode}}},
