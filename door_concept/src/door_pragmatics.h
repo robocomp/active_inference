@@ -113,7 +113,6 @@ struct InteractionState
     float approach_standoff_m = 0.0f; // middle of the actuation band [safe_standoff, reach] — the stand-off
     float robot_range_m = 0.0f;       // |robot - aperture centre| (m)
     float range_sigma_m = 0.0f;       // σ of that range (door Σ projected + pose chain, floored)
-    float pose_sigma_m  = 0.0f;   // D-A: the localisation part of range_sigma_m alone (floored) — the approach's ARRIVAL scatter
     float safe_standoff_m = 0.0f;     // near edge of the actuation band = the leaf's swept arc + the body
     float clear_width_m = 0.0f;       // along-wall clear span at the MODAL phi (diagnostic only)
 };

@@ -2325,7 +2325,6 @@ rc::door::InteractionState SpecificWorker::compute_interaction_state(const rc::D
                          + radial.y() * radial.y() * inst.chain_cov_yy;
     const float sigma    = std::sqrt(var_door
                                      + std::max(var_pose, pg.pose_sigma_floor_m * pg.pose_sigma_floor_m));
-    st.pose_sigma_m      = std::sqrt(std::max(var_pose, pg.pose_sigma_floor_m * pg.pose_sigma_floor_m));
     // ★THE ACTUATION ZONE IS A BAND. Near edge = the leaf's own swept arc: a door hinged on the aperture
     // edge reaches a full aperture-width out from the wall plane at 90 degrees, and since `LeafState::swing`
     // is NEVER FITTED (door_fitter sets it from config and it stays there) we cannot claim it opens away
@@ -2503,10 +2502,12 @@ void SpecificWorker::step_pragmatic_affordances(rc::DoorInstance& inst)
         apb.side = st.approach_side;
         apb.d_min = st.safe_standoff_m;
         apb.d_max = std::max(pg.actuation_reach_m, st.safe_standoff_m + 0.30f);
-        // The ARRIVAL σ: the contract is measured when the robot is at the door, where the door's own σ_s has shrunk
-        // under the close looks and what scatters is the robot's localisation (st.pose_sigma_m). With the far σ instead,
-        // a door 0.15 m uncertain from across the room scores P(complete) = 0 everywhere and the band has no gradient.
-        apb.sigma = st.pose_sigma_m;
+        // Fix round 2: the pose and the offer's AVAILABILITY at the NOMINAL σ (the pose floor) — independent of the live σ,
+        // so no availability cliff and no argmax staircase churning the epoch; the LIVE σ AT ARRIVAL (the localiser's pose
+        // covariance at the standpoint: translation + yaw × standoff — not the stale far-range mask chain) scales the VALUE.
+        apb.sigma = pg.pose_sigma_floor_m;
+        apb.sigma_arrival = rc::door::arrival_sigma(robot_pose_cov_in_room().value_or(Eigen::Matrix3f::Zero()),
+                                                    0.5f * (apb.d_min + apb.d_max), pg.pose_sigma_floor_m);
         apb.needed_w = pg.robot_passage_width_m + pg.passage_margin_m;
         apb.memory_s = pg.approach_refusal_memory_s;
         apb.footprint_r = 0.5f * pg.robot_passage_width_m + pg.passage_margin_m;
@@ -2526,15 +2527,22 @@ void SpecificWorker::step_pragmatic_affordances(rc::DoorInstance& inst)
         // M-3: the pose the consumer CLAIMED (what it is driving to, after its own repairs) is the one a hand-back refers to.
         if (inst.aff_approach.claimed() and inst.aff_approach.claim().has_value())
         {
-            inst.approach_claimed_xy = {inst.aff_approach.claim()->x, inst.aff_approach.claim()->y};
+            const auto& cl = inst.aff_approach.claim().value();
+            if (not inst.approach_claimed_valid or cl.epoch != inst.approach_claimed_epoch)   // a NEW claim replaces the old
+                inst.approach_claimed_epoch = cl.epoch;
+            inst.approach_claimed_xy = {cl.x, cl.y};
             inst.approach_claimed_valid = true;
         }
-        o.value    = pg.value_approach * std::clamp(1.0f - st.p_reach, 0.0f, 1.0f);
+        else if (inst.approach_claimed_valid and inst.aff_approach.epoch() != inst.approach_claimed_epoch)
+            inst.approach_claimed_valid = false;   // the claimed proposal was replaced and nobody claims the new one
+        // VALUE: worth more the farther the robot is from being there, and only as much as the approach can COMPLETE from
+        // where the localisation will put it (p_complete_live — a lost robot keeps the offer at a low value).
+        o.value    = pg.value_approach * std::clamp(1.0f - st.p_reach, 0.0f, 1.0f) * choice.p_complete_live;
         o.contract = rc::door::approach_contract(pg);
-        o.why      = std::format("P(served)={:.2f} = P(complete) {:.2f} × P(inside) {:.2f} × P(not refused) {:.2f} at standoff {:.2f} "
+        o.why      = std::format("P(complete at arrival σ {:.2f}) {:.2f}; P(served)={:.2f} = P(complete) {:.2f} × P(inside) {:.2f} × P(not refused) {:.2f} at standoff {:.2f} "
                                  "lateral {:+.2f} ({} hand-back(s) remembered); robot P(reach)={:.2f} = P(open) {:.2f} mix of "
                                  "P(band) {:.2f} ⇒ value {:.3f}; range {:.2f} m "
-                                 "in band [{:.2f},{:.2f}] σ {:.2f}, w {:.2f}", choice.score, choice.p_complete, choice.p_inside,
+                                 "in band [{:.2f},{:.2f}] σ {:.2f}, w {:.2f}", apb.sigma_arrival, choice.p_complete_live, choice.score, choice.p_complete, choice.p_inside,
                                  1.0f - choice.p_refused, choice.standoff, choice.lateral, inst.approach_memory.refused.size(),
                                  st.p_reach, st.p_open_known ? st.p_open : 0.0f, st.p_band, o.value, st.robot_range_m,
                                  st.safe_standoff_m, std::max(pg.actuation_reach_m, st.safe_standoff_m + 0.30f),

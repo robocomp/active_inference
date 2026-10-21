@@ -116,6 +116,47 @@ std::string SpecificWorker::robot_node_name() const
     return robots.empty() ? std::string{} : robots.front().name();
 }
 
+// The robot's pose covariance in the room frame (D-A fix round 2: the approach's arrival σ). room → robot edge: its own
+// (x, y, yaw) covariance, parent frame = the room. robot → room edge (this fleet's room_concept): the room's pose (t, θ) in
+// the robot frame; the robot in the room is the inverse, t_r = −R(θ)ᵀ t, θ_r = −θ, so P = J C Jᵀ with
+// ∂t_r/∂t = −R(θ)ᵀ, ∂t_r/∂θ = −(dR(θ)ᵀ/dθ) t, ∂θ_r/∂θ = −1.
+std::optional<Eigen::Matrix3f> SpecificWorker::robot_pose_cov_in_room() const
+{
+    if (not G or not inner_eigen_ or not rt_api_) return std::nullopt;
+    const std::string room = rc::room::current_room_frame(*G);
+    const std::string robot = robot_node_name();
+    if (room.empty() or robot.empty()) return std::nullopt;
+    const auto room_n = G->get_node(room), robot_n = G->get_node(robot);
+    if (not room_n.has_value() or not robot_n.has_value()) return std::nullopt;
+    const auto se2 = [](const Eigen::Matrix<double, 6, 6>& C6)
+    {
+        constexpr int k[3] = {0, 1, 5};
+        Eigen::Matrix3f C = Eigen::Matrix3f::Zero();
+        for (int i = 0; i < 3; ++i) for (int j = 0; j < 3; ++j) C(i, j) = float(C6(k[i], k[j]));
+        return C;
+    };
+    if (const auto e = G->get_edge(room_n->id(), robot_n->id(), "RT"); e.has_value())
+        if (const auto C6 = rt_api_->get_edge_RT_covariance(e.value()); C6.has_value() and C6->allFinite())
+            return se2(C6.value());
+    if (const auto e = G->get_edge(robot_n->id(), room_n->id(), "RT"); e.has_value())
+        if (const auto C6 = rt_api_->get_edge_RT_covariance(e.value()); C6.has_value() and C6->allFinite())
+        {
+            const auto T_room_robot = inner_eigen_->get_transformation_matrix(room, robot, 0);
+            if (not T_room_robot.has_value()) return std::nullopt;
+            const Eigen::Matrix4d T_robot_room = T_room_robot.value().inverse().matrix();
+            const float th = float(std::atan2(T_robot_room(1, 0), T_robot_room(0, 0)));
+            const Eigen::Vector2f t(float(T_robot_room(0, 3)), float(T_robot_room(1, 3)));
+            const float c = std::cos(th), s = std::sin(th);
+            Eigen::Matrix3f J = Eigen::Matrix3f::Zero();
+            J.topLeftCorner<2, 2>() << -c, -s, s, -c;                       // −R(θ)ᵀ
+            const Eigen::Matrix2f dRt{{-s, c}, {-c, -s}};                     // d R(θ)ᵀ / dθ
+            J.block<2, 1>(0, 2) = -(dRt * t);
+            J(2, 2) = -1.0f;
+            return Eigen::Matrix3f(J * se2(C6.value()) * J.transpose());
+        }
+    return std::nullopt;
+}
+
 // The OPENING's pose relative to the robot, from the room frames: robot←room ∘ room←opening. The opening frame:
 // origin at the aperture centre on the wall line, x along the wall, y the wall normal pointing AWAY from the robot
 // (the robot on −y, door_anchor_update.h). With `keep_side_of`, the axes are chosen to stay on the side the

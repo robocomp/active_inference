@@ -454,6 +454,9 @@ private:
     rc::door::rec::Recorder anchor_frames_;   // Task 8 fix 3: etc/anchor_frames.bin, every measured anchor cycle (replay_anchor_frames)
     void step_passage_anchor();
     bool create_passage_anchor(rc::DoorInstance& inst, const rc::pragmatic::PragmaticAffordance& aff);
+    // The robot's (x, y, yaw) pose covariance in the CURRENT ROOM frame, from the localiser's covariance on the room↔robot RT
+    // edge (either direction). nullopt ⇒ no edge or no covariance on it. Used by the approach's arrival σ (D-A fix round 2).
+    std::optional<Eigen::Matrix3f> robot_pose_cov_in_room() const;
     std::optional<rc::interaction::RelPose> anchor_from_room(const rc::DoorInstance& inst,
                                                              float* axis_sign_out = nullptr) const;
     void remove_passage_anchor(std::string_view why);

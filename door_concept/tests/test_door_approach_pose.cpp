@@ -46,7 +46,7 @@ rc::door::ApproachProblem problem()
 {
     rc::door::ApproachProblem p;
     p.side = +1.f; p.d_min = 1.0f + 0.3f + 0.2f; p.d_max = std::max(2.0f, p.d_min + 0.3f); p.sigma = 0.10f; p.needed_w = 0.70f;
-    p.memory_s = 60.f; p.footprint_r = 0.40f; p.room = "room_1";
+    p.memory_s = 60.f; p.footprint_r = 0.40f; p.room = "room_1"; p.sigma_arrival = 0.10f;
     return p;
 }
 float dist(const rc::door::Pose2& a, const rc::door::Pose2& b) { return std::hypot(a.x - b.x, a.y - b.y); }
@@ -175,6 +175,56 @@ int main()
                      ap.centre_xy().x(), ap.centre_xy().y(), b.centre_xy().x(), b.centre_xy().y(), pa, pb8, pc);
         check(std::abs(pa - pb8) < 1e-5f and pa > 0.99f, "the refusal did not survive the re-expression");
         check(pc == 0.f, "another room's refusal was taken as evidence here");
+    }
+    // ── fix round 2: σ at ARRIVAL, smooth P(complete), σ lowers the VALUE never the availability ──────────────────────────
+    const auto offer_of = [&](float sigma_arr, rc::door::ApproachChoice* out = nullptr)
+    {
+        auto p = pb;
+        p.sigma_arrival = sigma_arr;
+        const auto c = rc::door::choose_approach_pose(ap, p, rc::door::ApproachMemory{}, 0);
+        if (out) *out = c;
+        return std::pair{rc::door::approach_offer_prob(c, c), c.p_complete_live};
+    };
+    std::println("9. a far door: 5 m away, yaw σ 2°, translation σ 5 cm — the σ AT THE STANDPOINT, not yaw × 5 m");
+    {
+        Eigen::Matrix3f P = Eigen::Matrix3f::Zero();
+        P(0, 0) = P(1, 1) = 0.05f * 0.05f;
+        P(2, 2) = std::pow(2.0f * 3.14159265f / 180.0f, 2.0f);
+        const float sa = rc::door::arrival_sigma(P, c0.standoff, 0.10f);
+        const auto [po, val] = offer_of(sa);
+        std::println("    arrival σ {:.3f} m (the far-range chain would read {:.3f}); P(offer) {:.2f}, P(complete) {:.2f}", sa,
+                     std::sqrt(0.05f * 0.05f + std::pow(5.0f * 2.0f * 3.14159265f / 180.0f, 2.0f)), po, val);
+        check(po == 1.0f and val > 0.6f, "a far door with healthy localisation is not offered with a useful value");
+    }
+    std::println("10. after a HOLD: σ 2 m");
+    {
+        const auto [po, val] = offer_of(2.0f);
+        std::println("    P(offer) {:.2f}, P(complete) {:.3f}", po, val);
+        check(po == 1.0f, "a lost robot's approach was WITHDRAWN (it must only lose value)");
+        check(val < 0.1f, "a lost robot's approach kept a high value");
+    }
+    std::println("11. no cliff across σ 0.05 – 0.5");
+    {
+        float prev = -1.f, worst_jump = 0.f;
+        bool avail = true, monotone = true, same_pose = true;
+        rc::door::ApproachChoice first;
+        (void)offer_of(0.05f, &first);
+        for (int i = 0; i <= 450; ++i)
+        {
+            const float sg = 0.05f + 0.001f * static_cast<float>(i);
+            rc::door::ApproachChoice c;
+            const auto [po, val] = offer_of(sg, &c);
+            avail = avail and po == 1.0f;
+            if (prev >= 0.f) { worst_jump = std::max(worst_jump, std::abs(val - prev)); monotone = monotone and val <= prev + 1e-4f; }
+            same_pose = same_pose and c.pose.x == first.pose.x and c.pose.y == first.pose.y;
+            prev = val;
+        }
+        std::println("    availability constant: {}; value monotone: {}; largest step per mm of σ: {:.3f}; pose fixed: {}",
+                     avail, monotone, worst_jump, same_pose);
+        check(avail, "the availability depends on σ");
+        check(worst_jump < 0.05f, "the value jumps (a cliff) somewhere in σ 0.05-0.5");
+        check(monotone, "the value is not monotone in σ");
+        check(same_pose, "the chosen pose changes with σ (epoch churn while unclaimed)");
     }
     std::println("{} / {} checks passed", g_checks - g_fail, g_checks);
     return g_fail == 0 ? 0 : 1;

@@ -130,7 +130,8 @@ struct DoorFitState
     door::WallRegistration dbg_reg;
     // ★M-6 (Task 5b): the door's WALL as the low LiDAR last registered it (offset along across_u, residual rotation) — a
     // MODEL input, not a diagnostic: the passage anchor hangs its leaf hypotheses relative to it (door_anchor_leaf_plane.h).
-    // Held between registrations (a property of the wall, not of the cycle); dbg_reg above is this cycle's, for the logs.
+    // Held while no sweep of the door arrives (a property of the wall, not of the cycle); reset when a sweep arrives and the
+    // wall does not register (door_fit.cpp). dbg_reg above is this cycle's, for the logs.
     door::WallRegistration wall_reg;
     door::AlongWallResult  dbg_along;
     // Task 11: log P(the belief's hinge) / P(the other jamb) — the hinge as a static hidden variable, learned from the

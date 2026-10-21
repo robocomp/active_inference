@@ -20,7 +20,11 @@
 // ★THE SCORE DRIVES THE OFFER'S PROBABILITY (fix round, I-1): o.p = best score now / best score with nothing remembered
 // (approach_offer_prob). When hand-backs have used up the band it falls and PragmaticAffordance's own offer/withdraw
 // hysteresis withdraws the affordance — continuously, with no counter — and re-offers it as the evidence decays.
-// ★σ IS THE ARRIVAL σ (the robot's localisation at the door), not the far-range door σ: the contract is measured there.
+// ★TWO σ, TWO ROLES (fix round 2). The pose and the offer's AVAILABILITY are solved at the NOMINAL σ (the pose σ floor), so
+// neither depends on the live σ: no availability cliff, and no argmax staircase (1.67 ↔ 1.75 m) churning the epoch as σ
+// wanders. The LIVE arrival σ (arrival_sigma: the localiser's pose covariance at the standpoint) only scales the offer's
+// VALUE through p_complete_live — a robot that cannot localise well enough to complete the approach is offered it at a
+// low value, never withdrawn (a door out of view after a HOLD would otherwise lose it for ever).
 // ★REFUSALS LIVE IN THE DOOR'S FRAME, not the room's (M-5). A hand-back is stored as the standpoint's (along, across)
 // offsets from the aperture centre, multiplied by the approach side (so a π-re-expression of the aperture — wall_u and
 // across_u both flipped, which is what another room's association produces — maps it to the same physical point), and
@@ -97,7 +101,8 @@ struct ApproachProblem
 {
     float side = +1.0f;                 // which side of the aperture (approach_side)
     float d_min = 0.0f, d_max = 0.0f;   // the actuation band, from the aperture plane
-    float sigma = 0.1f;                 // the pose-and-door σ of P(reach), and the arrival scatter
+    float sigma = 0.1f;                 // NOMINAL σ (the pose σ floor): chooses the pose and sets the offer's AVAILABILITY
+    float sigma_arrival = 0.1f;         // the LIVE arrival σ (arrival_sigma): only the offer's VALUE (p_complete_live)
     float needed_w = 0.7f;              // the body + margin the opening must show
     float memory_s = 60.0f;             // τ of a refusal's evidence
     float footprint_r = 0.35f;          // the robot's footprint radius
@@ -111,6 +116,7 @@ struct ApproachChoice
     Pose2 pose;
     float standoff = 0.0f, lateral = 0.0f;
     float p_reach = 0.0f, p_complete = 0.0f, p_inside = 1.0f, p_refused = 0.0f;
+    float p_complete_live = 0.0f;       // P(complete) at the chosen pose under the LIVE arrival σ — scales the offer's value
     float score = 0.0f;                 // P(complete)·P(inside)·(1 − P(refused)) — the offer's probability
 };
 
@@ -125,22 +131,53 @@ struct ApproachChoice
     return band * prob_facing_opening(facing_cos(d.x(), d.y(), n.x(), n.y()), ap.w, pb.needed_w, pb.sigma);
 }
 
-// P(the contract completes | the robot is sent to q): its estimate at arrival ~ N(q, σ² I), complete iff
-// door_reach_prob there ≥ complete_at. 5-point Gauss–Hermite per axis.
-[[nodiscard]] inline float complete_prob_at(const Aperture& ap, const ApproachProblem& pb, const Eigen::Vector2f& q)
+// P(the contract completes | the robot is sent to q), SMOOTH (fix round 2): the contract completes when the door_reach_prob it
+// measures at arrival — band(range; σ_meas)·facing — reaches complete_at. Along the ray through q that is an INTERVAL of
+// ranges [r1, r2] (the band is unimodal in range, maximal at the band's midpoint; facing is taken at q's bearing — the
+// lateral scatter's effect on it is second order), and the robot's range at arrival ~ N(|q − c|, σ_arr²), so
+//      P = Φ((r2 − μ)/σ_arr) − Φ((r1 − μ)/σ_arr)
+// in closed form: continuous in q and in both σ — as σ_meas widens the interval shrinks to a point and P goes to 0 with
+// it, without the 1 → 0 cliff a coarse quadrature of an indicator produced (review: o.p 1.00 → 0.00 between σ 0.14 and
+// 0.15). Empty interval (the band can never read complete_at at this σ_meas) ⇒ 0, honestly.
+[[nodiscard]] inline float complete_prob_closed(const Aperture& ap, const ApproachProblem& pb, const Eigen::Vector2f& q,
+                                                float sigma_meas, float sigma_arr)
 {
-    static constexpr std::array<double, 5> kX{-2.0201828704560856, -0.9585724646138185, 0.0, 0.9585724646138185, 2.0201828704560856};
-    static constexpr std::array<double, 5> kW{0.019953242059045913, 0.39361932315224116, 0.9453087204829419,
-                                             0.39361932315224116, 0.019953242059045913};
-    const float s = std::max(pb.sigma, 1e-3f) * std::numbers::sqrt2_v<float>;
-    double acc = 0.0;
-    for (int i = 0; i < 5; ++i)
-        for (int j = 0; j < 5; ++j)
+    const Eigen::Vector2f c = ap.centre_xy(), n = ap.across_u();
+    const Eigen::Vector2f d = q - c;
+    const float mu = d.norm();
+    const float sm = std::max(sigma_meas, 1e-3f), sa = std::max(sigma_arr, 1e-3f);
+    const float fac = prob_facing_opening(facing_cos(d.x(), d.y(), n.x(), n.y()), ap.w, pb.needed_w, sm);
+    if (not (fac > 0.0f) or pb.d_max <= pb.d_min) return 0.0f;
+    const float need = pb.complete_at / fac;              // the band must read at least this
+    if (need >= 1.0f) return 0.0f;
+    const auto band = [&](float r) { return std::max(0.0f, prob_within(r, pb.d_max, sm) - prob_within(r, pb.d_min, sm)); };
+    const float mid = 0.5f * (pb.d_min + pb.d_max);
+    if (band(mid) < need) return 0.0f;
+    const auto root = [&](float lo, float hi, bool rising)   // band(lo..hi) crosses `need` once
+    {
+        for (int i = 0; i < 60; ++i)
         {
-            const Eigen::Vector2f r = q + s * Eigen::Vector2f(static_cast<float>(kX[i]), static_cast<float>(kX[j]));
-            if (reach_prob_at(ap, pb, r) >= pb.complete_at) acc += kW[i] * kW[j];
+            const float m = 0.5f * (lo + hi);
+            if ((band(m) >= need) == rising) hi = m; else lo = m;
         }
-    return static_cast<float>(acc / std::numbers::pi);   // ∫ e^{-x²} = √π per axis
+        return 0.5f * (lo + hi);
+    };
+    const float r1 = root(pb.d_min - 8.0f * sm, mid, true);
+    const float r2 = root(mid, pb.d_max + 8.0f * sm, false);
+    const auto Phi = [](float z) { return 0.5f * std::erfc(-z / std::numbers::sqrt2_v<float>); };
+    return std::clamp(Phi((r2 - mu) / sa) - Phi((r1 - mu) / sa), 0.0f, 1.0f);
+}
+
+// The robot's position σ AT THE STANDPOINT from its localisation covariance (the room↔robot RT edge, (x, y, yaw) in the
+// room frame): the translation's mean variance plus the yaw's lever over the standoff it will look at the door from —
+// not the far-range mask chain's yaw × CURRENT range (review: that reached the cliff at 3.75 m with a 2° yaw σ, so a far
+// door was never approachable — and approach is what brings it close). Floored by the pose σ floor.
+[[nodiscard]] inline float arrival_sigma(const Eigen::Matrix3f& P_robot_in_room, float standoff, float floor_m)
+{
+    const float var_t = 0.5f * (std::max(0.0f, P_robot_in_room(0, 0)) + std::max(0.0f, P_robot_in_room(1, 1)));
+    const float var_y = std::max(0.0f, P_robot_in_room(2, 2)) * standoff * standoff;
+    const float v = var_t + var_y;
+    return std::sqrt(std::max(std::isfinite(v) ? v : 0.0f, floor_m * floor_m));
 }
 
 // The feasible set is sampled on a grid with the old pose (midpoint, lateral 0) at its centre and evaluated centre-out,
@@ -177,7 +214,7 @@ struct ApproachChoice
             ApproachChoice ch;
             ch.pose = q; ch.standoff = standoff; ch.lateral = lateral;
             ch.p_reach    = reach_prob_at(ap, pb, qxy);
-            ch.p_complete = complete_prob_at(ap, pb, qxy);
+            ch.p_complete = complete_prob_closed(ap, pb, qxy, pb.sigma, pb.sigma);
             if (pb.polygon.size() >= 3)
             {   // P(inside the room): the standpoint's signed distance to the polygon under the pose σ
                 const float dist = signed_boundary_distance(pb.polygon, qxy);   // > 0 outside
@@ -191,6 +228,10 @@ struct ApproachChoice
                 have = true;
             }
         }
+    // σ_meas stays NOMINAL: door_reach_prob, measured AT the standpoint, uses the range σ floored by the pose floor, and at
+    // a 1.5-2 m standoff the chain's yaw lever is below it; what the live σ changes is WHERE the robot ends up relative to
+    // the pose it was sent to — the arrival scatter. (Both live made the interval collapse like √(σ* − σ): a steep step.)
+    best.p_complete_live = complete_prob_closed(ap, pb, {best.pose.x, best.pose.y}, pb.sigma, pb.sigma_arrival);
     return best;
 }
 

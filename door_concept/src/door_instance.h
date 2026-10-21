@@ -50,6 +50,7 @@ struct DoorInstance : DoorFitState
     bool approach_offered_valid = false;
     Eigen::Vector2f approach_claimed_xy{0.0f, 0.0f};   // M-3: the pose the consumer claimed (its own, after repairs)
     bool approach_claimed_valid = false;
+    int  approach_claimed_epoch = 0;                    // the proposal epoch that claim accepted
     std::string approach_room;                         // the room and side the offer was solved in (the refusal's key)
     float approach_side = 1.0f;
 };
