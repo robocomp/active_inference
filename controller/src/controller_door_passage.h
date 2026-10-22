@@ -139,6 +139,12 @@ public:
         efe_lambda_ = std::max(0.0f, lambda_cost);
         efe_margin_ = std::max(0.0f, switch_margin);
     }
+    /// Gate for the look-vs-step choice below: the [Policy] chain's (Policy.Enabled). The old chain keeps its old behaviour.
+    void set_look_enabled(bool on)
+    {
+        std::scoped_lock lk(m_);
+        look_enabled_ = on;
+    }
     /// ★Task E — THE PASSAGE'S CHOICE BETWEEN ITS GOAL-DIRECTED STEP AND AN EPISTEMIC LOOK, on ONE scale (nats, the selector's
     /// score  −G = value − λ·distance). Each side's `value` is what its producer publishes on the node's epistemic_gain: the
     /// look's is the expected information gain on the door state (D-optimal on [s, w, h], detection-weighted), the step's is
@@ -586,7 +592,8 @@ public:
         //   to go and look from.
         const std::string rq = name_of(step_);   // the step as it stands NOW (the completion above may have advanced it)
         const State sq = state_of(G, rq);
-        if (step_ == Step::Approach or ((step_ == Step::Open or step_ == Step::Cross) and sq != State::Offered and sq != State::Executing))
+        if (look_enabled_ and robot_.has_value()   // no robot pose ⇒ no distances ⇒ no comparison (never a bias toward the look)
+            and (step_ == Step::Approach or ((step_ == Step::Open or step_ == Step::Cross) and sq != State::Offered and sq != State::Executing)))
         {
             const std::string look = "aff_" + door_;
             const State sl = state_of(G, look);
@@ -599,7 +606,6 @@ public:
             };
             const auto dist_to = [&](const std::string& n) -> float
             {
-                if (not robot_.has_value()) return 0.0f;
                 const auto nd = G.get_node(n);
                 if (not nd.has_value()) return 0.0f;
                 const auto x = G.get_attrib_by_name<epistemic_target_x_m_att>(nd.value());
@@ -772,6 +778,7 @@ private:
     bool just_started_ = false;
     bool preempted_ = false;
     float efe_lambda_ = 0.2f, efe_margin_ = 0.5f;   ///< set_efe: the selector's λ (nats/m) and switch margin (nats)
+    bool look_enabled_ = false;   ///< set_look_enabled
     bool look_chosen_ = false;    ///< the last EFE choice was the epistemic look, not the step (the incumbent)
     bool reached_door_ = false;   ///< approach satisfied (or a later step taken from it) in this passage
     bool opened_ = false;         ///< `open` satisfied in this passage

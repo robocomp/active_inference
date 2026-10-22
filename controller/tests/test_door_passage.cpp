@@ -575,7 +575,7 @@ int main()
         auto G = make_graph(30);
         DoorPassage p;
         p.set_clock(clock);
-        p.set_efe(0.2f, 0.5f);
+        p.set_efe(0.2f, 0.5f); p.set_look_enabled(true);
         p.note_robot(Eigen::Vector2f(0.f, 0.f), 0.25f);
         p.start("door_5", Step::Cross);
         offered(*G, "aff_door_5_approach"); place(*G, "aff_door_5_approach", 3.f, 0.f);
@@ -601,17 +601,70 @@ int main()
         auto G2 = make_graph(31);
         DoorPassage q;
         q.set_clock(clock);
-        q.set_efe(0.2f, 0.5f);
+        q.set_efe(0.2f, 0.5f); q.set_look_enabled(true);
         q.note_robot(Eigen::Vector2f(0.f, 0.f), 0.25f);
         q.start("door_6", Step::Cross);
         offered(*G2, "aff_door_6"); place(*G2, "aff_door_6", 2.f, 0.f); gain(*G2, "aff_door_6", 1.5f, 2.f, 0.f);
         out = q.update(*G2, nullptr, "room_1");
         CHECK(out.required == "aff_door_6");
+        // GATE: the old chain ([Policy] off) never takes the look, whatever the prices
+        {
+            auto Gg = make_graph(33);
+            DoorPassage g;
+            g.set_clock(clock); g.set_efe(0.2f, 0.5f); g.note_robot(Eigen::Vector2f(0.f, 0.f), 0.25f);
+            g.start("door_4", Step::Cross);
+            offered(*Gg, "aff_door_4_approach"); place(*Gg, "aff_door_4_approach", 3.f, 0.f); gain(*Gg, "aff_door_4_approach", 0.1f, 3.f, 0.f);
+            offered(*Gg, "aff_door_4");          place(*Gg, "aff_door_4", 2.f, 0.f);          gain(*Gg, "aff_door_4", 5.0f, 2.f, 0.f);
+            CHECK(g.update(*Gg, nullptr, "room_1").required == "aff_door_4_approach");
+        }
+        // THE LOOP (persistent off-template width): the producer's look value is the information a view can still RESOLVE, so it
+        // is spent once the look has been done; the passage must reach Cross in a bounded number of cycles, taking the look once.
+        {
+            auto GL = make_graph(34);
+            DoorPassage l;
+            l.set_clock(clock); l.set_efe(0.2f, 0.5f); l.set_look_enabled(true);
+            l.start("door_3", Step::Cross);
+            offered(*GL, "aff_door_3_approach"); offered(*GL, "aff_door_3");
+            float look_gain = 1.8f;
+            Eigen::Vector2f robot(0.f, 0.f);
+            int looks_taken = 0, cycles = 0;
+            bool reached_cross = false;
+            for (; cycles < 60 and not reached_cross; ++cycles)
+            {
+                l.note_robot(robot, 0.25f);
+                gain(*GL, "aff_door_3_approach", 0.4f, 3.f, 0.f);
+                gain(*GL, "aff_door_3", look_gain, 6.f, 0.f);          // the look's viewpoint 6 m out
+                const auto o = l.update(*GL, nullptr, "room_1");
+                if (o.required == "aff_door_3")
+                {
+                    executing(*GL, "aff_door_3");
+                    robot = Eigen::Vector2f(6.f, 0.f);                 // drives out to the look viewpoint
+                    l.update(*GL, nullptr, "room_1");
+                    satisfied(*GL, "aff_door_3");                      // looked: done
+                    ++looks_taken;
+                    look_gain = 0.f;                                   // ...and what it could resolve is resolved
+                    l.update(*GL, nullptr, "room_1");
+                    offered(*GL, "aff_door_3_approach");
+                }
+                else if (o.required == "aff_door_3_approach")
+                {
+                    executing(*GL, "aff_door_3_approach");
+                    robot = Eigen::Vector2f(3.f, 0.f);
+                    l.update(*GL, nullptr, "room_1");
+                    satisfied(*GL, "aff_door_3_approach");
+                    l.update(*GL, nullptr, "room_1");
+                    offered(*GL, "aff_door_3_cross");
+                    reached_cross = l.update(*GL, nullptr, "room_1").required == "aff_door_3_cross";
+                }
+            }
+            std::println("    loop test: {} look(s), Cross reached after {} cycles", looks_taken, cycles);
+            CHECK(reached_cross and cycles <= 6 and looks_taken <= 1);
+        }
         // nothing worth looking at, approach withdrawn: the old wait
         auto G3 = make_graph(32);
         DoorPassage r;
         r.set_clock(clock);
-        r.set_efe(0.2f, 0.5f);
+        r.set_efe(0.2f, 0.5f); r.set_look_enabled(true); r.note_robot(Eigen::Vector2f(0.f, 0.f), 0.25f);
         r.start("door_8", Step::Cross);
         out = r.update(*G3, nullptr, "room_1");
         CHECK(out.required == "aff_door_8_approach");
