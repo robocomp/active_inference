@@ -549,8 +549,11 @@ DoorSilhouette compute_silhouette_existence(const ExistenceScene& sc, const rc::
 //     the same phi posterior the silhouette's absence is marginalised over, so the two cannot disagree
 //     about where the leaf is. A leaf swung toward the camera hides the jamb behind it; one swung away
 //     (out of this room — the try32 case) hides nothing, and the frame speaks in full.
-rc::door::FrameProbe compute_frame_probe(const ExistenceScene& sc, const rc::DoorFitState& inst)
+rc::door::FrameProbe compute_frame_probe(const ExistenceScene& sc, const rc::DoorFitState& inst, float s_shift)
 {
+    // Task D-C review C1: the probe at the aperture slid by s_shift along its wall (a placement hypothesis); 0 = the belief.
+    door::Aperture ap_shift = inst.aperture;
+    ap_shift.s += s_shift;
     if (not inst.ai2_initialized)
         return {};
     if (not camera_usable(sc.cam))
@@ -586,10 +589,10 @@ rc::door::FrameProbe compute_frame_probe(const ExistenceScene& sc, const rc::Doo
                 if (w <= 0.0f) continue;
                 door::LeafState ls = inst.leaf;
                 ls.phi = phi;
-                leaves.emplace_back(door::leaf_pose(inst.aperture, ls), w);
+                leaves.emplace_back(door::leaf_pose(ap_shift, ls), w);
             }
         else
-            leaves.emplace_back(inst.leaf_pose, 1.0f);
+            leaves.emplace_back(s_shift == 0.0f ? inst.leaf_pose : door::leaf_pose(ap_shift, inst.leaf), 1.0f);
     }
     const auto own_leaf_clear = [&](const Eigen::Vector3f& P) -> float
     {
@@ -617,7 +620,7 @@ rc::door::FrameProbe compute_frame_probe(const ExistenceScene& sc, const rc::Doo
     // casing's front, which is where the fit already puts the aperture — try34's carried door sat 6 cm in front
     // of room_2's face, a 5 cm proud Webots casing — and the synthetic scene in tests/test_door_frame_evidence.cpp
     // scored the seated probe WORSE in 3 of 5 views, down to +0.16 from +28 on an oblique view.)
-    const door::Aperture& ap_seen = inst.aperture;
+    const door::Aperture& ap_seen = ap_shift;
 
     const auto visible = [&](const Eigen::Vector3f& P) -> float
     {
@@ -960,6 +963,7 @@ void DoorCore::update_existence(const DoorCycleInput& in, DoorCycleOutput& out)
         // deleted while the camera looked straight at the doorway). Computed BEFORE the probed() test on
         // purpose: a leaf the camera cannot see does not make the frame around it unobservable.
         rc::door::FrameScore frame{};
+        float frame_verdict = 0.0f;   // the placement-marginal verdict (below); frame.* stays the believed placement's
         if (cfg.frame_contour_check)
         {
             const auto probe = compute_frame_probe(scene, inst);
@@ -974,6 +978,38 @@ void DoorCore::update_existence(const DoorCycleInput& in, DoorCycleOutput& out)
                 fdp.depth_scale_y = (fr > 0) ? static_cast<float>(fdimg->rows) / fr : 1.0f;
             }
             frame = rc::door::score_frame(probe, rgb_prep.valid() ? &rgb_prep : nullptr, fdimg, fdp);
+            frame_verdict = frame.verdict();
+            // ★Task D-C review C1: THE FRAME IS SCORED OVER THE DOOR'S OWN PLACEMENT UNCERTAINTY. The frame channel asks
+            //  "is there a doorway frame where the belief puts it" — at one placement, that conflates WHERE with WHETHER:
+            //  rtD1i's real DOOR_0, with its aperture 0.1-0.2 m off along the wall, scored −6…−21 a frame (true 10-25 vs
+            //  controls 97-199 sliding onto the real jamb) and was removed while YOLO detected it. The verdict is now the
+            //  mixture over s ~ N(ŝ, σ_s²) (σ_s the fit's own posterior along the wall), log Σ_k π_k e^{v_k}, on the
+            //  Gauss-Hermite nodes {0, ±√3·σ_s} (weights 2/3, 1/6, 1/6 — exact for a Gaussian up to 5th moments). The
+            //  jamb controls slide ≥ 0.4 w outward (kFrameJambOutward), beyond the placement a ±√3σ_s node reaches.
+            const float sd_s = std::sqrt(std::max(0.0f, inst.ai2_belief.covariance()(0, 0)));
+            if (sd_s > 0.0f and frame.n_samples() > 0)
+            {
+                constexpr std::array<std::pair<float, double>, 2> kNodes{{{1.7320508f, 1.0 / 6.0}, {-1.7320508f, 1.0 / 6.0}}};
+                double acc = 0.0;
+                double mx = frame_verdict;
+                std::array<float, 2> v{};
+                for (std::size_t k = 0; k < kNodes.size(); ++k)
+                {
+                    const auto pk = compute_frame_probe(scene, inst, kNodes[k].first * sd_s);
+                    const auto fk = rc::door::score_frame(pk, rgb_prep.valid() ? &rgb_prep : nullptr, fdimg, fdp);
+                    v[k] = fk.n_samples() > 0 ? fk.verdict() : frame_verdict;
+                    mx = std::max<double>(mx, v[k]);
+                    for (const auto& smp : pk.samples)
+                    {
+                        const int reach = static_cast<int>(std::ceil(std::max(0.0f, smp.side_window_px)));
+                        note_point(smp.px, reach, rgb_prep.valid(), fdimg != nullptr);
+                        for (const auto& c : smp.ctl) if (c.w > 0.0f) note_point(c.px, 0, rgb_prep.valid(), false);
+                    }
+                }
+                acc = (2.0 / 3.0) * std::exp(frame_verdict - mx);
+                for (std::size_t k = 0; k < kNodes.size(); ++k) acc += kNodes[k].second * std::exp(v[k] - mx);
+                frame_verdict = static_cast<float>(mx + std::log(acc));
+            }
             // the aperture frame's samples, their controls, and the depth read windows (input recording)
             for (const auto& smp : probe.samples)
             {
@@ -1004,7 +1040,7 @@ void DoorCore::update_existence(const DoorCycleInput& in, DoorCycleOutput& out)
             if (leaf_visible and depth.n_samples > 0)
             { verdict += depth.verdict; n = std::max(n, depth.n_samples); }
             if (frame.n_samples() > 0)
-            { verdict += frame.verdict(); n = std::max(n, frame.n_samples()); }
+            { verdict += frame_verdict; n = std::max(n, frame.n_samples()); }
             if (n == 0)
             { inst.dbg_edge_delta = 0.0f; return; }   // nothing measured — NOT a refutation
             // ★D4 (Task 5b): POOLED BY VIEW NOVELTY (door_view_pool.h). contour_evidence's llr·tanh(v) is the worth of ONE
@@ -1297,7 +1333,13 @@ void DoorCore::update_existence(const DoorCycleInput& in, DoorCycleOutput& out)
         // AFTER L has already crossed double-counts the same evidence and is what freezes a condemned door
         // forever once the robot looks away; the shared policy lets confidence discharge the repetition.
         // Either the look (p_detect) or the wall-band prior (1 − π) can resolve this cycle: probabilistic OR.
-        const float cycle_look = 1.0f - (1.0f - p_detect) * (1.0f - prior_look);
+        // ★Task D-C review C1 (lifecycle §3: occupancy confirms; only PREDICTED-VISIBLE-BUT-ABSENT removes): the look a
+        //  cycle contributes toward REMOVAL is the silhouette's, and only when the silhouette actually charged absence —
+        //  not on a frame where the door was detected (observed) or the view was not admissible. rtD1i: the real DOOR_0
+        //  was removed at cycle 614 while YOLO detected it (since_det 0-3, occ 330 / free 90) — the image-geometry channel
+        //  had pulled L down and the debounce counted P(detect) on detected frames.
+        const float absence_look = raw_free > 0.0f ? p_detect : 0.0f;
+        const float cycle_look = 1.0f - (1.0f - absence_look) * (1.0f - prior_look);
         const auto verdict = decide(inst, cycle_look);
         if (verdict.remove)
             to_remove.push_back(id);

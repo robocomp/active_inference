@@ -394,6 +394,10 @@ struct DoorFitState
     float last_written_cx   = std::numeric_limits<float>::max();
     float last_written_cy   = std::numeric_limits<float>::max();
     float last_written_yaw  = std::numeric_limits<float>::quiet_NaN();   // Task D-C (M-6): the yaw written with them
+    // Task D-C review C1: the camera position of the last view the mask-side bearings were credited from (room frame);
+    // a repeated view of the same mask is ONE observation (door_view_pool.h's similarity), not one per frame.
+    std::optional<Eigen::Vector2f> bearing_view_cam;
+    float bearing_view_credit = 0.0f;   // novelty already credited since that anchor view (0..1)
     // Last GEOMETRY published to the graph (dims + mesh). Gates the per-cycle mesh/dim rewrite so a
     // settled door stops jittering the retina mesh. Mirrors bottle_concept's last_pub_* publish gate.
     float last_pub_cx  = std::numeric_limits<float>::max();

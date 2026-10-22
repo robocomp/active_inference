@@ -243,7 +243,9 @@ struct ExistenceScene
 [[nodiscard]] bool camera_usable(const CameraIntrinsics& c);
 [[nodiscard]] DoorSilhouette compute_silhouette_existence(const ExistenceScene& sc, const rc::DoorFitState& inst,
                                                           const SemanticField* field);
-[[nodiscard]] rc::door::FrameProbe compute_frame_probe(const ExistenceScene& sc, const rc::DoorFitState& inst);
+/// s_shift (m): score the frame of the aperture slid that far along its wall — a placement hypothesis (Task D-C review C1).
+[[nodiscard]] rc::door::FrameProbe compute_frame_probe(const ExistenceScene& sc, const rc::DoorFitState& inst,
+                                                       float s_shift = 0.0f);
 [[nodiscard]] float door_view_obliquity(const std::optional<Mat4d>& room_T_zed, const rc::DoorFitState& inst);
 [[nodiscard]] float aperture_band_offset(const std::vector<Eigen::Vector2f>& polygon, const rc::DoorFitState& inst);
 

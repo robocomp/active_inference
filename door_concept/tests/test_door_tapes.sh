@@ -16,6 +16,10 @@
 #   SMOKE  the replay also runs the live-only belief consumers (the NBV planner, the DOF table, the reported Σ) on every
 #       door every cycle, built WITHOUT -DNDEBUG: an index error aborts it, as it aborted the agent (rtD1g). Asserted:
 #       each replay prints its "live-only belief consumers … ran N times, clean" line with N > 0.
+#   D-C  rtD1i (to cycle 715) and tour3A (to cycle 3768): the windows in which the replay is FAITHFUL to the live run — the
+#       affordance/anchor slice the core does not rebuild first acts at 715 (rtD1i: aff_door_1_approach EXECUTING) and 3769
+#       (tour3A: the first actuator OPEN). Every decision in them must equal the live log's: in particular rtD1i's real
+#       DOOR_0 (door_5) must not be REMOVED at cycle 614 while YOLO detects it (Task D-C review C1).
 #   D3  NOT A DEFECT, asserted so it stays documented: tourR2's births carry the names the identity table loaded for those
 #       apertures (door_4 IS DOOR_1's remembered name in the 4-row table .bak_tourP9; door_2 is DOOR_0's).
 # The tapes are 1.5 GB each and live outside the repo: DOOR_TAPES (default: the main checkout's crossing dir). Missing
@@ -24,7 +28,7 @@
 set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TAPES="${DOOR_TAPES:-/home/pbustos/robocomp/components/active_inference/room_concept/estimation_scripts/crossing}"
-for t in tourR1 tourR2; do
+for t in tourR1 tourR2 rtD1i tour3A; do
     if [[ ! -f "$TAPES/$t/door_inputs.bin" || ! -f "$TAPES/$t/door_decisions.bin" ]]; then
         echo "SKIPPED: $TAPES/$t tapes not found (set DOOR_TAPES)"; exit 0
     fi
@@ -44,6 +48,10 @@ for t in tourR1 tourR2; do
         "$OUT/door_replay" "$TAPES/$t/door_inputs.bin" "$TAPES/$t/door_decisions.bin" --recess-prior-std $sd --trace '*' \
             > "$OUT/$t@$sd.txt" 2>&1 &
     done
+done
+for tu in rtD1i:715 tour3A:3768; do
+    t="${tu%%:*}"; u="${tu##*:}"
+    "$OUT/door_replay" "$TAPES/$t/door_inputs.bin" "$TAPES/$t/door_decisions.bin" --until "$u" --trace '*' > "$OUT/$t.txt" 2>&1 &
 done
 wait
 python3 -I - "$OUT" <<'EOF'
@@ -106,6 +114,8 @@ for txt in sorted(glob.glob(f"{out}/*.txt")):
     m = [x for x in m if x]
     if not m or int(m[0].group(1)) == 0: fails.append(f"SMOKE {txt.split('/')[-1]}: the live-only belief consumers did not run clean (crash?)")
     else: print(f"SMOKE {txt.split('/')[-1]}: live-only belief consumers ran {m[0].group(1)} times, clean")
+for tape in ("rtD1i", "tour3A"):   # D-C: the faithful windows — decisions equal, no real door at the floor
+    decision_check(tape, f"{out}/{tape}.txt", f"{tape} (faithful window)")
 for tape in ("tourR1", "tourR2"):
     for sd in ("0.03", "0.1", "0.2", "0.3"):
         decision_check(tape, f"{out}/{tape}@{sd}.txt", f"{tape} (RecessPriorStd {sd})")

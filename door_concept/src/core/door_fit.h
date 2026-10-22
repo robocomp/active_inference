@@ -50,6 +50,9 @@ struct DoorObservation
     float explanation_ratio = 1.0f;
     std::vector<Eigen::Vector3f> candidate_pts;
     std::vector<Eigen::Vector3f> residual_pts;
+    // Task D-C review C1: the assigned ZED slice's leftmost / rightmost mask column (px), for MaskBearings; empty when the
+    // slice is not the ZED's (a ricoh slice is not a pinhole projection) or has no pixels.
+    std::optional<std::pair<float, float>> mask_cols;
 };
 
 /// The localisation/chain covariance J·Σ_chain·Jᵀ of a room-frame point, as cortex's InnerGaussianAPI computes it for

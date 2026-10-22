@@ -23,6 +23,7 @@
  */
 
 #pragma once
+#include <optional>
 #include <limits>
 
 #include <algorithm>
@@ -159,11 +160,25 @@ struct DoorBeliefParams
 // One fitted frame's evidence (room-frame points + per-point measurement variance R). chain_cov_s carries
 // the SHARED pose-chain + static-range variance the fitter computes for the along-wall position (added to
 // the s common-mode). Dimensions (w,h) have no localisation-chain term.
+// ★Task D-C review C1: WHERE THE MASK'S SIDES ARE, AS BEARINGS. The ZED mask's support points carry the depth map's
+// range error along the viewing ray; from an oblique view that error moves s and the leaf plane d TOGETHER, and the fit
+// slid DOOR_0's aperture 0.35-0.4 m along its wall (rtD1i, ~200 cycles with masks present) — the frame channel then read
+// the misplacement as absence and removed a door YOLO was detecting. The mask's left/right image columns are a
+// DEPTH-FREE observation: the bearings, from the camera, of the outermost parts of the door — its jambs on the wall line,
+// or the leaf's free edge where a swung leaf stands outside them. Censored (NaN) where the mask touches the image border.
+struct MaskBearings
+{
+    Eigen::Vector2f cam = Eigen::Vector2f::Zero();   // the camera, room frame (x, y)
+    float ref = 0.0f;                                 // the camera's forward yaw (room frame): angles are taken relative to it
+    float lo = std::numeric_limits<float>::quiet_NaN(), hi = std::numeric_limits<float>::quiet_NaN();   // relative bearings
+    float var = 0.0f;                                 // bearing variance (rad²)
+};
 struct DoorFrame
 {
     std::vector<Eigen::Vector3f> points;
     std::vector<float>           R;
     float chain_cov_s = 0.0f;   // along-wall position variance from the pose chain (m²)
+    std::optional<MaskBearings> bearings;   // Task D-C: the mask's sides (empty = not measured)
 };
 
 class DoorBelief
@@ -556,6 +571,7 @@ public:
     // Fixed template prior on w,h folded into the SAME GN normal equations as the data (engine detects this
     // hook via a C++23 requires). Pulls w→tpl_w, h→tpl_h with precision 1/prior_{w,h}_std² each frame; s is
     // untouched (it carries only the broad temporal prior). This is what makes the strong size prior stick.
+    [[nodiscard]] std::pair<float, float> predicted_bearing_extent(const DoorBeliefState& s, const MaskBearings& mb) const;
     void accumulate_extra(const DoorBeliefState& s, const DoorFrame& frame,
                           Eigen::Matrix<float, 4, 4>& Id, Eigen::Matrix<float, 4, 1>& bd) const;
 

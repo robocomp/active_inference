@@ -14,6 +14,7 @@
 #include <cmath>
 #include <format>
 #include <limits>
+#include <numbers>
 #include <locale>
 #include <numeric>
 #include <sstream>
@@ -428,6 +429,18 @@ DoorObservation DoorFit::observe(rc::DoorFitState& inst)
                     inst.obs_top_conf = (1.0f - a) * inst.obs_top_conf + a;
                 }
             }
+            if (slice.source == 0)   // Task D-C review C1: the mask's sides (DoorObservation::mask_cols)
+            {
+                const std::size_t pb = std::min<std::size_t>(slice.pixel_begin, masks_packet.mask_pixels.size());
+                const std::size_t pe = std::min<std::size_t>(slice.pixel_end, masks_packet.mask_pixels.size());
+                if (pe > pb)
+                {
+                    float c0 = std::numeric_limits<float>::infinity(), c1 = -std::numeric_limits<float>::infinity();
+                    for (std::size_t i = pb; i < pe; ++i)
+                    { c0 = std::min(c0, masks_packet.mask_pixels[i].x()); c1 = std::max(c1, masks_packet.mask_pixels[i].x()); }
+                    observation.mask_cols = std::make_pair(c0, c1);
+                }
+            }
             const std::size_t begin = std::min<std::size_t>(slice.support_begin, masks_packet.support_points.size());
             const std::size_t end = std::min<std::size_t>(slice.support_end, masks_packet.support_points.size());
 
@@ -654,6 +667,65 @@ float DoorFit::run_inference(rc::DoorFitState& inst, const DoorObservation& obse
         frame.points.insert(frame.points.end(), observation.candidate_pts.begin(), observation.candidate_pts.end());
         frame.points.insert(frame.points.end(), observation.residual_pts.begin(), observation.residual_pts.end());
         frame.R.assign(frame.points.size(), R);
+        // Task D-C review C1: the mask's sides as bearings (DoorFrame::bearings) — the ZED pinhole, the cycle's camera pose.
+        // Each side's variance is the per-point noise R at the door's range (one model of where a mask pixel lands); a
+        // side within one mask cell (6 px, door_existence.cpp MaskCells::CELL) of the image border is CENSORED — the door
+        // may continue past it.
+        if (observation.mask_cols.has_value() and room_T_zed_.has_value() and cam_.present and cam_.projection_model == 0
+            and cam_.width > 0 and cam_.focal_x > 0.0f)
+        {
+            const Eigen::Matrix3d Rz = room_T_zed_->topLeftCorner<3, 3>();
+            const auto yaw_of_col = [&](float c)
+            {
+                const double cx = static_cast<double>(static_cast<int>(static_cast<float>(cam_.width / 2u)));
+                const Eigen::Vector3d r = Rz * Eigen::Vector3d((static_cast<double>(c) - cx) / cam_.focal_x, 1.0, 0.0);
+                return std::atan2(r.y(), r.x());
+            };
+            const Eigen::Vector3d fwd = Rz * Eigen::Vector3d(0.0, 1.0, 0.0);
+            rc::MaskBearings mb;
+            mb.cam = Eigen::Vector2f(static_cast<float>(room_T_zed_->coeff(0, 3)), static_cast<float>(room_T_zed_->coeff(1, 3)));
+            mb.ref = static_cast<float>(std::atan2(fwd.y(), fwd.x()));
+            constexpr float kCellPx = 6.0f;
+            const float W = static_cast<float>(cam_.width);
+            const auto rel = [&](float c) { return static_cast<float>(std::remainder(yaw_of_col(c) - mb.ref, 2.0 * std::numbers::pi)); };
+            const auto [c0, c1] = *observation.mask_cols;
+            float a0 = c0 > kCellPx ? rel(c0) : std::numeric_limits<float>::quiet_NaN();
+            float a1 = c1 < W - 1.0f - kCellPx ? rel(c1) : std::numeric_limits<float>::quiet_NaN();
+            // image column grows to the RIGHT, i.e. toward smaller yaw: the left column is the larger relative bearing
+            mb.hi = a0; mb.lo = a1;
+            const float range = std::max(0.3f, (inst.aperture.centre_xy() - mb.cam).norm());
+            // ★ONE VIEW, ONE OBSERVATION. The mask of a parked camera is the same mask every frame (measured on the sim
+            //  tapes: the midpoint column varies by 0.00-0.10 px while parked), so re-adding its bearing each frame is the
+            //  same observation counted hundreds of times (tourR1 door_4: σ_w driven to 6 mm, a 3σ step). Each frame is
+            //  credited by its NOVELTY 1 − s against the last credited view, s the view similarity door_view_pool.h uses
+            //  (bearing from the door in units of its angular half-size, range in units of its half-diagonal): a still
+            //  camera adds nothing, a camera that moved by a door's half-size adds a full observation.
+            const Eigen::Vector2f dc = inst.aperture.centre_xy();
+            const float Rd = std::max(1e-3f, 0.5f * std::hypot(inst.aperture.w, inst.aperture.h));
+            float novelty = 1.0f;
+            if (inst.bearing_view_cam.has_value())
+            {
+                const Eigen::Vector2f v0 = *inst.bearing_view_cam - dc, v1 = mb.cam - dc;
+                const float d1 = std::max(1e-3f, v1.norm());
+                const float half = std::max(std::atan2(Rd, d1), 1e-3f);
+                const float db = std::remainder(std::atan2(v1.y(), v1.x()) - std::atan2(v0.y(), v0.x()), 2.0f * std::numbers::pi_v<float>);
+                const float dr = d1 - v0.norm();
+                novelty = 1.0f - std::exp(-std::min((db / half) * (db / half) + (dr / Rd) * (dr / Rd), 60.0f));
+            }
+            // Credit only the novelty not yet credited since the anchor view (as door_view_pool.h's `counted`), so a slow
+            // drift adds up to one observation per door-size of motion instead of vanishing frame by frame; once the
+            // view is wholly new the anchor moves there.
+            const float credit = std::max(0.0f, novelty - inst.bearing_view_credit);
+            if (not inst.bearing_view_cam.has_value() or novelty >= 1.0f - 1e-3f)
+            { inst.bearing_view_cam = mb.cam; inst.bearing_view_credit = 0.0f; }
+            else
+                inst.bearing_view_credit = std::max(inst.bearing_view_credit, novelty);
+            if (credit > 0.0f)
+            {
+                mb.var = R / (range * range) / credit;
+                frame.bearings = mb;
+            }
+        }
         // AIF "be-still-to-update" as CONTINUOUS PRECISION: a frame's authority to MOVE the mean is capped via the
         // per-frame common-mode (NOT per-point R), by a variance that grows with MOTION × OFF-AXIS position. Still
         // (motion→0) OR well-centred (periphery→0) ⇒ ~0 common-mode ⇒ full authority; moving AND peripheral ⇒ large

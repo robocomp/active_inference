@@ -126,9 +126,58 @@ Eigen::Matrix<float, 4, 1> DoorBelief::sdf_jacobian(const Eigen::Vector3f& p, co
 }
 
 // ─── Fixed template prior on w,h (non-drifting; folded into the GN normal equations each frame) ──
-void DoorBelief::accumulate_extra(const DoorBeliefState& s, const DoorFrame& /*frame*/,
+// Task D-C review C1: the predicted angular extent, from mb.cam relative to mb.ref, of the door under state s — the jambs on
+// the wall line and the believed leaf's free-edge corners (a swung leaf can stand outside the jambs in the image).
+std::pair<float, float> DoorBelief::predicted_bearing_extent(const DoorBeliefState& s, const MaskBearings& mb) const
+{
+    const door::Aperture ap = aperture_at(s);
+    const door::LeafPose L = door::leaf_pose(ap, params_.leaf);
+    const std::array<Eigen::Vector2f, 4> pts{ap.wall_O + s.s * ap.wall_u, ap.wall_O + (s.s + s.w) * ap.wall_u,
+                                             L.centre_xy + L.half_w * L.ex, L.centre_xy - L.half_w * L.ex};
+    float lo = std::numeric_limits<float>::infinity(), hi = -std::numeric_limits<float>::infinity();
+    for (const auto& p : pts)
+    {
+        const Eigen::Vector2f d = p - mb.cam;
+        const float a = std::remainder(std::atan2(d.y(), d.x()) - mb.ref, 2.0f * std::numbers::pi_v<float>);
+        lo = std::min(lo, a); hi = std::max(hi, a);
+    }
+    return {lo, hi};
+}
+
+void DoorBelief::accumulate_extra(const DoorBeliefState& s, const DoorFrame& frame,
                                   Eigen::Matrix<float, 4, 4>& Id, Eigen::Matrix<float, 4, 1>& bd) const
 {
+    // ── Task D-C review C1: the mask's sides as bearings (DoorFrame::bearings), a depth-free pin on the placement ──
+    // GN contribution of each uncensored side: residual r = predicted − measured, Jacobian by central differences
+    // over [s, w, h, d] (the leaf's free edge moves with d), precision 1/var.
+    if (frame.bearings.has_value() and frame.bearings->var > 0.0f)
+    {
+        const MaskBearings& mb = *frame.bearings;
+        const auto [lo0, hi0] = predicted_bearing_extent(s, mb);
+        Eigen::Matrix<float, 4, 1> Jlo, Jhi;
+        for (int k = 0; k < 4; ++k)
+        {
+            constexpr float h = 1e-3f;   // central-difference step (m), quadrature not a decision
+            auto vp = s.vec(); auto vm = s.vec();
+            vp(k) += h; vm(k) -= h;
+            const auto [lp, hp] = predicted_bearing_extent(DoorBeliefState::from_vec(vp), mb);
+            const auto [lm, hm] = predicted_bearing_extent(DoorBeliefState::from_vec(vm), mb);
+            Jlo(k) = (lp - lm) / (2.0f * h);
+            Jhi(k) = (hp - hm) / (2.0f * h);
+        }
+        // ★The MIDPOINT of the two sides, not each side: it pins WHERE the door is along its wall (the s/d degeneracy the
+        //  ZED depth leaves open) without letting one mask's segmentation of the door's WIDTH — which varies frame to frame
+        //  (tourR2 door_2: w 0.93 ↔ 1.08 at σ_w 0.015 when each side was a factor) — pass for a measurement of w. One
+        //  censored side ⇒ no midpoint ⇒ no factor this frame. Variance: the mean of two sides, var/2.
+        if (std::isfinite(mb.lo) and std::isfinite(mb.hi))
+        {
+            const float iv = 2.0f / mb.var;
+            const Eigen::Matrix<float, 4, 1> J = 0.5f * (Jlo + Jhi);
+            const float r = 0.5f * (lo0 + hi0) - 0.5f * (mb.lo + mb.hi);
+            Id.noalias() += iv * (J * J.transpose());
+            bd.noalias() += -iv * J * r;
+        }
+    }
     // GN normal-equation contribution of a residual r=(x−x0) with unit Jacobian and precision iw:
     //   Id += iw · JJᵀ = iw (on the diagonal),   bd += −iw · J · r = −iw·(x − x0).
     const float iw = 1.0f / std::max(1e-9f, params_.prior_w_std * params_.prior_w_std);
