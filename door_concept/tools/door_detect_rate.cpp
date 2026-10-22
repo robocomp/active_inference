@@ -26,6 +26,8 @@ static bool seg_cross(Eigen::Vector2d a, Eigen::Vector2d b, Eigen::Vector2d c, E
 }
 int main(int argc, char** argv)
 {
+    if (argc < 3 or (std::string(argv[2]) != "piso" and std::string(argv[2]) != "three"))
+    { std::println("usage: door_detect_rate <door_inputs.bin> piso|three"); return 2; }
     std::ifstream f(argv[1], std::ios::binary);
     std::uint32_t v = 0; auto h = read_header(f, RecordingKind::Input, &v);
     const bool three = std::string(argv[2]) == "three";
@@ -73,7 +75,9 @@ int main(int argc, char** argv)
             for (std::size_t i = 0; i < P.size() and not occl; ++i)
             {
                 const Eigen::Vector2d a = P[i].cast<double>(), b = P[(i + 1) % P.size()].cast<double>();
-                if (std::abs(a.y() - c.y()) < 0.3 and std::abs(b.y() - c.y()) < 0.3) continue;
+                // the door's OWN wall: both ends inside the doorway plane's depth band (±0.20 m, the leaf field's
+                // FieldNuisance depth_lo/hi — rc::door::door_wall_edges' rule; both GT doors lie in walls along x)
+                if (std::abs(a.y() - c.y()) <= 0.20 and std::abs(b.y() - c.y()) <= 0.20) continue;
                 occl = seg_cross(cam, c - 0.15 * (c - cam).normalized(), a, b);
             }
             const Eigen::Vector4d pc = Zi * Eigen::Vector4d(c.x(), c.y(), 1.05, 1.0);
