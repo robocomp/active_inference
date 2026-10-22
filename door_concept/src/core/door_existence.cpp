@@ -894,7 +894,9 @@ void DoorCore::update_existence(const DoorCycleInput& in, DoorCycleOutput& out)
                     if (rr.var >= 0.0f and (Vec2f(q.centroid.x(), q.centroid.y()) - door_c).squaredNorm() <= cfg.tracker_gate_mahalanobis * v)
                     { seen = true; break; }
                 }
-                ricoh_trials_ += 1.0f; ricoh_hits_ += seen ? 1.0f : 0.0f;
+                // ONE trial per distinct (viewpoint, door): the frames of a view share its pooled detected fraction
+                const auto [dh, dt] = inst.ricoh_hit_pool.add(cam_b, door_c, pool_R, seen);
+                ricoh_trials_ += dt; ricoh_hits_ += dh;
             }
             const float hit = (ricoh_hits_ + 1.0f) / (ricoh_trials_ + 2.0f);
             const float pc  = std::clamp(sm.clutter_prob, 1e-3f, 1.0f - 1e-3f);

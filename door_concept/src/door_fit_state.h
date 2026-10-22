@@ -28,6 +28,7 @@
 
 #include "../../common/exclusion/claims.h"        // rc::exclusion::Seniority (SHARED, pure)
 #include "door_model.h"        // DoorModel / DoorState
+#include "core/ricoh_door_birth.h"   // RicohHitPool (pure, Eigen only)
 #include "door_identity_table.h"   // kFitWithoutFreshDataFrames
 #include "door_belief.h"       // rc::DoorBelief (AI2 recursive-Laplace belief)
 #include "door_opening_edges.h" // rc::door::AlongWallState — the scan's registration offset (try96)
@@ -302,6 +303,7 @@ struct DoorFitState
     // Task Q: the 360 camera's own existence channel (door_existence.cpp): its evidence pooled by the SAME view model, and the
     // last detection's source + weight (a ricoh detection is worth its variance/wall-agreement weight, a ZED one 1).
     door::ViewPool ricoh_view_pool{};
+    door::core::RicohHitPool ricoh_hit_pool{};   // hit-rate calibration trials pooled per viewpoint (core/ricoh_door_birth.h)
     int   last_source   = 0;       // MaskSlice::source of the slice that last detected this door (0 = zed, 1 = ricoh)
     float last_detect_w = 1.0f;    // that detection's weight in [0, 1]: a ZED slice 1; a ricoh slice its association likelihood exp(-m2/2) under the door's + its own variance
     bool existence_seeded = false;            // false until seeded with cfg.exist_birth_logodds on first visit

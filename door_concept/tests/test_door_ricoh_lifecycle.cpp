@@ -158,6 +158,23 @@ int main()
     }
     CHECK(removal_after[0] > 0 and removal_after[1] > 0);
     CHECK(removal_after[0] < removal_after[1]);   // C. the nearer (better-resolving) looks condemn it sooner; the far, weak looks take longer
+    {   // D. the hit-rate Beta moves per VIEWPOINT, not per frame: 100 parked frames = 1 trial; K distinct viewpoints = K trials
+        const Vec2f door(1.0f, 4.99f);
+        RicohHitPool parked;
+        float h = 0, t = 0;
+        for (int k = 0; k < 100; ++k) { const auto [dh, dt] = parked.add(Vec2f(0.0f, 0.0f), door, 0.6f, k % 5 == 0); h += dh; t += dt; }
+        std::print("D: 100 parked frames -> {:.2f} trials, {:.2f} hits (20% detected)\n", t, h);
+        CHECK(std::abs(t - 1.0f) < 0.05f);
+        CHECK(h > 0.0f and h < 0.5f);                      // the view's detected FRACTION, once
+        RicohHitPool moving;
+        float t2 = 0;
+        const int K = 8;
+        for (int v = 0; v < K; ++v)
+            for (int k = 0; k < 20; ++k)                   // 20 frames at each of K well-separated viewpoints
+                t2 += moving.add(Vec2f(-9.0f + 2.5f * v, 0.0f), door, 0.6f, true).second;
+        std::print("D: {} viewpoints x 20 frames -> {:.2f} trials\n", K, t2);
+        CHECK(std::abs(t2 - static_cast<float>(K)) < 0.5f);
+    }
     if (fails == 0) std::print("test_door_ricoh_lifecycle: ALL PASS\n");
     else            std::print("test_door_ricoh_lifecycle: {} FAILURE(S)\n", fails);
     return fails == 0 ? 0 : 1;

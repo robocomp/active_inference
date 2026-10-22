@@ -17,8 +17,10 @@
 #include <cmath>
 #include <numbers>
 #include <optional>
+#include <utility>
 #include <vector>
 #include <Eigen/Dense>
+#include "../door_view_pool.h"
 
 namespace rc::door::core
 {
@@ -142,6 +144,20 @@ public:
 private:
     struct View { Eigen::Vector2f tgt; float bearing, range, n; bool seen; };
     std::vector<View> views_;
+};
+
+/// One door's calibration of the 360 detector's hit rate, POOLED PER VIEWPOINT: the frames of one view are one Bernoulli trial
+/// (door_view_pool.h's view model), whose outcome is the view's detected fraction; a new view is a new trial. add() returns the
+/// (hits, trials) increments to fold into the shared Beta posterior - 100 parked frames add 1 trial in total, K views add K.
+struct RicohHitPool
+{
+    rc::door::ViewPool hit{}, trial{};
+    std::pair<float, float> add(const Eigen::Vector2f& cam, const Eigen::Vector2f& door, float R, bool seen)
+    {
+        const float t = trial.add_logodds(cam, door, R, 1.0f);
+        const float h = hit.add_logodds(cam, door, R, seen ? 1.0f : 0.0f);
+        return {h, t};
+    }
 };
 
 }  // namespace rc::door::core
