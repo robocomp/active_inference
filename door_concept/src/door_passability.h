@@ -32,6 +32,26 @@ inline float clear_width(float aperture_w, float phi)
     return std::max(0.0f, aperture_w * (1.0f - std::max(0.0f, std::cos(phi))));
 }
 
+// The along-wall clear span MARGINALISED over the leaf-angle posterior: E[clear_width(w, phi)] under `log_curve` ((phi, log
+// weight), the posterior step's own lp). The span a log line or a planner quotes must come from the whole posterior, not from
+// its modal angle: a posterior straddling a shut and an open leaf has a mean span between the two, and the modal one is a lie
+// about it. nullopt-like 0 when the curve is empty.
+inline float clear_width_expected(const std::vector<std::pair<float, double>>& log_curve, float aperture_w)
+{
+    double m = -std::numeric_limits<double>::infinity();
+    for (const auto& [phi, lw] : log_curve) if (std::isfinite(phi) and not std::isnan(lw)) m = std::max(m, lw);
+    if (not std::isfinite(m)) return 0.0f;
+    double num = 0.0, den = 0.0;
+    for (const auto& [phi, lw] : log_curve)
+    {
+        if (not std::isfinite(phi) or std::isnan(lw)) continue;
+        const double w = std::exp(lw - m);
+        num += w * clear_width(aperture_w, phi);
+        den += w;
+    }
+    return den > 0.0 ? static_cast<float>(num / den) : 0.0f;
+}
+
 // P(passable), MARGINALISED over the leaf-angle posterior. `phi_curve` is (phi, unnormalised weight) as
 // DoorFitter::estimate_phi leaves it — image support x the persistence/command prior. Returns nullopt when
 // the curve is empty or carries no weight: that is "not measured", never "not passable".

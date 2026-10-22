@@ -2246,7 +2246,11 @@ rc::door::InteractionState SpecificWorker::compute_interaction_state(const rc::D
     const auto& ap = inst.aperture;
     st.phi_rad       = inst.phi_est;
     st.phi_known     = true;
-    st.clear_width_m = rc::door::clear_width(ap.w, inst.phi_est);
+    // Task L: the span the logs and the cross precondition quote is the EXPECTATION over the whole leaf posterior (the same
+    // curve P(passable) marginalises), not the span at its mean angle: a posterior split between a shut and an open leaf has
+    // a mean angle at which neither is true. Without a curve (a mirror's memory) it falls back to the mean angle.
+    st.clear_width_m = inst.phi_curve_log.empty() ? rc::door::clear_width(ap.w, inst.phi_est)
+                                                  : rc::door::clear_width_expected(inst.phi_curve_log, ap.w);
 
     // ── P(passable) ──────────────────────────────────────────────────────────────────────────────
     // MARGINALISED over the leaf-angle posterior, never read off its argmax: measured 2026-09-10 the
