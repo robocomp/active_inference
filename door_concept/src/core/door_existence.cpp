@@ -725,6 +725,12 @@ void DoorCore::update_existence(const DoorCycleInput& in, DoorCycleOutput& out)
     // confidence-scaled `required` see how far below the bound the data since entry have carried it. A door that entered at
     // or above the bound (every birth, +1) is decided on L itself, exactly as before.
     const float L_bound = [&] { const float p = std::clamp(policy.removal_prob, 1e-3f, 0.5f); return std::log(p / (1.0f - p)); }();
+    // ★Review I1: the record is UNCLAMPED BELOW (the −4 entry must stay condemnable) and CAPPED ABOVE at L_max − L_bound — the
+    //  most the published belief can say in favour. Uncapped, a restored door confirmed for many views banked tens of nats;
+    //  absent later, eff sat pinned at +L_max until absence repaid them all — immortal, the mirror of the clamp defect.
+    const float since_entry_cap = policy.logodds_max - L_bound;
+    const auto bank = [&](rc::DoorFitState& inst, float dL)
+    { inst.existence_since_entry = std::min(inst.existence_since_entry + dL, since_entry_cap); };
     const auto decide = [&](rc::DoorFitState& inst, float look)
     {
         if (not (inst.existence_entry_L < L_bound))
@@ -804,7 +810,7 @@ void DoorCore::update_existence(const DoorCycleInput& in, DoorCycleOutput& out)
             const float delta = aperture_band_offset(fit_.room_polygon(), inst);   // NaN with no polygon ⇒ term 0
             const float term  = rc::door::band_log_prior(delta, fit_.room_band());
             inst.existence.set(inst.existence.logodds() - inst.room_prior_term + term);
-            inst.existence_since_entry += term - inst.room_prior_term;
+            bank(inst, term - inst.room_prior_term);
             inst.room_prior_term = term;
             p_band = std::exp(term);
             inst.dbg_band_delta = delta;
@@ -813,7 +819,7 @@ void DoorCore::update_existence(const DoorCycleInput& in, DoorCycleOutput& out)
         else if (inst.room_prior_term != 0.0f)
         {
             inst.existence.set(inst.existence.logodds() - inst.room_prior_term);   // prior switched off: take it out
-            inst.existence_since_entry -= inst.room_prior_term;
+            bank(inst, -inst.room_prior_term);
             inst.room_prior_term = 0.0f;
         }
         const float prior_look = 1.0f - p_band;   // the prior's own resolvability toward removal
@@ -832,7 +838,7 @@ void DoorCore::update_existence(const DoorCycleInput& in, DoorCycleOutput& out)
             and inst.obs_top_z < cfg.exist_min_height_m)
         {
             inst.existence.set(inst.existence.logodds() - cfg.exist_short_gain);
-            inst.existence_since_entry -= cfg.exist_short_gain;
+            bank(inst, -cfg.exist_short_gain);
             // Same as the room prior: a categorical fact about what a door IS, so it needs no visibility.
             if (decide(inst, 1.0f).remove)
                 to_remove.push_back(id);
@@ -1046,7 +1052,7 @@ void DoorCore::update_existence(const DoorCycleInput& in, DoorCycleOutput& out)
             const float dL = inst.image_view_pool.add(cam, inst.aperture.centre_xy(), pool_R, verdict, llr);
             const float L0 = inst.existence.logodds();
             inst.existence.integrate(1.0f, dL);
-            inst.existence_since_entry += inst.existence.last_increment();
+            bank(inst, inst.existence.last_increment());
             inst.image_view_pool.commit(inst.existence.logodds() - L0);   // what the view really moved L (the clamp)
             inst.dbg_edge_delta = dL;
         };
@@ -1237,7 +1243,7 @@ void DoorCore::update_existence(const DoorCycleInput& in, DoorCycleOutput& out)
         // independent. (Task 5b item 4: the silhouette is pooled by view above; the belief itself is armed with ρ 0, so
         // this p_detect no longer feeds a second correlation discount.)
         inst.existence.integrate(ev, p_detect);
-        inst.existence_since_entry += inst.existence.last_increment();
+        bank(inst, inst.existence.last_increment());
         if (pooled_sil) inst.silhouette_view_pool.commit(inst.existence.logodds() - L_before_sil);   // what it REALLY moved L
 
         // ── RGB CONTOUR CHANNEL: an INDEPENDENT sensor, integrated separately ────────────────────────

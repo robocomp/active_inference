@@ -300,9 +300,10 @@ The HISTORY column above tracks §4.2 recording only, which is the part that mus
    2026-10-22)*. §3 makes predicted-visible-but-ABSENT the only removal evidence, and since D-C fix round 1 a cycle
    advances the removal debounce only by the look the silhouette actually charged as absence (round 2: continuously,
    P(detect) × the absent share of the reached samples, `door_existence.cpp`). A YOLO phantom detected on every frame
-   lights its own silhouette, so no look ever charges absence; the image-geometry channels (leaf contour, depth,
-   doorway frame) can still pull L below the bound, but the debounce does not advance and the door is reported
-   **stalled** (`rc::exist::stall_note`) instead of removed. It goes when the detector stops firing on it (another
+   lights its own silhouette, so its looks charge little or no absence; the image-geometry channels (leaf contour,
+   depth, doorway frame) can still pull L below the bound, but the debounce advances only by P(detect) × the absent share
+   free/(occ + free) — partially at most, not at all on a fully lit frame — and the door is reported **stalled**
+   (`rc::exist::stall_note`) instead of removed. It goes when the detector stops firing on it (another
    view) or by the wall-band prior. Accepted, deliberately: removing a door the detector IS detecting on image geometry
    alone is exactly what removed the REAL DOOR_0 at rtD1i cycle 614 (D-C review C1).
 

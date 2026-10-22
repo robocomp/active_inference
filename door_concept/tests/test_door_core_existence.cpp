@@ -458,6 +458,50 @@ int main()
         }
     }
 
+    // ── 9b. Review I1 (D-C round 2): the unclamped record is CAPPED ABOVE. Restored at −4, then CONFIRMED from many new
+    //     views, then truly absent: the evidence banked by the confirmations is bounded by L_max − L_bound (what the published
+    //     belief can say in favour), so the absence that follows still removes it. Uncapped, it banked tens of nats and the
+    //     door was immortal.
+    {
+        DoorCoreConfig cfg;
+        ExistWorld w;
+        w.cfg = cfg.door;
+        DoorCore core(cfg);
+        w.core = &core;
+        std::vector<rc::door::DoorDecision> removes;
+        core.connect(&w, {.decision = [&](const rc::door::DoorDecision& d)
+                          { if (d.kind == static_cast<std::uint16_t>(K::Remove)) removes.push_back(d); }, .diag = {}});
+        int c = 0;
+        for (; c < 40; ++c)
+            (void)core.step(cycle_input(static_cast<std::uint64_t>(c + 1), c + 1, Phase::Present));
+        CHECK(w.st.size() == 1);
+        if (w.st.size() == 1)
+        {
+            auto& inst = w.st.begin()->second;
+            inst.existence.set(-4.0f);
+            inst.existence_entry_L = inst.existence.logodds();
+            inst.existence_since_entry = 0.0f;
+            inst.existence_debounce = {};
+            inst.silhouette_view_pool = {};
+            inst.image_view_pool = {};
+            const auto sweep_rx = [](int k) { const int q = k % 12;
+                return 1.0f + 1.5f * (q < 6 ? (static_cast<float>(q) / 3.0f - 1.0f) : (1.0f - static_cast<float>(q - 6) / 3.0f)); };
+            for (int k = 0; k < 480; ++k, ++c)   // confirmed from many new views
+                (void)core.step(cycle_input(static_cast<std::uint64_t>(c + 1), c + 1, Phase::Present, false, kWallY, sweep_rx(k)));
+            const float L_bound = std::log(cfg.door.exist_removal_prob / (1.0f - cfg.door.exist_removal_prob));
+            const float banked = w.st.begin()->second.existence_since_entry;
+            const bool kept = removes.empty();
+            int absent_cycles = 0;
+            for (int k = 0; k < 1200 and removes.empty(); ++k, ++c, ++absent_cycles)   // then truly absent
+                (void)core.step(cycle_input(static_cast<std::uint64_t>(c + 1), c + 1, Phase::Absent, false, kWallY, sweep_rx(k)));
+            std::print("restored at −4, confirmed 480 cycles (banked {:+.2f}, cap {:+.2f}), then absent: {} REMOVE after {} cycles\n",
+                       banked, cfg.door.exist_max_logodds - L_bound, removes.size(), absent_cycles);
+            CHECK(kept);                                                           // confirmed ⇒ alive
+            CHECK(banked <= cfg.door.exist_max_logodds - L_bound + 1e-4f);         // the record is capped above
+            CHECK(removes.size() == 1);                                            // … so absence still removes it
+        }
+    }
+
     // ── 10. Task D-C (rtD1i door_5): THE IMAGE CHANNELS ARE WEIGHTED BY THE POSE'S UNCERTAINTY. The door was removed on
     //     looks taken from a pose 4 m wrong. pose_overlap_factor κ — the expected fraction of the predicted image that lands
     //     on the door when the bearing is uncertain — is 1 for a precise pose and falls toward 0 as the pose spreads, and it

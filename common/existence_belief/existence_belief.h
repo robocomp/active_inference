@@ -539,6 +539,7 @@ public:
     // ratio is recovered by dividing out p_detect and handing both to the primary form.
     void integrate(const Evidence& e, float p_detect = 1.0f)
     {
+        last_increment_ = 0.0f;                           // a HOLD here added nothing (review M1: no stale increment)
         if (e.n_reached == 0) return;                     // not probed this cycle ⇒ HOLD
         if (not std::isfinite(p_detect) or not std::isfinite(e.log_odds_delta)) return;   // see integrate() above
         const float pv = std::clamp(p_detect, 0.0f, 1.0f);

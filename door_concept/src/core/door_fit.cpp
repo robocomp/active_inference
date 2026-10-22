@@ -608,6 +608,8 @@ float DoorFit::run_inference(rc::DoorFitState& inst, const DoorObservation& obse
         //  for its opening and slid it there (tour3C DOOR_0, then removed by the wall-band prior). The memory's own precision
         //  (IdentityRow::place_sd) plus the room polygon's registration on re-entry (Existence.BoundarySigmaM, the σ the band
         //  prior and the recess prior read) is what the remembered place is known to. A row without the column keeps 0.6.
+        // (Review M3) place_sd is the σ of the aperture CENTRE (s + w/2); it seeds σ_s with zero cross terms to w — the
+        //  centre's σ is the larger of the two placements a restored door can be off by, so this errs wide (conservative).
         if (inst.remembered_place_sd.has_value())
         {
             const float sd = *inst.remembered_place_sd, sb = cfg_.exist_boundary_sigma_m;

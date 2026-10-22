@@ -308,7 +308,8 @@ struct DoorFitState
     // reads L_bound + (evidence since entry); differencing the published L (L − L_entry) loses whatever the ±L_max clamp
     // swallowed — a door RESTORED at the −4 floor could then never move below its entry, i.e. never be condemned however
     // long it was looked at and found absent. Each channel's increment is added here as it MEANT it (ExistenceBelief::
-    // last_increment), the band prior's change as replaced; reset with existence_entry_L.
+    // last_increment), the band prior's change as replaced; reset with existence_entry_L. Capped ABOVE at L_max − L_bound
+    // (review I1: banked confirmation must not make a later absence unrepayable); unclamped below.
     float existence_since_entry = 0.0f;
     // Task D-C round 2 (tour3C): a door RESTORED from memory — the σ its remembered place had along the wall when the row was
     // written (IdentityRow::place_sd). The lazy belief init seeds σ_s² = place_sd² + σ_b² (σ_b the room polygon's own
