@@ -82,9 +82,15 @@ def tools():
         return {"type": "function", "function": {"name": name, "description": desc, "parameters": p}}
     return [
         t("cross_door", "Take the robot through a door of the CURRENT room: approach it, open it if it is shut, and go "
-          "through. Starts at once.",
+          "through. Starts at once. Only when the person wants to GO THROUGH it; to just open or close a door, sim_door.",
           {"door": {"type": "string", "enum": ["door_0", "door_1", "nearest"],
                     "description": "a door of the current room, or 'nearest'"}}, ["door"]),
+        t("sim_door", "Have the SIMULATOR open or close a door of the CURRENT room at once (the robot does not move and "
+          "does not touch it). When the person asks to open or close a door without going through it. Not to go "
+          "through a door: cross_door opens it on the way.",
+          {"action": {"type": "string", "enum": ["open", "close"]},
+           "door": {"type": "string", "enum": ["door_0", "door_1", "nearest"],
+                    "description": "a door of the current room, or 'nearest'"}}, ["action", "door"]),
         t("stop", "Stop the robot immediately and abandon what it is doing.", {}, []),
         t("cancel_passage", "Abandon the door crossing in progress (the robot stays where it is).", {}, []),
         t("move_relative", "Move the robot a short distance relative to where it is now: first turn in place by "
@@ -103,6 +109,13 @@ def tools():
            "side": {"type": "string", "description": "ONLY when the person names a side: the side to approach from, as they said it "
                                                      "(right, the far side, behind it, por la izquierda) or a side name "
                                                      "from the STATE; empty = the object's default"}}, ["object"]),
+        t("go_around_object", "Drive a full loop around an object of the CURRENT room, stopping on each side facing "
+          "it, and end back where the loop began; sides the robot cannot reach (against a wall) are skipped. Give its "
+          "name or class, and optionally the direction the person says. Starts at once. To stop at ONE side use "
+          "approach_object.",
+          {"object": {"type": "string", "description": "an object name or class"},
+           "direction": {"type": "string", "description": "ONLY when the person says one: left or right (por la "
+                                                          "izquierda / derecha); empty = left"}}, ["object"]),
         t("find_objects", "List the objects the robot has perceived in the CURRENT room, nearest first, with "
           "distance, bearing and size. Read-only.",
           {"subtype": {"type": "string", "description": "a class to filter by, in English singular (chair, table, "
@@ -465,6 +478,27 @@ CASES = [
     # paraphrases: at temperature 0.2 a phrasing gets the same tool every repeat, so the spread is across phrasings.
     ("agents in the WM", [], "none", "how many agents are in the WM?",
      lambda n, a, c: n in ("agents", "graph_summary") or (n is None and (lists_agents(c) or re.search(r"\b(10|ten|diez)\b", c.lower()) is not None))),
+    # go_around_object / sim_door (2026-10-19)
+    ("go around the table", [], "none", "go around the table",
+     lambda n, a, c: n == "go_around_object" and "table" in str(a.get("object", "")).lower()),
+    ("go around chair 1 by the right", [], "none", "go around chair 1 by the right",
+     lambda n, a, c: n == "go_around_object" and "chair" in str(a.get("object", "")).lower()
+     and "right" in str(a.get("direction", "")).lower()),
+    ("da una vuelta alrededor de la mesa (es)", [], "none", "da una vuelta alrededor de la mesa",
+     lambda n, a, c: n == "go_around_object" and re.search("table|mesa", str(a.get("object", "")).lower()) is not None),
+    ("go to the far side of the chair (one side, not a loop)", [], "none", "go to the far side of the chair",
+     lambda n, a, c: n == "approach_object"),
+    ("open door 1", [], "none", "open door 1",
+     lambda n, a, c: n == "sim_door" and a.get("action") == "open" and a.get("door") == "door_1"),
+    ("close the nearest door", [], "none", "close the nearest door",
+     lambda n, a, c: n == "sim_door" and a.get("action") == "close" and a.get("door") in ("door_0", "nearest")),
+    ("cierra la puerta 0 (es)", [], "none", "cierra la puerta 0",
+     lambda n, a, c: n == "sim_door" and a.get("action") == "close" and a.get("door") == "door_0"),
+    ("go through door 1 (cross, not sim_door)", [], "none", "go through door 1",
+     lambda n, a, c: n == "cross_door"),
+    # live 2026-10-19: "stop agent chair concept" went to the robot-stop fast path (now gated off: command_gate.h)
+    ("stop agent chair concept", [], "none", "stop agent chair concept",
+     lambda n, a, c: n == "agent_control" and a.get("action") == "stop" and "chair" in str(a.get("agent", ""))),
     # agent_control (2026-10-19): the person starts / stops / restarts agents from the chat; questions stay on agents
     ("restart the chair agent", [], "none", "restart the chair agent",
      lambda n, a, c: n == "agent_control" and a.get("action") == "restart" and "chair" in str(a.get("agent", ""))),

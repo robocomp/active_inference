@@ -104,6 +104,10 @@ struct SessionConfig
     std::string fleet_confirm = "controller,retina";
     std::string fleet_lock;               ///< "" ⇒ $XDG_RUNTIME_DIR/ai_fleet_tour.lock (the tour scripts hold it)
     std::string fleet_log_dir = "logs/agents";
+    // sim_door (sim_door.h): the simulator's DoorControl; "" = no sim_door tool (the real robot)
+    std::string sim_door_endpoint = "doorcontrol:tcp -h localhost -p 10017";
+    std::string sim_door_script = "tools/sim_door.py";
+    double sim_door_match_max_m = 1.0;   ///< nearest Webots door farther than this ⇒ refused (doors are >= 2.5 m apart)
 };
 
 class ChatSession
@@ -161,6 +165,12 @@ private:
     void save_canvas_script(const QString& name);
     /// approach_object: pick the object, put a standpoint short of it, send a one-step go_to mission (approach.h).
     QString do_approach(const QJsonObject& args);
+    /// go_around_object: a loop of go_to stops around an object, back to the start (approach.h go_around_mission).
+    QString do_go_around(const QJsonObject& args);
+    /// sim_door: the door's world pose through the sim witness → tools/sim_door.py, async; told by on_sim_door_done.
+    QString do_sim_door(const QJsonObject& args);
+    void on_sim_door_done(int code);
+    [[nodiscard]] bool sim_door_available() const;   ///< endpoint configured AND robot_gt_* on the robot node (sim)
     /// episodes / episode / outcome_stats / last_episode → the tool-result text; "" if `name` is not one of them.
     QString answer_memory(const QString& name, const QJsonObject& args) const;
     /// Today's records + the all-time stats from the domain-4 graph; nullopt when it is not joined.
@@ -242,6 +252,8 @@ private:
     fleet::Confirmations fleet_confirmations_;
     std::optional<fleet::Op> fleet_op_;   ///< the start / stop / restart in progress
     QTimer fleet_timer_;
+    QProcess sim_door_proc_;     ///< the sim_door.py request in flight (never waited on in the GUI thread)
+    QString sim_door_what_;      ///< "open door_1" — what the in-flight request is for
     std::uint64_t user_turn_ = 0;          ///< messages typed by the person: a yes must come in a later one
 };
 

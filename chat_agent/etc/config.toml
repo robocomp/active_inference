@@ -118,3 +118,10 @@ Warn.Connections = "0"
 Trace.Network = "0"
 Trace.Protocol = "0"
 MessageSizeMax = "20004800"
+
+[SimDoor]
+# sim_door: the SIMULATOR opens / closes a door of the current room (webots-bridge DoorControl, tools/sim_door.py).
+# The tool is offered only while robot_concept writes robot_gt_* (sim only), so it vanishes on the real robot.
+# "" disables it. Which Webots door: the nearest by place, through the sim ground-truth pose (src/sim_door.h).
+endpoint = "doorcontrol:tcp -h localhost -p 10017"
+match_max_m = 1.0

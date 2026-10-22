@@ -25,6 +25,7 @@
 #include "gpu_memory.h"
 #include "image_prep.h"
 #include "look_messages.h"
+#include "sim_door.h"
 
 namespace rc::chat
 {
@@ -128,6 +129,12 @@ void ChatSession::start()
                            ? parse_gpu_memory(gpu_proc_.readAllStandardOutput().toStdString()) : std::nullopt;
         gpu_label_ = q(gpu_memory_label(m));
         refresh_status_bar();
+    });
+    QObject::connect(&sim_door_proc_, &QProcess::finished, &ctx_,
+                     [this](int code, QProcess::ExitStatus status) { on_sim_door_done(status == QProcess::NormalExit ? code : -1); });
+    QObject::connect(&sim_door_proc_, &QProcess::errorOccurred, &ctx_, [this](QProcess::ProcessError e)
+    {
+        if (e == QProcess::FailedToStart) on_sim_door_done(-1);   // the other errors end in finished() too
     });
     QObject::connect(&gpu_proc_, &QProcess::errorOccurred, &ctx_, [this](QProcess::ProcessError e)
     {
@@ -329,6 +336,8 @@ const QString kInterfaceRules = QStringLiteral(
     "plans its own path there, whatever a short move ran into. Nobody has to confirm anything: never ask the person "
     "to confirm a crossing, a move or the opening of a door. When they ask for an action, or answer yes to one you "
     "offered, call its tool now. The one question you do ask is the one agent_control returns as NOT DONE.\n"
+    "- \"Open door_1\" / \"close the door\" ALONE is sim_door (when you have it): the simulator moves the door and the "
+    "robot stays where it is. cross_door only when the person wants to go THROUGH the door.\n"
     "- 'robot motion now' in the STATE is the MEASURED velocity: if it is not zero you ARE moving (the controller "
     "also drives on its own: exploring, a mission, a joystick), whatever your last command says.\n"
     "- stop() halts the robot at once. cancel_passage() abandons a door crossing in progress.\n"
@@ -403,11 +412,22 @@ QJsonArray ChatSession::tools_json() const
     doors.append(QStringLiteral("nearest"));
     QJsonArray tools;
     tools.append(tool_def("cross_door",
-        "Take the robot through a door of the CURRENT room: approach it, open it if it is shut, and go through. "
-        "Starts at once.",
+        QStringLiteral("Take the robot through a door of the CURRENT room: approach it, open it if it is shut, and go "
+                       "through. Starts at once.") +
+            (sim_door_available() ? QStringLiteral(" Only when the person wants to GO THROUGH it; to just open or "
+                                                   "close a door, sim_door.") : QString{}),
         QJsonObject{{"door", QJsonObject{{"type", "string"}, {"enum", doors},
                                          {"description", "a door of the current room, or 'nearest'"}}}},
         QJsonArray{"door"}));
+    if (sim_door_available())
+        tools.append(tool_def("sim_door",
+            "Have the SIMULATOR open or close a door of the CURRENT room at once (the robot does not move and does not "
+            "touch it). When the person asks to open or close a door without going through it. Not to go through a "
+            "door: cross_door opens it on the way.",
+            QJsonObject{{"action", QJsonObject{{"type", "string"}, {"enum", QJsonArray{"open", "close"}}}},
+                        {"door", QJsonObject{{"type", "string"}, {"enum", doors},
+                                             {"description", "a door of the current room, or 'nearest'"}}}},
+            QJsonArray{"action", "door"}));
     tools.append(tool_def("stop", "Stop the robot immediately and abandon what it is doing.", QJsonObject{}, {}));
     tools.append(tool_def("cancel_passage", "Abandon the door crossing in progress (the robot stays where it is).",
                           QJsonObject{}, {}));
@@ -432,6 +452,15 @@ QJsonArray ChatSession::tools_json() const
                                          {"description", "ONLY when the person names a side: the side to approach from, as they said it "
                                                          "(right, the far side, behind it, por la izquierda) or a side "
                                                          "name from the STATE; empty = the object's default"}}}},
+        QJsonArray{"object"}));
+    tools.append(tool_def("go_around_object",
+        "Drive a full loop around an object of the CURRENT room, stopping on each side facing it, and end back where "
+        "the loop began; sides the robot cannot reach (against a wall) are skipped. Give its name or class, and "
+        "optionally the direction the person says. Starts at once. To stop at ONE side use approach_object.",
+        QJsonObject{{"object", QJsonObject{{"type", "string"}, {"description", "an object name or class"}}},
+                    {"direction", QJsonObject{{"type", "string"},
+                                              {"description", "ONLY when the person says one: left or right (por la "
+                                                              "izquierda / derecha); empty = left"}}}},
         QJsonArray{"object"}));
     tools.append(tool_def("find_objects",
         "List the objects the robot has perceived in the CURRENT room, nearest first, with distance, bearing and size. "
@@ -737,6 +766,8 @@ QString ChatSession::answer_query(const QString& name, const QJsonObject& args)
     }
     if (name == "approach_object") return do_approach(args);
     if (name == "agent_control") return do_agent_control(args);
+    if (name == "go_around_object") return do_go_around(args);
+    if (name == "sim_door") return do_sim_door(args);
     QString out;
     if (QString m = answer_memory(name, args); not m.isEmpty()) out = std::move(m);
     else if (name == "find_objects")
@@ -849,6 +880,123 @@ QString ChatSession::do_approach(const QJsonObject& args)
     return QStringLiteral("OK: mission 'approach %1' sent: the controller drives to a spot %2 m from its centre, facing "
                           "it, planning its path around obstacles.")
         .arg(q(o->name)).arg(footprint_radius(*o) + standoff, 0, 'f', 2);
+}
+
+QString ChatSession::do_go_around(const QJsonObject& args)
+{
+    const std::string what = args.value("object").toString().trimmed().toStdString();
+    const std::string room = digest_.facts.room;
+    const auto refuse = [&](const std::string& why)
+    {
+        log_.write("go_around", QJsonObject{{"object", q(what)}, {"ok", false}, {"reason", q(why)}});
+        window_->append_system(QStringLiteral("Not possible: ") + q(why));
+        return QStringLiteral("REJECTED: ") + q(why);
+    };
+    if (not digest_.facts.controller_present) return refuse("the controller is not running, so the robot cannot move");
+    if (room.empty()) return refuse("the current room is not known yet");
+    const auto o = pick_object(digest_.objects, what);
+    if (not o.has_value()) return refuse(o.error());
+    const auto left = parse_around_direction(args.value("direction").toString().toStdString());
+    if (not left.has_value())
+        return refuse("'" + args.value("direction").toString().toStdString() + "' is not a direction: left or right");
+    const auto To = inner_->get_transformation_matrix(room, o->name);
+    const auto Tr = inner_->get_transformation_matrix(room, "body");
+    if (not To.has_value() or not Tr.has_value())
+        return refuse("where '" + o->name + "' or the robot is in " + room + " cannot be resolved right now");
+    std::vector<ApproachSide> sides;   // the object's own standpoints, when it offers them (do_approach)
+    if (const auto aff = G_->get_node("aff_" + o->name + "_approach"); aff.has_value())
+    {
+        const auto names = G_->get_attrib_by_name<aff_option_names_att>(*aff);
+        const auto xs = G_->get_attrib_by_name<aff_option_x_m_att>(*aff);
+        const auto ys = G_->get_attrib_by_name<aff_option_y_m_att>(*aff);
+        const auto ws = G_->get_attrib_by_name<aff_option_yaw_rad_att>(*aff);
+        if (names.has_value() and xs.has_value() and ys.has_value() and ws.has_value())
+            if (auto p = parse_sides(*names, xs->get(), ys->get(), ws->get()); p.has_value()) sides = std::move(*p);
+    }
+    const double ring = footprint_radius(*o) + cfg_.robot_radius_m + cfg_.approach_clearance_m;
+    const auto m = go_around_mission(o->name, room, {To->translation().x(), To->translation().y()},
+                                     {Tr->translation().x(), Tr->translation().y()}, sides, ring, *left);
+    const bool own = sides.size() >= 3;
+    log_.write("go_around", QJsonObject{{"object", q(o->name)}, {"ok", true}, {"stops", int(m.steps.size())},
+                                        {"own_sides", own}, {"left", *left}});
+    if (not send_command(rc::mission::encode_json(m), "llm")) return QStringLiteral("FAILED: could not write the mission to the graph.");
+    return QStringLiteral("OK: mission 'go around %1' sent: %2 stops %3, setting off to the robot's %4 and ending back "
+                          "at the first; a stop it cannot reach is skipped. The chat reports progress; do not say it is done.")
+        .arg(q(o->name)).arg(m.steps.size() - 1)
+        .arg(own ? QStringLiteral("at the sides it offers") : QStringLiteral("%1 m from its centre").arg(ring, 0, 'f', 2),
+             *left ? QStringLiteral("left") : QStringLiteral("right"));
+}
+
+// ── sim_door: the simulator opens / closes a door (sim_door.h, tools/sim_door.py) ────────────────────────────────
+
+bool ChatSession::sim_door_available() const
+{
+    if (cfg_.sim_door_endpoint.empty()) return false;
+    const auto robots = G_->get_nodes_by_type("robot");
+    return not robots.empty() and G_->get_attrib_by_name<robot_gt_x_att>(robots.front()).has_value();
+}
+
+QString ChatSession::do_sim_door(const QJsonObject& args)
+{
+    const QString action = args.value("action").toString().trimmed().toLower();
+    std::string door = args.value("door").toString().trimmed().toLower().toStdString();
+    const std::string room = digest_.facts.room;
+    const auto refuse = [&](const std::string& why)
+    {
+        log_.write("sim_door", QJsonObject{{"args", args}, {"ok", false}, {"reason", q(why)}});
+        return QStringLiteral("REJECTED: ") + q(why);
+    };
+    if (not sim_door_available()) return refuse("there is no simulator to move doors (this is the real robot)");
+    if (sim_door_proc_.state() != QProcess::NotRunning)
+        return refuse("still waiting for the simulator about " + sim_door_what_.toStdString());
+    if (action != "open" and action != "close") return refuse("action must be open or close");
+    if (room.empty()) return refuse("the current room is not known yet");
+    if (door.empty() or door == "nearest" or door == "the door" or door == "door")
+    {
+        if (not digest_.facts.nearest_door.has_value()) return refuse("no door of " + room + " is known");
+        door = *digest_.facts.nearest_door;
+    }
+    if (std::ranges::find(digest_.facts.doors, door) == digest_.facts.doors.end())
+        return refuse("'" + door + "' is not a door of " + room + " (the current room)");
+    const auto robots = G_->get_nodes_by_type("robot");
+    const auto gx = G_->get_attrib_by_name<robot_gt_x_att>(robots.front());
+    const auto gy = G_->get_attrib_by_name<robot_gt_y_att>(robots.front());
+    const auto ga = G_->get_attrib_by_name<robot_gt_angle_att>(robots.front());
+    const auto Td = inner_->get_transformation_matrix(room, door);
+    const auto Tr = inner_->get_transformation_matrix(room, "body");
+    if (not gx.has_value() or not gy.has_value() or not ga.has_value() or not Td.has_value() or not Tr.has_value())
+        return refuse("where " + door + " or the robot is cannot be resolved right now");
+    const Eigen::Vector2d w = room_point_in_world({Td->translation().x(), Td->translation().y()}, Tr->matrix(),
+                                                  gx.value(), gy.value(), ga.value());
+    sim_door_what_ = action + " " + q(door);
+    sim_door_proc_.setProgram(QStringLiteral("python3"));
+    sim_door_proc_.setArguments({q(cfg_.sim_door_script), action, QString::number(w.x(), 'f', 3),
+                                 QString::number(w.y(), 'f', 3), QString::number(cfg_.sim_door_match_max_m, 'f', 2),
+                                 q(cfg_.sim_door_endpoint)});
+    sim_door_proc_.start();
+    log_.write("sim_door", QJsonObject{{"args", args}, {"ok", true}, {"door", q(door)}, {"world_x", w.x()}, {"world_y", w.y()}});
+    window_->append_system(QStringLiteral("simulator — %1").arg(sim_door_what_));
+    return QStringLiteral("OK: asked the simulator to %1 %2. The chat tells the person when it answers; do not say it "
+                          "is done.").arg(action, q(door));
+}
+
+void ChatSession::on_sim_door_done(int code)
+{
+    const QJsonObject r = QJsonDocument::fromJson(sim_door_proc_.readAllStandardOutput().trimmed()).object();
+    QString msg;
+    if (r.value("ok").toBool())
+        msg = QStringLiteral("the simulator is moving it (%1, %2 m from where the map has it); it takes a few seconds")
+                  .arg(r.value("id").toString()).arg(r.value("dist_m").toDouble(), 0, 'f', 2);
+    else if (r.contains("refusal"))
+        msg = QStringLiteral("the simulator refused (%1)").arg(r.value("refusal").toString());
+    else if (r.contains("error"))
+        msg = QStringLiteral("not done: ") + r.value("error").toString();
+    else
+        msg = QStringLiteral("not done: the helper failed (exit %1): %2")
+                  .arg(code).arg(QString::fromUtf8(sim_door_proc_.readAllStandardError()).trimmed().right(200));
+    log_.write("sim_door_done", QJsonObject{{"what", sim_door_what_}, {"result", r}, {"exit", code}});
+    window_->append_system(QStringLiteral("simulator — %1: %2").arg(sim_door_what_, msg));
+    push_history({{"role", "tool"}, {"tool_name", "sim_door"}, {"content", sim_door_what_ + ": " + msg}});
 }
 
 // ─── the side canvas (canvas_runner.h / canvas_snapshot.h / canvas_panel.h) ──────────────────────────────────────

@@ -171,11 +171,15 @@ inline GateResult validate(const ToolCall& call, const GateFacts& f, const GateL
     return r;
 }
 
-/// ^(stop|para|detente|alto)\b — the stop fast path. Sent at once, without the model.
+/// ^(stop|para|detente|alto)\b — the stop fast path. Sent at once, without the model. NOT when the rest names a
+/// program ("stop agent chair concept", "para la retina", "stop room_concept"): that is agent_control's, and live
+/// 2026-10-19 it stopped the robot instead.
 inline bool is_stop(const std::string& text)
 {
     static const std::regex re(R"(^(stop|para|detente|alto)\b)", std::regex::icase);
-    return std::regex_search(ascii_lower_trim(text), re);
+    static const std::regex program(R"(agent|concept|program|proce[sx]|retina|controll?er|controlador|ltsm|episodic|_)");
+    const std::string t = ascii_lower_trim(text);
+    return std::regex_search(t, re) and not std::regex_search(t, program);
 }
 
 /// Locale-proof number (CLAUDE.md: never strtod/stod under es_ES).

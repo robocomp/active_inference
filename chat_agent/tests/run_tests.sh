@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Offline checks for chat_agent's pure pieces (no DSR, no ollama): NDJSON splitter, CommandGate, object facts,
-# look()'s frame preparation + request JSON (OpenCV + Qt Core), the mission IR + its JSON and text forms (Qt Core), the mission interpreter's step machine, its progress/history JSON, the plan view's model, the system tools, the episodic-memory tools' answers, and the side canvas (fast-path phrases, the script runner + panel, the stock scripts), and the status bar's GPU memory reading.
+# look()'s frame preparation + request JSON (OpenCV + Qt Core), the mission IR + its JSON and text forms (Qt Core), the mission interpreter's step machine, its progress/history JSON, the plan view's model, the system tools, the episodic-memory tools' answers, and the side canvas (fast-path phrases, the script runner + panel, the stock scripts), the status bar's GPU memory reading, go_around's loop and sim_door's frame change.
 set -euo pipefail
 cd "$(dirname "$0")"
 out=$(mktemp -d)
@@ -8,6 +8,8 @@ for t in test_ndjson test_gate test_objects test_canvas test_gpu test_fleet; do
     g++ -std=c++23 -O0 -g -Wall -Wextra -o "$out/$t" "$t.cpp"
     "$out/$t"
 done
+g++ -std=c++23 -O0 -g -Wall -Wextra -isystem /usr/include/eigen3 -o "$out/test_sim_door" test_sim_door.cpp
+"$out/test_sim_door"
 g++ -std=c++23 -O0 -g -Wall -Wextra -Wno-deprecated-enum-enum-conversion -Wno-deprecated-literal-operator -fPIC \
     -o "$out/test_look" test_look.cpp \
     $(pkg-config --cflags opencv4 Qt6Core | sed "s/-I/-isystem /g") $(pkg-config --libs opencv4 Qt6Core)

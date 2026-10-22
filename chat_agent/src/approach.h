@@ -221,6 +221,60 @@ inline bool has_any(const std::string& s, std::initializer_list<const char*> wor
                                       : "'" + words_raw + "' is not a side; it offers: " + offered);
 }
 
+// ── "go around the table" (2026-10-19) ───────────────────────────────────────────────────────────────────────────
+// A full loop: one mission of go_to steps on a ring around the object, each facing it, starting from the stop
+// nearest the robot and ending back there. The stops are the object's own approach sides when it offers at least
+// three (they are standpoints it vouches for); otherwise kRingStops points at its footprint radius + standoff. A stop
+// the controller cannot reach (against a wall, taken) is SKIPPED, not fatal: a loop with one side blocked is still the
+// loop the person asked for, and the controller's planner drives each leg around the object itself.
+// `left` = set off to the robot's left as it faces the object, i.e. clockwise seen from above.
+
+inline constexpr int kRingStops = 6;
+
+[[nodiscard]] inline rc::mission::Mission go_around_mission(const std::string& object, const std::string& room,
+                                                            Xy centre, Xy robot, const std::vector<ApproachSide>& sides,
+                                                            double ring_radius, bool left)
+{
+    using namespace rc::mission;
+    std::vector<ApproachPoint> stops;
+    if (sides.size() >= 3)
+        for (const auto& s : sides) stops.push_back({s.x, s.y, s.yaw});
+    else
+        for (int i = 0; i < kRingStops; ++i)
+        {
+            const double a = 2.0 * std::numbers::pi * i / kRingStops;
+            stops.push_back({centre.x + ring_radius * std::cos(a), centre.y + ring_radius * std::sin(a), a + std::numbers::pi});
+        }
+    const auto angle = [&](const ApproachPoint& p) { return std::atan2(p.y - centre.y, p.x - centre.x); };
+    std::ranges::sort(stops, std::less{}, angle);   // counter-clockwise
+    if (left) std::ranges::reverse(stops);           // clockwise
+    // Start at the stop nearest the robot, so the loop does not begin by crossing to the far side.
+    const auto first = std::ranges::min_element(stops, std::less{}, [&](const ApproachPoint& p)
+                                                { return std::hypot(p.x - robot.x, p.y - robot.y); });
+    std::ranges::rotate(stops, first);
+    stops.push_back(stops.front());   // back to where it set off
+    Mission m{.title = "go around " + object};
+    for (std::size_t i = 0; i < stops.size(); ++i)
+    {
+        Ref to{.kind = Ref::Kind::Pose, .pose = Pose{.room = room, .x = stops[i].x, .y = stops[i].y, .yaw = stops[i].yaw}};
+        m.steps.push_back(Step{.id = std::to_string(i + 1), .op = "go_to", .args = {{"to", to}},
+                               .on_fail = OnFail{.kind = OnFail::Kind::Skip}});
+    }
+    return m;
+}
+
+/// "left" / "right" (English and Spanish) → set off to the robot's left; "" = left. nullopt = not a direction.
+[[nodiscard]] inline std::optional<bool> parse_around_direction(const std::string& words_raw)
+{
+    const std::string w = detail::lower(words_raw);
+    if (w.find_first_not_of(' ') == std::string::npos) return true;
+    using detail::has_any;
+    if (has_any(w, {"right", "derecha", "counterclockwise", "counter-clockwise", "anticlockwise", "antihorario"}))
+        return false;
+    if (has_any(w, {"left", "izquierda", "clockwise", "horario"})) return true;
+    return std::nullopt;
+}
+
 /// A command as people read it: a mission payload ('{' — chat_intention carries both) by its title, else as written.
 [[nodiscard]] inline std::string display_command(const std::string& command)
 {

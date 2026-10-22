@@ -46,6 +46,10 @@ int main()
 
     assert(is_stop("stop") and is_stop("Stop!") and is_stop("para ya") and is_stop("detente") and is_stop("alto")); ++checks;
     assert(not is_stop("parar") and not is_stop("please stop") and not is_stop("stopwatch")); ++checks;
+    // naming a program is agent_control's, not a robot stop (live 2026-10-19)
+    assert(not is_stop("stop agent chair concept") and not is_stop("stop room_concept") and not is_stop("para la retina")
+           and not is_stop("stop the controller") and not is_stop("para el agente de sillas")); ++checks;
+    assert(is_stop("stop now") and is_stop("para, para")); ++checks;
 
     auto d = parse_direct("cross door_19");
     assert(d and d->name == "cross_door" and d->door == "door_19"); ++checks;

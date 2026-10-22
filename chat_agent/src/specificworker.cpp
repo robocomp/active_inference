@@ -159,6 +159,11 @@ rc::chat::SessionConfig SpecificWorker::load_session_config(const ConfigLoader& 
     c.fleet_lock = r.s("Fleet.lock", c.fleet_lock,
             "agent_control: tour lock file (\"\" = $XDG_RUNTIME_DIR/ai_fleet_tour.lock); refused while its PID lives");
     c.fleet_log_dir = r.s("Fleet.log_dir", c.fleet_log_dir, "agent_control: agents started by the chat log here");
+    c.sim_door_endpoint = r.s("SimDoor.endpoint", c.sim_door_endpoint,
+            "sim_door: the simulator's DoorControl proxy (\"\" = no sim_door tool; it also needs robot_gt_* on the robot node)");
+    c.sim_door_script = r.s("SimDoor.script", c.sim_door_script, "sim_door: the helper that talks to DoorControl");
+    c.sim_door_match_max_m = r.d("SimDoor.match_max_m", c.sim_door_match_max_m,
+            "sim_door: the nearest Webots door farther than this from our door is refused (m)");
     return c;
 }
 

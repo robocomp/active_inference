@@ -125,6 +125,37 @@ int main()
         CHECK(sides_line(chair).starts_with("front (its own front; left side as seen from here), "));
     }
 
+    // go around: a ring when the object offers fewer than 3 sides, starting nearest the robot, back to the start
+    {
+        const auto m = go_around_mission("table_1", "room_1", {0, 0}, {3, 0}, {}, 1.0, /*left=*/true);
+        CHECK(m.title == "go around table_1");
+        CHECK(m.steps.size() == std::size_t(kRingStops + 1));
+        const auto pose = [&](std::size_t i) { return m.steps[i].ref("to")->pose; };
+        CHECK(near(pose(0).x, 1.0) and near(pose(0).y, 0.0) and near(std::abs(pose(0).yaw), std::numbers::pi));
+        // facing the table from +x, the robot's left is -y: clockwise
+        CHECK(near(pose(1).x, 0.5) and pose(1).y < -0.8);
+        CHECK(pose(kRingStops) == pose(0));
+        CHECK(std::ranges::all_of(m.steps, [](const auto& s) { return s.on_fail.kind == rc::mission::OnFail::Kind::Skip; }));
+        CHECK(std::ranges::all_of(m.steps, [](const auto& s) { return s.op == "go_to" and s.ref("to")->pose.room == "room_1"; }));
+        CHECK(rc::mission::decode_json(rc::mission::encode_json(m)).has_value());
+    }
+    // …the object's own sides when it offers 3 or more, counter-clockwise when going right
+    {
+        const std::vector<ApproachSide> sides{{"xp", 1, 0, 3.14}, {"yp", 0, 1, -1.57}, {"xn", -1, 0, 0}, {"yn", 0, -1, 1.57}};
+        const auto m = go_around_mission("chair_1", "room_1", {0, 0}, {0, 3}, sides, 9.0, /*left=*/false);
+        CHECK(m.steps.size() == 5u);
+        std::vector<std::pair<double, double>> got;
+        for (const auto& s : m.steps) got.emplace_back(s.ref("to")->pose.x, s.ref("to")->pose.y);
+        CHECK((got == std::vector<std::pair<double, double>>{{0, 1}, {-1, 0}, {0, -1}, {1, 0}, {0, 1}}));
+        CHECK(near(m.steps[1].ref("to")->pose.yaw, 0.0));   // the side's own yaw, not a computed one
+    }
+    CHECK(parse_around_direction("") == std::optional<bool>(true));
+    CHECK(parse_around_direction("por la derecha") == std::optional<bool>(false));
+    CHECK(parse_around_direction("to the left") == std::optional<bool>(true));
+    CHECK(parse_around_direction("counterclockwise") == std::optional<bool>(false));
+    CHECK(parse_around_direction("clockwise") == std::optional<bool>(true));
+    CHECK(not parse_around_direction("twice").has_value());
+
     std::println("test_approach: {} checks, {} failures", checks, failures);
     return failures == 0 ? 0 : 1;
 }
