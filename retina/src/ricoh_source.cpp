@@ -43,6 +43,7 @@ std::optional<PerceptionFrame> RicohSource::operator()()
     pf.rgbd.bgr = pano.clone();   // owned BGR panorama
     pf.stamp    = stamp;
     pf.is_360   = true;
+    pf.azimuth_tune_rad = static_cast<double>(azimuth_tune_deg_) * M_PI / 180.0;
 
     // room<-ricoh at the panorama stamp (real ts → no InnerEigenAPI cache), plus the runtime az-tune.
     if (inner_eigen_ && graph_)

@@ -195,6 +195,7 @@ private:
     rc::LockOn::Reading read_servo_reading(std::uint64_t feedback_node_id) const;
     // Perception producer's monotonic frame counter (mask_frame_id), or -1. See the definition.
     [[nodiscard]] int masks_frame_seq() const;
+    [[nodiscard]] std::optional<std::uint64_t> front_mask_node_id() const;   // front camera's mask node (cached)
     bool goal_met(std::uint64_t feedback_node_id) const;
     // Contract-driven Orient (Policy::Orient): rotate IN PLACE toward `target_yaw` (no navigation) until the
     // contract's completion predicate fires (a depth detection arrives) or the contract times out. Returns
@@ -505,11 +506,12 @@ private:
     bool          dwell_logged_ = false;
     // ── CONFIRMING LOOKS (see ControllerParams::affordance_dwell_mask_hits) ───────────────────────
     // How many separate producer frames have carried a mask of the affordance's object since the dwell
-    // began. Counted off the "masks" node directly rather than through the panel's composer: the
+    // began. Counted off the front camera's mask node directly rather than through the panel's composer: the
     // composer only runs while the affordance WINDOW IS OPEN, and behaviour that depends on whether a
     // window is open is not behaviour, it is a coincidence.
     int           dwell_mask_hits_ = 0;
     int           dwell_last_mask_frame_ = -1;
+    mutable std::uint64_t front_mask_node_id_ = 0;   // cache for front_mask_node_id()
     // Whether THIS dwell is waiting on an acquisition at all — decided once, when it is armed, from the
     // finished affordance's contract and whether its look succeeded. Latched rather than recomputed:
     // the contract is re-resolved as soon as the next target is picked, so asking again mid-dwell would

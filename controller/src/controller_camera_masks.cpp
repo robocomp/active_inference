@@ -504,15 +504,11 @@ bool ControllerCameraMasks::pump(const std::string &target_object,
     v.target_label = target_object.empty() ? QStringLiteral("—")
                                            : QString::fromStdString(target_object);
 
-    // Which slices came from the ZED. The panorama's masks index a DIFFERENT image, so drawing them on
-    // this one would put silhouettes at coordinates that mean nothing here — read straight off the node
-    // because MaskSlice does not carry the source (0 = zed, 1 = ricoh).
-    std::vector<float> source;
-    if (const auto node = graph_->get_node("masks"); node.has_value())
-        if (const auto s = graph_->get_attrib_by_name<mask_source_att>(node.value()); s.has_value())
-            source = s.value().get();
-    const auto is_zed = [&source](std::size_t i)
-    { return i >= source.size() or source[i] < 0.5f; };   // absent attribute ⇒ a zed-only producer
+    // Which slices came from the front camera. The panorama's masks index a DIFFERENT image, so drawing
+    // them on this one would put silhouettes at coordinates that mean nothing here. The merged packet's
+    // slices carry their source (0 = zed, 1 = ricoh), set from each camera's own mask node.
+    const auto is_zed = [&packet](std::size_t i)
+    { return i >= packet.slices.size() or packet.slices[i].is_zed(); };
 
     // ── COMPOSE ───────────────────────────────────────────────────────────────────────────────────
     // The canvas is the camera frame when there is one, and a plain ground the same size as the mask
