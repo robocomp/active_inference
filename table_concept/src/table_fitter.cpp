@@ -1059,7 +1059,7 @@ void TableFitter::log_ai2_csv(const TableInstance& inst, int npts, float R, bool
                  // NBV emission: what the planner proposed THIS cycle (the affordance node holds the
                  // FROZEN pose during a claim, so it cannot answer this). nbv_vfov=0 ⇒ the camera
                  // model was still incomplete when the proposal was made.
-                 << "nbv_standoff,nbv_tx,nbv_ty,nbv_pdetect,nbv_fill,nbv_vfov,nbv_gain_raw,nbv_gain_pub,ricoh_det,ricoh_attn,ex_pclear,score_logit,score_n,ct_edge_excess,ct_edge_n,ct_depth_verdict,ct_depth_bias,ct_depth_n,ct_dL\n";
+                 << "nbv_standoff,nbv_tx,nbv_ty,nbv_pdetect,nbv_fill,nbv_vfov,nbv_gain_raw,nbv_gain_pub,ricoh_det,ricoh_attn,ex_pclear,score_logit,score_n,ct_edge_excess,ct_edge_n,ct_depth_verdict,ct_depth_bias,ct_depth_n,ct_dL,bsm_p,bsm_n_c,bsm_n_own,bsm_az,bsm_el,bsm_lr\n";
     }
     const auto& s = inst.ai2_belief.state();
     const auto& S = inst.ai2_belief.covariance();
@@ -1115,7 +1115,9 @@ void TableFitter::log_ai2_csv(const TableInstance& inst, int npts, float R, bool
              << ',' << ricoh_dets_ << ',' << ricoh_attention_
              << ',' << inst.dbg_ex_pclear << ',' << inst.score_logit_mean << ',' << inst.score_n
              << ',' << inst.dbg_ct_edge_excess << ',' << inst.dbg_ct_edge_n << ',' << inst.dbg_ct_depth_verdict
-             << ',' << inst.dbg_ct_depth_bias_m << ',' << inst.dbg_ct_depth_n << ',' << inst.dbg_ct_dL << '\n';
+             << ',' << inst.dbg_ct_depth_bias_m << ',' << inst.dbg_ct_depth_n << ',' << inst.dbg_ct_dL
+             << ',' << inst.dbg_bsm_p << ',' << inst.dbg_bsm_n_c << ',' << inst.dbg_bsm_n_own
+             << ',' << inst.dbg_bsm_az << ',' << inst.dbg_bsm_el << ',' << inst.dbg_bsm_lr << '\n';
     ai2_csv_.flush();
 }
 

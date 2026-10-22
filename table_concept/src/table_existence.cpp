@@ -116,6 +116,11 @@ void TableExistence::update_and_remove(TableFitter& fitter, ConceptLidarIngestor
         // Hoisted with it: the debounce advances only on an evidence cycle, but the DECISION is read
         // outside that block, so the two must not share a scope.
         bool  doomed_now = false;
+        // The blind-spot map's viewpoint for this cycle, set where the silhouette is judged and used again to
+        // LABEL the map once the contour channel has spoken (BLIND_SPOT_MAP.md §3).
+        bool  have_view = false;
+        rc::detect::Viewpoint view;
+        float view_visible = 0.0f;
 
         // SILHOUETTE / MASK channel (pixel-level) — CAMERA clock: project the tabletop silhouette and compare,
         // per predicted-VISIBLE pixel, against the current YOLO foreground. Lit by a "table" mask ⇒ occupancy
@@ -209,6 +214,27 @@ void TableExistence::update_and_remove(TableFitter& fitter, ConceptLidarIngestor
                 }
                 p_detect *= p_clear;
                 inst.dbg_ex_pclear = p_clear;
+                // ★THE LEARNED BLIND SPOTS. The geometry + score grade above are the PRIOR on whether YOLO fires
+                // from here; the map corrects it with what this table (and every table of the class) actually
+                // did from nearby viewpoints. With no evidence near this viewpoint it returns the prior exactly.
+                // Visibility and centring still multiply, because the map's labels were weighted by them.
+                inst.dbg_bsm_p = -1.0f;
+                if (cfg_.existence_blind_spot_map and sil.has_cam)
+                {
+                    const float dx = sil.cam_x - bs.cx, dy = sil.cam_y - bs.cy, dz = sil.cam_z - bs.H;
+                    const float horiz = std::hypot(dx, dy);
+                    view.az = rc::detect::fold_bearing(std::atan2(dy, dx) - bs.yaw, inst.subtype == "round");
+                    view.el = std::atan2(dz, horiz);
+                    view.lr = std::log(std::max(0.05f, std::hypot(horiz, dz)));
+                    view_visible = sil.in_fov_frac();
+                    have_view = true;
+                    const float vis = std::max(1e-3f, sil.in_fov_frac() * sil.central_frac());
+                    const float p_prior = std::clamp(p_detect / vis, 0.0f, 1.0f);   // the prior without visibility
+                    const auto ans = bsm_.query(id, view, p_prior);
+                    p_detect = ans.p * sil.in_fov_frac() * sil.central_frac();
+                    inst.dbg_bsm_p = ans.p; inst.dbg_bsm_n_c = ans.n_c; inst.dbg_bsm_n_own = ans.n_own;
+                    inst.dbg_bsm_az = view.az; inst.dbg_bsm_el = view.el; inst.dbg_bsm_lr = view.lr;
+                }
                 cycle_p_detect = p_detect;
                 const float verify = raw_free * (1.0f - p_detect);        // un-confident absence → go-verify surprise
                 // p_detect must scale the SATURATED per-cycle log-odds, NOT the raw pixel count. Scaling the count
@@ -306,6 +332,11 @@ void TableExistence::update_and_remove(TableFitter& fitter, ConceptLidarIngestor
                     }
                 }
             }
+            // LABEL the blind-spot map (BLIND_SPOT_MAP.md §3): YOLO had its chance this cycle (fresh mask frame,
+            // viewpoint judged) and the IMAGE says how sure we are the table was there. hit = a mask was
+            // assigned to it. A refuting/abstaining contour weighs 0 — never labelled from the belief itself.
+            if (have_view and fresh_masks and n_used > 0 and std::isfinite(verdict))
+                bsm_.observe(id, view, observed, std::max(0.0f, std::tanh(verdict)) * view_visible);
             const rc::exist::Evidence ev_c = rc::exist::contour_evidence(verdict, n_used, sm);
             if (ev_c.n_reached > 0 and std::isfinite(ev_c.log_odds_delta))
             {
@@ -510,6 +541,7 @@ void TableExistence::update_and_remove(TableFitter& fitter, ConceptLidarIngestor
             if (on_remove) on_remove(id, it->second);
             it->second.affordance.remove();
         }
+        bsm_.flush(id);   // its open visit becomes a stored sample: the class keeps what this table taught
         fitter.forget_node(id);
         G_->delete_node(id);
     }

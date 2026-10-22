@@ -50,6 +50,8 @@ struct SilhouetteExistence
     int    img_w = 0, img_h = 0;
     int   n_occluded   = 0;    // in-frustum samples hidden by a nearer (non-table) mask
     float mean_range_m = 0.0f; // mean camera→silhouette depth over the detectable samples (absence confidence ∝ 1/range)
+    bool  has_cam = false;     // camera position, room frame, at the pose this silhouette was judged from
+    float cam_x = 0.0f, cam_y = 0.0f, cam_z = 0.0f;
     // "Should be visible" fraction: n_detectable / n_total. Absence is only evidence of removal in
     // proportion to how much of the object the sensor could actually have seen from here (real FoV).
     float in_fov_frac() const { return n_total > 0 ? static_cast<float>(n_detectable) / n_total : 0.0f; }

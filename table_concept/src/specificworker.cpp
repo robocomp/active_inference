@@ -146,6 +146,9 @@ void SpecificWorker::request_shutdown()
 
     save_window_settings();
     save_dashboard_geometry();   // the standalone dashboard is not in `windows`, so save it explicitly
+    if (existence_ and cfg_.existence_blind_spot_map)   // the class map survives the run (BLIND_SPOT_MAP.md §7)
+        std::print("table_concept: blind-spot map {} ({})\n", cfg_.existence_blind_spot_file,
+                   existence_->save_blind_spot_map() ? "saved" : "SAVE FAILED");
     save_strip_geometry();       // …nor is the compact belief strip
 
     cleanup_owned_nodes();
@@ -271,6 +274,9 @@ void SpecificWorker::initialize()
     fitter_ = std::make_unique<rc::TableFitter>(
         G, inner_eigen_.get(), cfg_, mask_ingestor_.get(), scene_graph_.get());
     existence_ = std::make_unique<rc::TableExistence>(G, cfg_);   // evidence-based removal (existence log-odds)
+    if (cfg_.existence_blind_spot_map)
+        std::print("table_concept: blind-spot map: {} class samples loaded from {}\n",
+                   existence_->load_blind_spot_map(), cfg_.existence_blind_spot_file);
 
     // Part B: localization/chain covariance on the published RT edge (mirrors bottle_concept).
     gaussian_api_ = std::make_unique<DSR::InnerGaussianAPI>(G.get());
