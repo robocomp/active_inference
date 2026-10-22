@@ -406,9 +406,16 @@ struct AlongWallResult
 // One cycle: predict the registration offset, then — if a span was measured — a probabilistic-data-association update of
 // [s, w, h, b] with the chosen span. `sigma0_sq` is the frame's stationary along-wall registration variance (pose chain +
 // range), `dt` the time since the last call, `p_detect` clear_fraction() of the leaf posterior.
+// ★Task D-C round 2 (tour3C): THE APERTURE IS IN ITS OWN WALL. `wall_lo` / `wall_hi` are the along-wall extent of the
+// wall the doorway is cut in (rc::door::door_wall_extent), placed with the polygon's own σ `wall_sigma`
+// (Existence.BoundarySigmaM). A span is this door's only if the aperture it measures — [z, z + w] — lies on that wall:
+// each candidate's likelihood carries Φ((z − lo)/σ)·Φ((hi − z − w)/σ), σ² = wall_sigma² + R. tour3C: a restored DOOR_0
+// (σ_s 0.6, the birth seed's) associated the through-span BEYOND its wall's end — the open stretch past the partition
+// corner 1.2-1.5 m away — and slid there, off its wall; the wall-band prior then condemned it. NaN ⇒ no polygon, no term.
 inline AlongWallResult along_wall_update(rc::DoorBelief& belief, AlongWallState& st, const std::vector<OpeningRun>& runs,
                                          const WallRegistration& reg, float p_detect, float sigma0_sq, float range_m,
-                                         float dt_s)
+                                         float dt_s, float wall_lo = std::numeric_limits<float>::quiet_NaN(),
+                                         float wall_hi = std::numeric_limits<float>::quiet_NaN(), float wall_sigma = 0.f)
 {
     AlongWallResult res;
     res.n_runs = static_cast<int>(runs.size());
@@ -460,7 +467,14 @@ inline AlongWallResult along_wall_update(rc::DoorBelief& belief, AlongWallState&
         const float R = slack * slack / 12.f + 0.25f * (r.var_left + r.var_right + var_w) + r_rot;
         const float Sj = S_prior + R;
         const float nu = z - (s + st.b);
-        const float g = std::exp(-0.5f * nu * nu / Sj) / std::sqrt(2.f * std::numbers::pi_v<float> * Sj);
+        float g = std::exp(-0.5f * nu * nu / Sj) / std::sqrt(2.f * std::numbers::pi_v<float> * Sj);
+        if (std::isfinite(wall_lo) or std::isfinite(wall_hi))
+        {
+            const float se = std::sqrt(wall_sigma * wall_sigma + R);
+            const auto Phi = [](float x) { return 0.5f * std::erfc(-x / std::numbers::sqrt2_v<float>); };
+            if (std::isfinite(wall_lo)) g *= Phi((z - wall_lo) / std::max(1e-4f, se));
+            if (std::isfinite(wall_hi)) g *= Phi((wall_hi - z - w) / std::max(1e-4f, se));
+        }
         const float e = res.p_detect * g;
         sum_e += e;
         if (e > best_e) { best_e = e; best_z = z; best_R = R; best_S = Sj; }

@@ -224,6 +224,13 @@ public:
     const Eigen::Matrix<float, 4, 4>&  covariance_full() const { return Sigma_; }
     const DoorBeliefParams&            params()     const { return params_; }
     void set_state(const DoorBeliefState& s) { state_ = s; }
+    // Task D-C round 2: the along-wall placement's prior σ when the belief is seeded from something better than the birth
+    // seed (a remembered place): Σ_ss = sd², s uncorrelated with the rest.
+    void set_placement_sd(float sd)
+    {
+        Sigma_.row(0).setZero(); Sigma_.col(0).setZero();
+        Sigma_(0, 0) = std::max(1e-8f, sd * sd);
+    }
     void set_params(const DoorBeliefParams& p) { params_ = p; }
     // Author the wall frame this door is anchored to (the fitter calls this each cycle from the associated
     // room-polygon wall). u is normalised defensively so the SDF's along/across split stays orthonormal.

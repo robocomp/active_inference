@@ -64,13 +64,17 @@ struct IdentityRow
     /// Absent ⇒ unknown age (a 17-column row): the remembered belief is not trusted beyond its identity (see
     /// restore_existence_prior).
     std::optional<std::int64_t> seen_wall_ms;
+    /// Task D-C round 2 (tour3C): the aperture centre's σ along its wall when written (m) — how well the remembered PLACE was
+    /// known. Absent ⇒ unknown (a row written before the column existed): the restored belief keeps the birth seed's σ.
+    std::optional<float> place_sd;
 };
 
 inline constexpr std::string_view kIdentityHeader =
-    "room,name,ap_x,ap_y,yaw,width,height,depth,exist_logodds,hinge_x,hinge_y,open_x,open_y,hinge_llr,swing_llr,phi,phi_sigma,seen_ms";
+    "room,name,ap_x,ap_y,yaw,width,height,depth,exist_logodds,hinge_x,hinge_y,open_x,open_y,hinge_llr,swing_llr,phi,phi_sigma,seen_ms,place_sd";
 inline constexpr std::size_t kIdentityColsOld  = 4;
 inline constexpr std::size_t kIdentityCols17   = 17;   ///< 2026-10-20 .. 10-21: no seen_ms column (age unknown)
-inline constexpr std::size_t kIdentityColsFull = 18;
+inline constexpr std::size_t kIdentityCols18   = 18;   ///< 2026-10-21 .. 10-22: no place_sd column (place precision unknown)
+inline constexpr std::size_t kIdentityColsFull = 19;
 
 /// A transform read before the room existed resolves to |t| ~ 1e13 m (try35): not a place.
 inline constexpr float kIdentityMaxPlaceM = 1.0e3f;
@@ -125,7 +129,8 @@ inline ParsedIdentityTable parse_identity_table(std::istream& in)
         if (line.empty() or line == "\r") continue;
         const auto c = detail::split(line);
         float x = 0.f, y = 0.f;
-        if ((c.size() != kIdentityColsOld and c.size() != kIdentityCols17 and c.size() != kIdentityColsFull) or c[0].empty()
+        if ((c.size() != kIdentityColsOld and c.size() != kIdentityCols17 and c.size() != kIdentityCols18
+             and c.size() != kIdentityColsFull) or c[0].empty()
             or not c[1].starts_with("door_") or not detail::num(c[2], x) or not detail::num(c[3], y)
             or std::hypot(x, y) > kIdentityMaxPlaceM)
         {
@@ -150,8 +155,10 @@ inline ParsedIdentityTable parse_identity_table(std::istream& in)
                 m.open_dir = {ox, oy};
                 r.leaf = m;
             }
-            if (std::int64_t t = 0; c.size() == kIdentityColsFull and detail::num_i64(c[17], t) and t > 0)
+            if (std::int64_t t = 0; c.size() >= kIdentityCols18 and detail::num_i64(c[17], t) and t > 0)
                 r.seen_wall_ms = t;
+            if (float sd = 0.f; c.size() == kIdentityColsFull and detail::num(c[18], sd) and sd > 0.f)
+                r.place_sd = sd;
         }
         out.rows.push_back(std::move(r));
     }
@@ -183,6 +190,8 @@ inline void write_identity_table(std::ostream& f, std::span<const IdentityRow> r
         f << ','; opt(hl, hl ? i.leaf->phi_sigma : 0.f);
         f << ',';
         if (i.seen_wall_ms.has_value() and *i.seen_wall_ms > 0) f << *i.seen_wall_ms;
+        f << ',';
+        if (i.place_sd.has_value() and std::isfinite(*i.place_sd) and *i.place_sd > 0.f) f << *i.place_sd;
         f << '\n';
     }
 }
@@ -271,6 +280,9 @@ inline bool upsert_row(std::vector<IdentityRow>& rows, const std::string& room, 
     IdentityRow& t = *it;
     const std::string incoming = row.name;
     t.xy = t.xy + a * (row.xy - t.xy);
+    // the place's precision moves with the place (Task D-C round 2): a mixed place is as well known as the mix of the two
+    if (row.place_sd.has_value())
+        t.place_sd = t.place_sd.has_value() ? mix(*t.place_sd, *row.place_sd) : *row.place_sd;
     if (row.pose.has_value())
     {
         if (t.pose.has_value())
@@ -323,6 +335,7 @@ inline int strip_restorable(std::vector<IdentityRow>& rows, std::string_view roo
             r.leaf.reset();
             r.exist_logodds.reset();
             r.seen_wall_ms.reset();
+            r.place_sd.reset();
             ++n;
         }
     return n;
@@ -409,6 +422,9 @@ void seed_restored_instance(Inst& inst, const IdentityRow& r, float prior_L, flo
     // Task D-C: the removal decision weighs what the data do SINCE this entry (DoorFitState::existence_entry_L), and the
     // door's age carries on from the row's stamp (a restored door not seen this visit keeps aging).
     inst.existence_entry_L = inst.existence.logodds();
+    inst.existence_since_entry = 0.0f;
+    // Task D-C round 2 (tour3C): the remembered place's precision seeds the belief's along-wall σ (DoorFit's lazy init).
+    inst.remembered_place_sd = r.place_sd;
     inst.last_detection_wall_ms = r.seen_wall_ms.value_or(0);
     inst.matched_frames   = std::max(inst.matched_frames, kFitWithoutFreshDataFrames);
     inst.seed_wh_from_box = true;

@@ -1869,6 +1869,13 @@ SpecificWorker::DoorIdentity SpecificWorker::identity_of(const rc::DoorInstance&
         row.exist_logodds = rc::door::remembered_logodds(inst);   // review I-1: the evidence, without the band prior
     if (inst.last_detection_wall_ms > 0)
         row.seen_wall_ms = inst.last_detection_wall_ms;   // Task D-C: the remembered belief's age
+    if (inst.ai2_initialized)
+    {
+        // Task D-C round 2: how well the PLACE is known — the aperture centre s + w/2 along its wall.
+        const auto S = inst.ai2_belief.covariance();
+        const float v = S(0, 0) + S(0, 1) + 0.25f * S(1, 1);
+        if (std::isfinite(v) and v > 0.0f) row.place_sd = std::sqrt(v);
+    }
     const Eigen::Vector2f open = inst.leaf.swing * inst.aperture.across_u();
     if (inst.leaf_pose.hinge_xy.allFinite() and open.allFinite() and std::isfinite(inst.phi_est)
         and std::isfinite(inst.phi_sigma) and std::isfinite(inst.hinge_llr) and std::isfinite(inst.swing_llr))

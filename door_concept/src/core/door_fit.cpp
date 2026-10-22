@@ -602,6 +602,18 @@ float DoorFit::run_inference(rc::DoorFitState& inst, const DoorObservation& obse
             inst.leaf_side_hint.reset();
         }
         inst.ai2_belief = rc::DoorBelief(s0, p);
+        // ★Task D-C round 2 (tour3C): A REMEMBERED PLACE IS NOT A BIRTH SEED. A door restored from memory came back with the
+        //  birth seed's σ_s = Door.PriorAlongWallStd 0.6 m although its place had been fitted to a few cm before the room was
+        //  left; at that width the LiDAR's along-wall association took the open stretch past its wall's end, 1.2-1.5 m away,
+        //  for its opening and slid it there (tour3C DOOR_0, then removed by the wall-band prior). The memory's own precision
+        //  (IdentityRow::place_sd) plus the room polygon's registration on re-entry (Existence.BoundarySigmaM, the σ the band
+        //  prior and the recess prior read) is what the remembered place is known to. A row without the column keeps 0.6.
+        if (inst.remembered_place_sd.has_value())
+        {
+            const float sd = *inst.remembered_place_sd, sb = cfg_.exist_boundary_sigma_m;
+            inst.ai2_belief.set_placement_sd(std::sqrt(sd * sd + sb * sb));
+            inst.remembered_place_sd.reset();
+        }
         inst.ai2_initialized = true;
         resign_leaf_llrs(inst);   // M-1
     }
@@ -1254,14 +1266,20 @@ void DoorFit::estimate_phi(rc::DoorFitState& inst)
         const auto ap = inst.ai2_belief.aperture();
         const auto runs = rc::door::measure_openings(ap, reg_sweep.origin, reg_sweep.pts);
         const Eigen::Vector2f u = ap.wall_u;
-        const float chain_s = u.x() * u.x() * inst.chain_cov_xx + u.y() * u.y() * inst.chain_cov_yy;
+        const float chain_s = u.x() * u.x() * inst.chain_cov_xx + 2.0f * u.x() * u.y() * inst.chain_cov_xy
+                            + u.y() * u.y() * inst.chain_cov_yy;
         const float range = (ap.centre_xy() - reg_sweep.origin.head<2>()).norm();
         const float rl = cfg_.ai2_range_noise_lat_per_m * range;
         const float dt_aw = inst.along_wall_t.time_since_epoch().count() == 0
                           ? 0.0f : std::chrono::duration<float>(now - inst.along_wall_t).count();
         inst.along_wall_t = now;
+        // Task D-C round 2 (tour3C): the aperture stays in its own wall — the extent the polygon gives it.
+        float wall_lo = std::numeric_limits<float>::quiet_NaN(), wall_hi = wall_lo;
+        if (has_room_polygon())
+            std::tie(wall_lo, wall_hi) = rc::door::door_wall_extent(ap, room_polygon_, nz.depth_lo, nz.depth_hi);
         inst.dbg_along = rc::door::along_wall_update(inst.ai2_belief, inst.along_wall, runs, reg_sweep.reg,
-                                                     rc::door::clear_fraction(post.curve), chain_s + rl * rl, range, dt_aw);
+                                                     rc::door::clear_fraction(post.curve), chain_s + rl * rl, range, dt_aw,
+                                                     wall_lo, wall_hi, cfg_.exist_boundary_sigma_m);
     }
     log_phi_csv(inst, rays, lr.frame_loglik, lr.prior_mean, lr.prior_sigma, post.mean, post.sigma, post.measured);
     // phi_support was the camera mask overlap at the claimed angle; -1 = "the camera does not score phi".

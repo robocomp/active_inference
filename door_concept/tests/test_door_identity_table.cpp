@@ -210,6 +210,26 @@ int main()
         w.exist_logodds = -4.0f; w.seen_wall_ms = kNowMs + 5000;
         upsert_row(t, "room_1", w, 1.45f, 0.02f);
         CHECK(t.size() == 1 and t[0].seen_wall_ms == kNowMs + 5000 and near(*t[0].exist_logodds, -4.0f));
+        // Task D-C round 2: the 19th column, place_sd — round trip; an 18-column row parses without it; upsert mixes it;
+        // a fresh entry strips it with the rest of the restore data
+        std::vector<IdentityRow> rt{full_row("room_1", "door_2", 0.55f, 2.54f)};
+        rt[0].place_sd = 0.037f;
+        std::stringstream io;
+        write_identity_table(io, rt);
+        const auto back = parse_identity_table(io);
+        CHECK(back.malformed == 0 and back.rows.size() == 1);
+        if (back.rows.size() == 1) CHECK(back.rows[0].place_sd.has_value() and near(*back.rows[0].place_sd, 0.037f));
+        std::stringstream old18;
+        old18 << "room,name,ap_x,ap_y,yaw,width,height,depth,exist_logodds,hinge_x,hinge_y,open_x,open_y,hinge_llr,swing_llr,phi,phi_sigma,seen_ms\n"
+              << "room_1,door_2,0.55,2.54,-3.14,1.0,2.1,0.1,1,,,,,,,,,1792632310409\n";
+        const auto p18 = parse_identity_table(old18);
+        CHECK(p18.malformed == 0 and p18.rows.size() == 1);
+        if (p18.rows.size() == 1) CHECK(p18.rows[0].seen_wall_ms.has_value() and not p18.rows[0].place_sd.has_value());
+        auto w2 = full_row("", "door_2", 0.55f, 2.54f);
+        w2.place_sd = 0.137f;
+        upsert_row(rt, "room_1", w2, 1.45f, 0.5f);
+        CHECK(rt.size() == 1 and rt[0].place_sd.has_value() and near(*rt[0].place_sd, 0.087f));
+        CHECK(strip_restorable(rt, "room_1") == 1 and not rt[0].place_sd.has_value());
     }
 
     // 3h. Task D-C review I-1: the row remembers the EVIDENCE (L − the band prior's current term); the restored instance
@@ -286,7 +306,8 @@ int main()
             std::optional<std::pair<Eigen::Vector2f, Eigen::Vector2f>> leaf_side_hint;
             float phi_est = 0.f, phi_sigma = 0.f, hinge_llr = 0.f, swing_llr = 0.f;
             std::chrono::steady_clock::time_point phi_last_t{}; bool phi_from_command = true;
-            float existence_entry_L = 1.f; std::int64_t last_detection_wall_ms = 0;
+            float existence_entry_L = 1.f, existence_since_entry = 7.f; std::int64_t last_detection_wall_ms = 0;
+            std::optional<float> remembered_place_sd;
         } inst;   // as the node-added path left it: (0,0), unseeded, 0 matched frames
         CHECK(not fitted_this_cycle(false, inst.matched_frames));           // the bug: never fitted ⇒ no approach
         const auto r = full_row("room_1", "door_1", -0.57f, 4.61f);

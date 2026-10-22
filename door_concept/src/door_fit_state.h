@@ -304,6 +304,16 @@ struct DoorFitState
     // did since entry, not on the prior the door entered with (DoorCore::update_existence): a door restored below the
     // removal bound must be pushed further down by data before it can be condemned.
     float existence_entry_L = 1.0f;
+    // ★Task D-C round 2: THE EVIDENCE SINCE ENTRY, UNCLAMPED. The removal decision of a door that entered below the bound
+    // reads L_bound + (evidence since entry); differencing the published L (L − L_entry) loses whatever the ±L_max clamp
+    // swallowed — a door RESTORED at the −4 floor could then never move below its entry, i.e. never be condemned however
+    // long it was looked at and found absent. Each channel's increment is added here as it MEANT it (ExistenceBelief::
+    // last_increment), the band prior's change as replaced; reset with existence_entry_L.
+    float existence_since_entry = 0.0f;
+    // Task D-C round 2 (tour3C): a door RESTORED from memory — the σ its remembered place had along the wall when the row was
+    // written (IdentityRow::place_sd). The lazy belief init seeds σ_s² = place_sd² + σ_b² (σ_b the room polygon's own
+    // registration, Existence.BoundarySigmaM) instead of the birth seed's Door.PriorAlongWallStd 0.6 m, then clears it.
+    std::optional<float> remembered_place_sd;
     // Task D-C: wall-clock ms (the cycle's t_wall_ms) of the last fresh detection; restored from the identity row's
     // seen_ms. Written to the row so a remembered belief carries its age (restore_existence_prior). 0 = never.
     std::int64_t last_detection_wall_ms = 0;

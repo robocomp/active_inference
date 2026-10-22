@@ -588,6 +588,44 @@ int main()
         }
     }
 
+    // ── 12b. Task D-C round 2 (tour3C DOOR_0): A REMEMBERED PLACE IS NOT A BIRTH SEED. The restored door's belief is
+    //     initialised with σ_s² = place_sd² + σ_b² (the row's own precision + the room polygon's registration,
+    //     Existence.BoundarySigmaM) — not the birth seed's Door.PriorAlongWallStd 0.6 m, at which the LiDAR's along-wall
+    //     association took an opening 1.2-1.5 m away past its wall's end. A row without the column keeps the 0.6 m.
+    for (const bool with_sd : {true, false})
+    {
+        ExistWorld w;
+        w.polygon = {{-5.f, -5.f}, {5.f, -5.f}, {5.f, 5.f}, {-5.f, 5.f}};
+        DoorCoreConfig cfg;
+        w.cfg = cfg.door;
+        DoorCore core(cfg);
+        w.core = &core;
+        core.connect(&w, {.decision = {}, .diag = {}});
+        (void)core.step(cycle_input(1, 1, Phase::Absent, false, kWallY, -1.2f));
+        rc::DoorState st0;
+        st0.w = 1.0f; st0.h = 2.1f; st0.thickness = 0.1f;
+        rc::DoorFitState f;
+        core.fit().init_instance(f, 4343, "door_9", st0);
+        rc::door::IdentityRow row;
+        row.room = "room_1"; row.name = "door_9"; row.xy = Eigen::Vector2f(kDoorX, 5.0f);
+        row.pose = rc::door::RestorePose{0.0f, 1.0f, 2.1f, 0.1f};
+        if (with_sd) row.place_sd = 0.04f;
+        rc::door::seed_restored_instance(f, row, 1.0f, 4.0f, std::chrono::steady_clock::now());
+        w.st.emplace(4343, std::move(f));
+        (void)core.step(cycle_input(2, 2, Phase::Absent, false, kWallY, -1.2f));
+        CHECK(w.st.contains(4343));
+        if (w.st.contains(4343))
+        {
+            const auto& inst = w.st.at(4343);
+            const float sd_s = std::sqrt(inst.ai2_belief.covariance()(0, 0));
+            const float want = with_sd ? std::hypot(0.04f, cfg.door.exist_boundary_sigma_m) : cfg.door.door_prior_s_std;
+            std::print("restored door, place_sd {}: σ_s {:.3f} m (expected {:.3f})\n", with_sd ? "0.04" : "absent", sd_s, want);
+            CHECK(inst.ai2_initialized);
+            CHECK(std::abs(sd_s - want) < 0.02f);
+            CHECK(not inst.remembered_place_sd.has_value());   // consumed by the init
+        }
+    }
+
     // ── 6. ImageSource: patches + the recorded frame_ref reproduce the full frame inside the patch ──────────────────
     {
         cv::Mat full(120, 200, CV_8UC1);
