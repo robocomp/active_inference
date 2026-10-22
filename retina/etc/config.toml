@@ -77,7 +77,7 @@ use_trt =true
 # class names come from the ONNX metadata). Same output layout as yolo26x-seg. Rollback: "models/yolo26/yolo26x-seg.onnx".
 # accepted_labels below is deliberately UNCHANGED: door/cabinet/hood are in the vocabulary but already arrive as
 # ADE20K semantic masks — whitelisting them here too would hand those agents two masks per object per frame.
-model_path = "models/yolo26/yoloe-26x-seg-household.onnx"
+model_path = "models/yolo26/yoloe-26x-seg-household-v2.onnx"   # v2 2026-10-22: +counter, faucet, paper towel roll, storage box, book; rollback = household.onnx
 conf_thresh = 0.25          # min class confidence to ACCEPT a seg detection/mask (argmax score floor); raise to reject weak masks
 iou_thresh  = 0.45          # NMS IoU: dedupe overlapping same-class boxes above this
 second_best_margin = 0.0    # if top class is NOT in accepted_labels but the runner-up IS and within this margin, adopt the runner-up (0 = off; try 0.10 to recover near-tie furniture)
