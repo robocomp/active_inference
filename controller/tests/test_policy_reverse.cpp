@@ -32,11 +32,13 @@ struct Scene
     CostToGo field;
     PolicyInput in;
     PolicyParams pp;
+    SeenMap seen;   // what the forward camera has looked at
     void finish(bool camera = true)
     {
         in.pose = {{0.f, 0.f}, kHalfPi};            // forward = +y
         in.sigma_rel_xy = 0.005f; in.sigma_rel_yaw = 0.005f;
         in.returns = ret; in.body = &b; in.base = limits(); in.goal = &goal; in.field = &field;
+        in.seen = &seen;
         if (camera) { in.camera_half_fov_rad = 0.96f; in.affordance_facing = true; }   // ZED2i 110 deg HFOV
     }
 };
@@ -66,7 +68,7 @@ int main()
         Scene s; s.ret = wall_x(-0.36f, -2.f, 0.6f);
         for (auto& r : wall_x(0.36f, -2.f, 0.6f)) s.ret.push_back(r);
         for (auto& r : wall_y(0.5f, -0.36f, 0.36f)) s.ret.push_back(r);
-        s.goal.p = {0.f, -3.f};
+        s.goal.p = {0.f, -3.f}; s.seen.mark({{0.f, -2.f}, kHalfPi}, 0.96f, 4.f);   // it drove in along this corridor: the way back was seen
         V g = s.goal.p; s.field.build(kGrid, [](const V&) { return true; }, no_extra, std::span<const V>(&g, 1));
         s.finish();
         const auto d = decide(s.in, s.pp); print("c", d);
@@ -82,11 +84,44 @@ int main()
     { // (e) tight corridor (flanks 0.32 m: a turn in place touches), goal behind, front open: reverse out is allowed
         Scene s; s.ret = wall_x(-0.32f, -2.f, 2.f);
         for (auto& r : wall_x(0.32f, -2.f, 2.f)) s.ret.push_back(r);
-        s.goal.p = {0.f, -3.f};
+        s.goal.p = {0.f, -3.f}; s.seen.mark({{0.f, -2.f}, kHalfPi}, 0.96f, 4.f);   // it drove in along this corridor: the way back was seen
         V g = s.goal.p; s.field.build(kGrid, [](const V&) { return true; }, no_extra, std::span<const V>(&g, 1));
         s.finish();
         const auto d = decide(s.in, s.pp); print("e", d);
         CHECK("e tight manoeuvre: reverse", d.v < 0.f);
+    }
+    { // (g) I3(i): clutter BEHIND the robot, unseen by the camera, goal behind -> turn and go forward, not back into it.
+      // Camera-off control: the same scene reverses (clutter leaves a 12 cm lane the contact model clears at risk_eps).
+        Scene s;
+        for (float y : {-0.55f, -0.95f, -1.35f})
+        { s.ret.push_back({{-0.45f, y}, 0.01f, 1.f}); s.ret.push_back({{0.45f, y}, 0.01f, 1.f}); }
+        s.goal.p = {0.f, -3.f};
+        V g = s.goal.p; s.field.build(kGrid, [](const V&) { return true; }, no_extra, std::span<const V>(&g, 1));
+        s.finish();
+        const auto d = decide(s.in, s.pp); print("g", d);
+        Scene c = s; c.finish(false); c.in.returns = c.ret; c.in.body = &c.b; c.in.goal = &c.goal; c.in.field = &c.field; c.in.seen = nullptr;
+        c.in.camera_half_fov_rad = -1.f;
+        const auto d0 = decide(c.in, c.pp); print("g-camera-off", d0);
+        CHECK("g clutter behind (unseen): no reversal", d.mode == Decision::Mode::Drive and d.v >= 0.f);
+        CHECK("g control: without the camera model the same scene reverses (the test discriminates)", d0.v < 0.f);
+    }
+    { // (h) I3(ii): tight spot - a wall 0.26 m past the nose, goal to the left. Forward arcs and reverse arcs both descend.
+      // The choice follows the expected contact of the space swept: reverse over a SEEN trail is safe and wins; into the UNSEEN it
+      // pays the unseen-contact prior (P_u ~ 0.01 per full-speed horizon = risk_eps) and a forward arc wins; with room, forward.
+        auto scene = [&](float gap, bool trail) {
+            Scene s;
+            for (float x = -1.2f; x <= 0.1f + 1e-4f; x += 0.05f) s.ret.push_back({{x, gap + 0.35f}, 0.01f, 1.f});
+            s.goal.p = {-1.5f, 0.f};
+            V g = s.goal.p; s.field.build(kGrid, [](const V&) { return true; }, no_extra, std::span<const V>(&g, 1));
+            if (trail) s.seen.mark({{0.f, -2.f}, kHalfPi}, 0.96f, 4.f);
+            s.finish();
+            return std::pair{decide(s.in, s.pp), 0};
+        };
+        const auto tight_seen = scene(0.26f, true).first, tight_unseen = scene(0.26f, false).first, roomy_seen = scene(0.60f, true).first;
+        print("h tight+seen", tight_seen); print("h tight+unseen", tight_unseen); print("h roomy+seen", roomy_seen);
+        CHECK("h tight, way back seen: reverse (safe, credited)", tight_seen.v < 0.f);
+        CHECK("h tight, way back unseen: forward (reversing would sweep unseen space)", tight_unseen.v > 0.f);
+        CHECK("h room ahead: forward", roomy_seen.v > 0.f);
     }
     { // (f) R4: the facing term matters only inside the door's reach - a sideways approach arc far from the gap is not penalised
         Scene s;

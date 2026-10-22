@@ -169,6 +169,8 @@ Pose2 Navigator::predicted_pose(const Claim& c, float el) const
 
 Navigator::Step Navigator::step(PolicyInput in, const PolicyParams& p)
 {
+    // ★ Task R: remember what the forward camera has looked at (seen_map.h); every decide() of this tick reads it
+    if (in.camera_half_fov_rad >= 0.f) { seen_.mark(in.pose, in.camera_half_fov_rad, in.camera_range_m); in.seen = &seen_; }
     Step s = step_core(in, p);
     // ★ F1 — fold this tick into the reachability belief (reachability_belief.h derives every likelihood used here).
     using M = Decision::Mode;

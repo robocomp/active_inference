@@ -51,6 +51,7 @@
 #include <optional>
 #include <vector>
 #include "local_policy.h"
+#include "seen_map.h"
 #include "reachability_belief.h"
 
 namespace rc::policy
@@ -124,6 +125,7 @@ public:
 private:
     Step step_core(PolicyInput in, const PolicyParams& p);   // the plan / decide / trap logic; step() adds the F1 belief
     ReachabilityBelief belief_;
+    SeenMap seen_;   // Task R: what the forward camera has already looked at
     // F1: the committed Drive's claim — from pose `at` (remaining time T0 there) it shortens the goal's remaining time by D;
     //   judged against its own rollout when its plan ends (navigator.cpp step())
     struct Claim { bool pending = false; Pose2 at{}; float T0 = 0.f; double t0 = 0.0;

@@ -1091,6 +1091,8 @@ void SpecificWorker::load_params()
          "half-angle of the forward camera's horizontal FOV (rad; ZED2i HD 110 deg = 0.96). Progress made outside it (reversing) is not credited; < 0 = off");
 	cfgr.opt_cast<double>("Policy.AffordanceReachM", params.policy_affordance_reach_m,
          "door model's actuation reach (m) (door_concept ActuationReachM): the doorway facing term is weighted by P(plan end within it)");
+	cfgr.opt_cast<double>("Policy.CameraRangeM", params.policy_camera_range_m,
+         "range (m) up to which the forward camera is taken to have looked at the space ahead (what a later reversal may count as SEEN)");
 	cfgr.opt("Policy.AffordanceFacing", params.policy_affordance_facing,
          "score a Doorway plan by log P(facing the gap) at its end (door_concept's cross precondition)");
 	cfgr.opt_cast<double>("Policy.PoseDriftSigmaM", params.policy_pose_drift_sigma_m,

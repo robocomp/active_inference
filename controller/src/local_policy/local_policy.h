@@ -8,6 +8,7 @@
 #include "policy_types.h"
 #include "contact.h"
 #include "cost_to_go.h"
+#include "seen_map.h"
 
 namespace rc::policy
 {
@@ -64,7 +65,9 @@ struct PolicyInput { Pose2 pose; float v_now = 0, w_now = 0, sigma_rel_xy = 0, s
                      // precondition: door_concept's cross needs the opening in front of the robot)
                      bool affordance_facing = false;
                      // Task R (R4): the door model's actuation reach (m); the facing term is weighted by P(plan end within it)
-                     float affordance_reach_m = 2.f; };
+                     float affordance_reach_m = 2.f;
+                     // Task R: how far the camera sees (m) and what it has already looked at (null = nothing remembered)
+                     float camera_range_m = 4.f; const SeenMap* seen = nullptr; };
 
 // log_p_safe / log_p_cont / progress_m describe the CHOSEN candidate (zeros when none is chosen); progress_m is its
 // TWO-STEP progress (round 4: the better of its end and its best eligible continuation, measured from the start).
@@ -107,9 +110,8 @@ struct Decision { enum class Mode { Drive, Release, Arrived, Stuck, Blind } mode
                   // -1 failed, 0 none (nothing pending, not yet due, or too small to judge); and whether THIS decision armed a
                   // prediction of its own (a monitored Drive with a finite descent, a monitored non-stop Release)
                   int judged = 0; bool armed = false;
-                  // Task R: why a Drive reverses (v < 0) when the camera model is on: 1 = no plan with credited (seen) progress exists
-                  // (dead end, stall, tight corridor), 2 = an alternative exists but the reversal scored higher; 0 = not a reversal
-                  int reversal = 0; };
+                  // Task R: the chosen Drive plan's travel over space the camera has not looked at, as a fraction of one full-speed horizon
+                  float blind_frac = 0.f; };
 
 // ★ ROUND 6 — STUCK IS A FAILED PREDICTION, judged on what happened. Each Drive decision predicts a two-step field
 //   descent dF_pred over its own duration tau_pred (the chosen candidate's duration + the continuation that set its

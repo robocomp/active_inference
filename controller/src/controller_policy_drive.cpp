@@ -446,6 +446,7 @@ ControllerSession::PolicyTick ControllerSession::policy_tick(const rc::policy::G
     in.sigma_rel_xy = prm.policy_sigma_rel_xy_m;
     in.sigma_rel_yaw = prm.policy_sigma_rel_yaw_rad;
     in.camera_half_fov_rad = prm.policy_camera_half_fov_rad;       // Task R
+    in.camera_range_m = prm.policy_camera_range_m;
     in.affordance_facing = prm.policy_affordance_facing;
     in.affordance_reach_m = prm.policy_affordance_reach_m;
     in.pose_drift_sigma_m = prm.policy_pose_drift_sigma_m;

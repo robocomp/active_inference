@@ -326,9 +326,8 @@ static ScenarioResult run_scenario(const World& world, Pose2 start, Goal goal, f
                 // end / stall / tight corridor), kind 2 = an alternative existed but the reversal outscored it; kind 0 = other.
                 // Independent view (true bare-hull clearance at the decision): tight = an obstacle within 0.25 m (~ inscribed radius).
                 if (d.mode == Decision::Mode::Release) ++g_rel;
-                else if (d.reversal == 1) ++g_rk1;
-                else if (d.reversal == 2) ++g_rk2;
-                else ++g_rk0;
+                else if (d.blind_frac < 0.5f) ++g_rk1;     // Drive reversal over space the camera has already looked at
+                else ++g_rk0;                              // Drive reversal over UNSEEN space
                 if (clear < 0.25f) ++g_rtight; else ++g_rclear;
             }
         }   // Task R reverse share
@@ -558,7 +557,9 @@ int main()
         Options o{.grid = kCorridorGrid, .jumps = {}, .trace_name = "tour3_1_leg3"};
         const auto S = run_seeds("tour3_1_leg3", [&](unsigned seed) { return run_scenario(w, s, g, 30.f, seed, o); });
         standard_oracles("tour3_1_leg3", S);
-        performance_oracle("tour3_1_leg3", S, 2.75f);
+        // ★ Task R (R1): the baseline encoded the OPENING back-up arc (goal 0.7 m behind-left, wall on the right: 2.75 s). The rule "back up only
+        //   to unlock / unstall / in a tight manoeuvre" turns left away from the wall and drives forward: measured median 4.15 s.
+        performance_oracle("tour3_1_leg3", S, camera_model_on() ? 4.15f : 2.75f);
     }
     // ---- try101_corridor: the 1 m stub before DOOR_1 (leaf open 90 deg on the near side), start 0.37 m from the east wall
     if (want("try101_corridor"))
@@ -619,7 +620,10 @@ int main()
                 return b;
             });
             standard_oracles(n, S);
-            performance_oracle(n, S, leaf == 1 ? 4.60f : 4.60f, 5.75f);
+            // ★ Task R (R1): the return leg's goal is BEHIND the robot once it has crossed. The old 4.60 s (cap 5.75 s) encoded backing
+            //   through the door - the live observation this task answers ("you just crossed backwards the door"). Now it turns round
+            //   and crosses facing the opening: measured medians 6.65 s (leaf into room_1) / 6.50 s (room_2), same limit rule (1.15x).
+            performance_oracle(n, S, camera_model_on() ? (leaf == 1 ? 6.65f : 6.50f) : 4.60f, camera_model_on() ? 1e9f : 5.75f);
         }
     // ---- leaf_known_hinge_side (Task 3b, rtD1c leg 5 + fix round 1): the leaf open 90 deg into room_1 and a CHAIR inside its
     //      swept region (2 sigma_phi east of the free edge, against the leaf's tip) are physical but not in the map; residual
@@ -898,7 +902,7 @@ int main()
         CHECK("realign_doorway: crosses on every seed, never handed back", S.reached == S.n and S.unreachable == 0);
         CHECK("realign_doorway: the scene needs >= 2 back-ups on every seed", S.min_backups >= 2);
     }
-    std::printf("REVERSE BREAKDOWN (of %ld reversing decisions): release/unlock %ld | drive, no seen-progress plan (dead end/stall) %ld | drive, outscored an alternative (tight) %ld | OTHER %ld ;  true clearance < 0.25 m: %ld, >= 0.25 m: %ld\n", g_rev, g_rel, g_rk1, g_rk2, g_rk0, g_rtight, g_rclear);
+    std::printf("REVERSE BREAKDOWN (of %ld reversing decisions): release/unlock %ld | drive over SEEN space (the way in, a traversed corridor) %ld | drive over unseen space (should be ~0) %ld ; [unused %ld] ;  true clearance < 0.25 m: %ld, >= 0.25 m: %ld\n", g_rev, g_rel, g_rk1, g_rk0, g_rk2, g_rtight, g_rclear);
     std::printf("REVERSE SHARE: %ld of %ld Drive/Release decisions (%.1f%%) camera=%s\n", g_rev, g_moves, g_moves ? 100.0 * double(g_rev) / double(g_moves) : 0.0, (std::getenv("POLICY_CAMERA") == nullptr or std::string(std::getenv("POLICY_CAMERA")) != "0") ? "on" : "off");
     std::printf("%s (%d failing)\n", fails == 0 ? "ALL PASS" : "FAILURES", fails);
     return fails == 0 ? 0 : 1;
