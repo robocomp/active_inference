@@ -985,14 +985,8 @@ void RoomSceneGraph::step_proto_room_impl(const rc::RoomConcept::UpdateResult& r
     // ── Birth. Frame = the crossed aperture, frozen: x along a→b, +y outward.
     //    Right-handed: tangent × n_out must be +z, otherwise flip the tangent (the aperture's a/b order is
     //    whatever door_concept's yaw made it, and a left-handed frame would mirror everything in it).
-    Eigen::Vector2f x_axis = best.tangent;
-    const Eigen::Vector2f y_axis = best.n_out;
-    if (x_axis.x() * y_axis.y() - x_axis.y() * y_axis.x() < 0.f)
-        x_axis = -x_axis;
-    Eigen::Affine2f T = Eigen::Affine2f::Identity();
-    T.linear().col(0) = x_axis;
-    T.linear().col(1) = y_axis;
-    T.translation()   = best.centre;
+    //    (y = n_out is exactly perpendicular to a→b — see crossing::outward_normal — so T is orthonormal.)
+    const Eigen::Affine2f T = rc::crossing::proto_frame(best);
 
     // Name: room_<k>, one past the highest room_<k> in the graph. The first room is room_1 (see
     // dsr_create_room_and_reparent), so the first proto is room_2 and the sequence never collides —

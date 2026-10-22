@@ -192,6 +192,12 @@ target_compile_definitions(door_apertures_selftest PRIVATE SHADOW_JSON="${CMAKE_
 target_link_libraries(door_apertures_selftest ${LIBS})
 set_target_properties(door_apertures_selftest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../../bin)
 
+# ── proto_frame_test ──────────────────────────────────────────────────────────
+# Task S: the proto-room frame comes from the aperture, not the nearest polygon edge. Header-only.
+add_executable(proto_frame_test EXCLUDE_FROM_ALL ../tools/proto_frame_test.cpp)
+target_include_directories(proto_frame_test PRIVATE ${CMAKE_CURRENT_LIST_DIR}/../src)
+set_target_properties(proto_frame_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../../bin)
+
 # ── corner_gather_test ────────────────────────────────────────────────────────
 # Offline check that the layout-wide explain-away removes a perpendicular face from a wall fit
 # WITHOUT letting a collinear neighbour starve it (see the file header for the two live failures it

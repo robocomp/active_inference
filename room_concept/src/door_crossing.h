@@ -56,15 +56,24 @@ namespace rc::crossing
         return static_cast<float>(1.0 / (1.0 + std::exp(-l)));
     }
 
-    /// Outward unit normal of the aperture: perpendicular to a→b, pointing AWAY from the room interior.
-    /// The interior side comes from the polygon's own orientation (signed area) and the polygon edge
-    /// nearest the aperture centre — the aperture lies ON the boundary, so the edge it lies on says which
-    /// side is inside. No probe distance, nothing to tune. Returns false when the polygon is degenerate.
+    /// Outward unit normal of the aperture: EXACTLY perpendicular to a→b, pointing AWAY from the room interior.
+    /// ★ THE AXIS COMES FROM THE APERTURE, THE POLYGON ONLY CHOOSES THE SIGN (2026-10-22, Task S). The normal used
+    ///   to be the perpendicular of the polygon edge NEAREST the aperture centre. On a recalled many-vertex outline
+    ///   that edge was a jamb/notch edge running ACROSS the door (live crossing/gold1: y = (-1, 0.0115) against
+    ///   x = a→b, det 0.019), so the proto frame was near-singular, s/u/σ_s were measured along the wrong axis and
+    ///   the robot was placed km away in the proto. Now n = perp(a→b), orthonormal by construction.
+    /// The sign is the outward side of the wall edge the door lies IN: of all edges, the one minimising
+    /// d² / cos²(angle to a→b) — a continuous preference for near AND parallel-to-the-aperture edges, so a jamb
+    /// (cos ≈ 0) can never be chosen; the 1e-6 terms are numerical guards, not model floors. The interior side
+    /// comes from the polygon's signed area. Returns false when the polygon or the aperture is degenerate.
     inline bool outward_normal(const DoorAperture& ap, const std::vector<Eigen::Vector2f>& polygon,
                                Eigen::Vector2f& n_out)
     {
         const std::size_t n = polygon.size();
         if (n < 3) return false;
+        const Eigen::Vector2f ab = ap.b - ap.a;
+        if (ab.squaredNorm() <= 0.f) return false;
+        const Eigen::Vector2f t = ab.normalized();
         float area2 = 0.f;
         for (std::size_t i = 0; i < n; ++i)
         {
@@ -75,8 +84,8 @@ namespace rc::crossing
         if (area2 == 0.f) return false;
 
         const Eigen::Vector2f c = 0.5f * (ap.a + ap.b);
-        std::size_t best = 0;
-        float best_d2 = std::numeric_limits<float>::max();
+        std::size_t best = n;
+        float best_score = std::numeric_limits<float>::max();
         for (std::size_t i = 0; i < n; ++i)
         {
             const Eigen::Vector2f p = polygon[i];
@@ -84,18 +93,22 @@ namespace rc::crossing
             const float L2 = e.squaredNorm();
             if (L2 <= 0.f) continue;
             const float u = std::clamp((c - p).dot(e) / L2, 0.f, 1.f);
-            if (const float d2 = (c - (p + u * e)).squaredNorm(); d2 < best_d2)
+            const float d2 = (c - (p + u * e)).squaredNorm();
+            const float cos2 = (e.dot(t) * e.dot(t)) / L2;
+            if (const float score = (d2 + 1e-6f) / (cos2 + 1e-6f); score < best_score)
             {
-                best_d2 = d2;
+                best_score = score;
                 best = i;
             }
         }
+        if (best == n) return false;
         Eigen::Vector2f e = polygon[(best + 1) % n] - polygon[best];
-        if (e.squaredNorm() <= 0.f) return false;
         e.normalize();
         // Counter-clockwise polygon (area2 > 0): interior on the LEFT of each edge, so outward = right.
         const Eigen::Vector2f right(e.y(), -e.x());
-        n_out = area2 > 0.f ? right : Eigen::Vector2f(-right);
+        const Eigen::Vector2f out = area2 > 0.f ? right : Eigen::Vector2f(-right);
+        const Eigen::Vector2f perp(-t.y(), t.x());
+        n_out = perp.dot(out) >= 0.f ? perp : Eigen::Vector2f(-perp);
         return true;
     }
 
@@ -115,6 +128,20 @@ namespace rc::crossing
         Eigen::Vector2f n_out{0.f, 1.f};     ///< unit, away from the room interior
         bool valid = false;
     };
+
+    /// The proto-room frame: origin at the aperture centre, x along a→b, y = n_out (the aperture's perpendicular,
+    /// so orthonormal by construction). Right-handed: if the aperture's a/b order made it left-handed, x flips.
+    inline Eigen::Affine2f proto_frame(const Crossing& c)
+    {
+        Eigen::Vector2f x_axis = c.tangent;
+        if (x_axis.x() * c.n_out.y() - x_axis.y() * c.n_out.x() < 0.f)
+            x_axis = -x_axis;
+        Eigen::Affine2f T = Eigen::Affine2f::Identity();
+        T.linear().col(0) = x_axis;
+        T.linear().col(1) = c.n_out;
+        T.translation()   = c.centre;
+        return T;
+    }
 
     // ── DIAGNOSTIC CSV: tmp/crossing.csv ────────────────────────────────────────────────────────
     // EVERY aperture evaluated, EVERY cycle — not just the winner. A proto-room that is not born is
