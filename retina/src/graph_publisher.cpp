@@ -33,14 +33,20 @@ GraphPublisher::GraphPublisher(std::shared_ptr<DSR::DSRGraph> graph,
 {}
 
 void GraphPublisher::publish(const RGBDData& rgbd, const Mat::RTMat& room_T_zed,
-                             const std::vector<SegDetection>& detections, std::uint64_t frame_ts_ms,
-                             const std::vector<BearingDetection>& bearing_detections)
+                             const std::vector<SegDetection>& detections, std::uint64_t frame_ts_ms)
 {
-    if (ensure_node("masks", "Plum", masks_ready_, /*relayout=*/true))
-        upload_masks(rgbd, room_T_zed, detections, frame_ts_ms, bearing_detections);
+    if (ensure_node("masks_zed", "Plum", masks_ready_, /*relayout=*/true, "zed"))
+        upload_masks(rgbd, room_T_zed, detections, frame_ts_ms);
 }
 
-bool GraphPublisher::ensure_node(const char* name, const char* color, bool& ready, bool relayout)
+void GraphPublisher::publish_ricoh(const std::vector<BearingDetection>& detections, std::uint64_t frame_ts_ms)
+{
+    if (ensure_node("masks_ricoh", "Plum", masks_ricoh_ready_, /*relayout=*/true, "ricoh"))
+        upload_masks_ricoh(detections, frame_ts_ms);
+}
+
+bool GraphPublisher::ensure_node(const char* name, const char* color, bool& ready, bool relayout,
+                                 const char* parent_name)
 {
     if (ready)
         return true;
@@ -55,10 +61,10 @@ bool GraphPublisher::ensure_node(const char* name, const char* color, bool& read
         return true;
     }
 
-    auto zed_node = G_->get_node("zed");
+    auto zed_node = G_->get_node(parent_name);   // the PARENT camera node (zed / ricoh)
     if (!zed_node.has_value())
     {
-        qWarning() << "[GraphPublisher] WARNING: 'zed' node not found — cannot create" << name;
+        qWarning() << "[GraphPublisher] WARNING:" << parent_name << "node not found — cannot create" << name;
         return false;
     }
 
@@ -78,7 +84,7 @@ bool GraphPublisher::ensure_node(const char* name, const char* color, bool& read
     }
 
     ready = true;
-    qInfo() << "[GraphPublisher] Created" << name << "node id=" << *id << "(semantic_grid) under 'zed'";
+    qInfo() << "[GraphPublisher] Created" << name << "node id=" << *id << "(semantic_grid) under" << parent_name;
     G_->get_rt_api()->insert_or_assign_edge_RT(zed_node.value(), *id, {0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 0.0f});
     if (relayout and relayout_)
         relayout_();
@@ -301,20 +307,100 @@ MaskColorSummary mask_color_summary(const cv::Mat& bgr, const cv::Mat& mask_bin,
 
 }   // namespace
 
-// FRAME CONTRACT — the 'masks' node is a SHARED contract read by every concept agent through ONE
-// component, common/mask_ingestor. Mask support points are DUAL-PUBLISHED, 1-to-1:
-//   * mask_support_points_cam  → ZED/CAMERA frame. THE ONLY 3-D array published. Raw deprojection,
-//                                before any pose is applied. Centroids/bboxes accompany it in the SAME
-//                                frame; common/mask_ingestor recomputes both in the consumer's target
-//                                frame after transforming, so no room-frame variant is needed.
+namespace {
+
+// Every attribute array one mask node carries (1-to-1 per slice unless noted). Shared by the zed and ricoh
+// publishers so the two nodes can never drift apart in which attributes they write.
+struct MaskArrays
+{
+    int                frame_id = 0;
+    std::uint64_t      ts_ms = 0;
+    std::string        labels;
+    std::vector<float> label_ids, confidences;
+    std::vector<float> support_offsets{0.0f};
+    std::vector<float> support_points_cam, centroids_xyz, bbox_min_xyz, bbox_max_xyz;
+    std::vector<float> pixels_xy;
+    std::vector<float> pixel_offsets{0.0f};
+    std::vector<float> has_depth, source, azimuth, depth_var;
+    std::vector<float> color_rgb, color_var, color_neff;
+    std::vector<float> motion_dotd, motion_bias, motion_var, trunc_frac, centroid_radius, range;
+    std::vector<float> cam_twist{0, 0, 0, 0, 0, 0};
+    float              frame_dt_s = 0.0f;
+    float              rt_lag_s = -1.0f;
+    float              rt_gap_s = -1.0f;
+};
+
+void write_mask_node(DSR::DSRGraph& G, const RetinaParams& params, DSR::Node& node, const MaskArrays& m)
+{
+    G.add_or_modify_attrib_local<mask_frame_id_att>(node, m.frame_id);
+    G.add_or_modify_attrib_local<mask_timestamp_ms_att>(node, m.ts_ms);
+    G.add_or_modify_attrib_local<mask_count_att>(node, static_cast<int>(m.label_ids.size()));
+    G.add_or_modify_attrib_local<mask_labels_att>(node, m.labels);
+    G.add_or_modify_attrib_local<mask_label_ids_att>(node, m.label_ids);
+    G.add_or_modify_attrib_local<mask_confidences_att>(node, m.confidences);
+    G.add_or_modify_attrib_local<mask_support_offsets_att>(node, m.support_offsets);
+    G.add_or_modify_attrib_local<mask_support_points_cam_att>(node, m.support_points_cam);
+    G.add_or_modify_attrib_local<mask_centroids_xyz_att>(node, m.centroids_xyz);
+    G.add_or_modify_attrib_local<mask_bbox_min_xyz_att>(node, m.bbox_min_xyz);
+    G.add_or_modify_attrib_local<mask_bbox_max_xyz_att>(node, m.bbox_max_xyz);
+    G.add_or_modify_attrib_local<mask_pixels_xy_att>(node, m.pixels_xy);
+    G.add_or_modify_attrib_local<mask_pixel_offsets_att>(node, m.pixel_offsets);
+    G.add_or_modify_attrib_local<mask_has_depth_att>(node, m.has_depth);
+    G.add_or_modify_attrib_local<mask_source_att>(node, m.source);
+    G.add_or_modify_attrib_local<mask_azimuth_att>(node, m.azimuth);
+    G.add_or_modify_attrib_local<mask_depth_var_att>(node, m.depth_var);
+    if (params.MASK_COLOR_ENABLED)
+    {
+        G.add_or_modify_attrib_local<mask_color_rgb_att>(node, m.color_rgb);
+        G.add_or_modify_attrib_local<mask_color_var_att>(node, m.color_var);
+        G.add_or_modify_attrib_local<mask_color_neff_att>(node, m.color_neff);
+    }
+    if (params.MASK_MOTION_ENABLED)
+    {
+        G.add_or_modify_attrib_local<mask_motion_dotd_att>(node, m.motion_dotd);
+        G.add_or_modify_attrib_local<mask_motion_bias_att>(node, m.motion_bias);
+        G.add_or_modify_attrib_local<mask_motion_var_att>(node, m.motion_var);
+        G.add_or_modify_attrib_local<mask_trunc_frac_att>(node, m.trunc_frac);
+        G.add_or_modify_attrib_local<mask_centroid_radius_att>(node, m.centroid_radius);
+        G.add_or_modify_attrib_local<mask_range_att>(node, m.range);
+        G.add_or_modify_attrib_local<mask_cam_twist_att>(node, m.cam_twist);
+        G.add_or_modify_attrib_local<mask_frame_dt_s_att>(node, m.frame_dt_s);
+        G.add_or_modify_attrib_local<mask_rt_lag_s_att>(node, m.rt_lag_s);
+        G.add_or_modify_attrib_local<mask_rt_gap_s_att>(node, m.rt_gap_s);
+    }
+}
+
+}   // namespace
+
+// FRAME CONTRACT — the per-camera mask nodes are a SHARED contract read by every concept agent
+// through ONE component, common/mask_ingestor. THERE IS ONE NODE PER CAMERA, each a semantic_grid child
+// of its own camera node (RT edge = identity), holding ONLY that camera's slices in THAT camera's frame:
+//   * "masks_zed"   — child of "zed".   ZED slices, ZED optical-ish frame (x right, y depth, z up).
+//   * "masks_ricoh" — child of "ricoh". Ricoh slices, RICOH frame (the graph's ricoh node frame).
+// Consumers MUST NOT hard-code these names: they enumerate get_nodes_by_type("rgbd") and take each
+// camera's child semantic_grid (common/mask_ingestor/mask_nodes.h). Each node has its OWN
+// mask_frame_id sequence and mask_timestamp_ms (that camera's capture stamp).
 //
-// ★THIS PRODUCER NO LONGER APPLIES room_T_zed TO MASKS. It used to, and that made a RAW-PERCEPTION
-// component depend on a LOCALIZATION one: room_concept was a required peer, and when the RT chain
-// failed to resolve, room_T_sensor defaulted to Identity and masks went out in camera coordinates
+//   * mask_support_points_cam  -> CAMERA frame of the node's parent. THE ONLY 3-D array published. Raw
+//                                deprojection, before any pose is applied. Centroids/bboxes accompany it
+//                                in the SAME frame; common/mask_ingestor recomputes both in the consumer's
+//                                target frame after transforming, so no room-frame variant is needed.
+//   * mask_azimuth             -> CAMERA-frame bearing (rad, atan2(y,x) of the ray in the parent camera's
+//                                frame) for bearing-only slices (has_depth==0). It used to be a ROOM-frame
+//                                azimuth; the ingestor now converts it to the room at ingest.
+//   * mask_source              -> 0 on masks_zed, 1 on masks_ricoh (kept per slice so per-slice code works).
+//
+// ★THIS PRODUCER NO LONGER APPLIES room_T_* TO MASKS — for NEITHER camera. It used to, and that made a
+// RAW-PERCEPTION component depend on a LOCALIZATION one: room_concept was a required peer, and when the RT
+// chain failed to resolve, room_T_sensor defaulted to Identity and masks went out in camera coordinates
 // LABELLED as room frame — undetectably. It also HID the localization covariance, which only the
 // component that applies the transform can account for (J·Sigma_chain·J^T). The transform now lives in
-// common/mask_ingestor, capture-stamp pinned and forward-extrapolated over the RT lag.
+// common/mask_ingestor, capture-stamp pinned and forward-extrapolated over the RT lag. The Ricoh slices
+// used to be the last violators (lidar hits built room-framed then mapped room->zed; azimuth room-framed):
+// they now come from the lidar through the ROBOT-INTERNAL extrinsics (ricoh<-robot) and the panorama ray.
 // The legacy room-frame "mask_support_points" array is GONE — do not reintroduce it.
+// (room_T_zed is still taken by publish(), but ONLY to finite-difference the camera twist for the
+//  ego-motion annotation below; no published coordinate is expressed in the room.)
 //
 // EGO-MOTION CORRUPTION ANNOTATION (MaskMotion.enabled, default on; common/motion_corruption):
 // while the camera moves, a mask is corrupted in a way the consumer can't reconstruct without the
@@ -335,8 +421,7 @@ MaskColorSummary mask_color_summary(const cv::Mat& bgr, const cv::Mat& mask_bin,
 //   reads it, which is what keeps a channel with this many correlated samples from being able to do harm.
 //   Ricoh slices publish n_eff==0 (detected on the panorama, not on this zed frame ⇒ no pixels here).
 void GraphPublisher::upload_masks(const RGBDData& rgbd, const Mat::RTMat& room_T_zed,
-                                  const std::vector<SegDetection>& detections, std::uint64_t frame_ts_ms,
-                                  const std::vector<BearingDetection>& bearing_detections)
+                                  const std::vector<SegDetection>& detections, std::uint64_t frame_ts_ms)
 {
     // Keep masks stream progressing even when voxel grid processing is paused.
     const std::uint64_t sensing_frame = ++masks_publish_seq_;
@@ -344,46 +429,17 @@ void GraphPublisher::upload_masks(const RGBDData& rgbd, const Mat::RTMat& room_T
         return;
     last_masks_uploaded_frame_ = sensing_frame;
 
-    auto masks_node_opt = G_->get_node("masks");
+    auto masks_node_opt = G_->get_node("masks_zed");
     if (!masks_node_opt.has_value())
         return;
     auto& masks_node = masks_node_opt.value();
 
     if (rgbd.depth.empty() || rgbd.width <= 0 || rgbd.height <= 0 || rgbd.focal_x <= 0.f || rgbd.focal_y <= 0.f)
     {
-        G_->add_or_modify_attrib_local<mask_frame_id_att>(masks_node, static_cast<int>(sensing_frame));
-        G_->add_or_modify_attrib_local<mask_timestamp_ms_att>(masks_node, frame_ts_ms);
-        G_->add_or_modify_attrib_local<mask_count_att>(masks_node, 0);
-        G_->add_or_modify_attrib_local<mask_labels_att>(masks_node, std::string{});
-        G_->add_or_modify_attrib_local<mask_label_ids_att>(masks_node, std::vector<float>{});
-        G_->add_or_modify_attrib_local<mask_confidences_att>(masks_node, std::vector<float>{});
-        G_->add_or_modify_attrib_local<mask_support_offsets_att>(masks_node, std::vector<float>{0.0f});
-        G_->add_or_modify_attrib_local<mask_support_points_cam_att>(masks_node, std::vector<float>{});
-        G_->add_or_modify_attrib_local<mask_centroids_xyz_att>(masks_node, std::vector<float>{});
-        G_->add_or_modify_attrib_local<mask_bbox_min_xyz_att>(masks_node, std::vector<float>{});
-        G_->add_or_modify_attrib_local<mask_bbox_max_xyz_att>(masks_node, std::vector<float>{});
-        G_->add_or_modify_attrib_local<mask_pixels_xy_att>(masks_node, std::vector<float>{});
-        G_->add_or_modify_attrib_local<mask_pixel_offsets_att>(masks_node, std::vector<float>{0.0f});
-        G_->add_or_modify_attrib_local<mask_depth_var_att>(masks_node, std::vector<float>{});
-        if (params_.MASK_COLOR_ENABLED)
-        {
-            G_->add_or_modify_attrib_local<mask_color_rgb_att>(masks_node, std::vector<float>{});
-            G_->add_or_modify_attrib_local<mask_color_var_att>(masks_node, std::vector<float>{});
-            G_->add_or_modify_attrib_local<mask_color_neff_att>(masks_node, std::vector<float>{});
-        }
-        if (params_.MASK_MOTION_ENABLED)
-        {
-            G_->add_or_modify_attrib_local<mask_motion_dotd_att>(masks_node, std::vector<float>{});
-            G_->add_or_modify_attrib_local<mask_motion_bias_att>(masks_node, std::vector<float>{});
-            G_->add_or_modify_attrib_local<mask_motion_var_att>(masks_node, std::vector<float>{});
-            G_->add_or_modify_attrib_local<mask_trunc_frac_att>(masks_node, std::vector<float>{});
-            G_->add_or_modify_attrib_local<mask_centroid_radius_att>(masks_node, std::vector<float>{});
-            G_->add_or_modify_attrib_local<mask_range_att>(masks_node, std::vector<float>{});
-            G_->add_or_modify_attrib_local<mask_cam_twist_att>(masks_node, std::vector<float>{0,0,0,0,0,0});
-            G_->add_or_modify_attrib_local<mask_frame_dt_s_att>(masks_node, 0.0f);
-            G_->add_or_modify_attrib_local<mask_rt_lag_s_att>(masks_node, -1.0f);
-            G_->add_or_modify_attrib_local<mask_rt_gap_s_att>(masks_node, -1.0f);
-        }
+        MaskArrays empty;
+        empty.frame_id = static_cast<int>(sensing_frame);
+        empty.ts_ms    = frame_ts_ms;
+        write_mask_node(*G_, params_, masks_node, empty);
         G_->update_node(std::move(masks_node));
         return;
     }
@@ -774,123 +830,39 @@ void GraphPublisher::upload_masks(const RGBDData& rgbd, const Mat::RTMat& room_T
         }
     }
 
-    // Append the RGB-360 (ricoh) bearing-only detections as NO-DEPTH slices in the SAME node (Part B, see
-    // RICOH_360_PERIPHERAL_DETECTION.md). They carry a room-frame bearing instead of 3D points:
-    // support_begin==support_end (no points), no raw pixels, NaN centroid/bbox. Consumers skip !has_depth
-    // slices until the bearing confirm/birth path (Part C) exists — inert-but-available today.
-    // (Only emitted alongside a valid zed depth frame; the empty-depth early-return above drops them for
-    //  that rare/transient frame, which is fine for peripheral evidence.)
-    // Zed→room inverse, to also express any lidar-depth ricoh support points in the ZED frame so they
-    // flow through the consumer's existing zed→target chain (no ingestor frame change / no camera tag).
-    const Eigen::Matrix3f zed_R = room_T_zed.linear().cast<float>();
-    const Eigen::Vector3f zed_t = room_T_zed.translation().cast<float>();
-    const Eigen::Matrix3f zed_R_inv = zed_R.transpose();               // room→zed rotation
-    const auto room_to_zed = [&](const Eigen::Vector3f& p_room) { return zed_R_inv * (p_room - zed_t); };
-
-    for (const auto& b : bearing_detections)
-    {
-        if (!labels_joined.str().empty())
-            labels_joined << '|';
-        labels_joined << b.label;
-        label_ids.push_back(b.class_id);
-        confidences.push_back(b.confidence);
-        mask_source.push_back(1.0f);       // source = ricoh (both bearing-only and lidar-depth ricoh slices)
-        azimuths.push_back(b.azimuth_room_rad);
-        mask_pixel_offsets.push_back(mask_pixel_offsets.back());    // no raw silhouette pixels either way
-        // A ricoh slice is detected on the 360 panorama, not on this zed frame, so there are no pixels here
-        // to summarise. n_eff==0 says exactly that — no colour information — keeping the arrays 1-to-1.
-        color_rgb.insert(color_rgb.end(), {0.0f, 0.0f, 0.0f});
-        color_var.insert(color_var.end(), {0.0f, 0.0f, 0.0f});
-        color_neff.push_back(0.0f);
-
-        if (b.has_lidar_depth and not b.support_room.empty())
-        {
-            // FULL 3D slice from the reprojected lidar. The hits arrive room-framed (they are built on the
-            // main thread from the lidar cloud), so they are converted to ZED here — the published frame —
-            // and the centroid/bbox are accumulated in that same frame, never in the room.
-            has_depth_flags.push_back(1.0f);
-            depth_var.push_back(b.range_var);
-            support_offsets.push_back(static_cast<float>(support_offsets.back() + static_cast<float>(b.support_room.size())));
-            Eigen::Vector3f mn  = Eigen::Vector3f::Constant(std::numeric_limits<float>::max());
-            Eigen::Vector3f mx  = Eigen::Vector3f::Constant(std::numeric_limits<float>::lowest());
-            Eigen::Vector3f sum = Eigen::Vector3f::Zero();
-            for (const auto& pr : b.support_room)
-            {
-                const Eigen::Vector3f pz = room_to_zed(pr);
-                support_points_cam.push_back(pz.x()); support_points_cam.push_back(pz.y()); support_points_cam.push_back(pz.z());
-                mn = mn.cwiseMin(pz); mx = mx.cwiseMax(pz); sum += pz;
-            }
-            const Eigen::Vector3f c_zed = sum / static_cast<float>(b.support_room.size());
-            centroids_xyz.insert(centroids_xyz.end(), {c_zed.x(), c_zed.y(), c_zed.z()});
-            bbox_min_xyz.insert(bbox_min_xyz.end(),   {mn.x(), mn.y(), mn.z()});
-            bbox_max_xyz.insert(bbox_max_xyz.end(),   {mx.x(), mx.y(), mx.z()});
-            if (params_.MASK_MOTION_ENABLED)
-            {
-                // No zed-image interaction matrix for a ricoh mask ⇒ neutral motion terms; range_var
-                // (depth_var) carries the ricoh-specific uncertainty. mask_range = the depth centroid range.
-                motion_dotd.push_back(0.0f);  motion_bias.push_back(0.0f);  motion_var.push_back(0.0f);
-                trunc_frac.push_back(0.0f);   centroid_radius.push_back(0.0f);
-                mask_range.push_back(b.centroid_room.norm());
-            }
-        }
-        else
-        {
-            // Bearing-only slice (no lidar depth): unchanged Part-B behaviour.
-            has_depth_flags.push_back(0.0f);
-            depth_var.push_back(0.0f);
-            support_offsets.push_back(support_offsets.back());     // no 3D points → begin == end
-            const float nan = std::numeric_limits<float>::quiet_NaN();
-            centroids_xyz.insert(centroids_xyz.end(), {nan, nan, nan});
-            bbox_min_xyz.insert(bbox_min_xyz.end(),   {nan, nan, nan});
-            bbox_max_xyz.insert(bbox_max_xyz.end(),   {nan, nan, nan});
-            if (params_.MASK_MOTION_ENABLED)
-            {
-                motion_dotd.push_back(0.0f);  motion_bias.push_back(0.0f);      motion_var.push_back(0.0f);
-                trunc_frac.push_back(0.0f);   centroid_radius.push_back(0.0f);  mask_range.push_back(0.0f);
-            }
-        }
-    }
-
-    const int mask_count = static_cast<int>(label_ids.size());
-    G_->add_or_modify_attrib_local<mask_frame_id_att>(masks_node, static_cast<int>(sensing_frame));
-    G_->add_or_modify_attrib_local<mask_timestamp_ms_att>(masks_node, frame_ts_ms);
-    G_->add_or_modify_attrib_local<mask_count_att>(masks_node, mask_count);
-    G_->add_or_modify_attrib_local<mask_labels_att>(masks_node, labels_joined.str());
-    G_->add_or_modify_attrib_local<mask_label_ids_att>(masks_node, label_ids);
-    G_->add_or_modify_attrib_local<mask_confidences_att>(masks_node, confidences);
-    G_->add_or_modify_attrib_local<mask_support_offsets_att>(masks_node, support_offsets);
-    G_->add_or_modify_attrib_local<mask_support_points_cam_att>(masks_node, support_points_cam);
-    G_->add_or_modify_attrib_local<mask_centroids_xyz_att>(masks_node, centroids_xyz);
-    G_->add_or_modify_attrib_local<mask_bbox_min_xyz_att>(masks_node, bbox_min_xyz);
-    G_->add_or_modify_attrib_local<mask_bbox_max_xyz_att>(masks_node, bbox_max_xyz);
-    G_->add_or_modify_attrib_local<mask_pixels_xy_att>(masks_node, mask_pixels_xy);
-    G_->add_or_modify_attrib_local<mask_pixel_offsets_att>(masks_node, mask_pixel_offsets);
-    G_->add_or_modify_attrib_local<mask_has_depth_att>(masks_node, has_depth_flags);
-    G_->add_or_modify_attrib_local<mask_source_att>(masks_node, mask_source);
-    G_->add_or_modify_attrib_local<mask_azimuth_att>(masks_node, azimuths);
-    G_->add_or_modify_attrib_local<mask_depth_var_att>(masks_node, depth_var);
-    if (params_.MASK_COLOR_ENABLED)
-    {
-        G_->add_or_modify_attrib_local<mask_color_rgb_att>(masks_node, color_rgb);
-        G_->add_or_modify_attrib_local<mask_color_var_att>(masks_node, color_var);
-        G_->add_or_modify_attrib_local<mask_color_neff_att>(masks_node, color_neff);
-    }
-    if (params_.MASK_MOTION_ENABLED)
-    {
-        G_->add_or_modify_attrib_local<mask_motion_dotd_att>(masks_node, motion_dotd);
-        G_->add_or_modify_attrib_local<mask_motion_bias_att>(masks_node, motion_bias);
-        G_->add_or_modify_attrib_local<mask_motion_var_att>(masks_node, motion_var);
-        G_->add_or_modify_attrib_local<mask_trunc_frac_att>(masks_node, trunc_frac);
-        G_->add_or_modify_attrib_local<mask_centroid_radius_att>(masks_node, centroid_radius);
-        G_->add_or_modify_attrib_local<mask_range_att>(masks_node, mask_range);
-        const std::vector<float> twist_flat{
-            cam_twist_optical.v.x(), cam_twist_optical.v.y(), cam_twist_optical.v.z(),
-            cam_twist_optical.w.x(), cam_twist_optical.w.y(), cam_twist_optical.w.z()};
-        G_->add_or_modify_attrib_local<mask_cam_twist_att>(masks_node, twist_flat);
-        G_->add_or_modify_attrib_local<mask_frame_dt_s_att>(masks_node, frame_dt_s);
-        G_->add_or_modify_attrib_local<mask_rt_lag_s_att>(masks_node, rt_lag_s);
-        G_->add_or_modify_attrib_local<mask_rt_gap_s_att>(masks_node, rt_gap_s);
-    }
+    MaskArrays out;
+    out.frame_id            = static_cast<int>(sensing_frame);
+    out.ts_ms               = frame_ts_ms;
+    out.labels              = labels_joined.str();
+    out.label_ids           = std::move(label_ids);
+    out.confidences         = std::move(confidences);
+    out.support_offsets     = std::move(support_offsets);
+    out.support_points_cam  = std::move(support_points_cam);
+    out.centroids_xyz       = std::move(centroids_xyz);
+    out.bbox_min_xyz        = std::move(bbox_min_xyz);
+    out.bbox_max_xyz        = std::move(bbox_max_xyz);
+    out.pixels_xy           = std::move(mask_pixels_xy);
+    out.pixel_offsets       = std::move(mask_pixel_offsets);
+    out.has_depth           = std::move(has_depth_flags);
+    out.source              = std::move(mask_source);
+    out.azimuth             = std::move(azimuths);
+    out.depth_var           = std::move(depth_var);
+    out.color_rgb           = std::move(color_rgb);
+    out.color_var           = std::move(color_var);
+    out.color_neff          = std::move(color_neff);
+    out.motion_dotd         = std::move(motion_dotd);
+    out.motion_bias         = std::move(motion_bias);
+    out.motion_var          = std::move(motion_var);
+    out.trunc_frac          = std::move(trunc_frac);
+    out.centroid_radius     = std::move(centroid_radius);
+    out.range               = std::move(mask_range);
+    out.cam_twist           = {cam_twist_optical.v.x(), cam_twist_optical.v.y(), cam_twist_optical.v.z(),
+                               cam_twist_optical.w.x(), cam_twist_optical.w.y(), cam_twist_optical.w.z()};
+    out.frame_dt_s          = frame_dt_s;
+    out.rt_lag_s            = rt_lag_s;
+    out.rt_gap_s            = rt_gap_s;
+    const int mask_count = static_cast<int>(out.label_ids.size());
+    write_mask_node(*G_, params_, masks_node, out);
     G_->update_node(std::move(masks_node));
 
     // Remember this zed pose for the next frame's twist finite-difference (only with a valid capture stamp).
@@ -906,6 +878,80 @@ void GraphPublisher::upload_masks(const RGBDData& rgbd, const Mat::RTMat& room_T
 
     if (params_.VERBOSE_DEBUG)
         qInfo() << "[Masks] Uploaded" << mask_count << "masks and" << total_support_points << "support points to DSR (frame=" << sensing_frame << ")";
+}
+
+// RICOH peripheral slices -> "masks_ricoh" (child of "ricoh"), RICOH-frame payload, ricoh capture stamp.
+// Depth-carrying slices (lidar reprojected into the panorama) publish 3-D support points / centroid / bbox in
+// the RICOH frame (derived by the caller through ricoh<-robot, never through the room); bearing-only slices
+// publish NaN geometry plus a RICOH-frame azimuth in mask_azimuth. All attribute arrays stay 1-to-1.
+void GraphPublisher::upload_masks_ricoh(const std::vector<BearingDetection>& detections, std::uint64_t frame_ts_ms)
+{
+    auto node_opt = G_->get_node("masks_ricoh");
+    if (!node_opt.has_value())
+        return;
+    auto& node = node_opt.value();
+
+    MaskArrays out;
+    out.frame_id = static_cast<int>(++masks_ricoh_publish_seq_);
+    out.ts_ms    = frame_ts_ms;
+    std::ostringstream labels_joined;
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+
+    for (const auto& b : detections)
+    {
+        if (not out.label_ids.empty())
+            labels_joined << '|';
+        labels_joined << b.label;
+        out.label_ids.push_back(b.class_id);
+        out.confidences.push_back(b.confidence);
+        out.source.push_back(1.0f);                                   // source = ricoh
+        out.azimuth.push_back(b.azimuth_cam_rad);                     // RICOH-frame bearing
+        out.pixel_offsets.push_back(out.pixel_offsets.back());        // no raw silhouette pixels
+        // Detected on the panorama, not on a zed frame: no colour information (n_eff==0), arrays stay 1-to-1.
+        out.color_rgb.insert(out.color_rgb.end(), {0.0f, 0.0f, 0.0f});
+        out.color_var.insert(out.color_var.end(), {0.0f, 0.0f, 0.0f});
+        out.color_neff.push_back(0.0f);
+
+        if (b.has_lidar_depth and not b.support_cam.empty())
+        {
+            out.has_depth.push_back(1.0f);
+            out.depth_var.push_back(b.range_var);
+            out.support_offsets.push_back(out.support_offsets.back() + static_cast<float>(b.support_cam.size()));
+            Eigen::Vector3f mn  = Eigen::Vector3f::Constant(std::numeric_limits<float>::max());
+            Eigen::Vector3f mx  = Eigen::Vector3f::Constant(std::numeric_limits<float>::lowest());
+            Eigen::Vector3f sum = Eigen::Vector3f::Zero();
+            for (const auto& p : b.support_cam)
+            {
+                out.support_points_cam.insert(out.support_points_cam.end(), {p.x(), p.y(), p.z()});
+                mn = mn.cwiseMin(p); mx = mx.cwiseMax(p); sum += p;
+            }
+            const Eigen::Vector3f c = sum / static_cast<float>(b.support_cam.size());
+            out.centroids_xyz.insert(out.centroids_xyz.end(), {c.x(), c.y(), c.z()});
+            out.bbox_min_xyz.insert(out.bbox_min_xyz.end(), {mn.x(), mn.y(), mn.z()});
+            out.bbox_max_xyz.insert(out.bbox_max_xyz.end(), {mx.x(), mx.y(), mx.z()});
+            // No image interaction matrix for a ricoh mask => neutral motion terms; depth_var carries the
+            // ricoh-specific uncertainty. mask_range = distance of the depth centroid from the camera.
+            out.motion_dotd.push_back(0.0f);  out.motion_bias.push_back(0.0f);  out.motion_var.push_back(0.0f);
+            out.trunc_frac.push_back(0.0f);   out.centroid_radius.push_back(0.0f);
+            out.range.push_back(b.centroid_cam.norm());
+        }
+        else
+        {
+            out.has_depth.push_back(0.0f);
+            out.depth_var.push_back(0.0f);
+            out.support_offsets.push_back(out.support_offsets.back());   // no 3-D points => begin == end
+            out.centroids_xyz.insert(out.centroids_xyz.end(), {nan, nan, nan});
+            out.bbox_min_xyz.insert(out.bbox_min_xyz.end(), {nan, nan, nan});
+            out.bbox_max_xyz.insert(out.bbox_max_xyz.end(), {nan, nan, nan});
+            out.motion_dotd.push_back(0.0f);  out.motion_bias.push_back(0.0f);  out.motion_var.push_back(0.0f);
+            out.trunc_frac.push_back(0.0f);   out.centroid_radius.push_back(0.0f);  out.range.push_back(0.0f);
+        }
+    }
+    out.labels = labels_joined.str();
+    write_mask_node(*G_, params_, node, out);
+    G_->update_node(std::move(node));
+    if (params_.VERBOSE_DEBUG)
+        qInfo() << "[Masks] ricoh uploaded" << out.label_ids.size() << "slices (frame=" << out.frame_id << ")";
 }
 
 void GraphPublisher::publish_skeletons(const RGBDData& rgbd,
@@ -1076,5 +1122,6 @@ void GraphPublisher::cleanup_semantic_grid_nodes()
         G_->delete_node(node.id());
     }
     masks_ready_    = false;
+    masks_ricoh_ready_ = false;
     skeleton_ready_ = false;
 }

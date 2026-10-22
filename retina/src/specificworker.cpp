@@ -1616,7 +1616,7 @@ void SpecificWorker::compute()
     {
         const auto perf_pub0 = std::chrono::steady_clock::now();
 
-        // RGB-360 (ricoh) peripheral detections → shared "masks" node (Part B, RICOH_360_PERIPHERAL_DETECTION.md).
+        // RGB-360 (ricoh) peripheral detections → per-camera mask nodes (masks_zed / masks_ricoh) (Part B, RICOH_360_PERIPHERAL_DETECTION.md).
         // SPLIT across threads: the RicohYoloWorker resolves each detection's room-frame BEARING on its own
         // thread (own InnerEigenAPI, room<-ricoh at the panorama stamp — ricoh_yolo_worker.cpp::compute_bearings);
         // the LiDAR DEPTH-FILL runs HERE on the main thread, where the lidar cloud lives, augmenting those
@@ -1645,12 +1645,17 @@ void SpecificWorker::compute()
                                                   rres->frame.rgbd.bgr, rres->frame.stamp, rg);
             }
 
-        std::vector<BearingDetection> bearing_dets;
+        // RGB-360 (ricoh) slices -> "masks_ricoh" (own node, RICOH frame, panorama stamp). Computed once per
+        // NEW panorama (the worker's latest result is otherwise re-seen every zed cycle).
         if (params.RICOH_PUBLISH_MASKS and ricoh_worker_)
         {
+            std::vector<BearingDetection> bearing_dets;
             std::vector<SegDetection> ricoh_dets;
-            if (auto rres = ricoh_worker_->latest_result(); rres and rres->masks and rres->bearings)
+            std::uint64_t ricoh_stamp = 0;
+            if (auto rres = ricoh_worker_->latest_result(); rres and rres->masks and rres->bearings
+                and rres->frame.stamp != last_ricoh_published_stamp_)
             {
+                ricoh_stamp = rres->frame.stamp;
                 // ★Log the 360 side too. The first run of detect_drops.csv came back with `source` = zed
                 // on all 34 832 semantic rows, because the only call sat on the ZED drain path — leaving
                 // the ONE camera whose drop behaviour we already know is defective (the min_area-over-the-
@@ -1670,28 +1675,42 @@ void SpecificWorker::compute()
                 bearing_dets = std::move(*rres->bearings);
             }
 
-            if (params.RICOH_MASK_DEPTH and frame->ricoh_valid
+            if (ricoh_stamp != 0 and params.RICOH_MASK_DEPTH and frame->ricoh_valid and robot_T_ricoh_.has_value()
                 and not bearing_dets.empty() and bearing_dets.size() == ricoh_dets.size()
-                and not frame->lidar_points_room.empty())
+                and not frame->lidar_points_robot.empty())
             {
                 if (not ricoh_camera_api_)
                     if (const auto rn = G->get_node("ricoh"); rn.has_value())
                         ricoh_camera_api_ = G->get_camera_api(rn.value());
                 if (ricoh_camera_api_)
                 {
+                    // ★RICOH-FRAME DEPTH WITHOUT THE ROOM. The lidar cloud is taken in the ROBOT frame and
+                    // brought into the ricoh frame through the robot-internal mount ricoh<-robot only
+                    // (a static RT chain; no localization, no room). `robot_T_ricoh_tuned` is the ricoh frame
+                    // with the live azimuth tune (a yaw about its up axis) folded in -- the frame the panorama
+                    // columns are really in; published points are rotated back by that yaw so they are
+                    // expressed in the GRAPH's ricoh node frame, which is what a consumer resolves.
+                    Mat::RTMat robot_T_ricoh_tuned = robot_T_ricoh_.value();
+                    Eigen::Matrix3d R_tune = Eigen::Matrix3d::Identity();
+                    if (params.RICOH_AZIMUTH_TUNE_DEG != 0.0f)
+                    {
+                        const Eigen::AngleAxisd tune(params.RICOH_AZIMUTH_TUNE_DEG * M_PI / 180.0, Eigen::Vector3d::UnitZ());
+                        robot_T_ricoh_tuned.rotate(tune);
+                        R_tune = tune.toRotationMatrix();
+                    }
                     // Reproject the lidar into the panorama ONCE (helios-only by default: co-located with the
-                    // ricoh ⇒ least occlusion parallax).
+                    // ricoh => least occlusion parallax).
                     std::vector<Eigen::Vector3f> cloud;
-                    cloud.reserve(frame->lidar_points_room.size());
-                    for (std::size_t i = 0; i < frame->lidar_points_room.size(); ++i)
+                    cloud.reserve(frame->lidar_points_robot.size());
+                    for (std::size_t i = 0; i < frame->lidar_points_robot.size(); ++i)
                     {
                         if (params.RICOH_MASK_DEPTH_HELIOS_ONLY
                             and i < frame->lidar_plane_id.size() and frame->lidar_plane_id[i] != 0)
                             continue;   // skip bpearl (plane 1)
-                        cloud.push_back(frame->lidar_points_room[i]);
+                        cloud.push_back(frame->lidar_points_robot[i]);
                     }
                     const auto lidar_pano =
-                        rc::depth::reproject_cloud(cloud, *ricoh_camera_api_, frame->room_T_ricoh.inverse());
+                        rc::depth::reproject_cloud(cloud, *ricoh_camera_api_, robot_T_ricoh_tuned.inverse());
 
                     for (std::size_t di = 0; di < ricoh_dets.size() and not lidar_pano.empty(); ++di)
                     {
@@ -1730,18 +1749,23 @@ void SpecificWorker::compute()
                             BearingDetection& bd = bearing_dets[di];   // augment the worker-computed bearing
                             bd.has_lidar_depth = true;
                             bd.range_var = md.range_var;
-                            bd.support_room.reserve(fg.size());
+                            bd.support_cam.reserve(fg.size());
                             Eigen::Vector3f sum = Eigen::Vector3f::Zero();
-                            for (const auto& h : fg)   // ricoh-frame hit → room frame
+                            for (const auto& h : fg)   // tuned-ricoh-frame hit -> graph ricoh-node frame
                             {
-                                const Eigen::Vector3f pr = (frame->room_T_ricoh * h.xyz_cam.cast<double>()).cast<float>();
-                                bd.support_room.push_back(pr);
-                                sum += pr;
+                                const Eigen::Vector3f pc = (R_tune * h.xyz_cam.cast<double>()).cast<float>();
+                                bd.support_cam.push_back(pc);
+                                sum += pc;
                             }
-                            bd.centroid_room = sum / static_cast<float>(fg.size());
+                            bd.centroid_cam = sum / static_cast<float>(fg.size());
                         }
                     }
                 }
+            }
+            if (ricoh_stamp != 0)
+            {
+                graph_publisher_->publish_ricoh(bearing_dets, ricoh_stamp);
+                last_ricoh_published_stamp_ = ricoh_stamp;
             }
         }
 
@@ -1763,7 +1787,7 @@ void SpecificWorker::compute()
             masks_src = &masks_refined;
         }
         graph_publisher_->publish(zed_res->frame.rgbd, zed_res->frame.room_T_sensor,
-                                  *masks_src, zed_res->frame.stamp, bearing_dets);
+                                  *masks_src, zed_res->frame.stamp);
         publish_ms = perf_ms(perf_pub0, std::chrono::steady_clock::now());
 
         // Human-pose branch: BODY_18 skeletons (camera frame) on the 'skeleton' node for human_concept.
@@ -1865,6 +1889,7 @@ std::optional<SpecificWorker::SceneFrame> SpecificWorker::process_scene_frame(FP
 
     std::vector<Eigen::Vector3f> lidar_points_room;
     std::vector<std::uint8_t>    lidar_plane_id;   // per-point source plane (helios=0, bpearl=1) for colouring
+    std::vector<Eigen::Vector3f> lidar_points_robot;   // same survivors as lidar_points_room, robot frame
     if (auto lidar_data = scene_processor->get_lidar3D(); lidar_data.has_value())
     {
         if (lidar_data->timestamp_ms > 0)
@@ -1955,6 +1980,7 @@ std::optional<SpecificWorker::SceneFrame> SpecificWorker::process_scene_frame(FP
         const std::size_t count = std::min({lidar_data->xs.size(), lidar_data->ys.size(), lidar_data->zs.size()});
         const std::size_t plane_count = std::min(count, lidar_data->plane_id.size());
         lidar_points_room.reserve(count);
+        lidar_points_robot.reserve(count);
         lidar_plane_id.reserve(plane_count);
         const Eigen::Matrix3f room_rotation = room_T_robot_lidar.linear().cast<float>();
         const Eigen::Vector3f room_translation = room_T_robot_lidar.translation().cast<float>();
@@ -1964,6 +1990,7 @@ std::optional<SpecificWorker::SceneFrame> SpecificWorker::process_scene_frame(FP
             const Eigen::Vector3f point_room = room_rotation * point_robot + room_translation;
             if (point_room.z() >= ceiling_z) continue;   // above the ceiling → drop
             lidar_points_room.emplace_back(point_room);
+            lidar_points_robot.emplace_back(point_robot);
             if (i < plane_count) lidar_plane_id.push_back(lidar_data->plane_id[i]);
         }
     }
@@ -2003,7 +2030,8 @@ std::optional<SpecificWorker::SceneFrame> SpecificWorker::process_scene_frame(FP
                       room_height,
                       room_T_ricoh,
                       ricoh_valid,
-                      frame_ts_ms};
+                      frame_ts_ms,
+                      std::move(lidar_points_robot)};
 }
 
 void SpecificWorker::log_ricoh_depth_lidar_correlation(const rc::depth::DepthMap& map,

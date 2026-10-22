@@ -35,6 +35,7 @@ struct PerceptionFrame
     RGBDData       rgbd;                                  // bgr + depth + intrinsics
     Mat::RTMat     room_T_sensor = Mat::RTMat::Identity();// transform pinned to `stamp`
     std::uint64_t  stamp = 0;                             // acquisition stamp
+    double         azimuth_tune_rad = 0.0;                // ricoh: live yaw fine-tune (already folded into room_T_sensor)
     bool           is_360 = false;                        // equirect source → 3-strip seg / bearing publish
 };
 
@@ -71,7 +72,7 @@ struct PerceptionResult
     // is a plain data race on its std::vector. The result already crosses the thread boundary safely,
     // so the window travels with it.
     std::vector<int>                                          strips_looked;
-    std::optional<std::vector<BearingDetection>>              bearings;   // ricoh: room-frame bearing per mask
+    std::optional<std::vector<BearingDetection>>              bearings;   // ricoh: RICOH-frame bearing per mask
     std::optional<std::vector<SegDetection>>                  refined_masks;   // SAM2-sharpened masks (subset of `masks`)
     bool                                                      refined_fresh = false;
     // Ricoh 360 monocular depth, per strip. ★NOT a continuous metric field — each strip carries its

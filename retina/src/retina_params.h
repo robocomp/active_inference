@@ -245,7 +245,7 @@ struct RetinaParams
     int         RICOH_SEMANTIC_DECIMATION  = 1;
     int         RICOH_YOLO_STRIP_OVERLAP_PX= 80;      // Ricoh.yolo_strip_overlap_px
     float       RICOH_YOLO_MERGE_IOU       = 0.5f;    // Ricoh.yolo_merge_iou — cross-strip dedup threshold
-    // Publish the ricoh 360 detections into the shared "masks" node as NO-DEPTH bearing slices (Part B,
+    // Publish the ricoh 360 detections into the per-camera mask nodes (masks_zed / masks_ricoh) as NO-DEPTH bearing slices (Part B,
     // RICOH_360_PERIPHERAL_DETECTION.md). azimuth_offset trims the panorama-column→room-bearing mapping for
     // the ricoh's mounting yaw + the panorama's 0-column convention — PROVISIONAL, verify live vs the
     // descriptor projection model before any consumer relies on the bearing (Part C is not built yet).

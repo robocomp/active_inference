@@ -2,7 +2,8 @@
  * common/mask_ingestor/mask_ingestor.h
  *
  * Shared perception input layer for the concept agents (bottle/table/chair/…): reads the YOLO
- * "masks" DSR node (written by the retina), parses it into per-instance mask slices + support
+ * mask nodes (ONE PER CAMERA, written by the retina, discovered via mask_nodes.h — never by name),
+ * merges them into one packet of per-instance mask slices + support
  * points + raw 2D silhouette pixels, and serves the nearest slice of a requested label to a query
  * centroid. Object-AGNOSTIC: the caller passes the query point + label, so this is a single shared
  * file (no <Obj>Instance dependency). Also reads the per-node candidate/residual point attributes.
@@ -11,11 +12,13 @@
  * packet(). Plain class (no Q_OBJECT) constructed by SpecificWorker once G is ready.
  *
  * FRAME CONTRACT (this class IS the single agreement point with the retina producer):
- *   The producer publishes mask support points in the ZED/CAMERA frame — the raw deprojection, before
- *   any pose is applied ("mask_support_points_cam"). THE ROOM TRANSFORM HAPPENS HERE, not at the
- *   producer: this class reads the camera points and transforms them zed→"room" via inner_eigen,
- *   pinned to the CAPTURE stamp, recomputing per-slice centroids/bboxes in the target frame. No *_cam
- *   centroid/bbox attribute exists or is needed for that reason.
+ *   The producer publishes ONE mask node PER CAMERA ("masks_zed" under "zed", "masks_ricoh" under "ricoh"),
+ *   each with its support points in THAT CAMERA's frame ("mask_support_points_cam") — the raw deprojection,
+ *   before any pose is applied — and its bearing-only azimuths ("mask_azimuth") in that camera's frame too.
+ *   THE ROOM TRANSFORM HAPPENS HERE, not at the producer: for each node this class transforms camera→"room"
+ *   via inner_eigen, pinned to THAT node's CAPTURE stamp, recomputing per-slice centroids/bboxes in the
+ *   target frame, and rotates each camera-frame azimuth into the room (slice.azimuth_room_rad). So
+ *   everything downstream (peripheral_channel, the concept agents) still sees room-frame data.
  *
  *   ★WHY THE CONSUMER PAYS FOR THE TRANSFORM, NOT THE PRODUCER. Baking room_T_zed at the producer made
  *   a RAW-PERCEPTION component depend on a LOCALIZATION component: the retina could not run at all
@@ -25,12 +28,14 @@
  *   the room transform is a measurement channel WITH a covariance, and only whoever applies it can add
  *   the J·Σ_chain·Jᵀ term (door/table/chair/cabinet already do, via InnerGaussianAPI). Skeletons were
  *   already published camera-frame for exactly this reason ("so a consumer can servo robot-relative
- *   without paying localization noise"); masks were the last holdout.
+ *   without paying localization noise"); masks were the last holdout (the Ricoh slices, which used to be
+ *   room-framed, now follow the same rule).
  *
- *   Legacy: "mask_support_points" (ROOM frame) is still read when the producer publishes it and the
- *   camera array is absent, so an OLD retina keeps working. Set MASK_INGESTOR_LEGACY_ROOM=1 in the
- *   environment to force that path for an A/B against the transform done here — the two must agree to
- *   float precision, since it is the same matrix at the same timestamp, one process later.
+ *   ★MERGE POLICY (see refresh()): one packet per FRONT-camera frame, plus the peripheral camera's slices
+ *   when it has published a NEW frame since the last packet (delivered exactly once). The packet header
+ *   (frame_id / timestamp_ms / cam_twist) is the front frame's; each slice carries its own camera's capture
+ *   stamp in MaskSlice::timestamp_ms. Front vs peripheral is decided from the camera's projection model in
+ *   the graph (pinhole = front), never from a node name.
  */
 
 #pragma once
@@ -42,11 +47,14 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
 
 #include <Eigen/Dense>
 #include <dsr/api/dsr_api.h>
 #include <dsr/api/dsr_inner_eigen_api.h>
+
+#include "mask_nodes.h"   // rc::masks::find_mask_nodes — the one camera→mask-node discovery
 
 namespace rc {
 
@@ -84,7 +92,10 @@ public:
         // BEARING. Consumers MUST skip !has_depth slices until a bearing confirm/birth path exists (Part C).
         // Defaults match the zed contract, so a producer that predates the field reads back has_depth=true.
         bool  has_depth        = true;   // false ⇒ ricoh bearing-only slice
-        float azimuth_room_rad = 0.0f;   // room-frame bearing; meaningful only when has_depth==false
+        float azimuth_room_rad = 0.0f;   // ROOM-frame bearing (rotated from the producer's camera-frame azimuth at ingest); meaningful only when has_depth==false
+        // Capture stamp (ms) of the camera frame this slice came from — each camera has its own, so in a
+        // merged packet it can differ from MasksPacket::timestamp_ms (the front camera's).
+        std::uint64_t timestamp_ms = 0;
         // ★★WHICH CAMERA SAW IT — AND `has_depth` IS NOT THAT QUESTION. The two were the same question only
         // while ricoh slices were bearing-only. Once the producer began depth-filling them from reprojected
         // LiDAR it started publishing them as FULL 3D slices with has_depth = 1 (graph_publisher.cpp: a
@@ -147,10 +158,10 @@ public:
     {
         bool valid = false;
         int frame_id = -1;
-        std::uint64_t timestamp_ms = 0;   // capture stamp of the source RGBD frame (0 = producer didn't publish one)
+        std::uint64_t timestamp_ms = 0;   // capture stamp of the FRONT camera frame heading the packet (0 = producer didn't publish one)
         std::vector<MaskSlice> slices;
         std::vector<Eigen::Vector3f> support_points;
-        // RAW camera/source-frame support points (from "mask_support_points_cam"), 1-to-1 with
+        // RAW camera/source-frame support points (from "mask_support_points_cam"; each node's in ITS OWN camera frame), 1-to-1 with
         // support_points' indexing. Empty if the producer didn't dual-publish it. Independent of
         // the robot pose — used to build pose-independent observations (object-anchor z_o).
         std::vector<Eigen::Vector3f> support_points_cam;
@@ -161,38 +172,32 @@ public:
     };
 
     // Constructs its OWN InnerEigenAPI (a fresh instance per call by design) so every consumer gets the
-    // zed→room transform without wiring one in. Safe: the lookup is pinned to the capture stamp (ts!=0),
+    // camera→room transform without wiring one in. Safe: the lookup is pinned to the capture stamp (ts!=0),
     // which bypasses InnerEigenAPI's unlocked ts==0 cache entirely (CLAUDE.md, DSR thread-safety).
     explicit MaskIngestor(std::shared_ptr<DSR::DSRGraph> graph);
 
-    // Override the default zed→room transform (e.g. a consumer that fits in a different frame). Passing
-    // a null inner_eigen or an empty frame name reverts to reading the legacy ROOM-frame array as-is.
+    // Override the default transform instance / target frame (e.g. a consumer that fits in a different
+    // frame). `source_frame` is vestigial: every mask node is transformed from ITS OWN camera frame.
     void enable_frame_transform(DSR::InnerEigenAPI* inner_eigen,
                                 std::string source_frame, std::string target_frame);
 
-    // Frames the transform resolves; defaults "zed" → "room". The TARGET is a configured name, resolved
+    // Frames the transform resolves (the source is vestigial, see above); the TARGET is a configured name, resolved
     // per frame in resolve_transform: "room" means "whichever room is current" (rc::room::resolve_frame),
     // because room_concept names its rooms room_1, room_2, … and no literal can follow a hand-over.
     void set_frames(std::string source_frame, std::string target_frame);
-
-    // A/B control: read the producer's legacy ROOM-frame array verbatim instead of transforming the
-    // camera-frame one here. Exists ONLY so the two paths can be compared on the same producer while
-    // both arrays still exist; it becomes a no-op once the producer stops publishing the room array
-    // (Phase 2). Also settable via MASK_INGESTOR_LEGACY_ROOM=1, which this overrides.
-    void set_legacy_room_frame(bool on) { force_legacy_room_ = on; }
 
     // Forward-extrapolate the target←robot pose from the newest RT block to the mask capture stamp before
     // composing the transform (default ON, horizon 0.2 s — the producer's settings, ported verbatim).
     // See resolve_transform() for why this is not optional in practice.
     void set_pose_extrapolation(bool enabled, float max_dt_s = 0.2f);
 
-    // Frames whose zed→room lookup failed (chain not resolvable at the capture stamp). These are DROPPED,
+    // Frames whose camera→room lookup failed (chain not resolvable at the capture stamp). These are DROPPED,
     // never passed through with an identity transform — identity would yield camera-frame points labelled
     // room, which is the exact defect this class was moved here to remove. A consumer skipping a cycle is
     // correct; a consumer fitting a corrupt cycle is not.
     [[nodiscard]] std::uint64_t dropped_no_transform() const noexcept { return dropped_no_transform_; }
 
-    // Re-read the "masks" node. Returns true only when a NEW frame was ingested.
+    // Re-read every camera's mask node and merge. Returns true only when a NEW frame was ingested.
     bool refresh();
 
     // ── Producer-liveness probes (for a consumer's primary-input stream gate; see CONCEPT_AGENT_RECIPE.md) ──
@@ -202,8 +207,8 @@ public:
     // never false-trips). Single-threaded (main-thread refresh + read), so no atomic.
     [[nodiscard]] std::int64_t ms_since_last_frame() const noexcept;
 
-    // Graph-only readiness probe (usable from Waiting, before any frame): is the "masks" DSR node present and
-    // carrying a mask_frame_id? True ⇒ refresh() will start yielding frames once the producer publishes.
+    // Graph-only readiness probe (usable from Waiting, before any frame): is at least one mask node (child of an
+    // rgbd camera) present and carrying a mask_frame_id? `detail` lists the mask nodes found. True ⇒ refresh() will start yielding frames once the producer publishes.
     // `detail` (optional) receives a human-readable reason when false. Object-agnostic.
     [[nodiscard]] bool stream_ready(std::string* detail = nullptr) const;
 
@@ -226,21 +231,32 @@ private:
     // tgt←robot pinned to the stamp and forward-extrapolated over the RT lag, composed with the STATIC
     // robot←src camera mount. nullopt when the chain is not resolvable — callers must DROP the frame,
     // never substitute identity. Falls back to a direct tgt←src lookup when the chain cannot be split.
-    [[nodiscard]] std::optional<Eigen::Matrix4d> resolve_transform(std::uint64_t stamp) const;
+    [[nodiscard]] std::optional<Eigen::Matrix4d> resolve_transform(const std::string& src_frame, std::uint64_t stamp) const;
+
+    enum class NodeResult { stale, dropped, ok };
+    [[nodiscard]] bool camera_is_front(std::uint64_t camera_id) const;
+    NodeResult ingest_node(const rc::masks::MaskNodeRef& ref, const DSR::Node& node, int frame_id, bool front,
+                           MasksPacket& out);
+    static void merge_into(MasksPacket& dst, MasksPacket&& src);
+
+    struct NodeState
+    {
+        int last_frame = -1;   // last mask_frame_id consumed from this node
+        int front      = -1;   // -1 unknown, 1 front (pinhole) camera, 0 peripheral (panoramic)
+    };
+    std::unordered_map<std::uint64_t, NodeState> node_state_;   // keyed by mask-node id
 
     std::shared_ptr<DSR::DSRGraph> G_;
     MasksPacket                    masks_packet_;
-    int                            last_masks_frame_seen_ = -1;
     std::int64_t                   last_fresh_wall_ms_    = 0;   // wall-clock ms of the last NEW-frame ingest (0 = never)
 
     // src→tgt frame transform (see the FRAME CONTRACT above). `inner_eigen_` points either at
     // `owned_inner_eigen_` (the default) or at an instance handed in by enable_frame_transform.
     std::unique_ptr<DSR::InnerEigenAPI> owned_inner_eigen_;
     DSR::InnerEigenAPI* inner_eigen_       = nullptr;
-    std::string         src_frame_         = "zed";
+    std::string         src_frame_         = "zed";   // vestigial: each node uses its own camera
     std::string         tgt_frame_         = "room";   // CONFIGURED; "room" ⇒ the current room, resolved per frame
     bool                transform_enabled_ = false;
-    bool                force_legacy_room_ = false;   // MASK_INGESTOR_LEGACY_ROOM=1 (A/B escape hatch)
     bool                pose_extrapolate_  = true;    // beat the room→robot RT lag (producer default)
     float               pose_extrap_max_dt_s_ = 0.2f; // extrapolation horizon clamp (producer default)
     // Memoized get_nodes_by_type("robot").front().name(), DROPPED as soon as that node leaves the

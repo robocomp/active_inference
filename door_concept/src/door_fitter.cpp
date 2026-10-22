@@ -324,7 +324,7 @@ DoorFitter::DoorObservation DoorFitter::observe(DoorInstance& inst, const DSR::N
     // Detection-aliveness ages every cycle; a fresh door mask below resets it to 0.
     if (inst.frames_since_detection < 1000000) ++inst.frames_since_detection;
 
-    // Primary path: YOLO "masks" (room frame), masks-only. Classify-don't-destroy SDF split keeps
+    // Primary path: YOLO masks (MaskIngestor, room frame), masks-only. Classify-don't-destroy SDF split keeps
     // inliers as candidates and the rest as residuals that drive model expansion.
     const auto& masks_packet = mask_ingestor_->packet();
     if (masks_packet.valid && masks_packet.frame_id > inst.last_masks_frame_seen)

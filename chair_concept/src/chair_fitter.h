@@ -67,7 +67,7 @@ public:
     // first time it is created (so the worker can register Qt series / canvas pos). Latches room_id.
     bool ensure_instance(const DSR::Node& node, std::uint64_t room_id);
 
-    // Read the "masks" node → candidate/residual split against the current SDF.
+    // Read the per-camera mask nodes (via MaskIngestor) → candidate/residual split against the current SDF.
     ChairObservation observe(ChairInstance& inst, const DSR::Node& node);
     // One recursive full-covariance belief update (ChairBelief) on this frame's mask points, with the
     // mask-motion channel as the observation precision R / bias gate. Writes the result into inst.model

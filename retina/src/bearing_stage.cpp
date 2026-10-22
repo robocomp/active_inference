@@ -37,10 +37,14 @@ void BearingStage::run(const PerceptionFrame& in, PerceptionResult& out)
     for (const auto& d : *out.masks)
     {
         const double col_c = static_cast<double>(d.bbox.x) + 0.5 * static_cast<double>(d.bbox.width);
-        // panorama column → ray in the ricoh frame → room frame → azimuth. room_T_sensor was resolved at
-        // the panorama stamp (with az-tune) by the RicohSource, so no knobs here.
-        const Eigen::Vector3d ray_room = in.room_T_sensor.linear() * camera_api_->ray_from_pixel(col_c, row_horizon);
-        const float az = std::atan2(static_cast<float>(ray_room.y()), static_cast<float>(ray_room.x()));
+        // panorama column -> ray in the RICOH camera frame -> azimuth. NO room frame: the producer publishes
+        // camera-frame bearings and the mask ingestor converts them to the room at ingest. The runtime
+        // az-tune is a yaw about the ricoh up axis on top of the graph intrinsics, i.e. it adds to the
+        // camera-frame azimuth directly (Rz(t)*ray has azimuth atan2(ray)+t).
+        const Eigen::Vector3d ray_cam = camera_api_->ray_from_pixel(col_c, row_horizon);
+        float az = std::atan2(static_cast<float>(ray_cam.y()), static_cast<float>(ray_cam.x()))
+                 + static_cast<float>(in.azimuth_tune_rad);
+        az = std::atan2(std::sin(az), std::cos(az));   // wrap to (-pi, pi]
         bearings.push_back(BearingDetection{d.label, static_cast<float>(d.class_id), d.confidence, az});
     }
 }

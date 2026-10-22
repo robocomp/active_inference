@@ -2,6 +2,7 @@
 #include <numbers>
 #include "controller_session.h"
 #include "controller_robot_body.h"
+#include "../../common/mask_ingestor/mask_nodes.h"   // rc::masks::find_front_mask_node
 #include "corner_visibility.h"   // point_in_polygon: is the standpoint in the room at all
 
 #include <algorithm>
@@ -5593,7 +5594,12 @@ void ControllerSession::count_dwell_mask_hits()
     // previous version matched YOLO class labels against the graph node NAME, which is unsatisfiable by
     // construction whenever the object is not named after a COCO class — so the robot stood waiting for
     // a confirmation that could not arrive while the mask it wanted was plainly on screen.
-    const auto masks = graph_->get_node("masks");
+    // The FRONT camera's mask node (discovered via the rgbd cameras, never by name): its counter is the
+    // "one look per published camera frame" rhythm; the panorama's frames are not looks at the target.
+    const auto masks_id = front_mask_node_id();
+    if (not masks_id.has_value())
+        return;
+    const auto masks = graph_->get_node(*masks_id);
     if (not masks.has_value())
         return;
     const auto frame = graph_->get_attrib_by_name<mask_frame_id_att>(masks.value());
@@ -5608,11 +5614,28 @@ void ControllerSession::count_dwell_mask_hits()
         ++dwell_mask_hits_;
 }
 
+// Id of the front camera's mask node, discovered through the rgbd cameras (never by name) and cached: the
+// discovery builds a CameraAPI, too heavy for a per-cycle call. Re-discovered when the cached node is gone.
+std::optional<std::uint64_t> ControllerSession::front_mask_node_id() const
+{
+    if (not graph_)
+        return std::nullopt;
+    if (front_mask_node_id_ != 0 and graph_->get_node(front_mask_node_id_).has_value())
+        return front_mask_node_id_;
+    front_mask_node_id_ = 0;
+    if (const auto ref = rc::masks::find_front_mask_node(*graph_); ref.has_value())
+        front_mask_node_id_ = ref->id;
+    return front_mask_node_id_ != 0 ? std::optional{front_mask_node_id_} : std::nullopt;
+}
+
 int ControllerSession::masks_frame_seq() const
 {
     if (not graph_)
         return -1;
-    const auto node = graph_->get_node("masks");
+    const auto ref = front_mask_node_id();
+    if (not ref.has_value())
+        return -1;
+    const auto node = graph_->get_node(*ref);
     if (not node.has_value())
         return -1;
     const auto id = graph_->get_attrib_by_name<mask_frame_id_att>(node.value());

@@ -212,7 +212,7 @@ ChairFitter::ChairObservation ChairFitter::observe(ChairInstance& inst, const DS
         inst.last_appearance_tp = tp_now;
     }
 
-    // Primary path: YOLO "masks" (room frame), masks-only. Classify-don't-destroy SDF split keeps
+    // Primary path: YOLO masks (MaskIngestor, room frame), masks-only. Classify-don't-destroy SDF split keeps
     // inliers as candidates and the rest as residuals that drive model expansion.
     const auto& masks_packet = mask_ingestor_->packet();
     if (masks_packet.valid && masks_packet.frame_id > inst.last_masks_frame_seen)

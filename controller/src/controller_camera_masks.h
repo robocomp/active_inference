@@ -12,7 +12,7 @@
  * there is something to look at.
  *
  * TWO INDEPENDENT SOURCES, DELIBERATELY:
- *   • the SILHOUETTES come from the "masks" DSR node (shared MaskIngestor — the same parse every concept
+ *   • the SILHOUETTES come from the per-camera mask DSR nodes (masks_zed / masks_ricoh, found via the rgbd cameras) (shared MaskIngestor — the same parse every concept
  *     agent uses, so what is drawn here is exactly what the beliefs were fed);
  *   • the PICTURE comes from the zero-copy media plane (zed/rgb descriptor).
  * The masks are the point and the picture is the backdrop: if the camera stream is absent the
