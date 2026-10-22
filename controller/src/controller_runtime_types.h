@@ -395,6 +395,7 @@ struct ControllerParams
     // Task R: reversal is blind. Half-angle of the forward camera's horizontal field of view (ZED2i HD: 110 deg => 0.96 rad,
     // datasheet); progress through space outside it is not credited (local_policy.cpp blind_length). < 0 = off.
     float policy_camera_half_fov_rad = 0.96f;
+    float policy_affordance_reach_m = 2.0f;     // door_concept ActuationReachM: the facing term applies inside it
     bool  policy_affordance_facing = true;      // Task R: a Doorway plan is scored by log P(facing the gap) at its end
     float policy_pose_drift_sigma_m = 0.064f;   // absolute pose error as OU: stationary std — PROGRESS MONITOR
     float policy_pose_drift_time_s = 115.f;     //   and correlation time

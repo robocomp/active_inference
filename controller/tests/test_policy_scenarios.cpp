@@ -23,7 +23,8 @@
 //   g++ -std=c++23 -O2 -Wall -Wextra -pthread -I/usr/include/eigen3 tests/test_policy_scenarios.cpp
 //     src/local_policy/local_policy.cpp src/local_policy/contact.cpp src/local_policy/cost_to_go.cpp src/local_policy/navigator.cpp
 //     ../common/robot_footprint/robot_footprint.cpp ../common/robot_footprint/mesh_hull.cpp -o /tmp/tps && /tmp/tps
-//   Env: ONLY=<scenario> runs one scenario; TRACE=<scenario>:<seed> prints every tick of that run; SEEDS=<n> (default 20).
+//   Env: POLICY_CAMERA=0 turns the Task-R camera model OFF (default ON, as in the controller); POLICY_NOFACING=1 drops the doorway facing term;
+//        ONLY=<scenario> runs one scenario; TRACE=<scenario>:<seed> prints every tick of that run; SEEDS=<n> (default 20).
 //   DIAGNOSTIC switches (NOT the brief's configuration): SIGMA_R=<m> LiDAR range sigma (default 0.02); NO_UNSEEN=1 drops the
 //     UnseenContact hypotheses from the returns (ON by default, ruling D3); NO_JAMBS=1 drops F4's measured jambs from a
 //     Doorway's field; NO_LEAF=1 leaves leaf_known_hinge_side's smear unexplained (A/B).
@@ -53,7 +54,8 @@ using sim2d::Box;
 constexpr float kPi = sim2d::kPi, kDeg = kPi / 180.f;
 
 static int fails = 0;
-static long g_moves = 0, g_rev = 0;   // Task R: Drive/Release decisions and how many reversed
+static bool camera_model_on() { const char* e = std::getenv("POLICY_CAMERA"); return e == nullptr or std::string(e) != "0"; }
+static long g_moves = 0, g_rev = 0, g_rel = 0, g_rk1 = 0, g_rk2 = 0, g_rk0 = 0, g_rtight = 0, g_rclear = 0;   // Task R: Drive/Release decisions and how many reversed
 #define CHECK(name, cond) do { const bool ok_ = (cond); std::printf("%s %s\n", ok_ ? "PASS" : "FAIL", name); if (not ok_) ++fails; } while (0)
 
 // ---------------------------------------------------------------- base and body
@@ -281,7 +283,7 @@ static ScenarioResult run_scenario(const World& world, Pose2 start, Goal goal, f
         PolicyInput in;
         in.pose = bel; in.v_now = base.v; in.w_now = base.w;
         in.sigma_rel_xy = 0.01f; in.sigma_rel_yaw = 0.01f;                                       // odometry-scale RELATIVE error
-        if (std::getenv("POLICY_CAMERA")) { in.camera_half_fov_rad = 0.96f; in.affordance_facing = not std::getenv("POLICY_NOFACING"); }   // Task R: ZED2i 110 deg HFOV
+        if (std::getenv("POLICY_CAMERA") == nullptr or std::string(std::getenv("POLICY_CAMERA")) != "0") { in.camera_half_fov_rad = 0.96f; in.affordance_facing = not std::getenv("POLICY_NOFACING"); }   // Task R: ZED2i 110 deg HFOV
         if (opt.ou) { in.pose_drift_sigma_m = err.sigma_xy; in.pose_drift_time_s = err.tau; }   // the OU's own process (monitor)
         in.returns_age_s = float(kBufferCycles - 1) * kTick;                                     // the older sweep's age
         in.returns = ret; in.body = &B; in.base = base.lim; in.latency_s = base.latency_s; in.now_s = t;
@@ -315,7 +317,21 @@ static ScenarioResult run_scenario(const World& world, Pose2 start, Goal goal, f
         const bool no_escape = st.replanned and (d.mode == Decision::Mode::Stuck
                                or (d.mode == Decision::Mode::Release and not (d.log_p_cont > d.log_p_cont_now)));
         if (no_escape and res.first_no_escape_t < 0.f) res.first_no_escape_t = t;
-        if (st.replanned and (d.mode == Decision::Mode::Drive or d.mode == Decision::Mode::Release)) { ++g_moves; if (d.v < 0.f) ++g_rev; }   // Task R reverse share
+        if (st.replanned and (d.mode == Decision::Mode::Drive or d.mode == Decision::Mode::Release)) {
+            ++g_moves;
+            if (d.v < 0.f)
+            {
+                ++g_rev;
+                // Task R reverse breakdown. Policy view: Release = unlock/unstall; Drive kind 1 = no seen-progress plan exists (dead
+                // end / stall / tight corridor), kind 2 = an alternative existed but the reversal outscored it; kind 0 = other.
+                // Independent view (true bare-hull clearance at the decision): tight = an obstacle within 0.25 m (~ inscribed radius).
+                if (d.mode == Decision::Mode::Release) ++g_rel;
+                else if (d.reversal == 1) ++g_rk1;
+                else if (d.reversal == 2) ++g_rk2;
+                else ++g_rk0;
+                if (clear < 0.25f) ++g_rtight; else ++g_rclear;
+            }
+        }   // Task R reverse share
         if (st.replanned and d.v < 0.f and (d.mode == Decision::Mode::Drive or d.mode == Decision::Mode::Release)) ++res.backups;
         if (tr) std::printf("    belief L %+.2f bar %.2f judged %+d armed %d early %d%s\n", st.unreach_L, st.unreach_bar, d.judged, int(d.armed), int(st.completed_early), st.hand_back ? "  HAND BACK" : "");
         if (d.mode == Decision::Mode::Release and not in_release_episode) { in_release_episode = true; ++res.releases; }
@@ -704,14 +720,17 @@ int main()
         Options o{.grid = kOpenGrid, .jumps = {}, .trace_name = "goal_behind_open_space"};
         const auto S = run_seeds("goal_behind_open_space", [&](unsigned seed) { return run_scenario(w, Pose2{V2(0.f, 0.f), 0.f}, g, 30.f, seed, o); });
         standard_oracles("goal_behind_open_space", S);
-        performance_oracle("goal_behind_open_space", S, 4.05f);
+        // ★ Task R (R1): the baseline encoded REVERSING: the goal 2 m behind was reached by backing up straight (4.05 s). The user's rule - only
+        //   back up to unlock / unstall / in a tight manoeuvre - makes the robot turn (~pi at w_max 1.5 = 2.1 s) and drive forward
+        //   (~2.2 m at 0.5 m/s with the ramps): measured 5.60 s with the camera model on. All safety/arrival checks are kept.
+        performance_oracle("goal_behind_open_space", S, camera_model_on() ? 5.60f : 4.05f);
         CHECK("goal_behind_open_space: path <= 1.5 x geodesic", S.max_path_ratio <= 1.5f);
         // the same with the measured OU pose-error process (0.5 m / 13 deg, tau 20 s): contact is judged on the true pose
         Options ou = o; ou.ou = true; ou.trace_name = "goal_behind_open_space_ou";
         const auto S2 = run_seeds("goal_behind_open_space + OU pose error", [&](unsigned seed) { return run_scenario(w, Pose2{V2(0.f, 0.f), 0.f}, g, 30.f, seed, ou); });
         CHECK("goal_behind_open_space OU: contacts == 0", S2.contacts == 0);
         CHECK("goal_behind_open_space OU: reached on every seed", S2.reached == S2.n);
-        performance_oracle("goal_behind_open_space OU", S2, 4.40f);
+        performance_oracle("goal_behind_open_space OU", S2, camera_model_on() ? 6.35f : 4.40f);   // Task R (R1): as above, measured 6.35 s with the pose-error process
     }
     // ---- pose_jump: 0.3 m / 10 deg jump of the believed pose mid-corridor -> contacts 0, reached
     if (want("pose_jump"))
@@ -879,7 +898,8 @@ int main()
         CHECK("realign_doorway: crosses on every seed, never handed back", S.reached == S.n and S.unreachable == 0);
         CHECK("realign_doorway: the scene needs >= 2 back-ups on every seed", S.min_backups >= 2);
     }
-    std::printf("REVERSE SHARE: %ld of %ld Drive/Release decisions (%.1f%%) camera=%s\n", g_rev, g_moves, g_moves ? 100.0 * double(g_rev) / double(g_moves) : 0.0, std::getenv("POLICY_CAMERA") ? "on" : "off");
+    std::printf("REVERSE BREAKDOWN (of %ld reversing decisions): release/unlock %ld | drive, no seen-progress plan (dead end/stall) %ld | drive, outscored an alternative (tight) %ld | OTHER %ld ;  true clearance < 0.25 m: %ld, >= 0.25 m: %ld\n", g_rev, g_rel, g_rk1, g_rk2, g_rk0, g_rtight, g_rclear);
+    std::printf("REVERSE SHARE: %ld of %ld Drive/Release decisions (%.1f%%) camera=%s\n", g_rev, g_moves, g_moves ? 100.0 * double(g_rev) / double(g_moves) : 0.0, (std::getenv("POLICY_CAMERA") == nullptr or std::string(std::getenv("POLICY_CAMERA")) != "0") ? "on" : "off");
     std::printf("%s (%d failing)\n", fails == 0 ? "ALL PASS" : "FAILURES", fails);
     return fails == 0 ? 0 : 1;
 }

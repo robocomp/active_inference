@@ -62,7 +62,9 @@ struct PolicyInput { Pose2 pose; float v_now = 0, w_now = 0, sigma_rel_xy = 0, s
                      float camera_half_fov_rad = -1.f;
                      // Task R — a Doorway goal scores each plan by log P(facing the gap) at its end (the affordance's own
                      // precondition: door_concept's cross needs the opening in front of the robot)
-                     bool affordance_facing = false; };
+                     bool affordance_facing = false;
+                     // Task R (R4): the door model's actuation reach (m); the facing term is weighted by P(plan end within it)
+                     float affordance_reach_m = 2.f; };
 
 // log_p_safe / log_p_cont / progress_m describe the CHOSEN candidate (zeros when none is chosen); progress_m is its
 // TWO-STEP progress (round 4: the better of its end and its best eligible continuation, measured from the start).
@@ -104,7 +106,10 @@ struct Decision { enum class Mode { Drive, Release, Arrived, Stuck, Blind } mode
                   // F1: the ProgressMonitor's verdict on the PREVIOUS plan's prediction, judged in this decide(): +1 delivered,
                   // -1 failed, 0 none (nothing pending, not yet due, or too small to judge); and whether THIS decision armed a
                   // prediction of its own (a monitored Drive with a finite descent, a monitored non-stop Release)
-                  int judged = 0; bool armed = false; };
+                  int judged = 0; bool armed = false;
+                  // Task R: why a Drive reverses (v < 0) when the camera model is on: 1 = no plan with credited (seen) progress exists
+                  // (dead end, stall, tight corridor), 2 = an alternative exists but the reversal scored higher; 0 = not a reversal
+                  int reversal = 0; };
 
 // ★ ROUND 6 — STUCK IS A FAILED PREDICTION, judged on what happened. Each Drive decision predicts a two-step field
 //   descent dF_pred over its own duration tau_pred (the chosen candidate's duration + the continuation that set its
@@ -135,6 +140,9 @@ struct ProgressMonitor
 };
 
 Decision decide(const PolicyInput& in, const PolicyParams& p, ProgressMonitor* monitor = nullptr);
+
+// Task R: the doorway facing term in nats at pose q (<= 0; 0 for a non-Doorway goal or when affordance_facing is off) — exposed for tests.
+float affordance_log_p_facing(const PolicyInput& in, const Pose2& q);
 
 // Exposed for tests/diagnostics: log((k+1)/(N+2)) of the coarse continuation set from `from` (a pose at rest).
 float log_p_continuable(const PolicyInput& in, const PolicyParams& p, const Pose2& from);

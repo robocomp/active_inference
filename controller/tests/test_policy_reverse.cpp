@@ -88,6 +88,23 @@ int main()
         const auto d = decide(s.in, s.pp); print("e", d);
         CHECK("e tight manoeuvre: reverse", d.v < 0.f);
     }
+    { // (f) R4: the facing term matters only inside the door's reach - a sideways approach arc far from the gap is not penalised
+        Scene s;
+        s.goal = Goal{.kind = Goal::Kind::Doorway, .p = {1.5f, 0.f}, .yaw = {}, .normal = {1.f, 0.f}, .width = 0.9f};
+        std::vector<V> pts; for (float t = -0.1f; t <= 0.1f + 1e-4f; t += 0.05f) pts.push_back({2.0f, t});
+        s.field.build(kGrid, [](const V&) { return true; }, no_extra, pts);
+        s.finish();
+        const Pose2 sideways_far{{-1.5f, 0.f}, kHalfPi};      // 3 m from the gap, heading +y (90 deg off the gap direction)
+        const Pose2 sideways_near{{0.7f, 0.f}, kHalfPi};      // 0.8 m from the gap, same heading
+        const Pose2 facing_near{{0.7f, 0.f}, 0.f};            // 0.8 m, heading at the gap
+        const Pose2 backwards_near{{0.7f, 0.f}, 3.14159265f};  // 0.8 m, gap behind
+        const float far = affordance_log_p_facing(s.in, sideways_far), near = affordance_log_p_facing(s.in, sideways_near);
+        const float ok = affordance_log_p_facing(s.in, facing_near), back = affordance_log_p_facing(s.in, backwards_near);
+        std::printf("  [f] log P(facing): far sideways %.4f | near sideways %.2f | near facing %.4f | near backwards %.1f\n", far, near, ok, back);
+        CHECK("f far from the gap the facing term is ~0 (sideways approach not penalised)", far > -0.25f);
+        CHECK("f near the gap, facing it costs ~0", ok > -0.05f);
+        CHECK("f near the gap, sideways or backwards costs nats", near < -1.f and back < -1.f and near < 10.f * far);
+    }
     std::printf("%s (%d failed)\n", fails ? "FAILED" : "ALL PASS", fails);
     return fails ? 1 : 0;
 }
