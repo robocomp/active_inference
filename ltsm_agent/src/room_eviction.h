@@ -174,7 +174,8 @@ public:
     /// nullopt when the robot is not resolvable in the old room.
     [[nodiscard]] std::optional<Mat::RTMat> fuse_seam_through_aperture(const Candidate &cand, const DSR::Node &door,
                                                                        const Mat::RTMat &door_in_old, const Mat::RTMat &chain_seam,
-                                                                       DSR::InnerEigenAPI &ie, bool new_room_was_remembered) const;
+                                                                       DSR::InnerEigenAPI &ie, bool new_room_was_remembered,
+                                                                       const std::optional<Mat::RTMat> &remembered_seam) const;
     [[nodiscard]] static std::map<std::string, DSR::Attribute> rt_attributes(const Mat::RTMat &t) { return rt_attrs(t); }
 
     /// BACKSTOP, not policy. Nodes still hanging under a non-current room whose owner is not
