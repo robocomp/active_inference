@@ -286,7 +286,7 @@ TransitableStableCycles  = 3      # … and only after the decision has held thi
 # expected information gain too: a wide posterior means an uncertain doorway, and an uncertain doorway is
 # worth trying BECAUSE trying it resolves the uncertainty. Full reasoning at DoorPragmaticCfg in
 # src/door_config.h — read it before replacing these three numbers.
-ValueApproach = 0.5
+ValueApproach = 1.0
 ValueOpen     = 0.3
 ValueCross    = 0.3
 
