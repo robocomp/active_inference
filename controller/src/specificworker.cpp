@@ -1087,6 +1087,10 @@ void SpecificWorker::load_params()
          "relative body-vs-returns pose error over a 1 s rollout, per axis (m) — tools/pose_error_stats.py");
 	cfgr.opt_cast<double>("Policy.SigmaRelYawRad", params.policy_sigma_rel_yaw_rad,
          "relative yaw error over a 1 s rollout (rad) — tools/pose_error_stats.py");
+	cfgr.opt_cast<double>("Policy.CameraHalfFovRad", params.policy_camera_half_fov_rad,
+         "half-angle of the forward camera's horizontal FOV (rad; ZED2i HD 110 deg = 0.96). Progress made outside it (reversing) is not credited; < 0 = off");
+	cfgr.opt("Policy.AffordanceFacing", params.policy_affordance_facing,
+         "score a Doorway plan by log P(facing the gap) at its end (door_concept's cross precondition)");
 	cfgr.opt_cast<double>("Policy.PoseDriftSigmaM", params.policy_pose_drift_sigma_m,
          "absolute pose error as an OU process: stationary std (m) — tools/pose_error_stats.py");
 	cfgr.opt_cast<double>("Policy.PoseDriftTimeS", params.policy_pose_drift_time_s,

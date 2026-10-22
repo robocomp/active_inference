@@ -392,6 +392,10 @@ struct ControllerParams
     // room_concept's gt_error.csv logs (Task 7; config.toml [Policy] carries the provenance). Sim values.
     float policy_sigma_rel_xy_m = 0.011f;       // relative (odometry) error over a 1 s rollout, per axis — CONTACT
     float policy_sigma_rel_yaw_rad = 0.013f;
+    // Task R: reversal is blind. Half-angle of the forward camera's horizontal field of view (ZED2i HD: 110 deg => 0.96 rad,
+    // datasheet); progress through space outside it is not credited (local_policy.cpp blind_length). < 0 = off.
+    float policy_camera_half_fov_rad = 0.96f;
+    bool  policy_affordance_facing = true;      // Task R: a Doorway plan is scored by log P(facing the gap) at its end
     float policy_pose_drift_sigma_m = 0.064f;   // absolute pose error as OU: stationary std — PROGRESS MONITOR
     float policy_pose_drift_time_s = 115.f;     //   and correlation time
     // Task 8 ([Policy], config.toml carries the provenance): the local policy drives the base; the old chain is OFF.

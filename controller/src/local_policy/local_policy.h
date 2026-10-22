@@ -56,7 +56,13 @@ struct PolicyInput { Pose2 pose; float v_now = 0, w_now = 0, sigma_rel_xy = 0, s
                      const CostToGo* progress_field = nullptr;
                      // review fix round 3: `returns` are ALREADY denoise_returns() output (the Navigator denoises once
                      // per tick for its plan check and decide() both)
-                     bool returns_denoised = false; };
+                     bool returns_denoised = false;
+                     // Task R — reversal is blind. Half-angle (rad) of the forward camera's horizontal field of view; < 0 = not
+                     // modelled (off). Progress made by moving through space the camera does not see is not credited (decide()).
+                     float camera_half_fov_rad = -1.f;
+                     // Task R — a Doorway goal scores each plan by log P(facing the gap) at its end (the affordance's own
+                     // precondition: door_concept's cross needs the opening in front of the robot)
+                     bool affordance_facing = false; };
 
 // log_p_safe / log_p_cont / progress_m describe the CHOSEN candidate (zeros when none is chosen); progress_m is its
 // TWO-STEP progress (round 4: the better of its end and its best eligible continuation, measured from the start).

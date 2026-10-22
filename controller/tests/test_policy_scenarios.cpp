@@ -53,6 +53,7 @@ using sim2d::Box;
 constexpr float kPi = sim2d::kPi, kDeg = kPi / 180.f;
 
 static int fails = 0;
+static long g_moves = 0, g_rev = 0;   // Task R: Drive/Release decisions and how many reversed
 #define CHECK(name, cond) do { const bool ok_ = (cond); std::printf("%s %s\n", ok_ ? "PASS" : "FAIL", name); if (not ok_) ++fails; } while (0)
 
 // ---------------------------------------------------------------- base and body
@@ -280,6 +281,7 @@ static ScenarioResult run_scenario(const World& world, Pose2 start, Goal goal, f
         PolicyInput in;
         in.pose = bel; in.v_now = base.v; in.w_now = base.w;
         in.sigma_rel_xy = 0.01f; in.sigma_rel_yaw = 0.01f;                                       // odometry-scale RELATIVE error
+        if (std::getenv("POLICY_CAMERA")) { in.camera_half_fov_rad = 0.96f; in.affordance_facing = not std::getenv("POLICY_NOFACING"); }   // Task R: ZED2i 110 deg HFOV
         if (opt.ou) { in.pose_drift_sigma_m = err.sigma_xy; in.pose_drift_time_s = err.tau; }   // the OU's own process (monitor)
         in.returns_age_s = float(kBufferCycles - 1) * kTick;                                     // the older sweep's age
         in.returns = ret; in.body = &B; in.base = base.lim; in.latency_s = base.latency_s; in.now_s = t;
@@ -313,6 +315,7 @@ static ScenarioResult run_scenario(const World& world, Pose2 start, Goal goal, f
         const bool no_escape = st.replanned and (d.mode == Decision::Mode::Stuck
                                or (d.mode == Decision::Mode::Release and not (d.log_p_cont > d.log_p_cont_now)));
         if (no_escape and res.first_no_escape_t < 0.f) res.first_no_escape_t = t;
+        if (st.replanned and (d.mode == Decision::Mode::Drive or d.mode == Decision::Mode::Release)) { ++g_moves; if (d.v < 0.f) ++g_rev; }   // Task R reverse share
         if (st.replanned and d.v < 0.f and (d.mode == Decision::Mode::Drive or d.mode == Decision::Mode::Release)) ++res.backups;
         if (tr) std::printf("    belief L %+.2f bar %.2f judged %+d armed %d early %d%s\n", st.unreach_L, st.unreach_bar, d.judged, int(d.armed), int(st.completed_early), st.hand_back ? "  HAND BACK" : "");
         if (d.mode == Decision::Mode::Release and not in_release_episode) { in_release_episode = true; ++res.releases; }
@@ -876,6 +879,7 @@ int main()
         CHECK("realign_doorway: crosses on every seed, never handed back", S.reached == S.n and S.unreachable == 0);
         CHECK("realign_doorway: the scene needs >= 2 back-ups on every seed", S.min_backups >= 2);
     }
+    std::printf("REVERSE SHARE: %ld of %ld Drive/Release decisions (%.1f%%) camera=%s\n", g_rev, g_moves, g_moves ? 100.0 * double(g_rev) / double(g_moves) : 0.0, std::getenv("POLICY_CAMERA") ? "on" : "off");
     std::printf("%s (%d failing)\n", fails == 0 ? "ALL PASS" : "FAILURES", fails);
     return fails == 0 ? 0 : 1;
 }

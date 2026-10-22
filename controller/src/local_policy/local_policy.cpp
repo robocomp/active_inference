@@ -105,7 +105,7 @@ bool arrived(const PolicyInput& in, const Pose2& at)
 // progress(start, cont end) / (dur + cont duration)); ub_rate: the same over ALL continuations (no contact sweep).
 struct Cand { float v, w; float lps = 0.f, prog = 0.f, prog2 = 0.f, ub2 = 0.f, dur = 0.f, rate = 0.f, tau = 0.f, ub_rate = 0.f, lpc = 0.f; Pose2 end{}, plan_end{};
               bool has_cont = false; float cont_v = 0.f, cont_w = 0.f, cont_dur = 0.f;
-              bool elig = false, lpc_done = false; int conts = -1;
+              float blind1 = 0.f, cprog = 0.f, amb_nats = 0.f; bool elig = false, lpc_done = false; int conts = -1;
               bool stop = false; };   // F2: the brake-to-rest command (0, 0) from a moving state — a release candidate only
 
 // Contact log-probability of (v, w) started at `from` with velocity (v0, w0); `end` receives the rest pose.
@@ -122,6 +122,59 @@ float lp_safe(const PolicyInput& in, const PolicyParams& p, const Pose2& from, f
     if (end) *end = sw.back();
     if (dur) *dur = duration(sw, p);
     return log_p_no_contact_cells(*in.body, sw, in.returns, in.sigma_rel_xy, in.sigma_rel_yaw, in.body_geometry_sigma_m, lps_floor);
+}
+
+// ★ TASK R — REVERSAL IS BLIND (the user's rule "only move backwards to unlock, unstall or in a tight manoeuvre", as a model term).
+//   The forward camera sees what lies ahead of the base; a motion whose direction is outside its field of view sweeps space
+//   that nothing but the LiDAR band covers (no leaf, jamb or low obstacle is seen). PROGRESS MADE BLIND IS NOT CREDITED: the
+//   descent rate is reduced by the blind path length per second, so a straight reverse along the gradient nets exactly 0 nats
+//   (its whole descent was made blind), while turning and driving forward earns its descent. Units are the rate's own
+//   (m/s over rate_scale = progress_scale_m / horizon_s), so no weight enters: one blind metre cancels one metre of progress.
+//   A segment is blind with probability u = P(|bearing| > half_fov), the bearing of its displacement from the heading
+//   (normal CDF with the policy's own relative yaw sigma, floored only against a zero sigma): continuous, no angle switch.
+//   Reverse stays available — it is only never the BEST when a forward or in-place alternative is eligible and progresses:
+//   a dead end, a wedge (Release is untouched) or a corridor too tight to turn in score it by lps/lpc as before.
+//   (A segment is always scored at its start heading; a pure rotation has no displacement and so no blind length.)
+//   ★ AMBIGUITY, in nats, on top: the blind travel pays the unseen-contact prior (UnseenContact::kPriorBlocked = 0.01, the
+//   stated fraction of commanded motions blocked by something the LiDAR cannot see) per full-speed horizon of blind travel,
+//   -log(1 - 0.01) * blind_length / (v_max T). It is small by construction (0.01 nats a horizon) and exists to break the TIE
+//   the credit rule leaves: a reverse arc that turns toward the goal and the in-place turn reaching the same heading earn the
+//   same credited descent (measured: open space, goal behind, back-up-arcing chosen on the tie).
+constexpr float kBlindPrice = 2.f;
+float blind_length(const std::vector<Pose2>& sw, const PolicyInput& in)
+{
+    if (not (in.camera_half_fov_rad >= 0.f)) return 0.f;
+    const float s = std::max(in.sigma_rel_yaw, 1e-3f);
+    float L = 0.f;
+    for (std::size_t k = 1; k < sw.size(); ++k)
+    {
+        const Eigen::Vector2f d = sw[k].p - sw[k - 1].p;
+        const float len = d.norm();
+        if (len < 1e-6f) continue;
+        const float b = std::abs(wrap(std::atan2(d.y(), d.x()) - sw[k - 1].yaw));
+        L += len * 0.5f * std::erfc((in.camera_half_fov_rad - b) / (s * 1.41421356f));
+    }
+    return L;
+}
+
+// ★ TASK R — the affordance's own precondition. door_concept's cross needs P(facing the opening): the apparent span
+//   w * max(0, cos beta) must admit the body (door_passability.h prob_facing_opening, P(needed <= apparent) under sigma).
+//   beta = the heading's angle off the direction to a point one aperture-width THROUGH the gap (≈ toward the gap centre from
+//   afar, ≈ the gap normal at it — smooth in between, no range switch); max(0, cos) because the sign matters here: a crossing
+//   made in reverse has the opening BEHIND the camera (P ~ 0). The plan is scored by log P at its end pose, in nats, on the
+//   same footing as log P(safe) and log P(continuable). sigma = the policy's relative position sigma (door_concept's floor 1e-3).
+float log_p_facing(const PolicyInput& in, const Pose2& q)
+{
+    const Goal& g = *in.goal;
+    if (not in.affordance_facing or g.kind != Goal::Kind::Doorway or not (g.width > 0.f) or in.body == nullptr) return 0.f;
+    const Eigen::Vector2f n = g.normal.norm() > 1e-6f ? Eigen::Vector2f(g.normal.normalized()) : Eigen::Vector2f(1.f, 0.f);
+    const Eigen::Vector2f to = g.p + g.width * n - q.p;
+    if (to.norm() < 1e-4f) return 0.f;
+    const float cb = std::cos(q.yaw) * to.x() / to.norm() + std::sin(q.yaw) * to.y() / to.norm();
+    const float apparent = g.width * std::max(0.f, cb), needed = 2.f * in.body->inscribed_radius();
+    const float s = std::max(in.sigma_rel_xy, 1e-3f);
+    const float p = 0.5f * std::erfc(-(apparent - needed) / (s * 1.41421356f));
+    return std::log(std::max(p, std::numeric_limits<float>::min()));   // (floor = FLT_MIN: log of 0 only)
 }
 
 bool eligible(float lps, const PolicyParams& p) { return 1.f - std::exp(lps) <= p.risk_eps; }
@@ -213,7 +266,8 @@ Conts make_conts(const PolicyInput& in, const PolicyParams& p, const Pose2& from
 //   something — count it for continuability (progress from `from` >= 0), or raise best_prog / best_rate.
 float eval_conts(const PolicyInput& in, const PolicyParams& p, const Pose2& from, const Conts& c,
                  const Pose2* ref = nullptr, float base_dur = 0.f, float* best_prog = nullptr, float* best_rate = nullptr,
-                 float* best_rate_dur = nullptr, Pose2* best_rate_end = nullptr, std::pair<float, float>* best_rate_cmd = nullptr)
+                 float* best_rate_dur = nullptr, Pose2* best_rate_end = nullptr, std::pair<float, float>* best_rate_cmd = nullptr,
+                 float blind_base = 0.f)
 {
     if (best_rate_dur) *best_rate_dur = 0.f;
     if (best_prog) *best_prog = -kInf;
@@ -222,11 +276,17 @@ float eval_conts(const PolicyInput& in, const PolicyParams& p, const Pose2& from
     if (c.sw.empty()) return std::log(1.f / (float(c.n) + 2.f));
     struct Item { std::size_t i; float pf, pr, rt, dur; };
     std::vector<Item> items;
+    std::vector<float> bl(c.sw.size(), 0.f);   // credited-progress deduction per continuation (Task R)
+    auto blind_cred = [&](std::size_t i) { return bl[i]; };
     for (std::size_t i = 0; i < c.sw.size(); ++i)
     {
         const float pr = ref ? progress(in, *ref, c.sw[i].back()) : -kInf;
         const float dj = duration(c.sw[i], p);
-        items.push_back({i, progress(in, from, c.sw[i].back()), pr, ref ? pr / (base_dur + dj) : -kInf, dj});
+        // ★ Task R: the rate is the CREDITED one — blind travel (the first leg's and this continuation's) earns nothing
+        const float bi = in.camera_half_fov_rad >= 0.f ? kBlindPrice * blind_length(c.sw[i], in) : 0.f;
+        const float blind = ref ? kBlindPrice * blind_base + bi : 0.f;
+        bl[i] = blind;
+        items.push_back({i, progress(in, from, c.sw[i].back()), pr, ref ? (pr - blind) / (base_dur + dj) : -kInf, dj});
     }
     std::ranges::sort(items, std::greater{}, &Item::rt);
     int k = 0; float bp = -kInf, br = -kInf;
@@ -238,7 +298,7 @@ float eval_conts(const PolicyInput& in, const PolicyParams& p, const Pose2& from
                                                  std::log1p(-p.risk_eps));
         if (not eligible(lps, p)) continue;
         if (need_k) ++k;
-        if (ref) { bp = std::max(bp, it.pr); if (it.rt > br) { br = it.rt; if (best_rate_dur) *best_rate_dur = it.dur; if (best_rate_end) *best_rate_end = c.sw[it.i].back(); if (best_rate_cmd) *best_rate_cmd = c.cmd[it.i]; } }
+        if (ref) { bp = std::max(bp, it.pr - blind_cred(it.i)); if (it.rt > br) { br = it.rt; if (best_rate_dur) *best_rate_dur = it.dur; if (best_rate_end) *best_rate_end = c.sw[it.i].back(); if (best_rate_cmd) *best_rate_cmd = c.cmd[it.i]; } }
     }
     if (best_prog) *best_prog = bp;
     if (best_rate) *best_rate = br;
@@ -381,7 +441,15 @@ Decision decide(const PolicyInput& in0, const PolicyParams& p, ProgressMonitor* 
             Cand c{.v = v, .w = w, .stop = stop};
             c.lps = lp_safe(in, p, start, in.v_now, in.w_now, v, w, &c.end, std::log1p(-p.release_risk_max), &c.dur);
             c.elig = not stop and eligible(c.lps, p);
-            if (c.elig) { c.prog = progress(in, start, c.end); ++d.eligible; }
+            if (c.elig)
+            {
+                c.prog = progress(in, start, c.end); ++d.eligible;
+                // ★ Task R: the candidate's own progress is CREDITED too (blind travel earns nothing), so a plan whose only
+                //   progress is a blind reverse is not a Drive plan: with no credited progress anywhere the policy is in a
+                //   wedge/stall/dead end, and Release (which may back up) is the existing answer
+                c.blind1 = blind_length(rollout(start, in.v_now, in.w_now, v, w, p.horizon_s, in.base, p.dt), in);
+                c.cprog = c.prog - kBlindPrice * c.blind1;
+            }
             cands.push_back(c);
         }
     d.n_candidates = int(cands.size());   // F1: what this decision searched (every Drive / Release / Stuck below carries it)
@@ -407,10 +475,17 @@ Decision decide(const PolicyInput& in0, const PolicyParams& p, ProgressMonitor* 
         float second = -kInf, second_rate = -kInf, second_dur = 0.f;
         Pose2 second_end = c.end;
         std::pair<float, float> second_cmd{0.f, 0.f};
-        c.lpc = eval_conts(in, p, c.end, ensure_conts(c), &start, c.dur, &second, &second_rate, &second_dur, &second_end, &second_cmd);
-        c.prog2 = std::max(c.prog, second);
-        c.rate = std::max(c.prog / c.dur, second_rate);
-        const bool one_step = c.prog / c.dur >= second_rate;
+        const float blind1 = c.blind1;
+        c.lpc = eval_conts(in, p, c.end, ensure_conts(c), &start, c.dur, &second, &second_rate, &second_dur, &second_end, &second_cmd, blind1);
+        c.prog2 = std::max(c.cprog, second);
+        // ★ Task R: blind progress is not credited (blind_length). The two plans — the candidate alone, or the candidate and its
+        //   best continuation — are compared AFTER the discount.
+        float rate1 = c.cprog / c.dur, rate2 = second_rate, ambiguity = c.blind1;
+        if (rate2 > rate1 and in.camera_half_fov_rad >= 0.f)
+            ambiguity += blind_length(rollout(c.end, 0.f, 0.f, second_cmd.first, second_cmd.second, p.horizon_s, in.base, p.dt), in);
+        c.rate = std::max(rate1, rate2);
+        c.amb_nats = -std::log1p(-0.01f) * ambiguity / std::max(in.base.v_max * p.horizon_s, 1e-3f);   // kPriorBlocked
+        const bool one_step = rate1 >= rate2;
         c.tau = one_step ? c.dur : c.dur + second_dur;          // the plan the rate belongs to
         c.plan_end = one_step ? c.end : second_end;
         c.has_cont = not one_step; c.cont_v = second_cmd.first; c.cont_w = second_cmd.second; c.cont_dur = one_step ? 0.f : second_dur;
@@ -504,13 +579,29 @@ Decision decide(const PolicyInput& in0, const PolicyParams& p, ProgressMonitor* 
     auto bound = [&](const Cand* c) { return c->lps + c->ub_rate / rate_scale + lpc_top; };
     std::ranges::sort(drive, std::greater{}, bound);
     Cand* best_drive = nullptr; float best_s = -kInf;
-    for (Cand* c : drive)
+    // ★ TASK R — TWO TIERS, ONE MODEL. Tier 1 scores plans on CREDITED progress (blind travel earns nothing, blind_length): when
+    //   some forward or in-place plan really descends, it is chosen and reversing never competes. Only when no plan has credited
+    //   progress — a dead end, a stall, a corridor too tight to turn in: every way forward is blind — does tier 2 rank the same
+    //   candidates on the RAW rate (the unmodified policy), so the reverse that leaves is available exactly then ("only move
+    //   backwards to unlock, unstall or in a tight manoeuvre"). Without tier 2 a plan whose only progress is blind scored a
+    //   credited rate of 0 and a slow in-place turn out-ranked the reverse (measured: dead_end_release dithered 107 s).
+    const bool credited = in.camera_half_fov_rad >= 0.f;
+    for (int tier = 0; tier < 2 and best_drive == nullptr; ++tier)
     {
-        if (bound(c) <= best_s) break;
-        ensure_lpc(*c);
-        if (not (c->prog2 > 0.f)) continue;
-        const float s = c->lps + c->rate / rate_scale + c->lpc;
-        if (s > best_s) { best_s = s; best_drive = c; }
+        if (tier == 1)
+        {
+            if (not credited) break;
+            in.camera_half_fov_rad = -1.f;                       // raw: blind_length() = 0 everywhere below
+            for (auto& c : cands) { c.blind1 = 0.f; c.cprog = c.prog; c.lpc_done = false; c.amb_nats = 0.f; }
+        }
+        for (Cand* c : drive)
+        {
+            if (bound(c) <= best_s) break;
+            ensure_lpc(*c);
+            if (not (c->prog2 > 0.f)) continue;
+            const float s = c->lps + c->rate / rate_scale + c->lpc + log_p_facing(in, c->plan_end) - c->amb_nats;
+            if (s > best_s) { best_s = s; best_drive = c; }
+        }
     }
     if (best_drive != nullptr and not prediction_failed)
     {
