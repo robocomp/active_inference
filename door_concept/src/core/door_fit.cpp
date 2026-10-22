@@ -763,7 +763,8 @@ float DoorFit::run_inference(rc::DoorFitState& inst, const DoorObservation& obse
             //  (uniform), shared by both sides. A mask that IS the hull (ΔW → 0) keeps its full precision — no gate.
             //  Evaluated at the pre-update mean (not inside the GN loop): a state that narrows its hull to match the mask must
             //  not also earn a tighter likelihood for it.
-            mb.var_common += inst.ai2_belief.hull_mismatch_var(mb) / credit;
+            if (not cfg_.replay_ablate_hull_midpoint)   // Task E: only a replay probe turns the term off
+                mb.var_common += inst.ai2_belief.hull_mismatch_var(mb) / credit;
             frame.bearings = mb;
         }
         // AIF "be-still-to-update" as CONTINUOUS PRECISION: a frame's authority to MOVE the mean is capped via the

@@ -105,7 +105,10 @@ struct DoorPragmaticCfg
     // is also the truth about doors: one that was shut last month says little about today. α and β are
     // floats precisely so that slots in with no schema change.)
     // Agreed with ltsm_agent 2026-09-12; see [[door-pragmatic-affordances]].
-    float value_approach = 0.5f;
+    // ★Task E: NATS, on the SAME scale as the epistemic look's gain, because a door passage now weighs the two
+    // (controller_door_passage.h choose_look_or_step). The approach's preference = ONE nat (a flagged unit choice, the only
+    // free constant of that comparison): ~1 nat of information about the door is worth about one approach.
+    float value_approach = 1.0f;
     float value_open     = 0.3f;
     float value_cross    = 0.3f;
 
@@ -495,6 +498,9 @@ struct DoorConfig
     // Task 5b: prior σ of the leaf plane's depth d off the wall line (m). < 0 (default) ⇒ derived from the wall band,
     // sqrt(T²/12 + σ_b²) (DoorFit::make_belief_params); set only to probe the model's sensitivity to it.
     float door_recess_prior_std = -1.0f;
+    // Task E (REPLAY ONLY, never read from a config file): switch OFF the Task-W hull-mismatch term of the sides' midpoint
+    // (DoorBelief::hull_mismatch_var added to the mask's common mode) to reproduce the ab7 width collapse on a tape.
+    bool  replay_ablate_hull_midpoint = false;
     float door_thickness_m = 0.05f;   // fixed panel thickness (m, across the wall)
     bool  tracker_nll_cost         = false;   // association cost = ½(m²+ln|S|) NLL (vs raw m²); see InstanceTracker
     // ZED-only BIRTH gate: only a ZED slice (depth_var==0) may SPAWN a door; a ricoh LiDAR-depth slice

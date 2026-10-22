@@ -36,6 +36,7 @@
 //       ../common/contour_edge/contour_edge_project.cpp ../common/contour_edge/contour_depth_check.cpp \
 //       -lzstd -lopencv_core -lopencv_imgproc -o /tmp/door_replay
 //   /tmp/door_replay <door_inputs.bin> <door_decisions.bin> [--until CYCLE] [--verbose] [--csv DIR] [--clock-jitter-ms J]
+//       [--look] [--ablate-hull-midpoint]   (Task E: per-cycle look-vs-approach prices on one scale; the Task-W term OFF)
 //       [--trace NAME]   (one line per cycle for that door — '*' for every door: its fit, its detection state and every
 //                         existence channel)
 //       [--recess-prior-std S]   (a sensitivity probe: the leaf-plane depth's prior σ, overriding the recorded config)
@@ -61,6 +62,7 @@
 #include "../src/door_config_fields.h"
 #include "../src/door_identity_table.h"
 #include "../src/door_dof.h"            // the live consumers' DOF table (dashboard, NBV adequacy)
+#include "../src/door_approach_pose.h"  // Task E: the approach offer's price (--look)
 #include "../src/epistemic_planner.h"   // the live NBV (rc::EpistemicPlanner) — run here as a smoke on every door
 
 using namespace rc::door::core;
@@ -490,12 +492,15 @@ int main(int argc, char** argv)
     double belief_smoke_sum = 0.0;
     long belief_smoke_runs = 0;
     float recess_prior_std = -2.0f;   // < -1.5: keep the recorded config's value
+    bool look_log = false, ablate_hull = false;   // Task E: --look prints the look-vs-approach prices; --ablate-hull-midpoint reproduces the collapse
     for (int i = 3; i < argc; ++i)
     {
         const std::string_view a = argv[i];
         if (a == "--until" and i + 1 < argc) until = std::strtoull(argv[++i], nullptr, 10);
         else if (a == "--verbose") verbose = true;
         else if (a == "--mirror") mirror = true;
+        else if (a == "--look") look_log = true;
+        else if (a == "--ablate-hull-midpoint") ablate_hull = true;
         else if (a == "--csv" and i + 1 < argc) csv_dir = argv[++i];
         else if (a == "--clock-jitter-ms" and i + 1 < argc) jitter_ms = std::strtod(argv[++i], nullptr);
         else if (a == "--trace" and i + 1 < argc) trace_door = argv[++i];
@@ -529,9 +534,11 @@ int main(int argc, char** argv)
         cfg.door.door_recess_prior_std = recess_prior_std;
         std::println("probe: Door.RecessPriorStd overridden to {}", recess_prior_std);
     }
+    if (ablate_hull) { cfg.door.replay_ablate_hull_midpoint = true; std::println("probe: the Task-W hull-mismatch term of the sides midpoint is OFF"); }
     std::println("tape: {} (DCIN v{}, agent {} '{}'); config: {} keys from the file, {} at code default, {} parse errors",
                  argv[1], version, hdr->agent_id, hdr->agent_name, eff.n_file, eff.n_default, cfg_errors);
 
+    nbv_smoke.set_detector_envelope(rc::detect::DetectorEnvelope{cfg.door.detect_min_fill, cfg.door.detect_max_fill, cfg.door.detect_soft});
     ReplayWorld world(cfg.door, by_cycle);
     world.mirror_ = mirror;
     DoorCore core(cfg);
@@ -627,8 +634,41 @@ int main(int argc, char** argv)
                 std::vector<Eigen::Vector2f> poly;
                 for (const auto& v : world.room_polygon()) poly.emplace_back(v.x(), v.y());
                 rc::nbv::Sensor sensor;
-                sensor.hfov_rad = 1.2f; sensor.vfov_rad = 0.9f; sensor.height_m = 1.2f;
-                (void)nbv_smoke.compute(b, cfg.door.ai2_range_noise_lat_per_m, cfg.door.ai2_sigma_base_m, sensor, {}, poly);
+                // the Shadow's ZED (2i, 2K): ~110 x 70 deg, optical centre ~1.0 m above the floor in the room frame (shadow.json 0.945 + body)
+                sensor.hfov_rad = 1.92f; sensor.vfov_rad = 1.22f; sensor.height_m = 1.0f;
+                const auto prop = nbv_smoke.compute(b, cfg.door.ai2_range_noise_lat_per_m, cfg.door.ai2_sigma_base_m, sensor, {}, poly);
+                if (look_log and in->robot.room_T_body.has_value())
+                {
+                    // Task E: the two prices on ONE scale (nats), as SpecificWorker prices them: the look = the NBV gain on the
+                    // belief's REPORTED Σ; the approach = ValueApproach x P(complete | the reported width sigma).
+                    const auto& pg = cfg.door.pragmatic;
+                    const rc::door::Aperture ap = b.aperture();
+                    const Eigen::Vector2f robot((*in->robot.room_T_body)(0, 3), (*in->robot.room_T_body)(1, 3));
+                    rc::door::ApproachProblem apb;
+                    apb.side = rc::door::approach_side(ap, robot, ap.across_u().dot(robot - ap.centre_xy()), 1.7f, poly);
+                    apb.d_min = ap.w + 0.5f * pg.robot_passage_width_m + pg.swing_clearance_m;
+                    apb.d_max = std::max(pg.actuation_reach_m, apb.d_min + 0.30f);
+                    apb.d_min = std::min(apb.d_min, apb.d_max - 0.30f);
+                    apb.sigma = pg.pose_sigma_floor_m; apb.sigma_arrival = pg.pose_sigma_floor_m;
+                    apb.needed_w = pg.robot_passage_width_m + pg.passage_margin_m;
+                    apb.sigma_w = std::sqrt(std::max(0.0f, b.covariance_reported()(1, 1)));
+                    apb.footprint_r = 0.5f * pg.robot_passage_width_m + pg.passage_margin_m;
+                    const auto ch = rc::door::choose_approach_pose(ap, apb, rc::door::ApproachMemory{}, 0);
+                    const float p_reach = rc::door::reach_prob_at(ap, apb, robot);
+                    const float approach_value = pg.value_approach * ch.p_complete_live;
+                    float standoff = 0.0f, off_deg = 0.0f;
+                    if (prop.valid)
+                    {
+                        const Eigen::Vector2f d = Eigen::Vector2f(prop.epistemic_target_x_m, prop.epistemic_target_y_m) - ap.centre_xy();
+                        standoff = d.norm();
+                        off_deg = std::acos(std::clamp(std::abs(d.dot(ap.across_u())) / std::max(1e-6f, d.norm()), 0.f, 1.f)) * 57.2958f;
+                    }
+                    std::println("LOOK {} cycle {} w {:.3f} sd_w_post {:.3f} sd_w_rep {:.3f} | look {:.3f} nats at {:.2f} m {:.1f} deg off the normal (valid {}) | "
+                                 "approach {:.3f} (P(complete) {:.3f}, P(reach) {:.2f}) | robot-to-door {:.2f} m",
+                                 st->node_name, in->cycle, b.state().w, std::sqrt(std::max(0.0f, b.covariance()(1, 1))), apb.sigma_w,
+                                 prop.valid ? prop.epistemic_gain : 0.0f, standoff, off_deg, prop.valid ? 1 : 0,
+                                 approach_value, ch.p_complete_live, p_reach, (robot - ap.centre_xy()).norm());
+                }
                 const auto S = b.covariance_reported();
                 double acc = rc::any_sigma_star(rc::kDoorDofs) ? rc::adequacy_gap_nats(rc::kDoorDofs, [&](std::size_t j) { return S(j, j); }) : 0.0;
                 for (std::size_t j = 0; j < rc::kDoorDofs.size(); ++j) acc += S(static_cast<int>(j), static_cast<int>(j));

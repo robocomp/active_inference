@@ -570,7 +570,11 @@ public:
     float           leaf_yaw()       const { return leaf_pose().yaw(); }
 
     // ── Inference (delegated to the shared engine) ────────────────────────────
-    float update(const DoorFrame& frame) { return ai::update<N>(*this, state_, Sigma_, prior_mean_, frame); }
+    float update(const DoorFrame& frame)
+    {
+        note_model_error(frame);   // Task E: BEFORE the fit moves the mean — the disagreement is with what the belief believed
+        return ai::update<N>(*this, state_, Sigma_, prior_mean_, frame);
+    }
     void  predict()                      { ai::predict<N>(*this, Sigma_, state_, prior_mean_); }
     // Age the belief with NO measurement: Σ ← FΣFᵀ + Q·(dt/dt_nominal), mean held. The fitter calls this
     // when a door's mask stream is stale/dead so Σ grows on the agent's clock instead of freezing.
@@ -619,7 +623,19 @@ public:
 
     // The wall fixes yaw, so there is no discrete-orientation ambiguity to report: the reported covariance
     // IS the 3×3 posterior Σ over [s,w,h]. Kept as a named accessor so publish/log call sites read cleanly.
-    Eigen::Matrix<float, 3, 3> covariance_reported() const { return Sigma_.topLeftCorner<3, 3>(); }
+    // ★Task E — HONEST UNCERTAINTY. The reported Σ is the posterior PLUS the model's own admitted error (model_error_var):
+    // an estimate whose observations disagree with it must LOOK uncertain to whoever prices an action on it (the NBV's
+    // information gain, the approach offer's P(complete)). See note_model_error for the two terms.
+    Eigen::Matrix<float, 3, 3> covariance_reported() const
+    {
+        Eigen::Matrix<float, 3, 3> S = Sigma_.topLeftCorner<3, 3>();
+        S(0, 0) += model_var_s_;
+        S(1, 1) += model_var_w_ + 0.25f * (state_.w - params_.tpl_w) * (state_.w - params_.tpl_w);
+        return S;
+    }
+    /// The model-error variances [s, w] (m^2) of the last mask frame: what that frame's mask-vs-hull disagreement leaves
+    /// unexplained. Replaced every frame that carries a mask (held otherwise); 0 = the mask agreed with the belief.
+    [[nodiscard]] std::pair<float, float> model_error_var() const { return {model_var_s_, model_var_w_}; }
 
     void  apply_constraints(DoorBeliefState& s) const;
     void  canonicalize(DoorBeliefState&) const {}   // wall fixes yaw ⇒ no symmetry fold
@@ -648,6 +664,16 @@ private:
     // Unnormalized mixture terms [panel, clutter] at p (likelihood×prior). Shared by responsibilities()
     // (normalizes) and association_nll() (sums).
     std::array<float, 3> mixture_unnorm(const Eigen::Vector3f& p, const DoorBeliefState& s, float R) const;
+    // Task E: the mask-vs-hull disagreement of the last mask frame, as variances on s and w (m^2).
+    // The hull-mismatch variance (px^2, the SAME dW^2/12 the sides' midpoint carries, hull_mismatch_var) carried to s and w
+    // through the hull's own Jacobians: a mask that is a contiguous PART of the predicted hull cannot say where inside it
+    // the door's edges are, so it cannot pin s or w better than the part-of-hull ambiguity it implies. This is not a
+    // likelihood term (it never moves the mean) and not process noise (it is REPLACED, not accumulated, every mask frame, so
+    // it falls back to 0 the moment a mask agrees with the hull again). The reported width additionally carries the
+    // disagreement of the posterior with its own template, (w - tpl_w)^2/4: the variance of a two-point mixture of 'the
+    // template holds' and 'the data hold' - a belief 4 prior sigma from its template is not 4 prior sigma sure of itself.
+    void note_model_error(const DoorFrame& frame);
+    float model_var_s_ = 0.f, model_var_w_ = 0.f;
     float p_hinge_ = 1.f;   // Task 15: P(the believed hinge); 1 = the single-hinge model
     float leaf_phi_sigma_ = 0.f;   // Task 15: the leaf angle's σ (rad), for the mask frame's along-wall common mode
 

@@ -158,6 +158,29 @@ float DoorBelief::hull_mismatch_var(const MaskBearings& mb) const
     return dW * dW / 12.0f;
 }
 
+void DoorBelief::note_model_error(const DoorFrame& frame)
+{
+    if (not frame.bearings.has_value()) return;   // no mask this frame: nothing new to disagree with - hold
+    const MaskBearings& mb = *frame.bearings;
+    if (not (std::isfinite(mb.lo) and std::isfinite(mb.hi))) return;
+    const float v = hull_mismatch_var(mb);
+    if (not std::isfinite(v)) return;
+    // central differences of the hull width (hh - hl) in w and of its midpoint in s
+    constexpr float h = 1e-3f;
+    const auto d = [&](int k, bool width)
+    {
+        auto vp = state_.vec(); auto vm = state_.vec();
+        vp(k) += h; vm(k) -= h;
+        const auto [lp, hp] = predicted_column_extent(DoorBeliefState::from_vec(vp), mb);
+        const auto [lm, hm] = predicted_column_extent(DoorBeliefState::from_vec(vm), mb);
+        if (not (std::isfinite(lp) and std::isfinite(lm) and std::isfinite(hp) and std::isfinite(hm))) return 0.0f;
+        return width ? ((hp - lp) - (hm - lm)) / (2.0f * h) : 0.5f * ((lp + hp) - (lm + hm)) / (2.0f * h);
+    };
+    const float Jw = d(1, true), Js = d(0, false);
+    model_var_w_ = Jw * Jw > 1e-12f ? v / (Jw * Jw) : 0.0f;   // 1e-12: a division guard, not a decision
+    model_var_s_ = Js * Js > 1e-12f ? v / (Js * Js) : 0.0f;
+}
+
 void DoorBelief::accumulate_extra(const DoorBeliefState& s, const DoorFrame& frame,
                                   Eigen::Matrix<float, 4, 4>& Id, Eigen::Matrix<float, 4, 1>& bd) const
 {

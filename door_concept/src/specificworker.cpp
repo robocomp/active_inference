@@ -2257,10 +2257,13 @@ rc::door::InteractionState SpecificWorker::compute_interaction_state(const rc::D
     // phi support curve is nearly flat (peak 0.007–0.245), so its argmax is noise, and a parameter the
     // data does not identify must not be allowed to decide whether an affordance exists.
     const float needed = pg.robot_passage_width_m + pg.passage_margin_m;
+    // ★Task E: …AND OVER THE APERTURE WIDTH'S OWN (reported, honest) σ: an estimate the mask disagrees with lowers P(passable)
+    //   (and, in the approach offer below, the predicted P(complete)) continuously instead of reading exactly yes or no.
+    const float sigma_w_rep = std::sqrt(std::max(0.0f, inst.ai2_belief.covariance_reported()(1, 1)));
     // ★ Task 11 fix round 1: IN LOG SPACE (rc::door::passable_logit over the posterior's log weights). The linear float
     //   sum underflowed every passable angle of a collapsed curve to exactly 0 — an absorbing "certainly shut" that no
     //   later evidence could move. The log-odds is kept beside p_open; p_open = σ(it).
-    if (const auto l = rc::door::passable_logit(inst.phi_curve_log, ap.w, needed); l.has_value())
+    if (const auto l = rc::door::passable_logit(inst.phi_curve_log, ap.w, needed, sigma_w_rep); l.has_value())
     {
         st.p_open_logit = *l;
         st.p_open = static_cast<float>(rc::door::sigmoid(*l));
@@ -2522,6 +2525,7 @@ void SpecificWorker::step_pragmatic_affordances(rc::DoorInstance& inst)
         apb.sigma_arrival = rc::door::arrival_sigma(robot_pose_cov_in_room().value_or(Eigen::Matrix3f::Zero()),
                                                     0.5f * (apb.d_min + apb.d_max), pg.pose_sigma_floor_m);
         apb.needed_w = pg.robot_passage_width_m + pg.passage_margin_m;
+        apb.sigma_w = std::sqrt(std::max(0.0f, inst.ai2_belief.covariance_reported()(1, 1)));   // Task E: P(complete) marginalised over the width's reported σ
         apb.memory_s = pg.approach_refusal_memory_s;
         apb.footprint_r = 0.5f * pg.robot_passage_width_m + pg.passage_margin_m;
         apb.room = G ? rc::room::current_room_frame(*G) : std::string{};
@@ -2548,13 +2552,19 @@ void SpecificWorker::step_pragmatic_affordances(rc::DoorInstance& inst)
         }
         else if (inst.approach_claimed_valid and inst.aff_approach.epoch() != inst.approach_claimed_epoch)
             inst.approach_claimed_valid = false;   // the claimed proposal was replaced and nobody claims the new one
-        // VALUE: worth more the farther the robot is from being there, and only as much as the approach can COMPLETE from
-        // where the localisation will put it (p_complete_live — a lost robot keeps the offer at a low value).
-        o.value    = pg.value_approach * std::clamp(1.0f - st.p_reach, 0.0f, 1.0f) * choice.p_complete_live;
+        // VALUE (nats): the preference for being at the door (DoorAffordance.ValueApproach) times the chance the approach can
+        // COMPLETE — p_complete_live: from where the localisation will put the robot AND under the door belief's REPORTED width σ
+        // (apb.sigma_w), so a poor estimate lowers it instead of withdrawing the offer. ★Task E: no longer × (1 − P(reach)).
+        // That factor made the value vanish on arrival ("approaching a door you are already at is worth nothing") to stop a
+        // complete→re-offer ping-pong in the OPEN contest — pragmatic offers are not in the open contest any more (they are
+        // selected only when a passage names them) — and in a passage it would let the door's epistemic look (a few tenths of
+        // a nat) out-bid an approach that is about to complete. The value is the goal's, not the distance's; the controller
+        // charges distance itself (G = λ·dist − value, the selector's own score).
+        o.value    = pg.value_approach * choice.p_complete_live;
         o.contract = rc::door::approach_contract(pg);
         o.why      = std::format("P(complete at arrival σ {:.2f}) {:.2f}; P(served)={:.2f} = P(complete) {:.2f} × P(inside) {:.2f} × P(not refused) {:.2f} at standoff {:.2f} "
                                  "lateral {:+.2f} ({} hand-back(s) remembered); robot P(reach)={:.2f} = P(open) {:.2f} mix of "
-                                 "P(band) {:.2f} ⇒ value {:.3f}; range {:.2f} m "
+                                 "P(band) {:.2f} ⇒ value {:.3f} nats; range {:.2f} m "
                                  "in band [{:.2f},{:.2f}] σ {:.2f}, w {:.2f}", apb.sigma_arrival, choice.p_complete_live, choice.score, choice.p_complete, choice.p_inside,
                                  1.0f - choice.p_refused, choice.standoff, choice.lateral, inst.approach_memory.refused.size(),
                                  st.p_reach, st.p_open_known ? st.p_open : 0.0f, st.p_band, o.value, st.robot_range_m,

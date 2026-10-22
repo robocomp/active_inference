@@ -104,6 +104,7 @@ struct ApproachProblem
     float sigma = 0.1f;                 // NOMINAL σ (the pose σ floor): chooses the pose and sets the offer's AVAILABILITY
     float sigma_arrival = 0.1f;         // the LIVE arrival σ (arrival_sigma): only the offer's VALUE (p_complete_live)
     float needed_w = 0.7f;              // the body + margin the opening must show
+    float sigma_w = 0.0f;               // Task E: the belief's REPORTED σ of the aperture width (m): the PREDICTED P(complete) is marginalised over it
     float memory_s = 60.0f;             // τ of a refusal's evidence
     float footprint_r = 0.35f;          // the robot's footprint radius
     float complete_at = kApproachCompleteProb;
@@ -139,8 +140,8 @@ struct ApproachChoice
 // in closed form: continuous in q and in both σ — as σ_meas widens the interval shrinks to a point and P goes to 0 with
 // it, without the 1 → 0 cliff a coarse quadrature of an indicator produced (review: o.p 1.00 → 0.00 between σ 0.14 and
 // 0.15). Empty interval (the band can never read complete_at at this σ_meas) ⇒ 0, honestly.
-[[nodiscard]] inline float complete_prob_closed(const Aperture& ap, const ApproachProblem& pb, const Eigen::Vector2f& q,
-                                                float sigma_meas, float sigma_arr)
+[[nodiscard]] inline float complete_prob_closed_at_width(const Aperture& ap, const ApproachProblem& pb, const Eigen::Vector2f& q,
+                                                         float sigma_meas, float sigma_arr)
 {
     const Eigen::Vector2f c = ap.centre_xy(), n = ap.across_u();
     const Eigen::Vector2f d = q - c;
@@ -166,6 +167,29 @@ struct ApproachChoice
     const float r2 = root(mid, pb.d_max + 8.0f * sm, false);
     const auto Phi = [](float z) { return 0.5f * std::erfc(-z / std::numbers::sqrt2_v<float>); };
     return std::clamp(Phi((r2 - mu) / sa) - Phi((r1 - mu) / sa), 0.0f, 1.0f);
+}
+
+// ★Task E: …MARGINALISED OVER THE APERTURE WIDTH'S OWN UNCERTAINTY. The contract completes when the width, MEASURED from the
+// standpoint, admits the body; what the belief knows of that width is N(ŵ, σ_w²) with σ_w the REPORTED one (the mask's
+// disagreement with the belief included, DoorBelief::covariance_reported). So the prediction is the expectation of the
+// closed form over w, by 3-point Gauss–Hermite (nodes 0, ±√3 σ_w; weights 2/3, 1/6, 1/6). A width believed 0.75 ± 0.25
+// keeps the chance its mask will read wide enough once the robot is there — the offer's VALUE falls with that chance
+// instead of the offer vanishing at the first cliff. σ_w = 0 is the single evaluation, bit for bit. (The contract's own
+// measurement, door_reach_prob, is untouched: it is read at arrival from the then-current belief.)
+[[nodiscard]] inline float complete_prob_closed(const Aperture& ap, const ApproachProblem& pb, const Eigen::Vector2f& q,
+                                                float sigma_meas, float sigma_arr)
+{
+    if (not (pb.sigma_w > 0.0f))
+        return complete_prob_closed_at_width(ap, pb, q, sigma_meas, sigma_arr);
+    constexpr float kNode = 1.7320508f;   // √3
+    float p = 0.0f;
+    for (const auto& [x, wt] : {std::pair{0.0f, 2.0f / 3.0f}, std::pair{kNode, 1.0f / 6.0f}, std::pair{-kNode, 1.0f / 6.0f}})
+    {
+        Aperture a = ap;
+        a.w = std::max(0.0f, ap.w + x * pb.sigma_w);
+        p += wt * complete_prob_closed_at_width(a, pb, q, sigma_meas, sigma_arr);
+    }
+    return std::clamp(p, 0.0f, 1.0f);
 }
 
 // The robot's position σ AT THE STANDPOINT from its localisation covariance (the room↔robot RT edge, (x, y, yaw) in the

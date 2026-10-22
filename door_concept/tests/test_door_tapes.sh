@@ -73,6 +73,12 @@ for tu in "${W_TAPES[@]}"; do
     [[ -f "$TAPES/$t/door_inputs.bin" && -f "$TAPES/$t/door_decisions.bin" ]] || continue
     MIRROR_PHI=1.553 "$OUT/door_replay" "$TAPES/$t/door_inputs.bin" "$TAPES/$t/door_decisions.bin" --mirror --until "$u" --trace '*' > "$OUT/W_$t.txt" 2>&1 &
 done
+# Task E: ab7_A1 with the Task-W midpoint term ABLATED (the collapse probe) — the per-cycle prices of the door's epistemic look
+# and of its approach (--look), on one scale (nats).
+if [[ -f "$TAPES/ab7_A1/door_inputs.bin" && -f "$TAPES/ab7_A1/door_decisions.bin" ]]; then
+    MIRROR_PHI=1.553 "$OUT/door_replay" "$TAPES/ab7_A1/door_inputs.bin" "$TAPES/ab7_A1/door_decisions.bin" --mirror --until 2500 \
+        --ablate-hull-midpoint --look > "$OUT/E_ab7_A1.txt" 2>&1 &
+fi
 wait
 python3 -I - "$OUT" <<'EOF'
 import csv, math, os, re, statistics, sys
@@ -204,6 +210,32 @@ for tape in ("ab7_A1", "ab7_C1", "ab7_A2", "ab7_C2"):
         print(f"W {tape} mirror '{key[1]}' @{key[0]}: lowest width {v:.3f} m (true 1.00, tolerance {1.5 * PRIOR_W_STD:.2f})")
         if v < 1.0 - 1.5 * PRIOR_W_STD: fails.append(f"W {tape} '{key[1]}' @{key[0]}: width fell to {v:.3f} m")
     if not low: fails.append(f"W {tape}: no trace rows for the mirror")
+# ── Task E: a poor door estimate makes the EPISTEMIC look beat the goal-directed approach (ab7_A1, Task-W term ablated) ──
+# Each LOOK row: the NBV gain on the belief's REPORTED sigma (nats), the approach's value (ValueApproach x P(complete under the
+# reported width sigma), nats), the look viewpoint's angle off the door normal and distance. After the entry mirror's first mask
+# update the reported sigma_w is > 0.1 m (the mask disagrees with the hull): from there the look must out-price the approach,
+# the approach must stay OFFERED (value > 0, never withdrawn into a dead end), and every look viewpoint is frontal.
+_e = f"{out}/E_ab7_A1.txt"
+if os.path.exists(_e):
+    rows = []
+    for ln in open(_e):
+        m = re.match(r"LOOK (\S+) cycle (\d+) w ([\d.]+) sd_w_post ([\d.]+) sd_w_rep ([\d.]+) \| look ([\d.]+) nats at ([\d.]+) m ([\d.]+) deg off the normal \(valid (\d)\) \| approach ([\d.]+)", ln)
+        if m: rows.append((int(m[2]), float(m[3]), float(m[5]), float(m[6]), float(m[7]), float(m[8]), int(m[9]), float(m[10])))
+    mir = re.search(r"MIRROR cycle (\d+)", open(_e).read())
+    if not rows or not mir: fails.append("E ab7_A1: the replay printed no LOOK rows / no mirror")
+    else:
+        post = [r for r in rows if r[0] >= int(mir[1])]
+        honest = [r for r in post if r[2] > 0.10]
+        if not honest: fails.append("E ab7_A1: the reported sigma_w never exceeded 0.10 m after the mirror (honest uncertainty missing)")
+        else:
+            wins = sum(1 for r in honest if r[3] > r[7])
+            print(f"E ab7_A1: {len(honest)} cycles with reported sigma_w > 0.10 m (first @{honest[0][0]}): look > approach on {wins}; "
+                  f"lowest approach value {min(r[7] for r in post):.3f}; look viewpoint {min(r[4] for r in post if r[6]):.2f}-{max(r[4] for r in post if r[6]):.2f} m, "
+                  f"<= {max(r[5] for r in post if r[6]):.1f} deg off the normal")
+            if honest[0][3] <= honest[0][7]: fails.append(f"E ab7_A1: at the first honest-sigma cycle @{honest[0][0]} the look ({honest[0][3]:.3f}) does not out-price the approach ({honest[0][7]:.3f})")
+            if wins < 0.95 * len(honest): fails.append(f"E ab7_A1: the look out-prices the approach on only {wins}/{len(honest)} honest-sigma cycles")
+        if min(r[7] for r in post) <= 0.0: fails.append("E ab7_A1: the approach was WITHDRAWN (value 0) — a poor estimate must only lower it")
+        if any(r[6] and r[5] > 15.0 for r in post): fails.append("E ab7_A1: a look viewpoint more than 15 deg off the door normal")
 for f in fails: print("FAIL:", f)
 print("tape regressions:", "PASS" if not fails else f"{len(fails)} FAIL")
 sys.exit(1 if fails else 0)

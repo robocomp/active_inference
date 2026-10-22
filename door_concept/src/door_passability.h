@@ -78,8 +78,11 @@ inline std::optional<float> passable_prob(const std::vector<std::pair<float, flo
 // 0.000 while the anchor's beams said open at +50..157 nats a frame). `log_curve` is (phi, log weight) — the posterior
 // step's own lp, never exponentiated — and the result is the LOG-ODDS log P(passable) − log P(not), by log-sum-exp on
 // each side. Finite whenever both sides have a grid point (the grid spans phi = 0 and phi_max). nullopt = no curve.
+// ★Task E: `sigma_w` marginalises the aperture width too. Under each leaf angle the clear span is w·(1 − cos φ) with w ~
+// N(ŵ, σ_w²), so P(span ≥ needed | φ) = Φ((ŵ(1 − cos φ) − needed)/(σ_w(1 − cos φ))) instead of an indicator; a shut leaf
+// (cos φ ≥ 1) still has no span whatever the width. σ_w = 0 reproduces the indicator exactly.
 inline std::optional<double> passable_logit(const std::vector<std::pair<float, double>>& log_curve,
-                                            float aperture_w, float needed_m)
+                                            float aperture_w, float needed_m, float sigma_w = 0.0f)
 {
     constexpr double ninf = -std::numeric_limits<double>::infinity();
     double a = ninf, b = ninf;
@@ -95,8 +98,18 @@ inline std::optional<double> passable_logit(const std::vector<std::pair<float, d
     {
         if (not std::isfinite(phi) or std::isnan(lw)) continue;
         any = true;
-        if (clear_width(aperture_w, phi) >= needed_m) a = lae(a, lw);
-        else                                          b = lae(b, lw);
+        const double open_frac = std::max(0.0, 1.0 - std::cos(static_cast<double>(phi)));   // clear span per metre of width
+        if (not (sigma_w > 0.0f) or not (open_frac > 0.0))
+        {
+            if (clear_width(aperture_w, phi) >= needed_m) a = lae(a, lw);
+            else                                          b = lae(b, lw);
+            continue;
+        }
+        const double z = (static_cast<double>(aperture_w) * open_frac - needed_m) / (static_cast<double>(sigma_w) * open_frac);
+        const double p_ok = 0.5 * std::erfc(-z / std::numbers::sqrt2);
+        const double tiny = std::numeric_limits<double>::min();   // log(0) guard, not a decision
+        a = lae(a, lw + std::log(std::max(p_ok, tiny)));
+        b = lae(b, lw + std::log(std::max(1.0 - p_ok, tiny)));
     }
     if (not any or (a == ninf and b == ninf)) return std::nullopt;
     if (a == ninf) return -std::numeric_limits<double>::infinity();
