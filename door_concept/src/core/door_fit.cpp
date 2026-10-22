@@ -289,6 +289,7 @@ void DoorFit::compute_chain_cov(rc::DoorFitState& inst)
 {
     inst.chain_cov_xx = 0.0f;
     inst.chain_cov_yy = 0.0f;
+    inst.chain_cov_xy = 0.0f;
     if (not cfg_.rt_cov_add_chain or masks_ == nullptr)
         return;
     // Localization/chain term J·Σ_chain·Jᵀ at the door centre: transform it to the measurement frame,
@@ -301,6 +302,7 @@ void DoorFit::compute_chain_cov(rc::DoorFitState& inst)
         return;
     inst.chain_cov_xx = static_cast<float>((*g)(0, 0));
     inst.chain_cov_yy = static_cast<float>((*g)(1, 1));
+    inst.chain_cov_xy = static_cast<float>((*g)(0, 1));
 }
 
 // ─── Instance lifecycle ──────────────────────────────────────────────────────
@@ -667,50 +669,27 @@ float DoorFit::run_inference(rc::DoorFitState& inst, const DoorObservation& obse
         inst.ai2_belief.predict();
     else
     {
-        rc::DoorFrame frame;
-        frame.points.reserve(static_cast<std::size_t>(npts));
-        frame.points.insert(frame.points.end(), observation.candidate_pts.begin(), observation.candidate_pts.end());
-        frame.points.insert(frame.points.end(), observation.residual_pts.begin(), observation.residual_pts.end());
-        frame.R.assign(frame.points.size(), R);
-        // Task D-C review C1: the mask's sides as bearings (DoorFrame::bearings) — the ZED pinhole, the cycle's camera pose.
-        // Each side's variance is the per-point noise R at the door's range (one model of where a mask pixel lands); a
-        // side within one mask cell (6 px, door_existence.cpp MaskCells::CELL) of the image border is CENSORED — the door
-        // may continue past it.
-        if (observation.mask_cols.has_value() and room_T_zed_.has_value() and cam_.present and cam_.projection_model == 0
-            and cam_.width > 0 and cam_.focal_x > 0.0f)
+        // ★Task D-C round 2: ONE VIEW, ONE OBSERVATION — FOR THE WHOLE FRAME (DoorFrame::weight). The mask of a parked camera
+        //  is the same mask every frame (the sim tapes: its midpoint column varies by 0.00-0.10 px while parked), seen through
+        //  the same pose error, so re-adding it each frame is the same observation counted hundreds of times. Fix round 1
+        //  credited only the mask's SIDES by novelty and still added every frame's POINTS at full weight: rtD1i counted ~40
+        //  frames of one parked view taken while room_concept's heading was 8.7° wrong (it published ~1°) as 40 independent
+        //  looks — s settled 0.46 m off at σ 0.067 and, with no process noise on s, never recovered; the later right views'
+        //  evidence went into the registration offset b instead. Each frame is credited by its NOVELTY 1 − sim against the
+        //  last credited view, sim the view similarity door_view_pool.h uses (bearing from the door in units of its angular
+        //  half-size, range in units of its half-diagonal): a still camera adds nothing, a camera that moved by a door's
+        //  half-size adds a full observation. A frame without a camera pose cannot be placed in a view and counts once.
+        float credit = 1.0f;
+        std::optional<Eigen::Vector2f> view_cam;
+        if (room_T_zed_.has_value())
         {
-            const Eigen::Matrix3d Rz = room_T_zed_->topLeftCorner<3, 3>();
-            const auto yaw_of_col = [&](float c)
-            {
-                const double cx = static_cast<double>(static_cast<int>(static_cast<float>(cam_.width / 2u)));
-                const Eigen::Vector3d r = Rz * Eigen::Vector3d((static_cast<double>(c) - cx) / cam_.focal_x, 1.0, 0.0);
-                return std::atan2(r.y(), r.x());
-            };
-            const Eigen::Vector3d fwd = Rz * Eigen::Vector3d(0.0, 1.0, 0.0);
-            rc::MaskBearings mb;
-            mb.cam = Eigen::Vector2f(static_cast<float>(room_T_zed_->coeff(0, 3)), static_cast<float>(room_T_zed_->coeff(1, 3)));
-            mb.ref = static_cast<float>(std::atan2(fwd.y(), fwd.x()));
-            constexpr float kCellPx = 6.0f;
-            const float W = static_cast<float>(cam_.width);
-            const auto rel = [&](float c) { return static_cast<float>(std::remainder(yaw_of_col(c) - mb.ref, 2.0 * std::numbers::pi)); };
-            const auto [c0, c1] = *observation.mask_cols;
-            float a0 = c0 > kCellPx ? rel(c0) : std::numeric_limits<float>::quiet_NaN();
-            float a1 = c1 < W - 1.0f - kCellPx ? rel(c1) : std::numeric_limits<float>::quiet_NaN();
-            // image column grows to the RIGHT, i.e. toward smaller yaw: the left column is the larger relative bearing
-            mb.hi = a0; mb.lo = a1;
-            const float range = std::max(0.3f, (inst.aperture.centre_xy() - mb.cam).norm());
-            // ★ONE VIEW, ONE OBSERVATION. The mask of a parked camera is the same mask every frame (measured on the sim
-            //  tapes: the midpoint column varies by 0.00-0.10 px while parked), so re-adding its bearing each frame is the
-            //  same observation counted hundreds of times (tourR1 door_4: σ_w driven to 6 mm, a 3σ step). Each frame is
-            //  credited by its NOVELTY 1 − s against the last credited view, s the view similarity door_view_pool.h uses
-            //  (bearing from the door in units of its angular half-size, range in units of its half-diagonal): a still
-            //  camera adds nothing, a camera that moved by a door's half-size adds a full observation.
+            view_cam = Eigen::Vector2f(static_cast<float>(room_T_zed_->coeff(0, 3)), static_cast<float>(room_T_zed_->coeff(1, 3)));
             const Eigen::Vector2f dc = inst.aperture.centre_xy();
             const float Rd = std::max(1e-3f, 0.5f * std::hypot(inst.aperture.w, inst.aperture.h));
             float novelty = 1.0f;
             if (inst.bearing_view_cam.has_value())
             {
-                const Eigen::Vector2f v0 = *inst.bearing_view_cam - dc, v1 = mb.cam - dc;
+                const Eigen::Vector2f v0 = *inst.bearing_view_cam - dc, v1 = *view_cam - dc;
                 const float d1 = std::max(1e-3f, v1.norm());
                 const float half = std::max(std::atan2(Rd, d1), 1e-3f);
                 const float db = std::remainder(std::atan2(v1.y(), v1.x()) - std::atan2(v0.y(), v0.x()), 2.0f * std::numbers::pi_v<float>);
@@ -718,18 +697,49 @@ float DoorFit::run_inference(rc::DoorFitState& inst, const DoorObservation& obse
                 novelty = 1.0f - std::exp(-std::min((db / half) * (db / half) + (dr / Rd) * (dr / Rd), 60.0f));
             }
             // Credit only the novelty not yet credited since the anchor view (as door_view_pool.h's `counted`), so a slow
-            // drift adds up to one observation per door-size of motion instead of vanishing frame by frame; once the
-            // view is wholly new the anchor moves there.
-            const float credit = std::max(0.0f, novelty - inst.bearing_view_credit);
+            // drift adds up to one observation per door-size of motion instead of vanishing frame by frame; once the view
+            // is wholly new the anchor moves there.
+            credit = std::max(0.0f, novelty - inst.bearing_view_credit);
             if (not inst.bearing_view_cam.has_value() or novelty >= 1.0f - 1e-3f)
-            { inst.bearing_view_cam = mb.cam; inst.bearing_view_credit = 0.0f; }
+            { inst.bearing_view_cam = view_cam; inst.bearing_view_credit = 0.0f; }
             else
                 inst.bearing_view_credit = std::max(inst.bearing_view_credit, novelty);
-            if (credit > 0.0f)
-            {
-                mb.var = R / (range * range) / credit;
-                frame.bearings = mb;
-            }
+        }
+        inst.dbg_view_credit = credit;
+        rc::DoorFrame frame;
+        frame.points.reserve(static_cast<std::size_t>(npts));
+        frame.points.insert(frame.points.end(), observation.candidate_pts.begin(), observation.candidate_pts.end());
+        frame.points.insert(frame.points.end(), observation.residual_pts.begin(), observation.residual_pts.end());
+        frame.weight = credit;
+        frame.R.assign(frame.points.size(), credit > 0.0f ? R / credit : R);
+        // Task D-C review C1 / round 2: the mask's sides (DoorFrame::bearings, rc::MaskBearings) — the ZED pinhole and the
+        // cycle's camera pose. A side within one mask cell (6 px, door_existence.cpp MaskCells::CELL) of the image border
+        // is CENSORED — the door may continue past it. Variance per side (px²): the per-point position noise R at the door's
+        // range, carried to the image (fx²·R/r²), plus the column's own quantisation (1/12 px²), independent between the
+        // two sides; and the pose chain at the door perpendicular to the ray (fx²·σ⊥²/r²), ONE error moving both sides — the
+        // fix-round-1 variance had no pose term at all. Both scaled by the frame's view credit, as everything it says is.
+        if (credit > 0.0f and observation.mask_cols.has_value() and room_T_zed_.has_value() and cam_.present
+            and cam_.projection_model == 0 and cam_.width > 0 and cam_.focal_x > 0.0f)
+        {
+            rc::MaskBearings mb;
+            mb.zed_T_room = room_T_zed_->inverse().topRows<3>().cast<float>();
+            mb.fx = cam_.focal_x;
+            mb.cx = static_cast<float>(static_cast<int>(static_cast<float>(cam_.width / 2u)));   // camera_project's centre
+            mb.jamb_depth = inst.wall_reg.ok ? inst.wall_reg.depth : 0.0f;
+            constexpr float kCellPx = 6.0f;
+            const float W = static_cast<float>(cam_.width);
+            const auto [c0, c1] = *observation.mask_cols;
+            mb.lo = c0 > kCellPx ? c0 : std::numeric_limits<float>::quiet_NaN();
+            mb.hi = c1 < W - 1.0f - kCellPx ? c1 : std::numeric_limits<float>::quiet_NaN();
+            const Eigen::Vector2f ray = inst.aperture.centre_xy() - *view_cam;
+            const float brange = std::max(0.3f, ray.norm());
+            const Eigen::Vector2f perp = Eigen::Vector2f(-ray.y(), ray.x()) / std::max(1e-6f, ray.norm());
+            const float chain_perp = perp.x() * perp.x() * inst.chain_cov_xx + 2.0f * perp.x() * perp.y() * inst.chain_cov_xy
+                                   + perp.y() * perp.y() * inst.chain_cov_yy;
+            const float px_per_m = mb.fx / brange;
+            mb.var = (px_per_m * px_per_m * R + 1.0f / 12.0f) / credit;
+            mb.var_common = px_per_m * px_per_m * std::max(0.0f, chain_perp) / credit;
+            frame.bearings = mb;
         }
         // AIF "be-still-to-update" as CONTINUOUS PRECISION: a frame's authority to MOVE the mean is capped via the
         // per-frame common-mode (NOT per-point R), by a variance that grows with MOTION × OFF-AXIS position. Still
@@ -741,14 +751,19 @@ float DoorFit::run_inference(rc::DoorFitState& inst, const DoorObservation& obse
         const float periph      = periphery_penalty(inst);
         const float mot_pos_var = std::pow(cfg_.motion_cm_pos_gain * motion_mag, 2.0f) * periph;   // m² (along-wall s)
         const Eigen::Vector2f u = inst.ai2_belief.params().wall_u;
-        const float chain_s = u.x() * u.x() * inst.chain_cov_xx + u.y() * u.y() * inst.chain_cov_yy;   // proj onto u
+        const float chain_s = u.x() * u.x() * inst.chain_cov_xx + 2.0f * u.x() * u.y() * inst.chain_cov_xy
+                            + u.y() * u.y() * inst.chain_cov_yy;   // proj onto u
+        // Task D-C round 2: the across-wall projection for d (DoorFrame::chain_cov_n).
+        const float chain_n = u.y() * u.y() * inst.chain_cov_xx - 2.0f * u.x() * u.y() * inst.chain_cov_xy
+                            + u.x() * u.x() * inst.chain_cov_yy;
         frame.chain_cov_s = chain_s + range_lat_var + mot_pos_var;
+        frame.chain_cov_n = chain_n + range_lat_var + mot_pos_var;
         // try96: the mask is displaced by the same registration offset b as the LiDAR (one pose registers both): the pose
         // chain + range term is b's (door_opening_edges.h), so the frame keeps only its own motion smear, and the fit is
         // re-expressed as a measurement of s + b (DoorBelief::update_sharing_offset).
         const bool share_offset = inst.along_wall.init;
         if (share_offset)
-            frame.chain_cov_s = mot_pos_var;
+            frame.chain_cov_s = mot_pos_var;   // (b is ALONG the wall only: the across common mode keeps the chain)
         // ★NO FREEZE SWITCH HERE. What used to gate this update is now stated in the generative model
         // instead: the aperture's along-wall process noise is ZERO (door_belief.h process_std_s), so its
         // precision grows with evidence and its mean stops being dragged by a swinging leaf without any
@@ -759,7 +774,9 @@ float DoorFit::run_inference(rc::DoorFitState& inst, const DoorObservation& obse
         // from the other — so a wrong hinge cannot slide the aperture a width to make its leaf fit (try75 leg 1).
         inst.ai2_belief.set_hinge_prob(1.0f / (1.0f + std::exp(-inst.hinge_llr)));
         inst.ai2_belief.set_leaf_phi_sigma(inst.phi_sigma);   // …and under the leaf ANGLE's own uncertainty
-        if (share_offset)
+        if (credit <= 0.0f)
+            inst.ai2_belief.predict();   // nothing new from this view: the belief carries its one-step Q only
+        else if (share_offset)
             inst.ai2_belief.update_sharing_offset(frame, inst.along_wall.b, inst.along_wall.Pb, inst.along_wall.c);
         else
             inst.ai2_belief.update(frame);   // MAP mean + posterior Σ; its surface-only return is NOT the FE (below)

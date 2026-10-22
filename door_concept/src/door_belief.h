@@ -160,24 +160,44 @@ struct DoorBeliefParams
 // One fitted frame's evidence (room-frame points + per-point measurement variance R). chain_cov_s carries
 // the SHARED pose-chain + static-range variance the fitter computes for the along-wall position (added to
 // the s common-mode). Dimensions (w,h) have no localisation-chain term.
-// ★Task D-C review C1: WHERE THE MASK'S SIDES ARE, AS BEARINGS. The ZED mask's support points carry the depth map's
-// range error along the viewing ray; from an oblique view that error moves s and the leaf plane d TOGETHER, and the fit
-// slid DOOR_0's aperture 0.35-0.4 m along its wall (rtD1i, ~200 cycles with masks present) — the frame channel then read
-// the misplacement as absence and removed a door YOLO was detecting. The mask's left/right image columns are a
-// DEPTH-FREE observation: the bearings, from the camera, of the outermost parts of the door — its jambs on the wall line,
-// or the leaf's free edge where a swung leaf stands outside them. Censored (NaN) where the mask touches the image border.
+// ★Task D-C review C1: WHERE THE MASK'S SIDES ARE. The ZED mask's support points carry the depth map's range error along the
+// viewing ray; from an oblique view that error moves s and the leaf plane d TOGETHER, and the fit slid DOOR_0's aperture
+// 0.35-0.4 m along its wall (rtD1i) — the frame channel then read the misplacement as absence and removed a door YOLO was
+// detecting. The mask's leftmost / rightmost image COLUMNS are a DEPTH-FREE observation of the outermost parts of the door.
+// ★Task D-C round 2: PREDICTED IN THE IMAGE, through the camera that took it. The door's outline — each jamb's visible
+// vertical edge from the floor to the head, and the believed leaf's free-edge corners — is projected with the CameraAPI
+// pinhole (u = fx·X/Y + cx, cx = width/2 as DSR::CameraAPI stores it: core/door_existence.h camera_project) and its
+// extreme columns are compared with the mask's. A pitched or rolled camera, an off-centre door, a door taller than the
+// image is high all come out of the projection; fix round 1 took a column as a horizontal bearing through cx and pitch 0.
+// The jambs' visible corners stand on the WALL'S ROOM-SIDE FACE — the polygon line moved by the wall's own registered
+// offset (DoorFitState::wall_reg.depth, the LiDAR's measurement of where that face is), not on the polygon line itself.
+// Censored (NaN) where the mask touches the image border. Variance per side in px²: the per-point position noise at the
+// door's range (var, independent between sides) plus the pose chain's error perpendicular to the ray (var_common, one
+// error moving both sides together — the midpoint does not average it away).
 struct MaskBearings
 {
-    Eigen::Vector2f cam = Eigen::Vector2f::Zero();   // the camera, room frame (x, y)
-    float ref = 0.0f;                                 // the camera's forward yaw (room frame): angles are taken relative to it
-    float lo = std::numeric_limits<float>::quiet_NaN(), hi = std::numeric_limits<float>::quiet_NaN();   // relative bearings
-    float var = 0.0f;                                 // bearing variance (rad²)
+    Eigen::Matrix<float, 3, 4> zed_T_room = Eigen::Matrix<float, 3, 4>::Zero();   // zed ← room (X right, Y forward, Z up)
+    float fx = 0.0f, cx = 0.0f;                       // the pinhole's horizontal focal (px) and centre column (px)
+    float jamb_depth = 0.0f;                          // the jambs' room-side face, across the wall from the line, INTO the room (m)
+    float lo = std::numeric_limits<float>::quiet_NaN(), hi = std::numeric_limits<float>::quiet_NaN();   // mask's left / right column (px)
+    float var = 0.0f;                                 // per-side independent variance (px²)
+    float var_common = 0.0f;                          // shared by both sides (px²)
 };
 struct DoorFrame
 {
     std::vector<Eigen::Vector3f> points;
     std::vector<float>           R;
     float chain_cov_s = 0.0f;   // along-wall position variance from the pose chain (m²)
+    // Task D-C round 2: the same pose chain projected ACROSS the wall — the common mode of d. It used to reuse chain_cov_s
+    // (the along projection), which at a head-on view is the small one: the leaf plane's depth then read ±4 mm while two
+    // pose epochs of rtD1i put the same leaf 0.30 m apart across the wall.
+    float chain_cov_n = 0.0f;
+    // ★Task D-C round 2: ONE VIEW, ONE OBSERVATION. The frame's whole information is multiplied by this (its points'
+    // R and its common mode are divided by it): the novelty of the view it was taken from against the last credited view
+    // (door_view_pool.h's similarity). A parked camera re-reads the same mask with the same pose error every frame; rtD1i
+    // counted ~40 frames of one parked view whose pose was 8.7° wrong (room_concept published ~1°) as 40 independent
+    // observations, and the aperture s settled 0.46 m off at σ 0.067 (7σ) and never recovered (Σ_ss has no process noise).
+    float weight = 1.0f;
     std::optional<MaskBearings> bearings;   // Task D-C: the mask's sides (empty = not measured)
 };
 
@@ -571,7 +591,7 @@ public:
     // Fixed template prior on w,h folded into the SAME GN normal equations as the data (engine detects this
     // hook via a C++23 requires). Pulls w→tpl_w, h→tpl_h with precision 1/prior_{w,h}_std² each frame; s is
     // untouched (it carries only the broad temporal prior). This is what makes the strong size prior stick.
-    [[nodiscard]] std::pair<float, float> predicted_bearing_extent(const DoorBeliefState& s, const MaskBearings& mb) const;
+    [[nodiscard]] std::pair<float, float> predicted_column_extent(const DoorBeliefState& s, const MaskBearings& mb) const;
     void accumulate_extra(const DoorBeliefState& s, const DoorFrame& frame,
                           Eigen::Matrix<float, 4, 4>& Id, Eigen::Matrix<float, 4, 1>& bd) const;
 

@@ -262,6 +262,33 @@ int main()
         else CHECK(false);
     }
 
+    // ── 5. Task D-C round 2: ONE VIEW, ONE OBSERVATION. A parked camera re-reads the same mask through the same pose error
+    //     every cycle; the frame's information is credited by the view's novelty (DoorFrame::weight), so 40 cycles of one
+    //     view leave σ_s where its first fresh frame put it. Before the fix every frame counted (σ_s ∝ 1/√N): rtD1i's 40
+    //     frames of one parked view 8.7° off in heading settled DOOR_0's s 0.46 m off at σ 0.067 (7σ).
+    {
+        DoorCoreConfig cfg;
+        FitWorld w;
+        w.cfg = cfg.door;
+        DoorCore core(cfg);
+        w.core = &core;
+        core.connect(&w, {.decision = {}, .diag = {}});
+        std::vector<float> sd;
+        for (int c = 1; c <= 40; ++c)
+        {
+            (void)core.step(cycle_input(static_cast<std::uint64_t>(c), c, Leaf::Shut));
+            if (w.st.size() == 1 and w.st.begin()->second.ai2_initialized)
+                sd.push_back(std::sqrt(w.st.begin()->second.ai2_belief.covariance()(0, 0)));
+        }
+        CHECK(sd.size() >= 30);
+        if (sd.size() >= 30)
+        {
+            std::print("parked view: σ_s after the first fit {:.4f}, after {} more cycles {:.4f}\n", sd.front(), sd.size() - 1, sd.back());
+            CHECK(sd.back() > 0.8f * sd.front());   // the same view, the same observation: no √N collapse
+        }
+        w.core = nullptr;
+    }
+
     // ── 3. determinism: the fit reads time only from the input ──────────────────────────────────────────────────────
     {
         const Run a = run(Leaf::Shut, 30);

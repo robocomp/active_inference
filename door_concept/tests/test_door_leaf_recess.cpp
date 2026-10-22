@@ -89,6 +89,7 @@ rc::DoorFrame frame_of(const std::vector<Eigen::Vector3f>& pts, float R, float c
     f.points = pts;
     f.R.assign(pts.size(), R);
     f.chain_cov_s = chain;
+    f.chain_cov_n = chain;   // an isotropic chain: the same variance across the wall (Task D-C round 2)
     return f;
 }
 

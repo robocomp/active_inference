@@ -276,6 +276,7 @@ struct DoorFitState
     // the real elapsed time (measurement-age → covariance); mirrors table_concept.
     std::chrono::steady_clock::time_point last_belief_touch{};
     float chain_cov_xx = 0.0f, chain_cov_yy = 0.0f, chain_cov_yaw = 0.0f;  // localization/chain cov (m²,rad²)
+    float chain_cov_xy = 0.0f;   // Task D-C round 2: its xy cross term, so a projection on ANY direction is exact
     int  assigned_mask_idx  = -1;     // tracker's gated mask-slice assignment (-1 = use greedy nearest)
     // ── Existence belief (shared rc::exist channel — same one table/chair use) ──────────────────────
     // L = log P(exists)/P(¬exists), integrated per SENSOR frame from the PIXEL-LEVEL silhouette evidence
@@ -394,10 +395,12 @@ struct DoorFitState
     float last_written_cx   = std::numeric_limits<float>::max();
     float last_written_cy   = std::numeric_limits<float>::max();
     float last_written_yaw  = std::numeric_limits<float>::quiet_NaN();   // Task D-C (M-6): the yaw written with them
-    // Task D-C review C1: the camera position of the last view the mask-side bearings were credited from (room frame);
-    // a repeated view of the same mask is ONE observation (door_view_pool.h's similarity), not one per frame.
+    // Task D-C review C1 / round 2: the camera position of the last view the MASK FRAME was credited from (room frame); a
+    // repeated view of the same mask is ONE observation (door_view_pool.h's similarity), not one per frame — its points,
+    // its sides, everything the frame says (DoorFrame::weight).
     std::optional<Eigen::Vector2f> bearing_view_cam;
     float bearing_view_credit = 0.0f;   // novelty already credited since that anchor view (0..1)
+    float dbg_view_credit = 1.0f;       // the last mask frame's credit (DoorFrame::weight) — diagnostics
     // Last GEOMETRY published to the graph (dims + mesh). Gates the per-cycle mesh/dim rewrite so a
     // settled door stops jittering the retina mesh. Mirrors bottle_concept's last_pub_* publish gate.
     float last_pub_cx  = std::numeric_limits<float>::max();

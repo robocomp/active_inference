@@ -126,53 +126,59 @@ Eigen::Matrix<float, 4, 1> DoorBelief::sdf_jacobian(const Eigen::Vector3f& p, co
 }
 
 // ─── Fixed template prior on w,h (non-drifting; folded into the GN normal equations each frame) ──
-// Task D-C review C1: the predicted angular extent, from mb.cam relative to mb.ref, of the door under state s — the jambs on
-// the wall line and the believed leaf's free-edge corners (a swung leaf can stand outside the jambs in the image).
-std::pair<float, float> DoorBelief::predicted_bearing_extent(const DoorBeliefState& s, const MaskBearings& mb) const
+// Task D-C round 2: the predicted image-column extent of the door under state s (see MaskBearings): each jamb's visible edge
+// (the wall's room-side face, floor to head) and the believed leaf's free-edge corners (a swung leaf can stand outside the
+// jambs in the image), projected with the pinhole. NaN when any of them is not in front of the camera.
+std::pair<float, float> DoorBelief::predicted_column_extent(const DoorBeliefState& s, const MaskBearings& mb) const
 {
     const door::Aperture ap = aperture_at(s);
     const door::LeafPose L = door::leaf_pose(ap, params_.leaf);
-    const std::array<Eigen::Vector2f, 4> pts{ap.wall_O + s.s * ap.wall_u, ap.wall_O + (s.s + s.w) * ap.wall_u,
-                                             L.centre_xy + L.half_w * L.ex, L.centre_xy - L.half_w * L.ex};
+    const Eigen::Vector2f face = mb.jamb_depth * ap.across_u();
+    const std::array<Eigen::Vector2f, 4> xy{ap.wall_O + s.s * ap.wall_u + face, ap.wall_O + (s.s + s.w) * ap.wall_u + face,
+                                            L.centre_xy + L.half_w * L.ex, L.centre_xy - L.half_w * L.ex};
+    constexpr float kNaN = std::numeric_limits<float>::quiet_NaN();
     float lo = std::numeric_limits<float>::infinity(), hi = -std::numeric_limits<float>::infinity();
-    for (const auto& p : pts)
-    {
-        const Eigen::Vector2f d = p - mb.cam;
-        const float a = std::remainder(std::atan2(d.y(), d.x()) - mb.ref, 2.0f * std::numbers::pi_v<float>);
-        lo = std::min(lo, a); hi = std::max(hi, a);
-    }
+    for (const auto& p : xy)
+        for (const float z : {params_.floor_z, params_.floor_z + s.h})
+        {
+            const Eigen::Vector3f q = mb.zed_T_room * Eigen::Vector4f(p.x(), p.y(), z, 1.0f);
+            if (not (q.y() > 1e-2f)) return {kNaN, kNaN};
+            const float u = mb.fx * q.x() / q.y() + mb.cx;
+            lo = std::min(lo, u); hi = std::max(hi, u);
+        }
     return {lo, hi};
 }
 
 void DoorBelief::accumulate_extra(const DoorBeliefState& s, const DoorFrame& frame,
                                   Eigen::Matrix<float, 4, 4>& Id, Eigen::Matrix<float, 4, 1>& bd) const
 {
-    // ── Task D-C review C1: the mask's sides as bearings (DoorFrame::bearings), a depth-free pin on the placement ──
-    // GN contribution of each uncensored side: residual r = predicted − measured, Jacobian by central differences
-    // over [s, w, h, d] (the leaf's free edge moves with d), precision 1/var.
-    if (frame.bearings.has_value() and frame.bearings->var > 0.0f)
+    // ── Task D-C review C1 / round 2: the mask's sides (DoorFrame::bearings), a depth-free pin on the placement ──
+    // GN contribution of the sides' MIDPOINT: residual r = predicted − measured (px), Jacobian by central differences over
+    // [s, w, h, d] (the leaf's free edge moves with d), precision 1/(var/2 + var_common).
+    if (frame.bearings.has_value() and (frame.bearings->var > 0.0f or frame.bearings->var_common > 0.0f)
+        and std::isfinite(frame.bearings->lo) and std::isfinite(frame.bearings->hi))
     {
         const MaskBearings& mb = *frame.bearings;
-        const auto [lo0, hi0] = predicted_bearing_extent(s, mb);
-        Eigen::Matrix<float, 4, 1> Jlo, Jhi;
-        for (int k = 0; k < 4; ++k)
+        const auto [lo0, hi0] = predicted_column_extent(s, mb);
+        Eigen::Matrix<float, 4, 1> J;
+        bool ok = std::isfinite(lo0) and std::isfinite(hi0);
+        for (int k = 0; k < 4 and ok; ++k)
         {
             constexpr float h = 1e-3f;   // central-difference step (m), quadrature not a decision
             auto vp = s.vec(); auto vm = s.vec();
             vp(k) += h; vm(k) -= h;
-            const auto [lp, hp] = predicted_bearing_extent(DoorBeliefState::from_vec(vp), mb);
-            const auto [lm, hm] = predicted_bearing_extent(DoorBeliefState::from_vec(vm), mb);
-            Jlo(k) = (lp - lm) / (2.0f * h);
-            Jhi(k) = (hp - hm) / (2.0f * h);
+            const auto [lp, hp] = predicted_column_extent(DoorBeliefState::from_vec(vp), mb);
+            const auto [lm, hm] = predicted_column_extent(DoorBeliefState::from_vec(vm), mb);
+            ok = std::isfinite(lp) and std::isfinite(lm);
+            J(k) = 0.5f * ((lp + hp) - (lm + hm)) / (2.0f * h);
         }
         // ★The MIDPOINT of the two sides, not each side: it pins WHERE the door is along its wall (the s/d degeneracy the
         //  ZED depth leaves open) without letting one mask's segmentation of the door's WIDTH — which varies frame to frame
         //  (tourR2 door_2: w 0.93 ↔ 1.08 at σ_w 0.015 when each side was a factor) — pass for a measurement of w. One
-        //  censored side ⇒ no midpoint ⇒ no factor this frame. Variance: the mean of two sides, var/2.
-        if (std::isfinite(mb.lo) and std::isfinite(mb.hi))
+        //  censored side ⇒ no midpoint ⇒ no factor this frame.
+        if (ok)
         {
-            const float iv = 2.0f / mb.var;
-            const Eigen::Matrix<float, 4, 1> J = 0.5f * (Jlo + Jhi);
+            const float iv = 1.0f / std::max(1e-6f, 0.5f * mb.var + mb.var_common);
             const float r = 0.5f * (lo0 + hi0) - 0.5f * (mb.lo + mb.hi);
             Id.noalias() += iv * (J * J.transpose());
             bd.noalias() += -iv * J * r;
@@ -236,11 +242,13 @@ Eigen::Matrix<float, 4, 1> DoorBelief::common_mode_inv_diag(const DoorFrame& fra
     // across-wall position by (w/2)·|cos φ|·δφ — so at a poorly known φ a frame cannot say where the plane is.
     const float leaf_n = 0.5f * state_.w * std::abs(std::cos(params_.leaf.phi)) * leaf_phi_sigma_;
     const float n2 = params_.common_mode_s_std * params_.common_mode_s_std + leaf_n * leaf_n;
+    // Task D-C round 2: × frame.weight — a frame's common-mode information scales with its view credit, as its points' do.
+    const float wt = std::max(0.0f, frame.weight);
     return (Eigen::Matrix<float, 4, 1>() <<
-            1.0f / std::max(1e-9f, s2 + frame.chain_cov_s),
-            1.0f / std::max(1e-9f, wh2 + leaf_w * leaf_w),
-            1.0f / std::max(1e-9f, wh2),
-            1.0f / std::max(1e-9f, n2 + frame.chain_cov_s)).finished();
+            wt / std::max(1e-9f, s2 + frame.chain_cov_s),
+            wt / std::max(1e-9f, wh2 + leaf_w * leaf_w),
+            wt / std::max(1e-9f, wh2),
+            wt / std::max(1e-9f, n2 + frame.chain_cov_n)).finished();
 }
 
 // ─── Self-test ───────────────────────────────────────────────────────────────────
