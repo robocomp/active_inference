@@ -623,9 +623,9 @@ QJsonArray ChatSession::messages_for_request() const
     return msgs;
 }
 
-void ChatSession::ask_model(bool followup)
+void ChatSession::ask_model(bool followup, bool offer_tools)
 {
-    turn_ = Turn{.followup = followup};
+    turn_ = Turn{.followup = followup, .offer_tools = offer_tools};
     // STATE additions for this request: what changed among the objects and the doors since the last request, and the last
     // relative move (so "a bit more" knows its direction even after the history has been trimmed).
     state_extra_.clear();
@@ -645,7 +645,12 @@ void ChatSession::ask_model(bool followup)
     state_extra_ += QStringLiteral("last move/turn sent from this chat: ") +
                     (last_relative_.empty() ? QStringLiteral("none") : q(explain_relative_command(last_relative_))) + "\n";
     const QJsonArray msgs = messages_for_request();
-    const QJsonArray tools = followup ? QJsonArray{} : tools_json();
+    // ★ A follow-up carries the SAME tools as the turn before it. ollama reuses the processed prompt only up to the first
+    //   token that differs, and the template writes the tools right after the system prompt: dropping them on the
+    //   follow-up and restoring them on the next message reprocessed the whole history twice per tool round (873 ms of
+    //   a 1086 ms cold prompt on the 5070 Ti, measured 2026-10-22; several seconds on a Jetson). With the tools on offer
+    //   the 8b still answered 35/35 follow-ups in words; a call it makes anyway is never run (on_done).
+    const QJsonArray tools = offer_tools ? tools_json() : QJsonArray{};
     QJsonArray hist;
     for (const auto& m : history_)
     {
@@ -686,6 +691,14 @@ void ChatSession::ask_model(bool followup)
                 // with 'Today\'s' in it is not JSON, eval 2026-10-19). Ask once more; then say so instead of silence.
                 else if (st.eval_count > 0 and lost_answers_++ == 0) ask_model(turn_.followup);
                 else if (not turn_.followup) window_->append_system(QStringLiteral("the model's answer could not be read; please ask again"));
+                return;
+            }
+            // A follow-up is for words: a call in it is not run (it would be a second command the person never gave).
+            // Its words are shown; with none, ask once more without the tools, as before (a cache miss, rare).
+            if (turn_.followup)
+            {
+                log_.write("followup_call_dropped", QJsonObject{{"tool_calls", turn_.tool_calls}});
+                if (content.isEmpty() and turn_.offer_tools) ask_model(true, false);
                 return;
             }
             push_history({{"role", "assistant"}, {"content", content}, {"tool_calls", turn_.tool_calls}});

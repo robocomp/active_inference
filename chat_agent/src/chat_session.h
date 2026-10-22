@@ -127,7 +127,8 @@ private:
     // ── the three entry points from the window ──
     void on_user_text(const QString& text);
 
-    void ask_model(bool followup);
+    /// offer_tools=false only for the retry of a follow-up that answered with a call instead of words.
+    void ask_model(bool followup, bool offer_tools = true);
     /// Runs every call, pushes the tool results. Returns true if one of them attached an image (look()).
     bool handle_tool_calls(const QJsonArray& calls);
     QJsonArray tools_json() const;
@@ -231,6 +232,7 @@ private:
         QString content;
         QJsonArray tool_calls;
         bool followup = false;
+        bool offer_tools = true;
         bool streaming = false;
         bool carries_image = false;   ///< this request sent an image ⇒ strip it from the history when it ends
     } turn_;

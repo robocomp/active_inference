@@ -23,7 +23,7 @@ NUM_PREDICT = int(re.search(r"^num_predict\s*=\s*(-?\d+)", (ROOT / "etc/config.t
                             .read_text(), re.M).group(1))
 MODEL = sys.argv[1] if len(sys.argv) > 1 else "qwen3-vl:8b-instruct"   # the model in etc/config.toml
 REPEATS = int(sys.argv[2]) if len(sys.argv) > 2 else 3
-URL = "http://localhost:11434/api/chat"
+URL = os.environ.get("OLLAMA", "http://localhost:11434") + "/api/chat"   # OLLAMA=http://192.168.1.34:11434 = the Orin
 
 
 def interface_rules(default_step="0.3"):
@@ -235,8 +235,11 @@ def ask(messages):
     body = {"model": MODEL, "messages": messages, "tools": tools(), "stream": False, "think": False,
             "keep_alive": "30m", "options": {"temperature": 0.2, "num_ctx": 16384, "num_predict": NUM_PREDICT}}
     req = urllib.request.Request(URL, json.dumps(body).encode(), {"Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=180) as r:
-        return json.loads(r.read())
+    try:
+        with urllib.request.urlopen(req, timeout=180) as r:
+            return json.loads(r.read())
+    except urllib.error.HTTPError as e:   # ollama answers 500 when it cannot parse the model's tool call (a FAIL, not a crash)
+        return {"message": {"content": f"<HTTP {e.code}: {e.read().decode(errors='replace')[:100]}>"}}
 
 
 def first_call(resp):
