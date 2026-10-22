@@ -21,6 +21,7 @@
 #include <cstdint>
 #include "../../common/exclusion/exclusion.h"   // rc::exclusion:: (SHARED)
 #include <vector>
+#include <opencv2/core.hpp>   // cv::Mat (borrowed ZED frames for the contour channel)
 #include <functional>
 #include <memory>
 
@@ -54,6 +55,13 @@ public:
     // epistemic planner so the viewpoint we ASK for and the absence we BELIEVE use the same model.
     void set_detector_envelope(const rc::detect::DetectorEnvelope& e) { det_env_ = e; }
 
+    // ── The classifier-free CONTOUR channel's inputs ────────────────────────────────────────────────
+    // The ZED frames for THIS cycle, set by the worker before update_and_remove. BORROWED for the call
+    // only and read on the main thread (a cv::Mat crossing a thread would need a deep copy). Either may
+    // be null: no RGB silences the gradient half, no depth the metric half, neither abstains (HOLD).
+    void set_camera_frames(const cv::Mat* rgb, const cv::Mat* depth, std::uint64_t stamp_ms, bool fresh)
+    { rgb_frame_ = rgb; depth_frame_ = depth; frame_stamp_ms_ = stamp_ms; frames_fresh_ = fresh; }
+
     HoodExistence(std::shared_ptr<DSR::DSRGraph> graph, const HoodConfig& cfg)
         : G_(std::move(graph)), cfg_(cfg) {}
 
@@ -71,6 +79,11 @@ private:
     rc::field::ViewField* p_fa_ = nullptr;
     const std::vector<rc::exclusion::Claim>* claims_ = nullptr;
     rc::detect::DetectorEnvelope det_env_{};
+
+    const cv::Mat* rgb_frame_       = nullptr;   // borrowed, this cycle only — see set_camera_frames
+    const cv::Mat* depth_frame_     = nullptr;   // CV_32F metres, NaN = no return
+    std::uint64_t  frame_stamp_ms_  = 0;
+    bool           frames_fresh_    = false;
 
     std::shared_ptr<DSR::DSRGraph> G_;
     const HoodConfig&             cfg_;

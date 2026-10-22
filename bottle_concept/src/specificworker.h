@@ -70,6 +70,8 @@
 #include "../../common/phantom_log/phantom_log.h"   // rc::history::PhantomLog (shadow-mode birth/death record)      // rc::BottleFitter (active-inference fit core)
 #include "../../common/phantom_log/observer_pose.h"   // rc::history::note_observer (SHARED)
 #include "../../common/agent_exit/terminal_exit.h"   // rc::agent::terminal_exit (SHARED)
+#include "../../common/rgb_ingestor/rgb_ingestor.h"             // rc::RgbIngestor — the SHARED ZED RGB consumer
+#include "../../common/rgb_ingestor/depth_ingestor.h"           // rc::DepthIngestor — its metric sibling
 #include "../../common/lidar_ingestor/concept_lidar_ingestor.h"  // rc::ConceptLidarIngestor (lidar3D media plane → room-frame sweep)
 #include "../../common/instance_tracker/instance_tracker.h"   // rc::InstanceTracker (birth/associate/death)
 #include "../../common/dashboard/belief_inspector.h"
@@ -242,6 +244,9 @@ private:
     std::unique_ptr<rc::BottleEvaluator>  evaluator_;    // Webots-GT / sweep / eval CSV (no-op unless flagged)
     std::unique_ptr<rc::BottleFitter>     fitter_;       // active-inference fit core (owns the instance map)
     rc::history::PhantomLog                             phantom_log_;   // shadow-mode birth/death record
+    std::unique_ptr<rc::RgbIngestor>          rgb_ingestor_;    // ZED RGB media plane (contour channel)
+    std::unique_ptr<rc::DepthIngestor>        depth_ingestor_;  // ZED depth (CV_32F m, NaN = no return)
+    bool                                      camera_planes_wanted_ = false;
     std::unique_ptr<rc::ConceptLidarIngestor> lidar_ingestor_;  // lidar3D media plane → room-frame sweep (feeds fitter)
     std::unique_ptr<rc::BottleExistence>  existence_;     // existence log-odds + removal (the shared rc::exist policy)
 

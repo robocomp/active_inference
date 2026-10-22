@@ -28,6 +28,7 @@
 
 #include "hood_instance.h"      // rc::HoodInstance, HoodState, rc::FrontCue
 #include "../../common/mask_ingestor/mask_ingestor.h"
+#include "../../common/contour_edge/contour_edge_project.h"   // rc::edges::ContourSet
 
 namespace cv { class Mat; }             // forward-decl: OpenCV lives only in hood_projection.cpp
 
@@ -105,6 +106,15 @@ public:
     // offset + fill), stored on the instance for the controller's centring/dwell lock-on search.
     void compute_projected_roi(HoodInstance& inst);
     SilhouetteExistence compute_silhouette_existence(const HoodInstance& inst);
+
+    // The classifier-free CONTOUR channel's geometry: the fitted box's most visible vertical face + the
+    // slid null it is scored against (shared construction, common/contour_edge). PINNED TO THE FRAME'S
+    // CAPTURE STAMP because the contour is compared against those pixels. Empty face = NOT MEASURED
+    // (camera/transform unavailable, or a corner behind the camera), never a refutation.
+    // frame_cols/rows: the delivered image size, so a CameraAPI-vs-frame size mismatch is rescaled
+    // rather than silently scored in the wrong place.
+    rc::edges::ContourSet compute_contour_set(const HoodInstance& inst, std::uint64_t stamp_ms,
+                                              int frame_cols, int frame_rows);
 
     // ── Appearance-based FRONT (door) detection ──────────────────────────────────────────────────────
     // Project the FITTED 3D box (from the belief, NOT YOLO's 2D mask) into the live ZED RGB and score

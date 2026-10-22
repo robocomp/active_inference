@@ -128,6 +128,11 @@ struct BottleInstance
     float dbg_ex_lidar_occ  = 0.0f;
     float dbg_ex_lidar_free = 0.0f;
     int   dbg_ex_lidar_n    = 0;
+    // Classifier-free CONTOUR channel: RGB edge excess / depth verdict / resolvability weight / delta-L admitted.
+    float dbg_ex_ct_edge    = 0.0f;  int dbg_ex_ct_edge_n = 0;
+    float dbg_ex_ct_depth   = 0.0f;  int dbg_ex_ct_depth_n = 0;
+    float dbg_ex_ct_pres    = 0.0f;
+    float dbg_ex_ct_dL      = 0.0f;
     float dbg_ex_lidar_pres = 0.0f;   // P(the sweep can resolve an object this small) — see bottle_existence.cpp
     float fe_surprise          = 0.0f;
     // ★The PUBLISHED epistemic_gain — the number the controller's affordance selection ranks on

@@ -30,3 +30,15 @@ add_executable(test_bottle_fit
 )
 target_link_libraries(test_bottle_fit PRIVATE "${TORCH_LIBRARIES}" Eigen3::Eigen)
 target_compile_options(test_bottle_fit PRIVATE -O2)
+
+# Contour channel geometry + scoring: pure Eigen + OpenCV, no DSR.
+find_package(OpenCV REQUIRED)
+add_executable(test_bottle_contour
+  test_bottle_contour.cpp
+  ../src/bottle_cylinder_contour.cpp
+  ${ACTIVE_INFERENCE_COMMON_DIR}/contour_edge/contour_edge_project.cpp
+  ${ACTIVE_INFERENCE_COMMON_DIR}/contour_edge/contour_edge_check.cpp
+)
+target_include_directories(test_bottle_contour PRIVATE ${OpenCV_INCLUDE_DIRS})
+target_link_libraries(test_bottle_contour PRIVATE ${OpenCV_LIBS} Eigen3::Eigen)
+target_compile_options(test_bottle_contour PRIVATE -O2)

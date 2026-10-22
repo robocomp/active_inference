@@ -12,6 +12,8 @@
 #include <utility>
 #include <vector>
 
+#include "../../common/contour_edge/contour_edge_check.h"    // rc::edges — the classifier-free RGB check
+#include "../../common/contour_edge/contour_depth_check.h"   // rc::edges — its metric half
 #include "hood_fitter.h"                                       // rc::HoodFitter (instances, silhouette)
 #include "../../common/lidar_ingestor/concept_lidar_ingestor.h"                              // rc::ConceptLidarIngestor (per-plane sweeps)
 #include "hood_model.h"                                       // HoodModel::TOP_THICKNESS / LEG_RADIUS
@@ -49,7 +51,8 @@ void HoodExistence::update_and_remove(HoodFitter& fitter, ConceptLidarIngestor* 
         const auto& sb = lidar->sweep_bpearl_room();
         if (not sb.empty()) { sweep_bp = &sb; origin_bp = lidar->origin_bpearl_room(); }
     }
-    if (not fresh_masks and sweep == nullptr and sweep_bp == nullptr)   // no new evidence on any channel this cycle
+    const bool contour_fresh = cfg_.contour_check_enabled and frames_fresh_;   // the camera clock, independent of YOLO
+    if (not fresh_masks and not contour_fresh and sweep == nullptr and sweep_bp == nullptr)   // no new evidence on any channel this cycle
         return;
 
     rc::exist::SensorModel sm;
@@ -265,6 +268,72 @@ void HoodExistence::update_and_remove(HoodFitter& fitter, ConceptLidarIngestor* 
                 const float vss = cfg_.verify_surprise_smooth;
                 inst.verify_surprise = (1.0f - vss) * inst.verify_surprise + vss * verify;
                 inst.wants_verification = inst.verify_surprise > cfg_.existence_verify_surprise;
+            }
+        }
+
+        // ── CONTOUR channel (classifier-free) — RGB/DEPTH clock, independent of fresh_masks ─────────────
+        // Mirrors refrigerator_concept. Every channel above ends at YOLO: when the robot closes in and the
+        // label collapses, "no mask here" is charged as absence of the HOOD rather than absence of the
+        // LABEL. This one projects the FITTED box into the ZED frame and asks, with no network:
+        //   RGB   — is there an intensity boundary along the projected face, more than along the same face
+        //           slid sideways along the wall? (relative statistic: needs the null, silent without one)
+        //   DEPTH — is there a surface at the distance the belief predicts, with space behind its edge?
+        //           (absolute statistic: needs no null)
+        // Both are bounded and dimensionless, so they SUM and pass through one tanh (common-mode: they
+        // are two consequences of the same fact). n_used == 0 ⇒ not measured ⇒ HOLD, never refutation.
+        if (contour_fresh
+            and ((rgb_frame_ != nullptr and not rgb_frame_->empty())
+                 or (depth_frame_ != nullptr and not depth_frame_->empty())))
+        {
+            const bool have_rgb = rgb_frame_ != nullptr and not rgb_frame_->empty();
+            const int fc = have_rgb ? rgb_frame_->cols : depth_frame_->cols;
+            const int fr = have_rgb ? rgb_frame_->rows : depth_frame_->rows;
+            const auto cs = fitter.compute_contour_set(inst, frame_stamp_ms_, fc, fr);
+            float verdict = 0.0f;
+            int   n_used  = 0;
+
+            if (cs.face.valid() and have_rgb)
+            {
+                std::vector<std::vector<cv::Point>> ctl;
+                ctl.reserve(cs.controls.size());
+                for (const auto& c : cs.controls)
+                    ctl.push_back(c.px);
+                const auto es = rc::edges::contour_edge_support(*rgb_frame_, cs.face.px, ctl);
+                // The RGB statistic is relative: with no surviving control it has no scale (this channel's
+                // own precondition), and `excess` rather than the ratio keeps magnitude.
+                if (es.n_samples > 0 and es.n_controls > 0)
+                {
+                    verdict += es.excess;
+                    n_used   = std::max(n_used, es.n_samples);
+                    inst.dbg_ex_edge_excess = es.excess;
+                    inst.dbg_ex_edge_n      = es.n_samples;
+                }
+            }
+            if (cs.face.valid() and depth_frame_ != nullptr and not depth_frame_->empty())
+            {
+                rc::edges::ContourDepthParams dp;
+                // σ_d from the belief's OWN position uncertainty (a poorly-known hood is not judged against
+                // its predicted depth as if pinned); the relative term is the stereo camera's.
+                const auto& P = inst.ai2_belief.covariance();
+                dp.sigma_depth_m = std::sqrt(std::max(1e-4f, static_cast<float>(P(0, 0) + P(1, 1))));
+                dp.depth_scale_x = (fc > 0) ? static_cast<float>(depth_frame_->cols) / fc : 1.0f;
+                dp.depth_scale_y = (fr > 0) ? static_cast<float>(depth_frame_->rows) / fr : 1.0f;
+                const auto ds = rc::edges::contour_depth_support(*depth_frame_, cs.face, cs.controls, dp);
+                if (ds.n_samples > 0)
+                {
+                    verdict += ds.verdict;
+                    n_used   = std::max(n_used, ds.n_samples);
+                    inst.dbg_ex_depth_verdict = ds.verdict;
+                    inst.dbg_ex_depth_bias_m  = ds.mean_bias_m;
+                    inst.dbg_ex_depth_n       = ds.n_samples;
+                }
+            }
+            const rc::exist::Evidence ev_c = rc::exist::contour_evidence(verdict, n_used, sm);
+            inst.dbg_ex_contour_dL = ev_c.log_odds_delta;
+            if (ev_c.n_reached > 0)
+            {
+                inst.existence.integrate(ev_c, 1.0f);
+                integrated = true;
             }
         }
 

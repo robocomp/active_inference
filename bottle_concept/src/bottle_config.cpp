@@ -149,6 +149,8 @@ BottleConfig load_bottle_config(const ConfigLoader& cfg)
             "debounce in IDEAL OBSERVATIONS (Σ p_detect), not cycles");
     out.existence_occluder_heights  = getb("BottleModel.ExistenceOccluderHeights", false,
             "★A/B ONLY, DEFAULT OFF — and the DIRECTION of the error is the reason");
+    out.contour_check_enabled       = getb("BottleConcept.ContourCheckEnabled", true,
+            "The classifier-free existence channel: score the fitted cylinder's projected outline against the RGB's own gradient and the DEPTH plane's agreement with it; runs on ZED frames, independent of YOLO masks");
     out.ai2_clutter_frac         = getf("BottleModel.AI2ClutterFrac", 0.10f,
             "ε: prior weight of the uniform clutter mixture component");
     out.ai2_clutter_scale_m      = getf("BottleModel.AI2ClutterScaleM", 0.08f,

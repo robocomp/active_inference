@@ -424,6 +424,12 @@ FridgeFilterLog = false     # log per-instance plausibility / plaus_evidence / e
 # RGB, score vertical-edge energy per face, fold the winner's bearing into the belief's door-mode resolver. Works
 # even when the robot is too close for YOLO (uses the belief's own box, not the mask). NEEDS LIVE TUNING: the edge
 # metric is lighting/texture dependent — FrontMinConfidence gates how decisive a face margin must be to count.
+# Classifier-free existence channel (mirrors refrigerator_concept): project the FITTED hood box into the ZED
+# frame and ask, with no network involved, RGB: is there a boundary along the projected face, more than along
+# the same face slid sideways along the wall? DEPTH: is there a surface at the predicted distance, with space
+# behind its edge? Runs on every fresh ZED frame, whether or not YOLO painted a "hood" mask. Brings up the
+# ZED RGB + DEPTH media planes.
+ContourCheckEnabled = true
 FrontDetectEnabled = true   # master switch: subscribe to ZED RGB media plane + run detect_front/resolve_front
 FrontMinFaceAreaPx = 900.0  # min projected face area (px²) to score for door-ness (rejects tiny grazing slivers)
 FrontMinConfidence = 0.10   # min door-ness margin (max−second)/(max+eps) for a cue to be emitted (else nullopt)

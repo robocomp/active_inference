@@ -241,6 +241,11 @@ struct HoodInstance
     // Verification-gated removal diagnostics: p_detect (how resolving this view is), central_frac, and the
     // decayed go-verify surprise. Show why an absence went to REMOVAL (high p_detect) vs VERIFICATION (low).
     float dbg_ex_pdetect = 1.0f, dbg_ex_central = 0.0f;
+    // Classifier-free CONTOUR channel (RGB edge excess / depth verdict / what both contributed to L).
+    float dbg_ex_edge_excess   = 0.0f;  int dbg_ex_edge_n  = 0;
+    float dbg_ex_depth_verdict = 0.0f;  int dbg_ex_depth_n = 0;
+    float dbg_ex_depth_bias_m  = 0.0f;
+    float dbg_ex_contour_dL    = 0.0f;
     // ★★VERIFIED MEANS CONFIRMED FROM TWO DIFFERENT DIRECTIONS — not "confirmed a lot".
     // The first cut of this accumulated Σ p_detect·in_fov_frac and called 1.0 "one whole look". That is
     // wrong in the one case the field exists for: a PERSISTENT false alarm, stared at from the bearing
