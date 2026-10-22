@@ -68,9 +68,20 @@ namespace ltsm::seam
     /// T(new <- old) through the aperture, with its covariance propagated from the door pose's (x, y, yaw) covariance.
     struct Measured { Vec3 pose = Vec3::Zero(); Mat3 cov = Mat3::Identity(); };
 
-    inline Measured aperture_seam(const Vec3& door_in_old, const Mat3& door_cov, const Eigen::Vector2d& robot_in_old)
+    /// `recess_mean`/`recess_sigma` (m): the proto's origin is the room's MOUTH, which lies INSIDE the old room by the
+    /// door's recess behind the door node (room_concept seat_in_room: the leaf sits δ past the mouth). The door node alone
+    /// therefore places the proto origin up to δ too far out along the aperture normal. The recess is not stored on the
+    /// graph, so it enters as a nuisance along the normal: mean shift inward, variance added on that axis only.
+    /// ★ gold2 (2026-10-23) measured it: both first entries disagreed with the door node by 0.495 / 0.49 m, ALONG the
+    ///   door normal, tangent and yaw agreeing to <0.07 m / 0.003 rad. Defaults 0 keep this a pure geometric function.
+    inline Measured aperture_seam(const Vec3& door_in_old, const Mat3& door_cov, const Eigen::Vector2d& robot_in_old,
+                                  double recess_mean = 0.0, double recess_sigma = 0.0)
     {
-        const Vec3 p = proto_in_old(door_in_old, robot_in_old);
+        Vec3 p = proto_in_old(door_in_old, robot_in_old);
+        const Eigen::Vector2d y(-std::sin(p.z()), std::cos(p.z()));   // aperture normal, out of the old room
+        p.head<2>() -= recess_mean * y;
+        Mat3 C = door_cov;
+        C.topLeftCorner<2, 2>() += recess_sigma * recess_sigma * y * y.transpose();
         // inverse: t' = -R(-θ)·t, θ' = -θ.  ∂t'/∂t = -R(-θ),  ∂t'/∂θ = R'(-θ)·t,  R'(a) = [[-sin a, -cos a],[cos a, -sin a]].
         const double s = std::sin(-p.z()), c = std::cos(-p.z());
         Eigen::Matrix2d dR;  dR << -s, -c, c, -s;
@@ -78,7 +89,7 @@ namespace ltsm::seam
         J.topLeftCorner<2, 2>() = -rot(-p.z());
         J.block<2, 1>(0, 2)     = dR * p.head<2>();
         J(2, 2) = -1.0;
-        return {inverse(p), J * door_cov * J.transpose()};
+        return {inverse(p), J * C * J.transpose()};
     }
 
     // ── covariance-carrying SE(2) algebra (additive (x, y, yaw) parametrisation, as cortex stores RT covariance) ──

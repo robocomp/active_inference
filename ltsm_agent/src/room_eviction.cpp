@@ -375,10 +375,16 @@ std::optional<ltsm::seam::Measured> pose_in_room(DSR::DSRGraph &G, std::uint64_t
 }
 }   // namespace
 
+// The door's recess behind the room's mouth (see aperture_seam). A model constant of the building's geometry, FLAGGED:
+// not stored on the graph. Observed 0.49-0.50 m twice (gold2); uniform on [0, 0.5] would be mean 0.25, sigma 0.14 -- sigma
+// is taken wider (0.25) so a recess the two observations did not span is still an inlier. room_concept writing the mouth
+// pose would retire this.
+constexpr double kRecessMean = 0.25, kRecessSigma = 0.25;
+
 std::optional<Mat::RTMat> RoomEviction::fuse_seam_through_aperture(const Candidate &cand, const DSR::Node &door,
                                                                    const Mat::RTMat &door_in_old,
                                                                    const Mat::RTMat &chain_seam_rt,
-                                                                   DSR::InnerEigenAPI &ie) const
+                                                                   DSR::InnerEigenAPI &ie, bool new_room_was_remembered) const
 {
     using namespace ltsm::seam;
     const auto robot_in_old = ie.get_transformation_matrix(cand.old_room_name, cand.robot_name);
@@ -413,12 +419,16 @@ std::optional<Mat::RTMat> RoomEviction::fuse_seam_through_aperture(const Candida
         ap = compose_cov(face_new.value(), inverse_cov(door_m.value()));
         how = "door faces";
     }
-    else if (not (cand.crossing_born or rc::room::is_proto(*live_, cand.new_room_id)))
+    else if (
+             new_room_was_remembered or not (cand.crossing_born or rc::room::is_proto(*live_, cand.new_room_id)))
     {
         // ★ THE APERTURE-AS-FRAME SEAM IS A HYPOTHESIS ABOUT THE NEW ROOM (Task S, round 2): it holds only for a room
         //   born through this crossing. An established room has an arbitrary frame; there the aperture seam is wrong
         //   and the mixture would reject a CORRECT chain. No provenance => the aperture carries no information about
         //   T(new<-old) (infinite frame uncertainty): keep the chain.
+        //   ★ A RE-ENTERED (recalled) ROOM IS NEVER BORN BY THIS CROSSING (gold2, 2026-10-23): promotion_candidate flags
+        //   every promotion, including the return into room_1, which memory already holds with its own frame. The old
+        //   seam stored for that return was (+0.04,-0.01,+3.13) instead of ~ inverse(first) = (-0.64,+4.61,-0.014).
         qInfo().noquote() << QString::fromStdString(std::format(
             "[eviction][seam] {} is not known to be crossing-born and has no entry face of {} -- robot chain kept",
             cand.new_room_name, door.name()));
@@ -428,7 +438,7 @@ std::optional<Mat::RTMat> RoomEviction::fuse_seam_through_aperture(const Candida
         // A proto's frame IS the aperture, so T(new<-old) is the inverse of the aperture pose in the old room. Its
         // pose comes from the door node (x = wall tangent, door_apertures.cpp:137); the sign of y is the side the
         // robot is on.
-        ap = aperture_seam(se2_of(door_in_old), door_m->cov, robot_xy);
+        ap = aperture_seam(se2_of(door_in_old), door_m->cov, robot_xy, kRecessMean, kRecessSigma);
     (void)door_pose;
 
     // ── THE ROBOT CHAIN, WITH ITS OWN COVARIANCE ───────────────────────────────────────────────────────────────
@@ -485,6 +495,9 @@ Outcome RoomEviction::evict(const Candidate &cand)
     }
     out.seam = seam.value();
     out.seam_ok = true;
+    // ★ Asked BEFORE step 3 stubs the new room into memory, or every room would look remembered (a re-entry has a twin
+    //   already; a room born by this crossing has none).
+    const bool new_room_was_remembered = remembered_room(live_->get_node(cand.new_room_id));
 
     const std::uint64_t old_idx = room_index(live_->get_node(cand.old_room_id).value());
     const std::uint64_t new_idx = room_index(live_->get_node(cand.new_room_id).value());
@@ -568,7 +581,7 @@ Outcome RoomEviction::evict(const Candidate &cand)
             //   measured THROUGH THE CROSSED DOOR -- T(new<-old) = inverse of the aperture pose in the old room -- and
             //   fused with the robot chain by covariance (seam_fusion.h). gold1 stored a chain seam of (-14262, +1668)
             //   between rooms 4 m apart; nothing contradicted it because the chain was the only measurement.
-            if (const auto fused = fuse_seam_through_aperture(cand, *chosen, chosen_in_old, out.seam, *ie); fused.has_value())
+            if (const auto fused = fuse_seam_through_aperture(cand, *chosen, chosen_in_old, out.seam, *ie, new_room_was_remembered); fused.has_value())
             {
                 out.seam = fused.value();
                 chosen_in_new = out.seam * chosen_in_old;

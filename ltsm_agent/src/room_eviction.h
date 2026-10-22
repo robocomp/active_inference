@@ -174,7 +174,7 @@ public:
     /// nullopt when the robot is not resolvable in the old room.
     [[nodiscard]] std::optional<Mat::RTMat> fuse_seam_through_aperture(const Candidate &cand, const DSR::Node &door,
                                                                        const Mat::RTMat &door_in_old, const Mat::RTMat &chain_seam,
-                                                                       DSR::InnerEigenAPI &ie) const;
+                                                                       DSR::InnerEigenAPI &ie, bool new_room_was_remembered) const;
     [[nodiscard]] static std::map<std::string, DSR::Attribute> rt_attributes(const Mat::RTMat &t) { return rt_attrs(t); }
 
     /// BACKSTOP, not policy. Nodes still hanging under a non-current room whose owner is not
@@ -206,6 +206,8 @@ private:
     /// `r<its room_id>_<live name>`. ★ IDENTITY BY NAME -- the only key available until place
     /// recognition exists; see seed_from_working_memory().
     [[nodiscard]] std::optional<DSR::Node> remembered(const DSR::Node &live_room) const;
+    [[nodiscard]] bool remembered_room(const std::optional<DSR::Node> &live_room) const
+    { return live_room.has_value() and remembered(live_room.value()).has_value(); }
 
     /// Whole = everything under the room (eviction). Structure = floor, walls and doors only, and
     /// nothing below a door (the startup seed).

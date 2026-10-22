@@ -87,6 +87,20 @@ int main()
         check(f.p_inlier > 0.99, "consistent chain keeps ~all its information");
         check(f.cov(0, 0) < ap.cov(0, 0), "fused is tighter than the door alone");
     }
+    std::printf("gold2 live numbers (door node vs mouth: 0.495 m along the normal)\n");
+    {
+        const Vec3 ap_seam(0.7051, -4.6052, 0.0138);               // door-node aperture seam as stored first
+        const Vec3 chain_pose(0.638, -4.110, 0.011);               // the robot chain that was thrown away
+        const Vec3 P = inverse(ap_seam);
+        const Eigen::Vector2d robot = P.head<2>() + rot(P.z()) * Eigen::Vector2d(0.3, 1.0);
+        const auto ap = aperture_seam(P, diag3(0.03, 0.01), robot, 0.25, 0.25);
+        Measured chain{chain_pose, diag3(0.05, 0.02)};
+        const auto f = fuse(chain, ap, 6.0);
+        check(f.p_inlier > 0.5, "the chain is an inlier once the recess nuisance is modelled");
+        check((f.pose - chain_pose).head<2>().norm() < 0.12, "fused seam stays with the chain along the normal (|diff| < 0.12 m)");
+        Measured garbage{Vec3(-14262.68, 1667.96, -1.1285), diag3(0.05, 0.02)};
+        check(fuse(garbage, ap, 6.0).p_inlier < 1e-9, "gold1 garbage still rejected");
+    }
     std::printf("chain covariance (Monte Carlo vs Jacobian)\n");
     {
         const Measured en{Vec3(-1.0, 0.3, 0.6), diag3(0.04, 0.02)}, eo{Vec3(-2.0, -0.4, 0.0), diag3(0.03, 0.015)};
