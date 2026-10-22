@@ -39,3 +39,8 @@ add_link_options(-Wl,--no-as-needed)
 # overruns the caller's stack slot (stack smash) or misaligns it (SIGBUS).
 # -fno-char8_t avoids a problem with the ICE Connection lib.
 add_definitions(-O3 -fmax-errors=1 -fno-char8_t)
+
+# Task S: offline test of the seam fusion (header-only). make -C build seam_fusion_test && ../bin/seam_fusion_test
+add_executable(seam_fusion_test EXCLUDE_FROM_ALL ../tools/seam_fusion_test.cpp)
+target_include_directories(seam_fusion_test PRIVATE ${CMAKE_CURRENT_LIST_DIR}/../src)
+set_target_properties(seam_fusion_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../bin)

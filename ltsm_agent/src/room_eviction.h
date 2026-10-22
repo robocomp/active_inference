@@ -166,6 +166,11 @@ public:
     { return "r" + std::to_string(room_index(live_room)) + "_"; }
 
     /// Planar-safe packing of a transform as RT edge attributes (rt_translation / rt_rotation_euler_xyz).
+    /// T(new<-old) for a PROTO new room, fused from the robot chain and the crossed aperture (seam_fusion.h).
+    /// nullopt when the robot is not resolvable in the old room.
+    [[nodiscard]] std::optional<Mat::RTMat> fuse_seam_through_aperture(const Candidate &cand, const DSR::Node &door,
+                                                                       const Mat::RTMat &door_in_old, const Mat::RTMat &chain_seam,
+                                                                       DSR::InnerEigenAPI &ie) const;
     [[nodiscard]] static std::map<std::string, DSR::Attribute> rt_attributes(const Mat::RTMat &t) { return rt_attrs(t); }
 
     /// BACKSTOP, not policy. Nodes still hanging under a non-current room whose owner is not
