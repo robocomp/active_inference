@@ -648,7 +648,7 @@ public:
     /// The model-error variances [s, w] (m^2) of the last mask frame; replaced every mask frame, 0 = the masks agree.
     [[nodiscard]] std::pair<float, float> model_error_var() const { return {model_var_s_, model_var_w_}; }
 
-        void  apply_constraints(DoorBeliefState& s) const;
+    void  apply_constraints(DoorBeliefState& s) const;
     void  canonicalize(DoorBeliefState&) const {}   // wall fixes yaw ⇒ no symmetry fold
 
     int   gn_iters() const { return params_.gn_iters; }
