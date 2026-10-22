@@ -341,13 +341,15 @@ inline int strip_restorable(std::vector<IdentityRow>& rows, std::string_view roo
 ///  with an AGE: with probability 1 − e^{−h·Δt} the scene the evidence was about has changed since (the door state was
 ///  redrawn from the prior), so P = e^{−h·Δt}·P_mem + (1 − e^{−h·Δt})·P_birth — the standard change-point (hazard) mixture,
 ///  in probability, not in log-odds.
-///  THE HAZARD'S SOURCE: h = kLeafMoveHyperShape / kLeafMoveHyperTimeS = 1/600 s (door_leaf_channel.h), the hyperprior of
-///  the one scene-change rate this agent models — an uncommanded leaf move per 10-min run length. The existence channels
-///  are conditioned on the leaf (silhouette, contour and frame are all rendered at φ), so an existence verdict is only as
-///  current as the leaf state it was formed under. Not a new constant: the leaf channel's own.
+///  THE HAZARD'S SOURCE — A BORROWED RATE, stated as such (review I-2): h = kLeafMoveHyperShape / kLeafMoveHyperTimeS =
+///  1/600 s, the leaf channel's move-hazard HYPERPRIOR (door_leaf_channel.h: one uncommanded leaf move per 10-min run
+///  length). It is not a measured rate of change of a door's existence — this agent has no such model. It is borrowed
+///  because the existence channels are conditioned on the leaf (silhouette, contour and frame are rendered at φ), so a
+///  verdict is only as current as the leaf state it was formed under. Kept as a copy here so this header stays pure (no
+///  door_belief.h); tests/test_door_identity_table.cpp static_asserts it equals the leaf channel's ratio.
 ///  Δt unknown (a 17-column row, or no stamp) ⇒ the memory's age is unknown ⇒ survival 0 ⇒ the birth prior: the row is
 ///  still an identity (name + place), but carries no existence belief.
-inline constexpr double kRememberedExistenceHazardPerS = 1.0 / 600.0;   // = kLeafMoveHyperShape / kLeafMoveHyperTimeS
+inline constexpr double kRememberedExistenceHazardPerS = 1.0 / 600.0;   // BORROWED: kLeafMoveHyperShape / kLeafMoveHyperTimeS
 inline float restore_existence_prior(const IdentityRow& r, float default_L, std::int64_t now_wall_ms)
 {
     if (not r.exist_logodds.has_value() or not std::isfinite(*r.exist_logodds))
@@ -360,6 +362,16 @@ inline float restore_existence_prior(const IdentityRow& r, float default_L, std:
     const double p_birth = 1.0 / (1.0 + std::exp(-static_cast<double>(default_L)));
     const double p = surv * p_mem + (1.0 - surv) * p_birth;
     return static_cast<float>(std::log(p / (1.0 - p)));
+}
+
+/// (Task D-C review I-1) THE EXISTENCE A ROW REMEMBERS IS THE EVIDENCE, NOT THE WALL-BAND PRIOR. The core adds the band's
+/// log-prior to L every cycle as a REPLACED term (DoorFitState::room_prior_term); a restored instance starts with that term
+/// at 0 and the core adds it again, so writing the full L counted the prior twice on every round trip. The row stores
+/// L − room_prior_term; the band term re-enters once, from the restored room's polygon.
+template <class Inst>
+[[nodiscard]] float remembered_logodds(const Inst& inst)
+{
+    return inst.existence.logodds() - inst.room_prior_term;
 }
 
 /// A door with fewer matched frames than this and no fresh detection is not fitted this cycle (process_door_node). A door

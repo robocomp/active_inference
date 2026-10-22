@@ -13,6 +13,9 @@
 #include <tuple>
 #include <vector>
 #include "../src/door_identity_table.h"
+#include "../src/door_leaf_channel.h"   // the borrowed hazard's source
+static_assert(rc::door::kRememberedExistenceHazardPerS == rc::door::kLeafMoveHyperShape / rc::door::kLeafMoveHyperTimeS,
+              "the remembered-existence hazard is the leaf channel's move-hazard hyperprior (door_identity_table.h)");
 #include <chrono>
 #include <optional>
 
@@ -207,6 +210,15 @@ int main()
         w.exist_logodds = -4.0f; w.seen_wall_ms = kNowMs + 5000;
         upsert_row(t, "room_1", w, 1.45f, 0.02f);
         CHECK(t.size() == 1 and t[0].seen_wall_ms == kNowMs + 5000 and near(*t[0].exist_logodds, -4.0f));
+    }
+
+    // 3h. Task D-C review I-1: the row remembers the EVIDENCE (L − the band prior's current term); the restored instance
+    //     starts with that term at 0 and the core adds it once — the full L would count the prior twice per round trip.
+    {
+        struct E { float L; float logodds() const { return L; } };
+        struct I { E existence; float room_prior_term; };
+        CHECK(near(remembered_logodds(I{{-1.5f}, -2.0f}), 0.5f));   // an off-band door: the prior's −2 is not remembered
+        CHECK(near(remembered_logodds(I{{3.0f}, 0.0f}), 3.0f));     // on the band: unchanged
     }
 
     // ── 4. Stale rows: a FRESH entry of room_1 strips its restore data; a later recall restores only doors seen since ──

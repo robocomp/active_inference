@@ -1866,7 +1866,7 @@ SpecificWorker::DoorIdentity SpecificWorker::identity_of(const rc::DoorInstance&
     if (std::isfinite(s.ap_yaw) and s.w > 0.0f and s.h > 0.0f and s.thickness > 0.0f)
         row.pose = rc::door::RestorePose{s.ap_yaw, s.w, s.h, s.thickness};
     if (inst.existence_seeded)
-        row.exist_logodds = inst.existence.logodds();
+        row.exist_logodds = rc::door::remembered_logodds(inst);   // review I-1: the evidence, without the band prior
     if (inst.last_detection_wall_ms > 0)
         row.seen_wall_ms = inst.last_detection_wall_ms;   // Task D-C: the remembered belief's age
     const Eigen::Vector2f open = inst.leaf.swing * inst.aperture.across_u();

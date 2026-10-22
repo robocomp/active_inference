@@ -735,21 +735,20 @@ void DoorCore::update_existence(const DoorCycleInput& in, DoorCycleOutput& out)
     // ★Task D-C (rtD1i door_5): REMOVAL IS DECIDED ON THE EVIDENCE GATHERED SINCE ENTRY, NOT ON THE PRIOR THE DOOR ENTERED
     // WITH. A door restored from memory came back at its remembered L = −4, already below the removal bound (−1.99), so the
     // shared debounce counted P(detect)-weighted looks as "sustained condemnation" although the data since the restore were
-    // net POSITIVE (L −4.00 → −3.04, +0.96 nats) — the prior alone completed the remove streak. The Wald/SPRT reading of
-    // the same decision: the test starts at entry and decides on what the data since entry did to the belief; the prior
-    // enters once, in the posterior, and cannot by itself execute a removal. So a door that ENTERED below the bound is
-    // condemned only while the data have pushed it further down (L < existence_entry_L); otherwise the decision sees the
-    // belief AT the bound (not condemned: the shared policy resets the streak, as for any belief above it).
-    // A door that entered at or above the bound (every fresh birth: Existence.BirthLogodds = +1) is decided exactly as
-    // before — for it, "below the bound" already means "pushed down by data".
+    // net POSITIVE (L −4.00 → −3.04, +0.96 nats) — the prior alone completed the remove streak.
+    // (Review I-1) The decision reads L_eff = L_bound + (L − L_entry) for a door that ENTERED below the bound: the test starts
+    // AT the bound and moves only by what happened since entry — the Wald/SPRT reading, the prior entering once (in the
+    // posterior L the agent publishes), never as a free condemnation. Continuous, not a sign switch: the streak and the
+    // confidence-scaled `required` see how far below the bound the data since entry have carried it. A door that entered at
+    // or above the bound (every birth, +1) is decided on L itself, exactly as before.
     const float L_bound = [&] { const float p = std::clamp(policy.removal_prob, 1e-3f, 0.5f); return std::log(p / (1.0f - p)); }();
     const auto decide = [&](rc::DoorFitState& inst, float look)
     {
-        if (not (inst.existence_entry_L < L_bound) or inst.existence.logodds() < inst.existence_entry_L)
+        if (not (inst.existence_entry_L < L_bound))
             return rc::exist::decide_removal(inst.existence, inst.existence_debounce, policy, look);
-        rc::exist::ExistenceBelief at_bound = inst.existence;
-        at_bound.set(std::max(inst.existence.logodds(), L_bound));
-        return rc::exist::decide_removal(at_bound, inst.existence_debounce, policy, look);
+        rc::exist::ExistenceBelief eff = inst.existence;
+        eff.set(L_bound + (inst.existence.logodds() - inst.existence_entry_L));
+        return rc::exist::decide_removal(eff, inst.existence_debounce, policy, look);
     };
 
     // ★ONE PreparedFrame (blur + Sobel + whole-frame gradient reference) per cycle, shared by every door's
