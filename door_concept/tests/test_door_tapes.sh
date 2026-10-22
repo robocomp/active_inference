@@ -90,6 +90,16 @@ ALLOWED = {
     ("tourR1", "REMOVE", 3613, "door_4"): "D2 — door_4 had jumped 3.66 m off DOOR_0 on its first update; it now stays on the doorway",
     ("tourR1", "BIRTH", 3448, "door_5"): "D2 — DOOR_0's detection now associates to door_4, which holds the doorway, so no second door is born",
 }
+# Task Q — RICOH door slices now reach the tracker, so decisions the recorded (ZED-only) run could not take appear.
+# (tape, kind, cycle-or-None, name-or-None, note-prefix-or-None) of a NEW decision, and why. Nothing else may appear.
+ALLOWED_NEW = {
+    ("tourR2", "SUPPRESS", None, None, "top 0.95m"): "Q — a short ricoh blob near (0.65, 2.46) is now looked at and suppressed (log only; nothing created)",
+    ("rtD1i", "BIRTH", 284, "door_4", None): "Q — DOOR_0 is now born from the ricoh's wall-fused, viewpoint-pooled evidence 14 cycles before the recorded ZED birth (298, door_5, 0.22 m away)",
+}
+SUPP_Q = "Q — the same short blob, now reported at the ricoh's wall-fused position (log only)"
+ALLOWED_GONE_Q = {
+    ("rtD1i", "BIRTH", 298, "door_5"): "Q — the same DOOR_0 is born earlier from the ricoh (cycle 284, door_4)",
+}
 fails = []
 DEC = re.compile(r"(?:EQUAL|ref|replay)\s+(cycle (\d+) t \d+ (BIRTH|SUPPRESS|MERGE|REMOVE|REACQUIRE|RELEASE|RESTORE) id \d+ '([^']*)'.*)$")
 
@@ -123,10 +133,16 @@ def decision_check(tape, txt, label):
     gone = [k for k in ref if k not in rep]
     new = [k for k in rep if k not in ref]
     for k in gone:
-        why = ALLOWED.get((tape, k[2], k[1], k[3]))
+        why = ALLOWED.get((tape, k[2], k[1], k[3])) or (ALLOWED_GONE_Q.get((tape, k[2], k[1], k[3]))) or (SUPP_Q if (tape == 'tourR2' and k[2] == 'SUPPRESS' and "note='top 0.95m'" in k[0]) else None)
         print(f"{label} decision no longer taken: {k[0][:110]}  — {why or 'NOT ALLOWED'}")
         if not why: fails.append(f"{label}: decision changed: {k[0][:110]}")
     for k in new:
+        qwhy = next((w for (t, kd, cy, nm, nt), w in ALLOWED_NEW.items()
+                     if t == tape and kd == k[2] and (cy is None or cy == k[1]) and (nm is None or nm == k[3])
+                     and (nt is None or f"note='{nt}'" in k[0])), None)
+        if qwhy:
+            print(f"{label} NEW decision (allowed): {k[0][:90]}  — {qwhy[:60]}")
+            continue
         print(f"{label} NEW decision: {k[0][:110]}")
         fails.append(f"{label}: new decision: {k[0][:110]}")
     for (t, kind, cyc, name), why in ALLOWED.items():

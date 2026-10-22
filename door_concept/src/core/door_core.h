@@ -47,6 +47,7 @@
 #include <vector>
 #include <Eigen/Dense>
 #include "door_cycle_io.h"
+#include "ricoh_door_birth.h"
 #include "sensing.h"
 #include "door_fit.h"
 #include "door_existence.h"   // the existence slice (Task 5): probes, SemanticField, ImageSource
@@ -259,6 +260,8 @@ private:
 
     rc::InstanceTracker tracker_;
     long last_birth_mask_frame_ = -1;
+    std::optional<Vec2f> cam_xy_;      // the camera's room xy this cycle (the ricoh slices' ray origin)
+    RicohViewPool ricoh_views_;        // pooled viewpoints of the ricoh birth candidates
     int  dbg_cycles_ = 0;     // the "[tracker] instances=…" print throttle
     int  dets_csv_rows_ = 0;  // etc/door_dets_log.csv's cycle column (one per tracker call)
     std::uint64_t create_seq_ = 0;

@@ -86,7 +86,8 @@ static MaskSlice door_slice(float x, float y, std::uint64_t b, std::uint64_t e, 
     return s;
 }
 
-struct Scene { std::vector<std::pair<Vec2f, float>> doors; };   // (xy, support top)
+// (xy, support top); `ricoh` makes every slice a 360-camera one: source 1, LiDAR-depth-filled (depth_var > 0).
+struct Scene { std::vector<std::pair<Vec2f, float>> doors; bool ricoh = false; float conf = 1.0f; float depth_var = 0.0f; float range = 2.5f; Vec2f cam = Vec2f::Zero(); };
 
 static DoorCycleInput cycle_input(std::uint64_t cycle, int frame_id, const Scene& sc)
 {
@@ -94,7 +95,8 @@ static DoorCycleInput cycle_input(std::uint64_t cycle, int frame_id, const Scene
     in.cycle = cycle;
     in.t_steady_ns = static_cast<std::int64_t>(cycle) * 100'000'000;   // 10 Hz
     in.robot.present = true;
-    in.robot.room_T_body = Mat4d::Identity();                          // the robot stands still ⇒ admissible
+    in.robot.room_T_body = Mat4d::Identity();
+    in.robot.room_T_body->coeffRef(0, 3) = sc.cam.x(); in.robot.room_T_body->coeffRef(1, 3) = sc.cam.y();                          // the robot stands still ⇒ admissible
     in.robot.body_T_zed = Mat4d::Identity();
     MaskPacket p;
     p.valid = true;
@@ -105,7 +107,10 @@ static DoorCycleInput cycle_input(std::uint64_t cycle, int frame_id, const Scene
         const std::uint64_t b = p.support_points.size();
         for (int i = 0; i < 20; ++i)
             p.support_points.emplace_back(xy.x() - 0.4f + 0.04f * i, xy.y(), 0.1f * (i % 20));
-        p.slices.push_back(door_slice(xy.x(), xy.y(), b, p.support_points.size(), top));
+        auto sl = door_slice(xy.x(), xy.y(), b, p.support_points.size(), top);
+        sl.confidence = sc.conf; sl.range = sc.range;
+        if (sc.ricoh) { sl.source = 1; sl.depth_var = sc.depth_var; }
+        p.slices.push_back(sl);
     }
     in.masks = std::move(p);
     return in;
@@ -196,6 +201,86 @@ int main()
         for (std::uint64_t c = 1; c <= 20; ++c)
             nb += static_cast<int>(of_kind(core.step(cycle_input(c, 5, sc)).decisions, K::Birth).size());
         CHECK(nb == 0 and w.created == 0);
+    }
+
+    // ── 3c. RICOH (360) door slices (task Q) ────────────────────────────────────────────────────────────────────
+    // The door sits IN the wall y = 5 (the FakeWorld room is +-5). The robot circles at r = 1.5 so each frame is a new
+    // viewpoint (frames from one viewpoint are ONE observation); ricoh depth_var 0.02 m^2, range ~5 m.
+    const Vec2f wall_door(3.0f, 5.0f);
+    const auto ricoh_scene = [&](Vec2f xy, int k, float conf, float dvar)
+    {
+        Scene sc{{{xy, 2.0f}}}; sc.ricoh = true; sc.conf = conf; sc.depth_var = dvar;
+        sc.cam = Vec2f(1.5f * std::cos(0.45f * k), 1.5f * std::sin(0.45f * k));
+        sc.range = (xy - sc.cam).norm();
+        return sc;
+    };
+    {   // (a) a door seen ONLY by the ricoh, from moving viewpoints: born later than a ZED one, once, at the pose
+        FakeWorld w;
+        DoorCore core(cfg);
+        core.connect(&w);
+        int birth_cycle = -1, removes = 0;
+        std::vector<rc::door::DoorDecision> births;
+        for (int k = 1; k <= 400; ++k)
+        {
+            const auto out = core.step(cycle_input(k, k, ricoh_scene(wall_door, k, 0.9f, 0.02f)));
+            const auto b = of_kind(out.decisions, K::Birth);
+            if (not b.empty()) { births.insert(births.end(), b.begin(), b.end()); if (birth_cycle < 0) birth_cycle = k; }
+            removes += static_cast<int>(of_kind(out.decisions, K::Remove).size());
+        }
+        // SYMMETRY: absence evidence is only ever the ZED silhouette's P(detect)-weighted absence; the ricoh not detecting
+        // a door is weight 0 (it has no absence channel), so 300 frames with NO ricoh slice remove nothing.
+        for (int k = 401; k <= 700; ++k)
+            removes += static_cast<int>(of_kind(core.step(cycle_input(k, k, Scene{})).decisions, K::Remove).size());
+        std::print("ricoh-only birth after {} frames; removes {}\n", birth_cycle, removes);
+        CHECK(births.size() == 1 and w.created == 1);           // exactly once over 400 frames (no remove/rebirth churn)
+        CHECK(removes == 0 and w.live.size() == 1);
+        CHECK(birth_cycle > 7 and birth_cycle <= 150);
+        if (not births.empty())
+            CHECK(std::abs(births[0].a - wall_door.x()) < 0.05 and std::abs(births[0].b - wall_door.y()) < 0.05);
+    }
+    {   // (b)+(d) CHURN: a long run of scattered low-confidence, high-variance ricoh slices ⇒ 0 births, 0 removals
+        FakeWorld w;
+        DoorCore core(cfg);
+        core.connect(&w);
+        std::uint32_t rng = 12345u;
+        const auto u = [&] { rng = rng * 1664525u + 1013904223u; return static_cast<float>(rng >> 8) / 16777216.0f; };
+        int removes = 0;
+        for (int k = 1; k <= 600; ++k)
+        {
+            const Vec2f xy = (k % 2) ? Vec2f(-4.0f + 8.0f * u(), -4.0f + 8.0f * u())          // anywhere in the room
+                                     : Vec2f(-4.0f + 8.0f * u(), 5.0f);                       // anywhere along a wall
+            const auto out = core.step(cycle_input(k, k, ricoh_scene(xy, k, 0.3f, 0.5f)));
+            removes += static_cast<int>(of_kind(out.decisions, K::Remove).size());
+        }
+        CHECK(w.created == 0 and removes == 0);
+    }
+    {   // a PARKED robot: 150 frames of one viewpoint are one observation ⇒ a stationary robot cannot accumulate a phantom
+        FakeWorld w;
+        DoorCore core(cfg);
+        core.connect(&w);
+        for (int k = 1; k <= 150; ++k)
+        {
+            auto sc = ricoh_scene(wall_door, 0, 0.9f, 0.02f);
+            core.step(cycle_input(k, k, sc));
+        }
+        CHECK(w.created == 0);
+    }
+    {   // a slice whose LiDAR range disagrees with the wall its bearing meets (depth landed on something else) births nothing
+        FakeWorld w;
+        DoorCore core(cfg);
+        core.connect(&w);
+        for (int k = 1; k <= 300; ++k)
+            core.step(cycle_input(k, k, ricoh_scene(Vec2f(2.0f, 1.0f), k, 0.9f, 0.02f)));   // mid-room, not in any wall
+        CHECK(w.created == 0);
+    }
+    {   // a ricoh slice CONFIRMS/associates to an existing door instead of being dropped
+        FakeWorld w;
+        DoorCore core(cfg);
+        core.connect(&w);
+        w.adopt_birth(42, -1, Vec3f(wall_door.x(), wall_door.y(), 1.0f));
+        core.step(cycle_input(1, 1, ricoh_scene(wall_door, 1, 0.9f, 0.02f)));
+        core.step(cycle_input(2, 2, ricoh_scene(wall_door, 2, 0.9f, 0.02f)));
+        CHECK(core.tracker_info().class_dets == 1 and core.tracker_info().assigned == 1);
     }
 
     // ── 4. suppressions ──────────────────────────────────────────────────────────────────────────────────────────

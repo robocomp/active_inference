@@ -503,12 +503,8 @@ struct DoorConfig
     bool  replay_ablate_hull_midpoint = false;
     float door_thickness_m = 0.05f;   // fixed panel thickness (m, across the wall)
     bool  tracker_nll_cost         = false;   // association cost = ½(m²+ln|S|) NLL (vs raw m²); see InstanceTracker
-    // ZED-only BIRTH gate: only a ZED slice (depth_var==0) may SPAWN a door; a ricoh LiDAR-depth slice
-    // (depth_var>0, unreliable depth/extent) may associate/confirm an existing door but never birth a phantom.
-    // A confident-ricoh escape hatch (OFF by default) permits a very-confident, low-variance ricoh birth.
-    bool  ricoh_birth_enabled = false;   // Tracker.RicohBirthEnabled — allow a confident ricoh-depth slice to birth
-    float ricoh_birth_conf    = 0.60f;   // Tracker.RicohBirthConf — min YOLO confidence for a ricoh birth
-    float ricoh_birth_max_var = 0.005f;  // Tracker.RicohBirthMaxVar — max depth_var (m²) for a ricoh birth
+    // (the old ZED-only birth gate + ricoh conf/var cutoffs are gone: a ricoh slice births through the same
+    //  evidence, weighted continuously by its depth_var — core/door_core.cpp, task Q)
     // ── RGB-360 bearing-only hypothesis birth (Part C-birth; RICOH_360_PERIPHERAL_DETECTION.md) ──────
     // A peripheral 360 "door" bearing (a no-depth mask slice, azimuth calibrated 2026-07-04) that matches
     // no live door and PERSISTS births a BROAD-Σ hypothesis: the mean is placed at a nominal range on the

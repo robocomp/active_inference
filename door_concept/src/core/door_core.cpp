@@ -194,6 +194,9 @@ DoorCycleOutput DoorCore::step(const DoorCycleInput& in)
     out.room_id = world_->room_id();
     // robot/camera speed → "be-still-to-update" gate (once per cycle) — was fitter_->update_ego_motion()
     ego_.update(CameraModel::room_T_zed(in.robot), in.t_steady_ns);
+    cam_xy_.reset();
+    if (in.robot.room_T_body.has_value())
+        cam_xy_ = Vec2f(static_cast<float>(in.robot.room_T_body->coeff(0, 3)), static_cast<float>(in.robot.room_T_body->coeff(1, 3)));
     // ONE ego-motion: the fit's confirm-only gate reads the value the birth gate uses (was fitter_->set_ego_motion).
     fit_.set_ego_motion(ego_.lin_mps, ego_.ang_radps);
     // ★ONE claim set per cycle for the SHARED mutual-exclusion rule: who else claims room space (was the graph walk at
@@ -369,16 +372,15 @@ void DoorCore::associate(const DoorCycleInput& in, DoorCycleOutput& out)
         for (int i = 0; i < static_cast<int>(pkt.slices.size()); ++i)
         {
             const auto& sl = pkt.slices[i];
-                // ★★ONLY THE FRONT RGB-D CAMERA MAY CREATE OR UPDATE AN OBJECT. `has_depth` is NOT that
-                // question: once the producer began depth-filling ricoh masks from reprojected LiDAR it
-                // publishes them as full 3D slices with has_depth = 1, so a 360° detection from BEHIND the
-                // robot passed every guard written as `if (has_depth)`. Reported live on bottle_concept —
-                // moving and cloning with the robot facing away, 3 m off. mask_source says which camera,
-                // unambiguously, and the retina has been publishing it all along. A ricoh slice may
-                // still CONFIRM a live instance (common/peripheral_channel) or raise a proto-object to go and look
-                // at; it may not move one. See MaskIngestor::MaskSlice::may_fit_geometry.
-            if (sl.label != "door" or sl.support_end <= sl.support_begin
-                or not may_fit_geometry(sl)) continue;
+                // ★BOTH CAMERAS OBSERVE; EACH WITH ITS OWN VARIANCE. This used to drop every slice that was not
+                // the front RGB-D camera (`may_fit_geometry`: source == 0), because a 360 detection from behind the
+                // robot moved bottle_concept's object. The fix for that was too blunt: the ricoh could neither
+                // birth, confirm nor refine a door, so a shut DOOR_0 the 360 YOLO saw plainly was never born (live
+                // 2026-10-22: door_dets=0 for the whole run). The ricoh slice's LiDAR-reprojected depth carries its
+                // variance (depth_var) and the fit already adds it to R, so it moves the belief exactly as much as
+                // its information warrants; below, the same ratio weights its BIRTH evidence. What still excludes
+                // a slice is having no 3-D support at all (bearing only, has_depth == 0): there is nothing to place.
+            if (sl.label != "door" or sl.support_end <= sl.support_begin or not sl.has_depth) continue;
 
             // ★A `door` LABEL IS NOT A DOOR-SIZED THING. YOLO-sem sometimes returns a positive door mask
             // delimiting a much smaller region — a jamb, a panel edge, a fragment of the leaf. It is a
@@ -436,17 +438,30 @@ void DoorCore::associate(const DoorCycleInput& in, DoorCycleOutput& out)
             rc::DetectionView dv;
             dv.xy = Eigen::Vector2f(sl.centroid.x(), sl.centroid.y());
             dv.slice_index = i;
-            // ZED-only BIRTH: only a ZED slice (per-pixel depth ⇒ depth_var==0) may SPAWN a door. A ricoh
-            // LiDAR-reprojected-depth slice (depth_var>0) has unreliable depth/extent, so it may ASSOCIATE to /
-            // confirm an existing door but must NOT birth a phantom — this is exactly what created door_3 (a
-            // wrong ricoh detection at 8.8 m, outside the room). A confident-ricoh escape hatch is OFF by default.
-            const bool is_zed = sl.depth_var == 0.0f;
-            dv.birthable = is_zed or (cfg.ricoh_birth_enabled
-                                      and sl.confidence >= cfg.ricoh_birth_conf
-                                      and sl.depth_var  <= cfg.ricoh_birth_max_var);
+            // ★NO BOOLEAN, NO CUTOFF: a ricoh slice births through the SAME evidence as a ZED one, scaled by how
+            // much of the fit's measurement noise it adds. The fit's R for a slice at this range is
+            // R0 = sigma_base^2 + (lateral range noise x range)^2 (door_fit.cpp); a ricoh slice adds its depth_var, so
+            // it is worth R0 / (R0 + depth_var) of a ZED observation — 1 for ZED (depth_var 0), small for a noisy
+            // LiDAR-filled range. Its confidence and range already weigh in via birth::evidence below.
+            // A ricoh slice's range is LiDAR reprojected onto the mask: it is scored against the room wall the
+            // bearing meets (a door lies in a wall), fused with it, and its frames are pooled per viewpoint
+            // (ricoh_door_birth.h). A ZED slice is untouched (weight 1, its own position).
+            float ricoh_w = 1.0f;
+            if (sl.source != 0)
+            {
+                if (not cam_xy_.has_value()) continue;               // no camera pose ⇒ no ray ⇒ no placement
+                const auto rr = ricoh_range(world_->room_polygon(), cam_xy_.value(), dv.xy, sl.depth_var,
+                                            cfg.ai2_sigma_base_m, cfg.ai2_range_noise_lat_per_m);
+                dv.xy = rr.xy;
+                ricoh_w = rr.weight;
+                if (birth_new_obs and ricoh_w > 0.0f)
+                    ricoh_w *= ricoh_views_.credit(cam_xy_.value(), dv.xy, 0.5f * cfg.door_prior_w_m,
+                                                   cfg.tracker_birth_min_sep_m);
+            }
+            dv.birthable = true;
             // One admissible, reliable observation — never a cycle. See birth_evidence.h.
             dv.birth_evidence = rc::birth::evidence({sl.confidence, sl.range}, birth_detect,
-                                                    birth_new_obs, frame_admissible(sl, ego_, cfg));
+                                                    birth_new_obs, frame_admissible(sl, ego_, cfg)) * ricoh_w;
             // ⚠size_w deliberately NOT multiplied in — see the note above. Carried only to be logged.
             dv.dbg_size_w = size_w;
 
@@ -502,6 +517,7 @@ void DoorCore::associate(const DoorCycleInput& in, DoorCycleOutput& out)
         diag("door_dets_log.csv", row.str(), out);
     }
 
+    if (birth_new_obs) ricoh_views_.end_frame();
     res_ = tracker_.update(tracks, dets_);
 
     const int n_assigned = static_cast<int>(std::count_if(res_.assignment.begin(), res_.assignment.end(),

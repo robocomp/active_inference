@@ -23,10 +23,6 @@
 namespace rc::door::core
 {
 
-/// rc::MaskIngestor::MaskSlice::may_fit_geometry, on the recorded slice: ★ONLY THE FRONT RGB-D CAMERA may create or
-/// update an object (source 0 = zed) and only with depth (see the note at the tracker's detection loop).
-[[nodiscard]] inline bool may_fit_geometry(const MaskSlice& s) { return s.source == 0 and s.has_depth; }
-
 /// The last mask packet the adapter delivered (MaskIngestor::packet()).
 class MaskSource
 {

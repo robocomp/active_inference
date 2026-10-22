@@ -260,12 +260,6 @@ void read_door_config_fields(DoorConfig& out, GetF&& getf, GetI&& geti, GetS&& g
             "fixed panel thickness (m, across the wall)");
     out.tracker_nll_cost         = getb("Tracker.NllCost", false,
             "association cost = ½(m²+ln|S|) NLL (vs raw m²); see InstanceTracker");
-    out.ricoh_birth_enabled      = getb("Tracker.RicohBirthEnabled", false,
-            "Tracker.RicohBirthEnabled — allow a confident ricoh-depth slice to birth");
-    out.ricoh_birth_conf         = getf("Tracker.RicohBirthConf", 0.60f,
-            "Tracker.RicohBirthConf — min YOLO confidence for a ricoh birth");
-    out.ricoh_birth_max_var      = getf("Tracker.RicohBirthMaxVar", 0.005f,
-            "Tracker.RicohBirthMaxVar — max depth_var (m²) for a ricoh birth");
     out.bearing_birth_enabled    = getb("Bearing.BirthEnabled", false,
             "Bearing.BirthEnabled");
     out.bearing_confirm_gate_rad = getf("Bearing.ConfirmGateRad", 0.17f,
