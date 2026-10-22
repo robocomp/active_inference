@@ -256,6 +256,33 @@ inline WallRun associate_wall(std::span<const Eigen::Vector2f> poly, std::span<c
     return wall_run_of_edge(poly, static_cast<std::size_t>(std::distance(votes.begin(), it)), recess_m);
 }
 
+// ★Task D-C review M-1: A REMEMBERED DOOR (no mask points: restored from memory, or carried across) is associated with the
+// wall its remembered POSE lies in — the place AND the yaw vote. The cost of edge e is how far the aperture would have to
+// move to lie in it, in metres of the door's own geometry: the place's distance to the edge, and the jamb displacement a
+// yaw mismatch δ implies, (w/2)·|sin δ| (the same measure the RT dead-band uses). The nearest-edge rule alone put DOOR_0 on
+// the PARTITION meeting its wall 7 cm from the jamb whenever the remembered place sat a few cm off its own wall line.
+inline WallRun associate_wall_remembered(std::span<const Eigen::Vector2f> poly, const Eigen::Vector2f& place, float yaw,
+                                         float half_w, float recess_m = 0.0f)
+{
+    const std::size_t n = poly.size();
+    if (n < 3 or not place.allFinite() or not std::isfinite(yaw))
+        return {};
+    std::size_t best = n;
+    double best_cost = std::numeric_limits<double>::infinity();
+    for (std::size_t i = 0; i < n; ++i)
+    {
+        const Eigen::Vector2f a = poly[i], b = poly[(i + 1) % n], ab = b - a;
+        const float len2 = ab.squaredNorm();
+        if (len2 < 1e-10f) continue;
+        const float t = std::clamp((place - a).dot(ab) / len2, 0.0f, 1.0f);
+        const double dist = (place - (a + t * ab)).norm();
+        const double dyaw = std::sin(static_cast<double>(yaw) - std::atan2(ab.y(), ab.x()));
+        const double cost = dist * dist + std::pow(static_cast<double>(half_w) * dyaw, 2.0);
+        if (cost < best_cost) { best_cost = cost; best = i; }
+    }
+    return best < n ? wall_run_of_edge(poly, best, recess_m) : WallRun{};
+}
+
 // ─── the poses ───────────────────────────────────────────────────────────────────────────────────
 
 struct Pose2

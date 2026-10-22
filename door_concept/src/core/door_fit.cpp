@@ -570,7 +570,12 @@ float DoorFit::run_inference(rc::DoorFitState& inst, const DoorObservation& obse
         inst.seed_wh_from_box = false;
         // Wall association: the belief's centre = O + (s + w/2)·u, so seed s so the panel centre lands on the
         // detection centroid. Off the wall (no polygon) → keep the identity frame and s = along-x of centroid.
-        if (const WallFrame wf = associate_wall(pts_xy, cam_xy); wf.ok)
+        WallFrame wf = associate_wall(pts_xy, cam_xy);
+        if (npts == 0 and std::isfinite(m.ap_yaw))   // review M-1: a remembered door's pose (place AND yaw) picks its wall
+            if (const auto r = door::associate_wall_remembered(room_polygon_, centroid_xy, m.ap_yaw, 0.5f * s0.w,
+                                                               room_band().wall_thickness_m); r.ok)
+            { wf.O = r.O; wf.u = r.u; wf.len = r.len; wf.ok = true; }
+        if (wf.ok)
         {
             p.wall_O = wf.O; p.wall_u = wf.u; p.wall_len = wf.len;
             s0.s = (centroid_xy - wf.O).dot(wf.u) - 0.5f * s0.w;   // not clamped to the run: see apply_constraints

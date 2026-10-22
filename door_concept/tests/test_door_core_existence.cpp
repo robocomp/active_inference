@@ -551,6 +551,9 @@ int main()
     //     partition) to a remembered place, and it crosses the partition first. With no observation the place itself is the
     //     only evidence — the door belongs to the wall it lies on. Here: the remembered door in the top wall, the camera
     //     west of a partition whose sightline crosses it; the belief must be initialised in the top wall (u ∥ x).
+    //     (review M-1) And the remembered place 14 cm off its wall line and 5 cm from the partition's face: the nearest edge
+    //     is the partition, the remembered YAW (along x) says the top wall — the pose votes, not the place alone.
+    for (const Eigen::Vector2f place : {Eigen::Vector2f(kDoorX, 5.0f), Eigen::Vector2f(0.53f, 4.86f)})
     {
         ExistWorld w;
         w.polygon = {{-5.f, -5.f}, {5.f, -5.f}, {5.f, 5.f}, {0.48f, 5.f}, {0.48f, 1.5f}, {0.38f, 1.5f}, {0.38f, 5.f}, {-5.f, 5.f}};
@@ -565,7 +568,7 @@ int main()
         rc::DoorFitState f;
         core.fit().init_instance(f, 4242, "door_9", st0);
         rc::door::IdentityRow row;
-        row.room = "room_1"; row.name = "door_9"; row.xy = {kDoorX, 5.0f};
+        row.room = "room_1"; row.name = "door_9"; row.xy = place;
         row.pose = rc::door::RestorePose{0.0f, 1.0f, 2.1f, 0.1f};
         rc::door::seed_restored_instance(f, row, 1.0f, 4.0f, std::chrono::steady_clock::now());
         w.st.emplace(4242, std::move(f));
@@ -577,11 +580,11 @@ int main()
             const auto& inst = w.st.at(4242);
             const auto ap = inst.ai2_belief.aperture();
             std::print("restored door seen from behind a partition: initialised {} — wall u ({:+.2f},{:+.2f}), centre ({:.2f},{:.2f}) "
-                       "(remembered (1.00,5.00), wall along x)\n", inst.ai2_initialized, ap.wall_u.x(), ap.wall_u.y(),
-                       ap.centre_xy().x(), ap.centre_xy().y());
+                       "(remembered ({:.2f},{:.2f}), wall along x)\n", inst.ai2_initialized, ap.wall_u.x(), ap.wall_u.y(),
+                       ap.centre_xy().x(), ap.centre_xy().y(), place.x(), place.y());
             CHECK(inst.ai2_initialized);
             CHECK(std::abs(ap.wall_u.y()) < 0.05f);                       // the top wall, not the partition
-            CHECK((ap.centre_xy() - Eigen::Vector2f(kDoorX, 5.0f)).norm() < 0.2f);
+            CHECK(std::abs(ap.centre_xy().x() - place.x()) < 0.2f and std::abs(ap.centre_xy().y() - 5.0f) < 0.05f);
         }
     }
 
