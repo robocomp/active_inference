@@ -241,7 +241,11 @@ already birthed, as a prior the existence channel then judges like any other doo
    recreated at its remembered room-frame pose, size and leaf memory, unless a door of that name or on that hole is
    already live (the carried door is never duplicated). Its existence starts from the REMEMBERED log-odds (or
    `Existence.BirthLogodds` = 1.0 nats, P = 0.73, for a row written without one); seen ⇒ confirmed, absent where it
-   should be visible (P(detect), wall line of sight) ⇒ removed and its identity row forgotten. A fresh room never
+   should be visible (P(detect), wall line of sight) ⇒ removed and its identity row forgotten. *(2026-10-22, D-C
+   round 2)* Its PLACEMENT prior is the memory's too: σ_s² = the row's `place_sd` (the aperture centre's σ when written)
+   ⊕ `Existence.BoundarySigmaM`, not the birth seed's 0.6 m — at the seed's width the LiDAR's along-wall channel took
+   an opening past the wall's end for the door's (tour3C) — and a door restored at the −4 clamp is still condemnable:
+   its removal reads the evidence since entry UNCLAMPED (`DoorFitState::existence_since_entry`). A fresh room never
    restores anything, whatever its name. Justification: the doors were birthed by evidence on an earlier visit and
    memory holds them; re-requiring a sighting made `cross door_1` fail in tourP2 because the 60 s exploration did not
    look at that wall. Rows of the older 4-column table carry no pose and are skipped with a log line.
@@ -292,6 +296,15 @@ The HISTORY column above tracks §4.2 recording only, which is the part that mus
 4. **Chair and door still write the legacy 5-column `<obj>_events.csv`** alongside the new
    `<obj>_phantom_events.csv`. Harmless (different files) but redundant — fold `log_tracker_event` into the
    shared writer once the baseline confirms the new schema captures everything wanted.
+5. **door_concept: a phantom the detector fires on in EVERY frame is not removed while it stays in view** *(Task D-C,
+   2026-10-22)*. §3 makes predicted-visible-but-ABSENT the only removal evidence, and since D-C fix round 1 a cycle
+   advances the removal debounce only by the look the silhouette actually charged as absence (round 2: continuously,
+   P(detect) × the absent share of the reached samples, `door_existence.cpp`). A YOLO phantom detected on every frame
+   lights its own silhouette, so no look ever charges absence; the image-geometry channels (leaf contour, depth,
+   doorway frame) can still pull L below the bound, but the debounce does not advance and the door is reported
+   **stalled** (`rc::exist::stall_note`) instead of removed. It goes when the detector stops firing on it (another
+   view) or by the wall-band prior. Accepted, deliberately: removing a door the detector IS detecting on image geometry
+   alone is exactly what removed the REAL DOOR_0 at rtD1i cycle 614 (D-C review C1).
 
 ---
 

@@ -508,6 +508,7 @@ public:
         //
         // The rule is the same one this whole file is built on: a probe that could not resolve the object is
         // not evidence either way. A probe whose resolvability is not even a NUMBER certainly could not.
+        last_increment_ = 0.0f;
         if (not std::isfinite(p_vis) or not std::isfinite(log_ratio)) return;
         const float pv = std::clamp(p_vis, 0.0f, 1.0f);
         if (pv <= 0.0f or log_ratio == 0.0f) return;      // could not have resolved it ⇒ no evidence, no update
@@ -526,8 +527,13 @@ public:
         }
         // The correlation weighting reads the CONDITIONS, and p_vis is exactly "how unambiguous was this
         // look" — the same quantity, so it is passed straight through rather than asked for twice.
-        L_ = std::clamp(L_ + delta * marginal_weight(run_k_, pv), -L_max_, L_max_);
+        last_increment_ = delta * marginal_weight(run_k_, pv);
+        L_ = std::clamp(L_ + last_increment_, -L_max_, L_max_);
     }
+    // The log-odds the last integrate() call MEANT to add, before the ±L_max clamp (0 on a HOLD). An agent that keeps
+    // its own unclamped record of the evidence (door_concept: the evidence since a restored door's entry, which the clamp
+    // would otherwise swallow at the floor) reads it here instead of differencing the clamped L.
+    float last_increment() const { return last_increment_; }
 
     // Compatibility overload for the beam/pixel path: an Evidence already carries the product, so the
     // ratio is recovered by dividing out p_detect and handing both to the primary form.
@@ -547,7 +553,7 @@ public:
         const float p = std::clamp(removal_prob, 1e-3f, 0.5f);
         return L_ < std::log(p / (1.0f - p));
     }
-    void  set(float L)    { L_ = std::clamp(L, -L_max_, L_max_); }
+    void  set(float L)    { L_ = std::clamp(L, -L_max_, L_max_); last_increment_ = 0.0f; }
     void  set_max(float m){ L_max_ = std::max(1e-3f, m); }
 
 private:
@@ -580,6 +586,7 @@ private:
     }
 
     float L_, L_max_;
+    float last_increment_ = 0.0f;   // see last_increment()
     float rho_      = 0.0f;   // frame-to-frame correlation of same-sign observations; 0 ⇒ independent
     int   run_sign_ = 0;      // +1 confirming run, −1 absence run, 0 = none yet
     int   run_k_    = 0;      // length of the current same-sign run

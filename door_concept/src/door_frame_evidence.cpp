@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <numbers>
 
 namespace rc::door
 {
@@ -70,7 +71,8 @@ bool leaf_blocks_sightline(const LeafPose& L, const Eigen::Vector3f& O, const Ei
 
 FrameProbe build_frame_probe(const Aperture& ap, const rc::edges::PointProjector& project,
                              const PointVisibility& visible, const PointVisibility& aperture_side_clear,
-                             int img_w, int img_h, float casing_m, float registration_sigma_m)
+                             int img_w, int img_h, float casing_m, float registration_sigma_m,
+                             float placement_sigma_m)
 {
     FrameProbe out;
     if (not project or img_w <= 0 or img_h <= 0 or ap.w <= 1e-3f or ap.h <= 1e-3f)
@@ -95,7 +97,9 @@ FrameProbe build_frame_probe(const Aperture& ap, const rc::edges::PointProjector
     // error, never more than half the opening (it must not reach the opposite jamb).
     const float side_window_m = std::min(std::max(0.0f, casing_m) + std::max(0.0f, registration_sigma_m), 0.5f * ap.w);
 
-    // `outward` (jambs): the null slides AWAY from the hole only, by kFrameJambOutward — see the header.
+    // `outward` (jambs): the null slides AWAY from the hole only, by kFrameJambOutward — see the header — plus the √3σ_s the
+    // placement mixture's outer nodes reach (Task D-C round 2).
+    const float jamb_clear_m = std::numbers::sqrt3_v<float> * std::max(0.0f, placement_sigma_m);
     // nullptr (lintel): the symmetric leaf-contour set kControlOffsets.
     const auto add = [&](const Eigen::Vector3d& P, const Eigen::Vector3d& tangent, const Eigen::Vector3d& into,
                          const Eigen::Vector3d* outward)
@@ -122,7 +126,7 @@ FrameProbe build_frame_probe(const Aperture& ap, const rc::edges::PointProjector
         for (std::size_t k = 0; k < rc::edges::kControlOffsets.size(); ++k)
         {
             const Eigen::Vector3d Pk = outward != nullptr
-                ? Eigen::Vector3d(P + static_cast<double>(kFrameJambOutward[k] * ap.w) * (*outward))
+                ? Eigen::Vector3d(P + static_cast<double>(kFrameJambOutward[k] * ap.w + jamb_clear_m) * (*outward))
                 : Eigen::Vector3d(P + static_cast<double>(rc::edges::kControlOffsets[k] * ap.w) * u);
             const auto lk = project_local(Pk, tangent, into, project);
             if (not lk or not in_image(lk->px, img_w, img_h))

@@ -316,6 +316,7 @@ int main()
         CHECK(near(inst.model.s.ap_yaw, 3.10f) and near(inst.model.s.w, 0.95f) and near(inst.model.s.h, 2.13f));
         CHECK(inst.existence_seeded and near(inst.existence.L, 4.0f, 1e-3f));
         CHECK(near(inst.existence_entry_L, inst.existence.L) and inst.last_detection_wall_ms == kNowMs);   // Task D-C
+        CHECK(inst.existence_since_entry == 0.f);   // round 2: the evidence since entry starts over at the restore
         CHECK(fitted_this_cycle(false, inst.matched_frames));               // fitted with no fresh mask
         CHECK(inst.seed_wh_from_box and inst.leaf_side_hint.has_value() and not inst.phi_from_command);
         // An identity-only row (no pose) still gets its place; size stays the instance's (template) one.

@@ -632,8 +632,9 @@ rc::door::FrameProbe compute_frame_probe(const ExistenceScene& sc, const rc::Doo
         }
         return own_leaf_clear(P);
     };
+    const float sd_s = inst.ai2_initialized ? std::sqrt(std::max(0.0f, inst.ai2_belief.covariance()(0, 0))) : 0.0f;
     return rc::door::build_frame_probe(ap_seen, project, visible, own_leaf_clear, W, H, sc.cfg.frame_casing_m,
-                                       sc.cfg.exist_boundary_sigma_m);
+                                       sc.cfg.exist_boundary_sigma_m, sd_s);
 }
 
 // |cos| of the camera→leaf ray against the LEAF's face normal. 1 = square-on, 0 = grazing. Keyed on the leaf, not
@@ -729,7 +730,7 @@ void DoorCore::update_existence(const DoorCycleInput& in, DoorCycleOutput& out)
         if (not (inst.existence_entry_L < L_bound))
             return rc::exist::decide_removal(inst.existence, inst.existence_debounce, policy, look);
         rc::exist::ExistenceBelief eff = inst.existence;
-        eff.set(L_bound + (inst.existence.logodds() - inst.existence_entry_L));
+        eff.set(L_bound + inst.existence_since_entry);   // round 2: the unclamped record (DoorFitState::existence_since_entry)
         return rc::exist::decide_removal(eff, inst.existence_debounce, policy, look);
     };
 
@@ -776,6 +777,7 @@ void DoorCore::update_existence(const DoorCycleInput& in, DoorCycleOutput& out)
             inst.existence.set(cfg.exist_birth_logodds);
             inst.existence_seeded = true;
             inst.existence_entry_L = inst.existence.logodds();
+            inst.existence_since_entry = 0.0f;
         }
 
         // ── ROOM-CONTAINMENT PRIOR: THE WALL BAND (door_room_band.h) ────────────────────────────────────
@@ -802,6 +804,7 @@ void DoorCore::update_existence(const DoorCycleInput& in, DoorCycleOutput& out)
             const float delta = aperture_band_offset(fit_.room_polygon(), inst);   // NaN with no polygon ⇒ term 0
             const float term  = rc::door::band_log_prior(delta, fit_.room_band());
             inst.existence.set(inst.existence.logodds() - inst.room_prior_term + term);
+            inst.existence_since_entry += term - inst.room_prior_term;
             inst.room_prior_term = term;
             p_band = std::exp(term);
             inst.dbg_band_delta = delta;
@@ -810,6 +813,7 @@ void DoorCore::update_existence(const DoorCycleInput& in, DoorCycleOutput& out)
         else if (inst.room_prior_term != 0.0f)
         {
             inst.existence.set(inst.existence.logodds() - inst.room_prior_term);   // prior switched off: take it out
+            inst.existence_since_entry -= inst.room_prior_term;
             inst.room_prior_term = 0.0f;
         }
         const float prior_look = 1.0f - p_band;   // the prior's own resolvability toward removal
@@ -828,6 +832,7 @@ void DoorCore::update_existence(const DoorCycleInput& in, DoorCycleOutput& out)
             and inst.obs_top_z < cfg.exist_min_height_m)
         {
             inst.existence.set(inst.existence.logodds() - cfg.exist_short_gain);
+            inst.existence_since_entry -= cfg.exist_short_gain;
             // Same as the room prior: a categorical fact about what a door IS, so it needs no visibility.
             if (decide(inst, 1.0f).remove)
                 to_remove.push_back(id);
@@ -966,7 +971,7 @@ void DoorCore::update_existence(const DoorCycleInput& in, DoorCycleOutput& out)
             //  controls 97-199 sliding onto the real jamb) and was removed while YOLO detected it. The verdict is now the
             //  mixture over s ~ N(ŝ, σ_s²) (σ_s the fit's own posterior along the wall), log Σ_k π_k e^{v_k}, on the
             //  Gauss-Hermite nodes {0, ±√3·σ_s} (weights 2/3, 1/6, 1/6 — exact for a Gaussian up to 5th moments). The
-            //  jamb controls slide ≥ 0.4 w outward (kFrameJambOutward), beyond the placement a ±√3σ_s node reaches.
+            //  jamb controls slide kFrameJambOutward·w + √3σ_s outward (round 2), beyond the placement a ±√3σ_s node reaches.
             const float sd_s = std::sqrt(std::max(0.0f, inst.ai2_belief.covariance()(0, 0)));
             if (sd_s > 0.0f and frame.n_samples() > 0)
             {
@@ -1041,6 +1046,7 @@ void DoorCore::update_existence(const DoorCycleInput& in, DoorCycleOutput& out)
             const float dL = inst.image_view_pool.add(cam, inst.aperture.centre_xy(), pool_R, verdict, llr);
             const float L0 = inst.existence.logodds();
             inst.existence.integrate(1.0f, dL);
+            inst.existence_since_entry += inst.existence.last_increment();
             inst.image_view_pool.commit(inst.existence.logodds() - L0);   // what the view really moved L (the clamp)
             inst.dbg_edge_delta = dL;
         };
@@ -1231,6 +1237,7 @@ void DoorCore::update_existence(const DoorCycleInput& in, DoorCycleOutput& out)
         // independent. (Task 5b item 4: the silhouette is pooled by view above; the belief itself is armed with ρ 0, so
         // this p_detect no longer feeds a second correlation discount.)
         inst.existence.integrate(ev, p_detect);
+        inst.existence_since_entry += inst.existence.last_increment();
         if (pooled_sil) inst.silhouette_view_pool.commit(inst.existence.logodds() - L_before_sil);   // what it REALLY moved L
 
         // ── RGB CONTOUR CHANNEL: an INDEPENDENT sensor, integrated separately ────────────────────────
@@ -1319,7 +1326,11 @@ void DoorCore::update_existence(const DoorCycleInput& in, DoorCycleOutput& out)
         //  not on a frame where the door was detected (observed) or the view was not admissible. rtD1i: the real DOOR_0
         //  was removed at cycle 614 while YOLO detected it (since_det 0-3, occ 330 / free 90) — the image-geometry channel
         //  had pulled L down and the debounce counted P(detect) on detected frames.
-        const float absence_look = raw_free > 0.0f ? p_detect : 0.0f;
+        // ★Task D-C round 2: CONTINUOUS, not a switch on raw_free > 0. The look this cycle contributes toward removal is
+        //  P(detect) times the share of the silhouette's reached samples that charged ABSENCE (free / (occ + free)): a frame
+        //  that saw the door mostly lit and a few samples free is mostly a confirmation, not a full look at an absence.
+        const float absence_share = raw_free > 0.0f ? raw_free / std::max(1e-6f, raw_free + std::max(0.0f, e_occ)) : 0.0f;
+        const float absence_look = p_detect * absence_share;
         const float cycle_look = 1.0f - (1.0f - absence_look) * (1.0f - prior_look);
         const auto verdict = decide(inst, cycle_look);
         if (verdict.remove)

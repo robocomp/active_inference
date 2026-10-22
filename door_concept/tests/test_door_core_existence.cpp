@@ -405,7 +405,10 @@ int main()
     //    that follow are net POSITIVE (the door is lit, pooled by view to one observation): the old rule counted those looks
     //    as sustained condemnation (the prior alone sat below logit(RemovalProb)) and removed it; now it must survive. The
     //    same restored door then truly ABSENT from new views (the sweep) is still removed.
-    for (const bool absent_after : {false, true})
+    //    (Task D-C round 2) And restored AT the −4 clamp (a door seen absent moments before the room was left): the evidence
+    //    since entry is kept unclamped (DoorFitState::existence_since_entry), so a truly absent door is still condemned —
+    //    differencing the clamped L it could never move below its entry and was immortal.
+    for (const auto& [L0, absent_after] : std::array<std::pair<float, bool>, 3>{{{-3.5f, false}, {-3.5f, true}, {-4.0f, true}}})
     {
         DoorCoreConfig cfg;
         ExistWorld w;
@@ -426,8 +429,9 @@ int main()
         if (w.st.size() != 1) continue;
         auto& inst = w.st.begin()->second;
         // the restore (rc::door::seed_restored_instance's existence half): the remembered prior, the debounce afresh
-        inst.existence.set(-3.5f);
+        inst.existence.set(L0);
         inst.existence_entry_L = inst.existence.logodds();
+        inst.existence_since_entry = 0.0f;
         inst.existence_debounce = {};
         inst.silhouette_view_pool = {};
         inst.image_view_pool = {};

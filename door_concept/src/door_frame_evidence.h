@@ -143,6 +143,11 @@ using PointVisibility = std::function<float(const Eigen::Vector3f&)>;
 // controls go away from the hole, onto the wall beside it (clear of a casing ~0.1 w), at the same magnitudes
 // where they overlap the old set. The lintel keeps the symmetric ±1.0/±1.6: slid along the wall it lands beside
 // the opening, never on it.
+// ★Task D-C round 2: AND BEYOND WHERE THE APERTURE MAY REALLY BE. The frame channel scores the belief's placement mixed over
+// s ~ N(ŝ, σ_s²) on the Gauss-Hermite nodes ±√3σ_s (door_existence.cpp); a control nearer than that to the believed jamb can
+// sit ON the real one when the placement is uncertain. Each jamb control slides kFrameJambOutward·w PLUS √3·σ_s
+// (`placement_sigma_m`, the fit's own posterior along the wall): at a settled σ_s of a few cm it is the old set; at a
+// restored door's 0.1-0.6 m the null moves out with the uncertainty instead of sampling the signal.
 inline constexpr std::array<float, 4> kFrameJambOutward{0.4f, 0.7f, 1.0f, 1.6f};
 
 // Sampling resolution (quadrature, not a decision constant): 30 per jamb, 14 along the lintel — the same
@@ -154,7 +159,8 @@ inline constexpr int kFrameLintelSamples = 14;
 // `aperture_side_clear(P)` is 1 − P(own leaf in front of a point just inside the hole next to P).
 //
 // `casing_m`: width of the CASING lining the opening (DoorConcept.FrameCasingM); `registration_sigma_m`: how
-// far the believed edge may sit from the real one (Existence.BoundarySigmaM). ★A DOORWAY'S EDGE IS NOT A
+// far the believed edge may sit from the real one (Existence.BoundarySigmaM); `placement_sigma_m`: the belief's own σ_s
+// along the wall (the jamb controls clear √3 of it, see kFrameJambOutward). ★A DOORWAY'S EDGE IS NOT A
 // KNIFE-EDGE IN THE WALL. A real opening is lined with frame boards that stand PROUD of the wall face (Webots'
 // Door.proto: 5 cm boards inside a 1 m gap, 5 cm proud of both faces; a real architrave ~1-2 cm). Read 3-6 px
 // inside the predicted edge, the "hole" side lands on that board — NEARER than the wall — and the step reads
@@ -166,7 +172,7 @@ inline constexpr int kFrameLintelSamples = 14;
                                            const PointVisibility& visible,
                                            const PointVisibility& aperture_side_clear,
                                            int img_w, int img_h, float casing_m = 0.0f,
-                                           float registration_sigma_m = 0.0f);
+                                           float registration_sigma_m = 0.0f, float placement_sigma_m = 0.0f);
 
 // Score a probe against one frame. `prep` may be null/invalid (RGB half not measured); `depth` may be null
 // or empty (depth half not measured). `dp` supplies the side-read offsets, σ_step and the RGB→depth scale.
