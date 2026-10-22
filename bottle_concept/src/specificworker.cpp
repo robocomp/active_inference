@@ -151,6 +151,8 @@ void SpecificWorker::request_shutdown()
     // Drop the LiDAR media subscriber BEFORE tearing down the graph/inner_eigen it reads (it holds a raw
     // inner_eigen_ pointer + a DDS reader) — mirrors room_concept's teardown ordering.
     lidar_ingestor_.reset();
+    rgb_ingestor_.reset();
+    depth_ingestor_.reset();
     inner_eigen_.reset();
 
     cleanup_owned_nodes();
@@ -280,6 +282,13 @@ void SpecificWorker::initialize()
     // YOLO-independent LiDAR range channel: lidar3D media-plane consumer that stages each cycle's sweep in the
     // room frame for the fitter. Dormant (no DDS participant) unless BottleModel.LidarPrecision > 0. Subscriber
     // is brought up lazily on the main thread from compute()::pump(), never here (graph may still be joining).
+    // ZED RGB + DEPTH media-plane consumers for the classifier-free contour existence channel. Dormant (no DDS
+    // participant) unless BottleConcept.ContourCheckEnabled. Subscribers come up lazily on the compute/main
+    // thread once the "zed" node + media descriptor exist (media-plane consumer pattern).
+    camera_planes_wanted_ = cfg_.contour_check_enabled;
+    rgb_ingestor_   = std::make_unique<rc::RgbIngestor>(G, &camera_planes_wanted_, "zed");
+    depth_ingestor_ = std::make_unique<rc::DepthIngestor>(G, &camera_planes_wanted_, "zed");
+
     lidar_ingestor_ = std::make_unique<rc::ConceptLidarIngestor>(G, inner_eigen_.get(),
         // Bottle declares only the helios range gate: its belief has no free-space carve and no bpearl
         // factor, so those two planes stay dormant rather than staging points nothing would read. The
@@ -417,6 +426,11 @@ void SpecificWorker::compute()
         fresh_sweep = true;
     }
 
+    // The camera planes for the contour channel. pump() deep-copies the frame (thread-boundary-safe) and
+    // decodes on THIS thread; the existence step only borrows them for the call.
+    if (rgb_ingestor_)   rgb_ingestor_->pump();
+    if (depth_ingestor_) depth_ingestor_->pump();
+
     run_instance_tracker();   // data-driven birth/associate/death (the only instance-lifecycle path)
 
     // Robot/camera ego-motion (room frame) for this cycle — the "be-still-to-update" signal. Computed ONCE on
@@ -441,6 +455,14 @@ void SpecificWorker::compute()
         in.sweep        = (fresh_sweep and lidar_ingestor_) ? &lidar_ingestor_->sweep_room() : nullptr;
         in.origin       = lidar_ingestor_ ? lidar_ingestor_->origin_room() : Eigen::Vector3f::Zero();
         in.room_polygon = &room_polygon_;
+        // Camera clock for the contour channel: the contour is scored against THOSE pixels and pinned to
+        // their stamp, so re-scoring a frame already scored would charge one observation twice.
+        in.frames_fresh = (rgb_ingestor_ and rgb_ingestor_->fresh()) or (depth_ingestor_ and depth_ingestor_->fresh());
+        in.rgb_frame    = rgb_ingestor_   ? &rgb_ingestor_->frame()   : nullptr;
+        in.depth_frame  = depth_ingestor_ ? &depth_ingestor_->frame() : nullptr;
+        in.frame_stamp_ms = (rgb_ingestor_ and rgb_ingestor_->stamp_ms() > 0)
+                          ? rgb_ingestor_->stamp_ms()
+                          : (depth_ingestor_ ? depth_ingestor_->stamp_ms() : 0);
         existence_->update_and_remove(*fitter_, in,
             [this](std::uint64_t id, rc::BottleInstance& inst)
             {

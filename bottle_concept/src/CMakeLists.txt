@@ -30,9 +30,22 @@ LIST(APPEND SOURCES
   ../src/bottle_belief.cpp
   ../src/bottle_fitter.cpp
   ../src/bottle_existence.cpp
+  ../src/bottle_projection.cpp
+  ../src/bottle_cylinder_contour.cpp
+  ../../common/rgb_ingestor/rgb_ingestor.cpp
+  ../../common/rgb_ingestor/depth_ingestor.cpp
+  ../../common/contour_edge/contour_edge_check.cpp
+  ../../common/contour_edge/contour_edge_project.cpp
+  ../../common/contour_edge/contour_depth_check.cpp
   ../src/epistemic_planner.cpp
   ../src/bottle_model.cpp
 )
+
+# OpenCV — the classifier-free contour channel (common/contour_edge + the shared rgb/depth ingestors).
+# ⚠common/contour_edge includes <opencv2/...>; any component linking it must pull OpenCV in, as here.
+find_package(OpenCV REQUIRED)
+include_directories(${OpenCV_INCLUDE_DIRS})
+LIST(APPEND LIBS ${LIBS} ${OpenCV_LIBS})
 
 # libdsr_core defines symbols that libdsr_{api,gui} only reference (UND). The
 # framework links them under -Wl,--as-needed with core *ahead* of its consumers,

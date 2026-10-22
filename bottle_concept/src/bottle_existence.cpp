@@ -11,11 +11,16 @@
 #include <cstdint>
 #include <fstream>
 #include <limits>
+#include <optional>
+#include <opencv2/imgproc.hpp>   // cv::boundingRect
 #include <locale>
 #include <print>
 #include <span>
 #include <vector>
 
+#include "bottle_projection.h"                                 // room_T_zed_at / make_zed_projector / cylinder_contour_set
+#include "../../common/contour_edge/contour_edge_check.h"      // rc::edges — the classifier-free RGB check
+#include "../../common/contour_edge/contour_depth_check.h"     // rc::edges — its metric half
 #include "bottle_fitter.h"                                     // rc::BottleFitter (instances)
 #include "../../common/existence_belief/existence_belief.h"    // rc::exist:: carve_box / ExistenceBelief
 #include "../../common/nbv/viewpoint_score.h"                  // rc::nbv:: Target / fill / visible_fraction
@@ -76,7 +81,10 @@ void BottleExistence::update_and_remove(BottleFitter& fitter, const Inputs& in,
 {
     if (not cfg_.existence_enabled or in.G == nullptr)
         return;
-    if (not in.fresh_masks and in.sweep == nullptr)
+    const bool contour_fresh = cfg_.contour_check_enabled and in.frames_fresh and in.inner_eigen != nullptr
+                           and ((in.rgb_frame != nullptr and not in.rgb_frame->empty())
+                                or (in.depth_frame != nullptr and not in.depth_frame->empty()));
+    if (not in.fresh_masks and not contour_fresh and in.sweep == nullptr)
         return;                       // no new evidence on either channel this cycle ⇒ nothing to integrate
 
     // ── the camera, once per cycle (all instances share it) ───────────────────────────────────────
@@ -148,6 +156,32 @@ void BottleExistence::update_and_remove(BottleFitter& fitter, const Inputs& in,
     policy.remove_frames     = static_cast<float>(cfg_.existence_remove_frames);
 
 
+    // ── CONTOUR channel setup, once per cycle: the camera pose AT THE FRAME'S STAMP and the projector ──
+    // Pinned to the stamp of the RGB/depth the outline is compared against (a latest-pose read would judge
+    // the frame from wherever the robot has since driven). An unavailable pose = not measured, never refuted.
+    rc::edges::PointProjector contour_project;
+    Eigen::Vector3d contour_cam_pos = Eigen::Vector3d::Zero();
+    int contour_cols = 0, contour_rows = 0;
+    std::optional<rc::edges::PreparedFrame> contour_prep;
+    if (contour_fresh)
+    {
+        if (not camera_api_)
+            if (const auto zed = in.G->get_node("zed"); zed.has_value())
+                camera_api_ = in.G->get_camera_api(zed.value());
+        const bool have_rgb = in.rgb_frame != nullptr and not in.rgb_frame->empty();
+        contour_cols = have_rgb ? in.rgb_frame->cols : in.depth_frame->cols;
+        contour_rows = have_rgb ? in.rgb_frame->rows : in.depth_frame->rows;
+        if (camera_api_)
+            if (const auto M = room_T_zed_at(*in.G, *in.inner_eigen, in.frame_stamp_ms); M.has_value())
+            {
+                contour_cam_pos = M->block<3, 1>(0, 3);
+                contour_project = make_zed_projector(M->inverse(), *camera_api_, contour_cols, contour_rows);
+            }
+        // Blur + Sobel + frame reference ONCE per frame; every bottle is scored against the same prepared frame.
+        if (contour_project and have_rgb)
+            contour_prep = rc::edges::prepare_frame(*in.rgb_frame);
+    }
+
     std::vector<std::uint64_t> doomed;
     for (auto& [id, inst] : fitter.instances())
     {
@@ -205,6 +239,81 @@ void BottleExistence::update_and_remove(BottleFitter& fitter, const Inputs& in,
             }
             else
                 inst.existence.integrate(p_det, llr_absent);
+        }
+
+        // ── CONTOUR channel (classifier-free) — RGB/DEPTH clock, independent of fresh_masks ───────────
+        // The camera channel above ends at YOLO: "no bottle mask" is charged as absence of the BOTTLE when it
+        // may only be absence of the LABEL (a 7 cm object is exactly where the network gives up first). This
+        // channel asks the image directly, with no network, about the agent's OWN fitted cylinder:
+        //   RGB   — is there an intensity boundary along the projected outline, more than along the same
+        //           outline slid sideways on the table? (relative: needs the null, silent without one)
+        //   DEPTH — is there a surface at the predicted range, with space behind its edge? (absolute)
+        // Both are bounded and dimensionless, so they SUM and pass through one tanh (rc::exist::contour_
+        // evidence; common-mode, they are two consequences of the same fact). Not measured ⇒ HOLD.
+        //
+        // ★DETECTABILITY ENTERS AS A CONTINUOUS WEIGHT, NOT A GATE. A bottle is small, and the check's
+        // edge-search tolerance (±2 px) is fixed in PIXELS, so what one pixel of slack is worth in METRES
+        // grows with range: tol_m = 2 px · (2r / w_px). The outline can only be told from its slid copy to
+        // within hypot(that, the belief's own position σ), so the share of it that can be localised on the
+        // object is the same ratio the LiDAR carve above uses:
+        //     p_resolve = r / (r + hypot(sigma_pos, tol_m))
+        // → 1 for a large, close, well-known bottle; → 0 as it shrinks to a few pixels (far) or the fit is
+        // loose. It scales the log-odds step (so a far bottle can neither confirm nor be refuted by it) and is
+        // handed to integrate() as p_vis. No size cutoff exists: the number falls smoothly with w_px and σ.
+        inst.dbg_ex_ct_edge = inst.dbg_ex_ct_depth = inst.dbg_ex_ct_pres = inst.dbg_ex_ct_dL = 0.0f;
+        inst.dbg_ex_ct_edge_n = inst.dbg_ex_ct_depth_n = 0;
+        if (contour_project)
+        {
+            const auto& s = inst.ai2_belief.state();
+            const auto cs = rc::cylinder_contour_set(s.cx, s.cy, s.cz - 0.5f * s.height, s.cz + 0.5f * s.height,
+                                                     s.radius, contour_cam_pos, contour_project);
+            float verdict = 0.0f;
+            int   n_used  = 0;
+            if (cs.face.valid() and contour_prep.has_value())
+            {
+                std::vector<std::vector<cv::Point>> ctl;
+                ctl.reserve(cs.controls.size());
+                for (const auto& c : cs.controls)
+                    ctl.push_back(c.px);
+                const auto es = rc::edges::contour_edge_support(*contour_prep, cs.face.px, ctl);
+                // The RGB statistic is relative: with no surviving control it has no scale (this channel's own
+                // precondition), and `excess` rather than the ratio keeps magnitude.
+                if (es.n_samples > 0 and es.n_controls > 0)
+                {
+                    verdict += es.excess;
+                    n_used   = std::max(n_used, es.n_samples);
+                    inst.dbg_ex_ct_edge   = es.excess;
+                    inst.dbg_ex_ct_edge_n = es.n_samples;
+                }
+            }
+            if (cs.face.valid() and in.depth_frame != nullptr and not in.depth_frame->empty())
+            {
+                rc::edges::ContourDepthParams dp;
+                // σ_d from the belief's OWN position uncertainty; the relative term is the stereo camera's.
+                dp.sigma_depth_m = std::max(1e-2f, t.sigma_pos_m);
+                dp.depth_scale_x = static_cast<float>(in.depth_frame->cols) / static_cast<float>(contour_cols);
+                dp.depth_scale_y = static_cast<float>(in.depth_frame->rows) / static_cast<float>(contour_rows);
+                const auto ds = rc::edges::contour_depth_support(*in.depth_frame, cs.face, cs.controls, dp);
+                if (ds.n_samples > 0)
+                {
+                    verdict += ds.verdict;
+                    n_used   = std::max(n_used, ds.n_samples);
+                    inst.dbg_ex_ct_depth   = ds.verdict;
+                    inst.dbg_ex_ct_depth_n = ds.n_samples;
+                }
+            }
+            rc::exist::Evidence ev_c = rc::exist::contour_evidence(verdict, n_used, sm);
+            if (ev_c.n_reached > 0)
+            {
+                const cv::Rect bb = cv::boundingRect(cs.face.px);
+                const float w_px  = static_cast<float>(std::max(1, bb.width));
+                const float tol_m = 2.0f * (2.0f * s.radius) / w_px;
+                const float p_res = s.radius / (s.radius + std::hypot(t.sigma_pos_m, tol_m));
+                ev_c.log_odds_delta *= p_res;
+                inst.dbg_ex_ct_pres = p_res;
+                inst.dbg_ex_ct_dL   = ev_c.log_odds_delta;
+                inst.existence.integrate(ev_c, p_res);
+            }
         }
 
         // ── LiDAR channel (sweep clock) ───────────────────────────────────────────────────────────
@@ -326,7 +435,7 @@ void BottleExistence::update_and_remove(BottleFitter& fitter, const Inputs& in,
                 f.imbue(std::locale::classic());
                 f << "cycle,node,L,p_exists,cx,cy,detected,since_det,p_detect,fill_max,fill_min,"
                      "vis,occl_total,occl_dropped,cam_usable,lidar_occ,lidar_free,lidar_n,lidar_p_resolve,"
-                     "remove_streak,remove_required,starved\n";
+                     "remove_streak,remove_required,starved,ct_edge,ct_depth,ct_p_resolve,ct_dL\n";
                 return f; }();
             if (ex_csv)
             {
@@ -340,7 +449,9 @@ void BottleExistence::update_and_remove(BottleFitter& fitter, const Inputs& in,
                        << inst.dbg_ex_lidar_free << ',' << inst.dbg_ex_lidar_n << ','
                        << inst.dbg_ex_lidar_pres << ','
                        << inst.existence_debounce.streak << ',' << verdict.required << ','
-                       << inst.existence_debounce.starved << '\n';
+                       << inst.existence_debounce.starved << ','
+                       << inst.dbg_ex_ct_edge << ',' << inst.dbg_ex_ct_depth << ','
+                       << inst.dbg_ex_ct_pres << ',' << inst.dbg_ex_ct_dL << '\n';
                 ex_csv.flush();
             }
         }

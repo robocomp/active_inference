@@ -46,11 +46,14 @@
 
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <vector>
 
 #include <Eigen/Dense>
 #include <dsr/api/dsr_api.h>
 #include <dsr/api/dsr_inner_eigen_api.h>
+#include <dsr/api/dsr_camera_api.h>
+#include <opencv2/core.hpp>
 
 #include "bottle_config.h"
 #include "../../common/exclusion/exclusion.h"   // rc::exclusion:: (SHARED)
@@ -84,6 +87,13 @@ public:
         const std::vector<Eigen::Vector3f>* sweep = nullptr;   // fresh room-frame sweep, or nullptr (LiDAR clock)
         Eigen::Vector3f origin = Eigen::Vector3f::Zero();      // that sweep's sensor origin, room frame
         const std::vector<Eigen::Vector2f>* room_polygon = nullptr;   // walls occlude too (may be empty/null)
+        // The classifier-free CONTOUR channel's inputs (camera clock, independent of fresh_masks).
+        // BORROWED for the call only, read on the main thread (a cv::Mat crossing a thread would need a deep
+        // copy). Either may be null: no RGB silences the gradient half, no depth the metric half.
+        const cv::Mat* rgb_frame   = nullptr;                  // BGR
+        const cv::Mat* depth_frame = nullptr;                  // CV_32F metres, NaN = no return
+        std::uint64_t  frame_stamp_ms = 0;                     // capture stamp of those frames
+        bool           frames_fresh   = false;                 // a NEW frame arrived this cycle
     };
 
     // Integrate both channels into every instance's existence log-odds and hand back the ones whose volume is
@@ -95,6 +105,7 @@ public:
 private:
     const std::vector<rc::exclusion::Claim>* claims_ = nullptr;
     BottleConfig& cfg_;
+    std::unique_ptr<DSR::CameraAPI> camera_api_;   // ZED intrinsics, lazily bound to the "zed" node
 };
 
 }  // namespace rc

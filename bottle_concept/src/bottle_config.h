@@ -113,6 +113,9 @@ struct BottleConfig
     // removal grows) on top of a detector envelope this agent's own log flags UNCALIBRATED. Turn it on to
     // MEASURE it against detect_probe — not to fix anything.
     bool  existence_occluder_heights  = false;
+    // ★The classifier-free CONTOUR channel (image evidence with no YOLO mask): the fitted cylinder's outline
+    // vs RGB edges + the ZED depth plane. Brings up the ZED RGB + DEPTH media planes. Default ON.
+    bool  contour_check_enabled       = true;
     float ai2_clutter_frac         = 0.10f;  // ε: prior weight of the uniform clutter mixture component
     float ai2_clutter_scale_m      = 0.08f;  // a point further than ~this from the surface is likely clutter
     float ai2_prior_pos_std        = 0.30f;  // broad position prior std (m) on cx,cy,cz

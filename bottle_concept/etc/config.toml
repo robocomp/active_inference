@@ -136,6 +136,13 @@ SupportBankMaxPoints = 4000
 SupportBankQuantizationM = 0.01      # dedup grid (m) for the support-bank hash
 SupportSelectRadiusMarginM = 0.04    # XY ownership gate margin around the bottle
 SupportSelectHeightMarginM = 0.10    # extra Z margin above/below the cylinder span
+# Classifier-free existence channel (mirrors refrigerator/hood): project the FITTED cylinder (hull of its two
+# rims) into the ZED frame and ask, with no network involved, RGB: is there a boundary along the outline, more
+# than along the same outline slid sideways on the table? DEPTH: is there a surface at the predicted range, with
+# space behind its edge? Runs on every fresh ZED frame, whether or not YOLO painted a bottle mask. Weighted by
+# p_resolve = r/(r + hypot(sigma_pos, 2px in metres at this range)) so a far/tiny/uncertain bottle carries ~no
+# evidence (continuous, no gate). Brings up the ZED RGB + DEPTH media planes.
+ContourCheckEnabled = true
 YawVariance = 9.87                 # ≈π² — yaw is unobservable for a symmetric cylinder
 
 [BottleModel]
