@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
 # Offline checks for chat_agent's pure pieces (no DSR, no ollama): NDJSON splitter, CommandGate, object facts,
-# look()'s frame preparation + request JSON (OpenCV + Qt Core), the mission IR + its JSON and text forms (Qt Core), the mission interpreter's step machine, its progress/history JSON, the plan view's model, the system tools, and the episodic-memory tools' answers.
+# look()'s frame preparation + request JSON (OpenCV + Qt Core), the mission IR + its JSON and text forms (Qt Core), the mission interpreter's step machine, its progress/history JSON, the plan view's model, the system tools, the episodic-memory tools' answers, and the side canvas (fast-path phrases, the script runner + panel, the stock scripts), the status bar's GPU memory reading, go_around's loop and sim_door's frame change.
 set -euo pipefail
 cd "$(dirname "$0")"
 out=$(mktemp -d)
-for t in test_ndjson test_gate test_objects; do
+for t in test_ndjson test_gate test_objects test_canvas test_gpu test_fleet; do
     g++ -std=c++23 -O0 -g -Wall -Wextra -o "$out/$t" "$t.cpp"
     "$out/$t"
 done
+g++ -std=c++23 -O0 -g -Wall -Wextra -isystem /usr/include/eigen3 -o "$out/test_sim_door" test_sim_door.cpp
+"$out/test_sim_door"
 g++ -std=c++23 -O0 -g -Wall -Wextra -Wno-deprecated-enum-enum-conversion -Wno-deprecated-literal-operator -fPIC \
     -o "$out/test_look" test_look.cpp \
     $(pkg-config --cflags opencv4 Qt6Core | sed "s/-I/-isystem /g") $(pkg-config --libs opencv4 Qt6Core)
@@ -38,4 +40,17 @@ g++ -std=c++23 -O0 -g -Wall -Wextra -Wno-missing-field-initializers -Wno-depreca
 g++ -std=c++23 -O0 -g -Wall -Wextra -Wno-missing-field-initializers -Wno-deprecated-literal-operator -fPIC \
     -o "$out/test_controller_facts" test_controller_facts.cpp $(pkg-config --cflags Qt6Core | sed "s/-I/-isystem /g") $(pkg-config --libs Qt6Core)
 "$out/test_controller_facts"
+g++ -std=c++23 -O0 -g -Wall -Wextra -Wno-missing-field-initializers -Wno-deprecated-literal-operator -fPIC \
+    -DCANVAS_DIR="\"$(realpath ../canvas)\"" -o "$out/test_canvas_runner" test_canvas_runner.cpp \
+    ../src/canvas_runner.cpp ../src/canvas_panel.cpp ../src/plan_view.cpp \
+    $(pkg-config --cflags Qt6Widgets Qt6OpenGLWidgets | sed "s/-I/-isystem /g") $(pkg-config --libs Qt6Widgets Qt6OpenGLWidgets)
+"$out/test_canvas_runner" 2>&1 | grep -v propagateSizeHints
+# the window's saved size: a real X display, never mapped (WA_DontShowOnScreen); skipped without one
+if [[ -n "${DISPLAY:-}" ]]; then
+g++ -std=c++23 -O0 -g -Wall -Wextra -Wno-missing-field-initializers -fPIC -o "$out/test_chat_window" test_chat_window.cpp \
+    ../src/chat_window.cpp ../src/canvas_panel.cpp ../src/plan_view.cpp \
+    $(pkg-config --cflags Qt6Widgets Qt6OpenGLWidgets | sed "s/-I/-isystem /g") $(pkg-config --libs Qt6Widgets Qt6OpenGLWidgets)
+"$out/test_chat_window" 2>&1 | grep -v -E "propagateSizeHints|QOpenGLWidget"
+else echo "test_chat_window: skipped (no DISPLAY)"; fi
+python3 test_canvas_stock.py
 rm -rf "$out"

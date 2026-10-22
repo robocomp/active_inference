@@ -2,8 +2,10 @@
  * graph_publisher.h
  *
  * The retina's DSR "semantic_grid" export:
- *   - "masks" — the live product, deprojected YOLO masks (room frame) consumed by
- *               the concept agents. Published every cycle.
+ *   - "masks_zed"   (child of "zed")   — the live product, deprojected YOLO masks in the ZED camera frame,
+ *   - "masks_ricoh" (child of "ricoh") — the RGB-360 slices in the RICOH camera frame,
+ *               consumed by the concept agents through common/mask_ingestor (which discovers them via the
+ *               "rgbd" camera nodes — never by name) and transformed to the room THERE.
  *
  * Owns the per-node "ready" state and the masks publish sequence; the graph relayout
  * is injected as a callback so this stays decoupled from the GUI (graph_viewers).
@@ -28,23 +30,24 @@ struct SegDetection;
 namespace rc::human_pose { struct PoseDetection; }
 namespace rc::semantic { struct SemanticMap; }
 
-// A detection from the RGB-360 (ricoh) panorama. Published into the SAME "masks" node. Two flavours:
-//   - bearing-only (has_lidar_depth=false): a no-depth slice (has_depth=0) tagged with a room-frame
-//     bearing instead of a 3D centroid (Part B legacy).
+// A detection from the RGB-360 (ricoh) panorama. Published into the "masks_ricoh" node, ALL IN THE RICOH
+// CAMERA FRAME (no room, no localization). Two flavours:
+//   - bearing-only (has_lidar_depth=false): a no-depth slice (has_depth=0) tagged with a RICOH-frame
+//     bearing instead of a 3D centroid.
 //   - depth-carrying (has_lidar_depth=true): the lidar reprojected into the panorama gave this mask a
-//     3D range, so it's published as a FULL 3D slice (has_depth=1) with room-frame support points and a
+//     3D range, so it's published as a FULL 3D slice (has_depth=1) with ricoh-frame support points and a
 //     mask_depth_var (m²) the consumer adds to R — same currency as the interaction-matrix motion_var.
 struct BearingDetection
 {
     std::string label;
     float       class_id = -1.0f;
     float       confidence = 0.0f;
-    float       azimuth_room_rad = 0.0f;   // room-frame bearing to the detection (fallback channel)
+    float       azimuth_cam_rad = 0.0f;    // bearing to the detection in the RICOH frame (atan2(y,x) of the ray)
 
     bool                          has_lidar_depth = false;
     float                         range_var = 0.0f;               // σ_range² (m²) → mask_depth_var
-    Eigen::Vector3f               centroid_room = Eigen::Vector3f::Zero();
-    std::vector<Eigen::Vector3f>  support_room;                   // lidar hits inside the mask (room frame)
+    Eigen::Vector3f               centroid_cam = Eigen::Vector3f::Zero();
+    std::vector<Eigen::Vector3f>  support_cam;                    // lidar hits inside the mask (RICOH frame)
 };
 
 class GraphPublisher
@@ -58,8 +61,11 @@ public:
     // the masks node so consumers can pin their pose lookups to capture time (0 = unknown → consumers
     // fall back to latest pose).
     void publish(const RGBDData& rgbd, const Mat::RTMat& room_T_zed,
-                 const std::vector<SegDetection>& detections, std::uint64_t frame_ts_ms = 0,
-                 const std::vector<BearingDetection>& bearing_detections = {});
+                 const std::vector<SegDetection>& detections, std::uint64_t frame_ts_ms = 0);
+
+    // Publish the RGB-360 slices on "masks_ricoh" (own frame-id sequence). frame_ts_ms = the PANORAMA's
+    // capture stamp (not the zed's). Call once per NEW panorama.
+    void publish_ricoh(const std::vector<BearingDetection>& detections, std::uint64_t frame_ts_ms);
 
     // Publish human skeletons on the dedicated 'skeleton' node. Keypoints are BODY_18, deprojected
     // to the CAMERA (zed) frame — NOT room frame — so a consumer interacting with a person can
@@ -100,11 +106,12 @@ private:
     // Create the named semantic_grid node under "zed" (+ identity RT edge) if absent. Returns true
     // once the node exists/is ready. `relayout` triggers a graph relayout after creation (masks/voxels
     // do; tracks deliberately don't, to avoid a churn-time viewer repaint of a freed item).
-    bool ensure_node(const char* name, const char* color, bool& ready, bool relayout);
+    bool ensure_node(const char* name, const char* color, bool& ready, bool relayout,
+                     const char* parent_name = "zed");
 
     void upload_masks(const RGBDData& rgbd, const Mat::RTMat& room_T_zed,
-                      const std::vector<SegDetection>& detections, std::uint64_t frame_ts_ms,
-                      const std::vector<BearingDetection>& bearing_detections);
+                      const std::vector<SegDetection>& detections, std::uint64_t frame_ts_ms);
+    void upload_masks_ricoh(const std::vector<BearingDetection>& detections, std::uint64_t frame_ts_ms);
     void upload_skeletons(const RGBDData& rgbd,
                           const std::vector<rc::human_pose::PoseDetection>& poses,
                           std::uint64_t frame_ts_ms);
@@ -125,6 +132,8 @@ private:
     bool            motion_csv_open_attempted_ = false;
 
     bool          masks_ready_    = false;
+    bool          masks_ricoh_ready_ = false;
+    std::uint64_t masks_ricoh_publish_seq_ = 0;
     bool          skeleton_ready_ = false;
     bool          semantic_ready_ = false;
     int           semantic_seq_   = 0;

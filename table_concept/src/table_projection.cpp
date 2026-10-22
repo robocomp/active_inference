@@ -218,6 +218,8 @@ SilhouetteExistence TableProjection::compute_silhouette_existence(const TableIns
     // Camera position in the room floor plane — one endpoint of the wall line-of-sight segment below.
     const Eigen::Vector2f cam_xy(static_cast<float>(Mopt.value().coeff(0, 3)),
                                  static_cast<float>(Mopt.value().coeff(1, 3)));
+    out.has_cam = true;   // the blind-spot map's viewpoint (table_existence.cpp)
+    out.cam_x = cam_xy.x(); out.cam_y = cam_xy.y(); out.cam_z = static_cast<float>(Mopt.value().coeff(2, 3));
     // A silhouette sample within this distance of a wall segment does not count as occluded BY that segment —
     // a table pushed flush against a wall must not hide behind it. Physical clearance, mirrors door_concept's
     // 0.30 m; smaller here because a table is free-standing and only grazes a wall.

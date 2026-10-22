@@ -32,17 +32,22 @@ int main()
         obj(9, "hood_1", "hood", true, -1, 0),
     };
     all[2].width_m = 1.2f; all[2].depth_m = 0.8f; all[2].height_m = 0.75f;
+    all[2].shape = "round"; all[2].shape_prob = 0.87f;
 
     const std::string sec = objects_section(all, 6, 2);
     std::println("{}", sec);
     assert(sec.find("1 bottle, 1 cabinet, 3 chair, 1 hood, 1 person, 1 table") != std::string::npos); ++checks;
     assert(sec.find("refrigerator") == std::string::npos); ++checks;                  // other room: not listed
     assert(sec.find("- person_1 1.2 m, +170 deg behind") != std::string::npos); ++checks;   // nearest first
-    assert(sec.find("table_1 2.8 m, +10 deg ahead, 1.20x0.80x0.75 m") != std::string::npos); ++checks;
+    assert(sec.find("table_1 2.8 m, +10 deg ahead, 1.20x0.80x0.75 m, round top (p 0.87)") != std::string::npos); ++checks;
     assert(sec.find("chair_3") == std::string::npos and sec.find("hood_1") == std::string::npos); ++checks;   // > N
     assert(sec.find("find_objects lists the rest") != std::string::npos); ++checks;
     assert(sec.find("unidentified obstacles") != std::string::npos); ++checks;
     assert(objects_section({}, 6, 0).find(": none") != std::string::npos); ++checks;
+    // an object that offers its approach: its sides, labelled as seen from here (approach.h sides_line)
+    assert(object_line(ObjectFact{.name = "chair_1", .subtype = "chair", .approach_sides = "front (its own front; far side as seen from here)"})
+               .ends_with(", approach sides: front (its own front; far side as seen from here)")); ++checks;
+    assert(object_line(ObjectFact{.name = "chair_2", .subtype = "chair"}).find("approach") == std::string::npos); ++checks;
 
     auto f = answer_find_objects(all, "chairs", "room_1");
     assert(f.starts_with("3 chairs perceived in room_1")); ++checks;

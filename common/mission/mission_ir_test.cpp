@@ -138,6 +138,12 @@ int main()
     CHECK(rejected(one_step(R"("op":"seq","steps":[{"id":"1.1","op":"stop"}])")).empty());
     CHECK(rejected(one_step(R"("op":"seq","steps":[{"id":"1","op":"stop"}])")) == "duplicate_id");   // across depth
     CHECK(rejected(one_step(R"("op":"stop","on_fail":"skip")")).empty());
+    // approach (2026-10-18): the object's own approach affordance, optionally from a side it offers
+    CHECK(rejected(one_step(R"("op":"approach","object":{"node":"table_1"})")).empty());
+    CHECK(rejected(one_step(R"("op":"approach","object":{"node":"table_1"},"side":"yp")")).empty());
+    CHECK(rejected(one_step(R"("op":"approach")")) == "missing_field");
+    CHECK(rejected(one_step(R"("op":"approach","object":{"anchor":"start"})")) == "bad_value");   // a pose is go_to's
+    CHECK(op_spec("approach") != nullptr and op_spec("approach")->claims == kBase and not op_spec("approach")->instant);
     CHECK(rejected(one_step(R"("op":"stop","on_fail":{"retry":0})")) == "bad_value");
     CHECK(rejected(one_step(R"("op":"stop","on_fail":"pray")")) == "bad_value");
 

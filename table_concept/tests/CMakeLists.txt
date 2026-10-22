@@ -38,3 +38,8 @@ add_executable(contour_test
 target_include_directories(contour_test PRIVATE ../src ../../common ${OpenCV_INCLUDE_DIRS})
 target_link_libraries(contour_test PRIVATE Eigen3::Eigen ${OpenCV_LIBS})
 target_compile_options(contour_test PRIVATE -O2)
+
+# The learned blind-spot map (common/detectability/blind_spot_map.h): visit pooling, class/instance levels,
+# locale-proof persistence.
+add_executable(blind_spot_test blind_spot_test.cpp)
+target_compile_options(blind_spot_test PRIVATE -O2)

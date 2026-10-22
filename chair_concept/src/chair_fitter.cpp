@@ -181,6 +181,10 @@ bool ChairFitter::ensure_instance(const DSR::Node& node, std::uint64_t room_id)
     inst.node_name = node.name();
     inst.model     = ChairModel(init_state, make_model_params());
     inst.affordance.init(G_, node.id(), node.name(), "chair");
+    // The Schmitt band and debounce are PragmaticAffordance's defaults: the precondition here is 0 or 1 (does a side fit
+    // in the room), so the band only sets how many measured cycles a change must hold.
+    inst.approach.init(G_, node.id(), node.name(), rc::pragmatic::PragmaticAffordance::Policy{},
+                       rc::pragmatic::ObjectApproach::Sides::Fronted);
 
     instances_.emplace(node.id(), std::move(inst));
     std::print("chair_concept: created instance for node '{}' id={}\n", node.name(), node.id());
@@ -208,7 +212,7 @@ ChairFitter::ChairObservation ChairFitter::observe(ChairInstance& inst, const DS
         inst.last_appearance_tp = tp_now;
     }
 
-    // Primary path: YOLO "masks" (room frame), masks-only. Classify-don't-destroy SDF split keeps
+    // Primary path: YOLO masks (MaskIngestor, room frame), masks-only. Classify-don't-destroy SDF split keeps
     // inliers as candidates and the rest as residuals that drive model expansion.
     const auto& masks_packet = mask_ingestor_->packet();
     if (masks_packet.valid && masks_packet.frame_id > inst.last_masks_frame_seen)

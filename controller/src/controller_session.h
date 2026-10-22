@@ -14,6 +14,7 @@
 #include "controller_lockon.h"
 #include "controller_affordance_view.h"
 #include "controller_mission.h"
+#include "controller_approach_order.h"
 #include "controller_door_passage.h"
 #include "motion_verdict.h"
 #include "controller_anchor_servo.h"
@@ -278,6 +279,7 @@ public:
     [[nodiscard]] bool route_reverse() const { return route_reverse_; }
 
     rc::DoorPassage &door_passage() { return door_passage_; }
+    rc::ApproachOrder &approach_order() { return approach_order_; }
     /// Mission (Command) mode: the open affordance contest runs only while an `explore` order holds it open — and,
     /// when the order names its room, only for affordances whose target is in that room (affordance_room_scope.h).
     void set_command_explore(bool on, std::string room = {}) { command_explore_ = on; explore_room_ = on ? std::move(room) : std::string{}; }
@@ -321,6 +323,7 @@ private:
     rc::LockOn::Reading read_servo_reading(std::uint64_t feedback_node_id) const;
     // Perception producer's monotonic frame counter (mask_frame_id), or -1. See the definition.
     [[nodiscard]] int masks_frame_seq() const;
+    [[nodiscard]] std::optional<std::uint64_t> front_mask_node_id() const;   // front camera's mask node (cached)
     bool goal_met(std::uint64_t feedback_node_id) const;
     // Contract-driven Orient (Policy::Orient): rotate IN PLACE toward `target_yaw` (no navigation) until the
     // contract's completion predicate fires (a depth detection arrives) or the contract times out. Returns
@@ -730,11 +733,12 @@ private:
     bool          dwell_logged_ = false;
     // ── CONFIRMING LOOKS (see ControllerParams::affordance_dwell_mask_hits) ───────────────────────
     // How many separate producer frames have carried a mask of the affordance's object since the dwell
-    // began. Counted off the "masks" node directly rather than through the panel's composer: the
+    // began. Counted off the front camera's mask node directly rather than through the panel's composer: the
     // composer only runs while the affordance WINDOW IS OPEN, and behaviour that depends on whether a
     // window is open is not behaviour, it is a coincidence.
     int           dwell_mask_hits_ = 0;
     int           dwell_last_mask_frame_ = -1;
+    mutable std::uint64_t front_mask_node_id_ = 0;   // cache for front_mask_node_id()
     // Whether THIS dwell is waiting on an acquisition at all — decided once, when it is armed, from the
     // finished affordance's contract and whether its look succeeded. Latched rather than recomputed:
     // the contract is re-resolved as soon as the next target is picked, so asking again mid-dwell would
@@ -1147,6 +1151,8 @@ private:
     rc::MissionRunner mission_;
     rc::DoorPassage door_passage_;                                  // controller_door_passage.h
     std::string door_required_;                                     // its required affordance this cycle ("" = none)
+    rc::ApproachOrder approach_order_;                              // controller_approach_order.h
+    std::string approach_required_, approach_option_;               // its node and side this cycle ("" = none)
     bool command_explore_ = false;                                  // Mission mode: an `explore` order is active
     std::string explore_room_;                                       // …and the room it confines the contest to ("" = none)
     std::optional<Eigen::Vector2f> passage_door_centre_;            // the passage's door node, current room frame

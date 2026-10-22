@@ -25,6 +25,7 @@
 
 #include "table_config.h"      // rc::TableConfig
 #include "../../common/detectability/detectability.h"   // rc::detect::DetectorEnvelope / p_detect
+#include "../../common/detectability/blind_spot_map.h"  // rc::detect::BlindSpotMap — the learned blind spots
 
 namespace rc {
 
@@ -62,6 +63,11 @@ public:
 
     // ZED RGB + depth for the classifier-free contour channel, borrowed for THIS cycle only (the ingestors
     // own them). Each plane carries its own capture stamp; a plane is scored only on a frame not yet scored.
+    // The class blind-spot map, persisted across runs (BLIND_SPOT_MAP.md §7). Load once at start, save on a
+    // graceful exit. Returns the number of samples read / whether the write succeeded.
+    std::size_t load_blind_spot_map() { return bsm_.load(cfg_.existence_blind_spot_file); }
+    bool        save_blind_spot_map() { return bsm_.save(cfg_.existence_blind_spot_file); }
+
     void set_camera_frames(const cv::Mat* rgb, std::uint64_t rgb_stamp_ms,
                            const cv::Mat* depth, std::uint64_t depth_stamp_ms)
     { rgb_ = rgb; rgb_stamp_ms_ = rgb_stamp_ms; depth_ = depth; depth_stamp_ms_ = depth_stamp_ms; }
@@ -74,6 +80,7 @@ private:
     const cv::Mat* rgb_   = nullptr;   std::uint64_t rgb_stamp_ms_   = 0;
     const cv::Mat* depth_ = nullptr;   std::uint64_t depth_stamp_ms_ = 0;
     std::uint64_t contour_last_rgb_ms_ = 0, contour_last_depth_ms_ = 0;   // stamps already scored
+    rc::detect::BlindSpotMap bsm_;
 };
 
 }  // namespace rc

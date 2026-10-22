@@ -220,6 +220,38 @@ Digest WorldDigest::build(DSR::InnerEigenAPI& inner, bool controller_present, co
             if (const auto v = G.get_attrib_by_name<width_m_att>(n); v.has_value()) o.width_m = v.value();
             if (const auto v = G.get_attrib_by_name<depth_m_att>(n); v.has_value()) o.depth_m = v.value();
             if (const auto v = G.get_attrib_by_name<height_m_att>(n); v.has_value()) o.height_m = v.value();
+            // Its approach affordance's sides (approach.h), labelled as seen from the robot now — in the robot's frame,
+            // where the robot is the origin: the room-frame standpoints are brought into it.
+            if (o.in_current_room)
+                if (const auto aff = G.get_node("aff_" + name + "_approach"); aff.has_value())
+                {
+                    const auto names = G.get_attrib_by_name<aff_option_names_att>(*aff);
+                    const auto xs = G.get_attrib_by_name<aff_option_x_m_att>(*aff);
+                    const auto ys = G.get_attrib_by_name<aff_option_y_m_att>(*aff);
+                    const auto ws = G.get_attrib_by_name<aff_option_yaw_rad_att>(*aff);
+                    const auto To = inner.get_transformation_matrix(robot_frame_, name);
+                    const std::string room = room_name_of(room_id);
+                    if (names.has_value() and xs.has_value() and ys.has_value() and ws.has_value() and To.has_value())
+                        if (auto sides = parse_sides(*names, xs->get(), ys->get(), ws->get()); sides.has_value())
+                        {
+                            bool all = true;
+                            for (auto& sd : *sides)
+                                if (const auto p = inner.transform(robot_frame_, Eigen::Vector3d(sd.x, sd.y, 0.0), room);
+                                    p.has_value())
+                                {
+                                    sd.x = p->x();
+                                    sd.y = p->y();
+                                }
+                                else all = false;
+                            if (all)
+                            {
+                                label_sides(*sides, {To->translation().x(), To->translation().y()}, {0.0, 0.0});
+                                o.approach_sides = sides_line(*sides);
+                            }
+                        }
+                }
+            if (const auto v = G.get_attrib_by_name<obj_shape_att>(n); v.has_value()) o.shape = v.value();
+            if (const auto v = G.get_attrib_by_name<obj_shape_prob_att>(n); v.has_value()) o.shape_prob = v.value();
             d.objects.push_back(std::move(o));
         }
     if (room_id != 0)

@@ -1515,6 +1515,7 @@ void SpecificWorker::execute_plan(const RobotPose &robot_pose)
 void SpecificWorker::set_manual_target(const QPointF &point)
 {
 	cancel_relative_motion("superseded by a clicked target");
+	session_.approach_order().stop();   // the person has taken the base: an approach order ends (aborted)
 	session_.set_manual_target(point,
 	                        world_model_,
 	                        obstacle_tracker_,
@@ -1978,6 +1979,7 @@ void SpecificWorker::enqueue_command(std::function<void()> command)
 // the remote file and chat_agent's intention node. Understood so far:
 //   cross door          the nearest door of the current room
 //   cross [the] door_N  that door (it must exist in the graph now)
+//   approach <object> [from <side>]   the object's approach affordance, from one of the sides it offers; then hold
 //   stop                the Stop button's abort, and the door passage ends too
 //   uncross             end the door passage (selection unrestricted again)
 //   move <m>            drive straight <m> metres, + forward / − backward (relative motion, controller_relative_motion.h)
@@ -2014,6 +2016,7 @@ SpecificWorker::MissionResult SpecificWorker::dispatch_mission_command(const std
 	if (t == "stop")
 	{
 		session_.door_passage().stop();
+		session_.approach_order().stop();
 		abort_all(source);
 		std::println("[{}] mission 'stop' -> STOP (passage ended, base output disarmed)", source);
 		return {.accepted = true, .kind = "stop"};
@@ -2069,8 +2072,23 @@ SpecificWorker::MissionResult SpecificWorker::dispatch_mission_command(const std
 			return start_door_passage(*door, rc::DoorPassage::Step::Close, source, /*then_affordances=*/true);
 		}
 	}
-	std::println("[{}] mission '{}' not understood (known: cross door | cross door_N | stop | uncross | move <m> | turn <deg>)", source, t);
-	return {.reason = std::format("'{}' not understood (known: cross door | cross door_N | stop | uncross | move <m> | turn <deg>)", t)};
+	if (t.starts_with("approach "))
+	{
+		// "approach [the] <object> [from [the] <side> [side]]" — names as the graph has them (chat resolves words to them).
+		std::string what = t.substr(9), side;
+		if (const auto at = what.find(" from "); at != std::string::npos)
+		{
+			side = what.substr(at + 6);
+			what = what.substr(0, at);
+			if (side.starts_with("the ")) side = side.substr(4);
+			if (side.ends_with(" side")) side = side.substr(0, side.size() - 5);
+		}
+		if (what.starts_with("the ")) what = what.substr(4);
+		cancel_mission("superseded", /*hold=*/false);
+		return start_approach(what, side, source, rc::ApproachOrder::After::Hold);
+	}
+	std::println("[{}] mission '{}' not understood (known: cross door | cross door_N | approach <object> [from <side>] | stop | uncross | move <m> | turn <deg>)", source, t);
+	return {.reason = std::format("'{}' not understood (known: cross door | cross door_N | approach <object> [from <side>] | stop | uncross | move <m> | turn <deg>)", t)};
 }
 
 // `cross door_N` and a mission's cross / open: the door must exist now; the passage restricts the selector to its steps.
@@ -2086,6 +2104,7 @@ SpecificWorker::MissionResult SpecificWorker::start_door_passage(const std::stri
 		return {.kind = kind, .door = door, .reason = std::format("door '{}' is not in the graph", door)};
 	}
 	cancel_relative_motion("superseded by a door passage");
+	session_.approach_order().stop();
 	session_.mission().set_mode(rc::DriveMode::Command);
 	session_.set_command_explore(false);   // the passage's own steps are the order now
 	session_.door_passage().start(door, stop_after, then_affordances, look_first);
@@ -2096,6 +2115,25 @@ SpecificWorker::MissionResult SpecificWorker::start_door_passage(const std::stri
 	             stop_after == rc::DoorPassage::Step::Open ? " (stops once open)" : "",
 	             driving_enabled_ ? "" : "  (base not armed: press Run to drive)");
 	return {.accepted = true, .kind = kind, .door = door};
+}
+
+// `approach <object> [from <side>]`: the object proposes (its approach node, the sides it lists); this only chooses.
+SpecificWorker::MissionResult SpecificWorker::start_approach(const std::string &object, const std::string &side,
+                                                             const char *source, rc::ApproachOrder::After after)
+{
+	if (const auto refused = rc::ApproachOrder::check(*G, object, side); refused.has_value())
+	{
+		std::println("[{}] approach '{}{}' refused: {}", source, object, side.empty() ? "" : " from " + side, *refused);
+		return {.kind = "approach", .reason = *refused, .object = object};
+	}
+	cancel_relative_motion("superseded by an approach");
+	session_.door_passage().stop();
+	session_.mission().set_mode(rc::DriveMode::Command);
+	session_.set_command_explore(false);   // the approach is the order now
+	session_.approach_order().start(object, side, after);
+	std::println("[{}] approach '{}'{} -> APPROACH ORDER{}", source, object, side.empty() ? "" : " from " + side,
+	             driving_enabled_ ? "" : "  (base not armed: press Run to drive)");
+	return {.accepted = true, .kind = "approach", .object = object, .approach_id = session_.approach_order().view().id};
 }
 
 // `move` / `turn` and a mission's move. A new relative command supersedes the one running, accepted or not.
@@ -2137,6 +2175,7 @@ SpecificWorker::MissionResult SpecificWorker::start_relative_motion(const std::s
 	// "Target" with no target, so when the motion ends the robot STAYS where it was put (the affordance planner
 	// does not drive off again) — the same rule a clicked target follows.
 	session_.door_passage().stop();
+	session_.approach_order().stop();
 	if (session_.mission().running()) session_.mission().stop("superseded by a relative move", now);
 	session_.mission().set_mode(rc::DriveMode::Target);
 	session_.mission().set_click_target(std::nullopt);
@@ -2235,6 +2274,7 @@ void SpecificWorker::service_chat_inbox()
 			else if (not r.accepted) chat_tracked_ = {.kind = K::Rejected, .door = r.door, .reason = r.reason};
 			else if (r.kind == "cross") chat_tracked_ = {.kind = K::Cross, .door = r.door};
 			else if (r.kind == "move") chat_tracked_ = {.kind = K::Motion, .motion_id = r.motion_id};
+			else if (r.kind == "approach") chat_tracked_ = {.kind = K::Approach, .approach_id = r.approach_id};
 			else if (r.kind == "stop") chat_tracked_ = {.kind = K::Stop};
 			else chat_tracked_ = {.kind = K::Uncross};
 			chat_tracked_.stamp = cmd->stamp_ms;
@@ -2253,6 +2293,8 @@ void SpecificWorker::service_chat_inbox()
 	}
 	const auto [state, bt] = chat_tracked_.kind == rc::ChatInbox::Tracked::Kind::Motion
 	                             ? rc::ChatInbox::status_of_motion(chat_tracked_, relative_motion_.view(), driving)
+	                         : chat_tracked_.kind == rc::ChatInbox::Tracked::Kind::Approach
+	                             ? rc::ChatInbox::status_of_approach(chat_tracked_, session_.approach_order().view(), driving)
 	                             : rc::ChatInbox::status_of(chat_tracked_, session_.door_passage().view(), driving);
 	chat_inbox_.publish(*G, chat_tracked_.stamp, state, bt);
 }

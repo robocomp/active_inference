@@ -7,6 +7,11 @@
  *   - one node per Stats: type `metaconcept`, name `stats_<level>_<kind>[_<author>]_<identity or "any">` (author for
  *     missions only), attr em_stats, under root.
  * Upsert = update the attribute when a node of that name exists, insert it otherwise.
+ *
+ * Viewer placement (pos_x / pos_y, re-laid out whenever a node is inserted or removed): the experiences are a
+ * TIMELINE — root at the origin, the records hanging from it in time order (id "<YYYYMMDD>-<seq>") left to right on
+ * root's row, so the root→record edges overlap into one axis — and each experience's tree HANGS DOWN below it as an
+ * indented list (one row per record, preorder, indented by depth). The stats nodes are a column left of root.
  */
 #pragma once
 
@@ -35,10 +40,11 @@ public:
 
 private:
     std::shared_ptr<DSR::DSRGraph> G_;
-    int placed_ = 0;   // viewer placement only: a fan of new nodes so they do not all land on one spot
 
     /// Insert a metaconcept node `name` hanging (has edge) from `parent_id`, or return the existing one.
     std::optional<DSR::Node> ensure_node(const std::string& name, std::uint64_t parent_id);
+    /// The viewer placement above, written only where a node's position changed.
+    void relayout();
 };
 
 }   // namespace rc::em

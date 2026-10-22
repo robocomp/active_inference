@@ -5,6 +5,9 @@
 #        robot_concept must be running (run_crossing.sh does not start robot_concept; without it every agent aborts).
 # ★ The first leg targets the main door BY NAME. It used to take the first door born, which was the main door only
 #   because it was seen first from the start pose; try46 (10-17) birthed DOOR_0 (shut, no room behind) first.
+# TOUR LOCK (shared with chat_agent's fleet tool): held while this tour runs, i.e. while this PID is alive; chat_agent
+# refuses to start/stop/restart fleet agents meanwhile. Removed on any exit; a crashed script's PID is dead, so it never sticks.
+LOCK=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/ai_fleet_tour.lock; echo $$ > $LOCK; trap 'rm -f $LOCK' EXIT
 B=/home/pbustos/robocomp/components/active_inference; E=$B/room_concept/estimation_scripts; cd $E; L=crossing/$1/logs
 echo stop > $B/controller/remote_cmd.txt  # DISARMED until the main door is born: the start pose faces it, and an armed
                                           # controller explores furniture meanwhile (try52: wedged on the table, door never seen).
@@ -41,6 +44,9 @@ for leg in 1 2 3 4 5 6; do
   room=$(grep -a "current room changed" $L/controller.log | tail -1 | awk '{print $NF}')
   echo "leg $leg through $cur: $r  (now in $room)"
   [ "$r" = "FAILED" ] && break
+  # Park between legs: the passage hands back to AffordancesOnly, and free exploration between legs wedged the robot in
+  # the new room's furniture (try84 leg 3) — this test measures the door crossing, not the exploration.
+  echo stop > $B/controller/remote_cmd.txt
   sleep 15; cur=$(grep -a -o "entry mirror door_[0-9]* is now" $L/door_concept.log | tail -1 | awk '{print $3}')
   sleep 25
 done

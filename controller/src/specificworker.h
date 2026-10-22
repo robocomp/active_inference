@@ -151,6 +151,8 @@ private:
 		std::string door;     ///< cross: the door the passage was started through
 		std::string reason;   ///< refused: why, in words a person can act on
 		std::uint64_t motion_id = 0;   ///< move: RelativeMotion::View::id of the run started
+		std::string object;            ///< approach: the object
+		std::uint64_t approach_id = 0; ///< approach: ApproachOrder::View::id of the order started
 	};
 	MissionResult run_mission_command(const std::string &text, const char *source);
 	/// run_mission_command's grammar itself; run_mission_command adds the episodic journal's record of what it did.
@@ -159,6 +161,8 @@ private:
 	void abort_all(const char *source);
 	/// The door-passage start shared by `cross door_N` and a mission's cross / open (the door must exist).
 	MissionResult start_door_passage(const std::string &door, rc::DoorPassage::Step stop_after, const char *source, bool then_affordances = false);
+	/// `approach <object> [from <side>]` and a mission's approach: the object must offer its approach and list the side.
+	MissionResult start_approach(const std::string &object, const std::string &side, const char *source, rc::ApproachOrder::After after);
 	/// The relative-motion start shared by `move` / `turn` and a mission's move (text in RelativeMotion's grammar).
 	MissionResult start_relative_motion(const std::string &text, const char *source);
 
@@ -181,6 +185,7 @@ private:
 		std::string door_;                 ///< cross / open: the door the passage runs through
 		std::uint64_t target_epoch_ = 0;   ///< go_to: ControllerSession::manual_target_status().epoch it set
 		std::uint64_t motion_id_ = 0;      ///< move: RelativeMotion::View::id it started
+		std::uint64_t approach_id_ = 0;   // approach: the ApproachOrder this leaf started
 		std::string room_;                 ///< explore: the room it explores (leaving it ends the step)
 		/// The episodic journal's StepStart text for what start() resolved (R3): {"target","grounding"}.
 		void ground(const rc::mission::Step &leaf, const std::string &target, const QJsonObject &grounding);

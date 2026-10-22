@@ -280,6 +280,8 @@ struct TableInstance
     // Contour channel, this cycle. *_n = 0 means NOT MEASURED, never "refuted".
     float dbg_ct_edge_excess = 0.0f, dbg_ct_depth_verdict = 0.0f, dbg_ct_depth_bias_m = 0.0f, dbg_ct_dL = 0.0f;
     int   dbg_ct_edge_n = 0, dbg_ct_depth_n = 0;
+    float dbg_bsm_p = -1.0f, dbg_bsm_n_c = 0.0f, dbg_bsm_n_own = 0.0f;   // blind-spot map answer (-1 = not queried)
+    float dbg_bsm_az = 0.0f, dbg_bsm_el = 0.0f, dbg_bsm_lr = 0.0f;       // …and the viewpoint it was asked at
     float dbg_ex_pclear  = 1.0f;   // P(score clears the cutoff | grade), already folded into dbg_ex_pdetect
 
     // ── Predicted in-image table ROI (current model projected through the camera extrinsic) ───────

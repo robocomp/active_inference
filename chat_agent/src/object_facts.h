@@ -44,6 +44,9 @@ struct ObjectFact
     std::optional<double> dist_m{};      ///< from the robot (body frame), when the transform resolves
     std::optional<double> bearing_deg{}; ///< 0 = ahead, + = left
     std::optional<float> width_m{}, depth_m{}, height_m{};
+    std::string approach_sides{};        ///< its approach affordance's sides with labels as seen now (approach.h sides_line)
+    std::string shape{};                 ///< obj_shape ("round" | "square" for a table top), "" = not stated
+    std::optional<float> shape_prob{};   ///< obj_shape_prob: P(shape), 0.5 = undecided
 };
 
 /// Body frame: x right, y FORWARD. Bearing 0 = straight ahead, + = to the left. (Doors use the same words.)
@@ -70,7 +73,7 @@ inline std::string motion_line(float advance_mps, float side_mps, float angular_
                        advance_mps < 0 ? "backward" : "forward", std::abs(advance_mps), std::abs(side_mps), turn);
 }
 
-/// "chair_1 (chair) 2.1 m, +35 deg ahead-left, 0.45x0.50x0.90 m"
+/// "table_1 (table) 2.1 m, +35 deg ahead-left, 1.20x0.70x0.75 m, square top (p 0.93)"
 inline std::string object_line(const ObjectFact& o, bool with_subtype = true)
 {
     std::string s = o.name;
@@ -80,6 +83,12 @@ inline std::string object_line(const ObjectFact& o, bool with_subtype = true)
     else s += " position unknown";
     if (o.width_m.has_value() and o.depth_m.has_value() and o.height_m.has_value())
         s += std::format(", {:.2f}x{:.2f}x{:.2f} m", *o.width_m, *o.depth_m, *o.height_m);
+    if (not o.approach_sides.empty()) s += ", approach sides: " + o.approach_sides;
+    if (not o.shape.empty())
+    {
+        s += ", " + o.shape + (o.subtype == "table" ? " top" : " shape");
+        if (o.shape_prob.has_value()) s += std::format(" (p {:.2f})", *o.shape_prob);
+    }
     return s;
 }
 

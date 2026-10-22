@@ -19,6 +19,7 @@
 #include <Eigen/Dense>
 
 #include "chair_model.h"
+#include "../../common/pragmatic_affordance/object_approach.h"   // rc::pragmatic::ObjectApproach (SHARED)
 #include "../../common/existence_belief/existence_belief.h"   // rc::exist::ExistenceBelief        // ChairModel / ChairState
 #include "chair_belief.h"       // rc::ChairBelief (AI2 recursive-Laplace belief)
 #include "../../common/object_affordance/object_affordance.h"   // rc::ObjectAffordance (SHARED)
@@ -165,6 +166,10 @@ struct ChairInstance
     std::vector<Eigen::Vector3f> last_residual_pts;
     // Epistemic action request published to DSR (filled by the epistemic planner).
     ObjectAffordance affordance;
+    // The chair's ONE pragmatic `approach` (aff_<chair>_approach): front (the seat side), left, back, right as options
+    // inside it, the front first once the yaw is known well enough to name it; else its box faces. Never selected
+    // by default — only when a command or mission asks to approach this chair (2026-10-18).
+    rc::pragmatic::ObjectApproach approach;
 
     // ── Active-perception aids for the controller's local lock-on search ──────────
     // Detection aliveness: how recently YOLO produced a "chair" mask for this instance, and the

@@ -84,6 +84,14 @@ struct Dir
             {"right", at(front_yaw - q)}};
 }
 
+/// Is a fronted object's front known? Its sides are 90° apart, so "front" names the right side while the yaw error
+/// stays within ±45°; at 2σ (~95 %, k as above) that is 2·σ_yaw < π/4. Otherwise the front may be a side, and the
+/// object is approached by its box faces instead.
+[[nodiscard]] inline bool front_known(float yaw_sigma)
+{
+    return std::isfinite(yaw_sigma) and 2.0f * yaw_sigma < std::numbers::pi_v<float> / 4;
+}
+
 /// A frontless object's four box faces, each named by the room axis its outward normal is nearest (xp, yp, xn, yn).
 /// A table's fitted yaw has a 180° symmetry, so names from its own axes would swap on a refit; room-axis names do
 /// not. Near 45° a face would be renamed on noise, so a name is kept until the yaw is past 45° by 2σ of itself.

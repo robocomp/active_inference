@@ -385,6 +385,12 @@ struct TableConfig
     // Symmetric: holds a table YOLO stops labelling in a turn, refutes one over blank floor.
     bool  existence_contour_check    = true;
 
+    // LEARNED BLIND-SPOT MAP (common/detectability/BLIND_SPOT_MAP.md): P(YOLO fires | table present, viewpoint),
+    // learned from frames where the contour channel proves the table is there; replaces the geometric prior in
+    // the absence weight. Persisted per class in existence_blind_spot_file (relative to the working directory).
+    bool        existence_blind_spot_map  = true;
+    std::string existence_blind_spot_file = "etc/blind_spot_map_table.csv";
+
     // ── RT-edge covariance upload ─────────────────────────────────────────────────────────────────
     // Upload the table pose covariance onto the room→table RT edge (rt_covariance_att, 6×6 SE3), mapped from
     // the belief's full Σ over [cx,cy,H,w,h,yaw]: x←cx, y←cy, z←H/2, yaw←ψ; roll/pitch are unobservable (large).

@@ -20,7 +20,7 @@
 /**
  * bottle_concept — Active Inference agent for bottle instance detection.
  *
- * Reads YOLO masks (the "masks" DSR node written by the retina), selects the
+ * Reads YOLO masks (the per-camera mask DSR nodes written by the retina), selects the
  * slices labelled "bottle", and fits a vertical-cylinder generative model
  * (5-param state + cylinder SDF) by free-energy minimisation. The fitted pose
  * AND its Laplace-curvature covariance (P_bottle) are written on the room→bottle
@@ -219,6 +219,7 @@ private:
     std::chrono::steady_clock::time_point last_monitor_tp_{};   // ~5 Hz dashboard tick
     std::chrono::steady_clock::time_point last_compute_tp_{};   // compute-rate estimate for the strip
     FPSCounter                            fps_counter_;         // overall compute()-cycle rate (std::cout heartbeat)
+    void build_dashboard();             // SHARED construction (specificworker_dashboard.cpp)
     void restore_dashboard_geometry();
     void save_dashboard_geometry() const;
 

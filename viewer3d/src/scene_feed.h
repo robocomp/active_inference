@@ -94,7 +94,8 @@ private:
     std::optional<Mat::RTMat> room_T_zed_extrapolated(DSR::InnerEigenAPI* eigen,
                                                       const std::string& room_name,
                                                       const std::string& robot_name,
-                                                      std::uint64_t stamp) const;
+                                                      std::uint64_t stamp,
+                                                      const std::string& camera_name = "zed") const;
 
     void update_room_polygon_in_viewers();
     void update_viewer_graph_object_boxes(std::span<const GraphObjectBox> graph_boxes);

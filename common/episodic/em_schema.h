@@ -49,6 +49,16 @@ struct Event
     bool operator==(const Event&) const = default;
 };
 
+/// THE SCENE (2026-10-18): what the robot believes is there when an action starts and once its consequences settled —
+/// the context a world model conditions on. things = names of the live nodes of kEventNodeTypes except affordances
+/// (rooms, doors, objects...); offered = names of the affordance nodes present. Both sorted. Names, not types: the
+/// type is the name's stem ("door_5" → door), and the instance keeps identity for whoever needs it.
+struct Scene
+{
+    std::vector<std::string> things, offered;
+    bool operator==(const Scene&) const = default;
+};
+
 struct Record
 {
     std::string id, parent;                     // id "<YYYYMMDD>-<seq>", parent "" for a mission
@@ -81,6 +91,9 @@ struct Record
     std::string room_after;
     std::optional<std::uint64_t> t_post;
     bool settled = false;
+    // Steps and claims only: the scene at open (scene_pre) and with the state after (scene_post, re-read at settling).
+    // Absent = not read (missions, records older than this field, a FactSource without a scene).
+    std::optional<Scene> scene_pre, scene_post;
     bool operator==(const Record&) const = default;
 };
 
@@ -131,6 +144,32 @@ inline QJsonArray facts_json(const std::vector<Fact>& fs)
     return a;
 }
 
+inline QJsonArray strings_json(const std::vector<std::string>& v)
+{
+    QJsonArray a;
+    for (const std::string& x : v) a.append(q(x));
+    return a;
+}
+
+inline std::vector<std::string> strings_from(const QJsonValue& v)
+{
+    std::vector<std::string> out;
+    for (const QJsonValue& e : v.toArray()) out.push_back(s(e));
+    return out;
+}
+
+inline QJsonObject to_json(const Scene& sc)
+{
+    return QJsonObject{{"things", strings_json(sc.things)}, {"offered", strings_json(sc.offered)}};
+}
+
+inline std::optional<Scene> scene_from(const QJsonValue& v)
+{
+    if (not v.isObject()) return std::nullopt;
+    const QJsonObject o = v.toObject();
+    return Scene{.things = strings_from(o["things"]), .offered = strings_from(o["offered"])};
+}
+
 inline std::vector<Fact> facts_from(const QJsonValue& v)
 {
     std::vector<Fact> out;
@@ -174,6 +213,8 @@ inline QJsonObject to_json(const Record& r)
     if (not r.room_after.empty()) o["room_after"] = q(r.room_after);
     if (r.t_post) o["t_post"] = double(*r.t_post);
     if (r.settled) o["settled"] = true;
+    if (r.scene_pre) o["scene_pre"] = to_json(*r.scene_pre);
+    if (r.scene_post) o["scene_post"] = to_json(*r.scene_post);
     return o;
 }
 
@@ -220,6 +261,8 @@ inline std::optional<Record> record_from_json(const QJsonObject& o)
     r.room_after = s(o["room_after"]);
     if (o["t_post"].isDouble()) r.t_post = std::uint64_t(o["t_post"].toDouble());
     r.settled = o["settled"].toBool(false);
+    r.scene_pre = scene_from(o["scene_pre"]);
+    r.scene_post = scene_from(o["scene_post"]);
     return r;
 }
 

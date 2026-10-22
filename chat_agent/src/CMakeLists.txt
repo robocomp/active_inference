@@ -5,12 +5,14 @@ set(ACTIVE_INFERENCE_COMMON_DIR "${CMAKE_CURRENT_LIST_DIR}/../../common")
 add_subdirectory(${ACTIVE_INFERENCE_COMMON_DIR} ${CMAKE_CURRENT_BINARY_DIR}/ai_common EXCLUDE_FROM_ALL)
 
 # The ollama HTTP client is QNetworkAccessManager (libcurl / nlohmann are not installed here).
-find_package(Qt6 REQUIRED COMPONENTS Network Widgets)
+find_package(Qt6 REQUIRED COMPONENTS Network Widgets OpenGL OpenGLWidgets)
 
 LIST(APPEND LIBS
   ai_common::presence     # agent presence monitor + coordinator
   ai_common::core         # header-only helpers (room_resolve, world_query, graph_provenance)
   ai_common::media        # zero-copy media plane — the ZED / Ricoh frames the look() tool shows the model
+  ai_common::obj          # OBJ loader — the canvas' 3-D page (canvas_model.cpp)
+  Qt6::OpenGL Qt6::OpenGLWidgets   # common/viewers/gl_mesh_viewer.h on that page
   Qt6::Network
 )
 
@@ -30,6 +32,11 @@ LIST(APPEND SOURCES
   ../src/intention_node.cpp
   ../src/camera_grabber.cpp
   ../src/plan_view.cpp
+  ../src/canvas_panel.cpp
+  ../src/canvas_runner.cpp
+  ../src/canvas_snapshot.cpp
+  ../src/canvas_model.cpp
+  ../src/canvas_lidar.cpp
   ../src/mission_watch.cpp
   ../src/system_reader.cpp
 )

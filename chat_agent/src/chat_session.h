@@ -16,6 +16,9 @@
  * An accepted call is sent at once: no confirmation card since 2026-10-18 (command_gate.h); "stop" halts the robot.
  * Read-only queries, answered here from the digest without the controller:
  * find_objects(subtype?) and where_is(name) (object_facts.h).
+ * show(name) / draw(script) put a picture on the side canvas for the PERSON (canvas_runner.h runs the script against
+ * a snapshot, canvas_snapshot.h); a failed script returns its stderr and the model gets up to two re-asks WITH tools
+ * to fix it. "show me the zed camera / the room / the plan" never reach the model (canvas_commands.h).
  * look(camera?) is read-only too: the newest frame of the front (ZED) or 360 (Ricoh) camera is shrunk, JPEG-encoded
  * and attached to its tool result; the follow-up request, always made then, shows it to the model (look_messages.h
  * has the message layout and the one-turn lifetime of an image; camera_grabber.h the media-plane side).
@@ -46,6 +49,7 @@
 #include <QJsonArray>
 #include <QJsonObject>
 #include <QObject>
+#include <QProcess>
 #include <QString>
 #include <QTimer>
 
@@ -53,9 +57,13 @@
 #include <dsr/api/dsr_inner_eigen_api.h>
 
 #include "camera_grabber.h"
+#include "canvas_commands.h"
+#include "canvas_lidar.h"
+#include "canvas_runner.h"
 #include "chat_log.h"
 #include "chat_window.h"
 #include "command_gate.h"
+#include "fleet_control.h"
 #include "../../common/episodic/em_answers.h"
 #include "intention_node.h"
 #include "mission_watch.h"
@@ -83,6 +91,23 @@ struct SessionConfig
     int look_max_side = 1280;          ///< look(): front frame shrunk to this longest side (px); see image_prep.h
     int look_max_side_360 = 1280;      ///< look(): the same for the 2:1 panorama
     int look_jpeg_quality = 80;
+    std::string canvas_dir = "canvas";   ///< bootstrap.py, rcanvas.py, stock/, library/ (canvas_runner.h)
+    int canvas_timeout_ms = 10000;       ///< a canvas script is killed after this long
+    int canvas_live_period_ms = 100;     ///< live drawings redraw at most this often (a redraw in flight skips a tick)
+    std::string canvas_memory_max = "1G";
+    int gpu_period_ms = 2000;            ///< status bar's GPU memory poll (nvidia-smi takes ~50 ms; 2 s is plenty to watch)
+    // agent_control (fleet_control.h): the agents the chat may start / stop, each as <fleet_dir>/<agent>/bin/<agent>
+    std::string fleet_dir = "..";
+    std::string fleet_agents = "room_concept,residual_concept,retina,door_concept,table_concept,chair_concept,"
+                               "bottle_concept,cabinet_concept,hood_concept,human_concept,refrigerator_concept,controller,"
+                               "ltsm_agent,episodic_agent";
+    std::string fleet_confirm = "controller,retina";
+    std::string fleet_lock;               ///< "" ⇒ $XDG_RUNTIME_DIR/ai_fleet_tour.lock (the tour scripts hold it)
+    std::string fleet_log_dir = "logs/agents";
+    // sim_door (sim_door.h): the simulator's DoorControl; "" = no sim_door tool (the real robot)
+    std::string sim_door_endpoint = "doorcontrol:tcp -h localhost -p 10017";
+    std::string sim_door_script = "tools/sim_door.py";
+    double sim_door_match_max_m = 1.0;   ///< nearest Webots door farther than this ⇒ refused (doors are >= 2.5 m apart)
 };
 
 class ChatSession
@@ -102,7 +127,8 @@ private:
     // ── the three entry points from the window ──
     void on_user_text(const QString& text);
 
-    void ask_model(bool followup);
+    /// offer_tools=false only for the retry of a follow-up that answered with a call instead of words.
+    void ask_model(bool followup, bool offer_tools = true);
     /// Runs every call, pushes the tool results. Returns true if one of them attached an image (look()).
     bool handle_tool_calls(const QJsonArray& calls);
     QJsonArray tools_json() const;
@@ -124,8 +150,28 @@ private:
     QString answer_query(const QString& name, const QJsonObject& args);
     /// look(camera?) → the tool-result text; on success the JPEG is left in look_jpeg_ for the tool message.
     QString do_look(const QJsonObject& args);
+    /// show(name, args?, live?) / draw(script, title, live?) → the tool-result text; the picture goes to the canvas.
+    QString do_draw(const QString& tool, const QJsonObject& args);
+    QString do_table(const QJsonObject& args);   ///< the table tool: stock/table.py with the model's rows
+    /// Run `job` now and put its picture on the canvas; "" on success, else why (also shown on the canvas).
+    QString draw_now(CanvasJob job, bool savable);
+    void show_request(const ShowRequest& r, const QString& text);   ///< the canvas fast path
+    QString show_model(const std::string& what);   ///< the 3-D page (canvas_model.h); "OK: …" or "ERROR: …"
+    QString show_lidar(const std::string& which);  ///< the point-cloud page (canvas_lidar.h): helios | bpearl | both
+    void canvas_stop();   ///< stop whatever the canvas keeps live: a script worker, the camera, the lidars
+    std::optional<CanvasJob> library_job(const QString& name, const QStringList& args) const;
+    QStringList canvas_library() const;   ///< stock + saved script names
+    void write_canvas_inputs(const CanvasJob& job);
+    void tick_canvas();                   ///< live re-run
+    void save_canvas_script(const QString& name);
     /// approach_object: pick the object, put a standpoint short of it, send a one-step go_to mission (approach.h).
     QString do_approach(const QJsonObject& args);
+    /// go_around_object: a loop of go_to stops around an object, back to the start (approach.h go_around_mission).
+    QString do_go_around(const QJsonObject& args);
+    /// sim_door: the door's world pose through the sim witness → tools/sim_door.py, async; told by on_sim_door_done.
+    QString do_sim_door(const QJsonObject& args);
+    void on_sim_door_done(int code);
+    [[nodiscard]] bool sim_door_available() const;   ///< endpoint configured AND robot_gt_* on the robot node (sim)
     /// episodes / episode / outcome_stats / last_episode → the tool-result text; "" if `name` is not one of them.
     QString answer_memory(const QString& name, const QJsonObject& args) const;
     /// Today's records + the all-time stats from the domain-4 graph; nullopt when it is not joined.
@@ -133,6 +179,12 @@ private:
     void tick_status();
     void ping_llm();
     void refresh_status_bar();
+    void poll_gpu();   ///< start an nvidia-smi query unless one is still running; its result lands in gpu_label_
+    /// agent_control: start / stop / restart a fleet agent (fleet_control.h); the outcome is told later by tick_fleet.
+    QString do_agent_control(const QJsonObject& args);
+    void tick_fleet();
+    bool launch_agent(const std::string& agent);   ///< `cd <agent> && setsid bin/<agent> etc/config.toml`, detached
+    [[nodiscard]] QString agent_log(const std::string& agent) const;
 
     std::shared_ptr<DSR::DSRGraph> G_;
     std::shared_ptr<DSR::DSRGraph> em_G_;   ///< episodic memory (domain 4), nullptr = not joined
@@ -148,6 +200,18 @@ private:
     ChatLog log_;
     CameraGrabber cameras_;
     SystemReader system_{G_, cameras_};   ///< agents / sensors / graph / inspect (after cameras_: it reads their rates)
+    CanvasRunner canvas_runner_;
+    CanvasJob canvas_job_;          ///< what the canvas shows now (re-run while live)
+    std::optional<Camera> canvas_camera_;   ///< the stock camera drawing: frames shown directly, no script
+    LidarGrabber lidars_{G_};               ///< the point-cloud page's subscribers (made only while it shows)
+    bool canvas_lidar_ = false;             ///< the point-cloud page is up: the canvas timer polls lidars_
+    bool lidar_logged_ = false;             ///< its first frame has been logged
+    bool canvas_live_ = false;
+    bool canvas_savable_ = false;
+    int draw_repairs_ = 0;          ///< model re-asks after a failed draw, this user message (cap kMaxDrawRepairs)
+    int lost_answers_ = 0;          ///< model answers this user message that came back empty (one is re-asked)
+    bool draw_failed_ = false;      ///< a draw in the current tool round failed
+    QTimer canvas_timer_;
     QByteArray look_jpeg_;   ///< set by do_look(), attached to that call's role:"tool" message
     QObject ctx_;
     QTimer digest_timer_, status_timer_, ping_timer_;
@@ -168,6 +232,7 @@ private:
         QString content;
         QJsonArray tool_calls;
         bool followup = false;
+        bool offer_tools = true;
         bool streaming = false;
         bool carries_image = false;   ///< this request sent an image ⇒ strip it from the history when it ends
     } turn_;
@@ -182,6 +247,16 @@ private:
     bool controller_present_ = false;
     bool ollama_ok_ = false;
     QString ollama_msg_ = "checking…";
+    QString gpu_label_ = QStringLiteral("GPU n/a");   ///< whole-GPU memory, from gpu_memory.h
+    QTimer gpu_timer_;
+    QProcess gpu_proc_;   ///< the async nvidia-smi query (never waited on in the GUI thread)
+    fleet::Policy fleet_policy_;
+    fleet::Confirmations fleet_confirmations_;
+    std::optional<fleet::Op> fleet_op_;   ///< the start / stop / restart in progress
+    QTimer fleet_timer_;
+    QProcess sim_door_proc_;     ///< the sim_door.py request in flight (never waited on in the GUI thread)
+    QString sim_door_what_;      ///< "open door_1" — what the in-flight request is for
+    std::uint64_t user_turn_ = 0;          ///< messages typed by the person: a yes must come in a later one
 };
 
 }   // namespace rc::chat

@@ -500,6 +500,67 @@ void selector_release_every_filter_and_missing_node(TestFailure &failure)
     (void)controller.select_target(graph);
     failure.expect(controller.current_name().empty(), "a current claim whose node is gone must be forgotten");
 }
+
+// ★ A PARAMETERISED AFFORDANCE (2026-10-18): one `approach` node lists its sides as options (aff_option_*, the default
+//   first). A consumer that requires an option drives to THAT option's pose and names it on its executing edge; an
+//   option the producer does not list is not on offer; no option = the node's own target, the default.
+void required_option_selects_its_pose_and_names_it_on_the_claim(TestFailure &failure)
+{
+    auto [graph, room_id] = create_graph_fixture();
+    if (not rc::AffordanceManager::own_agent_node_id(graph).has_value())
+    {
+        DSR::Node agent = DSR::Node::create<agent_node_type>("option_test_agent");
+        graph->add_or_modify_attrib_local<agent_id_att>(agent, static_cast<std::uint32_t>(graph->get_agent_id()));
+        graph->add_or_modify_attrib_local<level_att>(agent, 0);
+        failure.expect(graph->insert_node(agent).has_value(), "could not insert the test agent node");
+    }
+    rc::AffordanceManager producer{"aff_table_1_approach"};
+    failure.expect(producer.publish_target(graph, room_id, 1.f, 1.f, 0.f, 0.3f), "producer failed to publish");
+    auto n = graph->get_node("aff_table_1_approach");
+    failure.expect(n.has_value(), "approach node missing");
+    if (not n.has_value()) return;
+    graph->add_or_modify_attrib_local<aff_kind_att>(*n, std::string("approach"));
+    graph->add_or_modify_attrib_local<aff_option_names_att>(*n, std::string("xn,yp"));
+    graph->add_or_modify_attrib_local<aff_option_x_m_att>(*n, std::vector<float>{1.f, 3.f});
+    graph->add_or_modify_attrib_local<aff_option_y_m_att>(*n, std::vector<float>{1.f, 4.f});
+    graph->add_or_modify_attrib_local<aff_option_yaw_rad_att>(*n, std::vector<float>{0.f, -1.5f});
+    graph->update_node(*n);
+    const auto id = n->id();
+    const auto edge_option = [&]() -> std::optional<std::string>
+    {
+        for (const auto &e : graph->get_edges_to_id(id))
+            if (e.type() == "executing") return graph->get_attrib_by_name<executing_option_att>(e);
+        return std::nullopt;
+    };
+
+    {   // an option the producer does not list is not on offer: nothing is selected, nothing claimed
+        rc::AffordanceManager controller;
+        controller.set_required_name("aff_table_1_approach", "back");
+        failure.expect(not controller.select_target(graph).has_value(), "an unlisted option must not be selected");
+        expect_protocol_state(graph, "aff_table_1_approach", false, true, failure);
+    }
+    {   // the listed option: its pose, and its name on the claim
+        rc::AffordanceManager controller;
+        controller.set_required_name("aff_table_1_approach", "yp");
+        const auto t = controller.select_target(graph);
+        failure.expect(t.has_value(), "the required option was not selected");
+        if (t.has_value())
+            failure.expect(std::abs(t->room_pos.x() - 3.f) < 1e-4f and std::abs(t->room_pos.y() - 4.f) < 1e-4f
+                           and std::abs(t->yaw_rad + 1.5f) < 1e-4f, "the target is not the option's pose");
+        failure.expect(controller.publish_executing(graph, id, 1, 3.f, 4.f, -1.5f), "claim failed");
+        failure.expect(edge_option() == std::optional<std::string>("yp"), "the claim does not name the option");
+        failure.expect(controller.release_execution_claim(graph), "release failed");
+    }
+    {   // no option: the node's own target (the default), and the claim names none
+        rc::AffordanceManager controller;
+        controller.set_required_name("aff_table_1_approach");
+        const auto t = controller.select_target(graph);
+        failure.expect(t.has_value() and std::abs(t->room_pos.x() - 1.f) < 1e-4f, "without an option the default pose is the target");
+        failure.expect(controller.publish_executing(graph, id, 1, 1.f, 1.f, 0.f), "default claim failed");
+        const auto o = edge_option();
+        failure.expect(not o.has_value() or o->empty(), "a claim without an option must not name one");
+    }
+}
 } // namespace
 
 int main()
@@ -518,6 +579,7 @@ int main()
         selector_releases_a_claim_its_filter_excludes(failure);
         complete_claim_checks_ownership(failure);
         selector_release_every_filter_and_missing_node(failure);
+        required_option_selects_its_pose_and_names_it_on_the_claim(failure);
     }
     catch (const std::exception &e)
     {

@@ -24,6 +24,14 @@ Today the only way to "go to the table" is chat's `approach_object` (de009540): 
 4. **After an approach:** **hold position** (Command mode with no order: the robot stays, it does not forage).
    Inside a mission the leaf succeeds and the mission goes on.
 5. **Pilot:** **chair_concept** (it has a front: the seat side, from its estimated yaw).
+6. **One node, sides as parameters inside it** (user, 2026-10-18 — supersedes the node-per-side table in §1.2):
+   `aff_<object>_approach` lists the sides it can serve in `aff_option_names` (comma-separated, **the default
+   first**) with parallel `aff_option_x_m` / `_y_m` / `_yaw_rad`; the node's `epistemic_target_*` is the default.
+   The consumer names its choice in `executing_option` on its `executing` edge. Five new cortex attributes
+   (registered in cortex source, `dsr_attr_name.h`; the user reinstalls). A side that does not fit is simply not
+   listed. Implemented: `common/pragmatic_affordance/object_approach.{h,cpp}` + `tests/test_object_approach.cpp`.
+   ⚠ Not in `ai_common_affordance` until the reinstall (the CMake note there: a unit using unregistered
+   attributes breaks every agent's build).
 
 ## What exists (verified 2026-10-18)
 

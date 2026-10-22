@@ -1,4 +1,5 @@
 #include "scene_feed.h"
+#include "../../common/mask_ingestor/mask_nodes.h"   // rc::masks::find_mask_nodes (one mask node per camera)
 #include "../../common/room_resolve/room_resolve.h"   // rc::room::current_room (proto-aware, deterministic)
 
 #include "voxel_opengl_viewer.h"
@@ -50,7 +51,8 @@ std::string object_class_of(DSR::DSRGraph& g, const DSR::Node& node)
 std::optional<Mat::RTMat> SceneFeed::room_T_zed_extrapolated(DSR::InnerEigenAPI* eigen,
                                                                   const std::string& room_name,
                                                                   const std::string& robot_name,
-                                                                  std::uint64_t stamp) const
+                                                                  std::uint64_t stamp,
+                                                                  const std::string& camera_name) const
 {
     if (eigen == nullptr || room_name.empty() || robot_name.empty())
         return std::nullopt;
@@ -85,9 +87,9 @@ std::optional<Mat::RTMat> SceneFeed::room_T_zed_extrapolated(DSR::InnerEigenAPI*
             return std::nullopt;
     }
 
-    // robot→zed is the rigid, static camera extrinsic → query "latest" (ts==0) on the CALLER's own instance,
+    // robot→camera is the rigid, static camera extrinsic → query "latest" (ts==0) on the CALLER's own instance,
     // so the ts==0 cache stays per-thread; the extrinsic never changes so a stale cache is harmless.
-    const auto robot_T_zed = eigen->get_transformation_matrix(robot_name, "zed", 0);
+    const auto robot_T_zed = eigen->get_transformation_matrix(robot_name, camera_name, 0);
     if (!robot_T_zed.has_value())
         return std::nullopt;
 
@@ -550,7 +552,7 @@ void SceneFeed::update_viewer_mask_points()
     if (voxel_viewer_ == nullptr || graph_ == nullptr)
         return;
 
-    // The masks node carries the mask support points (flat xyz, room frame) as a runtime attribute.
+    // The mask nodes carry the mask support points (flat xyz, each in its own camera frame) as a runtime attribute.
     // Draw the object slices — the YOLO concept targets "bottle"/"table"/"chair" AND every YOLO-sem
     // furniture mask (class_id >= 1000, produced by SemanticMaskStage: cabinet/hood/shelf/…) — so the
     // Masks toggle shows them; other detections are clutter here. Coloured by color_for_category. Per-mask
@@ -560,8 +562,13 @@ void SceneFeed::update_viewer_mask_points()
     std::vector<QVector3D>   mask_points;
     std::vector<std::string> mask_categories;   // parallel to mask_points → per-class colour in the viewer
     std::vector<float>       mask_sources;       // parallel to mask_points → sensor source (0=zed, 1=ricoh) → brightness
-    if (const auto masks_node = graph_->get_node("masks"); masks_node.has_value())
+    // One mask node PER CAMERA (discovered through the rgbd cameras, never by name); each node's points are
+    // in ITS camera's frame and are transformed with that camera's own pose at that node's capture stamp.
+    for (const auto& mref : rc::masks::find_mask_nodes(*graph_))
     {
+        const auto masks_node = graph_->get_node(mref.id);
+        if (not masks_node.has_value())
+            continue;
         // TYPE-ATTRIBUTED reads (CLAUDE.md), compile-checked against dsr_attr_name.h.
         const auto pts_opt    = graph_->get_attrib_by_name<mask_support_points_cam_att>(masks_node.value());
         const auto mts_opt    = graph_->get_attrib_by_name<mask_timestamp_ms_att>(masks_node.value());
@@ -569,22 +576,22 @@ void SceneFeed::update_viewer_mask_points()
         const auto labels_opt = graph_->get_attrib_by_name<mask_labels_att>(masks_node.value());
         const auto ids_opt    = graph_->get_attrib_by_name<mask_label_ids_att>(masks_node.value());  // class_id per mask; semantic masks use 1000+ade_id
         const auto src_opt    = graph_->get_attrib_by_name<mask_source_att>(masks_node.value());     // optional (older producers omit it → treated as zed/bright)
-        // The producer publishes these in the ZED/CAMERA frame now, so the VIEWER pays for the room
+        // The producer publishes these in the node's CAMERA frame, so the VIEWER pays for the room
         // transform — pinned to the mask capture stamp, not "latest", or the cloud lags the robot pose
         // and shimmers under motion. No transform ⇒ draw nothing, rather than dump camera-frame points
         // into a room-frame scene (they would appear glued to the origin).
-        std::optional<Mat::RTMat> room_T_zed;
+        std::optional<Mat::RTMat> room_T_cam;
         if (inner_eigen_api_ != nullptr and pts_opt and not pts_opt->get().empty())
         {
             std::string room_name, robot_name;
             { room_name = room_node_name_; robot_name = robot_node_name_; }
             const std::uint64_t mts = mts_opt ? mts_opt.value() : 0;
-            room_T_zed = room_T_zed_extrapolated(inner_eigen_api_, room_name, robot_name, mts);
+            room_T_cam = room_T_zed_extrapolated(inner_eigen_api_, room_name, robot_name, mts, mref.camera);
         }
-        if (pts_opt and off_opt and labels_opt and room_T_zed.has_value())
+        if (pts_opt and off_opt and labels_opt and room_T_cam.has_value())
         {
-            const Eigen::Matrix3f Rz = room_T_zed->linear().cast<float>();
-            const Eigen::Vector3f tz = room_T_zed->translation().cast<float>();
+            const Eigen::Matrix3f Rz = room_T_cam->linear().cast<float>();
+            const Eigen::Vector3f tz = room_T_cam->translation().cast<float>();
             const auto& flat    = pts_opt->get();
             const auto& offsets = off_opt->get();
             const std::vector<float> empty_src;

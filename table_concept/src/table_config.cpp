@@ -337,6 +337,8 @@ TableConfig load_table_config(const ConfigLoader& cfg)
             "how much a table's logit YOLO score moves with the viewpoint (measured ~0.5 in a turn)");
     out.existence_contour_check       = getb("TableModel.ExistenceContourCheck", out.existence_contour_check,
             "score the tabletop's projected outline against ZED RGB edges + depth (YOLO-blind rescue)", rc::cfg::experiment);
+    out.existence_blind_spot_map      = getb("TableModel.ExistenceBlindSpotMap", out.existence_blind_spot_map,
+            "weight absence by the LEARNED P(detect | viewpoint), labelled by the contour channel", rc::cfg::experiment);
 
     std::print("table_concept: configuration loaded.\n");
     // Peripheral (ricoh) existence confirmation — see table_config.h. OFF by default.

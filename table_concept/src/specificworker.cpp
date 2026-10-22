@@ -146,6 +146,9 @@ void SpecificWorker::request_shutdown()
 
     save_window_settings();
     save_dashboard_geometry();   // the standalone dashboard is not in `windows`, so save it explicitly
+    if (existence_ and cfg_.existence_blind_spot_map)   // the class map survives the run (BLIND_SPOT_MAP.md §7)
+        std::print("table_concept: blind-spot map {} ({})\n", cfg_.existence_blind_spot_file,
+                   existence_->save_blind_spot_map() ? "saved" : "SAVE FAILED");
     save_strip_geometry();       // …nor is the compact belief strip
 
     cleanup_owned_nodes();
@@ -226,15 +229,12 @@ void SpecificWorker::initialize()
     rt_api_ = G->get_rt_api();
     inner_eigen_ = G->get_inner_eigen_api();
     mask_ingestor_ = std::make_unique<rc::MaskIngestor>(G);
-    // A/B ONLY (Masks.legacy_room_frame): read the producer's pre-flip ROOM-frame array instead of
-    // transforming the camera-frame one here. Announce it — a silent A/B knob is how a benchmark ends up
-    // measuring the wrong build. Normal operation is false; see table_config.h.
+    // Masks.legacy_room_frame is RETIRED (2026-10-22): the retina no longer publishes a room-frame mask
+    // array and the ingestor's legacy path is gone (masks are per camera, camera-frame). Say so loudly
+    // rather than silently running the normal path under an A/B label.
     if (cfg_.masks_legacy_room_frame)
-    {
-        mask_ingestor_->set_legacy_room_frame(true);
-        std::println("[table_concept] Masks.legacy_room_frame=true — A/B baseline: reading the retina's "
-                     "ROOM-frame mask array, NOT transforming camera points here");
-    }
+        std::println(stderr, "[table_concept] WARNING: Masks.legacy_room_frame=true is RETIRED and ignored — "
+                             "masks are always read in their camera frame and transformed here");
     scene_graph_ = std::make_unique<rc::TableSceneGraph>(
         G, rt_api_.get(), cfg_, [this] { trigger_graph_layout_twopi(); });
 
@@ -274,6 +274,9 @@ void SpecificWorker::initialize()
     fitter_ = std::make_unique<rc::TableFitter>(
         G, inner_eigen_.get(), cfg_, mask_ingestor_.get(), scene_graph_.get());
     existence_ = std::make_unique<rc::TableExistence>(G, cfg_);   // evidence-based removal (existence log-odds)
+    if (cfg_.existence_blind_spot_map)
+        std::print("table_concept: blind-spot map: {} class samples loaded from {}\n",
+                   existence_->load_blind_spot_map(), cfg_.existence_blind_spot_file);
 
     // Part B: localization/chain covariance on the published RT edge (mirrors bottle_concept).
     gaussian_api_ = std::make_unique<DSR::InnerGaussianAPI>(G.get());

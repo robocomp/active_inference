@@ -35,6 +35,8 @@ struct FakeFactSource : FactSource
         return it->second;
     }
     std::string current_room() const override { return room; }
+    std::optional<Scene> scene_now;                         // nullopt = the default FactSource (no scene)
+    std::optional<Scene> scene() const override { return scene_now; }
 };
 
 Fact door(std::string node, double open_p, std::optional<double> cxx = {}, std::optional<double> cyy = {})
@@ -616,6 +618,41 @@ void test_settle_missions_and_shutdown()
     CHECK(b.on_events({}, 99999).empty());                  // nothing left to settle
 }
 
+// The scene is read at a step's / claim's open and with every state after (close and settle); missions carry none,
+// and a FactSource that cannot read one leaves both absent.
+void test_scene_pre_and_post()
+{
+    FakeFactSource fs;
+    fs.facts["door_3"] = door("door_3", 0.0);
+    fs.scene_now = Scene{.things = {"door_3", "room_1"}, .offered = {"aff_door_3_open"}};
+    Builder b(fs, ids());
+    Script s;
+    prime_mission_only(b, s, 10);
+    push_mission(s, 100);
+    push_claim(s, 120);
+    const auto o = b.on_journal(s.wire(), 130);
+    CHECK(o.size() == 2 and o[0].level == Level::Mission and not o[0].scene_pre);
+    CHECK(o.size() == 2 and o[1].level == Level::Claim and o[1].scene_pre == fs.scene_now and not o[1].scene_post);
+    fs.scene_now = Scene{.things = {"door_3", "room_1"}, .offered = {}};
+    push_claim_end(s, 200, "success");
+    const auto c = closed(b.on_journal(s.wire(), 210));
+    CHECK(c.size() == 1 and c[0].scene_post == fs.scene_now and c[0].scene_pre->offered.size() == 1);
+    fs.scene_now = Scene{.things = {"door_3", "room_1", "room_2"}, .offered = {"aff_door_3_cross"}};
+    const auto later = b.on_events({}, 210 + kSettleMs);
+    CHECK(later.size() == 1 and later[0].settled and later[0].scene_post == fs.scene_now);
+
+    FakeFactSource none;
+    none.facts["door_3"] = door("door_3", 0.0);
+    Builder b2(none, ids());
+    Script s2;
+    prime_mission_only(b2, s2, 10);
+    push_mission(s2, 100);
+    push_claim(s2, 120);
+    push_claim_end(s2, 200, "success");
+    const auto c2 = closed(b2.on_journal(s2.wire(), 210));
+    CHECK(c2.size() == 1 and not c2[0].scene_pre and not c2[0].scene_post);
+}
+
 int main()
 {
     std::setlocale(LC_ALL, "es_ES.UTF-8") or std::setlocale(LC_ALL, "");
@@ -642,6 +679,7 @@ int main()
     test_affordance_events_innermost_only();
     test_settle_rereads_state_after();
     test_settle_missions_and_shutdown();
+    test_scene_pre_and_post();
     std::println("{} checks, {} failures", checks, failures);
     return failures == 0 ? 0 : 1;
 }

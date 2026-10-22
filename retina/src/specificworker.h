@@ -124,6 +124,7 @@ class SpecificWorker : public GenericWorker
             Mat::RTMat                  room_T_ricoh = Mat::RTMat::Identity();   // ricoh pose in room (room_T_robot·robot_T_ricoh)
             bool                        ricoh_valid = false;                     // true when the ricoh node/RT resolved
             std::uint64_t               frame_ts_ms = 0;   // capture stamp of rgbd/depth — published so consumers can pin pose to capture time
+            std::vector<Eigen::Vector3f> lidar_points_robot;   // SAME points/indices as lidar_points_room, in the ROBOT frame (no localization) — feeds the ricoh depth-fill via ricoh<-robot
         };
 
         std::optional<SceneFrame> process_scene_frame(FPSCounter& compute_fps);
@@ -404,6 +405,7 @@ class SpecificWorker : public GenericWorker
         // reused; room_T_ricoh = room_T_robot · robot_T_ricoh gives the optical centre without a
         // per-frame tree walk. Empty until the ricoh node exists (config with no ricoh → config fallback).
         std::optional<Mat::RTMat> robot_T_ricoh_;
+        std::uint64_t last_ricoh_published_stamp_ = 0;   // panorama stamp last sent to masks_ricoh (publish once per NEW panorama)
         // Ricoh detection→bearing UNPROJECT now runs on the RicohYoloWorker thread (compute_bearings).
         // This CameraAPI is only for the MAIN-thread LiDAR depth-fill (reproject_cloud); cached once.
         std::unique_ptr<DSR::CameraAPI> ricoh_camera_api_;

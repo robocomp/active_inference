@@ -31,7 +31,6 @@
 
 #include "../../common/diag_log/rotating_csv.h"   // keep the previous run instead of wiping it
 
-#include "../../common/dashboard/belief_certainty.h"   // rc::dash::fill_certainty (SHARED)
 
 #include "../../common/dashboard/belief_series.h"   // rc::dash::publish_belief_series (SHARED)
 
@@ -40,17 +39,11 @@
 #include "../../common/exclusion/exclusion.h"   // rc::exclusion:: (SHARED)
 #include "../../common/footprint/footprint.h"   // rc::geom:: (SHARED)
 #include "../../common/track/merge_instances.h"   // rc::track::merge_overlapping — the SHARED merge sweep
-#include <QSize>
-#include <QVBoxLayout>
-#include <QFontMetrics>
-#include <QHBoxLayout>
-#include <QPushButton>
 #include "../../common/nbv/graph_obstacles.h"   // rc::nbv::collect_graph_obstacles — shared, DSR-side
 #include <cstdlib>   // std::_Exit for the crash-free terminal shutdown
 #include <thread>    // std::this_thread::sleep_for — let DDS flush before _Exit
 #include <chrono>
 
-#include "bottle_dof.h"   // rc::kBottleDofs — names/units for the BeliefInspector rows
 
 #include <algorithm>
 #include <array>
@@ -63,8 +56,6 @@
 
 #include <QCoreApplication>
 #include <QTimer>
-#include <QSettings>   // persist the standalone dashboard window geometry
-#include <QByteArray>
 #include <QDateTime>   // wall-clock ms for the primary-input stream gate (presence_protocol_.operating_since_ms(), stall grace)
 
 #include "../../common/instance_tracker/birth_evidence.h"   // rc::birth:: the shared CREATE policy
@@ -175,30 +166,6 @@ void SpecificWorker::terminal_shutdown()
     // now lives with the code instead of in seven copies of the same comment block.
     rc::agent::terminal_exit([this] { request_shutdown(); },
                              [this] { if (G) G->reset(); });
-}
-
-// Persist/restore the standalone dashboard window's geometry. The generated save_window_settings()
-// only covers the QMainWindow(s) in `windows`; our extracted top-level widget is separate, so we
-// carry its own QSettings entry (mirrors room_concept's RoomViewer).
-void SpecificWorker::restore_dashboard_geometry()
-{
-    if (not dashboard_window_)
-        return;
-    QSettings settings(QStringLiteral("RoboComp"), QStringLiteral("bottle_concept"));
-    const QByteArray geom = settings.value(QStringLiteral("DashboardWindow_geometry")).toByteArray();
-    if (not geom.isEmpty())
-        dashboard_window_->restoreGeometry(geom);
-    else
-        dashboard_window_->resize(1180, 900);
-}
-
-void SpecificWorker::save_dashboard_geometry() const
-{
-    if (not dashboard_window_)
-        return;
-    QSettings settings(QStringLiteral("RoboComp"), QStringLiteral("bottle_concept"));
-    settings.setValue(QStringLiteral("DashboardWindow_geometry"), dashboard_window_->saveGeometry());
-    settings.sync();
 }
 
 void SpecificWorker::initialize()
@@ -320,97 +287,9 @@ void SpecificWorker::initialize()
         [this] { return rc::LidarGates{cfg_.lidar_precision, 0.0f, 0.0f}; });
     existence_      = std::make_unique<rc::BottleExistence>(cfg_);
 
-    // ── Live "Bottle Inference" dashboard — its OWN top-level window ───────────────────────────────
-    // Extracted from the DSR graph dock (add_custom_widget_to_dock) into a standalone window so it shows
-    // even with Agent.graph=false. Mirrors room_concept/kinova_controller and table_concept. TimeSeriesPlot
-    // is a plain QWidget (no QOpenGL backing store), safe as a top-level. NOT WA_DeleteOnClose: closing
-    // must only HIDE it, or the ts_*_plot_ pointers publish_bottle_diagnostics uses would dangle. A
-    // QApplication always exists (generated/main.cpp). Fed each cycle in publish_bottle_diagnostics.
-    {
-        custom_widget_ = new Custom_widget("Bottle — Free Energy, Surprise, Belief Uncertainty & Residuals");
-
-        auto* series_layout = new QVBoxLayout(custom_widget_->frame_series);
-        series_layout->setContentsMargins(0, 0, 0, 0);
-        custom_widget_->frame_series->setLayout(series_layout);
-
-        const auto add_plot = [&](rc::TimeSeriesPlot*& plot)
-        {
-            plot = new rc::TimeSeriesPlot(custom_widget_->frame_series);
-            plot->set_visible_window(60.f);
-            series_layout->addWidget(plot, 1);
-        };
-        add_plot(ts_plot_);            // free energy + its baseline
-        add_plot(ts_surprise_plot_);   // FE surprise (attention signal) — own panel, much smaller scale
-        add_plot(ts_cov_plot_);        // U(Σ) belief uncertainty
-        add_plot(ts_res_plot_);        // residual (unexplained) points
-
-        // BELIEF INSPECTOR — the panel that replaced the Σ[cx,cy] trace. A time-series of two variances
-        // showed a slice of the belief; this shows ALL of it: every state DOF with its posterior σ and Σ as
-        // a correlation heatmap, which is where the structure lives (the bottle's radius is depth-degenerate
-        // and its correlation with cz is exactly what the trace could not show). Stretch 2.
-        belief_inspector_ = new rc::BeliefInspector(QStringLiteral("belief inspector"),
-                                                    custom_widget_->frame_series);
-        series_layout->addWidget(belief_inspector_, 2);
-
-        // GenericWorker::initialize() may have started compute() already, so some instances can exist.
-        for (auto& [_, inst] : fitter_->instances())
-            publish_bottle_diagnostics(inst, inst.prev_free_energy);
-    }
-
-    // ── Section 1: evidence-pipeline counter strip ────────────────────────────
-    evidence_monitor_ = new rc::EvidenceMonitor(QStringLiteral("bottle_concept — evidence monitor"));
-
-    // ── Combined window: counters (top) over the plots + belief inspector (bottom) ──
-    // Identical three-section structure to every other concept agent. Only HIDDEN on close, never deleted
-    // (compute() keeps the raw child pointers).
-    dashboard_window_ = new QWidget;
-    dashboard_window_->setWindowTitle(QStringLiteral("bottle_concept — dashboard"));
-    auto* outer = new QVBoxLayout(dashboard_window_);
-    outer->setContentsMargins(0, 0, 0, 0);
-    // No splitter: the counter strip is two lines of text with nothing to resize, so it simply takes
-    // its natural height and the plots + inspector get everything else.
-    outer->addWidget(evidence_monitor_, 0);   // section 1 — natural height
-    outer->addWidget(custom_widget_, 1);      // sections 2 + 3 — all remaining space
-
-    restore_dashboard_geometry();
-
-    // EXPLICITLY hidden: restoreGeometry() also restores the window STATE, so relying on
-
-    // "we never called show()" is fragile. The drill-down must start down.
-
-    if (dashboard_window_) dashboard_window_->hide();
-    // NOT shown at startup: the compact strip below is the standing display and this window is the
-    // drill-down its "details" button reveals. Geometry is still restored, so the first click restores place.
-
-    // ── Compact belief strip — a SEPARATE, small top-level window ──────────────────────────────────
-    strip_window_ = new QWidget;
-    strip_window_->setWindowTitle(QStringLiteral("bottle_concept \u2014 beliefs"));
-    auto* strip_layout = new QVBoxLayout(strip_window_);
-    strip_layout->setContentsMargins(0, 0, 0, 0);
-    belief_strip_ = new rc::BeliefStrip(QStringLiteral("bottles"), strip_window_);
-    belief_strip_->set_visible_window(60.f);
-    strip_layout->addWidget(belief_strip_, 1);
-    {
-        auto* bar = new QHBoxLayout;
-        bar->setContentsMargins(4, 0, 4, 3);
-        bar->addStretch(1);
-        auto* details = new QPushButton(QStringLiteral("details \u25B8"), strip_window_);
-        QFont bf = details->font(); bf.setPointSizeF(bf.pointSizeF() - 1.0); details->setFont(bf);
-        details->setFixedHeight(QFontMetrics(bf).height() + 8);
-        QObject::connect(details, &QPushButton::clicked, strip_window_, [this]()
-        {
-            if (not dashboard_window_) return;
-            dashboard_window_->show();
-            dashboard_window_->setWindowState((dashboard_window_->windowState() & ~Qt::WindowMinimized)
-                                              | Qt::WindowActive);
-            dashboard_window_->raise();
-            dashboard_window_->activateWindow();
-        });
-        bar->addWidget(details, 0);
-        strip_layout->addLayout(bar, 0);
-    }
-    restore_strip_geometry();
-    strip_window_->show();
+    // Live dashboard: the belief strip + the drill-down behind its "details" button. SHARED construction
+    // (common/dashboard/concept_dashboard.h) — see specificworker_dashboard.cpp.
+    build_dashboard();
 
     // ── WHAT THIS AGENT IS ACTUALLY RUNNING ────────────────────────────────────────────────────
     //
@@ -954,86 +833,6 @@ void SpecificWorker::publish_bottle_diagnostics(rc::BottleInstance& inst, float 
                                     .residual_pts = static_cast<float>(inst.dbg_resid_pts)});
 }
 
-// ─── Belief inspector ────────────────────────────────────────────────────────
-//
-// Build the per-instance BELIEF snapshot (state, Σ, scalar gauges) and push it to the bottom panel,
-// throttled to ~5 Hz. Deliberately NOT hung off publish_bottle_diagnostics: that runs per-node inside the
-// publish loop and early-returns on a missing plot, whereas the inspector wants one pass over ALL live
-// instances. Main-thread only.
-// Section 1: push this cycle's evidence-pipeline counters, then (same tick, same data) the belief
-// inspector — so the two sections can never show different cycles. Throttled to ~5 Hz.
-void SpecificWorker::refresh_evidence_monitor()
-{
-    if (not evidence_monitor_)
-        return;
-    const auto tick = std::chrono::steady_clock::now();
-    if (last_monitor_tp_.time_since_epoch().count() != 0
-        and std::chrono::duration<float>(tick - last_monitor_tp_).count() < 0.2f)
-        return;
-    last_monitor_tp_ = tick;
-
-    evidence_monitor_->update_view(ev_g_);
-    refresh_belief_inspector();
-    refresh_belief_strip();   // same tick, same instance pass
-}
-
-void SpecificWorker::refresh_belief_inspector()
-{
-    if (not belief_inspector_)
-        return;
-    const auto now = std::chrono::steady_clock::now();
-
-    std::vector<rc::BeliefCard> cards;
-    cards.reserve(fitter_->instances().size());
-    for (const auto& [id, inst] : fitter_->instances())
-    {
-        rc::BeliefCard c;
-        c.node = inst.node_name;
-
-        // A bottle is a yaw-symmetric cylinder: no orientation DOF and no discrete modes, so Σ is the plain
-        // posterior (there is no covariance_reported() to fold a mode entropy into).
-        const auto& S = inst.ai2_belief.covariance();
-        const auto& s = inst.ai2_belief.state();
-        const std::array<float, rc::BottleBelief::N> v = {s.cx, s.cy, s.cz, s.radius, s.height};
-        for (int j = 0; j < rc::BottleBelief::N; ++j)
-            c.dofs.push_back({rc::kBottleDofs[j].name, rc::kBottleDofs[j].unit, v[j],
-                              std::sqrt(std::max(0.0f, S(j, j))), rc::kBottleDofs[j].sigma_star});
-
-        // Row-major copy, filled explicitly: Eigen stores column-major, and while Σ is symmetric today an
-        // implicit .data() copy would silently transpose if that ever stopped being true.
-        constexpr int N = rc::BottleBelief::N;
-        c.cov.resize(N * N);
-        for (int i = 0; i < N; ++i)
-            for (int j = 0; j < N; ++j)
-                c.cov[i * N + j] = S(i, j);
-
-        // prev_free_energy is seeded to FLT_MAX, not 0 — pass NaN before the first fit so the gauge reads
-        // "-" instead of a nonsense 3.4e38.
-        c.s.fe          = inst.prev_free_energy < std::numeric_limits<float>::max()
-                        ? inst.prev_free_energy
-                        : std::numeric_limits<float>::quiet_NaN();
-        c.s.fe_baseline = inst.fe_baseline;
-        c.s.fe_surprise = inst.fe_surprise;
-        // Existence (bottle_existence.cpp). Until 2026-08-10 the bottle genuinely had no log-odds and this
-        // was three lines of comment explaining why the card printed "-"; the channel exists now, so the card
-        // must show it. Reported only once the belief has been seeded — before that L is the prior, and
-        // printing a confident-looking 0.50 for an instance that has never been judged is worse than "-".
-        if (inst.existence_seeded)
-        {
-            c.s.logodds  = inst.existence.logodds();
-            c.s.p_exists = inst.existence.p_exists();
-        }
-        c.s.remove_streak = static_cast<int>(inst.existence_debounce.streak);
-        c.s.age_s       = inst.last_belief_touch.time_since_epoch().count() == 0
-                        ? -1.0f
-                        : std::chrono::duration<float>(now - inst.last_belief_touch).count();
-        c.s.since_det   = inst.frames_since_detection;
-        c.s.initialized = inst.ai2_initialized;
-        cards.push_back(std::move(c));
-    }
-    belief_inspector_->update_view(cards);
-}
-
 // Publish/refresh the "go see the hidden face" affordance (mirrors table_concept::step_epistemic). The
 // node persists and re-offers every cycle; a low ΔH is published as-is so the controller's EFE
 // selection won't pick a well-seen bottle (belief→knowledge governor without deleting the node).
@@ -1174,55 +973,4 @@ int SpecificWorker::startup_check()
     std::print("bottle_concept: startup_check()\n");
     QTimer::singleShot(200, QCoreApplication::instance(), SLOT(quit()));
     return 0;
-}
-
-// One row per bottle. gap_nats is the -1 sentinel because kBottleDofs declares no σ* (see the note there),
-// so the widget falls back to ½·ln det Σ — which is why the number reads NEGATIVE and is a log-volume, not a
-// remaining-work figure. p(exists) comes from the shared rc::exist channel (bottle_existence.cpp).
-//
-// ★This comment used to say "p(exists) is unavailable (bottle has no existence channel)" and the field was
-// left NaN. That became false the moment the channel landed, and the strip renders NaN as an EMPTY GREY BAR
-// with a dash — indistinguishable from "this agent has no existence belief". So the one display whose entire
-// job is "is it still there?" showed nothing while L was live, and stayed silent through both the NaN poison
-// and the LiDAR outvoting a live detection. Two widgets, two feeds: fixing the inspector card did not fix
-// this one.
-void SpecificWorker::refresh_belief_strip()
-{
-    // The loop, the REPORTED covariance, the creation-stamp birth time and update_view() are SHARED
-    // (common/dashboard/belief_strip.h). What stays is what only this agent knows: where p_exists
-    // comes from and which DOF table describes the belief.
-    rc::dash::fill_strip(belief_strip_, fitter_->instances(), *G,
-        [](rc::BeliefStripRow& r, const auto& inst)
-        {
-            r.p_exists = inst.existence.p_exists();
-            rc::dash::fill_certainty(r, inst.ai2_belief.covariance(), rc::kBottleDofs);   // bottle has no covariance_reported()
-        });
-}
-
-void SpecificWorker::restore_strip_geometry()
-{
-    if (not strip_window_) return;
-    QSettings settings(QStringLiteral("RoboComp"), QStringLiteral("bottle_concept"));
-    const QByteArray geom = settings.value(QStringLiteral("BeliefStripWindow_geometry")).toByteArray();
-    if (not geom.isEmpty())
-    {
-        strip_window_->restoreGeometry(geom);
-        // ★A restored geometry carries the window STATE too: a strip that was ever maximised comes back
-        // filling the screen, which from the outside looks like the big dashboard opening itself. The strip
-        // is meant to sit in a corner — refuse those states and cap the size, but honour the position.
-        strip_window_->setWindowState(strip_window_->windowState()
-                                      & ~(Qt::WindowMaximized | Qt::WindowFullScreen));
-        const QSize sz = strip_window_->size();
-        strip_window_->resize(std::min(sz.width(), 900), std::min(sz.height(), 420));
-    }
-    else
-        strip_window_->resize(520, 210);
-}
-
-void SpecificWorker::save_strip_geometry() const
-{
-    if (not strip_window_) return;
-    QSettings settings(QStringLiteral("RoboComp"), QStringLiteral("bottle_concept"));
-    settings.setValue(QStringLiteral("BeliefStripWindow_geometry"), strip_window_->saveGeometry());
-    settings.sync();
 }

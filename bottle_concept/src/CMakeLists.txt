@@ -23,6 +23,7 @@ LIST(APPEND LIBS
 LIST(APPEND SOURCES
   ../src/specificworker.cpp
   ../src/specificworker_presence.cpp
+  ../src/specificworker_dashboard.cpp
   ../src/bottle_config.cpp
   ../src/bottle_evaluator.cpp
   ../src/bottle_scene_graph.cpp

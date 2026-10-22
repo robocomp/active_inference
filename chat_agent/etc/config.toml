@@ -52,6 +52,8 @@ url = "http://localhost:11434"
 # 31/36 on tests/check_llm_tools.py, ~0.4 s median, 7.7 GiB VRAM (qwen3:8b: 6.2). ★NOT plain "qwen3-vl:8b": that tag is
 # the THINKING variant, ignores think:false and spent 3000-6000 tokens (40-80 s) thinking before every tool call.
 # Back to text-only: model = "qwen3:8b" (look() then fails at the model, not here — it cannot see the image).
+# qwen3-vl:30b-a3b-instruct tried 2026-10-19: eval 168/204 (8b: 189/204), ~1 s answers, 61% on a 16 GB GPU, no
+# visible gain live — kept for more complex scenarios; it cannot share this GPU with retina.
 model = "qwen3-vl:8b-instruct"
 # 16k (2026-10-17, was 8k): room for the planned LTSM / EM / system tools and a longer history. The KV cache is
 # ~144 KB/token (~2.3 GB at 16k, beside ~6 GB of weights) on a 16 GB GPU shared with retina's YOLO and the ZED SDK —
@@ -66,7 +68,9 @@ transfer_timeout_ms = 120000
 keep_alive = "30m"
 # Cap on generated tokens per request; <= 0 = none. The instruct model answers in 10-50 tokens; this only stops a
 # runaway (cuts it mid-sentence, so it is a backstop, not a style control — brevity comes from the prompt).
-num_predict = 400
+# A draw() script is a few hundred tokens (a table of what the robot can do: up to ~850, eval 2026-10-19); at 400 it
+# was cut mid-call and ollama returned nothing. 1500 ≈ 15 s of a runaway.
+num_predict = 1500
 
 [Chat]
 max_history = 32
@@ -98,8 +102,26 @@ look_max_side = 1280
 look_max_side_360 = 1280
 look_jpeg_quality = 85
 
+[Canvas]
+# The side canvas: the robot draws for the person by running a Python script (canvas/stock/*.py, canvas/library/*.py,
+# or one the model writes) against a snapshot of the world (src/canvas_snapshot.h). The script runs as python3 -I in a
+# systemd user scope (MemoryMax), in a network namespace when the kernel allows it, and is killed after timeout_ms.
+dir = "canvas"
+timeout_ms = 10000
+# Live drawings: the camera is shown directly (no Python); a script redraws in a persistent worker (~45 ms for the
+# room layout), skipping ticks while one is in flight, so a slow script sets its own pace.
+live_period_ms = 100
+memory_max = "1G"
+
 [Ice]
 Warn.Connections = "0"
 Trace.Network = "0"
 Trace.Protocol = "0"
 MessageSizeMax = "20004800"
+
+[SimDoor]
+# sim_door: the SIMULATOR opens / closes a door of the current room (webots-bridge DoorControl, tools/sim_door.py).
+# The tool is offered only while robot_concept writes robot_gt_* (sim only), so it vanishes on the real robot.
+# "" disables it. Which Webots door: the nearest by place, through the sim ground-truth pose (src/sim_door.h).
+endpoint = "doorcontrol:tcp -h localhost -p 10017"
+match_max_m = 1.0

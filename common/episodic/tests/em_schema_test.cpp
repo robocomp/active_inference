@@ -55,6 +55,8 @@ Record full_claim()
     r.room_after = "room_2";
     r.t_post = 1792319746401;
     r.settled = true;
+    r.scene_pre = Scene{.things = {"door_3", "room_1"}, .offered = {"aff_door_3_open", "afford_room"}};
+    r.scene_post = Scene{.things = {}, .offered = {}};      // empty is a reading, not absence
     return r;
 }
 
@@ -78,6 +80,8 @@ void test_absent_stays_absent()
     r.room_after.clear();
     r.t_post.reset();
     r.settled = false;
+    r.scene_pre.reset();
+    r.scene_post.reset();
     r.pre = {Fact{.node = "door_27", .type = "door", .ltsm_id = "", .values = {{"x", 1.0}}}};
     const QJsonObject j = to_json(r);
     CHECK(not j.contains("promised"));
@@ -85,6 +89,7 @@ void test_absent_stays_absent()
     CHECK(not j.contains("t1"));
     CHECK(not j.contains("serial_start") and not j.contains("serial_end"));
     CHECK(not j.contains("room_after") and not j.contains("t_post") and not j.contains("settled"));
+    CHECK(not j.contains("scene_pre") and not j.contains("scene_post"));
     CHECK(j["mission_key"].toString() == "m12");
     const QJsonObject f = j["pre"].toArray().at(0).toObject();
     CHECK(not f["values"].toObject().contains("door_open_prob"));
@@ -96,6 +101,7 @@ void test_absent_stays_absent()
     CHECK(back.has_value() and not back->serial_start and not back->serial_end and back->mission_key == "m12");
     CHECK(back.has_value() and not back->pre.at(0).values.contains("door_open_prob"));
     CHECK(back.has_value() and back->room_after.empty() and not back->t_post and not back->settled);
+    CHECK(back.has_value() and not back->scene_pre and not back->scene_post);
 }
 
 void test_unknown_level_rejected()

@@ -46,6 +46,7 @@
 #include <unordered_set>
 
 #include "chair_config.h"      // rc::ChairConfig + load_chair_config
+#include "chair_existence.h"   // rc::ChairExistence (existence channels + removal decision)
 #include "chair_instance.h"    // rc::ChairInstance
 #include "../../common/mask_ingestor/mask_ingestor.h"     // rc::MaskIngestor (perception)
 #include "../../common/rgb_ingestor/rgb_ingestor.h"       // rc::RgbIngestor  — SHARED ZED RGB (contour channel)
@@ -80,6 +81,7 @@ public:
     // per compute() cycle — one graph walk feeding both the birth filter and the existence
     // occupancy discount, so the two can never disagree about who is where.
     std::vector<rc::exclusion::Claim> foreign_claims_;
+    std::vector<rc::pragmatic::ObjectApproach> retired_approaches_;   // their chair was deleted from outside
     SpecificWorker(const ConfigLoader& configLoader, TuplePrx tprx, bool startup_check);
     ~SpecificWorker();
     bool is_shutting_down() const noexcept { return shutting_down_.load(); }
@@ -116,7 +118,7 @@ private:
     void run_instance_tracker();          // data-driven birth/associate/death (the only instance-lifecycle path)
     void retire_instance(std::uint64_t id);   // shared teardown: affordance + fitter forget + graph delete
     void merge_overlapping_instances();   // collapse two instances on the same chair (seat-footprint overlap)
-    void update_existence_beliefs();      // continuous existence log-odds → evidence-based removal (no age immunity)
+    void update_existence_beliefs();      // gathers inputs for existence_ (chair_existence.cpp) + owns the teardown
     // SHADOW-MODE birth/death recorder (CONCEPT_AGENT_LIFECYCLE.md §4.2). Records ONLY — never feeds back into
     // a belief, birth or removal. chair_concept matters most here: the radiator-reads-as-a-chair failure is a
     // CHAIR phenomenon, so this is the agent whose log actually tests the (place × bearing) clustering claim.
@@ -137,6 +139,7 @@ private:
                                   float free_energy);
     void step_convergence(rc::ChairInstance& inst, DSR::Node& node, float free_energy);
     void step_epistemic(rc::ChairInstance& inst, DSR::Node& node);
+    void step_approach(rc::ChairInstance& inst);   // the chair's pragmatic `approach` (object_approach.h)
     void trigger_graph_layout_twopi();   // injected into ChairSceneGraph as the relayout callback
 
     // ── Presence protocol ────────────────────────────────────────────────────
@@ -181,6 +184,7 @@ private:
     // Primary-input stream-gate bookkeeping (mirrors table_concept). All main-thread (FSM hooks).
 
     rc::ChairConfig                                         cfg_;
+    rc::ChairExistence                                      existence_{cfg_};   // existence channels + removal decision (after cfg_)
     rc::EpistemicPlanner                                    epistemic_planner_;
     std::unique_ptr<rc::ChairFitter>                    fitter_;   // active-inference fit core (owns instances)
     rc::history::PhantomLog                             phantom_log_;   // shadow-mode birth/death record
@@ -212,6 +216,7 @@ private:
     void refresh_evidence_monitor();                    // throttled push of BOTH dashboard sections
     std::chrono::steady_clock::time_point last_monitor_tp_{};   // ~5 Hz dashboard tick
     std::chrono::steady_clock::time_point last_compute_tp_{};   // compute-rate estimate for the strip
+    void build_dashboard();             // SHARED construction (specificworker_dashboard.cpp)
     void restore_dashboard_geometry();
     void save_dashboard_geometry() const;
 
@@ -223,19 +228,13 @@ private:
     // participant) while that flag is off; reset in request_shutdown BEFORE the graph goes.
     std::unique_ptr<rc::RgbIngestor>                    rgb_ingestor_;
     std::unique_ptr<rc::DepthIngestor>                  depth_ingestor_;
-    // Capture stamp of the camera frame the contour channel last scored. The channel runs on the mask clock
-    // (update_existence_beliefs), and scoring the same RGB/depth frame twice would charge one look twice.
-    std::uint64_t                                      contour_last_stamp_ms_ = 0;
-    std::uint64_t                                      contour_last_depth_stamp_ms_ = 0;
     std::unique_ptr<rc::ChairSceneGraph>               scene_graph_;     // DSR node/RT I/O
     rc::InstanceTracker                                tracker_;         // multi-instance (Tracker.Enabled)
-    float exist_support_scale_   = 0.0f;   // existence belief: online-calibrated E[npts·range²] (0 = seed from cfg)
     // Last mask frame_id that CONTRIBUTED birth evidence. Agents feed the tracker every compute cycle on
     // purpose (a candidate with no matching detection expires), but persisting a candidate and accruing
     // evidence into it are different things — conflating them made birth_frames count COMPUTE CYCLES. See
     // common/instance_tracker/birth_evidence.h rule 1.
     long  last_birth_mask_frame_ = -1;
-    int   exist_last_mask_frame_ = -1;    // (rc::BearingHypothesisStager removed with bearing-birth — see common/peripheral_channel)
     uint64_t                                            room_node_id_ = 0;
     FPSCounter                                          fps_counter_;     // overall compute()-cycle rate
 

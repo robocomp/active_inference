@@ -1,5 +1,6 @@
 #include "chat_window.h"
 #include <algorithm>
+#include <utility>
 #include <QKeySequence>
 #include <QKeyEvent>
 #include <QShortcut>
@@ -39,31 +40,32 @@ ChatWindow::ChatWindow(Callbacks cb, QWidget* parent) : QWidget(parent), cb_(std
     setWindowTitle(QStringLiteral("Robot chat"));
     auto* lay = new QVBoxLayout(this);
 
-    transcript_ = new QTextBrowser(this);
+    split_ = new QSplitter(Qt::Horizontal, this);
+    transcript_ = new QTextBrowser(split_);
     transcript_->setOpenExternalLinks(false);
     transcript_->setMinimumSize(480, 360);
-    lay->addWidget(transcript_, 1);
+    canvas_ = new CanvasPanel(cb_.canvas, split_);
+    canvas_->setVisible(false);
+    split_->addWidget(transcript_);
+    split_->addWidget(canvas_);
+    split_->setStretchFactor(0, 1);
+    split_->setStretchFactor(1, 1);
+    lay->addWidget(split_, 1);
 
     auto* row = new QHBoxLayout();
     input_ = new QLineEdit(this);
     input_->setPlaceholderText(QStringLiteral("Ask the robot… (\"stop\" stops it at once)"));
-    input_->setToolTip(QStringLiteral("Enter sends · ↑/↓ past prompts · /new or Ctrl+L: new conversation"));
-    busy_ = new QLabel(QStringLiteral("<i>thinking…</i>"), this);
+    input_->setToolTip(QStringLiteral("Enter sends · ↑/↓ past prompts · Esc stops the answer · /new or Ctrl+L: new conversation"));
+    busy_ = new QLabel(QStringLiteral("<i>thinking… (Esc stops)</i>"), this);
     busy_->setVisible(false);
-    cancel_ = new QPushButton(QStringLiteral("Cancel"), this);
-    cancel_->setToolTip(QStringLiteral("Stop the model's answer (does not stop the robot — type \"stop\" for that)"));
-    cancel_->setEnabled(false);
-    plan_ = new PlanView(this);
-    plan_btn_ = new QPushButton(QStringLiteral("Plan"), this);
-    plan_btn_->setToolTip(QStringLiteral("The mission the robot runs, step by step (none yet)"));
-    plan_btn_->setEnabled(false);
     row->addWidget(input_, 1);
     row->addWidget(busy_);
-    row->addWidget(plan_btn_);
-    row->addWidget(cancel_);
     input_->installEventFilter(new HistoryKeys(this));
     auto* clear = new QShortcut(QKeySequence(QStringLiteral("Ctrl+L")), this);
     QObject::connect(clear, &QShortcut::activated, this, [this]() { if (cb_.on_new) cb_.on_new(); });
+    // Esc aborts the model's answer (not the robot: "stop" does that). It replaces the Cancel button (2026-10-18).
+    auto* esc = new QShortcut(QKeySequence(Qt::Key_Escape), this);
+    QObject::connect(esc, &QShortcut::activated, this, [this]() { if (cb_.on_cancel) cb_.on_cancel(); });
     lay->addLayout(row);
 
     status_ = new QLabel(this);
@@ -71,24 +73,25 @@ ChatWindow::ChatWindow(Callbacks cb, QWidget* parent) : QWidget(parent), cb_(std
     lay->addWidget(status_);
 
     QObject::connect(input_, &QLineEdit::returnPressed, this, [this]() { send_clicked(); });
-    QObject::connect(plan_btn_, &QPushButton::clicked, this, [this]()
-    {
-        plan_->show();
-        plan_->raise();
-        plan_->activateWindow();
-    });
-    QObject::connect(cancel_, &QPushButton::clicked, this, [this]() { if (cb_.on_cancel) cb_.on_cancel(); });
 
     QSettings settings(QStringLiteral("RoboComp"), QStringLiteral("chat_agent"));
     if (const auto g = settings.value(QStringLiteral("chat_window/geometry")).toByteArray(); not g.isEmpty())
+    {
         restoreGeometry(g);
+        restored_with_canvas_ = settings.value(QStringLiteral("chat_window/canvas_open"), false).toBool();
+    }
     else
         resize(640, 560);
 }
 
 void ChatWindow::closeEvent(QCloseEvent* e)
 {
+    // The geometry is saved AS SEEN, with whether the canvas was in it: the first show_canvas() of the next run then
+    // fits the canvas inside instead of widening. Hiding the canvas here first did not work: the shrink reaches the
+    // window manager after saveGeometry(), so the window grew by one canvas on every run.
     QSettings settings(QStringLiteral("RoboComp"), QStringLiteral("chat_agent"));
+    if (canvas_->isVisible()) settings.setValue(QStringLiteral("chat_window/canvas_width"), canvas_->width());
+    settings.setValue(QStringLiteral("chat_window/canvas_open"), canvas_->isVisible());
     settings.setValue(QStringLiteral("chat_window/geometry"), saveGeometry());
     QWidget::closeEvent(e);
 }
@@ -167,32 +170,58 @@ void ChatWindow::clear_transcript()
 
 void ChatWindow::set_plan(const rc::mission::Mission& m, const QString& ir_json)
 {
-    plan_->set_mission(m, ir_json);
-    plan_btn_->setEnabled(true);
-    plan_btn_->setToolTip(QStringLiteral("The mission the robot runs, step by step"));
+    canvas_->plan()->set_mission(m, ir_json);
 }
 
 void ChatWindow::set_plan_progress(const rc::mission::Progress& p)
 {
-    plan_->set_progress(p);
-    // the button says whether something runs, so a glance at the chat tells it without opening the window
-    plan_btn_->setText(p.status == "in_progress" ? QStringLiteral("Plan \u25CF") : QStringLiteral("Plan"));
-    plan_btn_->setStyleSheet(p.status == "in_progress" ? QStringLiteral("color: #1565c0; font-weight: bold;") : QString());
+    canvas_->plan()->set_progress(p);
+}
+
+// Opening the canvas WIDENS the window by the canvas and closing it ([×]) gives exactly that width back, so the
+// transcript keeps its size either way and the window returns to what it was. The canvas width is remembered.
+void ChatWindow::show_canvas()
+{
+    if (canvas_->isVisible()) return;
+    QSettings settings(QStringLiteral("RoboComp"), QStringLiteral("chat_agent"));
+    const int canvas_w = std::max(320, settings.value(QStringLiteral("chat_window/canvas_width"), 560).toInt());
+    const int transcript_w = transcript_->width();
+    const int added = canvas_w + split_->handleWidth();
+    canvas_->setVisible(true);
+    if (std::exchange(restored_with_canvas_, false))   // the restored size already holds it
+    {
+        split_->setSizes({std::max(0, width() - added), canvas_w});
+        return;
+    }
+    resize(width() + added, height());
+    split_->setSizes({transcript_w, canvas_w});
+}
+
+void ChatWindow::hide_canvas()
+{
+    if (not canvas_->isVisible()) return;
+    QSettings settings(QStringLiteral("RoboComp"), QStringLiteral("chat_agent"));
+    settings.setValue(QStringLiteral("chat_window/canvas_width"), canvas_->width());
+    // what the canvas takes NOW (the person may have dragged the splitter or resized the window since it opened)
+    const int added = canvas_->width() + split_->handleWidth();
+    canvas_->setVisible(false);
+    resize(std::max(minimumSizeHint().width(), width() - added), height());
 }
 
 void ChatWindow::set_busy(bool busy)
 {
-    cancel_->setEnabled(busy);
     busy_->setVisible(busy);   // typing while busy is still allowed: "stop" must always get through
 }
 
-void ChatWindow::set_status(const QString& model, const QString& ollama, bool ollama_ok, bool controller_present)
+void ChatWindow::set_status(const QString& model, const QString& ollama, bool ollama_ok, bool controller_present,
+                            const QString& gpu)
 {
     const auto dot = [](bool ok) { return ok ? QStringLiteral("<span style='color:#2e7d32'>&#9679;</span>")
                                              : QStringLiteral("<span style='color:#c62828'>&#9679;</span>"); };
-    status_->setText(QStringLiteral("<small>model <b>%1</b> &nbsp;·&nbsp; %2 %3 &nbsp;·&nbsp; %4 controller %5</small>")
+    status_->setText(QStringLiteral("<small>model <b>%1</b> &nbsp;·&nbsp; %2 %3 &nbsp;·&nbsp; %4 controller %5 &nbsp;·&nbsp; %6</small>")
                          .arg(model.toHtmlEscaped(), dot(ollama_ok), ollama.toHtmlEscaped(), dot(controller_present),
-                              controller_present ? QStringLiteral("present") : QStringLiteral("absent")));
+                              controller_present ? QStringLiteral("present") : QStringLiteral("absent"),
+                              gpu.toHtmlEscaped()));
 }
 
 }   // namespace rc::chat

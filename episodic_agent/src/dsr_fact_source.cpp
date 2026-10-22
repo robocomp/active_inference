@@ -106,6 +106,18 @@ std::string DsrFactSource::current_room() const
     return n ? n->name() : std::string{};
 }
 
+std::optional<Scene> DsrFactSource::scene() const
+{
+    if (not live_) return std::nullopt;
+    Scene sc;
+    for (const char* type : kEventNodeTypes)
+        for (const auto& n : live_->get_nodes_by_type(type))
+            (std::string_view(type) == "affordance" ? sc.offered : sc.things).push_back(n.name());
+    std::ranges::sort(sc.things);
+    std::ranges::sort(sc.offered);
+    return sc;
+}
+
 std::string DsrFactSource::ltsm_id_of(const DSR::Node& door) const
 {
     if (not live_ or not ltsm_) return {};

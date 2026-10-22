@@ -148,6 +148,22 @@ rc::chat::SessionConfig SpecificWorker::load_session_config(const ConfigLoader& 
     c.look_max_side_360 = r.i("Chat.look_max_side_360", 1280,
             "look(): the same for the 2:1 Ricoh panorama (1280x640 ~1070 tokens; 1920x960 ~1800 and saw no more)");
     c.look_jpeg_quality = r.i("Chat.look_jpeg_quality", 80, "look(): JPEG quality 1..100 of the attached frame");
+    c.canvas_dir = r.s("Canvas.dir", "canvas", "side canvas: bootstrap.py, rcanvas.py, stock/ and library/ scripts");
+    c.canvas_timeout_ms = r.i("Canvas.timeout_ms", 10000, "side canvas: a drawing script is killed after this long");
+    c.canvas_live_period_ms = r.i("Canvas.live_period_ms", 100,
+            "side canvas: a live drawing redraws at most this often (a redraw still in flight skips the tick)");
+    c.canvas_memory_max = r.s("Canvas.memory_max", "1G", "side canvas: MemoryMax of the script's systemd scope");
+    c.fleet_dir = r.s("Fleet.dir", c.fleet_dir, "agent_control: the directory holding <agent>/bin/<agent>");
+    c.fleet_agents = r.s("Fleet.agents", c.fleet_agents, "agent_control: agents the chat may start / stop (comma list)");
+    c.fleet_confirm = r.s("Fleet.confirm", c.fleet_confirm, "agent_control: stopping these needs the person's yes");
+    c.fleet_lock = r.s("Fleet.lock", c.fleet_lock,
+            "agent_control: tour lock file (\"\" = $XDG_RUNTIME_DIR/ai_fleet_tour.lock); refused while its PID lives");
+    c.fleet_log_dir = r.s("Fleet.log_dir", c.fleet_log_dir, "agent_control: agents started by the chat log here");
+    c.sim_door_endpoint = r.s("SimDoor.endpoint", c.sim_door_endpoint,
+            "sim_door: the simulator's DoorControl proxy (\"\" = no sim_door tool; it also needs robot_gt_* on the robot node)");
+    c.sim_door_script = r.s("SimDoor.script", c.sim_door_script, "sim_door: the helper that talks to DoorControl");
+    c.sim_door_match_max_m = r.d("SimDoor.match_max_m", c.sim_door_match_max_m,
+            "sim_door: the nearest Webots door farther than this from our door is refused (m)");
     return c;
 }
 

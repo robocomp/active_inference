@@ -59,6 +59,7 @@ std::pair<std::string, std::string> ChatInbox::status_of(const Tracked& t, const
         case K::Stop: return {"aborted", std::format("stopped|robot stopped by chat|{}", drv)};
         case K::Uncross: return {"aborted", std::format("idle|{}|{}", v.last_event, drv)};
         case K::Motion: return {"", ""};   // status_of_motion
+        case K::Approach: return {"", ""}; // status_of_approach
         case K::Mission: return {"", ""};  // the interpreter reports its own (service_mission)
         case K::Cross:
         {
@@ -94,6 +95,19 @@ std::pair<std::string, std::string> ChatInbox::status_of_motion(const Tracked& t
         case P::Idle: break;
     }
     return {"", ""};
+}
+
+std::pair<std::string, std::string> ChatInbox::status_of_approach(const Tracked& t, const ApproachOrder::View& v,
+                                                                 bool driving)
+{
+    const std::string drv = driving ? "driving=on" : "driving=off";
+    if (v.id != t.approach_id) return {"aborted", std::format("superseded|another approach was started|{}", drv)};
+    const std::string what = v.option.empty() ? v.object : v.object + " from " + v.option;
+    const std::string bt = std::format("approach|{}: {}|{}", what, v.active ? v.state : v.outcome, drv);
+    if (v.active) return {"in_progress", bt};
+    if (v.outcome == "satisfied") return {"completed", bt};
+    if (not v.outcome.empty()) return {"failed|" + v.outcome, bt};
+    return {"aborted", bt};
 }
 
 }   // namespace rc

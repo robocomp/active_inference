@@ -2,6 +2,7 @@
 #include <numbers>
 #include "controller_session.h"
 #include "controller_robot_body.h"
+#include "../../common/mask_ingestor/mask_nodes.h"   // rc::masks::find_front_mask_node
 #include "corner_visibility.h"   // point_in_polygon: is the standpoint in the room at all
 #include "../../common/graph_provenance/creation_stamp.h"   // rc::provenance::now_ms — the anchor's clock
 #include "residual_risk.h"
@@ -233,6 +234,20 @@ bool ControllerSession::sync_world_state(std::uint64_t timestamp_ms,
                                   .attempts = v.attempts, .last_event = v.last_event},
                                  door_passages_);
         observe_door_passage_why(timestamp_ms);   // motion_verdict.h — observability only
+    }
+
+    // ── APPROACH ORDER (controller_approach_order.h): `approach <object> [from <side>]` — the object's ONE approach
+    //    affordance and the side asked for. A single command HOLDS position when it ends (2026-10-18, user): the mode
+    //    stays Command with no order standing, where the selector does not forage.
+    {
+        auto ao = approach_order_.update(*graph_);
+        if (ao.event.has_value()) std::println("{}", *ao.event);
+        if (approach_order_.take_finished())
+            std::println("[approach] order finished — {}", approach_order_.view().after == rc::ApproachOrder::After::Hold
+                                                               ? "holding position until the next command or mission"
+                                                               : "back to the mission");
+        approach_required_ = std::move(ao.required);
+        approach_option_ = std::move(ao.option);
     }
 
     // ── THE ROBOT'S OWN BODY, ONCE, AS SOON AS ITS NODE EXISTS ───────────────────────────────────
@@ -1000,9 +1015,14 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
 
     // Door passage: the selector may take only the step's affordance. On its start the claim on whatever was being
     // executed (the explorer's afford_room, typically) is released, exactly as an abandoned goal is above.
-    if (door_passage_.take_just_started())
+    const bool door_started = door_passage_.take_just_started();
+    const bool approach_started = approach_order_.take_just_started();   // evaluated whatever door_started is
+    if (door_started or approach_started)
     {
-        std::println("[door-passage] {} — releasing the current claim; selection now restricted", door_passage_.status());
+        if (door_started)
+            std::println("[door-passage] {} — releasing the current claim; selection now restricted", door_passage_.status());
+        else
+            std::println("{} — releasing the current claim; selection now restricted", approach_order_.view().last_event);
         affordance_manager.release_execution_claim(graph_);
         // AND whatever it was running: a lock-on/orient left armed completes on the NEXT affordance claimed and stamps
         // ITS outcome there (live try23: the epistemic aff_door_36 servo LOCKED after `cross` was claimed and reported
@@ -1033,7 +1053,9 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
         current_plan_.reset();
         plan_spline_valid_ = false;
     }
-    affordance_manager.set_required_name(door_required_);
+    // One order at a time (starting either stops the other, specificworker.cpp); the door's has the base if both name one.
+    if (not door_required_.empty()) affordance_manager.set_required_name(door_required_);
+    else affordance_manager.set_required_name(approach_required_, approach_option_);
     // ★ `explore room_X` CONFINES THE CONTEST TO room_X (2026-10-21, user: "anything in room_X"). No order, or a door
     //   passage's required entrant ⇒ "" ⇒ the old contest. On ENTERING a scope the standing claim is released, exactly
     //   as on a passage start above: a claim on another room's target would otherwise stay Executing with nobody to
@@ -1063,7 +1085,7 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
     //   purpose. With no order standing — after `stop`, or before the first — the contest stayed open and the robot
     //   went off on its own: live, after a chat `stop` it claimed aff_door_1 (an inspect look) over and over.
     const bool command_without_order = mission_.mode() == rc::DriveMode::Command
-                                   and door_required_.empty() and not command_explore_;
+                                   and door_required_.empty() and approach_required_.empty() and not command_explore_;
     auto target = rc::uses_mission(mission_.mode()) or mission_.mode() == rc::DriveMode::Target
                             or command_without_order
                             ? std::nullopt
@@ -7537,7 +7559,12 @@ void ControllerSession::count_dwell_mask_hits()
     // previous version matched YOLO class labels against the graph node NAME, which is unsatisfiable by
     // construction whenever the object is not named after a COCO class — so the robot stood waiting for
     // a confirmation that could not arrive while the mask it wanted was plainly on screen.
-    const auto masks = graph_->get_node("masks");
+    // The FRONT camera's mask node (discovered via the rgbd cameras, never by name): its counter is the
+    // "one look per published camera frame" rhythm; the panorama's frames are not looks at the target.
+    const auto masks_id = front_mask_node_id();
+    if (not masks_id.has_value())
+        return;
+    const auto masks = graph_->get_node(*masks_id);
     if (not masks.has_value())
         return;
     const auto frame = graph_->get_attrib_by_name<mask_frame_id_att>(masks.value());
@@ -7552,11 +7579,28 @@ void ControllerSession::count_dwell_mask_hits()
         ++dwell_mask_hits_;
 }
 
+// Id of the front camera's mask node, discovered through the rgbd cameras (never by name) and cached: the
+// discovery builds a CameraAPI, too heavy for a per-cycle call. Re-discovered when the cached node is gone.
+std::optional<std::uint64_t> ControllerSession::front_mask_node_id() const
+{
+    if (not graph_)
+        return std::nullopt;
+    if (front_mask_node_id_ != 0 and graph_->get_node(front_mask_node_id_).has_value())
+        return front_mask_node_id_;
+    front_mask_node_id_ = 0;
+    if (const auto ref = rc::masks::find_front_mask_node(*graph_); ref.has_value())
+        front_mask_node_id_ = ref->id;
+    return front_mask_node_id_ != 0 ? std::optional{front_mask_node_id_} : std::nullopt;
+}
+
 int ControllerSession::masks_frame_seq() const
 {
     if (not graph_)
         return -1;
-    const auto node = graph_->get_node("masks");
+    const auto ref = front_mask_node_id();
+    if (not ref.has_value())
+        return -1;
+    const auto node = graph_->get_node(*ref);
     if (not node.has_value())
         return -1;
     const auto id = graph_->get_attrib_by_name<mask_frame_id_att>(node.value());

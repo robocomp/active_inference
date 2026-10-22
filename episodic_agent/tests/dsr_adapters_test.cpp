@@ -117,6 +117,13 @@ static void fact_source(DSR::DSRGraph& live, DSR::DSRGraph& mem, std::shared_ptr
     const auto robot = add_node(live, DSR::Node::create<robot_node_type>("Shadow"), root);
     live.insert_or_assign_edge(DSR::Edge::create<current_edge_type>(robot, room_id));
     CHECK(fs.current_room() == "room_1");
+
+    // The scene: names per kEventNodeTypes, affordances apart, sorted; the robot is not a thing in it.
+    add_node(live, DSR::Node::create<affordance_node_type>("aff_door_3_open"), door_id);
+    const auto sc = fs.scene();
+    CHECK(sc.has_value());
+    CHECK(sc and sc->things == std::vector<std::string>({"door_3", "door_9", "room_1"}));
+    CHECK(sc and sc->offered == std::vector<std::string>({"aff_door_3_open"}));
 }
 
 static void live_diff(DSR::DSRGraph& live)
@@ -185,6 +192,16 @@ static void em_graph(std::shared_ptr<DSR::DSRGraph> em_p)
     CHECK(g.upsert(orphan));
     CHECK(em.get_edge(em.get_node("root")->id(), em.get_node(orphan.id)->id(), "has").has_value());
 
+    // Timeline: experiences left to right on root's row in id order, each tree hanging down indented by depth.
+    const auto at = [&](const std::string& name, float x, float y)
+    {
+        const auto n = em.get_node(name);
+        return n and em.get_attrib_by_name<pos_x_att>(*n).value_or(-1.f) == x and em.get_attrib_by_name<pos_y_att>(*n).value_or(-1.f) == y;
+    };
+    CHECK(at(m.id, 180.f, 0.f));
+    CHECK(at(s.id, 220.f, 60.f));
+    CHECK(at(orphan.id, 180.f + 180.f + 40.f, 0.f));   // the next column, past the first tree's indent
+
     const auto before = em.get_nodes_by_type("metaconcept").size();
     s.t1 = 1500;
     s.outcome = "succeeded";
@@ -203,6 +220,7 @@ static void em_graph(std::shared_ptr<DSR::DSRGraph> em_p)
     CHECK(rc::em::EmGraph::stats_name(any) == "stats_mission_mission_human_any");
     CHECK(g.upsert(st));
     CHECK(g.upsert(any));
+    CHECK(at(rc::em::EmGraph::stats_name(st), -240.f, 0.f) and at(rc::em::EmGraph::stats_name(any), -240.f, 60.f));   // by name
     st.n = 3;
     CHECK(g.upsert(st));
 

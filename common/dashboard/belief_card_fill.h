@@ -21,6 +21,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <limits>
 #include <span>
 #include <vector>
 
@@ -59,11 +60,29 @@ template <class Instance>
 inline void fill_scalars(BeliefCard& c, const Instance& inst,
                          std::chrono::steady_clock::time_point now)
 {
-    c.s.fe            = inst.dbg_energy;
+    // Two instance shapes for the FE readout. bottle keeps `prev_free_energy`, seeded to FLT_MAX rather than 0:
+    // pass NaN before the first fit so the gauge reads "-" instead of a nonsense 3.4e38.
+    if constexpr (requires { inst.dbg_energy; })
+        c.s.fe = inst.dbg_energy;
+    else
+        c.s.fe = inst.prev_free_energy < std::numeric_limits<float>::max()
+               ? inst.prev_free_energy
+               : std::numeric_limits<float>::quiet_NaN();
     c.s.fe_baseline   = inst.fe_baseline;
     c.s.fe_surprise   = inst.fe_surprise;
-    c.s.logodds       = inst.existence.logodds();
-    c.s.p_exists      = inst.existence.p_exists();
+    // An instance that tracks whether its existence belief was ever SEEDED reports it only once it was: before
+    // that L is the prior, and a confident-looking 0.50 for an instance never judged is worse than "-".
+    // bottle says so with a flag; chair with its `exist_logodds` mirror, which stays NaN until seeded.
+    bool report_existence = true;
+    if constexpr (requires { inst.existence_seeded; })
+        report_existence = inst.existence_seeded;
+    else if constexpr (requires { inst.exist_logodds; })
+        report_existence = std::isfinite(inst.exist_logodds);
+    if (report_existence)
+    {
+        c.s.logodds  = inst.existence.logodds();
+        c.s.p_exists = inst.existence.p_exists();
+    }
     // A belief never touched has no age — reported as -1 rather than as "now", which would read as fresh.
     c.s.age_s         = inst.last_belief_touch.time_since_epoch().count() == 0
                       ? -1.0f

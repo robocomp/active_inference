@@ -1,22 +1,31 @@
 #include "chat_session.h"
 
+#include <csignal>
 #include <cmath>
 #include <print>
 #include <ranges>
 #include <vector>
 
 #include <QDateTime>
+#include <QDir>
 #include <QFile>
+#include <QFileInfo>
 #include <cstdlib>
 #include <QJsonDocument>
 #include <QRegularExpression>
 
 #include "../../common/episodic/em_query_dsr.h"            // rc::em::load_store
 #include "../../common/graph_provenance/creation_stamp.h"   // rc::provenance::now_ms
+#include <opencv2/imgcodecs.hpp>
+
 #include "approach.h"
+#include "canvas_model.h"
+#include "canvas_snapshot.h"
 #include "controller_facts.h"
+#include "gpu_memory.h"
 #include "image_prep.h"
 #include "look_messages.h"
+#include "sim_door.h"
 
 namespace rc::chat
 {
@@ -51,9 +60,13 @@ QJsonObject tool_def(const QString& name, const QString& description, QJsonObjec
 
 ChatSession::ChatSession(std::shared_ptr<DSR::DSRGraph> G, SessionConfig cfg)
     : G_(std::move(G)), cfg_(std::move(cfg)), inner_(G_->get_inner_eigen_api()), digest_builder_(G_, "body", cfg_.objects_nearest),
-      intention_(G_), mission_watch_(G_), llm_(cfg_.llm), cameras_(G_)
+      intention_(G_), mission_watch_(G_), llm_(cfg_.llm), cameras_(G_),
+      canvas_runner_(CanvasRunConfig{.canvas_dir = q(cfg_.canvas_dir), .timeout_ms = cfg_.canvas_timeout_ms,
+                                     .memory_max = q(cfg_.canvas_memory_max)})
 {
     robot_description_ = load_robot_description(cfg_.system_prompt_path);
+    fleet_policy_ = fleet::Policy{.agents = fleet::split_names(cfg_.fleet_agents),
+                                  .confirm = fleet::split_names(cfg_.fleet_confirm)};
     if (not log_.open(cfg_.log_dir)) std::println("[chat_agent] WARNING: cannot open a log under '{}'", cfg_.log_dir);
     else std::println("[chat_agent] logging to {}", log_.path());
     log_.write("start", QJsonObject{{"model", cfg_.llm.model}, {"url", cfg_.llm.url}, {"num_ctx", cfg_.llm.num_ctx},
@@ -64,6 +77,7 @@ ChatSession::ChatSession(std::shared_ptr<DSR::DSRGraph> G, SessionConfig cfg)
 
 ChatSession::~ChatSession()
 {
+    QObject::disconnect(&gpu_proc_, nullptr, nullptr, nullptr);   // its destructor may still finish a query: no callback then
     llm_.cancel();
     log_.write("stop");
 }
@@ -86,13 +100,51 @@ void ChatSession::start()
             window_->append_system("New conversation.");
             log_.write("new_conversation");
         },
+        .canvas = CanvasPanel::Callbacks{
+            .on_close = [this]()
+            {
+                canvas_stop();
+                window_->hide_canvas();
+            },
+            .on_save = [this](const QString& name) { save_canvas_script(name); },
+        },
     });
     window_->show();
+    // The canvas is open from the start (× closes it; any drawing reopens it), with a hint until the first drawing.
+    window_->show_canvas();
+    window_->canvas()->show_message(QStringLiteral("Canvas"),
+        QStringLiteral("Ask me to show or draw something here:\n\"show me the zed camera\", \"show me the room\", "
+                       "\"show me the plan\", or anything else, e.g. \"plot how far each object is\"."));
     window_->append_system("Robot chat ready. I answer from the robot's live map only. Type \"stop\" to stop it at once.");
 
     QObject::connect(&digest_timer_, &QTimer::timeout, &ctx_, [this]() { tick_digest(); });
     QObject::connect(&status_timer_, &QTimer::timeout, &ctx_, [this]() { tick_status(); });
     QObject::connect(&ping_timer_, &QTimer::timeout, &ctx_, [this]() { ping_llm(); });
+    QObject::connect(&canvas_timer_, &QTimer::timeout, &ctx_, [this]() { tick_canvas(); });
+    QObject::connect(&gpu_timer_, &QTimer::timeout, &ctx_, [this]() { poll_gpu(); });
+    QObject::connect(&fleet_timer_, &QTimer::timeout, &ctx_, [this]() { tick_fleet(); });
+    QObject::connect(&gpu_proc_, &QProcess::finished, &ctx_, [this](int code, QProcess::ExitStatus status)
+    {
+        const auto m = (status == QProcess::NormalExit and code == 0)
+                           ? parse_gpu_memory(gpu_proc_.readAllStandardOutput().toStdString()) : std::nullopt;
+        gpu_label_ = q(gpu_memory_label(m));
+        refresh_status_bar();
+    });
+    QObject::connect(&sim_door_proc_, &QProcess::finished, &ctx_,
+                     [this](int code, QProcess::ExitStatus status) { on_sim_door_done(status == QProcess::NormalExit ? code : -1); });
+    QObject::connect(&sim_door_proc_, &QProcess::errorOccurred, &ctx_, [this](QProcess::ProcessError e)
+    {
+        if (e == QProcess::FailedToStart) on_sim_door_done(-1);   // the other errors end in finished() too
+    });
+    QObject::connect(&gpu_proc_, &QProcess::errorOccurred, &ctx_, [this](QProcess::ProcessError e)
+    {
+        if (e != QProcess::FailedToStart) return;   // the other errors end in finished() too
+        gpu_label_ = q(gpu_memory_label(std::nullopt));   // no nvidia-smi on this machine
+        refresh_status_bar();
+    });
+    canvas_timer_.start(cfg_.canvas_live_period_ms);
+    gpu_timer_.start(cfg_.gpu_period_ms);
+    poll_gpu();
     digest_timer_.start(cfg_.digest_period_ms);
     status_timer_.start(cfg_.status_period_ms);
     ping_timer_.start(30000);
@@ -146,7 +198,14 @@ void ChatSession::refresh_status_bar()
 {
     if (window_)
         window_->set_status(cfg_.llm.model, ollama_ok_ ? QStringLiteral("ollama ok") : ollama_msg_, ollama_ok_,
-                            controller_present_);
+                            controller_present_, gpu_label_);
+}
+
+void ChatSession::poll_gpu()
+{
+    if (gpu_proc_.state() != QProcess::NotRunning) return;   // a slow query is not stacked on
+    gpu_proc_.start(QStringLiteral("nvidia-smi"), {QStringLiteral("--query-gpu=memory.used,memory.total"),
+                                                   QStringLiteral("--format=csv,noheader,nounits")});
 }
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -195,7 +254,10 @@ void ChatSession::on_user_text(const QString& text)
     window_->append_user(text);
     const std::string t = norm(text);
     log_.write("user", QJsonObject{{"text", text}});
+    ++user_turn_;
     tick_digest();   // decide on the freshest facts
+    draw_repairs_ = 0;
+    lost_answers_ = 0;
 
     // 1. stop — at once, without the model, whatever else is going on.
     if (is_stop(t))
@@ -204,6 +266,26 @@ void ChatSession::on_user_text(const QString& text)
         dispatch({.name = "stop"}, "fast_path");
         push_history({{"role", "user"}, {"content", text}});
         push_history({{"role", "assistant"}, {"content", "Stopping the robot now."}});
+        return;
+    }
+    // 1a. a plain yes to agent_control's question: carried out here, not by the model (which answered "yes" by saying
+    //     the agent was stopped without calling the tool, eval 2026-10-19).
+    if (const auto& pend = fleet_confirmations_.pending(); pend.has_value() and fleet::is_yes(text.toStdString()))
+    {
+        const QJsonObject args{{"action", q(std::string(fleet::to_string(pend->action)))}, {"agent", q(pend->agent)}};
+        log_.write("fast_path", QJsonObject{{"kind", "agent_control_yes"}, {"args", args}});
+        const QString result = do_agent_control(args);
+        if (not result.startsWith(QStringLiteral("OK"))) window_->append_system(QStringLiteral("agents — ") + result);
+        push_history({{"role", "user"}, {"content", text}});
+        push_history({{"role", "assistant"}, {"content", result.startsWith(QStringLiteral("OK"))
+                                                             ? QStringLiteral("Doing it: ") + result.mid(4)
+                                                             : result}});
+        return;
+    }
+    // 1b. "show me the zed camera / the room / the plan", "close the canvas": a stock drawing, without the model.
+    if (const auto show = parse_show(t); show.has_value())
+    {
+        show_request(*show, text);
         return;
     }
     // 2. already in the controller's grammar.
@@ -221,7 +303,7 @@ void ChatSession::on_user_text(const QString& text)
     // 3. the model.
     if (llm_.busy())
     {
-        window_->append_system("Still answering the previous message — wait, or press Cancel.");
+        window_->append_system("Still answering the previous message — wait, or press Esc.");
         return;
     }
     if (not ollama_ok_) ping_llm();
@@ -235,6 +317,8 @@ void ChatSession::on_user_text(const QString& text)
 // If the file is missing, a minimal built-in description takes its place.
 namespace
 {
+constexpr int kMaxDrawRepairs = 2;   ///< re-asks after a failed draw script, per user message
+
 const QString kFallbackDescription = QStringLiteral(
     "You are the voice of Shadow, a mobile robot in a home, talking with a person through a chat window.\n"
     "Rules:\n"
@@ -251,7 +335,9 @@ const QString kInterfaceRules = QStringLiteral(
     "- A shut door is no reason not to call cross_door: the crossing itself approaches the door, has it opened and "
     "plans its own path there, whatever a short move ran into. Nobody has to confirm anything: never ask the person "
     "to confirm a crossing, a move or the opening of a door. When they ask for an action, or answer yes to one you "
-    "offered, call its tool now.\n"
+    "offered, call its tool now. The one question you do ask is the one agent_control returns as NOT DONE.\n"
+    "- \"Open door_1\" / \"close the door\" ALONE is sim_door (when you have it): the simulator moves the door and the "
+    "robot stays where it is. cross_door only when the person wants to go THROUGH the door.\n"
     "- 'robot motion now' in the STATE is the MEASURED velocity: if it is not zero you ARE moving (the controller "
     "also drives on its own: exploring, a mission, a joystick), whatever your last command says.\n"
     "- stop() halts the robot at once. cancel_passage() abandons a door crossing in progress.\n"
@@ -270,6 +356,13 @@ const QString kInterfaceRules = QStringLiteral(
     "behind or around you. What you say about a picture is a visual impression, not a measurement: for how many, how "
     "far and where, use the STATE and find_objects/where_is. Lines, dots, grids and labels drawn over a picture are "
     "debug overlays, not part of the scene.\n"
+    "- show(...) and draw(...) are for the PERSON: they put a picture on the canvas beside the chat. 'Show me', "
+    "'display', 'put on the screen', 'draw', 'plot', 'map' ⇒ show or draw, never look (look shows a picture only to "
+    "YOU). show = a ready-made picture (the camera, the room map, the mission plan, the working-memory graph, a 3-D "
+    "model of the robot or an object) — also when they say 'draw' it; table = a table or list of words or numbers, also "
+    "when they say 'draw' it (it needs no room or sensor data; 'show it/that/the list' = your previous answer); draw = anything else (a "
+    "chart, a plot, a marked map), as a Python script. After it, say in one short sentence what is on the canvas; do not "
+    "describe a picture you have not seen.\n"
     "- Of the robot's own software the STATE has only the names of the agents alive ('agents alive now'); for "
     "anything more about it CALL a tool, never guess: agents() "
     "(which programs run, their health, CPU, memory, uptime), sensors(name) (cameras, LiDAR, IMU: streams, measured "
@@ -319,11 +412,22 @@ QJsonArray ChatSession::tools_json() const
     doors.append(QStringLiteral("nearest"));
     QJsonArray tools;
     tools.append(tool_def("cross_door",
-        "Take the robot through a door of the CURRENT room: approach it, open it if it is shut, and go through. "
-        "Starts at once.",
+        QStringLiteral("Take the robot through a door of the CURRENT room: approach it, open it if it is shut, and go "
+                       "through. Starts at once.") +
+            (sim_door_available() ? QStringLiteral(" Only when the person wants to GO THROUGH it; to just open or "
+                                                   "close a door, sim_door.") : QString{}),
         QJsonObject{{"door", QJsonObject{{"type", "string"}, {"enum", doors},
                                          {"description", "a door of the current room, or 'nearest'"}}}},
         QJsonArray{"door"}));
+    if (sim_door_available())
+        tools.append(tool_def("sim_door",
+            "Have the SIMULATOR open or close a door of the CURRENT room at once (the robot does not move and does not "
+            "touch it). When the person asks to open or close a door without going through it. Not to go through a "
+            "door: cross_door opens it on the way.",
+            QJsonObject{{"action", QJsonObject{{"type", "string"}, {"enum", QJsonArray{"open", "close"}}}},
+                        {"door", QJsonObject{{"type", "string"}, {"enum", doors},
+                                             {"description", "a door of the current room, or 'nearest'"}}}},
+            QJsonArray{"action", "door"}));
     tools.append(tool_def("stop", "Stop the robot immediately and abandon what it is doing.", QJsonObject{}, {}));
     tools.append(tool_def("cancel_passage", "Abandon the door crossing in progress (the robot stays where it is).",
                           QJsonObject{}, {}));
@@ -339,9 +443,24 @@ QJsonArray ChatSession::tools_json() const
                                                              "negative = right, 180 = turn around, 0 = do not turn"}}}},
         QJsonArray{"distance_m", "turn_deg"}));
     tools.append(tool_def("approach_object",
-        "Drive to an object of the CURRENT room and stop in front of it, facing it: the controller plans the path "
-        "around obstacles. Give its name (chair_1) or its class (table: the nearest one). Starts at once.",
-        QJsonObject{{"object", QJsonObject{{"type", "string"}, {"description", "an object name or class"}}}},
+        "Drive to an object of the CURRENT room and stop in front of it, facing it: the object itself says where to "
+        "stand and from which sides it can be approached (the STATE lists them); the controller plans the path around "
+        "obstacles. Give its name (chair_1) or its class (table: the nearest one), and optionally the side in the "
+        "person's own words. Starts at once.",
+        QJsonObject{{"object", QJsonObject{{"type", "string"}, {"description", "an object name or class"}}},
+                    {"side", QJsonObject{{"type", "string"},
+                                         {"description", "ONLY when the person names a side: the side to approach from, as they said it "
+                                                         "(right, the far side, behind it, por la izquierda) or a side "
+                                                         "name from the STATE; empty = the object's default"}}}},
+        QJsonArray{"object"}));
+    tools.append(tool_def("go_around_object",
+        "Drive a full loop around an object of the CURRENT room, stopping on each side facing it, and end back where "
+        "the loop began; sides the robot cannot reach (against a wall) are skipped. Give its name or class, and "
+        "optionally the direction the person says. Starts at once. To stop at ONE side use approach_object.",
+        QJsonObject{{"object", QJsonObject{{"type", "string"}, {"description", "an object name or class"}}},
+                    {"direction", QJsonObject{{"type", "string"},
+                                              {"description", "ONLY when the person says one: left or right (por la "
+                                                              "izquierda / derecha); empty = left"}}}},
         QJsonArray{"object"}));
     tools.append(tool_def("find_objects",
         "List the objects the robot has perceived in the CURRENT room, nearest first, with distance, bearing and size. "
@@ -359,9 +478,23 @@ QJsonArray ChatSession::tools_json() const
         "The robot's software agents: which are running, their state (Operating / Degraded / Waiting), uptime, CPU "
         "and memory of each. Read-only.",
         QJsonObject{}, {}));
+    {
+        QString names;
+        for (const auto& a : fleet_policy_.agents) names += (names.isEmpty() ? "" : ", ") + q(a);
+        tools.append(tool_def("agent_control",
+            "Start, stop or restart one of the robot's software agents (" + names + "). When the person asks to "
+            "start, stop or restart an agent, call it with the name they give, also one not listed: the tool says "
+            "why not. Never to answer a question about them (that is agents). Stopping or restarting the controller or retina needs the person's yes: the tool says so, you "
+            "ask, and you call it again with the same arguments only after they answer yes.",
+            QJsonObject{{"action", QJsonObject{{"type", "string"}, {"enum", QJsonArray{"start", "stop", "restart"}}}},
+                        {"agent", QJsonObject{{"type", "string"},
+                                              {"description", "the agent's name, e.g. chair_concept"}}}},
+            QJsonArray{"action", "agent"}));
+    }
     tools.append(tool_def("sensors",
         "The robot's sensors (cameras, LiDAR, IMU): their streams, the frame rate MEASURED now, resolution, age of the "
-        "last frame and bandwidth. Read-only.",
+        "last frame and bandwidth: numbers about the streams, not what they measure. To let the person SEE what the "
+        "LiDARs or cameras measure use show (lidar / camera). Read-only.",
         QJsonObject{{"name", QJsonObject{{"type", "string"},
                                          {"description", "a sensor or camera to filter by (e.g. ricoh, 360, zed, front, "
                                                          "lidar); empty = all"}}}},
@@ -404,8 +537,63 @@ QJsonArray ChatSession::tools_json() const
         "The most recent episode today about one door, room or object (aimed at it or that read its beliefs). "
         "Read-only.",
         QJsonObject{{"target", str("a door, room or object name, e.g. door_27")}}, QJsonArray{"target"}));
+    {
+        QJsonArray names;
+        for (const auto& n : canvas_library()) names.append(n);
+        tools.append(tool_def("show",
+            "Show the PERSON a ready-made picture on the canvas beside the chat (you do not see it: look is for you). "
+            "camera = the live camera picture (args 'zed' = front, 'ricoh' = 360); layout = the current room from "
+            "above with the robot, doors and objects; plan = the mission the robot runs; graph = the robot's working "
+            "memory as a graph of nodes and edges, the DSR graph: what it knows and how it is connected — 'the graph', 'your "
+            "memory graph' (args: a node name to zoom in on it, e.g. 'room_1'; empty = all); "
+            "model = the 3-D model of the robot or of an object, which the person can turn with the mouse (args: "
+            "'robot', an object name like chair_1, or a class like table); lidar = the live 3-D LiDAR point clouds "
+            "in the robot's frame (args: leave EMPTY for both, the usual answer; 'helios' or 'bpearl' only when the person names one); "
+            "other names are drawings "
+            "saved earlier. Only when one of these is exactly what was asked; any other chart, plot or picture: draw.",
+            QJsonObject{{"name", QJsonObject{{"type", "string"}, {"enum", names}, {"description", "which drawing"}}},
+                        {"args", QJsonObject{{"type", "string"},
+                                             {"description", "camera: 'zed' (front, default) or 'ricoh' (360)"}}},
+                        {"live", QJsonObject{{"type", "boolean"},
+                                             {"description", "true = keep redrawing it (default for camera "
+                                                             "and layout); false = draw once"}}}},
+            QJsonArray{"name"}));
+        tools.append(tool_def("draw",
+            "Draw a NEW picture for the PERSON on the canvas beside the chat by writing a Python script (NOT for the "
+            "camera, the room map, the plan, the working-memory graph or a 3-D model: show has those, even when the "
+            "person says 'draw'; NOT for a table: table): a chart, a plot, a map with something marked. Python 3 with matplotlib/numpy/PIL, no network. "
+            "`from rcanvas import *` gives: w = world() (w.room.name, w.room.polygon [[x,y],...]; w.robot.x/.y/"
+            ".heading (rad, the direction it faces)/.radius; w.doors [d.name, d.a, d.b (ends [x,y]), d.p_open]; "
+            "w.objects [o.name, o.type, o.x, o.y, o.yaw, o.width, o.depth, o.height, o.dist]; w.target.x/.y; any of "
+            "these may be None), image('zed'|'ricoh') -> RGB numpy array or None, fig = figure(), ax = "
+            "layout_axes(fig) (equal-aspect map axes), draw_layout(ax, w) (room+doors+objects+robot+target), "
+            "draw_room/draw_doors/draw_objects/draw_robot/draw_target(ax, w); g = graph() (the working-memory graph: "
+            "g.nodes [n.id, n.name, n.type, n.agent], g.edges [e.src, e.dst, e.type] by node id), draw_graph(focus=None) "
+            "-> a PIL image of it. Metres, room frame. The script MUST end "
+            "with save(fig) (or save_image(img)). If it fails you get the error back: fix it and call draw again.",
+            QJsonObject{{"script", QJsonObject{{"type", "string"}, {"description", "the Python source"}}},
+                        {"title", QJsonObject{{"type", "string"}, {"description", "a short caption, e.g. 'distance to "
+                                                                                  "each object'"}}},
+                        {"live", QJsonObject{{"type", "boolean"},
+                                             {"description", "true = keep redrawing it with fresh data; "
+                                                             "false (default) = draw once"}}}},
+            QJsonArray{"script", "title"}));
+        tools.append(tool_def("table",
+            "Show the PERSON a table on the canvas beside the chat, from rows you already have: your previous answer, "
+            "the STATE or a tool result (a list of agents, of objects and distances, of what you can do). No script; "
+            "a table is never a draw. Short rows, as many as the content has.",
+            QJsonObject{{"title", QJsonObject{{"type", "string"}, {"description", "a short caption"}}},
+                        {"header", QJsonObject{{"type", "array"}, {"items", QJsonObject{{"type", "string"}}},
+                                               {"description", "the column names"}}},
+                        {"rows", QJsonObject{{"type", "array"},
+                                             {"items", QJsonObject{{"type", "array"}, {"items", QJsonObject{{"type", "string"}}}}},
+                                             {"description", "one list of cells per row, as many cells as the header"}}}},
+            QJsonArray{"title", "rows"}));
+        tools.append(tool_def("hide_canvas", "Close the drawing canvas beside the chat.", QJsonObject{}, {}));
+    }
     tools.append(tool_def("look",
-        "Look through a camera now: the current picture is shown to you in the next message. Read-only.",
+        "Look through a camera now: the current picture is shown to YOU (not to the person) in the next message, so you "
+        "can answer about it. To show a picture to the person use show or draw. Read-only.",
         QJsonObject{{"camera", QJsonObject{{"type", "string"}, {"enum", QJsonArray{"front", "360"}},
                                            {"description", "'front' = the camera facing ahead (default); "
                                                            "'360' = the all-round panorama"}}}},
@@ -435,9 +623,9 @@ QJsonArray ChatSession::messages_for_request() const
     return msgs;
 }
 
-void ChatSession::ask_model(bool followup)
+void ChatSession::ask_model(bool followup, bool offer_tools)
 {
-    turn_ = Turn{.followup = followup};
+    turn_ = Turn{.followup = followup, .offer_tools = offer_tools};
     // STATE additions for this request: what changed among the objects and the doors since the last request, and the last
     // relative move (so "a bit more" knows its direction even after the history has been trimmed).
     state_extra_.clear();
@@ -457,7 +645,12 @@ void ChatSession::ask_model(bool followup)
     state_extra_ += QStringLiteral("last move/turn sent from this chat: ") +
                     (last_relative_.empty() ? QStringLiteral("none") : q(explain_relative_command(last_relative_))) + "\n";
     const QJsonArray msgs = messages_for_request();
-    const QJsonArray tools = followup ? QJsonArray{} : tools_json();
+    // ★ A follow-up carries the SAME tools as the turn before it. ollama reuses the processed prompt only up to the first
+    //   token that differs, and the template writes the tools right after the system prompt: dropping them on the
+    //   follow-up and restoring them on the next message reprocessed the whole history twice per tool round (873 ms of
+    //   a 1086 ms cold prompt on the 5070 Ti, measured 2026-10-22; several seconds on a Jetson). With the tools on offer
+    //   the 8b still answered 35/35 follow-ups in words; a call it makes anyway is never run (on_done).
+    const QJsonArray tools = offer_tools ? tools_json() : QJsonArray{};
     QJsonArray hist;
     for (const auto& m : history_)
     {
@@ -486,12 +679,39 @@ void ChatSession::ask_model(bool followup)
             const QString content = strip_think(turn_.content);
             if (turn_.tool_calls.isEmpty())
             {
-                if (not content.isEmpty()) push_history({{"role", "assistant"}, {"content", content}});
+                // What the model says after a tool result is shown, not kept: the call and its result already hold what
+                // happened, and the 8b copies its own follow-ups ("I am approaching table_7 … I will stop in front of
+                // it") as the answer to the next request, with no call (live 2026-10-19: 0/5 calls replayed with
+                // them in the history, 5/5 without).
+                if (not content.isEmpty())
+                {
+                    if (not turn_.followup) push_history({{"role", "assistant"}, {"content", content}});
+                }
+                // Tokens came but neither words nor a call: ollama dropped a tool call it could not parse (a draw script
+                // with 'Today\'s' in it is not JSON, eval 2026-10-19). Ask once more; then say so instead of silence.
+                else if (st.eval_count > 0 and lost_answers_++ == 0) ask_model(turn_.followup);
+                else if (not turn_.followup) window_->append_system(QStringLiteral("the model's answer could not be read; please ask again"));
+                return;
+            }
+            // A follow-up is for words: a call in it is not run (it would be a second command the person never gave).
+            // Its words are shown; with none, ask once more without the tools, as before (a cache miss, rare).
+            if (turn_.followup)
+            {
+                log_.write("followup_call_dropped", QJsonObject{{"tool_calls", turn_.tool_calls}});
+                if (content.isEmpty() and turn_.offer_tools) ask_model(true, false);
                 return;
             }
             push_history({{"role", "assistant"}, {"content", content}, {"tool_calls", turn_.tool_calls}});
             const bool followup = turn_.followup;
+            draw_failed_ = false;
             const bool image = handle_tool_calls(turn_.tool_calls);
+            // A drawing script failed: the model gets its error back WITH the tools, to fix it (at most twice).
+            if (draw_failed_ and draw_repairs_ < kMaxDrawRepairs)
+            {
+                ++draw_repairs_;
+                ask_model(false);
+                return;
+            }
             // A tool round with no words: one follow-up (no tools) so the model can tell the person what happened.
             // A picture was asked for: the follow-up is where the model gets to see it, words or not.
             if ((content.isEmpty() or image) and not followup) ask_model(true);
@@ -549,7 +769,18 @@ bool ChatSession::handle_tool_calls(const QJsonArray& calls)
 QString ChatSession::answer_query(const QString& name, const QJsonObject& args)
 {
     if (name == "look") return do_look(args);
+    if (name == "draw" or name == "show") return do_draw(name, args);
+    if (name == "table") return do_table(args);
+    if (name == "hide_canvas")
+    {
+        canvas_stop();
+        window_->hide_canvas();
+        return QStringLiteral("OK: the canvas is closed.");
+    }
     if (name == "approach_object") return do_approach(args);
+    if (name == "agent_control") return do_agent_control(args);
+    if (name == "go_around_object") return do_go_around(args);
+    if (name == "sim_door") return do_sim_door(args);
     QString out;
     if (QString m = answer_memory(name, args); not m.isEmpty()) out = std::move(m);
     else if (name == "find_objects")
@@ -619,11 +850,38 @@ QString ChatSession::do_approach(const QJsonObject& args)
     if (room.empty()) return refuse("the current room is not known yet");
     const auto o = pick_object(digest_.objects, what);
     if (not o.has_value()) return refuse(o.error());
-    // Both in the room frame: the go_to pose is a room pose. Optionals checked (CLAUDE.md).
+    // Both in the room frame: the object's options and the go_to pose are room poses. Optionals checked (CLAUDE.md).
     const auto To = inner_->get_transformation_matrix(room, o->name);
     const auto Tr = inner_->get_transformation_matrix(room, "body");
     if (not To.has_value() or not Tr.has_value())
         return refuse("where '" + o->name + "' or the robot is in " + room + " cannot be resolved right now");
+    const std::string side_words = args.value("side").toString().trimmed().toStdString();
+    // ★ THE OBJECT PROPOSES (2026-10-18): an object that offers its approach affordance says where to stand and from
+    //   which sides; the chat only resolves the person's words to one of those and names it to the controller.
+    if (const auto aff = G_->get_node("aff_" + o->name + "_approach"); aff.has_value())
+    {
+        const auto names = G_->get_attrib_by_name<aff_option_names_att>(*aff);
+        const auto xs = G_->get_attrib_by_name<aff_option_x_m_att>(*aff);
+        const auto ys = G_->get_attrib_by_name<aff_option_y_m_att>(*aff);
+        const auto ws = G_->get_attrib_by_name<aff_option_yaw_rad_att>(*aff);
+        std::vector<ApproachSide> sides;
+        if (names.has_value() and xs.has_value() and ys.has_value() and ws.has_value())
+            if (auto p = parse_sides(*names, xs->get(), ys->get(), ws->get()); p.has_value()) sides = std::move(*p);
+        label_sides(sides, {To->translation().x(), To->translation().y()}, {Tr->translation().x(), Tr->translation().y()});
+        const auto side = resolve_side(sides, side_words);
+        if (not side.has_value()) return refuse(o->name + ": " + side.error());
+        const std::string cmd = "approach " + o->name + (side->empty() ? "" : " from " + *side);
+        std::string where;
+        for (const auto& s : sides)
+            if (s.name == (side->empty() ? sides.front().name : *side)) where = s.view + " side as seen from here";
+        log_.write("approach", QJsonObject{{"object", q(o->name)}, {"ok", true}, {"side", q(*side)}, {"command", q(cmd)}});
+        if (not send_command(cmd, "llm")) return QStringLiteral("FAILED: could not write the command to the graph.");
+        return QStringLiteral("OK: '%1' sent: %2 chose where to stand%3; the controller plans the path around obstacles.")
+            .arg(q(cmd), q(o->name), where.empty() ? QString{} : QStringLiteral(" (%1)").arg(q(where)));
+    }
+    // An object whose agent does not offer `approach` yet (only chair does, so far): the old pose path, without sides.
+    if (not side_words.empty())
+        return refuse(o->name + " does not offer approach sides yet; ask without a side to go to the side the robot is on");
     const double standoff = cfg_.robot_radius_m + cfg_.approach_clearance_m;
     const auto p = approach_point({To->translation().x(), To->translation().y()},
                                   {Tr->translation().x(), Tr->translation().y()}, footprint_radius(*o), standoff);
@@ -635,6 +893,504 @@ QString ChatSession::do_approach(const QJsonObject& args)
     return QStringLiteral("OK: mission 'approach %1' sent: the controller drives to a spot %2 m from its centre, facing "
                           "it, planning its path around obstacles.")
         .arg(q(o->name)).arg(footprint_radius(*o) + standoff, 0, 'f', 2);
+}
+
+QString ChatSession::do_go_around(const QJsonObject& args)
+{
+    const std::string what = args.value("object").toString().trimmed().toStdString();
+    const std::string room = digest_.facts.room;
+    const auto refuse = [&](const std::string& why)
+    {
+        log_.write("go_around", QJsonObject{{"object", q(what)}, {"ok", false}, {"reason", q(why)}});
+        window_->append_system(QStringLiteral("Not possible: ") + q(why));
+        return QStringLiteral("REJECTED: ") + q(why);
+    };
+    if (not digest_.facts.controller_present) return refuse("the controller is not running, so the robot cannot move");
+    if (room.empty()) return refuse("the current room is not known yet");
+    const auto o = pick_object(digest_.objects, what);
+    if (not o.has_value()) return refuse(o.error());
+    const auto left = parse_around_direction(args.value("direction").toString().toStdString());
+    if (not left.has_value())
+        return refuse("'" + args.value("direction").toString().toStdString() + "' is not a direction: left or right");
+    const auto To = inner_->get_transformation_matrix(room, o->name);
+    const auto Tr = inner_->get_transformation_matrix(room, "body");
+    if (not To.has_value() or not Tr.has_value())
+        return refuse("where '" + o->name + "' or the robot is in " + room + " cannot be resolved right now");
+    std::vector<ApproachSide> sides;   // the object's own standpoints, when it offers them (do_approach)
+    if (const auto aff = G_->get_node("aff_" + o->name + "_approach"); aff.has_value())
+    {
+        const auto names = G_->get_attrib_by_name<aff_option_names_att>(*aff);
+        const auto xs = G_->get_attrib_by_name<aff_option_x_m_att>(*aff);
+        const auto ys = G_->get_attrib_by_name<aff_option_y_m_att>(*aff);
+        const auto ws = G_->get_attrib_by_name<aff_option_yaw_rad_att>(*aff);
+        if (names.has_value() and xs.has_value() and ys.has_value() and ws.has_value())
+            if (auto p = parse_sides(*names, xs->get(), ys->get(), ws->get()); p.has_value()) sides = std::move(*p);
+    }
+    const double ring = footprint_radius(*o) + cfg_.robot_radius_m + cfg_.approach_clearance_m;
+    const auto m = go_around_mission(o->name, room, {To->translation().x(), To->translation().y()},
+                                     {Tr->translation().x(), Tr->translation().y()}, sides, ring, *left);
+    const bool own = sides.size() >= 3;
+    log_.write("go_around", QJsonObject{{"object", q(o->name)}, {"ok", true}, {"stops", int(m.steps.size())},
+                                        {"own_sides", own}, {"left", *left}});
+    if (not send_command(rc::mission::encode_json(m), "llm")) return QStringLiteral("FAILED: could not write the mission to the graph.");
+    return QStringLiteral("OK: mission 'go around %1' sent: %2 stops %3, setting off to the robot's %4 and ending back "
+                          "at the first; a stop it cannot reach is skipped. The chat reports progress; do not say it is done.")
+        .arg(q(o->name)).arg(m.steps.size() - 1)
+        .arg(own ? QStringLiteral("at the sides it offers") : QStringLiteral("%1 m from its centre").arg(ring, 0, 'f', 2),
+             *left ? QStringLiteral("left") : QStringLiteral("right"));
+}
+
+// ── sim_door: the simulator opens / closes a door (sim_door.h, tools/sim_door.py) ────────────────────────────────
+
+bool ChatSession::sim_door_available() const
+{
+    if (cfg_.sim_door_endpoint.empty()) return false;
+    const auto robots = G_->get_nodes_by_type("robot");
+    return not robots.empty() and G_->get_attrib_by_name<robot_gt_x_att>(robots.front()).has_value();
+}
+
+QString ChatSession::do_sim_door(const QJsonObject& args)
+{
+    const QString action = args.value("action").toString().trimmed().toLower();
+    std::string door = args.value("door").toString().trimmed().toLower().toStdString();
+    const std::string room = digest_.facts.room;
+    const auto refuse = [&](const std::string& why)
+    {
+        log_.write("sim_door", QJsonObject{{"args", args}, {"ok", false}, {"reason", q(why)}});
+        return QStringLiteral("REJECTED: ") + q(why);
+    };
+    if (not sim_door_available()) return refuse("there is no simulator to move doors (this is the real robot)");
+    if (sim_door_proc_.state() != QProcess::NotRunning)
+        return refuse("still waiting for the simulator about " + sim_door_what_.toStdString());
+    if (action != "open" and action != "close") return refuse("action must be open or close");
+    if (room.empty()) return refuse("the current room is not known yet");
+    if (door.empty() or door == "nearest" or door == "the door" or door == "door")
+    {
+        if (not digest_.facts.nearest_door.has_value()) return refuse("no door of " + room + " is known");
+        door = *digest_.facts.nearest_door;
+    }
+    if (std::ranges::find(digest_.facts.doors, door) == digest_.facts.doors.end())
+        return refuse("'" + door + "' is not a door of " + room + " (the current room)");
+    const auto robots = G_->get_nodes_by_type("robot");
+    const auto gx = G_->get_attrib_by_name<robot_gt_x_att>(robots.front());
+    const auto gy = G_->get_attrib_by_name<robot_gt_y_att>(robots.front());
+    const auto ga = G_->get_attrib_by_name<robot_gt_angle_att>(robots.front());
+    const auto Td = inner_->get_transformation_matrix(room, door);
+    const auto Tr = inner_->get_transformation_matrix(room, "body");
+    if (not gx.has_value() or not gy.has_value() or not ga.has_value() or not Td.has_value() or not Tr.has_value())
+        return refuse("where " + door + " or the robot is cannot be resolved right now");
+    const Eigen::Vector2d w = room_point_in_world({Td->translation().x(), Td->translation().y()}, Tr->matrix(),
+                                                  gx.value(), gy.value(), ga.value());
+    sim_door_what_ = action + " " + q(door);
+    sim_door_proc_.setProgram(QStringLiteral("python3"));
+    sim_door_proc_.setArguments({q(cfg_.sim_door_script), action, QString::number(w.x(), 'f', 3),
+                                 QString::number(w.y(), 'f', 3), QString::number(cfg_.sim_door_match_max_m, 'f', 2),
+                                 q(cfg_.sim_door_endpoint)});
+    sim_door_proc_.start();
+    log_.write("sim_door", QJsonObject{{"args", args}, {"ok", true}, {"door", q(door)}, {"world_x", w.x()}, {"world_y", w.y()}});
+    window_->append_system(QStringLiteral("simulator — %1").arg(sim_door_what_));
+    return QStringLiteral("OK: asked the simulator to %1 %2. The chat tells the person when it answers; do not say it "
+                          "is done.").arg(action, q(door));
+}
+
+void ChatSession::on_sim_door_done(int code)
+{
+    const QJsonObject r = QJsonDocument::fromJson(sim_door_proc_.readAllStandardOutput().trimmed()).object();
+    QString msg;
+    if (r.value("ok").toBool())
+        msg = QStringLiteral("the simulator is moving it (%1, %2 m from where the map has it); it takes a few seconds")
+                  .arg(r.value("id").toString()).arg(r.value("dist_m").toDouble(), 0, 'f', 2);
+    else if (r.contains("refusal"))
+        msg = QStringLiteral("the simulator refused (%1)").arg(r.value("refusal").toString());
+    else if (r.contains("error"))
+        msg = QStringLiteral("not done: ") + r.value("error").toString();
+    else
+        msg = QStringLiteral("not done: the helper failed (exit %1): %2")
+                  .arg(code).arg(QString::fromUtf8(sim_door_proc_.readAllStandardError()).trimmed().right(200));
+    log_.write("sim_door_done", QJsonObject{{"what", sim_door_what_}, {"result", r}, {"exit", code}});
+    window_->append_system(QStringLiteral("simulator — %1: %2").arg(sim_door_what_, msg));
+    push_history({{"role", "tool"}, {"tool_name", "sim_door"}, {"content", sim_door_what_ + ": " + msg}});
+}
+
+// ─── the side canvas (canvas_runner.h / canvas_snapshot.h / canvas_panel.h) ──────────────────────────────────────
+
+QStringList ChatSession::canvas_library() const
+{
+    QStringList names;
+    for (const char* sub : {"/stock", "/library"})
+        for (const QFileInfo& f : QDir(canvas_runner_.canvas_dir() + sub).entryInfoList({"*.py"}, QDir::Files, QDir::Name))
+            if (not names.contains(f.completeBaseName()) and f.completeBaseName() != "table")   // the table tool's
+                names.append(f.completeBaseName());
+    if (not names.contains("plan")) names.append("plan");     // not a script: the plan page of the canvas
+    if (not names.contains("model")) names.append("model");   // not a script: the 3-D page (canvas_model.h)
+    if (not names.contains("lidar")) names.append("lidar");   // not a script: the point-cloud page (canvas_lidar.h)
+    return names;
+}
+
+std::optional<CanvasJob> ChatSession::library_job(const QString& name, const QStringList& args) const
+{
+    for (const char* sub : {"/stock/", "/library/"})
+    {
+        const QString path = canvas_runner_.canvas_dir() + sub + name + ".py";
+        QFile f(path);
+        if (not f.open(QIODevice::ReadOnly | QIODevice::Text)) continue;
+        CanvasJob job{.title = name, .script_path = path, .args = args, .source = QString::fromUtf8(f.readAll())};
+        job.wants_images = job.source.contains("image(");
+        job.wants_graph = job.source.contains("graph(");
+        return job;
+    }
+    return std::nullopt;
+}
+
+void ChatSession::write_canvas_inputs(const CanvasJob& job)
+{
+    const QSize sz = window_->canvas()->drawing_size();
+    const QJsonObject snap = build_canvas_snapshot(*G_, *inner_, digest_, mission_progress_, cfg_.robot_radius_m,
+                                                   SnapshotSize{std::max(sz.width(), 320), std::max(sz.height(), 240)});
+    if (not write_canvas_snapshot(canvas_runner_.run_dir(), snap))
+        std::println("[chat_agent] canvas: cannot write the snapshot in {}", canvas_runner_.run_dir().toStdString());
+    // Camera frames only for a script that reads them (encoding a 360 frame every second is not free).
+    for (const auto& [cam, file] : {std::pair{Camera::front, "/zed.jpg"}, std::pair{Camera::pano, "/ricoh.jpg"}})
+    {
+        const std::string path = (canvas_runner_.run_dir() + file).toStdString();
+        if (const auto fr = job.wants_images ? cameras_.grab(cam) : std::expected<GrabbedFrame, std::string>(
+                                                                         std::unexpected(std::string())); fr.has_value())
+            cv::imwrite(path, fr->bgr, {cv::IMWRITE_JPEG_QUALITY, 90});
+        else QFile::remove(QString::fromStdString(path));   // no stale frame from an earlier run
+    }
+    // The whole graph only for a script that reads it (graph() in rcanvas.py).
+    if (job.wants_graph)
+    {
+        std::map<std::uint32_t, std::string> agent_names;
+        for (const auto& a : system_.agents()) agent_names[a.id] = a.name;
+        write_canvas_json(canvas_runner_.run_dir(), QStringLiteral("graph.json"), build_canvas_graph(*G_, agent_names));
+    }
+    else QFile::remove(canvas_runner_.run_dir() + QStringLiteral("/graph.json"));
+}
+
+namespace
+{
+// The stock camera drawing is the frame itself: shown straight from CameraGrabber's deep copy, no Python, so a live
+// camera runs at the canvas period instead of at a script's start-up cost.
+std::optional<Camera> stock_camera(const CanvasJob& job)
+{
+    if (not job.script_path.endsWith(QStringLiteral("/stock/camera.py"))) return std::nullopt;
+    const QString a = job.args.isEmpty() ? QString() : job.args.front().toLower();
+    return a == "ricoh" or a == "360" or a == "pano" ? Camera::pano : Camera::front;
+}
+
+QImage to_qimage(const cv::Mat& bgr)
+{
+    return QImage(bgr.data, bgr.cols, bgr.rows, static_cast<qsizetype>(bgr.step), QImage::Format_BGR888).copy();
+}
+}   // namespace
+
+QString ChatSession::draw_now(CanvasJob job, bool savable)
+{
+    canvas_stop();            // the previous drawing's live worker, camera or lidars
+    window_->show_canvas();   // first, so the snapshot carries the panel's real size
+    if (const auto cam = stock_camera(job); cam.has_value())
+    {
+        auto frame = cameras_.grab(*cam);
+        log_.write("draw", QJsonObject{{"title", job.title}, {"camera", int(*cam)}, {"live", job.live},
+                                       {"ok", frame.has_value()}, {"error", frame.has_value() ? QString() : q(frame.error())}});
+        if (not frame.has_value())
+        {
+            window_->canvas()->show_message(job.title, q(frame.error()));
+            return q(frame.error());
+        }
+        window_->canvas()->show_drawing(job.title, to_qimage(frame->bgr), job.live, job.source, false);
+        canvas_camera_ = cam;
+        canvas_job_ = std::move(job);
+        canvas_savable_ = false;
+        canvas_live_ = canvas_job_.live;
+        return {};
+    }
+    canvas_camera_.reset();
+    write_canvas_inputs(job);
+    const CanvasRunResult r = canvas_runner_.run_blocking(job);
+    log_.write("draw", QJsonObject{{"title", job.title}, {"script", job.script_path}, {"args", job.args.join(' ')},
+                                   {"live", job.live}, {"ok", r.ok}, {"ms", r.ms}, {"error", r.error}});
+    if (not r.ok)
+    {
+        window_->canvas()->show_message(job.title, QStringLiteral("Could not draw it: ") + r.error);
+        return r.error;
+    }
+    window_->canvas()->show_drawing(job.title, r.image, job.live, job.source, savable);
+    canvas_job_ = std::move(job);
+    canvas_savable_ = savable;
+    canvas_live_ = canvas_job_.live;
+    return {};
+}
+
+void ChatSession::tick_canvas()
+{
+    if (not window_ or not window_->canvas_visible()) return;
+    if (not canvas_live_ and not canvas_lidar_) return;
+    if (canvas_lidar_)
+    {
+        lidars_.retry();   // a subscriber that is not up yet (self-throttled); keeps the chosen sensors
+        if (lidars_.poll(*inner_))
+        {
+            window_->canvas()->update_lidar(lidars_.cloud(0), lidars_.cloud(1), lidars_.stamp_ms(), q(lidars_.status()));
+            if (not lidar_logged_)
+            {
+                lidar_logged_ = true;
+                log_.write("lidar_first_frame", QJsonObject{{"status", q(lidars_.status())}});
+                std::println("[chat_agent] canvas: first LiDAR frame — {}", lidars_.status());
+            }
+        }
+        return;
+    }
+    if (canvas_camera_.has_value())
+    {
+        if (auto frame = cameras_.grab(*canvas_camera_); frame.has_value())
+            window_->canvas()->update_image(to_qimage(frame->bgr));
+        return;
+    }
+    if (canvas_runner_.running()) return;   // the previous redraw is still drawing: skip this tick
+    write_canvas_inputs(canvas_job_);
+    canvas_runner_.redraw(canvas_job_, [this](CanvasRunResult r)
+    {
+        if (not canvas_live_) return;
+        if (r.ok) { window_->canvas()->update_image(r.image); return; }
+        // A live drawing that starts failing (a camera gone, a room with no polygon yet…): stop, say why, don't spin.
+        canvas_live_ = false;
+        window_->canvas()->set_live(false);
+        window_->append_system(QStringLiteral("canvas: the live drawing stopped — ") + r.error.section('\n', 0, 0));
+        log_.write("draw_live_failed", QJsonObject{{"title", canvas_job_.title}, {"error", r.error}});
+    });
+}
+
+void ChatSession::canvas_stop()
+{
+    canvas_live_ = false;
+    canvas_runner_.kill();
+    canvas_camera_.reset();
+    if (canvas_lidar_) lidars_.release();
+    canvas_lidar_ = false;
+}
+
+QString ChatSession::show_lidar(const std::string& which_raw)
+{
+    std::string which = which_raw;
+    std::ranges::transform(which, which.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    std::vector<std::string> sensors;
+    if (which.find("helios") != std::string::npos or which == "top" or which == "upper") sensors = {"helios"};
+    else if (which.find("bpearl") != std::string::npos or which == "dome" or which == "lower") sensors = {"bpearl"};
+    canvas_stop();
+    lidars_.want(sensors);
+    const bool any = G_->get_node("helios").has_value() or G_->get_node("bpearl").has_value();
+    log_.write("draw_lidar", QJsonObject{{"which", q(which)}, {"sensor_nodes", any}});
+    if (not any) return QStringLiteral("ERROR: the robot has no 3-D LiDAR nodes (helios / bpearl) in the graph");
+    canvas_lidar_ = true;
+    lidar_logged_ = false;
+    window_->show_canvas();
+    window_->canvas()->show_lidar(sensors.empty() ? QStringLiteral("3-D LiDARs: helios + bpearl")
+                                                  : QStringLiteral("3-D LiDAR: %1").arg(q(sensors.front())),
+                                  QStringLiteral("robot frame · helios and bpearl in two colours · waiting for points…"));
+    return QStringLiteral("OK: the %1 point cloud is on the canvas, live, in the robot's frame; the person can turn it "
+                          "with the mouse.").arg(sensors.empty() ? QStringLiteral("3-D LiDARs'") : q(sensors.front()));
+}
+
+QString ChatSession::show_model(const std::string& what)
+{
+    const auto m = find_model(*G_, digest_.objects, what);
+    log_.write("draw_model", QJsonObject{{"what", q(what)}, {"ok", m.has_value()},
+                                         {"result", q(m.has_value() ? m->description : m.error())}});
+    if (not m.has_value()) return QStringLiteral("ERROR: ") + q(m.error());
+    canvas_stop();
+    window_->show_canvas();
+    window_->canvas()->show_model(QStringLiteral("3-D model: %1").arg(q(m->node)), m->triangles, q(m->description));
+    return QStringLiteral("OK: the 3-D model of %1 is on the canvas (%2 triangles; the person can turn it with the mouse).")
+        .arg(q(m->node)).arg(m->triangles.size() / 3);
+}
+
+void ChatSession::show_request(const ShowRequest& r, const QString& text)
+{
+    log_.write("fast_path", QJsonObject{{"kind", "show"}, {"what", int(r.kind)}, {"arg", q(r.arg)}});
+    push_history({{"role", "user"}, {"content", text}});
+    QString reply;
+    if (r.kind == ShowRequest::Kind::hide)
+    {
+        canvas_stop();
+        window_->hide_canvas();
+        reply = QStringLiteral("Canvas closed.");
+    }
+    else if (r.kind == ShowRequest::Kind::plan)
+    {
+        canvas_stop();
+        window_->show_canvas();
+        window_->canvas()->show_plan();
+        reply = window_->canvas()->plan()->has_mission() ? QStringLiteral("The mission plan is on the canvas.")
+                                                          : QStringLiteral("No mission yet: the canvas shows an empty plan.");
+    }
+    else if (r.kind == ShowRequest::Kind::lidar)
+    {
+        const QString res = show_lidar(r.arg);
+        reply = res.startsWith("OK") ? QStringLiteral("Showing the %1 on the canvas, live (drag to turn it).")
+                                           .arg(r.arg.empty() ? QStringLiteral("3-D LiDARs") : q(r.arg))
+                                     : QStringLiteral("I cannot show the LiDARs: ") + res.mid(7);
+    }
+    else if (r.kind == ShowRequest::Kind::model)
+    {
+        const QString res = show_model(r.arg);
+        reply = res.startsWith("OK") ? QStringLiteral("Showing the 3-D model of %1 on the canvas (drag to turn it).")
+                                           .arg(r.arg == "robot" ? QStringLiteral("the robot") : q(r.arg))
+                                     : QStringLiteral("I cannot show that model: ") + res.mid(7);
+    }
+    else if (r.kind == ShowRequest::Kind::graph)
+    {
+        auto job = library_job("graph", r.arg.empty() ? QStringList{} : QStringList{q(r.arg)});
+        if (not job.has_value()) reply = QStringLiteral("I cannot draw: the stock canvas scripts are missing.");
+        else
+        {
+            job->title = r.arg.empty() ? QStringLiteral("working memory graph")
+                                       : QStringLiteral("working memory around %1").arg(q(r.arg));
+            const QString title = job->title;
+            const QString err = draw_now(std::move(*job), false);
+            reply = err.isEmpty() ? QStringLiteral("Showing the %1 on the canvas.").arg(title)
+                                  : QStringLiteral("I could not draw the %1: %2").arg(title, err.trimmed().section('\n', -1));
+        }
+    }
+    else
+    {
+        const bool cam = r.kind == ShowRequest::Kind::camera;
+        auto job = library_job(cam ? "camera" : "layout", cam ? QStringList{q(r.arg)} : QStringList{});
+        if (not job.has_value()) reply = QStringLiteral("I cannot draw: the stock canvas scripts are missing.");
+        else
+        {
+            job->title = cam ? (r.arg == "zed" ? QStringLiteral("front camera (ZED)") : QStringLiteral("360 camera (Ricoh)"))
+                             : QStringLiteral("room layout");
+            job->live = true;
+            const QString title = job->title;
+            const QString err = draw_now(std::move(*job), false);
+            reply = err.isEmpty() ? QStringLiteral("Showing the %1 on the canvas.").arg(title)
+                                  : QStringLiteral("I could not draw the %1: %2").arg(title, err.section('\n', 0, 0));
+        }
+    }
+    window_->append_system(reply);
+    push_history({{"role", "assistant"}, {"content", reply}});
+}
+
+QString ChatSession::do_draw(const QString& tool, const QJsonObject& args)
+{
+    const QString stock = tool == "show" ? args.value("name").toString().trimmed() : QString();
+    const QString script = tool == "draw" ? args.value("script").toString() : QString();
+    QString title = args.value("title").toString().trimmed();
+    // live: as asked; unasked, a stock camera/layout is live (it is a view of now), a script draws once.
+    const QJsonValue lv = args.value("live");
+    const bool live = lv.isBool() ? lv.toBool()
+                      : lv.isString() ? lv.toString() == QStringLiteral("true")
+                                      : (stock == "camera" or stock == "layout");
+    const QStringList extra = args.value("args").toString().split(' ', Qt::SkipEmptyParts);
+    const auto fail = [this](const QString& why)
+    {
+        draw_failed_ = true;
+        return QStringLiteral("ERROR: ") + why;
+    };
+    if (stock == "lidar")
+    {
+        // One sensor only when the PERSON named it: qwen3-vl passes 'helios' for "let me see the lidar points" 5/5,
+        // whatever the tool description says, and the person then sees half the robot's LiDAR without asking.
+        QString which = args.value("args").toString().trimmed().toLower();
+        QString asked;
+        for (auto it = history_.rbegin(); it != history_.rend(); ++it)
+            if (it->value("role").toString() == "user") { asked = it->value("content").toString().toLower(); break; }
+        if (not which.isEmpty() and not asked.contains(which)) which.clear();
+        return show_lidar(which.toStdString());
+    }
+    if (stock == "model")
+    {
+        const QString res = show_model(args.value("args").toString().trimmed().toStdString());
+        if (res.startsWith("ERROR")) draw_failed_ = false;   // not a script to fix: the model just reports it
+        return res;
+    }
+    if (stock == "plan")
+    {
+        canvas_stop();
+        window_->show_canvas();
+        window_->canvas()->show_plan();
+        return QStringLiteral("OK: the mission plan is on the canvas.");
+    }
+    CanvasJob job;
+    bool savable = false;
+    if (not script.trimmed().isEmpty())
+    {
+        const QString path = canvas_runner_.run_dir() + QStringLiteral("/script.py");
+        QFile f(path);
+        if (not f.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text))
+            return fail(QStringLiteral("cannot write the script: ") + f.errorString());
+        f.write(script.toUtf8());
+        f.close();
+        job = CanvasJob{.title = title.isEmpty() ? QStringLiteral("drawing") : title, .script_path = path, .args = extra,
+                        .source = script, .live = live, .wants_images = script.contains("image("),
+                        .wants_graph = script.contains("graph(")};
+        savable = true;
+    }
+    else if (not stock.isEmpty())
+    {
+        auto j = library_job(stock, extra);
+        if (not j.has_value())
+            return fail(QStringLiteral("no ready-made drawing '%1'; known: %2").arg(stock, canvas_library().join(", ")));
+        job = std::move(*j);
+        job.live = live;
+        if (not title.isEmpty()) job.title = title;
+    }
+    else return fail(tool == "show" ? QStringLiteral("give the name of a ready-made drawing")
+                                    : QStringLiteral("give the Python source in script"));
+    const QString shown = job.title;
+    const QString err = draw_now(std::move(job), savable);
+    if (not err.isEmpty())
+    {
+        window_->append_system(QStringLiteral("canvas: the drawing failed"));
+        return fail(err);
+    }
+    window_->append_system(QStringLiteral("canvas: %1%2").arg(shown, live ? QStringLiteral(" (live)") : QString()));
+    return QStringLiteral("OK: '%1' is drawn on the canvas beside the chat%2.")
+        .arg(shown, live ? QStringLiteral(", redrawn continuously") : QString());
+}
+
+QString ChatSession::do_table(const QJsonObject& args)
+{
+    // stock/table.py draws {title, header, rows} with rcanvas.draw_table: the model gives the words, never a script
+    const QString title = args.value("title").toString().trimmed();
+    const QJsonObject spec{{"title", title}, {"header", args.value("header")}, {"rows", args.value("rows")}};
+    auto job = library_job("table", {QString::fromUtf8(QJsonDocument(spec).toJson(QJsonDocument::Compact))});
+    if (not job.has_value()) return QStringLiteral("ERROR: the stock canvas scripts are missing.");
+    job->title = title.isEmpty() ? QStringLiteral("table") : title;
+    const QString shown = job->title;
+    if (const QString err = draw_now(std::move(*job), false); not err.isEmpty())
+    {
+        window_->append_system(QStringLiteral("canvas: the table failed"));
+        draw_failed_ = true;
+        return QStringLiteral("ERROR: ") + err.trimmed().section('\n', -1);
+    }
+    window_->append_system(QStringLiteral("canvas: ") + shown);
+    return QStringLiteral("OK: the table '%1' is on the canvas beside the chat.").arg(shown);
+}
+
+void ChatSession::save_canvas_script(const QString& raw)
+{
+    const QString name = q(canvas_script_name(raw.toStdString()));
+    if (name.isEmpty() or canvas_job_.source.isEmpty())
+    {
+        window_->append_system(QStringLiteral("canvas: nothing to save under that name"));
+        return;
+    }
+    const QString dir = canvas_runner_.canvas_dir() + QStringLiteral("/library");
+    QDir().mkpath(dir);
+    QFile f(dir + "/" + name + ".py");
+    if (not f.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text))
+    {
+        window_->append_system(QStringLiteral("canvas: cannot save — ") + f.errorString());
+        return;
+    }
+    f.write(QStringLiteral("# %1 — saved from the chat canvas %2\n")
+                .arg(canvas_job_.title, QDateTime::currentDateTime().toString(Qt::ISODate)).toUtf8());
+    f.write(canvas_job_.source.toUtf8());
+    log_.write("draw_saved", QJsonObject{{"name", name}, {"title", canvas_job_.title}});
+    window_->append_system(QStringLiteral("canvas: saved as '%1' — ask for it by name next time").arg(name));
 }
 
 QString ChatSession::do_look(const QJsonObject& args)
@@ -777,6 +1533,113 @@ void ChatSession::tick_status()
     seen_state_ = state;
     seen_step_ = step;
     seen_event_ = event;
+}
+
+// ── agent_control: start / stop / restart a fleet agent (fleet_control.h) ────────────────────────────────────────
+
+namespace
+{
+const std::filesystem::path kProc{"/proc"};
+std::int64_t fleet_now() { return static_cast<std::int64_t>(rc::provenance::now_ms()); }
+}   // namespace
+
+QString ChatSession::agent_log(const std::string& agent) const
+{
+    return QDir(q(cfg_.fleet_log_dir)).absoluteFilePath(q(agent) + QStringLiteral(".log"));
+}
+
+QString ChatSession::do_agent_control(const QJsonObject& args)
+{
+    const auto action = fleet::parse_action(args.value("action").toString().toStdString());
+    const auto reply = [&](const QString& out)
+    {
+        log_.write("agent_control", QJsonObject{{"args", args}, {"result", out}});
+        return out;
+    };
+    if (not action.has_value()) return reply(QStringLiteral("refused: action must be start, stop or restart"));
+    if (fleet_op_.has_value())
+        return reply(QStringLiteral("refused: still busy with %1 %2; wait until the chat tells it is done")
+                         .arg(q(std::string(fleet::to_string(fleet_op_->action()))), q(fleet_op_->agent())));
+    const auto agent = fleet::resolve_agent(args.value("agent").toString().toStdString(), fleet_policy_.agents);
+    if (not agent.has_value()) return reply(QStringLiteral("refused: ") + q(agent.error()));
+    const std::filesystem::path lock =
+        not cfg_.fleet_lock.empty() ? std::filesystem::path(cfg_.fleet_lock)
+            : std::filesystem::path(qEnvironmentVariable("XDG_RUNTIME_DIR", QStringLiteral("/tmp")).toStdString())
+                  / "ai_fleet_tour.lock";
+    const auto pids = fleet::find_pids(kProc, *agent);
+    const std::int64_t now = fleet_now();
+    const bool confirmed = fleet_confirmations_.confirmed(*action, *agent, user_turn_, now);
+    const auto d = fleet::decide(*action, *agent, fleet_policy_, fleet::tour_running(lock, kProc), not pids.empty(),
+                                 confirmed);
+    switch (d.kind)
+    {
+        case fleet::Decision::Kind::refuse: return reply(QStringLiteral("refused: ") + q(d.text));
+        case fleet::Decision::Kind::ask:
+            fleet_confirmations_.ask(*action, *agent, user_turn_, now);
+            return reply(QStringLiteral("NOT DONE: ask the person \"%1\" and call agent_control again with the same "
+                                        "arguments only if they answer yes.").arg(q(d.text)));
+        case fleet::Decision::Kind::go: break;
+    }
+    if (*action != fleet::Action::start)
+        for (int pid : pids) ::kill(pid, SIGTERM);   // never SIGKILL (fleet_control.h)
+    fleet_op_.emplace(*action, *agent, now);
+    window_->append_system(QStringLiteral("agents — %1 %2").arg(q(std::string(fleet::to_string(*action))), q(*agent)));
+    tick_fleet();
+    if (fleet_op_.has_value()) fleet_timer_.start(250);   // the outcome takes seconds: a quarter-second look is enough
+    const QString what = *action == fleet::Action::stop    ? QStringLiteral("SIGTERM sent to %1")
+                         : *action == fleet::Action::start ? QStringLiteral("starting %1")
+                                                           : QStringLiteral("restarting %1");
+    return reply(QStringLiteral("OK: ") + what.arg(q(*agent)) +
+                 QStringLiteral(". The chat tells the person when it is done; do not say it already is."));
+}
+
+void ChatSession::tick_fleet()
+{
+    if (not fleet_op_.has_value())
+    {
+        fleet_timer_.stop();
+        return;
+    }
+    const std::int64_t now = fleet_now();
+    const std::string agent = fleet_op_->agent();
+    const bool alive = not fleet::find_pids(kProc, agent).empty();
+    bool up = false;
+    if (fleet_op_->launched_ms() > 0)
+        for (const auto& a : system_.agents())
+            up = up or (a.name == agent and fleet::started_since(a, now - fleet_op_->launched_ms()));
+    auto step = fleet_op_->tick(now, alive, up);
+    bool ok = step.done and (step.report.find(" is up") != std::string::npos or
+                             step.report.find("has stopped") != std::string::npos);
+    if (step.launch and not launch_agent(agent))
+    {
+        step.done = true;
+        ok = false;
+        step.report = agent + " could not be launched: no executable "
+                    + QDir(q(cfg_.fleet_dir)).absoluteFilePath(q(agent) + "/bin/" + q(agent)).toStdString();
+    }
+    if (not step.done) return;
+    QString msg = QStringLiteral("agents — ") + q(step.report);
+    if (not ok) msg += QStringLiteral(" Its log: ") + agent_log(agent);
+    log_.write("agent_control_done", QJsonObject{{"agent", q(agent)}, {"ok", ok}, {"report", msg}});
+    window_->append_system(msg);
+    fleet_op_.reset();
+    fleet_timer_.stop();
+}
+
+bool ChatSession::launch_agent(const std::string& agent)
+{
+    const QDir dir(QDir(q(cfg_.fleet_dir)).absoluteFilePath(q(agent)));
+    const QString exe = dir.absoluteFilePath(QStringLiteral("bin/") + q(agent));
+    if (not QFileInfo(exe).isExecutable()) return false;
+    QDir().mkpath(q(cfg_.fleet_log_dir));
+    QProcess p;
+    p.setProgram(QStringLiteral("setsid"));   // its own session, as the tour scripts start it: it outlives the chat
+    p.setArguments({exe, QStringLiteral("etc/config.toml")});
+    p.setWorkingDirectory(dir.absolutePath());
+    p.setStandardInputFile(QProcess::nullDevice());
+    p.setStandardOutputFile(agent_log(agent), QIODevice::Append);
+    p.setStandardErrorFile(agent_log(agent), QIODevice::Append);
+    return p.startDetached();
 }
 
 }   // namespace rc::chat

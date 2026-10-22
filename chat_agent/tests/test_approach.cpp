@@ -80,6 +80,82 @@ int main()
         CHECK(display_command("cross door_1") == "cross door_1");
     }
 
+    // ── an object's approach SIDES (its aff_<object>_approach options): where each is, as seen from the robot ──────
+    {
+        // looking from (0,0) at an object at (2,0): +y is the robot's left
+        CHECK(view_of({2, 0}, {0, 0}, {1.3, 0}) == "near");
+        CHECK(view_of({2, 0}, {0, 0}, {2.7, 0}) == "far");
+        CHECK(view_of({2, 0}, {0, 0}, {2, 0.7}) == "left");
+        CHECK(view_of({2, 0}, {0, 0}, {2, -0.7}) == "right");
+
+        const auto bad = parse_sides("xn,yp", {1.3}, {0, 0.7}, {0, 0});
+        CHECK(not bad.has_value());                                   // parallel lists of different length
+        const auto t = parse_sides("xn,yp,yn,xp", {1.3, 2, 2, 2.7}, {0, 0.7, -0.7, 0}, {0, -1.57, 1.57, 3.14});
+        CHECK(t.has_value() and t->size() == 4 and t->front().name == "xn");
+        auto table = *t;
+        label_sides(table, {2, 0}, {0, 0});
+        CHECK(table[0].view == "near" and table[1].view == "left" and table[2].view == "right" and table[3].view == "far");
+
+        // a frontless object: the person's words are taken as seen from the robot
+        CHECK((resolve_side(table, "") == std::expected<std::string, std::string>("")));   // the object's default
+        CHECK((resolve_side(table, "right") == std::expected<std::string, std::string>("yn")));
+        CHECK((resolve_side(table, "the right side") == std::expected<std::string, std::string>("yn")));
+        CHECK((resolve_side(table, "Derecha") == std::expected<std::string, std::string>("yn")));
+        CHECK((resolve_side(table, "por la izquierda") == std::expected<std::string, std::string>("yp")));
+        CHECK((resolve_side(table, "the far side") == std::expected<std::string, std::string>("xp")));
+        CHECK((resolve_side(table, "behind it") == std::expected<std::string, std::string>("xp")));
+        CHECK((resolve_side(table, "xp") == std::expected<std::string, std::string>("xp")));   // the option itself
+        auto against_wall = table;
+        against_wall.pop_back();                                      // xp not offered
+        const auto r = resolve_side(against_wall, "far side");
+        CHECK(not r.has_value() and r.error().find("xn") != std::string::npos and r.error().find("near") != std::string::npos);
+        CHECK(not resolve_side(table, "upside").has_value());
+
+        // a fronted object: left/right/front/back are the OBJECT's own; near/far are still as seen from here
+        auto chair = *parse_sides("front,left,back,right", {2, 2, 2, 2.7}, {0.7, -0.7, -0.7, 0}, {0, 0, 0, 0});
+        label_sides(chair, {2, 0}, {0, 0});
+        CHECK((resolve_side(chair, "its right") == std::expected<std::string, std::string>("right")));   // not the view
+        CHECK((resolve_side(chair, "from behind") == std::expected<std::string, std::string>("back")));
+        CHECK((resolve_side(chair, "de frente") == std::expected<std::string, std::string>("front")));
+        CHECK((resolve_side(chair, "the far side") == std::expected<std::string, std::string>("right")));   // its view
+
+        // the STATE line
+        CHECK(sides_line(table) == "xn (near side, as seen from here), yp (left side, as seen from here), "
+                                   "yn (right side, as seen from here), xp (far side, as seen from here)");
+        CHECK(sides_line(chair).starts_with("front (its own front; left side as seen from here), "));
+    }
+
+    // go around: a ring when the object offers fewer than 3 sides, starting nearest the robot, back to the start
+    {
+        const auto m = go_around_mission("table_1", "room_1", {0, 0}, {3, 0}, {}, 1.0, /*left=*/true);
+        CHECK(m.title == "go around table_1");
+        CHECK(m.steps.size() == std::size_t(kRingStops + 1));
+        const auto pose = [&](std::size_t i) { return m.steps[i].ref("to")->pose; };
+        CHECK(near(pose(0).x, 1.0) and near(pose(0).y, 0.0) and near(std::abs(pose(0).yaw), std::numbers::pi));
+        // facing the table from +x, the robot's left is -y: clockwise
+        CHECK(near(pose(1).x, 0.5) and pose(1).y < -0.8);
+        CHECK(pose(kRingStops) == pose(0));
+        CHECK(std::ranges::all_of(m.steps, [](const auto& s) { return s.on_fail.kind == rc::mission::OnFail::Kind::Skip; }));
+        CHECK(std::ranges::all_of(m.steps, [](const auto& s) { return s.op == "go_to" and s.ref("to")->pose.room == "room_1"; }));
+        CHECK(rc::mission::decode_json(rc::mission::encode_json(m)).has_value());
+    }
+    // …the object's own sides when it offers 3 or more, counter-clockwise when going right
+    {
+        const std::vector<ApproachSide> sides{{"xp", 1, 0, 3.14}, {"yp", 0, 1, -1.57}, {"xn", -1, 0, 0}, {"yn", 0, -1, 1.57}};
+        const auto m = go_around_mission("chair_1", "room_1", {0, 0}, {0, 3}, sides, 9.0, /*left=*/false);
+        CHECK(m.steps.size() == 5u);
+        std::vector<std::pair<double, double>> got;
+        for (const auto& s : m.steps) got.emplace_back(s.ref("to")->pose.x, s.ref("to")->pose.y);
+        CHECK((got == std::vector<std::pair<double, double>>{{0, 1}, {-1, 0}, {0, -1}, {1, 0}, {0, 1}}));
+        CHECK(near(m.steps[1].ref("to")->pose.yaw, 0.0));   // the side's own yaw, not a computed one
+    }
+    CHECK(parse_around_direction("") == std::optional<bool>(true));
+    CHECK(parse_around_direction("por la derecha") == std::optional<bool>(false));
+    CHECK(parse_around_direction("to the left") == std::optional<bool>(true));
+    CHECK(parse_around_direction("counterclockwise") == std::optional<bool>(false));
+    CHECK(parse_around_direction("clockwise") == std::optional<bool>(true));
+    CHECK(not parse_around_direction("twice").has_value());
+
     std::println("test_approach: {} checks, {} failures", checks, failures);
     return failures == 0 ? 0 : 1;
 }
