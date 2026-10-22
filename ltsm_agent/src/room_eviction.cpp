@@ -326,9 +326,9 @@ Mat::RTMat pose_to_rtmat(const ltsm::seam::Vec3 &p)
     return T;
 }
 
+// The 6x6 RT covariance is over [x y z rx ry rz] (cortex convention, edge-parent frame); SE(2) = slots {0, 1, 5}.
 std::optional<ltsm::seam::Mat3> se2_cov_of(const std::optional<Eigen::Matrix<double, 6, 6>> &C6)
 {
-    // The edge covariance is a 6x6 over [x y z rx ry rz] (row-major); SE(2) = slots {0, 1, 5}.
     if (not C6.has_value()) return std::nullopt;
     static constexpr int slot[3] = {0, 1, 5};
     ltsm::seam::Mat3 S;
@@ -337,64 +337,121 @@ std::optional<ltsm::seam::Mat3> se2_cov_of(const std::optional<Eigen::Matrix<dou
             S(i, j) = (*C6)(slot[i], slot[j]);
     return S;
 }
+
+/// One RT edge as a pose with covariance; `has_cov` says whether the covariance was stated (zero otherwise).
+std::optional<ltsm::seam::Measured> edge_measured(DSR::DSRGraph &G, std::uint64_t from, std::uint64_t to, bool &has_cov)
+{
+    const auto e = G.get_edge(from, to, "RT");
+    if (not e.has_value()) return std::nullopt;
+    auto rt = G.get_rt_api();
+    const auto T = rt->get_edge_RT_as_rtmat(e.value());
+    if (not T.has_value()) return std::nullopt;
+    const auto C = se2_cov_of(rt->get_edge_RT_covariance(e.value()));
+    has_cov = C.has_value();
+    return ltsm::seam::Measured{se2_of(T.value()), C.value_or(ltsm::seam::Mat3::Zero().eval())};
+}
+
+/// `node`'s pose in `room`, composed down the parent chain room -> floor -> wall -> node. Ancestors without a stated
+/// covariance contribute none; `leaf_cov` is whether the NODE's own edge stated one (the gate for trusting the result).
+std::optional<ltsm::seam::Measured> pose_in_room(DSR::DSRGraph &G, std::uint64_t room_id, const DSR::Node &node, bool &leaf_cov)
+{
+    ltsm::seam::Measured acc{ltsm::seam::Vec3::Zero(), ltsm::seam::Mat3::Zero()};
+    std::uint64_t n = node.id();
+    leaf_cov = false;
+    for (int depth = 0; n != room_id and depth < 16; ++depth)
+    {
+        const auto nn = G.get_node(n);
+        if (not nn.has_value()) return std::nullopt;
+        const auto p = G.get_attrib_by_name<parent_att>(nn.value());
+        if (not p.has_value()) return std::nullopt;
+        bool hc = false;
+        const auto m = edge_measured(G, p.value(), n, hc);
+        if (not m.has_value()) return std::nullopt;
+        if (depth == 0) leaf_cov = hc;
+        acc = ltsm::seam::compose_cov(m.value(), acc);
+        n = p.value();
+    }
+    return n == room_id ? std::optional{acc} : std::nullopt;
+}
 }   // namespace
 
 std::optional<Mat::RTMat> RoomEviction::fuse_seam_through_aperture(const Candidate &cand, const DSR::Node &door,
                                                                    const Mat::RTMat &door_in_old,
-                                                                   const Mat::RTMat &chain_seam,
+                                                                   const Mat::RTMat &chain_seam_rt,
                                                                    DSR::InnerEigenAPI &ie) const
 {
     using namespace ltsm::seam;
     const auto robot_in_old = ie.get_transformation_matrix(cand.old_room_name, cand.robot_name);
     if (not robot_in_old.has_value()) return std::nullopt;
-    const Vec3 door_pose = se2_of(door_in_old);
     const Eigen::Vector2d robot_xy(robot_in_old->translation().x(), robot_in_old->translation().y());
+    const Vec3 door_pose = se2_of(door_in_old);
 
-    // The seam the aperture alone gives, and the covariance of the door pose it rests on.
-    auto rt = live_->get_rt_api();
-    std::optional<Mat3> door_cov;
-    if (const auto parent = live_->get_attrib_by_name<parent_att>(door); parent.has_value() and parent.value() == cand.old_room_id)
-        if (const auto e = live_->get_edge(cand.old_room_id, door.id(), "RT"); e.has_value())
-            door_cov = se2_cov_of(rt->get_edge_RT_covariance(e.value()));
-    if (not door_cov.has_value())
+    // ── THE APERTURE'S SEAM ─────────────────────────────────────────────────────────────────────────────────────
+    bool leaf = false;
+    const auto door_m = pose_in_room(*live_, cand.old_room_id, door, leaf);
+    if (not door_m.has_value() or not leaf)
     {
-        // No stated covariance for the door: the proto frame still IS the aperture, so use it alone rather than a chain
-        // nothing can audit.
-        const Vec3 p = proto_in_old(door_pose, robot_xy);
+        // No stated pose covariance for the door: nothing can weigh the aperture, and a seam nothing can audit is not
+        // improved by averaging it with one. Keep the robot chain (the pre-Task-S behaviour).
         qWarning().noquote() << QString::fromStdString(std::format(
-            "[eviction][seam] door {} has no pose covariance in {} -- seam taken from the aperture alone", door.name(), cand.old_room_name));
-        return pose_to_rtmat(inverse(p));
+            "[eviction][seam] door {} has no pose covariance in {} -- aperture seam unavailable, robot chain kept", door.name(),
+            cand.old_room_name));
+        return std::nullopt;
     }
-    const Measured ap = aperture_seam(door_pose, door_cov.value(), robot_xy);
+    Measured ap;
+    const char *how = "proto frame";
+    std::optional<Measured> face_new;
+    if (cand.new_door_id != 0)
+        if (const auto nd = live_->get_node(cand.new_door_id); nd.has_value())
+        {
+            bool nleaf = false;
+            if (auto m = pose_in_room(*live_, cand.new_room_id, nd.value(), nleaf); m.has_value() and nleaf)
+                face_new = m;
+        }
+    if (face_new.has_value())
+    {   // the entry mirror is the same hole at the same pose: T(new<-old) = T(new<-face_new) . inverse(T(old<-door))
+        ap = compose_cov(face_new.value(), inverse_cov(door_m.value()));
+        how = "door faces";
+    }
+    else
+        // A proto's frame IS the aperture, so T(new<-old) is the inverse of the aperture pose in the old room. Its
+        // pose comes from the door node (x = wall tangent, door_apertures.cpp:137); the sign of y is the side the
+        // robot is on.
+        ap = aperture_seam(se2_of(door_in_old), door_m->cov, robot_xy);
+    (void)door_pose;
 
-    // The robot chain's own covariance, from the two RT edges it composes: T(new<-old) = inv(E_new) . E_old,
-    // E = T(robot <- room). inv(E_new) propagates like the aperture's inverse; E_old's is added as it stands
-    // (same frame to first order). Missing either => the chain cannot be weighed, the aperture stands alone.
-    std::optional<Mat3> c_new, c_old;
-    Vec3 e_new = Vec3::Zero();
-    if (const auto en = live_->get_edge(cand.robot_id, cand.new_room_id, "RT"); en.has_value())
-    {
-        if (const auto T = rt->get_edge_RT_as_rtmat(en.value()); T.has_value()) e_new = se2_of(T.value());
-        c_new = se2_cov_of(rt->get_edge_RT_covariance(en.value()));
-    }
-    if (const auto eo = live_->get_edge(cand.robot_id, cand.old_room_id, "RT"); eo.has_value())
-        c_old = se2_cov_of(rt->get_edge_RT_covariance(eo.value()));
-    if (not c_new.has_value() or not c_old.has_value())
+    // ── THE ROBOT CHAIN, WITH ITS OWN COVARIANCE ───────────────────────────────────────────────────────────────
+    bool hn = false, ho = false;
+    const auto e_new = edge_measured(*live_, cand.robot_id, cand.new_room_id, hn);
+    const auto e_old = edge_measured(*live_, cand.robot_id, cand.old_room_id, ho);
+    if (not e_new.has_value() or not e_old.has_value() or not hn or not ho)
     {
         qWarning().noquote() << QString::fromStdString(std::format(
-            "[eviction][seam] robot RT edges carry no covariance -- seam taken from the aperture alone ({} <- {})",
-            cand.new_room_name, cand.old_room_name));
+            "[eviction][seam] robot RT edges carry no covariance -- seam taken from the aperture alone ({} <- {}, {})",
+            cand.new_room_name, cand.old_room_name, how));
         return pose_to_rtmat(ap.pose);
     }
-    const Measured inv_new = aperture_seam(e_new, c_new.value(), robot_xy);   // inverse + J C J^T (side test unused below)
-    Measured chain;
-    chain.pose = se2_of(chain_seam);
-    chain.cov = inv_new.cov + c_old.value();
-    const Fused f = fuse(chain, ap);
+    Measured chain = chain_seam(e_new.value(), e_old.value());
+    chain.pose = se2_of(chain_seam_rt);   // the graph's own composition is the mean; the covariance is from the edges
+
+    // Old room's extent from its origin (the outlier component's scale); the door's distance when no outline is stored.
+    double radius = door_pose.head<2>().norm();
+    if (const auto orn = live_->get_node(cand.old_room_id); orn.has_value())
+    {
+        const auto px = live_->get_attrib_by_name<delimiting_polygon_x_att>(orn.value());
+        const auto py = live_->get_attrib_by_name<delimiting_polygon_y_att>(orn.value());
+        if (px.has_value() and py.has_value())
+            for (std::size_t i = 0; i < std::min(px->get().size(), py->get().size()); ++i)
+                radius = std::max(radius, std::hypot(double(px->get()[i]), double(py->get()[i])));
+    }
+    radius = std::max(radius, 0.5);   // a door's own width: an outline-less room must not make U infinite
+
+    const Fused f = fuse(chain, ap, radius);
     qInfo().noquote() << QString::fromStdString(std::format(
-        "[eviction][seam] {} <- {}: chain ({:+.3f},{:+.3f},{:+.3f}) aperture ({:+.3f},{:+.3f},{:+.3f}) d2 {:.2f} chain weight {:.4f} -> ({:+.3f},{:+.3f},{:+.3f})",
-        cand.new_room_name, cand.old_room_name, chain.pose.x(), chain.pose.y(), chain.pose.z(), ap.pose.x(), ap.pose.y(),
-        ap.pose.z(), f.d2, f.chain_weight, f.pose.x(), f.pose.y(), f.pose.z()));
+        "[eviction][seam] {} <- {} ({}): chain ({:+.3f},{:+.3f},{:+.3f}) aperture ({:+.3f},{:+.3f},{:+.3f}) d2 {:.2f} "
+        "P(chain right) {:.4g} log P(chain wrong) {:.2f} -> ({:+.3f},{:+.3f},{:+.3f})",
+        cand.new_room_name, cand.old_room_name, how, chain.pose.x(), chain.pose.y(), chain.pose.z(), ap.pose.x(), ap.pose.y(),
+        ap.pose.z(), f.d2, f.p_inlier, f.log_p_wrong, f.pose.x(), f.pose.y(), f.pose.z()));
     return pose_to_rtmat(f.pose);
 }
 
@@ -500,12 +557,11 @@ Outcome RoomEviction::evict(const Candidate &cand)
             //   measured THROUGH THE CROSSED DOOR -- T(new<-old) = inverse of the aperture pose in the old room -- and
             //   fused with the robot chain by covariance (seam_fusion.h). gold1 stored a chain seam of (-14262, +1668)
             //   between rooms 4 m apart; nothing contradicted it because the chain was the only measurement.
-            if (cand.promote)
-                if (const auto fused = fuse_seam_through_aperture(cand, *chosen, chosen_in_old, out.seam, *ie); fused.has_value())
-                {
-                    out.seam = fused.value();
-                    chosen_in_new = out.seam * chosen_in_old;
-                }
+            if (const auto fused = fuse_seam_through_aperture(cand, *chosen, chosen_in_old, out.seam, *ie); fused.has_value())
+            {
+                out.seam = fused.value();
+                chosen_in_new = out.seam * chosen_in_old;
+            }
 
             out.door_name   = chosen->name();
             out.door_in_old = chosen_in_old.translation();
