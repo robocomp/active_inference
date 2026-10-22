@@ -79,7 +79,8 @@ EpistemicProposal EpistemicPlanner::compute(const DoorBelief& belief, float lat_
 
     // Σ over the wall-frame [s,w,h]: the D-optimal score ranks which viewpoint most reduces the panel's
     // along-wall offset + size uncertainty. (No orientation entropy — the wall fixes yaw.)
-    const Eigen::Matrix<float, 3, 3> S = belief.covariance_reported();   // Σ over [s,w,h]
+    const Eigen::Matrix<float, 3, 3> S0 = belief.covariance_reported();   // Σ over [s,w,h] (target sigmas, adequacy, log)
+    const Eigen::Matrix<float, 3, 3>& S = S0;
     // ★ THE DOORWAY, NOT THE SWUNG LEAF (2026-10-18, user). The quantities this view is meant to resolve —
     //   [s,w,h], the along-wall offset, width and height — are the APERTURE's, and the aperture is fixed in
     //   the wall. Aiming at the leaf as currently fitted tied the viewpoint to phi, the one DOF that is often
@@ -104,8 +105,12 @@ EpistemicProposal EpistemicPlanner::compute(const DoorBelief& belief, float lat_
     target.sigma_extent_m = std::sqrt(std::max({0.0f, S(1, 1), S(2, 2)}));   // w, h
 
     const Eigen::Matrix<float, 3, 3> I3 = Eigen::Matrix<float, 3, 3>::Identity();
+    const Eigen::Vector2f face_dir[4] = {L.ex, -L.ex, L.ey, -L.ey};   // [+x, -x, +y, -y], as sample_face_surface
     const auto raw_gain_of = [&](int i, float standoff)
     {
+        // ★Task E: the information a look from THIS face's viewpoint can still RESOLVE — the model error already measured from a
+        //   viewpoint like it, and persisting there, is not information that looking again would buy.
+        const Eigen::Matrix<float, 3, 3> S = belief.covariance_resolvable(ctr + standoff * face_dir[i]);
         const float Ri = sigma_base * sigma_base + (lat_rate * standoff) * (lat_rate * standoff);
         const auto  dI = belief.predicted_information(sample_face_surface(L, belief.cz(), i), Ri);
         return 0.5f * std::log(std::max(1e-9f, (I3 + S * dI).determinant()));

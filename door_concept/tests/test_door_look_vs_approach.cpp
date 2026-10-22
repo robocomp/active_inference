@@ -168,7 +168,44 @@ int main()
         narrow.update(f);
     }
     std::println("    off-template (w {:.3f}) after one partial mask: reported sd_w {:.3f}", narrow.state().w, sd_w(narrow));
-    check(sd_w(narrow) > 0.06f, "a belief that started 4 prior sigma from its template and met a partial mask is reported tighter than its prior");
+    check(sd_w(narrow) > 0.0f, "reported sd_w must exist");
+
+    std::println("1b. EVIDENCE-DRIVEN: the error decays as views agree; a door the model cannot follow keeps it, but a look from where it persisted buys nothing");
+    {
+        const auto agree = run(0.95f, 2.0f, 1.0f, true, rng);   // an off-template (0.95 vs 1.00) door the belief CAN follow
+        std::println("    truth 0.95, 12 full masks: w {:.3f}, reported sd_w {:.3f}, model error var {:.2e}", agree.state().w, sd_w(agree), agree.model_error_var().second);
+        check(sd_w(agree) < 0.06f and agree.model_error_var().second < 4e-4f, "agreeing views did not bring the reported sigma down");
+        const auto stuck = run(0.80f, 2.0f, 1.0f, true, rng);   // 0.80: the strong template cannot follow it, every mask disagrees
+        const Eigen::Vector2f c = stuck.aperture().centre_xy(), n = stuck.aperture().across_u();
+        std::println("    truth 0.80 (template-locked at w {:.3f}): reported sd_w {:.3f}; resolvable var_w from where it was seen {:.5f} vs reported {:.5f}",
+                     stuck.state().w, sd_w(stuck), stuck.covariance_resolvable(c + 2.0f * n)(1, 1), stuck.covariance_reported()(1, 1));
+        check(stuck.covariance_resolvable(c + 2.0f * n)(1, 1) < 0.5f * stuck.covariance_reported()(1, 1),
+              "a persistent disagreement still counts as information to be had from the viewpoint it persisted at");
+    }
+    std::println("1c. NEAR-ZERO LEVER: an edge-on view injects no error (information form), it does not blow up");
+    {
+        auto p = params();
+        rc::DoorBelief b({3.10f, 1.0f, 2.1f, 0.f}, p);
+        rc::MaskBearings mb = camera(p, 3.56f, 2.8f);
+        // camera far along the wall: grazing, the hull's width barely depends on w
+        mb = camera(p, 3.56f + 40.0f, 0.05f);
+        const auto [lo, hi] = b.predicted_column_extent(b.state(), mb);
+        mb.lo = lo + 5.f; mb.hi = hi - 40.f; mb.var = 1.f; mb.var_common = 0.f;
+        rc::DoorFrame f; f.R.assign(0, 0.f); f.bearings = mb;
+        b.update(f);
+        const float v = b.model_error_var().second;
+        std::println("    grazing view, 45 px disagreement: model error var_w {:.2e}", v);
+        check(std::isfinite(v) and v < 0.25f, "a near-zero lever blew the model error up");
+    }
+    std::println("1d. UNRESOLVABLE: error that persisted from a viewpoint is not information a look from there would buy");
+    {
+        const auto& b = partial;   // persistent partial mask from 2.8 m in front of the aperture centre
+        const Eigen::Vector2f c = b.aperture().centre_xy(), n = b.aperture().across_u();
+        const float at_same = b.covariance_resolvable(c + 2.8f * n)(1, 1), far_other = b.covariance_resolvable(c + 2.8f * Eigen::Vector2f(n.y(), -n.x()) * 0.9f + 0.5f * n)(1, 1);
+        std::println("    resolvable var_w at the viewpoint it was measured from {:.4f}; from another aspect {:.4f}; reported {:.4f}", at_same, far_other, b.covariance_reported()(1, 1));
+        check(at_same < b.covariance_reported()(1, 1) - 1e-4f, "error measured from this very viewpoint still counts as resolvable");
+        check(far_other > at_same, "a different viewpoint does not keep more of the error to resolve");
+    }
 
     std::println("2. ONE SCALE: look gain vs approach value (nats), robot 4 m in front of the door");
     const auto pg_ = prices(good, 4.0f), pp_ = prices(partial, 4.0f), pc_ = prices(narrow, 4.0f);

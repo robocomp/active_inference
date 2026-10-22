@@ -664,10 +664,12 @@ int main(int argc, char** argv)
                         off_deg = std::acos(std::clamp(std::abs(d.dot(ap.across_u())) / std::max(1e-6f, d.norm()), 0.f, 1.f)) * 57.2958f;
                     }
                     std::println("LOOK {} cycle {} w {:.3f} sd_w_post {:.3f} sd_w_rep {:.3f} | look {:.3f} nats at {:.2f} m {:.1f} deg off the normal (valid {}) | "
-                                 "approach {:.3f} (P(complete) {:.3f}, P(reach) {:.2f}) | robot-to-door {:.2f} m",
+                                 "approach {:.3f} (P(complete) {:.3f}, P(reach) {:.2f}) | robot-to-door {:.2f} m | d_look {:.2f} d_appr {:.2f}",
                                  st->node_name, in->cycle, b.state().w, std::sqrt(std::max(0.0f, b.covariance()(1, 1))), apb.sigma_w,
                                  prop.valid ? prop.epistemic_gain : 0.0f, standoff, off_deg, prop.valid ? 1 : 0,
-                                 approach_value, ch.p_complete_live, p_reach, (robot - ap.centre_xy()).norm());
+                                 approach_value, ch.p_complete_live, p_reach, (robot - ap.centre_xy()).norm(),
+                                 prop.valid ? (robot - Eigen::Vector2f(prop.epistemic_target_x_m, prop.epistemic_target_y_m)).norm() : 0.0f,
+                                 (robot - Eigen::Vector2f(ch.pose.x, ch.pose.y)).norm());
                 }
                 const auto S = b.covariance_reported();
                 double acc = rc::any_sigma_star(rc::kDoorDofs) ? rc::adequacy_gap_nats(rc::kDoorDofs, [&](std::size_t j) { return S(j, j); }) : 0.0;

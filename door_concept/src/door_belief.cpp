@@ -158,15 +158,27 @@ float DoorBelief::hull_mismatch_var(const MaskBearings& mb) const
     return dW * dW / 12.0f;
 }
 
+namespace
+{
+// door_view_pool.h's similarity of two viewpoints around a door of half-size R: Gaussian in the bearing change (units of the
+// door's angular half-size from there) and the range change (units of R).
+float view_similarity(float b1, float r1, float b2, float r2, float R)
+{
+    const float Rr = std::max(R, 1e-3f);
+    const float half = std::max(std::atan2(Rr, std::max(r2, 1e-3f)), 1e-3f);
+    const float db = std::remainder(b1 - b2, 2.0f * std::numbers::pi_v<float>), dr = r1 - r2;
+    return std::exp(-std::min((db / half) * (db / half) + (dr / Rr) * (dr / Rr), 60.0f));
+}
+}  // namespace
+
 void DoorBelief::note_model_error(const DoorFrame& frame)
 {
-    if (not frame.bearings.has_value()) return;   // no mask this frame: nothing new to disagree with - hold
+    if (not frame.bearings.has_value()) return;   // no mask: nothing new to disagree with (held)
     const MaskBearings& mb = *frame.bearings;
     if (not (std::isfinite(mb.lo) and std::isfinite(mb.hi))) return;
-    const float v = hull_mismatch_var(mb);
-    if (not std::isfinite(v)) return;
-    // central differences of the hull width (hh - hl) in w and of its midpoint in s
-    constexpr float h = 1e-3f;
+    const auto [hl, hh] = predicted_column_extent(state_, mb);
+    if (not (std::isfinite(hl) and std::isfinite(hh))) return;
+    constexpr float h = 1e-3f;   // central-difference step (m), quadrature
     const auto d = [&](int k, bool width)
     {
         auto vp = state_.vec(); auto vm = state_.vec();
@@ -177,8 +189,52 @@ void DoorBelief::note_model_error(const DoorFrame& frame)
         return width ? ((hp - lp) - (hm - lm)) / (2.0f * h) : 0.5f * ((lp + hp) - (lm + hm)) / (2.0f * h);
     };
     const float Jw = d(1, true), Js = d(0, false);
-    model_var_w_ = Jw * Jw > 1e-12f ? v / (Jw * Jw) : 0.0f;   // 1e-12: a division guard, not a decision
-    model_var_s_ = Js * Js > 1e-12f ? v / (Js * Js) : 0.0f;
+    const float r_w = (hh - hl) - (mb.hi - mb.lo);                    // hull width - mask width (px)
+    const float r_s = std::sqrt(std::max(0.0f, hull_mismatch_var(mb)));   // the midpoint's part-of-hull ambiguity (px): |dW|/sqrt(12)
+    const float R_w = 2.0f * mb.var;                                  // the sides' independent noise, twice (the common mode cancels in a width)
+    const float R_s = 0.5f * mb.var + mb.var_common;
+    // The move a frame's residual would make to the coordinate if the mask were trusted against the TEMPLATE (the prior
+    // sigma), not against the posterior: a posterior that has absorbed the frame is exactly what is over-confident when
+    // wrong, so measuring the disagreement against it would report the error away.
+    const auto gain_move = [](float Sig, float J, float r, float R)
+    {
+        const float S = J * J * Sig + std::max(R, 1e-9f);
+        const float m = Sig * J * r / S;
+        return std::isfinite(m) ? m * m : 0.0f;
+    };
+    model_var_w_ = gain_move(params_.prior_w_std * params_.prior_w_std, Jw, r_w, R_w);
+    model_var_s_ = gain_move(params_.prior_s_std * params_.prior_s_std, Js, r_s, R_s);
+    // remember where this was measured
+    const Eigen::Matrix3f Rm = mb.zed_T_room.leftCols<3>();
+    const Eigen::Vector3f cam = -Rm.transpose() * mb.zed_T_room.col(3);
+    const Eigen::Vector2f dv = Eigen::Vector2f(cam.x(), cam.y()) - aperture().centre_xy();
+    const float rng = dv.norm();
+    if (not (rng > 1e-3f)) return;
+    const float brg = std::atan2(dv.y(), dv.x());
+    const float q = model_var_w_ + model_var_s_;
+    const float Rd = std::max(0.5f * state_.w, 1e-3f);
+    for (auto& e : err_views_)
+        if (view_similarity(brg, rng, e.bearing, e.range, Rd) > 0.5f) { e.bearing = brg; e.range = rng; e.q = q; return; }
+    err_views_.push_back({brg, rng, q});
+}
+
+float DoorBelief::unresolved_at(const Eigen::Vector2f& viewpoint) const
+{
+    const Eigen::Vector2f dv = viewpoint - aperture().centre_xy();
+    const float rng = dv.norm();
+    if (not (rng > 1e-3f)) return 0.0f;
+    const float brg = std::atan2(dv.y(), dv.x());
+    const float Rd = std::max(0.5f * state_.w, 1e-3f);
+    const float q_now = model_var_w_ + model_var_s_;
+    float f = 0.0f;
+    for (const auto& e : err_views_)
+    {
+        // a viewpoint that measured error q and (still) sits at it leaves that error unresolved to the extent it IS the
+        // current error: q / (q + the posterior's own variance), weighted by how much this viewpoint is that one
+        const float share = (e.q + q_now) > 0.0f ? std::min(e.q, q_now) / std::max(e.q, q_now) : 0.0f;
+        f = std::max(f, view_similarity(brg, rng, e.bearing, e.range, Rd) * (q_now > 0.0f ? share : 0.0f));
+    }
+    return f;
 }
 
 void DoorBelief::accumulate_extra(const DoorBeliefState& s, const DoorFrame& frame,
