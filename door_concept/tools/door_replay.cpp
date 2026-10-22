@@ -199,6 +199,7 @@ public:
             {
                 room_ = d.door_id;
                 polygon_.clear();   // release_room: fitter_->set_room_geometry({}, {})
+                if (mirror_) make_entry_mirror();
             }
         });
         // refresh_room_geometry: the room's delimiting polygon, latched while it has ≥ 3 vertices.
@@ -209,6 +210,57 @@ public:
                     room_name_ = r.name;
                     if (r.polygon.size() >= 3) polygon_ = r.polygon;
                 }
+    }
+
+    // ★--mirror: the live agent, on a room switch, releases the old room's doors and creates an ENTRY MIRROR of the crossed
+    // door in the new room (create_entry_mirror: the same door, pose (0, 0.02) yaw π in the new room frame, the source's
+    // size and leaf side) whose fit is lazy-initialised from the first mask frame that sees it. The recorded decisions do
+    // not carry it, so by default the replay keeps the old instance — which never sees a mask again in the new room (a tape
+    // with a collapse AFTER the crossing cannot reproduce it). The crossed door = the live door nearest the robot.
+    bool mirror_ = false;
+    void make_entry_mirror()
+    {
+        if (in_ == nullptr or live_.empty() or not in_->robot.room_T_body.has_value()) return;
+        const Eigen::Vector2f rb((*in_->robot.room_T_body)(0, 3), (*in_->robot.room_T_body)(1, 3));
+        std::uint64_t src = 0; float best = 1e9f;
+        for (const auto& [id, d] : live_)
+        {
+            const auto& m = d.model.state();
+            if (const float dd = (Eigen::Vector2f(m.cx, m.cy) - rb).norm(); dd < best) { best = dd; src = id; }
+        }
+        if (src == 0) return;
+        const rc::DoorFitState old = live_.at(src);
+        const auto m = old.model.state();
+        live_.clear();
+        rc::DoorState s;
+        s.cx = 0.0f; s.cy = 0.02f; s.yaw = -3.14159265f;
+        s.w = m.w; s.thickness = m.thickness; s.h = m.h;
+        rc::DoorFitState f;
+        const std::uint64_t id = 0xFFE0'0000'0000'0000ull + (++synthetic_);
+        fit_->init_instance(f, id, old.node_name, s);
+        // install_carried_door: the leaf memory crosses with the door, re-expressed in the new room frame
+        // (T_new_old = T_door_new · T_door_old⁻¹, both 2-D rigid maps with the door pose as origin/orientation).
+        {
+            const auto rot = [](float a) { Eigen::Matrix2f r; r << std::cos(a), -std::sin(a), std::sin(a), std::cos(a); return r; };
+            const Eigen::Matrix2f Rn = rot(s.yaw), Ro = rot(m.yaw);
+            const Eigen::Matrix2f R = Rn * Ro.transpose();
+            const Eigen::Vector2f o = Eigen::Vector2f(s.cx, s.cy) - R * Eigen::Vector2f(m.cx, m.cy);
+            if (old.leaf_side_hint.has_value())
+                f.leaf_side_hint = std::make_pair(Eigen::Vector2f(R * old.leaf_side_hint->first + o),
+                                                  Eigen::Vector2f(R * old.leaf_side_hint->second));
+        }
+        f.phi_est = old.phi_est; f.phi_sigma = old.phi_sigma; f.hinge_llr = old.hinge_llr; f.swing_llr = old.swing_llr;
+        f.phi_curve = old.phi_curve; f.matched_frames = old.matched_frames; f.phi_from_command = false;
+        f.phi_last_t = std::chrono::steady_clock::time_point(std::chrono::nanoseconds(in_->t_steady_ns));
+        if (const char* e = std::getenv("MIRROR_PHI")) {
+            f.phi_est = std::strtof(e, nullptr); f.phi_sigma = 0.035f;
+            f.phi_curve.clear();
+            for (int i = 0; i <= 24; ++i)   // the crossing's curve: a 25-point grid with the weight on the opened angle
+            { const float ph = 0.0f + i * (2.0944f / 24.0f); f.phi_curve.emplace_back(ph, std::exp(-0.5f * std::pow((ph - f.phi_est) / 0.035f, 2.0f))); }
+        }
+
+        live_.insert_or_assign(id, std::move(f));
+        std::println("MIRROR cycle {} '{}' source w {:.3f} -> mirror at (0,0.02) in the new room; robot {:.2f} {:.2f}", cycle_, old.node_name, m.w, rb.x(), rb.y());
     }
 
     // ── after the core's step: what the old code did after run_instance_tracker (remember_door's identity upserts) ──
@@ -418,7 +470,7 @@ int main(int argc, char** argv)
         return 2;
     }
     std::uint64_t until = ~0ull;
-    bool verbose = false;
+    bool verbose = false, mirror = false;
     std::string csv_dir;
     // --clock-jitter-ms J: add a deterministic pseudo-random delay in [0, J) ms to every record's clock (steady and wall).
     // A SENSITIVITY probe, not a replay: it shows how far the Phi rows move when only the time at which the cycle is
@@ -438,6 +490,7 @@ int main(int argc, char** argv)
         const std::string_view a = argv[i];
         if (a == "--until" and i + 1 < argc) until = std::strtoull(argv[++i], nullptr, 10);
         else if (a == "--verbose") verbose = true;
+        else if (a == "--mirror") mirror = true;
         else if (a == "--csv" and i + 1 < argc) csv_dir = argv[++i];
         else if (a == "--clock-jitter-ms" and i + 1 < argc) jitter_ms = std::strtod(argv[++i], nullptr);
         else if (a == "--trace" and i + 1 < argc) trace_door = argv[++i];
@@ -475,6 +528,7 @@ int main(int argc, char** argv)
                  argv[1], version, hdr->agent_id, hdr->agent_name, eff.n_file, eff.n_default, cfg_errors);
 
     ReplayWorld world(cfg.door, by_cycle);
+    world.mirror_ = mirror;
     DoorCore core(cfg);
     world.set_fit(&core.fit());
     // A sink that only counts: the fit formats its stdout lines and CSV rows exactly as live (so the timing includes

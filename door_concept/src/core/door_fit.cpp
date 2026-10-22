@@ -753,6 +753,22 @@ float DoorFit::run_inference(rc::DoorFitState& inst, const DoorObservation& obse
             const float px_per_m = mb.fx / brange;
             mb.var = (px_per_m * px_per_m * R + 1.0f / 12.0f) / credit;
             mb.var_common = px_per_m * px_per_m * std::max(0.0f, chain_perp) / credit;
+            // ★THE MIDPOINT PINS PLACEMENT; IT MUST NOT BUY A WIDTH WITH A MASK THAT IS NOT THE PREDICTED HULL (task W). The
+            //  predicted extent is the hull of the jambs AND the believed leaf's free edge; the detector's mask of a FAR,
+            //  half-open door covers a part of it (ab7_A1 / ab7_C1: 116 px of mask against 200 px predicted at 2.8 m, midpoints
+            //  124 px apart = 14 σ of the sides' pixel noise). Every other channel pins s; the only free coordinate left to
+            //  absorb a 14 σ residual was w, and one 709-px frame took w 1.00 → 0.75 against a 0.06 prior. The generative
+            //  model of a mask is "a contiguous part of the hull, plus pixel noise": the midpoint of that part sits anywhere
+            //  within the hull, so the width the hull and the mask disagree by (ΔW) is the midpoint's own variance, ΔW²/12
+            //  (uniform), shared by both sides. A mask that IS the hull (ΔW → 0) keeps its full precision — no gate.
+            //  Evaluated at the pre-update mean (not inside the GN loop): a state that narrows its hull to match the mask must
+            //  not also earn a tighter likelihood for it.
+            if (const auto [hl, hh] = inst.ai2_belief.predicted_column_extent(inst.ai2_belief.state(), mb);
+                std::isfinite(hl) and std::isfinite(hh) and std::isfinite(mb.lo) and std::isfinite(mb.hi))
+            {
+                const float dW = (hh - hl) - (mb.hi - mb.lo);
+                mb.var_common += dW * dW / 12.0f / credit;
+            }
             frame.bearings = mb;
         }
         // AIF "be-still-to-update" as CONTINUOUS PRECISION: a frame's authority to MOVE the mean is capped via the

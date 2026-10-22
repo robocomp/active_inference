@@ -226,6 +226,30 @@ int main()
         check(monotone, "the value is not monotone in σ");
         check(same_pose, "the chosen pose changes with σ (epoch churn while unclaimed)");
     }
+    std::println("W. the offer FOLLOWS the aperture's width (task W: a withdrawn approach comes back when the width does)");
+    {
+        // ab7_A1 / C1 / A2 / C2: the crossed door's width fell 1.00 -> 0.70-0.85 on one far mask; P(complete) is a function of the
+        // aperture alone (not of the robot), so it fell to 0, the offer was withdrawn, and nothing the robot did could bring it
+        // back — only the width could. This pins the second half: the offer is a pure function of the CURRENT belief (no latch),
+        // so a width that recovers is an approach offered again, and the way down is as continuous as the belief is.
+        const float ws[] = {1.00f, 0.95f, 0.85f, 0.75f, 0.70f, 0.60f, 0.75f, 0.85f, 1.00f};
+        std::string trail;
+        float p_at_1 = -1.f, p_at_low = -1.f, p_back = -1.f;
+        for (std::size_t i = 0; i < std::size(ws); ++i)
+        {
+            auto a = ap; a.w = ws[i];
+            const auto c = rc::door::choose_approach_pose(a, pb, {}, 0);
+            const float po = rc::door::approach_offer_prob(c, rc::door::choose_approach_pose(ap, pb, {}, 0));
+            trail += std::format(" {:.2f}:{:.2f}", ws[i], po);
+            if (i == 0) p_at_1 = po;
+            if (ws[i] == 0.60f) p_at_low = po;
+            if (i + 1 == std::size(ws)) p_back = po;
+        }
+        std::println("    w:offer{}", trail);
+        check(p_at_1 >= kOffer, "a full-width door is not offered");
+        check(p_at_low < kWithdraw, "a door narrower than the body is still offered");
+        check(p_back >= kOffer and std::abs(p_back - p_at_1) < 1e-6f, "the offer did not come back when the width did (a latch)");
+    }
     std::println("{} / {} checks passed", g_checks - g_fail, g_checks);
     return g_fail == 0 ? 0 : 1;
 }

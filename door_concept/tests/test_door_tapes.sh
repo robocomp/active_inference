@@ -28,8 +28,16 @@
 #       covered by tests/test_door_along_wall_extent.cpp and test_door_core_existence §12b.
 #   D3  NOT A DEFECT, asserted so it stays documented: tourR2's births carry the names the identity table loaded for those
 #       apertures (door_4 IS DOOR_1's remembered name in the 4-row table .bak_tourP9; door_2 is DOOR_0's).
+#   W   (task W, ab7_A1 / ab7_C1 / ab7_A2 / ab7_C2; SKIPPED if those tapes are absent) the CROSSED door seen from the far room: the
+#       replay's --mirror re-creates the entry mirror the live agent made at the room switch (SpecificWorker, not rebuilt by
+#       the core) and the door's WIDTH, true 1.00 m, must stay within 1.5 prior σ (Door.PriorWidthStd 0.06 ⇒ 0.09 m) of it on
+#       every cycle after the switch (MIRROR_PHI=1.553: the leaf the crossing left open, 89 deg — the live log's
+#       "remembers its leaf from the crossing" — which the tape cannot carry: the actuator slice is not rebuilt). Before the fix the first small far mask (116 px against a 200 px predicted hull,
+#       midpoints 124 px = 14 σ apart) took it to 0.75 / 0.75 / 0.47 / 0.83: the sides-midpoint factor had no free coordinate
+#       left but w. (The approach offer's P(complete) is 0 below the body width and follows the aperture from there, see
+#       test_door_approach_pose §W, so a width that holds is an approach that stays offered.)
 # The tapes are 1.5 GB each and live outside the repo: DOOR_TAPES (default: the main checkout's crossing dir). Missing
-# tapes ⇒ SKIPPED (exit 0). Each replay takes ~2-4 min; all eleven run in parallel (~11 cores).
+# tapes ⇒ SKIPPED (exit 0). Each replay takes ~2-4 min; all fifteen run in parallel (~15 cores).
 # Run (from anywhere):  door_concept/tests/test_door_tapes.sh
 set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -59,9 +67,15 @@ for tu in rtD1i:715 tour3A:3768 tour3C:870; do
     t="${tu%%:*}"; u="${tu##*:}"
     "$OUT/door_replay" "$TAPES/$t/door_inputs.bin" "$TAPES/$t/door_decisions.bin" --until "$u" --trace '*' > "$OUT/$t.txt" 2>&1 &
 done
+W_TAPES=(ab7_A1:2500 ab7_C1:2500 ab7_A2:3400 ab7_C2:5700)
+for tu in "${W_TAPES[@]}"; do
+    t="${tu%%:*}"; u="${tu##*:}"
+    [[ -f "$TAPES/$t/door_inputs.bin" && -f "$TAPES/$t/door_decisions.bin" ]] || continue
+    MIRROR_PHI=1.553 "$OUT/door_replay" "$TAPES/$t/door_inputs.bin" "$TAPES/$t/door_decisions.bin" --mirror --until "$u" --trace '*' > "$OUT/W_$t.txt" 2>&1 &
+done
 wait
 python3 -I - "$OUT" <<'EOF'
-import csv, math, re, statistics, sys
+import csv, math, os, re, statistics, sys
 out = sys.argv[1]
 PRIOR_S_STD = 0.60          # Door.PriorAlongWallStd: the first update's prior σ along the wall
 # (tape, kind, cycle, name) of a RECORDED decision the fixed core no longer takes, and why. Nothing may appear.
@@ -171,6 +185,25 @@ for tape in ("tourR1", "tourR2"):
             ok = name in bpos and math.hypot(bpos[name][0] - x, bpos[name][1] - y) < 0.5
             print(f"tourR2 D3: '{name}' born {'at %.2f,%.2f' % bpos[name] if name in bpos else 'NEVER'} — the table's row for ({x},{y})")
             if not ok: fails.append(f"D3 tourR2: no birth named '{name}' at its remembered aperture ({x},{y})")
+# W: the crossed door's width after the room switch (see the header)
+PRIOR_W_STD = 0.06          # Door.PriorWidthStd
+for tape in ("ab7_A1", "ab7_C1", "ab7_A2", "ab7_C2"):
+    txt = f"{out}/W_{tape}.txt"
+    if not os.path.exists(txt):
+        print(f"W {tape}: SKIPPED (tape not found)"); continue
+    mirrors, low = [], {}
+    for line in open(txt):
+        m = re.match(r"MIRROR cycle (\d+) '(\S+)'", line)
+        if m: mirrors.append((int(m.group(1)), m.group(2))); continue
+        m = re.match(r"TRACE (\S+) cycle (\d+) L \S+ \| s \S+ w (\S+)", line)
+        if m:
+            for mc, mn in mirrors[-1:]:
+                if m.group(1) == mn and int(m.group(2)) > mc: low[(mc, mn)] = min(low.get((mc, mn), 9.0), float(m.group(3)))
+    if not mirrors: fails.append(f"W {tape}: the replay made no entry mirror (did it run?)"); continue
+    for key, v in sorted(low.items()):
+        print(f"W {tape} mirror '{key[1]}' @{key[0]}: lowest width {v:.3f} m (true 1.00, tolerance {1.5 * PRIOR_W_STD:.2f})")
+        if v < 1.0 - 1.5 * PRIOR_W_STD: fails.append(f"W {tape} '{key[1]}' @{key[0]}: width fell to {v:.3f} m")
+    if not low: fails.append(f"W {tape}: no trace rows for the mirror")
 for f in fails: print("FAIL:", f)
 print("tape regressions:", "PASS" if not fails else f"{len(fails)} FAIL")
 sys.exit(1 if fails else 0)
