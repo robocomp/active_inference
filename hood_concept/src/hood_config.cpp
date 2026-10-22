@@ -447,6 +447,8 @@ HoodConfig load_hood_config(const ConfigLoader& cfg)
     // ─── Appearance-based FRONT (door) detection + yaw resolver ────────────────
     out.front_detect_enabled   = getb("HoodConcept.FrontDetectEnabled", true,
             "master switch: subscribe to ZED RGB + run detect_front/resolve_front");
+    out.contour_check_enabled  = getb("HoodConcept.ContourCheckEnabled", true,
+            "The classifier-free existence channel: score the believed box outline against the RGB's own gradient and the DEPTH plane's agreement with it; runs on ZED frames, independent of YOLO masks");
     out.front_min_face_area_px = getf("HoodConcept.FrontMinFaceAreaPx", 900.0f,
             "min projected face area (px²) to score for door-ness");
     out.front_min_confidence   = getf("HoodConcept.FrontMinConfidence", 0.10f,

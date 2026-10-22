@@ -24,7 +24,11 @@ LIST(APPEND SOURCES
   ../src/hood_existence.cpp
   ../src/hood_fitter.cpp
   ../src/hood_projection.cpp
-  ../src/hood_rgb_ingestor.cpp
+  ../../common/rgb_ingestor/rgb_ingestor.cpp
+  ../../common/rgb_ingestor/depth_ingestor.cpp
+  ../../common/contour_edge/contour_edge_check.cpp
+  ../../common/contour_edge/contour_edge_project.cpp
+  ../../common/contour_edge/contour_depth_check.cpp
   ../src/hood_lidar_range_channel.cpp
   ../src/hood_model.cpp
   ../src/hood_belief.cpp
@@ -38,7 +42,7 @@ LIST(APPEND SOURCES
 add_definitions(-O3 -fmax-errors=1 -fno-char8_t)
 
 # OpenCV — appearance-based FRONT (door) detection (HoodProjection::detect_front + the ZED RGB ingestor).
-# Confined to hood_projection.cpp / hood_rgb_ingestor.cpp; the pure-Eigen belief stays OpenCV-free.
+# Confined to hood_projection.cpp, the shared rgb/depth ingestors and common/contour_edge; the pure-Eigen belief stays OpenCV-free.
 # Nothing under common/ includes <opencv2/...>, so this stays component-local.
 find_package(OpenCV REQUIRED)
 include_directories(${OpenCV_INCLUDE_DIRS})

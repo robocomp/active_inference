@@ -293,6 +293,7 @@ struct HoodConfig
     // project the FITTED box into the live ZED RGB, score vertical-edge energy per visible face, and fold the
     // winning face's bearing into the belief's sequential-Bayes door-mode resolver (HoodBelief::resolve_front).
     // Because it uses the belief's own box (not YOLO's mask) it keeps working when the robot is too close for YOLO.
+    bool  contour_check_enabled  = true;    // classifier-free existence channel: fitted box outline vs RGB edges + ZED depth
     bool  front_detect_enabled   = true;    // master switch: subscribe to ZED RGB + run detect_front/resolve_front
     float front_min_face_area_px = 900.0f;  // min projected face area (px²) to score for door-ness
     float front_min_confidence   = 0.10f;   // min door-ness margin (max−second)/(max+eps) for detect_front to emit

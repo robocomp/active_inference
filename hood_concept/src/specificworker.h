@@ -53,7 +53,8 @@
 #include "hood_instance.h"    // rc::HoodInstance
 #include "../../common/mask_ingestor/mask_ingestor.h"     // rc::MaskIngestor (perception)
 #include "../../common/lidar_ingestor/concept_lidar_ingestor.h"                          // rc::ConceptLidarIngestor (YOLO-independent LiDAR)
-#include "hood_rgb_ingestor.h"                            // rc::HoodRgbIngestor (ZED RGB for door detection)
+#include "../../common/rgb_ingestor/rgb_ingestor.h"             // rc::RgbIngestor — the SHARED ZED RGB consumer
+#include "../../common/rgb_ingestor/depth_ingestor.h"           // rc::DepthIngestor — its metric sibling
 #include "../../common/instance_tracker/instance_tracker.h"   // rc::InstanceTracker (birth/associate/death)
 #include "../../common/birth_fragment/birth_fragment.h"       // rc::BirthFragment — the probation burst
 #include "hood_scene_graph.h" // rc::HoodSceneGraph (DSR node/RT I/O)
@@ -289,7 +290,9 @@ private:
     std::unique_ptr<DSR::InnerGaussianAPI>              gaussian_api_;     // Part B: chain covariance propagation
     std::unique_ptr<rc::MaskIngestor>                   mask_ingestor_;    // perception (masks-only)
     std::unique_ptr<rc::ConceptLidarIngestor>             lidar_ingestor_;   // YOLO-independent LiDAR range channel
-    std::unique_ptr<rc::HoodRgbIngestor>              rgb_ingestor_;     // ZED RGB media plane for door detection
+    std::unique_ptr<rc::RgbIngestor>                  rgb_ingestor_;     // ZED RGB media plane (door cue + contour channel)
+    std::unique_ptr<rc::DepthIngestor>                depth_ingestor_;   // ZED depth (CV_32F m, NaN = no return)
+    bool                                              camera_planes_wanted_ = false;
     std::unique_ptr<rc::HoodSceneGraph>                scene_graph_;      // DSR node/RT I/O
     uint64_t                                            room_node_id_ = 0;
 
