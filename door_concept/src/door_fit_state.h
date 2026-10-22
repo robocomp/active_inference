@@ -299,6 +299,11 @@ struct DoorFitState
     door::ViewPool image_view_pool{};
     // Task 5b item 4: the silhouette's evidence pooled by the same view model (door_view_pool.h add_logodds).
     door::ViewPool silhouette_view_pool{};
+    // Task Q: the 360 camera's own existence channel (door_existence.cpp): its evidence pooled by the SAME view model, and the
+    // last detection's source + weight (a ricoh detection is worth its variance/wall-agreement weight, a ZED one 1).
+    door::ViewPool ricoh_view_pool{};
+    int   last_source   = 0;       // MaskSlice::source of the slice that last detected this door (0 = zed, 1 = ricoh)
+    float last_detect_w = 1.0f;    // that detection's weight in [0, 1]: a ZED slice 1; a ricoh slice its association likelihood exp(-m2/2) under the door's + its own variance
     bool existence_seeded = false;            // false until seeded with cfg.exist_birth_logodds on first visit
     // Task D-C: the log-odds the belief ENTERED with (birth seed, adoption or restore). Removal is decided on what the data
     // did since entry, not on the prior the door entered with (DoorCore::update_existence): a door restored below the

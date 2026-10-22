@@ -283,6 +283,60 @@ int main()
         CHECK(core.tracker_info().class_dets == 1 and core.tracker_info().assigned == 1);
     }
 
+    {   // (I4a) a PERSISTENT low-quality ricoh 'door' at a fixed wall spot ⇒ no birth; the SAME geometry at good quality ⇒ birth
+        int created[2] = {0, 0};
+        const float quality[2][2] = {{0.3f, 0.5f}, {0.9f, 0.02f}};   // (conf, depth_var): poor, then good
+        for (int q = 0; q < 2; ++q)
+        {
+            FakeWorld w;
+            DoorCore core(cfg);
+            core.connect(&w);
+            for (int k = 1; k <= 600; ++k)
+                core.step(cycle_input(k, k, ricoh_scene(wall_door, k, quality[q][0], quality[q][1])));
+            created[q] = w.created;
+        }
+        std::print("persistent ricoh door: poor quality births {}, good quality births {}\n", created[0], created[1]);
+        CHECK(created[0] == 0);
+        CHECK(created[1] == 1);
+    }
+    {   // (I3) ZED and ricoh both see ONE door (ricoh offset 0.25 m ≈ 2 sigma along the wall): exactly one instance, and the two
+        // sensors' evidence accrues to ONE candidate, so it is born SOONER than from the ZED alone (the old per-frame dup rule
+        // dropped the second sensor's evidence), whichever sensor is listed first.
+        const auto run_mixed = [&](int mode, int& births_out, std::size_t& live_out)   // 0 zed alone, 1 zed+ricoh, 2 ricoh+zed
+        {
+            FakeWorld w;
+            DoorCore core(cfg);
+            core.connect(&w);
+            int first = -1; births_out = 0;
+            for (int k = 1; k <= 150; ++k)
+            {
+                auto z = ricoh_scene(wall_door, k, 1.0f, 0.0f); z.ricoh = false;       // the ZED slice, same viewpoint
+                auto r = ricoh_scene(wall_door + Vec2f(0.25f, 0.0f), k, 0.9f, 0.02f);
+                DoorCycleInput in = cycle_input(k, k, mode == 2 ? r : z);
+                if (mode != 0)
+                {
+                    auto other = cycle_input(k, k, mode == 2 ? z : r);
+                    const std::uint64_t b = in.masks->support_points.size();
+                    for (const auto& pt : other.masks->support_points) in.masks->support_points.push_back(pt);
+                    auto sl = other.masks->slices[0];
+                    sl.support_begin += b; sl.support_end += b;
+                    in.masks->slices.push_back(sl);
+                }
+                const auto nb = of_kind(core.step(in).decisions, K::Birth).size();
+                births_out += static_cast<int>(nb);
+                if (nb > 0 and first < 0) first = k;
+            }
+            live_out = w.live.size();
+            return first;
+        };
+        int nb[3]; std::size_t nl[3];
+        const int t0 = run_mixed(0, nb[0], nl[0]), t1 = run_mixed(1, nb[1], nl[1]), t2 = run_mixed(2, nb[2], nl[2]);
+        std::print("birth frame: zed alone {}, zed+ricoh {}, ricoh+zed {}; instances {} {} {}\n", t0, t1, t2, nl[0], nl[1], nl[2]);
+        CHECK(t0 > 0 and t1 > 0 and t2 > 0);
+        CHECK(nb[1] == 1 and nl[1] == 1 and nb[2] == 1 and nl[2] == 1);
+        CHECK(t1 < t0 and t2 < t0);
+    }
+
     // ── 4. suppressions ──────────────────────────────────────────────────────────────────────────────────────────
     {
         FakeWorld w;

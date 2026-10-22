@@ -19,6 +19,7 @@
 #include <opencv2/imgproc.hpp>
 #include <Eigen/Eigenvalues>
 
+#include "../../../common/instance_tracker/birth_evidence.h"   // rc::birth::observation_weight (SHARED): the ricoh channel's P(detect)
 #include "../door_geometry.h"
 #include "../door_phi_posterior.h"                                // room_walls_beside, phi_field_nuisance (one own-wall definition)
 #include "../../../common/occlusion/occlusion.h"                 // rc::occlusion::{cone_blocks, walls_block} (SHARED)
@@ -682,7 +683,9 @@ void DoorCore::update_existence(const DoorCycleInput& in, DoorCycleOutput& out)
     // The silhouette channel needs the producer's raw 2D mask pixels (mask_pixels_xy — an OPTIONAL, newer
     // producer channel). Without them EVERY door reports n_detectable==0 and therefore HOLDs forever, which
     // looks exactly like "phantoms are never removed". Say so once rather than failing silently.
-    if (pkt.mask_pixels.empty())
+    // The 360 camera's channel needs no ZED pixels: with none, only a packet that carries no ricoh slice either has nothing to say.
+    if (pkt.mask_pixels.empty()
+        and std::none_of(pkt.slices.begin(), pkt.slices.end(), [](const MaskSlice& q) { return q.source != 0; }))
     {
         if (not exist_warned_)
         {
@@ -859,6 +862,73 @@ void DoorCore::update_existence(const DoorCycleInput& in, DoorCycleOutput& out)
         const float kappa = po.kappa;
         const float pool_R = std::hypot(view_R, po.spread_m);   // views closer than the pose spread are one look
         inst.dbg_pose_kappa = kappa;
+
+        // ── THE 360 CAMERA'S OWN EXISTENCE CHANNEL (task Q) ───────────────────────────────────────────────────────
+        // Symmetric to its BIRTH evidence: the same detection model P(detect | ricoh, viewpoint) = the birth's range term
+        // (rc::birth, the SAME Detectability) x line of sight with WALLS (ricoh_door_birth.h), pooled per viewpoint
+        // (ViewPool, the model every other channel uses). A ricoh detection of this door confirms it, worth its
+        // variance/wall weight; a ricoh frame (any ricoh slice in the packet = the camera ran) that did NOT detect it,
+        // while the ZED did not either, is absence worth P(detect). Where the ricoh rarely resolves a door, not
+        // seeing it is weak evidence — and a ricoh-born phantom BEHIND the robot, which the ZED can never probe, is
+        // removable by it. `ricoh_look` is the resolvability of that look, handed to the removal debounce.
+        float ricoh_look = 0.0f;
+        if (in.robot.room_T_body.has_value()
+            and std::any_of(pkt.slices.begin(), pkt.slices.end(), [](const MaskSlice& q) { return q.source != 0; }))
+        {
+            const Eigen::Vector2f cam_b(static_cast<float>(in.robot.room_T_body->coeff(0, 3)),
+                                        static_cast<float>(in.robot.room_T_body->coeff(1, 3)));
+            const Eigen::Vector2f door_c = inst.aperture.centre_xy();
+            const bool det_now = inst.frames_since_detection == 0;
+            // P(ricoh detects a door that is there), LEARNED on the doors the ZED confirms this frame: a ZED-observed door is
+            // there for certain, so whether the ricoh also reports it is a clean Bernoulli trial of the 360 detector.
+            if (det_now and inst.last_source == 0)
+            {
+                bool seen = false;
+                for (const auto& q : pkt.slices)
+                {
+                    if (q.source == 0 or q.label != "door" or not q.has_depth) continue;
+                    const auto rr = ricoh_range(fit_.room_polygon(), cam_b, Vec2f(q.centroid.x(), q.centroid.y()), q.depth_var,
+                                                cfg.ai2_sigma_base_m, cfg.ai2_range_noise_lat_per_m,
+                                                cfg.tracker_detection_noise_m * cfg.tracker_detection_noise_m);
+                    const float v = std::max(0.0f, inst.ai2_belief.covariance()(0, 0)) + std::max(0.0f, rr.var);
+                    if (rr.var >= 0.0f and (Vec2f(q.centroid.x(), q.centroid.y()) - door_c).squaredNorm() <= cfg.tracker_gate_mahalanobis * v)
+                    { seen = true; break; }
+                }
+                ricoh_trials_ += 1.0f; ricoh_hits_ += seen ? 1.0f : 0.0f;
+            }
+            const float hit = (ricoh_hits_ + 1.0f) / (ricoh_trials_ + 2.0f);
+            const float pc  = std::clamp(sm.clutter_prob, 1e-3f, 1.0f - 1e-3f);
+            float dL_look = 0.0f;
+            if (det_now and inst.last_source != 0)
+                // presence: the Bernoulli LLR of a detection, ln(hit / pc), worth its association likelihood
+                dL_look = inst.last_detect_w * kappa * std::log(std::clamp(hit, pc + 1e-3f, 1.0f - 1e-3f) / pc);
+            else if (not det_now)
+            {
+                const float range = (door_c - cam_b).norm();
+                const rc::birth::Detectability bd{cfg.ai2_periph_ref, 2.5f, 2.0f};
+                const float p_ricoh = rc::birth::observation_weight({1.0f, range}, bd)
+                                    * los_weight(fit_.room_polygon(), cam_b, door_c, cfg.ai2_sigma_base_m,
+                                                 cfg.ai2_range_noise_lat_per_m);
+                ricoh_look = p_ricoh;
+                // absence: a Bernoulli look. The door yields a detection with prob q = P(detect | ricoh, viewpoint) x hit (clutter
+                // scales with q too, so q = 0 says NOTHING, never a small ratchet): LLR = ln((1 - q hit) / (1 - q pc)).
+                dL_look = kappa * std::log((1.0f - p_ricoh * hit) / (1.0f - p_ricoh * pc));
+            }
+            if (dL_look != 0.0f)
+            {
+                const float dL = inst.ricoh_view_pool.add_logodds(cam_b, door_c, pool_R, dL_look);
+                const float L0 = inst.existence.logodds();
+                inst.existence.integrate(1.0f, dL);
+                bank(inst, inst.existence.last_increment());
+                inst.ricoh_view_pool.commit(inst.existence.logodds() - L0);
+            }
+        }
+        if (pkt.mask_pixels.empty())   // no ZED silhouette this frame: the ricoh channel is all there is
+        {
+            if (decide(inst, 1.0f - (1.0f - prior_look) * (1.0f - ricoh_look)).remove)
+                to_remove.push_back(id);
+            continue;
+        }
 
         // ── RGB CONTOUR CHECK ────────────────────────────────────────────────────────────────────
         // Does the IMAGE have a boundary where this door's own projected leaf face predicts one? No
@@ -1071,7 +1141,7 @@ void DoorCore::update_existence(const DoorCycleInput& in, DoorCycleOutput& out)
             integrate_image_geometry(/*leaf_visible=*/false);
             // The wall-band prior needs no look: an off-band door advances its debounce here too (a door the
             // sensor can never reach — behind a wall — is exactly the case that prior exists for).
-            if (decide(inst, prior_look).remove)
+            if (decide(inst, 1.0f - (1.0f - prior_look) * (1.0f - ricoh_look)).remove)
                 to_remove.push_back(id);
             continue;
         }
@@ -1089,7 +1159,10 @@ void DoorCore::update_existence(const DoorCycleInput& in, DoorCycleOutput& out)
         // a ZED false-negative, or a door only the ricoh resolved, must never vote itself away). This is the
         // honest form of "ricoh confirms, never removes": the old code enforced it on the positive side while
         // the negative side removed through range_detectability, which is precisely the ricoh's own reach.
-        const bool observed = inst.frames_since_detection == 0;
+        // ★"OBSERVED" IS A WEIGHT, NOT A FLAG. A ZED detection is a full observation; a ricoh one is worth its own
+        // variance/wall-agreement weight (DoorFit: last_detect_w), so a noisy 360 detection cannot silence the ZED's
+        // absence evidence at full strength.
+        const float observed_w = inst.frames_since_detection == 0 ? (inst.last_source == 0 ? 1.0f : inst.last_detect_w) : 0.0f;
         // ★A frame that may not MOVE the geometry may not DESTROY the object either. `dbg_gated` is the fit's
         // own admissibility verdict (door_fitter.cpp: truncated mask, or the robot moving with the mask
         // off-centre ⇒ predict-only). When it is set the belief is FROZEN, so the projected silhouette is a
@@ -1113,7 +1186,7 @@ void DoorCore::update_existence(const DoorCycleInput& in, DoorCycleOutput& out)
         // Reading gate_fresh makes the guard mean what its comment always claimed: it suppresses absence only
         // when THIS frame's fit really was frozen while a mask was in fact arriving.
         const bool view_untrustworthy = inst.dbg_gate_fresh and (inst.dbg_trunc_gated or inst.dbg_motion_gated);
-        const float raw_free = (observed or view_untrustworthy) ? 0.0f : sil.e_free;
+        const float raw_free = view_untrustworthy ? 0.0f : (1.0f - observed_w) * sil.e_free;
         // P(detect | present, geometry): could this view have resolved a door that IS there?
         //   resolvability — is the panel big enough in the image to segment (range × foreshortening),
         //   in_fov_frac  — how much of it the real frustum + occluders actually left visible,
@@ -1337,7 +1410,7 @@ void DoorCore::update_existence(const DoorCycleInput& in, DoorCycleOutput& out)
         //  that saw the door mostly lit and a few samples free is mostly a confirmation, not a full look at an absence.
         const float absence_share = raw_free > 0.0f ? raw_free / std::max(1e-6f, raw_free + std::max(0.0f, e_occ)) : 0.0f;
         const float absence_look = p_detect * absence_share;
-        const float cycle_look = 1.0f - (1.0f - absence_look) * (1.0f - prior_look);
+        const float cycle_look = 1.0f - (1.0f - absence_look) * (1.0f - prior_look) * (1.0f - ricoh_look);
         const auto verdict = decide(inst, cycle_look);
         if (verdict.remove)
             to_remove.push_back(id);

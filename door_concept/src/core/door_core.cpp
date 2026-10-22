@@ -199,6 +199,7 @@ DoorCycleOutput DoorCore::step(const DoorCycleInput& in)
         cam_xy_ = Vec2f(static_cast<float>(in.robot.room_T_body->coeff(0, 3)), static_cast<float>(in.robot.room_T_body->coeff(1, 3)));
     // ONE ego-motion: the fit's confirm-only gate reads the value the birth gate uses (was fitter_->set_ego_motion).
     fit_.set_ego_motion(ego_.lin_mps, ego_.ang_radps);
+    fit_.set_ricoh_origin(cam_xy_);
     // ★ONE claim set per cycle for the SHARED mutual-exclusion rule: who else claims room space (was the graph walk at
     // the top of compute(); now the snapshot of the same nodes taken at the top of the cycle). The birth filter AND the
     // fit's point exclusion read it (Task 4b: the worker's own second walk, foreign_claims_, is gone).
@@ -339,6 +340,7 @@ void DoorCore::associate(const DoorCycleInput& in, DoorCycleOutput& out)
 
     // Detections ← this frame's "door" mask slices (carry the slice index for the assignment).
     dets_.clear();
+    ricoh_fold_.clear();
     const auto& pkt = masks_.packet();
 
     // ★BIRTH EVIDENCE — the shared CREATE policy (common/instance_tracker/birth_evidence.h). This agent fed
@@ -447,16 +449,22 @@ void DoorCore::associate(const DoorCycleInput& in, DoorCycleOutput& out)
             // bearing meets (a door lies in a wall), fused with it, and its frames are pooled per viewpoint
             // (ricoh_door_birth.h). A ZED slice is untouched (weight 1, its own position).
             float ricoh_w = 1.0f;
+            std::optional<Vec2f> ricoh_fold;       // the view to fold into the pool if this slice ends up UNASSOCIATED
+            dv.sensor = sl.source;
             if (sl.source != 0)
             {
                 if (not cam_xy_.has_value()) continue;               // no camera pose ⇒ no ray ⇒ no placement
                 const auto rr = ricoh_range(world_->room_polygon(), cam_xy_.value(), dv.xy, sl.depth_var,
-                                            cfg.ai2_sigma_base_m, cfg.ai2_range_noise_lat_per_m);
+                                            cfg.ai2_sigma_base_m, cfg.ai2_range_noise_lat_per_m,
+                                            cfg.tracker_detection_noise_m * cfg.tracker_detection_noise_m);
                 dv.xy = rr.xy;
+                dv.xy_var = rr.var;                                  // its OWN measurement covariance (gate + candidates)
                 ricoh_w = rr.weight;
                 if (birth_new_obs and ricoh_w > 0.0f)
-                    ricoh_w *= ricoh_views_.credit(cam_xy_.value(), dv.xy, 0.5f * cfg.door_prior_w_m,
-                                                   cfg.tracker_birth_min_sep_m);
+                {
+                    ricoh_w *= ricoh_views_.peek(cam_xy_.value(), dv.xy, 0.5f * cfg.door_prior_w_m, cfg.tracker_birth_min_sep_m);
+                    ricoh_fold = dv.xy;
+                }
             }
             dv.birthable = true;
             // One admissible, reliable observation — never a cycle. See birth_evidence.h.
@@ -485,6 +493,7 @@ void DoorCore::associate(const DoorCycleInput& in, DoorCycleOutput& out)
                     diag("stdout", std::format("[door] birth cand CLAIMED by '{}' ({:.0f}%): birth_ev x{:.2f}\n",
                                                who ? who->node : "?", 100.0f * (1.0f - unclaimed), unclaimed), out);
             }
+            if (ricoh_fold.has_value()) ricoh_fold_.push_back({static_cast<int>(dets_.size()), ricoh_fold.value()});
             dets_.push_back(dv);
         }
     // The remembered-door look reads this frame's detections as "seen there" (door_look.h, step_remembered_looks).
@@ -517,8 +526,15 @@ void DoorCore::associate(const DoorCycleInput& in, DoorCycleOutput& out)
         diag("door_dets_log.csv", row.str(), out);
     }
 
-    if (birth_new_obs) ricoh_views_.end_frame();
     res_ = tracker_.update(tracks, dets_);
+    // Pool the viewpoint of a ricoh slice only if it is NOT explained by a live door (an associated slice is not a birth look).
+    if (birth_new_obs and cam_xy_.has_value())
+    {
+        for (const auto& [di, tgt] : ricoh_fold_)
+            if (res_.assignment[static_cast<std::size_t>(di)] < 0)
+                ricoh_views_.credit(cam_xy_.value(), tgt, 0.5f * cfg.door_prior_w_m, cfg.tracker_birth_min_sep_m);
+        ricoh_views_.end_frame();
+    }
 
     const int n_assigned = static_cast<int>(std::count_if(res_.assignment.begin(), res_.assignment.end(),
                                                           [](int a){ return a >= 0; }));
@@ -558,10 +574,13 @@ void DoorCore::associate(const DoorCycleInput& in, DoorCycleOutput& out)
             const auto& BS = inst.belief->covariance();
             // Σ(0,0)=σ_s² is the along-wall position variance; use it isotropically for the position gate.
             const float pos_var = BS(0, 0);
-            const float sxx = pos_var + inst.chain_cov_xx + rn2;   // innovation cov diag S = P + R²I
-            const float syy = pos_var + inst.chain_cov_yy + rn2;
             for (const auto& d : dets_)
             {
+                // ★PER-SOURCE measurement covariance: S = P + chain + R_source. A ZED slice keeps the classic detection
+                // noise; a ricoh one carries its own (bearing lever + fused range variance, ricoh_door_birth.h).
+                const float rn_d = d.xy_var >= 0.0f ? d.xy_var : rn2;
+                const float sxx = pos_var + inst.chain_cov_xx + rn_d;   // innovation cov diag S = P + R²I
+                const float syy = pos_var + inst.chain_cov_yy + rn_d;
                 // POSITION GATE (mirrors the tracker's S=P+R²I Mahalanobis): an instance may claim a slice
                 // ONLY if the slice centroid is within its gate. Without it the evidence greedy assigns EVERY
                 // instance some slice, so an instance whose own door is occluded this frame claims a FAR
@@ -574,7 +593,9 @@ void DoorCore::associate(const DoorCycleInput& in, DoorCycleOutput& out)
                 const auto pts_span = masks_.support(pkt.slices[d.slice_index]);
                 if (pts_span.empty()) continue;
                 const std::vector<Eigen::Vector3f> pts(pts_span.begin(), pts_span.end());
-                pairs.push_back({inst.belief->association_nll(pts, R), inst.id, d.slice_index});
+                // the evidence pass's R is the same per-source story: the fit's R plus the slice's own depth variance
+                pairs.push_back({inst.belief->association_nll(pts, R + std::max(0.0f, pkt.slices[d.slice_index].depth_var)),
+                                 inst.id, d.slice_index});
             }
         }
         std::sort(pairs.begin(), pairs.end(), [](const EvPair& a, const EvPair& b) { return a.e < b.e; });
@@ -597,12 +618,16 @@ void DoorCore::associate(const DoorCycleInput& in, DoorCycleOutput& out)
         {
             if (inst.ai2_initialized or used_inst.count(inst.id)) continue;
             const auto& ms = inst.state;
-            int best = -1; float best_r2 = fb2;
+            // Nearest by variance-scaled distance: when a ZED and a ricoh slice both sit on the newborn's door, the
+            // lower-variance (ZED) slice wins it; a ricoh slice is admissible inside the metric gate OR its own 3σ.
+            int best = -1; float best_cost = std::numeric_limits<float>::max();
             for (const auto& d : dets_)
             {
                 if (used_slice.count(d.slice_index)) continue;
                 const float ex = d.xy.x() - ms.cx, ey = d.xy.y() - ms.cy, r2 = ex * ex + ey * ey;
-                if (r2 < best_r2) { best_r2 = r2; best = d.slice_index; }
+                const float v = d.xy_var >= 0.0f ? d.xy_var : cfg.tracker_detection_noise_m * cfg.tracker_detection_noise_m;
+                if (r2 >= fb2 and r2 > cfg.tracker_gate_mahalanobis * v) continue;
+                if (const float cost = r2 / std::max(v, 1e-9f); cost < best_cost) { best_cost = cost; best = d.slice_index; }
             }
             if (best >= 0) { world_->set_assigned_mask(inst.id, best); used_slice.insert(best); used_inst.insert(inst.id); }
         }
@@ -626,7 +651,8 @@ void DoorCore::births(const DoorCycleInput& in, DoorCycleOutput& out)
         // existing instance already claimed by mean_energy must NOT also spawn a phantom (the tracker's
         // centroid birth and the evidence assignment can disagree). Full birth-validity (P(v=clean) — don't
         // birth from a merged/contaminated mask at all) is §2, still to come.
-        const Eigen::Vector3f& c = pkt.slices[slice].centroid;
+        // seed at the detection's position (a ricoh slice: wall-fused; a ZED slice: its centroid, unchanged)
+        const Eigen::Vector3f c(dets_[d].xy.x(), dets_[d].xy.y(), pkt.slices[slice].centroid.z());
         // ★Re-read every birth: an earlier birth this cycle is already an instance (a newborn's swept arc can explain
         // the next detection), and the existence update may have retired doors since the association.
         const std::vector<TrackedDoor> doors = world_->doors();

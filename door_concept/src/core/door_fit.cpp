@@ -377,6 +377,26 @@ DoorObservation DoorFit::observe(rc::DoorFitState& inst)
             const auto& slice = selected_mask.value();
             // YOLO fired for this door on a fresh frame → detection is alive.
             inst.frames_since_detection = 0;
+            // WHAT detected it, and how much that detection is worth: a ZED slice is a full observation; a ricoh one
+            // is worth its LiDAR-range variance and its agreement with the wall its bearing meets (ricoh_door_birth.h)
+            // — the SAME weight its birth evidence carried. The existence channel scales "observed" by it.
+            inst.last_source = slice.source;
+            inst.last_detect_w = 1.0f;
+            if (slice.source != 0)
+            {
+                // A ricoh slice was ASSOCIATED to this door by the tracker's gate; how much that association is worth is its
+                // Mahalanobis likelihood under the door's position variance + the slice's own (bearing lever + fused range
+                // variance): exp(-m2/2), continuous, 1 for a slice dead on the door. (The wall-ray agreement is a BIRTH
+                // test - where a door may be created; an existing door's position is already known.)
+                const auto rr = ricoh_origin_.has_value()
+                    ? ricoh_range(room_polygon_, ricoh_origin_.value(), Eigen::Vector2f(slice.centroid.x(), slice.centroid.y()),
+                                  slice.depth_var, cfg_.ai2_sigma_base_m, cfg_.ai2_range_noise_lat_per_m,
+                                  cfg_.tracker_detection_noise_m * cfg_.tracker_detection_noise_m)
+                    : RicohRange{};
+                const Eigen::Vector2f e = Eigen::Vector2f(slice.centroid.x(), slice.centroid.y()) - inst.aperture.centre_xy();
+                const float v = std::max(0.0f, inst.ai2_belief.covariance()(0, 0)) + std::max(0.0f, rr.var);
+                inst.last_detect_w = (rr.var >= 0.0f and v > 0.0f) ? std::exp(-0.5f * e.squaredNorm() / v) : 0.0f;
+            }
             inst.last_detection_wall_ms = t_wall_ms_;   // Task D-C: the age of what the identity row will remember
             inst.last_mask_confidence = slice.confidence;
             inst.last_mask_timestamp_ms = masks_packet.timestamp_ms;   // chain-cov pinning (Part B)

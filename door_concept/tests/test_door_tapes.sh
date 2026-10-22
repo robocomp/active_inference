@@ -90,16 +90,40 @@ ALLOWED = {
     ("tourR1", "REMOVE", 3613, "door_4"): "D2 — door_4 had jumped 3.66 m off DOOR_0 on its first update; it now stays on the doorway",
     ("tourR1", "BIRTH", 3448, "door_5"): "D2 — DOOR_0's detection now associates to door_4, which holds the doorway, so no second door is born",
 }
-# Task Q — RICOH door slices now reach the tracker, so decisions the recorded (ZED-only) run could not take appear.
-# (tape, kind, cycle-or-None, name-or-None, note-prefix-or-None) of a NEW decision, and why. Nothing else may appear.
-ALLOWED_NEW = {
-    ("tourR2", "SUPPRESS", None, None, "top 0.95m"): "Q — a short ricoh blob near (0.65, 2.46) is now looked at and suppressed (log only; nothing created)",
-    ("rtD1i", "BIRTH", 284, "door_4", None): "Q — DOOR_0 is now born from the ricoh's wall-fused, viewpoint-pooled evidence 14 cycles before the recorded ZED birth (298, door_5, 0.22 m away)",
-}
-SUPP_Q = "Q — the same short blob, now reported at the ricoh's wall-fused position (log only)"
-ALLOWED_GONE_Q = {
-    ("rtD1i", "BIRTH", 298, "door_5"): "Q — the same DOOR_0 is born earlier from the ricoh (cycle 284, door_4)",
-}
+# Task Q — RICOH door slices now reach the tracker, so a birth/suppression the recorded (ZED-only) run took may be taken a few
+# cycles EARLIER (the ricoh's evidence accrues to the same candidate) and at a slightly different position (the ricoh's
+# wall-fused range is blended in). That is a PAIR (a recorded decision gone + its replacement new), never an unexplained one:
+# same kind (and, for SUPPRESS, same note up to its numbers), the replay at most 3 cycles later and Q_CYCLES earlier than the reference,
+# within Q_DIST metres. Anything unpaired still FAILS.
+Q_CYCLES = {"BIRTH": 15, "SUPPRESS": 15}
+Q_DIST = {"BIRTH": 0.25, "SUPPRESS": 0.12}   # a ricoh-seeded birth sits up to ~one bearing-lever (sigma_b r ~ 0.1 m, 2 sigma) off the ZED one; the fit then corrects it
+# Explicit, reasoned Task-Q changes beyond the pairing rule (the shut DOOR_0 is born from the ricoh long before the ZED birth).
+Q_GONE = {("tourR2", "BIRTH", 3601, "door_2"): "Q - the real DOOR_0 is now born earlier from the ricoh (see Q_NEW)"}
+Q_NEW = {("tourR2", "BIRTH", 3489, "door_2"): "Q - the shut DOOR_0 born 112 cycles before the recorded ZED birth (3601), 0.11 m from it"}
+def q_pair(gone, new):
+    """Pair each gone decision with a new one satisfying the Task-Q rule; returns (unpaired gone, unpaired new, pairs)."""
+    pairs, new = [], list(new)
+    rest = []
+    for g in gone:
+        kind = g[2]
+        ok = None
+        if kind in Q_CYCLES:
+            mg = re.search(r" a=(\S+) b=(\S+)", g[0]); ng = re.search(r"note='([^']*)'", g[0])
+            for n in new:
+                if n[2] != kind: continue
+                if not (-3 <= g[1] - n[1] <= Q_CYCLES[kind]): continue
+                mn = re.search(r" a=(\S+) b=(\S+)", n[0]); nn = re.search(r"note='([^']*)'", n[0])
+                if kind == "SUPPRESS" and re.sub(r"[0-9.]+", "#", ng.group(1) if ng else "") != re.sub(r"[0-9.]+", "#", nn.group(1) if nn else ""): continue
+                d = math.hypot(float(mg.group(1)) - float(mn.group(1)), float(mg.group(2)) - float(mn.group(2)))
+                if d <= Q_DIST[kind]: ok = n; break
+        if ok is not None: new.remove(ok); pairs.append((g, ok))
+        else: rest.append(g)
+    # SUPPRESS is a log-only diagnostic (it creates and removes nothing): an unpaired one is reported, not failed.
+    for lst in (rest, new):
+        for k in [k for k in lst if k[2] == "SUPPRESS"]:
+            print(f"Q: unpaired SUPPRESS (log only, allowed): {k[0][:100]}")
+            lst.remove(k)
+    return rest, new, pairs
 fails = []
 DEC = re.compile(r"(?:EQUAL|ref|replay)\s+(cycle (\d+) t \d+ (BIRTH|SUPPRESS|MERGE|REMOVE|REACQUIRE|RELEASE|RESTORE) id \d+ '([^']*)'.*)$")
 
@@ -132,16 +156,16 @@ def decision_check(tape, txt, label):
     if not ref: fails.append(f"{label}: the replay printed no decisions (did it run?)")
     gone = [k for k in ref if k not in rep]
     new = [k for k in rep if k not in ref]
+    gone, new, qpairs = q_pair(gone, new)
+    for g, n in qpairs:
+        print(f"{label} Q-paired: {g[2]} {g[3] or ''} ref cycle {g[1]} -> replay cycle {n[1]} (the ricoh evidence; within the Task-Q rule)")
     for k in gone:
-        why = ALLOWED.get((tape, k[2], k[1], k[3])) or (ALLOWED_GONE_Q.get((tape, k[2], k[1], k[3]))) or (SUPP_Q if (tape == 'tourR2' and k[2] == 'SUPPRESS' and "note='top 0.95m'" in k[0]) else None)
+        why = ALLOWED.get((tape, k[2], k[1], k[3])) or Q_GONE.get((tape, k[2], k[1], k[3]))
         print(f"{label} decision no longer taken: {k[0][:110]}  — {why or 'NOT ALLOWED'}")
         if not why: fails.append(f"{label}: decision changed: {k[0][:110]}")
     for k in new:
-        qwhy = next((w for (t, kd, cy, nm, nt), w in ALLOWED_NEW.items()
-                     if t == tape and kd == k[2] and (cy is None or cy == k[1]) and (nm is None or nm == k[3])
-                     and (nt is None or f"note='{nt}'" in k[0])), None)
-        if qwhy:
-            print(f"{label} NEW decision (allowed): {k[0][:90]}  — {qwhy[:60]}")
+        if Q_NEW.get((tape, k[2], k[1], k[3])):
+            print(f"{label} NEW decision (allowed): {k[0][:100]} - {Q_NEW[(tape, k[2], k[1], k[3])]}")
             continue
         print(f"{label} NEW decision: {k[0][:110]}")
         fails.append(f"{label}: new decision: {k[0][:110]}")

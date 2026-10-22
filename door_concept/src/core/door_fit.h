@@ -108,6 +108,7 @@ public:
     void set_diag(std::function<void(const DiagRow&)> d) { diag_ = std::move(d); }
 
     // ── the room-containment prior's polygon (room frame). ONE copy: DoorFitter::set_room_geometry writes it. ──
+    void set_ricoh_origin(const std::optional<Eigen::Vector2f>& o) { ricoh_origin_ = o; }   // the 360 camera's room xy
     void set_room_polygon(std::vector<Eigen::Vector2f> polygon) { room_polygon_ = std::move(polygon); }
     [[nodiscard]] const std::vector<Eigen::Vector2f>& room_polygon() const { return room_polygon_; }
     [[nodiscard]] bool has_room_polygon() const { return room_polygon_.size() >= 3; }
@@ -163,6 +164,7 @@ private:
     CameraIntrinsics cam_{};
     float ego_lin_mps_ = 0.0f, ego_ang_radps_ = 0.0f;
     std::vector<Eigen::Vector2f> room_polygon_;
+    std::optional<Eigen::Vector2f> ricoh_origin_;
     std::unordered_map<std::uint64_t, Eigen::Vector2f> birth_seeds_;    // tracker-provided birth XY (note_birth)
     std::unordered_map<std::uint64_t, rc::DoorBelief> restore_seeds_;   // re-acquired identity's belief (note_reacquire)
     std::size_t n_explained_away_ = 0;                                  // points dropped (diagnostic)

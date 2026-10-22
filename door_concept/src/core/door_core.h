@@ -261,12 +261,16 @@ private:
     rc::InstanceTracker tracker_;
     long last_birth_mask_frame_ = -1;
     std::optional<Vec2f> cam_xy_;      // the camera's room xy this cycle (the ricoh slices' ray origin)
-    RicohViewPool ricoh_views_;        // pooled viewpoints of the ricoh birth candidates
+    RicohViewPool ricoh_views_;
+    std::vector<std::pair<int, Vec2f>> ricoh_fold_;   // (detection index, door xy) of this frame's ricoh slices        // pooled viewpoints of the ricoh birth candidates
     int  dbg_cycles_ = 0;     // the "[tracker] instances=…" print throttle
     int  dets_csv_rows_ = 0;  // etc/door_dets_log.csv's cycle column (one per tracker call)
     std::uint64_t create_seq_ = 0;
     // the existence slice's own state (were exist_last_mask_frame_ and three function statics in SpecificWorker)
     int  exist_last_mask_frame_ = -1;   // integrate once per NEW mask frame
+    // The 360 camera's LEARNED hit rate on doors the ZED confirms (Beta(1,1) prior): P(ricoh detects | door there, ricoh ran).
+    // Calibrated online - the same detection model births and removals use - instead of an asserted constant.
+    float ricoh_hits_ = 0.0f, ricoh_trials_ = 0.0f;
     bool exist_warned_ = false;         // the "no mask_pixels_xy" warning, once
     int  ex_dbg_ = 0;                   // the readout's throttle counter (= the existence CSV's cycle column)
     std::unordered_map<std::uint64_t, float> last_L_;   // last L per door (forces a readout row on |ΔL| > 1)

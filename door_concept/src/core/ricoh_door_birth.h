@@ -47,12 +47,12 @@ struct WallHit { float r = 0.0f; float cos_inc = 1.0f; };
     return best;
 }
 
-struct RicohRange { float weight = 0.0f; Eigen::Vector2f xy = Eigen::Vector2f::Zero(); };
+struct RicohRange { float agree = 0.0f; float weight = 0.0f; Eigen::Vector2f xy = Eigen::Vector2f::Zero(); float var = -1.0f; };
 
 /// Terms 1 and 2 for one slice seen from O: its birth weight and the wall-fused position.
 [[nodiscard]] inline RicohRange ricoh_range(const std::vector<Eigen::Vector2f>& poly, const Eigen::Vector2f& O,
                                             const Eigen::Vector2f& centroid, float depth_var, float sigma_base_m,
-                                            float lat_per_m)
+                                            float lat_per_m, float base_var = 0.0f)
 {
     RicohRange o; o.xy = centroid;
     const Eigen::Vector2f d = centroid - O;
@@ -68,10 +68,32 @@ struct RicohRange { float weight = 0.0f; Eigen::Vector2f xy = Eigen::Vector2f::Z
     const float var_w  = std::max(lever * lever * tanphi * tanphi, 1e-6f);
     const float dr     = rs - h->r;
     const float agree  = std::exp(-0.5f * dr * dr / (var_s + var_w));
-    o.weight = agree * (R0 / var_s);
+    o.agree  = agree;                                              // is it the wall's door at all (no variance factor)
+    o.weight = agree * (R0 / var_s);                                // ...and how much position information it carries
     const float r = (rs / var_s + h->r / var_w) / (1.0f / var_s + 1.0f / var_w);
     o.xy = O + dir * r;
+    // position variance (isotropic): the base measurement noise + the bearing's lateral lever (sigma_b r)^2 + the fused along-ray variance
+    o.var = base_var + (lat_per_m * r) * (lat_per_m * r) + 1.0f / (1.0f / var_s + 1.0f / var_w);
     return o;
+}
+
+/// LINE OF SIGHT from the 360 camera to a door's aperture centre, WALLS included: a door lies IN a wall, so the ray meets
+/// the polygon at ~the door's distance; a wall met clearly BEFORE it blocks the view. Continuous: the shortfall in units of
+/// the same wall-range and measurement variances ricoh_range uses. 1 = clear. No polygon / no hit ⇒ 1 (nothing blocks).
+[[nodiscard]] inline float los_weight(const std::vector<Eigen::Vector2f>& poly, const Eigen::Vector2f& O,
+                                      const Eigen::Vector2f& target, float sigma_base_m, float lat_per_m)
+{
+    const Eigen::Vector2f d = target - O;
+    const float dist = d.norm();
+    if (dist < 1e-3f) return 1.0f;
+    const auto h = wall_hit(poly, O, d / dist);
+    if (not h) return 1.0f;
+    const float R0     = sigma_base_m * sigma_base_m + (lat_per_m * dist) * (lat_per_m * dist);
+    const float tanphi = std::sqrt(std::max(0.0f, 1.0f - h->cos_inc * h->cos_inc)) / std::max(h->cos_inc, 1e-3f);
+    const float lever  = lat_per_m * h->r;
+    const float var    = R0 + std::max(lever * lever * tanphi * tanphi, 1e-6f);
+    const float short_by = std::max(0.0f, dist - h->r);
+    return std::exp(-0.5f * short_by * short_by / var);
 }
 
 /// Term 3: the pooled viewpoints of the ricoh birth candidates (one per door position).
@@ -79,6 +101,12 @@ class RicohViewPool
 {
 public:
     /// Credit in [0,1] for a frame seen from `cam` of a door at `tgt` (half-size R); folds the view in.
+    /// The credit the frame WOULD get, folding nothing in (the slice may turn out to be associated to a live door).
+    [[nodiscard]] float peek(const Eigen::Vector2f& cam, const Eigen::Vector2f& tgt, float R, float match_m) const
+    {
+        RicohViewPool copy = *this;
+        return copy.credit(cam, tgt, R, match_m);
+    }
     float credit(const Eigen::Vector2f& cam, const Eigen::Vector2f& tgt, float R, float match_m)
     {
         const Eigen::Vector2f dv = cam - tgt;

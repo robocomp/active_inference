@@ -116,6 +116,12 @@ struct DetectionView
     // crosses the birth boundary in fewer frames, while an un-corroborated/phantom detection (evidence 1.0)
     // still serves the full debounce. Birth becomes evidence-accumulation-to-a-boundary, not a fixed counter.
     float           birth_evidence = 1.0f;
+    // This detection's own position variance (m², isotropic) — the per-SOURCE measurement covariance. < 0 (default) ⇒ the
+    // classic behaviour: the gate uses detection_noise_m² and a pending candidate is matched by birth_match_m. ≥ 0 ⇒ the gate
+    // uses THIS variance, and candidates are matched by Mahalanobis distance over their summed variances (3σ = gate_mahalanobis),
+    // so evidence from two sensors for one object accrues to ONE candidate (e.g. a ZED centroid and a noisier 360° one).
+    float           xy_var = -1.0f;
+    int             sensor = 0;           // which sensor produced it; evidence from DIFFERENT sensors merges in one frame, the same sensor's duplicates do not
     float           dbg_size_w = 1.0f;   // diagnostic passenger: a candidate observation weight that
                                         // is NOT applied, carried so the agent can log it beside the det
 };
@@ -170,7 +176,8 @@ public:
                 {
                     // Innovation covariance S = P + R²I (fit cov + detection noise). Gating on P alone
                     // makes an overconfident fit reject every real detection — see detection_noise_m.
-                    const float r2n = params_.detection_noise_m * params_.detection_noise_m;
+                    const float r2n = dets[d].xy_var >= 0.0f ? dets[d].xy_var
+                                                              : params_.detection_noise_m * params_.detection_noise_m;
                     const Eigen::Matrix2f S = tracks[t].cov + r2n * Eigen::Matrix2f::Identity();
                     const float m2 = e.dot(S.inverse() * e);   // squared Mahalanobis vs innovation cov
                     ok = std::isfinite(m2) and m2 <= params_.gate_mahalanobis;   // gate is ALWAYS m²
@@ -241,18 +248,58 @@ public:
             const Eigen::Vector2f& xy = dets[d].xy;
             if (not far_from_tracks(xy, dets[d].z)) continue; // sits on top of a same-tier track → not new
 
-            // Match to a pending candidate (carried from prior frames) within birth_match_m.
-            int best = -1; float best_r = params_.birth_match_m;
+            // Match to a pending candidate (carried from prior frames). Classic: within birth_match_m. With a per-source
+            // variance (either side's var ≥ 0): the smallest Mahalanobis distance over the summed variances, inside the gate.
+            const float dn2 = params_.detection_noise_m * params_.detection_noise_m;
+            const float var_d = dets[d].xy_var >= 0.0f ? dets[d].xy_var : dn2;
+            const auto cand_match = [&](const Candidate& c, float& score)
+            {
+                const float r2 = (c.xy - xy).squaredNorm();
+                if (c.var < 0.0f and dets[d].xy_var < 0.0f) { score = std::sqrt(r2); return score < params_.birth_match_m; }
+                const float vs = (c.var >= 0.0f ? c.var : dn2) + var_d;
+                score = r2 / std::max(vs, 1e-9f);
+                return score <= params_.gate_mahalanobis;
+            };
+            const auto fuse = [&](Candidate& c)
+            {
+                if (c.var < 0.0f and dets[d].xy_var < 0.0f) { c.xy = xy; return; }   // classic: the latest position
+                const float vc = c.var >= 0.0f ? c.var : dn2;
+                const float wc = 1.0f / std::max(vc, 1e-9f), wd = 1.0f / std::max(var_d, 1e-9f);
+                c.xy  = (c.xy * wc + xy * wd) / (wc + wd);
+                c.var = 1.0f / (wc + wd);
+            };
+            // Evidence from a second sensor, SAME frame, for a candidate this frame already advanced: it accrues to that one
+            // candidate (independent sensors) instead of being dropped as a duplicate or seeding a second candidate.
+            bool merged = false;
+            for (std::size_t k = 0; k < next_cand.size() and not merged; ++k)
+                {
+                    float sc;
+                    if (next_cand[k].sensor == dets[d].sensor or (next_cand[k].var < 0.0f and dets[d].xy_var < 0.0f) or not cand_match(next_cand[k], sc)) continue;
+                    next_cand[k].streak += dets[d].birth_evidence;
+                    next_cand[k].sensor = dets[d].sensor;
+                    fuse(next_cand[k]);
+                    out.cand_of_det[d] = next_cand[k].id;
+                    if (next_cand[k].streak >= params_.birth_frames)
+                    {
+                        out.births.push_back(d);
+                        out.birth_cand_ids.push_back(next_cand[k].id);
+                        next_cand.erase(next_cand.begin() + static_cast<std::ptrdiff_t>(k));
+                    }
+                    merged = true;
+                }
+            if (merged) continue;
+            int best = -1; float best_r = std::numeric_limits<float>::max();
             for (int c = 0; c < static_cast<int>(candidates_.size()); ++c)
             {
                 if (candidates_[c].claimed) continue;
-                const float r = (candidates_[c].xy - xy).norm();
-                if (r < best_r) { best_r = r; best = c; }
+                float sc;
+                if (cand_match(candidates_[c], sc) and sc < best_r) { best_r = sc; best = c; }
             }
             Candidate cand;
             if (best >= 0) { cand = candidates_[best]; candidates_[best].claimed = true; }
-            else           { cand.id = ++next_cand_id_; }      // fresh blob → new identity for its burst
-            cand.xy     = xy;                                 // track the blob's latest position
+            else           { cand.id = ++next_cand_id_; cand.var = dets[d].xy_var; }   // fresh blob → new identity for its burst
+            if (best >= 0) fuse(cand); else cand.xy = xy;
+            cand.sensor = dets[d].sensor;
             cand.streak = (best >= 0 ? cand.streak : 0.0f) + dets[d].birth_evidence;   // accumulate birth evidence
 
             // Don't let two fresh dets seed the same birth this frame.
@@ -297,7 +344,8 @@ private:
     // `id` is a tracker-local monotonic identity for a pending birth, stable across the frames it
     // matures over. It is the key an agent banks the candidate's mask clouds under (see TrackerResult).
     struct Candidate { std::uint64_t id = 0; Eigen::Vector2f xy = Eigen::Vector2f::Zero();
-                       float streak = 0.0f; bool claimed = false; };
+                       float streak = 0.0f; bool claimed = false;
+                       float var = -1.0f; int sensor = 0; };   // var < 0 ⇒ classic candidate (no per-source variance yet)
 
     TrackerParams                          params_;
     std::unordered_map<std::uint64_t, int> miss_count_;   // track id → consecutive unsupported frames
