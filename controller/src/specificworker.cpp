@@ -1033,6 +1033,8 @@ void SpecificWorker::load_params()
 		affordance_manager_.set_selection_params(static_cast<float>(aff_lambda_cost),
 		                                         static_cast<float>(aff_switch_margin));
 		affordance_manager_.set_room_gain_scale(static_cast<float>(aff_room_gain_scale));
+		// Task E: the door passage weighs its step against the door's epistemic look with the SAME λ and margin.
+		session_.door_passage().set_efe(static_cast<float>(aff_lambda_cost), static_cast<float>(aff_switch_margin));
 	}
 	cfgr.opt_cast<double>("Controller.MaxAdvSpeed", params.max_adv_speed_mps,
          "");

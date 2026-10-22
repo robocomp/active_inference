@@ -552,6 +552,71 @@ int main()
         CHECK(p.view().step == Step::Open and out.required == "aff_door_3_open");
     }
 
+    // ── Task E: a poor door estimate makes the EPISTEMIC look win over the goal-directed step — on one scale (nats) ───────
+    {
+        const auto gain = [&](DSR::DSRGraph& G, const std::string& n, float g, float x, float y)
+        {
+            auto nd = G.get_node(n);
+            G.add_or_modify_attrib_local<epistemic_gain_att>(*nd, g);
+            G.add_or_modify_attrib_local<epistemic_target_x_m_att>(*nd, x);
+            G.add_or_modify_attrib_local<epistemic_target_y_m_att>(*nd, y);
+            G.update_node(*nd);
+        };
+        // the pure comparison
+        using C = DoorPassage;
+        CHECK(C::choose_look_or_step(0.40f, 3.f, 0.15f, 3.f, 0.2f, 0.5f, false).look == false);   // good belief: the step
+        CHECK(C::choose_look_or_step(0.20f, 3.f, 1.80f, 3.f, 0.2f, 0.5f, false).look == true);    // degraded: the look
+        CHECK(C::choose_look_or_step(std::nullopt, 0.f, 1.00f, 3.f, 0.2f, 0.5f, false).look == true);   // step withdrawn: the look
+        CHECK(C::choose_look_or_step(std::nullopt, 0.f, 0.10f, 3.f, 0.2f, 0.5f, false).look == false);   // look worth less than the trip: stay
+        CHECK(C::choose_look_or_step(std::nullopt, 0.f, std::nullopt, 0.f, 0.2f, 0.5f, false).look == false);
+        CHECK(C::choose_look_or_step(0.45f, 3.f, 0.50f, 3.f, 0.2f, 0.5f, true).look == true);     // incumbent look keeps the margin
+        CHECK(C::choose_look_or_step(0.45f, 3.f, 0.50f, 3.f, 0.2f, 0.5f, false).look == false);    // the step is the incumbent
+        // through the graph
+        auto G = make_graph(30);
+        DoorPassage p;
+        p.set_clock(clock);
+        p.set_efe(0.2f, 0.5f);
+        p.note_robot(Eigen::Vector2f(0.f, 0.f), 0.25f);
+        p.start("door_5", Step::Cross);
+        offered(*G, "aff_door_5_approach"); place(*G, "aff_door_5_approach", 3.f, 0.f);
+        offered(*G, "aff_door_5");          place(*G, "aff_door_5", 2.f, 0.f);
+        gain(*G, "aff_door_5_approach", 0.40f, 3.f, 0.f);
+        gain(*G, "aff_door_5", 0.12f, 2.f, 0.f);                       // good estimate: little to learn
+        auto out = p.update(*G, nullptr, "room_1");
+        CHECK(out.required == "aff_door_5_approach");
+        gain(*G, "aff_door_5_approach", 0.17f, 3.f, 0.f);             // the estimate degrades: P(complete) falls...
+        gain(*G, "aff_door_5", 1.80f, 2.f, 0.f);                      // ...and the information to be had rises
+        out = p.update(*G, nullptr, "room_1");
+        CHECK(out.required == "aff_door_5");                          // the repositioning came out of the comparison
+        CHECK(out.event.has_value() and out.event->find("epistemic look") != std::string::npos);
+        CHECK(p.view().step == Step::Approach);                      // the passage is still at approach
+        executing(*G, "aff_door_5");
+        out = p.update(*G, nullptr, "room_1");
+        CHECK(out.required == "aff_door_5");
+        satisfied(*G, "aff_door_5");                                  // the look is done: its gain falls with the uncertainty
+        gain(*G, "aff_door_5", 0.f, 2.f, 0.f);
+        out = p.update(*G, nullptr, "room_1");
+        CHECK(out.required == "aff_door_5_approach");                 // back to the goal-directed step
+        // the approach is WITHDRAWN (the ab7 dead end) and the look is on offer: no waiting
+        auto G2 = make_graph(31);
+        DoorPassage q;
+        q.set_clock(clock);
+        q.set_efe(0.2f, 0.5f);
+        q.note_robot(Eigen::Vector2f(0.f, 0.f), 0.25f);
+        q.start("door_6", Step::Cross);
+        offered(*G2, "aff_door_6"); place(*G2, "aff_door_6", 2.f, 0.f); gain(*G2, "aff_door_6", 1.5f, 2.f, 0.f);
+        out = q.update(*G2, nullptr, "room_1");
+        CHECK(out.required == "aff_door_6");
+        // nothing worth looking at, approach withdrawn: the old wait
+        auto G3 = make_graph(32);
+        DoorPassage r;
+        r.set_clock(clock);
+        r.set_efe(0.2f, 0.5f);
+        r.start("door_8", Step::Cross);
+        out = r.update(*G3, nullptr, "room_1");
+        CHECK(out.required == "aff_door_8_approach");
+    }
+
     std::println("test_door_passage: {} checks, {} failures", checks, failures);
     return failures == 0 ? 0 : 1;
 }

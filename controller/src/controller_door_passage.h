@@ -83,6 +83,7 @@ public:
         attempts_ = 0;
         cross_room_.clear();
         just_started_ = true;
+        look_chosen_ = false;
         preempted_ = false;
         reached_door_ = false;
         opened_ = false;
@@ -129,6 +130,34 @@ public:
     {
         std::scoped_lock lk(m_);
         close_wait_ms_ = ms;
+    }
+    /// The price of distance in the passage's choice between its step and the door's epistemic look: the SAME λ (nats per
+    /// metre) and commitment margin (nats) the affordance selector uses (Controller.AffordanceLambdaCost / SwitchMargin).
+    void set_efe(float lambda_cost, float switch_margin)
+    {
+        std::scoped_lock lk(m_);
+        efe_lambda_ = std::max(0.0f, lambda_cost);
+        efe_margin_ = std::max(0.0f, switch_margin);
+    }
+    /// ★Task E — THE PASSAGE'S CHOICE BETWEEN ITS GOAL-DIRECTED STEP AND AN EPISTEMIC LOOK, on ONE scale (nats, the selector's
+    /// score  −G = value − λ·distance). Each side's `value` is what its producer publishes on the node's epistemic_gain: the
+    /// look's is the expected information gain on the door state (D-optimal on [s, w, h], detection-weighted), the step's is
+    /// its preference in nats times the probability it can be completed under the door belief's CURRENT σ — so a poor door
+    /// estimate lowers the step's value and raises the look's, and the choice falls out of the comparison: no "if degraded
+    /// go to…" rule. Doing nothing is a policy with score 0, which both must beat; the incumbent (whichever was chosen last
+    /// cycle) carries the selector's switch margin so the choice does not flap. nullopt value = not on offer.
+    struct Choice { bool look = false; float step_score = 0.f, look_score = 0.f; };
+    [[nodiscard]] static Choice choose_look_or_step(std::optional<float> step_value, float step_dist,
+                                                    std::optional<float> look_value, float look_dist,
+                                                    float lambda, float margin, bool look_is_incumbent)
+    {
+        Choice c;
+        constexpr float kStay = 0.0f;   // doing nothing: G = 0
+        c.step_score = step_value.has_value() ? *step_value - lambda * step_dist + (look_is_incumbent ? 0.f : margin) : kStay;
+        c.look_score = look_value.has_value() and *look_value > 0.f
+                           ? *look_value - lambda * look_dist + (look_is_incumbent ? margin : 0.f) : kStay;
+        c.look = c.look_score > std::max(c.step_score, kStay);
+        return c;
     }
     /// Steady-clock milliseconds, injectable for tests.
     void set_clock(std::function<std::uint64_t()> clock)
@@ -551,6 +580,60 @@ public:
         if (out.event.has_value()) last_event_ = *out.event;
         if (step_ == Step::Done) { note_ = "done"; return out; }
 
+        // ★Task E — a step that is not clearly the better policy yields to the door's epistemic look (aff_<door>, door_concept's
+        //   NBV on its [s, w, h] belief). Only BEFORE the robot is in the doorway: an approach, or an open/cross that is not on
+        //   offer (withdrawn). An executing open/cross is never interrupted — standing in a swing or a doorway is not a place
+        //   to go and look from.
+        const std::string rq = name_of(step_);   // the step as it stands NOW (the completion above may have advanced it)
+        const State sq = state_of(G, rq);
+        if (step_ == Step::Approach or ((step_ == Step::Open or step_ == Step::Cross) and sq != State::Offered and sq != State::Executing))
+        {
+            const std::string look = "aff_" + door_;
+            const State sl = state_of(G, look);
+            const auto gain_of = [&](const std::string& n) -> std::optional<float>
+            {
+                const auto nd = G.get_node(n);
+                if (not nd.has_value()) return std::nullopt;
+                const auto g = G.get_attrib_by_name<epistemic_gain_att>(nd.value());
+                return g.has_value() and std::isfinite(*g) ? *g : 0.0f;
+            };
+            const auto dist_to = [&](const std::string& n) -> float
+            {
+                if (not robot_.has_value()) return 0.0f;
+                const auto nd = G.get_node(n);
+                if (not nd.has_value()) return 0.0f;
+                const auto x = G.get_attrib_by_name<epistemic_target_x_m_att>(nd.value());
+                const auto y = G.get_attrib_by_name<epistemic_target_y_m_att>(nd.value());
+                if (not x.has_value() or not y.has_value() or not std::isfinite(*x) or not std::isfinite(*y)) return 0.0f;
+                return (*robot_ - Eigen::Vector2f(*x, *y)).norm();
+            };
+            const bool look_on = sl == State::Offered or sl == State::Executing;
+            const bool step_on = sq == State::Offered or sq == State::Executing;
+            const auto c = choose_look_or_step(step_on ? gain_of(rq) : std::nullopt, step_on ? dist_to(rq) : 0.0f,
+                                               look_on ? gain_of(look) : std::nullopt, look_on ? dist_to(look) : 0.0f,
+                                               efe_lambda_, efe_margin_, look_chosen_);
+            if (c.look != look_chosen_)
+            {
+                out.event = std::format("[door-passage] {}: {} {} (EFE: look {:+.3f} vs {} {:+.3f} nats) — {}", door_,
+                                        c.look ? "the epistemic look beats" : "the step beats the look", rq, c.look_score,
+                                        rq, c.step_score,
+                                        c.look ? "taking the look" : "back to the step");
+                last_event_ = *out.event;
+                // the claim on the one that lost is released by the caller, so the producer sees it Offered again
+                if (c.look ? sq == State::Executing : sl == State::Executing) preempted_ = true;
+                look_chosen_ = c.look;
+            }
+            if (c.look)
+            {
+                step_state_ = state_name(sl);
+                note_ = std::format("{} ({}) — EFE look", look, step_state_);
+                out.required = look;
+                return out;
+            }
+        }
+        else
+            look_chosen_ = false;
+
         out.required = name_of(step_);
         if (step_ == Step::Cross)
         {
@@ -688,6 +771,8 @@ private:
     bool seen_executing_ = false;
     bool just_started_ = false;
     bool preempted_ = false;
+    float efe_lambda_ = 0.2f, efe_margin_ = 0.5f;   ///< set_efe: the selector's λ (nats/m) and switch margin (nats)
+    bool look_chosen_ = false;    ///< the last EFE choice was the epistemic look, not the step (the incumbent)
     bool reached_door_ = false;   ///< approach satisfied (or a later step taken from it) in this passage
     bool opened_ = false;         ///< `open` satisfied in this passage
     int attempts_ = 0;
