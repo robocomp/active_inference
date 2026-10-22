@@ -149,6 +149,15 @@ std::pair<float, float> DoorBelief::predicted_column_extent(const DoorBeliefStat
     return {lo, hi};
 }
 
+float DoorBelief::hull_mismatch_var(const MaskBearings& mb) const
+{
+    if (not (std::isfinite(mb.lo) and std::isfinite(mb.hi))) return 0.0f;
+    const auto [hl, hh] = predicted_column_extent(state_, mb);
+    if (not (std::isfinite(hl) and std::isfinite(hh))) return 0.0f;
+    const float dW = (hh - hl) - (mb.hi - mb.lo);
+    return dW * dW / 12.0f;
+}
+
 void DoorBelief::accumulate_extra(const DoorBeliefState& s, const DoorFrame& frame,
                                   Eigen::Matrix<float, 4, 4>& Id, Eigen::Matrix<float, 4, 1>& bd) const
 {

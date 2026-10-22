@@ -599,6 +599,10 @@ public:
     // hook via a C++23 requires). Pulls w→tpl_w, h→tpl_h with precision 1/prior_{w,h}_std² each frame; s is
     // untouched (it carries only the broad temporal prior). This is what makes the strong size prior stick.
     [[nodiscard]] std::pair<float, float> predicted_column_extent(const DoorBeliefState& s, const MaskBearings& mb) const;
+    // Task W: the variance (px²) the mask-sides MIDPOINT must carry because a mask is a contiguous PART of the hull, not
+    // necessarily all of it — (hull width − mask width)²/12 at the CURRENT mean (uniform position of the part within the
+    // hull). 0 when a side is censored / the hull is off the camera. Called once per frame, before the Gauss-Newton loop.
+    [[nodiscard]] float hull_mismatch_var(const MaskBearings& mb) const;
     void accumulate_extra(const DoorBeliefState& s, const DoorFrame& frame,
                           Eigen::Matrix<float, 4, 4>& Id, Eigen::Matrix<float, 4, 1>& bd) const;
 

@@ -763,12 +763,7 @@ float DoorFit::run_inference(rc::DoorFitState& inst, const DoorObservation& obse
             //  (uniform), shared by both sides. A mask that IS the hull (ΔW → 0) keeps its full precision — no gate.
             //  Evaluated at the pre-update mean (not inside the GN loop): a state that narrows its hull to match the mask must
             //  not also earn a tighter likelihood for it.
-            if (const auto [hl, hh] = inst.ai2_belief.predicted_column_extent(inst.ai2_belief.state(), mb);
-                std::isfinite(hl) and std::isfinite(hh) and std::isfinite(mb.lo) and std::isfinite(mb.hi))
-            {
-                const float dW = (hh - hl) - (mb.hi - mb.lo);
-                mb.var_common += dW * dW / 12.0f / credit;
-            }
+            mb.var_common += inst.ai2_belief.hull_mismatch_var(mb) / credit;
             frame.bearings = mb;
         }
         // AIF "be-still-to-update" as CONTINUOUS PRECISION: a frame's authority to MOVE the mean is capped via the

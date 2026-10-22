@@ -253,7 +253,12 @@ public:
         f.phi_curve = old.phi_curve; f.matched_frames = old.matched_frames; f.phi_from_command = false;
         f.phi_last_t = std::chrono::steady_clock::time_point(std::chrono::nanoseconds(in_->t_steady_ns));
         if (const char* e = std::getenv("MIRROR_PHI")) {
-            f.phi_est = std::strtof(e, nullptr); f.phi_sigma = 0.035f;
+            {   // from_chars, not strtof: main() activates the machine's es_ES locale, where strtof("1.553") stops at the '.' and reads 1
+                const std::string_view sv = e;
+                float v = 0.0f;
+                if (std::from_chars(sv.data(), sv.data() + sv.size(), v).ec == std::errc{}) f.phi_est = v;
+            }
+            f.phi_sigma = 0.035f;
             f.phi_curve.clear();
             for (int i = 0; i <= 24; ++i)   // the crossing's curve: a 25-point grid with the weight on the opened angle
             { const float ph = 0.0f + i * (2.0944f / 24.0f); f.phi_curve.emplace_back(ph, std::exp(-0.5f * std::pow((ph - f.phi_est) / 0.035f, 2.0f))); }

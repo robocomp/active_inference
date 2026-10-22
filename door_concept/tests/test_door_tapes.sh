@@ -34,7 +34,7 @@
 #       every cycle after the switch (MIRROR_PHI=1.553: the leaf the crossing left open, 89 deg — the live log's
 #       "remembers its leaf from the crossing" — which the tape cannot carry: the actuator slice is not rebuilt). Before the fix the first small far mask (116 px against a 200 px predicted hull,
 #       midpoints 124 px = 14 σ apart) took it to 0.75 / 0.75 / 0.47 / 0.83: the sides-midpoint factor had no free coordinate
-#       left but w. (The approach offer's P(complete) is 0 below the body width and follows the aperture from there, see
+#       left but w. (The approach offer's P(complete) falls from ~1 to 0 between w 0.85 and 0.75 m (the body 0.70 + margin, at the pose sigma) and follows the aperture on the way back, see
 #       test_door_approach_pose §W, so a width that holds is an approach that stays offered.)
 # The tapes are 1.5 GB each and live outside the repo: DOOR_TAPES (default: the main checkout's crossing dir). Missing
 # tapes ⇒ SKIPPED (exit 0). Each replay takes ~2-4 min; all fifteen run in parallel (~15 cores).
