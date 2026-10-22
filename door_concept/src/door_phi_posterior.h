@@ -123,6 +123,22 @@ inline DoorwayRays select_doorway_rays(const Aperture& ap, const Eigen::Vector3f
 // the door's wall when both its ends lie within the field's own depth support [depth_lo, depth_hi] of the doorway plane
 // — the band in which the model already says the door's wall can be. No new level: a wall perpendicular to the door
 // (a corridor side) starts in that band and leaves it, so it stays.
+// The indices i of the polygon edges polygon[i] → polygon[i+1] that ARE the door's own wall (both ends inside the field's
+// depth band of the doorway plane) — the complement of room_walls_beside, one rule (Task D-C review M-4: the existence
+// channels' line of sight excludes exactly these, rc::occlusion::walls_block's explicit-edge overload).
+inline std::vector<std::size_t> door_wall_edges(const Aperture& ap, const std::vector<Eigen::Vector2f>& polygon,
+                                                float depth_lo, float depth_hi)
+{
+    std::vector<std::size_t> out;
+    const std::size_t n = polygon.size();
+    if (n < 3) return out;
+    const Eigen::Vector2f nrm = ap.across_u();
+    const auto in_band = [&](const Eigen::Vector2f& p) { const float d = nrm.dot(p - ap.wall_O); return d >= depth_lo and d <= depth_hi; };
+    for (std::size_t i = 0; i < n; ++i)
+        if (in_band(polygon[i]) and in_band(polygon[(i + 1) % n])) out.push_back(i);
+    return out;
+}
+
 inline std::vector<std::array<Eigen::Vector2f, 2>> room_walls_beside(const Aperture& ap,
                                                                      const std::vector<Eigen::Vector2f>& polygon,
                                                                      float depth_lo, float depth_hi)

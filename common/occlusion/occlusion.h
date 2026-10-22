@@ -112,4 +112,35 @@ inline bool walls_block(const Eigen::Vector2f& cam, const Eigen::Vector2f& targe
     return false;
 }
 
+// The same question with the target's OWN wall given EXPLICITLY: `excluded` lists the indices i of the polygon edges
+// polygon[i] → polygon[(i+1) % n] the target is cut in; every OTHER edge occludes, however close to the target it passes.
+// ★WHY (door_concept Task D-C, rtD1i): the distance skip above also skips a PERPENDICULAR wall that merely meets the target's
+// wall near it — DOOR_0's hinge jamb stands 7 cm from a partition, both partition faces fell inside the 0.30 m skip, and from
+// behind that partition the door's frame and leaf read visible and empty. An agent that knows which wall its object lies in
+// passes those edges here instead of a radius.
+inline bool walls_block(const Eigen::Vector2f& cam, const Eigen::Vector2f& target,
+                        const std::vector<Eigen::Vector2f>& polygon, const std::vector<std::size_t>& excluded)
+{
+    const std::size_t np = polygon.size();
+    if (np < 3)
+        return false;
+    const auto cross = [](const Eigen::Vector2f& p, const Eigen::Vector2f& q) { return p.x() * q.y() - p.y() * q.x(); };
+    const Eigen::Vector2f d = target - cam;
+    for (std::size_t i = 0; i < np; ++i)
+    {
+        if (std::ranges::find(excluded, i) != excluded.end())
+            continue;   // the target's own wall
+        const Eigen::Vector2f a = polygon[i];
+        const Eigen::Vector2f ab = polygon[(i + 1) % np] - a;
+        const float rxs = cross(d, ab);
+        if (std::abs(rxs) < 1e-9f)
+            continue;   // parallel
+        const float t = cross(a - cam, ab) / rxs;
+        const float u = cross(a - cam, d)  / rxs;
+        if (t > 1e-3f and t < 1.0f - 1e-3f and u > 0.0f and u < 1.0f)
+            return true;
+    }
+    return false;
+}
+
 }  // namespace rc::occlusion
