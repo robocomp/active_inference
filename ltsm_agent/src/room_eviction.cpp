@@ -413,6 +413,17 @@ std::optional<Mat::RTMat> RoomEviction::fuse_seam_through_aperture(const Candida
         ap = compose_cov(face_new.value(), inverse_cov(door_m.value()));
         how = "door faces";
     }
+    else if (not (cand.crossing_born or rc::room::is_proto(*live_, cand.new_room_id)))
+    {
+        // ★ THE APERTURE-AS-FRAME SEAM IS A HYPOTHESIS ABOUT THE NEW ROOM (Task S, round 2): it holds only for a room
+        //   born through this crossing. An established room has an arbitrary frame; there the aperture seam is wrong
+        //   and the mixture would reject a CORRECT chain. No provenance => the aperture carries no information about
+        //   T(new<-old) (infinite frame uncertainty): keep the chain.
+        qInfo().noquote() << QString::fromStdString(std::format(
+            "[eviction][seam] {} is not known to be crossing-born and has no entry face of {} -- robot chain kept",
+            cand.new_room_name, door.name()));
+        return std::nullopt;
+    }
     else
         // A proto's frame IS the aperture, so T(new<-old) is the inverse of the aperture pose in the old room. Its
         // pose comes from the door node (x = wall tangent, door_apertures.cpp:137); the sign of y is the side the
@@ -1034,6 +1045,7 @@ std::optional<Candidate> RoomEviction::promotion_candidate(const PromotionReadin
     c.promote    = false;
     c.remove_old = true;
     c.p_inside   = static_cast<float>(reading.p_inside);
+    c.crossing_born = true;   // it was read through the crossing evidence: its frame is the crossed aperture
     return c;
 }
 

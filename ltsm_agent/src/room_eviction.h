@@ -65,6 +65,10 @@ struct Candidate
     std::uint64_t old_door_id = 0;       ///< the crossed door on the old side (0 ⇒ nearest to the robot)
     std::uint64_t new_door_id = 0;       ///< its face on the new side (the entry mirror), 0 ⇒ none
     float p_inside = 0.f;                ///< the evidence the promotion was taken on (log only)
+    /// The new room was born THROUGH a crossing, so its frame is the crossed aperture (promotion_candidate sets it: the
+    /// room passed the crossing evidence). A room that is still a `proto` at eviction time counts too. Without either,
+    /// nothing says the new room's frame is the aperture and the aperture-as-frame seam is not used.
+    bool crossing_born = false;
 };
 
 /// What the promotion evidence reads for one proto-room, every cycle (log + decision).
