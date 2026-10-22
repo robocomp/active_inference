@@ -106,7 +106,7 @@ bool arrived(const PolicyInput& in, const Pose2& at)
 // progress(start, cont end) / (dur + cont duration)); ub_rate: the same over ALL continuations (no contact sweep).
 struct Cand { float v, w; float lps = 0.f, prog = 0.f, prog2 = 0.f, ub2 = 0.f, dur = 0.f, rate = 0.f, tau = 0.f, ub_rate = 0.f, lpc = 0.f; Pose2 end{}, plan_end{};
               bool has_cont = false; float cont_v = 0.f, cont_w = 0.f, cont_dur = 0.f;
-              float lpu = 0.f, blind1 = 0.f, blind_plan = 0.f, cprog = 0.f; bool elig = false, lpc_done = false; int conts = -1;
+              float lpu = 0.f, blind1 = 0.f, ded1 = 0.f, blind_plan = 0.f, cprog = 0.f; bool elig = false, lpc_done = false; int conts = -1;
               bool stop = false; };   // F2: the brake-to-rest command (0, 0) from a moving state — a release candidate only
 
 // Contact log-probability of (v, w) started at `from` with velocity (v0, w0); `end` receives the rest pose.
@@ -148,6 +148,28 @@ float lp_safe(const PolicyInput& in, const PolicyParams& p, const Pose2& from, f
 //   so 1 loses (a) to noise. FLAGGED CONSTANT 1.5: any value in [1.25, 2] gives identical unit-test and scenario results;
 //   1.0 does not.
 constexpr float kBlindPrice = 1.5f;
+//   ★ P1 (coordinator ruling 3/5) - THE SITUATIONAL RULE AS A PREFERENCE. "Only move backwards to unlock, unstall or in a tight
+//   manoeuvre" is not about what the camera has covered; in Active Inference it is a prior preference (the C term) over outcomes:
+//   reversing is dispreferred. Every metre travelled against the heading costs kReversePrice metres of progress credit, i.e.
+//   kReversePrice / progress_scale_m nats per reverse metre (-log p_pref), applied to EVERY candidate and every continuation with
+//   no branch: credited = progress - kBlindPrice * blind - kReversePrice * reverse. At 1 a reversal's own descent is worth exactly
+//   nothing (the rule's plain reading); a reversal still wins when nothing else descends (dead end, stall: the only Drive plan) or when
+//   what else descends costs more. FLAGGED constant 1.1: the plain reading is 1.0, but then a reversing arc and the in-place turn that
+//   reaches the same heading tie within one count of the quantised continuability term (test (i), everything seen, goal behind, open
+//   space, fails at 1.0 and 1.05, passes from 1.1). The cost of the preference: dead_end_release reaches 97/100 (100/100 with no
+//   dispreference) - see the round-3 report.
+constexpr float kReversePrice = 1.1f;
+float reverse_length(const std::vector<Pose2>& sw, const PolicyInput& in)
+{
+    if (not (in.camera_half_fov_rad >= 0.f)) return 0.f;
+    float L = 0.f;
+    for (std::size_t k = 1; k < sw.size(); ++k)
+    {
+        const Eigen::Vector2f d = sw[k].p - sw[k - 1].p;
+        L += std::max(0.f, -(d.x() * std::cos(sw[k - 1].yaw) + d.y() * std::sin(sw[k - 1].yaw)));
+    }
+    return L;
+}
 float blind_length(const std::vector<Pose2>& sw, const PolicyInput& in)
 {
     if (not (in.camera_half_fov_rad >= 0.f)) return 0.f;
@@ -307,7 +329,7 @@ float eval_conts(const PolicyInput& in, const PolicyParams& p, const Pose2& from
     if (best_rate) *best_rate = -kInf;
     if (c.arrived) return std::log((float(c.n) + 1.f) / (float(c.n) + 2.f));   // nothing left to continue: k = N
     if (c.sw.empty()) return std::log(1.f / (float(c.n) + 2.f));
-    struct Item { std::size_t i; float pf, pr, rt, dur, blind_len; };
+    struct Item { std::size_t i; float pf, pr, rt, dur, blind_len, ded; };
     std::vector<Item> items;
     std::vector<float> bl(c.sw.size(), 0.f);   // credited-progress deduction per continuation (Task R)
     auto blind_cred = [&](std::size_t i) { return bl[i]; };
@@ -316,10 +338,12 @@ float eval_conts(const PolicyInput& in, const PolicyParams& p, const Pose2& from
         const float pr = ref ? progress(in, *ref, c.sw[i].back()) : -kInf;
         const float dj = duration(c.sw[i], p);
         // ★ Task R: the rate is the CREDITED one — blind travel (the first leg's and this continuation's) earns nothing
-        const float bi = credited and in.camera_half_fov_rad >= 0.f ? kBlindPrice * blind_length(c.sw[i], in) : 0.f;
-        const float blind = ref ? (credited ? kBlindPrice * blind_base : 0.f) + bi : 0.f;
+        const bool cm = credited and in.camera_half_fov_rad >= 0.f;
+        const float bl_i = cm ? blind_length(c.sw[i], in) : 0.f;
+        const float bi = cm ? kBlindPrice * bl_i + kReversePrice * reverse_length(c.sw[i], in) : 0.f;   // deduction of this leg
+        const float blind = ref ? (credited ? blind_base : 0.f) + bi : 0.f;                              // blind_base = the first leg's
         bl[i] = blind;
-        items.push_back({i, progress(in, from, c.sw[i].back()) - bi, pr, ref ? (pr - blind) / (base_dur + dj) : -kInf, dj, bi / kBlindPrice});
+        items.push_back({i, progress(in, from, c.sw[i].back()) - bi, pr, ref ? (pr - blind) / (base_dur + dj) : -kInf, dj, bl_i, bi});
     }
     std::ranges::sort(items, std::greater{}, &Item::rt);
     // ★ Task R: a continuation counts toward continuability if it makes CREDITED progress (above the field's resolution when the camera
@@ -329,7 +353,7 @@ float eval_conts(const PolicyInput& in, const PolicyParams& p, const Pose2& from
     int k = 0; float bp = -kInf, br = -kInf, bpr = -kInf;
     for (const Item& it : items)
     {
-        const bool need_k = credit and it.blind_len > 0.f and in.field != nullptr ? it.pf > res_k : it.pf >= 0.f, need_b = ref != nullptr and (it.pr > bp or it.rt > br);
+        const bool need_k = credit and it.ded > 0.f and in.field != nullptr ? it.pf > res_k : it.pf >= 0.f, need_b = ref != nullptr and (it.pr > bp or it.rt > br);
         if (not (need_k or need_b)) continue;
         const float lps = log_p_no_contact_cells(*in.body, c.sw[it.i], in.returns, in.sigma_rel_xy, in.sigma_rel_yaw, in.body_geometry_sigma_m,
                                                  std::log1p(-p.risk_eps))
@@ -482,13 +506,17 @@ Decision decide(const PolicyInput& in0, const PolicyParams& p, ProgressMonitor* 
             // ★ Task R: the swept space the camera has not looked at carries the unseen-contact prior, in the same units as the
             //   seen cells' P(contact): lps_u = lps + (blind / (v_max T)) log(1 - kPriorBlocked); eligibility reads lps_u
             if (not stop and in.camera_half_fov_rad >= 0.f)
-                c.blind1 = blind_length(rollout(start, in.v_now, in.w_now, v, w, p.horizon_s, in.base, p.dt), in);
+            {
+                const auto sw1 = rollout(start, in.v_now, in.w_now, v, w, p.horizon_s, in.base, p.dt);
+                c.blind1 = blind_length(sw1, in);
+                c.ded1 = kBlindPrice * c.blind1 + kReversePrice * reverse_length(sw1, in);
+            }
             c.lpu = c.lps + c.blind1 / std::max(in.base.v_max * p.horizon_s, 1e-3f) * std::log1p(-UnseenContact::kPriorBlocked);
             c.elig = not stop and eligible(c.lpu, p);
             if (c.elig)
             {
                 c.prog = progress(in, start, c.end); ++d.eligible;
-                c.cprog = c.prog - kBlindPrice * c.blind1;   // credited: blind travel earns nothing
+                c.cprog = c.prog - c.ded1;   // credited: blind and reverse travel earn nothing
             }
             cands.push_back(c);
         }
@@ -517,7 +545,7 @@ Decision decide(const PolicyInput& in0, const PolicyParams& p, ProgressMonitor* 
         Pose2 second_end = c.end;
         std::pair<float, float> second_cmd{0.f, 0.f};
         float second_raw = -kInf;
-        c.lpc = eval_conts(in, p, c.end, ensure_conts(c), &start, c.dur, &second, &second_rate, &second_dur, &second_end, &second_cmd, c.blind1, &second_raw, drive_mode);
+        c.lpc = eval_conts(in, p, c.end, ensure_conts(c), &start, c.dur, &second, &second_rate, &second_dur, &second_end, &second_cmd, c.ded1, &second_raw, drive_mode);
         const bool credit = drive_mode and in.camera_half_fov_rad >= 0.f;
         // credited rates (blind_length): the candidate alone, or the candidate and its best continuation (already credited)
         const float rate1 = (credit ? c.cprog : c.prog) / c.dur;
@@ -663,6 +691,10 @@ Decision decide(const PolicyInput& in0, const PolicyParams& p, ProgressMonitor* 
             d.armed = mon->pending;
         }
         Decision dd = finish(Decision::Mode::Drive, *best_drive, "drive: " + words(best_drive->v, best_drive->w));
+        // P4 (reporting): did a plan that does NOT reverse also descend? (a reversal with none is a dead end / stall / tight spot)
+        if (best_drive->v < 0.f)
+            for (Cand* c : drive)
+                if (c->v >= 0.f) { ensure_lpc(*c); if (c->prog2 > 0.f) { dd.forward_alt = true; break; } }
         if (fov >= 0.f) dd.blind_frac = std::min(1.f, best_drive->blind_plan / std::max(in.base.v_max * p.horizon_s, 1e-3f));
         // ★ round 5: each phase's predicted END STATE (turn and descent), for the Navigator's early completion
         const float f0 = pfp ? pfp->at_length(in.pose.p) : NAN, f1 = pfp ? pfp->at_length(hold_e1.p) : NAN, f2 = pfp ? pfp->at_length(hold_end.p) : NAN;

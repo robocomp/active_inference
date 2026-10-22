@@ -105,23 +105,45 @@ int main()
         CHECK("g clutter behind (unseen): no reversal", d.mode == Decision::Mode::Drive and d.v >= 0.f);
         CHECK("g control: without the camera model the same scene reverses (the test discriminates)", d0.v < 0.f);
     }
-    { // (h) I3(ii): tight spot - a wall 0.26 m past the nose, goal to the left. Forward arcs and reverse arcs both descend.
-      // The choice follows the expected contact of the space swept: reverse over a SEEN trail is safe and wins; into the UNSEEN it
-      // pays the unseen-contact prior (P_u ~ 0.01 per full-speed horizon = risk_eps) and a forward arc wins; with room, forward.
-        auto scene = [&](float gap, bool trail) {
+    { // (h) I3(ii) + P1: with the reverse DISPREFERENCE, a forward arc that is eligible and descends beats reversing even in a tight
+      // spot (wall 0.26 m past the nose, goal to the left, a safe slow left arc exists: (h1) reverse over the SEEN way back loses);
+      // reversal wins only when nothing forward is eligible: flanks 0.32 m (no turn fits) AND a wall 0.30 m ahead (h2), seen or not.
+        auto scene = [&](bool boxed, bool trail) {
             Scene s;
-            for (float x = -1.2f; x <= 0.1f + 1e-4f; x += 0.05f) s.ret.push_back({{x, gap + 0.35f}, 0.01f, 1.f});
-            s.goal.p = {-1.5f, 0.f};
+            if (boxed)
+            {
+                for (auto& r : wall_x(-0.32f, -2.f, 2.f)) s.ret.push_back(r);
+                for (auto& r : wall_x(0.32f, -2.f, 2.f)) s.ret.push_back(r);
+                for (auto& r : wall_y(0.58f, -0.32f, 0.32f)) s.ret.push_back(r);
+                s.goal.p = {0.f, -3.f};
+            }
+            else
+            {
+                for (float x = -1.2f; x <= 0.1f + 1e-4f; x += 0.05f) s.ret.push_back({{x, 0.61f}, 0.01f, 1.f});
+                s.goal.p = {-1.5f, 0.f};
+            }
             V g = s.goal.p; s.field.build(kGrid, [](const V&) { return true; }, no_extra, std::span<const V>(&g, 1));
             if (trail) s.seen.mark({{0.f, -2.f}, kHalfPi}, 0.96f, 4.f);
             s.finish();
-            return std::pair{decide(s.in, s.pp), 0};
+            return decide(s.in, s.pp);
         };
-        const auto tight_seen = scene(0.26f, true).first, tight_unseen = scene(0.26f, false).first, roomy_seen = scene(0.60f, true).first;
-        print("h tight+seen", tight_seen); print("h tight+unseen", tight_unseen); print("h roomy+seen", roomy_seen);
-        CHECK("h tight, way back seen: reverse (safe, credited)", tight_seen.v < 0.f);
-        CHECK("h tight, way back unseen: forward (reversing would sweep unseen space)", tight_unseen.v > 0.f);
-        CHECK("h room ahead: forward", roomy_seen.v > 0.f);
+        const auto h1 = scene(false, true), h2s = scene(true, true), h2u = scene(true, false);
+        print("h1 wall ahead, goal left, way back seen", h1); print("h2 boxed in, seen", h2s); print("h2 boxed in, unseen", h2u);
+        CHECK("h1 an eligible forward arc beats a seen reversal (dispreference)", h1.v > 0.f);
+        CHECK("h2 boxed in (no turn, wall ahead): reverse over the seen way back", h2s.v < 0.f);
+        // unseen way back: the reversal sweeps unseen space (prior ~ risk_eps) so it is not a Drive plan; the Release machinery answers
+        // (it takes the move that gains continuability - a turn at P(contact) 0.39 < release_risk_max 0.5 - which is the pre-existing
+        // Release order, flagged in the report). What must hold: the unseen reversal is NOT chosen as a Drive.
+        CHECK("h2 boxed in, way back unseen: not a blind Drive reversal (the Release machinery answers)", h2u.mode == Decision::Mode::Release);
+    }
+    { // (i) P2: goal behind, open space, EVERYTHING SEEN (the whole circle already looked at): the dispreference alone keeps the
+      // robot from reversing - it turns and goes forward
+        Scene s; s.goal.p = {0.f, -3.f};
+        V g = s.goal.p; s.field.build(kGrid, [](const V&) { return true; }, no_extra, std::span<const V>(&g, 1));
+        for (float a = 0.f; a < 6.2831853f; a += 0.5f) s.seen.mark({{0.f, 0.f}, a}, 0.96f, 4.f);
+        s.finish();
+        const auto d = decide(s.in, s.pp); print("i all-seen", d);
+        CHECK("i goal behind, open, everything seen: no reverse", d.mode == Decision::Mode::Drive and d.v >= 0.f);
     }
     { // (f) R4: the facing term matters only inside the door's reach - a sideways approach arc far from the gap is not penalised
         Scene s;

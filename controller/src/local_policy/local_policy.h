@@ -111,7 +111,9 @@ struct Decision { enum class Mode { Drive, Release, Arrived, Stuck, Blind } mode
                   // prediction of its own (a monitored Drive with a finite descent, a monitored non-stop Release)
                   int judged = 0; bool armed = false;
                   // Task R: the chosen Drive plan's travel over space the camera has not looked at, as a fraction of one full-speed horizon
-                  float blind_frac = 0.f; };
+                  float blind_frac = 0.f;
+                  // Task R (reporting): a Drive that reverses while some non-reversing plan also descends (else: dead end / stall / tight)
+                  bool forward_alt = false; };
 
 // ★ ROUND 6 — STUCK IS A FAILED PREDICTION, judged on what happened. Each Drive decision predicts a two-step field
 //   descent dF_pred over its own duration tau_pred (the chosen candidate's duration + the continuation that set its
