@@ -202,6 +202,15 @@ std::optional<std::uint64_t> RoomEviction::twin(const DSR::Node &src, std::uint6
     // busy live view). Copied into memory it folds r<k>_floor's walls away, and the doors that hang from
     // them are drawn detached from the room -- memory's view exists to show exactly that structure.
     attrs.erase(collapsed_str.data());
+    // The proto MOUTH pose (rt_* + interaction_node_id on a room NODE, Task M) is expressed in the old LIVE room's frame
+    // and means nothing in memory; erase it so no stale pose lands there. Rooms only: affordances keep interaction_node_id.
+    if (src.type() == "room")
+    {
+        attrs.erase(rt_translation_str.data());
+        attrs.erase(rt_rotation_euler_xyz_str.data());
+        attrs.erase(rt_covariance_str.data());
+        attrs.erase(interaction_node_id_str.data());
+    }
 
     const int parent_level = [&]
     {
@@ -380,14 +389,24 @@ std::optional<ltsm::seam::Measured> pose_in_room(DSR::DSRGraph &G, std::uint64_t
 // (a pose without a covariance cannot be weighed, so it is not used).
 namespace
 {
-std::optional<ltsm::seam::Measured> mouth_pose_of(DSR::DSRGraph &G, std::uint64_t room_id)
+bool has_mouth_attrs(DSR::DSRGraph &G, std::uint64_t room_id)
+{
+    const auto n = G.get_node(room_id);
+    return n.has_value() and G.get_attrib_by_name<rt_translation_att>(n.value()).has_value();
+}
+
+/// `frame_room_id` = the room the caller needs the mouth expressed in (the old room): the mouth names its own frame in
+/// interaction_node_id, and a mouth in any other room's frame is not used.
+std::optional<ltsm::seam::Measured> mouth_pose_of(DSR::DSRGraph &G, std::uint64_t room_id, std::uint64_t frame_room_id)
 {
     const auto n = G.get_node(room_id);
     if (not n.has_value()) return std::nullopt;
     const auto t = G.get_attrib_by_name<rt_translation_att>(n.value());
     const auto r = G.get_attrib_by_name<rt_rotation_euler_xyz_att>(n.value());
     const auto c = G.get_attrib_by_name<rt_covariance_att>(n.value());
-    if (not (t.has_value() and r.has_value() and c.has_value())) return std::nullopt;
+    const auto f = G.get_attrib_by_name<interaction_node_id_att>(n.value());
+    if (not (t.has_value() and r.has_value() and c.has_value() and f.has_value())) return std::nullopt;
+    if (f.value() != frame_room_id) return std::nullopt;
     if (t->get().size() < 2 or r->get().size() < 3 or c->get().size() != 36) return std::nullopt;
     ltsm::seam::Measured m;
     m.pose << t->get()[0], t->get()[1], r->get()[2];
@@ -458,7 +477,7 @@ std::optional<Mat::RTMat> RoomEviction::fuse_seam_through_aperture(const Candida
                              kRememberedSigmaYaw * kRememberedSigmaYaw;
         how = "remembered passage";
     }
-    else if (const auto mouth = mouth_pose_of(*live_, cand.new_room_id); mouth.has_value())
+    else if (const auto mouth = mouth_pose_of(*live_, cand.new_room_id, cand.old_room_id); mouth.has_value())
     {
         // ★ THE MOUTH, MEASURED BY THE ROOM THAT BORE IT (Task M). A room born through a crossing carries its frame's
         //   pose in the old room (exact, with the aperture's covariance), so T(new<-old) is its inverse: no door node,
@@ -488,10 +507,18 @@ std::optional<Mat::RTMat> RoomEviction::fuse_seam_through_aperture(const Candida
         return std::nullopt;
     }
     else
+    {
+        // The recess-nuisance fallback. If a mouth pose exists but was not usable (a different frame room, or an
+        // incomplete set), say so loudly: that is a pose room_concept published and this seam is ignoring.
+        if (has_mouth_attrs(*live_, cand.new_room_id))
+            qWarning().noquote() << QString::fromStdString(std::format(
+                "[eviction][seam] {} carries a mouth pose that is NOT usable against {} (other frame room or incomplete) -- "
+                "FALLING BACK to the flagged recess nuisance (kRecessMean {} m)", cand.new_room_name, cand.old_room_name, kRecessMean));
         // A proto's frame IS the aperture, so T(new<-old) is the inverse of the aperture pose in the old room. Its
         // pose comes from the door node (x = wall tangent, door_apertures.cpp:137); the sign of y is the side the
         // robot is on.
         ap = aperture_seam(se2_of(door_in_old), door_m->cov, robot_xy, kRecessMean, kRecessSigma);
+    }
     (void)door_pose;
 
     // ── THE ROBOT CHAIN, WITH ITS OWN COVARIANCE ───────────────────────────────────────────────────────────────
