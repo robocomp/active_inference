@@ -54,6 +54,7 @@
 #include <dsr/api/dsr_api.h>
 #include <dsr/api/dsr_inner_eigen_api.h>
 
+#include "mask_azimuth_windows.h"   // rc::masks::rotate_azimuth_windows
 #include "mask_nodes.h"   // rc::masks::find_mask_nodes — the one camera→mask-node discovery
 
 namespace rc {
@@ -169,6 +170,12 @@ public:
         // Per-frame ego-motion (optical frame), written by the producer; empty/0 if absent.
         std::array<float, 6> cam_twist{};   // [vx,vy,vz,wx,wy,wz]
         float                frame_dt_s = 0.0f;
+        // RICOH only: the azimuth intervals (from,to), ROOM frame, CCW rad, the 360 detector actually RAN on this
+        // panorama frame (it runs K vertical strips in rotation). A bearing outside every window was NOT LOOKED AT:
+        // no evidence, and no absence either. EMPTY = UNKNOWN (no ricoh frame in this packet, or a producer that
+        // predates mask_azimuth_windows) => treat every bearing as looked at. Rotated by the same yaw as
+        // slice.azimuth_room_rad. An interval may straddle the +-pi seam (from > to numerically).
+        std::vector<Eigen::Vector2f> ricoh_windows;
     };
 
     // Constructs its OWN InnerEigenAPI (a fresh instance per call by design) so every consumer gets the
