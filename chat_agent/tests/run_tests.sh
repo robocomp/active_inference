@@ -61,3 +61,6 @@ g++ -std=c++23 -O0 -g -Wall -Wextra -Wno-missing-field-initializers -fPIC -o "$o
 else echo "test_chat_window: skipped (no DISPLAY)"; fi
 python3 test_canvas_stock.py
 rm -rf "$out"
+g++ -std=c++23 -O0 -g -Wall -Wextra -Wno-deprecated-literal-operator -fPIC -o "$out/test_topology" test_topology.cpp \
+    $(pkg-config --cflags Qt6Core | sed "s/-I/-isystem /g") $(pkg-config --libs Qt6Core)
+"$out/test_topology"

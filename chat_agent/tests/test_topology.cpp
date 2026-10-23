@@ -1,0 +1,75 @@
+// Topology pure side (src/topology.h): decode of ltsm's ltsm_topology summary and the cheapest route over it.
+#include "../src/topology.h"
+#include "../../ltsm_agent/src/topology_digest.h"
+
+#include <cassert>
+#include <print>
+
+using namespace rc::chat;
+using rc::ltsm::TopoPassage;
+using rc::ltsm::TopoRoom;
+
+namespace
+{
+TopoPassage passage(std::string id, std::string a, std::string b, double pa = 1, double pb = 1)
+{
+    TopoPassage p;
+    p.id = std::move(id); p.room_a = std::move(a); p.face_a = "n"; p.room_b = std::move(b); p.face_b = "s";
+    p.pass_alpha = pa; p.pass_beta = pb;
+    return p;
+}
+TopoPassageInfo info(std::string id, std::string a, std::string b, double pa = 1, double pb = 1)
+{
+    TopoPassageInfo p;
+    p.id = std::move(id); p.room_a = std::move(a); p.room_b = std::move(b); p.pass_alpha = pa; p.pass_beta = pb;
+    return p;
+}
+}   // namespace
+
+int main()
+{
+    // encode -> decode, field for field
+    {
+        auto p = passage("p0", "room_1", "room_2", 4.5, 1.25);
+        p.crossings = 3; p.open_alpha = 2; p.open_beta = 0.5; p.live_door = "door_1";
+        const auto t = decode_topology(rc::ltsm::encode_topology({{"room_1", true}, {"room_2", false}}, {p}));
+        assert(t.has_value());
+        assert(t->rooms.size() == 2 and t->rooms[0].name == "room_1" and t->rooms[0].live and not t->rooms[1].live);
+        assert(t->passages.size() == 1);
+        const auto& q = t->passages[0];
+        assert(q.id == "p0" and q.room_a == "room_1" and q.face_a == "n" and q.room_b == "room_2" and q.face_b == "s");
+        assert(q.crossings == 3 and q.pass_alpha == 4.5 and q.pass_beta == 1.25);
+        assert(q.open_alpha == 2 and q.open_beta == 0.5);
+        assert(q.live_door == "door_1");
+        const auto t2 = decode_topology(rc::ltsm::encode_topology({}, {passage("p1", "a", "b")}));
+        assert(t2.has_value() and not t2->passages[0].live_door.has_value());
+    }
+    assert(not decode_topology("not json").has_value());
+    assert(not decode_topology("[1]").has_value());
+
+    // chain room_1 - room_2 - room_3, plus an island
+    {
+        Topology t;
+        t.passages = {info("p0", "room_1", "room_2"), info("p1", "room_2", "room_3")};
+        t.rooms = {{"room_1", true}, {"room_2", false}, {"room_3", false}, {"room_9", false}};
+        assert((route(t, "room_1", "room_3") == std::vector<std::string>{"p0", "p1"}));
+        assert((route(t, "room_3", "room_1") == std::vector<std::string>{"p1", "p0"}));   // undirected
+        assert(route(t, "room_1", "room_9").empty());
+        assert(route(t, "room_1", "room_1").empty());
+    }
+    // parallel passages: the reliable one wins, whichever order they are listed in
+    {
+        Topology t;
+        t.passages = {info("bad", "a", "b", 1, 9), info("good", "a", "b", 9, 1)};
+        assert((route(t, "a", "b") == std::vector<std::string>{"good"}));
+        std::ranges::reverse(t.passages);
+        assert((route(t, "a", "b") == std::vector<std::string>{"good"}));
+    }
+    // cost is 1/E[p_pass]: two reliable hops beat one unreliable direct passage
+    {
+        Topology t;
+        t.passages = {info("direct", "a", "c", 1, 9), info("h1", "a", "b", 9, 1), info("h2", "b", "c", 9, 1)};
+        assert((route(t, "a", "c") == std::vector<std::string>{"h1", "h2"}));
+    }
+    std::println("test_topology: ok");
+}
