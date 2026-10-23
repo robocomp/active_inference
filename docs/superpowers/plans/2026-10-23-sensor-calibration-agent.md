@@ -109,7 +109,7 @@ converter.
   graph body→helios RT edge yaw equals nominal +1.84° (1e-9), and bpearl z equals nominal −0.005.
 - [ ] Step 2: Run it, expect FAIL (helios and bpearl are not overlaid).
 - [ ] Step 3: Implement. Parse with `std::from_chars`; write with the classic locale. Compose
-  `nominal ∘ correction`, never overwrite with absolute values. Keep `version` monotonic.
+  the correction in BODY-aligned axes (`R = R_corr·R_nom`, `t = t_nom + t_corr`; ruling 10-23: helios/bpearl are rot y=π, so a sensor-frame yaw would flip sign), never overwrite with absolute values. Keep `version` monotonic.
 - [ ] Step 4: Run it, expect PASS. Run the existing robot_concept tests.
 - [ ] Step 5: Commit `robot_concept: mount overlay covers all four head sensors, per robot+world file`.
 
