@@ -130,6 +130,13 @@ int main(int argc, char** argv)
         std::println("CameraIngestor(zed): base extrinsic rotated {:.4f} deg by refresh_graph_extrinsic()", ang);
         CHECK(std::abs(ang - dyaw_deg) <= 0.05);
         CHECK(not ing.refresh_graph_extrinsic());                       // and settles
+        // mountPublish on => refresh disabled: a further edge change must NOT move the base (no double application)
+        ing.set_live_graph_refresh(false);
+        const Eigen::Matrix3f R1 = ing.base_R();
+        CHECK(commit_yaw(*G, "zed", static_cast<float>(dyaw_deg * M_PI / 180.0)));
+        for (int i = 0; i < 20; ++i) { QCoreApplication::processEvents(); QThread::msleep(10); }
+        CHECK(not ing.refresh_graph_extrinsic());
+        CHECK((ing.base_R() - R1).cwiseAbs().maxCoeff() == 0.f);
     }
     std::println("{}", failures == 0 ? "PASS" : "FAILED");
     G.reset();

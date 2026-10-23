@@ -151,7 +151,7 @@ void CameraIngestor::apply_graph_extrinsic_(const Eigen::Matrix4d& M)
 
 bool CameraIngestor::refresh_graph_extrinsic()
 {
-    if (not inner_ or robot_frame_.empty() or not extrinsic_ok_) return false;
+    if (not live_refresh_ or not inner_ or robot_frame_.empty() or not extrinsic_ok_) return false;
     const auto T = inner_->get_transformation_matrix(camera_node_, robot_frame_, 0, "RT",
                                                      DSR::RT_API::TimeQuery::Nearest);
     if (not T.has_value()) return false;                       // chain momentarily unresolvable: keep the last

@@ -91,6 +91,11 @@ public:
     /// Returns true when the base changed. No-op before a successful bind_camera().
     bool refresh_graph_extrinsic();
 
+    /// false => refresh_graph_extrinsic() is a no-op. Set false when this agent is itself the writer of the
+    /// body->camera edge (ImageEdge.mountPublish): the edge then already holds nominal x learned correction, and
+    /// re-reading it as the BASE would apply mount_corr_ a second time on every publish.
+    void set_live_graph_refresh(bool on) noexcept { live_refresh_ = on; }
+
     /// MAIN THREAD. The extrinsic half of bind_camera() on its own (reads cam<-robot, applies it, sets
     /// extrinsic_ok_); bind_camera() calls it. Public so the graph->extrinsic path is testable without a
     /// camera stream (room_concept/tests/lidar_mount_edge_live_test.cpp).
@@ -209,6 +214,7 @@ private:
     std::shared_ptr<DSR::DSRGraph> G_;
     std::string camera_node_;
     std::string robot_frame_;
+    bool live_refresh_ = true;
     std::unique_ptr<DSR::InnerEigenAPI>      inner_;            // main-thread-owned (see refresh_graph_extrinsic)
     Eigen::Matrix4d                          graph_cam_T_robot_ = Eigen::Matrix4d::Zero();   // last graph read
     /// Graph extrinsic -> base (+ configured boresight), shared by bind_camera and refresh_graph_extrinsic.

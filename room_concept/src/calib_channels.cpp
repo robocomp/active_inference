@@ -86,6 +86,17 @@ void CalibChannels::place_triple_points_in_room(rc::ImageEdgeObs &obs,
     }
 }
 
+// With ImageEdge.mountPublish this agent WRITES body->camera as nominal x learned correction, so re-reading that edge as the
+// base would apply the correction twice (compounding per publish): the live refresh is off in that case.
+void CalibChannels::apply_refresh_policy(rc::CameraIngestor& ing, const std::string& name) const
+{
+    ing.set_live_graph_refresh(not params.IMAGE_EDGE_MOUNT_PUBLISH);
+    if (params.IMAGE_EDGE_MOUNT_PUBLISH)
+        qInfo().noquote() << QString("[imgedge] '%1': live graph-extrinsic refresh DISABLED because ImageEdge.mountPublish is on "
+                                     "(this agent writes the body->camera edge and already holds the composition)")
+                                 .arg(QString::fromStdString(name));
+}
+
 void CalibChannels::pump_calib_channels()
 {
     const auto res = room_concept_.get_last_result();
@@ -98,6 +109,7 @@ void CalibChannels::pump_calib_channels()
         {
             if (not ch.ingestor->bind_camera(params.LIDAR_ROBOT_FRAME)) continue;
             ch.bound = true;
+            apply_refresh_policy(*ch.ingestor, ch.name);
             ch.source->set_room_polygon(room_polygon_);
             auto ic = ch.source->config();
             ic.room_height = params.room_height;
@@ -304,6 +316,7 @@ void CalibChannels::pump_image_edges()
         if (room_polygon_.size() < 3) return;
         if (not camera_ingestor_->bind_camera(params.LIDAR_ROBOT_FRAME)) return;
         image_edge_bound_ = true;
+        apply_refresh_policy(*camera_ingestor_, params.IMAGE_EDGE_CAMERA);
         image_edge_source_->set_room_polygon(room_polygon_);
         // The objects the room currently believes in, so the extraction can explain away wall
         // samples they stand in front of. Refreshed each tick below, not only at bind: furniture
