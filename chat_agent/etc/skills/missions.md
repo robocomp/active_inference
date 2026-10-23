@@ -1,7 +1,7 @@
 ---
 description: how to write a mission (multi-step, conditional or return-trip task) in the robot's mission language
 ---
-<!-- form: TEXT (eval 2026-10-23, tests/check_llm_missions.py, 24 cases x3, Orin): qwen3.8 text 63/72 = json 63/72; qwen3-vl:8b text 32/72, json 48/72; gemma4:26b text 60/72. Text >= JSON-2, so text. Best 87.5%, under the 90% gate. -->
+<!-- form: TEXT (eval 2026-10-23, tests/check_llm_missions.py, 24 cases x3, Orin): qwen3.8 text 63/72 = json 63/72; qwen3-vl:8b text 32/72, json 48/72; gemma4:26b text 60/72. Text >= JSON-2, so text. Best 87.5%, under the 90% gate. --> Models fence their output in ``` blocks: the planner must strip code fences before parsing. Re-graded 2026-10-23 (room_2 cases accept ask: or bind+$var, twice needs exactly 2 crossings): see task-7-report.
 Output ONLY the mission text, nothing else. If the request is unclear, output one line: `ask: <question>`.
 Use only names from the STATE (doors, rooms, objects). Never invent a name.
 

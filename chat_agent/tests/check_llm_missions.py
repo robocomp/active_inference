@@ -121,6 +121,8 @@ def check(reply):
 
 
 FENCED = [0]
+FENCED_PROSE = [0]   # fenced AND text outside the fence
+UNFENCED_PROSE = [0]   # no fence, but the reply does not start with mission / ask: / {
 
 
 def unfence(reply):
@@ -128,7 +130,11 @@ def unfence(reply):
     m = re.search(r"```[a-z]*\n(.*?)(```|\Z)", reply, re.S)
     if m:
         FENCED[0] += 1
+        if (reply[:m.start()] + reply[m.end():]).strip():
+            FENCED_PROSE[0] += 1
         return m.group(1).strip()
+    if not re.match(r"\s*(mission\b|ask:|\{)", reply, re.I):
+        UNFENCED_PROSE[0] += 1
     return reply.strip()
 
 
@@ -162,8 +168,8 @@ def explores_bound(L):
     return [(i, a) for i, a in of(L, "explore") if a.get("room", "").startswith("var:") and a["room"][4:] in b]
 
 
-def returns_after(L, k, home="room_1"):
-    """a way back after step k: a later cross with expect=<home> / any later cross of a door, or go_to anchor:."""
+def returns_after(L, k):
+    """a way back after step k: any later cross, or a later go_to anchor:."""
     return any(o == "cross" or (o == "go_to" and a.get("to", "").startswith("anchor:"))
                for o, a in L[k + 1:])
 
@@ -177,13 +183,20 @@ def visit_room(L):
     return bool(rep) and returns_after(L, rep[0])
 
 
+def names_room_2(L):
+    """room_2 is not in the STATE (no other rooms, none remembered): naming it as a node is an invented name."""
+    return any("node:room_2" in v for _, a in L for v in a.values())
+
+
 def visit_named_room(L):
-    """'room_2' is not in the STATE: either bind-and-explore, or explore room_2 itself after a cross."""
-    cr = crosses(L)
-    if not cr:
-        return False
-    ex = [i for i, a in of(L, "explore") if a.get("room") in ("node:room_2",) or a.get("room", "").startswith("var:")]
-    return bool(ex) and returns_after(L, ex[0])
+    """ask:, or cross with bind= then explore $var, then a way back; never `explore room_2`."""
+    ex = explores_bound(L)
+    return not names_room_2(L) and bool(ex) and returns_after(L, ex[0][0])
+
+
+def wait_in_new_room(L):
+    w = [i for i, a in of(L, "wait") if num(a, "s") == 30]
+    return not names_room_2(L) and bool(bound(L)) and bool(w) and returns_after(L, w[0])
 
 
 def single(L, op, **want):
@@ -209,13 +222,12 @@ CASES = [
      lambda L: bool(crosses(L, "door_1")) and visit_room(L), False),
     ("paraphrase ES 2", "Cruza door_1, mira qué hay en la otra sala y regresa.",
      lambda L: bool(crosses(L, "door_1")) and visit_room(L), False),
-    ("explore room_2 and back (EN)", "Explore room_2 and come back.", visit_named_room, False),
-    ("explore room_2 and back (ES)", "Explora room_2 y vuelve.", visit_named_room, False),
+    ("explore room_2 and back (EN)", "Explore room_2 and come back.", visit_named_room, "either"),
+    ("explore room_2 and back (ES)", "Explora room_2 y vuelve.", visit_named_room, "either"),
     ("cross door_1 twice", "Cross door_1 twice.",
-     lambda L: len(crosses(L, "door_1")) == 2 or any(o == "repeat" for o, _ in L) and len(crosses(L, "door_1")) >= 1, False),
-    ("go to room_2, wait 30s, back", "Go to room_2, wait 30 seconds, and come back.",
-     lambda L: bool(crosses(L)) and any(num(a, "s") == 30 for _, a in of(L, "wait"))
-     and (lambda w: bool(w) and returns_after(L, w[0][0]))(of(L, "wait")), False),
+     lambda L: len(crosses(L, "door_1")) == 2 and not any(o == "repeat" for o, _ in L)
+     or any(o == "repeat" and num(a, "times") == 2 for o, a in L) and len(crosses(L, "door_1")) == 1, False),
+    ("go to room_2, wait 30s, back", "Go to room_2, wait 30 seconds, and come back.", wait_in_new_room, "either"),
     ("cross door_0 and report", "Cross door_0 and tell me what you see on the other side.",
      lambda L: bool(crosses(L, "door_0")) and any(i > crosses(L, "door_0")[0][0] for i, _ in of(L, "report")), False),
     ("report in current room", "Tell me what is in this room.",
@@ -266,7 +278,9 @@ def main():
             t0 = time.monotonic()
             reply = unfence(ask_model(system, request))
             lat.append(time.monotonic() - t0)
-            if want_ask:
+            if want_ask == "either" and is_ask(reply):
+                good, why = True, ""
+            elif want_ask is True:
                 good, why = is_ask(reply), "no ask: " + reply.strip().replace("\n", " | ")[:120]
             elif is_ask(reply):
                 good, why = False, "asked instead: " + reply.strip()[:100]
@@ -282,7 +296,8 @@ def main():
     ls = sorted(lat)
     print(f"\nmodel {MODEL} form {FORM}; system {len(system)} chars; STATE {len(STATE_TEXT)} chars")
     print(f"latency: median {statistics.median(ls):.2f} s, mean {statistics.mean(ls):.2f} s, max {ls[-1]:.2f} s")
-    print(f"replies wrapped in a ``` fence: {FENCED[0]}/{len(results)}")
+    print(f"replies wrapped in a ``` fence: {FENCED[0]}/{len(results)} (of those, with prose outside it: {FENCED_PROSE[0]}); "
+          f"unfenced with prose first: {UNFENCED_PROSE[0]}/{len(results)}")
     print(f"{sum(results)}/{len(results)} passed")
     return 0 if all(results) else 1
 
