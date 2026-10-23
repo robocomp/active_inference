@@ -892,7 +892,24 @@ void ControllerSession::drive_with_policy(const ControllerRobotPose &robot_pose,
                 feedback_node_id_ = contract.feedback_node_id != 0 ? contract.feedback_node_id : last_target_info_->parent_node_id;
                 // Live fix 4 ruling 1: the orient goes to its standpoint first (a Place with yaw); its protocol (look / timeout)
                 // runs only once there — on the way, an incidental heading match is not the look
-                const bool at_standpoint = (cpose.pos - last_target_info_->room_pos).norm() <= gp.tol_xy;
+                // ★ Task O: the standpoint is the PUBLISHED target (our repair had put it 0.02 m from the robot, 0.18 m short of the
+                //   offer), and "there" is the affordance's own precondition probability when it publishes one (door_reach_prob on the
+                //   feedback node, completed at the level its sibling approach contract states), else the distance tolerance.
+                ControllerTargetInfo orient_t = *last_target_info_;
+                if (last_raw_target_pos_.has_value()) orient_t.room_pos = *last_raw_target_pos_;
+                std::optional<rc::policy::OrientPrecondition> pre;
+                if (feedback_node_id_ != 0)
+                    if (const auto fb = graph_->get_node(feedback_node_id_); fb.has_value())
+                        if (const auto pr = graph_->get_attrib_by_name<door_reach_prob_att>(fb.value()); pr.has_value() and pr.value() >= 0.f)
+                        {
+                            const std::string nm = last_target_info_->node_name;
+                            const auto cut = nm.rfind('_');
+                            if (cut != std::string::npos)
+                                if (const auto sib = graph_->get_node(nm.substr(0, cut) + "_approach"); sib.has_value())
+                                    for (const auto &c : rc::affordance::read_contract(sib.value(), parent_type).goal)
+                                        if (c.attr == "door_reach_prob") pre = rc::policy::OrientPrecondition{.p = pr.value(), .complete_at = c.value};
+                        }
+                const bool at_standpoint = rc::policy::orient_settled(cpose, orient_t, gp, pre);
                 note_why(rc::why::Cause::Orienting, std::format("orient '{}': {}", last_target_info_->node_name,
                                                                 at_standpoint ? "turning in place" : "driving to its standpoint"));
                 if (at_standpoint and step_orient(robot_pose, path_controller, obstacle_tracker, motion_commander, time_source,
@@ -902,8 +919,8 @@ void ControllerSession::drive_with_policy(const ControllerRobotPose &robot_pose,
                     policy_reset();
                     return;
                 }
-                if (const auto spec = rc::policy::goal_for_target(*last_target_info_, cpose, std::nullopt, rc::policy::GoalMode::Orient,
-                                                                  false, gp))
+                if (const auto spec = rc::policy::goal_for_target(orient_t, cpose, std::nullopt, rc::policy::GoalMode::Orient,
+                                                                  false, gp, pre))
                     policy_tick(*spec, std::format("orient {}", last_target_info_->node_name), cpose, obstacle_tracker,
                                 motion_commander, now);
                 return;

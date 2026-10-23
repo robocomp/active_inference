@@ -382,6 +382,28 @@ int main()
         CHECK("orient there: a Heading goal, turning in place", g2 and g2->goal.kind == Goal::Kind::Heading and near(*g2->goal.yaw, 1.5708f)
               and (g2->goal.p - there.pos).norm() < 1e-6f);
     }
+    // ---- 4i'. Task O (gold9 leg 1): the orient completes on the AFFORDANCE's precondition probability, not on a place tolerance.
+    //   The robot 0.18 m short of the open target (inside tol_xy), facing 0 deg; door_reach_prob (P(in band) x P(facing)) = 0.75
+    //   < the approach contract's 0.90 => the goal keeps pulling to the target pose (Place WITH yaw, tolerance shrunk
+    //   continuously by P/complete_at); at P >= complete_at => Heading (turn in place); at the target with P high => immediately.
+    {
+        ControllerTargetInfo t; t.room_pos = {-0.57f, 2.86f}; t.yaw_rad = 1.56f;
+        GoalAdapterParams prm; prm.tol_xy = 0.25f;
+        const ControllerRobotPose shy{.pos = {-0.58f, 2.68f}, .theta = 0.f};
+        const OrientPrecondition low{.p = 0.75f, .complete_at = 0.90f}, high{.p = 0.95f, .complete_at = 0.90f};
+        const auto g1 = goal_for_target(t, shy, std::nullopt, GoalMode::Orient, false, prm, low);
+        CHECK("orient O: 0.18 m short, P 0.75 < 0.90 -> Place goal at the target pose with its yaw",
+              g1 and g1->goal.kind == Goal::Kind::Place and (g1->goal.p - t.room_pos).norm() < 1e-6f and g1->goal.yaw and near(*g1->goal.yaw, 1.56f));
+        CHECK("orient O: the arrival tolerance shrinks with P (the pull survives being inside tol_xy)",
+              g1 and g1->goal.tol_xy < 0.18f and g1->goal.tol_xy > 0.f);
+        const auto g2 = goal_for_target(t, shy, std::nullopt, GoalMode::Orient, false, prm, high);
+        CHECK("orient O: P >= completion -> Heading, turning in place", g2 and g2->goal.kind == Goal::Kind::Heading);
+        const ControllerRobotPose on{.pos = t.room_pos, .theta = 0.f};
+        const auto g3 = goal_for_target(t, on, std::nullopt, GoalMode::Orient, false, prm, high);
+        CHECK("orient O: at the target with P high -> Heading immediately", g3 and g3->goal.kind == Goal::Kind::Heading);
+        CHECK("orient O: settled predicate", orient_settled(shy, t, prm, high) and not orient_settled(shy, t, prm, low)
+              and orient_settled(shy, t, prm, std::nullopt) and not orient_settled({.pos = {0.f, 0.f}, .theta = 0.f}, t, prm, std::nullopt));
+    }
     // ---- 4j. Live fix 4 ruling 4: a stale-anchor wait that has ARRIVED (facing where the anchor was published) and stays
     //   unpublished for one plan duration hands the cross back so the passage repositions (back to approach).
     {
