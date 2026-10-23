@@ -22,7 +22,7 @@
  *   unknown optional field is ignored; a field listed in `requires_fields` that this build does not know rejects;
  *   `v` must equal kVersion.
  *
- * ★ v1 RESERVATIONS (§7.4): step ids, `bind`, Ref::Kind::Var and `prefs` are in the format so adding bindings,
+ * ★ v1 RESERVATIONS (§7.4): step ids, `prefs` and (beyond `cross`/node refs) bindings are in the format so adding bindings,
  *   for_each and preferences later does not change the wire; v1's validate() refuses them as `unsupported:<name>`.
  *
  * ★ TERMINATION IS CHECKED BEFORE RUNNING: every loop carries a budget (repeat-until needs budget_s, explore needs
@@ -66,7 +66,7 @@ struct Ref
         Passage,   ///< "the live door of the room I am in that faces this passage" — resolved by the controller on arrival
         Anchor,    ///< a named pose: in Mission::anchors, or captured by an earlier `anchor` step
         Pose,      ///< an explicit pose in a room frame
-        Var,       ///< RESERVED (bindings, §7.2 L1): refused by v1
+        Var,       ///< a name bound by an earlier `cross … bind=NAME`; accepted where a node is (v1: rooms only)
     };
     Kind kind = Kind::Node;
     std::string name{};   ///< node name · passage id · anchor name · variable name
@@ -113,7 +113,7 @@ struct Step
     std::map<std::string, Value, std::less<>> args{};
     std::vector<Step> steps{};   ///< body of a composite op
     OnFail on_fail{};
-    std::optional<std::string> bind{};   ///< RESERVED (§7.2 L1): refused by v1
+    std::optional<std::string> bind{};   ///< names the room this step lands in; v1 accepts it on `cross` only
 
     bool operator==(const Step&) const = default;
 
@@ -147,7 +147,7 @@ struct Mission
 /// Why a mission was refused. status() is what the controller puts after `failed|` on the edge.
 struct Error
 {
-    std::string code{};    ///< malformed · unsupported_version · unsupported · missing_field · bad_type · bad_value · duplicate_id
+    std::string code{};    ///< malformed · unsupported_version · unsupported · missing_field · bad_type · bad_value · duplicate_id · unbound · unbound
     std::string name{};    ///< unsupported: what was not supported (fly · ref:region · pred:battery_low · bind · speed)
     std::string where{};   ///< "step 2.1 door"
     std::string text{};    ///< for people and logs
@@ -265,6 +265,9 @@ inline const std::vector<OpSpec>& ops()
          .check = check_wait},
         {.name = "say", .claims = kNone, .instant = true, .has_body = false,
          .fields = {{.name = "text", .type = String, .required = true, .positional = true}}},
+        // What the mission found, for the reply (the model reads it back): free text, no resource, instant.
+        {.name = "report", .claims = kNone, .instant = true, .has_body = false,
+         .fields = {{.name = "text", .type = String, .required = true, .positional = true}}},
         {.name = "anchor", .claims = kNone, .instant = true, .has_body = false,
          .fields = {{.name = "name", .type = String, .required = true, .positional = true}}},
         {.name = "move", .claims = kBase, .instant = false, .has_body = false,
@@ -363,7 +366,7 @@ public:
     }
 
 private:
-    std::set<std::string, std::less<>> ids_, anchors_;
+    std::set<std::string, std::less<>> ids_, anchors_, vars_;   // vars_: `bind` names, in pre-order
 
     std::optional<Error> step(const Step& s)
     {
@@ -371,7 +374,7 @@ private:
         if (not ids_.insert(s.id).second) return err("duplicate_id", s, "", "step ids must be unique");
         const OpSpec* spec = op_spec(s.op);
         if (spec == nullptr) return unsupported(s.op, s);
-        if (s.bind.has_value()) return unsupported("bind", s);
+        if (s.bind.has_value() and s.op != "cross") return unsupported("bind", s);   // only a cross binds (the room it lands in)
         for (const auto& f : spec->fields)
             if (auto e = field(s, f, s.args); e.has_value()) return e;
         if (spec->has_body and s.steps.empty()) return err("bad_value", s, "steps", s.op + " needs a body");
@@ -380,6 +383,7 @@ private:
             return err("bad_value", s, "on_fail", "retry needs >= 1");
         if (spec->check != nullptr)
             if (auto e = spec->check(s); e.has_value()) return e;
+        if (s.bind.has_value()) vars_.insert(*s.bind);   // visible to later steps only, never to its own fields
         if (s.op == "anchor") anchors_.insert(*s.string("name"));   // defined from here on, in execution order
         return steps(s.steps);
     }
@@ -404,7 +408,13 @@ private:
 
     std::optional<Error> ref(const Step& s, const FieldSpec& f, const rc::mission::Ref& r)
     {
-        if (r.kind == Ref::Kind::Var) return unsupported("var", s);
+        if (r.kind == Ref::Kind::Var)
+        {
+            if ((f.ref_kinds & kNode) == 0) return unsupported("var", s);   // a variable only stands for a node
+            if (not vars_.contains(r.name))
+                return err("unbound", s, f.name, "$" + r.name + " is not bound by an earlier step");
+            return std::nullopt;
+        }
         if ((f.ref_kinds & kind_bit(r.kind)) == 0) return err("bad_value", s, f.name, "this kind of reference is not accepted here");
         if (r.kind == Ref::Kind::Passage and r.from.empty())
             return err("missing_field", s, f.name, "a passage reference needs `from`");

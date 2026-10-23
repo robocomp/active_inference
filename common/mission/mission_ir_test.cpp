@@ -92,6 +92,20 @@ int main()
         CHECK(again.has_value() and again.value() == m);
     }
 
+    // ── bind / $NAME survive the JSON round trip ──────────────────────────────────────────────────────────────────
+    {
+        const auto b = decode_json(R"({"v":1,"steps":[
+          {"id":"1","op":"cross","door":{"node":"door_1"},"bind":"next"},
+          {"id":"2","op":"explore","room":{"var":"next"},"budget_s":10},
+          {"id":"3","op":"report","text":"objects here"}]})");
+        CHECK(b.has_value());
+        if (b.has_value())
+        {
+            const auto again = decode_json(encode_json(b.value()));
+            CHECK(again.has_value() and again.value() == b.value());
+        }
+    }
+
     // ── Resources come from the registry as a SET (one owner per resource; §7.4 point 3, §7.6) ─────────────────
     CHECK(op_spec("cross") != nullptr and op_spec("cross")->claims == kBase and not op_spec("cross")->instant);
     CHECK(op_spec("wait") != nullptr and op_spec("wait")->claims == kBase);     // holding still is owning the base
