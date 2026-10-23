@@ -179,15 +179,17 @@ Every sweep or frame feeds every factor. The Jacobian plus the noise model decid
   R, so stills dominate naturally. PlaceCells collapse repeat views.
 - **Trajectory factors** (Helios yaw vs chassis, Helios x/y, clock τ):
   - A ring buffer of ~30 s of keyframes: sweep, odometry + IMU accumulated since the previous keyframe, stamps.
-  - Each new keyframe forms the pair, among the last K, of maximum information per DoF, so a whole turn becomes
-    one piece. The thesis lost a hairpin's 9.9 → 0.64 information units with 0.20 rad cuts.
+  - Each new keyframe forms the pair, among the last K, of maximum information per DoF. Lever information of a
+    piece is ∝ 4 sin²(dθ/2), so turns are never CHOPPED into small pieces (the thesis lost a hairpin's
+    9.9 → 0.64 units with 0.20 rad cuts). A π turn as one pair and as two π/2 pairs carry equal signal, so the
+    segmentation is whatever the noise model makes optimal (ruling 10-23; "one pair" was the wrong target).
   - Keyframes used in a pair are consumed, so nothing is counted twice.
   - Keyframe spacing is a compute budget. Test that the posterior does not change when it does.
 - **Storage.** Per-DoF accumulated evidence, plus a small per-episode summary log for Phase 6 change detection.
 
 Test: on a synthetic trajectory (straight 5 m, a π hairpin, a 30 s stop), check the following:
 - yaw information comes ≥90 % from the straight;
-- lever information comes ≥90 % from the hairpin, as one pair;
+- lever information comes ≥90 % from the hairpin, is ≥0.9 of the best achievable segmentation and ≥5× the 0.20-rad chopping, at 0.1 s spacing and odo_sigma_per_rad ∈ {0.001, 0.005};
 - floor and static-alignment information comes mostly from the stop;
 - halving or doubling the keyframe spacing changes each posterior mean by <0.1σ.
 
