@@ -62,9 +62,9 @@ static void test_compose_helios_yaw_bpearl_z()
 
     const Mount b = compose(kNomT, kNomR, p.rows.at("bpearl"));
     CHECK(std::abs(b.t[2] - (kNomT[2] - 0.005)) < 1e-12);       // z equals nominal - 0.005 (1e-9)
-    CHECK(b.rpy == kNomR);
+    CHECK(b.rpy == kNomR);                                      // zero correction keeps nominal verbatim
     // documented stored triple: Ry(pi)*yaw a is re-extracted as (pi, 0, pi - a), an EQUIVALENT rotation
-    CHECK(std::abs(std::abs(h.rpy[0]) - kPi) < 1e-9 and std::abs(h.rpy[1]) < 1e-9 and std::abs(h.rpy[2] - (kPi - 0.0321140)) < 1e-9);                                      // zero correction keeps nominal verbatim
+    CHECK(std::abs(std::abs(h.rpy[0]) - kPi) < 1e-9 and std::abs(h.rpy[1]) < 1e-9 and std::abs(h.rpy[2] - (kPi - 0.0321140)) < 1e-9);
 }
 
 static void test_inverse_and_format()

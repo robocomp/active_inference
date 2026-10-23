@@ -2349,13 +2349,14 @@ std::string SpecificWorker::mount_overlay_path() const
 void SpecificWorker::apply_mount_overlay()
 {
 	namespace mo = rc::mount;
-	auto bn = G->get_node("body");
-	if (not bn.has_value()) { qWarning() << "[mount] overlay: no body node"; return; }
-	auto rt = G->get_rt_api();
-	if (not rt) return;
+	if (not G->get_node("body").has_value()) { qWarning() << "[mount] overlay: no body node"; return; }
+	// ★ The callables are STORED (persist reuses them at shutdown): they capture `this` only and re-fetch
+	//   the body node and the RT api on every call. Never capture a stack local here.
 	const mo::EdgeIO io{
-		[&](const std::string& s) -> std::optional<mo::Mount>
+		[this](const std::string& s) -> std::optional<mo::Mount>
 		{
+			auto bn = G->get_node("body");
+			if (not bn.has_value()) return std::nullopt;
 			auto cn = G->get_node(s);
 			if (not cn.has_value()) return std::nullopt;                // ALWAYS check (CLAUDE.md)
 			const auto e = G->get_edge(bn.value().id(), cn.value().id(), "RT");
@@ -2368,10 +2369,12 @@ void SpecificWorker::apply_mount_overlay()
 			for (int i = 0; i < 3; ++i) { m.t[i] = tr.value().get()[i]; m.rpy[i] = rot.value().get()[i]; }
 			return m;
 		},
-		[&](const std::string& s, const mo::Mount& m)
+		[this](const std::string& s, const mo::Mount& m)
 		{
+			auto bn = G->get_node("body");
 			auto cn = G->get_node(s);
-			if (not cn.has_value()) return;
+			auto rt = G->get_rt_api();
+			if (not bn.has_value() or not cn.has_value() or not rt) return;
 			// STATIC, NOT TIMESTAMPED: an extrinsic, not a state (see the boresight block above).
 			rt->insert_or_assign_edge_RT_static(bn.value(), cn.value().id(),
 				std::vector<float>{float(m.t[0]), float(m.t[1]), float(m.t[2])},
