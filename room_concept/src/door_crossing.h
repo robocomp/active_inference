@@ -7,7 +7,7 @@
 // NOT used here at all. This asks a purely geometric question about the belief we already hold:
 //
 //   p_geom  = P(body centre past the aperture line) · P(centre within the aperture span)
-//   p_cross = p_open · p_geom   (a CONJUNCTION since 2026-10-13 — see evaluate(); the logit sum below is history)
+//   p_cross = Bayes(p_geom | prior odds from p_open, shut leaf => passage ε) — see evaluate() (Task C 2026-10-23)
 //
 //   · p_open — door_concept's own marginalised belief that the leaf leaves a passable gap. A robot the
 //     pose says is "past" a SHUT door is a robot whose pose is wrong, and p_open is what says so.
@@ -39,6 +39,14 @@
 
 namespace rc::crossing
 {
+    /// ε = P(body passes a SHUT leaf without contact). ⚠ A model constant, not measured: a shut door blocks the
+    /// 0.5 m-wide body; the only way "past" happens is the pose being wrong, which the pose σ already prices. 1e-3
+    /// says: a pose reading must be ~1000:1 for "past" before it overrides a door believed shut (the controller's
+    /// contact model stops the base at a shut leaf, so a genuine passage has no other route). Why no model term
+    /// replaces it: ε is the only link between "leaf shut" and "body past"; with ε = 0 a shut door could never
+    /// be the explanation of ANY crossing, even when the shut belief is itself wrong (door_concept P(open) is a belief).
+    inline constexpr double kShutPassageEps = 1e-3;
+
     /// Standard normal CDF.
     inline float phi(float z) { return 0.5f * std::erfc(-z / std::sqrt(2.0f)); }
 
@@ -228,13 +236,29 @@ namespace rc::crossing
         c.p_past = phi(c.s / sig_s);
         const float p_span = phi((half - c.u) / sig_t) * phi((half + c.u) / sig_t);
         c.p_geom  = c.p_past * p_span;
-        // ★ CONJUNCTION, NOT A LOGIT SUM (2026-10-13). "Crossed through this door" = door passable AND footprint
-        //   past it. The logit sum fuse() treated two readings of DIFFERENT propositions as evidence about one, so a
-        //   confident open door (+13.8 at the clamp) outvoted a confident "not past" — live try35: p_open 1,
-        //   p_past 0.006, p_cross 0.9998 ⇒ a room BORN through a door the robot was 3.5 m from. The sum existed
-        //   because door_open_prob never rose above 0.14 (flat leaf posterior); it now reaches ≈1 for an open door.
-        //   Unmeasured door (p_open < 0): ½ — no evidence either way.
-        c.p_cross = (ap.p_open < 0.f ? 0.5f : std::clamp(ap.p_open, 0.f, 1.f)) * c.p_geom;
+        // ★ THE PASSAGE IS EVIDENCE ABOUT THE LEAF (2026-10-23, Task C; supersedes the 2026-10-13 product).
+        //   p_open · p_geom treated "door open" and "body past" as independent factors, so a body MEASURED 0.3 m past
+        //   the mouth (p_geom = 1) was discounted by the door's prior P(open) — gold3 leg 4: p_open 0.65–0.79 after the
+        //   actuator had opened the leaf, p_cross 0.79 < BirthProb ⇒ no proto, the robot sat in the next room believed
+        //   to be in this one. They are NOT independent: a shut leaf cannot be passed without contact, so
+        //     P(crossed | shut) = ε           (contact-free passage of a shut leaf)
+        //     P(crossed | open) = ½           (the same flat prior the pose reading p_geom itself assumes)
+        //   The pose reading is a likelihood ratio L = p_geom / (1 − p_geom) on "crossed", the door supplies the PRIOR
+        //   odds of that proposition, P0 = p_open·½ + (1 − p_open)·ε, and Bayes closes it:
+        //     odds(crossed) = P0/(1 − P0) · L.
+        //   p_open = 1 leaves p_cross = p_geom (try35's 3.5 m-early birth stays impossible: L ≈ 0 in front of the door);
+        //   p_open = 0 needs L ≳ 1/ε: a pose jitter across the plane (L ~ 1–10) cannot birth a room behind a shut door.
+        //   ε = kShutPassageEps below is a CONSTANT of the contact model (flagged there); the 0.95 decision boundary
+        //   at the call site now acts on this calibrated posterior. Unmeasured door (p_open < 0): ½.
+        {
+            const double po = ap.p_open < 0.f ? 0.5 : std::clamp(static_cast<double>(ap.p_open), 0.0, 1.0);
+            const double prior = po * 0.5 + (1.0 - po) * kShutPassageEps;
+            // ⚠ [1e-9, 1-1e-9] is where double stops representing the pose posterior (p_geom is float, exactly 1.0f
+            //   for a 6-sigma offset); not a tuning knob.
+            const double g = std::clamp(static_cast<double>(c.p_geom), 1e-9, 1.0 - 1e-9);
+            const double odds = (prior / (1.0 - prior)) * (g / (1.0 - g));
+            c.p_cross = static_cast<float>(odds / (1.0 + odds));
+        }
         c.p_span  = p_span;
         c.sig_s   = sig_s;
         c.sig_t   = sig_t;
