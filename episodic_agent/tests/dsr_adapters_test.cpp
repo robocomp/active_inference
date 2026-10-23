@@ -124,6 +124,32 @@ static void fact_source(DSR::DSRGraph& live, DSR::DSRGraph& mem, std::shared_ptr
     CHECK(sc.has_value());
     CHECK(sc and sc->things == std::vector<std::string>({"door_3", "door_9", "room_1"}));
     CHECK(sc and sc->offered == std::vector<std::string>({"aff_door_3_open"}));
+    CHECK(sc and sc->rt.empty());                   // no robot<->room / parent->room RT edge yet
+
+    // Task P: robot->room_1 (with cov), proto-like room_2 hanging from room_1 (parent RT, no cov), robot->room_2 absent.
+    std::vector<float> rcov(36, 0.f);
+    rcov[0] = 0.01f; rcov[1] = 0.002f; rcov[5] = 0.003f; rcov[7] = 0.02f; rcov[11] = 0.004f; rcov[35] = 0.05f;
+    add_rt(live, robot, room_id, {-1.5f, 0.5f, 0.f}, {0.f, 0.f, 1.25f}, rcov);
+    const auto proto = add_node(live, DSR::Node::create<room_node_type>("room_p"), room_id);
+    add_rt(live, room_id, proto, {4.f, 1.f, 0.f}, {0.f, 0.f, -0.5f}, std::nullopt);
+    const auto sc2 = fs.scene();
+    CHECK(sc2 and sc2->rt.size() == 2);
+    if (sc2 and sc2->rt.size() == 2)
+    {
+        const auto& a = sc2->rt[0];                 // sorted by (from,to): Shadow->room_1 before room_1->room_2
+        CHECK(a.from == "Shadow" and a.from_type == "robot" and a.to == "room_1" and a.to_type == "room");
+        CHECK(a.t.size() == 3 and std::abs(a.t[0] + 1.5) < 1e-6 and std::abs(a.t[1] - 0.5) < 1e-6);
+        CHECK(a.r.size() == 3 and std::abs(a.r[2] - 1.25) < 1e-6);
+        CHECK(a.cov.size() == 9 and std::abs(a.cov[0] - 0.01) < 1e-6 and std::abs(a.cov[2] - 0.003) < 1e-6
+              and std::abs(a.cov[4] - 0.02) < 1e-6 and std::abs(a.cov[8] - 0.05) < 1e-6);
+        const auto& b = sc2->rt[1];
+        CHECK(b.from == "room_1" and b.to == "room_p" and std::abs(b.t[0] - 4.0) < 1e-6 and b.cov.empty());
+        // JSON round trip keeps the edges; an old record (no "rt") reads back with none.
+        const auto back = rc::em::detail::scene_from(rc::em::detail::to_json(*sc2));
+        CHECK(back.has_value() and *back == *sc2);
+        const auto old = rc::em::detail::scene_from(rc::em::detail::to_json(rc::em::Scene{.things = {"a"}, .offered = {}, .rt = {}}));
+        CHECK(old.has_value() and old->rt.empty());
+    }
 }
 
 static void live_diff(DSR::DSRGraph& live)

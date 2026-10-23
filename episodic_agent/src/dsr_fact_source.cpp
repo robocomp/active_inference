@@ -8,6 +8,7 @@
 #include <charconv>
 #include <ranges>
 #include <set>
+#include <tuple>
 
 namespace rc::em
 {
@@ -53,6 +54,41 @@ template <typename Att>
 void put(DSR::DSRGraph& G, const DSR::Node& n, const char* key, std::map<std::string, double, std::less<>>& out)
 {
     if (const auto v = G.get_attrib_by_name<Att>(n); v.has_value()) out[key] = static_cast<double>(v.value());
+}
+
+RtEdge read_rt(DSR::DSRGraph& G, const DSR::Node& from, const DSR::Node& to)
+{
+    RtEdge r{.from = from.name(), .from_type = from.type(), .to = to.name(), .to_type = to.type(), .t = {}, .r = {}, .cov = {}};
+    const auto e = G.get_edge(from.id(), to.id(), "RT");
+    if (not e.has_value()) return r;
+    if (const auto t = G.get_attrib_by_name<rt_translation_att>(e.value()); t.has_value())
+        r.t.assign(t->get().begin(), t->get().end());
+    if (const auto q = G.get_attrib_by_name<rt_rotation_euler_xyz_att>(e.value()); q.has_value())
+        r.r.assign(q->get().begin(), q->get().end());
+    if (const auto c = G.get_attrib_by_name<rt_covariance_att>(e.value()); c.has_value() and c->get().size() >= 36)
+        for (const int i : {0, 1, 5, 6, 7, 11, 30, 31, 35}) r.cov.push_back(c->get()[i]);
+    return r;
+}
+
+/// robot<->room RT edges (whichever direction exists) and each room's parent->room RT edge. Bounded: rooms x robots.
+std::vector<RtEdge> rt_edges(DSR::DSRGraph& G)
+{
+    std::vector<RtEdge> out;
+    const auto rooms = G.get_nodes_by_type("room");
+    const auto robots = G.get_nodes_by_type("robot");
+    for (const auto& room : rooms)
+    {
+        for (const auto& robot : robots)
+        {
+            if (G.get_edge(robot.id(), room.id(), "RT").has_value()) out.push_back(read_rt(G, robot, room));
+            if (G.get_edge(room.id(), robot.id(), "RT").has_value()) out.push_back(read_rt(G, room, robot));
+        }
+        if (const auto p = G.get_attrib_by_name<parent_att>(room); p.has_value())
+            if (const auto pn = G.get_node(p.value()); pn.has_value() and G.get_edge(pn->id(), room.id(), "RT").has_value())
+                out.push_back(read_rt(G, *pn, room));
+    }
+    std::ranges::sort(out, [](const RtEdge& a, const RtEdge& b) { return std::tie(a.from, a.to) < std::tie(b.from, b.to); });
+    return out;
 }
 }   // namespace
 
@@ -115,6 +151,7 @@ std::optional<Scene> DsrFactSource::scene() const
             (std::string_view(type) == "affordance" ? sc.offered : sc.things).push_back(n.name());
     std::ranges::sort(sc.things);
     std::ranges::sort(sc.offered);
+    sc.rt = rt_edges(*live_);
     return sc;
 }
 

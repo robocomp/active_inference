@@ -53,9 +53,20 @@ struct Event
 /// the context a world model conditions on. things = names of the live nodes of kEventNodeTypes except affordances
 /// (rooms, doors, objects...); offered = names of the affordance nodes present. Both sorted. Names, not types: the
 /// type is the name's stem ("door_5" → door), and the instance keeps identity for whoever needs it.
+/// An RT edge in the scene (2026-10-23): robot<->room and room<-parent only, as stored (from -> to). t = (x,y,z),
+/// r = euler xyz; cov = the 3x3 over [x,y,yaw] row-major (9 values, from the 6x6 rt_covariance entries
+/// [0,1,5; 6,7,11; 30,31,35]); empty when the edge carries no (or a short) covariance. ABSENT IS NOT ZERO.
+struct RtEdge
+{
+    std::string from, from_type, to, to_type;
+    std::vector<double> t, r, cov;
+    bool operator==(const RtEdge&) const = default;
+};
+
 struct Scene
 {
     std::vector<std::string> things, offered;
+    std::vector<RtEdge> rt;                                 // omitted from JSON when empty (old records unchanged)
     bool operator==(const Scene&) const = default;
 };
 
@@ -158,16 +169,48 @@ inline std::vector<std::string> strings_from(const QJsonValue& v)
     return out;
 }
 
+inline QJsonArray doubles_json(const std::vector<double>& v)
+{
+    QJsonArray a;
+    for (const double x : v) a.append(x);
+    return a;
+}
+
+inline std::vector<double> doubles_from(const QJsonValue& v)
+{
+    std::vector<double> out;
+    for (const QJsonValue& e : v.toArray()) out.push_back(e.toDouble());
+    return out;
+}
+
 inline QJsonObject to_json(const Scene& sc)
 {
-    return QJsonObject{{"things", strings_json(sc.things)}, {"offered", strings_json(sc.offered)}};
+    QJsonObject o{{"things", strings_json(sc.things)}, {"offered", strings_json(sc.offered)}};
+    if (not sc.rt.empty())
+    {
+        QJsonArray a;
+        for (const RtEdge& e : sc.rt)
+            a.append(QJsonObject{{"from", q(e.from)}, {"from_type", q(e.from_type)}, {"to", q(e.to)},
+                                 {"to_type", q(e.to_type)}, {"t", doubles_json(e.t)}, {"r", doubles_json(e.r)},
+                                 {"cov", doubles_json(e.cov)}});
+        o["rt"] = a;
+    }
+    return o;
 }
 
 inline std::optional<Scene> scene_from(const QJsonValue& v)
 {
     if (not v.isObject()) return std::nullopt;
     const QJsonObject o = v.toObject();
-    return Scene{.things = strings_from(o["things"]), .offered = strings_from(o["offered"])};
+    Scene sc{.things = strings_from(o["things"]), .offered = strings_from(o["offered"]), .rt = {}};
+    for (const QJsonValue& v2 : o["rt"].toArray())
+    {
+        const QJsonObject e = v2.toObject();
+        sc.rt.push_back(RtEdge{.from = s(e["from"]), .from_type = s(e["from_type"]), .to = s(e["to"]),
+                               .to_type = s(e["to_type"]), .t = doubles_from(e["t"]), .r = doubles_from(e["r"]),
+                               .cov = doubles_from(e["cov"])});
+    }
+    return sc;
 }
 
 inline std::vector<Fact> facts_from(const QJsonValue& v)
