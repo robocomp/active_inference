@@ -72,6 +72,10 @@ keep_alive = "30m"
 # was cut mid-call and ollama returned nothing. 1500 ≈ 15 s of a runaway.
 num_predict = 1500
 
+[Skills]
+# Notes the model reads only when needed (use_skill): each *.md has a `description:` front matter listed in the system prompt.
+dir = "etc/skills"
+
 [Chat]
 max_history = 32
 digest_period_ms = 500

@@ -56,6 +56,7 @@
 #include <dsr/api/dsr_api.h>
 #include <dsr/api/dsr_inner_eigen_api.h>
 
+#include "skills.h"
 #include "camera_grabber.h"
 #include "canvas_commands.h"
 #include "canvas_lidar.h"
@@ -82,6 +83,7 @@ struct SessionConfig
     int status_period_ms = 250;
     std::string log_dir = "logs";
     std::string system_prompt_path = "etc/system_prompt.md";   ///< robot description; empty/missing ⇒ built-in
+    std::string skills_dir = "etc/skills";   ///< *.md skills the model reads on demand (use_skill); missing ⇒ none
     GateLimits limits;                 ///< move_relative ranges
     double default_step_m = 0.3;       ///< "advance a bit"
     double robot_radius_m = 0.35;      ///< approach_object: half the body width (0.70 m)
@@ -225,6 +227,7 @@ private:
     QString state_extra_;          ///< lines appended to the STATE for THIS request (changes, last move)
     std::string last_relative_;    ///< last move/turn command this chat sent ("" = none)
 
+    std::vector<rc::chat::Skill> skills_;   ///< etc/skills/*.md, read once; listed in the system prompt, served by use_skill
     QString robot_description_;   ///< etc/system_prompt.md, read once; empty ⇒ the built-in fallback
     std::deque<QJsonObject> history_;
     struct Turn

@@ -41,6 +41,10 @@ g++ -std=c++23 -O0 -g -Wall -Wextra -Wno-missing-field-initializers -Wno-depreca
     -o "$out/test_mission_plan" test_mission_plan.cpp $(pkg-config --cflags Qt6Core | sed "s/-I/-isystem /g") $(pkg-config --libs Qt6Core)
 "$out/test_mission_plan"
 g++ -std=c++23 -O0 -g -Wall -Wextra -Wno-missing-field-initializers -Wno-deprecated-literal-operator -fPIC \
+    -DSKILLS_DIR="\"$(realpath ../etc/skills)\"" -o "$out/test_skills" test_skills.cpp \
+    $(pkg-config --cflags Qt6Core | sed "s/-I/-isystem /g") $(pkg-config --libs Qt6Core)
+"$out/test_skills"
+g++ -std=c++23 -O0 -g -Wall -Wextra -Wno-missing-field-initializers -Wno-deprecated-literal-operator -fPIC \
     -o "$out/test_controller_facts" test_controller_facts.cpp $(pkg-config --cflags Qt6Core | sed "s/-I/-isystem /g") $(pkg-config --libs Qt6Core)
 "$out/test_controller_facts"
 g++ -std=c++23 -O0 -g -Wall -Wextra -Wno-missing-field-initializers -Wno-deprecated-literal-operator -fPIC \

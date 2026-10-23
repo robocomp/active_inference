@@ -134,6 +134,7 @@ rc::chat::SessionConfig SpecificWorker::load_session_config(const ConfigLoader& 
     c.log_dir = r.s("Chat.log_dir", "logs", "directory for logs/chat_<date>.jsonl");
     c.system_prompt_path = r.s("Chat.system_prompt_path", "etc/system_prompt.md",
             "robot description prepended to the system message (read once at start; missing => built-in)");
+    c.skills_dir = r.s("Skills.dir", "etc/skills", "markdown skills the model reads on demand (use_skill); missing => none");
     c.limits.max_move_m = r.d("Chat.max_move_m", 3.0, "move_relative: longer distances are refused (controller cap 3 m)");
     c.default_step_m = r.d("Chat.default_step_m", 0.3, "\"advance a bit\": the step the model is told to use");
     c.robot_radius_m = r.d("Chat.robot_radius_m", 0.35, "approach_object: half the body width");

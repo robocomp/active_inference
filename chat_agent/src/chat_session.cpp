@@ -65,6 +65,7 @@ ChatSession::ChatSession(std::shared_ptr<DSR::DSRGraph> G, SessionConfig cfg)
                                      .memory_max = q(cfg_.canvas_memory_max)})
 {
     robot_description_ = load_robot_description(cfg_.system_prompt_path);
+    if (not cfg_.skills_dir.empty()) skills_ = rc::chat::load_skills(cfg_.skills_dir);
     fleet_policy_ = fleet::Policy{.agents = fleet::split_names(cfg_.fleet_agents),
                                   .confirm = fleet::split_names(cfg_.fleet_confirm)};
     if (not log_.open(cfg_.log_dir)) std::println("[chat_agent] WARNING: cannot open a log under '{}'", cfg_.log_dir);
@@ -397,7 +398,11 @@ QString ChatSession::load_robot_description(const std::string& path)
 QString ChatSession::system_prompt() const
 {
     const QString& description = robot_description_.isEmpty() ? kFallbackDescription : robot_description_;
-    return description + QStringLiteral("\n") + kInterfaceRules.arg(cfg_.default_step_m, 0, 'f', 1);
+    QString prompt = description + QStringLiteral("\n") + kInterfaceRules.arg(cfg_.default_step_m, 0, 'f', 1);
+    if (not skills_.empty())
+        prompt += QStringLiteral("\nSkills: notes you can read when a request needs them. Call use_skill(name) BEFORE "
+                                 "acting on such a request.\n") + q(rc::chat::skills_index(skills_));
+    return prompt;
 }
 
 QString ChatSession::state_message() const
@@ -507,6 +512,16 @@ QJsonArray ChatSession::tools_json() const
         "Read-only.",
         QJsonObject{{"node", QJsonObject{{"type", "string"}, {"description", "the node's name or id"}}}},
         QJsonArray{"node"}));
+    if (not skills_.empty())
+    {
+        QJsonArray names;
+        for (const auto& s : skills_) names.append(q(s.name));
+        tools.append(tool_def("use_skill",
+            "Read one of the skills listed in the system prompt (how to write a mission, door and exploring tips). "
+            "Read-only; returns the skill's text.",
+            QJsonObject{{"name", QJsonObject{{"type", "string"}, {"enum", names}, {"description", "the skill's name"}}}},
+            QJsonArray{"name"}));
+    }
     const auto str = [](const char* d) { return QJsonObject{{"type", "string"}, {"description", d}}; };
     tools.append(tool_def("episodes",
         "What the robot did TODAY, from its episodic memory, with start and end time and outcome, oldest first. With no "
@@ -782,7 +797,13 @@ QString ChatSession::answer_query(const QString& name, const QJsonObject& args)
     if (name == "go_around_object") return do_go_around(args);
     if (name == "sim_door") return do_sim_door(args);
     QString out;
-    if (QString m = answer_memory(name, args); not m.isEmpty()) out = std::move(m);
+    if (name == "use_skill")
+    {
+        const std::string want = args.value("name").toString().toStdString();
+        const auto it = std::ranges::find(skills_, want, &rc::chat::Skill::name);
+        out = it != skills_.end() ? q(it->body) : QStringLiteral("REJECTED: no skill '%1'").arg(q(want));
+    }
+    else if (QString m = answer_memory(name, args); not m.isEmpty()) out = std::move(m);
     else if (name == "find_objects")
         out = q(answer_find_objects(digest_.objects, args.value("subtype").toString().toStdString(), digest_.facts.room));
     else if (name == "where_is")
