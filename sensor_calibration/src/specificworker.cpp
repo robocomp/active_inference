@@ -187,8 +187,6 @@ void SpecificWorker::compute()
     {
         harvester_log_ms_ = now;
         const auto e = harvester_->close_episode();
-        if (dash_model_)
-            dash_model_->close_episode();
         qInfo().noquote() << QString("[Harvester] keyframes %1 (stalled-dropped %2)  pairs %3 (total %4)  info(dx,dy,psi)=(%5, %6, %7)")
                 .arg(e.keyframes).arg(e.dropped_stalled).arg(e.pairs).arg(npairs_logged_)
                 .arg(e.info(0, 0), 0, 'g', 3).arg(e.info(1, 1), 0, 'g', 3).arg(e.info(2, 2), 0, 'g', 3);

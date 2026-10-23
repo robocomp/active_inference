@@ -298,6 +298,7 @@ void SensorInputs::poll_graph()
         if (o.has_value() and o->source_ts_ms > last_odom_ts_)   // one entry per producer sample
         {
             last_odom_ts_ = o->source_ts_ms;
+            ++odom_total_; odom_last_ = Clock::now();
             push(odom_q_, std::move(*o), cfg_.max_odom_queue);
         }
     }
@@ -336,6 +337,8 @@ void SensorInputs::poll_graph()
                         p.cov_room_robot[r * 6 + c] = static_cast<float>(M(r, c));
                 p.has_cov = true;
             }
+            if (not pose_.has_value() or not pose_->room_T_robot.matrix().isApprox(p.room_T_robot.matrix(), 0.0))
+                ++pose_total_;   // distinct pose (display counter only)
             pose_ = p;
         }
     }

@@ -49,7 +49,7 @@ void SpecificWorker::feed_dashboard_pairs(const std::vector<sc::calib::Pair>& pa
 {
     if (dash_model_)
         for (const auto& p : pairs)
-            dash_model_->add_pair(p);
+            dash_model_->add_pair(p, wall_ms());
 }
 
 void SpecificWorker::refresh_dashboard()
@@ -62,22 +62,20 @@ void SpecificWorker::refresh_dashboard()
     dash_last_tp_ = now;
     dash_model_->sample_stall(wall_ms(), inputs_->any_stalled());
 
-    // Rates from the cumulative arrival counts over >= 1 s windows (status_line()'s own windows are left alone).
-    const auto states = inputs_->stream_states();
-    const double dt = dash_rate_tp_.time_since_epoch().count() == 0 ? 0.0 : std::chrono::duration<double>(now - dash_rate_tp_).count();
-    if (dash_rate_tp_.time_since_epoch().count() == 0 or dt >= 1.0)
+    // Rates from cumulative arrival counts (status_line()'s own windows are left alone). Odometry, pose and the
+    // room polygon ride in the same row; pose/polygon are "ok" once present (a parked robot's pose may not change).
+    std::vector<sc::dash::StreamSample> samples;
+    for (const auto& s : inputs_->stream_states())
+        samples.push_back({s.key, s.total, s.ever_seen, s.stalled, true});
+    const auto g = inputs_->graph_state();
+    samples.push_back({"odom", g.odom_total, g.odom_seen, g.odom_stalled, true});
+    samples.push_back({"pose", g.pose_total, g.pose_seen, false, true});
+    samples.push_back({"polygon", g.polygon_vertices, g.polygon_vertices > 0, false, false});
+    dash_view_->set_streams(dash_rates_.update(wall_ms(), samples));
+    if (const long r = dash_model_->timeline_resets(); r != dash_resets_logged_)
     {
-        for (const auto& s : states)
-        {
-            const auto it = dash_rate_totals_.find(s.key);
-            dash_rates_[s.key] = (it != dash_rate_totals_.end() and dt > 0.0) ? double(s.total - it->second) / dt : 0.0;
-            dash_rate_totals_[s.key] = s.total;
-        }
-        dash_rate_tp_ = now;
+        dash_resets_logged_ = r;
+        qInfo() << "[Dashboard] timeline reset (wall clock stepped back)";
     }
-    std::vector<DashStreamRow> rows;
-    for (const auto& s : states)
-        rows.push_back({s.key, dash_rates_[s.key], s.stalled, s.ever_seen});
-    dash_view_->set_streams(std::move(rows));
     dash_view_->update();
 }

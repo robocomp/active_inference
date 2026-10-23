@@ -83,9 +83,9 @@ private:
     std::unique_ptr<sc::dash::DashboardModel> dash_model_;
     QWidget* dashboard_window_ = nullptr;     // owns the view (parentless top-level, deleted in the destructor)
     DashboardView* dash_view_ = nullptr;
-    std::chrono::steady_clock::time_point dash_last_tp_{}, dash_rate_tp_{};
-    std::map<std::string, std::uint64_t> dash_rate_totals_;
-    std::map<std::string, double> dash_rates_;
+    std::chrono::steady_clock::time_point dash_last_tp_{};
+    sc::dash::StreamRates dash_rates_;
+    long dash_resets_logged_ = 0;
 
     rc::presence::ConceptProtocol presence_protocol_;
     AgentPresenceCoordinator      presence_coordinator_;

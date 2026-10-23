@@ -23,7 +23,6 @@
 #include <string>
 #include <vector>
 
-struct DashStreamRow { std::string key; double rate_hz = 0.0; bool stalled = false, ever_seen = false; };
 
 class DashboardView : public QWidget
 {
@@ -33,7 +32,7 @@ public:
         setMinimumSize(640, 430);
         setAutoFillBackground(true);
     }
-    void set_streams(std::vector<DashStreamRow> s) { streams_ = std::move(s); }
+    void set_streams(std::vector<sc::dash::StreamRow> s) { streams_ = std::move(s); }
 
 protected:
     void paintEvent(QPaintEvent*) override
@@ -55,8 +54,8 @@ protected:
         p.setPen(fg);
         p.drawText(M, y + fm.ascent(), QStringLiteral("keyframes captured %1    dropped by stall %2").arg(model_.keyframes()).arg(model_.dropped_stalled()));
         y += lh;
-        p.drawText(M, y + fm.ascent(), QStringLiteral("this episode %1  (yaw %2, lever %3)    total %4  (yaw %5, lever %6)")
-                   .arg(model_.pairs_episode()).arg(model_.pairs_episode(Label::yaw)).arg(model_.pairs_episode(Label::lever))
+        p.drawText(M, y + fm.ascent(), QStringLiteral("last 60 s %1  (yaw %2, lever %3)    total %4  (yaw %5, lever %6)")
+                   .arg(model_.pairs_recent()).arg(model_.pairs_recent(Label::yaw)).arg(model_.pairs_recent(Label::lever))
                    .arg(model_.pairs_total()).arg(model_.pairs_total(Label::yaw)).arg(model_.pairs_total(Label::lever)));
         y += lh + 8;
 
@@ -115,18 +114,22 @@ protected:
         int x = M;
         for (const auto& s : streams_)
         {
-            const QString t = QStringLiteral("%1 %2 Hz%3").arg(QString::fromStdString(s.key)).arg(s.rate_hz, 0, 'f', 1).arg(s.stalled ? " STALLED" : "");
+            using St = sc::dash::StreamStatus;
+            const QString key = QString::fromStdString(s.key);
+            const QString t = s.status == St::waiting ? key + QStringLiteral(" waiting")
+                            : (s.show_rate ? QStringLiteral("%1 %2 Hz%3").arg(key).arg(s.rate_hz, 0, 'f', 1).arg(s.status == St::stalled ? " STALLED" : "")
+                                           : QStringLiteral("%1%2").arg(key).arg(s.status == St::stalled ? " STALLED" : " ok"));
             const int w = fm.horizontalAdvance(t) + 16;
             if (x + w > W - M) { x = M; y += lh + 4; }
             p.setPen(mid);
-            p.setBrush(s.stalled ? QBrush(QColor(220, 60, 60, 90)) : QBrush(Qt::NoBrush));
+            p.setBrush(s.status == St::stalled ? QBrush(QColor(220, 60, 60, 90)) : s.status == St::waiting ? QBrush(QColor(128, 128, 128, 70)) : QBrush(Qt::NoBrush));
             p.drawRoundedRect(QRectF(x, y, w - 6, lh), 4, 4);
-            p.setPen(fg); p.drawText(x + 5, y + fm.ascent() + 2, t);
+            p.setPen(s.status == St::waiting ? mid : fg); p.drawText(x + 5, y + fm.ascent() + 2, t);
             x += w;
         }
     }
 
 private:
     const sc::dash::DashboardModel& model_;
-    std::vector<DashStreamRow> streams_;
+    std::vector<sc::dash::StreamRow> streams_;
 };

@@ -227,6 +227,19 @@ public:
             v.push_back({k, s.mon.total(), s.mon.stalled(), s.mon.ever_seen()});
         return v;
     }
+    // Read-only graph-fed inputs for the same display. odom: dedup'd producer samples (stalled when none for
+    // stall_imu_ms); pose: distinct robot-in-room poses read; polygon: vertex count (0 = none yet).
+    struct GraphState { std::uint64_t odom_total = 0, pose_total = 0; bool odom_seen = false, odom_stalled = false, pose_seen = false; std::size_t polygon_vertices = 0; };
+    [[nodiscard]] GraphState graph_state() const
+    {
+        GraphState g;
+        g.odom_total = odom_total_; g.pose_total = pose_total_;
+        g.odom_seen = odom_total_ > 0;
+        g.odom_stalled = g.odom_seen and std::chrono::steady_clock::now() - odom_last_ > std::chrono::milliseconds(cfg_.stall_imu_ms);
+        g.pose_seen = pose_.has_value();
+        g.polygon_vertices = polygon_.vertices.size();
+        return g;
+    }
     [[nodiscard]] bool stalled(const std::string& key) const { const auto it = streams_.find(key); return it != streams_.end() and it->second.mon.stalled(); }
 
 private:
@@ -260,6 +273,8 @@ private:
     std::optional<PoseIn>  pose_;
     PolygonIn              polygon_;
     std::int64_t           last_odom_ts_ = 0;
+    std::uint64_t          odom_total_ = 0, pose_total_ = 0;   // display counters (read-only accessor graph_state())
+    std::chrono::steady_clock::time_point odom_last_{};
     std::chrono::steady_clock::time_point last_poly_{};
     std::chrono::steady_clock::time_point last_discovery_{}, last_log_{};
     std::map<std::string, bool> announced_absent_;
