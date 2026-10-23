@@ -72,3 +72,8 @@ ADD_EXECUTABLE( proposal_publisher_test EXCLUDE_FROM_ALL ../tests/proposal_publi
 TARGET_COMPILE_DEFINITIONS( proposal_publisher_test PRIVATE SHADOW_JSON="${CMAKE_CURRENT_SOURCE_DIR}/../../robot_concept/shadow.json" )
 TARGET_LINK_LIBRARIES( proposal_publisher_test ${LIBS} dsr_core dsr_gui dsr_api fastcdr fastdds OpenThreads Eigen3::Eigen QGLViewer-qt6 Qt6OpenGLWidgets ${STATIC_LIBS} ${SPECIFIC_LIBS} ${QT_LIBRARIES} ${Ice_LIBRARIES} )
 SET_TARGET_PROPERTIES( proposal_publisher_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../bin )
+
+# Dashboard aggregation selftest (pure: no Qt/DDS/DSR).  make -C build dashboard_model_test && ../bin/dashboard_model_test
+ADD_EXECUTABLE( dashboard_model_test EXCLUDE_FROM_ALL ../tests/dashboard_model_test.cpp ../src/dashboard_model.cpp )
+TARGET_LINK_LIBRARIES( dashboard_model_test ai_common::sensor_calib Eigen3::Eigen )
+SET_TARGET_PROPERTIES( dashboard_model_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../bin )

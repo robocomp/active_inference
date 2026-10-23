@@ -10,6 +10,9 @@
 #define SPECIFICWORKER_H
 
 #include <atomic>
+#include <chrono>
+#include <map>
+#include <memory>
 #include <cstdint>
 #include <string>
 
@@ -18,6 +21,8 @@
 #include "../../common/agent_presence_coordinator/agent_presence_coordinator.h"
 #include "../../common/concept_presence/concept_presence.h"   // rc::presence::ConceptProtocol (SHARED)
 #include "../../common/sensor_calib/trajectory_harvester.h"
+#include "dashboard_model.h"
+class DashboardView;
 #include "sensor_inputs.h"                                         // the input layer (plain-data outputs)
 
 class SpecificWorker : public GenericWorker
@@ -67,6 +72,20 @@ private:
     long npairs_logged_ = 0;
     std::int64_t harvester_log_ms_ = 0;            // wall clock of the last summary log
     std::unique_ptr<sc::SensorInputs> inputs_;     // created lazily on the first Operating tick (main thread)
+
+    // ── Dashboard (specificworker_dashboard.cpp). DISPLAY ONLY; all null/no-op when [Dashboard] show = false ──
+    void build_dashboard();
+    void feed_dashboard_keyframe(bool captured, bool stalled);
+    void feed_dashboard_pairs(const std::vector<sc::calib::Pair>& pairs);
+    void refresh_dashboard();                 // ≤ 5 Hz, from compute()
+    void save_dashboard_geometry() const;
+    bool dashboard_show_ = true;
+    std::unique_ptr<sc::dash::DashboardModel> dash_model_;
+    QWidget* dashboard_window_ = nullptr;     // owns the view (parentless top-level, deleted in the destructor)
+    DashboardView* dash_view_ = nullptr;
+    std::chrono::steady_clock::time_point dash_last_tp_{};
+    sc::dash::StreamRates dash_rates_;
+    long dash_resets_logged_ = 0;
 
     rc::presence::ConceptProtocol presence_protocol_;
     AgentPresenceCoordinator      presence_coordinator_;

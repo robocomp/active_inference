@@ -51,6 +51,9 @@ SpecificWorker::SpecificWorker(const ConfigLoader& configLoader, TuplePrx tprx, 
         h.odo_sigma_per_rad  = cfg.d("Harvester.odo_sigma_per_rad", h.odo_sigma_per_rad, "odometry translation error per radian rotated between the two keyframes (m/rad)");
     }
 
+    dashboard_show_ = rc::cfg::Reader(configLoader, "sensor_calibration").b("Dashboard.show", true,
+            "open the live trajectory-fragment dashboard window (display only; false = no window and no cost)");
+
     states["Waiting"] = std::make_unique<GRAFCETStep>("Waiting", period,
         std::bind(&SpecificWorker::waiting_loop, this), std::bind(&SpecificWorker::waiting_enter, this));
     states["Operating"] = std::make_unique<GRAFCETStep>("Operating", period,
@@ -81,6 +84,8 @@ SpecificWorker::SpecificWorker(const ConfigLoader& configLoader, TuplePrx tprx, 
 SpecificWorker::~SpecificWorker()
 {
     request_shutdown();
+    save_dashboard_geometry();
+    delete dashboard_window_;   // top-level, parentless: owned here
     std::print("sensor_calibration: SpecificWorker destroyed.\n");
 }
 
@@ -141,6 +146,7 @@ void SpecificWorker::initialize()
     QObject::connect(QCoreApplication::instance(), &QCoreApplication::aboutToQuit,
                      this, &SpecificWorker::terminal_shutdown, Qt::UniqueConnection);
 
+    build_dashboard();
     remove_stale_nodes();
     std::print("sensor_calibration: initialize() done, agent node '{} {}' present\n", agent_name, agent_id);
 }
@@ -161,12 +167,21 @@ void SpecificWorker::compute()
         harvester_->add_odometry(o.source_ts_ms, o.adv, o.side, o.rot);
     for (const auto& l : inputs_->take_lidar())
         if (l.sensor == "helios")
-            harvester_->add_keyframe(l.stamp_ms, inputs_->stalled("helios") or inputs_->any_stalled());
+        {
+            const bool stalled = inputs_->stalled("helios") or inputs_->any_stalled();
+            const bool captured = harvester_->add_keyframe(l.stamp_ms, stalled);
+            feed_dashboard_keyframe(captured, stalled);
+            if (dash_model_)
+                dash_model_->note_lidar_stamp(l.stamp_ms, std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::system_clock::now().time_since_epoch()).count());
+        }
     for (const auto& m : inputs_->take_imu())
         harvester_->add_gyro(m.stamp_ms, m.gyro.z());   // yaw rate about the IMU z axis (assumed up: pin with the mount)
     (void)inputs_->take_images();                       // cameras: not consumed by the trajectory part
     // Phase 4.4 attaches scan registration to these pairs; for now the agent only reports them (<= once / 10 s).
-    npairs_logged_ += long(harvester_->take_pairs().size());
+    const auto pairs = harvester_->take_pairs();
+    npairs_logged_ += long(pairs.size());
+    feed_dashboard_pairs(pairs);
     if (const auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::system_clock::now().time_since_epoch()).count(); now - harvester_log_ms_ >= 10000)
     {
@@ -176,6 +191,7 @@ void SpecificWorker::compute()
                 .arg(e.keyframes).arg(e.dropped_stalled).arg(e.pairs).arg(npairs_logged_)
                 .arg(e.info(0, 0), 0, 'g', 3).arg(e.info(1, 1), 0, 'g', 3).arg(e.info(2, 2), 0, 'g', 3);
     }
+    refresh_dashboard();
     fps.print("sensor_calibration compute", 3000);
 }
 
