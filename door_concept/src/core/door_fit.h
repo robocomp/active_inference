@@ -101,6 +101,9 @@ public:
         t_wall_ms_ = t_wall_ms;
     }
     void set_camera(const std::optional<Mat4d>& room_T_zed, const CameraIntrinsics& cam) { room_T_zed_ = room_T_zed; cam_ = cam; }
+    /// ★Task C: the robot BODY's room-frame centre and the xy covariance of its pose (rt_cov), for door_body_evidence.h.
+    /// nullopt xy or covariance ⇒ no body evidence this cycle (a pose without a stated spread must not decide a leaf).
+    void set_robot_body(const std::optional<Eigen::Vector2f>& xy, const std::optional<Eigen::Matrix2f>& cov) { body_xy_ = xy; body_cov_ = cov; }
     void set_ego_motion(float lin_mps, float ang_radps) { ego_lin_mps_ = lin_mps; ego_ang_radps_ = ang_radps; }
     void set_sources(const MaskSource* masks, const LeafSweep* sweep, const std::vector<rc::exclusion::Claim>* claims)
     { masks_ = masks; sweep_ = sweep; claims_ = claims; }
@@ -165,6 +168,8 @@ private:
     float ego_lin_mps_ = 0.0f, ego_ang_radps_ = 0.0f;
     std::vector<Eigen::Vector2f> room_polygon_;
     std::optional<Eigen::Vector2f> ricoh_origin_;
+    std::optional<Eigen::Vector2f> body_xy_;
+    std::optional<Eigen::Matrix2f> body_cov_;
     std::unordered_map<std::uint64_t, Eigen::Vector2f> birth_seeds_;    // tracker-provided birth XY (note_birth)
     std::unordered_map<std::uint64_t, rc::DoorBelief> restore_seeds_;   // re-acquired identity's belief (note_reacquire)
     std::size_t n_explained_away_ = 0;                                  // points dropped (diagnostic)

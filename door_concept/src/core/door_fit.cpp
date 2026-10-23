@@ -5,6 +5,7 @@
 #include <tuple>
 #include "door_core.h"                  // point_in_polygon — the containment rule, shared with the birth test
 #include "../door_standpoint.h"
+#include "../door_body_evidence.h"     // Task C: the robot body in the aperture as evidence about the leaf
 #include "../door_phi_posterior.h"      // the phi channel as pure functions (tested offline)
 #include "../door_opening_edges.h"      // try96: wall registration, the opening's through-span, the registration offset
 #include "../door_support_bank.h"       // rc::support_bank:: adapter (SHARED bank)
@@ -1232,6 +1233,45 @@ void DoorFit::estimate_phi(rc::DoorFitState& inst)
     }
     inst.anchor_phi_ll.clear();
     inst.anchor_phi_ll_other.clear();
+    // ★ Task C: THE ROBOT'S OWN BODY IN THE APERTURE (door_body_evidence.h). Passing a blocked leaf is impossible without
+    //   contact, so a body centre inside the opening is evidence for the φ where the leaf leaves room for it. The same curve
+    //   for all four (hinge x swing) hypotheses — the body does not care which jamb or side — ADDED to this frame's φ
+    //   likelihood, hence ε-contaminated per frame and pooled per viewpoint by the leaf channel like every other term.
+    //   No change (an empty curve) when the pose says the body is not in the opening.
+    if (body_xy_.has_value() and body_cov_.has_value())
+    {
+        const auto& ap = inst.aperture;
+        // The LEAF's plane (Aperture::depth), not the wall line: the body must pass where the leaf hangs.
+        const Eigen::Vector2f ax = ap.wall_u, ay = ap.across_u();
+        const Eigen::Vector2f d = body_xy_.value() - (ap.centre_xy() + ap.depth * ay);
+        const Eigen::Matrix2f C = body_cov_.value();
+        // Robot pose spread: isotropic at the LARGER eigenvalue (the rt_cov axes are not guaranteed to be the room's, so be
+        // conservative) PLUS the door belief's own uncertainty of where the opening is — along the wall (centre = s + w/2)
+        // and across it (the leaf plane's depth): the body is compared with a door whose place is itself a belief.
+        const float lam = Eigen::SelfAdjointEigenSolver<Eigen::Matrix2f>(0.5f * (C + C.transpose())).eigenvalues().maxCoeff();
+        const auto& S = inst.ai2_belief.covariance_full();
+        const float var_u = std::max(0.0f, S(0, 0) + 0.25f * S(1, 1) + S(0, 1));
+        const float var_d = std::max(0.0f, S(3, 3));
+        Eigen::Matrix2f Cuy = Eigen::Matrix2f::Identity() * std::max(0.0f, lam);
+        Cuy(0, 0) += var_u;
+        Cuy(1, 1) += var_d;
+        const float p_in = rc::door::body_in_aperture_prob(d.dot(ax), d.dot(ay), Cuy, 0.5f * ap.w, 0.5f * ap.thickness);
+        const auto bl = rc::door::body_phi_loglik(p_in, ap.w, cfg_.pragmatic.robot_passage_width_m, PHI_MIN, PHI_MAX, NSTEP);
+        if (not bl.empty())
+        {
+            const auto n = static_cast<std::size_t>(NSTEP);
+            for (auto* ll : {&ll_this, &ll_other, &ll_swing, &ll_both})
+            {
+                if (ll->size() != n)
+                {
+                    ll->clear();
+                    for (int k = 0; k < NSTEP; ++k)
+                        ll->emplace_back(PHI_MIN + (PHI_MAX - PHI_MIN) * static_cast<float>(k) / static_cast<float>(NSTEP - 1), 0.0f);
+                }
+                for (std::size_t k = 0; k < n; ++k) (*ll)[k].second += bl[k];
+            }
+        }
+    }
     // ★ Task 12 fix D: the swing's evidence from the anchor's beams (the only channel that scores both swings), consumed once;
     //   its sign is relative to the swing it was computed under. ★ try102: it is THIS FRAME's swing evidence, added to the
     //   field's own for the same frame and contaminated ONCE with it (the anchor and the field read the same sweep), never

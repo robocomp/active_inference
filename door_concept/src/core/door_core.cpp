@@ -200,6 +200,13 @@ DoorCycleOutput DoorCore::step(const DoorCycleInput& in)
     // ONE ego-motion: the fit's confirm-only gate reads the value the birth gate uses (was fitter_->set_ego_motion).
     fit_.set_ego_motion(ego_.lin_mps, ego_.ang_radps);
     fit_.set_ricoh_origin(cam_xy_);
+    // ★Task C: the body centre and its pose spread, for the body-in-aperture evidence about the leaf.
+    {
+        std::optional<Eigen::Matrix2f> cov;
+        if (in.robot.rt_cov.has_value() and in.robot.rt_cov->allFinite())
+            cov = Eigen::Matrix2f(in.robot.rt_cov->topLeftCorner<2, 2>().cast<float>());
+        fit_.set_robot_body(cam_xy_, cov);
+    }
     // ★ONE claim set per cycle for the SHARED mutual-exclusion rule: who else claims room space (was the graph walk at
     // the top of compute(); now the snapshot of the same nodes taken at the top of the cycle). The birth filter AND the
     // fit's point exclusion read it (Task 4b: the worker's own second walk, foreign_claims_, is gone).
