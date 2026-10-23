@@ -69,3 +69,7 @@ wheel_rot_sigma_rel = 0.2   # wheel rotation over-reports ~41 % on Shadow: wide
 wheel_rot_sigma_floor = 0.01
 gyro_sigma_rel = 0.01
 gyro_sigma_floor = 0.002
+
+# ── Live dashboard window (src/specificworker_dashboard.cpp): DISPLAY ONLY ───────
+[Dashboard]
+show = true    # false: no window is built and nothing is fed (no cost)

@@ -217,6 +217,16 @@ public:
     // Per-stream rate over the window since the last call (restarts the window), plus graph-read state.
     [[nodiscard]] std::string status_line();
     // True when this stream ("helios","zed/rgb","imu",...) has delivered before and has now stopped.
+    // Read-only view for the dashboard: cumulative arrivals and the stalled flag per stream. Unlike status_line() it
+    // restarts no rate window, so a display can derive its own rate from the totals without disturbing the logger.
+    struct StreamState { std::string key; std::uint64_t total = 0; bool stalled = false, ever_seen = false; };
+    [[nodiscard]] std::vector<StreamState> stream_states() const
+    {
+        std::vector<StreamState> v;
+        for (const auto& [k, s] : streams_)
+            v.push_back({k, s.mon.total(), s.mon.stalled(), s.mon.ever_seen()});
+        return v;
+    }
     [[nodiscard]] bool stalled(const std::string& key) const { const auto it = streams_.find(key); return it != streams_.end() and it->second.mon.stalled(); }
 
 private:

@@ -12,11 +12,15 @@ LIST(APPEND LIBS
 LIST(APPEND SOURCES
   ../src/specificworker.cpp
   ../src/sensor_inputs.cpp
+  ../src/dashboard_model.cpp
+  ../src/specificworker_dashboard.cpp
 )
 
 LIST(APPEND HEADERS
   ../src/specificworker.h
   ../src/sensor_inputs.h
+  ../src/dashboard_model.h
+  ../src/dashboard_view.h
 )
 
 # libdsr_core defines symbols that libdsr_{api,gui} only reference; keep all libs (see bottle_concept).
