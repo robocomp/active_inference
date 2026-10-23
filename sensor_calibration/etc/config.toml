@@ -1,0 +1,51 @@
+
+# --- Common Agent Data ---
+[Agent]
+id = 27  # ids 5-26 are taken; unique across the shared graph (CRDT actor id)
+name = "sensor_calibration"
+
+# --- Single Instance Configuration ---
+# Use this if you only have one graph.
+configFile = ""
+domain = 0
+tree = false
+graph = false   # headless: the DSR node-link viewer is not needed by a calibration agent
+2d = false
+3d = false
+
+# --- Multiple Instance Template ---
+# If you define multiple instances, the single instance config above will be ignored.
+# [Agent.instance_name]
+# configFile = ""
+# domain = 1
+# tree = true
+# graph = true
+# 2d = true
+# 3d = true
+
+[Period]
+Compute = 100
+Emergency = 500
+
+[Component.Debug]
+Verbose = false
+
+[Ice]
+Warn.Connections = "0"
+Trace.Network = "0"
+Trace.Protocol = "0"
+MessageSizeMax = "20004800"
+
+# ── Agent-presence protocol (same keys and values as bottle_concept) ──────────
+[Presence]
+required_agent_names = ["robot_concept", "room_concept"]
+config_dir = "etc"
+monitor_period_ms = 500
+heartbeat_timeout_ms = 25000
+rejoin_grace_ms = 8000
+stale_grace_ms = 120000
+agent_info_period_ms = 1000
+
+# Owned graph nodes torn down on shutdown / peer-loss. The agent node is "<name> <id>".
+[Owns]
+nodes = ["sensor_calibration 27"]
