@@ -705,6 +705,14 @@ int main(int argc, char** argv)
     std::println("replayed {} records (cycles {}..{}): stepped {}, media-only {}", n, first, last, stepped, media_only);
     std::println("live-only belief consumers (NBV planner, DOF table, reported Σ) ran {} times, clean (checksum {:.4g})",
                  belief_smoke_runs, belief_smoke_sum);
+    for (int k = 0; k < 2; ++k)
+    {
+        const auto& c = core.counters(k);
+        std::println("[birth-src {}] slices={} door={} no_support={} bearing_only={} no_cam={} wall_w0={} pushed={} ev>0={} "
+                     "sum(wall_w)={:.2f} sum(w_after_pool)={:.2f} sum(ev)={:.3f} max(ev)={:.3f}", k == 0 ? "ZED" : "RICOH",
+                     c.slices, c.door, c.no_support, c.bearing_only, c.no_cam, c.no_wall, c.pushed, c.pos_ev, c.w_wall,
+                     c.w_pool, c.ev, c.ev_max);
+    }
     std::println("removals decided by the core: {}; births without a recorded id: {}; not rebuilt: {} AffExecuting, "
                  "{} AnchorHung, {} ActuatorRequest rows on this tape", world.removed_, world.unmatched_creates_,
                  n_exec, n_anchor, n_act);

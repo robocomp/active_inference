@@ -258,6 +258,10 @@ void read_door_config_fields(DoorConfig& out, GetF&& getf, GetI&& geti, GetS&& g
             "prior std (m) of the leaf plane's depth off the wall line; < 0 = derived, sqrt(T^2/12 + sigma_b^2) (Task 5b)");
     out.door_thickness_m         = getf("Door.ThicknessM", 0.05f,
             "fixed panel thickness (m, across the wall)");
+    out.ricoh_hit_rate           = getf("Birth.RicohHitRate", 0.35f,
+            "P(the 360 detector reports a door that is there, per look) for the ricoh birth bank; measured on gold4 DOOR_0 (about 1 look in 3)");
+    out.ricoh_plane_std_m        = getf("Birth.RicohPlaneStdM", 0.10f,
+            "std (m) between the room outline's wall plane and the door face the LiDAR range lands on (layout normal sigma + the door sitting in the wall's thickness)");
     out.tracker_nll_cost         = getb("Tracker.NllCost", false,
             "association cost = ½(m²+ln|S|) NLL (vs raw m²); see InstanceTracker");
     out.bearing_birth_enabled    = getb("Bearing.BirthEnabled", false,

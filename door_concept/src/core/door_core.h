@@ -198,6 +198,13 @@ struct DoorCoreSinks
     std::function<void(const ImageRoiNote&)> image_roi;
 };
 
+/// Where the "door" slices of one source go on the way to a birth (cumulative; observation-only, changes nothing).
+struct SourceCounters
+{
+    long slices = 0, door = 0, no_support = 0, bearing_only = 0, no_cam = 0, no_wall = 0, pushed = 0, pos_ev = 0;
+    double w_wall = 0.0, w_pool = 0.0, ev = 0.0, ev_max = 0.0;   // sums of: wall/variance weight, pooled-view factor, birth evidence
+};
+
 class DoorCore
 {
 public:
@@ -207,6 +214,7 @@ public:
 
     /// The fit's stdout lines and CSV rows go to sinks.diag too (streams "stdout", "ai2_log.csv", "ai2_log_phi.csv").
     void connect(TrackerWorld* world, DoorCoreSinks sinks = {});
+    [[nodiscard]] const SourceCounters& counters(int source) const { return counters_[source != 0 ? 1 : 0]; }
 
     /// Take the cycle's media (mask packet, bpearl sweep) into the views. step() calls it; call it ALONE on a cycle
     /// whose decision step does not run (no room) — see sensing.h.
@@ -263,6 +271,10 @@ private:
     std::optional<Vec2f> cam_xy_;      // the camera's room xy this cycle (the ricoh slices' ray origin)
     RicohViewPool ricoh_views_;
     std::vector<std::pair<int, Vec2f>> ricoh_fold_;   // (detection index, door xy) of this frame's ricoh slices        // pooled viewpoints of the ricoh birth candidates
+    RicohBirthBank ricoh_bank_;
+    std::vector<RicohBirthBank::Look> ricoh_looks_;   // this frame's ricoh door detections (bank input), index = det index below
+    std::vector<int> ricoh_hit_det_;
+    SourceCounters counters_[2];   // per source (0 ZED, 1 RICOH): where do door slices die on the way to a birth?
     int  dbg_cycles_ = 0;     // the "[tracker] instances=…" print throttle
     int  dets_csv_rows_ = 0;  // etc/door_dets_log.csv's cycle column (one per tracker call)
     std::uint64_t create_seq_ = 0;

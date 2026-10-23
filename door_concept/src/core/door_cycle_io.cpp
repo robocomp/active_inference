@@ -489,6 +489,7 @@ void fields(Writer& w, const MaskPacket& x)
         x.frame_dt_s, x.room_T_zed_capture, x.room_T_robot_capture, x.room_zed_chain, x.ms_since_last_frame); return; }
     w(x.valid, x.frame_id, x.timestamp_ms, x.slices, x.cam_twist, x.frame_dt_s, x.room_T_zed_capture,
       x.room_T_robot_capture, x.room_zed_chain, x.ms_since_last_frame);
+    if (w.version >= 3) w(x.ricoh_windows);
     put_words(w, x.support_points_cam);
     put_derived(w, x.support_points, x.support_points_cam, x.room_T_zed_capture);
     put_pixels(w, x.mask_pixels);
@@ -500,6 +501,7 @@ void fields(Reader& r, MaskPacket& x)
         x.frame_dt_s, x.room_T_zed_capture, x.room_T_robot_capture, x.room_zed_chain, x.ms_since_last_frame); return; }
     r(x.valid, x.frame_id, x.timestamp_ms, x.slices, x.cam_twist, x.frame_dt_s, x.room_T_zed_capture,
       x.room_T_robot_capture, x.room_zed_chain, x.ms_since_last_frame);
+    if (r.version >= 3 and r.ok) r(x.ricoh_windows);
     if (r.ok) get_words(r, x.support_points_cam);
     if (r.ok) get_derived(r, x.support_points, x.support_points_cam, x.room_T_zed_capture);
     if (r.ok) get_pixels(r, x.mask_pixels);

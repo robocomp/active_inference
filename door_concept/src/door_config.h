@@ -399,6 +399,7 @@ struct DoorConfig
     float tracker_gate_mahalanobis = 9.0f;    // χ²₂ gate (~3σ) for a mask↔instance match once it has a cov
     float tracker_gate_fallback_m  = 0.40f;   // metric XY gate (m) before an instance has a usable covariance
     float tracker_detection_noise_m = 0.20f;  // R in the association innovation cov S=P+R²I (≥ centroid-vs-fit offset)
+    float ricoh_hit_rate = 0.35f, ricoh_plane_std_m = 0.10f;   // ricoh birth bank (ricoh_door_birth.h)
     float tracker_birth_frames     = 6.6f;    // IDEAL OBSERVATIONS of unexplained evidence before a birth
                                               // (8 rescaled by the graded model's median conf 0.826 — see config.toml)
     float tracker_birth_min_sep_m  = 0.70f;   // a birth must be ≥ this (m) from every existing door (anti-dup)

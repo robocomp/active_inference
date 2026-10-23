@@ -254,7 +254,10 @@ int main()
         }
         CHECK(w.created == 0 and removes == 0);
     }
-    {   // a PARKED robot: 150 frames of one viewpoint are one observation ⇒ a stationary robot cannot accumulate a phantom
+    {   // a PARKED robot, a perfect looked-at ricoh door (Q2): the ricoh bank settles it by the Bernoulli LLR of each frame, so a
+        // consistent detection of a wall door IS enough from one viewpoint (the gold4 DOOR_0 was only ever seen parked) - born ONCE,
+        // at the wall, and not before the evidence amounts to birth_frames ideal hits (ln(h/pc) each). The tracker's own streak
+        // could never do this (its candidate expires on the first miss); what keeps a parked phantom out is the bank's absence term.
         FakeWorld w;
         DoorCore core(cfg);
         core.connect(&w);
@@ -263,7 +266,21 @@ int main()
             auto sc = ricoh_scene(wall_door, 0, 0.9f, 0.02f);
             core.step(cycle_input(k, k, sc));
         }
-        CHECK(w.created == 0);
+        CHECK(w.created == 1);
+    }
+    {   // a PARKED robot whose ricoh sees the door only 1 frame in 3 (the detector runs on one of three strips per frame, the
+        // others are 'not looked at'): still born once - the unlooked frames cost nothing only if the producer says which strip ran;
+        // with no footprint published they count as misses, and the evidence must still outweigh them (hit rate 1/3 > break-even)
+        FakeWorld w;
+        DoorCore core(cfg);
+        core.connect(&w);
+        for (int k = 1; k <= 600; ++k)
+        {
+            // frames the door's strip was not processed: a ricoh slice of something unrelated (mid-room, no wall) - the camera ran
+            auto sc = (k % 3 == 0) ? ricoh_scene(wall_door, 0, 0.9f, 0.02f) : ricoh_scene(Vec2f(-2.0f, -1.0f), 0, 0.9f, 0.02f);
+            core.step(cycle_input(k, k, sc));
+        }
+        CHECK(w.created == 1);
     }
     {   // a slice whose LiDAR range disagrees with the wall its bearing meets (depth landed on something else) births nothing
         FakeWorld w;

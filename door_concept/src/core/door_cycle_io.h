@@ -85,7 +85,7 @@ using Mat3f = Eigen::Matrix3f;
 using Mat4d = Eigen::Matrix4d;
 using Mat6d = Eigen::Matrix<double, 6, 6>;
 
-inline constexpr std::uint32_t kCycleIoVersion = 2;     // written
+inline constexpr std::uint32_t kCycleIoVersion = 3;     // written
 inline constexpr std::uint32_t kCycleIoOldestReadable = 1;   // read (v1: unpacked arrays)
 
 /// DSR ids carry the generating agent's id in their low bits (cortex core/id_generator.h, agent_id_size = 12).
@@ -248,6 +248,11 @@ struct MaskPacket
     std::optional<Mat4d> room_T_robot_capture;     // room←robot at timestamp_ms, Interpolated (anchor mask frames)
     std::vector<RtChainStep> room_zed_chain;       // room←zed at timestamp_ms with per-edge covariance (chain cov)
     std::int64_t ms_since_last_frame = -1;         // the ingestor's liveness probe at refresh
+    /// The RICOH's observation footprint of THIS frame: the ROOM-frame azimuth intervals (x = from, y = to, rad, counter-clockwise)
+    /// of the panorama strips the detector actually ran on. The 360 detector segments ONE of three vertical strips per frame
+    /// (Ricoh.yolo_strips_per_frame = 1), so a door outside the strip was NOT LOOKED AT - which is not the same as not seen.
+    /// EMPTY = unknown (a producer that does not publish it): every bearing counts as looked at, as before. v3 of the tape format.
+    std::vector<Vec2f> ricoh_windows;
     bool operator==(const MaskPacket&) const = default;
 };
 

@@ -348,6 +348,9 @@ void DoorCore::associate(const DoorCycleInput& in, DoorCycleOutput& out)
     // Detections ← this frame's "door" mask slices (carry the slice index for the assignment).
     dets_.clear();
     ricoh_fold_.clear();
+    ricoh_looks_.clear(); ricoh_hit_det_.clear();
+    const float ricoh_bar = cfg.tracker_birth_frames
+        * std::log(std::clamp(cfg.ricoh_hit_rate, 1e-3f, 0.999f) / std::clamp(cfg.exist_clutter_prob, 1e-3f, 0.999f));
     const auto& pkt = masks_.packet();
 
     // ★BIRTH EVIDENCE — the shared CREATE policy (common/instance_tracker/birth_evidence.h). This agent fed
@@ -389,7 +392,12 @@ void DoorCore::associate(const DoorCycleInput& in, DoorCycleOutput& out)
                 // variance (depth_var) and the fit already adds it to R, so it moves the belief exactly as much as
                 // its information warrants; below, the same ratio weights its BIRTH evidence. What still excludes
                 // a slice is having no 3-D support at all (bearing only, has_depth == 0): there is nothing to place.
-            if (sl.label != "door" or sl.support_end <= sl.support_begin or not sl.has_depth) continue;
+            auto& ctr = counters_[sl.source != 0 ? 1 : 0];
+            ++ctr.slices;
+            if (sl.label != "door") continue;
+            ++ctr.door;
+            if (sl.support_end <= sl.support_begin) { ++ctr.no_support; continue; }
+            if (not sl.has_depth) { ++ctr.bearing_only; continue; }
 
             // ★A `door` LABEL IS NOT A DOOR-SIZED THING. YOLO-sem sometimes returns a positive door mask
             // delimiting a much smaller region — a jamb, a panel edge, a fragment of the leaf. It is a
@@ -456,17 +464,22 @@ void DoorCore::associate(const DoorCycleInput& in, DoorCycleOutput& out)
             // bearing meets (a door lies in a wall), fused with it, and its frames are pooled per viewpoint
             // (ricoh_door_birth.h). A ZED slice is untouched (weight 1, its own position).
             float ricoh_w = 1.0f;
+            std::optional<RicohBirthBank::Look> ricoh_look;   // the bank's input for this slice
             std::optional<Vec2f> ricoh_fold;       // the view to fold into the pool if this slice ends up UNASSOCIATED
             dv.sensor = sl.source;
             if (sl.source != 0)
             {
-                if (not cam_xy_.has_value()) continue;               // no camera pose ⇒ no ray ⇒ no placement
+                if (not cam_xy_.has_value()) { ++ctr.no_cam; continue; }   // no camera pose ⇒ no ray ⇒ no placement
                 const auto rr = ricoh_range(world_->room_polygon(), cam_xy_.value(), dv.xy, sl.depth_var,
                                             cfg.ai2_sigma_base_m, cfg.ai2_range_noise_lat_per_m,
-                                            cfg.tracker_detection_noise_m * cfg.tracker_detection_noise_m);
+                                            cfg.tracker_detection_noise_m * cfg.tracker_detection_noise_m,
+                                            cfg.ricoh_plane_std_m * cfg.ricoh_plane_std_m, true);
                 dv.xy = rr.xy;
                 dv.xy_var = rr.var;                                  // its OWN measurement covariance (gate + candidates)
                 ricoh_w = rr.weight;
+                ricoh_look = RicohBirthBank::Look{rr.xy, rr.var, rr.weight * std::clamp(sl.confidence, 0.0f, 1.0f)};   // the label's own reliability scales the hit
+                if (rr.weight <= 0.0f) ++ctr.no_wall;
+                ctr.w_wall += rr.weight;
                 if (birth_new_obs and ricoh_w > 0.0f)
                 {
                     ricoh_w *= ricoh_views_.peek(cam_xy_.value(), dv.xy, 0.5f * cfg.door_prior_w_m, cfg.tracker_birth_min_sep_m);
@@ -477,6 +490,11 @@ void DoorCore::associate(const DoorCycleInput& in, DoorCycleOutput& out)
             // One admissible, reliable observation — never a cycle. See birth_evidence.h.
             dv.birth_evidence = rc::birth::evidence({sl.confidence, sl.range}, birth_detect,
                                                     birth_new_obs, frame_admissible(sl, ego_, cfg)) * ricoh_w;
+            // ★A PLACE THE BANK HAS RIPENED is credited a full birth worth of evidence by its next detection (the tracker still
+            // decides: min separation, association, claims below). See RicohBirthBank for why the tracker's own streak cannot do this.
+            if (ricoh_look.has_value() and birth_new_obs
+                and ricoh_bank_.ripe_at(ricoh_look->xy, ricoh_look->var, cfg.tracker_gate_mahalanobis, ricoh_bar) != nullptr)
+                dv.birth_evidence = std::max(dv.birth_evidence, cfg.tracker_birth_frames);
             // ⚠size_w deliberately NOT multiplied in — see the note above. Carried only to be logged.
             dv.dbg_size_w = size_w;
 
@@ -500,6 +518,11 @@ void DoorCore::associate(const DoorCycleInput& in, DoorCycleOutput& out)
                     diag("stdout", std::format("[door] birth cand CLAIMED by '{}' ({:.0f}%): birth_ev x{:.2f}\n",
                                                who ? who->node : "?", 100.0f * (1.0f - unclaimed), unclaimed), out);
             }
+            ++ctr.pushed;
+            if (sl.source == 0) ctr.w_wall += 1.0;
+            ctr.w_pool += ricoh_w;
+            if (ricoh_look.has_value() and birth_new_obs)
+            { ricoh_hit_det_.push_back(static_cast<int>(dets_.size())); ricoh_looks_.push_back(*ricoh_look); }
             if (ricoh_fold.has_value()) ricoh_fold_.push_back({static_cast<int>(dets_.size()), ricoh_fold.value()});
             dets_.push_back(dv);
         }
@@ -534,13 +557,32 @@ void DoorCore::associate(const DoorCycleInput& in, DoorCycleOutput& out)
     }
 
     res_ = tracker_.update(tracks, dets_);
+    // The ricoh birth bank: this frame is one new observation of every ricoh-seen place (hit if a detection explains it, else a look).
+    if (birth_new_obs and cam_xy_.has_value()
+        and (not pkt.ricoh_windows.empty() or std::ranges::any_of(pkt.slices, [](const MaskSlice& q) { return q.source != 0; })))
+    {
+        std::vector<RicohBirthBank::Look> unassoc;
+        for (std::size_t k = 0; k < ricoh_hit_det_.size(); ++k)
+            if (res_.assignment[static_cast<std::size_t>(ricoh_hit_det_[k])] < 0) unassoc.push_back(ricoh_looks_[k]);
+        std::vector<Vec2f> track_xy;
+        for (const auto& t : tracks) track_xy.push_back(t.xy);
+        const auto poly = world_->room_polygon();
+        const Vec2f cam = cam_xy_.value();
+        ricoh_bank_.update(unassoc, cfg.ricoh_hit_rate, cfg.exist_clutter_prob, cfg.tracker_gate_mahalanobis,
+                           [&](const Vec2f& xy)
+                           { return (ricoh_looked(pkt.ricoh_windows, cam, xy) ? 1.0f : 0.0f)   // not looked at ⇒ no absence
+                                    * rc::birth::observation_weight({1.0f, (xy - cam).norm()}, birth_detect)
+                                    * los_weight(poly, cam, xy, cfg.ai2_sigma_base_m, cfg.ai2_range_noise_lat_per_m); },
+                           track_xy, cfg.tracker_birth_min_sep_m);
+        for (const int b : res_.births) ricoh_bank_.drop_near(dets_[static_cast<std::size_t>(b)].xy, cfg.tracker_birth_min_sep_m);
+    }
     // Pool the viewpoint of a ricoh slice only if it is NOT explained by a live door (an associated slice is not a birth look).
     if (birth_new_obs and cam_xy_.has_value())
     {
         for (const auto& [di, tgt] : ricoh_fold_)
             if (res_.assignment[static_cast<std::size_t>(di)] < 0)
                 ricoh_views_.credit(cam_xy_.value(), tgt, 0.5f * cfg.door_prior_w_m, cfg.tracker_birth_min_sep_m);
-        ricoh_views_.end_frame();
+        ricoh_views_.end_frame([&](const Vec2f& tgt) { return ricoh_looked(pkt.ricoh_windows, cam_xy_.value(), tgt); });
     }
 
     const int n_assigned = static_cast<int>(std::count_if(res_.assignment.begin(), res_.assignment.end(),
@@ -553,6 +595,15 @@ void DoorCore::associate(const DoorCycleInput& in, DoorCycleOutput& out)
     info_.assigned       = n_assigned;
     info_.tracker_births = static_cast<int>(res_.births.size());
     info_.tracker_deaths = static_cast<int>(res_.deaths.size());
+    if (dbg_cycles_ % 30 == 0)
+        for (int k = 0; k < 2; ++k)
+        {
+            const auto& c = counters_[k];
+            diag("stdout", std::format("[birth-src {}] slices={} door={} no_support={} bearing_only={} no_cam={} wall_w0={} pushed={} ev>0={} "
+                                       "sum(wall_w)={:.2f} sum(w_after_pool)={:.2f} sum(ev)={:.3f} max(ev)={:.3f}\n",
+                                       k == 0 ? "ZED" : "RICOH", c.slices, c.door, c.no_support, c.bearing_only, c.no_cam, c.no_wall,
+                                       c.pushed, c.pos_ev, c.w_wall, c.w_pool, c.ev, c.ev_max), out);
+        }
     if (++dbg_cycles_ % 30 == 0 or not res_.births.empty() or not res_.deaths.empty())
         diag("stdout", std::format("[tracker] instances={} door_dets={} assigned={} unassigned={} births={} deaths={}\n",
                                    tracks.size(), dets_.size(), n_assigned,
