@@ -43,6 +43,7 @@ checked mission runs the same way every time and can be shown to the person befo
 - The chat says something happened that the interpreter did not report.
 - A mission runs, or a fix runs, without the person's yes.
 - `stop` (fast path or tool) fails to win over a running mission.
+- A paused mission keeps advancing, or times out, while paused.
 - The model invents a door, room or object name, and it reaches the person's confirmation.
 
 ## 5. Design
@@ -153,10 +154,35 @@ there, and come back to room_1."*
    or a `cross` back). It returns to the exact start pose only if the controller already publishes that anchor's
    pose where chat_agent can read it. No new controller output is added for this.
 
-### 5.6 Stop
+### 5.6 Pause, resume, kill, stop (person's decision, 2026-10-23)
 
-The existing `is_stop` fast path and the `stop` tool must abort a running mission at once. The controller's existing
-Stop handling is assumed to cover chat-started missions. The builder verifies this and adds a test.
+A running mission can be paused at any moment and killed at any moment.
+
+- **Pause** takes effect at once:
+  - The robot holds.
+  - The interpreter freezes: no tick advances a step.
+  - The running step's clock and `budget_s` stop counting, as do any `wait s=`.
+  - Today, the controller panel's Pause only holds the base (`paused_`, `specificworker.cpp` ~533), while the
+    interpreter keeps ticking. That is the gap to close.
+- **Resume** has step resolution. The step that was interrupted is cancelled and restarts from its beginning: a
+  `cross` starts again from its approach, and its `retry` count is not consumed by the pause. Steps already
+  satisfied stay satisfied.
+  - The existing `Interpreter::resume()`, which ends a `wait`, keeps its meaning under a different trigger. The
+    builder must not conflate the two.
+- **Kill** aborts the whole mission. This exists today as `cancel` (`aborted|<outcome>`).
+- **Stop** (`is_stop` fast path, `stop` tool) is a kill plus the robot's stop, as today.
+- **Who can pause, resume or kill:** the person only, with no model in the loop:
+  - by chat, through fixed fast paths like `is_stop`: "pause", "continue"/"resume", "cancel the mission"/"abort";
+  - through the controller panel's buttons.
+
+  A paused mission is not a failure, so the model is not woken.
+- **Progress lines:** `⏸ paused at 2/5 exploring room_2`, `▶ resumed: 2/5 exploring room_2 (restarted)`,
+  `■ mission cancelled`.
+- **Graph contract:** the paused state must be visible on `controller_mission` (for example
+  `state=paused|<step>`), so the chat, the plan window and the STATE read one truth.
+
+The builder verifies that each of these works on chat-started missions and adds tests (interpreter unit tests for
+freeze and restart, plus the live checks in §7).
 
 ## 6. Open decision: how the model writes the mission
 
@@ -194,6 +220,13 @@ fix.
    - the robot ends in room_1;
    - one run with door_1 held shut exercises §5.5.
 3. **Stop test:** "stop" mid-mission halts the robot within the controller's normal stop latency.
+4. **Pause test:** "pause" during the `explore` step:
+   - the robot holds;
+   - waiting 2× the remaining budget does not fail or advance the step;
+   - "continue" restarts `explore` with its full budget;
+   - the mission completes.
+
+   "cancel the mission" while paused ends it as `aborted`.
 
 ## 8. Left to the builder
 
