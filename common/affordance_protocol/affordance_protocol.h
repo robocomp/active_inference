@@ -74,6 +74,10 @@ struct Contract
 
     // Completion predicate c: AND-ed clauses on the feedback node, held stable_n cycles, with timeout.
     std::vector<GoalClause> goal;
+    // ★ PRECONDITION clauses (Task O): about WHERE THE ROBOT STANDS (e.g. door_reach_prob = P(in band, facing)), not about the world
+    // the affordance changes. NEVER part of the completion predicate (evaluate_goal reads `goal` only); read by the controller's
+    // orient/Place settle test. Wire: rides the goal arrays with the attribute name prefixed kPreflag, split out by read_contract.
+    std::vector<GoalClause> pre;
     int    stable_n   = 3;
     float  timeout_ms = 10000.0f;
     OnFail on_fail    = OnFail::Consume;
@@ -148,6 +152,7 @@ public:
     // Completion predicate — clauses are AND-ed; `until` then `and_` reads naturally.
     ContractBuilder& until(std::string a, CompareOp op, float v) { c_.goal.push_back({std::move(a), op, v}); return *this; }
     ContractBuilder& and_ (std::string a, CompareOp op, float v) { c_.goal.push_back({std::move(a), op, v}); return *this; }
+    ContractBuilder& precondition(std::string a, CompareOp op, float v) { c_.pre.push_back({std::move(a), op, v}); return *this; }
     ContractBuilder& stable(int n)        { c_.stable_n   = n;           return *this; }
     ContractBuilder& timeout_ms(float ms) { c_.timeout_ms = ms;          return *this; }
     ContractBuilder& timeout_s (float s)  { c_.timeout_ms = s * 1000.0f; return *this; }
@@ -382,6 +387,8 @@ inline std::optional<std::string> attr_string(const DSR::Attribute& a)
 
 // ─── producer: write per-node overrides onto the affordance node ──────────────
 // (Caller does G.update_node(node) afterwards, as usual.)
+inline constexpr std::string_view kPreflag = "pre:";
+
 inline void write_contract(DSR::DSRGraph& G, DSR::Node& node, const Contract& c)
 {
     G.add_or_modify_attrib_local<aff_policy_att>      (node, std::string(to_string(c.policy)));
@@ -393,6 +400,7 @@ inline void write_contract(DSR::DSRGraph& G, DSR::Node& node, const Contract& c)
     std::vector<std::string> attrs, ops; std::vector<float> vals;
     attrs.reserve(c.goal.size()); ops.reserve(c.goal.size()); vals.reserve(c.goal.size());
     for (const auto& g : c.goal) { attrs.push_back(g.attr); ops.emplace_back(to_string(g.op)); vals.push_back(g.value); }
+    for (const auto& g : c.pre)  { attrs.push_back(std::string(kPreflag) + g.attr); ops.emplace_back(to_string(g.op)); vals.push_back(g.value); }
     G.add_or_modify_attrib_local<aff_goal_attrs_att>  (node, detail::join(attrs, '|'));
     G.add_or_modify_attrib_local<aff_goal_ops_att>    (node, detail::join(ops, '|'));
     G.add_or_modify_attrib_local<aff_goal_values_att> (node, vals);
@@ -462,7 +470,16 @@ inline Contract read_contract(const DSR::Node& node, std::string_view parent_typ
                     std::fprintf(stderr, "[affordance]   - %s\n", why.c_str());
             }
             else if (not parsed.clauses.empty())
-                c.goal = parsed.clauses;
+            {
+                std::vector<GoalClause> goal, pre;
+                for (const auto& cl : parsed.clauses)
+                {
+                    if (cl.attr.starts_with(kPreflag)) pre.push_back({cl.attr.substr(kPreflag.size()), cl.op, cl.value});
+                    else goal.push_back(cl);
+                }
+                if (not goal.empty()) c.goal = std::move(goal);
+                c.pre = std::move(pre);
+            }
         }
     }
     geti("aff_goal_stable_n", c.stable_n);
