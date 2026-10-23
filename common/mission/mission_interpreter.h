@@ -70,6 +70,8 @@ public:
     virtual void halt() = 0;
     /// The robot's pose now, for `anchor`. nullopt = not known.
     virtual std::optional<Pose> pose() = 0;
+    /// The room the robot is physically in now, a proto-room included, for `cross … bind=NAME`. nullopt = not known.
+    virtual std::optional<std::string> current_room() = 0;
     /// A predicate's belief now: a probability, or 0 / 1 for a fact. nullopt = cannot be evaluated now.
     virtual std::optional<double> eval(const Pred& p) = 0;
 };
@@ -116,6 +118,7 @@ public:
         title_ = std::move(m.title);
         anchors_ = std::move(m.anchors);
         captured_.clear();
+        vars_.clear();
         root_step_ = Step{.id = "", .op = "seq", .steps = std::move(m.steps)};
         root_ = build(root_step_);
         state_ = State::Running;
@@ -260,6 +263,7 @@ private:
     State state_ = State::Idle;
     std::string title_, abort_outcome_, last_event_;
     std::map<std::string, Pose, std::less<>> anchors_, captured_;
+    std::map<std::string, std::string, std::less<>> vars_;   ///< `bind=NAME` → the room name; cleared in start()
     Step root_step_{};
     Run root_{};
     std::uint64_t tick_ = 0;
@@ -312,8 +316,26 @@ private:
         for (auto& k : r.kids) reset(k);
     }
 
-    bool holds(const Pred& p)
+    /// A ref with a `$NAME` replaced by the node it was bound to. False = the name is not bound (yet).
+    bool substitute(Ref& ref) const
     {
+        if (ref.kind != Ref::Kind::Var) return true;
+        const auto v = vars_.find(ref.name);
+        if (v == vars_.end()) return false;
+        ref = Ref{.kind = Ref::Kind::Node, .name = v->second};
+        return true;
+    }
+    bool substitute(Pred& p) const
+    {
+        for (auto& [_, ref] : p.refs)
+            if (not substitute(ref)) return false;
+        return true;
+    }
+
+    bool holds(const Pred& pred)
+    {
+        Pred p = pred;
+        if (not substitute(p)) return false;   // an unbound name is a belief that cannot be evaluated
         const auto v = host_.eval(p);
         if (not v.has_value()) return false;
         if (not p.cmp.has_value()) return *v != 0.0;
@@ -439,6 +461,7 @@ private:
             host_.halt();
             return satisfy(r, now);
         }
+        if (s.op == "report") return satisfy(r, now);   // the text is the model's, read by the chat; nothing to do here
         if (s.op == "anchor")
         {
             const auto p = host_.pose();
@@ -451,7 +474,7 @@ private:
         {
             if (until.has_value() and holds(*until)) return satisfy(r, now, "until");
             auto resolved = resolve(s);
-            if (not resolved.has_value()) return fail(r, now, "no_anchor", s.id);
+            if (not resolved.has_value()) return fail(r, now, resolve_failure_, s.id);
             r.resolved = std::move(*resolved);
             if (auto refused = host_.start(r.resolved); refused.has_value()) return fail(r, now, *refused, s.id);
             r.started = true;
@@ -480,6 +503,12 @@ private:
                 const Pred in_room{.name = "in_room", .refs = {{"room", Ref{.kind = Ref::Kind::Node, .name = *expect}}}};
                 if (not holds(in_room)) return fail(r, now, "wrong_room", s.id);
             }
+            if (const auto& name = s.bind; name.has_value())
+            {
+                const auto room = host_.current_room();
+                if (not room.has_value()) return fail(r, now, "no_room", s.id);
+                vars_[*name] = *room;
+            }
             satisfy(r, now);
         }
     }
@@ -493,19 +522,39 @@ private:
     }
 
     /// A copy of the step with every anchor replaced by its pose: captured during this mission, else declared.
-    std::optional<Step> resolve(const Step& s) const
+    /// and every `$NAME` by the room it was bound to. nullopt: resolve_failure_ says why (no_anchor | unbound).
+    std::optional<Step> resolve(const Step& s)
     {
         Step out = s;
         for (auto& [_, v] : out.args)
-            if (auto* ref = std::get_if<Ref>(&v); ref != nullptr and ref->kind == Ref::Kind::Anchor)
+        {
+            if (auto* pred = std::get_if<Pred>(&v); pred != nullptr)
+            {
+                if (not substitute(*pred)) return unresolved("unbound");
+                continue;
+            }
+            auto* ref = std::get_if<Ref>(&v);
+            if (ref == nullptr) continue;
+            if (ref->kind == Ref::Kind::Var)
+            {
+                if (not substitute(*ref)) return unresolved("unbound");
+            }
+            else if (ref->kind == Ref::Kind::Anchor)
             {
                 const auto c = captured_.find(ref->name);
                 const auto d = anchors_.find(ref->name);
-                if (c == captured_.end() and d == anchors_.end()) return std::nullopt;
+                if (c == captured_.end() and d == anchors_.end()) return unresolved("no_anchor");
                 *ref = Ref{.kind = Ref::Kind::Pose, .pose = c != captured_.end() ? c->second : d->second};
             }
+        }
         return out;
     }
+    std::nullopt_t unresolved(std::string why)
+    {
+        resolve_failure_ = std::move(why);
+        return std::nullopt;
+    }
+    std::string resolve_failure_{};
 
     void cancel_subtree(Run& r, std::uint64_t now, const std::string& outcome)
     {

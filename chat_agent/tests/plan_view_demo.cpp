@@ -46,6 +46,7 @@ struct ScriptHost final : Host
     void say(const std::string&) override {}
     void halt() override {}
     std::optional<Pose> pose() override { return Pose{.room = "room_1", .x = 0.4, .y = -1.1, .yaw = 1.57}; }
+    std::optional<std::string> current_room() override { return "room_1"; }
     std::optional<double> eval(const Pred& p) override   // the door was crossed into room_2
     {
         if (p.name == "in_room") return p.refs.at("room").name == "room_2" ? 1.0 : 0.0;

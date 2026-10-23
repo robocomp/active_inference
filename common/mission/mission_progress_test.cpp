@@ -46,6 +46,7 @@ struct RunHost final : rc::mission::Host
     void say(const std::string&) override {}
     void halt() override {}
     std::optional<Pose> pose() override { return Pose{.room = "room_1", .x = 1.25, .y = -0.5, .yaw = 0.5}; }
+    std::optional<std::string> current_room() override { return "room_1"; }
     std::optional<double> eval(const Pred&) override { return std::nullopt; }
 };
 }   // namespace

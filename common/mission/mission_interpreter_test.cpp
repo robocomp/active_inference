@@ -39,6 +39,8 @@ struct FakeHost final : Host
     std::map<std::string, std::string> refuse;     // by step id: start() refuses with this reason
     std::map<std::string, double> belief;          // by predicate text (pred_text); absent = unknown
     std::optional<Pose> where = Pose{.room = "room_1", .x = 1, .y = 2, .yaw = 0.5, .sigma_xy = 0.1};
+    std::optional<std::string> room = "room_1";    // the room the robot is in now
+    std::vector<std::string> evaled;               // pred_text of every predicate eval() saw
 
     std::optional<std::string> start(const Step& s) override
     {
@@ -57,8 +59,10 @@ struct FakeHost final : Host
     void say(const std::string& text) override { log.push_back("say " + text); }
     void halt() override { log.push_back("halt"); }
     std::optional<Pose> pose() override { return where; }
+    std::optional<std::string> current_room() override { return room; }
     std::optional<double> eval(const Pred& p) override
     {
+        evaled.push_back(text_detail::pred_text(Pred{.name = p.name, .refs = p.refs}));
         const auto it = belief.find(text_detail::pred_text(Pred{.name = p.name, .refs = p.refs}));
         return it == belief.end() ? std::nullopt : std::optional<double>(it->second);
     }
@@ -537,6 +541,49 @@ int main()
         CHECK(in.span().first == 0 and in.span().second == 5);
         in.start(parse("mission\n  say hi\n"), 10);
         CHECK(in.serial() == 2);
+    }
+
+    // ── report is satisfied at once, with no host call; cross bind=NAME binds $NAME to the room entered ──────────
+    {
+        FakeHost h;
+        Interpreter in(h);
+        CHECK(not in.start(parse("mission\n  cross door_1 bind=next\n  explore $next budget_s=5s\n  report \"x\"\n"), 0).has_value());
+        in.tick(0);
+        CHECK(h.log == std::vector<std::string>{"start 1:cross"});
+        h.room = "room_2";
+        h.done("1");
+        in.tick(10);
+        CHECK(h.started.size() == 2 and h.started.back().op == "explore");
+        const auto room = h.started.back().ref("room");
+        CHECK(room.has_value() and room->name == "room_2" and room->kind == Ref::Kind::Node);
+        in.tick(5010);
+        CHECK(in.steps().at(2).state == Interpreter::StepState::Satisfied);
+        CHECK(h.count("start 3:report") == 0);
+        CHECK(in.state() == S::Completed);
+    }
+    {
+        FakeHost h;
+        Interpreter in(h);
+        in.start(parse("mission\n  cross door_1 bind=next\n  explore $next budget_s=5s\n"), 0);
+        in.tick(0);
+        h.room = std::nullopt;
+        h.done("1");
+        in.tick(10);
+        CHECK(in.status() == "failed|1|no_room");
+        CHECK(h.started.size() == 1);
+    }
+    // a $NAME inside a predicate ref is substituted before the host evaluates it
+    {
+        FakeHost h;
+        Interpreter in(h);
+        in.start(parse("mission\n  cross door_1 bind=next\n  wait until=in_room($next) s=5\n"), 0);
+        in.tick(0);
+        h.room = "room_2";
+        h.done("1");
+        in.tick(10);
+        in.tick(20);
+        CHECK(not h.evaled.empty() and h.evaled.back() == text_detail::pred_text(Pred{.name = "in_room", .refs = {{"room", Ref{.kind = Ref::Kind::Node, .name = "room_2"}}}}));
+        CHECK(h.evaled.empty() or h.evaled.back().find("$") == std::string::npos);
     }
 
     test_transitions_per_attempt();

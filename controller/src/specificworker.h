@@ -179,6 +179,7 @@ private:
 		void say(const std::string &text) override;
 		void halt() override;
 		std::optional<rc::mission::Pose> pose() override;
+		std::optional<std::string> current_room() override;
 		std::optional<double> eval(const rc::mission::Pred &p) override;
 	private:
 		SpecificWorker &w_;

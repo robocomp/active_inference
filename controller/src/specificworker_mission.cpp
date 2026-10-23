@@ -249,6 +249,12 @@ std::optional<rc::mission::Pose> SpecificWorker::MissionHost::pose()
 	return rc::mission::Pose{.room = gs.room_name, .x = p->pos.x(), .y = p->pos.y(), .yaw = p->theta};
 }
 
+std::optional<std::string> SpecificWorker::MissionHost::current_room()
+{
+	const std::string &here = w_.world_model_.graph_state().room_name;
+	return here.empty() ? std::nullopt : std::optional<std::string>(here);
+}
+
 std::optional<double> SpecificWorker::MissionHost::eval(const rc::mission::Pred &p)
 {
 	if (p.name == "in_room")

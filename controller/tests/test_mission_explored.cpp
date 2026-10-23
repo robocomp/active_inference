@@ -44,6 +44,7 @@ struct GraphHost final : Host
     void say(const std::string &) override {}
     void halt() override {}
     std::optional<Pose> pose() override { return std::nullopt; }
+    std::optional<std::string> current_room() override { return "room_1"; }
     std::optional<double> eval(const Pred &p) override
     {
         if (p.name == "explored") return rc::mission::explored_belief(G, p.refs.at("room").name);
