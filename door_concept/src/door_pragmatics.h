@@ -159,6 +159,9 @@ inline rc::affordance::Contract approach_contract(const DoorPragmaticCfg& p)
         .center("door_roi_offset")
         .valid ("door_roi_valid")
         .until ("door_reach_prob", GE, kApproachCompleteProb)   // ONE value, read by the pose solver too (door_approach_pose.h)
+        // ALSO a precondition: the approach's completion IS reaching the band, so the goal keeps the clause (goal_met unchanged) and the
+        // controller's Place settle test reads the same level from `pre` (Task O) instead of a fixed arrival tolerance
+        .precondition("door_reach_prob", GE, kApproachCompleteProb)
         .still (0.10f, 0.15f)
         .stable(2).timeout_s(p.approach_timeout_s).on_fail(rc::affordance::OnFail::Consume);
 }
