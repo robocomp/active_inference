@@ -74,6 +74,18 @@ int main()
     }
     CHECK(examples >= 5);
 
+    // the prose claims in missions.md / doors.md are pinned here, not just the examples
+    using rc::mission::parse_text;
+    CHECK(not parse_text("mission \"x\"\n  go_to door_1\n").has_value());
+    CHECK(not parse_text("mission \"x\"\n  go_to passage:p@room_2\n").has_value());
+    CHECK(parse_text("mission \"x\"\n  go_to pose:room_1(1, 2)\n").has_value());
+    CHECK(parse_text("mission \"x\"\n  anchor a\n  go_to anchor:a\n").has_value());
+    CHECK(not parse_text("mission \"x\"\n  open door_1 bind=n\n").has_value());
+    CHECK(not parse_text("mission \"x\"\n  repeat until=in_room(room_1)\n    stop\n").has_value());
+    CHECK(parse_text("mission \"x\"\n  repeat until=in_room(room_1) budget_s=30s\n    stop\n").has_value());
+    CHECK(parse_text("mission \"x\"\n  wait until=door_open(door_1)>=0.8 s=30s\n").has_value());
+    CHECK(parse_text("mission \"x\"\n  cross passage:passage_0@room_2 expect=room_1\n").has_value());
+
     std::println("test_skills: {} checks, {} failed", checks, failures);
     return failures == 0 ? 0 : 1;
 }

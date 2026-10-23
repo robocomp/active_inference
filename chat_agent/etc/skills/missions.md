@@ -10,7 +10,7 @@ A step is: op, positional values, then key=value keywords. Numbers carry their u
 Steps:
 - cross DOOR [expect=ROOM]: approach the door, open it, go through
 - open DOOR
-- go_to REF [standoff_m=0.8m]: REF is a door, anchor:NAME, or passage:NAME@ROOM
+- go_to REF [standoff_m=0.8m]: REF is anchor:NAME or pose:ROOM(x, y[, yaw]); never a door (doors: cross / open)
 - approach OBJECT [side=right]
 - explore ROOM budget_s=60s [until=explored(ROOM)>=0.9]: budget_s is required
 - wait s=5s [until=PRED]
@@ -18,11 +18,11 @@ Steps:
 - say "text": shown to the person
 - report "topic": the model describes the room the robot is in now
 - anchor NAME: a step; remembers this spot; return with go_to anchor:NAME
-- repeat 3 / seq: their body is the steps indented below
+- repeat 3 / seq: their body is the steps indented below; repeat until=PRED also needs budget_s=
 - stop
-Any step: retry=N, on_fail=skip|abort, bind=NAME.
+Any step: retry=N, on_fail=skip|abort.
 Predicates: explored(ROOM)>=p, in_room(ROOM), door_open(DOOR)<p.
-bind=NAME on a cross names the room you arrive in; use it later as $NAME (the room may not exist yet).
+bind=NAME works on cross only; it names the room you arrive in; use it later as $NAME (the room may not exist yet).
 Way back: cross the same door with expect=ROOM_YOU_CAME_FROM, or go_to anchor:NAME.
 
 ```
