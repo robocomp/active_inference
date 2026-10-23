@@ -446,6 +446,10 @@ private:
     // no longer Unreachable, and it must not clear the no-route clock that reports a non-Reach target (Place / mouse)
     rc::policy::UnreachLatch policy_unreach_latch_;
     rc::policy::ClearingNoRoute policy_clearing_no_route_;            // Task 3f (c): a clearing with no route is given up
+    std::optional<std::uint64_t> orient_entry_ms_;               // Task O I4: when the policy orient step began (bounds the hover)
+    std::uint64_t orient_entry_node_ = 0;
+    std::optional<rc::policy::OrientPrecondition> contract_precondition(const rc::affordance::Contract &c) const;
+    bool published_target_admissible(const ControllerTargetInfo &t) const;
     std::uint64_t policy_no_anchor_since_ms_ = 0;                // Live fix 4: a cross claim waiting for its anchor
     rc::policy::StaleAnchorWait policy_stale_wait_;              // Live fix 4: facing a never-published anchor
     // ★ Task 3b (rtD1c leg 5): the leaf door_concept models, in the room frame of `policy_leaf_room_`, held by the policy's cross

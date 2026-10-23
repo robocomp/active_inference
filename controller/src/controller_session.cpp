@@ -6610,6 +6610,9 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
             const auto contract = rc::affordance::read_contract(aff.value(), parent_type);
             if (contract.policy == rc::affordance::Policy::Orient)
             {
+                // ★ KNOWN DEFECT (Task O, left as is — the old chain stays unchanged by standing order): this branch completes an orient on
+                //   step_orient's own predicate at wherever the repair left the robot, not on the affordance's precondition probability, and
+                //   its standpoint is the REPAIRED point. The [Policy] chain (controller_policy_drive.cpp) does both properly.
                 active_contract_  = contract;
                 feedback_node_id_ = contract.feedback_node_id != 0 ? contract.feedback_node_id
                                                                    : last_target_info_->parent_node_id;

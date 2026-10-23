@@ -21,6 +21,7 @@
 #include <span>
 #include <vector>
 
+#include "affordance_protocol/affordance_goal_parse.h"   // GoalClause
 #include "policy_types.h"
 #include "local_policy.h"
 #include "unseen_contact.h"
@@ -166,6 +167,27 @@ enum class GoalMode { Place, Cross, Orient };
 //   probability the old distance tolerance applies.
 struct OrientPrecondition { float p = 0.f; float complete_at = 1.f; };
 
+// ★ Task O fix round 1 (I3): the precondition comes from the ACTIVE affordance's OWN contract — its `*_reach_prob >=` clause is the
+//   level, the feedback node's attribute of that name is p. `read(attr)` returns the node's value (nullopt = absent). A sentinel
+//   (negative = "not measured") is no evidence: nullopt, the distance tolerance applies.
+template <class Read>
+inline std::optional<OrientPrecondition> precondition_from_clauses(std::span<const rc::affordance::GoalClause> goal, Read&& read)
+{
+    for (const auto& c : goal)
+        if (c.op == rc::affordance::CompareOp::GE and c.attr.ends_with("_reach_prob"))
+            if (const std::optional<float> v = read(c.attr); v.has_value() and *v >= 0.f)
+                return OrientPrecondition{.p = *v, .complete_at = c.value};
+    return std::nullopt;
+}
+
+// ★ Task O fix round 1 (I2): the goal is toward the PUBLISHED target; our repaired point is only an admissible substitute when the
+//   published one is blocked / unroutable (published_admissible = false) or not known (no published point: a click, a mission).
+inline Eigen::Vector2f goal_target_pos(const std::optional<Eigen::Vector2f>& published, const Eigen::Vector2f& repaired,
+                                       bool published_admissible)
+{
+    return published.has_value() and published_admissible ? *published : repaired;
+}
+
 inline bool orient_settled(const ControllerRobotPose& robot, const ControllerTargetInfo& t, const GoalAdapterParams& p,
                            const std::optional<OrientPrecondition>& pre)
 {
@@ -195,7 +217,13 @@ inline std::optional<GoalSpec> goal_for_target(const ControllerTargetInfo& t, co
             }
             return heading_goal(robot.pos, t.yaw_rad, p.tol_yaw);
         case GoalMode::Place:
-            return place_goal(t.room_pos, want_facing ? std::optional<float>(t.yaw_rad) : std::nullopt, p.tol_xy, p.tol_yaw);
+        {
+            // Task O (I2): with the affordance's probability known, arriving within tol_xy is not completing — the tolerance shrinks
+            // with p/complete_at (the caller completes at p >= complete_at, orient_settled)
+            const float tol = pre.has_value() ? p.tol_xy * std::clamp(1.f - pre->p / std::max(pre->complete_at, 1e-6f), 0.f, 1.f)
+                                              : p.tol_xy;
+            return place_goal(t.room_pos, want_facing ? std::optional<float>(t.yaw_rad) : std::nullopt, tol, p.tol_yaw);
+        }
     }
     return std::nullopt;
 }
