@@ -99,7 +99,7 @@ Q_CYCLES = {"BIRTH": 15, "SUPPRESS": 15}
 Q_DIST = {"BIRTH": 0.25, "SUPPRESS": 0.12}   # a ricoh-seeded birth sits up to ~one bearing-lever (sigma_b r ~ 0.1 m, 2 sigma) off the ZED one; the fit then corrects it
 # Explicit, reasoned Task-Q changes beyond the pairing rule (the shut DOOR_0 is born from the ricoh long before the ZED birth).
 Q_GONE = {("tourR2", "BIRTH", 3601, "door_2"): "Q - the real DOOR_0 is now born earlier from the ricoh (see Q_NEW)"}
-Q_NEW = {("tourR2", "BIRTH", 3489, "door_2"): "Q - the shut DOOR_0 born 112 cycles before the recorded ZED birth (3601), 0.11 m from it"}
+Q_NEW = {("tourR2", "BIRTH", 3369, "door_2"): "Q2 - the shut DOOR_0 born from the ricoh bank (pooled per viewpoint) 232 cycles before the recorded ZED birth (3601), 0.06 m from it"}
 def q_pair(gone, new):
     """Pair each gone decision with a new one satisfying the Task-Q rule; returns (unpaired gone, unpaired new, pairs)."""
     pairs, new = [], list(new)

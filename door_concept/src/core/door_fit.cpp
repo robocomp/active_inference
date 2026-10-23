@@ -392,7 +392,8 @@ DoorObservation DoorFit::observe(rc::DoorFitState& inst)
                 const auto rr = ricoh_origin_.has_value()
                     ? ricoh_range(room_polygon_, ricoh_origin_.value(), Eigen::Vector2f(slice.centroid.x(), slice.centroid.y()),
                                   slice.depth_var, cfg_.ai2_sigma_base_m, cfg_.ai2_range_noise_lat_per_m,
-                                  cfg_.tracker_detection_noise_m * cfg_.tracker_detection_noise_m)
+                                  cfg_.tracker_detection_noise_m * cfg_.tracker_detection_noise_m,
+                                  cfg_.ricoh_plane_std_m * cfg_.ricoh_plane_std_m, true)   // as the birth path (niche-aware)
                     : RicohRange{};
                 const Eigen::Vector2f e = Eigen::Vector2f(slice.centroid.x(), slice.centroid.y()) - inst.aperture.centre_xy();
                 const float v = std::max(0.0f, inst.ai2_belief.covariance()(0, 0)) + std::max(0.0f, rr.var);

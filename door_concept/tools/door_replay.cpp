@@ -492,6 +492,7 @@ int main(int argc, char** argv)
     double belief_smoke_sum = 0.0;
     long belief_smoke_runs = 0;
     float recess_prior_std = -2.0f;   // < -1.5: keep the recorded config's value
+    bool strip_oracle = false;   // --ricoh-strip-oracle: tapes older than v3 carry no ricoh windows; stand one in (see below)
     bool look_log = false, ablate_hull = false;   // Task E: --look prints the look-vs-approach prices; --ablate-hull-midpoint reproduces the collapse
     for (int i = 3; i < argc; ++i)
     {
@@ -500,6 +501,7 @@ int main(int argc, char** argv)
         else if (a == "--verbose") verbose = true;
         else if (a == "--mirror") mirror = true;
         else if (a == "--look") look_log = true;
+        else if (a == "--ricoh-strip-oracle") strip_oracle = true;
         else if (a == "--ablate-hull-midpoint") ablate_hull = true;
         else if (a == "--csv" and i + 1 < argc) csv_dir = argv[++i];
         else if (a == "--clock-jitter-ms" and i + 1 < argc) jitter_ms = std::strtod(argv[++i], nullptr);
@@ -600,6 +602,20 @@ int main(int argc, char** argv)
             const DoorCycleInput copy = *in;
             copy_ms_sum += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
             if (copy.cycle != in->cycle) return 2;
+        }
+        if (strip_oracle and in->masks.has_value() and in->masks->valid and in->masks->ricoh_windows.empty() and in->robot.room_T_body.has_value())
+        {   // ★STAND-IN FOR THE PRODUCER'S FOOTPRINT (approximate, and circular for the hits): a 120-degree window centred on the circular mean bearing
+            // of this frame's ricoh slices. A frame with no ricoh slice gets none (state c: nothing looked). Replays the pooled-evidence accrual
+            // as if the detector's strip were known; it is NOT a measurement of the real windows.
+            const Vec2f cam(static_cast<float>(in->robot.room_T_body->coeff(0, 3)), static_cast<float>(in->robot.room_T_body->coeff(1, 3)));
+            double sx = 0, sy = 0; int n = 0;
+            for (const auto& sl : in->masks->slices)
+                if (sl.source != 0 and sl.has_depth) { const double a = std::atan2(sl.centroid.y() - cam.y(), sl.centroid.x() - cam.x()); sx += std::cos(a); sy += std::sin(a); ++n; }
+            if (n > 0)
+            {
+                const float c = static_cast<float>(std::atan2(sy, sx)), half = 2.0f * 3.14159265f / 6.0f;
+                in->masks->ricoh_windows.push_back(Vec2f(c - half, c + half));
+            }
         }
         world.begin_cycle(*in);
         if (world.room_id() == 0)

@@ -873,8 +873,7 @@ void DoorCore::update_existence(const DoorCycleInput& in, DoorCycleOutput& out)
         // removable by it. `ricoh_look` is the resolvability of that look, handed to the removal debounce.
         float ricoh_look = 0.0f;
         if (in.robot.room_T_body.has_value()
-            and (not pkt.ricoh_windows.empty()
-                 or std::any_of(pkt.slices.begin(), pkt.slices.end(), [](const MaskSlice& q) { return q.source != 0; })))
+            and ricoh_fresh(pkt))
         {
             const Eigen::Vector2f cam_b(static_cast<float>(in.robot.room_T_body->coeff(0, 3)),
                                         static_cast<float>(in.robot.room_T_body->coeff(1, 3)));
@@ -882,7 +881,7 @@ void DoorCore::update_existence(const DoorCycleInput& in, DoorCycleOutput& out)
             const bool det_now = inst.frames_since_detection == 0;
             // ★NOT LOOKED AT IS NOT NOT-SEEN. The 360 detector runs on one of three panorama strips per frame; a door outside
             // the processed strip is neither confirmed nor missed by this frame - no trial, no absence (MaskPacket::ricoh_windows).
-            const bool looked = ricoh_looked(pkt.ricoh_windows, cam_b, door_c);
+            const bool looked = ricoh_looked_in(pkt, cam_b, door_c);
             // P(ricoh detects a door that is there), LEARNED on the doors the ZED confirms this frame: a ZED-observed door is
             // there for certain, so whether the ricoh also reports it is a clean Bernoulli trial of the 360 detector.
             if (det_now and inst.last_source == 0 and looked)
@@ -893,7 +892,8 @@ void DoorCore::update_existence(const DoorCycleInput& in, DoorCycleOutput& out)
                     if (q.source == 0 or q.label != "door" or not q.has_depth) continue;
                     const auto rr = ricoh_range(fit_.room_polygon(), cam_b, Vec2f(q.centroid.x(), q.centroid.y()), q.depth_var,
                                                 cfg.ai2_sigma_base_m, cfg.ai2_range_noise_lat_per_m,
-                                                cfg.tracker_detection_noise_m * cfg.tracker_detection_noise_m);
+                                                cfg.tracker_detection_noise_m * cfg.tracker_detection_noise_m,
+                                                cfg.ricoh_plane_std_m * cfg.ricoh_plane_std_m, true);   // as the birth path (niche-aware)
                     const float v = std::max(0.0f, inst.ai2_belief.covariance()(0, 0)) + std::max(0.0f, rr.var);
                     if (rr.var >= 0.0f and (Vec2f(q.centroid.x(), q.centroid.y()) - door_c).squaredNorm() <= cfg.tracker_gate_mahalanobis * v)
                     { seen = true; break; }

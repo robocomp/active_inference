@@ -106,11 +106,6 @@ EpistemicProposal EpistemicPlanner::compute(const DoorBelief& belief, float lat_
 
     const Eigen::Matrix<float, 3, 3> I3 = Eigen::Matrix<float, 3, 3>::Identity();
     const Eigen::Vector2f face_dir[4] = {L.ex, -L.ex, L.ey, -L.ey};   // [+x, -x, +y, -y], as sample_face_surface
-    // ★EXISTENCE IS A DOF OF THE BELIEF. The mutual information between "the door is there" and one ZED outcome is added to every face's raw
-    // gain (the detection weighting in plan_faces then scales the whole by P(detect | pose): existence is only resolved by a look that can
-    // fire). A 360-born door sits at p~0.7 so the term is near its maximum; once the ZED has confirmed it (p->1) or the absence removed it
-    // (p->0) the term is 0 and the look is worth only what the geometry still offers.
-    const float exist_info = existence ? door::existence_mutual_info(existence->p_exists, existence->p_hit, existence->p_false) : 0.0f;
     const auto raw_gain_of = [&](int i, float standoff)
     {
         // ★Task E: the information a look from THIS face's viewpoint can still RESOLVE — the model error already measured from a
@@ -118,10 +113,10 @@ EpistemicProposal EpistemicPlanner::compute(const DoorBelief& belief, float lat_
         const Eigen::Matrix<float, 3, 3> S = belief.covariance_resolvable(ctr + standoff * face_dir[i]);
         const float Ri = sigma_base * sigma_base + (lat_rate * standoff) * (lat_rate * standoff);
         const auto  dI = belief.predicted_information(sample_face_surface(L, belief.cz(), i), Ri);
-        return exist_info + 0.5f * std::log(std::max(1e-9f, (I3 + S * dI).determinant()));
+        return 0.5f * std::log(std::max(1e-9f, (I3 + S * dI).determinant()));
     };
 
-    const rc::nbv::Plan plan = rc::nbv::plan_faces(target, sensor, robot_radius_m_, obstacles, raw_gain_of,
+    rc::nbv::Plan plan = rc::nbv::plan_faces(target, sensor, robot_radius_m_, obstacles, raw_gain_of,
                                                    room_polygon);
     if (plan_out != nullptr)
         *plan_out = plan;          // monitoring: the caller logs the whole decision, not just its result
@@ -140,9 +135,38 @@ EpistemicProposal EpistemicPlanner::compute(const DoorBelief& belief, float lat_
                        "the room. REFUSING (the raw argmax would stand in the wall).\n");
         return {};
     }
-    const int   best_idx  = plan.best_face;
+    // ★EXISTENCE IS A DOF OF THE BELIEF, priced EXACTLY per face. A look from face i fires with P(detect_i) (the ZED envelope, range, bearing
+    // and visibility: plan.face_p_detect), so the question "is the door there?" is answered by an outcome with P(Y|E=1) = p_hit * P(detect_i),
+    // P(Y|E=0) = p_false: its mutual information MI(p_exists, p_hit P(detect_i), p_false) nats is ADDED to the face's detection-weighted
+    // D-optimal gain (the geometry already carries its own P(detect) factor from plan_faces; existence must not be scaled by it a second
+    // time, it enters the likelihood). A 360-born door sits at p~0.7 so the term is near its maximum; once the ZED has confirmed it (p->1) or
+    // the absence removed it (p->0) the term is 0. Existence has no sigma*: all of it is wanted (no adequacy bound on it).
+    std::array<float, 4> total{};
+    std::array<bool, 4> usable{};
+    float best_total = -1.0f;
+    int best_idx = plan.best_face;
+    for (int i = 0; i < 4; ++i)
+    {
+        usable[i] = plan.face_reachable[i] and plan.face_p_detect[i] > 0.0f and plan.face_gains[i] > 0.0f;
+        if (existence and plan.face_reachable[i] and plan.face_p_detect[i] > 0.0f)
+            usable[i] = true;
+        if (not usable[i]) continue;
+        total[i] = plan.face_gains[i]
+                 + (existence ? door::existence_mutual_info(existence->p_exists, existence->p_hit * plan.face_p_detect[i], existence->p_false) : 0.0f);
+        if (total[i] > best_total) { best_total = total[i]; best_idx = i; }
+    }
+    if (existence and best_total >= 0.0f and best_idx != plan.best_face)    // existence moved the choice: re-place at that face's own range
+    {
+        const Eigen::Vector2f pos = ctr + plan.face_standoff_m[best_idx] * face_dir[best_idx];
+        const Eigen::Vector2f to = ctr - pos;
+        plan.best_pos = pos;
+        plan.best_yaw = std::atan2(to.y(), to.x());
+        plan.best_face = best_idx;
+        plan.best_standoff_m = plan.face_standoff_m[best_idx];
+        if (plan_out != nullptr) *plan_out = plan;
+    }
     const float best_raw  = plan.face_raw_gains[best_idx];
-    // ★BOUND THE GAIN BY THE ADEQUACY GAP — but only if a consumer has actually stated one.
+    // ★BOUND THE GEOMETRIC GAIN BY THE ADEQUACY GAP — but only if a consumer has actually stated one.
     // Information beyond σ* is worthless to the consumer, so an adequate object must STOP attracting;
     // without this an agent asks to be visited forever and starves every other affordance (measured: the
     // chair, whose gain never fell because its dominant uncertainty is discrete). The guard matters as
@@ -151,13 +175,14 @@ EpistemicProposal EpistemicPlanner::compute(const DoorBelief& belief, float lat_
     // zero and the object would never be selected at all. Ask first. Agents that DECLARE no consumer
     // demand (SIGMA-STAR: none) therefore stay unbounded, which is coherent: with no demand, "adequate"
     // is undefined. This activates by itself the moment a σ* is published.
-    float best_gain = plan.face_gains[best_idx];   // DETECTION-WEIGHTED
+    float geo_gain = plan.face_gains[best_idx];   // DETECTION-WEIGHTED
     if (rc::any_sigma_star(rc::kDoorDofs))
     {
-        const float adequacy_gap = exist_info + rc::adequacy_gap_nats(rc::kDoorDofs, [&](std::size_t j) { return S(j, j); });   // existence has no sigma*: all of it is wanted
+        const float adequacy_gap = rc::adequacy_gap_nats(rc::kDoorDofs, [&](std::size_t j) { return S(j, j); });
         const float useful_frac  = (best_raw > 1e-9f) ? std::min(best_raw, adequacy_gap) / best_raw : 0.0f;
-        best_gain *= useful_frac;
+        geo_gain *= useful_frac;
     }
+    const float best_gain = geo_gain + (total[best_idx] - plan.face_gains[best_idx]);   // + the existence term of the winning face
     const auto& face_gain = plan.face_gains;
     if (not std::isfinite(best_gain))
         return {};

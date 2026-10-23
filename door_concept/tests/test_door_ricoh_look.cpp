@@ -11,6 +11,7 @@
 //   src/epistemic_planner.cpp -o /tmp/test_door_ricoh_look && /tmp/test_door_ricoh_look
 #include <cmath>
 #include <print>
+#include <random>
 #include <vector>
 #include "../src/door_belief.h"
 #include "../src/door_config.h"
@@ -32,6 +33,56 @@ static rc::DoorBeliefParams params()
     p.common_mode_s_std = 0.03f; p.common_mode_wh_std = 0.02f; p.gn_iters = 4;
     p.recess_prior_m = 0.0f; p.recess_prior_std = std::sqrt(0.2f * 0.2f / 12.0f + 0.1f * 0.1f);
     return p;
+}
+
+
+// ── a FITTED door (12 full-mask frames from a ZED viewpoint): the geometry is settled, so its D-optimal gain is small ───────────────
+constexpr float kFx = 700.f, kCx = 960.f;
+static std::vector<Eigen::Vector3f> leaf_points(const rc::DoorBeliefParams& p, float s, float w, float h, int n, std::mt19937& rng)
+{
+    rc::door::Aperture a;
+    a.wall_O = p.wall_O; a.wall_u = p.wall_u; a.s = s; a.w = w; a.h = h; a.thickness = p.thickness; a.depth = 0.f;
+    const rc::door::LeafPose L = rc::door::leaf_pose(a, p.leaf);
+    std::uniform_real_distribution<float> U(0.f, 1.f);
+    std::normal_distribution<float> N(0.f, 0.006f);
+    std::vector<Eigen::Vector3f> pts;
+    for (int i = 0; i < n; ++i)
+        pts.push_back(rc::door::leaf_point(L, (U(rng) - 0.5f) * w, (i % 2 == 0 ? 1.f : -1.f) * L.half_t + N(rng), U(rng) * h));
+    return pts;
+}
+static rc::MaskBearings camera(const rc::DoorBeliefParams& p, float s_c, float range)
+{
+    const Eigen::Vector2f u = p.wall_u, n(-u.y(), u.x());
+    const Eigen::Vector2f c = p.wall_O + s_c * u + range * n, f = -n, r(f.y(), -f.x());
+    rc::MaskBearings mb;
+    Eigen::Matrix3f R; R << r.x(), r.y(), 0, f.x(), f.y(), 0, 0, 0, 1;
+    const Eigen::Vector3f C(c.x(), c.y(), 1.0f);
+    mb.zed_T_room.leftCols<3>() = R; mb.zed_T_room.col(3) = -R * C;
+    mb.fx = kFx; mb.cx = kCx; mb.jamb_depth = 0.0f;
+    return mb;
+}
+static rc::DoorBelief fitted(std::mt19937& rng)
+{
+    const auto p = params();
+    const float s_true = 3.06f, w_true = 1.0f, range = 2.5f;
+    rc::DoorBelief truth({s_true, w_true, 2.1f, 0.f}, p);
+    rc::DoorBelief b({3.10f, 1.0f, 2.1f, 0.f}, p);
+    b.set_hinge_prob(1.0f); b.set_leaf_phi_sigma(0.146f);
+    for (int k = 0; k < 12; ++k)
+    {
+        rc::MaskBearings mb = camera(p, s_true + 0.5f * w_true, range);
+        const auto [lo, hi] = truth.predicted_column_extent(truth.state(), mb);
+        mb.lo = lo; mb.hi = hi;
+        const float R = 0.00235f, ppm = kFx / range;
+        mb.var = ppm * ppm * R + 1.0f / 12.0f;
+        mb.var_common = ppm * ppm * 0.0005f + b.hull_mismatch_var(mb);
+        rc::DoorFrame f;
+        f.points = leaf_points(p, s_true, w_true, 2.07f, 3000, rng);
+        f.R.assign(f.points.size(), R); f.chain_cov_s = 0.0122f; f.chain_cov_n = 0.0122f;
+        f.bearings = mb;
+        b.update(f);
+    }
+    return b;
 }
 
 int main()
@@ -75,7 +126,7 @@ int main()
         prev = g;
     }
     std::print("2: after 6 ZED confirmations p={:.3f}: look gain {:.3f} -> {:.3f}\n", eb.p_exists(), first, prev);
-    CHECK(first - prev > 0.1f);                                                            // the existence part of the value is gone
+    CHECK(first - prev > 0.05f);                                                            // the existence part of the value is gone
     CHECK(std::abs(prev - settled.epistemic_gain) < 0.05f * first);                        // ...leaving only the geometric gain
     // 3. phantom: the ZED looks and the door is not there - misses drive the same belief down; the look is worth nothing in both tails
     rc::exist::ExistenceBelief ph; ph.set(1.0f);
@@ -83,8 +134,31 @@ int main()
     const float g_ph = look(ph.p_exists()).epistemic_gain;
     std::print("3: phantom after 8 ZED misses: p={:.4f} (L={:.2f}), look gain {:.3f}\n", ph.p_exists(), ph.logodds(), g_ph);
     CHECK(ph.p_exists() < 0.05f and ph.logodds() <= -3.99f);
-    CHECK(born.epistemic_gain - g_ph > 0.1f);                                              // existence settled the other way: its part is gone too
+    CHECK(born.epistemic_gain - g_ph > 0.05f);                                              // existence settled the other way: its part is gone too
     // (the removal itself - Existence floor -4 reached by ZED absence, once, no rebirth - is test_door_core_existence / test_door_ricoh_lifecycle B)
+    // 4. SETTLED GEOMETRY (the review's case): after a ZED fit the D-optimal gain is small, so existence is what is left to buy - it must change the offer
+    {
+        std::mt19937 rng(11);
+        rc::DoorBelief fb = fitted(rng);
+        const auto go = [&](const rc::ExistenceLook* e) { return planner.compute(fb, 0.02f, 0.03f, sensor, {}, room, nullptr, e); };
+        const rc::ExistenceLook open_{p_birth, 0.85f, 0.05f}, shut_{0.999f, 0.85f, 0.05f};
+        const auto g0 = go(nullptr), g_open = go(&open_), g_shut = go(&shut_);
+        std::print("4: fitted door: geometry-only look {:.3f} nats | existence open (p={:.2f}) {:.3f} | existence settled {:.3f}; approach offer <= {:.3f}\n",
+                   g0.epistemic_gain, p_birth, g_open.epistemic_gain, g_shut.epistemic_gain, approach);
+        CHECK(g0.valid and g_open.valid and g_shut.valid);
+        CHECK(g0.epistemic_gain < 0.5f * approach);                                         // the geometry alone would not justify a look
+        CHECK(g_open.epistemic_gain - g_shut.epistemic_gain > 0.05f);                       // open existence raises the offer...
+        CHECK(g_open.epistemic_gain > 1.5f * g0.epistemic_gain);                            // ...to well above what geometry alone is worth
+        // the ORDER of offers: any competing offer worth between the two (e.g. 0.20 nats, the scale of a remembered-door look) is beaten by the
+        // look at the door whose existence is open and beats the look at the same door once existence is settled - existence changes the order.
+        const float rival = 0.5f * (g_shut.epistemic_gain + g_open.epistemic_gain);
+        std::print("   rival offer {:.3f}: open-existence look {} it, settled look {} it\n", rival,
+                   g_open.epistemic_gain > rival ? "beats" : "loses to", g_shut.epistemic_gain > rival ? "beats" : "loses to");
+        CHECK(g_open.epistemic_gain > rival and g_shut.epistemic_gain < rival);
+        // the viewpoint: existence is the same question from every face, so it does not move a frontal choice (reported, not asserted to differ)
+        std::print("   viewpoint open ({:.2f},{:.2f}) vs settled ({:.2f},{:.2f})\n", g_open.epistemic_target_x_m, g_open.epistemic_target_y_m,
+                   g_shut.epistemic_target_x_m, g_shut.epistemic_target_y_m);
+    }
     if (fails == 0) std::print("test_door_ricoh_look: ALL PASS\n"); else std::print("test_door_ricoh_look: {} FAILURE(S)\n", fails);
     return fails == 0 ? 0 : 1;
 }

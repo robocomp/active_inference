@@ -349,8 +349,17 @@ void DoorCore::associate(const DoorCycleInput& in, DoorCycleOutput& out)
     dets_.clear();
     ricoh_fold_.clear();
     ricoh_looks_.clear(); ricoh_hit_det_.clear();
-    const float ricoh_bar = cfg.tracker_birth_frames
-        * std::log(std::clamp(cfg.ricoh_hit_rate, 1e-3f, 0.999f) / std::clamp(cfg.exist_clutter_prob, 1e-3f, 0.999f));
+    // The bank's sensor model: the 360 detector's hit rate is the one the EXISTENCE channel has LEARNED (per viewpoint, on doors the ZED
+    // confirms; Beta(1,1) prior, same expression as door_existence.cpp), its false-alarm rate the shared clutter probability.
+    RicohBirthBank::Params bank_prm;
+    bank_prm.hit_rate = (ricoh_hits_ + 1.0f) / (ricoh_trials_ + 2.0f);
+    bank_prm.clutter = cfg.exist_clutter_prob;
+    bank_prm.gate_mahalanobis = cfg.tracker_gate_mahalanobis;
+    bank_prm.min_sep_m = cfg.tracker_birth_min_sep_m;
+    bank_prm.tau_s = cfg.ricoh_decorrelation_s;
+    bank_prm.forget_s = cfg.ricoh_forget_s;
+    bank_prm.view_R_m = 0.5f * cfg.door_prior_w_m;
+    const float ricoh_bar = cfg.tracker_birth_frames * RicohBirthBank::llr_hit(bank_prm);   // ⚠ decision boundary, see RicohBirthBank
     const auto& pkt = masks_.packet();
 
     // ★BIRTH EVIDENCE — the shared CREATE policy (common/instance_tracker/birth_evidence.h). This agent fed
@@ -519,6 +528,8 @@ void DoorCore::associate(const DoorCycleInput& in, DoorCycleOutput& out)
                                                who ? who->node : "?", 100.0f * (1.0f - unclaimed), unclaimed), out);
             }
             ++ctr.pushed;
+            if (dv.birth_evidence > 0.0f) ++ctr.pos_ev;
+            ctr.ev += dv.birth_evidence; ctr.ev_max = std::max<double>(ctr.ev_max, dv.birth_evidence);
             if (sl.source == 0) ctr.w_wall += 1.0;
             ctr.w_pool += ricoh_w;
             if (ricoh_look.has_value() and birth_new_obs)
@@ -559,7 +570,7 @@ void DoorCore::associate(const DoorCycleInput& in, DoorCycleOutput& out)
     res_ = tracker_.update(tracks, dets_);
     // The ricoh birth bank: this frame is one new observation of every ricoh-seen place (hit if a detection explains it, else a look).
     if (birth_new_obs and cam_xy_.has_value()
-        and (not pkt.ricoh_windows.empty() or std::ranges::any_of(pkt.slices, [](const MaskSlice& q) { return q.source != 0; })))
+        and ricoh_fresh(pkt))
     {
         std::vector<RicohBirthBank::Look> unassoc;
         for (std::size_t k = 0; k < ricoh_hit_det_.size(); ++k)
@@ -568,12 +579,12 @@ void DoorCore::associate(const DoorCycleInput& in, DoorCycleOutput& out)
         for (const auto& t : tracks) track_xy.push_back(t.xy);
         const auto poly = world_->room_polygon();
         const Vec2f cam = cam_xy_.value();
-        ricoh_bank_.update(unassoc, cfg.ricoh_hit_rate, cfg.exist_clutter_prob, cfg.tracker_gate_mahalanobis,
+        ricoh_bank_.update(static_cast<double>(in.t_steady_ns) * 1e-9, cam, unassoc, bank_prm,
                            [&](const Vec2f& xy)
-                           { return (ricoh_looked(pkt.ricoh_windows, cam, xy) ? 1.0f : 0.0f)   // not looked at ⇒ no absence
+                           { return (ricoh_looked_in(pkt, cam, xy) ? 1.0f : 0.0f)   // not looked at ⇒ no absence
                                     * rc::birth::observation_weight({1.0f, (xy - cam).norm()}, birth_detect)
                                     * los_weight(poly, cam, xy, cfg.ai2_sigma_base_m, cfg.ai2_range_noise_lat_per_m); },
-                           track_xy, cfg.tracker_birth_min_sep_m);
+                           track_xy);
         for (const int b : res_.births) ricoh_bank_.drop_near(dets_[static_cast<std::size_t>(b)].xy, cfg.tracker_birth_min_sep_m);
     }
     // Pool the viewpoint of a ricoh slice only if it is NOT explained by a live door (an associated slice is not a birth look).
@@ -582,7 +593,7 @@ void DoorCore::associate(const DoorCycleInput& in, DoorCycleOutput& out)
         for (const auto& [di, tgt] : ricoh_fold_)
             if (res_.assignment[static_cast<std::size_t>(di)] < 0)
                 ricoh_views_.credit(cam_xy_.value(), tgt, 0.5f * cfg.door_prior_w_m, cfg.tracker_birth_min_sep_m);
-        ricoh_views_.end_frame([&](const Vec2f& tgt) { return ricoh_looked(pkt.ricoh_windows, cam_xy_.value(), tgt); });
+        ricoh_views_.end_frame([&](const Vec2f& tgt) { return ricoh_looked_in(pkt, cam_xy_.value(), tgt); });
     }
 
     const int n_assigned = static_cast<int>(std::count_if(res_.assignment.begin(), res_.assignment.end(),
