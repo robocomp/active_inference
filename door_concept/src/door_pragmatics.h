@@ -180,8 +180,8 @@ inline rc::affordance::Contract open_contract(const DoorPragmaticCfg& p)
 {
     using enum rc::affordance::CompareOp;
     return rc::affordance::Contract::orient()
-        .until ("door_reach_prob", GE, kApproachCompleteProb)   // Task O: open's OWN precondition (in the band, facing) is a clause of
-                                                                // its contract, so the controller settles the orient on it, not on a tolerance
+        .precondition("door_reach_prob", GE, kApproachCompleteProb)   // Task O: where the robot STANDS (in the band, facing) — the
+                                                                      // controller settles the orient on it; NOT part of "open is done"
         .until ("door_open_prob", GE, 0.70f)
         .still (0.05f, 0.10f)
         .yaw_rate(kTurnAtBaseLimit)
