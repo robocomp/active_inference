@@ -56,15 +56,46 @@ void put(DSR::DSRGraph& G, const DSR::Node& n, const char* key, std::map<std::st
     if (const auto v = G.get_attrib_by_name<Att>(n); v.has_value()) out[key] = static_cast<double>(v.value());
 }
 
+/// Index of the NEWEST block of an RT history ring of `blocks` blocks (rt_translation / rt_rotation_euler_xyz hold 3
+/// floats per block; rt_covariance holds 36). Same decode as controller/src/rt_ring.h: rt_head_index is the packed
+/// offset (3 floats per block) of the slot cortex writes NEXT, so the newest block is the one before it. A missing
+/// head falls back to the largest stamp; with neither, the last block.
+std::size_t newest_block(DSR::DSRGraph& G, const DSR::Edge& e, std::size_t blocks)
+{
+    if (blocks <= 1) return 0;
+    if (const auto head = G.get_attrib_by_name<rt_head_index_att>(e); head.has_value() and head.value() >= 0)
+    {
+        const std::size_t next = (static_cast<std::size_t>(head.value()) / 3) % blocks;
+        return next == 0 ? blocks - 1 : next - 1;
+    }
+    if (const auto ts = G.get_attrib_by_name<rt_timestamps_att>(e); ts.has_value() and ts->get().size() == blocks)
+        return static_cast<std::size_t>(std::ranges::max_element(ts->get()) - ts->get().begin());
+    return blocks - 1;
+}
+
 RtEdge read_rt(DSR::DSRGraph& G, const DSR::Node& from, const DSR::Node& to, const DSR::Edge& e)
 {
     RtEdge r{.from = from.name(), .from_type = from.type(), .to = to.name(), .to_type = to.type(), .t = {}, .r = {}, .cov = {}};
-    if (const auto t = G.get_attrib_by_name<rt_translation_att>(e); t.has_value())
-        r.t.assign(t->get().begin(), t->get().end());
-    if (const auto q = G.get_attrib_by_name<rt_rotation_euler_xyz_att>(e); q.has_value())
-        r.r.assign(q->get().begin(), q->get().end());
+    // Only the NEWEST sample of each ring is kept; the rest of the ring is cortex's history, not this edge's pose.
+    if (const auto t = G.get_attrib_by_name<rt_translation_att>(e); t.has_value() and t->get().size() >= 3)
+    {
+        const auto& v = t->get();
+        const std::size_t s = newest_block(G, e, v.size() / 3);
+        if (v.size() >= 3 * (s + 1)) r.t.assign(v.begin() + 3 * s, v.begin() + 3 * s + 3);
+    }
+    if (const auto q = G.get_attrib_by_name<rt_rotation_euler_xyz_att>(e); q.has_value() and q->get().size() >= 3)
+    {
+        const auto& v = q->get();
+        const std::size_t s = newest_block(G, e, v.size() / 3);
+        if (v.size() >= 3 * (s + 1)) r.r.assign(v.begin() + 3 * s, v.begin() + 3 * s + 3);
+    }
     if (const auto c = G.get_attrib_by_name<rt_covariance_att>(e); c.has_value() and c->get().size() >= 36)
-        for (const int i : {0, 1, 5, 6, 7, 11, 30, 31, 35}) r.cov.push_back(c->get()[i]);
+    {
+        const auto& v = c->get();
+        const std::size_t s = newest_block(G, e, v.size() / 36);
+        if (v.size() >= 36 * (s + 1))
+            for (const int i : {0, 1, 5, 6, 7, 11, 30, 31, 35}) r.cov.push_back(v[36 * s + i]);
+    }
     return r;
 }
 

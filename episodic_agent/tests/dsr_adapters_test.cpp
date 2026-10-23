@@ -13,6 +13,7 @@
 #include <cmath>
 #include <cstdio>
 #include <memory>
+#include <string_view>
 #include <string>
 #include <vector>
 
@@ -389,6 +390,70 @@ static void journal_node(DSR::DSRGraph& live)
     CHECK(not rc::em::read_journal(live).has_value());
 }
 
+// A cortex RT edge keeps a HISTORY RING of 25 samples (rt_translation / rt_rotation_euler_xyz 3 floats per sample,
+// rt_covariance 36). Only the NEWEST sample may reach the record: the slot is decoded from rt_head_index (the packed
+// offset of the slot written NEXT, so the newest is the one before it), with the largest stamp as the fallback.
+static void rt_ring_newest(std::shared_ptr<DSR::DSRGraph> live_p)
+{
+    auto& live = *live_p;
+    constexpr int N = 25;
+    const auto root = live.get_node("root")->id();
+    add_node(live, DSR::Node::create<robot_node_type>("Shadow_ring"), root);
+    add_node(live, DSR::Node::create<room_node_type>("room_ring_a"), root);
+    add_node(live, DSR::Node::create<room_node_type>("room_ring_b"), root);
+    add_node(live, DSR::Node::create<room_node_type>("room_ring_c"), root);
+    const auto robot = live.get_node("Shadow_ring")->id();
+    const auto room_a = live.get_node("room_ring_a")->id();
+    const auto room_b = live.get_node("room_ring_b")->id();
+    const auto room_c = live.get_node("room_ring_c")->id();
+
+    // Block k carries t = {k+.5, -k, 2k}, r = {k, k+1, k+2} and cov[36k+i] = 1000k+i, so every value names its slot.
+    // Stamps put `newest` at the maximum and the slot after it (the oldest) at the minimum, as cortex leaves a ring.
+    const auto ring = [&](std::uint64_t from, std::uint64_t to, int head, int newest)
+    {
+        std::vector<float> t(3 * N), r(3 * N), cov(36 * N);
+        std::vector<std::uint64_t> ts(N);
+        for (int k = 0; k < N; ++k)
+        {
+            t[3 * k] = k + 0.5f;  t[3 * k + 1] = -k;  t[3 * k + 2] = 2 * k;
+            r[3 * k] = k;         r[3 * k + 1] = k + 1; r[3 * k + 2] = k + 2;
+            for (int i = 0; i < 36; ++i) cov[36 * k + i] = 1000.f * k + i;
+            ts[k] = 1000 + ((k - newest - 1 + N) % N);
+        }
+        auto e = DSR::Edge::create<RT_edge_type>(from, to);
+        live.add_or_modify_attrib_local<rt_translation_att>(e, std::move(t));
+        live.add_or_modify_attrib_local<rt_rotation_euler_xyz_att>(e, std::move(r));
+        live.add_or_modify_attrib_local<rt_covariance_att>(e, std::move(cov));
+        live.add_or_modify_attrib_local<rt_timestamps_att>(e, std::move(ts));
+        if (head >= 0) live.add_or_modify_attrib_local<rt_head_index_att>(e, head);
+        live.insert_or_assign_edge(e);
+    };
+    ring(robot, room_a, 3 * (7 + 1), 7);   // head after writing slot 7: newest is 7, the last element is 24
+    ring(root, room_b, 0, 24);             // head wrapped to 0: newest is the LAST slot (wrap-around)
+    ring(root, room_c, -1, 7);             // no head: the largest stamp decides
+
+    const rc::em::DsrFactSource fs(live_p, nullptr);
+    const auto sc = fs.scene();
+    const auto find = [&](std::string_view from, std::string_view to) -> const rc::em::RtEdge*
+    {
+        if (not sc) return nullptr;
+        for (const auto& e : sc->rt) if (e.from == from and e.to == to) return &e;
+        return nullptr;
+    };
+    const auto check_slot = [&](const rc::em::RtEdge* e, int k)
+    {
+        CHECK(e and e->t.size() == 3 and std::abs(e->t[0] - (k + 0.5)) < 1e-6 and std::abs(e->t[1] + k) < 1e-6
+              and std::abs(e->t[2] - 2.0 * k) < 1e-6);
+        CHECK(e and e->r.size() == 3 and std::abs(e->r[0] - k) < 1e-6 and std::abs(e->r[2] - (k + 2)) < 1e-6);
+        // 6x6 row-major block of sample k: the 3x3 entries are slots 0,1,5,6,7,11,30,31,35 of that block.
+        CHECK(e and e->cov.size() == 9 and std::abs(e->cov[0] - (1000.0 * k + 0)) < 1e-3
+              and std::abs(e->cov[2] - (1000.0 * k + 5)) < 1e-3 and std::abs(e->cov[8] - (1000.0 * k + 35)) < 1e-3);
+    };
+    check_slot(find("Shadow_ring", "room_ring_a"), 7);
+    check_slot(find("root", "room_ring_b"), 24);
+    check_slot(find("root", "room_ring_c"), 7);
+}
+
 int main()
 {
     if (not std::setlocale(LC_ALL, "es_ES.UTF-8")) std::setlocale(LC_ALL, "");
@@ -398,6 +463,7 @@ int main()
         auto mem = make_graph("em_test_mem", 962, 61);
         auto em = make_graph("em_test_em", 963, 62);
         fact_source(*live, *mem, live, mem);
+        rt_ring_newest(live);
         live_diff(*live);
         journal_node(*live);
         em_graph(em);
