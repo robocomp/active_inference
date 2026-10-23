@@ -196,6 +196,9 @@ imu_source   = "auto"
 dsr_lidar_fps = -1
 
 [Transforms]
+# World this run is in: "webots" | "real". Selects etc/mount_calib_<robot>_<world>.txt (sensor mount
+# corrections, composed over the nominal mount); a file tagged with another world is refused.
+world = "webots"
 # ── This robot's camera boresights (rad, about the robot vertical) ────────────────────────────
 # See config_shadow.toml for what these are and why they live per robot.
 # MEASURED 2026-08-28 on P3Bot's ricoh: +0.814 +/- 0.022 deg (0.01421 rad), by joining the

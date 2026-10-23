@@ -100,3 +100,4 @@ retina/etc/zed_orbits
 retina/etc/zed_frames
 retina/etc/view_atlas_dataset
 retina/models/dinov3
+.superpowers/

@@ -83,6 +83,24 @@ public:
     ///   one would be constraining different poses.
     bool bind_camera(const std::string& robot_frame);
 
+    /// MAIN THREAD. Re-reads the graph's camera<-robot RT and, if it differs from what was last read, makes it
+    /// the new base extrinsic (the configured boresight and the live mount correction are re-applied on top).
+    /// This is how a body->camera edge that robot_concept COMMITTED at runtime reaches the image-edge term:
+    /// bind_camera() used to be the only read, so a committed mount was ignored until restart. The read goes
+    /// through inner_ (created on the main thread in bind_camera, so its queued cache invalidations fire).
+    /// Returns true when the base changed. No-op before a successful bind_camera().
+    bool refresh_graph_extrinsic();
+
+    /// false => refresh_graph_extrinsic() is a no-op. Set false when this agent is itself the writer of the
+    /// body->camera edge (ImageEdge.mountPublish): the edge then already holds nominal x learned correction, and
+    /// re-reading it as the BASE would apply mount_corr_ a second time on every publish.
+    void set_live_graph_refresh(bool on) noexcept { live_refresh_ = on; }
+
+    /// MAIN THREAD. The extrinsic half of bind_camera() on its own (reads cam<-robot, applies it, sets
+    /// extrinsic_ok_); bind_camera() calls it. Public so the graph->extrinsic path is testable without a
+    /// camera stream (room_concept/tests/lidar_mount_edge_live_test.cpp).
+    bool bind_extrinsic(const std::string& robot_frame);
+
     /// LOCAL boresight-yaw correction, radians, applied to the extrinsic read from the graph.
     ///
     /// ★ WHY THIS IS HERE AND NOT IN THE ROBOT'S GEOMETRY. The graph's camera<-robot RT is the
@@ -196,6 +214,11 @@ private:
     std::shared_ptr<DSR::DSRGraph> G_;
     std::string camera_node_;
     std::string robot_frame_;
+    bool live_refresh_ = true;
+    std::unique_ptr<DSR::InnerEigenAPI>      inner_;            // main-thread-owned (see refresh_graph_extrinsic)
+    Eigen::Matrix4d                          graph_cam_T_robot_ = Eigen::Matrix4d::Zero();   // last graph read
+    /// Graph extrinsic -> base (+ configured boresight), shared by bind_camera and refresh_graph_extrinsic.
+    void apply_graph_extrinsic_(const Eigen::Matrix4d& M);
 
     std::unique_ptr<DSR::CameraAPI>          camera_api_;
     // The RGB stream comes from the process-wide hub for this node (camera_stream_hub.h): ONE DDS

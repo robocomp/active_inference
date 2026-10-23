@@ -75,18 +75,34 @@ bool CameraIngestor::bind_camera(const std::string& robot_frame)
         return false;
     }
 
+    if (not bind_extrinsic(robot_frame_)) return false;
+    if (extrinsic_ok_)
+        rc::status::print("[imgedge] bound '{}': {}x{} model={} (reproduced to {:.2e} px), cam<-{} t=[{:.3f} {:.3f} {:.3f}]\n",
+                   camera_node_, static_cast<int>(model_.width), static_cast<int>(model_.height),
+                   model_.kind == CameraModel::Kind::Pinhole ? "pinhole"
+                     : (model_.kind == CameraModel::Kind::Equirect ? "equirect" : "cylindrical"),
+                   model_err, robot_frame_, cam_t_robot_.x(), cam_t_robot_.y(), cam_t_robot_.z());
+    return extrinsic_ok_;
+}
+
+bool CameraIngestor::bind_extrinsic(const std::string& robot_frame)
+{
+    if (not G_ or robot_frame.empty()) return false;
+    robot_frame_ = robot_frame;
     // ── The static camera <- robot extrinsic ─────────────────────────────────────────────────────
     // ★ MAIN THREAD ONLY: ts == 0 sets use_cache=true inside InnerEigenAPI and touches an UNLOCKED
-    //   map (CLAUDE.md). Read once here, cache, and never query it from the compute/ingest thread.
+    //   map (CLAUDE.md). Read here and again by refresh_graph_extrinsic(), both on the MAIN thread through
+    //   inner_ (main-thread-owned, so its queued invalidations fire); never query it from the compute/ingest thread.
     // ★ This is the ONLY transform the measurement path takes from the graph. room <- robot is the
     //   STATE VARIABLE; reading it here would make the residual a function of the answer.
-    auto inner = G_->get_inner_eigen_api();
-    if (not inner)
+    if (not inner_)
+        inner_ = G_->get_inner_eigen_api();   // kept: main-thread-owned, so a later edge change invalidates its cache
+    if (not inner_)
     {
         qWarning() << "[imgedge] no InnerEigenAPI";
         return false;
     }
-    const auto cam_T_robot = inner->get_transformation_matrix(
+    const auto cam_T_robot = inner_->get_transformation_matrix(
         camera_node_, robot_frame_, 0, "RT", DSR::RT_API::TimeQuery::Nearest);
     if (not cam_T_robot.has_value())          // ALWAYS check the optional (CLAUDE.md)
     {
@@ -94,7 +110,14 @@ bool CameraIngestor::bind_camera(const std::string& robot_frame)
                    << QString::fromStdString(robot_frame_) << "not resolvable yet";
         return false;
     }
-    const Eigen::Matrix4d M = cam_T_robot.value().matrix();
+    apply_graph_extrinsic_(cam_T_robot.value().matrix());
+    extrinsic_ok_ = cam_R_robot_.allFinite() and cam_t_robot_.allFinite();
+    return extrinsic_ok_;
+}
+
+void CameraIngestor::apply_graph_extrinsic_(const Eigen::Matrix4d& M)
+{
+    graph_cam_T_robot_ = M;
     cam_R_robot_ = M.block<3, 3>(0, 0).cast<float>();
     cam_t_robot_ = M.block<3, 1>(0, 3).cast<float>();
 
@@ -124,15 +147,20 @@ bool CameraIngestor::bind_camera(const std::string& robot_frame)
     cam_R_robot_base_ = cam_R_robot_;
     cam_t_robot_base_ = cam_t_robot_;
     rebuild_extrinsic_();
-    extrinsic_ok_ = cam_R_robot_.allFinite() and cam_t_robot_.allFinite();
+}
 
-    if (extrinsic_ok_)
-        rc::status::print("[imgedge] bound '{}': {}x{} model={} (reproduced to {:.2e} px), cam<-{} t=[{:.3f} {:.3f} {:.3f}]\n",
-                   camera_node_, static_cast<int>(model_.width), static_cast<int>(model_.height),
-                   model_.kind == CameraModel::Kind::Pinhole ? "pinhole"
-                     : (model_.kind == CameraModel::Kind::Equirect ? "equirect" : "cylindrical"),
-                   model_err, robot_frame_, cam_t_robot_.x(), cam_t_robot_.y(), cam_t_robot_.z());
-    return extrinsic_ok_;
+bool CameraIngestor::refresh_graph_extrinsic()
+{
+    if (not live_refresh_ or not inner_ or robot_frame_.empty() or not extrinsic_ok_) return false;
+    const auto T = inner_->get_transformation_matrix(camera_node_, robot_frame_, 0, "RT",
+                                                     DSR::RT_API::TimeQuery::Nearest);
+    if (not T.has_value()) return false;                       // chain momentarily unresolvable: keep the last
+    const Eigen::Matrix4d M = T.value().matrix();
+    if (M == graph_cam_T_robot_) return false;                 // bit-identical: nothing was committed
+    apply_graph_extrinsic_(M);
+    rc::status::print("[imgedge] '{}' graph extrinsic CHANGED at runtime (committed mount): cam<-{} t=[{:.4f} {:.4f} {:.4f}]\n",
+                      camera_node_, robot_frame_, cam_t_robot_.x(), cam_t_robot_.y(), cam_t_robot_.z());
+    return true;
 }
 
 Eigen::Vector3f CameraIngestor::ray_from_pixel(double u, double v) const

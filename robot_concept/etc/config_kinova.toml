@@ -162,6 +162,9 @@ ricoh_source = "auto"
 dsr_lidar_fps = -1
 
 [Transforms]
+# World this run is in: "webots" | "real". Selects etc/mount_calib_<robot>_<world>.txt (sensor mount
+# corrections, composed over the nominal mount); a file tagged with another world is refused.
+world = "webots"
 # Use RT interpolation for timestamped graph transforms. Disable to fall back to nearest sample.
 interpolate_rt = true
 

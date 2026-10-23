@@ -1806,6 +1806,10 @@ mountApply = false
 #   10-04 cold-start estimates (camera evidence wiped for an experiment) were persisted as the mount:
 #   zed 14 cm high / -1.3 deg pitch, ricoh 12 cm low (robot_concept/etc/mount_calib_Shadow.txt rev 14-15).
 # ★ 2026-10-11: OFF with mountApply (see above) — the graph must not carry a mount the loop has not earned.
+# ⚠ INTERACTION with the live edge refresh: CameraIngestor::refresh_graph_extrinsic() re-reads body->camera as the BASE
+#   extrinsic so a mount COMMITTED by robot_concept reaches this agent without a restart. With mountPublish = true THIS agent
+#   writes that edge (nominal x learned correction) and already holds the composition, so the refresh is switched OFF (a
+#   log line says so at bind); otherwise the correction would be applied twice, compounding on every publish.
 mountPublish = false
 # ── mountDescriptionFile: the robot description that ANCHORS the mount ───────────────────────────
 # The nominal body->camera edge is read from this file (the robot's DSR JSON), never from the graph, so

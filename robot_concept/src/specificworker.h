@@ -43,6 +43,7 @@
 #include "../../common/agent_presence_coordinator/agent_presence_coordinator.h"
 #include "../../common/agent_state_publisher/agent_status_overlay.h"
 #include "sensor_media_publisher.h"
+#include "mount_overlay.h"
 
 /**
  * \brief Class SpecificWorker implements the core functionality of the component.
@@ -124,8 +125,8 @@ private:
 		// copy (room_concept's ImageEdge.mountYawCorrection was exactly that, and its own header
 		// said the value "belongs in the robot geometry" once confirmed).
 		// 0 = leave the graph's extrinsic untouched.
-		/// Transforms.persist_mounts_on_stop — on a GRACEFUL stop, write the live body->camera mounts
-		/// into etc/mount_calib_<robot>.txt, and apply that file over the seeded JSON at every start.
+		/// Transforms.persist_mounts_on_stop — on a GRACEFUL stop, write the live body->sensor mounts as
+		/// corrections into etc/mount_calib_<robot>_<world>.txt, and apply that file over the seeded JSON at every start.
 		/// ★ AN OVERLAY, NOT AN EDIT OF THE ROBOT'S JSON, and deliberately: the JSON seeds the whole
 		///   graph on every start, so a writer that reformats or half-writes it takes the fleet down,
 		///   and recovery has to be "delete one file" rather than "restore from a backup you hope is
@@ -133,6 +134,10 @@ private:
 		///   a measured mount correction living outside the JSON — this extends it from one angle to
 		///   the whole mount, and gives it a version and a history.
 		bool        PERSIST_MOUNTS_ON_STOP = false;
+		/// Transforms.world — "webots" | "real". Names the mount overlay file and tags it; a file whose
+		/// tag differs is refused. Empty (unset) = no overlay applied, so a real run can never pick up a
+		/// sim calibration by omission.
+		std::string TRANSFORMS_WORLD;
 		float       BORESIGHT_YAW_ZED   = 0.f;   // Transforms.boresight_yaw_zed   (rad)
 		float       BORESIGHT_YAW_RICOH = 0.f;   // Transforms.boresight_yaw_ricoh (rad)
 		bool        ENABLE_LIDAR  = true;   // 3D LiDAR cloud    (rc/lidar3d/points)
@@ -385,12 +390,14 @@ private:
 	void on_optional_peer_lost(const std::string &name, std::uint32_t id);
 	void on_optional_peer_ready(const std::string &name, std::uint32_t id);
 	std::atomic<bool> shutting_down_{false};
-	/// Path of the mount overlay for this robot: etc/mount_calib_<robot>.txt.
+	/// Path of the mount overlay for this robot+world: etc/mount_calib_<robot>_<world>.txt.
 	[[nodiscard]] std::string mount_overlay_path() const;
 	/// Apply the overlay over the mounts the JSON just seeded. Startup, after the boresight block.
 	void apply_mount_overlay();
 	/// Write the live body->camera mounts into the overlay, versioned. GRACEFUL stop only.
 	void persist_mount_overlay();
+	rc::mount::State  mount_state_;   ///< nominal edges, file corrections, refused flag
+	rc::mount::EdgeIO mount_io_;      ///< graph read/write used at start, reused by persist
 
 	// DSR graph-structure tracking for the viewer relayout (main-thread only). update_node_signal fires on
 	// creation AND every attribute update, so we relayout only when `id` is not yet in `known_node_ids_`.

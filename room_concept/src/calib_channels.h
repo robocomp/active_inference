@@ -51,6 +51,7 @@ namespace rc
 
         void pump_image_edges();      ///< the driving camera: extraction, once per compute() tick
         void pump_calib_channels();   ///< every other camera: calibration only, never the pose
+        void apply_refresh_policy(rc::CameraIngestor& ing, const std::string& name) const;   ///< live edge refresh off when mountPublish is on
 
         /// The room polygon the extraction projects. Set from the SVG in Given mode; in Estimate mode
         /// it must be taken from the frozen layout once LOCALIZING begins.
