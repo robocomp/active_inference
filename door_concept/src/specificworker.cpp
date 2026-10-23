@@ -2199,10 +2199,12 @@ void SpecificWorker::step_epistemic(rc::DoorInstance& inst, DSR::Node& node)
         nbv_obstacle_count_ = static_cast<int>(obstacles.size());   // 0 walls ⇒ the room polygon never arrived
 
         rc::nbv::Plan nbv_plan;
+        // The existence question rides in the same gain (nats): high for a door only the 360 has reported, ~0 once the ZED settled it.
+        const rc::ExistenceLook exist_look{inst.existence.p_exists(), cfg_.exist_detection_prob, cfg_.exist_clutter_prob};
         rc::EpistemicProposal prop =
             epistemic_planner_.compute(inst.ai2_belief, cfg_.ai2_range_noise_lat_per_m, cfg_.ai2_sigma_base_m,
                                        rc::nbv::sensor_from_graph(*G, inner_eigen_.get()), obstacles,
-                                       fitter_->room_polygon(), &nbv_plan);
+                                       fitter_->room_polygon(), &nbv_plan, &exist_look);
         log_nbv_decision(inst, nbv_plan, prop);   // logs REFUSED proposals too — keep it before the check
         // Degenerate (non-finite) fit — retry next cycle.
         if (not prop.valid or not prop.is_finite())

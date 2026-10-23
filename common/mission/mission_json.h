@@ -3,7 +3,7 @@
  * mission_json.h — the wire form of the grounded mission (mission_ir.h): what chat_agent writes into
  * chat_intention's `current_intention` and the controller decodes (2026-10-17).
  *
- *   {"v":1, "title":…, "anchors":{name:{room,x,y,yaw,sigma_xy}}, "prefs":{}, "requires":[…],
+ *   {"v":1, "title":…, "request":…, "fixes":"m12", "anchors":{name:{room,x,y,yaw,sigma_xy}}, "prefs":{}, "requires":[…],
  *    "steps":[{"id":"1", "op":"cross", "door":{"node":"door_27"}, "expect":"room_2", "on_fail":{"retry":2}}, …]}
  *
  *   Ref   {"node":n} · {"passage":p,"from":room} · {"anchor":a} · {"pose":{room,x,y,yaw,sigma_xy}} · {"var":v}
@@ -332,6 +332,12 @@ inline QJsonArray steps_json(const std::vector<Step>& list)
         if (not o.value("title").isString()) return std::unexpected(bad("bad_type", "title", "expected a string"));
         m.title = o.value("title").toString().toStdString();
     }
+    for (auto [key, field] : {std::pair{"request", &m.request}, {"fixes", &m.fixes}})
+        if (o.contains(key))
+        {
+            if (not o.value(key).isString()) return std::unexpected(bad("bad_type", key, "expected a string"));
+            *field = o.value(key).toString().toStdString();
+        }
     if (o.contains("anchors"))
     {
         if (not o.value("anchors").isObject()) return std::unexpected(bad("bad_type", "anchors", "expected an object"));
@@ -377,6 +383,8 @@ inline QJsonArray steps_json(const std::vector<Step>& list)
     using namespace json_detail;
     QJsonObject o{{"v", m.v}, {"steps", steps_json(m.steps)}};
     if (not m.title.empty()) o.insert("title", q(m.title));
+    if (not m.request.empty()) o.insert("request", q(m.request));
+    if (not m.fixes.empty()) o.insert("fixes", q(m.fixes));
     if (not m.anchors.empty())
     {
         QJsonObject a;

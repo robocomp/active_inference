@@ -68,7 +68,10 @@ public:
     // capture stamp (not the zed's). Call once per NEW panorama.
     // `segs` (optional, 1:1 with `detections`) supplies the silhouettes + runner-up class for the hover snapshot.
     void publish_ricoh(const std::vector<BearingDetection>& detections, std::uint64_t frame_ts_ms,
-                       const std::vector<SegDetection>* segs = nullptr);
+                       const std::vector<SegDetection>* segs = nullptr,
+                       const std::vector<float>& looked_windows = {});
+    // looked_windows = mask_azimuth_windows: [from,to] x K camera-frame azimuths (rad, CCW) of the panorama strips the
+    // detector ran on this frame, written in the SAME node update as the masks. Empty = unknown.
 
     // Hover snapshots of the last published masks (immutable, own buffers; null before the first publish).
     // Main-thread only, like publish itself.
@@ -120,7 +123,7 @@ private:
     void upload_masks(const RGBDData& rgbd, const Mat::RTMat& room_T_zed,
                       const std::vector<SegDetection>& detections, std::uint64_t frame_ts_ms);
     void upload_masks_ricoh(const std::vector<BearingDetection>& detections, std::uint64_t frame_ts_ms,
-                            const std::vector<SegDetection>* segs);
+                            const std::vector<SegDetection>* segs, const std::vector<float>& looked_windows);
     void upload_skeletons(const RGBDData& rgbd,
                           const std::vector<rc::human_pose::PoseDetection>& poses,
                           std::uint64_t frame_ts_ms);

@@ -129,6 +129,8 @@ inline std::string line(const Record& r)
             if (not r.room.empty()) what += " in " + r.room;
             what += r.author == Author::Human ? ", asked by a person" + (r.source.empty() ? "" : " (" + r.source + ")")
                                               : std::string(", on its own");
+            if (not r.request.empty()) what += ": \"" + r.request + "\"";
+            if (not r.fixes.empty()) what += ", fixing " + r.fixes;
             break;
         case Level::Step:
             what = "step " + r.kind + (r.target.empty() ? "" : " " + r.target);

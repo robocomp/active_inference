@@ -30,6 +30,7 @@
 
 #include <Eigen/Dense>
 
+#include "door_existence_info.h"
 #include "door_identity_table.h"
 #include "door_standpoint.h"
 #include "door_leaf_channel.h"   // ViewBearings / view_bearings / ViewpointLedger — the viewpoint, shared
@@ -60,21 +61,10 @@ struct Plan
     float           standoff_m = 0.f, band_near_m = 0.f, band_far_m = 0.f;
 };
 
-inline float binary_entropy(float p)
-{
-    const auto h = [](float q) { return q > 0.f ? -q * std::log(q) : 0.f; };
-    p = std::clamp(p, 0.f, 1.f);
-    return h(p) + h(1.f - p);
-}
+inline float binary_entropy(float p) { return rc::door::binary_entropy_nats(p); }
 
-/// Mutual information (nats) between existence E ~ Bernoulli(p_exists) and one detector outcome Y with
-/// P(Y=1|E=1) = p_hit, P(Y=1|E=0) = p_false. Zero when the prior is certain or the look cannot tell the two apart.
-inline float existence_eig(float p_exists, float p_hit, float p_false)
-{
-    const float p = std::clamp(p_exists, 0.f, 1.f);
-    const float py = p * std::clamp(p_hit, 0.f, 1.f) + (1.f - p) * std::clamp(p_false, 0.f, 1.f);
-    return std::max(0.f, binary_entropy(py) - p * binary_entropy(p_hit) - (1.f - p) * binary_entropy(p_false));
-}
+/// Mutual information (nats) between existence E ~ Bernoulli(p_exists) and one detector outcome (door_existence_info.h).
+inline float existence_eig(float p_exists, float p_hit, float p_false) { return rc::door::existence_mutual_info(p_exists, p_hit, p_false); }
 
 /// The remembered aperture's along-wall direction: its remembered yaw, or (identity-only row) the wall of the room
 /// polygon it lies on. Unit, room frame; nullopt when neither is available.

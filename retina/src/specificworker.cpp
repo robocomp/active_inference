@@ -1652,6 +1652,7 @@ void SpecificWorker::compute()
             std::vector<BearingDetection> bearing_dets;
             std::vector<SegDetection> ricoh_dets;
             std::uint64_t ricoh_stamp = 0;
+            std::vector<float> looked_windows;   // mask_azimuth_windows for this panorama (camera frame)
             if (auto rres = ricoh_worker_->latest_result(); rres and rres->masks and rres->bearings
                 and rres->frame.stamp != last_ricoh_published_stamp_)
             {
@@ -1673,6 +1674,7 @@ void SpecificWorker::compute()
                                                r360->processor()->class_names());
                 ricoh_dets   = std::move(*rres->masks);       // 1:1 with bearings (BearingStage order)
                 bearing_dets = std::move(*rres->bearings);
+                looked_windows = rres->looked_azimuth_windows;
             }
 
             if (ricoh_stamp != 0 and params.RICOH_MASK_DEPTH and frame->ricoh_valid and robot_T_ricoh_.has_value()
@@ -1764,7 +1766,7 @@ void SpecificWorker::compute()
             }
             if (ricoh_stamp != 0)
             {
-                graph_publisher_->publish_ricoh(bearing_dets, ricoh_stamp, &ricoh_dets);
+                graph_publisher_->publish_ricoh(bearing_dets, ricoh_stamp, &ricoh_dets, looked_windows);
                 if (ricoh_viewer_)
                     ricoh_viewer_->set_mask_hover(graph_publisher_->ricoh_hover_snapshot());
                 last_ricoh_published_stamp_ = ricoh_stamp;

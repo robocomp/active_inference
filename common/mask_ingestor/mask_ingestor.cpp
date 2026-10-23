@@ -217,6 +217,7 @@ MaskIngestor::NodeResult MaskIngestor::ingest_node(const rc::masks::MaskNodeRef&
     const VecOpt cent_rad_opt    = G_->get_attrib_by_name<mask_centroid_radius_att>(masks_node);
     const VecOpt range_opt       = G_->get_attrib_by_name<mask_range_att>(masks_node);
     const VecOpt has_depth_opt   = G_->get_attrib_by_name<mask_has_depth_att>(masks_node);
+    const VecOpt azwin_opt       = G_->get_attrib_by_name<mask_azimuth_windows_att>(masks_node);   // absent = unknown
     const VecOpt azimuth_opt     = G_->get_attrib_by_name<mask_azimuth_att>(masks_node);
     const VecOpt depth_var_opt   = G_->get_attrib_by_name<mask_depth_var_att>(masks_node);
     const VecOpt source_opt      = G_->get_attrib_by_name<mask_source_att>(masks_node);
@@ -245,6 +246,7 @@ MaskIngestor::NodeResult MaskIngestor::ingest_node(const rc::masks::MaskNodeRef&
     const auto& range_v           = vref(range_opt);
     const auto& has_depth_v       = vref(has_depth_opt);
     const auto& azimuth_v         = vref(azimuth_opt);
+    const auto& azwin_v           = vref(azwin_opt);
     const auto& depth_var_v       = vref(depth_var_opt);
     const auto& source_v          = vref(source_opt);
     const auto& color_rgb_v       = vref(color_rgb_opt);
@@ -321,6 +323,9 @@ MaskIngestor::NodeResult MaskIngestor::ingest_node(const rc::masks::MaskNodeRef&
     packet.mask_pixels.reserve(pixel_count);
     for (std::size_t i = 0; i < pixel_count; ++i)
         packet.mask_pixels.emplace_back(pixels_flat[i*2], pixels_flat[i*2+1]);
+
+    // Windows the detector ran (ricoh), camera frame -> target frame with the SAME rotation as the slice azimuths.
+    packet.ricoh_windows = rc::masks::rotate_azimuth_windows(azwin_v, R_tgt_src, needs_transform);
 
     packet.slices.reserve(static_cast<std::size_t>(mask_count));
     for (int i = 0; i < mask_count; ++i)
@@ -437,6 +442,7 @@ void MaskIngestor::merge_into(MasksPacket& dst, MasksPacket&& src)
     dst.support_points.insert(dst.support_points.end(), src.support_points.begin(), src.support_points.end());
     dst.support_points_cam.insert(dst.support_points_cam.end(), src.support_points_cam.begin(), src.support_points_cam.end());
     dst.mask_pixels.insert(dst.mask_pixels.end(), src.mask_pixels.begin(), src.mask_pixels.end());
+    dst.ricoh_windows.insert(dst.ricoh_windows.end(), src.ricoh_windows.begin(), src.ricoh_windows.end());
 }
 
 // Re-read every camera's mask node; returns true only when a NEW frame (higher mask_frame_id) was ingested.
