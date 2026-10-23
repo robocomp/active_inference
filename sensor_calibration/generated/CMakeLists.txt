@@ -52,3 +52,10 @@ SET (EXECUTABLE_OUTPUT_PATH ${RC_COMPONENT_DEVEL_PATH}/bin)
 ADD_EXECUTABLE( sensor_calibration ${SOURCES} ${MOC_SOURCES} ${RC_SOURCES} ${UI_HEADERS} )
 TARGET_LINK_LIBRARIES( sensor_calibration ${LIBS}  dsr_core dsr_gui dsr_api fastcdr fastdds OpenThreads Eigen3::Eigen QGLViewer-qt6 Qt6OpenGLWidgets ${STATIC_LIBS} ${SPECIFIC_LIBS} ${QT_LIBRARIES} ${Ice_LIBRARIES} )
 INSTALL(FILES ${EXECUTABLE_OUTPUT_PATH}/sensor_calibration DESTINATION ${RC_COMPONENT_INSTALL_PATH}/bin/ PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE GROUP_READ GROUP_EXECUTE WORLD_READ WORLD_EXECUTE )
+
+# Plan Task 2.2: input layer selftest. Private DDS domains only (graph 91, media 44); never the live ones.
+#   make -C build sensor_inputs_test && ../bin/sensor_inputs_test
+ADD_EXECUTABLE( sensor_inputs_test EXCLUDE_FROM_ALL ../tests/sensor_inputs_test.cpp ../src/sensor_inputs.cpp )
+TARGET_COMPILE_DEFINITIONS( sensor_inputs_test PRIVATE SHADOW_JSON="${CMAKE_CURRENT_SOURCE_DIR}/../../robot_concept/shadow.json" )
+TARGET_LINK_LIBRARIES( sensor_inputs_test ${LIBS} dsr_core dsr_gui dsr_api fastcdr fastdds OpenThreads Eigen3::Eigen QGLViewer-qt6 Qt6OpenGLWidgets ${STATIC_LIBS} ${SPECIFIC_LIBS} ${QT_LIBRARIES} ${Ice_LIBRARIES} )
+SET_TARGET_PROPERTIES( sensor_inputs_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../bin )

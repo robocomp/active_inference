@@ -24,7 +24,7 @@ graph = false   # headless: the DSR node-link viewer is not needed by a calibrat
 # 3d = true
 
 [Period]
-Compute = 100
+Compute = 20      # 50 Hz: wheel odometry is polled (no DSR signal), so the tick sets its sampling rate
 Emergency = 500
 
 [Component.Debug]
@@ -49,3 +49,11 @@ agent_info_period_ms = 1000
 # Owned graph nodes torn down on shutdown / peer-loss. The agent node is "<name> <id>".
 [Owns]
 nodes = ["sensor_calibration 27"]
+
+# ── Input layer (src/sensor_inputs.h) ─────────────────────────────────────────
+[Inputs]
+camera_rate_hz = 1.5     # zed rgb/depth + ricoh: COMPUTE budget (frames beyond it are drained, not converted)
+stall_lidar_ms = 2000    # a stream silent this long is marked stalled + logged once; its data is not used
+stall_camera_ms = 5000
+stall_imu_ms = 1000
+log_period_ms = 10000    # stream rates logged once per this period

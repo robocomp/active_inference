@@ -25,6 +25,16 @@ SpecificWorker::SpecificWorker(const ConfigLoader& configLoader, TuplePrx tprx, 
     rc::cfg::Reader(configLoader, "sensor_calibration").req("Period.Compute", period,
             "GRAFCET step period (ms) for every state of this agent's state machine");
 
+    {
+        const rc::cfg::Reader cfg(configLoader, "sensor_calibration");
+        inputs_cfg_.camera_rate_hz   = cfg.d("Inputs.camera_rate_hz", inputs_cfg_.camera_rate_hz,
+                "zed rgb/depth and ricoh hand-over rate (Hz): a COMPUTE budget, frames beyond it are drained unconverted; <=0 disables cameras");
+        inputs_cfg_.stall_lidar_ms   = cfg.i("Inputs.stall_lidar_ms", inputs_cfg_.stall_lidar_ms, "LiDAR stream declared stalled after this silence (ms)");
+        inputs_cfg_.stall_camera_ms  = cfg.i("Inputs.stall_camera_ms", inputs_cfg_.stall_camera_ms, "camera stream declared stalled after this silence (ms)");
+        inputs_cfg_.stall_imu_ms     = cfg.i("Inputs.stall_imu_ms", inputs_cfg_.stall_imu_ms, "IMU stream declared stalled after this silence (ms)");
+        inputs_cfg_.log_period_ms    = cfg.i("Inputs.log_period_ms", inputs_cfg_.log_period_ms, "stream-rate log period (ms)");
+    }
+
     states["Waiting"] = std::make_unique<GRAFCETStep>("Waiting", period,
         std::bind(&SpecificWorker::waiting_loop, this), std::bind(&SpecificWorker::waiting_enter, this));
     states["Operating"] = std::make_unique<GRAFCETStep>("Operating", period,
@@ -62,6 +72,7 @@ void SpecificWorker::request_shutdown()
 {
     if (shutting_down_.exchange(true))
         return;
+    inputs_.reset();   // subscribers + InnerEigenAPI go down first, from the main thread, while G is alive
     if (G)
         disconnect(G.get(), nullptr, this, nullptr);   // sever graph callbacks before any teardown
     cleanup_owned_nodes();
@@ -120,7 +131,15 @@ void SpecificWorker::initialize()
 
 void SpecificWorker::compute()
 {
-    fps.print("sensor_calibration compute", 3000);   // no estimation yet
+    if (shutting_down_.load() or not G)
+        return;
+    // Created here (an Operating tick, main thread), never at t=0 from initialize(): the graph is loaded and the
+    // sensor nodes have synced by now (CLAUDE.md, media plane).
+    if (not inputs_)
+        inputs_ = std::make_unique<sc::SensorInputs>(G, inputs_cfg_);
+    inputs_->poll();
+    // Task 2.3 (trajectory harvester) takes inputs_->take_*() here; the queues are bounded until then.
+    fps.print("sensor_calibration compute", 3000);
 }
 
 void SpecificWorker::emergency()

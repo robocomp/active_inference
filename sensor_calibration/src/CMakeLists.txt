@@ -5,14 +5,17 @@ add_subdirectory(${ACTIVE_INFERENCE_COMMON_DIR} ${CMAKE_CURRENT_BINARY_DIR}/ai_c
 LIST(APPEND LIBS
   ai_common::presence     # agent presence monitor + coordinator + concept_presence
   ai_common::core         # header-only: config_report (rc::cfg::Reader), ...
+  ai_common::media        # zero-copy media plane (domain 7): subscriber factories
 )
 
 LIST(APPEND SOURCES
   ../src/specificworker.cpp
+  ../src/sensor_inputs.cpp
 )
 
 LIST(APPEND HEADERS
   ../src/specificworker.h
+  ../src/sensor_inputs.h
 )
 
 # libdsr_core defines symbols that libdsr_{api,gui} only reference; keep all libs (see bottle_concept).

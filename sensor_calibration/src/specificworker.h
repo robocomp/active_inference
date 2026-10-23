@@ -3,7 +3,8 @@
  * from raw media-plane streams, outside room_concept's localiser loop.
  *
  * THIS FILE IS THE SKELETON ONLY: the agent runs the presence protocol (mirrors bottle_concept), owns its own
- * agent node, and cleans it up on a graceful stop. No subscribers and no estimation yet.
+ * agent node, and cleans it up on a graceful stop. Task 2.2 adds the input layer (sensor_inputs.h);
+ * no estimation yet.
  */
 #ifndef SPECIFICWORKER_H
 #define SPECIFICWORKER_H
@@ -16,6 +17,7 @@
 
 #include "../../common/agent_presence_coordinator/agent_presence_coordinator.h"
 #include "../../common/concept_presence/concept_presence.h"   // rc::presence::ConceptProtocol (SHARED)
+#include "sensor_inputs.h"                                         // the input layer (plain-data outputs)
 
 class SpecificWorker : public GenericWorker
 {
@@ -57,6 +59,9 @@ private:
     bool startup_check_flag = false;
     bool owned_nodes_cleaned_ = false;
     std::atomic<bool> shutting_down_{false};
+
+    sc::InputsConfig inputs_cfg_;                  // [Inputs] section of the config
+    std::unique_ptr<sc::SensorInputs> inputs_;     // created lazily on the first Operating tick (main thread)
 
     rc::presence::ConceptProtocol presence_protocol_;
     AgentPresenceCoordinator      presence_coordinator_;
