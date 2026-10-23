@@ -563,6 +563,21 @@ void required_option_selects_its_pose_and_names_it_on_the_claim(TestFailure &fai
 }
 } // namespace
 
+// Task X: a proto room's boxed-in handoff used to publish gain 0 and the selector's `not gain > 0` filter dropped the
+// only offer ("NONE ELIGIBLE"). The offer now carries the candidate's own gain: alone, it is selected.
+void boxed_in_room_offer_is_selected_when_alone(TestFailure &failure)
+{
+    auto [graph, room_id] = create_graph_fixture();
+    rc::AffordanceManager room_producer{"room_concept_affordance"};
+    rc::AffordanceManager controller;
+    failure.expect(room_producer.publish_target(graph, room_id, 3.f, 1.f, 0.f, 0.f), "publish gain 0 failed");
+    failure.expect(not controller.select_target(graph).has_value(), "a gain-0 offer must not be selected");
+    failure.expect(room_producer.publish_target(graph, room_id, 3.f, 1.f, 0.f, 1.4f), "publish gain>0 failed");
+    const auto sel = controller.select_target(graph);
+    failure.expect(sel.has_value() and sel->node_name == "room_concept_affordance",
+                   "a boxed-in afford_room with a real gain must be selected when alone");
+}
+
 int main()
 {
     TestFailure failure;
@@ -580,6 +595,7 @@ int main()
         complete_claim_checks_ownership(failure);
         selector_release_every_filter_and_missing_node(failure);
         required_option_selects_its_pose_and_names_it_on_the_claim(failure);
+        boxed_in_room_offer_is_selected_when_alone(failure);
     }
     catch (const std::exception &e)
     {

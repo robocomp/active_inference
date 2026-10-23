@@ -131,14 +131,8 @@ struct Plan
     int free_cells  = -1;                  ///< free cells in the whole grid (idem)
     std::optional<Eigen::Vector2f> best_unreached;   ///< on "unreachable": the best candidate by gain per straight metre
     float best_unreached_gain = 0.f;       ///< the gain of `best_unreached`, in the planner's own unit (set with it)
-    float nats_per_gain = 1.f;             ///< conversion of `gain` to nats: 1 for plan() (already nats); plan_coverage counts
-                                           ///< m2 of unknown floor, its caller sets coverage_nats_per_m2(cell)
     std::string why;                       ///< one word on every path: ok | finished | no_feasible | no_gain | unreachable
 };
-
-/// Nats of expected information per m2 of still-unknown floor: an unknown occupancy cell is a binary variable at
-/// p = 1/2, i.e. ln 2 nats, and a cell covers cell^2 m2. The currency the controller compares across affordances.
-inline float coverage_nats_per_m2(float cell) { return 0.69314718f / (cell * cell); }
 
 /// BOXED IN BY THE GRID, NOT BY THE WORLD: before the first visit "unreachable" says nothing about the room, so the
 /// best candidate goes to the controller (its body-aware planner judges reachability and reports Unreachable through

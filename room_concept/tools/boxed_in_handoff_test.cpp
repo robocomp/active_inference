@@ -49,8 +49,6 @@ int main()
     CHECK(not rc::layout::boxed_in_handoff(again, 1));
     CHECK(not again.ok);
 
-    // units: one unknown cell of a 0.1 m grid carries ln 2 nats (a binary cell at p = 1/2)
-    CHECK(std::abs(rc::layout::coverage_nats_per_m2(0.1f) * 0.01f - std::log(2.f)) < 1e-5f);
     std::println("boxed_in_handoff_test: {}/{} checks passed", checks - failures, checks);
     return failures == 0 ? 0 : 1;
 }
