@@ -134,6 +134,17 @@ static void fact_source(DSR::DSRGraph& live, DSR::DSRGraph& mem, std::shared_ptr
     add_rt(live, room_id, proto, {4.f, 1.f, 0.f}, {0.f, 0.f, -0.5f}, std::nullopt);
     const auto sc2 = fs.scene();
     CHECK(sc2 and sc2->rt.size() == 2);
+    // Reverse direction (room->robot) and a world->room edge are also reported; a room->door edge never is.
+    {
+        const auto room2 = add_node(live, DSR::Node::create<room_node_type>("room_w"), root);
+        add_rt(live, root, room2, {9.f, 8.f, 0.f}, {0.f, 0.f, 0.f}, std::nullopt);
+        const auto sc3 = fs.scene();
+        CHECK(sc3 and sc3->rt.size() == 3);
+        CHECK(sc3 and std::ranges::any_of(sc3->rt, [](const rc::em::RtEdge& e) { return e.from == "root" and e.to == "room_w"; }));
+        CHECK(sc3 and std::ranges::none_of(sc3->rt, [](const rc::em::RtEdge& e) { return e.to_type == "door"; }));
+        live.delete_edge(root, room2, "RT");
+        live.delete_node(room2);
+    }
     if (sc2 and sc2->rt.size() == 2)
     {
         const auto& a = sc2->rt[0];                 // sorted by (from,to): Shadow->room_1 before room_1->room_2
