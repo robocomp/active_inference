@@ -65,3 +65,10 @@ SET_TARGET_PROPERTIES( sensor_inputs_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${
 ADD_EXECUTABLE( trajectory_harvester_test EXCLUDE_FROM_ALL ../tests/trajectory_harvester_test.cpp )
 TARGET_LINK_LIBRARIES( trajectory_harvester_test ai_common::sensor_calib Eigen3::Eigen )
 SET_TARGET_PROPERTIES( trajectory_harvester_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../bin )
+
+# Plan Task 2.3: proposal publisher selftest (pure parts + graph on PRIVATE domain 92).
+#   make -C build proposal_publisher_test && ../bin/proposal_publisher_test
+ADD_EXECUTABLE( proposal_publisher_test EXCLUDE_FROM_ALL ../tests/proposal_publisher_test.cpp )
+TARGET_COMPILE_DEFINITIONS( proposal_publisher_test PRIVATE SHADOW_JSON="${CMAKE_CURRENT_SOURCE_DIR}/../../robot_concept/shadow.json" )
+TARGET_LINK_LIBRARIES( proposal_publisher_test ${LIBS} dsr_core dsr_gui dsr_api fastcdr fastdds OpenThreads Eigen3::Eigen QGLViewer-qt6 Qt6OpenGLWidgets ${STATIC_LIBS} ${SPECIFIC_LIBS} ${QT_LIBRARIES} ${Ice_LIBRARIES} )
+SET_TARGET_PROPERTIES( proposal_publisher_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../bin )
