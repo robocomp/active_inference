@@ -478,6 +478,9 @@ inline Contract read_contract(const DSR::Node& node, std::string_view parent_typ
                     else goal.push_back(cl);
                 }
                 if (not goal.empty()) c.goal = std::move(goal);
+                else if (not pre.empty())
+                    std::fprintf(stderr, "[affordance] note: this node carries only precondition clauses; the '%.*s' type default goal (%zu clause(s)) stands.\n",
+                                 static_cast<int>(parent_type.size()), parent_type.data(), c.goal.size());
                 c.pre = std::move(pre);
             }
         }
