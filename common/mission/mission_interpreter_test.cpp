@@ -586,6 +586,48 @@ int main()
         CHECK(h.evaled.empty() or h.evaled.back().find("$") == std::string::npos);
     }
 
+    // ── pause / unpause: the running leaf is cancelled, the clocks freeze, the step restarts whole and without a retry ──
+    {
+        FakeHost h;
+        Interpreter in(h);
+        in.start(parse("mission\n  explore room_1 budget_s=10s\n"), 0);
+        in.tick(0);
+        CHECK(in.pause(3000));
+        CHECK(h.count("cancel 1:explore") == 1);
+        CHECK(in.status() == "paused|1" and in.paused());
+        CHECK(in.progress().starts_with("1:explore"));
+        in.tick(60000);
+        CHECK(in.steps()[0].state == Interpreter::StepState::Running);
+        CHECK(h.count("start 1:explore") == 1);
+        CHECK(in.unpause(60000) and not in.paused());
+        in.tick(60000);
+        CHECK(h.count("start 1:explore") == 2);
+        in.tick(69000);
+        CHECK(in.state() == S::Running);
+        in.tick(70000);
+        CHECK(in.state() == S::Completed);
+        CHECK(in.steps()[0].attempt == 1);
+        CHECK(not in.unpause(70000));
+    }
+    {
+        FakeHost h;
+        Interpreter in(h);
+        CHECK(not in.pause(0));
+        in.start(parse("mission\n  explore room_1 budget_s=10s\n"), 0);
+        in.tick(0);
+        CHECK(in.pause(1));
+        CHECK(not in.pause(2));
+    }
+    {
+        FakeHost h;
+        Interpreter in(h);
+        in.start(parse("mission\n  explore room_1 budget_s=10s\n"), 0);
+        in.tick(0);
+        in.pause(5);
+        in.cancel("cancelled", 6);
+        CHECK(in.status() == "aborted|cancelled" and not in.paused());
+    }
+
     test_transitions_per_attempt();
     test_transitions_per_iteration();
     test_transitions_close_every_open_step();

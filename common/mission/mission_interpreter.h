@@ -123,6 +123,7 @@ public:
         root_ = build(root_step_);
         state_ = State::Running;
         abort_outcome_.clear();
+        paused_ = false;
         tick_ = 0;
         event(std::format("mission '{}': started ({} steps)", title_, root_step_.steps.size()));
         return std::nullopt;
@@ -130,7 +131,7 @@ public:
 
     void tick(std::uint64_t now_ms)
     {
-        if (state_ != State::Running) return;
+        if (state_ != State::Running or paused_) return;
         ++tick_;
         advance(root_, now_ms);
         if (root_.state == StepState::Satisfied)
@@ -151,8 +152,47 @@ public:
         cancel_subtree(root_, now_ms, outcome);
         state_ = State::Aborted;
         abort_outcome_ = outcome;
+        paused_ = false;
         event(std::format("mission '{}': aborted ({})", title_, outcome));
     }
+
+    /// Freeze the mission at any moment: the running leaf is cancelled (the host decides what holding means) and
+    /// every clock stops. True if a running, not yet paused mission was paused.
+    bool pause(std::uint64_t now_ms)
+    {
+        if (state_ != State::Running or paused_) return false;
+        if (Run* leaf = running_leaf(root_); leaf != nullptr)
+        {
+            if (leaf->started) host_.cancel(leaf->resolved);
+            leaf->started = false;
+            paused_leaf_ = leaf->step->id;
+            event(std::format("step {}: paused", label(*leaf->step)));
+        }
+        else paused_leaf_.clear();
+        paused_ = true;
+        paused_at_ = now_ms;
+        return true;
+    }
+
+    /// Thaw it: the interrupted leaf restarts from its beginning with its whole budget, and no attempt is spent.
+    /// Enclosing steps' budgets resume where they stopped (their clocks are shifted by the time paused).
+    bool unpause(std::uint64_t now_ms)
+    {
+        if (state_ != State::Running or not paused_) return false;
+        paused_ = false;
+        for (Run* r = running_child(root_); r != nullptr; r = running_child(*r))
+        {
+            if (r->kids.empty())
+            {
+                r->began = now_ms;
+                event(std::format("step {}: restarted", label(*r->step)));
+            }
+            else r->began += now_ms - paused_at_;
+        }
+        return true;
+    }
+
+    [[nodiscard]] bool paused() const { return paused_; }
 
     /// End the running `wait`, if that is what runs. True if one was ended.
     bool resume(std::uint64_t now_ms)
@@ -177,7 +217,7 @@ public:
         switch (state_)
         {
             case State::Idle: return "";
-            case State::Running: return "in_progress";
+            case State::Running: return paused_ ? "paused|" + paused_leaf_ : "in_progress";
             case State::Completed: return "completed";
             case State::Failed: return std::format("failed|{}|{}", root_.origin, root_.outcome);
             case State::Aborted: return "aborted|" + abort_outcome_;
@@ -189,6 +229,7 @@ public:
     [[nodiscard]] std::string progress() const
     {
         if (state_ != State::Running) return std::format("-|{}|{}", status(), last_event_);
+        // paused: the same step path, so the paused step is the one reported (status() carries "paused|<id>")
         std::vector<const Run*> path;
         for (const Run* r = &root_; r != nullptr; r = running_child(*r)) path.push_back(r);
         const Run& leaf = *path.back();
@@ -267,6 +308,9 @@ private:
     Step root_step_{};
     Run root_{};
     std::uint64_t tick_ = 0;
+    bool paused_ = false;
+    std::uint64_t paused_at_ = 0;
+    std::string paused_leaf_;
     std::vector<std::string> events_;
     std::vector<StepTransition> transitions_;
     std::uint64_t mission_ = 0;
