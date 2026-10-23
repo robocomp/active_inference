@@ -268,3 +268,47 @@ Test: on a synthetic trajectory (straight 5 m, a π hairpin, a 30 s stop), check
 2. **Real bench (Phase 0 data).** Every DoF agrees with `expected.csv` within the combined σ.
 3. **room_concept.** Localisation metrics are unchanged on the standard tour after Phases 3 and 5. Size drops
    about 5k lines.
+
+## Status after Phases 1–2 (2026-10-23, branch feat/sensor-calibration)
+
+Phases 1–2 (Tasks 1.1–1.3, 2.1–2.4) are DONE and reviewed. Nothing has been run on the live fleet (domain 0); all
+tests ran on private DSR domains. Live check for the user: `sensor_calibration/bin/sensor_calibration etc/config.toml`
+→ "subscriber up" for helios, bpearl, zed rgb/depth, ricoh, imu, then `[inputs] rates: … odom=yes pose=yes+cov
+poly=Nv` with no `STALLED`.
+
+**Rulings taken during execution** (each with its cost if wrong):
+- Correction convention = BODY-aligned axes (R = Rx Ry Rz·R_nom, t = t_nom + t_corr) — cost: convert proposals.
+- Legacy absolute `etc/mount_calib_<robot>.txt` is ignored with a warning — cost: none found in the repo.
+- Graph-level overlay tests go through an EdgeIO seam, not a live graph — cost: the real DSR glue is unexercised live.
+- Hairpin requirement = optimal segmentation (not "one pair"); criterion ≥0.9× the exhaustive optimum.
+- Heading = precision-weighted gyro+wheel fusion; the chord is integrated along the fused heading.
+- Keyframe spacing budget upper bound = 0.5 s.
+- The proposal publisher is not wired (no mount posterior until 4.4).
+- Live camera refresh is disabled while room_concept `ImageEdge.mountPublish` is on (prevents double correction).
+
+**Carry-forwards:**
+- **4.4 Helios yaw vs chassis:**
+  - Gyro scale, bias and tilt are common-mode but are treated as independent per pair, so the posterior
+    over-tightens. Model them as nuisance states, or use Woodbury common-mode marginalisation.
+  - Add `Pair::chord_sigma²` and `dth_sigma` into the row variance.
+  - Pin the harvester's side/rot sign convention against KinematicMount.
+  - Verify that the Helios stamp and odometry share one clock.
+- **Phase 3:** pin the IMU up axis (`gyro.z()` is assumed) to the IMU mount.
+- **Phase 4 RGB-D factors:** zed rgb and depth are decimated independently, so they need a pairing rule (nearest
+  stamp or a shared decimator).
+- **Phase 4 wiring of the proposal publisher:**
+  - `offer()` must commit `last_` and `version` only after a successful graph write.
+  - A covariance-only change never triggers a write; consider a log-det-change trigger.
+  - Correlations are ignored by the per-DoF movement test.
+- **Phase 6 commit:**
+  - A committed edge that already contains a learned camera correction must rebase `mount_corr_`, which today is
+    reconciled only at load (`calib_channels.cpp:70`). The restart-with-mountPublish path is not traced.
+  - `LidarIngestor::resolve_sensor_origins` latches the sensor origins once, so committed translations do not
+    reach the mount factors.
+  - The `mountPublish→set_live_graph_refresh` wiring is only tested via the setter.
+- **Minor:**
+  - The input layer's `pose_` and `polygon_` are not cleared on room change.
+  - The factory "no descriptor" log repeats every 5 s.
+  - A stall hold extrapolates the last rate (gated only by the input layer).
+  - The stale sweep in `sensor_calibration` uses a placeholder `metaconcept` type and a name-prefix match.
+  - The selftests are EXCLUDE_FROM_ALL and not registered with ctest.
