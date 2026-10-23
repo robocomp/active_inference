@@ -29,7 +29,7 @@ sys.modules["torchaudio"] = None  # a torchaudio built for another torch breaks 
 # "dining table"/"coffee table" the round table becomes "desk" (measured: table 90 crops -> 0).
 VOCAB = [
     "person",
-    "table", "dining table", "coffee table", "desk", "workbench", "chair", "stool", "armchair", "sofa", "bed", "bench",
+    "table", "dining table", "coffee table", "desk", "workbench", "chair", "stool", "armchair", "sofa", "bed", "nightstand", "bench",
     "bookshelf", "shelf", "cube shelf", "cabinet", "chest of drawers", "wardrobe",
     "kitchen island", "countertop", "counter", "sink", "faucet", "refrigerator", "microwave", "oven", "stove", "range hood",
     "dishwasher", "washing machine", "kettle", "coffee machine", "trash can", "paper towel roll",
