@@ -4,6 +4,8 @@
 #include <QPixmap>
 #include <opencv2/core.hpp>
 
+#include "mask_hover_info.h"
+
 #include <chrono>
 #include <memory>
 #include <string>
@@ -42,6 +44,10 @@ public:
     // "unresolved". Cloned per frame (~128 kB); pass active=false to release.
     void update_probs(const rc::semantic::SemanticMap& map, bool active);
 
+    // Mask hover-readout: immutable snapshot of the masks published for the shown frame (own buffers;
+    // null = off). Hovering lists every mask under the cursor, smallest first.
+    void set_mask_hover(rc::MaskHoverSnapshotPtr snap);
+
 protected:
     void resizeEvent(QResizeEvent* event) override;
     void mouseMoveEvent(QMouseEvent* event) override;
@@ -68,6 +74,7 @@ private:
     // number by construction, which is the only thing keeping writer and reader coherent.
     std::unique_ptr<rc::semantic::SemanticMap> probs_map_;
     bool                     probs_active_ = false;
+    rc::MaskHoverSnapshotPtr mask_hover_;
 
     // Display-rate (update_frame call rate) shown as an on-image FPS overlay. EMA over inter-call
     // intervals; 0 until the second frame.

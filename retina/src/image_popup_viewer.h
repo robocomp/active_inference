@@ -4,6 +4,8 @@
 #include <QPixmap>
 #include <opencv2/core.hpp>
 
+#include "mask_hover_info.h"
+
 #include <chrono>
 #include <memory>
 #include <string>
@@ -51,6 +53,11 @@ public:
     void set_class_names(std::vector<std::string> names) { class_names_ = std::move(names); }
     void set_prob_readout(const rc::semantic::SemanticMap& map, bool active);
 
+    // Mask hover-readout: an immutable snapshot of the masks published for the frame being shown
+    // (own buffers, shared_ptr<const>; null switches the readout off). Hovering lists every mask
+    // under the cursor, smallest first.
+    void set_mask_hover(rc::MaskHoverSnapshotPtr snap);
+
 protected:
     void resizeEvent(QResizeEvent* event) override;
     void mouseMoveEvent(QMouseEvent* event) override;
@@ -70,6 +77,7 @@ private:
     bool    depth_active_ = false;
     std::unique_ptr<rc::semantic::SemanticMap> probs_map_;   // posterior planes only (cloned per frame)
     bool    probs_active_ = false;
+    rc::MaskHoverSnapshotPtr mask_hover_;
     std::vector<std::string> class_names_;                   // ADE20K-150 id → name, for the readout
 };
 

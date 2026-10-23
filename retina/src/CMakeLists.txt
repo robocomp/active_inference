@@ -99,6 +99,8 @@ LIST(APPEND SOURCES ../src/yolo_viewer.cpp)
 LIST(APPEND HEADERS ../src/yolo_viewer.h)
 LIST(APPEND SOURCES ../src/image_popup_viewer.cpp)
 LIST(APPEND HEADERS ../src/image_popup_viewer.h)
+LIST(APPEND SOURCES ../src/mask_hover_info.cpp)
+LIST(APPEND HEADERS ../src/mask_hover_info.h)
 
 # TBB is required by std::execution::par_unseq (libstdc++ on Linux)
 find_package(TBB REQUIRED)

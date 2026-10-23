@@ -90,7 +90,7 @@ ImagePopupViewer::~ImagePopupViewer() = default;
 
 void ImagePopupViewer::sync_mouse_tracking()
 {
-    setMouseTracking(depth_active_ or probs_active_);   // fire mouseMoveEvent with no button pressed
+    setMouseTracking(depth_active_ or probs_active_ or mask_hover_ != nullptr);   // fire mouseMoveEvent with no button pressed
 }
 
 void ImagePopupViewer::set_prob_readout(const rc::semantic::SemanticMap& map, bool active)
@@ -114,13 +114,22 @@ void ImagePopupViewer::set_prob_readout(const rc::semantic::SemanticMap& map, bo
     sync_mouse_tracking();
 }
 
+void ImagePopupViewer::set_mask_hover(rc::MaskHoverSnapshotPtr snap)
+{
+    mask_hover_ = std::move(snap);
+    if (not mask_hover_)
+        QToolTip::hideText();
+    sync_mouse_tracking();
+}
+
 void ImagePopupViewer::mouseMoveEvent(QMouseEvent* event)
 {
     QLabel::mouseMoveEvent(event);
     const bool want_depth = depth_active_ and (not room_log_range_.empty()
                                                or not model_log_range_.empty());
     const bool want_probs = probs_active_ and probs_map_ and probs_map_->graded();
-    if ((not want_depth and not want_probs) or last_pixmap_.isNull())
+    const bool want_masks = mask_hover_ != nullptr;
+    if ((not want_depth and not want_probs and not want_masks) or last_pixmap_.isNull())
     {
         QToolTip::hideText();
         return;
@@ -190,10 +199,16 @@ void ImagePopupViewer::mouseMoveEvent(QMouseEvent* event)
         lines << QString("Δ      %1%2 m").arg(model - room >= 0.f ? "+" : "")
                                          .arg(model - room, 0, 'f', 2);
 
-    if (lines.isEmpty())
+    QString text = lines.join('\n');
+    if (want_masks)
+        if (const QString mt = mask_hover_->tooltip_at(rx, ry); not mt.isEmpty())
+            text += (text.isEmpty() ? QString() : QStringLiteral("\n")) + mt;
+
+    if (text.isEmpty())
         QToolTip::hideText();
     else
-        QToolTip::showText(event->globalPosition().toPoint(), lines.join('\n'), this);
+        QToolTip::showText(event->globalPosition().toPoint(),
+                           "<pre style='margin:0'>" + text.toHtmlEscaped() + "</pre>", this);
 }
 
 } // namespace rc

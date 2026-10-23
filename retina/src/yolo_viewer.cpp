@@ -149,7 +149,7 @@ void YoloViewer::resizeEvent(QResizeEvent* event)
 // update_semantic had ever announced itself, and the semantic hover went silent for good.)
 void YoloViewer::sync_mouse_tracking()
 {
-    setMouseTracking(semantic_active_ or depth_active_ or probs_active_);
+    setMouseTracking(semantic_active_ or depth_active_ or probs_active_ or mask_hover_ != nullptr);
 }
 
 void YoloViewer::update_semantic(const cv::Mat& labels, bool active)
@@ -201,13 +201,22 @@ void YoloViewer::update_probs(const rc::semantic::SemanticMap& map, bool active)
     sync_mouse_tracking();
 }
 
+void YoloViewer::set_mask_hover(rc::MaskHoverSnapshotPtr snap)
+{
+    mask_hover_ = std::move(snap);
+    if (not mask_hover_)
+        QToolTip::hideText();
+    sync_mouse_tracking();
+}
+
 void YoloViewer::mouseMoveEvent(QMouseEvent* event)
 {
     QLabel::mouseMoveEvent(event);
 
     const bool want_depth = depth_active_ and not depth_measured_.empty();
     const bool want_probs = probs_active_ and probs_map_ and probs_map_->graded();
-    if ((!semantic_active_ or semantic_labels_.empty()) and not want_depth and not want_probs)
+    const bool want_masks = mask_hover_ != nullptr;
+    if ((!semantic_active_ or semantic_labels_.empty()) and not want_depth and not want_probs and not want_masks)
     {
         QToolTip::hideText();
         return;
@@ -284,7 +293,17 @@ void YoloViewer::mouseMoveEvent(QMouseEvent* event)
             lines << QString("Δ     %1%2 m").arg(m - z >= 0 ? "+" : "").arg(m - z, 0, 'f', 2);
     }
 
-    QToolTip::showText(event->globalPosition().toPoint(), lines.join('\n'), this);
+    QString text = lines.join('\n');
+    if (want_masks)
+        if (const QString mt = mask_hover_->tooltip_at(rx, ry); not mt.isEmpty())
+            text += (text.isEmpty() ? QString() : QStringLiteral("\n")) + mt;
+    if (text.isEmpty())
+    {
+        QToolTip::hideText();
+        return;
+    }
+    QToolTip::showText(event->globalPosition().toPoint(),
+                       "<pre style='margin:0'>" + text.toHtmlEscaped() + "</pre>", this);
 }
 
 } // namespace rc

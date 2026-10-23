@@ -25,6 +25,7 @@
 
 #include "rgbd_data.h"
 #include "retina_params.h"
+#include "mask_hover_info.h"
 
 struct SegDetection;
 namespace rc::human_pose { struct PoseDetection; }
@@ -65,7 +66,14 @@ public:
 
     // Publish the RGB-360 slices on "masks_ricoh" (own frame-id sequence). frame_ts_ms = the PANORAMA's
     // capture stamp (not the zed's). Call once per NEW panorama.
-    void publish_ricoh(const std::vector<BearingDetection>& detections, std::uint64_t frame_ts_ms);
+    // `segs` (optional, 1:1 with `detections`) supplies the silhouettes + runner-up class for the hover snapshot.
+    void publish_ricoh(const std::vector<BearingDetection>& detections, std::uint64_t frame_ts_ms,
+                       const std::vector<SegDetection>* segs = nullptr);
+
+    // Hover snapshots of the last published masks (immutable, own buffers; null before the first publish).
+    // Main-thread only, like publish itself.
+    [[nodiscard]] rc::MaskHoverSnapshotPtr zed_hover_snapshot() const { return zed_hover_; }
+    [[nodiscard]] rc::MaskHoverSnapshotPtr ricoh_hover_snapshot() const { return ricoh_hover_; }
 
     // Publish human skeletons on the dedicated 'skeleton' node. Keypoints are BODY_18, deprojected
     // to the CAMERA (zed) frame — NOT room frame — so a consumer interacting with a person can
@@ -111,7 +119,8 @@ private:
 
     void upload_masks(const RGBDData& rgbd, const Mat::RTMat& room_T_zed,
                       const std::vector<SegDetection>& detections, std::uint64_t frame_ts_ms);
-    void upload_masks_ricoh(const std::vector<BearingDetection>& detections, std::uint64_t frame_ts_ms);
+    void upload_masks_ricoh(const std::vector<BearingDetection>& detections, std::uint64_t frame_ts_ms,
+                            const std::vector<SegDetection>* segs);
     void upload_skeletons(const RGBDData& rgbd,
                           const std::vector<rc::human_pose::PoseDetection>& poses,
                           std::uint64_t frame_ts_ms);
@@ -130,6 +139,8 @@ private:
     // Diagnostic CSV for the ego-motion corruption (MaskMotion.csv_log). Opened lazily on first write.
     std::ofstream   motion_csv_;
     bool            motion_csv_open_attempted_ = false;
+
+    rc::MaskHoverSnapshotPtr zed_hover_, ricoh_hover_;
 
     bool          masks_ready_    = false;
     bool          masks_ricoh_ready_ = false;

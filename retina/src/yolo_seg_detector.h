@@ -26,6 +26,8 @@ struct SegDetection
     int second_class_id = -1;
     std::string second_label;
     float second_confidence = 0.f;
+    // The model's own label before normalisation (tv->monitor, dining table->table, ...). Display only.
+    std::string raw_label;
 };
 
 class YoloSegDetector

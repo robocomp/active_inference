@@ -1764,7 +1764,9 @@ void SpecificWorker::compute()
             }
             if (ricoh_stamp != 0)
             {
-                graph_publisher_->publish_ricoh(bearing_dets, ricoh_stamp);
+                graph_publisher_->publish_ricoh(bearing_dets, ricoh_stamp, &ricoh_dets);
+                if (ricoh_viewer_)
+                    ricoh_viewer_->set_mask_hover(graph_publisher_->ricoh_hover_snapshot());
                 last_ricoh_published_stamp_ = ricoh_stamp;
             }
         }
@@ -1788,6 +1790,9 @@ void SpecificWorker::compute()
         }
         graph_publisher_->publish(zed_res->frame.rgbd, zed_res->frame.room_T_sensor,
                                   *masks_src, zed_res->frame.stamp);
+        // Hover snapshot of exactly what was just published (immutable, own buffers, same thread).
+        if (yolo_viewer_)
+            yolo_viewer_->set_mask_hover(yolo_overlay_enabled_ ? graph_publisher_->zed_hover_snapshot() : nullptr);
         publish_ms = perf_ms(perf_pub0, std::chrono::steady_clock::now());
 
         // Human-pose branch: BODY_18 skeletons (camera frame) on the 'skeleton' node for human_concept.

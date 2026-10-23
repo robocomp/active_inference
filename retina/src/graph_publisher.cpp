@@ -16,6 +16,7 @@
 
 #include <algorithm>
 #include <array>
+#include <memory>
 #include <cmath>
 #include <limits>
 #include <print>
@@ -39,10 +40,11 @@ void GraphPublisher::publish(const RGBDData& rgbd, const Mat::RTMat& room_T_zed,
         upload_masks(rgbd, room_T_zed, detections, frame_ts_ms);
 }
 
-void GraphPublisher::publish_ricoh(const std::vector<BearingDetection>& detections, std::uint64_t frame_ts_ms)
+void GraphPublisher::publish_ricoh(const std::vector<BearingDetection>& detections, std::uint64_t frame_ts_ms,
+                                   const std::vector<SegDetection>* segs)
 {
     if (ensure_node("masks_ricoh", "Plum", masks_ricoh_ready_, /*relayout=*/true, "ricoh"))
-        upload_masks_ricoh(detections, frame_ts_ms);
+        upload_masks_ricoh(detections, frame_ts_ms, segs);
 }
 
 bool GraphPublisher::ensure_node(const char* name, const char* color, bool& ready, bool relayout,
@@ -434,8 +436,19 @@ void GraphPublisher::upload_masks(const RGBDData& rgbd, const Mat::RTMat& room_T
         return;
     auto& masks_node = masks_node_opt.value();
 
+    // Hover snapshot of exactly what is written below (own buffers; published to the popup at the end).
+    auto hover = std::make_shared<rc::MaskHoverSnapshot>();
+    hover->node = "masks_zed";
+    hover->source = "zed";
+    hover->frame_id = sensing_frame;
+    hover->stamp_ms = frame_ts_ms;
+    hover->created_steady_ms = rc::MaskHoverSnapshot::steady_now_ms();
+    hover->src_size = cv::Size(rgbd.width, rgbd.height);
+    const bool whitelist_active = not params_.YOLO_ACCEPTED_LABELS.empty();
+
     if (rgbd.depth.empty() || rgbd.width <= 0 || rgbd.height <= 0 || rgbd.focal_x <= 0.f || rgbd.focal_y <= 0.f)
     {
+        zed_hover_ = hover;   // no masks this frame
         MaskArrays empty;
         empty.frame_id = static_cast<int>(sensing_frame);
         empty.ts_ms    = frame_ts_ms;
@@ -731,6 +744,19 @@ void GraphPublisher::upload_masks(const RGBDData& rgbd, const Mat::RTMat& room_T
             labels_joined << '|';
         labels_joined << det.label;
 
+        {
+            const bool accepted = not whitelist_active
+                or std::ranges::find(params_.YOLO_ACCEPTED_LABELS, det.label) != params_.YOLO_ACCEPTED_LABELS.end();
+            auto info = rc::MaskHoverSnapshot::from_detection(det, static_cast<int>(label_ids.size()),
+                                                              whitelist_active, accepted);
+            info.has_depth = true;
+            info.centroid_cam = std::array<float, 3>{sum_pt.x() / static_cast<float>(mask_points.size()),
+                                                    sum_pt.y() / static_cast<float>(mask_points.size()),
+                                                    sum_pt.z() / static_cast<float>(mask_points.size())};
+            info.range_m = sum_pt.y() / static_cast<float>(mask_points.size());   // mean optical-axis depth Z
+            info.support_points = static_cast<int>(mask_points.size());
+            hover->masks.push_back(std::move(info));
+        }
         label_ids.push_back(static_cast<float>(det.class_id));
         confidences.push_back(det.confidence);
         has_depth_flags.push_back(1.0f);   // zed slice: carries 3D support points
@@ -748,6 +774,11 @@ void GraphPublisher::upload_masks(const RGBDData& rgbd, const Mat::RTMat& room_T
             color_rgb.insert(color_rgb.end(), {cs.chroma.x(), cs.chroma.y(), cs.chroma.z()});
             color_var.insert(color_var.end(), {cs.var.x(), cs.var.y(), cs.var.z()});
             color_neff.push_back(cs.n_eff);
+            if (params_.MASK_COLOR_ENABLED)
+            {
+                hover->masks.back().color_rgb = std::array<float, 3>{cs.chroma.x(), cs.chroma.y(), cs.chroma.z()};
+                hover->masks.back().color_neff = cs.n_eff;
+            }
         }
         support_offsets.push_back(static_cast<float>(support_offsets.back() + static_cast<float>(mask_points.size())));
         mask_pixels_xy.insert(mask_pixels_xy.end(), det_pixels.begin(), det_pixels.end());
@@ -805,6 +836,14 @@ void GraphPublisher::upload_masks(const RGBDData& rgbd, const Mat::RTMat& room_T
             const float radius = std::sqrt(xn * xn + yn * yn);
             centroid_radius.push_back(radius);
             mask_range.push_back(Z);   // static range: distance carries info loss even at zero motion
+            {
+                auto& hi = hover->masks.back();
+                hi.motion_dotd = corr.dot_d;
+                hi.motion_bias = corr.bias_m;
+                hi.motion_sigma_cm = std::sqrt(std::max(0.0f, corr.var_m)) * 100.0f;
+                hi.trunc_frac = tau;
+                hi.centroid_radius = radius;
+            }
 
             if (motion_csv_.is_open())
                 motion_csv_ << sensing_frame << ',' << frame_ts_ms << ',' << frame_dt_s << ','
@@ -862,6 +901,7 @@ void GraphPublisher::upload_masks(const RGBDData& rgbd, const Mat::RTMat& room_T
     out.rt_lag_s            = rt_lag_s;
     out.rt_gap_s            = rt_gap_s;
     const int mask_count = static_cast<int>(out.label_ids.size());
+    zed_hover_ = hover;
     write_mask_node(*G_, params_, masks_node, out);
     G_->update_node(std::move(masks_node));
 
@@ -884,7 +924,8 @@ void GraphPublisher::upload_masks(const RGBDData& rgbd, const Mat::RTMat& room_T
 // Depth-carrying slices (lidar reprojected into the panorama) publish 3-D support points / centroid / bbox in
 // the RICOH frame (derived by the caller through ricoh<-robot, never through the room); bearing-only slices
 // publish NaN geometry plus a RICOH-frame azimuth in mask_azimuth. All attribute arrays stay 1-to-1.
-void GraphPublisher::upload_masks_ricoh(const std::vector<BearingDetection>& detections, std::uint64_t frame_ts_ms)
+void GraphPublisher::upload_masks_ricoh(const std::vector<BearingDetection>& detections, std::uint64_t frame_ts_ms,
+                                        const std::vector<SegDetection>* segs)
 {
     auto node_opt = G_->get_node("masks_ricoh");
     if (!node_opt.has_value())
@@ -897,8 +938,50 @@ void GraphPublisher::upload_masks_ricoh(const std::vector<BearingDetection>& det
     std::ostringstream labels_joined;
     const float nan = std::numeric_limits<float>::quiet_NaN();
 
-    for (const auto& b : detections)
+    auto hover = std::make_shared<rc::MaskHoverSnapshot>();
+    hover->node = "masks_ricoh";
+    hover->source = "ricoh";
+    hover->frame_id = static_cast<std::uint64_t>(out.frame_id);
+    hover->stamp_ms = frame_ts_ms;
+    hover->created_steady_ms = rc::MaskHoverSnapshot::steady_now_ms();
+    const bool whitelist_active = not params_.YOLO_ACCEPTED_LABELS.empty();
+    const bool have_segs = segs != nullptr and segs->size() == detections.size();
+    if (have_segs)
+        for (const auto& s : *segs)
+            if (not s.mask.empty()) { hover->src_size = s.mask.size(); break; }
+
+    for (std::size_t bi = 0; bi < detections.size(); ++bi)
     {
+        const auto& b = detections[bi];
+        {
+            rc::MaskHoverInfo info;
+            if (have_segs)
+                info = rc::MaskHoverSnapshot::from_detection((*segs)[bi], static_cast<int>(bi), whitelist_active, true);
+            else
+            {
+                info.index = static_cast<int>(bi);
+                info.label = b.label;
+            }
+            // The bearing is what is published: its label/class/confidence are the record.
+            info.label = b.label;
+            info.class_id = static_cast<int>(b.class_id);
+            info.confidence = b.confidence;
+            info.accepted = not whitelist_active
+                or std::ranges::find(params_.YOLO_ACCEPTED_LABELS, b.label) != params_.YOLO_ACCEPTED_LABELS.end();
+            info.has_depth = b.has_lidar_depth and not b.support_cam.empty();
+            info.azimuth_deg = b.azimuth_cam_rad * 180.0f / static_cast<float>(M_PI);
+            if (info.has_depth)
+            {
+                Eigen::Vector3f c = Eigen::Vector3f::Zero();
+                for (const auto& p : b.support_cam) c += p;
+                c /= static_cast<float>(b.support_cam.size());
+                info.centroid_cam = std::array<float, 3>{c.x(), c.y(), c.z()};
+                info.range_m = c.norm();
+                info.support_points = static_cast<int>(b.support_cam.size());
+                info.depth_sigma_cm = std::sqrt(std::max(0.0f, b.range_var)) * 100.0f;
+            }
+            hover->masks.push_back(std::move(info));
+        }
         if (not out.label_ids.empty())
             labels_joined << '|';
         labels_joined << b.label;
@@ -948,6 +1031,7 @@ void GraphPublisher::upload_masks_ricoh(const std::vector<BearingDetection>& det
         }
     }
     out.labels = labels_joined.str();
+    ricoh_hover_ = hover;
     write_mask_node(*G_, params_, node, out);
     G_->update_node(std::move(node));
     if (params_.VERBOSE_DEBUG)

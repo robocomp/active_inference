@@ -265,7 +265,10 @@ bool YoloProcessor::is_accepted_yolo_label(const std::string& label) const
 void YoloProcessor::normalize_filter_and_erode(std::vector<SegDetection>& detections) const
 {
     for (auto& detection : detections)
+    {
+        detection.raw_label = detection.label;
         detection.label = normalize_yolo_label(detection.label);
+    }
 
     // Second-best recovery: before dropping a detection whose TOP class is not whitelisted, check its
     // runner-up. If the runner-up IS accepted and the two classes are within second_best_margin, adopt the
