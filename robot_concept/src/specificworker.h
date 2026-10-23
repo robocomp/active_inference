@@ -396,8 +396,8 @@ private:
 	void apply_mount_overlay();
 	/// Write the live body->camera mounts into the overlay, versioned. GRACEFUL stop only.
 	void persist_mount_overlay();
-	std::map<std::string, rc::mount::Mount>      mount_nominal_;       ///< body->sensor edges as seeded, before the overlay
-	std::map<std::string, rc::mount::Correction> mount_overlay_rows_;  ///< corrections the file held at start
+	rc::mount::State  mount_state_;   ///< nominal edges, file corrections, refused flag
+	rc::mount::EdgeIO mount_io_;      ///< graph read/write used at start, reused by persist
 
 	// DSR graph-structure tracking for the viewer relayout (main-thread only). update_node_signal fires on
 	// creation AND every attribute update, so we relayout only when `id` is not yet in `known_node_ids_`.

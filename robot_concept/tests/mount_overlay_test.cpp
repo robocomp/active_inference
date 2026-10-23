@@ -62,7 +62,9 @@ static void test_compose_helios_yaw_bpearl_z()
 
     const Mount b = compose(kNomT, kNomR, p.rows.at("bpearl"));
     CHECK(std::abs(b.t[2] - (kNomT[2] - 0.005)) < 1e-12);       // z equals nominal - 0.005 (1e-9)
-    CHECK(b.rpy == kNomR);                                      // zero correction keeps nominal verbatim
+    CHECK(b.rpy == kNomR);
+    // documented stored triple: Ry(pi)*yaw a is re-extracted as (pi, 0, pi - a), an EQUIVALENT rotation
+    CHECK(std::abs(std::abs(h.rpy[0]) - kPi) < 1e-9 and std::abs(h.rpy[1]) < 1e-9 and std::abs(h.rpy[2] - (kPi - 0.0321140)) < 1e-9);                                      // zero correction keeps nominal verbatim
 }
 
 static void test_inverse_and_format()
@@ -83,9 +85,65 @@ static void test_inverse_and_format()
     CHECK(next_version(q.rows, "helios") == 4 and next_version(q.rows, "zed") == 1);
 }
 
+// ── graph seam, faked ─────────────────────────────────────────────────────────
+struct FakeGraph
+{
+    std::map<std::string, Mount> edges;
+    std::map<std::string, int> writes;
+    EdgeIO io()
+    {
+        return {[this](const std::string& s) -> std::optional<Mount> { auto i = edges.find(s); if (i == edges.end()) return std::nullopt; return i->second; },
+                [this](const std::string& s, const Mount& m) { edges[s] = m; ++writes[s]; }};
+    }
+};
+static FakeGraph make_graph()
+{
+    FakeGraph g;
+    g.edges["helios"] = {kNomT, kNomR};
+    g.edges["bpearl"] = {{0.0, 0.14, 0.67}, kNomR};
+    g.edges["zed"]    = {{0.0, -0.075, 0.945}, {0, 0, 0}};
+    g.edges["ricoh"]  = {{0.0, -0.17, 1.275}, {0, 0, 0}};
+    return g;
+}
+
+static void mount_overlay_writes_edges()
+{
+    FakeGraph g = make_graph(); const auto nom = g.edges; State st;
+    const auto w = apply_overlay(std::string(kFile), "shadow", "webots", g.io(), st);
+    CHECK(w.empty() and not st.refused);
+    const Mat3 want = Eigen::AngleAxisd(0.0321140, Eigen::Vector3d::UnitZ()).toRotationMatrix() * euler_to_matrix(kNomR);
+    CHECK((euler_to_matrix(g.edges["helios"].rpy) - want).cwiseAbs().maxCoeff() < 1e-9);
+    CHECK(std::abs(g.edges["bpearl"].t[2] - (nom.at("bpearl").t[2] - 0.005)) < 1e-9);
+    CHECK(g.edges["zed"].t == nom.at("zed").t and g.edges["ricoh"].t == nom.at("ricoh").t);
+    CHECK(g.writes.count("zed") == 0 and g.writes.count("ricoh") == 0 and g.writes["helios"] == 1);
+    // persist right after: nothing changed => nothing to write
+    std::vector<std::string> pw;
+    CHECK(not persist_overlay("shadow", "webots", g.io(), st, "now", pw).has_value());
+    // a later change to zed is persisted with a monotonic version and helios keeps v3 -> unchanged
+    g.edges["zed"].t[2] += 0.01;
+    const auto out = persist_overlay("shadow", "webots", g.io(), st, "now", pw);
+    CHECK(out.has_value());
+    const Parsed q = parse_overlay(*out);
+    CHECK(q.rows.at("zed").version == 1 and q.rows.at("helios").version == 3 and std::abs(q.rows.at("zed").t[2] - 0.01) < 1e-12);
+}
+
+static void mount_overlay_rejects_world_mismatch()
+{
+    FakeGraph g = make_graph(); const auto nom = g.edges; State st;
+    const std::string real_file = std::string(kFile).replace(std::string(kFile).find("webots"), 6, "real");
+    const auto w = apply_overlay(real_file, "shadow", "webots", g.io(), st);
+    CHECK(w.size() == 1 and st.refused);
+    for (const auto& [k, m] : nom) CHECK(g.edges[k].t == m.t and g.edges[k].rpy == m.rpy);
+    CHECK(g.writes.empty());
+    std::vector<std::string> pw;
+    g.edges["zed"].t[2] += 0.01;                                // even with a live change, the file is not overwritten
+    CHECK(not persist_overlay("shadow", "webots", g.io(), st, "now", pw).has_value());
+    CHECK(pw.size() == 1);
+}
+
 int main()
 {
-    test_parse_and_world(); test_bad_rows(); test_compose_helios_yaw_bpearl_z(); test_inverse_and_format();
+    test_parse_and_world(); test_bad_rows(); test_compose_helios_yaw_bpearl_z(); test_inverse_and_format(); mount_overlay_writes_edges(); mount_overlay_rejects_world_mismatch();
     std::printf(fails ? "mount_overlay_test: %d FAILED\n" : "mount_overlay_test: ALL PASSED\n", fails);
     return fails != 0;
 }

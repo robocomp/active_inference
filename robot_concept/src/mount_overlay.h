@@ -18,12 +18,18 @@
 //   (nominal rotation 0) the two conventions coincide.
 //   A zero rotation correction returns the nominal Euler triple verbatim (no re-extraction).
 //
+// EULER  The edge stores a Euler triple, but compose() works on matrices and re-extracts the triple
+//   (pitch in [-pi/2, pi/2]). For a Ry(pi) mount that is an EQUIVALENT triple, not the nominal one with
+//   the yaw added: helios (0, pi, 0) with yaw +a is stored as (+-pi, 0, pi - a) (the sign of pi is whatever atan2 returns). Consumers that read the
+//   raw Euler angles of a corrected edge see this; consumers that build the rotation are unaffected.
+//
 // WORLD  A file whose `# world:` / `# robot:` tag differs from the configured one is REFUSED (a real-robot
 //   calibration must never move a Webots mount, or the reverse). A missing tag is a mismatch.
 #include <Eigen/Geometry>
 #include <algorithm>
 #include <array>
 #include <charconv>
+#include <functional>
 #include <cmath>
 #include <iomanip>
 #include <limits>
@@ -160,5 +166,63 @@ inline std::vector<std::string> split_ws(const std::string& s)
 		  << c.rpy[2] << ' ' << c.version << ' ' << (c.date.empty() ? "unknown" : c.date) << ' '
 		  << (c.source.empty() ? "unknown" : c.source) << '\n';
 	return o.str();
+}
+// ── GRAPH SEAM ───────────────────────────────────────────────────────────────────────────────────
+// apply/persist decisions, with the edge read/write behind callables so a test can fake the graph.
+struct EdgeIO
+{
+	std::function<std::optional<Mount>(const std::string&)> read;          // body->sensor edge, nullopt if absent
+	std::function<void(const std::string&, const Mount&)>   write;         // static RT write
+};
+struct State
+{
+	std::map<std::string, Mount>      nominal;       // edges as seeded, before the overlay
+	std::map<std::string, Correction> rows;          // corrections the file held at start
+	bool refused = false;                            // file existed but was refused: never overwrite it
+};
+
+/// `text` = file contents, nullopt if the file does not exist. Returns warnings (one per refusal/bad row).
+inline std::vector<std::string> apply_overlay(const std::optional<std::string>& text, const std::string& robot,
+                                              const std::string& world, const EdgeIO& io, State& st)
+{
+	std::vector<std::string> warn;
+	for (const char* s : kSensors)
+		if (const auto m = io.read(s)) st.nominal[s] = *m;
+	if (not text) return warn;
+	const Parsed p = parse_overlay(*text);
+	if (const auto why = check_world(p, robot, world)) { st.refused = true; warn.push_back(*why); return warn; }
+	warn = p.warnings;
+	st.rows = p.rows;
+	for (const char* s : kSensors)                                         // Helios before the cameras
+	{
+		const auto it = p.rows.find(s); const auto nom = st.nominal.find(s);
+		if (it != p.rows.end() and nom != st.nominal.end())
+			io.write(s, compose(nom->second.t, nom->second.rpy, it->second));
+	}
+	return warn;
+}
+
+/// New file contents to write, or nullopt (nothing to write, or the overlay was refused: warning added).
+inline std::optional<std::string> persist_overlay(const std::string& robot, const std::string& world, const EdgeIO& io,
+                                                  const State& st, const std::string& now, std::vector<std::string>& warn)
+{
+	if (st.refused) { warn.push_back("mount overlay was refused at start: persist skipped, file not overwritten"); return std::nullopt; }
+	std::map<std::string, Correction> out = st.rows;
+	bool changed = false;
+	for (const char* s : kSensors)
+	{
+		const auto nom = st.nominal.find(s); const auto live = io.read(s);
+		if (nom == st.nominal.end() or not live) continue;
+		Correction c = correction_from(nom->second.t, nom->second.rpy, live->t, live->rpy);
+		const auto old = out.find(s);
+		const Correction prev = old == out.end() ? Correction{} : old->second;
+		double d = 0;                                  // float edge storage: compare at float resolution
+		for (int i = 0; i < 3; ++i) d = std::max({d, std::abs(c.t[i] - prev.t[i]), std::abs(c.rpy[i] - prev.rpy[i])});
+		if (d < 1e-6) continue;
+		c.version = next_version(out, s); c.date = now; c.source = "robot_concept:persist";
+		out[s] = c; changed = true;
+	}
+	if (not changed) return std::nullopt;
+	return format_overlay(robot, world, out);
 }
 } // namespace rc::mount

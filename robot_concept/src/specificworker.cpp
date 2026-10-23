@@ -2351,103 +2351,66 @@ void SpecificWorker::apply_mount_overlay()
 	namespace mo = rc::mount;
 	auto bn = G->get_node("body");
 	if (not bn.has_value()) { qWarning() << "[mount] overlay: no body node"; return; }
-
-	// The nominal edges as just seeded: persist needs them to turn the live edge back into a correction.
-	const auto read_edge = [&](const std::string& s) -> std::optional<mo::Mount>
-	{
-		auto cn = G->get_node(s);
-		if (not cn.has_value()) return std::nullopt;                    // ALWAYS check (CLAUDE.md)
-		const auto e = G->get_edge(bn.value().id(), cn.value().id(), "RT");
-		if (not e.has_value()) return std::nullopt;
-		const auto rot = G->get_attrib_by_name<rt_rotation_euler_xyz_att>(e.value());
-		const auto tr  = G->get_attrib_by_name<rt_translation_att>(e.value());
-		if (not rot.has_value() or not tr.has_value()
-		    or rot.value().get().size() < 3 or tr.value().get().size() < 3) return std::nullopt;
-		mo::Mount m;
-		for (int i = 0; i < 3; ++i) { m.t[i] = tr.value().get()[i]; m.rpy[i] = rot.value().get()[i]; }
-		return m;
-	};
-	for (const char* s : mo::kSensors)
-		if (const auto m = read_edge(s)) mount_nominal_[s] = *m;
-
+	auto rt = G->get_rt_api();
+	if (not rt) return;
+	const mo::EdgeIO io{
+		[&](const std::string& s) -> std::optional<mo::Mount>
+		{
+			auto cn = G->get_node(s);
+			if (not cn.has_value()) return std::nullopt;                // ALWAYS check (CLAUDE.md)
+			const auto e = G->get_edge(bn.value().id(), cn.value().id(), "RT");
+			if (not e.has_value()) return std::nullopt;
+			const auto rot = G->get_attrib_by_name<rt_rotation_euler_xyz_att>(e.value());
+			const auto tr  = G->get_attrib_by_name<rt_translation_att>(e.value());
+			if (not rot.has_value() or not tr.has_value()
+			    or rot.value().get().size() < 3 or tr.value().get().size() < 3) return std::nullopt;
+			mo::Mount m;
+			for (int i = 0; i < 3; ++i) { m.t[i] = tr.value().get()[i]; m.rpy[i] = rot.value().get()[i]; }
+			return m;
+		},
+		[&](const std::string& s, const mo::Mount& m)
+		{
+			auto cn = G->get_node(s);
+			if (not cn.has_value()) return;
+			// STATIC, NOT TIMESTAMPED: an extrinsic, not a state (see the boresight block above).
+			rt->insert_or_assign_edge_RT_static(bn.value(), cn.value().id(),
+				std::vector<float>{float(m.t[0]), float(m.t[1]), float(m.t[2])},
+				std::vector<float>{float(m.rpy[0]), float(m.rpy[1]), float(m.rpy[2])});
+			qInfo().noquote() << QString::asprintf("[mount] overlay composed over body->%s: t [%+.5f %+.5f %+.5f]"
+				" euler [%+.6f %+.6f %+.6f]", s.c_str(), m.t[0], m.t[1], m.t[2], m.rpy[0], m.rpy[1], m.rpy[2]);
+		}};
+	mount_io_ = io;
 	const std::string path = mount_overlay_path();
-	std::ifstream f(path);
-	if (not f.is_open())
+	std::optional<std::string> text;
+	if (std::ifstream f(path); f.is_open()) text = std::string(std::istreambuf_iterator<char>(f), {});
+	else
 	{
 		// The pre-world file held ABSOLUTE zed/ricoh mounts, a different semantic: never read as a correction.
 		const std::string legacy = "etc/mount_calib_" + robot_name + ".txt";
 		if (std::ifstream(legacy).is_open())
 			qWarning().noquote() << "[mount] legacy" << QString::fromStdString(legacy)
 			                     << "(absolute mounts, no world tag) is IGNORED; nominal mounts stand";
-		return;                                                          // no overlay: the JSON's mount stands
 	}
-	const mo::Parsed parsed = mo::parse_overlay(std::string(std::istreambuf_iterator<char>(f), {}));
-	if (const auto why = mo::check_world(parsed, robot_name, params.TRANSFORMS_WORLD))
-	{ qWarning().noquote() << "[mount]" << QString::fromStdString(*why) << "(" << QString::fromStdString(path) << ")"; return; }
-	for (const std::string& w : parsed.warnings) qWarning().noquote() << "[mount]" << QString::fromStdString(w);
-	mount_overlay_rows_ = parsed.rows;                                   // persist keeps versions monotonic
-
-	auto rt = G->get_rt_api();
-	if (not rt) return;
-	for (const char* s : mo::kSensors)                                   // Helios before the cameras
-	{
-		const auto it = parsed.rows.find(s);
-		const auto nom = mount_nominal_.find(s);
-		if (it == parsed.rows.end() or nom == mount_nominal_.end()) continue;
-		auto cn = G->get_node(s);
-		if (not cn.has_value()) continue;
-		const mo::Mount m = mo::compose(nom->second.t, nom->second.rpy, it->second);
-		// ★ STATIC, NOT TIMESTAMPED — an extrinsic, not a state (see the boresight block above).
-		rt->insert_or_assign_edge_RT_static(bn.value(), cn.value().id(),
-			std::vector<float>{float(m.t[0]), float(m.t[1]), float(m.t[2])},
-			std::vector<float>{float(m.rpy[0]), float(m.rpy[1]), float(m.rpy[2])});
-		qInfo().noquote() << QString::asprintf(
-			"[mount] overlay v%d (%s, %s) composed over body->%s: t [%+.5f %+.5f %+.5f] euler [%+.6f %+.6f %+.6f]"
-			" (%s)", it->second.version, it->second.date.c_str(), it->second.source.c_str(), s,
-			m.t[0], m.t[1], m.t[2], m.rpy[0], m.rpy[1], m.rpy[2], path.c_str());
-	}
+	for (const std::string& w : mo::apply_overlay(text, robot_name, params.TRANSFORMS_WORLD, io, mount_state_))
+		qWarning().noquote() << "[mount]" << QString::fromStdString(w) << "(" << QString::fromStdString(path) << ")";
 }
 
 void SpecificWorker::persist_mount_overlay()
 {
 	namespace mo = rc::mount;
-	if (not params.PERSIST_MOUNTS_ON_STOP) return;
+	if (not params.PERSIST_MOUNTS_ON_STOP or not mount_io_.read) return;
 	if (params.TRANSFORMS_WORLD != "webots" and params.TRANSFORMS_WORLD != "real") return;
-	auto bn = G->get_node("body");
-	if (not bn.has_value()) return;
-	const std::string now = QDateTime::currentDateTime().toString(Qt::ISODate).toStdString();
-	std::map<std::string, mo::Correction> out = mount_overlay_rows_;
-	bool changed = false;
-	for (const char* s : mo::kSensors)
-	{
-		const auto nom = mount_nominal_.find(s);
-		auto cn = G->get_node(s);
-		if (nom == mount_nominal_.end() or not cn.has_value()) continue;
-		const auto e = G->get_edge(bn.value().id(), cn.value().id(), "RT");
-		if (not e.has_value()) continue;
-		const auto rot = G->get_attrib_by_name<rt_rotation_euler_xyz_att>(e.value());
-		const auto tr  = G->get_attrib_by_name<rt_translation_att>(e.value());
-		if (not rot.has_value() or not tr.has_value()
-		    or rot.value().get().size() < 3 or tr.value().get().size() < 3) continue;
-		mo::Vec3 lt, lr;
-		for (int i = 0; i < 3; ++i) { lt[i] = tr.value().get()[i]; lr[i] = rot.value().get()[i]; }
-		mo::Correction c = mo::correction_from(nom->second.t, nom->second.rpy, lt, lr);
-		const auto old = out.find(s);
-		const mo::Correction prev = old == out.end() ? mo::Correction{} : old->second;
-		double d = 0;                                 // float edge storage: compare at float resolution
-		for (int i = 0; i < 3; ++i) d = std::max({d, std::abs(c.t[i] - prev.t[i]), std::abs(c.rpy[i] - prev.rpy[i])});
-		if (d < 1e-6) continue;                       // unchanged: no version, no rewrite
-		c.version = mo::next_version(out, s); c.date = now; c.source = "robot_concept:persist";
-		out[s] = c; changed = true;
-	}
-	if (not changed) { qInfo() << "[mount] overlay unchanged — nothing written"; return; }
-
+	std::vector<std::string> warn;
+	const auto out = mo::persist_overlay(robot_name, params.TRANSFORMS_WORLD, mount_io_, mount_state_,
+	                                     QDateTime::currentDateTime().toString(Qt::ISODate).toStdString(), warn);
+	for (const std::string& w : warn) qWarning().noquote() << "[mount]" << QString::fromStdString(w);
+	if (not out) return;
 	const std::string path = mount_overlay_path(), tmp = path + ".tmp";
 	{   // ATOMIC: temp + rename, so a stop interrupted mid-write leaves the previous overlay intact.
 		std::ofstream f(tmp, std::ios::out | std::ios::trunc);
 		if (not f.is_open()) { qWarning() << "[mount] cannot write" << QString::fromStdString(tmp); return; }
 		f.imbue(std::locale::classic());
-		f << mo::format_overlay(robot_name, params.TRANSFORMS_WORLD, out);
+		f << *out;
 		f.flush();
 		if (not f.good()) { qWarning() << "[mount] write of" << QString::fromStdString(tmp) << "FAILED — overlay unchanged"; return; }
 	}
