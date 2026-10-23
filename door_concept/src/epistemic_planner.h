@@ -18,6 +18,7 @@
 #include <array>
 #include <cmath>
 
+#include "door_existence_info.h"
 #include "door_belief.h"                             // AI2 belief: Σ + predicted_information for the NBV
 #include "../../common/nbv/viewpoint_score.h"        // rc::nbv — the shared DETECTION-WEIGHTED NBV core
 
@@ -43,6 +44,10 @@ struct EpistemicProposal
 };
 
 // ─── Planner ─────────────────────────────────────────────────────────────────
+
+/// What a look can still learn about the door's EXISTENCE: the belief's p_exists and the ZED detector's hit / false-alarm rates.
+/// Part of the expected information gain (nats), beside the D-optimal gain on [s,w,h]; omitted (nullptr) = existence is not in question.
+struct ExistenceLook { float p_exists = 1.0f; float p_hit = 0.85f; float p_false = 0.05f; };
 
 class EpistemicPlanner
 {
@@ -70,7 +75,9 @@ public:
                               const std::vector<Eigen::Vector2f>& room_polygon = {},
     /// @param plan_out optional: the full four-face plan behind the decision (per-face stand-off, visibility,
     ///                  reachability, P(detect), expected gain). For monitoring — see etc/door_nbv_log.csv.
-                              rc::nbv::Plan* plan_out = nullptr) const;
+                              rc::nbv::Plan* plan_out = nullptr,
+    /// @param existence the existence question, priced on the same scale (see ExistenceLook).
+                              const ExistenceLook* existence = nullptr) const;
 
     // ★The old `MinStandOffM = 2.0` floor is GONE. It was a hand-picked stand-in for the near shoulder of the
     // detector envelope ("YOLO misses doors seen too close") — which is now MODELLED: P(detect) is unimodal in

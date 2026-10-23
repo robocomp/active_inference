@@ -70,7 +70,7 @@ EpistemicProposal EpistemicPlanner::compute(const DoorBelief& belief, float lat_
                                             const rc::nbv::Sensor& sensor_in,
                                             const std::vector<rc::nbv::Obstacle>& obstacles,
                                             const std::vector<Eigen::Vector2f>& room_polygon,
-                                            rc::nbv::Plan* plan_out) const
+                                            rc::nbv::Plan* plan_out, const ExistenceLook* existence) const
 {
     // The camera geometry arrives from the caller (read fresh from the graph each cycle); the
     // detector envelope is ours. Merging here keeps the two concerns in their right owners.
@@ -106,6 +106,11 @@ EpistemicProposal EpistemicPlanner::compute(const DoorBelief& belief, float lat_
 
     const Eigen::Matrix<float, 3, 3> I3 = Eigen::Matrix<float, 3, 3>::Identity();
     const Eigen::Vector2f face_dir[4] = {L.ex, -L.ex, L.ey, -L.ey};   // [+x, -x, +y, -y], as sample_face_surface
+    // ★EXISTENCE IS A DOF OF THE BELIEF. The mutual information between "the door is there" and one ZED outcome is added to every face's raw
+    // gain (the detection weighting in plan_faces then scales the whole by P(detect | pose): existence is only resolved by a look that can
+    // fire). A 360-born door sits at p~0.7 so the term is near its maximum; once the ZED has confirmed it (p->1) or the absence removed it
+    // (p->0) the term is 0 and the look is worth only what the geometry still offers.
+    const float exist_info = existence ? door::existence_mutual_info(existence->p_exists, existence->p_hit, existence->p_false) : 0.0f;
     const auto raw_gain_of = [&](int i, float standoff)
     {
         // ★Task E: the information a look from THIS face's viewpoint can still RESOLVE — the model error already measured from a
@@ -113,7 +118,7 @@ EpistemicProposal EpistemicPlanner::compute(const DoorBelief& belief, float lat_
         const Eigen::Matrix<float, 3, 3> S = belief.covariance_resolvable(ctr + standoff * face_dir[i]);
         const float Ri = sigma_base * sigma_base + (lat_rate * standoff) * (lat_rate * standoff);
         const auto  dI = belief.predicted_information(sample_face_surface(L, belief.cz(), i), Ri);
-        return 0.5f * std::log(std::max(1e-9f, (I3 + S * dI).determinant()));
+        return exist_info + 0.5f * std::log(std::max(1e-9f, (I3 + S * dI).determinant()));
     };
 
     const rc::nbv::Plan plan = rc::nbv::plan_faces(target, sensor, robot_radius_m_, obstacles, raw_gain_of,
@@ -149,7 +154,7 @@ EpistemicProposal EpistemicPlanner::compute(const DoorBelief& belief, float lat_
     float best_gain = plan.face_gains[best_idx];   // DETECTION-WEIGHTED
     if (rc::any_sigma_star(rc::kDoorDofs))
     {
-        const float adequacy_gap = rc::adequacy_gap_nats(rc::kDoorDofs, [&](std::size_t j) { return S(j, j); });
+        const float adequacy_gap = exist_info + rc::adequacy_gap_nats(rc::kDoorDofs, [&](std::size_t j) { return S(j, j); });   // existence has no sigma*: all of it is wanted
         const float useful_frac  = (best_raw > 1e-9f) ? std::min(best_raw, adequacy_gap) / best_raw : 0.0f;
         best_gain *= useful_frac;
     }
