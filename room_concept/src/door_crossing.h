@@ -208,7 +208,8 @@ namespace rc::crossing
 
     /// Evaluate one aperture. `xy`/`cov_xy` are the robot position and its 2×2 covariance, ROOM frame.
     inline Crossing evaluate(const DoorAperture& ap, const std::vector<Eigen::Vector2f>& polygon,
-                             const Eigen::Vector2f& xy, const Eigen::Matrix2f& cov_xy, float r_body)
+                             const Eigen::Vector2f& xy, const Eigen::Matrix2f& cov_xy, float r_body,
+                             float sigma_normal = 0.f)
     {
         Crossing c;
         const Eigen::Vector2f ab = ap.b - ap.a;
@@ -222,8 +223,15 @@ namespace rc::crossing
         c.u = d.dot(c.tangent);
         // Projected pose variances. The additive 1e-8 is numerical (a zero covariance is a legal input
         // from a frozen or synthetic pose), not a model floor: at 0.1 mm it cannot change any answer.
-        const float sig_s = std::sqrt(c.n_out.dot(cov_xy * c.n_out) + 1e-8f);
-        const float sig_t = std::sqrt(c.tangent.dot(cov_xy * c.tangent) + 1e-8f);
+        // ★ THE APERTURE IS A BELIEF TOO (fix round 1, Task C review). "Past the line" is measured against an ESTIMATED line:
+        //   its position error adds to the pose's. ACROSS the line (normal) the error is the wall's: `sigma_normal`, the
+        //   caller's layout σ (publish_corner_sigma, the same σ Task M gives the mouth; door node and mouth differed by
+        //   ~0.49 m along the normal on gold2). ALONG it, door_concept's own position σ (ap.sigma_along), or the same
+        //   layout σ when door_concept stated none. Never 0 in the caller; without them (default 0, tests/legacy) the
+        //   pose alone decides, which is the over-confident reading this exists to correct.
+        const float sig_along = ap.sigma_along > 0.f ? ap.sigma_along : sigma_normal;
+        const float sig_s = std::sqrt(c.n_out.dot(cov_xy * c.n_out) + sigma_normal * sigma_normal + 1e-8f);
+        const float sig_t = std::sqrt(c.tangent.dot(cov_xy * c.tangent) + sig_along * sig_along + 1e-8f);
         const float half = 0.5f * w;
         // ★ WHICH SIDE OF THE DOOR LINE IS THE BODY CENTRE ON (2026-10-21, Task R1b). Rooms partition the floor at
         //   the door line, so "which room is the robot in" is the side its CENTRE is on, under the pose's own

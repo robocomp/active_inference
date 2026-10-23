@@ -10,11 +10,11 @@ static int failures = 0;
 static void check(bool ok, const char *what)
 { if (!ok) ++failures; std::printf("  %s %s\n", ok ? "ok  " : "FAIL", what); }
 
-static float p_cross(float p_open, Vector2f robot, float sigma)
+static float p_cross(float p_open, Vector2f robot, float sigma, float sigma_normal = 0.f)
 {
     const std::vector<Vector2f> rect = {{-3, -2}, {3, -2}, {3, 3}, {-3, 3}};
     rc::DoorAperture ap; ap.a = {-0.5f, 3}; ap.b = {0.5f, 3}; ap.p_open = p_open;
-    return rc::crossing::evaluate(ap, rect, robot, Eigen::Matrix2f::Identity() * sigma * sigma, 0.25f).p_cross;
+    return rc::crossing::evaluate(ap, rect, robot, Eigen::Matrix2f::Identity() * sigma * sigma, 0.25f, sigma_normal).p_cross;
 }
 
 int main()
@@ -34,6 +34,12 @@ int main()
     check(p_cross(-1.f, {0.f, 3.3f}, 0.02f) > 0.9f, "unmeasured: passage still decides");
     std::printf("monotone in P(open)\n");
     check(p_cross(0.9f, {0.f, 3.2f}, 0.05f) >= p_cross(0.3f, {0.f, 3.2f}, 0.05f), "more open => more crossed");
+    std::printf("aperture position error (fix round 1)\n");
+    check(p_cross(0.02f, {0.f, 3.10f}, 0.01f, 0.15f) < 0.05f, "shut (0.02), pose sigma 1 cm, aperture sigma_normal 0.15, 0.10 m past the ESTIMATED line: no birth");
+    check(p_cross(0.02f, {0.f, 3.10f}, 0.01f, 0.f) > 0.05f, "(without the aperture sigma the same case would birth: the defect)");
+    const float gold3 = p_cross(0.75f, {0.f, 3.30f}, 0.02f, 0.06f);
+    std::printf("  gold3 case (0.75, 0.3 m past, aperture sigma 0.06): p_cross %.4f, margin over 0.95 = %.4f\n", gold3, gold3 - birth);
+    check(gold3 > birth, "gold3 still births with a realistic aperture sigma");
     std::printf("%s (%d failures)\n", failures ? "FAIL" : "PASS", failures);
     return failures ? 1 : 0;
 }

@@ -948,7 +948,8 @@ void RoomSceneGraph::step_proto_room_impl(const rc::RoomConcept::UpdateResult& r
     for (const auto& ap : apertures)
         if (room_of(ap.id) != dsr_room_id_)
             continue;
-        else if (const auto c = rc::crossing::evaluate(ap, polygon, xy, cov_xy, r_body); c.valid)
+        else if (const auto c = rc::crossing::evaluate(ap, polygon, xy, cov_xy, r_body,
+                                                              room_concept_->params.wall_map.publish_corner_sigma); c.valid)
         {
             const float p_open = ap.p_open < 0.f ? 0.5f : std::clamp(ap.p_open, 0.f, 1.f);
             p_in_doorway = std::max(p_in_doorway,
