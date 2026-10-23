@@ -147,13 +147,13 @@ inline std::string paused_at(const rc::mission::Progress& p)
         const std::string label = step ? name_of(*step) : v.id;
         if (v.state == SS::Running and was == SS::Running and old and v.attempt > old->attempt)
         {
-            const int n = step ? step->on_fail.retries + 1 : v.attempt;
-            out.push_back(std::format("⟳ retry {}/{} {}", v.attempt, n, label));
+            const int max = step ? step->on_fail.retries : v.attempt - 1;
+            out.push_back(std::format("⟳ retry {}/{} {}", v.attempt - 1, max, label));
         }
         else if (v.state == SS::Running and was != SS::Running)
             out.push_back(std::format("→ {}/{} {}", top_index(v.id), total, label));
         if (v.state == SS::Satisfied and was != SS::Satisfied)
-            out.push_back(std::format("✓ {} ({:.0f} s)", label, double(v.t1 - v.t0) / 1000.0));
+            out.push_back(std::format("✓ {} ({:.0f} s)", label, v.t1 < v.t0 ? 0.0 : double(v.t1 - v.t0) / 1000.0));
         else if (v.state == SS::Failed and was != SS::Failed)
             out.push_back(std::format("✗ {}: {}", label, v.outcome));
     }
@@ -161,10 +161,11 @@ inline std::string paused_at(const rc::mission::Progress& p)
     const std::string was_paused = paused_at(before), now_paused = paused_at(after);
     if (was_paused.empty() and not now_paused.empty())
         out.push_back(std::format("⏸ paused at {}/{} {}", top_index(now_paused), total, name_of(m, now_paused)));
-    else if (not was_paused.empty() and now_paused.empty() and not after.status.starts_with("aborted"))
+    else if (not was_paused.empty() and now_paused.empty() and after.status == "in_progress")
         out.push_back(std::format("▶ resumed: {}/{} {} (restarted)", top_index(was_paused), total, name_of(m, was_paused)));
     if (after.status.starts_with("aborted") and not before.status.starts_with("aborted"))
-        out.push_back("■ mission cancelled");
+        out.push_back(after.status == "aborted|cancelled" ? std::string("■ mission cancelled")
+                                                          : "■ mission aborted: " + after.status.substr(std::min<size_t>(8, after.status.size())));
     return out;
 }
 

@@ -82,9 +82,23 @@ int main()
     failed.steps[0].state = SS::Failed;
     failed.steps[0].outcome = "door shut";
     CHECK(progress_lines(run1, failed, *m) == std::vector<std::string>{"✗ 1:cross door_1: door shut"});
-    Progress retry = run1;
-    retry.steps[0].attempt = 2;
-    CHECK(progress_lines(run1, retry, *m) == std::vector<std::string>{"⟳ retry 2/1 1:cross door_1"});
+    const auto mr = parse_planned("mission\n  cross door_1 retry=2\n");
+    CHECK(mr.has_value());
+    if (mr.has_value())
+    {
+        const Progress r1 = snap("in_progress", {view("1", "cross", SS::Running, 1000)});
+        Progress r2 = r1;
+        r2.steps[0].attempt = 2;
+        CHECK(progress_lines(r1, r2, *mr) == std::vector<std::string>{"⟳ retry 1/2 1:cross door_1"});
+    }
+    {
+        Progress back = snap("in_progress", {view("1", "cross", SS::Satisfied, 5000, 1000)});
+        const auto l = progress_lines(run1, back, *m);
+        CHECK(l.size() == 1 and l[0] == "✓ 1:cross door_1 (0 s)");   // t1 < t0 must not underflow
+    }
+    CHECK(progress_lines(paused, snap("completed", run1.steps), *m).empty());   // paused -> completed is not a resume
+    const auto sup = progress_lines(run1, snap("aborted|superseded", run1.steps), *m);
+    CHECK(sup == std::vector<std::string>{"■ mission aborted: superseded"});
     CHECK(progress_lines(run1, snap("aborted|cancelled", run1.steps), *m) ==
           std::vector<std::string>{"■ mission cancelled"});
     CHECK(progress_lines(run1, run1, *m).empty());
