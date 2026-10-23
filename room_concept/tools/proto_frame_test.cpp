@@ -69,7 +69,7 @@ int main()
             rc::DoorAperture a2;
             a2.a = R * Vector2f(-0.1f, 3); a2.b = R * Vector2f(0.1f, 3); a2.p_open = 1.f; a2.sigma_along = 0.02f;
             const auto cc = rc::crossing::evaluate(a2, outline, R * Vector2f(0.3f, 3.8f), cov, 0.25f);
-            const auto mo = rc::crossing::mouth_of(cc, a2.sigma_along);
+            const auto mo = rc::crossing::mouth_of(cc, a2.sigma_along, 0.06f);
             const auto Tp = rc::crossing::proto_frame(cc);
             std::printf("  yaw %.1f %s (%zu vertices)\n", yaw, dense ? "notch" : "rect", outline.size());
             check(cc.valid, "valid");
@@ -78,13 +78,19 @@ int main()
             const Eigen::Matrix2f Rm = Eigen::Rotation2Df(mo.yaw).toRotationMatrix();
             check((Rm - Tp.linear()).cwiseAbs().maxCoeff() < 1e-5f, "mouth yaw reproduces the proto frame rotation");
             check(near((Rm.transpose() * Rm - Eigen::Matrix2f::Identity()).cwiseAbs().maxCoeff(), 0.f, 1e-5f) and near(Rm.determinant(), 1.f), "orthonormal, det +1");
-            check(mo.has_cov and near(mo.cov[0], 4e-4f, 1e-7f) and near(mo.cov[5 * 6 + 5], 2.f * 4e-4f / (0.2f * 0.2f), 1e-4f), "covariance from the aperture sigma");
+            {   // tangent sigma 0.02 (door_concept), normal sigma 0.06 (layout bar): C = 0.02^2 t t' + 0.06^2 n n' in the old frame
+                const Eigen::Vector2f t = Tp.linear().col(0), n = Tp.linear().col(1);
+                const Eigen::Matrix2f Ce = 4e-4f * t * t.transpose() + 3.6e-3f * n * n.transpose();
+                check(mo.has_cov and near(mo.cov[0], Ce(0, 0), 1e-7f) and near(mo.cov[1], Ce(0, 1), 1e-7f) and near(mo.cov[7], Ce(1, 1), 1e-7f)
+                          and near(mo.cov[5 * 6 + 5], 2.f * 3.6e-3f / (0.2f * 0.2f), 1e-4f),
+                      "covariance: tangent from the aperture sigma, normal from the layout bar, yaw from both ends");
+            }
             // the robot expressed through the published pose = through the proto frame
             const Vector2f robot_old = R * Vector2f(0.3f, 3.8f);
             const Vector2f via_pub = Rm.transpose() * (robot_old - Vector2f(mo.x, mo.y));
             check((via_pub - Tp.inverse() * robot_old).norm() < 1e-4f, "robot in the proto frame via the published pose");
         }
-    check(not rc::crossing::mouth_of(c, 0.f).has_cov, "no stated sigma -> no covariance published");
+    check(not rc::crossing::mouth_of(c, 0.f, 0.f).has_cov, "mouth_of itself states nothing from zero sigmas (the caller supplies the layout bar)");
 
     std::printf("%s (%d failures)\n", failures ? "FAILED" : "PASSED", failures);
     return failures ? 1 : 0;

@@ -146,12 +146,18 @@ namespace rc::crossing
 
     /// ★ THE MOUTH POSE (2026-10-23, Task M): the proto frame's pose in the OLD room's frame, as the numbers the DSR
     /// carries on the proto room node (rt_translation [x y 0], rt_rotation_euler_xyz [0 0 yaw], rt_covariance 6x6
-    /// row-major over [x y z rx ry rz]) so ltsm's seam T(new<-old) = inverse(mouth) needs no door node and no recess
-    /// constant. The pose IS proto_frame(c), not a second computation of it.
-    /// Covariance: the aperture's two ends each carry door_concept's position σ (`sigma_pos`, ap.sigma_along), so the
-    /// centre has σ in x and y and the heading of a→b has σ_yaw² = 2σ²/w² (two independent ends w apart) -- all from
-    /// the aperture estimate, no constants. sigma_pos <= 0 means door_concept stated none: has_cov = false and no
-    /// covariance is published (a seam nothing can weigh must not claim a precision).
+    /// row-major over [x y z rx ry rz]; a NODE-level overload of the RT attribute names) so ltsm's seam
+    /// T(new<-old) = inverse(mouth) needs no door node and no recess constant. The pose IS proto_frame(c).
+    /// Covariance, in the old room's frame, with the two sources named:
+    ///   · ALONG the aperture (tangent): `sigma_tangent` = door_concept's position σ of the door (ap.sigma_along), the
+    ///     uncertainty of where the opening lies along the wall; the caller passes the layout bar when door_concept
+    ///     stated none.
+    ///   · ALONG THE NORMAL: `sigma_normal` = the uncertainty of the WALL the mouth sits on (seat_in_room projects the
+    ///     door onto the room outline's edge, so the mouth's normal coordinate IS the outline's). It is NOT the door's σ:
+    ///     the mouth lies ~0.49 m off the door node along the normal (gold2). The caller passes the layout's
+    ///     publish_corner_sigma, the σ every published corner met (an upper bound on the edge's position σ).
+    ///   · yaw: the two ends of a→b, w apart, each carry σ_normal across the wall: σ_yaw² = 2 σ_normal² / w².
+    /// Always stated when the aperture has a width: a precision is derived from the outline, never silently dropped.
     struct Mouth
     {
         float x = 0.f, y = 0.f, yaw = 0.f;
@@ -159,19 +165,23 @@ namespace rc::crossing
         bool has_cov = false;
     };
 
-    inline Mouth mouth_of(const Crossing& c, float sigma_pos)
+    inline Mouth mouth_of(const Crossing& c, float sigma_tangent, float sigma_normal)
     {
         const Eigen::Affine2f T = proto_frame(c);
         Mouth m;
         m.x   = T.translation().x();
         m.y   = T.translation().y();
         m.yaw = std::atan2(T.linear()(1, 0), T.linear()(0, 0));
-        if (sigma_pos > 0.f and c.span_w > 0.f)
+        if (sigma_tangent > 0.f and sigma_normal > 0.f and c.span_w > 0.f)
         {
             m.has_cov = true;
-            m.cov[0 * 6 + 0] = sigma_pos * sigma_pos;
-            m.cov[1 * 6 + 1] = sigma_pos * sigma_pos;
-            m.cov[5 * 6 + 5] = 2.f * sigma_pos * sigma_pos / (c.span_w * c.span_w);
+            const Eigen::Vector2f t = T.linear().col(0), n = T.linear().col(1);
+            const Eigen::Matrix2f C = sigma_tangent * sigma_tangent * t * t.transpose()
+                                    + sigma_normal * sigma_normal * n * n.transpose();
+            for (int i = 0; i < 2; ++i)
+                for (int j = 0; j < 2; ++j)
+                    m.cov[i * 6 + j] = C(i, j);
+            m.cov[5 * 6 + 5] = 2.f * sigma_normal * sigma_normal / (c.span_w * c.span_w);
         }
         return m;
     }

@@ -54,3 +54,7 @@ ADD_EXECUTABLE( room_concept ${SOURCES} ${MOC_SOURCES} ${RC_SOURCES} ${UI_HEADER
 
 TARGET_LINK_LIBRARIES( room_concept ${LIBS}  dsr_core dsr_gui dsr_api fastcdr fastdds OpenThreads Eigen3::Eigen QGLViewer-qt6 Qt6OpenGLWidgets ${STATIC_LIBS} ${SPECIFIC_LIBS} ${QT_LIBRARIES} ${Ice_LIBRARIES} )
 INSTALL(FILES ${EXECUTABLE_OUTPUT_PATH}/room_concept DESTINATION ${RC_COMPONENT_INSTALL_PATH}/bin/ PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE GROUP_READ GROUP_EXECUTE WORLD_READ WORLD_EXECUTE )
+
+# Task M graph-level test: the proto birth's mouth write on a real in-process DSR graph. make -C build proto_mouth_graph_test
+ADD_EXECUTABLE( proto_mouth_graph_test EXCLUDE_FROM_ALL ../tools/proto_mouth_graph_test.cpp )
+TARGET_LINK_LIBRARIES( proto_mouth_graph_test ${LIBS} dsr_core dsr_gui dsr_api fastcdr fastdds OpenThreads Eigen3::Eigen QGLViewer-qt6 Qt6OpenGLWidgets ${STATIC_LIBS} ${SPECIFIC_LIBS} ${QT_LIBRARIES} ${Ice_LIBRARIES} )

@@ -12,6 +12,7 @@
 #include "room_scene_graph.h"
 #include "status_reporter.h"
 #include "door_crossing.h"                                   // rc::crossing (proto-room evidence)
+#include "proto_mouth.h"                                      // rc::crossing::write_mouth (the proto birth)
 #include "../../common/room_resolve/room_resolve.h"          // rc::room::current_room / is_proto
 
 #include <array>
@@ -1042,13 +1043,9 @@ void RoomSceneGraph::step_proto_room_impl(const rc::RoomConcept::UpdateResult& r
     //   loop in the tree every transform query walks. A node attribute survives promotion (which removes only the
     //   proto self-edge), so ltsm still finds it at eviction and can set T(new<-old) = inverse(mouth) with no
     //   door-recess nuisance. No covariance is written when door_concept stated no sigma.
-    {
-        const auto mouth = rc::crossing::mouth_of(best, best_ap->sigma_along);
-        G_->add_or_modify_attrib_local<rt_translation_att>(proto, std::vector<float>{mouth.x, mouth.y, 0.f});
-        G_->add_or_modify_attrib_local<rt_rotation_euler_xyz_att>(proto, std::vector<float>{0.f, 0.f, mouth.yaw});
-        if (mouth.has_cov)
-            G_->add_or_modify_attrib_local<rt_covariance_att>(proto, std::vector<float>(mouth.cov.begin(), mouth.cov.end()));
-    }
+    // (node-level overload of the RT attribute names, sources of the covariance, frame room: see proto_mouth.h)
+    rc::crossing::write_mouth(*G_, proto, best, best_ap->sigma_along, room_concept_->params.wall_map.publish_corner_sigma,
+                              static_cast<std::uint64_t>(dsr_room_id_));
     G_->add_or_modify_attrib_local<parent_att>(proto, dsr_robot_id_);
     rc::provenance::stamp_creation(*G_, proto);
     const auto id = G_->insert_node(proto);
