@@ -4,6 +4,8 @@
 
 #include <dsr/core/types/type_checking/dsr_attr_name.h>
 
+#include "../../common/room_resolve/room_resolve.h"   // current_edge_room
+
 #include <algorithm>
 #include <optional>
 
@@ -11,16 +13,6 @@ namespace ltsm
 {
 namespace
 {
-/// Memory names a node r<idx>_<live name>; the live name is what comes after the first '_'.
-std::string live_name(const std::string& mem)
-{
-    const auto us = mem.find('_');
-    if (mem.size() > 1 and mem.starts_with('r') and us != std::string::npos
-        and std::all_of(mem.begin() + 1, mem.begin() + static_cast<std::ptrdiff_t>(us), [](unsigned char c) { return std::isdigit(c); }))
-        return mem.substr(us + 1);
-    return mem;
-}
-
 std::optional<DSR::Node> owning_room(DSR::DSRGraph& g, const DSR::Node& n)
 {
     auto cur = std::optional<DSR::Node>(n);
@@ -40,11 +32,17 @@ std::string build_topology_json(DSR::DSRGraph& memory, DSR::DSRGraph& live)
     std::vector<rc::ltsm::TopoRoom> rooms;
     for (const auto& r : memory.get_nodes_by_type("room"))
     {
-        const auto name = live_name(r.name());
+        const auto name = rc::ltsm::live_name(r.name());
         if (std::ranges::any_of(rooms, [&](const auto& x) { return x.name == name; })) continue;
         rooms.push_back({.name = name, .live = live.get_node(name).has_value()});
     }
     std::ranges::sort(rooms, {}, &rc::ltsm::TopoRoom::name);
+
+    // The robot's CURRENT room (live name): only a face in it may name the live door -- with a proto-room live, the
+    // far end of a passage is also "live" but its door is not the one the robot stands at.
+    std::string current;
+    if (const auto cid = rc::room::current_edge_room(live); cid.has_value())
+        if (const auto cn = live.get_node(cid.value()); cn.has_value()) current = cn->name();
 
     std::vector<rc::ltsm::TopoPassage> passages;
     for (const auto& n : memory.get_nodes_by_type("metaconcept"))
@@ -64,14 +62,14 @@ std::string build_topology_json(DSR::DSRGraph& memory, DSR::DSRGraph& live)
             if (not face.has_value() or not is_door(memory, face.value())) continue;
             const auto room = owning_room(memory, face.value());
             if (not room.has_value()) continue;
-            const auto rn = live_name(room->name());
-            const auto fn = live_name(face->name());
+            const auto rn = rc::ltsm::live_name(room->name());
+            const auto fn = rc::ltsm::live_name(face->name());
             auto& slot_room = faces == 0 ? p.room_a : p.room_b;
             auto& slot_face = faces == 0 ? p.face_a : p.face_b;
             slot_room = rn;
             slot_face = fn;
             // The live door this face is NOW: only when its room is live and holds a door of that name.
-            if (not p.live_door.has_value() and live.get_node(rn).has_value())
+            if (not p.live_door.has_value() and rn == current)
                 if (const auto d = live.get_node(fn); d.has_value() and is_door(live, d.value())) p.live_door = fn;
             if (++faces == 2) break;
         }

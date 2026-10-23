@@ -4,6 +4,8 @@
 // (`room_1`, not the memory prefix `r<idx>_room_1`). Numbers go through std::format, which ignores LC_NUMERIC.
 #pragma once
 
+#include <algorithm>
+#include <cctype>
 #include <format>
 #include <optional>
 #include <string>
@@ -20,6 +22,18 @@ struct TopoPassage
     double pass_alpha = 1, pass_beta = 1, open_alpha = 1, open_beta = 1;
     std::optional<std::string> live_door;      // the door node currently standing for it, when it is in view
 };
+
+// Memory names a node r<digits>_<live name>; the live name is what follows. At least one digit is required, so a live
+// name that merely starts with "r" ("room_1", "r_x") is returned unchanged.
+inline std::string live_name(const std::string& mem)
+{
+    const auto us = mem.find('_');
+    if (us != std::string::npos and us > 1 and mem.starts_with('r')
+        and std::all_of(mem.begin() + 1, mem.begin() + static_cast<std::ptrdiff_t>(us),
+                        [](unsigned char c) { return std::isdigit(c); }))
+        return mem.substr(us + 1);
+    return mem;
+}
 
 inline std::string topo_json_string(const std::string& s)
 {

@@ -46,6 +46,7 @@ doors of the current room (2):
   - door_0: 3.1 m away, bearing +62 deg (ahead-left), P(open)=0.91, affordances: approach=offered open=absent cross=offered [nearest]
   - door_1: 4.4 m away, bearing -120 deg (behind-right), P(open)=0.12, affordances: approach=offered open=offered cross=absent
 remembered rooms (not in the live map, known from memory): none
+rooms in long-term memory (call route_to for the way): room_2 (behind door_1, crossed 3x), room_3 (2 passages away, first behind door_1, crossed 3x)
 objects perceived in the current room (only this room is perceived): 1 bottle, 2 chair, 1 table
   nearest 4:
   - chair_1 2.1 m, +35 deg ahead-left, 0.45x0.50x0.90 m, approach sides: front (its own front; far side as seen from here), left (its own left; left side as seen from here), right (its own right; right side as seen from here)
@@ -391,7 +392,7 @@ CASES = [
      lambda n, a, c: (n == "where_is" and re.search("fridge|refrigerator", str(a.get("name", "")).lower()) is not None)
      or (n is None and re.search(r"not (yet )?(perceived|seen)|haven't (perceived|seen)|have not (perceived|seen)", c.lower()) is not None)),
     # long-term memory (ltsm_topology): rooms the robot remembers and the route to one
-    ("passages remembered", [], "none", "list the rooms and passages in your long-term memory",
+    ("passages remembered", [], "none", "which rooms do you remember?",
      lambda n, a, c: n == "known_rooms"),
     ("route to room_3", [], "none", "how do I get to room_3?",
      lambda n, a, c: n == "route_to" and "room_3" in str(a.get("room", "")).lower()),

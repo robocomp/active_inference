@@ -28,5 +28,8 @@ int main()
     TopoPassage q; q.id = "a\"b";                       // quotes are escaped
     assert(encode_topology({}, {q}).find(R"("id":"a\"b")") != std::string::npos);
     assert(encode_topology({}, {}) == R"({"rooms":[],"passages":[]})");
+    assert(live_name("r12_room_1") == "room_1" and live_name("r1_door_3") == "door_3");
+    assert(live_name("room_1") == "room_1" and live_name("r_x") == "r_x" and live_name("rx1_a") == "rx1_a");
+    assert(live_name("r") == "r" and live_name("") == "");
     std::println("test_topology_digest: ok");
 }

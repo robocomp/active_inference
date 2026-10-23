@@ -87,7 +87,7 @@ int main()
         assert(answer_known_rooms(t, "room_1").contains("room_1 (you are here)"));
         assert(answer_known_rooms(Topology{}, "room_1").starts_with("No rooms"));
         const auto line = remembered_rooms_line(t, "room_1");
-        assert(line.starts_with("remembered rooms: room_2 (behind door_1, crossed 3x), room_3 (2 passages away"));
+        assert(line.starts_with("rooms in long-term memory (call route_to for the way): room_2 (behind door_1, crossed 3x), room_3 (2 passages away"));
         assert(line.contains("room_9 (no known route)"));
         assert(remembered_rooms_line(Topology{}, "room_1").empty());
     }

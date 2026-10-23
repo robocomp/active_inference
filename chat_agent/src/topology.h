@@ -155,7 +155,7 @@ inline std::string answer_route_to(const Topology& t, std::string_view current, 
     return o;
 }
 
-// The STATE line: `remembered rooms: room_2 (behind door_1, crossed 3x), room_3 (...)`; empty when nothing is remembered
+// The STATE line: `rooms in long-term memory (call route_to for the way): room_2 (behind door_1, crossed 3x), room_3 (...)`; empty when nothing is remembered
 // besides the current room.
 inline std::string remembered_rooms_line(const Topology& t, std::string_view current)
 {
@@ -174,6 +174,6 @@ inline std::string remembered_rooms_line(const Topology& t, std::string_view cur
             how = "no known route";
         o += std::format("{}{} ({})", o.empty() ? "" : ", ", r.name, how);
     }
-    return o.empty() ? o : "remembered rooms: " + o;
+    return o.empty() ? o : "rooms in long-term memory (call route_to for the way): " + o;
 }
 }   // namespace rc::chat
