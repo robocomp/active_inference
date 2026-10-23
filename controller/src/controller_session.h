@@ -448,6 +448,8 @@ private:
     rc::policy::ClearingNoRoute policy_clearing_no_route_;            // Task 3f (c): a clearing with no route is given up
     std::optional<std::uint64_t> orient_entry_ms_;               // Task O I4: when the policy orient step began (bounds the hover)
     std::uint64_t orient_entry_node_ = 0;
+    std::optional<std::uint64_t> place_entry_ms_;                // its own clock: a Place after an orient of the same node starts afresh
+    std::uint64_t place_entry_node_ = 0;
     std::optional<rc::policy::OrientPrecondition> contract_precondition(const rc::affordance::Contract &c) const;
     bool published_target_admissible(const ControllerTargetInfo &t) const;
     std::uint64_t policy_no_anchor_since_ms_ = 0;                // Live fix 4: a cross claim waiting for its anchor

@@ -3,6 +3,7 @@
 //       -o /tmp/top test_open_precondition.cpp -ldsr_api -ldsr_core -lfastcdr -lfastdds $(pkg-config --libs Qt6Core) && /tmp/top
 #include "affordance_protocol/affordance_protocol.h"
 #include "door_pragmatics.h"
+#include "../src/local_policy/goal_adapter.h"
 #include <cstdio>
 static int fails = 0;
 #define CHECK(name, cond) do { const bool ok_ = (cond); std::printf("%s %s\n", ok_ ? "PASS" : "FAIL", name); if (not ok_) ++fails; } while (0)
@@ -19,6 +20,16 @@ int main()
     CHECK("open: goal_met-style evaluate_goal ignores an UNMEASURED door_reach_prob", evaluate_goal(fb, c.goal));
     put(fb, "door_open_prob", 0.2f);
     CHECK("open: still not done while the leaf is shut", not evaluate_goal(fb, c.goal));
+    const auto ap = rc::door::approach_contract(rc::DoorPragmaticCfg{});
+    CHECK("approach: pre carries door_reach_prob at the band level (the Place target's settle test)",
+          ap.pre.size() == 1 and ap.pre[0].attr == "door_reach_prob" and ap.pre[0].value == rc::door::kApproachCompleteProb);
+    CHECK("approach: its GOAL keeps the clause (goal_met semantics unchanged)",
+          std::ranges::any_of(ap.goal, [](auto& g) { return g.attr == "door_reach_prob"; }));
+    {
+        DSR::Node f; put(f, "door_reach_prob", 0.75f);
+        const auto pre = rc::policy::precondition_from_clauses(ap.pre, [&](const std::string& a) -> std::optional<float> { return f.attrs().contains(a) ? rc::affordance::detail::attr_scalar(f.attrs().at(a)) : std::nullopt; });
+        CHECK("approach as Place target: completion reads door_reach_prob (0.75 < 0.90 => unmet)", pre and pre->p < pre->complete_at);
+    }
     // wire: the precondition rides the goal arrays prefixed and is split out by read_contract
     DSR::Node aff;
     aff.attrs()["aff_goal_attrs"] = DSR::Attribute(DSR::Value(std::string("pre:door_reach_prob|door_open_prob")), 0, 1);

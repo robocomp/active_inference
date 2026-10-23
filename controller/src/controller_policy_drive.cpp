@@ -91,6 +91,7 @@ bool ControllerSession::published_target_admissible(const ControllerTargetInfo &
 void ControllerSession::policy_reset()
 {
     orient_entry_ms_.reset();
+    place_entry_ms_.reset();
     policy_goal_.reset();
     policy_goal_who_.clear();
     policy_unseen_.reset();
@@ -989,11 +990,11 @@ void ControllerSession::drive_with_policy(const ControllerRobotPose &robot_pose,
     }
     // ★ fix round 2 (b): a Place that waits on the precondition probability is bounded from its entry by the contract's own timeout
     if (place_pre.has_value() and place_pre->p < place_pre->complete_at
-        and rc::policy::step_entry_expired(orient_entry_ms_, orient_entry_node_, active_target_id_, now, target_contract_.timeout_ms))
+        and rc::policy::step_entry_expired(place_entry_ms_, place_entry_node_, active_target_id_, now, target_contract_.timeout_ms))
     {
         motion_commander.stop_robot();
         qInfo() << "[affordance] place GIVE_UP (precondition unmet, timeout from step entry) | node" << active_target_id_;
-        orient_entry_ms_.reset();
+        place_entry_ms_.reset();
         finalize_reached(affordance_manager, path_controller, motion_commander, display, robot_pose.pos, time_source());
         policy_reset();
         return;
