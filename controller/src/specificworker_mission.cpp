@@ -90,7 +90,9 @@ std::optional<std::string> SpecificWorker::MissionHost::start(const rc::mission:
 	if (op == "explore")
 	{
 		const auto room = leaf.ref("room");
-		if (room->name != here)
+		// ★ `here` is the localisation's room; current_room() is where the robot physically is. Accept either.
+		const auto physical = current_room();
+		if (room->name != here and not (physical.has_value() and room->name == *physical))
 		{
 			std::println("[mission] explore: '{}' is not the room the robot is in ('{}')", room->name, here);
 			return std::string("wrong_room");
@@ -305,6 +307,7 @@ std::optional<rc::mission::Error> SpecificWorker::start_mission(rc::mission::Mis
 void SpecificWorker::cancel_mission(const std::string &outcome, bool hold)
 {
 	if (interpreter_.state() != rc::mission::Interpreter::State::Running) return;
+	if (interpreter_.paused()) paused_ = false;   // ★ a cancelled frozen mission must not leave the base held
 	interpreter_.cancel(outcome, current_time_ms());
 	session_.set_command_explore(false);   // a cancelled mission's explore no longer holds the contest open
 	{
@@ -455,7 +458,8 @@ void SpecificWorker::journal_check_command(bool superseded)
 // are about the interpreter's mission (journaled by journal_steps); a refused command started nothing.
 void SpecificWorker::journal_command(const MissionResult &r, const std::string &text, const char *source)
 {
-	if (not r.accepted or r.kind == "cancel" or r.kind == "resume") return;
+	if (not r.accepted or r.kind == "cancel" or r.kind == "resume"
+	    or r.kind == "pause" or r.kind == "unpause") return;
 	std::lock_guard lock(journal_mx_);
 	journal_steps();                 // a mission it replaced (cancel_mission already drained it; cheap if so)
 	journal_check_command(true);     // the command it replaced: its own end if it had one, else superseded

@@ -538,6 +538,10 @@ void SpecificWorker::initialize()
 			// progress all survive, so un-pausing resumes exactly where it stopped. The base output stays
 			// ARMED and keeps receiving zeros — a paused robot is still under control, and a base watchdog
 			// should keep hearing from us. That is precisely the difference from Stop.
+			// ★ With a mission running, Pause IS the interpreter's freeze (same as the chat word), so the panel
+			// and chat cannot disagree; with none it stays the plain base hold it always was.
+			if (paused) interpreter_.pause(current_time_ms());
+			else interpreter_.unpause(current_time_ms());
 			paused_ = paused;
 			if (paused_)
 			{
@@ -616,10 +620,10 @@ void SpecificWorker::initialize()
 					if (ok and n > 0 and n <= 200) { obstacle_tracker_.arm_z_dump(n); std::println("[remote] ZDUMP {} sweeps", n); }
 					else std::println("[remote] zdump refused: '{}' (expected zdump <1..200>)", c.toStdString());
 				}
-				else if (c == "cancel" or c == "resume")
+				else if (c == "cancel" or c == "resume" or c == "pause" or c == "unpause")
 					enqueue_command([this, cmd = c.toStdString()]() { run_mission_command(cmd, "remote"); });
 				else std::println("[remote] ignored '{}' (expected run | stop | cross <door> | move <m> | turn <deg> | mission <text> | "
-				                  "uncross | cancel | resume | probe <v> <w> <s> | zdump <n>, or a mission script)", c.toStdString());
+				                  "uncross | cancel | resume | pause | unpause | probe <v> <w> <s> | zdump <n>, or a mission script)", c.toStdString());
 			}
 		});
 		t->start(300);
@@ -2023,6 +2027,24 @@ SpecificWorker::MissionResult SpecificWorker::dispatch_mission_command(const std
 		std::println("[{}] mission 'resume' -> {}", source, ended ? "the wait ended" : "nothing was waiting");
 		return {.accepted = ended, .kind = "resume", .reason = ended ? "" : "the mission is not waiting"};
 	}
+	if (t == "pause")
+	{
+		const bool ok = interpreter_.pause(current_time_ms());
+		if (ok)
+		{
+			paused_ = true;   // the same hold as the panel's Pause: route kept, base armed, zeros sent
+			stop_robot();
+		}
+		std::println("[{}] mission 'pause' -> {}", source, ok ? "frozen, base held" : "nothing to pause");
+		return {.accepted = ok, .kind = "pause", .reason = ok ? "" : "nothing to pause (no running mission, or already paused)"};
+	}
+	if (t == "unpause")
+	{
+		const bool ok = interpreter_.unpause(current_time_ms());
+		if (ok) paused_ = false;
+		std::println("[{}] mission 'unpause' -> {}", source, ok ? "thawed" : "not paused");
+		return {.accepted = ok, .kind = "unpause", .reason = ok ? "" : "the mission is not paused"};
+	}
 	if (t == "stop")
 	{
 		session_.door_passage().stop();
@@ -2275,7 +2297,7 @@ void SpecificWorker::service_chat_inbox()
 		{
 			std::println("[chat] command '{}' (stamp {})", cmd->text, cmd->stamp_ms);
 			const auto r = run_mission_command(cmd->text, "chat");
-			if (r.kind == "cancel" or r.kind == "resume")
+			if (r.kind == "cancel" or r.kind == "resume" or r.kind == "pause" or r.kind == "unpause")
 			{
 				// About the mission, not a new one: the report on this stamp is the mission's own.
 				if (r.accepted) chat_tracked_ = {.kind = K::Mission, .mission_serial = interpreter_.serial()};
