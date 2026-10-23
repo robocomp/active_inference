@@ -1,5 +1,5 @@
 // mission_check — reads a planner reply on stdin, prints `OK` then one line per step in pre-order
-// (`op key=value … [bind=NAME] [on_fail=…]`), or `ERROR <message>`. Used by tests/check_llm_missions.py.
+// (`DEPTH op key=value … [bind=NAME] [on_fail=…]`), or `ERROR <message>`. Used by tests/check_llm_missions.py.
 // Refs print as node:NAME · var:NAME · anchor:NAME · passage:NAME@ROOM · pose:ROOM; strings are quoted.
 #include "../src/mission_plan.h"
 
@@ -38,11 +38,11 @@ std::string pred_str(const Pred& p)
     return s;
 }
 
-void print_steps(const std::vector<Step>& list)
+void print_steps(const std::vector<Step>& list, int depth = 0)
 {
     for (const auto& s : list)
     {
-        std::string line = s.op;
+        std::string line = std::format("{} {}", depth, s.op);
         for (const auto& [k, v] : s.args)
         {
             line += " " + k + "=";
@@ -61,7 +61,7 @@ void print_steps(const std::vector<Step>& list)
         if (s.on_fail.kind == OnFail::Kind::Skip) line += " on_fail=skip";
         if (s.on_fail.kind == OnFail::Kind::Retry) line += std::format(" retry={}", s.on_fail.retries);
         std::println("{}", line);
-        print_steps(s.steps);
+        print_steps(s.steps, depth + 1);
     }
 }
 }   // namespace

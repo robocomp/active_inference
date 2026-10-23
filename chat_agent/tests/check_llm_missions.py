@@ -115,8 +115,9 @@ def check(reply):
         return None, lines[0]
     steps = []
     for ln in lines[1:]:
+        depth, _, ln = ln.partition(" ")   # mission_check prints the nesting depth first
         op, _, rest = ln.partition(" ")
-        steps.append((op, dict(re.findall(r'(\w+)=("[^"]*"|\S+)', rest))))
+        steps.append((op, {"_d": depth, **dict(re.findall(r'(\w+)=("[^"]*"|\S+)', rest))}))
     return steps, ""
 
 
@@ -184,8 +185,8 @@ def visit_room(L):
 
 
 def names_room_2(L):
-    """room_2 is not in the STATE (no other rooms, none remembered): naming it as a node is an invented name."""
-    return any("node:room_2" in v for _, a in L for v in a.values())
+    """room_2 is not in the STATE (no other rooms, none remembered): naming it in any form is an invented name."""
+    return any(re.search(r"(node|pose):room_2\b|passage:[^ ]*@room_2\b", v) for _, a in L for v in a.values())
 
 
 def visit_named_room(L):
@@ -195,8 +196,26 @@ def visit_named_room(L):
 
 
 def wait_in_new_room(L):
-    w = [i for i, a in of(L, "wait") if num(a, "s") == 30]
-    return not names_room_2(L) and bool(bound(L)) and bool(w) and returns_after(L, w[0])
+    """a cross with bind=, THEN a 30 s wait after it, then a way back; never room_2 by name."""
+    b = bound(L)
+    w = [i for i, a in of(L, "wait") if num(a, "s") == 30 and b and i > b[0][0]]
+    return not names_room_2(L) and bool(w) and returns_after(L, w[0])
+
+
+def twice(L):
+    """exactly two crossings of door_1: two top-level crosses, or `repeat 2` whose whole body is ONE cross of door_1."""
+    if len(L) == 2 and all(o == "cross" and a.get("door") == "node:door_1" and a["_d"] == "0" for o, a in L):
+        return True
+    for i, (o, a) in enumerate(L):
+        if o == "repeat" and num(a, "times") == 2:
+            d = int(a["_d"])
+            body = []
+            for o2, a2 in L[i + 1:]:
+                if int(a2["_d"]) <= d:
+                    break
+                body.append((o2, a2))
+            return len(body) == 1 and body[0][0] == "cross" and body[0][1].get("door") == "node:door_1" and len(L) == 2
+    return False
 
 
 def single(L, op, **want):
@@ -225,8 +244,7 @@ CASES = [
     ("explore room_2 and back (EN)", "Explore room_2 and come back.", visit_named_room, "either"),
     ("explore room_2 and back (ES)", "Explora room_2 y vuelve.", visit_named_room, "either"),
     ("cross door_1 twice", "Cross door_1 twice.",
-     lambda L: len(crosses(L, "door_1")) == 2 and not any(o == "repeat" for o, _ in L)
-     or any(o == "repeat" and num(a, "times") == 2 for o, a in L) and len(crosses(L, "door_1")) == 1, False),
+     twice, False),
     ("go to room_2, wait 30s, back", "Go to room_2, wait 30 seconds, and come back.", wait_in_new_room, "either"),
     ("cross door_0 and report", "Cross door_0 and tell me what you see on the other side.",
      lambda L: bool(crosses(L, "door_0")) and any(i > crosses(L, "door_0")[0][0] for i, _ in of(L, "report")), False),
