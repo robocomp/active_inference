@@ -2264,6 +2264,11 @@ void RoomSceneGraph::dsr_update_layout_affordance(const rc::RoomConcept::UpdateR
         }
         else
             layout_last_plan_ = rc::layout::plan(map, poly, grid, robot, ep, admissible);
+        // ★ ONE CURRENCY (2026-10-22, Task X). plan() is in nats already; plan_coverage counts m² of unknown floor, but
+        //   the controller compares offers in nats of expected information (epistemic_gain, G = cost - gain). An unknown
+        //   cell is a binary variable at p = 1/2, ln 2 nats, and covers cell² m² -- a conversion, not a tuned weight.
+        if (layout_last_plan_.evaluated > 0 and free_space_)   // only plan_coverage fills `evaluated`
+            layout_last_plan_.nats_per_gain = rc::layout::coverage_nats_per_m2(free_space_->params().cell);
         // latched until the room is forgotten/reborn. "no_gain" with a publishable layout is the same verdict as
         // "finished" from the robot's side: nothing reachable is left worth visiting (live: 358/400 plans no_gain,
         // map_ready = 1, never promoted, robot parked).
@@ -2285,13 +2290,7 @@ void RoomSceneGraph::dsr_update_layout_affordance(const rc::RoomConcept::UpdateR
         // the room — the robot has not yet shown where it can go — and the best candidate goes to the controller,
         // which judges it with the real body (a refusal defers it as usual). After a visit, the 10-09 rule above holds:
         // "unreachable" then means the remaining gain lies beyond furniture, and it promotes.
-        if (layout_last_plan_.why == "unreachable" and layout_last_plan_.best_unreached and layout_visits_ == 0)
-        {
-            layout_last_plan_.ok = true;
-            layout_last_plan_.target = *layout_last_plan_.best_unreached;
-            layout_last_plan_.path.clear();
-            layout_last_plan_.why = "boxed_in_handoff";
-        }
+        rc::layout::boxed_in_handoff(layout_last_plan_, layout_visits_);
         readiness_explore_.store(layout_finished_ ? 1.f : 0.f, std::memory_order_relaxed);
         if (layout_last_plan_.finished
             or (layout_visits_ > 0
@@ -2319,7 +2318,7 @@ void RoomSceneGraph::dsr_update_layout_affordance(const rc::RoomConcept::UpdateR
             layout_target_ = tgt;
             layout_best_d_ = std::numeric_limits<float>::infinity();   // the motion clock is NOT reset by a replan
             layout_yaw_    = dir.squaredNorm() > 1e-9f ? std::atan2(dir.y(), dir.x()) : 0.f;
-            layout_gain_   = layout_last_plan_.gain;
+            layout_gain_   = layout_last_plan_.gain * layout_last_plan_.nats_per_gain;   // nats
         }
         else
             layout_target_.reset();
@@ -2333,7 +2332,8 @@ void RoomSceneGraph::dsr_update_layout_affordance(const rc::RoomConcept::UpdateR
                               layout_last_plan_.why,
                               layout_target_ ? std::format("({:.2f},{:.2f})", layout_target_->x(), layout_target_->y())
                                              : std::string("none"),
-                              layout_last_plan_.gain, layout_last_plan_.score, layout_last_plan_.candidates,
+                              layout_last_plan_.gain * layout_last_plan_.nats_per_gain, layout_last_plan_.score,
+                              layout_last_plan_.candidates,
                               layout_last_plan_.with_gain, layout_last_plan_.unknowns, layout_refused_.size());
             if (layout_last_plan_.why == "unreachable")
                 rc::status::print("[layout] unreachable: robot ({:.2f},{:.2f}) walks from ({:.2f},{:.2f}), its component "

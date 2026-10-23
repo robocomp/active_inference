@@ -362,6 +362,17 @@ Plan plan(const wallmap::WallMap& map, const wallmap::Polygon& poly, const Feasi
     return out;
 }
 
+bool boxed_in_handoff(Plan& p, int visits)
+{
+    if (p.why != "unreachable" or not p.best_unreached or visits != 0) return false;
+    p.ok = true;
+    p.target = *p.best_unreached;
+    p.gain = p.best_unreached_gain;
+    p.path.clear();
+    p.why = "boxed_in_handoff";
+    return true;
+}
+
 Plan plan_coverage(const FeasibleGrid& grid, const Eigen::Vector2f& robot, const ExplorerParams& p,
                    const Admissible& admissible, const GainFn& gain, float min_gain, const Admissible& deferred)
 {
@@ -401,6 +412,7 @@ Plan plan_coverage(const FeasibleGrid& grid, const Eigen::Vector2f& robot, const
                       { return a.first / (1.f + (a.second - robot).norm()) > b.first / (1.f + (b.second - robot).norm()); });
     if (static_cast<int>(cands.size()) > p.keep_best) cands.resize(static_cast<size_t>(p.keep_best));
     out.best_unreached = cands.front().second;
+    out.best_unreached_gain = cands.front().first;
     float best = -1.f;
     for (const auto& [g, v] : cands)
     {

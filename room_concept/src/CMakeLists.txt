@@ -273,3 +273,11 @@ target_include_directories(mount_replay PRIVATE ${CMAKE_CURRENT_LIST_DIR}/../src
 find_package(Qt6 COMPONENTS Core REQUIRED)
 target_link_libraries(mount_replay PRIVATE Qt6::Core)
 set_target_properties(mount_replay PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../../bin)
+
+# ── boxed_in_handoff_test ─────────────────────────────────────────────────────
+# Task X: the boxed-in handoff carries the candidate's own gain (nats). Standalone, EXCLUDE_FROM_ALL:
+#   g++ -std=c++23 -O2 -Isrc -I/usr/include/eigen3 tools/boxed_in_handoff_test.cpp src/layout_explorer.cpp src/wall_map.cpp src/wall_segmenter.cpp
+add_executable(boxed_in_handoff_test EXCLUDE_FROM_ALL ../tools/boxed_in_handoff_test.cpp)
+target_include_directories(boxed_in_handoff_test PRIVATE ${CMAKE_CURRENT_LIST_DIR}/../src)
+target_link_libraries(boxed_in_handoff_test ${LIBS})
+set_target_properties(boxed_in_handoff_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../../bin)
