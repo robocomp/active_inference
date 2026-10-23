@@ -75,6 +75,23 @@ void TrajectoryHarvester::add_odometry(std::int64_t ts, double adv, double side,
     while (hist_.size() > 2 and hist_[1].ts < ts - keep) hist_.pop_front();
 }
 
+void TrajectoryHarvester::add_gyro(std::int64_t ts, double rate)
+{
+    if (not std::isfinite(rate)) return;
+    GNode n;
+    if (not gyro_.empty())
+    {
+        if (ts <= gyro_.back().ts) return;
+        const double dt = double(ts - gyro_.back().ts) * 1e-3;
+        n.angle = gyro_.back().angle + gyro_.back().rate * dt;
+        n.abs   = gyro_.back().abs + std::abs(gyro_.back().rate) * dt;
+    }
+    n.ts = ts; n.rate = rate;
+    gyro_.push_back(n);
+    const std::int64_t keep = std::int64_t(cfg_.history_s * 1000.0);
+    while (gyro_.size() > 2 and gyro_[1].ts < ts - keep) gyro_.pop_front();
+}
+
 bool TrajectoryHarvester::over_budget() const
 {
     if (ring_.size() < 2) return false;
@@ -97,6 +114,12 @@ bool TrajectoryHarvester::add_keyframe(std::int64_t stamp, bool stalled)
     auto it = std::upper_bound(hist_.begin(), hist_.end(), stamp, [](std::int64_t t, const Node& n) { return t < n.ts; });
     const Node n = advance(*(it - 1), double(stamp - (it - 1)->ts) * 1e-3);
     Keyframe k{next_id_++, stamp, n.x, n.y, n.th, n.path, n.rot_acc};
+    if (not gyro_.empty() and stamp >= gyro_.front().ts)
+    {
+        const auto g = std::upper_bound(gyro_.begin(), gyro_.end(), stamp, [](std::int64_t t, const GNode& q) { return t < q.ts; }) - 1;
+        const double dt = double(stamp - g->ts) * 1e-3;
+        k.gth = g->angle + g->rate * dt; k.gabs = g->abs + std::abs(g->rate) * dt; k.has_gyro = true;
+    }
     ring_.push_back(k);
     last_kf_ms_ = stamp; have_kf_ = true;
     if (ep_.keyframes == 0) ep_.t_begin_ms = stamp;
@@ -110,10 +133,23 @@ void TrajectoryHarvester::finish() { while (ring_.size() >= 2) commit(true); rin
 
 Pair TrajectoryHarvester::pair_of(const Keyframe& a, const Keyframe& b) const
 {
-    const double dth = b.th - a.th, thm = a.th + 0.5 * dth;
+    const double dtw = b.th - a.th, rot_w = b.rot - a.rot, dt_s = double(b.stamp_ms - a.stamp_ms) * 1e-3;
+    const double vw = std::pow(cfg_.wheel_rot_sigma_rel * rot_w, 2) + cfg_.wheel_rot_sigma_floor * cfg_.wheel_rot_sigma_floor * dt_s;
+    double dth = dtw, var_th = vw, rotated = rot_w, dtg = dtw;
+    if (a.has_gyro and b.has_gyro)
+    {   // precision-weighted fusion of the two heading factors
+        dtg = b.gth - a.gth; rotated = b.gabs - a.gabs;
+        const double vg = std::pow(cfg_.gyro_sigma_rel * rotated, 2) + cfg_.gyro_sigma_floor * cfg_.gyro_sigma_floor * dt_s;
+        const double wg = 1.0 / std::max(vg, 1e-12), ww = 1.0 / std::max(vw, 1e-12);
+        dth = (dtg * wg + dtw * ww) / (wg + ww);
+        var_th = 1.0 / (wg + ww);
+    }
+    // chord decomposed on the wheel-frame midpoint heading (the frame the wheel x,y live in)
+    const double thm = a.th + 0.5 * dtw;
     const double cx = b.x - a.x, cy = b.y - a.y;
     Pair p = make_pair_from_motion(dth, cx * std::cos(thm) + cy * std::sin(thm), -cx * std::sin(thm) + cy * std::cos(thm),
-                                   b.path - a.path, b.rot - a.rot, cfg_);
+                                   b.path - a.path, rotated, cfg_);
+    p.dth_sigma = std::sqrt(var_th); p.dth_wheel = dtw; p.dth_gyro = dtg;
     p.id_a = a.id; p.id_b = b.id; p.stamp_a_ms = a.stamp_ms; p.stamp_b_ms = b.stamp_ms;
     return p;
 }
@@ -124,7 +160,7 @@ void TrajectoryHarvester::commit(bool final_flush)
     if (K < 2) { ring_.clear(); return; }
     const Eigen::Matrix3d Sigma = (H_acc_ + H_prior_).inverse();
 
-    // v(a,b) = tr(Sigma I_ab): first-order log det gain; additive over disjoint pairs => segmentation by DP.
+    // v(a,b) = tr(Sigma I_ab): prior-scaled information trace; additive over disjoint pairs => segmentation by DP.
     std::vector<std::vector<Pair>> P(K, std::vector<Pair>(K));
     std::vector<std::vector<double>> v(K, std::vector<double>(K, 0.0));
     for (int a = 0; a < K; ++a)

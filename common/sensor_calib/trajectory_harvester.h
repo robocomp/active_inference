@@ -24,16 +24,22 @@
  * that is a covariance that grows with the covariate, not a cut-off.
  *
  * PAIR SELECTION (what is maximised). Over the keyframes held in the ring, choose a set of DISJOINT pairs that
- * maximises  sum_p tr( Sigma  I_p ),  Sigma = (H_accumulated + H_prior)^-1,  I_p = J_p' R_p^-1 J_p. This is the
- * first-order (linearised) gain of log det of the posterior information, i.e. the D-optimal gain, and it is the
- * natural scalar because (a) Sigma carries the PRIOR scale of each DoF (a metre of lever and a radian of yaw are
- * comparable only through it) and (b) a linearisation is additive over pairs, so the best SEGMENTATION of the ring
- * is a dynamic programme, not a greedy guess. Because information is quadratic in the geometry a whole turn is
- * worth more as ONE pair than as pieces (a pi hairpin: 2 sin(pi/2) = 2 as one pair; the thesis lost 9.9 -> 0.64
- * information units by cutting it at 0.20 rad), and a straight followed by a turn is worth more as TWO pairs than
- * merged (the merged chord is perpendicular to the midpoint heading, so the yaw row dies); the DP finds both.
- * Keyframes of a chosen pair are CONSUMED, and so is everything between them: nothing is counted twice. Two pairs
- * never share a keyframe (a shared sweep would carry one registration error into both).
+ * maximises  sum_p tr( Sigma  I_p ),  Sigma = (H_accumulated + H_prior)^-1,  I_p = J_p' R_p^-1 J_p: the
+ * PRIOR-SCALED INFORMATION TRACE. Sigma puts a metre of lever and a radian of yaw on the same footing (through the
+ * prior) and the sum is additive over pairs, so the best SEGMENTATION of the ring is an exact dynamic programme, not
+ * a greedy guess. The segmentation is OPTIMAL UNDER THE STATED NOISE MODEL; it is not "one pair per turn". Lever
+ * information of a piece is ~ 4 sin^2(dth/2)/var, which is superadditive for small angles (cutting a turn into
+ * 0.20 rad pieces destroys most of it: the thesis lost 9.9 -> 0.64 information units) but ties at pi (one pi pair =
+ * two pi/2 pairs), and when the row noise grows with the rotation covered (odo_sigma_per_rad) splitting a large
+ * turn legitimately wins. A straight followed by a turn is worth two pairs (the merged chord is perpendicular to
+ * the midpoint heading, so the yaw row dies). Keyframes of a chosen pair are CONSUMED, and so is everything
+ * between them: nothing is counted twice. Two pairs never share a keyframe.
+ *
+ * HEADING (ruling B, "heading as two sensor factors"). dth of a pair is the precision-weighted fusion of the wheel
+ * rotation and the gyro (IMU yaw rate integrated piecewise-constant, add_gyro). Each has a variance that grows with
+ * the rotation covered plus a floor; Shadow's wheel rotation over-reports ~41 %, so the config gives the wheels a
+ * wide relative sigma and the gyro a narrow one. Translation (the chord) comes from the wheels. Without gyro
+ * coverage of both keyframes the pair falls back to the wheel rotation alone.
  *
  * WHEN. Pairs are committed when the ring exceeds its budget (ring_span_s of time or max_keyframes), never at the
  * newest keyframe: a pair touching the newest keyframe may be a turn still in progress, so it stays in the ring
@@ -69,7 +75,12 @@ struct HarvesterConfig
     // row noise model (see header)
     double      reg_sigma_m        = 0.01;    ///< scan-registration floor [m]
     double      odo_sigma_per_m    = 0.002;   ///< odometry error per metre travelled [m/m]
-    double      odo_sigma_per_rad  = 0.001;   ///< odometry TRANSLATION error per rad rotated [m/rad]; small: a pivot barely moves the chord
+    double      odo_sigma_per_rad  = 0.005;   ///< odometry error per radian rotated [m/rad] (assumed, to be calibrated in Phase 0)
+    // heading fusion: sigma^2 = (rel * |rotation covered|)^2 + floor^2 * dt  (wheels over-report ~41 %: wide)
+    double      wheel_rot_sigma_rel   = 0.2;
+    double      wheel_rot_sigma_floor = 0.01;    ///< rad / sqrt(s)
+    double      gyro_sigma_rel        = 0.01;
+    double      gyro_sigma_floor      = 0.002;   ///< rad / sqrt(s)
     double      history_s          = 90.0;    ///< odometry history kept to place keyframes (>= ring_span_s)
 };
 
@@ -78,7 +89,8 @@ struct Pair
 {
     std::uint64_t id_a = 0, id_b = 0;                 ///< keyframe ids (monotone)
     std::int64_t  stamp_a_ms = 0, stamp_b_ms = 0;
-    double dth = 0.0;                                  ///< odometry rotation a -> b [rad] (unwrapped)
+    double dth = 0.0, dth_sigma = 0.0;                 ///< fused rotation a -> b [rad] (unwrapped) and its sigma
+    double dth_wheel = 0.0, dth_gyro = 0.0;            ///< the two inputs (dth_gyro = dth_wheel when no gyro)
     double d_fwd = 0.0, d_lat = 0.0;                   ///< chord on the midpoint heading [m]
     double path = 0.0, rotated = 0.0;                  ///< odometry path length [m] and sum |rot| [rad]
     Eigen::Matrix<double, 2, 3> J = Eigen::Matrix<double, 2, 3>::Zero();   ///< rows: (fwd, lat)
@@ -122,6 +134,8 @@ public:
 
     /// Piecewise-constant hold: a sample's velocity applies from its source_ts_ms to the next sample's. Out-of-order
     /// or duplicate stamps are ignored. adv/side/rot as OdometryIn (body +Y forward).
+    /// Gyro yaw rate [rad/s] about the body up axis, held piecewise-constant like the odometry.
+    void add_gyro(std::int64_t ts_ms, double yaw_rate);
     void add_odometry(std::int64_t source_ts_ms, double adv, double side, double rot);
     /// Offer a sweep. Returns true when it became a keyframe (false: decimated, stalled, or no odometry covers it).
     bool add_keyframe(std::int64_t stamp_ms, bool stalled);
@@ -136,7 +150,8 @@ public:
 
 private:
     struct Node { std::int64_t ts = 0; double x = 0, y = 0, th = 0, path = 0, rot_acc = 0, adv = 0, side = 0, rot = 0; };
-    struct Keyframe { std::uint64_t id = 0; std::int64_t stamp_ms = 0; double x = 0, y = 0, th = 0, path = 0, rot = 0; };
+    struct Keyframe { std::uint64_t id = 0; std::int64_t stamp_ms = 0; double x = 0, y = 0, th = 0, path = 0, rot = 0, gth = 0, gabs = 0; bool has_gyro = false; };
+    struct GNode { std::int64_t ts = 0; double angle = 0, abs = 0, rate = 0; };
 
     [[nodiscard]] static Node advance(const Node& n, double dt_s);
     [[nodiscard]] bool over_budget() const;
@@ -145,6 +160,7 @@ private:
 
     HarvesterConfig cfg_;
     std::deque<Node> hist_;
+    std::deque<GNode> gyro_;
     std::deque<Keyframe> ring_;
     std::vector<Pair> out_;
     Eigen::Matrix3d H_acc_ = Eigen::Matrix3d::Zero(), H_prior_ = Eigen::Matrix3d::Zero();

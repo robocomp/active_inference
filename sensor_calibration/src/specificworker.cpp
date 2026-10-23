@@ -42,6 +42,10 @@ SpecificWorker::SpecificWorker(const ConfigLoader& configLoader, TuplePrx tprx, 
         h.keyframe_spacing_s = cfg.d("Harvester.keyframe_spacing_s", h.keyframe_spacing_s, "a Helios sweep becomes a keyframe at most this often (s): a COMPUTE budget, the posterior does not depend on it");
         h.ring_span_s        = cfg.d("Harvester.ring_span_s", h.ring_span_s, "time the keyframe ring holds before pairs are committed (s): compute budget");
         h.max_keyframes      = std::size_t(cfg.i("Harvester.max_keyframes", int(h.max_keyframes), "hard bound on the keyframe ring"));
+        h.wheel_rot_sigma_rel   = cfg.d("Harvester.wheel_rot_sigma_rel", h.wheel_rot_sigma_rel, "relative sigma of the wheel rotation (Shadow over-reports ~41 %)");
+        h.wheel_rot_sigma_floor = cfg.d("Harvester.wheel_rot_sigma_floor", h.wheel_rot_sigma_floor, "wheel rotation noise floor (rad/sqrt(s))");
+        h.gyro_sigma_rel        = cfg.d("Harvester.gyro_sigma_rel", h.gyro_sigma_rel, "relative sigma of the integrated gyro rotation");
+        h.gyro_sigma_floor      = cfg.d("Harvester.gyro_sigma_floor", h.gyro_sigma_floor, "gyro rotation noise floor (rad/sqrt(s))");
         h.reg_sigma_m        = cfg.d("Harvester.reg_sigma_m", h.reg_sigma_m, "scan-registration noise floor per pair row (m)");
         h.odo_sigma_per_m    = cfg.d("Harvester.odo_sigma_per_m", h.odo_sigma_per_m, "odometry error per metre travelled between the two keyframes (m/m)");
         h.odo_sigma_per_rad  = cfg.d("Harvester.odo_sigma_per_rad", h.odo_sigma_per_rad, "odometry translation error per radian rotated between the two keyframes (m/rad)");
@@ -158,8 +162,9 @@ void SpecificWorker::compute()
     for (const auto& l : inputs_->take_lidar())
         if (l.sensor == "helios")
             harvester_->add_keyframe(l.stamp_ms, inputs_->stalled("helios") or inputs_->any_stalled());
-    // Cameras / IMU: not consumed by the trajectory part yet; drain so the bounded queues do not just drop-oldest.
-    (void)inputs_->take_images(); (void)inputs_->take_imu();
+    for (const auto& m : inputs_->take_imu())
+        harvester_->add_gyro(m.stamp_ms, m.gyro.z());   // yaw rate about the IMU z axis (assumed up: pin with the mount)
+    (void)inputs_->take_images();                       // cameras: not consumed by the trajectory part
     // Phase 4.4 attaches scan registration to these pairs; for now the agent only reports them (<= once / 10 s).
     npairs_logged_ += long(harvester_->take_pairs().size());
     if (const auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
