@@ -375,10 +375,34 @@ std::optional<ltsm::seam::Measured> pose_in_room(DSR::DSRGraph &G, std::uint64_t
 }
 }   // namespace
 
+// The MOUTH POSE room_concept publishes on a proto room at birth (Task M): the proto frame's pose in the old room's
+// frame, as rt_translation / rt_rotation_euler_xyz / rt_covariance on the room NODE. nullopt unless all three are stated
+// (a pose without a covariance cannot be weighed, so it is not used).
+namespace
+{
+std::optional<ltsm::seam::Measured> mouth_pose_of(DSR::DSRGraph &G, std::uint64_t room_id)
+{
+    const auto n = G.get_node(room_id);
+    if (not n.has_value()) return std::nullopt;
+    const auto t = G.get_attrib_by_name<rt_translation_att>(n.value());
+    const auto r = G.get_attrib_by_name<rt_rotation_euler_xyz_att>(n.value());
+    const auto c = G.get_attrib_by_name<rt_covariance_att>(n.value());
+    if (not (t.has_value() and r.has_value() and c.has_value())) return std::nullopt;
+    if (t->get().size() < 2 or r->get().size() < 3 or c->get().size() != 36) return std::nullopt;
+    ltsm::seam::Measured m;
+    m.pose << t->get()[0], t->get()[1], r->get()[2];
+    static constexpr int slot[3] = {0, 1, 5};   // [x y z rx ry rz], row-major
+    for (int i = 0; i < 3; ++i)
+        for (int j = 0; j < 3; ++j)
+            m.cov(i, j) = c->get()[slot[i] * 6 + slot[j]];
+    return m;
+}
+}   // namespace
+
 // The door's recess behind the room's mouth (see aperture_seam). A model constant of the building's geometry, FLAGGED:
 // not stored on the graph. Observed 0.49-0.50 m twice (gold2); uniform on [0, 0.5] would be mean 0.25, sigma 0.14 -- sigma
-// is taken wider (0.25) so a recess the two observations did not span is still an inlier. room_concept writing the mouth
-// pose would retire this.
+// is taken wider (0.25) so a recess the two observations did not span is still an inlier. ONLY the fallback now: when
+// room_concept has published the mouth pose (Task M) the seam is its inverse and this is not involved.
 constexpr double kRecessMean = 0.25, kRecessSigma = 0.25;
 // Accuracy of a seam read back from memory's passage faces: it was itself a fused estimate (chain sigma ~0.05 m, door
 // recess nuisance 0.25 m along one axis before fusion), so 0.1 m / 0.03 rad. FLAGGED constants, not data.
@@ -433,6 +457,14 @@ std::optional<Mat::RTMat> RoomEviction::fuse_seam_through_aperture(const Candida
         ap.cov.diagonal() << kRememberedSigmaXY * kRememberedSigmaXY, kRememberedSigmaXY * kRememberedSigmaXY,
                              kRememberedSigmaYaw * kRememberedSigmaYaw;
         how = "remembered passage";
+    }
+    else if (const auto mouth = mouth_pose_of(*live_, cand.new_room_id); mouth.has_value())
+    {
+        // ★ THE MOUTH, MEASURED BY THE ROOM THAT BORE IT (Task M). A room born through a crossing carries its frame's
+        //   pose in the old room (exact, with the aperture's covariance), so T(new<-old) is its inverse: no door node,
+        //   no recess nuisance, no side test. It also stands as provenance -- only a crossing-born room has it.
+        ap = inverse_cov(mouth.value());
+        how = "mouth pose";
     }
     else if (not (cand.crossing_born or rc::room::is_proto(*live_, cand.new_room_id)))
     {

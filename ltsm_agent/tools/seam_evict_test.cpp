@@ -1,7 +1,7 @@
 // Task S INTEGRATION: drives RoomEviction::evict (detect -> evict) on a real in-process DSR graph with the gold1
 // garbage robot-chain seam and asserts the STORED seam is the aperture seam. The pure-math test cannot see whether the
 // fusion is wired in (review C1: it was gated on a flag nothing set).
-//   run from the component root:  ./bin/seam_evict_test sane | garbage | reentry | reentry-garbage | established | flagged | nocov
+//   run from the component root:  ./bin/seam_evict_test sane | garbage | reentry | reentry-garbage | established | flagged | nocov | mouth-sane | mouth-garbage
 // Scene = etc/stage_two_rooms.json, re-posed so room_1's frame IS the crossed aperture (a proto's frame): door_1 sits on
 // wall_1 (the +x wall) at (3, 0.5), its x axis = the wall tangent (+y); the robot stands 0.6 m past it.
 #include "../src/room_eviction.h"
@@ -38,7 +38,12 @@ int main(int argc, char **argv)
 
     const Vec3 door_in_old(3.0, 0.5, M_PI / 2);
     const Vec3 robot_in_old(3.6, 0.5, 0.0);
-    const Vec3 proto = proto_in_old(door_in_old, robot_in_old.head<2>());
+    // Task M: room_concept publishes the MOUTH pose on the proto node. The mouth lies 0.49 m INSIDE the old room from the
+    // door node along the aperture normal (gold2 measured 0.495 / 0.49 m): proto = door pose shifted by -0.49 y.
+    const bool mouth_mode = mode == "mouth-sane" or mode == "mouth-garbage";
+    const Vec3 proto = [&] { Vec3 p = proto_in_old(door_in_old, robot_in_old.head<2>());
+                             if (mouth_mode) p.head<2>() -= 0.49 * Eigen::Vector2d(-std::sin(p.z()), std::cos(p.z()));
+                             return p; }();
     const Vec3 truth = inverse(proto);                        // T(room_1 <- room_0)
     Mat3 Cr = Mat3::Zero();  Cr.diagonal() << 0.05 * 0.05, 0.05 * 0.05, 0.02 * 0.02;
     Mat3 Cd = Mat3::Zero();  Cd.diagonal() << 0.03 * 0.03, 0.03 * 0.03, 0.01 * 0.01;
@@ -50,7 +55,7 @@ int main(int argc, char **argv)
     // established: a sane chain, but room_1's frame is ARBITRARY (not the aperture): shift it by (1.3, -0.7, 0.4)
     const Vec3 arb(1.3, -0.7, 0.4);
     const Vec3 robot_in_arb = [&] { Vec3 q; q << (rot(arb.z()) * robot_in_new.head<2>() + arb.head<2>()), wrap(robot_in_new.z() + arb.z()); return q; }();
-    put_edge(*live, 200, 400, mode == "sane" ? inverse(robot_in_new) : (mode == "established" or mode == "reentry") ? inverse(robot_in_arb) : Vec3(-14262.68, 1667.96, -1.1285), cov ? std::optional{Cr} : std::nullopt);
+    put_edge(*live, 200, 400, (mode == "sane" or mode == "mouth-sane") ? inverse(robot_in_new) : (mode == "established" or mode == "reentry") ? inverse(robot_in_arb) : Vec3(-14262.68, 1667.96, -1.1285), cov ? std::optional{Cr} : std::nullopt);
     // door_1 hangs from wall_1: pose in the wall frame as the fixture authored it; give that edge the door's covariance
     const auto d1 = live->get_node("door_1").value();
     if (cov) put_edge(*live, 311, d1.id(), [&] { const auto e = live->get_edge(311, d1.id(), "RT").value();
@@ -58,7 +63,16 @@ int main(int argc, char **argv)
                                                   return Vec3(T.translation().x(), T.translation().y(), 0.0); }(), Cd);
 
     // gold1: room_1 is still a proto (self-edge). "garbage_flag"/"flagged": no proto edge, crossing_born set on the candidate.
-    if (mode == "garbage" or mode == "sane" or mode == "reentry" or mode == "reentry-garbage")
+    if (mouth_mode)
+    {   // the mouth pose as room_concept's birth site writes it: rt_translation / rt_rotation_euler_xyz / rt_covariance (6x6)
+        auto rn = live->get_node(400).value();
+        live->add_or_modify_attrib_local<rt_translation_att>(rn, std::vector<float>{(float)proto.x(), (float)proto.y(), 0.f});
+        live->add_or_modify_attrib_local<rt_rotation_euler_xyz_att>(rn, std::vector<float>{0.f, 0.f, (float)proto.z()});
+        std::vector<float> C(36, 0.f);  C[0] = 0.02f * 0.02f;  C[7] = 0.02f * 0.02f;  C[35] = 0.01f * 0.01f;
+        live->add_or_modify_attrib_local<rt_covariance_att>(rn, C);
+        live->update_node(rn);
+    }
+    if (mode == "garbage" or mode == "sane" or mouth_mode or mode == "reentry" or mode == "reentry-garbage")
         std::printf("  proto self-edge inserted: %d\n", int(live->insert_or_assign_edge(DSR::Edge::create<proto_edge_type>(400, 400))));
     ltsm::RoomEviction ev(live, mem);
     const bool reentry = mode == "reentry" or mode == "reentry-garbage";
@@ -99,7 +113,7 @@ int main(int argc, char **argv)
     }
     // a proto-room is not offered by detect(); the live path is promotion_candidate(reading)
     std::optional<ltsm::Candidate> cand;
-    if (mode == "garbage" or mode == "sane" or mode == "reentry" or mode == "reentry-garbage")
+    if (mode == "garbage" or mode == "sane" or mouth_mode or mode == "reentry" or mode == "reentry-garbage")
     {
         ev.ensure_current_edge();
         ltsm::PromotionReading r; r.proto_id = 400; r.proto_name = "room_1"; r.valid = true; r.p_inside = 1.0;
@@ -135,6 +149,12 @@ int main(int argc, char **argv)
     else if (mode == "reentry-garbage")
         check(close(stored, remembered_seam, 0.01, 0.005),
               "re-entry, gold1 garbage chain: the REMEMBERED seam is kept (chain weight ~0)");
+    else if (mode == "mouth-sane")
+        check(close(stored, truth, 0.02, 0.01) and (stored - ap_expected).head<2>().norm() > 0.1,
+              "mouth pose 0.49 m off the door node + sane chain: stored seam = mouth-derived seam ~ chain within sigma, NOT the recess-constant seam");
+    else if (mode == "mouth-garbage")
+        check(close(stored, truth, 0.01, 0.005) and (stored - ap_expected).head<2>().norm() > 0.1,
+              "mouth pose + gold1 garbage chain: the mouth-derived seam is kept (1 cm), recess constant not involved");
     else if (mode == "nocov")
         check(std::abs(stored.x()) > 1000, "no covariance: the robot chain is kept (pre-existing behaviour, warned)");
     else if (mode == "sane")
