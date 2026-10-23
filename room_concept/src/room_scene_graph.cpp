@@ -1034,6 +1034,21 @@ void RoomSceneGraph::step_proto_room_impl(const rc::RoomConcept::UpdateResult& r
         G_->add_or_modify_attrib_local<pos_x_att>(proto, G_->get_attrib_by_name<pos_x_att>(rn.value()).value_or(0.f) + 250.f);
         G_->add_or_modify_attrib_local<pos_y_att>(proto, G_->get_attrib_by_name<pos_y_att>(rn.value()).value_or(0.f));
     }
+    // ★ THE MOUTH POSE (Task M, 2026-10-23): this proto's frame IS the mouth of the opening it was born through, and
+    //   only this agent knows that pose exactly (and its covariance, from door_concept's aperture sigma). It is
+    //   published on the proto room node itself with the existing pose attributes -- translation [x y 0], rotation
+    //   [0 0 yaw], 6x6 covariance -- expressed in the OLD room's frame (the room that owns the crossed aperture,
+    //   frozen from here on). Not an RT edge: rooms hang off the robot, and a room-to-room RT edge would close a
+    //   loop in the tree every transform query walks. A node attribute survives promotion (which removes only the
+    //   proto self-edge), so ltsm still finds it at eviction and can set T(new<-old) = inverse(mouth) with no
+    //   door-recess nuisance. No covariance is written when door_concept stated no sigma.
+    {
+        const auto mouth = rc::crossing::mouth_of(best, best_ap->sigma_along);
+        G_->add_or_modify_attrib_local<rt_translation_att>(proto, std::vector<float>{mouth.x, mouth.y, 0.f});
+        G_->add_or_modify_attrib_local<rt_rotation_euler_xyz_att>(proto, std::vector<float>{0.f, 0.f, mouth.yaw});
+        if (mouth.has_cov)
+            G_->add_or_modify_attrib_local<rt_covariance_att>(proto, std::vector<float>(mouth.cov.begin(), mouth.cov.end()));
+    }
     G_->add_or_modify_attrib_local<parent_att>(proto, dsr_robot_id_);
     rc::provenance::stamp_creation(*G_, proto);
     const auto id = G_->insert_node(proto);

@@ -27,6 +27,7 @@
 
 #include <Eigen/Dense>
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <fstream>
@@ -141,6 +142,38 @@ namespace rc::crossing
         T.linear().col(1) = c.n_out;
         T.translation()   = c.centre;
         return T;
+    }
+
+    /// ★ THE MOUTH POSE (2026-10-23, Task M): the proto frame's pose in the OLD room's frame, as the numbers the DSR
+    /// carries on the proto room node (rt_translation [x y 0], rt_rotation_euler_xyz [0 0 yaw], rt_covariance 6x6
+    /// row-major over [x y z rx ry rz]) so ltsm's seam T(new<-old) = inverse(mouth) needs no door node and no recess
+    /// constant. The pose IS proto_frame(c), not a second computation of it.
+    /// Covariance: the aperture's two ends each carry door_concept's position σ (`sigma_pos`, ap.sigma_along), so the
+    /// centre has σ in x and y and the heading of a→b has σ_yaw² = 2σ²/w² (two independent ends w apart) -- all from
+    /// the aperture estimate, no constants. sigma_pos <= 0 means door_concept stated none: has_cov = false and no
+    /// covariance is published (a seam nothing can weigh must not claim a precision).
+    struct Mouth
+    {
+        float x = 0.f, y = 0.f, yaw = 0.f;
+        std::array<float, 36> cov{};
+        bool has_cov = false;
+    };
+
+    inline Mouth mouth_of(const Crossing& c, float sigma_pos)
+    {
+        const Eigen::Affine2f T = proto_frame(c);
+        Mouth m;
+        m.x   = T.translation().x();
+        m.y   = T.translation().y();
+        m.yaw = std::atan2(T.linear()(1, 0), T.linear()(0, 0));
+        if (sigma_pos > 0.f and c.span_w > 0.f)
+        {
+            m.has_cov = true;
+            m.cov[0 * 6 + 0] = sigma_pos * sigma_pos;
+            m.cov[1 * 6 + 1] = sigma_pos * sigma_pos;
+            m.cov[5 * 6 + 5] = 2.f * sigma_pos * sigma_pos / (c.span_w * c.span_w);
+        }
+        return m;
     }
 
     // ── DIAGNOSTIC CSV: tmp/crossing.csv ────────────────────────────────────────────────────────

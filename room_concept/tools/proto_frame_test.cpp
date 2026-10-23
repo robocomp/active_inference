@@ -57,6 +57,35 @@ int main()
     check(near(T.linear().determinant(), 1.f) and near(T.linear()(0, 0), 1.f) and near(T.linear()(1, 1), 1.f), "frame = identity rotation");
     check(near(c.s, 0.8f) and near(c.u, 0.3f), "s, u");
 
+    // ── Task M: the published mouth pose is the proto frame's pose in the old room ──────────────────────────────
+    std::printf("mouth pose (Task M)\n");
+    for (const double yaw : {0.0, 0.7, -2.4})
+        for (const bool dense : {false, true})
+        {
+            // A room rotated by `yaw`, door in its +y wall, 32-vertex (jamb-nearest) outline when dense.
+            const Eigen::Rotation2Df R(static_cast<float>(yaw));
+            auto rotv = [&](std::vector<Vector2f> v) { for (auto &p : v) p = R * p; return v; };
+            const auto outline = rotv(dense ? notch : rect);
+            rc::DoorAperture a2;
+            a2.a = R * Vector2f(-0.1f, 3); a2.b = R * Vector2f(0.1f, 3); a2.p_open = 1.f; a2.sigma_along = 0.02f;
+            const auto cc = rc::crossing::evaluate(a2, outline, R * Vector2f(0.3f, 3.8f), cov, 0.25f);
+            const auto mo = rc::crossing::mouth_of(cc, a2.sigma_along);
+            const auto Tp = rc::crossing::proto_frame(cc);
+            std::printf("  yaw %.1f %s (%zu vertices)\n", yaw, dense ? "notch" : "rect", outline.size());
+            check(cc.valid, "valid");
+            check(near(mo.x, Tp.translation().x(), 1e-6f) and near(mo.y, Tp.translation().y(), 1e-6f), "mouth xy = proto origin in old room");
+            // rebuild the rotation from the published yaw: must equal the proto frame's linear part, orthonormal
+            const Eigen::Matrix2f Rm = Eigen::Rotation2Df(mo.yaw).toRotationMatrix();
+            check((Rm - Tp.linear()).cwiseAbs().maxCoeff() < 1e-5f, "mouth yaw reproduces the proto frame rotation");
+            check(near((Rm.transpose() * Rm - Eigen::Matrix2f::Identity()).cwiseAbs().maxCoeff(), 0.f, 1e-5f) and near(Rm.determinant(), 1.f), "orthonormal, det +1");
+            check(mo.has_cov and near(mo.cov[0], 4e-4f, 1e-7f) and near(mo.cov[5 * 6 + 5], 2.f * 4e-4f / (0.2f * 0.2f), 1e-4f), "covariance from the aperture sigma");
+            // the robot expressed through the published pose = through the proto frame
+            const Vector2f robot_old = R * Vector2f(0.3f, 3.8f);
+            const Vector2f via_pub = Rm.transpose() * (robot_old - Vector2f(mo.x, mo.y));
+            check((via_pub - Tp.inverse() * robot_old).norm() < 1e-4f, "robot in the proto frame via the published pose");
+        }
+    check(not rc::crossing::mouth_of(c, 0.f).has_cov, "no stated sigma -> no covariance published");
+
     std::printf("%s (%d failures)\n", failures ? "FAILED" : "PASSED", failures);
     return failures ? 1 : 0;
 }
