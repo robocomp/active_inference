@@ -105,6 +105,8 @@ void CalibChannels::pump_calib_channels()
             ch.ingestor->start();
             qInfo() << "[camcal] channel" << QString::fromStdString(ch.name) << "bound";
         }
+        else
+            ch.ingestor->refresh_graph_extrinsic();   // a committed body->camera edge reaches the channel
         if (not ch.loaded)
         {
             ch.loaded = true;
@@ -173,6 +175,7 @@ void CalibChannels::pump_calib_channels()
     //   reads, so it is logged when it moves rather than changing the geometry quietly.
     if (image_edge_bound_)
     {
+        camera_ingestor_->refresh_graph_extrinsic();   // a committed body->camera edge reaches the image-edge term
         const float mz = room_concept_.measured_ceiling();
         const float want = mz > 1.5f ? mz : params.room_height;
         if (auto ic = image_edge_source_->config(); std::abs(ic.room_height - want) > 1e-4f)
