@@ -16,6 +16,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <numbers>
 #include <optional>
 #include <span>
@@ -186,6 +187,15 @@ inline Eigen::Vector2f goal_target_pos(const std::optional<Eigen::Vector2f>& pub
                                        bool published_admissible)
 {
     return published.has_value() and published_admissible ? *published : repaired;
+}
+
+// ★ Task O fix rounds 1-2 (I4): a step whose completion waits on a probability is bounded FROM ITS ENTRY by the contract's own timeout.
+//   `entry` is the step's start (reset when the node changes); returns true once now - entry > timeout_ms.
+inline bool step_entry_expired(std::optional<std::uint64_t>& entry, std::uint64_t& entry_node, std::uint64_t node,
+                               std::uint64_t now_ms, float timeout_ms)
+{
+    if (entry_node != node or not entry.has_value()) { entry_node = node; entry = now_ms; }
+    return double(now_ms - *entry) > double(timeout_ms);
 }
 
 inline bool orient_settled(const ControllerRobotPose& robot, const ControllerTargetInfo& t, const GoalAdapterParams& p,

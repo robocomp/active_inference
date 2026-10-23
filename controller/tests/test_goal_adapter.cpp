@@ -414,6 +414,13 @@ int main()
         CHECK("clauses: p from the feedback attr, level from the contract's own clause", pre and near(pre->p, 0.75f) and near(pre->complete_at, 0.90f));
         CHECK("clauses: a sentinel (-1 = not measured) is no evidence", not precondition_from_clauses(open_c, rd(-1.f)));
         CHECK("clauses: a contract with no reach clause has no precondition", not precondition_from_clauses(std::vector<GoalClause>{{"door_open_prob", CompareOp::GE, 0.7f}}, rd(0.8f)));
+        {
+            std::optional<std::uint64_t> en; std::uint64_t en_node = 0;
+            CHECK("entry bound: not expired at entry", not step_entry_expired(en, en_node, 7, 1000, 10000.f));
+            CHECK("entry bound: not expired inside the timeout", not step_entry_expired(en, en_node, 7, 10500, 10000.f));
+            CHECK("entry bound: expired from ENTRY (hover with p plateaued ends)", step_entry_expired(en, en_node, 7, 11100, 10000.f));
+            CHECK("entry bound: a new node restarts the clock", not step_entry_expired(en, en_node, 8, 11200, 10000.f));
+        }
         const Eigen::Vector2f pub{1.f, 2.f}, rep{1.f, 1.8f};
         CHECK("target: published when admissible", (goal_target_pos(pub, rep, true) - pub).norm() < 1e-6f);
         CHECK("target: the repair substitutes when the published point is blocked", (goal_target_pos(pub, rep, false) - rep).norm() < 1e-6f);

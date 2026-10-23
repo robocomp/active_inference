@@ -74,7 +74,7 @@ std::optional<rc::policy::OrientPrecondition> ControllerSession::contract_precon
     if (not graph_ or fb == 0) return std::nullopt;
     const auto node = graph_->get_node(fb);
     if (not node.has_value()) return std::nullopt;
-    return rc::policy::precondition_from_clauses(c.goal, [&](const std::string &attr) -> std::optional<float>
+    return rc::policy::precondition_from_clauses(c.pre, [&](const std::string &attr) -> std::optional<float>
     {
         if (attr == "door_reach_prob") return graph_->get_attrib_by_name<door_reach_prob_att>(node.value());
         return std::nullopt;
@@ -925,8 +925,7 @@ void ControllerSession::drive_with_policy(const ControllerRobotPose &robot_pose,
                 const auto pre = contract_precondition(contract);
                 // ★ I4: the bound runs from the STEP'S ENTRY with the contract's own timeout (nothing else started a clock before the
                 //   robot was settled, so an unmet precondition hovered for ever); the same give-up the protocol's timeout reports
-                if (orient_entry_node_ != active_target_id_ or not orient_entry_ms_) { orient_entry_node_ = active_target_id_; orient_entry_ms_ = now; }
-                if (double(now - *orient_entry_ms_) > double(contract.timeout_ms))
+                if (rc::policy::step_entry_expired(orient_entry_ms_, orient_entry_node_, active_target_id_, now, contract.timeout_ms))
                 {
                     motion_commander.stop_robot();
                     last_look_succeeded_ = false;
@@ -987,6 +986,17 @@ void ControllerSession::drive_with_policy(const ControllerRobotPose &robot_pose,
     {
         place_t.room_pos = rc::policy::goal_target_pos(last_raw_target_pos_, place_t.room_pos, published_target_admissible(place_t));
         if (target_contract_known_) place_pre = contract_precondition(target_contract_);
+    }
+    // ★ fix round 2 (b): a Place that waits on the precondition probability is bounded from its entry by the contract's own timeout
+    if (place_pre.has_value() and place_pre->p < place_pre->complete_at
+        and rc::policy::step_entry_expired(orient_entry_ms_, orient_entry_node_, active_target_id_, now, target_contract_.timeout_ms))
+    {
+        motion_commander.stop_robot();
+        qInfo() << "[affordance] place GIVE_UP (precondition unmet, timeout from step entry) | node" << active_target_id_;
+        orient_entry_ms_.reset();
+        finalize_reached(affordance_manager, path_controller, motion_commander, display, robot_pose.pos, time_source());
+        policy_reset();
+        return;
     }
     const auto spec = rc::policy::goal_for_target(place_t, cpose, std::nullopt, rc::policy::GoalMode::Place,
                                                   wants_final_facing(place_t), gp, place_pre);
