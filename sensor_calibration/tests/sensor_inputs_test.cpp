@@ -93,6 +93,7 @@ int main(int argc, char** argv)
     auto G = std::make_shared<DSR::DSRGraph>("sensor_inputs_test", 991, std::string(SHADOW_JSON), true,
                                              static_cast<int8_t>(91), DSR::SignalMode::QT);
     constexpr std::int64_t T0 = 1'700'000'000'000ll;
+    const float kYaw = static_cast<float>(M_PI / 6.0);   // 30 deg: the stored edge (room in robot frame)
 
     // ── B. graph reads ──────────────────────────────────────────────────────────────────────────────
     auto robot = G->get_nodes_by_type("robot").front();
@@ -104,7 +105,7 @@ int main(int argc, char** argv)
         CHECK(rid.has_value());
         auto rt = G->get_rt_api();
         auto rn = G->get_node(robot.id()).value();
-        rt->insert_or_assign_edge_RT(rn, *rid, std::vector<float>{1.f, 2.f, 0.f}, std::vector<float>{0.f, 0.f, 0.5f});
+        rt->insert_or_assign_edge_RT(rn, *rid, std::vector<float>{1.f, 2.f, 0.f}, std::vector<float>{0.f, 0.f, kYaw});
         std::vector<float> cov(36, 0.f);
         cov[0] = 0.01f; cov[7] = 0.02f; cov[35] = 0.003f;
         CHECK(rt->insert_or_assign_edge_RT_covariance(robot.id(), *rid, DSR::RT_API::CovarianceKind::Pose, cov));
@@ -164,12 +165,30 @@ int main(int argc, char** argv)
     CHECK(pose.has_value());
     if (pose)
     {
-        CHECK(pose->has_cov and std::abs(pose->cov[0] - 0.01f) < 1e-7 and std::abs(pose->cov[7] - 0.02f) < 1e-7 and std::abs(pose->cov[35] - 0.003f) < 1e-7);
-        CHECK(std::abs(pose->from_T_to.translation().x() - 1.0) < 1e-6 and std::abs(pose->from_T_to.translation().y() - 2.0) < 1e-6);
-        const double yaw = std::atan2(pose->from_T_to.linear()(1, 0), pose->from_T_to.linear()(0, 0));
-        CHECK(std::abs(yaw - 0.5) < 1e-6);
-        std::println("B pose t=({:.2f},{:.2f}) yaw={:.3f}, cov diag x={:.3f} y={:.3f} yaw={:.4f}", pose->from_T_to.translation().x(),
-                     pose->from_T_to.translation().y(), yaw, pose->cov[0], pose->cov[7], pose->cov[35]);
+        // room_T_robot is the INVERSE of the stored edge: R(-30deg), t = -R^T t' = -(R(-30)^T (1,2)).
+        const double th = M_PI / 6.0, c = std::cos(th), s = std::sin(th);
+        const Eigen::Vector2d t_expect(-(c * 1.0 + s * 2.0), -(-s * 1.0 + c * 2.0));
+        const double yaw = std::atan2(pose->room_T_robot.linear()(1, 0), pose->room_T_robot.linear()(0, 0));
+        CHECK((pose->room_T_robot.translation().head<2>() - t_expect).norm() < 1e-5 and std::abs(yaw + th) < 1e-5);
+        // Covariance: stored diag(.01,.02,.003) is of the EDGE pose. Independent expectation by a NUMERIC Jacobian
+        // of g(t, th) = (-R(th)^T t, -th) at the stored pose (central differences; no use of the library's formula).
+        auto g = [](Eigen::Vector3d v)
+        { const double a = std::cos(v[2]), b = std::sin(v[2]);
+          return Eigen::Vector3d(-(a * v[0] + b * v[1]), -(-b * v[0] + a * v[1]), -v[2]); };
+        const Eigen::Vector3d p0(1.0, 2.0, th);
+        Eigen::Matrix3d J;
+        for (int j = 0; j < 3; ++j) { Eigen::Vector3d d = Eigen::Vector3d::Zero(); d[j] = 1e-6; J.col(j) = (g(p0 + d) - g(p0 - d)) / 2e-6; }
+        const Eigen::Matrix3d Sexp = J * Eigen::Vector3d(0.01, 0.02, 0.003).asDiagonal() * J.transpose();
+        const int k[3] = {0, 1, 5};
+        bool ok = pose->has_cov;
+        for (int r = 0; r < 3; ++r) for (int q = 0; q < 3; ++q)
+            ok = ok and std::abs(pose->cov_room_robot[k[r] * 6 + k[q]] - Sexp(r, q)) < 1e-5;
+        CHECK(ok);
+        CHECK(std::abs(pose->cov_room_robot[0] - 0.01f) > 3e-3f);     // would equal .01 if the frame were left unconverted
+        CHECK(std::abs(pose->cov_room_robot[35] - 0.003f) < 1e-7f);   // yaw variance is invariant
+        std::println("B pose room_T_robot t=({:.3f},{:.3f}) yaw={:.3f}; cov_room_robot xx={:.4f} yy={:.4f} xy={:.4f} yawyaw={:.4f} (stored xx=.01 yy=.02)",
+                     pose->room_T_robot.translation().x(), pose->room_T_robot.translation().y(), yaw,
+                     pose->cov_room_robot[0], pose->cov_room_robot[7], pose->cov_room_robot[1], pose->cov_room_robot[35]);
     }
     CHECK(inputs->polygon().vertices.size() == 4);
     if (inputs->polygon().vertices.size() == 4) CHECK(inputs->polygon().vertices[2].isApprox(Eigen::Vector2f(4.f, 6.f)));

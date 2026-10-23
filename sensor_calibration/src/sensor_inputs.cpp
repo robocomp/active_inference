@@ -36,6 +36,18 @@ std::vector<Eigen::Vector3f> LidarIn::points_body() const
     return out;
 }
 
+Eigen::Matrix3d invert_pose_covariance_se2(const Eigen::Matrix3d& cov, double x, double y, double th)
+{
+    // Jacobian of g(t, th) = (-R(th)^T t, -th) at (x, y, th). g is an involution, so the same formula at the stored
+    // pose maps the stored covariance to that of the inverse pose (room_scene_graph.cpp builds its J the same way).
+    const double c = std::cos(th), s = std::sin(th);
+    Eigen::Matrix3d J = Eigen::Matrix3d::Zero();
+    J(0, 0) = -c; J(0, 1) = -s; J(0, 2) =  s * x - c * y;
+    J(1, 0) =  s; J(1, 1) = -c; J(1, 2) =  c * x + s * y;
+    J(2, 2) = -1.0;
+    return J * cov * J.transpose();
+}
+
 std::optional<OdometryIn> make_odometry(std::optional<float> adv, std::optional<float> side, std::optional<float> rot,
                                         std::optional<std::uint64_t> ts, std::optional<std::uint64_t> sim_ts,
                                         std::optional<bool> simulated, const std::optional<std::vector<float>>& variance)
@@ -84,7 +96,7 @@ std::string StreamMonitor::update(Clock::time_point now)
         return {};
     stalled_ = now_stalled;
     const auto age = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_arrival_).count();
-    return stalled_ ? std::format("[inputs] stream '{}' STALLED (no frame for {} ms): holding, its data will not be used", name_, age)
+    return stalled_ ? std::format("[inputs] stream '{}' STALLED (no frame for {} ms); consumers must not use its stale data", name_, age)
                     : std::format("[inputs] stream '{}' recovered", name_);
 }
 
@@ -301,14 +313,27 @@ void SensorInputs::poll_graph()
         if (const auto T = rt_->get_edge_RT_as_rtmat(e.value()); T.has_value())
         {
             PoseIn p;
-            p.from_id = robot.id(); p.to_id = *room; p.read_stamp_ms = wall_ms();
-            p.from_T_to = *T;
+            p.robot_id = robot.id(); p.room_id = *room; p.read_stamp_ms = wall_ms();
+            const Eigen::Affine3d& robot_T_room = *T;    // the edge as stored: the room in the robot frame
+            p.room_T_robot = robot_T_room.inverse();
             if (const auto C = rt_->get_edge_RT_covariance(e.value()); C.has_value())
             {
-                // rt_covariance layout is protocol: 6x6 ROW-MAJOR over [x y z rx ry rz]; heading variance at [35].
+                // Stored layout is protocol: 6x6 ROW-MAJOR over [x y z rx ry rz]; SE(2) lives in slots 0, 1, 5.
+                static constexpr int k[3] = {0, 1, 5};
+                Eigen::Matrix3d S;
+                for (int r = 0; r < 3; ++r)
+                    for (int c = 0; c < 3; ++c)
+                        S(r, c) = (*C)(k[r], k[c]);
+                const auto& R = robot_T_room.linear();
+                const Eigen::Matrix3d Sc = invert_pose_covariance_se2(S, robot_T_room.translation().x(), robot_T_room.translation().y(),
+                                                                      std::atan2(R(1, 0), R(0, 0)));
+                Eigen::Matrix<double, 6, 6> M = *C;
+                for (int r = 0; r < 3; ++r)
+                    for (int c = 0; c < 3; ++c)
+                        M(k[r], k[c]) = Sc(r, c);
                 for (int r = 0; r < 6; ++r)
                     for (int c = 0; c < 6; ++c)
-                        p.cov[r * 6 + c] = static_cast<float>((*C)(r, c));
+                        p.cov_room_robot[r * 6 + c] = static_cast<float>(M(r, c));
                 p.has_cov = true;
             }
             pose_ = p;

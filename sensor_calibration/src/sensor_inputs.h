@@ -91,16 +91,27 @@ struct OdometryIn
     float var_adv = -1.f, var_side = -1.f, var_rot = -1.f;
 };
 
+// The localiser's estimate, named by FRAME. room_concept stores the RT edge robot -> room (the room is a child of
+// the robot), i.e. the ROOM'S pose in the ROBOT frame, and writes its (x, y, theta) covariance through the Jacobian
+// of that inversion (room_scene_graph.cpp dsr_update_pose, the `J` block, ~l.618-628). What every consumer here wants
+// is the other quantity, the robot in the room, so BOTH the transform and the covariance are handed over already
+// converted: cov_room_robot = J' * Sigma_stored * J'^T with J' the Jacobian of the (self-inverse) map
+// (t, th) -> (-R(th)^T t, -th) evaluated at the STORED pose. x/y mix with the rotation through the lever arm; the
+// theta variance is invariant. Other slots (z, rx, ry) are copied unchanged (the writer fills only slots 0, 1, 5).
 struct PoseIn
 {
-    std::uint64_t from_id = 0, to_id = 0;              // the RT edge as stored: robot -> room
-    Eigen::Affine3d from_T_to = Eigen::Affine3d::Identity();   // rt_translation + Rx*Ry*Rz(rt_rotation_euler_xyz)
-    std::array<float, 36> cov{};                       // rt_covariance, 6x6 row-major [x y z rx ry rz]; yaw = [35]
+    std::uint64_t robot_id = 0, room_id = 0;
+    Eigen::Affine3d room_T_robot = Eigen::Affine3d::Identity();   // robot pose in the room: maps robot-frame points to the room frame
+    // 6x6 ROW-MAJOR over [x y z rx ry rz], covariance of room_T_robot's (x, y, yaw) in the ROOM frame; SE(2) slots
+    // are 0 (x), 1 (y), 5 (yaw): heading variance at [35].
+    std::array<float, 36> cov_room_robot{};
     bool          has_cov = false;
     std::int64_t  read_stamp_ms = 0;                   // wall clock of the read (the edge carries no capture stamp)
-
-    [[nodiscard]] Eigen::Affine3d to_T_from() const { return from_T_to.inverse(); }   // room<-robot pose
 };
+
+// SE(2) covariance change of frame for the robot<->room inversion (see PoseIn). `stored_pose_*` is the pose the
+// covariance is attached to; the result is the covariance of the inverse pose. Pure, pinned by the selftest.
+[[nodiscard]] Eigen::Matrix3d invert_pose_covariance_se2(const Eigen::Matrix3d& cov_xyt, double x, double y, double theta);
 
 struct PolygonIn
 {
@@ -185,10 +196,13 @@ public:
     // non-blockingly, polls the graph reads, updates the stall state and logs rates.
     void poll();
 
-    // Hand-over queues (bounded, drop-oldest). The consumer takes and owns what it takes.
+    // Hand-over queues (bounded, drop-oldest). The consumer takes and owns what it takes. Nothing here withholds data
+    // of a stalled stream: the consumer must check stalled(key)/any_stalled() before using what it takes.
     [[nodiscard]] std::vector<LidarIn>    take_lidar();
     [[nodiscard]] std::vector<ImageIn>    take_images();
     [[nodiscard]] std::vector<ImuIn>      take_imu();
+    // Odometry is POLLED, so a sample can be missed when a tick runs late. Never count samples: integrate the
+    // velocity piecewise-constant over successive source_ts_ms deltas.
     [[nodiscard]] std::vector<OdometryIn> take_odometry();
 
     // Latest graph reads (nullopt until first resolvable).
@@ -198,7 +212,7 @@ public:
     // body<-sensor from the graph now, at a real stamp (ts!=0 bypasses the ts==0 cache). nullopt if unresolved.
     [[nodiscard]] std::optional<Eigen::Affine3f> body_from_sensor(const std::string& sensor, std::int64_t stamp_ms) const;
 
-    // True while every stream that has ever delivered is currently delivering (no stalled stream).
+    // True when SOME stream that has delivered before is currently stalled.
     [[nodiscard]] bool any_stalled() const;
     // Per-stream rate over the window since the last call (restarts the window), plus graph-read state.
     [[nodiscard]] std::string status_line();
