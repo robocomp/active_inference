@@ -653,6 +653,44 @@ void test_scene_pre_and_post()
     CHECK(c2.size() == 1 and not c2[0].scene_pre and not c2[0].scene_post);
 }
 
+// Provenance: request is copied; fixes resolves the failed mission's key to its EM id within the epoch, else stays "".
+void test_mission_provenance()
+{
+    FakeFactSource fs;
+    Builder b(fs, ids());
+    Script s;
+    prime_mission_only(b, s, 10);
+    push_mission(s, 100, "m1");
+    s.all.back().text = R"({"v":1,"request":"¿hay luz en room_2?","steps":[]})";
+    auto& e1 = s.push(K::MissionEnd, 150); e1.mission = "m1"; e1.outcome = "failed|cross_unreachable";
+    push_mission(s, 200, "m2");
+    s.all.back().text = R"({"v":1,"request":"arréglalo","fixes":"m1","steps":[]})";
+    push_mission(s, 300, "m3");
+    s.all.back().text = R"({"v":1,"fixes":"m9","steps":[]})";   // a key this run never saw
+    push_mission(s, 400, "c1");
+    s.all.back().text = "cross door_5";                          // a plain command: no provenance
+    const auto rs = b.on_journal(s.wire(), 500);
+    std::map<std::string, Record> by_key;
+    for (const Record& r : rs)
+        if (r.level == Level::Mission) by_key[r.mission_key] = r;   // the last copy per mission wins
+    CHECK(by_key.size() == 4);
+    CHECK(by_key["m1"].request == "¿hay luz en room_2?" and by_key["m1"].fixes.empty());
+    CHECK(by_key["m2"].request == "arréglalo" and by_key["m2"].fixes == by_key["m1"].id and not by_key["m1"].id.empty());
+    CHECK(by_key["m3"].request.empty() and by_key["m3"].fixes.empty());
+    CHECK(by_key["c1"].request.empty() and by_key["c1"].fixes.empty());
+
+    // A restarted controller reuses m1: a fix naming it must not reach across runs.
+    s.epoch = 2000;
+    s.all.clear();
+    push_mission(s, 600, "m1");
+    s.all.back().text = R"({"v":1,"fixes":"m2","steps":[]})";
+    const auto rs2 = b.on_journal(s.wire(), 700);
+    const Record* m = nullptr;
+    for (const Record& r : rs2)
+        if (r.level == Level::Mission and r.t0 == 600) m = &r;
+    CHECK(m != nullptr and m->fixes.empty());
+}
+
 int main()
 {
     std::setlocale(LC_ALL, "es_ES.UTF-8") or std::setlocale(LC_ALL, "");
@@ -680,6 +718,7 @@ int main()
     test_settle_rereads_state_after();
     test_settle_missions_and_shutdown();
     test_scene_pre_and_post();
+    test_mission_provenance();
     std::println("{} checks, {} failures", checks, failures);
     return failures == 0 ? 0 : 1;
 }

@@ -90,7 +90,18 @@ int main()
         // ── Round trip: encode → decode gives the same mission ──────────────────────────────────────────────────
         const auto again = decode_json(encode_json(m));
         CHECK(again.has_value() and again.value() == m);
+        CHECK(m.request.empty() and m.fixes.empty());   // provenance is optional: absent = ""
+        CHECK(not encode_json(m).contains("request") and not encode_json(m).contains("fixes"));
+
+        // ── Provenance (request / fixes) round-trips; a non-string is refused ───────────────────────────────────
+        Mission p = m;
+        p.request = "¿están las luces encendidas en room_2?";
+        p.fixes = "m12";
+        const auto p_again = decode_json(encode_json(p));
+        CHECK(p_again.has_value() and p_again.value() == p);
     }
+    CHECK(decode_json(R"({"v":1,"request":3,"steps":[{"id":"1","op":"stop"}]})").error().code == "bad_type");
+    CHECK(decode_json(R"({"v":1,"fixes":["m1"],"steps":[{"id":"1","op":"stop"}]})").error().code == "bad_type");
 
     // ── Resources come from the registry as a SET (one owner per resource; §7.4 point 3, §7.6) ─────────────────
     CHECK(op_spec("cross") != nullptr and op_spec("cross")->claims == kBase and not op_spec("cross")->instant);

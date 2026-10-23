@@ -78,6 +78,10 @@ struct Record
     std::string kind, target, target_ltsm;      // kind = op / affordance kind / "mission"; target = live node name
     std::string action_json;                    // IR / command text / claim contract, verbatim JSON
     std::string source;                         // mission only: chat|remote|panel|self
+    // Mission only, PROVENANCE (2026-10-23), copied from the IR's optional `request` / `fixes`: the person's words, and
+    // the EM id of the failed mission this one repairs (resolved from the IR's controller key; "" = absent or unknown in
+    // this controller run — never guessed). Raw material for distilling procedures from successful missions.
+    std::string request, fixes;
     std::uint64_t t0 = 0;
     std::optional<std::uint64_t> t1;            // empty = still open
     std::string room;                           // current room at t0
@@ -234,6 +238,8 @@ inline QJsonObject to_json(const Record& r)
     o["target_ltsm"] = q(r.target_ltsm);
     o["action_json"] = q(r.action_json);
     o["source"] = q(r.source);
+    if (not r.request.empty()) o["request"] = q(r.request);
+    if (not r.fixes.empty()) o["fixes"] = q(r.fixes);
     o["t0"] = double(r.t0);
     if (r.t1) o["t1"] = double(*r.t1);
     o["room"] = q(r.room);
@@ -281,6 +287,8 @@ inline std::optional<Record> record_from_json(const QJsonObject& o)
     r.target_ltsm = s(o["target_ltsm"]);
     r.action_json = s(o["action_json"]);
     r.source = s(o["source"]);
+    r.request = s(o["request"]);
+    r.fixes = s(o["fixes"]);
     r.t0 = std::uint64_t(o["t0"].toDouble());
     if (o["t1"].isDouble()) r.t1 = std::uint64_t(o["t1"].toDouble());
     r.room = s(o["room"]);

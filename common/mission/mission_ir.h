@@ -140,6 +140,10 @@ struct Mission
     std::map<std::string, Pose, std::less<>> anchors;
     std::map<std::string, double, std::less<>> prefs;   ///< RESERVED (§7.2 L4): must be empty in v1
     std::vector<std::string> requires_fields;            ///< fields whose meaning this build must know
+    // PROVENANCE (2026-10-23), not behaviour: the interpreter never reads them; the episodic memory stores them so
+    // successful missions can later be distilled into reusable procedures. Absent ("") = not known. Not in the text form.
+    std::string request;   ///< the person's words that led to this mission
+    std::string fixes;     ///< controller mission key ("m12") of the failed mission this one repairs
     std::vector<Step> steps;
     bool operator==(const Mission&) const = default;
 };

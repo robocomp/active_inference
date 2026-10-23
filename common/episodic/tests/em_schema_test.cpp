@@ -35,6 +35,8 @@ Record full_claim()
     r.target_ltsm = "passage_0";
     r.action_json = R"({"op":"cross","door":{"node":"door_27"}})";
     r.source = "self";
+    r.request = "¿hay luz en room_2?";   // a claim never carries these; set here only to pin the codec
+    r.fixes = "20261017-3";
     r.t0 = 1792238400123ULL;
     r.t1 = 1792238460456ULL;
     r.room = "room_1";
@@ -82,6 +84,8 @@ void test_absent_stays_absent()
     r.settled = false;
     r.scene_pre.reset();
     r.scene_post.reset();
+    r.request.clear();
+    r.fixes.clear();
     r.pre = {Fact{.node = "door_27", .type = "door", .ltsm_id = "", .values = {{"x", 1.0}}}};
     const QJsonObject j = to_json(r);
     CHECK(not j.contains("promised"));
@@ -90,6 +94,7 @@ void test_absent_stays_absent()
     CHECK(not j.contains("serial_start") and not j.contains("serial_end"));
     CHECK(not j.contains("room_after") and not j.contains("t_post") and not j.contains("settled"));
     CHECK(not j.contains("scene_pre") and not j.contains("scene_post"));
+    CHECK(not j.contains("request") and not j.contains("fixes"));
     CHECK(j["mission_key"].toString() == "m12");
     const QJsonObject f = j["pre"].toArray().at(0).toObject();
     CHECK(not f["values"].toObject().contains("door_open_prob"));

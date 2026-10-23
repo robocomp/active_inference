@@ -32,6 +32,10 @@
  * each journal poll and each on_events call, never before the first journal poll; suspended after owner_lost until
  * the next journal poll. An unknown room (current_room() == "") never splits it.
  *
+ * Provenance (2026-10-23): a human mission's IR may carry `request` (the person's words) and `fixes` (the controller key
+ * of the failed mission it repairs). Both are copied onto the mission record; `fixes` is resolved to that mission's EM
+ * id through the keys seen in THIS controller epoch (keys restart with the controller), and left "" when unknown.
+ *
  * Back-references (finding 6): mission_key = the journal's mission field of the opening entry; serial_start /
  * serial_end = the serials of the journal entries that opened / closed the record, absent when EM did it.
  *
@@ -56,11 +60,13 @@
 #include <cmath>
 #include <cstdint>
 #include <functional>
+#include <map>
 #include <optional>
 #include <ranges>
 #include <span>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include <QJsonDocument>
@@ -89,6 +95,13 @@ inline QJsonObject parse_object(const std::string& text)
 {
     const QJsonDocument d = QJsonDocument::fromJson(QByteArray(text.data(), qsizetype(text.size())));
     return d.isObject() ? d.object() : QJsonObject{};
+}
+
+/// A mission's provenance from its IR text: {request, fixes key}; "" for each one absent, and for a plain-text command.
+inline std::pair<std::string, std::string> provenance(const std::string& ir_text)
+{
+    const QJsonObject o = parse_object(ir_text);
+    return {o["request"].toString().toStdString(), o["fixes"].toString().toStdString()};
 }
 
 inline std::string compact(const QJsonValue& v)
@@ -143,6 +156,7 @@ public:
             close_all("lost", now_ms);
             epoch_ = w.epoch;
             last_seen_ = 0;
+            mission_ids_.clear();           // the new run reuses the keys (m1, m2, …)
         }
         else
         {
@@ -228,6 +242,7 @@ private:
     std::uint64_t now_ = 0;         // EM time of the current call
     bool primed_ = false, owner_present_ = true;
     std::uint64_t epoch_ = 0, last_seen_ = 0;
+    std::map<std::string, std::string, std::less<>> mission_ids_;   // this epoch: controller mission key -> EM id
     std::string drive_mode_ = "affordances_only";   // R9
 
     bool self_driving() const { return drive_mode_ == "affordances_only" or drive_mode_ == "command"; }
@@ -344,7 +359,12 @@ private:
             o.rec.t0 = e.t_ms;
             o.rec.mission_key = e.mission;
             o.rec.serial_start = e.serial;
+            const auto [request, fixes] = builder_detail::provenance(e.text);
+            o.rec.request = request;
+            if (const auto it = mission_ids_.find(fixes); not fixes.empty() and it != mission_ids_.end())
+                o.rec.fixes = it->second;
             open_record(std::move(o));
+            if (not e.mission.empty()) mission_ids_[e.mission] = human_mission(e.mission)->rec.id;
             break;
         }
         case K::MissionEnd:
