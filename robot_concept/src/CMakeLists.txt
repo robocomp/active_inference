@@ -38,3 +38,12 @@ LIST(APPEND SOURCES
 # sizeof(std::optional<Eigen::Transform>) vs libdsr's 144 → get_transformation_matrix overruns the
 # caller's stack slot (stack smash) or misaligns it (SIGBUS). libdsr uses default Eigen alignment; match it.
 add_definitions(-O3 -fmax-errors=1 -fno-char8_t)
+
+# ── mount_overlay_test ────────────────────────────────────────────────────────
+# Pure functions of the mount overlay (parse, world check, nominal∘correction, inverse, format).
+# Header-only + Eigen, no DSR. EXCLUDE_FROM_ALL. Build and run with:
+#   make -C build mount_overlay_test && bin/mount_overlay_test
+add_executable(mount_overlay_test EXCLUDE_FROM_ALL ../tests/mount_overlay_test.cpp)
+target_include_directories(mount_overlay_test PRIVATE ${CMAKE_CURRENT_LIST_DIR})
+target_link_libraries(mount_overlay_test Eigen3::Eigen)
+set_target_properties(mount_overlay_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../bin)
