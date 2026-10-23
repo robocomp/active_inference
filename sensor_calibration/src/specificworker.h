@@ -17,6 +17,7 @@
 
 #include "../../common/agent_presence_coordinator/agent_presence_coordinator.h"
 #include "../../common/concept_presence/concept_presence.h"   // rc::presence::ConceptProtocol (SHARED)
+#include "../../common/sensor_calib/trajectory_harvester.h"
 #include "sensor_inputs.h"                                         // the input layer (plain-data outputs)
 
 class SpecificWorker : public GenericWorker
@@ -61,6 +62,10 @@ private:
     std::atomic<bool> shutting_down_{false};
 
     sc::InputsConfig inputs_cfg_;                  // [Inputs] section of the config
+    sc::calib::HarvesterConfig harvester_cfg_;     // [Harvester] section
+    std::unique_ptr<sc::calib::TrajectoryHarvester> harvester_;
+    long npairs_logged_ = 0;
+    std::int64_t harvester_log_ms_ = 0;            // wall clock of the last summary log
     std::unique_ptr<sc::SensorInputs> inputs_;     // created lazily on the first Operating tick (main thread)
 
     rc::presence::ConceptProtocol presence_protocol_;

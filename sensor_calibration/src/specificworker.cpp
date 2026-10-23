@@ -1,4 +1,5 @@
 #include "specificworker.h"
+#include <chrono>
 
 #include "../../common/agent_exit/terminal_exit.h"        // rc::agent::terminal_exit (SHARED)
 #include "../../common/config_report/config_read.h"       // rc::cfg::Reader (SHARED)
@@ -33,6 +34,17 @@ SpecificWorker::SpecificWorker(const ConfigLoader& configLoader, TuplePrx tprx, 
         inputs_cfg_.stall_camera_ms  = cfg.i("Inputs.stall_camera_ms", inputs_cfg_.stall_camera_ms, "camera stream declared stalled after this silence (ms)");
         inputs_cfg_.stall_imu_ms     = cfg.i("Inputs.stall_imu_ms", inputs_cfg_.stall_imu_ms, "IMU stream declared stalled after this silence (ms)");
         inputs_cfg_.log_period_ms    = cfg.i("Inputs.log_period_ms", inputs_cfg_.log_period_ms, "stream-rate log period (ms)");
+    }
+
+    {
+        const rc::cfg::Reader cfg(configLoader, "sensor_calibration");
+        auto& h = harvester_cfg_;
+        h.keyframe_spacing_s = cfg.d("Harvester.keyframe_spacing_s", h.keyframe_spacing_s, "a Helios sweep becomes a keyframe at most this often (s): a COMPUTE budget, the posterior does not depend on it");
+        h.ring_span_s        = cfg.d("Harvester.ring_span_s", h.ring_span_s, "time the keyframe ring holds before pairs are committed (s): compute budget");
+        h.max_keyframes      = std::size_t(cfg.i("Harvester.max_keyframes", int(h.max_keyframes), "hard bound on the keyframe ring"));
+        h.reg_sigma_m        = cfg.d("Harvester.reg_sigma_m", h.reg_sigma_m, "scan-registration noise floor per pair row (m)");
+        h.odo_sigma_per_m    = cfg.d("Harvester.odo_sigma_per_m", h.odo_sigma_per_m, "odometry error per metre travelled between the two keyframes (m/m)");
+        h.odo_sigma_per_rad  = cfg.d("Harvester.odo_sigma_per_rad", h.odo_sigma_per_rad, "odometry translation error per radian rotated between the two keyframes (m/rad)");
     }
 
     states["Waiting"] = std::make_unique<GRAFCETStep>("Waiting", period,
@@ -138,7 +150,27 @@ void SpecificWorker::compute()
     if (not inputs_)
         inputs_ = std::make_unique<sc::SensorInputs>(G, inputs_cfg_);
     inputs_->poll();
-    // Task 2.3 (trajectory harvester) takes inputs_->take_*() here; the queues are bounded until then.
+    if (not harvester_)
+        harvester_ = std::make_unique<sc::calib::TrajectoryHarvester>(harvester_cfg_);
+    // Odometry first (piecewise-constant over source_ts_ms deltas, inside the harvester), then the sweeps.
+    for (const auto& o : inputs_->take_odometry())
+        harvester_->add_odometry(o.source_ts_ms, o.adv, o.side, o.rot);
+    for (const auto& l : inputs_->take_lidar())
+        if (l.sensor == "helios")
+            harvester_->add_keyframe(l.stamp_ms, inputs_->stalled("helios") or inputs_->any_stalled());
+    // Cameras / IMU: not consumed by the trajectory part yet; drain so the bounded queues do not just drop-oldest.
+    (void)inputs_->take_images(); (void)inputs_->take_imu();
+    // Phase 4.4 attaches scan registration to these pairs; for now the agent only reports them (<= once / 10 s).
+    npairs_logged_ += long(harvester_->take_pairs().size());
+    if (const auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count(); now - harvester_log_ms_ >= 10000)
+    {
+        harvester_log_ms_ = now;
+        const auto e = harvester_->close_episode();
+        qInfo().noquote() << QString("[Harvester] keyframes %1 (stalled-dropped %2)  pairs %3 (total %4)  info(dx,dy,psi)=(%5, %6, %7)")
+                .arg(e.keyframes).arg(e.dropped_stalled).arg(e.pairs).arg(npairs_logged_)
+                .arg(e.info(0, 0), 0, 'g', 3).arg(e.info(1, 1), 0, 'g', 3).arg(e.info(2, 2), 0, 'g', 3);
+    }
     fps.print("sensor_calibration compute", 3000);
 }
 

@@ -6,6 +6,7 @@ LIST(APPEND LIBS
   ai_common::presence     # agent presence monitor + coordinator + concept_presence
   ai_common::core         # header-only: config_report (rc::cfg::Reader), ...
   ai_common::media        # zero-copy media plane (domain 7): subscriber factories
+  ai_common::sensor_calib # trajectory harvester (pure Eigen)
 )
 
 LIST(APPEND SOURCES
