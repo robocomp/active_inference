@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <expected>
+#include <format>
 #include <map>
 #include <optional>
 #include <queue>
@@ -106,5 +107,73 @@ inline std::vector<std::string> route(const Topology& t, std::string_view from_r
         out.push_back(t.passages[prev.at(r).passage].id);
     std::ranges::reverse(out);
     return out;
+}
+// ── tool answers (text the model reads; PURE) ─────────────────────────────────────────────────────────────────
+// The other end of a passage, as seen from `room`; empty when `room` is neither end.
+inline std::string topo_other_room(const TopoPassageInfo& p, std::string_view room)
+{
+    return p.room_a == room ? p.room_b : p.room_b == room ? p.room_a : std::string{};
+}
+inline std::string topo_door_words(const TopoPassageInfo& p)
+{
+    return std::format("{} <-> {} ({}), crossed {}x, passable {:.0f}%{}", p.room_a, p.room_b, p.id, p.crossings,
+                       100 * p.p_pass(), p.live_door ? std::format(", live door {}", *p.live_door) : std::string{});
+}
+
+// known_rooms(): every remembered room (marking the live ones) and every passage with its two rooms.
+inline std::string answer_known_rooms(const Topology& t, std::string_view current)
+{
+    if (t.rooms.empty()) return "No rooms are remembered yet.";
+    std::string o = "Remembered rooms:";
+    for (const auto& r : t.rooms)
+        o += std::format(" {}{}{};", r.name, r.name == current ? " (you are here)" : "", r.live and r.name != current ? " (live)" : "");
+    o += t.passages.empty() ? "\nNo passages between them are remembered." : "\nPassages:";
+    for (const auto& p : t.passages) o += "\n- " + topo_door_words(p);
+    return o;
+}
+
+// route_to(room): the passages in order from the current room. from == to and unreachable are told apart HERE
+// because route() returns {} for both.
+inline std::string answer_route_to(const Topology& t, std::string_view current, std::string_view to)
+{
+    if (to == current) return std::format("You are already in {}.", to);
+    if (std::ranges::none_of(t.rooms, [&](const auto& r) { return r.name == to; }))
+        return std::format("No remembered room is called '{}'. Call known_rooms to see the names.", to);
+    const auto ids = route(t, current, to);
+    if (ids.empty())
+        return std::format("No remembered route from {} to {}: no chain of passages joins them.", current, to);
+    std::string o = std::format("Route from {} to {}, {} passage(s) in order:", current, to, ids.size());
+    std::string at(current);
+    for (const auto& id : ids)
+    {
+        const auto it = std::ranges::find(t.passages, id, &TopoPassageInfo::id);
+        const auto next = topo_other_room(*it, at);
+        o += std::format("\n- cross passage:{}@{} expect={}{}", id, at, next,
+                         it->live_door ? std::format(" (live door there: {})", *it->live_door) : std::string{});
+        at = next;
+    }
+    return o;
+}
+
+// The STATE line: `remembered rooms: room_2 (behind door_1, crossed 3x), room_3 (...)`; empty when nothing is remembered
+// besides the current room.
+inline std::string remembered_rooms_line(const Topology& t, std::string_view current)
+{
+    std::string o;
+    for (const auto& r : t.rooms)
+    {
+        if (r.name == current) continue;
+        std::string how;
+        if (const auto ids = route(t, current, r.name); not ids.empty())
+        {
+            const auto it = std::ranges::find(t.passages, ids.front(), &TopoPassageInfo::id);
+            how = std::format("{}{}, crossed {}x", ids.size() > 1 ? std::format("{} passages away, first ", ids.size()) : std::string{},
+                              it->live_door ? "behind " + *it->live_door : std::string("via ") + it->id, it->crossings);
+        }
+        else
+            how = "no known route";
+        o += std::format("{}{} ({})", o.empty() ? "" : ", ", r.name, how);
+    }
+    return o.empty() ? o : "remembered rooms: " + o;
 }
 }   // namespace rc::chat

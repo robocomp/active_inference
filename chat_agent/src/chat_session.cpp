@@ -26,6 +26,7 @@
 #include "image_prep.h"
 #include "look_messages.h"
 #include "sim_door.h"
+#include "topology.h"
 
 namespace rc::chat
 {
@@ -479,6 +480,15 @@ QJsonArray ChatSession::tools_json() const
         "is in the current room, its distance and bearing; or that it has not been perceived. Read-only.",
         QJsonObject{{"name", QJsonObject{{"type", "string"}, {"description", "an object name or class"}}}},
         QJsonArray{"name"}));
+    tools.append(tool_def("known_rooms",
+        "The rooms the robot remembers (long-term memory), which are live now, and the passages (doorways) joining them: "
+        "their two rooms, live door, how often crossed and how reliably passable. Read-only.",
+        QJsonObject{}, {}));
+    tools.append(tool_def("route_to",
+        "The remembered route from the CURRENT room to a remembered room: the passages to cross, in order. Read-only; "
+        "it does not move the robot (to go, plan a mission with the passages it lists).",
+        QJsonObject{{"room", QJsonObject{{"type", "string"}, {"description", "a remembered room name, e.g. room_3"}}}},
+        QJsonArray{"room"}));
     tools.append(tool_def("agents",
         "The robot's software agents: which are running, their state (Operating / Degraded / Waiting), uptime, CPU "
         "and memory of each. Read-only.",
@@ -656,6 +666,9 @@ void ChatSession::ask_model(bool followup, bool offer_tools)
     }
     turn_doors_ = digest_.facts.doors;
     if (const auto m = mission_now_line(mission_progress_); m.has_value()) state_extra_ += q(*m) + "\n";
+    if (const auto topo = remembered_topology(); topo.has_value())
+        if (const auto line = rc::chat::remembered_rooms_line(*topo, digest_.facts.room); not line.empty())
+            state_extra_ += q(line) + "\n";
     state_extra_ += q(alive_line(system_.agents())) + "\n";   // the names from the graph, so none are made up
     state_extra_ += QStringLiteral("last move/turn sent from this chat: ") +
                     (last_relative_.empty() ? QStringLiteral("none") : q(explain_relative_command(last_relative_))) + "\n";
@@ -808,6 +821,13 @@ QString ChatSession::answer_query(const QString& name, const QJsonObject& args)
         out = q(answer_find_objects(digest_.objects, args.value("subtype").toString().toStdString(), digest_.facts.room));
     else if (name == "where_is")
         out = q(answer_where_is(digest_.objects, args.value("name").toString().toStdString(), digest_.facts.room));
+    else if (name == "known_rooms" or name == "route_to")
+    {
+        const auto topo = remembered_topology();
+        if (not topo.has_value()) out = QStringLiteral("No remembered topology is published (is ltsm_agent running?).");
+        else if (name == "known_rooms") out = q(rc::chat::answer_known_rooms(*topo, digest_.facts.room));
+        else out = q(rc::chat::answer_route_to(*topo, digest_.facts.room, args.value("room").toString().trimmed().toStdString()));
+    }
     else if (name == "agents")
         out = q(answer_agents(system_.agents()));
     else if (name == "sensors")
@@ -823,6 +843,19 @@ QString ChatSession::answer_query(const QString& name, const QJsonObject& args)
     else return {};
     log_.write("query", QJsonObject{{"tool", name}, {"args", args}, {"result", out}});
     return out.trimmed();
+}
+
+std::optional<rc::chat::Topology> ChatSession::remembered_topology() const
+{
+    // ltsm_agent's summary of its own (domain 2) memory, published on the live graph (ltsm_agent/src/topology_publish.h).
+    if (not G_) return std::nullopt;
+    const auto node = G_->get_node("ltsm_topology");
+    if (not node.has_value()) return std::nullopt;
+    const auto json = G_->get_attrib_by_name<ltsm_topology_att>(node.value());
+    if (not json.has_value()) return std::nullopt;
+    auto t = rc::chat::decode_topology(json.value());
+    if (not t.has_value()) return std::nullopt;
+    return std::move(t.value());
 }
 
 std::optional<rc::em::Store> ChatSession::em_store() const

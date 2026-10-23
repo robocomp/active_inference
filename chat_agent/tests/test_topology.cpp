@@ -71,5 +71,25 @@ int main()
         t.passages = {info("direct", "a", "c", 1, 9), info("h1", "a", "b", 9, 1), info("h2", "b", "c", 9, 1)};
         assert((route(t, "a", "c") == std::vector<std::string>{"h1", "h2"}));
     }
+    // tool answers
+    {
+        Topology t;
+        t.rooms = {{"room_1", true}, {"room_2", false}, {"room_3", false}, {"room_9", false}};
+        t.passages = {info("p0", "room_1", "room_2"), info("p1", "room_2", "room_3")};
+        t.passages[0].live_door = "door_1";
+        t.passages[0].crossings = 3;
+        assert(answer_route_to(t, "room_1", "room_1") == "You are already in room_1.");
+        assert(answer_route_to(t, "room_1", "room_9").starts_with("No remembered route"));
+        assert(answer_route_to(t, "room_1", "room_7").starts_with("No remembered room"));
+        const auto r = answer_route_to(t, "room_1", "room_3");
+        assert(r.contains("cross passage:p0@room_1 expect=room_2 (live door there: door_1)"));
+        assert(r.contains("cross passage:p1@room_2 expect=room_3"));
+        assert(answer_known_rooms(t, "room_1").contains("room_1 (you are here)"));
+        assert(answer_known_rooms(Topology{}, "room_1").starts_with("No rooms"));
+        const auto line = remembered_rooms_line(t, "room_1");
+        assert(line.starts_with("remembered rooms: room_2 (behind door_1, crossed 3x), room_3 (2 passages away"));
+        assert(line.contains("room_9 (no known route)"));
+        assert(remembered_rooms_line(Topology{}, "room_1").empty());
+    }
     std::println("test_topology: ok");
 }

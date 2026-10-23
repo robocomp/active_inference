@@ -70,6 +70,7 @@
 #include "mission_watch.h"
 #include "system_reader.h"
 #include "ollama_client.h"
+#include "topology.h"
 #include "world_digest.h"
 
 namespace rc::chat
@@ -150,6 +151,8 @@ private:
     void track_object_changes();
     /// find_objects / where_is → the tool-result text; "" if `name` is not a query tool.
     QString answer_query(const QString& name, const QJsonObject& args);
+    /// ltsm_agent's published memory summary (node ltsm_topology); nullopt when absent or unreadable.
+    std::optional<rc::chat::Topology> remembered_topology() const;
     /// look(camera?) → the tool-result text; on success the JPEG is left in look_jpeg_ for the tool message.
     QString do_look(const QJsonObject& args);
     /// show(name, args?, live?) / draw(script, title, live?) → the tool-result text; the picture goes to the canvas.

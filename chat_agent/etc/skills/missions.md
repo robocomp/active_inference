@@ -24,6 +24,7 @@ Steps:
 Any step: retry=N, on_fail=skip|abort.
 Predicates: explored(ROOM)>=p, in_room(ROOM), door_open(DOOR)<p.
 bind=NAME works on cross only; it names the room you arrive in; use it later as $NAME (the room may not exist yet).
+Rooms the robot remembers but cannot see: call route_to(room); it lists the passages in order. Write the first leg as cross door_N (the live door it names), every later leg as cross passage:ID@ROOM expect=NEXT_ROOM retry=2, ROOM being the room that leg starts in.
 Way back: cross the same door with expect=ROOM_YOU_CAME_FROM, or go_to anchor:NAME.
 
 ```
@@ -57,4 +58,9 @@ mission "visit two rooms, report each, return"
   cross door_2 retry=2 bind=b on_fail=skip
   report "what is in the second room"
   go_to anchor:home
+```
+```
+mission "go to room_3, two rooms away"
+  cross door_1 expect=room_2 retry=2
+  cross passage:passage_1@room_2 expect=room_3 retry=2
 ```

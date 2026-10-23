@@ -123,6 +123,12 @@ def tools():
         t("where_is", "Where is an object: give its name (e.g. chair_1) or its class (e.g. refrigerator). Returns its "
           "room and, if it is in the current room, its distance and bearing; or that it has not been perceived. "
           "Read-only.", {"name": {"type": "string", "description": "an object name or class"}}, ["name"]),
+        t("known_rooms", "The rooms the robot remembers (long-term memory), which are live now, and the passages "
+          "(doorways) joining them: their two rooms, live door, how often crossed and how reliably passable. "
+          "Read-only.", {}, []),
+        t("route_to", "The remembered route from the CURRENT room to a remembered room: the passages to cross, in "
+          "order. Read-only; it does not move the robot (to go, plan a mission with the passages it lists).",
+          {"room": {"type": "string", "description": "a remembered room name, e.g. room_3"}}, ["room"]),
         t("agent_control", "Start, stop or restart one of the robot's software agents (room_concept, residual_concept, "
           "retina, door_concept, table_concept, chair_concept, bottle_concept, cabinet_concept, hood_concept, "
           "human_concept, refrigerator_concept, controller, ltsm_agent, episodic_agent). When the person asks to start, "
@@ -384,6 +390,13 @@ CASES = [
     ("where is the fridge", [], "none", "where is the fridge?",
      lambda n, a, c: (n == "where_is" and re.search("fridge|refrigerator", str(a.get("name", "")).lower()) is not None)
      or (n is None and re.search(r"not (yet )?(perceived|seen)|haven't (perceived|seen)|have not (perceived|seen)", c.lower()) is not None)),
+    # long-term memory (ltsm_topology): rooms the robot remembers and the route to one
+    ("passages remembered", [], "none", "list the rooms and passages in your long-term memory",
+     lambda n, a, c: n == "known_rooms"),
+    ("route to room_3", [], "none", "how do I get to room_3?",
+     lambda n, a, c: n == "route_to" and "room_3" in str(a.get("room", "")).lower()),
+    ("ruta a room_3 (es)", [], "none", "\u00bfc\u00f3mo llego a la habitaci\u00f3n room_3?",
+     lambda n, a, c: n == "route_to" and "room_3" in str(a.get("room", "")).lower()),
     # look(): appearance / "what do you see" goes to the camera; counts stay with the STATE (the chairs case above).
     ("what do you see", [], "none", "what do you see?",
      lambda n, a, c: n == "look" and str(a.get("camera", "front")) in ("front", "")),
