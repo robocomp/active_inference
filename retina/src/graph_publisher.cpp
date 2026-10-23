@@ -22,6 +22,7 @@
 #include <print>
 #include <sstream>
 #include <unordered_map>
+#include <optional>
 #include <utility>
 
 #include <QtGlobal>
@@ -41,10 +42,10 @@ void GraphPublisher::publish(const RGBDData& rgbd, const Mat::RTMat& room_T_zed,
 }
 
 void GraphPublisher::publish_ricoh(const std::vector<BearingDetection>& detections, std::uint64_t frame_ts_ms,
-                                   const std::vector<SegDetection>* segs)
+                                   const std::vector<SegDetection>* segs, const std::vector<float>& looked_windows)
 {
     if (ensure_node("masks_ricoh", "Plum", masks_ricoh_ready_, /*relayout=*/true, "ricoh"))
-        upload_masks_ricoh(detections, frame_ts_ms, segs);
+        upload_masks_ricoh(detections, frame_ts_ms, segs, looked_windows);
 }
 
 bool GraphPublisher::ensure_node(const char* name, const char* color, bool& ready, bool relayout,
@@ -324,6 +325,7 @@ struct MaskArrays
     std::vector<float> pixels_xy;
     std::vector<float> pixel_offsets{0.0f};
     std::vector<float> has_depth, source, azimuth, depth_var;
+    std::optional<std::vector<float>> azimuth_windows;   // ricoh only: mask_azimuth_windows (set => written, even if empty)
     std::vector<float> color_rgb, color_var, color_neff;
     std::vector<float> motion_dotd, motion_bias, motion_var, trunc_frac, centroid_radius, range;
     std::vector<float> cam_twist{0, 0, 0, 0, 0, 0};
@@ -351,6 +353,8 @@ void write_mask_node(DSR::DSRGraph& G, const RetinaParams& params, DSR::Node& no
     G.add_or_modify_attrib_local<mask_source_att>(node, m.source);
     G.add_or_modify_attrib_local<mask_azimuth_att>(node, m.azimuth);
     G.add_or_modify_attrib_local<mask_depth_var_att>(node, m.depth_var);
+    if (m.azimuth_windows)
+        G.add_or_modify_attrib_local<mask_azimuth_windows_att>(node, *m.azimuth_windows);
     if (params.MASK_COLOR_ENABLED)
     {
         G.add_or_modify_attrib_local<mask_color_rgb_att>(node, m.color_rgb);
@@ -925,7 +929,7 @@ void GraphPublisher::upload_masks(const RGBDData& rgbd, const Mat::RTMat& room_T
 // the RICOH frame (derived by the caller through ricoh<-robot, never through the room); bearing-only slices
 // publish NaN geometry plus a RICOH-frame azimuth in mask_azimuth. All attribute arrays stay 1-to-1.
 void GraphPublisher::upload_masks_ricoh(const std::vector<BearingDetection>& detections, std::uint64_t frame_ts_ms,
-                                        const std::vector<SegDetection>* segs)
+                                        const std::vector<SegDetection>* segs, const std::vector<float>& looked_windows)
 {
     auto node_opt = G_->get_node("masks_ricoh");
     if (!node_opt.has_value())
@@ -1031,6 +1035,7 @@ void GraphPublisher::upload_masks_ricoh(const std::vector<BearingDetection>& det
         }
     }
     out.labels = labels_joined.str();
+    out.azimuth_windows = looked_windows;   // same update as the masks: a consumer never sees masks without their windows
     ricoh_hover_ = hover;
     write_mask_node(*G_, params_, node, out);
     G_->update_node(std::move(node));

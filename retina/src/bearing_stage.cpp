@@ -4,6 +4,7 @@
 #include <dsr/api/dsr_camera_api.h>
 
 #include <Eigen/Geometry>
+#include <algorithm>
 #include <cmath>
 #include <utility>
 
@@ -22,13 +23,49 @@ void BearingStage::run(const PerceptionFrame& in, PerceptionResult& out)
     // Depends on the seg stage having filled masks; always emit a (possibly empty) bearings vector so a
     // consumer can tell "ran, none" from "didn't run".
     out.bearings = std::vector<BearingDetection>{};
-    if (!out.masks || out.masks->empty() || in.rgbd.bgr.empty() || !graph_)
+    out.looked_azimuth_windows.clear();
+    if (!out.masks || in.rgbd.bgr.empty() || !graph_)
         return;
 
     if (!camera_api_)
         if (const auto rn = graph_->get_node("ricoh"); rn.has_value())
             camera_api_ = graph_->get_camera_api(rn.value());
     if (!camera_api_)
+        return;
+
+    // Which azimuths did the detector run on THIS frame? Same column->ray->azimuth chain as the bearings below (graph
+    // intrinsics + live az-tune), at the strip edges. Empty strips_looked = every strip. Never a single 2*pi window
+    // (the consumer reads from==to as width 0), so a full frame is sent as >= 3 adjacent windows.
+    {
+        const int cols = in.rgbd.bgr.cols;
+        const int n    = std::max(out.n_strips, 1);
+        std::vector<std::pair<int, int>> spans;   // [c0,c1) columns
+        if (out.strips_looked.empty() or n < 3)
+        {
+            for (int k = 0; k < 3; ++k)
+                spans.emplace_back(k * cols / 3, (k + 1) * cols / 3);
+        }
+        else
+            for (const int st : out.strips_looked)
+                if (st >= 0 and st < n)
+                    spans.emplace_back(st * cols / n, (st + 1) * cols / n);
+        const double row_h = in.rgbd.bgr.rows * 0.5;
+        const auto az_at = [&](int col) -> float
+        {
+            const Eigen::Vector3d r = camera_api_->ray_from_pixel(static_cast<double>(col), row_h);
+            const float a = std::atan2(static_cast<float>(r.y()), static_cast<float>(r.x()))
+                          + static_cast<float>(in.azimuth_tune_rad);
+            return std::atan2(std::sin(a), std::cos(a));
+        };
+        for (const auto& [c0, c1] : spans)
+        {
+            float a0 = az_at(c0), a1 = az_at(c1);
+            const float d = std::atan2(std::sin(a1 - a0), std::cos(a1 - a0));   // signed width, strip < pi wide
+            if (d < 0.0f) std::swap(a0, a1);                                    // column order may run CW: keep from->to CCW
+            out.looked_azimuth_windows.insert(out.looked_azimuth_windows.end(), {a0, a1});
+        }
+    }
+    if (out.masks->empty())
         return;
 
     const double row_horizon = in.rgbd.bgr.rows * 0.5;   // horizon row → horizontal bearing

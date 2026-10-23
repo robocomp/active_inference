@@ -72,6 +72,10 @@ struct PerceptionResult
     // is a plain data race on its std::vector. The result already crosses the thread boundary safely,
     // so the window travels with it.
     std::vector<int>                                          strips_looked;
+    int                                                       n_strips = 0;   // strips the panorama is split into (SegStage, 360 only)
+    // Camera-frame azimuth intervals [from,to] x K (rad, CCW) of the strips the detector ran (BearingStage); published
+    // as mask_azimuth_windows so a consumer can tell "not looked at" from "looked, saw nothing". Empty = unknown.
+    std::vector<float>                                        looked_azimuth_windows;
     std::optional<std::vector<BearingDetection>>              bearings;   // ricoh: RICOH-frame bearing per mask
     std::optional<std::vector<SegDetection>>                  refined_masks;   // SAM2-sharpened masks (subset of `masks`)
     bool                                                      refined_fresh = false;
