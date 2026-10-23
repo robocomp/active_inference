@@ -211,6 +211,48 @@ int main()
         for (int k = 0; k < 3; ++k) CHECK(std::abs(m(k) - t(k)) < 2.0 * s(k), "fused: dof %d err %.5f sigma %.5f", k, m(k) - t(k), s(k));
     }
 
+    // ── 5b. chord along the fused heading: a 3 rad arc (r = 1 m) with wheels over-reporting rotation by 41 % ──
+    {
+        auto arc = [&](bool gyro) {
+            TrajectoryHarvester h{cfg_of(0.5)};
+            for (int ms = 0; ms <= 6000; ms += 50)
+            {
+                h.add_odometry(T0 + ms, ms < 6000 ? 0.5 : 0.0, 0.0, ms < 6000 ? 0.5 * 1.41 : 0.0);
+                if (gyro) h.add_gyro(T0 + ms, ms < 6000 ? 0.5 : 0.0);
+                if (ms % 100 == 0) h.add_keyframe(T0 + ms, false);
+            }
+            h.finish();
+            return h.take_pairs();
+        };
+        const auto fused = arc(true), wheel = arc(false);
+        auto truth = [](const Pair& p, double& f, double& l)
+        {   // x = sin(th), y = 1 - cos(th), th = 0.5 t; chord from a to b in a's frame, on the midpoint heading
+            const double ta = 0.5 * tsec(p.stamp_a_ms), tb = 0.5 * tsec(p.stamp_b_ms);
+            const double cx0 = std::sin(tb) - std::sin(ta), cy0 = std::cos(ta) - std::cos(tb);
+            const double c = std::cos(ta), sn = std::sin(ta), cx = c * cx0 + sn * cy0, cy = -sn * cx0 + c * cy0;
+            const double thm = 0.5 * (tb - ta);
+            f = cx * std::cos(thm) + cy * std::sin(thm); l = -cx * std::sin(thm) + cy * std::cos(thm);
+        };
+        int n_fused = 0, n_wheel_bad = 0;
+        for (const auto& p : fused)
+        {
+            double f, l; truth(p, f, l);
+            const double e = std::hypot(p.d_fwd - f, p.d_lat - l);
+            std::printf("arc fused: dth %.3f chord (%.4f %.4f) true (%.4f %.4f) err %.4f  sigma %.4f\n", p.dth, p.d_fwd, p.d_lat, f, l, e, p.chord_sigma);
+            CHECK(e < 2.0 * p.chord_sigma + 1e-9, "fused chord err %.4f > 2 sigma %.4f", e, 2 * p.chord_sigma);
+            ++n_fused;
+        }
+        for (std::size_t i = 0; i < wheel.size() and i < fused.size(); ++i)
+        {
+            double f, l; truth(wheel[i], f, l);
+            const double e = std::hypot(wheel[i].d_fwd - f, wheel[i].d_lat - l);
+            std::printf("arc wheel: chord err %.4f (fused-run sigma %.4f)\n", e, fused[i].chord_sigma);
+            if (wheel[i].stamp_a_ms == fused[i].stamp_a_ms and wheel[i].stamp_b_ms == fused[i].stamp_b_ms and e > 2.0 * fused[i].chord_sigma) ++n_wheel_bad;
+        }
+        CHECK(n_fused > 0, "no arc pairs");
+        CHECK(n_wheel_bad > 0, "the wheel-heading chord also passed: test is toothless");
+    }
+
     // ── 6. a stalled interval contributes nothing ──
     {
         Opt o; o.stall_from = 3.0; o.stall_to = 6.0;

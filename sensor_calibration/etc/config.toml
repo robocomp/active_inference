@@ -59,7 +59,7 @@ stall_imu_ms = 1000
 log_period_ms = 10000    # stream rates logged once per this period
 
 [Harvester]
-keyframe_spacing_s = 0.5   # COMPUTE budget (decimator); the posterior does not depend on it (trajectory_harvester_test)
+keyframe_spacing_s = 0.5   # COMPUTE budget (decimator), 0.5 s is the UPPER BOUND: 0.1-0.5 s leaves sigma stable, 1.0 s loses hairpin rotation (trajectory_harvester_test)
 ring_span_s = 30.0         # COMPUTE budget: pairs are committed when the ring holds more than this
 max_keyframes = 120
 reg_sigma_m = 0.01         # ASSUMED scan-registration floor, to be replaced by Phase 0 data

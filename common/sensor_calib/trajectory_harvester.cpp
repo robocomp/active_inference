@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <optional>
 #include <utility>
 
 namespace sc::calib
@@ -131,6 +132,49 @@ bool TrajectoryHarvester::add_keyframe(std::int64_t stamp, bool stalled)
 
 void TrajectoryHarvester::finish() { while (ring_.size() >= 2) commit(true); ring_.clear(); }
 
+// Wheel speed integrated along the heading fused PER ODOMETRY INTERVAL (precision weighting of wheel and gyro
+// rotation over that interval), in the frame of the heading at t0. ok=false when the odometry history does not cover it.
+TrajectoryHarvester::Chord TrajectoryHarvester::integrate_chord(std::int64_t t0, std::int64_t t1) const
+{
+    Chord c;
+    if (hist_.empty() or t0 < hist_.front().ts or t1 <= t0) return c;
+    auto gyro_angle = [this](std::int64_t t) -> std::optional<double>
+    {
+        if (gyro_.empty() or t < gyro_.front().ts) return std::nullopt;
+        const auto g = std::upper_bound(gyro_.begin(), gyro_.end(), t, [](std::int64_t q, const GNode& n) { return q < n.ts; }) - 1;
+        return g->angle + g->rate * double(t - g->ts) * 1e-3;
+    };
+    auto it = std::upper_bound(hist_.begin(), hist_.end(), t0, [](std::int64_t t, const Node& n) { return t < n.ts; }) - 1;
+    double th = 0.0;
+    for (std::int64_t s0 = t0; s0 < t1; ++it)
+    {
+        const std::int64_t s1 = (it + 1 == hist_.end()) ? t1 : std::min(t1, (it + 1)->ts);
+        const double dt = double(s1 - s0) * 1e-3;
+        if (dt > 0.0)
+        {
+            const double dw = it->rot * dt;
+            double d = dw;
+            const auto g0 = gyro_angle(s0), g1 = gyro_angle(s1);
+            if (g0 and g1)
+            {
+                const double dg = *g1 - *g0;
+                const double vw = std::pow(cfg_.wheel_rot_sigma_rel * dw, 2) + cfg_.wheel_rot_sigma_floor * cfg_.wheel_rot_sigma_floor * dt;
+                const double vg = std::pow(cfg_.gyro_sigma_rel * dg, 2) + cfg_.gyro_sigma_floor * cfg_.gyro_sigma_floor * dt;
+                const double wg = 1.0 / std::max(vg, 1e-12), ww = 1.0 / std::max(vw, 1e-12);
+                d = (dg * wg + dw * ww) / (wg + ww);
+            }
+            const double thm = th + 0.5 * d;
+            c.cx += (it->adv * std::cos(thm) - it->side * std::sin(thm)) * dt;
+            c.cy += (it->adv * std::sin(thm) + it->side * std::cos(thm)) * dt;
+            th += d;
+        }
+        s0 = s1;
+        if (it + 1 == hist_.end()) break;
+    }
+    c.dth = th; c.ok = true;
+    return c;
+}
+
 Pair TrajectoryHarvester::pair_of(const Keyframe& a, const Keyframe& b) const
 {
     const double dtw = b.th - a.th, rot_w = b.rot - a.rot, dt_s = double(b.stamp_ms - a.stamp_ms) * 1e-3;
@@ -144,11 +188,16 @@ Pair TrajectoryHarvester::pair_of(const Keyframe& a, const Keyframe& b) const
         dth = (dtg * wg + dtw * ww) / (wg + ww);
         var_th = 1.0 / (wg + ww);
     }
-    // chord decomposed on the wheel-frame midpoint heading (the frame the wheel x,y live in)
-    const double thm = a.th + 0.5 * dtw;
-    const double cx = b.x - a.x, cy = b.y - a.y;
+    // chord along the FUSED heading (frame of a), decomposed on the fused midpoint heading; wheel fallback if unresolved
+    Chord ch = integrate_chord(a.stamp_ms, b.stamp_ms);
+    double thm = 0.5 * ch.dth, cx = ch.cx, cy = ch.cy;
+    if (not ch.ok)
+    {
+        thm = a.th + 0.5 * dtw; cx = b.x - a.x; cy = b.y - a.y;
+    }
     Pair p = make_pair_from_motion(dth, cx * std::cos(thm) + cy * std::sin(thm), -cx * std::sin(thm) + cy * std::cos(thm),
                                    b.path - a.path, rotated, cfg_);
+    p.chord_sigma = std::hypot(cx, cy) * std::sqrt(var_th);
     p.dth_sigma = std::sqrt(var_th); p.dth_wheel = dtw; p.dth_gyro = dtg;
     p.id_a = a.id; p.id_b = b.id; p.stamp_a_ms = a.stamp_ms; p.stamp_b_ms = b.stamp_ms;
     return p;

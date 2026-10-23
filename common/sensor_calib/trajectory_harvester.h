@@ -38,8 +38,19 @@
  * HEADING (ruling B, "heading as two sensor factors"). dth of a pair is the precision-weighted fusion of the wheel
  * rotation and the gyro (IMU yaw rate integrated piecewise-constant, add_gyro). Each has a variance that grows with
  * the rotation covered plus a floor; Shadow's wheel rotation over-reports ~41 %, so the config gives the wheels a
- * wide relative sigma and the gyro a narrow one. Translation (the chord) comes from the wheels. Without gyro
- * coverage of both keyframes the pair falls back to the wheel rotation alone.
+ * wide relative sigma and the gyro a narrow one. Translation (the chord) is the wheels' speed integrated along the
+ * FUSED heading, fused per odometry interval with the same precision weighting (integrating along the wheel
+ * heading would rotate the chord by the wheel's 41 % over-report and bias the rows); the chord is decomposed on
+ * the fused midpoint heading, and Pair::chord_sigma = |chord| * dth_sigma states its heading-driven uncertainty.
+ * Without gyro coverage the wheel heading is used.
+ *
+ * ASSUMPTIONS TO VERIFY IN PHASE 4 (no code enforces them): (1) the IMU z axis is the body up axis, so
+ * ImuIn::gyro.z is the yaw rate with the same sign as OdometryIn::rot; (2) the Helios capture stamp, the IMU
+ * stamp_ms and the odometry source_ts_ms are on one clock; (3) odometry side/rot sign convention is left = +side,
+ * CCW = +rot, to be pinned against KinematicMount's (fwd, lat) axes.
+ *
+ * KEYFRAME SPACING BUDGET: 0.1-0.5 s leaves the posterior sigma stable (<10 %, trajectory_harvester_test); 0.5 s is
+ * the UPPER BOUND, at 1.0 s a coarse grid loses up to a spacing of hairpin rotation at each end (sigma +18 %).
  *
  * WHEN. Pairs are committed when the ring exceeds its budget (ring_span_s of time or max_keyframes), never at the
  * newest keyframe: a pair touching the newest keyframe may be a turn still in progress, so it stays in the ring
@@ -66,7 +77,7 @@ namespace sc::calib
 struct HarvesterConfig
 {
     // compute budgets
-    double      keyframe_spacing_s = 0.5;     ///< a sweep becomes a keyframe at most this often
+    double      keyframe_spacing_s = 0.5;     ///< a sweep becomes a keyframe at most this often; 0.5 s is the UPPER BOUND of the budget
     double      ring_span_s        = 30.0;    ///< time the ring may hold before pairs are committed
     std::size_t max_keyframes      = 120;     ///< hard memory/compute bound on the ring
     // prior on the mount error (dx, dy) [m] and psi [rad]: same defaults as KinematicMount::Params
@@ -91,7 +102,8 @@ struct Pair
     std::int64_t  stamp_a_ms = 0, stamp_b_ms = 0;
     double dth = 0.0, dth_sigma = 0.0;                 ///< fused rotation a -> b [rad] (unwrapped) and its sigma
     double dth_wheel = 0.0, dth_gyro = 0.0;            ///< the two inputs (dth_gyro = dth_wheel when no gyro)
-    double d_fwd = 0.0, d_lat = 0.0;                   ///< chord on the midpoint heading [m]
+    double d_fwd = 0.0, d_lat = 0.0;                   ///< chord on the (fused) midpoint heading [m]
+    double chord_sigma = 0.0;                          ///< |chord| * dth_sigma [m]
     double path = 0.0, rotated = 0.0;                  ///< odometry path length [m] and sum |rot| [rad]
     Eigen::Matrix<double, 2, 3> J = Eigen::Matrix<double, 2, 3>::Zero();   ///< rows: (fwd, lat)
     Eigen::Vector2d var = Eigen::Vector2d::Zero();     ///< per-row noise variance [m^2]
@@ -156,6 +168,8 @@ private:
     [[nodiscard]] static Node advance(const Node& n, double dt_s);
     [[nodiscard]] bool over_budget() const;
     void commit(bool final_flush);
+    struct Chord { double cx = 0, cy = 0, dth = 0; bool ok = false; };
+    [[nodiscard]] Chord integrate_chord(std::int64_t t0, std::int64_t t1) const;
     [[nodiscard]] Pair pair_of(const Keyframe& a, const Keyframe& b) const;
 
     HarvesterConfig cfg_;
