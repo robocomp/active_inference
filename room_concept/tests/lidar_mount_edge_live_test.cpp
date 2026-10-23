@@ -12,6 +12,7 @@
 //      one pass of the event loop. This is the contract refresh_graph_extrinsic() relies on.
 // Build+run (EXCLUDE_FROM_ALL target, or by hand):
 //   make -C build lidar_mount_edge_live_test && ../bin/lidar_mount_edge_live_test
+#include "../src/camera_ingestor.h"
 #include <dsr/api/dsr_api.h>
 #include <dsr/api/dsr_inner_eigen_api.h>
 #include <dsr/api/dsr_rt_api.h>
@@ -107,6 +108,28 @@ int main(int argc, char** argv)
         const double ang = Eigen::AngleAxisd(Rrel).angle() * 180.0 / M_PI;   // rotation angle of the change
         std::println("ricoh: cam<-body rotation changed by {:.4f} deg", ang);
         CHECK(std::abs(ang - dyaw_deg) <= 0.05);
+    }
+    // 3. THE FIX ITSELF: CameraIngestor::refresh_graph_extrinsic() against this graph.
+    {
+        rc::CameraIngestor ing(G, "zed");
+        CHECK(ing.bind_extrinsic("body"));
+        const Eigen::Matrix3f R0 = ing.base_R();
+        CHECK(not ing.refresh_graph_extrinsic());                       // edge untouched => unchanged
+        CHECK((ing.base_R() - R0).cwiseAbs().maxCoeff() == 0.f);
+        CHECK(commit_yaw(*G, "zed", static_cast<float>(dyaw_deg * M_PI / 180.0)));
+        bool changed = false;
+        for (int i = 0; i < 200 and not changed; ++i)
+        {
+            QCoreApplication::processEvents();
+            changed = ing.refresh_graph_extrinsic();
+            if (not changed) QThread::msleep(10);
+        }
+        CHECK(changed);
+        const Eigen::Matrix3d Rrel = (ing.base_R() * R0.transpose()).cast<double>();
+        const double ang = Eigen::AngleAxisd(Rrel).angle() * 180.0 / M_PI;
+        std::println("CameraIngestor(zed): base extrinsic rotated {:.4f} deg by refresh_graph_extrinsic()", ang);
+        CHECK(std::abs(ang - dyaw_deg) <= 0.05);
+        CHECK(not ing.refresh_graph_extrinsic());                       // and settles
     }
     std::println("{}", failures == 0 ? "PASS" : "FAILED");
     G.reset();

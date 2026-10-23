@@ -75,9 +75,24 @@ bool CameraIngestor::bind_camera(const std::string& robot_frame)
         return false;
     }
 
+    if (not bind_extrinsic(robot_frame_)) return false;
+    if (extrinsic_ok_)
+        rc::status::print("[imgedge] bound '{}': {}x{} model={} (reproduced to {:.2e} px), cam<-{} t=[{:.3f} {:.3f} {:.3f}]\n",
+                   camera_node_, static_cast<int>(model_.width), static_cast<int>(model_.height),
+                   model_.kind == CameraModel::Kind::Pinhole ? "pinhole"
+                     : (model_.kind == CameraModel::Kind::Equirect ? "equirect" : "cylindrical"),
+                   model_err, robot_frame_, cam_t_robot_.x(), cam_t_robot_.y(), cam_t_robot_.z());
+    return extrinsic_ok_;
+}
+
+bool CameraIngestor::bind_extrinsic(const std::string& robot_frame)
+{
+    if (not G_ or robot_frame.empty()) return false;
+    robot_frame_ = robot_frame;
     // ── The static camera <- robot extrinsic ─────────────────────────────────────────────────────
     // ★ MAIN THREAD ONLY: ts == 0 sets use_cache=true inside InnerEigenAPI and touches an UNLOCKED
-    //   map (CLAUDE.md). Read once here, cache, and never query it from the compute/ingest thread.
+    //   map (CLAUDE.md). Read here and again by refresh_graph_extrinsic(), both on the MAIN thread through
+    //   inner_ (main-thread-owned, so its queued invalidations fire); never query it from the compute/ingest thread.
     // ★ This is the ONLY transform the measurement path takes from the graph. room <- robot is the
     //   STATE VARIABLE; reading it here would make the residual a function of the answer.
     if (not inner_)
@@ -97,13 +112,6 @@ bool CameraIngestor::bind_camera(const std::string& robot_frame)
     }
     apply_graph_extrinsic_(cam_T_robot.value().matrix());
     extrinsic_ok_ = cam_R_robot_.allFinite() and cam_t_robot_.allFinite();
-
-    if (extrinsic_ok_)
-        rc::status::print("[imgedge] bound '{}': {}x{} model={} (reproduced to {:.2e} px), cam<-{} t=[{:.3f} {:.3f} {:.3f}]\n",
-                   camera_node_, static_cast<int>(model_.width), static_cast<int>(model_.height),
-                   model_.kind == CameraModel::Kind::Pinhole ? "pinhole"
-                     : (model_.kind == CameraModel::Kind::Equirect ? "equirect" : "cylindrical"),
-                   model_err, robot_frame_, cam_t_robot_.x(), cam_t_robot_.y(), cam_t_robot_.z());
     return extrinsic_ok_;
 }
 

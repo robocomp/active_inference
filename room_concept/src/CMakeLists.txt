@@ -273,17 +273,3 @@ target_include_directories(mount_replay PRIVATE ${CMAKE_CURRENT_LIST_DIR}/../src
 find_package(Qt6 COMPONENTS Core REQUIRED)
 target_link_libraries(mount_replay PRIVATE Qt6::Core)
 set_target_properties(mount_replay PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../../bin)
-
-# ── lidar_mount_edge_live_test ────────────────────────────────────────────────
-# Plan Task 1.3: a body->sensor RT edge committed at runtime reaches the LiDAR reader's transform call
-# and a main-thread-owned ts==0 instance (the camera ingestor's). A REAL DSR graph on a private DDS domain
-# built from robot_concept/shadow.json -- the same pattern as controller/tests/test_door_passage.cpp.
-# EXCLUDE_FROM_ALL. Build and run with:
-#   make -C build lidar_mount_edge_live_test && ../bin/lidar_mount_edge_live_test
-find_package(Qt6 COMPONENTS Core REQUIRED)
-add_executable(lidar_mount_edge_live_test EXCLUDE_FROM_ALL ../tests/lidar_mount_edge_live_test.cpp)
-target_compile_definitions(lidar_mount_edge_live_test PRIVATE
-    SHADOW_JSON="${CMAKE_CURRENT_SOURCE_DIR}/../../robot_concept/shadow.json")
-target_include_directories(lidar_mount_edge_live_test PRIVATE ${EIGEN3_INCLUDE_DIR} /usr/include/eigen3)
-target_link_libraries(lidar_mount_edge_live_test PRIVATE dsr_api dsr_core fastcdr fastdds Qt6::Core)
-set_target_properties(lidar_mount_edge_live_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../../bin)

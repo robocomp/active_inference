@@ -58,3 +58,11 @@ INSTALL(FILES ${EXECUTABLE_OUTPUT_PATH}/room_concept DESTINATION ${RC_COMPONENT_
 # Task M graph-level test: the proto birth's mouth write on a real in-process DSR graph. make -C build proto_mouth_graph_test
 ADD_EXECUTABLE( proto_mouth_graph_test EXCLUDE_FROM_ALL ../tools/proto_mouth_graph_test.cpp )
 TARGET_LINK_LIBRARIES( proto_mouth_graph_test ${LIBS} dsr_core dsr_gui dsr_api fastcdr fastdds OpenThreads Eigen3::Eigen QGLViewer-qt6 Qt6OpenGLWidgets ${STATIC_LIBS} ${SPECIFIC_LIBS} ${QT_LIBRARIES} ${Ice_LIBRARIES} )
+
+# Plan Task 1.3 (sensor-calibration): a body->sensor RT edge committed at runtime reaches the LiDAR reader's transform
+# call AND CameraIngestor::refresh_graph_extrinsic(), on a real in-process DSR graph (shadow.json, private domain).
+#   make -C build lidar_mount_edge_live_test && ../bin/lidar_mount_edge_live_test
+ADD_EXECUTABLE( lidar_mount_edge_live_test EXCLUDE_FROM_ALL ../tests/lidar_mount_edge_live_test.cpp ../src/camera_ingestor.cpp ../src/camera_stream_hub.cpp )
+TARGET_COMPILE_DEFINITIONS( lidar_mount_edge_live_test PRIVATE SHADOW_JSON="${CMAKE_CURRENT_SOURCE_DIR}/../../robot_concept/shadow.json" )
+TARGET_LINK_LIBRARIES( lidar_mount_edge_live_test ${LIBS} dsr_core dsr_gui dsr_api fastcdr fastdds OpenThreads Eigen3::Eigen QGLViewer-qt6 Qt6OpenGLWidgets ${STATIC_LIBS} ${SPECIFIC_LIBS} ${QT_LIBRARIES} ${Ice_LIBRARIES} )
+SET_TARGET_PROPERTIES( lidar_mount_edge_live_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../../bin )

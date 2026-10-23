@@ -91,6 +91,11 @@ public:
     /// Returns true when the base changed. No-op before a successful bind_camera().
     bool refresh_graph_extrinsic();
 
+    /// MAIN THREAD. The extrinsic half of bind_camera() on its own (reads cam<-robot, applies it, sets
+    /// extrinsic_ok_); bind_camera() calls it. Public so the graph->extrinsic path is testable without a
+    /// camera stream (room_concept/tests/lidar_mount_edge_live_test.cpp).
+    bool bind_extrinsic(const std::string& robot_frame);
+
     /// LOCAL boresight-yaw correction, radians, applied to the extrinsic read from the graph.
     ///
     /// ★ WHY THIS IS HERE AND NOT IN THE ROBOT'S GEOMETRY. The graph's camera<-robot RT is the
