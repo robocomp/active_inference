@@ -77,6 +77,29 @@ void cross_into_room_2(DSR::DSRGraph& G, DoorPassage& p, const std::string& door
     p.update(G, nullptr, "room_1");          // cross_room_ = room_1
     p.update(G, nullptr, "room_2");          // room_concept moved the robot: the crossing is done
 }
+
+/// R2: door_concept's cross contract carries `pre: door_cross_exec_prob >= level`, and the door node the value.
+void cross_with_pre(DSR::DSRGraph& G, const std::string& door, bool pending, float level)
+{
+    const std::string name = "aff_" + door + "_cross";
+    put(G, name, pending, false);
+    auto n = G.get_node(name);
+    auto c = rc::affordance::Contract::reach().until("door_crossing_progress", rc::affordance::CompareOp::GE, 0.90f)
+                 .precondition("door_cross_exec_prob", rc::affordance::CompareOp::GE, 0.90f).stable(2).timeout_s(60.f);
+    rc::affordance::write_contract(G, *n, c);
+    G.update_node(*n);
+    auto d = G.get_node(door);
+    if (not d.has_value()) { DSR::Node m = DSR::Node::create<object_node_type>(door); G.insert_node(m); d = G.get_node(door); }
+    G.add_or_modify_attrib_local<door_cross_exec_prob_att>(*d, level);
+    G.update_node(*d);
+}
+void set_cross_exec(DSR::DSRGraph& G, const std::string& door, float level)
+{
+    auto d = G.get_node(door);
+    G.add_or_modify_attrib_local<door_cross_exec_prob_att>(*d, level);
+    G.update_node(*d);
+}
+void completed(DSR::DSRGraph& G, const std::string& n, rc::affordance::Outcome o) { put(G, n, false, false, o); }
 }   // namespace
 
 int main()
@@ -668,6 +691,70 @@ int main()
         r.start("door_8", Step::Cross);
         out = r.update(*G3, nullptr, "room_1");
         CHECK(out.required == "aff_door_8_approach");
+    }
+
+
+    // ── D3 fix round 1 (R2/R3): the skip to `cross` needs the cross's own pre: clause; a hand-back hold blocks it; attempts reset ──
+    {
+        auto G = make_graph(40);
+        DoorPassage p;
+        p.set_clock(clock);
+        p.start("door_7", Step::Cross);
+        offered(*G, "aff_door_7_approach");
+        cross_with_pre(*G, "door_7", true, 0.20f);          // gold13: beside the open leaf — offered, but the run meets the leaf
+        auto out = p.update(*G, nullptr, "room_1");
+        CHECK(p.view().step == Step::Approach);             // NOT skipped
+        CHECK(out.required == "aff_door_7_approach");
+        set_cross_exec(*G, "door_7", 0.95f);                // on axis in front of the aperture
+        out = p.update(*G, nullptr, "room_1");
+        CHECK(p.view().step == Step::Cross);                // skipped now
+        CHECK(out.required == "aff_door_7_cross");
+        // an older producer with NO pre clause: the legacy skip stands (offered = executable)
+        auto G2 = make_graph(41);
+        DoorPassage q;
+        q.set_clock(clock);
+        q.start("door_6", Step::Cross);
+        offered(*G2, "aff_door_6_approach");
+        offered(*G2, "aff_door_6_cross");
+        q.update(*G2, nullptr, "room_1");
+        CHECK(q.view().step == Step::Cross);
+    }
+    {   // a hand-back hold: the approach was handed back (Unreachable); cross with a HOLDING pre is still not skipped to
+        auto G = make_graph(42);
+        DoorPassage p;
+        p.set_clock(clock);
+        p.start("door_5", Step::Cross);
+        offered(*G, "aff_door_5_approach");
+        cross_with_pre(*G, "door_5", false, 0.20f);          // not on offer yet
+        p.update(*G, nullptr, "room_1");
+        executing(*G, "aff_door_5_approach");
+        p.update(*G, nullptr, "room_1");
+        completed(*G, "aff_door_5_approach", rc::affordance::Outcome::Unreachable);
+        p.update(*G, nullptr, "room_1");
+        CHECK(p.view().step == Step::Approach and p.view().attempts == 1);
+        cross_with_pre(*G, "door_5", true, 0.97f);           // offered AND its pre holds — the hold still wins
+        p.update(*G, nullptr, "room_1");
+        CHECK(p.view().step == Step::Approach);
+        // R3: a step change resets the attempts — an open ended Unreachable, then cross taken: attempts back to 0
+    }
+    {
+        auto G = make_graph(43);
+        DoorPassage p;
+        p.set_clock(clock);
+        p.start("door_4", Step::Cross);
+        offered(*G, "aff_door_4_approach");
+        p.update(*G, nullptr, "room_1");
+        executing(*G, "aff_door_4_approach"); p.update(*G, nullptr, "room_1");
+        satisfied(*G, "aff_door_4_approach");  p.update(*G, nullptr, "room_1");     // -> open
+        offered(*G, "aff_door_4_open");        p.update(*G, nullptr, "room_1");
+        executing(*G, "aff_door_4_open");      p.update(*G, nullptr, "room_1");
+        completed(*G, "aff_door_4_open", rc::affordance::Outcome::Unreachable); p.update(*G, nullptr, "room_1");
+        CHECK(p.view().step == Step::Open and p.view().attempts == 1);
+        put(*G, "aff_door_4_open", false, false);                                   // open withdrawn (door measured open)
+        cross_with_pre(*G, "door_4", true, 0.95f);
+        p.update(*G, nullptr, "room_1");
+        CHECK(p.view().step == Step::Cross);
+        CHECK(p.view().attempts == 0);                                              // R3
     }
 
     std::println("test_door_passage: {} checks, {} failures", checks, failures);

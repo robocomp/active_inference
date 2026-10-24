@@ -196,7 +196,8 @@ LeafStatus SpecificWorker::MissionHost::poll(const rc::mission::Step &leaf)
 		// A hand-back of the APPROACH is not a failure: door_concept re-sites it; wait for the re-offer (ApproachHold).
 		const bool on_approach = v.step == rc::DoorPassage::Step::Approach;
 		const bool present = on_approach and w_.G != nullptr and w_.G->get_node("aff_" + door_ + "_approach").has_value();
-		switch (approach_hold_.check(on_approach, v.attempts, present, v.step_state == "executing", hold_clock_ms()))
+		switch (approach_hold_.check(on_approach, v.attempts, present, v.step_state == "executing", hold_clock_ms(),
+		                                  std::uint64_t(std::max(0.0, leaf.number("budget_s").value_or(0.0)) * 1000.0)))
 		{
 			case rc::ApproachHold::Verdict::Waiting: return {};
 			case rc::ApproachHold::Verdict::Failed:

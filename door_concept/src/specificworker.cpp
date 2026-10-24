@@ -2435,6 +2435,30 @@ rc::door::InteractionState SpecificWorker::compute_interaction_state(const rc::D
     st.p_reach_known = true;
     st.range_sigma_m = sigma;
 
+    // ── P(the cross is executable from HERE): at the door x corridor clear of the leaf x passable ────────────────
+    // The run is robot -> through-pose (the far side of the room being LEFT, the same side the cross offer latches).
+    if (st.p_open_known and not inst.phi_curve_log.empty())
+    {
+        const float leave_side = rc::door::interior_side(ap, st.approach_standoff_m, fitter_->room_polygon(), st.approach_side);
+        const float cross_standoff = std::max(pg.cross_standoff_m, 2.0f * inst.leaf_pose.half_w
+                                              + 0.5f * pg.robot_passage_width_m + pg.swing_clearance_m);
+        const auto thr = rc::door::through_pose(ap, leave_side, cross_standoff);
+        rc::door::CrossCorridorBelief cb;
+        cb.ap = ap; cb.phi_curve_log = inst.phi_curve_log;
+        cb.hinge = inst.leaf.hinge; cb.swing = inst.leaf.swing;
+        // the log-odds are signed against the reference they were last accumulated for (hinge_llr_ref / swing_llr_ref): read
+        // them as the odds of the MAP leaf, exactly as the anchor does (specificworker_anchor.cpp)
+        const bool hinge_same = not inst.hinge_llr_ref.has_value() or *inst.hinge_llr_ref == inst.leaf.hinge;
+        const bool swing_same = not inst.swing_llr_ref.has_value() or (*inst.swing_llr_ref > 0.f) == (inst.leaf.swing > 0.f);
+        cb.hinge_llr = hinge_same ? inst.hinge_llr : -inst.hinge_llr;
+        cb.swing_llr = swing_same ? inst.swing_llr : -inst.swing_llr;
+        // body half-width + the passage margin's half: the same body the passability uses; the gap's σ is the range's own
+        st.p_corridor_clear = rc::door::prob_corridor_clear(cb, robot, Eigen::Vector2f(thr.x, thr.y),
+                                                            0.5f * needed, sigma);
+        st.p_cross_exec = rc::door::cross_exec_prob(st.p_within, st.p_corridor_clear, st.p_open);
+        st.p_cross_exec_known = true;
+    }
+
     // ── crossing progress, signed against the side latched when the claim was made ───────────────
     // "Crossed" is a CHANGE of side, not a position, so it is only defined while a claim is outstanding.
     // Outside one it stays 0 and unknown, and write_interaction_state publishes the neutral 0.
@@ -2697,11 +2721,13 @@ void SpecificWorker::step_pragmatic_affordances(rc::DoorInstance& inst)
         o.value    = pg.value_cross;
         o.contract = rc::door::cross_contract(pg);
         o.why      = std::format("P(passable)={:.2f} (log-odds {:+.1f}) — clear span {:.2f} m at phi={:.2f} rad vs {:.2f} m of body"
-                                 " × P(at the door)={:.2f} (P(facing) {:.2f} at {:.0f} deg; range {:.2f} m ≤ {:.2f}, σ {:.2f})",
+                                 " × P(at the door)={:.2f} (P(facing) {:.2f} at {:.0f} deg; range {:.2f} m ≤ {:.2f}, σ {:.2f})"
+                                 " × P(corridor clear of the leaf)={:.2f} ⇒ P(cross executable)={:.2f}",
                                  st.p_open, st.p_open_logit, st.clear_width_m, st.phi_rad,
                                  pg.robot_passage_width_m + pg.passage_margin_m, st.p_within, st.p_facing, st.facing_deg,
                                  st.robot_range_m,
-                                 std::max(pg.actuation_reach_m, st.safe_standoff_m + 0.30f), st.range_sigma_m);
+                                 std::max(pg.actuation_reach_m, st.safe_standoff_m + 0.30f), st.range_sigma_m,
+                                 st.p_corridor_clear, st.p_cross_exec);
         inst.aff_cross.update(o);
         log_affordance_transitions(inst, "cross", inst.aff_cross);
     }
