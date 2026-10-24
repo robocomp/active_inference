@@ -41,13 +41,13 @@ nl() { wc -l < $L/$1.log 2>/dev/null || echo 0; }
 now_ms() { date +%s%3N; }
 TSV=crossing/$1/legs.tsv; printf 'leg\tstatus\tt0_ms\tt1_ms\tltsm0\tltsm1\tdoor0\tdoor1\troom0\troom1\n' > $TSV
 run_leg() {   # leg door here   (sets r)
-  echo run > $B/controller/remote_cmd.txt; sleep 2
+  echo run > $B/controller/remote_cmd.txt; sleep 0.7   # the controller reads remote_cmd.txt every 300 ms
   printf 'mission "leg %s"\n  explore %s until=explored(%s)>=0.9 budget_s=%ss\n  cross %s retry=2\n' $1 $3 $3 $EXPLORE_S $2 > $B/controller/remote_cmd.txt
   t0=$(date +%s); r="FAILED (no end in 600 s)"
-  for i in $(seq 1 200); do
+  for i in $(seq 1 1200); do
     grep -a -q "mission 'leg $1': completed" $L/controller.log && { r="OK in $(( $(date +%s)-t0 )) s"; break; }
     grep -a -q -E "mission 'leg $1': (failed|aborted)" $L/controller.log && { r="FAILED: $(grep -a -o -E "mission 'leg $1': (failed|aborted)[^\"]*" $L/controller.log | tail -1)"; break; }
-    sleep 3
+    sleep 0.5
   done; }
 # Look for a door in the current room other than $1 until one is born/restored: spin 3x120 deg (the front camera
 # sweeps every wall even when the explorer has nothing left to do, e.g. a recalled room whose memory says explored=1.0),
@@ -56,7 +56,7 @@ scan_for_door() {   # exclude tag
   local ex=$1 tag=$2 ts=$(date +%s) dd n
   dd=$(new_door "$ex")
   while [ -z "$dd" ] && [ $(( $(date +%s)-ts )) -lt $SCAN_CAP_S ]; do
-    n=$(( $(date +%s)-ts )); echo run > $B/controller/remote_cmd.txt; sleep 2
+    n=$(( $(date +%s)-ts )); echo run > $B/controller/remote_cmd.txt; sleep 0.7
     printf 'mission "look%s_%s"\n  move turn_deg=120\n  move turn_deg=120\n  move turn_deg=120\n  explore %s budget_s=90s\n' "$tag" $n "$here" > $B/controller/remote_cmd.txt
     for i in $(seq 1 60); do grep -a -q -E "mission 'look${tag}_$n': (completed|failed|aborted)" $L/controller.log && break; dd=$(new_door "$ex"); [ -n "$dd" ] && break; sleep 3; done
     dd=$(new_door "$ex")
