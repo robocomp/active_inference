@@ -2462,6 +2462,8 @@ rc::door::InteractionState SpecificWorker::compute_interaction_state(const rc::D
         // body half-width + the passage margin's half: the same body the passability uses; the gap's σ is the range's own
         st.p_corridor_clear = rc::door::prob_corridor_clear(cb, robot, Eigen::Vector2f(thr.x, thr.y),
                                                             0.5f * needed, sigma);
+        st.corr_lateral_m = (robot - ap.centre_xy()).dot(ap.wall_u);
+        st.corr_hinge_llr = cb.hinge_llr; st.corr_swing_llr = cb.swing_llr;
         st.p_cross_exec = rc::door::cross_exec_prob(st.p_within, st.p_corridor_clear, st.p_open);
         st.p_cross_exec_known = true;
     }
@@ -2729,12 +2731,12 @@ void SpecificWorker::step_pragmatic_affordances(rc::DoorInstance& inst)
         o.contract = rc::door::cross_contract(pg);
         o.why      = std::format("P(passable)={:.2f} (log-odds {:+.1f}) — clear span {:.2f} m at phi={:.2f} rad vs {:.2f} m of body"
                                  " × P(at the door)={:.2f} (P(facing) {:.2f} at {:.0f} deg; range {:.2f} m ≤ {:.2f}, σ {:.2f})"
-                                 " × P(corridor clear of the leaf)={:.2f} ⇒ P(cross executable)={:.2f}",
+                                 " × P(corridor clear of the leaf)={:.2f} (robot {:+.2f} m along the wall, hinge llr {:+.1f}, swing llr {:+.1f}) ⇒ P(cross executable)={:.2f}",
                                  st.p_open, st.p_open_logit, st.clear_width_m, st.phi_rad,
                                  pg.robot_passage_width_m + pg.passage_margin_m, st.p_within, st.p_facing, st.facing_deg,
                                  st.robot_range_m,
                                  std::max(pg.actuation_reach_m, st.safe_standoff_m + 0.30f), st.range_sigma_m,
-                                 st.p_corridor_clear, st.p_cross_exec);
+                                 st.p_corridor_clear, st.corr_lateral_m, st.corr_hinge_llr, st.corr_swing_llr, st.p_cross_exec);
         inst.aff_cross.update(o);
         log_affordance_transitions(inst, "cross", inst.aff_cross);
     }

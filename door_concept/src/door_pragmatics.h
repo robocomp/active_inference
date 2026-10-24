@@ -108,6 +108,7 @@ struct InteractionState
     float p_cross_exec = 0.0f;
     bool  p_cross_exec_known = false;
     float p_corridor_clear = 0.0f;    // the middle factor, for the offer's why-line
+    float corr_lateral_m = 0.0f, corr_hinge_llr = 0.0f, corr_swing_llr = 0.0f;   // its inputs, for the why-line (live audit)
 
     float crossing_progress = 0.0f;   // -1 .. +1, signed against the latched side
     bool  crossing_known = false;

@@ -756,6 +756,23 @@ int main()
         CHECK(p.view().step == Step::Cross);
         CHECK(p.view().attempts == 0);                                              // R3
     }
+    {   // F2 (gold14): an `open` completed+Satisfied and withdrawn is a door already open — the passage advances to cross even when
+        // cross's pre FAILS (the pre then decides cross vs re-approach); it must not wait for open to come back
+        auto G = make_graph(44);
+        DoorPassage p;
+        p.set_clock(clock);
+        p.start("door_3", Step::Cross);
+        offered(*G, "aff_door_3_approach");
+        p.update(*G, nullptr, "room_1");
+        executing(*G, "aff_door_3_approach"); p.update(*G, nullptr, "room_1");
+        satisfied(*G, "aff_door_3_approach");  p.update(*G, nullptr, "room_1");     // -> open
+        CHECK(p.view().step == Step::Open);
+        satisfied(*G, "aff_door_3_open");                                           // completed, satisfied, not offered
+        cross_with_pre(*G, "door_3", true, 0.10f);                                  // cross offered, its run meets the leaf
+        const auto out = p.update(*G, nullptr, "room_1");
+        CHECK(p.view().step == Step::Cross);                                        // advanced, not parked on open
+        CHECK(out.event.has_value() and out.event->find("already opened") != std::string::npos);
+    }
 
     std::println("test_door_passage: {} checks, {} failures", checks, failures);
     return failures == 0 ? 0 : 1;

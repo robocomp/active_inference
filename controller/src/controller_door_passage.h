@@ -348,19 +348,35 @@ public:
                 if (const State st = state_of(G, name_of(s)); st == State::Offered or st == State::Executing) return true;
             return false;
         };
-        if (step_ == Step::Open and not seen_executing_ and owner_live() and cross_pre(G) != Pre::Fails)
+        // ★ F2 (D3 fix round 2, gold14): an `open` that is COMPLETED (Satisfied) and WITHDRAWN is a door already open — the passage
+        //   sat on it for ~10 min waiting for it to come back. It advances to `cross` whatever cross's pre says: the pre then decides
+        //   cross vs re-approach (an offered cross whose run meets the leaf falls back to the approach below). The same for an
+        //   `open` that is not offered while the door is MEASURED open (the rule above), cross's pre deciding what comes next.
+        const auto open_done = [&]
+        {
+            const auto on = G.get_node(name_of(Step::Open));
+            return on.has_value() and state_of(G, name_of(Step::Open)) == State::Completed
+                   and rc::affordance::read_outcome(on.value()) == rc::affordance::Outcome::Satisfied;
+        };
+        if (step_ == Step::Open and not seen_executing_)
             if (const State so = state_of(G, name_of(Step::Open)); so != State::Offered and so != State::Executing)
-                if (const auto dn = G.get_node(door_); dn.has_value())
-                    if (const auto po = G.get_attrib_by_name<door_open_prob_att>(*dn); po.has_value() and *po >= 0.f and *po > 0.5f)
-                    {
-                        reached_door_ = true;   // as a satisfied `open`: the robot is at the door (no falling back to `open`)
-                        step_ = Step::Cross;
-                        seen_executing_ = false;
-                        attempts_ = 0;
-                        out.event = std::format("[door-passage] {}: {} is not offered and the door is measured open (P {:.2f}) — "
-                                                "its goal holds: SATISFIED -> {}", door_, name_of(Step::Open), *po,
-                                                name_of(Step::Cross));
-                    }
+            {
+                std::optional<float> po;
+                if (owner_live())
+                    if (const auto dn = G.get_node(door_); dn.has_value())
+                        if (const auto v = G.get_attrib_by_name<door_open_prob_att>(*dn); v.has_value() and *v >= 0.f and *v > 0.5f) po = *v;
+                if (po.has_value() or open_done())
+                {
+                    reached_door_ = true;   // as a satisfied `open`: the robot is at the door (no falling back to `open`)
+                    step_ = Step::Cross;
+                    seen_executing_ = false;
+                    attempts_ = 0;
+                    out.event = std::format("[door-passage] {}: {} is not offered and the door is {} — its goal holds: SATISFIED -> {}",
+                                            door_, name_of(Step::Open),
+                                            po.has_value() ? std::format("measured open (P {:.2f})", *po) : std::string("already opened (completed, satisfied)"),
+                                            name_of(Step::Cross));
+                }
+            }
 
         // ★ A STEP THAT IS NO LONGER ON OFFER FALLS BACK to the latest earlier one that is. door_concept withdraws
         //   `cross` when the door is believed shut and `open` when out of reach; `approach` is always offered for a

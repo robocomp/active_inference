@@ -69,6 +69,20 @@ int main()
         std::println("largest step over 1 cm of lateral offset: {:.3f}", worst);
         CHECK(worst < 0.15f);
     }
+    {   // 7. LIVE gold14 leg 2: aperture 0.91 m, leaf open 1.48 rad INTO the robot's room, robot 1.44 m out, 16 deg off the normal
+        //    (0.40 m beside the axis), hinge side either way with a firm belief, body 0.35 m half-width, sigma 0.10. The straight
+        //    robot -> through diagonal cut the near jamb (P = 0.00 live); the run is axis-aligned: slide then through (> 0.5).
+        for (const float hinge_toward_robot_side : {+1.0f, -1.0f})
+        {
+            CrossCorridorBelief b = belief(1.48f, +1.0f, 8.0f);
+            b.ap.w = 0.91f; b.ap.wall_O = {-0.455f, 0.0f};
+            b.hinge = hinge_toward_robot_side > 0 ? HingeSide::Far : HingeSide::Near; b.hinge_llr = 8.0f;
+            const float lat = 1.44f * std::sin(16.0f * 3.14159265f / 180.0f), rng = 1.44f * std::cos(16.0f * 3.14159265f / 180.0f);
+            const float p = prob_corridor_clear(b, {lat, rng}, through, 0.35f, 0.10f);
+            std::println("live gold14 (hinge {}): P(clear) = {:.3f}", hinge_toward_robot_side > 0 ? "robot side" : "other side", p);
+            CHECK(p > 0.50f);
+        }
+    }
     {   // 6. the product: low corridor => low pre even with P(at door) and P(passable) high; empty curve => 0 (not measured)
         CHECK(cross_exec_prob(0.67f, 0.1f, 1.0f) < 0.10f);
         CrossCorridorBelief empty = belief(half_pi, +1.0f); empty.phi_curve_log.clear();

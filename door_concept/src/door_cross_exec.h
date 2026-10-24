@@ -63,7 +63,7 @@ struct CrossCorridorBelief
     float     hinge_llr = 0.0f, swing_llr = 0.0f;
 };
 
-// P(the body's run robot -> through-point is clear of the leaf), body half-width `r_body`, gap uncertainty `sigma`.
+// P(the body's run robot -> axis -> through-point is clear of the leaf), body half-width `r_body`, gap uncertainty `sigma`.
 // An empty phi curve is "not measured": 1 is NOT assumed — the caller multiplies a P(passable) that is itself unknown then.
 [[nodiscard]] inline float prob_corridor_clear(const CrossCorridorBelief& b, const Eigen::Vector2f& robot,
                                                const Eigen::Vector2f& through, float r_body, float sigma)
@@ -75,6 +75,13 @@ struct CrossCorridorBelief
     const float ph = sigm(b.hinge_llr), ps = sigm(b.swing_llr);
     const HingeSide other_h = b.hinge == HingeSide::Near ? HingeSide::Far : HingeSide::Near;
     const float s = std::max(sigma, 1e-3f);
+    // ★ THE RUN IS TWO LEGS, NOT THE DIAGONAL (gold14 leg 2: robot 1.44 m out, 16 deg off the normal = 0.4 m beside the axis,
+    //   P(corridor clear) 0.00 for an open leaf). The cross is driven through the doorway's gap along the door AXIS; the straight
+    //   robot -> through-pose segment cuts the near jamb, where the open leaf hangs, which no driver would do. The run is: slide
+    //   to the axis at the robot's own range (still out in front of the leaf's reach unless the robot really is inside it), then
+    //   along the axis through the aperture centre to the through-pose.
+    const Eigen::Vector2f c = b.ap.centre_xy(), n = b.ap.across_u();
+    const Eigen::Vector2f entry = c + (robot - c).dot(n) * n;
     double num = 0.0, den = 0.0;
     for (const auto& [phi, lw] : b.phi_curve_log)
     {
@@ -86,7 +93,7 @@ struct CrossCorridorBelief
             {
                 const LeafPose L = leaf_pose(b.ap, LeafState{.phi = phi, .hinge = h, .swing = sw});
                 const Eigen::Vector2f tip = L.hinge_xy + L.ex * (2.0f * L.half_w);
-                const float gap = segment_gap(robot, through, L.hinge_xy, tip);
+                const float gap = std::min(segment_gap(robot, entry, L.hinge_xy, tip), segment_gap(entry, through, L.hinge_xy, tip));
                 clear += wh * wsw * prob_within(r_body, gap, s);   // P(r_body <= gap)
             }
         num += w * clear;
