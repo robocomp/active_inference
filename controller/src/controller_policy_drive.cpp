@@ -733,6 +733,47 @@ void ControllerSession::drive_with_policy(const ControllerRobotPose &robot_pose,
     }
     policy_route_index_ = -1;   // no tour running: the next one latches afresh
 
+    // ── 0b. A DOOR ROUTE (controller_door_passage.h ROUTE MODE): the planned curve's points as successive Place goals, exactly
+    //        as a mission tour's waypoints are (step 0) — fixed points on ONE planned route, never re-decided per cycle. The
+    //        last carries the leg's heading. Arrived at the last ⇒ the passage is told; an Unreachable verdict (F1: not a Stuck)
+    //        ⇒ the route failed, and the passage rebuilds it once.
+    if (door_route_leg_.has_value())
+    {
+        if (not door_route_active_)
+        {
+            stop_here(rc::why::Cause::NoRoute, std::format("door route for '{}': not built", door_route_leg_->door));
+            return;
+        }
+        auto st = rc::policy::route_goal_step(door_route_goals_, 1, door_route_goal_index_, false, gp.tol_xy, gp.tol_yaw);
+        if (not st.finished and st.goal.has_value())
+        {
+            const std::string who = std::format("door route {} pt {}/{}", door_route_leg_->door, st.index + 1, door_route_goals_.size());
+            const auto tick = policy_tick(*st.goal, who, cpose, obstacle_tracker, motion_commander, now);
+            if (tick.verdict == PolicyVerdict::Unreachable)
+            {
+                std::println("[door-route] {}: {} cannot be reached ({}) — the route is blocked", door_route_leg_->door, who, tick.why);
+                door_route_active_ = false;
+                door_route_failed_ms_ = now;
+                door_passage_.note_route(door_route_leg_->key, rc::DoorPassage::RouteReport::Failed, tick.why);
+                policy_reset();
+                stop_here(rc::why::Cause::NoRoute, std::format("door route for '{}': blocked", door_route_leg_->door));
+                return;
+            }
+            if (tick.verdict == PolicyVerdict::Arrived)
+                st = rc::policy::route_goal_step(door_route_goals_, 1, door_route_goal_index_, true, gp.tol_xy, gp.tol_yaw);
+            door_route_goal_index_ = st.index;
+        }
+        if (st.finished)
+        {
+            std::println("[door-route] {}: the route's end reached (local policy)", door_route_leg_->door);
+            door_passage_.note_route(door_route_leg_->key, rc::DoorPassage::RouteReport::Arrived);
+            door_route_active_ = false;
+            policy_reset();
+            stop_here(rc::why::Cause::PolicyHold, std::format("door route for '{}': at its end", door_route_leg_->door));
+        }
+        return;
+    }
+
     // ── 1. THE CROSS: the protocol (gap, near side, through / not-a-crossing / waits) is shared; the motion is a Doorway goal
     //       on the MEASURED gap (the anchor while no gap is held), or — waiting for an anchor never seen — a Heading goal
     //       toward where it was last published

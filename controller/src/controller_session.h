@@ -1162,6 +1162,23 @@ private:
     bool command_explore_ = false;                                  // Mission mode: an `explore` order is active
     std::string explore_room_;                                       // …and the room it confines the contest to ("" = none)
     std::optional<Eigen::Vector2f> passage_door_centre_;            // the passage's door node, current room frame
+    // ── DOOR ROUTE ([DoorPassage] UseRoute — controller_door_passage.h ROUTE MODE, door_route.h). The passage names the leg;
+    //    the session builds ONE RouteFollower route for it (grid-planned hops, one curve) and drives it: the tracker follows
+    //    the curve (the [Policy]-off chain, as a mission route), or the policy takes its points as successive Place goals
+    //    (as a mission tour under the policy). Kept apart from route_ — that one belongs to a recorded mission.
+    std::optional<rc::DoorPassage::RouteLeg> door_route_leg_;      // this cycle's leg (nullopt = no door route to drive)
+    rc::RouteFollower door_route_;
+    std::string door_route_key_;                                    // the leg door_route_ was built (or last tried) for
+    bool door_route_active_ = false;                                // built for the current leg and not yet ended
+    bool door_route_installed_ = false;                             // handed to the tracker (policy off)
+    std::uint64_t door_route_build_ms_ = 0;                         // last build attempt
+    std::uint64_t door_route_failed_ms_ = 0;                        // last failure (build or drive): a rebuild waits kDoorRouteRebuildMs
+    static constexpr std::uint64_t kDoorRouteRebuildMs = 2000;      // as the mission route's build retry: the map gets a moment
+    std::vector<rc::policy::RouteWaypoint> door_route_goals_;       // the curve's points as Place goals (policy on)
+    int door_route_goal_index_ = 0;
+    bool build_door_route(const ControllerRobotPose &robot_pose, std::uint64_t now_ms, float tol_xy);
+    bool drive_door_route(const ControllerPlanningStep &step, rc::TrajectoryController &path_controller,
+                          ControllerMotionCommander &motion_commander, const TimeSource &time_source);
     std::vector<std::vector<Eigen::Vector2f>> door_passages_;       // its free corridor this cycle (room frame)
     std::optional<AnchorCrossReading> anchor_cross_;                // THIS cycle's anchor, fresh or WAITED for (nullopt = room route)
     // Task 9, fix A: while a Cross step is anchored it never falls back to the room route. engaged = this Cross step has

@@ -9,6 +9,7 @@
 #include "standpoint_fit.h"      // Task 3c: does an affordance standpoint serve, or is it handed back
 #include "../../common/affordance_manager/affordance_room_scope.h"   // Task 4: explore room_X scopes the contest
 #include "near_field_clearance.h"        // Task 6: [Route] NearFieldClearance — the band's structured near field
+#include "door_route.h"                 // the door route's waypoints (controller_door_passage.h ROUTE MODE)
 #include "band_cross.h"                 // Task 6 fix round 1: [Route] BandDrivesCross's route through the opening
 #include "local_policy/contact.h"       // Task 6: denoise_returns, the policy's surface model
 
@@ -217,6 +218,20 @@ bool ControllerSession::sync_world_state(std::uint64_t timestamp_ms,
             }
         }
         door_required_ = std::move(dp.required);
+        // Route mode: the leg to drive. A leg that ended or changed drops the route built for it (and the tracker's copy).
+        door_route_leg_ = std::move(dp.route);
+        if (not door_route_leg_.has_value() or door_route_leg_->key != door_route_key_)
+        {
+            door_route_active_ = false;
+            if (door_route_installed_)
+            {
+                path_controller.stop();
+                current_plan_.reset();
+                plan_spline_valid_ = false;
+                door_route_installed_ = false;
+            }
+            if (not door_route_leg_.has_value()) door_route_key_.clear();
+        }
         // Where the passage's door IS in this room — the door line the cross axis must be centred on. The cross
         // standpoint sits CrossStandoffM past it, a configured distance the controller must not assume.
         passage_door_centre_.reset();
@@ -1053,6 +1068,20 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
         active_target_id_ = 0;
         current_plan_.reset();
         plan_spline_valid_ = false;
+    }
+    // ── DOOR ROUTE (route mode): the passage's route owns the base, as a running mission's route does — nothing to select.
+    if (door_route_leg_.has_value())
+    {
+        affordance_manager.clear_current();
+        active_target_id_ = 0;
+        target_wait_logged_ = false;
+        step.target.node_name = "door-route:" + door_route_leg_->door;
+        step.target.room_pos = door_route_active_ and door_route_.valid()
+                                   ? door_route_.spline().position_at(door_route_.length()) : robot_pose->pos;
+        step.target_changed = false;
+        last_target_info_ = step.target;
+        current_target_room_ = step.target.room_pos;
+        return step;
     }
     // One order at a time (starting either stops the other, specificworker.cpp); the door's has the base if both name one.
     if (not door_required_.empty()) affordance_manager.set_required_name(door_required_);
@@ -2961,6 +2990,8 @@ bool ControllerSession::ensure_current_plan(const ControllerPlanningStep &step,
         if (policy_enabled()) return true;
         return drive_mission_route(step, path_controller, motion_commander, time_source);
     }
+    if (door_route_leg_.has_value())
+        return drive_door_route(step, path_controller, motion_commander, time_source);
     return drive_point_target(step, obstacle_tracker, path_controller, motion_commander,
                              display, time_source);
 }
@@ -3166,6 +3197,99 @@ bool ControllerSession::drive_mission_route(const ControllerPlanningStep &step,
         // yet departed and returned — so that is the only arrival test left running here.
         path_controller.set_endpoint_arrival(false);
         current_plan_ = ControllerPathPlan{.room_path = route_.path()};
+    }
+    return true;
+}
+
+// ── DOOR ROUTE (controller_door_passage.h ROUTE MODE) ──────────────────────────────────────────────────────────────────
+// The waypoints come from door_route.h (door_concept's two published targets + the aperture centre, slid ALONG THE AXIS only
+// where the grid says the footprint is not free); RouteFollower::build plans every hop with the grid planner and fits ONE
+// curve, exactly as a mission route is built. A build that fails is reported to the passage, which re-keys the leg once.
+bool ControllerSession::build_door_route(const ControllerRobotPose &robot_pose, std::uint64_t now_ms, float tol_xy)
+{
+    const auto &leg = *door_route_leg_;
+    door_route_key_ = leg.key;
+    door_route_build_ms_ = now_ms;
+    door_route_active_ = false;
+    const rc::door_route::Target appr{leg.approach, leg.approach_yaw};
+    const std::optional<rc::door_route::Target> cross =
+        leg.cross.has_value() ? std::optional<rc::door_route::Target>(rc::door_route::Target{*leg.cross, leg.cross_yaw}) : std::nullopt;
+    rc::door_route::Params prm;
+    // The body's reach toward the door (its support along the body's forward +y — drive_with_policy's half_len), the grid's
+    // cell, and the corridor's forward extent past the cross target (DoorPassage::corridor: 0.8 m) — the room P_post may
+    // slide into.
+    prm.body_reach_m = approach_body_.support_radius(0.f, Eigen::Vector2f(0.f, 1.f));
+    prm.step_m = grid_planner_.cell_size();
+    prm.post_slide_m = 0.8f;
+    const auto plan = rc::door_route::plan(appr, cross, passage_door_centre_, robot_pose.pos, leg.through, prm,
+                                           [this](const Eigen::Vector2f &p, float h) { return grid_planner_.pose_free(p, h); });
+    if (not plan.why.empty())
+    {
+        std::println("[door-route] {}: cannot place the route: {}", leg.door, plan.why);
+        door_passage_.note_route(leg.key, rc::DoorPassage::RouteReport::Failed, plan.why);
+        return false;
+    }
+    if (not plan.has_axis)
+        std::println("[door-route] {}: no aperture centre in this frame — driving door_concept's targets as published", leg.door);
+    last_plan_failure_.clear();
+    door_route_.set_optimizer(make_route_optimizer_config());
+    const bool ok = door_route_.build(robot_pose.pos, plan.waypoints, 1, route_plan_fn(), route_free_fn(),
+                                      params_ ? params_->route_spacing_m : 0.05f, params_ ? params_->route_smoothing_m : 0.40f);
+    if (not ok or not door_route_.valid())
+    {
+        const std::string why = last_plan_failure_.empty() ? std::string("the planner refused a hop") : last_plan_failure_;
+        std::println("[door-route] {}: RouteFollower::build failed ({})", leg.door, why);
+        door_passage_.note_route(leg.key, rc::DoorPassage::RouteReport::Failed, why);
+        return false;
+    }
+    std::println("[door-route] {}: pre ({:.2f},{:.2f}) s={:.2f}{} ap ({:.2f},{:.2f}) post {} — {} waypoint(s), {} pts, {:.2f} m{}",
+                 leg.door, plan.pre.x(), plan.pre.y(), plan.s_pre, plan.pre_moved ? " (slid along the axis: footprint not free)" : "",
+                 plan.ap.x(), plan.ap.y(),
+                 plan.through ? std::format("({:.2f},{:.2f}) s={:.2f}{}", plan.post.x(), plan.post.y(), plan.s_post,
+                                            plan.post_moved ? " (slid along the axis)" : "")
+                              : std::string("— (the door reads shut: the route ends at the vantage)"),
+                 plan.waypoints.size(), door_route_.path().size(), door_route_.length(), plan.pre_dropped ? ", pre dropped (robot past it)" : "");
+    // The policy's Place goals: the curve's points every 2·tol_xy of arc (consecutive arrival discs touch, never overlap),
+    // the last one with the leg's final heading (facing the door at P_pre; the travel direction at P_post).
+    door_route_goals_.clear();
+    const float L = door_route_.length();
+    const float ds = std::max(2.f * tol_xy, grid_planner_.cell_size());
+    for (float sa = ds; sa < L; sa += ds) door_route_goals_.push_back({door_route_.spline().position_at(sa), std::nullopt});
+    door_route_goals_.push_back({door_route_.spline().position_at(L), plan.through ? plan.post_yaw : plan.pre_yaw});
+    door_route_goal_index_ = 0;
+    door_route_active_ = true;
+    return true;
+}
+
+bool ControllerSession::drive_door_route(const ControllerPlanningStep &step, rc::TrajectoryController &path_controller,
+                                         ControllerMotionCommander &motion_commander, const TimeSource &time_source)
+{
+    const auto &leg = *door_route_leg_;
+    const std::uint64_t now = time_source();
+    // A leg is built ONCE (its key); a re-keyed leg after a failure waits kDoorRouteRebuildMs from that failure.
+    if (not door_route_active_ and leg.key != door_route_key_ and now - door_route_failed_ms_ >= kDoorRouteRebuildMs)
+        if (not build_door_route(step.robot_pose, now, path_controller.goal_threshold())) door_route_failed_ms_ = now;
+    if (not door_route_active_)
+    {
+        path_controller.stop();
+        motion_commander.stop_robot();
+        note_hold(std::format("door route for '{}' not built ({})", leg.door, last_plan_failure_.empty() ? "waiting" : last_plan_failure_));
+        note_why(rc::why::Cause::NoRoute, hold_reason_);
+        return false;
+    }
+    if (policy_enabled()) return true;   // drive_with_policy takes the curve's points as Place goals
+    if (not path_controller.is_active() or not door_route_installed_)
+    {
+        // as drive_mission_route: the curve is already C2 and footprint-checked
+        ++path_generation_;
+        path_controller.set_path_presmoothed(door_route_.path());
+        path_controller.set_route(&door_route_.spline());
+        path_controller.set_carrot_hint(static_cast<int>(door_route_.progress() / std::max(0.01f, door_route_.spline().spacing())));
+        path_controller.set_goal_facing_yaw(std::nullopt);
+        path_controller.set_arrival_point(std::nullopt);
+        path_controller.set_endpoint_arrival(false);   // the route ends by arc length (execute_plan: door_route_.finished)
+        current_plan_ = ControllerPathPlan{.room_path = door_route_.path()};
+        door_route_installed_ = true;
     }
     return true;
 }
@@ -6840,6 +6964,22 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
             prev_cmd_rot_sign_ = rot_sign;
     }
 
+    if (door_route_active_ and door_route_installed_ and door_route_leg_.has_value())
+    {
+        door_route_.advance(robot_pose.pos);
+        if (door_route_.finished(robot_pose.pos))
+        {
+            std::println("[door-route] {}: the route's end reached ({:.2f} of {:.2f} m)", door_route_leg_->door, door_route_.progress(),
+                         door_route_.length());
+            door_passage_.note_route(door_route_leg_->key, rc::DoorPassage::RouteReport::Arrived);
+            door_route_active_ = false;
+            door_route_installed_ = false;
+            path_controller.stop();
+            current_plan_.reset();
+            note_no_command(); motion_commander.stop_robot();
+            return;
+        }
+    }
     if (route_active_ and mission_.running())
     {
         // Progress is a scalar that only increases. Legs are read OFF it rather than driven by it.

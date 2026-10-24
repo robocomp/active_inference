@@ -78,6 +78,15 @@ RunDir = "etc/runs"
 # actuator) nothing tells "not yet" from "never": wait this long for the offer, then leave the door open.
 DoorCloseOfferWaitS = 5.0
 
+[DoorPassage]
+# ★2026-10-24 (user: "we need a path that goes to a point in front of the door and then into the other room, so the robot
+# can follow it instead of wandering"). true: `cross <door>` builds ONE route with RouteFollower over the grid planner —
+# door_concept's approach target (a vantage ON the door axis) -> the aperture centre -> its cross target just past the
+# door — and follows it; a shut door stops it at the vantage while door_concept's `open` runs, then it continues. Done on the
+# room switch or at the route's end; built twice without success = cross_unreachable. false: the approach/open/cross
+# affordance chain (each step a goal the local policy re-decides) — kept for the A/B. controller_door_passage.h ROUTE MODE.
+UseRoute = true
+
 [Planner]
 # A* planning grid. Collision is the robot's real footprint tested against this grid, so the ONLY thing
 # this controls is planning resolution/cost — nothing here inflates obstacles.

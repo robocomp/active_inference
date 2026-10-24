@@ -30,6 +30,18 @@
  * MPPI boundary and the outside-room check accept as free, and exempt() names the door node so it is not an obstacle.
  * Both end when the step ends. The open leaf still reaches the planner as residual LiDAR cells.
  *
+ * ★ ROUTE MODE ([DoorPassage] UseRoute, 2026-10-24, user: "we need a path that goes to a point in front of the door and then
+ *   into the other room, so the robot can follow it instead of wandering" / "we have a planner for that"). The chain above
+ *   lets the local policy re-decide every step's goal — live, the approach standpoint was handed back by a bed, re-sited
+ *   sideways, and the robot drifted into the wrong arm of an L-shaped room. In route mode the passage asks the session for
+ *   ONE planned route (Out::route, built by RouteFollower over the grid planner, door_route.h): door_concept's approach
+ *   target (a vantage on the door axis) and, once the door reads open, the aperture and the cross target just past it.
+ *     Approach  the route to P_pre (through P_ap to P_post at once if the door already reads open)
+ *     Open      at P_pre with the door shut: door_concept's `open` runs as in the chain (the selector takes it)
+ *     Cross     the route on through P_ap to P_post; DONE on the room switch into a room this door leads to, or at P_post
+ *   The session reports the route's end (note_route): Arrived advances, Failed rebuilds ONCE from the current pose (a new
+ *   leg key), and a second failure ends the passage failed with `cross_unreachable`. UseRoute = false is the chain, unchanged.
+ *
  * Header-only; no Qt. Driven from the control thread (update() before the selector runs); start/stop may come from
  * the GUI thread, hence the mutex.
  */
@@ -97,6 +109,13 @@ public:
         p_through_ = -1.0;
         target_ignored_logged_.clear();
         last_open_sp_.reset();
+        route_epoch_ = 0;
+        route_failures_ = 0;
+        route_arrived_ = false;
+        route_wait_logged_.clear();
+        route_key_.clear();
+        route_approach_.reset();
+        route_cross_.reset();
         last_event_ = std::format("[door-passage] {}: started", door_);
     }
     void stop()
@@ -231,8 +250,56 @@ public:
         return std::exchange(preempted_, false);
     }
 
+    /// [DoorPassage] UseRoute: drive the passage as ONE planned route (header, ROUTE MODE). Takes effect at the next start().
+    void set_use_route(bool on)
+    {
+        std::scoped_lock lk(m_);
+        use_route_ = on;
+    }
+    [[nodiscard]] bool use_route() const
+    {
+        std::scoped_lock lk(m_);
+        return use_route_;
+    }
+    /// What the session is to drive this cycle (route mode): the published targets, read from the graph by update(). `key`
+    /// changes exactly when the route must be (re)built — another leg, a rebuild after a failure, another room frame — and
+    /// NOT when door_concept refines a target by millimetres: a route is a commitment, not a re-decision per cycle.
+    struct RouteLeg
+    {
+        std::string key;
+        std::string door;
+        bool through = false;                              ///< P_pre → P_ap → P_post (else: to P_pre and stop)
+        Eigen::Vector2f approach = Eigen::Vector2f::Zero();
+        float approach_yaw = 0.f;
+        std::optional<Eigen::Vector2f> cross;
+        float cross_yaw = 0.f;
+    };
+    enum class RouteReport { Arrived, Failed };
+    /// The session's word on the route of the CURRENT leg (`key` = the leg it was built for; a stale report is ignored).
+    void note_route(const std::string& key, RouteReport r, const std::string& why = {})
+    {
+        std::scoped_lock lk(m_);
+        if (not use_route_ or key != route_key_) return;
+        if (r == RouteReport::Arrived) { route_arrived_ = true; return; }
+        ++route_failures_;
+        if (route_failures_ < kMaxRouteFailures)
+        {
+            ++route_epoch_;   // a new key: the session rebuilds from where the robot stands now
+            last_event_ = std::format("[door-route] {}: the route failed ({}) — rebuilding once from the current pose", door_, why);
+            std::println("{}", last_event_);
+            return;
+        }
+        finish();
+        failed_ = true;
+        last_outcome_ = "cross_unreachable";
+        last_event_ = std::format("[door-route] {}: the route failed again ({}) — passage FAILED (cross_unreachable)", door_, why);
+        std::println("{}", last_event_);
+    }
+    static constexpr int kMaxRouteFailures = 2;   ///< the build or the drive failing twice ends the passage (one rebuild)
+
     struct Out
     {
+        std::optional<RouteLeg> route;                      ///< route mode: the leg to drive now (nullopt = drive nothing)
         std::string required;                               ///< "" = no restriction (passage idle or done)
         std::vector<std::vector<Eigen::Vector2f>> passages; ///< free corridor while crossing (room frame)
         std::unordered_set<std::string> exempt;             ///< node names that are not obstacles now
@@ -280,6 +347,8 @@ public:
                 return out;
             }
         }
+
+        if (use_route_ and step_ != Step::Close) return update_route(G, room_frame, std::move(out));
 
         // Jump to the latest step its producer is offering — EVEN WHILE THE CURRENT ONE IS BEING EXECUTED
         // (2026-10-12). A later step on offer is door_concept saying the current step's purpose is already met:
@@ -676,6 +745,207 @@ public:
         }
         return out;
     }
+
+private:
+    static constexpr const char* kRouteSuffix = "#route";   // the required name while a route drives: matched by none
+
+    /// Route mode's door reading: open = door_concept offers / executes `cross` (P(passable) above its offer band) or measures
+    /// the door more likely open than not (door_open_prob, the -1 sentinel excluded) while it holds a standing offer for this
+    /// door (a live owner, M-4) — and it does NOT offer `open` (its own MAP that the door is shut wins, try20).
+    [[nodiscard]] bool door_reads_open(DSR::DSRGraph& G) const
+    {
+        if (state_of(G, name_of(Step::Open)) == State::Offered) return false;
+        if (const State sc = state_of(G, name_of(Step::Cross)); sc == State::Offered or sc == State::Executing) return true;
+        bool owner_live = false;
+        for (Step s : {Step::Approach, Step::Cross})
+            if (const State st = state_of(G, name_of(s)); st == State::Offered or st == State::Executing) owner_live = true;
+        if (not owner_live) return false;
+        if (const auto dn = G.get_node(door_); dn.has_value())
+            if (const auto v = G.get_attrib_by_name<door_open_prob_att>(*dn); v.has_value() and *v >= 0.f and *v > 0.5f) return true;
+        return false;
+    }
+    /// An affordance's published target pose (x, y, yaw); nullopt = node or attribute absent / not finite.
+    [[nodiscard]] std::optional<std::pair<Eigen::Vector2f, float>> target_of(DSR::DSRGraph& G, Step s) const
+    {
+        const auto n = G.get_node(name_of(s));
+        if (not n.has_value()) return std::nullopt;
+        const auto x = G.get_attrib_by_name<epistemic_target_x_m_att>(*n);
+        const auto y = G.get_attrib_by_name<epistemic_target_y_m_att>(*n);
+        const auto yaw = G.get_attrib_by_name<epistemic_target_yaw_rad_att>(*n);
+        if (not x.has_value() or not y.has_value() or not std::isfinite(*x) or not std::isfinite(*y)) return std::nullopt;
+        return std::pair{Eigen::Vector2f(*x, *y), yaw.has_value() and std::isfinite(*yaw) ? *yaw : 0.f};
+    }
+    void route_event(Out& out, std::string e)   // under m_
+    {
+        out.event = std::move(e);
+        last_event_ = *out.event;
+    }
+    /// ROUTE MODE (header). Under m_.
+    Out update_route(DSR::DSRGraph& G, const std::string& room_frame, Out out)
+    {
+        const bool open_now = door_reads_open(G);
+        const auto appr = target_of(G, Step::Approach);
+        const auto cross = target_of(G, Step::Cross);
+        if (appr.has_value()) route_approach_ = *appr;   // the last published vantage (the open-wait keeps using it)
+        if (cross.has_value()) route_cross_ = *cross;
+
+        // ── the room switch: the robot is through (a room this door leads to — M-8 — or any other when unknown)
+        if (step_ == Step::Cross and not cross_room_.empty() and room_frame != cross_room_)
+        {
+            const auto targets = target_rooms(G);
+            if (targets.empty() or std::ranges::find(targets, room_frame) != targets.end())
+                return route_through(out, std::format("the room changed {} -> {}", cross_room_, room_frame));
+            if (target_ignored_logged_ != room_frame)
+            {
+                target_ignored_logged_ = room_frame;
+                std::println("[door-route] {}: the room changed {} -> {}, which this door does not lead to ({}) — not a switch "
+                             "through it", door_, cross_room_, room_frame, targets.front());
+            }
+        }
+        // ── the route's end, as the session reported it
+        if (std::exchange(route_arrived_, false))
+        {
+            if (step_ == Step::Cross) return route_through(out, "reached the point past the door (P_post)");
+            if (step_ == Step::Approach)
+            {
+                if (open_now and route_cross_.has_value())
+                {
+                    route_event(out, std::format("[door-route] {}: at the vantage, the door reads open — on through it", door_));
+                    enter_cross(room_frame);
+                }
+                else
+                {
+                    route_event(out, std::format("[door-route] {}: at the vantage (P_pre), the door reads shut — waiting for it to "
+                                                 "open ({})", door_, name_of(Step::Open)));
+                    step_ = Step::Open;
+                    seen_executing_ = false;
+                    attempts_ = 0;
+                }
+            }
+        }
+        // ── a door that opens / shuts changes the leg
+        if (step_ == Step::Approach and open_now and route_cross_.has_value())
+        {
+            route_event(out, std::format("[door-route] {}: the door reads open — the route goes on through it", door_));
+            enter_cross(room_frame);
+        }
+        if (step_ == Step::Open)
+        {
+            const State so = state_of(G, name_of(Step::Open));
+            if (so == State::Executing) seen_executing_ = true;
+            const auto on = G.get_node(name_of(Step::Open));
+            const bool open_satisfied = seen_executing_ and so == State::Completed and on.has_value()
+                                        and rc::affordance::read_outcome(*on) == rc::affordance::Outcome::Satisfied;
+            if (seen_executing_ and so == State::Completed and on.has_value() and not open_satisfied)
+            {
+                ++attempts_;   // as the chain: a failed open is the mission's door_wont_open
+                last_outcome_ = rc::affordance::to_string(rc::affordance::read_outcome(*on));
+                seen_executing_ = false;
+                route_event(out, std::format("[door-route] {}: {} ended {} (attempt {}) — waiting for it to be offered again", door_,
+                                             name_of(Step::Open), last_outcome_, attempts_));
+            }
+            if ((open_now or open_satisfied) and route_cross_.has_value())
+            {
+                if (so == State::Executing) preempted_ = true;   // the caller releases the claim on `open`
+                opened_ = true;
+                route_event(out, std::format("[door-route] {}: the door is open — the route continues through it", door_));
+                enter_cross(room_frame);
+            }
+        }
+        // ★ BACK TO THE OPEN-WAIT WHEN door_concept SAYS SHUT before the robot is through (the chain's "back to open" rule): the
+        //   route ends at P_pre again. Not once this passage opened it (a re-offer then is the flicker, try38).
+        if (step_ == Step::Cross and not opened_ and state_of(G, name_of(Step::Open)) == State::Offered)
+        {
+            route_event(out, std::format("[door-route] {}: {} is offered — the door is shut: the route stops at the vantage", door_,
+                                         name_of(Step::Open)));
+            step_ = Step::Approach;
+            cross_room_.clear();
+        }
+        if (step_ == Step::Done) { note_ = "done"; return out; }
+        if (static_cast<int>(step_) > static_cast<int>(stop_after_))   // `open door`: done once open
+        {
+            finish();
+            route_event(out, std::format("[door-route] {}: {} reached — passage DONE (it was asked to stop after {})", door_,
+                                         step_name(step_), step_name(stop_after_)));
+            return out;
+        }
+
+        // ── what to drive / require
+        if (step_ == Step::Open)
+        {
+            out.route.reset();
+            step_state_ = state_name(state_of(G, name_of(Step::Open)));
+            note_ = std::format("{} ({}) — at the vantage, door shut", name_of(Step::Open), step_state_);
+            out.required = name_of(Step::Open);
+            return out;
+        }
+        const bool through = step_ == Step::Cross;
+        if (not route_approach_.has_value() or (through and not route_cross_.has_value()))
+        {
+            const std::string what = route_approach_.has_value() ? name_of(Step::Cross) : name_of(Step::Approach);
+            if (route_wait_logged_ != what)
+            {
+                route_wait_logged_ = what;
+                route_event(out, std::format("[door-route] {}: waiting for door_concept to publish {}'s target", door_, what));
+            }
+            note_ = std::format("waiting for {}'s target", what);
+            step_state_ = "no target";
+            out.required = name_of(step_) + kRouteSuffix;
+            return out;
+        }
+        RouteLeg leg;
+        leg.door = door_;
+        leg.through = through;
+        leg.approach = route_approach_->first;
+        leg.approach_yaw = route_approach_->second;
+        if (route_cross_.has_value()) { leg.cross = route_cross_->first; leg.cross_yaw = route_cross_->second; }
+        leg.key = std::format("{}|{}|{}|{}", door_, through ? "through" : "approach", route_epoch_, room_frame);
+        route_key_ = leg.key;
+        out.route = std::move(leg);
+        out.required = name_of(step_) + kRouteSuffix;
+        step_state_ = "route";
+        note_ = std::format("{} (route{})", name_of(step_), through ? " through the door" : " to the vantage");
+        if (through)
+        {
+            out.exempt = {door_};
+            if (auto c = corridor(G, nullptr, room_frame); c.has_value()) out.passages.push_back(std::move(*c));
+        }
+        return out;
+    }
+    void enter_cross(const std::string& room_frame)   // under m_
+    {
+        step_ = Step::Cross;
+        cross_room_ = room_frame;
+        seen_executing_ = false;
+        attempts_ = 0;
+        route_arrived_ = false;
+    }
+    Out route_through(Out& out, const std::string& why)   // under m_
+    {
+        out.route.reset();
+        if (static_cast<int>(stop_after_) >= static_cast<int>(Step::Close))
+        {
+            step_ = Step::Close;
+            close_since_ms_ = now_ms();
+            seen_executing_ = false;
+            attempts_ = 0;
+            route_event(out, std::format("[door-route] {}: through ({}) — now closing the door behind", door_, why));
+            out.required = name_of(Step::Close);
+            note_ = std::format("{} (waiting)", name_of(Step::Close));
+            return out;
+        }
+        finish();
+        route_event(out, std::format("[door-route] {}: through ({}) — passage DONE", door_, why));
+        return out;
+    }
+    bool use_route_ = false;
+    int route_epoch_ = 0;
+    int route_failures_ = 0;
+    bool route_arrived_ = false;
+    std::string route_key_;
+    std::string route_wait_logged_;
+    std::optional<std::pair<Eigen::Vector2f, float>> route_approach_, route_cross_;
+public:
 
     [[nodiscard]] std::string status() const
     {

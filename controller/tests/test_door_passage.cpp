@@ -100,6 +100,14 @@ void set_cross_exec(DSR::DSRGraph& G, const std::string& door, float level)
     G.update_node(*d);
 }
 void completed(DSR::DSRGraph& G, const std::string& n, rc::affordance::Outcome o) { put(G, n, false, false, o); }
+/// A published target pose (x, y, yaw), as door_concept writes an affordance's target.
+void target(DSR::DSRGraph& G, const std::string& name, float x, float y, float yaw)
+{
+    place(G, name, x, y);
+    auto n = G.get_node(name);
+    G.add_or_modify_attrib_local<epistemic_target_yaw_rad_att>(*n, yaw);
+    G.update_node(*n);
+}
 }   // namespace
 
 int main()
@@ -822,6 +830,112 @@ int main()
         const auto out = p.update(*G, nullptr, "room_1");
         CHECK(p.view().step == Step::Cross);                                        // advanced, not parked on open
         CHECK(out.event.has_value() and out.event->find("already opened") != std::string::npos);
+    }
+
+    // ══ ROUTE MODE ([DoorPassage] UseRoute, 2026-10-24): ONE planned route instead of the affordance chain ══════════════════
+    using RR = DoorPassage::RouteReport;
+    const float down = -1.5707963f;
+    {   // a SHUT door: the route ends at the vantage, `open` runs there, then the route goes on through, done on the room switch
+        auto G = make_graph(60);
+        DoorPassage p;
+        p.set_clock(clock);
+        p.set_use_route(true);
+        p.start("door_r", Step::Cross);
+        offered(*G, "aff_door_r_approach");
+        target(*G, "aff_door_r_approach", 2.f, 1.6f, down);
+        auto out = p.update(*G, nullptr, "room_1");
+        CHECK(out.route.has_value() and not out.route->through);
+        CHECK(out.route.has_value() and (out.route->approach - Eigen::Vector2f(2.f, 1.6f)).norm() < 1e-4f);
+        CHECK(out.required.ends_with("#route"));                 // the selector takes nothing while the route drives
+        CHECK(p.view().step == Step::Approach);
+        const std::string k_appr = out.route->key;
+        target(*G, "aff_door_r_approach", 2.001f, 1.6f, down);  // door_concept refines its target by a millimetre
+        out = p.update(*G, nullptr, "room_1");
+        CHECK(out.route.has_value() and out.route->key == k_appr);   // …the route is a commitment: same key, no rebuild
+        p.note_route("stale|key", RR::Arrived);                   // a report for another leg is ignored
+        out = p.update(*G, nullptr, "room_1");
+        CHECK(p.view().step == Step::Approach);
+        p.note_route(k_appr, RR::Arrived);                        // at P_pre, the door shut
+        out = p.update(*G, nullptr, "room_1");
+        CHECK(p.view().step == Step::Open);
+        CHECK(not out.route.has_value());                         // the robot stops at the vantage
+        CHECK(out.required == "aff_door_r_open");                 // …and `open` runs as in the chain
+        CHECK(out.event.has_value() and out.event->find("shut") != std::string::npos);
+        offered(*G, "aff_door_r_open");   p.update(*G, nullptr, "room_1");
+        executing(*G, "aff_door_r_open"); p.update(*G, nullptr, "room_1");
+        satisfied(*G, "aff_door_r_open");                         // door_concept: perceived open
+        offered(*G, "aff_door_r_cross");
+        target(*G, "aff_door_r_cross", 2.f, -0.8f, down);
+        { DSR::Node m = DSR::Node::create<object_node_type>("door_r"); G->insert_node(m); }   // the door: the corridor's width
+        out = p.update(*G, nullptr, "room_1");
+        CHECK(p.view().step == Step::Cross);
+        CHECK(out.route.has_value() and out.route->through and out.route->cross.has_value());
+        CHECK(out.route.has_value() and out.route->key != k_appr);   // a new leg: rebuilt from the current pose
+        CHECK(not out.passages.empty() and out.exempt.contains("door_r"));   // the doorway corridor while going through
+        out = p.update(*G, nullptr, "room_2");                    // room_concept moved the robot: through
+        CHECK(p.view().step == Step::Done and not p.view().failed);
+        CHECK(not out.route.has_value() and out.required.empty());
+        CHECK(p.take_finished());
+    }
+    {   // an OPEN door from the start: one route P_pre -> P_ap -> P_post at once; done at its end (P_post)
+        auto G = make_graph(61);
+        DoorPassage p;
+        p.set_clock(clock);
+        p.set_use_route(true);
+        p.start("door_s", Step::Cross);
+        offered(*G, "aff_door_s_approach"); target(*G, "aff_door_s_approach", 2.f, 1.6f, down);
+        offered(*G, "aff_door_s_cross");    target(*G, "aff_door_s_cross", 2.f, -0.8f, down);
+        auto out = p.update(*G, nullptr, "room_1");
+        CHECK(p.view().step == Step::Cross);
+        CHECK(out.route.has_value() and out.route->through);
+        p.note_route(out.route->key, RR::Arrived);
+        out = p.update(*G, nullptr, "room_1");
+        CHECK(p.view().step == Step::Done and not p.view().failed);
+        CHECK(out.event.has_value() and out.event->find("P_post") != std::string::npos);
+    }
+    {   // BLOCKED TWICE: the first failure rebuilds (a new key, no attempt charged), the second ends it cross_unreachable
+        auto G = make_graph(62);
+        DoorPassage p;
+        p.set_clock(clock);
+        p.set_use_route(true);
+        p.start("door_t", Step::Cross);
+        offered(*G, "aff_door_t_approach"); target(*G, "aff_door_t_approach", 2.f, 1.6f, down);
+        auto out = p.update(*G, nullptr, "room_1");
+        const std::string k0 = out.route->key;
+        p.note_route(k0, RR::Failed, "the planner refused a hop");
+        out = p.update(*G, nullptr, "room_1");
+        CHECK(p.active() and not p.view().failed and p.view().attempts == 0);
+        CHECK(out.route.has_value() and out.route->key != k0);
+        p.note_route(out.route->key, RR::Failed, "blocked");
+        out = p.update(*G, nullptr, "room_1");
+        CHECK(p.view().step == Step::Done and p.view().failed);
+        CHECK(p.view().last_outcome == "cross_unreachable");
+        CHECK(not out.route.has_value());
+    }
+    {   // the door shuts again before the robot is through: back to the vantage (the route stops there)
+        auto G = make_graph(63);
+        DoorPassage p;
+        p.set_clock(clock);
+        p.set_use_route(true);
+        p.start("door_u", Step::Cross);
+        offered(*G, "aff_door_u_approach"); target(*G, "aff_door_u_approach", 2.f, 1.6f, down);
+        offered(*G, "aff_door_u_cross");    target(*G, "aff_door_u_cross", 2.f, -0.8f, down);
+        auto out = p.update(*G, nullptr, "room_1");
+        CHECK(out.route.has_value() and out.route->through);
+        G->delete_node("aff_door_u_cross");
+        offered(*G, "aff_door_u_open");                          // door_concept: shut, in reach
+        out = p.update(*G, nullptr, "room_1");
+        CHECK(p.view().step == Step::Approach and out.route.has_value() and not out.route->through);
+    }
+    {   // FLAG OFF: the affordance chain, unchanged — no route, the approach affordance required
+        auto G = make_graph(64);
+        DoorPassage p;
+        p.set_clock(clock);
+        p.start("door_v", Step::Cross);
+        offered(*G, "aff_door_v_approach"); target(*G, "aff_door_v_approach", 2.f, 1.6f, down);
+        const auto out = p.update(*G, nullptr, "room_1");
+        CHECK(not out.route.has_value());
+        CHECK(out.required == "aff_door_v_approach");
     }
 
     std::println("test_door_passage: {} checks, {} failures", checks, failures);

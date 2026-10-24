@@ -1013,6 +1013,14 @@ void SpecificWorker::load_params()
 		     "leaving the door open (no actuator offers none) — controller_door_passage.h");
 		session_.door_passage().set_close_wait_ms(static_cast<std::uint64_t>(std::max(0.0, close_wait_s) * 1000.0));
 	}
+	{
+		bool use_route = false;
+		cfgr.opt("DoorPassage.UseRoute", use_route,
+		     "true = a door passage is driven as ONE planned route (door_concept's approach vantage -> aperture -> cross "
+		     "target, RouteFollower over the grid planner); false = the approach/open/cross affordance chain — controller_door_passage.h");
+		session_.door_passage().set_use_route(use_route);
+		std::println("[door-passage] UseRoute = {}", use_route);
+	}
 	cfgr.opt("Mission.MetricsCsvPath", params.mission_csv_path,
          "One row of continuous trajectory statistics per completed run is appended here");
 	cfgr.opt("Mission.RunDir", params.mission_run_dir,
