@@ -28,6 +28,7 @@
 // If you want to reduce the period automatically due to lack of use, you must uncomment the following line
 //#define HIBERNATION_ENABLED
 
+#include "mission_room_hold.h"
 #include <genericworker.h>
 #include <Eigen/Dense>
 #include <atomic>
@@ -174,6 +175,7 @@ private:
 	public:
 		explicit MissionHost(SpecificWorker &w) : w_(w) {}
 		std::optional<std::string> start(const rc::mission::Step &leaf) override;
+		std::optional<std::string> start_now(const rc::mission::Step &leaf);   ///< the start itself (after the room-hold)
 		rc::mission::LeafStatus poll(const rc::mission::Step &leaf) override;
 		void cancel(const rc::mission::Step &leaf) override;
 		void say(const std::string &text) override;
@@ -182,6 +184,7 @@ private:
 		std::optional<double> eval(const rc::mission::Pred &p) override;
 	private:
 		SpecificWorker &w_;
+		rc::RoomHold hold_;                ///< a room-scoped step waiting for current_room to resolve (mission_room_hold.h)
 		std::string door_;                 ///< cross / open: the door the passage runs through
 		std::uint64_t target_epoch_ = 0;   ///< go_to: ControllerSession::manual_target_status().epoch it set
 		std::uint64_t motion_id_ = 0;      ///< move: RelativeMotion::View::id it started

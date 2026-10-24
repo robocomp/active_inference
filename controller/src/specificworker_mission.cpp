@@ -20,6 +20,7 @@
 // Everything here runs on the control thread.
 #include "specificworker.h"
 
+#include <chrono>
 #include <cmath>
 #include <format>
 #include <print>
@@ -31,6 +32,7 @@
 #include "../../common/mission/mission_json.h"
 #include "../../common/world_query/door_query.h"
 #include "mission_explored.h"
+#include "mission_room_hold.h"
 
 using rc::mission::LeafState;
 using rc::mission::LeafStatus;
@@ -38,7 +40,29 @@ using rc::mission::Ref;
 
 // ── Host ─────────────────────────────────────────────────────────────────────────────────────────────────────────
 
+namespace
+{
+std::uint64_t hold_clock_ms()
+{
+	return std::uint64_t(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
+}
+}   // namespace
+
+// A room-scoped step with no resolved room yet (the first room is still being born) is NOT YET: hold it (RoomHold, its own
+// budget) and start it once current_room resolves. Only a resolved DIFFERENT room is wrong_room (start_now).
 std::optional<std::string> SpecificWorker::MissionHost::start(const rc::mission::Step &leaf)
+{
+	hold_.clear();
+	if (rc::RoomHold::scoped(leaf) and w_.world_model_.graph_state().room_name.empty())
+	{
+		std::println("[mission] step {} ({}) waits: the current room is not resolved yet", leaf.id, leaf.op);
+		hold_.hold(leaf, hold_clock_ms());
+		return std::nullopt;
+	}
+	return start_now(leaf);
+}
+
+std::optional<std::string> SpecificWorker::MissionHost::start_now(const rc::mission::Step &leaf)
 {
 	const std::string &op = leaf.op;
 	const std::string here = w_.world_model_.graph_state().room_name;
@@ -149,6 +173,17 @@ void SpecificWorker::MissionHost::ground(const rc::mission::Step &leaf, const st
 LeafStatus SpecificWorker::MissionHost::poll(const rc::mission::Step &leaf)
 {
 	const std::string &op = leaf.op;
+	if (hold_.holding())
+	{
+		switch (hold_.check(w_.world_model_.graph_state().room_name, hold_clock_ms()))
+		{
+			case rc::RoomHold::Verdict::Waiting: return {};
+			case rc::RoomHold::Verdict::TimedOut: return {.state = LeafState::Failed, .detail = "room_unresolved"};
+			case rc::RoomHold::Verdict::Ready:
+				if (auto refused = start_now(leaf); refused.has_value()) return {.state = LeafState::Failed, .detail = *refused};
+				break;   // started: this very poll reports it as any started leaf
+		}
+	}
 	if (op == "cross" or op == "open")
 	{
 		const auto v = w_.session_.door_passage().view();
@@ -179,7 +214,9 @@ LeafStatus SpecificWorker::MissionHost::poll(const rc::mission::Step &leaf)
 	}
 	if (op == "explore")
 	{
-		if (w_.world_model_.graph_state().room_name != room_) return {.state = LeafState::Failed, .detail = "outside_room"};
+		// an empty room is "not resolved", not "left the room": only a resolved DIFFERENT room ends the step
+		if (const auto &now_in = w_.world_model_.graph_state().room_name; not now_in.empty() and now_in != room_)
+			return {.state = LeafState::Failed, .detail = "outside_room"};
 		return {};
 	}
 	if (op == "approach")
@@ -206,6 +243,7 @@ LeafStatus SpecificWorker::MissionHost::poll(const rc::mission::Step &leaf)
 void SpecificWorker::MissionHost::cancel(const rc::mission::Step &leaf)
 {
 	const std::string &op = leaf.op;
+	if (hold_.holding()) { hold_.clear(); return; }   // never started: nothing to stop
 	if (op == "cross" or op == "open")
 	{
 		if (w_.session_.door_passage().view().door == door_) w_.session_.door_passage().stop();
