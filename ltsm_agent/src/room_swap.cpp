@@ -1,5 +1,6 @@
 #include "room_swap.h"
 
+#include "room_forget.h"
 #include "../../common/room_resolve/room_resolve.h"   // rc::room::is_proto, current_edge_room
 
 #include <dsr/api/dsr_inner_eigen_api.h>
@@ -63,21 +64,37 @@ std::optional<DSR::Node> RoomSwap::robot_node() const
 
 int RoomSwap::drop_subtree(const std::string &memory_room)
 {
-    const auto room = mem_->get_node(memory_room);
-    if (not room.has_value()) return 0;
-    std::vector<std::uint64_t> ids;
-    for (const char *t : {"floor", "wall", "object", "metaconcept", "room"})
-        for (const auto &n : mem_->get_nodes_by_type(t))
-            if (n.id() != room->id() and ltsm::is_descendant(*mem_, n.id(), memory_room)) ids.push_back(n.id());
-    int removed = 0;
-    for (const auto id : ids) if (mem_->delete_node(id)) ++removed;
-    if (mem_->delete_node(room->id())) ++removed;
-    return removed;
+    // the walk (RT + parent attribute, passages with a face in it, deepest first) is plan_forget's
+    const auto plan = plan_forget(*mem_, memory_room, true);
+    return plan.has_value() ? forget(*mem_, plan.value()) : 0;
+}
+
+void RoomSwap::retire_all_late()
+{
+    for (const auto &m : late_) recall_.remove_recall_of(m);
+    late_.clear();
+}
+
+void RoomSwap::step()
+{
+    for (auto it = late_.begin(); it != late_.end();)
+    {
+        const auto rec = live_->get_node("recall_" + RoomRecall::live_name_of(*it));
+        if (not rec.has_value()) { it = late_.erase(it); continue; }
+        const auto room = live_->get_node(RoomRecall::live_name_of(*it));
+        if (room.has_value() and room->type() == "room" and live_->get_attrib_by_name<valid_att>(rec.value()).value_or(true))
+        {
+            recall_.remove_recall_of(*it);       // the room is live again: the recall did its job
+            it = late_.erase(it);
+        }
+        else ++it;
+    }
 }
 
 bool RoomSwap::swap(std::uint64_t known_room_id, const rc::recog::PoseMix &pose_in_k, std::uint64_t provisional_live_id)
 {
     if (state_ == State::Staged) return known_id_ == known_room_id;      // already staged for this room: idempotent
+    retire_all_late();                                                   // a stale recall (the twin's, after an undo) must not outlive this
 
     // the recognised room K: an archived room that is not a staged draft
     std::optional<DSR::Node> K;
@@ -135,6 +152,9 @@ bool RoomSwap::swap(std::uint64_t known_room_id, const rc::recog::PoseMix &pose_
                 }
             }
 
+    if (not twin.has_value() and anchor == robot->id())
+        qInfo() << "[swap] no crossed door of the room being left survives: the late recall hangs under the robot";
+
     // case B: T(K <- twin) now, while the provisional room is still live and the robot chain resolves
     std::optional<Mat::RTMat> twin_from_K;
     if (twin.has_value())
@@ -163,6 +183,7 @@ bool RoomSwap::swap(std::uint64_t known_room_id, const rc::recog::PoseMix &pose_
         unstage();
         return false;
     }
+    late_.insert(known_mem);
     Candidate c;
     c.discard = true;
     c.new_room_id = P->id();
@@ -170,6 +191,7 @@ bool RoomSwap::swap(std::uint64_t known_room_id, const rc::recog::PoseMix &pose_
     if (not ev_.evict(c).ok)
     {
         recall_.remove_recall_of(known_mem);
+        late_.erase(known_mem);
         unstage();
         return false;
     }
@@ -192,6 +214,7 @@ bool RoomSwap::undo()
 {
     if (state_ != State::Staged) return false;
     recall_.remove_recall_of(known_mem_);
+    late_.erase(known_mem_);
     if (promoted_case_)
     {
         if (const auto t = mem_->get_node(prov_twin_); t.has_value()) restore_subtype(*mem_, t.value(), prov_twin_subtype_);
@@ -206,7 +229,8 @@ bool RoomSwap::undo()
                 if (const auto T = live_->get_inner_eigen_api()->get_transformation_matrix(robot->name(), live_k->name()); T.has_value())
                     robot_from_K = T;
             if (robot_from_K.has_value())
-                recall_.post_late(robot->id(), prov_twin_, Mat::RTMat(robot_from_K.value() * twin_from_known_.value()), {});
+                if (recall_.post_late(robot->id(), prov_twin_, Mat::RTMat(robot_from_K.value() * twin_from_known_.value()), {}) != 0)
+                    late_.insert(prov_twin_);
         }
     }
     ev_.release(known_mem_);
@@ -222,7 +246,7 @@ void RoomSwap::on_room_left(const std::string &room)
 {
     if (state_ != State::Staged) return;
     if (not room.empty() and room != known_mem_ and room != RoomRecall::live_name_of(known_mem_)) return;
-    recall_.remove_recall_of(known_mem_);
+    retire_all_late();
     if (promoted_case_) drop_subtree(prov_twin_);                 // the undo window is closed: the draft goes
     ev_.release(known_mem_);
     qInfo().noquote() << QString::fromStdString(std::format("[swap] COMMITTED: left {}; {}", known_mem_,
@@ -235,9 +259,27 @@ void RoomSwap::on_room_left(const std::string &room)
 
 void RoomSwap::on_evict(const Candidate &cand)
 {
+    leaving_ = false;
     if (state_ != State::Staged or cand.discard) return;
     if (const auto old = live_->get_node(cand.old_room_id); old.has_value())
-        if (ev_.memory_prefix(old.value()) + old->name() == known_mem_) on_room_left(known_mem_);
+        if (ev_.memory_prefix(old.value()) + old->name() == known_mem_)
+        {
+            ev_.release(known_mem_);          // the robot is leaving K: the eviction must be able to write it. NOTHING is deleted yet.
+            leaving_ = true;
+        }
+}
+
+void RoomSwap::on_evicted(const Candidate &cand, bool ok)
+{
+    if (cand.discard) return;
+    if (ok)
+    {
+        if (leaving_) on_room_left(known_mem_);          // the eviction stood: the undo window closes, the staged twin goes
+        else if (state_ == State::Entering) retire_all_late();
+    }
+    else if (leaving_ and state_ == State::Staged)
+        ev_.hold(known_mem_);                            // it failed: the robot is still in K's undo window
+    leaving_ = false;
 }
 
 int RoomSwap::sweep_stale()
@@ -249,6 +291,8 @@ int RoomSwap::sweep_stale()
         if (node.name().starts_with("recall_") and live_->get_attrib_by_name<recall_late_att>(node).value_or(false))
             if (live_->delete_node(node.id())) ++n;
     if (state_ == State::Staged) ev_.release(known_mem_);
+    late_.clear();
+    leaving_ = false;
     state_ = State::Entering;
     known_mem_.clear(); prov_twin_.clear(); prov_twin_subtype_.clear();
     known_id_ = 0; promoted_case_ = false;

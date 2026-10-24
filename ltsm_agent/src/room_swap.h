@@ -20,6 +20,14 @@
  * The carry-over of the newly crossed door into K's twin (a passage with a face in both archives) is the next task's and
  * runs at the release.
  *
+ * LATE-ADOPTION CONTRACT (for room_concept, Task 9). The late recall node `recall_<room>` (type metaconcept, subtype
+ * "room_recall", recall_late = true) is owned by ltsm. room_concept re-births the room from it and fits it with the evidence it
+ * has. If that late-adoption fit REJECTS the recalled room, room_concept writes the existing registered bool attribute
+ * `valid = false` on that recall node (and must not delete it). RoomRecognizer polls it every cycle while a swap stands and
+ * requests the Undo; RoomSwap::undo() removes the recall and the recognizer is acknowledged. Absent or true = no objection.
+ * Every late recall RoomSwap posts (K's, and the staged twin's after an undo) is tracked: step() retires it once its room is
+ * live again (unless marked invalid), on_room_left()/on_evicted() when the robot leaves, sweep_stale() at start.
+ *
  * ANCHOR. The late recall hangs under the crossed door D of the room being left while it is still live (case A); when no
  * door survives (case B: the previous room is archived and P's mirror dies with P) it hangs under the robot, where
  * T(robot <- K) is the inverse of the pose the recogniser handed over (the robot in K).
@@ -33,6 +41,7 @@
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <set>
 #include <string>
 
 namespace ltsm
@@ -50,8 +59,13 @@ public:
     /// The undo window closes (the robot left the recognised room): drop the staged twin and the late recall, release the
     /// archive. `room` = the recognised room's live or memory name; empty = whichever is staged. Ignored when it names another.
     void on_room_left(const std::string &room = {});
-    /// The eviction path, before evict(): the room being left is the staged one => on_room_left().
+    /// The eviction path, BEFORE evict(): the room being left is the staged one => its hold is released (the very eviction that
+    /// moves `current` on would otherwise be refused). Nothing is deleted yet.
     void on_evict(const Candidate &cand);
+    /// The eviction path, AFTER evict(): on success the undo window closes (on_room_left); on failure the hold is restored.
+    void on_evicted(const Candidate &cand, bool ok);
+    /// One cycle: retire the late recalls whose room is live again.
+    void step();
     /// Startup: leftover staged twins (memory) and late recalls (live) from a crashed run. Returns how many nodes went.
     int sweep_stale();
 
@@ -64,6 +78,9 @@ private:
     RoomRecall &recall_;
 
     State state_ = State::Entering;
+    std::set<std::string> late_;                  ///< memory rooms whose late recall this class posted (and so retires)
+    bool leaving_ = false;                        ///< on_evict released the hold; on_evicted decides
+    void retire_all_late();
     std::string known_mem_;                       ///< memory name of the recognised room K
     std::uint64_t known_id_ = 0;
     bool promoted_case_ = false;                  ///< case B (the provisional room had a memory twin)

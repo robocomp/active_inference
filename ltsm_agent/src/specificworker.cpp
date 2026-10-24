@@ -398,16 +398,24 @@ void SpecificWorker::compute()
             // reshapes the graph itself -- P discarded, the crossed door in a passage -- which must not read as episode loss).
             if (rq.act == ltsm::RoomRecognizer::Step::Act::Swap)
             {
-                if (swap_->swap(rq.room_id, rq.pose_in_k, recognizer_->provisional_id())) recognizer_->on_swap_executed(rq.room_id);
+                if (swap_->swap(rq.room_id, rq.pose_in_k, recognizer_->provisional_id()))
+                {
+                    recognizer_->on_swap_executed(rq.room_id);
+                    if (not recognizer_->swapped())
+                        qWarning() << "[swap] the recogniser ignored the acknowledgement of the swap to room_id" << static_cast<qulonglong>(rq.room_id)
+                                   << "(episode or commit no longer matches); the undo window is driven by RoomSwap";
+                }
                 else recognizer_->on_swap_failed();
             }
             else if (rq.act == ltsm::RoomRecognizer::Step::Act::Undo)
             {
-                swap_->undo();
-                recognizer_->on_undo_executed();
+                if (swap_->undo()) recognizer_->on_undo_executed();
+                else qWarning() << "[swap] UNDO requested for room_id" << static_cast<qulonglong>(rq.room_id) << "but no swap stands";
             }
-            // the episode is over (the robot left the recognised room): the undo window closes
-            if (swap_->state() == ltsm::RoomSwap::State::Staged and not recognizer_->swapped()) swap_->on_room_left();
+            // The undo window is RoomSwap's (state()), closed by the eviction that leaves the recognised room. Backstop: the
+            // recogniser's episode is over (provisional_id() == 0) while a swap still stands.
+            if (swap_->state() == ltsm::RoomSwap::State::Staged and recognizer_->provisional_id() == 0) swap_->on_room_left();
+            swap_->step();
         }
     }
     if (recall_) recall_->step();
@@ -486,6 +494,7 @@ bool SpecificWorker::step_eviction()
 
     if (swap_) swap_->on_evict(cand.value());       // leaving the recognised room closes the undo window first
     const auto out = evictor->evict(cand.value());
+    if (swap_) swap_->on_evicted(cand.value(), out.ok);
     if (not out.ok)
     {
         qWarning() << "[eviction] NOT DONE:" << QString::fromStdString(out.reason)
@@ -620,6 +629,7 @@ bool SpecificWorker::step_promotion()
 
         if (swap_) swap_->on_evict(cand.value());
         const auto out = evictor->evict(cand.value());
+        if (swap_) swap_->on_evicted(cand.value(), out.ok);
         if (not out.ok)
         {
             qWarning() << "[promotion] NOT DONE:" << QString::fromStdString(out.reason);

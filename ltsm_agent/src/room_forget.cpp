@@ -2,6 +2,7 @@
  * room_forget.cpp — see room_forget.h.
  */
 #include "room_forget.h"
+#include "room_eviction.h"   // is_staged_room
 
 #include <QDebug>
 
@@ -14,10 +15,11 @@
 namespace ltsm
 {
 
-std::optional<ForgetPlan> plan_forget(DSR::DSRGraph &mem, const std::string &room)
+std::optional<ForgetPlan> plan_forget(DSR::DSRGraph &mem, const std::string &room, bool allow_staged)
 {
     const auto r = mem.get_node(room);
     if (not r.has_value() or r->type() != "room") return std::nullopt;
+    if (not allow_staged and is_staged_room(mem, r.value())) return std::nullopt;
 
     // parent -> children by the `parent` attribute: catches a node hung below the room whose RT edge was never
     // written (or was lost), which an RT-only walk would leave dangling.

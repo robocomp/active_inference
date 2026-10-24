@@ -32,8 +32,9 @@ struct ForgetPlan
     std::uint64_t room_id = 0;
 };
 
-/// nullopt when `room` is not a room node of `mem`.
-std::optional<ForgetPlan> plan_forget(DSR::DSRGraph &mem, const std::string &room);
+/// nullopt when `room` is not a room node of `mem`, or is a STAGED draft (RoomSwap's undo snapshot is not the user's to forget;
+/// RoomSwap itself passes allow_staged to drop one).
+std::optional<ForgetPlan> plan_forget(DSR::DSRGraph &mem, const std::string &room, bool allow_staged = false);
 
 /// Execute a plan. Returns the number of nodes deleted (passages + subtree + room).
 int forget(DSR::DSRGraph &mem, const ForgetPlan &plan);

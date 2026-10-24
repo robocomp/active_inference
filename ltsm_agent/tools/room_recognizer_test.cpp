@@ -424,6 +424,36 @@ int main(int argc, char **argv)
         s.prov = s.mirror;
     }
 
+    std::printf("late_adoption_failure_requests_undo\n");
+    {
+        Scenario s(false, robot_in_r3_w);
+        ltsm::RoomRecognizer::Step st;
+        for (int i = 0; i < 5 and st.act == ltsm::RoomRecognizer::Step::Act::None; ++i) st = s.rec.step();
+        s.rec.on_swap_executed(3);
+        live->delete_node(s.mirror);
+        live->delete_node(s.prov);
+        DSR::Node rn; rn.type("metaconcept"); rn.name("recall_room_3");
+        live->add_or_modify_attrib_local<object_subtype_att>(rn, std::string("room_recall"));
+        live->add_or_modify_attrib_local<room_id_att>(rn, std::uint64_t(3));
+        live->add_or_modify_attrib_local<recall_late_att>(rn, true);
+        const auto rid = live->insert_node(rn).value();
+        bool any = false;
+        for (int i = 0; i < 3; ++i) any = any or s.rec.step().act != ltsm::RoomRecognizer::Step::Act::None;
+        check(not any and s.rec.swapped(), "recall present, no objection: the swap is held");
+        auto n2 = live->get_node(rid).value();
+        live->add_or_modify_attrib_local<valid_att>(n2, true);
+        live->update_node(n2);
+        check(s.rec.step().act == ltsm::RoomRecognizer::Step::Act::None, "valid = true: still no objection");
+        live->add_or_modify_attrib_local<valid_att>(n2, false);          // room_concept: the late-adoption fit rejected K
+        live->update_node(n2);
+        const auto u = s.rec.step();
+        check(u.act == ltsm::RoomRecognizer::Step::Act::Undo and u.room_id == 3 and not s.rec.swapped(), "valid = false on the late recall: Undo requested");
+        s.rec.on_undo_executed();
+        live->delete_node(rid);
+        s.mirror = live_door("door_9", live_r2);
+        s.prov = s.mirror;
+    }
+
     std::printf("failed_swap_reverts_to_entering\n");
     {
         Scenario s(false, robot_in_r3_w);

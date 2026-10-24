@@ -271,9 +271,14 @@ int main(int argc, char **argv)
         check(not out.ok and out.reason.starts_with("deferred"), "evict of the recalled room is deferred while Staged");
         check(snapshot_room("r3_room_3") == snapK and not mem->get_node("r3_extra").has_value(), "nothing was written into the known twin");
         f.sw.on_evict(c);
-        check(f.sw.state() == ltsm::RoomSwap::State::Entering, "on_evict (the robot leaves K) closes the window");
+        check(f.sw.state() == ltsm::RoomSwap::State::Staged and not f.ev.held("r3_room_3"), "on_evict only releases the hold: still Staged");
+        f.sw.on_evicted(c, false);
+        check(f.ev.held("r3_room_3") and f.sw.state() == ltsm::RoomSwap::State::Staged, "a failed eviction restores the hold");
+        f.sw.on_evict(c);
         const auto out2 = f.ev.evict(c);
         check(out2.ok and mem->get_node("r3_extra").has_value(), "after the release the eviction writes as usual");
+        f.sw.on_evicted(c, out2.ok);
+        check(f.sw.state() == ltsm::RoomSwap::State::Entering and recall_nodes() == 0, "a successful eviction closes the window and drops the late recall");
     }
 
     std::printf("entering_the_staged_room_flips_current_without_writing_into_it\n");
@@ -306,6 +311,32 @@ int main(int argc, char **argv)
         check(f.sw.swap(3, pose_k(), live_P), "swap again");
         check(f.recall.late_count() == 1 and recall_nodes() == 1, "exactly one late recall node, no orphan recall_*");
         check(f.sw.undo() and recall_nodes() == 0, "and undo leaves none");
+    }
+
+    std::printf("turn_around_promoted_case_leaves_no_orphan_recall\n");
+    {
+        reset(); build_memory(true); build_live(true);
+        Fix f;
+        check(f.sw.swap(3, pose_k(), live_P), "swap");
+        check(recall_nodes() == 1, "staged: exactly one recall (K's)");
+        check(f.sw.undo(), "undo");
+        check(live->get_node("recall_room_4").has_value() and recall_nodes() == 1, "the twin's recall is posted (and tracked)");
+        live_P = live_node("room", "room_4", robot_id, 1, 2, -0.3, 4);               // room_concept re-births P from it
+        live_M = live_node("object", "door_9", live_P, 1, 0, 1, std::nullopt, "door");
+        set_current(live_P);
+        f.sw.step();
+        check(recall_nodes() == 0, "step retires the twin's recall once its room is live again");
+        check(f.sw.swap(3, pose_k(), live_P), "swap again");
+        check(recall_nodes() == 1 and live->get_node("recall_room_3").has_value(), "staged again: exactly one recall");
+        f.sw.on_room_left("room_3");
+        check(recall_nodes() == 0 and not mem->get_node("r4_room_4").has_value(), "after leaving: no recall_* remains, the twin is gone");
+        // undo, then the robot leaves with the twin's recall still outstanding
+        reset(); build_memory(true); build_live(true);
+        Fix g;
+        check(g.sw.swap(3, pose_k(), live_P) and g.sw.undo() and recall_nodes() == 1, "swap, undo: the twin's recall outstanding");
+        ltsm::Candidate c; c.old_room_name = "room_x";
+        g.sw.on_evicted(c, true);
+        check(recall_nodes() == 0, "the robot leaving retires it");
     }
 
     std::printf("stale_staged_swept_at_start\n");

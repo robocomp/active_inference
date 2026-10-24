@@ -88,6 +88,7 @@ Map build(DSR::DSRGraph &mem, const std::string &anchor,
     const auto is_anchor = [&](const DSR::Node &n)
     { return n.name() == anchor or (n.name().starts_with('r') and n.name().ends_with("_" + anchor)); };
     auto room_nodes = mem.get_nodes_by_type("room");
+    std::erase_if(room_nodes, [&](const DSR::Node &n) { return ltsm::is_staged_room(mem, n); });   // a staged draft is not on the map
     std::ranges::sort(room_nodes, [&](const DSR::Node &l, const DSR::Node &r)
     {
         if (is_anchor(l) != is_anchor(r)) return is_anchor(l);

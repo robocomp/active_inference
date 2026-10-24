@@ -266,6 +266,23 @@ RoomRecognizer::Step RoomRecognizer::held_step(Step out)
 {
     // The swap stands. Its own effects reshape the graph (P gone before `current` moves, the crossed door in a passage),
     // so nothing here is judged. Only the robot LEAVING the committed room ends the episode, and with no Undo.
+    // ADOPTION FAILED (the contract in room_swap.h): room_concept marks the late recall of the committed room `valid = false`
+    // when its late-adoption fit rejects the recalled room. That is the evidence after execution: request the Undo.
+    if (commit_.room >= 0 and commit_.room < int(ids_.size()))
+        for (const auto &n : live_->get_nodes_by_type("metaconcept"))
+            if (subtype_of(*live_, n) == "room_recall" and n.name().starts_with("recall_")
+                and live_->get_attrib_by_name<room_id_att>(n).value_or(0) == ids_[commit_.room]
+                and not live_->get_attrib_by_name<valid_att>(n).value_or(true))
+            {
+                out.act = Step::Act::Undo;
+                out.room_index = commit_.room;
+                out.room_id = ids_[commit_.room];
+                if (commit_.room < int(post_entry_.size())) out.pose_in_k = post_entry_[commit_.room].pose_in_k;
+                commit_ = {rc::recog::Commit::State::Entering, -1};
+                swap_ack_ = false;
+                qInfo().noquote() << QString::fromStdString(std::format("[recog] UNDO requested: late adoption of room_id {} failed", out.room_id));
+                return out;
+            }
     const auto cur = rc::room::current_edge_room(*live_);
     if (not cur.has_value()) return out;
     const auto room = live_->get_node(cur.value());
