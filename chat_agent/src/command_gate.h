@@ -24,6 +24,7 @@
  *
  * Plus the two deterministic fast paths that bypass the model entirely:
  *   is_stop(text)       ^(stop|para|detente|alto)\b   → `stop` immediately
+ *   is_pause / is_continue / is_cancel_mission   the running mission's pause, go-on and kill (same anchoring)
  *   parse_direct(text)  text already in the controller grammar (cross door / cross door_N / uncross /
  *                       move <m> / turn <deg> / turn <deg> move <m>) → the same validation as the tool
  *
@@ -180,6 +181,39 @@ inline bool is_stop(const std::string& text)
     static const std::regex program(R"(agent|concept|program|proce[sx]|retina|controll?er|controlador|ltsm|episodic|_)");
     const std::string t = ascii_lower_trim(text);
     return std::regex_search(t, re) and not std::regex_search(t, program);
+}
+
+namespace gate_detail
+{
+/// The is_stop rule for the mission's fast-path words: `re` at the start, and no program named in the rest.
+inline bool anchored_word(const std::string& text, const std::regex& re)
+{
+    static const std::regex program(R"(agent|concept|program|proce[sx]|retina|controll?er|controlador|ltsm|episodic|_)");
+    const std::string t = ascii_lower_trim(text);
+    return std::regex_search(t, re) and not std::regex_search(t, program);
+}
+}   // namespace gate_detail
+
+/// ^(pause|pausa|espera)\b — hold the running mission where it is (controller word `pause`), without the model.
+inline bool is_pause(const std::string& text)
+{
+    static const std::regex re(R"(^(pause|pausa|espera)\b)");
+    return gate_detail::anchored_word(text, re);
+}
+
+/// ^(continue|resume|sigue|continúa)\b — go on: `unpause` a paused mission, else `resume` (ends a `wait`).
+inline bool is_continue(const std::string& text)
+{
+    static const std::regex re(R"(^(continue|resume|sigue|contin(u|ú)a)\b)");
+    return gate_detail::anchored_word(text, re);
+}
+
+/// ^(cancel the mission|abort|cancela la misión)\b — kill the mission (controller word `cancel`); the robot stays.
+/// A bare "cancel" is not one: it may mean the passage, the plan or the answer.
+inline bool is_cancel_mission(const std::string& text)
+{
+    static const std::regex re(R"(^(cancel (the )?mission|abort|aborta|cancela (la )?misi(o|ó)n)\b)");
+    return gate_detail::anchored_word(text, re);
 }
 
 /// Locale-proof number (CLAUDE.md: never strtod/stod under es_ES).

@@ -16,6 +16,7 @@
 
 #include "../../common/episodic/em_query_dsr.h"            // rc::em::load_store
 #include "../../common/graph_provenance/creation_stamp.h"   // rc::provenance::now_ms
+#include "../../common/room_resolve/room_resolve.h"
 #include <opencv2/imgcodecs.hpp>
 
 #include "approach.h"
@@ -87,6 +88,7 @@ ChatSession::~ChatSession()
 
 void ChatSession::start()
 {
+    start_ms_ = rc::provenance::now_ms();
     window_ = std::make_unique<ChatWindow>(ChatWindow::Callbacks{
         .on_send = [this](const QString& t) { on_user_text(t); },
         .on_cancel = [this]()
@@ -102,6 +104,7 @@ void ChatSession::start()
         {
             planner_.reset();            // before cancel(): its error callback then has no job to answer
             pending_mission_.reset();
+            fix_key_.clear();            // a failure's fix belongs to the conversation that heard of it (wakes stay)
             llm_.cancel();
             window_->set_busy(false);
             history_.clear();
@@ -298,6 +301,10 @@ void ChatSession::on_user_text(const QString& text)
         push_history({{"role", "assistant"}, {"content", "Stopping the robot now."}});
         return;
     }
+    // 1d. pause / continue / cancel the running mission: the person's alone, never the model's (spec §5.6).
+    if (is_pause(t)) { mission_control("pause", text); return; }
+    if (is_continue(t)) { mission_control("continue", text); return; }
+    if (is_cancel_mission(t)) { mission_control("cancel", text); return; }
     // 1a. a plain yes to agent_control's question: carried out here, not by the model (which answered "yes" by saying
     //     the agent was stopped without calling the tool, eval 2026-10-19).
     if (const auto& pend = fleet_confirmations_.pending(); pend.has_value() and fleet::is_yes(text.toStdString()))
@@ -1191,6 +1198,10 @@ void ChatSession::on_planned(const QString& reply)
         return;
     }
     m->request = planner_->request_text.toStdString();
+    // A plan written in answer to a failure's wake (its own turn, or the person's answer to an ASK) repairs that
+    // mission: the card carries its key, and EM links the two. Any later plan is a new subject.
+    if (not fix_key_.empty() and fix_still_open(fix_turn_, user_turn_)) m->fixes = fix_key_;
+    fix_key_.clear();
     if (pending_mission_.has_value())   // a repair round planned again while the first card waits
     {
         log_.write("mission_card_replaced", QJsonObject{{"card", static_cast<qint64>(pending_mission_->serial)}});
@@ -1773,11 +1784,18 @@ bool ChatSession::send_command(const std::string& command, const char* origin)
 // The controller's report on the last command, every 250 ms.
 void ChatSession::tick_status()
 {
+    // Wakes queued on an EARLIER tick: by now the command's own end (robot_status, below) is in the history before the
+    // wake, never after the model has been asked.
+    drain_wakes();
     {   // whatever the mission's source: chat, remote_cmd.txt, the panel
         auto u = mission_watch_.poll();
-        if (u.mission.has_value()) mission_progress_ = {};   // a new mission: the old one's progress is not its
-        if (u.progress.has_value()) mission_progress_ = *u.progress;   // the STATE's mission line (ask_model)
+        if (u.mission.has_value())
+        {
+            mission_progress_ = {};   // a new mission: the old one's progress is not its
+            mission_ir_ = u.mission->first;
+        }
         if (window_ and u.mission.has_value()) window_->set_plan(u.mission->first, QString::fromStdString(u.mission->second));
+        if (u.progress.has_value()) on_mission_progress(*u.progress);   // + the STATE's mission line (ask_model)
         if (window_ and u.progress.has_value()) window_->set_plan_progress(*u.progress);
     }
     if (sent_command_.empty()) return;
@@ -1800,9 +1818,25 @@ void ChatSession::tick_status()
     if (state == seen_state_ and step == seen_step_ and event == seen_event_) return;
     log_.write("intention_state", QJsonObject{{"command", q(display_command(sent_command_))}, {"state", q(state)}, {"bt_state", q(s.bt_state)}});
 
-    if (state == "in_progress")
+    // A mission (the chat's JSON) and the words about one (pause / unpause / cancel / resume) are told by the
+    // progress lines of controller_mission (on_mission_progress); this node only repeats them, under the word's name.
+    const bool about_mission = sent_command_.starts_with('{');
+    const bool mission_word = sent_command_ == "pause" or sent_command_ == "unpause" or sent_command_ == "cancel"
+                              or sent_command_ == "resume";
+    if (mission_word)
     {
-        if (step != seen_step_ or event != seen_event_)
+        // Only a refusal is news: the word was not taken (the mission ended meanwhile), the mission's own end is not.
+        if (not reported_end_ and state.starts_with("failed") and not mission_progress_.status.starts_with("failed"))
+        {
+            reported_end_ = true;
+            QString line = QStringLiteral("'%1' refused").arg(q(sent_command_));
+            if (const auto bar = state.find('|'); bar != std::string::npos) line += " — " + q(state.substr(bar + 1));
+            window_->append_robot(line);
+        }
+    }
+    else if (state == "in_progress")
+    {
+        if (not about_mission and (step != seen_step_ or event != seen_event_))
         {
             QString line = q(step);
             if (not event.empty() and event != seen_event_) line += " — " + q(event);
@@ -1830,6 +1864,117 @@ void ChatSession::tick_status()
     seen_state_ = state;
     seen_step_ = step;
     seen_event_ = event;
+}
+
+void ChatSession::on_mission_progress(rc::mission::Progress now)
+{
+    rc::mission::Progress before = std::exchange(mission_progress_, now);
+    if (before.serial != now.serial) before = {};   // another mission's snapshot is no baseline for this one
+    // A mission already under way (or over) when this chat started is a baseline, not news: no lines, no wakes.
+    if (not mission_primed_)
+    {
+        mission_primed_ = true;
+        if (now.status.empty() or (now.t0 != 0 and now.t0 < start_ms_)) return;   // t0 = 0: started, not ticked yet
+    }
+    if (not window_) return;
+    for (const auto& line : progress_lines(before, now, mission_ir_)) window_->append_robot(q(line));
+    // ★ Only the chat's own missions wake the model: one from remote_cmd.txt or the panel is shown, never talked about.
+    if (now.source != "chat") return;
+    const auto queue = [this, &now](std::string kind, std::string note, std::string fixes = {})
+    {
+        log_.write("wake_queued", QJsonObject{{"kind", q(kind)}, {"mission", static_cast<qint64>(now.serial)}, {"note", q(note)}});
+        wakes_.push(std::move(note), std::move(fixes));
+    };
+    if (const auto topics = new_reports(before, now, mission_ir_); not topics.empty())
+    {
+        // ★ The snapshot is taken NOW, as the step runs: the robot goes on moving while the model writes (spec §5.3).
+        tick_digest();
+        const std::string room = physical_room();
+        auto objects = digest_.objects;
+        if (room != digest_.facts.room)   // the first visit of a proto-room: `current` still names the room left
+            for (auto& o : objects) o.in_current_room = not room.empty() and o.room == room;
+        const std::string seen = answer_find_objects(std::move(objects), "", room);
+        for (const auto& topic : topics) queue("report", report_wake(topic, room, seen));
+    }
+    if (now.status.starts_with("failed|") and not before.status.starts_with("failed|"))
+        if (const auto note = failure_wake(now, mission_ir_); note.has_value())
+            queue("failure", *note, std::format("m{}", now.serial));
+    if (now.status == "completed" and before.status != "completed") queue("summary", summary_wake(now));
+}
+
+void ChatSession::drain_wakes()
+{
+    // ★ Never while a model request or a planner job is in flight: a wake is not the person speaking, so it must not
+    //   resolve a plan (on_user_text's rule) nor interleave with a tool round.
+    const auto note = wakes_.pop_if_idle(llm_.busy() or planner_.has_value());
+    if (not note.has_value()) return;
+    if (not wakes_.last_fixes().empty())
+    {
+        fix_key_ = wakes_.last_fixes();
+        fix_turn_ = user_turn_;
+    }
+    log_.write("wake", QJsonObject{{"note", q(*note)}, {"fixes", q(wakes_.last_fixes())}});
+    draw_repairs_ = 0;
+    lost_answers_ = 0;
+    if (not ollama_ok_) ping_llm();
+    push_history({{"role", "user"}, {"content", q(wake_message(*note))}});
+    ask_model(false);
+}
+
+std::string ChatSession::physical_room() const
+{
+    // room_resolve.h rule 2a, without rule 1 in front of it: the room whose robot RT is still LIVE is where the pose is
+    // being published, i.e. where the robot is, even while ltsm's `current` names the room it has just left.
+    std::string live;
+    int n = 0;
+    for (const auto& e : G_->get_edges_by_type("RT"))
+    {
+        const auto a = G_->get_node(e.from());
+        const auto b = G_->get_node(e.to());
+        if (not a.has_value() or not b.has_value()) continue;
+        const DSR::Node* room = a->type() == "room" and b->type() == "robot"   ? &*a
+                                : b->type() == "room" and a->type() == "robot" ? &*b
+                                                                               : nullptr;
+        if (room == nullptr or not G_->get_attrib_by_name<valid_att>(e).value_or(true)) continue;
+        live = room->name();
+        ++n;
+    }
+    return n == 1 ? live : digest_.facts.room;
+}
+
+void ChatSession::mission_control(std::string_view what, const QString& text)
+{
+    const std::string& st = mission_progress_.status;
+    const bool paused = st.starts_with("paused|");
+    const bool running = paused or st == "in_progress";
+    std::string word;
+    QString reply;
+    if (what == "pause")
+    {
+        if (paused) reply = QStringLiteral("The mission is already paused. Say \"continue\" to go on.");
+        else if (running) { word = "pause"; reply = QStringLiteral("Pausing the mission."); }
+        else reply = QStringLiteral("There is no mission to pause.");
+    }
+    else if (what == "continue")
+    {
+        // ★ unpause and resume are different words (Task 4): unpause restarts the paused step, resume ends a `wait`.
+        if (paused) { word = "unpause"; reply = QStringLiteral("Continuing the mission: the interrupted step starts again."); }
+        else if (running) { word = "resume"; reply = QStringLiteral("Continuing the mission."); }
+        else reply = QStringLiteral("There is no mission to continue.");
+    }
+    else
+    {
+        if (running) { word = "cancel"; reply = QStringLiteral("Cancelling the mission. The robot stays where it is."); }
+        else reply = QStringLiteral("There is no mission to cancel.");
+    }
+    log_.write("fast_path", QJsonObject{{"kind", q(std::string(what))}, {"status", q(st)}, {"word", q(word)}});
+    if (not word.empty() and not send_command(word, "fast_path"))
+        reply = QStringLiteral("I could not send '%1' to the controller.").arg(q(word));
+    window_->begin_assistant();
+    window_->append_token(reply);
+    window_->end_assistant();
+    push_history({{"role", "user"}, {"content", text}});
+    push_history({{"role", "assistant"}, {"content", reply}});
 }
 
 // ── agent_control: start / stop / restart a fleet agent (fleet_control.h) ────────────────────────────────────────

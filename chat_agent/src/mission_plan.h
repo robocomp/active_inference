@@ -11,11 +11,14 @@
  *   strip_fence / planned_ask / check_planned   the planner reply → `ask:` question, or a card-ready mission.
  *   card_still_valid  the yes to a mission card must be the person's very next message.
  *   plan_still_wanted a planner reply is discarded once the person has spoken again.
+ *   WakeQueue / *_wake  a robot event (report, failure, completion) for the model, held until it is idle.
+ *   fix_still_open    how long a failure's wake may still stamp a planned mission as its fix.
  */
 
 #include <algorithm>
 #include <cctype>
 #include <cstdint>
+#include <deque>
 #include <expected>
 #include <format>
 #include <functional>
@@ -252,6 +255,95 @@ inline std::string paused_at(const rc::mission::Progress& p)
             if (const auto t = s->string("text")) out.push_back(*t);
     }
     return out;
+}
+
+// ── wakes: the robot, not the person, has something to say (spec §5.1 steps 7-8, §5.5) ─────────────────────────
+
+/// Robot events for the model, oldest first. A note waits while the model (or the planner) is busy and is never
+/// dropped: the next idle tick takes it. A failure's note carries the key of the mission it failed ("m12") so the
+/// mission planned in answer can say what it fixes (Mission::fixes).
+struct WakeQueue
+{
+    void push(std::string note, std::string fixes = {}) { q_.push_back({std::move(note), std::move(fixes)}); }
+    [[nodiscard]] std::optional<std::string> pop_if_idle(bool busy)
+    {
+        if (busy or q_.empty()) return std::nullopt;
+        auto [note, fixes] = std::move(q_.front());
+        q_.pop_front();
+        last_fixes_ = std::move(fixes);
+        return note;
+    }
+    [[nodiscard]] const std::string& last_fixes() const { return last_fixes_; }   ///< of the last popped note
+    [[nodiscard]] bool empty() const { return q_.empty(); }
+
+private:
+    std::deque<std::pair<std::string, std::string>> q_;
+    std::string last_fixes_;
+};
+
+/// A wake goes to the model as a user-role message that says it is NOT the person speaking.
+[[nodiscard]] inline std::string wake_message(std::string_view note)
+{
+    return "(robot event, not the person) " + std::string(note);
+}
+
+/// The `report` step ran: its topic and the room's objects AT THAT INSTANT (the robot keeps moving while the model
+/// writes, so the answer is about the snapshot, never about the STATE of the reply's time; spec §5.3).
+[[nodiscard]] inline std::string report_wake(std::string_view topic, std::string_view room, std::string_view objects)
+{
+    return std::format("The mission reached its report step: \"{}\". When it ran the robot was in {}, and this is what "
+                       "find_objects answered then:\n{}\nTell the person about it now, from this snapshot only (the robot "
+                       "may have moved on since: the STATE is no longer about that room). The mission goes on by itself.",
+                       topic, room.empty() ? std::string_view("an unknown room") : room, objects);
+}
+
+/// The top-level steps not done (neither satisfied nor skipped), by their line names, in mission order.
+[[nodiscard]] inline std::vector<std::string> undone_steps(const rc::mission::Progress& p, const rc::mission::Mission& m)
+{
+    using namespace mission_plan_detail;
+    using SS = rc::mission::Interpreter::StepState;
+    std::vector<std::string> out;
+    for (const auto& s : m.steps)
+    {
+        const auto* v = view_of(p, s.id);
+        if (v and (v->state == SS::Satisfied or v->state == SS::Skipped)) continue;
+        out.push_back(name_of(s));
+    }
+    return out;
+}
+
+/// `failed|<step>|<outcome>` → what failed, how, what is left, and what the model is to do about it; nullopt when the
+/// mission has not failed.
+[[nodiscard]] inline std::optional<std::string> failure_wake(const rc::mission::Progress& p, const rc::mission::Mission& m)
+{
+    using namespace mission_plan_detail;
+    if (not p.status.starts_with("failed|")) return std::nullopt;
+    const std::string rest = p.status.substr(7);
+    const auto bar = rest.find('|');
+    const std::string step = rest.substr(0, bar);
+    const std::string outcome = bar == std::string::npos ? std::string("no reason given") : rest.substr(bar + 1);
+    std::string undone;
+    for (const auto& u : undone_steps(p, m)) undone += (undone.empty() ? "" : "; ") + u;
+    return std::format("The mission \"{}\" failed at step {}: {}. Steps not done: {}. Tell the person what happened in "
+                       "one or two sentences, then either propose a fix with plan_mission (a new mission that finishes "
+                       "what is left and brings the robot back where the person wanted it; it only shows a card, and runs "
+                       "only on their yes) or explain why there is none. No step is retried by itself.",
+                       p.title, name_of(m, step), outcome, undone.empty() ? std::string("none") : undone);
+}
+
+/// `completed` → one closing sentence.
+[[nodiscard]] inline std::string summary_wake(const rc::mission::Progress& p)
+{
+    const double s = p.t1 > p.t0 ? double(p.t1 - p.t0) / 1000.0 : 0.0;
+    return std::format("The mission \"{}\" completed ({:.0f} s, every step done). Close it for the person in one short "
+                       "sentence; do not repeat what you already reported.", p.title, s);
+}
+
+/// A failure's wake was delivered at user turn `fix_turn`: a card planned in that same turn, or in answer to the
+/// person's next message (an ASK: their answer), is the fix; anything later is a new subject.
+[[nodiscard]] constexpr bool fix_still_open(std::uint64_t fix_turn, std::uint64_t user_turn)
+{
+    return user_turn == fix_turn or user_turn == fix_turn + 1;
 }
 
 }   // namespace rc::chat

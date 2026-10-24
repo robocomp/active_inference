@@ -150,6 +150,52 @@ int main()
     CHECK(plan_still_wanted(5, 5));
     CHECK(not plan_still_wanted(5, 6));
 
+    // ── WakeQueue: a robot event reaches the model only while it is idle, and is never dropped ───────────────────
+    {
+        WakeQueue w;
+        CHECK(not w.pop_if_idle(false).has_value());   // nothing queued
+        w.push("a");
+        CHECK(not w.pop_if_idle(true).has_value());    // busy: kept
+        CHECK(w.pop_if_idle(false) == "a");
+        CHECK(not w.pop_if_idle(false).has_value());   // popped once
+        w.push("b");
+        w.push("c", "m7");
+        CHECK(w.pop_if_idle(false) == "b" and w.last_fixes().empty());
+        CHECK(w.pop_if_idle(false) == "c" and w.last_fixes() == "m7");   // the failure it came from
+        CHECK(wake_message("x") == "(robot event, not the person) x");
+    }
+
+    // ── the wakes' text ──────────────────────────────────────────────────────────────────────────────────────────
+    {
+        const std::string r = report_wake("objects here", "room_2", "2 objects perceived in room_2:\n- chair_1\n");
+        CHECK(r.contains("objects here") and r.contains("room_2") and r.contains("chair_1"));
+        Progress f = failed;   // step 1 failed, 2 and 3 never ran
+        f.status = "failed|1|door shut";
+        f.title = "t";
+        f.serial = 12;
+        const auto undone = undone_steps(f, *m);
+        CHECK(undone.size() == 3 and undone[0] == "1:cross door_1" and undone[1] == "2:explore $n"
+              and undone[2].starts_with("3:report"));
+        CHECK(undone_steps(done1, *m).size() == 2);   // a satisfied step is done
+        const auto fw = failure_wake(f, *m);
+        CHECK(fw.has_value() and fw->contains("1:cross door_1") and fw->contains("door shut")
+              and fw->contains("2:explore $n") and fw->contains("plan_mission"));
+        CHECK(not failure_wake(run1, *m).has_value());   // not failed
+        Progress c = rep;
+        c.status = "completed";
+        c.title = "t";
+        c.t0 = 1000;
+        c.t1 = 61000;
+        CHECK(undone_steps(c, *m).empty());
+        const auto sw = summary_wake(c);
+        CHECK(sw.contains("\"t\"") and sw.contains("60 s"));
+    }
+
+    // ── fix_still_open: a failure's fix is planned in its own wake turn or in answer to the person's next message ─
+    CHECK(fix_still_open(4, 4));
+    CHECK(fix_still_open(4, 5));
+    CHECK(not fix_still_open(4, 6));
+
     std::println("test_mission_plan: {} checks passed{}", checks - failures, failures ? " — FAILURES" : "");
     return failures ? 1 : 0;
 }

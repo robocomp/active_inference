@@ -51,6 +51,21 @@ int main()
            and not is_stop("stop the controller") and not is_stop("para el agente de sillas")); ++checks;
     assert(is_stop("stop now") and is_stop("para, para")); ++checks;
 
+    // the mission's pause / continue / cancel fast paths: anchored like is_stop, never a program's name
+    assert(is_pause("pause") and is_pause("Pause!") and is_pause("pausa") and is_pause("espera")); ++checks;
+    assert(is_pause("pause the mission") and is_pause("espera un momento")); ++checks;
+    assert(not is_pause("pause the chair agent") and not is_pause("please pause") and not is_pause("paused?")); ++checks;
+    assert(not is_pause("pausa la retina") and not is_pause("espera al controller")); ++checks;
+    assert(is_continue("continue") and is_continue("resume") and is_continue("sigue") and is_continue("continúa")); ++checks;
+    assert(is_continue("continua") and is_continue("continue the mission")); ++checks;
+    assert(not is_continue("continue the chair agent") and not is_continue("resume room_concept")
+           and not is_continue("continued")); ++checks;
+    assert(is_cancel_mission("cancel the mission") and is_cancel_mission("abort") and is_cancel_mission("cancela la misión")); ++checks;
+    assert(is_cancel_mission("Abort!") and is_cancel_mission("cancel mission") and is_cancel_mission("cancela la mision")); ++checks;
+    assert(not is_cancel_mission("cancel") and not is_cancel_mission("abort the chair agent")
+           and not is_cancel_mission("aborted?") and not is_cancel_mission("cancel passage")); ++checks;
+    assert(not is_stop("pause") and not is_pause("stop")); ++checks;
+
     auto d = parse_direct("cross door_19");
     assert(d and d->name == "cross_door" and d->door == "door_19"); ++checks;
     d = parse_direct("Cross the door");

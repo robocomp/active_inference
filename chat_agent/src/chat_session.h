@@ -4,6 +4,7 @@
  *
  * THE FLOW OF ONE USER MESSAGE (on_user_text):
  *   1. `stop` fast path (^(stop|para|detente|alto)\b) → the `stop` command is written at once, no model involved.
+ *      1d. pause / continue / cancel the mission (command_gate.h is_pause …) → the controller's own word, no model.
  *      1a/1c. a plain yes to agent_control's question / to a mission card → carried out here; any other message
  *      drops the card.
  *   2. text already in the controller grammar (cross door / cross door_N / uncross / move / turn) → CommandGate → sent.
@@ -16,6 +17,12 @@
  * temperature 0) writes the mission text. It is checked (mission_plan.h check_planned: fence, parse, validate, names);
  * an error goes back to the planner at most kMaxPlanFixes times, then REJECTED. A checked mission is shown as a CARD
  * and waits: only the person's NEXT message, if it is a plain yes, sends it (fast path 1c) — never the model.
+ *
+ * MISSION PROGRESS (2026-10-24): every controller_mission snapshot becomes fixed chat lines (mission_plan.h
+ * progress_lines), whoever started the mission. A mission started FROM THE CHAT also wakes the model (WakeQueue, a
+ * user-role message marked as a robot event, delivered only while neither the model nor the planner is busy): at a
+ * `report` step (its topic + the objects of the room the robot is in at that instant), on a failure (what failed, what
+ * is left: the model proposes a fix through plan_mission, whose card then carries `fixes`), and once on completion.
  *
  * TOOLS: cross_door(door ∈ current doors ∪ {nearest}), stop(), cancel_passage(), move_relative(distance_m, turn_deg),
  * find_objects(subtype?), where_is(name), look(camera?), and the episodic-memory queries episodes(since?, until?,
@@ -76,6 +83,7 @@
 #include "fleet_control.h"
 #include "../../common/episodic/em_answers.h"
 #include "intention_node.h"
+#include "mission_plan.h"
 #include "mission_watch.h"
 #include "system_reader.h"
 #include "ollama_client.h"
@@ -203,6 +211,13 @@ private:
     /// Today's records + the all-time stats from the domain-4 graph; nullopt when it is not joined.
     std::optional<rc::em::Store> em_store() const;
     void tick_status();
+    /// A new controller_mission snapshot: its progress lines, and the wakes of a chat mission.
+    void on_mission_progress(rc::mission::Progress now);
+    void drain_wakes();   ///< the oldest robot event to the model, if it is idle
+    /// The room the robot is physically in: the one its pose is published in (live robot RT), else the current room.
+    [[nodiscard]] std::string physical_room() const;
+    /// Fast path 1d: what = pause | continue | cancel, gated on the mission's status; the reply is fixed text.
+    void mission_control(std::string_view what, const QString& text);
     void ping_llm();
     void refresh_status_bar();
     void poll_gpu();   ///< start an nvidia-smi query unless one is still running; its result lands in gpu_label_
@@ -221,6 +236,12 @@ private:
     IntentionNode intention_;
     MissionWatch mission_watch_;   ///< the controller's controller_mission node → the plan window
     rc::mission::Progress mission_progress_;   ///< its last progress (the STATE's "controller mission now" line)
+    rc::mission::Mission mission_ir_;          ///< the IR that progress is about (progress_lines' step names)
+    bool mission_primed_ = false;              ///< the first snapshot of a run is a baseline unless it began after start
+    std::uint64_t start_ms_ = 0;               ///< when this session started (wall clock, the controller's ms)
+    WakeQueue wakes_;                          ///< robot events waiting for the model
+    std::string fix_key_;                      ///< "m<serial>" of the failed mission whose wake was delivered last
+    std::uint64_t fix_turn_ = 0;               ///< user_turn_ at that delivery (fix_still_open)
     OllamaClient llm_;
     std::unique_ptr<ChatWindow> window_;
     ChatLog log_;
