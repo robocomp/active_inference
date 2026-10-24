@@ -4,18 +4,24 @@
  * provisional. Evidence in, posterior out, a staged commit state; it only REQUESTS a swap or an undo (RoomSwap executes).
  *
  * WHEN IT RUNS (structural, nothing thresholded). Exactly while all of these hold:
- *   - the live graph has a CURRENT room L and a PROVISIONAL room P hung from the robot (a proto-room, or the hand-over
- *     case promotion_evidence also accepts: the robot->L edge retired while robot->P is live);
+ *   - the live graph has a CURRENT room L that memory holds a twin of, and a PROVISIONAL room P hung from the robot (a
+ *     proto-room, or the hand-over case promotion_evidence also accepts: the robot->L edge retired while robot->P is
+ *     live). L may itself be the promoted room of the previous episode (fresh -> fresh crossings);
  *   - P carries an entry mirror of a door of L (door_concept: a door node whose parent is P);
  *   - that crossed door has NO passage in memory (a door crossed before is a known passage; recall is trusted there,
  *     user decision 2026-10-23: no audit of known passages).
- * It stops, and its `recognition` node is removed, the moment any of these stops holding (P promoted, deleted, ...).
+ * It is BEGUN only while these hold (it then spans P's promotion, see below); it stops, and its `recognition` node is
+ * removed, when P is lost before promotion, at the fence, or when a newer provisional room appears.
  *
  * EVIDENCE. Two experts over the SAME pose in room k (rc::recog::posterior):
  *   metric       the robot pose through the seam chain vs room k's own chain (room_chain.h). The robot->P edge gives the
- *                robot in P with its covariance; the FRESH seam T(L <- P) is built HERE from the crossed door's two faces:
- *                its face in L (memory, the node the eviction/seed wrote for it) and its entry mirror in P (live).
- *                A state, read again each cycle; the decision uses its change since the last state change.
+ *                robot in P with its covariance; the FRESH seam T(L <- P) is built HERE from the crossed door's two LIVE
+ *                faces: D in L (its RT chain + covariance, door_concept's) and its entry mirror M in P. Nothing about D
+ *                has to be archived (a first-ever door has no memory face). FRAMES: the live L frame IS its memory twin's
+ *                (the twin is a copy of L, written at L's promotion or by the seed), so the memory path chain
+ *                start -> ... -> L_mem continues with T(L <- P) and then robot-in-P; every other room k is placed by its
+ *                own memory chain from the same start. The fresh seam is cached while L is live (it is evicted when P is
+ *                promoted). A state, read again each cycle; the decision uses its change since the last state change.
  *   appearance   retina's `place_evidence` node (recog_loglr / recog_mix / recog_mix_n, cumulative and already temporally
  *                discounted), absent today (metric-first) => AppearanceEvidence::available = false.
  * Candidates = the memory rooms that are not staged and are not L (the crossing rules L out structurally); they are sorted
@@ -28,8 +34,10 @@
  *
  * THE EPISODE SPANS THE PROMOTION: it lives while the current room is L, the provisional room (its promoted twin; the fresh
  * seam cached while L was still measurable) or the committed room (held, no new evidence: the evidence frame is gone), and
- * ends at the eviction fence (the robot leaves it). Ending any other way under a commit, or losing the committed room from
- * the candidates, emits an Undo request.
+ * ends at the eviction fence (the robot leaves it) or when a NEWER provisional room hangs from the robot (a new crossing
+ * out of the room the episode was about: that crossing's episode replaces it, in the same cycle). Ending any other way
+ * under an unexecuted commit, or losing the committed room from the candidates, emits an Undo request; an executed
+ * (held) swap ends with no Undo, as at the fence.
  *
  * OWNERSHIP. ltsm owns the live `recognition` metaconcept (recog_room_ids, recog_posterior; the last posterior entry is
  * "new"). It is removed on exit and swept at start (a SIGKILLed run leaves it; so can retina leave a `place_evidence`,
@@ -48,6 +56,7 @@
 #include <optional>
 #include <set>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace ltsm
@@ -123,5 +132,9 @@ private:
     Step abort_episode(Step out);               ///< end an episode; Undo is requested when a commit stood
     void track_current();
     void publish(const std::vector<float> &post);
+    /// The provisional room hung from `robot` (a proto, or the hand-over case: live while robot->current is retired), other
+    /// than the current room `cur` and than a room carrying `except_room_id`; with the robot->P edge.
+    [[nodiscard]] std::optional<std::pair<DSR::Node, DSR::Edge>> provisional_room(const DSR::Node &robot, std::uint64_t cur,
+                                                                                  std::optional<std::uint64_t> except_room_id) const;
 };
 }   // namespace ltsm

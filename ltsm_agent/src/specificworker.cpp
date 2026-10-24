@@ -375,17 +375,12 @@ void SpecificWorker::compute()
         if (live_passage_stage_check) check_live_passage(st);
     }
 
-    // AFTER the live passage step: the promotion reads the door pair that step matched.
-    if (promotion_enabled and evictor)
-    {
-        const bool promoted = step_promotion();
-        ++promotion_cycles_;
-        if (promotion_stage_check) check_promotion(promoted);
-    }
-    // What lies behind each door memory knows the far side of (room_recall.h). After the promotion, so a room that has
-    // just become live again retires its own recall in the same cycle.
-    // Which known room is the provisional room behind a fresh door? Posterior + staged commit REQUESTS. After the promotion
-    // step (it reads the current room that step may have just moved) and before the recall, which a swap will feed.
+    // Which known room is the provisional room behind a fresh door? Posterior + staged commit REQUESTS. BEFORE the promotion
+    // step (recog_try2, 2026-10-24): a provisional room can be promoted in the very cycle its door pair is first matched
+    // (room_4 was: first reading P(inside)=1.000 -> PROMOTING), and the promotion evicts L, the live room whose geometry the
+    // fresh seam is measured from. Run after it, the recogniser could see zero cycles of {L live, P provisional}; run
+    // before it, it always sees the cycle the promotion consumes (and caches the seam for the promoted stay). After the
+    // live passage step (it reads the door pair that step matched) and before the recall, which a swap will feed.
     if (recognizer_)
     {
         const auto rq = recognizer_->step();
@@ -418,6 +413,15 @@ void SpecificWorker::compute()
             swap_->step();
         }
     }
+    // AFTER the live passage step: the promotion reads the door pair that step matched.
+    if (promotion_enabled and evictor)
+    {
+        const bool promoted = step_promotion();
+        ++promotion_cycles_;
+        if (promotion_stage_check) check_promotion(promoted);
+    }
+    // What lies behind each door memory knows the far side of (room_recall.h). After the promotion, so a room that has
+    // just become live again retires its own recall in the same cycle.
     if (recall_) recall_->step();
 
     if (not probe_enabled)

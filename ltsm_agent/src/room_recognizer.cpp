@@ -87,6 +87,34 @@ std::optional<Eigen::Vector2d> centroid_of(DSR::DSRGraph &g, const DSR::Node &ro
     return c / static_cast<double>(px->get().size());
 }
 
+/// T(room <- node) with its covariance, composed from the LIVE RT edges along `node`'s parent chain up to `room_id`
+/// (a door hangs from a wall, the wall from the floor or the room). Each edge's covariance is in its parent's frame;
+/// compose_cov rotates it into the room's. An edge that states none contributes none, except the node's OWN edge, which
+/// gets the face prior (a door whose pose says nothing about its precision is still not exact). nullopt when the chain
+/// does not reach `room_id` through stated RT edges.
+std::optional<Measured> pose_in_room(DSR::DSRGraph &g, std::uint64_t room_id, const DSR::Node &node)
+{
+    auto rt = g.get_rt_api();
+    Measured acc{Vec3::Zero(), Mat3::Zero()};
+    DSR::Node cur = node;
+    for (int depth = 0; depth < 32; ++depth)
+    {
+        if (cur.id() == room_id) return acc;
+        const auto p = g.get_attrib_by_name<parent_att>(cur);
+        if (not p.has_value() or p.value() == cur.id()) return std::nullopt;
+        const auto e = g.get_edge(p.value(), cur.id(), "RT");
+        if (not e.has_value()) return std::nullopt;
+        const auto T = rt->get_edge_RT_as_rtmat(e.value());
+        if (not T.has_value()) return std::nullopt;
+        const Mat3 C = cov3_of(g, e.value()).value_or(depth == 0 ? face_prior() : Mat3::Zero());
+        acc = seam::compose_cov(Measured{se2_of(T.value()), C}, acc);      // T(parent <- node) = T(parent <- cur) . T(cur <- node)
+        const auto pn = g.get_node(p.value());
+        if (not pn.has_value()) return std::nullopt;
+        cur = pn.value();
+    }
+    return std::nullopt;
+}
+
 /// A valid covariance for the posterior: finite, symmetric, strictly positive definite (it has no PSD guard of its own).
 std::optional<Eigen::Matrix3f> as_covariance(const Eigen::Matrix3d &S)
 {
@@ -296,18 +324,57 @@ RoomRecognizer::Step RoomRecognizer::held_step(Step out)
     return out;
 }
 
+std::optional<std::pair<DSR::Node, DSR::Edge>> RoomRecognizer::provisional_room(const DSR::Node &robot, std::uint64_t cur,
+                                                                                std::optional<std::uint64_t> except_room_id) const
+{
+    // Hung from the robot by RT, not the current room, and a proto -- or (the hand-over case promotion_evidence also takes)
+    // live while the robot->current edge is retired.
+    bool cur_retired = false;
+    if (const auto ce = live_->get_edge(robot.id(), cur, "RT"); ce.has_value())
+        cur_retired = not live_->get_attrib_by_name<valid_att>(ce.value()).value_or(true);
+    for (const auto &e : DSR::DSRGraph::get_node_edges_by_type(robot, "RT"))
+    {
+        const auto room = live_->get_node(e.to());
+        if (not room.has_value() or room->type() != "room" or room->id() == cur) continue;
+        const bool entered = cur_retired and live_->get_attrib_by_name<valid_att>(e).value_or(true);
+        if (not rc::room::is_proto(*live_, room->id()) and not entered) continue;
+        if (except_room_id.has_value() and live_->get_attrib_by_name<room_id_att>(room.value()) == except_room_id) continue;
+        return std::pair{room.value(), e};
+    }
+    return std::nullopt;
+}
+
 RoomRecognizer::Step RoomRecognizer::step()
 {
     Step out;
     track_current();
-    if (swap_ack_ and prov_id_ != 0) return held_step(out);
-
     const auto cur = rc::room::current_edge_room(*live_);
-    if (not cur.has_value()) return abort_episode(out);
-
     std::optional<DSR::Node> robot;
-    for (const auto &e : live_->get_edges_by_type("current"))
-        if (e.to() == cur.value()) { robot = live_->get_node(e.from()); break; }
+    if (cur.has_value())
+        for (const auto &e : live_->get_edges_by_type("current"))
+            if (e.to() == cur.value()) { robot = live_->get_node(e.from()); break; }
+
+    // ── 0. A NEWER PROVISIONAL ROOM ends the running episode. Once the robot has moved on from L (into P, promoted, or
+    //    into the committed room K), a proto hung from the robot that is not this episode's P is a NEW crossing, out of
+    //    the room the episode was about: its question replaces this one. A standing commit is handled as any episode end:
+    //    requested-but-unexecuted => Undo (abort_episode); EXECUTED (held) => the robot is leaving K through another door,
+    //    which is the fence (no Undo). K's own late re-birth is a proto too (room_concept adopt_late_recall), so a room
+    //    carrying the committed room id is never "newer". Structural, no timer. ─────────────────────────────────────────
+    if (prov_id_ != 0 and cur.has_value() and robot.has_value() and cur.value() != L_id_)
+    {
+        const bool committed = commit_.state == rc::recog::Commit::State::Committed and commit_.room >= 0 and commit_.room < int(ids_.size());
+        if (const auto Pn = provisional_room(robot.value(), cur.value(), committed ? std::optional(ids_[commit_.room]) : std::nullopt);
+            Pn.has_value() and Pn->first.id() != prov_id_)
+        {
+            qInfo().noquote() << QString::fromStdString(std::format("[recog] newer provisional room {} behind the current room: the episode for {} ends",
+                                                                    Pn->first.name(), prov_id_));
+            if (swap_ack_) end_episode();
+            else if (out = abort_episode(out); out.act != Step::Act::None) return out;     // one request per cycle
+        }
+    }
+
+    if (swap_ack_ and prov_id_ != 0) return held_step(out);
+    if (not cur.has_value()) return abort_episode(out);
     if (not robot.has_value()) return abort_episode(out);
 
     auto ie = live_->get_inner_eigen_api();
@@ -361,30 +428,17 @@ RoomRecognizer::Step RoomRecognizer::step()
     else
     {
     // ── 2. ELIGIBILITY: current room L, provisional room P with an entry mirror, a crossed door nobody has used ──────
+    // L's MEMORY IDENTITY (cur_mem_): the twin memory already holds of the live room. A room that became current by a
+    // promotion has one from that moment (eviction step 3 copies the entered room's subtree, the stub its later eviction
+    // fills); the startup room has the seed's. The twin is a COPY of L's frame, so the live L frame and the twin's are one
+    // frame: that identity is what joins L's LIVE geometry to the memory chains. Without a twin nothing joins them.
     const auto L = live_->get_node(cur.value());
     if (not L.has_value() or cur_mem_.empty()) return abort_episode(out);
-    bool cur_retired = false;
-    if (const auto ce = live_->get_edge(robot->id(), cur.value(), "RT"); ce.has_value())
-        cur_retired = not live_->get_attrib_by_name<valid_att>(ce.value()).value_or(true);
 
-    // The provisional room: hung from the robot, a proto or (the hand-over case promotion_evidence also takes) live while
-    // the robot->current edge is retired.
-    std::optional<DSR::Node> P;
-    std::optional<DSR::Edge> P_edge;
-    for (const auto &e : DSR::DSRGraph::get_node_edges_by_type(robot.value(), "RT"))
-    {
-        const auto room = live_->get_node(e.to());
-        if (not room.has_value() or room->type() != "room" or room->id() == cur.value()) continue;
-        const bool entered = cur_retired and live_->get_attrib_by_name<valid_att>(e).value_or(true);
-        if (not rc::room::is_proto(*live_, room->id()) and not entered) continue;
-        P = room;
-        P_edge = e;
-        break;
-    }
-    if (not P.has_value()) return abort_episode(out);
-
-
-    if (const auto pe = P_edge.value(); true) robot_in_P = read_robot_in(pe);
+    const auto Pp = provisional_room(robot.value(), cur.value(), std::nullopt);
+    if (not Pp.has_value()) return abort_episode(out);
+    const std::optional<DSR::Node> P = Pp->first;
+    robot_in_P = read_robot_in(Pp->second);
 
     // the entry mirror: a door whose parent is P. The nearest to the robot (an argmin, nothing is excluded by distance).
     std::optional<DSR::Node> M;
@@ -472,38 +526,37 @@ RoomRecognizer::Step RoomRecognizer::step()
     }
     P_rid = live_->get_attrib_by_name<room_id_att>(P.value());
 
-    // The fresh seam T(L <- P) from the crossed door's two faces; nullopt (=> metric unavailable) when either is missing.
-    const auto mem_L = mem_->get_node(L_mem);
-    if (face.has_value() and robot_in_P.has_value() and mem_L.has_value())
+    // The fresh seam T(L <- P) from the crossed door's two faces, BOTH LIVE: D in L (door_concept's pose of the door, its RT
+    // chain and covariance) and its entry mirror M in P. L is still live here (this block runs only while L is current), so
+    // nothing has to be archived first -- a first-ever door has no memory face, and needs none. Frames:
+    //     fL     = T(L <- D)       live, composed up D's parent chain (pose_in_room)
+    //     fP     = T(P <- M)       live
+    //     seam   = T(L <- P) = fL . [turn by pi] . fP^-1
+    // L's live frame IS its memory twin's frame (above), so the seam continues the memory path chain that ends at L_mem.
+    // nullopt (=> metric unavailable) when either face or the robot pose in P is unresolvable.
+    if (robot_in_P.has_value())
     {
-        auto mie = mem_->get_inner_eigen_api();
-        const auto TL = mie->get_transformation_matrix(L_mem, face_name);          // T(L <- its face), memory
-        const auto edge_M = live_->get_edge(P->id(), M->id(), "RT");               // T(P <- the mirror), live
-        std::optional<Mat::RTMat> TP;
-        std::optional<Mat3> CP;
-        if (edge_M.has_value())
+        const auto fL_live = pose_in_room(*live_, L->id(), D.value());
+        auto fP_live = pose_in_room(*live_, P->id(), M.value());
+        if (not fP_live.has_value())
+            if (const auto TP = ie->get_transformation_matrix(P->name(), M->name()); TP.has_value())
+                fP_live = Measured{se2_of(TP.value()), face_prior()};
+        if (fL_live.has_value() and fP_live.has_value())
         {
-            TP = rt->get_edge_RT_as_rtmat(edge_M.value());
-            CP = cov3_of(*live_, edge_M.value());
-        }
-        else
-            TP = ie->get_transformation_matrix(P->name(), M->name());
-        if (TL.has_value() and TP.has_value())
-        {
-            Mat3 CL = face_prior();
-            if (const auto par = mem_->get_attrib_by_name<parent_att>(face.value()); par.has_value())
-                if (const auto fe = mem_->get_edge(par.value(), face->id(), "RT"); fe.has_value())
-                    if (const auto c = cov3_of(*mem_, fe.value()); c.has_value()) CL = c.value();
-            const Measured fL{se2_of(TL.value()), CL};
-            const Measured inv_fP = seam::inverse_cov(Measured{se2_of(TP.value()), CP.value_or(face_prior())});
+            const Measured fL = fL_live.value();
+            const Measured inv_fP = seam::inverse_cov(fP_live.value());
             Measured seam_LP = seam::compose_cov(fL, inv_fP);
 
             // The two faces are ONE hole, possibly TURNED by pi (door_concept orients a door's frame from the room that fits
             // it, so the mirror seen from P is the same doorway rotated half a turn). The provisional room lies on the
             // far side of the hole from L, and the robot is in it by definition: if the seam lands the robot on L's side
             // of the face, the turned face is the one. A side test, not a tolerance; the same rule seam_through_passage
-            // applies with the two outlines' centroids.
-            if (const auto c_L = centroid_of(*mem_, mem_L.value()); c_L.has_value())
+            // applies with the two outlines' centroids. L's side is read from its LIVE outline (the twin's may be the
+            // promotion-time stub), the twin's when the live room publishes none.
+            auto c_L = centroid_of(*live_, L.value());
+            if (not c_L.has_value())
+                if (const auto mem_L = mem_->get_node(L_mem); mem_L.has_value()) c_L = centroid_of(*mem_, mem_L.value());
+            if (c_L.has_value())
             {
                 const Eigen::Vector2d r_in_L = seam_LP.pose.head<2>() + seam::rot(seam_LP.pose.z()) * robot_in_P->pose.head<2>();
                 const Eigen::Vector2d o = fL.pose.head<2>();

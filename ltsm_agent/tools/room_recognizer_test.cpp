@@ -140,6 +140,15 @@ static void place_robot(const Vec3 &robot_w, std::uint64_t prov)
     if (prov) put_edge(*live, robot_id, prov, inv(mul(inv(prov_w), robot_w)), Codo);
 }
 
+// The robot's pose in P stated WITHOUT a covariance (promotion_evidence's reading: no covariance, no pose): the robot chain
+// is unmeasurable, so the metric expert is unavailable. (Deleting DOOR_2's memory face no longer does that: the fresh seam
+// is built from the two LIVE faces, so a first-ever door with no memory face still gives the metric.)
+static void unmeasured_robot(std::uint64_t prov, const Vec3 &robot_w)
+{
+    live->delete_edge(robot_id, prov, "RT");
+    put_edge(*live, robot_id, prov, inv(mul(inv(prov_w), robot_w)));
+}
+
 static void write_evidence(const std::vector<std::uint64_t> &ids, const std::vector<float> &llr, const std::vector<std::optional<Vec3>> &mu_in_k)
 {
     std::optional<DSR::Node> n = live->get_node("place_evidence");
@@ -204,6 +213,153 @@ struct Scenario
     }
 };
 
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+// THE LIVE SEQUENCE OF recog_try2 (2026-10-24), fresh -> fresh. World W, every room in its OWN frame:
+//   r1 [-2,2]x[-2,2] (A)   r2 [2,6]x[-2,2] (B)   room_3 [-2,6]x[2,6] (C, born a proto, promoted, live)
+//   passage_0 r1<->r2 at (2,0) in memory.  DOOR_A room_1<->room_3 at (0,2): first-ever, no memory face.
+//   DOOR_2 room_3<->r2 at (4,2): first-ever from room_3's side, the live door hangs from a WALL (non-identity frame) with
+//   door_concept-like RT covariance.  DOOR_E on room_3's east wall at (6,4): behind it nothing memory knows.
+// 1. room_1 current, proto room_3 behind DOOR_A: room_3's episode begins (candidate r2 only), the metric says NEW.
+// 2. room_3 is promoted: room_1 leaves the live graph; memory gains r1's face of DOOR_A, room_3's promotion STUB twin
+//    (room node + its entry face, no face of DOOR_2, a stale outline) and passage_1. room_3's episode keeps running.
+// 3. a proto room_4 appears behind DOOR_2 (or room_5 behind DOOR_E): room_3's episode ends, room_4's begins in the same cycle.
+static int live_sequence(bool to_known_room, int8_t dom_live, int8_t dom_mem)
+{
+    live = std::make_shared<DSR::DSRGraph>("seq_live", 196 + dom_live, "ltsm_root.json", true, dom_live);
+    mem  = std::make_shared<DSR::DSRGraph>("seq_mem", 196 + dom_mem, "ltsm_root.json", true, dom_mem);
+    const int before = failures;
+    auto rect = [](double x0, double y0, double x1, double y1) {
+        return std::vector<Eigen::Vector2d>{{x0, y0}, {x1, y0}, {x1, y1}, {x0, y1}}; };
+    const Vec3 A(10.0, 5.0, 0.3), B(-4.0, 7.0, -1.1), C(3.0, -8.0, 2.0);
+    auto local = [](const Vec3 &frame, const Vec3 &w) { return mul(inv(frame), w); };
+    auto set_poly = [](DSR::DSRGraph &G, DSR::Node &n, const Vec3 &frame, const std::vector<Eigen::Vector2d> &wp) {
+        std::vector<float> px, py;
+        for (const auto &w : wp) { const Vec3 l = mul(inv(frame), Vec3(w.x(), w.y(), 0.0)); px.push_back((float)l.x()); py.push_back((float)l.y()); }
+        G.add_or_modify_attrib_local<delimiting_polygon_x_att>(n, px);
+        G.add_or_modify_attrib_local<delimiting_polygon_y_att>(n, py); };
+
+    // ── memory: r1, r2, passage_0 ──
+    const auto mroot = mem->get_node("root").value().id();
+    auto mem_room = [&](const std::string &name, std::uint64_t rid, const Vec3 &frame, const std::vector<Eigen::Vector2d> &wp) {
+        DSR::Node n; n.type("room"); n.name(name);
+        mem->add_or_modify_attrib_local<room_id_att>(n, rid);
+        if (not wp.empty()) set_poly(*mem, n, frame, wp);
+        const auto id = mem->insert_node(n).value();
+        put_edge(*mem, mroot, id, Vec3::Zero());
+        return id; };
+    auto mem_face = [&](std::uint64_t room, const std::string &name, const Vec3 &frame, const Vec3 &face_w) {
+        DSR::Node f; f.type("object"); f.name(name);
+        mem->add_or_modify_attrib_local<object_subtype_att>(f, std::string("door"));
+        mem->add_or_modify_attrib_local<parent_att>(f, room);
+        const auto id = mem->insert_node(f).value();
+        put_edge(*mem, room, id, local(frame, face_w));
+        return id; };
+    auto mem_passage = [&](const std::string &name, std::uint64_t fa, std::uint64_t fb) {
+        DSR::Node pw; pw.type("metaconcept"); pw.name(name);
+        mem->add_or_modify_attrib_local<object_subtype_att>(pw, std::string("passage"));
+        const auto pid = mem->insert_node(pw).value();
+        mem->insert_or_assign_edge(DSR::Edge::create<match_edge_type>(pid, fa));
+        mem->insert_or_assign_edge(DSR::Edge::create<match_edge_type>(pid, fb)); };
+    const auto m1 = mem_room("r1_room_1", 1, A, rect(-2, -2, 2, 2));
+    const auto m2 = mem_room("r2_room_2", 2, B, rect(2, -2, 6, 2));
+    mem_passage("passage_0", mem_face(m1, "r1_door_1", A, Vec3(2.0, 0.0, M_PI / 2)), mem_face(m2, "r2_door_1", B, Vec3(2.0, 0.0, M_PI / 2)));
+
+    // ── live: robot, room_1 current with DOOR_A, proto room_3 behind it ──
+    DSR::Node rn; rn.type("robot"); rn.name("Shadow");
+    robot_id = live->insert_node(rn).value();
+    put_edge(*live, live->get_node("root").value().id(), robot_id, Vec3::Zero());
+    auto robot_at = [&](const Vec3 &w, std::initializer_list<std::pair<std::uint64_t, Vec3>> rooms_frames) {
+        for (const auto &[room, frame] : rooms_frames) put_edge(*live, robot_id, room, inv(local(frame, w)), Codo); };
+    const Vec3 robot_1(0.0, 2.6, M_PI / 2);                                  // 0.6 m into room_3
+    const auto l1 = live_room("room_1", 1, 1);
+    const auto l3 = live_room("room_3", 3, 3);
+    robot_at(robot_1, {{l1, A}, {l3, C}});                                   // (the RT edge gives a room its level)
+    { auto n = live->get_node(l1).value(); set_poly(*live, n, A, rect(-2, -2, 2, 2)); live->update_node(n); }
+    const auto doorA = live_door("door_2", l1);
+    put_edge(*live, l1, doorA, local(A, Vec3(0.0, 2.0, 0.0)));
+    live->insert_or_assign_edge(DSR::Edge::create<proto_edge_type>(l3, l3));
+    const auto mirA = live_door("door_9", l3);
+    put_edge(*live, l3, mirA, local(C, Vec3(0.0, 2.0, M_PI)));             // the same hole seen from room_3, turned by pi
+    set_current(l1);
+
+    ltsm::RoomEviction ev(live, mem);
+    ltsm::RoomRecognizer rec(live, mem, ev);
+    ltsm::RoomRecognizer::Step st;
+    bool any = false;
+    for (int i = 0; i < 5; ++i) any = any or (st = rec.step()).act != ltsm::RoomRecognizer::Step::Act::None;
+    auto p = read_recognition();
+    std::printf("  [1] room_3 behind DOOR_A: ids"); for (auto id : p.ids) std::printf(" %llu", (unsigned long long)id);
+    std::printf("  post"); for (float x : p.post) std::printf(" %.4f", x); std::printf("\n");
+    check(rec.provisional_id() == l3, "[1] room_3's episode runs (L = room_1, first-ever door: no memory face)");
+    check(p.present and p.ids == std::vector<std::uint64_t>{2} and p.post.size() == 2 and p.post[1] > 0.9f and not any,
+          "[1] metric available from the live faces: room_3 is NEW (> 0.9), no request");
+
+    // ── 2. PROMOTION of room_3 (what eviction #3 wrote) ──
+    live->delete_edge(l3, l3, "proto");
+    set_current(l3);
+    live->delete_node(doorA);
+    live->delete_edge(robot_id, l1, "RT");
+    live->delete_node(l1);
+    { auto n = live->get_node(l3).value(); set_poly(*live, n, C, rect(-2, 2, 6, 6)); live->update_node(n); }
+    const auto m3 = mem_room("r3_room_3", 3, C, rect(-1, 2, 1, 3));          // the promotion STUB: a stale, partial outline
+    mem_passage("passage_1", mem_face(m1, "r1_door_2", A, Vec3(0.0, 2.0, 0.0)), mem_face(m3, "r3_door_9", C, Vec3(0.0, 2.0, M_PI)));
+    for (int i = 0; i < 3; ++i) any = any or rec.step().act != ltsm::RoomRecognizer::Step::Act::None;
+    check(rec.provisional_id() == l3 and not any, "[2] promoted: room_3's episode spans the promotion, no request");
+
+    // ── 3. the robot crosses a door of room_3 nobody has crossed: a NEWER provisional room ──
+    // the door hangs from a wall of room_3 (wall frame on the south wall, x along it), with an RT covariance in the WALL frame
+    DSR::Node wn; wn.type("wall"); wn.name("room_3_wall_0");
+    live->add_or_modify_attrib_local<parent_att>(wn, l3);
+    const auto wall = live->insert_node(wn).value();
+    const Vec3 wall_w = to_known_room ? Vec3(1.0, 2.0, 0.0) : Vec3(6.0, 2.0, M_PI / 2);
+    put_edge(*live, l3, wall, local(C, wall_w));
+    const Vec3 hole_w = to_known_room ? Vec3(4.0, 2.0, 0.0) : Vec3(6.0, 4.0, M_PI / 2);
+    const auto D = live_door(to_known_room ? "door_4" : "door_5", wall);
+    Mat3 Cd = Mat3::Zero(); Cd.diagonal() << 0.054 * 0.054, 0.01 * 0.01, 0.0173 * 0.0173;
+    put_edge(*live, wall, D, local(wall_w, hole_w), Cd);
+    const auto l4 = live_room(to_known_room ? "room_4" : "room_5", 4, 4);
+    const Vec3 P_w(7.0, -3.0, 1.0);
+    // 0.39 m past the aperture: where room_4's first promotion reading put it (and it was promoted that cycle)
+    const Vec3 robot_2 = to_known_room ? Vec3(4.0, 2.0 - 0.39, -M_PI / 2) : Vec3(6.39, 4.0, 0.0);
+    robot_at(robot_2, {{l3, C}, {l4, P_w}});
+    live->insert_or_assign_edge(DSR::Edge::create<proto_edge_type>(l4, l4));
+    const auto mir = live_door("door_7", l4);
+    put_edge(*live, l4, mir, local(P_w, Vec3(hole_w.x(), hole_w.y(), hole_w.z() + M_PI)));
+
+    st = rec.step();
+    p = read_recognition();
+    std::printf("  [3] %s: first step act %d ids", to_known_room ? "room_4 behind DOOR_2" : "room_5 behind DOOR_E", int(st.act));
+    for (auto id : p.ids) std::printf(" %llu", (unsigned long long)id);
+    std::printf("  post"); for (float x : p.post) std::printf(" %.4f", x); std::printf("\n");
+    check(rec.provisional_id() == l4, "[3] in ONE step: room_3's episode ended and the episode for the newer provisional room began");
+    check(p.present and p.ids == std::vector<std::uint64_t>({1, 2}) and p.post.size() == 3, "[3] candidates {r1, r2} (L = room_3 excluded), posterior + new");
+    bool uniform = p.post.size() == 3;
+    for (float x : p.post) uniform = uniform and std::abs(x - 1.f / 3.f) < 1e-3f;
+    check(not uniform, "[3] metric available (the posterior is not the prior): no memory face of the crossed door, no full archive of L");
+    if (to_known_room)
+    {
+        check(p.post.size() == 3 and p.post[1] > p.post[0] and p.post[1] > p.post[2], "[3] the TRUE room (r2) is the argmax");
+        ltsm::RoomRecognizer::Step sw = st;
+        int n = 1;
+        for (; n < 5 and sw.act == ltsm::RoomRecognizer::Step::Act::None; ++n) sw = rec.step();
+        check(sw.act == ltsm::RoomRecognizer::Step::Act::Swap and sw.room_id == 2, "[3] Swap requested for r2 (step " + std::to_string(n) + ")");
+        const Vec3 truth = local(B, robot_2);
+        check(not sw.pose_in_k.empty() and (sw.pose_in_k[0].mu.head<2>().cast<double>() - truth.head<2>()).norm() < 0.05
+                  and std::abs(wrap(double(sw.pose_in_k[0].mu.z()) - truth.z())) < 0.03,
+              "[3] the Swap carries the robot's pose in r2 (< 5 cm, < 0.03 rad)");
+    }
+    else
+    {
+        bool req = st.act != ltsm::RoomRecognizer::Step::Act::None;
+        for (int i = 0; i < 50; ++i) req = req or rec.step().act != ltsm::RoomRecognizer::Step::Act::None;
+        p = read_recognition();
+        check(not req and p.post.size() == 3 and p.post[2] > 0.9f, "[3] a genuinely new room behind DOOR_E stays NEW (> 0.9), no request in 50 steps");
+    }
+    rec.sweep_stale();
+    return failures - before;
+}
+
 int main(int argc, char **argv)
 {
     std::setlocale(LC_ALL, "");
@@ -261,10 +417,21 @@ int main(int argc, char **argv)
             check(ok and p.post[1] > (y < 2.2 ? 0.5f : 0.99f) and st.act == ltsm::RoomRecognizer::Step::Act::Swap and st.room_id == 3, "past the aperture: R3 leads and the Swap is requested; well past: R3 > 0.99");
     }
 
-    std::printf("no_information_is_the_prior\n");
-    {   // the crossed door's face is missing in memory: the fresh seam is unmeasurable => metric unavailable, no evidence at all
+    std::printf("first_ever_door_needs_no_memory_face\n");
+    {   // the crossed door's face is missing in memory (a first-ever door): the seam comes from the LIVE faces, the metric stands
         mem->delete_node(face_r2_door);
         Scenario s(false, robot_in_r3_w);
+        ltsm::RoomRecognizer::Step st;
+        for (int i = 0; i < 5 and st.act == ltsm::RoomRecognizer::Step::Act::None; ++i) st = s.rec.step();
+        const auto p = read_recognition();
+        check(st.act == ltsm::RoomRecognizer::Step::Act::Swap and st.room_id == 3 and p.present and p.post.size() == 3 and p.post[1] > 0.99f,
+              "no memory face of DOOR_2: R3 > 0.99 and the Swap is requested (fresh seam from live D + live mirror)");
+    }
+
+    std::printf("no_information_is_the_prior\n");
+    {   // (face still missing) the robot pose in P states no covariance: the robot chain is unmeasurable => metric unavailable
+        Scenario s(false, robot_in_r3_w);
+        unmeasured_robot(s.prov, robot_in_r3_w);
         bool any = false;
         for (int i = 0; i < 20; ++i) any = any or s.rec.step().act != ltsm::RoomRecognizer::Step::Act::None;
         const auto p = read_recognition();
@@ -274,8 +441,9 @@ int main(int argc, char **argv)
     }
 
     std::printf("appearance_alone_commits_when_the_metric_is_unavailable\n");
-    {   // (face still missing) an expert that is absent is omitted, not zeroed: the other decides
+    {   // (robot chain unmeasurable) an expert that is absent is omitted, not zeroed: the other decides
         Scenario s(false, robot_in_r3_w);
+        unmeasured_robot(s.prov, robot_in_r3_w);
         write_evidence({1, 3}, {-2.f, 12.f}, {std::nullopt, in_room(2, robot_in_r3_w)});
         ltsm::RoomRecognizer::Step st;
         for (int i = 0; i < 5 and st.act == ltsm::RoomRecognizer::Step::Act::None; ++i) st = s.rec.step();
@@ -286,6 +454,7 @@ int main(int argc, char **argv)
     std::printf("symmetric_candidates_no_commit\n");
     {   // no metric; two candidates with IDENTICAL evidence: the posterior splits, nothing is committed
         Scenario s(false, robot_in_r3_w);
+        unmeasured_robot(s.prov, robot_in_r3_w);
         write_evidence({1, 3}, {3.f, 3.f}, {in_room(2, robot_in_r3_w), in_room(2, robot_in_r3_w)});
         bool any = false;
         for (int i = 0; i < 200; ++i) any = any or s.rec.step().act != ltsm::RoomRecognizer::Step::Act::None;
@@ -458,6 +627,36 @@ int main(int argc, char **argv)
         s.prov = s.mirror;
     }
 
+    std::printf("held_swap_ends_without_undo_when_a_newer_provisional_room_appears\n");
+    {
+        Scenario s(false, robot_in_r3_w);
+        ltsm::RoomRecognizer::Step st;
+        for (int i = 0; i < 5 and st.act == ltsm::RoomRecognizer::Step::Act::None; ++i) st = s.rec.step();
+        s.rec.on_swap_executed(3);
+        live->delete_node(s.mirror);
+        live->delete_node(s.prov);
+        // room_concept re-births K as a PROTO carrying K's room id (adopt_late_recall), then it is promoted and current
+        const auto Kr = live_node_for_test("room_3", 3);
+        put_edge(*live, robot_id, Kr, Vec3::Zero(), Codo);
+        live->insert_or_assign_edge(DSR::Edge::create<proto_edge_type>(Kr, Kr));
+        bool any = false;
+        for (int i = 0; i < 3; ++i) any = any or s.rec.step().act != ltsm::RoomRecognizer::Step::Act::None;
+        live->delete_edge(Kr, Kr, "proto");
+        set_current(Kr);
+        for (int i = 0; i < 3; ++i) any = any or s.rec.step().act != ltsm::RoomRecognizer::Step::Act::None;
+        check(not any and s.rec.swapped(), "K's own proto re-birth and promotion are not a newer provisional room: the swap is held");
+        const auto Pn = live_room("room_7", 7, 7);                          // the robot crosses another door out of K
+        put_edge(*live, robot_id, Pn, Vec3::Zero(), Codo);
+        live->insert_or_assign_edge(DSR::Edge::create<proto_edge_type>(Pn, Pn));
+        const auto a = s.rec.step();
+        check(a.act == ltsm::RoomRecognizer::Step::Act::None and not s.rec.swapped(), "a newer provisional room ends the held episode with no Undo (the fence)");
+        live->delete_node(Pn);
+        live->delete_node(Kr);
+        set_current(live_r1);
+        s.mirror = live_door("door_9", live_r2);
+        s.prov = s.mirror;
+    }
+
     std::printf("failed_swap_reverts_to_entering\n");
     {
         Scenario s(false, robot_in_r3_w);
@@ -529,6 +728,11 @@ int main(int argc, char **argv)
         }
         check(readable and not found, "no DirectConnection / connect( in room_recognizer.*");
     }
+
+    std::printf("live_sequence_fresh_to_fresh_known_room_behind_first_ever_door\n");
+    live_sequence(true, 46, 47);
+    std::printf("live_sequence_fresh_to_fresh_new_room_stays_new\n");
+    live_sequence(false, 48, 49);
 
     std::printf("%s (%d failures)\n", failures ? "FAILED" : "all ok", failures);
     std::fflush(stdout);
