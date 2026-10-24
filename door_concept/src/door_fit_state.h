@@ -364,6 +364,7 @@ struct DoorFitState
     float dbg_band_delta = 0.0f;   // signed offset of the aperture centre from the polygon (> 0 outside); NaN = no polygon
     float dbg_band_p     = 1.0f;   // π(δ) = exp(room_prior_term)
     float dbg_pose_kappa = 1.0f;   // Task D-C: the pose-uncertainty overlap κ the image channels were weighted by this frame
+    float dbg_ricoh_dL = 0.0f, dbg_ricoh_p = 0.0f, dbg_ricoh_pdet = 0.0f, dbg_ricoh_hit = 0.0f, dbg_ricoh_closed = 1.0f;   // the ricoh absence channel (existence CSV ric_*)
     float dbg_p_env      = 0.0f;   // detector-envelope factor of p_detect (from roi_fill), for the existence CSV
     float dbg_edge_excess = 0.0f;  // (s_true - s_ctrl) / frame mean gradient — THE evidence quantity
     int   dbg_edge_nctl = 0;       // control placements that survived; 0 ⇒ nothing to compare against,

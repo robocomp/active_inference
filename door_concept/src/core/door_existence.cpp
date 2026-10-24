@@ -21,6 +21,7 @@
 
 #include "../../../common/instance_tracker/birth_evidence.h"   // rc::birth::observation_weight (SHARED): the ricoh channel's P(detect)
 #include "../door_geometry.h"
+#include "../door_leaf_visibility.h"                     // leaf_closedness / ricoh_detect_scale (Task D2)
 #include "../door_phi_posterior.h"                                // room_walls_beside, phi_field_nuisance (one own-wall definition)
 #include "../../../common/occlusion/occlusion.h"                 // rc::occlusion::{cone_blocks, walls_block} (SHARED)
 #include "../../../common/contour_edge/contour_edge_check.h"     // rc::edges::PreparedFrame / contour_edge_support
@@ -119,7 +120,12 @@ const char* const kExistenceCsvHeader =
     "band_delta,band_p,"
     // The detector envelope's input (door_fit.cpp compute_projected_roi): the leaf box's
     // extent INSIDE the image per axis (≤ 1), and p_env, the envelope factor of p_detect.
-    "roi_fill,roi_fill_h,roi_fill_v,roi_valid,p_env\n";
+    "roi_fill,roi_fill_h,roi_fill_v,roi_valid,p_env,"
+    // The 360 camera's ABSENCE channel (Task D2; it was the one negative term no column showed): ric_dL = the pooled increment it
+    // put into L this cycle (0 = no look / not a ricoh frame), ric_p = P(ricoh detects | range, line of sight) of a SHUT leaf,
+    // ric_pdet = that times the open-leaf scale (the P(detect) the absence actually used), ric_hit = the learned hit rate,
+    // ric_closed = E[cos^2 phi] over the leaf-angle posterior (1 = shut, 0 = edge-on open).
+    "ric_dL,ric_p,ric_pdet,ric_hit,ric_closed\n";
 
 // ─── SemanticField: rc::SemanticProbField over the recorded plane ───────────────────────────────────────────────────
 
@@ -872,6 +878,14 @@ void DoorCore::update_existence(const DoorCycleInput& in, DoorCycleOutput& out)
         // seeing it is weak evidence — and a ricoh-born phantom BEHIND the robot, which the ZED can never probe, is
         // removable by it. `ricoh_look` is the resolvability of that look, handed to the removal debounce.
         float ricoh_look = 0.0f;
+        inst.dbg_ricoh_dL = 0.0f; inst.dbg_ricoh_p = 0.0f; inst.dbg_ricoh_pdet = 0.0f; inst.dbg_ricoh_hit = 0.0f;
+        // ★OPEN-AWARE (Task D2, gold12 DOOR_1): the ricoh detects a door as a panel IN the wall. A leaf swung open is edge-on and a
+        // leaf-width off the wall, so a 'looked, not detected' of it says little: P(detect) is the mixture over the leaf-angle posterior,
+        // P(shut-looking)·p + P(open-looking)·p·Ricoh.OpenDetectRel (door_leaf_visibility.h; cos² of phi, continuous — at phi ~ 90 deg the
+        // absence is ~0). The same marginalisation the ZED silhouette makes, and the same one the hit calibration and the slice's
+        // range likelihood below make (a leaf slice off the wall is the open door, not a different object).
+        const float leaf_closed = rc::door::leaf_closedness(inst.phi_curve, inst.phi_est);
+        inst.dbg_ricoh_closed = leaf_closed;
         if (in.robot.room_T_body.has_value()
             and ricoh_fresh(pkt))
         {
@@ -893,16 +907,24 @@ void DoorCore::update_existence(const DoorCycleInput& in, DoorCycleOutput& out)
                     const auto rr = ricoh_range(fit_.room_polygon(), cam_b, Vec2f(q.centroid.x(), q.centroid.y()), q.depth_var,
                                                 cfg.ai2_sigma_base_m, cfg.ai2_range_noise_lat_per_m,
                                                 cfg.tracker_detection_noise_m * cfg.tracker_detection_noise_m,
-                                                cfg.ricoh_plane_std_m * cfg.ricoh_plane_std_m, true);   // as the birth path (niche-aware)
+                                                cfg.ricoh_plane_std_m * cfg.ricoh_plane_std_m, true,   // as the birth path (niche-aware)
+                                                1.0f - leaf_closed, inst.aperture.w);   // a leaf slice off the wall is THIS door, open
                     const float v = std::max(0.0f, inst.ai2_belief.covariance()(0, 0)) + std::max(0.0f, rr.var);
                     if (rr.var >= 0.0f and (Vec2f(q.centroid.x(), q.centroid.y()) - door_c).squaredNorm() <= cfg.tracker_gate_mahalanobis * v)
                     { seen = true; break; }
                 }
                 // ONE trial per distinct (viewpoint, door): the frames of a view share its pooled detected fraction
                 const auto [dh, dt] = inst.ricoh_hit_pool.add(cam_b, door_c, pool_R, seen);
-                ricoh_trials_ += dt; ricoh_hits_ += dh;
+                // ★A trial on an OPEN leaf is not a trial of the detector on a door: it would read the leaf's invisibility as the
+                // detector's miss rate (the global hit rate feeds every door's P(detect) and the birth bank). Each trial counts in
+                // proportion to how shut the leaf looks — the weight the detector's hit probability has under that leaf state.
+                ricoh_trials_ += leaf_closed * dt; ricoh_hits_ += leaf_closed * dh;
+                ricoh_open_trials_ += (1.0f - leaf_closed) * dt; ricoh_open_hits_ += (1.0f - leaf_closed) * dh;
             }
             const float hit = (ricoh_hits_ + 1.0f) / (ricoh_trials_ + 2.0f);
+            // The open-leaf detection rate, relative to a shut one: learned on ZED-confirmed open doors, the config's value as its prior.
+            const float open_rel = rc::door::learned_open_rel(ricoh_open_hits_, ricoh_open_trials_, hit, cfg.ricoh_open_detect_rel);
+            const float ricoh_scale = rc::door::ricoh_detect_scale(leaf_closed, open_rel);
             const float pc  = std::clamp(sm.clutter_prob, 1e-3f, 1.0f - 1e-3f);
             float dL_look = 0.0f;
             if (det_now and inst.last_source != 0)
@@ -915,14 +937,19 @@ void DoorCore::update_existence(const DoorCycleInput& in, DoorCycleOutput& out)
                 const float p_ricoh = rc::birth::observation_weight({1.0f, range}, bd)
                                     * los_weight(fit_.room_polygon(), cam_b, door_c, cfg.ai2_sigma_base_m,
                                                  cfg.ai2_range_noise_lat_per_m);
-                ricoh_look = p_ricoh;
+                ricoh_look = p_ricoh * ricoh_scale;   // the removal debounce: an open leaf cannot be 'resolved absent' either
+                inst.dbg_ricoh_p = p_ricoh;
                 // absence: a Bernoulli look. The door yields a detection with prob q = P(detect | ricoh, viewpoint) x hit (clutter
                 // scales with q too, so q = 0 says NOTHING, never a small ratchet): LLR = ln((1 - q hit) / (1 - q pc)).
-                dL_look = kappa * std::log((1.0f - p_ricoh * hit) / (1.0f - p_ricoh * pc));
+                const float p_det = p_ricoh * ricoh_scale;   // P(detect) marginalised over the leaf state (see above)
+                inst.dbg_ricoh_pdet = p_det;
+                dL_look = kappa * std::log((1.0f - p_det * hit) / (1.0f - p_det * pc));
             }
+            inst.dbg_ricoh_hit = hit;
             if (dL_look != 0.0f)
             {
                 const float dL = inst.ricoh_view_pool.add_logodds(cam_b, door_c, pool_R, dL_look);
+                inst.dbg_ricoh_dL = dL;   // the POOLED increment the belief receives (the CSV's ric_dL)
                 const float L0 = inst.existence.logodds();
                 inst.existence.integrate(1.0f, dL);
                 bank(inst, inst.existence.last_increment());
@@ -1556,7 +1583,9 @@ void DoorCore::update_existence(const DoorCycleInput& in, DoorCycleOutput& out)
                            << ',' << inst.dbg_frame_depth << ',' << inst.dbg_frame_ndepth
                            << ',' << inst.dbg_band_delta << ',' << inst.dbg_band_p
                            << ',' << inst.roi_fill << ',' << inst.roi_fill_h << ',' << inst.roi_fill_v
-                           << ',' << (inst.roi_valid ? 1 : 0) << ',' << inst.dbg_p_env << '\n';
+                           << ',' << (inst.roi_valid ? 1 : 0) << ',' << inst.dbg_p_env
+                           << ',' << inst.dbg_ricoh_dL << ',' << inst.dbg_ricoh_p << ',' << inst.dbg_ricoh_pdet
+                           << ',' << inst.dbg_ricoh_hit << ',' << inst.dbg_ricoh_closed << '\n';
                 }
                 diag("door_existence_log.csv", ex_csv.str(), out);
             }

@@ -16,6 +16,7 @@
 #include <unordered_set>
 #include <utility>
 
+#include "../door_leaf_visibility.h"                     // leaf_closedness / ricoh_detect_scale (Task D2)
 #include "../../../common/instance_tracker/birth_evidence.h"   // rc::birth::evidence (SHARED)
 #include "../../../common/track/merge_sweep.h"                 // rc::track::merge_overlapping_sweep (SHARED, no Qt)
 #include "../../../common/footprint/footprint.h"               // rc::geom::Footprint, overlap_ratio
@@ -359,7 +360,9 @@ void DoorCore::associate(const DoorCycleInput& in, DoorCycleOutput& out)
     bank_prm.tau_s = cfg.ricoh_decorrelation_s;
     bank_prm.forget_s = cfg.ricoh_forget_s;
     bank_prm.view_R_m = 0.5f * cfg.door_prior_w_m;
-    const float ricoh_bar = cfg.tracker_birth_frames * RicohBirthBank::llr_hit(bank_prm);   // ⚠ decision boundary, see RicohBirthBank
+    const float ricoh_bar = cfg.tracker_birth_frames * RicohBirthBank::llr_hit(bank_prm);
+    // the bank's places are unidentified, so the open-leaf prior stands in for the leaf-state belief an instance would have
+    const float bank_open_scale = rc::door::ricoh_detect_scale(1.0f - cfg.ricoh_birth_p_open, cfg.ricoh_open_detect_rel);   // ⚠ decision boundary, see RicohBirthBank
     const auto& pkt = masks_.packet();
 
     // ★BIRTH EVIDENCE — the shared CREATE policy (common/instance_tracker/birth_evidence.h). This agent fed
@@ -482,13 +485,15 @@ void DoorCore::associate(const DoorCycleInput& in, DoorCycleOutput& out)
                 const auto rr = ricoh_range(world_->room_polygon(), cam_xy_.value(), dv.xy, sl.depth_var,
                                             cfg.ai2_sigma_base_m, cfg.ai2_range_noise_lat_per_m,
                                             cfg.tracker_detection_noise_m * cfg.tracker_detection_noise_m,
-                                            cfg.ricoh_plane_std_m * cfg.ricoh_plane_std_m, true);
+                                            cfg.ricoh_plane_std_m * cfg.ricoh_plane_std_m, true,
+                                            cfg.ricoh_birth_p_open, cfg.door_prior_w_m);   // Task D2: marginalised over a shut / open leaf
                 dv.xy = rr.xy;
                 dv.xy_var = rr.var;                                  // its OWN measurement covariance (gate + candidates)
                 ricoh_w = rr.weight;
                 ricoh_look = RicohBirthBank::Look{rr.xy, rr.var, rr.weight * std::clamp(sl.confidence, 0.0f, 1.0f)};   // the label's own reliability scales the hit
                 if (rr.weight <= 0.0f) ++ctr.no_wall;
                 ctr.w_wall += rr.weight;
+                ctr.agree_shut += rr.agree_shut; ctr.agree_open += rr.agree_open;
                 if (birth_new_obs and ricoh_w > 0.0f)
                 {
                     ricoh_w *= ricoh_views_.peek(cam_xy_.value(), dv.xy, 0.5f * cfg.door_prior_w_m, cfg.tracker_birth_min_sep_m);
@@ -582,6 +587,7 @@ void DoorCore::associate(const DoorCycleInput& in, DoorCycleOutput& out)
         ricoh_bank_.update(static_cast<double>(in.t_steady_ns) * 1e-9, cam, unassoc, bank_prm,
                            [&](const Vec2f& xy)
                            { return (ricoh_looked_in(pkt, cam, xy) ? 1.0f : 0.0f)   // not looked at ⇒ no absence
+                                    * bank_open_scale   // a place that may be an open leaf is detected less: its absence says less
                                     * rc::birth::observation_weight({1.0f, (xy - cam).norm()}, birth_detect)
                                     * los_weight(poly, cam, xy, cfg.ai2_sigma_base_m, cfg.ai2_range_noise_lat_per_m); },
                            track_xy);
@@ -611,9 +617,14 @@ void DoorCore::associate(const DoorCycleInput& in, DoorCycleOutput& out)
         {
             const auto& c = counters_[k];
             diag("stdout", std::format("[birth-src {}] slices={} door={} no_support={} bearing_only={} no_cam={} wall_w0={} pushed={} ev>0={} "
-                                       "sum(wall_w)={:.2f} sum(w_after_pool)={:.2f} sum(ev)={:.3f} max(ev)={:.3f}\n",
+                                       "sum(wall_w)={:.2f} sum(w_after_pool)={:.2f} sum(ev)={:.3f} max(ev)={:.3f} "
+                                       "sum(agree_shut)={:.2f} sum(agree_open)={:.2f} bank_entries={} bank_maxL={:.2f} ricoh_bar={:.2f} hit_rate={:.3f}\n",
                                        k == 0 ? "ZED" : "RICOH", c.slices, c.door, c.no_support, c.bearing_only, c.no_cam, c.no_wall,
-                                       c.pushed, c.pos_ev, c.w_wall, c.w_pool, c.ev, c.ev_max), out);
+                                       c.pushed, c.pos_ev, c.w_wall, c.w_pool, c.ev, c.ev_max, c.agree_shut, c.agree_open,
+                                       k == 1 ? ricoh_bank_.entries().size() : std::size_t{0},
+                                       k == 1 and not ricoh_bank_.entries().empty()
+                                           ? std::ranges::max(ricoh_bank_.entries(), {}, &RicohBirthBank::Entry::L).L : 0.0f,
+                                       ricoh_bar, bank_prm.hit_rate), out);
         }
     if (++dbg_cycles_ % 30 == 0 or not res_.births.empty() or not res_.deaths.empty())
         diag("stdout", std::format("[tracker] instances={} door_dets={} assigned={} unassigned={} births={} deaths={}\n",

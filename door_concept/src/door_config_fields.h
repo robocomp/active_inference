@@ -264,6 +264,12 @@ void read_door_config_fields(DoorConfig& out, GetF&& getf, GetI&& geti, GetS&& g
             "time constant (s) with which an unobserved (not looked at / occluded) ricoh birth candidate relaxes back to the prior");
     out.ricoh_plane_std_m        = getf("Birth.RicohPlaneStdM", 0.10f,
             "std (m) between the room outline's wall plane and the door face the LiDAR range lands on (layout normal sigma + the door sitting in the wall's thickness)");
+    out.ricoh_open_detect_rel    = getf("Ricoh.OpenDetectRel", 0.02f,
+            "MODEL PARAMETER: ricoh detection rate of an OPEN leaf (edge-on, a leaf-width off the wall) relative to a shut one; the ricoh absence of a door whose leaf is open (phi~90deg) is weighted by cos^2(phi)+(1-cos^2(phi))*this, so ~0 there");
+    out.ricoh_birth_p_open       = getf("Birth.RicohOpenPrior", 0.20f,
+            "MODEL PARAMETER: prior P(a ricoh door slice is a leaf standing OPEN, up to one leaf-width off the wall plane); the birth weight marginalises the slice's range likelihood over shut (wall agreement) and open (offset within the leaf width). 0 = wall agreement only");
+    out.exist_cross_leak         = getf("Existence.CrossLeak", 0.05f,
+            "MODEL PARAMETER: P(localisation error alone reports the robot body through a WALL); the doorway the body passed through gains ln(P(passable)/this) nats");
     out.tracker_nll_cost         = getb("Tracker.NllCost", false,
             "association cost = ½(m²+ln|S|) NLL (vs raw m²); see InstanceTracker");
     out.bearing_birth_enabled    = getb("Bearing.BirthEnabled", false,

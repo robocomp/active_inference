@@ -400,6 +400,10 @@ struct DoorConfig
     float tracker_gate_fallback_m  = 0.40f;   // metric XY gate (m) before an instance has a usable covariance
     float tracker_detection_noise_m = 0.20f;  // R in the association innovation cov S=P+R²I (≥ centroid-vs-fit offset)
     float ricoh_plane_std_m = 0.10f, ricoh_decorrelation_s = 5.0f, ricoh_forget_s = 120.0f;   // ricoh birth bank (ricoh_door_birth.h)
+    // ★MODEL PARAMETERS of an OPEN leaf (Task D2; door_leaf_visibility.h). Probabilities of the generative model, not gates.
+    float ricoh_open_detect_rel = 0.02f;      // Ricoh.OpenDetectRel — ricoh detection rate of an OPEN (edge-on, off-wall) leaf relative to a shut one
+    float ricoh_birth_p_open    = 0.20f;      // Birth.RicohOpenPrior — prior P(a ricoh door slice is a leaf standing open off the wall); 0 = wall-agreement only
+    float exist_cross_leak      = 0.05f;      // Existence.CrossLeak — P(localisation error alone reports the body through a WALL)
     float tracker_birth_frames     = 6.6f;    // IDEAL OBSERVATIONS of unexplained evidence before a birth
                                               // (8 rescaled by the graded model's median conf 0.826 — see config.toml)
     float tracker_birth_min_sep_m  = 0.70f;   // a birth must be ≥ this (m) from every existing door (anti-dup)
