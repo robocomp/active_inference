@@ -1176,6 +1176,7 @@ private:
     static constexpr std::uint64_t kDoorRouteRebuildMs = 2000;      // as the mission route's build retry: the map gets a moment
     std::vector<rc::policy::RouteWaypoint> door_route_goals_;       // the curve's points as Place goals (policy on)
     int door_route_goal_index_ = 0;
+    std::uint64_t door_route_cross_claim_ = 0;                      // aff_<door>_cross claimed by the through-leg (0 = none)
     bool build_door_route(const ControllerRobotPose &robot_pose, std::uint64_t now_ms, float tol_xy);
     bool drive_door_route(const ControllerPlanningStep &step, rc::TrajectoryController &path_controller,
                           ControllerMotionCommander &motion_commander, const TimeSource &time_source);

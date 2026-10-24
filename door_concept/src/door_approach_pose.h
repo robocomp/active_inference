@@ -85,8 +85,10 @@ struct ApproachMemory
         refused.push_back({dc.x(), dc.y(), room, t_ms});
     }
     // P(a standpoint at q is refused again | the remembered hand-backs), at time now, from the robot's current room.
+    // disc_overlap: the approach AXIS search uses the footprint-overlap kernel (below); the look memory keeps the Gaussian
+    // its withdrawal share is calibrated on (door_look_site.h).
     [[nodiscard]] float p_refused(const Aperture& ap, float side, const std::string& room, const Eigen::Vector2f& q,
-                                  std::int64_t now_ms, float memory_s, float footprint_r) const
+                                  std::int64_t now_ms, float memory_s, float footprint_r, bool disc_overlap = false) const
     {
         const float tau = std::max(memory_s, 1e-3f), r = std::max(footprint_r, 1e-3f);
         const Eigen::Vector2f dq = door_coords(ap, side, q);
@@ -95,7 +97,18 @@ struct ApproachMemory
         {
             if (f.room != room) continue;   // another room's standpoint — not evidence about this one
             const float age = std::max(0.0f, static_cast<float>(now_ms - f.t_ms) * 1e-3f);
-            const float k = std::exp(-age / tau) * std::exp(-0.5f * (dq - Eigen::Vector2f(f.a, f.c)).squaredNorm() / (r * r));
+            // A refusal says the footprint DISC at that standpoint is blocked (the obstacle is somewhere inside it). A
+            // candidate is blocked with the probability that the obstacle also lies inside ITS disc: the overlap fraction
+            // of two equal discs of radius r at distance d — continuous, exactly 0 once they no longer overlap (d ≥ 2r).
+            // (A Gaussian never reaches 0, so "farther from the refusal" always scored better and the axis search ran
+            // down to its floor, 0.42 m from the door, instead of stopping at the first free standoff.)
+            const float d = (dq - Eigen::Vector2f(f.a, f.c)).norm();
+            const float overlap = d >= 2.0f * r ? 0.0f
+                : (2.0f * r * r * std::acos(d / (2.0f * r)) - 0.5f * d * std::sqrt(4.0f * r * r - d * d))
+                      / (std::numbers::pi_v<float> * r * r);
+            const float space = disc_overlap ? overlap
+                                             : std::exp(-0.5f * (dq - Eigen::Vector2f(f.a, f.c)).squaredNorm() / (r * r));
+            const float k = std::exp(-age / tau) * space;
             p_free *= 1.0 - std::clamp(static_cast<double>(k), 0.0, 1.0);
         }
         return static_cast<float>(1.0 - p_free);
@@ -258,12 +271,26 @@ struct ApproachChoice
             const float dist = signed_boundary_distance(pb.polygon, qxy);   // > 0 outside
             ch.p_inside = std::isfinite(dist) ? 1.0f - prob_within(0.0f, dist, pb.sigma) : 1.0f;
         }
-        ch.p_refused = mem.p_refused(ap, pb.side, pb.room, qxy, now_ms, pb.memory_s, pb.footprint_r);
+        ch.p_refused = mem.p_refused(ap, pb.side, pb.room, qxy, now_ms, pb.memory_s, pb.footprint_r, /*disc_overlap=*/true);
         ch.score = ch.p_complete * ch.p_inside * (1.0f - ch.p_refused);
         if (not have or ch.score > best.score)
         {
             best = ch;
             have = true;
+        }
+        // ★THE VANTAGE IS THE FARTHEST FREE STANDOFF (user 2026-10-24: "a vantage position in front of the door"). Far to
+        // near, the FIRST candidate that is unrefused (the footprint-overlap kernel is exactly 0 there), inside the room and
+        // completable — in the band for a shut door, anywhere within reach for an open one — IS the vantage. Scanning on for
+        // a "better" score only follows the plateau's float creep toward the door (live: 0.42 m from it after one hand-back).
+        // FLAGGED: inside/open are MAP readings (≥ ½); "completable" is the contract's OWN completion level (complete_at, the
+        // approach contract's pre: clause), not a new number. The argmax above is the fallback when no candidate qualifies.
+        const bool door_open = pb.p_open >= 0.5f;
+        const bool in_band = standoff >= pb.d_min - 1e-4f;
+        if (ch.p_refused == 0.0f and ch.p_inside >= 0.5f and ch.p_complete >= pb.complete_at and (door_open or in_band))
+        {
+            best = ch;
+            have = true;
+            break;
         }
     }
     // σ_meas stays NOMINAL: door_reach_prob, measured AT the standpoint, uses the range σ floored by the pose floor, and at

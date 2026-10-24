@@ -1069,6 +1069,29 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
         current_plan_.reset();
         plan_spline_valid_ = false;
     }
+    // Route mode still CLAIMS `cross` on the through-leg: door_concept hangs its passage anchor and records the crossing
+    // only for a claimed cross (door_concept specificworker_anchor.cpp, anchor_creation_claim) — ltsm's passage history
+    // and room recognition's fresh seam depend on it. The claim ends with the leg: Satisfied unless the passage failed.
+    {
+        std::uint64_t want = 0;
+        if (door_route_leg_.has_value() and door_route_leg_->through and door_route_leg_->cross.has_value())
+            if (const auto n = graph_->get_node("aff_" + door_route_leg_->door + "_cross"); n.has_value()) want = n->id();
+        if (want != 0)
+        {
+            const int epoch = rc::AffordanceManager::producer_epoch(graph_, want).value_or(0);
+            const auto &c = *door_route_leg_->cross;
+            if (epoch != 0) affordance_manager.publish_executing(graph_, want, epoch, c.x(), c.y(), door_route_leg_->cross_yaw);
+            else affordance_manager.note_claim(graph_, want, 0);
+            door_route_cross_claim_ = want;
+        }
+        else if (door_route_cross_claim_ != 0)
+        {
+            affordance_manager.complete_claim(graph_, door_route_cross_claim_,
+                                              door_passage_.view().failed ? rc::affordance::Outcome::Unreachable
+                                                                          : rc::affordance::Outcome::Satisfied);
+            door_route_cross_claim_ = 0;
+        }
+    }
     // ── DOOR ROUTE (route mode): the passage's route owns the base, as a running mission's route does — nothing to select.
     if (door_route_leg_.has_value())
     {
