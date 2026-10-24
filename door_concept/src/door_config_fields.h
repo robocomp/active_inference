@@ -268,8 +268,10 @@ void read_door_config_fields(DoorConfig& out, GetF&& getf, GetI&& geti, GetS&& g
             "MODEL PARAMETER: ricoh detection rate of an OPEN leaf (edge-on, a leaf-width off the wall) relative to a shut one; the ricoh absence of a door whose leaf is open (phi~90deg) is weighted by cos^2(phi)+(1-cos^2(phi))*this, so ~0 there");
     out.ricoh_birth_p_open       = getf("Birth.RicohOpenPrior", 0.20f,
             "MODEL PARAMETER: prior P(a ricoh door slice is a leaf standing OPEN, up to one leaf-width off the wall plane); the birth weight marginalises the slice's range likelihood over shut (wall agreement) and open (offset within the leaf width). 0 = wall agreement only");
+    out.exist_cross_passable_prior = getf("Existence.CrossPassablePrior", 0.5f,
+            "MODEL PARAMETER: P(a doorway is passable) as the crossing's likelihood P(crossed|doorway) - UNINFORMATIVE 0.5 on purpose: the door's own door_open_prob may have been raised by the crossing itself (circular), so it is not read");
     out.exist_cross_leak         = getf("Existence.CrossLeak", 0.05f,
-            "MODEL PARAMETER: P(localisation error alone reports the robot body through a WALL); the doorway the body passed through gains ln(P(passable)/this) nats");
+            "MODEL PARAMETER: P(localisation error alone reports the robot body through a WALL); the crossed doorway gains ln(CrossPassablePrior/this) nats");
     out.tracker_nll_cost         = getb("Tracker.NllCost", false,
             "association cost = ½(m²+ln|S|) NLL (vs raw m²); see InstanceTracker");
     out.bearing_birth_enabled    = getb("Bearing.BirthEnabled", false,

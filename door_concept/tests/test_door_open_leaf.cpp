@@ -1,5 +1,5 @@
 // test_door_open_leaf.cpp — Task D2 (gold12): an OPEN leaf is a door. Four things, all on the real DoorCore / helpers:
-//   1. CROSSING CREDIT: a door re-made across a crossing keeps its L and gains ln(P(passable)/leak) (crossing_logodds), and is
+//   1. CROSSING CREDIT: a door re-made across a crossing keeps its L and gains ln(CrossPassablePrior/leak) (crossing_logodds), and is
 //      NOT re-seeded at BirthLogodds by the existence slice once it is marked seeded.
 //   2. RICOH ABSENCE, OPEN-AWARE: a ricoh-born door whose leaf stands open (phi 90 deg) under hundreds of ricoh 'looked, not
 //      detected' keeps its L (~0 dL); the same door with a shut leaf is removed (the old channel, unchanged).
@@ -133,22 +133,22 @@ int main()
         CHECK(std::abs(rc::door::ricoh_detect_scale(0.0f, 0.05f) - 0.05f) < 1e-6f and rc::door::ricoh_detect_scale(1.0f, 0.05f) == 1.0f);
     }
     {   // 1. crossing credit
-        const float dl = rc::door::crossing_logodds(0.995f, 0.05f);
-        std::print("1: crossing ln(0.995/0.05) = {:.3f}\n", dl);
-        CHECK(dl > 2.9f and dl < 3.1f);
+        const float dl = rc::door::crossing_logodds(0.5f, 0.05f);
+        std::print("1: crossing ln(0.5/0.05) = {:.3f}\n", dl);
+        CHECK(dl > 2.2f and dl < 2.4f);
         CHECK(rc::door::crossing_logodds(0.01f, 0.05f) == 0.0f);                       // a happened crossing never counts against
-        CHECK(rc::door::crossing_logodds(0.5f, 0.05f) < rc::door::crossing_logodds(0.995f, 0.05f));   // from P(passable), not a constant
+        CHECK(rc::door::crossing_logodds(0.2f, 0.05f) < rc::door::crossing_logodds(0.5f, 0.05f));   // from the likelihood ratio, not a constant
         const float L_src = 1.83f;
-        float Lout[2] = {0, 0};
-        for (int carry = 0; carry < 2; ++carry)   // the re-made door with / without the carried belief (one world each: two doors at one place would merge)
+        float Lout[3] = {0, 0, 0};
+        for (int carry = 0; carry < 3; ++carry)   // the re-made door with / without the carried belief (one world each: two doors at one place would merge)
         {
             DoorCoreConfig cfg; ExistWorld w; w.cfg = cfg.door; DoorCore core(cfg); w.core = &core; core.connect(&w);
             rc::DoorFitState inst;
             rc::DoorState s; s.w = cfg.door.door_prior_w_m; s.h = cfg.door.door_prior_h_m; s.thickness = cfg.door.door_thickness_m;
             core.fit().init_instance(inst, 1, "door_1", s);
-            if (carry)
+            if (carry)   // 1: carried L; 2: unseeded source - BirthLogodds + the crossing (specificworker I2)
             {
-                inst.existence.set(L_src + dl);
+                inst.existence.set((carry == 1 ? L_src : cfg.door.exist_birth_logodds) + dl);
                 inst.existence_seeded = true; inst.existence_entry_L = inst.existence.logodds(); inst.existence_since_entry = 0.0f;
             }
             w.st.emplace(1, std::move(inst));
@@ -159,6 +159,7 @@ int main()
         }
         std::print("1: re-made door L = {:.2f} (carried), {:.2f} (fresh, re-seeded)\n", Lout[1], Lout[0]);
         CHECK(std::abs(Lout[1] - std::min(L_src + dl, 4.0f)) < 1e-4f and Lout[1] > Lout[0] + 1.0f);   // kept, not re-seeded at BirthLogodds
+        CHECK(std::abs(Lout[2] - (1.0f + dl)) < 1e-4f and Lout[2] > Lout[0]);   // unseeded source: seed + crossing
         CHECK(std::abs(Lout[0] - 1.0f) < 1e-4f);                                                      // the old path, for contrast
     }
     {   // 3. ricoh birth weight (slice vs the wall at y = 5)

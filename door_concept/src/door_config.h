@@ -403,6 +403,7 @@ struct DoorConfig
     // ★MODEL PARAMETERS of an OPEN leaf (Task D2; door_leaf_visibility.h). Probabilities of the generative model, not gates.
     float ricoh_open_detect_rel = 0.02f;      // Ricoh.OpenDetectRel — ricoh detection rate of an OPEN (edge-on, off-wall) leaf relative to a shut one
     float ricoh_birth_p_open    = 0.20f;      // Birth.RicohOpenPrior — prior P(a ricoh door slice is a leaf standing open off the wall); 0 = wall-agreement only
+    float exist_cross_passable_prior = 0.5f;  // Existence.CrossPassablePrior — P(a doorway is passable) before the crossing, uninformative
     float exist_cross_leak      = 0.05f;      // Existence.CrossLeak — P(localisation error alone reports the body through a WALL)
     float tracker_birth_frames     = 6.6f;    // IDEAL OBSERVATIONS of unexplained evidence before a birth
                                               // (8 rescaled by the graded model's median conf 0.826 — see config.toml)

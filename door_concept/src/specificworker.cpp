@@ -3752,23 +3752,23 @@ void SpecificWorker::install_carried_door(std::uint64_t new_room, std::uint64_t 
                     }
             // ★Task D2 — THE BELIEF CROSSES WITH THE DOOR, AND SO DOES THE CROSSING (gold12: door_1 was re-made at BirthLogodds 1.0,
             //   forgetting its L = +1.83 and the fact that the robot's body had just passed through it, and died 5 s later).
-            //   L = the source's L + the crossing as an observation: P(crossed | doorway) = P(passable), P(crossed | wall) =
-            //   Existence.CrossLeak, i.e. ln(P(passable)/leak) nats (door_leaf_visibility.h), P(passable) being the door_open_prob
-            //   the graph already carries for this doorway. The instance is marked seeded so the existence slice does not re-seed it.
-            if (adopted_from.has_value() and adopted_from->existence_L.has_value())
+            //   L = the source's L (BirthLogodds when the source was never seeded: the crossing is evidence independent of it) + the
+            //   crossing as an observation: ln(Existence.CrossPassablePrior / Existence.CrossLeak) nats (door_leaf_visibility.h). The
+            //   door's own door_open_prob is NOT read: the crossing may have raised it (circular). Marked seeded so the existence slice
+            //   does not re-seed it.
+            if (adopted_from.has_value())
                 if (auto it = fitter_->instances().find(adopt_mirror); it != fitter_->instances().end())
                 {
                     auto& dst = it->second;
-                    float p_pass = 1.0f;   // nothing measured ⇒ nothing contradicts a crossing that happened
-                    if (const auto v = G->get_attrib_by_name<door_open_prob_att>(n.value()); v.has_value()) p_pass = v.value();
-                    else if (adopted_from->open_prob.has_value()) p_pass = *adopted_from->open_prob;
-                    const float dLx = rc::door::crossing_logodds(p_pass, cfg_.exist_cross_leak);
-                    dst.existence.set(*adopted_from->existence_L + dLx);
+                    const float L_src = adopted_from->existence_L.value_or(cfg_.exist_birth_logodds);
+                    const float dLx = rc::door::crossing_logodds(cfg_.exist_cross_passable_prior, cfg_.exist_cross_leak);
+                    dst.existence.set(L_src + dLx);
                     dst.existence_seeded      = true;
                     dst.existence_entry_L     = dst.existence.logodds();
                     dst.existence_since_entry = 0.0f;
-                    std::print("door_concept: [room] {} keeps its existence across the crossing: L {:.2f} + crossing {:.2f} "
-                               "(P(passable)={:.2f}, leak {:.2f}) -> {:.2f}\n", n->name(), *adopted_from->existence_L, dLx, p_pass,
+                    std::print("door_concept: [room] {} keeps its existence across the crossing: L {:.2f}{} + crossing {:.2f} "
+                               "(prior {:.2f}, leak {:.2f}) -> {:.2f}\n", n->name(), L_src,
+                               adopted_from->existence_L.has_value() ? "" : " (birth seed)", dLx, cfg_.exist_cross_passable_prior,
                                cfg_.exist_cross_leak, dst.existence.logodds());
                 }
         }
