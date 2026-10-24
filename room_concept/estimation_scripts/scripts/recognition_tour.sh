@@ -16,7 +16,7 @@ export FLEET="retina room_concept residual_concept controller door_concept ltsm_
 echo stop > $B/controller/remote_cmd.txt
 # fresh state: no last pose, no name high-water mark, no ltsm memory, no place maps
 rm -f ../etc/last_robot_pose.txt ../etc/room_name_hwm.txt $B/ltsm_agent/etc/ltsm_memory.json $B/ltsm_agent/etc/ltsm_memory.json.prev
-rm -rf $B/retina/etc/place_maps/
+rm -rf $B/retina/etc/place_maps/; rm -f $WT/ltsm_agent/etc/recognition_trace.csv $B/ltsm_agent/etc/recognition_trace.csv
 # close every door BEFORE the fleet starts (the cross mission opens the one it needs)
 for d in DOOR_1 DOOR_0 DOOR_2; do python3 scripts/door.py close $d; done
 sleep 3
@@ -26,6 +26,15 @@ for i in $(seq 1 90); do grep -a -q 'room polygon LOADED' $L/door_concept.log 2>
 room_now() { grep -a "current room changed" $L/controller.log | tail -1 | awk '{print $NF}'; }
 new_door() { awk '/\[room\] LET GO/{buf=""} /created instance for node/{buf=buf"\n"$0} END{print buf}' $L/door_concept.log \
              | grep -o "node 'door_[0-9]*'" | tr -d "'" | awk '{print $2}' | grep -v -x "$1" | tail -1; }
+# door to cross NEXT in room $1, other than $2 (the one just crossed); $3 = preferred name. Candidates: doors RESTORED in that
+# remembered room by door_concept (after a recognition swap the face of DOOR_2 carries the room's OWN restored name) plus doors
+# born in it. Logs how it was found.
+discover_door() {
+  local room=$1 ex=$2 pref=$3 cands pick src
+  cands=$( { grep -a -o -E "'door_[0-9]+' RESTORED in remembered '$room'" $L/door_concept.log | grep -o "door_[0-9]*"; new_door "$ex" | grep -v '^$'; } | grep -v -x "$ex" | awk '!s[$0]++')
+  if [ -n "$pref" ] && echo "$cands" | grep -q -x "$pref"; then pick=$pref; src="preferred name present among restored/born doors of $room"
+  else pick=$(echo "$cands" | tail -1); src="last restored/born door of $room other than $ex (candidates: $(echo $cands))"; fi
+  echo "discover_door($room): '$pick' - $src" >&2; echo "$pick"; }
 nl() { wc -l < $L/$1.log 2>/dev/null || echo 0; }
 now_ms() { date +%s%3N; }
 TSV=crossing/$1/legs.tsv; printf 'leg\tstatus\tt0_ms\tt1_ms\tltsm0\tltsm1\tdoor0\tdoor1\troom0\troom1\n' > $TSV
@@ -38,25 +47,28 @@ run_leg() {   # leg door here   (sets r)
     grep -a -q -E "mission 'leg $1': (failed|aborted)" $L/controller.log && { r="FAILED: $(grep -a -o -E "mission 'leg $1': (failed|aborted)[^\"]*" $L/controller.log | tail -1)"; break; }
     sleep 3
   done; }
-ok=0; d2=""; scan_s=0
+ok=0; d2=""; d5=""; scan_s=0
 for leg in 1 2 3 4 5 6; do
   here=$(room_now); [ -z "$here" ] && here=room_1
   T0=$(now_ms); A0=$(nl ltsm_agent); D0=$(nl door_concept); R0=$(nl room_concept)
-  case $leg in 1|2) d=door_1;; 3|6) d=door_2;;
+  case $leg in 1|2) d=door_1;; 3) d=door_2;;
     4) d2=$(new_door door_2); ts=$(date +%s)
        # scan until DOOR_2 is born (the gold_tour driver gave up after ONE 90 s explore although it was born later)
        while [ -z "$d2" ] && [ $(( $(date +%s)-ts )) -lt $SCAN_CAP_S ]; do
-         echo run > $B/controller/remote_cmd.txt; sleep 2
-         printf 'mission "scan%s"\n  explore %s budget_s=90s\n' $(( $(date +%s)-ts )) "$here" > $B/controller/remote_cmd.txt
-         n=$(( $(date +%s)-ts ))
+         n=$(( $(date +%s)-ts )); echo run > $B/controller/remote_cmd.txt; sleep 2
+         printf 'mission "scan%s"\n  explore %s budget_s=90s\n' $n "$here" > $B/controller/remote_cmd.txt
          for i in $(seq 1 40); do grep -a -q -E "mission 'scan$n': (completed|failed|aborted)" $L/controller.log && break; d2=$(new_door door_2); [ -n "$d2" ] && break; sleep 3; done
          d2=$(new_door door_2)
        done
        scan_s=$(( $(date +%s)-ts )); echo "leg 4: DOOR_2 scan took ${scan_s} s -> '${d2}'"
        [ -z "$d2" ] && { echo "leg 4: DOOR_2 never born in $here within ${SCAN_CAP_S} s"; break; }; d=$d2;;
-    5) d=$d2;; esac
+    5) d=$(discover_door "$(room_now)" "" ""); [ -z "$d" ] && d=$d2; d5=$d;;
+    6) d=$(discover_door "$(room_now)" "$d5" door_2); [ -z "$d" ] && d=door_2;; esac
   run_leg $leg $d $here
   case "$r" in *wrong_room*) sleep 10; here=$(room_now); [ -z "$here" ] && here=room_1; run_leg "${leg}r" $d $here;; esac
+  if [ $leg = 4 ]; then   # the window closes on the Swap line (ltsm acts after the cross) or a 20 s settle timeout
+    for i in $(seq 1 20); do tail -n +$((A0+1)) $L/ltsm_agent.log | grep -a -q '\[recog\] SWAP requested' && break; sleep 1; done; sleep 2
+  fi
   now=$(room_now)
   echo "leg $leg ($here --$d--> now $now): $r"
   case "$r" in OK*) st=OK; ok=$((ok+1));; *) st=FAILED;; esac
@@ -70,5 +82,6 @@ for d in DOOR_1 DOOR_0 DOOR_2; do python3 scripts/door.py open $d; done
 # collect + stop the fleet (SIGTERM; ltsm persists its memory on exit), then grade
 bash scripts/run_crossing.sh crossing/$1 collect >/dev/null 2>&1
 cp $B/ltsm_agent/etc/ltsm_memory.json crossing/$1/ltsm_memory.json 2>/dev/null
+cp $WT/ltsm_agent/etc/recognition_trace.csv crossing/$1/recognition_trace.csv 2>/dev/null || cp $B/ltsm_agent/etc/recognition_trace.csv crossing/$1/recognition_trace.csv 2>/dev/null
 python3 scripts/recognition_report.py crossing/$1 | tee crossing/$1/recognition_report.txt
 exit ${PIPESTATUS[0]}

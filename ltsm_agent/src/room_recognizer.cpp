@@ -11,7 +11,10 @@
 
 #include <algorithm>
 #include <cmath>
+#include <chrono>
 #include <format>
+#include <fstream>
+#include <locale>
 #include <limits>
 #include <ranges>
 #include <unordered_set>
@@ -647,8 +650,11 @@ RoomRecognizer::Step RoomRecognizer::step()
             out.room_id = ids_[next.room];
             out.pose_in_k = post_entry_[next.room].pose_in_k;
             rebase();
-            qInfo().noquote() << QString::fromStdString(std::format("[recog] SWAP requested: room_id {} (posterior {:.3f})",
-                                                                    out.room_id, std::exp(post_entry_[next.room].log_post)));
+            qInfo().noquote() << QString::fromStdString(std::format("[recog] SWAP requested: room_id {} (posterior {:.3f}; metric log_inside {:.2f}, appearance loglr {:.2f}{}, new: metric log_new {:.2f})",
+                                                                    out.room_id, std::exp(post_entry_[next.room].log_post),
+                                                                    metric[next.room].available ? metric[next.room].log_inside : 0.f,
+                                                                    app[next.room].available ? app[next.room].loglr : 0.f,
+                                                                    app[next.room].available ? "" : " (unavailable)", log_new));
         }
         else if (commit_.state == rc::recog::Commit::State::Committed and next.state == rc::recog::Commit::State::Entering)
         {
@@ -666,6 +672,24 @@ RoomRecognizer::Step RoomRecognizer::step()
 
     std::vector<float> post;
     for (const auto &h : post_entry_) post.push_back(std::exp(h.log_post));
+    // per-step trace for the gold-tour report (etc/recognition_trace.csv, truncated per run, classic locale)
+    if (not trace_.is_open())
+    {
+        trace_.imbue(std::locale::classic());
+        trace_.open("etc/recognition_trace.csv", std::ios::out | std::ios::trunc);
+        if (trace_.is_open()) trace_ << "stamp_ms,provisional_id,act,room_id,candidates(id:posterior:metric_log_inside:appearance_loglr;new:posterior::log_new)\n";
+    }
+    if (trace_.is_open())
+    {
+        trace_ << std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count()
+               << ',' << prov_id_ << ',' << (out.act == Step::Act::Swap ? "Swap" : out.act == Step::Act::Undo ? "Undo" : "None")
+               << ',' << out.room_id << ',';
+        for (std::size_t k = 0; k < n; ++k)
+            trace_ << ids_[k] << ':' << std::exp(post_entry_[k].log_post) << ':' << (metric[k].available ? metric[k].log_inside : 0.f)
+                   << ':' << (app[k].available ? app[k].loglr : 0.f) << ';';
+        trace_ << "new:" << std::exp(post_entry_.back().log_post) << "::" << log_new << '\n';
+        trace_.flush();
+    }
     publish(post);
     return out;
 }

@@ -42,6 +42,7 @@
 #include <dsr/api/dsr_api.h>
 
 #include <cstdint>
+#include <fstream>
 #include <map>
 #include <memory>
 #include <optional>
@@ -111,6 +112,7 @@ private:
     bool swap_ack_ = false;                     ///< RoomSwap executed the Swap: the episode is held, not judged
     bool promoted_ = false;                     ///< the provisional room became current (or the committed room did)
     std::vector<rc::recog::Hypothesis> post_entry_;
+    std::ofstream trace_;                       ///< etc/recognition_trace.csv, opened on the first step
     std::vector<float> published_;              ///< the last recog_posterior written (skip identical rewrites)
     std::vector<std::uint64_t> published_ids_;
     std::uint64_t node_id_ = 0;
