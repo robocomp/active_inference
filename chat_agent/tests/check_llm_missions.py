@@ -2,7 +2,10 @@
 """Live check (needs ollama): does the model WRITE a runnable, correct mission from a request?
 
 The planner request chat_agent will send: the three skills (etc/skills/missions.md + doors.md + exploring.md, front
-matter stripped) as the system prompt, the same synthetic STATE as check_llm_tools.py, then the person's request.
+matter stripped) as the system prompt, the same synthetic STATE as check_llm_tools.py, then the person's request in
+planner_request()'s layout (mission_plan.h): the person's words, then — only when the chat's plan_mission request says
+something else — a `(the chat summarised it as: "…")` line. A case is the person's words; a case may carry the chat's
+summary too (the live 10-24 case carries the one that dropped its report), and is then sent with that line.
 No tools, temperature 0, think false, num_predict from etc/config.toml. The reply is piped through
 tests/mission_check (parse_planned: the DSL, or JSON if it starts with `{`; then validate) and the case's checklist is
 run over the printed step lines. `ask:` is the right answer to an impossible/unclear request and a failure otherwise.
@@ -186,6 +189,18 @@ def visit_room(L):
     return bool(rep) and returns_after(L, rep[0])
 
 
+def report_in_bound_room(L):
+    """cross door_1 with bind, then a `report` while still in the bound room (no other cross in between), then a way
+    back after it (live 2026-10-24: the chat's summary dropped "tell me what objects are there")."""
+    b = [i for i, a in crosses(L, "door_1") if "bind" in a]
+    if not b:
+        return False
+    for i, _ in of(L, "report"):
+        if i > b[0] and not any(b[0] < j < i for j, _ in crosses(L)):
+            return returns_after(L, i)
+    return False
+
+
 def names_room_2(L):
     """room_2 is not in the STATE (no other rooms, none remembered): naming it in any form is an invented name."""
     return any(re.search(r"(node|pose):room_2\b|passage:[^ ]*@room_2\b", v) for _, a in L for v in a.values())
@@ -235,6 +250,11 @@ CASES = [
     # (label, request, checker(L) -> bool, expect_ask)
     ("spec 5.1 (EN)", "Approach door_1, cross to the next room, tell me what objects are there, and come back to room_1.",
      lambda L: bool(crosses(L, "door_1")) and visit_room(L) and any(a.get("door") == "node:door_1" for _, a in crosses(L)[:1]), False),
+    ("live 10-24: cross, report, back", "Cross door_1 into the next room, tell me what objects are there, then cross back to room_1",
+     report_in_bound_room, False),
+    ("live 10-24 + the chat's summary", ("Cross door_1 into the next room, tell me what objects are there, then cross back to room_1",
+                                         "cross door_1, explore the next room, and then cross door_1 back to room_1"),
+     report_in_bound_room, False),
     ("paraphrase EN", "Go through door_1, look around the room on the other side, report what is in it, then return here.",
      lambda L: bool(crosses(L, "door_1")) and visit_room(L), False),
     ("paraphrase EN 2", "Please check what objects are in the room behind door_1 and then get back to where you started.",
@@ -274,8 +294,18 @@ CASES = [
 ]
 
 
+def planner_request(case):
+    """mission_plan.h planner_request(said, request, false): a case is the person's words, or (words, chat summary)."""
+    said, summary = (case, "") if isinstance(case, str) else case
+    out = said.strip()
+    if summary.strip() and summary.strip().lower().rstrip(".!") != said.strip().lower().rstrip(".!"):
+        out += f'\n\n(the chat summarised it as: "{summary.strip()}")'
+    return out
+
+
 def ask_model(system, user):
-    msgs = [{"role": "system", "content": system}, {"role": "system", "content": STATE_TEXT}, {"role": "user", "content": user}]
+    msgs = [{"role": "system", "content": system}, {"role": "system", "content": STATE_TEXT},
+            {"role": "user", "content": planner_request(user)}]
     body = {"model": MODEL, "messages": msgs, "stream": False, "think": False, "keep_alive": "30m",
             "options": {"temperature": 0, "num_ctx": 16384, "num_predict": NUM_PREDICT}}
     if FORM == "json":

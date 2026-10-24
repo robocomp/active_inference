@@ -143,7 +143,16 @@ void ChatSession::start()
     QObject::connect(&ping_timer_, &QTimer::timeout, &ctx_, [this]() { ping_llm(); });
     QObject::connect(&canvas_timer_, &QTimer::timeout, &ctx_, [this]() { tick_canvas(); });
     QObject::connect(&gpu_timer_, &QTimer::timeout, &ctx_, [this]() { poll_gpu(); });
-    QObject::connect(&fleet_timer_, &QTimer::timeout, &ctx_, [this]() { tick_fleet(); });
+    QObject::connect(&fleet_timer_, &QTimer::timeout, &ctx_, [this]()
+    {
+        // ★ The tool answered "starting" before the outcome was known: the model hears how it ended (live 2026-10-24:
+        //   only the window heard "no executable", and the model told the person the agent was starting).
+        if (auto end = tick_fleet(); end.has_value())
+        {
+            log_.write("wake_queued", QJsonObject{{"kind", "agent_control"}, {"note", q(end->note)}});
+            wakes_.push(std::move(end->note));
+        }
+    });
     QObject::connect(&gpu_proc_, &QProcess::finished, &ctx_, [this](int code, QProcess::ExitStatus status)
     {
         const auto m = (status == QProcess::NormalExit and code == 0)
@@ -324,6 +333,7 @@ void ChatSession::on_user_text(const QString& text)
     log_.write("user", QJsonObject{{"text", text}});
     ++user_turn_;
     last_user_text_ = text;
+    wake_turn_ = false;
     // ★ The person spoke while a plan was being written: the plan is for a conversation that has moved on. Resolved
     //   FIRST, so its tool result lands right after its call in the history (a call and its results are never split
     //   by this message's turns) and a late reply can never become a card (stop, then a card, is an anti-goal).
@@ -1171,7 +1181,7 @@ QString ChatSession::queue_planner(const QJsonObject& args)
     if (planner_.has_value()) return refuse(QStringLiteral("one mission at a time: a plan is already being written"));
     if (request.isEmpty()) return refuse(QStringLiteral("the request is empty: pass what the person asked for"));
     if (not digest_.facts.controller_present) return refuse(QStringLiteral("the controller is not running, so no mission can run"));
-    planner_ = PlannerJob{.request = request, .request_text = last_user_text_, .turn = user_turn_};
+    planner_ = PlannerJob{.request = request, .request_text = last_user_text_, .turn = user_turn_, .from_wake = wake_turn_};
     log_.write("plan_mission", QJsonObject{{"request", request}, {"ok", true}});
     return {};
 }
@@ -1196,11 +1206,15 @@ void ChatSession::run_planner()
     }
     QJsonArray msgs{QJsonObject{{"role", "system"}, {"content", skills}},
                     QJsonObject{{"role", "system"}, {"content", planner_state()}},
-                    QJsonObject{{"role", "user"}, {"content", planner_->request}}};
+                    QJsonObject{{"role", "user"}, {"content", q(planner_request(planner_->request_text.toStdString(),
+                                                                                planner_->request.toStdString(),
+                                                                                planner_->from_wake))}}};
     for (const auto& m : planner_->rounds) msgs.append(m);
     planner_->reply.clear();
     const QString model = cfg_.llm.planner_model.isEmpty() ? cfg_.llm.model : cfg_.llm.planner_model;
-    log_.write("planner_request", QJsonObject{{"model", model}, {"request", planner_->request}, {"fixes", planner_->fixes}});
+    log_.write("planner_request", QJsonObject{{"model", model}, {"request", planner_->request},
+                                              {"said", planner_->from_wake ? QString{} : planner_->request_text},
+                                              {"fixes", planner_->fixes}});
     const bool ok = llm_.chat(msgs, {}, OllamaClient::Callbacks{
         .on_token = [this](const QString& tok) { if (planner_.has_value()) planner_->reply += tok; },
         .on_tool_calls = {},
@@ -1975,6 +1989,7 @@ void ChatSession::drain_wakes()
     draw_repairs_ = 0;
     lost_answers_ = 0;
     if (not ollama_ok_) ping_llm();
+    wake_turn_ = true;
     push_history({{"role", "user"}, {"content", q(wake_message(*note))}});
     ask_model(false);
 }
@@ -2059,12 +2074,18 @@ QString ChatSession::do_agent_control(const QJsonObject& args)
                                         "arguments only if they answer yes.").arg(q(d.text)));
         case fleet::Decision::Kind::go: break;
     }
+    // ★ No OK for a launch that cannot happen (live 2026-10-24): checked here, before a restart's SIGTERM too.
+    if (*action != fleet::Action::stop)
+        if (const auto missing = fleet::missing_executable(fleet::agent_executable(cfg_.fleet_dir, *agent)))
+            return reply(QStringLiteral("NOT DONE: ") + q(*missing) +
+                         QStringLiteral(". Tell the person it cannot be started from the chat; do not say it is starting."));
     if (*action != fleet::Action::start)
         for (int pid : pids) ::kill(pid, SIGTERM);   // never SIGKILL (fleet_control.h)
     fleet_op_.emplace(*action, *agent, now);
     window_->append_system(QStringLiteral("agents — %1 %2").arg(q(std::string(fleet::to_string(*action))), q(*agent)));
-    tick_fleet();
-    if (fleet_op_.has_value()) fleet_timer_.start(250);   // the outcome takes seconds: a quarter-second look is enough
+    if (const auto end = tick_fleet(); end.has_value())   // over at once (a failed launch, a stop already done)
+        return reply((end->ok ? QStringLiteral("OK: ") : QStringLiteral("NOT DONE: ")) + q(end->note));
+    fleet_timer_.start(250);   // the outcome takes seconds: a quarter-second look is enough
     const QString what = *action == fleet::Action::stop    ? QStringLiteral("SIGTERM sent to %1")
                          : *action == fleet::Action::start ? QStringLiteral("starting %1")
                                                            : QStringLiteral("restarting %1");
@@ -2072,12 +2093,12 @@ QString ChatSession::do_agent_control(const QJsonObject& args)
                  QStringLiteral(". The chat tells the person when it is done; do not say it already is."));
 }
 
-void ChatSession::tick_fleet()
+std::optional<ChatSession::FleetEnd> ChatSession::tick_fleet()
 {
     if (not fleet_op_.has_value())
     {
         fleet_timer_.stop();
-        return;
+        return std::nullopt;
     }
     const std::int64_t now = fleet_now();
     const std::string agent = fleet_op_->agent();
@@ -2093,22 +2114,25 @@ void ChatSession::tick_fleet()
     {
         step.done = true;
         ok = false;
-        step.report = agent + " could not be launched: no executable "
-                    + QDir(q(cfg_.fleet_dir)).absoluteFilePath(q(agent) + "/bin/" + q(agent)).toStdString();
+        step.report = agent + " could not be launched from " + fleet::agent_executable(cfg_.fleet_dir, agent).string() + ".";
     }
-    if (not step.done) return;
+    if (not step.done) return std::nullopt;
     QString msg = QStringLiteral("agents — ") + q(step.report);
     if (not ok) msg += QStringLiteral(" Its log: ") + agent_log(agent);
     log_.write("agent_control_done", QJsonObject{{"agent", q(agent)}, {"ok", ok}, {"report", msg}});
     window_->append_system(msg);
+    const fleet::Action action = fleet_op_->action();
     fleet_op_.reset();
     fleet_timer_.stop();
+    return FleetEnd{.ok = ok, .note = fleet::control_done_note(action, agent, ok, step.report,
+                                                               ok ? std::string{} : agent_log(agent).toStdString())};
 }
 
 bool ChatSession::launch_agent(const std::string& agent)
 {
-    const QDir dir(QDir(q(cfg_.fleet_dir)).absoluteFilePath(q(agent)));
-    const QString exe = dir.absoluteFilePath(QStringLiteral("bin/") + q(agent));
+    const auto path = fleet::agent_executable(cfg_.fleet_dir, agent);
+    const QString exe = q(path.string());
+    const QDir dir(q(path.parent_path().parent_path().string()));   // <agent>/, where etc/config.toml is
     if (not QFileInfo(exe).isExecutable()) return false;
     QDir().mkpath(q(cfg_.fleet_log_dir));
     QProcess p;

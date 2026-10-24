@@ -27,6 +27,8 @@
 #include <string_view>
 #include <vector>
 
+#include <unistd.h>
+
 #include "system_facts.h"
 
 namespace rc::chat::fleet
@@ -281,6 +283,37 @@ private:
     std::int64_t t0_, launched_ = 0;
     State state_;
 };
+
+/// Where start / restart launch the agent from: `<fleet_dir>/<agent>/bin/<agent>`, absolute (the session's cwd is not
+/// the fleet's; the default fleet dir is "..").
+[[nodiscard]] inline std::filesystem::path agent_executable(const std::filesystem::path& fleet_dir, std::string_view agent)
+{
+    return std::filesystem::absolute(fleet_dir / agent / "bin" / agent).lexically_normal();
+}
+
+/// Why `exe` cannot be launched ("<agent> has no executable at <path>"), or nullopt when it can: a regular file this
+/// process may execute. Checked BEFORE start / restart answer OK (live 2026-10-24: the tool said "starting", the
+/// launch then found no executable, and only the window heard it).
+[[nodiscard]] inline std::optional<std::string> missing_executable(const std::filesystem::path& exe)
+{
+    std::error_code ec;
+    if (std::filesystem::is_regular_file(exe, ec) and ::access(exe.c_str(), X_OK) == 0) return std::nullopt;
+    return exe.filename().string() + " has no executable at " + exe.string();
+}
+
+/// The outcome of a start / stop / restart this chat asked for, as a robot event for the model (WakeQueue): the tool
+/// answered before it was known, so the model may have to confirm it or take back what it said.
+[[nodiscard]] inline std::string control_done_note(Action action, const std::string& agent, bool ok,
+                                                   const std::string& report, const std::string& log)
+{
+    if (ok)
+        return "agent_control finished: " + agent + (action == Action::stop ? " has stopped." : " is running.") +
+               " Tell the person in one short sentence.";
+    std::string why = report;
+    if (not log.empty()) why += " Its log: " + log + ".";
+    return "agent_control finished: " + agent + " failed to " + std::string(to_string(action)) + ": " + why +
+           " Tell the person now that it failed, correcting anything you said before.";
+}
 
 /// The agent's heartbeat comes from the process started `elapsed_ms` ago, not from the old one's last breath.
 [[nodiscard]] inline bool started_since(const AgentFact& a, std::int64_t elapsed_ms)

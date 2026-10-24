@@ -229,7 +229,11 @@ private:
     void poll_vlm();   ///< GET <url>/api/ps asynchronously (none stacked); its result lands in gpu_label_
     /// agent_control: start / stop / restart a fleet agent (fleet_control.h); the outcome is told later by tick_fleet.
     QString do_agent_control(const QJsonObject& args);
-    void tick_fleet();
+    struct FleetEnd { bool ok = false; std::string note; };   ///< how a start / stop / restart ended, for the model
+    /// One look at the start / stop / restart in progress; when it has ended, whether it worked and the robot-event
+    /// note telling the model (fleet::control_done_note). The timer's ticks queue the note as a wake;
+    /// do_agent_control's first tick returns it as the tool result instead.
+    std::optional<FleetEnd> tick_fleet();
     bool launch_agent(const std::string& agent);   ///< `cd <agent> && setsid bin/<agent> etc/config.toml`, detached
     [[nodiscard]] QString agent_log(const std::string& agent) const;
 
@@ -248,6 +252,7 @@ private:
     WakeQueue wakes_;                          ///< robot events waiting for the model
     std::string fix_key_;                      ///< "m<serial>" of the failed mission whose wake was delivered last
     std::uint64_t fix_turn_ = 0;               ///< user_turn_ at that delivery (fix_still_open)
+    bool wake_turn_ = false;                   ///< the model's current turn answers a robot event, not the person
     OllamaClient llm_;
     std::unique_ptr<ChatWindow> window_;
     ChatLog log_;
@@ -326,6 +331,7 @@ private:
         QString reply;             ///< the reply being received
         int fixes = 0;             ///< fix rounds done (cap kMaxPlanFixes)
         bool image = false;        ///< the calling round attached a picture (look): its follow-up must show it
+        bool from_wake = false;    ///< queued in a robot event's turn: request_text is not about it (planner_request)
     };
     std::optional<PlannerJob> planner_;
     struct MissionCard   ///< a checked mission shown to the person, waiting for their yes

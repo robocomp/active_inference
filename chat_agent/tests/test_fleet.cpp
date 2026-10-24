@@ -180,5 +180,40 @@ int main()
         assert(not started_since(a, 5000)); ++checks;
     }
 
+    // ── the executable is checked BEFORE start/restart says OK (live 10-24: OK, then "no executable") ──────────
+    {
+        const fs::path root = fs::temp_directory_path() / ("test_fleet_exe_" + std::to_string(getpid()));
+        fs::create_directories(root / "chair_concept/bin");
+        const fs::path exe = agent_executable(root, "chair_concept");
+        assert(exe == fs::absolute(root / "chair_concept/bin/chair_concept")); ++checks;
+        assert(agent_executable("rel", "x").is_absolute()); ++checks;
+        assert(missing_executable(exe).has_value()); ++checks;                         // not there
+        assert(*missing_executable(exe) == "chair_concept has no executable at " + exe.string()); ++checks;
+        std::ofstream(exe) << "#!/bin/sh\n";
+        fs::permissions(exe, fs::perms::owner_read | fs::perms::owner_write);
+        assert(missing_executable(exe).has_value()); ++checks;                         // there, not executable
+        fs::permissions(exe, fs::perms::owner_exec, fs::perm_options::add);
+        assert(not missing_executable(exe).has_value()); ++checks;
+        assert(missing_executable(root / "chair_concept/bin").has_value()); ++checks;   // a directory is not one
+        fs::remove_all(root);
+    }
+
+    // ── the outcome, told later, reaches the MODEL as a robot event (it said "starting", it must correct itself) ──
+    {
+        const std::string up = control_done_note(Action::start, "chair_concept", true, "chair_concept is up.", "");
+        assert(up == "agent_control finished: chair_concept is running. Tell the person in one short sentence."); ++checks;
+        const std::string again = control_done_note(Action::restart, "retina", true, "retina is up again.", "");
+        assert(again.starts_with("agent_control finished: retina is running")); ++checks;
+        const std::string stopped = control_done_note(Action::stop, "retina", true, "retina has stopped.", "");
+        assert(stopped.starts_with("agent_control finished: retina has stopped.")); ++checks;
+        const std::string bad = control_done_note(Action::start, "chair_concept", false,
+                                                  "chair_concept exited soon after starting.", "/l/chair_concept.log");
+        assert(bad.starts_with("agent_control finished: chair_concept failed to start: chair_concept exited soon after "
+                               "starting.")); ++checks;
+        assert(bad.contains("/l/chair_concept.log") and bad.contains("correcting")); ++checks;
+        const std::string bad_stop = control_done_note(Action::stop, "retina", false, "retina is still running.", "");
+        assert(bad_stop.starts_with("agent_control finished: retina failed to stop: ")); ++checks;
+    }
+
     std::println("test_fleet: {} checks passed", checks);
 }
