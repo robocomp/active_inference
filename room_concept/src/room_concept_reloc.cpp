@@ -419,10 +419,7 @@ namespace rc
         if (params.reloc_enabled and map_guided_checks_allowed() and not searching())
         {
             if (late_pending_.load(std::memory_order_acquire) and not lidar_points.empty())
-            {
-                if (not late_forced_done_) run_late_recall_search(lidar_points);          // once, at adoption
-                else accumulate_late_evidence(std::max(res.sdf_mse, res.pred_sdf_median)); // then normal tracking's misfit
-            }
+                if (not late_forced_done_) { run_late_recall_search(lidar_points); late_forced_this_frame_ = late_forced_done_; }   // once, at adoption
             step_door_anchor(res);
             // Rivals first: they are scored on THIS scan against the pose update() just committed.
             step_rival_modes(lidar_points);
@@ -455,6 +452,11 @@ namespace rc
                 belief_prev_pose_ = pose;
                 belief_prev_pose_valid_ = true;
             }
+            // The late recall's verdict reads normal tracking's misfit, weighted by how new this view is (view_change): a parked
+            // robot's repeated identical scans are one observation, not many. The forced search at adoption read the first.
+            if (late_pending_.load(std::memory_order_acquire) and late_forced_done_ and not late_forced_this_frame_)
+                accumulate_late_evidence(s, view_change);
+            late_forced_this_frame_ = false;
             // The passage just used is a doorway of THIS room too, whatever the graph's parenting says yet (live: the
             // crossed door hangs from the room left behind for a while, so the scene graph's doorway term read exactly
             // 0 right after every recall). Two independent reasons the room does not owe the view combine as a union.
@@ -716,7 +718,7 @@ namespace rc
             rt_.hold_open = true;
         else
             set_belief_mismatch();
-        accumulate_late_evidence(last_search_top_median_);
+        accumulate_late_evidence(last_search_top_median_, 1.f);   // the first view is entirely new
     }
 
     // ★ THE ADOPTION VERDICT ACCUMULATES. One scan during the jump is noisy, so the verdict is the log-odds of "K explains
@@ -726,11 +728,21 @@ namespace rc
     //   FLAGGED: ±ln 19 is a SEQUENTIAL test boundary (Wald's SPRT, α = β = 0.05: ln((1−β)/α) = ln 19), not a 0-1-loss
     //   decision: another scan is cheap while a false Undo (or a missed one) is expensive. Weak evidence stays Pending,
     //   which ltsm reads as no objection.
-    void RoomConcept::accumulate_late_evidence(float s)
+    //   Each scan's likelihood is HEAVY-TAILED: the tracking emission is a one-sided Gaussian in ln s, so a single transient
+    //   scan (a person passing, the post-jump settling) would read tens of nats against it. The numerator is therefore the
+    //   mixture (1−ε)·tracking + ε·broad, ε = the relocaliser's own clutter fraction (reloc_outlier_frac, the constant ℓ
+    //   already uses for returns that fit no wall): one scan's LLR is bounded below by ln ε, with no clamp. And each LLR is
+    //   weighted by the view's novelty (view_change, as update_lost_belief weighs it): repeated identical views are one
+    //   observation. (The tracking emission keeps learning from these same scans, so the LLR is against a moving reference.)
+    void RoomConcept::accumulate_late_evidence(float s, float novelty)
     {
         if (not late_pending_.load(std::memory_order_acquire) or not std::isfinite(s)) return;
         const double var0 = static_cast<double>(params.reloc_track_log_sigma) * params.reloc_track_log_sigma;
-        late_log_odds_ += log_tracking_emission(s, var0) - log_broad_emission(s);
+        const double lt = log_tracking_emission(s, var0), lb = log_broad_emission(s);
+        const double eps = std::clamp(static_cast<double>(params.reloc_outlier_frac), 1e-9, 1.0 - 1e-9);   // numerical guard
+        const double hi = std::max(lt + std::log1p(-eps), lb + std::log(eps));
+        const double log_mix = hi + std::log(std::exp(lt + std::log1p(-eps) - hi) + std::exp(lb + std::log(eps) - hi));
+        late_log_odds_ += std::clamp(static_cast<double>(novelty), 0.0, 1.0) * (log_mix - lb);   // novelty is a [0,1] weight
         const double bound = std::log(19.0);   // FLAGGED above
         if (std::abs(late_log_odds_) < bound)
             return;   // undecided: keep reading the next scan

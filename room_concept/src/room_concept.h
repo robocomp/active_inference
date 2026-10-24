@@ -764,9 +764,10 @@ private:
    double late_log_odds_ = 0.0;                 ///< accumulated log-odds that K's layout explains the scans
    float  last_search_top_median_ = std::numeric_limits<float>::quiet_NaN();   ///< top mode's median |SDF| of the last search
    bool late_search_active_ = false;            ///< localiser thread: reloc_params() carries late_prior_
+   bool late_forced_this_frame_ = false;        ///< the forced search consumed this frame's scan
    bool late_forced_done_ = false;              ///< the one forced lost-branch search at adoption has run
    void run_late_recall_search(const std::vector<Eigen::Vector3f>& lidar_points);
-   void accumulate_late_evidence(float s);      ///< one scan's LLR into late_log_odds_ (localiser thread only)
+   void accumulate_late_evidence(float s, float novelty);      ///< one scan's LLR into late_log_odds_ (localiser thread only)
    rc::reloc::Runtime rt_;                      ///< Task R1/R1b relocalisation runtime (reloc_runtime.h)
    std::atomic<bool> pose_undecided_{false};
    std::atomic<float> p_track_display_{1.f};   ///< P(TRACKING) mirrored for the GUI thread (is_relocalising)

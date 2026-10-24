@@ -36,7 +36,8 @@ namespace rc
     {
         static void late(RoomConcept& r, const std::vector<Eigen::Vector3f>& pts) { r.run_late_recall_search(pts); }
         static void stale_emission(RoomConcept& r) { r.track_mu_ln_s_ = std::log(1.5f); r.track_var_ln_s_ = 1e-4f; }
-        static void evidence(RoomConcept& r, float s) { r.accumulate_late_evidence(s); }
+        static void evidence(RoomConcept& r, float s, float nov = 1.f) { r.accumulate_late_evidence(s, nov); }
+        static double log_odds(RoomConcept& r) { return r.late_log_odds_; }
         static double llr(RoomConcept& r, float s)
         {
             const double v = static_cast<double>(r.params.reloc_track_log_sigma) * r.params.reloc_track_log_sigma;
@@ -244,6 +245,41 @@ check("(e) a layout that cannot explain the scan is REJECTED", pend_e and ver_e 
     const auto vf = rcn.late_recall_verdict();
     check("(f) weak evidence never disturbs tracking, no spurious reject", same and vf != RoomConcept::LateVerdict::Rejected,
           (std::snprintf(buf, sizeof buf, "s0=%.3f verdict=%d untouched=%d", 0.5f * (lo + hi), static_cast<int>(vf), same ? 1 : 0), buf));
+}
+
+// (g) a correct K with a TRANSIENT BURST (4 scans of large misfit amid good ones): one scan's evidence is bounded below, so the
+// burst cannot reject; the good scans carry the verdict. (h) PARKED: the same view repeated (novelty 0 after the first, as
+// view_change is for an unchanged pose) does not accumulate. Both drive the verdict accumulator directly: the run-loop path
+// (relocalisation_step) needs a full UpdateResult stream, which reloc_selftest owns; the accumulator is the only thing the
+// watch does there after adoption (no search, no belief write), which (f) asserts.
+{
+    rc::RoomConcept rcn;
+    rcn.set_polygon_room(poly);
+    rcn.set_robot_pose(truth.x(), truth.y(), truth.z(), false);
+    rc::reloc::PriorMode m; m.mu = truth; m.S = Eigen::Vector3f(0.04f, 0.04f, 0.02f).asDiagonal();
+    rcn.seed_reloc_prior({m});
+    bool rejected = false;
+    for (int k = 0; k < 60 and rcn.late_recall_verdict() == RoomConcept::LateVerdict::Pending; ++k)
+    {
+        const bool burst = k >= 5 and k < 9;
+        rc::RelocSelftestAccess::evidence(rcn, burst ? 1.2f : 0.03f);
+        rejected = rejected or rcn.late_recall_verdict() == RoomConcept::LateVerdict::Rejected;
+    }
+    check("(g) a transient burst never rejects a correct K", not rejected and rcn.late_recall_verdict() == RoomConcept::LateVerdict::Accepted,
+          (std::snprintf(buf, sizeof buf, "verdict=%d log-odds=%.1f", static_cast<int>(rcn.late_recall_verdict()), rc::RelocSelftestAccess::log_odds(rcn)), buf));
+    rc::RoomConcept r5, r50;
+    for (auto* r : {&r5, &r50})
+    {
+        r->set_polygon_room(poly);
+        r->set_robot_pose(truth.x(), truth.y(), truth.z(), false);
+        r->seed_reloc_prior({m});
+    }
+    const float s_weak = 0.09f;   // mildly tracking-like: far from decisive
+    for (int k = 0; k < 5; ++k) rc::RelocSelftestAccess::evidence(r5, s_weak, k == 0 ? 1.f : 0.f);
+    for (int k = 0; k < 50; ++k) rc::RelocSelftestAccess::evidence(r50, s_weak, k == 0 ? 1.f : 0.f);
+    const double l5 = rc::RelocSelftestAccess::log_odds(r5), l50 = rc::RelocSelftestAccess::log_odds(r50);
+    check("(h) a parked robot's repeated view is one observation", std::abs(l50 - l5) < 1e-9,
+          (std::snprintf(buf, sizeof buf, "log-odds after 5 = %.3f, after 50 = %.3f", l5, l50), buf));
 }
 }
 
