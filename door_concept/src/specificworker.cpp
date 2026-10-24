@@ -60,6 +60,7 @@
 #include "../../common/instance_tracker/birth_evidence.h"   // rc::birth:: the shared CREATE policy
 #include "../../common/nbv/graph_obstacles.h"   // rc::nbv::collect_graph_obstacles — shared, DSR-side
 #include "door_dof.h"   // rc::kDoorDofs — names/units for the BeliefInspector rows
+#include "door_leaf_visibility.h"   // rc::door::crossing_logodds (Task D2)
 #include "../../common/graph_provenance/creation_stamp.h"   // rc::provenance::now_ms — the recorded cycle's wall clock
 
 #include <limits>   // numeric_limits<int>::max — the disabled tracker death counter
@@ -3238,6 +3239,8 @@ void SpecificWorker::step_entry_mirrors()
                     em.phi_curve   = si.phi_curve;
                     em.matched_frames = si.matched_frames;
                 }
+            if (src_it != fitter_->instances().end() and src_it->second.existence_seeded)
+                em.existence_L = src_it->second.existence.logodds();
             entry_mirrors_[room.id()] = std::move(em);
         }
     }
@@ -3245,6 +3248,10 @@ void SpecificWorker::step_entry_mirrors()
     // 3. Refresh the interaction channel from the source — the one belief about this door.
     //    Re-read the mirror node every time: update_node writes the WHOLE copy, so a stale copy would erase
     //    whatever anybody else added since.
+    // (Task D2: the source's existence L is refreshed here too, while the source lives — ltsm deletes it with its room.)
+    for (auto& [room_id, mir] : entry_mirrors_)
+        if (const auto si = fitter_->instances().find(mir.source_id); si != fitter_->instances().end() and si->second.existence_seeded)
+            mir.existence_L = si->second.existence.logodds();
     for (const auto& [room_id, mir] : entry_mirrors_)
     {
         const auto src = G->get_node(mir.source_id);
@@ -3743,6 +3750,27 @@ void SpecificWorker::install_carried_door(std::uint64_t new_room, std::uint64_t 
                                    "sigma={:.0f} deg, curve {} pts\n", n->name(), dst.phi_est * 57.2958f,
                                    dst.phi_sigma * 57.2958f, dst.phi_curve.size());
                     }
+            // ★Task D2 — THE BELIEF CROSSES WITH THE DOOR, AND SO DOES THE CROSSING (gold12: door_1 was re-made at BirthLogodds 1.0,
+            //   forgetting its L = +1.83 and the fact that the robot's body had just passed through it, and died 5 s later).
+            //   L = the source's L + the crossing as an observation: P(crossed | doorway) = P(passable), P(crossed | wall) =
+            //   Existence.CrossLeak, i.e. ln(P(passable)/leak) nats (door_leaf_visibility.h), P(passable) being the door_open_prob
+            //   the graph already carries for this doorway. The instance is marked seeded so the existence slice does not re-seed it.
+            if (adopted_from.has_value() and adopted_from->existence_L.has_value())
+                if (auto it = fitter_->instances().find(adopt_mirror); it != fitter_->instances().end())
+                {
+                    auto& dst = it->second;
+                    float p_pass = 1.0f;   // nothing measured ⇒ nothing contradicts a crossing that happened
+                    if (const auto v = G->get_attrib_by_name<door_open_prob_att>(n.value()); v.has_value()) p_pass = v.value();
+                    else if (adopted_from->open_prob.has_value()) p_pass = *adopted_from->open_prob;
+                    const float dLx = rc::door::crossing_logodds(p_pass, cfg_.exist_cross_leak);
+                    dst.existence.set(*adopted_from->existence_L + dLx);
+                    dst.existence_seeded      = true;
+                    dst.existence_entry_L     = dst.existence.logodds();
+                    dst.existence_since_entry = 0.0f;
+                    std::print("door_concept: [room] {} keeps its existence across the crossing: L {:.2f} + crossing {:.2f} "
+                               "(P(passable)={:.2f}, leak {:.2f}) -> {:.2f}\n", n->name(), *adopted_from->existence_L, dLx, p_pass,
+                               cfg_.exist_cross_leak, dst.existence.logodds());
+                }
         }
     // ★ THE PASSAGE ANCHOR IS NOT A DOOR OF EITHER ROOM. It hangs from the robot, so nothing above touched it; the
     //   one thing the room switch owes it (during approach/open, and since Task 12 Fix E during the cross as well) is its
@@ -4018,6 +4046,7 @@ void SpecificWorker::remember_door(const rc::DoorInstance& inst)
     em.swing_llr      = inst.swing_llr;
     em.phi_curve      = inst.phi_curve;
     em.matched_frames = inst.matched_frames;
+    if (inst.existence_seeded) em.existence_L = inst.existence.logodds();
     em.T_root_door    = Eigen::Affine3d(Tw->matrix());
     em.width  = G->get_attrib_by_name<width_m_att>(node.value()).value_or(cfg_.door_prior_w_m);
     em.depth  = G->get_attrib_by_name<depth_m_att>(node.value()).value_or(cfg_.door_thickness_m);
