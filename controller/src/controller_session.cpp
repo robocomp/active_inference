@@ -3300,7 +3300,9 @@ bool ControllerSession::drive_door_route(const ControllerPlanningStep &step, rc:
         note_why(rc::why::Cause::NoRoute, hold_reason_);
         return false;
     }
-    if (policy_enabled()) return true;   // drive_with_policy takes the curve's points as Place goals
+    // ★ THE DOOR ROUTE IS FOLLOWED, NOT RE-DECIDED (2026-10-24, user: "a path … so the robot can follow it instead of
+    //   wandering"): handed to the tracker even with the local policy on. Driven as the policy's Place goals it stalled in
+    //   the doorway (the crossing's pose jump read as a failed prediction ⇒ "release" ⇒ backing up, recog_try10).
     if (not path_controller.is_active() or not door_route_installed_)
     {
         // as drive_mission_route: the curve is already C2 and footprint-checked
@@ -6679,7 +6681,7 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
     //    returns' backoff, the anchor servo, lock-on and orient motion, the band, the clearance ceiling, the tracker's
     //    command path and its caps, the uncertainty limiter — none of which runs, so none can write the base. The
     //    protocol halves they carried (arrival, the cross's completion, the lock-on / orient predicates) are shared.
-    if (policy_enabled())
+    if (policy_enabled() and not door_route_leg_.has_value())   // a door route is followed by the tracker (drive_door_route)
     {
         drive_with_policy(robot_pose, path_controller, obstacle_tracker, motion_commander, display, affordance_manager,
                           time_source);
