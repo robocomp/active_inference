@@ -67,6 +67,19 @@ public:
     /// One cycle. Swap/Undo is a REQUEST, executed by RoomSwap.
     Step step();
 
+    /// ACKNOWLEDGEMENTS from RoomSwap (a request is not an execution).
+    /// A requested Swap was executed: from here the graph changes the swap itself causes (the provisional room discarded
+    /// before `current` moves, the crossed door gaining a passage) are NOT episode loss -- the episode is HELD (no new
+    /// evidence: its frame is gone) until the robot leaves the committed room (the eviction fence) or an Undo is executed.
+    void on_swap_executed(std::uint64_t room_id);
+    /// A requested Swap failed: the commit reverts to Entering (no Undo is requested: nothing was done).
+    void on_swap_failed();
+    /// A requested Undo was executed: the swap no longer stands.
+    void on_undo_executed();
+    /// The provisional room of the running episode (0 = none), and whether an executed swap is being held.
+    [[nodiscard]] std::uint64_t provisional_id() const { return prov_id_; }
+    [[nodiscard]] bool swapped() const { return swap_ack_; }
+
     /// Startup / graceful exit: remove the `recognition` node and any stale `place_evidence`. Returns how many went.
     int sweep_stale();
 
@@ -95,6 +108,7 @@ private:
     std::string start_;                         ///< path start room (memory) and the passages crossed to L
     std::vector<std::string> path_;
     std::optional<ChainPose> fresh_;            ///< the fresh seam T(L <- P), cached while measurable (L is gone after promotion)
+    bool swap_ack_ = false;                     ///< RoomSwap executed the Swap: the episode is held, not judged
     bool promoted_ = false;                     ///< the provisional room became current (or the committed room did)
     std::vector<rc::recog::Hypothesis> post_entry_;
     std::vector<float> published_;              ///< the last recog_posterior written (skip identical rewrites)
@@ -102,6 +116,7 @@ private:
     std::uint64_t node_id_ = 0;
 
     void end_episode();
+    Step held_step(Step out);                   ///< an executed swap: hold until the fence
     Step abort_episode(Step out);               ///< end an episode; Undo is requested when a commit stood
     void track_current();
     void publish(const std::vector<float> &post);

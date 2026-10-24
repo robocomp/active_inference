@@ -18,6 +18,7 @@
 #pragma once
 
 #include <dsr/api/dsr_api.h>
+#include <dsr/api/dsr_inner_eigen_api.h>
 
 #include <cstdint>
 #include <memory>
@@ -35,6 +36,20 @@ public:
 
     /// One cycle: post / refresh / retire. Returns how many recall nodes are live after it.
     int step();
+    /// LATE recall (RoomSwap): the robot is already inside `memory_room` (a known room recognised AFTER the crossing), so the
+    /// recall hangs under `anchor_id` (the crossed door, or the robot when no door survives) with `recall_late = true` and,
+    /// when given, `recall_pose_prior` (10 floats per component: w x y th Sxx Sxy Sxth Syy Syth Sthth, the robot in that
+    /// room). `anchor_from_room` = T(anchor <- room). One node per room name: a second call refreshes it in place.
+    /// Not owned by step(): step() neither refreshes nor retires it. Returns the node id, 0 on failure.
+    std::uint64_t post_late(std::uint64_t anchor_id, const std::string &memory_room, const Mat::RTMat &anchor_from_room,
+                            const std::vector<float> &pose_prior);
+    /// Delete the recall node named recall_<live name of memory_room>. Returns whether one went.
+    bool remove_recall_of(const std::string &memory_room);
+    /// How many late recalls are live.
+    [[nodiscard]] int late_count() const;
+    /// The live name of a memory room (its r<idx>_ prefix removed).
+    [[nodiscard]] static std::string live_name_of(const std::string &memory_room);
+
     /// Delete every recall_* node in the live graph (startup sweep and graceful exit).
     int remove_all();
 

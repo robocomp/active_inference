@@ -49,6 +49,10 @@ bool is_descendant(DSR::DSRGraph &mem, std::uint64_t node_id, const std::string 
 std::optional<Mat::RTMat> seam_through_passage(DSR::DSRGraph &mem, const std::string &passage,
                                                const std::string &room_to, const std::string &room_from);
 
+/// A memory room flagged `object_subtype "staged"`: a draft held by RoomSwap (the undo snapshot of a provisional room's
+/// twin), never a candidate, never recalled, never part of a passage consumers read.
+bool is_staged_room(DSR::DSRGraph &g, const DSR::Node &room);
+
 /// The two rooms the robot is holding at the instant of the hand-over.
 struct Candidate
 {
@@ -69,6 +73,11 @@ struct Candidate
     /// room passed the crossing evidence). A room that is still a `proto` at eviction time counts too. Without either,
     /// nothing says the new room's frame is the aperture and the aperture-as-frame seam is not used.
     bool crossing_born = false;
+
+    // ── DISCARD (RoomSwap: the provisional room turned out to be a known one) ───────────────────
+    /// Delete the room `new_room_id` and its live subtree and write NOTHING to memory (no seam, no copy, no `current` flip).
+    /// Only new_room_id / new_room_name are read.
+    bool discard = false;
 };
 
 /// What the promotion evidence reads for one proto-room, every cycle (log + decision).
@@ -153,6 +162,14 @@ public:
 
     /// The promotion candidate for `reading`: old = the room `current` points at, new = the proto-room.
     [[nodiscard]] std::optional<Candidate> promotion_candidate(const PromotionReading &reading) const;
+
+    /// READ-ONLY ARCHIVE (RoomSwap, while a swap is Staged). evict() writes nothing into a held memory room's twin:
+    /// as the room being LEFT it is refused (reason "deferred", nothing written; the caller releases the hold when the
+    /// robot leaves, then evicts), as the room being ENTERED its twin is not copied into nor given a derived door face
+    /// (the current flip and everything on the old side proceed; the carry-over writes the new side at release).
+    void hold(const std::string &memory_room) { held_.insert(memory_room); }
+    void release(const std::string &memory_room) { held_.erase(memory_room); }
+    [[nodiscard]] bool held(const std::string &memory_room) const { return held_.contains(memory_room); }
 
     /// BOOTSTRAP. With a single room and no `current` edge anywhere, place one. The let-go rule
     /// reads "a current edge exists AND points elsewhere", so a graph with no edge at all releases
@@ -248,6 +265,7 @@ private:
     /// otherwise be re-evicted every cycle.
     std::unordered_set<std::uint64_t> archived_;
     mutable bool warned_missing_stamp_ = false;
+    std::unordered_set<std::string> held_;   ///< memory rooms whose twin is read-only (see hold())
 };
 
 }   // namespace ltsm

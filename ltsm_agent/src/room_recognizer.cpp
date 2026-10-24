@@ -162,6 +162,7 @@ void RoomRecognizer::end_episode()
     path_.clear();
     fresh_.reset();
     promoted_ = false;
+    swap_ack_ = false;
     post_entry_.clear();
     published_.clear();
     published_ids_.clear();
@@ -243,10 +244,43 @@ RoomRecognizer::Step RoomRecognizer::abort_episode(Step out)
     return out;
 }
 
+void RoomRecognizer::on_swap_executed(std::uint64_t room_id)
+{
+    if (prov_id_ == 0 or commit_.state != rc::recog::Commit::State::Committed or commit_.room < 0 or commit_.room >= int(ids_.size())
+        or ids_[commit_.room] != room_id)
+        return;
+    swap_ack_ = true;
+    qInfo().noquote() << QString::fromStdString(std::format("[recog] swap to room_id {} executed: episode held until the robot leaves it", room_id));
+}
+
+void RoomRecognizer::on_swap_failed()
+{
+    if (swap_ack_ or commit_.state != rc::recog::Commit::State::Committed) return;
+    commit_ = {rc::recog::Commit::State::Entering, -1};
+    qInfo() << "[recog] swap failed: back to entering";
+}
+
+void RoomRecognizer::on_undo_executed() { swap_ack_ = false; }
+
+RoomRecognizer::Step RoomRecognizer::held_step(Step out)
+{
+    // The swap stands. Its own effects reshape the graph (P gone before `current` moves, the crossed door in a passage),
+    // so nothing here is judged. Only the robot LEAVING the committed room ends the episode, and with no Undo.
+    const auto cur = rc::room::current_edge_room(*live_);
+    if (not cur.has_value()) return out;
+    const auto room = live_->get_node(cur.value());
+    const auto rid = room.has_value() ? live_->get_attrib_by_name<room_id_att>(room.value()) : std::nullopt;
+    const bool at_known = commit_.room >= 0 and commit_.room < int(ids_.size()) and rid.has_value() and rid.value() == ids_[commit_.room];
+    if (cur.value() == L_id_ or cur.value() == prov_id_ or at_known) return out;
+    end_episode();
+    return out;
+}
+
 RoomRecognizer::Step RoomRecognizer::step()
 {
     Step out;
     track_current();
+    if (swap_ack_ and prov_id_ != 0) return held_step(out);
 
     const auto cur = rc::room::current_edge_room(*live_);
     if (not cur.has_value()) return abort_episode(out);

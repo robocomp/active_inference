@@ -304,6 +304,11 @@ bool RoomEviction::copy_subtree(std::uint64_t live_id, std::uint64_t mem_parent_
 }
 
 //////////////////////////////////////////////////////////////////////////////////////////////////
+bool is_staged_room(DSR::DSRGraph &g, const DSR::Node &room)
+{
+    return room.type() == "room" and g.get_attrib_by_name<object_subtype_att>(room).value_or(std::string{}) == "staged";
+}
+
 std::vector<DSR::Node> RoomEviction::passages() const
 {
     // ★ THE SUBTYPE FILTER IS LOAD-BEARING. `metaconcept` is a shared type -- ring_metaconcept's
@@ -313,7 +318,20 @@ std::vector<DSR::Node> RoomEviction::passages() const
     for (const auto &n : mem_->get_nodes_by_type("metaconcept"))
         if (const auto st = mem_->get_attrib_by_name<object_subtype_att>(n);
             st.has_value() and st.value() == "passage")
-            out.push_back(n);
+        {
+            // A passage with a face in a STAGED room (the undo snapshot) is not part of the map yet.
+            bool into_staged = false;
+            for (const auto &e : DSR::DSRGraph::get_node_edges_by_type(n, "match"))
+                if (const auto f = mem_->get_node(e.to()); f.has_value())
+                    for (auto cur = f; cur.has_value() and not into_staged;)
+                    {
+                        if (is_staged_room(*mem_, cur.value())) { into_staged = true; break; }
+                        const auto p = mem_->get_attrib_by_name<parent_att>(cur.value());
+                        if (not p.has_value() or p.value() == cur->id()) break;
+                        cur = mem_->get_node(p.value());
+                    }
+            if (not into_staged) out.push_back(n);
+        }
     return out;
 }
 
@@ -563,6 +581,15 @@ Outcome RoomEviction::evict(const Candidate &cand)
 {
     Outcome out;
 
+    // DISCARD: the room is not archived, it is dropped (a provisional room that was a known one). Nothing reaches memory.
+    if (cand.discard)
+    {
+        out.live_removed = remove_live_room(cand.new_room_id);
+        out.ok = out.live_removed > 0;
+        if (not out.ok) out.reason = "nothing to discard";
+        return out;
+    }
+
     // ── 1. THE SEAM, FIRST ──────────────────────────────────────────────────────────────────────
     // T(room_new <- room_old), composed through the robot. Computable ONLY while both RT edges
     // exist, which is why nothing is written before this line.
@@ -594,6 +621,15 @@ Outcome RoomEviction::evict(const Candidate &cand)
     const std::uint64_t new_idx = room_index(live_->get_node(cand.new_room_id).value());
     const std::string old_prefix = std::format("r{}_", old_idx);
     const std::string new_prefix = std::format("r{}_", new_idx);
+
+    // READ-ONLY ARCHIVE while a swap is staged (hold()). The room being left: nothing may be written into its twin, so the
+    // whole transaction is deferred. The room being entered: its twin is left alone (see new_held below).
+    if (held(old_prefix + cand.old_room_name))
+    {
+        out.reason = std::format("deferred: the archive of {} is read-only while a swap is staged", old_prefix + cand.old_room_name);
+        return out;
+    }
+    const bool new_held = held(new_prefix + cand.new_room_name);
 
     // ── 2. COPY THE OLD ROOM'S SUBTREE ─────────────────────────────────────────────────────────
     // It hangs off whatever memory already holds: the stub a previous eviction left for this room
@@ -627,9 +663,17 @@ Outcome RoomEviction::evict(const Candidate &cand)
     // room's side of the crossed door can be remembered. For a room with nothing under it yet (the
     // two-room stage) the subtree IS the stub.
     IdMap new_map;
-    if (not copy_subtree(cand.new_room_id, mem_parent, new_prefix, new_idx, root_edge, new_map, out))
-        return out;
-    out.mem_new_room_id = new_map.at(cand.new_room_id);
+    if (new_held)
+    {   // read-only twin: not copied into; only its id is read (door faces already in it are matched below)
+        if (const auto held_twin = mem_->get_node(new_prefix + cand.new_room_name); held_twin.has_value())
+            out.mem_new_room_id = held_twin->id();
+    }
+    else
+    {
+        if (not copy_subtree(cand.new_room_id, mem_parent, new_prefix, new_idx, root_edge, new_map, out))
+            return out;
+        out.mem_new_room_id = new_map.at(cand.new_room_id);
+    }
     hang_walls_on_floor(map);
     hang_walls_on_floor(new_map);
 
@@ -805,7 +849,7 @@ Outcome RoomEviction::evict(const Candidate &cand)
                             for (const auto &e : DSR::DSRGraph::get_node_edges_by_type(dwn.value(), "match"))
                                 if (const auto f = mem_->get_node(e.to()); f.has_value() and is_descendant(f->id(), nroom->name()))
                                     new_room_faces.push_back(f.value());
-                    if (not out.mem_door_new.empty())
+                    if (not out.mem_door_new.empty() and not new_held)
                     {
                         for (const auto &f : new_room_faces)
                             if (f.name() != out.mem_door_new and f.name().ends_with(kDerivedFaceSuffix))
@@ -832,7 +876,7 @@ Outcome RoomEviction::evict(const Candidate &cand)
                     //   Named <door>_entry: door_concept only mints door_N, so it can never collide with a real face,
                     //   and when the new room is itself evicted through this hole, the "same hole under a new name"
                     //   rule above deletes it in favour of door_concept's own face.
-                    if (out.mem_door_new.empty())
+                    if (out.mem_door_new.empty() and not new_held)
                         if (const auto nroom = mem_->get_node(out.mem_new_room_id); nroom.has_value())
                         {
                             const std::string fname = new_prefix + chosen->name() + std::string(kDerivedFaceSuffix);
@@ -1189,6 +1233,8 @@ SeedOutcome RoomEviction::seed_from_working_memory()
         // it. Identity is the name until place recognition exists -- with persistence off (the
         // default) memory starts empty and this never fires; with it on, a DIFFERENT room that
         // room_concept happens to name the same would be taken for the remembered one.
+        if (const auto known = remembered(room); known.has_value() and is_staged_room(*mem_, known.value()))
+            continue;   // a staged draft (crashed run) is swept by RoomSwap, never seeded into
         if (const auto known = remembered(room); known.has_value())
         {
             ++so.rooms_known;

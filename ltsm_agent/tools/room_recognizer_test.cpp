@@ -397,6 +397,48 @@ int main(int argc, char **argv)
         s.mirror = live_door("door_9", s.prov);
     }
 
+    std::printf("executed_swap_changes_are_not_episode_loss\n");
+    {
+        Scenario s(false, robot_in_r3_w);
+        ltsm::RoomRecognizer::Step st;
+        for (int i = 0; i < 5 and st.act == ltsm::RoomRecognizer::Step::Act::None; ++i) st = s.rec.step();
+        check(st.act == ltsm::RoomRecognizer::Step::Act::Swap and st.room_id == 3, "Swap requested");
+        s.rec.on_swap_executed(3);                          // RoomSwap executed it: P is discarded with its mirror
+        live->delete_node(s.mirror);
+        live->delete_node(s.prov);
+        bool any = false;
+        for (int i = 0; i < 3; ++i) any = any or s.rec.step().act != ltsm::RoomRecognizer::Step::Act::None;
+        check(not any and s.rec.swapped(), "P deleted by the swap itself, before promotion: no Undo, the swap is held");
+        // the crossed door is now in a passage (the swap's carry-over): known_door must not read as loss either
+        DSR::Node pw; pw.type("metaconcept"); pw.name("passage_9");
+        mem->add_or_modify_attrib_local<object_subtype_att>(pw, std::string("passage"));
+        const auto pid = mem->insert_node(pw).value();
+        mem->insert_or_assign_edge(DSR::Edge::create<match_edge_type>(pid, face_r2_door));
+        for (int i = 0; i < 3; ++i) any = any or s.rec.step().act != ltsm::RoomRecognizer::Step::Act::None;
+        check(not any and s.rec.swapped(), "the crossed door gaining a passage: still no Undo");
+        mem->delete_node(pid);
+        set_current(live_r1);                               // the robot leaves: the eviction fence
+        const auto f = s.rec.step();
+        check(f.act == ltsm::RoomRecognizer::Step::Act::None and not s.rec.swapped() and s.rec.provisional_id() == 0, "the fence ends the held episode with no Undo");
+        s.mirror = live_door("door_9", live_r2);            // so the destructor has something to delete
+        s.prov = s.mirror;
+    }
+
+    std::printf("failed_swap_reverts_to_entering\n");
+    {
+        Scenario s(false, robot_in_r3_w);
+        ltsm::RoomRecognizer::Step st;
+        for (int i = 0; i < 5 and st.act == ltsm::RoomRecognizer::Step::Act::None; ++i) st = s.rec.step();
+        check(st.act == ltsm::RoomRecognizer::Step::Act::Swap, "Swap requested");
+        s.rec.on_swap_failed();
+        bool any = false;
+        for (int i = 0; i < 10; ++i) any = any or s.rec.step().act != ltsm::RoomRecognizer::Step::Act::None;
+        check(not any and not s.rec.swapped(), "failed: back to Entering, no Undo, no re-commit on unchanged evidence");
+        live->delete_node(s.mirror);                        // the episode is then lost: nothing stands, so no Undo
+        check(s.rec.step().act == ltsm::RoomRecognizer::Step::Act::None, "losing the episode after a failed swap requests no Undo");
+        s.mirror = live_door("door_9", s.prov);
+    }
+
     std::printf("episode_ends_with_the_provisional_room\n");
     {
         {

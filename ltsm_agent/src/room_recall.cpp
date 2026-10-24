@@ -36,6 +36,76 @@ bool is_recall(DSR::DSRGraph &g, const DSR::Node &n)
 }
 }   // namespace
 
+std::string RoomRecall::live_name_of(const std::string &memory_room)
+{
+    std::string name = memory_room;
+    if (const auto us = name.find('_'); name.starts_with('r') and us != std::string::npos) name = name.substr(us + 1);
+    return name;
+}
+
+std::uint64_t RoomRecall::post_late(std::uint64_t anchor_id, const std::string &memory_room, const Mat::RTMat &anchor_from_room,
+                                    const std::vector<float> &pose_prior)
+{
+    const auto anchor = live_->get_node(anchor_id);
+    const auto mroom = mem_->get_node(memory_room);
+    if (not anchor.has_value() or not mroom.has_value()) return 0;
+    const auto px = mem_->get_attrib_by_name<delimiting_polygon_x_att>(mroom.value());
+    const auto py = mem_->get_attrib_by_name<delimiting_polygon_y_att>(mroom.value());
+    if (not px.has_value() or not py.has_value()) return 0;
+
+    const std::string rname = "recall_" + live_name_of(memory_room);
+    auto node = live_->get_node(rname);
+    const bool fresh = not node.has_value();
+    if (fresh)
+    {
+        DSR::Node n;
+        n.type("metaconcept");
+        n.name(rname);
+        node = n;
+    }
+    live_->add_or_modify_attrib_local<object_subtype_att>(node.value(), std::string("room_recall"));
+    live_->add_or_modify_attrib_local<recall_late_att>(node.value(), true);
+    if (not pose_prior.empty())
+        live_->add_or_modify_attrib_local<recall_pose_prior_att>(node.value(), std::vector<float>(pose_prior));
+    if (const auto old_parent = live_->get_attrib_by_name<parent_att>(node.value());
+        not fresh and old_parent.has_value() and old_parent.value() != anchor_id)
+        live_->delete_edge(old_parent.value(), node->id(), "RT");
+    live_->add_or_modify_attrib_local<parent_att>(node.value(), anchor_id);
+    live_->add_or_modify_attrib_local<level_att>(node.value(), live_->get_node_level(anchor.value()).value_or(0) + 1);
+    live_->add_or_modify_attrib_local<room_id_att>(node.value(), mem_->get_attrib_by_name<room_id_att>(mroom.value()).value_or(0));
+    live_->add_or_modify_attrib_local<delimiting_polygon_x_att>(node.value(), std::vector<float>(px->get()));
+    live_->add_or_modify_attrib_local<delimiting_polygon_y_att>(node.value(), std::vector<float>(py->get()));
+    live_->add_or_modify_attrib_local<pos_x_att>(node.value(), live_->get_attrib_by_name<pos_x_att>(anchor.value()).value_or(0.f) + 60.f);
+    live_->add_or_modify_attrib_local<pos_y_att>(node.value(), live_->get_attrib_by_name<pos_y_att>(anchor.value()).value_or(0.f) + 60.f);
+    std::uint64_t id = node->id();
+    if (fresh)
+    {
+        const auto ins = live_->insert_node(node.value());
+        if (not ins.has_value()) return 0;
+        id = ins.value();
+        qInfo().noquote() << QString::fromStdString(std::format("[recall] LATE {} posted under {}: the robot is inside remembered {}",
+                                                                rname, anchor->name(), memory_room));
+    }
+    else
+        live_->update_node(node.value());
+    live_->insert_or_assign_edge(DSR::Edge::create<RT_edge_type>(anchor_id, id, RoomEviction::rt_attributes(anchor_from_room)));
+    return id;
+}
+
+bool RoomRecall::remove_recall_of(const std::string &memory_room)
+{
+    const auto n = live_->get_node("recall_" + live_name_of(memory_room));
+    return n.has_value() and is_recall(*live_, n.value()) and live_->delete_node(n->id());
+}
+
+int RoomRecall::late_count() const
+{
+    int n = 0;
+    for (const auto &node : live_->get_nodes_by_type("metaconcept"))
+        if (is_recall(*live_, node) and live_->get_attrib_by_name<recall_late_att>(node).value_or(false)) ++n;
+    return n;
+}
+
 RoomRecall::RoomRecall(std::shared_ptr<DSR::DSRGraph> live, std::shared_ptr<DSR::DSRGraph> memory,
                        const RoomEviction &evictor)
     : live_(std::move(live)), mem_(std::move(memory)), ev_(evictor) {}
@@ -93,6 +163,7 @@ int RoomRecall::step()
         // sibling made room_1 the room behind room_1's own door, so no recall_room_2 was ever posted.
         std::optional<DSR::Node> other;
         const auto face_room = room_of(*mem_, face.value());
+        if (face_room.has_value() and is_staged_room(*mem_, face_room.value())) continue;
         for (const auto &pass : mem_->get_nodes_by_type("metaconcept"))
         {
             const auto m = DSR::DSRGraph::get_node_edges_by_type(pass, "match");
@@ -101,12 +172,13 @@ int RoomRecall::step()
                 if (e.to() != face->id())
                     if (const auto f = mem_->get_node(e.to()); f.has_value())
                         if (const auto fr = room_of(*mem_, f.value());
-                            fr.has_value() and (not face_room.has_value() or fr->id() != face_room->id()))
+                            fr.has_value() and not is_staged_room(*mem_, fr.value())
+                            and (not face_room.has_value() or fr->id() != face_room->id()))
                             other = f;
         }
         if (not other.has_value()) continue;
         const auto mroom = room_of(*mem_, other.value());
-        if (not mroom.has_value()) continue;
+        if (not mroom.has_value() or is_staged_room(*mem_, mroom.value())) continue;
 
         // The remembered room's LIVE name: memory's name without its r<idx>_ prefix.
         std::string name = mroom->name();
@@ -122,6 +194,8 @@ int RoomRecall::step()
         wanted.insert(door.id());
         const std::string rname = "recall_" + name;
         auto node = live_->get_node(rname);
+        // a LATE recall (RoomSwap) owns its name: step() never refreshes, re-parents or retires it
+        if (node.has_value() and live_->get_attrib_by_name<recall_late_att>(node.value()).value_or(false)) continue;
         const bool fresh = not node.has_value();
         if (fresh)
         {

@@ -33,6 +33,7 @@
 #include "room_eviction.h"
 #include "room_recall.h"
 #include "room_recognizer.h"
+#include "room_swap.h"
 #include "memory_store.h"
 #include "passage_harvest.h"
 #include "passage_live.h"
@@ -147,6 +148,8 @@ private:
 	/// Which known room is the provisional room behind a fresh door? Posterior + staged commit REQUESTS (room_recognizer.h);
 	/// RoomSwap executes them. [Recognition] enabled; absent => OFF. Needs eviction (it reads memory).
 	std::unique_ptr<ltsm::RoomRecognizer> recognizer_;
+	/// Executes the recogniser's Swap/Undo requests through the recall/promotion path (room_swap.h); acknowledges them back.
+	std::unique_ptr<ltsm::RoomSwap> swap_;
 	/// Startup seed of long-term memory; retried from compute() until room_concept has published a room.
 	void seed_memory();
 	bool seeded_ = false;

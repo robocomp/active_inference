@@ -293,7 +293,10 @@ void SpecificWorker::initialize()
             recognizer_ = std::make_unique<ltsm::RoomRecognizer>(G_dsr, G_ltsm, *evictor);
             if (const int n = recognizer_->sweep_stale(); n > 0)
                 qInfo() << "[recog] swept" << n << "stale recognition/place_evidence node(s) from a previous run";
-            qInfo() << "[ltsm_agent] ROOM RECOGNITION ARMED -- metric chain (+ place_evidence when retina publishes it); requests only";
+            swap_ = std::make_unique<ltsm::RoomSwap>(G_dsr, G_ltsm, *evictor, *recall_);
+            if (const int n = swap_->sweep_stale(); n > 0)
+                qInfo() << "[swap] swept" << n << "stale staged twin / late recall node(s) from a previous run";
+            qInfo() << "[ltsm_agent] ROOM RECOGNITION ARMED -- metric chain (+ place_evidence when retina publishes it); swaps are executed by RoomSwap";
         }
         passages = std::make_unique<ltsm::PassageHarvest>(
             G_dsr, G_ltsm,
@@ -389,6 +392,23 @@ void SpecificWorker::compute()
         if (rq.act != ltsm::RoomRecognizer::Step::Act::None)
             qInfo().noquote() << QString::fromStdString(std::format("[recog] {} requested for room_id {} (executed by RoomSwap)",
                     rq.act == ltsm::RoomRecognizer::Step::Act::Swap ? "SWAP" : "UNDO", rq.room_id));
+        if (swap_)
+        {
+            // A request is not an execution: RoomSwap does it, and the recogniser is told what happened (an executed swap
+            // reshapes the graph itself -- P discarded, the crossed door in a passage -- which must not read as episode loss).
+            if (rq.act == ltsm::RoomRecognizer::Step::Act::Swap)
+            {
+                if (swap_->swap(rq.room_id, rq.pose_in_k, recognizer_->provisional_id())) recognizer_->on_swap_executed(rq.room_id);
+                else recognizer_->on_swap_failed();
+            }
+            else if (rq.act == ltsm::RoomRecognizer::Step::Act::Undo)
+            {
+                swap_->undo();
+                recognizer_->on_undo_executed();
+            }
+            // the episode is over (the robot left the recognised room): the undo window closes
+            if (swap_->state() == ltsm::RoomSwap::State::Staged and not recognizer_->swapped()) swap_->on_room_left();
+        }
     }
     if (recall_) recall_->step();
 
@@ -464,6 +484,7 @@ bool SpecificWorker::step_eviction()
             << QString::fromStdString(cand->new_room_name)
             << "(born" << static_cast<qulonglong>(cand->new_birth_ms) << ")";
 
+    if (swap_) swap_->on_evict(cand.value());       // leaving the recognised room closes the undo window first
     const auto out = evictor->evict(cand.value());
     if (not out.ok)
     {
@@ -597,6 +618,7 @@ bool SpecificWorker::step_promotion()
             cand->old_door_id ? G_dsr->get_node(cand->old_door_id).transform([](const auto &n){ return n.name(); }).value_or("?") : "<nearest>",
             cand->new_door_id ? G_dsr->get_node(cand->new_door_id).transform([](const auto &n){ return n.name(); }).value_or("?") : "<none>"));
 
+        if (swap_) swap_->on_evict(cand.value());
         const auto out = evictor->evict(cand.value());
         if (not out.ok)
         {
