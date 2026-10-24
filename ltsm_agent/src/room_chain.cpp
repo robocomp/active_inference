@@ -209,15 +209,23 @@ struct Gauss2
     }
 };
 
-double log_mass(double quad_mass, double dist)
+/// Mass of a region from its quadrature mass `q` plus the mass the 9-point rule cannot see. A Gaussian puts at most
+/// exp(-d^2/2) beyond Mahalanobis distance d, and the rule's outermost node (r_max) is where its resolution ends, so
+/// the unresolved part is exp(-(d^2 + r_max^2)/2): smooth, monotone in d, vanishing where the rule resolves, no switch.
+double region_log_mass(double q, double dist)
 {
-    return quad_mass > 0.0 ? std::log(quad_mass) : -0.5 * dist * dist;
+    const double r = hermite().x.back();
+    const double x = -0.5 * (dist * dist + r * r);
+    const double lq = q > 0.0 ? std::log(q) : -std::numeric_limits<double>::infinity();   // log(0) = -inf: exact, not a switch
+    const double m = std::max(lq, x);                                                    // log(q + e^x), safe from underflow
+    return m + std::log(std::exp(lq - m) + std::exp(x - m));
 }
 }   // namespace
 
 //////////////////////////////////////////////////////////////////////////////////////////////////
 MetricQuery build_metric_query(DSR::DSRGraph &mem, const std::vector<std::string> &path_passages,
-                               const std::string &path_start_room, const ChainPose &robot_in_last_room)
+                               const std::string &path_start_room, const std::optional<ChainPose> &seam_last_to_provisional,
+                               const ChainPose &robot_in_provisional)
 {
     MetricQuery q;
     q.reference_room = path_start_room;
@@ -241,16 +249,17 @@ MetricQuery build_metric_query(DSR::DSRGraph &mem, const std::vector<std::string
             acc = seam::compose_cov(acc, s.value());
             here = next;
         }
-        if (ok)
+        if (ok and seam_last_to_provisional.has_value())
         {
-            const auto r = seam::compose_cov(acc, Measured{robot_in_last_room.pose, robot_in_last_room.cov});
+            // the crossed door has no passage: its seam is the fresh one measured from its two faces
+            acc = seam::compose_cov(acc, Measured{seam_last_to_provisional->pose, seam_last_to_provisional->cov});
+            const auto r = seam::compose_cov(acc, Measured{robot_in_provisional.pose, robot_in_provisional.cov});
             q.robot_in_ref = {r.pose, r.cov};
             q.robot_ok = true;
         }
     }
 
-    // ── each room's OWN chain: BFS over passages, never through the path's last passage ───────
-    const std::string excluded = path_passages.empty() ? std::string{} : path_passages.back();
+    // ── each room's OWN chain: BFS over the passages in memory (the crossed door is none of them) ──
     std::map<std::string, Measured> placed;       // room -> T(ref <- room)
     placed[path_start_room] = Measured{Vec3::Zero(), Mat3::Zero()};
     std::deque<std::string> frontier{path_start_room};
@@ -259,7 +268,7 @@ MetricQuery build_metric_query(DSR::DSRGraph &mem, const std::vector<std::string
         const std::string j = frontier.front(); frontier.pop_front();
         for (const auto &p : passages)
         {
-            if (p.name == excluded or (p.room_a != j and p.room_b != j)) continue;
+            if ((p.room_a != j and p.room_b != j)) continue;
             const std::string m = p.room_a == j ? p.room_b : p.room_a;
             if (placed.contains(m)) continue;
             if (const auto rm = mem.get_node(m); not rm.has_value() or is_staged(mem, rm.value())) continue;
@@ -296,37 +305,32 @@ std::vector<rc::recog::MetricEvidence> metric_evidence(const MetricQuery &q, flo
     log_new_out = 0.f;
     if (not q.robot_ok) return out;
 
-    std::vector<const std::vector<Eigen::Vector2d> *> outlines;
+    double log_new = 0.0;
     for (std::size_t k = 0; k < q.rooms.size(); ++k)
     {
         const auto &r = q.rooms[k];
         if (not r.chain_ok or r.polygon_in_ref.size() < 3) continue;
-        const Eigen::Matrix3d S = q.robot_in_ref.cov + r.cov_T;
+        Eigen::Matrix3d S = q.robot_in_ref.cov + r.cov_T;
+        S = 0.5 * (S + S.transpose());
         const Gauss2 g(q.robot_in_ref.pose.head<2>(), S.topLeftCorner<2, 2>());
-        double m = 0.0;
+        double in = 0.0, outside = 0.0;
         for (const auto &[x, w] : g.nodes)
-            if (inside(r.polygon_in_ref, x)) m += w;
-        outlines.push_back(&r.polygon_in_ref);
+            (inside(r.polygon_in_ref, x) ? in : outside) += w;
+        const double d = g.dist_to(r.polygon_in_ref);
 
         // pose in k: the robot expressed in k's frame (the two chains are treated as independent: conservative)
         const Measured Tk{{r.T_ref_k.translation().x(), r.T_ref_k.translation().y(), std::atan2(r.T_ref_k.linear()(1, 0), r.T_ref_k.linear()(0, 0))}, r.cov_T};
         const Measured in_k = seam::compose_cov(seam::inverse_cov(Tk), Measured{q.robot_in_ref.pose, q.robot_in_ref.cov});
         rc::recog::PoseGauss pg;
         pg.mu = in_k.pose.cast<float>();
-        pg.S = in_k.cov.cast<float>();
+        pg.S = (0.5 * (in_k.cov + in_k.cov.transpose())).cast<float>();
         pg.w = 1.f;
         out[k].pose_in_k = {pg};
-        out[k].log_inside = float(log_mass(m, g.dist_to(r.polygon_in_ref)));
+        out[k].log_inside = float(region_log_mass(in, d));
         out[k].available = true;
+        log_new += region_log_mass(outside, d);   // log(1 - P_inside_k) under THIS room's own S
     }
-    // The mass OUTSIDE every outline: the robot chain's own Gaussian (the outlines' uncertainty is each room's cov_T above).
-    if (outlines.empty()) return out;
-    const Gauss2 g(q.robot_in_ref.pose.head<2>(), q.robot_in_ref.cov.topLeftCorner<2, 2>());
-    double outside = 0.0, dist = std::numeric_limits<double>::infinity();
-    for (const auto &[x, w] : g.nodes)
-        if (std::ranges::none_of(outlines, [&](const auto *poly) { return inside(*poly, x); })) outside += w;
-    for (const auto *poly : outlines) dist = std::min(dist, g.dist_to(*poly));
-    log_new_out = float(log_mass(outside, dist));
+    log_new_out = float(log_new);
     return out;
 }
 }   // namespace ltsm

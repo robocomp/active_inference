@@ -11,17 +11,21 @@
  *
  * The robot is in k exactly when the first lands inside k's outline as the second places it. The two chains share no
  * seam wherever memory holds a loop, which is the whole content of the evidence: a closed loop is a check.
- * ★ The OWN chain of k never uses the LAST passage of the path (the door whose far side is being identified): going
- *   through it would assume the answer. Passages crossed earlier ARE usable, they are facts already.
+ * The crossed door has NO passage (that is when this runs), so the path chain ends with a FRESH seam from that door's
+ * two faces, passed in; the OWN chains use only passages already in memory, so they never assume the answer.
  *
  * Covariances: a seam carries the covariance of its two door faces (the RT edge of each, when stated), else a prior of
  * ignorance (sigma 3 cm / 0.01 rad per face, the door-pose covariance the repo's seam tests already use). Memory stores
  * none today (cortex drops rt_covariance on JSON load), so the prior is what is normally read. Not a gate: a
  * covariance that enters the Gaussian whose mass inside the outline is the evidence.
  *
- * Mass inside an outline = deterministic Gauss-Hermite quadrature (9x9) over the (x, y) Gaussian. Where the quadrature
- * resolves no mass (the outline is further than ~4 sigma) the Gaussian tail bound exp(-d^2/2) is used, d the
- * Mahalanobis distance to the outline's edge, so the answer stays finite, monotone in the distance, and floor-free.
+ * log_new = sum_k log(1 - P_inside_k), each P_inside_k under its own S = robot cov + cov_T(k). Treating the
+ * room placements as independent is an approximation (they share seams); it is exact for disjoint, independently
+ * placed outlines and conservative otherwise.
+ *
+ * Mass inside an outline = deterministic Gauss-Hermite quadrature (9x9) over the (x, y) Gaussian. The mass the rule cannot
+ * resolve (an outline further than ~4.5 sigma) is added as exp(-(d^2 + r_max^2)/2), d the Mahalanobis distance to the
+ * outline's edge: smooth and monotone in d, never -inf, no switch (see region_mass).
  */
 #include "room_eviction.h"
 #include "../../common/room_recognition/room_posterior.h"
@@ -30,6 +34,7 @@
 #include <Eigen/Geometry>
 
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -56,8 +61,15 @@ struct MetricQuery
     std::vector<KnownRoomMetric> rooms;
 };
 
+/// `path_passages`: the passages the robot crossed, oldest first, ending at the last KNOWN room L (all in memory).
+/// `seam_last_to_provisional`: the FRESH seam T(L <- provisional) with its covariance, measured from the crossed
+///   door's two faces (its face in L, a memory node, and its live entry-mirror face in the provisional room). The crossed
+///   door has no passage yet (that is the case this serves), so nothing in memory supplies it. nullopt => unmeasurable
+///   => the metric expert is unavailable (all `available=false`, log_new 0). Pass identity/zero when the robot is still in L.
+/// `robot_in_provisional`: the live robot pose in the PROVISIONAL room's frame (+ odometry covariance).
 MetricQuery build_metric_query(DSR::DSRGraph &mem, const std::vector<std::string> &path_passages,
-                               const std::string &path_start_room, const ChainPose &robot_in_last_room);
+                               const std::string &path_start_room, const std::optional<ChainPose> &seam_last_to_provisional,
+                               const ChainPose &robot_in_provisional);
 
 /// One entry per `q.rooms` (same order). `log_new_out` = log of the mass outside every known outline (0 when the
 /// robot chain is unavailable: an unavailable expert is omitted, not zeroed).

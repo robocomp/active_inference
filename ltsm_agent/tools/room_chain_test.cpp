@@ -2,7 +2,9 @@
 //   run from the component root:  ./bin/room_chain_test
 // Scene = the live loop, in a common world frame W (each room has its OWN, arbitrarily posed frame, as in memory):
 //   r1_room_1 [-2,2]x[-2,2]   r2_room_2 [2,6]x[-2,2]   r3_room_3 [-2,6]x[2,6]
-//   passage_0 r1<->r2 at (2,0)   passage_1 r1<->r3 at (0,2)   passage_2 r2<->r3 at (4,2)  (= DOOR_2, the never-crossed door)
+//   passage_0 r1<->r2 at (2,0)   passage_1 r1<->r3 at (0,2)
+//   DOOR_2 at (4,2): memory holds r2's face ONLY (no passage); the robot crossed it into a PROVISIONAL room whose frame is
+//   `prov_w`; the fresh seam T(r2 <- prov) comes from the two faces and is passed in.
 // The robot stands at (3,4) in W, i.e. inside r3, having come r1 -> r2 -> DOOR_2.
 #include "../src/room_chain.h"
 #include "../src/seam_fusion.h"
@@ -81,13 +83,18 @@ int main(int argc, char **argv)
     };
     add_passage(0, rooms[0], rooms[1], Vec3(2.0, 0.0, M_PI / 2));
     add_passage(1, rooms[0], rooms[2], Vec3(0.0, 2.0, 0.0));
-    add_passage(2, rooms[1], rooms[2], Vec3(4.0, 2.0, 0.0));
+    add_face(rooms[1], "r2_door_3", Vec3(4.0, 2.0, 0.0));     // DOOR_2's remembered face: unmatched, no passage
 
     const Vec3 robot_w(3.0, 4.0, 0.5);
+    const Vec3 prov_w(7.0, -3.0, 1.0);      // the provisional room's frame (arbitrary)
     const Vec3 robot_in_r3 = mul(inv(rooms[2].in_world), robot_w);
+    const Vec3 robot_in_prov = mul(inv(prov_w), robot_w);
+    Mat3 Cface = Mat3::Zero();  Cface.diagonal() << 0.03 * 0.03, 0.03 * 0.03, 0.01 * 0.01;
+    // fresh seam T(r2 <- prov) from the crossed door's two faces (each 3 cm / 0.01 rad)
+    const ltsm::ChainPose fresh{mul(inv(rooms[1].in_world), prov_w), 2.0 * Cface};
     const Vec3 robot_in_ref_truth = mul(inv(rooms[0].in_world), robot_w);
     Mat3 Codo = Mat3::Zero();  Codo.diagonal() << 0.05 * 0.05, 0.05 * 0.05, 0.02 * 0.02;
-    const std::vector<std::string> path{"passage_0", "passage_2"};
+    const std::vector<std::string> path{"passage_0"};
 
     auto argmax = [](const std::vector<rc::recog::MetricEvidence> &ev) {
         std::size_t best = 0;
@@ -100,8 +107,8 @@ int main(int argc, char **argv)
 
     std::printf("loop_consistency\n");
     {
-        const auto q = ltsm::build_metric_query(*mem, path, "r1_room_1", {robot_in_r3, Codo});
-        const auto q_direct = ltsm::build_metric_query(*mem, {"passage_1"}, "r1_room_1", {robot_in_r3, Codo});
+        const auto q = ltsm::build_metric_query(*mem, path, "r1_room_1", fresh, {robot_in_prov, Codo});
+        const auto q_direct = ltsm::build_metric_query(*mem, {"passage_1"}, "r1_room_1", ltsm::ChainPose{mul(inv(rooms[2].in_world), prov_w), 2.0 * Cface}, {robot_in_prov, Codo});
         check(q.robot_ok and q_direct.robot_ok, "both chains resolve");
         const Vec3 a = q.robot_in_ref.pose, b = q_direct.robot_in_ref.pose;
         std::printf("  path chain (%+.4f,%+.4f,%+.4f)  direct chain (%+.4f,%+.4f,%+.4f)  truth (%+.4f,%+.4f,%+.4f)\n",
@@ -118,23 +125,37 @@ int main(int argc, char **argv)
         const auto ev = ltsm::metric_evidence(q, log_new);
         std::printf("  log_inside:"); for (std::size_t i = 0; i < ev.size(); ++i) std::printf(" %s %.4g", q.rooms[i].mem_room.c_str(), ev[i].log_inside);
         std::printf("   log_new %.4g\n", log_new);
+        check(q.rooms.size() == 3 and q.robot_ok, "DOOR_2 has no passage in memory, yet the robot chain is available");
         check(i3 >= 0 and ev[i3].available and ev[i3].log_inside > std::log(0.99f), "log_inside(R3) > log 0.99");
         check(i3 >= 0 and argmax(ev) == std::size_t(i3), "R3 is the argmax");
         check(ev[i3].pose_in_k.size() == 1 and (ev[i3].pose_in_k[0].mu - robot_in_r3.cast<float>()).head<2>().norm() < 0.02f,
               "pose_in_k(R3) is the robot's pose in R3");
     }
 
+    std::printf("missing_fresh_seam_is_unavailable\n");
+    {
+        bool threw = false;
+        ltsm::MetricQuery q;
+        std::vector<rc::recog::MetricEvidence> ev;
+        float log_new = 1.f;
+        try { q = ltsm::build_metric_query(*mem, path, "r1_room_1", std::nullopt, {robot_in_prov, Codo}); ev = ltsm::metric_evidence(q, log_new); }
+        catch (...) { threw = true; }
+        bool none = true;
+        for (const auto &e : ev) none = none and not e.available;
+        check(not threw and not q.robot_ok and none and log_new == 0.f, "no fresh seam: robot_ok=false, nothing available, log_new 0, no throw");
+    }
+
     std::printf("seam_error_widens_not_flips\n");
     {
         float log_new0 = 0.f;
-        const auto q0 = ltsm::build_metric_query(*mem, path, "r1_room_1", {robot_in_r3, Codo});
+        const auto q0 = ltsm::build_metric_query(*mem, path, "r1_room_1", fresh, {robot_in_prov, Codo});
         (void)ltsm::metric_evidence(q0, log_new0);
         // a seam that is 0.1 rad off AND says so: the R2 face of passage_0 turned by 0.1 rad about its own origin, with a covariance to match
         const Vec3 good = mul(inv(rooms[1].in_world), Vec3(2.0, 0.0, M_PI / 2));
         const Vec3 bad(good.x(), good.y(), good.z() + 0.1);
         Mat3 Cbad = Mat3::Zero();  Cbad.diagonal() << 0.1 * 0.1, 0.1 * 0.1, 0.1 * 0.1;
         put_edge(*mem, rooms[1].id, face_ids[0][1], bad, Cbad);
-        const auto q = ltsm::build_metric_query(*mem, path, "r1_room_1", {robot_in_r3, Codo});
+        const auto q = ltsm::build_metric_query(*mem, path, "r1_room_1", fresh, {robot_in_prov, Codo});
         float log_new = 0.f;
         const auto ev = ltsm::metric_evidence(q, log_new);
         const int i3 = index_of(q, "r3_room_3");
@@ -149,7 +170,7 @@ int main(int argc, char **argv)
     std::printf("outside_everything_is_new\n");
     {
         const Vec3 far(-9.0, -9.0, 0.0);    // in the reference frame, >5 m from every outline
-        const auto q = ltsm::build_metric_query(*mem, {}, "r1_room_1", {far, Codo});
+        const auto q = ltsm::build_metric_query(*mem, {}, "r1_room_1", ltsm::ChainPose{}, {far, Codo});
         float log_new = 0.f;
         const auto ev = ltsm::metric_evidence(q, log_new);
         std::printf("  log_new %.4g  log_inside:", log_new); for (const auto &e : ev) std::printf(" %.4g", e.log_inside); std::printf("\n");
@@ -165,7 +186,7 @@ int main(int argc, char **argv)
         mem->add_or_modify_attrib_local<object_subtype_att>(n, std::string("staged"));
         const auto id = mem->insert_node(n).value();
         put_edge(*mem, root, id, Vec3::Zero());
-        const auto q = ltsm::build_metric_query(*mem, path, "r1_room_1", {robot_in_r3, Codo});
+        const auto q = ltsm::build_metric_query(*mem, path, "r1_room_1", fresh, {robot_in_prov, Codo});
         check(index_of(q, "r9_room_9") < 0 and q.rooms.size() == 3, "the staged twin is absent from rooms");
     }
 
@@ -176,7 +197,7 @@ int main(int argc, char **argv)
         ltsm::MetricQuery q;
         std::vector<rc::recog::MetricEvidence> ev;
         float log_new = 0.f;
-        try { q = ltsm::build_metric_query(*mem, path, "r1_room_1", {robot_in_r3, Codo}); ev = ltsm::metric_evidence(q, log_new); }
+        try { q = ltsm::build_metric_query(*mem, path, "r1_room_1", fresh, {robot_in_prov, Codo}); ev = ltsm::metric_evidence(q, log_new); }
         catch (...) { threw = true; }
         check(not threw, "no throw");
         const int i3 = index_of(q, "r3_room_3");
