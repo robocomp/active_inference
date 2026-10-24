@@ -8,9 +8,9 @@
 //   1. no refusal ⇒ the pose on the aperture's normal, in the band, offered with P ≥ OfferProb. ★Not the band's midpoint
 //      any more: the objective is P(the contract completes), and the arrival scatter adds range off the normal, so its
 //      argmax sits a little nearer than the midpoint (1.67 m against 1.75 here) — a deliberate change of the no-hand-back pose;
-//   2. a refusal ⇒ the next offer differs, stays in the band, faces the opening, and can still complete (P(reach) ≥ 0.90);
+//   2. a refusal ⇒ the next offer differs, stays ON THE AXIS (2026-10-24: never lateral), faces the opening, offer P falls;
 //   3. the evidence decays: the original pose returns;
-//   4. a two-agent mock (a consumer refusing one blocked footprint): converges, no identical re-offer;
+//   4. a two-agent mock, a bed in front of an OPEN door: converges by SHORTENING the standoff on the axis, no identical re-offer;
 //   5. EXHAUSTION (I-1): a consumer refusing EVERY pose, one hand-back every 2 s: the offer probability (approach_offer_prob) falls below
 //      WithdrawProb within a few hand-backs, and no pose is offered twice while the offer is still above WithdrawProb;
 //   6. the exile time (M-1): after the last hand-back of an exhausted band, how long until the offer clears OfferProb again
@@ -69,15 +69,15 @@ int main()
     }
     check(rc::door::approach_offer_prob(c0, c0) == 1.0f and c0.score > 0.5f, "a free band is not offered with P 1 / cannot complete");
 
-    std::println("2. one refusal at that pose (t = 0)");
+    std::println("2. one refusal at that pose (t = 0) — a SHUT door: the next offer stays ON THE AXIS");
     mem.refuse(ap, pb.side, pb.room, {c0.pose.x, c0.pose.y}, 0);
     const auto c1 = rc::door::choose_approach_pose(ap, pb, mem, 1000);
     std::println("    -> ({:.3f},{:.3f}) standoff {:.2f} lateral {:+.2f} P(reach) {:.2f} P(complete) {:.2f} P(refused) {:.2f} "
-                 "score {:.2f}, {:.2f} m away", c1.pose.x, c1.pose.y, c1.standoff, c1.lateral, c1.p_reach, c1.p_complete,
-                 c1.p_refused, c1.score, dist(c1.pose, c0.pose));
-    check(dist(c1.pose, c0.pose) > 0.2f, "the refused pose was re-offered");
-    check(c1.standoff >= pb.d_min - 1e-4f and c1.standoff <= pb.d_max + 1e-4f, "the new pose left the band");
-    check(c1.p_reach >= rc::door::kApproachCompleteProb, "the new pose cannot satisfy the approach contract");
+                 "score {:.2f}, {:.2f} m away; P(offer) {:.2f}", c1.pose.x, c1.pose.y, c1.standoff, c1.lateral, c1.p_reach, c1.p_complete,
+                 c1.p_refused, c1.score, dist(c1.pose, c0.pose), rc::door::approach_offer_prob(c1, c0));
+    check(dist(c1.pose, c0.pose) > 1e-3f, "the refused pose was re-offered");
+    check(c1.lateral == 0.0f and std::abs(c1.pose.x - ap.centre_xy().x()) < 1e-4f, "the new pose left the door's axis (sideways)");
+    check(rc::door::approach_offer_prob(c1, c0) < 1.0f, "a refusal did not lower the offer's probability");
     {
         const auto c = ap.centre_xy();
         const float want = std::atan2(c.y() - c1.pose.y, c.x() - c1.pose.x);
@@ -91,23 +91,43 @@ int main()
     std::println("    after 600 s: score {:.4f} (free band {:.4f}), P(refused) {:.5f}", c_late.score, c0.score, c_late.p_refused);
     check(c_late.score >= c0.score - 1e-3f and c_late.p_refused < 1e-3f, "the original value never comes back");
 
-    std::println("4. two agents: a consumer refusing one blocked footprint");
+    std::println("4. a BED in front of an OPEN door: a consumer refusing one blocked footprint (2026-10-24 live)");
     {
+        auto p4 = pb;
+        p4.p_open = 1.0f;          // the door is believed open: the leaf's arc no longer matters, nearer standpoints complete
+        p4.s_floor = p4.footprint_r;
         rc::door::ApproachMemory m2;
-        const auto blocked = [&](const rc::door::Pose2& q) { return std::hypot(q.x - c0.pose.x, q.y - c0.pose.y) < 0.45f; };
-        int handbacks = 0, repeats = 0;
+        const auto f0 = rc::door::choose_approach_pose(ap, p4, m2, 0);
+        // the bed's foot covers the axis from the free pose outward (and 0.45 m around it)
+        const auto blocked = [&](const rc::door::Pose2& q) { return q.y > f0.pose.y - 0.45f; };
+        int handbacks = 0, repeats = 0, lateral = 0;
         rc::door::Pose2 last{1e9f, 1e9f, 0.f};
+        rc::door::ApproachChoice acc;
         bool accepted = false;
         for (int k = 0; k < 20 and not accepted; ++k)
         {
-            const auto c = rc::door::choose_approach_pose(ap, pb, m2, 5000 * k);
+            const auto c = rc::door::choose_approach_pose(ap, p4, m2, 5000 * k);
             if (dist(c.pose, last) < 1e-4f) ++repeats;
+            if (c.lateral != 0.0f or std::abs(c.pose.x - ap.centre_xy().x()) > 1e-4f) ++lateral;
             last = c.pose;
-            if (blocked(c.pose)) { m2.refuse(ap, pb.side, pb.room, {c.pose.x, c.pose.y}, 5000 * k); ++handbacks; }
-            else accepted = true;
+            if (blocked(c.pose)) { m2.refuse(ap, p4.side, p4.room, {c.pose.x, c.pose.y}, 5000 * k); ++handbacks; }
+            else { accepted = true; acc = c; }
         }
-        std::println("    accepted after {} hand-back(s), {} identical re-offer(s)", handbacks, repeats);
+        std::println("    free standoff {:.2f}; accepted standoff {:.2f} after {} hand-back(s), {} identical re-offer(s), {} lateral; "
+                     "P(complete) {:.2f}", f0.standoff, acc.standoff, handbacks, repeats, lateral, acc.p_complete);
         check(accepted and repeats == 0 and handbacks <= 4, "the mock did not converge without an identical re-offer");
+        check(lateral == 0, "a hand-back moved the standpoint SIDEWAYS");
+        check(accepted and acc.standoff < f0.standoff and acc.standoff >= p4.s_floor - 1e-4f, "the standoff did not SHORTEN along the axis");
+        check(accepted and acc.p_complete > 0.5f, "the shortened standpoint cannot complete the approach of an open door");
+    }
+    std::println("4b. an open door with nothing remembered: the farthest standoff of the P(complete) plateau (a vantage, not the door)");
+    {
+        auto p4 = pb;
+        p4.p_open = 1.0f; p4.s_floor = p4.footprint_r;
+        const auto f0 = rc::door::choose_approach_pose(ap, p4, {}, 0);
+        std::println("    standoff {:.2f} P(complete) {:.3f}", f0.standoff, f0.p_complete);
+        // the plateau of P(complete) = 1 is [s_floor, ~d_max - 3σ]; far-to-near keeps the farthest sample that reaches it
+        check(f0.standoff >= 2.0f * p4.s_floor and f0.lateral == 0.0f, "an open door's free vantage collapsed toward the door");
     }
 
     std::println("5. exhaustion: every pose refused, one hand-back every 2 s");
@@ -249,6 +269,14 @@ int main()
         check(p_at_1 >= kOffer, "a full-width door is not offered");
         check(p_at_low < kWithdraw, "a door narrower than the body is still offered");
         check(p_back >= kOffer and std::abs(p_back - p_at_1) < 1e-6f, "the offer did not come back when the width did (a latch)");
+    }
+    std::println("X. the cross target: DoorAffordance.CrossTargetM > 0 is the depth; unset, past the leaf's swept radius");
+    {
+        const float old_depth = rc::door::cross_target_depth(0.0f, 2.0f, 0.5f, 0.6f, 0.2f);
+        const float near_depth = rc::door::cross_target_depth(0.8f, 2.0f, 0.5f, 0.6f, 0.2f);
+        std::println("    unset {:.2f} m, CrossTargetM 0.80 -> {:.2f} m", old_depth, near_depth);
+        check(std::abs(old_depth - 2.0f) < 1e-5f, "the unset depth is not the old max(CrossStandoffM, swept radius)");
+        check(std::abs(near_depth - 0.8f) < 1e-5f, "CrossTargetM is not the published depth");
     }
     std::println("{} / {} checks passed", g_checks - g_fail, g_checks);
     return g_fail == 0 ? 0 : 1;

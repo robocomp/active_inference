@@ -30,6 +30,17 @@
 // across_u both flipped, which is what another room's association produces — maps it to the same physical point), and
 // keyed by the room the robot was in: a room switch re-expresses the aperture in a new frame and the record still lands
 // on the same physical standpoint; a standpoint in another room is not this room's evidence.
+// ★ON THE AXIS, NEVER BESIDE IT (2026-10-24, user: "the approach affordance should provide a target for the path planner to a
+// vantage position in front of the door"). The feasible set used to include a LATERAL offset within the support of
+// P(facing): a hand-back by a bed foot in front of the door re-sited the standpoint sideways, and live the robot followed it
+// into the wrong arm of an L-shaped room. The set is now ONE-DIMENSIONAL — the standoff s along the aperture normal, on the
+// approach side — searched from the far edge of the actuation band inward, down to s_floor (the body's own reach: a
+// standpoint closer than that puts the footprint in the doorway). A hand-back therefore SHORTENS the standoff along the
+// axis (the refused footprint is evidence about that stretch of axis) instead of shifting it. Far-to-near order with a
+// strictly-better replacement makes the LARGEST standoff win among equally good ones (an open door's plateau).
+// ★P(complete) IS A MIXTURE OVER THE DOOR'S STATE, as the contract's measurement is (InteractionState::p_reach =
+// P(open)·P(within reach) + P(shut)·P(in band)): a door believed open does not need the robot outside the leaf's arc, so a
+// standpoint nearer than the band's near edge can complete it; a door believed shut cannot. p_open = 0 is the old model.
 // ⚑ τ (DoorAffordance.ApproachRefusalMemoryS) is a model parameter — how long a blocked standpoint stays blocked — not
 // a gate: the evidence fades continuously and nothing switches.
 #pragma once
@@ -108,6 +119,8 @@ struct ApproachProblem
     float memory_s = 60.0f;             // τ of a refusal's evidence
     float footprint_r = 0.35f;          // the robot's footprint radius
     float complete_at = kApproachCompleteProb;
+    float p_open = 0.0f;                // P(the door is open) — the mixture weight of P(complete) (see the header); 0 = shut
+    float s_floor = 0.0f;               // nearest standoff searched (the body's reach); ≤ 0 ⇒ the band's near edge (d_min)
     std::string room;                   // the room the robot is in (keys the refusals)
     std::vector<Eigen::Vector2f> polygon;   // that room; empty ⇒ no containment term
 };
@@ -176,8 +189,8 @@ struct ApproachChoice
 // keeps the chance its mask will read wide enough once the robot is there — the offer's VALUE falls with that chance
 // instead of the offer vanishing at the first cliff. σ_w = 0 is the single evaluation, bit for bit. (The contract's own
 // measurement, door_reach_prob, is untouched: it is read at arrival from the then-current belief.)
-[[nodiscard]] inline float complete_prob_closed(const Aperture& ap, const ApproachProblem& pb, const Eigen::Vector2f& q,
-                                                float sigma_meas, float sigma_arr)
+[[nodiscard]] inline float complete_prob_band(const Aperture& ap, const ApproachProblem& pb, const Eigen::Vector2f& q,
+                                              float sigma_meas, float sigma_arr)
 {
     if (not (pb.sigma_w > 0.0f))
         return complete_prob_closed_at_width(ap, pb, q, sigma_meas, sigma_arr);
@@ -192,6 +205,19 @@ struct ApproachChoice
     return std::clamp(p, 0.0f, 1.0f);
 }
 
+// P(complete) under the door-state mixture (header): shut ⇒ the band [d_min, d_max]; open ⇒ anywhere within reach
+// [0, d_max] (the arc no longer matters). p_open = 0 is complete_prob_band bit for bit.
+[[nodiscard]] inline float complete_prob_closed(const Aperture& ap, const ApproachProblem& pb, const Eigen::Vector2f& q,
+                                                float sigma_meas, float sigma_arr)
+{
+    const float po = std::clamp(pb.p_open, 0.0f, 1.0f);
+    const float shut = complete_prob_band(ap, pb, q, sigma_meas, sigma_arr);
+    if (not (po > 0.0f)) return shut;
+    ApproachProblem within = pb;
+    within.d_min = 0.0f;
+    return po * complete_prob_band(ap, within, q, sigma_meas, sigma_arr) + (1.0f - po) * shut;
+}
+
 // The robot's position σ AT THE STANDPOINT from its localisation covariance (the room↔robot RT edge, (x, y, yaw) in the
 // room frame): the translation's mean variance plus the yaw's lever over the standoff it will look at the door from —
 // not the far-range mask chain's yaw × CURRENT range (review: that reached the cliff at 3.75 m with a 2° yaw σ, so a far
@@ -204,54 +230,42 @@ struct ApproachChoice
     return std::sqrt(std::max(std::isfinite(v) ? v : 0.0f, floor_m * floor_m));
 }
 
-// The feasible set is sampled on a grid with the old pose (midpoint, lateral 0) at its centre and evaluated centre-out,
-// a strictly better score replacing the incumbent — so with no refusal the old pose is returned bit for bit. The lateral
-// support is where the opening can show the body at all: |θ| ≤ acos(needed/w), i.e. |lateral| ≤ standoff·tan θ_max.
+// The feasible set is the AXIS (header): standoffs on a fixed step (the band's width / 6, so the band's own seven samples
+// are the old grid's lateral-0 column) from d_max inward to the floor, evaluated FAR TO NEAR with a strictly better score
+// replacing the incumbent. Every candidate is front_pose(ap, side, s): on the normal, facing the aperture.
 [[nodiscard]] inline ApproachChoice choose_approach_pose(const Aperture& ap, const ApproachProblem& pb,
                                                          const ApproachMemory& mem, std::int64_t now_ms)
 {
-    constexpr int kNs = 7, kNl = 9;   // grid resolution of the feasible set (odd: the centre is a sample)
-    const float sgn = pb.side < 0.0f ? -1.0f : +1.0f;
-    const Eigen::Vector2f u = ap.wall_u, n = ap.across_u(), c = ap.centre_xy();
-    const float mid = 0.5f * (pb.d_min + pb.d_max), half_band = 0.5f * std::max(0.0f, pb.d_max - pb.d_min);
-    const float cos_max = ap.w > 1e-3f ? std::clamp(pb.needed_w / ap.w, 0.0f, 1.0f) : 1.0f;
-    const float tan_max = std::sqrt(std::max(0.0f, 1.0f - cos_max * cos_max)) / std::max(cos_max, 1e-3f);
+    constexpr int kNsBand = 7;   // samples across the band (odd: its midpoint is one)
+    const float band = std::max(0.0f, pb.d_max - pb.d_min);
+    const float step = band > 1e-4f ? band / static_cast<float>(kNsBand - 1) : 0.05f;
+    const float s_lo = pb.s_floor > 0.0f ? std::min(pb.s_floor, pb.d_min) : pb.d_min;
+    const int n = std::max(1, static_cast<int>(std::floor((pb.d_max - s_lo) / step + 1e-3f)) + 1);
 
     ApproachChoice best;
     bool have = false;
-    for (int a = 0; a < kNs; ++a)
-        for (int b = 0; b < kNl; ++b)
-        {
-            const int ia = (a % 2 == 0) ? a / 2 : -(a + 1) / 2;   // centre-out: 0, +1, −1, +2, −2, …
-            const int ib = (b % 2 == 0) ? b / 2 : -(b + 1) / 2;
-            const float standoff = mid + half_band * static_cast<float>(ia) / static_cast<float>(kNs / 2);
-            const float lateral  = std::min(standoff * tan_max, 4.0f * standoff) * static_cast<float>(ib) / static_cast<float>(kNl / 2);
-            Pose2 q;
-            if (lateral == 0.0f)
-                q = front_pose(ap, pb.side, standoff);   // the old construction, exactly
-            else
-            {
-                const Eigen::Vector2f p = c + sgn * standoff * n + lateral * u;
-                q = {p.x(), p.y(), std::atan2(c.y() - p.y(), c.x() - p.x())};
-            }
-            const Eigen::Vector2f qxy(q.x, q.y);
-            ApproachChoice ch;
-            ch.pose = q; ch.standoff = standoff; ch.lateral = lateral;
-            ch.p_reach    = reach_prob_at(ap, pb, qxy);
-            ch.p_complete = complete_prob_closed(ap, pb, qxy, pb.sigma, pb.sigma);
-            if (pb.polygon.size() >= 3)
-            {   // P(inside the room): the standpoint's signed distance to the polygon under the pose σ
-                const float dist = signed_boundary_distance(pb.polygon, qxy);   // > 0 outside
-                ch.p_inside = std::isfinite(dist) ? 1.0f - prob_within(0.0f, dist, pb.sigma) : 1.0f;
-            }
-            ch.p_refused = mem.p_refused(ap, pb.side, pb.room, qxy, now_ms, pb.memory_s, pb.footprint_r);
-            ch.score = ch.p_complete * ch.p_inside * (1.0f - ch.p_refused);
-            if (not have or ch.score > best.score)
-            {
-                best = ch;
-                have = true;
-            }
+    for (int k = 0; k < n; ++k)
+    {
+        const float standoff = pb.d_max - step * static_cast<float>(k);
+        const Pose2 q = front_pose(ap, pb.side, standoff);
+        const Eigen::Vector2f qxy(q.x, q.y);
+        ApproachChoice ch;
+        ch.pose = q; ch.standoff = standoff; ch.lateral = 0.0f;
+        ch.p_reach    = reach_prob_at(ap, pb, qxy);
+        ch.p_complete = complete_prob_closed(ap, pb, qxy, pb.sigma, pb.sigma);
+        if (pb.polygon.size() >= 3)
+        {   // P(inside the room): the standpoint's signed distance to the polygon under the pose σ
+            const float dist = signed_boundary_distance(pb.polygon, qxy);   // > 0 outside
+            ch.p_inside = std::isfinite(dist) ? 1.0f - prob_within(0.0f, dist, pb.sigma) : 1.0f;
         }
+        ch.p_refused = mem.p_refused(ap, pb.side, pb.room, qxy, now_ms, pb.memory_s, pb.footprint_r);
+        ch.score = ch.p_complete * ch.p_inside * (1.0f - ch.p_refused);
+        if (not have or ch.score > best.score)
+        {
+            best = ch;
+            have = true;
+        }
+    }
     // σ_meas stays NOMINAL: door_reach_prob, measured AT the standpoint, uses the range σ floored by the pose floor, and at
     // a 1.5-2 m standoff the chain's yaw lever is below it; what the live σ changes is WHERE the robot ends up relative to
     // the pose it was sent to — the arrival scatter. (Both live made the interval collapse like √(σ* − σ): a steep step.)
@@ -266,6 +280,17 @@ struct ApproachChoice
 [[nodiscard]] inline float approach_offer_prob(const ApproachChoice& now_best, const ApproachChoice& free_best)
 {
     return free_best.score > 0.0f ? std::clamp(now_best.score / free_best.score, 0.0f, 1.0f) : 0.0f;
+}
+
+// How far past the aperture plane the published CROSS target sits (DoorPragmaticCfg::cross_target_m, 2026-10-24: "a point
+// just at the other side of the door"). cross_target_m > 0: that depth. Otherwise the old through-pose: past the leaf's
+// swept radius (2·leaf_half_w — the leaf never reaches past its own width from the plane, whatever side or angle) + half
+// the body + the swing clearance, never nearer than CrossStandoffM. Plain floats so it is testable without DSR.
+[[nodiscard]] inline float cross_target_depth(float cross_target_m, float cross_standoff_m, float leaf_half_w,
+                                              float robot_passage_width_m, float swing_clearance_m)
+{
+    if (cross_target_m > 0.0f) return cross_target_m;
+    return std::max(cross_standoff_m, 2.0f * leaf_half_w + 0.5f * robot_passage_width_m + swing_clearance_m);
 }
 
 }  // namespace rc::door

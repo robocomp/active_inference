@@ -80,6 +80,8 @@ DoorConfig load_door_config(const ConfigLoader& cfg)
                 "⚠ApproachStandoffM IS GONE, not renamed");
         pg.cross_standoff_m      = getf("DoorAffordance.CrossStandoffM", pg.cross_standoff_m,
                 "how far PAST the aperture the cross target sits");
+        pg.cross_target_m        = getf("DoorAffordance.CrossTargetM", pg.cross_target_m,
+                "how far PAST the aperture the published cross target sits (≤ 0 = the old through-pose depth)");
         pg.cross_clearance_m     = getf("DoorAffordance.CrossClearanceM", pg.cross_clearance_m,
                 "distance past the aperture plane that counts as fully through");
         pg.robot_passage_width_m = getf("DoorAffordance.RobotPassageWidthM", pg.robot_passage_width_m,

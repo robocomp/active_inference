@@ -2623,6 +2623,10 @@ void SpecificWorker::step_pragmatic_affordances(rc::DoorInstance& inst)
         apb.footprint_r = 0.5f * pg.robot_passage_width_m + pg.passage_margin_m;
         apb.room = G ? rc::room::current_room_frame(*G) : std::string{};
         apb.polygon = fitter_->room_polygon();
+        // ★ 2026-10-24: ON THE AXIS (door_approach_pose.h) — P(complete) mixes over the door's state, and the search runs inward
+        //   to the body's reach, so a refused standpoint shortens the standoff instead of moving beside the door.
+        apb.p_open = st.p_open_known ? std::clamp(st.p_open, 0.0f, 1.0f) : 0.0f;
+        apb.s_floor = apb.footprint_r;
         const auto choice = rc::door::choose_approach_pose(inst.aperture, apb, inst.approach_memory, now_ms);
         const auto free_choice = rc::door::choose_approach_pose(inst.aperture, apb, rc::door::ApproachMemory{}, now_ms);
         const auto& pose = choice.pose;
@@ -2722,9 +2726,10 @@ void SpecificWorker::step_pragmatic_affordances(rc::DoorInstance& inst)
         //   far-side depth read 0, the target sat 1.27 m out — inside the real leaf at 104° (`standpoint (0.04,-1.27)
         //   occupied`, 6361 returns), and the robot stalled IN the doorway. What the kinematics guarantee whatever the
         //   side and the angle: the leaf never reaches past its own width from the aperture plane.
-        const float cross_standoff = std::max(pg.cross_standoff_m,
-                                              2.0f * inst.leaf_pose.half_w + 0.5f * pg.robot_passage_width_m
-                                              + pg.swing_clearance_m);
+        // ★ 2026-10-24 (user): "cross should provide a point just at the other side of the door" — DoorAffordance.CrossTargetM
+        //   (door_approach_pose.h cross_target_depth); unset, the swept-radius depth above.
+        const float cross_standoff = rc::door::cross_target_depth(pg.cross_target_m, pg.cross_standoff_m, inst.leaf_pose.half_w,
+                                                                    pg.robot_passage_width_m, pg.swing_clearance_m);
         inst.cross_standoff_m = cross_standoff;
         const auto pose = rc::door::through_pose(inst.aperture, inst.cross_side_latched, cross_standoff);
         o.x_m = pose.x; o.y_m = pose.y; o.yaw_rad = pose.yaw;

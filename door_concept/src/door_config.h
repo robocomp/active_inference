@@ -32,6 +32,12 @@ struct DoorPragmaticCfg
     // FAR edge of the actuation band, from the aperture plane. The NEAR edge is derived (safe_standoff).
     float actuation_reach_m    = 2.00f;
     float cross_standoff_m     = 1.20f;  // how far PAST the aperture the cross target sits
+    // ★THE CROSS TARGET IS "JUST ON THE OTHER SIDE" (2026-10-24, user): the controller's door route ends there and the room
+    // switch completes the passage. > 0 ⇒ the published cross target sits this far past the aperture plane on the axis;
+    // ≤ 0 ⇒ the old through-pose depth (max(CrossStandoffM, past the leaf's swept radius), door_approach_pose.h cross_target_depth). The
+    // leaf can still stand in that spot: the controller slides the target outward along the axis until its footprint is
+    // free on its grid (controller door_route.h) — it never moves sideways.
+    float cross_target_m       = 0.0f;
     float cross_clearance_m    = 0.80f;  // distance past the aperture plane that counts as fully through
     // ★A MEASUREMENT OF THE ROBOT, not a tuning knob — and the one direction in which a doorway closes.
     // Shadow's lateral half-width measured off the robocomp meshes is 0.2938 m per side (0.588 m across);
