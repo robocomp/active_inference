@@ -104,7 +104,8 @@ void ChatSession::start()
         {
             planner_.reset();            // before cancel(): its error callback then has no job to answer
             pending_mission_.reset();
-            fix_key_.clear();            // a failure's fix belongs to the conversation that heard of it (wakes stay)
+            fix_key_.clear();            // a failure's fix, and the robot events still queued, belong to the
+            wakes_.clear();              // conversation that was cleared: never delivered into the new one
             llm_.cancel();
             window_->set_busy(false);
             history_.clear();
@@ -301,10 +302,13 @@ void ChatSession::on_user_text(const QString& text)
         push_history({{"role", "assistant"}, {"content", "Stopping the robot now."}});
         return;
     }
-    // 1d. pause / continue / cancel the running mission: the person's alone, never the model's (spec §5.6).
-    if (is_pause(t)) { mission_control("pause", text); return; }
-    if (is_continue(t)) { mission_control("continue", text); return; }
-    if (is_cancel_mission(t)) { mission_control("cancel", text); return; }
+    // 1d. pause / continue / cancel the running mission: the person's alone, never the model's (spec §5.6) — and only
+    //     where the words mean the mission: otherwise ("sigue recto", "espera, ¿qué ves?") on to the normal path.
+    if (const auto act = mission_control_action(t, mission_progress_.status, running_op(mission_progress_)); act.has_value())
+    {
+        mission_control(*act, text);
+        return;
+    }
     // 1a. a plain yes to agent_control's question: carried out here, not by the model (which answered "yes" by saying
     //     the agent was stopped without calling the tool, eval 2026-10-19).
     if (const auto& pend = fleet_confirmations_.pending(); pend.has_value() and fleet::is_yes(text.toStdString()))
@@ -1857,7 +1861,8 @@ void ChatSession::tick_status()
         QString line = halt and state == "aborted" ? QStringLiteral("'%1' done").arg(q(shown))
                                                      : QStringLiteral("'%1' %2").arg(q(shown), q(state));
         if (not event.empty()) line += " — " + q(event);
-        window_->append_robot(line);
+        // A mission's end is already in the window as its progress lines (✓ / ✗ / ■): only the model is told here.
+        if (not about_mission) window_->append_robot(line);
         push_history({{"role", "tool"}, {"tool_name", "robot_status"},
                       {"content", q(robot_status_text(shown, state, event))}});
     }
@@ -1942,34 +1947,13 @@ std::string ChatSession::physical_room() const
     return n == 1 ? live : digest_.facts.room;
 }
 
-void ChatSession::mission_control(std::string_view what, const QString& text)
+void ChatSession::mission_control(const MissionControl& act, const QString& text)
 {
-    const std::string& st = mission_progress_.status;
-    const bool paused = st.starts_with("paused|");
-    const bool running = paused or st == "in_progress";
-    std::string word;
-    QString reply;
-    if (what == "pause")
-    {
-        if (paused) reply = QStringLiteral("The mission is already paused. Say \"continue\" to go on.");
-        else if (running) { word = "pause"; reply = QStringLiteral("Pausing the mission."); }
-        else reply = QStringLiteral("There is no mission to pause.");
-    }
-    else if (what == "continue")
-    {
-        // ★ unpause and resume are different words (Task 4): unpause restarts the paused step, resume ends a `wait`.
-        if (paused) { word = "unpause"; reply = QStringLiteral("Continuing the mission: the interrupted step starts again."); }
-        else if (running) { word = "resume"; reply = QStringLiteral("Continuing the mission."); }
-        else reply = QStringLiteral("There is no mission to continue.");
-    }
-    else
-    {
-        if (running) { word = "cancel"; reply = QStringLiteral("Cancelling the mission. The robot stays where it is."); }
-        else reply = QStringLiteral("There is no mission to cancel.");
-    }
-    log_.write("fast_path", QJsonObject{{"kind", q(std::string(what))}, {"status", q(st)}, {"word", q(word)}});
-    if (not word.empty() and not send_command(word, "fast_path"))
-        reply = QStringLiteral("I could not send '%1' to the controller.").arg(q(word));
+    QString reply = q(act.reply);
+    log_.write("fast_path", QJsonObject{{"kind", "mission_control"}, {"status", q(mission_progress_.status)},
+                                        {"word", q(act.word)}});
+    if (not act.word.empty() and not send_command(act.word, "fast_path"))
+        reply = QStringLiteral("I could not send '%1' to the controller.").arg(q(act.word));
     window_->begin_assistant();
     window_->append_token(reply);
     window_->end_assistant();

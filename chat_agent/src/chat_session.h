@@ -4,7 +4,8 @@
  *
  * THE FLOW OF ONE USER MESSAGE (on_user_text):
  *   1. `stop` fast path (^(stop|para|detente|alto)\b) → the `stop` command is written at once, no model involved.
- *      1d. pause / continue / cancel the mission (command_gate.h is_pause …) → the controller's own word, no model.
+ *      1d. pause / continue / cancel the mission → the controller's own word, no model, but only where the words mean
+ *          the mission (mission_plan.h mission_control_action); otherwise ("sigue recto") on to the normal path.
  *      1a/1c. a plain yes to agent_control's question / to a mission card → carried out here; any other message
  *      drops the card.
  *   2. text already in the controller grammar (cross door / cross door_N / uncross / move / turn) → CommandGate → sent.
@@ -216,8 +217,8 @@ private:
     void drain_wakes();   ///< the oldest robot event to the model, if it is idle
     /// The room the robot is physically in: the one its pose is published in (live robot RT), else the current room.
     [[nodiscard]] std::string physical_room() const;
-    /// Fast path 1d: what = pause | continue | cancel, gated on the mission's status; the reply is fixed text.
-    void mission_control(std::string_view what, const QString& text);
+    /// Fast path 1d: send mission_control_action's word (if any) and answer with its fixed reply.
+    void mission_control(const MissionControl& act, const QString& text);
     void ping_llm();
     void refresh_status_bar();
     void poll_gpu();   ///< start an nvidia-smi query unless one is still running; its result lands in gpu_label_

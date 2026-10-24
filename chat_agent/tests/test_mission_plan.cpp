@@ -191,6 +191,30 @@ int main()
         CHECK(sw.contains("\"t\"") and sw.contains("60 s"));
     }
 
+    // ── mission_control_action: the fast path only where it means something ─────────────────────────────────────
+    {
+        CHECK(not mission_control_action("sigue recto", "", "").has_value());
+        CHECK(not mission_control_action("espera, ¿qué ves?", "", "").has_value());
+        CHECK(not mission_control_action("continue to the kitchen", "completed", "").has_value());
+        const auto p = mission_control_action("pausa", "in_progress", "cross");
+        CHECK(p.has_value() and p->word == "pause");
+        CHECK(not mission_control_action("pausa", "paused|2", "").has_value());   // already paused: conversation
+        const auto u = mission_control_action("sigue", "paused|2", "");
+        CHECK(u.has_value() and u->word == "unpause");
+        CHECK(not mission_control_action("sigue", "in_progress", "explore").has_value());   // moving already
+        const auto r = mission_control_action("continue", "in_progress", "wait");
+        CHECK(r.has_value() and r->word == "resume");
+        const auto c0 = mission_control_action("cancel the mission", "", "");
+        CHECK(c0.has_value() and c0->word.empty() and c0->reply == "There is no mission to cancel.");
+        const auto c1 = mission_control_action("abort", "paused|1", "");
+        CHECK(c1.has_value() and c1->word == "cancel");
+        CHECK(not mission_control_action("what doors do you see?", "in_progress", "wait").has_value());
+        Progress rw = snap("in_progress", {view("1", "repeat", SS::Running), view("1.1", "wait", SS::Running),
+                                           view("2", "cross", SS::Pending)});
+        CHECK(running_op(rw) == "wait");
+        CHECK(running_op(idle).empty());
+    }
+
     // ── fix_still_open: a failure's fix is planned in its own wake turn or in answer to the person's next message ─
     CHECK(fix_still_open(4, 4));
     CHECK(fix_still_open(4, 5));

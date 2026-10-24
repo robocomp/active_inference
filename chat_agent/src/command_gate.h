@@ -172,20 +172,10 @@ inline GateResult validate(const ToolCall& call, const GateFacts& f, const GateL
     return r;
 }
 
-/// ^(stop|para|detente|alto)\b — the stop fast path. Sent at once, without the model. NOT when the rest names a
-/// program ("stop agent chair concept", "para la retina", "stop room_concept"): that is agent_control's, and live
-/// 2026-10-19 it stopped the robot instead.
-inline bool is_stop(const std::string& text)
-{
-    static const std::regex re(R"(^(stop|para|detente|alto)\b)", std::regex::icase);
-    static const std::regex program(R"(agent|concept|program|proce[sx]|retina|controll?er|controlador|ltsm|episodic|_)");
-    const std::string t = ascii_lower_trim(text);
-    return std::regex_search(t, re) and not std::regex_search(t, program);
-}
-
 namespace gate_detail
 {
-/// The is_stop rule for the mission's fast-path words: `re` at the start, and no program named in the rest.
+/// The fast-path rule (is_stop, is_pause, …): `re` at the start, and no program named in the rest. ONE program list,
+/// so the words cannot drift apart.
 inline bool anchored_word(const std::string& text, const std::regex& re)
 {
     static const std::regex program(R"(agent|concept|program|proce[sx]|retina|controll?er|controlador|ltsm|episodic|_)");
@@ -194,7 +184,17 @@ inline bool anchored_word(const std::string& text, const std::regex& re)
 }
 }   // namespace gate_detail
 
+/// ^(stop|para|detente|alto)\b — the stop fast path. Sent at once, without the model. NOT when the rest names a
+/// program ("stop agent chair concept", "para la retina", "stop room_concept"): that is agent_control's, and live
+/// 2026-10-19 it stopped the robot instead.
+inline bool is_stop(const std::string& text)
+{
+    static const std::regex re(R"(^(stop|para|detente|alto)\b)", std::regex::icase);
+    return gate_detail::anchored_word(text, re);
+}
+
 /// ^(pause|pausa|espera)\b — hold the running mission where it is (controller word `pause`), without the model.
+/// The words alone; whether they mean the mission depends on its status (mission_plan.h mission_control_action).
 inline bool is_pause(const std::string& text)
 {
     static const std::regex re(R"(^(pause|pausa|espera)\b)");

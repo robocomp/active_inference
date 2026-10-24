@@ -32,6 +32,7 @@
 #include "../../common/mission/mission_json.h"
 #include "../../common/mission/mission_progress.h"
 #include "../../common/mission/mission_text.h"
+#include "command_gate.h"
 
 namespace rc::chat
 {
@@ -257,6 +258,49 @@ inline std::string paused_at(const rc::mission::Progress& p)
     return out;
 }
 
+// ── pause / continue / cancel: the person's fast path, only where it means something (spec §5.6) ───────────────
+
+struct MissionControl
+{
+    std::string word;    ///< the controller word to send; "" = nothing to send, only the reply
+    std::string reply;   ///< the fixed text the chat answers with (no model)
+};
+
+/// The op of the innermost Running step ("" when none): what "continue" would act on.
+[[nodiscard]] inline std::string running_op(const rc::mission::Progress& p)
+{
+    std::string op;
+    for (const auto& v : p.steps)   // pre-order: the last Running one is the leaf
+        if (v.state == rc::mission::Interpreter::StepState::Running) op = v.op;
+    return op;
+}
+
+/// The person's words + the mission's status (+ its running step's op) → what to do, or nullopt = not about the
+/// mission: the message goes on to the normal path. "sigue recto" or "espera, ¿qué ves?" with nothing to pause or
+/// unpause is conversation, and the person's working language is Spanish.
+///   pause     → `pause` only while in_progress
+///   continue  → `unpause` while paused|…; `resume` only while in_progress AND the running step is a `wait`
+///   cancel    → `cancel` while in_progress or paused; with nothing running, the fixed "no mission" reply (the
+///               phrases are unambiguous)
+[[nodiscard]] inline std::optional<MissionControl> mission_control_action(std::string_view text, std::string_view status,
+                                                                          std::string_view running)
+{
+    const std::string t(text);
+    const bool paused = status.starts_with("paused|");
+    const bool in_progress = status == "in_progress";
+    if (is_pause(t) and in_progress) return MissionControl{"pause", "Pausing the mission."};
+    if (is_continue(t))
+    {
+        if (paused) return MissionControl{"unpause", "Continuing the mission: the interrupted step starts again."};
+        if (in_progress and running == "wait") return MissionControl{"resume", "Continuing: the mission stops waiting."};
+        return std::nullopt;
+    }
+    if (is_cancel_mission(t))
+        return in_progress or paused ? MissionControl{"cancel", "Cancelling the mission. The robot stays where it is."}
+                                     : MissionControl{"", "There is no mission to cancel."};
+    return std::nullopt;
+}
+
 // ── wakes: the robot, not the person, has something to say (spec §5.1 steps 7-8, §5.5) ─────────────────────────
 
 /// Robot events for the model, oldest first. A note waits while the model (or the planner) is busy and is never
@@ -275,6 +319,7 @@ struct WakeQueue
     }
     [[nodiscard]] const std::string& last_fixes() const { return last_fixes_; }   ///< of the last popped note
     [[nodiscard]] bool empty() const { return q_.empty(); }
+    void clear() { q_.clear(); last_fixes_.clear(); }   ///< a new conversation: its history has no place for them
 
 private:
     std::deque<std::pair<std::string, std::string>> q_;
