@@ -214,6 +214,56 @@ int main()
         CHECK(p.take_finished());
     }
 
+    // ── Task 11 (room recognition): the current room's NAME changes more than once within ONE cross leg — the start room
+    //    room_2, an EMPTY instant while the provisional room is removed, the provisional room_4 (born on entry through a
+    //    never-crossed door), then the recognised room_3 (re-born from ltsm's late recall). The leg completes on "a different
+    //    room from where it started", whatever the intermediate names. ────────────────────────────────────────────────────
+    {
+        auto G = make_graph(20);                    // unanchored (room route): ends at the first switch, then stays ended
+        DoorPassage p;
+        p.set_clock(clock);
+        p.start("door_20", Step::Cross);
+        const std::string a = "aff_door_20_";
+        offered(*G, a + "approach");  p.update(*G, nullptr, "room_2");
+        executing(*G, a + "approach"); p.update(*G, nullptr, "room_2");
+        satisfied(*G, a + "approach"); p.update(*G, nullptr, "room_2");
+        offered(*G, a + "cross");     p.update(*G, nullptr, "room_2");
+        executing(*G, a + "cross");   p.update(*G, nullptr, "room_2");
+        for (const char *r : {"", "room_4", "room_3", "room_4"})   // ... and an Undo renaming back
+        {
+            p.update(*G, nullptr, r);
+            CHECK(p.view().step == Step::Done);
+            CHECK(not p.view().failed);
+        }
+        CHECK(p.take_finished());
+    }
+    {
+        auto G = make_graph(21);                    // anchored: clears through every rename, ends only when through
+        DoorPassage p;
+        p.set_clock(clock);
+        p.start("door_21", Step::Cross);
+        const std::string a = "aff_door_21_";
+        offered(*G, a + "approach");  p.update(*G, nullptr, "room_2");
+        executing(*G, a + "approach"); p.update(*G, nullptr, "room_2");
+        satisfied(*G, a + "approach"); p.update(*G, nullptr, "room_2");
+        offered(*G, a + "cross");     p.update(*G, nullptr, "room_2");
+        executing(*G, a + "cross");
+        p.note_anchor(true, false);
+        p.update(*G, nullptr, "room_2");
+        for (const char *r : {"", "room_4", "room_3", "room_4"})
+        {
+            p.update(*G, nullptr, r);
+            CHECK(p.clearing());
+            CHECK(p.view().step == Step::Cross);
+            CHECK(not p.view().failed);
+        }
+        p.note_anchor(true, true);                  // through
+        p.update(*G, nullptr, "room_3");
+        CHECK(p.view().step == Step::Done);
+        CHECK(not p.view().failed);
+        CHECK(p.take_finished());
+    }
+
     // ── Task 3f r1 (M-1): a clearing GIVEN UP while the session's posterior says the body may straddle the doorway is NOT
     //    through: the passage must not go on to close the door on the robot. With P(through) > 1/2 it closes as before. ──
     for (const double p_thr : {0.20, 0.90})
