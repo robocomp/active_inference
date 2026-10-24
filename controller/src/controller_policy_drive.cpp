@@ -12,6 +12,7 @@
 // Unreachable. This file builds its input from the controller's world (conversions: local_policy/goal_adapter.h) and sends
 // its (v, w).
 #include "controller_session.h"
+#include "standpoint_fit.h"   // D4: rc::standpoint::place_unreachable
 
 #include <chrono>
 #include <cmath>
@@ -326,6 +327,14 @@ ControllerSession::PolicyTick ControllerSession::policy_tick(const rc::policy::G
                      spec.goal.yaw ? std::format(" facing {:.0f} deg", *spec.goal.yaw * 57.29578f) : std::string(),
                      policy_nav_.last_build_ms(), policy_nav_.field().at(pose.p));
     }
+    // ★ D4: an object / look / Reach place the field cannot reach from the robot (inside furniture the producer does not know of)
+    //   is HANDED BACK to the producer exactly like the approach standpoint (Task 3c) — it re-sites — never driven at.
+    if (new_goal and rc::standpoint::place_unreachable(policy_nav_.field().at(pose.p))
+        and flag_standpoint_unreachable(std::format("the local policy's field has no route from ({:.2f},{:.2f}) to the place ({:.2f},{:.2f}) "
+                                                    "— the body cannot stand there (furniture on it?) — handed back, not driven at",
+                                                    pose.p.x(), pose.p.y(), spec.goal.p.x(), spec.goal.p.y())))
+        std::println("[policy] {}: the field is infinite from the robot to ({:.2f},{:.2f}) — handing the place back to the producer "
+                     "(D4: a place the body cannot stand is never driven at)", who, spec.goal.p.x(), spec.goal.p.y());
     // ★ Live fix 2 ruling 4 — DIAGNOSTIC: a new goal whose field at the robot exceeds 10x the straight-line distance is
     //   dumped (free mask summary, traps, residual density stats, goal points) to a file named in the log.
     if (new_goal)
