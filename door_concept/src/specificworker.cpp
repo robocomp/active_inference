@@ -2243,15 +2243,17 @@ void SpecificWorker::step_epistemic(rc::DoorInstance& inst, DSR::Node& node)
                                        rc::nbv::sensor_from_graph(*G, inner_eigen_.get()), obstacles,
                                        fitter_->room_polygon(), &nbv_plan, &exist_look, &site_refused);
         log_nbv_decision(inst, nbv_plan, prop);   // logs REFUSED proposals too — keep it before the check
-        if (prop.unplaceable)
-        {
-            inst.look_unplaceable = true;
-            return std::nullopt;
-        }
+        // ★D4: the look's offer probability is the share of its worth the hand-backs left; the same Schmitt band as the pragmatic
+        //   affordances (offer above offer_prob, withdraw below withdraw_prob) — continuous in the memory, no exact-zero test.
         if (prop.valid and prop.is_finite())
         {
-            inst.look_offered_xy = {prop.epistemic_target_x_m, prop.epistemic_target_y_m};
-            inst.look_offered_valid = true;
+            const auto& pg = cfg_.pragmatic;
+            inst.look_offer_on = inst.look_offer_on ? prop.offer_share >= pg.withdraw_prob : prop.offer_share > pg.offer_prob;
+            if (not inst.look_offer_on)
+            {
+                inst.look_unplaceable = true;
+                return std::nullopt;
+            }
         }
         // Degenerate (non-finite) fit — retry next cycle.
         if (not prop.valid or not prop.is_finite())
@@ -2263,7 +2265,12 @@ void SpecificWorker::step_epistemic(rc::DoorInstance& inst, DSR::Node& node)
 
     // Write attributes to the door node (read by legacy consumers)
     hooks.record = [&](const rc::EpistemicProposal& published, float /*raw_gain*/)
-    { scene_graph_->write_epistemic_proposal(node, published); };
+    {
+        scene_graph_->write_epistemic_proposal(node, published);
+        // ★D4: the site a hand-back refers to is the one the step PUBLISHES here, not every cycle's computed proposal.
+        inst.look_offered_xy = {published.epistemic_target_x_m, published.epistemic_target_y_m};
+        inst.look_offered_valid = true;
+    };
 
     hooks.on_affordance_created = [this] { trigger_graph_layout_twopi(); };
 

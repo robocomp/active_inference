@@ -44,13 +44,13 @@ int main()
 
     std::println("1. no memory");
     const auto s0 = choose(0);
-    check(s0.face == 2 and s0.value == gain[2] and not s0.unplaceable, "the best face is not offered at its full gain");
+    check(s0.face == 2 and s0.value == gain[2] and s0.share == 1.f, "the best face is not offered at its full gain");
 
     std::println("2. the +y site handed back (the one inside the bed)");
     mem.refuse(ap, side_of(pos[2]), room, pos[2], 0);
     const auto s1 = choose(0);
     std::println("    face {} value {:.3f}", s1.face, s1.value);
-    check(s1.face == 0 and s1.value > 0.f and not s1.unplaceable, "another viewpoint that sees the door was not offered");
+    check(s1.face == 0 and s1.value > 0.f and s1.share > 0.2f, "another viewpoint that sees the door was not offered");
     check(s1.face != 2, "the handed-back site was offered again");
 
     std::println("3. continuity");
@@ -59,27 +59,37 @@ int main()
     const float p_near = near_mem.p_refused(ap, 1.f, room, pos[2], 0, tau_s, r), p_on = mem.p_refused(ap, 1.f, room, pos[2], 0, tau_s, r);
     check(p_near > 0.f and p_near < p_on and p_on == 1.f, "a hand-back beside the site must weigh less than one on it");
 
-    std::println("4. every usable site handed back, then decay");
-    mem.refuse(ap, side_of(pos[0]), room, pos[0], 0);
-    mem.refuse(ap, side_of(pos[1]), room, pos[1], 0);
-    const auto s2 = choose(0);
-    check(s2.unplaceable and s2.face >= 0 and not (s2.value > 0.f), "all sites remembered must be unplaceable (withdrawn)");
-    float prev = 0.f; bool mono = true; int back_at = -1;
-    for (int k = 1; k <= 8; ++k)
+    std::println("4. realistic: hand-backs at age > 0 and displaced from the face centres (the claimed pose after repairs)");
+    // hysteresis as step_epistemic applies it (cfg offer 0.60 / withdraw 0.35)
+    const auto step_on = [](bool on, float share) { return on ? share >= 0.35f : share > 0.60f; };
+    rc::door::ApproachMemory real;
+    real.refuse(ap, side_of(pos[2]), room, pos[2] + Eigen::Vector2f(0.1f, -0.15f), 0);
+    real.refuse(ap, side_of(pos[0]), room, pos[0] + Eigen::Vector2f(-0.12f, 0.1f), 0);
+    real.refuse(ap, side_of(pos[1]), room, pos[1] + Eigen::Vector2f(0.1f, 0.1f), 0);
+    const auto chooseR = [&](std::int64_t now)
     {
-        const auto s = choose(k * kTau);
-        if (s.face == 2 and s.value < prev) mono = false;
-        if (not s.unplaceable and back_at < 0) back_at = k;
-        if (s.face == 2) prev = s.value;
+        return rc::door::choose_look_site(gain, usable, pos, [&](const Eigen::Vector2f& q)
+                                          { return real.p_refused(ap, side_of(q), room, q, now, tau_s, r); });
+    };
+    bool on = true, withdrawn_early = false, back = false; float prev_share = -1.f; bool mono = true;
+    for (int k = 0; k <= 400; ++k)
+    {
+        const std::int64_t now = k * 500 + 20000;   // from 20 s old (age > 0 at every sample)
+        const auto s = chooseR(now);
+        on = step_on(on, s.share);
+        if (k == 0 and not on) withdrawn_early = true;
+        if (k > 0 and s.share < prev_share - 1e-6f) mono = false;
+        prev_share = s.share;
+        if (withdrawn_early and on) { back = true; std::println("    offered again at age {:.0f} s (share {:.2f})", now * 1e-3, s.share); break; }
     }
-    std::println("    placeable again after {} tau", back_at);
-    check(back_at == 1, "the look did not come back as the memory decayed");
-    check(mono, "the value of the original site must rise monotonically with age");
-    check(choose(40 * kTau).face == 2 and choose(40 * kTau).value > 0.89f, "after the memory is gone the original site returns");
+    check(withdrawn_early, "every site remembered at age 20 s must be withdrawn by the hysteresis (share below withdraw_prob)");
+    check(back, "the look did not come back as the memory decayed");
+    check(mono, "the share must rise monotonically as the memory decays");
+    check(chooseR(100 * kTau).share > 0.99f, "after the memory is gone the full worth returns");
 
     std::println("5. nothing usable");
     const auto s3 = rc::door::choose_look_site(gain, std::array<bool, 4>{false, false, false, false}, pos, [](const Eigen::Vector2f&) { return 0.f; });
-    check(s3.face == -1 and not s3.unplaceable, "no usable face is not a hand-back");
+    check(s3.face == -1 and s3.share == 1.f, "no usable face is not a hand-back");
 
     if (g_fail == 0) std::println("ALL PASS"); else std::println("FAILED ({})", g_fail);
     return g_fail == 0 ? 0 : 1;

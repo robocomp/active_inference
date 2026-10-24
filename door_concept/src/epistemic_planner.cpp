@@ -158,19 +158,13 @@ EpistemicProposal EpistemicPlanner::compute(const DoorBelief& belief, float lat_
         if (total[i] > best_total) { best_total = total[i]; best_idx = i; }
     }
     // ★D4: the faces' viewpoints weighted by P(the body can stand there), from the consumer's hand-backs (door_look_site.h).
-    float site_weight = 1.0f;
+    float site_weight = 1.0f, offer_share = 1.0f;
     if (site_refused != nullptr)
     {
         std::array<Eigen::Vector2f, 4> pos;
         for (int i = 0; i < 4; ++i) pos[i] = ctr + plan.face_standoff_m[i] * face_dir[i];
         const auto site = door::choose_look_site(total, usable, pos, *site_refused);
-        if (site.unplaceable)
-        {
-            EpistemicProposal none;
-            none.unplaceable = true;
-            return none;
-        }
-        if (site.face >= 0) { best_idx = site.face; best_total = total[site.face]; site_weight = 1.0f - site.p_refused; }
+        if (site.face >= 0) { best_idx = site.face; best_total = total[site.face]; site_weight = 1.0f - site.p_refused; offer_share = site.share; }
     }
     if ((existence or site_refused) and best_total >= 0.0f and best_idx != plan.best_face)    // existence moved the choice: re-place at that face's own range
     {
@@ -233,6 +227,7 @@ EpistemicProposal EpistemicPlanner::compute(const DoorBelief& belief, float lat_
     }
 
     EpistemicProposal proposal{plan.best_pos.x(), plan.best_pos.y(), plan.best_yaw, best_gain, true};
+    proposal.offer_share = offer_share;
     if (!proposal.is_finite())
         return {};
     return proposal;

@@ -8,9 +8,8 @@
 // the look had none. Same model, same memory type (ApproachMemory, in the door's frame), same τ.
 // ★THE MODEL. Each face's expected gain G_i (detection-weighted, existence included) is multiplied by P(site i standable) =
 // 1 − P(refused | site i): continuous in the site and in the age of the refusal, no gate. The face with the best weighted value
-// is offered, at that weighted value. A look whose every usable face is a remembered hand-back (value exactly 0 — a re-offer at
-// the very site that was handed back, which the planner reproduces deterministically) is UNPLACEABLE: it is withdrawn, and
-// comes back by itself as the refusals decay (the weight rises continuously from 0).
+// is offered, at that weighted value. The share of the unweighted best that is left is the offer's probability (hysteresis in the
+// caller): a look whose every usable face is a remembered hand-back is withdrawn and comes back as the refusals decay.
 #pragma once
 
 #include <array>
@@ -23,28 +22,29 @@ namespace rc::door
 struct LookSite
 {
     int   face = -1;            // the face to offer; -1 when none is usable at all
-    float value = 0.0f;         // its gain × P(standable)
+    float value = 0.0f;         // its gain x P(standable)
     float p_refused = 0.0f;     // P(refused | that site)
-    bool  unplaceable = false;  // usable faces exist, but every one is a remembered hand-back
+    float share = 1.0f;         // best weighted value / best unweighted value: the share of the look's worth the hand-backs left
 };
 
 // total[i]: face i's expected gain (meaningful only if usable[i]); pos[i]: its viewpoint; p_refused(q): the memory.
+// share is the look's OFFER probability (as approach_offer_prob): the caller's offer/withdraw hysteresis acts on it, so a look whose
+// every site is remembered falls out continuously and returns as the refusals decay - no exact-zero test, no cutoff.
 template <class Refused>
 [[nodiscard]] inline LookSite choose_look_site(const std::array<float, 4>& total, const std::array<bool, 4>& usable,
                                                const std::array<Eigen::Vector2f, 4>& pos, Refused&& p_refused)
 {
     LookSite out;
-    bool any_free_value = false;   // some usable face is worth something with nothing remembered
-    float best = -1.0f;
+    float best = -1.0f, free_best = 0.0f;
     for (int i = 0; i < 4; ++i)
     {
         if (not usable[i]) continue;
         const float pr = std::clamp(static_cast<float>(p_refused(pos[i])), 0.0f, 1.0f);
         const float v = total[i] * (1.0f - pr);
-        any_free_value = any_free_value or total[i] > 0.0f;
+        free_best = std::max(free_best, total[i]);
         if (v > best) { best = v; out.face = i; out.value = v; out.p_refused = pr; }
     }
-    out.unplaceable = any_free_value and not (out.value > 0.0f);
+    out.share = free_best > 0.0f ? std::clamp(out.value / free_best, 0.0f, 1.0f) : 1.0f;
     return out;
 }
 }  // namespace rc::door

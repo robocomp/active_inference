@@ -60,7 +60,8 @@ struct DoorInstance : DoorFitState
     Eigen::Vector2f look_offered_xy{0.0f, 0.0f};
     bool look_offered_valid = false;
     bool look_handback_taken = false;   // this completion's hand-back is already remembered (cleared when the look is re-offered)
-    bool look_unplaceable = false;      // this cycle: every usable site is a remembered hand-back — withdraw the look
+    bool look_unplaceable = false;      // this cycle: the hand-backs left too little of the look's worth — withdraw it (hysteresis below)
+    bool look_offer_on = true;          // the look's offer/withdraw hysteresis state (offer_prob / withdraw_prob on the share left)
 };
 
 }  // namespace rc
