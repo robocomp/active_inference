@@ -91,13 +91,19 @@ void ChatSession::start()
         .on_send = [this](const QString& t) { on_user_text(t); },
         .on_cancel = [this]()
         {
-            if (llm_.busy()) { llm_.cancel(); }
+            if (llm_.busy()) { llm_.cancel(); }   // the planner's own request ends in its on_error ("cancelled")
+            else if (planner_.has_value())        // Esc in the gap before the planner request starts
+            {
+                window_->append_system(QStringLiteral("(planning cancelled)"));
+                drop_planner(QStringLiteral("REJECTED: the person cancelled the planning"));
+            }
         },
         .on_new = [this]()
         {
             planner_.reset();            // before cancel(): its error callback then has no job to answer
             pending_mission_.reset();
             llm_.cancel();
+            window_->set_busy(false);
             history_.clear();
             look_jpeg_.clear();
             last_relative_.clear();   // "a bit more" has nothing to repeat in a new conversation
@@ -261,9 +267,24 @@ void ChatSession::on_user_text(const QString& text)
     log_.write("user", QJsonObject{{"text", text}});
     ++user_turn_;
     last_user_text_ = text;
-    // A mission card lives for exactly one message: taken here, so whatever this message is, the card is gone after it.
+    // ★ The person spoke while a plan was being written: the plan is for a conversation that has moved on. Resolved
+    //   FIRST, so its tool result lands right after its call in the history (a call and its results are never split
+    //   by this message's turns) and a late reply can never become a card (stop, then a card, is an anti-goal).
+    if (planner_.has_value() and not plan_still_wanted(planner_->turn, user_turn_))
+        drop_planner(QStringLiteral("REJECTED: the person spoke again before the plan was ready"));
+    // A mission card lives for exactly one message: taken here, so whatever this message is, the card is gone after
+    // it. It survives only as this message's yes (1a, an agent_control yes, goes first and takes the yes).
     std::optional<MissionCard> card = std::exchange(pending_mission_, std::nullopt);
-    if (card.has_value() and not card_still_valid(card->turn, user_turn_)) card.reset();
+    if (card.has_value())
+    {
+        const bool fleet_yes = fleet_confirmations_.pending().has_value() and fleet::is_yes(text.toStdString());
+        if (not card_still_valid(card->turn, user_turn_) or not fleet::is_yes(text.toStdString()) or fleet_yes)
+        {
+            log_.write("mission_card_dropped", QJsonObject{{"card", static_cast<qint64>(card->serial)}});
+            window_->append_system(QStringLiteral("(the planned mission was not started)"));
+            card.reset();
+        }
+    }
     tick_digest();   // decide on the freshest facts
     draw_repairs_ = 0;
     lost_answers_ = 0;
@@ -292,7 +313,7 @@ void ChatSession::on_user_text(const QString& text)
         return;
     }
     // 1c. a plain yes to a mission card: sent here, never by the model (anti-goal: a mission without the person's yes).
-    if (card.has_value() and fleet::is_yes(text.toStdString()))
+    if (card.has_value())
     {
         const std::string title = card->mission.title.empty() ? std::string("the mission") : card->mission.title;
         log_.write("fast_path", QJsonObject{{"kind", "mission_yes"}, {"card", static_cast<qint64>(card->serial)},
@@ -306,11 +327,6 @@ void ChatSession::on_user_text(const QString& text)
         push_history({{"role", "user"}, {"content", text}});
         push_history({{"role", "assistant"}, {"content", reply}});
         return;
-    }
-    if (card.has_value())
-    {
-        log_.write("mission_card_dropped", QJsonObject{{"card", static_cast<qint64>(card->serial)}});
-        window_->append_system(QStringLiteral("(the planned mission was not started)"));
     }
     // 1b. "show me the zed camera / the room / the plan", "close the canvas": a stock drawing, without the model.
     if (const auto show = parse_show(t); show.has_value())
@@ -331,7 +347,7 @@ void ChatSession::on_user_text(const QString& text)
         return;
     }
     // 3. the model.
-    if (llm_.busy() or planner_.has_value())
+    if (llm_.busy())
     {
         window_->append_system("Still answering the previous message — wait, or press Esc.");
         return;
@@ -1092,7 +1108,7 @@ QString ChatSession::queue_planner(const QJsonObject& args)
     if (planner_.has_value()) return refuse(QStringLiteral("one mission at a time: a plan is already being written"));
     if (request.isEmpty()) return refuse(QStringLiteral("the request is empty: pass what the person asked for"));
     if (not digest_.facts.controller_present) return refuse(QStringLiteral("the controller is not running, so no mission can run"));
-    planner_ = PlannerJob{.request = request};
+    planner_ = PlannerJob{.request = request, .request_text = last_user_text_, .turn = user_turn_};
     log_.write("plan_mission", QJsonObject{{"request", request}, {"ok", true}});
     return {};
 }
@@ -1101,7 +1117,11 @@ QString ChatSession::queue_planner(const QJsonObject& args)
 //   none of the chat's history, rules or tools, so what it writes is what tests/check_llm_missions.py measures.
 void ChatSession::run_planner()
 {
-    if (not planner_.has_value()) return;   // dropped meanwhile (new conversation)
+    if (not planner_.has_value())   // dropped meanwhile (the person spoke, Esc, new conversation)
+    {
+        if (not llm_.busy()) window_->set_busy(false);   // a message that went to the model keeps its own indicator
+        return;
+    }
     QString skills;
     for (const char* name : {"missions", "doors", "exploring"})
         if (const auto it = std::ranges::find(skills_, std::string(name), &rc::chat::Skill::name); it != skills_.end())
@@ -1112,7 +1132,7 @@ void ChatSession::run_planner()
         return;
     }
     QJsonArray msgs{QJsonObject{{"role", "system"}, {"content", skills}},
-                    QJsonObject{{"role", "system"}, {"content", state_message()}},
+                    QJsonObject{{"role", "system"}, {"content", planner_state()}},
                     QJsonObject{{"role", "user"}, {"content", planner_->request}}};
     for (const auto& m : planner_->rounds) msgs.append(m);
     planner_->reply.clear();
@@ -1123,7 +1143,7 @@ void ChatSession::run_planner()
         .on_tool_calls = {},
         .on_done = [this](const ChatStats& st)
         {
-            if (not planner_.has_value()) return;
+            if (not planner_.has_value()) return;   // resolved meanwhile (drop_planner)
             log_.write("planner_response", QJsonObject{{"content", planner_->reply}, {"wall_ms", st.wall_ms},
                                                        {"eval_count", static_cast<qint64>(st.eval_count)},
                                                        {"done_reason", st.done_reason}});
@@ -1147,6 +1167,7 @@ void ChatSession::run_planner()
 
 void ChatSession::on_planned(const QString& reply)
 {
+    if (not planner_.has_value() or not plan_still_wanted(planner_->turn, user_turn_)) return;   // a late reply: no card
     const std::string text = reply.toStdString();
     if (const auto question = planned_ask(text); question.has_value())
     {
@@ -1170,7 +1191,12 @@ void ChatSession::on_planned(const QString& reply)
         QTimer::singleShot(0, &ctx_, [this]() { run_planner(); });   // after this callback, like the first request
         return;
     }
-    m->request = last_user_text_.toStdString();
+    m->request = planner_->request_text.toStdString();
+    if (pending_mission_.has_value())   // a repair round planned again while the first card waits
+    {
+        log_.write("mission_card_replaced", QJsonObject{{"card", static_cast<qint64>(pending_mission_->serial)}});
+        window_->append_system(QStringLiteral("(replaced the previous plan)"));
+    }
     pending_mission_ = MissionCard{.mission = *m, .serial = ++card_serial_, .turn = user_turn_};
     // ★ The card shows the mission AS IT WILL RUN (printed back from the checked IR), never the model's raw reply.
     const std::string shown = rc::mission::print_text(*m);
@@ -1178,6 +1204,26 @@ void ChatSession::on_planned(const QString& reply)
                                            {"fixes", planner_->fixes}});
     window_->append_card(planner_->request, q(shown).trimmed());
     finish_planner(QStringLiteral("OK: card shown; wait for the person's yes. It shows:\n") + q(shown).trimmed());
+}
+
+QString ChatSession::planner_state() const
+{
+    // ★ The planner has no route_to: the way to a remembered room is given to it, legs in order (topology.h ways_line).
+    QString st = state_message();
+    if (const auto topo = remembered_topology(); topo.has_value())
+        if (const auto line = rc::chat::ways_line(*topo, digest_.facts.room); not line.empty()) st += q(line) + "\n";
+    return st;
+}
+
+void ChatSession::drop_planner(const QString& result)
+{
+    if (not planner_.has_value()) return;
+    const QString request = planner_->request;
+    planner_.reset();   // before cancel(): the request's on_error then finds no job
+    if (llm_.busy()) llm_.cancel();
+    window_->set_busy(false);
+    log_.write("query", QJsonObject{{"tool", "plan_mission"}, {"args", QJsonObject{{"request", request}}}, {"result", result}});
+    push_history({{"role", "tool"}, {"tool_name", "plan_mission"}, {"content", result}});
 }
 
 void ChatSession::finish_planner(const QString& result, bool speak)

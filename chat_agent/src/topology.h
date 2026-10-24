@@ -176,4 +176,29 @@ inline std::string remembered_rooms_line(const Topology& t, std::string_view cur
     }
     return o.empty() ? o : "rooms in long-term memory (call route_to for the way): " + o;
 }
+// The PLANNER's STATE line (plan_mission; not the chat's): for every remembered room reachable from `current`, the
+// legs in order as mission steps — the first by its live door when it has one (a door of the current room), every
+// later one as passage:ID@ROOM, ROOM being the room that leg starts in. Empty when no room is reachable.
+// `ways from here (each leg in order): room_2 = cross door_1 expect=room_2; room_3 = cross door_1 expect=room_2, cross passage:p1@room_2 expect=room_3`
+inline std::string ways_line(const Topology& t, std::string_view current)
+{
+    std::string o;
+    for (const auto& r : t.rooms)
+    {
+        if (r.name == current) continue;
+        const auto ids = route(t, current, r.name);
+        if (ids.empty()) continue;
+        std::string legs, at(current);
+        for (const auto& id : ids)
+        {
+            const auto it = std::ranges::find(t.passages, id, &TopoPassageInfo::id);
+            const std::string next = topo_other_room(*it, at);
+            const std::string ref = (legs.empty() and it->live_door) ? *it->live_door : "passage:" + id + "@" + at;
+            legs += std::format("{}cross {} expect={}", legs.empty() ? "" : ", ", ref, next);
+            at = next;
+        }
+        o += std::format("{}{} = {}", o.empty() ? "" : "; ", r.name, legs);
+    }
+    return o.empty() ? o : "ways from here (each leg in order): " + o;
+}
 }   // namespace rc::chat

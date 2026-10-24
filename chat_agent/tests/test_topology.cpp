@@ -86,6 +86,14 @@ int main()
         assert(r.contains("cross passage:p1@room_2 expect=room_3"));
         assert(answer_known_rooms(t, "room_1").contains("room_1 (you are here)"));
         assert(answer_known_rooms(Topology{}, "room_1").starts_with("No rooms"));
+        // the planner's STATE line: every reachable remembered room, its legs in order; the first leg by its live door
+        assert(ways_line(t, "room_1") == "ways from here (each leg in order): room_2 = cross door_1 expect=room_2; "
+                                         "room_3 = cross door_1 expect=room_2, cross passage:p1@room_2 expect=room_3");
+        assert(ways_line(t, "room_3") == "ways from here (each leg in order): room_1 = cross passage:p1@room_3 "
+                                         "expect=room_2, cross passage:p0@room_2 expect=room_1; room_2 = cross "
+                                         "passage:p1@room_3 expect=room_2");   // no live door at the first leg
+        assert(ways_line(t, "room_9").empty());           // nothing reachable from an island
+        assert(ways_line(Topology{}, "room_1").empty());
         const auto line = remembered_rooms_line(t, "room_1");
         assert(line.starts_with("rooms in long-term memory (call route_to for the way): room_2 (behind door_1, crossed 3x), room_3 (2 passages away"));
         assert(line.contains("room_9 (no known route)"));

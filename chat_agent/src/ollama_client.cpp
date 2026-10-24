@@ -146,7 +146,9 @@ bool OllamaClient::chat(const QJsonArray& messages, const QJsonArray& tools, Cal
         if (done_seen_) finish_ok();
         else finish_with_error(QStringLiteral("the stream ended without a final 'done' message"));
     });
-    first_token_timer_.start(cfg_.first_token_timeout_ms);
+    // ★ Not streamed, nothing arrives before the whole reply: the first-token watchdog would bound the GENERATION.
+    //   The transport's transfer timeout (transfer_timeout_ms, no bytes for that long) is then the total bound.
+    if (opt.stream) first_token_timer_.start(cfg_.first_token_timeout_ms);
     return true;
 }
 

@@ -184,6 +184,9 @@ private:
     void run_planner();                          ///< one planner request (the first, or a fix round)
     void on_planned(const QString& reply);       ///< ask / fix round / REJECTED / card
     void finish_planner(const QString& result, bool speak = true);   ///< the deferred tool result, then the follow-up
+    /// Abandon the job now (the person spoke, Esc): cancel its request, push `result` as its tool message, no follow-up.
+    void drop_planner(const QString& result);
+    [[nodiscard]] QString planner_state() const;   ///< state_message() + the `ways from here` line (planner only)
     /// After a tool round of the model: re-ask to fix a failed draw, or one follow-up when it said nothing / saw a picture.
     void after_tool_round(bool had_words, bool image);
     [[nodiscard]] bool name_exists(std::string_view name) const;   ///< a node of the live graph or a remembered passage
@@ -286,6 +289,8 @@ private:
     struct PlannerJob   ///< plan_mission's planner request, queued or in flight (one at a time)
     {
         QString request;           ///< what the conversation model asked to plan
+        QString request_text;      ///< the person's message that led to it (Mission::request), taken at queue time
+        std::uint64_t turn = 0;    ///< user_turn_ at queue time: any later message drops the job (plan_still_wanted)
         QJsonArray rounds;         ///< earlier replies and why each was refused (assistant + user pairs)
         QString reply;             ///< the reply being received
         int fixes = 0;             ///< fix rounds done (cap kMaxPlanFixes)

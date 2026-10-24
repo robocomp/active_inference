@@ -10,6 +10,7 @@
  *   new_reports     the text of each `report` step that has just run, for the reply.
  *   strip_fence / planned_ask / check_planned   the planner reply → `ask:` question, or a card-ready mission.
  *   card_still_valid  the yes to a mission card must be the person's very next message.
+ *   plan_still_wanted a planner reply is discarded once the person has spoken again.
  */
 
 #include <algorithm>
@@ -184,6 +185,13 @@ inline std::string paused_at(const rc::mission::Progress& p)
 [[nodiscard]] constexpr bool card_still_valid(std::uint64_t card_turn, std::uint64_t user_turn)
 {
     return user_turn == card_turn + 1;
+}
+
+/// A planner reply is used only while the person has not typed since plan_mission was called (`job_turn` = user_turn_
+/// then): a message in between resolves the job as REJECTED, so a late reply never becomes a card.
+[[nodiscard]] constexpr bool plan_still_wanted(std::uint64_t job_turn, std::uint64_t user_turn)
+{
+    return user_turn == job_turn;
 }
 
 /// One fixed line per step-state change between two snapshots, oldest first (the order of the steps).

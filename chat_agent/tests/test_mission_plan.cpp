@@ -146,6 +146,10 @@ int main()
     CHECK(not card_still_valid(5, 7));
     CHECK(not card_still_valid(5, 5));
 
+    // ── plan_still_wanted: a planner reply counts only if the person has not spoken since plan_mission ───────────
+    CHECK(plan_still_wanted(5, 5));
+    CHECK(not plan_still_wanted(5, 6));
+
     std::println("test_mission_plan: {} checks passed{}", checks - failures, failures ? " — FAILURES" : "");
     return failures ? 1 : 0;
 }
