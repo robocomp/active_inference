@@ -24,6 +24,12 @@
 #include "canvas_snapshot.h"
 #include "controller_facts.h"
 #include "gpu_memory.h"
+#include "vlm_status.h"
+#include <QHostAddress>
+#include <QHostInfo>
+#include <QNetworkInterface>
+#include <QNetworkRequest>
+#include <QUrl>
 #include "image_prep.h"
 #include "look_messages.h"
 #include "mission_plan.h"
@@ -158,6 +164,7 @@ void ChatSession::start()
         refresh_status_bar();
     });
     canvas_timer_.start(cfg_.canvas_live_period_ms);
+    setup_vlm_status();
     gpu_timer_.start(cfg_.gpu_period_ms);
     poll_gpu();
     digest_timer_.start(cfg_.digest_period_ms);
@@ -218,9 +225,55 @@ void ChatSession::refresh_status_bar()
 
 void ChatSession::poll_gpu()
 {
+    if (vlm_remote_) { poll_vlm(); return; }   // the model is not on this GPU: ask the server what it holds
     if (gpu_proc_.state() != QProcess::NotRunning) return;   // a slow query is not stacked on
     gpu_proc_.start(QStringLiteral("nvidia-smi"), {QStringLiteral("--query-gpu=memory.used,memory.total"),
                                                    QStringLiteral("--format=csv,noheader,nounits")});
+}
+
+void ChatSession::setup_vlm_status()
+{
+    const QUrl url(cfg_.llm.url);
+    const QString host = url.host();
+    std::vector<std::string> mine;
+    for (const auto& a : QNetworkInterface::allAddresses()) mine.push_back(a.toString().toStdString());
+    vlm_remote_ = not is_local_host(host.toStdString(), mine);
+    if (not vlm_remote_) return;
+    vlm_ip_ = host.toStdString();   // until the lookups answer (an ip literal is already final)
+    // QHostInfo::lookupHost is asynchronous; a name resolves forward, an address resolves in reverse (/etc/hosts counts).
+    const auto reverse = [this](const QString& ip)
+    {
+        QHostInfo::lookupHost(ip, &ctx_, [this, ip](const QHostInfo& info)
+        {
+            vlm_host_ = (info.error() == QHostInfo::NoError and info.hostName() != ip) ? info.hostName().toStdString() : "";
+        });
+    };
+    if (QHostAddress(host).isNull())
+        QHostInfo::lookupHost(host, &ctx_, [this, host, reverse](const QHostInfo& info)
+        {
+            if (info.error() != QHostInfo::NoError or info.addresses().isEmpty()) return;
+            vlm_ip_ = info.addresses().first().toString().toStdString();
+            reverse(QString::fromStdString(vlm_ip_));
+        });
+    else
+        reverse(host);
+}
+
+void ChatSession::poll_vlm()
+{
+    if (vlm_reply_) return;   // a slow request is not stacked on
+    QNetworkRequest req(QUrl(cfg_.llm.url + QStringLiteral("/api/ps")));
+    req.setTransferTimeout(1500);
+    vlm_reply_ = vlm_nam_.get(req);
+    QObject::connect(vlm_reply_, &QNetworkReply::finished, &ctx_, [this, r = vlm_reply_]()
+    {
+        std::optional<VlmMemory> mem;
+        if (r->error() == QNetworkReply::NoError)
+            mem = parse_ollama_ps(r->readAll().toStdString(), cfg_.llm.model.toStdString());
+        r->deleteLater();
+        gpu_label_ = q(vlm_status_label(cfg_.llm.model.toStdString(), vlm_ip_, vlm_host_, mem));
+        refresh_status_bar();
+    });
 }
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────

@@ -37,6 +37,9 @@ g++ -std=c++23 -O0 -g -Wall -Wextra -Wno-deprecated-literal-operator -fPIC -o "$
 g++ -std=c++23 -O0 -g -Wall -Wextra -Wno-missing-field-initializers -Wno-deprecated-literal-operator -fPIC \
     -o "$out/test_approach" test_approach.cpp $(pkg-config --cflags Qt6Core | sed "s/-I/-isystem /g") $(pkg-config --libs Qt6Core)
 "$out/test_approach"
+g++ -std=c++23 -O0 -g -Wall -Wextra -Wno-deprecated-literal-operator -fPIC -o "$out/test_vlm_status" test_vlm_status.cpp \
+    $(pkg-config --cflags Qt6Core | sed "s/-I/-isystem /g") $(pkg-config --libs Qt6Core)
+"$out/test_vlm_status"
 g++ -std=c++23 -O0 -g -Wall -Wextra -Wno-missing-field-initializers -Wno-deprecated-literal-operator -fPIC \
     -o "$out/test_mission_plan" test_mission_plan.cpp $(pkg-config --cflags Qt6Core | sed "s/-I/-isystem /g") $(pkg-config --libs Qt6Core)
 "$out/test_mission_plan"

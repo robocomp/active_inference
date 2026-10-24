@@ -66,6 +66,9 @@
 #include <QJsonArray>
 #include <QJsonObject>
 #include <QObject>
+#include <QNetworkAccessManager>
+#include <QNetworkReply>
+#include <QPointer>
 #include <QProcess>
 #include <QString>
 #include <QTimer>
@@ -222,6 +225,8 @@ private:
     void ping_llm();
     void refresh_status_bar();
     void poll_gpu();   ///< start an nvidia-smi query unless one is still running; its result lands in gpu_label_
+    void setup_vlm_status();   ///< decide local vs remote ollama from [LLM] url; remote ⇒ resolve its ip + host name
+    void poll_vlm();   ///< GET <url>/api/ps asynchronously (none stacked); its result lands in gpu_label_
     /// agent_control: start / stop / restart a fleet agent (fleet_control.h); the outcome is told later by tick_fleet.
     QString do_agent_control(const QJsonObject& args);
     void tick_fleet();
@@ -299,6 +304,10 @@ private:
     QString gpu_label_ = QStringLiteral("GPU n/a");   ///< whole-GPU memory, from gpu_memory.h
     QTimer gpu_timer_;
     QProcess gpu_proc_;   ///< the async nvidia-smi query (never waited on in the GUI thread)
+    bool vlm_remote_ = false;   ///< [LLM] url points at another machine ⇒ the status bar shows ITS memory (vlm_status.h)
+    std::string vlm_ip_, vlm_host_;   ///< that machine's address and (reverse-looked-up) name; name may stay empty
+    QNetworkAccessManager vlm_nam_;
+    QPointer<QNetworkReply> vlm_reply_;   ///< the /api/ps request in flight, if any
     fleet::Policy fleet_policy_;
     fleet::Confirmations fleet_confirmations_;
     std::optional<fleet::Op> fleet_op_;   ///< the start / stop / restart in progress
