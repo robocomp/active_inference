@@ -25,7 +25,7 @@ P, F, NM = 'PASS', 'FAIL', 'NOT MEASURED'
 
 CHI2_2_95 = 5.99        # chi-square, 2 dof, 0.95 quantile
 FIRST_LEGS, RECOG_LEG, RETURN_LEGS = (1, 3), 4, (5, 6)
-SWAP_PAT = re.compile(r'\[recog\] SWAP requested|\[swap\] STAGED|\[recall\] LATE|\[room\]\[late-recall\] .*adopted')
+SWAP_PAT = re.compile(r'\[recog\] SWAP requested: room_id|\[swap\] STAGED|\[recall\] LATE|\[room\]\[late-recall\] .*adopted')
 
 def read_lines(path):
     try:
@@ -96,7 +96,7 @@ def c1(legs, ltsm, run):
 def c2(legs, ltsm, rooms):
     if RECOG_LEG not in legs: return F, 'leg 4 missing from legs.tsv'
     sl = slice_of(ltsm, legs, RECOG_LEG, 'ltsm')
-    sw = [l for l in sl if '[recog] SWAP requested' in l]
+    sw = [l for l in sl if '[recog] SWAP requested: room_id' in l]
     if len(sw) != 1: return F, f'{len(sw)} Swap request(s) in the leg-4 window, expected exactly 1'
     m = re.search(r'room_id (\d+) \(posterior ([0-9.eE+-]+)', sw[0])
     if not m: return F, 'Swap line unparsable: ' + sw[0].strip()[:90]

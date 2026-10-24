@@ -34,10 +34,14 @@ std::optional<RoomSceneGraph::Recall> RoomSceneGraph::find_late_recall() const
         if (not px.has_value() or not py.has_value() or not pp.has_value()) continue;
         // Either anchor: the crossed door of the room being left (case A) or the robot itself (case B, no door survives).
         // The recall's own RT edge is not needed: the prior is a pose in the recalled room's frame, not a transform.
-        // The parent must be one of the two anchors the contract allows: a door node (case A) or the robot (case B).
+        // The parent must be one of the two anchors the contract allows: a door node (type door, or object with
+        // object_subtype door) for case A, or the robot (case B).
         const auto parent = G_->get_attrib_by_name<parent_att>(n).value_or(0);
         const auto pnode = parent != 0 ? G_->get_node(parent) : std::nullopt;
-        if (not pnode.has_value() or not (pnode->type() == "door" or parent == dsr_robot_id_))
+        const bool is_door = pnode.has_value() and
+                             (pnode->type() == "door" or
+                              G_->get_attrib_by_name<object_subtype_att>(pnode.value()).value_or(std::string{}) == "door");
+        if (not pnode.has_value() or not (is_door or parent == dsr_robot_id_))
         {
             if (late_bad_parent_logged_ != n.id())
             {
