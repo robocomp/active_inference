@@ -1,6 +1,7 @@
 #include "room_swap.h"
 
 #include "room_forget.h"
+#include "seam_fusion.h"
 #include "../../common/room_resolve/room_resolve.h"   // rc::room::is_proto, current_edge_room
 
 #include <dsr/api/dsr_inner_eigen_api.h>
@@ -21,6 +22,17 @@ namespace ltsm
 namespace
 {
 constexpr const char *kStaged = "staged";
+
+Eigen::Vector3d se2_of(const Mat::RTMat &T) { return {T.translation().x(), T.translation().y(), std::atan2(T.linear()(1, 0), T.linear()(0, 0))}; }
+ltsm::seam::Measured meas(const Mat::RTMat &T, const Eigen::Matrix3d &C) { return {se2_of(T), C}; }
+
+/// Covariance of T(K <- previous room) = T(K <- robot) . T(robot <- previous room) when only the robot's pose in K is uncertain:
+/// the YAW LEVER ARM (robot yaw sigma x distance to the door) comes through the SE(2) composition Jacobian.
+Eigen::Matrix3d seam_cov_through_robot(const Mat::RTMat &K_from_robot, const Eigen::Matrix3d &C_robot, const Mat::RTMat &K_from_prev)
+{
+    const Mat::RTMat robot_from_prev(K_from_robot.inverse() * K_from_prev);
+    return ltsm::seam::compose_cov(meas(K_from_robot, C_robot), meas(robot_from_prev, Eigen::Matrix3d::Zero())).cov;
+}
 
 /// T(K <- robot) from the robot's pose in K, as the recogniser's joint posterior holds it (SE(2): x, y, yaw).
 Mat::RTMat se2_to_rtmat(double x, double y, double th)
@@ -194,11 +206,22 @@ bool RoomSwap::swap(std::uint64_t known_room_id, const rc::recog::PoseMix &pose_
             const auto mt = live_->get_attrib_by_name<rt_translation_att>(P.value());
             const auto mr = live_->get_attrib_by_name<rt_rotation_euler_xyz_att>(P.value());
             const auto mf = live_->get_attrib_by_name<interaction_node_id_att>(P.value());
-            if (mt.has_value() and mr.has_value() and mf.has_value() and mf.value() == Ln->id() and mt->get().size() >= 2 and mr->get().size() >= 3)
+            const auto mc = live_->get_attrib_by_name<rt_covariance_att>(P.value());      // a mouth without its covariance cannot be weighed: not used
+            Eigen::Matrix3d C_chain = Eigen::Matrix3d::Zero();
+            bool mouth = false;
+            if (mt.has_value() and mr.has_value() and mf.has_value() and mc.has_value() and mf.value() == Ln->id()
+                and mt->get().size() >= 2 and mr->get().size() >= 3 and mc->get().size() == 36)
                 if (const auto robot_from_P = ie->get_transformation_matrix(robot->name(), P->name()); robot_from_P.has_value())
                 {
                     const Mat::RTMat L_from_P = se2_to_rtmat(mt->get()[0], mt->get()[1], mr->get()[2]);
                     K_from_L = Mat::RTMat(K_from_robot * robot_from_P.value() * L_from_P.inverse());
+                    static constexpr int slot[3] = {0, 1, 5};      // [x y z rx ry rz], row-major
+                    Eigen::Matrix3d Cm;
+                    for (int i = 0; i < 3; ++i) for (int j = 0; j < 3; ++j) Cm(i, j) = mc->get()[slot[i] * 6 + slot[j]];
+                    // K<-robot (robot cov) . robot<-P (exact) . inverse(mouth) (mouth cov): both enter through their Jacobians
+                    const auto kp = ltsm::seam::compose_cov(meas(K_from_robot, S_robot), meas(robot_from_P.value(), Eigen::Matrix3d::Zero()));
+                    C_chain = ltsm::seam::compose_cov(kp, ltsm::seam::inverse_cov(meas(L_from_P, Cm))).cov;
+                    mouth = true;
                 }
             if (not K_from_L.has_value())
                 if (const auto robot_from_L = ie->get_transformation_matrix(robot->name(), Ln->name()); robot_from_L.has_value())
@@ -206,7 +229,8 @@ bool RoomSwap::swap(std::uint64_t known_room_id, const rc::recog::PoseMix &pose_
             if (K_from_L.has_value())
             {
                 const std::string pre = ev_.memory_prefix(Ln.value());
-                carries.push_back({pre + d->name(), pre + Ln->name(), d->name(), K_from_L.value(), S_robot});
+                if (not mouth) C_chain = seam_cov_through_robot(K_from_robot, S_robot, K_from_L.value());
+                carries.push_back({pre + d->name(), pre + Ln->name(), d->name(), K_from_L.value(), C_chain});
             }
         }
     }
@@ -231,7 +255,8 @@ bool RoomSwap::swap(std::uint64_t known_room_id, const rc::recog::PoseMix &pose_
             if (not T.has_value()) continue;
             const std::string rp = "r" + std::to_string(mem_->get_attrib_by_name<room_id_att>(room.value()).value_or(0)) + "_";
             carries.push_back({other->name(), room->name(), other->name().starts_with(rp) ? other->name().substr(rp.size()) : other->name(),
-                               Mat::RTMat(twin_from_K.value() * T.value()), S_robot});
+                               Mat::RTMat(twin_from_K.value() * T.value()),
+                               seam_cov_through_robot(K_from_robot, S_robot, Mat::RTMat(twin_from_K.value() * T.value()))});
         }
 
     // ── execute: stage, recall, discard, hold ──────────────────────────────────────────────────────────────────
@@ -340,7 +365,6 @@ namespace
 constexpr double kDoorSigmaXY = 0.1, kDoorSigmaYaw = 0.03;
 
 double wrap_pi(double a) { return std::atan2(std::sin(a), std::cos(a)); }
-Eigen::Vector3d se2_of(const Mat::RTMat &T) { return {T.translation().x(), T.translation().y(), std::atan2(T.linear()(1, 0), T.linear()(0, 0))}; }
 
 /// Shoelace area of a room's outline; 0 when none is stored.
 double outline_area(DSR::DSRGraph &g, const DSR::Node &room)
@@ -382,10 +406,13 @@ bool RoomSwap::carry_over(const std::string &prev_room_face, std::uint64_t known
     const auto F = ie->get_transformation_matrix(it->prev_room, prev_room_face);     // the previous room's face, in its own frame
     if (not F.has_value()) return false;
     const Eigen::Vector3d t = se2_of(Mat::RTMat(it->known_from_prev * F.value()));    // the aperture in K's frame, through the chain
-    const Eigen::Matrix3d C = it->cov;
+    // the aperture's covariance: the seam's (robot lever arm, mouth) carried to the face, plus the error of the previous room's
+    // stored face (the same FLAGGED prior a stored door carries)
     const Eigen::Matrix3d Cd = Eigen::Vector3d(kDoorSigmaXY * kDoorSigmaXY, kDoorSigmaXY * kDoorSigmaXY, kDoorSigmaYaw * kDoorSigmaYaw).asDiagonal();
+    const Eigen::Matrix3d C = ltsm::seam::compose_cov(meas(it->known_from_prev, it->cov), meas(F.value(), Eigen::Matrix3d::Zero())).cov + Cd;
     const Eigen::Matrix3d S = C + Cd;
-    const double log_norm = -1.5 * std::log(2.0 * M_PI) - 0.5 * std::log(S.determinant());
+    const auto Sldlt = S.ldlt();
+    const double log_norm = -1.5 * std::log(2.0 * M_PI) - 0.5 * Sldlt.vectorD().array().log().sum();
 
     // ASSOCIATION over {each unowned K door} U {none -> a new face}. FLAGGED: a MAP decision with a symmetric 0-1 loss.
     // Doors are pi-symmetric, so each is scored in both leaf orientations and the better one kept.
@@ -405,7 +432,7 @@ bool RoomSwap::carry_over(const std::string &prev_room_face, std::uint64_t known
         for (const double turn : {0.0, M_PI})
         {
             Eigen::Vector3d r(D.x() - t.x(), D.y() - t.y(), wrap_pi(D.z() + turn - t.z()));
-            const double ll = log_norm - 0.5 * r.dot(S.ldlt().solve(r));
+            const double ll = log_norm - 0.5 * r.dot(Sldlt.solve(r));
             if (ll > best_c.ll) best_c = {d, D, turn, ll};
         }
         cands.push_back(best_c);
@@ -423,15 +450,18 @@ bool RoomSwap::carry_over(const std::string &prev_room_face, std::uint64_t known
         // PRECISION FUSION of the door's stored pose with the chain pose, on the orientation branch consistent with the
         // previous face; written back through the door's own parent edge.
         const Eigen::Vector3d Db(adopt->pose.x(), adopt->pose.y(), t.z() + wrap_pi(adopt->pose.z() + adopt->dth - t.z()));
-        const Eigen::Matrix3d Pt = C.inverse(), Pd = Cd.inverse();
-        const Eigen::Matrix3d Pf = (Pt + Pd).inverse();
-        Eigen::Vector3d fused = t + Pf * Pd * (Db - t);
+        // information-form fusion as a Kalman gain, no explicit inverse: x = t + C (C + Cd)^-1 (D - t)
+        Eigen::Vector3d fused = t + C * Sldlt.solve(Eigen::Vector3d(Db - t));
         fused.z() = wrap_pi(fused.z());
         const Mat::RTMat fusedK = [&] { Mat::RTMat T = Mat::RTMat::Identity(); T.linear() = Eigen::AngleAxisd(fused.z(), Eigen::Vector3d::UnitZ()).toRotationMatrix(); T.translation() = Eigen::Vector3d(fused.x(), fused.y(), 0.0); return T; }();
         const auto par = mem_->get_attrib_by_name<parent_att>(adopt->door);
         const auto pn = par.has_value() ? mem_->get_node(par.value()) : std::nullopt;
         const auto K_from_par = pn.has_value() ? ie->get_transformation_matrix(K->name(), pn->name()) : std::nullopt;
-        if (not K_from_par.has_value()) return false;
+        if (not K_from_par.has_value() or not pn.has_value())
+        {
+            qWarning().noquote() << QString::fromStdString(std::format("[swap] carry-over: adopted door {} has no resolvable parent in {}: NOT fused, nothing written", adopt->door.name(), K->name()));
+            return false;
+        }
         mem_->insert_or_assign_edge(DSR::Edge::create<RT_edge_type>(pn->id(), adopt->door.id(), RoomEviction::rt_attributes(Mat::RTMat(K_from_par->inverse() * fusedK))));
         fid = adopt->door.id();
     }

@@ -521,12 +521,12 @@ int main(int argc, char **argv)
     const Mat::RTMat truthA = se2(1.0, 2.0, 0.3) * se2(-3.0, -1.0, 0.2);
     const Mat::RTMat face_truth = truthA * se2(4.0, 2.0, 0.0);
 
-    std::printf("adopts_k_face_off_by_15cm_and_fuses\n");
+    std::printf("adopts_k_face_off_by_6cm_and_fuses\n");
     {
         reset(); build_memory(false); build_live(false); far_side_outline_for_L();
         const auto K = mem->get_node("r3_room_3").value().id();
-        const double ex = face_truth.translation().x() + 0.1, ey = face_truth.translation().y() + 0.1;
-        mem_node("object", "r3_door_old", K, ex, ey, std::atan2(face_truth.linear()(1, 0), face_truth.linear()(0, 0)) + 0.05, std::nullopt, {}, "door");
+        const double ex = face_truth.translation().x() + 0.04, ey = face_truth.translation().y() + 0.04;
+        mem_node("object", "r3_door_old", K, ex, ey, std::atan2(face_truth.linear()(1, 0), face_truth.linear()(0, 0)) + 0.01, std::nullopt, {}, "door");
         Fix f;
         f.sw.swap(3, pose_tight(), live_P);
         f.sw.on_room_left("room_3");
@@ -536,7 +536,7 @@ int main(int argc, char **argv)
         check(d.has_value() and T.has_value(), "adopted door resolves in K");
         if (T)
         {
-            const double raw = std::hypot(0.1, 0.1);
+            const double raw = std::hypot(0.04, 0.04);
             const double now = (T->translation() - face_truth.translation()).head<2>().norm();
             check(now < raw and now < 0.05, "its pose was PRECISION-FUSED toward the chain (" + std::to_string(now) + " m, was " + std::to_string(raw) + ")");
         }
@@ -548,7 +548,7 @@ int main(int argc, char **argv)
     {
         reset(); build_memory(false); build_live(false); far_side_outline_for_L();
         const auto K = mem->get_node("r3_room_3").value().id();
-        mem_node("object", "r3_door_old", K, face_truth.translation().x() + 0.1, face_truth.translation().y() - 0.1,
+        mem_node("object", "r3_door_old", K, face_truth.translation().x() + 0.04, face_truth.translation().y() - 0.04,
                  std::atan2(face_truth.linear()(1, 0), face_truth.linear()(0, 0)) + M_PI, std::nullopt, {}, "door");
         Fix f;
         f.sw.swap(3, pose_tight(), live_P);
@@ -611,6 +611,37 @@ int main(int argc, char **argv)
         }
     }
 
+    std::printf("loose_robot_pose_trusts_the_stored_door\n");
+    {
+        reset(); build_memory(false); build_live(false); far_side_outline_for_L();
+        const auto K = mem->get_node("r3_room_3").value().id();
+        mem_node("object", "r3_door_old", K, face_truth.translation().x() + 0.03, face_truth.translation().y() - 0.03,
+                 std::atan2(face_truth.linear()(1, 0), face_truth.linear()(0, 0)), std::nullopt, {}, "door");
+        auto loose = pose_k();
+        loose[0].S = Eigen::Vector3f(0.04f, 0.04f, 0.01f).asDiagonal();      // 0.2 m / 0.1 rad
+        Fix f;
+        f.sw.swap(3, loose, live_P);
+        f.sw.on_room_left("room_3");
+        check(not mem->get_node("r3_door_3").has_value(), "adopted");
+        const auto T = mem->get_inner_eigen_api()->get_transformation_matrix("r3_room_3", "r3_door_old");
+        const double now = T ? (T->translation() - face_truth.translation()).head<2>().norm() : 1e9;
+        check(now < 0.05, "the accurate stored door stays within 5 cm of truth (" + std::to_string(now) + " m)");
+    }
+
+    std::printf("tight_chain_wrong_stored_door_follows_the_chain\n");
+    {
+        reset(); build_memory(false); build_live(false); far_side_outline_for_L();
+        const auto K = mem->get_node("r3_room_3").value().id();
+        mem_node("object", "r3_door_old", K, face_truth.translation().x() + 0.25, face_truth.translation().y(),
+                 std::atan2(face_truth.linear()(1, 0), face_truth.linear()(0, 0)), std::nullopt, {}, "door");
+        Fix f;
+        f.sw.swap(3, pose_tight(), live_P);
+        f.sw.on_room_left("room_3");
+        const auto T = mem->get_inner_eigen_api()->get_transformation_matrix("r3_room_3", "r3_door_old");
+        const double now = T ? (T->translation() - face_truth.translation()).head<2>().norm() : 1e9;
+        check(not mem->get_node("r3_door_3").has_value() and now < 0.6 * 0.25, "adopted and pulled to the chain (" + std::to_string(now) + " m of 0.25)");
+    }
+
     std::printf("mouth_pose_of_the_provisional_room_is_the_seam\n");
     {
         reset(); build_memory(false); build_live(false); far_side_outline_for_L();
@@ -621,6 +652,9 @@ int main(int argc, char **argv)
         live->add_or_modify_attrib_local<rt_translation_att>(P, std::vector<float>{(float)x, (float)y, 0.f});
         live->add_or_modify_attrib_local<rt_rotation_euler_xyz_att>(P, std::vector<float>{0.f, 0.f, (float)th});
         live->add_or_modify_attrib_local<interaction_node_id_att>(P, (std::uint64_t)live_L);
+        std::vector<float> cov36(36, 0.f);
+        cov36[0] = cov36[7] = 0.0004f; cov36[35] = 0.0001f;
+        live->add_or_modify_attrib_local<rt_covariance_att>(P, cov36);
         live->update_node(P);
         Fix f;
         f.sw.swap(3, pose_tight(), live_P);
