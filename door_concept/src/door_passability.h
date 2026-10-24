@@ -130,21 +130,17 @@ inline float prob_within(float d, float R, float sigma)
     return 0.5f * std::erfc(-(R - d) / (s * std::numbers::sqrt2_v<float>));
 }
 
-// ─── cross's precondition: P(passable) × P(at the door) (try102, 2026-10-19) ─────────────────────────────────────────────
-// `cross` was offered on P(passable) alone — from ANYWHERE in the room. Its consumer reads an offered cross as "the door is
-// within reach" (controller_door_passage.h: `open`/`cross` offered ⇒ reached_door_, the approach pre-empted), and the cross
-// is now driven on the passage anchor, a robot-relative measurement of the doorway that this agent hangs at the claim and
-// that only the robot's own sweep near the door can refresh. try102 leg 5: after 60 s of exploration the robot stood
-// beside chair_2, 5.5 m out; `cross` was on offer (P(passable) 1.00), the controller pre-empted the approach, the anchor
-// was hung from 5.5 m, was never once seen from there (no "RESUMED publishing" in door_concept.log between the claims at
-// l.10287 and l.11080), and the robot waited facing the opening for a fresh anchor, 40 s, twice. The third attempt crossed
-// because the approach had moved the robot first. `open` already has the same two halves ("offering it from across the
-// room is a request the consumer would have to chain by itself") — so does `cross`: the joint probability that the door is
-// passable AND the robot is at it (P(d ≤ reach), the open door's half of p_reach), under the two independent beliefs. No
-// new level: the reach is the actuation band's far edge and its σ the range's own (compute_interaction_state).
-[[nodiscard]] inline float cross_offer_prob(float p_passable, float p_within_reach)
+// ─── cross's OFFER is availability; the robot's pose enters only through its `pre:` (D3 ruling, 2026-10-24) ──────────────
+// try102 made the cross OFFER P(passable) x P(at the door), so a robot out of the band (recog_try1: drifted to 2.11 m during an
+// epistemic look, P(at the door) 0.30) had the cross WITHDRAWN after 3 cycles below 0.35, and the passage then waited for a
+// cross that never came back. Availability and executability are different beliefs: `cross` is available while the doorway is
+// passable — a property of the DOOR (the clear span) — and whether the robot can execute it from where it stands is the
+// contract's `pre:` clause (door_cross_exec_prob = P(at the door) x P(corridor clear of the leaf) x P(passable)), which makes
+// the consumer re-approach while the offer stays up (controller_door_passage.h: an offered cross whose pre fails re-enters
+// the approach). So the offer probability is P(passable) alone; the pose-dependent factors live in `pre:` and in the why-line.
+[[nodiscard]] inline float cross_offer_prob(float p_passable)
 {
-    return std::clamp(p_passable, 0.0f, 1.0f) * std::clamp(p_within_reach, 0.0f, 1.0f);
+    return std::clamp(p_passable, 0.0f, 1.0f);
 }
 
 // ─── AT THE DOOR INCLUDES THE VIEWING ANGLE (tourP8, 2026-10-21) ─────────────────────────────────────────────────────────

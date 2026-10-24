@@ -96,7 +96,7 @@ struct InteractionState
     float p_reach = 0.0f;
     bool  p_reach_known = false;      // false ⇒ no robot pose this cycle
     float p_band  = 0.0f;             // P(d_min ≤ d ≤ d_max): `open`'s half — it is the step that swings the leaf
-    float p_within = 0.0f;            // P(d ≤ d_max): AT an open door — `cross`'s half (cross_offer_prob)
+    float p_within = 0.0f;            // P(d ≤ d_max): AT an open door — feeds the cross pre: (door_cross_exec_prob), no longer its offer
     // P(the opening is IN FRONT of the robot): its apparent span w·|cos θ| from where the robot stands admits the body
     // (rc::door::prob_facing_opening, tourP8). Multiplied into p_band and p_within (hence p_reach): in range but 58°
     // off the normal is not "at the door".

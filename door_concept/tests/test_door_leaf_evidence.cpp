@@ -12,7 +12,7 @@
 //       to its 0.35; the channel holds the open door: P(passable) ≥ the offer level 0.6 on every frame of the window.
 //   (d) φ is HELD, not frozen: a door that really shuts in front of a parked robot is followed within a bounded number of
 //       frames; one seen shut from a NEW viewpoint after an absence likewise.
-//   (e) cross_offer_prob: from leg 5's 5.5 m `cross` is not offered (P(at the door) ≈ 0); from the approach standpoint it is.
+//   (e) cross_offer_prob (D3): the OFFER is P(passable) alone — it stays up from 5.5 m / 2.11 m; the pose enters only the pre: (door_cross_exec_prob).
 //
 // Build + run (from door_concept/):
 //   g++ -std=c++23 -O2 -I/usr/include/eigen3 tests/test_door_leaf_evidence.cpp src/door_belief.cpp -o /tmp/test_door_leaf_evidence && /tmp/test_door_leaf_evidence
@@ -276,14 +276,21 @@ int main()
         check(k_new > 0 and k_new <= 10, std::format("followed within 10 frames ({})", k_new));
     }
 
-    // ── (e) cross is offered at the door, not from across the room ─────────────────────────────────────────────────
-    std::print("\n(e) cross_offer_prob (P(passable) 1.00; reach 2.00 m, σ 0.10 m)\n");
+    // ── (e) cross stays OFFERED out of the band; its pre: is what drops ─────────────────────────────────────────────
+    std::print("\n(e) cross_offer_prob = P(passable); pre: = door_cross_exec_prob (reach 2.00 m, σ 0.10 m)\n");
     {
-        const float far = cross_offer_prob(1.0f, prob_within(5.50f, 2.0f, 0.10f));
-        const float band = cross_offer_prob(1.0f, prob_within(1.75f, 2.0f, 0.10f));
-        const float shut = cross_offer_prob(0.0f, prob_within(1.75f, 2.0f, 0.10f));
-        std::print("  5.50 m (leg 5): {:.3f}; 1.75 m (the approach standpoint): {:.3f}; shut at 1.75 m: {:.3f}\n", far, band, shut);
-        check(far < 0.35f and band > OFFER and shut < 0.35f, "offered at the door only, and never for a shut door");
+        const float pp = 1.0f;
+        const float offer_far  = cross_offer_prob(pp);                                   // 5.50 m (leg 5)
+        const float offer_drift = cross_offer_prob(pp);                                  // 2.11 m (recog_try1)
+        const float pre_far   = prob_within(5.50f, 2.0f, 0.10f) * pp;                    // pre's P(at the door) x P(passable) (corridor term <= 1)
+        const float pre_drift = prob_within(2.11f, 2.0f, 0.10f) * pp;
+        const float pre_band  = prob_within(1.75f, 2.0f, 0.10f) * pp;
+        const float shut      = cross_offer_prob(0.0f);
+        std::print("  offer: 5.50 m {:.3f}, 2.11 m {:.3f}, shut {:.3f}; pre: 5.50 m {:.3f}, 2.11 m {:.3f}, 1.75 m {:.3f}\n",
+                   offer_far, offer_drift, shut, pre_far, pre_drift, pre_band);
+        check(offer_far > OFFER and offer_drift > OFFER, "the cross stays offered out of the band while the doorway is passable");
+        check(pre_far < 0.35f and pre_drift < 0.35f and pre_band > OFFER, "its pre: is low out of the band and holds at the standpoint");
+        check(shut < 0.35f, "never offered for a shut door");
     }
 
     std::print("\n{}\n", g_fail == 0 ? "ALL PASS" : std::format("{} FAILURE(S)", g_fail));

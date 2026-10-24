@@ -2706,8 +2706,9 @@ void SpecificWorker::step_pragmatic_affordances(rc::DoorInstance& inst)
     {
         rc::pragmatic::Offer o;
         o.known = located and st.p_open_known;
-        // try102: passable AND at the door (rc::door::cross_offer_prob) — never from across the room.
-        o.p     = rc::door::cross_offer_prob(st.p_open, st.p_within);
+        // D3: the OFFER is availability (P(passable)); the robot's pose enters only through the contract's `pre:`
+        // (door_cross_exec_prob), which makes the controller re-approach. See rc::door::cross_offer_prob.
+        o.p     = rc::door::cross_offer_prob(st.p_open);
         if (not inst.aff_cross.claimed() or inst.cross_side_latched == 0.0f)
             inst.cross_side_latched = rc::door::interior_side(inst.aperture, st.approach_standoff_m,
                                                               fitter_->room_polygon(), st.approach_side);   // leave THIS room
@@ -2731,7 +2732,7 @@ void SpecificWorker::step_pragmatic_affordances(rc::DoorInstance& inst)
         o.contract = rc::door::cross_contract(pg);
         o.why      = std::format("P(passable)={:.2f} (log-odds {:+.1f}) — clear span {:.2f} m at phi={:.2f} rad vs {:.2f} m of body"
                                  " × P(at the door)={:.2f} (P(facing) {:.2f} at {:.0f} deg; range {:.2f} m ≤ {:.2f}, σ {:.2f})"
-                                 " × P(corridor clear of the leaf)={:.2f} (robot {:+.2f} m along the wall, hinge llr {:+.1f}, swing llr {:+.1f}) ⇒ P(cross executable)={:.2f}",
+                                 " × P(corridor clear of the leaf)={:.2f} (robot {:+.2f} m along the wall, hinge llr {:+.1f}, swing llr {:+.1f}) ⇒ P(cross executable)={:.2f} [pre: only; the offer is P(passable)]",
                                  st.p_open, st.p_open_logit, st.clear_width_m, st.phi_rad,
                                  pg.robot_passage_width_m + pg.passage_margin_m, st.p_within, st.p_facing, st.facing_deg,
                                  st.robot_range_m,
