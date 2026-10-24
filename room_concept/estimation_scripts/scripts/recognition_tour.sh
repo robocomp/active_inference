@@ -49,19 +49,29 @@ run_leg() {   # leg door here   (sets r)
     grep -a -q -E "mission 'leg $1': (failed|aborted)" $L/controller.log && { r="FAILED: $(grep -a -o -E "mission 'leg $1': (failed|aborted)[^\"]*" $L/controller.log | tail -1)"; break; }
     sleep 3
   done; }
+# Look for a door in the current room other than $1 until one is born/restored: spin 3x120 deg (the front camera
+# sweeps every wall even when the explorer has nothing left to do, e.g. a recalled room whose memory says explored=1.0),
+# then explore; repeat, bounded by SCAN_CAP_S. Prints the door name (empty on failure); logs the time on stderr.
+scan_for_door() {   # exclude tag
+  local ex=$1 tag=$2 ts=$(date +%s) dd n
+  dd=$(new_door "$ex")
+  while [ -z "$dd" ] && [ $(( $(date +%s)-ts )) -lt $SCAN_CAP_S ]; do
+    n=$(( $(date +%s)-ts )); echo run > $B/controller/remote_cmd.txt; sleep 2
+    printf 'mission "look%s_%s"\n  move turn_deg=120\n  move turn_deg=120\n  move turn_deg=120\n  explore %s budget_s=90s\n' "$tag" $n "$here" > $B/controller/remote_cmd.txt
+    for i in $(seq 1 60); do grep -a -q -E "mission 'look${tag}_$n': (completed|failed|aborted)" $L/controller.log && break; dd=$(new_door "$ex"); [ -n "$dd" ] && break; sleep 3; done
+    dd=$(new_door "$ex")
+  done
+  echo "leg $tag: door scan in $here took $(( $(date +%s)-ts )) s -> '${dd}'" >&2; echo "$dd"; }
 ok=0; d2=""; d5=""; D5=0; SW0=0; SD0=0; scan_s=0
 for leg in 1 2 3 4 5 6; do
   here=$(room_now); [ -z "$here" ] && here=room_1
   T0=$(now_ms); A0=$(nl ltsm_agent); D0=$(nl door_concept); R0=$(nl room_concept)
-  case $leg in 1|2) d=door_1;; 3) d=door_2;;
-    4) SW0=$A0; SD0=$D0; d2=$(new_door door_2); ts=$(date +%s)
-       # scan until DOOR_2 is born (the gold_tour driver gave up after ONE 90 s explore although it was born later)
-       while [ -z "$d2" ] && [ $(( $(date +%s)-ts )) -lt $SCAN_CAP_S ]; do
-         n=$(( $(date +%s)-ts )); echo run > $B/controller/remote_cmd.txt; sleep 2
-         printf 'mission "scan%s"\n  explore %s budget_s=90s\n' $n "$here" > $B/controller/remote_cmd.txt
-         for i in $(seq 1 40); do grep -a -q -E "mission 'scan$n': (completed|failed|aborted)" $L/controller.log && break; d2=$(new_door door_2); [ -n "$d2" ] && break; sleep 3; done
-         d2=$(new_door door_2)
-       done
+  case $leg in 1|2) d=door_1;;
+    3) # room_1's DOOR_0 face: whatever door other than door_1 is live in room_1 (restored or born); scan if none yet
+       d=$(scan_for_door door_1 3); [ -z "$d" ] && { echo "leg 3: no door other than door_1 in $here within ${SCAN_CAP_S} s"; break; };;
+    4) SW0=$A0; SD0=$D0; ts=$(date +%s)
+       # scan until DOOR_2 is born (spin + explore, bounded; the gold_tour driver gave up after ONE 90 s explore)
+       d2=$(scan_for_door door_2 4)
        scan_s=$(( $(date +%s)-ts )); echo "leg 4: DOOR_2 scan took ${scan_s} s -> '${d2}'"
        [ -z "$d2" ] && { echo "leg 4: DOOR_2 never born in $here within ${SCAN_CAP_S} s"; break; }; d=$d2;;
     5) # the door back: ltsm logs, at swap time, which face of the recognised room is the crossed door's ("[swap] crossed door
