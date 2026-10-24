@@ -43,7 +43,9 @@ sys.argv = ["check_llm_tools.py"]
 exec(compile(_src, str(_tools_path), "exec"), _ns)
 sys.argv = _saved
 NUM_PREDICT = _ns["NUM_PREDICT"]
-STATE_TEXT = _ns["state"]()
+# These cases (names_room_2) assume NO remembered rooms: room_2 is a name the STATE does not hold. The tools eval's STATE
+# gained a long-term-memory line (room_2, room_3) for known_rooms/route_to; drop it here so the premise stays true.
+STATE_TEXT = "\n".join(l for l in _ns["state"]().split("\n") if not l.startswith("rooms in long-term memory"))
 
 
 def skills():

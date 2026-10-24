@@ -338,6 +338,12 @@ const QString kInterfaceRules = QStringLiteral(
     "plans its own path there, whatever a short move ran into. Nobody has to confirm anything: never ask the person "
     "to confirm a crossing, a move or the opening of a door. When they ask for an action, or answer yes to one you "
     "offered, call its tool now. The one question you do ask is the one agent_control returns as NOT DONE.\n"
+    "- What the STATE says a door or object \"offers\" (affordances, approach sides) is the controller's current opinion, "
+    "not a reason to refuse: when the person asks to go through a door or to approach an object (from whichever side "
+    "they name), call cross_door / approach_object with what they said; if it cannot, the tool replies and says why. "
+    "Never answer \"I cannot\" to such a request without calling the tool.\n"
+    "- Pass the argument the person named: when they name a door, an object, a class, a node or a room, put exactly "
+    "that in the call (the node to zoom a graph on, the object whose model to show); never leave it empty or default.\n"
     "- \"Open door_1\" / \"close the door\" ALONE is sim_door (when you have it): the simulator moves the door and the "
     "robot stays where it is. cross_door only when the person wants to go THROUGH the door.\n"
     "- 'robot motion now' in the STATE is the MEASURED velocity: if it is not zero you ARE moving (the controller "
@@ -486,7 +492,8 @@ QJsonArray ChatSession::tools_json() const
         QJsonObject{}, {}));
     tools.append(tool_def("route_to",
         "The remembered route from the CURRENT room to a remembered room: the passages to cross, in order. Read-only; "
-        "it does not move the robot (to go, plan a mission with the passages it lists).",
+        "it does not move the robot (to go, plan a mission with the passages it lists). Call it for any question about "
+        "getting to a remembered room: the STATE names those rooms but not the passages.",
         QJsonObject{{"room", QJsonObject{{"type", "string"}, {"description", "a remembered room name, e.g. room_3"}}}},
         QJsonArray{"room"}));
     tools.append(tool_def("agents",
@@ -499,7 +506,8 @@ QJsonArray ChatSession::tools_json() const
         tools.append(tool_def("agent_control",
             "Start, stop or restart one of the robot's software agents (" + names + "). When the person asks to "
             "start, stop or restart an agent, call it with the name they give, also one not listed: the tool says "
-            "why not. Never to answer a question about them (that is agents). Stopping or restarting the controller or retina needs the person's yes: the tool says so, you "
+            "why not. Never to answer a question about them (that is agents); a general question whether you "
+            "can start agents is answered yes, in words. Stopping or restarting the controller or retina needs the person's yes: call it first; the tool says so, you "
             "ask, and you call it again with the same arguments only after they answer yes.",
             QJsonObject{{"action", QJsonObject{{"type", "string"}, {"enum", QJsonArray{"start", "stop", "restart"}}}},
                         {"agent", QJsonObject{{"type", "string"},
@@ -570,7 +578,7 @@ QJsonArray ChatSession::tools_json() const
             "camera = the live camera picture (args 'zed' = front, 'ricoh' = 360); layout = the current room from "
             "above with the robot, doors and objects; plan = the mission the robot runs; graph = the robot's working "
             "memory as a graph of nodes and edges, the DSR graph: what it knows and how it is connected — 'the graph', 'your "
-            "memory graph' (args: a node name to zoom in on it, e.g. 'room_1'; empty = all); "
+            "memory graph', also when they say draw (args: a node name to zoom in on it, e.g. 'room_1'; empty = all); "
             "model = the 3-D model of the robot or of an object, which the person can turn with the mouse (args: "
             "'robot', an object name like chair_1, or a class like table); lidar = the live 3-D LiDAR point clouds "
             "in the robot's frame (args: leave EMPTY for both, the usual answer; 'helios' or 'bpearl' only when the person names one); "
@@ -578,7 +586,9 @@ QJsonArray ChatSession::tools_json() const
             "saved earlier. Only when one of these is exactly what was asked; any other chart, plot or picture: draw.",
             QJsonObject{{"name", QJsonObject{{"type", "string"}, {"enum", names}, {"description", "which drawing"}}},
                         {"args", QJsonObject{{"type", "string"},
-                                             {"description", "camera: 'zed' (front, default) or 'ricoh' (360)"}}},
+                                             {"description", "camera: 'zed' (front, default) or 'ricoh' (360); graph: the node the person "
+                                                             "named (e.g. room_1), empty = all; model: the object the "
+                                                             "person named (chair_1, or its class) or 'robot', never empty"}}},
                         {"live", QJsonObject{{"type", "boolean"},
                                              {"description", "true = keep redrawing it (default for camera "
                                                              "and layout); false = draw once"}}}},
@@ -586,11 +596,11 @@ QJsonArray ChatSession::tools_json() const
         tools.append(tool_def("draw",
             "Draw a NEW picture for the PERSON on the canvas beside the chat by writing a Python script (NOT for the "
             "camera, the room map, the plan, the working-memory graph or a 3-D model: show has those, even when the "
-            "person says 'draw'; NOT for a table: table): a chart, a plot, a map with something marked. Python 3 with matplotlib/numpy/PIL, no network. "
+            "person says 'draw'; NOT for a table: table; check show first): a chart, a plot, a map with something marked. Python 3 with matplotlib/numpy/PIL, no network. "
             "`from rcanvas import *` gives: w = world() (w.room.name, w.room.polygon [[x,y],...]; w.robot.x/.y/"
             ".heading (rad, the direction it faces)/.radius; w.doors [d.name, d.a, d.b (ends [x,y]), d.p_open]; "
             "w.objects [o.name, o.type, o.x, o.y, o.yaw, o.width, o.depth, o.height, o.dist]; w.target.x/.y; any of "
-            "these may be None), image('zed'|'ricoh') -> RGB numpy array or None, fig = figure(), ax = "
+            "these may be None; doors, objects, nodes and edges are objects with ATTRIBUTES, o.name, o.dist: never o[0]), image('zed'|'ricoh') -> RGB numpy array or None, fig = figure(), ax = "
             "layout_axes(fig) (equal-aspect map axes), draw_layout(ax, w) (room+doors+objects+robot+target), "
             "draw_room/draw_doors/draw_objects/draw_robot/draw_target(ax, w); g = graph() (the working-memory graph: "
             "g.nodes [n.id, n.name, n.type, n.agent], g.edges [e.src, e.dst, e.type] by node id), draw_graph(focus=None) "

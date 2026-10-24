@@ -128,14 +128,15 @@ def tools():
           "(doorways) joining them: their two rooms, live door, how often crossed and how reliably passable. "
           "Read-only.", {}, []),
         t("route_to", "The remembered route from the CURRENT room to a remembered room: the passages to cross, in "
-          "order. Read-only; it does not move the robot (to go, plan a mission with the passages it lists).",
+          "order. Read-only; it does not move the robot (to go, plan a mission with the passages it lists). Call it for any "
+          "question about getting to a remembered room: the STATE names those rooms but not the passages.",
           {"room": {"type": "string", "description": "a remembered room name, e.g. room_3"}}, ["room"]),
         t("agent_control", "Start, stop or restart one of the robot's software agents (room_concept, residual_concept, "
           "retina, door_concept, table_concept, chair_concept, bottle_concept, cabinet_concept, hood_concept, "
           "human_concept, refrigerator_concept, controller, ltsm_agent, episodic_agent). When the person asks to start, "
           "stop or restart an agent, call it with the name they give, also one not listed: the tool says why not. "
-          "Never to answer a question about them (that is agents). Stopping or restarting the controller or "
-          "retina needs the person's yes: the tool says so, you ask, and you call it again with the same arguments "
+          "Never to answer a question about them (that is agents); a general question whether you can start agents is answered yes, in words. Stopping or restarting the controller or "
+          "retina needs the person's yes: call it first; the tool says so, you ask, and you call it again with the same arguments "
           "only after they answer yes.",
           {"action": {"type": "string", "enum": ["start", "stop", "restart"]},
            "agent": {"type": "string", "description": "the agent's name, e.g. chair_concept"}}, ["action", "agent"]),
@@ -181,23 +182,25 @@ def tools():
           "you). camera = the live camera picture (args 'zed' = front, 'ricoh' = 360); layout = the current room from "
           "above with the robot, doors and objects; plan = the mission the robot runs; graph = the robot's working "
           "memory as a graph of nodes and edges, the DSR graph: what it knows and how it is connected — 'the graph', 'your "
-          "memory graph' (args: a node name to zoom in on it, e.g. 'room_1'; empty = all); "
+          "memory graph', also when they say draw (args: a node name to zoom in on it, e.g. 'room_1'; empty = all); "
           "model = the 3-D model of the robot or of an object, which the person can turn with the mouse (args: "
           "'robot', an object name like chair_1, or a class like table); lidar = the live 3-D LiDAR point clouds "
           "in the robot's frame (args: leave EMPTY for both, the usual answer; 'helios' or 'bpearl' only when the person names one); "
           "other names are drawings "
           "saved earlier. Only when one of these is exactly what was asked; any other chart, plot or picture: draw.",
           {"name": {"type": "string", "enum": ["camera", "graph", "layout", "lidar", "model", "plan"], "description": "which drawing"},
-           "args": {"type": "string", "description": "camera: 'zed' (front, default) or 'ricoh' (360)"},
+           "args": {"type": "string", "description": "camera: 'zed' (front, default) or 'ricoh' (360); graph: the node the person "
+                                                       "named (e.g. room_1), empty = all; model: the object the "
+                                                       "person named (chair_1, or its class) or 'robot', never empty"},
            "live": {"type": "boolean", "description": "true = keep redrawing it (default for camera and "
                                                       "layout); false = draw once"}}, ["name"]),
         t("draw", "Draw a NEW picture for the PERSON on the canvas beside the chat by writing a Python script (NOT for "
           "the camera, the room map, the plan, the working-memory graph or a 3-D model: show has those, even when the "
-          "person says 'draw'; NOT for a table: table): a chart, a plot, a map with something marked. Python 3 with matplotlib/numpy/PIL, no network. "
+          "person says 'draw'; NOT for a table: table; check show first): a chart, a plot, a map with something marked. Python 3 with matplotlib/numpy/PIL, no network. "
           "`from rcanvas import *` gives: w = world() (w.room.name, w.room.polygon [[x,y],...]; w.robot.x/.y/"
           ".heading (rad, the direction it faces)/.radius; w.doors [d.name, d.a, d.b (ends [x,y]), d.p_open]; "
           "w.objects [o.name, o.type, o.x, o.y, o.yaw, o.width, o.depth, o.height, o.dist]; w.target.x/.y; any of "
-          "these may be None), image('zed'|'ricoh') -> RGB numpy array or None, fig = figure(), ax = "
+          "these may be None; doors, objects, nodes and edges are objects with ATTRIBUTES, o.name, o.dist: never o[0]), image('zed'|'ricoh') -> RGB numpy array or None, fig = figure(), ax = "
           "layout_axes(fig) (equal-aspect map axes), draw_layout(ax, w) (room+doors+objects+robot+target), "
           "draw_room/draw_doors/draw_objects/draw_robot/draw_target(ax, w); g = graph() (the working-memory graph: "
           "g.nodes [n.id, n.name, n.type, n.agent], g.edges [e.src, e.dst, e.type] by node id), draw_graph(focus=None) "
@@ -393,7 +396,7 @@ CASES = [
      or (n is None and re.search(r"not (yet )?(perceived|seen)|haven't (perceived|seen)|have not (perceived|seen)", c.lower()) is not None)),
     # long-term memory (ltsm_topology): rooms the robot remembers and the route to one
     ("passages remembered", [], "none", "which rooms do you remember?",
-     lambda n, a, c: n == "known_rooms"),
+     lambda n, a, c: n == "known_rooms" or (n is None and "room_2" in c and "room_3" in c)),
     ("route to room_3", [], "none", "how do I get to room_3?",
      lambda n, a, c: n == "route_to" and "room_3" in str(a.get("room", "")).lower()),
     ("ruta a room_3 (es)", [], "none", "\u00bfc\u00f3mo llego a la habitaci\u00f3n room_3?",
