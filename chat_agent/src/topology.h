@@ -176,6 +176,14 @@ inline std::string remembered_rooms_line(const Topology& t, std::string_view cur
     }
     return o.empty() ? o : "rooms in long-term memory (call route_to for the way): " + o;
 }
+// A name a mission may use from the long-term memory: a remembered room (ltsm's recall re-creates it with the SAME name
+// when the robot crosses into it, room_recall.h) or a passage id. Doors and faces are not: a door is a live name.
+inline bool remembered_name(const Topology& t, std::string_view name)
+{
+    return std::ranges::any_of(t.rooms, [&](const auto& r) { return r.name == name; })
+        or std::ranges::any_of(t.passages, [&](const auto& p) { return p.id == name; });
+}
+
 // The PLANNER's STATE line (plan_mission; not the chat's): for every remembered room reachable from `current`, the
 // legs in order as mission steps — the first by its live door when it has one (a door of the current room), every
 // later one as passage:ID@ROOM, ROOM being the room that leg starts in. Empty when no room is reachable.

@@ -24,7 +24,7 @@ Steps:
 Any step: retry=N, on_fail=skip|abort.
 Predicates: explored(ROOM)>=p, in_room(ROOM), door_open(DOOR)<p.
 bind=NAME works on cross only (never on open); it names the room you arrive in; use it later as $NAME (the room may not exist yet).
-Rooms the robot remembers but cannot see: the STATE line `ways from here` gives each room's legs in order; write them as cross steps exactly as given, in that order, each with retry=2.
+Rooms the robot remembers but cannot see: the STATE line `ways from here` gives each room's legs in order; write them as cross steps exactly as given, in that order, each with retry=2; after them that room may be named (explore room_3).
 Way back: cross the same door with expect=ROOM_YOU_CAME_FROM, or go_to anchor:NAME.
 
 ```

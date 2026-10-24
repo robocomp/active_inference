@@ -1091,9 +1091,8 @@ constexpr int kMaxPlanFixes = 2;   ///< planner re-asks with the checker's error
 bool ChatSession::name_exists(std::string_view name) const
 {
     if (G_ and G_->get_node(std::string(name)).has_value()) return true;
-    // passage:<id>@<room> names a passage of the long-term memory, published in its summary (topology.h)
-    if (const auto topo = remembered_topology(); topo.has_value())
-        return std::ranges::any_of(topo->passages, [&](const auto& p) { return p.id == name; });
+    // a remembered room (named after the legs that lead into it) or a passage of the long-term memory (topology.h)
+    if (const auto topo = remembered_topology(); topo.has_value()) return rc::chat::remembered_name(*topo, name);
     return false;
 }
 

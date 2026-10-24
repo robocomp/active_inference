@@ -92,6 +92,10 @@ int main()
         assert(ways_line(t, "room_3") == "ways from here (each leg in order): room_1 = cross passage:p1@room_3 "
                                          "expect=room_2, cross passage:p0@room_2 expect=room_1; room_2 = cross "
                                          "passage:p1@room_3 expect=room_2");   // no live door at the first leg
+        // names a mission may use from memory: remembered rooms (recall re-creates them by name) and passage ids
+        assert(remembered_name(t, "room_3") and remembered_name(t, "p1"));
+        assert(not remembered_name(t, "door_1"));    // a live door seen from memory is not a name of the memory
+        assert(not remembered_name(t, "room_7") and not remembered_name(Topology{}, "room_1"));
         assert(ways_line(t, "room_9").empty());           // nothing reachable from an island
         assert(ways_line(Topology{}, "room_1").empty());
         const auto line = remembered_rooms_line(t, "room_1");
