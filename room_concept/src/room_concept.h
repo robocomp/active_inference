@@ -464,8 +464,9 @@ public:
     void cancel_late_recall();
     enum class LateVerdict : int { None = 0, Pending = 1, Accepted = 2, Rejected = 3 };
     /// Pending after seed_reloc_prior while scans accumulate evidence; then Accepted or Rejected. The evidence per scan
-    /// is the log-likelihood ratio "the best mode's median |SDF| is tracking-like vs broad" (the lost belief's own two
-    /// emissions), summed with geometric forgetting; decided when the posterior passes the symmetric bound. A single noisy
+    /// is the log-likelihood ratio "the median |SDF| is tracking-like vs broad" (the lost belief's own two emissions) of the
+    /// forced search at adoption and then of normal tracking, summed WITHOUT forgetting; decided at the sequential-test
+    /// boundary +-ln 19 (Wald SPRT, alpha = beta = 0.05). Weak evidence stays Pending (= no objection). A single noisy
     /// scan during the jump cannot reject. None until a prior was ever seeded.
     [[nodiscard]] LateVerdict late_recall_verdict() const { return static_cast<LateVerdict>(late_verdict_.load(std::memory_order_acquire)); }
     /// The rival pose modes the localiser is carrying (thread-safe copy). Empty ⇔ the pose is unambiguous.
@@ -758,10 +759,14 @@ private:
    std::vector<rc::reloc::PriorMode> late_prior_;
    std::atomic<bool> late_pending_{false};      ///< a late-recall search is armed
    std::atomic<int>  late_verdict_{0};          ///< LateVerdict
+   // late_log_odds_, late_forced_done_, last_search_top_median_ and the track_* emission are non-atomic: owned by the LOCALISER
+   // thread (RoomConcept::run -> relocalisation_step, and the scene graph's update() it calls inline, which seeds them).
    double late_log_odds_ = 0.0;                 ///< accumulated log-odds that K's layout explains the scans
    float  last_search_top_median_ = std::numeric_limits<float>::quiet_NaN();   ///< top mode's median |SDF| of the last search
    bool late_search_active_ = false;            ///< localiser thread: reloc_params() carries late_prior_
+   bool late_forced_done_ = false;              ///< the one forced lost-branch search at adoption has run
    void run_late_recall_search(const std::vector<Eigen::Vector3f>& lidar_points);
+   void accumulate_late_evidence(float s);      ///< one scan's LLR into late_log_odds_ (localiser thread only)
    rc::reloc::Runtime rt_;                      ///< Task R1/R1b relocalisation runtime (reloc_runtime.h)
    std::atomic<bool> pose_undecided_{false};
    std::atomic<float> p_track_display_{1.f};   ///< P(TRACKING) mirrored for the GUI thread (is_relocalising)

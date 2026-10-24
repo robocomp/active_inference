@@ -36,6 +36,13 @@ namespace rc
     {
         static void late(RoomConcept& r, const std::vector<Eigen::Vector3f>& pts) { r.run_late_recall_search(pts); }
         static void stale_emission(RoomConcept& r) { r.track_mu_ln_s_ = std::log(1.5f); r.track_var_ln_s_ = 1e-4f; }
+        static void evidence(RoomConcept& r, float s) { r.accumulate_late_evidence(s); }
+        static double llr(RoomConcept& r, float s)
+        {
+            const double v = static_cast<double>(r.params.reloc_track_log_sigma) * r.params.reloc_track_log_sigma;
+            return r.log_tracking_emission(s, v) - r.log_broad_emission(s);
+        }
+        static double lost(RoomConcept& r) { return r.belief_[RoomConcept::kLost]; }
         static float track_mu(RoomConcept& r) { return r.track_mu_ln_s_; }
     };
 }
@@ -188,12 +195,20 @@ const auto verdict_for = [&](const std::vector<Eigen::Vector2f>& remembered, con
     const bool pending = rcn.late_recall_verdict() == RoomConcept::LateVerdict::Pending
                          and rc::RelocSelftestAccess::track_mu(rcn) != std::log(1.5f);   // the emission was reset
     std::mt19937 nrng(4242);
-    for (int k = 0; k < 40 and rcn.late_recall_verdict() == RoomConcept::LateVerdict::Pending; ++k)
+    for (int k = 0; k < 60 and rcn.late_recall_verdict() == RoomConcept::LateVerdict::Pending; ++k)
     {
         const auto sc = synth_scan(truth, 360, 0.03f, nrng);   // noisier than the first-scan section
         std::vector<Eigen::Vector3f> p3;
-        for (const auto& q : sc) p3.emplace_back(q.x(), q.y(), 0.f);
-        rc::RelocSelftestAccess::late(rcn, p3);
+        std::vector<Eigen::Vector2f> p2;
+        for (const auto& q : sc) { p3.emplace_back(q.x(), q.y(), 0.f); p2.emplace_back(q.x(), q.y()); }
+        if (k == 0) rc::RelocSelftestAccess::late(rcn, p3);   // the one forced search, at adoption
+        else
+        {   // normal tracking's misfit: median |SDF| of the scan at the tracker's own pose in the remembered layout
+            const auto st = rcn.get_current_state();
+            float med = 0.f;
+            rc::reloc::log_likelihood(remembered, p2, Eigen::Vector3f(st[2], st[3], st[4]), rc::reloc::Params{}, 10.f, &med);
+            rc::RelocSelftestAccess::evidence(rcn, med);
+        }
         if (ever_rejected != nullptr and rcn.late_recall_verdict() == RoomConcept::LateVerdict::Rejected) *ever_rejected = true;
     }
     return std::pair{pending, rcn.late_recall_verdict()};
@@ -206,6 +221,30 @@ const std::vector<Eigen::Vector2f> other = {{-1.2f, -1.2f}, {1.2f, -1.2f}, {1.2f
 const auto [pend_e, ver_e] = verdict_for(other, Eigen::Vector3f(0.f, 0.f, 0.f));
 check("(e) a layout that cannot explain the scan is REJECTED", pend_e and ver_e == RoomConcept::LateVerdict::Rejected,
       (std::snprintf(buf, sizeof buf, "pending-before=%d verdict=%d", pend_e ? 1 : 0, static_cast<int>(ver_e)), buf));
+
+// (f) WEAK evidence: s where the two emissions are equally likely (LLR ~ 0). Reading it never disturbs tracking (pose and
+// lost belief untouched), and it either reaches a verdict or stays Pending (= no objection), never Rejected for no reason.
+{
+    rc::RoomConcept rcn;
+    rcn.set_polygon_room(poly);
+    rcn.set_robot_pose(truth.x(), truth.y(), truth.z(), false);
+    rc::reloc::PriorMode m; m.mu = truth; m.S = Eigen::Vector3f(0.04f, 0.04f, 0.02f).asDiagonal();
+    rcn.seed_reloc_prior({m});
+    float lo = 0.01f, hi = 3.f;   // bisect the s where the LLR crosses zero
+    for (int i = 0; i < 60; ++i)
+    {
+        const float mid = 0.5f * (lo + hi);
+        (rc::RelocSelftestAccess::llr(rcn, mid) > 0.0 ? lo : hi) = mid;
+    }
+    const auto before = rcn.get_current_state();
+    const double lost_before = rc::RelocSelftestAccess::lost(rcn);
+    for (int i = 0; i < 200; ++i) rc::RelocSelftestAccess::evidence(rcn, 0.5f * (lo + hi));
+    const auto after = rcn.get_current_state();
+    const bool same = (before - after).norm() == 0.f and rc::RelocSelftestAccess::lost(rcn) == lost_before;
+    const auto vf = rcn.late_recall_verdict();
+    check("(f) weak evidence never disturbs tracking, no spurious reject", same and vf != RoomConcept::LateVerdict::Rejected,
+          (std::snprintf(buf, sizeof buf, "s0=%.3f verdict=%d untouched=%d", 0.5f * (lo + hi), static_cast<int>(vf), same ? 1 : 0), buf));
+}
 }
 
 int main(int argc, char** argv)
