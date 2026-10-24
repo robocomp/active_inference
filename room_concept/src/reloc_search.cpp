@@ -868,7 +868,8 @@ namespace rc::reloc
             if (not merged) modes.push_back(md);
         }
 
-        // 4. Laplace evidence  ℓ* + ½log|Σ|, normalised by log-sum-exp.
+        // 4. Laplace evidence  ℓ* + ½log|Σ|  (+ the pose prior's log-density when one is given), normalised by log-sum-exp.
+        //    The mode ordering, the max_modes cut, the weights and the ESS all include the prior: it is part of the evidence.
         const double area = p.prior_modes.empty() ? 0.0 : polygon_area(polygon);
         for (auto& md : modes)
         {
@@ -911,6 +912,7 @@ namespace rc::reloc
     double log_prior_modes(const Params& p, const Eigen::Vector3f& pose, const Eigen::Matrix3f& cov, double area)
     {
         if (p.prior_modes.empty()) return 0.0;
+        // 1e-9 / 1e-6 / 1e-30 below are numerical guards (log of 0, division by 0), not model thresholds.
         const double wrong = std::clamp(static_cast<double>(p.prior_wrong), 1e-9, 1.0 - 1e-9);
         const double log_u = -std::log(std::max(area, 1e-6) * 2.0 * M_PI);
         double wsum = 0.0;

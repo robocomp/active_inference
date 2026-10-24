@@ -35,6 +35,8 @@ namespace rc
     struct RelocSelftestAccess
     {
         static void late(RoomConcept& r, const std::vector<Eigen::Vector3f>& pts) { r.run_late_recall_search(pts); }
+        static void stale_emission(RoomConcept& r) { r.track_mu_ln_s_ = std::log(1.5f); r.track_var_ln_s_ = 1e-4f; }
+        static float track_mu(RoomConcept& r) { return r.track_mu_ln_s_; }
     };
 }
 
@@ -172,22 +174,33 @@ void late_recall_section()
 // (d)/(e): the ADOPTION VERDICT. The room was adopted from a late recall; the one search that judges it runs on the
 // next scan. A remembered layout that explains the scan is Accepted; one that explains it no better than clutter
 // is Rejected (the signal ltsm's undo is built on: valid = false on the recall node, written by the scene graph).
-const auto verdict_for = [&](const std::vector<Eigen::Vector2f>& remembered, const Eigen::Vector3f& at)
+// Tracker initialised in a provisional frame (an arbitrary SE(2) offset, and a tracking emission learnt there that is
+// absurdly stale), then NOISY scans, one search per scan: the accumulating verdict must never reject a correct K.
+const auto verdict_for = [&](const std::vector<Eigen::Vector2f>& remembered, const Eigen::Vector3f& at, bool* ever_rejected = nullptr)
 {
     rc::RoomConcept rcn;
     rcn.set_polygon_room(remembered);
-    rcn.set_robot_pose(at.x(), at.y(), at.z(), false);
+    rcn.set_robot_pose(provisional.x(), provisional.y(), provisional.z(), false);
+    rc::RelocSelftestAccess::stale_emission(rcn);
     rc::reloc::PriorMode m;
     m.mu = at; m.S = Eigen::Vector3f(0.04f, 0.04f, 0.02f).asDiagonal();
     rcn.seed_reloc_prior({m});
-    const bool pending = rcn.late_recall_verdict() == RoomConcept::LateVerdict::Pending;
-    std::vector<Eigen::Vector3f> p3;
-    for (const auto& q : scan) p3.emplace_back(q.x(), q.y(), 0.f);
-    rc::RelocSelftestAccess::late(rcn, p3);
+    const bool pending = rcn.late_recall_verdict() == RoomConcept::LateVerdict::Pending
+                         and rc::RelocSelftestAccess::track_mu(rcn) != std::log(1.5f);   // the emission was reset
+    std::mt19937 nrng(4242);
+    for (int k = 0; k < 40 and rcn.late_recall_verdict() == RoomConcept::LateVerdict::Pending; ++k)
+    {
+        const auto sc = synth_scan(truth, 360, 0.03f, nrng);   // noisier than the first-scan section
+        std::vector<Eigen::Vector3f> p3;
+        for (const auto& q : sc) p3.emplace_back(q.x(), q.y(), 0.f);
+        rc::RelocSelftestAccess::late(rcn, p3);
+        if (ever_rejected != nullptr and rcn.late_recall_verdict() == RoomConcept::LateVerdict::Rejected) *ever_rejected = true;
+    }
     return std::pair{pending, rcn.late_recall_verdict()};
 };
-const auto [pend_d, ver_d] = verdict_for(poly, truth);
-check("(d) the true layout is ACCEPTED", pend_d and ver_d == RoomConcept::LateVerdict::Accepted,
+bool rejected_d = false;
+const auto [pend_d, ver_d] = verdict_for(poly, truth, &rejected_d);
+check("(d) the true layout is ACCEPTED", pend_d and not rejected_d and ver_d == RoomConcept::LateVerdict::Accepted,
       (std::snprintf(buf, sizeof buf, "pending-before=%d verdict=%d", pend_d ? 1 : 0, static_cast<int>(ver_d)), buf));
 const std::vector<Eigen::Vector2f> other = {{-1.2f, -1.2f}, {1.2f, -1.2f}, {1.2f, 1.2f}, {-1.2f, 1.2f}};   // a 2.4 m closet
 const auto [pend_e, ver_e] = verdict_for(other, Eigen::Vector3f(0.f, 0.f, 0.f));

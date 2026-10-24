@@ -231,7 +231,9 @@ private:
     /// its outline given, the pose found by the mixture search with the recall's pose prior; the verdict of that search is
     /// reported back on the recall node (`valid = false` = rejected). The room it replaces is released to ltsm's fence.
     bool adopt_late_recall(const Recall& r);
-    void step_late_recall();   ///< one cycle: adopt a standing late recall, relay the adoption verdict
+    bool step_late_recall();   ///< one cycle: adopt a standing late recall, relay the adoption verdict. True = adopted THIS call
+    std::uint64_t late_watch_room_ = 0;      ///< the room node adopted from it
+    mutable std::uint64_t late_bad_parent_logged_ = 0;
     std::uint64_t late_watch_node_ = 0;      ///< the recall whose adoption verdict is pending (0 = none)
     std::string   late_adopted_name_;        ///< the room last adopted from a late recall
     std::int64_t  late_last_poll_ms_ = 0;

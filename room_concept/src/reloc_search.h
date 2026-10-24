@@ -152,8 +152,9 @@ namespace rc::reloc
         float beyond_extent  = 20.f;
         /// A pose prior from outside the scan (Task 9; PriorMode). Empty = none. Its components also seed the polish.
         std::vector<PriorMode> prior_modes;
-        /// P(the prior is wrong) — the mass of its uniform floor. ⚠ the same kind of constant as `list_wrong` (a prior on
-        /// a hypothesis source, not a gate); 0.1 as there.
+        /// P(the prior is wrong) — the mass of its uniform floor.
+        /// FLAGGED: a modelling constant, the same kind as `list_wrong` (a prior on a hypothesis source, not a gate); 0.1 as
+        /// there. No model-level term can replace it: how often the recogniser is wrong is a fact about the recogniser.
         float prior_wrong = 0.1f;
     };
 

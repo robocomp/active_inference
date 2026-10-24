@@ -456,11 +456,17 @@ public:
     /// pose belongs to the abandoned provisional frame, so the search is the lost branch (P(lost) = 1) with these modes as
     /// its prior — a continuity term in each mode's weight (reloc_search.h, PriorMode), never a gate. Its outcome is the
     /// verdict below. Thread-safe (the scene graph arms it, the localiser thread runs it).
+    /// Also commits the prior's heaviest mean as the pose AT ONCE (the search refines it), so the new frame never pairs with
+    /// a provisional-frame pose, and resets the tracking emission (it was learnt in the abandoned frame). Called from the
+    /// scene graph's update(), which runs on the localiser thread.
     void seed_reloc_prior(const std::vector<rc::reloc::PriorMode>& modes);
+    /// Drop an armed/standing late adoption without a verdict (its room or recall vanished).
+    void cancel_late_recall();
     enum class LateVerdict : int { None = 0, Pending = 1, Accepted = 2, Rejected = 3 };
-    /// Pending after seed_reloc_prior until the search has run; then Accepted (some pose explains the scan the way tracking
-    /// does, or the pose was confirmed/held) or Rejected (no pose in K's remembered layout does: the existing tracking-vs-
-    /// broad emission comparison, explains_like_tracking, not a new threshold). None until a prior was ever seeded.
+    /// Pending after seed_reloc_prior while scans accumulate evidence; then Accepted or Rejected. The evidence per scan
+    /// is the log-likelihood ratio "the best mode's median |SDF| is tracking-like vs broad" (the lost belief's own two
+    /// emissions), summed with geometric forgetting; decided when the posterior passes the symmetric bound. A single noisy
+    /// scan during the jump cannot reject. None until a prior was ever seeded.
     [[nodiscard]] LateVerdict late_recall_verdict() const { return static_cast<LateVerdict>(late_verdict_.load(std::memory_order_acquire)); }
     /// The rival pose modes the localiser is carrying (thread-safe copy). Empty ⇔ the pose is unambiguous.
     std::vector<rc::reloc::PoseHypothesis> pose_hypotheses() const
@@ -752,6 +758,8 @@ private:
    std::vector<rc::reloc::PriorMode> late_prior_;
    std::atomic<bool> late_pending_{false};      ///< a late-recall search is armed
    std::atomic<int>  late_verdict_{0};          ///< LateVerdict
+   double late_log_odds_ = 0.0;                 ///< accumulated log-odds that K's layout explains the scans
+   float  last_search_top_median_ = std::numeric_limits<float>::quiet_NaN();   ///< top mode's median |SDF| of the last search
    bool late_search_active_ = false;            ///< localiser thread: reloc_params() carries late_prior_
    void run_late_recall_search(const std::vector<Eigen::Vector3f>& lidar_points);
    rc::reloc::Runtime rt_;                      ///< Task R1/R1b relocalisation runtime (reloc_runtime.h)

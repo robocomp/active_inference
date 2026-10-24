@@ -198,7 +198,7 @@ void RoomSceneGraph::update(const rc::RoomConcept::UpdateResult& res, float adv,
     last_int_pose_ = res.robot_pose;
     have_last_int_pose_ = true;
 
-    step_late_recall();   // a late recall from ltsm's recogniser re-births its room (room_scene_graph_late_recall.cpp)
+    if (step_late_recall()) return;   // a late recall from ltsm's recogniser re-births its room (room_scene_graph_late_recall.cpp)
 
     // ── START-UP PROTO-ROOM: the room exists from the first second of an estimation run ─────────────
     // Born here, on the localiser thread, the first time an estimating agent has no room — ALWAYS, even if

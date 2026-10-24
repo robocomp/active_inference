@@ -206,6 +206,7 @@ namespace rc
         }
         ep.best_x = top.pose.x(); ep.best_y = top.pose.y(); ep.best_theta = top.pose.z();
         ep.best_loss = top.median_abs;
+        last_search_top_median_ = top.median_abs;
         ep.jump_m   = (top.pose.head<2>() - incumbent.head<2>()).norm();
         ep.jump_rad = std::abs(std::remainder(top.pose.z() - incumbent.z(), 2.f * static_cast<float>(M_PI)));
         ep.success = true;
@@ -657,51 +658,76 @@ namespace rc
     void RoomConcept::seed_reloc_prior(const std::vector<rc::reloc::PriorMode>& modes)
     {
         { std::scoped_lock lk(late_prior_mutex_); late_prior_ = modes; }
+        late_log_odds_ = 0.0;
         late_verdict_.store(static_cast<int>(modes.empty() ? LateVerdict::None : LateVerdict::Pending), std::memory_order_release);
         late_pending_.store(not modes.empty(), std::memory_order_release);
         belief_reset_requested_.store(true, std::memory_order_relaxed);
+        if (modes.empty()) return;
+        // The tracking emission (typical misfit of the tracked pose) was learnt in the abandoned provisional frame: NaN seeds
+        // it from the params again, to be learnt in K's.
+        track_mu_ln_s_ = track_var_ln_s_ = std::numeric_limits<float>::quiet_NaN();
+        // The pose moves WITH the frame: the prior's heaviest mean, now (the search refines it on every scan).
+        if (model_ != nullptr and model_->has_state())
+        {
+            const auto best = std::ranges::max_element(modes, {}, &rc::reloc::PriorMode::w);
+            commit_relocalised_pose(best->mu, best->S);
+        }
+    }
+
+    void RoomConcept::cancel_late_recall()
+    {
+        { std::scoped_lock lk(late_prior_mutex_); late_prior_.clear(); }
+        late_pending_.store(false, std::memory_order_release);
+        late_verdict_.store(static_cast<int>(LateVerdict::None), std::memory_order_release);
     }
 
     // ── THE LATE-RECALL SEARCH (Task 9) ─────────────────────────────────────────────────────────────────────────
-    // The room was just adopted from memory while the robot stands inside it, so there is no doorway to anchor on
-    // (the passage prior is NOT used) and the tracker's pose lives in the provisional frame — meaningless in K's. The
-    // incumbent is therefore RESET to the prior's heaviest mean (a stand-in so that "keep" is a sensible hypothesis) and
-    // the search runs as the lost branch with P(lost) = 1: the tracker's continuity term vanishes and the recognition
-    // posterior takes its place, as one more factor of every mode's weight. Whether the scan overrules it is the
-    // likelihood's call (a prior metres off whose covariance admits the truth loses: gn_selftest late_recall (b)).
-    // ★ THE ADOPTION VERDICT is the search's own outcome, no new test: K is REJECTED when the search ends with the pose
-    //   neither moved, nor confirmed, nor held — i.e. when even the best mode of K's remembered layout fails
-    //   explains_like_tracking (the learnt tracking emission against the broad one), the very comparison that stops any
-    //   relocalisation from committing a pose that explains the view no better than clutter.
+    // The room was just adopted from memory while the robot stands inside it, so there is no doorway to anchor on (the
+    // passage prior is NOT used) and the tracker's pose belongs to the provisional frame: seed_reloc_prior already moved it
+    // to the prior's heaviest mean. Each scan runs the search as the lost branch with P(lost) = 1 (the tracker's continuity
+    // term vanishes, the recognition posterior takes its place as one more factor of every mode's weight). Whether the
+    // scan overrules the prior is the likelihood's call (gn_selftest late_recall (b)).
+    // ★ THE ADOPTION VERDICT ACCUMULATES. One scan during the jump is noisy, so the verdict is a log-odds summed over scans
+    //   (the construction of stability_belief.h): per scan the LLR of the best mode's median |SDF| under the tracking
+    //   emission vs the broad one — the two densities the lost belief already runs on — forgetting geometrically over the
+    //   tracking memory (no new constant). Decided when the posterior passes the bound either way.
+    //   FLAGGED: symmetric loss (a wrongly kept K costs as much as a wrongly undone one), so ONE bound, 95%: ln(19).
     void RoomConcept::run_late_recall_search(const std::vector<Eigen::Vector3f>& lidar_points)
     {
         std::vector<rc::reloc::PriorMode> prior;
         { std::scoped_lock lk(late_prior_mutex_); prior = late_prior_; }
         if (prior.empty() or model_ == nullptr or not model_->has_state())
             return;
-        const auto best = std::ranges::max_element(prior, {}, &rc::reloc::PriorMode::w);
-        commit_relocalised_pose(best->mu, best->S);
         late_search_active_ = true;
         search_trigger_ = "late_recall";
         ++rt_.searches;
         pending_episode_p_lost_ = 1.f;
+        last_search_top_median_ = std::numeric_limits<float>::quiet_NaN();
         const bool ran = grid_search_initial_pose(lidar_points, 0.5f, static_cast<float>(M_PI_4));
         pending_episode_p_lost_ = std::numeric_limits<float>::quiet_NaN();
         late_search_active_ = false;
-        if (not ran)
-            return;   // nothing to judge with yet (no polygon / no mode): stay armed, try the next scan
-        const bool explained = last_search_moved_ or last_search_confirmed_incumbent_ or rt_.last_search_held;
+        if (not ran or not std::isfinite(last_search_top_median_))
+            return;   // nothing to judge with on this scan (no polygon / no mode): no evidence either way
         if (last_search_moved_ or last_search_confirmed_incumbent_)
             reset_lost_belief();
         else if (rt_.last_search_held)
             rt_.hold_open = true;
         else
             set_belief_mismatch();
+        const double var0 = static_cast<double>(params.reloc_track_log_sigma) * params.reloc_track_log_sigma;
+        const double llr = log_tracking_emission(last_search_top_median_, var0) - log_broad_emission(last_search_top_median_);
+        const double lambda = 1.0 - 1.0 / std::max(1, params.reloc_track_memory_frames);
+        late_log_odds_ = lambda * late_log_odds_ + llr;
+        const double bound = std::log(19.0);   // FLAGGED above
+        if (std::abs(late_log_odds_) < bound)
+            return;   // undecided: keep judging on the next scan
+        const bool accepted = late_log_odds_ > 0.0;
         { std::scoped_lock lk(late_prior_mutex_); late_prior_.clear(); }
         late_pending_.store(false, std::memory_order_release);
-        late_verdict_.store(static_cast<int>(explained ? LateVerdict::Accepted : LateVerdict::Rejected), std::memory_order_release);
-        qInfo().noquote() << QString("[reloc] late recall: %1").arg(explained ? "ACCEPTED — K's layout explains the scan"
-                                                                                : "REJECTED — no pose in K's layout explains the scan");
+        late_verdict_.store(static_cast<int>(accepted ? LateVerdict::Accepted : LateVerdict::Rejected), std::memory_order_release);
+        qInfo().noquote() << QString("[reloc] late recall: %1 (log-odds %2)")
+            .arg(accepted ? "ACCEPTED — K's layout explains the scans" : "REJECTED — no pose in K's layout explains the scans")
+            .arg(late_log_odds_, 0, 'f', 1);
     }
 
     void RoomConcept::relocalise_from_belief(const std::vector<Eigen::Vector3f>& lidar_points, float s, float p_lost)

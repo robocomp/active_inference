@@ -32,8 +32,19 @@ std::optional<RoomSceneGraph::Recall> RoomSceneGraph::find_late_recall() const
         if (not px.has_value() or not py.has_value() or not pp.has_value()) continue;
         // Either anchor: the crossed door of the room being left (case A) or the robot itself (case B, no door survives).
         // The recall's own RT edge is not needed: the prior is a pose in the recalled room's frame, not a transform.
+        // The parent must be one of the two anchors the contract allows: a door node (case A) or the robot (case B).
         const auto parent = G_->get_attrib_by_name<parent_att>(n).value_or(0);
-        if (parent == 0 or not G_->get_node(parent).has_value()) continue;
+        const auto pnode = parent != 0 ? G_->get_node(parent) : std::nullopt;
+        if (not pnode.has_value() or not (pnode->type() == "door" or parent == dsr_robot_id_))
+        {
+            if (late_bad_parent_logged_ != n.id())
+            {
+                late_bad_parent_logged_ = n.id();
+                qWarning().noquote() << QString("[room][late-recall] %1 ignored: parent %2 is neither a door nor the robot")
+                                            .arg(QString::fromStdString(n.name())).arg(parent);
+            }
+            continue;
+        }
         const auto& xs = px->get(); const auto& ys = py->get(); const auto& v = pp->get();
         if (xs.size() < 3 or xs.size() != ys.size() or v.empty() or v.size() % 10 != 0) continue;
         Recall r;
@@ -88,7 +99,11 @@ bool RoomSceneGraph::adopt_late_recall(const Recall& r)
     note_room_name_issued(r.room_index);
     mark_room_rt_not_current();   // the room being replaced keeps the last pose that was true of it
     rearm_after_crossing(id.value(), r.name, "late recall", 1.f, r);
+    // The remembered room's frame is the internal one now: frame-bound state of the old frame goes.
+    left_polys_int_.clear();
+    have_last_int_pose_ = false;
     late_watch_node_   = r.node_id;
+    late_watch_room_   = id.value();
     late_adopted_name_ = r.name;
     qInfo().noquote() << QString("[room][late-recall] %1 adopted from memory (node id %2), replacing room %3; localising with "
                                  "the recognition posterior (%4 mode(s)) as the search's prior")
@@ -96,40 +111,56 @@ bool RoomSceneGraph::adopt_late_recall(const Recall& r)
     return true;
 }
 
-void RoomSceneGraph::step_late_recall()
+bool RoomSceneGraph::step_late_recall()
 {
-    if (G_ == nullptr or dsr_room_id_ == 0) return;
-    // The verdict first: the search that judges the adoption has run on the localiser thread.
-    if (late_watch_node_ != 0)
-    {
-        switch (room_concept_->late_recall_verdict())
-        {
-        case rc::RoomConcept::LateVerdict::Rejected:
-            if (auto n = G_->get_node(late_watch_node_); n.has_value())
-            {
-                G_->add_or_modify_attrib_local<valid_att>(n.value(), false);   // ltsm's undo reads this; never delete the node
-                G_->update_node(n.value());
-                qWarning().noquote() << QString("[room][late-recall] %1 REJECTED by the late-adoption fit: valid=false on its recall")
-                                            .arg(QString::fromStdString(late_adopted_name_));
-            }
-            late_watch_node_ = 0;
-            break;
-        case rc::RoomConcept::LateVerdict::Accepted:
-            late_watch_node_ = 0;
-            break;
-        default: break;
-        }
-        return;   // one adoption at a time: the next recall waits for this verdict
-    }
+    if (G_ == nullptr or dsr_room_id_ == 0) return false;
     const std::int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now().time_since_epoch()).count();
-    if (now - late_last_poll_ms_ < 1000) return;
-    late_last_poll_ms_ = now;
-    const auto r = find_late_recall();
+    const bool poll = now - late_last_poll_ms_ >= 1000;
+    if (poll) late_last_poll_ms_ = now;
+    std::optional<Recall> standing;
+    if (poll or late_watch_node_ != 0) standing = find_late_recall();
+    // The watch ends by MODEL EVENTS, never by waiting: the adopted room or the recall node is gone, or another late recall
+    // stands in its place (an undo posts the staged twin's). Whatever the search still holds is dropped with it.
+    if (late_watch_node_ != 0)
+    {
+        const bool gone = not G_->get_node(late_watch_node_).has_value() or not G_->get_node(late_watch_room_).has_value()
+                          or dsr_room_id_ != late_watch_room_
+                          or (standing.has_value() and standing->node_id != late_watch_node_);
+        if (gone)
+        {
+            room_concept_->cancel_late_recall();
+            late_watch_node_ = late_watch_room_ = 0;
+        }
+        else
+        {
+            switch (room_concept_->late_recall_verdict())
+            {
+            case rc::RoomConcept::LateVerdict::Rejected:
+                if (auto n = G_->get_node(late_watch_node_); n.has_value())
+                {
+                    G_->add_or_modify_attrib_local<valid_att>(n.value(), false);   // ltsm's undo reads this; never delete the node
+                    G_->update_node(n.value());
+                    qWarning().noquote() << QString("[room][late-recall] %1 REJECTED by the late-adoption fit: valid=false on its recall")
+                                                .arg(QString::fromStdString(late_adopted_name_));
+                }
+                late_watch_node_ = late_watch_room_ = 0;
+                break;
+            case rc::RoomConcept::LateVerdict::Accepted:
+                late_watch_node_ = late_watch_room_ = 0;
+                break;
+            default: return false;   // still judging
+            }
+            return false;
+        }
+    }
+    if (not poll) return false;
     // A recall for the room already live is ltsm's own (retired by it); an undo posts one for the OTHER room, and the same
-    // function adopts that one.
-    if (r.has_value() and r->name != room_node_name())
-        adopt_late_recall(*r);
+    // function adopts that one. ltsm's undo removes K's recall and posts the twin's; the twin's name may still be taken by
+    // the provisional room for a moment: adopt_late_recall then returns false without side effects and the next poll retries.
+    if (standing.has_value() and standing->name != room_node_name())
+        return adopt_late_recall(*standing);
+    return false;
 }
 
 }   // namespace rc
