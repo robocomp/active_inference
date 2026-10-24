@@ -60,6 +60,7 @@
 #include "../../common/instance_tracker/birth_evidence.h"   // rc::birth:: the shared CREATE policy
 #include "../../common/nbv/graph_obstacles.h"   // rc::nbv::collect_graph_obstacles — shared, DSR-side
 #include "door_dof.h"   // rc::kDoorDofs — names/units for the BeliefInspector rows
+#include "door_leaf_visibility.h"   // rc::door::crossing_logodds (Task D2)
 #include "../../common/graph_provenance/creation_stamp.h"   // rc::provenance::now_ms — the recorded cycle's wall clock
 
 #include <limits>   // numeric_limits<int>::max — the disabled tracker death counter
@@ -2160,6 +2161,35 @@ void SpecificWorker::step_epistemic(rc::DoorInstance& inst, DSR::Node& node)
     // because the shared step has exactly one bail path.
     rc::epistemic::StepHooks<rc::EpistemicProposal> hooks;
 
+    // ★D4 — A LOOK THE CONTROLLER HANDED BACK IS EVIDENCE ITS SITE IS BLOCKED (gold13: the look was offered inside Bed(1); the
+    //   controller found no route and spun). The occupancy the controller plans on is not in the NBV planner's obstacle set, so the
+    //   memory is the only channel. Same model as the approach (door_approach_pose.h); the sites are weighted in the planner.
+    const auto look_now_ms = static_cast<std::int64_t>(rc::provenance::now_ms());
+    const float look_memory_s = cfg_.pragmatic.approach_refusal_memory_s;
+    inst.look_unplaceable = false;
+    inst.look_memory.prune(look_now_ms, look_memory_s);
+    if (const auto aid = inst.affordance.node_id(); aid != 0)
+        if (const auto an = G->get_node(aid); an.has_value())
+        {
+            const bool active  = G->get_attrib_by_name<active_att>(an.value()).value_or(false);
+            const bool pending = G->get_attrib_by_name<epistemic_pending_att>(an.value()).value_or(true);
+            const auto outcome = rc::affordance::read_outcome(an.value());
+            if (pending)
+                inst.look_handback_taken = false;
+            else if (not active and not inst.look_handback_taken and inst.look_offered_valid
+                     and (outcome == rc::affordance::Outcome::Unreachable or outcome == rc::affordance::Outcome::Infeasible
+                          or outcome == rc::affordance::Outcome::OutsideRoom))
+            {
+                const float side = (inst.look_offered_xy - inst.aperture.centre_xy()).dot(inst.aperture.across_u()) < 0.0f ? -1.0f : 1.0f;
+                inst.look_memory.refuse(inst.aperture, side, G ? rc::room::current_room_frame(*G) : std::string{},
+                                        inst.look_offered_xy, look_now_ms);
+                inst.look_handback_taken = true;
+                std::print("door_concept: [look] {} site ({:.2f},{:.2f}) handed back ({}) — remembered as blocked (decays on {:.0f} s); "
+                           "the look is re-sited around it\n", inst.node_name, inst.look_offered_xy.x(), inst.look_offered_xy.y(),
+                           rc::affordance::to_string(outcome), look_memory_s);
+            }
+        }
+
     hooks.compute = [&]() -> std::optional<rc::EpistemicProposal>
     {
         // Σ-based D-optimal NBV from the belief. Skip until the belief has seen its first frame (else Σ is
@@ -2199,13 +2229,32 @@ void SpecificWorker::step_epistemic(rc::DoorInstance& inst, DSR::Node& node)
         nbv_obstacle_count_ = static_cast<int>(obstacles.size());   // 0 walls ⇒ the room polygon never arrived
 
         rc::nbv::Plan nbv_plan;
+        const std::string look_room = G ? rc::room::current_room_frame(*G) : std::string{};
+        const std::function<float(const Eigen::Vector2f&)> site_refused = [&](const Eigen::Vector2f& q)
+        {
+            const float side = (q - inst.aperture.centre_xy()).dot(inst.aperture.across_u()) < 0.0f ? -1.0f : 1.0f;
+            return inst.look_memory.p_refused(inst.aperture, side, look_room, q, look_now_ms, look_memory_s,
+                                              0.5f * cfg_.pragmatic.robot_passage_width_m + cfg_.pragmatic.passage_margin_m);
+        };
         // The existence question rides in the same gain (nats): high for a door only the 360 has reported, ~0 once the ZED settled it.
         const rc::ExistenceLook exist_look{inst.existence.p_exists(), cfg_.exist_detection_prob, cfg_.exist_clutter_prob};
         rc::EpistemicProposal prop =
             epistemic_planner_.compute(inst.ai2_belief, cfg_.ai2_range_noise_lat_per_m, cfg_.ai2_sigma_base_m,
                                        rc::nbv::sensor_from_graph(*G, inner_eigen_.get()), obstacles,
-                                       fitter_->room_polygon(), &nbv_plan, &exist_look);
+                                       fitter_->room_polygon(), &nbv_plan, &exist_look, &site_refused);
         log_nbv_decision(inst, nbv_plan, prop);   // logs REFUSED proposals too — keep it before the check
+        // ★D4: the look's offer probability is the share of its worth the hand-backs left; the same Schmitt band as the pragmatic
+        //   affordances (offer above offer_prob, withdraw below withdraw_prob) — continuous in the memory, no exact-zero test.
+        if (prop.valid and prop.is_finite())
+        {
+            const auto& pg = cfg_.pragmatic;
+            inst.look_offer_on = inst.look_offer_on ? prop.offer_share >= pg.withdraw_prob : prop.offer_share > pg.offer_prob;
+            if (not inst.look_offer_on)
+            {
+                inst.look_unplaceable = true;
+                return std::nullopt;
+            }
+        }
         // Degenerate (non-finite) fit — retry next cycle.
         if (not prop.valid or not prop.is_finite())
             return std::nullopt;
@@ -2216,13 +2265,29 @@ void SpecificWorker::step_epistemic(rc::DoorInstance& inst, DSR::Node& node)
 
     // Write attributes to the door node (read by legacy consumers)
     hooks.record = [&](const rc::EpistemicProposal& published, float /*raw_gain*/)
-    { scene_graph_->write_epistemic_proposal(node, published); };
+    {
+        scene_graph_->write_epistemic_proposal(node, published);
+        // ★D4: the site a hand-back refers to is the one the step PUBLISHES here, not every cycle's computed proposal.
+        inst.look_offered_xy = {published.epistemic_target_x_m, published.epistemic_target_y_m};
+        inst.look_offered_valid = true;
+    };
 
     hooks.on_affordance_created = [this] { trigger_graph_layout_twopi(); };
 
     rc::epistemic::step(inst, *G,
                         {.cooldown_cycles = cfg_.epistemic_cooldown_cycles, .orient_mode = orient},
                         hooks);
+
+    // A look that cannot be placed anywhere is WITHDRAWN, never left offered at a site already handed back (the executing claim,
+    // if any, is the controller's to finish). It returns by itself as the remembered hand-backs decay.
+    if (inst.look_unplaceable and inst.affordance.node_id() != 0
+        and inst.affordance.state() != rc::ObjectAffordance::State::executing)
+    {
+        inst.affordance.remove();
+        inst.look_offered_valid = false;
+        std::print("door_concept: [look] {} WITHDRAWN — every viewpoint that sees the door is a remembered hand-back "
+                   "(back as they decay on {:.0f} s)\n", inst.node_name, look_memory_s);
+    }
 }
 
 
@@ -2376,6 +2441,32 @@ rc::door::InteractionState SpecificWorker::compute_interaction_state(const rc::D
                      + (1.0f - p_open_now) * st.p_band;
     st.p_reach_known = true;
     st.range_sigma_m = sigma;
+
+    // ── P(the cross is executable from HERE): at the door x corridor clear of the leaf x passable ────────────────
+    // The run is robot -> through-pose (the far side of the room being LEFT, the same side the cross offer latches).
+    if (st.p_open_known and not inst.phi_curve_log.empty())
+    {
+        const float leave_side = rc::door::interior_side(ap, st.approach_standoff_m, fitter_->room_polygon(), st.approach_side);
+        const float cross_standoff = std::max(pg.cross_standoff_m, 2.0f * inst.leaf_pose.half_w
+                                              + 0.5f * pg.robot_passage_width_m + pg.swing_clearance_m);
+        const auto thr = rc::door::through_pose(ap, leave_side, cross_standoff);
+        rc::door::CrossCorridorBelief cb;
+        cb.ap = ap; cb.phi_curve_log = inst.phi_curve_log;
+        cb.hinge = inst.leaf.hinge; cb.swing = inst.leaf.swing;
+        // the log-odds are signed against the reference they were last accumulated for (hinge_llr_ref / swing_llr_ref): read
+        // them as the odds of the MAP leaf, exactly as the anchor does (specificworker_anchor.cpp)
+        const bool hinge_same = not inst.hinge_llr_ref.has_value() or *inst.hinge_llr_ref == inst.leaf.hinge;
+        const bool swing_same = not inst.swing_llr_ref.has_value() or (*inst.swing_llr_ref > 0.f) == (inst.leaf.swing > 0.f);
+        cb.hinge_llr = hinge_same ? inst.hinge_llr : -inst.hinge_llr;
+        cb.swing_llr = swing_same ? inst.swing_llr : -inst.swing_llr;
+        // body half-width + the passage margin's half: the same body the passability uses; the gap's σ is the range's own
+        st.p_corridor_clear = rc::door::prob_corridor_clear(cb, robot, Eigen::Vector2f(thr.x, thr.y),
+                                                            0.5f * needed, sigma);
+        st.corr_lateral_m = (robot - ap.centre_xy()).dot(ap.wall_u);
+        st.corr_hinge_llr = cb.hinge_llr; st.corr_swing_llr = cb.swing_llr;
+        st.p_cross_exec = rc::door::cross_exec_prob(st.p_within, st.p_corridor_clear, st.p_open);
+        st.p_cross_exec_known = true;
+    }
 
     // ── crossing progress, signed against the side latched when the claim was made ───────────────
     // "Crossed" is a CHANGE of side, not a position, so it is only defined while a claim is outstanding.
@@ -2639,11 +2730,13 @@ void SpecificWorker::step_pragmatic_affordances(rc::DoorInstance& inst)
         o.value    = pg.value_cross;
         o.contract = rc::door::cross_contract(pg);
         o.why      = std::format("P(passable)={:.2f} (log-odds {:+.1f}) — clear span {:.2f} m at phi={:.2f} rad vs {:.2f} m of body"
-                                 " × P(at the door)={:.2f} (P(facing) {:.2f} at {:.0f} deg; range {:.2f} m ≤ {:.2f}, σ {:.2f})",
+                                 " × P(at the door)={:.2f} (P(facing) {:.2f} at {:.0f} deg; range {:.2f} m ≤ {:.2f}, σ {:.2f})"
+                                 " × P(corridor clear of the leaf)={:.2f} (robot {:+.2f} m along the wall, hinge llr {:+.1f}, swing llr {:+.1f}) ⇒ P(cross executable)={:.2f}",
                                  st.p_open, st.p_open_logit, st.clear_width_m, st.phi_rad,
                                  pg.robot_passage_width_m + pg.passage_margin_m, st.p_within, st.p_facing, st.facing_deg,
                                  st.robot_range_m,
-                                 std::max(pg.actuation_reach_m, st.safe_standoff_m + 0.30f), st.range_sigma_m);
+                                 std::max(pg.actuation_reach_m, st.safe_standoff_m + 0.30f), st.range_sigma_m,
+                                 st.p_corridor_clear, st.corr_lateral_m, st.corr_hinge_llr, st.corr_swing_llr, st.p_cross_exec);
         inst.aff_cross.update(o);
         log_affordance_transitions(inst, "cross", inst.aff_cross);
     }
@@ -3238,6 +3331,8 @@ void SpecificWorker::step_entry_mirrors()
                     em.phi_curve   = si.phi_curve;
                     em.matched_frames = si.matched_frames;
                 }
+            if (src_it != fitter_->instances().end() and src_it->second.existence_seeded)
+                em.existence_L = src_it->second.existence.logodds();
             entry_mirrors_[room.id()] = std::move(em);
         }
     }
@@ -3245,6 +3340,10 @@ void SpecificWorker::step_entry_mirrors()
     // 3. Refresh the interaction channel from the source — the one belief about this door.
     //    Re-read the mirror node every time: update_node writes the WHOLE copy, so a stale copy would erase
     //    whatever anybody else added since.
+    // (Task D2: the source's existence L is refreshed here too, while the source lives — ltsm deletes it with its room.)
+    for (auto& [room_id, mir] : entry_mirrors_)
+        if (const auto si = fitter_->instances().find(mir.source_id); si != fitter_->instances().end() and si->second.existence_seeded)
+            mir.existence_L = si->second.existence.logodds();
     for (const auto& [room_id, mir] : entry_mirrors_)
     {
         const auto src = G->get_node(mir.source_id);
@@ -3743,6 +3842,27 @@ void SpecificWorker::install_carried_door(std::uint64_t new_room, std::uint64_t 
                                    "sigma={:.0f} deg, curve {} pts\n", n->name(), dst.phi_est * 57.2958f,
                                    dst.phi_sigma * 57.2958f, dst.phi_curve.size());
                     }
+            // ★Task D2 — THE BELIEF CROSSES WITH THE DOOR, AND SO DOES THE CROSSING (gold12: door_1 was re-made at BirthLogodds 1.0,
+            //   forgetting its L = +1.83 and the fact that the robot's body had just passed through it, and died 5 s later).
+            //   L = the source's L (BirthLogodds when the source was never seeded: the crossing is evidence independent of it) + the
+            //   crossing as an observation: ln(Existence.CrossPassablePrior / Existence.CrossLeak) nats (door_leaf_visibility.h). The
+            //   door's own door_open_prob is NOT read: the crossing may have raised it (circular). Marked seeded so the existence slice
+            //   does not re-seed it.
+            if (adopted_from.has_value())
+                if (auto it = fitter_->instances().find(adopt_mirror); it != fitter_->instances().end())
+                {
+                    auto& dst = it->second;
+                    const float L_src = adopted_from->existence_L.value_or(cfg_.exist_birth_logodds);
+                    const float dLx = rc::door::crossing_logodds(cfg_.exist_cross_passable_prior, cfg_.exist_cross_leak);
+                    dst.existence.set(L_src + dLx);
+                    dst.existence_seeded      = true;
+                    dst.existence_entry_L     = dst.existence.logodds();
+                    dst.existence_since_entry = 0.0f;
+                    std::print("door_concept: [room] {} keeps its existence across the crossing: L {:.2f}{} + crossing {:.2f} "
+                               "(prior {:.2f}, leak {:.2f}) -> {:.2f}\n", n->name(), L_src,
+                               adopted_from->existence_L.has_value() ? "" : " (birth seed)", dLx, cfg_.exist_cross_passable_prior,
+                               cfg_.exist_cross_leak, dst.existence.logodds());
+                }
         }
     // ★ THE PASSAGE ANCHOR IS NOT A DOOR OF EITHER ROOM. It hangs from the robot, so nothing above touched it; the
     //   one thing the room switch owes it (during approach/open, and since Task 12 Fix E during the cross as well) is its
@@ -4018,6 +4138,7 @@ void SpecificWorker::remember_door(const rc::DoorInstance& inst)
     em.swing_llr      = inst.swing_llr;
     em.phi_curve      = inst.phi_curve;
     em.matched_frames = inst.matched_frames;
+    if (inst.existence_seeded) em.existence_L = inst.existence.logodds();
     em.T_root_door    = Eigen::Affine3d(Tw->matrix());
     em.width  = G->get_attrib_by_name<width_m_att>(node.value()).value_or(cfg_.door_prior_w_m);
     em.depth  = G->get_attrib_by_name<depth_m_att>(node.value()).value_or(cfg_.door_thickness_m);

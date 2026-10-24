@@ -535,6 +535,7 @@ void DoorSceneGraph::write_interaction_state(DSR::Node& node, const rc::door::In
     G_->add_or_modify_attrib_local<door_phi_rad_att>          (node, st.phi_known    ? st.phi_rad  : kUnmeasured);
     G_->add_or_modify_attrib_local<door_open_prob_att>        (node, st.p_open_known ? st.p_open   : kUnmeasured);
     G_->add_or_modify_attrib_local<door_reach_prob_att>       (node, st.p_reach_known? st.p_reach  : kUnmeasured);
+    G_->add_or_modify_attrib_local<door_cross_exec_prob_att>  (node, st.p_cross_exec_known ? st.p_cross_exec : kUnmeasured);
     G_->add_or_modify_attrib_local<door_crossing_progress_att>(node, st.crossing_known ? st.crossing_progress
                                                                                        : kUnmeasuredSigned);
 }

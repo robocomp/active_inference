@@ -16,6 +16,7 @@
 #include <unordered_set>
 #include <utility>
 
+#include "../door_leaf_visibility.h"                     // leaf_closedness / ricoh_detect_scale (Task D2)
 #include "../../../common/instance_tracker/birth_evidence.h"   // rc::birth::evidence (SHARED)
 #include "../../../common/track/merge_sweep.h"                 // rc::track::merge_overlapping_sweep (SHARED, no Qt)
 #include "../../../common/footprint/footprint.h"               // rc::geom::Footprint, overlap_ratio
@@ -349,8 +350,19 @@ void DoorCore::associate(const DoorCycleInput& in, DoorCycleOutput& out)
     dets_.clear();
     ricoh_fold_.clear();
     ricoh_looks_.clear(); ricoh_hit_det_.clear();
-    const float ricoh_bar = cfg.tracker_birth_frames
-        * std::log(std::clamp(cfg.ricoh_hit_rate, 1e-3f, 0.999f) / std::clamp(cfg.exist_clutter_prob, 1e-3f, 0.999f));
+    // The bank's sensor model: the 360 detector's hit rate is the one the EXISTENCE channel has LEARNED (per viewpoint, on doors the ZED
+    // confirms; Beta(1,1) prior, same expression as door_existence.cpp), its false-alarm rate the shared clutter probability.
+    RicohBirthBank::Params bank_prm;
+    bank_prm.hit_rate = (ricoh_hits_ + 1.0f) / (ricoh_trials_ + 2.0f);
+    bank_prm.clutter = cfg.exist_clutter_prob;
+    bank_prm.gate_mahalanobis = cfg.tracker_gate_mahalanobis;
+    bank_prm.min_sep_m = cfg.tracker_birth_min_sep_m;
+    bank_prm.tau_s = cfg.ricoh_decorrelation_s;
+    bank_prm.forget_s = cfg.ricoh_forget_s;
+    bank_prm.view_R_m = 0.5f * cfg.door_prior_w_m;
+    const float ricoh_bar = cfg.tracker_birth_frames * RicohBirthBank::llr_hit(bank_prm);
+    // the bank's places are unidentified, so the open-leaf prior stands in for the leaf-state belief an instance would have
+    const float bank_open_scale = rc::door::ricoh_detect_scale(1.0f - cfg.ricoh_birth_p_open, cfg.ricoh_open_detect_rel);   // ⚠ decision boundary, see RicohBirthBank
     const auto& pkt = masks_.packet();
 
     // ★BIRTH EVIDENCE — the shared CREATE policy (common/instance_tracker/birth_evidence.h). This agent fed
@@ -473,13 +485,15 @@ void DoorCore::associate(const DoorCycleInput& in, DoorCycleOutput& out)
                 const auto rr = ricoh_range(world_->room_polygon(), cam_xy_.value(), dv.xy, sl.depth_var,
                                             cfg.ai2_sigma_base_m, cfg.ai2_range_noise_lat_per_m,
                                             cfg.tracker_detection_noise_m * cfg.tracker_detection_noise_m,
-                                            cfg.ricoh_plane_std_m * cfg.ricoh_plane_std_m, true);
+                                            cfg.ricoh_plane_std_m * cfg.ricoh_plane_std_m, true,
+                                            cfg.ricoh_birth_p_open, cfg.door_prior_w_m);   // Task D2: marginalised over a shut / open leaf
                 dv.xy = rr.xy;
                 dv.xy_var = rr.var;                                  // its OWN measurement covariance (gate + candidates)
                 ricoh_w = rr.weight;
                 ricoh_look = RicohBirthBank::Look{rr.xy, rr.var, rr.weight * std::clamp(sl.confidence, 0.0f, 1.0f)};   // the label's own reliability scales the hit
                 if (rr.weight <= 0.0f) ++ctr.no_wall;
                 ctr.w_wall += rr.weight;
+                ctr.agree_shut += rr.agree_shut; ctr.agree_open += rr.agree_open;
                 if (birth_new_obs and ricoh_w > 0.0f)
                 {
                     ricoh_w *= ricoh_views_.peek(cam_xy_.value(), dv.xy, 0.5f * cfg.door_prior_w_m, cfg.tracker_birth_min_sep_m);
@@ -519,6 +533,8 @@ void DoorCore::associate(const DoorCycleInput& in, DoorCycleOutput& out)
                                                who ? who->node : "?", 100.0f * (1.0f - unclaimed), unclaimed), out);
             }
             ++ctr.pushed;
+            if (dv.birth_evidence > 0.0f) ++ctr.pos_ev;
+            ctr.ev += dv.birth_evidence; ctr.ev_max = std::max<double>(ctr.ev_max, dv.birth_evidence);
             if (sl.source == 0) ctr.w_wall += 1.0;
             ctr.w_pool += ricoh_w;
             if (ricoh_look.has_value() and birth_new_obs)
@@ -559,7 +575,7 @@ void DoorCore::associate(const DoorCycleInput& in, DoorCycleOutput& out)
     res_ = tracker_.update(tracks, dets_);
     // The ricoh birth bank: this frame is one new observation of every ricoh-seen place (hit if a detection explains it, else a look).
     if (birth_new_obs and cam_xy_.has_value()
-        and (not pkt.ricoh_windows.empty() or std::ranges::any_of(pkt.slices, [](const MaskSlice& q) { return q.source != 0; })))
+        and ricoh_fresh(pkt))
     {
         std::vector<RicohBirthBank::Look> unassoc;
         for (std::size_t k = 0; k < ricoh_hit_det_.size(); ++k)
@@ -568,12 +584,13 @@ void DoorCore::associate(const DoorCycleInput& in, DoorCycleOutput& out)
         for (const auto& t : tracks) track_xy.push_back(t.xy);
         const auto poly = world_->room_polygon();
         const Vec2f cam = cam_xy_.value();
-        ricoh_bank_.update(unassoc, cfg.ricoh_hit_rate, cfg.exist_clutter_prob, cfg.tracker_gate_mahalanobis,
+        ricoh_bank_.update(static_cast<double>(in.t_steady_ns) * 1e-9, cam, unassoc, bank_prm,
                            [&](const Vec2f& xy)
-                           { return (ricoh_looked(pkt.ricoh_windows, cam, xy) ? 1.0f : 0.0f)   // not looked at ⇒ no absence
+                           { return (ricoh_looked_in(pkt, cam, xy) ? 1.0f : 0.0f)   // not looked at ⇒ no absence
+                                    * bank_open_scale   // a place that may be an open leaf is detected less: its absence says less
                                     * rc::birth::observation_weight({1.0f, (xy - cam).norm()}, birth_detect)
                                     * los_weight(poly, cam, xy, cfg.ai2_sigma_base_m, cfg.ai2_range_noise_lat_per_m); },
-                           track_xy, cfg.tracker_birth_min_sep_m);
+                           track_xy);
         for (const int b : res_.births) ricoh_bank_.drop_near(dets_[static_cast<std::size_t>(b)].xy, cfg.tracker_birth_min_sep_m);
     }
     // Pool the viewpoint of a ricoh slice only if it is NOT explained by a live door (an associated slice is not a birth look).
@@ -582,7 +599,7 @@ void DoorCore::associate(const DoorCycleInput& in, DoorCycleOutput& out)
         for (const auto& [di, tgt] : ricoh_fold_)
             if (res_.assignment[static_cast<std::size_t>(di)] < 0)
                 ricoh_views_.credit(cam_xy_.value(), tgt, 0.5f * cfg.door_prior_w_m, cfg.tracker_birth_min_sep_m);
-        ricoh_views_.end_frame([&](const Vec2f& tgt) { return ricoh_looked(pkt.ricoh_windows, cam_xy_.value(), tgt); });
+        ricoh_views_.end_frame([&](const Vec2f& tgt) { return ricoh_looked_in(pkt, cam_xy_.value(), tgt); });
     }
 
     const int n_assigned = static_cast<int>(std::count_if(res_.assignment.begin(), res_.assignment.end(),
@@ -600,9 +617,14 @@ void DoorCore::associate(const DoorCycleInput& in, DoorCycleOutput& out)
         {
             const auto& c = counters_[k];
             diag("stdout", std::format("[birth-src {}] slices={} door={} no_support={} bearing_only={} no_cam={} wall_w0={} pushed={} ev>0={} "
-                                       "sum(wall_w)={:.2f} sum(w_after_pool)={:.2f} sum(ev)={:.3f} max(ev)={:.3f}\n",
+                                       "sum(wall_w)={:.2f} sum(w_after_pool)={:.2f} sum(ev)={:.3f} max(ev)={:.3f} "
+                                       "sum(agree_shut)={:.2f} sum(agree_open)={:.2f} bank_entries={} bank_maxL={:.2f} ricoh_bar={:.2f} hit_rate={:.3f}\n",
                                        k == 0 ? "ZED" : "RICOH", c.slices, c.door, c.no_support, c.bearing_only, c.no_cam, c.no_wall,
-                                       c.pushed, c.pos_ev, c.w_wall, c.w_pool, c.ev, c.ev_max), out);
+                                       c.pushed, c.pos_ev, c.w_wall, c.w_pool, c.ev, c.ev_max, c.agree_shut, c.agree_open,
+                                       k == 1 ? ricoh_bank_.entries().size() : std::size_t{0},
+                                       k == 1 and not ricoh_bank_.entries().empty()
+                                           ? std::ranges::max(ricoh_bank_.entries(), {}, &RicohBirthBank::Entry::L).L : 0.0f,
+                                       ricoh_bar, bank_prm.hit_rate), out);
         }
     if (++dbg_cycles_ % 30 == 0 or not res_.births.empty() or not res_.deaths.empty())
         diag("stdout", std::format("[tracker] instances={} door_dets={} assigned={} unassigned={} births={} deaths={}\n",

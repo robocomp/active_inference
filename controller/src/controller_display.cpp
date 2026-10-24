@@ -11,6 +11,9 @@
 #include <QByteArray>
 #include <limits>
 #include <QComboBox>
+#include <QGuiApplication>
+#include <QScreen>
+#include <algorithm>
 #include <QInputDialog>
 #include <QPushButton>
 #include <QSettings>
@@ -49,8 +52,20 @@ void ControllerDisplay::restore_window_geometry()
     const QByteArray geom = settings.value(kWinSettingsKey).toByteArray();
     if (!geom.isEmpty())
         custom_widget_->restoreGeometry(geom);
-    else
+    // A saved geometry can be degenerate (2026-10-24: ~20x20 px at negative coords, after a collapse) and restoreGeometry
+    // re-applies it on every launch: the window maps with an empty visible region, Qt sends it no paint events and the
+    // planner view never refreshes. Reject one that is smaller than the widget's own minimum size hint or lies off every
+    // screen, and fall back to the default size on the primary screen.
+    const QRect frame = custom_widget_->frameGeometry();
+    const QSize need = custom_widget_->minimumSizeHint().expandedTo(QSize(320, 240));
+    const bool on_screen = std::ranges::any_of(QGuiApplication::screens(),
+        [&](const QScreen *s) { return s->availableGeometry().intersects(frame); });
+    if (geom.isEmpty() or not on_screen or custom_widget_->width() < need.width() or custom_widget_->height() < need.height())
+    {
         custom_widget_->resize(820, 600);
+        if (const QScreen *s = QGuiApplication::primaryScreen())
+            custom_widget_->move(s->availableGeometry().center() - QPoint(410, 300));
+    }
     log_geometry("restored", custom_widget_.get());
 }
 

@@ -202,7 +202,8 @@ struct DoorCoreSinks
 struct SourceCounters
 {
     long slices = 0, door = 0, no_support = 0, bearing_only = 0, no_cam = 0, no_wall = 0, pushed = 0, pos_ev = 0;
-    double w_wall = 0.0, w_pool = 0.0, ev = 0.0, ev_max = 0.0;   // sums of: wall/variance weight, pooled-view factor, birth evidence
+    double w_wall = 0.0, w_pool = 0.0, ev = 0.0, ev_max = 0.0;
+    double agree_shut = 0.0, agree_open = 0.0;   // sums of the ricoh slice's two range-likelihood terms (ricoh_range: wall agreement, open-leaf offset)   // sums of: wall/variance weight, pooled-view factor, birth evidence
 };
 
 class DoorCore
@@ -282,7 +283,8 @@ private:
     int  exist_last_mask_frame_ = -1;   // integrate once per NEW mask frame
     // The 360 camera's LEARNED hit rate on doors the ZED confirms (Beta(1,1) prior): P(ricoh detects | door there, ricoh ran).
     // Calibrated online - the same detection model births and removals use - instead of an asserted constant.
-    float ricoh_hits_ = 0.0f, ricoh_trials_ = 0.0f;
+    float ricoh_hits_ = 0.0f, ricoh_trials_ = 0.0f;   // …on SHUT leaves (each trial weighted by the leaf's closedness)
+    float ricoh_open_hits_ = 0.0f, ricoh_open_trials_ = 0.0f;   // …and on OPEN ones (weighted by 1 - closedness; door_leaf_visibility.h)
     bool exist_warned_ = false;         // the "no mask_pixels_xy" warning, once
     int  ex_dbg_ = 0;                   // the readout's throttle counter (= the existence CSV's cycle column)
     std::unordered_map<std::uint64_t, float> last_L_;   // last L per door (forces a readout row on |ΔL| > 1)

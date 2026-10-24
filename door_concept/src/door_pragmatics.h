@@ -64,6 +64,7 @@
 #include "door_passability.h"  // clear_width, passable_prob
 #include "door_standpoint.h"   // the poses + which side of the aperture to stand on
 #include "door_approach_pose.h" // kApproachCompleteProb — the approach contract's completion level
+#include "door_cross_exec.h"    // P(cross executable) — the cross contract's pre: clause
 
 namespace rc::door
 {
@@ -101,6 +102,13 @@ struct InteractionState
     // off the normal is not "at the door".
     float p_facing = 1.0f;
     float facing_deg = 0.0f;          // θ, the robot's angle off the aperture normal (diagnostic)
+
+    // P(the cross is EXECUTABLE from here) = P(at the door) x P(the run robot -> through-pose is clear of the leaf) x P(passable)
+    // (door_cross_exec.h) — the cross contract's `pre:` clause. Needs the phi posterior AND a robot pose.
+    float p_cross_exec = 0.0f;
+    bool  p_cross_exec_known = false;
+    float p_corridor_clear = 0.0f;    // the middle factor, for the offer's why-line
+    float corr_lateral_m = 0.0f, corr_hinge_llr = 0.0f, corr_swing_llr = 0.0f;   // its inputs, for the why-line (live audit)
 
     float crossing_progress = 0.0f;   // -1 .. +1, signed against the latched side
     bool  crossing_known = false;
@@ -159,6 +167,9 @@ inline rc::affordance::Contract approach_contract(const DoorPragmaticCfg& p)
         .center("door_roi_offset")
         .valid ("door_roi_valid")
         .until ("door_reach_prob", GE, kApproachCompleteProb)   // ONE value, read by the pose solver too (door_approach_pose.h)
+        // ALSO a precondition: the approach's completion IS reaching the band, so the goal keeps the clause (goal_met unchanged) and the
+        // controller's Place settle test reads the same level from `pre` (Task O) instead of a fixed arrival tolerance
+        .precondition("door_reach_prob", GE, kApproachCompleteProb)
         .still (0.10f, 0.15f)
         .stable(2).timeout_s(p.approach_timeout_s).on_fail(rc::affordance::OnFail::Consume);
 }
@@ -180,6 +191,8 @@ inline rc::affordance::Contract open_contract(const DoorPragmaticCfg& p)
 {
     using enum rc::affordance::CompareOp;
     return rc::affordance::Contract::orient()
+        .precondition("door_reach_prob", GE, kApproachCompleteProb)   // Task O: where the robot STANDS (in the band, facing) — the
+                                                                      // controller settles the orient on it; NOT part of "open is done"
         .until ("door_open_prob", GE, 0.70f)
         .still (0.05f, 0.10f)
         .yaw_rate(kTurnAtBaseLimit)
@@ -205,6 +218,9 @@ inline rc::affordance::Contract cross_contract(const DoorPragmaticCfg& p)
     using enum rc::affordance::CompareOp;
     return rc::affordance::Contract::reach()
         .until ("door_crossing_progress", GE, 0.90f)
+        // pre: the cross is only EXECUTABLE from where the robot stands if the run to the far side is clear of the leaf
+        // (door_cross_exec.h). Same completion level as the approach (one number for "the precondition holds").
+        .precondition("door_cross_exec_prob", GE, kApproachCompleteProb)
         .stable(2).timeout_s(p.cross_timeout_s).on_fail(rc::affordance::OnFail::Consume);
 }
 

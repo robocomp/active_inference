@@ -16,11 +16,13 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <numbers>
 #include <optional>
 #include <span>
 #include <vector>
 
+#include "affordance_protocol/affordance_goal_parse.h"   // GoalClause
 #include "policy_types.h"
 #include "local_policy.h"
 #include "unseen_contact.h"
@@ -155,9 +157,57 @@ inline bool field_free_from_distance(float distance_m, float cell_m, float inscr
 //   Orient — go to the standpoint (Place with yaw) while farther than tol_xy, then turn in place to target.yaw_rad (the
 //            same forward-heading convention, facing_yaw_to_theta above).
 enum class GoalMode { Place, Cross, Orient };
+
+// ★ Task O (gold9 leg 1) — THE ORIENT COMPLETES ON THE AFFORDANCE'S PRECONDITION PROBABILITY, NOT ON A PLACE TOLERANCE.
+//   The affordance publishes how likely its own precondition holds from where the robot is (door `open`: door_reach_prob =
+//   P(in band) x P(facing)) and the level at which its sibling contract calls that done (complete_at). A fixed arrival
+//   tolerance said "there" 0.18 m short of the target while P was 0.75, and the turn-in-place goal then sat still until the
+//   affordance timed out. With the probability known the robot is SETTLED iff p >= complete_at; until then the goal keeps
+//   pulling to the target pose, its arrival tolerance shrinking continuously with p/complete_at (no gate: at p -> complete_at
+//   the tolerance -> 0, so being inside tol_xy never stops the pull while the precondition is unmet). Without a published
+//   probability the old distance tolerance applies.
+struct OrientPrecondition { float p = 0.f; float complete_at = 1.f; };
+
+// ★ Task O fix round 1 (I3): the precondition comes from the ACTIVE affordance's OWN contract — its `*_reach_prob >=` clause is the
+//   level, the feedback node's attribute of that name is p. `read(attr)` returns the node's value (nullopt = absent). A sentinel
+//   (negative = "not measured") is no evidence: nullopt, the distance tolerance applies.
+template <class Read>
+inline std::optional<OrientPrecondition> precondition_from_clauses(std::span<const rc::affordance::GoalClause> goal, Read&& read)
+{
+    for (const auto& c : goal)
+        if (c.op == rc::affordance::CompareOp::GE and c.attr.ends_with("_reach_prob"))
+            if (const std::optional<float> v = read(c.attr); v.has_value() and *v >= 0.f)
+                return OrientPrecondition{.p = *v, .complete_at = c.value};
+    return std::nullopt;
+}
+
+// ★ Task O fix round 1 (I2): the goal is toward the PUBLISHED target; our repaired point is only an admissible substitute when the
+//   published one is blocked / unroutable (published_admissible = false) or not known (no published point: a click, a mission).
+inline Eigen::Vector2f goal_target_pos(const std::optional<Eigen::Vector2f>& published, const Eigen::Vector2f& repaired,
+                                       bool published_admissible)
+{
+    return published.has_value() and published_admissible ? *published : repaired;
+}
+
+// ★ Task O fix rounds 1-2 (I4): a step whose completion waits on a probability is bounded FROM ITS ENTRY by the contract's own timeout.
+//   `entry` is the step's start (reset when the node changes); returns true once now - entry > timeout_ms.
+inline bool step_entry_expired(std::optional<std::uint64_t>& entry, std::uint64_t& entry_node, std::uint64_t node,
+                               std::uint64_t now_ms, float timeout_ms)
+{
+    if (entry_node != node or not entry.has_value()) { entry_node = node; entry = now_ms; }
+    return double(now_ms - *entry) > double(timeout_ms);
+}
+
+inline bool orient_settled(const ControllerRobotPose& robot, const ControllerTargetInfo& t, const GoalAdapterParams& p,
+                           const std::optional<OrientPrecondition>& pre)
+{
+    if (pre.has_value()) return pre->p >= pre->complete_at;
+    return (robot.pos - t.room_pos).norm() <= p.tol_xy;
+}
+
 inline std::optional<GoalSpec> goal_for_target(const ControllerTargetInfo& t, const ControllerRobotPose& robot,
                                                const std::optional<RoomGap>& gap, GoalMode mode, bool want_facing,
-                                               const GoalAdapterParams& p)
+                                               const GoalAdapterParams& p, const std::optional<OrientPrecondition>& pre = std::nullopt)
 {
     switch (mode)
     {
@@ -166,12 +216,24 @@ inline std::optional<GoalSpec> goal_for_target(const ControllerTargetInfo& t, co
             return doorway_goal(*gap, p);
         case GoalMode::Orient:
             // ★ Live fix 4 ruling 1: an orient GOES TO its standpoint first — a Place WITH the contract's yaw while the robot
-            //   is farther than the arrival tolerance from it; only there does it turn in place (tourP8: turned to +1.57 at a
-            //   spot 1.2 m from the open standpoint, 58 deg off the door normal).
-            if ((robot.pos - t.room_pos).norm() > p.tol_xy) return place_goal(t.room_pos, t.yaw_rad, p.tol_xy, p.tol_yaw);
+            //   is not settled there; only there does it turn in place (tourP8: turned to +1.57 at a spot 1.2 m from the
+            //   open standpoint, 58 deg off the door normal). Task O: "settled" is the affordance's own probability when it
+            //   publishes one (orient_settled).
+            if (not orient_settled(robot, t, p, pre))
+            {
+                const float tol = pre.has_value() ? p.tol_xy * std::clamp(1.f - pre->p / std::max(pre->complete_at, 1e-6f), 0.f, 1.f)
+                                                  : p.tol_xy;
+                return place_goal(t.room_pos, t.yaw_rad, tol, p.tol_yaw);
+            }
             return heading_goal(robot.pos, t.yaw_rad, p.tol_yaw);
         case GoalMode::Place:
-            return place_goal(t.room_pos, want_facing ? std::optional<float>(t.yaw_rad) : std::nullopt, p.tol_xy, p.tol_yaw);
+        {
+            // Task O (I2): with the affordance's probability known, arriving within tol_xy is not completing — the tolerance shrinks
+            // with p/complete_at (the caller completes at p >= complete_at, orient_settled)
+            const float tol = pre.has_value() ? p.tol_xy * std::clamp(1.f - pre->p / std::max(pre->complete_at, 1e-6f), 0.f, 1.f)
+                                              : p.tol_xy;
+            return place_goal(t.room_pos, want_facing ? std::optional<float>(t.yaw_rad) : std::nullopt, tol, p.tol_yaw);
+        }
     }
     return std::nullopt;
 }

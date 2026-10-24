@@ -275,11 +275,13 @@ void RoomSceneGraph::update(const rc::RoomConcept::UpdateResult& res, float adv,
     if (!room_node_created_)
     {
         stable_frames_ = stable ? stable_frames_ + 1 : 0;
+        if (not stability_configured_) { stability_.configure(params_->STABLE_FRAMES_REQUIRED); stability_configured_ = true; }
+        const bool stability_decisive = stability_.update(stable);
         // Estimate mode: also wait for the learnt polygon to close and be re-anchored (map_ready).
         // ...unless the start-up proto owns creation (estimating + StartupProto.Enabled): its birth may wait
         // one update after sweeping leftovers, and this path must not slip a surveyed-looking room in between.
         const bool proto_owns_creation = params_->STARTUP_PROTO_ENABLED and room_concept_->estimating();
-        if (not proto_owns_creation and stable_frames_ >= params_->STABLE_FRAMES_REQUIRED and room_concept_->map_ready())
+        if (not proto_owns_creation and stability_decisive and room_concept_->map_ready())
             dsr_create_room_and_reparent(res);
         // ★NOTHING IS PUBLISHED WHILE WAITING, AND THAT IS THE POINT. This used to call
         // dsr_update_pose(res) here, writing the estimate onto root->robot every frame until the room
@@ -1334,7 +1336,7 @@ void RoomSceneGraph::forget_room(const char* why)
     room_node_created_ = false;
     dsr_room_id_ = 0;
     affordance_manager_.reset();
-    stable_frames_ = 0;
+    stable_frames_ = 0; stability_.reset();
     published_polygon_verts_ = 0;
     startup_proto_ = startup_promoted_ = false;
     layout_pool_.clear();
@@ -1678,7 +1680,7 @@ void RoomSceneGraph::arm_startup_proto(std::uint64_t room_id, const Eigen::Affin
     dsr_room_id_       = room_id;
     published_is_lost_.reset();   // a new room node: `is_lost` is written on it afresh
     room_node_created_ = true;
-    stable_frames_     = 0;
+    stable_frames_     = 0; stability_.reset();
     published_polygon_verts_ = 0;
     startup_proto_     = true;
     startup_promoted_  = false;
@@ -2385,7 +2387,7 @@ void RoomSceneGraph::dsr_create_room_and_reparent(const rc::RoomConcept::UpdateR
     {
         dsr_room_id_ = adopted.value();
         room_node_created_ = true;
-        stable_frames_ = 0;
+        stable_frames_ = 0; stability_.reset();
         // Idempotent polygon write: a room node ADOPTED here (persisted from a prior session, or created bare by
         // another agent) may LACK the delimiting polygon — it is only set on the create path below. Every
         // consumer's room-containment prior (chair_concept, cabinet_concept) then silently goes inert. So if the
@@ -2451,7 +2453,7 @@ void RoomSceneGraph::dsr_create_room_and_reparent(const rc::RoomConcept::UpdateR
 
     dsr_room_id_ = room_id_opt.value();
     room_node_created_ = true;
-    stable_frames_ = 0;
+    stable_frames_ = 0; stability_.reset();
     published_polygon_verts_ = room_polygon.size();
     trigger_layout_();
 

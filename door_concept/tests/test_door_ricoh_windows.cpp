@@ -47,53 +47,112 @@ int main()
     CHECK(ricoh_looked(across, cam, V2(-1.0f, 0.0f)));
     CHECK(ricoh_looked(across, cam, V2(std::cos(pi - 0.3f), std::sin(pi - 0.3f))));
     CHECK(not ricoh_looked(across, cam, V2(1.0f, 0.0f)));
+    {   // the three states as the helpers see them
+        struct Sl { int source; };
+        struct Pk { std::vector<Eigen::Matrix<float, 2, 1>> ricoh_windows; std::vector<Sl> slices; };
+        Pk a{{{0.0f, 2.0f * pi / 3.0f}}, {}};                  // (a) fresh, windows (even with no detection)
+        Pk b{{}, {{1}}};                                       // (b) fresh ricoh slice, no attribute
+        Pk c{{}, {{0}}};                                       // (c) only a ZED slice / nothing: no fresh ricoh frame
+        Pk d{{}, {}};
+        CHECK(ricoh_fresh(a) and ricoh_fresh(b) and not ricoh_fresh(c) and not ricoh_fresh(d));
+        const V2 in_w(std::cos(1.0f), std::sin(1.0f)), out_w(std::cos(-2.0f), std::sin(-2.0f));
+        CHECK(ricoh_looked_in(a, cam, in_w) and not ricoh_looked_in(a, cam, out_w));
+        CHECK(ricoh_looked_in(b, cam, in_w) and ricoh_looked_in(b, cam, out_w));            // legacy: unknown => looked
+        CHECK(not ricoh_looked_in(c, cam, in_w) and not ricoh_looked_in(d, cam, out_w));    // nothing fresh => nothing looked
+    }
+    // ── B2. full circle and three adjacent strips ───────────────────────────────────────────────────────────────
+    {
+        const std::vector<Eigen::Matrix<float, 2, 1>> full{{0.0f, 2.0f * pi}};
+        CHECK(ricoh_looked(full, cam, V2(-1, 0)) and ricoh_looked(full, cam, V2(0, 1)));
+        const float t3 = 2.0f * pi / 3.0f;
+        const std::vector<Eigen::Matrix<float, 2, 1>> three{{-pi, -pi + t3}, {-pi + t3, -pi + 2 * t3}, {-pi + 2 * t3, pi}};
+        for (int k = 0; k < 72; ++k)
+        {
+            const float a = -pi + 2.0f * pi * (static_cast<float>(k) + 0.5f) / 72.0f;
+            CHECK(ricoh_looked(three, cam, V2(std::cos(a), std::sin(a))));
+        }
+        const std::vector<Eigen::Matrix<float, 2, 1>> one_of_three{{-pi + t3, -pi + 2 * t3}};
+        int inside = 0;
+        for (int k = 0; k < 72; ++k)
+        {
+            const float a = -pi + 2.0f * pi * (static_cast<float>(k) + 0.5f) / 72.0f;
+            inside += ricoh_looked(one_of_three, cam, V2(std::cos(a), std::sin(a))) ? 1 : 0;
+        }
+        CHECK(inside == 24);                                                                 // exactly a third of the bearings
+    }
     // ── C. bank ────────────────────────────────────────────────────────────────────────────────────────────────
-    const float h = 0.35f, pc = 0.05f, gate = 9.0f, bar = 6.6f * std::log(h / pc);
+    RicohBirthBank::Params prm;
+    prm.hit_rate = 0.8f; prm.clutter = 0.05f; prm.gate_mahalanobis = 9.0f; prm.min_sep_m = 0.7f; prm.tau_s = 5.0f; prm.forget_s = 120.0f;
+    const float bar = 6.6f * RicohBirthBank::llr_hit(prm);
     const V2 place(3.0f, 5.0f);
     const std::vector<V2> no_tracks;
-    const auto run = [&](bool unlooked_frames_are_looked, int frames) -> int      // frames until ripe, -1 never
+    const float dt = 0.1f;
+    // seconds until ripe; `hit_every`: a detection every n-th frame (looked frames only when `unlooked_are_looks` is false)
+    const auto run = [&](bool moving, int hit_every, bool unlooked_are_looks, float t_max) -> float
     {
         RicohBirthBank b;
-        for (int k = 1; k <= frames; ++k)
+        for (int k = 1; k * dt <= t_max; ++k)
         {
-            const bool seen = (k % 3 == 0);
+            const float t = static_cast<float>(k) * dt;
+            const V2 c = moving ? V2(3.0f + 3.0f * std::cos(0.01f * static_cast<float>(k)), 5.0f - 3.0f * std::sin(0.01f * static_cast<float>(k)) - 1.0f) : V2(0.f, 0.f);
+            const bool seen = (k % hit_every == 0);
             std::vector<RicohBirthBank::Look> hits;
-            if (seen) hits.push_back({place, 0.01f, 0.8f});
-            // q: the detectability of the place; an unlooked frame withholds its absence unless we pretend the strip was processed
-            b.update(hits, h, pc, gate, [&](const V2&) { return (seen or unlooked_frames_are_looked) ? 0.85f : 0.0f; }, no_tracks, 0.7f);
-            if (b.ripe_at(place, 0.01f, gate, bar)) return k;
+            if (seen) hits.push_back({place, 0.01f, 0.5f});
+            b.update(t, c, hits, prm, [&](const V2&) { return (seen or unlooked_are_looks) ? 0.85f : 0.0f; }, no_tracks);
+            if (b.ripe_at(place, 0.01f, prm.gate_mahalanobis, bar)) return t;
         }
-        return -1;
+        return -1.0f;
     };
-    const int blind = run(true, 600), aware = run(false, 600);
-    std::print("C: ripe after {} frames counting unlooked frames as misses, {} when they are not looked at\n", blind, aware);
-    CHECK(aware > 0 and (blind < 0 or aware <= blind));
-    {   // seen once, then looked-at absences: dropped (the prior), never ripe
+    const float t_parked = run(false, 1, true, 600.f), t_moving = run(true, 1, true, 600.f);
+    const float t_blind = run(false, 3, true, 1200.f), t_aware = run(false, 3, false, 1200.f);
+    std::print("C: time to ripe: parked, every frame a hit {:.1f} s; moving at 0.3 m/s on a 3 m circle {:.1f} s; parked 1-in-3 hits: unlooked frames as misses {:.1f} s, not looked at {:.1f} s\n",
+               t_parked, t_moving, t_blind, t_aware);
+    CHECK(t_parked > 0.0f and t_moving > 0.0f);
+    CHECK(t_parked > 10.0f * dt * 9.0f);                 // NOT ~9 looked hits (1 s): the parked stare is a few effective samples, at tau = 5 s each
+    CHECK(t_moving < t_parked);                          // new viewpoints are worth more than a stare
+    CHECK(t_aware > 0.0f and (t_blind < 0.0f or t_aware <= t_blind));
+    {   // seen once, then looked-at absences from other views: dropped (the prior), never ripe
         RicohBirthBank b;
-        b.update({{place, 0.01f, 0.8f}}, h, pc, gate, [](const V2&) { return 0.85f; }, no_tracks, 0.7f);
+        b.update(0.0, V2(0, 0), {{place, 0.01f, 0.5f}}, prm, [](const V2&) { return 0.85f; }, no_tracks);
         CHECK(b.entries().size() == 1);
-        for (int k = 0; k < 20; ++k) b.update({}, h, pc, gate, [](const V2&) { return 0.85f; }, no_tracks, 0.7f);
+        for (int k = 1; k <= 60; ++k)
+            b.update(5.0 * k, V2(std::cos(0.7f * static_cast<float>(k)) * 4.0f, 1.0f + std::sin(0.7f * static_cast<float>(k)) * 2.0f), {}, prm, [](const V2&) { return 0.85f; }, no_tracks);
         CHECK(b.entries().empty());
     }
-    {   // seen once, then NOT looked at: held
+    {   // seen once, then NOT observed: relaxes toward the prior with forget_s, and is eventually dropped; not before
         RicohBirthBank b;
-        b.update({{place, 0.01f, 0.8f}}, h, pc, gate, [](const V2&) { return 0.85f; }, no_tracks, 0.7f);
-        for (int k = 0; k < 200; ++k) b.update({}, h, pc, gate, [](const V2&) { return 0.0f; }, no_tracks, 0.7f);
-        CHECK(b.entries().size() == 1);
+        b.update(0.0, V2(0, 0), {{place, 0.01f, 0.5f}}, prm, [](const V2&) { return 0.0f; }, no_tracks);
+        const float L0 = b.entries().front().L;
+        b.update(60.0, V2(0, 0), {}, prm, [](const V2&) { return 0.0f; }, no_tracks);
+        CHECK(b.entries().size() == 1 and b.entries().front().L < L0 and b.entries().front().L > 0.4f * L0);   // exp(-60/120) = 0.61
+        for (int k = 2; k < 400; ++k) b.update(60.0 * k, V2(0, 0), {}, prm, [](const V2&) { return 0.0f; }, no_tracks);
+        CHECK(b.entries().empty());
     }
-    {   // scattered hits (a new place each time) never ripen
+    {   // two detections of one place in ONE frame are one hit
+        RicohBirthBank a, c;
+        a.update(0.0, V2(0, 0), {{place, 0.01f, 0.5f}}, prm, [](const V2&) { return 0.85f; }, no_tracks);
+        c.update(0.0, V2(0, 0), {{place, 0.01f, 0.5f}, {place + V2(0.05f, 0.f), 0.01f, 0.5f}}, prm, [](const V2&) { return 0.85f; }, no_tracks);
+        CHECK(std::abs(a.entries().front().L - c.entries().front().L) < 1e-6f);
+    }
+    {   // scattered hits (a new place each time) never ripen; the bank stays capped
         RicohBirthBank b;
-        for (int k = 0; k < 300; ++k)
+        for (int k = 0; k < 600; ++k)
         {
             const V2 p(-4.0f + 8.0f * std::fmod(0.618034f * static_cast<float>(k), 1.0f), 5.0f);
-            b.update({{p, 0.01f, 0.8f}}, h, pc, gate, [](const V2&) { return 0.85f; }, no_tracks, 0.7f);
+            b.update(0.1 * k, V2(0, 0), {{p, 0.01f, 0.5f}}, prm, [](const V2&) { return 0.85f; }, no_tracks);
             for (const auto& e : b.entries()) CHECK(e.L < bar);
+            CHECK(b.entries().size() <= prm.max_entries);
         }
     }
     {   // an entry that lands on a live track is dropped
         RicohBirthBank b;
-        b.update({{place, 0.01f, 0.8f}}, h, pc, gate, [](const V2&) { return 0.85f; }, std::vector<V2>{V2(3.1f, 5.0f)}, 0.7f);
+        b.update(0.0, V2(0, 0), {{place, 0.01f, 0.5f}}, prm, [](const V2&) { return 0.85f; }, std::vector<V2>{V2(3.1f, 5.0f)});
         CHECK(b.entries().empty());
+    }
+    {   // a detector that would not tell a door from clutter (learned h <= pc): nothing ripens
+        RicohBirthBank b; auto bad = prm; bad.hit_rate = 0.04f;
+        for (int k = 0; k < 100; ++k) b.update(1.0 * k, V2(std::cos(0.3f * k) * 3, std::sin(0.3f * k) * 3), {{place, 0.01f, 0.5f}}, bad, [](const V2&) { return 0.85f; }, no_tracks);
+        CHECK(b.entries().empty() and RicohBirthBank::llr_hit(bad) == 0.0f);
     }
     // ── D. view pool holds an unlooked candidate ─────────────────────────────────────────────────────────────
     {

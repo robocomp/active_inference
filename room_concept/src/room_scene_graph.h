@@ -9,6 +9,7 @@
  */
 
 #pragma once
+#include "stability_belief.h"
 
 // RoomSceneGraph — DSR scene-graph writer for room_concept.
 //
@@ -530,7 +531,9 @@ private:
     std::string overlay_robot_name_, overlay_scenario_name_;   ///< resolve_overlays_from_graph() runs once, from whichever site reaches it first
     std::uint64_t dsr_room_id_  = 0;
     bool          room_node_created_ = false;
-    int           stable_frames_     = 0;
+    int           stable_frames_     = 0;   // consecutive stable frames: DISPLAY only
+    rc::StabilityBelief stability_;           // the birth decision (stability_belief.h)
+    bool          stability_configured_ = false;
     std::size_t published_polygon_verts_ = 0;   // Estimate mode: vertex count last written to the room node
     // Sustained-stability counter for the object-anchor PIN guard. Distinct from stable_frames_, which
     // only runs BEFORE the room node exists (bootstrap) and is reset by every re-anchor: pinning happens

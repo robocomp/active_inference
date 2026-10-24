@@ -370,6 +370,7 @@ void InputSnapshot::capture_masks(DSR::DSRGraph& G, DSR::InnerEigenAPI* inner, D
     o.mask_pixels = p.mask_pixels;
     o.cam_twist = p.cam_twist;
     o.frame_dt_s = p.frame_dt_s;
+    o.ricoh_windows.assign(p.ricoh_windows.begin(), p.ricoh_windows.end());   // the strips the 360 detector ran on (empty = unknown)
     o.ms_since_last_frame = cur_.mask_stream_ms_since_last_frame;
     if (p.valid)
     {

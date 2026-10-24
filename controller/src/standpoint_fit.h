@@ -97,6 +97,15 @@ struct Decision { Action action = Action::LegacyRepair; Fit fit{}; };
     return {verdict(f) == Verdict::HandBack ? Action::HandBack : Action::ServeAsPublished, f};
 }
 
+// ── D4: A PLACE THE FIELD CANNOT REACH IS HANDED BACK, NOT DRIVEN AT ─────────────────────────────────────────────────────
+// body_fit / decide_standpoint judge the standpoint against the planner's belief; the policy's cost-to-go is built on its own
+// free mask (the inscribed disc must clear the distance field), and a place the two disagree on used to be driven at: gold13's
+// epistemic look aff_door_1 sat inside Bed(1) — "goal free 0, field inf m from the robot" — and the controller spun in NO ROUTE.
+// The goal is seeded in a non-free cell and the field stays infinite everywhere, the robot's cell included. So the verdict is
+// the field's own: a place whose cost-to-go at the robot is not finite is a place the body cannot be taken to — Unreachable to
+// the producer (object and Reach alike; the look, the approach and the cell all go through here), which re-sites it.
+[[nodiscard]] inline bool place_unreachable(float cost_to_go_at_robot) { return not std::isfinite(cost_to_go_at_robot); }
+
 [[nodiscard]] inline const char* action_name(Action a)
 {
     return a == Action::LegacyRepair ? "LegacyRepair" : a == Action::ServeAsPublished ? "ServeAsPublished" : "HandBack";

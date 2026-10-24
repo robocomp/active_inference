@@ -287,3 +287,9 @@ add_executable(boxed_in_handoff_test EXCLUDE_FROM_ALL ../tools/boxed_in_handoff_
 target_include_directories(boxed_in_handoff_test PRIVATE ${CMAKE_CURRENT_LIST_DIR}/../src)
 target_link_libraries(boxed_in_handoff_test ${LIBS})
 set_target_properties(boxed_in_handoff_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../../bin)
+
+# ── stability_belief_test ─────────────────────────────────────────────────────
+# Room-birth stability belief (replaces the consecutive-frames counter). Header-only.
+add_executable(stability_belief_test EXCLUDE_FROM_ALL ../tools/stability_belief_test.cpp)
+target_include_directories(stability_belief_test PRIVATE ${CMAKE_CURRENT_LIST_DIR}/../src)
+set_target_properties(stability_belief_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../../bin)

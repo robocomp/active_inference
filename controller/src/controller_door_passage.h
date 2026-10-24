@@ -302,7 +302,12 @@ public:
             // the rule made an OPEN, passable door wait for the approach servo's own completion — try99 leg 2: cross on
             // offer at P(passable)=1.00, phi 1.57 rad, while the approach servo micro-searched until approach_timeout.
             // `open_wanted` still makes a shut door win over a contradictory `cross`.
-            if (state_of(G, name_of(later)) == State::Offered and not open_wanted)
+            // ★ R2: `cross` is skipped to ONLY when its own pre: clause holds (P(cross executable from here) — at the door x the run
+            //   clear of the leaf x passable), and NEVER while the approach's hand-back is being waited out (attempts_ > 0 on the
+            //   approach: door_concept is re-siting the standpoint). Otherwise the passage stays on / re-enters the approach.
+            const bool approach_handed_back = step_ == Step::Approach and attempts_ > 0;
+            const bool pre_blocks = later == Step::Cross and (approach_handed_back or cross_pre(G) == Pre::Fails);
+            if (state_of(G, name_of(later)) == State::Offered and not open_wanted and not pre_blocks)
             {
                 const bool was_executing = st_cur == State::Executing;
                 out.event = std::format("[door-passage] {}: {} is offered — {} to it", door_, name_of(later),
@@ -319,6 +324,7 @@ public:
                         { opened_ = true; reached_door_ = true; }
                 step_ = later;
                 seen_executing_ = false;
+                attempts_ = 0;   // ★ R3: a step change starts the new step clean — no attempt carried over to fail it
                 break;
             }
         }
@@ -342,19 +348,35 @@ public:
                 if (const State st = state_of(G, name_of(s)); st == State::Offered or st == State::Executing) return true;
             return false;
         };
-        if (step_ == Step::Open and not seen_executing_ and owner_live())
+        // ★ F2 (D3 fix round 2, gold14): an `open` that is COMPLETED (Satisfied) and WITHDRAWN is a door already open — the passage
+        //   sat on it for ~10 min waiting for it to come back. It advances to `cross` whatever cross's pre says: the pre then decides
+        //   cross vs re-approach (an offered cross whose run meets the leaf falls back to the approach below). The same for an
+        //   `open` that is not offered while the door is MEASURED open (the rule above), cross's pre deciding what comes next.
+        const auto open_done = [&]
+        {
+            const auto on = G.get_node(name_of(Step::Open));
+            return on.has_value() and state_of(G, name_of(Step::Open)) == State::Completed
+                   and rc::affordance::read_outcome(on.value()) == rc::affordance::Outcome::Satisfied;
+        };
+        if (step_ == Step::Open and not seen_executing_)
             if (const State so = state_of(G, name_of(Step::Open)); so != State::Offered and so != State::Executing)
-                if (const auto dn = G.get_node(door_); dn.has_value())
-                    if (const auto po = G.get_attrib_by_name<door_open_prob_att>(*dn); po.has_value() and *po >= 0.f and *po > 0.5f)
-                    {
-                        reached_door_ = true;   // as a satisfied `open`: the robot is at the door (no falling back to `open`)
-                        step_ = Step::Cross;
-                        seen_executing_ = false;
-                        attempts_ = 0;
-                        out.event = std::format("[door-passage] {}: {} is not offered and the door is measured open (P {:.2f}) — "
-                                                "its goal holds: SATISFIED -> {}", door_, name_of(Step::Open), *po,
-                                                name_of(Step::Cross));
-                    }
+            {
+                std::optional<float> po;
+                if (owner_live())
+                    if (const auto dn = G.get_node(door_); dn.has_value())
+                        if (const auto v = G.get_attrib_by_name<door_open_prob_att>(*dn); v.has_value() and *v >= 0.f and *v > 0.5f) po = *v;
+                if (po.has_value() or open_done())
+                {
+                    reached_door_ = true;   // as a satisfied `open`: the robot is at the door (no falling back to `open`)
+                    step_ = Step::Cross;
+                    seen_executing_ = false;
+                    attempts_ = 0;
+                    out.event = std::format("[door-passage] {}: {} is not offered and the door is {} — its goal holds: SATISFIED -> {}",
+                                            door_, name_of(Step::Open),
+                                            po.has_value() ? std::format("measured open (P {:.2f})", *po) : std::string("already opened (completed, satisfied)"),
+                                            name_of(Step::Cross));
+                }
+            }
 
         // ★ A STEP THAT IS NO LONGER ON OFFER FALLS BACK to the latest earlier one that is. door_concept withdraws
         //   `cross` when the door is believed shut and `open` when out of reach; `approach` is always offered for a
@@ -388,7 +410,11 @@ public:
         if (step_ == Step::Cross or step_ == Step::Open)
         {
             const State st_now = state_of(G, name_of(step_));
-            if (st_now != State::Offered and st_now != State::Executing and not seen_executing_)
+            // ★ R2: a `cross` that is OFFERED but whose pre: clause fails from here (the run to the far side meets the leaf) is not
+            //   executable: re-enter the approach, which re-sites the robot, exactly as for a withdrawn step. Never one being executed.
+            const bool cross_not_executable = step_ == Step::Cross and st_now == State::Offered and not seen_executing_
+                                              and cross_pre(G) == Pre::Fails;
+            if ((st_now != State::Offered and st_now != State::Executing and not seen_executing_) or cross_not_executable)
                 for (Step earlier : {Step::Open, Step::Approach})
                 {
                     if (static_cast<int>(earlier) >= static_cast<int>(step_)) continue;
@@ -400,6 +426,7 @@ public:
                                                 reached_door_ ? " (the robot left the door's reach band)" : "");
                         if (earlier == Step::Approach) reached_door_ = false;   // re-armed by approach's completion
                         step_ = earlier;
+                        attempts_ = 0;   // ★ R3
                         break;
                     }
                 }
@@ -419,6 +446,7 @@ public:
             if (was_executing) preempted_ = true;
             step_ = Step::Open;
             seen_executing_ = false;
+            attempts_ = 0;   // ★ R3
         }
 
         // ★ THE CROSSING ENDS WHEN THE ROBOT IS THROUGH (Task 12 Fix E, user 10-18: "keep going inside so it can localise in
@@ -712,6 +740,30 @@ private:
         const char* kind = s == Step::Approach ? "approach" : s == Step::Open ? "open" : s == Step::Close ? "close" : "cross";
         return "aff_" + door_ + "_" + kind;
     }
+    /// ★ R2 (D3 fix round 1) — the cross's OWN `pre:` clauses, read from ITS contract as the Place/Orient completion reads its
+    ///   own (contract.pre against the door node's attribute of that name). Unstated = the producer declares none (an older
+    ///   door_concept): the legacy behaviour, offered means executable. Fails when the probability is below the clause's level OR
+    ///   not measured (the -1 sentinel is no evidence, never a pass).
+    enum class Pre { Unstated, Holds, Fails };
+    [[nodiscard]] Pre cross_pre(DSR::DSRGraph& G) const
+    {
+        const auto an = G.get_node(name_of(Step::Cross));
+        if (not an.has_value()) return Pre::Unstated;
+        const auto contract = rc::affordance::read_contract(an.value());
+        bool stated = false;
+        for (const auto& cl : contract.pre)
+        {
+            if (cl.attr != "door_cross_exec_prob") continue;
+            stated = true;
+            const auto dn = G.get_node(door_);
+            const auto v = dn.has_value() ? G.get_attrib_by_name<door_cross_exec_prob_att>(*dn) : std::nullopt;
+            if (not v.has_value() or not std::isfinite(*v) or *v < 0.f) return Pre::Fails;
+            const bool ok = cl.op == rc::affordance::CompareOp::LE ? *v <= cl.value : *v >= cl.value;
+            if (not ok) return Pre::Fails;
+        }
+        return stated ? Pre::Holds : Pre::Unstated;
+    }
+
     static const char* state_name(State s)
     {
         return s == State::Offered ? "offered" : s == State::Executing ? "executing"

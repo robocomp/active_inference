@@ -12,6 +12,7 @@
 // Unreachable. This file builds its input from the controller's world (conversions: local_policy/goal_adapter.h) and sends
 // its (v, w).
 #include "controller_session.h"
+#include "standpoint_fit.h"   // D4: rc::standpoint::place_unreachable
 
 #include <chrono>
 #include <cmath>
@@ -65,8 +66,33 @@ void ControllerSession::read_base_odometry(const ControllerWorldModel &world_mod
     }
 }
 
+// ★ Task O fix round 1: the active contract's precondition probability (policy-drive helpers)
+std::optional<rc::policy::OrientPrecondition> ControllerSession::contract_precondition(const rc::affordance::Contract &c) const
+{
+    const std::uint64_t fb = c.feedback_node_id != 0 ? c.feedback_node_id
+                           : feedback_node_id_ != 0 ? feedback_node_id_
+                           : last_target_info_.has_value() ? last_target_info_->parent_node_id : 0;
+    if (not graph_ or fb == 0) return std::nullopt;
+    const auto node = graph_->get_node(fb);
+    if (not node.has_value()) return std::nullopt;
+    return rc::policy::precondition_from_clauses(c.pre, [&](const std::string &attr) -> std::optional<float>
+    {
+        if (attr == "door_reach_prob") return graph_->get_attrib_by_name<door_reach_prob_att>(node.value());
+        return std::nullopt;
+    });
+}
+
+// Is the published point usable as the goal? Unknown grid / blocked pose => the repaired point stands in.
+bool ControllerSession::published_target_admissible(const ControllerTargetInfo &t) const
+{
+    if (not last_raw_target_pos_.has_value()) return false;
+    return grid_planner_.pose_free(*last_raw_target_pos_, t.yaw_rad);
+}
+
 void ControllerSession::policy_reset()
 {
+    orient_entry_ms_.reset();
+    place_entry_ms_.reset();
     policy_goal_.reset();
     policy_goal_who_.clear();
     policy_unseen_.reset();
@@ -301,6 +327,14 @@ ControllerSession::PolicyTick ControllerSession::policy_tick(const rc::policy::G
                      spec.goal.yaw ? std::format(" facing {:.0f} deg", *spec.goal.yaw * 57.29578f) : std::string(),
                      policy_nav_.last_build_ms(), policy_nav_.field().at(pose.p));
     }
+    // ★ D4: an object / look / Reach place the field cannot reach from the robot (inside furniture the producer does not know of)
+    //   is HANDED BACK to the producer exactly like the approach standpoint (Task 3c) — it re-sites — never driven at.
+    if (new_goal and rc::standpoint::place_unreachable(policy_nav_.field().at(pose.p))
+        and flag_standpoint_unreachable(std::format("the local policy's field has no route from ({:.2f},{:.2f}) to the place ({:.2f},{:.2f}) "
+                                                    "— the body cannot stand there (furniture on it?) — handed back, not driven at",
+                                                    pose.p.x(), pose.p.y(), spec.goal.p.x(), spec.goal.p.y())))
+        std::println("[policy] {}: the field is infinite from the robot to ({:.2f},{:.2f}) — handing the place back to the producer "
+                     "(D4: a place the body cannot stand is never driven at)", who, spec.goal.p.x(), spec.goal.p.y());
     // ★ Live fix 2 ruling 4 — DIAGNOSTIC: a new goal whose field at the robot exceeds 10x the straight-line distance is
     //   dumped (free mask summary, traps, residual density stats, goal points) to a file named in the log.
     if (new_goal)
@@ -892,7 +926,26 @@ void ControllerSession::drive_with_policy(const ControllerRobotPose &robot_pose,
                 feedback_node_id_ = contract.feedback_node_id != 0 ? contract.feedback_node_id : last_target_info_->parent_node_id;
                 // Live fix 4 ruling 1: the orient goes to its standpoint first (a Place with yaw); its protocol (look / timeout)
                 // runs only once there — on the way, an incidental heading match is not the look
-                const bool at_standpoint = (cpose.pos - last_target_info_->room_pos).norm() <= gp.tol_xy;
+                // ★ Task O: the standpoint is the PUBLISHED target (our repair had put it 0.02 m from the robot, 0.18 m short of the
+                //   offer), and "there" is the affordance's OWN precondition: the `*_reach_prob >=` clause of ITS contract against
+                //   the feedback node (fix round 1, I3 — no sibling lookup); no such clause or no measurement: the distance tolerance.
+                ControllerTargetInfo orient_t = *last_target_info_;
+                orient_t.room_pos = rc::policy::goal_target_pos(last_raw_target_pos_, orient_t.room_pos,
+                                                                published_target_admissible(orient_t));
+                const auto pre = contract_precondition(contract);
+                // ★ I4: the bound runs from the STEP'S ENTRY with the contract's own timeout (nothing else started a clock before the
+                //   robot was settled, so an unmet precondition hovered for ever); the same give-up the protocol's timeout reports
+                if (rc::policy::step_entry_expired(orient_entry_ms_, orient_entry_node_, active_target_id_, now, contract.timeout_ms))
+                {
+                    motion_commander.stop_robot();
+                    last_look_succeeded_ = false;
+                    qInfo() << "[affordance] orient GIVE_UP (timeout from step entry) | node" << active_target_id_;
+                    orient_entry_ms_.reset();
+                    finalize_reached(affordance_manager, path_controller, motion_commander, display, robot_pose.pos, time_source());
+                    policy_reset();
+                    return;
+                }
+                const bool at_standpoint = rc::policy::orient_settled(cpose, orient_t, gp, pre);
                 note_why(rc::why::Cause::Orienting, std::format("orient '{}': {}", last_target_info_->node_name,
                                                                 at_standpoint ? "turning in place" : "driving to its standpoint"));
                 if (at_standpoint and step_orient(robot_pose, path_controller, obstacle_tracker, motion_commander, time_source,
@@ -902,8 +955,8 @@ void ControllerSession::drive_with_policy(const ControllerRobotPose &robot_pose,
                     policy_reset();
                     return;
                 }
-                if (const auto spec = rc::policy::goal_for_target(*last_target_info_, cpose, std::nullopt, rc::policy::GoalMode::Orient,
-                                                                  false, gp))
+                if (const auto spec = rc::policy::goal_for_target(orient_t, cpose, std::nullopt, rc::policy::GoalMode::Orient,
+                                                                  false, gp, pre))
                     policy_tick(*spec, std::format("orient {}", last_target_info_->node_name), cpose, obstacle_tracker,
                                 motion_commander, now);
                 return;
@@ -935,13 +988,34 @@ void ControllerSession::drive_with_policy(const ControllerRobotPose &robot_pose,
         return;
     }
     policy_no_anchor_since_ms_ = 0;
-    const auto spec = rc::policy::goal_for_target(*last_target_info_, cpose, std::nullopt, rc::policy::GoalMode::Place,
-                                                  wants_final_facing(*last_target_info_), gp);
+    // ★ Task O fix round 1 (I2): toward the PUBLISHED target (the repair is an admissible substitute only), and — when the active
+    //   contract states a precondition probability — completed by IT, not by arriving within tol_xy
+    ControllerTargetInfo place_t = *last_target_info_;
+    std::optional<rc::policy::OrientPrecondition> place_pre;
+    if (last_target_info_->from_affordance)
+    {
+        place_t.room_pos = rc::policy::goal_target_pos(last_raw_target_pos_, place_t.room_pos, published_target_admissible(place_t));
+        if (target_contract_known_) place_pre = contract_precondition(target_contract_);
+    }
+    // ★ fix round 2 (b): a Place that waits on the precondition probability is bounded from its entry by the contract's own timeout
+    if (place_pre.has_value() and place_pre->p < place_pre->complete_at
+        and rc::policy::step_entry_expired(place_entry_ms_, place_entry_node_, active_target_id_, now, target_contract_.timeout_ms))
+    {
+        motion_commander.stop_robot();
+        qInfo() << "[affordance] place GIVE_UP (precondition unmet, timeout from step entry) | node" << active_target_id_;
+        place_entry_ms_.reset();
+        finalize_reached(affordance_manager, path_controller, motion_commander, display, robot_pose.pos, time_source());
+        policy_reset();
+        return;
+    }
+    const auto spec = rc::policy::goal_for_target(place_t, cpose, std::nullopt, rc::policy::GoalMode::Place,
+                                                  wants_final_facing(place_t), gp, place_pre);
     if (not spec.has_value()) { stop_here(rc::why::Cause::PolicyHold, "no goal could be built"); return; }
     const std::string who = last_target_info_->node_name.empty() ? std::string("target") : last_target_info_->node_name;
     const auto tick = policy_tick(*spec, who, cpose, obstacle_tracker, motion_commander, now);
+    const bool precondition_met = place_pre.has_value() and place_pre->p >= place_pre->complete_at;
     // ARRIVAL: the same protocol the tracker's arrival goes through (servo → lock-on, already there, approach-only, REACH)
-    if (consume_goal_reached(tick.verdict == PolicyVerdict::Arrived, robot_pose, path_controller, obstacle_tracker,
+    if (consume_goal_reached(precondition_met or (not place_pre.has_value() and tick.verdict == PolicyVerdict::Arrived), robot_pose, path_controller, obstacle_tracker,
                              motion_commander, display, affordance_manager, time_source, /*drive_base=*/false))
     {
         if (not lockon_.active()) policy_reset();
