@@ -15,15 +15,21 @@
  *   metric       the robot pose through the seam chain vs room k's own chain (room_chain.h). The robot->P edge gives the
  *                robot in P with its covariance; the FRESH seam T(L <- P) is built HERE from the crossed door's two faces:
  *                its face in L (memory, the node the eviction/seed wrote for it) and its entry mirror in P (live).
- *                A STATE evidence: the latest chain, not accumulated (the chain is one quantity seen again each cycle).
+ *                A state, read again each cycle; the decision uses its change since the last state change.
  *   appearance   retina's `place_evidence` node (recog_loglr / recog_mix / recog_mix_n, cumulative and already temporally
  *                discounted), absent today (metric-first) => AppearanceEvidence::available = false.
  * Candidates = the memory rooms that are not staged and are not L (the crossing rules L out structurally); they are sorted
  * by room_id so the order retina sees in `recog_room_ids` is stable.
  *
- * STAGED COMMIT (rc::recog::commit_step). since-entry = metric(now) + appearance since the candidates were announced;
- * since-commit = metric(now) + the appearance gathered AFTER the commit (llr minus its value at the commit, the prior reset).
+ * STAGED COMMIT (rc::recog::commit_step). Every decision uses the evidence gathered SINCE THE LAST STATE CHANGE (episode
+ * entry, commit, undo): per hypothesis the log-evidence now minus its value at that change (the metric as a DELTA too,
+ * appearance rebased the same way), under the uniform prior. No new data => posterior = prior => no undo, no re-commit.
  * Swap/Undo are emitted on the TRANSITION only. A missing or unresolvable expert is omitted from the product, never zeroed.
+ *
+ * THE EPISODE SPANS THE PROMOTION: it lives while the current room is L, the provisional room (its promoted twin; the fresh
+ * seam cached while L was still measurable) or the committed room (held, no new evidence: the evidence frame is gone), and
+ * ends at the eviction fence (the robot leaves it). Ending any other way under a commit, or losing the committed room from
+ * the candidates, emits an Undo request.
  *
  * OWNERSHIP. ltsm owns the live `recognition` metaconcept (recog_room_ids, recog_posterior; the last posterior entry is
  * "new"). It is removed on exit and swept at start (a SIGKILLed run leaves it; so can retina leave a `place_evidence`,
@@ -64,6 +70,9 @@ public:
     /// Startup / graceful exit: remove the `recognition` node and any stale `place_evidence`. Returns how many went.
     int sweep_stale();
 
+    /// Graceful exit: remove only what ltsm owns (the `recognition` node); retina's `place_evidence` is not ours to delete.
+    int remove_owned();
+
     /// The latest since-entry posterior (known rooms in candidate order, `new` last); empty when no episode is running.
     [[nodiscard]] const std::vector<rc::recog::Hypothesis> &posterior() const { return post_entry_; }
     [[nodiscard]] const std::vector<std::uint64_t> &candidates() const { return ids_; }
@@ -80,14 +89,20 @@ private:
     std::uint64_t prov_id_ = 0;                 ///< the provisional room this episode is about (0 = none)
     std::vector<std::uint64_t> ids_;            ///< candidate room ids, sorted
     rc::recog::Commit commit_{rc::recog::Commit::State::Entering, -1};
-    std::map<std::uint64_t, float> loglr_at_commit_;   ///< appearance llr per room at the commit (the prior reset)
-    std::set<std::uint64_t> refuted_;                  ///< rooms a later commit-window outvoted: not committable again this episode
+    std::map<std::int64_t, float> base_;               ///< log posterior of each hypothesis (-1 = new) at the last state change
+    std::uint64_t L_id_ = 0;                    ///< the live room the robot came from
+    std::string ep_L_mem_;                      ///< its memory name
+    std::string start_;                         ///< path start room (memory) and the passages crossed to L
+    std::vector<std::string> path_;
+    std::optional<ChainPose> fresh_;            ///< the fresh seam T(L <- P), cached while measurable (L is gone after promotion)
+    bool promoted_ = false;                     ///< the provisional room became current (or the committed room did)
     std::vector<rc::recog::Hypothesis> post_entry_;
     std::vector<float> published_;              ///< the last recog_posterior written (skip identical rewrites)
     std::vector<std::uint64_t> published_ids_;
     std::uint64_t node_id_ = 0;
 
     void end_episode();
+    Step abort_episode(Step out);               ///< end an episode; Undo is requested when a commit stood
     void track_current();
     void publish(const std::vector<float> &post);
 };

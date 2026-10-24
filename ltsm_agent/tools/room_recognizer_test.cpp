@@ -244,14 +244,19 @@ int main(int argc, char **argv)
     }
 
     std::printf("entry_without_evidence_does_nothing\n");
+    for (const double y : {2.0, 2.05, 2.4})      // in the aperture, just past it (either side of the margin: new .58 | R3 .64), well past (R3 starts at y = 2)
     {
-        Scenario s(false, hole_w);                                       // standing IN the doorway, chain exact
-        bool any = false;
-        for (int i = 0; i < 5; ++i) any = any or s.rec.step().act != ltsm::RoomRecognizer::Step::Act::None;
+        Scenario s(false, Vec3(4.0, y, 1.5707963));
+        ltsm::RoomRecognizer::Step st;
+        for (int i = 0; i < 5 and st.act == ltsm::RoomRecognizer::Step::Act::None; ++i) st = s.rec.step();
         const auto p = read_recognition();
-        std::printf("  posterior at the door:"); for (float x : p.post) std::printf(" %.4f", x); std::printf("\n");
-        check(p.present and p.post.size() == 3, "posterior published at the door");
-        check(not any, "no Swap/Undo request from the doorway with no appearance evidence");
+        const bool ok = p.present and p.post.size() == 3;
+        std::printf("  y=%.2f posterior R1 %.4f R3 %.4f new %.4f   act %d\n", y, ok ? p.post[0] : -1.f, ok ? p.post[1] : -1.f, ok ? p.post[2] : -1.f, int(st.act));
+        check(ok and p.post[0] < 1e-6f, "R1 is excluded by the metric");
+        if (y < 2.01)
+            check(ok and p.post[2] > p.post[1] and st.act == ltsm::RoomRecognizer::Step::Act::None, "in the aperture: `new` leads (0.58 vs 0.42 asserted as an ordering), no request");
+        else
+            check(ok and p.post[1] > (y < 2.2 ? 0.5f : 0.99f) and st.act == ltsm::RoomRecognizer::Step::Act::Swap and st.room_id == 3, "past the aperture: R3 leads and the Swap is requested; well past: R3 > 0.99");
     }
 
     std::printf("no_information_is_the_prior\n");
@@ -334,8 +339,62 @@ int main(int argc, char **argv)
         check(u.act == ltsm::RoomRecognizer::Step::Act::Undo and u.room_id == 3, "Undo R3: evidence after the commit says it is not R3");
         bool again = false;
         for (int i = 0; i < 20; ++i) again = again or s.rec.step().act != ltsm::RoomRecognizer::Step::Act::None;
-        check(not again, "no re-commit of the refuted room");
+        check(not again, "unchanged evidence after the Undo: no re-commit (posterior since the change = the prior)");
+        write_evidence({1, 3}, {-1000.f, 1500.f}, {std::nullopt, in_room(2, robot_in_r3_w)});   // fresh evidence for R3
+        ltsm::RoomRecognizer::Step r;
+        for (int i = 0; i < 5 and r.act == ltsm::RoomRecognizer::Step::Act::None; ++i) r = s.rec.step();
+        check(r.act == ltsm::RoomRecognizer::Step::Act::Swap and r.room_id == 3, "fresh evidence for R3 after the Undo: re-commit");
         live->delete_node(live->get_node("place_evidence").value().id());
+    }
+
+    std::printf("appearance_carried_commit_is_not_undone_by_unchanged_evidence\n");
+    {   // the metric mildly prefers `new` (the robot is just short of R3), appearance strongly says R3
+        const Vec3 near_w(4.0, 2.0, 1.5707963);
+        Scenario s(false, near_w);
+        s.rec.step();
+        const auto p0 = read_recognition();
+        std::printf("  metric alone: R3 %.3f new %.3f\n", p0.post.size() == 3 ? p0.post[1] : -1.f, p0.post.size() == 3 ? p0.post[2] : -1.f);
+        check(p0.post.size() == 3 and p0.post[2] > p0.post[1], "the metric alone prefers `new`");
+        write_evidence({1, 3}, {0.f, 12.f}, {std::nullopt, in_room(2, near_w)});
+        ltsm::RoomRecognizer::Step st;
+        for (int i = 0; i < 5 and st.act == ltsm::RoomRecognizer::Step::Act::None; ++i) st = s.rec.step();
+        check(st.act == ltsm::RoomRecognizer::Step::Act::Swap and st.room_id == 3, "appearance +12 carries the commit against the mild metric");
+        bool any = false;
+        for (int i = 0; i < 50; ++i) any = any or s.rec.step().act != ltsm::RoomRecognizer::Step::Act::None;
+        check(not any, "50 cycles of unchanged evidence: no Undo");
+        live->delete_node(live->get_node("place_evidence").value().id());
+    }
+
+    std::printf("episode_spans_promotion\n");
+    {
+        Scenario s(false, robot_in_r3_w);
+        ltsm::RoomRecognizer::Step st;
+        for (int i = 0; i < 5 and st.act == ltsm::RoomRecognizer::Step::Act::None; ++i) st = s.rec.step();
+        check(st.act == ltsm::RoomRecognizer::Step::Act::Swap, "Swap requested before promotion");
+        // PROMOTION: the proto edge goes, `current` moves to the provisional room, the old room leaves the live graph
+        live->delete_edge(s.prov, s.prov, "proto");
+        set_current(s.prov);
+        live->delete_node(s.mirror);                        // door_concept retires the mirror with its source
+        bool any = false;
+        for (int i = 0; i < 10; ++i) any = any or s.rec.step().act != ltsm::RoomRecognizer::Step::Act::None;
+        const auto p = read_recognition();
+        check(not any and p.present and p.post.size() == 3 and p.post[1] > 0.99f, "after promotion: episode and commit kept, R3 still recognised (cached seam)");
+        set_current(live_r1);                               // the eviction fence: the robot leaves the room
+        const auto f = s.rec.step();
+        check(f.act == ltsm::RoomRecognizer::Step::Act::None and not read_recognition().present, "at the fence the episode ends with no Undo");
+        s.mirror = live_door("door_9", s.prov);             // the destructor deletes it
+        live->insert_or_assign_edge(DSR::Edge::create<proto_edge_type>(s.prov, s.prov));
+    }
+
+    std::printf("episode_lost_under_a_commit_requests_undo\n");
+    {
+        Scenario s(false, robot_in_r3_w);
+        ltsm::RoomRecognizer::Step st;
+        for (int i = 0; i < 5 and st.act == ltsm::RoomRecognizer::Step::Act::None; ++i) st = s.rec.step();
+        live->delete_node(s.mirror);                        // pre-promotion, the crossing evidence vanishes
+        const auto u = s.rec.step();
+        check(u.act == ltsm::RoomRecognizer::Step::Act::Undo and u.room_id == 3 and not read_recognition().present, "Undo requested when the episode is lost under a commit");
+        s.mirror = live_door("door_9", s.prov);
     }
 
     std::printf("episode_ends_with_the_provisional_room\n");

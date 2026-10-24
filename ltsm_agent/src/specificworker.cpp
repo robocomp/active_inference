@@ -87,7 +87,7 @@ SpecificWorker::~SpecificWorker()
 	std::cout << "Destroying SpecificWorker" << std::endl;
 	// Graceful exit (SIGTERM/SIGINT, never kill -9): let go of the live passages this agent owns.
 	if (recognizer_)
-		if (const int n = recognizer_->sweep_stale(); n > 0)
+		if (const int n = recognizer_->remove_owned(); n > 0)
 			std::cout << "[recog] removed " << n << " recognition node(s) on shutdown" << std::endl;
 	if (recall_)
 		if (const int n = recall_->remove_all(); n > 0)

@@ -132,6 +132,17 @@ int RoomRecognizer::sweep_stale()
     return n;
 }
 
+int RoomRecognizer::remove_owned()
+{
+    int n = 0;
+    for (const auto &node : live_->get_nodes_by_type("metaconcept"))
+        if (subtype_of(*live_, node) == kRecognition and live_->delete_node(node.id())) ++n;
+    node_id_ = 0;
+    published_.clear();
+    published_ids_.clear();
+    return n;
+}
+
 void RoomRecognizer::end_episode()
 {
     if (node_id_ != 0)
@@ -144,8 +155,13 @@ void RoomRecognizer::end_episode()
     prov_id_ = 0;
     ids_.clear();
     commit_ = {rc::recog::Commit::State::Entering, -1};
-    loglr_at_commit_.clear();
-    refuted_.clear();
+    base_.clear();
+    L_id_ = 0;
+    ep_L_mem_.clear();
+    start_.clear();
+    path_.clear();
+    fresh_.reset();
+    promoted_ = false;
     post_entry_.clear();
     published_.clear();
     published_ids_.clear();
@@ -160,8 +176,7 @@ void RoomRecognizer::track_current()
             if (const auto m = ev_.memory_prefix(room.value()) + room->name(); mem_->get_node(m).has_value()) mem_name = m;
     if (mem_name == cur_mem_) return;
 
-    // The current room changed: whatever episode was running was about the room just left behind.
-    end_episode();
+    // (a running episode is judged by step(): it spans the promotion)
     prev_mem_.clear();
     prev_passage_.clear();
     if (not cur_mem_.empty() and not mem_name.empty())
@@ -212,22 +227,88 @@ void RoomRecognizer::publish(const std::vector<float> &post)
 }
 
 //////////////////////////////////////////////////////////////////////////////////////////////////
+RoomRecognizer::Step RoomRecognizer::abort_episode(Step out)
+{
+    // An episode that ends while a commit stands, other than by the robot leaving the room it was committed in (the
+    // eviction fence), has lost the ground the commit stood on: ask for the undo.
+    if (prov_id_ != 0 and commit_.state == rc::recog::Commit::State::Committed and commit_.room >= 0 and commit_.room < int(ids_.size()))
+    {
+        out.act = Step::Act::Undo;
+        out.room_index = commit_.room;
+        out.room_id = ids_[commit_.room];
+        if (commit_.room < int(post_entry_.size())) out.pose_in_k = post_entry_[commit_.room].pose_in_k;
+        qInfo().noquote() << QString::fromStdString(std::format("[recog] UNDO requested: room_id {} (the episode ended under a commit)", out.room_id));
+    }
+    end_episode();
+    return out;
+}
+
 RoomRecognizer::Step RoomRecognizer::step()
 {
     Step out;
     track_current();
 
-    // ── 1. ELIGIBILITY: current room L, provisional room P with an entry mirror, a crossed door nobody has used ──────
     const auto cur = rc::room::current_edge_room(*live_);
-    if (not cur.has_value()) { end_episode(); return out; }
-    const auto L = live_->get_node(cur.value());
-    if (not L.has_value() or cur_mem_.empty()) { end_episode(); return out; }
+    if (not cur.has_value()) return abort_episode(out);
 
     std::optional<DSR::Node> robot;
     for (const auto &e : live_->get_edges_by_type("current"))
         if (e.to() == cur.value()) { robot = live_->get_node(e.from()); break; }
-    if (not robot.has_value()) { end_episode(); return out; }
+    if (not robot.has_value()) return abort_episode(out);
 
+    auto ie = live_->get_inner_eigen_api();
+    auto rt = live_->get_rt_api();
+
+    // the robot in a room, with its covariance (promotion_evidence's reading: no covariance, no pose)
+    const auto read_robot_in = [&](const DSR::Edge &e) -> std::optional<Measured> {
+        if (not live_->get_attrib_by_name<valid_att>(e).value_or(true)) return std::nullopt;
+        const auto E = rt->get_edge_RT_as_rtmat(e);
+        const auto C = cov3_of(*live_, e);
+        if (not E.has_value() or not C.has_value()) return std::nullopt;
+        return seam::inverse_cov(Measured{se2_of(E.value()), C.value()}); };
+
+    std::string L_mem;
+    std::optional<Measured> robot_in_P;
+    std::optional<ChainPose> fresh;
+    std::optional<std::uint64_t> P_rid;
+
+    // ── 1. WHICH PHASE. The episode spans the promotion: it lives while the current room is L (before), the provisional
+    //    room (its promoted twin) or the committed room; it ends at the eviction fence (the robot leaves it). ────────────
+    bool phase_b = false;
+    if (prov_id_ != 0)
+    {
+        const auto cur_rid = live_->get_node(cur.value()).has_value()
+                                 ? live_->get_attrib_by_name<room_id_att>(live_->get_node(cur.value()).value()) : std::nullopt;
+        if (cur.value() == prov_id_) { phase_b = true; promoted_ = true; }
+        else if (commit_.state == rc::recog::Commit::State::Committed and commit_.room >= 0 and commit_.room < int(ids_.size())
+                 and cur_rid.has_value() and cur_rid.value() == ids_[commit_.room])
+        {   // the recognised room is current: the evidence frame (the provisional room) is gone, the commit stands
+            promoted_ = true;
+            return out;
+        }
+        else if (cur.value() != L_id_)
+        {
+            if (promoted_) { end_episode(); return out; }       // the fence: the robot left the room, the commit stays
+            return abort_episode(out);
+        }
+    }
+
+    if (phase_b)
+    {
+        // After promotion the old room may be gone: the metric uses the seam cached while it was measurable, and the robot
+        // edge to the (now current) twin.
+        L_mem = ep_L_mem_;
+        const auto Pn = live_->get_node(prov_id_);
+        if (not Pn.has_value()) return abort_episode(out);
+        P_rid = live_->get_attrib_by_name<room_id_att>(Pn.value());
+        if (const auto pe = live_->get_edge(robot->id(), prov_id_, "RT"); pe.has_value()) robot_in_P = read_robot_in(pe.value());
+        fresh = fresh_;
+    }
+    else
+    {
+    // ── 2. ELIGIBILITY: current room L, provisional room P with an entry mirror, a crossed door nobody has used ──────
+    const auto L = live_->get_node(cur.value());
+    if (not L.has_value() or cur_mem_.empty()) return abort_episode(out);
     bool cur_retired = false;
     if (const auto ce = live_->get_edge(robot->id(), cur.value(), "RT"); ce.has_value())
         cur_retired = not live_->get_attrib_by_name<valid_att>(ce.value()).value_or(true);
@@ -246,17 +327,10 @@ RoomRecognizer::Step RoomRecognizer::step()
         P_edge = e;
         break;
     }
-    if (not P.has_value()) { end_episode(); return out; }
+    if (not P.has_value()) return abort_episode(out);
 
-    auto ie = live_->get_inner_eigen_api();
-    auto rt = live_->get_rt_api();
 
-    // the robot in P, with its covariance (promotion_evidence's reading: no covariance, no pose)
-    std::optional<Measured> robot_in_P;
-    if (live_->get_attrib_by_name<valid_att>(P_edge.value()).value_or(true))
-        if (const auto E = rt->get_edge_RT_as_rtmat(P_edge.value()); E.has_value())
-            if (const auto C = cov3_of(*live_, P_edge.value()); C.has_value())
-                robot_in_P = seam::inverse_cov(Measured{se2_of(E.value()), C.value()});
+    if (const auto pe = P_edge.value(); true) robot_in_P = read_robot_in(pe);
 
     // the entry mirror: a door whose parent is P. The nearest to the robot (an argmin, nothing is excluded by distance).
     std::optional<DSR::Node> M;
@@ -272,7 +346,7 @@ RoomRecognizer::Step RoomRecognizer::step()
                 dist = (T->translation().head<2>() - robot_in_P->pose.head<2>()).norm();
         if (dist < best_m) { best_m = dist; M = d; }
     }
-    if (not M.has_value()) { end_episode(); return out; }
+    if (not M.has_value()) return abort_episode(out);
 
     // its counterpart D in L: the door the live passage matched to it, else the nearest door of L (both in L's frame).
     std::optional<DSR::Node> D;
@@ -300,11 +374,11 @@ RoomRecognizer::Step RoomRecognizer::step()
                     if (const double dist = (T->translation() - TM->translation()).head<2>().norm(); dist < best) { best = dist; D = d; }
             }
     }
-    if (not D.has_value()) { end_episode(); return out; }
+    if (not D.has_value()) return abort_episode(out);
 
     // The crossed door must have NO passage in memory. Its face is looked up by name (how eviction/seed wrote it) and, when
     // door_concept re-made the door under a new name, by place: the passage face of L whose aperture holds D's centre.
-    const std::string L_mem = cur_mem_;
+    L_mem = cur_mem_;
     const std::string face_name = ev_.memory_prefix(L.value()) + D->name();
     const auto passages = passages_of(*mem_);
     const auto face = mem_->get_node(face_name);
@@ -323,20 +397,28 @@ RoomRecognizer::Step RoomRecognizer::step()
                 const auto fr = owning_room(*mem_, f.value());
                 if (not fr.has_value() or fr->name() != L_mem) continue;
                 if (const auto Tm = mie->get_transformation_matrix(L_mem, f->name()); Tm.has_value())
+                    // FLAGGED: a membership test, not a tuning constant. A door re-made under a new name is the SAME hole when its
+                    // centre lies inside the remembered face's aperture (half the door width): a point inside a segment.
                     if ((Tm->translation() - TD->translation()).head<2>().norm() < half_w) known_door = true;
             }
     }
-    if (known_door) { end_episode(); return out; }
+    if (known_door) return abort_episode(out);
     if (prov_id_ != P->id())
     {
         end_episode();
         prov_id_ = P->id();
+        L_id_ = L->id();
+        ep_L_mem_ = L_mem;
+        promoted_ = false;
+        // the path taken: the passage that brought the robot into L (from its previous room), else L itself is the reference
+        path_.clear();
+        start_ = L_mem;
+        if (not prev_passage_.empty() and not prev_mem_.empty()) { path_ = {prev_passage_}; start_ = prev_mem_; }
         qInfo().noquote() << QString::fromStdString(std::format("[recog] episode begins: provisional {} behind {}", P->name(), L->name()));
     }
+    P_rid = live_->get_attrib_by_name<room_id_att>(P.value());
 
-    // ── 2. CANDIDATES and the metric query ─────────────────────────────────────────────────────────────────────────
     // The fresh seam T(L <- P) from the crossed door's two faces; nullopt (=> metric unavailable) when either is missing.
-    std::optional<ChainPose> fresh;
     const auto mem_L = mem_->get_node(L_mem);
     if (face.has_value() and robot_in_P.has_value() and mem_L.has_value())
     {
@@ -378,23 +460,22 @@ RoomRecognizer::Step RoomRecognizer::step()
             fresh = ChainPose{seam_LP.pose, seam_LP.cov};
         }
     }
+    fresh_ = fresh;
 
-    // path taken: the passage that brought the robot into L (from its previous room), else L itself is the reference.
-    std::vector<std::string> path;
-    std::string start = L_mem;
-    if (not prev_passage_.empty() and not prev_mem_.empty()) { path = {prev_passage_}; start = prev_mem_; }
+    }
+
     ChainPose robot_prov;
     if (robot_in_P.has_value()) robot_prov = {robot_in_P->pose, robot_in_P->cov};
-    auto q = build_metric_query(*mem_, path, start, robot_in_P.has_value() ? fresh : std::nullopt, robot_prov);
+    auto q = build_metric_query(*mem_, path_, start_, robot_in_P.has_value() ? fresh : std::nullopt, robot_prov);
 
     // Candidates: archived rooms that are not staged (build_metric_query already drops them), not L (the crossing rules it
     // out), and not P's own twin if memory holds one. Sorted by room_id: the order retina's evidence is keyed to.
-    const auto P_rid = live_->get_attrib_by_name<room_id_att>(P.value());
     std::erase_if(q.rooms, [&](const KnownRoomMetric &k) {
         return k.mem_room == L_mem or (P_rid.has_value() and k.room_id == P_rid.value()); });
     std::ranges::sort(q.rooms, {}, &KnownRoomMetric::room_id);
-    if (q.rooms.empty()) { end_episode(); return out; }
+    if (q.rooms.empty()) return abort_episode(out);
 
+    bool skip_decision = false;
     // the candidate list changed under a running episode: carry the commit by id, drop it if its room left
     {
         std::vector<std::uint64_t> ids;
@@ -405,8 +486,18 @@ RoomRecognizer::Step RoomRecognizer::step()
             {
                 const auto old = (commit_.room >= 0 and commit_.room < int(ids_.size())) ? std::optional(ids_[commit_.room]) : std::nullopt;
                 const auto it = old.has_value() ? std::ranges::find(ids, old.value()) : ids.end();
-                commit_ = it == ids.end() ? rc::recog::Commit{rc::recog::Commit::State::Entering, -1}
-                                          : rc::recog::Commit{rc::recog::Commit::State::Committed, int(it - ids.begin())};
+                if (it == ids.end())
+                {   // the committed room is no longer a candidate: the commit lost its ground
+                    out.act = Step::Act::Undo;
+                    out.room_index = commit_.room;
+                    out.room_id = old.value_or(0);
+                    if (commit_.room < int(post_entry_.size())) out.pose_in_k = post_entry_[commit_.room].pose_in_k;
+                    commit_ = {rc::recog::Commit::State::Entering, -1};
+                    skip_decision = true;
+                    qInfo().noquote() << QString::fromStdString(std::format("[recog] UNDO requested: room_id {} left the candidates", out.room_id));
+                }
+                else
+                    commit_ = {rc::recog::Commit::State::Committed, int(it - ids.begin())};
             }
             ids_ = std::move(ids);
         }
@@ -470,49 +561,57 @@ RoomRecognizer::Step RoomRecognizer::step()
         break;
     }
 
-    // ── 4. POSTERIORS and the staged commit ──────────────────────────────────────────────────────────────────────────
-    const auto since = [&](const std::map<std::uint64_t, float> &base) {
-        auto a = app;
-        for (std::size_t k = 0; k < n; ++k)
-            if (a[k].available)
-                if (const auto it = base.find(ids_[k]); it != base.end()) a[k].loglr -= it->second;
-        return a; };
-    post_entry_ = rc::recog::posterior(metric, app, area, log_new);
-
-    // A room whose commit was refuted by evidence gathered after it cannot be committed again in this episode (otherwise the
-    // metric, which is a state and not a sum, re-commits it the very next cycle). Excluded from the MAP only.
-    auto eff = post_entry_;
-    for (auto &h : eff)
-        if (h.room >= 0 and h.room < int(n) and refuted_.contains(ids_[h.room])) h.log_post = -std::numeric_limits<float>::infinity();
-
-    std::vector<rc::recog::Hypothesis> post_commit;
-    if (commit_.state == rc::recog::Commit::State::Committed)
-        post_commit = rc::recog::posterior(metric, since(loglr_at_commit_), area, log_new);
-
-    const auto next = rc::recog::commit_step(commit_, eff, post_commit);
-    if (commit_.state == rc::recog::Commit::State::Entering and next.state == rc::recog::Commit::State::Committed)
+    // ── 4. POSTERIOR and the staged commit ────────────────────────────────────────────────────────────────────────
+    // Every decision uses the evidence gathered SINCE THE LAST STATE CHANGE (episode entry, commit, undo): per hypothesis the
+    // log-evidence now minus its value at that change (the metric as a delta too, appearance rebased the same way), under the
+    // uniform prior. With nothing new the delta is zero: the posterior is the prior, so no undo and no re-commit.
+    post_entry_ = rc::recog::posterior(metric, app, area, log_new);        // all evidence now (published, and the pose density)
+    const auto key = [&](const rc::recog::Hypothesis &h) -> std::int64_t { return h.room < 0 ? -1 : std::int64_t(ids_[h.room]); };
+    std::vector<rc::recog::Hypothesis> since = post_entry_;
     {
-        out.act = Step::Act::Swap;
-        out.room_index = next.room;
-        out.room_id = ids_[next.room];
-        out.pose_in_k = post_entry_[next.room].pose_in_k;
-        loglr_at_commit_.clear();
-        for (std::size_t k = 0; k < n; ++k)
-            if (app[k].available) loglr_at_commit_[ids_[k]] = app[k].loglr;
-        qInfo().noquote() << QString::fromStdString(std::format("[recog] SWAP requested: room_id {} (posterior {:.3f})",
-                                                                out.room_id, std::exp(post_entry_[next.room].log_post)));
+        std::vector<double> d(since.size());
+        for (std::size_t i = 0; i < since.size(); ++i)
+        {
+            const double now = since[i].log_post;
+            if (base_.empty()) { d[i] = now; continue; }                      // episode entry: all evidence is new
+            const auto b = base_.find(key(since[i]));
+            d[i] = b == base_.end() ? 0.0                                      // new to the list: no history
+                                     : ((std::isfinite(now) or std::isfinite(b->second)) ? now - double(b->second) : 0.0);
+        }
+        const double z = rc::recog::detail::logsumexp(d);
+        for (std::size_t i = 0; i < since.size(); ++i) since[i].log_post = std::isfinite(z) ? float(d[i] - z) : float(-std::log(double(d.size())));
     }
-    else if (commit_.state == rc::recog::Commit::State::Committed and next.state == rc::recog::Commit::State::Entering)
+    const auto rebase = [&] {
+        base_.clear();
+        for (const auto &h : post_entry_) base_[key(h)] = h.log_post;
+    };
+
+    if (not skip_decision)
     {
-        out.act = Step::Act::Undo;
-        out.room_index = commit_.room;
-        out.room_id = ids_[commit_.room];
-        out.pose_in_k = post_commit[commit_.room].pose_in_k;
-        refuted_.insert(out.room_id);
-        loglr_at_commit_.clear();
-        qInfo().noquote() << QString::fromStdString(std::format("[recog] UNDO requested: room_id {} refuted by later evidence", out.room_id));
+        const auto next = rc::recog::commit_step(commit_, since, since);
+        if (commit_.state == rc::recog::Commit::State::Entering and next.state == rc::recog::Commit::State::Committed)
+        {
+            out.act = Step::Act::Swap;
+            out.room_index = next.room;
+            out.room_id = ids_[next.room];
+            out.pose_in_k = post_entry_[next.room].pose_in_k;
+            rebase();
+            qInfo().noquote() << QString::fromStdString(std::format("[recog] SWAP requested: room_id {} (posterior {:.3f})",
+                                                                    out.room_id, std::exp(post_entry_[next.room].log_post)));
+        }
+        else if (commit_.state == rc::recog::Commit::State::Committed and next.state == rc::recog::Commit::State::Entering)
+        {
+            out.act = Step::Act::Undo;
+            out.room_index = commit_.room;
+            out.room_id = ids_[commit_.room];
+            out.pose_in_k = post_entry_[commit_.room].pose_in_k;
+            rebase();
+            qInfo().noquote() << QString::fromStdString(std::format("[recog] UNDO requested: room_id {} contradicted by evidence since the commit", out.room_id));
+        }
+        commit_ = next;
     }
-    commit_ = next;
+    else
+        rebase();
 
     std::vector<float> post;
     for (const auto &h : post_entry_) post.push_back(std::exp(h.log_post));
