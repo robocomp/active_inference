@@ -204,7 +204,7 @@ private:
 	// "room_1") is the room whose frame is the map's global frame; every reachable room is drawn in it.
 	TopologyView *topology_view_ = nullptr;   ///< owned by its dock
 	QTimer topology_timer_;
-	void setup_topology_view(const std::string &anchor_room);
+	void setup_topology_view(const std::string &anchor_room, bool optimise);
 	std::optional<TopologyView::Robot> topology_robot() const;
 	/// Memory's name for a live room (r<room_id>_<name>), when memory holds it. A lookup: never mints an index.
 	std::optional<std::string> memory_room_name(const DSR::Node &live_room) const;

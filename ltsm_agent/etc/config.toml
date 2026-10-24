@@ -101,3 +101,11 @@ backstop_sweep = false
 [Memory]
 persist      = true
 persist_path = "etc/ltsm_memory.json"
+# Every save is a NEW dated generation here (ltsm_<YYYYMMDD_HHMMSS_mmm>.json + its _layout.json); start-up opens the
+# newest. Empty = the single file above. tools/ltsm_history.py lists and diffs them.
+history_dir  = "etc/ltsm_history"
+
+# The Topology dock draws the MAP layout (seams with covariance + Manhattan / non-overlap / shared-wall priors,
+# src/layout_optimizer.h), solved once per new room. false = the spanning tree of seams, as before.
+[Layout]
+optimize = true

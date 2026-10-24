@@ -23,6 +23,8 @@
 #include <dsr/api/dsr_inner_eigen_api.h>
 #include <dsr/api/dsr_rt_api.h>
 
+#include "seam_fusion.h"
+
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -48,6 +50,13 @@ bool is_descendant(DSR::DSRGraph &mem, std::uint64_t node_id, const std::string 
 /// the passage has a face in each room. Free so a read-only consumer (the topology view) needs no RoomEviction.
 std::optional<Mat::RTMat> seam_through_passage(DSR::DSRGraph &mem, const std::string &passage,
                                                const std::string &room_to, const std::string &room_from);
+
+/// The same seam as an SE(2) pose with its covariance, propagated from the two faces' RT covariances (in room_to's
+/// frame). `stated_faces` (0..2) counts the faces whose own edge states one; the others enter at the remembered-seam
+/// sigmas. For the memory layout's MAP estimate (layout_optimizer.h).
+std::optional<ltsm::seam::Measured> seam_measured_through_passage(DSR::DSRGraph &mem, const std::string &passage,
+                                                                  const std::string &room_to, const std::string &room_from,
+                                                                  int &stated_faces);
 
 /// The two rooms the robot is holding at the instant of the hand-over.
 struct Candidate

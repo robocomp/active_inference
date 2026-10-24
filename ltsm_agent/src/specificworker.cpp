@@ -17,6 +17,7 @@
  *    along with RoboComp.  If not, see <http://www.gnu.org/licenses/>.
  */
 #include "specificworker.h"
+#include "layout_sidecar.h"
 #include "../../common/window_geometry/window_geometry_saver.h"
 #include "../../common/room_resolve/room_resolve.h"   // current_edge_room
 
@@ -208,12 +209,16 @@ void SpecificWorker::initialize()
     {
         const std::string path = cfgr.s("Memory.persist_path", "etc/ltsm_memory.json",
                 "where the long-term memory graph is written; resolved against the CWD");
+        const std::string history = cfgr.s("Memory.history_dir", "",
+                "non-empty: every save is a NEW dated generation ltsm_<stamp>.json here (+ its layout sidecar) and "
+                "start-up opens the newest; empty: the single file persist_path");
         store = std::make_unique<ltsm::MemoryStore>(G_ltsm, path,
-                flag("Memory.persist", "persist the memory graph across runs"));
+                flag("Memory.persist", "persist the memory graph across runs"), history);
         if (store->enabled())
         {
-            qInfo() << "[ltsm_agent] PERSISTENCE ARMED --" << path.c_str()
-                    << "(saved at the eviction fence and on a graceful exit)";
+            qInfo() << "[ltsm_agent] PERSISTENCE ARMED --" << (history.empty() ? path.c_str() : history.c_str())
+                    << (history.empty() ? "(saved at the eviction fence and on a graceful exit)"
+                                        : "(a dated generation per change: eviction fence, forget, seed, exit)");
             store->load();
         }
         else
@@ -227,7 +232,10 @@ void SpecificWorker::initialize()
     if (cfgr.b("Topology.enabled", true,
             "draw memory as a topological map (rooms placed by their passages' seams) in a dock; display only"))
         setup_topology_view(cfgr.s("Topology.anchor_room", "room_1",
-                "the room whose frame is the Topology map's global frame (live name; memory's r<idx>_ prefix is matched)"));
+                "the room whose frame is the Topology map's global frame (live name; memory's r<idx>_ prefix is matched)"),
+                cfgr.b("Layout.optimize", false,
+                "draw the MAP layout (seams with covariance + Manhattan / non-overlap / shared-wall priors), solved once "
+                "per new room; off = the spanning tree of seams"));
 
     if (G_dsr)
         evictor = std::make_unique<ltsm::RoomEviction>(G_dsr, G_ltsm);
@@ -1103,12 +1111,54 @@ void SpecificWorker::setup_memory_layout()
     memory_layout_timer_.start(kLayoutCoalesceMs);   // the seeded root / a restored generation
 }
 
-void SpecificWorker::setup_topology_view(const std::string &anchor_room)
+void SpecificWorker::setup_topology_view(const std::string &anchor_room, bool optimise)
 {
     const auto it = graph_viewers.find("ltsm");
     if (it == graph_viewers.end() or not G_ltsm) return;
     topology_view_ = new TopologyView(G_ltsm, [this]() { return topology_robot(); });
     topology_view_->set_anchor(anchor_room);
+
+    // The MAP layout: solved when memory's structure changes, logged once per solve, written beside the generation.
+    topology_view_->set_optimise(optimise, [this](const ltsm::topo::LayoutCache &c)
+    {
+        double max_d2 = 0;
+        std::string worst, disowned;
+        for (const auto &[name, d2] : c.seam_d2)
+            if (d2 > max_d2) { max_d2 = d2; worst = name; }
+        for (const auto &[name, p] : c.seam_p_inlier)
+            if (p >= 0 and p < 0.5) disowned += std::format(" {} (P(inlier) {:.3f})", name, p);
+        std::string square;
+        for (const auto &[name, p] : c.p_manhattan)
+            if (p >= 0) square += std::format(" {} {:.2f}", name, p);
+        qInfo().noquote() << QString::fromStdString(std::format(
+            "[layout] solve #{}: {} room(s), {} passage(s), {} it{}, {:.1f} ms | F {:.3f} -> {:.3f} (seam {:.3f} square {:.3f} "
+            "overlap {:.3f} wall {:.3f}) | worst seam d2 {:.2f}{} | seams explained as WRONG:{} | {} start(s){} | "
+            "building axis {} | P(square):{}",
+            c.solves, c.rooms, c.passages, c.iterations, c.converged ? "" : " NOT CONVERGED", c.ms, c.before.total(),
+            c.after.total(), c.after.seam, c.after.manhattan, c.after.overlap, c.after.wall, max_d2,
+            worst.empty() ? "" : " (" + worst + ")", disowned.empty() ? " none" : disowned, c.starts,
+            c.restarted > 0 ? " (won by a re-start, not the previous layout)" : "",
+            c.building_axis.has_value() ? std::format("{:.2f} deg", c.building_axis.value() * 180.0 / M_PI) : "none",
+            square.empty() ? " none" : square));
+        if (store and store->enabled()) store->write_layout(ltsm::topo::layout_to_json(c).toStdString());
+    });
+    if (optimise and store and store->enabled())
+    {
+        // Warm start from the generation memory was loaded from, so a restart does not reshuffle a settled map.
+        if (const auto lp = store->layout_path(); not lp.empty())
+            if (auto warm = ltsm::topo::layout_from_json(lp); warm.has_value())
+            {
+                qInfo() << "[layout] warm start from" << lp.c_str() << "--" << static_cast<int>(warm->pose.size())
+                        << "room pose(s)";
+                topology_view_->seed_layout(std::move(warm.value()));
+            }
+        // A save writes the layout too -- but only one solved THIS run (a warm start has no key until it is re-solved).
+        store->set_layout_provider([this]() -> std::optional<std::string>
+        {
+            if (not topology_view_ or topology_view_->layout().key.empty()) return std::nullopt;
+            return ltsm::topo::layout_to_json(topology_view_->layout()).toStdString();
+        });
+    }
     topology_view_->set_forget([this](const std::string &room) { return forget_blocker(room); },
                                [this](const std::string &room) { forget_memory_room(room); });
     it->second->add_custom_widget_to_dock("Topology", topology_view_);

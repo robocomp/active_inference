@@ -7,6 +7,8 @@ LIST(APPEND SOURCES
   ../src/passage_live.cpp
   ../src/room_recall.cpp
   ../src/topology_layout.cpp
+  ../src/layout_optimizer.cpp
+  ../src/layout_sidecar.cpp
   ../src/topology_view.cpp
   ../src/room_forget.cpp
 )
@@ -20,6 +22,8 @@ LIST(APPEND HEADERS
   ../src/passage_live.h
   ../src/room_recall.h
   ../src/topology_layout.h
+  ../src/layout_optimizer.h
+  ../src/layout_sidecar.h
   ../src/topology_view.h
   ../src/room_forget.h
 )
@@ -44,3 +48,16 @@ add_definitions(-O3 -fmax-errors=1 -fno-char8_t)
 add_executable(seam_fusion_test EXCLUDE_FROM_ALL ../tools/seam_fusion_test.cpp)
 target_include_directories(seam_fusion_test PRIVATE ${CMAKE_CURRENT_LIST_DIR}/../src)
 set_target_properties(seam_fusion_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../bin)
+
+# The memory layout's MAP estimate on synthetic apartments (pure Eigen). make -C build layout_optimizer_test && ../bin/layout_optimizer_test
+add_executable(layout_optimizer_test EXCLUDE_FROM_ALL ../tools/layout_optimizer_test.cpp ../src/layout_optimizer.cpp)
+target_include_directories(layout_optimizer_test PRIVATE ${CMAKE_CURRENT_LIST_DIR}/../src)
+set_target_properties(layout_optimizer_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../bin)
+
+# The MAP layout on REAL memory files vs the spanning tree (private DDS domain 9). make -C build layout_harness &&
+# bin/layout_harness <ltsm_memory.json>...
+add_executable(layout_harness EXCLUDE_FROM_ALL ../tools/layout_harness.cpp ../src/topology_layout.cpp
+               ../src/layout_optimizer.cpp ../src/room_eviction.cpp)
+target_include_directories(layout_harness PRIVATE ${CMAKE_CURRENT_LIST_DIR}/../src)
+target_link_libraries(layout_harness dsr_core dsr_api dsr_gui fastcdr fastdds Qt6::Core Qt6::Gui Qt6::Widgets)
+set_target_properties(layout_harness PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../bin)

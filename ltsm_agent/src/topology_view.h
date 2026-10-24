@@ -43,6 +43,16 @@ public:
     /// The room whose frame is the map's global frame (a live name, e.g. "room_1"; see topo::build).
     void set_anchor(std::string anchor) { anchor_ = std::move(anchor); }
 
+    /// Draw the MAP layout (layout_optimizer.h) instead of the spanning tree. It is solved only when memory's structure
+    /// changes (a room or a resolvable passage appears or goes); `on_solve` hears each new solve, to log and persist it.
+    using OnSolve = std::function<void(const ltsm::topo::LayoutCache &)>;
+    void set_optimise(bool on, OnSolve on_solve = {}) { optimise_ = on; on_solve_ = std::move(on_solve); }
+    /// Warm start: poses from the last run's sidecar become the first solve's initial guess (its key is empty, so it
+    /// is re-solved against the graph as it is now).
+    void seed_layout(ltsm::topo::LayoutCache warm) { cache_ = std::move(warm); cache_.key.clear(); cache_.fresh = false; }
+    [[nodiscard]] const ltsm::topo::LayoutCache &layout() const { return cache_; }
+    [[nodiscard]] bool optimising() const { return optimise_; }
+
     /// Re-read the memory graph and redraw. Main thread only.
     void rebuild();
 
@@ -62,6 +72,9 @@ private:
     Blocker blocker_;
     Forget forget_;
     QPoint press_pos_;
+    bool optimise_ = false;
+    ltsm::topo::LayoutCache cache_;
+    OnSolve on_solve_;
     void room_menu(const std::string &room, const QPoint &global);
     QRectF content_;             ///< scene box of the rooms and doors (what auto-fit frames)
     bool user_framed_ = false;   ///< auto-fit until the user zooms or pans, as the stock graph view does

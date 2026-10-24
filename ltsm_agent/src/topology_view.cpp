@@ -78,7 +78,12 @@ void TopologyView::rebuild()
     const auto robot = robot_ ? robot_() : std::nullopt;
     std::map<std::string, std::vector<Eigen::Vector2d>> live_outlines;
     if (robot.has_value() and not robot->live_outline.empty()) live_outlines[robot->mem_room] = robot->live_outline;
-    const auto map = ltsm::topo::build(*mem_, anchor_, live_outlines);
+    const auto map = ltsm::topo::build(*mem_, anchor_, live_outlines, optimise_ ? &cache_ : nullptr);
+    if (cache_.fresh)
+    {
+        cache_.fresh = false;
+        if (on_solve_) on_solve_(cache_);
+    }
     const auto current = robot.has_value() ? map.room_index(robot->mem_room) : std::nullopt;
 
     scene_.clear();
@@ -93,6 +98,24 @@ void TopologyView::rebuild()
     for (const auto &[i, r] : std::views::enumerate(map.rooms))
     {
         const bool is_current = current == static_cast<std::size_t>(i);
+        // Where the spanning tree alone would put it: faint and dashed, behind, so the MAP's correction is visible.
+        if (map.optimised and not r.outline_raw.empty())
+        {
+            QPolygonF poly;
+            for (const auto &p : r.outline_raw) poly << to_scene(p);
+            scene_.addPolygon(poly, cosmetic(QColor(150, 150, 150, 160), 1.0, Qt::DashLine))->setZValue(-1);
+        }
+        // 1-σ position ellipse of the room's frame origin (Laplace covariance; none for the gauge room).
+        if (const Eigen::Matrix2d C = r.cov.topLeftCorner<2, 2>(); C.trace() > 0)
+        {
+            const Eigen::SelfAdjointEigenSolver<Eigen::Matrix2d> es(C);
+            const double a = std::sqrt(std::max(es.eigenvalues()(1), 0.0)), b = std::sqrt(std::max(es.eigenvalues()(0), 0.0));
+            const Eigen::Vector2d v = es.eigenvectors().col(1);
+            auto *e = scene_.addEllipse(-a, -b, 2 * a, 2 * b, cosmetic(QColor(40, 90, 200, 200), 1.0));
+            e->setPos(to_scene(r.world.translation().head<2>()));
+            e->setRotation(-std::atan2(v.y(), v.x()) * 180.0 / M_PI);   // scene y is down
+            e->setZValue(3);
+        }
         if (not r.outline.empty())
         {
             QPolygonF poly;
@@ -101,7 +124,8 @@ void TopologyView::rebuild()
                                                             : cosmetic(QColor(120, 120, 120), 1.0),
                                            QBrush(room_fill(r.name, is_current)));
             item->setZValue(0);
-            item->setToolTip(QString::fromStdString(r.name));
+            item->setToolTip(QString::fromStdString(r.p_manhattan >= 0
+                ? std::format("{}\nP(square to the building) = {:.2f}", r.name, r.p_manhattan) : r.name));
             item->setData(kRoomKey, QString::fromStdString(r.name));
         }
         auto *node = marker(scene_, new QGraphicsEllipseItem(-9, -9, 18, 18), to_scene(r.centre));
@@ -134,9 +158,15 @@ void TopologyView::rebuild()
         const double pp = p.p_pass();
         const auto tip = QString::fromStdString(std::format("{}\nP(pass) = {:.2f}   (α {:.1f}, β {:.1f})\ncrossings {}{}",
             p.name, pp, p.alpha, p.beta, p.crossings,
-            p.loop ? std::format("\nloop closure {:.3f} m", p.closure_m) : std::string{}));
-        const QColor colour = p.seam_ok ? QColor(30, 130, 60, static_cast<int>(80 + 175 * pp)) : QColor(140, 140, 140);
-        const QPen pen = p.seam_ok ? cosmetic(colour, 1.5 + 4.5 * pp) : cosmetic(colour, 1.5, Qt::DashLine);
+            p.loop ? std::format("\nloop closure {:.3f} m", p.closure_m) : std::string{})
+            + (p.seam_d2 >= 0 ? std::format("\nseam Mahalanobis² {:.2f}, P(right) {:.3f}  ({} of 2 faces state a covariance)",
+                                            p.seam_d2, p.p_inlier, p.stated_faces) : std::string{}));
+        // A seam the MAP explains as wrong (P(right) < ½) is drawn dashed red: memory holds it, the layout ignores it.
+        const bool disowned = p.p_inlier >= 0 and p.p_inlier < 0.5;
+        const QColor colour = not p.seam_ok ? QColor(140, 140, 140)
+                            : disowned      ? QColor(200, 40, 40)
+                                            : QColor(30, 130, 60, static_cast<int>(80 + 175 * pp));
+        const QPen pen = p.seam_ok and not disowned ? cosmetic(colour, 1.5 + 4.5 * pp) : cosmetic(colour, 1.5, Qt::DashLine);
 
         // One half per side, each through ITS OWN door face: on a tree passage they meet at the same point; on a
         // loop the gap between them is the closure error, drawn rather than hidden.
@@ -190,6 +220,17 @@ void TopologyView::rebuild()
 
     if (map.rooms.empty())
         label(scene_, QStringLiteral("long-term memory holds no room yet"), {0, 0}, {0, 0}, 1);
+    else if (map.optimised)
+    {
+        const auto &c = cache_;
+        label(scene_, QString::fromStdString(std::format(
+            "MAP layout · solve #{} ({:.0f} ms, {} it{})\nF {:.2f} → {:.2f}   seam {:.2f}  square {:.2f}  overlap {:.2f}  wall {:.2f}{}",
+            c.solves, c.ms, c.iterations, c.converged ? "" : ", NOT converged", c.before.total(), c.after.total(),
+            c.after.seam, c.after.manhattan, c.after.overlap, c.after.wall,
+            c.building_axis.has_value() ? std::format("\nbuilding axis {:.1f}°", c.building_axis.value() * 180.0 / M_PI)
+                                        : std::string{})),
+            content_.topLeft(), {0, -40}, 7);
+    }
 
     if (not user_framed_) fit();
 }
