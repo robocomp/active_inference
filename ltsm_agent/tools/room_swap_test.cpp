@@ -88,6 +88,7 @@ static void build_memory(bool promoted_twin)
         const auto P = mem_node("room", "r4_room_4", 0, 0, 0, 0, 4, box);
         const auto fP = mem_node("object", "r4_door_9", P, 1, 0, 1, std::nullopt, {}, "door");
         passage("passage_5", fL, fP);
+        { auto pw = mem->get_node("passage_5").value(); mem->add_or_modify_attrib_local<passage_crossings_att>(pw, 7); mem->update_node(pw); }
     }
 }
 
@@ -224,6 +225,21 @@ int main(int argc, char **argv)
         live->delete_node(Lr.id());
         f.sw.on_room_left("room_3");
         check(not mem->get_node("r4_room_4").has_value() and not mem->get_node("r4_door_9").has_value(), "on_room_left: the staged twin and its faces are gone");
+        {
+            const auto pw = mem->get_node("passage_5");
+            check(pw.has_value(), "the L<->twin passage survives");
+            if (pw)
+            {
+                const auto m = DSR::DSRGraph::get_node_edges_by_type(pw.value(), "match");
+                const auto fL = mem->get_node("r2_door_3");
+                check(m.size() == 1 and fL.has_value() and m[0].to() == fL->id(), "with L's face only");
+                check(mem->get_attrib_by_name<passage_crossings_att>(pw.value()).value_or(0) == 7, "and its crossing history intact");
+            }
+            check(mem->get_node("r2_door_3").has_value() and mem->get_node("r2_room_2").has_value(), "L's archive door is intact");
+            for (const char *t : {"room", "floor", "wall", "object"})
+                for (const auto &n : mem->get_nodes_by_type(t))
+                    if (n.name().starts_with("r4_")) check(false, "no node of the twin remains: " + n.name());
+        }
         check(mem_rooms() == 2, "memory: exactly the known rooms (K, L)");
         check(not live->get_node("recall_room_3").has_value() and f.sw.state() == ltsm::RoomSwap::State::Entering, "late recall dropped, state Entering");
         check(not f.ev.held("r3_room_3"), "the archive is released");
@@ -337,6 +353,18 @@ int main(int argc, char **argv)
         ltsm::Candidate c; c.old_room_name = "room_x";
         g.sw.on_evicted(c, true);
         check(recall_nodes() == 0, "the robot leaving retires it");
+    }
+
+    std::printf("k_recall_survives_k_room_appearing_while_staged\n");
+    {
+        reset(); build_memory(true); build_live(true);
+        Fix h;
+        check(h.sw.swap(3, pose_k(), live_P), "swap");
+        live_node("room", "room_3", robot_id, 0, 0, 0, 3);
+        h.sw.step();
+        check(live->get_node("recall_room_3").has_value(), "K's room node exists: K's recall is NOT retired while staged");
+        h.sw.on_room_left("room_3");
+        check(not live->get_node("recall_room_3").has_value(), "retired when the window closes");
     }
 
     std::printf("stale_staged_swept_at_start\n");

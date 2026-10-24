@@ -13,6 +13,7 @@
 #include <cmath>
 #include <format>
 #include <limits>
+#include <unordered_set>
 
 namespace ltsm
 {
@@ -65,8 +66,17 @@ std::optional<DSR::Node> RoomSwap::robot_node() const
 int RoomSwap::drop_subtree(const std::string &memory_room)
 {
     // the walk (RT + parent attribute, passages with a face in it, deepest first) is plan_forget's
-    const auto plan = plan_forget(*mem_, memory_room, true);
-    return plan.has_value() ? forget(*mem_, plan.value()) : 0;
+    auto plan = plan_forget(*mem_, memory_room, true);
+    if (not plan.has_value()) return 0;
+    // A passage with a face OUTSIDE the twin (the previous room's) survives with its crossing history: only the twin's own face
+    // goes (the node deletion drops the match edge). Passages wholly inside the twin go with it.
+    std::unordered_set<std::uint64_t> inside(plan->subtree.begin(), plan->subtree.end());
+    inside.insert(plan->room_id);
+    std::erase_if(plan->passages, [&](std::uint64_t pid) {
+        const auto p = mem_->get_node(pid);
+        return p.has_value() and std::ranges::any_of(DSR::DSRGraph::get_node_edges_by_type(p.value(), "match"),
+                                                      [&](const auto &e) { return not inside.contains(e.to()); }); });
+    return forget(*mem_, plan.value());
 }
 
 void RoomSwap::retire_all_late()
@@ -79,6 +89,9 @@ void RoomSwap::step()
 {
     for (auto it = late_.begin(); it != late_.end();)
     {
+        // K's own late recall is the channel room_concept reports a failed late adoption on (valid = false), written AFTER it
+        // re-births the room from it: it stays until the undo window closes. Only the twin's recall is retired here.
+        if (state_ == State::Staged and *it == known_mem_) { ++it; continue; }
         const auto rec = live_->get_node("recall_" + RoomRecall::live_name_of(*it));
         if (not rec.has_value()) { it = late_.erase(it); continue; }
         const auto room = live_->get_node(RoomRecall::live_name_of(*it));

@@ -109,6 +109,8 @@ static std::uint64_t live_door(const std::string &name, std::uint64_t parent)
     return live->insert_node(d).value();
 }
 
+static std::uint64_t live_node_for_test(const std::string &name, std::uint64_t rid) { return live_room(name, rid, rid); }
+
 static void set_current(std::uint64_t room)
 {
     for (const auto &e : live->get_edges_by_type("current")) live->delete_edge(e.from(), e.to(), "current");
@@ -440,6 +442,7 @@ int main(int argc, char **argv)
         bool any = false;
         for (int i = 0; i < 3; ++i) any = any or s.rec.step().act != ltsm::RoomRecognizer::Step::Act::None;
         check(not any and s.rec.swapped(), "recall present, no objection: the swap is held");
+        const auto Kr = live_node_for_test("room_3", 3);       // room_concept re-births K; the recall is still there
         auto n2 = live->get_node(rid).value();
         live->add_or_modify_attrib_local<valid_att>(n2, true);
         live->update_node(n2);
@@ -449,6 +452,7 @@ int main(int argc, char **argv)
         const auto u = s.rec.step();
         check(u.act == ltsm::RoomRecognizer::Step::Act::Undo and u.room_id == 3 and not s.rec.swapped(), "valid = false on the late recall: Undo requested");
         s.rec.on_undo_executed();
+        live->delete_node(Kr);
         live->delete_node(rid);
         s.mirror = live_door("door_9", live_r2);
         s.prov = s.mirror;
