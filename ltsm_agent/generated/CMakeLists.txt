@@ -60,3 +60,7 @@ TARGET_LINK_LIBRARIES( seam_evict_test ${LIBS} dsr_core dsr_gui dsr_api fastcdr 
 # Room-recognition metric evidence: path-taken seam chain vs each known room's own chain. make -C build room_chain_test; run from the component root.
 ADD_EXECUTABLE( room_chain_test EXCLUDE_FROM_ALL ../tools/room_chain_test.cpp ../src/room_chain.cpp ../src/room_eviction.cpp )
 TARGET_LINK_LIBRARIES( room_chain_test ${LIBS} dsr_core dsr_gui dsr_api fastcdr fastdds OpenThreads Eigen3::Eigen QGLViewer-qt6 Qt6OpenGLWidgets ${STATIC_LIBS} ${SPECIFIC_LIBS} ${QT_LIBRARIES} ${Ice_LIBRARIES} )
+
+# Room recognition: evidence in, posterior out, staged commit state. make -C build room_recognizer_test; run from the component root.
+ADD_EXECUTABLE( room_recognizer_test EXCLUDE_FROM_ALL ../tools/room_recognizer_test.cpp ../src/room_recognizer.cpp ../src/room_chain.cpp ../src/room_eviction.cpp )
+TARGET_LINK_LIBRARIES( room_recognizer_test ${LIBS} dsr_core dsr_gui dsr_api fastcdr fastdds OpenThreads Eigen3::Eigen QGLViewer-qt6 Qt6OpenGLWidgets ${STATIC_LIBS} ${SPECIFIC_LIBS} ${QT_LIBRARIES} ${Ice_LIBRARIES} )

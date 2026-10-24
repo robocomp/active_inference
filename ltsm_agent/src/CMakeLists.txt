@@ -10,6 +10,7 @@ LIST(APPEND SOURCES
   ../src/topology_view.cpp
   ../src/room_forget.cpp
   ../src/room_chain.cpp
+  ../src/room_recognizer.cpp
 )
 
 # Headers set
@@ -24,6 +25,7 @@ LIST(APPEND HEADERS
   ../src/topology_view.h
   ../src/room_forget.h
   ../src/room_chain.h
+  ../src/room_recognizer.h
 )
 
 LIST(APPEND LIBS ${LIBS})

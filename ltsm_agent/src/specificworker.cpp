@@ -86,6 +86,9 @@ SpecificWorker::~SpecificWorker()
 {
 	std::cout << "Destroying SpecificWorker" << std::endl;
 	// Graceful exit (SIGTERM/SIGINT, never kill -9): let go of the live passages this agent owns.
+	if (recognizer_)
+		if (const int n = recognizer_->sweep_stale(); n > 0)
+			std::cout << "[recog] removed " << n << " recognition node(s) on shutdown" << std::endl;
 	if (recall_)
 		if (const int n = recall_->remove_all(); n > 0)
 			std::cout << "[recall] removed " << n << " recall node(s) on shutdown" << std::endl;
@@ -284,6 +287,14 @@ void SpecificWorker::initialize()
         recall_ = std::make_unique<ltsm::RoomRecall>(G_dsr, G_ltsm, *evictor);
         if (const int n = recall_->remove_all(); n > 0)
             qInfo() << "[recall] swept" << n << "stale recall node(s) from a previous run";
+        if (flag("Recognition.enabled",
+                "recognise which known room the provisional room behind a fresh door is (posterior + staged commit requests)"))
+        {
+            recognizer_ = std::make_unique<ltsm::RoomRecognizer>(G_dsr, G_ltsm, *evictor);
+            if (const int n = recognizer_->sweep_stale(); n > 0)
+                qInfo() << "[recog] swept" << n << "stale recognition/place_evidence node(s) from a previous run";
+            qInfo() << "[ltsm_agent] ROOM RECOGNITION ARMED -- metric chain (+ place_evidence when retina publishes it); requests only";
+        }
         passages = std::make_unique<ltsm::PassageHarvest>(
             G_dsr, G_ltsm,
             cfgr.s("Passages.csv_path", "etc/passages.csv",
@@ -370,6 +381,15 @@ void SpecificWorker::compute()
     }
     // What lies behind each door memory knows the far side of (room_recall.h). After the promotion, so a room that has
     // just become live again retires its own recall in the same cycle.
+    // Which known room is the provisional room behind a fresh door? Posterior + staged commit REQUESTS. After the promotion
+    // step (it reads the current room that step may have just moved) and before the recall, which a swap will feed.
+    if (recognizer_)
+    {
+        const auto rq = recognizer_->step();
+        if (rq.act != ltsm::RoomRecognizer::Step::Act::None)
+            qInfo().noquote() << QString::fromStdString(std::format("[recog] {} requested for room_id {} (executed by RoomSwap)",
+                    rq.act == ltsm::RoomRecognizer::Step::Act::Swap ? "SWAP" : "UNDO", rq.room_id));
+    }
     if (recall_) recall_->step();
 
     if (not probe_enabled)

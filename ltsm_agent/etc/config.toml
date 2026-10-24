@@ -97,6 +97,13 @@ decision_prob = 0.95
 enabled        = true
 backstop_sweep = false
 
+# ── Room recognition (src/room_recognizer.h) ─────────────────────────────────────────────────────
+# While the room behind a crossed door nobody has used is still provisional, score it against every archived room: the robot's
+# pose through the seam chain (+ retina's place_evidence when it is published) -> a posterior over {known rooms, new} on the
+# `recognition` node, and staged Swap/Undo REQUESTS (executed by RoomSwap, not yet wired). Needs Eviction. Absent key => OFF.
+[Recognition]
+enabled = false   # request-only until RoomSwap (Task 7) executes the requests; switch on for the gold tour
+
 # Long-term memory survives runs: room 1 is written at start-up only if it is not already remembered.
 [Memory]
 persist      = true
