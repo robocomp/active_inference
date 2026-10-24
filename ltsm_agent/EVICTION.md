@@ -399,6 +399,23 @@ Doing 2 before 1 would bootstrap a belief from a channel nobody had checked the 
 most diagnostic joystick crossings are the ones through a doorway standing WIDE open: that is the
 highest-|llr| case and where the visibility normalisation is under most strain.
 
+## Staged twin, discard candidate, read-only archive (room recognition, 2026-10-24)
+
+When `RoomRecognizer` decides the provisional room behind a fresh door is a KNOWN room K, `RoomSwap`
+(`src/room_swap.{h,cpp}`) reuses this machinery rather than adding a lifecycle:
+
+- **Discard candidate.** `RoomEviction::Candidate::discard = true` (`src/room_eviction.h`) deletes `new_room_id` and its live
+  subtree and writes NOTHING to memory: no seam, no copy, no `current` flip. Only `new_room_id`/`new_room_name` are read.
+- **Staged twin.** If the provisional room was already promoted (its memory twin exists), the twin is flagged
+  `object_subtype "staged"` and kept as the undo snapshot; the previous room's passage face into it is not rewritten.
+- **Read-only archive while staged.** K's memory twin is held (`RoomEviction::hold`): an `evict()` of K as the room being LEFT
+  is refused, and as the room being ENTERED the twin is not copied into.
+- **The undo window IS the eviction fence.** It closes when the robot leaves K: `on_room_left()` (called from the eviction
+  path BEFORE `evict()`, otherwise the hold would refuse the eviction that moves `current` on) deletes the staged twin and the
+  late recall, releases the hold, and carries the crossed door over as a passage of both rooms.
+- Contract with room_concept (`valid = false` on the recall requests an undo) and the full case A/B description are in the
+  header of `src/room_swap.h`; the lifecycle audit row is in [../CONCEPT_AGENT_LIFECYCLE.md](../CONCEPT_AGENT_LIFECYCLE.md).
+
 ## Testing it without the fleet and without room_concept
 
 `etc/config_stage.toml`: the `dsr` sub-table is seeded from a **fixture file on its own private

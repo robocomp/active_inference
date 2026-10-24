@@ -227,6 +227,8 @@ Derived by reading each agent, not inferred from includes. `—` = not applicabl
 | human | ❌ | ❌ `belief_stabilizer` | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
 | chat_agent *(2026-10-12)* | — no instances | — no belief | — | — | — | — | — | ✅ |
 | sensor_calibration *(2026-10-23, skeleton)* | — no instances | — no belief | — | — | — | — | — | ✅ |
+| ltsm `recognition` / `recall_late` / `staged` *(2026-10-24)* | — no instances (decides which KNOWN room this is; births nothing) | — no belief | — | ❌ metric evidence only, no occupancy/absence channel | — | — | ❌ no phantom record | ✅ |
+| retina `place_evidence` *(2026-10-24, PLANNED, not producing)* | — | — | — | — | — | — | ❌ not built | ❌ not yet owned |
 
 **chat_agent** is not a concept agent: it births no instance and holds no belief, so CREATE…HISTORY do not apply
 (`—`, not `❌`). It owns exactly one node, `chat_intention` (type `intention`, has_intention edge from `Shadow`), the
@@ -242,6 +244,27 @@ DSR signal; the digest and the command status are polled on the main thread.
 grace 3000 ms; required `robot_concept`, `room_concept`); it connects no DSR signal. No ❌. When it later writes
 proposal attributes on its own node, that node stays its only owned state (robot_concept remains the sole writer of
 body→sensor RT edges).
+
+**Room recognition (2026-10-24; spec `docs/superpowers/specs/2026-10-22-room-recognition-design.md`).** Built METRIC-FIRST by
+decision: the appearance expert (retina `place_evidence` / PlaceMemory, plan Tasks 2 and 4) is DEFERRED and does not exist;
+`room_recognizer.h` treats it as absent (`AppearanceEvidence::available = false`). Nothing below depends on it.
+- **ltsm `recognition`** (metaconcept, `recog_room_ids`, `recog_posterior`; `ltsm_agent/src/room_recognizer.{h,cpp}`,
+  trace `recognition_trace.csv`) is ltsm-owned, removed when its structural preconditions stop holding, swept at start. It
+  births no room: it only REQUESTS a swap or undo. **`recall_late`** (`recall_<room>`, subtype `room_recall`,
+  `recall_pose_prior`) and the twin flag **`object_subtype "staged"`** are ltsm-owned too (`ltsm_agent/src/room_swap.{h,cpp}`).
+  The only cross-agent write is `valid = false` by room_concept on a recall it rejected (it never deletes it). That is the
+  late-adoption contract (`room_swap.h`; room_concept side `room_concept/src/room_scene_graph_late_recall.cpp`).
+- **The undo window is the eviction fence.** The swap is reversible until the robot leaves the recalled room; then
+  `on_room_left()` deletes the staged twin and the late recall and releases the hold. While staged, K's memory twin is
+  read-only to eviction (`RoomEviction::hold`). Details in `ltsm_agent/EVICTION.md`.
+- door_concept reads a late recall as a recalled branch and records `IdentityDrop` for the provisional room's doors
+  (`door_concept/src/specificworker.cpp`); the controller's cross leg survives the rename.
+- **❌ justifications.** ltsm REMOVE: the recogniser has no occupancy/absence channel because it judges a hypothesis over rooms
+  (a posterior from the pose seam), not an object's existence; the swap's own reversal is the undo above. ltsm HISTORY: no
+  phantom record is kept; `recognition_trace.csv` records each decision's evidence but a false recognition is undone, not
+  clustered, and there is no place×bearing hypothesis to test on it. retina `place_evidence`: PLANNED, not producing;
+  every cell is ❌ because there is nothing to conform yet. Revisit the row when Tasks 2 and 4 are built (its node will need
+  an `[Owns]` entry matching `[Agent].id`; retina already rewrites it, ltsm sweeps it only as a SIGKILL leftover).
 
 **door_concept CREATE exceptions (2026-10-20).** Birth stays tracker-only for every door *first seen*. Two creations do
 not go through the tracker, and neither is a birth in §1's sense — both RESTORE a door that some earlier evidence

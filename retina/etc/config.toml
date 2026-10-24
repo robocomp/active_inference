@@ -416,8 +416,10 @@ MessageSizeMax = "20004800"
 # encodes each ricoh panorama with DINOv2 ViT-S/14, keyed to the room pose it was captured at, so a
 # query panorama can propose WHERE — as a distribution, not an answer.
 #
-# ★ THIS PASS BUILDS THE MAP AND THE MEASUREMENT, NOT THE BEHAVIOUR. Nothing consumes the output yet;
-# the designed consumer is grid_search Stage 1 (room_concept.cpp:1764-1808), where mixture.sample(rng, 8)
+# ★ THIS PASS BUILDS THE MAP AND THE MEASUREMENT, NOT THE BEHAVIOUR. Nothing consumes the output yet.
+# The room-recognition appearance path (a `place_evidence` node read by ltsm's RoomRecognizer) is DEFERRED:
+# recognition was built metric-first and treats appearance as absent (room_recognizer.h). The designed
+# consumer is grid_search Stage 1 (room_concept.cpp:1764-1808), where mixture.sample(rng, 8)
 # replaces the lattice and feeds the unchanged Stage 2 → moment_match contract. Turning this on costs
 # GPU time and produces files; it changes no robot behaviour.
 #
