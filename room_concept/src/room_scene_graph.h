@@ -218,7 +218,23 @@ private:
         std::vector<Eigen::Vector2f> poly_pub;     ///< outline in the remembered room's own (published) frame
         Eigen::Affine2f T_int_recall = Eigen::Affine2f::Identity();
         std::optional<float> explored_p;           ///< room_explored_p, if memory carried it onto the recall (room_explored.h)
+        // ── a LATE recall (Task 9): the robot is already inside the remembered room, no door to place it through ────
+        bool late = false;                         ///< recall_late: the recogniser committed before this recall arrived
+        std::uint64_t node_id = 0;                 ///< the recall node (owned by ltsm: read, and `valid` written, never deleted)
+        std::vector<rc::reloc::PriorMode> pose_prior;   ///< the robot's pose in the recalled room's frame (recall_pose_prior)
     };
+    /// The late recall (recall_late) ltsm posted, hung from the crossed door of the room being left (case A) or from the robot
+    /// (case B: no door survives). Its outline is already in the remembered room's own frame, which becomes the internal
+    /// one (T_int_recall = I): the robot's pose in it is the PRIOR the relocalisation search is handed, not a transform.
+    [[nodiscard]] std::optional<Recall> find_late_recall() const;
+    /// Re-birth the room from a late recall: the room node with the REMEMBERED name (rearm_after_crossing's recall path),
+    /// its outline given, the pose found by the mixture search with the recall's pose prior; the verdict of that search is
+    /// reported back on the recall node (`valid = false` = rejected). The room it replaces is released to ltsm's fence.
+    bool adopt_late_recall(const Recall& r);
+    void step_late_recall();   ///< one cycle: adopt a standing late recall, relay the adoption verdict
+    std::uint64_t late_watch_node_ = 0;      ///< the recall whose adoption verdict is pending (0 = none)
+    std::string   late_adopted_name_;        ///< the room last adopted from a late recall
+    std::int64_t  late_last_poll_ms_ = 0;
     /// The recall hung from the crossed door `ap`, if ltsm posted one. Reads node/edge attributes only (thread-safe).
     [[nodiscard]] std::optional<Recall> find_recall(const rc::DoorAperture& ap) const;
     // Room names are never reused: one past every room_<k> ever issued, not only those live (see the proto birth).

@@ -20,12 +20,23 @@
 #include "room_concept.h"
 #include "room_gn_solver.h"
 #include "room_model.h"
+#include "reloc_search.h"
+#include <cstring>
 #include "image_edge_types.h"
 #include "image_edge_ops.h"
 #include "image_edge_accumulate.h"
 #include "image_edge_source.h"
 
 using rc::RoomConcept;
+
+namespace rc
+{
+    /// Test access to the late-recall search (declared friend in RoomConcept).
+    struct RelocSelftestAccess
+    {
+        static void late(RoomConcept& r, const std::vector<Eigen::Vector3f>& pts) { r.run_late_recall_search(pts); }
+    };
+}
 
 namespace
 {
@@ -84,8 +95,114 @@ namespace
     }
 } // namespace
 
-int main()
+
+/// ── late_recall (Task 9) ────────────────────────────────────────────────────────────────────────────────────
+/// A late recall hands room_concept a pose prior (the recogniser's posterior of "I am in K, here"). The robot is
+/// already inside a symmetric (rectangular) room and the tracker sits in a provisional frame at an arbitrary
+/// offset; the search must (a) let the prior break the 180 deg tie, (b) be overruled by the scan when the prior is
+/// 3 m off but its covariance admits the truth, (c) leave every number untouched when the prior is empty.
+void late_recall_section()
 {
+    std::printf("\n[late_recall] pose prior in the relocalisation mixture search\n");
+    char buf[256];
+    std::mt19937 lrng(777);
+    const Eigen::Vector3f truth(-0.7f, 0.4f, 0.6f);   // 2.3 m from the east wall
+    const auto scan = synth_scan(truth, 360, 0.01f, lrng);
+    std::vector<Eigen::Vector2f> pts;
+    for (const auto& q : scan) pts.emplace_back(q.x(), q.y());
+    const auto poly = room_polygon();
+    rc::reloc::Params base;
+    rc::reloc::LikelihoodRaster raster;
+    raster.build(poly, base);
+    const Eigen::Vector3f provisional(1.5f, -1.0f, 2.0f);   // tracker pose in the provisional frame: meaningless here
+    const auto err = [&](const rc::reloc::Mode& m)
+    {
+        Eigen::Vector3f d = m.pose - truth;
+        d.z() = std::remainder(d.z(), 2.f * static_cast<float>(M_PI));
+        return d;
+    };
+    const auto chi2 = [&](const rc::reloc::Mode& m)
+    {
+        const Eigen::Vector3f d = err(m);
+        return d.dot(m.cov.ldlt().solve(d));
+    };
+    const Eigen::Vector3f twin(-truth.x(), -truth.y(), truth.z() + static_cast<float>(M_PI));
+
+    const auto free_res = rc::reloc::search(raster, poly, pts, {provisional}, base, 99u);
+    check("prior-free search finds truth and its twin tied", free_res.modes.size() >= 2
+          and free_res.modes[0].weight < 0.6f and free_res.modes[1].weight > 0.4f,
+          (std::snprintf(buf, sizeof buf, "top w=%.3f second w=%.3f", free_res.modes.empty() ? 0.f : free_res.modes[0].weight,
+                         free_res.modes.size() > 1 ? free_res.modes[1].weight : 0.f), buf));
+
+    rc::reloc::Params with = base;
+    rc::reloc::PriorMode pm;
+    pm.mu = truth + Eigen::Vector3f(0.05f, -0.03f, 0.02f);
+    pm.S = Eigen::Vector3f(0.15f * 0.15f, 0.15f * 0.15f, 0.1f * 0.1f).asDiagonal();
+    with.prior_modes = {pm};
+    const auto res_a = rc::reloc::search(raster, poly, pts, {provisional}, with, 99u);
+    const bool a_ok = not res_a.modes.empty() and res_a.modes[0].weight > 0.9f and chi2(res_a.modes[0]) <= 7.81f
+                      and err(res_a.modes[0]).head<2>().norm() < 0.05f;
+    check("(a) prior breaks the tie, truth in the 95% region", a_ok,
+          (std::snprintf(buf, sizeof buf, "w=%.3f err=%.3f m chi2=%.2f", res_a.modes.empty() ? 0.f : res_a.modes[0].weight,
+                         res_a.modes.empty() ? -1.f : err(res_a.modes[0]).head<2>().norm(),
+                         res_a.modes.empty() ? -1.f : chi2(res_a.modes[0])), buf));
+
+    rc::reloc::Params off = base;
+    rc::reloc::PriorMode po;
+    po.mu = truth + Eigen::Vector3f(3.0f, 0.f, 0.f);
+    po.S = Eigen::Vector3f(2.f * 2.f, 2.f * 2.f, 1.f).asDiagonal();   // admits the truth at 1.5 sigma
+    off.prior_modes = {po};
+    const auto res_b = rc::reloc::search(raster, poly, pts, {provisional}, off, 99u);
+    const bool b_ok = not res_b.modes.empty() and err(res_b.modes[0]).head<2>().norm() < 0.05f
+                      and std::abs(err(res_b.modes[0]).z()) < 0.05f;
+    check("(b) a prior 3 m off is overruled by the likelihood", b_ok,
+          (std::snprintf(buf, sizeof buf, "top err=%.3f m w=%.3f", res_b.modes.empty() ? -1.f : err(res_b.modes[0]).head<2>().norm(),
+                         res_b.modes.empty() ? 0.f : res_b.modes[0].weight), buf));
+
+    rc::reloc::Params empty = base;
+    empty.prior_modes.clear();
+    const auto res_c = rc::reloc::search(raster, poly, pts, {provisional}, empty, 99u);
+    bool same = res_c.modes.size() == free_res.modes.size();
+    for (std::size_t i = 0; same and i < res_c.modes.size(); ++i)
+        same = std::memcmp(&res_c.modes[i].pose, &free_res.modes[i].pose, sizeof(Eigen::Vector3f)) == 0
+               and std::memcmp(&res_c.modes[i].cov, &free_res.modes[i].cov, sizeof(Eigen::Matrix3f)) == 0
+               and res_c.modes[i].weight == free_res.modes[i].weight and res_c.modes[i].log_weight == free_res.modes[i].log_weight;
+    check("(c) an empty prior reproduces today's result bit-for-bit", same, "");
+
+// (d)/(e): the ADOPTION VERDICT. The room was adopted from a late recall; the one search that judges it runs on the
+// next scan. A remembered layout that explains the scan is Accepted; one that explains it no better than clutter
+// is Rejected (the signal ltsm's undo is built on: valid = false on the recall node, written by the scene graph).
+const auto verdict_for = [&](const std::vector<Eigen::Vector2f>& remembered, const Eigen::Vector3f& at)
+{
+    rc::RoomConcept rcn;
+    rcn.set_polygon_room(remembered);
+    rcn.set_robot_pose(at.x(), at.y(), at.z(), false);
+    rc::reloc::PriorMode m;
+    m.mu = at; m.S = Eigen::Vector3f(0.04f, 0.04f, 0.02f).asDiagonal();
+    rcn.seed_reloc_prior({m});
+    const bool pending = rcn.late_recall_verdict() == RoomConcept::LateVerdict::Pending;
+    std::vector<Eigen::Vector3f> p3;
+    for (const auto& q : scan) p3.emplace_back(q.x(), q.y(), 0.f);
+    rc::RelocSelftestAccess::late(rcn, p3);
+    return std::pair{pending, rcn.late_recall_verdict()};
+};
+const auto [pend_d, ver_d] = verdict_for(poly, truth);
+check("(d) the true layout is ACCEPTED", pend_d and ver_d == RoomConcept::LateVerdict::Accepted,
+      (std::snprintf(buf, sizeof buf, "pending-before=%d verdict=%d", pend_d ? 1 : 0, static_cast<int>(ver_d)), buf));
+const std::vector<Eigen::Vector2f> other = {{-1.2f, -1.2f}, {1.2f, -1.2f}, {1.2f, 1.2f}, {-1.2f, 1.2f}};   // a 2.4 m closet
+const auto [pend_e, ver_e] = verdict_for(other, Eigen::Vector3f(0.f, 0.f, 0.f));
+check("(e) a layout that cannot explain the scan is REJECTED", pend_e and ver_e == RoomConcept::LateVerdict::Rejected,
+      (std::snprintf(buf, sizeof buf, "pending-before=%d verdict=%d", pend_e ? 1 : 0, static_cast<int>(ver_e)), buf));
+}
+
+int main(int argc, char** argv)
+{
+    if (argc > 1 and std::strcmp(argv[1], "late_recall") == 0)
+    {
+        late_recall_section();
+        std::printf("\n%s (%d failure%s)\n\n", failures == 0 ? "ALL PASS" : "FAILURES", failures, failures == 1 ? "" : "s");
+        return failures == 0 ? 0 : 1;
+    }
     std::mt19937 rng(12345);
 
     rc::Model model;
@@ -970,6 +1087,8 @@ int main()
         std::snprintf(buf, sizeof buf, "|wrap - nowrap| = %.2e px at u = %.0f", d_mid, u_mid);
         check("wrapping changes NOTHING away from the seam", d_mid < 1e-6f, buf);
     }
+
+    late_recall_section();
 
     std::printf("\n%s (%d failure%s)\n\n", failures == 0 ? "ALL PASS" : "FAILURES",
                 failures, failures == 1 ? "" : "s");

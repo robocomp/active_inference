@@ -198,6 +198,8 @@ void RoomSceneGraph::update(const rc::RoomConcept::UpdateResult& res, float adv,
     last_int_pose_ = res.robot_pose;
     have_last_int_pose_ = true;
 
+    step_late_recall();   // a late recall from ltsm's recogniser re-births its room (room_scene_graph_late_recall.cpp)
+
     // ── START-UP PROTO-ROOM: the room exists from the first second of an estimation run ─────────────
     // Born here, on the localiser thread, the first time an estimating agent has no room — ALWAYS, even if
     // the layout is already "publishable" (2026-10-09: it was, on the very first update of a run, and the
@@ -1572,7 +1574,8 @@ void RoomSceneGraph::rearm_after_crossing(std::uint64_t new_room_id, const std::
     // ROOMS DO NOT OVERLAP: the room left behind is known space, not the new room's. Its outline (internal frame, read
     // before begin_room_estimation releases it) is excluded from the new room's free-space map (FreeSpacePolygon::
     // set_exclusion) — what the LiDAR sees of it back through the open doorway is not floor to promote.
-    if (auto poly = room_concept_->nominal_room_polygon(); poly.size() >= 3)
+    // (A late recall replaces a provisional room that IS this same space: nothing to exclude.)
+    if (auto poly = room_concept_->nominal_room_polygon(); poly.size() >= 3 and not (recall.has_value() and recall->late))
         left_polys_int_.push_back(std::move(poly));
     // This agent's intentions (afford_room, afford_calib) are ONE node each and move with the agent's room: the
     // affordance manager re-hangs them from the new room on its next publish (parent + has_intention), but never
@@ -1640,6 +1643,15 @@ void RoomSceneGraph::rearm_after_crossing(std::uint64_t new_room_id, const std::
     {
         room_concept_->set_map_layout(recall_int);
         room_concept_->adopt_map_layout_as_given();
+        if (recall->late)
+        {
+            // The robot is already INSIDE: no doorway to anchor on (the passage prior is not used). The recognition
+            // posterior of the robot's pose in this room goes to the relocaliser as the prior of ONE mixture search on the
+            // next scan (RoomConcept::seed_reloc_prior); the Laplace modes give the pose covariance after the jump.
+            room_concept_->seed_reloc_prior(recall->pose_prior);
+        }
+        else
+        {
         // The robot is standing in the passage it just crossed: its geometry tempers the lost belief while the body is
         // in it and anchors the relocaliser's prior (passage_prior.h, Task R1b). n_out of the room left = into this one.
         rc::passage::Passage pg;
@@ -1652,6 +1664,7 @@ void RoomSceneGraph::rearm_after_crossing(std::uint64_t new_room_id, const std::
         pg.door_id = last_crossing_door_id_;
         pg.heading = last_crossing_heading_;  pg.sig_heading = last_crossing_sig_heading_;   // forward or backing through
         room_concept_->note_passage_handover(pg);
+        }
         std::string reason;
         promote_startup_proto(reason, true);
         recalled_visit_ = true;   // the remembered outline is not re-refined on this visit: see step_layout_refiner

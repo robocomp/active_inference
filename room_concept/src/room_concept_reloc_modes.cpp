@@ -95,7 +95,9 @@ namespace rc
                 const double hx = std::max(x1, x2);
                 log_a_rel = hx + std::log(std::exp(x1 - hx) + std::exp(x2 - hx)) - log_uniform;
             }
-            return log_a_rel + hi + std::log(std::exp(a - hi) + std::exp(b - hi));
+            // …AND THE RECOGNITION POSTERIOR, when a late recall armed one (Task 9; rp.prior_modes, else exactly 0).
+            return log_a_rel + hi + std::log(std::exp(a - hi) + std::exp(b - hi))
+                   + rc::reloc::log_prior_modes(rp, pose, cov, 0.5 * std::abs(area2));
         };
         for (const auto& m : res.modes)
             log_post.push_back(static_cast<double>(rc::reloc::log_evidence(m)) + log_prior(m.pose, m.cov));

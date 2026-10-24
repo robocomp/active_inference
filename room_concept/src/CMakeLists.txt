@@ -47,6 +47,7 @@ LIST(APPEND SOURCES
   ../src/epistemic_controller.cpp
   ../src/room_scene_graph.cpp
   ../src/room_scene_graph_explored.cpp
+  ../src/room_scene_graph_late_recall.cpp
   ../src/layout_explorer.cpp
   ../src/lidar_ingestor.cpp
   ../src/imu_ingestor.cpp

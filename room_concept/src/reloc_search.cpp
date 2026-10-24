@@ -840,6 +840,7 @@ namespace rc::reloc
         std::vector<Eigen::Vector3f> starts;
         for (const auto& c : maxima) starts.push_back(c.pose);
         for (const auto& sp : seed_poses) starts.push_back(sp);
+        for (const auto& pm : p.prior_modes) starts.push_back(pm.mu);   // the prior's own hypotheses are always polished
 
         // The lattice ran on the subsample for speed; the polish is per seed and cheap, so it uses the
         // denser set — mode PRECISION comes from here, and a 150-point polish left modes ~10 cm off.
@@ -868,7 +869,14 @@ namespace rc::reloc
         }
 
         // 4. Laplace evidence  ℓ* + ½log|Σ|, normalised by log-sum-exp.
-        for (auto& md : modes) md.log_weight = md.log_lik + 0.5f * log_det3(md.cov);
+        const double area = p.prior_modes.empty() ? 0.0 : polygon_area(polygon);
+        for (auto& md : modes)
+        {
+            md.log_weight = md.log_lik + 0.5f * log_det3(md.cov);
+            // A pose prior from outside the scan is one more factor of the mode's evidence (empty: nothing added).
+            if (not p.prior_modes.empty())
+                md.log_weight += static_cast<float>(log_prior_modes(p, md.pose, md.cov, area));
+        }
         std::ranges::sort(modes, std::ranges::greater{}, &Mode::log_weight);
         if (static_cast<int>(modes.size()) > p.max_modes) modes.resize(static_cast<std::size_t>(p.max_modes));
         if (not modes.empty())
@@ -890,6 +898,41 @@ namespace rc::reloc
         res.modes = std::move(modes);
         res.duration_ms = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - t0).count();
         return res;
+    }
+
+    double polygon_area(const std::vector<Eigen::Vector2f>& polygon)
+    {
+        double a2 = 0.0;
+        for (std::size_t i = 0, j = polygon.size() - 1; i < polygon.size(); j = i++)
+            a2 += static_cast<double>(polygon[j].x()) * polygon[i].y() - static_cast<double>(polygon[i].x()) * polygon[j].y();
+        return 0.5 * std::abs(a2);
+    }
+
+    double log_prior_modes(const Params& p, const Eigen::Vector3f& pose, const Eigen::Matrix3f& cov, double area)
+    {
+        if (p.prior_modes.empty()) return 0.0;
+        const double wrong = std::clamp(static_cast<double>(p.prior_wrong), 1e-9, 1.0 - 1e-9);
+        const double log_u = -std::log(std::max(area, 1e-6) * 2.0 * M_PI);
+        double wsum = 0.0;
+        for (const auto& c : p.prior_modes) wsum += std::max(0.f, c.w);
+        double lg = -std::numeric_limits<double>::infinity();
+        for (const auto& c : p.prior_modes)
+        {
+            if (not (c.w > 0.f) or wsum <= 0.0) continue;
+            Eigen::Vector3f d = pose - c.mu;
+            d.z() = wrap(d.z());
+            const Eigen::LDLT<Eigen::Matrix3f> ldlt(Eigen::Matrix3f(c.S + cov));
+            const double maha = d.dot(ldlt.solve(d));
+            const double logdet = ldlt.vectorD().array().abs().max(1e-30f).log().sum();
+            if (not std::isfinite(maha)) continue;
+            const double lc = std::log(static_cast<double>(c.w) / wsum) - 0.5 * maha
+                              - 0.5 * (3.0 * std::log(2.0 * M_PI) + logdet);
+            const double hm = std::max(lg, lc);
+            lg = hm + std::log(std::exp(lg - hm) + std::exp(lc - hm));
+        }
+        const double a = std::log1p(-wrong) + lg, b = std::log(wrong) + log_u;
+        const double hi = std::max(a, b);
+        return hi + std::log(std::exp(a - hi) + std::exp(b - hi));
     }
 
     std::vector<Eigen::Vector2f> polish_points(const std::vector<Eigen::Vector2f>& pts_all, const Params& p)

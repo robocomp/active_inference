@@ -450,6 +450,18 @@ public:
     bool grid_search_initial_pose(const std::vector<Eigen::Vector3f>& lidar_points,
                                    float grid_resolution = 0.5f,  // meters
                                    float angle_resolution = M_PI_4);  // 45 degrees
+    /// ── LATE ADOPTION OF A RECALLED ROOM (Task 9) ────────────────────────────────────────────────────────────────
+    /// The recogniser's posterior of "I am in the remembered room K, here" as pose modes in K's frame. Arms ONE
+    /// relocalisation search on the next scan, run against the room that was just adopted as the GIVEN one: the tracker's
+    /// pose belongs to the abandoned provisional frame, so the search is the lost branch (P(lost) = 1) with these modes as
+    /// its prior — a continuity term in each mode's weight (reloc_search.h, PriorMode), never a gate. Its outcome is the
+    /// verdict below. Thread-safe (the scene graph arms it, the localiser thread runs it).
+    void seed_reloc_prior(const std::vector<rc::reloc::PriorMode>& modes);
+    enum class LateVerdict : int { None = 0, Pending = 1, Accepted = 2, Rejected = 3 };
+    /// Pending after seed_reloc_prior until the search has run; then Accepted (some pose explains the scan the way tracking
+    /// does, or the pose was confirmed/held) or Rejected (no pose in K's remembered layout does: the existing tracking-vs-
+    /// broad emission comparison, explains_like_tracking, not a new threshold). None until a prior was ever seeded.
+    [[nodiscard]] LateVerdict late_recall_verdict() const { return static_cast<LateVerdict>(late_verdict_.load(std::memory_order_acquire)); }
     /// The rival pose modes the localiser is carrying (thread-safe copy). Empty ⇔ the pose is unambiguous.
     std::vector<rc::reloc::PoseHypothesis> pose_hypotheses() const
     {
@@ -736,6 +748,12 @@ private:
    bool  belief_init_       = false;
    std::atomic<bool>  belief_reset_requested_{false};   ///< a new given room was adopted: reset the lost belief next frame
    std::mutex passage_mutex_;                   ///< guards rt_.pending_passage (note_passage_handover)
+   mutable std::mutex late_prior_mutex_;                ///< guards late_prior_ (seed_reloc_prior)
+   std::vector<rc::reloc::PriorMode> late_prior_;
+   std::atomic<bool> late_pending_{false};      ///< a late-recall search is armed
+   std::atomic<int>  late_verdict_{0};          ///< LateVerdict
+   bool late_search_active_ = false;            ///< localiser thread: reloc_params() carries late_prior_
+   void run_late_recall_search(const std::vector<Eigen::Vector3f>& lidar_points);
    rc::reloc::Runtime rt_;                      ///< Task R1/R1b relocalisation runtime (reloc_runtime.h)
    std::atomic<bool> pose_undecided_{false};
    std::atomic<float> p_track_display_{1.f};   ///< P(TRACKING) mirrored for the GUI thread (is_relocalising)

@@ -96,6 +96,21 @@ namespace rc::reloc
         std::vector<int>   seg;   ///< per point: its line, −1 none
     };
 
+    /// ── A PRIOR ABOUT WHERE THE ROBOT IS IN THIS ROOM, from somewhere other than the scan (Task 9) ─────────────────
+    /// One component of a Gaussian mixture over the pose in the ROOM frame: mean (x, y, θ), covariance, weight. The
+    /// room recogniser's posterior of "I am in the remembered room K, here" arrives as such a mixture (ltsm's
+    /// `recall_pose_prior`); a symmetric room cannot tell its twins apart from the scan, the prior can.
+    /// It enters search() exactly as the tracker's own pose does in mode_posterior: a continuity TERM in each mode's
+    /// weight — log Σ_c w_c N(x; μ_c, Σ_c + Σ_mode) with a uniform floor of mass `Params::prior_wrong` — never a gate:
+    /// a prior metres off whose covariance admits the truth is overruled by the likelihood, and an empty prior leaves
+    /// every number exactly as it was.
+    struct PriorMode
+    {
+        Eigen::Vector3f mu = Eigen::Vector3f::Zero();
+        Eigen::Matrix3f S  = Eigen::Matrix3f::Identity();
+        float w = 1.f;
+    };
+
     struct Params
     {
         float sigma_sdf      = 0.15f;   // m — SDF observation noise (RoomConcept::Params::sigma_sdf)
@@ -135,7 +150,18 @@ namespace rc::reloc
         /// m — a return from beyond a doorway is spread uniformly over this range past it. The SAME constant as the
         /// tracker's next-room hypothesis (DoorApertures::kBeyondExtentM): one generative model for both.
         float beyond_extent  = 20.f;
+        /// A pose prior from outside the scan (Task 9; PriorMode). Empty = none. Its components also seed the polish.
+        std::vector<PriorMode> prior_modes;
+        /// P(the prior is wrong) — the mass of its uniform floor. ⚠ the same kind of constant as `list_wrong` (a prior on
+        /// a hypothesis source, not a gate); 0.1 as there.
+        float prior_wrong = 0.1f;
     };
+
+    /// log of the prior density at a pose whose own Laplace covariance is `cov`: log[(1−prior_wrong)·Σ_c w_c N(pose;
+    /// μ_c, S_c + cov) + prior_wrong·U], U = 1/(area·2π). `area` = the room's area (m²). 0 with no prior (nothing added).
+    double log_prior_modes(const Params& p, const Eigen::Vector3f& pose, const Eigen::Matrix3f& cov, double area);
+    /// Unsigned polygon area.
+    double polygon_area(const std::vector<Eigen::Vector2f>& polygon);
 
     /// A rival pose hypothesis the localiser is carrying, and its accumulated log-likelihood ratio against the
     /// committed pose (0 = as well supported; negative = less). Shared with the epistemic planner.
