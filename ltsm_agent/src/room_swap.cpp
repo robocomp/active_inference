@@ -165,7 +165,9 @@ bool RoomSwap::swap(std::uint64_t known_room_id, const rc::recog::PoseMix &pose_
                 double best_d = std::numeric_limits<double>::infinity();
                 for (const auto &d : live_->get_nodes_by_type("object"))
                 {
-                    if (not is_door(*live_, d) or live_->get_attrib_by_name<parent_att>(d).value_or(0) != L->id()) continue;
+                    // a door OF L at any depth: door_concept hangs a door from its WALL; only the entry mirror hangs from the room
+                    // itself (a parent==L test kept only that mirror, i.e. the door the robot came IN by -- recog wiring test 10-24)
+                    if (not is_door(*live_, d) or not is_descendant(*live_, d.id(), L->name())) continue;
                     const auto Td = ie->get_transformation_matrix(L->name(), d.name());
                     const auto ref = TM.has_value() ? TM : ie->get_transformation_matrix(L->name(), robot->name());
                     if (not Td.has_value() or not ref.has_value()) continue;

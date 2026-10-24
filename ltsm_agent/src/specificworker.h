@@ -34,6 +34,7 @@
 #include "room_recall.h"
 #include "room_recognizer.h"
 #include "room_swap.h"
+#include "recognition_cycle.h"
 #include "memory_store.h"
 #include "passage_harvest.h"
 #include "passage_live.h"

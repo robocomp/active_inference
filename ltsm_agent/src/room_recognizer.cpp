@@ -18,6 +18,7 @@
 #include <limits>
 #include <ranges>
 #include <unordered_set>
+#include <utility>
 
 namespace ltsm
 {
@@ -176,6 +177,7 @@ int RoomRecognizer::remove_owned()
 
 void RoomRecognizer::end_episode()
 {
+    if (swap_ack_ and prov_id_ != 0) released_ = true;     // an executed swap's window closes with its episode
     if (node_id_ != 0)
     {
         if (live_->get_node(node_id_).has_value()) live_->delete_node(node_id_);
@@ -325,7 +327,8 @@ RoomRecognizer::Step RoomRecognizer::held_step(Step out)
 }
 
 std::optional<std::pair<DSR::Node, DSR::Edge>> RoomRecognizer::provisional_room(const DSR::Node &robot, std::uint64_t cur,
-                                                                                std::optional<std::uint64_t> except_room_id) const
+                                                                                std::optional<std::uint64_t> except_room_id,
+                                                                                std::uint64_t except_node) const
 {
     // Hung from the robot by RT, not the current room, and a proto -- or (the hand-over case promotion_evidence also takes)
     // live while the robot->current edge is retired.
@@ -335,7 +338,7 @@ std::optional<std::pair<DSR::Node, DSR::Edge>> RoomRecognizer::provisional_room(
     for (const auto &e : DSR::DSRGraph::get_node_edges_by_type(robot, "RT"))
     {
         const auto room = live_->get_node(e.to());
-        if (not room.has_value() or room->type() != "room" or room->id() == cur) continue;
+        if (not room.has_value() or room->type() != "room" or room->id() == cur or room->id() == except_node) continue;
         const bool entered = cur_retired and live_->get_attrib_by_name<valid_att>(e).value_or(true);
         if (not rc::room::is_proto(*live_, room->id()) and not entered) continue;
         if (except_room_id.has_value() and live_->get_attrib_by_name<room_id_att>(room.value()) == except_room_id) continue;
@@ -345,6 +348,13 @@ std::optional<std::pair<DSR::Node, DSR::Edge>> RoomRecognizer::provisional_room(
 }
 
 RoomRecognizer::Step RoomRecognizer::step()
+{
+    Step s = step_impl();
+    s.released = std::exchange(released_, false);
+    return s;
+}
+
+RoomRecognizer::Step RoomRecognizer::step_impl()
 {
     Step out;
     track_current();
@@ -358,13 +368,15 @@ RoomRecognizer::Step RoomRecognizer::step()
     //    into the committed room K), a proto hung from the robot that is not this episode's P is a NEW crossing, out of
     //    the room the episode was about: its question replaces this one. A standing commit is handled as any episode end:
     //    requested-but-unexecuted => Undo (abort_episode); EXECUTED (held) => the robot is leaving K through another door,
-    //    which is the fence (no Undo). K's own late re-birth is a proto too (room_concept adopt_late_recall), so a room
-    //    carrying the committed room id is never "newer". Structural, no timer. ─────────────────────────────────────────
+    //    which is the fence (no Undo; Step::released tells the caller to close RoomSwap's window). K's own late re-birth is
+    //    a proto too (room_concept adopt_late_recall), so a room carrying the committed room id is never "newer". When the
+    //    episode simply ends, eligibility runs for the newer room IN THIS CYCLE; when ending it requests an Undo, that
+    //    request is this cycle's and eligibility runs on the next. Structural, no timer. ──────────────────────────────────
     if (prov_id_ != 0 and cur.has_value() and robot.has_value() and cur.value() != L_id_)
     {
         const bool committed = commit_.state == rc::recog::Commit::State::Committed and commit_.room >= 0 and commit_.room < int(ids_.size());
-        if (const auto Pn = provisional_room(robot.value(), cur.value(), committed ? std::optional(ids_[commit_.room]) : std::nullopt);
-            Pn.has_value() and Pn->first.id() != prov_id_)
+        if (const auto Pn = provisional_room(robot.value(), cur.value(), committed ? std::optional(ids_[commit_.room]) : std::nullopt, prov_id_);
+            Pn.has_value())
         {
             qInfo().noquote() << QString::fromStdString(std::format("[recog] newer provisional room {} behind the current room: the episode for {} ends",
                                                                     Pn->first.name(), prov_id_));

@@ -381,38 +381,7 @@ void SpecificWorker::compute()
     // fresh seam is measured from. Run after it, the recogniser could see zero cycles of {L live, P provisional}; run
     // before it, it always sees the cycle the promotion consumes (and caches the seam for the promoted stay). After the
     // live passage step (it reads the door pair that step matched) and before the recall, which a swap will feed.
-    if (recognizer_)
-    {
-        const auto rq = recognizer_->step();
-        if (rq.act != ltsm::RoomRecognizer::Step::Act::None)
-            qInfo().noquote() << QString::fromStdString(std::format("[recog] {} requested for room_id {} (executed by RoomSwap)",
-                    rq.act == ltsm::RoomRecognizer::Step::Act::Swap ? "SWAP" : "UNDO", rq.room_id));
-        if (swap_)
-        {
-            // A request is not an execution: RoomSwap does it, and the recogniser is told what happened (an executed swap
-            // reshapes the graph itself -- P discarded, the crossed door in a passage -- which must not read as episode loss).
-            if (rq.act == ltsm::RoomRecognizer::Step::Act::Swap)
-            {
-                if (swap_->swap(rq.room_id, rq.pose_in_k, recognizer_->provisional_id()))
-                {
-                    recognizer_->on_swap_executed(rq.room_id);
-                    if (not recognizer_->swapped())
-                        qWarning() << "[swap] the recogniser ignored the acknowledgement of the swap to room_id" << static_cast<qulonglong>(rq.room_id)
-                                   << "(episode or commit no longer matches); the undo window is driven by RoomSwap";
-                }
-                else recognizer_->on_swap_failed();
-            }
-            else if (rq.act == ltsm::RoomRecognizer::Step::Act::Undo)
-            {
-                if (swap_->undo()) recognizer_->on_undo_executed();
-                else qWarning() << "[swap] UNDO requested for room_id" << static_cast<qulonglong>(rq.room_id) << "but no swap stands";
-            }
-            // The undo window is RoomSwap's (state()), closed by the eviction that leaves the recognised room. Backstop: the
-            // recogniser's episode is over (provisional_id() == 0) while a swap still stands.
-            if (swap_->state() == ltsm::RoomSwap::State::Staged and recognizer_->provisional_id() == 0) swap_->on_room_left();
-            swap_->step();
-        }
-    }
+    if (recognizer_) ltsm::recognition_cycle(*recognizer_, swap_.get());     // recognition_cycle.h: step, close a released window, execute
     // AFTER the live passage step: the promotion reads the door pair that step matched.
     if (promotion_enabled and evictor)
     {

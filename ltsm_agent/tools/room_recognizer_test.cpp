@@ -8,6 +8,7 @@
 // new side, in either orientation). The fresh seam T(r2 <- provisional) is built by RoomRecognizer FROM THE TWO FACES --
 // nothing here hands it the seam, so the convention (L <- prov, the turn by pi) is exercised.
 #include "../src/room_recognizer.h"
+#include "../src/recognition_cycle.h"
 #include "../src/seam_fusion.h"
 #include <QCoreApplication>
 #include <clocale>
@@ -224,8 +225,11 @@ struct Scenario
 // 2. room_3 is promoted: room_1 leaves the live graph; memory gains r1's face of DOOR_A, room_3's promotion STUB twin
 //    (room node + its entry face, no face of DOOR_2, a stale outline) and passage_1. room_3's episode keeps running.
 // 3. a proto room_4 appears behind DOOR_2 (or room_5 behind DOOR_E): room_3's episode ends, room_4's begins in the same cycle.
-static int live_sequence(bool to_known_room, int8_t dom_live, int8_t dom_mem)
+static bool this_swap_state(const ltsm::RoomSwap &sw) { return sw.state() == ltsm::RoomSwap::State::Staged; }
+enum class Seq { Known, KnownSameOrientationMirror, New, Wiring };
+static int live_sequence(Seq mode, int8_t dom_live, int8_t dom_mem)
 {
+    const bool to_known_room = mode != Seq::New;
     live = std::make_shared<DSR::DSRGraph>("seq_live", 196 + dom_live, "ltsm_root.json", true, dom_live);
     mem  = std::make_shared<DSR::DSRGraph>("seq_mem", 196 + dom_mem, "ltsm_root.json", true, dom_mem);
     const int before = failures;
@@ -325,9 +329,14 @@ static int live_sequence(bool to_known_room, int8_t dom_live, int8_t dom_mem)
     robot_at(robot_2, {{l3, C}, {l4, P_w}});
     live->insert_or_assign_edge(DSR::Edge::create<proto_edge_type>(l4, l4));
     const auto mir = live_door("door_7", l4);
-    put_edge(*live, l4, mir, local(P_w, Vec3(hole_w.x(), hole_w.y(), hole_w.z() + M_PI)));
+    const bool turned = mode != Seq::KnownSameOrientationMirror;
+    put_edge(*live, l4, mir, local(P_w, Vec3(hole_w.x(), hole_w.y(), hole_w.z() + (turned ? M_PI : 0.0))));
+    std::optional<ltsm::RoomRecall> recall;
+    std::optional<ltsm::RoomSwap> sw;
+    if (mode == Seq::Wiring) { recall.emplace(live, mem, ev); sw.emplace(live, mem, ev, *recall); }
+    auto cycle = [&] { return mode == Seq::Wiring ? ltsm::recognition_cycle(rec, &*sw) : rec.step(); };
 
-    st = rec.step();
+    st = cycle();
     p = read_recognition();
     std::printf("  [3] %s: first step act %d ids", to_known_room ? "room_4 behind DOOR_2" : "room_5 behind DOOR_E", int(st.act));
     for (auto id : p.ids) std::printf(" %llu", (unsigned long long)id);
@@ -342,14 +351,68 @@ static int live_sequence(bool to_known_room, int8_t dom_live, int8_t dom_mem)
         check(p.post.size() == 3 and p.post[1] > p.post[0] and p.post[1] > p.post[2], "[3] the TRUE room (r2) is the argmax");
         ltsm::RoomRecognizer::Step sw = st;
         int n = 1;
-        for (; n < 5 and sw.act == ltsm::RoomRecognizer::Step::Act::None; ++n) sw = rec.step();
+        for (; n < 5 and sw.act == ltsm::RoomRecognizer::Step::Act::None; ++n) sw = cycle();
         check(sw.act == ltsm::RoomRecognizer::Step::Act::Swap and sw.room_id == 2, "[3] Swap requested for r2 (step " + std::to_string(n) + ")");
         const Vec3 truth = local(B, robot_2);
         check(not sw.pose_in_k.empty() and (sw.pose_in_k[0].mu.head<2>().cast<double>() - truth.head<2>()).norm() < 0.05
                   and std::abs(wrap(double(sw.pose_in_k[0].mu.z()) - truth.z())) < 0.03,
               "[3] the Swap carries the robot's pose in r2 (< 5 cm, < 0.03 rad)");
     }
-    else
+    if (mode == Seq::Wiring)
+    {
+        auto late_recalls = [&] {
+            int n = 0;
+            for (const auto &m : live->get_nodes_by_type("metaconcept"))
+                if (live->get_attrib_by_name<recall_late_att>(m).value_or(false)) ++n;
+            return n; };
+        check(this_swap_state(*sw) and rec.swapped() and late_recalls() == 1 and not live->get_node(l4).has_value(),
+              "[W] RoomSwap executed it (case A): Staged, recogniser held, K's late recall posted, P discarded");
+        // room_concept re-births K from the late recall (a proto carrying K's room id), it is promoted, room_3 leaves
+        const auto K = live_room("room_2", 2, 2);
+        robot_at(robot_2, {{K, B}});
+        live->insert_or_assign_edge(DSR::Edge::create<proto_edge_type>(K, K));
+        bool any = false;
+        for (int i = 0; i < 2; ++i) any = any or cycle().act != ltsm::RoomRecognizer::Step::Act::None;
+        live->delete_edge(K, K, "proto");
+        set_current(K);
+        for (const auto id : {D, wall, mirA}) live->delete_node(id);
+        live->delete_edge(robot_id, l3, "RT");
+        live->delete_node(l3);
+        { auto n = live->get_node(K).value(); set_poly(*live, n, B, rect(2, -2, 6, 2)); live->update_node(n); }
+        ltsm::RoomRecognizer::Step h;
+        for (int i = 0; i < 3; ++i) { h = cycle(); any = any or h.act != ltsm::RoomRecognizer::Step::Act::None or h.released; }
+        check(not any and this_swap_state(*sw) and rec.swapped(), "[W] K re-born, promoted, current: the swap is held, the window open");
+        // the robot crosses a door of K nobody has crossed: a newer provisional room with door + mirror
+        DSR::Node kw; kw.type("wall"); kw.name("room_2_wall_1");
+        live->add_or_modify_attrib_local<parent_att>(kw, K);
+        const auto kwall = live->insert_node(kw).value();
+        put_edge(*live, K, kwall, local(B, Vec3(6.0, -2.0, M_PI / 2)));
+        const Vec3 holeE(6.0, 0.0, M_PI / 2);
+        const auto DK = live_door("door_8", kwall);
+        put_edge(*live, kwall, DK, local(Vec3(6.0, -2.0, M_PI / 2), holeE), Cd);
+        const auto P6 = live_room("room_6", 6, 6);
+        const Vec3 P6_w(-5.0, 4.0, -2.2), robot_3(6.4, 0.0, 0.0);
+        robot_at(robot_3, {{K, B}, {P6, P6_w}});
+        live->insert_or_assign_edge(DSR::Edge::create<proto_edge_type>(P6, P6));
+        const auto M6 = live_door("door_10", P6);
+        put_edge(*live, P6, M6, local(P6_w, Vec3(holeE.x(), holeE.y(), holeE.z() + M_PI)));
+        const auto r = cycle();
+        p = read_recognition();
+        std::printf("  [W] newer room_6 behind door_8: released %d act %d prov %llu ids", int(r.released), int(r.act), (unsigned long long)rec.provisional_id());
+        for (auto id : p.ids) std::printf(" %llu", (unsigned long long)id);
+        std::printf("  post"); for (float x : p.post) std::printf(" %.4f", x); std::printf("\n");
+        check(r.released and r.act == ltsm::RoomRecognizer::Step::Act::None, "[W] the step reports the held episode RELEASED, and no Undo");
+        check(not this_swap_state(*sw) and late_recalls() == 0, "[W] the wiring closed RoomSwap's window (on_room_left): Entering, K's late recall retired");
+        {   // the swap anchored on the CROSSED door (door_4, wall-hung), not room_3's entry mirror: passage_1 (r1<->r3) untouched
+            const auto p1 = mem->get_node("passage_1");
+            check(p1.has_value() and DSR::DSRGraph::get_node_edges_by_type(p1.value(), "match").size() == 2,
+                  "[W] passage_1 (r1<->r3) still has exactly its two faces: K's face was not carried into the door the robot came IN by");
+        }
+        check(rec.provisional_id() == P6 and not rec.swapped() and p.present, "[W] and the new episode for room_6 runs, in the same cycle");
+        const auto r2 = cycle();
+        check(not r2.released, "[W] released is one-shot");
+    }
+    if (mode == Seq::New)
     {
         bool req = st.act != ltsm::RoomRecognizer::Step::Act::None;
         for (int i = 0; i < 50; ++i) req = req or rec.step().act != ltsm::RoomRecognizer::Step::Act::None;
@@ -415,6 +478,27 @@ int main(int argc, char **argv)
             check(ok and p.post[2] > p.post[1] and st.act == ltsm::RoomRecognizer::Step::Act::None, "in the aperture: `new` leads (0.58 vs 0.42 asserted as an ordering), no request");
         else
             check(ok and p.post[1] > (y < 2.2 ? 0.5f : 0.99f) and st.act == ltsm::RoomRecognizer::Step::Act::Swap and st.room_id == 3, "past the aperture: R3 leads and the Swap is requested; well past: R3 > 0.99");
+    }
+
+    std::printf("unresolvable_face_means_no_metric\n");
+    for (const bool lose_D : {true, false})
+    {   // the live passage pairs D with the mirror (so both are FOUND without any transform); then one face loses its RT edge
+        Scenario s(false, robot_in_r3_w);
+        DSR::Node pw; pw.type("metaconcept"); pw.name("passage_live");
+        live->add_or_modify_attrib_local<object_subtype_att>(pw, std::string("passage"));
+        const auto pid = live->insert_node(pw).value();
+        live->insert_or_assign_edge(DSR::Edge::create<match_edge_type>(pid, s.mirror));
+        live->insert_or_assign_edge(DSR::Edge::create<match_edge_type>(pid, live_D));
+        if (lose_D) live->delete_edge(live_r2, live_D, "RT"); else live->delete_edge(s.prov, s.mirror, "RT");
+        bool any = false;
+        for (int i = 0; i < 5; ++i) any = any or s.rec.step().act != ltsm::RoomRecognizer::Step::Act::None;
+        const auto p = read_recognition();
+        bool uniform = p.present and p.post.size() == 3;
+        for (float x : p.post) uniform = uniform and std::abs(x - 1.f / 3.f) < 1e-5f;
+        check(s.rec.provisional_id() == s.prov and uniform and not any,
+              std::string(lose_D ? "D" : "the mirror") + " unresolvable: the episode runs, the metric is unavailable (posterior = prior), no request");
+        live->delete_node(pid);
+        if (lose_D) put_edge(*live, live_r2, live_D, mul(inv(rooms[1].in_world), hole_w));
     }
 
     std::printf("first_ever_door_needs_no_memory_face\n");
@@ -730,9 +814,13 @@ int main(int argc, char **argv)
     }
 
     std::printf("live_sequence_fresh_to_fresh_known_room_behind_first_ever_door\n");
-    live_sequence(true, 46, 47);
+    live_sequence(Seq::Known, 46, 47);
+    std::printf("live_sequence_fresh_to_fresh_same_orientation_mirror\n");
+    live_sequence(Seq::KnownSameOrientationMirror, 50, 51);
     std::printf("live_sequence_fresh_to_fresh_new_room_stays_new\n");
-    live_sequence(false, 48, 49);
+    live_sequence(Seq::New, 48, 49);
+    std::printf("wiring_held_swap_released_by_a_newer_provisional_room\n");
+    live_sequence(Seq::Wiring, 52, 53);
 
     std::printf("%s (%d failures)\n", failures ? "FAILED" : "all ok", failures);
     std::fflush(stdout);

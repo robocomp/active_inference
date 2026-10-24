@@ -35,7 +35,8 @@
  * THE EPISODE SPANS THE PROMOTION: it lives while the current room is L, the provisional room (its promoted twin; the fresh
  * seam cached while L was still measurable) or the committed room (held, no new evidence: the evidence frame is gone), and
  * ends at the eviction fence (the robot leaves it) or when a NEWER provisional room hangs from the robot (a new crossing
- * out of the room the episode was about: that crossing's episode replaces it, in the same cycle). Ending any other way
+ * out of the room the episode was about: that crossing's episode replaces it -- in the same cycle, or in the next when
+ * ending the old one requests an Undo). Ending any other way
  * under an unexecuted commit, or losing the committed room from the candidates, emits an Undo request; an executed
  * (held) swap ends with no Undo, as at the fence.
  *
@@ -72,6 +73,10 @@ public:
         int           room_index = -1;      ///< index into the candidates (recog_room_ids order)
         std::uint64_t room_id = 0;
         rc::recog::PoseMix pose_in_k;       ///< the robot in that room's frame, as the joint posterior holds it
+        /// An EXECUTED (held) swap's episode ended this cycle (the fence, or a newer provisional room): the undo window is
+        /// closed. The caller closes RoomSwap's window from this (on_room_left), BEFORE executing `act`, which may already
+        /// belong to the next episode. One-shot: reported on exactly one Step.
+        bool released = false;
     };
 
     /// One cycle. Swap/Undo is a REQUEST, executed by RoomSwap.
@@ -127,14 +132,19 @@ private:
     std::vector<std::uint64_t> published_ids_;
     std::uint64_t node_id_ = 0;
 
+    bool released_ = false;                     ///< a held episode ended since the last Step was returned
+    Step step_impl();
     void end_episode();
     Step held_step(Step out);                   ///< an executed swap: hold until the fence
     Step abort_episode(Step out);               ///< end an episode; Undo is requested when a commit stood
     void track_current();
     void publish(const std::vector<float> &post);
     /// The provisional room hung from `robot` (a proto, or the hand-over case: live while robot->current is retired), other
-    /// than the current room `cur` and than a room carrying `except_room_id`; with the robot->P edge.
+    /// than the current room `cur`, the live node `except_node` (0 = none) and a room carrying `except_room_id`; with the
+    /// robot->P edge. The FIRST such room in edge order (excluding by node, not by order, is what makes a lookup for "another
+    /// provisional room" independent of that order).
     [[nodiscard]] std::optional<std::pair<DSR::Node, DSR::Edge>> provisional_room(const DSR::Node &robot, std::uint64_t cur,
-                                                                                  std::optional<std::uint64_t> except_room_id) const;
+                                                                                  std::optional<std::uint64_t> except_room_id,
+                                                                                  std::uint64_t except_node = 0) const;
 };
 }   // namespace ltsm
