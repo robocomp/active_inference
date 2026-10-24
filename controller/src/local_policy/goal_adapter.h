@@ -205,6 +205,22 @@ inline bool orient_settled(const ControllerRobotPose& robot, const ControllerTar
     return (robot.pos - t.room_pos).norm() <= p.tol_xy;
 }
 
+// ★ Task 13: the target a Place goal is built from. A claimed affordance (last_target_info_) or, with none, the MANUAL goal (a panel
+//   click / a mission go_to): select_target clears last_target_info_ for a manual target on purpose — a click is not an affordance,
+//   and every affordance path (claim, hand-back, orient, lock-on, facing) keys on it — so the policy reads the manual goal from here,
+//   never from last_target_info_. Built with from_affordance=false and no node: no facing, no contract, no producer to hand back to
+//   (an unreachable one ends through the no-route clock as ManualTargetEnd::NoRoute).
+inline std::optional<ControllerTargetInfo> policy_place_target(const std::optional<ControllerTargetInfo>& claimed,
+                                                              const std::optional<Eigen::Vector2f>& manual)
+{
+    if (claimed.has_value()) return claimed;
+    if (not manual.has_value()) return std::nullopt;
+    ControllerTargetInfo t;
+    t.node_name = "mouse_target";   // the name select_target gives a manual target's step (why lines, the policy's `who`)
+    t.room_pos = *manual;
+    return t;
+}
+
 inline std::optional<GoalSpec> goal_for_target(const ControllerTargetInfo& t, const ControllerRobotPose& robot,
                                                const std::optional<RoomGap>& gap, GoalMode mode, bool want_facing,
                                                const GoalAdapterParams& p, const std::optional<OrientPrecondition>& pre = std::nullopt)
