@@ -92,14 +92,45 @@ inline bool point_in_polygon(const Eigen::Vector2f& q, const std::vector<Eigen::
     return in;
 }
 
-/// Drops, in place, every outline in `polys` that CONTAINS `q`; returns how many it dropped. FLAGGED geometric
-/// contradiction, not a tolerance: rooms do not overlap, so an outline the robot is standing inside cannot be a
-/// DIFFERENT room from the one it is entering — excluding it would blind the free-space raster to the very floor
-/// under the robot (live recog_try2: room_2 entered from its other side, ~130 free cells, no ring for 600 s).
-inline std::size_t drop_outlines_containing(std::vector<std::vector<Eigen::Vector2f>>& polys, const Eigen::Vector2f& q)
+/// Probability mass of N(mean, cov) inside `poly`: 2-D Gauss-Hermite quadrature (7 x 7 nodes, probabilists'),
+/// on the Cholesky of `cov` (a tiny diagonal jitter keeps a degenerate covariance factorisable). Deterministic and
+/// continuous in mean and covariance: a point estimate is the limit cov -> 0.
+inline float gaussian_mass_in_polygon(const Eigen::Vector2f& mean, const Eigen::Matrix2f& cov,
+                                      const std::vector<Eigen::Vector2f>& poly)
+{
+    if (poly.size() < 3) return 0.f;
+    static constexpr int N = 7;
+    static constexpr double x[N] = {-3.7504397177257425, -2.3667594107345413, -1.1544053947399682, 0.0,
+                                    1.1544053947399682, 2.3667594107345413, 3.7504397177257425};
+    static constexpr double w[N] = {0.0005482688559722184, 0.030757123967586136, 0.24012317860501237,
+                                    0.4571428571428571, 0.24012317860501237, 0.030757123967586136,
+                                    0.0005482688559722184};   // sum = sqrt(2 pi) ... normalised below
+    Eigen::Matrix2f c = 0.5f * (cov + cov.transpose());
+    c.diagonal().array() += 1e-8f;
+    const Eigen::Matrix2f L = Eigen::LLT<Eigen::Matrix2f>(c).matrixL();
+    double inside = 0., total = 0.;
+    for (int a = 0; a < N; ++a)
+        for (int b = 0; b < N; ++b)
+        {
+            const Eigen::Vector2f q = mean + L * Eigen::Vector2f(static_cast<float>(x[a]), static_cast<float>(x[b]));
+            const double wt = w[a] * w[b];
+            total += wt;
+            if (point_in_polygon(q, poly)) inside += wt;
+        }
+    return static_cast<float>(inside / total);
+}
+
+/// Drops, in place, every outline in `polys` that holds MORE of the robot-position posterior N(mean, cov) than it
+/// leaves outside (mass inside > 1/2, the MAP of "inside vs outside"); returns how many it dropped. FLAGGED geometric
+/// contradiction, not a tolerance: rooms do not overlap, so an outline the robot is (more probably than not) standing
+/// inside is not a DIFFERENT room from the one it is entering — excluding it would blind the free-space raster to the
+/// floor under the robot (live recog_try2: ~130 free cells, no ring for 600 s). Using the posterior rather than the
+/// point keeps the decision continuous at an aperture, where a one-frame-stale pose sits on the line.
+inline std::size_t drop_outlines_containing(std::vector<std::vector<Eigen::Vector2f>>& polys, const Eigen::Vector2f& mean,
+                                            const Eigen::Matrix2f& cov)
 {
     return std::erase_if(polys, [&](const std::vector<Eigen::Vector2f>& poly)
-                         { return poly.size() >= 3 and point_in_polygon(q, poly); });
+                         { return gaussian_mass_in_polygon(mean, cov, poly) > 0.5f; });
 }
 
 /// True when no two non-adjacent edges of the closed ring touch or cross.

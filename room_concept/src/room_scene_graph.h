@@ -194,6 +194,7 @@ private:
     /// T_room_proto_. One consumer, at the top of update(), so neither can miss it.
     void absorb_reanchor(const Eigen::Affine2f& int_now);
     Eigen::Affine2f last_int_pose_ = Eigen::Affine2f::Identity();   ///< internal robot pose at the previous update
+    Eigen::Matrix3f last_int_cov_ = Eigen::Matrix3f::Identity();   ///< its covariance (x, y, theta)
     bool have_last_int_pose_ = false;
     bool reanchor_this_update_ = false;   ///< for the proto CSV's `event` column
     std::string startup_event_;           ///< "startup_born" / "promoted" — one-shot, for the same column

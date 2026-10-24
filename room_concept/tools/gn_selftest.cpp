@@ -140,7 +140,7 @@ void proto_exclusion_section()
     scan_square(blind);
     // After: the armed path drops what contains the robot, then excludes the rest.
     std::vector<Poly> left = {L, other};
-    const auto dropped = rc::freespace::drop_outlines_containing(left, robot);
+    const auto dropped = rc::freespace::drop_outlines_containing(left, robot, Eigen::Matrix2f::Identity() * 0.0064f);
     rc::freespace::FreeSpacePolygon fs;
     fs.set_exclusion(left);
     scan_square(fs);
@@ -152,6 +152,26 @@ void proto_exclusion_section()
     check("raster grows over the room once L is dropped", blind.free_cells() * 20 < fs.free_cells() and fs.free_cells() > 5000 and ring.size() >= 4, buf);
     check("an outline NOT containing the robot is still excluded", fs.state_at({6.f, 0.f}) == 2 and fs.state_at({0.f, 0.f}) == 1,
           std::to_string(fs.state_at({6.f, 0.f})));
+
+    // Aperture case: the pose sits 5 cm from an outline edge with sigma 0.08 m. The decision follows the posterior mass
+    // (P(inside) = Phi(+-0.05/0.08) = 0.73 / 0.27): 5 cm inside => dropped, 5 cm outside => kept, as a point test
+    // would do for a stale pose only by luck. Stale-by-one-frame therefore degrades smoothly, not at the line.
+    const Eigen::Matrix2f S = Eigen::Matrix2f::Identity() * 0.0064f;
+    const float m_in  = rc::freespace::gaussian_mass_in_polygon({2.95f, 0.f}, S, L);
+    const float m_out = rc::freespace::gaussian_mass_in_polygon({3.05f, 0.f}, S, L);
+    std::snprintf(buf, sizeof buf, "mass inside: 5 cm in %.3f (exact 0.734), 5 cm out %.3f (exact 0.266)", m_in, m_out);
+    check("pose mass tracks the edge distance", std::abs(m_in - 0.734f) < 0.02f and std::abs(m_out - 0.266f) < 0.02f, buf);
+    std::vector<Poly> a1 = {L}, a2 = {L};
+    const auto d_in  = rc::freespace::drop_outlines_containing(a1, {2.95f, 0.f}, S);
+    const auto d_out = rc::freespace::drop_outlines_containing(a2, {3.05f, 0.f}, S);
+    check("5 cm inside the edge: dropped; 5 cm outside: kept", d_in == 1 and d_out == 0 and a2.size() == 1,
+          std::to_string(d_in) + "/" + std::to_string(d_out));
+    // The room JUST LEFT is pushed after the drop (room_scene_graph.cpp rearm_after_crossing), so it is never a
+    // candidate even with the robot deep inside its outline: only the earlier entries go through the drop.
+    std::vector<Poly> earlier = {other};
+    rc::freespace::drop_outlines_containing(earlier, robot, S);
+    earlier.push_back(L);   // the entry pushed for this crossing
+    check("the just-left entry survives with the robot inside it", earlier.size() == 2 and earlier.back() == L, std::to_string(earlier.size()));
 }
 
 /// ── late_recall (Task 9) ────────────────────────────────────────────────────────────────────────────────────
