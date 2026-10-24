@@ -164,6 +164,33 @@ struct Fix
     Fix() : ev(live, mem), recall(live, mem, ev), sw(live, mem, ev, recall) {}
 };
 
+static Mat::RTMat se2(double x, double y, double th)
+{
+    Mat::RTMat T = Mat::RTMat::Identity();
+    T.linear() = Eigen::AngleAxisd(th, Eigen::Vector3d::UnitZ()).toRotationMatrix();
+    T.translation() = Eigen::Vector3d(x, y, 0.0);
+    return T;
+}
+static int passage_count()
+{
+    int n = 0;
+    for (const auto &x : mem->get_nodes_by_type("metaconcept"))
+        if (mem->get_attrib_by_name<object_subtype_att>(x).value_or("") == "passage") ++n;
+    return n;
+}
+static std::optional<DSR::Node> only_passage()
+{
+    for (const auto &x : mem->get_nodes_by_type("metaconcept"))
+        if (mem->get_attrib_by_name<object_subtype_att>(x).value_or("") == "passage") return x;
+    return std::nullopt;
+}
+static bool any_name_contains(const std::string &s)
+{
+    for (const char *t : {"room", "floor", "wall", "object", "metaconcept"})
+        for (const auto &n : mem->get_nodes_by_type(t)) if (n.name().find(s) != std::string::npos) return true;
+    return false;
+}
+
 int main(int argc, char **argv)
 {
     std::setlocale(LC_ALL, "");
@@ -232,7 +259,7 @@ int main(int argc, char **argv)
             {
                 const auto m = DSR::DSRGraph::get_node_edges_by_type(pw.value(), "match");
                 const auto fL = mem->get_node("r2_door_3");
-                check(m.size() == 1 and fL.has_value() and m[0].to() == fL->id(), "with L's face only");
+                check(m.size() == 2 and fL.has_value() and std::ranges::any_of(m, [&](const auto &e) { return e.to() == fL->id(); }), "with L's face and (carry-over) K's new face, the twin's gone");
                 check(mem->get_attrib_by_name<passage_crossings_att>(pw.value()).value_or(0) == 7, "and its crossing history intact");
             }
             check(mem->get_node("r2_door_3").has_value() and mem->get_node("r2_room_2").has_value(), "L's archive door is intact");
@@ -365,6 +392,104 @@ int main(int argc, char **argv)
         check(live->get_node("recall_room_3").has_value(), "K's room node exists: K's recall is NOT retired while staged");
         h.sw.on_room_left("room_3");
         check(not live->get_node("recall_room_3").has_value(), "retired when the window closes");
+    }
+
+    std::printf("door2_becomes_passage_of_both_rooms\n");
+    {
+        reset(); build_memory(false); build_live(false);
+        Fix f;
+        check(passage_count() == 0, "(no passage yet: case A)");
+        check(f.sw.swap(3, pose_k(), live_P), "swap accepted");
+        f.sw.on_room_left("room_3");
+        check(passage_count() == 1, "exactly one passage");
+        const auto pw = only_passage();
+        if (pw)
+        {
+            const auto m = DSR::DSRGraph::get_node_edges_by_type(pw.value(), "match");
+            check(m.size() == 2, "two match edges");
+            bool in_r2 = false, in_r3 = false;
+            for (const auto &e : m)
+            {
+                in_r2 = in_r2 or ltsm::is_descendant(*mem, e.to(), "r2_room_2");
+                in_r3 = in_r3 or ltsm::is_descendant(*mem, e.to(), "r3_room_3");
+            }
+            check(in_r2 and in_r3, "one face in R2, one in R3");
+            const auto S = ltsm::seam_through_passage(*mem, pw->name(), "r3_room_3", "r2_room_2");
+            check(S.has_value(), "seam_through_passage(R3, R2) resolves");
+            if (S)
+            {
+                const Mat::RTMat truth = se2(1.0, 2.0, 0.3) * se2(-3.0, -1.0, 0.2);       // T(K <- robot) T(robot <- L)
+                const double err = (S->translation() - truth.translation()).head<2>().norm();
+                const double dth = std::abs(std::remainder(std::atan2(S->linear()(1, 0), S->linear()(0, 0))
+                                                           - std::atan2(truth.linear()(1, 0), truth.linear()(0, 0)), 2 * M_PI));
+                check(err < 0.05 and dth < 0.05, "the seam is within 5 cm of truth (" + std::to_string(err) + " m, " + std::to_string(dth) + " rad)");
+            }
+        }
+    }
+
+    std::printf("door2_case_b_rehangs_the_surviving_passage\n");
+    {
+        reset(); build_memory(true); build_live(true);
+        Fix f;
+        check(f.sw.swap(3, pose_k(), live_P), "swap accepted");
+        f.sw.on_room_left("room_3");
+        check(passage_count() == 1, "still one passage (re-hung, not duplicated)");
+        const auto pw = mem->get_node("passage_5");
+        check(pw.has_value(), "it is the original passage_5");
+        if (pw)
+        {
+            check(mem->get_attrib_by_name<passage_crossings_att>(pw.value()).value_or(0) == 7, "crossing history intact");
+            const auto m = DSR::DSRGraph::get_node_edges_by_type(pw.value(), "match");
+            bool in_r2 = false, in_r3 = false;
+            for (const auto &e : m)
+            {
+                in_r2 = in_r2 or ltsm::is_descendant(*mem, e.to(), "r2_room_2");
+                in_r3 = in_r3 or ltsm::is_descendant(*mem, e.to(), "r3_room_3");
+            }
+            check(m.size() == 2 and in_r2 and in_r3, "faces in R2 and R3 (the twin's is gone)");
+            const auto S = ltsm::seam_through_passage(*mem, "passage_5", "r3_room_3", "r2_room_2");
+            check(S.has_value(), "seam_through_passage(R3, R2) resolves");
+        }
+    }
+
+    std::printf("no_face_in_provisional_name\n");
+    {
+        for (const bool promoted : {false, true})
+        {
+            reset(); build_memory(promoted); build_live(promoted);
+            Fix f;
+            f.sw.swap(3, pose_k(), live_P);
+            f.sw.on_room_left("room_3");
+            check(not any_name_contains("room_4") and not any_name_contains("r4_"),
+                  std::string("no memory node carries the provisional room's name (") + (promoted ? "B" : "A") + ")");
+        }
+    }
+
+    std::printf("carry_over_idempotent\n");
+    {
+        reset(); build_memory(false); build_live(false);
+        Fix f;
+        f.sw.swap(3, pose_k(), live_P);
+        f.sw.on_room_left("room_3");
+        const auto before = mem_names();
+        const int np = passage_count();
+        check(f.sw.carry_over("r2_door_3", 3), "a second call reports success");
+        check(mem_names() == before and passage_count() == np, "and changes nothing");
+    }
+
+    std::printf("second_crossing_recalls_directly\n");
+    {
+        reset(); build_memory(false); build_live(false);
+        Fix f;
+        f.sw.swap(3, pose_k(), live_P);
+        f.sw.on_room_left("room_3");
+        live->delete_node(live->get_node("room_2").value().id());
+        const auto L2 = live_node("room", "room_2", robot_id, -3, -1, 0.2, 2);
+        live_node("object", "door_3", L2, 4, 2, 0, std::nullopt, "door");
+        f.recall.step();
+        const auto rc = live->get_node("recall_room_3");
+        check(rc.has_value(), "recall_room_3 posted under the door");
+        if (rc) check(not live->get_attrib_by_name<recall_late_att>(rc.value()).value_or(false), "and it is an ordinary one (no late flag)");
     }
 
     std::printf("stale_staged_swept_at_start\n");

@@ -10,6 +10,7 @@
 #include <QString>
 
 #include <algorithm>
+#include <charconv>
 #include <cmath>
 #include <format>
 #include <limits>
@@ -177,6 +178,32 @@ bool RoomSwap::swap(std::uint64_t known_room_id, const rc::recog::PoseMix &pose_
         twin_from_K = Mat::RTMat(K_from_robot * robot_from_P.value());
     }
 
+    // the crossed door(s) in K's frame, while the chains resolve: robot-in-K (the relocalisation) through the live door (case A),
+    // or K <- twin through the twin's face of each passage (case B). The previous room's face is the other end of the passage.
+    std::vector<Carry> carries;
+    if (not twin.has_value() and anchor != robot->id())
+    {
+        if (const auto d = live_->get_node(anchor); d.has_value())
+            if (const auto L = rc::room::current_edge_room(*live_); L.has_value())
+                if (const auto Ln = live_->get_node(L.value()); Ln.has_value())
+                    carries.push_back({ev_.memory_prefix(Ln.value()) + d->name(), Mat::RTMat(anchor_from_K.inverse())});
+    }
+    if (twin.has_value() and twin_from_K.has_value())
+    {
+        auto mie = mem_->get_inner_eigen_api();
+        for (const auto &pn : mem_->get_nodes_by_type("metaconcept"))
+        {
+            if (subtype_of(*mem_, pn) != "passage") continue;
+            std::optional<DSR::Node> mine, other;
+            for (const auto &e : DSR::DSRGraph::get_node_edges_by_type(pn, "match"))
+                if (const auto f = mem_->get_node(e.to()); f.has_value())
+                    (is_descendant(*mem_, f->id(), twin->name()) ? mine : other) = f;
+            if (not mine.has_value() or not other.has_value()) continue;
+            if (const auto T = mie->get_transformation_matrix(twin->name(), mine->name()); T.has_value())
+                carries.push_back({other->name(), Mat::RTMat(twin_from_K.value() * T.value())});
+        }
+    }
+
     // ── execute: stage, recall, discard, hold ──────────────────────────────────────────────────────────────────
     const std::string known_mem = K->name();
     std::string prior_subtype;
@@ -210,6 +237,7 @@ bool RoomSwap::swap(std::uint64_t known_room_id, const rc::recog::PoseMix &pose_
     }
     ev_.hold(known_mem);
 
+    carry_ = std::move(carries);
     state_ = State::Staged;
     known_mem_ = known_mem;
     known_id_ = known_room_id;
@@ -247,6 +275,7 @@ bool RoomSwap::undo()
         }
     }
     ev_.release(known_mem_);
+    carry_.clear();
     qInfo().noquote() << QString::fromStdString(std::format("[swap] UNDONE: {} is not {}", prov_twin_.empty() ? "the provisional room" : prov_twin_, known_mem_));
     state_ = State::Entering;
     known_mem_.clear(); prov_twin_.clear(); prov_twin_subtype_.clear();
@@ -260,6 +289,10 @@ void RoomSwap::on_room_left(const std::string &room)
     if (state_ != State::Staged) return;
     if (not room.empty() and room != known_mem_ and room != RoomRecall::live_name_of(known_mem_)) return;
     retire_all_late();
+    for (const auto &k : std::vector<Carry>(carry_))              // before the twin goes: its face is the passage's second end meanwhile
+        if (not carry_over(k.prev_face, known_id_))
+            qWarning().noquote() << QString::fromStdString(std::format("[swap] carry-over of {} into {} failed", k.prev_face, known_mem_));
+    carry_.clear();
     if (promoted_case_) drop_subtree(prov_twin_);                 // the undo window is closed: the draft goes
     ev_.release(known_mem_);
     qInfo().noquote() << QString::fromStdString(std::format("[swap] COMMITTED: left {}; {}", known_mem_,
@@ -268,6 +301,90 @@ void RoomSwap::on_room_left(const std::string &room)
     known_mem_.clear(); prov_twin_.clear(); prov_twin_subtype_.clear();
     known_id_ = 0; promoted_case_ = false;
     twin_from_known_.reset(); robot_from_known_.reset();
+}
+
+bool RoomSwap::carry_over(const std::string &prev_room_face, std::uint64_t known_room_id)
+{
+    std::optional<DSR::Node> K;
+    for (const auto &r : mem_->get_nodes_by_type("room"))
+        if (mem_->get_attrib_by_name<room_id_att>(r).value_or(0) == known_room_id and not is_staged_room(*mem_, r)) { K = r; break; }
+    const auto prev = mem_->get_node(prev_room_face);
+    if (not K.has_value() or not prev.has_value()) return false;
+
+    // the passage this face belongs to (case B: the one the twin's face hung from; case A: written by the eviction)
+    std::optional<DSR::Node> pass;
+    for (const auto &pn : mem_->get_nodes_by_type("metaconcept"))
+        if (subtype_of(*mem_, pn) == "passage")
+            for (const auto &e : DSR::DSRGraph::get_node_edges_by_type(pn, "match"))
+                if (e.to() == prev->id()) pass = pn;
+    const auto face_of_k = [&](const DSR::Node &p) -> std::optional<DSR::Node> {
+        for (const auto &e : DSR::DSRGraph::get_node_edges_by_type(p, "match"))
+            if (const auto f = mem_->get_node(e.to()); f.has_value() and is_descendant(*mem_, f->id(), K->name())) return f;
+        return std::nullopt;
+    };
+    if (pass.has_value() and face_of_k(pass.value()).has_value()) return true;       // already carried: idempotent
+
+    const auto it = std::ranges::find(carry_, prev_room_face, &Carry::prev_face);
+    if (it == carry_.end()) return false;                                          // no pose for it: nothing is invented
+    const Mat::RTMat T = it->in_known;
+    const double half_w = 0.5 * mem_->get_attrib_by_name<width_m_att>(prev.value()).value_or(1.f);
+
+    // K already has a door at the aperture that no passage owns (the live K was evicted into it with the re-born door): adopt it.
+    std::optional<std::uint64_t> fid;
+    auto ie = mem_->get_inner_eigen_api();
+    std::unordered_set<std::uint64_t> owned;
+    for (const auto &pn : mem_->get_nodes_by_type("metaconcept"))
+        if (subtype_of(*mem_, pn) == "passage")
+            for (const auto &e : DSR::DSRGraph::get_node_edges_by_type(pn, "match")) owned.insert(e.to());
+    double best = half_w;
+    for (const auto &d : mem_->get_nodes_by_type("object"))
+    {
+        if (not is_door(*mem_, d) or owned.contains(d.id()) or not is_descendant(*mem_, d.id(), K->name())) continue;
+        if (const auto there = ie->get_transformation_matrix(K->name(), d.name()); there.has_value())
+            if (const double dist = (there->translation() - T.translation()).head<2>().norm(); dist < best) { best = dist; fid = d.id(); }
+    }
+    if (not fid.has_value())
+    {
+        std::string base = prev_room_face;
+        if (base.size() > 1 and base[0] == 'r')
+            if (const auto us = base.find('_'); us != std::string::npos and us > 1 and std::ranges::all_of(base.substr(1, us - 1), [](char ch) { return ch >= '0' and ch <= '9'; }))
+                base = base.substr(us + 1);
+        const std::string prefix = "r" + std::to_string(known_room_id) + "_";
+        std::string name = prefix + base;
+        while (mem_->get_node(name).has_value()) name += "_x";
+        DSR::Node f;
+        f.type("object"); f.name(name);
+        mem_->add_or_modify_attrib_local<object_subtype_att>(f, std::string("door"));
+        mem_->add_or_modify_attrib_local<width_m_att>(f, mem_->get_attrib_by_name<width_m_att>(prev.value()).value_or(1.f));
+        mem_->add_or_modify_attrib_local<parent_att>(f, K->id());
+        mem_->add_or_modify_attrib_local<level_att>(f, mem_->get_node_level(K.value()).value_or(0) + 1);
+        fid = mem_->insert_node(f);
+        if (not fid.has_value()) return false;
+        mem_->insert_or_assign_edge(DSR::Edge::create<RT_edge_type>(K->id(), fid.value(), RoomEviction::rt_attributes(T)));
+    }
+    if (not pass.has_value())
+    {
+        std::uint64_t n = 0;
+        for (const auto &pn : mem_->get_nodes_by_type("metaconcept"))
+            if (pn.name().starts_with("passage_"))
+            {
+                std::uint64_t v = 0;
+                const auto s = pn.name().substr(8);
+                if (std::from_chars(s.data(), s.data() + s.size(), v).ec == std::errc{}) n = std::max(n, v + 1);
+            }
+        DSR::Node dw;
+        dw.type("metaconcept"); dw.name(std::format("passage_{}", n));
+        mem_->add_or_modify_attrib_local<object_subtype_att>(dw, std::string("passage"));
+        mem_->add_or_modify_attrib_local<level_att>(dw, 0);
+        const auto id = mem_->insert_node(dw);
+        if (not id.has_value()) return false;
+        mem_->insert_or_assign_edge(DSR::Edge::create<match_edge_type>(id.value(), prev->id()));
+        pass = mem_->get_node(id.value());
+    }
+    mem_->insert_or_assign_edge(DSR::Edge::create<match_edge_type>(pass->id(), fid.value()));
+    qInfo().noquote() << QString::fromStdString(std::format("[swap] carry-over: {} is a passage of {} and the previous room ({})",
+            mem_->get_node(fid.value()).value().name(), known_mem_.empty() ? K->name() : known_mem_, pass->name()));
+    return true;
 }
 
 void RoomSwap::on_evict(const Candidate &cand)
@@ -310,6 +427,7 @@ int RoomSwap::sweep_stale()
     known_mem_.clear(); prov_twin_.clear(); prov_twin_subtype_.clear();
     known_id_ = 0; promoted_case_ = false;
     twin_from_known_.reset(); robot_from_known_.reset();
+    carry_.clear();
     return n;
 }
 }   // namespace ltsm

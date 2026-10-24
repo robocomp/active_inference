@@ -17,8 +17,13 @@
  * LEFT is refused, as the room being ENTERED its twin is not copied into. The robot leaving K ends the undo window:
  * on_room_left() deletes the staged twin and the late recall and releases the hold; on_evict() is that call made from the
  * eviction path BEFORE evict() (the hold would otherwise refuse the very eviction that moves `current` on).
- * The carry-over of the newly crossed door into K's twin (a passage with a face in both archives) is the next task's and
- * runs at the release.
+ * CARRY-OVER. At the release (on_room_left) the crossed door becomes a passage of BOTH rooms: carry_over() writes K's NEW
+ * face of it, at the aperture's pose in K's frame, and match-links it into the passage that holds the previous room's face
+ * (minted when there is none). The pose is read at swap time, while the chain resolves: robot-in-K (the recogniser's
+ * relocalisation) composed with the crossed door (case A: its live node; case B: the provisional twin's face, through
+ * T(K <- twin)). The face is the SAME physical hole in the same orientation, as a derived face is, so seam_through_passage()
+ * composes it with no extra rotation. The provisional twin's face in a case-B passage goes with the twin; the passage and
+ * its crossing history stay and now point at K.
  *
  * LATE-ADOPTION CONTRACT (for room_concept, Task 9). The late recall node `recall_<room>` (type metaconcept, subtype
  * "room_recall", recall_late = true) is owned by ltsm. room_concept re-births the room from it and fits it with the evidence it
@@ -43,6 +48,7 @@
 #include <optional>
 #include <set>
 #include <string>
+#include <vector>
 
 namespace ltsm
 {
@@ -64,6 +70,10 @@ public:
     void on_evict(const Candidate &cand);
     /// The eviction path, AFTER evict(): on success the undo window closes (on_room_left); on failure the hold is restored.
     void on_evicted(const Candidate &cand, bool ok);
+    /// CARRY-OVER of the crossed door into K (see above): `prev_room_face` = the memory name of the previous room's face of the
+    /// crossed door, `known_room_id` = K. Writes K's face and match-links both into one passage. Idempotent; true when the
+    /// passage holds a face in each room afterwards. Called by on_room_left for every door staged at swap time.
+    bool carry_over(const std::string &prev_room_face, std::uint64_t known_room_id);
     /// One cycle: retire the late recalls whose room is live again.
     void step();
     /// Startup: leftover staged twins (memory) and late recalls (live) from a crashed run. Returns how many nodes went.
@@ -89,6 +99,8 @@ private:
     std::optional<Mat::RTMat> twin_from_known_;   ///< case B: T(K <- provisional twin), at swap time
     std::optional<Mat::RTMat> robot_from_known_;  ///< T(robot <- K) at swap time
 
+    struct Carry { std::string prev_face; Mat::RTMat in_known; };   ///< a crossed door's pose in K's frame, taken at swap time
+    std::vector<Carry> carry_;
     int drop_subtree(const std::string &memory_room);
     std::optional<DSR::Node> robot_node() const;
 };
