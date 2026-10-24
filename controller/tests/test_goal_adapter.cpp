@@ -620,6 +620,28 @@ int main()
         CHECK("3b leaf: no leaves -> empty", door_leaf_in_room(a, {}, robot).empty());
     }
 
+    // ---- Task 13: a manual goal (panel click / mission go_to) reaches the policy as a Place (vlm_live1: "no target (the policy
+    //      has no goal)" — select_target clears last_target_info_ for a manual target, and the policy read only that)
+    {
+        const ControllerRobotPose robot{.pos = {0.f, 0.f}, .theta = 0.f};
+        GoalAdapterParams p;
+        p.tol_xy = 0.2f;
+        const Eigen::Vector2f click(-1.81f, -1.61f);
+        const auto t = policy_place_target(std::nullopt, click);
+        CHECK("13 manual: a manual goal with no claimed affordance is a target", t.has_value());
+        CHECK("13 manual: at the clicked point, not an affordance, no node", t.has_value() and near(t->room_pos.x(), click.x())
+              and near(t->room_pos.y(), click.y()) and not t->from_affordance and t->node_id == 0 and t->parent_node_id == 0);
+        const auto spec = t.has_value() ? goal_for_target(*t, robot, std::nullopt, GoalMode::Place, false, p) : std::nullopt;
+        CHECK("13 manual: it builds a Place goal at the click, with no facing", spec.has_value() and spec->goal.kind == Goal::Kind::Place
+              and near(spec->goal.p.x(), click.x()) and near(spec->goal.p.y(), click.y()) and not spec->goal.yaw.has_value());
+        ControllerTargetInfo aff;
+        aff.node_id = 42; aff.node_name = "aff_x"; aff.room_pos = {3.f, 1.f}; aff.from_affordance = true;
+        const auto c = policy_place_target(aff, click);
+        CHECK("13 manual: a claimed affordance wins (a manual target clears it upstream; never both)",
+              c.has_value() and c->node_id == 42 and c->from_affordance);
+        CHECK("13 manual: neither -> no target", not policy_place_target(std::nullopt, std::nullopt).has_value());
+    }
+
     std::printf(fails == 0 ? "ALL PASS\n" : "FAILURES (%d failing)\n", fails);
     return fails == 0 ? 0 : 1;
 }

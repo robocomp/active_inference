@@ -924,8 +924,11 @@ void ControllerSession::drive_with_policy(const ControllerRobotPose &robot_pose,
         return;
     }
 
-    // review I4: gated on a TARGET (and, below, on the field), not on an A* route
-    if (not last_target_info_.has_value())
+    // review I4: gated on a TARGET (and, below, on the field), not on an A* route. ★ Task 13: the claimed affordance OR the manual
+    // goal (click / mission go_to) — select_target clears last_target_info_ for a manual one, so gating on it alone stopped every
+    // go_to with "the policy has no goal" (vlm_live1). Only the PLACE below reads the manual goal; lock-on / orient stay affordance-only.
+    const auto place_target = rc::policy::policy_place_target(last_target_info_, manual_target_room_);
+    if (not place_target.has_value())
     {
         display.clear_robot_trajectory();
         clear_tracking_state();
@@ -1005,35 +1008,30 @@ void ControllerSession::drive_with_policy(const ControllerRobotPose &robot_pose,
         }
     }
 
-    // ── 4. A PLACE: a reach standpoint, a click target, a mission waypoint
-    if (not last_target_info_.has_value())
-    {
-        stop_here(rc::why::Cause::NoTarget, "a plan is held but no target names where it goes");
-        return;
-    }
+    // ── 4. A PLACE: a reach standpoint, a click target, a mission go_to, a mission waypoint (place_target: gated above)
     // ★ Live fix 4 ruling 2: a CROSS whose anchor door_concept has not hung yet is WAITED for, still — never driven as a room
     //   route to the far room's through-pose (tourP8: `back up v=-0.35` toward a target 6.8 m away for a cycle per claim).
     //   door_concept hangs one on every cross claim (the cycle after it sees it); bounded by the cross contract's timeout.
-    if (last_target_info_->from_affordance and last_target_info_->node_name.ends_with("_cross"))
+    if (place_target->from_affordance and place_target->node_name.ends_with("_cross"))
     {
         if (policy_no_anchor_since_ms_ == 0) policy_no_anchor_since_ms_ = now;
         if (target_contract_known_ and double(now - policy_no_anchor_since_ms_) > double(target_contract_.timeout_ms))
         {
-            cross_hand_back(std::format("no anchor was hung for '{}' within the cross contract's timeout", last_target_info_->node_name),
+            cross_hand_back(std::format("no anchor was hung for '{}' within the cross contract's timeout", place_target->node_name),
                             /*timed_out=*/true, motion_commander);
             policy_no_anchor_since_ms_ = 0;
             return;
         }
         stop_here(rc::why::Cause::AnchorWaiting, std::format("'{}': waiting for door_concept to hang the cross's anchor ({:.1f} s)",
-                                                             last_target_info_->node_name, (now - policy_no_anchor_since_ms_) * 1e-3));
+                                                             place_target->node_name, (now - policy_no_anchor_since_ms_) * 1e-3));
         return;
     }
     policy_no_anchor_since_ms_ = 0;
     // ★ Task O fix round 1 (I2): toward the PUBLISHED target (the repair is an admissible substitute only), and — when the active
     //   contract states a precondition probability — completed by IT, not by arriving within tol_xy
-    ControllerTargetInfo place_t = *last_target_info_;
+    ControllerTargetInfo place_t = *place_target;
     std::optional<rc::policy::OrientPrecondition> place_pre;
-    if (last_target_info_->from_affordance)
+    if (place_t.from_affordance)
     {
         place_t.room_pos = rc::policy::goal_target_pos(last_raw_target_pos_, place_t.room_pos, published_target_admissible(place_t));
         if (target_contract_known_) place_pre = contract_precondition(target_contract_);
@@ -1052,7 +1050,7 @@ void ControllerSession::drive_with_policy(const ControllerRobotPose &robot_pose,
     const auto spec = rc::policy::goal_for_target(place_t, cpose, std::nullopt, rc::policy::GoalMode::Place,
                                                   wants_final_facing(place_t), gp, place_pre);
     if (not spec.has_value()) { stop_here(rc::why::Cause::PolicyHold, "no goal could be built"); return; }
-    const std::string who = last_target_info_->node_name.empty() ? std::string("target") : last_target_info_->node_name;
+    const std::string who = place_t.node_name.empty() ? std::string("target") : place_t.node_name;
     const auto tick = policy_tick(*spec, who, cpose, obstacle_tracker, motion_commander, now);
     const bool precondition_met = place_pre.has_value() and place_pre->p >= place_pre->complete_at;
     // ARRIVAL: the same protocol the tracker's arrival goes through (servo → lock-on, already there, approach-only, REACH)
