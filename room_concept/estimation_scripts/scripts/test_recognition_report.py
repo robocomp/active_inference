@@ -125,6 +125,16 @@ def main():
         assert door(old + new, 1) == 'door_7' and door(old + new, 2) == ''      # windowed: an older line is not this swap's
         assert door('[swap] crossed door r3_door_4 <-> K face new\n') == ''      # new face => discovery fails
         assert door('nothing\n') == ''
+        # renamed restore: door_concept restored remembered door_7 under another name; windowed to after the leg-4 start
+        dl = os.path.join(t, 'd.log')
+        open(dl, 'w').write("door_concept: [restore] RESTORED as 'door_2' (remembered 'door_7')\n")
+        def door2(text, dfrom=0):
+            open(lg, 'w').write(text)
+            return subprocess.run([sys.executable, '-I', REPORT, '--leg5-door', lg, '0', dl, str(dfrom)], capture_output=True, text=True).stdout.strip()
+        assert door2(new) == 'door_2'                    # mapped through the pair
+        assert door2(new, 1) == 'door_7'                 # pair is before the window: base name as before
+        open(dl, 'w').write("door_concept: [restore] RESTORED as 'door_3' (remembered 'door_5')\n")
+        assert door2(new) == 'door_7'                    # a pair for another door does not apply
     print('test_recognition_report: OK')
 
 if __name__ == '__main__': main()

@@ -177,19 +177,28 @@ def c8(door):
     if fresh: return F, f"'{nm}' entered FRESH after the swap"
     return P, f"'{nm}' recalled (late), provisional identity rows dropped, no FRESH entry after"
 
-def leg5_door(log_path, from_line):
+def leg5_door(log_path, from_line, door_path=None, door_from=0):
     """The live door to cross back through the recognised room: ltsm's last '[swap] crossed door A <-> K face rN_door_M' line after
-    from_line (0-based line count when leg 4 began) -> 'door_M'; '' when the line is absent or says 'new'."""
+    from_line (leg 4 start) -> base name 'door_M', mapped through door_concept's last "[restore] RESTORED as 'ACTUAL' (remembered
+    'door_M')" pair after door_from (a live node may have held the name: RestoreRename) -> ACTUAL. '' when ltsm's line is absent
+    or says 'new'."""
     last = ''
     for l in read_lines(log_path)[from_line:]:
         m = re.search(r'\[swap\] crossed door (\S+) <-> K face (\S+)', l)
         if m: last = m.group(2)
     m = re.match(r'^r\d+_(door_\d+)', last)
-    return m.group(1) if m else ''
+    if not m: return ''
+    base = m.group(1)
+    if door_path:
+        for l in read_lines(door_path)[door_from:]:
+            p = re.search(r"\[restore\] RESTORED as '([^']+)' \(remembered '([^']+)'\)", l)
+            if p and p.group(2) == base: base = p.group(1)       # last pair wins
+    return base
 
 def main():
-    if len(sys.argv) == 4 and sys.argv[1] == '--leg5-door':
-        print(leg5_door(sys.argv[2], int(sys.argv[3]))); return 0
+    if len(sys.argv) in (4, 6) and sys.argv[1] == '--leg5-door':
+        a = sys.argv
+        print(leg5_door(a[2], int(a[3]), *( (a[4], int(a[5])) if len(a) == 6 else () ))); return 0
     if len(sys.argv) != 2: print(__doc__); return 2
     run = sys.argv[1]
     legs = read_legs(run)

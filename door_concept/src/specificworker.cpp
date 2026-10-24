@@ -3674,6 +3674,8 @@ void SpecificWorker::restore_remembered_doors(std::uint64_t new_room)
                                                               *r.exist_logodds, 1e-3 * double(static_cast<std::int64_t>(rc::provenance::now_ms()) - *r.seen_wall_ms))
                                                 : std::string("remembered with no age: BirthLogodds"),
                    r.leaf.has_value() ? "yes" : "no");
+        // the pair the tour driver maps ltsm's remembered base name through (a live node may hold the name: RestoreRename)
+        std::print("door_concept: [restore] RESTORED as '{}' (remembered '{}')\n", n->name(), r.name);
     }
 }
 
