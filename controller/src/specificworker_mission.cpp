@@ -33,6 +33,7 @@
 #include "../../common/world_query/door_query.h"
 #include "mission_explored.h"
 #include "mission_room_hold.h"
+#include "mission_approach_hold.h"
 
 using rc::mission::LeafState;
 using rc::mission::LeafStatus;
@@ -53,6 +54,7 @@ std::uint64_t hold_clock_ms()
 std::optional<std::string> SpecificWorker::MissionHost::start(const rc::mission::Step &leaf)
 {
 	hold_.clear();
+	approach_hold_.reset();
 	if (rc::RoomHold::scoped(leaf) and w_.world_model_.graph_state().room_name.empty())
 	{
 		std::println("[mission] step {} ({}) waits: the current room is not resolved yet", leaf.id, leaf.op);
@@ -191,6 +193,16 @@ LeafStatus SpecificWorker::MissionHost::poll(const rc::mission::Step &leaf)
 		// a FAILED passage ends Done too (finish()): it is a failure, not a success (Live fix 3: a ruled-out look)
 		if (v.failed) return {.state = LeafState::Failed, .detail = v.last_outcome.empty() ? std::string("failed") : v.last_outcome};
 		if (v.step == rc::DoorPassage::Step::Done) return {.state = LeafState::Succeeded};
+		// A hand-back of the APPROACH is not a failure: door_concept re-sites it; wait for the re-offer (ApproachHold).
+		const bool on_approach = v.step == rc::DoorPassage::Step::Approach;
+		const bool present = on_approach and w_.G != nullptr and w_.G->get_node("aff_" + door_ + "_approach").has_value();
+		switch (approach_hold_.check(on_approach, v.attempts, present, v.step_state == "executing", hold_clock_ms()))
+		{
+			case rc::ApproachHold::Verdict::Waiting: return {};
+			case rc::ApproachHold::Verdict::Failed:
+				return {.state = LeafState::Failed, .detail = std::format("approach_{}", v.last_outcome)};
+			case rc::ApproachHold::Verdict::NotHeld: break;
+		}
 		if (v.attempts > 0)
 			return {.state = LeafState::Failed,
 			        .detail = v.step == rc::DoorPassage::Step::Open

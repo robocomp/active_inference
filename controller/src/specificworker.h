@@ -29,6 +29,7 @@
 //#define HIBERNATION_ENABLED
 
 #include "mission_room_hold.h"
+#include "mission_approach_hold.h"
 #include <genericworker.h>
 #include <Eigen/Dense>
 #include <atomic>
@@ -185,6 +186,7 @@ private:
 	private:
 		SpecificWorker &w_;
 		rc::RoomHold hold_;                ///< a room-scoped step waiting for current_room to resolve (mission_room_hold.h)
+		rc::ApproachHold approach_hold_;   ///< a handed-back approach waiting for door_concept's re-offer (mission_approach_hold.h)
 		std::string door_;                 ///< cross / open: the door the passage runs through
 		std::uint64_t target_epoch_ = 0;   ///< go_to: ControllerSession::manual_target_status().epoch it set
 		std::uint64_t motion_id_ = 0;      ///< move: RelativeMotion::View::id it started
