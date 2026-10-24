@@ -8,7 +8,7 @@
  *                   so a typo comes back to the model instead of failing on the robot.
  *   progress_lines  the fixed one-line messages for every step-state change between two snapshots.
  *   new_reports     the text of each `report` step that has just run, for the reply.
- *   planner_request   the planner's user message: the person's VERBATIM words first, the chat's summary as a hint.
+ *   planner_request   the planner's user message: the person's VERBATIM words, then the chat's request if it differs.
  *   strip_fence / planned_ask / check_planned   the planner reply → `ask:` question, or a card-ready mission.
  *   card_still_valid  the yes to a mission card must be the person's very next message.
  *   plan_still_wanted a planner reply is discarded once the person has spoken again.
@@ -162,8 +162,8 @@ inline std::string paused_at(const rc::mission::Progress& p)
 
 /// The planner's user message. ★ The person's VERBATIM words lead (live 2026-10-24: the chat summarised "…, tell me
 /// what objects are there, then cross back" without the report, and the mission had no `report` step); the chat's
-/// plan_mission request follows as a hint only when it says something else (it may carry what an answer to an ASK
-/// refers to). A plan asked for in a robot event's turn (a failure's fix) has no words of the person behind it: the
+/// plan_mission request follows only when it says something else, labelled neutrally: it may be a lossy summary of
+/// the words, or the request itself when the words are the person's answer to the planner's `ask:` ("door_1"). A plan asked for in a robot event's turn (a failure's fix) has no words of the person behind it: the
 /// last ones were about the old mission, so the request alone goes. tests/check_llm_missions.py sends the same layout.
 [[nodiscard]] inline std::string planner_request(std::string_view said, std::string_view request, bool from_wake)
 {
@@ -177,7 +177,7 @@ inline std::string paused_at(const rc::mission::Progress& p)
     //   invented a room name (mission eval 2026-10-24: 66/72 wrapped, 72/72 bare).
     std::string out(trim(said));
     if (not trim(request).empty() and ascii_lower_trim(std::string(said)) != ascii_lower_trim(std::string(request)))
-        out += std::format("\n\n(the chat summarised it as: \"{}\")", trim(request));
+        out += std::format("\n\n(the chat's request: \"{}\")", trim(request));
     return out;
 }
 

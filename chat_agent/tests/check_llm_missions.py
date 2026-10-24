@@ -4,8 +4,9 @@
 The planner request chat_agent will send: the three skills (etc/skills/missions.md + doors.md + exploring.md, front
 matter stripped) as the system prompt, the same synthetic STATE as check_llm_tools.py, then the person's request in
 planner_request()'s layout (mission_plan.h): the person's words, then — only when the chat's plan_mission request says
-something else — a `(the chat summarised it as: "…")` line. A case is the person's words; a case may carry the chat's
-summary too (the live 10-24 case carries the one that dropped its report), and is then sent with that line.
+something else — a `(the chat's request: "…")` line. A case is the person's words; a case may carry the chat's
+request too (the live 10-24 case carries the summary that dropped its report; the answer-after-ask cases carry the
+full request their short answer belongs to), and is then sent with that line.
 No tools, temperature 0, think false, num_predict from etc/config.toml. The reply is piped through
 tests/mission_check (parse_planned: the DSL, or JSON if it starts with `{`; then validate) and the case's checklist is
 run over the printed step lines. `ask:` is the right answer to an impossible/unclear request and a failure otherwise.
@@ -255,6 +256,11 @@ CASES = [
     ("live 10-24 + the chat's summary", ("Cross door_1 into the next room, tell me what objects are there, then cross back to room_1",
                                          "cross door_1, explore the next room, and then cross door_1 back to room_1"),
      report_in_bound_room, False),
+    # the person's words are their ANSWER to the planner's ask:, the chat's request is what it answers
+    ("answer after ask: door_1", ("door_1", "cross door_1 into the next room, report the objects there, and cross back to room_1"),
+     report_in_bound_room, False),
+    ("answer after ask: yes, the first", ("yes, the first one", "cross door_1 into the next room, report the objects there, and cross back to room_1"),
+     report_in_bound_room, False),
     ("paraphrase EN", "Go through door_1, look around the room on the other side, report what is in it, then return here.",
      lambda L: bool(crosses(L, "door_1")) and visit_room(L), False),
     ("paraphrase EN 2", "Please check what objects are in the room behind door_1 and then get back to where you started.",
@@ -295,11 +301,11 @@ CASES = [
 
 
 def planner_request(case):
-    """mission_plan.h planner_request(said, request, false): a case is the person's words, or (words, chat summary)."""
+    """mission_plan.h planner_request(said, request, false): a case is the person's words, or (words, the chat's request)."""
     said, summary = (case, "") if isinstance(case, str) else case
     out = said.strip()
     if summary.strip() and summary.strip().lower().rstrip(".!") != said.strip().lower().rstrip(".!"):
-        out += f'\n\n(the chat summarised it as: "{summary.strip()}")'
+        out += f'\n\n(the chat\'s request: "{summary.strip()}")'
     return out
 
 

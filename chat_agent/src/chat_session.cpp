@@ -2065,20 +2065,19 @@ QString ChatSession::do_agent_control(const QJsonObject& args)
     const bool confirmed = fleet_confirmations_.confirmed(*action, *agent, user_turn_, now);
     const auto d = fleet::decide(*action, *agent, fleet_policy_, fleet::tour_running(lock, kProc), not pids.empty(),
                                  confirmed);
-    switch (d.kind)
-    {
-        case fleet::Decision::Kind::refuse: return reply(QStringLiteral("refused: ") + q(d.text));
-        case fleet::Decision::Kind::ask:
-            fleet_confirmations_.ask(*action, *agent, user_turn_, now);
-            return reply(QStringLiteral("NOT DONE: ask the person \"%1\" and call agent_control again with the same "
-                                        "arguments only if they answer yes.").arg(q(d.text)));
-        case fleet::Decision::Kind::go: break;
-    }
-    // ★ No OK for a launch that cannot happen (live 2026-10-24): checked here, before a restart's SIGTERM too.
+    if (d.kind == fleet::Decision::Kind::refuse) return reply(QStringLiteral("refused: ") + q(d.text));
+    // ★ No OK for a launch that cannot happen (live 2026-10-24): checked before the person is asked to confirm a
+    //   restart, and before its SIGTERM.
     if (*action != fleet::Action::stop)
         if (const auto missing = fleet::missing_executable(fleet::agent_executable(cfg_.fleet_dir, *agent)))
             return reply(QStringLiteral("NOT DONE: ") + q(*missing) +
                          QStringLiteral(". Tell the person it cannot be started from the chat; do not say it is starting."));
+    if (d.kind == fleet::Decision::Kind::ask)
+    {
+        fleet_confirmations_.ask(*action, *agent, user_turn_, now);
+        return reply(QStringLiteral("NOT DONE: ask the person \"%1\" and call agent_control again with the same "
+                                    "arguments only if they answer yes.").arg(q(d.text)));
+    }
     if (*action != fleet::Action::start)
         for (int pid : pids) ::kill(pid, SIGTERM);   // never SIGKILL (fleet_control.h)
     fleet_op_.emplace(*action, *agent, now);
@@ -2090,7 +2089,8 @@ QString ChatSession::do_agent_control(const QJsonObject& args)
                          : *action == fleet::Action::start ? QStringLiteral("starting %1")
                                                            : QStringLiteral("restarting %1");
     return reply(QStringLiteral("OK: ") + what.arg(q(*agent)) +
-                 QStringLiteral(". The chat tells the person when it is done; do not say it already is."));
+                 QStringLiteral(". You will be told how it ended (a robot event); until then do not say it is running or "
+                                "has stopped."));
 }
 
 std::optional<ChatSession::FleetEnd> ChatSession::tick_fleet()
@@ -2118,14 +2118,14 @@ std::optional<ChatSession::FleetEnd> ChatSession::tick_fleet()
     }
     if (not step.done) return std::nullopt;
     QString msg = QStringLiteral("agents — ") + q(step.report);
-    if (not ok) msg += QStringLiteral(" Its log: ") + agent_log(agent);
+    const QString log = ok ? QString{} : agent_log(agent);
+    if (not ok) msg += QStringLiteral(" Its log: ") + log;
     log_.write("agent_control_done", QJsonObject{{"agent", q(agent)}, {"ok", ok}, {"report", msg}});
     window_->append_system(msg);
     const fleet::Action action = fleet_op_->action();
     fleet_op_.reset();
     fleet_timer_.stop();
-    return FleetEnd{.ok = ok, .note = fleet::control_done_note(action, agent, ok, step.report,
-                                                               ok ? std::string{} : agent_log(agent).toStdString())};
+    return FleetEnd{.ok = ok, .note = fleet::control_done_note(action, agent, ok, step.report, log.toStdString())};
 }
 
 bool ChatSession::launch_agent(const std::string& agent)

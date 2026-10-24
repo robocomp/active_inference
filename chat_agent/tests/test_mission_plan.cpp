@@ -226,7 +226,7 @@ int main()
         const std::string summ = "cross door_1, explore the next room, and then cross door_1 back to room_1";
         const std::string both = planner_request(said, summ, false);
         CHECK(both.starts_with(said + "\n\n"));
-        CHECK(both.contains("(the chat summarised it as: \"" + summ + "\")"));
+        CHECK(both.contains("(the chat's request: \"" + summ + "\")"));
         CHECK(both.find(said) < both.find(summ));
         // the same words (any case, any surrounding blanks): no second line
         CHECK(planner_request(said, "  " + said + " ", false) == said);
@@ -234,6 +234,9 @@ int main()
         // planned in a robot event's turn (a failure's fix): the person's last words are about the old mission
         CHECK(planner_request(said, "finish the report, then back to room_1", true) == "finish the report, then back to room_1");
         CHECK(planner_request("", "cross door_0", false) == "cross door_0");   // no message from the person yet
+        // the person's ANSWER to the planner's ask: the words lead, the chat's request says what they answer
+        CHECK(planner_request("door_1", "cross the door, report the objects, come back", false) ==
+              "door_1\n\n(the chat's request: \"cross the door, report the objects, come back\")");
     }
 
     std::println("test_mission_plan: {} checks passed{}", checks - failures, failures ? " — FAILURES" : "");
