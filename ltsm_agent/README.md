@@ -148,6 +148,37 @@ Stop with SIGTERM / Ctrl-C, **never `kill -9`**.
   after. **The mechanism is in libIce, so every RoboComp component here is likely affected — this
   fix is worth lifting into the generator template rather than per-agent.**
 
+## The metric layout is a MAP estimate (2026-10-23)
+
+The Topology dock used to place rooms by a spanning tree of passage seams: the first seam to reach a room decided
+where it was, a second passage into it was only reported as "loop closure", and nothing knew rooms are disjoint. With
+`[Layout] optimize = true` the tree is only the initial guess; the poses drawn are the MAP of one generative model
+(`src/layout_optimizer.{h,cpp}`, pure Eigen): every seam with its covariance as an **inlier/outlier mixture**, a latent
+**building axis** each room is square to or not (mixture), **non-overlap** of room areas, the passage's **shared wall**
+(parallel, one wall-thickness apart), and **adjacency** of rooms joined by a passage. No gates: a seam that contradicts
+the rest is explained as wrong (P(right) in the tooltip, dashed red), not cut. The model's constants are flagged in
+`layout::Model`. Solved from the cached poses AND one spanning tree per seam; the lowest free energy wins.
+
+- **It solves only when memory's STRUCTURE changes** (the set of rooms and of passages whose seam resolves): once per
+  new room, never on the dock's 1 s refresh. `[layout] solve #n ...` is logged once per solve.
+- **Verified** with `bin/layout_optimizer_test` (synthetic: ring with loop, 30° room not snapped, overlap, shared wall,
+  outlier seam, all-seams-wrong drift, stacked rooms) and `bin/layout_harness <memory.json>...` on real memories
+  (private DDS domain 9). gold6 (clean) moves room_2 3 cm / 1.4°; on gold2 the tree had put room_2 *inside* room_1 and
+  the MAP put it against room_1's wall where gold6 has it, disowning the passage that caused it.
+- ⚠ **A memory read back from disk has NO door covariances.** The file stores the RT ring + `rt_covariance`; cortex's
+  `read_from_json_file` restores the edge as head-only (`rt_translation`, `rt_rotation_euler_xyz`, `rt_static`) and the
+  covariance is gone. Every seam of a restored memory is then weighted at the remembered-seam sigmas (0.1 m, 0.03 rad;
+  `kRememberedSigma*`), while seams evicted in this run use the stated ones. A cortex fix, not one for this agent.
+
+## Dated memory generations (2026-10-23)
+
+With `[Memory] history_dir = "etc/ltsm_history"` every save is a NEW file `ltsm_<YYYYMMDD_HHMMSS_mmm>.json` (temp +
+rename, nothing overwritten) and the layout solved for it goes beside it as `ltsm_<stamp>_layout.json`. Start-up opens
+the NEWEST generation that parses (a corrupt one is skipped loudly, never replaced by an empty memory), falling back to
+`persist_path`, then to the seed; its sidecar warm-starts the first solve, so a restart does not reshuffle a settled
+map. A save happens at the eviction fence, on forget, at the start-up seed and on a graceful exit — and only if memory
+changed. `tools/ltsm_history.py [DIR]` lists them; `--diff A B` compares two layouts' room poses.
+
 ## Not a concept agent
 
 `CONCEPT_AGENT_LIFECYCLE.md`'s conformance audit covers agents that CREATE / UPDATE / REMOVE
