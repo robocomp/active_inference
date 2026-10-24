@@ -1715,6 +1715,15 @@ void RoomSceneGraph::arm_startup_proto(std::uint64_t room_id, const Eigen::Affin
     fp.erode_m   = startup_erode_m();
     fp.max_verts = params_->STARTUP_PROTO_MAX_VERTS;
     free_space_.emplace(fp);
+    // FLAGGED (geometric contradiction, no threshold): an outline of a room already left that CONTAINS the robot's
+    // position is not a different room — rooms do not overlap, and the robot is standing in it. Excluded, it
+    // blinded the raster to the floor under the robot (a parked robot adds no free space ⇒ no polygon ⇒ 'NO WORLD'
+    // for ever; recog_try2, room_2 re-entered from its other side). Same kind of rule as the recall erase_if above.
+    if (have_last_int_pose_)
+        if (const auto n = rc::freespace::drop_outlines_containing(left_polys_int_, last_int_pose_.translation()); n > 0)
+            qWarning() << "[room][startup-proto] dropped" << n << "left-room outline(s) from the exclusion: the robot at ("
+                       << last_int_pose_.translation().x() << "," << last_int_pose_.translation().y()
+                       << ") stands inside them, so they are this room, not another";
     if (not left_polys_int_.empty())   // the rooms this agent has left, in this room's published frame
     {
         std::vector<std::vector<Eigen::Vector2f>> excl;

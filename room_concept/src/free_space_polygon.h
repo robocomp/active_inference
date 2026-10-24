@@ -92,6 +92,16 @@ inline bool point_in_polygon(const Eigen::Vector2f& q, const std::vector<Eigen::
     return in;
 }
 
+/// Drops, in place, every outline in `polys` that CONTAINS `q`; returns how many it dropped. FLAGGED geometric
+/// contradiction, not a tolerance: rooms do not overlap, so an outline the robot is standing inside cannot be a
+/// DIFFERENT room from the one it is entering — excluding it would blind the free-space raster to the very floor
+/// under the robot (live recog_try2: room_2 entered from its other side, ~130 free cells, no ring for 600 s).
+inline std::size_t drop_outlines_containing(std::vector<std::vector<Eigen::Vector2f>>& polys, const Eigen::Vector2f& q)
+{
+    return std::erase_if(polys, [&](const std::vector<Eigen::Vector2f>& poly)
+                         { return poly.size() >= 3 and point_in_polygon(q, poly); });
+}
+
 /// True when no two non-adjacent edges of the closed ring touch or cross.
 inline bool is_simple(const std::vector<Eigen::Vector2f>& p)
 {

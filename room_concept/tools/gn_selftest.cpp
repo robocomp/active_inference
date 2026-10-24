@@ -20,6 +20,7 @@
 #include "room_concept.h"
 #include "room_gn_solver.h"
 #include "room_model.h"
+#include "free_space_polygon.h"
 #include "reloc_search.h"
 #include <cstring>
 #include <format>
@@ -106,6 +107,52 @@ namespace
     }
 } // namespace
 
+
+/// ── proto_exclusion (task R2) ───────────────────────────────────────────────────────────────────────────────
+/// A proto armed while the robot stands inside the outline of a room "already left" (the same room, entered from its
+/// other side) must NOT exclude that outline: the raster was blind to the floor under the robot and never grew
+/// (recog_try2: ~130 free cells, no ring for 600 s). An outline the robot is NOT inside is still excluded.
+void proto_exclusion_section()
+{
+    std::printf("\n[proto_exclusion] left outlines containing the robot are not exclusions\n");
+    char buf[256];
+    using Poly = std::vector<Eigen::Vector2f>;
+    const Poly L = {{-3.f, -3.f}, {3.f, -3.f}, {3.f, 3.f}, {-3.f, 3.f}};   // covers the robot
+    const Poly other = {{4.f, -3.f}, {8.f, -3.f}, {8.f, 3.f}, {4.f, 3.f}};  // a room elsewhere
+    const Eigen::Vector2f robot(0.5f, 0.2f);
+    const auto scan_square = [&](rc::freespace::FreeSpacePolygon& fs)
+    {
+        std::vector<Eigen::Vector2f> ends;   // walls of a 6 x 6 square centred on the origin
+        for (int b = 0; b < 720; ++b)
+        {
+            const float a = 2.f * static_cast<float>(M_PI) * b / 720.f;
+            const Eigen::Vector2f u(std::cos(a), std::sin(a));
+            const Eigen::Vector2f d = u.cwiseAbs();
+            const float tx = d.x() > 1e-6f ? ((u.x() > 0 ? 3.f : -3.f) - robot.x()) / u.x() : 1e9f;
+            const float ty = d.y() > 1e-6f ? ((u.y() > 0 ? 3.f : -3.f) - robot.y()) / u.y() : 1e9f;
+            ends.push_back(robot + u * std::min(tx, ty));
+        }
+        fs.add_scan(robot, ends);
+    };
+    // Before the fix: the outline stays in the exclusion and the raster stays blind.
+    rc::freespace::FreeSpacePolygon blind;
+    blind.set_exclusion({L});
+    scan_square(blind);
+    // After: the armed path drops what contains the robot, then excludes the rest.
+    std::vector<Poly> left = {L, other};
+    const auto dropped = rc::freespace::drop_outlines_containing(left, robot);
+    rc::freespace::FreeSpacePolygon fs;
+    fs.set_exclusion(left);
+    scan_square(fs);
+    const auto ring = fs.polygon(robot);
+    std::snprintf(buf, sizeof buf, "dropped %zu, %zu left", dropped, left.size());
+    check("outline containing the robot is dropped, the other kept", dropped == 1 and left.size() == 1 and left[0] == other, buf);
+    std::snprintf(buf, sizeof buf, "free cells: excluded %ld vs dropped %ld, ring %zu verts",
+                  blind.free_cells(), fs.free_cells(), ring.size());
+    check("raster grows over the room once L is dropped", blind.free_cells() * 20 < fs.free_cells() and fs.free_cells() > 5000 and ring.size() >= 4, buf);
+    check("an outline NOT containing the robot is still excluded", fs.state_at({6.f, 0.f}) == 2 and fs.state_at({0.f, 0.f}) == 1,
+          std::to_string(fs.state_at({6.f, 0.f})));
+}
 
 /// ── late_recall (Task 9) ────────────────────────────────────────────────────────────────────────────────────
 /// A late recall hands room_concept a pose prior (the recogniser's posterior of "I am in K, here"). The robot is
@@ -329,6 +376,12 @@ check("(e) a layout that cannot explain the scan is REJECTED", pend_e and ver_e 
 
 int main(int argc, char** argv)
 {
+    if (argc > 1 and std::strcmp(argv[1], "proto_exclusion") == 0)
+    {
+        proto_exclusion_section();
+        std::printf("\n%s (%d failure%s)\n\n", failures == 0 ? "ALL PASS" : "FAILURES", failures, failures == 1 ? "" : "s");
+        return failures == 0 ? 0 : 1;
+    }
     if (argc > 1 and std::strcmp(argv[1], "late_recall") == 0)
     {
         late_recall_section();
@@ -1221,6 +1274,7 @@ int main(int argc, char** argv)
     }
 
     late_recall_section();
+    proto_exclusion_section();
 
     std::printf("\n%s (%d failure%s)\n\n", failures == 0 ? "ALL PASS" : "FAILURES",
                 failures, failures == 1 ? "" : "s");
