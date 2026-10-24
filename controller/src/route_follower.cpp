@@ -26,7 +26,10 @@ bool RouteFollower::build(const Eigen::Vector2f &start,
     wp_pos_.clear();
     wp_per_lap_ = 0;
     progress_ = 0.f;
-    if (waypoints.size() < 2 or not plan) return false;
+    // A single hop is a route (the door route's leg to the vantage while the door is shut: robot → P_pre, 2026-10-24); a tour
+    // that restarts (laps > 1) still needs two waypoints to have a lap at all.
+    const std::size_t min_wp = laps > 1 ? 2 : 1;
+    if (waypoints.size() < min_wp or not plan) return false;
 
     laps = std::max(1, laps);
     laps_ = laps;
@@ -108,7 +111,7 @@ bool RouteFollower::build(const Eigen::Vector2f &start,
                         "run.\n", from.x(), from.y(), wp_pos_.front().x(), wp_pos_.front().y());
     }
 
-    if (wp_per_lap_ < 2 or wp_pos_.size() < 2)
+    if (wp_per_lap_ < static_cast<int>(min_wp) or wp_pos_.size() < min_wp)
     {
         std::printf("[route] build FAILED: only %zu of %d waypoints are reachable — that is not a route.\n",
                     wp_pos_.size(), wp_per_lap_);
