@@ -157,6 +157,10 @@ inline std::string answer_route_to(const Topology& t, std::string_view current, 
 
 // The STATE line: `rooms in long-term memory (call route_to for the way): room_2 (behind door_1, crossed 3x), room_3 (...)`; empty when nothing is remembered
 // besides the current room.
+/// The head of the chat's long-term-memory STATE line, and the planner's copy of it (planner_state_text).
+inline constexpr std::string_view kRememberedRoomsHead = "rooms in long-term memory (call route_to for the way): ";
+inline constexpr std::string_view kRememberedRoomsPlannerHead = "rooms in long-term memory: ";
+
 inline std::string remembered_rooms_line(const Topology& t, std::string_view current)
 {
     std::string o;
@@ -174,7 +178,7 @@ inline std::string remembered_rooms_line(const Topology& t, std::string_view cur
             how = "no known route";
         o += std::format("{}{} ({})", o.empty() ? "" : ", ", r.name, how);
     }
-    return o.empty() ? o : "rooms in long-term memory (call route_to for the way): " + o;
+    return o.empty() ? o : std::string(kRememberedRoomsHead) + o;
 }
 // A name a mission may use from the long-term memory: a remembered room (ltsm's recall re-creates it with the SAME name
 // when the robot crosses into it, room_recall.h) or a passage id. Doors and faces are not: a door is a live name.
@@ -208,5 +212,17 @@ inline std::string ways_line(const Topology& t, std::string_view current)
         o += std::format("{}{} = {}", o.empty() ? "" : "; ", r.name, legs);
     }
     return o.empty() ? o : "ways from here (each leg in order): " + o;
+}
+
+/// The planner's STATE from the chat's: ★ the planner has NO tools (final review I6), so the long-term-memory line loses
+/// its "(call route_to for the way)" and the way itself is given instead — `ways` (ways_line), appended as its own line.
+/// tests/check_llm_missions.py builds its remembered-room STATE the same way.
+inline std::string planner_state_text(std::string_view chat_state, std::string_view ways)
+{
+    std::string st(chat_state);
+    if (const auto at = st.find(kRememberedRoomsHead); at != std::string::npos)
+        st.replace(at, kRememberedRoomsHead.size(), kRememberedRoomsPlannerHead);
+    if (not ways.empty()) st += std::string(ways) + "\n";
+    return st;
 }
 }   // namespace rc::chat

@@ -103,5 +103,27 @@ int main()
         assert(line.contains("room_9 (no known route)"));
         assert(remembered_rooms_line(Topology{}, "room_1").empty());
     }
+    // the planner's STATE (final review I6): no "(call route_to …)" — the planner has no tools — and the ways line
+    // appended. ★ Pinned to the EXACT text tests/check_llm_missions.py's remembered-room cases send (STATE_REMEMBERED):
+    // the eval's STATE is this function's output for the tools eval's topology (room_2 behind door_1, room_3 beyond).
+    {
+        Topology t;
+        t.rooms = {{"room_1", true}, {"room_2", false}, {"room_3", false}};
+        t.passages = {info("passage_0", "room_1", "room_2"), info("passage_1", "room_2", "room_3")};
+        t.passages[0].live_door = "door_1";
+        t.passages[0].crossings = 3;
+        const std::string line = remembered_rooms_line(t, "room_1");
+        assert(line == "rooms in long-term memory (call route_to for the way): room_2 (behind door_1, crossed 3x), "
+                       "room_3 (2 passages away, first behind door_1, crossed 3x)");   // = check_llm_tools.py STATE
+        const std::string chat = "STATE:\ncurrent room: room_1\n" + line + "\nlast move/turn sent from this chat: none\n";
+        const std::string planner = planner_state_text(chat, ways_line(t, "room_1"));
+        assert(planner == "STATE:\ncurrent room: room_1\n"
+                          "rooms in long-term memory: room_2 (behind door_1, crossed 3x), room_3 (2 passages away, first "
+                          "behind door_1, crossed 3x)\nlast move/turn sent from this chat: none\n"
+                          "ways from here (each leg in order): room_2 = cross door_1 expect=room_2; room_3 = cross door_1 "
+                          "expect=room_2, cross passage:passage_1@room_2 expect=room_3\n");
+        assert(not planner.contains("route_to"));
+        assert(planner_state_text("STATE:\nx\n", "") == "STATE:\nx\n");   // nothing remembered: unchanged
+    }
     std::println("test_topology: ok");
 }

@@ -10,6 +10,10 @@ full request their short answer belongs to), and is then sent with that line.
 No tools, temperature 0, think false, num_predict from etc/config.toml. The reply is piped through
 tests/mission_check (parse_planned: the DSL, or JSON if it starts with `{`; then validate) and the case's checklist is
 run over the printed step lines. `ask:` is the right answer to an impossible/unclear request and a failure otherwise.
+CASES_REMEMBERED (final review I6, 2026-10-24) send the PRODUCTION planner STATE once ltsm remembers rooms
+(STATE_REMEMBERED: the long-term-memory line without "(call route_to …)" + the `ways from here` line, pinned by
+tests/test_topology.cpp) and grade multi-room requests on the ordered legs; the totals are printed per group so the old
+cases stay comparable with earlier runs.
 
     python3 tests/check_llm_missions.py <model> [repeats=3] [--form text|json]
     OLLAMA=http://192.168.1.34:11434 python3 tests/check_llm_missions.py qwen3.8 3 --form text
@@ -50,6 +54,14 @@ NUM_PREDICT = _ns["NUM_PREDICT"]
 # These cases (names_room_2) assume NO remembered rooms: room_2 is a name the STATE does not hold. The tools eval's STATE
 # gained a long-term-memory line (room_2, room_3) for known_rooms/route_to; drop it here so the premise stays true.
 STATE_TEXT = "\n".join(l for l in _ns["state"]().split("\n") if not l.startswith("rooms in long-term memory"))
+# The PRODUCTION planner STATE once ltsm remembers rooms (final review I6): chat_session.cpp planner_state() =
+# topology.h planner_state_text(state_message(), ways_line(...)) — the long-term-memory line WITHOUT "(call route_to …)"
+# (the planner has no tools) and the ways line appended. tests/test_topology.cpp pins this exact text for the same
+# topology (room_2 behind door_1 = passage_0, room_3 beyond it through passage_1).
+STATE_REMEMBERED = (_ns["state"]().replace("rooms in long-term memory (call route_to for the way): ", "rooms in long-term memory: ")
+                    + "ways from here (each leg in order): room_2 = cross door_1 expect=room_2; "
+                      "room_3 = cross door_1 expect=room_2, cross passage:passage_1@room_2 expect=room_3\n")
+assert "route_to" not in STATE_REMEMBERED
 
 
 def skills():
@@ -236,6 +248,52 @@ def twice(L):
     return False
 
 
+def expect_of(a):
+    """expect=ROOM is a string field: mission_check prints it quoted."""
+    return a.get("expect", "").strip('"') or None
+
+
+def legs_to_room_3(L):
+    """the remembered way, legs in order: first cross door_1 (or its face passage:passage_0@room_1), then
+    passage:passage_1@room_2 — the next two crosses of the mission, nothing else crossed in between."""
+    c = crosses(L)
+    return (len(c) >= 2 and c[0][1].get("door") in ("node:door_1", "passage:passage_0@room_1")
+            and c[1][1].get("door") == "passage:passage_1@room_2")
+
+
+def back_from_room_3(L):
+    """after the two legs out, at least two crosses back, the last one into room_1 (expect=room_1), or a go_to
+    anchor that anchors_reachable() accepts."""
+    c = crosses(L)
+    back = c[2:]
+    return len(back) >= 2 and (expect_of(back[-1][1]) == "room_1" or any(
+        o == "go_to" and a.get("to", "").startswith("anchor:") for o, a in L[back[-1][0] + 1:])) and anchors_reachable(L)
+
+
+def anchors_reachable(L):
+    """every go_to anchor:NAME runs in the room where NAME was taken (the controller refuses it anywhere else). The
+    rooms are tracked as a stack of the doors crossed: crossing the door on top of the stack again goes back (pop); a
+    cross with expect=R pops back to R when R is on the way; any other cross enters a new room (push)."""
+    path = [("", "room_1")]   # (the door that led here, the room)
+    anchors = {}
+    for o, a in L:
+        if o == "anchor":
+            anchors[a.get("name", "").strip('"')] = len(path)
+        elif o == "cross":
+            door, exp = a.get("door", ""), expect_of(a)
+            rooms = [r for _, r in path]
+            if exp and exp in rooms[:-1]:
+                del path[rooms.index(exp) + 1:]
+            elif len(path) > 1 and path[-1][0] == door:
+                path.pop()
+            else:
+                path.append((door, exp or f"?{len(path)}"))
+        elif o == "go_to" and a.get("to", "").startswith("anchor:"):
+            if anchors.get(a["to"][7:]) != len(path):
+                return False
+    return True
+
+
 def single(L, op, **want):
     return len(L) == 1 and L[0][0] == op and all(L[0][1].get(k) == v for k, v in want.items())
 
@@ -297,6 +355,30 @@ CASES = [
      lambda L: len(L) >= 1 and L[0][0] == "explore" and "explored" in L[0][1].get("until", "") and num(L[0][1], "budget_s") == 300, False),
     ("cross and come back to start", "Cross door_0 and then come back to where you started.",
      lambda L: bool(crosses(L, "door_0")) and returns_after(L, crosses(L, "door_0")[0][0]), False),
+    # final review I5: go_to anchor:NAME only in the anchor's own room — the cross back comes first
+    ("anchor: cross back before go_to", "Remember this spot, go through door_1, wait 10 seconds there, and come back to this spot.",
+     lambda L: bool(crosses(L, "door_1")) and returns_after(L, crosses(L, "door_1")[0][0]) and anchors_reachable(L)
+     and (not any(o == "go_to" for o, _ in L) or len(crosses(L)) >= 2), False),
+]
+
+# ── remembered rooms (final review I6): the PRODUCTION planner STATE (STATE_REMEMBERED: ltsm remembers room_2 behind
+#    door_1 and room_3 beyond it), multi-room requests graded on the ordered legs. Kept apart so the old total stays
+#    comparable with earlier runs. Same tuple, the STATE last.
+CASES_REMEMBERED = [
+    ("mem: room_3 and back", "Go to room_3 and come back.",
+     lambda L: legs_to_room_3(L) and back_from_room_3(L), False, STATE_REMEMBERED),
+    ("mem: room_3 and back (ES)", "Ve a room_3 y vuelve.",
+     lambda L: legs_to_room_3(L) and back_from_room_3(L), False, STATE_REMEMBERED),
+    ("mem: room_3, report, back", "Go to room_3, tell me what objects are there, and come back.",
+     lambda L: legs_to_room_3(L) and any(i > crosses(L)[1][0] and (len(crosses(L)) < 3 or i < crosses(L)[2][0])
+                                         for i, _ in of(L, "report")) and back_from_room_3(L), False, STATE_REMEMBERED),
+    ("mem: explore room_3", "Explore room_3 for one minute.",
+     lambda L: legs_to_room_3(L) and any(i > crosses(L)[1][0] and (a.get("room") == "node:room_3" or a.get("room", "").startswith("var:"))
+                                         for i, a in of(L, "explore")), False, STATE_REMEMBERED),
+    ("mem: room_2, explore, back", "Go to room_2, explore it for a minute and come back.",
+     lambda L: bool(crosses(L)) and crosses(L)[0][1].get("door") in ("node:door_1", "passage:passage_0@room_1")
+     and any(i > crosses(L)[0][0] for i, _ in of(L, "explore"))
+     and any(expect_of(a) == "room_1" for _, a in crosses(L)[1:]) and anchors_reachable(L), False, STATE_REMEMBERED),
 ]
 
 
@@ -309,8 +391,8 @@ def planner_request(case):
     return out
 
 
-def ask_model(system, user):
-    msgs = [{"role": "system", "content": system}, {"role": "system", "content": STATE_TEXT},
+def ask_model(system, user, state=None):
+    msgs = [{"role": "system", "content": system}, {"role": "system", "content": state or STATE_TEXT},
             {"role": "user", "content": planner_request(user)}]
     body = {"model": MODEL, "messages": msgs, "stream": False, "think": False, "keep_alive": "30m",
             "options": {"temperature": 0, "num_ctx": 16384, "num_predict": NUM_PREDICT}}
@@ -328,11 +410,14 @@ def main():
     system = skills()
     if FORM == "json":
         system += "\n\n" + JSON_LINE
-    results, lat = [], []
-    for label, request, chk, want_ask in CASES:
+    results, lat, groups = [], [], {}
+    for case in CASES + CASES_REMEMBERED:
+        label, request, chk, want_ask = case[:4]
+        state = case[4] if len(case) > 4 else None
+        group = "remembered rooms (new, I6)" if state else ("anchor (new, I5)" if label.startswith("anchor:") else "old cases")
         for rep in range(REPEATS):
             t0 = time.monotonic()
-            reply = unfence(ask_model(system, request))
+            reply = unfence(ask_model(system, request, state))
             lat.append(time.monotonic() - t0)
             if want_ask == "either" and is_ask(reply):
                 good, why = True, ""
@@ -348,12 +433,15 @@ def main():
                     good = bool(chk(steps))
                     why = "checklist: " + "; ".join(o + (" " + " ".join(f"{k}={v}" for k, v in a.items())) for o, a in steps)[:200]
             results.append(good)
+            groups.setdefault(group, []).append(good)
             print(f"{'PASS' if good else 'FAIL'}  {label:<30} #{rep + 1}" + ("" if good else f"  -> {why}"), flush=True)
     ls = sorted(lat)
     print(f"\nmodel {MODEL} form {FORM}; system {len(system)} chars; STATE {len(STATE_TEXT)} chars")
     print(f"latency: median {statistics.median(ls):.2f} s, mean {statistics.mean(ls):.2f} s, max {ls[-1]:.2f} s")
     print(f"replies wrapped in a ``` fence: {FENCED[0]}/{len(results)} (of those, with prose outside it: {FENCED_PROSE[0]}); "
           f"unfenced with prose first: {UNFENCED_PROSE[0]}/{len(results)}")
+    for g, r in groups.items():
+        print(f"  {g}: {sum(r)}/{len(r)}")
     print(f"{sum(results)}/{len(results)} passed")
     return 0 if all(results) else 1
 

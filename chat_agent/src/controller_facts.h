@@ -55,12 +55,21 @@ struct TargetFact
     return s;
 }
 
-/// A RUNNING mission's line; nullopt otherwise (a finished one is reported by the last-command line).
+/// A RUNNING or PAUSED mission's line; nullopt otherwise (a finished one is reported by the last-command line).
+/// ★ A paused mission still exists (final review I3): without its line the model believes there is none, answers
+///   "what are you doing?" wrongly, or plans over it without saying so. Only the person's words move it on.
 [[nodiscard]] inline std::optional<std::string> mission_now_line(const rc::mission::Progress& p)
 {
-    if (p.status != "in_progress") return std::nullopt;
+    const bool paused = p.status.starts_with("paused|");
+    if (p.status != "in_progress" and not paused) return std::nullopt;
     std::string s = std::format("controller mission now: \"{}\"", p.title);
     if (not p.source.empty()) s += " (from " + p.source + ")";
+    if (paused)
+    {
+        s += " PAUSED";
+        if (not p.line.empty()) s += " at: " + p.line;
+        return s + " (the robot holds still; it goes on only when the person says continue, or ends on cancel)";
+    }
     if (not p.line.empty()) s += ", running: " + p.line;
     return s;
 }

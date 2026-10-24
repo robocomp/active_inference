@@ -5,7 +5,7 @@ description: shut doors, passages, how to name the way back through a door, and 
 - cross approaches the door by itself: do not add a go_to or open before it.
 - The STATE lists the doors of the CURRENT room. A door of another room cannot be crossed until the robot is there.
 - The room behind a door that was never crossed has no name yet. Name it with bind=NAME on the cross and use $NAME afterwards.
-- Way back: cross the same door again with expect=<room you came from>, or anchor at the start and go_to anchor:NAME.
-- A doorway seen from the other side may be called passage:NAME@ROOM (the face NAME shows in ROOM), e.g. passage:passage_0@room_2. Use it only with cross / open, never go_to.
+- Way back: cross the same door again with expect=<room you came from>. go_to anchor:NAME works only in the room where the anchor was taken, so it comes after the cross back, never instead of it.
+- A doorway seen from the other side may be called passage:NAME@ROOM (the face NAME shows in ROOM), e.g. passage:passage_3@room_6. Use it only with cross / open, never go_to.
 - door_open(DOOR)>=p is true when the probability that the door is open reaches p: `wait until=door_open(door_1)>=0.8 s=30s` waits up to 30 s for door_1 to open.
 - If a door stays shut after the retries, that step fails and so does the mission; the chat then proposes a fix. Do not invent another door.

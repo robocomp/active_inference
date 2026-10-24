@@ -393,7 +393,8 @@ void ChatSession::on_user_text(const QString& text)
         log_.write("fast_path", QJsonObject{{"kind", "mission_yes"}, {"card", static_cast<qint64>(card->serial)},
                                             {"title", q(title)}});
         const bool sent = send_command(rc::mission::encode_json(card->mission), "mission_card");
-        const QString reply = sent ? QStringLiteral("Starting: ") + q(title)
+        // "Sent", not "Starting": the controller may still refuse it (that is told as its own line); `→ 1/N` is the start.
+        const QString reply = sent ? QStringLiteral("Sent to the controller: ") + q(title)
                                    : QStringLiteral("I could not send the mission '%1' to the controller.").arg(q(title));
         window_->begin_assistant();
         window_->append_token(reply);
@@ -762,6 +763,17 @@ QJsonArray ChatSession::tools_json() const
                                            {"description", "'front' = the camera facing ahead (default); "
                                                            "'360' = the all-round panorama"}}}},
         {}));
+    // ★ A robot event's turn (and its follow-ups: wake_turn_ holds until the person speaks, so they carry the same list
+    //   and the prompt cache keeps) offers only what may run there (mission_plan.h allowed_in_wake; handle_tool_calls
+    //   refuses the rest too). The person's own turns get the full list unchanged: that is what check_llm_tools measures.
+    if (wake_turn_)
+    {
+        QJsonArray kept;
+        for (const auto& t : tools)
+            if (allowed_in_wake(t.toObject().value("function").toObject().value("name").toString().toStdString()))
+                kept.append(t);
+        return kept;
+    }
     return tools;
 }
 
@@ -920,6 +932,14 @@ bool ChatSession::handle_tool_calls(const QJsonArray& calls)
         QJsonObject args = fn.value("arguments").toObject();
         if (fn.value("arguments").isString())   // some templates send the arguments JSON-encoded
             args = QJsonDocument::fromJson(fn.value("arguments").toString().toUtf8()).object();
+        // ★ A robot event's turn: nobody asked for an action, so none runs without the person's yes (final review C1).
+        //   The tool list already leaves them out; a call the model makes anyway is refused here, with what to do instead.
+        if (wake_turn_ and not allowed_in_wake(name.toStdString()))
+        {
+            log_.write("wake_call_refused", QJsonObject{{"tool", name}, {"args", args}});
+            push_history({{"role", "tool"}, {"tool_name", name}, {"content", q(std::string(kWakeRefusal))}});
+            continue;
+        }
         if (name == "plan_mission")
         {
             const QString refused = queue_planner(args);
@@ -1289,11 +1309,11 @@ void ChatSession::on_planned(const QString& reply)
 
 QString ChatSession::planner_state() const
 {
-    // ★ The planner has no route_to: the way to a remembered room is given to it, legs in order (topology.h ways_line).
-    QString st = state_message();
-    if (const auto topo = remembered_topology(); topo.has_value())
-        if (const auto line = rc::chat::ways_line(*topo, digest_.facts.room); not line.empty()) st += q(line) + "\n";
-    return st;
+    // ★ The planner has no tools: the way to a remembered room is given to it, legs in order (topology.h ways_line), and
+    //   the STATE's "(call route_to …)" is dropped from its copy (planner_state_text, final review I6).
+    std::string ways;
+    if (const auto topo = remembered_topology(); topo.has_value()) ways = rc::chat::ways_line(*topo, digest_.facts.room);
+    return q(rc::chat::planner_state_text(state_message().toStdString(), ways));
 }
 
 void ChatSession::drop_planner(const QString& result)
@@ -1929,7 +1949,15 @@ void ChatSession::tick_status()
                                                      : QStringLiteral("'%1' %2").arg(q(shown), q(state));
         if (not event.empty()) line += " — " + q(event);
         // A mission's end is already in the window as its progress lines (✓ / ✗ / ■): only the model is told here.
-        if (not about_mission) window_->append_robot(line);
+        // ★ Except a mission the controller REFUSED before its first step (final review I2): it has no progress lines
+        //   at all, so the line is shown and the model is woken to tell the person (it said nothing about it yet).
+        const auto refused = about_mission ? mission_refused_note(state, step, sent_title()) : std::nullopt;
+        if (not about_mission or refused.has_value()) window_->append_robot(line);
+        if (refused.has_value())
+        {
+            log_.write("wake_queued", QJsonObject{{"kind", "refused"}, {"note", q(*refused)}});
+            wakes_.push(*refused);
+        }
         push_history({{"role", "tool"}, {"tool_name", "robot_status"},
                       {"content", q(robot_status_text(shown, state, event))}});
     }
@@ -1971,7 +1999,7 @@ void ChatSession::on_mission_progress(rc::mission::Progress now)
     if (now.status.starts_with("failed|") and not before.status.starts_with("failed|"))
         if (const auto note = failure_wake(now, mission_ir_); note.has_value())
             queue("failure", *note, std::format("m{}", now.serial));
-    if (now.status == "completed" and before.status != "completed") queue("summary", summary_wake(now));
+    if (now.status == "completed" and before.status != "completed") queue("summary", summary_wake(now, mission_ir_));
 }
 
 void ChatSession::drain_wakes()
@@ -1996,23 +2024,18 @@ void ChatSession::drain_wakes()
 
 std::string ChatSession::physical_room() const
 {
-    // room_resolve.h rule 2a, without rule 1 in front of it: the room whose robot RT is still LIVE is where the pose is
-    // being published, i.e. where the robot is, even while ltsm's `current` names the room it has just left.
-    std::string live;
-    int n = 0;
-    for (const auto& e : G_->get_edges_by_type("RT"))
-    {
-        const auto a = G_->get_node(e.from());
-        const auto b = G_->get_node(e.to());
-        if (not a.has_value() or not b.has_value()) continue;
-        const DSR::Node* room = a->type() == "room" and b->type() == "robot"   ? &*a
-                                : b->type() == "room" and a->type() == "robot" ? &*b
-                                                                               : nullptr;
-        if (room == nullptr or not G_->get_attrib_by_name<valid_att>(e).value_or(true)) continue;
-        live = room->name();
-        ++n;
-    }
-    return n == 1 ? live : digest_.facts.room;
+    // ★ The SAME rule as the controller's `bind` (room_resolve.h physical_room, final review I1): the room whose robot
+    //   RT is still LIVE is where the pose is being published, i.e. where the robot is, even while ltsm's `current`
+    //   names the room it has just left. Otherwise the identity rule (= the digest's room).
+    if (not G_) return digest_.facts.room;
+    const std::string here = rc::room::physical_room_name(*G_);
+    return here.empty() ? digest_.facts.room : here;
+}
+
+std::string ChatSession::sent_title() const
+{
+    const auto m = rc::mission::decode_json(sent_command_);
+    return m.has_value() and not m->title.empty() ? m->title : std::string("the mission");
 }
 
 void ChatSession::mission_control(const MissionControl& act, const QString& text)

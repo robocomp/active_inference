@@ -14,6 +14,8 @@
  *   plan_still_wanted a planner reply is discarded once the person has spoken again.
  *   WakeQueue / *_wake  a robot event (report, failure, completion) for the model, held until it is idle.
  *   fix_still_open    how long a failure's wake may still stamp a planned mission as its fix.
+ *   allowed_in_wake   the tools a robot event's turn may offer and run (look, stop, propose — never act).
+ *   mission_refused_note  a mission the controller refused before its first step: the only line the person gets.
  */
 
 #include <algorithm>
@@ -95,6 +97,8 @@ inline std::string name_of(const Mission& m, std::string_view id)
 inline std::optional<std::string> unknown_in_ref(const Ref& r, const std::function<bool(std::string_view)>& exists)
 {
     if ((r.kind == Ref::Kind::Node or r.kind == Ref::Kind::Passage) and not exists(r.name)) return r.name;
+    // a passage's face is named by the room it shows in (passage:NAME@ROOM): that room is a name too
+    if (r.kind == Ref::Kind::Passage and not r.from.empty() and not exists(r.from)) return r.from;
     return std::nullopt;
 }
 
@@ -103,6 +107,8 @@ inline std::optional<std::string> unknown_in(const std::vector<Step>& list,
 {
     for (const auto& s : list)
     {
+        // `expect=ROOM` is a String field, not a Ref, but it names a room all the same ($NAME is a bound room: skipped)
+        if (const auto e = s.string("expect"); e.has_value() and not e->starts_with('$') and not exists(*e)) return *e;
         for (const auto& [key, v] : s.args)
         {
             if (const Ref* r = std::get_if<Ref>(&v))
@@ -131,8 +137,8 @@ inline std::string paused_at(const rc::mission::Progress& p)
 }
 }   // namespace mission_plan_detail
 
-/// The first Node or Passage name the mission uses that `exists` refuses (op args and predicate refs, recursively).
-/// Var, Anchor and Pose refs are not names in the graph and are skipped.
+/// The first Node or Passage name the mission uses that `exists` refuses (op args, predicate refs, a passage's
+/// `@ROOM` and `expect=ROOM`, recursively). Var, Anchor and Pose refs are not names in the graph and are skipped.
 [[nodiscard]] inline std::optional<std::string> unknown_name(const rc::mission::Mission& m,
                                                              const std::function<bool(std::string_view)>& exists)
 {
@@ -247,6 +253,8 @@ inline std::string paused_at(const rc::mission::Progress& p)
             out.push_back(std::format("✓ {} ({:.0f} s)", label, v.t1 < v.t0 ? 0.0 : double(v.t1 - v.t0) / 1000.0));
         else if (v.state == SS::Failed and was != SS::Failed)
             out.push_back(std::format("✗ {}: {}", label, v.outcome));
+        else if (v.state == SS::Skipped and was != SS::Skipped)   // on_fail=skip: it did not happen, and the person is told
+            out.push_back(std::format("↷ skipped: {} ({})", label, v.outcome.empty() ? std::string("failed") : v.outcome));
     }
 
     const std::string was_paused = paused_at(before), now_paused = paused_at(after);
@@ -398,12 +406,30 @@ private:
                        p.title, name_of(m, step), outcome, undone.empty() ? std::string("none") : undone);
 }
 
-/// `completed` → one closing sentence.
-[[nodiscard]] inline std::string summary_wake(const rc::mission::Progress& p)
+/// Every step (any depth) the mission SKIPPED (on_fail=skip after a failure), by line name with its outcome, in order.
+[[nodiscard]] inline std::vector<std::string> skipped_steps(const rc::mission::Progress& p, const rc::mission::Mission& m)
+{
+    using namespace mission_plan_detail;
+    std::vector<std::string> out;
+    for (const auto& v : p.steps)
+        if (v.state == rc::mission::Interpreter::StepState::Skipped)
+            out.push_back(std::format("{} ({})", name_of(m, v.id), v.outcome.empty() ? std::string("failed") : v.outcome));
+    return out;
+}
+
+/// `completed` → one closing sentence. ★ A completed mission may have SKIPPED steps (on_fail=skip): they are named, so
+/// the model never tells the person "every step done" about a step that did not happen (anti-goal 1).
+[[nodiscard]] inline std::string summary_wake(const rc::mission::Progress& p, const rc::mission::Mission& m)
 {
     const double s = p.t1 > p.t0 ? double(p.t1 - p.t0) / 1000.0 : 0.0;
-    return std::format("The mission \"{}\" completed ({:.0f} s, every step done). Close it for the person in one short "
-                       "sentence; do not repeat what you already reported.", p.title, s);
+    std::string skipped;
+    for (const auto& k : skipped_steps(p, m)) skipped += (skipped.empty() ? "" : "; ") + k;
+    if (skipped.empty())
+        return std::format("The mission \"{}\" completed ({:.0f} s, every step done). Close it for the person in one short "
+                           "sentence; do not repeat what you already reported.", p.title, s);
+    return std::format("The mission \"{}\" completed ({:.0f} s) but SKIPPED these steps, which did not happen: {}. Close it "
+                       "for the person in one or two short sentences, saying what was skipped; do not repeat what you "
+                       "already reported.", p.title, s, skipped);
 }
 
 /// A failure's wake was delivered at user turn `fix_turn`: a card planned in that same turn, or in answer to the
@@ -411,6 +437,44 @@ private:
 [[nodiscard]] constexpr bool fix_still_open(std::uint64_t fix_turn, std::uint64_t user_turn)
 {
     return user_turn == fix_turn or user_turn == fix_turn + 1;
+}
+
+// ── a robot event's turn: the model may look, stop and propose, never act (spec §4 anti-goal 2, final review C1) ──
+
+/// The tool result of an acting call the model makes while answering a robot event.
+inline constexpr std::string_view kWakeRefusal =
+    "REFUSED: during a robot event only plan_mission/stop/cancel_passage may act; propose a fix with plan_mission";
+
+/// The tools a robot event's turn (a report, a failure, a completion, an agent's late launch result) may offer AND run.
+/// Nobody asked for anything in that turn, so nothing may move the robot or change the fleet: an acting call there
+/// (cross_door after a failed cross, approach_object mid-mission, agent_control start after a failed launch) would
+/// run without the person's yes or supersede the mission they approved. What is left: the read-only tools, `stop` and
+/// `cancel_passage` (they only ever halt), and `plan_mission`, which only shows a card that runs on the person's yes.
+/// ★ An ALLOW-list: a tool added later is refused in a wake until someone decides it is harmless there.
+[[nodiscard]] inline bool allowed_in_wake(std::string_view tool)
+{
+    static constexpr std::string_view kAllowed[] = {
+        "stop", "cancel_passage", "plan_mission",                                                  // halt / propose
+        "look", "find_objects", "where_is", "known_rooms", "route_to", "agents", "sensors",        // read the world
+        "graph_summary", "inspect", "use_skill", "episodes", "episode", "outcome_stats", "last_episode",
+        "show", "draw", "table", "hide_canvas",                                                     // the side canvas
+    };
+    return std::ranges::find(kAllowed, tool) != std::ranges::end(kAllowed);
+}
+
+/// The controller's report on a sent mission (`{…}` JSON) → the line for the person when it REFUSED it before its first
+/// step (chat_inbox K::Rejected: state `failed|<reason>`, bt step `-`), else nullopt. A mission that ran and then
+/// failed carries its step in the bt and is told by its progress lines instead; a refused one never has any, so
+/// without this line the person sees "Sent to the controller" and then nothing (final review I2).
+[[nodiscard]] inline std::optional<std::string> mission_refused_note(std::string_view state, std::string_view bt_step,
+                                                                     std::string_view title)
+{
+    if (not state.starts_with("failed") or bt_step != "-") return std::nullopt;
+    const auto bar = state.find('|');
+    const std::string why = bar == std::string_view::npos ? std::string("no reason given") : std::string(state.substr(bar + 1));
+    return std::format("The controller REFUSED the mission \"{}\" before its first step: {}. Nothing ran and the robot did "
+                       "not move. Tell the person in one sentence; a fix is a new plan_mission, only if they want one.",
+                       title, why);
 }
 
 }   // namespace rc::chat

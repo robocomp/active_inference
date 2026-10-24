@@ -24,15 +24,15 @@ Steps:
 Any step: retry=N, on_fail=skip|abort.
 Predicates: explored(ROOM)>=p, in_room(ROOM), door_open(DOOR)<p.
 bind=NAME works on cross only (never on open); it names the room you arrive in; use it later as $NAME (the room may not exist yet).
-Rooms the robot remembers but cannot see: the STATE line `ways from here` gives each room's legs in order; write them as cross steps exactly as given, in that order, each with retry=2; after them that room may be named (explore room_3).
-Way back: cross the same door with expect=ROOM_YOU_CAME_FROM, or go_to anchor:NAME.
+Rooms the robot remembers but cannot see: the STATE line `ways from here` gives each room's legs in order; write them as cross steps exactly as given, in that order, each with retry=2; after them that room may be named (explore room_7).
+Way back: cross the same door again with expect=ROOM_YOU_CAME_FROM, one cross per door, in reverse order. To end on the very spot you started from, put `anchor start` first and go_to anchor:start AFTER crossing back (go_to only drives inside the room where its anchor was taken).
 
 ```
-mission "go to door_1 and cross"
-  cross door_1 expect=room_2 retry=2
+mission "go through door_1"
+  cross door_1 retry=2
 ```
 ```
-mission "look at room_2 and come back"
+mission "look at the room behind door_1 and come back"
   anchor start
   cross door_1 retry=2 bind=next
   explore $next budget_s=60s
@@ -51,16 +51,24 @@ mission "turn around and go to the table"
   approach table_1
 ```
 ```
-mission "visit two rooms, report each, return"
+mission "visit the rooms behind door_1 and door_0, report each, return"
   anchor home
   cross door_1 retry=2 bind=a
+  explore $a budget_s=60s
   report "what is in the first room"
-  cross door_2 retry=2 bind=b on_fail=skip
+  cross door_1 expect=room_1 retry=2
+  cross door_0 retry=2 bind=b
+  explore $b budget_s=60s
   report "what is in the second room"
+  cross door_0 expect=room_1 retry=2
   go_to anchor:home
 ```
+A remembered room two rooms away, with the robot in room_5 and the STATE line `ways from here (each leg in order): room_7 = cross door_4 expect=room_6, cross passage:passage_3@room_6 expect=room_7`:
 ```
-mission "go to room_3, two rooms away"
-  cross door_1 expect=room_2 retry=2
-  cross passage:passage_1@room_2 expect=room_3 retry=2
+mission "go to room_7, report, come back"
+  cross door_4 expect=room_6 retry=2
+  cross passage:passage_3@room_6 expect=room_7 retry=2
+  report "what is in room_7"
+  cross passage:passage_3@room_7 expect=room_6 retry=2
+  cross door_4 expect=room_5 retry=2
 ```

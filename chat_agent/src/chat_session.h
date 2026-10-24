@@ -220,6 +220,7 @@ private:
     void drain_wakes();   ///< the oldest robot event to the model, if it is idle
     /// The room the robot is physically in: the one its pose is published in (live robot RT), else the current room.
     [[nodiscard]] std::string physical_room() const;
+    [[nodiscard]] std::string sent_title() const;   ///< the title of the mission JSON last sent ('the mission' if none)
     /// Fast path 1d: send mission_control_action's word (if any) and answer with its fixed reply.
     void mission_control(const MissionControl& act, const QString& text);
     void ping_llm();

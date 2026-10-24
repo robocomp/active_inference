@@ -61,6 +61,19 @@ int main()
     CHECK(in_pred.has_value() and unknown_name(*in_pred, exists) == "door_7");
     const auto nested = parse_planned("mission\n  repeat 2\n    cross door_1\n    open door_8\n");
     CHECK(nested.has_value() and unknown_name(*nested, exists) == "door_8");
+    // final review I4: `expect=ROOM` (a String field) and a passage's `@ROOM` are names too
+    const auto known = [](std::string_view n) { return n == "door_1" or n == "room_1" or n == "room_2" or n == "passage_0"; };
+    const auto bad_expect = parse_planned("mission\n  cross door_1 expect=room_9\n");
+    CHECK(bad_expect.has_value() and unknown_name(*bad_expect, known) == "room_9");
+    const auto good_expect = parse_planned("mission\n  cross door_1 expect=room_2\n");
+    CHECK(good_expect.has_value() and not unknown_name(*good_expect, known).has_value());
+    const auto nested_expect = parse_planned("mission\n  repeat 2\n    cross door_1 expect=room_7\n");
+    CHECK(nested_expect.has_value() and unknown_name(*nested_expect, known) == "room_7");
+    const auto bad_face = parse_planned("mission\n  cross passage:passage_0@room_8 expect=room_1\n");
+    CHECK(bad_face.has_value() and unknown_name(*bad_face, known) == "room_8");
+    const auto good_face = parse_planned("mission\n  cross passage:passage_0@room_2 expect=room_1\n");
+    CHECK(good_face.has_value() and not unknown_name(*good_face, known).has_value());
+    CHECK(not check_planned("mission\n  cross door_1 expect=room_9\n", known).has_value());   // never reaches a card
 
     // ── progress_lines ───────────────────────────────────────────────────────────────────────────────────────────
     const Progress idle = snap("in_progress", {view("1", "cross", SS::Pending), view("2", "explore", SS::Pending),
@@ -187,8 +200,47 @@ int main()
         c.t0 = 1000;
         c.t1 = 61000;
         CHECK(undone_steps(c, *m).empty());
-        const auto sw = summary_wake(c);
-        CHECK(sw.contains("\"t\"") and sw.contains("60 s"));
+        const auto sw = summary_wake(c, *m);
+        CHECK(sw.contains("\"t\"") and sw.contains("60 s") and sw.contains("every step done"));
+        // final review I7: a skipped step is named, never "every step done"
+        Progress k = c;
+        k.steps = {view("1", "cross", SS::Skipped), view("2", "explore", SS::Satisfied), view("3", "report", SS::Satisfied)};
+        k.steps[0].outcome = "door_wont_open";
+        CHECK(skipped_steps(k, *m) == std::vector<std::string>{"1:cross door_1 (door_wont_open)"});
+        const auto sk = summary_wake(k, *m);
+        CHECK(not sk.contains("every step done") and sk.contains("SKIPPED") and sk.contains("1:cross door_1 (door_wont_open)"));
+    }
+
+    // ── skipped steps get a line (final review I7) ───────────────────────────────────────────────────────────────
+    {
+        Progress a = snap("in_progress", {view("1", "cross", SS::Running), view("2", "explore", SS::Pending)});
+        Progress b = snap("in_progress", {view("1", "cross", SS::Skipped), view("2", "explore", SS::Running)});
+        b.steps[0].outcome = "door_wont_open";
+        const auto l = progress_lines(a, b, *m);
+        CHECK(l.size() == 2 and l[0] == "↷ skipped: 1:cross door_1 (door_wont_open)" and l[1].starts_with("→ 2/3"));
+        CHECK(progress_lines(b, b, *m).empty());   // told once
+    }
+
+    // ── allowed_in_wake: a robot event's turn may look, stop and propose, never act (final review C1) ───────────
+    {
+        for (const char* t : {"stop", "cancel_passage", "plan_mission", "look", "find_objects", "where_is", "known_rooms",
+                              "route_to", "agents", "sensors", "graph_summary", "inspect", "use_skill", "episodes",
+                              "episode", "outcome_stats", "last_episode", "show", "draw", "table", "hide_canvas"})
+            CHECK(allowed_in_wake(t));
+        for (const char* t : {"cross_door", "approach_object", "go_around_object", "move_relative", "sim_door",
+                              "agent_control", "some_future_tool", ""})
+            CHECK(not allowed_in_wake(t));
+        CHECK(kWakeRefusal.starts_with("REFUSED: during a robot event only plan_mission/stop/cancel_passage may act"));
+    }
+
+    // ── mission_refused_note: refused before its first step (K::Rejected) vs failed while running (final review I2) ─
+    {
+        const auto r = mission_refused_note("failed|bad_value: unknown op 'report'", "-", "look around");
+        CHECK(r.has_value() and r->contains("REFUSED") and r->contains("\"look around\"") and r->contains("unknown op 'report'"));
+        CHECK(not mission_refused_note("failed|1|door_wont_open", "1:cross door_1", "t").has_value());   // ran, then failed
+        CHECK(not mission_refused_note("in_progress", "-", "t").has_value());
+        CHECK(not mission_refused_note("completed", "", "t").has_value());
+        CHECK(mission_refused_note("failed", "-", "t").has_value());   // no reason given still says something
     }
 
     // ── mission_control_action: the fast path only where it means something ─────────────────────────────────────

@@ -48,6 +48,10 @@ int main()
                                 .line = "go_to pose(room_1 0.95 -0.25)"};
         CHECK(mission_now_line(p) ==
               std::optional<std::string>("controller mission now: \"approach table_1\" (from chat), running: go_to pose(room_1 0.95 -0.25)"));
+        p.status = "paused|1";   // final review I3: a paused mission is still there, and says so
+        const auto paused = mission_now_line(p);
+        CHECK(paused.has_value() and paused->starts_with("controller mission now: \"approach table_1\" (from chat) PAUSED at: go_to")
+              and paused->contains("continue") and paused->contains("cancel") and not paused->contains("running:"));
         p.status = "completed";
         CHECK(not mission_now_line(p).has_value());   // finished: the last-command line reports how it ended
         CHECK(not mission_now_line(rc::mission::Progress{}).has_value());
