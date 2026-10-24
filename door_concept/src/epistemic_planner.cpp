@@ -9,6 +9,7 @@
  */
 
 #include "epistemic_planner.h"
+#include "door_look_site.h"
 #include "door_dof.h"          // kDoorDofs: names/units (no σ* published for the door)
 
 #include <algorithm>
@@ -70,7 +71,8 @@ EpistemicProposal EpistemicPlanner::compute(const DoorBelief& belief, float lat_
                                             const rc::nbv::Sensor& sensor_in,
                                             const std::vector<rc::nbv::Obstacle>& obstacles,
                                             const std::vector<Eigen::Vector2f>& room_polygon,
-                                            rc::nbv::Plan* plan_out, const ExistenceLook* existence) const
+                                            rc::nbv::Plan* plan_out, const ExistenceLook* existence,
+                                            const std::function<float(const Eigen::Vector2f&)>* site_refused) const
 {
     // The camera geometry arrives from the caller (read fresh from the graph each cycle); the
     // detector envelope is ours. Merging here keeps the two concerns in their right owners.
@@ -155,7 +157,22 @@ EpistemicProposal EpistemicPlanner::compute(const DoorBelief& belief, float lat_
                  + (existence ? door::existence_mutual_info(existence->p_exists, existence->p_hit * plan.face_p_detect[i], existence->p_false) : 0.0f);
         if (total[i] > best_total) { best_total = total[i]; best_idx = i; }
     }
-    if (existence and best_total >= 0.0f and best_idx != plan.best_face)    // existence moved the choice: re-place at that face's own range
+    // ★D4: the faces' viewpoints weighted by P(the body can stand there), from the consumer's hand-backs (door_look_site.h).
+    float site_weight = 1.0f;
+    if (site_refused != nullptr)
+    {
+        std::array<Eigen::Vector2f, 4> pos;
+        for (int i = 0; i < 4; ++i) pos[i] = ctr + plan.face_standoff_m[i] * face_dir[i];
+        const auto site = door::choose_look_site(total, usable, pos, *site_refused);
+        if (site.unplaceable)
+        {
+            EpistemicProposal none;
+            none.unplaceable = true;
+            return none;
+        }
+        if (site.face >= 0) { best_idx = site.face; best_total = total[site.face]; site_weight = 1.0f - site.p_refused; }
+    }
+    if ((existence or site_refused) and best_total >= 0.0f and best_idx != plan.best_face)    // existence moved the choice: re-place at that face's own range
     {
         const Eigen::Vector2f pos = ctr + plan.face_standoff_m[best_idx] * face_dir[best_idx];
         const Eigen::Vector2f to = ctr - pos;
@@ -182,7 +199,7 @@ EpistemicProposal EpistemicPlanner::compute(const DoorBelief& belief, float lat_
         const float useful_frac  = (best_raw > 1e-9f) ? std::min(best_raw, adequacy_gap) / best_raw : 0.0f;
         geo_gain *= useful_frac;
     }
-    const float best_gain = geo_gain + (total[best_idx] - plan.face_gains[best_idx]);   // + the existence term of the winning face
+    const float best_gain = site_weight * (geo_gain + (total[best_idx] - plan.face_gains[best_idx]));   // + the existence term of the winning face
     const auto& face_gain = plan.face_gains;
     if (not std::isfinite(best_gain))
         return {};

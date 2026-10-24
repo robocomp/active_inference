@@ -2161,6 +2161,35 @@ void SpecificWorker::step_epistemic(rc::DoorInstance& inst, DSR::Node& node)
     // because the shared step has exactly one bail path.
     rc::epistemic::StepHooks<rc::EpistemicProposal> hooks;
 
+    // ★D4 — A LOOK THE CONTROLLER HANDED BACK IS EVIDENCE ITS SITE IS BLOCKED (gold13: the look was offered inside Bed(1); the
+    //   controller found no route and spun). The occupancy the controller plans on is not in the NBV planner's obstacle set, so the
+    //   memory is the only channel. Same model as the approach (door_approach_pose.h); the sites are weighted in the planner.
+    const auto look_now_ms = static_cast<std::int64_t>(rc::provenance::now_ms());
+    const float look_memory_s = cfg_.pragmatic.approach_refusal_memory_s;
+    inst.look_unplaceable = false;
+    inst.look_memory.prune(look_now_ms, look_memory_s);
+    if (const auto aid = inst.affordance.node_id(); aid != 0)
+        if (const auto an = G->get_node(aid); an.has_value())
+        {
+            const bool active  = G->get_attrib_by_name<active_att>(an.value()).value_or(false);
+            const bool pending = G->get_attrib_by_name<epistemic_pending_att>(an.value()).value_or(true);
+            const auto outcome = rc::affordance::read_outcome(an.value());
+            if (pending)
+                inst.look_handback_taken = false;
+            else if (not active and not inst.look_handback_taken and inst.look_offered_valid
+                     and (outcome == rc::affordance::Outcome::Unreachable or outcome == rc::affordance::Outcome::Infeasible
+                          or outcome == rc::affordance::Outcome::OutsideRoom))
+            {
+                const float side = (inst.look_offered_xy - inst.aperture.centre_xy()).dot(inst.aperture.across_u()) < 0.0f ? -1.0f : 1.0f;
+                inst.look_memory.refuse(inst.aperture, side, G ? rc::room::current_room_frame(*G) : std::string{},
+                                        inst.look_offered_xy, look_now_ms);
+                inst.look_handback_taken = true;
+                std::print("door_concept: [look] {} site ({:.2f},{:.2f}) handed back ({}) — remembered as blocked (decays on {:.0f} s); "
+                           "the look is re-sited around it\n", inst.node_name, inst.look_offered_xy.x(), inst.look_offered_xy.y(),
+                           rc::affordance::to_string(outcome), look_memory_s);
+            }
+        }
+
     hooks.compute = [&]() -> std::optional<rc::EpistemicProposal>
     {
         // Σ-based D-optimal NBV from the belief. Skip until the belief has seen its first frame (else Σ is
@@ -2200,13 +2229,30 @@ void SpecificWorker::step_epistemic(rc::DoorInstance& inst, DSR::Node& node)
         nbv_obstacle_count_ = static_cast<int>(obstacles.size());   // 0 walls ⇒ the room polygon never arrived
 
         rc::nbv::Plan nbv_plan;
+        const std::string look_room = G ? rc::room::current_room_frame(*G) : std::string{};
+        const std::function<float(const Eigen::Vector2f&)> site_refused = [&](const Eigen::Vector2f& q)
+        {
+            const float side = (q - inst.aperture.centre_xy()).dot(inst.aperture.across_u()) < 0.0f ? -1.0f : 1.0f;
+            return inst.look_memory.p_refused(inst.aperture, side, look_room, q, look_now_ms, look_memory_s,
+                                              0.5f * cfg_.pragmatic.robot_passage_width_m + cfg_.pragmatic.passage_margin_m);
+        };
         // The existence question rides in the same gain (nats): high for a door only the 360 has reported, ~0 once the ZED settled it.
         const rc::ExistenceLook exist_look{inst.existence.p_exists(), cfg_.exist_detection_prob, cfg_.exist_clutter_prob};
         rc::EpistemicProposal prop =
             epistemic_planner_.compute(inst.ai2_belief, cfg_.ai2_range_noise_lat_per_m, cfg_.ai2_sigma_base_m,
                                        rc::nbv::sensor_from_graph(*G, inner_eigen_.get()), obstacles,
-                                       fitter_->room_polygon(), &nbv_plan, &exist_look);
+                                       fitter_->room_polygon(), &nbv_plan, &exist_look, &site_refused);
         log_nbv_decision(inst, nbv_plan, prop);   // logs REFUSED proposals too — keep it before the check
+        if (prop.unplaceable)
+        {
+            inst.look_unplaceable = true;
+            return std::nullopt;
+        }
+        if (prop.valid and prop.is_finite())
+        {
+            inst.look_offered_xy = {prop.epistemic_target_x_m, prop.epistemic_target_y_m};
+            inst.look_offered_valid = true;
+        }
         // Degenerate (non-finite) fit — retry next cycle.
         if (not prop.valid or not prop.is_finite())
             return std::nullopt;
@@ -2224,6 +2270,17 @@ void SpecificWorker::step_epistemic(rc::DoorInstance& inst, DSR::Node& node)
     rc::epistemic::step(inst, *G,
                         {.cooldown_cycles = cfg_.epistemic_cooldown_cycles, .orient_mode = orient},
                         hooks);
+
+    // A look that cannot be placed anywhere is WITHDRAWN, never left offered at a site already handed back (the executing claim,
+    // if any, is the controller's to finish). It returns by itself as the remembered hand-backs decay.
+    if (inst.look_unplaceable and inst.affordance.node_id() != 0
+        and inst.affordance.state() != rc::ObjectAffordance::State::executing)
+    {
+        inst.affordance.remove();
+        inst.look_offered_valid = false;
+        std::print("door_concept: [look] {} WITHDRAWN — every viewpoint that sees the door is a remembered hand-back "
+                   "(back as they decay on {:.0f} s)\n", inst.node_name, look_memory_s);
+    }
 }
 
 

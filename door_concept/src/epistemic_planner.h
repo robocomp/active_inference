@@ -17,6 +17,7 @@
 
 #include <array>
 #include <cmath>
+#include <functional>
 
 #include "door_existence_info.h"
 #include "door_belief.h"                             // AI2 belief: Σ + predicted_information for the NBV
@@ -33,6 +34,8 @@ struct EpistemicProposal
     float epistemic_target_yaw_rad = 0.0f;
     float epistemic_gain = 0.0f;
     bool  valid = false;
+    // D4: usable viewpoints exist but every one is a remembered hand-back — the look cannot be placed; the caller withdraws it.
+    bool  unplaceable = false;
 
     bool is_finite() const
     {
@@ -77,7 +80,9 @@ public:
     ///                  reachability, P(detect), expected gain). For monitoring — see etc/door_nbv_log.csv.
                               rc::nbv::Plan* plan_out = nullptr,
     /// @param existence the existence question, priced on the same scale (see ExistenceLook).
-                              const ExistenceLook* existence = nullptr) const;
+                              const ExistenceLook* existence = nullptr,
+    /// @param site_refused D4: P(the consumer cannot stand at q) from the hand-back memory; each face's gain is weighted by 1 - it.
+                              const std::function<float(const Eigen::Vector2f&)>* site_refused = nullptr) const;
 
     // ★The old `MinStandOffM = 2.0` floor is GONE. It was a hand-picked stand-in for the near shoulder of the
     // detector envelope ("YOLO misses doors seen too close") — which is now MODELLED: P(detect) is unimodal in

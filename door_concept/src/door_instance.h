@@ -53,6 +53,14 @@ struct DoorInstance : DoorFitState
     int  approach_claimed_epoch = 0;                    // the proposal epoch that claim accepted
     std::string approach_room;                         // the room and side the offer was solved in (the refusal's key)
     float approach_side = 1.0f;
+
+    // D4: the same memory for the EPISTEMIC look (aff_door_<id>, `affordance` above): the look sites the controller handed back,
+    // in the door's frame, and the site currently offered (the one a hand-back refers to). door_look_site.h.
+    rc::door::ApproachMemory look_memory;
+    Eigen::Vector2f look_offered_xy{0.0f, 0.0f};
+    bool look_offered_valid = false;
+    bool look_handback_taken = false;   // this completion's hand-back is already remembered (cleared when the look is re-offered)
+    bool look_unplaceable = false;      // this cycle: every usable site is a remembered hand-back — withdraw the look
 };
 
 }  // namespace rc
