@@ -79,4 +79,20 @@ inline std::optional<std::uint64_t> resolve_current_room(const CurrentEdges& cur
     return std::nullopt;
 }
 
+/// ★WHERE THE ROBOT PHYSICALLY IS, a proto-room included (2026-10-24, vlm-missions final review I1): the unique room
+/// the robot's RT is LIVE to — the room room_concept publishes the pose in — and only without one, `identity` (the rule
+/// above, resolve_current_room). It differs from resolve_current_room in ONE window: right after a door crossing,
+/// while ltsm_agent's `current` edge still names the room just left (rule 1 wins there) and the new room is a proto.
+/// A mission's `cross … bind=NAME` must latch the room the robot stands in, not the one it left, or a later
+/// `explore $NAME` drives back through the door. The controller's bind and the chat's report both use this rule.
+inline std::optional<std::uint64_t> resolve_physical_room(std::span<const RoomFact> rooms,
+                                                          std::optional<std::uint64_t> identity)
+{
+    std::optional<std::uint64_t> live;
+    int n_live = 0;
+    for (const auto& r : rooms)
+        if (r.rt == RoomFact::Rt::Live) { ++n_live; live = r.id; }
+    return n_live == 1 ? live : identity;
+}
+
 }   // namespace rc::room

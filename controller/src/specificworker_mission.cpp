@@ -19,6 +19,7 @@
 //     never assessed = unknown, which never satisfies an `until`.
 // Everything here runs on the control thread.
 #include "specificworker.h"
+#include "../../common/room_resolve/room_resolve.h"   // physical_room: what `bind` latches
 
 #include <chrono>
 #include <cmath>
@@ -302,10 +303,18 @@ std::optional<rc::mission::Pose> SpecificWorker::MissionHost::pose()
 	return rc::mission::Pose{.room = gs.room_name, .x = p->pos.x(), .y = p->pos.y(), .yaw = p->theta};
 }
 
+// ★ WHERE THE ROBOT PHYSICALLY IS, not the identity resolver's room (final review I1): right after a crossing ltsm's
+//   `current` may still name the room just left while the robot stands in the new proto-room. `bind` latching the old
+//   room would send a later `explore $next` back through the door. Same rule as the chat's report (room_resolve.h).
 std::optional<std::string> SpecificWorker::MissionHost::current_room()
 {
-	const std::string &here = w_.world_model_.graph_state().room_name;
+	const std::string here = rc::room::physical_room_name(*w_.G);
 	return here.empty() ? std::nullopt : std::optional<std::string>(here);
+}
+
+void SpecificWorker::MissionHost::on_bind(const std::string &name, const std::string &room)
+{
+	std::println("[mission] bind {} = {} (localisation's room: '{}')", name, room, w_.world_model_.graph_state().room_name);
 }
 
 std::optional<double> SpecificWorker::MissionHost::eval(const rc::mission::Pred &p)

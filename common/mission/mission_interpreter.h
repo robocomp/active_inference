@@ -71,7 +71,10 @@ public:
     /// The robot's pose now, for `anchor`. nullopt = not known.
     virtual std::optional<Pose> pose() = 0;
     /// The room the robot is physically in now, a proto-room included, for `cross … bind=NAME`. nullopt = not known.
+    /// (The controller answers with rc::room::physical_room, the same rule the chat reports by.)
     virtual std::optional<std::string> current_room() = 0;
+    /// `bind=NAME` has just latched `room` (a log line for whoever runs the robot; the default says nothing).
+    virtual void on_bind(const std::string& /*name*/, const std::string& /*room*/) {}
     /// A predicate's belief now: a probability, or 0 / 1 for a fact. nullopt = cannot be evaluated now.
     virtual std::optional<double> eval(const Pred& p) = 0;
 };
@@ -552,6 +555,7 @@ private:
                 const auto room = host_.current_room();
                 if (not room.has_value()) return fail(r, now, "no_room", s.id);
                 vars_[*name] = *room;
+                host_.on_bind(*name, *room);
             }
             satisfy(r, now);
         }

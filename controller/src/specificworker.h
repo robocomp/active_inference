@@ -183,6 +183,7 @@ private:
 		void halt() override;
 		std::optional<rc::mission::Pose> pose() override;
 		std::optional<std::string> current_room() override;
+		void on_bind(const std::string &name, const std::string &room) override;
 		std::optional<double> eval(const rc::mission::Pred &p) override;
 	private:
 		SpecificWorker &w_;

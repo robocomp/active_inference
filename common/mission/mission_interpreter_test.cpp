@@ -60,6 +60,7 @@ struct FakeHost final : Host
     void halt() override { log.push_back("halt"); }
     std::optional<Pose> pose() override { return where; }
     std::optional<std::string> current_room() override { return room; }
+    void on_bind(const std::string& name, const std::string& r) override { log.push_back("bind " + name + "=" + r); }
     std::optional<double> eval(const Pred& p) override
     {
         evaled.push_back(text_detail::pred_text(Pred{.name = p.name, .refs = p.refs}));
@@ -554,6 +555,7 @@ int main()
         h.done("1");
         in.tick(10);
         CHECK(h.started.size() == 2 and h.started.back().op == "explore");
+        CHECK(h.count("bind next=room_2") == 1);   // the host hears what was latched (the controller logs it)
         const auto room = h.started.back().ref("room");
         CHECK(room.has_value() and room->name == "room_2" and room->kind == Ref::Kind::Node);
         in.tick(5010);
