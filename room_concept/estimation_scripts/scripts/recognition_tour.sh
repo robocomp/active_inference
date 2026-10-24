@@ -26,12 +26,13 @@ for i in $(seq 1 90); do grep -a -q 'room polygon LOADED' $L/door_concept.log 2>
 room_now() { grep -a "current room changed" $L/controller.log | tail -1 | awk '{print $NF}'; }
 new_door() { awk '/\[room\] LET GO/{buf=""} /created instance for node/{buf=buf"\n"$0} END{print buf}' $L/door_concept.log \
              | grep -o "node 'door_[0-9]*'" | tr -d "'" | awk '{print $2}' | grep -v -x "$1" | tail -1; }
-# door to cross NEXT in room $1, other than $2 (the one just crossed); $3 = preferred name. Candidates: doors RESTORED in that
+# LEG 6 ONLY (leg 5 comes from ltsm's '[swap] crossed door' line). Door to cross NEXT in room $1, other than $2; $3 = preferred;
+# $4 = door_concept.log line count to window from. Candidates: doors RESTORED in that
 # remembered room by door_concept (after a recognition swap the face of DOOR_2 carries the room's OWN restored name) plus doors
 # born in it. Logs how it was found.
 discover_door() {
   local room=$1 ex=$2 pref=$3 cands pick src
-  cands=$( { grep -a -o -E "'door_[0-9]+' RESTORED in remembered '$room'" $L/door_concept.log | grep -o "door_[0-9]*"; new_door "$ex" | grep -v '^$'; } | grep -v -x "$ex" | awk '!s[$0]++')
+  cands=$( { tail -n +$((${4:-0}+1)) $L/door_concept.log | grep -a -o -E "'door_[0-9]+' RESTORED in remembered '$room'" | grep -o "door_[0-9]*"; new_door "$ex" | grep -v '^$'; } | grep -v -x "$ex" | awk '!s[$0]++')
   if [ -n "$pref" ] && echo "$cands" | grep -q -x "$pref"; then pick=$pref; src="preferred name present among restored/born doors of $room"
   else pick=$(echo "$cands" | tail -1); src="last restored/born door of $room other than $ex (candidates: $(echo $cands))"; fi
   echo "discover_door($room): '$pick' - $src" >&2; echo "$pick"; }
@@ -47,12 +48,12 @@ run_leg() {   # leg door here   (sets r)
     grep -a -q -E "mission 'leg $1': (failed|aborted)" $L/controller.log && { r="FAILED: $(grep -a -o -E "mission 'leg $1': (failed|aborted)[^\"]*" $L/controller.log | tail -1)"; break; }
     sleep 3
   done; }
-ok=0; d2=""; d5=""; scan_s=0
+ok=0; d2=""; d5=""; D5=0; SW0=0; scan_s=0
 for leg in 1 2 3 4 5 6; do
   here=$(room_now); [ -z "$here" ] && here=room_1
   T0=$(now_ms); A0=$(nl ltsm_agent); D0=$(nl door_concept); R0=$(nl room_concept)
   case $leg in 1|2) d=door_1;; 3) d=door_2;;
-    4) d2=$(new_door door_2); ts=$(date +%s)
+    4) SW0=$A0; d2=$(new_door door_2); ts=$(date +%s)
        # scan until DOOR_2 is born (the gold_tour driver gave up after ONE 90 s explore although it was born later)
        while [ -z "$d2" ] && [ $(( $(date +%s)-ts )) -lt $SCAN_CAP_S ]; do
          n=$(( $(date +%s)-ts )); echo run > $B/controller/remote_cmd.txt; sleep 2
@@ -62,8 +63,14 @@ for leg in 1 2 3 4 5 6; do
        done
        scan_s=$(( $(date +%s)-ts )); echo "leg 4: DOOR_2 scan took ${scan_s} s -> '${d2}'"
        [ -z "$d2" ] && { echo "leg 4: DOOR_2 never born in $here within ${SCAN_CAP_S} s"; break; }; d=$d2;;
-    5) d=$(discover_door "$(room_now)" "" ""); [ -z "$d" ] && d=$d2; d5=$d;;
-    6) d=$(discover_door "$(room_now)" "$d5" door_2); [ -z "$d" ] && d=door_2;; esac
+    5) # the door back: ltsm logs, at swap time, which face of the recognised room is the crossed door's ("[swap] crossed door
+       # rA_door_M <-> K face rN_door_K" or "... face new"); door_concept restores K's doors under their remembered base names
+       sl=$(tail -n +$((SW0+1)) $L/ltsm_agent.log | grep -a '\[swap\] crossed door' | tail -1)
+       d=$(python3 -I scripts/recognition_report.py --leg5-door $L/ltsm_agent.log $SW0)
+       if [ -z "$d" ]; then echo "leg 5: door discovery failed (ltsm line: '${sl:-absent}')"
+         printf '5\tDISCOVERY_FAILED\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' $T0 $(now_ms) $A0 $(nl ltsm_agent) $D0 $(nl door_concept) $R0 $(nl room_concept) >> $TSV; break; fi
+       echo "leg 5: door '$d' from ltsm: $sl"; d5=$d; D5=$D0;;
+    6) d=$(discover_door "$(room_now)" "$d5" door_2 $D5); [ -z "$d" ] && d=door_2;; esac
   run_leg $leg $d $here
   case "$r" in *wrong_room*) sleep 10; here=$(room_now); [ -z "$here" ] && here=room_1; run_leg "${leg}r" $d $here;; esac
   if [ $leg = 4 ]; then   # the window closes on the Swap line (ltsm acts after the cross) or a 20 s settle timeout

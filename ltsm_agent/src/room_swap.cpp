@@ -294,6 +294,7 @@ bool RoomSwap::swap(std::uint64_t known_room_id, const rc::recog::PoseMix &pose_
 
     carry_ = std::move(carries);
     state_ = State::Staged;
+    for (const auto &k : std::vector<Carry>(carry_)) carry_over(k.prev_face, known_room_id, true);   // log the MAP face association now
     known_mem_ = known_mem;
     known_id_ = known_room_id;
     promoted_case_ = twin.has_value();
@@ -379,7 +380,7 @@ double outline_area(DSR::DSRGraph &g, const DSR::Node &room)
 }
 }   // namespace
 
-bool RoomSwap::carry_over(const std::string &prev_room_face, std::uint64_t known_room_id)
+bool RoomSwap::carry_over(const std::string &prev_room_face, std::uint64_t known_room_id, bool log_only)
 {
     std::optional<DSR::Node> K;
     for (const auto &r : mem_->get_nodes_by_type("room"))
@@ -398,7 +399,12 @@ bool RoomSwap::carry_over(const std::string &prev_room_face, std::uint64_t known
             if (const auto f = mem_->get_node(e.to()); f.has_value() and is_descendant(*mem_, f->id(), K->name())) return f;
         return std::nullopt;
     };
-    if (pass.has_value() and face_of_k(pass.value()).has_value()) return true;       // already carried: idempotent
+    if (pass.has_value() and face_of_k(pass.value()).has_value())                     // already carried: idempotent
+    {
+        if (log_only)
+            qInfo().noquote() << QString::fromStdString(std::format("[swap] crossed door {} <-> K face {}", prev_room_face, face_of_k(pass.value())->name()));
+        return true;
+    }
 
     const auto it = std::ranges::find(carry_, prev_room_face, &Carry::prev_face);
     if (it == carry_.end()) return false;                                          // no seam for it: nothing is invented
@@ -444,6 +450,12 @@ bool RoomSwap::carry_over(const std::string &prev_room_face, std::uint64_t known
     for (const auto &cd : cands)
         if (const double ll = std::log(0.5 / double(cands.size())) + cd.ll; ll > best_ll) { best_ll = ll; adopt = cd; }
 
+    if (log_only)       // swap time: the MAP association, logged for the tour driver; nothing is written
+    {
+        qInfo().noquote() << QString::fromStdString(std::format("[swap] crossed door {} <-> K face {}", prev_room_face,
+                                                                adopt.has_value() ? adopt->door.name() : std::string("new")));
+        return true;
+    }
     std::optional<std::uint64_t> fid;
     if (adopt.has_value())
     {

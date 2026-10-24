@@ -112,6 +112,7 @@ private:
     bool swap_ack_ = false;                     ///< RoomSwap executed the Swap: the episode is held, not judged
     bool promoted_ = false;                     ///< the provisional room became current (or the committed room did)
     std::vector<rc::recog::Hypothesis> post_entry_;
+    bool trace_tried_ = false;                  ///< the trace file is opened once per process, never retried
     std::ofstream trace_;                       ///< etc/recognition_trace.csv, opened on the first step
     std::vector<float> published_;              ///< the last recog_posterior written (skip identical rewrites)
     std::vector<std::uint64_t> published_ids_;

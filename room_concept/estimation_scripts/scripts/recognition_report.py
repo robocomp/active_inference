@@ -157,7 +157,7 @@ def c5(sym):
 def c6(legs, ltsm):
     bad = []
     for leg in RETURN_LEGS:
-        if leg not in legs or legs[leg]['status'] != 'OK': bad.append(f'leg {leg} not completed'); continue   # Swaps count only in these windows (leg 4's closes on the Swap line)
+        if leg not in legs or legs[leg]['status'] != 'OK': bad.append(f"leg {leg} not completed ({legs[leg]['status'] if leg in legs else 'absent'})"); continue   # Swaps count only in these windows (leg 4's closes on the Swap line)
         sl = slice_of(ltsm, legs, leg, 'ltsm')
         if not any(re.search(r'\[recall\] \S+ posted', l) for l in sl): bad.append(f'leg {leg}: no recall posted')
         if any(SWAP_PAT.search(l) for l in sl): bad.append(f'leg {leg}: a Swap')
@@ -177,7 +177,19 @@ def c8(door):
     if fresh: return F, f"'{nm}' entered FRESH after the swap"
     return P, f"'{nm}' recalled (late), provisional identity rows dropped, no FRESH entry after"
 
+def leg5_door(log_path, from_line):
+    """The live door to cross back through the recognised room: ltsm's last '[swap] crossed door A <-> K face rN_door_M' line after
+    from_line (0-based line count when leg 4 began) -> 'door_M'; '' when the line is absent or says 'new'."""
+    last = ''
+    for l in read_lines(log_path)[from_line:]:
+        m = re.search(r'\[swap\] crossed door (\S+) <-> K face (\S+)', l)
+        if m: last = m.group(2)
+    m = re.match(r'^r\d+_(door_\d+)', last)
+    return m.group(1) if m else ''
+
 def main():
+    if len(sys.argv) == 4 and sys.argv[1] == '--leg5-door':
+        print(leg5_door(sys.argv[2], int(sys.argv[3]))); return 0
     if len(sys.argv) != 2: print(__doc__); return 2
     run = sys.argv[1]
     legs = read_legs(run)

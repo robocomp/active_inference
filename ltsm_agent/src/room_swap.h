@@ -81,7 +81,7 @@ public:
     /// CARRY-OVER of the crossed door into K (see above): `prev_room_face` = the memory name of the previous room's face of the
     /// crossed door, `known_room_id` = K. Writes K's face and match-links both into one passage. Idempotent; true when the
     /// passage holds a face in each room afterwards. Called by on_room_left for every door staged at swap time.
-    bool carry_over(const std::string &prev_room_face, std::uint64_t known_room_id);
+    bool carry_over(const std::string &prev_room_face, std::uint64_t known_room_id, bool log_only = false);
     /// One cycle: retire the late recalls whose room is live again.
     void step();
     /// Startup: leftover staged twins (memory) and late recalls (live) from a crashed run. Returns how many nodes went.

@@ -673,8 +673,9 @@ RoomRecognizer::Step RoomRecognizer::step()
     std::vector<float> post;
     for (const auto &h : post_entry_) post.push_back(std::exp(h.log_post));
     // per-step trace for the gold-tour report (etc/recognition_trace.csv, truncated per run, classic locale)
-    if (not trace_.is_open())
+    if (not trace_.is_open() and not trace_tried_)
     {
+        trace_tried_ = true;
         trace_.imbue(std::locale::classic());
         trace_.open("etc/recognition_trace.csv", std::ios::out | std::ios::trunc);
         if (trace_.is_open()) trace_ << "stamp_ms,provisional_id,act,room_id,candidates(id:posterior:metric_log_inside:appearance_loglr;new:posterior::log_new)\n";

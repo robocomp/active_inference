@@ -113,6 +113,18 @@ def main():
         case(t, 'c8_nodrop', 1, ['FAIL C8'], door=DOOR.splitlines()[1] + '\n')
         # leg-4 boundary: the Swap/STAGED lines landed AFTER the leg-4 window (cut at 3) => leg 4 has none, leg 5 has a Swap
         case(t, 'boundary_late', 1, ['FAIL C2', '0 Swap', 'FAIL C6'], cuts=(0, 2, 2, 3, 3, 8, 9))
+    # leg-5 door from ltsm's swap-time association line, windowed to after the leg-4 start
+    with tempfile.TemporaryDirectory() as t:
+        lg = os.path.join(t, 'l.log')
+        def door(text, frm=0):
+            open(lg, 'w').write(text)
+            return subprocess.run([sys.executable, '-I', REPORT, '--leg5-door', lg, str(frm)], capture_output=True, text=True).stdout.strip()
+        old = '[swap] crossed door r1_door_1 <-> K face r2_door_1\n'
+        new = '[swap] crossed door r3_door_4 <-> K face r2_door_7\n'
+        assert door(old + new) == 'door_7'
+        assert door(old + new, 1) == 'door_7' and door(old + new, 2) == ''      # windowed: an older line is not this swap's
+        assert door('[swap] crossed door r3_door_4 <-> K face new\n') == ''      # new face => discovery fails
+        assert door('nothing\n') == ''
     print('test_recognition_report: OK')
 
 if __name__ == '__main__': main()
