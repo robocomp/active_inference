@@ -128,6 +128,8 @@ rc::chat::SessionConfig SpecificWorker::load_session_config(const ConfigLoader& 
     c.llm.keep_alive = QString::fromStdString(r.s("LLM.keep_alive", "30m", "how long ollama keeps the model loaded"));
     c.llm.num_predict = r.i("LLM.num_predict", -1,
             "cap on generated tokens per request (options.num_predict); <= 0 = no cap (a runaway answer is cut, not stopped)");
+    c.llm.planner_model = QString::fromStdString(r.s("LLM.planner_model", c.llm.model.toStdString(),
+            "model of plan_mission's planner request (missions from the skills); default = LLM.model"));
     c.max_history = r.i("Chat.max_history", 16, "messages of history sent with each request (tool pairs kept together)");
     c.digest_period_ms = r.i("Chat.digest_period_ms", 500, "period of the graph STATE digest (main thread poll)");
     c.status_period_ms = r.i("Chat.status_period_ms", 250, "period of the chat_intention state poll");

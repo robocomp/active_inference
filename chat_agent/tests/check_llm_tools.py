@@ -117,6 +117,12 @@ def tools():
           {"object": {"type": "string", "description": "an object name or class"},
            "direction": {"type": "string", "description": "ONLY when the person says one: left or right (por la "
                                                           "izquierda / derecha); empty = left"}}, ["object"]),
+        t("plan_mission", "Plan a MISSION: any request with more than one step, a condition or a return (cross a door and explore "
+          "the next room, do this then that, come back). Pass the request in your own words with the names from the "
+          "STATE; the plan is shown to the person and starts only when they say yes. For ONE action use its own "
+          "tool (cross_door, approach_object, go_around_object, move_relative).",
+          {"request": {"type": "string", "description": "what the person asked for, every step, with the names from "
+                                                        "the STATE (door_1, room_2, chair_1)"}}, ["request"]),
         t("find_objects", "List the objects the robot has perceived in the CURRENT room, nearest first, with "
           "distance, bearing and size. Read-only.",
           {"subtype": {"type": "string", "description": "a class to filter by, in English singular (chair, table, "
@@ -152,6 +158,9 @@ def tools():
         t("inspect", "Every attribute and edge of ONE node of the robot's graph, by name (e.g. door_1, Shadow, "
           "controller 7) or id. Read-only.", {"node": {"type": "string", "description": "the node's name or id"}},
           ["node"]),
+        t("use_skill", "Read one of the skills listed in the system prompt (how to write a mission, door and exploring "
+          "tips). Read-only; returns the skill's text.",
+          {"name": {"type": "string", "enum": [n for n, _ in skill_index()], "description": "the skill's name"}}, ["name"]),
         # episodic memory (chat_session.cpp tools_json; answers in src/em_answers.h)
         t("episodes", "What the robot did TODAY, from its episodic memory, with start and end time and outcome, oldest "
           "first. With no kind and no target it lists only the MISSIONS; pass kind (e.g. cross, open) for the steps and "
@@ -225,9 +234,21 @@ def tools():
     ]
 
 
+def skill_index():
+    """(name, description) of etc/skills/*.md sorted by name, as src/skills.h load_skills reads them."""
+    out = []
+    for f in sorted((ROOT / "etc/skills").glob("*.md")):
+        m = re.search(r"^description:\s*(.*)$", f.read_text(), re.M)
+        if m:
+            out.append((f.stem, m.group(1).strip()))
+    return out
+
+
 def system():
     desc = (ROOT / "etc/system_prompt.md").read_text().strip()
-    return desc + "\n" + interface_rules()
+    skills = "".join(f"- {n}: {d}\n" for n, d in skill_index())
+    return (desc + "\n" + interface_rules() + "\nSkills: notes you can read when a request needs them. Call "
+            "use_skill(name) BEFORE acting on such a request.\n" + skills)
 
 
 def state(last_move="none", extra=""):
@@ -401,6 +422,30 @@ CASES = [
      lambda n, a, c: n == "route_to" and "room_3" in str(a.get("room", "")).lower()),
     ("ruta a room_3 (es)", [], "none", "\u00bfc\u00f3mo llego a la habitaci\u00f3n room_3?",
      lambda n, a, c: n == "route_to" and "room_3" in str(a.get("room", "")).lower()),
+    # plan_mission (2026-10-24): more than one step, a condition or a return is ONE plan_mission call; one action keeps
+    # its own tool. The way to a room two passages away is not in the STATE: route_to first is right there too.
+    ("plan: cross, explore, come back", [], "none", "cross door_1, explore the next room and come back",
+     lambda n, a, c: n == "plan_mission" and "door_1" in str(a.get("request", ""))),
+    ("plan: test case", [{"role": "user", "content": "what doors do you see?"},
+                         {"role": "assistant", "content": "I see two doors: door_0 ahead-left (probably open) and "
+                          "door_1 behind me to the right (probably shut)."}], "none",
+     "approach door_1, cross to the next room, tell me what objects are there, and come back to room_1",
+     lambda n, a, c: n == "plan_mission" and "door_1" in str(a.get("request", ""))),
+    ("plan: then", [], "none", "approach the table, then go around chair_1",
+     lambda n, a, c: n == "plan_mission" and "chair_1" in str(a.get("request", ""))),
+    ("plan: wait and return", [], "none", "go through door_0, wait there 10 seconds and come back",
+     lambda n, a, c: n == "plan_mission" and "door_0" in str(a.get("request", ""))),
+    ("plan: condition", [], "none", "explore this room until you have seen all its walls, then cross door_0",
+     lambda n, a, c: n == "plan_mission" and "door_0" in str(a.get("request", ""))),
+    ("plan: cruza y vuelve (es)", [], "none", "cruza la door_1, explora la habitación de al lado y vuelve aquí",
+     lambda n, a, c: n == "plan_mission" and "door_1" in str(a.get("request", ""))),
+    ("plan: to a remembered room", [], "none", "go to room_3",
+     lambda n, a, c: n == "route_to" and "room_3" in str(a.get("room", ""))
+     or (n == "plan_mission" and "room_3" in str(a.get("request", "")))),
+    ("single: cross only", [], "none", "go through door_0",
+     lambda n, a, c: n == "cross_door" and str(a.get("door", "")) == "door_0"),
+    ("single: approach only", [], "none", "go to chair_1",
+     lambda n, a, c: n == "approach_object" and "chair_1" in str(a.get("object", ""))),
     # look(): appearance / "what do you see" goes to the camera; counts stay with the STATE (the chairs case above).
     ("what do you see", [], "none", "what do you see?",
      lambda n, a, c: n == "look" and str(a.get("camera", "front")) in ("front", "")),

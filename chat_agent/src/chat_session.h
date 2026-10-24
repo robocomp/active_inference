@@ -4,10 +4,18 @@
  *
  * THE FLOW OF ONE USER MESSAGE (on_user_text):
  *   1. `stop` fast path (^(stop|para|detente|alto)\b) → the `stop` command is written at once, no model involved.
+ *      1a/1c. a plain yes to agent_control's question / to a mission card → carried out here; any other message
+ *      drops the card.
  *   2. text already in the controller grammar (cross door / cross door_N / uncross / move / turn) → CommandGate → sent.
  *   3. otherwise → the model, with ONE system message rebuilt this turn (robot description
  *      from etc/system_prompt.md + interface rules + the STATE digest) and the last
  *      ~16 history messages (a tool call and its results are never split by the trim).
+ *
+ * MISSIONS (plan_mission, 2026-10-24): the model passes the request; AFTER its turn's on_done a second request to the
+ * same OllamaClient (the planner: the three mission skills as the system prompt, the request, the STATE; no tools,
+ * temperature 0) writes the mission text. It is checked (mission_plan.h check_planned: fence, parse, validate, names);
+ * an error goes back to the planner at most kMaxPlanFixes times, then REJECTED. A checked mission is shown as a CARD
+ * and waits: only the person's NEXT message, if it is a plain yes, sends it (fast path 1c) — never the model.
  *
  * TOOLS: cross_door(door ∈ current doors ∪ {nearest}), stop(), cancel_passage(), move_relative(distance_m, turn_deg),
  * find_objects(subtype?), where_is(name), look(camera?), and the episodic-memory queries episodes(since?, until?,
@@ -44,6 +52,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <QJsonArray>
@@ -169,6 +178,15 @@ private:
     void write_canvas_inputs(const CanvasJob& job);
     void tick_canvas();                   ///< live re-run
     void save_canvas_script(const QString& name);
+    /// plan_mission(request): queue the planner request (run_planner, after this turn's on_done); "" = queued, else
+    /// the tool result at once (a refusal).
+    QString queue_planner(const QJsonObject& args);
+    void run_planner();                          ///< one planner request (the first, or a fix round)
+    void on_planned(const QString& reply);       ///< ask / fix round / REJECTED / card
+    void finish_planner(const QString& result, bool speak = true);   ///< the deferred tool result, then the follow-up
+    /// After a tool round of the model: re-ask to fix a failed draw, or one follow-up when it said nothing / saw a picture.
+    void after_tool_round(bool had_words, bool image);
+    [[nodiscard]] bool name_exists(std::string_view name) const;   ///< a node of the live graph or a remembered passage
     /// approach_object: pick the object, put a standpoint short of it, send a one-step go_to mission (approach.h).
     QString do_approach(const QJsonObject& args);
     /// go_around_object: a loop of go_to stops around an object, back to the start (approach.h go_around_mission).
@@ -263,6 +281,25 @@ private:
     QProcess sim_door_proc_;     ///< the sim_door.py request in flight (never waited on in the GUI thread)
     QString sim_door_what_;      ///< "open door_1" — what the in-flight request is for
     std::uint64_t user_turn_ = 0;          ///< messages typed by the person: a yes must come in a later one
+    QString last_user_text_;               ///< the person's last message: Mission::request of what it leads to
+
+    struct PlannerJob   ///< plan_mission's planner request, queued or in flight (one at a time)
+    {
+        QString request;           ///< what the conversation model asked to plan
+        QJsonArray rounds;         ///< earlier replies and why each was refused (assistant + user pairs)
+        QString reply;             ///< the reply being received
+        int fixes = 0;             ///< fix rounds done (cap kMaxPlanFixes)
+        bool image = false;        ///< the calling round attached a picture (look): its follow-up must show it
+    };
+    std::optional<PlannerJob> planner_;
+    struct MissionCard   ///< a checked mission shown to the person, waiting for their yes
+    {
+        rc::mission::Mission mission;
+        std::uint64_t serial = 0;   ///< counts the cards of this run (logs)
+        std::uint64_t turn = 0;     ///< user_turn_ when it was shown: card_still_valid
+    };
+    std::optional<MissionCard> pending_mission_;
+    std::uint64_t card_serial_ = 0;
 };
 
 }   // namespace rc::chat

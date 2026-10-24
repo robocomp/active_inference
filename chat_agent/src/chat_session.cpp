@@ -25,6 +25,7 @@
 #include "gpu_memory.h"
 #include "image_prep.h"
 #include "look_messages.h"
+#include "mission_plan.h"
 #include "sim_door.h"
 #include "topology.h"
 
@@ -94,6 +95,8 @@ void ChatSession::start()
         },
         .on_new = [this]()
         {
+            planner_.reset();            // before cancel(): its error callback then has no job to answer
+            pending_mission_.reset();
             llm_.cancel();
             history_.clear();
             look_jpeg_.clear();
@@ -257,6 +260,10 @@ void ChatSession::on_user_text(const QString& text)
     const std::string t = norm(text);
     log_.write("user", QJsonObject{{"text", text}});
     ++user_turn_;
+    last_user_text_ = text;
+    // A mission card lives for exactly one message: taken here, so whatever this message is, the card is gone after it.
+    std::optional<MissionCard> card = std::exchange(pending_mission_, std::nullopt);
+    if (card.has_value() and not card_still_valid(card->turn, user_turn_)) card.reset();
     tick_digest();   // decide on the freshest facts
     draw_repairs_ = 0;
     lost_answers_ = 0;
@@ -284,6 +291,27 @@ void ChatSession::on_user_text(const QString& text)
                                                              : result}});
         return;
     }
+    // 1c. a plain yes to a mission card: sent here, never by the model (anti-goal: a mission without the person's yes).
+    if (card.has_value() and fleet::is_yes(text.toStdString()))
+    {
+        const std::string title = card->mission.title.empty() ? std::string("the mission") : card->mission.title;
+        log_.write("fast_path", QJsonObject{{"kind", "mission_yes"}, {"card", static_cast<qint64>(card->serial)},
+                                            {"title", q(title)}});
+        const bool sent = send_command(rc::mission::encode_json(card->mission), "mission_card");
+        const QString reply = sent ? QStringLiteral("Starting: ") + q(title)
+                                   : QStringLiteral("I could not send the mission '%1' to the controller.").arg(q(title));
+        window_->begin_assistant();
+        window_->append_token(reply);
+        window_->end_assistant();
+        push_history({{"role", "user"}, {"content", text}});
+        push_history({{"role", "assistant"}, {"content", reply}});
+        return;
+    }
+    if (card.has_value())
+    {
+        log_.write("mission_card_dropped", QJsonObject{{"card", static_cast<qint64>(card->serial)}});
+        window_->append_system(QStringLiteral("(the planned mission was not started)"));
+    }
     // 1b. "show me the zed camera / the room / the plan", "close the canvas": a stock drawing, without the model.
     if (const auto show = parse_show(t); show.has_value())
     {
@@ -303,7 +331,7 @@ void ChatSession::on_user_text(const QString& text)
         return;
     }
     // 3. the model.
-    if (llm_.busy())
+    if (llm_.busy() or planner_.has_value())
     {
         window_->append_system("Still answering the previous message — wait, or press Esc.");
         return;
@@ -338,6 +366,8 @@ const QString kInterfaceRules = QStringLiteral(
     "plans its own path there, whatever a short move ran into. Nobody has to confirm anything: never ask the person "
     "to confirm a crossing, a move or the opening of a door. When they ask for an action, or answer yes to one you "
     "offered, call its tool now. The one question you do ask is the one agent_control returns as NOT DONE.\n"
+    "- plan_mission answers OK: tell the person in one sentence what the plan does and that it starts when they say "
+    "yes. ASK: put its question to the person. REJECTED: say why it cannot be done.\n"
     "- What the STATE says a door or object \"offers\" (affordances, approach sides) is the controller's current opinion, "
     "not a reason to refuse: when the person asks to go through a door or to approach an object (from whichever side "
     "they name), call cross_door / approach_object with what they said; if it cannot, the tool replies and says why. "
@@ -474,6 +504,15 @@ QJsonArray ChatSession::tools_json() const
                                               {"description", "ONLY when the person says one: left or right (por la "
                                                               "izquierda / derecha); empty = left"}}}},
         QJsonArray{"object"}));
+    tools.append(tool_def("plan_mission",
+        "Plan a MISSION: any request with more than one step, a condition or a return (cross a door and explore the "
+        "next room, do this then that, come back). Pass the request in your own words with the names from the STATE; "
+        "the plan is shown to the person and starts only when they say yes. For ONE action use its own tool "
+        "(cross_door, approach_object, go_around_object, move_relative).",
+        QJsonObject{{"request", QJsonObject{{"type", "string"},
+                                            {"description", "what the person asked for, every step, with the names "
+                                                            "from the STATE (door_1, room_2, chair_1)"}}}},
+        QJsonArray{"request"}));
     tools.append(tool_def("find_objects",
         "List the objects the robot has perceived in the CURRENT room, nearest first, with distance, bearing and size. "
         "Read-only.",
@@ -740,19 +779,18 @@ void ChatSession::ask_model(bool followup, bool offer_tools)
                 return;
             }
             push_history({{"role", "assistant"}, {"content", content}, {"tool_calls", turn_.tool_calls}});
-            const bool followup = turn_.followup;
             draw_failed_ = false;
             const bool image = handle_tool_calls(turn_.tool_calls);
-            // A drawing script failed: the model gets its error back WITH the tools, to fix it (at most twice).
-            if (draw_failed_ and draw_repairs_ < kMaxDrawRepairs)
+            // plan_mission queued the planner: it runs once THIS callback has returned (the client is the same, one
+            // request at a time); its result is the round's last tool message, and the follow-up waits for it.
+            if (planner_.has_value())
             {
-                ++draw_repairs_;
-                ask_model(false);
+                planner_->image = image;
+                window_->set_busy(true);
+                QTimer::singleShot(0, &ctx_, [this]() { run_planner(); });
                 return;
             }
-            // A tool round with no words: one follow-up (no tools) so the model can tell the person what happened.
-            // A picture was asked for: the follow-up is where the model gets to see it, words or not.
-            if ((content.isEmpty() or image) and not followup) ask_model(true);
+            after_tool_round(not content.isEmpty(), image);
         },
         .on_error = [this](const QString& err)
         {
@@ -768,6 +806,20 @@ void ChatSession::ask_model(bool followup, bool offer_tools)
     window_->set_busy(true);
 }
 
+void ChatSession::after_tool_round(bool had_words, bool image)
+{
+    // A drawing script failed: the model gets its error back WITH the tools, to fix it (at most twice).
+    if (draw_failed_ and draw_repairs_ < kMaxDrawRepairs)
+    {
+        ++draw_repairs_;
+        ask_model(false);
+        return;
+    }
+    // A tool round with no words: one follow-up so the model can tell the person what happened.
+    // A picture was asked for: the follow-up is where the model gets to see it, words or not.
+    if (not had_words or image) ask_model(true);
+}
+
 bool ChatSession::handle_tool_calls(const QJsonArray& calls)
 {
     bool image = false;
@@ -778,6 +830,13 @@ bool ChatSession::handle_tool_calls(const QJsonArray& calls)
         QJsonObject args = fn.value("arguments").toObject();
         if (fn.value("arguments").isString())   // some templates send the arguments JSON-encoded
             args = QJsonDocument::fromJson(fn.value("arguments").toString().toUtf8()).object();
+        if (name == "plan_mission")
+        {
+            const QString refused = queue_planner(args);
+            if (refused.isEmpty()) continue;   // queued: its tool message comes when the planner has answered
+            push_history({{"role", "tool"}, {"tool_name", name}, {"content", refused}});
+            continue;
+        }
         QString result = answer_query(name, args);
         if (result.isEmpty())
         {
@@ -951,7 +1010,9 @@ QString ChatSession::do_approach(const QJsonObject& args)
                                   {Tr->translation().x(), Tr->translation().y()}, footprint_radius(*o), standoff);
     if (not p.has_value())
         return QStringLiteral("OK: the robot is already next to %1; nothing to drive.").arg(q(o->name));
-    const std::string json = rc::mission::encode_json(approach_mission(o->name, room, *p));
+    auto am = approach_mission(o->name, room, *p);
+    am.request = last_user_text_.toStdString();
+    const std::string json = rc::mission::encode_json(am);
     log_.write("approach", QJsonObject{{"object", q(o->name)}, {"ok", true}, {"x", p->x}, {"y", p->y}, {"yaw", p->yaw}});
     if (not send_command(json, "llm")) return QStringLiteral("FAILED: could not write the mission to the graph.");
     return QStringLiteral("OK: mission 'approach %1' sent: the controller drives to a spot %2 m from its centre, facing "
@@ -991,8 +1052,9 @@ QString ChatSession::do_go_around(const QJsonObject& args)
             if (auto p = parse_sides(*names, xs->get(), ys->get(), ws->get()); p.has_value()) sides = std::move(*p);
     }
     const double ring = footprint_radius(*o) + cfg_.robot_radius_m + cfg_.approach_clearance_m;
-    const auto m = go_around_mission(o->name, room, {To->translation().x(), To->translation().y()},
-                                     {Tr->translation().x(), Tr->translation().y()}, sides, ring, *left);
+    auto m = go_around_mission(o->name, room, {To->translation().x(), To->translation().y()},
+                               {Tr->translation().x(), Tr->translation().y()}, sides, ring, *left);
+    m.request = last_user_text_.toStdString();
     const bool own = sides.size() >= 3;
     log_.write("go_around", QJsonObject{{"object", q(o->name)}, {"ok", true}, {"stops", int(m.steps.size())},
                                         {"own_sides", own}, {"left", *left}});
@@ -1002,6 +1064,132 @@ QString ChatSession::do_go_around(const QJsonObject& args)
         .arg(q(o->name)).arg(m.steps.size() - 1)
         .arg(own ? QStringLiteral("at the sides it offers") : QStringLiteral("%1 m from its centre").arg(ring, 0, 'f', 2),
              *left ? QStringLiteral("left") : QStringLiteral("right"));
+}
+
+// ── plan_mission: the planner request, its fix rounds and the card (mission_plan.h) ──────────────────────────
+namespace
+{
+constexpr int kMaxPlanFixes = 2;   ///< planner re-asks with the checker's error, per plan_mission call
+}
+
+bool ChatSession::name_exists(std::string_view name) const
+{
+    if (G_ and G_->get_node(std::string(name)).has_value()) return true;
+    // passage:<id>@<room> names a passage of the long-term memory, published in its summary (topology.h)
+    if (const auto topo = remembered_topology(); topo.has_value())
+        return std::ranges::any_of(topo->passages, [&](const auto& p) { return p.id == name; });
+    return false;
+}
+
+QString ChatSession::queue_planner(const QJsonObject& args)
+{
+    const QString request = args.value("request").toString().trimmed();
+    const auto refuse = [&](const QString& why)
+    {
+        log_.write("plan_mission", QJsonObject{{"request", request}, {"ok", false}, {"reason", why}});
+        return QStringLiteral("REJECTED: ") + why;
+    };
+    if (planner_.has_value()) return refuse(QStringLiteral("one mission at a time: a plan is already being written"));
+    if (request.isEmpty()) return refuse(QStringLiteral("the request is empty: pass what the person asked for"));
+    if (not digest_.facts.controller_present) return refuse(QStringLiteral("the controller is not running, so no mission can run"));
+    planner_ = PlannerJob{.request = request};
+    log_.write("plan_mission", QJsonObject{{"request", request}, {"ok", true}});
+    return {};
+}
+
+// ★ The planner sees ONLY the mission skills, the STATE and the request (the eval's layout, check_llm_missions.py):
+//   none of the chat's history, rules or tools, so what it writes is what tests/check_llm_missions.py measures.
+void ChatSession::run_planner()
+{
+    if (not planner_.has_value()) return;   // dropped meanwhile (new conversation)
+    QString skills;
+    for (const char* name : {"missions", "doors", "exploring"})
+        if (const auto it = std::ranges::find(skills_, std::string(name), &rc::chat::Skill::name); it != skills_.end())
+            skills += (skills.isEmpty() ? QString{} : QStringLiteral("\n\n")) + q(it->body).trimmed();
+    if (skills.isEmpty())
+    {
+        finish_planner(QStringLiteral("REJECTED: the mission skills are not loaded (etc/skills/missions.md)"));
+        return;
+    }
+    QJsonArray msgs{QJsonObject{{"role", "system"}, {"content", skills}},
+                    QJsonObject{{"role", "system"}, {"content", state_message()}},
+                    QJsonObject{{"role", "user"}, {"content", planner_->request}}};
+    for (const auto& m : planner_->rounds) msgs.append(m);
+    planner_->reply.clear();
+    const QString model = cfg_.llm.planner_model.isEmpty() ? cfg_.llm.model : cfg_.llm.planner_model;
+    log_.write("planner_request", QJsonObject{{"model", model}, {"request", planner_->request}, {"fixes", planner_->fixes}});
+    const bool ok = llm_.chat(msgs, {}, OllamaClient::Callbacks{
+        .on_token = [this](const QString& tok) { if (planner_.has_value()) planner_->reply += tok; },
+        .on_tool_calls = {},
+        .on_done = [this](const ChatStats& st)
+        {
+            if (not planner_.has_value()) return;
+            log_.write("planner_response", QJsonObject{{"content", planner_->reply}, {"wall_ms", st.wall_ms},
+                                                       {"eval_count", static_cast<qint64>(st.eval_count)},
+                                                       {"done_reason", st.done_reason}});
+            on_planned(strip_think(planner_->reply));
+        },
+        .on_error = [this](const QString& err)
+        {
+            if (not planner_.has_value()) return;
+            log_.write("error", QJsonObject{{"where", "planner"}, {"msg", err}});
+            if (err == "cancelled")
+            {
+                window_->append_system(QStringLiteral("(planning cancelled)"));
+                finish_planner(QStringLiteral("REJECTED: the person cancelled the planning"), false);
+                return;
+            }
+            finish_planner(QStringLiteral("REJECTED: the planner failed: ") + err);
+        },
+    }, RequestOptions{.model = model, .temperature = 0.0, .stream = false});
+    if (not ok) finish_planner(QStringLiteral("REJECTED: the model is busy"));
+}
+
+void ChatSession::on_planned(const QString& reply)
+{
+    const std::string text = reply.toStdString();
+    if (const auto question = planned_ask(text); question.has_value())
+    {
+        finish_planner(QStringLiteral("ASK: ") + q(*question));
+        return;
+    }
+    auto m = check_planned(text, [this](std::string_view n) { return name_exists(n); });
+    if (not m.has_value())
+    {
+        log_.write("planner_refused", QJsonObject{{"error", q(m.error())}, {"fixes", planner_->fixes}});
+        if (planner_->fixes >= kMaxPlanFixes)
+        {
+            finish_planner(QStringLiteral("REJECTED: ") + q(m.error()));
+            return;
+        }
+        ++planner_->fixes;
+        planner_->rounds.append(QJsonObject{{"role", "assistant"}, {"content", reply}});
+        planner_->rounds.append(QJsonObject{{"role", "user"}, {"content",
+            QStringLiteral("That mission was refused: %1. Write the whole mission again, fixed. Output ONLY the mission "
+                           "text, or one ask: line.").arg(q(m.error()))}});
+        QTimer::singleShot(0, &ctx_, [this]() { run_planner(); });   // after this callback, like the first request
+        return;
+    }
+    m->request = last_user_text_.toStdString();
+    pending_mission_ = MissionCard{.mission = *m, .serial = ++card_serial_, .turn = user_turn_};
+    // ★ The card shows the mission AS IT WILL RUN (printed back from the checked IR), never the model's raw reply.
+    const std::string shown = rc::mission::print_text(*m);
+    log_.write("mission_card", QJsonObject{{"card", static_cast<qint64>(card_serial_)}, {"text", q(shown)},
+                                           {"fixes", planner_->fixes}});
+    window_->append_card(planner_->request, q(shown).trimmed());
+    finish_planner(QStringLiteral("OK: card shown; wait for the person's yes. It shows:\n") + q(shown).trimmed());
+}
+
+void ChatSession::finish_planner(const QString& result, bool speak)
+{
+    if (not planner_.has_value()) return;
+    const PlannerJob job = *std::move(planner_);
+    planner_.reset();
+    window_->set_busy(false);
+    log_.write("query", QJsonObject{{"tool", "plan_mission"}, {"args", QJsonObject{{"request", job.request}}}, {"result", result}});
+    push_history({{"role", "tool"}, {"tool_name", "plan_mission"}, {"content", result}});
+    // Always a follow-up: whatever the model said before its call cannot tell the person an ASK or a REJECTED.
+    if (speak) after_tool_round(false, job.image);
 }
 
 // ── sim_door: the simulator opens / closes a door (sim_door.h, tools/sim_door.py) ────────────────────────────────

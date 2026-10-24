@@ -5,7 +5,8 @@
  *
  *   ping()     GET /api/version, then /api/tags — is the server up, and is the configured model pulled?
  *   warmup()   load the model (empty chat, keep_alive) so the first real question does not pay the load.
- *   chat()     POST /api/chat {model, messages, tools, stream:true, think:false, keep_alive, options}.
+ *   chat()     POST /api/chat {model, messages, tools, stream:true, think:false, keep_alive, options}; RequestOptions
+ *              overrides model / temperature / stream for one request (plan_mission's planner).
  *              The body is NDJSON: one JSON object per line, cut into chunks by the network — NdjsonSplitter
  *              re-assembles lines. Tokens stream to on_token; tool calls are collected and delivered once, just
  *              before on_done; an {"error":...} line or a transport error goes to on_error.
@@ -23,6 +24,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
 
 #include <QJsonArray>
 #include <QJsonObject>
@@ -48,6 +50,15 @@ struct OllamaConfig
     int transfer_timeout_ms = 120000;
     QString keep_alive = "30m";
     int num_predict = -1;   ///< cap on generated tokens per request (options.num_predict); <= 0 = no cap
+    QString planner_model;  ///< plan_mission's planner request ([LLM] planner_model); empty = `model`
+};
+
+/// What one chat() request changes from the config (the planner: another model, temperature 0, no streaming).
+struct RequestOptions
+{
+    QString model;                       ///< empty = OllamaConfig::model
+    std::optional<double> temperature;   ///< nullopt = OllamaConfig::temperature
+    bool stream = true;                  ///< false: one JSON reply (on_token gets the whole content once)
 };
 
 struct ChatStats
@@ -83,7 +94,7 @@ public:
 
     void ping(std::function<void(const PingResult&)> done);
     void warmup();
-    bool chat(const QJsonArray& messages, const QJsonArray& tools, Callbacks cb);
+    bool chat(const QJsonArray& messages, const QJsonArray& tools, Callbacks cb, const RequestOptions& opt = {});
     void cancel();
     [[nodiscard]] bool busy() const { return not reply_.isNull(); }
     [[nodiscard]] const OllamaConfig& config() const { return cfg_; }

@@ -110,6 +110,42 @@ int main()
     CHECK(new_reports(done1, rep, *m) == std::vector<std::string>{"objects here"});
     CHECK(new_reports(rep, rep, *m).empty());
 
+    // ── strip_fence ──────────────────────────────────────────────────────────────────────────────────────────────
+    CHECK(strip_fence("```\nmission \"t\"\n  stop\n```") == "mission \"t\"\n  stop");
+    CHECK(strip_fence("  ```text\nmission \"t\"\n  stop\n```\n") == "mission \"t\"\n  stop");
+    CHECK(strip_fence("```json\n{\"v\":1}\n```") == "{\"v\":1}");
+    CHECK(strip_fence("\n mission \"t\"\n  stop \n") == "mission \"t\"\n  stop");   // no fence: only trimmed
+    CHECK(strip_fence("```\nask: which door?\n```") == "ask: which door?");
+    CHECK(strip_fence("```\nmission \"t\"\n  stop") == "mission \"t\"\n  stop");   // cut before its closing fence
+    CHECK(strip_fence("Here it is:\n```\nmission \"t\"\n  stop\n```\nSay yes.") == "mission \"t\"\n  stop");
+    CHECK(strip_fence("").empty());
+    {
+        const auto fenced = parse_planned(strip_fence("```\n" + kText + "```"));
+        CHECK(fenced.has_value() and *fenced == *m);
+    }
+
+    // ── planned_ask ──────────────────────────────────────────────────────────────────────────────────────────────
+    CHECK(planned_ask("ask: which door?") == "which door?");
+    CHECK(planned_ask("  ASK:   which door?  ") == "which door?");
+    CHECK(planned_ask("```\nask: which door?\n```") == "which door?");
+    CHECK(not planned_ask(kText).has_value());
+    CHECK(not planned_ask("mission \"ask: x\"\n  stop").has_value());
+
+    // ── check_planned: fence → parse → validate → names ──────────────────────────────────────────────────────────
+    {
+        const auto ok = check_planned("```\n" + kText + "```", exists);
+        CHECK(ok.has_value() and *ok == *m);
+        const auto bad_name = check_planned("mission \"t\"\n  cross door_7\n", exists);
+        CHECK(not bad_name.has_value() and bad_name.error().contains("door_7"));
+        const auto bad_syntax = check_planned("mission \"t\"\n  fly to the moon\n", exists);
+        CHECK(not bad_syntax.has_value() and not bad_syntax.error().empty());
+    }
+
+    // ── card_still_valid: the yes is the person's NEXT message ───────────────────────────────────────────────────
+    CHECK(card_still_valid(5, 6));
+    CHECK(not card_still_valid(5, 7));
+    CHECK(not card_still_valid(5, 5));
+
     std::println("test_mission_plan: {} checks passed{}", checks - failures, failures ? " — FAILURES" : "");
     return failures ? 1 : 0;
 }

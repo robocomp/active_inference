@@ -8,9 +8,13 @@
  *                   so a typo comes back to the model instead of failing on the robot.
  *   progress_lines  the fixed one-line messages for every step-state change between two snapshots.
  *   new_reports     the text of each `report` step that has just run, for the reply.
+ *   strip_fence / planned_ask / check_planned   the planner reply → `ask:` question, or a card-ready mission.
+ *   card_still_valid  the yes to a mission card must be the person's very next message.
  */
 
 #include <algorithm>
+#include <cctype>
+#include <cstdint>
 #include <expected>
 #include <format>
 #include <functional>
@@ -127,6 +131,59 @@ inline std::string paused_at(const rc::mission::Progress& p)
                                                              const std::function<bool(std::string_view)>& exists)
 {
     return mission_plan_detail::unknown_in(m.steps, exists);
+}
+
+/// The planner's reply without its code fence: models copy the skill's ``` examples (qwen3.8 fenced ~50% of its
+/// replies, eval 2026-10-23). The inside of the FIRST fenced block (any language tag; to the end if it is never
+/// closed), else the whole reply; trimmed either way. Same rule as tests/check_llm_missions.py's unfence(), so the
+/// eval measures what runs: text outside a fence is the model chatting, never part of the mission.
+[[nodiscard]] inline std::string_view strip_fence(std::string_view s)
+{
+    const auto trim = [](std::string_view t)
+    {
+        const auto a = t.find_first_not_of(" \t\r\n");
+        if (a == std::string_view::npos) return std::string_view{};
+        return t.substr(a, t.find_last_not_of(" \t\r\n") - a + 1);
+    };
+    const auto open = s.find("```");
+    if (open == std::string_view::npos) return trim(s);
+    std::string_view rest = s.substr(open + 3);
+    const auto tag = rest.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_+-");
+    if (tag == std::string_view::npos) return {};          // "```json" and nothing else
+    if (rest[tag] == '\n') rest.remove_prefix(tag + 1);    // the fence line, with its language tag
+    return trim(rest.substr(0, rest.find("```")));
+}
+
+/// `ask: <question>` (any case, fenced or not) → the question; nullopt for anything else.
+[[nodiscard]] inline std::optional<std::string> planned_ask(std::string_view reply)
+{
+    const std::string_view s = strip_fence(reply);
+    if (s.size() < 4) return std::nullopt;
+    std::string head(s.substr(0, 4));
+    std::ranges::transform(head, head.begin(), [](unsigned char c) { return char(std::tolower(c)); });
+    if (head != "ask:") return std::nullopt;
+    const std::string_view q = s.substr(4);
+    const auto a = q.find_first_not_of(" \t");
+    return a == std::string_view::npos ? std::string{} : std::string(q.substr(a));
+}
+
+/// A planner reply → the mission chat_agent may put on a card: fence stripped, parsed, validated, every name known.
+/// The error is ONE line the planner can act on (it is sent back to it to fix).
+[[nodiscard]] inline std::expected<rc::mission::Mission, std::string> check_planned(
+    std::string_view reply, const std::function<bool(std::string_view)>& exists)
+{
+    auto m = parse_planned(strip_fence(reply));
+    if (not m.has_value()) return m;
+    if (const auto bad = unknown_name(*m, exists); bad.has_value())
+        return std::unexpected(std::format("unknown name '{}': there is no such door, room or object in the live map now "
+                                           "(a room not yet reached is named with cross ... bind=NAME, then $NAME)", *bad));
+    return m;
+}
+
+/// A mission card is answered by the person's NEXT message only: anything typed in between cancels it.
+[[nodiscard]] constexpr bool card_still_valid(std::uint64_t card_turn, std::uint64_t user_turn)
+{
+    return user_turn == card_turn + 1;
 }
 
 /// One fixed line per step-state change between two snapshots, oldest first (the order of the steps).

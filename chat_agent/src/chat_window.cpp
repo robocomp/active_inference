@@ -162,6 +162,14 @@ void ChatWindow::append_system(const QString& text)
     append_html(QStringLiteral("<p style='color:#757575'><small>%1</small></p>").arg(text.toHtmlEscaped()));
 }
 
+void ChatWindow::append_card(const QString& summary, const QString& mission_text)
+{
+    append_html(QStringLiteral("<p style='color:#e65100'><b>mission plan:</b> %1</p>"
+                               "<pre style='background:#fff3e0;color:#000'>%2</pre>"
+                               "<p style='color:#e65100'><small>Say \"yes\" to start it; anything else cancels it.</small></p>")
+                    .arg(summary.toHtmlEscaped(), mission_text.toHtmlEscaped()));
+}
+
 void ChatWindow::clear_transcript()
 {
     in_assistant_ = false;

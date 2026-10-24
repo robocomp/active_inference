@@ -53,6 +53,8 @@ public:
     void end_assistant();
     void append_robot(const QString& text);     ///< a robot status line (from the controller)
     void append_system(const QString& text);    ///< agent notes: validation, errors, sent commands
+    /// plan_mission's card: a one-line summary, the mission's text form as it will run, and the "say yes" hint.
+    void append_card(const QString& summary, const QString& mission_text);
     void clear_transcript();
 
     /// The controller's mission (mission_watch.h): a new one resets the plan page's rows. It does not open the canvas.

@@ -80,7 +80,7 @@ void OllamaClient::warmup()
     QObject::connect(r, &QNetworkReply::finished, &ctx_, [r]() { r->deleteLater(); });
 }
 
-bool OllamaClient::chat(const QJsonArray& messages, const QJsonArray& tools, Callbacks cb)
+bool OllamaClient::chat(const QJsonArray& messages, const QJsonArray& tools, Callbacks cb, const RequestOptions& opt)
 {
     if (busy()) return false;
     const std::uint64_t gen = ++generation_;
@@ -93,12 +93,14 @@ bool OllamaClient::chat(const QJsonArray& messages, const QJsonArray& tools, Cal
     finished_ = false;
     t0_ms_ = now_ms();
 
-    QJsonObject body{{"model", cfg_.model},
+    // stream:false is the same reply as ONE line with done:true, so the NDJSON path below reads it unchanged.
+    QJsonObject body{{"model", opt.model.isEmpty() ? cfg_.model : opt.model},
                      {"messages", messages},
-                     {"stream", true},
+                     {"stream", opt.stream},
                      {"think", false},
                      {"keep_alive", cfg_.keep_alive},
-                     {"options", QJsonObject{{"temperature", cfg_.temperature}, {"num_ctx", cfg_.num_ctx}}}};
+                     {"options", QJsonObject{{"temperature", opt.temperature.value_or(cfg_.temperature)},
+                                             {"num_ctx", cfg_.num_ctx}}}};
     if (cfg_.num_predict > 0)
     {
         QJsonObject opts = body.value("options").toObject();
