@@ -222,6 +222,7 @@ private:
         bool late = false;                         ///< recall_late: the recogniser committed before this recall arrived
         std::uint64_t node_id = 0;                 ///< the recall node (owned by ltsm: read, and `valid` written, never deleted)
         std::vector<rc::reloc::PriorMode> pose_prior;   ///< the robot's pose in the recalled room's frame (recall_pose_prior)
+        double recog_log_odds = 0.0;               ///< ln P(K)/P(new) from ltsm's recognition node at adoption (0 = none)
     };
     /// The late recall (recall_late) ltsm posted, hung from the crossed door of the room being left (case A) or from the robot
     /// (case B: no door survives). Its outline is already in the remembered room's own frame, which becomes the internal
@@ -231,6 +232,9 @@ private:
     /// its outline given, the pose found by the mixture search with the recall's pose prior; the verdict of that search is
     /// reported back on the recall node (`valid = false` = rejected). The room it replaces is released to ltsm's fence.
     bool adopt_late_recall(const Recall& r);
+    /// ln P(K)/P(new) on ltsm's `recognition` node (recog_room_ids / recog_posterior, P(new) last) for room_id K; 0 when the
+    /// node, the entry or the attributes are absent (no recognition evidence = an even prior for the adoption test).
+    [[nodiscard]] double recognition_log_odds(std::uint64_t room_id) const;
     bool step_late_recall();   ///< one cycle: adopt a standing late recall, relay the adoption verdict. True = adopted THIS call
     std::uint64_t late_watch_room_ = 0;      ///< the room node adopted from it
     mutable std::uint64_t late_bad_parent_logged_ = 0;

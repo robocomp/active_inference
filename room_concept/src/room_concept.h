@@ -459,7 +459,8 @@ public:
     /// Also commits the prior's heaviest mean as the pose AT ONCE (the search refines it), so the new frame never pairs with
     /// a provisional-frame pose, and resets the tracking emission (it was learnt in the abandoned frame). Called from the
     /// scene graph's update(), which runs on the localiser thread.
-    void seed_reloc_prior(const std::vector<rc::reloc::PriorMode>& modes);
+    /// prior_log_odds = ln P(K)/P(new) of the recogniser at adoption: the adoption test's starting log-odds (0 = even).
+    void seed_reloc_prior(const std::vector<rc::reloc::PriorMode>& modes, double prior_log_odds = 0.0);
     /// Drop an armed/standing late adoption without a verdict (its room or recall vanished).
     void cancel_late_recall();
     enum class LateVerdict : int { None = 0, Pending = 1, Accepted = 2, Rejected = 3 };

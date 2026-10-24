@@ -660,10 +660,20 @@ namespace rc
         return static_cast<float>(belief_[kLost]);
     }
 
-    void RoomConcept::seed_reloc_prior(const std::vector<rc::reloc::PriorMode>& modes)
+    // ★ THE ADOPTION TEST STARTS FROM THE RECOGNITION EVIDENCE. The question the verdict answers ("is this room K?") is the
+    //   one ltsm's recogniser already answered from its own evidence, so its posterior log-odds ln P(K)/P(new) is the PRIOR
+    //   of the sequential test, not 0. Starting at 0 discarded that evidence and made the test hostage to the moment of
+    //   adoption, which is exactly when transients happen (the pose jump settling, the scan that triggered the swap): three
+    //   bounded outlier scans (3 ln ε = −3.6 < −ln 19) rejected a correct K (gn_selftest late_recall (g)).
+    //   The COST, stated: a wrong K that was strongly recognised needs proportionally more contrary scans to be undone
+    //   (each worth at most ln ε ≈ −1.2 nats, so ≈ (prior + ln 19)/1.2 of them), and one unremarkable scan can Accept a K
+    //   whose prior already sits at the bound. The decision is still taken only on a scan (accumulate_late_evidence): the
+    //   prior alone never decides. ⚠ the recogniser and this test both read the LiDAR of the same room; they are taken as
+    //   independent (different features: layout shape vs the SDF misfit at the relocalised pose), which they are not fully.
+    void RoomConcept::seed_reloc_prior(const std::vector<rc::reloc::PriorMode>& modes, double prior_log_odds)
     {
         { std::scoped_lock lk(late_prior_mutex_); late_prior_ = modes; }
-        late_log_odds_ = 0.0;
+        late_log_odds_ = std::isfinite(prior_log_odds) ? prior_log_odds : 0.0;
         late_forced_done_ = false;
         late_verdict_.store(static_cast<int>(modes.empty() ? LateVerdict::None : LateVerdict::Pending), std::memory_order_release);
         late_pending_.store(not modes.empty(), std::memory_order_release);
@@ -731,7 +741,10 @@ namespace rc
     //   Each scan's likelihood is HEAVY-TAILED: the tracking emission is a one-sided Gaussian in ln s, so a single transient
     //   scan (a person passing, the post-jump settling) would read tens of nats against it. The numerator is therefore the
     //   mixture (1−ε)·tracking + ε·broad, ε = the relocaliser's own clutter fraction (reloc_outlier_frac, the constant ℓ
-    //   already uses for returns that fit no wall): one scan's LLR is bounded below by ln ε, with no clamp. And each LLR is
+    //   already uses for returns that fit no wall): one scan's LLR is bounded below by ln ε, with no clamp. NOTE: ε is
+    //   reused with a PER-SCAN meaning here (the fraction of whole scans that are transients), where ℓ means a per-RETURN
+    //   fraction; the same number stands for both until a per-scan rate is measured.
+    //   The sum starts from the recogniser's log-odds of K (seed_reloc_prior), not from 0. And each LLR is
     //   weighted by the view's novelty (view_change, as update_lost_belief weighs it): repeated identical views are one
     //   observation. (The tracking emission keeps learning from these same scans, so the LLR is against a moving reference.)
     void RoomConcept::accumulate_late_evidence(float s, float novelty)

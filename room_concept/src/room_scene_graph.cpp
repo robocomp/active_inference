@@ -1648,7 +1648,7 @@ void RoomSceneGraph::rearm_after_crossing(std::uint64_t new_room_id, const std::
             // The robot is already INSIDE: no doorway to anchor on (the passage prior is not used). The recognition
             // posterior of the robot's pose in this room goes to the relocaliser as the prior of ONE mixture search on the
             // next scan (RoomConcept::seed_reloc_prior); the Laplace modes give the pose covariance after the jump.
-            room_concept_->seed_reloc_prior(recall->pose_prior);
+            room_concept_->seed_reloc_prior(recall->pose_prior, recall->recog_log_odds);
         }
         else
         {

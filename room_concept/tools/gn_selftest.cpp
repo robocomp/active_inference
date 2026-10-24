@@ -22,6 +22,7 @@
 #include "room_model.h"
 #include "reloc_search.h"
 #include <cstring>
+#include <format>
 #include "image_edge_types.h"
 #include "image_edge_ops.h"
 #include "image_edge_accumulate.h"
@@ -247,38 +248,81 @@ check("(e) a layout that cannot explain the scan is REJECTED", pend_e and ver_e 
           (std::snprintf(buf, sizeof buf, "s0=%.3f verdict=%d untouched=%d", 0.5f * (lo + hi), static_cast<int>(vf), same ? 1 : 0), buf));
 }
 
-// (g) a correct K with a TRANSIENT BURST (4 scans of large misfit amid good ones): one scan's evidence is bounded below, so the
-// burst cannot reject; the good scans carry the verdict. (h) PARKED: the same view repeated (novelty 0 after the first, as
-// view_change is for an unchanged pose) does not accumulate. Both drive the verdict accumulator directly: the run-loop path
-// (relocalisation_step) needs a full UpdateResult stream, which reloc_selftest owns; the accumulator is the only thing the
-// watch does there after adoption (no search, no belief write), which (f) asserts.
+// (g) a correct K with a TRANSIENT BURST of 3 large-misfit scans RIGHT AFTER ADOPTION (when the jump settles). One scan's
+// evidence is bounded below by ln eps (~ -1.2 nats), but three of them from a start at 0 cross -ln 19: WITHOUT the recognition
+// prior the burst rejects a correct K. The adoption test's prior is the recogniser's log-odds ln P(K)/P(new) (ltsm's
+// recognition node); with P(K) = 0.95 the same burst only dents it and the good scans that follow Accept.
+// (h) NOVELTY: a fractional novelty weighs a scan's LLR (0.1 = a tenth of an observation); a parked robot's repeated view
+// (novelty 0 after the first, as view_change is for an unchanged pose) adds nothing.
+// Both drive the verdict accumulator directly: the run-loop path (relocalisation_step) needs a full UpdateResult stream,
+// which reloc_selftest owns; the accumulator is the only thing the watch does there after adoption (no search, no belief
+// write), which (f) asserts.
 {
-    rc::RoomConcept rcn;
-    rcn.set_polygon_room(poly);
-    rcn.set_robot_pose(truth.x(), truth.y(), truth.z(), false);
     rc::reloc::PriorMode m; m.mu = truth; m.S = Eigen::Vector3f(0.04f, 0.04f, 0.02f).asDiagonal();
-    rcn.seed_reloc_prior({m});
-    bool rejected = false;
-    for (int k = 0; k < 60 and rcn.late_recall_verdict() == RoomConcept::LateVerdict::Pending; ++k)
+    const auto fresh = [&](RoomConcept& r, double prior)
     {
-        const bool burst = k >= 5 and k < 9;
-        rc::RelocSelftestAccess::evidence(rcn, burst ? 1.2f : 0.03f);
-        rejected = rejected or rcn.late_recall_verdict() == RoomConcept::LateVerdict::Rejected;
-    }
-    check("(g) a transient burst never rejects a correct K", not rejected and rcn.late_recall_verdict() == RoomConcept::LateVerdict::Accepted,
-          (std::snprintf(buf, sizeof buf, "verdict=%d log-odds=%.1f", static_cast<int>(rcn.late_recall_verdict()), rc::RelocSelftestAccess::log_odds(rcn)), buf));
-    rc::RoomConcept r5, r50;
-    for (auto* r : {&r5, &r50})
+        r.set_polygon_room(poly);
+        r.set_robot_pose(truth.x(), truth.y(), truth.z(), false);
+        r.seed_reloc_prior({m}, prior);
+    };
+    struct BurstRun { bool pending_before; bool rejected; RoomConcept::LateVerdict verdict; std::string traj; };
+    const auto burst_run = [&](double prior)
     {
-        r->set_polygon_room(poly);
-        r->set_robot_pose(truth.x(), truth.y(), truth.z(), false);
-        r->seed_reloc_prior({m});
+        RoomConcept rcn;
+        fresh(rcn, prior);
+        BurstRun out{rcn.late_recall_verdict() == RoomConcept::LateVerdict::Pending, false, RoomConcept::LateVerdict::None, {}};
+        out.traj = std::format("{:.2f}", rc::RelocSelftestAccess::log_odds(rcn));
+        for (int k = 0; k < 60 and rcn.late_recall_verdict() == RoomConcept::LateVerdict::Pending; ++k)
+        {
+            const bool burst = k < 3;   // the first three scans after adoption
+            rc::RelocSelftestAccess::evidence(rcn, burst ? 1.2f : 0.03f);
+            out.traj += std::format(" {}{:.2f}", burst ? "*" : "", rc::RelocSelftestAccess::log_odds(rcn));
+            out.rejected = out.rejected or rcn.late_recall_verdict() == RoomConcept::LateVerdict::Rejected;
+        }
+        out.verdict = rcn.late_recall_verdict();
+        return out;
+    };
+    const double prior95 = std::log(0.95 / 0.05);
+    const auto g1 = burst_run(prior95);
+    const auto g0 = burst_run(0.0);
+    std::printf("      (g) log-odds trajectory, prior ln(0.95/0.05)=%.2f (*=burst scan): %s\n", prior95, g1.traj.c_str());
+    std::printf("      (g) log-odds trajectory, prior 0                     (*=burst scan): %s\n", g0.traj.c_str());
+    check("(g) burst right after adoption: with the recognition prior a correct K is never rejected",
+          g1.pending_before and not g1.rejected and g1.verdict == RoomConcept::LateVerdict::Accepted,
+          (std::snprintf(buf, sizeof buf, "pending-before=%d verdict=%d", g1.pending_before ? 1 : 0, static_cast<int>(g1.verdict)), buf));
+    check("(g') the same burst from a prior of 0 rejects it (why the prior matters)",
+          g0.pending_before and g0.verdict == RoomConcept::LateVerdict::Rejected,
+          (std::snprintf(buf, sizeof buf, "pending-before=%d verdict=%d", g0.pending_before ? 1 : 0, static_cast<int>(g0.verdict)), buf));
+
+    const float s_weak = 0.09f;   // mildly contrary (LLR ~ -0.5): far from decisive
+    RoomConcept full;
+    fresh(full, 0.0);
+    rc::RelocSelftestAccess::evidence(full, s_weak, 1.f);
+    const double l1 = rc::RelocSelftestAccess::log_odds(full);   // one full-novelty scan
+    RoomConcept frac;
+    fresh(frac, 0.0);
+    constexpr int N = 10;
+    constexpr float nu = 0.1f;
+    std::string traj_h = "0.000";
+    bool pending_after_first = false;
+    for (int k = 0; k < N; ++k)
+    {
+        rc::RelocSelftestAccess::evidence(frac, s_weak, nu);
+        if (k == 0) pending_after_first = frac.late_recall_verdict() == RoomConcept::LateVerdict::Pending;
+        traj_h += std::format(" {:.3f}", rc::RelocSelftestAccess::log_odds(frac));
     }
-    const float s_weak = 0.09f;   // mildly tracking-like: far from decisive
+    const double lN = rc::RelocSelftestAccess::log_odds(frac);
+    std::printf("      (h) one full scan: %.3f; log-odds trajectory at novelty %.1f: %s\n", l1, nu, traj_h.c_str());
+    check("(h) a fractional-novelty scan counts as that fraction of an observation",
+          std::abs(l1) > 1e-3 and pending_after_first and std::abs(lN - N * nu * l1) < 1e-6 * std::max(1.0, std::abs(l1))
+          and std::abs(lN) < N * std::abs(l1),
+          (std::snprintf(buf, sizeof buf, "after %d scans = %.4f, sum of nu*LLR = %.4f, N x full = %.4f", N, lN, N * nu * l1, N * l1), buf));
+    RoomConcept r5, r50;
+    fresh(r5, 0.0); fresh(r50, 0.0);
     for (int k = 0; k < 5; ++k) rc::RelocSelftestAccess::evidence(r5, s_weak, k == 0 ? 1.f : 0.f);
     for (int k = 0; k < 50; ++k) rc::RelocSelftestAccess::evidence(r50, s_weak, k == 0 ? 1.f : 0.f);
     const double l5 = rc::RelocSelftestAccess::log_odds(r5), l50 = rc::RelocSelftestAccess::log_odds(r50);
-    check("(h) a parked robot's repeated view is one observation", std::abs(l50 - l5) < 1e-9,
+    check("(h') a parked robot's repeated view is one observation", std::abs(l50 - l5) < 1e-9 and std::abs(l5 - l1) < 1e-9,
           (std::snprintf(buf, sizeof buf, "log-odds after 5 = %.3f, after 50 = %.3f", l5, l50), buf));
 }
 }

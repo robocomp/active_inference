@@ -13,7 +13,9 @@
 #include "room_scene_graph.h"
 #include "../../common/graph_provenance/creation_stamp.h"   // rc::provenance::stamp_creation
 
+#include <algorithm>
 #include <cmath>
+#include <limits>
 
 #include <QDebug>
 
@@ -71,8 +73,34 @@ std::optional<RoomSceneGraph::Recall> RoomSceneGraph::find_late_recall() const
     return std::nullopt;
 }
 
-bool RoomSceneGraph::adopt_late_recall(const Recall& r)
+double RoomSceneGraph::recognition_log_odds(std::uint64_t room_id) const
 {
+    // ltsm's recogniser posts one `recognition` metaconcept: recog_room_ids (the candidates) and recog_posterior (P over them,
+    // then P(new) LAST; ltsm_agent/src/room_recognizer.cpp). Its log-odds of K against "a new room" is the prior of the
+    // adoption test (RoomConcept::seed_reloc_prior). Absent node / attribute / entry: no recognition evidence, 0.
+    const auto n = G_->get_node(std::string("recognition"));
+    if (not n.has_value() or n->type() != "metaconcept"
+        or G_->get_attrib_by_name<object_subtype_att>(n.value()).value_or(std::string{}) != "recognition")
+        return 0.0;
+    const auto ids  = G_->get_attrib_by_name<recog_room_ids_att>(n.value());
+    const auto post = G_->get_attrib_by_name<recog_posterior_att>(n.value());
+    if (not ids.has_value() or not post.has_value()) return 0.0;
+    const auto& iv = ids->get(); const auto& pv = post->get();
+    if (pv.size() != iv.size() + 1) return 0.0;
+    const auto it = std::ranges::find(iv, room_id);
+    if (it == iv.end()) return 0.0;
+    // Numerical guard: a posterior that underflowed to 0 is floored at the smallest normal float, not taken as -inf.
+    const auto ln = [](float p) { return std::log(std::max(static_cast<double>(p), static_cast<double>(std::numeric_limits<float>::min()))); };
+    const float pk = pv[static_cast<std::size_t>(it - iv.begin())], pn = pv.back();
+    if (not std::isfinite(pk) or not std::isfinite(pn)) return 0.0;
+    return ln(pk) - ln(pn);
+}
+
+bool RoomSceneGraph::adopt_late_recall(const Recall& recall)
+{
+    // The recognition evidence is read ONCE, at adoption: it is the adoption test's prior, not a running input.
+    Recall r = recall;
+    r.recog_log_odds = recognition_log_odds(r.room_index);
     if (dsr_room_id_ == 0 or proto_room_id_ != 0 or r.poly_pub.size() < 3 or r.room_index == 0) return false;
     for (const auto& rn : G_->get_nodes_by_type("room"))
         if (rn.name() == r.name) return false;   // the name is taken (the room is live): nothing to re-birth
@@ -106,8 +134,10 @@ bool RoomSceneGraph::adopt_late_recall(const Recall& r)
     late_watch_room_   = id.value();
     late_adopted_name_ = r.name;
     qInfo().noquote() << QString("[room][late-recall] %1 adopted from memory (node id %2), replacing room %3; localising with "
-                                 "the recognition posterior (%4 mode(s)) as the search's prior")
-                             .arg(QString::fromStdString(r.name)).arg(id.value()).arg(old->id()).arg(r.pose_prior.size());
+                                 "the recognition posterior (%4 mode(s)) as the search's prior; adoption test starts at "
+                                 "log-odds %5 (recogniser ln P(K)/P(new))")
+                             .arg(QString::fromStdString(r.name)).arg(id.value()).arg(old->id()).arg(r.pose_prior.size())
+                             .arg(r.recog_log_odds, 0, 'f', 2);
     return true;
 }
 
