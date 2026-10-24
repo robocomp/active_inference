@@ -9,6 +9,7 @@
 # Writes crossing/<run>/legs.tsv (leg windows + per-log line ranges), copies ltsm_memory.json, runs recognition_report.py.
 # Stop agents with SIGTERM only (run_crossing.sh collect does); never edit this script while a run uses it.
 LOCK=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/ai_fleet_tour.lock; echo $$ > $LOCK; trap 'rm -f $LOCK' EXIT
+S=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)   # helpers come from THIS script's own directory (the worktree), data stays under $E
 B=/home/pbustos/robocomp/components/active_inference; E=$B/room_concept/estimation_scripts; cd $E; L=crossing/$1/logs
 EXPLORE_S=${2:-60}; SCAN_CAP_S=${SCAN_CAP_S:-600}
 export WT=${WT:-/home/pbustos/robocomp/components/active_inference.worktrees/rt-build} WT_AGENTS=${WT_AGENTS:-"controller door_concept table_concept room_concept ltsm_agent"}
@@ -18,9 +19,9 @@ echo stop > $B/controller/remote_cmd.txt
 rm -f ../etc/last_robot_pose.txt ../etc/room_name_hwm.txt $B/ltsm_agent/etc/ltsm_memory.json $B/ltsm_agent/etc/ltsm_memory.json.prev
 rm -rf $B/retina/etc/place_maps/; rm -f $WT/ltsm_agent/etc/recognition_trace.csv $B/ltsm_agent/etc/recognition_trace.csv
 # close every door BEFORE the fleet starts (the cross mission opens the one it needs)
-for d in DOOR_1 DOOR_0 DOOR_2; do python3 scripts/door.py close $d; done
+for d in DOOR_1 DOOR_0 DOOR_2; do python3 $S/door.py close $d; done
 sleep 3
-NORUN=1 bash scripts/run_crossing.sh crossing/$1 -5.33 3.66 0.58 >/dev/null 2>&1
+NORUN=1 bash $S/run_crossing.sh crossing/$1 -5.33 3.66 0.58 >/dev/null 2>&1
 sleep 25
 for i in $(seq 1 90); do grep -a -q 'room polygon LOADED' $L/door_concept.log 2>/dev/null && break; sleep 2; done; sleep 5
 room_now() { grep -a "current room changed" $L/controller.log | tail -1 | awk '{print $NF}'; }
@@ -66,7 +67,7 @@ for leg in 1 2 3 4 5 6; do
     5) # the door back: ltsm logs, at swap time, which face of the recognised room is the crossed door's ("[swap] crossed door
        # rA_door_M <-> K face rN_door_K" or "... face new"); door_concept restores K's doors under their remembered base names
        sl=$(tail -n +$((SW0+1)) $L/ltsm_agent.log | grep -a '\[swap\] crossed door' | tail -1)
-       d=$(python3 -I scripts/recognition_report.py --leg5-door $L/ltsm_agent.log $SW0 $L/door_concept.log $SD0)
+       d=$(python3 -I $S/recognition_report.py --leg5-door $L/ltsm_agent.log $SW0 $L/door_concept.log $SD0)
        if [ -z "$d" ]; then echo "leg 5: door discovery failed (ltsm line: '${sl:-absent}')"
          printf '5\tDISCOVERY_FAILED\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' $T0 $(now_ms) $A0 $(nl ltsm_agent) $D0 $(nl door_concept) $R0 $(nl room_concept) >> $TSV; break; fi
        echo "leg 5: door '$d' from ltsm: $sl"; d5=$d; D5=$D0;;
@@ -87,10 +88,10 @@ done
 echo "=== $ok/6 legs; DOOR_2 named '$d2'; scan ${scan_s} s"
 echo stop > $B/controller/remote_cmd.txt
 # restore the world: open the doors the tour crossed (DOOR_1, DOOR_0, DOOR_2)
-for d in DOOR_1 DOOR_0 DOOR_2; do python3 scripts/door.py open $d; done
+for d in DOOR_1 DOOR_0 DOOR_2; do python3 $S/door.py open $d; done
 # collect + stop the fleet (SIGTERM; ltsm persists its memory on exit), then grade
-bash scripts/run_crossing.sh crossing/$1 collect >/dev/null 2>&1
+bash $S/run_crossing.sh crossing/$1 collect >/dev/null 2>&1
 cp $B/ltsm_agent/etc/ltsm_memory.json crossing/$1/ltsm_memory.json 2>/dev/null
 cp $WT/ltsm_agent/etc/recognition_trace.csv crossing/$1/recognition_trace.csv 2>/dev/null || cp $B/ltsm_agent/etc/recognition_trace.csv crossing/$1/recognition_trace.csv 2>/dev/null
-python3 scripts/recognition_report.py crossing/$1 | tee crossing/$1/recognition_report.txt
+python3 $S/recognition_report.py crossing/$1 | tee crossing/$1/recognition_report.txt
 exit ${PIPESTATUS[0]}
