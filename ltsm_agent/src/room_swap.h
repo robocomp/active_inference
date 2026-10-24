@@ -17,13 +17,21 @@
  * LEFT is refused, as the room being ENTERED its twin is not copied into. The robot leaving K ends the undo window:
  * on_room_left() deletes the staged twin and the late recall and releases the hold; on_evict() is that call made from the
  * eviction path BEFORE evict() (the hold would otherwise refuse the very eviction that moves `current` on).
- * CARRY-OVER. At the release (on_room_left) the crossed door becomes a passage of BOTH rooms: carry_over() writes K's NEW
- * face of it, at the aperture's pose in K's frame, and match-links it into the passage that holds the previous room's face
- * (minted when there is none). The pose is read at swap time, while the chain resolves: robot-in-K (the recogniser's
- * relocalisation) composed with the crossed door (case A: its live node; case B: the provisional twin's face, through
- * T(K <- twin)). The face is the SAME physical hole in the same orientation, as a derived face is, so seam_through_passage()
- * composes it with no extra rotation. The provisional twin's face in a case-B passage goes with the twin; the passage and
- * its crossing history stay and now point at K.
+ * CARRY-OVER. At the release (on_room_left) the crossed door becomes a passage of BOTH rooms: carry_over() puts K's face of it at
+ * T(K <- previous room) . (the previous room's own face pose) and match-links it into the passage that holds the previous
+ * room's face (minted by RoomEviction::mint_passage when there is none). T(K <- previous room) is read at swap time, while the
+ * chains resolve: robot-in-K (the recogniser's relocalisation) through the live previous room (case A) -- or, when the
+ * provisional room carries the MOUTH POSE room_concept publishes (Task M, the same attribute fuse_seam_through_aperture
+ * reads), through the provisional frame and the inverse of that mouth (the exact aperture, no door node) -- or, in case B,
+ * through T(K <- twin) and the passage into the twin. fuse_seam_through_aperture itself is NOT reused: it fits a PROTO frame,
+ * and K's frame is already metric.
+ * When K already holds an unmatched door at the aperture (its own face of the same hole), it is ASSOCIATED, not duplicated:
+ * MAP over {each unowned K door} U {none -> new face}, door likelihood Gaussian in the chain pose (both leaf orientations,
+ * doors are pi-symmetric), 'none' uniform over K's area and yaw. An adopted door's pose is precision-fused with the chain
+ * pose (orientation on the branch consistent with the previous face) and written back. The twin's face in a case-B passage
+ * goes with the twin; the passage and its crossing history stay and now point at K.
+ * KNOWN GAP: carry-over runs ONLY at on_room_left. If the robot never leaves K, or the agent dies first, the crossed door
+ * keeps one face (carry_ is in memory, not persisted) until the next crossing writes it; the recogniser then reads it known.
  *
  * LATE-ADOPTION CONTRACT (for room_concept, Task 9). The late recall node `recall_<room>` (type metaconcept, subtype
  * "room_recall", recall_late = true) is owned by ltsm. room_concept re-births the room from it and fits it with the evidence it
@@ -99,7 +107,9 @@ private:
     std::optional<Mat::RTMat> twin_from_known_;   ///< case B: T(K <- provisional twin), at swap time
     std::optional<Mat::RTMat> robot_from_known_;  ///< T(robot <- K) at swap time
 
-    struct Carry { std::string prev_face; Mat::RTMat in_known; };   ///< a crossed door's pose in K's frame, taken at swap time
+    /// A crossed door, taken at swap time: the previous room's memory name and face, the seam T(K <- previous room) and the
+    /// covariance of the robot's pose in K that it inherits (x, y, yaw).
+    struct Carry { std::string prev_face, prev_room, base; Mat::RTMat known_from_prev; Eigen::Matrix3d cov; };
     std::vector<Carry> carry_;
     int drop_subtree(const std::string &memory_room);
     std::optional<DSR::Node> robot_node() const;

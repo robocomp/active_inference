@@ -178,19 +178,39 @@ bool RoomSwap::swap(std::uint64_t known_room_id, const rc::recog::PoseMix &pose_
         twin_from_K = Mat::RTMat(K_from_robot * robot_from_P.value());
     }
 
-    // the crossed door(s) in K's frame, while the chains resolve: robot-in-K (the relocalisation) through the live door (case A),
-    // or K <- twin through the twin's face of each passage (case B). The previous room's face is the other end of the passage.
+    // the seam T(K <- previous room), while the chains resolve, one per crossed door (see room_swap.h CARRY-OVER).
     std::vector<Carry> carries;
+    const Eigen::Matrix3d S_robot = best->S.cast<double>();
     if (not twin.has_value() and anchor != robot->id())
     {
-        if (const auto d = live_->get_node(anchor); d.has_value())
-            if (const auto L = rc::room::current_edge_room(*live_); L.has_value())
-                if (const auto Ln = live_->get_node(L.value()); Ln.has_value())
-                    carries.push_back({ev_.memory_prefix(Ln.value()) + d->name(), Mat::RTMat(anchor_from_K.inverse())});
+        const auto d = live_->get_node(anchor);
+        const auto Lid = rc::room::current_edge_room(*live_);
+        const auto Ln = Lid.has_value() ? live_->get_node(Lid.value()) : std::nullopt;
+        if (d.has_value() and Ln.has_value())
+        {
+            std::optional<Mat::RTMat> K_from_L;
+            // the MOUTH room_concept published on the provisional room (frame = the room being left): T(P <- L) is the inverse of
+            // it, exact, no door node. Else the plain robot chain.
+            const auto mt = live_->get_attrib_by_name<rt_translation_att>(P.value());
+            const auto mr = live_->get_attrib_by_name<rt_rotation_euler_xyz_att>(P.value());
+            const auto mf = live_->get_attrib_by_name<interaction_node_id_att>(P.value());
+            if (mt.has_value() and mr.has_value() and mf.has_value() and mf.value() == Ln->id() and mt->get().size() >= 2 and mr->get().size() >= 3)
+                if (const auto robot_from_P = ie->get_transformation_matrix(robot->name(), P->name()); robot_from_P.has_value())
+                {
+                    const Mat::RTMat L_from_P = se2_to_rtmat(mt->get()[0], mt->get()[1], mr->get()[2]);
+                    K_from_L = Mat::RTMat(K_from_robot * robot_from_P.value() * L_from_P.inverse());
+                }
+            if (not K_from_L.has_value())
+                if (const auto robot_from_L = ie->get_transformation_matrix(robot->name(), Ln->name()); robot_from_L.has_value())
+                    K_from_L = Mat::RTMat(K_from_robot * robot_from_L.value());
+            if (K_from_L.has_value())
+            {
+                const std::string pre = ev_.memory_prefix(Ln.value());
+                carries.push_back({pre + d->name(), pre + Ln->name(), d->name(), K_from_L.value(), S_robot});
+            }
+        }
     }
     if (twin.has_value() and twin_from_K.has_value())
-    {
-        auto mie = mem_->get_inner_eigen_api();
         for (const auto &pn : mem_->get_nodes_by_type("metaconcept"))
         {
             if (subtype_of(*mem_, pn) != "passage") continue;
@@ -199,10 +219,20 @@ bool RoomSwap::swap(std::uint64_t known_room_id, const rc::recog::PoseMix &pose_
                 if (const auto f = mem_->get_node(e.to()); f.has_value())
                     (is_descendant(*mem_, f->id(), twin->name()) ? mine : other) = f;
             if (not mine.has_value() or not other.has_value()) continue;
-            if (const auto T = mie->get_transformation_matrix(twin->name(), mine->name()); T.has_value())
-                carries.push_back({other->name(), Mat::RTMat(twin_from_K.value() * T.value())});
+            std::optional<DSR::Node> room;                       // the previous room: the face's room ancestor
+            for (auto n = other; n.has_value() and not room.has_value();)
+            {
+                if (n->type() == "room") room = n;
+                else if (const auto par = mem_->get_attrib_by_name<parent_att>(n.value()); par.has_value()) n = mem_->get_node(par.value());
+                else break;
+            }
+            if (not room.has_value()) continue;
+            const auto T = ltsm::seam_through_passage(*mem_, pn.name(), twin->name(), room->name());       // T(twin <- previous room)
+            if (not T.has_value()) continue;
+            const std::string rp = "r" + std::to_string(mem_->get_attrib_by_name<room_id_att>(room.value()).value_or(0)) + "_";
+            carries.push_back({other->name(), room->name(), other->name().starts_with(rp) ? other->name().substr(rp.size()) : other->name(),
+                               Mat::RTMat(twin_from_K.value() * T.value()), S_robot});
         }
-    }
 
     // ── execute: stage, recall, discard, hold ──────────────────────────────────────────────────────────────────
     const std::string known_mem = K->name();
@@ -303,6 +333,28 @@ void RoomSwap::on_room_left(const std::string &room)
     twin_from_known_.reset(); robot_from_known_.reset();
 }
 
+namespace
+{
+// FLAGGED model constants: the accuracy a door pose stored in memory carries (the same figures eviction uses for a seam
+// read back from memory: it was itself a fused estimate).
+constexpr double kDoorSigmaXY = 0.1, kDoorSigmaYaw = 0.03;
+
+double wrap_pi(double a) { return std::atan2(std::sin(a), std::cos(a)); }
+Eigen::Vector3d se2_of(const Mat::RTMat &T) { return {T.translation().x(), T.translation().y(), std::atan2(T.linear()(1, 0), T.linear()(0, 0))}; }
+
+/// Shoelace area of a room's outline; 0 when none is stored.
+double outline_area(DSR::DSRGraph &g, const DSR::Node &room)
+{
+    const auto px = g.get_attrib_by_name<delimiting_polygon_x_att>(room);
+    const auto py = g.get_attrib_by_name<delimiting_polygon_y_att>(room);
+    if (not px.has_value() or not py.has_value() or px->get().size() < 3 or px->get().size() != py->get().size()) return 0.0;
+    double a = 0.0;
+    const auto &x = px->get(), &y = py->get();
+    for (std::size_t i = 0; i < x.size(); ++i) a += double(x[i]) * y[(i + 1) % x.size()] - double(x[(i + 1) % x.size()]) * y[i];
+    return std::abs(a) * 0.5;
+}
+}   // namespace
+
 bool RoomSwap::carry_over(const std::string &prev_room_face, std::uint64_t known_room_id)
 {
     std::optional<DSR::Node> K;
@@ -325,32 +377,68 @@ bool RoomSwap::carry_over(const std::string &prev_room_face, std::uint64_t known
     if (pass.has_value() and face_of_k(pass.value()).has_value()) return true;       // already carried: idempotent
 
     const auto it = std::ranges::find(carry_, prev_room_face, &Carry::prev_face);
-    if (it == carry_.end()) return false;                                          // no pose for it: nothing is invented
-    const Mat::RTMat T = it->in_known;
-    const double half_w = 0.5 * mem_->get_attrib_by_name<width_m_att>(prev.value()).value_or(1.f);
-
-    // K already has a door at the aperture that no passage owns (the live K was evicted into it with the re-born door): adopt it.
-    std::optional<std::uint64_t> fid;
+    if (it == carry_.end()) return false;                                          // no seam for it: nothing is invented
     auto ie = mem_->get_inner_eigen_api();
+    const auto F = ie->get_transformation_matrix(it->prev_room, prev_room_face);     // the previous room's face, in its own frame
+    if (not F.has_value()) return false;
+    const Eigen::Vector3d t = se2_of(Mat::RTMat(it->known_from_prev * F.value()));    // the aperture in K's frame, through the chain
+    const Eigen::Matrix3d C = it->cov;
+    const Eigen::Matrix3d Cd = Eigen::Vector3d(kDoorSigmaXY * kDoorSigmaXY, kDoorSigmaXY * kDoorSigmaXY, kDoorSigmaYaw * kDoorSigmaYaw).asDiagonal();
+    const Eigen::Matrix3d S = C + Cd;
+    const double log_norm = -1.5 * std::log(2.0 * M_PI) - 0.5 * std::log(S.determinant());
+
+    // ASSOCIATION over {each unowned K door} U {none -> a new face}. FLAGGED: a MAP decision with a symmetric 0-1 loss.
+    // Doors are pi-symmetric, so each is scored in both leaf orientations and the better one kept.
     std::unordered_set<std::uint64_t> owned;
     for (const auto &pn : mem_->get_nodes_by_type("metaconcept"))
         if (subtype_of(*mem_, pn) == "passage")
             for (const auto &e : DSR::DSRGraph::get_node_edges_by_type(pn, "match")) owned.insert(e.to());
-    double best = half_w;
+    struct Cand { DSR::Node door; Eigen::Vector3d pose; double dth, ll; };
+    std::vector<Cand> cands;
     for (const auto &d : mem_->get_nodes_by_type("object"))
     {
         if (not is_door(*mem_, d) or owned.contains(d.id()) or not is_descendant(*mem_, d.id(), K->name())) continue;
-        if (const auto there = ie->get_transformation_matrix(K->name(), d.name()); there.has_value())
-            if (const double dist = (there->translation() - T.translation()).head<2>().norm(); dist < best) { best = dist; fid = d.id(); }
+        const auto there = ie->get_transformation_matrix(K->name(), d.name());
+        if (not there.has_value()) continue;
+        const Eigen::Vector3d D = se2_of(there.value());
+        Cand best_c{d, D, 0.0, -std::numeric_limits<double>::infinity()};
+        for (const double turn : {0.0, M_PI})
+        {
+            Eigen::Vector3d r(D.x() - t.x(), D.y() - t.y(), wrap_pi(D.z() + turn - t.z()));
+            const double ll = log_norm - 0.5 * r.dot(S.ldlt().solve(r));
+            if (ll > best_c.ll) best_c = {d, D, turn, ll};
+        }
+        cands.push_back(best_c);
     }
-    if (not fid.has_value())
+    const double area = outline_area(*mem_, K.value());
+    const double log_none = std::log(0.5) - std::log((area > 0.0 ? area : 1.0) * 2.0 * M_PI);
+    std::optional<Cand> adopt;
+    double best_ll = log_none;
+    for (const auto &cd : cands)
+        if (const double ll = std::log(0.5 / double(cands.size())) + cd.ll; ll > best_ll) { best_ll = ll; adopt = cd; }
+
+    std::optional<std::uint64_t> fid;
+    if (adopt.has_value())
     {
-        std::string base = prev_room_face;
-        if (base.size() > 1 and base[0] == 'r')
-            if (const auto us = base.find('_'); us != std::string::npos and us > 1 and std::ranges::all_of(base.substr(1, us - 1), [](char ch) { return ch >= '0' and ch <= '9'; }))
-                base = base.substr(us + 1);
-        const std::string prefix = "r" + std::to_string(known_room_id) + "_";
-        std::string name = prefix + base;
+        // PRECISION FUSION of the door's stored pose with the chain pose, on the orientation branch consistent with the
+        // previous face; written back through the door's own parent edge.
+        const Eigen::Vector3d Db(adopt->pose.x(), adopt->pose.y(), t.z() + wrap_pi(adopt->pose.z() + adopt->dth - t.z()));
+        const Eigen::Matrix3d Pt = C.inverse(), Pd = Cd.inverse();
+        const Eigen::Matrix3d Pf = (Pt + Pd).inverse();
+        Eigen::Vector3d fused = t + Pf * Pd * (Db - t);
+        fused.z() = wrap_pi(fused.z());
+        const Mat::RTMat fusedK = [&] { Mat::RTMat T = Mat::RTMat::Identity(); T.linear() = Eigen::AngleAxisd(fused.z(), Eigen::Vector3d::UnitZ()).toRotationMatrix(); T.translation() = Eigen::Vector3d(fused.x(), fused.y(), 0.0); return T; }();
+        const auto par = mem_->get_attrib_by_name<parent_att>(adopt->door);
+        const auto pn = par.has_value() ? mem_->get_node(par.value()) : std::nullopt;
+        const auto K_from_par = pn.has_value() ? ie->get_transformation_matrix(K->name(), pn->name()) : std::nullopt;
+        if (not K_from_par.has_value()) return false;
+        mem_->insert_or_assign_edge(DSR::Edge::create<RT_edge_type>(pn->id(), adopt->door.id(), RoomEviction::rt_attributes(Mat::RTMat(K_from_par->inverse() * fusedK))));
+        fid = adopt->door.id();
+    }
+    else
+    {
+        const std::string name0 = "r" + std::to_string(known_room_id) + "_" + it->base;
+        std::string name = name0;
         while (mem_->get_node(name).has_value()) name += "_x";
         DSR::Node f;
         f.type("object"); f.name(name);
@@ -360,30 +448,21 @@ bool RoomSwap::carry_over(const std::string &prev_room_face, std::uint64_t known
         mem_->add_or_modify_attrib_local<level_att>(f, mem_->get_node_level(K.value()).value_or(0) + 1);
         fid = mem_->insert_node(f);
         if (not fid.has_value()) return false;
+        Mat::RTMat T = Mat::RTMat::Identity();
+        T.linear() = Eigen::AngleAxisd(t.z(), Eigen::Vector3d::UnitZ()).toRotationMatrix();
+        T.translation() = Eigen::Vector3d(t.x(), t.y(), 0.0);
         mem_->insert_or_assign_edge(DSR::Edge::create<RT_edge_type>(K->id(), fid.value(), RoomEviction::rt_attributes(T)));
     }
     if (not pass.has_value())
     {
-        std::uint64_t n = 0;
-        for (const auto &pn : mem_->get_nodes_by_type("metaconcept"))
-            if (pn.name().starts_with("passage_"))
-            {
-                std::uint64_t v = 0;
-                const auto s = pn.name().substr(8);
-                if (std::from_chars(s.data(), s.data() + s.size(), v).ec == std::errc{}) n = std::max(n, v + 1);
-            }
-        DSR::Node dw;
-        dw.type("metaconcept"); dw.name(std::format("passage_{}", n));
-        mem_->add_or_modify_attrib_local<object_subtype_att>(dw, std::string("passage"));
-        mem_->add_or_modify_attrib_local<level_att>(dw, 0);
-        const auto id = mem_->insert_node(dw);
-        if (not id.has_value()) return false;
-        mem_->insert_or_assign_edge(DSR::Edge::create<match_edge_type>(id.value(), prev->id()));
-        pass = mem_->get_node(id.value());
+        const auto id = ev_.mint_passage();
+        if (id == 0) return false;
+        mem_->insert_or_assign_edge(DSR::Edge::create<match_edge_type>(id, prev->id()));
+        pass = mem_->get_node(id);
     }
     mem_->insert_or_assign_edge(DSR::Edge::create<match_edge_type>(pass->id(), fid.value()));
-    qInfo().noquote() << QString::fromStdString(std::format("[swap] carry-over: {} is a passage of {} and the previous room ({})",
-            mem_->get_node(fid.value()).value().name(), known_mem_.empty() ? K->name() : known_mem_, pass->name()));
+    qInfo().noquote() << QString::fromStdString(std::format("[swap] carry-over: {} ({}) is a passage of {} and the previous room ({})",
+            mem_->get_node(fid.value()).value().name(), adopt.has_value() ? "adopted, fused" : "new face", K->name(), pass->name()));
     return true;
 }
 

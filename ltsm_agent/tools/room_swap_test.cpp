@@ -120,6 +120,24 @@ static rc::recog::PoseMix pose_k()
     return {g};
 }
 
+// L's outline on the far side of the crossed door (the fixture's default box sits exactly ON the door's plane, where
+// seam_through_passage's pi-orientation side test is a coin flip)
+static void far_side_outline_for_L()
+{
+    auto L = mem->get_node("r2_room_2").value();
+    mem->add_or_modify_attrib_local<delimiting_polygon_x_att>(L, std::vector<float>{3.f, 5.f, 5.f, 3.f});
+    mem->add_or_modify_attrib_local<delimiting_polygon_y_att>(L, std::vector<float>{4.f, 4.f, 6.f, 6.f});
+    mem->update_node(L);
+}
+
+// the relocalised pose with the accuracy a real fix has (2 cm, 0.01 rad)
+static rc::recog::PoseMix pose_tight()
+{
+    auto m = pose_k();
+    m[0].S = Eigen::Vector3f(0.0004f, 0.0004f, 0.0001f).asDiagonal();
+    return m;
+}
+
 static std::set<std::string> mem_names()
 {
     std::set<std::string> s;
@@ -490,6 +508,126 @@ int main(int argc, char **argv)
         const auto rc = live->get_node("recall_room_3");
         check(rc.has_value(), "recall_room_3 posted under the door");
         if (rc) check(not live->get_attrib_by_name<recall_late_att>(rc.value()).value_or(false), "and it is an ordinary one (no late flag)");
+    }
+
+    // ── association with K's own unmatched face of the crossed door (the real case) ──
+    const auto seam_err = [&](const Mat::RTMat &truth) {
+        const auto S = ltsm::seam_through_passage(*mem, only_passage() ? only_passage()->name() : "", "r3_room_3", "r2_room_2");
+        if (not S) return std::make_pair(1e9, 1e9);
+        const double e = (S->translation() - truth.translation()).head<2>().norm();
+        const double d = std::abs(std::remainder(std::atan2(S->linear()(1, 0), S->linear()(0, 0)) - std::atan2(truth.linear()(1, 0), truth.linear()(0, 0)), 2 * M_PI));
+        return std::make_pair(e, d);
+    };
+    const Mat::RTMat truthA = se2(1.0, 2.0, 0.3) * se2(-3.0, -1.0, 0.2);
+    const Mat::RTMat face_truth = truthA * se2(4.0, 2.0, 0.0);
+
+    std::printf("adopts_k_face_off_by_15cm_and_fuses\n");
+    {
+        reset(); build_memory(false); build_live(false); far_side_outline_for_L();
+        const auto K = mem->get_node("r3_room_3").value().id();
+        const double ex = face_truth.translation().x() + 0.1, ey = face_truth.translation().y() + 0.1;
+        mem_node("object", "r3_door_old", K, ex, ey, std::atan2(face_truth.linear()(1, 0), face_truth.linear()(0, 0)) + 0.05, std::nullopt, {}, "door");
+        Fix f;
+        f.sw.swap(3, pose_tight(), live_P);
+        f.sw.on_room_left("room_3");
+        check(not mem->get_node("r3_door_3").has_value() and passage_count() == 1, "no new face: the existing one is adopted");
+        const auto d = mem->get_node("r3_door_old");
+        const auto T = mem->get_inner_eigen_api()->get_transformation_matrix("r3_room_3", "r3_door_old");
+        check(d.has_value() and T.has_value(), "adopted door resolves in K");
+        if (T)
+        {
+            const double raw = std::hypot(0.1, 0.1);
+            const double now = (T->translation() - face_truth.translation()).head<2>().norm();
+            check(now < raw and now < 0.05, "its pose was PRECISION-FUSED toward the chain (" + std::to_string(now) + " m, was " + std::to_string(raw) + ")");
+        }
+        const auto [e, dth] = seam_err(truthA);
+        check(e < 0.05 and dth < 0.05, "seam within 5 cm / 0.05 rad (" + std::to_string(e) + ", " + std::to_string(dth) + ")");
+    }
+
+    std::printf("adopts_the_same_face_turned_by_pi\n");
+    {
+        reset(); build_memory(false); build_live(false); far_side_outline_for_L();
+        const auto K = mem->get_node("r3_room_3").value().id();
+        mem_node("object", "r3_door_old", K, face_truth.translation().x() + 0.1, face_truth.translation().y() - 0.1,
+                 std::atan2(face_truth.linear()(1, 0), face_truth.linear()(0, 0)) + M_PI, std::nullopt, {}, "door");
+        Fix f;
+        f.sw.swap(3, pose_tight(), live_P);
+        f.sw.on_room_left("room_3");
+        check(not mem->get_node("r3_door_3").has_value(), "adopted although turned by pi");
+        const auto T = mem->get_inner_eigen_api()->get_transformation_matrix("r3_room_3", "r3_door_old");
+        if (T)
+        {
+            const double dy = std::abs(std::remainder(std::atan2(T->linear()(1, 0), T->linear()(0, 0)) - std::atan2(face_truth.linear()(1, 0), face_truth.linear()(0, 0)), 2 * M_PI));
+            check(dy < 0.05, "orientation brought onto the consistent branch (" + std::to_string(dy) + " rad off)");
+        }
+        const auto [e, dth] = seam_err(truthA);
+        check(e < 0.05 and dth < 0.05, "seam within 5 cm / 0.05 rad (" + std::to_string(e) + ", " + std::to_string(dth) + ")");
+    }
+
+    std::printf("distractor_door_2m_away_is_not_adopted\n");
+    {
+        reset(); build_memory(false); build_live(false); far_side_outline_for_L();
+        const auto K = mem->get_node("r3_room_3").value().id();
+        mem_node("object", "r3_door_far", K, face_truth.translation().x() + 2.0, face_truth.translation().y(), 0.0, std::nullopt, {}, "door");
+        Fix f;
+        f.sw.swap(3, pose_tight(), live_P);
+        f.sw.on_room_left("room_3");
+        check(mem->get_node("r3_door_3").has_value(), "a new face was written");
+        const auto pw = only_passage();
+        bool far_owned = false;
+        if (pw) for (const auto &e : DSR::DSRGraph::get_node_edges_by_type(pw.value(), "match")) far_owned = far_owned or (mem->get_node(e.to()) and mem->get_node(e.to())->name() == "r3_door_far");
+        check(not far_owned, "the distractor stays unowned");
+        const auto [e, dth] = seam_err(truthA);
+        check(e < 0.05 and dth < 0.05, "seam within 5 cm / 0.05 rad");
+    }
+
+    std::printf("live_door_oriented_from_the_other_room\n");
+    {
+        reset(); build_memory(false); build_live(false); far_side_outline_for_L();
+        put_edge(*live, live_L, live_D, 4, 2, M_PI);
+        put_edge(*mem, mem->get_node("r2_room_2").value().id(), mem->get_node("r2_door_3").value().id(), 4, 2, M_PI);
+        Fix f;
+        f.sw.swap(3, pose_tight(), live_P);
+        f.sw.on_room_left("room_3");
+        const auto [e, dth] = seam_err(truthA);
+        check(e < 0.05 and dth < 0.05, "theta = pi door: seam within 5 cm / 0.05 rad (" + std::to_string(e) + ", " + std::to_string(dth) + ")");
+    }
+
+    std::printf("case_b_seam_matches_truth\n");
+    {
+        reset(); build_memory(true); build_live(true);
+        Fix f;
+        f.sw.swap(3, pose_tight(), live_P);
+        f.sw.on_room_left("room_3");
+        // truth: T(K<-robot) T(robot<-P) T(P<-L), T(P<-L) from the L<->twin passage faces
+        const Mat::RTMat truthB = se2(1.0, 2.0, 0.3) * se2(1.0, 2.0, -0.3) * (se2(1.0, 0.0, 1.0) * se2(4.0, 2.0, 0.0).inverse());
+        const auto S = ltsm::seam_through_passage(*mem, "passage_5", "r3_room_3", "r2_room_2");
+        check(S.has_value(), "resolves");
+        if (S)
+        {
+            const double e = (S->translation() - truthB.translation()).head<2>().norm();
+            const double d = std::abs(std::remainder(std::atan2(S->linear()(1, 0), S->linear()(0, 0)) - std::atan2(truthB.linear()(1, 0), truthB.linear()(0, 0)), 2 * M_PI));
+            check(e < 0.05 and d < 0.05, "within 5 cm / 0.05 rad of truth (" + std::to_string(e) + ", " + std::to_string(d) + ")");
+        }
+    }
+
+    std::printf("mouth_pose_of_the_provisional_room_is_the_seam\n");
+    {
+        reset(); build_memory(false); build_live(false); far_side_outline_for_L();
+        // L_from_P consistent with the chain, shifted 0.3 m along L's x: the seam must follow the mouth
+        const Mat::RTMat L_from_P = (truthA.inverse() * se2(1.0, 2.0, 0.3) * se2(1.0, 2.0, -0.3));
+        auto P = live->get_node(live_P).value();
+        const double x = L_from_P.translation().x() + 0.3, y = L_from_P.translation().y(), th = std::atan2(L_from_P.linear()(1, 0), L_from_P.linear()(0, 0));
+        live->add_or_modify_attrib_local<rt_translation_att>(P, std::vector<float>{(float)x, (float)y, 0.f});
+        live->add_or_modify_attrib_local<rt_rotation_euler_xyz_att>(P, std::vector<float>{0.f, 0.f, (float)th});
+        live->add_or_modify_attrib_local<interaction_node_id_att>(P, (std::uint64_t)live_L);
+        live->update_node(P);
+        Fix f;
+        f.sw.swap(3, pose_tight(), live_P);
+        f.sw.on_room_left("room_3");
+        const auto [e, dth] = seam_err(truthA);
+        // K_from_L = K_from_P * mouth^-1 with the mouth moved by 0.3 m along L's x => the seam moves by ~0.3 m
+        check(e > 0.2 and e < 0.4 and dth < 0.05, "the seam follows the published mouth (off the chain by " + std::to_string(e) + " m)");
     }
 
     std::printf("stale_staged_swept_at_start\n");

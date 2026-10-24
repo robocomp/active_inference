@@ -788,34 +788,7 @@ Outcome RoomEviction::evict(const Candidate &cand)
                     }
                 }
 
-                if (doorway_id == 0)
-                {
-                    std::uint64_t n = 0;
-                    for (const auto &dw : passages())
-                        if (const auto digits = trailing_index(dw.name()); not digits.empty())
-                        {
-                            std::uint64_t v = 0;
-                            if (std::from_chars(digits.data(), digits.data() + digits.size(), v).ec == std::errc{})
-                                n = std::max(n, v + 1);
-                        }
-                    // TYPE `metaconcept`, SUBTYPE "passage". Its registered comment in cortex is the
-                    // spec: "a concept OVER concepts (level-2): an arrangement/grouping that BELIEVES
-                    // in a relation among other nodes rather than in a solid body of its own" — an
-                    // abstract passage is exactly that, a relation between two rooms with no body.
-                    // ★ NOT the `door` node type, which only LOOKS vacant: door_concept's owned-node
-                    // sweep is {types object,door} x {name starts with "door"}
-                    // (common/owned_nodes/owned_nodes.h:58), so a door-typed node named doorway_*
-                    // would be deleted by name at door_concept's next startup if one ever existed in
-                    // the LIVE graph — silently, with nobody logging why. Immaterial on domain 2,
-                    // free to avoid.
-                    DSR::Node dw;
-                    dw.type("metaconcept");
-                    dw.name(std::format("passage_{}", n));
-                    mem_->add_or_modify_attrib_local<object_subtype_att>(dw, std::string("passage"));
-                    mem_->add_or_modify_attrib_local<level_att>(dw, 0);
-                    if (const auto id = mem_->insert_node(dw); id.has_value())
-                        doorway_id = id.value();
-                }
+                if (doorway_id == 0) doorway_id = mint_passage();
 
                 if (doorway_id != 0)
                 {
@@ -960,6 +933,38 @@ Outcome RoomEviction::evict(const Candidate &cand)
     if (cand.remove_old)
         out.live_removed = remove_live_room(cand.old_room_id);
     return out;
+}
+
+
+// A fresh abstract passage node (type `metaconcept`, subtype "passage"), numbered after the highest existing one. 0 on failure.
+std::uint64_t RoomEviction::mint_passage()
+{
+        std::uint64_t n = 0;
+        for (const auto &dw : passages())
+            if (const auto digits = trailing_index(dw.name()); not digits.empty())
+            {
+                std::uint64_t v = 0;
+                if (std::from_chars(digits.data(), digits.data() + digits.size(), v).ec == std::errc{})
+                    n = std::max(n, v + 1);
+            }
+        // TYPE `metaconcept`, SUBTYPE "passage". Its registered comment in cortex is the
+        // spec: "a concept OVER concepts (level-2): an arrangement/grouping that BELIEVES
+        // in a relation among other nodes rather than in a solid body of its own" — an
+        // abstract passage is exactly that, a relation between two rooms with no body.
+        // ★ NOT the `door` node type, which only LOOKS vacant: door_concept's owned-node
+        // sweep is {types object,door} x {name starts with "door"}
+        // (common/owned_nodes/owned_nodes.h:58), so a door-typed node named doorway_*
+        // would be deleted by name at door_concept's next startup if one ever existed in
+        // the LIVE graph — silently, with nobody logging why. Immaterial on domain 2,
+        // free to avoid.
+        DSR::Node dw;
+        dw.type("metaconcept");
+        dw.name(std::format("passage_{}", n));
+        mem_->add_or_modify_attrib_local<object_subtype_att>(dw, std::string("passage"));
+        mem_->add_or_modify_attrib_local<level_att>(dw, 0);
+        if (const auto id = mem_->insert_node(dw); id.has_value())
+            return id.value();
+    return 0;
 }
 
 //////////////////////////////////////////////////////////////////////////////////////////////////

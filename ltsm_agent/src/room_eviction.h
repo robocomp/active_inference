@@ -171,6 +171,9 @@ public:
     void release(const std::string &memory_room) { held_.erase(memory_room); }
     [[nodiscard]] bool held(const std::string &memory_room) const { return held_.contains(memory_room); }
 
+    /// Mint an empty abstract passage node in memory (shared by eviction and RoomSwap's carry-over). 0 on failure.
+    std::uint64_t mint_passage();
+
     /// BOOTSTRAP. With a single room and no `current` edge anywhere, place one. The let-go rule
     /// reads "a current edge exists AND points elsewhere", so a graph with no edge at all releases
     /// nothing — which is the fleet today, and is why somebody has to write the first one.
