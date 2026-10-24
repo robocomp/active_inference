@@ -300,6 +300,7 @@ private:
     //   knowledge acquired since that room's fresh entry can come back. A recalled room's restore is DEFERRED until its
     //   polygon is loaded (has_room_polygon), so the belief init associates the door with a wall, not the identity frame.
     std::unordered_set<std::string> recall_names_seen_;
+    std::unordered_set<std::string> recall_late_names_;   // the subset announced with recall_late (recognition swap)
 
     // ── LOOK AT A REMEMBERED DOOR (2026-10-21, tourP5; door_look.h) ─────────────────────────────────────────────
     // Each identity row of the CURRENT room whose door is not instantiated gets an epistemic "look here" affordance
@@ -321,7 +322,7 @@ private:
     void drop_looks(const char* why);
     std::uint64_t pending_restore_room_ = 0;
     void latch_recall_names();
-    void enter_room_memory(std::uint64_t room_id, bool first_resolution);   // decide recall/fresh; strip or arm the restore
+    void enter_room_memory(std::uint64_t room_id, bool first_resolution, const std::string& left_room = {});   // decide recall/fresh; strip or arm the restore
     void step_pending_restore();
     void restore_remembered_doors(std::uint64_t new_room);
 

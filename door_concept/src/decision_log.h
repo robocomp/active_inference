@@ -66,6 +66,8 @@ enum class DoorDecisionKind : std::uint16_t
     RestoreRename,
     // passage-anchor state change other than hang/remove (park, re-init, relink, mode, leaf): a,b,c = pose x,y,yaw, d=epoch; note=what
     AnchorState,
+    // a swap dropped the provisional room's identity row: name, note=room (the dead provisional name)
+    IdentityDrop,
     kCount_   // sentinel: keep LAST; kCount = number of kinds
 };
 inline constexpr std::uint16_t kCount = static_cast<std::uint16_t>(DoorDecisionKind::kCount_) - 1;

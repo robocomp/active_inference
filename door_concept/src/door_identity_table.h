@@ -341,6 +341,28 @@ inline int strip_restorable(std::vector<IdentityRow>& rows, std::string_view roo
     return n;
 }
 
+/// Room recognition swap (spec 2026-10-22): a room entered FRESH while ltsm had not yet recognised it is PROVISIONAL.
+/// When ltsm then posts a LATE recall (recall_late) for the room entered, that room is a recalled entry (its doors
+/// are restored) and the provisional room just left is dead: room names are never reused, so its identity rows go
+/// (drop_room), not merely stripped to identity. An early recall, or none, drops nothing.
+struct RoomEntryPlan { bool recalled = false; bool drop_left = false; };
+inline RoomEntryPlan plan_room_entry(bool first_resolution, bool recall_announced, bool recall_late,
+                                     std::string_view left_room, std::string_view entered_room)
+{
+    RoomEntryPlan p;
+    p.recalled = recall_announced and not first_resolution;
+    p.drop_left = p.recalled and recall_late and not left_room.empty() and left_room != entered_room;
+    return p;
+}
+
+/// Delete every identity row of `room`; returns the dropped door names (for the decision log).
+inline std::vector<std::string> drop_room(std::vector<IdentityRow>& rows, std::string_view room)
+{
+    std::vector<std::string> names;
+    std::erase_if(rows, [&](const IdentityRow& r) { if (r.room != room) return false; names.push_back(r.name); return true; });
+    return names;
+}
+
 /// The existence prior a restored door starts from: the remembered belief when one was written, else `default_L`
 /// (the agent passes Existence.BirthLogodds = 1.0 nats, P = 0.73 — the same moderate prior a fresh birth gets).
 /// ★A DIFFERENT CONVENTION FROM GHOST RE-ACQUISITION, on purpose (controller ruling 2026-10-20). A ghost is a door

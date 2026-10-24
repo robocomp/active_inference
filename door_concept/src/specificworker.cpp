@@ -3453,6 +3453,7 @@ void SpecificWorker::release_room(std::uint64_t old_room, std::uint64_t new_room
         if (const auto renamed = adopt_doorway_name(adopt_mirror, new_room, adopted_from->name); renamed != 0)
             adopt_mirror = renamed;
     remember_live_identities();   // the room we are leaving, under ITS name: room_node_id_ has not moved yet
+    const std::string left_room_name = current_room_name();   // cached: the left room may already be deleted
     if (fitter_)
     {
         std::vector<std::uint64_t> leaving;
@@ -3511,7 +3512,7 @@ void SpecificWorker::release_room(std::uint64_t old_room, std::uint64_t new_room
     install_carried_door(new_room, adopt_mirror, adopted_from);
     // AFTER the carry: the crossed door is live by now (or still HELD under its name for the late carry), so the
     // restore below cannot duplicate it.
-    enter_room_memory(new_room, false);
+    enter_room_memory(new_room, false, left_room_name);
     step_pending_restore();          // now, if the recalled outline is already loaded; else on a later cycle
 }
 
@@ -3523,21 +3524,42 @@ void SpecificWorker::latch_recall_names()
     for (const auto& n : G->get_nodes_by_type("metaconcept"))
         if (n.name().starts_with("recall_")
             and G->get_attrib_by_name<object_subtype_att>(n).value_or(std::string{}) == "room_recall")
-            if (const auto room = n.name().substr(7); not room.empty() and recall_names_seen_.insert(room).second)
+            if (const auto room = n.name().substr(7); not room.empty())
+            {
+                if (G->get_attrib_by_name<recall_late_att>(n).value_or(false))
+                    recall_late_names_.insert(room);
+                if (not recall_names_seen_.insert(room).second) continue;
                 std::print("door_concept: [restore] ltsm announces remembered '{}' behind a door — its doors will be "
                            "restored if the robot enters it\n", room);
+            }
 }
 
-void SpecificWorker::enter_room_memory(std::uint64_t room_id, bool first_resolution)
+void SpecificWorker::enter_room_memory(std::uint64_t room_id, bool first_resolution, const std::string& left_room)
 {
     pending_restore_room_ = 0;
     const auto room = G->get_node(room_id);
-    const bool recalled = room.has_value() and not first_resolution and recall_names_seen_.contains(room->name());
+    const auto plan = room.has_value()
+        ? rc::door::plan_room_entry(first_resolution, recall_names_seen_.contains(room->name()),
+                                    recall_late_names_.contains(room->name()), left_room, room->name())
+        : rc::door::RoomEntryPlan{};
+    const bool recalled = plan.recalled;
     recall_names_seen_.clear();      // a recall is evidence about ONE crossing only
+    recall_late_names_.clear();
     if (not room.has_value())
         return;
+    if (plan.drop_left)
+    {
+        // RECOGNITION SWAP: the provisional room is dead and its name is never reused: rows deleted, not stripped.
+        for (const auto& nm : rc::door::drop_room(identities_, left_room))
+            decision_log_.record(rc::door::DoorDecisionKind::IdentityDrop, 0, nm, 0, 0, 0, 0, left_room);
+        save_identities();
+        std::print("door_concept: [restore] provisional '{}' dropped — ltsm recognised the room as '{}' (late recall); its "
+                   "identity rows are deleted\n", left_room, room->name());
+    }
     if (recalled)
     {
+        std::print("door_concept: [restore] '{}' recalled{} — its remembered doors are restored once its outline loads\n",
+                   room->name(), plan.drop_left ? " (late)" : "");
         pending_restore_room_ = room_id;
         return;
     }
