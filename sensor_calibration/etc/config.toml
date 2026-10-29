@@ -70,6 +70,17 @@ wheel_rot_sigma_floor = 0.01
 gyro_sigma_rel = 0.01
 gyro_sigma_floor = 0.002
 
+# ── LiDAR mount factors (src/lidar_mount_stage.*; plan Phase 3, moved from room_concept 2026-10-29) ──
+# bpearl floor (roll, pitch, z), helios tilt (roll, pitch) from walls + ceiling, bpearl planar (x, y, yaw)
+# relative to the published room polygon. ESTIMATE + LOG only (tmp/mount_factors/mounts_<ts>.csv).
+# To PLANT a mount error in Webots, use robot_concept's overlay (etc/mount_calib_<robot>_webots.txt).
+[MountFactors]
+enabled = true
+rate_hz = 2.0              # COMPUTE budget: sweeps fed per second per LiDAR (room_concept's BpearlMountRate)
+pose_sigma_xy = 0.05       # m, WIDE per-sweep pose nuisance prior (never the localiser's own marginal)
+pose_sigma_yaw_deg = 2.0   # deg
+log_period_ms = 10000      # summary line + one mounts CSV row this often
+
 # ── Live dashboard window (src/specificworker_dashboard.cpp): DISPLAY ONLY ───────
 [Dashboard]
 show = true    # false: no window is built and nothing is fed (no cost)

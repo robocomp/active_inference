@@ -991,9 +991,6 @@ MotionCalibRotModelSigma = 0.030  # m per rad of turning, added in quadrature to
 MotionCalibLeverSigma = 0.05   # m. Prior on the helios lever arm (spec §5). Learnt only from ROTATION.
                         # Estimated always, applied only through LidarMountApply. Plan
                         # docs/superpowers/plans/2026-10-05-joint-calibration.md Task 1.
-JointCalibMonitor = true   # LOG ONLY: one joint posterior over odometry + helios mount + camera mounts per
-                           # motion solve -> tmp/joint_calib/joint_<ts>.csv. Changes nothing. Grade with
-                           # tools/joint_calib_report.py. Plan: docs/superpowers/plans/2026-10-05-joint-calibration.md
 LidarMountApply   = false  # apply the helios (lever_x, lever_y, yaw) to the points: the motion calibrator's
                            # ACTING values (taught + MotionCalibApply + MotionCalibApplyMask bits 1/7/8), so
                            # p_applied records exactly what acts. The yaw then acts on the points INSTEAD of
@@ -1006,29 +1003,20 @@ LidarMountInjectYawDeg = 0.0 # deg  Leave all three at 0 on the real robot -- ro
 # ── r2 (plan docs/superpowers/plans/2026-10-08-lidar-mounts-kinematic-floor.md): 6-DoF planted mount errors ──
 # ⚠ Since 2026-10-08 ALL LidarMountInject* form ONE Pose6 rotating about the SENSOR origin (lidar_mount.h), not
 # a Planar about the body origin: for X/Y/YawDeg = (0.03, -0.02, 1) the kinematic factor now reads a body-origin
-# lever of (27.3, -20) mm; the mounts monitor reports the Pose6 (30, -20) mm. ⚠ SIMULATION ONLY, all 0 here.
+# lever of (27.3, -20) mm. ⚠ SIMULATION ONLY, all 0 here.
 LidarMountInjectZ        = 0.0   # m
 LidarMountInjectRollDeg  = 0.0   # deg, about body X through the helios origin
 LidarMountInjectPitchDeg = 0.0   # deg, about body Y through the helios origin
-BpearlMountInjectX        = 0.0  # m    ⚠ SIMULATION ONLY: planted bpearl mount error, Pose6 about the bpearl origin
-BpearlMountInjectY        = 0.0  # m
-BpearlMountInjectZ        = 0.0  # m
-BpearlMountInjectRollDeg  = 0.0  # deg
-BpearlMountInjectPitchDeg = 0.0  # deg
-BpearlMountInjectYawDeg   = 0.0  # deg
-# The mount factors: helios (x, y, yaw) from the KINEMATIC factor (scan-only poses vs the calibrated odometry),
-# bpearl (z, roll, pitch) from the FLOOR, helios (roll, pitch) + bpearl (x, y, yaw relative to the helios) from
-# VERTICAL walls / the horizontal ceiling; fused with the cameras -> tmp/joint_calib/mounts_<ts>.csv (grade:
-# tools/joint_calib_report.py --mounts), per-cycle kinematic log tmp/mount_factors/kin_<ts>.csv. ESTIMATE + LOG
-# only: nothing here moves the published pose (LidarMountApply stays OFF).
+# The KINEMATIC mount factor: helios (x, y, yaw) from scan-only poses vs the calibrated odometry, per-cycle log
+# tmp/mount_factors/kin_<ts>.csv. ESTIMATE + LOG only: nothing here moves the published pose (LidarMountApply
+# stays OFF). The FLOOR (bpearl z, roll, pitch) and VERTICAL (helios roll, pitch; bpearl x, y, yaw) factors, the
+# bpearl injection and the joint monitor moved out on 2026-10-29: they run in sensor_calibration ([MountFactors]);
+# plant a mount error for them through robot_concept's overlay (etc/mount_calib_<robot>_webots.txt).
 # ⚠ BEHAVIOUR CHANGE WHEN TRUE (r2.2 item 4, single owner): the kinematic factor owns the helios yaw, so
 # eps_yaw STOPS ACTING ON THE ODOMETRY -- room_config sets motion_calib.lidar_side_yaw AND clears the eps_yaw
 # apply bit (unless LidarMountApply puts it on the points), so p_applied records 0 for it. eps_yaw is still
 # estimated and logged. The acting value (yaw_offset) is logged per row and must read 0.
 MountFactors      = true
-BpearlMountRate   = 2.0    # Hz: floor/vertical sweeps per second (bpearl + the full helios sweep), ingest thread
-MountPoseSigmaXY  = 0.05   # m   WIDE prior of the vertical factor's per-sweep pose nuisance (pose-field sigma,
-MountPoseSigmaYawDeg = 2.0 # deg never the solver's own marginal -- r2.2 item 6)
 MotionCalibFitModelGain  = 2.0    # x mean |SDF| over the episode, into the position R. Also the
                         # header default. A correction can only be as good as the FIT that produced
                         # it: when the localiser is not tracking, the optimizer fires nearly every

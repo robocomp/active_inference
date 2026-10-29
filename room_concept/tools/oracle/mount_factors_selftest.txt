@@ -45,40 +45,5 @@ Part 1 D: replay pins on logged Webots runs (plant (30, -20) mm, +1 deg)
   [PASS] D: all three DETECTED with the planted signs
   [PASS] D: dy and psi agree with the plant (2 sigma)
   [INFO] D: dx agrees with the plant (2 sigma) -- KNOWN SHORTFALL on this run, r2.2 item 8 (see the diagnosis; not asserted)
-Part 2: FloorPlaneMount (bpearl roll, pitch, z from the floor seen head-on)
-    A clean floor                  roll +0,500 +- 0,0050 deg | pitch -0,799 +- 0,0050 deg | dz +10,04 +- 0,71 mm | share 0,85 sigma_f 5,1 mm
-  [PASS] A: planted roll 0.5, pitch -0.8 deg, dz 10 mm recovered (2 sigma + 1 % linearisation)
-    B 20% furniture near           roll +0,500 +- 0,0050 deg | pitch -0,802 +- 0,0050 deg | dz +10,02 +- 0,71 mm | share 0,69 sigma_f 5,0 mm
-  [PASS] B: 20 % of near floor points on furniture -> still recovered (mixture, no band)
-    C per-sweep floor offset 5 mm  roll +0,501 +- 0,0050 deg | pitch -0,801 +- 0,0050 deg | dz +10,22 +- 0,71 mm | share 0,82 sigma_f 5,0 mm
-    sigma_flat/sqrt(sweeps) = 0,50 mm
-  [PASS] C: dz sigma does not collapse below ~sigma_flat/sqrt(sweeps)
-  [PASS] C: and the planted values are still recovered
-  [PASS] C: the per-sweep dz nuisance does NOT absorb roll/pitch (tilt stays sharp)
-Part 3: VerticalMount (helios tilt from walls + ceiling; bpearl planar relative to the map)
-    A helios tilt 0.7/-0.4 deg       dx  +0,0+-50,0 dy  +0,0+-50,0 dz  +0,0+-20,0 mm | roll +0,699+-0,007 pitch -0,400+-0,007 yaw +0,000+-1,000 deg | share 1,00 sw 10,0 mm
-  [PASS] A: helios roll/pitch recovered within 2 sigma (+1 % linearisation)
-  [PASS] A: and informed (sigma < 0.05 deg)
-    C pose error 3 cm/1 deg, no tilt dx  +0,0+-50,0 dy  +0,0+-50,0 dz  +0,0+-20,0 mm | roll +0,000+-0,007 pitch -0,000+-0,007 yaw +0,000+-1,000 deg | share 0,99 sw 10,3 mm
-  [PASS] C: per-sweep pose error does NOT leak into tilt (within 2 sigma of 0)
-    D helios dz 2 cm                 dx  +0,0+-50,0 dy  +0,0+-50,0 dz  +0,0+-20,0 mm | roll +0,000+-0,009 pitch +0,003+-0,009 yaw +0,000+-1,000 deg | share 1,00 sw 10,0 mm
-  [PASS] D: helios dz stays at its prior (sigma == prior, mean 0)
-    E helios lever 30 mm + 1 deg yaw dx  +0,0+-50,0 dy  +0,0+-50,0 dz  +0,0+-20,0 mm | roll -0,000+-0,009 pitch +0,003+-0,009 yaw +0,000+-1,000 deg | share 0,99 sw 10,2 mm
-  [PASS] E: the vertical factor gives the helios ZERO planar information (sigma == prior)
-  [PASS] E: and the lever is not read as tilt
-    B bpearl planar 20/-30 mm, 0.8 deg dx +20,3+- 3,0 dy -30,3+- 3,0 dz  +0,0+-20,0 mm | roll +0,000+-1,000 pitch +0,000+-1,000 yaw +0,778+-0,107 deg | share 0,15 sw 9,7 mm
-  [PASS] B: bpearl planar (relative) recovered within 2 sigma
-  [PASS] B: and detected
-  [PASS] B: bpearl verticals carry NO tilt/z (the floor owns those)
-
-P. place-level common mode (PlaceCells)
-    one parked place + 200 others: est (+0,2, -0,2) mm (+0,00 deg), sd (2,1, 2,1) mm
-  [PASS] P1 the parked place counts as ONE place (est ~ 0)
-    without the place nuisance: est (+34,1, -22,8) mm
-  [PASS] P2 control: without it the parked view dominates (the live defect)
-  [PASS] P3 one place saturates at 1/sigma_place^2
-  [PASS] P4 forgotten cells are pruned
-  [PASS] P5 same cell, same key
-  [PASS] P5 other heading octant, other key
 ALL PASS (0 failures)
 [exit 0]

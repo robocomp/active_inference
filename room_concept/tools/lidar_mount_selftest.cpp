@@ -2,7 +2,7 @@
 // to helios points after the DSR device->body transform.
 //
 //   g++ -std=c++23 -O2 -I/usr/include/eigen3 tools/lidar_mount_selftest.cpp -o /tmp/lidar_mount_selftest && /tmp/lidar_mount_selftest
-#include "../src/lidar_mount.h"
+#include "sensor_calib/lidar_mount.h"
 #include <cmath>
 #include <cstdio>
 static int failures = 0;

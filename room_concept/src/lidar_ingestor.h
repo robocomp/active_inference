@@ -36,8 +36,7 @@
 #include <genericworker.h>          // DSR API
 
 #include "buffer_types.h"           // rc::HighLidarBuffer, rc::LidarData (+ Eigen)
-#include "lidar_mount.h"            // rc::lidar_mount::Planar (plan 2026-10-05 Task 5), Pose6 (2026-10-08 Task 4)
-#include "mount_factors.h"          // rc::mountf floor / vertical factors (plan 2026-10-08)
+#include "sensor_calib/lidar_mount.h"   // rc::lidar_mount::Planar (plan 2026-10-05 Task 5), Pose6 (2026-10-08 Task 4)
 #include "room_concept.h"           // rc::RoomConcept (notify_new_lidar)
 #include "room_config.h"            // rc::RoomConfig (shared config)
 
@@ -95,25 +94,12 @@ public:
     /// The r1 helios CORRECTION T_corr (LidarMountApply; identity by default), applied to every helios point
     /// right after the DSR device->body transform and AFTER the sim-only injection below.
     /// ⚠ CHANGED 2026-10-08 (plan r2 Task 4): this used to hold compose(T_corr, T_inject) with a Planar
-    /// injection; the injection is now a Pose6 per LiDAR applied first (inject_helios_/inject_bpearl_), so
+    /// injection; the injection is now a Pose6 applied first (inject_helios_), so
     /// the main thread sets T_corr ALONE. Same order as before: T_corr(T_inject(p)). Thread-safe (mutex).
     void set_mount_extra(const rc::lidar_mount::Planar& t);
     [[nodiscard]] rc::lidar_mount::Planar mount_extra() const;
-    /// The sim-only 6-DoF injections (inverse of the planted Pose6, about each sensor's origin).
+    /// The sim-only 6-DoF helios injection (inverse of the planted Pose6, about the sensor's origin).
     [[nodiscard]] const rc::lidar_mount::Pose6& inject_helios() const noexcept { return inject_helios_; }
-    [[nodiscard]] const rc::lidar_mount::Pose6& inject_bpearl() const noexcept { return inject_bpearl_; }
-
-    /// ── r2 MOUNT FACTORS on this (ingest) thread: floor (bpearl) + verticals (helios tilt, bpearl planar) ──
-    /// A COPY for the main thread's joint monitor (plan 2026-10-08 Task 5), taken under a mutex.
-    struct MountFactorSnapshot
-    {
-        rc::mountf::Info3 floor;                 ///< bpearl (droll, dpitch, dz)
-        rc::mountf::Info6 vert_helios, vert_bpearl;
-        Eigen::Vector3d s_helios{0.0, -0.155, 1.1075}, s_bpearl{0.0, 0.14, 0.7025};   ///< Shadow frame
-        double floor_share = 0.0, floor_sigma = 0.0, wall_sigma_h = 0.0, wall_sigma_b = 0.0;
-        bool origins_from_graph = false;
-    };
-    [[nodiscard]] MountFactorSnapshot mount_factor_snapshot() const;
 
 private:
     // Ingest-thread body: tightly paced poll of the reader so a fresh scan reaches the localizer with
@@ -138,42 +124,28 @@ private:
 
     mutable std::mutex       mount_mx_;
     rc::lidar_mount::Planar  mount_extra_{};    ///< guarded by mount_mx_ (the r1 correction only)
-    rc::lidar_mount::Pose6   inject_helios_{}, inject_bpearl_{};   ///< constant after construction
+    rc::lidar_mount::Pose6   inject_helios_{};  ///< constant after construction
 
-    // ── r2 mount factors (ingest thread only, except the snapshot) ──
-    /// Throttled (BpearlMountRate): helios verticals from the FULL helios sweep, then the bpearl (permanent
-    /// reader, bpearl_reader_ shared) for the floor and its verticals.
-    void mount_factor_step(const std::vector<Eigen::Vector3f>& helios_full, std::int64_t helios_stamp_ms);
     /// 2 Hz: low returns (floor < z < robot top) of the full helios sweep and the bpearl -> RoomConcept mailbox.
     void low_obstacle_step(const std::vector<Eigen::Vector3f>& helios_full, std::int64_t helios_stamp_ms);
     std::int64_t low_obs_ms_ = 0, last_bp_low_stamp_ = std::numeric_limits<std::int64_t>::min();
-    // ── ONE bpearl reader, shared by its three consumers (2026-10-10) ──
-    // The startup floor check, the r2 mount factors and the low-obstacle mailbox each used to own a
+    // ── ONE bpearl reader, shared by its consumers (2026-10-10) ──
+    // The startup floor check and the low-obstacle mailbox (and, until 2026-10-29, the r2 mount factors,
+    // now in the sensor_calibration agent) each used to own a
     // LidarPlaneReader on "bpearl" — two live DDS subscribers on the same stream, every sweep transferred
     // twice. poll() returns nullopt when nothing is NEW, so a second consumer polling the same reader would
     // starve; the newest sweep is therefore CACHED here and each consumer de-duplicates by its own stamp.
-    // Ingest thread only (all three consumers run there), so no lock. Consumers that modify points (the
-    // sim-only planted mount error) do so on their OWN copy, never on the cache.
+    // Ingest thread only (all consumers run there), so no lock. Consumers never modify the cache.
     std::unique_ptr<rc::media::LidarPlaneReader> bpearl_reader_;
     std::optional<rc::media::LidarSweep>         bpearl_latest_;
     /// Poll the shared reader (creating it lazily) and return the newest bpearl sweep ever seen, or
     /// nullptr if none yet. Callers compare stamp_ms against their own last-consumed stamp.
     const rc::media::LidarSweep* bpearl_newest();
     std::int64_t last_bp_geom_stamp_ = std::numeric_limits<std::int64_t>::min();
-    /// The localiser's wall map in the BODY frame at the pose carried to `stamp_ms`; false if none yet.
-    /// gap_s / speed / heading (optional): the stamp gap sweep - snapshot, the snapshot's speed and heading
-    bool walls_at(std::int64_t stamp_ms, std::vector<rc::mountf::VerticalMount::Wall>& walls,
-                  float* gap_s = nullptr, float* speed = nullptr, float* heading = nullptr,
-                  std::int64_t* place = nullptr) const;   ///< place: rc::mountf::place_key of the carried pose
-    std::ofstream bp_sweep_csv_;   ///< tmp/mount_factors/bpearl_sweeps_<ts>.csv — per-sweep bpearl planar reading
+    /// The helios origin in LIDAR_ROBOT_FRAME, from the DSR RT chain (the sim-only injection rotates about it).
     void resolve_sensor_origins();
-    rc::mountf::FloorPlaneMount floor_bp_;
-    rc::mountf::VerticalMount   vert_h_, vert_bp_;
-    std::int64_t mount_step_ms_ = 0, last_bp_mount_stamp_ = std::numeric_limits<std::int64_t>::min();
-    Eigen::Vector3f s_helios_{0.f, -0.155f, 1.1075f}, s_bpearl_{0.f, 0.14f, 0.7025f};   // r2.2 item 5 fallbacks
-    bool origins_resolved_ = false, origins_from_graph_ = false;
-    mutable std::mutex mf_mx_;
-    MountFactorSnapshot mf_snap_;                ///< guarded by mf_mx_
+    Eigen::Vector3f s_helios_{0.f, -0.155f, 1.1075f};   // r2.2 item 5 fallback until the RT chain resolves
+    bool origins_resolved_ = false;
 
     std::shared_ptr<DSR::DSRGraph> G_;
     rc::RoomConcept*      room_concept_ = nullptr;

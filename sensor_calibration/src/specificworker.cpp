@@ -51,6 +51,20 @@ SpecificWorker::SpecificWorker(const ConfigLoader& configLoader, TuplePrx tprx, 
         h.odo_sigma_per_rad  = cfg.d("Harvester.odo_sigma_per_rad", h.odo_sigma_per_rad, "odometry translation error per radian rotated between the two keyframes (m/rad)");
     }
 
+    {
+        const rc::cfg::Reader cfg(configLoader, "sensor_calibration");
+        mount_factors_enabled_ = cfg.b("MountFactors.enabled", mount_factors_enabled_,
+                "run the floor + vertical LiDAR mount factors (estimate + log only)");
+        mount_cfg_.rate_hz = cfg.d("MountFactors.rate_hz", mount_cfg_.rate_hz,
+                "sweeps fed per second per LiDAR (Hz): a COMPUTE budget");
+        mount_cfg_.pose_sigma_xy = cfg.d("MountFactors.pose_sigma_xy", mount_cfg_.pose_sigma_xy,
+                "m, WIDE per-sweep pose nuisance prior of the vertical factor (never the localiser's marginal)");
+        mount_cfg_.pose_sigma_yaw_deg = cfg.d("MountFactors.pose_sigma_yaw_deg", mount_cfg_.pose_sigma_yaw_deg,
+                "deg, WIDE per-sweep pose-yaw nuisance prior of the vertical factor");
+        mount_log_period_ms_ = cfg.i("MountFactors.log_period_ms", mount_log_period_ms_,
+                "summary line + mounts CSV row period (ms)");
+    }
+
     dashboard_show_ = rc::cfg::Reader(configLoader, "sensor_calibration").b("Dashboard.show", true,
             "open the live trajectory-fragment dashboard window (display only; false = no window and no cost)");
 
@@ -166,6 +180,8 @@ void SpecificWorker::compute()
     for (const auto& o : inputs_->take_odometry())
         harvester_->add_odometry(o.source_ts_ms, o.adv, o.side, o.rot);
     for (const auto& l : inputs_->take_lidar())
+    {
+        feed_mount_factors(l);
         if (l.sensor == "helios")
         {
             const bool stalled = inputs_->stalled("helios") or inputs_->any_stalled();
@@ -175,6 +191,7 @@ void SpecificWorker::compute()
                 dash_model_->note_lidar_stamp(l.stamp_ms, std::chrono::duration_cast<std::chrono::milliseconds>(
                         std::chrono::system_clock::now().time_since_epoch()).count());
         }
+    }
     for (const auto& m : inputs_->take_imu())
         harvester_->add_gyro(m.stamp_ms, m.gyro.z());   // yaw rate about the IMU z axis (assumed up: pin with the mount)
     (void)inputs_->take_images();                       // cameras: not consumed by the trajectory part
@@ -193,6 +210,29 @@ void SpecificWorker::compute()
     }
     refresh_dashboard();
     fps.print("sensor_calibration compute", 3000);
+}
+
+// Floor + vertical LiDAR mount factors (plan Phase 3). A stalled stream's sweeps are not used (sensor_inputs
+// contract); a sweep without a resolvable robot-frame mount is skipped (nothing to put the points in).
+void SpecificWorker::feed_mount_factors(const sc::LidarIn& l)
+{
+    if (not mount_factors_enabled_ or inputs_->stalled(l.sensor) or not l.robot_from_sensor.has_value())
+        return;
+    if (not mount_stage_)
+        mount_stage_ = std::make_unique<sc::LidarMountStage>(mount_cfg_);
+    const auto& poly = inputs_->polygon();
+    // room_concept's factor used the MEASURED ceiling only (0 = no ceiling rows); a configured height has sigma 0.
+    const float ceiling = poly.ceiling_sigma_m > 0.f ? poly.ceiling_m : 0.f;
+    mount_stage_->observe({.sensor = l.sensor, .stamp_ms = l.stamp_ms, .points_robot = l.points_robot(),
+                           .origin_robot = l.robot_from_sensor->translation(), .room_T_robot = l.room_T_robot},
+                          poly.vertices, ceiling);
+    if (const auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count(); now - mount_log_ms_ >= mount_log_period_ms_)
+    {
+        mount_log_ms_ = now;
+        mount_stage_->log_state(now);
+        qInfo().noquote() << QString::fromStdString(mount_stage_->summary());
+    }
 }
 
 void SpecificWorker::emergency()

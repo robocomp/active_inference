@@ -77,3 +77,9 @@ SET_TARGET_PROPERTIES( proposal_publisher_test PROPERTIES RUNTIME_OUTPUT_DIRECTO
 ADD_EXECUTABLE( dashboard_model_test EXCLUDE_FROM_ALL ../tests/dashboard_model_test.cpp ../src/dashboard_model.cpp )
 TARGET_LINK_LIBRARIES( dashboard_model_test ai_common::sensor_calib Eigen3::Eigen )
 SET_TARGET_PROPERTIES( dashboard_model_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../bin )
+
+# Plan Phase 3: floor + vertical LiDAR mount factors (moved from room_concept) and the agent's stage. Pure Eigen.
+#   make -C build mount_factors_test && ../bin/mount_factors_test
+ADD_EXECUTABLE( mount_factors_test EXCLUDE_FROM_ALL ../tests/mount_factors_test.cpp ../src/lidar_mount_stage.cpp )
+TARGET_LINK_LIBRARIES( mount_factors_test Eigen3::Eigen )
+SET_TARGET_PROPERTIES( mount_factors_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../bin )

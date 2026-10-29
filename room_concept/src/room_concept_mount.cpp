@@ -27,7 +27,7 @@
 namespace rc
 {
 
-    // ── r2 KINEMATIC MOUNT FACTOR (mount_factors.h; plan docs/superpowers/plans/2026-10-08-lidar-mounts-kinematic-floor.md
+    // ── r2 KINEMATIC MOUNT FACTOR (kinematic_mount.h; plan docs/superpowers/plans/2026-10-08-lidar-mounts-kinematic-floor.md
     //    Tasks 1, 1b, 5; r2.2 items 1, 4). Called from observe_innovation on `fed` cycles only. ──────────────
     // T's columns are (FORWARD, LATERAL, heading) in world coordinates, so T.col(0).dot(delta) is the forward
     // innovation and odom_body = (forward, lateral, dtheta) -- named fields in Cycle, never a positional pair.

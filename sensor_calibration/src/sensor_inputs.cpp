@@ -36,6 +36,17 @@ std::vector<Eigen::Vector3f> LidarIn::points_body() const
     return out;
 }
 
+std::vector<Eigen::Vector3f> LidarIn::points_robot() const
+{
+    std::vector<Eigen::Vector3f> out;
+    if (not robot_from_sensor.has_value())
+        return out;
+    out.reserve(points_sensor.size());
+    for (const auto& p : points_sensor)
+        out.emplace_back(*robot_from_sensor * p);
+    return out;
+}
+
 Eigen::Matrix3d invert_pose_covariance_se2(const Eigen::Matrix3d& cov, double x, double y, double th)
 {
     // Jacobian of g(t, th) = (-R(th)^T t, -th) at (x, y, th). g is an involution, so the same formula at the stored
@@ -143,6 +154,41 @@ std::optional<Eigen::Affine3f> SensorInputs::body_from_sensor(const std::string&
     return Eigen::Affine3f(Eigen::Matrix4f(T->matrix().cast<float>()));
 }
 
+std::optional<Eigen::Affine3f> SensorInputs::robot_from_sensor(const std::string& sensor, std::int64_t stamp_ms) const
+{
+    if (robot_name_.empty())
+        return std::nullopt;
+    if (stamp_ms <= 0)
+        stamp_ms = wall_ms();   // never ts==0: that is the cached path
+    const auto T = inner_->get_transformation_matrix(robot_name_, sensor, static_cast<std::uint64_t>(stamp_ms), "RT",
+                                                     DSR::RT_API::TimeQuery::Nearest);
+    if (not T.has_value())
+        return std::nullopt;
+    return Eigen::Affine3f(Eigen::Matrix4f(T->matrix().cast<float>()));
+}
+
+std::optional<Eigen::Affine3d> SensorInputs::room_T_robot_at(std::int64_t stamp_ms, double* walk_ms) const
+{
+    if (walk_ms) *walk_ms = 0.0;
+    if (not room_id_.has_value() or robot_id_ == 0 or stamp_ms <= 0)
+        return std::nullopt;
+    const auto robot = G_->get_node(robot_id_);
+    if (not robot.has_value())
+        return std::nullopt;
+    const auto e = DSR::RT_API::get_edge_RT(robot.value(), *room_id_);
+    if (not e.has_value())
+        return std::nullopt;
+    DSR::RT_API::TimeQueryInfo info;
+    const auto T = rt_->get_edge_RT_as_rtmat(e.value(), static_cast<std::uint64_t>(stamp_ms),
+                                             DSR::RT_API::TimeQuery::Extrapolated, &info);
+    // Stale/Clamped return an end block AS-IS: a pose from another instant is not evidence for this one.
+    if (not T.has_value() or info.clamped())
+        return std::nullopt;
+    if (walk_ms) *walk_ms = static_cast<double>(info.applied_dt_ms);
+    const Eigen::Affine3d& robot_T_room = *T;   // the edge as stored: the room in the robot frame
+    return robot_T_room.inverse();
+}
+
 void SensorInputs::ensure_subscribers()
 {
     const auto now = Clock::now();
@@ -214,6 +260,8 @@ void SensorInputs::drain_lidar(const std::string& sensor, rc::media::LidarSubscr
                 s.points_sensor.emplace_back(x, y, z);
         }
         s.body_from_sensor = body_from_sensor(sensor, s.stamp_ms);
+        s.robot_from_sensor = robot_from_sensor(sensor, s.stamp_ms);
+        s.room_T_robot = room_T_robot_at(s.stamp_ms, &s.pose_walk_ms);
         push(lidar_q_, std::move(s), cfg_.max_lidar_queue);
     });
 }
@@ -278,6 +326,8 @@ void SensorInputs::poll_graph()
     if (robots.empty())
         return;
     const auto& robot = robots.front();
+    robot_name_ = robot.name();
+    robot_id_ = robot.id();
 
     // ── odometry: the same attributes room_concept's slot reads, polled here (no DSR signal) ──
     {
@@ -305,6 +355,7 @@ void SensorInputs::poll_graph()
 
     // ── pose + covariance on the robot -> room RT edge, as residual_concept reads it ──
     const auto room = rc::room::current_room(*G_);
+    room_id_ = room;
     if (not room.has_value())
         return;
     // The edge carries a HISTORY RING (rt_translation holds several blocks), so the raw attributes are not "the
@@ -351,6 +402,8 @@ void SensorInputs::poll_graph()
             const auto px = G_->get_attrib_by_name<delimiting_polygon_x_att>(rn.value());
             const auto py = G_->get_attrib_by_name<delimiting_polygon_y_att>(rn.value());
             PolygonIn poly; poly.room_id = *room;
+            poly.ceiling_m = G_->get_attrib_by_name<room_height_att>(rn.value()).value_or(0.f);
+            poly.ceiling_sigma_m = G_->get_attrib_by_name<room_height_sigma_att>(rn.value()).value_or(0.f);
             if (px.has_value() and py.has_value())
             {
                 const auto& xs = px->get(); const auto& ys = py->get();

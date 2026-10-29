@@ -269,7 +269,7 @@ void SpecificWorker::compute()
     if (status_stream_ and loc_res.has_value())
         status_.observe(*loc_res);   // scalars only; the snapshot timer serialises them
     t_loc_fetch_us = section_timer.nsecsElapsed() / 1000;
-    joint_calibration_step(loc_res);   // plan 2026-10-05: joint calib monitor (logs only unless LidarMountApply)
+    lidar_mount_apply_step(loc_res);   // LidarMountApply (default off) + camera evidence re-reference
 
     const Eigen::Affine2f pose_for_draw = viewer_->best_available_pose(loc_res, have_loc);
     
@@ -400,28 +400,26 @@ void SpecificWorker::compute()
     fps_counter_.print("[Compute]", 3000);
 }
 
-// ── JOINT CALIBRATION (plan docs/superpowers/plans/2026-10-05-joint-calibration.md) ──────────────
-// Task 4, MONITOR: once per new motion solve, one joint posterior over odometry + helios mount + every
-// camera mount -> tmp/joint_calib/. Logs only.
-// ⚠ DEVIATION from the plan's call site: the motion block is read from the localizer's RESULT
-//   (UpdateResult::calib_information, a copy made on the localizer thread), not by reaching into
-//   room_concept_.motion_calibrator() -- that calibrator is fed on the LOCALIZER thread and its
-//   episode deque must not be iterated from this one. The camera pools are fed here, on the main
-//   thread, so they are read directly. The trigger is the monotonic episode counter
-//   (calib_episodes), not last_solve().episodes, which saturates at the 512-episode window.
-//
-// Task 5, LiDAR-SIDE CORRECTION (LidarMountApply, default OFF), every cycle:
+// ── LiDAR-SIDE CORRECTION (plan docs/superpowers/plans/2026-10-05-joint-calibration.md, Task 5) ──────────
+// LidarMountApply (default OFF), every cycle:
 //   T_corr = Planar{lever_x, lever_y, eps_yaw / kEpsPerLidarYaw} from the motion calibrator's ACTING
 //   values (calib_applied bit set), points get compose(T_corr, T_inject).
-// ⚠ DEVIATION: the plan takes T_corr from the JOINT posterior. The acting MOTION values are used
-//   instead because p_applied (which undoes the feedback) records exactly those; applying the joint's
-//   value would act a number p_applied never hears about -- the Review Focus #2 failure. The joint
-//   remains the logged monitor.
+// The acting MOTION values are used because p_applied (which undoes the feedback) records exactly those.
 // Camera evidence is then re-referenced to the LiDAR frame in force (camcal::Estimator::
-// reference_to_lidar_yaw, idempotent, persisted), and the joint refers it back through
-// CameraBlock::lidar_yaw_applied. Runs whatever the flag, so evidence left referenced to a correction
-// from an earlier session is brought back to the frame now in force.
-void SpecificWorker::joint_calibration_step(const std::optional<rc::RoomConcept::UpdateResult>& loc_res)
+// reference_to_lidar_yaw, idempotent, persisted). Runs whatever the flag, so evidence left referenced to a
+// correction from an earlier session is brought back to the frame now in force.
+// The joint MONITOR (odometry + helios + bpearl + camera mounts -> tmp/joint_calib/, logs only) and the r2
+// floor/vertical mount factors were retired from room_concept 2026-10-29: the floor/vertical factors run in
+// the sensor_calibration agent (sensor_calibration plan, Phase 3).
+namespace
+{
+    /// eps_yaw = k * psi_h. eps acts on the odometry heading (room_concept.cpp: theta_mid + yaw_offset())
+    /// and the localiser reads theta_true + psi_h, so the closed loop cancels iff eps = -psi_h
+    /// (Fable review 1b). ⚠ TO BE CONFIRMED LIVE (joint-calibration plan Task 6 check 2, the yaw-only leg).
+    constexpr float kEpsPerLidarYaw = -1.f;
+}
+
+void SpecificWorker::lidar_mount_apply_step(const std::optional<rc::RoomConcept::UpdateResult>& loc_res)
 {
     if (not loc_res.has_value()) return;
     const double yaw_sigma = params.IMAGE_EDGE_MOUNT_YAW_SIGMA;
@@ -431,8 +429,8 @@ void SpecificWorker::joint_calibration_step(const std::optional<rc::RoomConcept:
         const auto acting = [&](int i)
         { return ((loc_res->calib_applied >> i) & 1) ? loc_res->calib_value[i] : 0.f; };
         const rc::lidar_mount::Planar T_corr{acting(rc::calib::P_LEVER_X), acting(rc::calib::P_LEVER_Y),
-                                             acting(rc::calib::P_EPS_YAW) / rc::joint::kEpsPerLidarYaw};
-        // The sim-only injection is now applied by the ingestor itself, BEFORE this (Pose6, plan 2026-10-08
+                                             acting(rc::calib::P_EPS_YAW) / kEpsPerLidarYaw};
+        // The sim-only injection is applied by the ingestor itself, BEFORE this (Pose6, plan 2026-10-08
         // Task 4): T_corr alone here, same order T_corr(T_inject(p)) as before.
         lidar_ingestor_->set_mount_extra(T_corr);
         psi_app = T_corr.yaw;
@@ -440,43 +438,6 @@ void SpecificWorker::joint_calibration_step(const std::optional<rc::RoomConcept:
     if (mount_) mount_->pool().reference_to_lidar_yaw(psi_app, yaw_sigma);
     if (calib_)
         for (auto& ch : calib_->channels()) ch->calib.reference_to_lidar_yaw(psi_app, yaw_sigma);
-
-    if (not params.JOINT_CALIB_MONITOR) return;
-    const Eigen::Vector4d unit(params.IMAGE_EDGE_MOUNT_PITCH_SIGMA, params.IMAGE_EDGE_MOUNT_HEIGHT_SIGMA,
-                               yaw_sigma, 1.0);
-    const auto cameras = [&]
-    {
-        std::vector<rc::joint::CameraBlock> cams;
-        if (mount_)
-            cams.push_back({params.IMAGE_EDGE_CAMERA, mount_->pool().marginal_information(unit), mount_->pool().lidar_yaw_ref()});
-        if (calib_)
-            for (const auto& ch : calib_->channels())
-                cams.push_back({ch->name, ch->calib.marginal_information(unit), ch->calib.lidar_yaw_ref()});
-        return cams;
-    };
-    // ── r2 MOUNTS MONITOR (plan 2026-10-08 Task 5), ~1 Hz on the LiDAR clock: helios 6 + bpearl 6 + cameras from
-    //    the kinematic block (a COPY in UpdateResult, localizer thread) and the floor/vertical blocks (a COPY from
-    //    the ingestor's snapshot, ingest thread). LOG ONLY -> tmp/joint_calib/mounts_<ts>.csv. The r1 motion block
-    //    is deliberately NOT an input (single owner, r2.2 item 4). ──
-    if (params.MOUNT_FACTORS and lidar_ingestor_ and loc_res->timestamp_ms - mount_monitor_ms_ >= 1000)
-    {
-        mount_monitor_ms_ = loc_res->timestamp_ms;
-        const auto mf = lidar_ingestor_->mount_factor_snapshot();
-        rc::joint::MountBlocks B;
-        B.kinematic   = loc_res->mount_kin_info;
-        B.floor       = mf.floor;
-        B.vert_helios = mf.vert_helios;
-        B.vert_bpearl = mf.vert_bpearl;
-        B.s_helios = mf.s_helios; B.s_bpearl = mf.s_bpearl;
-        // the helios band's mean height above the helios origin: where its tilt moves the 2-D scan (r2.2 item 7)
-        B.band_dz = 0.5 * (double(params.LIDAR_HIGH_MIN_HEIGHT) + double(params.LIDAR_HIGH_MAX_HEIGHT)) - mf.s_helios.z();
-        rc::joint::MountMonitor::Extra ex; ex.yaw_offset = loc_res->mount_yaw_offset;
-        mount_monitor_.observe(loc_res->timestamp_ms, B, cameras(), ex);
-    }
-    const int ep = loc_res->calib_episodes;
-    if (ep == joint_last_episodes_ or loc_res->calib_information.episodes <= 0) return;
-    joint_last_episodes_ = ep;
-    joint_monitor_.observe(loc_res->timestamp_ms, ep, loc_res->calib_information, cameras());
 }
 
 void SpecificWorker::initialize_room_model_from_svg()

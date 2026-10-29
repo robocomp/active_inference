@@ -312,3 +312,31 @@ poly=Nv` with no `STALLED`.
   - A stall hold extrapolates the last rate (gated only by the input layer).
   - The stale sweep in `sensor_calibration` uses a placeholder `metaconcept` type and a name-prefix match.
   - The selftests are EXCLUDE_FROM_ALL and not registered with ctest.
+
+## Status after Phase 3 (2026-10-29, branch feat/sensor-calib-phase3)
+
+Tasks 3.1–3.3 DONE (no live run yet).
+- **3.1** `common/sensor_calib/mount_factors.h` (Info3/Info6, PlaceCells, place_key, FloorPlaneMount, VerticalMount) and
+  `common/sensor_calib/lidar_mount.h` are shared. `KinematicMount` split out to `room_concept/src/kinematic_mount.h`.
+- **3.2** `sensor_calibration/src/lidar_mount_stage.*` runs the floor + vertical factors, `[MountFactors]` config,
+  logs `tmp/mount_factors/{mounts,bpearl_sweeps}_<ts>.csv` + a `[mounts]` line every 10 s. Inputs now carry the
+  robot (Shadow) frame mount, the pose AT the sweep stamp (`TimeQuery::Extrapolated`; Stale/Clamped = no pose) and
+  the room's `room_height`. Test: `mount_factors_test` (parts 2/3/P byte-identical to the pre-move oracle, + part S).
+- **3.3** Removed from room_concept: `mount_factor_step`, `walls_at`, the mount snapshot, `BpearlMountInject*`,
+  `BpearlMountRate`, `MountPoseSigma*`, the joint monitor (`joint_calibration.h`, `joint_calib_monitor.h`,
+  `JointCalibMonitor`, `UpdateResult::{calib_information, mount_kin_info, mount_yaw_offset}`), their selftests and
+  `tools/joint_calib_report.py`. `RoomConcept.MountFactors` STAYS: it gates the kinematic factor AND the single-owner
+  rule (`lidar_side_yaw`, eps apply bit), so it is not log-only.
+
+**Rulings:**
+- Equivalence (Review Focus 5) is satisfied by construction: the room_concept copy is deleted, not disabled, and the
+  estimators are byte-identical on the synthetic oracle. A replayed Webots A/B (plan 3.2 "within 0.1σ") was NOT run;
+  the inputs legitimately differ (pose from the RT ring vs room's velocity carry; published polygon vs
+  nominal_room_polygon; room_height only when measured).
+- Planted errors for these factors go through robot_concept's overlay file, not per-agent inject keys.
+- The joint fusion (helios tilt ↔ bpearl planar coupling, cameras) is not ported; the agent reports the three
+  blocks separately.
+
+**Carry-forwards:** `calibration_estimator.h`'s `last_information()` and the camera pools' `marginal_information()`
+/ `lidar_yaw_ref()` lost their only consumer (the monitor); clean them up in Phase 5. Room_concept's `kin_csv_` is
+now the only output of `KinematicMount` (until 4.4 replaces it).

@@ -56,8 +56,18 @@ struct LidarIn
     // factors estimate a CORRECTION to this mount, so it travels with the sweep. nullopt = chain unresolved.
     std::optional<Eigen::Affine3f> body_from_sensor;
 
-    // points_sensor mapped through body_from_sensor; empty when the mount is unresolved.
+    // The same mount into the ROBOT node's frame (Shadow: origin on the floor, z up), which the floor and
+    // vertical mount factors need (common/sensor_calib/mount_factors.h). nullopt until the robot node is known.
+    std::optional<Eigen::Affine3f> robot_from_sensor;
+    // The robot pose in the room AT THIS SWEEP'S STAMP (TimeQuery::Extrapolated on the robot<->room edge ring:
+    // interpolated inside it, walked along the published twist past its ends). nullopt when there is no room
+    // or the ring answered Stale/Clamped, i.e. no pose evidence for this instant.
+    std::optional<Eigen::Affine3d> room_T_robot;
+    double pose_walk_ms = 0.0;                      // how far the extrapolation walked (0 inside the ring)
+
+    // points_sensor mapped through body_from_sensor / robot_from_sensor; empty when that mount is unresolved.
     [[nodiscard]] std::vector<Eigen::Vector3f> points_body() const;
+    [[nodiscard]] std::vector<Eigen::Vector3f> points_robot() const;
 };
 
 struct ImageIn
@@ -117,6 +127,8 @@ struct PolygonIn
 {
     std::uint64_t room_id = 0;
     std::vector<Eigen::Vector2f> vertices;             // room frame
+    float ceiling_m = 0.f;                             // room node room_height (m above the floor); 0 = absent
+    float ceiling_sigma_m = 0.f;                       // room_height_sigma; 0 = not measured (a configured height)
 };
 
 // ───────────────────────────── pure, testable parts ─────────────────────────────
@@ -271,6 +283,12 @@ private:
     std::deque<ImuIn>      imu_q_;
     std::deque<OdometryIn> odom_q_;
     std::optional<PoseIn>  pose_;
+    // Robot node + room cached by poll_graph() for the per-sweep reads in drain_lidar() (one tick behind).
+    std::string            robot_name_;
+    std::uint64_t          robot_id_ = 0;
+    std::optional<std::uint64_t> room_id_;
+    [[nodiscard]] std::optional<Eigen::Affine3f> robot_from_sensor(const std::string& sensor, std::int64_t stamp_ms) const;
+    [[nodiscard]] std::optional<Eigen::Affine3d> room_T_robot_at(std::int64_t stamp_ms, double* walk_ms) const;
     PolygonIn              polygon_;
     std::int64_t           last_odom_ts_ = 0;
     std::uint64_t          odom_total_ = 0, pose_total_ = 0;   // display counters (read-only accessor graph_state())

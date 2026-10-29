@@ -419,9 +419,8 @@ namespace rc::loc
         bool   pose_field_bias     = true;
         bool   pose_field_publish  = false;
         double pose_field_sigma0   = 0.02;
-        /// r2 mount factors (plan 2026-10-08): feed the KINEMATIC factor (helios dx, dy, psi) from the same
-        /// innovation stream and carry its Info3 in UpdateResult; also publish the mount snapshot the ingestor's
-        /// floor/vertical factors read. Estimate + log only. RoomConcept.MountFactors.
+        /// r2 mount factor (plan 2026-10-08): feed the KINEMATIC factor (helios dx, dy, psi) from the same
+        /// innovation stream (log only: tmp/mount_factors/kin_*.csv). RoomConcept.MountFactors.
         bool   mount_factors       = true;
         rc::preint::NoiseModel odom_preint_noise{};  // measured-odometry channel
         // Command channel. Its floor stays deliberately looser than the encoder's (cmd_noise_base

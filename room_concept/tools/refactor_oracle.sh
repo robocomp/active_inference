@@ -41,7 +41,7 @@ declare -A STANDALONE_EXTRA=(
     [layout_explorer_selftest]="src/layout_explorer.cpp src/wall_map.cpp src/wall_segmenter.cpp"
 )
 STANDALONE=(free_space_polygon_selftest layout_explorer_selftest image_edge_frame_selftest stride_span_selftest
-            motion_noise_vc_selftest surprise_selftest joint_calib_selftest joint_mounts_selftest
+            motion_noise_vc_selftest surprise_selftest
             lidar_mount_selftest motion_calib_lever_selftest motion_noise_innov_selftest mount_factors_selftest
             mount_info_selftest pose_field_bias_selftest rest_density_selftest wheel_noise_selftest
             calib_estimator_selftest calib_intake_selftest)
@@ -74,7 +74,7 @@ fi
 # stale or missing standalone binary would silently record "file not found" as the oracle.
 echo "building standalone selftests ..."
 for t in "${STANDALONE[@]}"; do
-    g++ -std=c++23 -O2 -Isrc -I/usr/include/eigen3 tools/$t.cpp ${STANDALONE_EXTRA[$t]:-} -o "$WORK/$t" \
+    g++ -std=c++23 -O2 -Isrc -I../common -I/usr/include/eigen3 tools/$t.cpp ${STANDALONE_EXTRA[$t]:-} -o "$WORK/$t" \
         2> "$WORK/$t.cerr" || { echo "COMPILE FAILED: $t — see $WORK/$t.cerr"; exit 1; }
 done
 for c in "${CASES[@]}"; do

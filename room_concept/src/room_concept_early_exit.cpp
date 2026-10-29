@@ -145,33 +145,6 @@ namespace rc
             res.surprise.pf_tt      = Sb(2, 2);
             if (params.pose_field_publish and Sb.allFinite()) res.covariance += Sb;
         }
-        if (params.mount_factors)
-        {   // r2: the kinematic block and the acting eps travel to the main thread as COPIES (r1 thread rule)
-            res.mount_kin_info   = kin_mount_.info();
-            res.mount_yaw_offset = motion_calib_.yaw_offset();
-            // ... and the wall map + pose the ingest thread's vertical factor reads (one copy under a lock)
-            if (scan_ok and map_guided_checks_allowed())
-            {
-                MountSnapshot snap;
-                snap.valid = true;
-                snap.ts_ms = res.timestamp_ms;
-                const Eigen::Matrix2f Rl = res.robot_pose.linear();
-                snap.pose = Eigen::Vector3f(res.robot_pose.translation().x(), res.robot_pose.translation().y(),
-                                            std::atan2(Rl(1, 0), Rl(0, 0)));
-                if (cyc_dt_s_ > 0.f and cyc_odom_.allFinite()) snap.vel = cyc_odom_ / cyc_dt_s_;
-                snap.polygon = nominal_room_polygon();
-                if (snap.polygon.size() >= 3)
-                {
-                    std::scoped_lock lk(mount_snap_mutex_);
-                    mount_snap_ = std::move(snap);
-                }
-            }
-            else
-            {
-                std::scoped_lock lk(mount_snap_mutex_);
-                mount_snap_.valid = false;
-            }
-        }
         innov_prev_ok_ = scan_ok;
         if (scan_ok) { innov_z_prev_ = innov_z_; innov_R_prev_ = innov_R_; innov_prev_cycle_ = innov_cycle_; }
     }

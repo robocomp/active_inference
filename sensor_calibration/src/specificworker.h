@@ -23,6 +23,7 @@
 #include "../../common/sensor_calib/trajectory_harvester.h"
 #include "dashboard_model.h"
 class DashboardView;
+#include "lidar_mount_stage.h"                                     // floor + vertical LiDAR mount factors (Phase 3)
 #include "sensor_inputs.h"                                         // the input layer (plain-data outputs)
 
 class SpecificWorker : public GenericWorker
@@ -72,6 +73,14 @@ private:
     long npairs_logged_ = 0;
     std::int64_t harvester_log_ms_ = 0;            // wall clock of the last summary log
     std::unique_ptr<sc::SensorInputs> inputs_;     // created lazily on the first Operating tick (main thread)
+
+    // ── LiDAR mount factors (src/lidar_mount_stage.*), [MountFactors] section ──
+    bool mount_factors_enabled_ = true;
+    int  mount_log_period_ms_ = 10000;
+    sc::LidarMountStageConfig mount_cfg_;
+    std::unique_ptr<sc::LidarMountStage> mount_stage_;
+    std::int64_t mount_log_ms_ = 0;
+    void feed_mount_factors(const sc::LidarIn& l);
 
     // ── Dashboard (specificworker_dashboard.cpp). DISPLAY ONLY; all null/no-op when [Dashboard] show = false ──
     void build_dashboard();

@@ -46,7 +46,7 @@
 #include "motion_noise_vc.h"
 #include "motion_noise_innov.h"
 #include "pose_field_bias.h"
-#include "mount_factors.h"
+#include "kinematic_mount.h"
 #include "drift_monitor.h"
 #include "stride_span.h"
 #include "localizer_params.h"
@@ -348,19 +348,6 @@ public:
     /// MAP. Until there is one (Estimate mode before closure) they have nothing to judge against.
     bool map_guided_checks_allowed() const { return map_ready(); }
     const std::vector<Eigen::Vector2f>& polygon_vertices() const { return init_polygon_vertices_; }
-    /// r2 mount factors (plan 2026-10-08 Task 5): what the INGEST thread's vertical factor needs from the
-    /// localiser -- the wall map and the pose -- as one COPY taken under a lock (never read the map from the
-    /// ingest thread). Written on the localizer thread every tracked cycle. vel = world-frame rate (per s) of
-    /// the last cycle, so the reader can carry the pose to its own sweep's stamp.
-    struct MountSnapshot
-    {
-        bool valid = false;
-        std::int64_t ts_ms = 0;
-        Eigen::Vector3f pose = Eigen::Vector3f::Zero();   ///< x, y, theta (room frame)
-        Eigen::Vector3f vel  = Eigen::Vector3f::Zero();   ///< d(x, y, theta)/dt, per second
-        std::vector<Eigen::Vector2f> polygon;             ///< the room polygon (room frame)
-    };
-    MountSnapshot mount_snapshot() const { std::scoped_lock lk(mount_snap_mutex_); return mount_snap_; }
 
     /// LOW OBSTACLES (2026-10-09): returns between the floor and the robot's top, robot frame (xy), with the
     /// sweep's capture stamp. Posted by the ingest thread (LidarIngestor::low_obstacle_step), taken by the
@@ -973,12 +960,10 @@ private:
    bool            innov_ok_ = false, innov_prev_ok_ = false;
    int             last_scan_iters_ = 0;                      // GN iterations the last scan-only pose took
    std::ofstream   innov_csv_;
-   // ── r2 KINEMATIC MOUNT FACTOR (mount_factors.h; plan 2026-10-08 Task 1/1b/5) ──────────────────────
+   // ── r2 KINEMATIC MOUNT FACTOR (kinematic_mount.h; plan 2026-10-08 Task 1/1b/5) ────────────────────
    rc::mountf::KinematicMount kin_mount_;
-   mutable std::mutex mount_snap_mutex_;                      // guards mount_snap_ (read by the ingest thread)
    std::mutex low_obs_mutex_;                                 // guards low_obs_ (ingest -> localiser)
    std::deque<LowObstacles> low_obs_;
-   MountSnapshot   mount_snap_;
    std::ofstream   kin_csv_;                                  // tmp/mount_factors/kin_<ts>.csv: per fed cycle
    /// Feed kin_mount_ from this cycle's innovation (observe_innovation, only when `fed`).
    void observe_kinematic_mount(const Eigen::Vector3f &delta, const Eigen::Matrix3f &T,
