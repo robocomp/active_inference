@@ -1,6 +1,9 @@
 #include "helios_mount_stage.h"
 
 #include <algorithm>
+#include <cstdio>
+#include <string>
+#include <vector>
 #include <cmath>
 #include <ctime>
 #include <filesystem>
@@ -69,7 +72,12 @@ bool HeliosMountStage::add_pair(const sc::calib::Pair& p)
     Eigen::Matrix3d T = Eigen::Matrix3d::Identity();   // registration cov (x, y, t) -> (fwd, lat, rot)
     T.topLeftCorner<2, 2>() = Rm;
     Eigen::Matrix3d R = T * r.cov * T.transpose();
-    R(0, 0) += std::max(p.var(0) - hcfg_.reg_sigma_m * hcfg_.reg_sigma_m, 0.0);   // the registration floor is replaced by the measured cov
+    // p.var = reg_sigma_m^2 (the harvester's ASSUMED registration floor, used only to score pairs before any scan is
+    // registered) + the odometry terms. Subtract the floor so only the odometry part is added: the measured registration
+    // covariance (in R already) replaces it. The max() only guards a user-set p.var below the floor; it is not a model gate.
+    // chord_sigma^2 goes on the LATERAL row only: a heading error rotates the chord perpendicular to itself, and the
+    // chord lies along the midpoint heading (fwd), so its effect is first order on lat and second order on fwd.
+    R(0, 0) += std::max(p.var(0) - hcfg_.reg_sigma_m * hcfg_.reg_sigma_m, 0.0);
     R(1, 1) += std::max(p.var(1) - hcfg_.reg_sigma_m * hcfg_.reg_sigma_m, 0.0) + p.chord_sigma * p.chord_sigma;
     R(2, 2) += p.dth_sigma * p.dth_sigma;
     if (not y.allFinite() or not R.allFinite()) { ++rejected_; return false; }
@@ -131,8 +139,8 @@ void HeliosMountStage::open_csv(std::ofstream& f, const char* stem, const char* 
     char stamp[32];
     const std::time_t now_t = std::time(nullptr);
     std::strftime(stamp, sizeof stamp, "%Y-%m-%d_%H-%M-%S", std::localtime(&now_t));
+    f.imbue(std::locale::classic());   // CLAUDE.md: data files never acquire a comma separator (before open)
     f.open(cfg_.log_dir + "/" + stem + "_" + stamp + ".csv");
-    f.imbue(std::locale::classic());   // CLAUDE.md: data files never acquire a comma separator
     f << header << '\n';
 }
 

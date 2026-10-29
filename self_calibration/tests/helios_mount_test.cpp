@@ -129,14 +129,18 @@ int main()
         CHECK(std::abs(r.m[2] + pl.psi) < 2 * r.s[2], "psi %.4f deg vs %.4f deg", r.m[2] / kDeg, -pl.psi / kDeg);
         CHECK(r.s[0] >= 0.9 * xy_prior and r.s[1] >= 0.9 * xy_prior, "dx/dy sigma %.2f %.2f mm vs prior %.1f mm", r.s[0] * 1e3, r.s[1] * 1e3, xy_prior * 1e3);
     }
-    {   // 4. gyro_bias_not_absorbed: one-direction CCW arc corners, a gyro that reads 3 mrad/s high, mount exact
-        Opt o; o.gyro_bias = 0.003;
+    {   // 4. gyro_bias_not_absorbed: one-direction CCW arc corners, a gyro that reads 8 mrad/s high, mount exact; 5 seeds
+        Opt o; o.gyro_bias = 0.008;
         const auto s = ccw_arcs();
-        const auto r = run(room, {-1.2, -2.2, 0.0}, s, {}, o, 14);
-        const auto c = run(room, {-1.2, -2.2, 0.0}, s, {}, o, 14, 1e-7, 1e-7);   // the control: nuisance removed
-        std::printf("gyro_bias_not_absorbed: %s\n                        control(no nuisance): %s\n", r.line.c_str(), c.line.c_str());
-        CHECK(std::abs(r.m[2]) < 2 * r.s[2], "psi %.4f deg, 2 sigma %.4f deg", r.m[2] / kDeg, 2 * r.s[2] / kDeg);
-        CHECK(std::abs(c.m[2]) > 3 * c.s[2], "control psi %.4f deg, 3 sigma %.4f deg (must be confidently wrong)", c.m[2] / kDeg, 3 * c.s[2] / kDeg);
+        for (unsigned seed = 14; seed < 19; ++seed)
+        {
+            const auto r = run(room, {-1.2, -2.2, 0.0}, s, {}, o, seed);
+            const auto c = run(room, {-1.2, -2.2, 0.0}, s, {}, o, seed, 1e-7, 1e-7);   // the control: nuisance removed
+            std::printf("gyro_bias_not_absorbed[%u]: psi %.3f +- %.3f deg   control(no nuisance): %.3f +- %.3f deg (%.1f sigma)\n", seed,
+                        r.m[2] / kDeg, r.s[2] / kDeg, c.m[2] / kDeg, c.s[2] / kDeg, std::abs(c.m[2]) / c.s[2]);
+            CHECK(std::abs(r.m[2]) < 2 * r.s[2], "seed %u psi %.4f deg, 2 sigma %.4f deg", seed, r.m[2] / kDeg, 2 * r.s[2] / kDeg);
+            CHECK(std::abs(c.m[2]) > 3 * c.s[2], "seed %u control psi %.4f deg, 3 sigma %.4f deg (must be confidently wrong)", seed, c.m[2] / kDeg, 3 * c.s[2] / kDeg);
+        }
     }
     {   // 5. missing_sweep_adds_nothing
         HeliosMountConfig c; c.log_dir = "";
