@@ -199,39 +199,50 @@ int main(int argc, char** argv)
         auto p = the_proposal();
         check(p.has_value() and same_pose(Eigen::Vector3f(p->T_P_K.translation().x(), p->T_P_K.translation().y(), angle_of(p->T_P_K)),
               Eigen::Vector3f(T_prior.translation().x(), T_prior.translation().y(), angle_of(T_prior))), "the proposal carries ltsm's prior");
-        // ORDER: record what a reader would see at each write. The edge write must land while state is still "pending".
-        std::vector<std::string> order;
-        QObject::connect(G.get(), &DSR::DSRGraph::update_edge_signal, [&](std::uint64_t from, std::uint64_t to, const std::string& type, DSR::SignalInfo)
+        // ATOMIC: every node update a reader receives that says "accepted" must already carry the accepted T and its
+        // covariance (they travel in ONE node sample; the edge is a different DDS topic and proves nothing).
+        const auto node_T = [&]() -> std::optional<Eigen::Vector3f>
         {
-            if (from == P and to == prop and type == "RT") order.push_back("edge@" + state_of(prop));
-        });
+            const auto n = G->get_node(prop);
+            if (not n.has_value()) return std::nullopt;
+            const auto tr = G->get_attrib_by_name<rt_translation_att>(n.value());
+            const auto ro = G->get_attrib_by_name<rt_rotation_euler_xyz_att>(n.value());
+            if (not tr.has_value() or not ro.has_value() or tr->get().size() < 2 or ro->get().size() < 3) return std::nullopt;
+            return Eigen::Vector3f(tr->get()[0], tr->get()[1], ro->get()[2]);
+        };
+        const Eigen::Vector3f want(T_true.translation().x(), T_true.translation().y(), angle_of(T_true));
+        std::vector<std::string> seen;
         QObject::connect(G.get(), &DSR::DSRGraph::update_node_signal, [&](std::uint64_t id, const std::string&, DSR::SignalInfo)
         {
-            if (id == prop) order.push_back("node:" + state_of(prop));
+            if (id == prop and state_of(prop) == "accepted") seen.push_back(same_pose(node_T(), want) ? "accepted+T" : "accepted-noT");
         });
         if (p.has_value()) p->T_P_K = acc;
         const auto a = p.has_value() ? adopt_in_place(*G, *p, robot) : Adoption{};
         check(a.ok, "adopted by the ACCEPTED transform");
-        check(p.has_value() and answer_accepted(*G, *p, acc), "answer_accepted writes the transform and the verdict");
-        QObject::disconnect(G.get(), &DSR::DSRGraph::update_edge_signal, nullptr, nullptr);
+        Eigen::Matrix3f Sk; Sk << 0.0009f, 0.0001f, 0.f, 0.0001f, 0.0016f, 0.f, 0.f, 0.f, 0.0004f;
+        check(p.has_value() and answer_accepted(*G, *p, acc, Sk), "answer_accepted writes the transform and the verdict");
         QObject::disconnect(G.get(), &DSR::DSRGraph::update_node_signal, nullptr, nullptr);
-        std::string seq; for (const auto& o : order) seq += o + " ";
-        const auto e_at = std::ranges::find_if(order, [](const std::string& o) { return o.starts_with("edge@"); });
-        const auto n_at = std::ranges::find(order, std::string("node:accepted"));
-        check(e_at != order.end() and *e_at == "edge@pending" and n_at != order.end() and e_at < n_at,
-              "the accepted T lands on the edge BEFORE state=accepted (" + seq + ")");
-        const auto onedge = rt_of(P, prop);
-        check(same_pose(onedge, Eigen::Vector3f(T_true.translation().x(), T_true.translation().y(), angle_of(T_true))),
-              "the proposal edge now holds the accepted T(P<-K), not the prior");
+        std::string seq; for (const auto& o : seen) seq += o + " ";
+        check(not seen.empty() and std::ranges::all_of(seen, [](const std::string& o) { return o == "accepted+T"; }),
+              "every node update that says accepted carries the accepted T (" + seq + ")");
+        check(same_pose(node_T(), want), "the proposal NODE holds the accepted T(P<-K) (rt_translation / rt_rotation_euler_xyz)");
+        {
+            const auto n = G->get_node(prop);
+            const auto cv = n.has_value() ? G->get_attrib_by_name<rt_covariance_att>(n.value()) : std::nullopt;
+            check(cv.has_value() and cv->get().size() == 36 and near(cv->get()[0], 0.0009f) and near(cv->get()[7], 0.0016f)
+                  and near(cv->get()[1], 0.0001f) and near(cv->get()[35], 0.0004f) and cv->get()[14] == 0.f,
+                  "the node carries the fit's robot-in-K covariance on SE(3) slots 0,1,5");
+        }
+        check(same_pose(rt_of(P, prop), want), "the edge follows too (viewers/history)");
         check(state_of(prop) == "accepted", "state = accepted");
         check(same_pose(rt_of(P, robot, kStamps[2]), transform_pose(T_true.inverse(), robot_at(2))),
               "the robot is re-expressed by the ACCEPTED T(K<-P)");
-        // no edge ⇒ no verdict: the transform gates the state
+        // the edge is NOT the carrier: with it gone, the verdict and its T still land on the node
         reset();
         auto q = the_proposal();
         G->delete_edge(P, prop, "RT");
-        check(q.has_value() and not answer_accepted(*G, *q, acc) and state_of(prop) == "pending",
-              "without the edge nothing is answered (a reader never sees accepted without the accepted T)");
+        check(q.has_value() and answer_accepted(*G, *q, acc, Sk) and state_of(prop) == "accepted" and same_pose(node_T(), want),
+              "no edge: the node still carries accepted + T in one update");
     }
 
     std::printf("robot_edge_runs_robot_to_room\n");
@@ -314,6 +325,36 @@ int main(int argc, char** argv)
                 }
             check(ok, "the pose covariance takes the composition's Jacobian (lever arm of T(P<-K))");
         }
+    }
+
+    std::printf("flat_covariance_belongs_to_the_newest_block\n");
+    {
+        // A robot→room ring whose covariance is ONE 36 block (not per slot): its lever arm is the NEWEST written block's.
+        reset();
+        G->delete_edge(P, robot, "RT");
+        const auto se2 = [](const Eigen::Vector3f& q) { return Eigen::Affine2f(Eigen::Translation2f(q.head<2>()) * Eigen::Rotation2Df(q.z())); };
+        const auto pose_of = [](const Eigen::Affine2f& T) { return Eigen::Vector3f(T.translation().x(), T.translation().y(), angle_of(T)); };
+        for (int i = 0; i < 3; ++i)
+        {
+            auto rn = G->get_node(robot).value();
+            const auto q = pose_of(se2(robot_at(i)).inverse());
+            G->get_rt_api()->insert_or_assign_edge_RT(rn, P, std::vector<float>{q.x(), q.y(), 0.f}, std::vector<float>{0.f, 0.f, q.z()}, kStamps[i]);
+        }
+        std::vector<float> cov(36, 0.f);
+        cov[0] = 0.04f; cov[7] = 0.01f; cov[35] = 0.002f;
+        auto e = G->get_edge(robot, P, "RT").value();
+        G->add_or_modify_attrib_local<rt_covariance_att>(e, cov);
+        G->insert_or_assign_edge(e);
+        const auto p = the_proposal();
+        const auto a = p.has_value() ? adopt_in_place(*G, *p, robot) : Adoption{};
+        const auto e2 = G->get_edge(robot, P, "RT");
+        const auto cv = e2.has_value() ? G->get_attrib_by_name<rt_covariance_att>(e2.value()) : std::nullopt;
+        const auto q = pose_of(se2(robot_at(2)).inverse());   // the newest block (stamp 1200)
+        const Eigen::Vector2f Rt = Eigen::Rotation2Df(q.z()) * T_P_K.translation();
+        const Eigen::Vector2f lever(-Rt.y(), Rt.x());
+        check(a.ok and cv.has_value() and cv->get().size() == 36 and near(cv->get()[5], lever.x() * 0.002f, 1e-5f)
+              and near(cv->get()[11], lever.y() * 0.002f, 1e-5f) and std::abs(lever.norm()) > 0.5f,
+              "the single covariance takes the NEWEST written block's lever arm");
     }
 
     std::printf("reject_marks_only\n");

@@ -119,6 +119,14 @@ bool reexpress_ring_as_parent(DSR::DSRGraph& G, std::uint64_t from, std::uint64_
     }
     G.add_or_modify_attrib_local<rt_translation_att>(e.value(), std::move(t));
     G.add_or_modify_attrib_local<rt_rotation_euler_xyz_att>(e.value(), std::move(r));
+    // A covariance that is not one per slot belongs to the NEWEST written block (the one an untimestamped read returns).
+    std::size_t newest = nb - 1;
+    if (stamped)
+    {
+        std::uint64_t best = 0;
+        for (std::size_t b = 0; b < nb; ++b)
+            if (written[b] and stamps->get()[b] >= best) { best = stamps->get()[b]; newest = b; }
+    }
     if (const auto cv = G.get_attrib_by_name<rt_covariance_att>(e.value()); cv.has_value() and not cv->get().empty()
         and cv->get().size() % 36 == 0)
     {
@@ -129,7 +137,7 @@ bool reexpress_ring_as_parent(DSR::DSRGraph& G, std::uint64_t from, std::uint64_
             const bool per_slot = c.size() == 36 * nb;
             if (per_slot and not written[b]) continue;
             Eigen::Matrix<float, 6, 6> J = Eigen::Matrix<float, 6, 6>::Identity();
-            J.block<2, 1>(0, 5) = per_slot ? lever[b] : lever[std::min<std::size_t>(b, nb - 1)];
+            J.block<2, 1>(0, 5) = per_slot ? lever[b] : lever[newest];
             Eigen::Map<Eigen::Matrix<float, 6, 6, Eigen::RowMajor>> S(c.data() + k);
             const Eigen::Matrix<float, 6, 6> Sr = J * S * J.transpose();
             S = Sr;
@@ -179,22 +187,31 @@ Eigen::Affine2f accepted_T_P_K(const Eigen::Affine2f& robot_P, const Eigen::Affi
     return robot_P * robot_K.inverse();
 }
 
-bool answer_accepted(DSR::DSRGraph& G, const Proposal& p, const Eigen::Affine2f& T_P_K_accepted)
+bool answer_accepted(DSR::DSRGraph& G, const Proposal& p, const Eigen::Affine2f& T_P_K_accepted,
+                     const Eigen::Matrix3f& robot_K_cov)
 {
-    // 1. The accepted transform replaces ltsm's prior on the edge (one block; the edge's z kept).
+    auto n = G.get_node(p.node_id);
+    auto Pn = G.get_node(p.parent);
+    if (not n.has_value() or not Pn.has_value()) return false;
     const auto rt = G.get_rt_api();
     const auto prior = planar_rt(G, *rt, p.parent, p.node_id);
-    auto Pn = G.get_node(p.parent);
-    if (not prior.has_value() or not Pn.has_value() or not G.get_node(p.node_id).has_value()) return false;
-    try
-    {
-        rt->insert_or_assign_edge_RT(Pn.value(), p.node_id,
-            std::vector<float>{T_P_K_accepted.translation().x(), T_P_K_accepted.translation().y(), prior->second},
-            std::vector<float>{0.f, 0.f, angle_of(T_P_K_accepted)});
-    }
-    catch (const std::exception&) { return false; }
-    // 2. Only then the verdict.
-    return answer(G, p.node_id, kAccepted);
+    const float z = prior.has_value() ? prior->second : 0.f;
+    const std::vector<float> tr{T_P_K_accepted.translation().x(), T_P_K_accepted.translation().y(), z};
+    const std::vector<float> rot{0.f, 0.f, angle_of(T_P_K_accepted)};
+    // The EDGE follows too (viewers, history), but it is NOT the verdict's carrier: cortex sends edge and node-attribute
+    // updates on different DDS topics, unordered and droppable, so a reader could see "accepted" with the prior still on it.
+    if (prior.has_value())
+        try { rt->insert_or_assign_edge_RT(Pn.value(), p.node_id, tr, rot); } catch (const std::exception&) {}
+    // THE VERDICT: T(P<-K), the covariance it inherits and state = "accepted" in ONE update_node — one DDS sample, atomic.
+    static constexpr int se3_of_se2[3] = {0, 1, 5};
+    std::vector<float> cov(36, 0.f);
+    for (int r = 0; r < 3; ++r)
+        for (int c = 0; c < 3; ++c) cov[se3_of_se2[r] * 6 + se3_of_se2[c]] = robot_K_cov(r, c);
+    G.add_or_modify_attrib_local<rt_translation_att>(n.value(), tr);
+    G.add_or_modify_attrib_local<rt_rotation_euler_xyz_att>(n.value(), rot);
+    G.add_or_modify_attrib_local<rt_covariance_att>(n.value(), std::move(cov));
+    G.add_or_modify_attrib_local<state_att>(n.value(), std::string(kAccepted));
+    return G.update_node(n.value());
 }
 
 float angle_of(const Eigen::Affine2f& T) { return std::atan2(T.linear()(1, 0), T.linear()(0, 0)); }

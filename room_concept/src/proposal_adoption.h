@@ -66,11 +66,15 @@ bool answer(DSR::DSRGraph& G, std::uint64_t proposal_id, std::string_view state)
 /// i.e. T(P←K) = robot_P ∘ robot_K⁻¹.
 [[nodiscard]] Eigen::Affine2f accepted_T_P_K(const Eigen::Affine2f& robot_P, const Eigen::Affine2f& robot_K);
 
-/// The ACCEPTED verdict, as ONE fact for every reader: the accepted T(P←K) overwrites ltsm's prior on the RT edge
-/// P→proposal FIRST (its z kept), and only then `state` = "accepted" — so any reader that sees "accepted" reads the accepted
-/// transform, never the prior (door_concept's re-seat, ltsm's carry-over). False (and no state written) if the edge or the
-/// node is gone.
-bool answer_accepted(DSR::DSRGraph& G, const Proposal& p, const Eigen::Affine2f& T_P_K_accepted);
+/// The ACCEPTED verdict, as ONE fact for every reader, in ONE update_node of the proposal NODE: rt_translation [x y z] and
+/// rt_rotation_euler_xyz [0 0 yaw] = the accepted T(P←K); rt_covariance (36, row-major [x y z rx ry rz], SE(2) on rows/cols
+/// 0,1,5) = the covariance of the robot's FITTED pose in K, in K's frame (`robot_K_cov`, [x y θ]) — the uncertainty T(P←K)
+/// inherits (the survey pose robot_P is its reference); and state = "accepted". One DDS sample, so a reader that sees
+/// "accepted" sees this T. Readers take T ONLY from these node attributes (absent ⇒ malformed). The RT edge P→proposal is
+/// overwritten too, for viewers/history only: edge and node updates travel on different, unordered DDS topics.
+/// False if the node or P is gone.
+bool answer_accepted(DSR::DSRGraph& G, const Proposal& p, const Eigen::Affine2f& T_P_K_accepted,
+                     const Eigen::Matrix3f& robot_K_cov);
 
 struct Adoption
 {

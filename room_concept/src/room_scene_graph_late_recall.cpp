@@ -20,7 +20,8 @@
 //   4. Accepted: P becomes K IN PLACE — same node id renamed to K's live name (cortex rename, 43bfe16), room_id and
 //      outline K's, P's own RT children re-expressed by T(K←P), the published frame becomes K's, proto edge removed,
 //      the walls built/synced on K's outline — and "accepted" is written. T(K←P) is the FIT's (robot_K ∘ robot_P⁻¹), not
-//      ltsm's prior, and it is written on the proposal's RT edge before "accepted" (Task 20: one fact, every reader). A refused rename is a rejection.
+//      ltsm's prior, and it is written on the proposal NODE in the same update_node as "accepted" (Task 20: one fact,
+//      every reader); no fitted pose ⇒ rejected, never the prior. A refused rename is a rejection.
 // The proposal node is ltsm's: read, `state` written, never deleted. (This replaced the late recall's INSERT of a new
 // room node; ltsm no longer posts late recalls, 4d9f7ae4.)
 #include "room_scene_graph.h"
@@ -120,10 +121,24 @@ bool RoomSceneGraph::accept_proposal(const rc::RoomConcept::UpdateResult& res)
     // result, tracked against K) are one physical pose ⇒ T(P←K) = robot_P ∘ robot_K⁻¹. It re-expresses this agent's own
     // edges and is written on the proposal before "accepted", so every reader of the verdict reads this one fact.
     const Eigen::Affine2f T_P_K_prior = p.T_P_K;
-    if (const auto fit = room_concept_->get_last_result(); fit.has_value() and fit->ok)
-        p.T_P_K = rc::proposal::accepted_T_P_K(T_old * res.robot_pose, T_K_int * fit->robot_pose);
-    else
-        qWarning().noquote() << "[room][proposal] no fitted pose at acceptance: ltsm's prior T(P<-K) is used as the accepted one";
+    // Same internal frame for both poses: the survey (plain SLAM's shadow) is seeded from and compared against the
+    // localiser's window pose directly (record_slam_shadow), and the only internal-frame move (reanchor_map_frame) is
+    // suppressed while a start-up proto owns the published frame (freeze_internal_frame_), which P is.
+    const auto fit = room_concept_->get_last_result();
+    if (not fit.has_value() or not fit->ok)
+    {
+        // No fitted pose ⇒ no accepted transform: accepting would publish ltsm's prior as the fact. Reject instead.
+        rc::proposal::answer(*G_, p.node_id, rc::proposal::kRejected);
+        end_proposal_fit("no fitted pose at acceptance");
+        qWarning().noquote() << QString("[room][proposal] %1 accepted by the fit but no fitted pose is available to state the "
+                                        "accepted T(P<-K): REJECTED").arg(QString::fromStdString(p.live_name));
+        return false;
+    }
+    p.T_P_K = rc::proposal::accepted_T_P_K(T_old * res.robot_pose, T_K_int * fit->robot_pose);
+    // The fit's pose covariance, internal frame → K's (rotation only; θ unchanged): what T(P←K) inherits.
+    Eigen::Matrix3f J = Eigen::Matrix3f::Identity();
+    J.topLeftCorner<2, 2>() = T_K_int.linear();
+    const Eigen::Matrix3f robot_K_cov = J * fit->covariance * J.transpose();
     {
         const Eigen::Affine2f d = T_P_K_prior.inverse() * p.T_P_K;   // the fit's correction of the prior, in K
         qWarning().noquote() << QString("[room][proposal] accepted T(P<-K) = (%1, %2, %3 deg); ltsm's prior (%4, %5, %6 deg); "
@@ -157,7 +172,7 @@ bool RoomSceneGraph::accept_proposal(const rc::RoomConcept::UpdateResult& res)
     r.name = p.live_name; r.room_index = p.room_index; r.poly_pub = p.outline_K;
     note_recall_memory(r);                     // P(explored) from what memory restores (room_explored.h)
     startup_event_ = "recalled";
-    if (not rc::proposal::answer_accepted(*G_, p, p.T_P_K))   // the accepted T on the edge FIRST, then "accepted"
+    if (not rc::proposal::answer_accepted(*G_, p, p.T_P_K, robot_K_cov))   // T + covariance + "accepted": one update_node
         qWarning().noquote() << "[room][proposal] the accepted verdict could not be written (the proposal or its edge is gone)";
     prop_judged_.reset();
     qWarning().noquote() << QString("[room][proposal] ACCEPTED: room %1 is %2, adopted in place (same id; %3 own RT edge(s) "
