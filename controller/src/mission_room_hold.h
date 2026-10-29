@@ -10,6 +10,7 @@
 #include <string>
 
 #include "../../common/mission/mission_ir.h"
+#include "mission_door_relation.h"
 
 namespace rc
 {
@@ -29,7 +30,7 @@ public:
         if (s.op == "cross" or s.op == "open")
         {
             const auto d = s.ref("door");
-            return d.has_value() and d->kind == mission::Ref::Kind::Passage;
+            return d.has_value() and (d->kind == mission::Ref::Kind::Passage or relation_of(*d) != DoorRelationKind::None);
         }
         return false;
     }

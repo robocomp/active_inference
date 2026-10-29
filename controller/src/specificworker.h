@@ -30,6 +30,8 @@
 
 #include "mission_room_hold.h"
 #include "mission_approach_hold.h"
+#include "mission_door_relation.h"
+#include <set>
 #include <genericworker.h>
 #include <Eigen/Dense>
 #include <atomic>
@@ -186,6 +188,7 @@ private:
 	private:
 		SpecificWorker &w_;
 		rc::RoomHold hold_;                ///< a room-scoped step waiting for current_room to resolve (mission_room_hold.h)
+		rc::RelationHold relation_hold_;   ///< a cross <room>/new waiting for its door to resolve (mission_door_relation.h)
 		rc::ApproachHold approach_hold_;   ///< a handed-back approach waiting for door_concept's re-offer (mission_approach_hold.h)
 		std::string door_;                 ///< cross / open: the door the passage runs through
 		std::uint64_t target_epoch_ = 0;   ///< go_to: ControllerSession::manual_target_status().epoch it set
@@ -212,6 +215,8 @@ private:
 	void hold_base();
 	/// The live door a door reference names now: a node by name, or the face of a passage in the current room.
 	std::expected<std::string, std::string> resolve_door(const rc::mission::Ref &r);
+	std::vector<rc::DoorFacts> door_facts();   ///< the live doors of the current room, with their relations (mission_door_relation.h)
+	std::set<std::string> door_looked_;        ///< doors a door_concept look has ever targeted
 	// ── chat_agent's command channel (chat_inbox.h): polled on the control thread, never signalled ──
 	rc::ChatInbox chat_inbox_;
 	rc::ChatInbox::Tracked chat_tracked_;

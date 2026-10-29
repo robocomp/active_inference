@@ -34,6 +34,7 @@
 #include "mission_explored.h"
 #include "mission_room_hold.h"
 #include "mission_approach_hold.h"
+#include "mission_door_relation.h"
 
 using rc::mission::LeafState;
 using rc::mission::LeafStatus;
@@ -54,6 +55,7 @@ std::uint64_t hold_clock_ms()
 std::optional<std::string> SpecificWorker::MissionHost::start(const rc::mission::Step &leaf)
 {
 	hold_.clear();
+	relation_hold_.clear();
 	approach_hold_.reset();
 	if (rc::RoomHold::scoped(leaf) and w_.world_model_.graph_state().room_name.empty())
 	{
@@ -76,6 +78,13 @@ std::optional<std::string> SpecificWorker::MissionHost::start_now(const rc::miss
 	{
 		const Ref ref = *leaf.ref("door");   // ref() returns by value: a copy, not a reference to a temporary
 		const auto door = w_.resolve_door(ref);
+		if (not door.has_value() and rc::relation_of(ref) != rc::DoorRelationKind::None)
+		{
+			// `cross <room>` / `cross new`: the recall (or the new door) may appear late — hold and re-resolve each poll.
+			std::println("[mission] step {} ({} {}) waits: no door in '{}' resolves yet", leaf.id, op, ref.name, here);
+			relation_hold_.hold(leaf, hold_clock_ms());
+			return std::nullopt;
+		}
 		if (not door.has_value()) return door.error();
 		const auto r = w_.start_door_passage(*door, op == "open" ? rc::DoorPassage::Step::Open : rc::DoorPassage::Step::Cross,
 		                                     "mission");
@@ -175,6 +184,18 @@ void SpecificWorker::MissionHost::ground(const rc::mission::Step &leaf, const st
 LeafStatus SpecificWorker::MissionHost::poll(const rc::mission::Step &leaf)
 {
 	const std::string &op = leaf.op;
+	if (relation_hold_.holding())
+	{
+		const auto door = w_.resolve_door(*leaf.ref("door"));
+		switch (relation_hold_.check(door.has_value() ? std::optional<std::string>(*door) : std::nullopt, hold_clock_ms()))
+		{
+			case rc::RelationHold::Verdict::Waiting: return {};
+			case rc::RelationHold::Verdict::TimedOut: return {.state = LeafState::Failed, .detail = "door_unresolved"};
+			case rc::RelationHold::Verdict::Ready:
+				if (auto refused = start_now(leaf); refused.has_value()) return {.state = LeafState::Failed, .detail = *refused};
+				return {};   // started: the passage is polled from the next cycle
+		}
+	}
 	if (hold_.holding())
 	{
 		switch (hold_.check(w_.world_model_.graph_state().room_name, hold_clock_ms()))
@@ -257,6 +278,7 @@ void SpecificWorker::MissionHost::cancel(const rc::mission::Step &leaf)
 {
 	const std::string &op = leaf.op;
 	if (hold_.holding()) { hold_.clear(); return; }   // never started: nothing to stop
+	if (relation_hold_.holding()) { relation_hold_.clear(); return; }
 	if (op == "cross" or op == "open")
 	{
 		if (w_.session_.door_passage().view().door == door_) w_.session_.door_passage().stop();
@@ -384,8 +406,41 @@ void SpecificWorker::hold_base()
 	clear_manual_target();
 }
 
+// The live doors of the current room (any depth) with the relations `cross <room>` / `cross new` select by.
+std::vector<rc::DoorFacts> SpecificWorker::door_facts()
+{
+	std::vector<rc::DoorFacts> out;
+	const auto &gs = world_model_.graph_state();
+	if (G == nullptr or gs.room_id == 0) return out;
+	const auto robot_T = inner_eigen_api_ and not gs.robot_name.empty()
+	                         ? inner_eigen_api_->get_transformation_matrix(gs.room_name, gs.robot_name) : std::nullopt;
+	for (const auto &name : rc::world::doors_of_room(*G, gs.room_id))
+	{
+		const auto door = G->get_node(name);
+		if (not door.has_value()) continue;
+		rc::DoorFacts f{.name = name};
+		for (const auto &e : DSR::DSRGraph::get_node_edges_by_type(door.value(), "RT"))
+			if (const auto child = G->get_node(e.to()); child.has_value() and child->name().starts_with("recall_"))
+				f.recall_rooms.insert(child->name().substr(7));
+		for (const auto &e : G->get_edges_to_id(door->id()))
+			if (e.type() == "match") f.has_match = true;
+		if (G->get_node(rc::DoorPassage::look_name(name)).has_value()) door_looked_.insert(name);
+		f.looked = door_looked_.contains(name);
+		if (robot_T.has_value() and inner_eigen_api_)
+			if (const auto T = inner_eigen_api_->get_transformation_matrix(gs.room_name, name); T.has_value())
+				f.dist = (T->translation() - robot_T->translation()).head<2>().norm();
+		out.push_back(std::move(f));
+	}
+	return out;
+}
+
 std::expected<std::string, std::string> SpecificWorker::resolve_door(const rc::mission::Ref &r)
 {
+	if (rc::relation_of(r) != rc::DoorRelationKind::None)
+	{
+		if (const auto door = rc::pick_door(r, door_facts()); door.has_value()) return *door;
+		return std::unexpected(std::format("no door of '{}' resolves '{}' yet", world_model_.graph_state().room_name, r.name));
+	}
 	if (r.kind == Ref::Kind::Node)
 	{
 		// Live fix 3: a remembered door (door_concept offers aff_door_look_<door>) resolves — the passage starts with the look
