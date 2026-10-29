@@ -71,7 +71,7 @@ scan_for_door() {   # exclude tag
     n=$(( $(date +%s)-ts )); echo run > $B/controller/remote_cmd.txt; sleep 0.7
     # explore FIRST: it drives the robot into the room (a passage ends at the room switch, right past the door frame, where
     # a 120 deg turn is refused for the wall and fails the whole mission — recog_try11); the turns then sweep from inside
-    printf 'mission "look%s_%s"\n  explore %s budget_s=60s\n  move turn_deg=120\n  move turn_deg=120\n  move turn_deg=120\n' "$tag" $n "$here" > $B/controller/remote_cmd.txt
+    printf 'mission "look%s_%s"\n  explore %s budget_s=90s\n' "$tag" $n "$here" > $B/controller/remote_cmd.txt   # no turns: refused near walls they failed the whole look (recog_try19); the door's look viewpoint above covers the recalled-room case
     for i in $(seq 1 60); do grep -a -q -E "mission 'look${tag}_$n': (completed|failed|aborted)" $L/controller.log && break; dd=$(new_door "$ex"); [ -n "$dd" ] && break; sleep 3; done
     dd=$(new_door "$ex")
   done
