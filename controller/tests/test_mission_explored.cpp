@@ -37,6 +37,7 @@ struct GraphHost final : Host
 {
     explicit GraphHost(DSR::DSRGraph &g) : G(g) {}
     DSR::DSRGraph &G;
+    rc::RoomAliases aliases{};
     int started = 0, cancelled = 0;
     std::optional<std::string> start(const Step &) override { ++started; return std::nullopt; }
     LeafStatus poll(const Step &) override { return {}; }
@@ -46,7 +47,7 @@ struct GraphHost final : Host
     std::optional<Pose> pose() override { return std::nullopt; }
     std::optional<double> eval(const Pred &p) override
     {
-        if (p.name == "explored") return rc::mission::explored_belief(G, p.refs.at("room").name);
+        if (p.name == "explored") return rc::mission::explored_belief(G, aliases, p.refs.at("room").name);
         return std::nullopt;
     }
 };
@@ -125,6 +126,24 @@ void recalled_room_starts_explored()
     in.tick(0);
     CHECK(in.state() == S::Completed and h.started == 0);                 // already true: nothing is started
 }
+
+// explored(room_4) written before room_concept renamed room_4 -> room_2 (same node id) reads the renamed node, not "unknown".
+void renamed_room_reads_by_id()
+{
+    auto G = make_graph(3);
+    set_explored(*G, 0.95f);
+    const auto id = G->get_node("room_2")->id();
+    GraphHost h(*G);
+    h.aliases["room_4"] = id;                                             // the controller saw the rename
+    CHECK(not rc::mission::explored_belief(*G, "room_4").has_value());    // by name alone: unknown
+    const auto v = rc::mission::explored_belief(*G, h.aliases, "room_4");
+    CHECK(v.has_value() and std::abs(*v - 0.95) < 1e-6);                  // by id: the renamed node's belief
+    CHECK(not rc::mission::explored_belief(*G, h.aliases, "room_9").has_value());
+    Interpreter in(h);
+    in.start(parse("mission\n  explore room_4 until=explored(room_4)>=0.9 budget_s=30s\n"), 0);
+    in.tick(0);
+    CHECK(in.state() == S::Completed and h.started == 0);
+}
 }   // namespace
 
 int main()
@@ -132,6 +151,7 @@ int main()
     unknown_never_satisfies();
     attribute_decides();
     recalled_room_starts_explored();
+    renamed_room_reads_by_id();
     std::println("test_mission_explored: {}/{} checks passed", checks - failures, checks);
     return failures == 0 ? 0 : 1;
 }

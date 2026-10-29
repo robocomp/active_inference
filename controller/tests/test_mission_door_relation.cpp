@@ -24,6 +24,20 @@ int main()
         CHECK(track_room(id, name, prev, 7, "room_2") == RoomEvent::None);
         CHECK(track_room(id, name, prev, 9, "room_5") == RoomEvent::Changed and prev == "room_2" and name == "room_5" and id == 9);
     }
+    {   // a mission's room is the room BY ID: survives a same-id rename, ends on an id change
+        std::uint64_t id = 7; std::string name = "room_4", prev;
+        RoomAliases al;
+        CHECK(robot_in_room(id, name, al, 7, "room_4"));                       // explore room_4 starts: live node of that name
+        track_room(id, name, prev, 7, "room_2"); al["room_4"] = id;            // room_concept adopts room_2 in place
+        CHECK(robot_in_room(id, name, al, std::nullopt, "room_4"));            // the step still holds: same id
+        CHECK(robot_in_room(id, name, al, 7, "room_2"));
+        CHECK(not robot_in_room(id, name, al, 9, "room_5"));                   // another live room
+        track_room(id, name, prev, 9, "room_5");                               // the robot really leaves
+        CHECK(not robot_in_room(id, name, al, std::nullopt, "room_4"));        // id differs -> outside
+        CHECK(robot_in_room(id, name, al, 9, "room_5"));
+        CHECK(not robot_in_room(0, "", al, std::nullopt, "room_4"));           // unresolved is not "in"
+        CHECK(room_id_named(al, 3, "room_4") == 3u);                           // a reused name is its live node's
+    }
     CHECK(relation_of(node("new")) == DoorRelationKind::New);
     CHECK(relation_of(node("room_2")) == DoorRelationKind::Room);
     CHECK(relation_of(node("door_3")) == DoorRelationKind::None);

@@ -11,6 +11,7 @@
 // poll. Pure: the controller gathers DoorFacts from the graph; no graph, no Qt here.
 #include <cstdint>
 #include <limits>
+#include <map>
 #include <optional>
 #include <set>
 #include <string>
@@ -79,6 +80,29 @@ inline RoomEvent track_room(std::uint64_t &id, std::string &name, std::string &p
     }
     if (name != new_name) { name = new_name; return RoomEvent::Renamed; }
     return RoomEvent::None;
+}
+
+/// Every name a room node has worn, by node id: a mission step names a room by the NAME it was written with ("room_4") and
+/// that name can be renamed away under the same id (room_4 -> room_2). The id is the identity; this maps an old name to it.
+using RoomAliases = std::map<std::string, std::uint64_t>;
+
+/// The id a mission's room NAME stands for: the live graph node of that name if there is one (a name in use is its own
+/// node's — an alias could be stale if the name was reused), else the node that used to wear it.
+[[nodiscard]] inline std::optional<std::uint64_t> room_id_named(const RoomAliases &aliases, std::optional<std::uint64_t> live_id,
+                                                               const std::string &name)
+{
+    if (live_id.has_value()) return live_id;
+    if (const auto it = aliases.find(name); it != aliases.end()) return it->second;
+    return std::nullopt;
+}
+
+/// Is the robot (room `cur_id` / `cur_name`) in the room the mission calls `name`? By id; the name only when the id is unknown.
+[[nodiscard]] inline bool robot_in_room(std::uint64_t cur_id, const std::string &cur_name, const RoomAliases &aliases,
+                                        std::optional<std::uint64_t> live_id, const std::string &name)
+{
+    if (cur_id == 0) return not cur_name.empty() and cur_name == name;
+    if (const auto id = room_id_named(aliases, live_id, name); id.has_value()) return *id == cur_id;
+    return cur_name == name;
 }
 
 /// The step waits for its door to resolve; it has a budget so it cannot hang (like RoomHold).

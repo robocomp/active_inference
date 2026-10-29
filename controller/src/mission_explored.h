@@ -8,6 +8,8 @@
 // "unexplored" and is not "explored" either.
 #include <dsr/api/dsr_api.h>
 
+#include "mission_door_relation.h"
+
 #include <optional>
 #include <string>
 
@@ -19,5 +21,16 @@ namespace rc::mission
     if (not node.has_value()) return std::nullopt;
     const auto p = G.get_attrib_by_name<room_explored_p_att>(node.value());
     return p.has_value() ? std::optional<double>(p.value()) : std::nullopt;
+}
+
+/// Same, for a room NAMED by a mission that may have been written before a rename: resolved by node id (the live node of
+/// that name, else the node that used to wear it), then read from that node.
+[[nodiscard]] inline std::optional<double> explored_belief(DSR::DSRGraph &G, const RoomAliases &aliases, const std::string &room)
+{
+    if (const auto live = G.get_node(room); live.has_value()) return explored_belief(G, room);
+    const auto id = room_id_named(aliases, std::nullopt, room);
+    if (not id.has_value()) return std::nullopt;
+    const auto node = G.get_node(*id);
+    return node.has_value() ? explored_belief(G, node->name()) : std::nullopt;
 }
 }   // namespace rc::mission

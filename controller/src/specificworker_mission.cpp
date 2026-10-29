@@ -105,7 +105,7 @@ std::optional<std::string> SpecificWorker::MissionHost::start_now(const rc::miss
 	{
 		const auto to = leaf.ref("to");
 		if (not to.has_value() or to->kind != Ref::Kind::Pose) return std::string("no_target");
-		if (to->pose.room != here)
+		if (not w_.robot_in_named_room(to->pose.room))
 		{
 			std::println("[mission] go_to: the target is in '{}' and the robot in '{}' (routes between rooms: Phase 1c)",
 			             to->pose.room, here);
@@ -127,7 +127,7 @@ std::optional<std::string> SpecificWorker::MissionHost::start_now(const rc::miss
 	if (op == "explore")
 	{
 		const auto room = leaf.ref("room");
-		if (room->name != here)
+		if (not w_.robot_in_named_room(room->name))
 		{
 			std::println("[mission] explore: '{}' is not the room the robot is in ('{}')", room->name, here);
 			return std::string("wrong_room");
@@ -140,6 +140,7 @@ std::optional<std::string> SpecificWorker::MissionHost::start_now(const rc::miss
 		w_.session_.mission().set_mode(rc::DriveMode::Command);   // no door required: the selector chooses freely
 		w_.session_.set_command_explore(true, room->name);         // …opened on purpose by this order, for its room only
 		room_ = room->name;
+		room_id_ = w_.world_model_.graph_state().room_id;   // the room by ID: a rename in place is not leaving it
 		ground(leaf, room_, {{"room", QString::fromStdString(room_)}});
 		return std::nullopt;
 	}
@@ -280,9 +281,22 @@ LeafStatus SpecificWorker::MissionHost::poll(const rc::mission::Step &leaf)
 	}
 	if (op == "explore")
 	{
-		// an empty room is "not resolved", not "left the room": only a resolved DIFFERENT room ends the step
-		if (const auto &now_in = w_.world_model_.graph_state().room_name; not now_in.empty() and now_in != room_)
+		// an unresolved room (id 0) is "not resolved", not "left the room": only a resolved DIFFERENT room ID ends the step.
+		// The name is no witness: room_concept renames a recognised room in place (room_4 -> room_2, same node).
+		if (const auto now_id = w_.world_model_.graph_state().room_id; now_id != 0 and now_id != room_id_)
+		{
+			std::println("[mission] explore {}: the robot is now in room id {} ('{}'), not id {} — outside_room", room_,
+			             now_id, w_.world_model_.graph_state().room_name, room_id_);
 			return {.state = LeafState::Failed, .detail = "outside_room"};
+		}
+		// the same room under a new name: the affordance contest is scoped by NAME, so follow the rename (one claim release)
+		if (const auto &gs = w_.world_model_.graph_state(); gs.room_id == room_id_ and not gs.room_name.empty() and gs.room_name != room_)
+		{
+			std::println("[mission] explore {}: the room was renamed in place ({} -> {}, node id {}) — the step follows the id", room_,
+			             room_, gs.room_name, room_id_);
+			room_ = gs.room_name;
+			w_.session_.set_command_explore(true, room_);
+		}
 		return {};
 	}
 	if (op == "approach")
@@ -358,9 +372,8 @@ std::optional<double> SpecificWorker::MissionHost::eval(const rc::mission::Pred 
 {
 	if (p.name == "in_room")
 	{
-		const std::string &here = w_.world_model_.graph_state().room_name;
-		if (here.empty()) return std::nullopt;
-		return p.refs.at("room").name == here ? 1.0 : 0.0;
+		if (w_.world_model_.graph_state().room_name.empty()) return std::nullopt;
+		return w_.robot_in_named_room(p.refs.at("room").name) ? 1.0 : 0.0;
 	}
 	if (p.name == "door_open")
 	{
@@ -371,7 +384,7 @@ std::optional<double> SpecificWorker::MissionHost::eval(const rc::mission::Pred 
 		const auto prob = w_.G->get_attrib_by_name<door_open_prob_att>(node.value());
 		return prob.has_value() ? std::optional<double>(prob.value()) : std::nullopt;
 	}
-	if (p.name == "explored") return rc::mission::explored_belief(*w_.G, p.refs.at("room").name);
+	if (p.name == "explored") return rc::mission::explored_belief(*w_.G, w_.world_model_.graph_state().room_aliases, p.refs.at("room").name);
 	return std::nullopt;
 }
 
@@ -466,6 +479,16 @@ std::vector<rc::DoorFacts> SpecificWorker::door_facts()
 	return out;
 }
 
+// Is the robot in the room a mission calls `name`? By node id, so a room renamed in place is still itself.
+bool SpecificWorker::robot_in_named_room(const std::string &name)
+{
+	const auto &gs = world_model_.graph_state();
+	std::optional<std::uint64_t> live;
+	if (G != nullptr)
+		if (const auto n = G->get_node(name); n.has_value()) live = n->id();
+	return rc::robot_in_room(gs.room_id, gs.room_name, gs.room_aliases, live, name);
+}
+
 std::expected<std::string, std::string> SpecificWorker::resolve_door(const rc::mission::Ref &r)
 {
 	if (rc::relation_of(r) != rc::DoorRelationKind::None)
@@ -490,7 +513,7 @@ std::expected<std::string, std::string> SpecificWorker::resolve_door(const rc::m
 	}
 	if (r.kind != Ref::Kind::Passage) return std::unexpected(std::string("not a door"));
 	const auto &gs = world_model_.graph_state();
-	if (r.from != gs.room_name) return std::unexpected(std::string("wrong_room"));
+	if (not robot_in_named_room(r.from)) return std::unexpected(std::string("wrong_room"));
 	// The live passage_<n> (ltsm passage_live.h) holds a `match` to each of its two faces: take the one in this room.
 	const auto passage = G->get_node(r.name);
 	if (not passage.has_value()) return std::unexpected(std::string("passage_unresolved"));

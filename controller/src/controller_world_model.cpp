@@ -55,6 +55,7 @@ bool ControllerWorldModel::refresh_graph_state()
                                              .arg(QString::fromStdString(old_name)).arg(QString::fromStdString(room->name()));
                 break;
             case rc::RoomEvent::Renamed:
+                graph_state_.room_aliases[old_name] = graph_state_.room_id;   // missions that wrote the old name still mean this room
                 qInfo().noquote() << QString("[controller] current room renamed: %1 -> %2")
                                          .arg(QString::fromStdString(old_name)).arg(QString::fromStdString(room->name()));
                 break;

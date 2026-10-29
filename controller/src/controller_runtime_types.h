@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <map>
 #include <optional>
 #include <string>
 #include <vector>
@@ -557,6 +558,7 @@ struct ControllerGraphState
     std::uint64_t room_id = 0;
     std::uint64_t robot_id = 0;
     std::string room_name;
+    std::map<std::string, std::uint64_t> room_aliases;   ///< every name the current room has worn -> its node id (a rename keeps the id)
     std::string prev_room_name;   ///< the room the robot was in before room_name (empty until the first change)
     std::string robot_name;
 

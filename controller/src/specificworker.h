@@ -195,7 +195,8 @@ private:
 		std::uint64_t target_epoch_ = 0;   ///< go_to: ControllerSession::manual_target_status().epoch it set
 		std::uint64_t motion_id_ = 0;      ///< move: RelativeMotion::View::id it started
 		std::uint64_t approach_id_ = 0;   // approach: the ApproachOrder this leaf started
-		std::string room_;                 ///< explore: the room it explores (leaving it ends the step)
+		std::string room_;                 ///< explore: the room it explores (its name when the step started; may be renamed since)
+		std::uint64_t room_id_ = 0;        ///< explore: that room's NODE ID — the identity; leaving it (an id change) ends the step
 		/// The episodic journal's StepStart text for what start() resolved (R3): {"target","grounding"}.
 		void ground(const rc::mission::Step &leaf, const std::string &target, const QJsonObject &grounding);
 	};
@@ -215,6 +216,7 @@ private:
 	/// Nothing drives and the base stays still, armed: Target mode with no target (a finished `move` does the same).
 	void hold_base();
 	/// The live door a door reference names now: a node by name, or the face of a passage in the current room.
+	bool robot_in_named_room(const std::string &name);   ///< by node id: a room renamed in place is still itself
 	std::expected<std::string, std::string> resolve_door(const rc::mission::Ref &r);
 	std::vector<rc::DoorFacts> door_facts();   ///< the live doors of the current room, with their relations (mission_door_relation.h)
 	std::set<std::string> door_looked_;        ///< doors a door_concept look has ever targeted
