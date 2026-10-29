@@ -1,33 +1,42 @@
-// test_door_absence_detectability.cpp — Task 15: ABSENCE IS WEIGHTED BY P(detect) IN EVERY CHANNEL, the image geometry included.
+// test_door_absence_detectability.cpp — Task 15: ABSENCE IS WEIGHTED BY P(detect) IN EVERY CHANNEL, the image geometry included,
+// and a static prior is never a look.
 //
 // Live recog_proto5 (2026-10-29): DOOR_2, restored as door_4 and OPEN (phi ≈ 85-90°), was removed "for absence" while the
 // robot approached it for `cross door_4` (1.6-3 m from it), and the same hole was re-born at once as door_39 with a fresh,
 // shut-looking belief. Its existence trace (door_existence_log.csv): L lost 34.7 nats over its life and only 0.28 of them on
-// rows whose silhouette P(detect) exceeded 0.02 — the silhouette (the channel WITH a detection model) never charged it. The
-// IMAGE-GEOMETRY channel (doorway frame + leaf contour/depth, door_view_pool.h) did: −1.90 (frame exc −9.2) at cycle 8549,
-// −1.54 / −1.69 (frame dep −1.00) at 9147/9148 with p_detect 0.000 and the leaf fully occluded (occl 420), each new view a
-// fresh refutation at the full llr = log(pd/pc); at L = −4 the wall-band prior's per-cycle look (1 − π = 0.78) completed the
-// removal debounce in 26 cycles with no sensor look at all.
+// rows whose silhouette P(detect) exceeded 0.02. The IMAGE-GEOMETRY channel (doorway frame + leaf contour/depth,
+// door_view_pool.h) had no detection model: −1.90 (frame exc −9.2, vis 0.43) at cycle 8549, −1.54 / −1.69 (frame dep −1.00) at
+// 9147/9148 with p_detect 0.000 and the leaf occluded (occl 420); and once L sat at −4 the WALL-BAND PRIOR (door_4 0.2 m inside
+// room_3's polygon, π 0.15-0.23) advanced the removal debounce by 1 − π every cycle and completed it in 26 cycles with no
+// sensor look at all.
 //
-// The scene is test_door_core_existence.cpp's (a door in the top wall of a 10 x 10 m room, camera 1.2 m high looking +y),
-// with a synthetic ZED DEPTH frame added so the image-geometry channel speaks:
-//   CONFIRM  the hole reads DEEPER than the wall (a doorway: the next room behind it);
-//   REFUTE   the hole reads NEARER than the wall (live 9148's dep −1.00: something stands in front of the opening).
-//   A. the door_4 trace, synthesised: confirmed from the detectable far view (masks lit), then the robot APPROACHES to 1.1-2 m —
-//      the door overflows the detector envelope (roi_fill > MaxFill ⇒ P(detect) ≈ 0), no mask lights it — while the depth
-//      REFUTES it from a new view every frame. L must not fall below the level it had when the approach began (nothing the
-//      detector could have resolved has said "absent"). Before the fix it walked to the −4 floor (RED).
-//   B. A PHANTOM seen from DETECTABLE viewpoints (the far sweep, as test_door_core_existence §1 — the recog_try23/26 phantoms
-//      door_11/door_12 on room_1's south wall were removed from such views) with the depth refuting: still REMOVED.
-//   C. door_view_pool.h's look weight: w = 1 on every look is bit-identical to the unweighted pool; w = 0 changes nothing
-//      (neither speaks nor dilutes); a fresh view's refutation at w = p says p of it.
+// The scene is test_door_core_existence.cpp's (a door in the top wall y = 5 of a 10 x 10 m room, camera 1.2 m high looking +y)
+// with a synthetic ZED DEPTH frame so the image-geometry channel speaks:
+//   DEEPER   the hole reads deeper than the wall (a doorway: the next room behind it)               — confirms
+//   NEARER   the hole reads nearer than the wall (live 9148's dep −1.00: something stands in it)     — refutes
+//   FLAT     a blank wall, the would-be opening ±4 cm off it, the sign alternating frame to frame   — zero-mean
+//   A1. envelope overflow: confirmed from the far sweep, then approached and PASSED THROUGH (3.0 → 6.0 m, the opening at
+//       y = 5) from views where the doorway overflows the detector envelope, the depth refuting: L must not fall.
+//   A2. the live mechanism: after the confirmation room_3's polygon is re-estimated 0.2 m beyond the door (band π ≈ 0.15, the
+//       term enters L once), then the robot approaches from 3 m to 1.6 m with a PERSON covering the lower part of the doorway
+//       (the silhouette occluded, the frame partly visible) and the hole reading nearer, and passes through: NOT removed (the
+//       band prior is not a look), L not below the level the prior left it at.
+//   A3. a BLANK-WALL phantom approached at close range with zero-mean frame noise: L must not RISE (a weight on one sign only
+//       is a ratchet).
+//   B.  a phantom refuted from DETECTABLE viewpoints (the far sweep): still REMOVED — and the image channel's refutations
+//       there count (Σ of its negative ΔL < −1, look weight > 0.2), not only the silhouette's.
+//   D.  recog_try23 door_11: a phantom 0.6 m INSIDE the polygon (π ≈ 0) is removed by its prior L plus the real detectable
+//       looks of its absence; the same phantom never looked at (camera turned away) is NOT removed by the prior alone.
+//   C.  door_view_pool.h's look weight: w = 1 is bit-identical to the unweighted pool; w = 0 changes nothing; w = p says p of a
+//       fresh view.
 //
-// Build + run (from door_concept/):
+// Build + run (from door_concept/; any output path — door_concept/build is the agent's own build dir):
 //   g++ -std=c++23 -O1 -I/usr/include/eigen3 -I/usr/include/opencv4 tests/test_door_absence_detectability.cpp \
 //       src/core/door_core.cpp src/core/door_fit.cpp src/core/door_existence.cpp src/core/door_cycle_io.cpp \
 //       src/door_belief.cpp src/door_model.cpp src/door_frame_evidence.cpp ../common/contour_edge/contour_edge_check.cpp \
 //       ../common/contour_edge/contour_edge_project.cpp ../common/contour_edge/contour_depth_check.cpp \
-//       -lzstd -lopencv_core -lopencv_imgproc -o /tmp/test_door_absence_detectability && /tmp/test_door_absence_detectability
+//       -lzstd -lopencv_core -lopencv_imgproc -o build/test_door_absence_detectability && build/test_door_absence_detectability
+// -DTASK15_RED_BASELINE builds against sources without the Task 15 fields (prints −9 for them and skips C), for the RED runs.
 #include <clocale>
 #include <cmath>
 #include <cstring>
@@ -43,9 +52,11 @@
 using namespace rc::door::core;
 using K = rc::door::DoorDecisionKind;
 #ifdef TASK15_RED_BASELINE
-#define IMG_ABS_W(s) -9.0f   // the pre-Task-15 state has no such field
+#define IMG_W(s) -9.0f
+#define AP_ENV(s) -9.0f
 #else
-#define IMG_ABS_W(s) (s).dbg_img_absence_w
+#define IMG_W(s) (s).dbg_img_look_w
+#define AP_ENV(s) (s).dbg_p_env_aperture
 #endif
 
 static int fails = 0;
@@ -107,47 +118,58 @@ constexpr float kDoorX = 1.0f, kWallY = 4.99f, kWallLine = 5.0f, kCamZ = 1.2f;
 constexpr int kW = 1280, kH = 720;
 constexpr float kF = 700.f;
 
-static Mat4d pose(double x, double y, double z)
+static Mat4d pose(double x, double y, double z, bool turned_away = false)
 {
     Mat4d T = Mat4d::Identity();
+    if (turned_away) { T(0, 0) = -1.0; T(1, 1) = -1.0; }   // yaw 180°: zed +y points to −y
     T(0, 3) = x; T(1, 3) = y; T(2, 3) = z;
     return T;
 }
 
-// The door's projected pixel box (the mask the detector would return) from (rx, ry) looking +y.
-static void door_pixels(std::vector<Vec2f>& px, float rx, float ry)
+// The door's projected pixel box from (rx, ry) looking +y, clipped to the image; rows with z in [z0, z1] only.
+static void door_pixels(std::vector<Vec2f>& px, float rx, float ry, float z0 = 0.0f, float z1 = 2.1f)
 {
     const float Y = kWallY - ry;
+    if (Y < 0.3f) return;
     const float c0 = kW / 2 + kF * (kDoorX - 0.5f - rx) / Y, c1 = kW / 2 + kF * (kDoorX + 0.5f - rx) / Y;
-    const float r0 = kH / 2 - kF * (2.1f - kCamZ) / Y, r1 = kH / 2 - kF * (0.0f - kCamZ) / Y;
+    const float r0 = kH / 2 - kF * (z1 - kCamZ) / Y, r1 = kH / 2 - kF * (z0 - kCamZ) / Y;
     for (float r = std::max(0.f, r0); r < std::min<float>(kH, r1); r += 3.0f)
         for (float c = std::max(0.f, c0); c < std::min<float>(kW, c1); c += 3.0f)
             px.emplace_back(c, r);
 }
 
-enum class Hole { Deeper, Nearer };
+enum class Hole { Deeper, Nearer, Flat };
 
-// The ZED depth frame (forward distance) from (rx, ry, kCamZ) looking +y: the wall plane y = kWallLine everywhere, and inside
-// the aperture x ∈ [kDoorX ± 0.5], z ∈ [0, 2.1] either the next room 3 m behind it (Deeper) or a surface at 0.55 of the wall's
-// distance in front of it (Nearer).
-static rc::door::core::ImageFrame depth_frame(float rx, float ry, Hole hole, std::uint64_t stamp)
+// The ZED depth frame (forward distance) from (rx, ry, kCamZ) looking +y. Past the wall (the robot through the doorway) the
+// camera sees the next room: 3 m everywhere.
+static ImageFrame depth_frame(float rx, float ry, Hole hole, std::uint64_t stamp)
 {
-    rc::door::core::ImageFrame f;
-    f.format = rc::door::core::PixelFormat::DepthF32;
+    ImageFrame f;
+    f.format = PixelFormat::DepthF32;
     f.width = kW; f.height = kH; f.stamp_ms = stamp;
-    rc::door::core::ImagePatch p;
+    ImagePatch p;
     p.x0 = 0; p.y0 = 0; p.w = kW; p.h = kH;
     p.bytes.resize(static_cast<std::size_t>(kW) * kH * sizeof(float));
     std::vector<float> d(static_cast<std::size_t>(kW) * kH);
     const float t_wall = kWallLine - ry;
+    // FLAT: a blank wall whose depth over the would-be opening carries a per-frame offset of ±4 cm, its sign alternating with
+    // the frame (exactly zero-mean over any two frames) — the noise the frame channel sees on a blank wall, both signs.
+    const float flat_bias = (stamp % 2 == 0 ? 1.0f : -1.0f) * 0.04f;
     for (int r = 0; r < kH; ++r)
         for (int c = 0; c < kW; ++c)
         {
-            const float x = (static_cast<float>(c) - kW / 2) / kF, z = -(static_cast<float>(r) - kH / 2) / kF;
-            const float X = rx + x * t_wall, Z = kCamZ + z * t_wall;
-            float t = t_wall;
-            if (X > kDoorX - 0.5f and X < kDoorX + 0.5f and Z > 0.0f and Z < 2.1f)
-                t = hole == Hole::Deeper ? t_wall + 3.0f : 0.55f * t_wall;
+            float t = 3.0f;
+            if (t_wall > 0.05f)
+            {
+                const float x = (static_cast<float>(c) - kW / 2) / kF, z = -(static_cast<float>(r) - kH / 2) / kF;
+                const float X = rx + x * t_wall, Z = kCamZ + z * t_wall;
+                t = t_wall;
+                const bool in_hole = X > kDoorX - 0.5f and X < kDoorX + 0.5f and Z > 0.0f and Z < 2.1f;
+                if (hole == Hole::Flat)
+                { if (in_hole) t += flat_bias; }
+                else if (in_hole)
+                    t = hole == Hole::Deeper ? t_wall + 3.0f : 0.55f * t_wall;
+            }
             d[static_cast<std::size_t>(r) * kW + c] = t;
         }
     std::memcpy(p.bytes.data(), d.data(), p.bytes.size());
@@ -155,14 +177,24 @@ static rc::door::core::ImageFrame depth_frame(float rx, float ry, Hole hole, std
     return f;
 }
 
-static DoorCycleInput cycle_input(std::uint64_t cycle, int frame_id, bool lit, float rx, float ry, Hole hole)
+struct Look
+{
+    float rx = 1.0f, ry = 0.5f;
+    bool lit = false;           // the detector returns a door mask
+    Hole hole = Hole::Deeper;
+    bool person = false;        // a person mask covers the doorway's lower 1.5 m (an occluder, not a door)
+    bool turned_away = false;
+    float top_y = kWallLine;    // the room polygon's top face this cycle (its re-estimation moves it)
+};
+
+static DoorCycleInput cycle_input(std::uint64_t cycle, int frame_id, const Look& lk)
 {
     DoorCycleInput in;
     in.cycle = cycle;
     in.t_steady_ns = static_cast<std::int64_t>(cycle) * 100'000'000;
     in.t_wall_ms = 1'700'000'000'000 + static_cast<std::int64_t>(cycle) * 100;
     in.robot.present = true;
-    in.robot.room_T_body = pose(rx, ry, 0.0);
+    in.robot.room_T_body = pose(lk.rx, lk.ry, 0.0, lk.turned_away);
     in.robot.body_T_zed = pose(0.0, 0.0, kCamZ);
     in.camera.present = true;
     in.camera.width = kW; in.camera.height = kH; in.camera.focal_x = kF; in.camera.focal_y = kF;
@@ -170,7 +202,7 @@ static DoorCycleInput cycle_input(std::uint64_t cycle, int frame_id, bool lit, f
     p.valid = true;
     p.frame_id = frame_id;
     p.timestamp_ms = 1000 + static_cast<std::uint64_t>(frame_id);
-    if (lit)
+    if (lk.lit)
     {
         for (int i = 0; i <= 20; ++i)
             for (int j = 0; j <= 21; ++j)
@@ -183,62 +215,71 @@ static DoorCycleInput cycle_input(std::uint64_t cycle, int frame_id, bool lit, f
         s.centroid = {kDoorX, kWallY, 1.05f}; s.bbox_min = {kDoorX - 0.5f, kWallY - 0.01f, 0.0f};
         s.bbox_max = {kDoorX + 0.5f, kWallY + 0.01f, 2.1f};
         s.support_begin = 0; s.support_end = p.support_points.size();
-        s.trunc_frac = 0.0f; s.range = kWallY - ry; s.centroid_radius = 0.1f; s.source = 0; s.has_depth = true;
-        door_pixels(p.mask_pixels, rx, ry);
+        s.trunc_frac = 0.0f; s.range = kWallY - lk.ry; s.centroid_radius = 0.1f; s.source = 0; s.has_depth = true;
+        door_pixels(p.mask_pixels, lk.rx, lk.ry);
         s.pixel_begin = 0; s.pixel_end = p.mask_pixels.size();
         p.slices.push_back(s);
     }
-    else
     {
-        // a small unrelated mask in the image corner: the frame carries mask pixels (the silhouette can speak), none on the door
+        // a small unrelated mask in the image corner: the packet carries mask pixels (the silhouette can speak)
         MaskSlice s;
         s.label = "plant"; s.class_id = 5.f; s.confidence = 0.8f; s.source = 0; s.has_depth = true;
+        s.pixel_begin = p.mask_pixels.size();
         for (int r = 0; r < 30; r += 3) for (int c = 0; c < 30; c += 3) p.mask_pixels.emplace_back(c, r);
-        s.pixel_begin = 0; s.pixel_end = p.mask_pixels.size();
+        s.pixel_end = p.mask_pixels.size();
+        p.slices.push_back(s);
+    }
+    if (lk.person and not lk.turned_away)
+    {
+        MaskSlice s;
+        s.label = "person"; s.class_id = 0.f; s.confidence = 0.9f; s.source = 0; s.has_depth = true;
+        s.pixel_begin = p.mask_pixels.size();
+        door_pixels(p.mask_pixels, lk.rx, lk.ry, 0.0f, 1.5f);
+        s.pixel_end = p.mask_pixels.size();
         p.slices.push_back(s);
     }
     in.masks = std::move(p);
-    in.depth = depth_frame(rx, ry, hole, 1000 + static_cast<std::uint64_t>(frame_id));
+    in.depth = depth_frame(lk.rx, lk.ry, lk.hole, 1000 + static_cast<std::uint64_t>(frame_id));
     return in;
 }
 
-struct Look { float rx, ry; bool lit; Hole hole; };
+struct Row { int c = 0; double L = 0, img_dL = 0, img_w = 0, band_p = 1, streak = 0, p_det = 0, ap_env = 0; };
 struct Trace
 {
-    std::vector<double> L;   // one per Existence decision
-    std::vector<int> cycle;
+    std::vector<Row> rows;   // the door's state after each cycle it was alive
     int removes = 0;
-    double L_at(int c) const { double v = std::numeric_limits<double>::quiet_NaN(); for (std::size_t i = 0; i < L.size(); ++i) if (cycle[i] <= c) v = L[i]; return v; }
+    double L_at(int c) const { double v = std::numeric_limits<double>::quiet_NaN(); for (const auto& r : rows) if (r.c <= c) v = r.L; return v; }
+    double L_min_after(int c) const { double v = 1e9; for (const auto& r : rows) if (r.c > c) v = std::min(v, r.L); return v; }
+    double L_max_after(int c) const { double v = -1e9; for (const auto& r : rows) if (r.c > c) v = std::max(v, r.L); return v; }
 };
 
-// Drive the core over `looks`; print a few channel numbers every `every` cycles from `print_from` on.
-// top_y: the room polygon's top face (the wall line the door is in).
-static Trace drive(const std::vector<Look>& looks, int print_from, int every, float top_y = kWallLine)
+static Trace drive(const std::vector<Look>& looks, int print_from, int every)
 {
     DoorCoreConfig cfg;
     ExistWorld w;
     w.cfg = cfg.door;
-    w.polygon = {{-5.f, -5.f}, {5.f, -5.f}, {5.f, top_y}, {-5.f, top_y}};
     DoorCore core(cfg);
     w.core = &core;
     Trace t;
     core.connect(&w, {.decision = [&](const rc::door::DoorDecision& d)
-                      {
-                          if (d.kind == static_cast<std::uint16_t>(K::Existence)) { t.L.push_back(d.a); t.cycle.push_back(static_cast<int>(d.cycle)); }
-                          if (d.kind == static_cast<std::uint16_t>(K::Remove)) ++t.removes;
-                      },
+                      { if (d.kind == static_cast<std::uint16_t>(K::Remove)) ++t.removes; },
                       .diag = [](const DiagRow&) {}});
     for (std::size_t k = 0; k < looks.size(); ++k)
     {
         const int c = static_cast<int>(k) + 1;
         const auto& lk = looks[k];
-        (void)core.step(cycle_input(static_cast<std::uint64_t>(c), c, lk.lit, lk.rx, lk.ry, lk.hole));
-        if (c >= print_from and (c - print_from) % every == 0)
-            for (const auto& [id, s] : w.st)
-                std::print("    cycle {:3d} robot ({:+.2f},{:.2f}) L {:+.2f} | p_detect {:.3f} p_env {:.2f} ndet {} | img dL {:+.2f} w_abs {:+.2f} "
-                           "frame vis {:.2f} dep {:+.2f} | band p {:.2f} streak {:.2f}\n", c, lk.rx, lk.ry, s.existence.logodds(), s.dbg_sil_pdetect,
-                           s.dbg_p_env, s.dbg_sil_ndet, s.dbg_edge_delta, IMG_ABS_W(s), s.dbg_frame_vis, s.dbg_frame_depth, s.dbg_band_p,
-                           s.existence_debounce.streak);
+        w.polygon = {{-5.f, -5.f}, {5.f, -5.f}, {5.f, lk.top_y}, {-5.f, lk.top_y}};
+        (void)core.step(cycle_input(static_cast<std::uint64_t>(c), c, lk));
+        for (const auto& [id, s] : w.st)
+        {
+            t.rows.push_back({c, s.existence.logodds(), s.dbg_edge_delta, IMG_W(s), s.dbg_band_p, s.existence_debounce.streak,
+                              s.dbg_sil_pdetect, AP_ENV(s)});
+            if (c >= print_from and (c - print_from) % every == 0)
+                std::print("    cycle {:3d} robot ({:+.2f},{:.2f}) L {:+.2f} | p_detect {:.3f} ndet {} occl {} | img dL {:+.2f} w {:+.2f} "
+                           "ap_env {:+.2f} frame vis {:.2f} dep {:+.2f} | band p {:.2f} streak {:.2f}\n", c, lk.rx, lk.ry,
+                           s.existence.logodds(), s.dbg_sil_pdetect, s.dbg_sil_ndet, s.dbg_sil_noccl, s.dbg_edge_delta, IMG_W(s),
+                           AP_ENV(s), s.dbg_frame_vis, s.dbg_frame_depth, s.dbg_band_p, s.existence_debounce.streak);
+        }
     }
     w.core = nullptr;
     return t;
@@ -250,6 +291,18 @@ static float sweep_x(int c)
     const int k = c % 12;
     return 1.0f + 1.5f * (k < 6 ? (static_cast<float>(k) / 3.0f - 1.0f) : (1.0f - static_cast<float>(k - 6) / 3.0f));
 }
+// a lateral swing of ±a m, period 8: a new view of the door every frame or two
+static float swing(int k, float a)
+{
+    const int m = k % 8;
+    return kDoorX + a * (m < 4 ? (static_cast<float>(m) / 2.0f - 1.0f) : (1.0f - static_cast<float>(m - 4) / 2.0f));
+}
+static std::vector<Look> confirmed_far(int n, Hole hole = Hole::Deeper)
+{
+    std::vector<Look> v;
+    for (int c = 1; c <= n; ++c) v.push_back({.rx = sweep_x(c), .ry = 0.5f, .lit = true, .hole = hole});
+    return v;
+}
 
 int main()
 {
@@ -258,11 +311,9 @@ int main()
     const double L_remove = std::log(dcfg.exist_removal_prob / (1.0 - dcfg.exist_removal_prob));
 
     // ── C. the view pool's look weight ─────────────────────────────────────────────────────────────────────────────────
-    // (-DTASK15_RED_BASELINE: build against the pre-Task-15 sources, whose pool has no weight, to show A failing.)
 #ifndef TASK15_RED_BASELINE
     {
-        // the unweighted pool, as it was before Task 15 (door_view_pool.h at 9d45e5ef), for the bit-identity check
-        struct Old
+        struct Old   // the unweighted pool as it was before Task 15, for the bit-identity check
         {
             bool have = false; float bearing = 0, range = 0, n = 0, mean = 0, counted = 0;
             float add(const Eigen::Vector2f& obs, const Eigen::Vector2f& tgt, float R, float v, float llr)
@@ -298,62 +349,97 @@ int main()
         }
         std::print("C. w = 1 on every look: {} to the unweighted pool over 200 looks\n", identical ? "bit-identical" : "DIFFERENT");
         CHECK(identical);
-
         rc::door::ViewPool p0;
-        const float c0 = p0.add({1.0f, 0.5f}, door, 1.17f, +2.0f, 2.83f);
-        p0.commit(c0);
+        p0.commit(p0.add({1.0f, 0.5f}, door, 1.17f, +2.0f, 2.83f));
         const auto before = p0;
-        const float z = p0.add({1.0f, 0.5f}, door, 1.17f, -5.0f, 2.83f, 0.0f);   // the same view, refuted unresolvably
-        std::print("C. w = 0: ΔL {:+.3f}, pool n {:.3f}→{:.3f} mean {:+.3f}→{:+.3f}\n", z, before.n, p0.n, before.mean, p0.mean);
+        const float z = p0.add({1.0f, 0.5f}, door, 1.17f, -5.0f, 2.83f, 0.0f);
         CHECK(z == 0.0f and p0.n == before.n and p0.mean == before.mean and p0.counted == before.counted);
-
         rc::door::ViewPool pf;
         const float full = rc::door::ViewPool{}.add({1.0f, 0.5f}, door, 1.17f, -1.0f, 2.83f);
         const float part = pf.add({1.0f, 0.5f}, door, 1.17f, -1.0f, 2.83f, 0.25f);
-        std::print("C. a fresh view's refutation: w 1 → {:+.3f}, w 0.25 → {:+.3f}\n", full, part);
+        std::print("C. w = 0 changes nothing; a fresh view's refutation: w 1 → {:+.3f}, w 0.25 → {:+.3f}\n", full, part);
         CHECK(std::abs(part - 0.25f * full) < 1e-5f);
     }
 #endif
 
-    // ── A. the door_4 trace: confirmed far, then APPROACHED where it is undetectable, the depth refuting every new view ──
-    //    (The live REMOVE was then completed by the wall-band prior's look, door_4 sitting 0.2 m inside room_3's polygon; this
-    //    scene's fit seats the aperture on the polygon face, π = 1, so the RED here is L at the −4 floor without the REMOVE.)
+    // ── A1. envelope overflow: approached and passed THROUGH, the depth refuting ────────────────────────────────────────
     {
-        const float top_y = kWallLine;
-        std::vector<Look> looks;
-        for (int c = 1; c <= 40; ++c) looks.push_back({sweep_x(c), 0.5f, true, Hole::Deeper});
-        constexpr int kApproach = 60;
-        for (int k = 0; k < kApproach; ++k)
-        {
-            // y 3.0 → 3.9 (2.0 → 1.1 m from the wall), x swinging ±0.8 m: a new view of the door every frame or two
-            const float ry = 3.0f + 0.9f * static_cast<float>(k) / static_cast<float>(kApproach - 1);
-            const int m = k % 8;
-            const float rx = kDoorX + 0.8f * (m < 4 ? (static_cast<float>(m) / 2.0f - 1.0f) : (1.0f - static_cast<float>(m - 4) / 2.0f));
-            looks.push_back({rx, ry, false, Hole::Nearer});
-        }
-        std::print("A. polygon face y={:.2f}: confirmed from the far sweep, then approached to 1.1-2 m (undetectable), the hole reading NEARER:\n", top_y);
-        const Trace t = drive(looks, 40, 6, top_y);
-        const double L_before = t.L_at(40);
-        double L_min = 1e9;
-        for (std::size_t i = 0; i < t.L.size(); ++i) if (t.cycle[i] > 40) L_min = std::min(L_min, t.L[i]);
-        std::print("A. L when the approach began {:+.3f}; lowest during it {:+.3f}; removal bound {:+.3f}; REMOVE {}\n",
-                   L_before, L_min, L_remove, t.removes);
-        CHECK(std::isfinite(L_before) and L_before > L_remove);
+        auto looks = confirmed_far(40);
+        for (int k = 0; k < 90; ++k)   // y 3.0 → 6.0: through the opening at y = 5 (x within ±0.3 of its centre)
+            looks.push_back({.rx = swing(k, 0.3f), .ry = 3.0f + 3.0f * static_cast<float>(k) / 89.0f, .hole = Hole::Nearer});
+        std::print("A1. confirmed far, then approached 2 m → through the doorway → 1 m beyond (undetectable), hole NEARER:\n");
+        const Trace t = drive(looks, 40, 10);
+        const double L0 = t.L_at(40), Lmin = t.L_min_after(40);
+        std::print("A1. L at the approach {:+.3f}, lowest after {:+.3f}, REMOVE {}\n", L0, Lmin, t.removes);
+        CHECK(std::isfinite(L0) and L0 > L_remove);
         CHECK(t.removes == 0);
-        // Nothing the detector could resolve said "absent": the belief holds where the approach found it. (The first approach
-        // frame is still marginally detectable — p_detect 0.005 — and charges its due, ~0.01 nats; before the fix L hit −4.)
-        CHECK(L_min >= L_before - 0.05);
+        // Its prior-driven level: what a door is born with (the birth seed), plus only what a resolving look said. The
+        // refutations from where the doorway is still (barely) inside the envelope count at that weight — small.
+        CHECK(Lmin > dcfg.exist_birth_logodds);
     }
 
-    // ── B. a PHANTOM seen from DETECTABLE viewpoints, the depth refuting: still removed ──────────────────────────────────
+    // ── A2. the live mechanism: polygon 0.2 m beyond the door, a person in the doorway, 3 → 1.6 m, then through ─────────
     {
-        std::vector<Look> looks;
-        for (int c = 1; c <= 40; ++c) looks.push_back({sweep_x(c), 0.5f, true, Hole::Deeper});
-        for (int c = 41; c <= 240; ++c) looks.push_back({sweep_x(c), 0.5f, false, Hole::Nearer});
-        std::print("B. a phantom: lit 40 frames, then absent from the detectable far sweep with the hole reading NEARER:\n");
+        auto looks = confirmed_far(40);
+        for (int c = 31; c <= 40; ++c) looks[static_cast<std::size_t>(c - 1)].top_y = kWallLine + 0.2f;   // re-estimated
+        for (int k = 0; k < 60; ++k)
+            looks.push_back({.rx = swing(k, 0.6f), .ry = 2.0f + 1.4f * static_cast<float>(k) / 59.0f, .hole = Hole::Nearer,
+                             .person = true, .top_y = kWallLine + 0.2f});
+        for (int k = 0; k < 40; ++k)
+            looks.push_back({.rx = swing(k, 0.2f), .ry = 3.4f + 2.4f * static_cast<float>(k) / 39.0f, .hole = Hole::Nearer,
+                             .person = true, .top_y = kWallLine + 0.2f});
+        std::print("A2. polygon re-estimated 0.2 m beyond the door; a person in the doorway; 3 → 1.6 m, then through:\n");
+        const Trace t = drive(looks, 40, 10);
+        const double L0 = t.L_at(40), Lmin = t.L_min_after(40);
+        double band = 1.0;
+        for (const auto& r : t.rows) if (r.c == 40) band = r.band_p;
+        std::print("A2. band π {:.2f}; L after the prior entered {:+.3f}; lowest after {:+.3f}; REMOVE {}\n", band, L0, Lmin, t.removes);
+        CHECK(band < 0.5);              // the scene does put the door off the band, as live
+        CHECK(t.removes == 0);          // the prior is in L once; it is not a look
+        CHECK(Lmin > dcfg.exist_birth_logodds);   // as A1: never below the birth seed on looks that could not resolve it
+    }
+
+    // ── A3. a blank-wall phantom approached at close range with zero-mean frame noise: L must not rise ───────────────────
+    {
+        auto looks = confirmed_far(40, Hole::Flat);
+        for (int k = 0; k < 80; ++k)
+            looks.push_back({.rx = swing(k, 0.8f), .ry = 3.0f + 0.9f * static_cast<float>(k % 40) / 39.0f, .hole = Hole::Flat});
+        std::print("A3. a phantom on a blank wall, then close undetectable views with zero-mean depth noise:\n");
+        const Trace t = drive(looks, 40, 20);
+        const double L0 = t.L_at(40), Lmax = t.L_max_after(40);
+        std::print("A3. L at the approach {:+.3f}, highest after {:+.3f}\n", L0, Lmax);
+        CHECK(std::isfinite(L0));
+        CHECK(Lmax <= L0 + 0.05);
+    }
+
+    // ── B. a phantom refuted from DETECTABLE viewpoints: removed, and the image channel's refutations count ─────────────
+    {
+        auto looks = confirmed_far(40);
+        for (int c = 41; c <= 240; ++c) looks.push_back({.rx = sweep_x(c), .ry = 0.5f, .hole = Hole::Nearer});
+        std::print("B. a phantom: lit 40 frames, then absent from the detectable far sweep, the hole reading NEARER:\n");
         const Trace t = drive(looks, 41, 40);
-        std::print("B. REMOVE {} (last L {:+.3f})\n", t.removes, t.L.empty() ? -99.0 : t.L.back());
+        double neg = 0.0, w_max = 0.0;
+        for (const auto& r : t.rows)
+            if (r.c > 40 and r.img_dL < 0.0) { neg += r.img_dL; w_max = std::max(w_max, r.img_w); }
+        std::print("B. REMOVE {}; the image channel's refutations Σ {:+.2f} nats at look weight up to {:.2f}\n", t.removes, neg, w_max);
         CHECK(t.removes == 1);
+        CHECK(neg < -1.0);
+        CHECK(w_max > 0.2);
+    }
+
+    // ── D. recog_try23 door_11: off the band (π ≈ 0) — removed by its prior L + real detectable looks; never by the prior alone ─
+    for (const bool looked_at : {true, false})
+    {
+        auto looks = confirmed_far(40);   // (lit; the polygon moves when the detector stops firing, so the term is what it says)
+        for (int c = 41; c <= 240; ++c)
+            looks.push_back({.rx = sweep_x(c), .ry = 0.5f, .hole = Hole::Flat, .turned_away = not looked_at, .top_y = kWallLine + 0.6f});
+        std::print("D. a phantom 0.6 m inside the polygon, then {}:\n", looked_at ? "absent from the detectable far sweep" : "never looked at (camera turned away)");
+        const Trace t = drive(looks, 41, 100);
+        double band = 1.0;
+        for (const auto& r : t.rows) if (r.c == 41) band = r.band_p;
+        std::print("D. band π {:.3f}; REMOVE {}; L last {:+.2f}\n", band, t.removes, t.rows.empty() ? -99.0 : t.rows.back().L);
+        CHECK(band < 0.05);
+        CHECK(t.removes == (looked_at ? 1 : 0));
     }
 
     std::print("{}\n", fails == 0 ? "ALL PASS" : std::format("{} FAILURE(S)", fails));

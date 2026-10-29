@@ -352,7 +352,8 @@ struct DoorFitState
     float dbg_edge_true = 0.0f, dbg_edge_ctrl = 0.0f;
     int   dbg_edge_n = 0;
     float dbg_edge_delta = 0.0f;   // log-odds this channel contributed this cycle (signed)
-    float dbg_img_absence_w = -1.0f;   // Task 15: weight of the image geometry's last look (1 confirm, P(detect) refute, −1 none)
+    float dbg_img_look_w = -1.0f;      // Task 15: the image geometry's last look, in looks (max of its halves' P(detect); −1 none)
+    float dbg_p_env_aperture = 0.0f;   // Task 15: the detector envelope at the aperture's apparent size (the frame's detectability)
     // ── the doorway-FRAME channel (door_frame_evidence.h). dbg_frame_n == 0 ⇒ NOT MEASURED. ──
     float dbg_frame_excess = 0.0f, dbg_frame_true = 0.0f, dbg_frame_ctrl = 0.0f;
     float dbg_frame_depth = 0.0f, dbg_frame_vis = 0.0f;

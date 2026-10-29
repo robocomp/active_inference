@@ -644,6 +644,35 @@ rc::door::FrameProbe compute_frame_probe(const ExistenceScene& sc, const rc::Doo
                                        sc.cfg.exist_boundary_sigma_m, sd_s);
 }
 
+// P(detect | present) of the APERTURE from this camera: the shared detector envelope (rc::detect) at the doorway's apparent
+// size — the extent a virtual camera with the ZED's intrinsics aimed at the aperture centre would see, f·size/range per axis,
+// the horizontal one foreshortened by the obliquity of the view to the wall. The doorway frame's detectability (Task 15): it
+// does not depend on the leaf, so an open door keeps it; standing in or next to the opening overflows the envelope (→ 0), far
+// away it falls under the min-fill shoulder. 0 without a camera pose or intrinsics.
+float aperture_envelope(const std::optional<Mat4d>& room_T_zed, const CameraIntrinsics& cam, const rc::DoorFitState& inst,
+                        const rc::detect::DetectorEnvelope& env)
+{
+    if (not room_T_zed.has_value() or not camera_usable(cam) or not inst.ai2_initialized)
+        return 0.0f;
+    const auto& ap = inst.aperture;
+    const Eigen::Vector3f C(static_cast<float>(room_T_zed->coeff(0, 3)), static_cast<float>(room_T_zed->coeff(1, 3)),
+                            static_cast<float>(room_T_zed->coeff(2, 3)));
+    const Eigen::Vector2f c2 = ap.centre_xy();
+    const Eigen::Vector3f r = Eigen::Vector3f(c2.x(), c2.y(), ap.centre_z()) - C;
+    const float d = r.norm();
+    if (not std::isfinite(d) or d < 1e-3f)
+        return 0.0f;
+    const Eigen::Vector3f fwd(static_cast<float>(room_T_zed->coeff(0, 1)), static_cast<float>(room_T_zed->coeff(1, 1)),
+                              static_cast<float>(room_T_zed->coeff(2, 1)));   // the ZED's forward axis (+y) in the room
+    if (not (r.dot(fwd) > 0.0f))
+        return 0.0f;   // behind the camera: nothing to frame
+    const Eigen::Vector2f rh(r.x(), r.y());
+    const float oblq = rh.norm() > 1e-6f ? std::abs(rh.normalized().dot(ap.across_u())) : 1.0f;
+    const float fill_h = cam.focal_x * ap.w * oblq / (d * static_cast<float>(cam.width));
+    const float fill_v = cam.focal_y * ap.h / (d * static_cast<float>(cam.height));
+    return rc::detect::p_detect(std::max(fill_h, fill_v), 1.0f, env);
+}
+
 // |cos| of the camera→leaf ray against the LEAF's face normal. 1 = square-on, 0 = grazing. Keyed on the leaf, not
 // the wall, so it stays meaningful once phi is fitted: an open door presents its face at a different angle than its
 // aperture does.
@@ -806,9 +835,13 @@ void DoorCore::update_existence(const DoorCycleInput& in, DoorCycleOutput& out)
         // in the door-registration ⊕ polygon-face σ on BOTH sides — a door well inside the room is as wrong as
         // one far outside. It REPLACES its previous value in L each cycle (take the old term out, put the new
         // one in), so a door on the band pays nothing ever, and one far off it is pushed to the floor once and
-        // held there. The removal debounce is advanced by 1 − π (how sure the prior is that this is not a door
-        // of this wall), on every cycle, probed or not — so an off-band door behind a wall, which no sensor can
-        // reach, is still removed after RemoveFrames ideal looks' worth, as before.
+        // held there. ★Task 15 fix round: the prior is ONE fact and enters ONCE — through L, as this term. It no longer
+        // advances the removal debounce (it used to, by 1 − π EVERY cycle, probed or not): a static prior is not a look, and
+        // counted as one per cycle it removed recog_proto5's door_4 — the real DOOR_2, 0.2 m inside room_3's estimated
+        // polygon (π 0.15-0.23) — 26 cycles after L reached −4, with p_detect 0 and no sensor look on any of them. An
+        // off-band phantom (recog_try23 door_11, δ −0.6, π ≈ 0) is pushed to the floor by this term and is removed by the
+        // detectable looks that follow; one no sensor can ever reach stays CONDEMNED-BUT-UNEXECUTABLE (stall_note) —
+        // a request for a look, as the lifecycle asks, not a silent decay.
         // ★ONLY ON A RESOLVED APERTURE (ai2_initialized). Before the first fit the "aperture" is the published
         // LEAF box (door_fitter.cpp refresh_geometry), whose centre sits up to half a width INSIDE the room
         // for a leaf open into it — a two-sided band would floor a healthy newborn. Births outside the room are
@@ -831,7 +864,6 @@ void DoorCore::update_existence(const DoorCycleInput& in, DoorCycleOutput& out)
             bank(inst, -inst.room_prior_term);
             inst.room_prior_term = 0.0f;
         }
-        const float prior_look = 1.0f - p_band;   // the prior's own resolvability toward removal
 
         // MINIMUM-HEIGHT prior: same categorical prior as at birth, for an instance that is ALREADY alive —
         // either it predates the birth check, or it drifted onto a low blob. A door is an aperture a person
@@ -958,7 +990,7 @@ void DoorCore::update_existence(const DoorCycleInput& in, DoorCycleOutput& out)
         }
         if (pkt.mask_pixels.empty())   // no ZED silhouette this frame: the ricoh channel is all there is
         {
-            if (decide(inst, 1.0f - (1.0f - prior_look) * (1.0f - ricoh_look)).remove)
+            if (decide(inst, ricoh_look).remove)
                 to_remove.push_back(id);
             continue;
         }
@@ -1126,30 +1158,46 @@ void DoorCore::update_existence(const DoorCycleInput& in, DoorCycleOutput& out)
         // this reduces term for term to what ran before. The frame enters SYMMETRIC and scaled by vis_frac
         // (how much of it the camera could resolve): on a blank wall both its halves are zero-mean, so it
         // neither confirms nor refutes a phantom — and a confirm-only form fed that noise would be a ratchet.
-        // ★Task 15 (recog_proto5 door_4): `p_absence` is P(detect | present) of THIS look — the door detection model's own
-        //  resolvability, the one the silhouette charges its absence with (p_detect below, without κ: llr carries κ already).
-        //  OCCUPANCY CONFIRMS, ABSENCE IS WEIGHTED BY P(detect) (CONCEPT_AGENT_LIFECYCLE §3): a look whose verdict refutes the
-        //  door counts as p_absence of one look in the view pool (door_view_pool.h `w`), one that confirms counts in full.
-        //  Measured: door_4, the REAL open DOOR_2, lost 34.7 nats over its life of which 0.28 came on rows whose p_detect
-        //  exceeded 0.02 — the doorway frame refuted it, a new view at a time, as the robot approached the open doorway from
-        //  places where the detector could not have seen it as a door (not probed / occluded / overflowing the envelope /
-        //  the leaf edge-on), until L hit −4 and the wall-band prior's look completed the removal in 26 cycles.
-        //  NOT PROBED ⇒ p_absence = 0: the silhouette's own verdict on this cycle is HOLD (lifecycle: "occluded, out of FoV,
-        //  or not probed — never absence"), and a refutation of a door the detector could not see from here is the same
-        //  non-observation in another channel. The frame still CONFIRMS from there (the try32 open-out door it exists for).
-        const auto integrate_image_geometry = [&](bool leaf_visible, float p_absence)
+        const rc::detect::DetectorEnvelope env{cfg.detect_min_fill, cfg.detect_max_fill, cfg.detect_soft};
+        const float p_env_aperture = aperture_envelope(room_T_zed, in.camera, inst, env);
+        inst.dbg_p_env_aperture = p_env_aperture;
+        // ★Task 15 (recog_proto5 door_4): EACH HALF IS WEIGHTED BY ITS OWN DETECTABILITY, SYMMETRICALLY (confirm and refute alike).
+        //  The channel had no detection model: every new view counted one full llr, scaled only by the frame's vis_frac. door_4,
+        //  the REAL open DOOR_2, lost 34.7 nats over its life, 0.28 of them on rows whose silhouette p_detect exceeded 0.02 — the
+        //  doorway frame refuted it (exc −9.2 at vis 0.43; dep −1.00) a new view at a time while the robot approached it for
+        //  the crossing from places the detector could not have resolved it, and its confirmations (+19, +12.7) were lost at
+        //  the +4 clamp: a random walk to the floor.
+        //   · w_leaf  — the LEAF halves (RGB contour, depth): the silhouette's own P(detect | present) without κ (the llr
+        //               carries κ) — envelope × leaf obliquity × resolvability × in-FoV × central. 0 when not probed.
+        //   · w_frame — the doorway FRAME: the detector envelope at the APERTURE's apparent size from here
+        //               (aperture_envelope; the frame does not move with the leaf, so an open door seen square-on keeps its
+        //               frame fully weighted — the try32 open-out confirmations) × vis_frac, which frame.verdict() already
+        //               carries (f = vis_frac·(excess + depth)), so it is not applied twice.
+        //  The look is worth W = max(w_leaf, w_frame) of one look in the view pool (door_view_pool.h `w`), and its verdict is the
+        //  detectability-weighted sum of the halves over W — so with both weights 1 it is the old summed verdict, and a half
+        //  the camera cannot resolve from here says nothing in EITHER direction (a one-sided weight is a ratchet: the frame is
+        //  zero-mean on a blank wall).
+        const auto integrate_image_geometry = [&](bool leaf_visible, float w_leaf, float w_frame)
         {
-            inst.dbg_img_absence_w = -1.0f;   // no image-geometry look this cycle (the log prints it as such)
-            float verdict = 0.0f;
+            inst.dbg_img_look_w = -1.0f;   // no image-geometry look this cycle (the log prints it as such)
+            float v_leaf = 0.0f, v_frame = 0.0f;
+            bool  has_leaf = false, has_frame = false;
             int   n = 0;
             if (leaf_visible and inst.dbg_edge_n > 0 and edge.n_controls > 0)
-            { verdict += std::max(0.0f, edge.excess); n = std::max(n, inst.dbg_edge_n); }
+            { v_leaf += std::max(0.0f, edge.excess); n = std::max(n, inst.dbg_edge_n); has_leaf = true; }
             if (leaf_visible and depth.n_samples > 0)
-            { verdict += depth.verdict; n = std::max(n, depth.n_samples); }
+            { v_leaf += depth.verdict; n = std::max(n, depth.n_samples); has_leaf = true; }
             if (frame.n_samples() > 0)
-            { verdict += frame_verdict; n = std::max(n, frame.n_samples()); }
+            { v_frame = frame_verdict; n = std::max(n, frame.n_samples()); has_frame = true; }
             if (n == 0)
             { inst.dbg_edge_delta = 0.0f; return; }   // nothing measured — NOT a refutation
+            w_leaf  = has_leaf  ? w_leaf  : 0.0f;   // both are products of probabilities in [0, 1]; the pool clamps W once
+            w_frame = has_frame ? w_frame : 0.0f;
+            const float W = std::max(w_leaf, w_frame);
+            inst.dbg_img_look_w = W;
+            if (not (W > 0.0f))
+            { inst.dbg_edge_delta = 0.0f; return; }   // measured, but from where neither half can resolve the door: HOLD
+            const float verdict = (w_leaf * v_leaf + w_frame * v_frame) / W;
             // ★D4 (Task 5b): POOLED BY VIEW NOVELTY (door_view_pool.h). contour_evidence's llr·tanh(v) is the worth of ONE
             // observation; the frames of one view are that observation repeated, so they pool (mean verdict) instead of
             // adding a full llr each — which on the tapes walked correct doors from the +4 clamp to the −4 floor in a few
@@ -1164,9 +1212,7 @@ void DoorCore::update_existence(const DoorCycleInput& in, DoorCycleOutput& out)
             // view" is one question about one object, and two channels judging it at different scales let the one that
             // sees novelty sooner (the narrower) out-run the other — measured, tourR1 DOOR_1 at RecessPriorStd 0.2:
             // the image channel at 0.5·w walked a door the silhouette read occupied (150/30) to the floor in 13 frames.
-            const float w_look = verdict >= 0.0f ? 1.0f : std::clamp(p_absence, 0.0f, 1.0f);
-            inst.dbg_img_absence_w = w_look;
-            const float dL = inst.image_view_pool.add(cam, inst.aperture.centre_xy(), pool_R, verdict, llr, w_look);
+            const float dL = inst.image_view_pool.add(cam, inst.aperture.centre_xy(), pool_R, verdict, llr, W);
             const float L0 = inst.existence.logodds();
             inst.existence.integrate(1.0f, dL);
             bank(inst, inst.existence.last_increment());
@@ -1185,10 +1231,9 @@ void DoorCore::update_existence(const DoorCycleInput& in, DoorCycleOutput& out)
             inst.dbg_sil_pdetect = 0.0f; inst.dbg_sil_free_eff = 0.0f;
             // The leaf was not looked at; the FRAME may have been. Its evidence is integrated, but no
             // removal decision is taken on a cycle the removal channel (the silhouette) did not probe.
-            integrate_image_geometry(/*leaf_visible=*/false, /*p_absence=*/0.0f);
-            // The wall-band prior needs no look: an off-band door advances its debounce here too (a door the
-            // sensor can never reach — behind a wall — is exactly the case that prior exists for).
-            if (decide(inst, 1.0f - (1.0f - prior_look) * (1.0f - ricoh_look)).remove)
+            integrate_image_geometry(/*leaf_visible=*/false, /*w_leaf=*/0.0f, p_env_aperture);
+            // (The wall-band prior no longer advances the debounce — see the band prior above: it is in L, once.)
+            if (decide(inst, ricoh_look).remove)
                 to_remove.push_back(id);
             continue;
         }
@@ -1270,7 +1315,6 @@ void DoorCore::update_existence(const DoorCycleInput& in, DoorCycleOutput& out)
         //
         // visible_frac is passed as 1.0 on purpose: occlusion/frustum loss is already carried by
         // in_fov_frac() below, and passing it twice would square it.
-        const rc::detect::DetectorEnvelope env{cfg.detect_min_fill, cfg.detect_max_fill, cfg.detect_soft};
         const float p_env = rc::detect::p_detect(inst.roi_fill, 1.0f, env);
         inst.dbg_p_env = p_env;
         // ★OBLIQUITY OF THE LEAF, which only became a live variable when phi did. A panel seen edge-on
@@ -1290,9 +1334,9 @@ void DoorCore::update_existence(const DoorCycleInput& in, DoorCycleOutput& out)
         // is the same shape as the documented hood failure, so a door believed permanently edge-on
         // would be hard to remove. The aperture-side evidence is what has to keep that in check.
         const float leaf_oblq = door_view_obliquity(room_T_zed, inst);
-        // The same model without κ, for the image-geometry channel's absence (its llr is already κ-weighted).
-        const float p_look_absence = p_env * leaf_oblq * sil.resolvability() * sil.in_fov_frac() * sil.central_frac();
-        float p_detect = p_look_absence * kappa;
+        // The same model without κ: the leaf halves' detectability in the image-geometry channel (its llr carries κ).
+        const float p_look_leaf = p_env * leaf_oblq * sil.resolvability() * sil.in_fov_frac() * sil.central_frac();
+        float p_detect = p_look_leaf * kappa;
 
         // ★THE CONTOUR CHECK. Everything above is geometry: it says how well the camera could have
         // resolved the door IN PRINCIPLE. This asks what the classifier actually computed AT the door's
@@ -1435,7 +1479,7 @@ void DoorCore::update_existence(const DoorCycleInput& in, DoorCycleOutput& out)
         // RGB frame at all. Its statistic is absolute, so it does not need the null the gradient
         // check does, and making it wait for one would silence the only channel that can say "we are
         // looking straight through the place the door is supposed to be".
-        integrate_image_geometry(/*leaf_visible=*/true, p_look_absence);
+        integrate_image_geometry(/*leaf_visible=*/true, p_look_leaf, p_env_aperture);
 
         // Debounce on consecutive EVIDENCE cycles (not wall-clock), so a transient hiccup cannot delete a real
         // door, and removal always reflects sustained agreement across frames.
@@ -1459,7 +1503,7 @@ void DoorCore::update_existence(const DoorCycleInput& in, DoorCycleOutput& out)
         //  that saw the door mostly lit and a few samples free is mostly a confirmation, not a full look at an absence.
         const float absence_share = raw_free > 0.0f ? raw_free / std::max(1e-6f, raw_free + std::max(0.0f, e_occ)) : 0.0f;
         const float absence_look = p_detect * absence_share;
-        const float cycle_look = 1.0f - (1.0f - absence_look) * (1.0f - prior_look) * (1.0f - ricoh_look);
+        const float cycle_look = 1.0f - (1.0f - absence_look) * (1.0f - ricoh_look);
         const auto verdict = decide(inst, cycle_look);
         if (verdict.remove)
             to_remove.push_back(id);
@@ -1536,9 +1580,9 @@ void DoorCore::update_existence(const DoorCycleInput& in, DoorCycleOutput& out)
                            // disagree — edge high while P(door) collapses — the disagreement IS the
                            // finding, and it was previously only visible by joining two files afterwards.
                            " | edge n={}/{}ctl sup={:.2f} exc={:+.2f} (t={:.0f} c={:.0f}) dL={:+.2f}"
-                           // Task 15: how much of one look the image geometry's last verdict was worth (1 = it confirmed;
-                           // < 1 = a refutation weighted by P(detect | present); -1 = no look this cycle).
-                           " img_abs_w={:.2f}"
+                           // Task 15: how much of one look the image geometry's last verdict was worth — max of its halves'
+                           // detectabilities, −1 = no look this cycle — and the aperture's envelope factor (the frame's).
+                           " img_w={:.2f} ap_env={:.2f}"
                            " | phi={:.1f}deg sup={:.2f} cmd={}"
                            // The doorway-FRAME channel (door_frame_evidence.h). n=0 ⇒ NOT MEASURED. Its
                            // contribution is inside the edge dL above (one tanh for all image geometry).
@@ -1553,7 +1597,7 @@ void DoorCore::update_existence(const DoorCycleInput& in, DoorCycleOutput& out)
                            inst.existence_debounce.streak,
                            inst.dbg_field_n, inst.dbg_field_mean, inst.dbg_field_bg, inst.dbg_field_support,
                            inst.dbg_edge_n, inst.dbg_edge_nctl, inst.dbg_edge_support, inst.dbg_edge_excess,
-                           inst.dbg_edge_true, inst.dbg_edge_ctrl, inst.dbg_edge_delta, inst.dbg_img_absence_w,
+                           inst.dbg_edge_true, inst.dbg_edge_ctrl, inst.dbg_edge_delta, inst.dbg_img_look_w, inst.dbg_p_env_aperture,
                            inst.phi_est * 180.0f / static_cast<float>(M_PI), inst.phi_support,
                            inst.phi_cmd_active ? 1 : 0,
                            inst.dbg_frame_n, inst.dbg_frame_vis, inst.dbg_frame_excess, inst.dbg_frame_true,

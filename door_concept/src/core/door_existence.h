@@ -24,6 +24,7 @@
 //   · the input recorder's image ROIs (which pixels each check sampled): ImageUseNote / ImageRoiNote to the sinks, at
 //     the point the old code called InputSnapshot::note_images / note_roi.
 #pragma once
+#include "../../../common/detectability/detectability.h"   // rc::detect — the shared detector envelope
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -247,6 +248,10 @@ struct ExistenceScene
 [[nodiscard]] rc::door::FrameProbe compute_frame_probe(const ExistenceScene& sc, const rc::DoorFitState& inst,
                                                        float s_shift = 0.0f);
 [[nodiscard]] float door_view_obliquity(const std::optional<Mat4d>& room_T_zed, const rc::DoorFitState& inst);
+/// P(detect | present) of the APERTURE (the doorway frame's detectability, Task 15): the shared detector envelope at the
+/// doorway's apparent size from this camera. See door_existence.cpp.
+[[nodiscard]] float aperture_envelope(const std::optional<Mat4d>& room_T_zed, const CameraIntrinsics& cam,
+                                      const rc::DoorFitState& inst, const rc::detect::DetectorEnvelope& env);
 [[nodiscard]] float aperture_band_offset(const std::vector<Eigen::Vector2f>& polygon, const rc::DoorFitState& inst);
 
 /// ★Task D-C (rtD1i door_5): THE DOOR'S IMAGE CHANNELS UNDER THE ROBOT POSE'S UNCERTAINTY. Every image channel predicts
