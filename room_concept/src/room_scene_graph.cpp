@@ -200,7 +200,7 @@ void RoomSceneGraph::update(const rc::RoomConcept::UpdateResult& res, float adv,
     last_int_cov_  = res.covariance;
     have_last_int_pose_ = true;
 
-    if (step_late_recall()) return;   // a late recall from ltsm's recogniser re-births its room (room_scene_graph_late_recall.cpp)
+    if (step_proposal(res)) return;   // ltsm's recognition proposal: P adopted as K in place (room_scene_graph_late_recall.cpp)
 
     // ── START-UP PROTO-ROOM: the room exists from the first second of an estimation run ─────────────
     // Born here, on the localiser thread, the first time an estimating agent has no room — ALWAYS, even if
@@ -311,7 +311,13 @@ void RoomSceneGraph::update(const rc::RoomConcept::UpdateResult& res, float adv,
         // Estimate mode, after publication: a structure change (a wall born after closure) changes
         // the polygon's vertex count. Republish the contract attribute so consumers see the new
         // shape, and move the wall nodes onto it in place (rule 1, sync_walls_to_polygon).
-        if (startup_proto_ and not startup_promoted_)
+        if (prop_judged_.has_value())
+        {
+            // A recognition proposal is being judged (step_proposal): the given layout is K's, placed in the internal
+            // frame, and P's published state (polygon, walls, survey) must not move until the verdict — a reject has
+            // to leave P exactly as it was. The robot's RT is still published below, in P's frame.
+        }
+        else if (startup_proto_ and not startup_promoted_)
         {
             // The start-up proto's polygon is CONFIRMED FREE SPACE, not the learnt layout — see
             // step_startup_proto, which also promotes it when the layout becomes publishable.
@@ -1583,7 +1589,6 @@ void RoomSceneGraph::rearm_after_crossing(std::uint64_t new_room_id, const std::
     // ROOMS DO NOT OVERLAP: the room left behind is known space, not the new room's. Its outline (internal frame, read
     // before begin_room_estimation releases it) is excluded from the new room's free-space map (FreeSpacePolygon::
     // set_exclusion) — what the LiDAR sees of it back through the open doorway is not floor to promote.
-    // (A late recall replaces a provisional room that IS this same space: nothing to exclude.)
     // FLAGGED (geometric contradiction, MAP of inside vs outside): an EARLIER left outline that holds most of the robot's
     // position posterior is not a different room — rooms do not overlap, and the robot is standing in it. Excluded, it
     // blinded the raster to the floor under the robot (a parked robot adds no free space => no polygon => 'NO WORLD'
@@ -1595,7 +1600,7 @@ void RoomSceneGraph::rearm_after_crossing(std::uint64_t new_room_id, const std::
             qWarning() << "[room][startup-proto] dropped" << n << "earlier left-room outline(s) from the exclusion: most of the"
                        << "pose posterior at (" << last_int_pose_.translation().x() << "," << last_int_pose_.translation().y()
                        << ") lies inside them, so they are this room, not another";
-    if (auto poly = room_concept_->nominal_room_polygon(); poly.size() >= 3 and not (recall.has_value() and recall->late))
+    if (auto poly = room_concept_->nominal_room_polygon(); poly.size() >= 3)
         left_polys_int_.push_back(std::move(poly));
     // This agent's intentions (afford_room, afford_calib) are ONE node each and move with the agent's room: the
     // affordance manager re-hangs them from the new room on its next publish (parent + has_intention), but never
@@ -1663,15 +1668,6 @@ void RoomSceneGraph::rearm_after_crossing(std::uint64_t new_room_id, const std::
     {
         room_concept_->set_map_layout(recall_int);
         room_concept_->adopt_map_layout_as_given();
-        if (recall->late)
-        {
-            // The robot is already INSIDE: no doorway to anchor on (the passage prior is not used). The recognition
-            // posterior of the robot's pose in this room goes to the relocaliser as the prior of ONE mixture search on the
-            // next scan (RoomConcept::seed_reloc_prior); the Laplace modes give the pose covariance after the jump.
-            room_concept_->seed_reloc_prior(recall->pose_prior, recall->recog_log_odds);
-        }
-        else
-        {
         // The robot is standing in the passage it just crossed: its geometry tempers the lost belief while the body is
         // in it and anchors the relocaliser's prior (passage_prior.h, Task R1b). n_out of the room left = into this one.
         rc::passage::Passage pg;
@@ -1684,7 +1680,6 @@ void RoomSceneGraph::rearm_after_crossing(std::uint64_t new_room_id, const std::
         pg.door_id = last_crossing_door_id_;
         pg.heading = last_crossing_heading_;  pg.sig_heading = last_crossing_sig_heading_;   // forward or backing through
         room_concept_->note_passage_handover(pg);
-        }
         std::string reason;
         promote_startup_proto(reason, true);
         recalled_visit_ = true;   // the remembered outline is not re-refined on this visit: see step_layout_refiner
@@ -1703,6 +1698,31 @@ float RoomSceneGraph::startup_erode_m() const
 {
     return params_->STARTUP_PROTO_ERODE_M >= 0.f ? params_->STARTUP_PROTO_ERODE_M
                                                  : 0.5f * std::max(params_->ROBOT_WIDTH, params_->ROBOT_LENGTH);
+}
+
+void RoomSceneGraph::reset_free_space(const Eigen::Affine2f& T_pub_int)
+{
+    // The free-space accumulator and everything read from it are in the PUBLISHED frame: a new published frame (a room
+    // born, or a provisional room adopted as a remembered one) starts them again.
+    rc::freespace::Params fp;
+    fp.cell      = params_->STARTUP_PROTO_CELL;
+    fp.half_span = params_->STARTUP_PROTO_HALF_SPAN;
+    fp.erode_m   = startup_erode_m();
+    fp.max_verts = params_->STARTUP_PROTO_MAX_VERTS;
+    free_space_.emplace(fp);
+    if (not left_polys_int_.empty())   // the rooms this agent has left, in this room's published frame
+    {
+        std::vector<std::vector<Eigen::Vector2f>> excl;
+        for (const auto& poly : left_polys_int_)
+        {
+            auto& e = excl.emplace_back();
+            for (const auto& v : poly) e.push_back(T_pub_int * v);
+        }
+        free_space_->set_exclusion(std::move(excl));
+    }
+    fs_published_.clear();
+    fs_free_ring_.clear();
+    pose_hist_.clear();
 }
 
 void RoomSceneGraph::arm_startup_proto(std::uint64_t room_id, const Eigen::Affine2f& T_pub_int)
@@ -1729,24 +1749,7 @@ void RoomSceneGraph::arm_startup_proto(std::uint64_t room_id, const Eigen::Affin
     if (Eigen::Affine2f stale; room_concept_->take_pending_reanchor(stale))
         qWarning() << "[room][startup-proto] discarded a re-anchor pending from before the birth (it moved a"
                    << "frame nobody had published)";
-    rc::freespace::Params fp;
-    fp.cell      = params_->STARTUP_PROTO_CELL;
-    fp.half_span = params_->STARTUP_PROTO_HALF_SPAN;
-    fp.erode_m   = startup_erode_m();
-    fp.max_verts = params_->STARTUP_PROTO_MAX_VERTS;
-    free_space_.emplace(fp);
-    if (not left_polys_int_.empty())   // the rooms this agent has left, in this room's published frame
-    {
-        std::vector<std::vector<Eigen::Vector2f>> excl;
-        for (const auto& poly : left_polys_int_)
-        {
-            auto& e = excl.emplace_back();
-            for (const auto& v : poly) e.push_back(T_pub_int * v);
-        }
-        free_space_->set_exclusion(std::move(excl));
-    }
-    fs_published_.clear();
-    fs_free_ring_.clear();
+    reset_free_space(T_pub_int);
     layout_visits_ = 0;
     fs_last_ms_ = 0;
     layout_target_.reset();
@@ -1990,7 +1993,7 @@ void RoomSceneGraph::promote_startup_proto(std::string& reason, bool recalled)
     if (not G_->update_node(rn.value())) { reason = "promote_update_failed"; return; }
     // PROMOTION IN PLACE: same node id, same frame, the `proto` self-edge removed. No identity question at
     // start-up (it is the robot's first room); ltsm_agent's identity authority concerns crossings.
-    if (not G_->delete_edge(dsr_room_id_, dsr_room_id_, "proto"))
+    if (G_->get_edge(dsr_room_id_, dsr_room_id_, "proto").has_value() and not G_->delete_edge(dsr_room_id_, dsr_room_id_, "proto"))
         qWarning() << "[room][startup-proto] could not delete the proto self-edge on room" << dsr_room_id_
                    << "— consumers will keep reading it as a proto";
     startup_promoted_ = true;

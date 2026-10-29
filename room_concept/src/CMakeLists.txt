@@ -48,6 +48,7 @@ LIST(APPEND SOURCES
   ../src/room_scene_graph.cpp
   ../src/room_scene_graph_explored.cpp
   ../src/room_scene_graph_late_recall.cpp
+  ../src/proposal_adoption.cpp
   ../src/layout_explorer.cpp
   ../src/lidar_ingestor.cpp
   ../src/imu_ingestor.cpp
@@ -301,3 +302,13 @@ set_target_properties(stability_belief_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY 
 add_executable(wall_update_test EXCLUDE_FROM_ALL ../tools/wall_update_test.cpp)
 target_include_directories(wall_update_test PRIVATE ${CMAKE_CURRENT_LIST_DIR}/../src)
 set_target_properties(wall_update_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../../bin)
+
+# ── proposal_adoption_test ────────────────────────────────────────────────────
+# Room-transition protocol C2.7: adopt (rename in place, own children re-expressed) or reject ltsm's recognition
+# proposal, on a REAL DSR graph (private DDS domain 57). Needs cortex with rename (branch rename-node, 43bfe16).
+#   make -C build proposal_adoption_test && ../bin/proposal_adoption_test
+add_executable(proposal_adoption_test EXCLUDE_FROM_ALL ../tools/proposal_adoption_test.cpp ../src/proposal_adoption.cpp)
+target_include_directories(proposal_adoption_test PRIVATE ${CMAKE_CURRENT_LIST_DIR}/../src)
+target_compile_definitions(proposal_adoption_test PRIVATE ROOT_JSON="${CMAKE_CURRENT_LIST_DIR}/../../ltsm_agent/ltsm_root.json")
+target_link_libraries(proposal_adoption_test ${LIBS})
+set_target_properties(proposal_adoption_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../../bin)

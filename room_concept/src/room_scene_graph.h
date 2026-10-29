@@ -51,6 +51,7 @@
 #include "learnt_layout.h"           // rc::learnt (the accepted room kept as a dated SVG, MapMode = "last")
 #include "layout_explorer.h"         // rc::layout (the live layout explorer → afford_room while proto)
 #include "room_explored.h"           // rc::explored — P(room explored), room_explored_p
+#include "proposal_adoption.h"         // rc::proposal — ltsm's recognition proposal: admit, adopt in place, answer
 
 namespace rc
 {
@@ -216,6 +217,8 @@ private:
     bool birth_startup_proto(const rc::RoomConcept::UpdateResult& res, std::string& why);
     /// The start-up survey's state for a room just born with no polygon, published frame = T_pub_int · internal.
     void arm_startup_proto(std::uint64_t room_id, const Eigen::Affine2f& T_pub_int);
+    /// Fresh free-space accumulator (+ left-room exclusion, published-frame caches) for the published frame T_pub_int.
+    void reset_free_space(const Eigen::Affine2f& T_pub_int);
     /// Out of a promoted room through a door: the new room becomes this agent's room, estimated by the start-up survey.
     /// A room REMEMBERED behind a door (ltsm_agent's `recall_<room>` metaconcept, RT child of the door node): its name,
     /// its outline in its own frame, and that frame in this agent's INTERNAL frame (through the crossed aperture).
@@ -226,29 +229,25 @@ private:
         std::vector<Eigen::Vector2f> poly_pub;     ///< outline in the remembered room's own (published) frame
         Eigen::Affine2f T_int_recall = Eigen::Affine2f::Identity();
         std::optional<float> explored_p;           ///< room_explored_p, if memory carried it onto the recall (room_explored.h)
-        // ── a LATE recall (Task 9): the robot is already inside the remembered room, no door to place it through ────
-        bool late = false;                         ///< recall_late: the recogniser committed before this recall arrived
-        std::uint64_t node_id = 0;                 ///< the recall node (owned by ltsm: read, and `valid` written, never deleted)
-        std::vector<rc::reloc::PriorMode> pose_prior;   ///< the robot's pose in the recalled room's frame (recall_pose_prior)
-        double recog_log_odds = 0.0;               ///< ln P(K)/P(new) from ltsm's recognition node at adoption (0 = none)
     };
-    /// The late recall (recall_late) ltsm posted, hung from the crossed door of the room being left (case A) or from the robot
-    /// (case B: no door survives). Its outline is already in the remembered room's own frame, which becomes the internal
-    /// one (T_int_recall = I): the robot's pose in it is the PRIOR the relocalisation search is handed, not a transform.
-    [[nodiscard]] std::optional<Recall> find_late_recall() const;
-    /// Re-birth the room from a late recall: the room node with the REMEMBERED name (rearm_after_crossing's recall path),
-    /// its outline given, the pose found by the mixture search with the recall's pose prior; the verdict of that search is
-    /// reported back on the recall node (`valid = false` = rejected). The room it replaces is released to ltsm's fence.
-    bool adopt_late_recall(const Recall& r);
     /// ln P(K)/P(new) on ltsm's `recognition` node (recog_room_ids / recog_posterior, P(new) last) for room_id K; 0 when the
     /// node, the entry or the attributes are absent (no recognition evidence = an even prior for the adoption test).
     [[nodiscard]] double recognition_log_odds(std::uint64_t room_id) const;
-    bool step_late_recall();   ///< one cycle: adopt a standing late recall, relay the adoption verdict. True = adopted THIS call
-    std::uint64_t late_watch_room_ = 0;      ///< the room node adopted from it
-    mutable std::uint64_t late_bad_parent_logged_ = 0;
-    std::uint64_t late_watch_node_ = 0;      ///< the recall whose adoption verdict is pending (0 = none)
-    std::string   late_adopted_name_;        ///< the room last adopted from a late recall
-    std::int64_t  late_last_poll_ms_ = 0;
+    // ── RECOGNITION PROPOSALS (room-transition protocol C2.7; room_scene_graph_late_recall.cpp, proposal_adoption.h) ──
+    /// One cycle: answer standing proposals (refuse what cannot be judged), run the fit of the one under judgement and
+    /// relay its verdict. True = P was adopted as K THIS call (the rest of update() is skipped, as a birth is).
+    bool step_proposal(const rc::RoomConcept::UpdateResult& res);
+    /// Start the fit: K's outline becomes the GIVEN layout (placed in the internal frame through T(P←K)), the robot-in-K
+    /// modes the relocaliser's prior. Nothing is written to the graph while it runs; P's survey is suspended.
+    void begin_proposal_fit(const rc::proposal::Proposal& p);
+    /// Back to P's survey after a rejected / withdrawn proposal: the given layout is released (plain SLAM again).
+    void end_proposal_fit(const char* why);
+    /// Accepted: P becomes K in place (rename, outline, own children by T(K←P), published frame = K's), then promoted.
+    bool accept_proposal(const rc::RoomConcept::UpdateResult& res);
+    [[nodiscard]] std::uint64_t provisional_room() const;   ///< this agent's provisional room (0 = none)
+    std::optional<rc::proposal::Proposal> prop_judged_;     ///< the proposal under judgement (none = no fit running)
+    Eigen::Affine2f prop_T_int_K_ = Eigen::Affine2f::Identity();   ///< K's frame in the internal one, for that fit
+    std::int64_t  prop_last_poll_ms_ = 0;
     /// The recall hung from the crossed door `ap`, if ltsm posted one. Reads node/edge attributes only (thread-safe).
     [[nodiscard]] std::optional<Recall> find_recall(const rc::DoorAperture& ap) const;
     // Room names are never reused: one past every room_<k> ever issued, not only those live (see the proto birth).

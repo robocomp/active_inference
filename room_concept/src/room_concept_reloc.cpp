@@ -734,7 +734,7 @@ namespace rc
     // ★ THE ADOPTION VERDICT ACCUMULATES. One scan during the jump is noisy, so the verdict is the log-odds of "K explains
     //   the scans" summed over scans (the construction of stability_belief.h): per scan the LLR of the tracker's median |SDF|
     //   under the tracking emission vs the broad one — the two densities the lost belief already runs on. NO forgetting: the
-    //   window is bounded by model events (the fence / the recall or room vanishing, RoomSceneGraph::step_late_recall).
+    //   window is bounded by model events (the fence / the proposal or room vanishing, RoomSceneGraph::step_proposal).
     //   FLAGGED: ±ln 19 is a SEQUENTIAL test boundary (Wald's SPRT, α = β = 0.05: ln((1−β)/α) = ln 19), not a 0-1-loss
     //   decision: another scan is cheap while a false Undo (or a missed one) is expensive. Weak evidence stays Pending,
     //   which ltsm reads as no objection.
