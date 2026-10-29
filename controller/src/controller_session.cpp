@@ -1136,8 +1136,9 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
             current_plan_.reset();
             plan_spline_valid_ = false;
         }
-        affordance_manager.set_room_scope(scope);
     }
+    // Reconcile ALWAYS: a same-room rename changes the scope name without `changed` (and without a release).
+    if (affordance_manager.room_scope() != so.manager_scope) affordance_manager.set_room_scope(so.manager_scope);
     // ★ MISSION (COMMAND) MODE TAKES ORDERS, IT DOES NOT FORAGE (2026-10-18, user). The selector runs there only
     //   for an order: a door passage (door_required_ names its step) or an `explore`, which opens the contest on
     //   purpose. With no order standing — after `stop`, or before the first — the contest stayed open and the robot

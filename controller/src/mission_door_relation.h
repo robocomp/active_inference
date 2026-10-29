@@ -143,7 +143,7 @@ inline bool rename_scope(std::string &explore_room, std::string &manager_scope, 
 /// (names only), then compares the wanted scope with the manager's. `release` = the contest scope CHANGED to a non-empty room:
 /// the caller must release the standing claim, lock-on and plan. A rename never sets it.
 struct ScopeCycle { std::string explore_room, manager_scope, pending_rename; };
-struct ScopeOutcome { bool changed = false; bool release = false; std::string scope; };
+struct ScopeOutcome { bool changed = false; bool release = false; std::string scope; std::string manager_scope; /* what the manager MUST hold after this cycle */ };
 [[nodiscard]] inline ScopeOutcome scope_cycle(ScopeCycle &s, bool command_explore, std::string_view door_required)
 {
     if (not s.pending_rename.empty())
@@ -156,6 +156,7 @@ struct ScopeOutcome { bool changed = false; bool release = false; std::string sc
     o.changed = o.scope != s.manager_scope;
     o.release = o.changed and not o.scope.empty();
     if (o.changed) s.manager_scope = o.scope;
+    o.manager_scope = s.manager_scope;
     return o;
 }
 

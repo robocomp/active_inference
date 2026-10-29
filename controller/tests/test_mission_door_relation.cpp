@@ -75,6 +75,21 @@ int main()
         sc.pending_rename.clear(); sc.explore_room = "room_5";
         CHECK(cycle(true).release and not claim);
     }
+    {   // what the session would set on the REAL manager (it feeds the real scope in and reconciles to outcome.manager_scope)
+        std::string real;   // the manager's scope
+        auto run = [&](std::string er, std::string pend, bool cmd, std::string_view req) {
+            ScopeCycle sc{.explore_room = er, .manager_scope = real, .pending_rename = pend};
+            const auto o = scope_cycle(sc, cmd, req);
+            real = o.manager_scope;                                // session: set_room_scope(outcome.manager_scope)
+            return o;
+        };
+        auto o = run("room_4", "", true, "");                      // enter
+        CHECK(o.release and real == "room_4");
+        o = run("room_4", "room_2", true, "");                     // same-id rename: names only
+        CHECK(not o.release and not o.changed and real == "room_2");
+        o = run("room_2", "", true, "door_1");                     // a passage overrides: clear, no release
+        CHECK(not o.release and o.changed and real.empty());
+    }
     CHECK(relation_of(node("new")) == DoorRelationKind::New);
     CHECK(relation_of(node("room_2")) == DoorRelationKind::Room);
     CHECK(relation_of(node("door_3")) == DoorRelationKind::None);
