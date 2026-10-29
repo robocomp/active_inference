@@ -11,6 +11,7 @@
 #include <ranges>
 #include "room_scene_graph.h"
 #include "status_reporter.h"
+#include "wall_sync.h"                                       // rc::walls::plan_wall_sync (rule 1)
 #include "door_crossing.h"                                   // rc::crossing (proto-room evidence)
 #include "proto_mouth.h"                                      // rc::crossing::write_mouth (the proto birth)
 #include "../../common/room_resolve/room_resolve.h"          // rc::room::current_room / is_proto
@@ -309,8 +310,7 @@ void RoomSceneGraph::update(const rc::RoomConcept::UpdateResult& res, float adv,
     {
         // Estimate mode, after publication: a structure change (a wall born after closure) changes
         // the polygon's vertex count. Republish the contract attribute so consumers see the new
-        // shape. The wall_i nodes are NOT rebuilt here (dsr_create_wall_nodes is create-once); that
-        // is the known follow-up, as is naming walls by landmark id so door edge indices survive.
+        // shape, and move the wall nodes onto it in place (rule 1, sync_walls_to_polygon).
         if (startup_proto_ and not startup_promoted_)
         {
             // The start-up proto's polygon is CONFIRMED FREE SPACE, not the learnt layout — see
@@ -349,8 +349,16 @@ void RoomSceneGraph::update(const rc::RoomConcept::UpdateResult& res, float adv,
                     qInfo() << "[room][wall-slam] structure change: republished delimiting_polygon on"
                             << QString::fromStdString(rn->name()) << "with"
                             << static_cast<int>(poly_int.size()) << "vertices (was" << static_cast<int>(last_verts)
-                            << "); wall_i nodes are stale until restart";
+                            << ")";
                     last_verts = poly_int.size();
+                    // The crossing proto has no walls of its own yet (its frame is frozen; its build is
+                    // dsr_create_wall_nodes's); this agent's room does.
+                    if (not to_proto)
+                    {
+                        std::vector<Eigen::Vector2f> poly_pub; poly_pub.reserve(px.size());
+                        for (std::size_t i = 0; i < px.size(); ++i) poly_pub.emplace_back(px[i], py[i]);
+                        sync_walls_to_polygon(poly_pub);
+                    }
                 }
             }
         }
@@ -3760,45 +3768,140 @@ void RoomSceneGraph::load_robot_body_dimensions_from_graph()
 }
 
 ///////////////////////////////////////////////////////////////////////////////
-// Move walls that still hang from the room onto the floor, preserving their pose. floor->room is the
-// identity, so the RT payload is identical in either frame and is simply recomputed from `polygon`.
-// The old room->wall RT edge must go, or the wall would show two parents in the RT tree.
-void RoomSceneGraph::re_parent_walls_onto_floor(const std::vector<DSR::Node>& walls,
-                                                DSR::Node& floor_node,
-                                                const std::vector<Eigen::Vector2f>& polygon)
+// ── ONE FLOOR AND ONE WALL SET PER ROOM (2026-10-11, door crossing) ────────────────────────────────────
+// The first room keeps the historical names (floor, wall_<i>, meshes/floor.obj); a room entered through a door
+// prefixes its own name, so its walls neither collide with the first room's names nor are mistaken for them.
+RoomSceneGraph::WallNaming RoomSceneGraph::wall_naming(const std::string& room_name)
 {
-    if (!G_ || !rt_api_ || polygon.size() < 3) return;
-    const int n = static_cast<int>(polygon.size());
-    const float half_h = params_->room_height * 0.5f;
+    const bool first_room = room_name == "room_1" or room_name == "room";
+    const std::string prefix = first_room ? std::string{} : room_name + "_";
+    return {first_room, prefix, prefix + "floor"};
+}
 
-    for (const auto& wall : walls)
+std::vector<DSR::Node> RoomSceneGraph::own_wall_nodes(const WallNaming& nm) const
+{
+    std::vector<DSR::Node> out;
+    const auto own_floor = G_->get_node(nm.floor_name);
+    for (auto& w : G_->get_nodes_by_type("wall"))
     {
-        const auto parent = G_->get_attrib_by_name<parent_att>(wall);
-        if (!parent.has_value() or parent.value() != dsr_room_id_) continue;
-
-        // The wall's index is its name suffix; from_chars because this codebase never parses numbers
-        // through the C locale (see CLAUDE.md), even when the input is a node name.
-        const std::string& name = wall.name();
-        const auto dash = name.rfind('_');
-        if (dash == std::string::npos) continue;
-        int idx = -1;
-        if (const auto* first = name.data() + dash + 1;
-            std::from_chars(first, name.data() + name.size(), idx).ec != std::errc{} or idx < 0 or idx >= n)
-            continue;
-
-        const Eigen::Vector2f& p0 = polygon[idx];
-        const Eigen::Vector2f& p1 = polygon[(idx + 1) % n];
-        const float L = (p1 - p0).norm();
-        if (L < 0.1f) continue;
-        const Eigen::Vector2f dir = (p1 - p0) / L;
-        const Eigen::Vector2f mid = (p0 + p1) * 0.5f;
-
-        rt_api_->insert_or_assign_edge_RT(floor_node, wall.id(),
-                                          {mid.x(), mid.y(), half_h},
-                                          {0.f, 0.f, std::atan2(dir.y(), dir.x())});
-        G_->delete_edge(dsr_room_id_, wall.id(), "RT");
-        qInfo() << "dsr_create_wall_nodes: re-parented" << QString::fromStdString(name) << "onto the floor";
+        const auto par = G_->get_attrib_by_name<parent_att>(w);
+        const bool mine = nm.first_room ? w.name().starts_with("wall_") : w.name().starts_with(nm.prefix);
+        if (mine or (par.has_value() and (par.value() == dsr_room_id_
+                                           or (own_floor.has_value() and par.value() == own_floor->id()))))
+            out.push_back(std::move(w));
     }
+    return out;
+}
+
+std::optional<std::uint64_t> RoomSceneGraph::insert_wall_node(DSR::Node& parent, const std::string& name,
+                                                              const Eigen::Vector2f& mid, float yaw, float length,
+                                                              int level)
+{
+    DSR::Node wall_node = DSR::Node::create<wall_node_type>(name);
+    G_->add_or_modify_attrib_local<width_m_att>(wall_node, length);
+    G_->add_or_modify_attrib_local<height_m_att>(wall_node, params_->room_height);
+    // Display mesh, same contract the furniture concepts use: a 2-triangle panel authored to the
+    // shared unit-box convention (local x ALONG the wall, z = height, y = the normal, no
+    // thickness), which a viewer rescales by width_m/height_m. The agent owns its appearance.
+    G_->add_or_modify_attrib_local<mesh_path_att>(wall_node, std::string("room_concept/meshes/wall.obj"));
+    G_->add_or_modify_attrib_local<parent_att>(wall_node, parent.id());
+    G_->add_or_modify_attrib_local<level_att>(wall_node, level);
+
+    rc::provenance::stamp_creation(*G_, wall_node);   // birth stamp: epoch ms + local ISO-8601
+    const auto wall_id = G_->insert_node(wall_node);
+    if (not wall_id.has_value())
+    {
+        qWarning() << "dsr_create_wall_nodes: failed to insert" << QString::fromStdString(name);
+        return std::nullopt;
+    }
+    // The pose is unchanged by the re-parenting: floor->room is the identity, so (mid, yaw)
+    // still reads in ROOM coordinates, which is what every consumer of a wall quad assumes.
+    rt_api_->insert_or_assign_edge_RT(parent, wall_id.value(),
+                                      {mid.x(), mid.y(), params_->room_height * 0.5f}, {0.f, 0.f, yaw});
+    return wall_id;
+}
+
+///////////////////////////////////////////////////////////////////////////////
+// RULE 1 — see wall_sync.h for the plan (pure, pinned by tools/wall_update_test.cpp). This is its graph half.
+// It also re-hangs walls authored before the floor existed (they still hang from the room) onto the floor: the
+// RT write moves parent/level and the stale room->wall RT edge is dropped, or the wall would show two parents.
+void RoomSceneGraph::sync_walls_to_polygon(const std::vector<Eigen::Vector2f>& poly)
+{
+    if (not G_ or not rt_api_ or poly.size() < 3) return;
+    const auto room = G_->get_node(dsr_room_id_);
+    if (not room.has_value()) return;
+    const auto nm = wall_naming(room->name());
+    auto floor = G_->get_node(nm.floor_name);
+    if (not floor.has_value()) return;   // the first build is dsr_create_wall_nodes's
+    const auto walls = own_wall_nodes(nm);
+
+    std::vector<rc::walls::WallPose> poses;
+    poses.reserve(walls.size());
+    int next_index = 0;   // new walls take indices past every existing one: names are identities, not edge indices
+    for (const auto& w : walls)
+    {
+        rc::walls::WallPose wp;
+        const auto par = G_->get_attrib_by_name<parent_att>(w).value_or(dsr_room_id_);
+        if (const auto e = G_->get_edge(par, w.id(), "RT"); e.has_value())
+        {
+            const auto tr  = G_->get_attrib_by_name<rt_translation_att>(e.value());
+            const auto rot = G_->get_attrib_by_name<rt_rotation_euler_xyz_att>(e.value());
+            if (tr.has_value() and tr->get().size() >= 2) wp.mid = {tr->get()[0], tr->get()[1]};
+            if (rot.has_value() and rot->get().size() >= 3) wp.yaw = rot->get()[2];
+        }
+        wp.length = G_->get_attrib_by_name<width_m_att>(w).value_or(0.f);
+        // A FOREIGN CHILD is any edge leaving the wall: room_concept hangs nothing from its walls, door_concept
+        // hangs its doors (RT wall->door).
+        wp.has_children = std::ranges::any_of(w.fano(), [&](const auto& kv) { return kv.first.first != w.id(); });
+        poses.push_back(wp);
+        const auto& name = w.name();
+        if (const auto dash = name.rfind('_'); dash != std::string::npos)
+            if (int idx = -1; std::from_chars(name.data() + dash + 1, name.data() + name.size(), idx).ec == std::errc{})
+                next_index = std::max(next_index, idx + 1);
+    }
+
+    const auto plan = rc::walls::plan_wall_sync(poses, poly);
+    int moved = 0, deleted = 0, created = 0, kept_for_children = 0;
+    for (std::size_t i = 0; i < walls.size(); ++i)
+    {
+        const auto& w = walls[i];
+        if (plan.target_edge[i] < 0)
+        {
+            G_->delete_node(w.id());
+            ++deleted;
+            continue;
+        }
+        const auto e = rc::walls::edge_pose(poly, plan.target_edge[i]);
+        const auto par = G_->get_attrib_by_name<parent_att>(w).value_or(dsr_room_id_);
+        const bool same = par == floor->id() and poses[i].mid == e.mid and poses[i].yaw == e.yaw
+                          and poses[i].length == e.length;
+        if (same) continue;
+        if (auto wn = G_->get_node(w.id()); wn.has_value() and poses[i].length != e.length)
+        {
+            G_->add_or_modify_attrib_local<width_m_att>(wn.value(), e.length);
+            G_->update_node(wn.value());
+        }
+        rt_api_->insert_or_assign_edge_RT(floor.value(), w.id(),
+                                          {e.mid.x(), e.mid.y(), params_->room_height * 0.5f}, {0.f, 0.f, e.yaw});
+        if (par != floor->id())
+            G_->delete_edge(par, w.id(), "RT");
+        ++moved;
+        kept_for_children += poses[i].has_children;
+    }
+    const int wall_level = G_->get_node_level(floor.value()).value_or(3) + 1;
+    for (const int k : plan.new_edges)
+    {
+        const auto e = rc::walls::edge_pose(poly, k);
+        if (insert_wall_node(floor.value(), nm.prefix + "wall_" + std::to_string(next_index++), e.mid, e.yaw, e.length,
+                             wall_level).has_value())
+            ++created;
+    }
+    if (moved + deleted + created == 0) return;
+    qInfo().noquote() << QString("[room][walls] synced %1 to a %2-edge polygon: moved %3 in place (%4 carrying other "
+                                 "agents' nodes), deleted %5 childless, created %6")
+                         .arg(QString::fromStdString(room->name())).arg(poly.size()).arg(moved)
+                         .arg(kept_for_children).arg(deleted).arg(created);
+    trigger_layout_();
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -3813,31 +3916,17 @@ void RoomSceneGraph::dsr_create_wall_nodes()
     const int n = static_cast<int>(polygon.size());
     if (n < 3) { qWarning() << "dsr_create_wall_nodes: polygon has fewer than 3 vertices"; return; }
 
-    // ── ONE FLOOR AND ONE WALL SET PER ROOM (2026-10-11, door crossing) ────────────────────────────────────
-    // The first room keeps the historical names (floor, wall_<i>, meshes/floor.obj); a room entered through a door
-    // prefixes its own name, so its walls neither collide with the first room's names nor are mistaken for them
-    // by the guard below (which used to treat ANY wall in the graph as this room's and re-hang it onto this floor).
-    const std::string room_name = room_node_opt->name();
-    const bool first_room = room_name == "room_1" or room_name == "room";
-    const std::string prefix = first_room ? std::string{} : room_name + "_";
-    const std::string floor_name = prefix + "floor";
+    // One floor and one wall set per room (wall_naming): the guard below used to treat ANY wall in the graph as
+    // this room's and re-hang it onto this floor.
+    const auto nm = wall_naming(room_node_opt->name());
+    const bool first_room = nm.first_room;
+    const std::string& prefix = nm.prefix;
+    const std::string& floor_name = nm.floor_name;
     const std::string floor_rel = first_room ? std::string(kFloorMeshRel) : "room_concept/meshes/" + prefix + "floor.obj";
     const std::string floor_out = first_room ? std::string(kFloorMeshOut) : "meshes/" + prefix + "floor.obj";
 
-    // Guard — idempotent: if wall nodes already exist under this room, skip.
-    std::vector<DSR::Node> existing;
-    {
-        const auto own_floor = G_->get_node(floor_name);
-        for (auto& w : G_->get_nodes_by_type("wall"))
-        {
-            const auto par = G_->get_attrib_by_name<parent_att>(w);
-            const bool mine = first_room ? w.name().starts_with("wall_")
-                                         : w.name().starts_with(prefix);
-            if (mine or (par.has_value() and (par.value() == dsr_room_id_
-                                               or (own_floor.has_value() and par.value() == own_floor->id()))))
-                existing.push_back(std::move(w));
-        }
-    }
+    // Guard — idempotent: if wall nodes already exist under this room, they are SYNCED, not rebuilt.
+    std::vector<DSR::Node> existing = own_wall_nodes(nm);
     if (!existing.empty())
     {
         // ...but walls and the floor persist in the shared graph, so ones created before the display
@@ -3878,15 +3967,14 @@ void RoomSceneGraph::dsr_create_wall_nodes()
             if (floor_changed)
                 G_->update_node(f.value());
 
-            // Walls authored before the floor became their parent still hang from the room. Re-hang
-            // them, recomputing the RT from the polygon in force now — the same source the floor mesh
-            // above is regenerated from, so the two cannot disagree.
-            re_parent_walls_onto_floor(existing, f.value(), polygon);
+            // RULE 1: the walls follow the polygon in force now — the same source the floor mesh above is
+            // regenerated from, so the two cannot disagree — moved IN PLACE so the doors on them move too. This also
+            // re-hangs walls authored before the floor became their parent (they still hang from the room).
+            sync_walls_to_polygon(polygon);
         }
         return;
     }
 
-    const float half_h = params_->room_height * 0.5f;
 
     // A room node without a `level` cannot parent an RT edge (DSR throws). A room ltsm has just swapped in can be visible
     // before its attributes land (recog_try24: room_concept aborted on exactly this, right after RoomSwap). Not yet a room
@@ -3947,43 +4035,13 @@ void RoomSceneGraph::dsr_create_wall_nodes()
     // ── Walls ────────────────────────────────────────────────────────────────
     for (int i = 0; i < n; ++i)
     {
-        const Eigen::Vector2f& p0 = polygon[i];
-        const Eigen::Vector2f& p1 = polygon[(i + 1) % n];
-        const float L = (p1 - p0).norm();
-        if (L < 0.1f)
+        const auto e = rc::walls::edge_pose(polygon, i);
+        if (e.length < rc::walls::kMinWallLength)
         {
-            qWarning() << "dsr_create_wall_nodes: skipping degenerate wall" << i << "(length" << L << "m)";
+            qWarning() << "dsr_create_wall_nodes: skipping degenerate wall" << i << "(length" << e.length << "m)";
             continue;
         }
-
-        const Eigen::Vector2f dir = (p1 - p0) / L;
-        const float yaw = std::atan2(dir.y(), dir.x());
-        const Eigen::Vector2f mid = (p0 + p1) * 0.5f;
-
-        DSR::Node wall_node = DSR::Node::create<wall_node_type>(prefix + "wall_" + std::to_string(i));
-        G_->add_or_modify_attrib_local<width_m_att>(wall_node, L);
-        G_->add_or_modify_attrib_local<height_m_att>(wall_node, params_->room_height);
-        // Display mesh, same contract the furniture concepts use: a 2-triangle panel authored to the
-        // shared unit-box convention (local x ALONG the wall, z = height, y = the normal, no
-        // thickness), which a viewer rescales by width_m/height_m. The agent owns its appearance.
-        G_->add_or_modify_attrib_local<mesh_path_att>(wall_node, std::string("room_concept/meshes/wall.obj"));
-        G_->add_or_modify_attrib_local<parent_att>(wall_node, wall_parent.id());
-        G_->add_or_modify_attrib_local<level_att>(wall_node, wall_level);
-
-        rc::provenance::stamp_creation(*G_, wall_node);   // birth stamp: epoch ms + local ISO-8601
-        const auto wall_id = G_->insert_node(wall_node);
-        if (!wall_id.has_value())
-        {
-            qWarning() << "dsr_create_wall_nodes: failed to insert" << QString::fromStdString(prefix + "wall_" + std::to_string(i));
-            continue;
-        }
-
-        // The pose is unchanged by the re-parenting: floor->room is the identity, so (mid, yaw)
-        // still reads in ROOM coordinates, which is what every consumer of a wall quad assumes.
-        rt_api_->insert_or_assign_edge_RT(wall_parent,
-                                          wall_id.value(),
-                                          {mid.x(), mid.y(), half_h},
-                                          {0.f, 0.f, yaw});
+        insert_wall_node(wall_parent, prefix + "wall_" + std::to_string(i), e.mid, e.yaw, e.length, wall_level);
     }
 
     trigger_layout_();
@@ -4279,6 +4337,7 @@ void RoomSceneGraph::step_layout_refiner(const rc::RoomConcept::UpdateResult& re
     {
         fs_published_ = R.polygon; published_polygon_verts_ = R.polygon.size();
         save_learnt_layout(R.polygon, "refined");
+        sync_walls_to_polygon(R.polygon);   // rule 1: the walls (and the doors on them) follow the refined outline
     }
 }
 

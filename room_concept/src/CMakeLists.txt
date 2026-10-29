@@ -294,3 +294,10 @@ set_target_properties(boxed_in_handoff_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY 
 add_executable(stability_belief_test EXCLUDE_FROM_ALL ../tools/stability_belief_test.cpp)
 target_include_directories(stability_belief_test PRIVATE ${CMAKE_CURRENT_LIST_DIR}/../src)
 set_target_properties(stability_belief_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../../bin)
+
+# ── wall_update_test ──────────────────────────────────────────────────────────
+# Room-transition protocol rule 1: walls move in place, never deleted under a door (wall_sync.h). Header-only.
+#   make -C build wall_update_test && ../bin/wall_update_test
+add_executable(wall_update_test EXCLUDE_FROM_ALL ../tools/wall_update_test.cpp)
+target_include_directories(wall_update_test PRIVATE ${CMAKE_CURRENT_LIST_DIR}/../src)
+set_target_properties(wall_update_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../../bin)

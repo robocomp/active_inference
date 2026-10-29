@@ -122,6 +122,13 @@ public:
     // Delete room/wall/floor/affordance nodes owned by this agent (start + shutdown).
     void cleanup_room_graph_nodes();
 
+    // RULE 1 (room-transition protocol): the walls follow the published polygon IN PLACE. Each existing wall is
+    // assigned to an edge (rc::walls::plan_wall_sync) and gets that edge's RT — same node, so a door hanging from it
+    // moves with it. A wall carrying another agent's node is never deleted; a childless wall with no edge is; an edge
+    // with no wall gets a new one. `poly` is in the room's PUBLISHED frame. No-op until the room's floor exists
+    // (dsr_create_wall_nodes owns the first build). Call whenever the published polygon changes, and on adoption.
+    void sync_walls_to_polygon(const std::vector<Eigen::Vector2f>& poly);
+
     // Controller peer lost: drop a stale execution claim so the room stays selectable.
     void on_controller_lost();
 
@@ -442,11 +449,14 @@ private:
     void log_table_landmarks();
     void load_robot_body_dimensions_from_graph();
     void dsr_create_wall_nodes();
-    // Adoption path: walls created before the floor existed hang from the room; move them under the
-    // floor (identity RT to the room, so no pose changes) and drop the stale room->wall RT edge.
-    void re_parent_walls_onto_floor(const std::vector<DSR::Node>& walls,
-                                    DSR::Node& floor_node,
-                                    const std::vector<Eigen::Vector2f>& polygon);
+    // Naming: room_1 keeps the historical names (floor, wall_<k>); any other room prefixes its own name.
+    struct WallNaming { bool first_room; std::string prefix; std::string floor_name; };
+    static WallNaming wall_naming(const std::string& room_name);
+    // This room's wall nodes: named with its prefix, or hanging from the room / its floor.
+    std::vector<DSR::Node> own_wall_nodes(const WallNaming& nm) const;
+    // Insert one wall node `name` under `parent` with the pose of a polygon edge. Returns its id.
+    std::optional<std::uint64_t> insert_wall_node(DSR::Node& parent, const std::string& name,
+                                                  const Eigen::Vector2f& mid, float yaw, float length, int level);
 
     std::shared_ptr<DSR::DSRGraph> G_;
     DSR::RT_API*                   rt_api_       = nullptr;   // worker-owned, injected
