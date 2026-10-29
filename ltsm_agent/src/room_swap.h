@@ -36,8 +36,10 @@
  * doors are pi-symmetric), 'none' uniform over K's area and yaw. An adopted door's pose is precision-fused with the chain
  * pose (orientation on the branch consistent with the previous face) and written back. The twin's face in a case-B passage
  * goes with the twin; the passage and its crossing history stay and now point at K.
- * A previous room still LIVE at the verdict (fresh -> fresh) has no face in memory yet: its carry-over is retried when the robot
- * leaves K (after that room's eviction). KNOWN GAP: carry_ is in memory, not persisted.
+ * A previous room still LIVE at the verdict (fresh -> fresh, or a verdict landing before room_concept's switch) has no face in
+ * memory yet: its carry-over is retried on the FACT that writes it -- the eviction that archives that room (on_evicted) -- and
+ * on every step() while Adopted (idempotent), so the way back is known while the robot is still in K (try28). KNOWN GAP:
+ * carry_ is in memory, not persisted.
  *
  * Late recalls (recall_late) are no longer posted by the swap; sweep_stale still removes any a crashed older build left.
  */
@@ -50,7 +52,6 @@
 #include <cstdint>
 #include <memory>
 #include <optional>
-#include <set>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -107,11 +108,13 @@ private:
     std::uint64_t prov_id_ = 0;                   ///< the provisional room P (its id survives adoption: renamed in place)
     std::string prov_name_;                       ///< P's name at swap time
     std::optional<std::uint64_t> prov_rid_;       ///< P's room_id at swap time
+    std::optional<std::uint64_t> rt_at_swap_;     ///< the robot's live RT room at swap time (RF4: only a change AWAY from it counts)
     bool promoted_case_ = false;                  ///< case B (the provisional room had a memory twin)
     std::string prov_twin_;                       ///< case B: the staged twin's memory name
     std::string prov_twin_subtype_;               ///< its object_subtype before staging (restored by undo)
 
     void commit();                                ///< the accepted verdict: carry-over written, twin dropped
+    void retry_carries();                         ///< write the carry-overs still deferred (idempotent; a no-op when none)
     void abandon(std::string_view why);           ///< no verdict will be acted on: withdraw, unstage, release
     void clear();
     [[nodiscard]] bool names_known(const std::string &room) const;

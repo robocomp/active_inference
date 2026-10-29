@@ -6,6 +6,7 @@
 // (carry-over, twin dropped) and undone on "rejected", on P gone, or when the robot leaves P before a verdict.
 #include "../src/room_swap.h"
 #include "../src/room_proposal.h"
+#include "../../common/room_resolve/room_resolve.h"
 #include <QCoreApplication>
 #include <clocale>
 #include <algorithm>
@@ -374,6 +375,56 @@ int main(int argc, char **argv)
         check(k.sw.swap(3, pose_k(), live_P), "case A swap");
         live->delete_node(live_P);
         check(k.sw.step() == ltsm::RoomSwap::Event::Withdrawn and k.sw.state() == ltsm::RoomSwap::State::Entering, "P gone: Withdrawn");
+    }
+
+    std::printf("verdict_before_previous_room_archived_carries_on_archive\n");
+    {
+        // fresh -> fresh: L (room_2) is live-only, its face of the crossed door is NOT in memory; the verdict lands before
+        // room_concept's switch archives L. The carry-over must be written the moment L is archived, while the robot is in K.
+        reset(); build_memory(false); build_live(false);
+        for (const char *nm : {"r2_door_3", "r2_room_2"}) if (const auto n = mem->get_node(nm); n.has_value()) mem->delete_node(n->id());
+        Fix f;
+        check(f.sw.swap(3, pose_k(), live_P), "swap accepted");
+        answer("accepted");
+        check(f.sw.step() == ltsm::RoomSwap::Event::Accepted and passages_with_k_face() == 0, "accepted: L's face not in memory yet, carry deferred");
+        // the adopted room under K's name (stand-in for room_concept's in-place rename, cortex reinstall pending)
+        const auto K = live_node("room", "room_3", robot_id, 0, 0, 0, 3);
+        ltsm::Candidate c;
+        c.robot_id = robot_id; c.robot_name = "Shadow";
+        c.old_room_id = live_L; c.old_room_name = "room_2"; c.new_room_id = K; c.new_room_name = "room_3";
+        c.remove_old = false;
+        f.sw.on_evict(c);
+        const auto out = f.ev.evict(c);
+        check(out.ok and mem->get_node("r2_door_3").has_value(), "L archived: its face r2_door_3 is in memory now (" + out.reason + ")");
+        f.sw.on_evicted(c, out.ok);
+        check(passages_with_k_face() == 1, "on the archive (a fact), the deferred carry-over is written: the way back is known");
+        check(f.sw.state() == ltsm::RoomSwap::State::Adopted and f.ev.held("r3_room_3"), "while the robot is still in K (Adopted, held)");
+        check(f.sw.step() == ltsm::RoomSwap::Event::None and passages_with_k_face() == 1, "idempotent on the next step");
+    }
+
+    std::printf("proposal_before_switch_does_not_self_withdraw\n");
+    {
+        // only robot->L is live at swap time (room_concept has not switched yet: robot->P retired)
+        reset(); build_memory(false); build_live(false);
+        auto ep = live->get_edge(robot_id, live_P, "RT").value();
+        live->add_or_modify_attrib_local<valid_att>(ep, false);
+        live->insert_or_assign_edge(ep);
+        check(rc::room::robot_rt_room(*live) == std::optional<std::uint64_t>(live_L), "(robot RT room = L)");
+        Fix f;
+        check(f.sw.swap(3, pose_k(), live_P), "swap accepted");
+        check(f.sw.step() == ltsm::RoomSwap::Event::None and proposals().size() == 1, "robot still in L, where it was at swap time: NOT withdrawn");
+        // room_concept switches into P: robot->P live, robot->L retired
+        live->add_or_modify_attrib_local<valid_att>(ep, true);
+        live->insert_or_assign_edge(ep);
+        auto el = live->get_edge(robot_id, live_L, "RT").value();
+        live->add_or_modify_attrib_local<valid_att>(el, false);
+        live->insert_or_assign_edge(el);
+        check(f.sw.step() == ltsm::RoomSwap::Event::None and proposals().size() == 1, "switched into P: still pending");
+        // the robot goes on to another room before a verdict: that IS a change away
+        live->add_or_modify_attrib_local<valid_att>(ep, false);
+        live->insert_or_assign_edge(ep);
+        live_node("room", "room_5", robot_id, 0, 0, 0, 5);
+        check(f.sw.step() == ltsm::RoomSwap::Event::Withdrawn and proposals().empty(), "moved to room_5 before a verdict: withdrawn");
     }
 
     std::printf("stale_proposal_swept_at_start\n");

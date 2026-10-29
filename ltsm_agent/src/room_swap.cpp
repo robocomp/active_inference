@@ -95,6 +95,7 @@ int RoomSwap::drop_subtree(const std::string &memory_room)
 
 RoomSwap::Event RoomSwap::step()
 {
+    if (state_ == State::Adopted) { retry_carries(); return Event::None; }
     if (state_ != State::Staged) return Event::None;
     // room_concept's verdict first: an accepted proposal stands even if the robot moves on in the same cycle (it then leaves
     // the ADOPTED room, which the eviction path handles).
@@ -106,8 +107,10 @@ RoomSwap::Event RoomSwap::step()
         case RoomProposal::Verdict::Pending:  break;
     }
     // Review Focus 4: the robot left P before a verdict. room_concept's fact (the robot's live RT room), not ltsm's `current`;
-    // unknown (none or several live edges, a hand-over) decides nothing.
-    if (const auto r = rc::room::robot_rt_room(*live_); r.has_value() and r.value() != prov_id_)
+    // unknown (none or several live edges, a hand-over) decides nothing, and neither does the room the robot was ALREADY in at
+    // swap time (a proposal made before room_concept's switch into P must not withdraw itself): only a change AWAY from it,
+    // to a room that is not P.
+    if (const auto r = rc::room::robot_rt_room(*live_); r.has_value() and r.value() != prov_id_ and r != rt_at_swap_)
     {
         abandon("the robot left the provisional room before a verdict");
         return Event::Withdrawn;
@@ -286,6 +289,7 @@ bool RoomSwap::swap(std::uint64_t known_room_id, const rc::recog::PoseMix &pose_
     prov_id_ = P->id();
     prov_name_ = P->name();
     prov_rid_ = live_->get_attrib_by_name<room_id_att>(P.value());
+    rt_at_swap_ = rc::room::robot_rt_room(*live_);
     promoted_case_ = twin.has_value();
     prov_twin_ = twin.has_value() ? twin->name() : std::string{};
     prov_twin_subtype_ = prior_subtype;
@@ -299,7 +303,7 @@ void RoomSwap::clear()
     state_ = State::Entering;
     carry_.clear();
     known_mem_.clear(); prov_twin_.clear(); prov_twin_subtype_.clear(); prov_name_.clear();
-    known_id_ = 0; prov_id_ = 0; prov_rid_.reset(); promoted_case_ = false;
+    known_id_ = 0; prov_id_ = 0; prov_rid_.reset(); rt_at_swap_.reset(); promoted_case_ = false;
 }
 
 bool RoomSwap::names_known(const std::string &room) const
@@ -316,6 +320,16 @@ void RoomSwap::abandon(std::string_view why)
     qInfo().noquote() << QString::fromStdString(std::format("[swap] WITHDRAWN: {} is not {} ({}); memory unstaged, {} stays a new room",
             prov_name_, known_mem_, why, prov_name_));
     clear();
+}
+
+void RoomSwap::retry_carries()
+{
+    std::erase_if(carry_, [&](const Carry &k) {
+        if (not mem_->get_node(k.prev_face).has_value()) return false;     // its room is not archived yet: nothing to write
+        const bool ok = carry_over(k.prev_face, known_id_);
+        if (ok)
+            qInfo().noquote() << QString::fromStdString(std::format("[swap] deferred carry-over of {} into {} written (the previous room is archived now)", k.prev_face, known_mem_));
+        return ok; });
 }
 
 void RoomSwap::commit()
@@ -539,6 +553,7 @@ void RoomSwap::on_evicted(const Candidate &cand, bool ok)
 {
     if (cand.discard) return;
     if (ok and leaving_) on_room_left(known_mem_);       // the eviction stood: the adopted room's window closes
+    else if (ok and state_ == State::Adopted) retry_carries();   // e.g. the previous room archived after the verdict: its face now exists
     else if (not ok and leaving_ and state_ == State::Adopted)
         ev_.hold(known_mem_);                            // it failed: the robot is still in K
     leaving_ = false;
