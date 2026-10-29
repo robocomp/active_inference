@@ -33,6 +33,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
 
 namespace rc::door
@@ -424,6 +425,26 @@ inline RoomEntryPlan plan_room_entry(bool first_resolution, bool recall_announce
 /// doors come back from the identity table (plan_restore, the crossed door's face included: it is a row of that room, and
 /// a face already live at its place is skipped by place), so no entry mirror is invented for it. Only a proto-room nobody
 /// announced is new, and gets the mirror of the door it was entered through.
+/// Which room nodes were ANNOUNCED, as a fact about the room's identity that persists: the verdict is taken ONCE, when a
+/// room node is first seen, from whether its recall_<name> metaconcept is live THEN (room_concept builds a recalled room by
+/// reading that very node, so it is live while the room is born), and kept under the room's node id until that node is gone.
+/// It does not depend on the recall still existing later (ltsm retires it), nor on a name latch cleared at a room switch,
+/// nor on a stale latch for a room never entered (another room is another id).
+class AnnouncedRooms
+{
+public:
+    /// First sight of `room_id` fixes the verdict; later calls ignore `recall_live_now`.
+    void observe(std::uint64_t room_id, bool recall_live_now) { verdict_.emplace(room_id, recall_live_now); }
+    [[nodiscard]] bool announced(std::uint64_t room_id) const
+    { const auto it = verdict_.find(room_id); return it != verdict_.end() and it->second; }
+    [[nodiscard]] bool seen(std::uint64_t room_id) const { return verdict_.contains(room_id); }
+    /// Forget rooms whose node is gone.
+    template <class Pred> void prune(Pred room_exists) { std::erase_if(verdict_, [&](const auto& kv) { return not room_exists(kv.first); }); }
+    [[nodiscard]] std::size_t size() const { return verdict_.size(); }
+private:
+    std::unordered_map<std::uint64_t, bool> verdict_;
+};
+
 [[nodiscard]] inline bool entry_mirror_wanted(bool room_is_proto, bool recall_announced)
 {
     return room_is_proto and not recall_announced;

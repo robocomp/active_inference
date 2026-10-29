@@ -3257,13 +3257,19 @@ void SpecificWorker::step_entry_mirrors()
     //    The containment test is geometric identity, not a tuned gate: along the aperture within the door's own
     //    half-width, across it within the same half-width (the fit may have refined the door since the
     //    proto-room froze its frame).
+    announced_rooms_.prune([&](std::uint64_t id) { return G->get_node(id).has_value(); });
+    std::erase_if(announced_no_mirror_logged_, [&](std::uint64_t id) { return not G->get_node(id).has_value(); });
     for (const auto& room : G->get_nodes_by_type("room"))
     {
         if (entry_mirrors_.contains(room.id()))
             continue;
-        // ANNOUNCED room (ltsm recall_<room>, latched by step_room_following): remembered, not new — its doors are restored
-        // from the identity table on entry (enter_room_memory), the crossed face included. No invented mirror.
-        if (not rc::door::entry_mirror_wanted(rc::room::is_proto(*G, room.id()), recall_names_seen_.contains(room.name())))
+        // ANNOUNCED room: remembered, not new — its doors are restored from the identity table on entry (enter_room_memory),
+        // the crossed face included. No invented mirror. The verdict is fixed at the room's FIRST SIGHT from the live
+        // recall_<name> node and kept by room id (AnnouncedRooms), so it survives ltsm retiring the recall and the latch
+        // being cleared at the switch.
+        if (not announced_rooms_.seen(room.id()))
+            announced_rooms_.observe(room.id(), recall_node_live(room.name()));
+        if (not rc::door::entry_mirror_wanted(rc::room::is_proto(*G, room.id()), announced_rooms_.announced(room.id())))
         {
             if (rc::room::is_proto(*G, room.id()) and announced_no_mirror_logged_.insert(room.id()).second)
                 std::print("door_concept: [proto] no entry mirror into '{}' — ltsm announced it as remembered; its doors are restored on entry\n", room.name());
@@ -3521,6 +3527,12 @@ void SpecificWorker::release_room(std::uint64_t old_room, std::uint64_t new_room
 }
 
 // ─── RESTORE ON RE-ENTRY ──────────────────────────────────────────────────────────────────────────────────────────
+
+bool SpecificWorker::recall_node_live(const std::string& room_name) const
+{
+    const auto n = G->get_node("recall_" + room_name);
+    return n.has_value() and G->get_attrib_by_name<object_subtype_att>(n.value()).value_or(std::string{}) == "room_recall";
+}
 
 void SpecificWorker::latch_recall_names()
 {

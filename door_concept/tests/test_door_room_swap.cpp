@@ -65,6 +65,19 @@ int main()
         const auto d2 = plan_restore(rr, "room_1", true, live, 0.3f);
         CHECK(d2.restore.size() == 1 and d2.restore[0].name == "door_2");
     }
+    // ORDER (a): recall live at the room's first sight, retired BEFORE the switch (and the name latch cleared): still announced
+    {
+        AnnouncedRooms ar;
+        ar.observe(7, true);
+        ar.observe(7, false);                                  // recall retired: later sightings do not change the verdict
+        CHECK(ar.announced(7) and not entry_mirror_wanted(true, ar.announced(7)));
+        // (b) a stale announcement of another room (id 5, never entered) does not touch an unannounced same-name room (id 9)
+        ar.observe(5, true);
+        ar.observe(9, false);
+        CHECK(not ar.announced(9) and entry_mirror_wanted(true, ar.announced(9)));
+        ar.prune([](std::uint64_t id) { return id != 5; });     // room 5 gone
+        CHECK(not ar.seen(5) and ar.seen(9) and ar.size() == 2);
+    }
     CHECK(entry_mirror_wanted(true, false));                   // fresh_room_still_mirrors
     CHECK(not entry_mirror_wanted(false, false));              // not proto: never
 
