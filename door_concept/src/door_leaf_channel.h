@@ -158,40 +158,53 @@ struct ViewpointLedger
 };
 
 // ─── a STATIC binary (hinge jamb, swing side): log-odds = carried prior + Σ_v g(λ_v) ─────────────────────────────────────
-// The log-odds the instance publishes is RELATIVE to its believed side, and others write it (the MAP flip negates it, a
-// re-created belief re-signs it, a room switch hands a mirror its source's). `sync` reads what the instance holds now: the
-// value it last returned (nothing happened), its negation (re-signed: every λ flips with it) or anything else (handed in
-// from outside: that becomes the carried prior and the per-viewpoint evidence starts again — it is already inside it).
+// ★ Task 11 (recog_proto1, 2026-10-29): THE EVIDENCE LIVES IN AN ABSOLUTE FRAME. prior, sum_g and every viewpoint's λ are
+// the log-odds of the "+" side — the NEAR jamb (hinge), opening ALONG the wall's normal (swing, leaf.swing = +1) — never of
+// "the side believed now". Which side is believed is a decision read OFF this number (⚑ the MAP, P = ½), so relabelling it
+// (a MAP flip, a re-created belief hanging the leaf the other way) cannot change the evidence, and a frame's δ — relative to
+// the side believed when the frame was scored — is turned absolute once, as it is added (sign = that side).
+// The instance still PUBLISHES the log-odds relative to its believed side (DoorFitState::hinge_llr / swing_llr: the anchor,
+// the corridor and the identity table read them that way), and others write it (the MAP flip and resign_leaf_llrs negate
+// it together with the side; a room switch hands a mirror its source's; a restore loads a remembered one). `sync` reads
+// what the instance holds now together with the side it is relative to: the same ABSOLUTE log-odds as last published
+// (nothing happened, or only a relabelling) leaves the ledger alone; anything else was handed in from outside and becomes
+// the carried prior, the per-viewpoint evidence starting again (it is already inside it).
+// (The previous ledger stored λ for "the side believed when `negated` was false" and re-signed prior and Σg at every flip;
+// equivalent arithmetic, but a frame's evidence and the pooled number were MAP-relative, and that is the frame this fix
+// removes from the model.)
 struct StaticBinaryEvidence
 {
-    double prior = 0.0;      // the carried log-odds (handed over, or set at creation)
-    double sum_g = 0.0;      // Σ_v g(λ_v) over the ledger's views (kept incrementally)
-    float  published = 0.0f;
-    bool   negated = false;  // the ledger's λ are stored for the side believed when `negated` was false
-    [[nodiscard]] double llr() const { return prior + sum_g; }
-    void sync(float held, ViewpointLedger& L, double ViewRecord::*lam)
+    double prior = 0.0;      // the carried log-odds of "+" (handed over, or set at creation)
+    double sum_g = 0.0;      // Σ_v g(λ_v) over the ledger's views, of "+" (kept incrementally)
+    float  published = 0.0f;       // the relative value last handed out…
+    float  published_side = 0.0f;  // …and the side (±1) it was relative to; 0 = nothing handed out yet
+    [[nodiscard]] double llr() const { return prior + sum_g; }   // ABSOLUTE: log P(+) / P(−)
+    [[nodiscard]] float relative(float side) const { return static_cast<float>(side * llr()); }
+    void sync(float held, float side, ViewpointLedger& L, double ViewRecord::*lam)
     {
-        if (held == published) return;
-        if (held == -published) { prior = -prior; sum_g = -sum_g; negated = not negated; published = held; return; }
-        prior = held; sum_g = 0.0; published = held;
+        // exact in IEEE arithmetic: a relabelling negates both factors
+        if (published_side != 0.0f and held * side == published * published_side) { published = held; published_side = side; return; }
+        prior = double(held) * double(side); sum_g = 0.0; published = held; published_side = side;
         for (auto& v : L.views) v.*lam = 0.0;
-        negated = false;
     }
-    // One frame's binary evidence δ (relative to the believed side) at the ledger's current view.
-    float add(double delta, ViewpointLedger& L, double ViewRecord::*lam, double eps, double eps_v)
+    // One frame's binary evidence δ, relative to `side` (the side believed when the frame was scored), at the ledger's
+    // current view. Returns the log-odds relative to `side`.
+    float add(double delta, float side, ViewpointLedger& L, double ViewRecord::*lam, double eps, double eps_v)
     {
         if (L.current >= 0 and delta != 0.0 and std::isfinite(delta))
         {
-            double& lv = L.views[std::size_t(L.current)].*lam;          // stored for the un-negated side
-            const double sgn = negated ? -1.0 : 1.0;
+            double& lv = L.views[std::size_t(L.current)].*lam;
             const double before = viewpoint_llr(lv, eps_v);
-            lv += sgn * contaminated_llr(delta, eps);
-            sum_g += sgn * (viewpoint_llr(lv, eps_v) - before);
+            lv += double(side) * contaminated_llr(delta, eps);   // contaminated_llr is odd: the absolute frame's δ, contaminated
+            sum_g += viewpoint_llr(lv, eps_v) - before;
         }
-        published = static_cast<float>(llr());
+        published = relative(side);
+        published_side = side;
         return published;
     }
 };
+[[nodiscard]] inline float hinge_sign(HingeSide h) { return h == HingeSide::Near ? 1.0f : -1.0f; }
+[[nodiscard]] inline float swing_sign(float swing) { return swing > 0.0f ? 1.0f : -1.0f; }
 
 // ─── the φ filter on the grid: held, or moving, two branches per viewpoint epoch ──────────────────────────────────────────
 // The leaf is in one of two regimes: HELD (φ does not change) or MOVING (pushed: φ diffuses at the leaf's swing rate r, a
@@ -386,6 +399,36 @@ struct LeafChannelResult
     std::vector<std::pair<float, float>> frame_loglik;   // the frame's (hinge × swing)-marginal curve (empty = none)
 };
 
+// ─── a φ term COMMON to the four leaf hypotheses (the robot's body in the aperture, door_body_evidence.h) ────────────────
+// `curves` are the frame's (believed hinge × believed swing, other hinge, other swing, both) curves as LeafChannelInput
+// names them (bb, ob, bs, os); `term` is a log-likelihood on the same grid.
+// ★ Task 11 (recog_proto1, 2026-10-29): THE TERM IS ADDED TO THE HYPOTHESES THE FRAME SCORED, AND NEVER SCORES ONE IT DID NOT.
+//   A term the same for all four hypotheses says nothing about the hinge or the swing; the binary evidence leaf_channel_step
+//   draws from the curves is a ratio between hypotheses scored on the SAME data. The old body block re-created every
+//   missing curve as zero + the term: with the passage anchor active (which clears the field's other-swing curves) the
+//   believed swing was then scored by LiDAR + anchor + body — a curve normalised to the field's joint maximum, so ≤ 0 — and
+//   the other swing by the body alone (≈ 0), i.e. every frame argued AGAINST whichever side was believed: the swing flipped
+//   on every frame for 20 s in DOOR_1's doorway (door_28; and the hinge's log-odds drifted 25.2 → 21.5 the same way).
+//   A frame that scored nothing at all (no LiDAR, no anchor) is scored by the term alone, for all four alike.
+inline void add_common_phi_term(std::array<std::vector<std::pair<float, float>>*, 4> curves, std::span<const float> term,
+                                float phi_min, float phi_max)
+{
+    const std::size_t n = term.size();
+    if (n < 2) return;
+    const bool any_scored = std::ranges::any_of(curves, [n](const auto* ll) { return ll->size() == n; });
+    for (auto* ll : curves)
+    {
+        if (ll->size() != n)
+        {
+            if (any_scored) continue;   // not scored by this frame: the common term does not score it either
+            ll->clear();
+            for (std::size_t k = 0; k < n; ++k)
+                ll->emplace_back(phi_min + (phi_max - phi_min) * float(k) / float(n - 1), 0.0f);
+        }
+        for (std::size_t k = 0; k < n; ++k) (*ll)[k].second += term[k];
+    }
+}
+
 [[nodiscard]] inline std::vector<double> gaussian_log_prior(float lo, float hi, int n, float mean, float sigma)
 {
     std::vector<double> p(std::size_t(std::max(n, 2)));
@@ -413,8 +456,9 @@ inline LeafChannelResult leaf_channel_step(LeafChannel& ch, rc::DoorBelief& b, f
     const auto log_sig = [](double l) { return l >= 0 ? -std::log1p(std::exp(-l)) : l - std::log1p(std::exp(l)); };
 
     // ── what others wrote since the last step ───────────────────────────────────────────────────────────────────────
-    ch.hinge.sync(hinge_llr, ch.views, &ViewRecord::lam_hinge);
-    ch.swing.sync(swing_llr, ch.views, &ViewRecord::lam_swing);
+    // (relative to the side the belief holds now: an outside relabelling negated both, an outside hand-over did not)
+    ch.hinge.sync(hinge_llr, hinge_sign(b.params().leaf.hinge), ch.views, &ViewRecord::lam_hinge);
+    ch.swing.sync(swing_llr, swing_sign(b.params().leaf.swing), ch.views, &ViewRecord::lam_swing);
     const bool first_look = not std::isfinite(in.dt);
     if (not ch.phi[0].init or ch.phi[0].n() != NN or phi_est != ch.out_mean or phi_sigma != ch.out_sigma)
     {
@@ -567,12 +611,14 @@ inline LeafChannelResult leaf_channel_step(LeafChannel& ch, rc::DoorBelief& b, f
         }
 
     // ── the static binaries: contaminated, pooled per viewpoint; the geometry hangs from the MAP leaf ───────────────────
-    hinge_llr = ch.hinge.add(res.frame_hinge, ch.views, &ViewRecord::lam_hinge, in.eps, in.eps_v);
-    swing_llr = ch.swing.add(res.frame_swing, ch.views, &ViewRecord::lam_swing, in.eps, in.eps_v);
+    // This frame's δ are relative to the side believed when it was scored (bh, bsw); the ledger turns them absolute.
+    hinge_llr = ch.hinge.add(res.frame_hinge, hinge_sign(bh), ch.views, &ViewRecord::lam_hinge, in.eps, in.eps_v);
+    swing_llr = ch.swing.add(res.frame_swing, swing_sign(bsw), ch.views, &ViewRecord::lam_swing, in.eps, in.eps_v);
     res.hinge_flipped = adopt_map_hinge(b, hinge_llr);
     res.swing_flipped = adopt_map_swing(b, swing_llr);
-    ch.hinge.sync(hinge_llr, ch.views, &ViewRecord::lam_hinge);
-    ch.swing.sync(swing_llr, ch.views, &ViewRecord::lam_swing);
+    // the MAP flip negated the published number with the side: a relabelling, the ledger stands
+    ch.hinge.sync(hinge_llr, hinge_sign(b.params().leaf.hinge), ch.views, &ViewRecord::lam_hinge);
+    ch.swing.sync(swing_llr, swing_sign(b.params().leaf.swing), ch.views, &ViewRecord::lam_swing);
 
     // ── the posterior over φ: the four filters mixed by P(hinge)·P(swing) ──────────────────────────────────────────────
     const HingeSide nh = b.params().leaf.hinge, noh = nh == HingeSide::Near ? HingeSide::Far : HingeSide::Near;

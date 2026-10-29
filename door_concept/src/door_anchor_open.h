@@ -37,6 +37,7 @@
 #pragma once
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <limits>
 #include <vector>
@@ -117,7 +118,7 @@ inline AnchorPhiCurve anchor_phi_loglik(const rc::interaction::RelPose& post, fl
     };
 
     std::vector<double> ll(std::size_t(H * K), 0.0);
-    double n_inf = 0.0;
+    double n_inf = 0.0, n_inf_all = 0.0;
     std::vector<double> lr(std::size_t(H * K));
     for (const auto& p3 : rays)
     {
@@ -135,6 +136,8 @@ inline AnchorPhiCurve anchor_phi_loglik(const rc::interaction::RelPose& post, fl
         const double m = t_plane > 0.0 ? 0.5 * std::erfc(-(half_w - std::abs(xc)) / (std::sqrt(2.0) * s_u)) : 0.0;
         const double t_wall = t_plane;   // where a beam outside the span meets the wall
         double vmin = 1e300, vmax = -1e300;
+        std::array<double, 4> hmin, hmax;   // Task 11: every hypothesis's own spread, for the swing's label-free tempering
+        hmin.fill(1e300); hmax.fill(-1e300);
         for (int h = 0; h < H; ++h)
             for (int k = 0; k < K; ++k)
             {
@@ -156,10 +159,12 @@ inline AnchorPhiCurve anchor_phi_loglik(const rc::interaction::RelPose& post, fl
                 const double l = mx + std::log(m * std::exp(l_in - mx) + (1.0 - m) * std::exp(l_out - mx));
                 lr[std::size_t(h * K + k)] = l;
                 if (h == 0) { vmin = std::min(vmin, l); vmax = std::max(vmax, l); }   // the believed leaf's spread (as the leaf channel)
+                hmin[std::size_t(h)] = std::min(hmin[std::size_t(h)], l); hmax[std::size_t(h)] = std::max(hmax[std::size_t(h)], l);
             }
         if (not std::isfinite(vmax - vmin)) continue;
         for (std::size_t j = 0; j < lr.size(); ++j) ll[j] += lr[j];
         n_inf += 1.0 - std::exp(-(vmax - vmin));
+        for (int h = 0; h < H; ++h) n_inf_all += 0.25 * (1.0 - std::exp(-(hmax[std::size_t(h)] - hmin[std::size_t(h)])));
         ++out.n_rays;
     }
     if (out.n_rays == 0)
@@ -189,6 +194,15 @@ inline AnchorPhiCurve anchor_phi_loglik(const rc::interaction::RelPose& post, fl
         out.ll_other[std::size_t(k)] = float(lh[std::size_t(K + k)] - mh);
     }
     // The swing's evidence: each swing marginalised over both hinges (½) and φ under the caller's prior.
+    // ★ Task 11 (recog_proto1, 2026-10-29): TEMPERED BY A COUNT THAT DOES NOT KNOW WHICH SIDE IS BELIEVED. The curves above
+    //   are tempered by the BELIEVED leaf's spread (n_inf: how much the frame says about the angle of the leaf as believed);
+    //   used for the swing, that made the same rays a different amount of evidence depending on the label — the run's own
+    //   anchor_frames.bin record t=1793301183151 gave −11.4 believed against the normal and +4.1 for the same rays believed
+    //   along it (tests/test_door_swing_stability (a)). A log-likelihood ratio must be ODD under relabelling: the count of
+    //   discriminating beams is taken over the four hypotheses alike (each beam's mean 1 − e^{−spread}), the same
+    //   common-mode ρ_c and p_view. Swapping the believed side then swaps e_b and e_o exactly.
+    const double g_sw = pv / (1.0 + std::max(0.0, n_inf_all - 1.0) * rho_c);
+    const double rescale = g_sw / g;   // ll holds g·(raw); the swing reads g_sw·(raw)
     double e_b = -std::numeric_limits<double>::infinity(), e_o = e_b;
     const double sp = std::max(1e-4, double(leaf.phi_sigma));
     for (int k = 0; k < K; ++k)
@@ -198,8 +212,8 @@ inline AnchorPhiCurve anchor_phi_loglik(const rc::interaction::RelPose& post, fl
         const double lw = leaf.phi_known ? -0.5 * d * d : 0.0;
         for (int h = 0; h < 2; ++h)
         {
-            e_b = lae(e_b, ll[std::size_t((2 * h) * K + k)] + lw);
-            e_o = lae(e_o, ll[std::size_t((2 * h + 1) * K + k)] + lw);
+            e_b = lae(e_b, rescale * ll[std::size_t((2 * h) * K + k)] + lw);
+            e_o = lae(e_o, rescale * ll[std::size_t((2 * h + 1) * K + k)] + lw);
         }
     }
     out.swing_llr = std::isfinite(e_b - e_o) ? e_b - e_o : 0.0;

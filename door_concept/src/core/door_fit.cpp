@@ -1258,20 +1258,7 @@ void DoorFit::estimate_phi(rc::DoorFitState& inst)
         Cuy(1, 1) += var_d;
         const float p_in = rc::door::body_in_aperture_prob(d.dot(ax), d.dot(ay), Cuy, 0.5f * ap.w, 0.5f * ap.thickness);
         const auto bl = rc::door::body_phi_loglik(p_in, ap.w, cfg_.pragmatic.robot_passage_width_m, PHI_MIN, PHI_MAX, NSTEP);
-        if (not bl.empty())
-        {
-            const auto n = static_cast<std::size_t>(NSTEP);
-            for (auto* ll : {&ll_this, &ll_other, &ll_swing, &ll_both})
-            {
-                if (ll->size() != n)
-                {
-                    ll->clear();
-                    for (int k = 0; k < NSTEP; ++k)
-                        ll->emplace_back(PHI_MIN + (PHI_MAX - PHI_MIN) * static_cast<float>(k) / static_cast<float>(NSTEP - 1), 0.0f);
-                }
-                for (std::size_t k = 0; k < n; ++k) (*ll)[k].second += bl[k];
-            }
-        }
+        rc::door::add_common_phi_term({&ll_this, &ll_other, &ll_swing, &ll_both}, bl, PHI_MIN, PHI_MAX);
     }
     // ★ Task 12 fix D: the swing's evidence from the anchor's beams (the only channel that scores both swings), consumed once;
     //   its sign is relative to the swing it was computed under. ★ try102: it is THIS FRAME's swing evidence, added to the
@@ -1306,10 +1293,13 @@ void DoorFit::estimate_phi(rc::DoorFitState& inst)
     inst.dbg_leaf_pi_move = static_cast<float>(lr.pi_move);
     inst.dbg_leaf_p_ok    = static_cast<float>(lr.p_ok);
     if (lr.swing_flipped)
-        say(std::format("door_concept: [{}] SWING FLIPPED — the leaf now opens {} the wall's normal (log-odds {:+.1f} over {} "
-                        "viewpoints; phi {:.0f} deg)\n", inst.node_name,
-                        inst.ai2_belief.params().leaf.swing > 0.0f ? "along" : "against", inst.swing_llr,
-                        inst.leaf_channel.views.views.size(), inst.phi_est * 57.2958f));
+        // ★ Task 11: the POOLED evidence in its absolute frame (log-odds of "along the normal") and this frame's own: a flip is
+        //   the pooled number changing sign, never a relabelling of it.
+        say(std::format("door_concept: [{}] SWING FLIPPED — the leaf now opens {} the wall's normal (pooled log-odds of along "
+                        "{:+.2f} over {} viewpoints, this frame {:+.2f} for the side it was scored under; phi {:.0f} deg)\n",
+                        inst.node_name, inst.ai2_belief.params().leaf.swing > 0.0f ? "along" : "against",
+                        inst.leaf_channel.swing.llr(), inst.leaf_channel.views.views.size(), lr.frame_swing,
+                        inst.phi_est * 57.2958f));
     if (lr.hinge_flipped)
         // ★ The live check (fix round 1): this line must come BEFORE the aperture's σ_s collapses (σ_s printed here).
         say(std::format("door_concept: [{}] HINGE FLIPPED — now the {} jamb, the leaf is better explained hung there "
