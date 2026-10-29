@@ -201,6 +201,7 @@ bool ControllerSession::sync_world_state(std::uint64_t timestamp_ms,
                                      path_controller.goal_threshold());
         }
         door_passage_.set_look_enabled(policy_enabled());   // Task E: the look-vs-step choice belongs to the [Policy] chain
+        door_passage_.note_room_id(world_model.graph_state().room_id);
         auto dp = door_passage_.update(*graph_, world_model.inner_eigen(), world_model.graph_state().room_name);
         if (dp.event.has_value()) std::println("{}", *dp.event);
         // A single command's passage is over (crossed, door closed behind or left open): the base goes back to the

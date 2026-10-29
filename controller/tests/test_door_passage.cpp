@@ -840,6 +840,7 @@ int main()
         DoorPassage p;
         p.set_clock(clock);
         p.set_use_route(true);
+        p.note_room_id(1);
         p.start("door_r", Step::Cross);
         offered(*G, "aff_door_r_approach");
         target(*G, "aff_door_r_approach", 2.f, 1.6f, down);
@@ -872,6 +873,7 @@ int main()
         CHECK(out.route.has_value() and out.route->through and out.route->cross.has_value());
         CHECK(out.route.has_value() and out.route->key != k_appr);   // a new leg: rebuilt from the current pose
         CHECK(not out.passages.empty() and out.exempt.contains("door_r"));   // the doorway corridor while going through
+        p.note_room_id(2);
         out = p.update(*G, nullptr, "room_2");                    // room_concept moved the robot: through
         CHECK(p.view().step == Step::Done and not p.view().failed);
         CHECK(not out.route.has_value() and out.required.empty());
@@ -882,6 +884,7 @@ int main()
         DoorPassage p;
         p.set_clock(clock);
         p.set_use_route(true);
+        p.note_room_id(1);
         p.start("door_s", Step::Cross);
         offered(*G, "aff_door_s_approach"); target(*G, "aff_door_s_approach", 2.f, 1.6f, down);
         offered(*G, "aff_door_s_cross");    target(*G, "aff_door_s_cross", 2.f, -0.8f, down);
@@ -896,8 +899,46 @@ int main()
         CHECK(not out.route.has_value());
         out = p.update(*G, nullptr, "room_1");
         CHECK(p.view().step == Step::Cross and not out.event.has_value() and not out.route.has_value());   // logged once, still holding
+        p.note_room_id(2);
         out = p.update(*G, nullptr, "room_2");
         CHECK(p.view().step == Step::Done and not p.view().failed);   // the room switch ends it
+    }
+    {   // Task 17 ruling: start room id UNKNOWN -> the first known id before P_post is captured; a same-id rename is no switch
+        auto G = make_graph(63);
+        DoorPassage p;
+        p.set_clock(clock);
+        p.set_use_route(true);
+        p.start("door_u", Step::Cross);
+        offered(*G, "aff_door_u_approach"); target(*G, "aff_door_u_approach", 2.f, 1.6f, down);
+        offered(*G, "aff_door_u_cross");    target(*G, "aff_door_u_cross", 2.f, -0.8f, down);
+        auto out = p.update(*G, nullptr, "");
+        p.note_room_id(7);
+        out = p.update(*G, nullptr, "room_a");
+        CHECK(p.view().step == Step::Cross);
+        out = p.update(*G, nullptr, "room_a_renamed");            // same id 7, another name: not a switch
+        CHECK(p.view().step == Step::Cross);
+        p.note_route(out.route->key, RR::Arrived);
+        out = p.update(*G, nullptr, "room_a_renamed");
+        CHECK(p.view().step == Step::Cross and not out.route.has_value());   // P_post, same id: holds
+        p.note_room_id(8);
+        out = p.update(*G, nullptr, "room_b");
+        CHECK(p.view().step == Step::Done);
+    }
+    {   // Task 17 ruling: no id ever known before P_post -> the first known id after it is the switch
+        auto G = make_graph(64);
+        DoorPassage p;
+        p.set_clock(clock);
+        p.set_use_route(true);
+        p.start("door_v", Step::Cross);
+        offered(*G, "aff_door_v_approach"); target(*G, "aff_door_v_approach", 2.f, 1.6f, down);
+        offered(*G, "aff_door_v_cross");    target(*G, "aff_door_v_cross", 2.f, -0.8f, down);
+        auto out = p.update(*G, nullptr, "");
+        p.note_route(out.route->key, RR::Arrived);
+        out = p.update(*G, nullptr, "");
+        CHECK(p.view().step == Step::Cross);
+        p.note_room_id(9);
+        out = p.update(*G, nullptr, "room_c");
+        CHECK(p.view().step == Step::Done);
     }
     {   // BLOCKED TWICE: the first failure rebuilds (a new key, no attempt charged), the second ends it cross_unreachable
         auto G = make_graph(62);

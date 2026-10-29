@@ -1,20 +1,23 @@
 #pragma once
 // The DONE decision of a door passage (protocol fact 3, spec 2026-10-29 C1.6/C2.10): the passage is through when the robot's
-// resolved room id CHANGED (room_concept switched the robot's RT parent), never merely because the robot reached the point
-// past the door. A same-id rename is not a change: the ids are compared, nothing else.
-#include <string>
+// resolved room ID changed (room_concept switched the robot's RT parent), never merely because the robot reached the point
+// past the door. Ids are compared, never names: a same-id rename is not a change. id 0 = unknown.
+#include <cstdint>
 
 namespace rc
 {
-/// `cross_room` = the room id when the Cross step began (empty = unknown); `room_frame` = the id resolved now.
-[[nodiscard]] inline bool passage_room_switched(const std::string& cross_room, const std::string& room_frame)
+/// `captured` = the room id the Cross step started in (0 = unknown then; filled in by the FIRST known id seen before P_post);
+/// `now` = the id resolved this cycle (track_room / graph_state().room_id). True = the room switch happened.
+/// If no id was known before P_post, the first known id after it counts as the switch (it happened while unknown).
+[[nodiscard]] inline bool passage_room_switched(std::uint64_t& captured, std::uint64_t now, bool post_reached)
 {
-    return not cross_room.empty() and room_frame != cross_room;
-}
-/// Reaching P_post decides nothing by itself: the passage is done only on the room switch; otherwise it holds, waiting.
-[[nodiscard]] inline bool passage_done(bool reached_p_post, const std::string& cross_room, const std::string& room_frame)
-{
-    (void)reached_p_post;
-    return passage_room_switched(cross_room, room_frame);
+    if (now == 0) return false;
+    if (captured == 0)
+    {
+        if (post_reached) return true;
+        captured = now;
+        return false;
+    }
+    return now != captured;
 }
 }  // namespace rc

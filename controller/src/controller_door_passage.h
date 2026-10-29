@@ -114,6 +114,7 @@ public:
         route_failures_ = 0;
         route_arrived_ = false;
         post_reached_ = false;
+        cross_id_ = 0;
         route_wait_logged_.clear();
         route_key_.clear();
         route_approach_.reset();
@@ -263,6 +264,9 @@ public:
         std::scoped_lock lk(m_);
         return use_route_;
     }
+    /// The robot's resolved room ID this cycle (the controller's track_room id, graph_state().room_id; 0 = unknown). The
+    /// route's room switch is decided on ids, never names (a same-id rename is not a switch).
+    void note_room_id(std::uint64_t id) { std::scoped_lock lk(m_); room_id_ = id; }
     /// What the session is to drive this cycle (route mode): the published targets, read from the graph by update(). `key`
     /// changes exactly when the route must be (re)built — another leg, a rebuild after a failure, another room frame — and
     /// NOT when door_concept refines a target by millimetres: a route is a commitment, not a re-decision per cycle.
@@ -792,7 +796,7 @@ private:
         if (cross.has_value()) route_cross_ = *cross;
 
         // ── the room switch: the robot is through (a room this door leads to — M-8 — or any other when unknown)
-        if (step_ == Step::Cross and passage_done(post_reached_, cross_room_, room_frame))
+        if (step_ == Step::Cross and passage_room_switched(cross_id_, room_id_, post_reached_))
         {
             const auto targets = target_rooms(G);
             if (targets.empty() or std::ranges::find(targets, room_frame) != targets.end())
@@ -941,6 +945,7 @@ private:
         attempts_ = 0;
         route_arrived_ = false;
         post_reached_ = false;
+        cross_id_ = room_id_;   // the room ID the step began in (0 = unknown: the first known id is captured later)
     }
     Out route_through(Out& out, const std::string& why)   // under m_
     {
@@ -964,7 +969,11 @@ private:
     int route_epoch_ = 0;
     int route_failures_ = 0;
     bool route_arrived_ = false;
-    bool post_reached_ = false;   ///< Task 17: P_post reached, no room switch yet (hold; logged once)
+    /// Task 17: P_post reached, no room switch yet (hold; logged once). Cleared ONLY by enter_cross/start: a robot shoved back
+    /// out of the doorway while holding stays held until the mission step's budget (accepted).
+    bool post_reached_ = false;
+    std::uint64_t cross_id_ = 0;   ///< the room ID the Cross step began in (0 = unknown)
+    std::uint64_t room_id_ = 0;    ///< the robot's resolved room id this cycle (note_room_id; 0 = unknown)
     std::string route_key_;
     std::string route_wait_logged_;
     std::optional<std::pair<Eigen::Vector2f, float>> route_approach_, route_cross_;
