@@ -6,6 +6,7 @@
 #include <clocale>
 #include <cmath>
 #include <print>
+#include <set>
 #include <unordered_map>
 #include <string>
 #include <vector>
@@ -14,6 +15,7 @@
 
 using namespace rc::door;
 static int fails = 0;
+static const std::vector<std::string> O4{"room_4"}, NONE{};
 #define CHECK(c) do { if (not (c)) { ++fails; std::print("FAIL {}:{}  {}\n", __FILE__, __LINE__, #c); } } while (0)
 
 static IdentityRow row(std::string room, std::string name, float x, float y, bool full)
@@ -89,10 +91,10 @@ int main()
     // face (live, no remembered face in K) stays a live door of K.
     {
         std::vector<ProposalView> props{{"proposal_room_3", 7, "accepted"}};
-        const auto a = plan_adoption(props, 7, "room_3", "room_4", false);
+        const auto a = plan_adoption(props, 7, "room_3", O4, false);
         CHECK(a.restore and a.drop_old);
-        CHECK(not plan_adoption(props, 7, "room_3", "room_4", true).restore);              // once
-        CHECK(not plan_adoption(props, 8, "room_3", "room_4", false).restore);             // another room's id
+        CHECK(not plan_adoption(props, 7, "room_3", O4, true).restore);              // once
+        CHECK(not plan_adoption(props, 8, "room_3", O4, false).restore);             // another room's id
         std::vector<IdentityRow> t{row("room_3", "door_7", 1, 2, true), row("room_3", "door_8", -3, 0, true),
                                    row("room_4", "door_9", 0.5f, 1, true)};
         drop_room(t, "room_4");
@@ -108,12 +110,12 @@ int main()
         for (const char* st : {"rejected", "pending"})
         {
             std::vector<ProposalView> props{{"proposal_room_3", 7, st}};
-            const auto a = plan_adoption(props, 7, "room_3", "room_3", false);
+            const auto a = plan_adoption(props, 7, "room_3", NONE, false);
             CHECK(not a.restore and not a.drop_old);
         }
         // the room kept P's name: the proposal for K does not match it
         std::vector<ProposalView> props{{"proposal_room_3", 7, "accepted"}};
-        CHECK(not plan_adoption(props, 7, "room_4", "room_4", false).restore);
+        CHECK(not plan_adoption(props, 7, "room_4", NONE, false).restore);
     }
     // C2.8 rename_is_not_a_room_change: same node id under a new name is Same; only a different id releases
     CHECK(room_follow_kind(7, 7) == FollowKind::Same);
@@ -142,8 +144,8 @@ int main()
         CHECK(descends_from(11, 7, parent_of));                  // hung directly from the room
         CHECK(not descends_from(12, 7, parent_of));              // another room's door
         std::vector<ProposalView> props{{"proposal_room_3", 7, "accepted"}};
-        CHECK(plan_adoption(props, 7, "room_3", "room_4", false).reseat);
-        const auto same = plan_adoption(props, 7, "room_3", "room_3", false);
+        CHECK(plan_adoption(props, 7, "room_3", O4, false).reseat);
+        const auto same = plan_adoption(props, 7, "room_3", NONE, false);
         CHECK(same.restore and not same.reseat);                 // accepted, previous == name: beliefs already in K's frame
         // ordering: the merge by place reads the RE-SEATED live position
         const Rigid2 K_from_P = rigid_inverse(Rigid2{2.f, -1.f, 1.5707963f});
@@ -151,6 +153,31 @@ int main()
         const auto moved = rigid_apply(K_from_P, PublishedPose{3.f, 1.f, 0.f});          // live door, P-frame (3,1) -> K (2,-1)
         CHECK(plan_restore(t, "room_3", true, std::vector<LiveDoor>{LiveDoor{"d", Eigen::Vector2f(moved.cx, moved.cy)}}, 0.3f).restore.empty());
         CHECK(plan_restore(t, "room_3", true, std::vector<LiveDoor>{LiveDoor{"d", Eigen::Vector2f(3.f, 1.f)}}, 0.3f).restore.size() == 1);   // un-reseated would duplicate
+    }
+    // C2.8 round 2: the reseat keys on the names this agent held beliefs under, not on which of rename/accepted came first
+    {
+        struct Sim
+        {   RoomNameHistory h; std::set<std::pair<std::uint64_t, std::string>> handled; int reseats = 0;
+            void cycle(std::uint64_t id, const std::string& name, const char* state)
+            {
+                h.observe(id, name);
+                if (handled.contains({id, name})) return;
+                std::vector<ProposalView> pv{{"proposal_room_3", id, state}};
+                const auto o = h.others(id, name);
+                const auto a = plan_adoption(pv, id, name, o, false);
+                if (not a.restore) return;
+                handled.insert({id, name});
+                if (a.reseat) ++reseats;
+            } };
+        { Sim s; s.cycle(7, "room_4", "pending"); s.cycle(7, "room_3", "pending"); s.cycle(7, "room_3", "accepted");
+          s.cycle(7, "room_3", "accepted"); CHECK(s.reseats == 1); }                       // (a) rename a cycle before accepted
+        { Sim s; s.cycle(7, "room_4", "pending"); s.cycle(7, "room_3", "accepted"); CHECK(s.reseats == 1); }   // (b) same cycle
+        { Sim s; s.cycle(7, "room_3", "accepted"); s.cycle(7, "room_3", "accepted"); CHECK(s.reseats == 0); }  // (c) first sight as K
+        { Sim s; s.cycle(7, "room_4", "pending");
+          for (int i = 0; i < 10; ++i) s.cycle(7, "room_3", "accepted"); CHECK(s.reseats == 1); }              // (d) many cycles
+        // descends_from stops at a cycle
+        std::unordered_map<std::uint64_t, std::uint64_t> par{{1, 2}, {2, 1}};
+        CHECK(not descends_from(1, 9, [&](std::uint64_t x) { return par.at(x); }));
     }
     std::print("{}\n", fails == 0 ? "ALL PASS" : "FAILED");
     return fails != 0;

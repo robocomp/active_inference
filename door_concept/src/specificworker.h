@@ -331,6 +331,7 @@ private:
     void step_adoption();   // C2.8: an ACCEPTED ltsm proposal for the current room = a recalled entry under its new name
     std::pair<std::uint64_t, std::string> followed_name_{0, {}};   // the followed room's id and the name it wore last cycle
     std::set<std::pair<std::uint64_t, std::string>> adoption_handled_;
+    rc::door::RoomNameHistory room_names_;
     void enter_room_memory(std::uint64_t room_id, bool first_resolution, const std::string& left_room = {});   // decide recall/fresh; strip or arm the restore
     void step_pending_restore();
     void restore_remembered_doors(std::uint64_t new_room);

@@ -30,6 +30,7 @@
 #include <numbers>
 #include <optional>
 #include <ostream>
+#include <set>
 #include <span>
 #include <string>
 #include <string_view>
@@ -436,26 +437,47 @@ enum class FollowKind { NoInformation, Same, First, Change };
     return followed_id == 0 ? FollowKind::First : FollowKind::Change;
 }
 
-/// An ACCEPTED proposal for the current room (parent == its id, named for the name it now wears): that room is RECALLED
-/// under K. `handled` = the (id, name) pairs already acted on, so the restore runs once. The provisional name P is dead
-/// (names are never reused): its rows go, exactly as in the late-recall swap. Rejected / pending: nothing — the room stays
-/// as entered (FRESH). Merging the live doors into K's remembered ones is plan_restore's place test (PlaceLive).
 struct AdoptionPlan { bool restore = false; bool drop_old = false; bool reseat = false; };
 
+/// Every name THIS agent has held beliefs under, per room node id. The frame change P -> K applies to beliefs formed under a
+/// name other than K, whichever of {rename, "accepted"} arrives first (room_concept renames FIRST and writes "accepted"
+/// LAST, so the rename is normally seen a cycle earlier). First sight already named K ⇒ no other name ⇒ nothing to move.
+class RoomNameHistory
+{
+public:
+    void observe(std::uint64_t room_id, const std::string& name) { names_[room_id].insert(name); }
+    [[nodiscard]] std::vector<std::string> others(std::uint64_t room_id, std::string_view name) const
+    {
+        std::vector<std::string> out;
+        if (const auto it = names_.find(room_id); it != names_.end())
+            for (const auto& n : it->second) if (n != name) out.push_back(n);
+        return out;
+    }
+private:
+    std::unordered_map<std::uint64_t, std::set<std::string>> names_;
+};
+
 /// Does `id` belong to `room_id`? Walk the parent chain (door -> wall -> floor -> room, or door -> room), the same chain
-/// resolve_wall relies on. The hop cap only guards a malformed cyclic graph.
+/// resolve_wall relies on, stopping at the root (parent 0) or at a node already visited (a malformed cyclic graph).
 template <class ParentOf>
 [[nodiscard]] bool descends_from(std::uint64_t id, std::uint64_t room_id, ParentOf parent_of)
 {
-    for (int hop = 0; hop < 8 and id != 0; ++hop)
+    std::set<std::uint64_t> visited;
+    while (id != 0 and visited.insert(id).second)
     {
         id = parent_of(id);
         if (id == room_id) return true;
     }
     return false;
 }
+
+/// An ACCEPTED proposal for the current room (parent == its id, named for the name it now wears): that room is RECALLED
+/// under K, once (`already_handled`). `other_names` = the names this agent held beliefs under for this room id that are not
+/// K (RoomNameHistory::others): their identity rows go (names are never reused) and the beliefs are re-seated by the frame
+/// change. Rejected / pending: nothing — the room stays as entered (FRESH). Merging the live doors into K's remembered ones
+/// is plan_restore's place test (PlaceLive).
 [[nodiscard]] inline AdoptionPlan plan_adoption(std::span<const ProposalView> proposals, std::uint64_t room_id,
-                                                std::string_view room_name, std::string_view previous_name,
+                                                std::string_view room_name, std::span<const std::string> other_names,
                                                 bool already_handled)
 {
     AdoptionPlan p;
@@ -463,9 +485,7 @@ template <class ParentOf>
     const std::string want = "proposal_" + std::string(room_name);
     p.restore = std::ranges::any_of(proposals, [&](const ProposalView& v)
     { return v.parent == room_id and v.name == want and v.state == "accepted"; });
-    p.drop_old = p.restore and not previous_name.empty() and previous_name != room_name;
-    // The frame changed only if THIS agent saw the rename (same id, new name). A room first resolved after the accept has its
-    // beliefs rebuilt from the graph, already in K's frame: applying T(K<-P) again would move them twice.
+    p.drop_old = p.restore and not other_names.empty();
     p.reseat = p.drop_old;
     return p;
 }

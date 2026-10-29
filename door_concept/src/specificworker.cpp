@@ -3557,36 +3557,37 @@ void SpecificWorker::step_adoption()
     if (not room.has_value())
         return;
     const std::string name = room->name();
-    if (followed_name_.first != room_node_id_)
-        followed_name_ = {room_node_id_, name};
+    room_names_.observe(room_node_id_, name);
+    if (name != followed_name_.second and followed_name_.first == room_node_id_)
+        std::print("door_concept: [restore] room node {} renamed '{}' -> '{}' (same room, nothing released)\n",
+                   room_node_id_, followed_name_.second, name);
+    followed_name_ = {room_node_id_, name};
     if (adoption_handled_.contains({room_node_id_, name}))
-    {
-        followed_name_.second = name;
         return;                                  // already acted on: stop scanning the graph
-    }
     std::vector<rc::door::ProposalView> props;
     for (const auto& n : G->get_nodes_by_type("metaconcept"))
         if (n.name().starts_with("proposal_")
             and G->get_attrib_by_name<object_subtype_att>(n).value_or(std::string{}) == "room_proposal")
             props.push_back({n.name(), G->get_attrib_by_name<parent_att>(n).value_or(0),
                              G->get_attrib_by_name<state_att>(n).value_or(std::string{})});
-    const std::string previous = followed_name_.second;
-    const auto plan = rc::door::plan_adoption(props, room_node_id_, name, previous,
-                                              adoption_handled_.contains({room_node_id_, name}));
-    if (name != previous)
-        std::print("door_concept: [restore] room node {} renamed '{}' -> '{}' (same room, nothing released)\n",
-                   room_node_id_, previous, name);
-    followed_name_.second = name;
+    const auto others = room_names_.others(room_node_id_, name);
+    const auto plan = rc::door::plan_adoption(props, room_node_id_, name, others, false);
     if (not plan.restore)
         return;
     adoption_handled_.insert({room_node_id_, name});
     recall_names_seen_.insert(name);          // the accepted proposal IS the announcement
     recall_late_names_.insert(name);          // and the provisional name is dead: drop its rows
     std::print("door_concept: [restore] ltsm proposal ACCEPTED for room node {} — '{}' is the remembered '{}'; restoring its "
-               "doors and merging the live ones by place\n", room_node_id_, previous, name);
+               "doors and merging the live ones by place\n", room_node_id_, others.empty() ? name : others.front(), name);
     if (plan.reseat)
         reseat_doors_after_adoption(room_node_id_, props);   // BEFORE the restore: the merge by place reads re-seated positions
-    enter_room_memory(room_node_id_, false, plan.drop_old ? previous : std::string{});
+    for (const auto& old : others)               // the provisional names are dead: their rows are deleted, not stripped
+    {
+        for (const auto& nm : rc::door::drop_room(identities_, old))
+            decision_log_.record(rc::door::DoorDecisionKind::IdentityDrop, 0, nm, 0, 0, 0, 0, old);
+        save_identities();
+    }
+    enter_room_memory(room_node_id_, false, {});
 }
 
 // The accepted proposal carries T(P<-K) on its RT edge (P -> proposal). room_concept re-expressed ITS OWN children by
