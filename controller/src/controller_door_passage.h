@@ -46,6 +46,7 @@
  * the GUI thread, hence the mutex.
  */
 
+#include "door_passage_done.h"
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -112,6 +113,7 @@ public:
         route_epoch_ = 0;
         route_failures_ = 0;
         route_arrived_ = false;
+        post_reached_ = false;
         route_wait_logged_.clear();
         route_key_.clear();
         route_approach_.reset();
@@ -790,7 +792,7 @@ private:
         if (cross.has_value()) route_cross_ = *cross;
 
         // ── the room switch: the robot is through (a room this door leads to — M-8 — or any other when unknown)
-        if (step_ == Step::Cross and not cross_room_.empty() and room_frame != cross_room_)
+        if (step_ == Step::Cross and passage_done(post_reached_, cross_room_, room_frame))
         {
             const auto targets = target_rooms(G);
             if (targets.empty() or std::ranges::find(targets, room_frame) != targets.end())
@@ -805,7 +807,16 @@ private:
         // ── the route's end, as the session reported it
         if (std::exchange(route_arrived_, false))
         {
-            if (step_ == Step::Cross) return route_through(out, "reached the point past the door (P_post)");
+            if (step_ == Step::Cross)
+            {
+                // Task 17: P_post alone is NOT the end. The passage is done on room_concept's room switch (fact 3, handled
+                // above); until it arrives the robot holds here — no driving back, no failure; the mission step's budget bounds it.
+                if (not post_reached_)
+                {
+                    post_reached_ = true;
+                    route_event(out, std::format("[door-route] {}: past the door — waiting for room_concept's room switch", door_));
+                }
+            }
             if (step_ == Step::Approach)
             {
                 if (open_now and route_cross_.has_value())
@@ -854,7 +865,7 @@ private:
         }
         // ★ BACK TO THE OPEN-WAIT WHEN door_concept SAYS SHUT before the robot is through (the chain's "back to open" rule): the
         //   route ends at P_pre again. Not once this passage opened it (a re-offer then is the flicker, try38).
-        if (step_ == Step::Cross and not opened_ and not open_now)   // the door READS shut — not merely `open` on offer (its offer is P(shut), 04620a74)
+        if (step_ == Step::Cross and not opened_ and not open_now and not post_reached_)   // the door READS shut — not merely `open` on offer (its offer is P(shut), 04620a74)
         {
             route_event(out, std::format("[door-route] {}: {} is offered — the door is shut: the route stops at the vantage", door_,
                                          name_of(Step::Open)));
@@ -880,6 +891,16 @@ private:
             return out;
         }
         const bool through = step_ == Step::Cross;
+        if (through and post_reached_)   // past the door, waiting for the room switch: hold (no route, the claim stays)
+        {
+            out.route.reset();
+            out.required = name_of(step_) + kRouteSuffix;
+            step_state_ = "past the door";
+            note_ = std::format("{} (past the door, waiting for room_concept's room switch)", name_of(step_));
+            out.exempt = {door_};
+            if (auto c = corridor(G, nullptr, room_frame); c.has_value()) out.passages.push_back(std::move(*c));
+            return out;
+        }
         if (not route_approach_.has_value() or (through and not route_cross_.has_value()))
         {
             const std::string what = route_approach_.has_value() ? name_of(Step::Cross) : name_of(Step::Approach);
@@ -919,6 +940,7 @@ private:
         seen_executing_ = false;
         attempts_ = 0;
         route_arrived_ = false;
+        post_reached_ = false;
     }
     Out route_through(Out& out, const std::string& why)   // under m_
     {
@@ -942,6 +964,7 @@ private:
     int route_epoch_ = 0;
     int route_failures_ = 0;
     bool route_arrived_ = false;
+    bool post_reached_ = false;   ///< Task 17: P_post reached, no room switch yet (hold; logged once)
     std::string route_key_;
     std::string route_wait_logged_;
     std::optional<std::pair<Eigen::Vector2f, float>> route_approach_, route_cross_;

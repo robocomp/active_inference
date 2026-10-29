@@ -890,8 +890,14 @@ int main()
         CHECK(out.route.has_value() and out.route->through);
         p.note_route(out.route->key, RR::Arrived);
         out = p.update(*G, nullptr, "room_1");
-        CHECK(p.view().step == Step::Done and not p.view().failed);
-        CHECK(out.event.has_value() and out.event->find("P_post") != std::string::npos);
+        // Task 17: P_post with the SAME room is not done — it holds, waiting for room_concept's room switch
+        CHECK(p.view().step == Step::Cross and not p.view().failed);
+        CHECK(out.event.has_value() and out.event->find("waiting for room_concept's room switch") != std::string::npos);
+        CHECK(not out.route.has_value());
+        out = p.update(*G, nullptr, "room_1");
+        CHECK(p.view().step == Step::Cross and not out.event.has_value() and not out.route.has_value());   // logged once, still holding
+        out = p.update(*G, nullptr, "room_2");
+        CHECK(p.view().step == Step::Done and not p.view().failed);   // the room switch ends it
     }
     {   // BLOCKED TWICE: the first failure rebuilds (a new key, no attempt charged), the second ends it cross_unreachable
         auto G = make_graph(62);
