@@ -90,6 +90,7 @@ std::optional<std::string> SpecificWorker::MissionHost::start_now(const rc::miss
 		                                     "mission");
 		if (not r.accepted) return r.reason;
 		door_ = *door;
+		door_room_ = here;
 		QJsonObject g{{"door", QString::fromStdString(*door)}};
 		if (ref.kind == Ref::Kind::Passage)
 		{
@@ -214,7 +215,8 @@ LeafStatus SpecificWorker::MissionHost::poll(const rc::mission::Step &leaf)
 		// 600 s for a door that no longer existed), drop the passage and resolve the relation again.
 		if (const Ref ref = *leaf.ref("door"); rc::relation_of(ref) != rc::DoorRelationKind::None and not door_.empty()
 		    and w_.G != nullptr and not w_.G->get_node(door_).has_value()
-		    and w_.session_.door_passage().view().step != rc::DoorPassage::Step::Done)
+		    and w_.session_.door_passage().view().step != rc::DoorPassage::Step::Done
+		    and w_.world_model_.graph_state().room_name == door_room_)   // crossed ⇒ the door is re-made on the far side, not gone
 		{
 			std::println("[mission] step {} ({} {}): '{}' left the graph before the crossing — resolving '{}' again", leaf.id, op,
 			             ref.name, door_, ref.name);
