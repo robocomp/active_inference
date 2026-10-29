@@ -176,11 +176,31 @@ static int passages_with_k_face()
     return n;
 }
 
-/// room_concept's answer, as it writes it (Task 6): `state` on the proposal node.
-static void answer(const std::string &state)
+/// room_concept's answer, as it writes it (Task 6 / Task 20): `state` on the proposal node; on "accepted" the accepted T(P <- K)
+/// (rt_translation / rt_rotation_euler_xyz) and the fit's robot-in-K covariance (rt_covariance) in the SAME update_node.
+/// Default accepted T = the one on the edge (the fit agreed with the prior); `node_T` overrides it; `bare` = a malformed verdict.
+static void answer(const std::string &state, std::optional<Eigen::Vector3d> node_T = std::nullopt,
+                   Eigen::Vector3d node_var = Eigen::Vector3d(0.04, 0.04, 0.01), bool bare = false)
 {
     auto n = live->get_node("proposal_room_3");
     if (not n) return;
+    if (state == "accepted" and not bare)
+    {
+        if (not node_T.has_value())
+        {
+            const auto e = live->get_edge(live->get_attrib_by_name<parent_att>(n.value()).value_or(0), n->id(), "RT");
+            const auto m = e.has_value() ? live->get_rt_api()->get_edge_RT_as_rtmat(e.value()) : std::nullopt;
+            if (m.has_value()) node_T = Eigen::Vector3d(m->translation().x(), m->translation().y(), std::atan2(m->linear()(1, 0), m->linear()(0, 0)));
+        }
+        if (node_T.has_value())
+        {
+            std::vector<float> cov(36, 0.f);
+            cov[0] = (float)node_var.x(); cov[7] = (float)node_var.y(); cov[35] = (float)node_var.z();
+            live->add_or_modify_attrib_local<rt_translation_att>(n.value(), std::vector<float>{(float)node_T->x(), (float)node_T->y(), 0.f});
+            live->add_or_modify_attrib_local<rt_rotation_euler_xyz_att>(n.value(), std::vector<float>{0.f, 0.f, (float)node_T->z()});
+            live->add_or_modify_attrib_local<rt_covariance_att>(n.value(), std::move(cov));
+        }
+    }
     live->add_or_modify_attrib_local<state_att>(n.value(), std::string(state));
     live->update_node(n.value());
 }
@@ -481,13 +501,18 @@ int main(int argc, char **argv)
     for (const bool promoted : {false, true})
     {
         // Task 20 (recog_proto6): ltsm's prior T(P <- K) was the half-turn twin of the truth; room_concept's fit corrected it
-        // and wrote the ACCEPTED T(P <- K) on the proposal's RT edge before "accepted". The seam must be the accepted one.
+        // and states the ACCEPTED T(P <- K) + the fit's covariance on the proposal NODE with "accepted". The seam must use
+        // the node's T — never the edge (another DDS topic), never the prior.
         std::printf(" case %s\n", promoted ? "B (promoted)" : "A (proto)");
         const auto se2_of = [](const Mat::RTMat &T) { return Eigen::Vector3d(T.translation().x(), T.translation().y(), std::atan2(T.linear()(1, 0), T.linear()(0, 0))); };
-        // the carried K face of the crossed door, in K's frame, after the verdict (accepted_override: the edge rewritten first)
-        const auto run = [&](std::optional<Mat::RTMat> accepted_override, Mat::RTMat &prior_out) -> std::optional<Eigen::Vector3d>
+        struct Out { Eigen::Vector3d face; std::string name; };
+        // the carried K face of the crossed door, in K's frame, after the verdict
+        const auto run = [&](std::optional<Mat::RTMat> node_T, std::optional<Mat::RTMat> edge_T, Eigen::Vector3d var, bool bare,
+                             std::optional<Eigen::Vector3d> extra_door, Mat::RTMat &prior_out) -> std::optional<Out>
         {
             reset(); build_memory(promoted); build_live(promoted);
+            if (extra_door.has_value())
+                mem_node("object", "r3_door_7", mem->get_node("r3_room_3")->id(), extra_door->x(), extra_door->y(), extra_door->z(), std::nullopt, {}, "door");
             Fix f;
             if (not f.sw.swap(3, pose_k(), live_P)) return std::nullopt;
             const auto pn = live->get_node("proposal_room_3");
@@ -496,12 +521,8 @@ int main(int argc, char **argv)
             const auto m = e.has_value() ? live->get_rt_api()->get_edge_RT_as_rtmat(e.value()) : std::nullopt;
             if (not m.has_value()) return std::nullopt;
             prior_out = m.value();
-            if (accepted_override.has_value())   // room_concept: the accepted T on the edge, THEN the state
-            {
-                const auto a = se2_of(accepted_override.value());
-                put_edge(*live, live_P, pn->id(), a.x(), a.y(), a.z());
-            }
-            answer("accepted");
+            if (edge_T.has_value()) { const auto x = se2_of(*edge_T); put_edge(*live, live_P, pn->id(), x.x(), x.y(), x.z()); }
+            answer("accepted", node_T.has_value() ? std::optional<Eigen::Vector3d>(se2_of(*node_T)) : std::nullopt, var, bare);
             if (f.sw.step() != ltsm::RoomSwap::Event::Accepted) return std::nullopt;
             const char *pw = promoted ? "passage_5" : nullptr;
             for (const auto &x : mem->get_nodes_by_type("metaconcept"))
@@ -512,33 +533,45 @@ int main(int argc, char **argv)
                     if (ltsm::is_descendant(*mem, ed.to(), "r3_room_3"))
                         if (const auto fn = mem->get_node(ed.to()); fn.has_value())
                             if (const auto T = mem->get_inner_eigen_api()->get_transformation_matrix("r3_room_3", fn->name()); T.has_value())
-                                return se2_of(T.value());
+                                return Out{se2_of(T.value()), fn->name()};
             }
             return std::nullopt;
         };
-        Mat::RTMat prior = Mat::RTMat::Identity();
-        const auto F_prior = run(std::nullopt, prior);         // accepted == prior: the old behaviour's seam
-        check(F_prior.has_value(), "accepted with the prior left on the edge: a K face is carried");
+        const Eigen::Vector3d var_prior(0.04, 0.04, 0.01);
+        Mat::RTMat prior = Mat::RTMat::Identity(), scratch = Mat::RTMat::Identity();
+        const auto F_prior = run(std::nullopt, std::nullopt, var_prior, false, std::nullopt, prior);   // accepted == prior
+        check(F_prior.has_value(), "accepted with T = the prior on the node: a K face is carried");
         // the truth: the prior composed with a half turn about K's (2, 2) — the twin a symmetric room allows
         const Mat::RTMat half = se2(2, 2, 0) * se2(0, 0, M_PI) * se2(-2, -2, 0);
         const Mat::RTMat acc(prior * half);
-        Mat::RTMat prior2 = Mat::RTMat::Identity();
-        const auto F_acc = run(acc, prior2);
-        check(F_acc.has_value(), "accepted with the ACCEPTED T on the edge: a K face is carried");
+        // the EDGE carries yet another T (a stale / reordered sample): the node's must win
+        const Mat::RTMat edge_other(prior * se2(0.7, -0.4, 0.9));
+        const auto F_acc = run(acc, edge_other, var_prior, false, std::nullopt, scratch);
+        check(F_acc.has_value(), "accepted with the ACCEPTED T on the node (and a different T on the edge): a K face is carried");
         if (F_prior.has_value() and F_acc.has_value())
         {
-            // expected: the same face re-based by C = T_acc(P<-K)^-1 T_prior(P<-K) = half^-1
             const Mat::RTMat C(acc.inverse() * prior);
-            const Mat::RTMat Fp = se2(F_prior->x(), F_prior->y(), F_prior->z());
+            const Mat::RTMat Fp = se2(F_prior->face.x(), F_prior->face.y(), F_prior->face.z());
             const Eigen::Vector3d want = se2_of(Mat::RTMat(C * Fp));
-            const double dxy = (F_acc->head<2>() - want.head<2>()).norm();
-            const double dth = std::abs(std::remainder(F_acc->z() - want.z(), 2.0 * M_PI));
+            const double dxy = (F_acc->face.head<2>() - want.head<2>()).norm();
+            const double dth = std::abs(std::remainder(F_acc->face.z() - want.z(), 2.0 * M_PI));
             char buf[256];
-            std::snprintf(buf, sizeof buf, "the seam is the ACCEPTED one: face (%.3f, %.3f, %.3f) vs C.prior-face (%.3f, %.3f, %.3f), prior-face (%.3f, %.3f)",
-                          F_acc->x(), F_acc->y(), F_acc->z(), want.x(), want.y(), want.z(), F_prior->x(), F_prior->y());
+            std::snprintf(buf, sizeof buf, "the seam is the NODE's accepted T: face (%.3f, %.3f, %.3f) vs C.prior-face (%.3f, %.3f, %.3f), prior-face (%.3f, %.3f)",
+                          F_acc->face.x(), F_acc->face.y(), F_acc->face.z(), want.x(), want.y(), want.z(), F_prior->face.x(), F_prior->face.y());
             check(dxy < 1e-3 and dth < 1e-3, buf);
-            check((F_acc->head<2>() - F_prior->head<2>()).norm() > 1.0, "the half-turn prior does NOT leak into the seam (faces differ by > 1 m)");
+            check((F_acc->face.head<2>() - F_prior->face.head<2>()).norm() > 1.0, "the half-turn prior does NOT leak into the seam (faces differ by > 1 m)");
+
+            // the FIT's covariance (node), not the prior mode's, weighs the association: a K door 0.6 m from the seam's
+            // face is adopted under a broad fit covariance and NOT under a sharp one (same seam mean).
+            const Eigen::Vector3d near_door(F_acc->face.x() + 0.6, F_acc->face.y(), F_acc->face.z());
+            const auto sharp = run(acc, std::nullopt, Eigen::Vector3d(1e-6, 1e-6, 1e-8), false, near_door, scratch);
+            const auto broad = run(acc, std::nullopt, Eigen::Vector3d(0.5, 0.5, 0.2), false, near_door, scratch);
+            check(sharp.has_value() and sharp->name != "r3_door_7", "sharp fit covariance: the 0.6 m-off K door is NOT adopted (" + (sharp ? sharp->name : std::string("none")) + ")");
+            check(broad.has_value() and broad->name == "r3_door_7", "broad fit covariance: it IS adopted (" + (broad ? broad->name : std::string("none")) + ")");
         }
+        // a MALFORMED verdict (accepted, no T on the node): nothing is carried, the edge is never a fallback
+        const auto F_bare = run(std::nullopt, std::nullopt, var_prior, true, std::nullopt, scratch);
+        check(not F_bare.has_value() and passages_with_k_face() == 0, "accepted without the node's T: malformed, NO seam written");
     }
 
     std::printf("stale_proposal_swept_at_start\n");

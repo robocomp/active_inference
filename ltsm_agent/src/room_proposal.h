@@ -49,10 +49,12 @@ public:
     /// Delete the standing proposal (ltsm owns it). Idempotent.
     void withdraw();
 
-    /// T(P <- K) as the RT edge P -> proposal holds it NOW. ltsm posts its PRIOR there; room_concept overwrites it with the
-    /// ACCEPTED transform (its fit's) BEFORE writing state = "accepted" (Task 20), so read at the Accepted verdict this is the
-    /// accepted fact. nullopt when no proposal stands or its edge cannot be read.
-    [[nodiscard]] std::optional<Mat::RTMat> transform() const;
+    /// room_concept's ACCEPTED verdict as it states it on the proposal NODE, in the same update_node as state = "accepted"
+    /// (Task 20; atomic — the RT edge travels on another DDS topic and is never read for it): rt_translation /
+    /// rt_rotation_euler_xyz = the accepted T(P <- K); rt_covariance (36, SE(2) on slots 0,1,5) = the covariance of the robot's
+    /// fitted pose in K. nullopt unless the state is "accepted" and all three are present and well-sized (malformed).
+    struct Accepted { Mat::RTMat P_from_K; Eigen::Matrix3d robot_K_cov; };
+    [[nodiscard]] std::optional<Accepted> accepted() const;
     /// The prior T(P <- K) this instance posted (what every swap-time quantity was computed through).
     [[nodiscard]] const Mat::RTMat &prior() const { return prior_; }
 

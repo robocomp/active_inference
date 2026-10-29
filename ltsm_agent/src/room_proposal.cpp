@@ -2,7 +2,6 @@
 #include "room_eviction.h"     // RoomEviction::rt_attributes
 #include "room_recall.h"       // RoomRecall::live_name_of
 
-#include <dsr/api/dsr_rt_api.h>
 #include <dsr/core/types/type_checking/dsr_attr_name.h>
 
 #include <QDebug>
@@ -81,14 +80,26 @@ RoomProposal::Verdict RoomProposal::verdict() const
     return Verdict::Pending;
 }
 
-std::optional<Mat::RTMat> RoomProposal::transform() const
+std::optional<RoomProposal::Accepted> RoomProposal::accepted() const
 {
     if (id_ == 0) return std::nullopt;
-    const auto e = live_->get_edge(P_, id_, "RT");
-    if (not e.has_value()) return std::nullopt;
-    const auto m = live_->get_rt_api()->get_edge_RT_as_rtmat(e.value());
-    if (not m.has_value()) return std::nullopt;
-    return Mat::RTMat(m.value());
+    const auto n = live_->get_node(id_);
+    if (not n.has_value() or live_->get_attrib_by_name<state_att>(n.value()).value_or(std::string{}) != kAccepted) return std::nullopt;
+    const auto tr = live_->get_attrib_by_name<rt_translation_att>(n.value());
+    const auto ro = live_->get_attrib_by_name<rt_rotation_euler_xyz_att>(n.value());
+    const auto cv = live_->get_attrib_by_name<rt_covariance_att>(n.value());
+    if (not tr.has_value() or not ro.has_value() or not cv.has_value() or tr->get().size() < 2 or ro->get().size() < 3
+        or cv->get().size() != 36)
+        return std::nullopt;
+    Accepted a;
+    a.P_from_K = Mat::RTMat::Identity();
+    a.P_from_K.linear() = Eigen::AngleAxisd(ro->get()[2], Eigen::Vector3d::UnitZ()).toRotationMatrix();
+    a.P_from_K.translation() = Eigen::Vector3d(tr->get()[0], tr->get()[1], 0.0);
+    static constexpr int slot[3] = {0, 1, 5};
+    for (int i = 0; i < 3; ++i)
+        for (int j = 0; j < 3; ++j) a.robot_K_cov(i, j) = cv->get()[slot[i] * 6 + slot[j]];
+    if (not a.P_from_K.matrix().allFinite() or not a.robot_K_cov.allFinite()) return std::nullopt;
+    return a;
 }
 
 void RoomProposal::withdraw()

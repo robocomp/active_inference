@@ -32,8 +32,9 @@
  * through T(K <- twin) and the passage into the twin. fuse_seam_through_aperture itself is NOT reused: it fits a PROTO frame,
  * and K's frame is already metric.
  * ACCEPTED TRANSFORM (Task 20): every swap-time seam goes through ltsm's PRIOR T(P <- K). On "accepted" (commit) each one is
- * re-based by the T(P <- K) room_concept wrote on the proposal's RT edge before the verdict (its fit's, which may differ from
- * the prior by a half turn: recog_proto6), so the prior never reaches memory.
+ * rebuilt from the T(P <- K) and the fit's robot-in-K covariance room_concept states on the proposal NODE in the same update
+ * as "accepted" (its fit's, which may differ from the prior by a half turn: recog_proto6), so the prior never reaches memory.
+ * A verdict without them is malformed: no seam is written.
  * When K already holds an unmatched door at the aperture (its own face of the same hole), it is ASSOCIATED, not duplicated:
  * MAP over {each unowned K door} U {none -> new face}, door likelihood Gaussian in the chain pose (both leaf orientations,
  * doors are pi-symmetric), 'none' uniform over K's area and yaw. An adopted door's pose is precision-fused with the chain
@@ -124,7 +125,11 @@ private:
 
     /// A crossed door, taken at swap time: the previous room's memory name and face, the seam T(K <- previous room) and the
     /// covariance of the robot's pose in K that it inherits (x, y, yaw).
-    struct Carry { std::string prev_face, prev_room, base; Mat::RTMat known_from_prev; Eigen::Matrix3d cov; std::string live_room; /* L's LIVE name while it is not archived yet; empty = memory only */ };
+    /// robot_from_prev / side_cov: the seam's robot-side half T(robot <- prev) and its own covariance (the mouth's; else 0),
+    /// from which the accepted verdict rebuilds the seam (commit).
+    struct Carry { std::string prev_face, prev_room, base; Mat::RTMat known_from_prev; Eigen::Matrix3d cov; std::string live_room; /* L's LIVE name while it is not archived yet; empty = memory only */
+                   Mat::RTMat robot_from_prev = Mat::RTMat::Identity(); Eigen::Matrix3d side_cov = Eigen::Matrix3d::Zero(); };
+    Mat::RTMat K_from_robot_ = Mat::RTMat::Identity();   ///< the prior robot-in-K pose (best mode) every swap-time seam used
     std::vector<Carry> carry_;
     int drop_subtree(const std::string &memory_room);
     std::optional<DSR::Node> robot_node() const;

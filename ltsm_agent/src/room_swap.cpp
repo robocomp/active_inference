@@ -211,6 +211,7 @@ bool RoomSwap::swap(std::uint64_t known_room_id, const rc::recog::PoseMix &pose_
             const auto mf = live_->get_attrib_by_name<interaction_node_id_att>(P.value());
             const auto mc = live_->get_attrib_by_name<rt_covariance_att>(P.value());      // a mouth without its covariance cannot be weighed: not used
             Eigen::Matrix3d C_chain = Eigen::Matrix3d::Zero();
+            Eigen::Matrix3d side = Eigen::Matrix3d::Zero();     // covariance of the robot-side half T(robot <- L) (the mouth's)
             bool mouth = false;
             if (mt.has_value() and mr.has_value() and mf.has_value() and mc.has_value() and mf.value() == Ln->id()
                 and mt->get().size() >= 2 and mr->get().size() >= 3 and mc->get().size() == 36)
@@ -224,6 +225,8 @@ bool RoomSwap::swap(std::uint64_t known_room_id, const rc::recog::PoseMix &pose_
                     // K<-robot (robot cov) . robot<-P (exact) . inverse(mouth) (mouth cov): both enter through their Jacobians
                     const auto kp = ltsm::seam::compose_cov(meas(K_from_robot, S_robot), meas(robot_from_P.value(), Eigen::Matrix3d::Zero()));
                     C_chain = ltsm::seam::compose_cov(kp, ltsm::seam::inverse_cov(meas(L_from_P, Cm))).cov;
+                    side = ltsm::seam::compose_cov(meas(robot_from_P.value(), Eigen::Matrix3d::Zero()),
+                                                   ltsm::seam::inverse_cov(meas(L_from_P, Cm))).cov;
                     mouth = true;
                 }
             if (not K_from_L.has_value())
@@ -234,6 +237,7 @@ bool RoomSwap::swap(std::uint64_t known_room_id, const rc::recog::PoseMix &pose_
                 const std::string pre = ev_.memory_prefix(Ln.value());
                 if (not mouth) C_chain = seam_cov_through_robot(K_from_robot, S_robot, K_from_L.value());
                 carries.push_back({pre + d->name(), pre + Ln->name(), d->name(), K_from_L.value(), C_chain, Ln->name()});
+                carries.back().side_cov = side;
             }
         }
     }
@@ -262,6 +266,9 @@ bool RoomSwap::swap(std::uint64_t known_room_id, const rc::recog::PoseMix &pose_
                                seam_cov_through_robot(K_from_robot, S_robot, Mat::RTMat(twin_from_K.value() * T.value()))});
         }
 
+    // Every seam is T(K <- robot) . T(robot <- prev): keep the robot-side half, so the ACCEPTED verdict can rebuild the seam
+    // from room_concept's T(P <- K) and the FIT's covariance (commit) instead of this prior mode's.
+    for (auto &k : carries) k.robot_from_prev = Mat::RTMat(robot_from_K * k.known_from_prev);
     // ── execute: stage, propose, hold. NOTHING is written to memory here (C2.9: the carry-over is the accepted verdict's) ──
     const std::string known_mem = K->name();
     std::string prior_subtype;
@@ -284,6 +291,7 @@ bool RoomSwap::swap(std::uint64_t known_room_id, const rc::recog::PoseMix &pose_
     for (const auto &k : carry_)
         carry_over(k.prev_face, known_room_id, true);   // the MAP face association, logged for the tour driver; nothing written
     state_ = State::Staged;
+    K_from_robot_ = K_from_robot;
     known_mem_ = known_mem;
     known_id_ = known_room_id;
     prov_id_ = P->id();
@@ -334,29 +342,35 @@ void RoomSwap::retry_carries()
 
 void RoomSwap::commit()
 {
-    // THE ACCEPTED TRANSFORM (Task 20). Every seam in carry_ was computed at swap time through ltsm's own prior T(P <- K) (the
-    // recogniser's pose mode). room_concept's fit may have corrected it (recog_proto6: a half turn) and wrote the ACCEPTED
-    // T(P <- K) on the proposal's RT edge before "accepted": that edge, read now, is the one fact. Each seam T(K <- prev) =
-    // T(K <- P) T(P <- prev) is re-based by C = T(K_acc <- K_prior) = T_acc(P <- K)^-1 T_prior(P <- K); its covariance (K frame)
-    // is carried through C exactly (C itself is the verdict, no uncertainty added here).
-    if (const auto acc = proposal_.transform(); acc.has_value())
+    // THE ACCEPTED TRANSFORM (Task 20). Every seam in carry_ was computed at swap time through ltsm's PRIOR (the recogniser's
+    // best pose mode, its covariance S_robot). room_concept's fit may have corrected it (recog_proto6: a half turn) and states
+    // the accepted T(P <- K) and the FIT's robot-in-K covariance on the proposal NODE, in the same update as "accepted"
+    // (atomic; the edge is a different DDS topic and is NOT read). Each seam is REBUILT from them:
+    //   T(K <- robot)_acc = C . T(K <- robot)_prior,  C = T_acc(P <- K)^-1 . T_prior(P <- K)
+    //   seam = T(K <- robot)_acc . T(robot <- prev),  cov = compose(fit cov, robot-side cov)   (the prior mode's S is gone)
+    // Absent ⇒ the verdict is malformed: NO seam is written (a wrong one would be permanent), nothing guessed.
+    if (const auto acc = proposal_.accepted(); acc.has_value())
     {
-        const Mat::RTMat C(acc->inverse() * proposal_.prior());
-        const Eigen::Vector3d c = se2_of(C), a = se2_of(acc.value()), pr = se2_of(proposal_.prior());
+        const Mat::RTMat C(acc->P_from_K.inverse() * proposal_.prior());
+        const Mat::RTMat K_from_robot(C * K_from_robot_);
         for (auto &k : carry_)
         {
-            k.cov = ltsm::seam::compose_cov(meas(C, Eigen::Matrix3d::Zero()), meas(k.known_from_prev, k.cov)).cov;
-            k.known_from_prev = Mat::RTMat(C * k.known_from_prev);
+            k.known_from_prev = Mat::RTMat(K_from_robot * k.robot_from_prev);
+            k.cov = ltsm::seam::compose_cov(meas(K_from_robot, acc->robot_K_cov), meas(k.robot_from_prev, k.side_cov)).cov;
         }
+        const Eigen::Vector3d c = se2_of(C), a = se2_of(acc->P_from_K), pr = se2_of(proposal_.prior());
         qInfo().noquote() << QString::fromStdString(std::format(
-            "[swap] accepted T(P<-K) = ({:.2f}, {:.2f}, {:.1f} deg), ltsm's prior ({:.2f}, {:.2f}, {:.1f} deg): {} seam(s) re-based by "
-            "({:.2f}, {:.2f}, {:.1f} deg)", a.x(), a.y(), a.z() * 180.0 / M_PI, pr.x(), pr.y(), pr.z() * 180.0 / M_PI, carry_.size(),
-            c.x(), c.y(), c.z() * 180.0 / M_PI));
+            "[swap] accepted T(P<-K) = ({:.2f}, {:.2f}, {:.1f} deg), ltsm's prior ({:.2f}, {:.2f}, {:.1f} deg): {} seam(s) rebuilt "
+            "(correction {:.2f}, {:.2f}, {:.1f} deg) with the fit's covariance", a.x(), a.y(), a.z() * 180.0 / M_PI, pr.x(), pr.y(),
+            pr.z() * 180.0 / M_PI, carry_.size(), c.x(), c.y(), c.z() * 180.0 / M_PI));
     }
     else
-        qWarning() << "[swap] accepted, but the proposal's RT edge is unreadable: the seams keep ltsm's prior T(P<-K)";
-    // C2.9: the carry-over joins the crossed door's passage to K. A previous room still live (fresh -> fresh) has no face in
-    // memory yet: that one is retried when the robot leaves K, after its eviction.
+    {
+        qWarning().noquote() << QString::fromStdString(std::format(
+            "[swap] MALFORMED accepted verdict: the proposal node carries no accepted T(P<-K)/covariance; {} carry-over seam(s) "
+            "NOT written (never the prior)", carry_.size()));
+        carry_.clear();
+    }
     std::erase_if(carry_, [&](const Carry &k) { return carry_over(k.prev_face, known_id_); });
     for (const auto &k : carry_)
         qInfo().noquote() << QString::fromStdString(std::format("[swap] carry-over of {} into {} deferred: retried when the robot leaves it", k.prev_face, known_mem_));
