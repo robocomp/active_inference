@@ -45,18 +45,13 @@ public:
     // Data-driven birth: create a fresh "door_N" node at the detection centroid (room frame), seeded
     // with the Tracker.Birth* default geometry. Returns the new node id (0 on failure). Used by the
     // worker's instance tracker — the only instance-lifecycle path.
-    // `preferred_name` (identity RE-ACQUISITION): reuse the name of a door that was removed and is now coming
-    // back at this spot, so it keeps its identity in the graph instead of taking the next free door_N. Ignored
-    // if empty or if a node of that name still exists.
-    // `reserved_names` — names still HELD BY A GHOST (a removed door that may yet come back). A freed number
-    // must not be handed to a different physical door while its owner can still re-acquire it: that is how
-    // "door_1" migrated across the room between lives, and how the original door lost its identity memory
-    // (see SpecificWorker::remember_ghost). Reserved names only raise the counter; they never block
-    // `preferred_name`, which IS the ghost being consumed.
+    // `preferred_name` (identity RE-ACQUISITION): the remembered name of a door coming back at this spot; taken when
+    // no live node wears it, else a fresh name. `next_door_index` is the agent's persisted name counter, advanced for
+    // a fresh name (rc::door::allocate_door_name: names are opaque and never recycled).
     std::uint64_t create_instance_from_detection(const Eigen::Vector3f& centroid_room,
                                                  std::uint64_t room_node_id,
-                                                 std::string_view preferred_name = {},
-                                                 std::span<const std::string> reserved_names = {});
+                                                 std::string_view preferred_name,
+                                                 std::uint64_t& next_door_index);
 
     // ── ENTRY MIRROR under a PROTO-ROOM ──────────────────────────────────────────────────────────────
     // A proto-room (room_concept, a `room` node with a `proto` self-edge) is born when the robot crosses a
@@ -67,18 +62,19 @@ public:
     // `door_N` (object_subtype "door", parent = the proto-room) with no fitter instance, no affordances,
     // no ghost and no identity row. Its RT edge proto→mirror is `T_proto_source`, resolved once and never
     // rewritten — the proto-room's gauge is frozen, so the door's pose in it is a constant.
-    // Returns the new node id (0 on failure). `reserved_names` as for create_instance_from_detection.
+    // Returns the new node id (0 on failure). The mirror asks for its source's name (live ⇒ a fresh counter name);
+    // `next_door_index` as for create_instance_from_detection.
     /// A door node under `room` with the given geometry (a door carried across from the room just left).
     std::uint64_t create_door_copy(const DSR::Node& room, float width, float depth, float height,
                                    std::optional<float> open_prob, std::optional<float> phi_rad,
                                    const Eigen::Vector3f& t, const Eigen::Vector3f& euler_xyz,
-                                   std::span<const std::string> reserved_names, const std::string& source_label,
+                                   std::uint64_t& next_door_index, const std::string& source_label,
                                    std::string_view preferred_name = {});
     std::uint64_t create_entry_mirror(const DSR::Node& proto_room,
                                       const DSR::Node& source_door,
                                       const Eigen::Vector3f& t_proto_source,
                                       const Eigen::Vector3f& euler_xyz_proto_source,
-                                      std::span<const std::string> reserved_names = {});
+                                      std::uint64_t& next_door_index);
 
     // Publish the instance's fitted model to its DSR node (geometry + FE + mesh + RFE/support-bank) and
     // the room→door RT edge. persist_* resolves the node by id first; both no-op if the node is gone.
@@ -130,9 +126,9 @@ private:
     };
     WallRef resolve_wall(std::uint64_t room_id, const Eigen::Vector2f& door_xy) const;
 
-    // One past the highest "door_<N>" that is LIVE OR RESERVED, or `preferred_name` when it is free.
-    // Shared by detection births and entry mirrors so the two can never hand out the same number.
-    std::string next_door_name(std::string_view preferred_name, std::span<const std::string> reserved_names) const;
+    // `preferred_name` when no live node wears it, else `door_<next_door_index++>` (rc::door::allocate_door_name).
+    // Shared by detection births, copies and entry mirrors so they can never hand out the same name.
+    std::string next_door_name(std::string_view preferred_name, std::uint64_t& next_door_index) const;
 
     std::shared_ptr<DSR::DSRGraph> G_;
     DSR::RT_API*          rt_api_ = nullptr;

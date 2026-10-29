@@ -116,7 +116,8 @@ int main()
     IdentityRow old4; old4.room = "room_1"; old4.name = "door_5"; old4.xy = {2.0f, -3.0f};   // 4-column row
     table.push_back(old4);
 
-    // 3a. Recalled room_1, the crossed door_2 already carried (live, by name): restore door_1 only.
+    // 3a. Recalled room_1, the crossed door_2 already carried (live, ON ITS HOLE): restore door_1 only. The crossed door is
+    //     recognised by PLACE — since 2026-10-29 a live NAME blocks nothing (names are opaque).
     {
         const std::vector<LiveDoor> live{{"door_2", Eigen::Vector2f(0.60f, 2.52f)}};
         const auto d = plan_restore(table, "room_1", true, live, radius);
@@ -126,7 +127,8 @@ int main()
         for (const auto& s : d.skipped)
         {
             skipped_old     = skipped_old     or (s.name == "door_5" and s.reason == SkipReason::NoPose);
-            skipped_crossed = skipped_crossed or (s.name == "door_2" and s.reason == SkipReason::NameLive);
+            skipped_crossed = skipped_crossed or (s.name == "door_2" and s.reason == SkipReason::PlaceLive);
+            CHECK(s.reason != SkipReason::NameLive);   // retired: never produced
         }
         CHECK(skipped_old);
         CHECK(skipped_crossed);
@@ -146,17 +148,28 @@ int main()
         for (const auto& s : d.skipped) by_place = by_place or (s.name == "door_2" and s.reason == SkipReason::PlaceLive);
         CHECK(by_place);
     }
-    // 3d. The crossed door still HELD in the room left behind (late carry): its name is live in the graph even though
-    //     its place in the new room cannot be resolved — skipped by name, no duplicate.
+    // 3d. (b) A remembered door whose NAME a live node wears but whose HOLE is free (2026-10-29: names are opaque) is
+    //     restored — the allocator then gives it a FRESH name; the live node is not renamed, not touched.
     {
         const std::vector<LiveDoor> live{{"door_2", std::nullopt}};
         const auto d = plan_restore(table, "room_1", true, live, radius);
-        CHECK(d.restore.size() == 1 and d.restore[0].name == "door_1");
+        CHECK(d.restore.size() == 2);
+        bool has1 = false, has2 = false;
+        for (const auto& r : d.restore) { has1 = has1 or r.name == "door_1"; has2 = has2 or r.name == "door_2"; }
+        CHECK(has1 and has2);
+        std::vector<std::string> graph{"door_2"};
+        std::uint64_t next = 5;
+        const auto nm = allocate_door_name("door_2", graph, next);   // the restore asks for its remembered name
+        CHECK(nm == "door_5" and next == 6);                           // live ⇒ fresh counter name
+        CHECK(graph.size() == 1 and graph[0] == "door_2");             // the live one keeps its name
+        const auto nm1 = allocate_door_name("door_1", graph, next);   // remembered name free ⇒ taken
+        CHECK(nm1 == "door_1" and next == 6);
     }
     // 3e. Same-hole test uses the remembered width: a live door 1.2 m away from a 0.95 m-wide doorway with r=0.5
     //     (radius + width = 1.45 m) is the same hole.
     {
-        const std::vector<LiveDoor> live{{"door_8", Eigen::Vector2f(-0.54f + 1.2f, 4.61f)}, {"door_2", std::nullopt}};
+        const std::vector<LiveDoor> live{{"door_8", Eigen::Vector2f(-0.54f + 1.2f, 4.61f)},
+                                         {"door_9", Eigen::Vector2f(0.60f, 2.52f)}};   // door_2's hole, under another name
         const auto d = plan_restore(table, "room_1", true, live, radius);
         CHECK(d.restore.empty());
     }
@@ -352,6 +365,84 @@ int main()
         // A credible door (P ≈ 1) moves it fully.
         CHECK(upsert_row(t, "room_1", full_row("", "door_2", 0.60f, 2.54f), radius + 0.84f, 0.98f));
         CHECK(std::abs(t[0].xy.x() - 0.599f) < 0.01f);
+    }
+
+    // ── 9. (a) OPAQUE NAMES FROM ONE MONOTONIC COUNTER: fresh names strictly increase across births, deaths and restores,
+    //        a name is never handed to a second door, and the counter survives a save/load of the table ──
+    {
+        std::uint64_t next = 1;
+        std::vector<std::string> live;
+        std::vector<std::uint64_t> fresh;   // the index of every FRESH name issued, in order
+        const auto issue = [&](std::string_view preferred)
+        {
+            const auto before = next;
+            const auto nm = allocate_door_name(preferred, live, next);
+            if (next != before) fresh.push_back(*door_name_index(nm));
+            live.push_back(nm);
+            return nm;
+        };
+        const auto kill = [&](const std::string& nm) { std::erase(live, nm); };
+        const auto a = issue({}), b = issue({}), c = issue({});      // three births
+        CHECK(a == "door_1" and b == "door_2" and c == "door_3");
+        kill(a);                                                     // door_1 dies...
+        const auto d = issue({});                                    // ...its number is NOT recycled (was: lowest free)
+        CHECK(d == "door_4");
+        const auto r1 = issue("door_1");                             // a restore of door_1 (free): its remembered name
+        CHECK(r1 == "door_1");
+        const auto r2 = issue("door_2");                             // a restore whose name is live: fresh
+        CHECK(r2 == "door_5");
+        kill(b); kill(c); kill(d);
+        const auto e = issue({});
+        CHECK(e == "door_6");
+        // a live node of another writer / an earlier run with a higher number raises the counter past it
+        live.push_back("door_40");
+        CHECK(issue({}) == "door_41");
+        bool increasing = true;
+        for (std::size_t i = 1; i < fresh.size(); ++i) increasing = increasing and fresh[i] > fresh[i - 1];
+        CHECK(increasing and fresh.size() == 7);   // 1,2,3,4,5,6 and 41 — the restore of door_1 issued nothing fresh
+        // save/load: the counter line round-trips, an old reader-compatible row set is unchanged, and a fresh run's
+        // first name continues from the counter even with every door forgotten (no row holds door_41).
+        std::vector<IdentityRow> rows{full_row("room_1", "door_1", -0.54f, 4.61f)};
+        std::stringstream ss;
+        write_identity_table(ss, rows, next);
+        CHECK(ss.str().find("\n#next_door,42\n") != std::string::npos);
+        const auto p = parse_identity_table(ss);
+        CHECK(p.rows.size() == 1 and p.malformed == 0 and p.next_door_index == 42);
+        std::uint64_t next2 = next_door_index_floor(p);
+        CHECK(next2 == 42);
+        const std::vector<std::string> none;
+        CHECK(allocate_door_name({}, none, next2) == "door_42");
+        // a table from before the counter: the counter starts past every remembered name
+        std::stringstream old(std::string(kIdentityHeader) + "\nroom_1,door_7,1.0,2.0\nroom_2,door_3,0.5,0.5\n");
+        const auto po = parse_identity_table(old);
+        CHECK(po.next_door_index == 0 and next_door_index_floor(po) == 8);
+        // a stored counter BELOW a remembered name (hand-edited) cannot hand that name out
+        std::stringstream low("room,name,ap_x,ap_y\nroom_1,door_9,1.0,2.0\n#next_door,3\n");
+        CHECK(next_door_index_floor(parse_identity_table(low)) == 10);
+        // garbage counter: counted malformed, rows intact
+        std::stringstream bad("room,name,ap_x,ap_y\nroom_1,door_9,1.0,2.0\n#next_door,x\n");
+        const auto pb = parse_identity_table(bad);
+        CHECK(pb.rows.size() == 1 and pb.malformed == 1 and pb.next_door_index == 0);
+        // names that are not door_<N≥1> are not numbers
+        CHECK(not door_name_index("door_").has_value() and not door_name_index("door_0").has_value()
+              and not door_name_index("door_3a").has_value() and not door_name_index("passage_3").has_value()
+              and door_name_index("door_12") == std::optional<std::uint64_t>(12));
+    }
+    // ── 10. (c) PLACE RE-IDENTIFICATION UNCHANGED: a re-detected/restored hole keeps its remembered (oldest) row name by
+    //         place, whatever name its live node got; a different hole is a different row ──
+    {
+        std::vector<IdentityRow> t{full_row("room_1", "door_1", -0.54f, 4.61f)};
+        // the hole's node now wears a fresh name (door_9, since door_1 was live elsewhere): the row stays door_1
+        CHECK(upsert_row(t, "room_1", full_row("", "door_9", -0.50f, 4.60f), radius + 0.95f, 0.9f));
+        CHECK(t.size() == 1 and t[0].name == "door_1");
+        // a door elsewhere is its own row
+        CHECK(upsert_row(t, "room_1", full_row("", "door_10", 2.5f, 0.0f), radius + 0.95f, 0.9f));
+        CHECK(t.size() == 2 and t[1].name == "door_10");
+        // restore by place: a live node on door_1's hole (any name) blocks it; door_10's free hole is restored
+        const std::vector<LiveDoor> live{{"door_9", Eigen::Vector2f(-0.52f, 4.60f)}};
+        const auto d = plan_restore(t, "room_1", true, live, radius);
+        CHECK(d.restore.size() == 1 and d.restore[0].name == "door_10");
+        CHECK(d.skipped.size() == 1 and d.skipped[0].name == "door_1" and d.skipped[0].reason == SkipReason::PlaceLive);
     }
 
     if (fails == 0) std::print("test_door_identity_table: ALL PASS\n");

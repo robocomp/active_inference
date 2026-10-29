@@ -1501,7 +1501,6 @@ std::optional<rc::door::core::IdentityMatch> SpecificWorker::CoreWorld::match_id
     return rc::door::core::IdentityMatch{i->name, i->xy};
 }
 
-std::vector<std::string> SpecificWorker::CoreWorld::reserved_names() const { return w_.reserved_names(); }
 
 void SpecificWorker::CoreWorld::retire(std::uint64_t id) { w_.retire_instance(id); }
 
@@ -1604,7 +1603,9 @@ void SpecificWorker::CoreWorld::remove_door(std::uint64_t id, float L)
 std::uint64_t SpecificWorker::CoreWorld::create_door(const rc::door::core::BirthRequest& r)
 {
     const Eigen::Vector3f& c = r.centroid;
-    const auto new_id = w_.scene_graph_->create_instance_from_detection(c, r.room_id, r.preferred_name, r.reserved);
+    const auto counter_before = w_.next_door_index_;
+    const auto new_id = w_.scene_graph_->create_instance_from_detection(c, r.room_id, r.preferred_name, w_.next_door_index_);
+    w_.persist_door_counter(counter_before);
     if (new_id != 0)
     {
         // (The birth seed — the room-frame XY the newborn's model starts at — is noted by the DoorCore itself.)
@@ -1746,18 +1747,6 @@ void SpecificWorker::remember_ghost(const rc::DoorInstance& inst)
         ghosts_.erase(ghosts_.begin());
 }
 
-// The names still spoken for by a removed-but-remembered door — this run's ghosts AND the identities
-// persisted from earlier runs. Handed to the birth path so a freed number is never given to a DIFFERENT
-// physical door while its owner can still come back and claim it.
-std::vector<std::string> SpecificWorker::reserved_names() const
-{
-    std::vector<std::string> names;
-    names.reserve(ghosts_.size() + identities_.size());
-    for (const auto& g : ghosts_)      names.push_back(g.name);
-    for (const auto& i : identities_)  names.push_back(i.name);
-    return names;
-}
-
 // ─── Identity across runs (etc/door_identities.csv) ─────────────────────────────────────────────
 //
 // Ghosts are RAM: they cannot survive the process, and cleanup_owned_nodes deletes every door node on the
@@ -1794,6 +1783,9 @@ void SpecificWorker::load_identities()
                    "(rewritten room-keyed on the next save)\n");
         return;
     }
+    // The name counter: the persisted one, raised past every remembered name (a file from before the counter).
+    next_door_index_ = std::max(next_door_index_, rc::door::next_door_index_floor(parsed));
+    std::print("door_concept: [identity] door-name counter: next fresh name door_{}\n", next_door_index_);
     identities_ = std::move(parsed.rows);
     decision_log_.record(rc::door::DoorDecisionKind::IdentityLoad, 0, {}, double(identities_.size()), double(parsed.malformed));
     for (const auto& i : identities_)   // spec 6.6: the table content at load is an explicit event
@@ -1815,7 +1807,7 @@ void SpecificWorker::save_identities() const
     std::ofstream f("etc/door_identities.csv", std::ios::trunc);
     if (not f)
         return;
-    rc::door::write_identity_table(f, identities_);   // imbues the classic locale: never a comma decimal separator
+    rc::door::write_identity_table(f, identities_, next_door_index_);   // imbues the classic locale: never a comma decimal separator
 }
 
 // Upsert BY PLACE WITHIN THE CURRENT ROOM: one hole in this room's walls carries one name. The same name may hold a
@@ -3315,11 +3307,13 @@ void SpecificWorker::step_entry_mirrors()
                                     static_cast<float>(std::asin(std::clamp(R(0, 2), -1.0, 1.0))),
                                     static_cast<float>(std::atan2(-R(0, 1), R(0, 0))));
         const Eigen::Vector3f t = best_T.translation().cast<float>();
-        const auto names = reserved_names();
-        if (const auto id = scene_graph_->create_entry_mirror(room, best.value(), t, euler, names); id != 0)
+        const auto counter_before = next_door_index_;
+        const auto id = scene_graph_->create_entry_mirror(room, best.value(), t, euler, next_door_index_);
+        persist_door_counter(counter_before);
+        if (id != 0)
         {
             EntryMirror em{id, best->id()};
-            em.name = best->name();   // the doorway's name: the mirror takes it once the source has left the graph
+            em.name = best->name();   // the source's name (information only: the mirror keeps its own)
             const auto room_now = G->get_node(room_node_id_);
             const auto src_it = fitter_->instances().find(best->id());
             if (room_now.has_value() and src_it != fitter_->instances().end() and src_it->second.ai2_initialized)
@@ -3453,13 +3447,7 @@ void SpecificWorker::release_room(std::uint64_t old_room, std::uint64_t new_room
                     if (const auto Tx = inner_eigen_->get_transformation_matrix(room_n->name(), m->second.name, 0);
                         Tx.has_value() and Tx->matrix().allFinite())
                         m->second.T_in_room[new_room] = Eigen::Affine3d(Tx->matrix());
-    // ★ ONE NAME PER DOORWAY (2026-10-13). The mirror was born under a fresh number because its source still held the
-    //   doorway's name (DSR names are unique). Once the source is gone — ltsm evicts it with the room left behind —
-    //   the mirror is re-made under that name, so the same hole is door_8 from both rooms, across every crossing, and
-    //   "cross door_8" means the same thing on the way back. A source still live (eviction off) keeps the fresh name.
-    if (adopt_mirror != 0 and adopted_from.has_value())
-        if (const auto renamed = adopt_doorway_name(adopt_mirror, new_room, adopted_from->name); renamed != 0)
-            adopt_mirror = renamed;
+    // (No rename of the adopted mirror, 2026-10-29: door names are opaque — the mirror keeps the name it was born with.)
     remember_live_identities();   // the room we are leaving, under ITS name: room_node_id_ has not moved yet
     const std::string left_room_name = current_room_name();   // cached: the left room may already be deleted
     if (fitter_)
@@ -3635,15 +3623,16 @@ void SpecificWorker::restore_remembered_doors(std::uint64_t new_room)
 
     for (const auto& r : d.restore)
     {
-        const auto names = reserved_names();
+        const auto counter_before = next_door_index_;
         // Task D-C: the remembered belief, decayed toward BirthLogodds by the time since the door was last seen.
         const float prior_L = rc::door::restore_existence_prior(r, cfg_.exist_birth_logodds, static_cast<std::int64_t>(rc::provenance::now_ms()));
         // Door node origin = aperture centre on the floor, yaw = the aperture's (write_rt_pose's room-frame form).
         const auto id = scene_graph_->create_door_copy(room.value(), r.pose->width, r.pose->depth, r.pose->height,
                                                        std::nullopt, r.leaf.has_value() ? std::optional<float>(r.leaf->phi) : std::nullopt,
                                                        Eigen::Vector3f(r.xy.x(), r.xy.y(), 0.0f),
-                                                       Eigen::Vector3f(0.0f, 0.0f, r.pose->yaw), names,
+                                                       Eigen::Vector3f(0.0f, 0.0f, r.pose->yaw), next_door_index_,
                                                        std::format("'{}' remembered in {}", r.name, room->name()), r.name);
+        persist_door_counter(counter_before);
         if (id == 0)
         {
             std::print("door_concept: [restore] '{}' could not be recreated in '{}' (insert failed)\n", r.name, room->name());
@@ -3671,8 +3660,6 @@ void SpecificWorker::restore_remembered_doors(std::uint64_t new_room)
         // Fitted without a fresh detection (as the carried door is), at the remembered pose and size, with its leaf memory.
         rc::door::seed_restored_instance(inst, r, prior_L, cfg_.exist_max_logodds, std::chrono::steady_clock::now());
         log_tracker_event("RESTORE", id, r.xy.x(), r.xy.y(), std::format("remembered in {}", room->name()), n->name());
-        if (n->name() != r.name)
-            decision_log_.record(rc::door::DoorDecisionKind::RestoreRename, id, r.name, 0, 0, 0, 0, n->name());
         std::print("door_concept: [restore] '{}' RESTORED in remembered '{}' at ({:.2f},{:.2f}) yaw={:.2f} w={:.2f} h={:.2f} — "
                    "existence prior L={:.2f} (P={:.2f}, {}), leaf memory {}\n",
                    n->name(), room->name(), r.xy.x(), r.xy.y(), r.pose->yaw, r.pose->width, r.pose->height, prior_L,
@@ -3682,7 +3669,7 @@ void SpecificWorker::restore_remembered_doors(std::uint64_t new_room)
                                                               *r.exist_logodds, 1e-3 * double(static_cast<std::int64_t>(rc::provenance::now_ms()) - *r.seen_wall_ms))
                                                 : std::string("remembered with no age: BirthLogodds"),
                    r.leaf.has_value() ? "yes" : "no");
-        // the pair the tour driver maps ltsm's remembered base name through (a live node may hold the name: RestoreRename)
+        // (kept for log readers: the remembered name, or a fresh one when a live node held it — names are opaque)
         std::print("door_concept: [restore] RESTORED as '{}' (remembered '{}')\n", n->name(), r.name);
     }
 }
@@ -3898,8 +3885,8 @@ void SpecificWorker::install_carried_door(std::uint64_t new_room, std::uint64_t 
         }
     // ★ THE PASSAGE ANCHOR IS NOT A DOOR OF EITHER ROOM. It hangs from the robot, so nothing above touched it; the
     //   one thing the room switch owes it (during approach/open, and since Task 12 Fix E during the cross as well) is its
-    //   ORIGINAL: when the door carried across is the anchored one (same source node, or the
-    //   same doorway name — one name per doorway), the anchor now names that door.
+    //   ORIGINAL: when the door carried across is the anchored one (same source node, or the name the anchored node
+    //   wore — a name is never recycled, so it names that node, not a doorway), the anchor now names that door.
     if (passage_anchor_.has_value() and adopt_mirror != 0 and adopted_from.has_value()
         and (adopted_from->source_id == passage_anchor_->door_id or adopted_from->name == passage_anchor_->door_name))
         relink_passage_anchor(adopt_mirror, "room switch: the crossed door, re-identified in the new room");
@@ -4186,43 +4173,6 @@ void SpecificWorker::remember_door(const rc::DoorInstance& inst)
     door_memo_[inst.node_id] = std::move(em);
 }
 
-std::uint64_t SpecificWorker::adopt_doorway_name(std::uint64_t id, std::uint64_t room_id, const std::string& name)
-{
-    if (name.empty() or not scene_graph_ or not inner_eigen_) return 0;
-    const auto node = G->get_node(id);
-    const auto room = G->get_node(room_id);
-    if (not node.has_value() or not room.has_value() or node->name() == name) return 0;
-    if (G->get_node(name).has_value())
-    {
-        std::print("door_concept: [identity] {} keeps its own name: '{}' is still a live node (the room left behind "
-                   "is still in the working memory)\n", node->name(), name);
-        return 0;
-    }
-    const auto T = inner_eigen_->get_transformation_matrix(room->name(), node->name(), 0);
-    if (not T.has_value() or not T->matrix().allFinite()) return 0;
-    const Eigen::Matrix3d R = T->rotation();
-    const Eigen::Vector3f euler(static_cast<float>(std::atan2(-R(1, 2), R(2, 2))),
-                                static_cast<float>(std::asin(std::clamp(R(0, 2), -1.0, 1.0))),
-                                static_cast<float>(std::atan2(-R(0, 1), R(0, 0))));
-    const auto op = G->get_attrib_by_name<door_open_prob_att>(node.value());
-    const auto ph = G->get_attrib_by_name<door_phi_rad_att>(node.value());
-    const auto names = reserved_names();
-    const auto nid = scene_graph_->create_door_copy(
-        room.value(),
-        G->get_attrib_by_name<width_m_att> (node.value()).value_or(cfg_.door_prior_w_m),
-        G->get_attrib_by_name<depth_m_att> (node.value()).value_or(cfg_.door_thickness_m),
-        G->get_attrib_by_name<height_m_att>(node.value()).value_or(cfg_.door_prior_h_m),
-        op.has_value() ? std::optional<float>(op.value()) : std::nullopt,
-        ph.has_value() ? std::optional<float>(ph.value()) : std::nullopt,
-        T->translation().cast<float>(), euler, names, std::format("'{}' id={} (renamed)", node->name(), id), name);
-    if (nid == 0) return 0;
-    if (fitter_ and fitter_->instances().contains(id)) fitter_->forget_node(id);
-    G->delete_node(id);
-    std::print("door_concept: [identity] {} is the doorway '{}' seen from '{}' — re-made under that name (id {})\n",
-               node->name(), name, room->name(), nid);
-    return nid;
-}
-
 std::optional<std::pair<std::uint64_t, SpecificWorker::EntryMirror>> SpecificWorker::recreate_lost_door(std::uint64_t new_room)
 {
     if (lost_doors_.empty() or not inner_eigen_ or not scene_graph_) return std::nullopt;
@@ -4255,11 +4205,12 @@ std::optional<std::pair<std::uint64_t, SpecificWorker::EntryMirror>> SpecificWor
     const Eigen::Vector3f euler(static_cast<float>(std::atan2(-R(1, 2), R(2, 2))),
                                 static_cast<float>(std::asin(std::clamp(R(0, 2), -1.0, 1.0))),
                                 static_cast<float>(std::atan2(-R(0, 1), R(0, 0))));
-    const auto names = reserved_names();
+    const auto counter_before = next_door_index_;
     const auto id = scene_graph_->create_door_copy(room.value(), best->width, best->depth, best->height, best->open_prob,
-                                                   best->phi_rad, T.translation().cast<float>(), euler, names,
+                                                   best->phi_rad, T.translation().cast<float>(), euler, next_door_index_,
                                                    std::format("'{}' (deleted with the room left behind)", best->name),
                                                    best->name);
+    persist_door_counter(counter_before);
     if (id == 0) return std::nullopt;
     std::print("door_concept: [room] recreated the door just crossed ('{}', {:.2f} m from the robot) in '{}'\n",
                best->name, (best->T_root_door.translation().head<2>() - robot).norm(), room->name());

@@ -49,7 +49,6 @@ struct FakeWorld final : TrackerWorld
     std::vector<TrackedDoor> doors() const override { return live; }
     std::optional<GhostMatch> match_ghost(const Vec2f&) const override { return std::nullopt; }
     std::optional<IdentityMatch> match_identity(const Vec2f&) const override { return std::nullopt; }
-    std::vector<std::string> reserved_names() const override { return {}; }
     void retire(std::uint64_t id) override { retired.push_back(id); std::erase_if(live, [&](const auto& d) { return d.id == id; }); }
     void set_assigned_mask(std::uint64_t id, int slice) override
     { for (auto& d : live) if (d.id == id) d.assigned_mask_idx = slice; }

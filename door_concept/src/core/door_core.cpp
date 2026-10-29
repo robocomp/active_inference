@@ -884,7 +884,6 @@ void DoorCore::births(const DoorCycleInput& in, DoorCycleOutput& out)
         req.centroid = c;
         req.room_id = world_->room_id();
         req.preferred_name = preferred_name;
-        req.reserved = world_->reserved_names();   // a number a ghost or a stored identity holds is not free
         req.slice = slice;
         const auto new_id = world_->create_door(req);
         if (new_id != 0)
@@ -920,43 +919,6 @@ void DoorCore::births(const DoorCycleInput& in, DoorCycleOutput& out)
             record(K::Birth, new_id, c.x(), c.y(), {}, name.value_or(std::string{}), out);
         }
     }
-}
-
-std::string allocate_door_name(std::string_view preferred_name, const std::vector<std::string>& graph_door_names,
-                               std::span<const std::string> reserved_names)
-{
-    // Auto-name: the LOWEST "door_<N>" (N >= 1) that is neither LIVE nor REMEMBERED (2026-10-12, was one past the
-    // highest — names only ever grew: door_40 after a few crossings).
-    std::set<int> taken;
-    const auto take = [&](std::string_view nm)
-    {
-        if (not nm.starts_with("door_")) return;
-        int v = 0;
-        const std::string_view digits = nm.substr(5);   // "door_" = 5 chars
-        if (const auto [p, ec] = std::from_chars(digits.data(), digits.data() + digits.size(), v);
-            ec == std::errc{} and p == digits.data() + digits.size())
-            taken.insert(v);
-    };
-    bool preferred_free = not preferred_name.empty();
-    for (const auto& nm : graph_door_names)
-        if (nm.rfind("door_", 0) == 0)
-        {
-            if (nm == preferred_name) preferred_free = false;   // still occupied → don't collide
-            take(nm);
-        }
-    // A number a GHOST or a stored identity still holds is not free either. Recycling it was the identity defect:
-    // `door_1` died, its number went straight to a different door across the room, and when THAT one died it
-    // overwrote the original's ghost — so the real door_1 came back as door_3. Reserved names never mark
-    // `preferred_name` occupied, since that ghost is precisely the one being consumed here.
-    for (const auto& nm : reserved_names)
-        take(nm);
-    // RE-ACQUISITION: a door that flickered out and came back keeps its name, so downstream consumers see the
-    // same object rather than a fresh one. (The DSR id necessarily changes — the old node was deleted.)
-    if (preferred_free)
-        return std::string(preferred_name);
-    int n = 1;
-    while (taken.contains(n)) ++n;
-    return "door_" + std::to_string(n);
 }
 
 bool point_in_polygon(const std::vector<Vec2f>& poly, const Vec2f& q, float margin_m)

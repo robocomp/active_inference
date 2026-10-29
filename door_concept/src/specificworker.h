@@ -153,7 +153,6 @@ private:
         std::vector<std::pair<std::uint64_t, rc::DoorFitState*>> fit_states() const override;
         std::optional<rc::door::core::GhostMatch> match_ghost(const Eigen::Vector2f& xy) const override;
         std::optional<rc::door::core::IdentityMatch> match_identity(const Eigen::Vector2f& xy) const override;
-        std::vector<std::string> reserved_names() const override;
         void retire(std::uint64_t id) override;
         void set_assigned_mask(std::uint64_t id, int slice) override;
         void after_association(const rc::door::core::TrackerCycleInfo& info) override;
@@ -221,7 +220,6 @@ private:
     void remember_ghost(const rc::DoorInstance& inst);                 // called just before a node is deleted
     const DoorGhost* match_ghost(const Eigen::Vector2f& xy) const;     // nearest ghost within the radius, else null
     void forget_ghost(const Eigen::Vector2f& xy);                      // consume the ghost(s) at a re-acquired place
-    std::vector<std::string> reserved_names() const;                   // names a ghost OR a stored identity still holds
     std::vector<DoorGhost> ghosts_;
 
     // ── Identity ACROSS RUNS (etc/door_identities.csv) ────────────────────────────────────────────
@@ -241,8 +239,12 @@ private:
     std::string current_room_name() const;
     mutable std::pair<std::uint64_t, std::string> room_name_cache_{0, {}};   // the left room may already be deleted
     std::vector<DoorIdentity> identities_;
+    // The door-name counter (2026-10-29): every fresh name is `door_<next_door_index_++>`, persisted with the table
+    // (`#next_door,N`) so a name is never handed out twice, across runs too. Names are OPAQUE (door_identity_table.h).
+    std::uint64_t next_door_index_ = 1;
+    void persist_door_counter(std::uint64_t before) const { if (next_door_index_ != before) save_identities(); }
     void load_identities();                                            // once, at startup
-    void save_identities() const;                                      // whole table, locale-independent
+    void save_identities() const;                                      // whole table + counter, locale-independent
     void note_identity(const std::string& name, const Eigen::Vector2f& ap, float width_m = 0.0f);   // upsert by PLACE, then save
     // note_identity with the full row (pose, existence, leaf); `weight` = P(the writer is this hole's door), its P(exists)
     void upsert_identity(DoorIdentity row, float width_m, float weight);
@@ -369,9 +371,6 @@ private:
     std::vector<EntryMirror> lost_doors_;
     void remember_door(const rc::DoorInstance& inst);
     std::optional<std::pair<std::uint64_t, EntryMirror>> recreate_lost_door(std::uint64_t new_room);
-    // Re-make door node `id` (under room `room_id`) as `name` when no live node holds that name; returns the new id,
-    // 0 when nothing was done. The doorway keeps one name from both rooms (release_room).
-    std::uint64_t adopt_doorway_name(std::uint64_t id, std::uint64_t room_id, const std::string& name);
     std::unordered_map<std::uint64_t /*proto room id*/, EntryMirror> entry_mirrors_;
     std::unordered_set<std::uint64_t> held_doors_;   ///< door nodes of a room left behind that is still live (release_room)
     std::uint64_t carry_pending_room_ = 0;   ///< room entered while the crossed door was still HELD: carry it when it is lost
@@ -392,7 +391,7 @@ private:
     {
         std::optional<rc::interaction::Anchor> anchor;    // engaged while the node exists
         std::uint64_t door_id = 0;                        // the original door (follows relink)
-        std::string   door_name;                          // its name at creation (one name per doorway)
+        std::string   door_name;                          // its door's name at creation (never recycled)
         std::uint64_t linked_aff = 0;                     // the affordance that names the anchor now
         int           linked_epoch = -1;                  // the executing epoch seen on it; -1 = unknown
         rc::interaction::RelPose pose;                    // the belief, robot frame (P = the published covariance)

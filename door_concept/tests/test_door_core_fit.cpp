@@ -57,7 +57,6 @@ struct FitWorld final : TrackerWorld
     }
     std::optional<GhostMatch> match_ghost(const Vec2f&) const override { return std::nullopt; }
     std::optional<IdentityMatch> match_identity(const Vec2f&) const override { return std::nullopt; }
-    std::vector<std::string> reserved_names() const override { return {}; }
     void retire(std::uint64_t id) override { st.erase(id); }
     void set_assigned_mask(std::uint64_t id, int slice) override
     { if (auto it = st.find(id); it != st.end()) it->second.assigned_mask_idx = slice; }

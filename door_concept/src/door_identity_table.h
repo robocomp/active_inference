@@ -84,7 +84,70 @@ struct ParsedIdentityTable
     std::vector<IdentityRow> rows;
     bool unkeyed_format = false;   ///< the pre-2026-10-13 (name,ap_x,ap_y) table: refused whole
     int  malformed      = 0;       ///< rows dropped (bad arity, non-door name, unparsable or non-finite place)
+    std::uint64_t next_door_index = 0;   ///< the persisted name counter (`#next_door,N` line); 0 = absent (older file)
 };
+
+// ── DOOR NAMES ARE OPAQUE (2026-10-29, door-identity-design part 1) ─────────────────────────────────────────────────
+// A door node's name is `door_<N>` with N drawn from ONE monotonic counter that is persisted with this table and never
+// goes back: a name is never handed to a second door, in this run or a later one. The name records nothing — not birth
+// order, not which hole, not which room: identity across crossings is the PLACE (ghosts, the (room, place) rows), and
+// the passage identity is ltsm's. A door that is a door we already know (a ghost re-acquired, an identity row matched by
+// place, a restored row, the crossed door carried across) asks for its remembered name; it gets it when no live node
+// holds it, otherwise a fresh counter name — and nothing in door_concept depends on which of the two it got.
+// (Was: the LOWEST free number, reserved names, and three rename paths that re-made a live node under a remembered
+//  name — a name then recorded birth order and timing, drifted, and was reused for a different hole.)
+
+/// The counter line appended after the rows: `#next_door,<N>`. A pre-counter reader drops it as one malformed row.
+inline constexpr std::string_view kNextDoorTag = "#next_door";
+
+/// N of a `door_<N>` name (N ≥ 1, digits only); nullopt for anything else.
+inline std::optional<std::uint64_t> door_name_index(std::string_view name)
+{
+    if (not name.starts_with("door_")) return std::nullopt;
+    const std::string_view digits = name.substr(5);
+    std::uint64_t v = 0;
+    if (digits.empty()) return std::nullopt;
+    const auto [p, ec] = std::from_chars(digits.data(), digits.data() + digits.size(), v);
+    if (ec != std::errc{} or p != digits.data() + digits.size() or v == 0) return std::nullopt;
+    return v;
+}
+
+/// Raise `next` past every `door_<N>` in `names` (a counter can only move forward).
+template <class Names>
+void observe_door_names(std::uint64_t& next, const Names& names)
+{
+    next = std::max<std::uint64_t>(next, 1);
+    for (const auto& nm : names)
+        if (const auto n = door_name_index(nm); n.has_value()) next = std::max(next, *n + 1);
+}
+
+/// The counter a run starts from: the persisted one, raised past every name the table remembers (a file written before
+/// the counter existed, or edited by hand, cannot make the counter hand out a remembered name).
+inline std::uint64_t next_door_index_floor(const ParsedIdentityTable& t)
+{
+    std::uint64_t next = std::max<std::uint64_t>(t.next_door_index, 1);
+    for (const auto& r : t.rows)
+        if (const auto n = door_name_index(r.name); n.has_value()) next = std::max(next, *n + 1);
+    return next;
+}
+
+/// The name a new door node gets. `preferred_name` (the remembered name of a door we know) when no node in
+/// `graph_door_names` (every live `door_*` node) wears it; otherwise `door_<next++>`. `next` is first raised past every
+/// live name, so a fresh name can never collide with a node of an earlier run or another writer.
+inline std::string allocate_door_name(std::string_view preferred_name, std::span<const std::string> graph_door_names,
+                                      std::uint64_t& next)
+{
+    observe_door_names(next, graph_door_names);
+    const bool preferred_free = not preferred_name.empty()
+                                and std::ranges::find(graph_door_names, preferred_name) == graph_door_names.end();
+    if (preferred_free)
+    {
+        // A remembered name in use again: the counter must stay past it too.
+        if (const auto n = door_name_index(preferred_name); n.has_value()) next = std::max(next, *n + 1);
+        return std::string(preferred_name);
+    }
+    return "door_" + std::to_string(next++);
+}
 
 namespace detail
 {
@@ -128,6 +191,14 @@ inline ParsedIdentityTable parse_identity_table(std::istream& in)
     {
         if (line.empty() or line == "\r") continue;
         const auto c = detail::split(line);
+        if (c.size() == 2 and c[0] == kNextDoorTag)
+        {
+            if (std::int64_t n = 0; detail::num_i64(c[1], n) and n > 0)
+                out.next_door_index = static_cast<std::uint64_t>(n);
+            else
+                ++out.malformed;
+            continue;
+        }
         float x = 0.f, y = 0.f;
         if ((c.size() != kIdentityColsOld and c.size() != kIdentityCols17 and c.size() != kIdentityCols18
              and c.size() != kIdentityColsFull) or c[0].empty()
@@ -165,7 +236,7 @@ inline ParsedIdentityTable parse_identity_table(std::istream& in)
     return out;
 }
 
-inline void write_identity_table(std::ostream& f, std::span<const IdentityRow> rows)
+inline void write_identity_table(std::ostream& f, std::span<const IdentityRow> rows, std::uint64_t next_door_index = 0)
 {
     f.imbue(std::locale::classic());   // never emit a comma decimal separator
     f << kIdentityHeader << '\n';
@@ -194,6 +265,7 @@ inline void write_identity_table(std::ostream& f, std::span<const IdentityRow> r
         if (i.place_sd.has_value() and std::isfinite(*i.place_sd) and *i.place_sd > 0.f) f << *i.place_sd;
         f << '\n';
     }
+    if (next_door_index > 0) f << kNextDoorTag << ',' << next_door_index << '\n';
 }
 
 // ── THE RESTORE DECISION ─────────────────────────────────────────────────────────────────────────────────────────
@@ -206,6 +278,8 @@ struct LiveDoor
     std::optional<Eigen::Vector2f> xy_in_room;
 };
 
+/// Values are logged (RestoreSkip a=); NameLive is RETIRED (2026-10-29: a live name no longer blocks a restore — the
+/// restored door takes a fresh name) and kept only so PlaceLive stays 2.
 enum class SkipReason { NoPose, NameLive, PlaceLive };
 
 struct RestoreDecision
@@ -219,9 +293,9 @@ struct RestoreDecision
 /// Which of `room`'s remembered doors to recreate on entering it.
 ///  · Only when the room IS a recall (`recalled`): a fresh room sharing a name with old rows restores nothing.
 ///  · A row without a pose cannot be recreated (old 4-column / birth row) — skipped, the caller logs it.
-///  · A door already live is not duplicated: by NAME (one name per doorway; covers the crossed door carried across,
-///    including one still HELD in the room left behind for the late carry), or by PLACE — a live door whose aperture
-///    lies within the same-hole distance (reacquire radius + the remembered width, as note_identity uses).
+///  · A door already live is not duplicated: by PLACE — a live door whose aperture lies within the same-hole distance
+///    (reacquire radius + the remembered width, as note_identity uses). NOT by name (2026-10-29): names are opaque, a
+///    row whose name a live node wears is still restored when its hole is free, under a fresh name (allocate_door_name).
 inline RestoreDecision plan_restore(std::span<const IdentityRow> rows, std::string_view room, bool recalled,
                                     std::span<const LiveDoor> live, float reacquire_radius_m)
 {
@@ -231,19 +305,11 @@ inline RestoreDecision plan_restore(std::span<const IdentityRow> rows, std::stri
     {
         if (r.room != room) continue;
         if (not r.pose.has_value()) { d.skipped.push_back({r.name, SkipReason::NoPose}); continue; }
-        bool name_live = false, place_live = false;
         const float same_hole = std::max(0.f, reacquire_radius_m) + std::max(0.f, r.pose->width);
-        for (const auto& l : live)
-        {
-            name_live  = name_live or l.name == r.name;
-            place_live = place_live or (l.xy_in_room.has_value() and l.xy_in_room->allFinite()
-                                        and (*l.xy_in_room - r.xy).norm() < same_hole);
-        }
-        // A name restored twice in one table (should not happen: upsert by name) would make two nodes; the first wins.
-        for (const auto& k : d.restore) name_live = name_live or k.name == r.name;
-        if (name_live)       d.skipped.push_back({r.name, SkipReason::NameLive});
-        else if (place_live) d.skipped.push_back({r.name, SkipReason::PlaceLive});
-        else                 d.restore.push_back(r);
+        const bool place_live = std::ranges::any_of(live, [&](const LiveDoor& l)
+        { return l.xy_in_room.has_value() and l.xy_in_room->allFinite() and (*l.xy_in_room - r.xy).norm() < same_hole; });
+        if (place_live) d.skipped.push_back({r.name, SkipReason::PlaceLive});
+        else            d.restore.push_back(r);
     }
     return d;
 }
@@ -322,8 +388,7 @@ inline bool upsert_row(std::vector<IdentityRow>& rows, const std::string& room, 
 }
 
 /// A room entered FRESH (not a recall) starts its restorable memory over: the pose, leaf and existence of its rows are
-/// dropped, the NAME and PLACE kept (still an identity: a re-detected door gets its name back, and the number stays
-/// reserved). etc/door_identities.csv outlives ltsm's memory, so without this a later recall of the same room name
+/// dropped, the NAME and PLACE kept (still an identity: a re-detected door gets its name back). etc/door_identities.csv outlives ltsm's memory, so without this a later recall of the same room name
 /// could restore an OLDER run's doors as confident phantoms. Returns how many rows lost their restore data.
 inline int strip_restorable(std::vector<IdentityRow>& rows, std::string_view room)
 {
@@ -467,7 +532,7 @@ inline const char* to_string(SkipReason s)
     switch (s)
     {
         case SkipReason::NoPose:    return "no remembered pose (identity-only row)";
-        case SkipReason::NameLive:  return "a door of that name is already live";
+        case SkipReason::NameLive:  return "a door of that name is already live (retired reason)";
         case SkipReason::PlaceLive: return "a live door already holds that hole";
     }
     return "?";

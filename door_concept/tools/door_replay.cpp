@@ -320,13 +320,6 @@ public:
         if (best == nullptr) return std::nullopt;
         return IdentityMatch{best->name, best->xy};
     }
-    std::vector<std::string> reserved_names() const override
-    {
-        std::vector<std::string> n;
-        for (const auto& g : ghosts_) n.push_back(g.name);
-        for (const auto& i : identities_) n.push_back(i.name);
-        return n;
-    }
     void retire(std::uint64_t id) override { live_.erase(id); }
     void set_assigned_mask(std::uint64_t id, int slice) override
     { if (auto it = live_.find(id); it != live_.end()) it->second.assigned_mask_idx = slice; }
@@ -362,7 +355,7 @@ public:
         if (in_ != nullptr)
             for (const auto& o : in_->objects)
                 if (o.name.rfind("door_", 0) == 0) graph_names.push_back(o.name);
-        pending_name_ = allocate_door_name(r.preferred_name, graph_names, r.reserved);
+        pending_name_ = rc::door::allocate_door_name(r.preferred_name, graph_names, next_door_index_);
         // ★THE INSTANCE IS BORN INSIDE THE INSERT, NOT IN adopt_birth. Live, create_instance_from_detection's
         // insert_node emits update_node_signal on the MAIN thread, so modify_node_slot runs synchronously inside it
         // (AutoConnection, same thread ⇒ direct) and ensure_instance reads the node BEFORE its RT edge exists and
@@ -416,10 +409,13 @@ private:
     {
         if (l.initial_room.has_value()) { room_ = *l.initial_room; room_name_ = l.initial_room_name; }
         identities_.clear();
+        next_door_index_ = 1;
         if (not l.file_present) return;
         std::istringstream in(l.csv_text);
         auto parsed = rc::door::parse_identity_table(in);
-        if (not parsed.unkeyed_format) identities_ = std::move(parsed.rows);
+        if (parsed.unkeyed_format) return;
+        next_door_index_ = rc::door::next_door_index_floor(parsed);   // SpecificWorker::load_identities
+        identities_ = std::move(parsed.rows);
     }
     void upsert(const DoorDecision& d)
     {
@@ -463,6 +459,10 @@ private:
     std::set<const DoorDecision*> used_births_;
     std::vector<std::string> births_named_;
     std::uint64_t pending_id_ = 0, synthetic_ = 0;
+    // The live agent's name counter. ⚠ It also advances for entry mirrors / restores / recreated doors, which this
+    // replay does not make; allocate_door_name raises it past every door_* node the input snapshot shows, so those
+    // still count once they are seen in the graph.
+    std::uint64_t next_door_index_ = 1;
     std::string pending_name_;
 };
 }  // namespace

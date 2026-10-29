@@ -102,8 +102,7 @@ struct BirthRequest
 {
     Vec3f centroid = Vec3f::Zero();        // room frame
     std::uint64_t room_id = 0;
-    std::string preferred_name;            // a ghost's or an identity's name; empty = allocate
-    std::vector<std::string> reserved;     // names a ghost or a stored identity still holds
+    std::string preferred_name;            // a ghost's or an identity's name; empty = a fresh counter name
     int slice = -1;
 };
 
@@ -137,7 +136,6 @@ public:
     [[nodiscard]] virtual std::vector<TrackedDoor> doors() const;
     [[nodiscard]] virtual std::optional<GhostMatch> match_ghost(const Vec2f& xy) const = 0;
     [[nodiscard]] virtual std::optional<IdentityMatch> match_identity(const Vec2f& xy) const = 0;
-    [[nodiscard]] virtual std::vector<std::string> reserved_names() const = 0;
     // ── act ──
     virtual void retire(std::uint64_t id) = 0;                           // a merged duplicate: affordances + fit + node
     virtual void set_assigned_mask(std::uint64_t id, int slice) = 0;     // -1 = none this cycle
@@ -295,12 +293,8 @@ private:
     TrackerCycleInfo info_;
 };
 
-/// The name a newborn door node gets (DoorSceneGraph::next_door_name's rule, moved here so the replay names a door
-/// exactly as the live agent does): `preferred_name` if no node in `graph_door_names` (every "door_*" object node in
-/// the graph, live) already wears it, else the LOWEST free door_<N> (N ≥ 1) — free of both the graph's names and the
-/// `reserved` ones (ghosts, stored identities).
-[[nodiscard]] std::string allocate_door_name(std::string_view preferred_name, const std::vector<std::string>& graph_door_names,
-                                             std::span<const std::string> reserved);
+// (The naming rule — opaque `door_<next++>` names from a persisted counter — is rc::door::allocate_door_name in
+//  door_identity_table.h, shared by the agent's DoorSceneGraph and the replay.)
 
 /// point_in_room's rule (DoorFitter delegates here): inside the polygon, or outside by no more than margin_m. No
 /// polygon (< 3 vertices) ⇒ true — an unknown room imposes no prior.
