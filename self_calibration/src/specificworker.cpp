@@ -1,3 +1,4 @@
+#include <algorithm>
 #include "specificworker.h"
 #include <chrono>
 
@@ -63,6 +64,16 @@ SpecificWorker::SpecificWorker(const ConfigLoader& configLoader, TuplePrx tprx, 
                 "deg, WIDE per-sweep pose-yaw nuisance prior of the vertical factor");
         mount_log_period_ms_ = cfg.i("MountFactors.log_period_ms", mount_log_period_ms_,
                 "summary line + mounts CSV row period (ms)");
+    }
+
+    {
+        const rc::cfg::Reader cfg(configLoader, "self_calibration");
+        helios_enabled_ = cfg.b("HeliosMount.enabled", helios_enabled_, "register the harvester's keyframe pairs and estimate the Helios planar mount (estimate + log only)");
+        helios_cfg_.band_min_m = cfg.d("HeliosMount.band_min_m", helios_cfg_.band_min_m, "lower height of the 2-D wall band (m); room_concept's Media.lidar_high_min_height");
+        helios_cfg_.band_max_m = cfg.d("HeliosMount.band_max_m", helios_cfg_.band_max_m, "upper height of the 2-D wall band (m); room_concept's Media.lidar_high_max_height");
+        helios_cfg_.gyro_bias_sigma = cfg.d("HeliosMount.gyro_bias_sigma", helios_cfg_.gyro_bias_sigma, "rad/s, prior on the common gyro bias (marginalised nuisance)");
+        helios_cfg_.gyro_scale_sigma = cfg.d("HeliosMount.gyro_scale_sigma", helios_cfg_.gyro_scale_sigma, "fractional prior on the common gyro scale (marginalised nuisance)");
+        helios_log_period_ms_ = cfg.i("HeliosMount.log_period_ms", helios_log_period_ms_, "summary line + one mount CSV row period (ms)");
     }
 
     dashboard_show_ = rc::cfg::Reader(configLoader, "self_calibration").b("Dashboard.show", true,
@@ -178,7 +189,11 @@ void SpecificWorker::compute()
         harvester_ = std::make_unique<sc::calib::TrajectoryHarvester>(harvester_cfg_);
     // Odometry first (piecewise-constant over source_ts_ms deltas, inside the harvester), then the sweeps.
     for (const auto& o : inputs_->take_odometry())
+    {
         harvester_->add_odometry(o.source_ts_ms, o.adv, o.side, o.rot);
+        odo_stamps_.push_back(o.source_ts_ms);
+        if (odo_stamps_.size() > 400) odo_stamps_.pop_front();
+    }
     for (const auto& l : inputs_->take_lidar())
     {
         feed_mount_factors(l);
@@ -186,6 +201,13 @@ void SpecificWorker::compute()
         {
             const bool stalled = inputs_->stalled("helios") or inputs_->any_stalled();
             const bool captured = harvester_->add_keyframe(l.stamp_ms, stalled);
+            if (captured and helios_enabled_ and l.robot_from_sensor.has_value())
+            {
+                if (not helios_stage_)
+                    helios_stage_ = std::make_unique<sc::HeliosMountStage>(helios_cfg_, harvester_cfg_);
+                helios_stage_->store_keyframe(l.stamp_ms, l.points_robot());
+                note_helios_clock(l.stamp_ms);
+            }
             feed_dashboard_keyframe(captured, stalled);
             if (dash_model_)
                 dash_model_->note_lidar_stamp(l.stamp_ms, std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -198,6 +220,18 @@ void SpecificWorker::compute()
     // Phase 4.4 attaches scan registration to these pairs; for now the agent only reports them (<= once / 10 s).
     const auto pairs = harvester_->take_pairs();
     npairs_logged_ += long(pairs.size());
+    if (helios_stage_)
+    {
+        for (const auto& p : pairs)
+            helios_stage_->add_pair(p);
+        if (const auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count(); now - helios_log_ms_ >= helios_log_period_ms_)
+        {
+            helios_log_ms_ = now;
+            helios_stage_->log_state(now);
+            qInfo().noquote() << QString::fromStdString(helios_stage_->summary());
+        }
+    }
     feed_dashboard_pairs(pairs);
     if (const auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::system_clock::now().time_since_epoch()).count(); now - harvester_log_ms_ >= 10000)
@@ -210,6 +244,24 @@ void SpecificWorker::compute()
     }
     refresh_dashboard();
     fps.print("self_calibration compute", 3000);
+}
+
+// Clock check (plan 4.4 step 5): the Helios stamp and the odometry source stamp must share one clock. Once, over the
+// first 50 keyframes: median and spread of (keyframe stamp - nearest odometry stamp). Reported, never corrected here.
+void SpecificWorker::note_helios_clock(std::int64_t keyframe_stamp_ms)
+{
+    if (helios_clock_logged_ or odo_stamps_.empty())
+        return;
+    const auto it = std::ranges::lower_bound(odo_stamps_, keyframe_stamp_ms);   // stamps are monotone
+    std::int64_t best = odo_stamps_.back();
+    if (it != odo_stamps_.end())
+        best = (it != odo_stamps_.begin() and keyframe_stamp_ms - *(it - 1) < *it - keyframe_stamp_ms) ? *(it - 1) : *it;
+    helios_stage_->note_clock_offset_ms(double(keyframe_stamp_ms - best));
+    if (helios_stage_->clock_samples() >= 50)
+    {
+        helios_clock_logged_ = true;
+        qInfo().noquote() << QString::fromStdString(helios_stage_->clock_summary());
+    }
 }
 
 // Floor + vertical LiDAR mount factors (plan Phase 3). A stalled stream's sweeps are not used (sensor_inputs

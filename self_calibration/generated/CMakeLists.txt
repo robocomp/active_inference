@@ -89,3 +89,9 @@ SET_TARGET_PROPERTIES( dashboard_model_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY 
 ADD_EXECUTABLE( mount_factors_test EXCLUDE_FROM_ALL ../tests/mount_factors_test.cpp ../src/lidar_mount_stage.cpp )
 TARGET_LINK_LIBRARIES( mount_factors_test Eigen3::Eigen )
 SET_TARGET_PROPERTIES( mount_factors_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../bin )
+
+# Phase 4 Task 2: Helios planar mount from registered keyframe pairs (pure Eigen).
+#   make -C build helios_mount_test && ../bin/helios_mount_test
+ADD_EXECUTABLE( helios_mount_test EXCLUDE_FROM_ALL ../tests/helios_mount_test.cpp ../src/helios_mount_stage.cpp )
+TARGET_LINK_LIBRARIES( helios_mount_test ai_common::sensor_calib Eigen3::Eigen )
+SET_TARGET_PROPERTIES( helios_mount_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../bin )

@@ -11,6 +11,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <deque>
 #include <map>
 #include <memory>
 #include <cstdint>
@@ -23,6 +24,7 @@
 #include "../../common/sensor_calib/trajectory_harvester.h"
 #include "dashboard_model.h"
 class DashboardView;
+#include "helios_mount_stage.h"                                    // Helios planar mount from registered keyframe pairs (Phase 4.4)
 #include "lidar_mount_stage.h"                                     // floor + vertical LiDAR mount factors (Phase 3)
 #include "sensor_inputs.h"                                         // the input layer (plain-data outputs)
 
@@ -81,6 +83,16 @@ private:
     std::unique_ptr<sc::LidarMountStage> mount_stage_;
     std::int64_t mount_log_ms_ = 0;
     void feed_mount_factors(const sc::LidarIn& l);
+
+    // ── Helios planar mount (src/helios_mount_stage.*), [HeliosMount] section ──
+    bool helios_enabled_ = true;
+    int  helios_log_period_ms_ = 10000;
+    sc::HeliosMountConfig helios_cfg_;
+    std::unique_ptr<sc::HeliosMountStage> helios_stage_;
+    std::int64_t helios_log_ms_ = 0;
+    std::deque<std::int64_t> odo_stamps_;          // recent odometry source stamps (clock check only)
+    bool helios_clock_logged_ = false;
+    void note_helios_clock(std::int64_t keyframe_stamp_ms);
 
     // ── Dashboard (specificworker_dashboard.cpp). DISPLAY ONLY; all null/no-op when [Dashboard] show = false ──
     void build_dashboard();

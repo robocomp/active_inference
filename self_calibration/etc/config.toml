@@ -81,6 +81,15 @@ pose_sigma_xy = 0.05       # m, WIDE per-sweep pose nuisance prior (never the lo
 pose_sigma_yaw_deg = 2.0   # deg
 log_period_ms = 10000      # summary line + one mounts CSV row this often
 
+# ── Helios planar mount (src/helios_mount_stage.*; plan Task 4.4): ESTIMATE + LOG ONLY ───────
+[HeliosMount]
+enabled = true
+band_min_m = 1.5           # the 2-D wall band: room_concept's Media.lidar_high_min_height
+band_max_m = 2.0           # room_concept's Media.lidar_high_max_height
+gyro_bias_sigma = 0.002    # rad/s, prior on the common gyro bias (nuisance, marginalised by Schur)
+gyro_scale_sigma = 0.01    # fractional prior on the common gyro scale (nuisance)
+log_period_ms = 10000      # summary line + one mount CSV row this often
+
 # ── Live dashboard window (src/specificworker_dashboard.cpp): DISPLAY ONLY ───────
 [Dashboard]
 show = true    # false: no window is built and nothing is fed (no cost)
