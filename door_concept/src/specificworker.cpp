@@ -2679,9 +2679,11 @@ void SpecificWorker::step_pragmatic_affordances(rc::DoorInstance& inst)
     {
         rc::pragmatic::Offer o;
         o.known = located and st.p_open_known and not cfg_.door_control_endpoint.empty();
-        // The BAND, not the marginal p_reach: this is the step that swings the leaf, so the robot must be
-        // outside its arc whatever the door is believed to be.
-        o.p     = st.p_band * std::clamp(1.0f - st.p_open, 0.0f, 1.0f);
+        // ★ THE OFFER IS AVAILABILITY: P(shut) (2026-10-29, recog_try18 — as cross_offer_prob is P(passable)). Where the
+        //   robot must stand (the band, outside the leaf's arc) is the contract's pre: clause, not the offer: multiplied in,
+        //   a robot that stopped 0.2 m short of the vantage (P(in band) 0.27 at the band's edge under σ) saw `open`
+        //   WITHDRAWN, and nothing ever moved it back — the door route waited 600 s at a shut door.
+        o.p     = std::clamp(1.0f - st.p_open, 0.0f, 1.0f);
         if (inst.actuation_refused)
         {
             // ★A REFUSAL IS INFORMATION, and this kind is permanent: UnknownDoor / NotActuable mean never
