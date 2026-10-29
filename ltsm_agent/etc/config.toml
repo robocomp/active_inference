@@ -80,14 +80,12 @@ probe = false
 enabled = true
 
 # ── Promotion (proto-room → current) ─────────────────────────────────────────────────────────────
-# ltsm_agent decides room IDENTITY. Each cycle, for every proto-room: P(the robot's whole footprint is
-# past the crossed aperture) = Φ((s − r_body)/σ_s), from the robot→proto RT edge and its pose covariance,
-# r_body from the `body` node. When P ≥ decision_prob: remove `proto`, move `current`, copy BOTH rooms to
-# memory (passage matching the two door faces), and DELETE the old room from the working memory.
-# ⚠ decision_prob is a DECISION LEVEL on a continuous belief (the one flagged threshold on this path).
+# ltsm_agent decides room IDENTITY, but FOLLOWS room_concept: the room whose robot->room RT edge is live
+# (rc::room::robot_rt_room) becomes `current` when it differs. No probability level. The P(inside) from the pose
+# covariance is still computed, for the log only. Then: move `current`, copy BOTH rooms to memory (passage
+# matching the two door faces), and DELETE the old room from the working memory.
 [Promotion]
 enabled       = true
-decision_prob = 0.95
 
 # ── Eviction (2026-10-12) ───────────────────────────────────────────────────────────────────────
 # ON: when promotion moves `current` to the room the robot has entered, the room it left is copied to long-term memory

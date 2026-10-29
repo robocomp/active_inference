@@ -164,10 +164,9 @@ private:
 	// ltsm decides room IDENTITY: a proto-room the robot's whole footprint is confidently past the crossed
 	// aperture of becomes THE room -- proto edge removed, `current` moved, both rooms copied into memory
 	// with the two doors matched through a memory passage, the old room deleted from the working memory.
-	// [Promotion] enabled (absent ⇒ OFF), decision_prob = the one flagged decision level.
+	// [Promotion] enabled (absent ⇒ OFF),.
 	bool   promotion_enabled = false;
 	bool   promotion_stage_check = false;
-	double promotion_decision_prob = 0.95;
 	int    promotions_done = 0;
 	void promote_identity_only(const ltsm::Candidate &cand);   ///< eviction OFF: move `current`, count the crossing
 	int    promotion_cycles_ = 0;

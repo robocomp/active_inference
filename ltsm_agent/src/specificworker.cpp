@@ -239,8 +239,6 @@ void SpecificWorker::initialize()
             "promote a proto-room to a real room once the evidence supports it");
     promotion_stage_check = flag("Promotion.stage_check",
             "verify each promotion stage before advancing");
-    cfgr.opt("Promotion.decision_prob", promotion_decision_prob,
-             "posterior probability at which a promotion is decided");
     if (promotion_enabled and promotion_stage_check)
     {
         // ★ FIXTURE MANIPULATION, domain 3 only: the pose covariance a JSON-seeded edge cannot carry
@@ -256,8 +254,8 @@ void SpecificWorker::initialize()
             qFatal("[promotion][stage] could not write the fixture's pose covariance on Shadow->room_2");
     }
     if (promotion_enabled)
-        qInfo() << "[ltsm_agent] PROMOTION ARMED -- a proto-room the robot is past the doorway of (P >="
-                << promotion_decision_prob << ") becomes current; the old room goes to memory and is REMOVED"
+        qInfo() << "[ltsm_agent] PROMOTION ARMED -- the room room_concept puts the robot in"
+                   " (live robot RT edge) becomes current; the old room goes to memory and is REMOVED"
                    " from the working memory";
 
     // ── Live passage ────────────────────────────────────────────────────────────────────────
@@ -538,40 +536,31 @@ std::optional<double> SpecificWorker::body_radius() const
 
 bool SpecificWorker::step_promotion()
 {
-    const auto r_body = body_radius();
-    if (not r_body.has_value())
-    {
-        static bool warned = false;
-        if (not std::exchange(warned, true))
-            qWarning() << "[promotion] no `body` node with width_m/depth_m in the live graph -- cannot tell "
-                          "whether the robot's footprint is past the doorway, so nothing is promoted";
-        return false;
-    }
+    // ★ PROMOTION FOLLOWS ROOM_CONCEPT'S SWITCH (room-transition protocol C1.5/C2.5). room_concept decides which room the
+    //   robot is in and writes it as the live robot->room RT edge; this agent no longer re-derives that from a P(inside)
+    //   level. The candidate is that room, whenever it differs from `current`. No threshold: the fact is the edge.
+    const auto robot_room = rc::room::robot_rt_room(*G_dsr);
+    if (not ltsm::promotion_due(robot_room, rc::room::current_edge_room(*G_dsr))) return false;
 
-    for (const auto &r : evictor->promotion_evidence(r_body.value()))
-    {
-        if (not r.valid)
-        {
-            qInfo().noquote() << QString::fromStdString(std::format(
-                "[promotion] {}: no evidence -- {}", r.proto_name, r.why_not));
-            continue;
-        }
+    // The geometric evidence is kept for the LOG only (and to fill the candidate's record).
+    ltsm::PromotionReading r;
+    r.proto_id = robot_room.value();
+    if (const auto n = G_dsr->get_node(r.proto_id); n.has_value()) r.proto_name = n->name();
+    if (const auto r_body = body_radius(); r_body.has_value())
+        for (const auto &e : evictor->promotion_evidence(r_body.value()))
+            if (e.proto_id == r.proto_id) { r = e; break; }
+    if (r.valid)
         qInfo().noquote() << QString::fromStdString(std::format(
             "[promotion] {}: s={:+.2f} m past the aperture (r_body={:.2f}, σ={:.3f}) → P(inside)={:.3f}"
-            "  (promote at ≥ {:.2f})", r.proto_name, r.s, r.body_radius, r.sigma_s, r.p_inside,
-            promotion_decision_prob));
+            "  (log only; room_concept's robot RT edge decides)", r.proto_name, r.s, r.body_radius, r.sigma_s, r.p_inside));
+    else
+        // No geometric reading for this room (not a proto, or the pose carries no covariance): the edge still decides;
+        // the record's p_inside stays 0 -- it is only logged.
+        qInfo().noquote() << QString::fromStdString(std::format(
+            "[promotion] {}: no geometric evidence ({}); promoting on room_concept's robot RT edge alone",
+            r.proto_name, r.why_not.empty() ? "not in the evidence set" : r.why_not));
 
-        // ⚠ DECISION LEVEL (Promotion.decision_prob) -- the one threshold on this path, and flagged as such.
-        // Promotion is an ACT on a belief: it deletes a room from the working memory. The belief itself is
-        // continuous (Φ under the pose covariance, no gate); acting on it needs a level, exactly like
-        // room_concept's ProtoRoom.BirthProb. Repeated cycles are NOT fused: they are the same pose belief
-        // re-read, and adding them up would manufacture confidence from one measurement.
-        if (r.p_inside < promotion_decision_prob) continue;
-
-        // Already the room we are in: identity was decided; the `proto` edge that is still there is room_concept's
-        // "layout provisional", not an open identity question (see promote_identity_only).
-        if (rc::room::current_edge_room(*G_dsr) == r.proto_id) continue;
-
+    {
         auto cand = evictor->promotion_candidate(r);
         if (cand.has_value() and not eviction_enabled)
         {
@@ -582,7 +571,7 @@ bool SpecificWorker::step_promotion()
         {
             qWarning() << "[promotion]" << QString::fromStdString(r.proto_name)
                        << "is ready but there is no `current` room to promote it from";
-            continue;
+            return false;
         }
         if (live_passage)
             if (const auto pair = live_passage->pair_for(r.proto_id); pair.has_value())
@@ -608,7 +597,7 @@ bool SpecificWorker::step_promotion()
         if (not out.ok)
         {
             qWarning() << "[promotion] NOT DONE:" << QString::fromStdString(out.reason);
-            continue;
+            return false;
         }
         ++promotions_done;
         // THE CROSSING IS COUNTED ON MEMORY'S PASSAGE: the live passage_N goes with the old room's door.
@@ -632,7 +621,6 @@ bool SpecificWorker::step_promotion()
         last_promotion_cand_ = cand.value();
         return true;                                   // one per cycle
     }
-    return false;
 }
 
 // ── PROMOTION WITHOUT EVICTION (2026-10-11, door crossing, user decision: eviction OFF for this phase) ──────────────

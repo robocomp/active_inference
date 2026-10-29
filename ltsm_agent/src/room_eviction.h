@@ -105,6 +105,13 @@ struct Candidate
 };
 
 /// What the promotion evidence reads for one proto-room, every cycle (log + decision).
+/// Promotion trigger (room-transition protocol C1.5/C2.5): room_concept's robot->room RT edge names a room that is not
+/// the one `current` points at. No level: the edge is the fact.
+[[nodiscard]] inline bool promotion_due(std::optional<std::uint64_t> robot_room, std::optional<std::uint64_t> current_edge_room)
+{
+    return robot_room.has_value() and robot_room != current_edge_room;
+}
+
 struct PromotionReading
 {
     std::uint64_t proto_id = 0;
