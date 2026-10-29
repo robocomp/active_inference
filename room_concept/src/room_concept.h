@@ -984,6 +984,7 @@ private:
    // "is the injection still binding"; these answer "which channel produced THIS cycle's heading",
    // which is the covariate an online scale estimate has to be regressed on.
    Eigen::Vector2f last_pred_pos_ = Eigen::Vector2f::Zero();  // odometry prediction, pre-optimizer
+   Eigen::Matrix2f last_pred_cov_ = Eigen::Matrix2f::Zero();  // its x,y covariance (P_pred incl. Q); zero = none
    float           last_pred_theta_ = 0.f;
    rc::calib::MotionCalibrator motion_calib_;
    float last_cycle_dt_s_ = 0.f;   // odometry window duration, for the calibrator's time covariate

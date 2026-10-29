@@ -76,6 +76,9 @@ namespace rc::loc
         // alignment, so it measures the same thing on the real robot as it does here. On early-exit
         // cycles it equals robot_pose exactly; that identity is a free self-check on this plumbing.
         float pred_x = 0.f, pred_y = 0.f, pred_theta = 0.f;
+        /// The prediction's position covariance (x, y block of P_pred = F P F' + Q, odometry process noise included);
+        /// zero when the cycle had no propagated prediction. Read by the crossing memory's continuity test (Task 16).
+        Eigen::Matrix2f pred_cov = Eigen::Matrix2f::Zero();
         bool  slot_appended = false;   ///< strided window: this frame was APPENDED (not a replace of the newest)
         /// KL(posterior || motion prediction) for this cycle, in nats -- what the room evidence had to tell
         /// the motion model (see surprise.h). Zero on an early exit; the open-loop stretch is scored whole

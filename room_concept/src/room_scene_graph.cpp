@@ -984,7 +984,7 @@ void RoomSceneGraph::step_proto_room_impl(const rc::RoomConcept::UpdateResult& r
     // itself committed a discrete jump (reloc_epoch advanced). See crossing::p_continuous.
     crossing_mem_.set_half_body_width(0.5f * params_->ROBOT_WIDTH);
     crossing_mem_.begin_frame(xy, cov_xy, Eigen::Vector2f(res.pred_x, res.pred_y), rc::crossing::polygon_area(polygon),
-                              res.reloc_epoch != crossing_epoch_);
+                              res.reloc_epoch != crossing_epoch_, res.pred_cov);
     crossing_epoch_ = res.reloc_epoch;
     float p_in_doorway = 0.f;   // max over this room's apertures — see the outside_prob note below
     for (const auto& ap : apertures)

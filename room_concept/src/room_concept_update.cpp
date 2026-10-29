@@ -100,6 +100,8 @@ namespace rc
         const auto pred_pos = c.pred_pos = motion_prior_selection.predicted_pos;
         const auto pred_theta = c.pred_theta = motion_prior_selection.predicted_theta;
         last_pred_pos_ = pred_pos;      // kept for UpdateResult on BOTH return paths
+        last_pred_cov_ = prediction.have_propagated ? Eigen::Matrix2f(prediction.propagated_cov.topLeftCorner<2, 2>())
+                                                    : Eigen::Matrix2f::Zero();
         last_pred_theta_ = pred_theta;
     }
 

@@ -562,6 +562,7 @@ namespace rc
         res.pred_x = last_pred_pos_.x();
         res.slot_appended = params.window_stride_enabled and not rec_stride_replace_;
         res.pred_y = last_pred_pos_.y();
+        res.pred_cov = last_pred_cov_;
         res.pred_theta = last_pred_theta_;
         res.dx_local = cyc_dx_local_;
         res.dy_local = cyc_dy_local_;

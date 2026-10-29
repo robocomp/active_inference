@@ -33,10 +33,10 @@ struct Run { float max_p = 0.f, last_p = 0.f, last_open_post = 0.f; cr::Crossing
 // One frame of the agent's loop (RoomSceneGraph::step_proto_room_impl): begin_frame with the odometry prediction, then
 // evaluate. `est` = the localiser's estimate, `pred` = the odometry prediction of this frame.
 static cr::Crossing frame(cr::PassageMemory& mem, const rc::DoorAperture& ap, Vector2f est, Vector2f pred,
-                          bool jump_committed = false)
+                          bool jump_committed = false, const Eigen::Matrix2f& pred_cov = Eigen::Matrix2f::Zero())
 {
     const Eigen::Matrix2f cov = Eigen::Matrix2f::Identity() * kSigPose * kSigPose;
-    mem.begin_frame(est, cov, pred, cr::polygon_area(kRoom), jump_committed);
+    mem.begin_frame(est, cov, pred, cr::polygon_area(kRoom), jump_committed, pred_cov);
     return mem.evaluate(ap, kRoom, est, cov, kRBody, kSigLayout);
 }
 
@@ -247,6 +247,54 @@ int main()
             const auto b = drive(door(1.28e-4f), p3, m4);
             std::printf("  off-centre u %.2f (clearance %.2f m): p_cross open-prior %.4f, near-shut prior %.4f\n",
                         u, 0.5f - kHalfWidth - u, a.last_p, b.last_p);
+        }
+    }
+
+    std::printf("(h) ROUND 2 I-1: the door estimate WOBBLES within its sigma while the robot crosses slowly\n");
+    for (const float sig_door : {0.03f, 0.06f})
+    {
+        // robot at 0.1 m/s (5 mm per 20 Hz frame) from 1 m in front to 0.85 m past; every frame door_concept's read
+        // of the opening moves by a zero-mean random offset of sig_door along AND across (a re-read, not a jump)
+        std::mt19937 rng(3);
+        std::normal_distribution<float> dn(0.f, sig_door);
+        std::vector<Vector2f> path;
+        line(path, {0.f, 2.0f}, {0.f, 3.85f}, 0.005f);
+        park(path, {0.f, 3.85f}, 40);
+        std::vector<rc::DoorAperture> reads;
+        for (std::size_t k = 0; k < path.size(); ++k)
+        {
+            const Vector2f o(dn(rng), dn(rng));
+            reads.push_back(door(1.28e-4f, Vector2f(-0.5f, 3) + o, Vector2f(0.5f, 3) + o));
+        }
+        auto mem = mem_new();
+        const auto r = drive_fn([&](std::size_t k) { return reads[k]; }, path, mem);
+        std::printf("  door wobble %.2f m, p_open 1.28e-4: p_past %.4f p_through %.6f p_cross %.6f\n",
+                    sig_door, r.last.p_past, r.last.p_through, r.last_p);
+        check(r.last_p >= kBirth, "still a birth: a re-drawn line within its sigma is the same opening");
+    }
+
+    std::printf("(i) ROUND 2 I-2: a DOORWAY POSE SNAP of 10 cm that the prediction's own noise explains\n");
+    {
+        // the localiser's posterior sigma is 1 cm (known to run ~3x tight); the prediction P_pred (with Q) says 5 cm.
+        // In the mouth the view snaps the pose 10 cm forward across the line — the odometry predicted the old place.
+        const Eigen::Matrix2f Ppred = Eigen::Matrix2f::Identity() * 0.05f * 0.05f;
+        for (const bool with_pred_cov : {true, false})
+        {
+            auto mem = mem_new();
+            std::vector<Vector2f> path;
+            line(path, {0.f, 1.5f}, {0.f, 2.95f});
+            (void)drive(door(1.28e-4f), path, mem);
+            cr::Crossing c = frame(mem, door(1.28e-4f), {0.f, 3.05f}, {0.f, 2.95f}, false,
+                                   with_pred_cov ? Ppred : Eigen::Matrix2f::Zero());
+            const double w = mem.last_continuity();
+            for (float y = 3.07f; y < 3.85f; y += 0.02f)
+                c = frame(mem, door(1.28e-4f), {0.f, y}, {0.f, y}, false, with_pred_cov ? Ppred : Eigen::Matrix2f::Zero());
+            std::printf("  %s: continuity of the snap %.3g, p_cross %.6f\n",
+                        with_pred_cov ? "S = P_pred + Sigma (round 2)" : "S = Sigma_now + Sigma_prev (round 1)", w, c.p_cross);
+            if (with_pred_cov)
+                check(c.p_cross >= kBirth, "the snap counts as traversal: birth");
+            else
+                check(c.p_cross < kBirth, "(round-1 covariance: the same snap blocked the birth — the defect)");
         }
     }
 

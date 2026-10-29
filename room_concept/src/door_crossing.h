@@ -340,10 +340,20 @@ namespace rc::crossing
 
         /// Start of a frame: how continuous was the robot's step from the previous frame (p_continuous), folded into
         /// every door's "since last update" weight (a door door_concept skipped this frame still owes it).
+        /// `pred_cov` = the localiser's PREDICTED covariance of this frame (P_pred = F P F' + Q, odometry process noise
+        /// included). The innovation ν = xy − pred then has covariance ≤ P_pred (the update only shrinks it); P_pred +
+        /// Σ_now is used — the generous side, so a doorway snap the prediction's own noise explains is never read as a
+        /// jump (fix round 2: Σ_now + Σ_prev omitted Q, and the posterior σ is known to run ~3x tight, which made the
+        /// 5.8σ cutoff an ~8 cm gate on the per-frame correction). A non-finite / zero pred_cov (a caller that has none)
+        /// falls back to Σ_now + Σ_prev.
         void begin_frame(const Eigen::Vector2f& xy, const Eigen::Matrix2f& cov, const Eigen::Vector2f& pred,
-                         double area, bool jump_committed)
+                         double area, bool jump_committed,
+                         const Eigen::Matrix2f& pred_cov = Eigen::Matrix2f::Zero())
         {
-            w_last_ = prev_.has_value() ? p_continuous(xy - pred, cov + prev_->cov, area, jump_committed) : 1.0;
+            const bool have_pred_cov = pred_cov.allFinite() and pred_cov.trace() > 0.f;
+            const Eigen::Matrix2f S = have_pred_cov ? Eigen::Matrix2f(pred_cov + cov)
+                                    : prev_.has_value() ? Eigen::Matrix2f(cov + prev_->cov) : cov;
+            w_last_ = prev_.has_value() ? p_continuous(xy - pred, S, area, jump_committed) : 1.0;
             for (auto& [k, d] : doors_) d.w_since *= w_last_;
             prev_ = PoseSample{xy, cov};
         }
@@ -408,8 +418,14 @@ namespace rc::crossing
         //      (p_continuous, accumulated since this door's last update); the rest — a jump, or outside the jambs —
         //      is "past by another way" (W). Δ < 0 is mass flowing back, leaving both kinds proportionally.
         //   2. RE-ESTIMATION, robot held: the door's new read moves P(past) without anyone moving. Mass that becomes
-        //      "past" this way did not pass through anything (it lands in W); mass that becomes "front" leaves
-        //      proportionally. So a door estimate jumping ACROSS the robot's in-room path cannot create a passage.
+        //      "front" leaves proportionally. Mass that becomes "past" is weighted like motion (fix round 2): the door's
+        //      change δ = centre_new − centre_old is a re-estimate of the SAME physical opening with probability
+        //      w_door = p_continuous(δ, Σ_door,old + Σ_door,new, A) (Σ_door from its stated σ along/across); that share
+        //      enters "through" with the span at the robot's lateral offset under the new read — door jitter within its
+        //      σ around a robot in the mouth is the robot passing a slightly re-drawn line. The rest (a door estimate
+        //      JUMPING across the robot's in-room path, metres beyond its σ) lands in W: no passage is created.
+        //      (Without this a zero-mean door wobble drained "through" into W one wobble at a time: backward removes A
+        //      and W proportionally, forward refilled only W.)
         //   The sign of Δ is the direction of the flow, not a gate. 0 ≤ thru ≤ P(past) by construction.
         //   ⚠ JITTER NEAR THE LINE: a pose dithering across the line at lateral offset u_j alternately adds w·Δ·span(u_j)
         //   and removes thru·|Δ|/P(past); the ratio thru/P(past) relaxes toward w·span(u_j) — toward the instantaneous
@@ -444,6 +460,17 @@ namespace rc::crossing
             thru = std::min(thru, b.past);
             if (now.past < b.past and b.past > 0.0)   // re-estimation: mass leaving "past" leaves proportionally
                 thru *= now.past / b.past;
+            else if (now.past > b.past)
+            {
+                const auto door_cov = [](const ApertureGeo& d) -> Eigen::Matrix2f
+                {
+                    return static_cast<float>(d.sig_along * d.sig_along) * d.tangent * d.tangent.transpose()
+                         + static_cast<float>(d.sig_normal * d.sig_normal) * d.n_out * d.n_out.transpose();
+                };
+                const double w_door = p_continuous(g.centre - old.centre, door_cov(old) + door_cov(g),
+                                                   polygon_area(polygon), false);
+                thru += w_door * (now.past - b.past) * now.span;
+            }
             thru = std::min(thru, now.past);           // float-sum guard; exact in real arithmetic
         }
         if (state != nullptr)
