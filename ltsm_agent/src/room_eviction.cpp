@@ -1031,6 +1031,18 @@ void RoomEviction::guard_recycled_door_names(std::uint64_t live_room_id, const s
     {
         if (not is_door(*live_, door) or not ltsm::is_descendant(*live_, door.id(), room->name())) continue;
         const std::string plain = prefix + door.name();
+        // ONE FACE PER HOLE PER ROOM: a door at the place of a face this room already has in memory IS that face, whatever
+        // its live name — archive it onto that face (recog_try28: DOOR_1's entry mirror door_15 was copied as a second face
+        // r1_door_15 beside r1_door_13, 3 cm apart, because only the CROSSED door was matched by place).
+        if (const auto hole = remembered_hole(door); hole.has_value() and hole->face.name() != plain
+            and hole->face.name().starts_with(prefix))
+        {
+            mem_name_of_[door.id()] = hole->face.name();
+            qInfo().noquote() << QString::fromStdString(std::format(
+                "[eviction] {} is the hole memory already knows as {} ({:.2f} m apart, {}) — archived onto that face",
+                door.name(), hole->face.name(), hole->distance, hole->passage.name()));
+            continue;
+        }
         const auto namesake = mem_->get_node(plain);
         if (not namesake.has_value() or not faces.contains(namesake->id())) continue;
         // Without a pose the name is the only key there is: keep it.

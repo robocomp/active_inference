@@ -296,7 +296,16 @@ bool RoomSwap::swap(std::uint64_t known_room_id, const rc::recog::PoseMix &pose_
 
     carry_ = std::move(carries);
     state_ = State::Staged;
-    for (const auto &k : std::vector<Carry>(carry_)) carry_over(k.prev_face, known_room_id, true);   // log the MAP face association now
+    // The crossed door becomes a passage of BOTH rooms NOW when the previous room's face is already in memory: the way back is
+    // known the moment the robot is inside (recog_try28 leg 5: `cross room_3` from the recognised room_2 waited for a recall
+    // that only the release would have made possible). carry_over is idempotent, so the release re-run is a no-op. A face
+    // still only live (fresh -> fresh) is logged now and written at the release, as before.
+    for (const auto &k : std::vector<Carry>(carry_))
+    {
+        carry_over(k.prev_face, known_room_id, true);   // the MAP face association, logged for the tour driver
+        if (mem_->get_node(k.prev_face).has_value() and not carry_over(k.prev_face, known_room_id, false))
+            qWarning().noquote() << QString::fromStdString(std::format("[swap] early carry-over of {} into room_id {} failed — retried at the release", k.prev_face, known_room_id));
+    }
     known_mem_ = known_mem;
     known_id_ = known_room_id;
     promoted_case_ = twin.has_value();
