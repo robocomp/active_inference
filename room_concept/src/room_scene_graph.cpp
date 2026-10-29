@@ -930,7 +930,7 @@ void RoomSceneGraph::step_proto_room_impl(const rc::RoomConcept::UpdateResult& r
         //   geometry silently starts measuring from the wrong place.
         // (Consumed once per update by absorb_reanchor, at the top of update(), which also moves the
         //  start-up proto's frame; the event column is set by step_proto_room.)
-        crossing_path_.clear();   // nothing to cross out of until the new room is promoted (path restarts there)
+        crossing_mem_.clear();   // nothing to cross out of until the new room is promoted (memory restarts there)
         const float sig_s = std::sqrt(proto_n_out_.dot(cov_xy * proto_n_out_) + 1e-8f);
         const float s = (xy - proto_centre_).dot(proto_n_out_);
         room_concept_->set_outside_prob(rc::crossing::phi((s - r_body) / sig_s));
@@ -964,21 +964,34 @@ void RoomSceneGraph::step_proto_room_impl(const rc::RoomConcept::UpdateResult& r
         }
         return 0;
     };
-    // ★ THE PATH, NOT ONLY THE POSE (2026-10-29, Task 16). "Went through the door" is read from the robot's path in
-    //   this room's frame (door_crossing.h: PassagePath, evaluate's history). One path per room: a new room id starts
-    //   a new one; a re-anchor moves it with the frame (absorb_reanchor).
-    if (crossing_path_room_ != dsr_room_id_)
+    // ★ THE PATH, NOT ONLY THE POSE (2026-10-29, Task 16; fix round 1). "Went through the door" is accumulated per door,
+    //   one step per frame, in this room's frame (door_crossing.h: PassageMemory). One memory per room: a new room id
+    //   starts a new one; the estimator's re-anchors move it (pending ones here, absorbed ones in absorb_reanchor).
+    if (crossing_mem_room_ != dsr_room_id_)
     {
-        crossing_path_.clear();
-        crossing_path_room_ = dsr_room_id_;
+        crossing_mem_.clear();
+        crossing_mem_room_ = dsr_room_id_;
     }
+    // A re-anchor the publisher has NOT absorbed (absorb_reanchor returns early while the gauge is not frozen and there
+    // is no proto) has still moved the INTERNAL frame xy and the polygon are read in: move the memory with it now, and
+    // remember how much was applied so the eventual absorption (or rejection) applies only the remainder.
+    if (Eigen::Affine2f Tp; room_concept_->peek_pending_reanchor(Tp))
+    {
+        crossing_mem_.apply(Tp * crossing_seen_pending_.inverse());
+        crossing_seen_pending_ = Tp;
+    }
+    // How continuous was this frame's step: the innovation against the odometry prediction, and whether the localiser
+    // itself committed a discrete jump (reloc_epoch advanced). See crossing::p_continuous.
+    crossing_mem_.set_half_body_width(0.5f * params_->ROBOT_WIDTH);
+    crossing_mem_.begin_frame(xy, cov_xy, Eigen::Vector2f(res.pred_x, res.pred_y), rc::crossing::polygon_area(polygon),
+                              res.reloc_epoch != crossing_epoch_);
+    crossing_epoch_ = res.reloc_epoch;
     float p_in_doorway = 0.f;   // max over this room's apertures — see the outside_prob note below
     for (const auto& ap : apertures)
         if (room_of(ap.id) != dsr_room_id_)
             continue;
-        else if (const auto c = rc::crossing::evaluate(ap, polygon, xy, cov_xy, r_body,
-                                                              room_concept_->params.wall_map.publish_corner_sigma,
-                                                              crossing_path_.samples()); c.valid)
+        else if (const auto c = crossing_mem_.evaluate(ap, polygon, xy, cov_xy, r_body,
+                                                       room_concept_->params.wall_map.publish_corner_sigma); c.valid)
         {
             const float p_open = ap.p_open < 0.f ? 0.5f : std::clamp(ap.p_open, 0.f, 1.f);
             p_in_doorway = std::max(p_in_doorway,
@@ -994,7 +1007,6 @@ void RoomSceneGraph::step_proto_room_impl(const rc::RoomConcept::UpdateResult& r
     //   ★ Over EVERY valid aperture, not the best-crossing one: in front of the mouth p_cross underflows to exactly 0
     //   for all of them, best_ap stayed null and this was 0 throughout the approach (try60 leg 1: the same jump).
     room_concept_->set_outside_prob(p_in_doorway);
-    crossing_path_.observe(xy, cov_xy);   // AFTER evaluating: the history is the robot's EARLIER poses
     row.n_apert = static_cast<int>(apertures.size());
     if (best_ap == nullptr)
         return;   // row keeps NaN across the aperture columns; n_apert says whether any were offered
@@ -1102,11 +1114,11 @@ void RoomSceneGraph::step_proto_room_impl(const rc::RoomConcept::UpdateResult& r
     qInfo().noquote() << QString("[room][proto] %1 BORN through %2 — see tmp/proto_room.csv")
                              .arg(QString::fromStdString(name)).arg(QString::fromStdString(best_ap->name));
     qInfo().noquote() << QString("[room][proto] passage evidence: path through the jambs %1, door prior P(open) %2 "
-                                 "-> P(open | path) %3, p_cross %4 (%5 path samples)")
+                                 "-> P(open | path) %3, p_cross %4 (%5 doors in memory, last step continuity %6)")
                              .arg(best.p_through, 0, 'g', 4).arg(best_ap->p_open, 0, 'g', 4)
                              .arg(best.p_open_post, 0, 'g', 4).arg(best.p_cross, 0, 'g', 6)
-                             .arg(crossing_path_.samples().size());
-    crossing_path_.clear();   // the next room's path starts at its own birth
+                             .arg(crossing_mem_.doors()).arg(crossing_mem_.last_continuity(), 0, 'g', 4);
+    crossing_mem_.clear();   // the next room's memory starts at its own promotion
     // ── THE HAND-OVER, IN THIS ORDER ────────────────────────────────────────────────────────────────
     // 1. Stamp the room's RT edge while it still holds the last pose that was true of it. Do it BEFORE
     //    retiring, so the mark and the last honest pose belong to the same edge state.
@@ -1316,6 +1328,9 @@ void RoomSceneGraph::absorb_reanchor(const Eigen::Affine2f& int_now)
             qWarning().noquote() << QString("[room][gauge] estimator re-anchor NOT absorbed: the internal robot pose did "
                                             "not move with it (kept %1 vs moved %2); published frame unchanged.")
                                         .arg(e_kept, 0, 'f', 3).arg(e_moved, 0, 'f', 3);
+            // The robot was not re-expressed: undo what step_proto_room applied to the crossing memory from the peek.
+            crossing_mem_.apply(crossing_seen_pending_.inverse());
+            crossing_seen_pending_ = Eigen::Affine2f::Identity();
             reanchor_this_update_ = true;
             return;
         }
@@ -1341,7 +1356,8 @@ void RoomSceneGraph::absorb_reanchor(const Eigen::Affine2f& int_now)
     }
     for (auto& [c, until] : layout_refused_)
         c = T_new_old * c;
-    crossing_path_.apply(T_new_old);
+    crossing_mem_.apply(T_new_old * crossing_seen_pending_.inverse());   // only what step_proto_room did not already apply
+    crossing_seen_pending_ = Eigen::Affine2f::Identity();
     if (not std::isnan(armed_tx_))
     {
         const Eigen::Vector2f a = T_new_old * Eigen::Vector2f(armed_tx_, armed_ty_);

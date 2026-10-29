@@ -280,6 +280,14 @@ public:
     /// So the moves are accumulated here as T_new_old and handed over exactly once. Localiser thread.
     /// Returns false (and leaves `T` untouched) when nothing is pending.
     bool take_pending_reanchor(Eigen::Affine2f& T);
+    /// The same accumulated re-anchor WITHOUT consuming it (the crossing memory follows the internal frame while the
+    /// publisher leaves the move pending). Same thread as take_pending_reanchor.
+    bool peek_pending_reanchor(Eigen::Affine2f& T) const
+    {
+        if (not has_pending_reanchor_) return false;
+        T = pending_reanchor_;
+        return true;
+    }
 
     /// ── THE TWO STATES THIS AGENT IS EVER IN ─────────────────────────────────────────────────────
     /// SEARCHING   the layout is unknown and is being estimated. The walls ARE the estimate: they are
