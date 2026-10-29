@@ -73,4 +73,90 @@ rc::layout::Plan RoomSceneGraph::plan_recalled_rest(const rc::layout::FeasibleGr
         footprint_area(), deferred);
 }
 
+// ── CAMERA COVERAGE OF THE BOUNDARY (camera_coverage.h; Task 12, 2026-10-29) ─────────────────────────────────────────
+void RoomSceneGraph::resolve_zed_mount()
+{
+    if (zed_mount_resolved_ or not G_ or not rt_api_ or dsr_robot_id_ == 0) return;
+    // Same walk as resolve_lidar_origin: zed → … → robot node, read once (the mount does not move). ROBOT_GEOMETRY.md:
+    // the zed frame is x-right, y-DEPTH, z-up, so its optical axis is the frame's +y column.
+    auto node = G_->get_node("zed");
+    Eigen::Affine3d T = Eigen::Affine3d::Identity();
+    bool ok = node.has_value();
+    for (int depth = 0; ok and depth < 8 and node->id() != dsr_robot_id_; ++depth)
+    {
+        const auto rt = rt_api_->get_RT_pose_from_parent(node.value());
+        const auto parent = G_->get_attrib_by_name<parent_att>(node.value());
+        if (not rt.has_value() or not parent.has_value()) { ok = false; break; }
+        T = Eigen::Affine3d(rt->matrix()) * T;
+        node = G_->get_node(parent.value());
+        ok = node.has_value();
+    }
+    ok = ok and node->id() == dsr_robot_id_;
+    if (ok)
+    {
+        zed_xy_ = T.translation().head<2>().cast<float>();
+        const Eigen::Vector2f f = T.linear().col(1).head<2>().cast<float>();
+        if (f.norm() > 1e-6f) zed_fwd_ = f.normalized();
+        cam_sensor_.height_m = static_cast<float>(T.translation().z());
+        zed_mount_resolved_ = true;
+        qInfo() << "[room][camera-cover] zed mount: (" << zed_xy_.x() << "," << zed_xy_.y() << ") m, axis ("
+                << zed_fwd_.x() << "," << zed_fwd_.y() << "), height" << cam_sensor_.height_m << "m in the robot frame";
+    }
+    else if (++zed_mount_tries_ == 200 and not camera_model_warned_)
+    {
+        camera_model_warned_ = true;
+        qWarning() << "[room][camera-cover] could not walk zed -> robot in the RT tree: NO camera coverage of the room's"
+                   << "boundary — rooms will be called explored on the LiDAR alone (doors on unseen walls may be missed)";
+    }
+}
+
+void RoomSceneGraph::observe_camera_cover(const rc::RoomConcept::UpdateResult& res)
+{
+    if (not G_ or not startup_proto_ or recalled_visit_) return;   // a surveyed room (first or crossing-born) only
+    resolve_zed_mount();
+    // intrinsics per call until complete: robot_concept publishes them only once frames flow (graph_obstacles.h)
+    if (not cam_sensor_.has_vertical() or not (cam_sensor_.hfov_rad > 0.05f))
+        if (const auto zed = G_->get_node("zed"); zed.has_value())
+            if (auto cam = G_->get_camera_api(zed.value()); cam)
+            {
+                const float fx = cam->get_focal_x(), fy = cam->get_focal_y();
+                const float W = static_cast<float>(cam->get_width()), H = static_cast<float>(cam->get_height());
+                if (fx > 0.f and W > 0.f and fy > 0.f and H > 0.f)
+                {
+                    cam_sensor_.hfov_rad = 2.f * std::atan(0.5f * W / fx);
+                    cam_sensor_.vfov_rad = 2.f * std::atan(0.5f * H / fy);
+                    qInfo() << "[room][camera-cover] zed intrinsics: hfov" << cam_sensor_.hfov_rad * 57.29578f
+                            << "deg, vfov" << cam_sensor_.vfov_rad * 57.29578f << "deg";
+                }
+            }
+    if (startup_promoted_ and not cam_sensor_.complete() and not camera_model_warned_ and zed_mount_tries_ >= 200)
+    {
+        camera_model_warned_ = true;
+        qWarning() << "[room][camera-cover] camera model INCOMPLETE at promotion — the room's boundary camera coverage"
+                   << "cannot be assessed; afford_room goes to the pose planner on the LiDAR survey alone";
+    }
+    if (not zed_mount_resolved_ or not cam_sensor_.complete()) return;
+    // The boundary in the PUBLISHED frame: the promoted room's polygon, or the survey's ring before promotion (its views
+    // are carried onto the promoted outline by Coverage::set_outline).
+    auto outline = startup_promoted_ ? published_polygon() : fs_published_;
+    if (outline.size() < 3) return;
+    cam_cover_.set_outline(outline);
+    const Eigen::Affine2f pose_pub = T_pub_int_ * res.robot_pose;
+    const Eigen::Vector2f cam = pose_pub * zed_xy_;
+    const Eigen::Vector2f fwd = pose_pub.linear() * zed_fwd_;
+    cam_cover_.observe(cam, std::atan2(fwd.y(), fwd.x()), cam_sensor_);
+}
+
+rc::layout::Plan RoomSceneGraph::plan_camera_cover(const rc::layout::FeasibleGrid& grid, const Eigen::Vector2f& robot,
+                                                   const rc::layout::ExplorerParams& ep,
+                                                   const rc::layout::Admissible& standable,
+                                                   const rc::layout::Admissible& deferred)
+{
+    // A standpoint is in the internal frame; the coverage is in the published one. The camera sits at the zed mount, not
+    // at the robot origin — a few cm, ignored here as in the LiDAR gain (its origin is the standpoint too).
+    return rc::layout::plan_coverage(grid, robot, ep, standable,
+        [this](const Eigen::Vector2f& v) { return cam_cover_.best_look(T_pub_int_ * v, cam_sensor_).gain; },
+        cam_cover_.price(), deferred);
+}
+
 }   // namespace rc

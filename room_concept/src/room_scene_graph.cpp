@@ -1361,6 +1361,9 @@ void RoomSceneGraph::forget_room(const char* why)
     left_rooms_.clear();
     left_polys_int_.clear();
     layout_finished_ = false;
+    cam_cover_.reset();
+    camera_finished_ = layout_plan_camera_ = false;
+    camera_visits0_ = -1;
     pub_gauge_frozen_ = false;
     {
         std::scoped_lock lk(gauge_mutex_);
@@ -1743,6 +1746,10 @@ void RoomSceneGraph::arm_startup_proto(std::uint64_t room_id, const Eigen::Affin
     explored_.reset();          // a re-entry restores its memory (note_recall_memory) after this
     layout_pool_.clear();
     layout_finished_   = false;
+    cam_cover_.reset();          // a new room: its boundary has been shown to no camera yet (camera_coverage.h)
+    camera_finished_    = false;
+    camera_visits0_     = -1;
+    layout_plan_camera_ = false;
     pub_gauge_frozen_  = true;
     {
         std::scoped_lock lk(gauge_mutex_);
@@ -2180,12 +2187,16 @@ void RoomSceneGraph::dsr_update_layout_affordance(const rc::RoomConcept::UpdateR
     // what promoted the room) and the legacy wall-map planner below has no input any more (the wall map is not observed
     // after promotion). Building the clearance grid anyway cost ~1/3 of the localiser thread, measured with perf
     // (a radius search per grid cell, every replan), for a plan that could only say "no gain".
-    if (replan and startup_promoted_ and refine_contested_.empty() and not recalled_partial())
+    // ...UNLESS the cameras have not yet been shown the boundary (Task 12, 2026-10-29): the LiDAR survey is complete, but
+    // doors are found by the CAMERAS, and a wall none has faced may hold one (live recog_proto2 leg 4, DOOR_2). The
+    // camera-coverage plan below runs then; this early exit is only for a room with nothing left for either.
+    if (replan and startup_promoted_ and refine_contested_.empty() and not recalled_partial() and not camera_cover_open())
     {
         layout_plan_ms_ = now;
         layout_last_plan_ = {};
         layout_last_plan_.finished = true;
         layout_last_plan_.why = "nothing_contested";
+        layout_plan_camera_ = false;
         readiness_explore_.store(1.f, std::memory_order_relaxed);
         return;
     }
@@ -2265,7 +2276,16 @@ void RoomSceneGraph::dsr_update_layout_affordance(const rc::RoomConcept::UpdateR
         const auto& map = room_concept_->wall_map_localiser_only();
         const auto poly = room_concept_->explorer_polygon_localiser_only();
         rej_ring_ = rej_furniture_ = rej_refused_ = 0;
+        layout_plan_camera_ = false;
+        // ── THE CAMERA PHASE (Task 12): promoted, nothing contested, boundary not yet before the cameras ──────────────
+        const bool camera_phase = startup_promoted_ and not recalled_partial() and refine_contested_.empty()
+                              and camera_cover_open();
         if (recalled_partial() and free_space_) layout_last_plan_ = plan_recalled_rest(grid, robot, ep, standable, deferred);
+        else if (camera_phase)
+        {
+            layout_last_plan_ = plan_camera_cover(grid, robot, ep, standable, deferred);
+            layout_plan_camera_ = true;
+        }
         else if (room_concept_->plain_slam_driving() and free_space_)
         {
             const float footprint = footprint_area();
@@ -2328,7 +2348,24 @@ void RoomSceneGraph::dsr_update_layout_affordance(const rc::RoomConcept::UpdateR
         // "unreachable" then means the remaining gain lies beyond furniture, and it promotes.
         rc::layout::boxed_in_handoff(layout_last_plan_, layout_visits_);
         readiness_explore_.store(layout_finished_ ? 1.f : 0.f, std::memory_order_relaxed);
-        if (layout_last_plan_.finished
+        // The camera phase latches its OWN verdict, by the survey's rule: `finished` (no look shows a door's width of
+        // unseen wall), or nothing REACHABLE left once a standpoint has been visited. An unreachable target before that
+        // only re-plans (the refused area is deferred, its gain still counts: "deferred", never "finished").
+        if (layout_plan_camera_)
+        {
+            if (camera_visits0_ < 0) camera_visits0_ = layout_visits_;   // the phase's own visits, not the survey's
+            if (layout_last_plan_.finished or (layout_visits_ > camera_visits0_ and layout_last_plan_.why == "unreachable"))
+            {
+                camera_finished_ = true;
+                qInfo().noquote() << QString("[room][camera-cover] boundary camera coverage FINISHED (%1): %2 of %3 m of "
+                                             "wall still unseen-weighted, no look left worth a door width — afford_room "
+                                             "goes to the pose planner")
+                                         .arg(QString::fromStdString(layout_last_plan_.why))
+                                         .arg(cam_cover_.unseen_length(), 0, 'f', 2)
+                                         .arg([this] { float L = 0.f; for (const auto& c : cam_cover_.cells()) L += c.len; return L; }(), 0, 'f', 2);
+            }
+        }
+        else if (layout_last_plan_.finished
             or (layout_visits_ > 0
                 and (room_concept_->plain_slam_driving() ? room_concept_->has_map_layout() : room_concept_->map_ready())
                 and (layout_last_plan_.why == "no_gain" or layout_last_plan_.why == "unreachable")))
@@ -2354,6 +2391,9 @@ void RoomSceneGraph::dsr_update_layout_affordance(const rc::RoomConcept::UpdateR
             layout_target_ = tgt;
             layout_best_d_ = std::numeric_limits<float>::infinity();   // the motion clock is NOT reset by a replan
             layout_yaw_    = dir.squaredNorm() > 1e-9f ? std::atan2(dir.y(), dir.x()) : 0.f;
+            // the camera phase's look is AIMED: face the heading that buys the gain (published frame → internal)
+            if (layout_plan_camera_)
+                layout_yaw_ = wrap_pi(cam_cover_.best_look(T_pub_int_ * tgt, cam_sensor_).yaw - angle_of(T_pub_int_));
             layout_gain_   = layout_last_plan_.gain;
         }
         else
@@ -2922,6 +2962,7 @@ void RoomSceneGraph::dsr_update_affordance(const rc::RoomConcept::UpdateResult& 
     // the layout explorer runs again with "contested cells a standpoint would see" as the gain — a look that decides
     // an edit. Empty contested set = nothing to test = the pose planner as before.
     // (and a partly remembered room until the explorer is `finished` — room_explored.h; P(explored) from each plan)
+    observe_camera_cover(res);   // what the ZED is offered of the boundary this frame (camera_coverage.h, Task 12)
     if (layout_explorer_owns_room()) { dsr_update_layout_affordance(res); publish_plan_explored(); return; }
     publish_explored(explored_.settled(room_node_name()));   // nothing left for the explorer: p = 1 (room_explored.h)
     if (!epistemic_) return;

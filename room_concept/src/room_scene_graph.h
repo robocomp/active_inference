@@ -51,6 +51,7 @@
 #include "learnt_layout.h"           // rc::learnt (the accepted room kept as a dated SVG, MapMode = "last")
 #include "layout_explorer.h"         // rc::layout (the live layout explorer → afford_room while proto)
 #include "room_explored.h"           // rc::explored — P(room explored), room_explored_p
+#include "camera_coverage.h"         // rc::camcov — the boundary as the CAMERAS have seen it (Task 12)
 #include "proposal_adoption.h"         // rc::proposal — ltsm's recognition proposal: admit, adopt in place, answer
 
 namespace rc
@@ -307,20 +308,46 @@ private:
     void note_recall_memory(const Recall& recall);
     /// A recalled room memory does not hold completely: the explorer looks for what memory may lack.
     [[nodiscard]] bool recalled_partial() const { return recalled_visit_ and explored_.recalled_partial(); }
-    /// Who drives afford_room: the layout explorer (proto survey, contested refiner cells, a partly remembered room)
+    /// Who drives afford_room: the layout explorer (proto survey, contested refiner cells, a partly remembered room,
+    /// and a promoted fresh room until its boundary has been put before the cameras — camera_coverage.h, Task 12)
     [[nodiscard]] bool layout_explorer_owns_room() const
     {
-        return (startup_proto_ and not startup_promoted_) or (startup_promoted_ and not refine_contested_.empty())
-            or (recalled_partial() and not layout_finished_);
+        return rc::camcov::explorer_owns_room({.proto = startup_proto_, .promoted = startup_promoted_,
+                                               .contested = not refine_contested_.empty(),
+                                               .recalled_partial = recalled_partial(),
+                                               .layout_finished = layout_finished_,
+                                               .camera_open = camera_cover_open()});
     }
     /// P(explored) from the explorer's last plan (its own price; the wall-map EIG plan has none ⇒ not assessed).
     void publish_plan_explored()
     {
         using rc::explored::Phase;
-        const Phase ph = recalled_partial() ? Phase::RecalledRest : startup_promoted_ ? Phase::Contested : Phase::Survey;
+        const Phase ph = recalled_partial() ? Phase::RecalledRest : layout_plan_camera_ ? Phase::Cameras
+                       : startup_promoted_ ? Phase::Contested : Phase::Survey;
         const auto& P = layout_last_plan_;
-        publish_explored(explored_.plan(room_node_name(), ph, P.evaluated, P.best_gain, P.price, layout_finished_));
+        publish_explored(explored_.plan(room_node_name(), ph, P.evaluated, P.best_gain, P.price,
+                                        layout_plan_camera_ ? camera_finished_ : layout_finished_));
     }
+    // ── CAMERA COVERAGE OF THE BOUNDARY (camera_coverage.h, room_scene_graph_explored.cpp; Task 12, 2026-10-29) ──
+    rc::camcov::Coverage cam_cover_;
+    rc::nbv::Sensor      cam_sensor_;            ///< the ZED as the detector sees it: intrinsics (graph) + mount height
+    Eigen::Vector2f      zed_xy_{0.f, 0.f};      ///< zed position, robot frame
+    Eigen::Vector2f      zed_fwd_{0.f, 1.f};     ///< zed optical axis (its frame's +y = depth), robot frame
+    bool                 zed_mount_resolved_ = false;
+    int                  zed_mount_tries_ = 0;
+    bool                 camera_finished_ = false;     ///< the camera phase's latched `finished` (cf. layout_finished_)
+    bool                 layout_plan_camera_ = false;  ///< layout_last_plan_ is the camera-coverage plan
+    int                  camera_visits0_ = -1;         ///< layout_visits_ when the camera phase began (-1 = not yet)
+    bool                 camera_model_warned_ = false;
+    /// The camera phase can still run here: a promoted fresh room (not a recall), a complete camera model, not finished.
+    [[nodiscard]] bool camera_cover_open() const
+    { return startup_promoted_ and not recalled_visit_ and cam_sensor_.complete() and not camera_finished_; }
+    void resolve_zed_mount();                                        ///< zed → robot through the RT tree, once
+    void observe_camera_cover(const rc::RoomConcept::UpdateResult& res);   ///< every frame: what the ZED is offered
+    /// The camera phase's plan: gain = boundary metres a look would newly put before the detector, price = a door width.
+    rc::layout::Plan plan_camera_cover(const rc::layout::FeasibleGrid& grid, const Eigen::Vector2f& robot,
+                                       const rc::layout::ExplorerParams& ep, const rc::layout::Admissible& standable,
+                                       const rc::layout::Admissible& deferred);
     /// The robot's footprint area, m² — the coverage explorer's price of a trip (plan_coverage's min_gain).
     [[nodiscard]] float footprint_area() const;
     /// The coverage plan of a partly remembered room: unseen space in the remembered outline, worth (1 − p_mem) of it.

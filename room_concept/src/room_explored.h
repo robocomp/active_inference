@@ -95,6 +95,7 @@ enum class Phase
     Survey,         ///< a proto room: how much of its boundary is still unseen
     Contested,      ///< promoted: can a look decide one refiner edit — NOT whether the boundary is seen
     RecalledRest,   ///< a partly remembered room: what memory may lack
+    Cameras,        ///< promoted fresh room: boundary not yet put before the cameras (camera_coverage.h, Task 12)
 };
 
 /// The agent's glue (RoomSceneGraph calls exactly this): what is published, what is remembered, what is terminal.
@@ -117,7 +118,8 @@ public:
     {
         // ★ A recalled room's `finished` is the same terminal verdict as a survey's promotion: nothing reachable is
         //   left worth a trip, so the boundary question is closed (p = 1). Without it p stuck at 1/(2 − p_mem).
-        if (phase == Phase::RecalledRest and finished) return settled(room);
+        //   The camera phase's `finished` likewise (no look left that would show a door's width of unseen wall).
+        if ((phase == Phase::RecalledRest or phase == Phase::Cameras) and finished) return settled(room);
         const auto p = belief(evaluated, best_gain, price, phase == Phase::RecalledRest ? p_mem_ : 0.f);
         // ★ ONLY THE BOUNDARY BELIEF IS REMEMBERED. The contested plan prices a refiner edit; a room is contested only
         //   once promoted, i.e. after its survey finished — so its memory is 1, whatever the refiner still asks.

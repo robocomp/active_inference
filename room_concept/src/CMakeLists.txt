@@ -321,3 +321,12 @@ add_executable(proposal_fit_test EXCLUDE_FROM_ALL ../tools/proposal_fit_test.cpp
 target_include_directories(proposal_fit_test PRIVATE ${CMAKE_CURRENT_LIST_DIR}/../src)
 target_link_libraries(proposal_fit_test ${LIBS})
 set_target_properties(proposal_fit_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../../bin)
+
+# ── camera_coverage_test ──────────────────────────────────────────────────────
+# Task 12: a room keeps proposing epistemic poses until its boundary has been put before the CAMERAS (camera_coverage.h):
+# ownership predicate + the explorer's plan_coverage on a synthetic room with a never-camera-seen wall.
+#   make -C build camera_coverage_test && ../bin/camera_coverage_test
+add_executable(camera_coverage_test EXCLUDE_FROM_ALL ../tools/camera_coverage_test.cpp ../src/layout_explorer.cpp)
+target_include_directories(camera_coverage_test PRIVATE ${CMAKE_CURRENT_LIST_DIR}/../src)
+target_link_libraries(camera_coverage_test ${LIBS})
+set_target_properties(camera_coverage_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../../bin)
