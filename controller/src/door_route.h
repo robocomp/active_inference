@@ -134,7 +134,12 @@ struct Params
             out.post = ax->c + *sp * ax->n;
             out.post_yaw = face;
             // P_pre only while the robot is still farther from the door than it along the axis
-            out.pre_dropped = (robot - ax->c).dot(ax->n) <= out.s_pre;
+            // …and already IN the door's corridor: a robot beside the doorway (small along-axis coordinate, large lateral one)
+            // has not passed the vantage, it is exactly who needs it (recog_try16: dropped, the route came at the jambs
+            // diagonally and the tracker was pinned by the returns). FLAGGED: the corridor half-width is the body's reach.
+            const Eigen::Vector2f rel = robot - ax->c;
+            const float lateral = std::abs(rel.x() * ax->n.y() - rel.y() * ax->n.x());
+            out.pre_dropped = rel.dot(ax->n) <= out.s_pre and lateral <= prm.body_reach_m;
             if (not out.pre_dropped) out.waypoints.push_back(out.pre);
             out.waypoints.push_back(out.ap);
             out.waypoints.push_back(out.post);
