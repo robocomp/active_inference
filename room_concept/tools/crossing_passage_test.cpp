@@ -332,8 +332,8 @@ int main()
                 check(c.p_cross >= kBirth, "birth");
             }
             else
-                check(w < 0.01, "(round-1 covariance read the snap step as a jump — the defect; since round 3 the robot's "
-                                "own onward motion re-labels that mass, so the birth no longer hinges on this one step)");
+                check(w < 0.01, "(round-1 covariance read the snap step as a jump — the defect: a shift carries no passage "
+                                "and onward motion crosses nothing, so this branch does not birth; P_pred + Sigma is the cure)");
         }
     }
 
@@ -363,36 +363,81 @@ int main()
             check(maxp < kBirth, "no birth from jitter after a teleport");
         }
 
-    std::printf("(l) ROUND 4: a relocalisation jump past the door, then REAL odometric driving: birth only when the\n"
-                "    odometric path itself crosses the anchored line between the jambs\n");
+    std::printf("(l) ROUND 5: a relocalisation jump past the door is NOT a passage, whatever the robot does next —\n"
+                "    unless it drives back and genuinely crosses\n");
     for (const float po : {1.28e-4f, 0.99f})
     {
-        struct Leg { const char* what; Vector2f step; int frames; bool births; };
-        for (const Leg& leg : {Leg{"drives on 1.0 m (x_odo 2.5 -> 3.5 crosses the line)", {0.f, 0.005f}, 200, true},
-                              Leg{"drives on 0.2 m (x_odo 2.5 -> 2.7 stays short)", {0.f, 0.005f}, 40, false},
-                              Leg{"drives SIDEWAYS 1.0 m (x_odo never crosses)", {0.005f, 0.f}, 200, false}})
+        struct Leg { const char* what; std::vector<Vector2f> steps; bool births; };
+        const auto fwd = [](int n, Vector2f st) { return std::vector<Vector2f>(n, st); };
+        auto back_and_through = fwd(200, {0.f, -0.005f});                       // 3.3 → 2.3: back through the door
+        { auto on = fwd(300, {0.f, 0.005f}); back_and_through.insert(back_and_through.end(), on.begin(), on.end()); }   // → 3.8
+        for (const Leg& leg : {Leg{"drives on 1.0 m (the jump put it past; onward motion crosses nothing)", fwd(200, {0.f, 0.005f}), false},
+                               Leg{"drives SIDEWAYS 1.0 m", fwd(200, {0.005f, 0.f}), false},
+                               Leg{"drives BACK 1.0 m through the door, then forward through it again", back_and_through, true}})
         {
             auto mem = mem_new();
             std::vector<Vector2f> path;
             line(path, {0.f, 1.5f}, {0.f, 2.5f});
             (void)drive(door(po), path, mem);
-            cr::Crossing c = frame(mem, door(po), {0.f, 3.3f}, {0.f, 2.5f}, true);
+            cr::Crossing c = frame(mem, door(po), {0.f, 3.3f}, {0.f, 2.5f}, true);   // the committed jump
             std::mt19937 rng(5);
             std::normal_distribution<float> n(0.f, kSigPose);
-            Vector2f prev = {0.f, 3.3f}, truth_est = {0.f, 3.3f};
+            Vector2f prev = {0.f, 3.3f}, truth = {0.f, 3.3f};
             float maxp = c.p_cross;
-            for (int k = 0; k < leg.frames; ++k)
+            for (const Vector2f& st : leg.steps)
             {
-                truth_est += leg.step;
-                const Vector2f est = truth_est + Vector2f(n(rng), n(rng));
-                c = frame(mem, door(po), est, prev + leg.step);
+                truth += st;
+                const Vector2f est = truth + Vector2f(n(rng), n(rng));
+                c = frame(mem, door(po), est, prev + st);
                 prev = est; maxp = std::max(maxp, c.p_cross);
             }
-            std::printf("  p_open %.4g, %s: x_odo (%.2f, %.2f) p_through %.3g max p_cross %.3g\n", po, leg.what,
-                        mem.propagated().xy.x(), mem.propagated().xy.y(), c.p_through, maxp);
-            check((maxp >= kBirth) == leg.births, leg.births ? "birth: the odometry carried the body across between the jambs"
-                                                             : "no birth: the odometric path did not cross");
+            std::printf("  p_open %.4g, %s: at (%.2f, %.2f) p_through %.3g p_reread %.3g max p_cross %.3g\n", po, leg.what,
+                        truth.x(), truth.y(), c.p_through, c.p_reread, maxp);
+            check((maxp >= kBirth) == leg.births, leg.births ? "birth: the odometry carried the body through the jambs"
+                                                             : "no birth: the jump is not a passage");
         }
+    }
+
+    std::printf("(m) ROUND 5: a 0.5 m jump ALONG the doorway direction mid-room, then a real crossing of a SECOND door\n");
+    for (const float po : {1.28e-4f, 0.99f})
+    {
+        // door A at x ∈ [-0.5, 0.5] (as everywhere above), door B at x ∈ [1.5, 2.5], both in the +y wall
+        const auto doorB = [&] { auto d = door(po, {1.5f, 3}, {2.5f, 3}); d.name = "door_B"; d.id = 2; return d; };
+        const auto doorA = [&] { auto d = door(po); d.id = 1; return d; };
+        auto mem = mem_new();
+        const Eigen::Matrix2f cov = Eigen::Matrix2f::Identity() * kSigPose * kSigPose;
+        const auto both = [&](Vector2f est, Vector2f pred, bool jump) -> std::pair<cr::Crossing, cr::Crossing>
+        {
+            mem.begin_frame(est, cov, pred, cr::polygon_area(kRoom), jump);
+            return {mem.evaluate(doorA(), kRoom, est, cov, kRBody, kSigLayout),
+                    mem.evaluate(doorB(), kRoom, est, cov, kRBody, kSigLayout)};
+        };
+        std::mt19937 rng(9);
+        std::normal_distribution<float> n(0.f, kSigPose);
+        std::vector<Vector2f> path;
+        line(path, {0.f, 0.5f}, {0.f, 1.5f});                       // in front of door A, 1.5 m short
+        Vector2f prev = path.front(), truth = path.front();
+        float maxA = 0.f, maxB = 0.f;
+        const auto run = [&](const std::vector<Vector2f>& pts)
+        {
+            for (const Vector2f& p : pts)
+            {
+                const Vector2f est = p + Vector2f(n(rng), n(rng));
+                const auto [ca, cb] = both(est, prev + (p - truth), false);
+                prev = est; truth = p; maxA = std::max(maxA, ca.p_cross); maxB = std::max(maxB, cb.p_cross);
+            }
+        };
+        run(path);
+        // the committed jump: 0.5 m along x (the doorway direction), odometry says parked
+        truth = {0.5f, 1.5f};
+        { const auto [ca, cb] = both(truth, prev, true); prev = truth; maxA = std::max(maxA, ca.p_cross); maxB = std::max(maxB, cb.p_cross); }
+        std::vector<Vector2f> on;
+        line(on, {0.5f, 1.5f}, {2.0f, 1.5f});                       // over to door B's axis
+        line(on, {2.0f, 1.5f}, {2.0f, 3.85f});                      // through door B
+        run(on);
+        std::printf("  p_open %.4g: max p_cross door A %.3g, door B %.6f\n", po, maxA, maxB);
+        check(maxA < kBirth, "door A: the jump along the wall is no passage");
+        check(maxB >= kBirth, "door B: the real crossing after the jump births (the estimate is trusted after a reloc)");
     }
 
     std::printf("(d) frame move: PassageMemory::apply keeps the passage when the room frame is re-anchored\n");

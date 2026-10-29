@@ -132,7 +132,7 @@ namespace rc::crossing
         float p_geom   = 0.f;   ///< = p_through, the path's own answer (no door prior)
         float p_through = 0.f;  ///< P(centre past AND the odometric path carried it across between the jambs) (Task 16)
         float p_open_post = 0.f; ///< P(leaf open | path): the posterior the passage implies about the door
-        float p_reread = 0.f;    ///< P(past under the estimate/read but NOT under the odometric path) — "not crossed"
+        float p_reread = 0.f;    ///< P(past only by a re-read of the door or a shift of the estimate) — "not crossed"
         float p_past   = 0.f;   ///< P(body centre past the aperture line), no p_open, no span
         float p_span   = 0.f;   ///< P(CURRENT centre within the aperture span) — the doorway term's, not the passage's
         float s        = 0.f;   ///< signed distance of the robot centre past the line (m)
@@ -221,10 +221,10 @@ namespace rc::crossing
         Eigen::Matrix2f cov = Eigen::Matrix2f::Zero();
     };
 
-    /// ⚠ P(the localiser's estimate is NOT a continuous reading of the odometry-propagated position) a priori — the prior
-    ///   of the "teleport" hypothesis in p_continuous(). A model constant, not measured: relocalisation commits are rare
-    ///   events (a handful per tour of ~10⁴ frames). Its effect is logarithmic: the innovation at which an estimate stops
-    ///   re-seeding the propagated position sits where N(ν; 0, S) = π_J / ((1 − π_J)·A), i.e. d² ≈ 2 ln((1 − π_J)·A /
+    /// ⚠ P(the localiser's correction this frame is a frame SHIFT, not a continuous reading) a priori — the prior of the
+    ///   "teleport" hypothesis in p_continuous(). A model constant, not measured: relocalisation commits are rare events
+    ///   (a handful per tour of ~10⁴ frames). Its effect is logarithmic: the innovation at which a correction stops
+    ///   counting as continuous sits where N(ν; 0, S) = π_J / ((1 − π_J)·A), i.e. d² ≈ 2 ln((1 − π_J)·A /
     ///   (2π√|S| π_J)) — ≈ 5.8σ for A = 30 m², σ = 1 cm; a factor 10 on π_J moves that by ~0.4σ. Why no model term
     ///   replaces it: the localiser publishes no jump rate.
     inline constexpr double kPoseJumpPrior = 1e-3;
@@ -233,7 +233,7 @@ namespace rc::crossing
     /// answer is not cancelled to exactly 0 or 1 by float.
     inline double phi_d(double z) { return 0.5 * std::erfc(-z / std::sqrt(2.0)); }
 
-    /// P(the estimate is a CONTINUOUS reading of the propagated position | innovation ν, its covariance S, room area A).
+    /// P(the estimate's correction is CONTINUOUS | innovation ν = est − pred, its covariance S, room area A).
     ///   C  continuous:  ν ~ N(0, S)
     ///   J  jump:        the estimate landed anywhere in the room, density 1/A
     /// p = (1 − π_J)·N / ((1 − π_J)·N + π_J/A), π_J = kPoseJumpPrior (flagged). `jump_committed` = the localiser itself
@@ -297,20 +297,21 @@ namespace rc::crossing
         return r;
     }
 
-    /// Per-door passage state (round 4): the ANCHOR read the robot's motion is judged against, the passage mass A, and
-    /// where the odometry-propagated position was when this door was last updated.
+    /// Per-door passage state (round 5): the ANCHOR read the robot's motion is judged against, the passage mass A, the
+    /// jumped mass J, and the estimate / cumulative odometric displacement / continuity at this door's last update.
     struct DoorPassage
     {
         ApertureGeo geo;                       ///< G*: the anchor read of the line
-        double thru = 0.0;                     ///< A: P(the propagated position is past G* AND got there between its jambs)
-        PoseSample last;                       ///< the propagated position at this door's last update
+        double thru = 0.0;                     ///< A: P(past G* AND the body got there by odometric motion between its jambs)
+        double jumped = 0.0;                   ///< J: P(past G* only because the estimate was shifted — no motion)
+        PoseSample last;                       ///< the estimate at this door's last update
         Eigen::Vector2f d_last{0.f, 0.f};      ///< the cumulative odometric displacement then
+        double w_since = 1.0;                  ///< P(every estimate correction since then was continuous)
     };
 
     inline Crossing evaluate_core(const DoorAperture& ap, const std::vector<Eigen::Vector2f>& polygon,
                                   const Eigen::Vector2f& xy, const Eigen::Matrix2f& cov_xy, float r_body,
-                                  float sigma_normal, double half_body, DoorPassage* state,
-                                  const PoseSample& odo, const Eigen::Vector2f& d_odo);
+                                  float sigma_normal, double half_body, DoorPassage* state, const Eigen::Vector2f& d_odo);
 
     /// Evaluate one aperture from the CURRENT pose alone (no memory): the pre-Task-16 reading, with the centre's span
     /// (half_body = 0). `xy`/`cov_xy` are the robot position and its 2×2 covariance, ROOM frame.
@@ -318,21 +319,19 @@ namespace rc::crossing
                              const Eigen::Vector2f& xy, const Eigen::Matrix2f& cov_xy, float r_body,
                              float sigma_normal = 0.f);
 
-    /// ★ THE PASSAGE MEMORY (Task 16, round 4 — 2026-10-29). One per room (the caller clears it on a room change and
-    ///   moves it with the frame on a re-anchor). It tracks TWO things:
-    ///   · the robot's ODOMETRY-PROPAGATED position x_odo, P_odo: dead-reckoned from the localiser's prediction deltas
-    ///     (pred − previous estimate = what the odometry added this frame) with the prediction's own growing process
-    ///     noise, and re-seeded from the estimate ONLY with the probability the estimate is a continuous reading of it
-    ///     (p_continuous: innovation est − x_odo against P_odo + Σ_est; 0 on a committed relocalisation). A jump of the
-    ///     estimate never moves x_odo; the next frames' estimates are then as far from x_odo as the jump was, so x_odo
-    ///     stays dead-reckoned until P_odo has grown to cover the gap (or the memory restarts in the next room).
-    ///   · per door, an ANCHOR read of the line (DoorPassage::geo) and the passage mass A (evaluate_core).
+    /// ★ THE PASSAGE MEMORY (Task 16, round 5 — 2026-10-29). One per room (the caller clears it on a room change and
+    ///   moves it with the frame on a re-anchor). The robot's position IS the localiser's estimate (after a relocalisation
+    ///   the relocaliser is trusted: room_concept owns the pose — controller ruling). What the memory adds is the SPLIT of
+    ///   each frame's displacement: the ODOMETRIC step (pred − previous estimate: motion of the body, both hypotheses
+    ///   below agree on it) and the estimate's CORRECTION (est − pred), which with probability w = p_continuous(est − pred,
+    ///   P_pred + Σ) is a continuous re-seed (the labels of the past mass are kept) and with 1 − w a frame shift (what it
+    ///   pushes past the line carries no passage: it is "jumped", priced as not crossed; 0 on a committed relocalisation).
+    ///   Per door, an ANCHOR read of the line and the two masses A / J (evaluate_core).
     ///   Cycle: begin_frame(est, pred, area, jump_committed, pred_cov) → evaluate(...) per door.
     class PassageMemory
     {
         std::unordered_map<std::uint64_t, DoorPassage> doors_;
-        std::optional<PoseSample> prev_;         ///< the previous frame's ESTIMATE (pred − prev_ = the odometric step)
-        PoseSample odo_;                         ///< x_odo, P_odo
+        std::optional<PoseSample> prev_;         ///< the previous frame's estimate (pred − prev_ = the odometric step)
         Eigen::Vector2f d_{0.f, 0.f};            ///< cumulative odometric displacement since the memory started
         double half_body_ = 0.0;
         double w_last_ = 1.0;
@@ -343,39 +342,24 @@ namespace rc::crossing
         void set_half_body_width(float h) { half_body_ = h; }
         void clear() { doors_.clear(); prev_.reset(); d_.setZero(); w_last_ = 1.0; }
         std::size_t doors() const { return doors_.size(); }
-        double last_continuity() const { return w_last_; }   ///< the weight the last estimate re-seeded x_odo with
-        const PoseSample& propagated() const { return odo_; }
+        double last_continuity() const { return w_last_; }   ///< w of the last frame's correction
 
         /// `pred` = the localiser's odometry prediction of this frame (previous estimate + this frame's odometric step),
-        /// `pred_cov` its covariance P_pred = F P F' + Q (zero when the caller has none: then no process noise is added).
+        /// `pred_cov` its covariance P_pred = F P F' + Q (the innovation est − pred has covariance ≤ P_pred; P_pred + Σ_est
+        /// is the generous side, so a doorway snap the prediction's own noise explains is never read as a jump — fix
+        /// round 2). A zero / non-finite pred_cov (a caller without one) falls back to Σ_now + Σ_prev.
         void begin_frame(const Eigen::Vector2f& xy, const Eigen::Matrix2f& cov, const Eigen::Vector2f& pred,
                          double area, bool jump_committed,
                          const Eigen::Matrix2f& pred_cov = Eigen::Matrix2f::Zero())
         {
-            if (not prev_.has_value())
+            if (prev_.has_value())
             {
-                odo_ = PoseSample{xy, cov}; d_.setZero(); w_last_ = 1.0; prev_ = PoseSample{xy, cov};
-                return;
+                d_ += pred - prev_->xy;
+                const bool have_pred_cov = pred_cov.allFinite() and pred_cov.trace() > 0.f;
+                const Eigen::Matrix2f S = have_pred_cov ? Eigen::Matrix2f(pred_cov + cov) : Eigen::Matrix2f(cov + prev_->cov);
+                w_last_ = p_continuous(xy - pred, S, area, jump_committed);
+                for (auto& [k, d] : doors_) d.w_since *= w_last_;
             }
-            // 1. PREDICT: the odometric step is what the prediction added to the previous estimate; its noise is what the
-            //    prediction added to the previous covariance (Q, projected to PSD — the difference of two estimates is
-            //    not guaranteed PSD; the floor at 0 is numerical).
-            const Eigen::Vector2f step = pred - prev_->xy;
-            odo_.xy += step; d_ += step;
-            if (pred_cov.allFinite() and pred_cov.trace() > 0.f)
-            {
-                const Eigen::Matrix2f Q = 0.5f * ((pred_cov - prev_->cov) + (pred_cov - prev_->cov).transpose());
-                const Eigen::SelfAdjointEigenSolver<Eigen::Matrix2f> es(Q);
-                odo_.cov += es.eigenvectors() * es.eigenvalues().cwiseMax(0.f).asDiagonal() * es.eigenvectors().transpose();
-            }
-            // 2. RE-SEED: the estimate is the propagated position with probability w (a continuous reading of it) and a
-            //    teleport with 1 − w. The propagated belief is that two-component mixture, moment-matched.
-            const Eigen::Vector2f nu = xy - odo_.xy;
-            const double w = p_continuous(nu, odo_.cov + cov, area, jump_committed);
-            const float wf = static_cast<float>(w);
-            odo_.cov = wf * cov + (1.f - wf) * odo_.cov + wf * (1.f - wf) * nu * nu.transpose();
-            odo_.xy += wf * nu;
-            w_last_ = w;
             prev_ = PoseSample{xy, cov};
         }
 
@@ -388,7 +372,6 @@ namespace rc::crossing
             const Eigen::Matrix2f R = T.linear();
             const auto mv = [&](PoseSample& p) { p.xy = T * p.xy; p.cov = R * p.cov * R.transpose(); };
             if (prev_.has_value()) mv(*prev_);
-            mv(odo_);
             d_ = R * d_;
             for (auto& [k, d] : doors_)
             {
@@ -403,8 +386,7 @@ namespace rc::crossing
 
     inline Crossing evaluate_core(const DoorAperture& ap, const std::vector<Eigen::Vector2f>& polygon,
                                   const Eigen::Vector2f& xy, const Eigen::Matrix2f& cov_xy, float r_body,
-                                  float sigma_normal, double half_body, DoorPassage* state,
-                                  const PoseSample& odo, const Eigen::Vector2f& d_odo)
+                                  float sigma_normal, double half_body, DoorPassage* state, const Eigen::Vector2f& d_odo)
     {
         Crossing c;
         const Eigen::Vector2f ab = ap.b - ap.a;
@@ -431,37 +413,36 @@ namespace rc::crossing
         //   lands in the "through a wall" class, which the contact model prices at ε like a shut leaf. h is the body's
         //   half-WIDTH (the dimension across the doorway), not r_body (half the larger dimension, the doorway term's).
         //   The memory-less evaluate() keeps h = 0 (the centre test it always was).
-        const Reading now = read(g, xy, cov_xy, half_body);   // the ESTIMATE against the CURRENT read
+        const Reading now = read(g, xy, cov_xy, half_body);   // the estimate against the CURRENT read
 
-        // ★ DID THE BODY GO THROUGH THE APERTURE — A QUESTION ABOUT THE ODOMETRIC PATH, NOT THE POSE (Task 16, round 4).
+        // ★ DID THE BODY GO THROUGH THE APERTURE — A QUESTION ABOUT THE ODOMETRIC PATH, NOT THE POSE (Task 16, round 5).
         //   recog_proto5 leg 5: centre 2.73 m past door_39, then 1.4 m sideways along the new room ⇒ p_span(now) 2e-11,
         //   no birth: the span belongs to the moment of PASSAGE. And a passage is MOTION of the body: the estimate
         //   jumping (relocalisation, try58: 4.32 m in a doorway), jittering, or the door's read moving across a parked
-        //   robot moves no body across anything. So:
-        //   ONE RULE. The passage mass A labels the part of P(x_odo past the anchor line G*) that got there by odometric
-        //   motion between the jambs. Only an odometric step CREATES label: Δ = P*(past) over the step from the
-        //   propagated position at this door's last update to that position plus the odometric displacement since, both
-        //   read against the same G*; Δ > 0 enters A × span at the point the step meets the line, Δ < 0 leaves A in
-        //   proportion. Everything else that changes P*(past) — the estimate re-seeding x_odo, the anchor following a
-        //   corrected read — RESCALES A with it: the fraction A / P*(past) is the label and it is kept. A parked robot
-        //   (zero odometric step) therefore never adds passage, whatever the estimate, the read or the jitter do; and A
-        //   is 0 until the odometry has carried the body across.
-        //   THE ANCHOR is the line as it was when the robot approached it: it follows the current read with the soft
-        //   weight κ = sides · min(1, |odometric step| / |read − anchor|), where sides = (1 − |P(past)_read − P(past)_G*|)
-        //   ·|2P(past)_read − 1|·|2P(past)_G* − 1| (x_odo against each line) is 1 when the body is clearly on the SAME
-        //   side of both (re-anchoring changes nothing it is judged by) and → 0 near either line or on different sides.
-        //   The pace factor is what makes κ a weight on MOTION, not on time: a per-frame blend integrates (200 frames at
-        //   1.4 % walk the anchor through a parked robot), so the anchor may move at most as far as the body did since
-        //   this door's last update — a parked robot's anchor is frozen whatever the read does, and a driving robot
-        //   re-adopts a corrected read at the pace of its own approach. Continuous, no constant.
-        //   ⚠ Consequence, by design: a line that moved INTO the room while the robot was clearly in front of both is
-        //   adopted as it drives on, and later motion across it IS a passage under the belief. A read whose σ is
-        //   over-stated keeps the body "near the line" longer (sides small), so door_concept must state its σ honestly.
-        //   THE LABELS OF THE CURRENT "PAST" MASS p_now = P(estimate past the current read):
-        //     R = max(0, p_now − P*(past)): past under the estimate/read but NOT under the odometric path → the physical
-        //         state "not crossed" (a re-read or a jump of the estimate), priced like N;
-        //     the rest, min(p_now, P*(past)), is odometric past mass and carries the path's labels: A (between the
-        //         jambs) and W = the remainder (through a wall/jamb).
+        //   robot moves no body across anything. So, per door, against an anchor read G*:
+        //   1. THE ODOMETRIC STEP since this door's last update (the estimate then + the odometric displacement since) is
+        //      the only thing that CREATES label: Δ = ΔP*(past) > 0 enters A × span at the point the step meets the line;
+        //      Δ < 0 leaves A and J in proportion. A parked robot (zero odometric step) never adds passage, whatever the
+        //      estimate, the read or the jitter do; A is 0 until the odometry has carried the body across.
+        //   2. THE ESTIMATE'S CORRECTION (from there to the estimate now) is a mixture: with w = P(continuous since the last
+        //      update) a re-seed that KEEPS the labels (A, J rescale with P*(past): the fraction is the label); with 1 − w
+        //      a frame SHIFT that carries no passage — what it pushes past the line is J ("jumped"), what it pulls back
+        //      leaves in proportion. J is never converted by motion onward: a jump that lands the body past the door is
+        //      not a passage; driving back and crossing again is.
+        //   3. THE ANCHOR follows the current read with κ = sides · min(1, |odometric step| / |read − anchor|), sides =
+        //      (1 − |P(past)_read − P(past)_G*|)·|2P(past)_read − 1|·|2P(past)_G* − 1| (the estimate against each line):
+        //      1 when the body is clearly on the SAME side of both (re-anchoring changes nothing it is judged by), → 0 near
+        //      either line or on different sides. The pace factor makes κ a weight on MOTION, not on time (a per-frame
+        //      blend integrates: 200 frames at 1.4 % walked the anchor through a parked robot): a parked robot's anchor is
+        //      frozen whatever the read does, a driving robot re-adopts a corrected read at the pace of its own approach.
+        //      κ is a constant-free SPEED LIMIT on the anchor (shaping), not a generative term: it states no likelihood,
+        //      it only bounds how fast the line the motion is judged against may be redrawn. Its move rescales A and J.
+        //      ⚠ By design: a line that moved INTO the room while the robot was clearly in front of both is adopted as it
+        //      drives on, and later motion across it IS a passage under the belief. A read whose σ is over-stated keeps
+        //      the body "near the line" longer (sides small), so door_concept must state its σ honestly.
+        //   LABELS of the current past mass p_now = P(estimate past the CURRENT read): R = max(0, p_now − P*(past)) (past
+        //   under the read but not under the anchor: a re-read) + J's share — both the physical state "not crossed",
+        //   priced like N; the rest carries A, and W = the remainder (through a wall/jamb).
         double qA = 0.0, R = 0.0;
         if (state == nullptr)
             qA = now.past * now.span;   // no memory: the instantaneous reading
@@ -469,14 +450,14 @@ namespace rc::crossing
         {
             if (state->geo.half <= 0.0)   // first sight of this door: no path relative to it yet, the instantaneous reading
             {
-                const Reading o = read(g, odo.xy, odo.cov, half_body);
-                state->geo = g; state->thru = o.past * o.span; state->last = odo; state->d_last = d_odo;
+                state->geo = g; state->thru = now.past * now.span; state->jumped = 0.0;
+                state->last = PoseSample{xy, cov_xy}; state->d_last = d_odo; state->w_since = 1.0;
             }
             const ApertureGeo& G = state->geo;
-            double A = state->thru;
-            // 1. the odometric step since this door's last update, against the anchor: the only thing that labels
+            double A = state->thru, J = state->jumped;
+            // 1. the odometric step
             const Reading a = read(G, state->last.xy, state->last.cov, half_body);
-            const Reading b = read(G, state->last.xy + (d_odo - state->d_last), odo.cov, half_body);
+            const Reading b = read(G, state->last.xy + (d_odo - state->d_last), cov_xy, half_body);
             if (b.past > a.past)
             {
                 const double ds = b.s - a.s;
@@ -486,13 +467,18 @@ namespace rc::crossing
                 A += (b.past - a.past) * phi_d((free - uc) / st) * phi_d((free + uc) / st);
             }
             else if (a.past > 0.0)
-                A *= b.past / a.past;
-            // 2. the re-seed (where the estimate pulled x_odo) rescales
-            const Reading o = read(G, odo.xy, odo.cov, half_body);
-            A = b.past > 0.0 ? A * o.past / b.past : 0.0;
-            // 3. the anchor follows the read with κ; its move rescales
-            const Reading n = read(g, odo.xy, odo.cov, half_body);
-            const double sides = (1.0 - std::abs(n.past - o.past)) * std::abs(2.0 * n.past - 1.0) * std::abs(2.0 * o.past - 1.0);
+            {
+                A *= b.past / a.past; J *= b.past / a.past;
+            }
+            // 2. the estimate's correction: continuous re-seed (labels kept) vs frame shift (pushes J)
+            const Reading e = read(G, xy, cov_xy, half_body);
+            const double wc = state->w_since;
+            const double r  = b.past > 0.0 ? std::min(e.past / b.past, 1.0) : 0.0;   // ≤ 1: the shrink both share
+            const double Ac = b.past > 0.0 ? A * e.past / b.past : 0.0, Jc = b.past > 0.0 ? J * e.past / b.past : 0.0;
+            const double Aj = A * r, Jj = J * r + std::max(0.0, e.past - b.past);
+            A = wc * Ac + (1.0 - wc) * Aj; J = wc * Jc + (1.0 - wc) * Jj;
+            // 3. the anchor follows the read at the pace of the body
+            const double sides = (1.0 - std::abs(now.past - e.past)) * std::abs(2.0 * now.past - 1.0) * std::abs(2.0 * e.past - 1.0);
             const float gh = static_cast<float>(g.half), Gh = static_cast<float>(G.half);
             const float dist = std::max((g.centre - gh * g.tangent - (G.centre - Gh * G.tangent)).norm(),
                                         (g.centre + gh * g.tangent - (G.centre + Gh * G.tangent)).norm());
@@ -507,12 +493,15 @@ namespace rc::crossing
             Gn.sig_normal = G.sig_normal + kappa * (g.sig_normal - G.sig_normal);
             Gn.sig_along  = G.sig_along + kappa * (g.sig_along - G.sig_along);
             if (not Gn.tangent.allFinite() or not Gn.n_out.allFinite()) Gn = g;   // antiparallel reads: numerical
-            const Reading on = read(Gn, odo.xy, odo.cov, half_body);
-            A = o.past > 0.0 ? std::min(A * on.past / o.past, on.past) : 0.0;   // min: A ≤ P*(past), numerical
-            state->geo = Gn; state->thru = A; state->last = odo; state->d_last = d_odo;
+            const Reading on = read(Gn, xy, cov_xy, half_body);
+            const double ra = e.past > 0.0 ? on.past / e.past : 0.0;
+            A = std::min(A * ra, on.past); J = std::min(J * ra, on.past - A);   // A + J ≤ P*(past): numerical
+            state->geo = Gn; state->thru = A; state->jumped = J;
+            state->last = PoseSample{xy, cov_xy}; state->d_last = d_odo; state->w_since = 1.0;
             // 4. the labels of the current past mass
-            qA = on.past > 0.0 ? A * std::min(1.0, now.past / on.past) : 0.0;
-            R  = std::max(0.0, now.past - on.past);
+            const double share = on.past > 0.0 ? std::min(1.0, now.past / on.past) : 0.0;
+            qA = A * share;
+            R  = std::max(0.0, now.past - on.past) + J * share;
         }
 
         c.s       = static_cast<float>(now.s);
@@ -566,14 +555,14 @@ namespace rc::crossing
                              const Eigen::Vector2f& xy, const Eigen::Matrix2f& cov_xy, float r_body,
                              float sigma_normal)
     {
-        return evaluate_core(ap, polygon, xy, cov_xy, r_body, sigma_normal, 0.0, nullptr, PoseSample{}, Eigen::Vector2f::Zero());
+        return evaluate_core(ap, polygon, xy, cov_xy, r_body, sigma_normal, 0.0, nullptr, Eigen::Vector2f::Zero());
     }
 
     inline Crossing PassageMemory::evaluate(const DoorAperture& ap, const std::vector<Eigen::Vector2f>& polygon,
                                             const Eigen::Vector2f& xy, const Eigen::Matrix2f& cov_xy, float r_body,
                                             float sigma_normal)
     {
-        return evaluate_core(ap, polygon, xy, cov_xy, r_body, sigma_normal, half_body_, &doors_[key(ap)], odo_, d_);
+        return evaluate_core(ap, polygon, xy, cov_xy, r_body, sigma_normal, half_body_, &doors_[key(ap)], d_);
     }
 
     inline void log_row(const std::string& name, float p_open, const Crossing& c,

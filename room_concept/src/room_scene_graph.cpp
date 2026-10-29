@@ -980,9 +980,9 @@ void RoomSceneGraph::step_proto_room_impl(const rc::RoomConcept::UpdateResult& r
         crossing_mem_.apply(Tp * crossing_seen_pending_.inverse());
         crossing_seen_pending_ = Tp;
     }
-    // The odometry-propagated position advances by what the prediction added to the previous estimate (pred − prev) with
-    // P_pred's process noise, and is re-seeded from this estimate only to the degree the estimate is a continuous reading
-    // of it (never when the localiser committed a discrete jump: reloc_epoch advanced). See crossing::PassageMemory.
+    // This frame's displacement is split into the odometric step (pred − previous estimate: the body's motion, the only
+    // thing that creates passage) and the estimate's correction, continuous with P(p_continuous) and a frame shift
+    // otherwise (always when the localiser committed a discrete jump: reloc_epoch advanced). See crossing::PassageMemory.
     crossing_mem_.set_half_body_width(0.5f * params_->ROBOT_WIDTH);
     crossing_mem_.begin_frame(xy, cov_xy, Eigen::Vector2f(res.pred_x, res.pred_y), rc::crossing::polygon_area(polygon),
                               res.reloc_epoch != crossing_epoch_, res.pred_cov);
@@ -1116,7 +1116,7 @@ void RoomSceneGraph::step_proto_room_impl(const rc::RoomConcept::UpdateResult& r
                              .arg(QString::fromStdString(name)).arg(QString::fromStdString(best_ap->name));
     qInfo().noquote() << QString("[room][proto] passage evidence: odometric path through the jambs %1 (past by re-read/jump only %2), "
                                  "door prior P(open) %3 -> P(open | path) %4, p_cross %5 (%6 doors in memory, "
-                                 "estimate re-seeds the propagated position with weight %7)")
+                                 "last correction continuous with P %7)")
                              .arg(best.p_through, 0, 'g', 4).arg(best.p_reread, 0, 'g', 4).arg(best_ap->p_open, 0, 'g', 4)
                              .arg(best.p_open_post, 0, 'g', 4).arg(best.p_cross, 0, 'g', 6)
                              .arg(crossing_mem_.doors()).arg(crossing_mem_.last_continuity(), 0, 'g', 4);
