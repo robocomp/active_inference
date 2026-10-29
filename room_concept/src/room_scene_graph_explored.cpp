@@ -38,6 +38,7 @@ std::string RoomSceneGraph::room_node_name() const
 
 void RoomSceneGraph::note_recall_memory(const Recall& recall)
 {
+    resume_camera_cover(recall.name);   // before the settled publish below: an unfinished camera phase is not "explored"
     const bool had_record = explored_.memory().recall(recall.name).has_value();
     explored_.enter_recalled(recall.name, recall.explored_p);
     // The explorer's standpoints and its countable outline are the REMEMBERED outline (published frame): a re-entry
@@ -49,7 +50,7 @@ void RoomSceneGraph::note_recall_memory(const Recall& recall)
                                   : had_record ? "this agent's record of the room"
                                   : "outline only: the promoted layout is complete");
     // A complete memory is explored on entry; a partial one is published on the explorer's first plan.
-    if (not explored_.recalled_partial()) publish_explored(explored_.settled(recall.name));
+    if (not explored_.recalled_partial() and not camera_cover_open()) publish_explored(explored_.settled(recall.name));
 }
 
 float RoomSceneGraph::footprint_area() const
@@ -112,16 +113,16 @@ void RoomSceneGraph::resolve_zed_mount()
 
 void RoomSceneGraph::observe_camera_cover(const rc::RoomConcept::UpdateResult& res)
 {
-    if (not G_ or not startup_proto_ or recalled_visit_) return;   // a surveyed room (first or crossing-born) only
+    if (not G_ or not startup_proto_ or camera_finished_) return;   // this agent's room, while its camera question is open
     resolve_zed_mount();
     // intrinsics per call until complete: robot_concept publishes them only once frames flow (graph_obstacles.h)
-    if (not cam_sensor_.has_vertical() or not (cam_sensor_.hfov_rad > 0.05f))
+    if (not cam_sensor_.complete())
         if (const auto zed = G_->get_node("zed"); zed.has_value())
             if (auto cam = G_->get_camera_api(zed.value()); cam)
             {
                 const float fx = cam->get_focal_x(), fy = cam->get_focal_y();
                 const float W = static_cast<float>(cam->get_width()), H = static_cast<float>(cam->get_height());
-                if (fx > 0.f and W > 0.f and fy > 0.f and H > 0.f)
+                if (fx > 0.f and W > 0.f and fy > 0.f and H > 0.f and not cam_sensor_.has_vertical())   // once
                 {
                     cam_sensor_.hfov_rad = 2.f * std::atan(0.5f * W / fx);
                     cam_sensor_.vfov_rad = 2.f * std::atan(0.5f * H / fy);
@@ -129,11 +130,13 @@ void RoomSceneGraph::observe_camera_cover(const rc::RoomConcept::UpdateResult& r
                             << "deg, vfov" << cam_sensor_.vfov_rad * 57.29578f << "deg";
                 }
             }
-    if (startup_promoted_ and not cam_sensor_.complete() and not camera_model_warned_ and zed_mount_tries_ >= 200)
+    if (startup_promoted_ and not cam_sensor_.complete() and not camera_model_warned_)
     {
         camera_model_warned_ = true;
-        qWarning() << "[room][camera-cover] camera model INCOMPLETE at promotion — the room's boundary camera coverage"
-                   << "cannot be assessed; afford_room goes to the pose planner on the LiDAR survey alone";
+        qWarning() << "[room][camera-cover] camera model INCOMPLETE at promotion (hfov" << cam_sensor_.hfov_rad * 57.29578f
+                   << "vfov" << cam_sensor_.vfov_rad * 57.29578f << "deg, height" << cam_sensor_.height_m << "m) — until it"
+                   << "completes the room's boundary camera coverage cannot be assessed and afford_room goes to the pose"
+                   << "planner on the LiDAR survey alone";
     }
     if (not zed_mount_resolved_ or not cam_sensor_.complete()) return;
     // The boundary in the PUBLISHED frame: the promoted room's polygon, or the survey's ring before promotion (its views
@@ -152,11 +155,73 @@ rc::layout::Plan RoomSceneGraph::plan_camera_cover(const rc::layout::FeasibleGri
                                                    const rc::layout::Admissible& standable,
                                                    const rc::layout::Admissible& deferred)
 {
-    // A standpoint is in the internal frame; the coverage is in the published one. The camera sits at the zed mount, not
-    // at the robot origin — a few cm, ignored here as in the LiDAR gain (its origin is the standpoint too).
-    return rc::layout::plan_coverage(grid, robot, ep, standable,
-        [this](const Eigen::Vector2f& v) { return cam_cover_.best_look(T_pub_int_ * v, cam_sensor_).gain; },
-        cam_cover_.price(), deferred);
+    // A standpoint is in the internal frame; the coverage is in the published one. The look is scored at the ARRIVAL
+    // heading (robot → standpoint): what the camera will see on getting there, whether or not the controller turns to
+    // the published yaw (camera_coverage.h). The zed sits a few cm from the robot origin — ignored here, as the LiDAR
+    // gain ignores its own mount; observe() uses the real zed pose. An unreachable best target is excluded and the plan
+    // re-run (plan_coverage_reachable): it never ends the phase by itself.
+    const Eigen::Vector2f r_pub = T_pub_int_ * robot;
+    return rc::layout::plan_coverage_reachable(grid, robot, ep, standable,
+        [this, r_pub](const Eigen::Vector2f& v)
+        {
+            const Eigen::Vector2f v_pub = T_pub_int_ * v, d = v_pub - r_pub;
+            return d.squaredNorm() > 1e-9f ? cam_cover_.look_gain(v_pub, std::atan2(d.y(), d.x()), cam_sensor_) : 0.f;
+        },
+        cam_cover_.price(cam_sensor_), deferred);
+}
+
+void RoomSceneGraph::latch_camera_phase()
+{
+    // The camera phase's OWN verdict: plan_coverage's `finished` — no REACHABLE look newly shows one door's worth of wall
+    // (unreachable targets were excluded and re-planned; recently refused ones keep it "deferred"). layout_finished_ is
+    // the LiDAR survey's and is left alone.
+    if (camera_visits0_ < 0) camera_visits0_ = layout_visits_;   // the phase's own visits, not the survey's
+    if (not layout_last_plan_.finished or camera_finished_) return;
+    camera_finished_ = true;
+    float total = 0.f;
+    for (const auto& c : cam_cover_.cells()) total += c.len;
+    const float price = cam_cover_.price(cam_sensor_), residual = cam_cover_.residual_length(cam_sensor_);
+    qInfo().noquote() << QString("[room][camera-cover] boundary camera coverage FINISHED: %1 of %2 m of wall could still "
+                                 "be shown to the detector, no reachable look worth one door (%3 m) — afford_room goes "
+                                 "to the pose planner")
+                             .arg(residual, 0, 'f', 2).arg(total, 0, 'f', 2).arg(price, 0, 'f', 2);
+    // ★ LOUD while the detector envelope is uncalibrated: a phase that finishes without a single camera-phase visit while
+    //   more than a door's worth of wall was never shown is almost always a room too narrow for the envelope's band
+    //   (~2.4-3.1 m for a door with the default envelope), i.e. the model, not the room, ended it.
+    if (layout_visits_ == camera_visits0_ and residual > price and not camera_narrow_warned_)
+    {
+        camera_narrow_warned_ = true;
+        qWarning().noquote() << QString("[room][camera-cover] WARNING: camera phase FINISHED WITHOUT A VISIT with %1 m of "
+                                        "wall never shown to the door detector (attainable P %2) — the room is called "
+                                        "explored but a door there may be undiscovered; the detector envelope is "
+                                        "UNCALIBRATED (rc::detect defaults)")
+                                    .arg(residual, 0, 'f', 2).arg(cam_cover_.attainable_p(cam_sensor_), 0, 'f', 2);
+    }
+}
+
+void RoomSceneGraph::remember_camera_cover()
+{
+    if (const std::string name = room_node_name(); not name.empty() and startup_proto_ and cam_cover_.ready())
+        camera_memory_[name] = CameraMemo{cam_cover_, camera_finished_};
+}
+
+void RoomSceneGraph::resume_camera_cover(const std::string& room)
+{
+    // A re-entry: the cameras' record of this room (published frame = the room's own, the one the recall restores).
+    // No record = a room this run never surveyed with the cameras (remembered from before): no camera question is
+    // reopened — a remembered door there is door_concept's look (door_look.h), not this coverage.
+    if (const auto it = camera_memory_.find(room); it != camera_memory_.end())
+    {
+        cam_cover_ = it->second.cover;
+        camera_finished_ = it->second.finished;
+        camera_visits0_ = -1;
+        if (not camera_finished_)
+            qInfo().noquote() << QString("[room][camera-cover] %1 re-entered with its boundary camera coverage UNFINISHED "
+                                         "(%2 m still to show the detector): the camera phase resumes")
+                                     .arg(QString::fromStdString(room)).arg(cam_cover_.residual_length(cam_sensor_), 0, 'f', 2);
+    }
+    else
+        camera_finished_ = true;
 }
 
 }   // namespace rc

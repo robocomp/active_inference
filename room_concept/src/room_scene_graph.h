@@ -338,10 +338,19 @@ private:
     bool                 camera_finished_ = false;     ///< the camera phase's latched `finished` (cf. layout_finished_)
     bool                 layout_plan_camera_ = false;  ///< layout_last_plan_ is the camera-coverage plan
     int                  camera_visits0_ = -1;         ///< layout_visits_ when the camera phase began (-1 = not yet)
+    bool                 camera_narrow_warned_ = false;
+    struct CameraMemo { rc::camcov::Coverage cover; bool finished = false; };
+    std::map<std::string, CameraMemo> camera_memory_;  ///< by room name, in that room's published frame
+    void remember_camera_cover();                       ///< the room being left (dsr_room_id_), before the re-arm
+    void resume_camera_cover(const std::string& room);  ///< a re-entry: reopen what its cameras had not finished
+    void latch_camera_phase();                          ///< the camera plan's own `finished` (+ the narrow-room warning)
     bool                 camera_model_warned_ = false;
-    /// The camera phase can still run here: a promoted fresh room (not a recall), a complete camera model, not finished.
+    /// The camera phase can still run here: promoted, a complete camera model, not finished (a recall resumes it).
     [[nodiscard]] bool camera_cover_open() const
-    { return startup_promoted_ and not recalled_visit_ and cam_sensor_.complete() and not camera_finished_; }
+    { return startup_promoted_ and cam_sensor_.complete() and not camera_finished_; }
+    /// The camera phase plans now: promoted, nothing contested, the camera question open (Task 12).
+    [[nodiscard]] bool camera_phase_now() const
+    { return startup_promoted_ and refine_contested_.empty() and camera_cover_open(); }
     void resolve_zed_mount();                                        ///< zed → robot through the RT tree, once
     void observe_camera_cover(const rc::RoomConcept::UpdateResult& res);   ///< every frame: what the ZED is offered
     /// The camera phase's plan: gain = boundary metres a look would newly put before the detector, price = a door width.

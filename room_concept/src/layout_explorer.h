@@ -131,6 +131,7 @@ struct Plan
     int free_cells  = -1;                  ///< free cells in the whole grid (idem)
     std::optional<Eigen::Vector2f> best_unreached;   ///< on "unreachable": the best candidate by gain per straight metre
     float best_unreached_gain = 0.f;       ///< the gain of `best_unreached`, in the planner's own unit (set with it)
+    std::vector<Eigen::Vector2f> tried_unreached;   ///< plan_coverage: candidates whose A* found no route (this plan)
     std::string why;                       ///< one word on every path: ok | finished | no_feasible | no_gain | unreachable
 };
 
@@ -162,5 +163,12 @@ Plan plan(const wallmap::WallMap& map, const wallmap::Polygon& poly, const Feasi
 using GainFn = std::function<float(const Eigen::Vector2f&)>;
 Plan plan_coverage(const FeasibleGrid& grid, const Eigen::Vector2f& robot, const ExplorerParams& p,
                    const Admissible& admissible, const GainFn& gain, float min_gain, const Admissible& deferred = {});
+
+/// plan_coverage that never stops at "unreachable" (Task 12, 2026-10-29): the candidates it could not route to are
+/// excluded and it plans again, until a reachable target is chosen or nothing reachable is worth `min_gain` — then it
+/// is `finished` (or "deferred" when only recently refused spots hold gain). Terminates: each pass excludes >= 1.
+Plan plan_coverage_reachable(const FeasibleGrid& grid, const Eigen::Vector2f& robot, const ExplorerParams& p,
+                             const Admissible& admissible, const GainFn& gain, float min_gain,
+                             const Admissible& deferred = {});
 
 }   // namespace rc::layout

@@ -417,7 +417,7 @@ Plan plan_coverage(const FeasibleGrid& grid, const Eigen::Vector2f& robot, const
     for (const auto& [g, v] : cands)
     {
         auto path = grid.astar(out.start, v);
-        if (path.size() <= 1) continue;
+        if (path.size() <= 1) { out.tried_unreached.push_back(v); continue; }
         float L = 0.f;
         for (std::size_t k2 = 1; k2 < path.size(); ++k2) L += (path[k2] - path[k2 - 1]).norm();
         const float sc = g / (1.f + L);
@@ -433,6 +433,23 @@ Plan plan_coverage(const FeasibleGrid& grid, const Eigen::Vector2f& robot, const
         out.free_cells = grid.free_count();
     }
     return out;
+}
+
+Plan plan_coverage_reachable(const FeasibleGrid& grid, const Eigen::Vector2f& robot, const ExplorerParams& p,
+                             const Admissible& admissible, const GainFn& gain, float min_gain, const Admissible& deferred)
+{
+    std::vector<Eigen::Vector2f> unreached;
+    const Admissible ok = [&](const Eigen::Vector2f& v)
+    {
+        return (not admissible or admissible(v))
+           and std::ranges::none_of(unreached, [&](const Eigen::Vector2f& u) { return (u - v).squaredNorm() < 1e-8f; });
+    };
+    for (;;)
+    {
+        Plan out = plan_coverage(grid, robot, p, ok, gain, min_gain, deferred);
+        if (out.why != "unreachable" or out.tried_unreached.empty()) return out;
+        unreached.insert(unreached.end(), out.tried_unreached.begin(), out.tried_unreached.end());
+    }
 }
 
 }   // namespace rc::layout

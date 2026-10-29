@@ -15,14 +15,20 @@
 //   frames from one viewpoint are not independent looks (door_look.h's absence channel makes the same argument), so a
 //   window seen at P = 0.4 is seen at 0.4 until a BETTER view comes, not after ten more frames of the same one.
 //
-//   gain(v)  = max over headings ψ of  Σ_i len_i · max(0, P_i(v, ψ) − seen_i)
-//            = metres of boundary a look from v would newly put before the detector (probability-weighted).
-//   price    = one door width: a trip that cannot newly show at least one door's width of wall is not worth taking
-//              (the camera analogue of the LiDAR survey's footprint-area price). plan_coverage's own `finished`.
+//   gain(v, ψ) = Σ_i len_i · max(0, P_i(v, ψ) − seen_i)
+//              = metres of boundary a look from v along ψ would newly put before the detector (probability-weighted).
+//   ψ = the ARRIVAL heading (robot → v): the view the camera will actually have when the robot gets there, whether or
+//       not the controller turns to the published yaw — so a plan's prediction is what the next frames observe, and a
+//       visit is credited by what the camera ACTUALLY saw (observe() runs on the real pose every frame).
+//   price = ONE DOOR at the detector's ATTAINABLE P: door width · max_d P(detect | door head-on at range d) — the most
+//       one door-width of wall can ever add (rc::nbv::standoff_band's peak). A trip that cannot newly show one door's
+//       worth is not worth taking (the camera analogue of the LiDAR survey's footprint-area price); plan_coverage's own
+//       `finished`. ★ Pricing at the attainable P, not P = 1: with the uncalibrated envelope P never exceeds ~0.43 for a
+//       door, so a 1.8 m stub (two windows) would never have paid a full door width — exactly where doors sit.
 //
-// ★ CONSTANTS. The door prior (0.90 x 2.00 m, 5 cm leaf) is door_concept's (DoorPriorW/H, door_look.h Params): it is
-//   what the detector looks for, not a tuning knob. The detector envelope is the Sensor's (rc::detect defaults =
-//   door_concept's DoorModel.Detect* defaults), uncalibrated there and here alike.
+// ★ CONSTANTS. The door prior is common/nbv/door_prior.h (door_look.h's values): what the detector looks for, not a
+//   tuning knob. The detector envelope is the Sensor's (rc::detect defaults = door_concept's DoorModel.Detect*
+//   defaults), uncalibrated there and here alike.
 //
 // Pure (Eigen + the common NBV header). tools/camera_coverage_test.cpp.
 // ═══════════════════════════════════════════════════════════════════════════════════════════════════════════
@@ -34,15 +40,11 @@
 #include <Eigen/Dense>
 
 #include "../../common/nbv/viewpoint_score.h"
+#include "../../common/nbv/door_prior.h"
 
 namespace rc::camcov
 {
-struct Params
-{
-    float door_w = 0.90f;   ///< m — door_concept's door prior width (DoorPriorW): the window a detection needs
-    float door_h = 2.00f;   ///< m — its height (DoorPriorW/H)
-    float wall_t = 0.05f;   ///< m — leaf/wall thickness (door_look.h thickness_m): occluder depth only
-};
+using Params = rc::nbv::DoorPrior;
 
 struct Cell
 {
@@ -50,12 +52,6 @@ struct Cell
     Eigen::Vector2f u{1.f, 0.f};   ///< along the wall (unit)
     float len  = 0.f;              ///< boundary metres this window stands for
     float seen = 0.f;              ///< best P(detect | door there) any camera pose has offered
-};
-
-struct Look
-{
-    float gain = 0.f;   ///< metres of boundary newly put before the detector (probability-weighted)
-    float yaw  = 0.f;   ///< the heading that buys it (outline frame)
 };
 
 inline float wrap(float a) { return std::atan2(std::sin(a), std::cos(a)); }
@@ -66,7 +62,16 @@ public:
     explicit Coverage(Params p = {}) : p_(p) {}
 
     [[nodiscard]] const Params& params() const { return p_; }
-    [[nodiscard]] float price() const { return p_.door_w; }
+    /// The best P(detect) a door window can ever be offered: head-on, at the envelope's best range (no occluder).
+    [[nodiscard]] float attainable_p(const rc::nbv::Sensor& s) const
+    {
+        if (not s.complete()) return 0.f;
+        rc::nbv::Target t;
+        t.w = p_.w_m; t.h = p_.t_m; t.z0 = 0.f; t.z1 = p_.h_m;
+        return rc::nbv::standoff_band(t, s, Eigen::Vector2f::Zero(), Eigen::Vector2f(0.f, 1.f), 0.f).peak_p;
+    }
+    /// One door's worth at the attainable P: the price of a trip.
+    [[nodiscard]] float price(const rc::nbv::Sensor& s) const { return p_.w_m * attainable_p(s); }
     [[nodiscard]] const std::vector<Cell>& cells() const { return cells_; }
     [[nodiscard]] bool ready() const { return not cells_.empty(); }
     void reset() { cells_.clear(); occl_.clear(); outline_.clear(); }
@@ -84,7 +89,7 @@ public:
             const float L = (b - a).norm();
             if (not (L > 1e-3f)) continue;
             const Eigen::Vector2f u = (b - a) / L;
-            const int n = std::max(1, static_cast<int>(std::lround(L / p_.door_w)));
+            const int n = std::max(1, static_cast<int>(std::lround(L / p_.w_m)));
             for (int i = 0; i < n; ++i)
             {
                 Cell c;
@@ -92,7 +97,7 @@ public:
                 c.u = u;
                 c.len = L / static_cast<float>(n);
                 for (const auto& o : cells_)
-                    if ((o.c - c.c).norm() <= 0.5f * p_.door_w and std::abs(o.u.dot(c.u)) > std::cos(std::numbers::pi_v<float> / 4.f))
+                    if ((o.c - c.c).norm() <= 0.5f * p_.w_m and std::abs(o.u.dot(c.u)) > std::cos(std::numbers::pi_v<float> / 4.f))
                         c.seen = std::max(c.seen, o.seen);   // ↑ parallel = within half a right angle (a Manhattan outline's two classes)
                 fresh.push_back(c);
             }
@@ -103,8 +108,8 @@ public:
         occl_.reserve(cells_.size());
         for (const auto& c : cells_)   // the walls, with THIS window punched out (the leaf sits inside its own wall)
         {
-            const std::vector<rc::nbv::WallGap> gap{{c.c, 0.5f * p_.door_w}};
-            occl_.push_back(rc::nbv::wall_obstacles(outline_, p_.wall_t, gap));
+            const std::vector<rc::nbv::WallGap> gap{{c.c, 0.5f * p_.w_m}};
+            occl_.push_back(rc::nbv::wall_obstacles(outline_, p_.t_m, gap));
         }
     }
 
@@ -128,36 +133,23 @@ public:
             cells_[i].seen = std::max(cells_[i].seen, p_detect(i, pos, yaw, s));
     }
 
-    /// The best look from standpoint `v`: the heading among the windows' own bearings (each window centred in the
-    /// frame) whose frustum holds the most still-unseen boundary, then scored exactly at that heading.
-    [[nodiscard]] Look best_look(const Eigen::Vector2f& v, const rc::nbv::Sensor& s) const
+    /// What a look from `v` along `yaw` would newly put before the detector: boundary metres, probability-weighted.
+    [[nodiscard]] float look_gain(const Eigen::Vector2f& v, float yaw, const rc::nbv::Sensor& s) const
     {
-        Look out;
-        if (not s.complete() or cells_.empty()) return out;
-        const std::size_t n = cells_.size();
-        std::vector<float> bearing(n), resid(n);
-        for (std::size_t i = 0; i < n; ++i)
-        {
-            const Eigen::Vector2f d = cells_[i].c - v;
-            bearing[i] = std::atan2(d.y(), d.x());
-            resid[i] = cells_[i].len * std::max(0.f, p_detect(i, v, bearing[i], s) - cells_[i].seen);
-        }
-        const float half = 0.5f * s.hfov_rad;
-        float best = -1.f;
-        std::size_t arg = 0;
-        for (std::size_t k = 0; k < n; ++k)
-        {
-            if (not (resid[k] > 0.f)) continue;
-            float g = 0.f;
-            for (std::size_t j = 0; j < n; ++j)
-                if (std::abs(wrap(bearing[j] - bearing[k])) <= half) g += resid[j];
-            if (g > best) { best = g; arg = k; }
-        }
-        if (best <= 0.f) return out;
-        out.yaw = bearing[arg];
-        for (std::size_t i = 0; i < n; ++i)
-            out.gain += cells_[i].len * std::max(0.f, p_detect(i, v, out.yaw, s) - cells_[i].seen);
-        return out;
+        if (not s.complete()) return 0.f;
+        float g = 0.f;
+        for (std::size_t i = 0; i < cells_.size(); ++i)
+            g += cells_[i].len * std::max(0.f, p_detect(i, v, yaw, s) - cells_[i].seen);
+        return g;
+    }
+
+    /// Boundary metres the detector could still be shown: Σ len·max(0, attainable P − seen).
+    [[nodiscard]] float residual_length(const rc::nbv::Sensor& s) const
+    {
+        const float pm = attainable_p(s);
+        float a = 0.f;
+        for (const auto& c : cells_) a += c.len * std::max(0.f, pm - c.seen);
+        return a;
     }
 
     /// Boundary metres weighted by what is still unseen: Σ len·(1 − seen) (diagnostics).
@@ -174,7 +166,7 @@ private:
         const Cell& c = cells_[i];
         rc::nbv::Target t;
         t.cx = c.c.x(); t.cy = c.c.y(); t.yaw = std::atan2(c.u.y(), c.u.x());
-        t.w = p_.door_w; t.h = p_.wall_t; t.z0 = 0.f; t.z1 = p_.door_h;
+        t.w = p_.w_m; t.h = p_.t_m; t.z0 = 0.f; t.z1 = p_.h_m;
         return t;
     }
 
@@ -192,7 +184,8 @@ struct OwnerInputs
     bool contested = false;          ///< the refiner holds contested cells
     bool recalled_partial = false;   ///< a partly remembered room
     bool layout_finished = false;    ///< the LiDAR survey's / recalled rest's latched verdict
-    bool camera_open = false;        ///< camera model complete, room not recalled, boundary camera coverage not finished
+    bool camera_open = false;        ///< camera model complete, boundary camera coverage not finished (a re-entry
+                                     ///< resumes it from the room's camera memory)
 };
 /// The layout explorer drives afford_room for: the proto survey; a promoted room the refiner contests; a partly remembered
 /// room until finished; and (Task 12) a promoted, freshly surveyed room until the cameras have covered its boundary.

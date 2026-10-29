@@ -124,7 +124,10 @@ public:
         // ★ ONLY THE BOUNDARY BELIEF IS REMEMBERED. The contested plan prices a refiner edit; a room is contested only
         //   once promoted, i.e. after its survey finished — so its memory is 1, whatever the refiner still asks.
         //   Remembering the refiner's value made the re-entry re-survey the whole remembered outline.
-        if (phase == Phase::Contested) memory_.remember(room, 1.f);
+        //   The CAMERA phase likewise runs only after the LiDAR survey finished: its open question (has the boundary been
+        //   shown to the cameras?) is remembered by the agent's per-room camera memory, which a re-entry resumes — not
+        //   here, where p < 1 would make the re-entry re-survey a LiDAR-complete room (Task 12 review).
+        if (phase == Phase::Contested or phase == Phase::Cameras) memory_.remember(room, 1.f);
         else if (p.has_value()) memory_.remember(room, *p);
         return p;
     }

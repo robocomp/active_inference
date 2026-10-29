@@ -1587,6 +1587,7 @@ void RoomSceneGraph::rearm_after_crossing(std::uint64_t new_room_id, const std::
                                           const std::string& door, float p_cross, const std::optional<Recall>& recall)
 {
     abandon_proposal_fit("the robot crossed out of P");   // before begin_room_estimation below re-arms the estimator
+    remember_camera_cover();   // the room left keeps what its cameras saw: a re-entry resumes it (camera_coverage.h)
     // The proto frame (the crossed aperture: x along it, +y into the new room) becomes the new room's PUBLISHED frame,
     // exactly as the robot's initial pose was the first room's. T_room_proto_ is that frame in the internal one.
     const std::uint64_t left_id = dsr_room_id_;
@@ -1749,6 +1750,7 @@ void RoomSceneGraph::arm_startup_proto(std::uint64_t room_id, const Eigen::Affin
     cam_cover_.reset();          // a new room: its boundary has been shown to no camera yet (camera_coverage.h)
     camera_finished_    = false;
     camera_visits0_     = -1;
+    camera_narrow_warned_ = false;
     layout_plan_camera_ = false;
     pub_gauge_frozen_  = true;
     {
@@ -2187,9 +2189,7 @@ void RoomSceneGraph::dsr_update_layout_affordance(const rc::RoomConcept::UpdateR
     // what promoted the room) and the legacy wall-map planner below has no input any more (the wall map is not observed
     // after promotion). Building the clearance grid anyway cost ~1/3 of the localiser thread, measured with perf
     // (a radius search per grid cell, every replan), for a plan that could only say "no gain".
-    // ...UNLESS the cameras have not yet been shown the boundary (Task 12, 2026-10-29): the LiDAR survey is complete, but
-    // doors are found by the CAMERAS, and a wall none has faced may hold one (live recog_proto2 leg 4, DOOR_2). The
-    // camera-coverage plan below runs then; this early exit is only for a room with nothing left for either.
+    // ...unless the CAMERAS have not been shown the boundary yet (camera phase, Task 12 — camera_coverage.h).
     if (replan and startup_promoted_ and refine_contested_.empty() and not recalled_partial() and not camera_cover_open())
     {
         layout_plan_ms_ = now;
@@ -2276,16 +2276,9 @@ void RoomSceneGraph::dsr_update_layout_affordance(const rc::RoomConcept::UpdateR
         const auto& map = room_concept_->wall_map_localiser_only();
         const auto poly = room_concept_->explorer_polygon_localiser_only();
         rej_ring_ = rej_furniture_ = rej_refused_ = 0;
-        layout_plan_camera_ = false;
-        // ── THE CAMERA PHASE (Task 12): promoted, nothing contested, boundary not yet before the cameras ──────────────
-        const bool camera_phase = startup_promoted_ and not recalled_partial() and refine_contested_.empty()
-                              and camera_cover_open();
+        layout_plan_camera_ = camera_phase_now() and not recalled_partial();   // Task 12: promoted, uncontested, cameras owed
         if (recalled_partial() and free_space_) layout_last_plan_ = plan_recalled_rest(grid, robot, ep, standable, deferred);
-        else if (camera_phase)
-        {
-            layout_last_plan_ = plan_camera_cover(grid, robot, ep, standable, deferred);
-            layout_plan_camera_ = true;
-        }
+        else if (layout_plan_camera_) layout_last_plan_ = plan_camera_cover(grid, robot, ep, standable, deferred);
         else if (room_concept_->plain_slam_driving() and free_space_)
         {
             const float footprint = footprint_area();
@@ -2348,23 +2341,7 @@ void RoomSceneGraph::dsr_update_layout_affordance(const rc::RoomConcept::UpdateR
         // "unreachable" then means the remaining gain lies beyond furniture, and it promotes.
         rc::layout::boxed_in_handoff(layout_last_plan_, layout_visits_);
         readiness_explore_.store(layout_finished_ ? 1.f : 0.f, std::memory_order_relaxed);
-        // The camera phase latches its OWN verdict, by the survey's rule: `finished` (no look shows a door's width of
-        // unseen wall), or nothing REACHABLE left once a standpoint has been visited. An unreachable target before that
-        // only re-plans (the refused area is deferred, its gain still counts: "deferred", never "finished").
-        if (layout_plan_camera_)
-        {
-            if (camera_visits0_ < 0) camera_visits0_ = layout_visits_;   // the phase's own visits, not the survey's
-            if (layout_last_plan_.finished or (layout_visits_ > camera_visits0_ and layout_last_plan_.why == "unreachable"))
-            {
-                camera_finished_ = true;
-                qInfo().noquote() << QString("[room][camera-cover] boundary camera coverage FINISHED (%1): %2 of %3 m of "
-                                             "wall still unseen-weighted, no look left worth a door width — afford_room "
-                                             "goes to the pose planner")
-                                         .arg(QString::fromStdString(layout_last_plan_.why))
-                                         .arg(cam_cover_.unseen_length(), 0, 'f', 2)
-                                         .arg([this] { float L = 0.f; for (const auto& c : cam_cover_.cells()) L += c.len; return L; }(), 0, 'f', 2);
-            }
-        }
+        if (layout_plan_camera_) latch_camera_phase();   // its OWN verdict (room_scene_graph_explored.cpp)
         else if (layout_last_plan_.finished
             or (layout_visits_ > 0
                 and (room_concept_->plain_slam_driving() ? room_concept_->has_map_layout() : room_concept_->map_ready())
@@ -2391,9 +2368,7 @@ void RoomSceneGraph::dsr_update_layout_affordance(const rc::RoomConcept::UpdateR
             layout_target_ = tgt;
             layout_best_d_ = std::numeric_limits<float>::infinity();   // the motion clock is NOT reset by a replan
             layout_yaw_    = dir.squaredNorm() > 1e-9f ? std::atan2(dir.y(), dir.x()) : 0.f;
-            // the camera phase's look is AIMED: face the heading that buys the gain (published frame → internal)
-            if (layout_plan_camera_)
-                layout_yaw_ = wrap_pi(cam_cover_.best_look(T_pub_int_ * tgt, cam_sensor_).yaw - angle_of(T_pub_int_));
+            if (layout_plan_camera_) layout_yaw_ = std::atan2(tgt.y() - robot.y(), tgt.x() - robot.x());   // its ARRIVAL heading
             layout_gain_   = layout_last_plan_.gain;
         }
         else
