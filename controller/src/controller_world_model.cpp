@@ -1,3 +1,4 @@
+#include "mission_door_relation.h"
 #include "controller_world_model.h"
 #include "../../common/room_resolve/room_resolve.h"   // rc::room::current_room (proto-aware, deterministic)
 #include "rt_ring.h"                                  // rc::rt::latest_slot_from_head (cortex head-index decode)
@@ -43,15 +44,22 @@ bool ControllerWorldModel::refresh_graph_state()
     //   polygon, for as long as the node lived (for ever: room_concept keeps a room it left). The rule
     //   (room_resolve.h) moves with the robot; nullopt is "nobody has told me", never a release, so the cached room
     //   is kept through a moment of ambiguity.
-    if (const auto room = rc::room::current_room_node(*graph_); room.has_value() and room->id() != graph_state_.room_id)
+    if (const auto room = rc::room::current_room_node(*graph_); room.has_value())
     {
-        if (not graph_state_.room_name.empty())
-            qInfo().noquote() << QString("[controller] current room changed: %1 -> %2")
-                                     .arg(QString::fromStdString(graph_state_.room_name))
-                                     .arg(QString::fromStdString(room->name()));
-        if (not graph_state_.room_name.empty()) graph_state_.prev_room_name = graph_state_.room_name;
-        graph_state_.room_id = room->id();
-        graph_state_.room_name = room->name();
+        const std::string old_name = graph_state_.room_name;
+        switch (rc::track_room(graph_state_.room_id, graph_state_.room_name, graph_state_.prev_room_name, room->id(), room->name()))
+        {
+            case rc::RoomEvent::Changed:
+                if (not old_name.empty())
+                    qInfo().noquote() << QString("[controller] current room changed: %1 -> %2")
+                                             .arg(QString::fromStdString(old_name)).arg(QString::fromStdString(room->name()));
+                break;
+            case rc::RoomEvent::Renamed:
+                qInfo().noquote() << QString("[controller] current room renamed: %1 -> %2")
+                                         .arg(QString::fromStdString(old_name)).arg(QString::fromStdString(room->name()));
+                break;
+            case rc::RoomEvent::None: break;
+        }
     }
     else if (not graph_state_.room_name.empty() and !graph_->get_node(graph_state_.room_id).has_value())
     {

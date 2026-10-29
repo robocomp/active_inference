@@ -64,13 +64,30 @@ enum class DoorRelationKind { None, Room, New };
     return best != nullptr ? std::optional<std::string>(best->name) : std::nullopt;
 }
 
+enum class RoomEvent { None, Renamed, Changed };
+
+/// The room the robot is in, tracked by node id. The id says WHICH room; the name is owned by room_concept and can change
+/// under the same id (a recognised room adopts its remembered name in place: room_4 -> room_2). A rename is not a room
+/// change: prev_name stays the name the room had when the robot LEFT it (so ltsm's recall_<prev> is found by that name).
+inline RoomEvent track_room(std::uint64_t &id, std::string &name, std::string &prev_name, std::uint64_t new_id, const std::string &new_name)
+{
+    if (new_id != id)
+    {
+        if (not name.empty()) prev_name = name;
+        id = new_id; name = new_name;
+        return RoomEvent::Changed;
+    }
+    if (name != new_name) { name = new_name; return RoomEvent::Renamed; }
+    return RoomEvent::None;
+}
+
 /// The step waits for its door to resolve; it has a budget so it cannot hang (like RoomHold).
 class RelationHold
 {
 public:
     /// ⚑ FLAGGED CONSTANT: a MISSION-LEVEL timeout, not an ordering guess. The release is the FACT (pick_door resolves: ltsm
     /// marked recall_<room>, or a new door was seen); this only bounds how long the mission waits for a fact that may never
-    /// come (ltsm down, door never seen) so the step fails as 'door_unresolved'. The step's own budget_s wins when smaller.
+    /// come (`cross new` is gated on ltsm posting the way-back recall; ltsm down, door never seen) so the step fails as 'door_unresolved'. The step's own budget_s wins when smaller.
     static constexpr std::uint64_t kHoldBudgetMs = 120'000;
 
     enum class Verdict { Waiting, Ready, TimedOut };

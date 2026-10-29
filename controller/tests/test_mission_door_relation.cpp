@@ -18,6 +18,12 @@ DoorFacts door(std::string n, std::set<std::string> recalls = {}, bool match = f
 
 int main()
 {
+    {   // a rename under the same id is not a room change; prev stays the name at LEAVING
+        std::uint64_t id = 7; std::string name = "room_4", prev = "room_1";
+        CHECK(track_room(id, name, prev, 7, "room_2") == RoomEvent::Renamed and name == "room_2" and prev == "room_1");
+        CHECK(track_room(id, name, prev, 7, "room_2") == RoomEvent::None);
+        CHECK(track_room(id, name, prev, 9, "room_5") == RoomEvent::Changed and prev == "room_2" and name == "room_5" and id == 9);
+    }
     CHECK(relation_of(node("new")) == DoorRelationKind::New);
     CHECK(relation_of(node("room_2")) == DoorRelationKind::Room);
     CHECK(relation_of(node("door_3")) == DoorRelationKind::None);
