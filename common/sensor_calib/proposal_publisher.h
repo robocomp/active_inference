@@ -1,6 +1,6 @@
 /*
- * proposal_publisher.h -- the PROPOSAL stage of the sensor_calibration agent (plan Task 2.3). Plain data in, an
- * optional wire payload out: no DDS, no DSR, no Qt (the graph write is sensor_calibration/src/proposal_writer.h).
+ * proposal_publisher.h -- the PROPOSAL stage of the self_calibration agent (plan Task 2.3). Plain data in, an
+ * optional wire payload out: no DDS, no DSR, no Qt (the graph write is self_calibration/src/proposal_writer.h).
  *
  * WIRE FORMAT (cortex attributes `mount_proposal`, `mount_proposal_version`, `mount_proposal_ready`, written on the
  * agent's OWN node only; robot_concept is the only writer of the body->sensor RT edges and commits in Phase 6):

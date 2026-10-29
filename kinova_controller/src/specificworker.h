@@ -88,7 +88,7 @@ private:
 	std::unique_ptr<ArmBeliefViewer3D> arm_belief_viewer_;
 	std::unique_ptr<PickandPlaceFSM>   fsm_;
 
-	// ── Joint buffer for the self_calibration agent ───────────────────────────
+	// ── Joint buffer for the arm_calibration agent ───────────────────────────
 	// A rolling (stamp_ms, q) ring published on the kinova_arm_r node so the
 	// calibrator can nearest-match q to an image stamp_ms (the t↔q lookup). DSR has
 	// no nested-vector attr type, so it is flattened to FLOAT vectors + a uint64

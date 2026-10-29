@@ -1,4 +1,3 @@
-
 Component self_calibration
 {
     Communications
@@ -8,4 +7,3 @@ Component self_calibration
     options dsr;
 
 };
-

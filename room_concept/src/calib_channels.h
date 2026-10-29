@@ -5,7 +5,7 @@
 // what it reports to: the graph, the config, the estimator it asks for poses and corner matches, and
 // the viewer it displays on. (Until 2026-10-29 it also ran calibration-only cameras and fed the camera
 // mount calibrator; camera extrinsics are robot_concept's graph + overlay now, estimated by
-// sensor_calibration. The class keeps its name to keep the diff small.)
+// self_calibration. The class keeps its name to keep the diff small.)
 //
 // ⚠ The room polygon arrives LATE in Estimate mode. It is loaded from SVG in Given mode and is empty
 // until the layout freezes otherwise — see take_room_polygon_from(); three consumers in a row were

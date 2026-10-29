@@ -71,7 +71,7 @@ find_package(Qt6 QUIET COMPONENTS OpenGL OpenGLWidgets)
 # the framework's TARGET_LINK_LIBRARIES uses them.
 set(AI_COMMON_FASTDDS_LIBS fastdds fastcdr)
 
-# Pinocchio is only needed by ai_common::kinematics (kinova_controller, self_calibration).
+# Pinocchio is only needed by ai_common::kinematics (kinova_controller, arm_calibration).
 # Opt in with `set(AI_COMMON_WITH_KINEMATICS ON)` BEFORE add_subdirectory().
 #
 # One named flag, not a magic incantation: consumers used to have to remember
@@ -373,7 +373,7 @@ target_link_libraries(ai_common_geometry PUBLIC Eigen3::Eigen)
 add_library(ai_common::geometry ALIAS ai_common_geometry)
 
 # =====================================================================================
-# ai_common::sensor_calib -- trajectory harvester of the sensor_calibration agent. PURE EIGEN (no Qt/DDS/DSR).
+# ai_common::sensor_calib -- trajectory harvester of the self_calibration agent. PURE EIGEN (no Qt/DDS/DSR).
 # =====================================================================================
 add_library(ai_common_sensor_calib STATIC sensor_calib/trajectory_harvester.cpp sensor_calib/proposal_publisher.cpp)
 ai_common_defaults(ai_common_sensor_calib)
@@ -417,7 +417,7 @@ add_library(ai_common::affordance ALIAS ai_common_affordance)
 
 # =====================================================================================
 # ai_common::kinematics — Pinocchio. This target is the design in miniature: kinova_controller
-# and self_calibration each hand-write the prefix path, the find_package, an
+# and arm_calibration each hand-write the prefix path, the find_package, an
 # include_directories(common/kinematics) and -DCOAL_DISABLE_HPP_FCL_WARNINGS in their base
 # add_definitions() line. All four now live on the target that needs them.
 # =====================================================================================

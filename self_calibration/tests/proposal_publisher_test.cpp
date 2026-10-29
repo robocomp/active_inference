@@ -85,7 +85,7 @@ int main(int argc, char** argv)
     // B. graph, PRIVATE domain 92 (never the live 0)
     auto G = std::make_shared<DSR::DSRGraph>("proposal_publisher_test", 992, std::string(SHADOW_JSON), true,
                                              static_cast<int8_t>(92), DSR::SignalMode::QT);
-    auto node = DSR::Node::create<metaconcept_node_type>("sensor_calibration 27");
+    auto node = DSR::Node::create<metaconcept_node_type>("self_calibration 27");
     const auto id = G->insert_node(node);
     CHECK(id.has_value());
     ProposalPublisher pub;

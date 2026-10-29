@@ -196,7 +196,7 @@ namespace rc
         }
 
         // The camera mount columns and the sensor-triangle line were removed 2026-10-29 with the camera
-        // mount calibrator (camera extrinsics: robot_concept's graph + overlay, estimated by sensor_calibration).
+        // mount calibrator (camera extrinsics: robot_concept's graph + overlay, estimated by self_calibration).
     }
 
     void CalibrationViewer::update_values(const Eigen::Matrix<float, rc::calib::P_COUNT, 1>& value,

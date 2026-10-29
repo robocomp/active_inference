@@ -1,5 +1,5 @@
 /*
- * dashboard_view.h -- the Qt face of the sensor_calibration dashboard: one QPainter widget over a DashboardModel.
+ * dashboard_view.h -- the Qt face of the self_calibration dashboard: one QPainter widget over a DashboardModel.
  * DISPLAY ONLY, main thread. No Q_OBJECT (no signals/slots), so no moc needed. Colours come from the palette so the
  * window follows the desktop theme; the two fragment labels use a fixed blue / orange pair (distinguishable in both).
  *

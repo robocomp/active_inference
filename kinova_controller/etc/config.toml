@@ -34,7 +34,7 @@ monitor_log = true   # TEMP diagnostic
 monitor_period = 40  # cycles between log lines; loop is 100 Hz so 40 → ~2.5 Hz
 bottle_from_graph = true    # OPEN-LOOP result: read the PERCEIVED bottle (real P_bottle covariance) from the graph, with the look-up cost on, to show the closed→open-loop transition
 publish_scene_to_graph = false  # opt-in: write robot->table->bottle to graph (round-trip test / siblings)
-publish_joint_buffer = true  # write the rolling (stamp_ms,q) ring on kinova_arm_r for the self_calibration agent (~20Hz)
+publish_joint_buffer = true  # write the rolling (stamp_ms,q) ring on kinova_arm_r for the arm_calibration agent (~20Hz)
 tip_log    = true  # TEMP diagnostic
 
 # EXPERIMENT 1 — natural fine-tuning from a specialized sequence:

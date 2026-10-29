@@ -1,5 +1,5 @@
 /*
- * trajectory_harvester.h -- the opportunistic TRAJECTORY harvester of the sensor_calibration agent (plan Task 2.4).
+ * trajectory_harvester.h -- the opportunistic TRAJECTORY harvester of the self_calibration agent (plan Task 2.4).
  *
  * Plain data in / plain data out: no DDS, no DSR, no Qt. The agent feeds it
  *     add_odometry(source_ts_ms, adv, side, rot)   the producer's velocity samples (piecewise-constant hold)

@@ -993,7 +993,7 @@ MotionCalibLeverSigma = 0.05   # m. Prior on the helios lever arm (spec §5). Le
                         # docs/superpowers/plans/2026-10-05-joint-calibration.md Task 1.
 # ── Helios mount: NOT this agent's (2026-10-29). LidarMountApply, LidarMountInject* and MountFactors (the
 # kinematic helios factor) were removed: the mount is the graph's (robot_concept nominal + overlay
-# etc/mount_calib_<robot>_<world>.txt, where planted Webots errors go too) and is estimated by sensor_calibration.
+# etc/mount_calib_<robot>_<world>.txt, where planted Webots errors go too) and is estimated by self_calibration.
 # eps_yaw (MotionCalib*) is still estimated and logged but never applied to the odometry (single owner).
 MotionCalibFitModelGain  = 2.0    # x mean |SDF| over the episode, into the position R. Also the
                         # header default. A correction can only be as good as the FIT that produced
@@ -1728,7 +1728,7 @@ mountYawSigma    = 0.0175   # rad (1 deg)      ⚠ NOT MEASURED ON SHADOW. 2026-
 # ── The camera MOUNT CALIBRATOR (mountVertexOffsetSigmaPx, mountApply, mountPublish, mountDescriptionFile,
 # calibCameras, calibMinConvertIntervalMs, mountYawCorrection) was REMOVED 2026-10-29. Camera extrinsics are the
 # graph's: robot_concept's nominal + overlay (etc/mount_calib_<robot>_<world>.txt; the ricoh correction this loop
-# had learned on Webots now lives there) and boresight_yaw_*; estimating them is sensor_calibration's job. The
+# had learned on Webots now lives there) and boresight_yaw_*; estimating them is self_calibration's job. The
 # mount SIGMAS above stay: they are the driving term's marginalised nuisance priors.
 
 # ── Structural features ported from config_p3bot_webots.toml, 2026-08-29 ───────────────────────

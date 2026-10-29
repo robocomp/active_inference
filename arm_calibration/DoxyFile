@@ -18,7 +18,7 @@
 DOXYFILE_ENCODING      = UTF-8
 
 # ROBOCOMP
-PROJECT_NAME           = sensor_calibration
+PROJECT_NAME           = arm_calibration
 PROJECT_NUMBER         =
 
 

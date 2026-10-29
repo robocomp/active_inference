@@ -449,7 +449,7 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
             "m. Prior on the helios lever arm (spec §5); learnt only from ROTATION (plan 2026-10-05 Task 1)");
     // ── helios mount: NOT this agent's any more (2026-10-29). The kinematic factor, LidarMountApply and the
     //    sim-only LidarMountInject* were removed; the mount is the graph's (robot_concept: nominal + overlay,
-    //    where planted errors go too) and its estimation belongs to sensor_calibration (plan Task 4.4).
+    //    where planted errors go too) and its estimation belongs to self_calibration (plan Task 4.4).
     //    SINGLE OWNER (r2.2 item 4, unchanged behaviour): eps_yaw is still ESTIMATED and logged by the motion
     //    calibrator but never applied to the odometry, and p_applied records 0 for it -- the helios yaw is a
     //    mount, and a mount is corrected in the graph, not in the odometry. (Before 10-29 this was the

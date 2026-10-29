@@ -1,4 +1,4 @@
-// Plan Task 2.2: sensor_calibration's input layer, verified WITHOUT Webots and WITHOUT the live DSR domain.
+// Plan Task 2.2: self_calibration's input layer, verified WITHOUT Webots and WITHOUT the live DSR domain.
 //
 //  A. pure parts: odometry attribute parsing, the camera decimator (30 Hz in, 1.5 Hz config => 1.5 +- 0.1 Hz out),
 //     stream monitor (rate, stall, recovery);

@@ -226,7 +226,7 @@ Derived by reading each agent, not inferred from includes. `—` = not applicabl
 | residual | ✅ | ✅ | — field model, no per-frame gate | ✅ `rc::exist` | — | — | ⚠️ unattributable | ✅ |
 | human | ❌ | ❌ `belief_stabilizer` | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
 | chat_agent *(2026-10-12)* | — no instances | — no belief | — | — | — | — | — | ✅ |
-| sensor_calibration *(2026-10-23, skeleton)* | — no instances | — no belief | — | — | — | — | — | ✅ |
+| self_calibration *(2026-10-23, skeleton)* | — no instances | — no belief | — | — | — | — | — | ✅ |
 
 **chat_agent** is not a concept agent: it births no instance and holds no belief, so CREATE…HISTORY do not apply
 (`—`, not `❌`). It owns exactly one node, `chat_intention` (type `intention`, has_intention edge from `Shadow`), the
@@ -235,10 +235,10 @@ stamped with `rc::provenance::stamp_creation`, swept at `initialize()` and again
 shared coordinator on SIGTERM/SIGINT (verified 2026-10-12: `[Graph] node 'chat_intention' deleted`). It connects no
 DSR signal; the digest and the command status are polled on the main thread.
 
-**sensor_calibration** (skeleton, 2026-10-23) is not a concept agent either: no instance, no belief, so CREATE…HISTORY are
-`—`. It owns only its own agent node `sensor_calibration 27` (`[Owns] nodes = ["sensor_calibration 27"]`, id matches
+**self_calibration** (skeleton, 2026-10-23) is not a concept agent either: no instance, no belief, so CREATE…HISTORY are
+`—`. It owns only its own agent node `self_calibration 27` (`[Owns] nodes = ["self_calibration 27"]`, id matches
 `[Agent].id = 27`), deleted by the shared coordinator on SIGTERM (verified 5/5 on an isolated domain: `[Graph] node
-'sensor_calibration 27' deleted`, exit 0). Presence is the shared `rc::presence::ConceptProtocol` (debounced Degraded,
+'self_calibration 27' deleted`, exit 0). Presence is the shared `rc::presence::ConceptProtocol` (debounced Degraded,
 grace 3000 ms; required `robot_concept`, `room_concept`); it connects no DSR signal. No ❌. When it later writes
 proposal attributes on its own node, that node stays its only owned state (robot_concept remains the sole writer of
 body→sensor RT edges).

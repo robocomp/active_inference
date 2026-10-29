@@ -8,7 +8,7 @@
 
 // Self-projection viewer (display-only).
 //
-// The self_calibration agent already holds the RGB frame, the FK link poses, the
+// The arm_calibration agent already holds the RGB frame, the FK link poses, the
 // arm→camera extrinsic and the intrinsics, so it computes the projected per-link
 // capsule "aura" itself and pushes (image + capsules) here each compute() cycle.
 // This widget only paints — no DDS, no FK, no threads. The agent's compute() and

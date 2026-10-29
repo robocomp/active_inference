@@ -1,1006 +1,287 @@
-/*
- *    Copyright (C) 2026 by YOUR NAME HERE
- *
- *    This file is part of RoboComp
- *
- *    RoboComp is free software: you can redistribute it and/or modify
- *    it under the terms of the GNU General Public License as published by
- *    the Free Software Foundation, either version 3 of the License, or
- *    (at your option) any later version.
- *
- *    RoboComp is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU General Public License for more details.
- *
- *    You should have received a copy of the GNU General Public License
- *    along with RoboComp.  If not, see <http://www.gnu.org/licenses/>.
- */
 #include "specificworker.h"
-
-#include "../../common/config_report/config_read.h"   // rc::cfg::Reader (SHARED)
-
-#include "kinematics.h"
-#include "self_projection_capsules.h"
-#include "self_projection_viewer.h"
-
-#include <dsr/api/dsr_inner_eigen_api.h>
-
-#include <QImage>
-
-#include <algorithm>
 #include <chrono>
-#include <cmath>
-#include <limits>
+
+#include "../../common/agent_exit/terminal_exit.h"        // rc::agent::terminal_exit (SHARED)
+#include "../../common/config_report/config_read.h"       // rc::cfg::Reader (SHARED)
+
 #include <print>
-#include <string>
-#include <string_view>
-#include <utility>
-#include <vector>
 
-namespace
+#include <QCoreApplication>
+#include <QTimer>
+
+#include <dsr/api/dsr_api.h>
+
+SpecificWorker::SpecificWorker(const ConfigLoader& configLoader, TuplePrx tprx, bool startup_check)
+    : GenericWorker(configLoader, tprx)
 {
-    // Capsule fitted to a given link mesh (small linear scan over the 8 links).
-    const LinkCapsule* capsule_for(std::string_view mesh)
+    this->startup_check_flag = startup_check;
+    if (this->startup_check_flag)
     {
-        for (const auto& c : LINK_CAPSULES) if (c.mesh == mesh) return &c;
-        return nullptr;
+        this->startup_check();
+        return;
     }
 
-    // Near-surface depth (camera-frame Y) where the camera ray through point P first
-    // meets the capsule (segment A..B, radius R) — the proper ray–capsule intersection
-    // that replaces the crude Y−R: cylinder body, with sphere caps past the ends.
-    // Returns `fallback` when the ray grazes/misses (numerically degenerate).
-    // Optionally writes the hit point and outward surface normal (for the grazing-
-    // incidence weight). On a ray miss/graze it returns `fallback` and leaves the
-    // outputs untouched (caller treats a zero normal as nominal incidence).
-    double capsule_near_depth(const Eigen::Vector3d& P, const Eigen::Vector3d& A,
-                              const Eigen::Vector3d& B, double R, double fallback,
-                              Eigen::Vector3d* hit_out = nullptr, Eigen::Vector3d* normal_out = nullptr)
+    // Agent-presence state machine: Waiting -> Operating -> Degraded (as bottle_concept).
+    int period = 0;
+    rc::cfg::Reader(configLoader, "self_calibration").req("Period.Compute", period,
+            "GRAFCET step period (ms) for every state of this agent's state machine");
+
     {
-        const Eigen::Vector3d d  = P.normalized();   // ray dir from the camera origin (O=0)
-        const Eigen::Vector3d ab = B - A;
-        const double L = ab.norm();
-        double tau = -1.0;
-        Eigen::Vector3d normal = Eigen::Vector3d::Zero();
-        if (L > 1e-6)                                 // infinite-cylinder body, clamped to [A,B]
-        {
-            const Eigen::Vector3d u = ab / L;
-            const double du = d.dot(u);
-            const double alpha = 1.0 - du * du;
-            if (alpha > 1e-6)
-            {
-                const double Au = A.dot(u), dA = d.dot(A);
-                const double beta  = 2.0 * (du * Au - dA);
-                const double gamma = A.squaredNorm() - Au * Au - R * R;
-                const double disc  = beta * beta - 4.0 * alpha * gamma;
-                if (disc >= 0.0)
-                {
-                    const double t = (-beta - std::sqrt(disc)) / (2.0 * alpha);
-                    const double sproj = (t * d - A).dot(u);   // axial coord of the hit
-                    if (t > 1e-6 and sproj >= 0.0 and sproj <= L)
-                    {
-                        tau = t;
-                        normal = (t * d - (A + sproj * u)).normalized();  // hit − closest axis point
-                    }
-                }
-            }
-        }
-        if (tau < 0.0)                                // off the body → sphere cap at the nearer end
-        {
-            const Eigen::Vector3d C = (L > 1e-6 and (P - A).dot(ab) > 0.5 * L * L) ? B : A;
-            const double dC = d.dot(C);
-            const double disc = dC * dC - (C.squaredNorm() - R * R);
-            if (disc >= 0.0)
-            {
-                const double t = dC - std::sqrt(disc);
-                if (t > 1e-6) { tau = t; normal = (t * d - C).normalized(); }
-            }
-        }
-        if (tau < 0.0) return fallback;
-        if (hit_out)    *hit_out    = tau * d;
-        if (normal_out) *normal_out = normal;
-        return (tau * d).y();
+        const rc::cfg::Reader cfg(configLoader, "self_calibration");
+        inputs_cfg_.camera_rate_hz   = cfg.d("Inputs.camera_rate_hz", inputs_cfg_.camera_rate_hz,
+                "zed rgb/depth and ricoh hand-over rate (Hz): a COMPUTE budget, frames beyond it are drained unconverted; <=0 disables cameras");
+        inputs_cfg_.stall_lidar_ms   = cfg.i("Inputs.stall_lidar_ms", inputs_cfg_.stall_lidar_ms, "LiDAR stream declared stalled after this silence (ms)");
+        inputs_cfg_.stall_camera_ms  = cfg.i("Inputs.stall_camera_ms", inputs_cfg_.stall_camera_ms, "camera stream declared stalled after this silence (ms)");
+        inputs_cfg_.stall_imu_ms     = cfg.i("Inputs.stall_imu_ms", inputs_cfg_.stall_imu_ms, "IMU stream declared stalled after this silence (ms)");
+        inputs_cfg_.log_period_ms    = cfg.i("Inputs.log_period_ms", inputs_cfg_.log_period_ms, "stream-rate log period (ms)");
     }
 
-    // se(3) exponential (ξ=[ρ;φ]) → SE(3). Used to apply the filter's finite δξ correction
-    // to the extrinsic; first-order won't do at ~8cm/8°. Matches the Jacobian's generator basis.
-    Eigen::Matrix4d se3_exp(const Eigen::Matrix<double, 6, 1>& xi)
     {
-        const Eigen::Vector3d rho = xi.head<3>(), phi = xi.tail<3>();
-        const double th = phi.norm();
-        Eigen::Matrix3d Wx;
-        Wx <<       0.0, -phi.z(),  phi.y(),
-               phi.z(),       0.0, -phi.x(),
-              -phi.y(),  phi.x(),       0.0;
-        Eigen::Matrix3d R, V;
-        if (th < 1e-9) { R = Eigen::Matrix3d::Identity() + Wx; V = Eigen::Matrix3d::Identity() + 0.5 * Wx; }
-        else
-        {
-            const double a = std::sin(th) / th, b = (1.0 - std::cos(th)) / (th * th), c = (th - std::sin(th)) / (th * th * th);
-            R = Eigen::Matrix3d::Identity() + a * Wx + b * Wx * Wx;
-            V = Eigen::Matrix3d::Identity() + b * Wx + c * Wx * Wx;
-        }
-        Eigen::Matrix4d T = Eigen::Matrix4d::Identity();
-        T.topLeftCorner<3, 3>()  = R;
-        T.topRightCorner<3, 1>() = V * rho;
-        return T;
+        const rc::cfg::Reader cfg(configLoader, "self_calibration");
+        auto& h = harvester_cfg_;
+        h.keyframe_spacing_s = cfg.d("Harvester.keyframe_spacing_s", h.keyframe_spacing_s, "a Helios sweep becomes a keyframe at most this often (s): a COMPUTE budget, the posterior does not depend on it");
+        h.ring_span_s        = cfg.d("Harvester.ring_span_s", h.ring_span_s, "time the keyframe ring holds before pairs are committed (s): compute budget");
+        h.max_keyframes      = std::size_t(cfg.i("Harvester.max_keyframes", int(h.max_keyframes), "hard bound on the keyframe ring"));
+        h.wheel_rot_sigma_rel   = cfg.d("Harvester.wheel_rot_sigma_rel", h.wheel_rot_sigma_rel, "relative sigma of the wheel rotation (Shadow over-reports ~41 %)");
+        h.wheel_rot_sigma_floor = cfg.d("Harvester.wheel_rot_sigma_floor", h.wheel_rot_sigma_floor, "wheel rotation noise floor (rad/sqrt(s))");
+        h.gyro_sigma_rel        = cfg.d("Harvester.gyro_sigma_rel", h.gyro_sigma_rel, "relative sigma of the integrated gyro rotation");
+        h.gyro_sigma_floor      = cfg.d("Harvester.gyro_sigma_floor", h.gyro_sigma_floor, "gyro rotation noise floor (rad/sqrt(s))");
+        h.reg_sigma_m        = cfg.d("Harvester.reg_sigma_m", h.reg_sigma_m, "scan-registration noise floor per pair row (m)");
+        h.odo_sigma_per_m    = cfg.d("Harvester.odo_sigma_per_m", h.odo_sigma_per_m, "odometry error per metre travelled between the two keyframes (m/m)");
+        h.odo_sigma_per_rad  = cfg.d("Harvester.odo_sigma_per_rad", h.odo_sigma_per_rad, "odometry translation error per radian rotated between the two keyframes (m/rad)");
     }
 
-    struct LineFit { double slope = 0, intercept = 0, scale = 0, vspread = 0, inlier_frac = 0; bool ok = false; };
-
-    // Robust line fit r = intercept + slope·v via IRLS with Huber weights, so the
-    // fast-motion model-breakdown samples can't lever the slope. ok=false if too few
-    // points or no v-spread (τ is then unseparable from the bias).
-    LineFit huber_fit(const std::deque<std::pair<float, float>>& pts, double vspread_min)
     {
-        LineFit f;
-        const std::size_t n = pts.size();
-        if (n < 30) return f;
-
-        double mv = 0.0; for (const auto& p : pts) mv += p.first; mv /= static_cast<double>(n);
-        double vv = 0.0; for (const auto& p : pts) vv += (p.first - mv) * (p.first - mv);
-        f.vspread = std::sqrt(vv / static_cast<double>(n));
-        // Below this depth-velocity leverage τ is unseparable from the bias: the slope
-        // just fits noise and emits a confident-looking but meaningless value (e.g. +220 ms
-        // at vspread≈0.04). Gate it so τ only reports when the arm moves enough.
-        if (f.vspread < vspread_min) return f;
-
-        double sv=0,sr=0,svv=0,svr=0;     // OLS seed
-        for (const auto& p : pts){ sv+=p.first; sr+=p.second; svv+=p.first*p.first; svr+=p.first*p.second; }
-        const double det = static_cast<double>(n)*svv - sv*sv;
-        if (std::abs(det) < 1e-12) return f;
-        double b = (static_cast<double>(n)*svr - sv*sr)/det;
-        double a = (sr - b*sv)/static_cast<double>(n);
-
-        std::vector<double> ae(n);
-        double scale = 0.0;
-        for (int iter = 0; iter < 5; ++iter)   // IRLS Huber
-        {
-            std::size_t i = 0;
-            for (const auto& p : pts) ae[i++] = std::abs(p.second - (a + b*p.first));
-            std::nth_element(ae.begin(), ae.begin() + n/2, ae.end());
-            scale = 1.4826 * std::max(ae[n/2], 1e-4);
-            const double k = 1.345 * scale;
-            double Wsw=0,Wsv=0,Wsr=0,Wsvv=0,Wsvr=0;
-            for (const auto& p : pts)
-            {
-                const double e = p.second - (a + b*p.first);
-                const double w = std::abs(e) <= k ? 1.0 : k/std::abs(e);
-                Wsw+=w; Wsv+=w*p.first; Wsr+=w*p.second; Wsvv+=w*p.first*p.first; Wsvr+=w*p.first*p.second;
-            }
-            const double d2 = Wsw*Wsvv - Wsv*Wsv;
-            if (std::abs(d2) < 1e-12) break;
-            b = (Wsw*Wsvr - Wsv*Wsr)/d2;
-            a = (Wsr - b*Wsv)/Wsw;
-        }
-        std::size_t in = 0;
-        for (const auto& p : pts) if (std::abs(p.second - (a + b*p.first)) <= 1.345*scale) ++in;
-        f.slope=b; f.intercept=a; f.scale=scale; f.inlier_frac=static_cast<double>(in)/static_cast<double>(n); f.ok=true;
-        return f;
+        const rc::cfg::Reader cfg(configLoader, "self_calibration");
+        mount_factors_enabled_ = cfg.b("MountFactors.enabled", mount_factors_enabled_,
+                "run the floor + vertical LiDAR mount factors (estimate + log only)");
+        mount_cfg_.rate_hz = cfg.d("MountFactors.rate_hz", mount_cfg_.rate_hz,
+                "sweeps fed per second per LiDAR (Hz): a COMPUTE budget");
+        mount_cfg_.pose_sigma_xy = cfg.d("MountFactors.pose_sigma_xy", mount_cfg_.pose_sigma_xy,
+                "m, WIDE per-sweep pose nuisance prior of the vertical factor (never the localiser's marginal)");
+        mount_cfg_.pose_sigma_yaw_deg = cfg.d("MountFactors.pose_sigma_yaw_deg", mount_cfg_.pose_sigma_yaw_deg,
+                "deg, WIDE per-sweep pose-yaw nuisance prior of the vertical factor");
+        mount_log_period_ms_ = cfg.i("MountFactors.log_period_ms", mount_log_period_ms_,
+                "summary line + mounts CSV row period (ms)");
     }
-}
 
-SpecificWorker::SpecificWorker(const ConfigLoader& configLoader, TuplePrx tprx, bool startup_check) : GenericWorker(configLoader, tprx)
-{
-	this->startup_check_flag = startup_check;
-	if(this->startup_check_flag)
-	{
-		this->startup_check();
-	}
-	else
-	{
-		#ifdef HIBERNATION_ENABLED
-			hibernationChecker.start(500);
-		#endif
-		
-		// Example statemachine:
-		/***
-		//Your definition for the statesmachine (if you dont want use a execute function, use nullptr)
-		states["CustomState"] = std::make_unique<GRAFCETStep>("CustomState", period, 
-															std::bind(&SpecificWorker::customLoop, this),  // Cyclic function
-															std::bind(&SpecificWorker::customEnter, this), // On-enter function
-															std::bind(&SpecificWorker::customExit, this)); // On-exit function
+    dashboard_show_ = rc::cfg::Reader(configLoader, "self_calibration").b("Dashboard.show", true,
+            "open the live trajectory-fragment dashboard window (display only; false = no window and no cost)");
 
-		//Add your definition of transitions (addTransition(originOfSignal, signal, dstState))
-		states["CustomState"]->addTransition(states["CustomState"].get(), SIGNAL(entered()), states["OtherState"].get());
-		states["Compute"]->addTransition(this, SIGNAL(customSignal()), states["CustomState"].get()); //Define your signal in the .h file under the "Signals" section.
+    states["Waiting"] = std::make_unique<GRAFCETStep>("Waiting", period,
+        std::bind(&SpecificWorker::waiting_loop, this), std::bind(&SpecificWorker::waiting_enter, this));
+    states["Operating"] = std::make_unique<GRAFCETStep>("Operating", period,
+        std::bind(&SpecificWorker::operating_loop, this), std::bind(&SpecificWorker::operating_enter, this));
+    states["Degraded"] = std::make_unique<GRAFCETStep>("Degraded", period,
+        std::bind(&SpecificWorker::degraded_loop, this), std::bind(&SpecificWorker::degraded_enter, this));
 
-		//Add your custom state
-		statemachine.addState(states["CustomState"].get());
-		***/
+    states["Compute"]->addTransition(states["Compute"].get(), SIGNAL(entered()), states["Waiting"].get());
+    states["Waiting"]->addTransition(this, SIGNAL(presenceReady()), states["Operating"].get());
+    states["Operating"]->addTransition(this, SIGNAL(presenceLost()), states["Degraded"].get());
+    states["Degraded"]->addTransition(states["Degraded"].get(), SIGNAL(entered()), states["Waiting"].get());
 
-		statemachine.setChildMode(QState::ExclusiveStates);
-		statemachine.start();
+    statemachine.addState(states["Waiting"].get());
+    statemachine.addState(states["Operating"].get());
+    statemachine.addState(states["Degraded"].get());
 
-		auto error = statemachine.errorString();
-		if (error.length() > 0){
-			qWarning() << error;
-			throw error;
-		}
-	}
+    statemachine.setChildMode(QState::ExclusiveStates);
+    statemachine.start();
+
+    auto error = statemachine.errorString();
+    if (error.length() > 0)
+    {
+        qWarning() << error;
+        throw error;
+    }
 }
 
 SpecificWorker::~SpecificWorker()
 {
-	std::cout << "Destroying SpecificWorker" << std::endl;
-	/*
-	for (auto const& [name, g] : Graphs) {
-	    g->write_to_json_file("./"+agent_name+"_"+name+".json");
-	}
-	*/
+    request_shutdown();
+    save_dashboard_geometry();
+    delete dashboard_window_;   // top-level, parentless: owned here
+    std::print("self_calibration: SpecificWorker destroyed.\n");
 }
 
+void SpecificWorker::request_shutdown()
+{
+    if (shutting_down_.exchange(true))
+        return;
+    inputs_.reset();   // subscribers + InnerEigenAPI go down first, from the main thread, while G is alive
+    if (G)
+        disconnect(G.get(), nullptr, this, nullptr);   // sever graph callbacks before any teardown
+    cleanup_owned_nodes();
+}
+
+void SpecificWorker::terminal_shutdown()
+{
+    static std::atomic<bool> terminating{false};
+    if (terminating.exchange(true))
+        return;
+    rc::agent::terminal_exit([this] { request_shutdown(); }, [this] { if (G) G->reset(); });
+}
 
 void SpecificWorker::initialize()
 {
-    rc::cfg::Reader cfgr(configLoader, "self_calibration");
-    std::cout << "initialize worker" << std::endl;
-	GenericWorker::initialize();
+    std::print("self_calibration: initialize()\n");
+    GenericWorker::initialize();   // creates the DSR graph and, with it, this agent's own node "<name> <id>"
 
-	//Subscription to DSR graph update signals. 
-	// If multiple graphs exist, it is necessary to specify the graph name 
-	// using 'Graphs.at("name")' to connect its signals to the Worker's slots.
-	//connect(Graphs.at("").get(), &DSR::DSRGraph::update_node_signal, this, &SpecificWorker::modify_node_slot);
-	//connect(Graphs.at("").get(), &DSR::DSRGraph::update_edge_signal, this, &SpecificWorker::modify_edge_slot);
-	//connect(Graphs.at("").get(), &DSR::DSRGraph::update_node_attr_signal, this, &SpecificWorker::modify_node_attrs_slot);
-	//connect(Graphs.at("").get(), &DSR::DSRGraph::update_edge_attr_signal, this, &SpecificWorker::modify_edge_attrs_slot);
-	//connect(Graphs.at("").get(), &DSR::DSRGraph::del_edge_signal, this, &SpecificWorker::del_edge_slot);
-	//connect(Graphs.at("").get(), &DSR::DSRGraph::del_node_signal, this, &SpecificWorker::del_node_slot);
-
-	/***
-	Custom Widget
-	In addition to the predefined viewers, Graph Viewer allows you to add various widgets designed by the developer.
-	The add_custom_widget_to_dock method is used. This widget can be defined like any other Qt widget,
-	either with a QtDesigner or directly from scratch in a class of its own.
-	The add_custom_widget_to_dock method receives a name for the widget and a reference to the class instance.
-	***/
-	//If you have more than one graph, you need to connect to the specific graph with the name
-	//graph_viewers.at("")->add_custom_widget_to_dock("CustomWidget", &custom_widget);
-
-    //initializeCODE
-    init_media_plane();
-    cfgr.opt_cast<double>("SelfCalib.residual_gate_m", residual_gate_m_,
-            "inlier band (SelfCalib.residual_gate_m)");
-    cfgr.opt_cast<double>("SelfCalib.tau_vspread_min", tau_vspread_min_,
-            "min depth-velocity std (m/s) to identify τ (SelfCalib.tau_vspread_min)");
-    {   // The config states DEGREES; the member holds RADIANS. Registering the key in the unit
-        // the FILE uses is the point - a table that reported radians here would not match the
-        // number anybody types, which is how a unit bug survives a review of both sides.
-        double deg = encoder_sigma_rad_ * 57.29577951308232;
-        cfgr.opt("SelfCalib.encoder_sigma_deg", deg,
-                 "per-encoder angle noise the calibration assumes (deg; stored internally as radians)");
-        encoder_sigma_rad_ = deg * 0.017453292519943295;
-    }
-    cfgr.opt_cast<double>("SelfCalib.depth_sensor_sigma_m", depth_sensor_sigma_m_,
-            "base depth-sensor noise floor (SelfCalib.depth_sensor_sigma_m)");
-    cfgr.opt_cast<double>("SelfCalib.depth_sensor_range_k", depth_sensor_range_k_,
-            "depth noise grows ≈ k·range² (/m) (SelfCalib.depth_sensor_range_k)");
-    cfgr.opt_cast<double>("SelfCalib.geom_sigma_m", geom_sigma_m_,
-            "single-capsule model floor (SelfCalib.geom_sigma_m)");
-    cfgr.opt_cast<double>("SelfCalib.grazing_cos_min", grazing_cos_min_,
-            "clamp on |ray·surface-normal|: grazing samples inflate σ_geom ≤1/this (SelfCalib.grazing_cos_min)");
-    cfgr.opt_cast<bool>("SelfCalib.filter_enabled", filter_enabled_,
-            "SelfCalib.filter_enabled");
-    { double m = 0.020; cfgr.opt_cast<double>("SelfCalib.model_sigma_m", m,
-            "per-pose nuisance bias σ (m): the ±22mm config-dependent single-capsule model error, correlated within a pose"); model_sigma_sq_ = m * m; }
-    cfgr.opt_cast<double>("SelfCalib.prior_sigma_trans_m", prior_sigma_trans_,
-            "extrinsic prior σ, translation m (SelfCalib.prior_sigma_trans_m)");
-    {   // The config states DEGREES; the member holds RADIANS. Registering the key in the unit
-        // the FILE uses is the point - a table that reported radians here would not match the
-        // number anybody types, which is how a unit bug survives a review of both sides.
-        double deg = prior_sigma_rot_ * 57.29577951308232;
-        cfgr.opt("SelfCalib.prior_sigma_rot_deg", deg,
-                 "prior std on the rotation parameters (deg; stored internally as radians)");
-        prior_sigma_rot_ = deg * 0.017453292519943295;
-    }
-    cfgr.opt_cast<double>("SelfCalib.pose_min_dq", pose_min_dq_,
-            "min ‖Δq‖ rad to count a NEW pose (SelfCalib.pose_min_dq)");
-    cfgr.opt_cast<bool>("SelfCalib.apply_filter_to_overlay", apply_filter_to_overlay_,
-            "SelfCalib.apply_filter_to_overlay");
-    {
-        const double D = 0.017453292519943295;
-        double tx=0, ty=0, tz=0, rx=0, ry=0, rz=0;
-        cfgr.opt_cast<double>("SelfCalib.inject_tx_m", tx,
-                "");
-        cfgr.opt_cast<double>("SelfCalib.inject_ty_m", ty,
-                "");
-        cfgr.opt_cast<double>("SelfCalib.inject_tz_m", tz,
-                "");
-        {   double deg = rx / D;
-        cfgr.opt("SelfCalib.inject_rx_deg", deg,
-                 "deliberate rx error (deg) injected into the mount, to test whether the calibration recovers it");
-        rx = deg * D;
-    }
-        {   double deg = ry / D;
-        cfgr.opt("SelfCalib.inject_ry_deg", deg,
-                 "deliberate ry error (deg) injected into the mount, to test whether the calibration recovers it");
-        ry = deg * D;
-    }
-        {   double deg = rz / D;
-        cfgr.opt("SelfCalib.inject_rz_deg", deg,
-                 "deliberate rz error (deg) injected into the mount, to test whether the calibration recovers it");
-        rz = deg * D;
-    }
-        const Eigen::Matrix3d R = (Eigen::AngleAxisd(rz, Eigen::Vector3d::UnitZ())
-                                 * Eigen::AngleAxisd(ry, Eigen::Vector3d::UnitY())
-                                 * Eigen::AngleAxisd(rx, Eigen::Vector3d::UnitX())).matrix();
-        inject_ext_.setIdentity();
-        inject_ext_.topLeftCorner<3, 3>()  = R;
-        inject_ext_.topRightCorner<3, 1>() = Eigen::Vector3d(tx, ty, tz);
-        if (tx or ty or tz or rx or ry or rz)
-            std::print("[calib-filter] INJECTING extrinsic corruption t=({:.3f},{:.3f},{:.3f})m rpy=({:.2f},{:.2f},{:.2f})° — filter should recover δξ≈−this\n",
-                       tx, ty, tz, rx/D, ry/D, rz/D);
-    }
-    init_filter_prior();
-
-    // FK model (the SAME Kinematics the controller uses) + the graph extrinsic API.
-    if (G) inner_eigen_ = G->get_inner_eigen_api();
-    std::string urdf = "/home/pbustos/robocomp/components/active_inference/common/kinematics/gen3_robotiq_2f_85-mod.urdf";
-    cfgr.opt_cast<std::string>("SelfCalib.urdf_path", urdf,
-            "");
-    try
-    {
-        kin_ = std::make_unique<Kinematics>(urdf);   // base_tf_ stays identity ⇒ base_link frame
-        std::print("[self_calib] Kinematics loaded: {}\n", urdf);
-    }
-    catch (const std::exception& e)
-    {
-        std::print(stderr, "[self_calib] Kinematics load FAILED ({}) — residual disabled.\n", e.what());
-    }
-
-    // Visualization dock: RGB + the projected FK-capsule aura. Own top-level window
-    // (isolated from the graph view's repaint storm); falls back to a standalone
-    // window if no graph viewer is present.
-    viewer_ = std::make_unique<SelfProjectionViewer>();
-    if (graph_viewers.contains(""))
-        graph_viewers.at("")->add_custom_widget_in_own_window("self_projection", viewer_.get());
-    else
-        viewer_->show();
-
-	// ── WHAT THIS AGENT IS ACTUALLY RUNNING ────────────────────────────────────────────────────
-	//
-	// ★PUBLISHED AT THE END OF initialize(), NOT WHERE THE CONFIG IS PARSED. This agent's own keys
-	// are settled much earlier, but the SHARED presence unit reads its sixteen [Presence.*]/[Owns.*]
-	// keys when the coordinator is configured, further down this same function. Publishing before
-	// that armed the unread sweep on a registry those sixteen had not reached yet, and named every
-	// one of them "in the file, read by nothing" - confident false positives from the one check whose
-	// whole value is that it does not cry wolf. The rule is general: publish when the LAST reader has
-	// run, which is the end of startup, not the end of parsing.
-	//
-	// Prints only the DELTAS - values differing from the code default, plus every A/B arm even at its
-	// default - and writes the full table to etc/config_effective.csv, this run's own record of which
-	// arm it was. Config is read once at startup, so a file's mtime never says which run used it.
-	//
-	// declare_complete() CLAIMS that every config key this agent reads goes through a Reader, and it
-	// ARMS the unread sweep; check_registry_complete.sh self_calibration is the grep that keeps the claim
-	// honest. Re-run it whenever a config read is added.
-	rc::cfg::exempt_generated_prefixes();
-	rc::cfg::registry().declare_complete("self_calibration");
-	rc::cfg::Reader(configLoader, "self_calibration").publish("etc/config_effective.csv");
-}
-
-// Discover the zero-copy media plane from the DSR graph (the camera node carries a
-// MediaDescriptor JSON written by robot_concept) and open RGB + depth subscribers.
-// All failures are soft: the agent stays up and retries are a future refinement.
-void SpecificWorker::init_media_plane()
-{
     if (not G)
     {
-        std::print(stderr, "[self_calib] DSR graph G is null — cannot discover media plane.\n");
+        qWarning() << "self_calibration: DSR graph not available in initialize()";
         return;
     }
 
-    std::string camera_node = "zed";
-    // Its own Reader: this read is in a different function from the startup block, and a Reader is
-    // two pointers over the same process-wide registry - so the key still reaches the table.
-    rc::cfg::Reader(configLoader, "self_calibration").opt("SelfCalib.camera_node", camera_node,
-            "which camera node on the graph this calibration solves the mount for");
+    // Nothing here reads pixels out of the graph (media plane only, later tasks).
+    G->set_ignored_attributes<cam_rgb_att, cam_depth_att, laser_X_att, laser_Y_att, laser_Z_att>();
 
-    const auto desc = rc::media::descriptor_from_graph(*G, camera_node);
-    if (not desc.has_value())
-    {
-        std::print(stderr, "[self_calib] no media_descriptor on node '{}' — is robot_concept up?\n", camera_node);
-        return;
-    }
-    if (desc->type_tag != rc::media::IMAGE_FRAME_TYPE_TAG)
-    {
-        std::print(stderr, "[self_calib] type_tag mismatch ('{}' != '{}') — refusing stream.\n",
-                   desc->type_tag, rc::media::IMAGE_FRAME_TYPE_TAG);
-        return;
-    }
+    // The whole presence protocol is SHARED (common/concept_presence): debounced Degraded, one-shot post-sync
+    // sweep on first Operating. This agent has NO primary input stream yet, so the input is "always live".
+    presence_protocol_.wire(
+        presence_coordinator_, &statemachine, this, configLoader, G, static_cast<std::uint32_t>(agent_id),
+        {
+            .shutting_down      = [this] { return shutting_down_.load(); },
+            .pump_primary_input = {},
+            .primary_age_ms     = [] { return std::int64_t{-1}; },
+            .primary_live       = [] { return true; },
+            .primary_stalled    = [](std::int64_t*) { return false; },
+            .emit_ready         = [this] { emit presenceReady(); },
+            .emit_lost          = [this] { emit presenceLost(); },
+            .compute            = [this] { compute(); },
+            .terminal_shutdown  = [this] { terminal_shutdown(); },
+            .on_first_operating = [this] { remove_stale_nodes(); },
+            .on_optional_peer_lost  = [](const std::string& name, std::uint32_t)
+                                      { qInfo() << "[Presence] optional peer lost:" << QString::fromStdString(name); },
+            .on_optional_peer_ready = [](const std::string& name, std::uint32_t)
+                                      { qInfo() << "[Presence] optional peer ready:" << QString::fromStdString(name); },
+        });
 
-    if (const auto cfg = desc->subscriber_config("rgb"))
-    {
-        media_rgb_sub_ = std::make_unique<rc::media::MediaSubscriber>();
-        if (not media_rgb_sub_->init(*cfg)) media_rgb_sub_.reset();
-    }
-    if (const auto cfg = desc->subscriber_config("depth"))
-    {
-        media_depth_sub_ = std::make_unique<rc::media::MediaSubscriber>();
-        if (not media_depth_sub_->init(*cfg)) media_depth_sub_.reset();
-    }
-    std::print("[self_calib] media plane: domain={} rgb={} depth={}\n",
-               desc->domain_id, static_cast<bool>(media_rgb_sub_), static_cast<bool>(media_depth_sub_));
+    // SIGTERM / Ctrl+C (sigwatch -> quit -> aboutToQuit) goes through the crash-free terminal shutdown.
+    QObject::connect(QCoreApplication::instance(), &QCoreApplication::aboutToQuit,
+                     this, &SpecificWorker::terminal_shutdown, Qt::UniqueConnection);
+
+    build_dashboard();
+    remove_stale_nodes();
+    std::print("self_calibration: initialize() done, agent node '{} {}' present\n", agent_name, agent_id);
 }
-
 
 void SpecificWorker::compute()
 {
-    // Drain the media plane (non-blocking). The frame is a loaned view valid only
-    // for the callback; record metadata now, do the FK/projection/residual later.
-    if (media_rgb_sub_)
-        rx_rgb_count_ += media_rgb_sub_->poll([this](const rc::media::ImageFrame& f, std::int64_t)
+    if (shutting_down_.load() or not G)
+        return;
+    // Created here (an Operating tick, main thread), never at t=0 from initialize(): the graph is loaded and the
+    // sensor nodes have synced by now (CLAUDE.md, media plane).
+    if (not inputs_)
+        inputs_ = std::make_unique<sc::SensorInputs>(G, inputs_cfg_);
+    inputs_->poll();
+    if (not harvester_)
+        harvester_ = std::make_unique<sc::calib::TrajectoryHarvester>(harvester_cfg_);
+    // Odometry first (piecewise-constant over source_ts_ms deltas, inside the harvester), then the sweeps.
+    for (const auto& o : inputs_->take_odometry())
+        harvester_->add_odometry(o.source_ts_ms, o.adv, o.side, o.rot);
+    for (const auto& l : inputs_->take_lidar())
+    {
+        feed_mount_factors(l);
+        if (l.sensor == "helios")
         {
-            last_rgb_w_ = f.width(); last_rgb_h_ = f.height();
-            last_rgb_stamp_ms_ = f.stamp_ms();
-            rgb_format_ = f.format();
-            const std::uint32_t sz = f.size();           // copy out of the loaned view for the overlay
-            if (sz > 0 and sz <= f.data().size())
-                rgb_data_.assign(f.data().data(), f.data().data() + sz);
-        });
-    if (media_depth_sub_)
-        rx_depth_count_ += media_depth_sub_->poll([this](const rc::media::ImageFrame& f, std::int64_t)
-        {
-            last_depth_w_ = f.width(); last_depth_h_ = f.height();
-            last_depth_stamp_ms_ = f.stamp_ms();
-            depth_format_ = f.format();
-            const std::uint32_t sz = f.size();           // copy out of the loaned view to sample later
-            if (sz > 0 and sz <= f.data().size())
-                depth_data_.assign(f.data().data(), f.data().data() + sz);
-        });
-
-    // New depth frame ⇒ score the reprojection residual against the matched q.
-    if (last_depth_stamp_ms_ != last_processed_depth_stamp_ and not depth_data_.empty())
-    {
-        last_processed_depth_stamp_ = last_depth_stamp_ms_;
-        compute_depth_residual();
+            const bool stalled = inputs_->stalled("helios") or inputs_->any_stalled();
+            const bool captured = harvester_->add_keyframe(l.stamp_ms, stalled);
+            feed_dashboard_keyframe(captured, stalled);
+            if (dash_model_)
+                dash_model_->note_lidar_stamp(l.stamp_ms, std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::system_clock::now().time_since_epoch()).count());
+        }
     }
-
-    // New RGB frame ⇒ rebuild the aura overlay (FK + project capsules) and show it.
-    if (last_rgb_stamp_ms_ != last_processed_rgb_stamp_ and not rgb_data_.empty())
+    for (const auto& m : inputs_->take_imu())
+        harvester_->add_gyro(m.stamp_ms, m.gyro.z());   // yaw rate about the IMU z axis (assumed up: pin with the mount)
+    (void)inputs_->take_images();                       // cameras: not consumed by the trajectory part
+    // Phase 4.4 attaches scan registration to these pairs; for now the agent only reports them (<= once / 10 s).
+    const auto pairs = harvester_->take_pairs();
+    npairs_logged_ += long(pairs.size());
+    feed_dashboard_pairs(pairs);
+    if (const auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count(); now - harvester_log_ms_ >= 10000)
     {
-        last_processed_rgb_stamp_ = last_rgb_stamp_ms_;
-        build_self_projection();
+        harvester_log_ms_ = now;
+        const auto e = harvester_->close_episode();
+        qInfo().noquote() << QString("[Harvester] keyframes %1 (stalled-dropped %2)  pairs %3 (total %4)  info(dx,dy,psi)=(%5, %6, %7)")
+                .arg(e.keyframes).arg(e.dropped_stalled).arg(e.pairs).arg(npairs_logged_)
+                .arg(e.info(0, 0), 0, 'g', 3).arg(e.info(1, 1), 0, 'g', 3).arg(e.info(2, 2), 0, 'g', 3);
     }
-
-    // Reception heartbeat (foundation milestone): confirm the plane is flowing
-    // before we build FK projection + the reprojection residual on top.
-    static auto last_report = std::chrono::steady_clock::now();
-    const auto now = std::chrono::steady_clock::now();
-    if (now - last_report >= std::chrono::seconds(5))
-    {
-        std::print("[calib-rx] 5s rgb={} ({}x{} t={}ms) depth={} ({}x{} t={}ms)\n",
-                   rx_rgb_count_, last_rgb_w_, last_rgb_h_, last_rgb_stamp_ms_,
-                   rx_depth_count_, last_depth_w_, last_depth_h_, last_depth_stamp_ms_);
-        last_report = now;
-    }
+    refresh_dashboard();
+    fps.print("self_calibration compute", 3000);
 }
 
-
-// Read the (stamp_ms,q) ring off kinova_arm_r (written by the controller) and
-// nearest-match q to the frame stamp t_img. Reconstructs stamps from base + offsets.
-SpecificWorker::JointSample SpecificWorker::match_joint(std::uint64_t t_img) const
+// Floor + vertical LiDAR mount factors (plan Phase 3). A stalled stream's sweeps are not used (sensor_inputs
+// contract); a sweep without a resolvable robot-frame mount is skipped (nothing to put the points in).
+void SpecificWorker::feed_mount_factors(const sc::LidarIn& l)
 {
-    JointSample out;
-    if (not G) return out;
-    auto node = G->get_node("kinova_arm_r");
-    if (not node.has_value()) return out;
-    const auto find_attr = [&](const char* n) -> const DSR::Attribute*
-    {
-        auto it = node->attrs().find(n);
-        return it == node->attrs().end() ? nullptr : &it->second;
-    };
-    const auto* base_a = find_attr("joint_buffer_base_ms");
-    const auto* off_a  = find_attr("joint_buffer_stamp_off_ms");
-    const auto* q_a    = find_attr("joint_buffer_q");
-    const auto* dof_a  = find_attr("joint_buffer_dof");
-    if (not (base_a and off_a and q_a and dof_a))
-        return out;
-
-    const std::uint64_t base = base_a->uint64();
-    const auto& off = off_a->float_vec();
-    const auto& qv  = q_a->float_vec();
-    const int   dof = dof_a->dec();
-    const std::size_t N = off.size();
-    if (dof <= 0 or N == 0 or qv.size() < N * static_cast<std::size_t>(dof))
-        return out;
-
-    const auto stamp_at = [&](std::size_t i) { return base + static_cast<std::uint64_t>(std::llround(off[i])); };
-    std::size_t best = 0; std::uint64_t best_d = std::numeric_limits<std::uint64_t>::max();
-    for (std::size_t i = 0; i < N; ++i)
-    {
-        const std::uint64_t st = stamp_at(i);
-        const std::uint64_t d  = st > t_img ? st - t_img : t_img - st;
-        if (d < best_d) { best_d = d; best = i; }
-    }
-    for (int j = 0; j < 7 and j < dof; ++j)
-        out.q[j] = qv[best * dof + j];
-    out.stamp_ms     = stamp_at(best);
-    out.match_err_ms = best_d;
-
-    // Neighbouring ring sample → the matched step's q_prev + dt (for the depth-velocity
-    // ∂depth/∂t) and a scalar ‖q̇‖. Prefer the earlier neighbour so dt > 0.
-    if (N >= 2)
-    {
-        const std::size_t k = best > 0 ? best - 1 : best + 1;
-        out.dt_s = (static_cast<double>(off[best]) - static_cast<double>(off[k])) / 1000.0;
-        double s2 = 0.0;
-        for (int j = 0; j < 7 and j < dof; ++j)
-        {
-            out.q_prev[j] = qv[k * dof + j];
-            const double dq = static_cast<double>(qv[best * dof + j]) - static_cast<double>(qv[k * dof + j]);
-            s2 += dq * dq;
-        }
-        out.qdot_norm = std::abs(out.dt_s) > 1e-4 ? std::sqrt(s2) / std::abs(out.dt_s) : 0.0;
-        out.has_prev  = std::abs(out.dt_s) > 1e-4;
-    }
-    out.valid = true;
-    return out;
-}
-
-// arm-base→camera extrinsic: body_T_zed⁻¹ · body_T_arm (both hang off "body", so
-// room/world cancels). Element-wise copy = alignment-safe (bottle_concept pattern).
-bool SpecificWorker::build_extrinsic(Eigen::Matrix4d& zed_T_arm) const
-{
-    if (not inner_eigen_) return false;
-    const auto btz = inner_eigen_->get_transformation_matrix("body", "zed", 0);
-    const auto bta = inner_eigen_->get_transformation_matrix("body", "kinova_arm_r", 0);
-    if (not (btz.has_value() and bta.has_value())) return false;
-    const auto to_m4 = [](const Mat::RTMat& T)
-    {
-        Eigen::Matrix4d m; const auto& s = T.matrix();
-        for (int i = 0; i < 4; ++i) for (int j = 0; j < 4; ++j) m(i, j) = s(i, j);
-        return m;
-    };
-    zed_T_arm = to_m4(btz.value()).inverse() * to_m4(bta.value());
-    return true;
-}
-
-// Depth intrinsics from the zed node (once): focal from cam_depth_focalx/y, the
-// principal point at the depth image centre (cx,cy = w/2,h/2 — CameraAPI convention).
-bool SpecificWorker::ensure_depth_intrinsics()
-{
-    if (depth_intr_ok_) return true;
-    if (not G or last_depth_w_ == 0 or last_depth_h_ == 0) return false;
-    auto zed = G->get_node("zed");
-    if (not zed.has_value()) return false;
-    const auto fx = G->get_attrib_by_name<cam_depth_focalx_att>(zed.value());
-    const auto fy = G->get_attrib_by_name<cam_depth_focaly_att>(zed.value());
-    if (not (fx.has_value() and fy.has_value())) return false;
-    dfx_ = fx.value(); dfy_ = fy.value();
-    dcx_ = last_depth_w_ / 2.0; dcy_ = last_depth_h_ / 2.0;
-    depth_intr_ok_ = true;
-    std::print("[self_calib] depth intrinsics: fx={:.1f} fy={:.1f} cx={:.1f} cy={:.1f} ({}x{})\n",
-               dfx_, dfy_, dcx_, dcy_, last_depth_w_, last_depth_h_);
-    return true;
-}
-
-// First reprojection residual (depth channel, FIXED params). FK the matched q,
-// sample each link capsule's axis, project into the depth image, and compare the
-// predicted near-surface depth (axis depth − radius) to the observed depth. An
-// inlier gate rejects background/occlusion. Prints rms + signed bias (the spatial
-// calibration error) alongside q̇ (the residual's q̇-slope is τ).
-// Seed the information matrix with the extrinsic prior: large variance ⇒ small information,
-// so unobservable DOFs relax to the graph value (δξ=0) while observable ones move.
-void SpecificWorker::init_filter_prior()
-{
-    filt_Lambda_.setZero();
-    for (int i = 0; i < 3; ++i) filt_Lambda_(i, i) = 1.0 / (prior_sigma_trans_ * prior_sigma_trans_);
-    for (int i = 3; i < 6; ++i) filt_Lambda_(i, i) = 1.0 / (prior_sigma_rot_ * prior_sigma_rot_);
-    filt_eta_.setZero();
-    filt_poses_ = 0;
-    have_folded_pose_ = false;
-}
-
-void SpecificWorker::compute_depth_residual()
-{
-    if (not kin_ or not ensure_depth_intrinsics())
+    if (not mount_factors_enabled_ or inputs_->stalled(l.sensor) or not l.robot_from_sensor.has_value())
         return;
-    // Throttle the "blocked" heartbeats so a missing prerequisite is never silent
-    // (frames arriving but no [calib] output ⇒ this fires) — ~once/2s at 54 fps.
-    static int blocked_throttle = 0;
-    const bool say = (blocked_throttle++ % 100) == 0;
-    const bool print_now = last_depth_stamp_ms_ >= last_calib_print_ms_ + 350;  // ~2.8 Hz
-    const auto js = match_joint(last_depth_stamp_ms_);
-    if (not js.valid)
+    if (not mount_stage_)
+        mount_stage_ = std::make_unique<sc::LidarMountStage>(mount_cfg_);
+    const auto& poly = inputs_->polygon();
+    // room_concept's factor used the MEASURED ceiling only (0 = no ceiling rows); a configured height has sigma 0.
+    const float ceiling = poly.ceiling_sigma_m > 0.f ? poly.ceiling_m : 0.f;
+    mount_stage_->observe({.sensor = l.sensor, .stamp_ms = l.stamp_ms, .points_robot = l.points_robot(),
+                           .origin_robot = l.robot_from_sensor->translation(), .room_T_robot = l.room_T_robot},
+                          poly.vertices, ceiling);
+    if (const auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count(); now - mount_log_ms_ >= mount_log_period_ms_)
     {
-        if (say) std::print("[calib] no q for this frame: (stamp_ms,q) ring absent on kinova_arm_r — is kinova_controller running with publish_joint_buffer=true?\n");
-        return;
+        mount_log_ms_ = now;
+        mount_stage_->log_state(now);
+        qInfo().noquote() << QString::fromStdString(mount_stage_->summary());
     }
-    Eigen::Matrix4d zed_T_arm;
-    if (not build_extrinsic(zed_T_arm))
-    {
-        if (say) std::print("[calib] extrinsic unavailable: inner_eigen body→arm / body→zed walk failed (graph not fully joined?)\n");
-        return;
-    }
-    zed_T_arm = zed_T_arm * inject_ext_;   // identity unless the validation injection is on
-
-    // Information-filter Jacobian needs the extrinsic right-perturbed in se(3): zed_T_arm·Exp(ε·eₖ).
-    // First-order generators (k<3 translation, k≥3 rotation = skew) suffice at EXT_EPS scale.
-    constexpr double EXT_EPS = 1e-5;
-    std::array<Eigen::Matrix4d, 6> zed_T_arm_dxi;
-    if (filter_enabled_)
-        for (int k = 0; k < 6; ++k)
-        {
-            Eigen::Matrix4d G = Eigen::Matrix4d::Zero();
-            if (k < 3) G(k, 3) = 1.0;                                  // translation generator
-            else                                                       // rotation generator = skew(e_{k-3})
-            {
-                const Eigen::Vector3d w = Eigen::Vector3d::Unit(k - 3);
-                G(0, 1) = -w.z(); G(0, 2) =  w.y();
-                G(1, 0) =  w.z(); G(1, 2) = -w.x();
-                G(2, 0) = -w.y(); G(2, 1) =  w.x();
-            }
-            zed_T_arm_dxi[static_cast<std::size_t>(k)] = zed_T_arm * (Eigen::Matrix4d::Identity() + EXT_EPS * G);
-        }
-    // Per-pose GLS accumulators (folded once per distinct pose, with the b_pose nuisance).
-    Eigen::Matrix<double, 6, 6> pose_A    = Eigen::Matrix<double, 6, 6>::Zero();
-    Eigen::Matrix<double, 6, 1> pose_g    = Eigen::Matrix<double, 6, 1>::Zero();
-    Eigen::Matrix<double, 6, 1> pose_hsum = Eigen::Matrix<double, 6, 1>::Zero();
-    double pose_rsum = 0.0, pose_s = 0.0; int pose_n = 0;
-
-    const int w = static_cast<int>(last_depth_w_), h = static_cast<int>(last_depth_h_);
-    const auto depth_at = [&](int u, int v) -> double          // observed forward distance, m (<0 = invalid)
-    {
-        if (u < 0 or v < 0 or u >= w or v >= h) return -1.0;
-        const std::size_t idx = static_cast<std::size_t>(v) * w + u;
-        if (depth_format_ == rc::media::FORMAT_DEPTH_F32)
-        {
-            if ((idx + 1) * sizeof(float) > depth_data_.size()) return -1.0;
-            const float d = reinterpret_cast<const float*>(depth_data_.data())[idx];
-            return (std::isfinite(d) and d > 0.05f) ? static_cast<double>(d) : -1.0;
-        }
-        if (depth_format_ == rc::media::FORMAT_Z16)
-        {
-            if ((idx + 1) * sizeof(std::uint16_t) > depth_data_.size()) return -1.0;
-            const std::uint16_t mm = reinterpret_cast<const std::uint16_t*>(depth_data_.data())[idx];
-            return mm > 0 ? mm * 0.001 : -1.0;
-        }
-        return -1.0;
-    };
-
-    const auto cap_for = [](std::string_view m) -> const LinkCapsule*
-    {
-        for (const auto& c : LINK_CAPSULES) if (c.mesh == m) return &c;
-        return nullptr;
-    };
-
-    // FK both the matched q and its ring neighbour, so every sample carries its own
-    // predicted depth-velocity vdepth = (Y(q) − Y(q_prev)) / dt → the τ regressor.
-    const auto links      = kin_->arm_mesh_link_poses(js.q);
-    const bool have_prev  = js.has_prev and std::abs(js.dt_s) > 1e-4;
-    const auto links_prev = have_prev ? kin_->arm_mesh_link_poses(js.q_prev)
-                                      : std::vector<Kinematics::MeshLinkPose>{};
-
-    // Probabilistic FK: perturb each joint by ε once → reuse the perturbed link
-    // poses per sample to numerically propagate encoder noise into the predicted
-    // depth (∂d_pred/∂q_j along the fixed pixel ray). 7 extra FK evals/frame.
-    constexpr double EPS = 1e-5;                 // rad finite-diff step
-    std::array<std::vector<Kinematics::MeshLinkPose>, 7> links_pert;
-    for (int j = 0; j < 7; ++j)
-    {
-        auto qj = js.q; qj[static_cast<std::size_t>(j)] += EPS;
-        links_pert[static_cast<std::size_t>(j)] = kin_->arm_mesh_link_poses(qj);
-    }
-
-    constexpr int    S    = 12;                 // samples along each capsule axis
-    const double     gate = residual_gate_m_;   // m inlier band (tightened; rejects model breakdown)
-    int n_in = 0; double sum2 = 0.0, sum_signed = 0.0;
-    // Precision-weighted accumulators (probabilistic FK) + σ_d distribution probe.
-    double wsum = 0.0, wr = 0.0, wr2 = 0.0;
-    std::vector<double> sigma_d_list, fk_frac_list;
-
-    for (std::size_t li = 0; li < links.size(); ++li)
-    {
-        const LinkCapsule* cap = cap_for(links[li].mesh_filename);
-        if (not cap) continue;
-        const Eigen::Vector3d axis(cap->ax, cap->ay, cap->az), ctr(cap->cx, cap->cy, cap->cz);
-        const Eigen::Vector3d a0 = ctr - axis * cap->half_length, a1 = ctr + axis * cap->half_length;
-        // Capsule axis endpoints in the camera frame, under q (and q_prev for the velocity).
-        const Eigen::Vector3d e0c = (zed_T_arm * (links[li].pose * a0).homogeneous()).head<3>();
-        const Eigen::Vector3d e1c = (zed_T_arm * (links[li].pose * a1).homogeneous()).head<3>();
-        const bool lp = have_prev and li < links_prev.size();
-        const Eigen::Vector3d e0p = lp ? Eigen::Vector3d((zed_T_arm * (links_prev[li].pose * a0).homogeneous()).head<3>()) : Eigen::Vector3d::Zero();
-        const Eigen::Vector3d e1p = lp ? Eigen::Vector3d((zed_T_arm * (links_prev[li].pose * a1).homogeneous()).head<3>()) : Eigen::Vector3d::Zero();
-        for (int s = 0; s < S; ++s)
-        {
-            const double t = -cap->half_length + 2.0 * cap->half_length * s / (S - 1);
-            const Eigen::Vector3d P = (zed_T_arm * (links[li].pose * (ctr + axis * t)).homogeneous()).head<3>();
-            const double X = P.x(), Y = P.y(), Z = P.z();
-            if (Y <= 1e-3) continue;                            // behind the camera
-            const int u = static_cast<int>(std::lround(dcx_ + dfx_ * X / Y));
-            const int v = static_cast<int>(std::lround(dcy_ - dfy_ * Z / Y));
-            const double d_obs = depth_at(u, v);
-            if (d_obs < 0.0) continue;
-            Eigen::Vector3d hit, nrm = Eigen::Vector3d::Zero();
-            const double d_pred = capsule_near_depth(P, e0c, e1c, cap->radius, Y - cap->radius, &hit, &nrm);
-            const double r = d_pred - d_obs;                    // ray–capsule near surface − observed
-            if (std::abs(r) > gate) continue;
-            sum2 += r * r; sum_signed += r; ++n_in;
-
-            // Predictive depth variance σ_d² = encoder noise through FK (numeric
-            // ∂d_pred/∂q_j along THIS fixed ray) + capsule-model floor + range-
-            // dependent sensor noise → per-sample precision w = 1/σ_d². Silhouette/
-            // grazing & ill-conditioned configs get large ∂d_pred/∂q ⇒ downweighted.
-            double var_fk = 0.0;
-            for (int j = 0; j < 7; ++j)
-            {
-                const auto& lp_j = links_pert[static_cast<std::size_t>(j)];
-                if (li >= lp_j.size()) continue;
-                const Eigen::Vector3d e0j = (zed_T_arm * (lp_j[li].pose * a0).homogeneous()).head<3>();
-                const Eigen::Vector3d e1j = (zed_T_arm * (lp_j[li].pose * a1).homogeneous()).head<3>();
-                const double g = (capsule_near_depth(P, e0j, e1j, cap->radius, d_pred) - d_pred) / EPS;
-                var_fk += g * g;
-            }
-            var_fk *= encoder_sigma_rad_ * encoder_sigma_rad_;
-            const double sig_sensor = depth_sensor_sigma_m_ + depth_sensor_range_k_ * Y * Y;
-            // Grazing incidence: at a near-tangent ray (|d̂·n|→0) a small radius/position
-            // error swings the surface depth a lot → inflate the model floor by 1/cosθ
-            // (clamped). Zero normal = ray missed the capsule → nominal incidence.
-            const double cos_inc  = nrm.squaredNorm() > 0.5 ? std::abs(P.normalized().dot(nrm)) : 1.0;
-            const double sig_geom = geom_sigma_m_ / std::max(cos_inc, grazing_cos_min_);
-            const double var_d = var_fk + sig_geom * sig_geom + sig_sensor * sig_sensor;
-            const double wts   = 1.0 / var_d;
-            wsum += wts; wr += wts * r; wr2 += wts * r * r;
-            sigma_d_list.push_back(std::sqrt(var_d));
-            fk_frac_list.push_back(var_fk / var_d);
-
-            // Information filter: H = ∂d_pred/∂δξ via the 6 right-perturbed extrinsics, along the
-            // SAME ray. Lateral/tilt DOFs → H≈0 → no information → stay at prior (the depth-blindness).
-            if (filter_enabled_)
-            {
-                Eigen::Matrix<double, 6, 1> H;
-                for (int k = 0; k < 6; ++k)
-                {
-                    const auto& M = zed_T_arm_dxi[static_cast<std::size_t>(k)];
-                    const Eigen::Vector3d e0k = (M * (links[li].pose * a0).homogeneous()).head<3>();
-                    const Eigen::Vector3d e1k = (M * (links[li].pose * a1).homogeneous()).head<3>();
-                    H(k) = (capsule_near_depth(P, e0k, e1k, cap->radius, d_pred) - d_pred) / EXT_EPS;
-                }
-                pose_A.noalias()    += (H * H.transpose()) * wts;
-                pose_g.noalias()    += H * (r * wts);
-                pose_hsum.noalias() += H * wts;
-                pose_rsum += r * wts;
-                pose_s    += wts;
-                ++pose_n;
-            }
-
-            // τ regressor = ∂d_pred/∂t along the SAME pixel ray: the q_prev capsule's
-            // near-surface depth at this ray, differenced. Consistent with d_pred (the
-            // earlier axis-Y velocity was not, and injected a spurious slope).
-            if (lp)
-            {
-                const double d_pred_prev = capsule_near_depth(P, e0p, e1p, cap->radius, d_pred);
-                const double vdepth = (d_pred - d_pred_prev) / js.dt_s;
-                reg_samples_.emplace_back(static_cast<float>(vdepth), static_cast<float>(r));
-                if (reg_samples_.size() > REG_MAX) reg_samples_.pop_front();
-            }
-        }
-    }
-
-    if (n_in < 5)
-    {
-        if (print_now)
-        {
-            last_calib_print_ms_ = last_depth_stamp_ms_;
-            std::print("[calib] depth residual: too few inliers ({}) — arm out of view / extrinsic off?\n", n_in);
-        }
-        return;
-    }
-    if (print_now)
-    {
-        last_calib_print_ms_ = last_depth_stamp_ms_;
-        std::print("[calib] depth rms={:.4f}m bias={:+.4f}m n={} | qdot={:.3f}rad/s match_dt={}ms\n",
-                   std::sqrt(sum2 / n_in), sum_signed / n_in, n_in, js.qdot_norm, js.match_err_ms);
-    }
-
-    // Probabilistic-FK precision-weighted residual + the σ_d distribution, so we can
-    // sanity-check the predictive covariance against the flat stats above before the
-    // information filter consumes it. fk_frac = encoder-share of σ_d² (≈0 in sim ⇒
-    // floor-dominated, as expected; grows on HW where q noise matters).
-    if (print_now and wsum > 0.0 and not sigma_d_list.empty())
-    {
-        const double bias_w = wr / wsum, rms_w = std::sqrt(wr2 / wsum);
-        const auto pct = [](std::vector<double>& v, double p)
-        {
-            const std::size_t k = std::min(v.size() - 1, static_cast<std::size_t>(p * (v.size() - 1)));
-            std::nth_element(v.begin(), v.begin() + k, v.end());
-            return v[k];
-        };
-        double mf = 0.0; for (double f : fk_frac_list) mf += f; mf /= fk_frac_list.size();
-        const double s10 = pct(sigma_d_list, 0.10), s50 = pct(sigma_d_list, 0.50), s90 = pct(sigma_d_list, 0.90);
-        std::print("[calib-pfk] rms_w={:.4f}m bias_w={:+.4f}m | sigma_d p10/med/p90={:.4f}/{:.4f}/{:.4f}m  fk_frac_mean={:.1f}%\n",
-                   rms_w, bias_w, s10, s50, s90, 100.0 * mf);
-    }
-
-    if (++reg_frames_ % REG_REPORT_EVERY == 0)
-    {
-        const auto f = huber_fit(reg_samples_, tau_vspread_min_);
-        if (f.ok)
-            std::print("[calib-tau] τ={:+.1f}ms  spatial_bias={:+.4f}m  (n={}, inliers={:.0f}%, scale={:.4f}m, vspread={:.3f})\n",
-                       -f.slope * 1000.0, f.intercept, reg_samples_.size(),
-                       100.0 * f.inlier_frac, f.scale, f.vspread);
-        else
-            std::print("[calib-tau] τ unidentifiable (n={}, vspread={:.3f} < {:.3f} m/s — move the arm more)\n",
-                       reg_samples_.size(), f.vspread, tau_vspread_min_);
-    }
-
-    // ── Information filter: fold THIS pose (if a distinct viewpoint) and report ──────
-    if (filter_enabled_ and pose_n >= 8)
-    {
-        double dq = 0.0;
-        if (have_folded_pose_) for (int j = 0; j < 7; ++j) { const double d = js.q[j] - last_folded_q_[j]; dq += d * d; }
-        if (not have_folded_pose_ or std::sqrt(dq) > pose_min_dq_)
-        {
-            // Marginalize the per-pose nuisance bias b_pose~N(0,σ_model²) via Sherman-Morrison on
-            // C = diag(σ_d²) + σ_model²·11ᵀ: the κ·hsum·hsumᵀ term removes the COMMON mode, so the
-            // ±22mm shared model offset can't masquerade as evidence about the extrinsic.
-            const double kappa = model_sigma_sq_ / (1.0 + model_sigma_sq_ * pose_s);
-            filt_Lambda_.noalias() += pose_A - kappa * (pose_hsum * pose_hsum.transpose());
-            filt_eta_.noalias()    += -(pose_g - kappa * pose_hsum * pose_rsum);
-            last_folded_q_ = js.q;
-            have_folded_pose_ = true;
-            ++filt_poses_;
-        }
-    }
-    if (filter_enabled_ and print_now and filt_poses_ >= 3)
-    {
-        const Eigen::Matrix<double, 6, 6> Sigma = filt_Lambda_.inverse();
-        const Eigen::Matrix<double, 6, 1> dxi   = Sigma * filt_eta_;
-        filt_dxi_ = dxi; filt_have_dxi_ = true;   // republish to the overlay
-        const double D = 57.29577951308232;       // rad→deg
-
-        // One-shot ground-truth decomposition: print the graph's body_T_zed / body_T_arm, the
-        // composed extrinsic, and the filter-CORRECTED extrinsic, so we can see which transform
-        // carries the error. (body_T_arm truth = T_mount (0.272385,0.014412,0.520) Rz90, from the
-        // Webots scene; body_T_zed truth lives in the Shadow proto — read the corrected value here.)
-        if (not gt_printed_ and filt_poses_ >= 50 and inner_eigen_)
-        {
-            const auto rd = [&](const char* a, const char* b) -> std::optional<Eigen::Matrix4d>
-            {
-                const auto o = inner_eigen_->get_transformation_matrix(a, b, 0);
-                if (not o.has_value()) return std::nullopt;
-                Eigen::Matrix4d m; const auto& s = o.value().matrix();
-                for (int i = 0; i < 4; ++i) for (int j = 0; j < 4; ++j) m(i, j) = s(i, j);
-                return m;
-            };
-            const auto show = [D](const char* name, const Eigen::Matrix4d& T)
-            {
-                const Eigen::Vector3d t = T.topRightCorner<3, 1>();
-                const Eigen::Vector3d e = T.topLeftCorner<3, 3>().eulerAngles(0, 1, 2) * D;
-                std::print("[calib-gt] {:<22} t=({:+.4f},{:+.4f},{:+.4f})m rpy_xyz=({:+.1f},{:+.1f},{:+.1f})deg\n",
-                           name, t.x(), t.y(), t.z(), e.x(), e.y(), e.z());
-            };
-            const auto btz = rd("body", "zed"), bta = rd("body", "kinova_arm_r");
-            if (btz and bta)
-            {
-                const Eigen::Matrix4d zTa = btz->inverse() * (*bta);
-                show("body_T_zed (graph)", *btz);
-                show("body_T_arm (graph)", *bta);   // truth = (0.272385,0.014412,0.520) Rz90 ⇒ json z off ~-31mm
-                show("zed_T_arm (graph)", zTa);
-                show("zed_T_arm (corrected)", zTa * se3_exp(filt_dxi_));
-                gt_printed_ = true;
-            }
-        }
-        std::print("[calib-filter] poses={} | dxi_t=({:+.1f},{:+.1f},{:+.1f})mm dxi_r=({:+.2f},{:+.2f},{:+.2f})deg | "
-                   "sig_t=({:.1f},{:.1f},{:.1f})mm sig_r=({:.2f},{:.2f},{:.2f})deg\n",
-                   filt_poses_,
-                   1000.0 * dxi(0), 1000.0 * dxi(1), 1000.0 * dxi(2), D * dxi(3), D * dxi(4), D * dxi(5),
-                   1000.0 * std::sqrt(Sigma(0,0)), 1000.0 * std::sqrt(Sigma(1,1)), 1000.0 * std::sqrt(Sigma(2,2)),
-                   D * std::sqrt(Sigma(3,3)), D * std::sqrt(Sigma(4,4)), D * std::sqrt(Sigma(5,5)));
-    }
-}
-
-// RGB intrinsics from the zed node (once): focal from cam_rgb_focalx/y, principal
-// point at the RGB image centre.
-bool SpecificWorker::ensure_rgb_intrinsics()
-{
-    if (rgb_intr_ok_) return true;
-    if (not G or last_rgb_w_ == 0 or last_rgb_h_ == 0) return false;
-    auto zed = G->get_node("zed");
-    if (not zed.has_value()) return false;
-    const auto fx = G->get_attrib_by_name<cam_rgb_focalx_att>(zed.value());
-    const auto fy = G->get_attrib_by_name<cam_rgb_focaly_att>(zed.value());
-    if (not (fx.has_value() and fy.has_value())) return false;
-    rfx_ = fx.value(); rfy_ = fy.value();
-    rcx_ = last_rgb_w_ / 2.0; rcy_ = last_rgb_h_ / 2.0;
-    rgb_intr_ok_ = true;
-    return true;
-}
-
-// Build the aura overlay for the latest RGB frame and push it to the viewer: FK the
-// q matched to the RGB stamp, project each link capsule's two axis endpoints (+ its
-// perspective radius) into the RGB image, wrap the frame in a QImage. Same FK +
-// capsule model as the depth residual, projected with the RGB intrinsics.
-void SpecificWorker::build_self_projection()
-{
-    if (not viewer_ or not kin_ or rgb_data_.empty())
-        return;
-    if (not ensure_rgb_intrinsics())
-        return;
-    const auto js = match_joint(last_rgb_stamp_ms_);
-    Eigen::Matrix4d zed_T_arm;
-    if (not js.valid or not build_extrinsic(zed_T_arm))
-        return;
-    zed_T_arm = zed_T_arm * inject_ext_;   // mirror the residual's extrinsic (identity unless injecting)
-    // Decisive test: draw with the CORRECTED extrinsic. If the skeleton snaps onto the arm across
-    // poses, the filter's dxi is a REAL extrinsic error (not absorbed model error).
-    if (apply_filter_to_overlay_ and filt_have_dxi_)
-        zed_T_arm = zed_T_arm * se3_exp(filt_dxi_);
-
-    const int w = static_cast<int>(last_rgb_w_), h = static_cast<int>(last_rgb_h_);
-    QImage::Format qfmt = QImage::Format_Invalid;
-    if      (rgb_format_ == rc::media::FORMAT_RGB8) qfmt = QImage::Format_RGB888;
-    else if (rgb_format_ == rc::media::FORMAT_BGR8) qfmt = QImage::Format_BGR888;
-    else return;
-    const int step = w * 3;
-    if (static_cast<std::size_t>(step) * h > rgb_data_.size())
-        return;
-    QImage img(rgb_data_.data(), w, h, step, qfmt);   // the viewer deep-copies
-
-    const auto project = [&](const Eigen::Vector3d& p_arm, double r_m, QPointF& uv, double& rpx) -> bool
-    {
-        const Eigen::Vector4d pc = zed_T_arm * p_arm.homogeneous();
-        const double X = pc.x(), Y = pc.y(), Z = pc.z();
-        if (Y <= 1e-3) return false;
-        uv  = QPointF(rcx_ + rfx_ * X / Y, rcy_ - rfy_ * Z / Y);
-        rpx = std::clamp(rfx_ * r_m / Y, 1.0, 80.0);   // ceiling: near links (small Y) would otherwise balloon
-        return true;
-    };
-
-    std::vector<SelfProjectionViewer::ProjCapsule> caps;
-    for (const auto& link : kin_->arm_mesh_link_poses(js.q))
-    {
-        const LinkCapsule* cap = capsule_for(link.mesh_filename);
-        if (not cap) continue;
-        const Eigen::Vector3d axis(cap->ax, cap->ay, cap->az), ctr(cap->cx, cap->cy, cap->cz);
-        const Eigen::Vector3d e0 = link.pose * (ctr - axis * cap->half_length);
-        const Eigen::Vector3d e1 = link.pose * (ctr + axis * cap->half_length);
-        SelfProjectionViewer::ProjCapsule pc;
-        if (project(e0, cap->radius, pc.a, pc.ra) and project(e1, cap->radius, pc.b, pc.rb))
-            caps.push_back(pc);
-    }
-
-    // Crisp FK skeleton (base→joint_1..7→tool) for the static projection check.
-    std::vector<QPointF> skel;
-    for (const auto& p_arm : kin_->arm_skeleton_points(js.q))
-    {
-        const Eigen::Vector4d pc = zed_T_arm * p_arm.homogeneous();
-        const double X = pc.x(), Y = pc.y(), Z = pc.z();
-        if (Y <= 1e-3) { skel.clear(); break; }   // a joint behind the camera ⇒ skip the skeleton this frame
-        skel.emplace_back(rcx_ + rfx_ * X / Y, rcy_ - rfy_ * Z / Y);
-    }
-
-    viewer_->set_overlay(img, std::move(caps), std::move(skel));
 }
 
 void SpecificWorker::emergency()
 {
     fps.print("Emergency worker", 3000);
-    //emergencyCODE
-    //
-    //if (SUCCESSFUL) //The componet is safe for continue
-    //  emmit goToRestore()
 }
 
-
-//Execute one when exiting to emergencyState
 void SpecificWorker::restore()
 {
-    std::cout << "Restore worker" << std::endl;
-    //restoreCODE
-    //Restore emergency component
-
+    std::print("self_calibration: restore()\n");
 }
-
 
 int SpecificWorker::startup_check()
 {
-	std::cout << "Startup check" << std::endl;
-	QTimer::singleShot(200, QCoreApplication::instance(), SLOT(quit()));
-	return 0;
+    std::print("self_calibration: startup_check()\n");
+    QTimer::singleShot(200, QCoreApplication::instance(), SLOT(quit()));
+    return 0;
 }
 
+// ─── Presence state-machine step hooks (delegated to the coordinator) ──────────
+void SpecificWorker::waiting_enter()   { presence_coordinator_.waiting_enter(); }
+void SpecificWorker::waiting_loop()    { presence_coordinator_.waiting_loop(); }
+void SpecificWorker::operating_enter() { presence_coordinator_.operating_enter(); }
+void SpecificWorker::operating_loop()  { presence_coordinator_.operating_loop(); }
+void SpecificWorker::degraded_enter()  { presence_coordinator_.degraded_enter(); }
+void SpecificWorker::degraded_loop()   { presence_coordinator_.degraded_loop(); }
 
+// The only node this agent owns today is its own agent node ("self_calibration 27"), which the DSR graph
+// constructor (re)creates and cleanup_owned_nodes() deletes through [Owns]. This sweep reaps anything ELSE
+// carrying the agent's name left by a crashed run (future proposal nodes). The live agent node is excluded.
+void SpecificWorker::remove_stale_nodes()
+{
+    if (not G)
+        return;
+    std::vector<std::uint64_t> stale;
+    for (const auto& node : G->get_nodes_by_type("metaconcept"))
+        if (node.name().starts_with("self_calibration"))
+            stale.push_back(node.id());
+    for (const auto id : stale)
+        G->delete_node(id);
+    if (not stale.empty())
+        std::print("self_calibration: swept {} stale node(s)\n", stale.size());
+}
 
+void SpecificWorker::cleanup_owned_nodes()
+{
+    if (owned_nodes_cleaned_)
+        return;
+    owned_nodes_cleaned_ = true;
+    remove_stale_nodes();                          // while the monitor is still up, before [Owns] deletion
+    presence_coordinator_.cleanup_owned_nodes();   // stops the monitor FIRST, then deletes the [Owns] nodes
+}

@@ -8,7 +8,7 @@
  *    VerticalMount    helios (droll, dpitch)      walls are vertical, the ceiling is horizontal
  *                     bpearl (dx, dy, dyaw)       RELATIVE to the helios-built wall map
  *
- *  Moved out of room_concept 2026-10-29 (sensor_calibration plan, Phase 3); the factors RUN in sensor_calibration
+ *  Moved out of room_concept 2026-10-29 (self_calibration plan, Phase 3); the factors RUN in self_calibration
  *  (src/lidar_mount_stage.*). room_concept's KinematicMount (helios x, y, yaw) was removed the same day; its
  *  replacement is plan Task 4.4 in the agent.
  *

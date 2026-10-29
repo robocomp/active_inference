@@ -420,7 +420,7 @@ struct RoomConfig
     float IMAGE_EDGE_MOUNT_YAW_SIGMA   = 0.0035f; // ImageEdge.mountYawSigma (rad)
     // The camera mount calibrator's keys (mountVertexOffsetSigmaPx, mountYawCorrection, mountApply,
     // mountPublish, mountDescriptionFile, calibCameras, calibMinConvertIntervalMs) were removed 2026-10-29:
-    // camera extrinsics are robot_concept's graph + overlay, estimated by sensor_calibration. The three
+    // camera extrinsics are robot_concept's graph + overlay, estimated by self_calibration. The three
     // mount SIGMAS above stay: they are the driving term's marginalised nuisance priors, not a calibration.
     // Per-CONTOUR map-position uncertainty — nuisance column [4]. Not a mount property: how well any
     // single wall's place in the room polygon is known. MEASURED, see image_edge_types.h.

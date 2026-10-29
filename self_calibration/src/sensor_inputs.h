@@ -1,5 +1,5 @@
 /*
- * sensor_inputs — the INPUT LAYER of sensor_calibration.
+ * sensor_inputs — the INPUT LAYER of self_calibration.
  *
  * Everything the calibration agent reads, as small plain-data structs, each with its SOURCE timestamp, so the
  * later stages (trajectory harvester, floor / wall / camera-vs-LiDAR factors) consume it without touching DDS

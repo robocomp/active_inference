@@ -1,5 +1,5 @@
 /*
- * dashboard_model.h -- the PURE (no Qt, no DSR) aggregation behind the sensor_calibration dashboard window.
+ * dashboard_model.h -- the PURE (no Qt, no DSR) aggregation behind the self_calibration dashboard window.
  *
  * DISPLAY ONLY. Nothing here feeds back into the harvester or any estimate: the agent hands over copies of what it
  * already has (the selected Pairs, keyframe verdicts, stall samples) and the widgets read the result.

@@ -1,23 +1,23 @@
-# sensor_calibration
+# arm_calibration
 A brief introduction to the component. Describe its purpose, functionality, and any specific features here.
 ```
 <YOUR BRIEFING>
 ```
 
 ## Dependencies
-The following dependencies are required to build and run sensor_calibration. Ensure they are installed and properly configured on your system before proceeding:
+The following dependencies are required to build and run arm_calibration. Ensure they are installed and properly configured on your system before proceeding:
 ```
 <YOUR DEPENDENCIES>
 ```
 
 ## Configuration parameters
-Like any other component, sensor_calibration requires a configuration file to start. In etc/config or etc/config.toml, you can find an example of the configuration file.
+Like any other component, arm_calibration requires a configuration file to start. In etc/config or etc/config.toml, you can find an example of the configuration file.
 
 ## Starting the component
 To avoid modifying the config file directly in the repository, you can copy it to the component's home directory. This prevents changes from being overridden by future `git pull` commands:
 
 ```bash
-cd <sensor_calibration's path> 
+cd <arm_calibration's path> 
 cp etc/config etc/yourConfig
 ```
 
@@ -25,12 +25,12 @@ After editing the new config file we can run the component:
 
 ```bash
 cmake -B build && make -C build -j12 # Compile the component
-bin/sensor_calibration etc/yourConfig # Execute the component
+bin/arm_calibration etc/yourConfig # Execute the component
 ```
 -----
 -----
 # Developer Notes
-This section explains how to work with the generated code of sensor_calibration, including what can be modified and how to use key features.
+This section explains how to work with the generated code of arm_calibration, including what can be modified and how to use key features.
 ## Editable Files
 You can freely edit the following files:
 - etc/* – Configuration files

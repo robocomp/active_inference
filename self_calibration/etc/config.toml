@@ -1,15 +1,15 @@
 
 # --- Common Agent Data ---
 [Agent]
-id = 12 # MUST be unique across the shared graph: room=5 robot=6 retina=9 bottle=10 controller=11. A collision = CRDT actor-id clash → SIGSEGV.
+id = 27  # ids 5-26 are taken; unique across the shared graph (CRDT actor id)
 name = "self_calibration"
 
 # --- Single Instance Configuration ---
 # Use this if you only have one graph.
 configFile = ""
 domain = 0
-tree =false 
-graph = true
+tree = false
+graph = false   # headless: the DSR node-link viewer is not needed by a calibration agent
 2d = false
 3d = false
 
@@ -23,37 +23,8 @@ graph = true
 # 2d = true
 # 3d = true
 
-# Self-calibration: subscribe to the arm camera's media plane (discovered from the
-# DSR MediaDescriptor on this node) for the reprojection residual.
-[SelfCalib]
-camera_node = "zed"
-residual_gate_m = 0.06   # depth inlier band (m): reject samples beyond this |pred−obs| (model breakdown / occlusion)
-tau_vspread_min = 0.1    # min depth-velocity std (m/s) to report τ; below this τ is unseparable from bias (skip, don't print garbage)
-
-# Probabilistic FK / predictive depth covariance — per-sample residual weight = 1/σ_d².
-encoder_sigma_deg    = 0.02    # per-joint encoder σ (deg). Gen3 publishes no σ; seeded from repeatability 1mm@2σ. Swamped in sim; re-measure on HW (hold arm still, take per-joint std)
-depth_sensor_sigma_m = 0.005   # base depth-sensor noise floor (m)
-depth_sensor_range_k = 0.001   # depth noise grows ≈ k·range² (per m)
-geom_sigma_m         = 0.008   # single-capsule model floor (m)
-grazing_cos_min      = 0.2     # clamp on |ray·surface-normal|; grazing/silhouette samples inflate σ_geom up to 1/this (downweights unreliable edge samples)
-
-# Information filter — belief on the T_body_arm correction δξ∈se(3), written from the depth residual.
-filter_enabled       = true
-model_sigma_m        = 0.020   # per-pose nuisance bias σ (m): the ±22mm config-dependent single-capsule model error, correlated within a pose
-prior_sigma_trans_m  = 0.05    # extrinsic prior σ, translation (m) — how far the mount may be off; loose = let observable DOFs move
-prior_sigma_rot_deg  = 5.0     # extrinsic prior σ, rotation (deg)
-pose_min_dq          = 0.05    # min ‖Δq‖ (rad) for a frame to count as a NEW pose (viewpoint), so sitting still doesn't over-count
-apply_filter_to_overlay = false # draw the self-projection skeleton with the CORRECTED extrinsic (zed_T_arm·Exp(dxi)) — toggle to test if dxi snaps the overlay onto the arm
-# Validation (active-vs-passive): corrupt the working extrinsic by a KNOWN offset; the filter should recover δξ ≈ −offset on observable DOFs.
-inject_tx_m          = 0.0
-inject_ty_m          = 0.0
-inject_tz_m          = 0.0
-inject_rx_deg        = 0.0
-inject_ry_deg        = 0.0
-inject_rz_deg        = 0.0
-
 [Period]
-Compute = 100
+Compute = 20      # 50 Hz: wheel odometry is polled (no DSR signal), so the tick sets its sampling rate
 Emergency = 500
 
 [Component.Debug]
@@ -64,3 +35,52 @@ Warn.Connections = "0"
 Trace.Network = "0"
 Trace.Protocol = "0"
 MessageSizeMax = "20004800"
+
+# ── Agent-presence protocol (same keys and values as bottle_concept) ──────────
+[Presence]
+required_agent_names = ["robot_concept", "room_concept"]
+config_dir = "etc"
+monitor_period_ms = 500
+heartbeat_timeout_ms = 25000
+rejoin_grace_ms = 8000
+stale_grace_ms = 120000
+agent_info_period_ms = 1000
+
+# Owned graph nodes torn down on shutdown / peer-loss. The agent node is "<name> <id>".
+[Owns]
+nodes = ["self_calibration 27"]
+
+# ── Input layer (src/sensor_inputs.h) ─────────────────────────────────────────
+[Inputs]
+camera_rate_hz = 1.5     # zed rgb/depth + ricoh: COMPUTE budget (frames beyond it are drained, not converted)
+stall_lidar_ms = 2000    # a stream silent this long is marked stalled + logged once; its data is not used
+stall_camera_ms = 5000
+stall_imu_ms = 1000
+log_period_ms = 10000    # stream rates logged once per this period
+
+[Harvester]
+keyframe_spacing_s = 0.5   # COMPUTE budget (decimator), 0.5 s is the UPPER BOUND: 0.1-0.5 s leaves sigma stable, 1.0 s loses hairpin rotation (trajectory_harvester_test)
+ring_span_s = 30.0         # COMPUTE budget: pairs are committed when the ring holds more than this
+max_keyframes = 120
+reg_sigma_m = 0.01         # ASSUMED scan-registration floor, to be replaced by Phase 0 data
+odo_sigma_per_m = 0.002    # ASSUMED odometry error per metre
+odo_sigma_per_rad = 0.005  # ASSUMED odometry error per radian rotated
+wheel_rot_sigma_rel = 0.2   # wheel rotation over-reports ~41 % on Shadow: wide
+wheel_rot_sigma_floor = 0.01
+gyro_sigma_rel = 0.01
+gyro_sigma_floor = 0.002
+
+# ── LiDAR mount factors (src/lidar_mount_stage.*; plan Phase 3, moved from room_concept 2026-10-29) ──
+# bpearl floor (roll, pitch, z), helios tilt (roll, pitch) from walls + ceiling, bpearl planar (x, y, yaw)
+# relative to the published room polygon. ESTIMATE + LOG only (tmp/mount_factors/mounts_<ts>.csv).
+# To PLANT a mount error in Webots, use robot_concept's overlay (etc/mount_calib_<robot>_webots.txt).
+[MountFactors]
+enabled = true
+rate_hz = 2.0              # COMPUTE budget: sweeps fed per second per LiDAR (room_concept's BpearlMountRate)
+pose_sigma_xy = 0.05       # m, WIDE per-sweep pose nuisance prior (never the localiser's own marginal)
+pose_sigma_yaw_deg = 2.0   # deg
+log_period_ms = 10000      # summary line + one mounts CSV row this often
+
+# ── Live dashboard window (src/specificworker_dashboard.cpp): DISPLAY ONLY ───────
+[Dashboard]
+show = true    # false: no window is built and nothing is fed (no cost)

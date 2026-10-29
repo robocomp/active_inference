@@ -156,8 +156,8 @@ void SpecificWorker::initialize()
             "OPT-IN scene publishing (default off): write robot->table->bottle RT edges from Webots ground truth so other agents/viewer see a live scene");
     if (publish_scene_to_graph_) std::print("[scene] publishing robot->table->bottle to DSR graph (Webots ground truth)\n");
     cfgr.opt_cast<bool>("Controller.publish_joint_buffer", joint_buffer_enabled_,
-            "write the rolling (stamp_ms,q) ring on kinova_arm_r for the self_calibration agent (~20Hz)");
-    if (joint_buffer_enabled_) std::print("[joint-buffer] publishing (stamp_ms,q) ring on kinova_arm_r for self_calibration\n");
+            "write the rolling (stamp_ms,q) ring on kinova_arm_r for the arm_calibration agent (~20Hz)");
+    if (joint_buffer_enabled_) std::print("[joint-buffer] publishing (stamp_ms,q) ring on kinova_arm_r for arm_calibration\n");
 
     // Rest pose, tunable without recompiling: Controller.rest_pose = "j1 .. j7"
     // (rad). Lets us iterate the "ready over the table, camera-up" posture by
@@ -272,7 +272,7 @@ void SpecificWorker::initialize()
 }
 
 // Publish the rolling (stamp_ms, q) ring onto the kinova_arm_r node so the
-// self_calibration agent can nearest-match q to an image stamp_ms. Flattened to
+// arm_calibration agent can nearest-match q to an image stamp_ms. Flattened to
 // float vectors (the retina-proven runtime-attr path); stamps are float OFFSETS
 // from a uint64 base so ms precision survives float32. The graph write is throttled
 // to ~20 Hz to bound the update_node signal cascade on the arm node's subscribers
@@ -361,7 +361,7 @@ void SpecificWorker::compute()
         }
         cur_q_ = q;
 
-        // Publish the rolling (stamp_ms, q) ring for the self_calibration agent.
+        // Publish the rolling (stamp_ms, q) ring for the arm_calibration agent.
         // js.timestamp is epoch ms (same clock as the media stamp_ms — confirmed by
         // [ts-probe]); the ring keeps filling at 100 Hz, the graph write is throttled.
         if (joint_buffer_enabled_)

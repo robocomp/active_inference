@@ -1,4 +1,5 @@
-Component sensor_calibration
+
+Component arm_calibration
 {
     Communications
     {
@@ -7,3 +8,4 @@ Component sensor_calibration
     options dsr;
 
 };
+

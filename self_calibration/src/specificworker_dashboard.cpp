@@ -1,5 +1,5 @@
 /*
- * specificworker_dashboard.cpp -- the sensor_calibration dashboard window (separate TU, as bottle_concept).
+ * specificworker_dashboard.cpp -- the self_calibration dashboard window (separate TU, as bottle_concept).
  * DISPLAY ONLY: copies of data the agent already holds go into sc::dash::DashboardModel (pure, tested) and a thin
  * QPainter view (dashboard_view.h) draws it. Nothing here reads back into the harvester or any estimate.
  * Main thread only; the view is repainted at <= 5 Hz from compute(), never per pair. With [Dashboard] show = false
@@ -27,16 +27,16 @@ void SpecificWorker::build_dashboard()
                               harvester_cfg_.prior_sigma_yaw * harvester_cfg_.prior_sigma_yaw};
     dash_model_ = std::make_unique<sc::dash::DashboardModel>(pr);
     auto* v = new DashboardView(*dash_model_);
-    v->setWindowTitle(QStringLiteral("sensor_calibration - trajectory fragments"));
+    v->setWindowTitle(QStringLiteral("self_calibration - trajectory fragments"));
     dash_view_ = v;
     dashboard_window_ = v;
-    rc::dashboard::restore_window_geometry(dashboard_window_, QStringLiteral("sensor_calibration"), QStringLiteral("DashboardWindow"), QSize(760, 470));
+    rc::dashboard::restore_window_geometry(dashboard_window_, QStringLiteral("self_calibration"), QStringLiteral("DashboardWindow"), QSize(760, 470));
     dashboard_window_->show();
 }
 
 void SpecificWorker::save_dashboard_geometry() const
 {
-    rc::dashboard::save_window_geometry(dashboard_window_, QStringLiteral("sensor_calibration"), QStringLiteral("DashboardWindow"));
+    rc::dashboard::save_window_geometry(dashboard_window_, QStringLiteral("self_calibration"), QStringLiteral("DashboardWindow"));
 }
 
 void SpecificWorker::feed_dashboard_keyframe(bool captured, bool stalled)

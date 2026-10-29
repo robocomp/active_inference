@@ -117,7 +117,7 @@ private:
     std::int64_t low_obs_ms_ = 0, last_bp_low_stamp_ = std::numeric_limits<std::int64_t>::min();
     // ── ONE bpearl reader, shared by its consumers (2026-10-10) ──
     // The startup floor check and the low-obstacle mailbox (and, until 2026-10-29, the r2 mount factors,
-    // now in the sensor_calibration agent) each used to own a
+    // now in the self_calibration agent) each used to own a
     // LidarPlaneReader on "bpearl" — two live DDS subscribers on the same stream, every sweep transferred
     // twice. poll() returns nullopt when nothing is NEW, so a second consumer polling the same reader would
     // starve; the newest sweep is therefore CACHED here and each consumer de-duplicates by its own stamp.

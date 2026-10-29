@@ -6,7 +6,7 @@ set(ACTIVE_INFERENCE_COMMON_DIR "${CMAKE_CURRENT_LIST_DIR}/../../common")
 set(AI_COMMON_WITH_KINEMATICS ON)
 add_subdirectory(${ACTIVE_INFERENCE_COMMON_DIR} ${CMAKE_CURRENT_BINARY_DIR}/ai_common EXCLUDE_FROM_ALL)
 LIST(APPEND LIBS
-  ai_common::kinematics   # Kinematics + fitted link capsules + URDF (shared with self_calibration)
+  ai_common::kinematics   # Kinematics + fitted link capsules + URDF (shared with arm_calibration)
   ai_common::core         # header-only (self_projection_capsules.h, …)
 )
 

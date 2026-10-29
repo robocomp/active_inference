@@ -19,7 +19,7 @@ Reading order for someone new: §1 → §2 → §3, then the agent you are touch
 | **§8** | The object concept agents — table, chair, bottle, cabinet, refrigerator, door, human |
 | **§9** | `ring_metaconcept` — a concept over concepts |
 | **§10** | Action — `controller`, `kinova_controller` |
-| **§11** | Introspection — `scene_graph_viewer`, `self_calibration` |
+| **§11** | Introspection — `scene_graph_viewer`, `arm_calibration` |
 | **§12** | Conventions — frames, units, ids, build, shutdown |
 
 ---
@@ -400,7 +400,7 @@ cortex viewer (a heavy `QOpenGLWidget` sharing that backing store crashes on pee
 Builder in `common/graph3d/` (DSR-aware, `dsr_api` only), renderer in
 `common/viewers/gl_graph3d_viewer.h` (DSR-blind, so any agent can drive it).
 
-### `self_calibration` (id 12)
+### `arm_calibration` (id 12)
 
 Estimates the arm↔camera extrinsics online from an FK-vs-depth residual with a GLS information
 filter, and is the testbed for *epistemic* calibration moves — choosing arm motions that maximise
