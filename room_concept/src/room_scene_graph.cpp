@@ -3888,6 +3888,15 @@ void RoomSceneGraph::dsr_create_wall_nodes()
 
     const float half_h = params_->room_height * 0.5f;
 
+    // A room node without a `level` cannot parent an RT edge (DSR throws). A room ltsm has just swapped in can be visible
+    // before its attributes land (recog_try24: room_concept aborted on exactly this, right after RoomSwap). Not yet a room
+    // to build on — retry next cycle.
+    if (not G_->get_node_level(room_node_opt.value()).has_value())
+    {
+        qWarning() << "dsr_create_wall_nodes: room node" << room_node_opt->name().c_str() << "has no level yet — floor/walls deferred";
+        return;
+    }
+
     // ── Floor ─────────────────────────────────────────────────────────────────
     // Created FIRST, because it is the parent the walls hang from: a purely semantic frame for
     // everything that stands on the floor of this room. It sits at the room origin, so its RT edge
@@ -3913,7 +3922,15 @@ void RoomSceneGraph::dsr_create_wall_nodes()
     rc::provenance::stamp_creation(*G_, floor_node);   // birth stamp: epoch ms + local ISO-8601
     const auto floor_id = G_->insert_node(floor_node);
     if (floor_id.has_value())
-        rt_api_->insert_or_assign_edge_RT_identity(room_node_opt.value(), floor_id.value());
+    {
+        try { rt_api_->insert_or_assign_edge_RT_identity(room_node_opt.value(), floor_id.value()); }
+        catch (const std::exception &e)
+        {
+            qWarning() << "dsr_create_wall_nodes: room->floor RT failed:" << e.what() << "— floor removed, retry next cycle";
+            G_->delete_node(floor_id.value());
+            return;
+        }
+    }
     else
         qWarning() << "dsr_create_wall_nodes: failed to insert floor node";
 
