@@ -55,6 +55,18 @@ run_leg() {   # leg door here   (sets r)
 scan_for_door() {   # exclude tag
   local ex=$1 tag=$2 ts=$(date +%s) dd n
   dd=$(new_door "$ex")
+  # FIRST the door's own target: door_concept offers an epistemic LOOK at a remembered door that is not in the graph
+  # ("[look] aff_door_look_<d> OFFERED at (x,y) yaw=Y", door_concept.log after the last room switch) — a viewpoint that
+  # puts it square in front of the ZED. Drive there (go_to), then the explore+turn fallback below.
+  local lk; lk=$(awk '/\[room\] LET GO/{l=""} /\[look\] aff_door_look_.* OFFERED at/{l=$0} END{print l}' $L/door_concept.log \
+                 | grep -o -E "OFFERED at \(-?[0-9.]+,-?[0-9.]+\) yaw=[-+]?[0-9.]+" | tr -d '()' | tr ',=' '  ' | awk '{print $3, $4, $6}')
+  if [ -z "$dd" ] && [ -n "$lk" ]; then
+    set -- $lk; echo "leg $tag: going to the door's look viewpoint ($1,$2) yaw $3" >&2
+    echo run > $B/controller/remote_cmd.txt; sleep 0.7
+    printf 'mission "lookpose%s"\n  go_to pose:%s(%s, %s, %s)\n' "$tag" "$here" $1 $2 $3 > $B/controller/remote_cmd.txt
+    for i in $(seq 1 60); do grep -a -q -E "mission 'lookpose${tag}': (completed|failed|aborted)" $L/controller.log && break; dd=$(new_door "$ex"); [ -n "$dd" ] && break; sleep 1; done
+    for i in $(seq 1 10); do dd=$(new_door "$ex"); [ -n "$dd" ] && break; sleep 1; done   # dwell: masks arrive at camera rate
+  fi
   while [ -z "$dd" ] && [ $(( $(date +%s)-ts )) -lt $SCAN_CAP_S ]; do
     n=$(( $(date +%s)-ts )); echo run > $B/controller/remote_cmd.txt; sleep 0.7
     # explore FIRST: it drives the robot into the room (a passage ends at the room switch, right past the door frame, where
