@@ -275,6 +275,20 @@ int main()
         const Rigid2 P_from_K_prior = rigid_inverse(rigid_compose(half_turn, K_from_P_true));   // ltsm's (wrong) prior
         const Rigid2 P_from_K_accepted = rigid_inverse(K_from_P_true);           // room_concept's fit, written on the edge
         const PublishedPose door_43_P{-0.00f, 0.01f, 3.138f};                     // the entry mirror in P
+        // the verdict is read from the NODE (one DDS sample with the state); the edge may still hold the prior (another topic,
+        // unordered): it is not an input. Node absent / short ⇒ malformed, nothing.
+        {
+            const std::vector<float> node_tr{P_from_K_accepted.tx, P_from_K_accepted.ty, 0.f};
+            const std::vector<float> node_rot{0.f, 0.f, P_from_K_accepted.yaw};
+            const auto fromnode = node_P_from_K(&node_tr, &node_rot);
+            CHECK(fromnode.has_value() and std::hypot(fromnode->tx - P_from_K_accepted.tx, fromnode->ty - P_from_K_accepted.ty) < 1e-6f);
+            const auto T_used = accepted_K_from_P("accepted", fromnode);
+            CHECK(T_used.has_value() and std::hypot(rigid_apply(*T_used, door_43_P).cx - 2.95f, rigid_apply(*T_used, door_43_P).cy - 1.55f) < 0.02f);
+            const std::vector<float> shortv{1.f};
+            CHECK(not node_P_from_K(nullptr, &node_rot).has_value() and not node_P_from_K(&node_tr, nullptr).has_value()
+                  and not node_P_from_K(&shortv, &node_rot).has_value());
+            CHECK(not accepted_K_from_P("accepted", node_P_from_K(nullptr, nullptr)).has_value());   // malformed: no re-seat
+        }
         // pending: the edge holds ltsm's prior, and nothing is re-seated by it
         CHECK(not accepted_K_from_P("pending", P_from_K_prior).has_value());
         CHECK(not accepted_K_from_P("accepted", std::nullopt).has_value());

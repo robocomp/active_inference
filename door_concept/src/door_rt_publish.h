@@ -19,6 +19,7 @@
 #include <optional>
 #include <string_view>
 #include <string>
+#include <vector>
 
 #include <Eigen/Dense>
 
@@ -117,15 +118,25 @@ struct Rigid2 { float tx = 0.0f, ty = 0.0f, yaw = 0.0f; };
 /// The robot's pose in the followed room's frame as one RT block: the pose and the block's stamp (ms).
 struct RobotFix { Rigid2 pose; std::uint64_t stamp_ms = 0; };
 
-/// ★THE FRAME CHANGE OF AN ACCEPTED ADOPTION IS THE PROPOSAL EDGE'S, READ AT THE VERDICT (Task 20). room_concept computes
-/// T(P<-K) from its own fit (robot_P ∘ robot_K⁻¹) and writes it on the RT edge P -> proposal BEFORE state = "accepted", so a
-/// reader that sees "accepted" reads the ACCEPTED transform — never ltsm's prior, which recog_proto6 showed a half turn
-/// off. One fact, three readers (room_concept's own edges, ltsm's carry-over, these doors): no wait, no robot pairing.
-/// nullopt unless the proposal is accepted and its edge was readable.
+/// ★THE FRAME CHANGE OF AN ACCEPTED ADOPTION IS THE PROPOSAL NODE'S, READ AT THE VERDICT (Task 20). room_concept computes
+/// T(P<-K) from its own fit (robot_P ∘ robot_K⁻¹) and writes it on the proposal NODE (rt_translation/rt_rotation_euler_xyz)
+/// in the same update_node as state = "accepted" — one DDS sample — so a reader that sees "accepted" reads the ACCEPTED
+/// transform, never ltsm's prior (recog_proto6: a half turn off) and never the RT edge (another, unordered DDS topic). One fact, three readers (room_concept's own edges, ltsm's carry-over, these doors): no wait, no robot pairing.
+/// nullopt unless the proposal is accepted and its node carries the T (else malformed: nothing is re-seated).
 [[nodiscard]] inline std::optional<Rigid2> accepted_K_from_P(std::string_view state, const std::optional<Rigid2>& edge_P_from_K)
 {
     if (state != "accepted" or not edge_P_from_K.has_value()) return std::nullopt;
     return rigid_inverse(*edge_P_from_K);
+}
+
+/// The accepted T(P<-K) as the proposal NODE states it: rt_translation [x y z] + rt_rotation_euler_xyz [rx ry yaw]. nullopt
+/// (malformed) when either is absent, short or non-finite. The RT edge is deliberately not a parameter: it is never read.
+[[nodiscard]] inline std::optional<Rigid2> node_P_from_K(const std::vector<float>* tr, const std::vector<float>* rot)
+{
+    if (tr == nullptr or rot == nullptr or tr->size() < 2 or rot->size() < 3) return std::nullopt;
+    const Rigid2 T{(*tr)[0], (*tr)[1], (*rot)[2]};
+    if (not std::isfinite(T.tx) or not std::isfinite(T.ty) or not std::isfinite(T.yaw)) return std::nullopt;
+    return T;
 }
 
 /// How far two frame changes T(K<-P) disagree, at P's origin (metres) and in heading (degrees): the robot-paired one is

@@ -3579,8 +3579,8 @@ void SpecificWorker::step_adoption()
     const auto plan = rc::door::plan_adoption(props, room_node_id_, name, others, false);
     if (not plan.restore)
         return;
-    // ★The frame change is the ACCEPTED T(P<-K) on the proposal's RT edge (Task 20): room_concept writes its fit's transform
-    //  there BEFORE "accepted", so reading it at the verdict needs no wait. The robot-paired T(K<-P) (Task 19) is only a
+    // ★The frame change is the ACCEPTED T(P<-K) on the proposal NODE (Task 20): room_concept writes its fit's transform in
+    //  the same update_node as "accepted", so it arrives with the verdict and reading it needs no wait. The robot-paired T(K<-P) (Task 19) is only a
     //  logged cross-check, taken when K's first robot block arrives (step_adoption_crosscheck).
     std::optional<rc::door::Rigid2> K_from_P;
     if (plan.reseat)
@@ -3588,7 +3588,7 @@ void SpecificWorker::step_adoption()
         K_from_P = rc::door::accepted_K_from_P("accepted", proposal_P_from_K(room_node_id_, props));
         if (K_from_P.has_value())
         {
-            std::print("door_concept: [restore] accepted T(K<-P) = ({:.2f},{:.2f},{:.3f}) from the proposal edge (room_concept's fit)\n",
+            std::print("door_concept: [restore] accepted T(K<-P) = ({:.2f},{:.2f},{:.3f}) from the proposal node (room_concept's fit)\n",
                        K_from_P->tx, K_from_P->ty, K_from_P->yaw);
             if (adoption_pairing_.has_previous())
                 adoption_crosscheck_ = AdoptionCrossCheck{room_node_id_, name, *K_from_P};
@@ -3596,7 +3596,7 @@ void SpecificWorker::step_adoption()
                 std::print("door_concept: [restore] no robot pose was read under the provisional name: no robot cross-check\n");
         }
         else
-            std::print("door_concept: [restore] the accepted proposal's T(P<-K) is unreadable: doors keep their frame\n");
+            std::print("door_concept: [restore] the accepted proposal carries no T(P<-K) on its node (malformed): doors keep their frame\n");
     }
     if (not adoption_crosscheck_.has_value())
         adoption_pairing_.rebase(name);
@@ -3638,8 +3638,10 @@ void SpecificWorker::step_adoption_crosscheck(const std::string& name, const std
     adoption_pairing_.rebase(name);
 }
 
-// ltsm's proposal carries T(P<-K) on its RT edge (P -> proposal); on "accepted" room_concept has overwritten it with the
-// ACCEPTED transform (its fit's) before writing the state (Task 20). Read through the RT API: the newest block.
+// On "accepted", room_concept states the ACCEPTED T(P<-K) on the proposal NODE (rt_translation / rt_rotation_euler_xyz) in
+// the SAME update_node as the state (Task 20): one DDS sample, so it arrives with the verdict. The RT edge P -> proposal is
+// another DDS topic (unordered, droppable) and is NEVER read for this: an accepted proposal without the node's T is
+// malformed and nothing is re-seated.
 std::optional<rc::door::Rigid2> SpecificWorker::proposal_P_from_K(std::uint64_t room_id, const std::vector<rc::door::ProposalView>& props) const
 {
     std::optional<rc::door::Rigid2> P_from_K;
@@ -3648,12 +3650,14 @@ std::optional<rc::door::Rigid2> SpecificWorker::proposal_P_from_K(std::uint64_t 
         if (pv.parent != room_id or pv.state != "accepted") continue;
         const auto pn = G->get_node(pv.name);
         if (not pn.has_value()) continue;
-        const auto e = G->get_edge(room_id, pn->id(), "RT");
-        if (not e.has_value() or not rt_api_) continue;
-        const auto T = rt_api_->get_edge_RT_as_rtmat(e.value());
-        if (T.has_value() and T->matrix().allFinite())
-            P_from_K = rc::door::Rigid2{static_cast<float>(T->translation().x()), static_cast<float>(T->translation().y()),
-                                        static_cast<float>(std::atan2(T->linear()(1, 0), T->linear()(0, 0)))};
+        const auto tr  = G->get_attrib_by_name<rt_translation_att>(pn.value());
+        const auto rot = G->get_attrib_by_name<rt_rotation_euler_xyz_att>(pn.value());
+        if (const auto T = rc::door::node_P_from_K(tr.has_value() ? &tr->get() : nullptr, rot.has_value() ? &rot->get() : nullptr);
+            T.has_value())
+            P_from_K = T;
+        else
+            std::print("door_concept: [restore] MALFORMED accepted proposal '{}': no accepted T(P<-K) on the node "
+                       "(rt_translation/rt_rotation_euler_xyz) — nothing re-seated, the edge is never a fallback\n", pv.name);
     }
     return P_from_K;
 }
