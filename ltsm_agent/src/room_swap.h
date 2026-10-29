@@ -1,23 +1,29 @@
 #pragma once
 /*
- * room_swap.h -- EXECUTE the recogniser's requests: the room behind a fresh door is a KNOWN one (Swap), or that was wrong
- * (Undo). Staged and reversible; it runs through the recall/promotion machinery, not a new node lifecycle.
+ * room_swap.h -- EXECUTE the recogniser's requests: the provisional room behind a fresh door is a KNOWN one (Swap), or that
+ * was wrong (Undo). Since the room-transition protocol (spec case 2, C2.6/C2.9) a swap PROPOSES; it changes nothing live but
+ * its own proposal node (rule 1: P belongs to room_concept, which adopts it in place or rejects the proposal).
  *
- * TWO CASES (room_recognizer.h decides WHEN; this decides WHAT happens in the graph):
- *   A. the provisional room P is still a PROTO (no memory twin): swap posts a LATE recall of the known room K under the
- *      crossed door (room_recall.h: recall_late, recall_pose_prior) and discards P from the live graph (Candidate::discard:
- *      nothing is written to memory). room_concept (its Task 9) re-births K from the recall. undo removes that recall and
- *      room_concept re-runs the normal proto birth at the crossing. Memory is untouched in BOTH directions.
- *   B. P was already PROMOTED (its memory twin exists, the previous room is archived with a passage to it): swap flags the
- *      twin `object_subtype "staged"` (kept until the robot leaves: the undo snapshot), posts the late recall for K and
- *      discards the live P. The previous room's passage face into the twin is NOT rewritten. undo re-posts a recall for
- *      the staged twin (the same mechanism, P as the "remembered room"), clears `staged`, and removes K's late recall.
+ * SWAP (C2.6). Writes `proposal_<K>` under the provisional room P (room_proposal.h: T(P <- K), K's room_id and outline, the
+ * robot-in-K modes, state "pending") and STAGES memory, reversibly:
+ *   - K's archive is held read-only (RoomEviction::hold): no eviction writes into it while the verdict is open;
+ *   - case B (P already promoted: memory holds its twin): the twin is flagged `object_subtype "staged"` (the undo snapshot);
+ *   - the seam T(K <- previous room) of each crossed door is read NOW, while the chains resolve (CARRY-OVER below), and the
+ *     MAP association with K's own faces is logged ("[swap] crossed door X <-> K face Y", read by the tour driver).
+ *   NOTHING is written to memory at swap time.
  *
- * READ-ONLY ARCHIVE WHILE STAGED. K's memory twin is held in the RoomEviction (hold()): an evict() of K as the room being
- * LEFT is refused, as the room being ENTERED its twin is not copied into. The robot leaving K ends the undo window:
- * on_room_left() deletes the staged twin and the late recall and releases the hold; on_evict() is that call made from the
- * eviction path BEFORE evict() (the hold would otherwise refuse the very eviction that moves `current` on).
- * CARRY-OVER. At the release (on_room_left) the crossed door becomes a passage of BOTH rooms: carry_over() puts K's face of it at
+ * VERDICT (step(), polled each cycle; no DSR signal):
+ *   accepted  => COMMIT (C2.9): the carry-over is written (the crossed door becomes a passage of BOTH rooms), the staged twin
+ *                is dropped (or, case A, the twin a later promotion wrote for P). The proposal stays -- door_concept reads it
+ *                (Task 8) -- and K stays held until the robot LEAVES it (on_room_left / on_evict+on_evicted), which releases the
+ *                hold, retries any carry-over that could not be written yet, and withdraws the proposal.
+ *   rejected  => UNDO: the twin's subtype restored, K released, the proposal deleted. P stays a new room; the recogniser rebases
+ *                its evidence (Event::Rejected; recognition_cycle.h) and may propose again.
+ *   gone      => as rejected (P or the proposal left the live graph).
+ *   the robot leaves P before a verdict (Review Focus 4: rc::room::robot_rt_room names another room; the recogniser's episode
+ *   is released; or the eviction leaving P) => WITHDRAW: the same undo, so P is archived as NEW.
+ *
+ * CARRY-OVER. The crossed door becomes a passage of BOTH rooms: carry_over() puts K's face of it at
  * T(K <- previous room) . (the previous room's own face pose) and match-links it into the passage that holds the previous
  * room's face (minted by RoomEviction::mint_passage when there is none). T(K <- previous room) is read at swap time, while the
  * chains resolve: robot-in-K (the recogniser's relocalisation) through the live previous room (case A) -- or, when the
@@ -30,23 +36,13 @@
  * doors are pi-symmetric), 'none' uniform over K's area and yaw. An adopted door's pose is precision-fused with the chain
  * pose (orientation on the branch consistent with the previous face) and written back. The twin's face in a case-B passage
  * goes with the twin; the passage and its crossing history stay and now point at K.
- * KNOWN GAP: carry-over runs ONLY at on_room_left. If the robot never leaves K, or the agent dies first, the crossed door
- * keeps one face (carry_ is in memory, not persisted) until the next crossing writes it; the recogniser then reads it known.
+ * A previous room still LIVE at the verdict (fresh -> fresh) has no face in memory yet: its carry-over is retried when the robot
+ * leaves K (after that room's eviction). KNOWN GAP: carry_ is in memory, not persisted.
  *
- * LATE-ADOPTION CONTRACT (for room_concept, Task 9). The late recall node `recall_<room>` (type metaconcept, subtype
- * "room_recall", recall_late = true) is owned by ltsm. room_concept re-births the room from it and fits it with the evidence it
- * has. If that late-adoption fit REJECTS the recalled room, room_concept writes the existing registered bool attribute
- * `valid = false` on that recall node (and must not delete it). RoomRecognizer polls it every cycle while a swap stands and
- * requests the Undo; RoomSwap::undo() removes the recall and the recognizer is acknowledged. Absent or true = no objection.
- * Every late recall RoomSwap posts (K's, and the staged twin's after an undo) is tracked: step() retires it once its room is
- * live again (unless marked invalid), on_room_left()/on_evicted() when the robot leaves, sweep_stale() at start.
- *
- * ANCHOR. The late recall hangs under the crossed door D of the room being left while it is still live (case A); when no
- * door survives (case B: the previous room is archived and P's mirror dies with P) it hangs under the robot, where
- * T(robot <- K) is the inverse of the pose the recogniser handed over (the robot in K).
+ * Late recalls (recall_late) are no longer posted by the swap; sweep_stale still removes any a crashed older build left.
  */
 #include "room_eviction.h"
-#include "room_recall.h"
+#include "room_proposal.h"
 #include "../../common/room_recognition/room_posterior.h"
 
 #include <dsr/api/dsr_api.h>
@@ -56,6 +52,7 @@
 #include <optional>
 #include <set>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace ltsm
@@ -63,49 +60,61 @@ namespace ltsm
 class RoomSwap
 {
 public:
-    RoomSwap(std::shared_ptr<DSR::DSRGraph> live, std::shared_ptr<DSR::DSRGraph> mem, RoomEviction &evictor, RoomRecall &recall);
+    RoomSwap(std::shared_ptr<DSR::DSRGraph> live, std::shared_ptr<DSR::DSRGraph> mem, RoomEviction &evictor);
 
-    /// Execute a Swap request. `provisional_live_id` = the provisional room (RoomRecognizer::provisional_id()); 0 = look for
-    /// a proto / just-entered room hung from the robot. True when the request was accepted and executed.
+    /// Execute a Swap request: post the proposal and stage memory. `provisional_live_id` = the provisional room
+    /// (RoomRecognizer::provisional_id()); 0 = look for a proto hung from the robot. True when the proposal stands.
     bool swap(std::uint64_t known_room_id, const rc::recog::PoseMix &pose_in_k, std::uint64_t provisional_live_id = 0);
-    /// Back to "just entering". True when a swap stood and is undone.
+    /// Back to "just entering" before a verdict: withdraw the proposal, unstage. True when a pending swap stood.
     bool undo();
-    /// The undo window closes (the robot left the recognised room): drop the staged twin and the late recall, release the
-    /// archive. `room` = the recognised room's live or memory name; empty = whichever is staged. Ignored when it names another.
+    /// The robot left the recognised room (`room` = its live or memory name; empty = whichever is staged; ignored when it
+    /// names another). Pending => withdrawn (P archived as new). Adopted => the hold is released, leftover carry-over written,
+    /// the proposal withdrawn.
     void on_room_left(const std::string &room = {});
-    /// The eviction path, BEFORE evict(): the room being left is the staged one => its hold is released (the very eviction that
-    /// moves `current` on would otherwise be refused). Nothing is deleted yet.
+    /// The eviction path, BEFORE evict(): leaving P before a verdict withdraws (so P's twin is written as a NEW room); leaving
+    /// the adopted room releases its hold (the very eviction that moves `current` on would otherwise be refused).
     void on_evict(const Candidate &cand);
-    /// The eviction path, AFTER evict(): on success the undo window closes (on_room_left); on failure the hold is restored.
+    /// The eviction path, AFTER evict(): on success the adopted room's window closes (on_room_left); on failure the hold is restored.
     void on_evicted(const Candidate &cand, bool ok);
     /// CARRY-OVER of the crossed door into K (see above): `prev_room_face` = the memory name of the previous room's face of the
     /// crossed door, `known_room_id` = K. Writes K's face and match-links both into one passage. Idempotent; true when the
-    /// passage holds a face in each room afterwards. Called by on_room_left for every door staged at swap time.
+    /// passage holds a face in each room afterwards. `log_only` = the swap-time association line, nothing written.
     bool carry_over(const std::string &prev_room_face, std::uint64_t known_room_id, bool log_only = false);
-    /// One cycle: retire the late recalls whose room is live again.
-    void step();
-    /// Startup: leftover staged twins (memory) and late recalls (live) from a crashed run. Returns how many nodes went.
-    int sweep_stale();
 
-    enum class State { Entering, Staged };
+    /// What one cycle observed of room_concept's verdict (or the robot's movement) on the standing proposal.
+    enum class Event { None, Accepted, Rejected, Withdrawn };
+    /// One cycle: read the verdict and act on it (commit / undo / withdraw). Rejected and Withdrawn mean the swap no longer
+    /// stands: the caller tells the recogniser (RoomRecognizer::on_proposal_rejected).
+    Event step();
+    /// Startup: leftover staged twins (memory), late recalls and proposals (live) from a crashed run. Returns how many nodes went.
+    int sweep_stale();
+    /// Graceful exit: delete the proposal ltsm owns. Returns how many went.
+    int remove_owned();
+
+    /// Entering: no swap. Staged: proposal pending. Adopted: accepted, the robot is still in the adopted room.
+    enum class State { Entering, Staged, Adopted };
     [[nodiscard]] State state() const { return state_; }
 
 private:
     std::shared_ptr<DSR::DSRGraph> live_, mem_;
     RoomEviction &ev_;
-    RoomRecall &recall_;
+    RoomProposal proposal_;
 
     State state_ = State::Entering;
-    std::set<std::string> late_;                  ///< memory rooms whose late recall this class posted (and so retires)
     bool leaving_ = false;                        ///< on_evict released the hold; on_evicted decides
-    void retire_all_late();
     std::string known_mem_;                       ///< memory name of the recognised room K
     std::uint64_t known_id_ = 0;
+    std::uint64_t prov_id_ = 0;                   ///< the provisional room P (its id survives adoption: renamed in place)
+    std::string prov_name_;                       ///< P's name at swap time
+    std::optional<std::uint64_t> prov_rid_;       ///< P's room_id at swap time
     bool promoted_case_ = false;                  ///< case B (the provisional room had a memory twin)
     std::string prov_twin_;                       ///< case B: the staged twin's memory name
     std::string prov_twin_subtype_;               ///< its object_subtype before staging (restored by undo)
-    std::optional<Mat::RTMat> twin_from_known_;   ///< case B: T(K <- provisional twin), at swap time
-    std::optional<Mat::RTMat> robot_from_known_;  ///< T(robot <- K) at swap time
+
+    void commit();                                ///< the accepted verdict: carry-over written, twin dropped
+    void abandon(std::string_view why);           ///< no verdict will be acted on: withdraw, unstage, release
+    void clear();
+    [[nodiscard]] bool names_known(const std::string &room) const;
 
     /// A crossed door, taken at swap time: the previous room's memory name and face, the seam T(K <- previous room) and the
     /// covariance of the robot's pose in K that it inherits (x, y, yaw).

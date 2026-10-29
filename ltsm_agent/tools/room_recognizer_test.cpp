@@ -331,9 +331,8 @@ static int live_sequence(Seq mode, int8_t dom_live, int8_t dom_mem)
     const auto mir = live_door("door_7", l4);
     const bool turned = mode != Seq::KnownSameOrientationMirror;
     put_edge(*live, l4, mir, local(P_w, Vec3(hole_w.x(), hole_w.y(), hole_w.z() + (turned ? M_PI : 0.0))));
-    std::optional<ltsm::RoomRecall> recall;
     std::optional<ltsm::RoomSwap> sw;
-    if (mode == Seq::Wiring) { recall.emplace(live, mem, ev); sw.emplace(live, mem, ev, *recall); }
+    if (mode == Seq::Wiring) sw.emplace(live, mem, ev);
     auto cycle = [&] { return mode == Seq::Wiring ? ltsm::recognition_cycle(rec, &*sw) : rec.step(); };
 
     st = cycle();
@@ -360,28 +359,44 @@ static int live_sequence(Seq mode, int8_t dom_live, int8_t dom_mem)
     }
     if (mode == Seq::Wiring)
     {
+        auto proposals = [&] {
+            int n = 0;
+            for (const auto &m : live->get_nodes_by_type("metaconcept"))
+                if (live->get_attrib_by_name<object_subtype_att>(m).value_or("") == "room_proposal") ++n;
+            return n; };
         auto late_recalls = [&] {
             int n = 0;
             for (const auto &m : live->get_nodes_by_type("metaconcept"))
                 if (live->get_attrib_by_name<recall_late_att>(m).value_or(false)) ++n;
             return n; };
-        check(this_swap_state(*sw) and rec.swapped() and late_recalls() == 1 and not live->get_node(l4).has_value(),
-              "[W] RoomSwap executed it (case A): Staged, recogniser held, K's late recall posted, P discarded");
-        // room_concept re-births K from the late recall (a proto carrying K's room id), it is promoted, room_3 leaves
-        const auto K = live_room("room_2", 2, 2);
-        robot_at(robot_2, {{K, B}});
-        live->insert_or_assign_edge(DSR::Edge::create<proto_edge_type>(K, K));
+        const auto prop = live->get_node("proposal_room_2");
+        check(this_swap_state(*sw) and rec.swapped() and proposals() == 1 and late_recalls() == 0 and live->get_node(l4).has_value()
+                  and prop.has_value() and live->get_attrib_by_name<parent_att>(prop.value()).value_or(0) == l4,
+              "[W] RoomSwap executed it (case A): Staged, recogniser held, proposal_room_2 under P, P untouched (rule 1)");
         bool any = false;
         for (int i = 0; i < 2; ++i) any = any or cycle().act != ltsm::RoomRecognizer::Step::Act::None;
-        live->delete_edge(K, K, "proto");
+        check(not any and this_swap_state(*sw) and rec.swapped(), "[W] pending: held, no request");
+        // room_concept ACCEPTS (Task 6): P adopted in place -- K's room_id, proto edge gone, `state` accepted. (The rename to
+        // room_2 needs the cortex reinstall; the id is what ltsm follows.)
+        { auto n = live->get_node("proposal_room_2").value(); live->add_or_modify_attrib_local<state_att>(n, std::string("accepted")); live->update_node(n); }
+        { auto n = live->get_node(l4).value(); live->add_or_modify_attrib_local<room_id_att>(n, std::uint64_t(2)); live->update_node(n); }
+        live->delete_edge(l4, l4, "proto");
+        cycle();
+        check(sw->state() == ltsm::RoomSwap::State::Adopted and rec.swapped() and proposals() == 1, "[W] accepted: RoomSwap Adopted, recogniser still held, proposal kept");
+        // STAND-IN for the in-place rename (P -> room_2 in K's frame, Task 6; the installed cortex cannot rename yet): the adopted
+        // room as a node named room_2. Its memory twin r2_room_2 is what the next episode's L needs.
+        live->delete_node(l4);
+        const auto K = live_room("room_2", 2, 2);
+        robot_at(robot_2, {{K, B}});
+        { auto n = live->get_node(K).value(); set_poly(*live, n, B, rect(2, -2, 6, 2)); live->update_node(n); }
+        // promotion into the adopted room: room_3 leaves
         set_current(K);
         for (const auto id : {D, wall, mirA}) live->delete_node(id);
         live->delete_edge(robot_id, l3, "RT");
         live->delete_node(l3);
-        { auto n = live->get_node(K).value(); set_poly(*live, n, B, rect(2, -2, 6, 2)); live->update_node(n); }
         ltsm::RoomRecognizer::Step h;
         for (int i = 0; i < 3; ++i) { h = cycle(); any = any or h.act != ltsm::RoomRecognizer::Step::Act::None or h.released; }
-        check(not any and this_swap_state(*sw) and rec.swapped(), "[W] K re-born, promoted, current: the swap is held, the window open");
+        check(not any and sw->state() == ltsm::RoomSwap::State::Adopted and rec.swapped(), "[W] adopted K current: the swap is held, the window open");
         // the robot crosses a door of K nobody has crossed: a newer provisional room with door + mirror
         DSR::Node kw; kw.type("wall"); kw.name("room_2_wall_1");
         live->add_or_modify_attrib_local<parent_att>(kw, K);
@@ -402,7 +417,7 @@ static int live_sequence(Seq mode, int8_t dom_live, int8_t dom_mem)
         for (auto id : p.ids) std::printf(" %llu", (unsigned long long)id);
         std::printf("  post"); for (float x : p.post) std::printf(" %.4f", x); std::printf("\n");
         check(r.released and r.act == ltsm::RoomRecognizer::Step::Act::None, "[W] the step reports the held episode RELEASED, and no Undo");
-        check(not this_swap_state(*sw) and late_recalls() == 0, "[W] the wiring closed RoomSwap's window (on_room_left): Entering, K's late recall retired");
+        check(sw->state() == ltsm::RoomSwap::State::Entering and proposals() == 0, "[W] the wiring closed RoomSwap's window (on_room_left): Entering, proposal withdrawn");
         {   // the swap anchored on the CROSSED door (door_4, wall-hung), not room_3's entry mirror: passage_1 (r1<->r3) untouched
             const auto p1 = mem->get_node("passage_1");
             check(p1.has_value() and DSR::DSRGraph::get_node_edges_by_type(p1.value(), "match").size() == 2,
@@ -679,36 +694,26 @@ int main(int argc, char **argv)
         s.prov = s.mirror;
     }
 
-    std::printf("late_adoption_failure_requests_undo\n");
-    {
+    std::printf("rejected_unstages_and_rebases (recogniser side)\n");
+    {   // room_concept rejects the proposal; evidence for K that arrived WHILE the verdict was open must not re-propose at once
         Scenario s(false, robot_in_r3_w);
         ltsm::RoomRecognizer::Step st;
         for (int i = 0; i < 5 and st.act == ltsm::RoomRecognizer::Step::Act::None; ++i) st = s.rec.step();
+        check(st.act == ltsm::RoomRecognizer::Step::Act::Swap and st.room_id == 3, "Swap R3 on the metric");
         s.rec.on_swap_executed(3);
-        live->delete_node(s.mirror);
-        live->delete_node(s.prov);
-        DSR::Node rn; rn.type("metaconcept"); rn.name("recall_room_3");
-        live->add_or_modify_attrib_local<object_subtype_att>(rn, std::string("room_recall"));
-        live->add_or_modify_attrib_local<room_id_att>(rn, std::uint64_t(3));
-        live->add_or_modify_attrib_local<recall_late_att>(rn, true);
-        const auto rid = live->insert_node(rn).value();
+        write_evidence({1, 3}, {0.f, 40.f}, {std::nullopt, in_room(2, robot_in_r3_w)});     // held: not judged
         bool any = false;
         for (int i = 0; i < 3; ++i) any = any or s.rec.step().act != ltsm::RoomRecognizer::Step::Act::None;
-        check(not any and s.rec.swapped(), "recall present, no objection: the swap is held");
-        const auto Kr = live_node_for_test("room_3", 3);       // room_concept re-births K; the recall is still there
-        auto n2 = live->get_node(rid).value();
-        live->add_or_modify_attrib_local<valid_att>(n2, true);
-        live->update_node(n2);
-        check(s.rec.step().act == ltsm::RoomRecognizer::Step::Act::None, "valid = true: still no objection");
-        live->add_or_modify_attrib_local<valid_att>(n2, false);          // room_concept: the late-adoption fit rejected K
-        live->update_node(n2);
-        const auto u = s.rec.step();
-        check(u.act == ltsm::RoomRecognizer::Step::Act::Undo and u.room_id == 3 and not s.rec.swapped(), "valid = false on the late recall: Undo requested");
-        s.rec.on_undo_executed();
-        live->delete_node(Kr);
-        live->delete_node(rid);
-        s.mirror = live_door("door_9", live_r2);
-        s.prov = s.mirror;
+        check(not any and s.rec.swapped(), "pending verdict: held, the new evidence is not judged");
+        s.rec.on_proposal_rejected();
+        check(not s.rec.swapped() and s.rec.provisional_id() == s.prov, "rejected: unheld, the episode goes on");
+        for (int i = 0; i < 20; ++i) any = any or s.rec.step().act != ltsm::RoomRecognizer::Step::Act::None;
+        check(not any, "evidence REBASED at the rejection: what arrived before it does not re-propose");
+        write_evidence({1, 3}, {0.f, 80.f}, {std::nullopt, in_room(2, robot_in_r3_w)});     // NEW evidence after the rejection
+        ltsm::RoomRecognizer::Step r;
+        for (int i = 0; i < 5 and r.act == ltsm::RoomRecognizer::Step::Act::None; ++i) r = s.rec.step();
+        check(r.act == ltsm::RoomRecognizer::Step::Act::Swap and r.room_id == 3, "new evidence after the rejection: proposes again");
+        live->delete_node(live->get_node("place_evidence").value().id());
     }
 
     std::printf("held_swap_ends_without_undo_when_a_newer_provisional_room_appears\n");

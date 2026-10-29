@@ -89,6 +89,9 @@ SpecificWorker::~SpecificWorker()
 	if (recognizer_)
 		if (const int n = recognizer_->remove_owned(); n > 0)
 			std::cout << "[recog] removed " << n << " recognition node(s) on shutdown" << std::endl;
+	if (swap_)
+		if (const int n = swap_->remove_owned(); n > 0)
+			std::cout << "[swap] removed " << n << " room_proposal node(s) on shutdown" << std::endl;
 	if (recall_)
 		if (const int n = recall_->remove_all(); n > 0)
 			std::cout << "[recall] removed " << n << " recall node(s) on shutdown" << std::endl;
@@ -293,10 +296,10 @@ void SpecificWorker::initialize()
             recognizer_ = std::make_unique<ltsm::RoomRecognizer>(G_dsr, G_ltsm, *evictor);
             if (const int n = recognizer_->sweep_stale(); n > 0)
                 qInfo() << "[recog] swept" << n << "stale recognition/place_evidence node(s) from a previous run";
-            swap_ = std::make_unique<ltsm::RoomSwap>(G_dsr, G_ltsm, *evictor, *recall_);
+            swap_ = std::make_unique<ltsm::RoomSwap>(G_dsr, G_ltsm, *evictor);
             if (const int n = swap_->sweep_stale(); n > 0)
-                qInfo() << "[swap] swept" << n << "stale staged twin / late recall node(s) from a previous run";
-            qInfo() << "[ltsm_agent] ROOM RECOGNITION ARMED -- metric chain (+ place_evidence when retina publishes it); swaps are executed by RoomSwap";
+                qInfo() << "[swap] swept" << n << "stale staged twin / late recall / room_proposal node(s) from a previous run";
+            qInfo() << "[ltsm_agent] ROOM RECOGNITION ARMED -- metric chain (+ place_evidence when retina publishes it); a swap PROPOSES (room_proposal), room_concept adopts or rejects";
         }
         passages = std::make_unique<ltsm::PassageHarvest>(
             G_dsr, G_ltsm,

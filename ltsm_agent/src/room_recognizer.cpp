@@ -198,6 +198,7 @@ void RoomRecognizer::end_episode()
     fresh_.reset();
     promoted_ = false;
     swap_ack_ = false;
+    rebase_next_ = false;
     post_entry_.clear();
     published_.clear();
     published_ids_.clear();
@@ -308,27 +309,21 @@ void RoomRecognizer::on_swap_failed()
 
 void RoomRecognizer::on_undo_executed() { swap_ack_ = false; }
 
+void RoomRecognizer::on_proposal_rejected()
+{
+    if (prov_id_ == 0 or not swap_ack_) return;
+    const auto rid = commit_.room >= 0 and commit_.room < int(ids_.size()) ? ids_[commit_.room] : 0;
+    commit_ = {rc::recog::Commit::State::Entering, -1};
+    swap_ack_ = false;
+    rebase_next_ = true;
+    qInfo().noquote() << QString::fromStdString(std::format("[recog] proposal for room_id {} rejected: back to entering, evidence rebased at the rejection", rid));
+}
+
 RoomRecognizer::Step RoomRecognizer::held_step(Step out)
 {
-    // The swap stands. Its own effects reshape the graph (P gone before `current` moves, the crossed door in a passage),
-    // so nothing here is judged. Only the robot LEAVING the committed room ends the episode, and with no Undo.
-    // ADOPTION FAILED (the contract in room_swap.h): room_concept marks the late recall of the committed room `valid = false`
-    // when its late-adoption fit rejects the recalled room. That is the evidence after execution: request the Undo.
-    if (commit_.room >= 0 and commit_.room < int(ids_.size()))
-        for (const auto &n : live_->get_nodes_by_type("metaconcept"))
-            if (subtype_of(*live_, n) == "room_recall" and n.name().starts_with("recall_")
-                and live_->get_attrib_by_name<room_id_att>(n).value_or(0) == ids_[commit_.room]
-                and not live_->get_attrib_by_name<valid_att>(n).value_or(true))
-            {
-                out.act = Step::Act::Undo;
-                out.room_index = commit_.room;
-                out.room_id = ids_[commit_.room];
-                if (commit_.room < int(post_entry_.size())) out.pose_in_k = post_entry_[commit_.room].pose_in_k;
-                commit_ = {rc::recog::Commit::State::Entering, -1};
-                swap_ack_ = false;
-                qInfo().noquote() << QString::fromStdString(std::format("[recog] UNDO requested: late adoption of room_id {} failed", out.room_id));
-                return out;
-            }
+    // The swap stands: its proposal waits for room_concept's verdict (RoomSwap reads it; a rejection comes back through
+    // on_proposal_rejected), or it was accepted. Nothing here is judged. Only the robot LEAVING the committed room ends the
+    // episode, and with no Undo.
     const auto cur = rc::room::current_edge_room(*live_);
     if (not cur.has_value()) return out;
     const auto room = live_->get_node(cur.value());
@@ -704,6 +699,13 @@ RoomRecognizer::Step RoomRecognizer::step_impl()
     // uniform prior. With nothing new the delta is zero: the posterior is the prior, so no undo and no re-commit.
     post_entry_ = rc::recog::posterior(metric, app, area, log_new);        // all evidence now (published, and the pose density)
     const auto key = [&](const rc::recog::Hypothesis &h) -> std::int64_t { return h.room < 0 ? -1 : std::int64_t(ids_[h.room]); };
+    // A REJECTED proposal (on_proposal_rejected): the evidence is rebased HERE, on the first frame after the rejection, so the
+    // delta below is zero and only what arrives from now on can commit again.
+    if (std::exchange(rebase_next_, false))
+    {
+        base_.clear();
+        for (const auto &h : post_entry_) base_[key(h)] = h.log_post;
+    }
     std::vector<rc::recog::Hypothesis> since = post_entry_;
     {
         std::vector<double> d(since.size());

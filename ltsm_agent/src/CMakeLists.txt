@@ -12,6 +12,7 @@ LIST(APPEND SOURCES
   ../src/room_chain.cpp
   ../src/room_recognizer.cpp
   ../src/room_swap.cpp
+  ../src/room_proposal.cpp
 )
 
 # Headers set
@@ -28,6 +29,7 @@ LIST(APPEND HEADERS
   ../src/room_chain.h
   ../src/room_recognizer.h
   ../src/room_swap.h
+  ../src/room_proposal.h
 )
 
 LIST(APPEND LIBS ${LIBS})

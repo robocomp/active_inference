@@ -1,8 +1,9 @@
 #include "room_swap.h"
 
 #include "room_forget.h"
+#include "room_recall.h"      // RoomRecall::live_name_of
 #include "seam_fusion.h"
-#include "../../common/room_resolve/room_resolve.h"   // rc::room::is_proto, current_edge_room
+#include "../../common/room_resolve/room_resolve.h"   // rc::room::is_proto, current_edge_room, robot_rt_room
 
 #include <dsr/api/dsr_inner_eigen_api.h>
 #include <dsr/core/types/type_checking/dsr_attr_name.h>
@@ -67,8 +68,8 @@ void restore_subtype(DSR::DSRGraph &g, DSR::Node t, const std::string &prior)
 }
 }   // namespace
 
-RoomSwap::RoomSwap(std::shared_ptr<DSR::DSRGraph> live, std::shared_ptr<DSR::DSRGraph> mem, RoomEviction &evictor, RoomRecall &recall)
-    : live_(std::move(live)), mem_(std::move(mem)), ev_(evictor), recall_(recall) {}
+RoomSwap::RoomSwap(std::shared_ptr<DSR::DSRGraph> live, std::shared_ptr<DSR::DSRGraph> mem, RoomEviction &evictor)
+    : live_(live), mem_(mem), ev_(evictor), proposal_(live, mem) {}
 
 std::optional<DSR::Node> RoomSwap::robot_node() const
 {
@@ -92,35 +93,32 @@ int RoomSwap::drop_subtree(const std::string &memory_room)
     return forget(*mem_, plan.value());
 }
 
-void RoomSwap::retire_all_late()
+RoomSwap::Event RoomSwap::step()
 {
-    for (const auto &m : late_) recall_.remove_recall_of(m);
-    late_.clear();
-}
-
-void RoomSwap::step()
-{
-    for (auto it = late_.begin(); it != late_.end();)
+    if (state_ != State::Staged) return Event::None;
+    // room_concept's verdict first: an accepted proposal stands even if the robot moves on in the same cycle (it then leaves
+    // the ADOPTED room, which the eviction path handles).
+    switch (proposal_.verdict())
     {
-        // K's own late recall is the channel room_concept reports a failed late adoption on (valid = false), written AFTER it
-        // re-births the room from it: it stays until the undo window closes. Only the twin's recall is retired here.
-        if (state_ == State::Staged and *it == known_mem_) { ++it; continue; }
-        const auto rec = live_->get_node("recall_" + RoomRecall::live_name_of(*it));
-        if (not rec.has_value()) { it = late_.erase(it); continue; }
-        const auto room = live_->get_node(RoomRecall::live_name_of(*it));
-        if (room.has_value() and room->type() == "room" and live_->get_attrib_by_name<valid_att>(rec.value()).value_or(true))
-        {
-            recall_.remove_recall_of(*it);       // the room is live again: the recall did its job
-            it = late_.erase(it);
-        }
-        else ++it;
+        case RoomProposal::Verdict::Accepted: commit(); return Event::Accepted;
+        case RoomProposal::Verdict::Rejected: abandon("REJECTED by room_concept"); return Event::Rejected;
+        case RoomProposal::Verdict::Gone:     abandon("the proposal or the provisional room left the live graph"); return Event::Withdrawn;
+        case RoomProposal::Verdict::Pending:  break;
     }
+    // Review Focus 4: the robot left P before a verdict. room_concept's fact (the robot's live RT room), not ltsm's `current`;
+    // unknown (none or several live edges, a hand-over) decides nothing.
+    if (const auto r = rc::room::robot_rt_room(*live_); r.has_value() and r.value() != prov_id_)
+    {
+        abandon("the robot left the provisional room before a verdict");
+        return Event::Withdrawn;
+    }
+    return Event::None;
 }
 
 bool RoomSwap::swap(std::uint64_t known_room_id, const rc::recog::PoseMix &pose_in_k, std::uint64_t provisional_live_id)
 {
-    if (state_ == State::Staged) return known_id_ == known_room_id;      // already staged for this room: idempotent
-    retire_all_late();                                                   // a stale recall (the twin's, after an undo) must not outlive this
+    if (state_ == State::Staged) return known_id_ == known_room_id;      // already proposed for this room: idempotent
+    if (state_ == State::Adopted) return false;                          // the robot is still in an adopted room
 
     // the recognised room K: an archived room that is not a staged draft
     std::optional<DSR::Node> K;
@@ -151,9 +149,13 @@ bool RoomSwap::swap(std::uint64_t known_room_id, const rc::recog::PoseMix &pose_
     const Mat::RTMat robot_from_K = K_from_robot.inverse();
     auto ie = live_->get_inner_eigen_api();
 
-    // the anchor: the crossed door of the room being left while it is live (the door of L nearest P's entry mirror), else the robot
-    std::uint64_t anchor = robot->id();
-    Mat::RTMat anchor_from_K = robot_from_K;
+    // T(P <- K), the proposal's RT edge: P's frame <- the robot <- K (the recognised pose)
+    const auto P_from_robot = ie->get_transformation_matrix(P->name(), robot->name());
+    if (not P_from_robot.has_value()) return false;
+    const Mat::RTMat P_from_K(P_from_robot.value() * robot_from_K);
+
+    // the crossed door of the room being left while it is live (the door of L nearest P's entry mirror): the carry-over seam
+    std::uint64_t crossed = 0;
     if (not twin.has_value())
         if (const auto cur = rc::room::current_edge_room(*live_); cur.has_value() and cur.value() != P->id())
             if (const auto L = live_->get_node(cur.value()); L.has_value())
@@ -172,16 +174,12 @@ bool RoomSwap::swap(std::uint64_t known_room_id, const rc::recog::PoseMix &pose_
                     const auto ref = TM.has_value() ? TM : ie->get_transformation_matrix(L->name(), robot->name());
                     if (not Td.has_value() or not ref.has_value()) continue;
                     if (const double dist = (Td->translation() - ref->translation()).head<2>().norm(); dist < best_d)
-                    {
-                        const auto Tdr = ie->get_transformation_matrix(d.name(), robot->name());
-                        if (not Tdr.has_value()) continue;
-                        best_d = dist; anchor = d.id(); anchor_from_K = Mat::RTMat(Tdr.value() * robot_from_K);
-                    }
+                    { best_d = dist; crossed = d.id(); }
                 }
             }
 
-    if (not twin.has_value() and anchor == robot->id())
-        qInfo() << "[swap] no crossed door of the room being left survives: the late recall hangs under the robot";
+    if (not twin.has_value() and crossed == 0)
+        qInfo() << "[swap] no crossed door of the room being left survives: no carry-over seam from it";
 
     // case B: T(K <- twin) now, while the provisional room is still live and the robot chain resolves
     std::optional<Mat::RTMat> twin_from_K;
@@ -195,9 +193,9 @@ bool RoomSwap::swap(std::uint64_t known_room_id, const rc::recog::PoseMix &pose_
     // the seam T(K <- previous room), while the chains resolve, one per crossed door (see room_swap.h CARRY-OVER).
     std::vector<Carry> carries;
     const Eigen::Matrix3d S_robot = best->S.cast<double>();
-    if (not twin.has_value() and anchor != robot->id())
+    if (not twin.has_value() and crossed != 0)
     {
-        const auto d = live_->get_node(anchor);
+        const auto d = live_->get_node(crossed);
         const auto Lid = rc::room::current_edge_room(*live_);
         const auto Ln = Lid.has_value() ? live_->get_node(Lid.value()) : std::nullopt;
         if (d.has_value() and Ln.has_value())
@@ -261,7 +259,7 @@ bool RoomSwap::swap(std::uint64_t known_room_id, const rc::recog::PoseMix &pose_
                                seam_cov_through_robot(K_from_robot, S_robot, Mat::RTMat(twin_from_K.value() * T.value()))});
         }
 
-    // ── execute: stage, recall, discard, hold ──────────────────────────────────────────────────────────────────
+    // ── execute: stage, propose, hold. NOTHING is written to memory here (C2.9: the carry-over is the accepted verdict's) ──
     const std::string known_mem = K->name();
     std::string prior_subtype;
     if (twin.has_value())
@@ -271,103 +269,92 @@ bool RoomSwap::swap(std::uint64_t known_room_id, const rc::recog::PoseMix &pose_
         mem_->add_or_modify_attrib_local<object_subtype_att>(t, std::string(kStaged));
         if (not mem_->update_node(t)) return false;
     }
-    const auto unstage = [&] {
-        if (not twin.has_value()) return;
-        if (const auto t = mem_->get_node(twin->id()); t.has_value()) restore_subtype(*mem_, t.value(), prior_subtype);
-    };
-    if (recall_.post_late(anchor, known_mem, anchor_from_K, pack_pose_prior(pose_in_k)) == 0)
+    if (proposal_.post(P->id(), known_mem, P_from_K, pack_pose_prior(pose_in_k)) == 0)
     {
-        unstage();
-        return false;
-    }
-    late_.insert(known_mem);
-    Candidate c;
-    c.discard = true;
-    c.new_room_id = P->id();
-    c.new_room_name = P->name();
-    if (not ev_.evict(c).ok)
-    {
-        recall_.remove_recall_of(known_mem);
-        late_.erase(known_mem);
-        unstage();
+        if (twin.has_value())
+            if (const auto t = mem_->get_node(twin->id()); t.has_value()) restore_subtype(*mem_, t.value(), prior_subtype);
         return false;
     }
     ev_.hold(known_mem);
 
     carry_ = std::move(carries);
+    for (const auto &k : carry_)
+        carry_over(k.prev_face, known_room_id, true);   // the MAP face association, logged for the tour driver; nothing written
     state_ = State::Staged;
-    // The crossed door becomes a passage of BOTH rooms NOW when the previous room's face is already in memory: the way back is
-    // known the moment the robot is inside (recog_try28 leg 5: `cross room_3` from the recognised room_2 waited for a recall
-    // that only the release would have made possible). carry_over is idempotent, so the release re-run is a no-op. A face
-    // still only live (fresh -> fresh) is logged now and written at the release, as before.
-    for (const auto &k : std::vector<Carry>(carry_))
-    {
-        carry_over(k.prev_face, known_room_id, true);   // the MAP face association, logged for the tour driver
-        if (mem_->get_node(k.prev_face).has_value() and not carry_over(k.prev_face, known_room_id, false))
-            qWarning().noquote() << QString::fromStdString(std::format("[swap] early carry-over of {} into room_id {} failed — retried at the release", k.prev_face, known_room_id));
-    }
     known_mem_ = known_mem;
     known_id_ = known_room_id;
+    prov_id_ = P->id();
+    prov_name_ = P->name();
+    prov_rid_ = live_->get_attrib_by_name<room_id_att>(P.value());
     promoted_case_ = twin.has_value();
     prov_twin_ = twin.has_value() ? twin->name() : std::string{};
     prov_twin_subtype_ = prior_subtype;
-    twin_from_known_ = twin_from_K;
-    robot_from_known_ = robot_from_K;
-    qInfo().noquote() << QString::fromStdString(std::format("[swap] STAGED: {} is {} (case {}); late recall under {}",
-            P->name(), known_mem, promoted_case_ ? "B, twin " + prov_twin_ + " staged" : std::string("A"), anchor == robot->id() ? robot->name() : "the crossed door"));
+    qInfo().noquote() << QString::fromStdString(std::format("[swap] PROPOSED: {} is {} (case {}); memory staged, nothing written until room_concept's verdict",
+            P->name(), known_mem, promoted_case_ ? "B, twin " + prov_twin_ + " staged" : std::string("A")));
     return true;
+}
+
+void RoomSwap::clear()
+{
+    state_ = State::Entering;
+    carry_.clear();
+    known_mem_.clear(); prov_twin_.clear(); prov_twin_subtype_.clear(); prov_name_.clear();
+    known_id_ = 0; prov_id_ = 0; prov_rid_.reset(); promoted_case_ = false;
+}
+
+bool RoomSwap::names_known(const std::string &room) const
+{
+    return room.empty() or room == known_mem_ or room == RoomRecall::live_name_of(known_mem_) or room == prov_name_;
+}
+
+void RoomSwap::abandon(std::string_view why)
+{
+    proposal_.withdraw();
+    if (promoted_case_)
+        if (const auto t = mem_->get_node(prov_twin_); t.has_value()) restore_subtype(*mem_, t.value(), prov_twin_subtype_);
+    ev_.release(known_mem_);
+    qInfo().noquote() << QString::fromStdString(std::format("[swap] WITHDRAWN: {} is not {} ({}); memory unstaged, {} stays a new room",
+            prov_name_, known_mem_, why, prov_name_));
+    clear();
+}
+
+void RoomSwap::commit()
+{
+    // C2.9: the carry-over joins the crossed door's passage to K. A previous room still live (fresh -> fresh) has no face in
+    // memory yet: that one is retried when the robot leaves K, after its eviction.
+    std::erase_if(carry_, [&](const Carry &k) { return carry_over(k.prev_face, known_id_); });
+    for (const auto &k : carry_)
+        qInfo().noquote() << QString::fromStdString(std::format("[swap] carry-over of {} into {} deferred: retried when the robot leaves it", k.prev_face, known_mem_));
+    // P's twin goes (after the carry-over: its face is the passage's second end meanwhile). Case B: the staged one; case A: the
+    // twin a promotion may have written for P while the verdict was open.
+    std::string twin = prov_twin_;
+    if (twin.empty() and prov_rid_.has_value())
+        if (const auto t = mem_->get_node(std::format("r{}_{}", prov_rid_.value(), prov_name_)); t.has_value() and t->name() != known_mem_)
+            twin = t->name();
+    if (not twin.empty()) drop_subtree(twin);
+    state_ = State::Adopted;
+    qInfo().noquote() << QString::fromStdString(std::format("[swap] ACCEPTED: {} adopted as {}; {}; K held until the robot leaves it",
+            prov_name_, known_mem_, twin.empty() ? std::string("no twin to drop") : "twin " + twin + " dropped"));
 }
 
 bool RoomSwap::undo()
 {
     if (state_ != State::Staged) return false;
-    recall_.remove_recall_of(known_mem_);
-    late_.erase(known_mem_);
-    if (promoted_case_)
-    {
-        if (const auto t = mem_->get_node(prov_twin_); t.has_value()) restore_subtype(*mem_, t.value(), prov_twin_subtype_);
-        // the provisional room comes back through the same mechanism: a recall of its twin, posted under the robot.
-        // T(robot <- twin) = T(robot <- K) T(K <- twin): the robot's pose in K as room_concept now holds it when K is live
-        // again, else the pose handed over at the swap.
-        const auto robot = robot_node();
-        if (robot.has_value() and twin_from_known_.has_value())
-        {
-            std::optional<Mat::RTMat> robot_from_K = robot_from_known_;
-            if (const auto live_k = live_->get_node(RoomRecall::live_name_of(known_mem_)); live_k.has_value())
-                if (const auto T = live_->get_inner_eigen_api()->get_transformation_matrix(robot->name(), live_k->name()); T.has_value())
-                    robot_from_K = T;
-            if (robot_from_K.has_value())
-                if (recall_.post_late(robot->id(), prov_twin_, Mat::RTMat(robot_from_K.value() * twin_from_known_.value()), {}) != 0)
-                    late_.insert(prov_twin_);
-        }
-    }
-    ev_.release(known_mem_);
-    carry_.clear();
-    qInfo().noquote() << QString::fromStdString(std::format("[swap] UNDONE: {} is not {}", prov_twin_.empty() ? "the provisional room" : prov_twin_, known_mem_));
-    state_ = State::Entering;
-    known_mem_.clear(); prov_twin_.clear(); prov_twin_subtype_.clear();
-    known_id_ = 0; promoted_case_ = false;
-    twin_from_known_.reset(); robot_from_known_.reset();
+    abandon("undo requested by the recogniser");
     return true;
 }
 
 void RoomSwap::on_room_left(const std::string &room)
 {
-    if (state_ != State::Staged) return;
-    if (not room.empty() and room != known_mem_ and room != RoomRecall::live_name_of(known_mem_)) return;
-    retire_all_late();
-    for (const auto &k : std::vector<Carry>(carry_))              // before the twin goes: its face is the passage's second end meanwhile
+    if (state_ == State::Entering or not names_known(room)) return;
+    if (state_ == State::Staged) { abandon("the robot left before a verdict"); return; }
+    for (const auto &k : std::vector<Carry>(carry_))
         if (not carry_over(k.prev_face, known_id_))
             qWarning().noquote() << QString::fromStdString(std::format("[swap] carry-over of {} into {} failed", k.prev_face, known_mem_));
-    carry_.clear();
-    if (promoted_case_) drop_subtree(prov_twin_);                 // the undo window is closed: the draft goes
     ev_.release(known_mem_);
-    qInfo().noquote() << QString::fromStdString(std::format("[swap] COMMITTED: left {}; {}", known_mem_,
-            promoted_case_ ? "staged twin " + prov_twin_ + " deleted" : std::string("nothing staged in memory")));
-    state_ = State::Entering;
-    known_mem_.clear(); prov_twin_.clear(); prov_twin_subtype_.clear();
-    known_id_ = 0; promoted_case_ = false;
-    twin_from_known_.reset(); robot_from_known_.reset();
+    proposal_.withdraw();
+    qInfo().noquote() << QString::fromStdString(std::format("[swap] COMMITTED: left {}; hold released, proposal withdrawn", known_mem_));
+    clear();
 }
 
 namespace
@@ -534,26 +521,34 @@ bool RoomSwap::carry_over(const std::string &prev_room_face, std::uint64_t known
 void RoomSwap::on_evict(const Candidate &cand)
 {
     leaving_ = false;
-    if (state_ != State::Staged or cand.discard) return;
-    if (const auto old = live_->get_node(cand.old_room_id); old.has_value())
-        if (ev_.memory_prefix(old.value()) + old->name() == known_mem_)
-        {
-            ev_.release(known_mem_);          // the robot is leaving K: the eviction must be able to write it. NOTHING is deleted yet.
-            leaving_ = true;
-        }
+    if (state_ == State::Entering or cand.discard) return;
+    const auto old = live_->get_node(cand.old_room_id);
+    const bool leaving_P = cand.old_room_id == prov_id_
+                           or (old.has_value() and ev_.memory_prefix(old.value()) + old->name() == known_mem_);   // adopted: renamed to K
+    if (not leaving_P) return;
+    if (state_ == State::Staged)
+    {   // Review Focus 4: no verdict yet. Unstage FIRST so this eviction writes P's twin as a NEW room.
+        abandon("the robot left the provisional room before a verdict");
+        return;
+    }
+    ev_.release(known_mem_);          // the robot is leaving the adopted K: the eviction must be able to write it
+    leaving_ = true;
 }
 
 void RoomSwap::on_evicted(const Candidate &cand, bool ok)
 {
     if (cand.discard) return;
-    if (ok)
-    {
-        if (leaving_) on_room_left(known_mem_);          // the eviction stood: the undo window closes, the staged twin goes
-        else if (state_ == State::Entering) retire_all_late();
-    }
-    else if (leaving_ and state_ == State::Staged)
-        ev_.hold(known_mem_);                            // it failed: the robot is still in K's undo window
+    if (ok and leaving_) on_room_left(known_mem_);       // the eviction stood: the adopted room's window closes
+    else if (not ok and leaving_ and state_ == State::Adopted)
+        ev_.hold(known_mem_);                            // it failed: the robot is still in K
     leaving_ = false;
+}
+
+int RoomSwap::remove_owned()
+{
+    const int n = proposal_.id() != 0 and live_->get_node(proposal_.id()).has_value() ? 1 : 0;
+    proposal_.withdraw();
+    return n;
 }
 
 int RoomSwap::sweep_stale()
@@ -561,17 +556,14 @@ int RoomSwap::sweep_stale()
     int n = 0;
     for (const auto &r : mem_->get_nodes_by_type("room"))
         if (is_staged_room(*mem_, r)) n += drop_subtree(r.name());
+    // late recalls are no longer posted (the proposal replaced them); an older build's leftovers still go
     for (const auto &node : live_->get_nodes_by_type("metaconcept"))
         if (node.name().starts_with("recall_") and live_->get_attrib_by_name<recall_late_att>(node).value_or(false))
             if (live_->delete_node(node.id())) ++n;
-    if (state_ == State::Staged) ev_.release(known_mem_);
-    late_.clear();
+    n += proposal_.sweep_stale();
+    if (state_ != State::Entering) ev_.release(known_mem_);
     leaving_ = false;
-    state_ = State::Entering;
-    known_mem_.clear(); prov_twin_.clear(); prov_twin_subtype_.clear();
-    known_id_ = 0; promoted_case_ = false;
-    twin_from_known_.reset(); robot_from_known_.reset();
-    carry_.clear();
+    clear();
     return n;
 }
 }   // namespace ltsm

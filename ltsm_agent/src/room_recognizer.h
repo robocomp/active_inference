@@ -40,6 +40,10 @@
  * under an unexecuted commit, or losing the committed room from the candidates, emits an Undo request; an executed
  * (held) swap ends with no Undo, as at the fence.
  *
+ * VERDICT. An executed Swap posts a PROPOSAL (room_proposal.h) and the episode is HELD until room_concept answers. Accepted:
+ * held until the robot leaves the adopted room. Rejected (or withdrawn): on_proposal_rejected() -- judging resumes with the
+ * evidence rebased at the rejection, so only evidence gathered after it can propose again.
+ *
  * OWNERSHIP. ltsm owns the live `recognition` metaconcept (recog_room_ids, recog_posterior; the last posterior entry is
  * "new"). It is removed on exit and swept at start (a SIGKILLed run leaves it; so can retina leave a `place_evidence`,
  * which retina rewrites when it runs again). No DSR signal is connected: ltsm polls from compute().
@@ -83,14 +87,19 @@ public:
     Step step();
 
     /// ACKNOWLEDGEMENTS from RoomSwap (a request is not an execution).
-    /// A requested Swap was executed: from here the graph changes the swap itself causes (the provisional room discarded
-    /// before `current` moves, the crossed door gaining a passage) are NOT episode loss -- the episode is HELD (no new
-    /// evidence: its frame is gone) until the robot leaves the committed room (the eviction fence) or an Undo is executed.
+    /// A requested Swap was executed (its proposal posted): from here the graph changes that follow it (room_concept adopting
+    /// P in place, the crossed door gaining a passage) are NOT episode loss -- the episode is HELD (not judged) until the
+    /// verdict comes back rejected (on_proposal_rejected), the robot leaves the committed room (the eviction fence), or an
+    /// Undo is executed.
     void on_swap_executed(std::uint64_t room_id);
     /// A requested Swap failed: the commit reverts to Entering (no Undo is requested: nothing was done).
     void on_swap_failed();
     /// A requested Undo was executed: the swap no longer stands.
     void on_undo_executed();
+    /// room_concept REJECTED the proposal (or it was withdrawn: P gone, the robot left P before a verdict). The swap no longer
+    /// stands: back to Entering, unheld, and the evidence is REBASED at the rejection -- the next posterior counts only what
+    /// arrives after it (spec: rejection is per proposal; ltsm may propose again with NEW evidence).
+    void on_proposal_rejected();
     /// The provisional room of the running episode (0 = none), and whether an executed swap is being held.
     [[nodiscard]] std::uint64_t provisional_id() const { return prov_id_; }
     [[nodiscard]] bool swapped() const { return swap_ack_; }
@@ -126,6 +135,7 @@ private:
     std::vector<std::string> path_;
     std::optional<ChainPose> fresh_;            ///< the fresh seam T(L <- P), cached while measurable (L is gone after promotion)
     bool swap_ack_ = false;                     ///< RoomSwap executed the Swap: the episode is held, not judged
+    bool rebase_next_ = false;                  ///< a rejection: the next evidence frame becomes the base (delta 0)
     bool promoted_ = false;                     ///< the provisional room became current (or the committed room did)
     std::vector<rc::recog::Hypothesis> post_entry_;
     bool trace_tried_ = false;                  ///< the trace file is opened once per process, never retried

@@ -166,8 +166,18 @@ int main(int argc, char **argv)
         check(c.live_passage == archived_name, "the live passage takes memory's name " + archived_name + ": " + c.live_passage);
         check(c.out.mem_doorway == archived_name, "the eviction re-uses it: " + c.out.mem_doorway);
         check(memory_passages(*mem_a) == before, "no passage minted for the same hole");
-        check(not mem_a->get_node("r0_door_1").has_value() and mem_a->get_node("r0_door_17").has_value(),
-              "room_0's face of the hole is the new one (r0_door_17), the stale r0_door_1 replaced");
+        // Names are opaque (02bd9d4f): which label the face keeps is not the contract. The INVARIANT is: the hole has exactly
+        // one face in room_0, and it is in the same passage.
+        int faces_in_r0 = 0;
+        if (const auto pw = mem_a->get_node(archived_name); pw.has_value())
+            for (const auto &e : DSR::DSRGraph::get_node_edges_by_type(pw.value(), "match"))
+                if (ltsm::is_descendant(*mem_a, e.to(), "r0_room_0")) ++faces_in_r0;
+        int r0_doors = 0;
+        for (const auto &n : mem_a->get_nodes_by_type("object"))
+            if (ltsm::is_door(*mem_a, n) and ltsm::is_descendant(*mem_a, n.id(), "r0_room_0")) ++r0_doors;
+        check(faces_in_r0 == 1 and r0_doors == 1,
+              "room_0 holds exactly one face of the hole, in the same passage " + archived_name + " (faces in passage "
+              + std::to_string(faces_in_r0) + ", doors in r0_room_0 " + std::to_string(r0_doors) + ")");
     }
 
     std::printf("[renamed] memory knows the hole as door_3, the live door is door_17 at the same place\n");

@@ -1,8 +1,9 @@
-// room_swap: executing the recogniser's requests (ltsm).   run from the component root:   ./bin/room_swap_test
+// room_swap: executing the recogniser's requests (ltsm). A swap PROPOSES (room_proposal.h); memory is committed on "accepted".   run from the component root:   ./bin/room_swap_test
 // Memory: K = r3_room_3 (known, with a floor and a door face), L = r2_room_2 (the room being left, door face r2_door_3).
 // Case A: the provisional room room_4 is a PROTO (no memory twin).  Case B: it was PROMOTED: memory holds its twin r4_room_4
 // and passage_5 (r2_door_3 <-> r4_door_9), and the previous room is archived (no live L).
 #include "../src/room_swap.h"
+#include "../src/room_recall.h"
 #include <QCoreApplication>
 #include <clocale>
 #include <algorithm>
@@ -180,8 +181,26 @@ struct Fix
     ltsm::RoomEviction ev;
     ltsm::RoomRecall recall;
     ltsm::RoomSwap sw;
-    Fix() : ev(live, mem), recall(live, mem, ev), sw(live, mem, ev, recall) {}
+    Fix() : ev(live, mem), recall(live, mem, ev), sw(live, mem, ev) {}
 };
+
+static int proposal_nodes()
+{
+    int n = 0;
+    for (const auto &x : live->get_nodes_by_type("metaconcept"))
+        if (live->get_attrib_by_name<object_subtype_att>(x).value_or("") == "room_proposal") ++n;
+    return n;
+}
+
+/// room_concept accepts the proposal (Task 6 writes `state`), and the next cycle reads the verdict: the staging is committed.
+static bool accept(Fix &f)
+{
+    auto n = live->get_node("proposal_room_3");
+    if (not n) return false;
+    live->add_or_modify_attrib_local<state_att>(n.value(), std::string("accepted"));
+    live->update_node(n.value());
+    return f.sw.step() == ltsm::RoomSwap::Event::Accepted;
+}
 
 static Mat::RTMat se2(double x, double y, double th)
 {
@@ -230,26 +249,26 @@ int main(int argc, char **argv)
         check(not f.sw.swap(99, pose_k(), live_P) and f.sw.state() == ltsm::RoomSwap::State::Entering, "an unknown room id is refused, nothing changes");
         check(f.sw.swap(3, pose_k(), live_P), "swap accepted");
         check(f.sw.state() == ltsm::RoomSwap::State::Staged, "state Staged");
-        check(not live->get_node("room_4").has_value() and not live->get_node("door_9").has_value(), "the live proto is removed with its mirror");
+        check(live->get_node("room_4").has_value() and live->get_node("door_9").has_value(), "rule 1: the live proto stays, with its mirror");
         check(live->get_node("room_2").has_value(), "the room being left is untouched");
-        const auto rc = live->get_node("recall_room_3");
-        check(rc.has_value(), "recall_room_3 posted");
+        check(recall_nodes() == 0, "no late recall is posted");
+        const auto rc = live->get_node("proposal_room_3");
+        check(rc.has_value(), "proposal_room_3 posted");
         if (rc)
         {
-            check(live->get_attrib_by_name<recall_late_att>(rc.value()).value_or(false), "recall_late = true");
             const auto pp = live->get_attrib_by_name<recall_pose_prior_att>(rc.value());
             check(pp.has_value() and pp->get().size() == 10 and pp->get()[0] == 1.f and pp->get()[1] == 1.f and pp->get()[2] == 2.f, "recall_pose_prior packs [w,x,y,th,S...]");
             const auto par = live->get_attrib_by_name<parent_att>(rc.value());
-            check(par.has_value() and par.value() == live_D, "hangs under the crossed door");
+            check(par.has_value() and par.value() == live_P, "hangs under the provisional room");
             const auto px = live->get_attrib_by_name<delimiting_polygon_x_att>(rc.value());
             check(px.has_value() and px->get().size() == 4, "carries K's outline");
-            const auto T = live->get_inner_eigen_api()->get_transformation_matrix("recall_room_3", "Shadow");
+            const auto T = live->get_inner_eigen_api()->get_transformation_matrix("proposal_room_3", "Shadow");
             check(T.has_value() and std::abs(T->translation().x() - 1.0) < 1e-3 and std::abs(T->translation().y() - 2.0) < 1e-3,
-                  "the robot is at the recognised pose in the recalled room's frame");
+                  "the robot is at the recognised pose in the proposed room's frame");
         }
         check(mem_names() == before and mem_rooms() == rooms, "memory: nothing written (same nodes, same room count)");
         check(f.sw.undo(), "undo accepted");
-        check(not live->get_node("recall_room_3").has_value() and recall_nodes() == 0, "undo removes the recall");
+        check(proposal_nodes() == 0 and recall_nodes() == 0, "undo withdraws the proposal");
         check(mem_names() == before and mem_rooms() == rooms and f.sw.state() == ltsm::RoomSwap::State::Entering, "memory still untouched, state Entering");
         check(not f.sw.undo(), "undo with nothing staged is refused");
     }
@@ -263,8 +282,8 @@ int main(int argc, char **argv)
         const auto twin = mem->get_node("r4_room_4");
         check(twin.has_value() and mem->get_attrib_by_name<object_subtype_att>(twin.value()).value_or("") == "staged", "the provisional twin is staged");
         check(mem_rooms() == 3, "no duplicate room node while staged");
-        check(not live->get_node("room_4").has_value(), "the live provisional room is discarded");
-        check(live->get_node("recall_room_3").has_value(), "late recall for K posted (under the robot: no door survives)");
+        check(live->get_node("room_4").has_value(), "rule 1: the live provisional room stays");
+        check(live->get_node("proposal_room_3").has_value(), "proposal for K posted under it");
         // an archived-room passage into the staged twin must not feed the recall of a live door
         const auto L2 = live_node("room", "room_2", robot_id, -3, -1, 0.2, 2);
         live_node("object", "door_3", L2, 4, 2, 0, std::nullopt, "door");
@@ -272,8 +291,9 @@ int main(int argc, char **argv)
         check(not live->get_node("recall_room_4").has_value(), "RoomRecall::step skips the staged twin");
         const auto Lr = live->get_node("room_2").value();
         live->delete_node(Lr.id());
+        check(accept(f), "room_concept accepts");
         f.sw.on_room_left("room_3");
-        check(not mem->get_node("r4_room_4").has_value() and not mem->get_node("r4_door_9").has_value(), "on_room_left: the staged twin and its faces are gone");
+        check(not mem->get_node("r4_room_4").has_value() and not mem->get_node("r4_door_9").has_value(), "accepted: the staged twin and its faces are gone");
         {
             const auto pw = mem->get_node("passage_5");
             check(pw.has_value(), "the L<->twin passage survives");
@@ -290,7 +310,7 @@ int main(int argc, char **argv)
                     if (n.name().starts_with("r4_")) check(false, "no node of the twin remains: " + n.name());
         }
         check(mem_rooms() == 2, "memory: exactly the known rooms (K, L)");
-        check(not live->get_node("recall_room_3").has_value() and f.sw.state() == ltsm::RoomSwap::State::Entering, "late recall dropped, state Entering");
+        check(proposal_nodes() == 0 and f.sw.state() == ltsm::RoomSwap::State::Entering, "left: proposal withdrawn, state Entering");
         check(not f.ev.held("r3_room_3"), "the archive is released");
     }
 
@@ -307,14 +327,8 @@ int main(int argc, char **argv)
         check(snapshot_room("r3_room_3") == snapK, "the known room's subtree (nodes, attrs, RT edges) is bit-identical");
         check(snapshot_room("r4_room_4") == snapP, "the provisional twin is restored exactly (subtype, door face)");
         check(mem_names() == before, "no node added or lost in memory");
-        const auto rp = live->get_node("recall_room_4");
-        check(rp.has_value(), "a recall for the provisional room is re-posted (it comes back through the same mechanism)");
-        if (rp)
-        {
-            const auto px = live->get_attrib_by_name<delimiting_polygon_x_att>(rp.value());
-            check(px.has_value() and px->get().size() == 4, "carrying the twin's outline");
-        }
-        check(not live->get_node("recall_room_3").has_value(), "K's late recall is gone");
+        check(live->get_node("room_4").has_value() and recall_nodes() == 0, "the provisional room never left the live graph: nothing to re-post");
+        check(proposal_nodes() == 0, "K's proposal is gone");
         check(not f.ev.held("r3_room_3"), "the archive is released");
     }
 
@@ -322,8 +336,9 @@ int main(int argc, char **argv)
     {
         reset(); build_memory(false); build_live(false);
         Fix f;
-        check(f.sw.swap(3, pose_k(), live_P), "swap accepted");
-        // room_concept re-births K from the recall; the robot then leaves it into a new proto
+        check(f.sw.swap(3, pose_k(), live_P) and accept(f), "swap accepted, proposal accepted");
+        // the adopted room live under K's name (room_concept renames P in place, Task 6; stood in for here by a node named
+        // room_3); the robot then leaves it into a new proto
         const auto K = live_node("room", "room_3", robot_id, 0, 0, 0, 3);
         live_node("object", "extra", K, 1, 1, 0);
         const auto N = live_node("room", "room_6", robot_id, 2, 2, 0, 6);
@@ -336,24 +351,24 @@ int main(int argc, char **argv)
         check(not out.ok and out.reason.starts_with("deferred"), "evict of the recalled room is deferred while Staged");
         check(snapshot_room("r3_room_3") == snapK and not mem->get_node("r3_extra").has_value(), "nothing was written into the known twin");
         f.sw.on_evict(c);
-        check(f.sw.state() == ltsm::RoomSwap::State::Staged and not f.ev.held("r3_room_3"), "on_evict only releases the hold: still Staged");
+        check(f.sw.state() == ltsm::RoomSwap::State::Adopted and not f.ev.held("r3_room_3"), "on_evict only releases the hold: still Adopted");
         f.sw.on_evicted(c, false);
-        check(f.ev.held("r3_room_3") and f.sw.state() == ltsm::RoomSwap::State::Staged, "a failed eviction restores the hold");
+        check(f.ev.held("r3_room_3") and f.sw.state() == ltsm::RoomSwap::State::Adopted, "a failed eviction restores the hold");
         f.sw.on_evict(c);
         const auto out2 = f.ev.evict(c);
         check(out2.ok and mem->get_node("r3_extra").has_value(), "after the release the eviction writes as usual");
         f.sw.on_evicted(c, out2.ok);
-        check(f.sw.state() == ltsm::RoomSwap::State::Entering and recall_nodes() == 0, "a successful eviction closes the window and drops the late recall");
+        check(f.sw.state() == ltsm::RoomSwap::State::Entering and proposal_nodes() == 0, "a successful eviction closes the window and withdraws the proposal");
     }
 
     std::printf("entering_the_staged_room_flips_current_without_writing_into_it\n");
     {
         reset(); build_memory(false); build_live(false);
         Fix f;
-        check(f.sw.swap(3, pose_k(), live_P), "swap accepted");
-        const auto K = live_node("room", "room_3", robot_id, 0, 0, 0, 3);
+        check(f.sw.swap(3, pose_k(), live_P) and accept(f), "swap accepted, proposal accepted");
+        const auto K = live_node("room", "room_3", robot_id, 0, 0, 0, 3);       // the adopted room (renamed P stand-in)
         live_node("object", "extra", K, 1, 1, 0);
-        ltsm::Candidate c;      // promotion of the re-born K: old = L, new = K
+        ltsm::Candidate c;      // promotion of the adopted K: old = L, new = K
         c.robot_id = robot_id; c.robot_name = "Shadow";
         c.old_room_id = live_L; c.old_room_name = "room_2"; c.new_room_id = K; c.new_room_name = "room_3";
         c.remove_old = false;
@@ -370,50 +385,37 @@ int main(int argc, char **argv)
         Fix f;
         check(f.sw.swap(3, pose_k(), live_P), "swap");
         check(f.sw.undo(), "undo");
-        live_P = live_node("room", "room_4", robot_id, 1, 2, -0.3, 4);               // room_concept re-births the proto
-        live_M = live_node("object", "door_9", live_P, 1, 0, 1, std::nullopt, "door");
-        live->insert_or_assign_edge(DSR::Edge::create<proto_edge_type>(live_P, live_P));
+        check(live->get_node(live_P).has_value(), "the proto never left: nothing to re-birth");
         check(f.sw.swap(3, pose_k(), live_P), "swap again");
-        check(f.recall.late_count() == 1 and recall_nodes() == 1, "exactly one late recall node, no orphan recall_*");
-        check(f.sw.undo() and recall_nodes() == 0, "and undo leaves none");
+        check(proposal_nodes() == 1 and recall_nodes() == 0, "exactly one proposal node, no recall_*");
+        check(f.sw.undo() and proposal_nodes() == 0, "and undo leaves none");
     }
 
-    std::printf("turn_around_promoted_case_leaves_no_orphan_recall\n");
+    std::printf("turn_around_promoted_case_leaves_no_orphan_proposal\n");
     {
         reset(); build_memory(true); build_live(true);
         Fix f;
+        const auto snapP = snapshot_room("r4_room_4");
         check(f.sw.swap(3, pose_k(), live_P), "swap");
-        check(recall_nodes() == 1, "staged: exactly one recall (K's)");
+        check(proposal_nodes() == 1 and recall_nodes() == 0, "staged: exactly one proposal, no recall");
         check(f.sw.undo(), "undo");
-        check(live->get_node("recall_room_4").has_value() and recall_nodes() == 1, "the twin's recall is posted (and tracked)");
-        live_P = live_node("room", "room_4", robot_id, 1, 2, -0.3, 4);               // room_concept re-births P from it
-        live_M = live_node("object", "door_9", live_P, 1, 0, 1, std::nullopt, "door");
-        set_current(live_P);
-        f.sw.step();
-        check(recall_nodes() == 0, "step retires the twin's recall once its room is live again");
+        check(proposal_nodes() == 0 and recall_nodes() == 0 and snapshot_room("r4_room_4") == snapP, "nothing live remains, the twin is restored exactly");
         check(f.sw.swap(3, pose_k(), live_P), "swap again");
-        check(recall_nodes() == 1 and live->get_node("recall_room_3").has_value(), "staged again: exactly one recall");
+        check(proposal_nodes() == 1, "staged again: exactly one proposal");
+        check(accept(f), "accepted");
         f.sw.on_room_left("room_3");
-        check(recall_nodes() == 0 and not mem->get_node("r4_room_4").has_value(), "after leaving: no recall_* remains, the twin is gone");
-        // undo, then the robot leaves with the twin's recall still outstanding
-        reset(); build_memory(true); build_live(true);
-        Fix g;
-        check(g.sw.swap(3, pose_k(), live_P) and g.sw.undo() and recall_nodes() == 1, "swap, undo: the twin's recall outstanding");
-        ltsm::Candidate c; c.old_room_name = "room_x";
-        g.sw.on_evicted(c, true);
-        check(recall_nodes() == 0, "the robot leaving retires it");
+        check(proposal_nodes() == 0 and recall_nodes() == 0 and not mem->get_node("r4_room_4").has_value(), "after leaving: no proposal remains, the twin is gone");
     }
 
-    std::printf("k_recall_survives_k_room_appearing_while_staged\n");
+    std::printf("proposal_kept_while_pending_and_adopted_until_left\n");
     {
         reset(); build_memory(true); build_live(true);
         Fix h;
         check(h.sw.swap(3, pose_k(), live_P), "swap");
-        live_node("room", "room_3", robot_id, 0, 0, 0, 3);
-        h.sw.step();
-        check(live->get_node("recall_room_3").has_value(), "K's room node exists: K's recall is NOT retired while staged");
+        check(h.sw.step() == ltsm::RoomSwap::Event::None and live->get_node("proposal_room_3").has_value(), "pending: the proposal stands");
+        check(accept(h) and live->get_node("proposal_room_3").has_value(), "accepted: it stands (door_concept reads it)");
         h.sw.on_room_left("room_3");
-        check(not live->get_node("recall_room_3").has_value(), "retired when the window closes");
+        check(not live->get_node("proposal_room_3").has_value(), "withdrawn when the window closes");
     }
 
     std::printf("door2_becomes_passage_of_both_rooms\n");
@@ -421,7 +423,7 @@ int main(int argc, char **argv)
         reset(); build_memory(false); build_live(false);
         Fix f;
         check(passage_count() == 0, "(no passage yet: case A)");
-        check(f.sw.swap(3, pose_k(), live_P), "swap accepted");
+        check(f.sw.swap(3, pose_k(), live_P) and accept(f), "swap accepted, proposal accepted");
         f.sw.on_room_left("room_3");
         check(passage_count() == 1, "exactly one passage");
         const auto pw = only_passage();
@@ -453,7 +455,7 @@ int main(int argc, char **argv)
     {
         reset(); build_memory(true); build_live(true);
         Fix f;
-        check(f.sw.swap(3, pose_k(), live_P), "swap accepted");
+        check(f.sw.swap(3, pose_k(), live_P) and accept(f), "swap accepted, proposal accepted");
         f.sw.on_room_left("room_3");
         check(passage_count() == 1, "still one passage (re-hung, not duplicated)");
         const auto pw = mem->get_node("passage_5");
@@ -481,6 +483,7 @@ int main(int argc, char **argv)
             reset(); build_memory(promoted); build_live(promoted);
             Fix f;
             f.sw.swap(3, pose_k(), live_P);
+            accept(f);
             f.sw.on_room_left("room_3");
             check(not any_name_contains("room_4") and not any_name_contains("r4_"),
                   std::string("no memory node carries the provisional room's name (") + (promoted ? "B" : "A") + ")");
@@ -492,6 +495,7 @@ int main(int argc, char **argv)
         reset(); build_memory(false); build_live(false);
         Fix f;
         f.sw.swap(3, pose_k(), live_P);
+        accept(f);
         f.sw.on_room_left("room_3");
         const auto before = mem_names();
         const int np = passage_count();
@@ -504,6 +508,7 @@ int main(int argc, char **argv)
         reset(); build_memory(false); build_live(false);
         Fix f;
         f.sw.swap(3, pose_k(), live_P);
+        accept(f);
         f.sw.on_room_left("room_3");
         live->delete_node(live->get_node("room_2").value().id());
         const auto L2 = live_node("room", "room_2", robot_id, -3, -1, 0.2, 2);
@@ -533,6 +538,7 @@ int main(int argc, char **argv)
         mem_node("object", "r3_door_old", K, ex, ey, std::atan2(face_truth.linear()(1, 0), face_truth.linear()(0, 0)) + 0.01, std::nullopt, {}, "door");
         Fix f;
         f.sw.swap(3, pose_tight(), live_P);
+        accept(f);
         f.sw.on_room_left("room_3");
         check(not mem->get_node("r3_door_3").has_value() and passage_count() == 1, "no new face: the existing one is adopted");
         const auto d = mem->get_node("r3_door_old");
@@ -556,6 +562,7 @@ int main(int argc, char **argv)
                  std::atan2(face_truth.linear()(1, 0), face_truth.linear()(0, 0)) + M_PI, std::nullopt, {}, "door");
         Fix f;
         f.sw.swap(3, pose_tight(), live_P);
+        accept(f);
         f.sw.on_room_left("room_3");
         check(not mem->get_node("r3_door_3").has_value(), "adopted although turned by pi");
         const auto T = mem->get_inner_eigen_api()->get_transformation_matrix("r3_room_3", "r3_door_old");
@@ -575,6 +582,7 @@ int main(int argc, char **argv)
         mem_node("object", "r3_door_far", K, face_truth.translation().x() + 2.0, face_truth.translation().y(), 0.0, std::nullopt, {}, "door");
         Fix f;
         f.sw.swap(3, pose_tight(), live_P);
+        accept(f);
         f.sw.on_room_left("room_3");
         check(mem->get_node("r3_door_3").has_value(), "a new face was written");
         const auto pw = only_passage();
@@ -592,6 +600,7 @@ int main(int argc, char **argv)
         put_edge(*mem, mem->get_node("r2_room_2").value().id(), mem->get_node("r2_door_3").value().id(), 4, 2, M_PI);
         Fix f;
         f.sw.swap(3, pose_tight(), live_P);
+        accept(f);
         f.sw.on_room_left("room_3");
         const auto [e, dth] = seam_err(truthA);
         check(e < 0.05 and dth < 0.05, "theta = pi door: seam within 5 cm / 0.05 rad (" + std::to_string(e) + ", " + std::to_string(dth) + ")");
@@ -602,6 +611,7 @@ int main(int argc, char **argv)
         reset(); build_memory(true); build_live(true);
         Fix f;
         f.sw.swap(3, pose_tight(), live_P);
+        accept(f);
         f.sw.on_room_left("room_3");
         // truth: T(K<-robot) T(robot<-P) T(P<-L), T(P<-L) from the L<->twin passage faces
         const Mat::RTMat truthB = se2(1.0, 2.0, 0.3) * se2(1.0, 2.0, -0.3) * (se2(1.0, 0.0, 1.0) * se2(4.0, 2.0, 0.0).inverse());
@@ -625,6 +635,7 @@ int main(int argc, char **argv)
         loose[0].S = Eigen::Vector3f(0.04f, 0.04f, 0.01f).asDiagonal();      // 0.2 m / 0.1 rad
         Fix f;
         f.sw.swap(3, loose, live_P);
+        accept(f);
         f.sw.on_room_left("room_3");
         check(not mem->get_node("r3_door_3").has_value(), "adopted");
         const auto T = mem->get_inner_eigen_api()->get_transformation_matrix("r3_room_3", "r3_door_old");
@@ -640,6 +651,7 @@ int main(int argc, char **argv)
                  std::atan2(face_truth.linear()(1, 0), face_truth.linear()(0, 0)), std::nullopt, {}, "door");
         Fix f;
         f.sw.swap(3, pose_tight(), live_P);
+        accept(f);
         f.sw.on_room_left("room_3");
         const auto T = mem->get_inner_eigen_api()->get_transformation_matrix("r3_room_3", "r3_door_old");
         const double now = T ? (T->translation() - face_truth.translation()).head<2>().norm() : 1e9;
@@ -662,6 +674,7 @@ int main(int argc, char **argv)
         live->update_node(P);
         Fix f;
         f.sw.swap(3, pose_tight(), live_P);
+        accept(f);
         f.sw.on_room_left("room_3");
         const auto [e, dth] = seam_err(truthA);
         // K_from_L = K_from_P * mouth^-1 with the mouth moved by 0.3 m along L's x => the seam moves by ~0.3 m
@@ -677,10 +690,12 @@ int main(int argc, char **argv)
         mem->add_or_modify_attrib_local<object_subtype_att>(t2, std::string("staged"));
         mem->update_node(t2);
         Fix f;
-        f.recall.post_late(robot_id, "r3_room_3", Mat::RTMat::Identity(), {});
+        f.recall.post_late(robot_id, "r3_room_3", Mat::RTMat::Identity(), {});     // an older build's late recall
         check(recall_nodes() == 1 and f.recall.late_count() == 1, "(a late recall is live)");
+        ltsm::RoomProposal(live, mem).post(live_P, "r3_room_3", Mat::RTMat::Identity(), {});
+        check(proposal_nodes() == 1, "(a proposal is live)");
         const int n = f.sw.sweep_stale();
-        check(n >= 2, "sweep reports what it removed (" + std::to_string(n) + ")");
+        check(n >= 3 and proposal_nodes() == 0, "sweep reports what it removed (" + std::to_string(n) + "), the proposal too");
         check(not mem->get_node("r4_room_4").has_value() and not mem->get_node("r4_door_9").has_value(), "the staged twin is removed from memory");
         check(recall_nodes() == 0 and mem_rooms() == 2, "the late recall is removed; K and L remain");
         check(f.sw.sweep_stale() == 0, "a second sweep finds nothing");
