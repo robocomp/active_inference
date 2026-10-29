@@ -930,6 +930,7 @@ void RoomSceneGraph::step_proto_room_impl(const rc::RoomConcept::UpdateResult& r
         //   geometry silently starts measuring from the wrong place.
         // (Consumed once per update by absorb_reanchor, at the top of update(), which also moves the
         //  start-up proto's frame; the event column is set by step_proto_room.)
+        crossing_path_.clear();   // nothing to cross out of until the new room is promoted (path restarts there)
         const float sig_s = std::sqrt(proto_n_out_.dot(cov_xy * proto_n_out_) + 1e-8f);
         const float s = (xy - proto_centre_).dot(proto_n_out_);
         room_concept_->set_outside_prob(rc::crossing::phi((s - r_body) / sig_s));
@@ -963,12 +964,21 @@ void RoomSceneGraph::step_proto_room_impl(const rc::RoomConcept::UpdateResult& r
         }
         return 0;
     };
+    // ★ THE PATH, NOT ONLY THE POSE (2026-10-29, Task 16). "Went through the door" is read from the robot's path in
+    //   this room's frame (door_crossing.h: PassagePath, evaluate's history). One path per room: a new room id starts
+    //   a new one; a re-anchor moves it with the frame (absorb_reanchor).
+    if (crossing_path_room_ != dsr_room_id_)
+    {
+        crossing_path_.clear();
+        crossing_path_room_ = dsr_room_id_;
+    }
     float p_in_doorway = 0.f;   // max over this room's apertures — see the outside_prob note below
     for (const auto& ap : apertures)
         if (room_of(ap.id) != dsr_room_id_)
             continue;
         else if (const auto c = rc::crossing::evaluate(ap, polygon, xy, cov_xy, r_body,
-                                                              room_concept_->params.wall_map.publish_corner_sigma); c.valid)
+                                                              room_concept_->params.wall_map.publish_corner_sigma,
+                                                              crossing_path_.samples()); c.valid)
         {
             const float p_open = ap.p_open < 0.f ? 0.5f : std::clamp(ap.p_open, 0.f, 1.f);
             p_in_doorway = std::max(p_in_doorway,
@@ -984,6 +994,7 @@ void RoomSceneGraph::step_proto_room_impl(const rc::RoomConcept::UpdateResult& r
     //   ★ Over EVERY valid aperture, not the best-crossing one: in front of the mouth p_cross underflows to exactly 0
     //   for all of them, best_ap stayed null and this was 0 throughout the approach (try60 leg 1: the same jump).
     room_concept_->set_outside_prob(p_in_doorway);
+    crossing_path_.observe(xy, cov_xy);   // AFTER evaluating: the history is the robot's EARLIER poses
     row.n_apert = static_cast<int>(apertures.size());
     if (best_ap == nullptr)
         return;   // row keeps NaN across the aperture columns; n_apert says whether any were offered
@@ -1090,6 +1101,12 @@ void RoomSceneGraph::step_proto_room_impl(const rc::RoomConcept::UpdateResult& r
     // the numbers are in tmp/proto_room.csv, which is the record meant to be read.
     qInfo().noquote() << QString("[room][proto] %1 BORN through %2 — see tmp/proto_room.csv")
                              .arg(QString::fromStdString(name)).arg(QString::fromStdString(best_ap->name));
+    qInfo().noquote() << QString("[room][proto] passage evidence: path through the jambs %1, door prior P(open) %2 "
+                                 "-> P(open | path) %3, p_cross %4 (%5 path samples)")
+                             .arg(best.p_through, 0, 'g', 4).arg(best_ap->p_open, 0, 'g', 4)
+                             .arg(best.p_open_post, 0, 'g', 4).arg(best.p_cross, 0, 'g', 6)
+                             .arg(crossing_path_.samples().size());
+    crossing_path_.clear();   // the next room's path starts at its own birth
     // ── THE HAND-OVER, IN THIS ORDER ────────────────────────────────────────────────────────────────
     // 1. Stamp the room's RT edge while it still holds the last pose that was true of it. Do it BEFORE
     //    retiring, so the mark and the last honest pose belong to the same edge state.
@@ -1324,6 +1341,7 @@ void RoomSceneGraph::absorb_reanchor(const Eigen::Affine2f& int_now)
     }
     for (auto& [c, until] : layout_refused_)
         c = T_new_old * c;
+    crossing_path_.apply(T_new_old);
     if (not std::isnan(armed_tx_))
     {
         const Eigen::Vector2f a = T_new_old * Eigen::Vector2f(armed_tx_, armed_ty_);

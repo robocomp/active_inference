@@ -391,6 +391,8 @@ private:
     Eigen::Affine2f T_room_proto_  = Eigen::Affine2f::Identity();   ///< proto frame in the room frame
     Eigen::Vector2f proto_centre_{0.f, 0.f};                        ///< crossed aperture, room frame
     Eigen::Vector2f proto_n_out_{0.f, 1.f};                         ///< its outward normal, room frame
+    rc::crossing::PassagePath crossing_path_;                       ///< robot path in this room's frame (Task 16)
+    std::uint64_t crossing_path_room_ = 0;                          ///< the room that path belongs to
 
     // ── THE ROLES INVERT AT THE CROSSING ────────────────────────────────────────────────────────────
     // Before: this agent's room is the published child and the proto-room rides along as a constant
