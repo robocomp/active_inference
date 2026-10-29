@@ -195,12 +195,18 @@ bool RoomSceneGraph::step_proposal(const rc::RoomConcept::UpdateResult& res)
         if (adm == rc::proposal::Admission::Judge and prop_judged_.has_value()) continue;   // one at a time
         if (adm == rc::proposal::Admission::Judge and begin_proposal_fit(p)) continue;
         // PlainSlam off: the survey has no pose independent of K, so the fit could not run without moving what is
-        // published (and could not be undone) — not judgeable here.
+        // published (and could not be undone) — not judgeable here. NOTE: "rejected" here means "CANNOT JUDGE", not
+        // "judged not K"; ltsm treats both alike (keeps P as a new room, rebases its evidence).
         const char* why = adm == rc::proposal::Admission::Judge ? "no independent survey pose to publish during the fit (plain SLAM not driving)"
                                                                 : rc::proposal::to_string(adm);
         rc::proposal::answer(*G_, p.node_id, rc::proposal::kRejected);
-        qWarning().noquote() << QString("[room][proposal] %1 (id %2) rejected without a fit: %3")
-                                    .arg(QString::fromStdString(p.live_name)).arg(p.node_id).arg(why);
+        if (adm == rc::proposal::Admission::Judge)
+            qCritical().noquote() << QString("[room][proposal] %1 (id %2) CANNOT BE JUDGED — answered rejected: %3. "
+                                             "Recognition cannot adopt any room in this configuration (RoomShape.PlainSlam)")
+                                         .arg(QString::fromStdString(p.live_name)).arg(p.node_id).arg(why);
+        else
+            qWarning().noquote() << QString("[room][proposal] %1 (id %2) rejected without a fit: %3")
+                                        .arg(QString::fromStdString(p.live_name)).arg(p.node_id).arg(why);
     }
     return false;
 }

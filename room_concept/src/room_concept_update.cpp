@@ -346,6 +346,10 @@ namespace rc
                     plain_slam_.set_pose(wall_pose - rec_odom_delta_);   // step() adds this frame's delta back
                     plain_slam_seed_ = false;
                 }
+                // The shadow's own prediction for this frame (step() adds the delta to its pose): what a publisher must
+                // difference its measured motion against while the shadow is the published pose (hypothesis fit).
+                plain_slam_pred_ = plain_slam_.pose() + rec_odom_delta_;
+                plain_slam_pred_.z() = std::remainder(plain_slam_pred_.z(), 2.f * static_cast<float>(M_PI));
                 std::vector<Eigen::Vector2f> xy;
                 xy.reserve(sampled_points.size());
                 for (const auto& q : sampled_points) xy.emplace_back(q.x(), q.y());

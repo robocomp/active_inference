@@ -46,8 +46,16 @@ bool reexpress_ring(DSR::DSRGraph& G, std::uint64_t from, std::uint64_t to, cons
     if (t.size() % 3 != 0 or t.size() != r.size()) return false;
     const float phi = angle_of(T);
     const Eigen::Matrix2f R = T.linear();
+    // A timestamped ring may hold slots never written (stamp 0): they carry no pose and are left as they are. An edge
+    // without rt_timestamps (one untimestamped block) is re-expressed whole.
+    const auto stamps = G.get_attrib_by_name<rt_timestamps_att>(e.value());
+    const bool stamped = stamps.has_value() and stamps->get().size() * 3 == t.size();
+    std::vector<bool> written(t.size() / 3, true);
+    if (stamped)
+        for (std::size_t b = 0; b < written.size(); ++b) written[b] = stamps->get()[b] != 0;
     for (std::size_t k = 0; k < t.size(); k += 3)
     {
+        if (not written[k / 3]) continue;
         const Eigen::Vector2f xy = T * Eigen::Vector2f(t[k], t[k + 1]);
         t[k] = xy.x(); t[k + 1] = xy.y();                                          // z kept
         const Eigen::Vector2f rxy = R * Eigen::Vector2f(r[k], r[k + 1]);           // roll/pitch axes turn with the frame
@@ -66,6 +74,7 @@ bool reexpress_ring(DSR::DSRGraph& G, std::uint64_t from, std::uint64_t to, cons
         J.block<2, 2>(3, 3) = R;
         for (std::size_t k = 0; k < c.size(); k += 36)
         {
+            if (c.size() == 36 * written.size() and not written[k / 36]) continue;
             Eigen::Map<Eigen::Matrix<float, 6, 6, Eigen::RowMajor>> S(c.data() + k);
             const Eigen::Matrix<float, 6, 6> Sr = J * S * J.transpose();
             S = Sr;

@@ -4,6 +4,7 @@
 #include "../../common/status_stream/status_sink.h"   // rc::status::Line (routed)
 
 #include "pose_publisher.h"
+#include "published_pose.h"
 
 #include "room_concept.h"
 #include "room_scene_graph.h"
@@ -275,14 +276,10 @@ bool PosePublisher::maybe_publish_corrected_pose()
     // can be metres off (try32: 3.77 m / 89°). Nothing a consumer sees may move before the verdict, so the published
     // pose is the survey's own — plain SLAM's shadow, which the fit never touches — with the covariance it was published
     // with, and the fit's own re-seeding is not a relocalisation epoch here (the clamp stays armed against it).
+    // The survey's PREDICTION is substituted too: the clamp's measured-motion term differences pred against the last
+    // published estimate (the shadow's), and the fit tracker's own prediction sits at the K-prior mode, metres away.
     if (const auto sp = room_concept_.survey_pose_during_fit(); sp.has_value())
-    {
-        const auto& [pose, cov] = sp.value();
-        loc_res->robot_pose = Eigen::Translation2f(pose.head<2>()) * Eigen::Rotation2Df(pose.z());
-        if (loc_res->state.size() > 4) { loc_res->state[2] = pose.x(); loc_res->state[3] = pose.y(); loc_res->state[4] = pose.z(); }
-        loc_res->covariance = cov;
-        loc_res->reloc_epoch = last_published_reloc_epoch_;
-    }
+        rc::publish::substitute_survey(*loc_res, sp.value(), last_published_reloc_epoch_);
 
     // ---- KINEMATIC CLAMP on the published CORRECTION --------------------------------------------
     // The published stream must be a physically possible trajectory: between two published poses the
@@ -341,85 +338,26 @@ bool PosePublisher::maybe_publish_corrected_pose()
         const float dt = static_cast<float>(loc_res->timestamp_ms - last_published_ts_ms_) / 1000.f;
         if (dt > 0.f and dt <= params.POSE_CLAMP_MAX_DT_S)
         {
-            const auto& prev = last_published_pose_.value();
-            const Eigen::Vector2f d_xy = loc_res->robot_pose.translation() - prev.translation();
-            const float prev_th = std::atan2(prev.linear()(1, 0), prev.linear()(0, 0));
-            const float new_th  = std::atan2(loc_res->robot_pose.linear()(1, 0),
-                                             loc_res->robot_pose.linear()(0, 0));
-            const float d_th = std::remainder(new_th - prev_th, 2.f * static_cast<float>(M_PI));
-
-            // The motion the sensors MEASURED between the last published frame and this one.
-            // build_motion_prior_selection() builds every prediction on last_update_result.robot_pose
-            // — the previous CORRECTED estimate — so pred[k] - est[k-1] is exactly the preintegrated
-            // increment for this interval, with nothing else in it. Verified on the live log after the
-            // clamp fix: pred[k] - (est[k-1] + imu_dtheta) is 0.0002 deg at p50.
-            //
-            // ⚠ IT MUST BE est[k-1], NOT pred[k-1]. Differencing two consecutive PREDICTIONS looks
-            // equivalent and is not: substituting pred[k-1] = est[k-2] + increment[k-1] gives
-            // pred[k] - pred[k-1] = increment[k] + innovation[k-1], i.e. it hands the previous frame's
-            // correction through the clamp UNBOUNDED, one frame late. That was the bug in the first
-            // version of this fix, and it survived because a free-running predictor would make the two
-            // forms identical — the log column it was checked against (est_theta) is written AFTER the
-            // clamp, so it showed the clamp's own backlog and not the localiser's estimate.
-            //
-            // With no previous estimate to difference against (first publication after a reset) it is
-            // zero, which degrades to the old total-delta behaviour for that single frame.
-            //
-            // Any correction the clamp did not apply on earlier frames is deliberately left INSIDE the
-            // bounded part here, so a backlog still discharges at max_th per frame rather than
-            // escaping as one jump.
-            Eigen::Vector2f m_xy = Eigen::Vector2f::Zero();
-            float           m_th = 0.f;
-            if (last_published_est_.has_value())
+            apply_base_capability_to_pose_clamp();   // the bound from the robot (cheap after the first success)
+            const auto cl = rc::publish::clamp_correction(
+                last_published_pose_.value(), last_published_est_, loc_res->robot_pose,
+                Eigen::Vector3f(loc_res->pred_x, loc_res->pred_y, loc_res->pred_theta),
+                params.POSE_CLAMP_V_MAX * dt, params.POSE_CLAMP_W_MAX * dt);
+            if (cl.fired)
             {
-                const Eigen::Vector3f& pe = last_published_est_.value();
-                m_xy = Eigen::Vector2f(loc_res->pred_x - pe.x(), loc_res->pred_y - pe.y());
-                m_th = std::remainder(loc_res->pred_theta - pe.z(), 2.f * static_cast<float>(M_PI));
-            }
-
-            // What is left after the measured motion is accounted for IS the correction — the only
-            // part of the published delta that has no dynamical support and can therefore be a
-            // teleport. Bound that, and only that.
-            const Eigen::Vector2f c_xy = d_xy - m_xy;
-            const float           c_th = std::remainder(d_th - m_th, 2.f * static_cast<float>(M_PI));
-
-            // Take the bound from the robot before using it. Cheap after the first success (one bool),
-            // and placed HERE rather than in initialize() so it cannot silently fall back for the life
-            // of the process because the robot node had not synced yet.
-            apply_base_capability_to_pose_clamp();
-            const float max_xy = params.POSE_CLAMP_V_MAX * dt;
-            const float max_th = params.POSE_CLAMP_W_MAX * dt;
-            const float n_xy = c_xy.norm();
-
-            if (n_xy > max_xy or std::abs(c_th) > max_th)
-            {
-                const Eigen::Vector2f xy_c = m_xy + ((n_xy > max_xy and n_xy > 1e-9f)
-                                             ? Eigen::Vector2f(c_xy * (max_xy / n_xy)) : c_xy);
-                const float th_c = m_th + std::clamp(c_th, -max_th, max_th);
-
-                // The part of the correction we did NOT apply is real, known error in the published
-                // pose. Surfacing it as covariance is what keeps the clamp honest rather than a lie:
-                // consumers learn the pose is deliberately behind the measurement, and it is the one
-                // signal in this stream that is genuinely informative (it fires on ~1% of frames, so
-                // it cannot shift the mean sigma the speed governor watches).
-                const Eigen::Vector2f res_xy = d_xy - xy_c;
-                const float res_th = d_th - th_c;
-                loc_res->covariance(0, 0) += res_xy.x() * res_xy.x();
-                loc_res->covariance(1, 1) += res_xy.y() * res_xy.y();
-                loc_res->covariance(2, 2) += res_th * res_th;
-
-                Eigen::Affine2f clamped = Eigen::Affine2f::Identity();
-                clamped.translation() = prev.translation() + xy_c;
-                clamped.linear() = Eigen::Rotation2Df(prev_th + th_c).toRotationMatrix();
-                loc_res->robot_pose = clamped;
-
+                // The part of the correction NOT applied is real, known error in the published pose: surfaced as
+                // covariance (see rc::publish::clamp_correction).
+                loc_res->covariance(0, 0) += cl.res_xy.x() * cl.res_xy.x();
+                loc_res->covariance(1, 1) += cl.res_xy.y() * cl.res_xy.y();
+                loc_res->covariance(2, 2) += cl.res_th * cl.res_th;
+                loc_res->robot_pose = cl.pose;
                 clamp_fired = true;
                 if (++pose_clamp_hits_ % 20 == 1)
-                    qWarning() << "[pose-clamp] CORRECTION implied" << (n_xy / dt) << "m/s /"
-                               << (std::abs(c_th) / dt) << "rad/s over dt" << dt << "s — limits"
+                    qWarning() << "[pose-clamp] CORRECTION implied" << (cl.n_xy / dt) << "m/s /"
+                               << (std::abs(cl.c_th) / dt) << "rad/s over dt" << dt << "s — limits"
                                << params.POSE_CLAMP_V_MAX << "/" << params.POSE_CLAMP_W_MAX
-                               << "; measured motion passed through at" << (std::abs(m_th) / dt)
-                               << "rad/s; carried" << res_xy.norm() * 1000.f
+                               << "; measured motion passed through at" << (std::abs(cl.m_th) / dt)
+                               << "rad/s; carried" << cl.res_xy.norm() * 1000.f
                                << "mm into covariance (" << pose_clamp_hits_ << " clamps)";
             }
         }

@@ -156,6 +156,20 @@ int main(int argc, char** argv)
               "a query between two blocks interpolates inside K's frame");
         const auto e = G->get_edge(P, robot, "RT");
         const auto cv = e.has_value() ? G->get_attrib_by_name<rt_covariance_att>(e.value()) : std::nullopt;
+        {
+            const auto tr = e.has_value() ? G->get_attrib_by_name<rt_translation_att>(e.value()) : std::nullopt;
+            const auto st = e.has_value() ? G->get_attrib_by_name<rt_timestamps_att>(e.value()) : std::nullopt;
+            int unwritten = 0; bool untouched = true;
+            if (tr.has_value() and st.has_value() and st->get().size() * 3 == tr->get().size())
+                for (std::size_t b = 0; b < st->get().size(); ++b)
+                    if (st->get()[b] == 0)
+                    {
+                        ++unwritten;
+                        untouched = untouched and tr->get()[3 * b] == 0.f and tr->get()[3 * b + 1] == 0.f;
+                    }
+            check(unwritten > 0 and untouched, "never-written ring slots (stamp 0) are left as they were ("
+                  + std::to_string(unwritten) + " slots)");
+        }
         check(cv.has_value() and cv->get().size() >= 36 and near(cv->get()[0], 0.01f) and near(cv->get()[7], 0.04f),
               "the pose covariance is rotated with the frame (90 deg: sxx <-> syy)");
         check(same_pose(rt_of(floor_id, wall), transform_pose(T_K_P, kWallInFloor)), "this agent's wall is re-expressed");

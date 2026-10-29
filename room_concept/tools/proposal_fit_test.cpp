@@ -9,6 +9,7 @@
 //   make -C build proposal_fit_test && ../bin/proposal_fit_test
 #include "room_concept.h"
 #include "reloc_search.h"
+#include "published_pose.h"
 
 #include <clocale>
 #include <cmath>
@@ -29,6 +30,7 @@ struct RelocSelftestAccess   // friend of RoomConcept (one per test binary)
     static void evidence(RoomConcept& r, float s) { r.accumulate_late_evidence(s, 1.f); }
     static double log_odds(RoomConcept& r) { return r.late_log_odds_; }
     // The agent's run loop calls relocalisation_step after update() (room_concept.cpp, step 8); update() alone does not.
+    static std::uint64_t epoch(RoomConcept& r) { return r.reloc_epoch_.load(); }
     static void reloc(RoomConcept& r, const RoomConcept::UpdateResult& res, const std::vector<Eigen::Vector3f>& pts)
     { r.relocalisation_step(res, pts); }
 };
@@ -71,9 +73,48 @@ static std::vector<Eigen::Vector3f> scan_at(const Poly& poly, const Eigen::Vecto
     return out;
 }
 
+// What PosePublisher::maybe_publish_corrected_pose does with each result, on the SAME functions it calls
+// (rc::publish::substitute_survey + clamp_correction) and the same state it carries between frames
+// (last published pose / pre-clamp estimate / epoch). Limits as live: 1 m/s, 2 rad/s.
+struct Publisher
+{
+    std::optional<Eigen::Affine2f> last_pose;
+    std::optional<Eigen::Vector3f> last_est;
+    std::uint64_t last_epoch = 0;
+    std::int64_t last_ts = 0;
+    bool fired = false;
+    bool use_survey_pred = true;   // false = the reviewed bug: survey pose substituted, fit prediction kept
+    Eigen::Vector3f publish(RoomConcept& r, rc::loc::UpdateResult res)
+    {
+        if (auto sp = r.survey_pose_during_fit(); sp.has_value())
+        {
+            if (not use_survey_pred) sp->pred = Eigen::Vector3f(res.pred_x, res.pred_y, res.pred_theta);
+            rc::publish::substitute_survey(res, sp.value(), last_epoch);
+        }
+        const Eigen::Affine2f est = res.robot_pose;
+        const bool relocalised = res.reloc_epoch != last_epoch;
+        fired = false;
+        if (not relocalised and last_pose.has_value() and res.timestamp_ms > last_ts)
+        {
+            const float dt = static_cast<float>(res.timestamp_ms - last_ts) / 1000.f;
+            const auto cl = rc::publish::clamp_correction(*last_pose, last_est, res.robot_pose,
+                                                          Eigen::Vector3f(res.pred_x, res.pred_y, res.pred_theta), 1.f * dt, 2.f * dt);
+            if (cl.fired) { res.robot_pose = cl.pose; fired = true; }
+        }
+        last_pose = res.robot_pose;
+        last_est = Eigen::Vector3f(est.translation().x(), est.translation().y(), std::atan2(est.linear()(1, 0), est.linear()(0, 0)));
+        last_epoch = res.reloc_epoch;
+        last_ts = res.timestamp_ms;
+        const auto& P = res.robot_pose;
+        return {P.translation().x(), P.translation().y(), std::atan2(P.linear()(1, 0), P.linear()(0, 0))};
+    }
+};
+
 struct Rig
 {
     RoomConcept rcn;
+    Publisher pub;
+    Eigen::Vector3f published = Eigen::Vector3f::Zero();
     std::mt19937 rng{2026};
     std::int64_t ts = 1000;
     void frame()
@@ -88,8 +129,10 @@ struct Rig
             odom.push_back(o);
         }
         const auto pts = scan_at(kRoom, kTruth, rng);
-        const auto res = rcn.update(rc::LidarData{pts, ts}, {}, odom);
-        Acc::reloc(rcn, res, pts);
+        auto res = rcn.update(rc::LidarData{pts, ts}, {}, odom);
+        res.reloc_epoch = Acc::epoch(rcn);          // as the run loop stamps it
+        published = pub.publish(rcn, res);          // on_result_ready → PosePublisher
+        Acc::reloc(rcn, res, pts);                  // then section 8
     }
     Rig()
     {
@@ -146,14 +189,24 @@ int main()
         auto& r = rig.rcn;
         const auto b = snap(r);
         check(r.begin_hypothesis_fit(kCloset, {wrong}, 0.0), "the fit starts (closet layout, prior 3 m / 90 deg off)");
-        float published_dev = 0.f, fit_dev = 0.f;
+        const Eigen::Vector3f published_before = rig.published;
+        float published_dev = 0.f, fit_dev = 0.f, vs_shadow = 0.f;
+        bool any_clamp = false;
         for (int k = 0; k < 60 and r.late_recall_verdict() == RoomConcept::LateVerdict::Pending; ++k)
         {
             rig.frame();
             const auto sp = r.survey_pose_during_fit();
-            if (sp.has_value()) published_dev = std::max(published_dev, dpose(sp->first, b.pose));
+            if (k == 0)
+                check(sp.has_value() and dpose(rig.published, sp->pose) < 1e-4f and not rig.pub.fired,
+                      "FIRST fit frame: the PUBLISHED pose is exactly the shadow's, no clamp ("
+                      + std::to_string(sp.has_value() ? dpose(rig.published, sp->pose) : -1.f) + ")");
+            if (sp.has_value()) vs_shadow = std::max(vs_shadow, dpose(rig.published, sp->pose));
+            any_clamp = any_clamp or rig.pub.fired;
+            published_dev = std::max(published_dev, dpose(rig.published, published_before));
             fit_dev = std::max(fit_dev, dpose(pose_of(r), b.pose));
         }
+        check(vs_shadow < 1e-4f and not any_clamp, "every fit frame publishes the shadow's pose exactly (max "
+              + std::to_string(vs_shadow) + ")");
         // Parked, repeated views count once (novelty-weighted): the forced search's scan took the log-odds to ~-1.9 and
         // further identical views add nothing. Two more DISTINCT contrary views (what driving would add) are fed
         // straight into the sequential test — the rejection itself is the fit's, the views are the harness's.
@@ -161,10 +214,14 @@ int main()
         for (int k = 0; k < 10 and r.late_recall_verdict() == RoomConcept::LateVerdict::Pending; ++k) Acc::evidence(r, 1.0f);
         check(after_scans < 0.0, "the scans alone already argue against K (log-odds " + std::to_string(after_scans) + ")");
         check(fit_dev > 0.5f, "the fit's own pose was dragged away (" + std::to_string(fit_dev) + ") ...");
-        check(published_dev < 0.05f, "... while the PUBLISHED pose stayed the survey's (" + std::to_string(published_dev) + ")");
+        check(published_dev < 0.05f, "... while the PUBLISHED pose (publisher path) stayed where it was (" + std::to_string(published_dev) + ")");
         check(r.late_recall_verdict() == RoomConcept::LateVerdict::Rejected, "verdict: REJECTED");
         r.end_hypothesis_fit();
         unchanged(r, b, "rejected");
+        rig.frame();
+        check(dpose(rig.published, published_before) < 0.05f and dpose(rig.published, pose_of(r)) < 1e-4f,
+              "first frame after the reject: PUBLISHED = the survey's pose, where it was ("
+              + std::to_string(dpose(rig.published, published_before)) + ")");
         for (int f = 0; f < 10; ++f) rig.frame();
         check(dpose(pose_of(r), kTruth) < 0.05f, "the survey carries on from where it was");
     }
@@ -175,11 +232,35 @@ int main()
         auto& r = rig.rcn;
         const auto b = snap(r);
         check(r.begin_hypothesis_fit(kCloset, {wrong}, 3.0), "the fit starts");
-        for (int f = 0; f < 3; ++f) rig.frame();
+        float vs = 0.f;
+        for (int f = 0; f < 3; ++f)
+        {
+            rig.frame();
+            if (const auto sp = r.survey_pose_during_fit(); sp.has_value()) vs = std::max(vs, dpose(rig.published, sp->pose));
+        }
+        check(vs < 1e-4f, "while pending, PUBLISHED = the shadow's pose (max " + std::to_string(vs) + ")");
         check(r.late_recall_verdict() == RoomConcept::LateVerdict::Pending, "no verdict yet (ltsm withdraws / re-posts)");
         r.end_hypothesis_fit();
         unchanged(r, b, "withdrawn");
+        const Eigen::Vector3f before_pub = b.pose;
+        rig.frame();
+        check(dpose(rig.published, before_pub) < 0.05f and dpose(rig.published, pose_of(r)) < 1e-4f,
+              "first frame after the withdrawal: PUBLISHED = the survey's pose (" + std::to_string(dpose(rig.published, before_pub)) + ")");
         check(r.late_recall_verdict() == RoomConcept::LateVerdict::None, "the late fit is disarmed");
+    }
+
+    std::printf("survey_prediction_is_what_keeps_the_clamp_quiet\n");
+    {
+        Rig rig;
+        auto& r = rig.rcn;
+        rig.pub.use_survey_pred = false;   // the reviewed bug: survey pose, but the FIT tracker's prediction
+        const Eigen::Vector3f before = rig.published;
+        check(r.begin_hypothesis_fit(kCloset, {wrong}, 0.0), "the fit starts");
+        rig.frame();
+        check(rig.pub.fired and dpose(rig.published, before) > 0.1f,
+              "with the fit's prediction the clamp FIRES and drags the published pose toward the fit ("
+              + std::to_string(dpose(rig.published, before)) + ") — why the survey's prediction is substituted");
+        r.end_hypothesis_fit();
     }
 
     std::printf("true_layout_accepted_and_kept\n");

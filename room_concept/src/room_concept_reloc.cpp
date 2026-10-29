@@ -742,10 +742,10 @@ namespace rc
         return true;
     }
 
-    std::optional<std::pair<Eigen::Vector3f, Eigen::Matrix3f>> RoomConcept::survey_pose_during_fit() const
+    std::optional<rc::publish::SurveyPose> RoomConcept::survey_pose_during_fit() const
     {
         if (not hypothesis_.has_value()) return std::nullopt;
-        return std::pair{plain_slam_.pose(), hypothesis_->covariance};
+        return rc::publish::SurveyPose{plain_slam_.pose(), plain_slam_pred_, hypothesis_->covariance};
     }
 
     void RoomConcept::end_hypothesis_fit()
@@ -771,6 +771,7 @@ namespace rc
         rivals_ = h.rivals;
         rival_ref_pose_ = h.rival_ref_pose;
         rival_ref_valid_ = h.rival_ref_valid;
+        publish_rival_snapshot();   // the GUI / pose_hypotheses() copy follows the restored rivals
         rt_.hold_open = false;
         // The pose goes back to the survey's own: plain SLAM's shadow, which never followed K. (A commit clears the window
         // and the prediction base, exactly as the fit's own seeding did; plain SLAM rewrites the newest slot every frame.)

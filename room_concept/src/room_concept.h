@@ -1,4 +1,5 @@
 #pragma once
+#include "published_pose.h"   // rc::publish::SurveyPose
 #include <unordered_map>
 #include <utility>   // std::exchange
 #include <array>
@@ -476,9 +477,10 @@ public:
     /// Accepted: K stays the given room; the snapshot is dropped.
     void keep_hypothesis_fit();
     [[nodiscard]] bool hypothesis_fit_active() const { return hypothesis_.has_value(); }
-    /// While a fit runs: the survey's own pose (plain SLAM's shadow, internal frame) and the covariance it was published
-    /// with — what must be published so nothing visible moves before the verdict. nullopt when no fit runs.
-    [[nodiscard]] std::optional<std::pair<Eigen::Vector3f, Eigen::Matrix3f>> survey_pose_during_fit() const;
+    /// While a fit runs: the survey's own pose (plain SLAM's shadow, internal frame), its prediction for this frame and
+    /// the covariance it was published with — what must be published so nothing visible moves before the verdict
+    /// (PosePublisher via rc::publish::substitute_survey). nullopt when no fit runs.
+    [[nodiscard]] std::optional<rc::publish::SurveyPose> survey_pose_during_fit() const;
     enum class LateVerdict : int { None = 0, Pending = 1, Accepted = 2, Rejected = 3 };
     /// Pending after seed_reloc_prior while scans accumulate evidence; then Accepted or Rejected. The evidence per scan
     /// is the log-likelihood ratio "the median |SDF| is tracking-like vs broad" (the lost belief's own two emissions) of the
@@ -1152,6 +1154,7 @@ private:
     std::unordered_map<std::uint64_t, Eigen::Matrix2f> window_wall_information() const;
     bool          rec_stride_replace_ = false;                       // this frame's stride decision, for the recorder
     Eigen::Vector3f rec_odom_delta_ = Eigen::Vector3f::Zero();       // this frame's map-frame odometry delta
+    Eigen::Vector3f plain_slam_pred_ = Eigen::Vector3f::Zero();   // plain SLAM's prediction this frame (pose before step + odom delta)
     rc::slam::ScanSlam plain_slam_;                                   // Estimate-mode pose (plain_slam_driving)
     bool plain_slam_seed_ = true;                                     // (re)seed from the window's pose on next step
     /// Set once, at the first publishable polygon, when WallMap::Params::freeze_when_publishable is
