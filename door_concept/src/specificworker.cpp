@@ -1289,7 +1289,10 @@ void SpecificWorker::compute()
     // Must run before anything below reads room_node_id_ — births, the containment prior and every RT
     // write are all parented by it.
     step_room_following();
-    if (room_node_id_ == 0)
+    // ★ADOPTION HOLD (Task 19): an accepted proposal renamed this room but K's first robot block has not arrived, so the
+    //  frame change cannot be read yet — the doors are still in P's frame and the next robot pose may be K's. Fitting them
+    //  against each other would be evidence in the wrong frame; this cycle runs like the no-room one below.
+    if (room_node_id_ == 0 or adoption_hold_)
     {
         // ★ NO ROOM, BUT A PASSAGE IN FLIGHT (mid room-switch): the anchor's prediction and its robot-frame LiDAR /
         //   mask update need no room, and an edge left unwritten for 1 s is read as a dead owner — the controller
@@ -3159,6 +3162,7 @@ std::optional<std::uint64_t> SpecificWorker::resolve_current_room() const
 void SpecificWorker::step_room_following()
 {
     if (not G) return;
+    adoption_hold_ = false;   // decided afresh each cycle: only step_adoption, still waiting for K's robot block, sets it
     latch_recall_names();   // BEFORE the switch below: ltsm may retire the recall the moment the room is live again
     const auto current = resolve_current_room();
 
@@ -3557,6 +3561,10 @@ void SpecificWorker::step_adoption()
     if (not room.has_value())
         return;
     const std::string name = room->name();
+    // The robot's newest block in this room's frame, read EVERY cycle: the blocks read under P's name are what T(K<-P)
+    // is paired from when the adoption lands (rc::door::AdoptionFramePairing).
+    const auto fix = robot_fix_in_room(room_node_id_);
+    adoption_pairing_.observe(room_node_id_, name, fix);
     room_names_.observe(room_node_id_, name);
     if (name != followed_name_.second and followed_name_.first == room_node_id_)
         std::print("door_concept: [restore] room node {} renamed '{}' -> '{}' (same room, nothing released)\n",
@@ -3574,13 +3582,49 @@ void SpecificWorker::step_adoption()
     const auto plan = rc::door::plan_adoption(props, room_node_id_, name, others, false);
     if (not plan.restore)
         return;
+    // ★The frame change is the ROBOT's (Task 19): T(K<-P) = robot_K ∘ robot_P⁻¹, not the inverse of the proposal's T(P<-K),
+    //  which is ltsm's pose hypothesis BEFORE room_concept's fit relocalised the robot in K. Until K's first robot block
+    //  exists the doors cannot be placed: hold the fit (compute() skips it) rather than fit P-frame beliefs against a
+    //  K-frame robot. Nothing read under P (no robot edge then) ⇒ the proposal is all there is.
+    std::optional<rc::door::Rigid2> K_from_P;
+    if (plan.reseat)
+    {
+        const auto proposed = proposal_P_from_K(room_node_id_, props);
+        K_from_P = adoption_pairing_.K_from_P(fix);
+        if (not K_from_P.has_value() and adoption_pairing_.has_previous())
+        {
+            std::print("door_concept: [restore] ltsm proposal ACCEPTED for '{}' — fit held this cycle: room_concept has not "
+                       "yet published the robot in K's frame (the frame change is read from the robot)\n", name);
+            adoption_hold_ = true;
+            return;
+        }
+        if (K_from_P.has_value() and proposed.has_value())
+        {
+            const auto prop = rc::door::rigid_inverse(*proposed);
+            std::print("door_concept: [restore] T(K<-P) from the robot = ({:.2f},{:.2f},{:.3f}); the proposal's = ({:.2f},{:.2f},{:.3f}) "
+                       "— {:.2f} m / {:.1f} deg apart at P's origin (room_concept's fit relocalised the robot after ltsm proposed)\n",
+                       K_from_P->tx, K_from_P->ty, K_from_P->yaw, prop.tx, prop.ty, prop.yaw,
+                       std::hypot(K_from_P->tx - prop.tx, K_from_P->ty - prop.ty),
+                       std::abs(std::remainder(K_from_P->yaw - prop.yaw, 2.0f * static_cast<float>(M_PI))) * 180.0f / static_cast<float>(M_PI));
+        }
+        else if (not K_from_P.has_value() and proposed.has_value())
+        {
+            K_from_P = rc::door::rigid_inverse(*proposed);
+            std::print("door_concept: [restore] no robot pose was read under the provisional name: re-seating by the "
+                       "proposal's T(P<-K) (ltsm's hypothesis, not room_concept's fit)\n");
+        }
+        else if (not K_from_P.has_value())
+            std::print("door_concept: [restore] neither the robot nor the accepted proposal gives T(K<-P): doors keep their frame\n");
+    }
+    adoption_hold_ = false;
+    adoption_pairing_.rebase(name);
     adoption_handled_.insert({room_node_id_, name});
     recall_names_seen_.insert(name);          // the accepted proposal IS the announcement
     recall_late_names_.insert(name);          // and the provisional name is dead: drop its rows
     std::print("door_concept: [restore] ltsm proposal ACCEPTED for room node {} — '{}' is the remembered '{}'; restoring its "
                "doors and merging the live ones by place\n", room_node_id_, others.empty() ? name : others.front(), name);
-    if (plan.reseat)
-        reseat_doors_after_adoption(room_node_id_, props);   // BEFORE the restore: the merge by place reads re-seated positions
+    if (K_from_P.has_value())
+        reseat_doors_after_adoption(room_node_id_, *K_from_P);   // BEFORE the restore: the merge by place reads re-seated positions
     for (const auto& old : others)               // the provisional names are dead: their rows are deleted, not stripped
     {
         for (const auto& nm : rc::door::drop_room(identities_, old))
@@ -3590,13 +3634,10 @@ void SpecificWorker::step_adoption()
     enter_room_memory(room_node_id_, false, {});
 }
 
-// The accepted proposal carries T(P<-K) on its RT edge (P -> proposal). room_concept re-expressed ITS OWN children by
-// T(K<-P) and switched the published frame to K; the doors hung directly from the room (or from a wall that moved with
-// it) still hold P-frame numbers under K's name. Move each such door's belief by the frame change and re-publish.
-void SpecificWorker::reseat_doors_after_adoption(std::uint64_t room_id, const std::vector<rc::door::ProposalView>& props)
+// ltsm's accepted proposal carries T(P<-K) on its RT edge (P -> proposal) — ltsm's hypothesis (its best pose mode), kept as
+// the fallback and the diagnostic the robot-paired T(K<-P) is compared with.
+std::optional<rc::door::Rigid2> SpecificWorker::proposal_P_from_K(std::uint64_t room_id, const std::vector<rc::door::ProposalView>& props) const
 {
-    if (not fitter_ or not scene_graph_)
-        return;
     std::optional<rc::door::Rigid2> P_from_K;
     for (const auto& pv : props)
     {
@@ -3610,12 +3651,45 @@ void SpecificWorker::reseat_doors_after_adoption(std::uint64_t room_id, const st
         if (tr.has_value() and rot.has_value() and tr->get().size() >= 2 and rot->get().size() >= 3)
             P_from_K = rc::door::Rigid2{tr->get()[0], tr->get()[1], rot->get()[2]};
     }
-    if (not P_from_K.has_value())
+    return P_from_K;
+}
+
+// The robot's newest RT block between it and the room, as the robot's pose in the room's frame. This fleet's room_concept
+// anchors the edge robot -> room (the room in the robot frame: inverted here); room -> robot is read as it is. The newest
+// block is found by scanning the stamps (the ring is overwritten in place, rc::rt::newest_twist). No stamps ⇒ nullopt.
+std::optional<rc::door::RobotFix> SpecificWorker::robot_fix_in_room(std::uint64_t room_id) const
+{
+    if (not G or not rt_api_) return std::nullopt;
+    const std::string robot = robot_node_name();
+    const auto robot_n = robot.empty() ? std::nullopt : G->get_node(robot);
+    if (not robot_n.has_value()) return std::nullopt;
+    const auto read = [&](std::uint64_t from, std::uint64_t to, bool invert) -> std::optional<rc::door::RobotFix>
     {
-        std::print("door_concept: [restore] accepted proposal has no readable RT T(P<-K): doors keep their frame\n");
+        const auto e = G->get_edge(from, to, "RT");
+        if (not e.has_value()) return std::nullopt;
+        const auto stamps = G->get_attrib_by_name<rt_timestamps_att>(e.value());
+        if (not stamps.has_value()) return std::nullopt;
+        std::uint64_t newest = 0;
+        for (const auto st : stamps->get()) newest = std::max(newest, st);
+        if (newest == 0) return std::nullopt;
+        const auto T = rt_api_->get_edge_RT_as_rtmat(e.value(), newest);
+        if (not T.has_value() or not T->matrix().allFinite()) return std::nullopt;
+        const rc::door::Rigid2 p{static_cast<float>(T->translation().x()), static_cast<float>(T->translation().y()),
+                                 static_cast<float>(std::atan2(T->linear()(1, 0), T->linear()(0, 0)))};
+        return rc::door::RobotFix{invert ? rc::door::rigid_inverse(p) : p, newest};
+    };
+    if (auto f = read(room_id, robot_n->id(), false); f.has_value()) return f;
+    return read(robot_n->id(), room_id, true);
+}
+
+// room_concept re-expressed ITS OWN children and switched the published frame to K; the doors hung from the room (or from a
+// wall that moved with it) still hold P-frame numbers under K's name. Move each such door's belief by T(K<-P) and re-publish.
+// Called once per adoption (adoption_handled_), on beliefs this agent holds in P's frame: nothing here reads a door's
+// graph edge, so an edge already expressed in K by someone else is never moved a second time.
+void SpecificWorker::reseat_doors_after_adoption(std::uint64_t room_id, const rc::door::Rigid2& K_from_P)
+{
+    if (not fitter_ or not scene_graph_)
         return;
-    }
-    const auto K_from_P = rc::door::rigid_inverse(*P_from_K);
     int n = 0;
     for (auto& [id, inst] : fitter_->instances())
     {
@@ -3727,6 +3801,24 @@ void SpecificWorker::restore_remembered_doors(std::uint64_t new_room)
     {
         if (not n.name().starts_with("door_")) continue;
         rc::door::LiveDoor l{n.name(), std::nullopt};
+        // ★One of OUR doors is placed by its BELIEF (Task 19): an adoption re-seat moved the belief and rewrote the edge
+        //  this very cycle, and the ts==0 transform cache is invalidated only by a queued slot that has not run yet — the
+        //  graph read returned door_43's P-frame place (0,0.01) and blocked room_2's door_19 at (0.07,0.12) in recog_proto6.
+        //  (step_remembered_looks places live doors the same way.)
+        const auto parent_of = [&](std::uint64_t x) -> std::uint64_t
+        {
+            const auto xn = G->get_node(x);
+            return xn.has_value() ? G->get_attrib_by_name<parent_att>(xn.value()).value_or(0) : 0;
+        };
+        if (const auto it = fitter_->instances().find(n.id());
+            it != fitter_->instances().end() and rc::door::descends_from(n.id(), new_room, parent_of))
+        {
+            const auto& s = it->second.model.state();
+            if (const Eigen::Vector2f ap(s.ap_cx, s.ap_cy); ap.allFinite() and ap.norm() < rc::door::kIdentityMaxPlaceM)
+                l.xy_in_room = ap;
+            live.push_back(std::move(l));
+            continue;
+        }
         if (inner_eigen_)
             if (const auto T = inner_eigen_->get_transformation_matrix(room->name(), n.name(), 0);
                 T.has_value() and T->matrix().allFinite() and T->translation().head<2>().norm() < rc::door::kIdentityMaxPlaceM)

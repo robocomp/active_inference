@@ -179,6 +179,94 @@ int main()
         std::unordered_map<std::uint64_t, std::uint64_t> par{{1, 2}, {2, 1}};
         CHECK(not descends_from(1, 9, [&](std::uint64_t x) { return par.at(x); }));
     }
+    // Task 19 (recog_proto6): T(K<-P) is read from the ROBOT across the frame switch, not from ltsm's proposal.
+    {
+        const auto near = [](const Rigid2& a, const Rigid2& b, float tol)
+        { return std::hypot(a.tx - b.tx, a.ty - b.ty) < tol and std::abs(std::remainder(a.yaw - b.yaw, 6.2831853f)) < tol; };
+        const auto near_pose = [](const PublishedPose& a, const PublishedPose& b, float tol)
+        { return std::hypot(a.cx - b.cx, a.cy - b.cy) < tol and std::abs(std::remainder(a.yaw - b.yaw, 6.2831853f)) < tol; };
+        // SE(2) power: Δ^1 = Δ, Δ^0 = I, Δ^2 = Δ∘Δ
+        const Rigid2 D{0.03f, 0.04f, 0.05f};
+        CHECK(near(rigid_power(D, 1.f), D, 1e-5f));
+        CHECK(near(rigid_power(D, 0.f), Rigid2{}, 1e-6f));
+        CHECK(near(rigid_power(D, 2.f), rigid_compose(D, D), 1e-5f));
+
+        // The live geometry. TRUE frame change: room_4 (P) is room_2 (K) turned +90 deg about DOOR_2's hole — P's entry
+        // mirror door_43 at (0,0.01) yaw 3.138 lands on room_2's door_20 hole (2.95,1.55). ltsm's proposal was the 180-deg
+        // twin: the true one followed by a half turn about (0.21,-0.19) in K (room_concept's fit then moved the robot 179 deg).
+        const Rigid2 K_from_P_true{2.95f, 1.55f, 1.5707963f};
+        const Rigid2 half_turn{0.42f, -0.38f, 3.1415927f};                        // 180 deg about (0.21,-0.19)
+        const Rigid2 P_from_K_proposed = rigid_inverse(rigid_compose(half_turn, K_from_P_true));
+        const PublishedPose door_43_P{0.f, 0.01f, 3.138f};
+        const auto by_proposal = rigid_apply(rigid_inverse(P_from_K_proposed), door_43_P);
+        CHECK(std::abs(by_proposal.cx + 2.53f) < 0.02f and std::abs(by_proposal.cy + 1.93f) < 0.02f);   // the logged (-2.53,-1.93)
+        CHECK(std::hypot(by_proposal.cx - 2.95f, by_proposal.cy - 1.55f) > 6.4f);                       // 6.5 m off the hole
+
+        // The robot drives a constant body twist (0.3 m/s forward, 0.4 rad/s) through the switch; its K pose at t ms.
+        const Rigid2 robot_K0{-0.4f, 2.6f, -1.2f}, twist_per_s{0.f, 0.3f, 0.4f};
+        const auto robot_K = [&](std::uint64_t t) { return rigid_compose(robot_K0, rigid_power(twist_per_s, 1e-3f * float(t))); };
+        const auto robot_P = [&](std::uint64_t t) { return rigid_compose(rigid_inverse(K_from_P_true), robot_K(t)); };
+        const auto fixP = [&](std::uint64_t t) { return std::optional<RobotFix>(RobotFix{robot_P(t), t}); };
+        const auto fixK = [&](std::uint64_t t) { return std::optional<RobotFix>(RobotFix{robot_K(t), t}); };
+
+        // (a) the rename cycle still reads P's LAST block (published before the adopting cycle): hold, then K's first block
+        {
+            AdoptionFramePairing pr;
+            pr.observe(7, "room_4", fixP(1000)); pr.observe(7, "room_4", fixP(1100));
+            pr.observe(7, "room_2", fixP(1150));
+            CHECK(not pr.K_from_P(fixP(1150)).has_value() and pr.has_previous());     // may still be P's: hold
+            pr.observe(7, "room_2", fixK(1250));
+            const auto T = pr.K_from_P(fixK(1250));
+            CHECK(T.has_value() and near(*T, K_from_P_true, 2e-3f));
+            if (T.has_value())
+            {
+                const auto reseated = rigid_apply(*T, door_43_P);
+                CHECK(near_pose(reseated, rigid_apply(K_from_P_true, door_43_P), 0.01f));   // = T(K<-P)·its P-frame pose
+                CHECK(std::hypot(reseated.cx - 2.95f, reseated.cy - 1.55f) < 0.02f);       // at DOOR_2's hole (door_20)
+            }
+            // applied ONCE: after the re-seat the pairing is rebased; later K blocks give no second frame change, so a door
+            // whose numbers are already K's is never moved again
+            pr.rebase("room_2");
+            pr.observe(7, "room_2", fixK(1350));
+            CHECK(not pr.K_from_P(fixK(1350)).has_value());
+        }
+        // (b) the rename cycle already reads a K block: it is still not trusted (it might have been P's); the next one is
+        {
+            AdoptionFramePairing pr;
+            pr.observe(7, "room_4", fixP(1000)); pr.observe(7, "room_4", fixP(1100));
+            pr.observe(7, "room_2", fixK(1200));
+            CHECK(not pr.K_from_P(fixK(1200)).has_value());
+            pr.observe(7, "room_2", fixK(1300));
+            const auto T = pr.K_from_P(fixK(1300));
+            CHECK(T.has_value() and near(*T, K_from_P_true, 2e-3f));
+        }
+        // (c) the same block seen twice is not "newer": no answer until a new stamp
+        {
+            AdoptionFramePairing pr;
+            pr.observe(7, "room_4", fixP(1000));
+            pr.observe(7, "room_2", fixP(1000));
+            CHECK(not pr.K_from_P(fixP(1000)).has_value());
+            pr.observe(7, "room_2", fixK(1100));
+            // one P block only: zero-velocity carry, off by 100 ms of motion (0.04 rad at ~3.5 m of lever + 3 cm forward)
+            const auto T = pr.K_from_P(fixK(1100));
+            CHECK(T.has_value() and std::hypot(T->tx - K_from_P_true.tx, T->ty - K_from_P_true.ty) < 0.2f
+                  and std::abs(T->yaw - K_from_P_true.yaw) < 0.05f);
+        }
+        // (d) nothing read under P (no robot edge then): the pairing cannot answer and says so (the caller falls back)
+        {
+            AdoptionFramePairing pr;
+            pr.observe(7, "room_4", std::nullopt);
+            pr.observe(7, "room_2", fixK(1200)); pr.observe(7, "room_2", fixK(1300));
+            CHECK(not pr.has_previous() and not pr.K_from_P(fixK(1300)).has_value());
+        }
+        // (e) another room id restarts the pairing (a crossing is not an adoption)
+        {
+            AdoptionFramePairing pr;
+            pr.observe(7, "room_4", fixP(1000));
+            pr.observe(9, "room_5", fixK(1100));
+            CHECK(not pr.K_from_P(fixK(1100)).has_value());
+        }
+    }
     std::print("{}\n", fails == 0 ? "ALL PASS" : "FAILED");
     return fails != 0;
 }

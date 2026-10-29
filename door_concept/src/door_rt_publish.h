@@ -14,8 +14,10 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <limits>
 #include <optional>
+#include <string>
 
 #include <Eigen/Dense>
 
@@ -88,5 +90,81 @@ struct Rigid2 { float tx = 0.0f, ty = 0.0f, yaw = 0.0f; };
     const auto q = rigid_apply(B_from_A, Eigen::Vector2f(p.cx, p.cy));
     return {q.x(), q.y(), std::remainder(p.yaw + B_from_A.yaw, 2.0f * static_cast<float>(M_PI))};
 }
+
+/// A ∘ B (apply B, then A).
+[[nodiscard]] inline Rigid2 rigid_compose(const Rigid2& A, const Rigid2& B)
+{
+    const auto t = rigid_apply(A, Eigen::Vector2f(B.tx, B.ty));
+    return {t.x(), t.y(), std::remainder(A.yaw + B.yaw, 2.0f * static_cast<float>(M_PI))};
+}
+/// Δ^s on SE(2) (log, scale, exp): the same twist held for s times as long. s = 0 is the identity, s = 1 is Δ.
+[[nodiscard]] inline Rigid2 rigid_power(const Rigid2& D, float s)
+{
+    const float th = std::remainder(D.yaw, 2.0f * static_cast<float>(M_PI));
+    // V(θ) = [[a, -b], [b, a]], a = sin θ/θ, b = (1 - cos θ)/θ  (→ identity as θ → 0)
+    const auto V = [](float t) -> Eigen::Matrix2f
+    {
+        const float a = std::abs(t) < 1e-4f ? 1.0f - t * t / 6.0f : std::sin(t) / t;
+        const float b = std::abs(t) < 1e-4f ? 0.5f * t : (1.0f - std::cos(t)) / t;
+        return (Eigen::Matrix2f() << a, -b, b, a).finished();
+    };
+    const Eigen::Vector2f rho = V(th).inverse() * Eigen::Vector2f(D.tx, D.ty);
+    const Eigen::Vector2f t = V(s * th) * (s * rho);
+    return {t.x(), t.y(), s * th};
+}
+
+/// The robot's pose in the followed room's frame as one RT block: the pose and the block's stamp (ms).
+struct RobotFix { Rigid2 pose; std::uint64_t stamp_ms = 0; };
+
+/// ★T(K<-P) FROM THE ROBOT, NOT FROM THE PROPOSAL (Task 19, recog_proto6). ltsm's proposal edge carries T(P<-K) built from
+/// ITS best pose mode; room_concept's adoption fit then relocalises the robot against K's outline, and what it publishes
+/// in K is the FIT's pose — 179° / 3.12 m away from ltsm's mode in recog_proto6, so the proposal's frame change moved the
+/// entry mirror door_43 6.5 m off DOOR_2's hole (a 180° turn about (0.21,-0.19) in K). The frame change every consumer
+/// must agree with is the one the robot's published pose implies: the same physical robot, seen in P's frame just before
+/// the switch and in K's frame just after, T(K<-P) = robot_K(t) ∘ robot_P(t)⁻¹. The two blocks are not simultaneous
+/// (room_concept publishes no pose in the cycle that adopts), so the P pose is carried to the K block's stamp by the
+/// body-frame motion of the last two P blocks (constant twist; a body-frame twist is frame-independent).
+///
+/// Which blocks are which frame: every block read while the room still wore P's name is P's (room_concept renames
+/// first and publishes in K only on a later cycle). A block read after the rename may still be P's last one, so K's
+/// first block is the first one STRICTLY NEWER than the newest block read in the cycle the rename was first seen.
+class AdoptionFramePairing
+{
+public:
+    /// One read per cycle of the followed room (id, current name) and the robot's newest block in it (nullopt: unreadable).
+    void observe(std::uint64_t room, const std::string& name, const std::optional<RobotFix>& fix)
+    {
+        if (room != room_) { room_ = room; name_ = name; prev_.reset(); last_.reset(); fence_.reset(); }
+        if (name == name_)
+        {
+            if (fix.has_value() and (not last_.has_value() or fix->stamp_ms > last_->stamp_ms)) { prev_ = last_; last_ = fix; }
+            return;
+        }
+        if (not fence_.has_value() and fix.has_value()) fence_ = fix->stamp_ms;   // the rename's cycle: maybe still P's
+    }
+    /// Robot blocks were read under the previous name: the pairing can (eventually) answer.
+    [[nodiscard]] bool has_previous() const { return last_.has_value(); }
+    /// T(K<-P) once `now` is a block of the new frame; nullopt while it may still be P's (or nothing was read under P).
+    [[nodiscard]] std::optional<Rigid2> K_from_P(const std::optional<RobotFix>& now) const
+    {
+        if (not last_.has_value() or not fence_.has_value() or not now.has_value() or now->stamp_ms <= *fence_)
+            return std::nullopt;
+        Rigid2 robot_P = last_->pose;
+        if (prev_.has_value() and last_->stamp_ms > prev_->stamp_ms)
+        {
+            const float s = static_cast<float>(now->stamp_ms - last_->stamp_ms) / static_cast<float>(last_->stamp_ms - prev_->stamp_ms);
+            robot_P = rigid_compose(last_->pose, rigid_power(rigid_compose(rigid_inverse(prev_->pose), last_->pose), s));
+        }
+        return rigid_compose(now->pose, rigid_inverse(robot_P));
+    }
+    /// The adoption was acted on: the current name is the frame from now on.
+    void rebase(const std::string& name) { name_ = name; prev_.reset(); last_.reset(); fence_.reset(); }
+
+private:
+    std::uint64_t room_ = 0;
+    std::string name_;
+    std::optional<RobotFix> prev_, last_;
+    std::optional<std::uint64_t> fence_;
+};
 
 }  // namespace rc::door

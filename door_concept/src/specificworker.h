@@ -327,8 +327,12 @@ private:
     void drop_looks(const char* why);
     std::uint64_t pending_restore_room_ = 0;
     void latch_recall_names();
-    void reseat_doors_after_adoption(std::uint64_t room_id, const std::vector<rc::door::ProposalView>& props);
+    void reseat_doors_after_adoption(std::uint64_t room_id, const rc::door::Rigid2& K_from_P);
+    std::optional<rc::door::Rigid2> proposal_P_from_K(std::uint64_t room_id, const std::vector<rc::door::ProposalView>& props) const;
+    std::optional<rc::door::RobotFix> robot_fix_in_room(std::uint64_t room_id) const;   // newest robot block in the room's frame
     void step_adoption();   // C2.8: an ACCEPTED ltsm proposal for the current room = a recalled entry under its new name
+    rc::door::AdoptionFramePairing adoption_pairing_;   // T(K<-P) from the robot's pose across the frame switch (Task 19)
+    bool adoption_hold_ = false;                        // accepted, re-seat pending K's first robot block: no fit this cycle
     std::pair<std::uint64_t, std::string> followed_name_{0, {}};   // the followed room's id and the name it wore last cycle
     std::set<std::pair<std::uint64_t, std::string>> adoption_handled_;
     rc::door::RoomNameHistory room_names_;
