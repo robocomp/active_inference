@@ -3559,6 +3559,11 @@ void SpecificWorker::step_adoption()
     const std::string name = room->name();
     if (followed_name_.first != room_node_id_)
         followed_name_ = {room_node_id_, name};
+    if (adoption_handled_.contains({room_node_id_, name}))
+    {
+        followed_name_.second = name;
+        return;                                  // already acted on: stop scanning the graph
+    }
     std::vector<rc::door::ProposalView> props;
     for (const auto& n : G->get_nodes_by_type("metaconcept"))
         if (n.name().starts_with("proposal_")
@@ -3579,8 +3584,9 @@ void SpecificWorker::step_adoption()
     recall_late_names_.insert(name);          // and the provisional name is dead: drop its rows
     std::print("door_concept: [restore] ltsm proposal ACCEPTED for room node {} — '{}' is the remembered '{}'; restoring its "
                "doors and merging the live ones by place\n", room_node_id_, previous, name);
+    if (plan.reseat)
+        reseat_doors_after_adoption(room_node_id_, props);   // BEFORE the restore: the merge by place reads re-seated positions
     enter_room_memory(room_node_id_, false, plan.drop_old ? previous : std::string{});
-    reseat_doors_after_adoption(room_node_id_, props);
 }
 
 // The accepted proposal carries T(P<-K) on its RT edge (P -> proposal). room_concept re-expressed ITS OWN children by
@@ -3614,10 +3620,12 @@ void SpecificWorker::reseat_doors_after_adoption(std::uint64_t room_id, const st
     {
         const auto dn = G->get_node(id);
         if (not dn.has_value()) continue;
-        const auto par = G->get_attrib_by_name<parent_att>(dn.value()).value_or(0);
-        const auto pp  = par == room_id ? room_id
-                       : G->get_node(par).has_value() ? G->get_attrib_by_name<parent_att>(G->get_node(par).value()).value_or(0) : 0;
-        if (par != room_id and pp != room_id) continue;
+        const auto parent_of = [&](std::uint64_t x) -> std::uint64_t
+        {
+            const auto xn = G->get_node(x);
+            return xn.has_value() ? G->get_attrib_by_name<parent_att>(xn.value()).value_or(0) : 0;
+        };
+        if (not rc::door::descends_from(id, room_id, parent_of)) continue;   // door -> wall -> floor -> room, or door -> room
         auto s = inst.model.state();
         const auto leaf = rc::door::rigid_apply(K_from_P, rc::door::PublishedPose{s.cx, s.cy, s.yaw});
         const auto ap   = rc::door::rigid_apply(K_from_P, rc::door::PublishedPose{s.ap_cx, s.ap_cy, s.ap_yaw});
@@ -3627,6 +3635,12 @@ void SpecificWorker::reseat_doors_after_adoption(std::uint64_t room_id, const st
         const auto& bp = inst.ai2_belief.params();
         inst.ai2_belief.set_wall(rc::door::rigid_apply(K_from_P, bp.wall_O),
                                  Eigen::Rotation2Df(K_from_P.yaw) * bp.wall_u, bp.wall_len);
+        // The belief's covariance is over [s, w, h, d] (along/across the wall): wall-relative, so a rigid frame change does not
+        // rotate it. looks_ is re-derived each cycle from the identity table and the live instances; lost_doors_ belong to the
+        // room left behind. Only the last-written cache is room-frame.
+        const auto lw = rc::door::rigid_apply(K_from_P, rc::door::PublishedPose{inst.last_written_cx, inst.last_written_cy, inst.last_written_yaw});
+        if (std::isfinite(inst.last_written_cx) and std::isfinite(inst.last_written_cy) and std::isfinite(inst.last_written_yaw))
+        { inst.last_written_cx = lw.cx; inst.last_written_cy = lw.cy; inst.last_written_yaw = lw.yaw; }
         scene_graph_->write_rt_pose(room_id, inst);
         ++n;
     }

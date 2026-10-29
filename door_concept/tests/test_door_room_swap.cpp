@@ -6,6 +6,7 @@
 #include <clocale>
 #include <cmath>
 #include <print>
+#include <unordered_map>
 #include <string>
 #include <vector>
 #include "../src/door_identity_table.h"
@@ -132,6 +133,24 @@ int main()
         CHECK(std::abs(nw.yaw - (0.3f - 1.5707963f)) < 1e-4f);
         const auto back = rigid_apply(P_from_K, nw);
         CHECK(std::abs(back.cx - old.cx) < 1e-4f and std::abs(back.cy - old.cy) < 1e-4f and std::abs(back.yaw - old.yaw) < 1e-4f);
+    }
+    // C2.8 review fixes: the reseat filter walks door -> wall -> floor -> room; no reseat unless the rename was observed
+    {
+        std::unordered_map<std::uint64_t, std::uint64_t> par{{10, 2}, {2, 3}, {3, 7}, {11, 7}, {12, 99}, {99, 0}};   // 10: door->wall->floor->room 7
+        const auto parent_of = [&](std::uint64_t x) { const auto it = par.find(x); return it == par.end() ? 0ull : it->second; };
+        CHECK(descends_from(10, 7, parent_of));                  // wall-hung door via the floor
+        CHECK(descends_from(11, 7, parent_of));                  // hung directly from the room
+        CHECK(not descends_from(12, 7, parent_of));              // another room's door
+        std::vector<ProposalView> props{{"proposal_room_3", 7, "accepted"}};
+        CHECK(plan_adoption(props, 7, "room_3", "room_4", false).reseat);
+        const auto same = plan_adoption(props, 7, "room_3", "room_3", false);
+        CHECK(same.restore and not same.reseat);                 // accepted, previous == name: beliefs already in K's frame
+        // ordering: the merge by place reads the RE-SEATED live position
+        const Rigid2 K_from_P = rigid_inverse(Rigid2{2.f, -1.f, 1.5707963f});
+        std::vector<IdentityRow> t{row("room_3", "door_7", 2, -1, true)};
+        const auto moved = rigid_apply(K_from_P, PublishedPose{3.f, 1.f, 0.f});          // live door, P-frame (3,1) -> K (2,-1)
+        CHECK(plan_restore(t, "room_3", true, std::vector<LiveDoor>{LiveDoor{"d", Eigen::Vector2f(moved.cx, moved.cy)}}, 0.3f).restore.empty());
+        CHECK(plan_restore(t, "room_3", true, std::vector<LiveDoor>{LiveDoor{"d", Eigen::Vector2f(3.f, 1.f)}}, 0.3f).restore.size() == 1);   // un-reseated would duplicate
     }
     std::print("{}\n", fails == 0 ? "ALL PASS" : "FAILED");
     return fails != 0;

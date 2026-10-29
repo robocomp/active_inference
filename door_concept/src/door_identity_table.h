@@ -440,7 +440,20 @@ enum class FollowKind { NoInformation, Same, First, Change };
 /// under K. `handled` = the (id, name) pairs already acted on, so the restore runs once. The provisional name P is dead
 /// (names are never reused): its rows go, exactly as in the late-recall swap. Rejected / pending: nothing — the room stays
 /// as entered (FRESH). Merging the live doors into K's remembered ones is plan_restore's place test (PlaceLive).
-struct AdoptionPlan { bool restore = false; bool drop_old = false; };
+struct AdoptionPlan { bool restore = false; bool drop_old = false; bool reseat = false; };
+
+/// Does `id` belong to `room_id`? Walk the parent chain (door -> wall -> floor -> room, or door -> room), the same chain
+/// resolve_wall relies on. The hop cap only guards a malformed cyclic graph.
+template <class ParentOf>
+[[nodiscard]] bool descends_from(std::uint64_t id, std::uint64_t room_id, ParentOf parent_of)
+{
+    for (int hop = 0; hop < 8 and id != 0; ++hop)
+    {
+        id = parent_of(id);
+        if (id == room_id) return true;
+    }
+    return false;
+}
 [[nodiscard]] inline AdoptionPlan plan_adoption(std::span<const ProposalView> proposals, std::uint64_t room_id,
                                                 std::string_view room_name, std::string_view previous_name,
                                                 bool already_handled)
@@ -451,6 +464,9 @@ struct AdoptionPlan { bool restore = false; bool drop_old = false; };
     p.restore = std::ranges::any_of(proposals, [&](const ProposalView& v)
     { return v.parent == room_id and v.name == want and v.state == "accepted"; });
     p.drop_old = p.restore and not previous_name.empty() and previous_name != room_name;
+    // The frame changed only if THIS agent saw the rename (same id, new name). A room first resolved after the accept has its
+    // beliefs rebuilt from the graph, already in K's frame: applying T(K<-P) again would move them twice.
+    p.reseat = p.drop_old;
     return p;
 }
 
