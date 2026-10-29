@@ -105,6 +105,38 @@ using RoomAliases = std::map<std::string, std::uint64_t>;
     return cur_name == name;
 }
 
+/// `cross <room>`: ltsm names a door's recall child by the room's name AT THE TIME; the mission may use another name of the
+/// same room (renamed since). `ids` = every name known -> node id (aliases + live rooms). A door whose recall names the
+/// same id as `room` gets `room` added to its recall set, so pick_door matches it.
+inline void expand_recalls(std::vector<DoorFacts> &doors, const RoomAliases &ids, const std::string &room)
+{
+    const auto it = ids.find(room);
+    if (it == ids.end()) return;
+    for (auto &d : doors)
+        for (const auto &r : std::set<std::string>(d.recall_rooms))
+            if (const auto j = ids.find(r); j != ids.end() and j->second == it->second) d.recall_rooms.insert(room);
+}
+
+/// The explore step's per-poll decision, by room ID (the name is no witness: a recognised room is renamed in place).
+enum class ExploreRoom { Inside, Renamed, Outside };
+[[nodiscard]] inline ExploreRoom explore_room_verdict(std::uint64_t step_id, std::uint64_t now_id, const std::string &step_name,
+                                                      const std::string &now_name)
+{
+    if (now_id == 0) return ExploreRoom::Inside;                 // unresolved: not "left"
+    if (now_id != step_id) return ExploreRoom::Outside;
+    return (not now_name.empty() and now_name != step_name) ? ExploreRoom::Renamed : ExploreRoom::Inside;
+}
+
+/// A same-room rename of an explore's scope: swap ONLY the names. The scope CHANGE path of the session (a new room entering
+/// the contest) releases the claim, lock-on and plan; a rename is the same room, so none of that may happen. Swaps only a
+/// scope that is the old name (an empty scope — door passage standing — stays empty). True when swapped.
+inline bool rename_scope(std::string &explore_room, std::string &manager_scope, const std::string &new_name)
+{
+    if (explore_room.empty() or manager_scope != explore_room) return false;
+    explore_room = manager_scope = new_name;
+    return true;
+}
+
 /// The step waits for its door to resolve; it has a budget so it cannot hang (like RoomHold).
 class RelationHold
 {

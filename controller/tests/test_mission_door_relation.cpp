@@ -38,6 +38,23 @@ int main()
         CHECK(not robot_in_room(0, "", al, std::nullopt, "room_4"));           // unresolved is not "in"
         CHECK(room_id_named(al, 3, "room_4") == 3u);                           // a reused name is its live node's
     }
+    {   // the explore poll decision
+        CHECK(explore_room_verdict(7, 7, "room_4", "room_4") == ExploreRoom::Inside);
+        CHECK(explore_room_verdict(7, 7, "room_4", "room_2") == ExploreRoom::Renamed);
+        CHECK(explore_room_verdict(7, 9, "room_4", "room_5") == ExploreRoom::Outside);
+        CHECK(explore_room_verdict(7, 0, "room_4", "") == ExploreRoom::Inside);
+        // a rename keeps the claim: only the names swap (the session's scope-change path is not taken)
+        std::string er = "room_4", scope = "room_4";
+        CHECK(rename_scope(er, scope, "room_2") and er == "room_2" and scope == "room_2");
+        std::string er2 = "room_4", none;   // a door passage stands: no scope, none invented
+        CHECK(not rename_scope(er2, none, "room_2") and none.empty());
+        // cross room_4 finds recall_room_2 (same id) and vice versa
+        RoomAliases ids{{"room_4", 7}, {"room_2", 7}, {"room_9", 3}};
+        std::vector<DoorFacts> ds{door("door_1", {"room_2"}), door("door_2", {"room_9"})};
+        CHECK(not pick_door(node("room_4"), ds).has_value());
+        expand_recalls(ds, ids, "room_4");
+        CHECK(pick_door(node("room_4"), ds) == std::optional<std::string>("door_1"));
+    }
     CHECK(relation_of(node("new")) == DoorRelationKind::New);
     CHECK(relation_of(node("room_2")) == DoorRelationKind::Room);
     CHECK(relation_of(node("door_3")) == DoorRelationKind::None);

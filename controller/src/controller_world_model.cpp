@@ -44,6 +44,8 @@ bool ControllerWorldModel::refresh_graph_state()
     //   polygon, for as long as the node lived (for ever: room_concept keeps a room it left). The rule
     //   (room_resolve.h) moves with the robot; nullopt is "nobody has told me", never a release, so the cached room
     //   is kept through a moment of ambiguity.
+    // every room's name -> id, so a mission naming a room that was renamed ELSEWHERE (not the current one) still resolves
+    for (const auto &n : graph_->get_nodes_by_type("room")) graph_state_.room_aliases[n.name()] = n.id();
     if (const auto room = rc::room::current_room_node(*graph_); room.has_value())
     {
         const std::string old_name = graph_state_.room_name;

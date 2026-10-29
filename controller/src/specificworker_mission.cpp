@@ -501,7 +501,14 @@ std::expected<std::string, std::string> SpecificWorker::resolve_door(const rc::m
 		if (const auto &gs = world_model_.graph_state(); rc::relation_of(r) == rc::DoorRelationKind::New and not gs.prev_room_name.empty()
 		    and std::ranges::none_of(facts, [&](const rc::DoorFacts &f) { return f.recall_rooms.contains(gs.prev_room_name); }))
 			return std::unexpected(std::format("no door of '{}' is known yet to lead back to '{}'", gs.room_name, gs.prev_room_name));
-		if (const auto door = rc::pick_door(r, facts); door.has_value()) return *door;
+		auto expanded = facts;
+		if (rc::relation_of(r) == rc::DoorRelationKind::Room)
+		{
+			rc::RoomAliases ids = world_model_.graph_state().room_aliases;
+			for (const auto &n : G->get_nodes_by_type("room")) ids[n.name()] = n.id();
+			rc::expand_recalls(expanded, ids, r.name);   // recall_<old name> or recall_<new name> of the same room
+		}
+		if (const auto door = rc::pick_door(r, expanded); door.has_value()) return *door;
 		return std::unexpected(std::format("no door of '{}' resolves '{}' yet", world_model_.graph_state().room_name, r.name));
 	}
 	if (r.kind == Ref::Kind::Node)

@@ -1113,6 +1113,15 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
     //   passage's required entrant ⇒ "" ⇒ the old contest. On ENTERING a scope the standing claim is released, exactly
     //   as on a passage start above: a claim on another room's target would otherwise stay Executing with nobody to
     //   drive it, since the selector no longer sees it (the scope removes it before the keep-executing branch).
+    // A same-room RENAME of the explored room (mission_door_relation.h rename_scope): swap the names only, so the scope below
+    // compares equal and the claim / lock-on / plan release further down is NOT taken.
+    if (not pending_explore_rename_.empty())
+    {
+        std::string er = explore_room_, ms = affordance_manager.room_scope();
+        if (rc::rename_scope(er, ms, pending_explore_rename_)) { explore_room_ = er; affordance_manager.set_room_scope(ms); }
+        else if (not explore_room_.empty()) explore_room_ = pending_explore_rename_;
+        pending_explore_rename_.clear();
+    }
     if (const std::string scope = rc::affordance::contest_room_scope(command_explore_, door_required_, explore_room_);
         scope != affordance_manager.room_scope())
     {

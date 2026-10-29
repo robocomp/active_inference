@@ -33,6 +33,7 @@
 #include "stall_judge.h"
 #include "trajectory_controller.h"
 #include "../../common/affordance_manager/affordance_manager.h"
+#include "mission_door_relation.h"
 #include "local_policy/goal_adapter.h"
 #include "local_policy/doorway_hypotheses.h"   // Task 3e: the MAP goal line, the anchor re-init test
 #include "local_policy/navigator.h"
@@ -283,6 +284,9 @@ public:
     /// Mission (Command) mode: the open affordance contest runs only while an `explore` order holds it open — and,
     /// when the order names its room, only for affordances whose target is in that room (affordance_room_scope.h).
     void set_command_explore(bool on, std::string room = {}) { command_explore_ = on; explore_room_ = on ? std::move(room) : std::string{}; }
+    /// The explored room was renamed in place (same node id): follow the name WITHOUT the scope-change path (which releases the
+    /// claim, lock-on and plan). Mission explore's own rename; see rename_scope (mission_door_relation.h).
+    void rename_command_explore_room(const std::string &name) { pending_explore_rename_ = name; }   // applied next cycle, names only
     rc::MissionRunner &mission() { return mission_; }
     // Smooth the selected mission against the SAME grid + footprint predicate the planner drives with,
     // so a smoothed route cannot contain a pose the planner would then refuse. Returns waypoints moved.
@@ -1160,6 +1164,7 @@ private:
     rc::ApproachOrder approach_order_;                              // controller_approach_order.h
     std::string approach_required_, approach_option_;               // its node and side this cycle ("" = none)
     bool command_explore_ = false;                                  // Mission mode: an `explore` order is active
+    std::string pending_explore_rename_;                             // a same-room rename awaiting the next selection cycle
     std::string explore_room_;                                       // …and the room it confines the contest to ("" = none)
     std::optional<Eigen::Vector2f> passage_door_centre_;            // the passage's door node, current room frame
     // ── DOOR ROUTE ([DoorPassage] UseRoute — controller_door_passage.h ROUTE MODE, door_route.h). The passage names the leg;
