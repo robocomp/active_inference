@@ -192,7 +192,6 @@ private:
 		rc::RelationHold relation_hold_;   ///< a cross <room>/new waiting for its door to resolve (mission_door_relation.h)
 		rc::ApproachHold approach_hold_;   ///< a handed-back approach waiting for door_concept's re-offer (mission_approach_hold.h)
 		std::string door_;                 ///< cross / open: the door the passage runs through
-		std::string door_room_;            ///< the room door_ was resolved in (a relation re-resolves only while still there)
 		std::uint64_t target_epoch_ = 0;   ///< go_to: ControllerSession::manual_target_status().epoch it set
 		std::uint64_t motion_id_ = 0;      ///< move: RelativeMotion::View::id it started
 		std::uint64_t approach_id_ = 0;   // approach: the ApproachOrder this leaf started
