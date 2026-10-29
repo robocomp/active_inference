@@ -80,7 +80,11 @@ ok=0; d2=""; d5=""; D5=0; SW0=0; SD0=0; scan_s=0
 for leg in 1 2 3 4 5 6; do
   here=$(room_now); [ -z "$here" ] && here=room_1
   T0=$(now_ms); A0=$(nl ltsm_agent); D0=$(nl door_concept); R0=$(nl room_concept)
-  case $leg in 1|2) d=door_1;;
+  case $leg in
+    1) # the first door: door_1 if it is already born, else scan (look viewpoint / explore) for any door
+       d=door_1; grep -a -q "created instance for node 'door_1'" $L/door_concept.log || d=$(scan_for_door __none__ 1)
+       [ -z "$d" ] && { echo "leg 1: no door born in $here within ${SCAN_CAP_S} s"; break; }; d1=$d;;
+    2) d=${d1:-door_1};;
     3) # room_1's DOOR_0 face: whatever door other than door_1 is live in room_1 (restored or born); scan if none yet
        d=$(scan_for_door door_1 3); [ -z "$d" ] && { echo "leg 3: no door other than door_1 in $here within ${SCAN_CAP_S} s"; break; }; d3=$d;;
     4) SW0=$A0; SD0=$D0; ts=$(date +%s)
