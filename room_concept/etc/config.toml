@@ -1803,6 +1803,9 @@ mountPublish = false
 # The nominal body->camera edge is read from this file (the robot's DSR JSON), never from the graph, so
 # the graph is purely an output and a restart cannot turn last session's answer into this session's
 # prior. Empty = the old graph-anchored behaviour. Path relative to room_concept's working directory.
+# ★ 2026-10-29: consulted ONLY while mountPublish = true (the only case where the graph edge is this loop's own
+#   output). With mountPublish = false the graph edge -- robot_concept's nominal + overlay -- is the nominal, as
+#   for every other agent, so a real or planted camera correction is no longer silently undone here.
 mountDescriptionFile = "../robot_concept/shadow.json"
 # ★ 2026-09-03: the camera extrinsic is now CLOSED-LOOP. The pooled solve is fed back into the mount
 #   on the camera's own axes (the ones J differentiates), the evidence is re-referenced to the mount

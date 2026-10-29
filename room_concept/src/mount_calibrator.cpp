@@ -163,10 +163,16 @@ void MountCalibrator::reconcile_mount_nominal(rc::camcal::Estimator &pool, rc::C
     //     base_desc = E_desc^-1 * E_graph * base_graph,
     // which needs nothing above the camera's own link. Whatever the graph holds then no longer matters:
     // the comparisons below run against the DESCRIPTION, and the graph is purely an output again.
+    // ★ ONLY WHILE mountPublish IS ON (2026-10-29). The ratchet needs this loop to WRITE the edge; with
+    //   mountPublish off the graph edge is robot_concept's alone (nominal + its versioned, world-tagged
+    //   overlay etc/mount_calib_<robot>_<world>.txt), and every other agent reads it. Overriding it here
+    //   made room_concept the one agent that silently undid a camera mount correction -- a real-robot
+    //   one included, measured against the WEBOTS shadow.json -- or a planted Webots error.
     if (auto cn = G->get_node(cam); cn.has_value())
         if (const auto pid = G->get_attrib_by_name<parent_att>(cn.value()); pid.has_value())
             if (auto pn = G->get_node(pid.value()); pn.has_value())
-                if (const auto desc = description_mount(pn->name(), cam); desc.has_value())
+                if (const auto desc = params.IMAGE_EDGE_MOUNT_PUBLISH ? description_mount(pn->name(), cam)
+                                                                      : std::nullopt; desc.has_value())
                     if (const auto e = G->get_edge(pn->id(), cn->id(), "RT"); e.has_value())
                     {
                         const auto rot = G->get_attrib_by_name<rt_rotation_euler_xyz_att>(e.value());

@@ -75,6 +75,7 @@ namespace rc
                                     const std::string& cam);
         /// The parent->camera RT edge as the ROBOT DESCRIPTION states it (ImageEdge.mountDescriptionFile),
         /// as (translation, euler xyz). nullopt when no file is configured or the edge is not in it.
+        /// Used as the nominal only while ImageEdge.mountPublish is on (see reconcile_mount_nominal).
         std::optional<std::pair<Eigen::Vector3f, Eigen::Vector3f>>
             description_mount(const std::string& parent, const std::string& cam) const;
         void reconcile_mount_nominal(rc::camcal::Estimator& pool, rc::CameraIngestor& ing,
