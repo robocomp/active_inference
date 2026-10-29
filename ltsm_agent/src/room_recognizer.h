@@ -118,6 +118,8 @@ private:
     std::vector<std::uint64_t> ids_;            ///< candidate room ids, sorted
     rc::recog::Commit commit_{rc::recog::Commit::State::Entering, -1};
     std::map<std::int64_t, float> base_;               ///< log posterior of each hypothesis (-1 = new) at the last state change
+    std::map<std::int64_t, float> metric_filt_;        ///< the metric log-evidence per hypothesis (-1 = new), filtered over the episode
+    std::int64_t metric_filt_ms_ = 0;                  ///< wall time of the last filter update (0 = none this episode)
     std::uint64_t L_id_ = 0;                    ///< the live room the robot came from
     std::string ep_L_mem_;                      ///< its memory name
     std::string start_;                         ///< path start room (memory) and the passages crossed to L

@@ -189,6 +189,8 @@ void RoomRecognizer::end_episode()
     ids_.clear();
     commit_ = {rc::recog::Commit::State::Entering, -1};
     base_.clear();
+    metric_filt_.clear();
+    metric_filt_ms_ = 0;
     L_id_ = 0;
     ep_L_mem_.clear();
     start_.clear();
@@ -618,6 +620,30 @@ RoomRecognizer::Step RoomRecognizer::step_impl()
     // ── 3. EVIDENCE ──────────────────────────────────────────────────────────────────────────────────────────────────
     float log_new = 0.f;
     auto metric = metric_evidence(q, log_new);
+    // ── 3a. The metric evidence is a FIT OF THE ROOM ESTIMATE AS IT STANDS — one frame of a correlated sequence, not
+    //        independent news. Believed frame by frame, a single transient fit of a half-built layout flipped the posterior
+    //        from 1e-6 to 0.84 after eleven frames that all said "new" (recog_try30: room_3 swapped for room_2 while the
+    //        robot never left room_3). Filter it: each hypothesis's log-evidence is the exponentially weighted mean of its
+    //        frames, the weight of the past decaying with the correlation time of the map evidence. FLAGGED model constant:
+    //        kMetricTauS, the time over which the room estimate's fit decorrelates (the layout refits at ~1 Hz and settles in
+    //        seconds). Not a gate: every frame counts, none decides alone.
+    {
+        constexpr double kMetricTauS = 5.0;
+        const std::int64_t now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                        std::chrono::steady_clock::now().time_since_epoch()).count();
+        const double keep = metric_filt_ms_ == 0 ? 0.0 : std::exp(-double(now_ms - metric_filt_ms_) / 1000.0 / kMetricTauS);
+        metric_filt_ms_ = now_ms;
+        const auto filt = [&](std::int64_t key, float x) -> float {
+            if (not std::isfinite(x)) return x;
+            const auto it = metric_filt_.find(key);
+            const float y = it == metric_filt_.end() ? x : float(keep * it->second + (1.0 - keep) * x);
+            metric_filt_[key] = y;
+            return y;
+        };
+        for (std::size_t k = 0; k < metric.size() and k < ids_.size(); ++k)
+            if (metric[k].available) metric[k].log_inside = filt(std::int64_t(ids_[k]), metric[k].log_inside);
+        log_new = filt(-1, log_new);
+    }
     std::vector<float> area(n, 0.f);
     for (std::size_t k = 0; k < n; ++k)
     {
