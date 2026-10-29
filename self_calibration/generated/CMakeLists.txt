@@ -66,6 +66,12 @@ ADD_EXECUTABLE( trajectory_harvester_test EXCLUDE_FROM_ALL ../tests/trajectory_h
 TARGET_LINK_LIBRARIES( trajectory_harvester_test ai_common::sensor_calib Eigen3::Eigen )
 SET_TARGET_PROPERTIES( trajectory_harvester_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../bin )
 
+# Phase 4 Task 1: 2-D point-to-line scan registration selftest (synthetic, pure Eigen).
+#   make -C build scan_registration_test && ../bin/scan_registration_test
+ADD_EXECUTABLE( scan_registration_test EXCLUDE_FROM_ALL ../tests/scan_registration_test.cpp )
+TARGET_LINK_LIBRARIES( scan_registration_test ai_common::sensor_calib Eigen3::Eigen )
+SET_TARGET_PROPERTIES( scan_registration_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../bin )
+
 # Plan Task 2.3: proposal publisher selftest (pure parts + graph on PRIVATE domain 92).
 #   make -C build proposal_publisher_test && ../bin/proposal_publisher_test
 ADD_EXECUTABLE( proposal_publisher_test EXCLUDE_FROM_ALL ../tests/proposal_publisher_test.cpp )

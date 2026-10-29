@@ -375,7 +375,7 @@ add_library(ai_common::geometry ALIAS ai_common_geometry)
 # =====================================================================================
 # ai_common::sensor_calib -- trajectory harvester of the self_calibration agent. PURE EIGEN (no Qt/DDS/DSR).
 # =====================================================================================
-add_library(ai_common_sensor_calib STATIC sensor_calib/trajectory_harvester.cpp sensor_calib/proposal_publisher.cpp)
+add_library(ai_common_sensor_calib STATIC sensor_calib/trajectory_harvester.cpp sensor_calib/proposal_publisher.cpp sensor_calib/scan_registration.cpp)
 ai_common_defaults(ai_common_sensor_calib)
 target_link_libraries(ai_common_sensor_calib PUBLIC Eigen3::Eigen)
 add_library(ai_common::sensor_calib ALIAS ai_common_sensor_calib)
