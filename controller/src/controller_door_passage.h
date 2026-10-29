@@ -854,7 +854,7 @@ private:
         }
         // ★ BACK TO THE OPEN-WAIT WHEN door_concept SAYS SHUT before the robot is through (the chain's "back to open" rule): the
         //   route ends at P_pre again. Not once this passage opened it (a re-offer then is the flicker, try38).
-        if (step_ == Step::Cross and not opened_ and state_of(G, name_of(Step::Open)) == State::Offered)
+        if (step_ == Step::Cross and not opened_ and not open_now)   // the door READS shut — not merely `open` on offer (its offer is P(shut), 04620a74)
         {
             route_event(out, std::format("[door-route] {}: {} is offered — the door is shut: the route stops at the vantage", door_,
                                          name_of(Step::Open)));

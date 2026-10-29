@@ -3256,7 +3256,26 @@ bool ControllerSession::build_door_route(const ControllerRobotPose &robot_pose, 
         std::println("[door-route] {}: no aperture centre in this frame — driving door_concept's targets as published", leg.door);
     last_plan_failure_.clear();
     door_route_.set_optimizer(make_route_optimizer_config());
-    const bool ok = door_route_.build(robot_pose.pos, plan.waypoints, 1, route_plan_fn(), route_free_fn(),
+    // The hops INTO and OUT OF the aperture are the door's straight axis (design: P_pre → P_ap → P_post on the axis), not a
+    // grid search: with the leaf open toward the robot's side the corridor has ~0.15 m a side and the planner's inflated
+    // footprint refused the hop (recog_try21 leg 2, cross_unreachable). Only robot → P_pre is planned.
+    const Eigen::Vector2f ap_pt = plan.ap;
+    const bool axis_known = plan.has_axis;
+    auto door_plan = [this, ap_pt, axis_known](const Eigen::Vector2f &a, const Eigen::Vector2f &b)
+        -> std::optional<std::vector<Eigen::Vector2f>>
+    {
+        if (axis_known and ((a - ap_pt).norm() < 1e-3f or (b - ap_pt).norm() < 1e-3f))
+        {
+            const int n = std::max(2, static_cast<int>(std::ceil((b - a).norm() / std::max(0.02f, grid_planner_.cell_size()))) + 1);
+            std::vector<Eigen::Vector2f> line;
+            for (int i = 0; i < n; ++i) line.push_back(a + (b - a) * (static_cast<float>(i) / static_cast<float>(n - 1)));
+            return line;
+        }
+        auto r = grid_planner_.plan(a, b);
+        if (not r.has_value()) last_plan_failure_ = grid_planner_.last_failure();
+        return r;
+    };
+    const bool ok = door_route_.build(robot_pose.pos, plan.waypoints, 1, door_plan, route_free_fn(),
                                       params_ ? params_->route_spacing_m : 0.05f, params_ ? params_->route_smoothing_m : 0.40f);
     if (not ok or not door_route_.valid())
     {
