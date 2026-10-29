@@ -3918,6 +3918,15 @@ ControllerSession::LiveReturns ControllerSession::live_returns(const ControllerR
 {
     LiveReturns lr;
     lr.margin = approach_body_.safety_margin();
+    // ★ IN THE DOORWAY THE TEST IS CONTACT, NOT COMFORT (recog_try16/17): following a door route's through-leg, a 1.0 m
+    //   aperture leaves ~0.15 m a side for the 0.7 m body, so the comfort margin put the JAMBS inside it — the net held the
+    //   whole command and the returns' backoff fought the route for minutes. Inside the passage corridor door_concept's
+    //   passage declares (door_passages_, the free channel the route is centred in) the margin is the body itself; outside
+    //   it nothing changes.
+    if (door_route_leg_.has_value() and door_route_leg_->through
+        and std::ranges::any_of(door_passages_, [&](const auto &pass)
+                                { return pass.size() >= 3 and rc::corner_visibility::point_in_polygon(pose.pos, pass); }))
+        lr.margin = 0.f;
     lr.a_dec = anchor_brake_decel(path_controller);
     lr.v_max = params_ != nullptr ? params_->max_adv_speed_mps : 0.35f;
     lr.w_max = params_ != nullptr ? params_->max_rot_speed_rps : 1.0f;
