@@ -81,8 +81,10 @@ std::optional<std::string> SpecificWorker::MissionHost::start_now(const rc::miss
 		if (not door.has_value() and rc::relation_of(ref) != rc::DoorRelationKind::None)
 		{
 			// `cross <room>` / `cross new`: the recall (or the new door) may appear late — hold and re-resolve each poll.
-			std::println("[mission] step {} ({} {}) waits: no door in '{}' resolves yet", leaf.id, op, ref.name, here);
+			std::println("[mission] step {} ({} {}) waits: no door in '{}' resolves yet — exploring the room meanwhile", leaf.id, op,
+			             ref.name, here);
 			relation_hold_.hold(leaf, hold_clock_ms());
+			explore_while_waiting(here);
 			return std::nullopt;
 		}
 		if (not door.has_value()) return door.error();
@@ -182,6 +184,18 @@ void SpecificWorker::MissionHost::ground(const rc::mission::Step &leaf, const st
 	w_.journal_grounding_[leaf.id] = QJsonDocument(text).toJson(QJsonDocument::Compact).toStdString();
 }
 
+// A relation that resolves to no door yet (`cross new` before the door is seen) must not stand still: a door is only born
+// from a view of it (recog_try29 leg 4: the explore step was already satisfied, the hold stood the robot still for 360 s and
+// DOOR_2 was never seen). Explore the room until the door passage takes over (start_door_passage closes the explore).
+void SpecificWorker::MissionHost::explore_while_waiting(const std::string &room)
+{
+	if (room.empty()) return;
+	w_.session_.mission().set_click_target(std::nullopt);
+	w_.clear_manual_target();
+	w_.session_.mission().set_mode(rc::DriveMode::Command);
+	w_.session_.set_command_explore(true, room);
+}
+
 LeafStatus SpecificWorker::MissionHost::poll(const rc::mission::Step &leaf)
 {
 	const std::string &op = leaf.op;
@@ -223,6 +237,7 @@ LeafStatus SpecificWorker::MissionHost::poll(const rc::mission::Step &leaf)
 			if (w_.session_.door_passage().view().door == door_) w_.session_.door_passage().stop();
 			door_.clear();
 			relation_hold_.hold(leaf, hold_clock_ms());
+			explore_while_waiting(w_.world_model_.graph_state().room_name);
 			return {};
 		}
 		const auto v = w_.session_.door_passage().view();

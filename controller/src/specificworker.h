@@ -180,6 +180,7 @@ private:
 		std::optional<std::string> start(const rc::mission::Step &leaf) override;
 		std::optional<std::string> start_now(const rc::mission::Step &leaf);   ///< the start itself (after the room-hold)
 		rc::mission::LeafStatus poll(const rc::mission::Step &leaf) override;
+		void explore_while_waiting(const std::string &room);   ///< a relation with no door yet keeps exploring its room
 		void cancel(const rc::mission::Step &leaf) override;
 		void say(const std::string &text) override;
 		void halt() override;
