@@ -81,6 +81,19 @@ int main()
     expect("2a: retired but no live RT yet -> rule 2",
            resolve_current_room(none, std::vector<RoomFact>{{5, false, Rt::Retired}, {9, true, Rt::None}}), 5);
 
+    // ── resolve_robot_rt_room: the room room_concept's live robot->room RT edge names ──────────────────
+    using rc::room::resolve_robot_rt_room;
+    expect("rt: one Live -> it",
+           resolve_robot_rt_room(std::vector<RoomFact>{{5, false, Rt::Live}, {6, false, Rt::None}}), 5);
+    expect("rt: Live + Retired -> the Live one",
+           resolve_robot_rt_room(std::vector<RoomFact>{{5, false, Rt::Retired}, {9, false, Rt::Live}}), 9);
+    expect("rt: two Live -> nullopt",
+           resolve_robot_rt_room(std::vector<RoomFact>{{5, false, Rt::Live}, {9, false, Rt::Live}}), std::nullopt);
+    expect("rt: none -> nullopt",
+           resolve_robot_rt_room(std::vector<RoomFact>{{5, false, Rt::None}, {9, true, Rt::Retired}}), std::nullopt);
+    expect("rt: proto Live -> it (provisional rooms count)",
+           resolve_robot_rt_room(std::vector<RoomFact>{{5, false, Rt::Retired}, {9, true, Rt::Live}}), 9);
+
     std::printf("%s: %d failure(s)\n", fails == 0 ? "ALL PASS" : "FAILED", fails);
     return fails == 0 ? 0 : 1;
 }

@@ -85,16 +85,13 @@ inline std::optional<std::uint64_t> current_edge_room(DSR::DSRGraph& G)
     return c.room;
 }
 
-/// "The" room, per the rule in the header comment. nullopt = unknown, NEVER a release.
-inline std::optional<std::uint64_t> current_room(DSR::DSRGraph& G)
+/// Every `room` node as a RoomFact: proto flag, and the robot's RT edge to it (None / Live / Retired).
+/// By edge type, source TYPE "robot": no platform node name assumed.
+inline std::vector<RoomFact> room_facts(DSR::DSRGraph& G)
 {
-    const auto cur = current_edges(G);
-    if (cur.count == 1)
-        return cur.room;   // rule 1 needs no room scan
     std::vector<RoomFact> rooms;
     for (const auto& r : G.get_nodes_by_type("room"))
         rooms.push_back({.id = r.id(), .proto = is_proto(G, r.id())});
-    // The robot→room RT edges (rule 2a). By edge type, source TYPE "robot": no platform node name assumed.
     for (const auto& e : G.get_edges_by_type("RT"))
     {
         auto it = std::ranges::find(rooms, e.to(), &RoomFact::id);
@@ -103,7 +100,23 @@ inline std::optional<std::uint64_t> current_room(DSR::DSRGraph& G)
         const bool retired = not G.get_attrib_by_name<valid_att>(e).value_or(true);
         it->rt = retired ? RoomFact::Rt::Retired : RoomFact::Rt::Live;
     }
+    return rooms;
+}
+
+/// "The" room, per the rule in the header comment. nullopt = unknown, NEVER a release.
+inline std::optional<std::uint64_t> current_room(DSR::DSRGraph& G)
+{
+    const auto cur = current_edges(G);
+    if (cur.count == 1)
+        return cur.room;   // rule 1 needs no room scan
+    const auto rooms = room_facts(G);
     return resolve_current_room(cur, rooms);
+}
+
+/// The room whose robot->room RT edge is live (room_concept's decision); nullopt if none or several.
+inline std::optional<std::uint64_t> robot_rt_room(DSR::DSRGraph& G)
+{
+    return resolve_robot_rt_room(room_facts(G));
 }
 
 /// Same, returning the node (convenience for call sites that read attributes off it).

@@ -79,4 +79,15 @@ inline std::optional<std::uint64_t> resolve_current_room(const CurrentEdges& cur
     return std::nullopt;
 }
 
+/// The room whose robot->room RT edge is LIVE — room_concept's own decision of where the robot is (provisional
+/// proto rooms count). nullopt when none, or when more than one is live (ambiguous: report nothing).
+inline std::optional<std::uint64_t> resolve_robot_rt_room(std::span<const RoomFact> rooms)
+{
+    std::optional<std::uint64_t> live;
+    int n_live = 0;
+    for (const auto& r : rooms)
+        if (r.rt == RoomFact::Rt::Live) { ++n_live; live = r.id; }
+    return n_live == 1 ? live : std::nullopt;
+}
+
 }   // namespace rc::room
