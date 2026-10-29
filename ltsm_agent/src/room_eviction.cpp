@@ -133,13 +133,25 @@ std::uint64_t RoomEviction::room_index(const DSR::Node &room) const
     // fallback for a room carrying neither (a graph from before the rename, whose room is plain "room"
     // with no digits; an offline fixture) -- and an unmemoised counter hands the SAME room a different index
     // every time it is asked (seed → r0_, its eviction → r1_), which duplicates it in memory.
+    // ★ room_id, when the room carries it, IS the identity and is read FRESH, never from the memo: an ACCEPTED recognition
+    // renames the provisional room IN PLACE (same node id, room_id rewritten to K's index, room_concept proposal_adoption).
+    // The memo still held P's index, so the adopted room's twin was looked up as r<P>_<K name> — a node that never exists —
+    // and every by-place lookup in it (remembered_hole ⇒ recall, the eviction prefix) came back empty (Task 18,
+    // recog_proto6 leg 5: recall_room_3 retired at the proposal and never re-posted after the accept).
+    if (const auto id = live_->get_attrib_by_name<room_id_att>(room); id.has_value())
+    {
+        if (const auto it = index_of_.find(room.id()); it != index_of_.end() and it->second != id.value())
+            qInfo().noquote() << QString::fromStdString(std::format(
+                "[eviction] room node {} ('{}') now carries room_id {} (memory prefix r{}_ -> r{}_): adopted in place",
+                room.id(), room.name(), id.value(), it->second, id.value()));
+        index_of_.insert_or_assign(room.id(), id.value());
+        return id.value();
+    }
     if (const auto it = index_of_.find(room.id()); it != index_of_.end())
         return it->second;
 
     const auto compute = [&]() -> std::uint64_t
     {
-        if (const auto id = live_->get_attrib_by_name<room_id_att>(room); id.has_value())
-            return id.value();
         if (const auto digits = trailing_index(room.name()); not digits.empty())
         {
             std::uint64_t v = 0;

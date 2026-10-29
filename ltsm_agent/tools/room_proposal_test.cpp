@@ -6,6 +6,7 @@
 // (carry-over, twin dropped) and undone on "rejected", on P gone, or when the robot leaves P before a verdict.
 #include "../src/room_swap.h"
 #include "../src/room_proposal.h"
+#include "../src/room_recall.h"
 #include "../../common/room_resolve/room_resolve.h"
 #include <QCoreApplication>
 #include <clocale>
@@ -425,6 +426,55 @@ int main(int argc, char **argv)
         live->insert_or_assign_edge(ep);
         live_node("room", "room_5", robot_id, 0, 0, 0, 5);
         check(f.sw.step() == ltsm::RoomSwap::Event::Withdrawn and proposals().empty(), "moved to room_5 before a verdict: withdrawn");
+    }
+
+    std::printf("accepted_adoption_recalls_the_way_back\n");
+    {
+        // recog_proto6 leg 5 (Task 18): room_3 -> room_4 promoted (recall_room_3 under door_43), room_4 recognised as room_2,
+        // ACCEPTED; room_concept renames room_4 -> room_2 IN PLACE (same node id, room_id rewritten) and door_concept re-seats
+        // the entry mirror into K's frame. The way back (recall_<previous room> under that door) must be posted again.
+        // Here: L = room_2 (archived), P = room_4 (live, mirror door_9), K = r3_room_3.
+        reset(); build_memory(true); build_live(true);
+        Fix f;
+        ltsm::RoomRecall rc(live, mem, f.ev);
+        rc.step();
+        auto r = live->get_node("recall_room_2");
+        check(r.has_value() and live->get_attrib_by_name<parent_att>(r.value()).value_or(0) == live_M,
+              "promoted P: recall_room_2 posted under its mirror door_9 (P's memory index is memoised here)");
+        check(f.sw.swap(3, pose_k(), live_P), "swap accepted");
+        rc.step();
+        check(not live->get_node("recall_room_2").has_value(), "staged: P's twin is not part of the map, the recall retires");
+        answer("accepted");
+        check(f.sw.step() == ltsm::RoomSwap::Event::Accepted and k_faces_in("passage_5") == 1, "accepted: passage_5 carries a K face");
+        // the carried K face, in K's frame
+        std::optional<DSR::Node> kface;
+        if (const auto pw = mem->get_node("passage_5"); pw.has_value())
+            for (const auto &e : DSR::DSRGraph::get_node_edges_by_type(pw.value(), "match"))
+                if (ltsm::is_descendant(*mem, e.to(), "r3_room_3")) kface = mem->get_node(e.to());
+        const auto TK = kface.has_value() ? mem->get_inner_eigen_api()->get_transformation_matrix("r3_room_3", kface->name()) : std::nullopt;
+        check(TK.has_value(), "the carried face resolves in K");
+        // room_concept: P renamed in place to K's live name, room_id = K's index (proposal_adoption.cpp, one update_node)
+        auto P = live->get_node(live_P).value();
+        P.name("room_3");
+        live->add_or_modify_attrib_local<room_id_att>(P, std::uint64_t{3});
+        bool renamed = false;
+        try { renamed = live->update_node(P); } catch (const std::exception &) { renamed = false; }
+        check(renamed and live->get_node("room_3").has_value() and live->get_node("room_3")->id() == live_P, "P renamed room_4 -> room_3 in place");
+        // door_concept: the mirror re-seated into K's frame, at the hole (the carried face's place)
+        if (TK.has_value())
+        {
+            const double th = std::atan2(TK->linear()(1, 0), TK->linear()(0, 0));
+            put_edge(*live, live_P, live_M, TK->translation().x(), TK->translation().y(), th);
+        }
+        const auto hole = f.ev.remembered_hole(live->get_node(live_M).value());
+        check(hole.has_value() and hole->passage.name() == "passage_5" and kface.has_value() and hole->face.id() == kface->id(),
+              "remembered_hole(door_9) in the adopted room = K's carried face in passage_5 (twin looked up as r3_room_3)");
+        rc.step();
+        r = live->get_node("recall_room_2");
+        check(r.has_value() and live->get_attrib_by_name<parent_att>(r.value()).value_or(0) == live_M,
+              "adopted: recall_room_2 (the way back) posted under the adopted room's door at that hole");
+        rc.step();
+        check(live->get_node("recall_room_2").has_value(), "and it stays on the next cycle");
     }
 
     std::printf("stale_proposal_swept_at_start\n");
