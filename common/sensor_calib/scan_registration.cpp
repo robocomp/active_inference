@@ -123,48 +123,46 @@ ScanRegResult register_scans_2d(const std::vector<Eigen::Vector2f>& ref, const s
             Hfake += w[j] * var_tilt[nn[j]] * u * u.transpose();
         }
     }
-    Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> hes(H - Hfake);
-    // The realised fake information fluctuates around its expectation F by a relative sqrt(2 k / n) (chi-square of
-    // ~n/k independent tilts, each shared by ~k residuals). An axis counts as observed only as far as its measured
-    // information exceeds F by two such sds (a one-sided 97.5% lower bound; the one stated constant, see report).
+    // Information after removing the expected manufactured part (projected to PSD: numerical housekeeping). The
+    // subtracted part is itself random (relative sd sqrt(2k/n): ~n/k independent tilts each shared by ~k residuals),
+    // so each axis' remaining information lambda is shrunk by its reliability lambda^2 / (lambda^2 + s^2),
+    // s = rel * (manufactured information on that axis): continuous, -> lambda when it dominates its noise, -> 0 when
+    // it is within the noise (the posterior-mean weight of a signal of variance lambda^2 in noise s^2).
     const double rel = std::sqrt(2.0 * k / std::max(wsum, 1.0));
-    Eigen::Vector3d lam = hes.eigenvalues();
-    std::vector<bool> observed(3, true);
-    for (int m = 0; m < 3; ++m)
+    Eigen::Matrix3d Hc;
     {
-        const Eigen::Vector3d v = hes.eigenvectors().col(m);
-        lam[m] -= 2.0 * rel * v.dot(Hfake * v);
-        observed[m] = lam[m] > 1e-12 * H.trace();                       // numerical positivity only
+        Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> e(H - Hfake);
+        Eigen::Vector3d lam = e.eigenvalues().cwiseMax(0.0);
+        for (int m = 0; m < 3; ++m)
+        {
+            const Eigen::Vector3d v = e.eigenvectors().col(m);
+            const double sm = rel * v.dot(Hfake * v);
+            lam[m] *= lam[m] * lam[m] / std::max(lam[m] * lam[m] + sm * sm, 1e-300);
+        }
+        Hc = e.eigenvectors() * lam.asDiagonal() * e.eigenvectors().transpose();
     }
-    // Unobserved axes: no information beyond the extent of the scan, so their variance is that extent squared
-    // (finite, so it cannot leak into the other axes through the ref-correlation sandwich below).
-    double extent2 = 0.0;
+    // Reference-noise correlation. A reference point sits in ~k fitted lines, so it shifts all their residuals
+    // together, each by 1/k: M = sum_i a_i a_i^T, a_i = sum_{j: i in N(nn_j)} w_j J_j / k. The measurement then has
+    // covariance sigma^2 (H^-1 + H^-1 M H^-1) = sigma^2 H (H+M)^-1 H inverted, i.e. information H (H+M)^-1 H / sigma^2
+    // (written this way it stays finite on an axis with H = 0).
+    // Gaussian prior on the registration pose: variance (scan extent)^2 per translation, (1 rad)^2 for yaw, i.e. we
+    // know nothing beyond the scene scale. In H units (H = sigma^2 x information) the prior adds sigma^2 P0^-1.
+    double extent2 = 1e-12;
     for (const auto& p : cur) extent2 = std::max(extent2, double(p.squaredNorm()));
-    Eigen::Matrix3d Hi = Eigen::Matrix3d::Zero(), Vbig = Eigen::Matrix3d::Zero();
-    for (int m = 0; m < 3; ++m)
-    {
-        const Eigen::Vector3d v = hes.eigenvectors().col(m);
-        if (observed[m]) Hi += v * v.transpose() / lam[m]; else Vbig += extent2 * v * v.transpose();
-    }
-    const bool pd = observed[0] or observed[1] or observed[2];
+    const Eigen::Matrix3d Pinv = sig2 * Eigen::Vector3d(1.0 / extent2, 1.0 / extent2, 1.0).asDiagonal().toDenseMatrix();
+    std::vector<Eigen::Vector3d> a(ref.size(), Eigen::Vector3d::Zero());
+    for (size_t j = 0; j < cur.size(); ++j)
+        for (int m = 0; m < k; ++m) a[nbr[size_t(nn[j]) * k + m]] += w[j] * J[j] / k;
+    Eigen::Matrix3d M = Eigen::Matrix3d::Zero();
+    for (const auto& ai : a) M += ai * ai.transpose();
+    const Eigen::Matrix3d Hhat = Hc * (Hc + M + Pinv).inverse() * Hc + Pinv;
+    Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> hes(0.5 * (Hhat + Hhat.transpose()));
+    const Eigen::Matrix3d Hi = hes.eigenvectors() * hes.eigenvalues().cwiseInverse().asDiagonal() * hes.eigenvectors().transpose();
+    const bool pd = hes.eigenvalues().minCoeff() > 0.0 and Hi.allFinite();
     out.xyt = x; out.inlier_share = pi_in; out.n_used = int(std::llround(wsum));
     out.rms = wsum > 0.0 ? std::sqrt(wr2 / wsum) : 0.0;
-    if (wsum > 0.0 and pd)
-    {
-        // Covariance = propagation of the range noise of BOTH scans. The residual is the distance to the line fitted
-        // through the k neighbours of the nearest reference point, so the reference noise enters it as the MEAN of k
-        // perpendicular errors (sigma^2/k) and the residual variance is sigma^2 (1 + 1/k) with one sensor for both
-        // scans. The cur part is independent across residuals: sigma^2 H^-1. The ref part is a CORRELATION: ref
-        // point i sits in the k-neighbourhood of ~k lines, so it shifts all their residuals together, each by 1/k.
-        // Pose-error contribution: sigma^2 H^-1 (sum_i a_i a_i^T) H^-1, a_i = sum_{j: i in N(nn_j)} w_j J_j / k.
-        std::vector<Eigen::Vector3d> a(ref.size(), Eigen::Vector3d::Zero());
-        for (size_t j = 0; j < cur.size(); ++j)
-            for (int m = 0; m < k; ++m) a[nbr[size_t(nn[j]) * k + m]] += w[j] * J[j] / k;
-        Eigen::Matrix3d M = Eigen::Matrix3d::Zero();
-        for (const auto& ai : a) M += ai * ai.transpose();
-        out.cov = sig2 * (Hi + Hi * M * Hi) + Vbig;
-    }
-    out.ok = converged and pd;
+    if (wsum > 0.0 and pd) out.cov = sig2 * Hi;
+    out.ok = converged and pd;   // converged + finite: consumers must still read cov (an axis may be uninformed)
     return out;
 }
 }  // namespace sc::calib
