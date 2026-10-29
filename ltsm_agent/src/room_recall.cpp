@@ -130,52 +130,27 @@ int RoomRecall::step()
         const auto room = room_of(*live_, door);
         if (not room.has_value()) continue;
 
-        // This door's FACE in memory, by the same prefix the eviction wrote it under.
-        auto face = mem_->get_node(ev_.memory_prefix(room.value()) + door.name());
-        // ★ BY PLACE WHEN NOT BY NAME (2026-10-12). A re-entered room comes back with its crossed door RECREATED by
-        //   door_concept under a new name (try28: door_37 in room_1, memory face r1_door_19), so the name lookup misses
-        //   and no recall was posted for the room behind it — room_2 was then surveyed as a new room. A re-entered room
-        //   is published in its own remembered frame, so the live door and the memory faces of that room are directly
-        //   comparable: take the face of this room's memory copy whose aperture contains the live door's centre.
-        if (not face.has_value())
-            if (const auto mself = mem_->get_node(ev_.memory_prefix(room.value()) + room->name()); mself.has_value())
-                if (const auto Tl = live_->get_inner_eigen_api()->get_transformation_matrix(room->name(), door.name()); Tl.has_value())
-                {
-                    const double half_w = 0.5 * live_->get_attrib_by_name<width_m_att>(door).value_or(1.f);
-                    double best = half_w;
-                    for (const auto &pass : mem_->get_nodes_by_type("metaconcept"))
-                        for (const auto &e : DSR::DSRGraph::get_node_edges_by_type(pass, "match"))
-                        {
-                            const auto f = mem_->get_node(e.to());
-                            if (not f.has_value()) continue;
-                            const auto fr = room_of(*mem_, f.value());
-                            if (not fr.has_value() or fr->id() != mself->id()) continue;
-                            const auto Tm = mie->get_transformation_matrix(mself->name(), f->name());
-                            if (not Tm.has_value()) continue;
-                            if (const double d = (Tm->translation() - Tl->translation()).head<2>().norm(); d < best)
-                            { best = d; face = f; }
-                        }
-                }
-        if (not face.has_value()) continue;
+        // The hole memory already knows behind this door, BY PLACE (RoomEviction::remembered_hole): the door's NAME is a
+        // label door_concept re-makes at every crossing (try28: door_37 in room_1 for the face r1_door_19), never the key.
+        // A re-entered room is published in its own remembered frame, so the live door and its room's memory faces are
+        // directly comparable; the name is consulted only when the door's pose in its room does not resolve.
+        const auto hole = ev_.remembered_hole(door);
+        if (not hole.has_value()) continue;
+        const auto &face = hole->face;
 
-        // The passage holding that face, and its OTHER face: one in a DIFFERENT room. A passage written before
-        // 2026-10-18 can carry two faces of the same room (try53: r1_door_1 and r1_door_1_entry), and taking the
-        // sibling made room_1 the room behind room_1's own door, so no recall_room_2 was ever posted.
+        // The passage's OTHER face: one in a DIFFERENT room. A passage written before 2026-10-18 can carry two faces of
+        // the same room (try53: r1_door_1 and r1_door_1_entry), and taking the sibling made room_1 the room behind
+        // room_1's own door, so no recall_room_2 was ever posted.
         std::optional<DSR::Node> other;
-        const auto face_room = room_of(*mem_, face.value());
+        const auto face_room = room_of(*mem_, face);
         if (face_room.has_value() and is_staged_room(*mem_, face_room.value())) continue;
-        for (const auto &pass : mem_->get_nodes_by_type("metaconcept"))
-        {
-            const auto m = DSR::DSRGraph::get_node_edges_by_type(pass, "match");
-            if (std::ranges::none_of(m, [&](const auto &e) { return e.to() == face->id(); })) continue;
-            for (const auto &e : m)
-                if (e.to() != face->id())
-                    if (const auto f = mem_->get_node(e.to()); f.has_value())
-                        if (const auto fr = room_of(*mem_, f.value());
-                            fr.has_value() and not is_staged_room(*mem_, fr.value())
-                            and (not face_room.has_value() or fr->id() != face_room->id()))
-                            other = f;
-        }
+        for (const auto &e : DSR::DSRGraph::get_node_edges_by_type(hole->passage, "match"))
+            if (e.to() != face.id())
+                if (const auto f = mem_->get_node(e.to()); f.has_value())
+                    if (const auto fr = room_of(*mem_, f.value());
+                        fr.has_value() and not is_staged_room(*mem_, fr.value())
+                        and (not face_room.has_value() or fr->id() != face_room->id()))
+                        other = f;
         if (not other.has_value()) continue;
         const auto mroom = room_of(*mem_, other.value());
         if (not mroom.has_value() or is_staged_room(*mem_, mroom.value())) continue;
@@ -221,7 +196,7 @@ int RoomRecall::step()
             id = ins.value();
             qInfo().noquote() << QString::fromStdString(std::format(
                 "[recall] {} posted under {}: behind it lies remembered {} (passage face {} ↔ {})",
-                rname, door.name(), mroom->name(), face->name(), other->name()));
+                rname, door.name(), mroom->name(), face.name(), other->name()));
         }
         else
             live_->update_node(node.value());

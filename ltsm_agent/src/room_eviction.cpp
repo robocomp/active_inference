@@ -191,7 +191,9 @@ std::map<std::string, DSR::Attribute> RoomEviction::rt_attrs(const Mat::RTMat &t
 std::optional<std::uint64_t> RoomEviction::twin(const DSR::Node &src, std::uint64_t mem_parent_id,
                                                 const std::string &prefix, std::uint64_t room_idx)
 {
-    const std::string mem_name = prefix + src.name();
+    // A door whose plain memory name belongs to ANOTHER hole was given its own name (guard_recycled_door_names).
+    const auto renamed = mem_name_of_.find(src.id());
+    const std::string mem_name = renamed != mem_name_of_.end() ? renamed->second : prefix + src.name();
 
     // Attributes come over wholesale — including timestamp_creation, so memory keeps the node's
     // REAL birth rather than the instant it was archived.
@@ -647,6 +649,12 @@ Outcome RoomEviction::evict(const Candidate &cand)
     const std::uint64_t mem_parent = mem_root->id();
     const auto root_edge = rt_attrs(Mat::RTMat::Identity());
 
+    // A door NAME is a label, not the hole: a memory face carrying this door's name may be another hole (a name
+    // door_concept recycled). Such a door is archived under its own name, so the copy never overwrites that face.
+    mem_name_of_.clear();
+    guard_recycled_door_names(cand.old_room_id, old_prefix);
+    if (not new_held) guard_recycled_door_names(cand.new_room_id, new_prefix);
+
     IdMap map;
     if (not copy_subtree(cand.old_room_id, mem_parent, old_prefix, old_idx, root_edge, map, out))
         return out;
@@ -746,7 +754,9 @@ Outcome RoomEviction::evict(const Candidate &cand)
             const auto mem_face = map.find(chosen->id());
             if (mem_face != map.end())
             {
-                out.mem_door_old = old_prefix + chosen->name();
+                const std::string face_name = mem_->get_node(mem_face->second).transform([](const auto &n) { return n.name(); })
+                                                  .value_or(old_prefix + chosen->name());
+                out.mem_door_old = face_name;
 
                 // Reuse the passage this face already belongs to; only mint one the first time.
                 std::uint64_t doorway_id = 0;
@@ -763,7 +773,7 @@ Outcome RoomEviction::evict(const Candidate &cand)
                 {
                     auto mie = mem_->get_inner_eigen_api();
                     const std::string mroom = old_prefix + cand.old_room_name;
-                    const auto here = mie->get_transformation_matrix(mroom, old_prefix + chosen->name());
+                    const auto here = mie->get_transformation_matrix(mroom, face_name);
                     const double half_w = 0.5 * live_->get_attrib_by_name<width_m_att>(*chosen).value_or(1.f);
                     double best_d = half_w;
                     std::uint64_t stale_face = 0;
@@ -783,12 +793,38 @@ Outcome RoomEviction::evict(const Candidate &cand)
                         const auto stale = mem_->get_node(stale_face);
                         qInfo().noquote() << QString::fromStdString(std::format(
                             "[eviction] {} is the hole memory already knows as {} ({:.2f} m apart) — same passage, face replaced",
-                            old_prefix + chosen->name(), stale.has_value() ? stale->name() : std::string("?"), best_d));
+                            face_name, stale.has_value() ? stale->name() : std::string("?"), best_d));
                         mem_->delete_node(stale_face);
                     }
                 }
 
-                if (doorway_id == 0) doorway_id = mint_passage();
+                // ★ ONE IDENTITY LIVE AND IN MEMORY (2026-10-29). The crossed hole has a LIVE passage (PassageLive paired
+                //   the door with its entry mirror at the crossing). That passage either took memory's name by place
+                //   (remembered_hole) — then memory holds it and it IS this hole — or was numbered by the shared
+                //   next_passage_index, a name no memory passage carries; memory mints it under that same name.
+                std::string live_name;
+                for (const auto id : {chosen->id(), cand.new_door_id})
+                    if (id != 0 and live_name.empty())
+                        if (const auto lp = live_passage_of(*live_, id); lp.has_value()) live_name = lp->name();
+                if (doorway_id == 0 and not live_name.empty())
+                    if (const auto m = mem_->get_node(live_name);
+                        m.has_value() and mem_->get_attrib_by_name<object_subtype_att>(m.value()).value_or(std::string{}) == "passage")
+                    {
+                        doorway_id = m->id();
+                        qInfo().noquote() << QString::fromStdString(std::format(
+                            "[eviction] {} is the hole memory knows as {} (the live passage's name) — same passage",
+                            face_name, live_name));
+                        // ONE FACE PER ROOM PER PASSAGE: the face just written replaces this room's older face of it.
+                        const std::string mroom = old_prefix + cand.old_room_name;
+                        for (const auto &e : DSR::DSRGraph::get_node_edges_by_type(m.value(), "match"))
+                            if (e.to() != mem_face->second and is_descendant(e.to(), mroom))
+                                mem_->delete_node(e.to());
+                    }
+                if (doorway_id == 0) doorway_id = mint_passage(live_name);
+                if (const auto dwn = mem_->get_node(doorway_id); dwn.has_value() and not live_name.empty() and dwn->name() != live_name)
+                    qWarning().noquote() << QString::fromStdString(std::format(
+                        "[eviction] ⚠ the crossed hole is {} in memory but its live passage is {} — memory's name stands",
+                        dwn->name(), live_name));
 
                 if (doorway_id != 0)
                 {
@@ -852,7 +888,15 @@ Outcome RoomEviction::evict(const Candidate &cand)
                     if (out.mem_door_new.empty() and not new_held)
                         if (const auto nroom = mem_->get_node(out.mem_new_room_id); nroom.has_value())
                         {
-                            const std::string fname = new_prefix + chosen->name() + std::string(kDerivedFaceSuffix);
+                            // The derived face of THIS passage only: a namesake held by another passage is another hole
+                            // (a recycled door name), never re-used — this face gets its own name instead.
+                            const auto in_other_passage = [&](std::uint64_t id) {
+                                return std::ranges::any_of(passages(), [&](const DSR::Node &p) {
+                                    return p.id() != doorway_id and mem_->get_edge(p.id(), id, "match").has_value(); }); };
+                            std::string fname = new_prefix + chosen->name() + std::string(kDerivedFaceSuffix);
+                            for (int k = 1; ; ++k)
+                                if (const auto ex = mem_->get_node(fname); not ex.has_value() or not in_other_passage(ex->id())) break;
+                                else fname = std::format("{}{}_h{}{}", new_prefix, chosen->name(), k, kDerivedFaceSuffix);   // still ends _entry
                             std::optional<std::uint64_t> fid;
                             if (const auto existing = mem_->get_node(fname); existing.has_value())
                                 fid = existing->id();
@@ -936,17 +980,137 @@ Outcome RoomEviction::evict(const Candidate &cand)
 }
 
 
-// A fresh abstract passage node (type `metaconcept`, subtype "passage"), numbered after the highest existing one. 0 on failure.
-std::uint64_t RoomEviction::mint_passage()
+//////////////////////////////////////////////////////////////////////////////////////////////////
+// Passage identity (room_eviction.h, PASSAGE IDENTITY)
+//////////////////////////////////////////////////////////////////////////////////////////////////
+std::optional<std::uint64_t> passage_index(std::string_view name)
 {
-        std::uint64_t n = 0;
-        for (const auto &dw : passages())
-            if (const auto digits = trailing_index(dw.name()); not digits.empty())
+    constexpr std::string_view prefix = "passage_";
+    if (not name.starts_with(prefix) or name.size() == prefix.size()) return {};
+    std::uint64_t v = 0;
+    // from_chars, never stoull: es_ES locale (CLAUDE.md).
+    if (const auto [ptr, ec] = std::from_chars(name.data() + prefix.size(), name.data() + name.size(), v);
+        ec == std::errc{} and ptr == name.data() + name.size())
+        return v;
+    return {};
+}
+
+std::uint64_t next_passage_index(DSR::DSRGraph &live, DSR::DSRGraph *mem)
+{
+    // Every metaconcept NAMED passage_N counts, staged or not, whatever its subtype: the number is a name slot, and a
+    // name taken in either graph must never be handed to a different hole.
+    std::uint64_t n = 0;
+    const auto scan = [&n](DSR::DSRGraph &g)
+    {
+        for (const auto &p : g.get_nodes_by_type("metaconcept"))
+            if (const auto i = passage_index(p.name()); i.has_value()) n = std::max(n, i.value() + 1);
+    };
+    scan(live);
+    if (mem != nullptr) scan(*mem);
+    return n;
+}
+
+std::optional<DSR::Node> live_passage_of(DSR::DSRGraph &live, std::uint64_t door_id)
+{
+    for (const auto &p : live.get_nodes_by_type("metaconcept"))
+        if (live.get_attrib_by_name<object_subtype_att>(p).value_or(std::string{}) == "passage"
+            and live.get_edge(p.id(), door_id, "match").has_value())
+            return p;
+    return {};
+}
+
+void RoomEviction::guard_recycled_door_names(std::uint64_t live_room_id, const std::string &prefix)
+{
+    const auto room = live_->get_node(live_room_id);
+    if (not room.has_value()) return;
+    std::unordered_set<std::uint64_t> faces;
+    for (const auto &p : passages())
+        for (const auto &e : DSR::DSRGraph::get_node_edges_by_type(p, "match")) faces.insert(e.to());
+    auto ie = live_->get_inner_eigen_api();
+    for (const auto &door : live_->get_nodes_by_type("object"))
+    {
+        if (not is_door(*live_, door) or not ltsm::is_descendant(*live_, door.id(), room->name())) continue;
+        const std::string plain = prefix + door.name();
+        const auto namesake = mem_->get_node(plain);
+        if (not namesake.has_value() or not faces.contains(namesake->id())) continue;
+        // Without a pose the name is the only key there is: keep it.
+        if (not ie->get_transformation_matrix(room->name(), door.name()).has_value()) continue;
+        const auto hole = remembered_hole(door);
+        if (hole.has_value() and hole->face.id() == namesake->id()) continue;   // same hole, same name
+        std::string name;
+        if (hole.has_value() and hole->face.name().starts_with(plain + "_h"))
+            name = hole->face.name();                                            // this hole's own earlier renamed face
+        else
+            for (int k = 1; name.empty(); ++k)
+                if (const auto c = std::format("{}_h{}", plain, k); not mem_->get_node(c).has_value()) name = c;
+        mem_name_of_[door.id()] = name;
+        qInfo().noquote() << QString::fromStdString(std::format(
+            "[eviction] {} names ANOTHER hole in memory (not at {}'s place): archived as {}", plain, door.name(), name));
+    }
+}
+
+std::optional<RememberedHole> RoomEviction::remembered_hole(const DSR::Node &live_door) const
+{
+    // The live room the door belongs to (a door hangs from a wall, an entry mirror from the room itself).
+    std::optional<DSR::Node> room;
+    for (auto cur = std::optional<DSR::Node>(live_door); cur.has_value() and not room.has_value();)
+    {
+        if (cur->type() == "room") { room = cur; break; }
+        const auto p = live_->get_attrib_by_name<parent_att>(cur.value());
+        if (not p.has_value() or p.value() == cur->id()) break;
+        cur = live_->get_node(p.value());
+    }
+    if (not room.has_value()) return {};
+    const std::string prefix = memory_prefix(room.value());
+    const auto twin = mem_->get_node(prefix + room->name());
+    if (not twin.has_value() or is_staged_room(*mem_, twin.value())) return {};
+
+    const auto all = passages();
+    const auto passage_of_face = [&](std::uint64_t face_id) -> std::optional<DSR::Node>
+    {
+        for (const auto &p : all)
+            for (const auto &e : DSR::DSRGraph::get_node_edges_by_type(p, "match"))
+                if (e.to() == face_id) return p;
+        return {};
+    };
+
+    // BY PLACE: the room is published in its own remembered frame, so T(room <- door) live and T(twin <- face) in memory
+    // are the same quantity for the same hole.
+    if (const auto Tl = live_->get_inner_eigen_api()->get_transformation_matrix(room->name(), live_door.name()); Tl.has_value())
+    {
+        auto mie = mem_->get_inner_eigen_api();
+        double best = 0.5 * live_->get_attrib_by_name<width_m_att>(live_door).value_or(1.f);
+        std::optional<RememberedHole> hit;
+        for (const auto &p : all)
+            for (const auto &e : DSR::DSRGraph::get_node_edges_by_type(p, "match"))
             {
-                std::uint64_t v = 0;
-                if (std::from_chars(digits.data(), digits.data() + digits.size(), v).ec == std::errc{})
-                    n = std::max(n, v + 1);
+                const auto f = mem_->get_node(e.to());
+                if (not f.has_value() or not ltsm::is_descendant(*mem_, f->id(), twin->name())) continue;
+                const auto Tm = mie->get_transformation_matrix(twin->name(), f->name());
+                if (not Tm.has_value()) continue;
+                if (const double d = (Tm->translation() - Tl->translation()).head<2>().norm(); d < best)
+                {
+                    best = d;
+                    hit = RememberedHole{p, f.value(), d};
+                }
             }
+        return hit;   // the place decides: a name hit elsewhere would be a different hole under a recycled label
+    }
+
+    // The pose does not resolve: the name is the only key left (how eviction / the seed wrote the face).
+    if (const auto f = mem_->get_node(prefix + live_door.name()); f.has_value())
+        if (const auto p = passage_of_face(f->id()); p.has_value())
+            return RememberedHole{p.value(), f.value(), 0.};
+    return {};
+}
+
+// A fresh abstract passage node (type `metaconcept`, subtype "passage"). 0 on failure.
+std::uint64_t RoomEviction::mint_passage(std::string_view name)
+{
+        // The hole's live identity when it has one and memory has not used that name; otherwise THE ONE numbering.
+        std::string pname(name);
+        if (pname.empty() or not passage_index(pname).has_value() or mem_->get_node(pname).has_value())
+            pname = std::format("passage_{}", next_passage_index());
         // TYPE `metaconcept`, SUBTYPE "passage". Its registered comment in cortex is the
         // spec: "a concept OVER concepts (level-2): an arrangement/grouping that BELIEVES
         // in a relation among other nodes rather than in a solid body of its own" — an
@@ -959,7 +1123,7 @@ std::uint64_t RoomEviction::mint_passage()
         // free to avoid.
         DSR::Node dw;
         dw.type("metaconcept");
-        dw.name(std::format("passage_{}", n));
+        dw.name(pname);
         mem_->add_or_modify_attrib_local<object_subtype_att>(dw, std::string("passage"));
         mem_->add_or_modify_attrib_local<level_att>(dw, 0);
         if (const auto id = mem_->insert_node(dw); id.has_value())

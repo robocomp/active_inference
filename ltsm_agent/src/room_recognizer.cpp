@@ -507,35 +507,13 @@ RoomRecognizer::Step RoomRecognizer::step_impl()
     }
     if (not D.has_value()) return ineligible(out, P->name(), "no crossed door found in the current room");
 
-    // The crossed door must have NO passage in memory. Its face is looked up by name (how eviction/seed wrote it) and, when
-    // door_concept re-made the door under a new name, by place: the passage face of L whose aperture holds D's centre.
     L_mem = cur_mem_;
-    const std::string face_name = ev_.memory_prefix(L.value()) + D->name();
-    const auto passages = passages_of(*mem_);
-    const auto face = mem_->get_node(face_name);
-    bool known_door = false;
-    // THE PLACE DECIDES, not the name: door_concept re-uses door names (an entry door renamed door_2 frees "door_7" for a NEW
-    // doorway), so a face found by name may be a different hole (recog_try12: the new door_7 matched the entry door's face
-    // r3_door_7 => known => room_4 never examined). The same hole <=> D's centre lies inside a remembered face's aperture
-    // (half the door width: a point inside a segment, a membership test, not a tuning constant). The name is the fallback
-    // only when D's pose in L is unresolvable.
-    if (const auto TD = ie->get_transformation_matrix(L->name(), D->name()); TD.has_value())
-    {
-        const double half_w = 0.5 * live_->get_attrib_by_name<width_m_att>(D.value()).value_or(1.f);
-        auto mie = mem_->get_inner_eigen_api();
-        for (const auto &p : passages)
-            for (const auto fid : p.faces)
-            {
-                const auto f = mem_->get_node(fid);
-                if (not f.has_value()) continue;
-                const auto fr = owning_room(*mem_, f.value());
-                if (not fr.has_value() or fr->name() != L_mem) continue;
-                if (const auto Tm = mie->get_transformation_matrix(L_mem, f->name()); Tm.has_value())
-                    if ((Tm->translation() - TD->translation()).head<2>().norm() < half_w) known_door = true;
-            }
-    }
-    else if (face.has_value())
-        known_door = std::ranges::any_of(passages, [&](const auto &p) { return std::ranges::contains(p.faces, face->id()); });
+    // The crossed door must have NO passage in memory. THE PLACE DECIDES, not the name: door_concept re-makes door nodes
+    // under new names (recog_try12: a new door_7 matched the entry door's face r3_door_7 by name => known => room_4 never
+    // examined). RoomEviction::remembered_hole is the one resolver every consumer uses: D's centre inside a remembered
+    // face's aperture in L's twin (half the door width: a point inside a segment, a membership test, not a tuning
+    // constant); the name is the fallback only when D's pose in L is unresolvable.
+    const bool known_door = ev_.remembered_hole(D.value()).has_value();
     if (known_door) return ineligible(out, P->name(), std::format("the crossed door {} is already a passage in memory", D->name()));
     if (prov_id_ != P->id())
     {

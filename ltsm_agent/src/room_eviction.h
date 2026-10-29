@@ -53,6 +53,30 @@ std::optional<Mat::RTMat> seam_through_passage(DSR::DSRGraph &mem, const std::st
 /// twin), never a candidate, never recalled, never part of a passage consumers read.
 bool is_staged_room(DSR::DSRGraph &g, const DSR::Node &room);
 
+// ── PASSAGE IDENTITY (2026-10-29, door-identity design part 2) ─────────────────────────────────────────────────────
+// A door's NAME is door_concept's uniqueness slot among LIVE nodes, re-made on every crossing; it is a label, never the
+// identity of the hole. The identity of a physical doorway is its `passage_N`, the same N live and in memory: ONE
+// numbering (next_passage_index) for both graphs, and a live passage of a hole memory already knows takes memory's name.
+
+/// passage_<N> → N; nullopt for any other name.
+std::optional<std::uint64_t> passage_index(std::string_view name);
+
+/// THE ONE passage numbering: 1 + the highest N over every `passage_N` metaconcept in `live` AND in `mem` (0 when there
+/// is none). Every passage minted anywhere — PassageLive, RoomEviction::mint_passage, RoomSwap's carry-over — takes its
+/// number here, so two holes can never be handed the same name by two counters. `mem` may be null (live only).
+std::uint64_t next_passage_index(DSR::DSRGraph &live, DSR::DSRGraph *mem);
+
+/// The LIVE passage (metaconcept, subtype "passage") holding a `match` edge to this live door, if any.
+std::optional<DSR::Node> live_passage_of(DSR::DSRGraph &live, std::uint64_t door_id);
+
+/// A hole memory already knows: the passage and the remembered face of it.
+struct RememberedHole
+{
+    DSR::Node passage;
+    DSR::Node face;
+    double    distance = 0.;   ///< metres between the live door and that face, in the room's frame (0 when matched by name)
+};
+
 /// The two rooms the robot is holding at the instant of the hand-over.
 struct Candidate
 {
@@ -172,7 +196,19 @@ public:
     [[nodiscard]] bool held(const std::string &memory_room) const { return held_.contains(memory_room); }
 
     /// Mint an empty abstract passage node in memory (shared by eviction and RoomSwap's carry-over). 0 on failure.
-    std::uint64_t mint_passage();
+    /// `name` = the identity the hole already carries live (its live passage's name); empty, or already taken in memory,
+    /// ⇒ passage_<next_passage_index()>.
+    std::uint64_t mint_passage(std::string_view name = {});
+
+    /// next_passage_index over this agent's live graph and memory.
+    [[nodiscard]] std::uint64_t next_passage_index() const { return ltsm::next_passage_index(*live_, mem_.get()); }
+
+    /// THE HOLE MEMORY ALREADY KNOWS behind a LIVE door, resolved BY PLACE: the door's room has a memory twin (same
+    /// prefix eviction writes it under) and the room is published in its remembered frame, so the live door and that
+    /// twin's passage faces are directly comparable — the face whose aperture contains the door's centre (argmin, within
+    /// half the door's width: a point-in-segment membership test, not a tuning constant). The door's NAME is consulted
+    /// only when its pose in its room cannot be resolved. nullopt = memory holds no passage for this hole.
+    [[nodiscard]] std::optional<RememberedHole> remembered_hole(const DSR::Node &live_door) const;
 
     /// BOOTSTRAP. With a single room and no `current` edge anywhere, place one. The let-go rule
     /// reads "a current edge exists AND points elsewhere", so a graph with no edge at all releases
@@ -259,6 +295,11 @@ private:
     /// Delete a room and everything RT-below it from the LIVE graph, deepest first; never climbs into a
     /// robot or root node. Returns the number of nodes deleted.
     int remove_live_room(std::uint64_t room_id);
+
+    /// live door id → its memory name when the plain `r<idx>_<door>` already names a DIFFERENT hole's passage face
+    /// (decided by place, guard_recycled_door_names); twin() writes the door there instead of over that face.
+    std::unordered_map<std::uint64_t, std::string> mem_name_of_;
+    void guard_recycled_door_names(std::uint64_t live_room_id, const std::string &prefix);
 
     mutable std::uint64_t next_index_ = 0;   ///< fallback room numbering
     mutable std::unordered_map<std::uint64_t, std::uint64_t> index_of_;   ///< live room id → memory index

@@ -22,18 +22,6 @@ namespace ltsm
 namespace
 {
 constexpr std::string_view kPrefix = "passage_";
-
-std::optional<std::uint64_t> index_of(const std::string &name)
-{
-    if (not name.starts_with(kPrefix)) return {};
-    std::uint64_t v = 0;
-    const auto *b = name.data() + kPrefix.size();
-    // from_chars, never stoull: es_ES locale (CLAUDE.md).
-    if (const auto [ptr, ec] = std::from_chars(b, name.data() + name.size(), v);
-        ec == std::errc{} and ptr == name.data() + name.size())
-        return v;
-    return {};
-}
 }   // namespace
 
 PassageLive::PassageLive(std::shared_ptr<DSR::DSRGraph> live) : G_(std::move(live)) {}
@@ -183,15 +171,35 @@ PassageLive::Step PassageLive::step()
             //   The passage ends only when one of its doors is gone (step 1).
             if (passage.has_value()) continue;
 
-            std::uint64_t n = 0;
-            for (const auto &p : owned())
-                if (const auto i = index_of(p.name()); i.has_value()) n = std::max(n, i.value() + 1);
+            // THE NAME IS THE HOLE'S IDENTITY: memory's passage for this hole when it has one (by place, the current
+            // room's door first, then the entry mirror), else the one shared numbering over live AND memory.
+            std::string pname;
+            std::string why = "new hole";
+            if (ev_ != nullptr)
+                for (const auto &d : {best.value(), entry})
+                    if (const auto h = ev_->remembered_hole(d); h.has_value())
+                    {
+                        if (G_->get_node(h->passage.name()).has_value())
+                        {
+                            // two live entries resolved to one remembered hole: the name is taken live, so this one
+                            // cannot carry it (DSR names are unique). Logged, numbered fresh — never two holes on one name.
+                            qWarning().noquote() << QString::fromStdString(std::format(
+                                "[passage] ⚠ {} resolves to remembered {} which is already live — numbered fresh",
+                                d.name(), h->passage.name()));
+                            break;
+                        }
+                        pname = h->passage.name();
+                        why = std::format("remembered: {} at {:.2f} m from face {}", d.name(), h->distance, h->face.name());
+                        break;
+                    }
+            if (pname.empty())
+                pname = std::format("passage_{}", ev_ != nullptr ? ev_->next_passage_index() : next_passage_index(*G_, nullptr));
 
             // TYPE `metaconcept`, SUBTYPE "passage", NO RT EDGE: a relation between two doors, not a body.
             // Never type `door` -- door_concept's owned-node sweep deletes `door`-typed nodes by name.
             DSR::Node node;
             node.type("metaconcept");
-            node.name(std::format("passage_{}", n));
+            node.name(pname);
             G_->add_or_modify_attrib_local<object_subtype_att>(node, std::string("passage"));
             G_->add_or_modify_attrib_local<level_att>(node, 0);
             // Viewer placement only: between the two doors it links.
@@ -209,8 +217,8 @@ PassageLive::Step PassageLive::step()
             G_->insert_or_assign_edge(std::move(to_entry));
             ++st.created;
             qInfo().noquote() << QString::fromStdString(std::format(
-                "[passage] {} match {} ↔ {}  ({:.2f} m apart in {})",
-                node.name(), best->name(), entry.name(), best_d, cur_node->name()));
+                "[passage] {} match {} ↔ {}  ({:.2f} m apart in {}; {})",
+                node.name(), best->name(), entry.name(), best_d, cur_node->name(), why));
         }
 
     st.passages = static_cast<int>(owned().size());

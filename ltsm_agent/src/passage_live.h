@@ -16,6 +16,13 @@
  *     eviction (EVICTION.md), made visible while the robot is still in the doorway;
  *   - delete it the moment either door disappears.
  *
+ * IDENTITY (2026-10-29). The passage, not a door name, is the identity of the hole, and it is ONE identity live and in
+ * memory: when memory already holds a passage for the crossed hole (RoomEviction::remembered_hole, BY PLACE, tried on
+ * the current room's door and then on the entry mirror) the live passage takes THAT name; otherwise it is numbered by
+ * the one shared next_passage_index (max over live AND memory), which RoomEviction::mint_passage also uses — and the
+ * eviction then archives the hole under the live name. Re-crossing a hole after its room was archived therefore shows
+ * the same passage_N, whatever door_concept named the door this time.
+ *
  * OWNERSHIP. ltsm_agent owns every live `metaconcept` named `passage_*` with subtype "passage". It does
  * not run the presence monitor, so an `[Owns]` entry would be read by nothing; ownership is enforced
  * here instead: remove_owned() on a graceful exit and sweep_stale() at startup for a crashed run. Both
@@ -36,10 +43,16 @@
 namespace ltsm
 {
 
+class RoomEviction;
+
 class PassageLive
 {
 public:
     explicit PassageLive(std::shared_ptr<DSR::DSRGraph> live);
+
+    /// Read-only access to long-term memory for NAMING only (remembered_hole + the shared numbering). Never used to
+    /// write or sweep: sweep_stale()/remove_owned() still act on the live graph alone. Null = live-only numbering.
+    void set_memory(const RoomEviction *ev) { ev_ = ev; }
 
     struct Step
     {
@@ -69,6 +82,7 @@ public:
 private:
     std::shared_ptr<DSR::DSRGraph> G_;
     bool warned_no_current_ = false;
+    const RoomEviction *ev_ = nullptr;
 
     /// The room a node belongs to: climb `parent` until a `room`. 0 when there is none.
     [[nodiscard]] std::uint64_t owning_room(DSR::Node n) const;

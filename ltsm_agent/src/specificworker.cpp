@@ -261,12 +261,14 @@ void SpecificWorker::initialize()
                    " from the working memory";
 
     // ── Live passage ────────────────────────────────────────────────────────────────────────
-    // Constructed with the LIVE graph only: it can never see (or sweep) memory's own passage_N.
+    // Constructed with the LIVE graph only: it can never sweep memory's own passage_N (memory is read for NAMING only).
     if (G_dsr and flag("LivePassage.enabled",
             "track door crossings on the LIVE graph only, so it can never sweep memory's own "
             "passage_N nodes"))
     {
         live_passage = std::make_unique<ltsm::PassageLive>(G_dsr);
+        // Naming only: a hole memory already holds keeps its passage_N; otherwise the one numbering over live + memory.
+        if (evictor and G_ltsm) live_passage->set_memory(evictor.get());
         live_passage_stage_check = flag("LivePassage.stage_check",
                 "verify each live-passage stage before advancing");
         const int stale = live_passage->sweep_stale();
