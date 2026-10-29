@@ -83,7 +83,119 @@ bool reexpress_ring(DSR::DSRGraph& G, std::uint64_t from, std::uint64_t to, cons
     }
     return G.insert_or_assign_edge(e.value());
 }
+
+// The robot→P edge (the robot is the RT root on this fleet): every block holds T(robot←P) and becomes T(robot←K) =
+// T(robot←P)·T(P←K), a RIGHT composition. Per written block, with (t, θ) the block's pose and (t_PK, φ) = T(P←K):
+//   pose        t' = t + R(θ)·t_PK, θ' = θ + φ                          (roll/pitch kept: a planar frame change)
+//   covariance  PARENT (robot) frame, parameters [x y z rx ry rz]: Σ' = J Σ Jᵀ, J = I except ∂t'/∂θ = Ṙ(θ)·t_PK
+//   twist       the CHILD's (the room's) motion in CHILD axes: ξ_K = Ad(T(K←P))·ξ_P, Ad(R,t)(v,w) = (R v + w(t_y,-t_x), w)
+//   twist cov   CHILD axes: Ad Σ Adᵀ on [vx vy wz]
+bool reexpress_ring_as_parent(DSR::DSRGraph& G, std::uint64_t from, std::uint64_t to, const Eigen::Affine2f& T_P_K)
+{
+    auto e = G.get_edge(from, to, "RT");
+    if (not e.has_value()) return false;
+    const auto tr = G.get_attrib_by_name<rt_translation_att>(e.value());
+    const auto rot = G.get_attrib_by_name<rt_rotation_euler_xyz_att>(e.value());
+    if (not tr.has_value() or not rot.has_value()) return false;
+    std::vector<float> t(tr->get()), r(rot->get());
+    if (t.size() % 3 != 0 or t.size() != r.size()) return false;
+    const std::size_t nb = t.size() / 3;
+    const float phi = angle_of(T_P_K);
+    const Eigen::Vector2f t_PK = T_P_K.translation();
+    const auto stamps = G.get_attrib_by_name<rt_timestamps_att>(e.value());
+    const bool stamped = stamps.has_value() and stamps->get().size() == nb;
+    std::vector<bool> written(nb, true);
+    if (stamped)
+        for (std::size_t b = 0; b < nb; ++b) written[b] = stamps->get()[b] != 0;
+    std::vector<Eigen::Vector2f> lever(nb, Eigen::Vector2f::Zero());   // Ṙ(θ_b)·t_PK, the covariance's lever arm
+    for (std::size_t b = 0; b < nb; ++b)
+    {
+        if (not written[b]) continue;
+        const std::size_t k = 3 * b;
+        const Eigen::Vector2f Rt = Eigen::Rotation2Df(r[k + 2]) * t_PK;
+        lever[b] = Eigen::Vector2f(-Rt.y(), Rt.x());
+        t[k] += Rt.x(); t[k + 1] += Rt.y();                                        // z kept
+        r[k + 2] = std::remainder(r[k + 2] + phi, 2.f * static_cast<float>(M_PI));
+    }
+    G.add_or_modify_attrib_local<rt_translation_att>(e.value(), std::move(t));
+    G.add_or_modify_attrib_local<rt_rotation_euler_xyz_att>(e.value(), std::move(r));
+    if (const auto cv = G.get_attrib_by_name<rt_covariance_att>(e.value()); cv.has_value() and not cv->get().empty()
+        and cv->get().size() % 36 == 0)
+    {
+        std::vector<float> c(cv->get());
+        for (std::size_t k = 0; k < c.size(); k += 36)
+        {
+            const std::size_t b = k / 36;
+            const bool per_slot = c.size() == 36 * nb;
+            if (per_slot and not written[b]) continue;
+            Eigen::Matrix<float, 6, 6> J = Eigen::Matrix<float, 6, 6>::Identity();
+            J.block<2, 1>(0, 5) = per_slot ? lever[b] : lever[std::min<std::size_t>(b, nb - 1)];
+            Eigen::Map<Eigen::Matrix<float, 6, 6, Eigen::RowMajor>> S(c.data() + k);
+            const Eigen::Matrix<float, 6, 6> Sr = J * S * J.transpose();
+            S = Sr;
+        }
+        G.add_or_modify_attrib_local<rt_covariance_att>(e.value(), std::move(c));
+    }
+    // The twist: child axes P → K by the adjoint of T(K←P).
+    const Eigen::Affine2f T_K_P = T_P_K.inverse();
+    const Eigen::Matrix2f R_KP = T_K_P.linear();
+    const Eigen::Vector2f arm(T_K_P.translation().y(), -T_K_P.translation().x());
+    const auto tl = G.get_attrib_by_name<rt_twist_linear_att>(e.value());
+    const auto ta = G.get_attrib_by_name<rt_twist_angular_att>(e.value());
+    if (tl.has_value() and ta.has_value() and tl->get().size() == 3 * nb and ta->get().size() == 3 * nb)
+    {
+        std::vector<float> v(tl->get());
+        for (std::size_t b = 0; b < nb; ++b)
+        {
+            if (not written[b]) continue;
+            const float w = ta->get()[3 * b + 2];
+            const Eigen::Vector2f vk = R_KP * Eigen::Vector2f(v[3 * b], v[3 * b + 1]) + w * arm;
+            v[3 * b] = vk.x(); v[3 * b + 1] = vk.y();
+        }
+        G.add_or_modify_attrib_local<rt_twist_linear_att>(e.value(), std::move(v));
+    }
+    if (const auto vc = G.get_attrib_by_name<rt_covariance_velocity_att>(e.value()); vc.has_value() and not vc->get().empty()
+        and vc->get().size() % 36 == 0)
+    {
+        std::vector<float> c(vc->get());
+        Eigen::Matrix<float, 6, 6> Ad = Eigen::Matrix<float, 6, 6>::Identity();
+        Ad.block<2, 2>(0, 0) = R_KP;
+        Ad.block<2, 1>(0, 5) = arm;
+        for (std::size_t k = 0; k < c.size(); k += 36)
+        {
+            if (c.size() == 36 * nb and not written[k / 36]) continue;
+            Eigen::Map<Eigen::Matrix<float, 6, 6, Eigen::RowMajor>> S(c.data() + k);
+            const Eigen::Matrix<float, 6, 6> Sr = Ad * S * Ad.transpose();
+            S = Sr;
+        }
+        G.add_or_modify_attrib_local<rt_covariance_velocity_att>(e.value(), std::move(c));
+    }
+    return G.insert_or_assign_edge(e.value());
+}
 }   // namespace
+
+Eigen::Affine2f accepted_T_P_K(const Eigen::Affine2f& robot_P, const Eigen::Affine2f& robot_K)
+{
+    return robot_P * robot_K.inverse();
+}
+
+bool answer_accepted(DSR::DSRGraph& G, const Proposal& p, const Eigen::Affine2f& T_P_K_accepted)
+{
+    // 1. The accepted transform replaces ltsm's prior on the edge (one block; the edge's z kept).
+    const auto rt = G.get_rt_api();
+    const auto prior = planar_rt(G, *rt, p.parent, p.node_id);
+    auto Pn = G.get_node(p.parent);
+    if (not prior.has_value() or not Pn.has_value() or not G.get_node(p.node_id).has_value()) return false;
+    try
+    {
+        rt->insert_or_assign_edge_RT(Pn.value(), p.node_id,
+            std::vector<float>{T_P_K_accepted.translation().x(), T_P_K_accepted.translation().y(), prior->second},
+            std::vector<float>{0.f, 0.f, angle_of(T_P_K_accepted)});
+    }
+    catch (const std::exception&) { return false; }
+    // 2. Only then the verdict.
+    return answer(G, p.node_id, kAccepted);
+}
 
 float angle_of(const Eigen::Affine2f& T) { return std::atan2(T.linear()(1, 0), T.linear()(0, 0)); }
 
@@ -198,6 +310,8 @@ Adoption adopt_in_place(DSR::DSRGraph& G, const Proposal& p, std::uint64_t robot
         }
     };
     collect(p.parent, true);
+    // The robot as the PARENT of P (robot→P: the robot is the RT root on this fleet) — re-expressed by right-composition.
+    const bool robot_parent = robot_id != 0 and G.get_edge(robot_id, p.parent, "RT").has_value();
     for (const auto& e : G.get_node_edges_by_type(P.value(), "RT"))
         if (e.from() == p.parent)
             if (const auto c = G.get_node(e.to()); c.has_value() and c->type() == "floor") collect(c->id(), false);
@@ -224,6 +338,7 @@ Adoption adopt_in_place(DSR::DSRGraph& G, const Proposal& p, std::uint64_t robot
     const Eigen::Affine2f T_K_P = p.T_P_K.inverse();
     for (const auto& [from, to] : own)
         if (reexpress_ring(G, from, to, T_K_P)) ++a.reexpressed;
+    if (robot_parent and reexpress_ring_as_parent(G, robot_id, p.parent, p.T_P_K)) ++a.reexpressed;
 
     // 3. Not provisional any more.
     G.delete_edge(p.parent, p.parent, "proto");

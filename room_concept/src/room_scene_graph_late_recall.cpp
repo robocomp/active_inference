@@ -19,7 +19,8 @@
 //      the fit is abandoned (the survey restored, then the crossing / re-birth proceeds as it would have without it).
 //   4. Accepted: P becomes K IN PLACE — same node id renamed to K's live name (cortex rename, 43bfe16), room_id and
 //      outline K's, P's own RT children re-expressed by T(K←P), the published frame becomes K's, proto edge removed,
-//      the walls built/synced on K's outline — and "accepted" is written. A refused rename is a rejection.
+//      the walls built/synced on K's outline — and "accepted" is written. T(K←P) is the FIT's (robot_K ∘ robot_P⁻¹), not
+//      ltsm's prior, and it is written on the proposal's RT edge before "accepted" (Task 20: one fact, every reader). A refused rename is a rejection.
 // The proposal node is ltsm's: read, `state` written, never deleted. (This replaced the late recall's INSERT of a new
 // room node; ltsm no longer posts late recalls, 4d9f7ae4.)
 #include "room_scene_graph.h"
@@ -109,10 +110,31 @@ void RoomSceneGraph::abandon_proposal_fit(const char* why)
 
 bool RoomSceneGraph::accept_proposal(const rc::RoomConcept::UpdateResult& res)
 {
-    const auto p = *prop_judged_;
+    auto p = *prop_judged_;
     const Eigen::Affine2f T_K_int = prop_T_int_K_.inverse();
     Eigen::Affine2f T_old;
-    { std::scoped_lock lk(gauge_mutex_); T_old = T_pub_int_; T_pub_int_ = T_K_int; }
+    { std::scoped_lock lk(gauge_mutex_); T_old = T_pub_int_; }
+    // THE ACCEPTED TRANSFORM (Task 20). ltsm's T(P←K) is only the prior the fit started from — recog_proto6: a half turn
+    // off, which the fit corrected (3.12 m / 179°). The accepted fact is the fit's: the robot's pose in P as published this
+    // frame (`res` carries the survey's pose, rc::publish::substitute_survey) and its fitted pose in K (the localiser's own
+    // result, tracked against K) are one physical pose ⇒ T(P←K) = robot_P ∘ robot_K⁻¹. It re-expresses this agent's own
+    // edges and is written on the proposal before "accepted", so every reader of the verdict reads this one fact.
+    const Eigen::Affine2f T_P_K_prior = p.T_P_K;
+    if (const auto fit = room_concept_->get_last_result(); fit.has_value() and fit->ok)
+        p.T_P_K = rc::proposal::accepted_T_P_K(T_old * res.robot_pose, T_K_int * fit->robot_pose);
+    else
+        qWarning().noquote() << "[room][proposal] no fitted pose at acceptance: ltsm's prior T(P<-K) is used as the accepted one";
+    {
+        const Eigen::Affine2f d = T_P_K_prior.inverse() * p.T_P_K;   // the fit's correction of the prior, in K
+        qWarning().noquote() << QString("[room][proposal] accepted T(P<-K) = (%1, %2, %3 deg); ltsm's prior (%4, %5, %6 deg); "
+                                        "correction %7 m / %8 deg")
+                                    .arg(p.T_P_K.translation().x(), 0, 'f', 2).arg(p.T_P_K.translation().y(), 0, 'f', 2)
+                                    .arg(rc::proposal::angle_of(p.T_P_K) * 180.f / M_PI, 0, 'f', 1)
+                                    .arg(T_P_K_prior.translation().x(), 0, 'f', 2).arg(T_P_K_prior.translation().y(), 0, 'f', 2)
+                                    .arg(rc::proposal::angle_of(T_P_K_prior) * 180.f / M_PI, 0, 'f', 1)
+                                    .arg(d.translation().norm(), 0, 'f', 2).arg(rc::proposal::angle_of(d) * 180.f / M_PI, 0, 'f', 1);
+    }
+    { std::scoped_lock lk(gauge_mutex_); T_pub_int_ = T_K_int; }
     const auto a = rc::proposal::adopt_in_place(*G_, p, dsr_robot_id_);
     if (not a.ok)
     {
@@ -135,7 +157,8 @@ bool RoomSceneGraph::accept_proposal(const rc::RoomConcept::UpdateResult& res)
     r.name = p.live_name; r.room_index = p.room_index; r.poly_pub = p.outline_K;
     note_recall_memory(r);                     // P(explored) from what memory restores (room_explored.h)
     startup_event_ = "recalled";
-    rc::proposal::answer(*G_, p.node_id, rc::proposal::kAccepted);
+    if (not rc::proposal::answer_accepted(*G_, p, p.T_P_K))   // the accepted T on the edge FIRST, then "accepted"
+        qWarning().noquote() << "[room][proposal] the accepted verdict could not be written (the proposal or its edge is gone)";
     prop_judged_.reset();
     qWarning().noquote() << QString("[room][proposal] ACCEPTED: room %1 is %2, adopted in place (same id; %3 own RT edge(s) "
                                     "re-expressed by T(K<-P); promotion: %4)")

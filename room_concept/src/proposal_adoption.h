@@ -60,6 +60,18 @@ enum class Admission { Judge, NotProvisional, NameTaken, Malformed };
 /// Write `state` on the proposal node (update_node). False if the node is gone.
 bool answer(DSR::DSRGraph& G, std::uint64_t proposal_id, std::string_view state);
 
+/// THE ACCEPTED TRANSFORM (Task 20). ltsm's RT edge P→proposal holds its PRIOR T(P←K); the fit that decides may correct it
+/// (recog_proto6: a half turn). The accepted fact is the fit's: the robot's pose in P just before adoption (`robot_P`, what
+/// was published under P) and its fitted pose in K (`robot_K`) are the same physical pose, so T(K←P) = robot_K ∘ robot_P⁻¹,
+/// i.e. T(P←K) = robot_P ∘ robot_K⁻¹.
+[[nodiscard]] Eigen::Affine2f accepted_T_P_K(const Eigen::Affine2f& robot_P, const Eigen::Affine2f& robot_K);
+
+/// The ACCEPTED verdict, as ONE fact for every reader: the accepted T(P←K) overwrites ltsm's prior on the RT edge
+/// P→proposal FIRST (its z kept), and only then `state` = "accepted" — so any reader that sees "accepted" reads the accepted
+/// transform, never the prior (door_concept's re-seat, ltsm's carry-over). False (and no state written) if the edge or the
+/// node is gone.
+bool answer_accepted(DSR::DSRGraph& G, const Proposal& p, const Eigen::Affine2f& T_P_K_accepted);
+
 struct Adoption
 {
     bool ok = false;
@@ -67,10 +79,13 @@ struct Adoption
     int reexpressed = 0;    ///< RT edges re-expressed by T(K←P)
 };
 
-/// Accept: P becomes K in place. Rename + room_id + outline in ONE update_node (same id) FIRST — a refused rename (the
+/// Accept: P becomes K in place, by `p.T_P_K` — the caller sets it to the ACCEPTED transform (accepted_T_P_K), not ltsm's prior. Rename + room_id + outline in ONE update_node (same id) FIRST — a refused rename (the
 /// name held by another id: cortex returns false; a cortex without rename support throws) leaves the graph untouched
 /// and returns ok=false. Then P's OWN RT children are re-expressed by T(K←P): the robot and room_concept's walls,
-/// whether hung from P or from P's floor (floor←room stays the identity: the floor IS the room's frame). EVERY block of
+/// whether hung from P or from P's floor (floor←room stays the identity: the floor IS the room's frame). The robot edge
+/// is found in EITHER direction: P→robot holds T(P←robot) and is LEFT-composed (T(K←P)·T(P←robot)); robot→P (this fleet:
+/// the robot is the RT root) holds T(robot←P) and is RIGHT-composed (T(robot←P)·T(P←K)), its child-axes twist carried by
+/// the adjoint Ad(T(K←P)) and its parent-frame pose covariance by the composition's Jacobian. EVERY block of
 /// each edge's history ring is re-expressed in place (same slots and timestamps; pose covariance rotated), so no reader
 /// can interpolate across the P and K frames. Other agents' children are theirs to move. Last, the `proto` self-edge is removed.
 /// The verdict (`state`) is NOT written here: the caller answers once its own state has followed.

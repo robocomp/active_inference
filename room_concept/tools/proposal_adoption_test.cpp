@@ -12,7 +12,9 @@
 
 #include <QCoreApplication>
 #include <clocale>
+#include <algorithm>
 #include <array>
+#include <vector>
 #include <cmath>
 #include <cstdio>
 #include <memory>
@@ -176,6 +178,142 @@ int main(int argc, char** argv)
         check(same_pose(rt_of(P, floor_id), Eigen::Vector3f::Zero()), "the floor stays the room's identity");
         check(same_pose(rt_of(P, door), kDoorInP), "another agent's child is left to its owner");
         check(a.reexpressed == 2, "exactly two own edges re-expressed (robot, wall)");
+    }
+
+    // ── Task 20: the ACCEPTED transform is the fit's, written on the proposal before "accepted" ────────────────────
+    std::printf("accepted_transform_from_the_fit\n");
+    {
+        // ltsm's prior is the half-turn twin of the truth (recog_proto6); the fit placed the robot right in K.
+        const Eigen::Affine2f T_true = T_P_K;
+        const Eigen::Affine2f half = Eigen::Translation2f(0.21f, -0.19f) * Eigen::Rotation2Df(std::numbers::pi_v<float>)
+                                     * Eigen::Translation2f(-0.21f, 0.19f);
+        const Eigen::Affine2f T_prior = T_true * half;
+        const Eigen::Affine2f robot_P = Eigen::Translation2f(kRobotInP.head<2>()) * Eigen::Rotation2Df(kRobotInP.z());
+        const Eigen::Affine2f robot_K = T_true.inverse() * robot_P;    // the fit's pose in K
+        const Eigen::Affine2f acc = accepted_T_P_K(robot_P, robot_K);
+        check((acc.matrix() - T_true.matrix()).cwiseAbs().maxCoeff() < 1e-5f, "T(P<-K) = robot_P . robot_K^-1 recovers the truth");
+        check((acc.matrix() - T_prior.matrix()).cwiseAbs().maxCoeff() > 1.f, "... and differs from the half-turn prior");
+
+        reset();
+        put_rt(P, prop, Eigen::Vector3f(T_prior.translation().x(), T_prior.translation().y(), angle_of(T_prior)));
+        auto p = the_proposal();
+        check(p.has_value() and same_pose(Eigen::Vector3f(p->T_P_K.translation().x(), p->T_P_K.translation().y(), angle_of(p->T_P_K)),
+              Eigen::Vector3f(T_prior.translation().x(), T_prior.translation().y(), angle_of(T_prior))), "the proposal carries ltsm's prior");
+        // ORDER: record what a reader would see at each write. The edge write must land while state is still "pending".
+        std::vector<std::string> order;
+        QObject::connect(G.get(), &DSR::DSRGraph::update_edge_signal, [&](std::uint64_t from, std::uint64_t to, const std::string& type, DSR::SignalInfo)
+        {
+            if (from == P and to == prop and type == "RT") order.push_back("edge@" + state_of(prop));
+        });
+        QObject::connect(G.get(), &DSR::DSRGraph::update_node_signal, [&](std::uint64_t id, const std::string&, DSR::SignalInfo)
+        {
+            if (id == prop) order.push_back("node:" + state_of(prop));
+        });
+        if (p.has_value()) p->T_P_K = acc;
+        const auto a = p.has_value() ? adopt_in_place(*G, *p, robot) : Adoption{};
+        check(a.ok, "adopted by the ACCEPTED transform");
+        check(p.has_value() and answer_accepted(*G, *p, acc), "answer_accepted writes the transform and the verdict");
+        QObject::disconnect(G.get(), &DSR::DSRGraph::update_edge_signal, nullptr, nullptr);
+        QObject::disconnect(G.get(), &DSR::DSRGraph::update_node_signal, nullptr, nullptr);
+        std::string seq; for (const auto& o : order) seq += o + " ";
+        const auto e_at = std::ranges::find_if(order, [](const std::string& o) { return o.starts_with("edge@"); });
+        const auto n_at = std::ranges::find(order, std::string("node:accepted"));
+        check(e_at != order.end() and *e_at == "edge@pending" and n_at != order.end() and e_at < n_at,
+              "the accepted T lands on the edge BEFORE state=accepted (" + seq + ")");
+        const auto onedge = rt_of(P, prop);
+        check(same_pose(onedge, Eigen::Vector3f(T_true.translation().x(), T_true.translation().y(), angle_of(T_true))),
+              "the proposal edge now holds the accepted T(P<-K), not the prior");
+        check(state_of(prop) == "accepted", "state = accepted");
+        check(same_pose(rt_of(P, robot, kStamps[2]), transform_pose(T_true.inverse(), robot_at(2))),
+              "the robot is re-expressed by the ACCEPTED T(K<-P)");
+        // no edge ⇒ no verdict: the transform gates the state
+        reset();
+        auto q = the_proposal();
+        G->delete_edge(P, prop, "RT");
+        check(q.has_value() and not answer_accepted(*G, *q, acc) and state_of(prop) == "pending",
+              "without the edge nothing is answered (a reader never sees accepted without the accepted T)");
+    }
+
+    std::printf("robot_edge_runs_robot_to_room\n");
+    {
+        // This fleet: the robot is the RT root, the edge is robot→room holding T(robot←P), with twist (child = the room,
+        // child axes) and pose covariance (parent = robot frame) in a timestamped ring.
+        reset();
+        G->delete_edge(P, robot, "RT");
+        const auto se2 = [](const Eigen::Vector3f& q) { return Eigen::Affine2f(Eigen::Translation2f(q.head<2>()) * Eigen::Rotation2Df(q.z())); };
+        const auto pose_of = [](const Eigen::Affine2f& T) { return Eigen::Vector3f(T.translation().x(), T.translation().y(), angle_of(T)); };
+        std::vector<float> cov(36, 0.f);
+        cov[0] = 0.04f; cov[7] = 0.01f; cov[35] = 0.002f; cov[5] = cov[30] = 0.003f;
+        std::vector<float> vcov(36, 0.f);
+        vcov[0] = 0.0025f; vcov[7] = 0.0009f; vcov[35] = 0.0004f;
+        const Eigen::Vector2f v_P(0.12f, -0.3f); const float w_P = 0.25f;
+        for (int i = 0; i < 3; ++i)
+        {
+            auto rn = G->get_node(robot).value();
+            const auto q = pose_of(se2(robot_at(i)).inverse());   // T(robot←P)
+            G->get_rt_api()->insert_or_assign_edge_RT(rn, P, DSR::RT_API::RTBlock{
+                .translation = {q.x(), q.y(), 0.f}, .rotation_euler = {0.f, 0.f, q.z()}, .covariance = cov,
+                .twist_linear = std::vector<float>{v_P.x(), v_P.y(), 0.f}, .twist_angular = std::vector<float>{0.f, 0.f, w_P},
+                .twist_covariance = vcov}, kStamps[i]);
+        }
+        const auto p = the_proposal();
+        const auto a = p.has_value() ? adopt_in_place(*G, *p, robot) : Adoption{};
+        check(a.ok and a.reexpressed == 2, "adopted; robot→room edge + wall re-expressed (" + std::to_string(a.reexpressed) + ")");
+        bool ring_ok = true;
+        for (int i = 0; i < 3; ++i)
+            ring_ok = ring_ok and same_pose(rt_of(robot, P, kStamps[i]), pose_of(se2(robot_at(i)).inverse() * T_P_K));
+        check(ring_ok, "EVERY block of robot→room is T(robot<-P).T(P<-K) = T(robot<-K), at its own timestamp");
+        check(same_pose(rt_of(robot, P, kStamps[1]), pose_of((T_K_P * se2(robot_at(1))).inverse())),
+              "... i.e. the inverse of the robot's pose in K");
+        const auto e = G->get_edge(robot, P, "RT");
+        // twist, checked against the finite-difference definition: T(robot←K)(dt) = T(robot←P) exp(ξ_P dt) T(P←K)
+        {
+            const float dt = 1e-3f;
+            const Eigen::Affine2f step = se2(Eigen::Vector3f(v_P.x() * dt, v_P.y() * dt, w_P * dt));
+            const Eigen::Affine2f M = T_K_P * step * T_P_K;
+            const Eigen::Vector2f v_K_fd = M.translation() / dt;
+            const auto tl = e.has_value() ? G->get_attrib_by_name<rt_twist_linear_att>(e.value()) : std::nullopt;
+            const auto ta = e.has_value() ? G->get_attrib_by_name<rt_twist_angular_att>(e.value()) : std::nullopt;
+            const auto ts = e.has_value() ? G->get_attrib_by_name<rt_timestamps_att>(e.value()) : std::nullopt;
+            bool ok = tl.has_value() and ta.has_value() and ts.has_value();
+            int n = 0;
+            if (ok)
+                for (std::size_t b = 0; b < ts->get().size(); ++b)
+                {
+                    if (ts->get()[b] == 0) continue;
+                    ++n;
+                    ok = ok and near(tl->get()[3 * b], v_K_fd.x(), 2e-3f) and near(tl->get()[3 * b + 1], v_K_fd.y(), 2e-3f)
+                         and near(ta->get()[3 * b + 2], w_P);
+                }
+            check(ok and n == 3, "the room's twist is carried to K's axes by the adjoint (matches the finite difference)");
+        }
+        // pose covariance (robot frame), against a finite-difference Jacobian of (x,y,θ) ↦ (x,y,θ)∘T(P←K)
+        {
+            const auto cv = e.has_value() ? G->get_attrib_by_name<rt_covariance_att>(e.value()) : std::nullopt;
+            const auto ts = e.has_value() ? G->get_attrib_by_name<rt_timestamps_att>(e.value()) : std::nullopt;
+            bool ok = cv.has_value() and ts.has_value() and cv->get().size() == 36 * ts->get().size();
+            if (ok)
+                for (std::size_t b = 0; b < ts->get().size(); ++b)
+                {
+                    if (ts->get()[b] == 0) continue;
+                    const auto it = std::ranges::find(kStamps, ts->get()[b]);
+                    const auto q = pose_of(se2(robot_at(static_cast<int>(it - kStamps.begin()))).inverse());
+                    Eigen::Matrix3f J;
+                    for (int c = 0; c < 3; ++c)
+                    {
+                        Eigen::Vector3f dq = Eigen::Vector3f::Zero(); dq[c] = 1e-3f;
+                        const Eigen::Vector3f f1 = pose_of(se2(q + dq) * T_P_K), f0 = pose_of(se2(q - dq) * T_P_K);
+                        Eigen::Vector3f d = (f1 - f0) / 2e-3f; d.z() = std::remainder(f1.z() - f0.z(), 2.f * std::numbers::pi_v<float>) / 2e-3f;
+                        J.col(c) = d;
+                    }
+                    Eigen::Matrix3f S0; S0 << cov[0], cov[1], cov[5], cov[6], cov[7], cov[11], cov[30], cov[31], cov[35];
+                    const Eigen::Matrix3f S1 = J * S0 * J.transpose();
+                    const float* c = cv->get().data() + 36 * b;
+                    Eigen::Matrix3f got; got << c[0], c[1], c[5], c[6], c[7], c[11], c[30], c[31], c[35];
+                    ok = ok and (got - S1).cwiseAbs().maxCoeff() < 1e-3f;
+                }
+            check(ok, "the pose covariance takes the composition's Jacobian (lever arm of T(P<-K))");
+        }
     }
 
     std::printf("reject_marks_only\n");
