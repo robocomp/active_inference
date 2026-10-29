@@ -277,6 +277,17 @@ RoomRecognizer::Step RoomRecognizer::abort_episode(Step out)
     return out;
 }
 
+RoomRecognizer::Step RoomRecognizer::ineligible(Step out, const std::string &room, std::string_view reason)
+{
+    const std::string v = std::format("{}: {}", room, reason);
+    if (v != verdict_)
+    {
+        verdict_ = v;
+        qInfo().noquote() << QString::fromStdString(std::format("[recog] {} not eligible: {}", room, reason));
+    }
+    return abort_episode(out);
+}
+
 void RoomRecognizer::on_swap_executed(std::uint64_t room_id)
 {
     if (prov_id_ == 0 or commit_.state != rc::recog::Commit::State::Committed or commit_.room < 0 or commit_.room >= int(ids_.size())
@@ -445,10 +456,10 @@ RoomRecognizer::Step RoomRecognizer::step_impl()
     // fills); the startup room has the seed's. The twin is a COPY of L's frame, so the live L frame and the twin's are one
     // frame: that identity is what joins L's LIVE geometry to the memory chains. Without a twin nothing joins them.
     const auto L = live_->get_node(cur.value());
-    if (not L.has_value() or cur_mem_.empty()) return abort_episode(out);
-
     const auto Pp = provisional_room(robot.value(), cur.value(), std::nullopt);
-    if (not Pp.has_value()) return abort_episode(out);
+    if (not Pp.has_value()) { verdict_.clear(); return abort_episode(out); }
+    if (not L.has_value() or cur_mem_.empty())
+        return ineligible(out, Pp->first.name(), "the current room has no memory twin (cur_mem_ unset)");
     const std::optional<DSR::Node> P = Pp->first;
     robot_in_P = read_robot_in(Pp->second);
 
@@ -466,7 +477,7 @@ RoomRecognizer::Step RoomRecognizer::step_impl()
                 dist = (T->translation().head<2>() - robot_in_P->pose.head<2>()).norm();
         if (dist < best_m) { best_m = dist; M = d; }
     }
-    if (not M.has_value()) return abort_episode(out);
+    if (not M.has_value()) return ineligible(out, P->name(), "no entry-mirror door hangs from it");
 
     // its counterpart D in L: the door the live passage matched to it, else the nearest door of L (both in L's frame).
     std::optional<DSR::Node> D;
@@ -494,7 +505,7 @@ RoomRecognizer::Step RoomRecognizer::step_impl()
                     if (const double dist = (T->translation() - TM->translation()).head<2>().norm(); dist < best) { best = dist; D = d; }
             }
     }
-    if (not D.has_value()) return abort_episode(out);
+    if (not D.has_value()) return ineligible(out, P->name(), "no crossed door found in the current room");
 
     // The crossed door must have NO passage in memory. Its face is looked up by name (how eviction/seed wrote it) and, when
     // door_concept re-made the door under a new name, by place: the passage face of L whose aperture holds D's centre.
@@ -503,9 +514,12 @@ RoomRecognizer::Step RoomRecognizer::step_impl()
     const auto passages = passages_of(*mem_);
     const auto face = mem_->get_node(face_name);
     bool known_door = false;
-    if (face.has_value())
-        known_door = std::ranges::any_of(passages, [&](const auto &p) { return std::ranges::contains(p.faces, face->id()); });
-    else if (const auto TD = ie->get_transformation_matrix(L->name(), D->name()); TD.has_value())
+    // THE PLACE DECIDES, not the name: door_concept re-uses door names (an entry door renamed door_2 frees "door_7" for a NEW
+    // doorway), so a face found by name may be a different hole (recog_try12: the new door_7 matched the entry door's face
+    // r3_door_7 => known => room_4 never examined). The same hole <=> D's centre lies inside a remembered face's aperture
+    // (half the door width: a point inside a segment, a membership test, not a tuning constant). The name is the fallback
+    // only when D's pose in L is unresolvable.
+    if (const auto TD = ie->get_transformation_matrix(L->name(), D->name()); TD.has_value())
     {
         const double half_w = 0.5 * live_->get_attrib_by_name<width_m_att>(D.value()).value_or(1.f);
         auto mie = mem_->get_inner_eigen_api();
@@ -517,12 +531,12 @@ RoomRecognizer::Step RoomRecognizer::step_impl()
                 const auto fr = owning_room(*mem_, f.value());
                 if (not fr.has_value() or fr->name() != L_mem) continue;
                 if (const auto Tm = mie->get_transformation_matrix(L_mem, f->name()); Tm.has_value())
-                    // FLAGGED: a membership test, not a tuning constant. A door re-made under a new name is the SAME hole when its
-                    // centre lies inside the remembered face's aperture (half the door width): a point inside a segment.
                     if ((Tm->translation() - TD->translation()).head<2>().norm() < half_w) known_door = true;
             }
     }
-    if (known_door) return abort_episode(out);
+    else if (face.has_value())
+        known_door = std::ranges::any_of(passages, [&](const auto &p) { return std::ranges::contains(p.faces, face->id()); });
+    if (known_door) return ineligible(out, P->name(), std::format("the crossed door {} is already a passage in memory", D->name()));
     if (prov_id_ != P->id())
     {
         end_episode();

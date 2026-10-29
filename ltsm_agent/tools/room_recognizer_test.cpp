@@ -783,6 +783,23 @@ int main(int argc, char **argv)
         mem->delete_node(pid);
     }
 
+    std::printf("same_name_different_hole_is_not_a_known_door\n");
+    {   // recog_try12: door_concept re-used a door NAME (an entry door renamed, its old name free for a NEW doorway). Memory holds a
+        // passage face carrying D's name, but at ANOTHER place: the hole is unknown, the episode must run.
+        const Vec3 elsewhere_w(1.0, -2.0, 0.0);      // r2's remembered face, moved 3 m along r2's south wall
+        put_edge(*mem, rooms[1].id, face_r2_door, mul(inv(rooms[1].in_world), elsewhere_w));
+        DSR::Node pw; pw.type("metaconcept"); pw.name("passage_9");
+        mem->add_or_modify_attrib_local<object_subtype_att>(pw, std::string("passage"));
+        const auto pid = mem->insert_node(pw).value();
+        mem->insert_or_assign_edge(DSR::Edge::create<match_edge_type>(pid, face_r2_door));
+        Scenario s(false, robot_in_r3_w);
+        ltsm::RoomRecognizer::Step st;
+        for (int i = 0; i < 5 and st.act == ltsm::RoomRecognizer::Step::Act::None; ++i) st = s.rec.step();
+        check(read_recognition().present and s.rec.provisional_id() == s.prov, "same name, other place: the episode runs for the provisional room");
+        mem->delete_node(pid);
+        put_edge(*mem, rooms[1].id, face_r2_door, mul(inv(rooms[1].in_world), hole_w));
+    }
+
     std::printf("stale_recognition_swept_at_start\n");
     {
         for (const char *sub : {"recognition", "place_evidence"})

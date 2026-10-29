@@ -137,6 +137,9 @@ private:
     void end_episode();
     Step held_step(Step out);                   ///< an executed swap: hold until the fence
     Step abort_episode(Step out);               ///< end an episode; Undo is requested when a commit stood
+    /// abort_episode + ONE log line when the reason a provisional room is not eligible CHANGES (not every cycle).
+    Step ineligible(Step out, const std::string &room, std::string_view reason);
+    std::string verdict_;                       ///< the last eligibility verdict logged ("" = none)
     void track_current();
     void publish(const std::vector<float> &post);
     /// The provisional room hung from `robot` (a proto, or the hand-over case: live while robot->current is retired), other
