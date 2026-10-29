@@ -18,6 +18,8 @@ export WT=${WT:-/home/pbustos/robocomp/components/active_inference.worktrees/rt-
 export FLEET="retina room_concept residual_concept controller door_concept ltsm_agent table_concept"
 echo stop > $B/controller/remote_cmd.txt
 # fresh state: no last pose, no name high-water mark, no ltsm memory, no place maps
+# the previous memory is ARCHIVED, never just deleted (user 10-29: keep the LTSM graph on disk)
+[ -f $B/ltsm_agent/etc/ltsm_memory.json ] && mkdir -p crossing/ltsm_archive && cp $B/ltsm_agent/etc/ltsm_memory.json crossing/ltsm_archive/ltsm_memory_before_$1_$(date +%Y%m%d_%H%M%S).json
 rm -f ../etc/last_robot_pose.txt ../etc/room_name_hwm.txt $B/ltsm_agent/etc/ltsm_memory.json $B/ltsm_agent/etc/ltsm_memory.json.prev
 rm -rf $B/retina/etc/place_maps/; rm -f $WT/ltsm_agent/etc/recognition_trace.csv $B/ltsm_agent/etc/recognition_trace.csv
 # close every door BEFORE the fleet starts (the cross mission opens the one it needs)
