@@ -132,6 +132,7 @@ namespace rc::crossing
         float p_geom   = 0.f;   ///< = p_through, the path's own answer (no door prior)
         float p_through = 0.f;  ///< P(centre past AND it entered between the jambs), over the stored path (Task 16)
         float p_open_post = 0.f; ///< P(leaf open | path): the posterior the passage implies about the door
+        float p_reread = 0.f;    ///< P(past only because the door's read moved across the robot) — "not crossed" (round 3)
         float p_past   = 0.f;   ///< P(body centre past the aperture line), no p_open, no span
         float p_span   = 0.f;   ///< P(CURRENT centre within the aperture span) — the doorway term's, not the passage's
         float s        = 0.f;   ///< signed distance of the robot centre past the line (m)
@@ -302,10 +303,14 @@ namespace rc::crossing
     /// against, the pose it was last computed at, and the continuity of the robot's motion since then.
     struct DoorPassage
     {
-        double thru = 0.0;
-        ApertureGeo geo;
+        ApertureGeo geo;          ///< the ANCHOR read: the line the robot's motion is judged against (round 3)
+        double thru = 0.0;        ///< A: past the anchor line, entered between its jambs by MOTION
+        double reread = 0.0;      ///< R: past the anchor line only because the anchor followed a re-read (no passage)
         PoseSample last;
         double w_since = 1.0;
+        /// Mass the robot's estimate pushed back to "front", with its A and R parts, kept labelled while it waits, so
+        /// a pose dithering across the line returns what it took (no drift).
+        double pool = 0.0, pool_thru = 0.0, pool_reread = 0.0;
     };
 
     inline Crossing evaluate_core(const DoorAperture& ap, const std::vector<Eigen::Vector2f>& polygon,
@@ -411,74 +416,125 @@ namespace rc::crossing
         // ★ DID THE BODY GO THROUGH THE APERTURE — A QUESTION ABOUT THE PATH, NOT THE POSE (2026-10-29, Task 16).
         //   recog_proto5 leg 5: centre 2.73 m past door_39, then 1.4 m sideways along the new room ⇒ p_span(now) 2e-11,
         //   p_cross 1e-12, no birth. The span belongs to the moment of PASSAGE.
-        //   thru = P(centre past the line AND it got there between the jambs), one step per update of this door:
-        //   1. MOTION, door held where it was believed at the last update (state->geo): Δ = P(past)_now − P(past)_last.
-        //      Δ ≥ 0 is mass flowing front→past; it enters between the jambs with P(span) at the point the segment
-        //      meets the line (nearest point when it does not), weighted by w = P(the step was a physical traversal)
-        //      (p_continuous, accumulated since this door's last update); the rest — a jump, or outside the jambs —
-        //      is "past by another way" (W). Δ < 0 is mass flowing back, leaving both kinds proportionally.
-        //   2. RE-ESTIMATION, robot held: the door's new read moves P(past) without anyone moving. Mass that becomes
-        //      "front" leaves proportionally. Mass that becomes "past" is weighted like motion (fix round 2): the door's
-        //      change δ = centre_new − centre_old is a re-estimate of the SAME physical opening with probability
-        //      w_door = p_continuous(δ, Σ_door,old + Σ_door,new, A) (Σ_door from its stated σ along/across); that share
-        //      enters "through" with the span at the robot's lateral offset under the new read — door jitter within its
-        //      σ around a robot in the mouth is the robot passing a slightly re-drawn line. The rest (a door estimate
-        //      JUMPING across the robot's in-room path, metres beyond its σ) lands in W: no passage is created.
-        //      (Without this a zero-mean door wobble drained "through" into W one wobble at a time: backward removes A
-        //      and W proportionally, forward refilled only W.)
-        //   The sign of Δ is the direction of the flow, not a gate. 0 ≤ thru ≤ P(past) by construction.
-        //   ⚠ JITTER NEAR THE LINE: a pose dithering across the line at lateral offset u_j alternately adds w·Δ·span(u_j)
-        //   and removes thru·|Δ|/P(past); the ratio thru/P(past) relaxes toward w·span(u_j) — toward the instantaneous
-        //   answer at the point where it dithers, never past it. A robot parked ON the line of an open door therefore
-        //   drifts toward "through" at P(past) ≈ ½, which the N class (q_N ≈ ½) keeps far below any birth level.
-        double thru = 0.0;
+        //   thru = P(centre past the line AND it got there between the jambs), one step per update of this door.
+        //   ★ ROUND 3 — THE ROBOT'S MOTION IS JUDGED AGAINST AN ANCHORED LINE; THE DOOR'S RE-READS NEVER LABEL MASS.
+        //   Per door: an ANCHOR read G* of the line, and three labelled masses past it — A (entered between the jambs by
+        //   motion), R (pushed past by the anchor following a re-read: the robot did not move across anything), W (the
+        //   rest: outside the jambs, or a pose jump).
+        //   1. MOTION against G* (last pose → this pose, same G* for both): Δ = P*(past)_now − P*(past)_last. Back flows
+        //      (Δ < 0: backing up, or the estimate dithering) leave A, R, W proportionally and WAIT in a pool with their
+        //      labels; forward flows draw from that pool first and return the labels (× the span where they re-cross);
+        //      only the EXCESS — mass that was never past — is newly labelled: A with w·span at the point the segment
+        //      meets the line (w = P(physical traversal), p_continuous since this door's last update), R with 1 − w (a
+        //      pose jump moved the estimate, not the robot), W with w·(1 − span) (through a wall/jamb).
+        //      So a pose dithering in place nets out exactly.
+        //   2. THE CURRENT READ vs G*: the extra P(past) the current read gives over G* is R (computed directly, every
+        //      frame — no flow, so a zero-mean door wobble cannot accumulate anything); a deficit scales A, R, W down.
+        //   3. THE ANCHOR FOLLOWS THE READ only where that cannot move the robot across it:
+        //        κ = (1 − |P(past)_read − P*(past)|) · |2P(past)_read − 1| · |2P*(past) − 1|,   G* ← G* + κ (G − G*)
+        //      — 1 when the robot is clearly on the SAME side of both (re-anchoring changes nothing it is judged by), 0
+        //      when it is near either line (in the mouth: the anchor holds still while the robot crosses, whatever the
+        //      read wobbles) or on different sides (a re-read across a parked robot). What the anchor's own move pushes
+        //      past is R, kept: a door drifting or flipping across a robot that never moved stays R at ANY step size.
+        //      κ is continuous, not a gate; no constant enters.
+        //   Bayes (below): R is the physical state "not crossed" — priced like N, not at ε like W.
+        //   ⚠ Consequence, by design: once the anchor has followed a line that moved INTO the room, motion across that
+        //   new line later IS a passage under the belief (the robot drove through where the door is now believed).
+        //   ⚠ The door's stated σ widens P(past)/P(span): an OVER-stated σ keeps the robot "near the line" for longer
+        //   (κ small), so the anchor holds and the jambs blur — the passage is scored against a wider, softer opening;
+        //   door_concept must state its σ honestly.
+        double thru = 0.0, reread = 0.0;
         if (state == nullptr)
             thru = now.past * now.span;   // no memory: the instantaneous reading
-        else if (state->geo.half <= 0.0)  // first sight of this door: no path relative to it yet
-        {
-            thru = now.past * now.span;
-            state->thru = thru;
-        }
         else
         {
-            const ApertureGeo& old = state->geo;
-            const Reading a  = read(old, state->last.xy, state->last.cov, half_body);
-            const Reading b  = read(old, xy, cov_xy, half_body);
-            thru = state->thru;
-            const double delta = b.past - a.past;
-            if (delta >= 0.0)
+            if (state->geo.half <= 0.0)   // first sight of this door: no path relative to it yet
+            {
+                state->geo = g;
+                state->thru = now.past * now.span;
+                state->reread = 0.0;
+                state->last = PoseSample{xy, cov_xy};
+            }
+            const ApertureGeo& G = state->geo;
+            const Reading a  = read(G, state->last.xy, state->last.cov, half_body);
+            const Reading b  = read(G, xy, cov_xy, half_body);
+            double A = state->thru, Rr = state->reread;
+            double& pool = state->pool; double& pool_A = state->pool_thru; double& pool_R = state->pool_reread;
+            // 1. motion against the anchor
+            if (b.past < a.past)
+            {
+                const double d = a.past - b.past;
+                const double fA = a.past > 0.0 ? A / a.past : 0.0, fR = a.past > 0.0 ? Rr / a.past : 0.0;
+                A -= fA * d; Rr -= fR * d;
+                pool += d; pool_A += fA * d; pool_R += fR * d;
+            }
+            else if (b.past > a.past)
             {
                 const double ds = b.s - a.s;
                 const double f  = ds != 0.0 ? std::clamp(-a.s / ds, 0.0, 1.0) : 1.0;   // segment ∩ line (geometry clamp)
                 const double uc = a.u + f * (b.u - a.u);
                 const double st = a.sig_t + f * (b.sig_t - a.sig_t);
-                const double free = old.half - half_body;
-                thru += std::clamp(state->w_since, 0.0, 1.0) * delta * phi_d((free - uc) / st) * phi_d((free + uc) / st);
+                const double free = G.half - half_body;
+                const double span_c = phi_d((free - uc) / st) * phi_d((free + uc) / st);
+                const double d = b.past - a.past;
+                const double take = std::min(d, pool);
+                const double backA = pool > 0.0 ? pool_A * take / pool : 0.0;
+                const double backR = pool > 0.0 ? pool_R * take / pool : 0.0;
+                A += backA * span_c; Rr += backR;
+                pool -= take; pool_A -= backA; pool_R -= backR;
+                const double w = std::clamp(state->w_since, 0.0, 1.0);
+                const double excess = d - take;
+                // R is mass the robot has NOT physically carried across (it is "past" only because a line moved): the
+                // robot's own forward motion carries it across at the rate it carries its front mass, so it re-labels
+                // like any other crossing mass. A robot that never moves keeps it R; one that drives on converts it.
+                const double front_a = phi_d(-a.s / a.sig_s);
+                const double conv = front_a > 0.0 ? Rr * std::min(1.0, excess / front_a) : 0.0;
+                Rr -= conv;
+                A  += (excess + conv) * w * span_c;
+                Rr += (excess + conv) * (1.0 - w);   // a pose JUMP moved the estimate, not the robot: "not crossed"
             }
-            else if (a.past > 0.0)
-                thru *= b.past / a.past;
-            thru = std::min(thru, b.past);
-            if (now.past < b.past and b.past > 0.0)   // re-estimation: mass leaving "past" leaves proportionally
-                thru *= now.past / b.past;
-            else if (now.past > b.past)
+            const double front = phi_d(-b.s / b.sig_s);
+            pool = std::clamp(pool, 0.0, front);
+            pool_A = std::clamp(pool_A, 0.0, pool); pool_R = std::clamp(pool_R, 0.0, pool - pool_A);
+            A  = std::clamp(A, 0.0, b.past);
+            Rr = std::clamp(Rr, 0.0, b.past - A);
+            // 3. the anchor follows the read where that cannot carry the robot across it; what its move pushes past is R
+            const double kappa = std::clamp((1.0 - std::abs(now.past - b.past)) * std::abs(2.0 * now.past - 1.0)
+                                            * std::abs(2.0 * b.past - 1.0), 0.0, 1.0);
+            ApertureGeo Gn = G;
+            const float k = static_cast<float>(kappa);
+            Gn.centre  = G.centre + k * (g.centre - G.centre);
+            Gn.tangent = (G.tangent + k * (g.tangent - G.tangent)).normalized();
+            Gn.n_out   = (G.n_out + k * (g.n_out - G.n_out)).normalized();
+            Gn.half       = G.half + kappa * (g.half - G.half);
+            Gn.sig_normal = G.sig_normal + kappa * (g.sig_normal - G.sig_normal);
+            Gn.sig_along  = G.sig_along + kappa * (g.sig_along - G.sig_along);
+            if (not Gn.tangent.allFinite() or not Gn.n_out.allFinite()) Gn = g;   // antiparallel reads: numerical
+            const Reading c2 = read(Gn, xy, cov_xy, half_body);
+            if (c2.past < b.past and b.past > 0.0)
             {
-                const auto door_cov = [](const ApertureGeo& d) -> Eigen::Matrix2f
-                {
-                    return static_cast<float>(d.sig_along * d.sig_along) * d.tangent * d.tangent.transpose()
-                         + static_cast<float>(d.sig_normal * d.sig_normal) * d.n_out * d.n_out.transpose();
-                };
-                const double w_door = p_continuous(g.centre - old.centre, door_cov(old) + door_cov(g),
-                                                   polygon_area(polygon), false);
-                thru += w_door * (now.past - b.past) * now.span;
+                const double r = c2.past / b.past;
+                A *= r; Rr *= r;
             }
-            thru = std::min(thru, now.past);           // float-sum guard; exact in real arithmetic
-        }
-        if (state != nullptr)
-        {
-            state->thru = thru;
-            state->geo = g;
+            else if (c2.past > b.past)
+                Rr += c2.past - b.past;
+            state->geo = Gn;
+            state->thru = A; state->reread = Rr;
             state->last = PoseSample{xy, cov_xy};
             state->w_since = 1.0;
+            // 2. the current read against the (moved) anchor: surplus is R, deficit scales everything down
+            if (now.past >= c2.past)
+            {
+                thru = A;
+                reread = Rr + (now.past - c2.past);
+            }
+            else
+            {
+                const double r = c2.past > 0.0 ? now.past / c2.past : 0.0;
+                thru = A * r; reread = Rr * r;
+            }
+            thru = std::clamp(thru, 0.0, now.past);
+            reread = std::clamp(reread, 0.0, now.past - thru);
         }
 
         c.s       = static_cast<float>(now.s);
@@ -488,13 +544,15 @@ namespace rc::crossing
         c.p_past  = static_cast<float>(now.past);
         c.p_span  = static_cast<float>(now.span);
         c.p_through = static_cast<float>(thru);
+        c.p_reread  = static_cast<float>(reread);
         c.p_geom  = c.p_through;
 
         // ★ THE PASSAGE IS EVIDENCE ABOUT THE LEAF — three classes, not two (Task C 2026-10-23; Task 16 2026-10-29).
         //   The path posterior splits the robot's whereabouts into
         //     A = past, entered between the jambs (q_A = thru),
-        //     W = past by another way — through a wall/jamb, or by a jump (q_W = P(past) − thru),
-        //     N = not past (q_N = Φ(−s/σ_s), computed directly).
+        //     W = past through a wall/jamb (q_W = P(past) − thru − R),
+        //     N = not crossed: not past (Φ(−s/σ_s), computed directly) PLUS R — "past" only because the door's read or
+        //         the pose estimate jumped, the robot itself did not move across (round 3).
         //   The door supplies the physical prior over them, with ONE contact constant ε (a body does not pass a solid
         //   barrier, leaf or wall, without contact):
         //     open:  A (1−ε)/2   N (1−ε)/2   W ε          (A vs N: the same flat prior the pose reading assumes)
@@ -509,8 +567,8 @@ namespace rc::crossing
             const double e  = kShutPassageEps;
             const double po = ap.p_open < 0.f ? 0.5 : std::clamp(static_cast<double>(ap.p_open), 0.0, 1.0);
             const double qA = thru;
-            const double qW = std::max(0.0, now.past - thru);
-            const double qN = phi_d(-now.s / now.sig_s);
+            const double qW = std::max(0.0, now.past - thru - reread);
+            const double qN = phi_d(-now.s / now.sig_s) + reread;   // R: the robot did not cross — the N state
             const double open_A = 0.5 * (1.0 - e), open_N = 0.5 * (1.0 - e), open_W = e;
             const double shut_A = e, shut_N = 1.0 - 2.0 * e, shut_W = e;
             const double jA = (po * open_A + (1.0 - po) * shut_A) * qA;
@@ -549,7 +607,7 @@ namespace rc::crossing
             std::ofstream o("tmp/crossing.csv", std::ios::out | std::ios::trunc);
             o.imbue(std::locale::classic());
             o << "ts_ms,door,p_open,p_past,p_span,p_geom,p_cross,s,u,r_body,"
-                 "sig_s,sig_t,span_w,x,y,p_through,p_open_post\n";
+                 "sig_s,sig_t,span_w,x,y,p_through,p_open_post,p_reread\n";
             return o;
         }();
         if (not f)
@@ -559,7 +617,7 @@ namespace rc::crossing
         f << ts << ',' << (name.empty() ? std::string{"?"} : name) << ',' << p_open << ','
           << c.p_past << ',' << c.p_span << ',' << c.p_geom << ',' << c.p_cross << ','
           << c.s << ',' << c.u << ',' << r_body << ',' << c.sig_s << ',' << c.sig_t << ','
-          << c.span_w << ',' << xy.x() << ',' << xy.y() << ',' << c.p_through << ',' << c.p_open_post << '\n';
+          << c.span_w << ',' << xy.x() << ',' << xy.y() << ',' << c.p_through << ',' << c.p_open_post << ',' << c.p_reread << '\n';
         f.flush();
     }
 }   // namespace rc::crossing

@@ -163,12 +163,12 @@ int main()
     std::printf("(e) REVIEW I-1: the DOOR ESTIMATE jumps across the robot's in-room path\n");
     for (const float po : {1.28e-4f, 0.99f})
     {
-        // robot drives inside the room toward the door and parks 0.9 m short; mid-way the door estimate jumps from
-        // y = 3 to y = 1.2 (into the room), so the robot's own in-room path now lies past it and between its jambs
+        // robot drives inside the room toward the door and parks 0.9 m short; then the door estimate jumps from
+        // y = 3 to y = 1.2 (into the room, behind the parked robot), so its in-room path now lies past it, in its jambs
         std::vector<Vector2f> path;
         line(path, {0.f, 0.5f}, {0.f, 2.1f});
         park(path, {0.f, 2.1f}, 200);
-        const std::size_t jump_at = path.size() / 3;   // the robot is at ~y 1.0, in front of BOTH reads
+        const std::size_t jump_at = path.size() / 3;   // the robot is already parked at y 2.1
         auto mem = mem_new();
         const auto r = drive_fn([&](std::size_t k) { return k < jump_at ? door(po) : door(po, {-0.5f, 1.2f}, {0.5f, 1.2f}); },
                                 path, mem);
@@ -273,6 +273,41 @@ int main()
         check(r.last_p >= kBirth, "still a birth: a re-drawn line within its sigma is the same opening");
     }
 
+    std::printf("(j) ROUND 3: the door read DRIFTS/FLIPS 30 cm inward across a robot parked 15 cm short of the line\n");
+    for (const int frames : {1, 10, 60})
+    {
+        std::vector<Vector2f> path;
+        line(path, {0.f, 1.5f}, {0.f, 2.85f});
+        const std::size_t t0 = path.size() + 20;
+        park(path, {0.f, 2.85f}, 220);
+        auto mem = mem_new();
+        const auto r = drive_fn([&](std::size_t k)
+        {
+            const float f = k < t0 ? 0.f : std::min(1.f, static_cast<float>(k - t0 + 1) / frames);
+            const float y = 3.f - 0.30f * f;   // the line moves 3.00 → 2.70, the robot sits at 2.85
+            return door(0.99f, {-0.5f, y}, {0.5f, y});
+        }, path, mem);
+        std::printf("  over %d frame(s), p_open 0.99: final p_past %.3f p_through %.3g max p_cross %.3g\n",
+                    frames, r.last.p_past, r.last.p_through, r.max_p);
+        check(r.last.p_past > 0.95f, "(the robot IS past the moved read — the setup)");
+        check(r.max_p < kBirth, "no birth: the door was re-read, the robot did not move through it");
+    }
+    {
+        // and the door drifting metres in 2 cm steps across a parked robot
+        std::vector<Vector2f> path;
+        line(path, {0.f, 1.5f}, {0.f, 2.85f});
+        const std::size_t t0 = path.size() + 20;
+        park(path, {0.f, 2.85f}, 200);
+        auto mem = mem_new();
+        const auto r = drive_fn([&](std::size_t k)
+        {
+            const float y = k < t0 ? 3.f : std::max(0.8f, 3.f - 0.02f * static_cast<float>(k - t0 + 1));
+            return door(0.99f, {-0.5f, y}, {0.5f, y});
+        }, path, mem);
+        std::printf("  door drifts 2.2 m in 2 cm steps, p_open 0.99: max p_cross %.3g\n", r.max_p);
+        check(r.max_p < kBirth, "no birth");
+    }
+
     std::printf("(i) ROUND 2 I-2: a DOORWAY POSE SNAP of 10 cm that the prediction's own noise explains\n");
     {
         // the localiser's posterior sigma is 1 cm (known to run ~3x tight); the prediction P_pred (with Q) says 5 cm.
@@ -292,9 +327,13 @@ int main()
             std::printf("  %s: continuity of the snap %.3g, p_cross %.6f\n",
                         with_pred_cov ? "S = P_pred + Sigma (round 2)" : "S = Sigma_now + Sigma_prev (round 1)", w, c.p_cross);
             if (with_pred_cov)
-                check(c.p_cross >= kBirth, "the snap counts as traversal: birth");
+            {
+                check(w > 0.99, "the snap step itself counts as a traversal");
+                check(c.p_cross >= kBirth, "birth");
+            }
             else
-                check(c.p_cross < kBirth, "(round-1 covariance: the same snap blocked the birth — the defect)");
+                check(w < 0.01, "(round-1 covariance read the snap step as a jump — the defect; since round 3 the robot's "
+                                "own onward motion re-labels that mass, so the birth no longer hinges on this one step)");
         }
     }
 
