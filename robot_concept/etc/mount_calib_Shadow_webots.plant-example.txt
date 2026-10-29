@@ -1,0 +1,14 @@
+# robot: Shadow
+# world: webots
+# sensor x y z roll pitch yaw version iso_date source
+# ── PLANTED ERRORS FOR A WEBOTS RUN (sensor_calibration plan, Phase 3). NOT LOADED UNDER THIS NAME. ──
+# To plant:   cp etc/mount_calib_Shadow_webots.plant-example.txt etc/mount_calib_Shadow_webots.txt
+#             then (re)start robot_concept FIRST, then the rest of the fleet (the overlay is read at startup only).
+# To remove:  rm etc/mount_calib_Shadow_webots.txt and restart robot_concept. A forgotten file plants on EVERY run.
+# Each row is a CORRECTION composed over the nominal mount in body-aligned axes at the sensor origin
+# (mount_overlay.h): the graph then believes the wrong mount while Webots keeps the nominal one, so every agent sees
+# the same error. sensor_calibration's factors read the NEGATIVE of these numbers (mount_factors_test part O).
+# Radians. 0.4 deg = 0.0069813, -0.3 deg = -0.0052360, 0.5 deg = 0.0087266, -0.8 deg = -0.0139626, 1 deg = 0.0174533.
+# ⚠ helios yaw/x/y move room_concept's map and pose too (by design: that is what a real mount error does).
+helios 0 0 0 0.0069813 -0.0052360 0 1 2026-10-29 planted-phase3-test
+bpearl 0.010 0 0.010 0.0087266 -0.0139626 0.0174533 1 2026-10-29 planted-phase3-test

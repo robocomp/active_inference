@@ -5,6 +5,7 @@
 // their expected output is room_concept/tools/oracle/mount_factors_selftest.txt as recorded before the move.
 #include "../../common/sensor_calib/mount_factors.h"
 #include "../src/lidar_mount_stage.h"
+#include "../../robot_concept/src/mount_overlay.h"   // the overlay a planted error is written in
 
 #include <charconv>
 #include <clocale>
@@ -279,6 +280,65 @@ static void part_stage()
     check(not st.observe(sw, poly, 0.f), "S10 another sensor is ignored");
 }
 
+// ─────────────────────────────── Part O: an error planted through robot_concept's overlay ───────────────────────────────
+// The Webots protocol (plan Phase 3 rulings): write a CORRECTION C into robot_concept/etc/mount_calib_<robot>_webots.txt.
+// The graph then believes mount = compose(nominal, C) while Webots still mounts the sensor at the nominal pose, so
+// every consumer sees the same wrong extrinsic. This part runs that chain end to end -- true points -> device frame
+// through the TRUE (nominal) mount -> robot frame through the OVERLAID mount (rc::mount::compose, robot_concept's own
+// code) -> the stage -- and pins the SIGN: the factors estimate the correction that RESTORES the truth, so they read
+// -C (to first order), and the stage's sensor origin is the overlaid one.
+static void part_overlay()
+{
+    using namespace syn;
+    std::printf("Part O: error planted through the mount overlay -> the stage reads -C\n");
+    const Room room;
+    const std::vector<Eigen::Vector2f> poly{{float(-room.hx), float(-room.hy)}, {float(room.hx), float(-room.hy)},
+                                            {float(room.hx), float(room.hy)}, {float(-room.hx), float(room.hy)}};
+    struct Sensor { const char *name; V3 t_nom; rc::mount::Vec3 rpy_nom; rc::mount::Correction C; std::vector<double> elev; };
+    // Nominal mounts in the Shadow frame (ROBOT_GEOMETRY.md), both hung inverted (Ry(pi)).
+    rc::mount::Correction Ch; Ch.rpy = {0.4 * kDegD, -0.3 * kDegD, 0.0};                       // helios tilt
+    rc::mount::Correction Cb; Cb.t = {0.010, 0.0, 0.010}; Cb.rpy = {0.5 * kDegD, -0.8 * kDegD, 1.0 * kDegD};   // bpearl
+    const std::array<Sensor, 2> sensors{{{"helios", V3(0.0, -0.155, 1.1075), {0.0, M_PI, 0.0}, Ch, range(-15.5, 54.5, 2.0)},
+                                         {"bpearl", V3(0.0, 0.14, 0.7025), {0.0, M_PI, 0.0}, Cb, range(-88.0, -2.0, 3.0)}}};
+    sc::LidarMountStageConfig cfg; cfg.log_dir = "";
+    sc::LidarMountStage st(cfg);
+    std::mt19937 rng(11);
+    std::uniform_real_distribution<double> ux(-1.0, 1.0), uth(-M_PI, M_PI);
+    std::int64_t stamp = 1'000'000;
+    for (int k = 0; k < 300; ++k)
+    {
+        const Pose P{ux(rng), 1.5 * ux(rng), uth(rng)};
+        Eigen::Affine3d T = Eigen::Affine3d::Identity();
+        T.translate(V3(P.x, P.y, 0.0)); T.rotate(Eigen::AngleAxisd(P.th, V3::UnitZ()));
+        stamp += 600;   // past 1/rate_hz: every sweep is fed
+        for (const auto &S : sensors)
+        {
+            const auto truth = sweep(room, P, S.t_nom, M6{}, S.elev, 1.5 * kDegD, 0.01, rng, std::string(S.name) == "helios");
+            const Eigen::Matrix3d Rn = rc::mount::euler_to_matrix(S.rpy_nom);
+            const rc::mount::Mount G = rc::mount::compose({S.t_nom.x(), S.t_nom.y(), S.t_nom.z()}, S.rpy_nom, S.C);
+            const Eigen::Matrix3d Rg = rc::mount::euler_to_matrix(G.rpy);
+            const V3 tg(G.t[0], G.t[1], G.t[2]);
+            sc::MountSweep sw; sw.sensor = S.name; sw.stamp_ms = stamp; sw.origin_robot = tg.cast<float>(); sw.room_T_robot = T;
+            for (const auto &p : truth)
+            {
+                const V3 p_dev = Rn.transpose() * (p.cast<double>() - S.t_nom);   // what the device reports
+                sw.points_robot.emplace_back((Rg * p_dev + tg).cast<float>());      // what the graph makes of it
+            }
+            st.observe(sw, poly, float(room.h));
+        }
+    }
+    const auto s = st.state();
+    const Eigen::Vector3d fm = s.floor.mean(), fs = s.floor.sigma();
+    const auto hm = s.vert_helios.mean(), hs = s.vert_helios.sigma();
+    const auto bm = s.vert_bpearl.mean(), bs = s.vert_bpearl.sigma();
+    std::printf("    %s\n", st.summary().c_str());
+    auto near = [](double est, double sd, double want) { return std::abs(est - want) < std::max(3.0 * sd, 0.1 * std::abs(want)); };
+    check(near(fm(0), fs(0), -Cb.rpy[0]) and near(fm(1), fs(1), -Cb.rpy[1]), "O1 bpearl floor roll/pitch read -C (planted +0.5 / -0.8 deg)");
+    check(near(fm(2), fs(2), -Cb.t[2]), "O2 bpearl floor z reads -C (planted +10 mm)");
+    check(near(hm(3), hs(3), -Ch.rpy[0]) and near(hm(4), hs(4), -Ch.rpy[1]), "O3 helios tilt reads -C (planted +0.4 / -0.3 deg)");
+    check(near(bm(0), bs(0), -Cb.t[0]) and near(bm(5), bs(5), -Cb.rpy[2]), "O4 bpearl planar x / yaw read -C (planted +10 mm / +1 deg)");
+}
+
 int main(int argc, char **argv)
 {
     std::setlocale(LC_ALL, "");   // CLAUDE.md: a harness that parses agent data must run under the agent's locale
@@ -320,6 +380,7 @@ int main(int argc, char **argv)
     }
 
     if (only.empty() or only == "S") part_stage();
+    if (only.empty() or only == "O") part_overlay();
 
     std::printf("%s (%d failures)\n", failures ? "FAILED" : "ALL PASS", failures);
     return failures ? 1 : 0;
