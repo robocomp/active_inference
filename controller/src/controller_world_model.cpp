@@ -49,6 +49,7 @@ bool ControllerWorldModel::refresh_graph_state()
             qInfo().noquote() << QString("[controller] current room changed: %1 -> %2")
                                      .arg(QString::fromStdString(graph_state_.room_name))
                                      .arg(QString::fromStdString(room->name()));
+        if (not graph_state_.room_name.empty()) graph_state_.prev_room_name = graph_state_.room_name;
         graph_state_.room_id = room->id();
         graph_state_.room_name = room->name();
     }

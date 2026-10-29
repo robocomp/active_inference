@@ -557,6 +557,7 @@ struct ControllerGraphState
     std::uint64_t room_id = 0;
     std::uint64_t robot_id = 0;
     std::string room_name;
+    std::string prev_room_name;   ///< the room the robot was in before room_name (empty until the first change)
     std::string robot_name;
 
     bool ready() const

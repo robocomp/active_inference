@@ -469,7 +469,15 @@ std::expected<std::string, std::string> SpecificWorker::resolve_door(const rc::m
 {
 	if (rc::relation_of(r) != rc::DoorRelationKind::None)
 	{
-		if (const auto door = rc::pick_door(r, door_facts()); door.has_value()) return *door;
+		const auto facts = door_facts();
+		// `new` only once the way BACK is known: right after a crossing the entry door carries no recall yet and would read
+		// "new" (recog_try30 leg 4 took the door it had just come through). ltsm marks it recall_<previous room> once it has
+		// processed the crossing; until then nothing in this room is known to be new. A relation, not a timer: if ltsm never
+		// marks it, the step's hold runs out and the caller scans/retries as for any unresolved door.
+		if (const auto &gs = world_model_.graph_state(); rc::relation_of(r) == rc::DoorRelationKind::New and not gs.prev_room_name.empty()
+		    and std::ranges::none_of(facts, [&](const rc::DoorFacts &f) { return f.recall_rooms.contains(gs.prev_room_name); }))
+			return std::unexpected(std::format("no door of '{}' is known yet to lead back to '{}'", gs.room_name, gs.prev_room_name));
+		if (const auto door = rc::pick_door(r, facts); door.has_value()) return *door;
 		return std::unexpected(std::format("no door of '{}' resolves '{}' yet", world_model_.graph_state().room_name, r.name));
 	}
 	if (r.kind == Ref::Kind::Node)
