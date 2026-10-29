@@ -331,8 +331,11 @@ private:
     std::optional<rc::door::Rigid2> proposal_P_from_K(std::uint64_t room_id, const std::vector<rc::door::ProposalView>& props) const;
     std::optional<rc::door::RobotFix> robot_fix_in_room(std::uint64_t room_id) const;   // newest robot block in the room's frame
     void step_adoption();   // C2.8: an ACCEPTED ltsm proposal for the current room = a recalled entry under its new name
-    rc::door::AdoptionFramePairing adoption_pairing_;   // T(K<-P) from the robot's pose across the frame switch (Task 19)
-    bool adoption_hold_ = false;                        // accepted, re-seat pending K's first robot block: no fit this cycle
+    rc::door::AdoptionFramePairing adoption_pairing_;   // T(K<-P) from the robot across the frame switch: cross-check only (Task 20)
+    // Task 20: the robot-paired T(K<-P) is a logged cross-check of the accepted one, taken at K's first robot block.
+    struct AdoptionCrossCheck { std::uint64_t room = 0; std::string name; rc::door::Rigid2 accepted; };
+    std::optional<AdoptionCrossCheck> adoption_crosscheck_;
+    void step_adoption_crosscheck(const std::string& name, const std::optional<rc::door::RobotFix>& fix);
     std::pair<std::uint64_t, std::string> followed_name_{0, {}};   // the followed room's id and the name it wore last cycle
     std::set<std::pair<std::uint64_t, std::string>> adoption_handled_;
     rc::door::RoomNameHistory room_names_;

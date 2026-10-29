@@ -267,6 +267,47 @@ int main()
             CHECK(not pr.K_from_P(fixK(1100)).has_value());
         }
     }
+    // Task 20: the re-seat reads the ACCEPTED T(P<-K) room_concept wrote on the proposal edge before "accepted"; the
+    // robot-paired T is a cross-check only, and nothing waits for K's first robot block.
+    {
+        const Rigid2 K_from_P_true{2.95f, 1.55f, 1.5707963f};                     // live: room_4 (P) -> room_2 (K)
+        const Rigid2 half_turn{0.42f, -0.38f, 3.1415927f};                        // 180 deg about (0.21,-0.19) in K
+        const Rigid2 P_from_K_prior = rigid_inverse(rigid_compose(half_turn, K_from_P_true));   // ltsm's (wrong) prior
+        const Rigid2 P_from_K_accepted = rigid_inverse(K_from_P_true);           // room_concept's fit, written on the edge
+        const PublishedPose door_43_P{-0.00f, 0.01f, 3.138f};                     // the entry mirror in P
+        // pending: the edge holds ltsm's prior, and nothing is re-seated by it
+        CHECK(not accepted_K_from_P("pending", P_from_K_prior).has_value());
+        CHECK(not accepted_K_from_P("accepted", std::nullopt).has_value());
+        // accepted: the edge now holds the accepted T (written before the state) — the door lands on DOOR_2's hole
+        const auto T = accepted_K_from_P("accepted", P_from_K_accepted);
+        CHECK(T.has_value());
+        if (T.has_value())
+        {
+            const auto reseated = rigid_apply(*T, door_43_P);
+            std::print("  Task 20: door_43 re-seated to ({:.2f},{:.2f}) yaw {:.3f}; door_20 at (2.95,1.55)\n", reseated.cx, reseated.cy, reseated.yaw);
+            CHECK(std::hypot(reseated.cx - 2.95f, reseated.cy - 1.55f) < 0.02f);   // near door_20, at the hole
+            const auto by_prior = rigid_apply(rigid_inverse(P_from_K_prior), door_43_P);
+            CHECK(std::hypot(by_prior.cx - reseated.cx, by_prior.cy - reseated.cy) > 6.4f);   // the prior did NOT leak
+        }
+        // no pause: in the rename cycle the robot cannot answer yet (its block may still be P's), the accepted T can
+        const Rigid2 robot_K0{-0.4f, 2.6f, -1.2f}, twist_per_s{0.f, 0.3f, 0.4f};
+        const auto robot_K = [&](std::uint64_t t) { return rigid_compose(robot_K0, rigid_power(twist_per_s, 1e-3f * float(t))); };
+        const auto robot_P = [&](std::uint64_t t) { return rigid_compose(rigid_inverse(K_from_P_true), robot_K(t)); };
+        AdoptionFramePairing pr;
+        pr.observe(7, "room_4", RobotFix{robot_P(1000), 1000}); pr.observe(7, "room_4", RobotFix{robot_P(1100), 1100});
+        pr.observe(7, "room_2", RobotFix{robot_P(1150), 1150});
+        CHECK(not pr.K_from_P(RobotFix{robot_P(1150), 1150}).has_value() and T.has_value());
+        // the cross-check, once K's first block is read: the robot agrees with the accepted T, and disagrees with the prior
+        pr.observe(7, "room_2", RobotFix{robot_K(1250), 1250});
+        const auto R = pr.K_from_P(RobotFix{robot_K(1250), 1250});
+        CHECK(R.has_value() and T.has_value());
+        if (R.has_value() and T.has_value())
+        {
+            const auto ok = frame_discrepancy(*T, *R), bad = frame_discrepancy(rigid_inverse(P_from_K_prior), *R);
+            CHECK(ok.d_xy < 0.01f and ok.d_yaw_deg < 0.2f);
+            CHECK(bad.d_xy > 1.0f and bad.d_yaw_deg > 179.0f);
+        }
+    }
     std::print("{}\n", fails == 0 ? "ALL PASS" : "FAILED");
     return fails != 0;
 }

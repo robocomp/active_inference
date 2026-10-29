@@ -17,6 +17,7 @@
 #include <cstdint>
 #include <limits>
 #include <optional>
+#include <string_view>
 #include <string>
 
 #include <Eigen/Dense>
@@ -116,7 +117,27 @@ struct Rigid2 { float tx = 0.0f, ty = 0.0f, yaw = 0.0f; };
 /// The robot's pose in the followed room's frame as one RT block: the pose and the block's stamp (ms).
 struct RobotFix { Rigid2 pose; std::uint64_t stamp_ms = 0; };
 
-/// ★T(K<-P) FROM THE ROBOT, NOT FROM THE PROPOSAL (Task 19, recog_proto6). ltsm's proposal edge carries T(P<-K) built from
+/// ★THE FRAME CHANGE OF AN ACCEPTED ADOPTION IS THE PROPOSAL EDGE'S, READ AT THE VERDICT (Task 20). room_concept computes
+/// T(P<-K) from its own fit (robot_P ∘ robot_K⁻¹) and writes it on the RT edge P -> proposal BEFORE state = "accepted", so a
+/// reader that sees "accepted" reads the ACCEPTED transform — never ltsm's prior, which recog_proto6 showed a half turn
+/// off. One fact, three readers (room_concept's own edges, ltsm's carry-over, these doors): no wait, no robot pairing.
+/// nullopt unless the proposal is accepted and its edge was readable.
+[[nodiscard]] inline std::optional<Rigid2> accepted_K_from_P(std::string_view state, const std::optional<Rigid2>& edge_P_from_K)
+{
+    if (state != "accepted" or not edge_P_from_K.has_value()) return std::nullopt;
+    return rigid_inverse(*edge_P_from_K);
+}
+
+/// How far two frame changes T(K<-P) disagree, at P's origin (metres) and in heading (degrees): the robot-paired one is
+/// logged against the accepted one as a CROSS-CHECK only (it never moves a door).
+struct FrameDiscrepancy { float d_xy = 0.f, d_yaw_deg = 0.f; };
+[[nodiscard]] inline FrameDiscrepancy frame_discrepancy(const Rigid2& a, const Rigid2& b)
+{
+    return {std::hypot(a.tx - b.tx, a.ty - b.ty),
+            std::abs(std::remainder(a.yaw - b.yaw, 2.0f * static_cast<float>(M_PI))) * 180.0f / static_cast<float>(M_PI)};
+}
+
+/// T(K<-P) FROM THE ROBOT — since Task 20 a CROSS-CHECK of the accepted transform, logged, never applied (Task 19, recog_proto6). ltsm's proposal edge carries T(P<-K) built from
 /// ITS best pose mode; room_concept's adoption fit then relocalises the robot against K's outline, and what it publishes
 /// in K is the FIT's pose — 179° / 3.12 m away from ltsm's mode in recog_proto6, so the proposal's frame change moved the
 /// entry mirror door_43 6.5 m off DOOR_2's hole (a 180° turn about (0.21,-0.19) in K). The frame change every consumer
