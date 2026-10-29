@@ -86,7 +86,7 @@ for leg in 1 2 3 4 5 6; do
        [ -z "$d" ] && { echo "leg 1: no door born in $here within ${SCAN_CAP_S} s"; break; }; d1=$d;;
     2) d=${d1:-door_1};;
     3) # room_1's DOOR_0 face: whatever door other than door_1 is live in room_1 (restored or born); scan if none yet
-       d=$(scan_for_door door_1 3); [ -z "$d" ] && { echo "leg 3: no door other than door_1 in $here within ${SCAN_CAP_S} s"; break; }; d3=$d;;
+       d=$(scan_for_door "${d1:-door_1}" 3); [ -z "$d" ] && { echo "leg 3: no door other than door_1 in $here within ${SCAN_CAP_S} s"; break; }; d3=$d;;
     4) SW0=$A0; SD0=$D0; ts=$(date +%s)
        # scan until DOOR_2 is born (spin + explore, bounded; the gold_tour driver gave up after ONE 90 s explore)
        d2=$(scan_for_door "${d3:-door_2}" 4)   # not the door leg 3 came through (its entry mirror here keeps that name)
