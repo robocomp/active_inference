@@ -9,7 +9,7 @@
 // rc::status::event(), which does nothing with no sink installed, and build_state() is never called.
 // So a call site never needs a guard.
 //
-// THREADING: observe(), observe_compute(), note_camcal() and build_state() are MAIN THREAD only (they
+// THREADING: observe(), observe_compute() and build_state() are MAIN THREAD only (they
 // are called from compute(), the camera pumps and a QTimer). The static event helpers are any-thread.
 //
 // Viewer: room_concept/tools/room_tui.py (launcher: room_concept/tools/room_run.sh).
@@ -99,9 +99,6 @@ public:
     void accumulate_surprise(const loc::UpdateResult& r);
     /// compute(): this tick's cost.
     void observe_compute(long long us);
-    /// The camera mount solve, in physical units, from the same place the Calib window gets it.
-    void note_camcal(const std::string& cam, const std::array<float, 4>& value, const std::array<float, 4>& sigma,
-                     int informed, float cond, long pairs);
     /// Build and post one `state` event. Returns the JSON (the dump command writes it).
     std::string build_state();
     [[nodiscard]] const std::string& last_state() const { return last_state_; }
@@ -133,15 +130,6 @@ private:
     long long comp_n_ = 0, comp_sum_us_ = 0, comp_max_us_ = 0;
     long long comp_t0_ms_ = 0;
 
-    struct Cam
-    {
-        std::array<float, 4> v{}, s{};
-        int informed = 0;
-        float cond = 0;
-        long pairs = 0;
-        long long t_ms = 0;
-    };
-    std::map<std::string, Cam> cams_;
 
     struct Rate { long long count = -1; long long t_ms = 0; double hz = 0; };
     std::map<std::string, Rate> rates_;

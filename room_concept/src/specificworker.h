@@ -37,13 +37,10 @@
 #include "lidar_ingestor.h"
 #include "imu_ingestor.h"
 #include "camera_ingestor.h"
-#include "mount_lidar_pair.h"
-#include "mount_calibrator.h"
 #include "pose_publisher.h"
 #include "calib_channels.h"
 #include "door_apertures.h"
 #include "ground_truth_log.h"
-#include "camera_calibration.h"
 #include <map>
 #include "image_edge_source.h"
 #include "room_viewer.h"
@@ -300,18 +297,9 @@ class SpecificWorker : public GenericWorker
     // ★ SELF-CHECKING, not a silent negation. Both conventions are scored every cycle by how CONSTANT
     //   the resulting offset is; gt_convention_report() names the winner. If robot_concept is fixed,
     //   the winner flips and the log says so, instead of this correction inverting a correct signal.
-    // ── Stage 2: camera-vs-LiDAR mount calibration, pose-free (mount_lidar_pair.h) ───────────────
-    // TWO accumulators on purpose. `mp_win_` resets every window and is directly comparable with
-    // stage 1's per-window solve; `mp_pool_` never resets. Pooling is only legitimate if the pose was
-    // the dominant between-window nuisance, which is a CLAIM — running both is what tests it.
-    // ── One calibration channel per camera ───────────────────────────────────────────────────────
-    // The driving camera keeps the members below; every OTHER camera in ImageEdge.calibCameras gets
-    // one of these — its own ingestor, its own extraction, its own evidence file. Calibration and
-    // driving are different jobs and need not use the same sensor.
-    // CalibChannel now lives in rc::CalibChannels, with the rest of the RGB plumbing.
-    /// Cost of the two per-tick camera pumps, in nanoseconds accumulated between reports. They run
-    /// whether or not the optimiser will, so at 100% early exit they ARE the CPU.
-    qint64 pump_ns_edge_ = 0, pump_ns_calib_ = 0;
+    /// Cost of the per-tick camera pump, in nanoseconds accumulated between reports. It runs
+    /// whether or not the optimiser will, so at 100% early exit it IS the CPU.
+    qint64 pump_ns_edge_ = 0;
     int    pump_ticks_ = 0;
     qint64 pump_report_ms_ = 0;
     /// Put each triple point in the ROOM by intersecting its measured ray with the plane it lies in.
@@ -323,10 +311,6 @@ class SpecificWorker : public GenericWorker
     ///   ~0.4% bias. It is also what the 2-D canvas needs to draw a camera corner beside its LiDAR
     ///   one, which until now it silently skipped for want of a range.
 
-    // Camera<->LiDAR mount calibration: rc::MountCalibrator (src/mount_calibrator.{h,cpp}).
-    // Owns its accumulators, its pair logs, the per-camera publish bookkeeping and the sensor-triangle
-    // loop closure; borrows only the graph, the config and the viewer slot.
-    std::unique_ptr<rc::MountCalibrator> mount_;
     /// Pose publishing: rc::PosePublisher (src/pose_publisher.{h,cpp}). Owns the corrected and
     /// predicted writers, the clamp, the jump log and the mutex that makes the two threads safe.
     std::unique_ptr<rc::PosePublisher> pose_pub_;
@@ -334,8 +318,6 @@ class SpecificWorker : public GenericWorker
     /// every calibration-only camera, their extractors, evidence and pair logs, and the room polygon
     /// they project.
     std::unique_ptr<rc::CalibChannels> calib_;
-    /// LidarMountApply + re-referencing the camera evidence to the LiDAR yaw in force (specificworker.cpp).
-    void lidar_mount_apply_step(const std::optional<rc::RoomConcept::UpdateResult>& loc_res);
     /// Ground-truth grading: rc::GroundTruthLog (src/ground_truth_log.{h,cpp}).
     std::unique_ptr<rc::GroundTruthLog> gt_log_;
     /// Open doorways, refreshed from the graph in compute() and handed to the localiser as a snapshot.

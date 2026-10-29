@@ -1,14 +1,11 @@
 #pragma once
 
-// ── THE RGB CHANNELS, LIFTED OUT OF SpecificWorker ───────────────────────────────────────────────
-// One driving camera and any number of calibration-only cameras, each with its own ingestor, its own
-// contour extraction, its own evidence and its own replayable pair log. Calibration and driving are
-// different jobs and need not use the same sensor, which is the whole reason this is a LIST and not
-// a pair of members.
-//
-// It owns the plumbing (ingestors, extractors, per-channel state, the room polygon they project) and
-// borrows what it reports to: the graph, the config, the estimator it asks for poses and corner
-// matches, the mount calibrator it feeds pairs to, and the viewer it displays on.
+// ── THE RGB CHANNEL, LIFTED OUT OF SpecificWorker ────────────────────────────────────────────────
+// The DRIVING camera: its ingestor, its contour extraction and the room polygon it projects. It borrows
+// what it reports to: the graph, the config, the estimator it asks for poses and corner matches, and
+// the viewer it displays on. (Until 2026-10-29 it also ran calibration-only cameras and fed the camera
+// mount calibrator; camera extrinsics are robot_concept's graph + overlay now, estimated by
+// sensor_calibration. The class keeps its name to keep the diff small.)
 //
 // ⚠ The room polygon arrives LATE in Estimate mode. It is loaded from SVG in Given mode and is empty
 // until the layout freezes otherwise — see take_room_polygon_from(); three consumers in a row were
@@ -21,7 +18,6 @@
 #include <string>
 #include <vector>
 
-#include "camera_calibration.h"
 #include "camera_ingestor.h"
 #include "image_edge_source.h"
 #include "room_config.h"
@@ -32,17 +28,15 @@ namespace rc
 {
     class RoomConcept;
     class RoomViewer;
-    class MountCalibrator;
 
     class CalibChannels
     {
     public:
         CalibChannels(std::shared_ptr<DSR::DSRGraph> graph, RoomConfig& params, RoomConcept& room,
-                      MountCalibrator& mount, RoomViewer** viewer)
-            : G(std::move(graph)), params(params), room_concept_(room), mount_(mount),
-              viewer_slot_(viewer) {}
+                      RoomViewer** viewer)
+            : G(std::move(graph)), params(params), room_concept_(room), viewer_slot_(viewer) {}
 
-        /// Build the driving camera and every entry of ImageEdge.calibCameras. Does nothing when
+        /// Build the driving camera. Does nothing when
         /// ImageEdge.enable is false: no subscriber, no thread, no extraction — the feature is exactly
         /// free when off, which is why the construction is here and not unconditional.
         void configure();
@@ -50,8 +44,6 @@ namespace rc
         void stop();                  ///< drop the readers before the graph goes (shutdown)
 
         void pump_image_edges();      ///< the driving camera: extraction, once per compute() tick
-        void pump_calib_channels();   ///< every other camera: calibration only, never the pose
-        void apply_refresh_policy(rc::CameraIngestor& ing, const std::string& name) const;   ///< live edge refresh off when mountPublish is on
 
         /// The room polygon the extraction projects. Set from the SVG in Given mode; in Estimate mode
         /// it must be taken from the frozen layout once LOCALIZING begins.
@@ -69,8 +61,6 @@ namespace rc
         /// Every camera's ingest counter and frame age, for the status stream's rate readout.
         struct StreamStat { std::string name; long long frames = -1; long long age_ms = -1; };
         std::vector<StreamStat> stream_stats() const;
-        /// The status stream's copy of each calibration channel's solve (see rc::camcal::Sink).
-        void set_camcal_sink(rc::camcal::Sink s) { camcal_sink_ = std::move(s); }
 
         /// Carry a triple point's image corner into the room plane at the LiDAR corner's range, so the
         /// canvas can draw a camera corner beside its LiDAR one. Static: it needs no channel state.
@@ -84,7 +74,6 @@ namespace rc
         RoomConfig&      params;
         RoomConcept&     room_concept_;
         bool             localizing_throttled_ = false;   // ImageEdge.localizingConvertIntervalMs applied
-        MountCalibrator& mount_;
         RoomViewer**     viewer_slot_ = nullptr;
 
         std::unique_ptr<rc::CameraIngestor>  camera_ingestor_;
@@ -96,34 +85,5 @@ namespace rc
 
         std::vector<Eigen::Vector2f> room_polygon_;
         Eigen::Vector2f              room_polygon_offset_ = Eigen::Vector2f::Zero();
-
-    public:
-        /// The driving camera keeps the members above; every OTHER camera in ImageEdge.calibCameras
-        /// gets one of these. Auxiliary channels wrote NO pair rows before 2026-09-02 — they
-        /// accumulated evidence but left no replayable record, so arm 7's attribution table could not
-        /// be replayed from a single drive. One file per camera, like the evidence file beside it.
-        struct CalibChannel
-        {
-            std::string                          name;
-            std::unique_ptr<rc::CameraIngestor>  ingestor;
-            std::unique_ptr<rc::ImageEdgeSource> source;
-            rc::camcal::Estimator                calib;
-            std::ofstream                        csv;
-            bool                                 bound = false, loaded = false;
-            long                                 pairs = 0;
-            /// Last push to the Calib window (ms, WALL clock — so a channel resuming evidence from
-            /// disk still shows it on a tick where no frame arrived).
-            std::int64_t                         viz_ms = 0;
-        };
-        /// Every calibration-only channel, read-only (joint calibration monitor, plan 2026-10-05 Task 4).
-        [[nodiscard]] const std::vector<std::unique_ptr<CalibChannel>>& channels() const noexcept
-        { return calib_channels_; }
-        /// Mutable access, for re-referencing each channel's evidence when the LiDAR mount correction
-        /// changes (plan 2026-10-05 Task 5). Main thread only, like the pumps.
-        [[nodiscard]] std::vector<std::unique_ptr<CalibChannel>>& channels() noexcept
-        { return calib_channels_; }
-    private:
-        std::vector<std::unique_ptr<CalibChannel>> calib_channels_;
-        rc::camcal::Sink camcal_sink_;
     };
 }   // namespace rc

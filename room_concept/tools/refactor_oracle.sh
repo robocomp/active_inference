@@ -42,8 +42,8 @@ declare -A STANDALONE_EXTRA=(
 )
 STANDALONE=(free_space_polygon_selftest layout_explorer_selftest image_edge_frame_selftest stride_span_selftest
             motion_noise_vc_selftest surprise_selftest
-            lidar_mount_selftest motion_calib_lever_selftest motion_noise_innov_selftest mount_factors_selftest
-            mount_info_selftest pose_field_bias_selftest rest_density_selftest wheel_noise_selftest
+            motion_calib_lever_selftest motion_noise_innov_selftest
+            pose_field_bias_selftest rest_density_selftest wheel_noise_selftest
             calib_estimator_selftest calib_intake_selftest)
 
 # ── cases: name | env | command ─────────────────────────────────────────────────────────────────
@@ -52,7 +52,6 @@ CASES=(
     "reloc_selftest||$BIN/reloc_selftest"
     "corner_gather_test||$BIN/corner_gather_test"
     "motion_calib||$BIN/motion_calib --selftest"
-    "mount_replay||$BIN/mount_replay --selftest"
     "wss_default||$BIN/wall_slam_selftest"
     "wss_tour|WS_TOUR=1|$BIN/wall_slam_selftest"
     # Box estimator, single rooms of the WS_BOXES_RANDOM sweep (the 12-room sweep takes 17 min): its
@@ -67,7 +66,7 @@ CHAOTIC=" reloc_selftest wss_default wss_tour wss_box_room0 wss_box_room2 wss_bo
 if (( build )); then
     if (( $(pgrep -c cc1plus) > 0 )); then echo "another build is running (pgrep cc1plus) — wait for it"; exit 2; fi
     echo "building CMake selftests (-j8) ..."
-    make -C build -j8 gn_selftest reloc_selftest wall_slam_selftest corner_gather_test motion_calib mount_replay \
+    make -C build -j8 gn_selftest reloc_selftest wall_slam_selftest corner_gather_test motion_calib \
         > "$WORK/build.log" 2>&1 || { echo "BUILD FAILED — see $WORK/build.log"; exit 1; }
 fi
 # Standalone selftests are always compiled (seconds): --no-build skips only the CMake targets, and a

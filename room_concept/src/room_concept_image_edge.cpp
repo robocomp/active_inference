@@ -45,11 +45,7 @@ namespace rc
         if (obs.empty())       { ++imgedge_no_obs_; imgedge_health(timestamp_ms); return; }
         if (not obs.cam.valid) { ++imgedge_no_cam_; imgedge_health(timestamp_ms); return; }
 
-        last_mount_fy_ = obs.cam.fy;
         const Eigen::Vector3f pose = poses_after.back();
-        // Where the robot was while these samples were taken. Logged beside the fit because the
-        // question the cumulative form could not answer is whether the estimate moves WITH position.
-        mnt_pose_x_ = pose.x(); mnt_pose_y_ = pose.y(); mnt_pose_th_ = pose.z();
         const float cth = std::cos(pose.z()), sth = std::sin(pose.z());
         Eigen::Matrix3f Rm; Rm << cth, sth, 0.f, -sth, cth, 0.f, 0.f, 0.f, 1.f;
 
@@ -120,45 +116,6 @@ namespace rc
                     const double w   = s2 > 0.f ? static_cast<double>(gam) / static_cast<double>(s2)
                                                 : 0.0;
 
-                    // ── Monitor 2: RIGID IMAGE TRANSLATION,  r_k ~ tx*nx_k + ty*ny_k ─────────
-                    // Why this exists beside the fy/d fit below. The residual is SCALAR and taken
-                    // along each contour's OWN normal, so a rigid displacement of the prediction —
-                    // principal point, boresight yaw, a small pitch — enters sample k as
-                    // t . n_hat_k: positive on some contours, negative on others, averaging toward
-                    // zero. The CONSTANT column cannot represent it. So "b_const ~ 0" was never
-                    // evidence that the camera points where we think it does; it is what a rigid
-                    // pointing error looks like in a basis that cannot see one.
-                    // Measured parked (2026-08-28, 82 windows): b_const -0.15 +/- 0.11 px and
-                    // b_invd -0.0036 +/- 0.0012 m together account for ~0.7 px of a 6.11 px r_rms.
-                    // This is the basis in which the missing 5.4 px would show up if it is pointing.
-                    // ★ ALL CONTOUR CLASSES, unlike the fit below. What conditions this fit is the
-                    // spread of contour ORIENTATIONS, not of ranges, and that is why it works
-                    // PARKED where the fy/d fit cannot (rho 0.9864, cond 146, unmoved across 82
-                    // windows because the pose spanned 3 cm). Mixing floor junctions (near-vertical
-                    // normals) with wall corners (near-horizontal) makes the columns orthogonal,
-                    // but it is NOT required: simulated at the real geometry, junctions alone give
-                    // cond 1.1, because a contour's normal already turns by ~0.15 rad along it.
-                    // Taking every class is for sample count and coverage, not conditioning.
-                    if (gam > 1e-6f)
-                    {
-                        const double nx = smp.n_hat.x(), ny = smp.n_hat.y();
-                        mnt_T11_ += w * nx * nx;  mnt_T12_ += w * nx * ny;  mnt_T22_ += w * ny * ny;
-                        mnt_Tx_  += w * nx * r;   mnt_Ty_  += w * ny * r;   mnt_Tyy_ += w * r * r;
-                        ++mnt_tn_;
-
-                        // ── Monitor 3: the four mount nuisances as PARAMETERS (see room_concept.h) ──
-                        // Same samples, same weight, same residual. The only new thing is keeping h
-                        // instead of collapsing it to h.squaredNorm().
-                        // ★ head<4> ON PURPOSE: column [4] is THIS CONTOUR's map position, a
-                        //   per-segment nuisance, not a mount parameter. Fitting it globally would
-                        //   average six different walls' offsets into one meaningless number and
-                        //   contaminate the four that are genuinely global.
-                        const Eigen::Vector4d hd = smp.h.head<4>().cast<double>();
-                        mnt_H_.noalias() += w * hd * hd.transpose();
-                        mnt_b_.noalias() += w * hd * static_cast<double>(r);
-                        ++mnt_hn_;
-                    }
-
                     // ── Monitor 1: FLOOR-JUNCTION samples only ───────────────────────────────
                     // The fy/d signature is what makes pitch and height separable, and a vertical
                     // corner does not carry it.
@@ -171,15 +128,6 @@ namespace rc
                             const double x2 = obs.cam.fy / d;
                             S11 += w;        S12 += w * x2;   S22 += w * x2 * x2;
                             Sy1 += w * r;    Sy2 += w * x2 * r; Syy += w * r * r; Sw += w;
-                            // ── POOLED across the whole run ───────────────────────────────────
-                            // The mount is STATIC, so the per-frame fit is the wrong unit: it asks
-                            // four samples spanning almost no depth to separate a constant from a
-                            // 1/d term, which is near-degenerate, and the answer wandered a full
-                            // degree between quarters of a run. Pooling turns range diversity from a
-                            // within-image accident into something the TRAJECTORY supplies for free.
-                            mnt_S11_ += w;       mnt_S12_ += w * x2;    mnt_S22_ += w * x2 * x2;
-                            mnt_Sy1_ += w * r;   mnt_Sy2_ += w * x2 * r; mnt_Syy_ += w * r * r;
-                            ++mnt_n_;
                         }
                     }
                     abs_r.push_back(std::fabs(r));
@@ -236,30 +184,6 @@ namespace rc
                 const auto& b = poses_on.back();
                 dx = b.x() - a.x(); dy = b.y() - a.y();
                 dth = std::atan2(std::sin(b.z() - a.z()), std::cos(b.z() - a.z()));
-            }
-
-            // ── FACTOR B: the same window, the same measured points, the NOMINAL mount ───────────
-            // The observation records the self-calibration correction that was inside its extrinsic
-            // when it was extracted, so removing that correction re-creates the mount the robot
-            // would have had with the loop switched off. Both conditions therefore differ ONLY in
-            // the prediction, which is the pairing the experiment asks for — and it is exact rather
-            // than first order, because this re-projects rather than linearising.
-            // ★ Shadow only. The authoritative solve above runs with mount_delta zero, always.
-            if (r_on.ok and not obs.mount_correction.isZero())
-            {
-                Params p_b0 = p_on;
-                p_b0.image_edge.mount_delta = -obs.mount_correction;
-                rc::gn::Input in_b0 = in; in_b0.params = &p_b0;
-                auto poses_b0 = poses_after;
-                if (const auto r_b0 = rc::gn::solve(in_b0, poses_b0, opts); r_b0.ok)
-                {
-                    std::scoped_lock lk(factor_b_mutex_);
-                    factor_b_.valid = true;
-                    factor_b_.ts_ms = timestamp_ms;
-                    factor_b_.pose_calibrated = poses_on.back();   // B1: the mount in force
-                    factor_b_.pose_nominal    = poses_b0.back();   // B0: the correction removed
-                    factor_b_.correction      = obs.mount_correction;
-                }
             }
         }
 
@@ -349,7 +273,6 @@ namespace rc
         }
         log_triple_points(obs, timestamp_ms, pose);
         imgedge_health(timestamp_ms);
-        mount_pooled_solve(timestamp_ms);
     }
 
     /// One row per detected triple point per frame. Diagnostic only — nothing consumes these yet.

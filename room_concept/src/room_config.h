@@ -44,19 +44,6 @@ struct RoomConfig
     std::string LIDAR_HELIOS_NAME     = "helios";
     // Destination frame for the device->robot transform (the mount RT edge parent, e.g. body->helios).
     std::string LIDAR_ROBOT_FRAME     = "";   // empty ⇒ auto-derived from the type-"robot" node at init
-    // Joint sensor-mount + odometry calibration (plan docs/superpowers/plans/2026-10-05-joint-calibration.md).
-    bool  LIDAR_MOUNT_APPLY = false;    // RoomConcept.LidarMountApply — helios (lever, yaw) applied to the points
-    float LIDAR_MOUNT_INJECT_X = 0.f;   // RoomConcept.LidarMountInjectX (m)    ⚠ SIMULATION ONLY
-    float LIDAR_MOUNT_INJECT_Y = 0.f;   // RoomConcept.LidarMountInjectY (m)    ⚠ SIMULATION ONLY
-    float LIDAR_MOUNT_INJECT_YAW_DEG = 0.f;   // RoomConcept.LidarMountInjectYawDeg ⚠ SIMULATION ONLY
-    // r2 (plan docs/superpowers/plans/2026-10-08-lidar-mounts-kinematic-floor.md): 6-DoF helios injection (with
-    // X/Y/YawDeg above, now a Pose6 about the SENSOR origin) + the bpearl's, and the decoupled mount factors.
-    float LIDAR_MOUNT_INJECT_Z = 0.f;          // RoomConcept.LidarMountInjectZ (m)          ⚠ SIMULATION ONLY
-    float LIDAR_MOUNT_INJECT_ROLL_DEG = 0.f;   // RoomConcept.LidarMountInjectRollDeg      ⚠ SIMULATION ONLY
-    float LIDAR_MOUNT_INJECT_PITCH_DEG = 0.f;  // RoomConcept.LidarMountInjectPitchDeg     ⚠ SIMULATION ONLY
-    // The floor/vertical factors, BpearlMountInject*, BpearlMountRate and MountPoseSigma* moved to the
-    // sensor_calibration agent on 2026-10-29 (its plan, Phase 3).
-    bool  MOUNT_FACTORS = true;          // RoomConcept.MountFactors — the KINEMATIC helios factor (log only) + single yaw owner
 
     // ── PLATFORM OVERLAY: one config for every robot ────────────────────────────────────────────
     // Most of this file is POLICY and is the same everywhere. A handful of values are PHYSICAL —
@@ -82,7 +69,7 @@ struct RoomConfig
     {
         // Camera mount — measured on one machine, meaningless on another.
         std::optional<float> mount_pitch_sigma, mount_height_sigma, mount_yaw_sigma;
-        std::optional<float> mount_yaw_correction, wall_position_sigma;
+        std::optional<float> wall_position_sigma;
         std::optional<std::string> image_edge_camera;
         // Odometry noise — the wheels, the encoders and the floor they run on. Every one of these
         // was MEASURED on its robot (see the ZUPT and velCov work); inheriting another machine's
@@ -408,11 +395,6 @@ struct RoomConfig
     /// only the grey conversion of frames nobody would have read. See CameraIngestor.
     int   IMAGE_EDGE_MIN_CONVERT_MS = 0;     // ImageEdge.minConvertIntervalMs
     int   IMAGE_EDGE_LOCALIZING_CONVERT_MS = 0;   // ImageEdge.localizingConvertIntervalMs (0 = no throttle)
-    /// The same throttle for the CALIBRATION channels, which is a different question: their frames
-    /// never reach the loss, so a skipped one costs coverage of a fit that accumulates over minutes,
-    /// not evidence for this tick's pose. Kept SEPARATE from the driving camera on purpose — one
-    /// number for both would buy the calibration's saving with the pose factor's rate.
-    int   IMAGE_EDGE_CALIB_MIN_CONVERT_MS = 100;   // ImageEdge.calibMinConvertIntervalMs
     // Which structural contours are measured. Vertical wall-wall corners carry BEARING on a
     // horizontal normal and are nearly immune to the mount pitch/height nuisances; the floor-wall
     // junction carries RANGE and is exposed to them (δd = θ_pitch·d²/h ⇒ 1° ≈ 14 cm at 3 m).
@@ -436,37 +418,16 @@ struct RoomConfig
     float IMAGE_EDGE_MOUNT_PITCH_SIGMA = 0.0035f; // ImageEdge.mountPitchSigma (rad, ~0.2°)
     float IMAGE_EDGE_MOUNT_HEIGHT_SIGMA= 0.010f;  // ImageEdge.mountHeightSigma (m)
     float IMAGE_EDGE_MOUNT_YAW_SIGMA   = 0.0035f; // ImageEdge.mountYawSigma (rad)
-    /// Prior sigma on a CORNER'S OWN image offset, in pixels — the per-vertex nuisance that stops the
-    /// mount solve counting one corner's thousands of sightings as thousands of independent
-    /// measurements (mount_lidar_pair.h). 0 = OFF, and OFF is bit-for-bit the pre-2026-09-02 solve.
-    /// ⚠ DEFAULTS OFF DELIBERATELY: turning it on changes every mount sigma the agent reports, and
-    ///   that is the user's call, not a silent upgrade.
-    float IMAGE_EDGE_MOUNT_VERTEX_OFFSET_SIGMA_PX = 0.0f;  // ImageEdge.mountVertexOffsetSigmaPx
-    // Local boresight correction applied to the graph's camera<-robot extrinsic. NOT a tuning knob:
-    // a measured physical angle. 0 = use the graph's extrinsic unchanged.
-    float IMAGE_EDGE_MOUNT_YAW_CORR    = 0.0f;    // ImageEdge.mountYawCorrection (rad)
-    // Feed the pooled mount solve back into the camera extrinsic as it is measured.
-    // ⚠ OFF by default: it changes a live perception input, and every camera-mount number recorded
-    //   before 2026-09-03 was taken open-loop. It REFUSES unless the per-vertex nuisance is running
-    //   (ImageEdge.mountVertexOffsetSigmaPx > 0) — an estimate that has absorbed per-corner detector
-    //   bias must not be written into an extrinsic, and that refusal is the whole safety argument.
-    bool  IMAGE_EDGE_MOUNT_APPLY       = false;   // ImageEdge.mountApply
-    /// ImageEdge.mountPublish — mirror the measured mount into the SHARED body->camera RT edge, so
-    /// every other agent reads the corrected extrinsic instead of the nominal one. An OUTPUT only:
-    /// the estimator keeps measuring against the extrinsic it read at bind (see
-    /// SpecificWorker::publish_mount_to_graph for why that separation is the whole safety argument).
-    bool  IMAGE_EDGE_MOUNT_PUBLISH     = false;   // ImageEdge.mountPublish
-    std::string IMAGE_EDGE_MOUNT_DESCRIPTION;     // ImageEdge.mountDescriptionFile: the robot JSON = the mount NOMINAL
+    // The camera mount calibrator's keys (mountVertexOffsetSigmaPx, mountYawCorrection, mountApply,
+    // mountPublish, mountDescriptionFile, calibCameras, calibMinConvertIntervalMs) were removed 2026-10-29:
+    // camera extrinsics are robot_concept's graph + overlay, estimated by sensor_calibration. The three
+    // mount SIGMAS above stay: they are the driving term's marginalised nuisance priors, not a calibration.
     // Per-CONTOUR map-position uncertainty — nuisance column [4]. Not a mount property: how well any
     // single wall's place in the room polygon is known. MEASURED, see image_edge_types.h.
     float IMAGE_EDGE_WALL_POS_SIGMA    = 0.015f;  // ImageEdge.wallPositionSigma (m)
     // Evidence form: per-sample contour residuals (false) or triple points (true). INSTEAD, not as
     // well — a triple point is the same segment offsets re-expressed, so both would double-count.
     bool  IMAGE_EDGE_USE_TRIPLE_POINTS = false;   // ImageEdge.useTriplePoints
-    // Cameras run for CALIBRATION, which need not be the one that drives the pose. Each gets its own
-    // ingestor, its own extraction and its own evidence file; IMAGE_EDGE_CAMERA stays the one whose
-    // factor may enter the loss. Two of them make the sensor triangle close — see camera_calibration.h.
-    std::vector<std::string> CALIB_CAMERAS = {};   // ImageEdge.calibCameras
     std::string IMAGE_EDGE_CSV = "etc/image_edge.csv";  // ImageEdge.csv
 };
 

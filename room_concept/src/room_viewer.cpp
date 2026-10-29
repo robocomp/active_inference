@@ -302,23 +302,12 @@ RoomViewer::RoomViewer(std::shared_ptr<DSR::DSRGraph> graph,
     calib_viewer_ = new rc::CalibrationViewer(custom_widget_);
     vphase("calibration_viewer");
     calib_viewer_->hide();
-    // ★ EVERY CAMERA GETS ITS COLUMN NOW, fed or not. Declaring the list here rather than letting a
-    // column appear when the first solve arrives is what lets the window show "no evidence" for a
-    // camera that has never produced a pair: a column that does not exist cannot say anything, and
-    // an absent column and a silent one would be indistinguishable. The driving camera goes first.
-    {
-        std::vector<std::string> cams{params_->IMAGE_EDGE_CAMERA};
-        for (const auto& c : params_->CALIB_CAMERAS)
-            if (c != params_->IMAGE_EDGE_CAMERA) cams.push_back(c);
-        calib_viewer_->set_cameras(cams, params_->IMAGE_EDGE_CAMERA);
-    }
     // The window asks; the localiser thread acts. RoomConcept queues it rather than touching the
     // estimator from the GUI thread.
     if (room_concept_ != nullptr)
         calib_viewer_->set_reset_handler([this]
         {
             room_concept_->request_calibration_reset();
-            if (on_camera_reset_) on_camera_reset_();   // both blocks, or neither
         });
 
     // ── Ground truth vs estimate (SIMULATION ONLY) ────────────────────────────────────────────
@@ -909,20 +898,6 @@ void RoomViewer::on_robot_rotated(QPointF scene_pos)
     room_concept_->push_command(rc::RoomConcept::CmdSetPose{rx, ry, theta});
 }
 
-
-void RoomViewer::set_camera_calibration(const Eigen::Matrix<float, rc::camcal::P_COUNT, 1>& value,
-                                        const Eigen::Matrix<float, rc::camcal::P_COUNT, 1>& sigma,
-                                        int informed_mask, float condition, long pairs,
-                                        const std::string& camera)
-{
-    if (calib_viewer_)
-        calib_viewer_->update_camera(value, sigma, informed_mask, condition, pairs, camera);
-}
-
-void RoomViewer::set_loop_closure(double du_deg, double dv_deg, double sd_du, double sd_dv, long n)
-{
-    if (calib_viewer_) calib_viewer_->update_loop_closure(du_deg, dv_deg, sd_du, sd_dv, n);
-}
 
 void RoomViewer::set_room_readiness(float layout_stable, float explore_done, float slam_disagreement_m)
 {

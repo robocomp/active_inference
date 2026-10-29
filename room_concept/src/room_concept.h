@@ -46,7 +46,6 @@
 #include "motion_noise_vc.h"
 #include "motion_noise_innov.h"
 #include "pose_field_bias.h"
-#include "kinematic_mount.h"
 #include "drift_monitor.h"
 #include "stride_span.h"
 #include "localizer_params.h"
@@ -497,25 +496,6 @@ public:
         int   n_segments   = 0;
         std::int64_t ts_ms = 0;
     };
-    /// ── FACTOR B of the camera experiment, measured in the shadow ───────────────────────────────
-    /// The same window solved under the mount as it is (calibrated) and as it would be with the
-    /// self-calibration removed (nominal). Both poses are published RAW and never differenced here:
-    /// the pose error each implies needs ground truth, which lives in the agent and not in this
-    /// class, and a pre-combined delta is exactly the pairing that hides a mismatch.
-    struct FactorB
-    {
-        bool  valid = false;
-        std::int64_t ts_ms = 0;
-        Eigen::Vector3f pose_calibrated = Eigen::Vector3f::Zero();
-        Eigen::Vector3f pose_nominal    = Eigen::Vector3f::Zero();
-        Eigen::Vector3f correction      = Eigen::Vector3f::Zero();
-    };
-    FactorB get_factor_b() const
-    {
-        std::scoped_lock lk(factor_b_mutex_);
-        return factor_b_;
-    }
-
     ImageEdgeStats get_image_edge_stats() const
     {
         std::scoped_lock lk(image_edge_stats_mutex_);
@@ -623,8 +603,6 @@ private:
    std::vector<ClosureObs> pending_closures_;
    mutable std::mutex image_edge_stats_mutex_;
    ImageEdgeStats     image_edge_stats_{};
-   mutable std::mutex factor_b_mutex_;
-   FactorB            factor_b_{};
    mutable std::mutex image_edges_mutex_;
    ImageEdgeObs       latest_image_edges_;
    std::vector<TriplePoint> latest_triple_points_;   ///< display copy, see triple_points()
@@ -960,14 +938,8 @@ private:
    bool            innov_ok_ = false, innov_prev_ok_ = false;
    int             last_scan_iters_ = 0;                      // GN iterations the last scan-only pose took
    std::ofstream   innov_csv_;
-   // ── r2 KINEMATIC MOUNT FACTOR (kinematic_mount.h; plan 2026-10-08 Task 1/1b/5) ────────────────────
-   rc::mountf::KinematicMount kin_mount_;
    std::mutex low_obs_mutex_;                                 // guards low_obs_ (ingest -> localiser)
    std::deque<LowObstacles> low_obs_;
-   std::ofstream   kin_csv_;                                  // tmp/mount_factors/kin_<ts>.csv: per fed cycle
-   /// Feed kin_mount_ from this cycle's innovation (observe_innovation, only when `fed`).
-   void observe_kinematic_mount(const Eigen::Vector3f &delta, const Eigen::Matrix3f &T,
-                                const Eigen::Vector3f &odom_body, UpdateResult &res);
    /// The newest scan's SDF factor alone, linearised at (x, y, th): the same query, observation weights,
    /// IRLS Huber and Jacobian as the solver's SdfFactor (room_gn_solver.cpp). Shared by the polish.
    bool scan_linearize(const ScanPoints &pts, float x, float y, float th, Eigen::Matrix3f &H, Eigen::Vector3f &bb);
@@ -1411,10 +1383,6 @@ private:
     int imgedge_rows_ = 0, imgedge_calls_ = 0, imgedge_no_window_ = 0,
         imgedge_no_obs_ = 0, imgedge_no_cam_ = 0;
     std::int64_t imgedge_health_last_ms_ = 0;
-    /// Per-window mount fit. The accumulators are RESET after every solve, so each row is an
-    /// independent measurement and the between-window scatter is visible. See mount_pooled_solve().
-    void mount_pooled_solve(std::int64_t timestamp_ms);
-    std::ofstream mount_csv_;
     std::ofstream triple_csv_;
     std::ofstream triple_pose_csv_;
     long          triple_rows_ = 0, triple_frames_ = 0;
@@ -1425,48 +1393,6 @@ private:
     long          tps_chi2_n_ = 0;
     void          log_triple_points(const ImageEdgeObs& obs, std::int64_t timestamp_ms,
                                     const Eigen::Vector3f& pose);
-    double mnt_S11_ = 0, mnt_S12_ = 0, mnt_S22_ = 0, mnt_Sy1_ = 0, mnt_Sy2_ = 0, mnt_Syy_ = 0;
-    long   mnt_n_ = 0;
-    std::int64_t mnt_win_start_ms_ = 0;
-    float  last_mount_fy_ = 0.f;
-    float  mnt_pose_x_ = 0.f, mnt_pose_y_ = 0.f, mnt_pose_th_ = 0.f;
-    long   mnt_wins_ = 0;
-    double mnt_pitch_sum_ = 0.0, mnt_pitch_sum2_ = 0.0;
-    long   mnt_pitch_n_ = 0;   ///< windows monitor 1 could actually solve, which is not mnt_wins_
-    // ── Monitor 2: rigid image translation,  r_k ~ tx*nx_k + ty*ny_k ─────────────────────────────
-    // A basis the const + fy/d fit structurally cannot see. The residual is scalar along each
-    // contour's own normal, so a rigid displacement of the prediction projects as t . n_hat and
-    // averages toward zero in the constant column. Fed by EVERY contour class, because the near-
-    // orthogonality of floor-junction (vertical) and wall-corner (horizontal) normals is what makes
-    // this fit well conditioned while the fy/d one is degenerate at a standstill.
-    double mnt_T11_ = 0, mnt_T12_ = 0, mnt_T22_ = 0, mnt_Tx_ = 0, mnt_Ty_ = 0, mnt_Tyy_ = 0;
-    long   mnt_tn_ = 0;
-
-    // ── Monitor 3 / STAGE 1 of online mount self-calibration ─────────────────────────────────────
-    // The four mount nuisances (pitch, height, boresight yaw, image/LiDAR dt) as PARAMETERS rather
-    // than as marginalised noise. No new geometry: ImageEdgeSample::h already holds
-    // sigma_i * d(residual)/d(nuisance_i) per sample (image_edge_source.cpp:261-272), computed every
-    // frame and, until now, used only to WIDEN the inlier variance and then thrown away. Summing
-    // w*h*h' and w*h*r instead turns it into the exact normal-equation block.
-    //
-    // ★ h IS ALREADY SCALED BY THE PRIOR SIGMA, so the parameters are dimensionless — in units of
-    //   their own prior — and the Gaussian prior P0^-1 is exactly the IDENTITY. That also makes
-    //   `informed` fall out with no new convention: posterior sigma < 0.9 in these units IS the
-    //   existing rule (calibration_estimator.h), because the prior sigma is 1 by construction.
-    //
-    // ★ THIS CANNOT SEPARATE BORESIGHT YAW FROM ROBOT HEADING WITHIN ONE WINDOW — they are perfectly
-    //   collinear in a single view, which is why measuring it needed the Webots supervisor. Pooling
-    //   ACROSS windows at different poses separates them only under the assumption that the
-    //   localiser's heading error is zero-mean. That assumption is what stage 2 (RGB<->LiDAR corner
-    //   coupling) removes. Until then the between-window scatter, not the within-window sigma, is
-    //   the honest uncertainty on yaw — hence the pooled accumulators below.
-    Eigen::Matrix4d mnt_H_ = Eigen::Matrix4d::Zero();
-    Eigen::Vector4d mnt_b_ = Eigen::Vector4d::Zero();
-    long            mnt_hn_ = 0;
-    Eigen::Vector4d mnt_p_sum_  = Eigen::Vector4d::Zero();
-    Eigen::Vector4d mnt_p_sum2_ = Eigen::Vector4d::Zero();
-    long            mnt_p_n_ = 0;
-
     /// The boundary-prior precision scale for this frame (hierarchical π=exp(u_b) when enabled, else
     /// the legacy quality gate). One definition, so every backend minimises the same objective.
     float boundary_weight_now() const;

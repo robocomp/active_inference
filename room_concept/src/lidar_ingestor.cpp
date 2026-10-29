@@ -50,23 +50,6 @@ LidarIngestor::LidarIngestor(std::shared_ptr<DSR::DSRGraph> graph, rc::RoomConce
     : G_(std::move(graph)), room_concept_(&room_concept), params_(&params)
 {
     high_max_z_ = params_->LIDAR_HIGH_MAX_HEIGHT;   // until the startup check refines it from the ceiling
-    // Sim-only planted mount errors (plan 2026-10-08 Task 4; r1 Task 5 for the helios planar part): M_inj is
-    // the sensor's 6-DoF displacement + rotation ABOUT ITS OWN ORIGIN, body frame (lidar_mount.h Pose6); the
-    // nominal transform then reads M_inj^-1(p_true), so the points get inverse(M_inj). Identity by default.
-    // ⚠ The helios X/Y/YawDeg keys were a Planar about the BODY origin until 2026-10-08; as a Pose6 the same
-    //   numbers differ by (I - R) s: for (30, -20) mm / 1 deg the kinematic factor now expects a body-origin
-    //   lever of (30 - 2.7, -20) mm.
-    // The bpearl injection was removed 2026-10-29 with the floor/vertical factors (now in sensor_calibration):
-    // plant a mount error for that agent through robot_concept's mount overlay (etc/mount_calib_<robot>_webots.txt),
-    // which every consumer of the RT tree then sees consistently.
-    {
-        constexpr float d2r = static_cast<float>(M_PI / 180.0);
-        inject_helios_ = rc::lidar_mount::inverse(rc::lidar_mount::Pose6{
-            Eigen::Vector3f(params_->LIDAR_MOUNT_INJECT_X, params_->LIDAR_MOUNT_INJECT_Y, params_->LIDAR_MOUNT_INJECT_Z),
-            d2r * Eigen::Vector3f(params_->LIDAR_MOUNT_INJECT_ROLL_DEG, params_->LIDAR_MOUNT_INJECT_PITCH_DEG,
-                                  params_->LIDAR_MOUNT_INJECT_YAW_DEG)});
-    }
-    mount_extra_ = {};
     if (!params_->LIDAR_USE_MEDIA)
     {
         qWarning() << "[Lidar] LIDAR_USE_MEDIA=false and the DSR-graph path was removed — no LiDAR source";
@@ -137,18 +120,6 @@ void LidarIngestor::ingest_loop()
     }
 }
 
-void LidarIngestor::set_mount_extra(const rc::lidar_mount::Planar& t)
-{
-    const std::lock_guard<std::mutex> lk(mount_mx_);
-    mount_extra_ = t;
-}
-
-rc::lidar_mount::Planar LidarIngestor::mount_extra() const
-{
-    const std::lock_guard<std::mutex> lk(mount_mx_);
-    return mount_extra_;
-}
-
 bool LidarIngestor::pump()
 {
     if (!reader_)
@@ -158,20 +129,10 @@ bool LidarIngestor::pump()
     // base ("body") via the DSR RT tree. interpolate=false — helios → body only crosses the
     // static mount edge, so the sweep stamp is irrelevant. The height filter below is meaningful in
     // this robot-base frame (z = height above the base).
+    // The mount is the graph's (robot_concept: nominal + overlay); nothing is re-applied here since 2026-10-29.
     auto sweep = reader_->poll(params_->LIDAR_ROBOT_FRAME, /*interpolate=*/false);
     if (sweep.has_value())
-    {
         ++fresh_frames_;
-        // ── helios sim-only injection (Pose6, plan 2026-10-08 Task 4) and the r1 correction ─────────
-        // Applied HERE, right after device->body, so the corner detector, wall-SLAM, the SDF and the
-        // camera pairs all consume ONE frame. A planted roll/pitch/z moves z as a real one would, so the
-        // height band below selects what a mis-mounted sensor would give it.
-        resolve_sensor_origins();
-        if (not rc::lidar_mount::is_identity(inject_helios_))
-            for (auto& p : sweep->points) p = rc::lidar_mount::apply(inject_helios_, s_helios_, p);
-        if (const auto extra = mount_extra(); not rc::lidar_mount::is_identity(extra))
-            for (auto& p : sweep->points) p = rc::lidar_mount::apply(extra, p);
-    }
 
     bool ingested = false;
     if (sweep.has_value() and not sweep->points.empty())
@@ -644,21 +605,6 @@ void LidarIngestor::run_startup_geometry_check()
         bpearl_latest_.reset();
     }
     std::vector<int>().swap(geom_hist_bpearl_);
-}
-
-// The helios origin in the frame the points arrive in (LIDAR_ROBOT_FRAME = Shadow): the DSR RT chain is the
-// truth (shadow.json); the r2.2 item 5 constant is the fallback until it resolves. The sim-only injection
-// rotates about it.
-void LidarIngestor::resolve_sensor_origins()
-{
-    if (origins_resolved_ or not inner_eigen_) return;
-    if (const auto h = inner_eigen_->get_translation_vector(params_->LIDAR_ROBOT_FRAME, params_->LIDAR_HELIOS_NAME); h.has_value())
-    {
-        s_helios_ = h->cast<float>();
-        origins_resolved_ = true;
-        rc::status::println("[LidarMount] helios origin in '{}': ({:.4f}, {:.4f}, {:.4f})",
-                            params_->LIDAR_ROBOT_FRAME, s_helios_.x(), s_helios_.y(), s_helios_.z());
-    }
 }
 
 const rc::media::LidarSweep* LidarIngestor::bpearl_newest()

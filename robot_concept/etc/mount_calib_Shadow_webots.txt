@@ -1,0 +1,9 @@
+# robot: Shadow
+# world: webots
+# sensor x y z roll pitch yaw version iso_date source
+# ricoh: the mount room_concept's camera calibrator had LEARNED on Webots and re-applied at every start until
+# 2026-10-29 (camera_calib_Shadow_ricoh.txt "applied" row: pitch -0.0051 deg, height -0.0034 m, yaw +0.2060 deg on
+# the camera's own axes; logged as "[camcal] ricoh mount correction resumed" in crossing/try107). Converted EXACTLY
+# (residual 2e-16) to this body-aligned correction when that calibrator was removed, so the driving camera keeps the
+# same extrinsic. Now every agent sees it, retina included (it used the nominal before).
+ricoh -0.000000001 -0.000000303 0.003400222 0.000089172 -0.000000321 -0.003594752 1 2026-10-29 room_concept:camcal-learned

@@ -91,18 +91,6 @@ void StatusReporter::observe_compute(long long us)
     comp_max_us_ = std::max(comp_max_us_, us);
 }
 
-void StatusReporter::note_camcal(const std::string& cam, const std::array<float, 4>& value,
-                                 const std::array<float, 4>& sigma, int informed, float cond, long pairs)
-{
-    auto& c = cams_[cam];
-    c.v = value;
-    c.s = sigma;
-    c.informed = informed;
-    c.cond = cond;
-    c.pairs = pairs;
-    c.t_ms = now_ms();
-}
-
 std::string StatusReporter::build_state()
 {
     const long long now = now_ms();
@@ -163,22 +151,6 @@ std::string StatusReporter::build_state()
                             .f("cond", loc_.ccond, 4).i("episodes", loc_.episodes)
                             .i("carried", loc_.carried).i("dropped", loc_.dropped)
                             .str());
-    }
-
-    // ── camera mounts (pitch deg, height mm, yaw deg, dt x) ──
-    {
-        status::Arr cams;
-        for (const auto& [name, c] : cams_)
-        {
-            status::Arr v, s;
-            for (int i = 0; i < 4; ++i) { v.f(c.v[static_cast<std::size_t>(i)], 5); s.f(c.s[static_cast<std::size_t>(i)], 4); }
-            cams.raw(status::Obj{}
-                         .s("cam", name).raw("value", v.str()).raw("sigma", s.str())
-                         .i("informed", c.informed).f("cond", c.cond, 4).i("pairs", c.pairs)
-                         .i("age_ms", now - c.t_ms)
-                         .str());
-        }
-        st.raw("camcal", cams.str());
     }
 
     // ── streams: rate from the counters' deltas, smoothed over a few snapshots ──

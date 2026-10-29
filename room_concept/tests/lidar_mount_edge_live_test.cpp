@@ -113,9 +113,9 @@ int main(int argc, char** argv)
     {
         rc::CameraIngestor ing(G, "zed");
         CHECK(ing.bind_extrinsic("body"));
-        const Eigen::Matrix3f R0 = ing.base_R();
+        const Eigen::Matrix3f R0 = ing.cam_R_robot();
         CHECK(not ing.refresh_graph_extrinsic());                       // edge untouched => unchanged
-        CHECK((ing.base_R() - R0).cwiseAbs().maxCoeff() == 0.f);
+        CHECK((ing.cam_R_robot() - R0).cwiseAbs().maxCoeff() == 0.f);
         CHECK(commit_yaw(*G, "zed", static_cast<float>(dyaw_deg * M_PI / 180.0)));
         bool changed = false;
         for (int i = 0; i < 200 and not changed; ++i)
@@ -125,18 +125,11 @@ int main(int argc, char** argv)
             if (not changed) QThread::msleep(10);
         }
         CHECK(changed);
-        const Eigen::Matrix3d Rrel = (ing.base_R() * R0.transpose()).cast<double>();
+        const Eigen::Matrix3d Rrel = (ing.cam_R_robot() * R0.transpose()).cast<double>();
         const double ang = Eigen::AngleAxisd(Rrel).angle() * 180.0 / M_PI;
         std::println("CameraIngestor(zed): base extrinsic rotated {:.4f} deg by refresh_graph_extrinsic()", ang);
         CHECK(std::abs(ang - dyaw_deg) <= 0.05);
         CHECK(not ing.refresh_graph_extrinsic());                       // and settles
-        // mountPublish on => refresh disabled: a further edge change must NOT move the base (no double application)
-        ing.set_live_graph_refresh(false);
-        const Eigen::Matrix3f R1 = ing.base_R();
-        CHECK(commit_yaw(*G, "zed", static_cast<float>(dyaw_deg * M_PI / 180.0)));
-        for (int i = 0; i < 20; ++i) { QCoreApplication::processEvents(); QThread::msleep(10); }
-        CHECK(not ing.refresh_graph_extrinsic());
-        CHECK((ing.base_R() - R1).cwiseAbs().maxCoeff() == 0.f);
     }
     std::println("{}", failures == 0 ? "PASS" : "FAILED");
     G.reset();

@@ -1,9 +1,9 @@
 #include <genericworker.h>   // FIRST: DSR's signal emitter is not self-contained (see pose_publisher.cpp)
 
 #include "calib_channels.h"
+#include "image_edge_ops.h"   // rc::img::xyz_from_pixel_depth
 #include "status_reporter.h"
 
-#include "mount_calibrator.h"
 #include "room_concept.h"
 #include "room_viewer.h"
 
@@ -86,191 +86,6 @@ void CalibChannels::place_triple_points_in_room(rc::ImageEdgeObs &obs,
     }
 }
 
-// With ImageEdge.mountPublish this agent WRITES body->camera as nominal x learned correction, so re-reading that edge as the
-// base would apply the correction twice (compounding per publish): the live refresh is off in that case.
-void CalibChannels::apply_refresh_policy(rc::CameraIngestor& ing, const std::string& name) const
-{
-    ing.set_live_graph_refresh(not params.IMAGE_EDGE_MOUNT_PUBLISH);
-    if (params.IMAGE_EDGE_MOUNT_PUBLISH)
-        qInfo().noquote() << QString("[imgedge] '%1': live graph-extrinsic refresh DISABLED because ImageEdge.mountPublish is on "
-                                     "(this agent writes the body->camera edge and already holds the composition)")
-                                 .arg(QString::fromStdString(name));
-}
-
-void CalibChannels::pump_calib_channels()
-{
-    const auto res = room_concept_.get_last_result();
-    if (not res.has_value() or room_polygon_.size() < 3) return;
-
-    for (auto &chp : calib_channels_)
-    {
-        auto &ch = *chp;
-        if (not ch.bound)
-        {
-            if (not ch.ingestor->bind_camera(params.LIDAR_ROBOT_FRAME)) continue;
-            ch.bound = true;
-            apply_refresh_policy(*ch.ingestor, ch.name);
-            ch.source->set_room_polygon(room_polygon_);
-            auto ic = ch.source->config();
-            ic.room_height = params.room_height;
-            ch.source->set_config(ic);
-            ch.ingestor->start();
-            qInfo() << "[camcal] channel" << QString::fromStdString(ch.name) << "bound";
-        }
-        else
-            ch.ingestor->refresh_graph_extrinsic();   // a committed body->camera edge reaches the channel
-        if (not ch.loaded)
-        {
-            ch.loaded = true;
-            ch.calib.set_camera(ch.name, params.LIDAR_ROBOT_FRAME);
-            // Same model on every camera, or the Calib window would show two mounts judged by two
-            // different notions of uncertainty side by side.
-            ch.calib.set_vertex_offset_sigma_px(params.IMAGE_EDGE_MOUNT_VERTEX_OFFSET_SIGMA_PX);
-            const std::string path = ch.calib.path();
-            const std::size_t k_aux = ch.calib.load(path);
-            mount_.reconcile_mount_nominal(ch.calib, *ch.ingestor, ch.name);
-            mount_.push_mount_correction(*ch.ingestor, ch.calib.applied(), ch.name, "resumed");
-            if (k_aux > 0)
-                qInfo().nospace() << "[camcal] " << QString::fromStdString(ch.name)
-                                  << " resumed from " << QString::fromStdString(path)
-                                  << " (" << k_aux << " pairs)";
-            rc::StatusReporter::loaded("camcal_evidence", path,
-                                       std::format("camera {}: {} pairs{}", ch.name, k_aux,
-                                                   k_aux > 0 ? "" : " (none on disk: starting empty)"));
-        }
-
-        // ── This channel's own column in the Calib window ────────────────────────────────────────
-        // ★ THE SECOND ESTIMATOR HAD NO WAY OUT. Only the driving camera's pool ever reached the
-        //   viewer (see mount_pair_update), so this channel's evidence accumulated in its own file
-        //   with nothing on screen able to show it, while the window's single camera block was
-        //   captioned with whichever camera reported last. One column per camera now, each fed by
-        //   its own estimator.
-        // ★ BEFORE take_latest(), not after the pairing loop. Placed after it, a channel that is
-        //   bound but currently sees no corner — including one that has just RESUMED a full evidence
-        //   file from disk — would never push, and its column would read "no evidence" while the
-        //   evidence sat on disk. The column must describe the estimator, not this tick's luck.
-        //   Wall clock, 5 s, matching the driving camera's window so both columns are the same age.
-        if (const auto now_ms = QDateTime::currentMSecsSinceEpoch();
-            (viewer() or camcal_sink_) and now_ms - ch.viz_ms >= 5000)
-        {
-            ch.viz_ms = now_ms;
-            if (const auto sol = ch.calib.solve(); sol.ok)
-            {
-                Eigen::Matrix<float, rc::camcal::P_COUNT, 1> pv, sv;
-                // Same unit conversion as the driving camera: the estimator works in units of the
-                // PRIOR SIGMA, so value AND sigma are both scaled back to physical here — scaling
-                // only the value would put a dimensionless uncertainty beside a physical number.
-                const double psig[4] = {params.IMAGE_EDGE_MOUNT_PITCH_SIGMA,
-                                        params.IMAGE_EDGE_MOUNT_HEIGHT_SIGMA,
-                                        params.IMAGE_EDGE_MOUNT_YAW_SIGMA, 1.0};
-                for (int i = 0; i < rc::camcal::P_COUNT; ++i)
-                {
-                    // The TOTAL correction (applied - p), not the increment p — see mount_pair_update.
-                    pv(i) = static_cast<float>((ch.calib.applied()(i) - sol.p(i)) * psig[i]);
-                    sv(i) = static_cast<float>(sol.sigma(i) * psig[i]);
-                }
-                if (viewer())
-                    viewer()->set_camera_calibration(pv, sv, sol.informed,
-                                                    static_cast<float>(sol.cond),
-                                                    ch.calib.pairs(), ch.name);
-                if (camcal_sink_)
-                    camcal_sink_(ch.name, {pv(0), pv(1), pv(2), pv(3)}, {sv(0), sv(1), sv(2), sv(3)},
-                                 sol.informed, static_cast<float>(sol.cond), ch.calib.pairs());
-            }
-        }
-
-        // ── The ceiling the contour is projected at, REFRESHED ──────────────────────────────────────
-    // ★ It used to be set only inside the bind block above, so a ceiling measured one second after
-    //   binding never reached the projection — and with the wire broken it never arrived at all. The
-    //   room polygon beside it was already refreshed every tick for exactly this reason.
-    // ⚠ A change here moves every wall-ceiling corner, which is what the mount's HEIGHT parameter
-    //   reads, so it is logged when it moves rather than changing the geometry quietly.
-    if (image_edge_bound_)
-    {
-        camera_ingestor_->refresh_graph_extrinsic();   // a committed body->camera edge reaches the image-edge term
-        const float mz = room_concept_.measured_ceiling();
-        const float want = mz > 1.5f ? mz : params.room_height;
-        if (auto ic = image_edge_source_->config(); std::abs(ic.room_height - want) > 1e-4f)
-        {
-            qInfo().noquote() << QString::asprintf(
-                "[imgedge] wall-ceiling contour re-projected: room_height %.4f -> %.4f m (%s;"
-                " the scenario states %.4f)", ic.room_height, want,
-                mz > 1.5f ? "MEASURED by the LiDAR" : "stated in the scenario", params.room_height);
-            if (mz > 1.5f)
-                qInfo().noquote() << QString::asprintf(
-                    "         its uncertainty is +/- %.3f m — the ceiling corners' z now carries that,"
-                    " and the mount's height can no longer silently absorb it",
-                    room_concept_.measured_ceiling_sigma());
-            ic.room_height = want;
-            image_edge_source_->set_config(ic);
-        }
-    }
-
-    rc::GrayFrame frame;
-        if (not ch.ingestor->take_latest(frame)) continue;
-
-        const Eigen::Affine2f &rp = res->robot_pose;
-        const Eigen::Vector3f pose(rp.translation().x(), rp.translation().y(),
-                                   std::atan2(rp.linear()(1, 0), rp.linear()(0, 0)));
-        const std::int64_t dt_ms = static_cast<std::int64_t>(frame.stamp) - res->timestamp_ms;
-        auto obs = ch.source->extract(frame, ch.ingestor->model(), ch.ingestor->cam_R_robot(),
-                                      ch.ingestor->cam_t_robot(), pose, res->covariance,
-                                      Eigen::Vector3f::Zero(), dt_ms, nullptr);
-        place_triple_points_in_room(obs, *ch.ingestor, pose);
-        // Each camera's corners go to ITS OWN window: the ZED popup shows the ZED's corners even
-        // though the Ricoh is the one driving, which is the comparison worth being able to see.
-        if (viewer()) viewer()->set_triple_points(obs.triple_points, ch.name);
-        if (obs.triple_points.empty() or res->corner_matches.empty()) continue;
-
-        for (const auto &tp : obs.triple_points)
-        {
-            const auto it = std::ranges::find_if(res->corner_matches,
-                [&](const auto &m) { return m.model_index == tp.vertex; });
-            if (it == res->corner_matches.end() or it->suppressed) continue;
-            const auto pr = rc::mount::make_pair(tp, *it, ch.ingestor->model(),
-                                                 ch.ingestor->cam_R_robot(),
-                                                 ch.ingestor->cam_t_robot(),
-                                                 params.IMAGE_EDGE_MOUNT_PITCH_SIGMA,
-                                                 params.IMAGE_EDGE_MOUNT_HEIGHT_SIGMA,
-                                                 params.IMAGE_EDGE_MOUNT_YAW_SIGMA);
-            if (not pr.ok) continue;
-            ch.calib.add(pr);
-            ++ch.pairs;
-            // The SAME row the driving camera writes. Without it this channel produced evidence
-            // nobody could re-derive: arm 7 needs both cameras' mounts re-solved under one
-            // injection, and the closure recomputed from the two, all from a single drive.
-            if (not ch.csv.is_open()) mount_.open_pair_log(ch.csv, ch.name, *ch.ingestor);
-            rc::MountCalibrator::write_pair_row(ch.csv, ch.name, static_cast<std::int64_t>(frame.stamp), pr,
-                           tp.from == rc::ContourClass::WallCeiling,
-                           it->angle_deg, it->assoc_chi2_val, it->n_rivals, it->runnerup_chi2,
-                           ch.ingestor->mount_correction());
-            // Per ROW, not per frame: see the note on the driving camera's call — the local
-            // pixel-to-angle scale varies across a pinhole's field, and this channel IS the pinhole.
-            const Eigen::Vector2f ppr = rc::img::px_per_rad_at(obs.cam, pr.uv_image);
-            if (ppr.x() > 0.f and ppr.y() > 0.f)
-                mount_.loop_closure_observe(ch.name, tp.vertex,
-                                     tp.from == rc::ContourClass::WallCeiling,
-                                     static_cast<double>(pr.r.x() / ppr.x()),
-                                     static_cast<double>(pr.r.y() / ppr.y()),
-                                     static_cast<std::int64_t>(frame.stamp));
-        }
-        if (ch.pairs % 2000 < 12 and ch.pairs > 0)
-        {
-            if (const auto sol_apply = ch.calib.solve(); sol_apply.ok)
-                mount_.apply_mount_solve(ch.calib, *ch.ingestor, sol_apply, ch.name);
-            ch.calib.save(ch.calib.path());
-            if (ch.csv.is_open()) ch.csv.flush();   // same cadence as the evidence beside it
-            if (const auto sol = ch.calib.solve(); sol.ok)
-                qInfo().nospace().noquote()
-                    << "[camcal] " << QString::fromStdString(ch.name) << " " << ch.pairs
-                    << " pairs | yaw "
-                    << QString::number((ch.calib.applied()(2) - sol.p(2)) * params.IMAGE_EDGE_MOUNT_YAW_SIGMA
-                                       * 180.0 / M_PI, 'f', 4)   // the total in force, not the increment
-                    << " deg | cond " << QString::number(sol.cond, 'f', 1);
-        }
-    }
-}
-
 void CalibChannels::pump_image_edges()
 {
     if (not camera_ingestor_ or not image_edge_source_) return;
@@ -316,7 +131,6 @@ void CalibChannels::pump_image_edges()
         if (room_polygon_.size() < 3) return;
         if (not camera_ingestor_->bind_camera(params.LIDAR_ROBOT_FRAME)) return;
         image_edge_bound_ = true;
-        apply_refresh_policy(*camera_ingestor_, params.IMAGE_EDGE_CAMERA);
         image_edge_source_->set_room_polygon(room_polygon_);
         // The objects the room currently believes in, so the extraction can explain away wall
         // samples they stand in front of. Refreshed each tick below, not only at bind: furniture
@@ -346,6 +160,35 @@ void CalibChannels::pump_image_edges()
                 << "in frame" << QString::fromStdString(params.LIDAR_ROBOT_FRAME)
                 << "| polygon" << room_polygon_.size() << "pts, room_height" << ic.room_height
                 << (measured_ceiling > 1.5f ? "(measured by the LiDAR)" : "(stated in the scenario)");
+    }
+
+    // ── The extrinsic and the ceiling the contour is projected at, REFRESHED every tick ──────────────────────────────────────
+    // ★ It used to be set only inside the bind block above, so a ceiling measured one second after
+    //   binding never reached the projection — and with the wire broken it never arrived at all. The
+    //   room polygon beside it was already refreshed every tick for exactly this reason.
+    // ⚠ A change here moves every wall-ceiling corner, which is what the mount's HEIGHT parameter
+    //   reads, so it is logged when it moves rather than changing the geometry quietly.
+    // (Until 2026-10-29 this block sat inside the auxiliary calibration-channel loop and so ran only while a
+    //  zed calibration channel existed; it belongs to the driving camera.)
+    if (image_edge_bound_)
+    {
+        camera_ingestor_->refresh_graph_extrinsic();   // a committed body->camera edge reaches the image-edge term
+        const float mz = room_concept_.measured_ceiling();
+        const float want = mz > 1.5f ? mz : params.room_height;
+        if (auto ic = image_edge_source_->config(); std::abs(ic.room_height - want) > 1e-4f)
+        {
+            qInfo().noquote() << QString::asprintf(
+                "[imgedge] wall-ceiling contour re-projected: room_height %.4f -> %.4f m (%s;"
+                " the scenario states %.4f)", ic.room_height, want,
+                mz > 1.5f ? "MEASURED by the LiDAR" : "stated in the scenario", params.room_height);
+            if (mz > 1.5f)
+                qInfo().noquote() << QString::asprintf(
+                    "         its uncertainty is +/- %.3f m — the ceiling corners' z now carries that,"
+                    " and the mount's height can no longer silently absorb it",
+                    room_concept_.measured_ceiling_sigma());
+            ic.room_height = want;
+            image_edge_source_->set_config(ic);
+        }
     }
 
     rc::GrayFrame frame;
@@ -393,9 +236,6 @@ void CalibChannels::pump_image_edges()
                                            camera_ingestor_->cam_R_robot(),
                                            camera_ingestor_->cam_t_robot(),
                                            pose, res->covariance, twist, dt_ms, &st);
-    // The correction that was inside the extrinsic used above. Recorded on the observation so a
-    // shadow solve can remove it and re-create the nominal mount for THESE measurements — factor B.
-    obs.mount_correction = camera_ingestor_->mount_correction();
     // Provenance travels WITH the evidence from here on: every downstream consumer (the pair log,
     // the triple log, the viewer overlay) then reports the camera this observation actually came
     // from, not the one the config names at the moment it is asked.
@@ -447,7 +287,6 @@ void CalibChannels::pump_image_edges()
     // Place the corners in the room BEFORE anything consumes them: the 2-D canvas needs it, and it
     // works for a camera with no depth at all, which the panorama is.
     place_triple_points_in_room(obs, *camera_ingestor_, pose);
-    mount_.mount_pair_update(obs, res->corner_matches, static_cast<std::int64_t>(frame.stamp));
     // The overlay draws these on whichever window IS this camera; the name travels with them so a
     // ricoh corner can never be painted onto a zed frame at a plausible-looking wrong position.
     if (viewer()) viewer()->set_triple_points(obs.triple_points, params.IMAGE_EDGE_CAMERA);
@@ -486,11 +325,8 @@ void CalibChannels::pump_image_edges()
     if (params.IMAGE_EDGE_ENABLE)
     {
         camera_ingestor_ = std::make_unique<rc::CameraIngestor>(G, params.IMAGE_EDGE_CAMERA);
-        // Set BEFORE the first bind_camera(): the correction is applied where the extrinsic is read.
-        camera_ingestor_->set_mount_yaw_correction(params.IMAGE_EDGE_MOUNT_YAW_CORR);
         // Throttle the grey CONVERSION, never the drain — see CameraIngestor and the config note.
         camera_ingestor_->set_min_convert_interval_ms(params.IMAGE_EDGE_MIN_CONVERT_MS);
-        mount_.set_driving_ingestor(camera_ingestor_.get());
 
         image_edge_source_ = std::make_unique<rc::ImageEdgeSource>();
         rc::ImageEdgeSource::Config ic;
@@ -506,71 +342,17 @@ void CalibChannels::pump_image_edges()
         ic.wall_position_sigma = params.IMAGE_EDGE_WALL_POS_SIGMA;
         ic.room_height         = params.room_height;
         image_edge_source_->set_config(ic);
-
-        // ── Extra CALIBRATION channels ─────────────────────────────────────────────────────────
-        // ★ AFTER image_edge_source_ is built and configured. This block sat BEFORE it and
-        //   called image_edge_source_->config() on a null unique_ptr — a segfault on the
-        //   very first start, before the graph was even up. Second time today that adding
-        //   setup beside related code put it ahead of the thing it depends on; the
-        //   dependency is on CONSTRUCTION ORDER and nothing in the surrounding code shows it.──
-        // The driving camera is skipped: it already has an ingestor above, and running it twice
-        // would feed its own evidence file from two extractions of the same frames — the exact
-        // double-count the triple-point/segment choice exists to avoid.
-        for (const auto &cam : params.CALIB_CAMERAS)
-        {
-            if (cam == params.IMAGE_EDGE_CAMERA) continue;
-            auto ch = std::make_unique<CalibChannel>();
-            ch->name = cam;
-            ch->ingestor = std::make_unique<rc::CameraIngestor>(G, cam);
-            // ★ The CALIB interval, not the driving one. A calibration channel's frames never
-            //   reach the loss — they feed an estimator that accumulates H and b over minutes — so
-            //   skipping frames here costs coverage, not evidence. Sharing one number with the
-            //   driving camera would pay for this saving with the pose factor's rate.
-            ch->ingestor->set_min_convert_interval_ms(params.IMAGE_EDGE_CALIB_MIN_CONVERT_MS);
-            // ★ The yaw correction is per CAMERA and is NOT shared. It was measured for the zed; a
-            //   second camera has its own mount and applying one camera's correction to another
-            //   would be a fabricated extrinsic.
-            ch->source = std::make_unique<rc::ImageEdgeSource>();
-            ch->source->set_config(ic);   // the same config, from the local `ic` — see below
-            calib_channels_.push_back(std::move(ch));
-            qInfo() << "[camcal] calibration channel for" << QString::fromStdString(cam)
-                    << "(does not drive the pose)";
-        }
     }
     }
 
     void CalibChannels::start()
     {
-        // ── ONLY THE DRIVING CAMERA STARTS HERE, AS IT ALWAYS DID ───────────────────────────────
-        // The extraction briefly started every calibration channel from this point too. That was the
-        // single run-time difference the review found, and it is reverted: each auxiliary channel is
-        // started lazily inside pump_calib_channels() once its own bind_camera() succeeds. The
-        // difference is not academic — a camera that is CONFIGURED BUT NEVER BINDABLE (wrong node
-        // name, a sensor this robot does not have) would otherwise cost a live ingest thread doing
-        // 1 Hz descriptor discovery and frame drain for the entire run, and the fleet's own note on
-        // that failure is that a media plane for a sensor the robot lacks bridges for ever.
-        // Starting a reader before there is anything to read is not free and buys nothing.
         if (camera_ingestor_) camera_ingestor_->start();
     }
 
     void CalibChannels::stop()
     {
-        // ⚠ REVIEW 2026-09-13, TWO NOTES.
-        //   (a) the baseline never destroyed the auxiliary ingestors at shutdown; this does. Benign,
-        //       but it is not verbatim either.
-        //   (b) MountCalibrator::driving_ is a RAW pointer into camera_ingestor_, handed over in
-        //       configure(), and is NOT cleared here — so after this it dangles, and the guard in
-        //       mount_pair_update() (`not driving_`) can no longer detect it, where at baseline that
-        //       same guard read the owning unique_ptr and was a true guard. Unreachable today: the
-        //       only caller is pump_image_edges(), which returns on its own null camera_ingestor_,
-        //       and request_shutdown() runs on the GUI thread and then _Exit()s, so no compute tick
-        //       can interleave — safe by a property of SHUTDOWN, not by construction. Closed below.
-        // The calibrator holds a RAW pointer to the driving ingestor (handed over in configure()), so
-        // it is told BEFORE the object goes. Its own `not driving_` guard is then a true guard again,
-        // as it was at the baseline where it read the owning unique_ptr.
-        mount_.set_driving_ingestor(nullptr);
         camera_ingestor_.reset();          // drop the RGB readers before the graph goes
-        for (auto& chp : calib_channels_) chp->ingestor.reset();
     }
 
     void CalibChannels::set_room_polygon(std::vector<Eigen::Vector2f> poly, const Eigen::Vector2f& offset)
@@ -594,8 +376,6 @@ void CalibChannels::pump_image_edges()
                            static_cast<long long>(ing.ms_since_last_frame())});
         };
         if (camera_ingestor_) add(params.IMAGE_EDGE_CAMERA, *camera_ingestor_);
-        for (const auto& chp : calib_channels_)
-            if (chp->ingestor) add(chp->name, *chp->ingestor);
         return out;
     }
 
@@ -607,8 +387,6 @@ void CalibChannels::pump_image_edges()
             out += " " + name + " " + std::to_string(st.second) + "/" + std::to_string(st.first);
         };
         if (camera_ingestor_) add(params.IMAGE_EDGE_CAMERA, camera_ingestor_->convert_stats());
-        for (const auto& chp : calib_channels_)
-            if (chp->ingestor) add(chp->name, chp->ingestor->convert_stats());
         return out;
     }
 

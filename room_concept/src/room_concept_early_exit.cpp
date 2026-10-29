@@ -75,8 +75,6 @@ namespace rc
             // P(the body moved this cycle): the rest channel's own belief (RestMotionChannel), either motion
             const float p_move = 1.f - (1.f - std::clamp(zupt_pred_gain_tr_, 0.f, 1.f)) * (1.f - std::clamp(zupt_pred_gain_ro_, 0.f, 1.f));
             noise_innov_.observe(delta, T, cyc_U_, innov_R_ + innov_R_prev_, odom_body, p_move, cyc_dt_s_);
-            // r2 kinematic mount factor: the same delta, the learner's per-axis model variance (plan 2026-10-08)
-            if (params.mount_factors) observe_kinematic_mount(delta, T, odom_body, res);
             if (params.motion_noise_learn)
             {   // the coefficients the NEXT prediction is built with
                 np.k_long     = float(noise_innov_.k(0)); np.k_lat     = float(noise_innov_.k(1));

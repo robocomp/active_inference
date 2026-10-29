@@ -84,56 +84,19 @@ public:
     bool bind_camera(const std::string& robot_frame);
 
     /// MAIN THREAD. Re-reads the graph's camera<-robot RT and, if it differs from what was last read, makes it
-    /// the new base extrinsic (the configured boresight and the live mount correction are re-applied on top).
+    /// the extrinsic.
     /// This is how a body->camera edge that robot_concept COMMITTED at runtime reaches the image-edge term:
     /// bind_camera() used to be the only read, so a committed mount was ignored until restart. The read goes
     /// through inner_ (created on the main thread in bind_camera, so its queued cache invalidations fire).
     /// Returns true when the base changed. No-op before a successful bind_camera().
     bool refresh_graph_extrinsic();
 
-    /// false => refresh_graph_extrinsic() is a no-op. Set false when this agent is itself the writer of the
-    /// body->camera edge (ImageEdge.mountPublish): the edge then already holds nominal x learned correction, and
-    /// re-reading it as the BASE would apply mount_corr_ a second time on every publish.
-    void set_live_graph_refresh(bool on) noexcept { live_refresh_ = on; }
 
     /// MAIN THREAD. The extrinsic half of bind_camera() on its own (reads cam<-robot, applies it, sets
     /// extrinsic_ok_); bind_camera() calls it. Public so the graph->extrinsic path is testable without a
     /// camera stream (room_concept/tests/lidar_mount_edge_live_test.cpp).
     bool bind_extrinsic(const std::string& robot_frame);
 
-    /// LOCAL boresight-yaw correction, radians, applied to the extrinsic read from the graph.
-    ///
-    /// ★ WHY THIS IS HERE AND NOT IN THE ROBOT'S GEOMETRY. The graph's camera<-robot RT is the
-    ///   shared, authoritative description every agent reads. This knob lets room_concept test a
-    ///   measured mount error WITHOUT editing that shared description, so a wrong sign or a wrong
-    ///   magnitude cannot silently propagate to every other consumer of the zed extrinsic. Once the
-    ///   value is confirmed here it belongs in the robot geometry, and this should go back to 0.
-    ///
-    /// MEASURED 2026-08-28: +0.814 +/- 0.022 deg (0.01421 rad, 6.37 px at fy=448), by joining the
-    /// image-edge rigid-shift fit against the Webots supervisor across 99 windows and 7 heading
-    /// bins. Flat across heading (spread 0.058 deg), which is what makes it a BORESIGHT and not the
-    /// localiser's own heading error (that ran ~0.18 deg sd and correlated at +0.816 with the shift).
-    void set_mount_yaw_correction(float rad) noexcept { mount_yaw_correction_ = rad; }
-
-    /// ── THE LIVE CORRECTION, on the axes the ESTIMATOR differentiates ───────────────────────────
-    /// Separate from the configured boresight above, and deliberately so. That one is measured on
-    /// the ROBOT's vertical; this one uses the CAMERA's own axes — pitch about x̂_cam, height along
-    /// ẑ_cam, yaw about ẑ_cam — because those are literally the columns of `J` in mount_lidar_pair.h,
-    /// and a correction applied on a different axis than the one estimated is not that correction.
-    /// (mount_lidar_pair.h records that using the robot's axes here was a bug once already: what was
-    /// labelled "pitch" was a roll.)
-    /// Safe to call at any time: the graph extrinsic is kept untouched and the mount is rebuilt from
-    /// it, so corrections replace rather than accumulate and there is no drift through re-application.
-    void set_mount_correction(float pitch_rad, float height_m, float yaw_rad);
-    /// Override the frozen base — the extrinsic the correction is applied ON TOP OF.
-    /// ★ Used on resume when the evidence carries the nominal it was measured against. Binding takes
-    ///   the base from the GRAPH, which is right only while nothing writes the graph; once the
-    ///   measured mount is published into that same edge, the graph holds `base ⊕ applied` and
-    ///   binding to it would apply the correction twice. The evidence knows better, so it wins.
-    void set_base(const Eigen::Matrix3f& R, const Eigen::Vector3f& t);
-    [[nodiscard]] const Eigen::Matrix3f& base_R() const noexcept { return cam_R_robot_base_; }
-    [[nodiscard]] const Eigen::Vector3f& base_t() const noexcept { return cam_t_robot_base_; }
-    [[nodiscard]] Eigen::Vector3f mount_correction() const noexcept { return mount_corr_; }
 
     /// Convert at most one frame per `ms`. 0 = every delivered frame (the old behaviour).
     ///
@@ -214,10 +177,9 @@ private:
     std::shared_ptr<DSR::DSRGraph> G_;
     std::string camera_node_;
     std::string robot_frame_;
-    bool live_refresh_ = true;
     std::unique_ptr<DSR::InnerEigenAPI>      inner_;            // main-thread-owned (see refresh_graph_extrinsic)
     Eigen::Matrix4d                          graph_cam_T_robot_ = Eigen::Matrix4d::Zero();   // last graph read
-    /// Graph extrinsic -> base (+ configured boresight), shared by bind_camera and refresh_graph_extrinsic.
+    /// Graph extrinsic -> cam_R_robot_/cam_t_robot_, shared by bind_camera and refresh_graph_extrinsic.
     void apply_graph_extrinsic_(const Eigen::Matrix4d& M);
 
     std::unique_ptr<DSR::CameraAPI>          camera_api_;
@@ -230,14 +192,6 @@ private:
     std::unique_ptr<rc::media::MediaSubscriber>   sub_depth_;   ///< COMPUTE thread only
     bool            depth_absent_warned_ = false;
     long            depth_polls_ = 0, depth_hits_ = 0;
-    float           mount_yaw_correction_ = 0.f;   ///< rad, applied about the ROBOT VERTICAL at bind
-    /// (pitch rad, height m, yaw rad) on the CAMERA's own axes — the live self-calibration term.
-    Eigen::Vector3f mount_corr_ = Eigen::Vector3f::Zero();
-    /// The graph's extrinsic with the CONFIGURED boresight already in it, and nothing else. Kept so
-    /// the live correction can be re-applied from a fixed base instead of composed onto itself.
-    Eigen::Matrix3f cam_R_robot_base_ = Eigen::Matrix3f::Identity();
-    Eigen::Vector3f cam_t_robot_base_ = Eigen::Vector3f::Zero();
-    void rebuild_extrinsic_();
     int  min_convert_ms_ = 0;      ///< see set_min_convert_interval_ms
     std::int64_t last_convert_ms_ = 0;
     long conv_seen_ = 0, conv_done_ = 0;

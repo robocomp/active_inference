@@ -36,7 +36,6 @@ LIST(APPEND SOURCES
   ../src/specificworker.cpp
   ../src/specificworker_slots.cpp
   ../src/specificworker_startup.cpp
-  ../src/mount_calibrator.cpp
   ../src/pose_publisher.cpp
   ../src/calib_channels.cpp
   ../src/ground_truth_log.cpp
@@ -262,23 +261,6 @@ set_target_properties(wall_slam_selftest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${C
 add_executable(motion_calib EXCLUDE_FROM_ALL ../tools/motion_calib.cpp)
 target_include_directories(motion_calib PRIVATE ${CMAKE_CURRENT_LIST_DIR}/../src)
 set_target_properties(motion_calib PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../../bin)
-
-# ── mount_replay ──────────────────────────────────────────────────────────────
-# Arm 7 (VALIDATION_THREE_DEVICE_CORNERS §2b): replays a recorded drive under a deliberately wrong
-# extrinsic, so the four injection legs are four analyses of ONE drive. Standalone like motion_calib
-# — it includes mount_lidar_pair.h, which is Eigen + std only, so it links no torch and no DSR and
-# builds in seconds. It calls the AGENT'S estimator rather than a replica of it, on purpose.
-#   make -C build mount_replay && ../bin/mount_replay --help
-add_executable(mount_replay EXCLUDE_FROM_ALL ../tools/mount_replay.cpp)
-target_include_directories(mount_replay PRIVATE ${CMAKE_CURRENT_LIST_DIR}/../src)
-# ★ QtCore ONLY, and only because camera_calibration.h logs through QDebug. The point of this target
-#   is that it calls the AGENT'S OWN estimator rather than a replica of it, and the rebase-on-adopt
-#   selftest needs rc::camcal::Estimator itself — the decision about whether a nominal change is
-#   expressible as a mount correction lives there. QtCore is cheap; no widgets, no DSR, no torch, so
-#   the target still builds in seconds.
-find_package(Qt6 COMPONENTS Core REQUIRED)
-target_link_libraries(mount_replay PRIVATE Qt6::Core)
-set_target_properties(mount_replay PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../../bin)
 
 # ── boxed_in_handoff_test ─────────────────────────────────────────────────────
 # Task X: the boxed-in handoff carries the candidate's own gain (nats). Standalone, EXCLUDE_FROM_ALL:

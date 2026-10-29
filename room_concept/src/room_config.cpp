@@ -447,49 +447,14 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
             "multiplies mean |SDF| over the episode, into the position R");
     reader.opt<float, double>("RoomConcept.MotionCalibLeverSigma", room_concept.params.motion_calib.lever_sigma,
             "m. Prior on the helios lever arm (spec §5); learnt only from ROTATION (plan 2026-10-05 Task 1)");
-    // ── helios mount correction + sim-only injection at the LiDAR ingestor (plan 2026-10-05 Task 5) ──
-    reader.opt<bool>("RoomConcept.LidarMountApply", p.LIDAR_MOUNT_APPLY,
-            "apply the motion calibrator's ACTING helios (lever_x, lever_y, eps_yaw/kEps) to the LiDAR points; OFF until validated (plan 2026-10-05 Task 5/6)");
-    reader.opt<float, double>("RoomConcept.LidarMountInjectX", p.LIDAR_MOUNT_INJECT_X,
-            "m. SIMULATION ONLY: planted helios mount error (sensor displacement, body X)");
-    reader.opt<float, double>("RoomConcept.LidarMountInjectY", p.LIDAR_MOUNT_INJECT_Y,
-            "m. SIMULATION ONLY: planted helios mount error (sensor displacement, body Y)");
-    reader.opt<float, double>("RoomConcept.LidarMountInjectYawDeg", p.LIDAR_MOUNT_INJECT_YAW_DEG,
-            "deg. SIMULATION ONLY: planted helios mount error (sensor CCW yaw)");
-    reader.opt<float, double>("RoomConcept.LidarMountInjectZ", p.LIDAR_MOUNT_INJECT_Z,
-            "m. SIMULATION ONLY: planted helios mount error (sensor displacement, body Z); Pose6 about the sensor origin");
-    reader.opt<float, double>("RoomConcept.LidarMountInjectRollDeg", p.LIDAR_MOUNT_INJECT_ROLL_DEG,
-            "deg. SIMULATION ONLY: planted helios mount error (rotation about body X through the sensor origin)");
-    reader.opt<float, double>("RoomConcept.LidarMountInjectPitchDeg", p.LIDAR_MOUNT_INJECT_PITCH_DEG,
-            "deg. SIMULATION ONLY: planted helios mount error (rotation about body Y through the sensor origin)");
-    // ── the KINEMATIC helios mount factor (plan 2026-10-08). The floor/vertical factors (bpearl z, roll, pitch;
-    //    helios roll, pitch; bpearl x, y, yaw) run in the sensor_calibration agent since 2026-10-29. ──
-    reader.opt<bool>("RoomConcept.MountFactors", p.MOUNT_FACTORS,
-            "feed + LOG the kinematic helios (x, y, yaw) mount factor (tmp/mount_factors/kin_*.csv); moves no pose. ⚠ ON => eps_yaw stops acting on the odometry (single owner)");
-    room_concept.params.mount_factors = p.MOUNT_FACTORS;
-    // The lever acts and the yaw moves to the LiDAR side exactly when the correction is applied there,
-    // so p_applied records what acts and the odometry never applies the same yaw a second time.
-    room_concept.params.motion_calib.apply_lever    = p.LIDAR_MOUNT_APPLY;
-    // r2.2 item 4, SINGLE OWNER (MANDATORY): with the mount factors on, the kinematic factor owns the helios
-    // yaw, so eps_yaw must NOT act on the odometry (else the yaw plant is absorbed into the odometry before
-    // the kinematic factor sees it). lidar_side_yaw makes yaw_offset() return 0.
-    // ⚠ BEHAVIOUR CHANGE of the odometry side: eps_yaw stops acting (it was acting under ApplyMask = -1).
-    // ⚠ DEVIATION (defensible version): lidar_side_yaw ALONE would leave acting(P_EPS_YAW) true, so p_applied
-    //   would record a yaw that nothing applied (no LiDAR-side consumer while LidarMountApply is off) and the
-    //   calibrator's r + J*p_applied undo would charge it back -- the r1 Review Focus #2 failure. So, unless
-    //   LidarMountApply puts the yaw on the points, the eps apply bit is ALSO cleared: eps is then estimated
-    //   and reported, never applied, and p_applied records 0 for it.
-    room_concept.params.motion_calib.lidar_side_yaw = p.LIDAR_MOUNT_APPLY or p.MOUNT_FACTORS;
-    if (p.MOUNT_FACTORS and not p.LIDAR_MOUNT_APPLY)
-        room_concept.params.motion_calib.apply_mask &= ~(1 << rc::calib::P_EPS_YAW);
-    if (p.LIDAR_MOUNT_INJECT_X != 0.f or p.LIDAR_MOUNT_INJECT_Y != 0.f or p.LIDAR_MOUNT_INJECT_YAW_DEG != 0.f
-        or p.LIDAR_MOUNT_INJECT_Z != 0.f or p.LIDAR_MOUNT_INJECT_ROLL_DEG != 0.f or p.LIDAR_MOUNT_INJECT_PITCH_DEG != 0.f)
-        qWarning().nospace() << "[cfg] ⚠ LidarMountInject* is NONZERO (x " << p.LIDAR_MOUNT_INJECT_X
-                             << " m, y " << p.LIDAR_MOUNT_INJECT_Y << " m, z " << p.LIDAR_MOUNT_INJECT_Z
-                             << " m, roll " << p.LIDAR_MOUNT_INJECT_ROLL_DEG << ", pitch " << p.LIDAR_MOUNT_INJECT_PITCH_DEG
-                             << ", yaw " << p.LIDAR_MOUNT_INJECT_YAW_DEG
-                             << " deg): a helios mount error is being PLANTED in the LiDAR points. "
-                                "SIMULATION ONLY -- set all six to 0 on the real robot.";
+    // ── helios mount: NOT this agent's any more (2026-10-29). The kinematic factor, LidarMountApply and the
+    //    sim-only LidarMountInject* were removed; the mount is the graph's (robot_concept: nominal + overlay,
+    //    where planted errors go too) and its estimation belongs to sensor_calibration (plan Task 4.4).
+    //    SINGLE OWNER (r2.2 item 4, unchanged behaviour): eps_yaw is still ESTIMATED and logged by the motion
+    //    calibrator but never applied to the odometry, and p_applied records 0 for it -- the helios yaw is a
+    //    mount, and a mount is corrected in the graph, not in the odometry. (Before 10-29 this was the
+    //    MountFactors=true branch; lidar_side_yaw stays false, which with the apply bit cleared is equivalent.)
+    room_concept.params.motion_calib.apply_mask &= ~(1 << rc::calib::P_EPS_YAW);
     // ★ EXPOSED 2026-09-01 so the episode LENGTH can be A/B'd without a rebuild between legs.
     // These are identifiability triggers, not tuning: below them the Jacobian rows are ~0. But
     // information in a channel goes as (accumulated covariate)^2 while episodes arrive at 1/T, so
@@ -845,16 +810,6 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
             "ImageEdge.mountHeightSigma (m)");
     reader.opt<float, double>("ImageEdge.mountYawSigma", p.IMAGE_EDGE_MOUNT_YAW_SIGMA,
             "ImageEdge.mountYawSigma (rad)");
-    reader.opt<float, double>("ImageEdge.mountVertexOffsetSigmaPx", p.IMAGE_EDGE_MOUNT_VERTEX_OFFSET_SIGMA_PX,
-            "ImageEdge.mountVertexOffsetSigmaPx");
-    reader.opt<float, double>("ImageEdge.mountYawCorrection", p.IMAGE_EDGE_MOUNT_YAW_CORR,
-            "ImageEdge.mountYawCorrection (rad)");
-    reader.opt<bool>("ImageEdge.mountApply", p.IMAGE_EDGE_MOUNT_APPLY,
-            "ImageEdge.mountApply");
-    reader.opt<bool>("ImageEdge.mountPublish", p.IMAGE_EDGE_MOUNT_PUBLISH,
-            "ImageEdge.mountPublish");
-    reader.opt<std::string>("ImageEdge.mountDescriptionFile", p.IMAGE_EDGE_MOUNT_DESCRIPTION,
-            "ImageEdge.mountDescriptionFile: the robot JSON = the mount NOMINAL");
     reader.opt<float, double>("ImageEdge.wallPositionSigma", p.IMAGE_EDGE_WALL_POS_SIGMA,
             "ImageEdge.wallPositionSigma (m)");
     reader.opt<bool>("ImageEdge.useTriplePoints", p.IMAGE_EDGE_USE_TRIPLE_POINTS,
@@ -888,7 +843,6 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
             f("mountPitchSigma",    ov.mount_pitch_sigma);
             f("mountHeightSigma",   ov.mount_height_sigma);
             f("mountYawSigma",      ov.mount_yaw_sigma);
-            f("mountYawCorrection", ov.mount_yaw_correction);
             f("wallPositionSigma",  ov.wall_position_sigma);
             f("CmdNoiseRot",        ov.cmd_noise_rot);
             f("CmdNoiseTrans",      ov.cmd_noise_trans);
@@ -975,19 +929,12 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
             qInfo() << "[cfg] scenario overlays parsed for" << static_cast<int>(names.size())
                     << "scenario(s); the matching one is applied once the graph names this place";
     }
-    // ConfigLoader throws on an EMPTY array (memory: configloader-empty-array-throws), so an absent
-    // key is the way to say "no extra calibration cameras", not `calibCameras = []`.
-    try { reader.opt<std::vector<std::string>>("ImageEdge.calibCameras", p.CALIB_CAMERAS,
-            "only reading here that needs no ground truth. See camera_calibration.h"); }
-    catch (const std::exception& e) { qWarning() << "[cfg] ImageEdge.calibCameras ignored:" << e.what(); }
     reader.opt<std::string>("ImageEdge.csv", p.IMAGE_EDGE_CSV,
             "ImageEdge.csv");
     reader.opt<int>("ImageEdge.minConvertIntervalMs", p.IMAGE_EDGE_MIN_CONVERT_MS,
             "ImageEdge.minConvertIntervalMs");
     reader.opt<int>("ImageEdge.localizingConvertIntervalMs", p.IMAGE_EDGE_LOCALIZING_CONVERT_MS,
             "ImageEdge.localizingConvertIntervalMs (conversion throttle once LOCALIZING; 0 = none)");
-    reader.opt<int>("ImageEdge.calibMinConvertIntervalMs", p.IMAGE_EDGE_CALIB_MIN_CONVERT_MS,
-            "ImageEdge.calibMinConvertIntervalMs");
 
     room_concept.params.image_edge.enable             = p.IMAGE_EDGE_ENABLE;
     room_concept.params.image_edge.drive              = p.IMAGE_EDGE_DRIVE;
@@ -1187,7 +1134,6 @@ std::vector<std::string> RoomConfig::apply_platform(const std::string& robot)
     set(ov.mount_pitch_sigma,    IMAGE_EDGE_MOUNT_PITCH_SIGMA,  "mountPitchSigma");
     set(ov.mount_height_sigma,   IMAGE_EDGE_MOUNT_HEIGHT_SIGMA, "mountHeightSigma");
     set(ov.mount_yaw_sigma,      IMAGE_EDGE_MOUNT_YAW_SIGMA,    "mountYawSigma");
-    set(ov.mount_yaw_correction, IMAGE_EDGE_MOUNT_YAW_CORR,     "mountYawCorrection");
     set(ov.wall_position_sigma,  IMAGE_EDGE_WALL_POS_SIGMA,     "wallPositionSigma");
     if (ov.image_edge_camera.has_value() and *ov.image_edge_camera != IMAGE_EDGE_CAMERA)
     { changed.emplace_back("camera"); IMAGE_EDGE_CAMERA = *ov.image_edge_camera; note_overlay_applied("camera", IMAGE_EDGE_CAMERA, source); }

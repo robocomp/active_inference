@@ -2,9 +2,13 @@
 # world: webots
 # sensor x y z roll pitch yaw version iso_date source
 # ── PLANTED ERRORS FOR A WEBOTS RUN (sensor_calibration plan, Phase 3). NOT LOADED UNDER THIS NAME. ──
-# To plant:   cp etc/mount_calib_Shadow_webots.plant-example.txt etc/mount_calib_Shadow_webots.txt
+# To plant:   cp etc/mount_calib_Shadow_webots.txt etc/mount_calib_Shadow_webots.txt.clean   (keep the real one)
+#             cp etc/mount_calib_Shadow_webots.plant-example.txt etc/mount_calib_Shadow_webots.txt
 #             then (re)start robot_concept FIRST, then the rest of the fleet (the overlay is read at startup only).
-# To remove:  rm etc/mount_calib_Shadow_webots.txt and restart robot_concept. A forgotten file plants on EVERY run.
+# To remove:  mv etc/mount_calib_Shadow_webots.txt.clean etc/mount_calib_Shadow_webots.txt, restart robot_concept.
+#             A forgotten plant file plants on EVERY run.
+# The ricoh row is NOT a plant: it is the real Webots ricoh correction (see mount_calib_Shadow_webots.txt), kept here so
+# a planted run does not lose it.
 # Each row is a CORRECTION composed over the nominal mount in body-aligned axes at the sensor origin
 # (mount_overlay.h): the graph then believes the wrong mount while Webots keeps the nominal one, so every agent sees
 # the same error. sensor_calibration's factors read the NEGATIVE of these numbers (mount_factors_test part O).
@@ -12,3 +16,4 @@
 # ⚠ helios yaw/x/y move room_concept's map and pose too (by design: that is what a real mount error does).
 helios 0 0 0 0.0069813 -0.0052360 0 1 2026-10-29 planted-phase3-test
 bpearl 0.010 0 0.010 0.0087266 -0.0139626 0.0174533 1 2026-10-29 planted-phase3-test
+ricoh -0.000000001 -0.000000303 0.003400222 0.000089172 -0.000000321 -0.003594752 1 2026-10-29 room_concept:camcal-learned

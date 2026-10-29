@@ -991,32 +991,10 @@ MotionCalibRotModelSigma = 0.030  # m per rad of turning, added in quadrature to
 MotionCalibLeverSigma = 0.05   # m. Prior on the helios lever arm (spec §5). Learnt only from ROTATION.
                         # Estimated always, applied only through LidarMountApply. Plan
                         # docs/superpowers/plans/2026-10-05-joint-calibration.md Task 1.
-LidarMountApply   = false  # apply the helios (lever_x, lever_y, yaw) to the points: the motion calibrator's
-                           # ACTING values (taught + MotionCalibApply + MotionCalibApplyMask bits 1/7/8), so
-                           # p_applied records exactly what acts. The yaw then acts on the points INSTEAD of
-                           # the odometry. OFF until Task 6's injection run recovers a planted error. Owner: user.
-                           # ⚠ Turning it on mid-run moves the published pose by R(theta)*lever and the
-                           # yaw in one step -- expected, not a relocalisation.
-LidarMountInjectX = 0.0    # m    ⚠ SIMULATION ONLY: plant a KNOWN helios mount error = the sensor's displacement
-LidarMountInjectY = 0.0    # m      and CCW yaw from its nominal mount, body frame (points get inverse() of it).
-LidarMountInjectYawDeg = 0.0 # deg  Leave all three at 0 on the real robot -- room_config WARNs when any is nonzero.
-# ── r2 (plan docs/superpowers/plans/2026-10-08-lidar-mounts-kinematic-floor.md): 6-DoF planted mount errors ──
-# ⚠ Since 2026-10-08 ALL LidarMountInject* form ONE Pose6 rotating about the SENSOR origin (lidar_mount.h), not
-# a Planar about the body origin: for X/Y/YawDeg = (0.03, -0.02, 1) the kinematic factor now reads a body-origin
-# lever of (27.3, -20) mm. ⚠ SIMULATION ONLY, all 0 here.
-LidarMountInjectZ        = 0.0   # m
-LidarMountInjectRollDeg  = 0.0   # deg, about body X through the helios origin
-LidarMountInjectPitchDeg = 0.0   # deg, about body Y through the helios origin
-# The KINEMATIC mount factor: helios (x, y, yaw) from scan-only poses vs the calibrated odometry, per-cycle log
-# tmp/mount_factors/kin_<ts>.csv. ESTIMATE + LOG only: nothing here moves the published pose (LidarMountApply
-# stays OFF). The FLOOR (bpearl z, roll, pitch) and VERTICAL (helios roll, pitch; bpearl x, y, yaw) factors, the
-# bpearl injection and the joint monitor moved out on 2026-10-29: they run in sensor_calibration ([MountFactors]);
-# plant a mount error for them through robot_concept's overlay (etc/mount_calib_<robot>_webots.txt).
-# ⚠ BEHAVIOUR CHANGE WHEN TRUE (r2.2 item 4, single owner): the kinematic factor owns the helios yaw, so
-# eps_yaw STOPS ACTING ON THE ODOMETRY -- room_config sets motion_calib.lidar_side_yaw AND clears the eps_yaw
-# apply bit (unless LidarMountApply puts it on the points), so p_applied records 0 for it. eps_yaw is still
-# estimated and logged. The acting value (yaw_offset) is logged per row and must read 0.
-MountFactors      = true
+# ── Helios mount: NOT this agent's (2026-10-29). LidarMountApply, LidarMountInject* and MountFactors (the
+# kinematic helios factor) were removed: the mount is the graph's (robot_concept nominal + overlay
+# etc/mount_calib_<robot>_<world>.txt, where planted Webots errors go too) and is estimated by sensor_calibration.
+# eps_yaw (MotionCalib*) is still estimated and logged but never applied to the odometry (single owner).
 MotionCalibFitModelGain  = 2.0    # x mean |SDF| over the episode, into the position R. Also the
                         # header default. A correction can only be as good as the FIT that produced
                         # it: when the localiser is not tracking, the optimizer fires nearly every
@@ -1747,74 +1725,11 @@ maxSlots     = 1          # newest window slot only, like corners
 mountPitchSigma  = 0.0035   # rad (~0.2 deg)   ⚠ NOT MEASURED ON SHADOW
 mountHeightSigma = 0.010    # m                ⚠ NOT MEASURED ON SHADOW
 mountYawSigma    = 0.0175   # rad (1 deg)      ⚠ NOT MEASURED ON SHADOW. 2026-10-08: widened from 0.0035 for joint-calib Task 6 (a 0.2 deg prior let the per-vertex offsets absorb a planted 1 deg); revisit after
-# ── The per-vertex offset nuisance (mount_lidar_pair.h) ──────────────────────────────────────────
-# Prior sigma on a CORNER'S OWN image offset, in pixels. MEASURED 2026-09-02: per-vertex means reach
-# −17 px and spread sd 5.3 px across 23 corners, while the mount signal being estimated is 1.1 px of
-# yaw. Without this term the solve counts one corner's thousands of sightings as thousands of
-# independent measurements and reports a yaw sigma 127x too small — smaller than its own honest error.
-#   0    = OFF, and OFF is bit-for-bit the pre-2026-09-02 solve. This is the default on purpose:
-#          turning it on changes every mount sigma the agent reports, which is the user's call.
-#   5.3  = the measured between-corner spread. ⚠ Empirical Bayes: measured from the same data it is
-#          applied to, so it is a hyperparameter, NOT a prior the data then confirms.
-# ★ Expect yaw's sigma to open by ~130x (to about 0.216 deg, the between-vertex SEM) and pitch and
-#   height by much less. That asymmetry is the pre-registered prediction, not a side effect: yaw is a
-#   constant pixel shift and is degenerate with a corner's own offset, while pitch and height are
-#   range-dependent and survive. See VALIDATION_THREE_DEVICE_CORNERS.md §2.
-# ⚠ Evidence files written before this existed carry no vertices and CANNOT be marginalised; the
-#   agent says so and refuses rather than reverting silently. Delete etc/camera_calib_*.txt to
-#   re-accumulate under the new model.
-mountVertexOffsetSigmaPx = 5.3
-# ★ 2026-09-03: ARMED. 0 = the pre-2026-09-02 solve, which counted each of a corner's thousands of
-#   sightings as independent and reported a yaw sigma 127x too small. 5.3 px is the measured spread
-#   of the per-corner offsets. It is also a PRECONDITION for mountApply below: an estimate taken
-#   with this off has absorbed each corner's own detection bias, and must not be written into an
-#   extrinsic. The solve REFUSES to be applied unless this is on.
-# ★ 2026-10-11: OFF. The learned mounts RAN AWAY between 09-19 and 10-11 (estimate-mode campaigns, ~100 teleported
-#   runs): zed pitch -9.5 deg / yaw -9.2 deg, ricoh height +0.49 m, and drive=true put them into the post-promotion
-#   pose. Files restored to the 09-19 evidence (commit 9caf1d41); runaway copies kept in the session scratchpad.
-#   Evidence still ACCUMULATES (etc/image_edge_mount.csv) so the cause can be measured; nothing is applied until it is.
-mountApply = false
-
-# ── mountPublish: write the measured mount into the SHARED body->camera RT edge ──────────────────
-# OFF until the loop has been watched for a session or two on this robot. With mountApply on, the
-# correction exists only inside room_concept's own camera model: retina, the controller and every
-# other consumer still read the nominal mount, so the fleet disagrees with the estimator by exactly
-# the amount the estimator has measured. Turning this on makes the graph tell everyone the same
-# thing.
-#
-# ★ It is an OUTPUT only. The estimator keeps measuring against the extrinsic it read at BIND and
-#   the prior stays anchored there, so publishing cannot change any number the loop produces. See
-#   SpecificWorker::publish_mount_to_graph — that separation, not a magnitude limit, is what makes
-#   it safe to leave running.
-#
-# ★ ON since 2026-09; the cross-restart problem it had is CLOSED (2026-10-04) by mountDescriptionFile below.
-#   Before that, the nominal the estimator measured against was read from the graph, i.e. from this
-#   loop's own earlier output, and robot_concept saved the edge over the JSON at every stop
-#   (persist_mounts_on_stop) — a ratchet: ricoh yaw crept -0.05 -> -0.14 deg over 13 restarts, and on
-#   10-04 cold-start estimates (camera evidence wiped for an experiment) were persisted as the mount:
-#   zed 14 cm high / -1.3 deg pitch, ricoh 12 cm low (robot_concept/etc/mount_calib_Shadow.txt rev 14-15).
-# ★ 2026-10-11: OFF with mountApply (see above) — the graph must not carry a mount the loop has not earned.
-# ⚠ INTERACTION with the live edge refresh: CameraIngestor::refresh_graph_extrinsic() re-reads body->camera as the BASE
-#   extrinsic so a mount COMMITTED by robot_concept reaches this agent without a restart. With mountPublish = true THIS agent
-#   writes that edge (nominal x learned correction) and already holds the composition, so the refresh is switched OFF (a
-#   log line says so at bind); otherwise the correction would be applied twice, compounding on every publish.
-mountPublish = false
-# ── mountDescriptionFile: the robot description that ANCHORS the mount ───────────────────────────
-# The nominal body->camera edge is read from this file (the robot's DSR JSON), never from the graph, so
-# the graph is purely an output and a restart cannot turn last session's answer into this session's
-# prior. Empty = the old graph-anchored behaviour. Path relative to room_concept's working directory.
-# ★ 2026-10-29: consulted ONLY while mountPublish = true (the only case where the graph edge is this loop's own
-#   output). With mountPublish = false the graph edge -- robot_concept's nominal + overlay -- is the nominal, as
-#   for every other agent, so a real or planted camera correction is no longer silently undone here.
-mountDescriptionFile = "../robot_concept/shadow.json"
-# ★ 2026-09-03: the camera extrinsic is now CLOSED-LOOP. The pooled solve is fed back into the mount
-#   on the camera's own axes (the ones J differentiates), the evidence is re-referenced to the mount
-#   that results, and the prior stays anchored on the GRAPH extrinsic so the total is always the
-#   posterior mean of the error relative to it. No gate and no magnitude limit: the posterior mean is
-#   already shrunk by how much the data informs each axis, so a well-informed axis applies nearly all
-#   of itself (zed yaw, 0.98) and an uninformed one applies nothing and DECAYS back to the graph.
-#   Proven not to run away before being switched on: tools/mount_replay.cpp --selftest drives the
-#   real loop for 12 cycles (converges to 0.984 of a 1.000 truth, late steps 0.006 deg).
+# ── The camera MOUNT CALIBRATOR (mountVertexOffsetSigmaPx, mountApply, mountPublish, mountDescriptionFile,
+# calibCameras, calibMinConvertIntervalMs, mountYawCorrection) was REMOVED 2026-10-29. Camera extrinsics are the
+# graph's: robot_concept's nominal + overlay (etc/mount_calib_<robot>_<world>.txt; the ricoh correction this loop
+# had learned on Webots now lives there) and boresight_yaw_*; estimating them is sensor_calibration's job. The
+# mount SIGMAS above stay: they are the driving term's marginalised nuisance priors.
 
 # ── Structural features ported from config_p3bot_webots.toml, 2026-08-29 ───────────────────────
 # ★★ mountYawCorrection is DELIBERATELY ABSENT, i.e. zero. P3Bot's +0.814 deg was measured on
@@ -1853,19 +1768,7 @@ localizingConvertIntervalMs = 500   # 2026-10-10 ★COMPUTE BUDGET: once LOCALIZ
                                     # estimate (~100% early exit), so ~2 Hz instead of every frame; perf: the channel was
                                     # ~15-20% of a core at full rate. 0 = never throttle.
                               # factor that MOVES the published pose (drive = true), so a skipped
-                              # frame here is evidence the localiser does not get — a different
-                              # trade from the one below, which is why it is a different number.
-calibMinConvertIntervalMs = 100   # CALIBRATION channels (the zed today): 10 Hz. Their frames never
-                              # reach the loss; they feed an estimator that accumulates H and b over
-                              # minutes and wants COVERAGE — poses spread around the room — not every
-                              # frame from one pose. Convergence is slower in wall-clock by the same
-                              # factor the cost falls.
-
-# Both cameras calibrated; `camera` above stays the one that may drive. Each camera's residual
-# against the LiDAR is (camera error) + (LiDAR corner error) and those are inseparable with ONE
-# camera — differencing two cameras against the SAME corner cancels the LiDAR term, which is the
-# only reading here that needs no ground truth. See camera_calibration.h.
-calibCameras = ["zed", "ricoh"]
+                              # frame here is evidence the localiser does not get.
 
 # Per-CONTOUR map-position uncertainty (m). Not a mount property: how well any single wall's place
 # in the polygon is known. Stops N samples along one wall counting as N independent measurements of
@@ -1988,12 +1891,8 @@ camera             = "ricoh"
 mountPitchSigma    = 0.0017
 mountHeightSigma   = 0.010
 mountYawSigma      = 0.0035
-# ★ 2026-09-03: MOVED. This is now robot_concept/etc/config_p3bot.toml's
-#   Transforms.boresight_yaw_ricoh, which corrects the body->ricoh RT edge itself, so every agent
-#   reads the corrected extrinsic instead of room_concept holding a private offset. Leaving a value
-#   here as well would apply it TWICE. The key still works if set — it remains the right place to
-#   test an unconfirmed correction without touching the shared description.
-mountYawCorrection = 0.0
+# mountYawCorrection: MOVED 2026-09-03 to robot_concept/etc/config_p3bot.toml Transforms.boresight_yaw_ricoh;
+# the room_concept key itself was removed 2026-10-29.
 wallPositionSigma  = 0.015
 # ── The rest of P3Bot's own values ─────────────────────────────────────────────────────────────
 Period                          = 16

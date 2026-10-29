@@ -36,7 +36,6 @@
 #include <genericworker.h>          // DSR API
 
 #include "buffer_types.h"           // rc::HighLidarBuffer, rc::LidarData (+ Eigen)
-#include "sensor_calib/lidar_mount.h"   // rc::lidar_mount::Planar (plan 2026-10-05 Task 5), Pose6 (2026-10-08 Task 4)
 #include "room_concept.h"           // rc::RoomConcept (notify_new_lidar)
 #include "room_config.h"            // rc::RoomConfig (shared config)
 
@@ -90,16 +89,6 @@ public:
     /// Sweeps pushed to the buffer since start (monotonic), for the status stream's rate readout.
     [[nodiscard]] std::uint64_t frames_total() const noexcept { return frames_total_.load(std::memory_order_relaxed); }
 
-    /// ── THE EXTRA PLANAR MOUNT TRANSFORM (plan 2026-10-05 Task 5) ─────────────────────────────────
-    /// The r1 helios CORRECTION T_corr (LidarMountApply; identity by default), applied to every helios point
-    /// right after the DSR device->body transform and AFTER the sim-only injection below.
-    /// ⚠ CHANGED 2026-10-08 (plan r2 Task 4): this used to hold compose(T_corr, T_inject) with a Planar
-    /// injection; the injection is now a Pose6 applied first (inject_helios_), so
-    /// the main thread sets T_corr ALONE. Same order as before: T_corr(T_inject(p)). Thread-safe (mutex).
-    void set_mount_extra(const rc::lidar_mount::Planar& t);
-    [[nodiscard]] rc::lidar_mount::Planar mount_extra() const;
-    /// The sim-only 6-DoF helios injection (inverse of the planted Pose6, about the sensor's origin).
-    [[nodiscard]] const rc::lidar_mount::Pose6& inject_helios() const noexcept { return inject_helios_; }
 
 private:
     // Ingest-thread body: tightly paced poll of the reader so a fresh scan reaches the localizer with
@@ -122,9 +111,6 @@ private:
     /// interior rings for the rest of the run (the wall-SLAM hairball). Logs on VERDICT CHANGE only.
     void update_ceiling_cap(bool startup);
 
-    mutable std::mutex       mount_mx_;
-    rc::lidar_mount::Planar  mount_extra_{};    ///< guarded by mount_mx_ (the r1 correction only)
-    rc::lidar_mount::Pose6   inject_helios_{};  ///< constant after construction
 
     /// 2 Hz: low returns (floor < z < robot top) of the full helios sweep and the bpearl -> RoomConcept mailbox.
     void low_obstacle_step(const std::vector<Eigen::Vector3f>& helios_full, std::int64_t helios_stamp_ms);
@@ -142,10 +128,6 @@ private:
     /// nullptr if none yet. Callers compare stamp_ms against their own last-consumed stamp.
     const rc::media::LidarSweep* bpearl_newest();
     std::int64_t last_bp_geom_stamp_ = std::numeric_limits<std::int64_t>::min();
-    /// The helios origin in LIDAR_ROBOT_FRAME, from the DSR RT chain (the sim-only injection rotates about it).
-    void resolve_sensor_origins();
-    Eigen::Vector3f s_helios_{0.f, -0.155f, 1.1075f};   // r2.2 item 5 fallback until the RT chain resolves
-    bool origins_resolved_ = false;
 
     std::shared_ptr<DSR::DSRGraph> G_;
     rc::RoomConcept*      room_concept_ = nullptr;

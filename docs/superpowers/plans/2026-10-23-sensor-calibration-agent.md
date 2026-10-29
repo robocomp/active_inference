@@ -340,3 +340,24 @@ Tasks 3.1–3.3 DONE (no live run yet).
 **Carry-forwards:** `calibration_estimator.h`'s `last_information()` and the camera pools' `marginal_information()`
 / `lidar_yaw_ref()` lost their only consumer (the monitor); clean them up in Phase 5. Room_concept's `kin_csv_` is
 now the only output of `KinematicMount` (until 4.4 replaces it).
+
+## room_concept extrinsic code removed (2026-10-29, ahead of Phases 4-5, user decision)
+
+User ruling: extrinsic sensor calibration resumes and is developed ONLY in sensor_calibration; room_concept keeps
+just the robot base params and the odometry/motion calibrator (it needs the localiser's prediction errors).
+Removed from room_concept (src 63,008 -> 59,015 lines; ~6.6k incl. tools/tests):
+- camera mount calibrator: mount_calibrator.*, camera_calibration.h, mount_lidar_pair.h, the zed calibration-only
+  channel, the camera half of the Calib window, the status `camcal` field, the pooled mount monitors (mnt_*),
+  factor B (and gt_error.csv's fb_* columns), ImageEdge.{mountVertexOffsetSigmaPx, mountYawCorrection, mountApply,
+  mountPublish, mountDescriptionFile, calibCameras, calibMinConvertIntervalMs}, CameraIngestor's live correction /
+  local boresight / base override; tools mount_replay, mount_info_selftest, solve_mount.py.
+- helios: KinematicMount (+kin CSV), LidarMountApply, LidarMountInject*, RoomConcept.MountFactors; lidar_mount.h.
+  eps_yaw stays ESTIMATED, never applied (apply bit cleared unconditionally = the old MountFactors=true behaviour).
+Kept: ImageEdge.mount{Pitch,Height,Yaw}Sigma (the driving term's marginalised nuisance priors), the motion
+calibrator incl. its lever/eps rows (estimated, not applied), the calib pivot.
+- The Ricoh correction room_concept had learned on Webots (yaw +0.206 deg, height -3.4 mm) moved EXACTLY into
+  robot_concept/etc/mount_calib_Shadow_webots.txt, so the driving camera's extrinsic is unchanged.
+- The driving camera's live extrinsic + ceiling refresh had been sitting inside the zed calibration-channel loop
+  (it only ran because that channel existed); moved into pump_image_edges.
+- Not ported anywhere yet: the per-camera evidence files etc/camera_calib_Shadow_*.txt and image_edge_replay_*.txt
+  are left on disk, unused.

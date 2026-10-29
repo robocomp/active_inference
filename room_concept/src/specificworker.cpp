@@ -18,7 +18,6 @@
  */
 #include "specificworker.h"
 
-#include "mount_calibrator.h"
 #include "pose_publisher.h"
 #include "calib_channels.h"
 #include "ground_truth_log.h"
@@ -226,20 +225,12 @@ void SpecificWorker::compute()
 
     // ── WHERE THE CPU GOES WHEN NOTHING IS BEING OPTIMISED ──────────────────────────────────────
     // At 100% early exit the localiser update is ~1.6 ms at 20 Hz — 3% of a core — so the rest of
-    // the CPU is not the thing being watched. Both pumps below run EVERY compute tick regardless of
-    // whether the optimiser will: the driving camera's extraction, and then the SAME extraction
-    // again for each entry in ImageEdge.calibCameras (zed + ricoh today, so three per tick).
-    // Their only live consumers while the gate holds are the calibration accumulator and the canvas
-    // — the loss sees them just on optimised frames. Reported as ms per second, i.e. percent of one
-    // core, so the answer is a number rather than an argument about which pump is heavy.
+    // the CPU is not the thing being watched. The driving camera's extraction runs EVERY compute tick
+    // regardless of whether the optimiser will. Reported as ms per second, i.e. percent of one core.
     {
         QElapsedTimer t; t.start();
         calib_->pump_image_edges();
-        const auto t_edge = t.nsecsElapsed();
-        t.restart();
-        calib_->pump_calib_channels();   // extra cameras: calibration only, never the pose
-        const auto t_calib = t.nsecsElapsed();
-        pump_ns_edge_ += t_edge; pump_ns_calib_ += t_calib; ++pump_ticks_;
+        pump_ns_edge_ += t.nsecsElapsed(); ++pump_ticks_;
         const auto now_ms = QDateTime::currentMSecsSinceEpoch();
         if (pump_report_ms_ == 0) pump_report_ms_ = now_ms;
         else if (now_ms - pump_report_ms_ > 5000)
@@ -255,10 +246,9 @@ void SpecificWorker::compute()
             conv += QString::fromStdString(calib_->convert_stats_line());
             qInfo().nospace().noquote()
                 << "[pumps] over " << secs << " s: image_edge " << (1e-6 * pump_ns_edge_ / secs)
-                << " ms/s  calib_channels " << (1e-6 * pump_ns_calib_ / secs)
                 << " ms/s  (= % of one core) | " << pump_ticks_ << " ticks | conv" << conv
                 << " (converted/delivered)";
-            pump_report_ms_ = now_ms; pump_ns_edge_ = pump_ns_calib_ = 0; pump_ticks_ = 0;
+            pump_report_ms_ = now_ms; pump_ns_edge_ = 0; pump_ticks_ = 0;
         }
     }
 
@@ -269,7 +259,6 @@ void SpecificWorker::compute()
     if (status_stream_ and loc_res.has_value())
         status_.observe(*loc_res);   // scalars only; the snapshot timer serialises them
     t_loc_fetch_us = section_timer.nsecsElapsed() / 1000;
-    lidar_mount_apply_step(loc_res);   // LidarMountApply (default off) + camera evidence re-reference
 
     const Eigen::Affine2f pose_for_draw = viewer_->best_available_pose(loc_res, have_loc);
     
@@ -398,46 +387,6 @@ void SpecificWorker::compute()
                 << "gui_thread=" << on_gui_thread;
     }
     fps_counter_.print("[Compute]", 3000);
-}
-
-// ── LiDAR-SIDE CORRECTION (plan docs/superpowers/plans/2026-10-05-joint-calibration.md, Task 5) ──────────
-// LidarMountApply (default OFF), every cycle:
-//   T_corr = Planar{lever_x, lever_y, eps_yaw / kEpsPerLidarYaw} from the motion calibrator's ACTING
-//   values (calib_applied bit set), points get compose(T_corr, T_inject).
-// The acting MOTION values are used because p_applied (which undoes the feedback) records exactly those.
-// Camera evidence is then re-referenced to the LiDAR frame in force (camcal::Estimator::
-// reference_to_lidar_yaw, idempotent, persisted). Runs whatever the flag, so evidence left referenced to a
-// correction from an earlier session is brought back to the frame now in force.
-// The joint MONITOR (odometry + helios + bpearl + camera mounts -> tmp/joint_calib/, logs only) and the r2
-// floor/vertical mount factors were retired from room_concept 2026-10-29: the floor/vertical factors run in
-// the sensor_calibration agent (sensor_calibration plan, Phase 3).
-namespace
-{
-    /// eps_yaw = k * psi_h. eps acts on the odometry heading (room_concept.cpp: theta_mid + yaw_offset())
-    /// and the localiser reads theta_true + psi_h, so the closed loop cancels iff eps = -psi_h
-    /// (Fable review 1b). ⚠ TO BE CONFIRMED LIVE (joint-calibration plan Task 6 check 2, the yaw-only leg).
-    constexpr float kEpsPerLidarYaw = -1.f;
-}
-
-void SpecificWorker::lidar_mount_apply_step(const std::optional<rc::RoomConcept::UpdateResult>& loc_res)
-{
-    if (not loc_res.has_value()) return;
-    const double yaw_sigma = params.IMAGE_EDGE_MOUNT_YAW_SIGMA;
-    double psi_app = 0.0;
-    if (params.LIDAR_MOUNT_APPLY and lidar_ingestor_)
-    {
-        const auto acting = [&](int i)
-        { return ((loc_res->calib_applied >> i) & 1) ? loc_res->calib_value[i] : 0.f; };
-        const rc::lidar_mount::Planar T_corr{acting(rc::calib::P_LEVER_X), acting(rc::calib::P_LEVER_Y),
-                                             acting(rc::calib::P_EPS_YAW) / kEpsPerLidarYaw};
-        // The sim-only injection is applied by the ingestor itself, BEFORE this (Pose6, plan 2026-10-08
-        // Task 4): T_corr alone here, same order T_corr(T_inject(p)) as before.
-        lidar_ingestor_->set_mount_extra(T_corr);
-        psi_app = T_corr.yaw;
-    }
-    if (mount_) mount_->pool().reference_to_lidar_yaw(psi_app, yaw_sigma);
-    if (calib_)
-        for (auto& ch : calib_->channels()) ch->calib.reference_to_lidar_yaw(psi_app, yaw_sigma);
 }
 
 void SpecificWorker::initialize_room_model_from_svg()

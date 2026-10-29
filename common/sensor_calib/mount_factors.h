@@ -8,15 +8,15 @@
  *    VerticalMount    helios (droll, dpitch)      walls are vertical, the ceiling is horizontal
  *                     bpearl (dx, dy, dyaw)       RELATIVE to the helios-built wall map
  *
- *  Shared by room_concept and sensor_calibration since 2026-10-29 (sensor_calibration plan, Phase 3). The
- *  floor and vertical factors RUN in sensor_calibration (src/lidar_mount_stage.*); room_concept keeps only
- *  KinematicMount (room_concept/src/kinematic_mount.h), which needs the localiser's per-cycle innovation.
+ *  Moved out of room_concept 2026-10-29 (sensor_calibration plan, Phase 3); the factors RUN in sensor_calibration
+ *  (src/lidar_mount_stage.*). room_concept's KinematicMount (helios x, y, yaw) was removed the same day; its
+ *  replacement is plan Task 4.4 in the agent.
  *
  *  Every accumulator keeps its normal equations in PHYSICAL units (m, rad), the prior SEPARATE (Info*.H_prior),
  *  exponential forgetting, and any per-sweep common mode marginalised by a Schur complement -- never a sigma
  *  floor (CLAUDE.md).
  *
- *  CONVENTION (plan "Global Constraints"; r1 lidar_mount.h). Every estimate is the CORRECTION M: nominal
+ *  CONVENTION (plan "Global Constraints"). Every estimate is the CORRECTION M: nominal
  *  points are restored by M (p_true = M(p_nom)), a planted error is injected by inverse(M). For the 6-DoF
  *  blocks M is a small rotation omega = (droll, dpitch, dyaw) ABOUT THE SENSOR ORIGIN s plus a translation
  *  dt, all in the BODY frame:  p_true ~= p_nom + omega x (p_nom - s) + dt.
