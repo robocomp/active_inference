@@ -337,6 +337,64 @@ int main()
         }
     }
 
+    std::printf("(k) ROUND 4: a RELOCALISATION jump lands a PARKED robot past the door, then 100 frames of 1 cm jitter with\n"
+                "    agreeing (zero) odometry — the estimate dithers, the body never moved\n");
+    for (const float land : {3.3f, 3.5f, 3.7f, 3.9f})
+        for (const float po : {1.28e-4f, 0.5f, 0.99f})
+        {
+            auto mem = mem_new();
+            std::vector<Vector2f> path;
+            line(path, {0.f, 1.5f}, {0.f, 2.5f});
+            (void)drive(door(po), path, mem);
+            cr::Crossing c = frame(mem, door(po), {0.f, land}, {0.f, 2.5f}, true);   // the committed jump
+            float maxp = c.p_cross;
+            std::mt19937 rng(3);
+            std::normal_distribution<float> n(0.f, kSigPose);
+            Vector2f prev = {0.f, land};
+            for (int k = 0; k < 100; ++k)
+            {
+                const Vector2f est = Vector2f(0.f, land) + Vector2f(n(rng), n(rng));
+                c = frame(mem, door(po), est, prev);   // pred = the previous estimate: the odometry says "parked"
+                prev = est; maxp = std::max(maxp, c.p_cross);
+            }
+            std::printf("  land %.1f m, p_open %.4g: p_through %.3g p_reread %.3g max p_cross %.3g\n",
+                        land, po, c.p_through, c.p_reread, maxp);
+            check(c.p_through < 1e-9f, "no passage mass beyond the approach's own tail: the odometric path never crossed");
+            check(maxp < kBirth, "no birth from jitter after a teleport");
+        }
+
+    std::printf("(l) ROUND 4: a relocalisation jump past the door, then REAL odometric driving: birth only when the\n"
+                "    odometric path itself crosses the anchored line between the jambs\n");
+    for (const float po : {1.28e-4f, 0.99f})
+    {
+        struct Leg { const char* what; Vector2f step; int frames; bool births; };
+        for (const Leg& leg : {Leg{"drives on 1.0 m (x_odo 2.5 -> 3.5 crosses the line)", {0.f, 0.005f}, 200, true},
+                              Leg{"drives on 0.2 m (x_odo 2.5 -> 2.7 stays short)", {0.f, 0.005f}, 40, false},
+                              Leg{"drives SIDEWAYS 1.0 m (x_odo never crosses)", {0.005f, 0.f}, 200, false}})
+        {
+            auto mem = mem_new();
+            std::vector<Vector2f> path;
+            line(path, {0.f, 1.5f}, {0.f, 2.5f});
+            (void)drive(door(po), path, mem);
+            cr::Crossing c = frame(mem, door(po), {0.f, 3.3f}, {0.f, 2.5f}, true);
+            std::mt19937 rng(5);
+            std::normal_distribution<float> n(0.f, kSigPose);
+            Vector2f prev = {0.f, 3.3f}, truth_est = {0.f, 3.3f};
+            float maxp = c.p_cross;
+            for (int k = 0; k < leg.frames; ++k)
+            {
+                truth_est += leg.step;
+                const Vector2f est = truth_est + Vector2f(n(rng), n(rng));
+                c = frame(mem, door(po), est, prev + leg.step);
+                prev = est; maxp = std::max(maxp, c.p_cross);
+            }
+            std::printf("  p_open %.4g, %s: x_odo (%.2f, %.2f) p_through %.3g max p_cross %.3g\n", po, leg.what,
+                        mem.propagated().xy.x(), mem.propagated().xy.y(), c.p_through, maxp);
+            check((maxp >= kBirth) == leg.births, leg.births ? "birth: the odometry carried the body across between the jambs"
+                                                             : "no birth: the odometric path did not cross");
+        }
+    }
+
     std::printf("(d) frame move: PassageMemory::apply keeps the passage when the room frame is re-anchored\n");
     {
         std::vector<Vector2f> path;
