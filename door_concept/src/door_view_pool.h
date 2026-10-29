@@ -46,12 +46,23 @@ struct ViewPool
 
     // One cycle's verdict `v` seen from `obs` of a door centred at `tgt` with half-width `R`; `llr` = the log-odds of one
     // confident observation. Returns the log-odds to integrate this cycle. A non-finite verdict or geometry ⇒ 0, held.
-    float add(const Eigen::Vector2f& obs, const Eigen::Vector2f& tgt, float R, float v, float llr)
+    // ★`w` ∈ [0, 1] is how much of ONE look this frame is: its resolvability (Task 15). The view's effective count grows by w,
+    //  its mean is the w-weighted mean verdict, and what the view says is llr·tanh(mean)·min(1, n) — a view assembled from
+    //  looks worth less than one observation in total says proportionally less. w = 0 is a frame that could not have resolved
+    //  the door: it changes NOTHING (it neither speaks nor dilutes what earlier looks of the view said). w = 1 on every look
+    //  (the default) is bit-identical to the unweighted pool: n ≥ 1 after any look, so min(1, n) = 1.
+    float add(const Eigen::Vector2f& obs, const Eigen::Vector2f& tgt, float R, float v, float llr, float w = 1.0f)
     {
         const Eigen::Vector2f dv = obs - tgt;   // the viewpoint, seen from the door
         const float d = dv.norm();
         if (not std::isfinite(v) or not std::isfinite(d) or not std::isfinite(llr) or d < 1e-3f)
             return 0.0f;
+        w = std::isfinite(w) ? std::clamp(w, 0.0f, 1.0f) : 0.0f;
+        if (not (w > 0.0f))
+        {
+            pending = 0.0f;   // an unresolvable look: no evidence, and the pool is left exactly as it was
+            return 0.0f;
+        }
         const float b  = std::atan2(dv.y(), dv.x());
         const float Rr = std::max(R, 1e-3f);
         float s = 0.0f;
@@ -65,18 +76,18 @@ struct ViewPool
         }
         last_s = s;
         const float n_old = s * n;
-        n = n_old + 1.0f;
-        mean = (n_old * mean + v) / n;
+        n = n_old + w;
+        mean = (n_old * mean + w * v) / n;
         if (have)
         {
-            bearing += std::remainder(b - bearing, 2.0f * std::numbers::pi_v<float>) / n;
-            range   += (d - range) / n;
+            bearing += std::remainder(b - bearing, 2.0f * std::numbers::pi_v<float>) / (n / w);
+            range   += (d - range) / (n / w);
         }
         else
         {
             bearing = b; range = d; have = true;
         }
-        const float c = llr * std::tanh(mean);
+        const float c = llr * std::tanh(mean) * std::min(1.0f, n);
         pending = c - s * counted;        // less the part of the old contribution that is this same view
         counted = c;                      // assumed realised in full until commit() says otherwise
         return pending;
