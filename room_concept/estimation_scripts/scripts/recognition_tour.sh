@@ -64,8 +64,15 @@ scan_for_door() {   # exclude tag
     set -- $lk; echo "leg $tag: going to the door's look viewpoint ($1,$2) yaw $3" >&2
     echo run > $B/controller/remote_cmd.txt; sleep 0.7
     printf 'mission "lookpose%s"\n  go_to pose:%s(%s, %s, %s)\n' "$tag" "$here" $1 $2 $3 > $B/controller/remote_cmd.txt
-    for i in $(seq 1 60); do grep -a -q -E "mission 'lookpose${tag}': (completed|failed|aborted)" $L/controller.log && break; dd=$(new_door "$ex"); [ -n "$dd" ] && break; sleep 1; done
-    for i in $(seq 1 10); do dd=$(new_door "$ex"); [ -n "$dd" ] && break; sleep 1; done   # dwell: masks arrive at camera rate
+    # the door the look was FOR (door_concept re-identifies it by place under its remembered name) — not just the newest
+    # door born meanwhile, which can be a phantom (recog_try23: door_11 on the far wall while door_7 was being looked at)
+    local want; want=$(awk '/\[room\] LET GO/{w=""} /\[look\] .door_[0-9]+. remembered/{w=$0} END{print w}' $L/door_concept.log \
+                       | grep -o -E "'door_[0-9]+'" | head -1 | tr -d "'")
+    born_want() { [ -n "$want" ] && awk '/\[room\] LET GO/{b=""} /created instance for node/{b=b"\n"$0} END{print b}' $L/door_concept.log | grep -q "node '$want'"; }
+    for i in $(seq 1 90); do born_want && { dd=$want; break; }; grep -a -q -E "mission 'lookpose${tag}': (failed|aborted)" $L/controller.log && break; sleep 1; done
+
+    [ -z "$dd" ] && [ -z "$want" ] && dd=$(new_door "$ex")   # no remembered target: the newest door, as before
+    echo "leg $tag: look target '${want:-none}' -> '${dd:-not born}'" >&2
   fi
   while [ -z "$dd" ] && [ $(( $(date +%s)-ts )) -lt $SCAN_CAP_S ]; do
     n=$(( $(date +%s)-ts )); echo run > $B/controller/remote_cmd.txt; sleep 0.7
