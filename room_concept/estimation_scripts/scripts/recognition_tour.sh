@@ -82,10 +82,10 @@ for leg in 1 2 3 4 5 6; do
   T0=$(now_ms); A0=$(nl ltsm_agent); D0=$(nl door_concept); R0=$(nl room_concept)
   case $leg in 1|2) d=door_1;;
     3) # room_1's DOOR_0 face: whatever door other than door_1 is live in room_1 (restored or born); scan if none yet
-       d=$(scan_for_door door_1 3); [ -z "$d" ] && { echo "leg 3: no door other than door_1 in $here within ${SCAN_CAP_S} s"; break; };;
+       d=$(scan_for_door door_1 3); [ -z "$d" ] && { echo "leg 3: no door other than door_1 in $here within ${SCAN_CAP_S} s"; break; }; d3=$d;;
     4) SW0=$A0; SD0=$D0; ts=$(date +%s)
        # scan until DOOR_2 is born (spin + explore, bounded; the gold_tour driver gave up after ONE 90 s explore)
-       d2=$(scan_for_door door_2 4)
+       d2=$(scan_for_door "${d3:-door_2}" 4)   # not the door leg 3 came through (its entry mirror here keeps that name)
        scan_s=$(( $(date +%s)-ts )); echo "leg 4: DOOR_2 scan took ${scan_s} s -> '${d2}'"
        [ -z "$d2" ] && { echo "leg 4: DOOR_2 never born in $here within ${SCAN_CAP_S} s"; break; }; d=$d2;;
     5) # the door back: ltsm logs, at swap time, which face of the recognised room is the crossed door's ("[swap] crossed door
@@ -97,7 +97,7 @@ for leg in 1 2 3 4 5 6; do
        echo "leg 5: door '$d' from ltsm: $sl"; d5=$d; D5=$D0;;
     6) # window from leg 5's ROOM SWITCH (last '[room] LET GO' in door_concept.log after leg 5 began), not leg 5's start
        sw=$(awk -v s=$D5 'NR>s && /\[room\] LET GO/{n=NR} END{print n+0}' $L/door_concept.log); [ "$sw" -gt 0 ] || sw=$D5
-       d=$(discover_door "$(room_now)" "$d5" door_2 $sw); [ -z "$d" ] && d=door_2;; esac
+       d=$(discover_door "$(room_now)" "$d5" "${d3:-door_2}" $sw); [ -z "$d" ] && d=${d3:-door_2};; esac
   run_leg $leg $d $here
   case "$r" in *wrong_room*) sleep 10; here=$(room_now); [ -z "$here" ] && here=room_1; run_leg "${leg}r" $d $here;; esac
   if [ $leg = 4 ]; then   # the window closes on the Swap line (ltsm acts after the cross) or a 20 s settle timeout
