@@ -130,6 +130,14 @@ bool TrajectoryHarvester::add_keyframe(std::int64_t stamp, bool stalled)
     return true;
 }
 
+std::optional<std::int64_t> TrajectoryHarvester::oldest_pending_stamp_ms() const
+{
+    std::optional<std::int64_t> m;
+    if (not ring_.empty()) m = ring_.front().stamp_ms;
+    for (const auto& p : out_) m = m ? std::min(*m, p.stamp_a_ms) : p.stamp_a_ms;
+    return m;
+}
+
 void TrajectoryHarvester::finish() { while (ring_.size() >= 2) commit(true); ring_.clear(); }
 
 // Wheel speed integrated along the heading fused PER ODOMETRY INTERVAL (precision weighting of wheel and gyro

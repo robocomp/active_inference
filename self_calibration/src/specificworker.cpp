@@ -81,6 +81,11 @@ SpecificWorker::SpecificWorker(const ConfigLoader& configLoader, TuplePrx tprx, 
         helios_cfg_.band_max_m = cfg.d("HeliosMount.band_max_m", helios_cfg_.band_max_m, "upper height of the 2-D wall band (m); room_concept's Media.lidar_high_max_height");
         helios_cfg_.gyro_bias_sigma = cfg.d("HeliosMount.gyro_bias_sigma", helios_cfg_.gyro_bias_sigma, "rad/s, prior on the common gyro bias (marginalised nuisance)");
         helios_cfg_.gyro_scale_sigma = cfg.d("HeliosMount.gyro_scale_sigma", helios_cfg_.gyro_scale_sigma, "fractional prior on the common gyro scale (marginalised nuisance)");
+        helios_cfg_.wheel_scale_sigma = cfg.d("HeliosMount.wheel_scale_sigma", helios_cfg_.wheel_scale_sigma, "fractional prior on the common wheel translation scale (marginalised nuisance)");
+        helios_cfg_.outlier_prior = cfg.d("HeliosMount.outlier_prior", helios_cfg_.outlier_prior, "model prior: share of pairs whose registration slipped into a wrong basin (0 = every pair an inlier)");
+        helios_cfg_.outlier_sigma_m = cfg.d("HeliosMount.outlier_sigma_m", helios_cfg_.outlier_sigma_m, "m, model prior: whole-pair registration slip ~ the scan's feature spacing");
+        helios_cfg_.outlier_sigma_rad = cfg.d("HeliosMount.outlier_sigma_rad", helios_cfg_.outlier_sigma_rad, "rad, the slip's rotation counterpart");
+        helios_cfg_.registration_budget_ms = cfg.d("HeliosMount.registration_budget_ms", helios_cfg_.registration_budget_ms, "ms of wall time per tick spent registering queued pairs: a COMPUTE budget (>= 1 pair per tick)");
         helios_log_period_ms_ = cfg.i("HeliosMount.log_period_ms", helios_log_period_ms_, "summary line + one mount CSV row period (ms)");
     }
 
@@ -195,6 +200,8 @@ void SpecificWorker::compute()
     inputs_->poll();
     if (not harvester_)
         harvester_ = std::make_unique<sc::calib::TrajectoryHarvester>(harvester_cfg_);
+    if (helios_enabled_ and not helios_stage_)   // created regardless of the first keyframe's mount: failures must show in summary()
+        helios_stage_ = std::make_unique<sc::HeliosMountStage>(helios_cfg_, harvester_cfg_);
     // Odometry first (piecewise-constant over source_ts_ms deltas, inside the harvester), then the sweeps.
     for (const auto& o : inputs_->take_odometry())
     {
@@ -209,10 +216,10 @@ void SpecificWorker::compute()
         {
             const bool stalled = inputs_->stalled("helios") or inputs_->any_stalled();
             const bool captured = harvester_->add_keyframe(l.stamp_ms, stalled);
-            if (captured and helios_enabled_ and l.robot_from_sensor.has_value())
+            // A keyframe without a resolvable robot-frame mount cannot be stored; the pairs that need it are then
+            // counted as missing by the stage (summary()), not silently skipped.
+            if (captured and helios_stage_ and l.robot_from_sensor.has_value())
             {
-                if (not helios_stage_)
-                    helios_stage_ = std::make_unique<sc::HeliosMountStage>(helios_cfg_, harvester_cfg_);
                 helios_stage_->store_keyframe(l.stamp_ms, l.points_robot());
                 note_helios_clock(l.stamp_ms);
             }
@@ -231,8 +238,10 @@ void SpecificWorker::compute()
     npairs_logged_ += long(pairs.size());
     if (helios_stage_)
     {
-        for (const auto& p : pairs)
-            helios_stage_->add_pair(p);
+        // Registration is a COMPUTE budget per tick (registration_budget_ms), never a burst: a stall commits the whole
+        // ring at once and this tick also polls the odometry. The sweeps are kept until their pairs are consumed.
+        helios_stage_->enqueue(pairs);
+        helios_stage_->process_queue(harvester_->oldest_pending_stamp_ms());
         if (const auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::system_clock::now().time_since_epoch()).count(); now - helios_log_ms_ >= helios_log_period_ms_)
         {

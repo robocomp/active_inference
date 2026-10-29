@@ -1,4 +1,5 @@
 #include "sensor_inputs.h"
+#include "zed_floor_stage.h"
 
 #include "../../common/media_transport/media_transport.h"
 #include "../../common/room_resolve/room_resolve.h"
@@ -14,6 +15,9 @@
 
 namespace sc
 {
+// zed_floor_stage.cpp repeats the producer's depth format codes to stay free of the DDS header; pin them here.
+static_assert(kFormatZ16 == rc::media::FORMAT_Z16 and kFormatDepthF32 == rc::media::FORMAT_DEPTH_F32,
+              "zed_floor_stage's depth format codes must equal the producer's");
 using Clock = std::chrono::steady_clock;
 
 namespace

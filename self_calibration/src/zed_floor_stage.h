@@ -13,7 +13,9 @@
  *
  * dz IS NOT THE MOUNT HEIGHT ALONE (until 4.2): the depth value is scaled by the camera's depth-scale error s,
  * which moves the floor to s·h below the camera, so dz = (height error) + (s - 1)·h. Roll and pitch are
- * unaffected by a uniform depth scale (it dilates the floor plane about the camera, tilt-preserving).
+ * unaffected only by a UNIFORM depth scale (it dilates the floor plane about the camera, tilt-preserving). A
+ * range-dependent depth error (retina fits a power law d' = a d^b) BENDS the floor into a curve, which a plane fit
+ * reads partly as pitch: roll/pitch inherit that leak until 4.2 models the depth error (the two interact).
  *
  * ESTIMATE + LOG ONLY. Pure: no Qt, no DSR — the agent hands it plain data (sensor_inputs.h structs).
  */
@@ -30,6 +32,12 @@
 
 namespace sc
 {
+// The producer's depth format codes (rc::media::FORMAT_Z16 / FORMAT_DEPTH_F32, common/media_transport/generated/idl/
+// image_frame.hpp), repeated here so this stage stays free of the DDS-generated header. sensor_inputs.cpp, which sees
+// the header, static_asserts that they are equal.
+inline constexpr std::uint32_t kFormatZ16 = 3;          // uint16, millimetres
+inline constexpr std::uint32_t kFormatDepthF32 = 4;     // float32, metres
+
 // Depth image (FORMAT_DEPTH_F32 metres, or FORMAT_Z16 millimetres) -> points in the ZED node frame
 // (X right, Y forward = the depth value, Z up), every `stride`-th pixel; non-finite and <= 0 depths are skipped.
 // X = (u - cx) d / fx, Z = (cy - v) d / fy with cx, cy = size/2; K belongs to the RGB model and is scaled

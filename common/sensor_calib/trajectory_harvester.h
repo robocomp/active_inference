@@ -69,6 +69,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <deque>
+#include <optional>
 #include <vector>
 
 namespace sc::calib
@@ -157,6 +158,10 @@ public:
     [[nodiscard]] std::vector<Pair> take_pairs();
     [[nodiscard]] const Eigen::Matrix3d& information() const { return H_acc_; }   ///< accumulated, no prior
     [[nodiscard]] std::size_t ring_size() const { return ring_.size(); }
+    /// Stamp of the oldest keyframe a FUTURE or not-yet-taken pair can still reference: the front of the ring, or the
+    /// oldest stamp_a of a committed pair not yet taken. nullopt = nothing pending. A consumer of the pairs keeps the
+    /// sweeps of every stamp >= this (and of its own queued pairs), and may drop the older ones.
+    [[nodiscard]] std::optional<std::int64_t> oldest_pending_stamp_ms() const;
     /// Close the running episode and start a new one.
     [[nodiscard]] EpisodeSummary close_episode();
 

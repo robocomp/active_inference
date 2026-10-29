@@ -7,6 +7,7 @@
 #include "synthetic_room.h"
 
 #include <cmath>
+#include <limits>
 #include <cstdio>
 #include <numbers>
 #include <random>
@@ -23,11 +24,21 @@ static constexpr std::int64_t T0 = 1'000'000;
 
 struct Seg { double adv, rot, dur; };
 struct Plant { double lx = 0, ly = 0, psi = 0; };   // true sensor vs nominal: lever in Shadow axes (X lateral, Y forward) [m], yaw [rad]
-struct Opt { double gyro_bias = 0.0; double gyro_scale = 0.0; bool drop_keyframes = false; };
+struct Opt {
+    double gyro_bias = 0.0, gyro_scale = 0.0, wheel_scale = 0.0;   // odometry errors: gyro rad/s bias, fractional gyro / wheel-translation scale
+    bool drop_keyframes = false;
+    double ring_span_s = 10.0;       // harvester ring (compute budget); 10 s keeps the older tests' pair sets
+    int drain_every_ms = 100;        // how often the "agent tick" takes pairs from the harvester
+    double max_range = std::numeric_limits<double>::infinity();   // lidar range limit (corridor: no end walls in view)
+    double wheel_sigma = 0.03, outlier_prior = 0.05;
+    bool cross_cov = true;
+    int inject_k = -1;               // replace the registration of the inject_k-th pair with |d_fwd| > 1 m by a wrong-basin one
+    double inject_err_m = 0.3;
+};
 
-struct Out { Eigen::Vector3d m, s; long n = 0; double path = 0; std::string line; };
+struct Out { Eigen::Vector3d m, s; long n = 0, missing = 0, rejected = 0; double path = 0, n_eff = 0, gamma_injected = -1; std::string line; };
 
-static HarvesterConfig hcfg() { HarvesterConfig c; c.ring_span_s = 10.0; return c; }   // a compute budget: pairs are committed while their sweeps are still held
+static HarvesterConfig hcfg(double span = 10.0) { HarvesterConfig c; c.ring_span_s = span; return c; }
 
 // Lift 2-D hits to 3-D robot-frame points: wall hits inside the band, plus decoys outside it that must be ignored.
 static std::vector<Eigen::Vector3f> lift(const std::vector<Eigen::Vector2f>& hits_h, std::mt19937& rng)
@@ -39,12 +50,16 @@ static std::vector<Eigen::Vector3f> lift(const std::vector<Eigen::Vector2f>& hit
     return out;
 }
 
+static Eigen::Matrix2d rot(double a) { Eigen::Matrix2d R; R << std::cos(a), -std::sin(a), std::sin(a), std::cos(a); return R; }
+
 static Out run(const Room2D& room, const Eigen::Vector3d& start, const std::vector<Seg>& segs, const Plant& pl, const Opt& o,
                unsigned seed, double gyro_bias_sigma = 0.002, double gyro_scale_sigma = 0.01)
 {
     HeliosMountConfig c; c.log_dir = ""; c.gyro_bias_sigma = gyro_bias_sigma; c.gyro_scale_sigma = gyro_scale_sigma;
-    TrajectoryHarvester h(hcfg());
-    HeliosMountStage st(c, hcfg());
+    c.wheel_scale_sigma = o.wheel_sigma; c.heading_cross_cov = o.cross_cov; c.outlier_prior = o.outlier_prior;
+    c.registration_budget_ms = 1e9;   // the tests drain completely every tick; the budget logic has its own test
+    TrajectoryHarvester h(hcfg(o.ring_span_s));
+    HeliosMountStage st(c, hcfg(o.ring_span_s));
     std::mt19937 rng(seed);
     const Eigen::Vector2d l_h(pl.ly, -pl.lx);   // harvester axes: forward = Y, left = -X
     double x = start.x(), y = start.y(), th = start.z(), path = 0;
@@ -52,10 +67,26 @@ static Out run(const Room2D& room, const Eigen::Vector3d& start, const std::vect
     const auto offer = [&]() {
         if (not h.add_keyframe(T0 + t_ms, false)) return;
         const Eigen::Vector2d sp = Eigen::Vector2d(x, y) + Eigen::Rotation2Dd(th).toRotationMatrix() * l_h;
-        st.store_keyframe(T0 + t_ms, lift(raycast(room, {sp.x(), sp.y(), th + pl.psi}, 0.5 * kDeg, 0.005, rng), rng));
+        st.store_keyframe(T0 + t_ms, lift(raycast(room, {sp.x(), sp.y(), th + pl.psi}, 0.5 * kDeg, 0.005, rng, o.max_range), rng));
     };
-    const auto drain = [&]() {   // as the agent does every compute(): take what the harvester committed
-        for (const auto& p : h.take_pairs()) if (not o.drop_keyframes) st.add_pair(p);
+    int n_long = 0, inj_idx = -1;
+    const auto drain = [&]() {   // as the agent does every compute(): take what the harvester committed, queue, process
+        const auto pairs = h.take_pairs();
+        if (o.drop_keyframes) {}
+        else if (o.inject_k < 0) st.enqueue(pairs);
+        else for (const auto& p : pairs)
+        {
+            auto reg = st.register_pair(p);
+            if (not reg) continue;
+            if (std::abs(p.d_fwd) > 1.0 and n_long++ == o.inject_k)
+            {   // a wrong-basin registration that still reports a 1 mm covariance: the chord is off by inject_err_m laterally
+                reg->xyt.head<2>() += rot(0.5 * p.dth) * Eigen::Vector2d(0.0, o.inject_err_m);
+                reg->cov = Eigen::Vector3d(1e-6, 1e-6, 1e-8).asDiagonal();
+                inj_idx = int(st.pairs_used());
+            }
+            st.add_registration(p, *reg);
+        }
+        st.process_queue(h.oldest_pending_stamp_ms());
     };
     h.add_odometry(T0, 0, 0, 0); h.add_gyro(T0, 0);
     offer();
@@ -65,14 +96,17 @@ static Out run(const Room2D& room, const Eigen::Vector3d& start, const std::vect
             const double dt = 0.05, thm = th + 0.5 * sg.rot * dt;
             x += sg.adv * std::cos(thm) * dt; y += sg.adv * std::sin(thm) * dt; th += sg.rot * dt; path += std::abs(sg.adv) * dt;
             t_ms += 50;
-            h.add_odometry(T0 + t_ms - 50, sg.adv, 0.0, sg.rot);   // piecewise-constant hold: the sample opens its own interval
+            h.add_odometry(T0 + t_ms - 50, sg.adv * (1.0 + o.wheel_scale), 0.0, sg.rot);   // piecewise-constant hold: the sample opens its own interval
             h.add_gyro(T0 + t_ms - 50, sg.rot * (1.0 + o.gyro_scale) + o.gyro_bias);
-            if (t_ms % 100 == 0) { offer(); drain(); }
+            if (t_ms % 100 == 0) offer();
+            if (t_ms % o.drain_every_ms == 0) drain();
         }
     h.add_odometry(T0 + t_ms, 0, 0, 0); h.add_gyro(T0 + t_ms, 0);
     h.finish();
     drain();
     Out r; r.m = st.mean(); r.s = st.sigma(); r.n = st.pairs_used(); r.path = path; r.line = st.summary();
+    r.missing = st.missing(); r.rejected = st.rejected(); r.n_eff = st.effective_pairs();
+    if (inj_idx >= 0) r.gamma_injected = st.responsibilities()[std::size_t(inj_idx)];
     return r;
 }
 
@@ -135,12 +169,89 @@ int main()
         for (unsigned seed = 14; seed < 19; ++seed)
         {
             const auto r = run(room, {-1.2, -2.2, 0.0}, s, {}, o, seed);
-            const auto c = run(room, {-1.2, -2.2, 0.0}, s, {}, o, seed, 1e-7, 1e-7);   // the control: nuisance removed
+            Opt oc = o; oc.outlier_prior = 0.0; oc.wheel_sigma = 1e-7; oc.cross_cov = false;   // the control = the model WITHOUT nuisances (the original control): with the EM weight on, a mis-modelled run is called all-outlier (sigma back to the prior) instead; the wheel-scale nuisance would alias part of the gyro bias and the lat-rot cross term (minor 5) explains most of it away per pair; the lat-rot cross term (minor 5) would explain most of it away per pair
+            const auto c = run(room, {-1.2, -2.2, 0.0}, s, {}, oc, seed, 1e-7, 1e-7);   // the control: nuisance removed
             std::printf("gyro_bias_not_absorbed[%u]: psi %.3f +- %.3f deg   control(no nuisance): %.3f +- %.3f deg (%.1f sigma)\n", seed,
                         r.m[2] / kDeg, r.s[2] / kDeg, c.m[2] / kDeg, c.s[2] / kDeg, std::abs(c.m[2]) / c.s[2]);
             CHECK(std::abs(r.m[2]) < 2 * r.s[2], "seed %u psi %.4f deg, 2 sigma %.4f deg", seed, r.m[2] / kDeg, 2 * r.s[2] / kDeg);
             CHECK(std::abs(c.m[2]) > 3 * c.s[2], "seed %u control psi %.4f deg, 3 sigma %.4f deg (must be confidently wrong)", seed, c.m[2] / kDeg, 3 * c.s[2] / kDeg);
         }
+    }
+    {   // 4b. wheel_scale_not_absorbed: odometry translation 2 % long, one-direction arcs, mount exact; 5 seeds
+        Opt o; o.wheel_scale = 0.02;
+        Opt oc = o; oc.wheel_sigma = 1e-7; oc.outlier_prior = 0.0;   // the control: the wheel-scale nuisance removed (and, to isolate it, the EM weight)
+        const auto s = ccw_arcs();
+        for (unsigned seed = 20; seed < 25; ++seed)
+        {
+            const auto r = run(room, {-1.2, -2.2, 0.0}, s, {}, o, seed);
+            const auto c = run(room, {-1.2, -2.2, 0.0}, s, {}, oc, seed);
+            std::printf("wheel_scale_not_absorbed[%u]: dx %.2f +- %.2f dy %.2f +- %.2f mm   control(no nuisance): dx %.2f +- %.2f (%.1f sigma) dy %.2f +- %.2f (%.1f sigma)\n", seed,
+                        r.m[0] * 1e3, r.s[0] * 1e3, r.m[1] * 1e3, r.s[1] * 1e3, c.m[0] * 1e3, c.s[0] * 1e3, std::abs(c.m[0]) / c.s[0],
+                        c.m[1] * 1e3, c.s[1] * 1e3, std::abs(c.m[1]) / c.s[1]);
+            CHECK(std::abs(r.m[0]) < 2 * r.s[0] and std::abs(r.m[1]) < 2 * r.s[1], "seed %u (dx, dy) = (%.2f, %.2f) mm, 2 sigma (%.2f, %.2f)", seed,
+                  r.m[0] * 1e3, r.m[1] * 1e3, 2 * r.s[0] * 1e3, 2 * r.s[1] * 1e3);
+            CHECK(std::abs(c.m[0]) > 3 * c.s[0] or std::abs(c.m[1]) > 3 * c.s[1], "seed %u control (%.2f, %.2f) mm must be confidently wrong on the biased axis (3 sigma %.2f, %.2f)", seed,
+                  c.m[0] * 1e3, c.m[1] * 1e3, 3 * c.s[0] * 1e3, 3 * c.s[1] * 1e3);
+        }
+    }
+    {   // 4c. aliased_pair_downweighted: one wrong-basin registration (0.3 m chord error, 1 mm covariance) in a clean planted-yaw run
+        const Plant pl{0, 0, 1.84 * kDeg};
+        Opt o; o.inject_k = 3;
+        Opt oc = o; oc.outlier_prior = 0.0;   // the control: every pair an inlier
+        const auto r = run(room, {-1.2, -2.2, 0.0}, mixed(), pl, o, 11);
+        const auto c = run(room, {-1.2, -2.2, 0.0}, mixed(), pl, oc, 11);
+        std::printf("aliased_pair_downweighted: gamma(injected) %.2e  n_eff %.1f/%ld  psi err %.4f deg (%.2f sigma)   control(no EM weight): psi err %.4f deg (%.2f sigma)\n",
+                    r.gamma_injected, r.n_eff, r.n, (r.m[2] + pl.psi) / kDeg, std::abs(r.m[2] + pl.psi) / r.s[2], (c.m[2] + pl.psi) / kDeg, std::abs(c.m[2] + pl.psi) / c.s[2]);
+        CHECK(r.gamma_injected >= 0.0 and r.gamma_injected < 0.01, "injected pair responsibility %.3g", r.gamma_injected);
+        CHECK(std::abs(r.m[2] + pl.psi) < 2 * r.s[2], "psi %.4f deg vs %.4f deg (2 sigma %.4f)", r.m[2] / kDeg, -pl.psi / kDeg, 2 * r.s[2] / kDeg);
+        CHECK(std::abs(c.m[2] + pl.psi) > 3 * c.s[2], "control psi err %.4f deg must be visibly pulled (3 sigma %.4f deg)", (c.m[2] + pl.psi) / kDeg, 3 * c.s[2] / kDeg);
+    }
+    {   // 4d. batch_drain_no_missing: default ring (30 s), pairs taken once per 4 s batch of keyframes -> no sweep pruned before its pair
+        const Plant pl{0, 0, 1.0 * kDeg};
+        Opt o; o.ring_span_s = 30.0; o.drain_every_ms = 4000;
+        const auto r = run(room, {-1.2, -2.2, 0.0}, mixed(), pl, o, 31);
+        std::printf("batch_drain_no_missing: %s\n", r.line.c_str());
+        CHECK(r.missing == 0, "%ld pairs reported missing sweeps", r.missing);
+        CHECK(r.n > 10, "only %ld pairs", r.n);
+    }
+    {   // 4e. corridor_straights: scan range limited so the end walls are out of view: psi informed, dx stays at its prior
+        const Plant pl{0, 0, 1.0 * kDeg};
+        Opt o; o.max_range = 4.0;
+        std::vector<Seg> s;
+        for (int i = 0; i < 3; ++i) { s.push_back({0.5, 0, 16.0}); s.push_back({-0.5, 0, 16.0}); }
+        const auto r = run(corridor(40.0, 2.0), {-10.0, 0.0, 0.0}, s, pl, o, 41);
+        std::printf("corridor_straights: %s\n", r.line.c_str());
+        CHECK(r.s[2] < 0.2 * kDeg, "psi sigma %.4f deg", r.s[2] / kDeg);
+        CHECK(std::abs(r.m[2] + pl.psi) < 2 * r.s[2], "psi %.4f deg vs %.4f deg (2 sigma %.4f)", r.m[2] / kDeg, -pl.psi / kDeg, 2 * r.s[2] / kDeg);
+        CHECK(r.s[0] >= 0.9 * xy_prior and r.s[1] >= 0.9 * xy_prior, "dx/dy sigma %.2f %.2f mm vs prior %.1f mm", r.s[0] * 1e3, r.s[1] * 1e3, xy_prior * 1e3);
+    }
+    {   // 4f. rejected_pair_counted: both sweeps present but too sparse to register -> register_pair fails, rejected_ counts, nothing added
+        HeliosMountConfig c; c.log_dir = "";
+        HeliosMountStage st(c, hcfg());
+        Pair p = make_pair_from_motion(0.5, 1.0, 0.0, 1.0, 0.5, hcfg());
+        p.stamp_a_ms = T0; p.stamp_b_ms = T0 + 500;
+        const std::vector<Eigen::Vector3f> sparse{{1.f, 1.f, 1.7f}, {2.f, 1.f, 1.7f}, {3.f, 1.f, 1.7f}};
+        st.store_keyframe(T0, sparse); st.store_keyframe(T0 + 500, sparse);
+        CHECK(not st.add_pair(p), "unregistrable pair was accepted");
+        CHECK(st.rejected() == 1 and st.missing() == 0 and st.pairs_used() == 0, "rejected %ld missing %ld used %ld", st.rejected(), st.missing(), st.pairs_used());
+    }
+    {   // 4g. budget_queue: a burst of pairs drains one per call when the budget is spent at once, and sweeps are held until consumed
+        HeliosMountConfig c; c.log_dir = ""; c.registration_budget_ms = 0.0;
+        HeliosMountStage st(c, hcfg());
+        std::vector<Pair> ps;
+        for (int i = 0; i < 4; ++i)
+        {
+            Pair p = make_pair_from_motion(0.5, 1.0, 0.0, 1.0, 0.5, hcfg());
+            p.stamp_a_ms = T0 + 1000 * i; p.stamp_b_ms = p.stamp_a_ms + 500;
+            st.store_keyframe(p.stamp_a_ms, {}); st.store_keyframe(p.stamp_b_ms, {});
+            ps.push_back(p);
+        }
+        st.enqueue(ps);
+        CHECK(st.process_queue(T0 + 10'000) == 1 and st.queued() == 3, "queued %zu", st.queued());
+        CHECK(st.sweeps_held() == 6, "sweeps held %zu while pairs still queued (the consumed pair's two are gone)", st.sweeps_held());
+        st.process_queue(T0 + 10'000); st.process_queue(T0 + 10'000); st.process_queue(T0 + 10'000);
+        CHECK(st.queued() == 0 and st.missing() == 4, "queued %zu missing %ld (empty sweeps)", st.queued(), st.missing());
+        CHECK(st.sweeps_held() == 0, "sweeps held %zu after the queue drained with the ring front ahead", st.sweeps_held());
     }
     {   // 5. missing_sweep_adds_nothing
         HeliosMountConfig c; c.log_dir = "";

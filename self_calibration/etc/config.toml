@@ -83,7 +83,8 @@ log_period_ms = 10000      # summary line + one mounts CSV row this often
 
 # ── ZED floor plane (src/zed_floor_stage.*; plan Task 4.1): ESTIMATE + LOG ONLY ───────
 # roll, pitch and z of the zed mount from the floor in its depth image (tmp/zed_floor/zed_floor_<ts>.csv).
-# z includes the depth-scale error until 4.2; roll and pitch do not.
+# z includes the depth-scale error until 4.2. Roll and pitch are unaffected only by a UNIFORM depth scale; a
+# range-dependent depth error (retina fits a power law) bends the floor and leaks into pitch (interacts with 4.2).
 [ZedFloor]
 enabled = true
 rate_hz = 1.0              # COMPUTE budget: depth frames fed per second (Inputs.camera_rate_hz decimates upstream)
@@ -97,6 +98,11 @@ band_min_m = 1.5           # the 2-D wall band: room_concept's Media.lidar_high_
 band_max_m = 2.0           # room_concept's Media.lidar_high_max_height
 gyro_bias_sigma = 0.002    # rad/s, prior on the common gyro bias (nuisance, marginalised by Schur)
 gyro_scale_sigma = 0.01    # fractional prior on the common gyro scale (nuisance)
+wheel_scale_sigma = 0.03   # fractional prior on the common wheel translation scale (nuisance)
+outlier_prior = 0.05       # model prior: share of pairs whose registration slipped into a wrong basin (0 = none)
+outlier_sigma_m = 0.3      # m, model prior: whole-pair registration slip ~ the scan's feature spacing
+outlier_sigma_rad = 0.1    # rad, the slip's rotation counterpart (0.3 m over ~3 m of range)
+registration_budget_ms = 8 # COMPUTE budget: wall time per tick spent registering queued pairs (>= 1 pair per tick)
 log_period_ms = 10000      # summary line + one mount CSV row this often
 
 # ── Live dashboard window (src/specificworker_dashboard.cpp): DISPLAY ONLY ───────

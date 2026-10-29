@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <ctime>
 #include <filesystem>
@@ -16,8 +17,6 @@ namespace
 constexpr double kRad2Deg = 180.0 / M_PI;
 // The producer's depth format codes (common/media_transport/generated/idl/image_frame.hpp), repeated here so the
 // stage stays free of the DDS-generated header.
-constexpr std::uint32_t FORMAT_Z16 = 3;          // uint16, millimetres
-constexpr std::uint32_t FORMAT_DEPTH_F32 = 4;    // float32, metres
 }
 
 std::vector<Eigen::Vector3f> depth_to_points(const ImageIn& depth, const PinholeIntrinsics& K, int stride)
@@ -25,7 +24,7 @@ std::vector<Eigen::Vector3f> depth_to_points(const ImageIn& depth, const Pinhole
     std::vector<Eigen::Vector3f> out;
     if (depth.width == 0 or depth.height == 0 or not (K.fx > 0.0) or not (K.fy > 0.0) or K.width <= 0.0 or K.height <= 0.0)
         return out;
-    const bool f32 = depth.format == FORMAT_DEPTH_F32, z16 = depth.format == FORMAT_Z16;
+    const bool f32 = depth.format == kFormatDepthF32, z16 = depth.format == kFormatZ16;
     if (not f32 and not z16)
         return out;
     const std::size_t bpp = f32 ? 4 : 2;
@@ -33,6 +32,17 @@ std::vector<Eigen::Vector3f> depth_to_points(const ImageIn& depth, const Pinhole
     if (depth.data.size() < step * (depth.height - 1) + depth.width * bpp)
         return out;
     const double sx = depth.width / K.width, sy = depth.height / K.height;   // uniform when the aspect is the same
+    // Different aspect ratios (sx != sy) mean the depth image is most likely a CROP of the RGB frame, not a rescale of
+    // it, and a crop moves the principal point instead of scaling the focal lengths. The per-axis scaling is kept
+    // (nothing better is known), but say so once, with both sizes.
+    static bool warned_aspect = false;
+    if (not warned_aspect and std::abs(sx / sy - 1.0) > 1e-3)
+    {
+        warned_aspect = true;
+        std::fprintf(stderr, "[zed-floor] WARNING depth image %zux%zu and RGB intrinsics %gx%g have different aspect ratios "
+                     "(sx %.4f, sy %.4f): probably a crop, not a scale; per-axis scaling kept\n",
+                     std::size_t(depth.width), std::size_t(depth.height), K.width, K.height, sx, sy);
+    }
     const double fx = K.fx * sx, fy = K.fy * sy, cx = 0.5 * depth.width, cy = 0.5 * depth.height;
     const std::size_t k = static_cast<std::size_t>(std::max(1, stride));
     out.reserve((depth.width / k + 1) * (depth.height / k + 1));
@@ -86,7 +96,7 @@ std::string ZedFloorStage::summary() const
 {
     const auto i = floor_.info();
     const Eigen::Vector3d m = i.mean(), s = i.sigma();
-    return std::format("[zed-floor] roll {:+.3f}±{:.3f} pitch {:+.3f}±{:.3f} deg  z {:+.1f}±{:.1f} mm (z includes depth scale) ({} frames)",
+    return std::format("[zed-floor] roll {:+.3f}±{:.3f} pitch {:+.3f}±{:.3f} deg  z {:+.1f}±{:.1f} mm (z includes depth scale; roll/pitch assume a UNIFORM depth scale, a range-dependent depth error bends the floor and leaks into pitch, see 4.2) ({} frames)",
                        m(0) * kRad2Deg, s(0) * kRad2Deg, m(1) * kRad2Deg, s(1) * kRad2Deg, m(2) * 1e3, s(2) * 1e3, n_);
 }
 
@@ -101,8 +111,8 @@ void ZedFloorStage::log_state(std::int64_t stamp_ms)
         char stamp[32];
         const std::time_t now_t = std::time(nullptr);
         std::strftime(stamp, sizeof stamp, "%Y-%m-%d_%H-%M-%S", std::localtime(&now_t));
+        csv_.imbue(std::locale::classic());   // CLAUDE.md: data files never acquire a comma separator (before open)
         csv_.open(cfg_.log_dir + "/zed_floor_" + stamp + ".csv");
-        csv_.imbue(std::locale::classic());   // CLAUDE.md: data files never acquire a comma separator
         csv_ << "stamp_ms,droll,dpitch,dz_incl_depth_scale,sd_droll,sd_dpitch,sd_dz,n_frames,floor_share,floor_sigma\n";
     }
     if (not csv_.is_open())
