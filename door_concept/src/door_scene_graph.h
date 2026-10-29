@@ -81,7 +81,6 @@ public:
     // the room→door RT edge. persist_* resolves the node by id first; both no-op if the node is gone.
     bool persist_door_belief(DoorInstance& inst, std::uint64_t node_id, std::uint64_t room_id, float free_energy);
     void step_write_model(DoorInstance& inst, DSR::Node& node, std::uint64_t room_id, float free_energy);
-    void write_rt_pose(std::uint64_t room_id, DoorInstance& inst);
 
     // Attach the door pose covariance (rt_covariance_att, 6×6 SE3) on the room→door RT edge, mapped
     // from the belief's full Σ. Writes when `force` (a geometry republish)
@@ -108,6 +107,10 @@ public:
 
     // Flat triangle list (room frame): top slab + 4 legs.
     static std::vector<float> make_door_mesh(const DoorState& s);
+
+    // Re-seat the door's RT edge from its belief (dead-banded against the published pose). Public: step_adoption calls it
+    // after a frame change P -> K.
+    void write_rt_pose(std::uint64_t room_id, DoorInstance& inst);
 
 private:
     void write_door_mesh(DoorInstance& inst, DSR::Node& node);

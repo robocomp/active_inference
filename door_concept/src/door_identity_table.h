@@ -421,6 +421,39 @@ inline RoomEntryPlan plan_room_entry(bool first_resolution, bool recall_announce
     return p;
 }
 
+/// Room-transition protocol, case 2 (C2.8): ltsm's recognition proposal for the room the robot is IN, as door_concept sees it.
+/// room_concept ACCEPTS by renaming the proposal's parent P to K IN PLACE (same node id) and writing state="accepted" on
+/// proposal_<K>; it REJECTS by writing state="rejected" only.
+struct ProposalView { std::string name; std::uint64_t parent = 0; std::string state; };
+
+/// What following `current` means this cycle. Identity is the NODE ID: the same id under a new name is a RENAME, never a
+/// room change (nothing is released or held), and no `current` edge at all is "no information", not a release.
+enum class FollowKind { NoInformation, Same, First, Change };
+[[nodiscard]] inline FollowKind room_follow_kind(std::uint64_t followed_id, std::optional<std::uint64_t> current)
+{
+    if (not current.has_value()) return FollowKind::NoInformation;
+    if (followed_id == *current) return FollowKind::Same;
+    return followed_id == 0 ? FollowKind::First : FollowKind::Change;
+}
+
+/// An ACCEPTED proposal for the current room (parent == its id, named for the name it now wears): that room is RECALLED
+/// under K. `handled` = the (id, name) pairs already acted on, so the restore runs once. The provisional name P is dead
+/// (names are never reused): its rows go, exactly as in the late-recall swap. Rejected / pending: nothing — the room stays
+/// as entered (FRESH). Merging the live doors into K's remembered ones is plan_restore's place test (PlaceLive).
+struct AdoptionPlan { bool restore = false; bool drop_old = false; };
+[[nodiscard]] inline AdoptionPlan plan_adoption(std::span<const ProposalView> proposals, std::uint64_t room_id,
+                                                std::string_view room_name, std::string_view previous_name,
+                                                bool already_handled)
+{
+    AdoptionPlan p;
+    if (already_handled or room_id == 0 or room_name.empty()) return p;
+    const std::string want = "proposal_" + std::string(room_name);
+    p.restore = std::ranges::any_of(proposals, [&](const ProposalView& v)
+    { return v.parent == room_id and v.name == want and v.state == "accepted"; });
+    p.drop_old = p.restore and not previous_name.empty() and previous_name != room_name;
+    return p;
+}
+
 /// Room-transition protocol, case C1.4: a room ltsm ANNOUNCED (recall_<room>) is a REMEMBERED room, not a new one. Its
 /// doors come back from the identity table (plan_restore, the crossed door's face included: it is a row of that room, and
 /// a face already live at its place is skipped by place), so no entry mirror is invented for it. Only a proto-room nobody

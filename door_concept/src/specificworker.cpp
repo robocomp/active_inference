@@ -3184,6 +3184,7 @@ void SpecificWorker::step_room_following()
 
     if (room_node_id_ == *current)
     {
+        step_adoption();          // a rename of THIS room (same id) is followed here, never released
         step_pending_restore();   // a recalled room's doors, once its polygon is loaded
         // The crossed door was HELD at the switch and has been deleted with its room since: carry it across now.
         if (carry_pending_room_ == room_node_id_ and not lost_doors_.empty())
@@ -3548,6 +3549,88 @@ void SpecificWorker::latch_recall_names()
                 std::print("door_concept: [restore] ltsm announces remembered '{}' behind a door — its doors will be "
                            "restored if the robot enters it\n", room);
             }
+}
+
+void SpecificWorker::step_adoption()
+{
+    const auto room = G->get_node(room_node_id_);
+    if (not room.has_value())
+        return;
+    const std::string name = room->name();
+    if (followed_name_.first != room_node_id_)
+        followed_name_ = {room_node_id_, name};
+    std::vector<rc::door::ProposalView> props;
+    for (const auto& n : G->get_nodes_by_type("metaconcept"))
+        if (n.name().starts_with("proposal_")
+            and G->get_attrib_by_name<object_subtype_att>(n).value_or(std::string{}) == "room_proposal")
+            props.push_back({n.name(), G->get_attrib_by_name<parent_att>(n).value_or(0),
+                             G->get_attrib_by_name<state_att>(n).value_or(std::string{})});
+    const std::string previous = followed_name_.second;
+    const auto plan = rc::door::plan_adoption(props, room_node_id_, name, previous,
+                                              adoption_handled_.contains({room_node_id_, name}));
+    if (name != previous)
+        std::print("door_concept: [restore] room node {} renamed '{}' -> '{}' (same room, nothing released)\n",
+                   room_node_id_, previous, name);
+    followed_name_.second = name;
+    if (not plan.restore)
+        return;
+    adoption_handled_.insert({room_node_id_, name});
+    recall_names_seen_.insert(name);          // the accepted proposal IS the announcement
+    recall_late_names_.insert(name);          // and the provisional name is dead: drop its rows
+    std::print("door_concept: [restore] ltsm proposal ACCEPTED for room node {} — '{}' is the remembered '{}'; restoring its "
+               "doors and merging the live ones by place\n", room_node_id_, previous, name);
+    enter_room_memory(room_node_id_, false, plan.drop_old ? previous : std::string{});
+    reseat_doors_after_adoption(room_node_id_, props);
+}
+
+// The accepted proposal carries T(P<-K) on its RT edge (P -> proposal). room_concept re-expressed ITS OWN children by
+// T(K<-P) and switched the published frame to K; the doors hung directly from the room (or from a wall that moved with
+// it) still hold P-frame numbers under K's name. Move each such door's belief by the frame change and re-publish.
+void SpecificWorker::reseat_doors_after_adoption(std::uint64_t room_id, const std::vector<rc::door::ProposalView>& props)
+{
+    if (not fitter_ or not scene_graph_)
+        return;
+    std::optional<rc::door::Rigid2> P_from_K;
+    for (const auto& pv : props)
+    {
+        if (pv.parent != room_id or pv.state != "accepted") continue;
+        const auto pn = G->get_node(pv.name);
+        if (not pn.has_value()) continue;
+        const auto e = G->get_edge(room_id, pn->id(), "RT");
+        if (not e.has_value()) continue;
+        const auto tr  = G->get_attrib_by_name<rt_translation_att>(e.value());
+        const auto rot = G->get_attrib_by_name<rt_rotation_euler_xyz_att>(e.value());
+        if (tr.has_value() and rot.has_value() and tr->get().size() >= 2 and rot->get().size() >= 3)
+            P_from_K = rc::door::Rigid2{tr->get()[0], tr->get()[1], rot->get()[2]};
+    }
+    if (not P_from_K.has_value())
+    {
+        std::print("door_concept: [restore] accepted proposal has no readable RT T(P<-K): doors keep their frame\n");
+        return;
+    }
+    const auto K_from_P = rc::door::rigid_inverse(*P_from_K);
+    int n = 0;
+    for (auto& [id, inst] : fitter_->instances())
+    {
+        const auto dn = G->get_node(id);
+        if (not dn.has_value()) continue;
+        const auto par = G->get_attrib_by_name<parent_att>(dn.value()).value_or(0);
+        const auto pp  = par == room_id ? room_id
+                       : G->get_node(par).has_value() ? G->get_attrib_by_name<parent_att>(G->get_node(par).value()).value_or(0) : 0;
+        if (par != room_id and pp != room_id) continue;
+        auto s = inst.model.state();
+        const auto leaf = rc::door::rigid_apply(K_from_P, rc::door::PublishedPose{s.cx, s.cy, s.yaw});
+        const auto ap   = rc::door::rigid_apply(K_from_P, rc::door::PublishedPose{s.ap_cx, s.ap_cy, s.ap_yaw});
+        s.cx = leaf.cx; s.cy = leaf.cy; s.yaw = leaf.yaw;
+        s.ap_cx = ap.cx; s.ap_cy = ap.cy; s.ap_yaw = ap.yaw;
+        inst.model.set_state(s);
+        const auto& bp = inst.ai2_belief.params();
+        inst.ai2_belief.set_wall(rc::door::rigid_apply(K_from_P, bp.wall_O),
+                                 Eigen::Rotation2Df(K_from_P.yaw) * bp.wall_u, bp.wall_len);
+        scene_graph_->write_rt_pose(room_id, inst);
+        ++n;
+    }
+    std::print("door_concept: [restore] adoption re-seated {} door(s) hung from the room into K's frame\n", n);
 }
 
 void SpecificWorker::enter_room_memory(std::uint64_t room_id, bool first_resolution, const std::string& left_room)

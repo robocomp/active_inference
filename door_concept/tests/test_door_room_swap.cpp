@@ -4,10 +4,12 @@
 // Build + run:
 //   g++ -std=c++23 -O1 -I/usr/include/eigen3 tests/test_door_room_swap.cpp -o /tmp/test_door_room_swap && /tmp/test_door_room_swap
 #include <clocale>
+#include <cmath>
 #include <print>
 #include <string>
 #include <vector>
 #include "../src/door_identity_table.h"
+#include "../src/door_rt_publish.h"
 
 using namespace rc::door;
 static int fails = 0;
@@ -81,6 +83,56 @@ int main()
     CHECK(entry_mirror_wanted(true, false));                   // fresh_room_still_mirrors
     CHECK(not entry_mirror_wanted(false, false));              // not proto: never
 
+    // C2.8 accepted_proposal_restores_and_merges: P (room 7, "room_4") renamed to K "room_3" in place; K has remembered doors,
+    // one at the place of a live door of P (the same door: merged, not duplicated), one unseen (restored); the crossed DOOR_2
+    // face (live, no remembered face in K) stays a live door of K.
+    {
+        std::vector<ProposalView> props{{"proposal_room_3", 7, "accepted"}};
+        const auto a = plan_adoption(props, 7, "room_3", "room_4", false);
+        CHECK(a.restore and a.drop_old);
+        CHECK(not plan_adoption(props, 7, "room_3", "room_4", true).restore);              // once
+        CHECK(not plan_adoption(props, 8, "room_3", "room_4", false).restore);             // another room's id
+        std::vector<IdentityRow> t{row("room_3", "door_7", 1, 2, true), row("room_3", "door_8", -3, 0, true),
+                                   row("room_4", "door_9", 0.5f, 1, true)};
+        drop_room(t, "room_4");
+        CHECK(t.size() == 2);
+        std::vector<LiveDoor> live{LiveDoor{"door_1", Eigen::Vector2f(1.1f, 2.05f)},      // at door_7's place
+                                   LiveDoor{"door_2", Eigen::Vector2f(5.f, 5.f)}};        // the crossed face, no row in K
+        const auto d = plan_restore(t, "room_3", true, live, 0.3f);
+        CHECK(d.restore.size() == 1 and d.restore[0].name == "door_8");
+        CHECK(d.skipped.size() == 1 and d.skipped[0].name == "door_7" and d.skipped[0].reason == SkipReason::PlaceLive);
+    }
+    // C2.8 rejected_proposal_keeps_fresh (and pending too): no restore, no drop
+    {
+        for (const char* st : {"rejected", "pending"})
+        {
+            std::vector<ProposalView> props{{"proposal_room_3", 7, st}};
+            const auto a = plan_adoption(props, 7, "room_3", "room_3", false);
+            CHECK(not a.restore and not a.drop_old);
+        }
+        // the room kept P's name: the proposal for K does not match it
+        std::vector<ProposalView> props{{"proposal_room_3", 7, "accepted"}};
+        CHECK(not plan_adoption(props, 7, "room_4", "room_4", false).restore);
+    }
+    // C2.8 rename_is_not_a_room_change: same node id under a new name is Same; only a different id releases
+    CHECK(room_follow_kind(7, 7) == FollowKind::Same);
+    CHECK(room_follow_kind(7, 9) == FollowKind::Change);
+    CHECK(room_follow_kind(0, 9) == FollowKind::First);
+    CHECK(room_follow_kind(7, std::nullopt) == FollowKind::NoInformation);
+
+    // C2.8 reseat: a door hung from P at a known P-frame pose; T(P<-K) = shift (2,-1), 90 deg. After accept its K-frame pose is
+    // T(K<-P).old, and the inverse round-trips.
+    {
+        const Rigid2 P_from_K{2.f, -1.f, 1.5707963f};
+        const auto K_from_P = rigid_inverse(P_from_K);
+        const PublishedPose old{3.f, 1.f, 0.3f};                     // in P
+        const auto nw = rigid_apply(K_from_P, old);
+        // K point (a,b) = R^T (p - t): p-t = (1,2) -> (2,-1)
+        CHECK(std::abs(nw.cx - 2.f) < 1e-4f and std::abs(nw.cy + 1.f) < 1e-4f);
+        CHECK(std::abs(nw.yaw - (0.3f - 1.5707963f)) < 1e-4f);
+        const auto back = rigid_apply(P_from_K, nw);
+        CHECK(std::abs(back.cx - old.cx) < 1e-4f and std::abs(back.cy - old.cy) < 1e-4f and std::abs(back.yaw - old.yaw) < 1e-4f);
+    }
     std::print("{}\n", fails == 0 ? "ALL PASS" : "FAILED");
     return fails != 0;
 }

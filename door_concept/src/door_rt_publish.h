@@ -69,4 +69,24 @@ struct PublishedPose { float cx, cy, yaw; };
     return rt_write_due(last_cx, last_cy, last_yaw, cx, cy, yaw, half_w);
 }
 
+/// A planar rigid transform: p' = R(yaw)·p + t. Room-transition case 2: ltsm's proposal carries T(P<-K) on its RT edge; the
+/// adopted room's frame changes P -> K, so what door_concept holds in P's frame moves by T(K<-P) = inverse.
+struct Rigid2 { float tx = 0.0f, ty = 0.0f, yaw = 0.0f; };
+[[nodiscard]] inline Rigid2 rigid_inverse(const Rigid2& T)
+{
+    const float c = std::cos(T.yaw), s = std::sin(T.yaw);
+    return {-(c * T.tx + s * T.ty), -(-s * T.tx + c * T.ty), -T.yaw};
+}
+[[nodiscard]] inline Eigen::Vector2f rigid_apply(const Rigid2& T, const Eigen::Vector2f& p)
+{
+    const float c = std::cos(T.yaw), s = std::sin(T.yaw);
+    return {c * p.x() - s * p.y() + T.tx, s * p.x() + c * p.y() + T.ty};
+}
+/// A pose (position + heading) seen in frame B, given the frame change `B_from_A`: the door's pose in the new frame.
+[[nodiscard]] inline PublishedPose rigid_apply(const Rigid2& B_from_A, const PublishedPose& p)
+{
+    const auto q = rigid_apply(B_from_A, Eigen::Vector2f(p.cx, p.cy));
+    return {q.x(), q.y(), std::remainder(p.yaw + B_from_A.yaw, 2.0f * static_cast<float>(M_PI))};
+}
+
 }  // namespace rc::door
