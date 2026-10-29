@@ -16,6 +16,7 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include "door_rt_publish.h"   // rc::door::PublishedPose
 #include <span>
 #include <string>
 #include <string_view>
@@ -125,6 +126,9 @@ private:
         bool  ok  = false;
     };
     WallRef resolve_wall(std::uint64_t room_id, const Eigen::Vector2f& door_xy) const;
+    // The door's room-frame pose as the graph publishes it (parent RT ∘ door RT); nullopt if not readable.
+    std::optional<rc::door::PublishedPose> published_room_pose(std::uint64_t room_id, std::uint64_t parent_id,
+                                                               std::uint64_t door_id) const;
 
     // `preferred_name` when no live node wears it, else `door_<next_door_index++>` (rc::door::allocate_door_name).
     // Shared by detection births, copies and entry mirrors so they can never hand out the same name.

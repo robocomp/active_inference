@@ -455,6 +455,9 @@ private:
     // This room's wall nodes: named with its prefix, or hanging from the room / its floor.
     std::vector<DSR::Node> own_wall_nodes(const WallNaming& nm) const;
     // Insert one wall node `name` under `parent` with the pose of a polygon edge. Returns its id.
+    // Next free wall index per room prefix; only grows (wall names are identities — ltsm compares them by name).
+    std::map<std::string, int> next_wall_index_;
+    void note_wall_index(const std::string& prefix, const std::string& name);
     std::optional<std::uint64_t> insert_wall_node(DSR::Node& parent, const std::string& name,
                                                   const Eigen::Vector2f& mid, float yaw, float length, int level);
 

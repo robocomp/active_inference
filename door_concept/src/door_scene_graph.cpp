@@ -13,6 +13,7 @@
 #include <limits>
 #include <format>
 #include <optional>
+#include <array>
 #include <set>
 #include <print>
 #include <utility>
@@ -429,6 +430,33 @@ void DoorSceneGraph::write_door_mesh(DoorInstance& inst, DSR::Node& node)
     G_->add_or_modify_attrib_local<mesh_vertices_att>(node, verts);
 }
 
+// The door's room-frame pose as the graph publishes it now: parent->door RT, composed with the wall's RT when the parent
+// is a wall (its RT parent is the room or the room's floor, identity to the room). Direct edge reads (the latest value;
+// no transform cache involved). nullopt when any edge/attribute is missing.
+std::optional<rc::door::PublishedPose> DoorSceneGraph::published_room_pose(std::uint64_t room_id, std::uint64_t parent_id,
+                                                                           std::uint64_t door_id) const
+{
+    const auto rt_of = [&](std::uint64_t from, std::uint64_t to) -> std::optional<std::array<float, 3>>
+    {
+        const auto e = G_->get_edge(from, to, "RT");
+        if (not e.has_value()) return std::nullopt;
+        const auto tr  = G_->get_attrib_by_name<rt_translation_att>(e.value());
+        const auto rot = G_->get_attrib_by_name<rt_rotation_euler_xyz_att>(e.value());
+        if (not tr.has_value() or not rot.has_value() or tr->get().size() < 2 or rot->get().size() < 3) return std::nullopt;
+        return std::array<float, 3>{tr->get()[0], tr->get()[1], rot->get()[2]};
+    };
+    const auto d = rt_of(parent_id, door_id);
+    if (not d.has_value()) return std::nullopt;
+    if (parent_id == room_id) return rc::door::PublishedPose{(*d)[0], (*d)[1], (*d)[2]};
+    const auto wn = G_->get_node(parent_id);
+    if (not wn.has_value()) return std::nullopt;
+    const auto wall_parent = G_->get_attrib_by_name<parent_att>(wn.value());
+    if (not wall_parent.has_value()) return std::nullopt;
+    const auto w = rt_of(wall_parent.value(), parent_id);
+    if (not w.has_value()) return std::nullopt;
+    return rc::door::door_room_pose({(*w)[0], (*w)[1]}, (*w)[2], (*d)[0], (*d)[1], (*d)[2]);
+}
+
 void DoorSceneGraph::write_rt_pose(std::uint64_t room_id, DoorInstance& inst)
 {
     if (room_id == 0 or not rt_api_)
@@ -460,8 +488,11 @@ void DoorSceneGraph::write_rt_pose(std::uint64_t room_id, DoorInstance& inst)
     // Dead-band: suppress RT edge updates that move the aperture's jambs by less than 5 cm (pos churn from gradient
     // oscillations) — but NEVER skip a re-parent (the door must move onto its wall even when it hasn't translated).
     // ★Task D-C (M-6): the JAMBS, not the centre — a pure yaw re-fit is published too (door_rt_publish.h).
-    if (not reparent and not rc::door::rt_write_due(inst.last_written_cx, inst.last_written_cy, inst.last_written_yaw,
-                                                    ap_cx, ap_cy, ap_yaw, 0.5f * s.w))
+    // ★Rule 1 (2026-10-29): against the pose the graph PUBLISHES (room_concept may have moved the wall under the door),
+    //   not only against what was last written — door_rt_publish.h rt_write_due_published.
+    if (not reparent and not rc::door::rt_write_due_published(published_room_pose(room_id, old_parent, inst.node_id),
+                                                             inst.last_written_cx, inst.last_written_cy,
+                                                             inst.last_written_yaw, ap_cx, ap_cy, ap_yaw, 0.5f * s.w))
         return;
 
     // Door node origin = BASE on the floor (z=0 in room). In the wall frame that base sits z0 below the wall

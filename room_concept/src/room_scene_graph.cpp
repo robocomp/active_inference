@@ -3793,6 +3793,15 @@ std::vector<DSR::Node> RoomSceneGraph::own_wall_nodes(const WallNaming& nm) cons
     return out;
 }
 
+void RoomSceneGraph::note_wall_index(const std::string& prefix, const std::string& name)
+{
+    if (not name.starts_with(prefix + "wall_")) return;
+    int& next = next_wall_index_[prefix];
+    const auto* first = name.data() + prefix.size() + 5;
+    if (int idx = -1; std::from_chars(first, name.data() + name.size(), idx).ec == std::errc{} and idx >= 0)
+        next = std::max(next, idx + 1);
+}
+
 std::optional<std::uint64_t> RoomSceneGraph::insert_wall_node(DSR::Node& parent, const std::string& name,
                                                               const Eigen::Vector2f& mid, float yaw, float length,
                                                               int level)
@@ -3809,6 +3818,8 @@ std::optional<std::uint64_t> RoomSceneGraph::insert_wall_node(DSR::Node& parent,
 
     rc::provenance::stamp_creation(*G_, wall_node);   // birth stamp: epoch ms + local ISO-8601
     const auto wall_id = G_->insert_node(wall_node);
+    // every wall name this process hands out advances its room's counter (wall_<k> is an identity: never reused)
+    note_wall_index(name.substr(0, name.rfind("wall_")), name);
     if (not wall_id.has_value())
     {
         qWarning() << "dsr_create_wall_nodes: failed to insert" << QString::fromStdString(name);
@@ -3837,7 +3848,6 @@ void RoomSceneGraph::sync_walls_to_polygon(const std::vector<Eigen::Vector2f>& p
 
     std::vector<rc::walls::WallPose> poses;
     poses.reserve(walls.size());
-    int next_index = 0;   // new walls take indices past every existing one: names are identities, not edge indices
     for (const auto& w : walls)
     {
         rc::walls::WallPose wp;
@@ -3851,14 +3861,24 @@ void RoomSceneGraph::sync_walls_to_polygon(const std::vector<Eigen::Vector2f>& p
         }
         wp.length = G_->get_attrib_by_name<width_m_att>(w).value_or(0.f);
         // A FOREIGN CHILD is any edge leaving the wall: room_concept hangs nothing from its walls, door_concept
-        // hangs its doors (RT wall->door).
-        wp.has_children = std::ranges::any_of(w.fano(), [&](const auto& kv) { return kv.first.first != w.id(); });
+        // hangs its doors (RT wall->door). Its room-frame position (wall RT ∘ child RT; floor->room is the identity)
+        // is what matches the wall to an edge — the door is where it was seen, the wall may be stale (try32).
+        const Eigen::Vector2f u(std::cos(wp.yaw), std::sin(wp.yaw)), v(-u.y(), u.x());
+        for (const auto& [key, edge] : w.fano())
+        {
+            if (key.first == w.id()) continue;
+            wp.has_children = true;
+            if (key.second != "RT") continue;
+            if (const auto ct = G_->get_attrib_by_name<rt_translation_att>(edge); ct.has_value() and ct->get().size() >= 2)
+                wp.children_xy.push_back(wp.mid + ct->get()[0] * u + ct->get()[1] * v);
+        }
         poses.push_back(wp);
-        const auto& name = w.name();
-        if (const auto dash = name.rfind('_'); dash != std::string::npos)
-            if (int idx = -1; std::from_chars(name.data() + dash + 1, name.data() + name.size(), idx).ec == std::errc{})
-                next_index = std::max(next_index, idx + 1);
     }
+    // Names are IDENTITIES (ltsm stores and compares walls by name), so an index is never handed out twice in this
+    // process: the per-room counter only grows, seeded past every wall name seen.
+    // ⚠ It does not survive a restart; a restart rebuilds the room's walls from wall_0 (cleanup_room_graph_nodes).
+    int& next_index = next_wall_index_[nm.prefix];
+    for (const auto& w : walls) note_wall_index(nm.prefix, w.name());
 
     const auto plan = rc::walls::plan_wall_sync(poses, poly);
     int moved = 0, deleted = 0, created = 0, kept_for_children = 0;
@@ -3867,6 +3887,8 @@ void RoomSceneGraph::sync_walls_to_polygon(const std::vector<Eigen::Vector2f>& p
         const auto& w = walls[i];
         if (plan.target_edge[i] < 0)
         {
+            // ⚠ May race a child edge another agent has written but that has not synced here yet (the wall then
+            //   reads childless); the door's own re-seat (door_concept write_rt_pose) re-hangs it on its nearest wall.
             G_->delete_node(w.id());
             ++deleted;
             continue;
@@ -4041,7 +4063,10 @@ void RoomSceneGraph::dsr_create_wall_nodes()
             qWarning() << "dsr_create_wall_nodes: skipping degenerate wall" << i << "(length" << e.length << "m)";
             continue;
         }
-        insert_wall_node(wall_parent, prefix + "wall_" + std::to_string(i), e.mid, e.yaw, e.length, wall_level);
+        // wall_<k> from the room's never-decreasing counter: 0..n-1 on a fresh process, as before; past every name
+        // already handed out if this room's walls were built once in this process (a name is never reused).
+        insert_wall_node(wall_parent, prefix + "wall_" + std::to_string(next_wall_index_[prefix]), e.mid, e.yaw,
+                         e.length, wall_level);
     }
 
     trigger_layout_();

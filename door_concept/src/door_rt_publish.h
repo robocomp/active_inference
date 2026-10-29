@@ -15,6 +15,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <optional>
 
 #include <Eigen/Dense>
 
@@ -41,6 +42,31 @@ inline constexpr float kRtMinJambMoveM = 0.05f;
 [[nodiscard]] inline bool rt_write_due(float old_cx, float old_cy, float old_yaw, float cx, float cy, float yaw, float half_w)
 {
     return aperture_jamb_move(old_cx, old_cy, old_yaw, cx, cy, yaw, half_w) >= kRtMinJambMoveM;
+}
+
+/// A door's room-frame aperture pose as the GRAPH currently publishes it.
+struct PublishedPose { float cx, cy, yaw; };
+
+/// The inverse of door_in_wall: the door's local RT (lx, ly along/across the wall, lyaw) under a wall whose RT puts its
+/// midpoint at `mid` with tangent `wall_yaw` (room frame; floor->room is the identity) ⇒ the room-frame pose.
+[[nodiscard]] inline PublishedPose door_room_pose(const Eigen::Vector2f& mid, float wall_yaw, float lx, float ly, float lyaw)
+{
+    const float c = std::cos(wall_yaw), s = std::sin(wall_yaw);
+    return {mid.x() + c * lx - s * ly, mid.y() + s * lx + c * ly,
+            std::remainder(wall_yaw + lyaw, 2.0f * static_cast<float>(M_PI))};
+}
+
+/// ★ROOM-TRANSITION RULE 1 (2026-10-29): room_concept moves a wall IN PLACE when the layout changes, and the door's RT
+/// (its offset along the wall) goes with it — so the pose the graph publishes can leave the door's belief without the
+/// belief moving. The dead-band therefore compares the belief with what the graph PUBLISHES when that can be read, and
+/// with what this agent last wrote only when it cannot (no edge yet). A slid door is re-seated on the next cycle.
+[[nodiscard]] inline bool rt_write_due_published(const std::optional<PublishedPose>& published,
+                                                 float last_cx, float last_cy, float last_yaw,
+                                                 float cx, float cy, float yaw, float half_w)
+{
+    if (published.has_value())
+        return rt_write_due(published->cx, published->cy, published->yaw, cx, cy, yaw, half_w);
+    return rt_write_due(last_cx, last_cy, last_yaw, cx, cy, yaw, half_w);
 }
 
 }  // namespace rc::door

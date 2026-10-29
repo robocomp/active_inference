@@ -18,7 +18,7 @@ static bool near_angle(float a, float b, float tol = 1e-4f)
 static rc::walls::WallPose wall_on(const Vector2f& p0, const Vector2f& p1, bool children)
 {
     const Vector2f d = p1 - p0;
-    return {(p0 + p1) * 0.5f, std::atan2(d.y(), d.x()), d.norm(), children};
+    return {(p0 + p1) * 0.5f, std::atan2(d.y(), d.x()), d.norm(), children, {}};
 }
 
 int main()
@@ -76,6 +76,23 @@ int main()
         for (std::size_t i = 0; i < rect.size(); ++i) W.push_back(wall_on(rect[i], rect[(i + 1) % rect.size()], true));
         const auto P = plan_wall_sync(W, tri);
         check(std::ranges::all_of(P.target_edge, [](int t) { return t >= 0; }), "no wall with children deleted");
+    }
+
+    std::printf("door_wall_matched_by_its_door_not_its_stale_segment\n");
+    {
+        // try32: a wall left from an early small estimate stands mid-room (y = 0.5, nearest the y = 0 edge), but the
+        // door hanging from it was seen in the real y = 3 wall. The wall must go where its door is.
+        std::vector<rc::walls::WallPose> W;
+        for (std::size_t i = 0; i < rect.size(); ++i) W.push_back(wall_on(rect[i], rect[(i + 1) % rect.size()], false));
+        auto stale = wall_on({0, 0.5f}, {4, 0.5f}, true);
+        stale.children_xy = {{2.f, 3.f}};
+        W.insert(W.begin(), stale);
+        const auto P = plan_wall_sync(W, rect);
+        check(P.target_edge[0] == 2, "the door's wall goes to the edge its door is on (y = 3)");
+        check(P.target_edge[1] == 0, "the y = 0 edge keeps its own wall");
+        int deleted = 0;
+        for (const int t : P.target_edge) deleted += (t < 0);
+        check(deleted == 1 and P.target_edge[3] < 0, "the childless wall that lost y = 3 is deleted");
     }
 
     std::printf("childless_extra_wall_deleted\n");

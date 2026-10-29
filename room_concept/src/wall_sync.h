@@ -12,6 +12,8 @@
 //   * walls carrying another agent's nodes choose FIRST, so a door's wall is never the one left without an edge;
 //   * a door-carrying wall with no free edge left (more of them than edges) shares its nearest edge — never deleted;
 //   * a childless wall with no edge is deleted; an edge with no wall gets a new one.
+//   * a door-carrying wall is matched by its CHILDREN's room-frame positions, not by its own (possibly stale) segment;
+//   * consistent polygon winding is assumed (edge i = poly[i] -> poly[i+1]; the yaw follows it).
 #include <Eigen/Dense>
 #include <algorithm>
 #include <cmath>
@@ -25,7 +27,13 @@ namespace rc::walls
 //   this (a 0-length "wall" has no direction, so no yaw and no RT). Kept identical so the two paths agree.
 inline constexpr float kMinWallLength = 0.1f;
 
-struct WallPose { Eigen::Vector2f mid = Eigen::Vector2f::Zero(); float yaw = 0.f; float length = 0.f; bool has_children = false; };
+struct WallPose
+{
+    Eigen::Vector2f mid = Eigen::Vector2f::Zero(); float yaw = 0.f; float length = 0.f; bool has_children = false;
+    // Room-frame positions of the nodes other agents hang from this wall (wall RT ∘ child RT). When present they — not
+    // the wall's own, possibly stale, segment — say where the wall really is: a door is where it was SEEN.
+    std::vector<Eigen::Vector2f> children_xy;
+};
 struct EdgePose { Eigen::Vector2f mid = Eigen::Vector2f::Zero(); float yaw = 0.f; float length = 0.f; };
 
 struct WallSyncPlan
@@ -78,7 +86,17 @@ inline WallSyncPlan plan_wall_sync(const std::vector<WallPose>& walls, const std
         const Eigen::Vector2f a0 = walls[w].mid - 0.5f * walls[w].length * dir;
         const Eigen::Vector2f a1 = walls[w].mid + 0.5f * walls[w].length * dir;
         for (std::size_t k = 0; k < edges.size(); ++k)
-            cost[w][k] = detail::segment_cost(a0, a1, poly[edges[k]], poly[(edges[k] + 1) % n]);
+        {
+            const Eigen::Vector2f& b0 = poly[edges[k]];
+            const Eigen::Vector2f& b1 = poly[(edges[k] + 1) % n];
+            if (walls[w].children_xy.empty())
+                cost[w][k] = detail::segment_cost(a0, a1, b0, b1);
+            else   // a door-carrying wall is matched by its doors: summed squared distance of each child to the edge
+            {
+                cost[w][k] = 0.f;
+                for (const auto& c : walls[w].children_xy) cost[w][k] += detail::point_segment_d2(c, b0, b1);
+            }
+        }
     }
 
     // Greedy one-to-one: walls with children first, then by cost (index order breaks ties deterministically).
