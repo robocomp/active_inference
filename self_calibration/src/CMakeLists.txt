@@ -14,6 +14,7 @@ LIST(APPEND SOURCES
   ../src/sensor_inputs.cpp
   ../src/lidar_mount_stage.cpp
   ../src/helios_mount_stage.cpp
+  ../src/zed_floor_stage.cpp
   ../src/dashboard_model.cpp
   ../src/specificworker_dashboard.cpp
 )
@@ -23,6 +24,7 @@ LIST(APPEND HEADERS
   ../src/sensor_inputs.h
   ../src/lidar_mount_stage.h
   ../src/helios_mount_stage.h
+  ../src/zed_floor_stage.h
   ../src/dashboard_model.h
   ../src/dashboard_view.h
 )

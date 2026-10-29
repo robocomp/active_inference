@@ -27,6 +27,7 @@ class DashboardView;
 #include "helios_mount_stage.h"                                    // Helios planar mount from registered keyframe pairs (Phase 4.4)
 #include "lidar_mount_stage.h"                                     // floor + vertical LiDAR mount factors (Phase 3)
 #include "sensor_inputs.h"                                         // the input layer (plain-data outputs)
+#include "zed_floor_stage.h"                                       // ZED floor plane from the depth image (Phase 4.1)
 
 class SpecificWorker : public GenericWorker
 {
@@ -83,6 +84,14 @@ private:
     std::unique_ptr<sc::LidarMountStage> mount_stage_;
     std::int64_t mount_log_ms_ = 0;
     void feed_mount_factors(const sc::LidarIn& l);
+
+    // ── ZED floor plane (src/zed_floor_stage.*), [ZedFloor] section ──
+    bool zed_floor_enabled_ = true;
+    int  zed_floor_log_period_ms_ = 10000;
+    sc::ZedFloorStage::Config zed_floor_cfg_;
+    std::unique_ptr<sc::ZedFloorStage> zed_floor_stage_;
+    std::int64_t zed_floor_log_ms_ = 0;
+    void feed_zed_floor(const sc::ImageIn& im);
 
     // ── Helios planar mount (src/helios_mount_stage.*), [HeliosMount] section ──
     bool helios_enabled_ = true;

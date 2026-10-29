@@ -54,6 +54,14 @@ SpecificWorker::SpecificWorker(const ConfigLoader& configLoader, TuplePrx tprx, 
 
     {
         const rc::cfg::Reader cfg(configLoader, "self_calibration");
+        zed_floor_enabled_ = cfg.b("ZedFloor.enabled", zed_floor_enabled_, "run the ZED floor-plane factor (estimate + log only)");
+        zed_floor_cfg_.rate_hz = cfg.d("ZedFloor.rate_hz", zed_floor_cfg_.rate_hz, "depth frames fed per second (Hz): a COMPUTE budget");
+        zed_floor_cfg_.stride = cfg.i("ZedFloor.stride", zed_floor_cfg_.stride, "every stride-th depth pixel in u and v: a COMPUTE budget");
+        zed_floor_log_period_ms_ = cfg.i("ZedFloor.log_period_ms", zed_floor_log_period_ms_, "summary line + CSV row period (ms)");
+    }
+
+    {
+        const rc::cfg::Reader cfg(configLoader, "self_calibration");
         mount_factors_enabled_ = cfg.b("MountFactors.enabled", mount_factors_enabled_,
                 "run the floor + vertical LiDAR mount factors (estimate + log only)");
         mount_cfg_.rate_hz = cfg.d("MountFactors.rate_hz", mount_cfg_.rate_hz,
@@ -216,7 +224,8 @@ void SpecificWorker::compute()
     }
     for (const auto& m : inputs_->take_imu())
         harvester_->add_gyro(m.stamp_ms, m.gyro.z());   // yaw rate about the IMU z axis (assumed up: pin with the mount)
-    (void)inputs_->take_images();                       // cameras: not consumed by the trajectory part
+    for (const auto& im : inputs_->take_images())       // only the ZED depth is consumed (floor plane); other cameras are dropped
+        feed_zed_floor(im);
     // Phase 4.4 attaches scan registration to these pairs; for now the agent only reports them (<= once / 10 s).
     const auto pairs = harvester_->take_pairs();
     npairs_logged_ += long(pairs.size());
@@ -284,6 +293,25 @@ void SpecificWorker::feed_mount_factors(const sc::LidarIn& l)
         mount_log_ms_ = now;
         mount_stage_->log_state(now);
         qInfo().noquote() << QString::fromStdString(mount_stage_->summary());
+    }
+}
+
+// ZED floor plane (plan 4.1). Only the zed depth stream; a stalled stream's frames and frames without a resolved
+// robot-frame mount or intrinsics are not used.
+void SpecificWorker::feed_zed_floor(const sc::ImageIn& im)
+{
+    if (not zed_floor_enabled_ or im.sensor != "zed" or im.stream != "depth" or inputs_->stalled("zed/depth")
+        or not im.robot_from_sensor.has_value())
+        return;
+    if (not zed_floor_stage_)
+        zed_floor_stage_ = std::make_unique<sc::ZedFloorStage>(zed_floor_cfg_);
+    zed_floor_stage_->observe(im, im.intrinsics, im.room_T_robot);
+    if (const auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count(); now - zed_floor_log_ms_ >= zed_floor_log_period_ms_)
+    {
+        zed_floor_log_ms_ = now;
+        zed_floor_stage_->log_state(now);
+        qInfo().noquote() << QString::fromStdString(zed_floor_stage_->summary());
     }
 }
 

@@ -8,6 +8,7 @@
 #include <print>
 
 #include <dsr/api/dsr_api.h>
+#include <dsr/api/dsr_camera_api.h>
 #include <dsr/api/dsr_inner_eigen_api.h>
 #include <dsr/api/dsr_rt_api.h>
 
@@ -281,8 +282,25 @@ void SensorInputs::drain_image(const std::string& sensor, const std::string& str
         const std::size_t n = std::min<std::size_t>(f.size(), f.data().size());
         im.data.assign(f.data().begin(), f.data().begin() + n);   // deep copy of the valid bytes
         im.body_from_sensor = body_from_sensor(sensor, im.stamp_ms);
+        im.robot_from_sensor = robot_from_sensor(sensor, im.stamp_ms);
+        im.room_T_robot = room_T_robot_at(im.stamp_ms, nullptr);
+        if (sensor == "zed")
+            im.intrinsics = intrinsics_of(sensor);
         push(image_q_, std::move(im), cfg_.max_image_queue);
     });
+}
+
+PinholeIntrinsics SensorInputs::intrinsics_of(const std::string& sensor)
+{
+    if (const auto it = intrinsics_.find(sensor); it != intrinsics_.end() and it->second.fx > 0.0)
+        return it->second;
+    PinholeIntrinsics K;
+    if (const auto node = G_->get_node(sensor); node.has_value())
+        if (const auto cam = G_->get_camera_api(*node); cam)
+            K = {cam->get_focal_x(), cam->get_focal_y(), static_cast<double>(cam->get_width()),
+                 static_cast<double>(cam->get_height())};
+    intrinsics_[sensor] = K;   // fx == 0 is retried on the next frame
+    return K;
 }
 
 void SensorInputs::drain_image360(rc::media::Image360Subscriber& sub, StreamMonitor& mon, RateDecimator& dec)

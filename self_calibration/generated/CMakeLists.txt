@@ -95,3 +95,9 @@ SET_TARGET_PROPERTIES( mount_factors_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${
 ADD_EXECUTABLE( helios_mount_test EXCLUDE_FROM_ALL ../tests/helios_mount_test.cpp ../src/helios_mount_stage.cpp )
 TARGET_LINK_LIBRARIES( helios_mount_test ai_common::sensor_calib Eigen3::Eigen )
 SET_TARGET_PROPERTIES( helios_mount_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../bin )
+
+# Phase 4 Task 3: ZED floor plane (roll, pitch, z) from the depth image (pure Eigen).
+#   make -C build zed_floor_test && ../bin/zed_floor_test
+ADD_EXECUTABLE( zed_floor_test EXCLUDE_FROM_ALL ../tests/zed_floor_test.cpp ../src/zed_floor_stage.cpp )
+TARGET_LINK_LIBRARIES( zed_floor_test ai_common::sensor_calib Eigen3::Eigen )
+SET_TARGET_PROPERTIES( zed_floor_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../bin )

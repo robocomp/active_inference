@@ -70,6 +70,10 @@ struct LidarIn
     [[nodiscard]] std::vector<Eigen::Vector3f> points_robot() const;
 };
 
+// Pinhole intrinsics of the camera's RGB MODEL (CameraAPI: centre = size/2, no separate cx/cy). A depth image of a
+// different size is served by scaling these uniformly (zed_floor_stage depth_to_points). 0 = unknown.
+struct PinholeIntrinsics { double fx = 0, fy = 0, width = 0, height = 0; };
+
 struct ImageIn
 {
     std::string                sensor;              // "zed" | "ricoh"
@@ -79,6 +83,9 @@ struct ImageIn
     std::uint32_t              width = 0, height = 0, step = 0, format = 0;   // format: producer's FORMAT_* code
     std::vector<std::uint8_t>  data;                // OWNED deep copy of the valid bytes
     std::optional<Eigen::Affine3f> body_from_sensor;
+    std::optional<Eigen::Affine3f> robot_from_sensor;   // as LidarIn: the mount into the ROBOT (Shadow) frame; nullopt = unresolved
+    PinholeIntrinsics              intrinsics;           // pinhole cameras (zed) only, read once per sensor from the graph
+    std::optional<Eigen::Affine3d> room_T_robot;         // robot pose in the room at this image's stamp (as LidarIn); nullopt = none
 };
 
 struct ImuIn
@@ -288,6 +295,9 @@ private:
     std::uint64_t          robot_id_ = 0;
     std::optional<std::uint64_t> room_id_;
     [[nodiscard]] std::optional<Eigen::Affine3f> robot_from_sensor(const std::string& sensor, std::int64_t stamp_ms) const;
+    // Pinhole intrinsics of a camera node, read through CameraAPI on first use and cached (main thread only).
+    [[nodiscard]] PinholeIntrinsics intrinsics_of(const std::string& sensor);
+    std::map<std::string, PinholeIntrinsics> intrinsics_;
     [[nodiscard]] std::optional<Eigen::Affine3d> room_T_robot_at(std::int64_t stamp_ms, double* walk_ms) const;
     PolygonIn              polygon_;
     std::int64_t           last_odom_ts_ = 0;

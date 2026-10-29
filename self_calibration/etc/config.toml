@@ -81,6 +81,15 @@ pose_sigma_xy = 0.05       # m, WIDE per-sweep pose nuisance prior (never the lo
 pose_sigma_yaw_deg = 2.0   # deg
 log_period_ms = 10000      # summary line + one mounts CSV row this often
 
+# ── ZED floor plane (src/zed_floor_stage.*; plan Task 4.1): ESTIMATE + LOG ONLY ───────
+# roll, pitch and z of the zed mount from the floor in its depth image (tmp/zed_floor/zed_floor_<ts>.csv).
+# z includes the depth-scale error until 4.2; roll and pitch do not.
+[ZedFloor]
+enabled = true
+rate_hz = 1.0              # COMPUTE budget: depth frames fed per second (Inputs.camera_rate_hz decimates upstream)
+stride = 4                 # COMPUTE budget: every 4th pixel in u and v
+log_period_ms = 10000      # summary line + one CSV row this often
+
 # ── Helios planar mount (src/helios_mount_stage.*; plan Task 4.4): ESTIMATE + LOG ONLY ───────
 [HeliosMount]
 enabled = true
