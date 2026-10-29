@@ -232,7 +232,7 @@ bool RoomSwap::swap(std::uint64_t known_room_id, const rc::recog::PoseMix &pose_
             {
                 const std::string pre = ev_.memory_prefix(Ln.value());
                 if (not mouth) C_chain = seam_cov_through_robot(K_from_robot, S_robot, K_from_L.value());
-                carries.push_back({pre + d->name(), pre + Ln->name(), d->name(), K_from_L.value(), C_chain});
+                carries.push_back({pre + d->name(), pre + Ln->name(), d->name(), K_from_L.value(), C_chain, Ln->name()});
             }
         }
     }
@@ -388,14 +388,25 @@ bool RoomSwap::carry_over(const std::string &prev_room_face, std::uint64_t known
     for (const auto &r : mem_->get_nodes_by_type("room"))
         if (mem_->get_attrib_by_name<room_id_att>(r).value_or(0) == known_room_id and not is_staged_room(*mem_, r)) { K = r; break; }
     const auto prev = mem_->get_node(prev_room_face);
-    if (not K.has_value() or not prev.has_value()) return false;
+    // FRESH -> FRESH crossing: the room being left (L) is archived only when the robot LEAVES the recognised room, so at swap time
+    // its face is not in memory yet -- it is a LIVE node. The swap-time log line (log_only) reads it from the live graph; the
+    // write (the release) always finds it in memory, after L's eviction.
+    const auto live_it = std::ranges::find(carry_, prev_room_face, &Carry::prev_face);
+    const bool live_only = not prev.has_value() and log_only and live_it != carry_.end() and not live_it->live_room.empty();
+    if (not K.has_value() or (not prev.has_value() and not live_only))
+    {
+        if (log_only) qWarning().noquote() << QString::fromStdString(std::format("[swap] crossed door {}: no association (K {}, face in memory {}, live face {})",
+                prev_room_face, K.has_value() ? "found" : "missing", prev.has_value() ? "yes" : "no", live_only ? "yes" : "no"));
+        return false;
+    }
 
     // the passage this face belongs to (case B: the one the twin's face hung from; case A: written by the eviction)
     std::optional<DSR::Node> pass;
-    for (const auto &pn : mem_->get_nodes_by_type("metaconcept"))
-        if (subtype_of(*mem_, pn) == "passage")
-            for (const auto &e : DSR::DSRGraph::get_node_edges_by_type(pn, "match"))
-                if (e.to() == prev->id()) pass = pn;
+    if (prev.has_value())
+        for (const auto &pn : mem_->get_nodes_by_type("metaconcept"))
+            if (subtype_of(*mem_, pn) == "passage")
+                for (const auto &e : DSR::DSRGraph::get_node_edges_by_type(pn, "match"))
+                    if (e.to() == prev->id()) pass = pn;
     const auto face_of_k = [&](const DSR::Node &p) -> std::optional<DSR::Node> {
         for (const auto &e : DSR::DSRGraph::get_node_edges_by_type(p, "match"))
             if (const auto f = mem_->get_node(e.to()); f.has_value() and is_descendant(*mem_, f->id(), K->name())) return f;
@@ -411,7 +422,8 @@ bool RoomSwap::carry_over(const std::string &prev_room_face, std::uint64_t known
     const auto it = std::ranges::find(carry_, prev_room_face, &Carry::prev_face);
     if (it == carry_.end()) return false;                                          // no seam for it: nothing is invented
     auto ie = mem_->get_inner_eigen_api();
-    const auto F = ie->get_transformation_matrix(it->prev_room, prev_room_face);     // the previous room's face, in its own frame
+    const auto F = live_only ? live_->get_inner_eigen_api()->get_transformation_matrix(it->live_room, it->base)
+                             : ie->get_transformation_matrix(it->prev_room, prev_room_face);     // the previous room's face, in its own frame
     if (not F.has_value()) return false;
     const Eigen::Vector3d t = se2_of(Mat::RTMat(it->known_from_prev * F.value()));    // the aperture in K's frame, through the chain
     // the aperture's covariance: the seam's (robot lever arm, mouth) carried to the face, plus the error of the previous room's

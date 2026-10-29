@@ -109,7 +109,7 @@ private:
 
     /// A crossed door, taken at swap time: the previous room's memory name and face, the seam T(K <- previous room) and the
     /// covariance of the robot's pose in K that it inherits (x, y, yaw).
-    struct Carry { std::string prev_face, prev_room, base; Mat::RTMat known_from_prev; Eigen::Matrix3d cov; };
+    struct Carry { std::string prev_face, prev_room, base; Mat::RTMat known_from_prev; Eigen::Matrix3d cov; std::string live_room; /* L's LIVE name while it is not archived yet; empty = memory only */ };
     std::vector<Carry> carry_;
     int drop_subtree(const std::string &memory_room);
     std::optional<DSR::Node> robot_node() const;

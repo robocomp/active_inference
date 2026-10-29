@@ -1571,7 +1571,7 @@ void RoomSceneGraph::rearm_after_crossing(std::uint64_t new_room_id, const std::
     // The proto frame (the crossed aperture: x along it, +y into the new room) becomes the new room's PUBLISHED frame,
     // exactly as the robot's initial pose was the first room's. T_room_proto_ is that frame in the internal one.
     const std::uint64_t left_id = dsr_room_id_;
-    left_rooms_.push_back(left_id);   // sweep_foreign_rooms must not reap it while the new room is surveyed
+    if (left_id != 0) left_rooms_.push_back(left_id);   // (0: the provisional room was already discarded) sweep_foreign_rooms must not reap it while the new room is surveyed
     // ROOMS DO NOT OVERLAP: the room left behind is known space, not the new room's. Its outline (internal frame, read
     // before begin_room_estimation releases it) is excluded from the new room's free-space map (FreeSpacePolygon::
     // set_exclusion) — what the LiDAR sees of it back through the open doorway is not floor to promote.

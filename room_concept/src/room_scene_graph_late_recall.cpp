@@ -105,19 +105,26 @@ bool RoomSceneGraph::adopt_late_recall(const Recall& recall)
     // The recognition evidence is read ONCE, at adoption: it is the adoption test's prior, not a running input.
     Recall r = recall;
     r.recog_log_odds = recognition_log_odds(r.room_index);
-    if (dsr_room_id_ == 0 or proto_room_id_ != 0 or r.poly_pub.size() < 3 or r.room_index == 0) return false;
+    if (proto_room_id_ != 0 or r.poly_pub.size() < 3 or r.room_index == 0) return false;
     for (const auto& rn : G_->get_nodes_by_type("room"))
         if (rn.name() == r.name) return false;   // the name is taken (the room is live): nothing to re-birth
-    const auto old = G_->get_node(dsr_room_id_);
-    if (not old.has_value()) return false;
+    // ltsm discards the provisional room in the SAME cycle that posts the late recall, so by the time this runs the room we
+    // think we are in is usually GONE from the graph (recog_try14: the old code returned false here, the reset path then
+    // re-birthed a start-up proto and its sweep deleted the room being LEFT). A vanished room is released and the recalled
+    // one is born in its place; a still-live provisional room is replaced as before.
+    auto old = dsr_room_id_ != 0 ? G_->get_node(dsr_room_id_) : std::nullopt;
+    if (not old.has_value() and dsr_room_id_ != 0) forget_room("late recall: the provisional room is already gone");
     DSR::Node node = DSR::Node::create<room_node_type>(r.name);
     G_->add_or_modify_attrib_local<room_id_att>(node, r.room_index);
-    if (const auto h = G_->get_attrib_by_name<room_height_att>(old.value()); h.has_value())
-        G_->add_or_modify_attrib_local<room_height_att>(node, h.value());
-    if (const auto l = G_->get_attrib_by_name<level_att>(old.value()); l.has_value())
-        G_->add_or_modify_attrib_local<level_att>(node, l.value());
-    G_->add_or_modify_attrib_local<pos_x_att>(node, G_->get_attrib_by_name<pos_x_att>(old.value()).value_or(0.f) + 250.f);
-    G_->add_or_modify_attrib_local<pos_y_att>(node, G_->get_attrib_by_name<pos_y_att>(old.value()).value_or(0.f));
+    const float own_height = published_room_height_ > 0.f ? published_room_height_ : params_->room_height;
+    const float height = old.has_value() ? G_->get_attrib_by_name<room_height_att>(old.value()).value_or(own_height)
+                                         : own_height;
+    G_->add_or_modify_attrib_local<room_height_att>(node, height);
+    if (old.has_value())
+        if (const auto l = G_->get_attrib_by_name<level_att>(old.value()); l.has_value())
+            G_->add_or_modify_attrib_local<level_att>(node, l.value());
+    G_->add_or_modify_attrib_local<pos_x_att>(node, (old.has_value() ? G_->get_attrib_by_name<pos_x_att>(old.value()).value_or(0.f) : 0.f) + 250.f);
+    G_->add_or_modify_attrib_local<pos_y_att>(node, old.has_value() ? G_->get_attrib_by_name<pos_y_att>(old.value()).value_or(0.f) : 0.f);
     G_->add_or_modify_attrib_local<parent_att>(node, dsr_robot_id_);
     rc::provenance::stamp_creation(*G_, node);
     const auto id = G_->insert_node(node);
@@ -140,17 +147,18 @@ bool RoomSceneGraph::adopt_late_recall(const Recall& recall)
     qInfo().noquote() << QString("[room][late-recall] %1 adopted from memory (node id %2), replacing room %3; localising with "
                                  "the recognition posterior (%4 mode(s)) as the search's prior; adoption test starts at "
                                  "log-odds %5 (recogniser ln P(K)/P(new))")
-                             .arg(QString::fromStdString(r.name)).arg(id.value()).arg(old->id()).arg(r.pose_prior.size())
+                             .arg(QString::fromStdString(r.name)).arg(id.value()).arg(old.has_value() ? old->id() : 0).arg(r.pose_prior.size())
                              .arg(r.recog_log_odds, 0, 'f', 2);
     return true;
 }
 
 bool RoomSceneGraph::step_late_recall()
 {
-    if (G_ == nullptr or dsr_room_id_ == 0) return false;
+    if (G_ == nullptr) return false;
     const std::int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now().time_since_epoch()).count();
-    const bool poll = now - late_last_poll_ms_ >= 1000;
+    // No room at all (the provisional one was discarded under us): look EVERY cycle, so no start-up birth can run first.
+    const bool poll = not room_node_created_ or now - late_last_poll_ms_ >= 1000;
     if (poll) late_last_poll_ms_ = now;
     std::optional<Recall> standing;
     if (poll or late_watch_node_ != 0) standing = find_late_recall();

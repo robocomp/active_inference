@@ -5,6 +5,7 @@
 #include "../src/room_swap.h"
 #include <QCoreApplication>
 #include <clocale>
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <set>
@@ -208,6 +209,9 @@ static bool any_name_contains(const std::string &s)
         for (const auto &n : mem->get_nodes_by_type(t)) if (n.name().find(s) != std::string::npos) return true;
     return false;
 }
+
+static std::vector<std::string> captured_log;
+static void capture(QtMsgType, const QMessageLogContext &, const QString &msg) { captured_log.push_back(msg.toStdString()); std::fputs((msg.toStdString() + "\n").c_str(), stdout); }
 
 int main(int argc, char **argv)
 {
@@ -680,6 +684,27 @@ int main(int argc, char **argv)
         check(not mem->get_node("r4_room_4").has_value() and not mem->get_node("r4_door_9").has_value(), "the staged twin is removed from memory");
         check(recall_nodes() == 0 and mem_rooms() == 2, "the late recall is removed; K and L remain");
         check(f.sw.sweep_stale() == 0, "a second sweep finds nothing");
+    }
+
+    // recog_try14 (P2): a FRESH->FRESH crossing leaves the room being left LIVE-ONLY (it is archived when the robot leaves the
+    // recognised room), so at swap time its door face is not in memory. The '[swap] crossed door X <-> K face Y' line the tour
+    // driver reads must still be printed -- from the live face -- and nothing may be written.
+    std::printf("swap_time_log_with_live_only_previous_room\n");
+    {
+        reset(); build_memory(false); build_live(false);
+        for (const char *nm : {"r2_door_3", "r2_room_2"}) if (const auto n = mem->get_node(nm); n.has_value()) mem->delete_node(n->id());
+        check(not mem->get_node("r2_door_3").has_value() and live->get_node("door_3").has_value(), "(L is live-only: no face of it in memory)");
+        Fix f;
+        const auto before = mem_names();
+        captured_log.clear();
+        qInstallMessageHandler(capture);
+        const bool ok = f.sw.swap(3, pose_k(), live_P);
+        qInstallMessageHandler(nullptr);
+        check(ok, "swap accepted");
+        const bool printed = std::ranges::any_of(captured_log, [](const std::string &l) { return l.starts_with("[swap] crossed door r2_door_3 <-> K face "); });
+        check(printed, "the swap-time association line is printed from the live face");
+        check(passage_count() == 0 and not any_name_contains("r2_door_3"), "and nothing was written to memory");
+        (void) before;
     }
 
     std::printf("%s (%d failures)\n", failures ? "FAILED" : "all ok", failures);
