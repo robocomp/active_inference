@@ -12,6 +12,7 @@
 
 #include <QCoreApplication>
 #include <clocale>
+#include <array>
 #include <cmath>
 #include <cstdio>
 #include <memory>
@@ -36,11 +37,14 @@ static void put_rt(std::uint64_t from, std::uint64_t to, const Eigen::Vector3f& 
     G->get_rt_api()->insert_or_assign_edge_RT(n, to, std::vector<float>{q.x(), q.y(), z}, std::vector<float>{0.f, 0.f, q.z()});
 }
 
-static std::optional<Eigen::Vector3f> rt_of(std::uint64_t from, std::uint64_t to)
+static const std::array<std::uint64_t, 3> kStamps{1000, 1100, 1200};
+static Eigen::Vector3f robot_at(int i) { return kRobotInP + Eigen::Vector3f(0.1f * i, -0.05f * i, 0.02f * i); }
+
+static std::optional<Eigen::Vector3f> rt_of(std::uint64_t from, std::uint64_t to, std::uint64_t ts = 0)
 {
     const auto e = G->get_edge(from, to, "RT");
     if (not e.has_value()) return std::nullopt;
-    const auto m = G->get_rt_api()->get_edge_RT_as_rtmat(e.value());
+    const auto m = G->get_rt_api()->get_edge_RT_as_rtmat(e.value(), ts);
     if (not m.has_value()) return std::nullopt;
     return Eigen::Vector3f(m->translation().x(), m->translation().y(), std::atan2(m->rotation()(1, 0), m->rotation()(0, 0)));
 }
@@ -69,7 +73,17 @@ static void reset(bool proto = true, bool with_proposal = true)
     wall = add("wall", "room_4_wall_0", floor_id);
     put_rt(floor_id, wall, kWallInFloor, 1.25f);
     robot = add("robot", "Shadow", P);
-    put_rt(P, robot, kRobotInP);
+    {   // a timestamped HISTORY ring, with a pose covariance (σx 0.2, σy 0.1), as dsr_update_pose writes it
+        std::vector<float> cov(36, 0.f);
+        cov[0] = 0.04f; cov[7] = 0.01f; cov[35] = 0.001f;
+        for (int i = 0; i < 3; ++i)
+        {
+            auto pn = G->get_node(P).value();
+            const auto q = robot_at(i);
+            G->get_rt_api()->insert_or_assign_edge_RT(pn, robot, std::vector<float>{q.x(), q.y(), 0.f},
+                                                     std::vector<float>{0.f, 0.f, q.z()}, cov, kStamps[i]);
+        }
+    }
     door = add("door", "door_9", P);
     put_rt(P, door, kDoorInP);
     if (not with_proposal) return;
@@ -134,7 +148,16 @@ int main(int argc, char** argv)
         check(px.has_value() and py.has_value() and px->get() == std::vector<float>{0.f, 4.f, 4.f, 0.f}
               and py->get() == std::vector<float>{0.f, 0.f, 3.f, 3.f}, "delimiting polygon = K's outline");
         check(not G->get_edge(P, P, "proto").has_value(), "the proto self-edge is gone");
-        check(same_pose(rt_of(P, robot), transform_pose(T_K_P, kRobotInP)), "the robot is re-expressed by T(K<-P)");
+        bool ring_ok = true;
+        for (int i = 0; i < 3; ++i) ring_ok = ring_ok and same_pose(rt_of(P, robot, kStamps[i]), transform_pose(T_K_P, robot_at(i)));
+        check(ring_ok, "EVERY block of the robot's history ring is re-expressed by T(K<-P), at its own timestamp");
+        const auto mid = rt_of(P, robot, 1050);   // between two blocks: both in K, so the interpolation is too
+        check(mid.has_value() and (mid->head<2>() - transform_pose(T_K_P, robot_at(0)).head<2>()).norm() < 0.2f,
+              "a query between two blocks interpolates inside K's frame");
+        const auto e = G->get_edge(P, robot, "RT");
+        const auto cv = e.has_value() ? G->get_attrib_by_name<rt_covariance_att>(e.value()) : std::nullopt;
+        check(cv.has_value() and cv->get().size() >= 36 and near(cv->get()[0], 0.01f) and near(cv->get()[7], 0.04f),
+              "the pose covariance is rotated with the frame (90 deg: sxx <-> syy)");
         check(same_pose(rt_of(floor_id, wall), transform_pose(T_K_P, kWallInFloor)), "this agent's wall is re-expressed");
         check(same_pose(rt_of(P, floor_id), Eigen::Vector3f::Zero()), "the floor stays the room's identity");
         check(same_pose(rt_of(P, door), kDoorInP), "another agent's child is left to its owner");
@@ -149,7 +172,7 @@ int main(int argc, char** argv)
         check(n.has_value() and n->name() == "room_4" and G->get_attrib_by_name<room_id_att>(n.value()).value_or(0) == 4,
               "P keeps its name and room_id");
         check(G->get_edge(P, P, "proto").has_value(), "P is still provisional");
-        check(same_pose(rt_of(P, robot), kRobotInP) and same_pose(rt_of(floor_id, wall), kWallInFloor), "nothing moved");
+        check(same_pose(rt_of(P, robot), robot_at(2)) and same_pose(rt_of(floor_id, wall), kWallInFloor), "nothing moved");
         check(not the_proposal().has_value(), "a rejected proposal is no longer pending (never answered twice)");
     }
 
@@ -180,7 +203,7 @@ int main(int argc, char** argv)
         check(not threw and not a.ok, "adopt_in_place on a held name returns false, no throw (" + a.why + ")");
         const auto n = G->get_node(P);
         check(n.has_value() and n->name() == "room_4" and G->get_node("room_2")->id() == other, "neither node renamed");
-        check(G->get_edge(P, P, "proto").has_value() and same_pose(rt_of(P, robot), kRobotInP), "nothing else written");
+        check(G->get_edge(P, P, "proto").has_value() and same_pose(rt_of(P, robot), robot_at(2)), "nothing else written");
         // and the cortex guard itself, past this module's pre-check: a rename to a held name is refused by update_node
         auto raw = G->get_node(P).value();
         raw.name("room_2");

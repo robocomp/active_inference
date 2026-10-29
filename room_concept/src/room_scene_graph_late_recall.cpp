@@ -13,8 +13,10 @@
 //      internal frame and the pose do not jump — and the robot-in-K modes the relocaliser's prior. While it runs NOTHING
 //      is written to the graph: P keeps its name, polygon, walls and frame (the robot's RT is published in P's frame as
 //      before) and P's survey is suspended.
-//   3. Rejected (or the proposal / P vanished, or the robot left P): K's layout is released, P's survey resumes on the
-//      same SLAM map, and "rejected" is written (nothing on a vanished proposal).
+//   3. Rejected or withdrawn: RoomConcept restores the survey from its snapshot (end_hypothesis_fit) and "rejected" is
+//      written (nothing on a vanished proposal). While the fit runs, the PUBLISHED pose is the survey's (plain SLAM's
+//      shadow, PosePublisher), so nothing a consumer sees moves before the verdict. P vanished / the robot crossed out:
+//      the fit is abandoned (the survey restored, then the crossing / re-birth proceeds as it would have without it).
 //   4. Accepted: P becomes K IN PLACE — same node id renamed to K's live name (cortex rename, 43bfe16), room_id and
 //      outline K's, P's own RT children re-expressed by T(K←P), the published frame becomes K's, proto edge removed,
 //      the walls built/synced on K's outline — and "accepted" is written. A refused rename is a rejection.
@@ -63,35 +65,45 @@ std::uint64_t RoomSceneGraph::provisional_room() const
            ? dsr_room_id_ : 0;
 }
 
-void RoomSceneGraph::begin_proposal_fit(const rc::proposal::Proposal& p)
+bool RoomSceneGraph::begin_proposal_fit(const rc::proposal::Proposal& p)
 {
     Eigen::Affine2f T_pub_int;
     { std::scoped_lock lk(gauge_mutex_); T_pub_int = T_pub_int_; }
-    // K's frame in the internal one: internal ← P(published) ← K. The internal frame stays where it is, so the tracker's
-    // pose does not move with the hypothesis; only the layout it is scored against does.
-    prop_T_int_K_ = T_pub_int.inverse() * p.T_P_K;
+    // K's frame in the internal one: internal ← P(published) ← K. The internal frame stays where it is; only the layout
+    // the localiser is scored against changes, and RoomConcept snapshots the survey so a rejection costs nothing.
+    const Eigen::Affine2f T_int_K = T_pub_int.inverse() * p.T_P_K;
     std::vector<Eigen::Vector2f> K_int;
     K_int.reserve(p.outline_K.size());
-    for (const auto& v : p.outline_K) K_int.push_back(prop_T_int_K_ * v);
-    const auto modes = rc::proposal::modes_in(p.pose_prior, prop_T_int_K_);
+    for (const auto& v : p.outline_K) K_int.push_back(T_int_K * v);
+    const auto modes = rc::proposal::modes_in(p.pose_prior, T_int_K);
     const double prior = recognition_log_odds(p.room_index);
-    room_concept_->set_map_layout(K_int);
-    room_concept_->adopt_map_layout_as_given();
-    room_concept_->seed_reloc_prior(modes, prior);
+    if (not room_concept_->begin_hypothesis_fit(std::move(K_int), modes, prior)) return false;
+    prop_T_int_K_ = T_int_K;
     prop_judged_ = p;
+    const auto pn = G_->get_node(p.parent);
     qWarning().noquote() << QString("[room][proposal] judging %1: %2 is remembered %3 — K's outline (%4 vertices) is the given "
-                                    "layout, %5 pose mode(s) the relocaliser's prior, test starts at log-odds %6; nothing "
-                                    "written until the verdict")
-                                .arg(p.node_id).arg(QString::fromStdString(G_->get_node(p.parent) ? G_->get_node(p.parent)->name() : "?"))
+                                    "layout, %5 pose mode(s) the relocaliser's prior, test starts at log-odds %6; the survey "
+                                    "pose is published and nothing written until the verdict")
+                                .arg(p.node_id).arg(QString::fromStdString(pn.has_value() ? pn->name() : std::string("?")))
                                 .arg(QString::fromStdString(p.live_name)).arg(p.outline_K.size()).arg(modes.size())
                                 .arg(prior, 0, 'f', 2);
+    return true;
 }
 
 void RoomSceneGraph::end_proposal_fit(const char* why)
 {
-    room_concept_->cancel_late_recall();
-    // Back to SEARCHING on the same scan map: plain SLAM takes the pose back, P's survey resumes next frame.
-    room_concept_->begin_room_estimation(std::string("proposal ") + why);
+    // Back to P's survey exactly as it was (RoomConcept::end_hypothesis_fit restores layout, emission and belief; the
+    // pose is plain SLAM's shadow, which never followed K). Nothing of P was written while the fit ran.
+    room_concept_->end_hypothesis_fit();
+    qInfo().noquote() << "[room][proposal] fit ended (" << why << "): P's survey resumes";
+    prop_judged_.reset();
+}
+
+void RoomSceneGraph::abandon_proposal_fit(const char* why)
+{
+    if (not prop_judged_.has_value()) return;
+    room_concept_->end_hypothesis_fit();   // the survey as it was: what a crossing / a re-birth then starts from
+    qWarning().noquote() << QString("[room][proposal] %1 abandoned: %2").arg(QString::fromStdString(prop_judged_->live_name)).arg(why);
     prop_judged_.reset();
 }
 
@@ -101,8 +113,7 @@ bool RoomSceneGraph::accept_proposal(const rc::RoomConcept::UpdateResult& res)
     const Eigen::Affine2f T_K_int = prop_T_int_K_.inverse();
     Eigen::Affine2f T_old;
     { std::scoped_lock lk(gauge_mutex_); T_old = T_pub_int_; T_pub_int_ = T_K_int; }
-    const auto a = rc::proposal::adopt_in_place(*G_, p, dsr_robot_id_,
-                                                res.timestamp_ms > 0 ? std::optional<std::uint64_t>(res.timestamp_ms) : std::nullopt);
+    const auto a = rc::proposal::adopt_in_place(*G_, p, dsr_robot_id_);
     if (not a.ok)
     {
         { std::scoped_lock lk(gauge_mutex_); T_pub_int_ = T_old; }
@@ -112,6 +123,7 @@ bool RoomSceneGraph::accept_proposal(const rc::RoomConcept::UpdateResult& res)
                                     .arg(QString::fromStdString(p.live_name)).arg(QString::fromStdString(a.why));
         return false;
     }
+    room_concept_->keep_hypothesis_fit();   // K stays the given room
     note_room_name_issued(p.room_index);
     // The published-frame state of P's survey does not survive the frame change.
     reset_free_space(T_K_int);
@@ -143,10 +155,15 @@ bool RoomSceneGraph::step_proposal(const rc::RoomConcept::UpdateResult& res)
         const auto pn = G_->get_node(p.node_id);
         const bool still_pending = pn.has_value()
             and G_->get_attrib_by_name<state_att>(pn.value()).value_or(std::string(rc::proposal::kPending)) == rc::proposal::kPending;
-        if (not still_pending or not G_->get_node(p.parent).has_value() or dsr_room_id_ != p.parent)
+        if (not G_->get_node(p.parent).has_value() or dsr_room_id_ != p.parent)
         {
-            qWarning().noquote() << QString("[room][proposal] %1 withdrawn or P left before the verdict: K's layout released, "
-                                            "P's survey resumes").arg(QString::fromStdString(p.live_name));
+            abandon_proposal_fit("P is gone or no longer this agent's room");
+            return false;
+        }
+        if (not still_pending)
+        {
+            qWarning().noquote() << QString("[room][proposal] %1 withdrawn before the verdict: K's layout released, "
+                                            "P's survey restored").arg(QString::fromStdString(p.live_name));
             end_proposal_fit("withdrawn");
             return false;
         }
@@ -175,16 +192,15 @@ bool RoomSceneGraph::step_proposal(const rc::RoomConcept::UpdateResult& res)
     {
         // Every room is this agent's (room_concept is the only room producer), so every pending proposal is answered.
         const auto adm = rc::proposal::admit(*G_, p, mine);
-        if (adm == rc::proposal::Admission::Judge and not prop_judged_.has_value())
-        {
-            begin_proposal_fit(p);
-            continue;
-        }
-        if (adm == rc::proposal::Admission::Judge) continue;   // one at a time; ltsm keeps one per P anyway
+        if (adm == rc::proposal::Admission::Judge and prop_judged_.has_value()) continue;   // one at a time
+        if (adm == rc::proposal::Admission::Judge and begin_proposal_fit(p)) continue;
+        // PlainSlam off: the survey has no pose independent of K, so the fit could not run without moving what is
+        // published (and could not be undone) — not judgeable here.
+        const char* why = adm == rc::proposal::Admission::Judge ? "no independent survey pose to publish during the fit (plain SLAM not driving)"
+                                                                : rc::proposal::to_string(adm);
         rc::proposal::answer(*G_, p.node_id, rc::proposal::kRejected);
         qWarning().noquote() << QString("[room][proposal] %1 (id %2) rejected without a fit: %3")
-                                    .arg(QString::fromStdString(p.live_name)).arg(p.node_id)
-                                    .arg(rc::proposal::to_string(adm));
+                                    .arg(QString::fromStdString(p.live_name)).arg(p.node_id).arg(why);
     }
     return false;
 }

@@ -312,3 +312,12 @@ target_include_directories(proposal_adoption_test PRIVATE ${CMAKE_CURRENT_LIST_D
 target_compile_definitions(proposal_adoption_test PRIVATE ROOT_JSON="${CMAKE_CURRENT_LIST_DIR}/../../ltsm_agent/ltsm_root.json")
 target_link_libraries(proposal_adoption_test ${LIBS})
 set_target_properties(proposal_adoption_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../../bin)
+
+# ── proposal_fit_test ─────────────────────────────────────────────────────────
+# Room-transition protocol C2.7: judging a proposal costs the survey nothing (RoomConcept through update(): the
+# published pose stays the survey's during the fit; reject/withdraw restore pose, WallMap, map_ready, emission).
+#   make -C build proposal_fit_test && ../bin/proposal_fit_test
+add_executable(proposal_fit_test EXCLUDE_FROM_ALL ../tools/proposal_fit_test.cpp)
+target_include_directories(proposal_fit_test PRIVATE ${CMAKE_CURRENT_LIST_DIR}/../src)
+target_link_libraries(proposal_fit_test ${LIBS})
+set_target_properties(proposal_fit_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../../bin)

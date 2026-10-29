@@ -16,6 +16,7 @@ namespace rc::proposal
 {
 namespace
 {
+
 bool is_proposal(DSR::DSRGraph& G, const DSR::Node& n)
 {
     return n.type() == "metaconcept" and G.get_attrib_by_name<object_subtype_att>(n).value_or(std::string{}) == kSubtype;
@@ -33,6 +34,45 @@ std::optional<std::pair<Eigen::Vector3f, float>> planar_rt(DSR::DSRGraph& G, DSR
     return std::pair{Eigen::Vector3f(static_cast<float>(t.x()), static_cast<float>(t.y()),
                                      static_cast<float>(std::atan2(R(1, 0), R(0, 0)))),
                      static_cast<float>(t.z())};
+}
+bool reexpress_ring(DSR::DSRGraph& G, std::uint64_t from, std::uint64_t to, const Eigen::Affine2f& T)
+{
+    auto e = G.get_edge(from, to, "RT");
+    if (not e.has_value()) return false;
+    const auto tr = G.get_attrib_by_name<rt_translation_att>(e.value());
+    const auto rot = G.get_attrib_by_name<rt_rotation_euler_xyz_att>(e.value());
+    if (not tr.has_value() or not rot.has_value()) return false;
+    std::vector<float> t(tr->get()), r(rot->get());
+    if (t.size() % 3 != 0 or t.size() != r.size()) return false;
+    const float phi = angle_of(T);
+    const Eigen::Matrix2f R = T.linear();
+    for (std::size_t k = 0; k < t.size(); k += 3)
+    {
+        const Eigen::Vector2f xy = T * Eigen::Vector2f(t[k], t[k + 1]);
+        t[k] = xy.x(); t[k + 1] = xy.y();                                          // z kept
+        const Eigen::Vector2f rxy = R * Eigen::Vector2f(r[k], r[k + 1]);           // roll/pitch axes turn with the frame
+        r[k] = rxy.x(); r[k + 1] = rxy.y();
+        r[k + 2] = std::remainder(r[k + 2] + phi, 2.f * static_cast<float>(M_PI));
+    }
+    G.add_or_modify_attrib_local<rt_translation_att>(e.value(), std::move(t));
+    G.add_or_modify_attrib_local<rt_rotation_euler_xyz_att>(e.value(), std::move(r));
+    // The pose covariance is in the PARENT frame (dsr_rt_api.h RTBlock): Σ' = J Σ Jᵀ, J = diag(Rz, Rz) on [x y z rx ry rz].
+    if (const auto cv = G.get_attrib_by_name<rt_covariance_att>(e.value()); cv.has_value() and not cv->get().empty()
+        and cv->get().size() % 36 == 0)
+    {
+        std::vector<float> c(cv->get());
+        Eigen::Matrix<float, 6, 6> J = Eigen::Matrix<float, 6, 6>::Identity();
+        J.block<2, 2>(0, 0) = R;
+        J.block<2, 2>(3, 3) = R;
+        for (std::size_t k = 0; k < c.size(); k += 36)
+        {
+            Eigen::Map<Eigen::Matrix<float, 6, 6, Eigen::RowMajor>> S(c.data() + k);
+            const Eigen::Matrix<float, 6, 6> Sr = J * S * J.transpose();
+            S = Sr;
+        }
+        G.add_or_modify_attrib_local<rt_covariance_att>(e.value(), std::move(c));
+    }
+    return G.insert_or_assign_edge(e.value());
 }
 }   // namespace
 
@@ -125,7 +165,7 @@ bool answer(DSR::DSRGraph& G, std::uint64_t proposal_id, std::string_view state)
     return G.update_node(n.value());
 }
 
-Adoption adopt_in_place(DSR::DSRGraph& G, const Proposal& p, std::uint64_t robot_id, std::optional<std::uint64_t> robot_ts)
+Adoption adopt_in_place(DSR::DSRGraph& G, const Proposal& p, std::uint64_t robot_id)
 {
     Adoption a;
     auto P = G.get_node(p.parent);
@@ -134,10 +174,8 @@ Adoption adopt_in_place(DSR::DSRGraph& G, const Proposal& p, std::uint64_t robot
     if (const auto other = G.get_node(p.live_name); other.has_value() and other->id() != p.parent)
     { a.why = "the name " + p.live_name + " is held by id " + std::to_string(other->id()); return a; }
 
-    // P's own RT children and their poses, read BEFORE anything is written.
-    const auto rt = G.get_rt_api();
-    struct Move { std::uint64_t from, to; Eigen::Vector3f pose; float z; bool robot; };
-    std::vector<Move> moves;
+    // P's own RT children (robot; walls under P or under P's floor), found BEFORE anything is written.
+    std::vector<std::pair<std::uint64_t, std::uint64_t>> own;   // (from, to)
     const auto collect = [&](std::uint64_t from, bool robot_allowed)
     {
         const auto fn = G.get_node(from);
@@ -147,10 +185,7 @@ Adoption adopt_in_place(DSR::DSRGraph& G, const Proposal& p, std::uint64_t robot
             if (e.from() != from) continue;
             const auto child = G.get_node(e.to());
             if (not child.has_value()) continue;
-            const bool robot = robot_allowed and e.to() == robot_id;
-            if (not robot and child->type() != "wall") continue;
-            if (const auto q = planar_rt(G, *rt, from, e.to()); q.has_value())
-                moves.push_back({from, e.to(), q->first, q->second, robot});
+            if ((robot_allowed and e.to() == robot_id) or child->type() == "wall") own.emplace_back(from, e.to());
         }
     };
     collect(p.parent, true);
@@ -175,17 +210,11 @@ Adoption adopt_in_place(DSR::DSRGraph& G, const Proposal& p, std::uint64_t robot
         return a;
     }
 
-    // 2. P's own geometry follows the frame: T(K←P) = T(P←K)⁻¹.
+    // 2. P's own geometry follows the frame: T(K←P) = T(P←K)⁻¹, applied to EVERY block of each edge's history ring
+    //    (same slots, same timestamps), so no reader can interpolate between a P-frame and a K-frame block.
     const Eigen::Affine2f T_K_P = p.T_P_K.inverse();
-    for (const auto& m : moves)
-    {
-        auto from = G.get_node(m.from);
-        if (not from.has_value()) continue;
-        const Eigen::Vector3f q = transform_pose(T_K_P, m.pose);
-        rt->insert_or_assign_edge_RT(from.value(), m.to, std::vector<float>{q.x(), q.y(), m.z},
-                                     std::vector<float>{0.f, 0.f, q.z()}, m.robot ? robot_ts : std::nullopt);
-        ++a.reexpressed;
-    }
+    for (const auto& [from, to] : own)
+        if (reexpress_ring(G, from, to, T_K_P)) ++a.reexpressed;
 
     // 3. Not provisional any more.
     G.delete_edge(p.parent, p.parent, "proto");

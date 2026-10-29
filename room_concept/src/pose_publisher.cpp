@@ -270,6 +270,20 @@ bool PosePublisher::maybe_publish_corrected_pose()
 
     last_dsr_publish_try_ms_ = now_ms;
 
+    // ── WHILE A REMEMBERED LAYOUT IS BEING JUDGED, THE SURVEY'S POSE IS PUBLISHED (room-transition C2.7) ──────────
+    // RoomConcept::begin_hypothesis_fit tracks against ltsm's proposed layout K with the recogniser's pose prior, which
+    // can be metres off (try32: 3.77 m / 89°). Nothing a consumer sees may move before the verdict, so the published
+    // pose is the survey's own — plain SLAM's shadow, which the fit never touches — with the covariance it was published
+    // with, and the fit's own re-seeding is not a relocalisation epoch here (the clamp stays armed against it).
+    if (const auto sp = room_concept_.survey_pose_during_fit(); sp.has_value())
+    {
+        const auto& [pose, cov] = sp.value();
+        loc_res->robot_pose = Eigen::Translation2f(pose.head<2>()) * Eigen::Rotation2Df(pose.z());
+        if (loc_res->state.size() > 4) { loc_res->state[2] = pose.x(); loc_res->state[3] = pose.y(); loc_res->state[4] = pose.z(); }
+        loc_res->covariance = cov;
+        loc_res->reloc_epoch = last_published_reloc_epoch_;
+    }
+
     // ---- KINEMATIC CLAMP on the published CORRECTION --------------------------------------------
     // The published stream must be a physically possible trajectory: between two published poses the
     // robot cannot have jumped further than its own speed limit allows. Measured on this agent's own

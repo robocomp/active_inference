@@ -697,6 +697,98 @@ namespace rc
         late_verdict_.store(static_cast<int>(LateVerdict::None), std::memory_order_release);
     }
 
+    // ── A REMEMBERED LAYOUT AS A HYPOTHESIS (room-transition protocol C2.7) ──────────────────────────────────────
+    // The fit is the late adoption's, unchanged: K becomes the GIVEN layout and seed_reloc_prior arms the forced search +
+    // the sequential verdict. What is new is that it may LOSE without cost: everything it overwrites in the survey is
+    // snapshotted here and put back by end_hypothesis_fit, and the pose the agent PUBLISHES meanwhile is plain SLAM's
+    // shadow (it keeps running on its own scan map while a layout is adopted, room_concept_update.cpp), which is exactly
+    // the pose the survey was publishing — so a wrong prior (try32: 3.77 m / 89°) never reaches a consumer.
+    // The WallMap needs no snapshot: while map_layout_adopted_ it is not observed (wall_slam_observe) and nothing here
+    // re-configures it (begin_room_estimation would, which is why a rejection does NOT go through it).
+    bool RoomConcept::begin_hypothesis_fit(std::vector<Eigen::Vector2f> K_int, const std::vector<rc::reloc::PriorMode>& modes,
+                                           double prior_log_odds)
+    {
+        if (hypothesis_.has_value() or K_int.size() < 3 or modes.empty() or not plain_slam_driving()
+            or model_ == nullptr or not model_->has_state())
+            return false;
+        HypothesisSnapshot h;
+        {
+            std::scoped_lock lk(wall_map_mutex_);
+            h.map_layout = map_layout_;
+            h.derived_polygon = derived_polygon_;
+        }
+        h.init_polygon = init_polygon_vertices_;
+        h.model_polygon = model_->polygon_vertices;
+        h.map_layout_adopted = map_layout_adopted_;
+        h.map_ready = map_ready_.load();
+        h.wall_frozen = wall_frozen_;
+        h.wall_reanchored = wall_reanchored_;
+        h.init_use_polygon = init_use_polygon_;
+        h.belief_init = belief_init_;
+        h.belief_reset_requested = belief_reset_requested_.load(std::memory_order_relaxed);
+        h.track_mu = track_mu_ln_s_;
+        h.track_var = track_var_ln_s_;
+        h.lost_logodds = lost_logodds_;
+        h.p_track = p_track_display_.load(std::memory_order_relaxed);
+        h.belief = belief_;
+        h.rivals = rivals_;
+        h.rival_ref_pose = rival_ref_pose_;
+        h.rival_ref_valid = rival_ref_valid_;
+        h.covariance = current_covariance;
+        hypothesis_ = std::move(h);
+        set_map_layout(std::move(K_int));
+        adopt_map_layout_as_given();
+        seed_reloc_prior(modes, prior_log_odds);
+        return true;
+    }
+
+    std::optional<std::pair<Eigen::Vector3f, Eigen::Matrix3f>> RoomConcept::survey_pose_during_fit() const
+    {
+        if (not hypothesis_.has_value()) return std::nullopt;
+        return std::pair{plain_slam_.pose(), hypothesis_->covariance};
+    }
+
+    void RoomConcept::end_hypothesis_fit()
+    {
+        if (not hypothesis_.has_value()) return;
+        cancel_late_recall();
+        const auto h = std::move(*hypothesis_);
+        hypothesis_.reset();
+        {
+            std::scoped_lock lk(wall_map_mutex_);
+            map_layout_ = h.map_layout;
+            derived_polygon_ = h.derived_polygon;
+        }
+        init_polygon_vertices_ = h.init_polygon;
+        corner_detector_.set_model_corners(init_polygon_vertices_);
+        if (h.model_polygon.size() >= 3 and model_ != nullptr and model_->has_state())
+            model_->update_polygon_vertices(h.model_polygon);
+        map_layout_adopted_ = h.map_layout_adopted;
+        map_ready_ = h.map_ready;
+        wall_frozen_ = h.wall_frozen;
+        wall_reanchored_ = h.wall_reanchored;
+        init_use_polygon_ = h.init_use_polygon;
+        rivals_ = h.rivals;
+        rival_ref_pose_ = h.rival_ref_pose;
+        rival_ref_valid_ = h.rival_ref_valid;
+        rt_.hold_open = false;
+        // The pose goes back to the survey's own: plain SLAM's shadow, which never followed K. (A commit clears the window
+        // and the prediction base, exactly as the fit's own seeding did; plain SLAM rewrites the newest slot every frame.)
+        commit_relocalised_pose(plain_slam_.pose(), h.covariance);
+        // AFTER the commit: the survey's tracking emission and lost belief, not the fit's.
+        track_mu_ln_s_ = h.track_mu;
+        track_var_ln_s_ = h.track_var;
+        belief_ = h.belief;
+        belief_init_ = h.belief_init;
+        lost_logodds_ = h.lost_logodds;
+        p_track_display_.store(h.p_track, std::memory_order_relaxed);
+        belief_reset_requested_.store(h.belief_reset_requested, std::memory_order_relaxed);
+        qInfo().noquote() << "[room][hypothesis] remembered layout released: the survey is restored (layout, emission, "
+                             "belief) and the pose is plain SLAM's again";
+    }
+
+    void RoomConcept::keep_hypothesis_fit() { hypothesis_.reset(); }
+
     // ── THE LATE-RECALL SEARCH (Task 9) ─────────────────────────────────────────────────────────────────────────
     // The room was just adopted from memory while the robot stands inside it, so there is no doorway to anchor on (the
     // passage prior is NOT used) and the tracker's pose belongs to the provisional frame: seed_reloc_prior already moved it

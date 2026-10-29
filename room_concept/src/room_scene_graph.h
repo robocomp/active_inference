@@ -239,9 +239,11 @@ private:
     bool step_proposal(const rc::RoomConcept::UpdateResult& res);
     /// Start the fit: K's outline becomes the GIVEN layout (placed in the internal frame through T(P←K)), the robot-in-K
     /// modes the relocaliser's prior. Nothing is written to the graph while it runs; P's survey is suspended.
-    void begin_proposal_fit(const rc::proposal::Proposal& p);
-    /// Back to P's survey after a rejected / withdrawn proposal: the given layout is released (plain SLAM again).
+    bool begin_proposal_fit(const rc::proposal::Proposal& p);   ///< false = the fit cannot run (plain SLAM not driving)
+    /// Back to P's survey after a rejected / withdrawn proposal, restored from RoomConcept's snapshot.
     void end_proposal_fit(const char* why);
+    /// The room is left / forgotten under a running fit: restore the survey, write nothing (the caller proceeds).
+    void abandon_proposal_fit(const char* why);
     /// Accepted: P becomes K in place (rename, outline, own children by T(K←P), published frame = K's), then promoted.
     bool accept_proposal(const rc::RoomConcept::UpdateResult& res);
     [[nodiscard]] std::uint64_t provisional_room() const;   ///< this agent's provisional room (0 = none)

@@ -69,12 +69,12 @@ struct Adoption
 
 /// Accept: P becomes K in place. Rename + room_id + outline in ONE update_node (same id) FIRST — a refused rename (the
 /// name held by another id: cortex returns false; a cortex without rename support throws) leaves the graph untouched
-/// and returns ok=false. Then P's OWN RT children are re-expressed by T(K←P): the robot (written with `robot_ts` when
-/// given) and room_concept's walls, whether hung from P or from P's floor (floor←room stays the identity: the floor IS
-/// the room's frame). Other agents' children are theirs to move. Last, the `proto` self-edge is removed.
+/// and returns ok=false. Then P's OWN RT children are re-expressed by T(K←P): the robot and room_concept's walls,
+/// whether hung from P or from P's floor (floor←room stays the identity: the floor IS the room's frame). EVERY block of
+/// each edge's history ring is re-expressed in place (same slots and timestamps; pose covariance rotated), so no reader
+/// can interpolate across the P and K frames. Other agents' children are theirs to move. Last, the `proto` self-edge is removed.
 /// The verdict (`state`) is NOT written here: the caller answers once its own state has followed.
-Adoption adopt_in_place(DSR::DSRGraph& G, const Proposal& p, std::uint64_t robot_id,
-                        std::optional<std::uint64_t> robot_ts = std::nullopt);
+Adoption adopt_in_place(DSR::DSRGraph& G, const Proposal& p, std::uint64_t robot_id);
 
 // ── pure frame algebra ──────────────────────────────────────────────────────────────────────────────────────────
 /// Unpack robot-in-K modes and express them in the frame `T_dst_K` maps K into: mean composed, covariance rotated.

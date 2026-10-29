@@ -463,6 +463,22 @@ public:
     void seed_reloc_prior(const std::vector<rc::reloc::PriorMode>& modes, double prior_log_odds = 0.0);
     /// Drop an armed/standing late adoption without a verdict (its room or recall vanished).
     void cancel_late_recall();
+    // ── A REMEMBERED LAYOUT AS A HYPOTHESIS (room-transition protocol C2.7: ltsm's recognition proposal) ──────────
+    /// Judge layout K (INTERNAL frame) with the late-adoption fit above (adopt it as given + seed_reloc_prior) WITHOUT
+    /// giving up the room being surveyed: everything the fit overwrites is snapshotted first. Refused (false) unless plain
+    /// SLAM is driving the survey — its shadow is the only pose that stays independent of K while the fit runs, and it is
+    /// what is published meanwhile (survey_pose_during_fit). Localiser thread (the scene graph's update()).
+    bool begin_hypothesis_fit(std::vector<Eigen::Vector2f> K_int, const std::vector<rc::reloc::PriorMode>& modes,
+                              double prior_log_odds);
+    /// Rejected / withdrawn: the survey is restored exactly as it was (layout flags, derived/model polygons, WallMap
+    /// untouched, tracking emission, lost belief) and the pose goes back to plain SLAM's shadow pose.
+    void end_hypothesis_fit();
+    /// Accepted: K stays the given room; the snapshot is dropped.
+    void keep_hypothesis_fit();
+    [[nodiscard]] bool hypothesis_fit_active() const { return hypothesis_.has_value(); }
+    /// While a fit runs: the survey's own pose (plain SLAM's shadow, internal frame) and the covariance it was published
+    /// with — what must be published so nothing visible moves before the verdict. nullopt when no fit runs.
+    [[nodiscard]] std::optional<std::pair<Eigen::Vector3f, Eigen::Matrix3f>> survey_pose_during_fit() const;
     enum class LateVerdict : int { None = 0, Pending = 1, Accepted = 2, Rejected = 3 };
     /// Pending after seed_reloc_prior while scans accumulate evidence; then Accepted or Rejected. The evidence per scan
     /// is the log-likelihood ratio "the median |SDF| is tracking-like vs broad" (the lost belief's own two emissions) of the
@@ -809,6 +825,19 @@ private:
    /// A carried rival mode: its pose and its log-likelihood ratio against the committed pose.
    struct RivalMode { Eigen::Vector3f pose; float llr = 0.f; };
    std::vector<RivalMode> rivals_;
+   struct HypothesisSnapshot   ///< what begin_hypothesis_fit overwrites, restored by end_hypothesis_fit
+   {
+       std::vector<Eigen::Vector2f> map_layout, derived_polygon, init_polygon, model_polygon;
+       bool map_layout_adopted = false, map_ready = false, wall_frozen = false, wall_reanchored = false;
+       bool init_use_polygon = false, belief_init = false, belief_reset_requested = false;
+       float track_mu = 0.f, track_var = 0.f, lost_logodds = 0.f, p_track = 1.f;
+       std::array<double, 3> belief{1.0, 0.0, 0.0};
+       std::vector<RivalMode> rivals;
+       Eigen::Vector3f rival_ref_pose = Eigen::Vector3f::Zero();
+       bool rival_ref_valid = false;
+       Eigen::Matrix3f covariance = Eigen::Matrix3f::Identity();
+   };
+   std::optional<HypothesisSnapshot> hypothesis_;
    mutable std::mutex rival_snapshot_mutex_;
    std::vector<rc::reloc::PoseHypothesis> rival_snapshot_;   // copy for the main thread (scene graph → planner)
    void publish_rival_snapshot();

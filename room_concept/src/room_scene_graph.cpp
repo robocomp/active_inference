@@ -1346,6 +1346,7 @@ std::vector<Eigen::Vector2f> RoomSceneGraph::published_polygon() const
 
 void RoomSceneGraph::forget_room(const char* why)
 {
+    abandon_proposal_fit("the room node vanished");
     if (startup_proto_)
         qWarning() << "[room][startup-proto] room state reset (" << why << ") while"
                    << (startup_promoted_ ? "the promoted start-up room" : "the start-up proto-room")
@@ -1582,6 +1583,7 @@ std::optional<RoomSceneGraph::Recall> RoomSceneGraph::find_recall(const rc::Door
 void RoomSceneGraph::rearm_after_crossing(std::uint64_t new_room_id, const std::string& new_name,
                                           const std::string& door, float p_cross, const std::optional<Recall>& recall)
 {
+    abandon_proposal_fit("the robot crossed out of P");   // before begin_room_estimation below re-arms the estimator
     // The proto frame (the crossed aperture: x along it, +y into the new room) becomes the new room's PUBLISHED frame,
     // exactly as the robot's initial pose was the first room's. T_room_proto_ is that frame in the internal one.
     const std::uint64_t left_id = dsr_room_id_;
