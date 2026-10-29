@@ -2,6 +2,7 @@
 #include "room_eviction.h"     // RoomEviction::rt_attributes
 #include "room_recall.h"       // RoomRecall::live_name_of
 
+#include <dsr/api/dsr_rt_api.h>
 #include <dsr/core/types/type_checking/dsr_attr_name.h>
 
 #include <QDebug>
@@ -63,6 +64,7 @@ std::uint64_t RoomProposal::post(std::uint64_t P, const std::string &K_mem, cons
     }
     id_ = id.value();
     P_ = P;
+    prior_ = P_from_K;
     qInfo().noquote() << QString::fromStdString(std::format("[proposal] {} posted under {}: {} is remembered {} (pending room_concept's verdict)",
                                                             name, Pn->name(), Pn->name(), K_mem));
     return id_;
@@ -77,6 +79,16 @@ RoomProposal::Verdict RoomProposal::verdict() const
     if (s == kAccepted) return Verdict::Accepted;
     if (s == kRejected) return Verdict::Rejected;
     return Verdict::Pending;
+}
+
+std::optional<Mat::RTMat> RoomProposal::transform() const
+{
+    if (id_ == 0) return std::nullopt;
+    const auto e = live_->get_edge(P_, id_, "RT");
+    if (not e.has_value()) return std::nullopt;
+    const auto m = live_->get_rt_api()->get_edge_RT_as_rtmat(e.value());
+    if (not m.has_value()) return std::nullopt;
+    return Mat::RTMat(m.value());
 }
 
 void RoomProposal::withdraw()

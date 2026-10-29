@@ -334,6 +334,27 @@ void RoomSwap::retry_carries()
 
 void RoomSwap::commit()
 {
+    // THE ACCEPTED TRANSFORM (Task 20). Every seam in carry_ was computed at swap time through ltsm's own prior T(P <- K) (the
+    // recogniser's pose mode). room_concept's fit may have corrected it (recog_proto6: a half turn) and wrote the ACCEPTED
+    // T(P <- K) on the proposal's RT edge before "accepted": that edge, read now, is the one fact. Each seam T(K <- prev) =
+    // T(K <- P) T(P <- prev) is re-based by C = T(K_acc <- K_prior) = T_acc(P <- K)^-1 T_prior(P <- K); its covariance (K frame)
+    // is carried through C exactly (C itself is the verdict, no uncertainty added here).
+    if (const auto acc = proposal_.transform(); acc.has_value())
+    {
+        const Mat::RTMat C(acc->inverse() * proposal_.prior());
+        const Eigen::Vector3d c = se2_of(C), a = se2_of(acc.value()), pr = se2_of(proposal_.prior());
+        for (auto &k : carry_)
+        {
+            k.cov = ltsm::seam::compose_cov(meas(C, Eigen::Matrix3d::Zero()), meas(k.known_from_prev, k.cov)).cov;
+            k.known_from_prev = Mat::RTMat(C * k.known_from_prev);
+        }
+        qInfo().noquote() << QString::fromStdString(std::format(
+            "[swap] accepted T(P<-K) = ({:.2f}, {:.2f}, {:.1f} deg), ltsm's prior ({:.2f}, {:.2f}, {:.1f} deg): {} seam(s) re-based by "
+            "({:.2f}, {:.2f}, {:.1f} deg)", a.x(), a.y(), a.z() * 180.0 / M_PI, pr.x(), pr.y(), pr.z() * 180.0 / M_PI, carry_.size(),
+            c.x(), c.y(), c.z() * 180.0 / M_PI));
+    }
+    else
+        qWarning() << "[swap] accepted, but the proposal's RT edge is unreadable: the seams keep ltsm's prior T(P<-K)";
     // C2.9: the carry-over joins the crossed door's passage to K. A previous room still live (fresh -> fresh) has no face in
     // memory yet: that one is retried when the robot leaves K, after its eviction.
     std::erase_if(carry_, [&](const Carry &k) { return carry_over(k.prev_face, known_id_); });

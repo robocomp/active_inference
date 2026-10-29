@@ -31,6 +31,9 @@
  * reads), through the provisional frame and the inverse of that mouth (the exact aperture, no door node) -- or, in case B,
  * through T(K <- twin) and the passage into the twin. fuse_seam_through_aperture itself is NOT reused: it fits a PROTO frame,
  * and K's frame is already metric.
+ * ACCEPTED TRANSFORM (Task 20): every swap-time seam goes through ltsm's PRIOR T(P <- K). On "accepted" (commit) each one is
+ * re-based by the T(P <- K) room_concept wrote on the proposal's RT edge before the verdict (its fit's, which may differ from
+ * the prior by a half turn: recog_proto6), so the prior never reaches memory.
  * When K already holds an unmatched door at the aperture (its own face of the same hole), it is ASSOCIATED, not duplicated:
  * MAP over {each unowned K door} U {none -> new face}, door likelihood Gaussian in the chain pose (both leaf orientations,
  * doors are pi-symmetric), 'none' uniform over K's area and yaw. An adopted door's pose is precision-fused with the chain

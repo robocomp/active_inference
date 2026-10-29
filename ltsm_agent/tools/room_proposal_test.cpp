@@ -477,6 +477,70 @@ int main(int argc, char **argv)
         check(live->get_node("recall_room_2").has_value(), "and it stays on the next cycle");
     }
 
+    std::printf("carry_over_reads_the_accepted_transform\n");
+    for (const bool promoted : {false, true})
+    {
+        // Task 20 (recog_proto6): ltsm's prior T(P <- K) was the half-turn twin of the truth; room_concept's fit corrected it
+        // and wrote the ACCEPTED T(P <- K) on the proposal's RT edge before "accepted". The seam must be the accepted one.
+        std::printf(" case %s\n", promoted ? "B (promoted)" : "A (proto)");
+        const auto se2_of = [](const Mat::RTMat &T) { return Eigen::Vector3d(T.translation().x(), T.translation().y(), std::atan2(T.linear()(1, 0), T.linear()(0, 0))); };
+        // the carried K face of the crossed door, in K's frame, after the verdict (accepted_override: the edge rewritten first)
+        const auto run = [&](std::optional<Mat::RTMat> accepted_override, Mat::RTMat &prior_out) -> std::optional<Eigen::Vector3d>
+        {
+            reset(); build_memory(promoted); build_live(promoted);
+            Fix f;
+            if (not f.sw.swap(3, pose_k(), live_P)) return std::nullopt;
+            const auto pn = live->get_node("proposal_room_3");
+            if (not pn.has_value()) return std::nullopt;
+            const auto e = live->get_edge(live_P, pn->id(), "RT");
+            const auto m = e.has_value() ? live->get_rt_api()->get_edge_RT_as_rtmat(e.value()) : std::nullopt;
+            if (not m.has_value()) return std::nullopt;
+            prior_out = m.value();
+            if (accepted_override.has_value())   // room_concept: the accepted T on the edge, THEN the state
+            {
+                const auto a = se2_of(accepted_override.value());
+                put_edge(*live, live_P, pn->id(), a.x(), a.y(), a.z());
+            }
+            answer("accepted");
+            if (f.sw.step() != ltsm::RoomSwap::Event::Accepted) return std::nullopt;
+            const char *pw = promoted ? "passage_5" : nullptr;
+            for (const auto &x : mem->get_nodes_by_type("metaconcept"))
+            {
+                if (mem->get_attrib_by_name<object_subtype_att>(x).value_or("") != "passage") continue;
+                if (pw != nullptr and x.name() != pw) continue;
+                for (const auto &ed : DSR::DSRGraph::get_node_edges_by_type(x, "match"))
+                    if (ltsm::is_descendant(*mem, ed.to(), "r3_room_3"))
+                        if (const auto fn = mem->get_node(ed.to()); fn.has_value())
+                            if (const auto T = mem->get_inner_eigen_api()->get_transformation_matrix("r3_room_3", fn->name()); T.has_value())
+                                return se2_of(T.value());
+            }
+            return std::nullopt;
+        };
+        Mat::RTMat prior = Mat::RTMat::Identity();
+        const auto F_prior = run(std::nullopt, prior);         // accepted == prior: the old behaviour's seam
+        check(F_prior.has_value(), "accepted with the prior left on the edge: a K face is carried");
+        // the truth: the prior composed with a half turn about K's (2, 2) — the twin a symmetric room allows
+        const Mat::RTMat half = se2(2, 2, 0) * se2(0, 0, M_PI) * se2(-2, -2, 0);
+        const Mat::RTMat acc(prior * half);
+        Mat::RTMat prior2 = Mat::RTMat::Identity();
+        const auto F_acc = run(acc, prior2);
+        check(F_acc.has_value(), "accepted with the ACCEPTED T on the edge: a K face is carried");
+        if (F_prior.has_value() and F_acc.has_value())
+        {
+            // expected: the same face re-based by C = T_acc(P<-K)^-1 T_prior(P<-K) = half^-1
+            const Mat::RTMat C(acc.inverse() * prior);
+            const Mat::RTMat Fp = se2(F_prior->x(), F_prior->y(), F_prior->z());
+            const Eigen::Vector3d want = se2_of(Mat::RTMat(C * Fp));
+            const double dxy = (F_acc->head<2>() - want.head<2>()).norm();
+            const double dth = std::abs(std::remainder(F_acc->z() - want.z(), 2.0 * M_PI));
+            char buf[256];
+            std::snprintf(buf, sizeof buf, "the seam is the ACCEPTED one: face (%.3f, %.3f, %.3f) vs C.prior-face (%.3f, %.3f, %.3f), prior-face (%.3f, %.3f)",
+                          F_acc->x(), F_acc->y(), F_acc->z(), want.x(), want.y(), want.z(), F_prior->x(), F_prior->y());
+            check(dxy < 1e-3 and dth < 1e-3, buf);
+            check((F_acc->head<2>() - F_prior->head<2>()).norm() > 1.0, "the half-turn prior does NOT leak into the seam (faces differ by > 1 m)");
+        }
+    }
+
     std::printf("stale_proposal_swept_at_start\n");
     {
         reset(); build_memory(false); build_live(false);

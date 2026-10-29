@@ -28,6 +28,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -48,6 +49,13 @@ public:
     /// Delete the standing proposal (ltsm owns it). Idempotent.
     void withdraw();
 
+    /// T(P <- K) as the RT edge P -> proposal holds it NOW. ltsm posts its PRIOR there; room_concept overwrites it with the
+    /// ACCEPTED transform (its fit's) BEFORE writing state = "accepted" (Task 20), so read at the Accepted verdict this is the
+    /// accepted fact. nullopt when no proposal stands or its edge cannot be read.
+    [[nodiscard]] std::optional<Mat::RTMat> transform() const;
+    /// The prior T(P <- K) this instance posted (what every swap-time quantity was computed through).
+    [[nodiscard]] const Mat::RTMat &prior() const { return prior_; }
+
     [[nodiscard]] std::uint64_t id() const { return id_; }
     [[nodiscard]] std::uint64_t provisional() const { return P_; }
 
@@ -63,5 +71,6 @@ private:
     std::shared_ptr<DSR::DSRGraph> live_, mem_;
     std::uint64_t id_ = 0;      ///< the standing proposal (0 = none)
     std::uint64_t P_ = 0;       ///< the provisional room it hangs from
+    Mat::RTMat prior_ = Mat::RTMat::Identity();   ///< the T(P <- K) posted
 };
 }   // namespace ltsm
