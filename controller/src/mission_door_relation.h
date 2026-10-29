@@ -68,8 +68,9 @@ enum class DoorRelationKind { None, Room, New };
 class RelationHold
 {
 public:
-    /// ⚑ FLAGGED CONSTANT: how long a relation may stay unresolved (ltsm's recall step, or a door still to be seen, have no
-    /// model-level latency). The step's own budget_s wins when it is smaller.
+    /// ⚑ FLAGGED CONSTANT: a MISSION-LEVEL timeout, not an ordering guess. The release is the FACT (pick_door resolves: ltsm
+    /// marked recall_<room>, or a new door was seen); this only bounds how long the mission waits for a fact that may never
+    /// come (ltsm down, door never seen) so the step fails as 'door_unresolved'. The step's own budget_s wins when smaller.
     static constexpr std::uint64_t kHoldBudgetMs = 120'000;
 
     enum class Verdict { Waiting, Ready, TimedOut };
