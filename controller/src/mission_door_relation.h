@@ -15,8 +15,10 @@
 #include <optional>
 #include <set>
 #include <string>
+#include <string_view>
 #include <vector>
 
+#include "../../common/affordance_manager/affordance_room_scope.h"
 #include "../../common/mission/mission_ir.h"
 
 namespace rc
@@ -135,6 +137,26 @@ inline bool rename_scope(std::string &explore_room, std::string &manager_scope, 
     if (explore_room.empty() or manager_scope != explore_room) return false;
     explore_room = manager_scope = new_name;
     return true;
+}
+
+/// The session's per-cycle scope step, pure so a test can drive it with an executing claim. Applies a queued same-room rename
+/// (names only), then compares the wanted scope with the manager's. `release` = the contest scope CHANGED to a non-empty room:
+/// the caller must release the standing claim, lock-on and plan. A rename never sets it.
+struct ScopeCycle { std::string explore_room, manager_scope, pending_rename; };
+struct ScopeOutcome { bool changed = false; bool release = false; std::string scope; };
+[[nodiscard]] inline ScopeOutcome scope_cycle(ScopeCycle &s, bool command_explore, std::string_view door_required)
+{
+    if (not s.pending_rename.empty())
+    {
+        if (not rename_scope(s.explore_room, s.manager_scope, s.pending_rename) and not s.explore_room.empty())
+            s.explore_room = s.pending_rename;
+        s.pending_rename.clear();
+    }
+    ScopeOutcome o{.scope = affordance::contest_room_scope(command_explore, door_required, s.explore_room)};
+    o.changed = o.scope != s.manager_scope;
+    o.release = o.changed and not o.scope.empty();
+    if (o.changed) s.manager_scope = o.scope;
+    return o;
 }
 
 /// The step waits for its door to resolve; it has a budget so it cannot hang (like RoomHold).

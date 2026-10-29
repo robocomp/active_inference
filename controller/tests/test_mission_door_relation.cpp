@@ -55,6 +55,26 @@ int main()
         expand_recalls(ds, ids, "room_4");
         CHECK(pick_door(node("room_4"), ds) == std::optional<std::string>("door_1"));
     }
+    {   // poll decision + session scope step together, with an EXECUTING claim: a same-id rename must not release it
+        bool claim = true, lockon = true, plan = true;
+        auto release = [&] { claim = lockon = plan = false; };
+        ScopeCycle sc{.explore_room = "room_4", .manager_scope = "", .pending_rename = ""};
+        auto cycle = [&](bool cmd) { auto o = scope_cycle(sc, cmd, ""); if (o.release) release(); return o; };
+        CHECK(cycle(true).release);                                    // entering the scope releases (by design)...
+        claim = lockon = plan = true;                                  // ...then a drive starts and executes
+        std::string room_name = "room_4";
+        const std::uint64_t id = 7;
+        // room_concept renames room_4 -> room_2 under the same id; the poll sees it
+        CHECK(explore_room_verdict(id, id, room_name, "room_2") == ExploreRoom::Renamed);
+        room_name = "room_2"; sc.pending_rename = room_name;           // rename_command_explore_room
+        const auto o = cycle(true);
+        CHECK(not o.release and claim and lockon and plan);            // survives
+        CHECK(o.changed == false and sc.manager_scope == "room_2" and sc.explore_room == "room_2");
+        CHECK(explore_room_verdict(id, id, room_name, "room_2") == ExploreRoom::Inside);
+        // a genuinely different explore (set_command_explore clears the queued rename) still releases
+        sc.pending_rename.clear(); sc.explore_room = "room_5";
+        CHECK(cycle(true).release and not claim);
+    }
     CHECK(relation_of(node("new")) == DoorRelationKind::New);
     CHECK(relation_of(node("room_2")) == DoorRelationKind::Room);
     CHECK(relation_of(node("door_3")) == DoorRelationKind::None);

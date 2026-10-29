@@ -283,7 +283,7 @@ public:
     rc::ApproachOrder &approach_order() { return approach_order_; }
     /// Mission (Command) mode: the open affordance contest runs only while an `explore` order holds it open — and,
     /// when the order names its room, only for affordances whose target is in that room (affordance_room_scope.h).
-    void set_command_explore(bool on, std::string room = {}) { command_explore_ = on; explore_room_ = on ? std::move(room) : std::string{}; }
+    void set_command_explore(bool on, std::string room = {}) { pending_explore_rename_.clear(); command_explore_ = on; explore_room_ = on ? std::move(room) : std::string{}; }
     /// The explored room was renamed in place (same node id): follow the name WITHOUT the scope-change path (which releases the
     /// claim, lock-on and plan). Mission explore's own rename; see rename_scope (mission_door_relation.h).
     void rename_command_explore_room(const std::string &name) { pending_explore_rename_ = name; }   // applied next cycle, names only

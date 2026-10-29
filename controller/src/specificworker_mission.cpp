@@ -281,21 +281,22 @@ LeafStatus SpecificWorker::MissionHost::poll(const rc::mission::Step &leaf)
 	}
 	if (op == "explore")
 	{
-		// an unresolved room (id 0) is "not resolved", not "left the room": only a resolved DIFFERENT room ID ends the step.
-		// The name is no witness: room_concept renames a recognised room in place (room_4 -> room_2, same node).
-		if (const auto now_id = w_.world_model_.graph_state().room_id; now_id != 0 and now_id != room_id_)
+		// Only a resolved DIFFERENT room ID ends the step; the name is no witness (room_concept renames a recognised room in place).
+		const auto &gs = w_.world_model_.graph_state();
+		switch (rc::explore_room_verdict(room_id_, gs.room_id, room_, gs.room_name))
 		{
-			std::println("[mission] explore {}: the robot is now in room id {} ('{}'), not id {} — outside_room", room_,
-			             now_id, w_.world_model_.graph_state().room_name, room_id_);
-			return {.state = LeafState::Failed, .detail = "outside_room"};
-		}
-		// the same room under a new name: the affordance contest is scoped by NAME, so follow the rename (one claim release)
-		if (const auto &gs = w_.world_model_.graph_state(); gs.room_id == room_id_ and not gs.room_name.empty() and gs.room_name != room_)
-		{
-			std::println("[mission] explore {}: the room was renamed in place ({} -> {}, node id {}) — the step follows the id", room_,
-			             room_, gs.room_name, room_id_);
-			room_ = gs.room_name;
-			w_.session_.set_command_explore(true, room_);
+			case rc::ExploreRoom::Outside:
+				std::println("[mission] explore {}: the robot is now in room id {} ('{}'), not id {} — outside_room", room_, gs.room_id,
+				             gs.room_name, room_id_);
+				return {.state = LeafState::Failed, .detail = "outside_room"};
+			case rc::ExploreRoom::Renamed:
+				// the contest is scoped by NAME: swap the name only — an executing claim, lock-on and plan survive
+				std::println("[mission] explore {}: the room was renamed in place ({} -> {}, node id {}) — the step follows the id", room_,
+				             room_, gs.room_name, room_id_);
+				room_ = gs.room_name;
+				w_.session_.rename_command_explore_room(room_);
+				break;
+			case rc::ExploreRoom::Inside: break;
 		}
 		return {};
 	}
