@@ -8,6 +8,7 @@
 #include "../../robot_concept/src/mount_overlay.h"   // the overlay a planted error is written in
 
 #include <charconv>
+#include <filesystem>
 #include <clocale>
 #include <cmath>
 #include <cstdio>
@@ -337,6 +338,70 @@ static void part_overlay()
     check(near(fm(2), fs(2), -Cb.t[2]), "O2 bpearl floor z reads -C (planted +10 mm)");
     check(near(hm(3), hs(3), -Ch.rpy[0]) and near(hm(4), hs(4), -Ch.rpy[1]), "O3 helios tilt reads -C (planted +0.4 / -0.3 deg)");
     check(near(bm(0), bs(0), -Cb.t[0]) and near(bm(5), bs(5), -Cb.rpy[2]), "O4 bpearl planar x / yaw read -C (planted +10 mm / +1 deg)");
+
+    // O5: what the [mounts] line prints is what log_state() writes. Same stage, a log_dir, one row, read back with
+    // from_chars (CLAUDE.md: the harness runs under the agent's locale, main() calls setlocale).
+    const std::string dir = (std::filesystem::temp_directory_path() / "mount_factors_test_csv").string();
+    std::filesystem::remove_all(dir);
+    sc::LidarMountStageConfig lc; lc.log_dir = dir;
+    sc::LidarMountStage ls(lc);
+    // a fresh stage on 40 of the same planted sweeps (coarser azimuth: this check is about the file, not the fit)
+    {
+        std::mt19937 r2(11);
+        std::int64_t t2 = 1'000'000;
+        for (int k = 0; k < 40; ++k)
+        {
+            const Pose P{ux(r2), 1.5 * ux(r2), uth(r2)};
+            Eigen::Affine3d T = Eigen::Affine3d::Identity();
+            T.translate(V3(P.x, P.y, 0.0)); T.rotate(Eigen::AngleAxisd(P.th, V3::UnitZ()));
+            t2 += 600;
+            for (const auto &S : sensors)
+            {
+                const auto truth = sweep(room, P, S.t_nom, M6{}, S.elev, 3.0 * kDegD, 0.01, r2, std::string(S.name) == "helios");
+                const Eigen::Matrix3d Rn = rc::mount::euler_to_matrix(S.rpy_nom);
+                const rc::mount::Mount G = rc::mount::compose({S.t_nom.x(), S.t_nom.y(), S.t_nom.z()}, S.rpy_nom, S.C);
+                const Eigen::Matrix3d Rg = rc::mount::euler_to_matrix(G.rpy);
+                const V3 tg(G.t[0], G.t[1], G.t[2]);
+                sc::MountSweep sw; sw.sensor = S.name; sw.stamp_ms = t2; sw.origin_robot = tg.cast<float>(); sw.room_T_robot = T;
+                for (const auto &p : truth) sw.points_robot.emplace_back((Rg * (Rn.transpose() * (p.cast<double>() - S.t_nom)) + tg).cast<float>());
+                ls.observe(sw, poly, float(room.h));
+            }
+        }
+    }
+    ls.log_state(123456);
+    ls.log_state(123457);
+    std::vector<std::filesystem::path> files;
+    for (const auto &e : std::filesystem::directory_iterator(dir))
+        if (e.path().filename().string().starts_with("mounts_")) files.push_back(e.path());
+    check(files.size() == 1, "O5 one mounts_<ts>.csv is written");
+    std::vector<std::string> lines;
+    if (files.size() == 1) { std::ifstream f(files[0]); for (std::string l; std::getline(f, l);) lines.push_back(l); }
+    check(lines.size() == 3 and lines[0].starts_with("stamp_ms,floor_droll,"), "O5 header + one row per log_state()");
+    if (lines.size() == 3)
+    {
+        std::vector<double> v;
+        for (std::size_t i = 0, j; i <= lines[2].size(); i = j + 1)
+        {
+            j = lines[2].find(',', i); if (j == std::string::npos) j = lines[2].size();
+            double x = 0.0; const auto r = std::from_chars(lines[2].data() + i, lines[2].data() + j, x);
+            v.push_back(r.ec == std::errc() ? x : std::nan(""));
+        }
+        const auto q = ls.state();
+        const Eigen::Vector3d qf = q.floor.mean(), qfs = q.floor.sigma();
+        const auto qh = q.vert_helios.mean(), qb = q.vert_bpearl.mean();
+        const std::array<double, 12> want{123457, qf(0), qf(1), qf(2), qfs(0), qfs(1), qfs(2), double(q.sweeps_bpearl_floor),
+                                          qh(3), qh(4), qb(0), qb(5)};
+        const std::array<int, 12> col{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 13, 15};
+        bool same = v.size() == 24;
+        for (std::size_t k = 0; same and k < want.size(); ++k)
+            same = std::abs(v[col[k]] - want[k]) <= 1e-5 * std::max(1.0, std::abs(want[k]));
+        std::printf("    csv row: floor roll %+.4f deg z %+.2f mm | helios roll %+.4f deg | bpearl yaw %+.4f deg (%zu columns)\n",
+                    v.size() > 3 ? v[1] / kDegD : 0.0, v.size() > 3 ? v[3] * 1e3 : 0.0, v.size() > 8 ? v[8] / kDegD : 0.0,
+                    v.size() > 15 ? v[15] / kDegD : 0.0, v.size());
+        std::printf("    %s\n", ls.summary().c_str());
+        check(same, "O5 the CSV row carries the same estimates the [mounts] line prints (24 columns, parsed back)");
+    }
+    std::filesystem::remove_all(dir);
 }
 
 int main(int argc, char **argv)
