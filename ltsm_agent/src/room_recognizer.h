@@ -54,11 +54,13 @@
 
 #include <dsr/api/dsr_api.h>
 
+#include <chrono>
 #include <cstdint>
 #include <fstream>
 #include <map>
 #include <memory>
 #include <optional>
+#include <functional>
 #include <set>
 #include <string>
 #include <utility>
@@ -85,6 +87,11 @@ public:
 
     /// One cycle. Swap/Undo is a REQUEST, executed by RoomSwap.
     Step step();
+
+    /// The wall clock the metric-evidence filter reads, in ms. A test installs its own (no sleeping); default steady_clock.
+    static inline std::function<std::int64_t()> clock_ms = [] {
+        return std::int64_t(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count()) + 1;
+    };
 
     /// ACKNOWLEDGEMENTS from RoomSwap (a request is not an execution).
     /// A requested Swap was executed (its proposal posted): from here the graph changes that follow it (room_concept adopting
@@ -128,7 +135,8 @@ private:
     rc::recog::Commit commit_{rc::recog::Commit::State::Entering, -1};
     std::map<std::int64_t, float> base_;               ///< log posterior of each hypothesis (-1 = new) at the last state change
     std::map<std::int64_t, float> metric_filt_;        ///< the metric log-evidence per hypothesis (-1 = new), filtered over the episode
-    std::int64_t metric_filt_ms_ = 0;                  ///< wall time of the last filter update (0 = none this episode)
+    std::int64_t cycle_ms_ = 0;                        ///< the clock, read once at the top of each cycle
+    std::int64_t metric_filt_ms_ = 0;                  ///< time of the last filter update, or of the episode start before the first (0 = no episode)
     std::uint64_t L_id_ = 0;                    ///< the live room the robot came from
     std::string ep_L_mem_;                      ///< its memory name
     std::string start_;                         ///< path start room (memory) and the passages crossed to L

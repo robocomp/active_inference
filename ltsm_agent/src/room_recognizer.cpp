@@ -304,6 +304,7 @@ void RoomRecognizer::on_swap_failed()
 {
     if (swap_ack_ or commit_.state != rc::recog::Commit::State::Committed) return;
     commit_ = {rc::recog::Commit::State::Entering, -1};
+    rebase_next_ = true;                           // the filter was still converging when it committed: that tail is not new evidence for a retry
     qInfo() << "[recog] swap failed: back to entering";
 }
 
@@ -365,6 +366,7 @@ RoomRecognizer::Step RoomRecognizer::step()
 RoomRecognizer::Step RoomRecognizer::step_impl()
 {
     Step out;
+    cycle_ms_ = clock_ms();                        // ONE clock reading per cycle: the episode start and its first frame share it (dt = 0)
     track_current();
     const auto cur = rc::room::current_edge_room(*live_);
     std::optional<DSR::Node> robot;
@@ -519,11 +521,12 @@ RoomRecognizer::Step RoomRecognizer::step_impl()
         L_id_ = L->id();
         ep_L_mem_ = L_mem;
         promoted_ = false;
+        metric_filt_ms_ = cycle_ms_;                   // the filter's clock starts with the episode
         // the path taken: the passage that brought the robot into L (from its previous room), else L itself is the reference
         path_.clear();
         start_ = L_mem;
         if (not prev_passage_.empty() and not prev_mem_.empty()) { path_ = {prev_passage_}; start_ = prev_mem_; }
-        qInfo().noquote() << QString::fromStdString(std::format("[recog] episode begins: provisional {} behind {}", P->name(), L->name()));
+        qInfo().noquote() << QString::fromStdString(std::format("[recog] episode begins: provisional {} behind {} (metric filter starts neutral)", P->name(), L->name()));
     }
     P_rid = live_->get_attrib_by_name<room_id_att>(P.value());
 
@@ -622,16 +625,22 @@ RoomRecognizer::Step RoomRecognizer::step_impl()
     //        frames, the weight of the past decaying with the correlation time of the map evidence. FLAGGED model constant:
     //        kMetricTauS, the time over which the room estimate's fit decorrelates (the layout refits at ~1 Hz and settles in
     //        seconds). Not a gate: every frame counts, none decides alone.
+    bool no_time = false;                              // no time has passed since the filter's last update: nothing was integrated
     {
         constexpr double kMetricTauS = 5.0;
-        const std::int64_t now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                        std::chrono::steady_clock::now().time_since_epoch()).count();
-        const double keep = metric_filt_ms_ == 0 ? 0.0 : std::exp(-double(now_ms - metric_filt_ms_) / 1000.0 / kMetricTauS);
+        // NEUTRAL START: every hypothesis (a late joiner too) begins at the same value 0, so before any evidence the
+        // posterior is the prior, and EVERY frame -- the first included -- enters with weight (1 - keep), keep over the
+        // time since the previous update (since the episode start for the first one). One frame cannot decide alone.
+        const std::int64_t now_ms = cycle_ms_;
+        if (metric_filt_ms_ == 0) metric_filt_ms_ = now_ms;
+        const double keep = std::exp(-double(now_ms - metric_filt_ms_) / 1000.0 / kMetricTauS);
         metric_filt_ms_ = now_ms;
+        no_time = keep >= 1.0;
         const auto filt = [&](std::int64_t key, float x) -> float {
             if (not std::isfinite(x)) return x;
             const auto it = metric_filt_.find(key);
-            const float y = it == metric_filt_.end() ? x : float(keep * it->second + (1.0 - keep) * x);
+            const float prev = it == metric_filt_.end() ? 0.f : it->second;      // neutral for a hypothesis new to the filter
+            const float y = float(keep * prev + (1.0 - keep) * x);
             metric_filt_[key] = y;
             return y;
         };
@@ -725,7 +734,12 @@ RoomRecognizer::Step RoomRecognizer::step_impl()
         for (const auto &h : post_entry_) base_[key(h)] = h.log_post;
     };
 
-    if (not skip_decision)
+    if (no_time and not skip_decision)
+    {
+        // The metric filter integrated nothing this cycle (the episode's first frame, or no clock tick): the posterior is the
+        // prior for the metric, so there is nothing to judge -- and appearance alone must not decide in its place.
+    }
+    else if (not skip_decision)
     {
         const auto next = rc::recog::commit_step(commit_, since, since);
         if (commit_.state == rc::recog::Commit::State::Entering and next.state == rc::recog::Commit::State::Committed)

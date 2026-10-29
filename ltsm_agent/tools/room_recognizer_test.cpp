@@ -173,6 +173,9 @@ static void write_evidence(const std::vector<std::uint64_t> &ids, const std::vec
 }
 
 struct Posterior { std::vector<std::uint64_t> ids; std::vector<float> post; bool present = false; };
+// The metric evidence is filtered (tau 5 s) and the test clock ticks 1 s per cycle: let it converge before reading the posterior.
+static void settle(ltsm::RoomRecognizer &rec, int n = 250) { for (int i = 0; i < n; ++i) rec.step(); }
+
 static Posterior read_recognition()
 {
     Posterior p;
@@ -342,6 +345,8 @@ static int live_sequence(Seq mode, int8_t dom_live, int8_t dom_mem)
     std::printf("  post"); for (float x : p.post) std::printf(" %.4f", x); std::printf("\n");
     check(rec.provisional_id() == l4, "[3] in ONE step: room_3's episode ended and the episode for the newer provisional room began");
     check(p.present and p.ids == std::vector<std::uint64_t>({1, 2}) and p.post.size() == 3, "[3] candidates {r1, r2} (L = room_3 excluded), posterior + new");
+    st = cycle();                                       // the first frame carries no weight (the filter starts neutral): the second is the first to speak
+    p = read_recognition();
     bool uniform = p.post.size() == 3;
     for (float x : p.post) uniform = uniform and std::abs(x - 1.f / 3.f) < 1e-3f;
     check(not uniform, "[3] metric available (the posterior is not the prior): no memory face of the crossed door, no full archive of L");
@@ -443,6 +448,9 @@ int main(int argc, char **argv)
     std::setlocale(LC_ALL, "");
     setvbuf(stdout, nullptr, _IONBF, 0);
     QCoreApplication app(argc, argv);
+    // The metric filter reads a clock; the test drives it: one second per read (one read per evidence step), no sleeping.
+    static std::int64_t fake_ms = 1000000;
+    ltsm::RoomRecognizer::clock_ms = [] { fake_ms += 1000; return fake_ms; };
     live = std::make_shared<DSR::DSRGraph>("recog_live", 194, "ltsm_root.json", true, 44);
     mem  = std::make_shared<DSR::DSRGraph>("recog_mem", 195, "ltsm_root.json", true, 45);
     Codo = Mat3::Zero();  Codo.diagonal() << 0.05 * 0.05, 0.05 * 0.05, 0.02 * 0.02;
@@ -485,6 +493,7 @@ int main(int argc, char **argv)
         Scenario s(false, Vec3(4.0, y, 1.5707963));
         ltsm::RoomRecognizer::Step st;
         for (int i = 0; i < 5 and st.act == ltsm::RoomRecognizer::Step::Act::None; ++i) st = s.rec.step();
+        settle(s.rec);                                  // the metric filter converges (tau = 5 s, 1 s steps)
         const auto p = read_recognition();
         const bool ok = p.present and p.post.size() == 3;
         std::printf("  y=%.2f posterior R1 %.4f R3 %.4f new %.4f   act %d\n", y, ok ? p.post[0] : -1.f, ok ? p.post[1] : -1.f, ok ? p.post[2] : -1.f, int(st.act));
@@ -597,12 +606,43 @@ int main(int argc, char **argv)
         live->delete_node(live->get_node("place_evidence").value().id());
     }
 
+    std::printf("first_frame_does_not_decide\n");
+    {   // recog_try32: ltsm proposed on the first cycle of the episode. One excellent frame at the episode start must not.
+        Scenario s(false, robot_in_r3_w);
+        const auto st = s.rec.step();
+        check(s.rec.provisional_id() == s.prov, "the episode began on this step");
+        check(st.act == ltsm::RoomRecognizer::Step::Act::None, "one excellent frame at the episode start: no Swap on that step");
+    }
+
+    std::printf("steady_evidence_still_commits\n");
+    {
+        Scenario s(false, robot_in_r3_w);
+        ltsm::RoomRecognizer::Step st;
+        int steps = 0;
+        for (; steps < 60 and st.act == ltsm::RoomRecognizer::Step::Act::None; ++steps) st = s.rec.step();
+        std::printf("  steps (1 s each) to the Swap: %d\n", steps);
+        check(st.act == ltsm::RoomRecognizer::Step::Act::Swap and st.room_id == 3 and steps <= 20, "consistent evidence for R3: Swap within 20 one-second steps");
+    }
+
+    std::printf("single_frame_spike_after_contrary_frames_does_not_swap\n");
+    {
+        Scenario s(false, far_w);
+        bool any = false;
+        for (int i = 0; i < 15; ++i) any = any or s.rec.step().act != ltsm::RoomRecognizer::Step::Act::None;
+        place_robot(robot_in_r3_w, s.prov);                                // ONE frame that fits R3 perfectly
+        any = any or s.rec.step().act != ltsm::RoomRecognizer::Step::Act::None;
+        place_robot(far_w, s.prov);
+        for (int i = 0; i < 3; ++i) any = any or s.rec.step().act != ltsm::RoomRecognizer::Step::Act::None;
+        check(not any, "a false one-frame spike after many contrary frames: no Swap");
+    }
+
     std::printf("commit_then_contradiction_is_undone_and_not_recommitted\n");
     {
         Scenario s(false, robot_in_r3_w);
         ltsm::RoomRecognizer::Step st;
         for (int i = 0; i < 5 and st.act == ltsm::RoomRecognizer::Step::Act::None; ++i) st = s.rec.step();
         check(st.act == ltsm::RoomRecognizer::Step::Act::Swap and st.room_id == 3, "Swap R3 on the metric");
+        settle(s.rec);                                  // the metric filter finishes converging: what follows the commit is a new frame, not the tail of the old
         write_evidence({1, 3}, {-1000.f, -1000.f}, {std::nullopt, std::nullopt});     // after the commit: nothing here looks like R1 or R3
         ltsm::RoomRecognizer::Step u;
         for (int i = 0; i < 5 and u.act == ltsm::RoomRecognizer::Step::Act::None; ++i) u = s.rec.step();
@@ -622,6 +662,7 @@ int main(int argc, char **argv)
         const Vec3 near_w(4.0, 2.0, 1.5707963);
         Scenario s(false, near_w);
         s.rec.step();
+        settle(s.rec);
         const auto p0 = read_recognition();
         std::printf("  metric alone: R3 %.3f new %.3f\n", p0.post.size() == 3 ? p0.post[1] : -1.f, p0.post.size() == 3 ? p0.post[2] : -1.f);
         check(p0.post.size() == 3 and p0.post[2] > p0.post[1], "the metric alone prefers `new`");
@@ -629,6 +670,7 @@ int main(int argc, char **argv)
         ltsm::RoomRecognizer::Step st;
         for (int i = 0; i < 5 and st.act == ltsm::RoomRecognizer::Step::Act::None; ++i) st = s.rec.step();
         check(st.act == ltsm::RoomRecognizer::Step::Act::Swap and st.room_id == 3, "appearance +12 carries the commit against the mild metric");
+        settle(s.rec);
         bool any = false;
         for (int i = 0; i < 50; ++i) any = any or s.rec.step().act != ltsm::RoomRecognizer::Step::Act::None;
         check(not any, "50 cycles of unchanged evidence: no Undo");
@@ -701,6 +743,7 @@ int main(int argc, char **argv)
         for (int i = 0; i < 5 and st.act == ltsm::RoomRecognizer::Step::Act::None; ++i) st = s.rec.step();
         check(st.act == ltsm::RoomRecognizer::Step::Act::Swap and st.room_id == 3, "Swap R3 on the metric");
         s.rec.on_swap_executed(3);
+        settle(s.rec);                                  // held: the metric filter converges, nothing is judged
         write_evidence({1, 3}, {0.f, 40.f}, {std::nullopt, in_room(2, robot_in_r3_w)});     // held: not judged
         bool any = false;
         for (int i = 0; i < 3; ++i) any = any or s.rec.step().act != ltsm::RoomRecognizer::Step::Act::None;
@@ -752,6 +795,7 @@ int main(int argc, char **argv)
         ltsm::RoomRecognizer::Step st;
         for (int i = 0; i < 5 and st.act == ltsm::RoomRecognizer::Step::Act::None; ++i) st = s.rec.step();
         check(st.act == ltsm::RoomRecognizer::Step::Act::Swap, "Swap requested");
+        settle(s.rec);                                  // the metric filter converges BEFORE the failure: its tail is not evidence for a re-commit
         s.rec.on_swap_failed();
         bool any = false;
         for (int i = 0; i < 10; ++i) any = any or s.rec.step().act != ltsm::RoomRecognizer::Step::Act::None;
