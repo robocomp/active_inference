@@ -209,6 +209,20 @@ LeafStatus SpecificWorker::MissionHost::poll(const rc::mission::Step &leaf)
 	}
 	if (op == "cross" or op == "open")
 	{
+		// `cross new` / `cross <room>` name a RELATION, not a node: if the door it resolved to leaves the graph before the
+		// crossing (door_concept removed it for absence — recog_try26 leg 3: phantom door_12 removed, the passage then waited
+		// 600 s for a door that no longer existed), drop the passage and resolve the relation again.
+		if (const Ref ref = *leaf.ref("door"); rc::relation_of(ref) != rc::DoorRelationKind::None and not door_.empty()
+		    and w_.G != nullptr and not w_.G->get_node(door_).has_value()
+		    and w_.session_.door_passage().view().step != rc::DoorPassage::Step::Done)
+		{
+			std::println("[mission] step {} ({} {}): '{}' left the graph before the crossing — resolving '{}' again", leaf.id, op,
+			             ref.name, door_, ref.name);
+			if (w_.session_.door_passage().view().door == door_) w_.session_.door_passage().stop();
+			door_.clear();
+			relation_hold_.hold(leaf, hold_clock_ms());
+			return {};
+		}
 		const auto v = w_.session_.door_passage().view();
 		if (v.door != door_ or v.step == rc::DoorPassage::Step::Idle) return {.state = LeafState::Failed, .detail = "abandoned"};
 		// a FAILED passage ends Done too (finish()): it is a failure, not a success (Live fix 3: a ruled-out look)
