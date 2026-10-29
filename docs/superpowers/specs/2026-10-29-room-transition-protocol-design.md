@@ -147,6 +147,10 @@ Example: room_3 → DOOR_2 → room_2 (room_2 known only through DOOR_1).
   reads fact 3 instead of computing it. A model, not a timer.
 - **When P is created (case 2).** Unchanged from today (room_concept already builds the provisional room as the robot
   enters); only the switch and its order are new.
+- **Rename (user 10-29: option A).** cortex's `DSRGraph::update_node` throws on a name change although the LWW engine
+  supports it; the guard is lifted in cortex (user reinstalls), verified by a two-graph sync test first.
+- **No new attributes.** "Provisional" = the existing `proto` self-edge; the proposal = a metaconcept node using the
+  existing `room_id`, `recall_pose_prior`, `delimiting_polygon_x/y` and `state` attributes.
 - **Adoption keeps P's node id.** Doors and the passage hang from P, so P becomes room_2 in place — a rename if cortex
   allows renaming a node; if it does not, the builder reports back before choosing a workaround. The existing late
   adoption (`room_scene_graph_late_recall.cpp`) is reused; its try32 rejection ("no pose explains this view", median
