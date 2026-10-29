@@ -78,8 +78,8 @@ int main()
             wide += sx > 0.05; covered += std::abs(r.xyt.x() - tr.x()) < 3.0 * sx;
         }
         std::printf("corridor over %d seeds: sd_x > 5 cm in %d, x within 3 sigma in %d\n", N, wide, covered);
-        // INFORMATIONAL, not asserted: the continuous covariance (no k-sigma cut) gives 66/100 and 58/100 here, short of the
-        // 95/97 target; see the fix-round-2 report. Asserting it would require reintroducing the cut.
+        CHECK(wide >= 95, "wide %d/%d", wide, N);
+        CHECK(covered >= 97, "covered %d/%d", covered, N);
     }
     {   // honest covariance: empirical sd / mean reported sd for x, y, yaw, in two geometries, 200 seeds each
         const Eigen::Vector3d trs[2] = {{0.30, 0.05, 2.0 * kDeg}, {1.2, -0.3, 10.0 * kDeg}};

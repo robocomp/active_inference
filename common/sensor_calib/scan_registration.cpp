@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <cstdint>
 #include <numbers>
 
@@ -19,6 +20,49 @@ struct Cloud
     template <class BBox> bool kdtree_get_bbox(BBox&) const { return false; }
 };
 using Tree = nanoflann::KDTreeSingleIndexAdaptor<nanoflann::L2_Simple_Adaptor<double, Cloud>, Cloud, 2>;
+
+// log of the regularised lower incomplete gamma P(a, x) (series for x < a+1, Lentz continued fraction otherwise).
+double log_gamma_p(double a, double x)
+{
+    if (x <= 0.0) return -std::numeric_limits<double>::infinity();
+    if (x < a + 1.0)
+    {
+        double term = 1.0 / a, sum = term;
+        for (int n = 1; n < 500 and term > 1e-17 * sum; ++n) { term *= x / (a + n); sum += term; }
+        return -x + a * std::log(x) - std::lgamma(a) + std::log(sum);
+    }
+    const double tiny = 1e-300;
+    double b = x + 1.0 - a, c = 1.0 / tiny, d = 1.0 / b, h = d;
+    for (int i = 1; i < 500; ++i)
+    {
+        const double an = -i * (i - a);
+        b += 2.0;
+        d = an * d + b; if (std::abs(d) < tiny) d = tiny;
+        c = b + an / c; if (std::abs(c) < tiny) c = tiny;
+        d = 1.0 / d;
+        const double del = d * c;
+        h *= del;
+        if (std::abs(del - 1.0) < 1e-15) break;
+    }
+    const double log_q = -x + a * std::log(x) - std::lgamma(a) + std::log(h);
+    return std::log1p(-std::min(std::exp(log_q), 1.0 - 1e-300));
+}
+
+// P(real structure | lambda) by Bayesian model comparison, prior odds 1:1.
+//   H0 (noise only): lambda ~ Gamma(shape 1/rel^2, scale F rel^2)      (mean F, relative sd rel)
+//   H1 (real):       lambda = G + S, G as in H0, S ~ Exponential(mean mu)  (a wall end's worth of information)
+// f1(lambda) = beta e^{-beta lambda} (1 - beta theta)^{-a} P(a, lambda (1 - beta theta) / theta), beta = 1/mu.
+double p_real(double lambda, double F, double rel, double mu)
+{
+    if (not (F > 0.0)) return lambda > 0.0 ? 1.0 : 0.0;     // nothing is manufactured on this axis
+    if (not (lambda > 0.0)) return 0.0;
+    const double a = 1.0 / (rel * rel), theta = F * rel * rel, beta = 1.0 / mu;
+    if (beta * theta >= 1.0) return 1.0;                    // prior flatter than the noise's own scale: no evidence for H0
+    const double lg0 = -std::lgamma(a) - a * std::log(theta) + (a - 1.0) * std::log(lambda) - lambda / theta;
+    const double lg1 = std::log(beta) - beta * lambda - a * std::log1p(-beta * theta)
+                     + log_gamma_p(a, lambda * (1.0 - beta * theta) / theta);
+    return 1.0 / (1.0 + std::exp(std::clamp(lg0 - lg1, -700.0, 700.0)));
+}
 }  // namespace
 
 ScanRegResult register_scans_2d(const std::vector<Eigen::Vector2f>& ref, const std::vector<Eigen::Vector2f>& cur,
@@ -123,21 +167,22 @@ ScanRegResult register_scans_2d(const std::vector<Eigen::Vector2f>& ref, const s
             Hfake += w[j] * var_tilt[nn[j]] * u * u.transpose();
         }
     }
-    // Information after removing the expected manufactured part (projected to PSD: numerical housekeeping). The
-    // subtracted part is itself random (relative sd sqrt(2k/n): ~n/k independent tilts each shared by ~k residuals),
-    // so each axis' remaining information lambda is shrunk by its reliability lambda^2 / (lambda^2 + s^2),
-    // s = rel * (manufactured information on that axis): continuous, -> lambda when it dominates its noise, -> 0 when
-    // it is within the noise (the posterior-mean weight of a signal of variance lambda^2 in noise s^2).
+    // Real or manufactured, axis by axis (eigen-axes of H): Bayesian comparison of the measured information lambda
+    // against the manufactured-information distribution F +- rel (see p_real). The axis carries P(real) (lambda - F)+.
+    // n_eff = independent neighbourhoods (~n/k, each tilt is shared by ~k residuals); rel^2 = 2/n_eff (chi-square).
+    // mu = one wall end's information: a wall facing the axis subtends about a quarter of a 360 deg scan, each
+    // point contributing ~1 (unit Jacobian along its normal).
     const double rel = std::sqrt(2.0 * k / std::max(wsum, 1.0));
+    const double mu = std::max(0.25 * wsum, 1.0);
     Eigen::Matrix3d Hc;
     {
-        Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> e(H - Hfake);
-        Eigen::Vector3d lam = e.eigenvalues().cwiseMax(0.0);
+        Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> e(H);
+        Eigen::Vector3d lam = Eigen::Vector3d::Zero();
         for (int m = 0; m < 3; ++m)
         {
             const Eigen::Vector3d v = e.eigenvectors().col(m);
-            const double sm = rel * v.dot(Hfake * v);
-            lam[m] *= lam[m] * lam[m] / std::max(lam[m] * lam[m] + sm * sm, 1e-300);
+            const double l = e.eigenvalues()[m], F = v.dot(Hfake * v);
+            lam[m] = p_real(l, F, rel, mu) * std::max(l - F, 0.0);
         }
         Hc = e.eigenvectors() * lam.asDiagonal() * e.eigenvectors().transpose();
     }
