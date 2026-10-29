@@ -3259,8 +3259,16 @@ void SpecificWorker::step_entry_mirrors()
     //    proto-room froze its frame).
     for (const auto& room : G->get_nodes_by_type("room"))
     {
-        if (not rc::room::is_proto(*G, room.id()) or entry_mirrors_.contains(room.id()))
+        if (entry_mirrors_.contains(room.id()))
             continue;
+        // ANNOUNCED room (ltsm recall_<room>, latched by step_room_following): remembered, not new — its doors are restored
+        // from the identity table on entry (enter_room_memory), the crossed face included. No invented mirror.
+        if (not rc::door::entry_mirror_wanted(rc::room::is_proto(*G, room.id()), recall_names_seen_.contains(room.name())))
+        {
+            if (rc::room::is_proto(*G, room.id()) and announced_no_mirror_logged_.insert(room.id()).second)
+                std::print("door_concept: [proto] no entry mirror into '{}' — ltsm announced it as remembered; its doors are restored on entry\n", room.name());
+            continue;
+        }
         // The room this agent is IN needs no mirror: its doors are its own instances (release_room adopted the
         // entry mirror). Without this the adopted door — whose aperture holds the proto origin by construction —
         // would be mirrored into its own room. A proto stays proto until room_concept promotes its LAYOUT.

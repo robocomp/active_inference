@@ -302,6 +302,7 @@ private:
     //   knowledge acquired since that room's fresh entry can come back. A recalled room's restore is DEFERRED until its
     //   polygon is loaded (has_room_polygon), so the belief init associates the door with a wall, not the identity frame.
     std::unordered_set<std::string> recall_names_seen_;
+    std::unordered_set<std::uint64_t> announced_no_mirror_logged_;   // rooms whose "no mirror, announced" line was printed
     std::unordered_set<std::string> recall_late_names_;   // the subset announced with recall_late (recognition swap)
 
     // ── LOOK AT A REMEMBERED DOOR (2026-10-21, tourP5; door_look.h) ─────────────────────────────────────────────

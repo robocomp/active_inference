@@ -420,6 +420,15 @@ inline RoomEntryPlan plan_room_entry(bool first_resolution, bool recall_announce
     return p;
 }
 
+/// Room-transition protocol, case C1.4: a room ltsm ANNOUNCED (recall_<room>) is a REMEMBERED room, not a new one. Its
+/// doors come back from the identity table (plan_restore, the crossed door's face included: it is a row of that room, and
+/// a face already live at its place is skipped by place), so no entry mirror is invented for it. Only a proto-room nobody
+/// announced is new, and gets the mirror of the door it was entered through.
+[[nodiscard]] inline bool entry_mirror_wanted(bool room_is_proto, bool recall_announced)
+{
+    return room_is_proto and not recall_announced;
+}
+
 /// Delete every identity row of `room`; returns the dropped door names (for the decision log).
 inline std::vector<std::string> drop_room(std::vector<IdentityRow>& rows, std::string_view room)
 {

@@ -53,6 +53,21 @@ int main()
     // same-name late recall (no swap) drops nothing
     CHECK(not plan_room_entry(false, true, true, "room_3", "room_3").drop_left);
 
+    // C1.4: an announced room restores its remembered rows, the crossed door's face included, and gets no mirror
+    {
+        std::vector<IdentityRow> rr{row("room_1", "door_1", 2, 0, true), row("room_1", "door_2", -3, 1, true)};   // door_1 = crossed face
+        CHECK(plan_room_entry(false, true, false, "room_2", "room_1").recalled);
+        CHECK(not entry_mirror_wanted(true, true));            // announced proto room: no mirror
+        const auto d = plan_restore(rr, "room_1", true, {}, 0.3f);
+        CHECK(d.restore.size() == 2 and d.restore[0].name == "door_1");
+        // a face already live at its place is not duplicated (the recreated/carried crossed door)
+        std::vector<LiveDoor> live{LiveDoor{"door_9", Eigen::Vector2f(2.05f, 0.f)}};
+        const auto d2 = plan_restore(rr, "room_1", true, live, 0.3f);
+        CHECK(d2.restore.size() == 1 and d2.restore[0].name == "door_2");
+    }
+    CHECK(entry_mirror_wanted(true, false));                   // fresh_room_still_mirrors
+    CHECK(not entry_mirror_wanted(false, false));              // not proto: never
+
     std::print("{}\n", fails == 0 ? "ALL PASS" : "FAILED");
     return fails != 0;
 }
