@@ -221,6 +221,7 @@ int main()
         for (int i = 0; i < 3; ++i) { s.push_back({0.5, 0, 16.0}); s.push_back({-0.5, 0, 16.0}); }
         const auto r = run(corridor(40.0, 2.0), {-10.0, 0.0, 0.0}, s, pl, o, 41);
         std::printf("corridor_straights: %s\n", r.line.c_str());
+        CHECK(r.rejected == 0 and r.n == 12, "corridor pairs: %ld used, %ld rejected (the registration must converge in a corridor)", r.n, r.rejected);
         CHECK(r.s[2] < 0.2 * kDeg, "psi sigma %.4f deg", r.s[2] / kDeg);
         CHECK(std::abs(r.m[2] + pl.psi) < 2 * r.s[2], "psi %.4f deg vs %.4f deg (2 sigma %.4f)", r.m[2] / kDeg, -pl.psi / kDeg, 2 * r.s[2] / kDeg);
         CHECK(r.s[0] >= 0.9 * xy_prior and r.s[1] >= 0.9 * xy_prior, "dx/dy sigma %.2f %.2f mm vs prior %.1f mm", r.s[0] * 1e3, r.s[1] * 1e3, xy_prior * 1e3);

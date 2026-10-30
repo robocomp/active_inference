@@ -63,6 +63,7 @@ int main()
         const auto r = run(corridor(200.0, 2.0), tr, Eigen::Vector3d::Zero(), 7, 0.0, 15.0);
         const double sx = std::sqrt(r.cov(0, 0)), sy = std::sqrt(r.cov(1, 1)), ex = r.xyt.x() - tr.x();
         std::printf("degenerate_corridor  sd_x=%.3f sd_y=%.5f ex=%.3f m ey=%.2f mm\n", sx, sy, ex, (r.xyt.y() - tr.y()) * 1e3);
+        CHECK(r.ok, "corridor registration did not converge (iters %d): the unobserved axis must not stop convergence", r.iters);
         CHECK(sx > 0.05, "along-corridor sd %.4f m not wider than the 5 cm mount prior", sx);
         CHECK(std::abs(ex) < 3.0 * sx, "x err %.3f beyond 3 reported sigma %.3f", ex, sx);
         CHECK(sx > 10.0 * sy, "along-corridor sd %.4f not >> cross sd %.5f", sx, sy);

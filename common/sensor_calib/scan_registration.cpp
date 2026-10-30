@@ -133,17 +133,27 @@ ScanRegResult register_scans_2d(const std::vector<Eigen::Vector2f>& ref, const s
         return wsum / double(cur.size());                               // EM update of the inlier share
     };
 
+    // Gaussian prior on the registration pose, centred on the initial guess: variance (scan extent)^2 per translation,
+    // (1 rad)^2 for yaw, i.e. nothing beyond the scene scale. The iteration minimises the MAP cost (data + this prior),
+    // so on an axis the scans do not observe (along a corridor) the step is held by the prior instead of sliding on a
+    // flat, NN-flip-jittered cost for max_iters. In H units (H = sigma^2 x information) the prior adds sigma^2 P0^-1.
+    double extent2 = 1e-12;
+    for (const auto& p : cur) extent2 = std::max(extent2, double(p.squaredNorm()));
+    const Eigen::Matrix3d P0inv = Eigen::Vector3d(1.0 / extent2, 1.0 / extent2, 1.0).asDiagonal().toDenseMatrix();
     for (int it = 0; it < cfg.max_iters; ++it)
     {
         out.iters = it + 1;
         pi_in = std::clamp(linearise(), 1e-6, 1.0 - 1e-6);              // keeps log-odds finite, not a gate
         H.setZero(); Eigen::Vector3d g = Eigen::Vector3d::Zero();
         for (size_t j = 0; j < cur.size(); ++j) { H += w[j] * J[j] * J[j].transpose(); g += w[j] * r[j] * J[j]; }
-        const Eigen::Matrix3d Hs = H + 1e-12 * H.trace() * Eigen::Matrix3d::Identity();   // conditioning only
-        const Eigen::Vector3d dx = -Hs.ldlt().solve(g);
+        const Eigen::Matrix3d Hp = H + sigma * sigma * P0inv;
+        const Eigen::Vector3d dx = -Hp.ldlt().solve(g + sigma * sigma * P0inv * (x - init_xyt));
         x += dx;
+        // Converged when the step is small against the posterior's own spread: dx^T (H + sigma^2 P0^-1) dx / sigma^2 is
+        // the step in posterior standard deviations (squared), so metres and radians, and observed and unobserved axes,
+        // are weighed consistently. 1e-2 = a tenth of a standard deviation (the NN-flip limit cycle sits well below).
         const bool annealed = sigma <= cfg.sigma_m;
-        if (annealed and dx.norm() < 1e-4) { converged = true; break; }
+        if (annealed and dx.dot(Hp * dx) / (sigma * sigma) < 1e-2) { converged = true; break; }
         sigma = std::max(cfg.sigma_m, 0.7 * sigma);
     }
 
@@ -190,11 +200,8 @@ ScanRegResult register_scans_2d(const std::vector<Eigen::Vector2f>& ref, const s
     // together, each by 1/k: M = sum_i a_i a_i^T, a_i = sum_{j: i in N(nn_j)} w_j J_j / k. The measurement then has
     // covariance sigma^2 (H^-1 + H^-1 M H^-1) = sigma^2 H (H+M)^-1 H inverted, i.e. information H (H+M)^-1 H / sigma^2
     // (written this way it stays finite on an axis with H = 0).
-    // Gaussian prior on the registration pose: variance (scan extent)^2 per translation, (1 rad)^2 for yaw, i.e. we
-    // know nothing beyond the scene scale. In H units (H = sigma^2 x information) the prior adds sigma^2 P0^-1.
-    double extent2 = 1e-12;
-    for (const auto& p : cur) extent2 = std::max(extent2, double(p.squaredNorm()));
-    const Eigen::Matrix3d Pinv = sig2 * Eigen::Vector3d(1.0 / extent2, 1.0 / extent2, 1.0).asDiagonal().toDenseMatrix();
+    // The same pose prior as the iteration, in the final sigma's H units.
+    const Eigen::Matrix3d Pinv = sig2 * P0inv;
     std::vector<Eigen::Vector3d> a(ref.size(), Eigen::Vector3d::Zero());
     for (size_t j = 0; j < cur.size(); ++j)
         for (int m = 0; m < k; ++m) a[nbr[size_t(nn[j]) * k + m]] += w[j] * J[j] / k;

@@ -3,7 +3,8 @@
 // of its neighbourhood. No distance gate: every pair is weighted by the EM responsibility of an inlier Gaussian
 // (sigma_m) against a uniform over outlier_window_m (the window is the uniform's support, not a cut-off).
 // The inlier sigma is annealed from half the window down to sigma_m (a fixed 1 cm Gaussian has an empty basin for a
-// scan displaced by tens of cm). Convergence: |step| < 1e-4 (NN flips leave a ~2e-5 limit cycle, so 1e-6 never fires).
+// scan displaced by tens of cm). Each step is a MAP step under the weak pose prior (scan extent, 1 rad) centred on the
+// initial guess; convergence = step below a tenth of a posterior standard deviation (Mahalanobis, so units mix correctly).
 // Residual = distance to the line fitted through the normal_k neighbours of the nearest reference point.
 // cov = sigma^2 (H^-1 + H^-1 M_ref H^-1): both scans' range noise, the reference part being a correlation (a ref
 // point sits in ~k fitted lines). H is first corrected for the information the noisy normals manufacture (errors
