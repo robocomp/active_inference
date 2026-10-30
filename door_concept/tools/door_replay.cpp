@@ -40,6 +40,11 @@
 //       [--trace NAME]   (one line per cycle for that door — '*' for every door: its fit, its detection state and every
 //                         existence channel)
 //       [--recess-prior-std S]   (a sensitivity probe: the leaf-plane depth's prior σ, overriding the recorded config)
+//       [--mirror]   (on each recorded RoomSwitch, stand in for the live ENTRY MIRROR: the crossed door re-made at (0, 0.02)
+//                     yaw π in the new room with its leaf side, φ memory and existence carried — see make_entry_mirror. The
+//                     mirror keeps the SOURCE's name in the replay. Without it the old instance stays, in the wrong frame.)
+//   ★The existence rows' c,d (and the live "[existence] … pos=" line) are the LEAF centre (DoorState::cx, cy), not the
+//    aperture: an open leaf sits ~w/2 off the hole both along and across. The trace's "ap" is the published aperture.
 // Exit: 0 = the tracker kinds, the Phi rows, the Existence rows and the REMOVEs are equal; 1 = mismatches (listed);
 // 2 = usage / unreadable input.
 #include <charconv>
@@ -64,6 +69,7 @@
 #include "../src/door_dof.h"            // the live consumers' DOF table (dashboard, NBV adequacy)
 #include "../src/door_approach_pose.h"  // Task E: the approach offer's price (--look)
 #include "../src/epistemic_planner.h"   // the live NBV (rc::EpistemicPlanner) — run here as a smoke on every door
+#include "../src/door_leaf_visibility.h" // crossing_logodds (the --mirror stand-in carries existence as live does)
 
 using namespace rc::door::core;
 using K = rc::door::DoorDecisionKind;
@@ -240,16 +246,20 @@ public:
         rc::DoorFitState f;
         const std::uint64_t id = 0xFFE0'0000'0000'0000ull + (++synthetic_);
         fit_->init_instance(f, id, old.node_name, s);
-        // install_carried_door: the leaf memory crosses with the door, re-expressed in the new room frame
-        // (T_new_old = T_door_new · T_door_old⁻¹, both 2-D rigid maps with the door pose as origin/orientation).
+        // install_carried_door, as LIVE does it (specificworker.cpp step_entry_mirrors → install_carried_door): the source's
+        // hinge point and opening direction are taken into the source DOOR NODE's frame — its published APERTURE pose
+        // (ap_cx, ap_cy, ap_yaw), never the leaf's (cx, cy, yaw), which an open leaf turns by φ — and mapped out of the
+        // mirror's identical node frame by the mirror's RT (room_new ← door = (0, 0.02), yaw π). (Until 2026-10-30 this
+        // used the LEAF yaw: with the source open 90° it put the mirror's leaf on the wrong side of the wall, so a replay
+        // could not reproduce what the live mirror did.) Live hands a leaf over only from a fitted source (ai2_initialized).
+        if (old.ai2_initialized)
         {
             const auto rot = [](float a) { Eigen::Matrix2f r; r << std::cos(a), -std::sin(a), std::sin(a), std::cos(a); return r; };
-            const Eigen::Matrix2f Rn = rot(s.yaw), Ro = rot(m.yaw);
-            const Eigen::Matrix2f R = Rn * Ro.transpose();
-            const Eigen::Vector2f o = Eigen::Vector2f(s.cx, s.cy) - R * Eigen::Vector2f(m.cx, m.cy);
-            if (old.leaf_side_hint.has_value())
-                f.leaf_side_hint = std::make_pair(Eigen::Vector2f(R * old.leaf_side_hint->first + o),
-                                                  Eigen::Vector2f(R * old.leaf_side_hint->second));
+            const Eigen::Matrix2f Rs = rot(m.ap_yaw), Rn = rot(s.yaw);
+            const Eigen::Vector2f os(m.ap_cx, m.ap_cy), on(s.cx, s.cy);
+            const Eigen::Vector2f hinge_local = Rs.transpose() * (old.leaf_pose.hinge_xy - os);
+            const Eigen::Vector2f open_local  = Rs.transpose() * (old.leaf.swing * old.aperture.across_u());
+            f.leaf_side_hint = std::make_pair(Eigen::Vector2f(Rn * hinge_local + on), Eigen::Vector2f(Rn * open_local));
         }
         f.phi_est = old.phi_est; f.phi_sigma = old.phi_sigma; f.hinge_llr = old.hinge_llr; f.swing_llr = old.swing_llr;
         f.phi_curve = old.phi_curve; f.matched_frames = old.matched_frames; f.phi_from_command = false;
@@ -266,6 +276,14 @@ public:
             { const float ph = 0.0f + i * (2.0944f / 24.0f); f.phi_curve.emplace_back(ph, std::exp(-0.5f * std::pow((ph - f.phi_est) / 0.035f, 2.0f))); }
         }
 
+        if (old.existence_seeded)   // install_carried_door (Task D2): the source's L plus the crossing as an observation
+        {
+            f.existence.set(old.existence.logodds()
+                            + rc::door::crossing_logodds(cfg_.exist_cross_passable_prior, cfg_.exist_cross_leak));
+            f.existence_seeded = true;
+            f.existence_entry_L = f.existence.logodds();
+            f.existence_since_entry = 0.0f;
+        }
         live_.insert_or_assign(id, std::move(f));
         std::println("MIRROR cycle {} '{}' source w {:.3f} -> mirror at (0,0.02) in the new room; robot {:.2f} {:.2f}", cycle_, old.node_name, m.w, rb.x(), rb.y());
     }
@@ -708,12 +726,15 @@ int main(int argc, char** argv)
                         }
                         std::println("TRACE {} cycle {} L {:+.2f} | s {:.3f} w {:.3f} h {:.3f} d {:+.3f}±{:.3f} phi {:.3f}±{:.3f} | "
                                      "since_det {} mask {} px {} | sil occ {:.1f} free {:.1f} free_eff {:.2f} p_det {:.3f} | edge dL {:+.2f} "
-                                     "frame exc {:+.2f} (true {:.1f} ctrl {:.1f}) | robot {:.3f} {:.3f} | kappa {:.3f}",
+                                     "frame exc {:+.2f} (true {:.1f} ctrl {:.1f}) | robot {:.3f} {:.3f} | kappa {:.3f} | leaf c {:+.3f} {:+.3f} "
+                                     "| ap {:+.3f} {:+.3f} yaw {:+.3f}",
                                      st->node_name, in->cycle, st->existence.logodds(), b.s, b.w, b.h, b.d, st->ai2_belief.recess_sd(),
                                      st->phi_est, st->phi_sigma, st->frames_since_detection, st->assigned_mask_idx, mask_px,
                                      st->dbg_sil_occ, st->dbg_sil_free, st->dbg_sil_free_eff, st->dbg_sil_pdetect,
                                      st->dbg_edge_delta, st->dbg_frame_excess, st->dbg_frame_true, st->dbg_frame_ctrl,
-                                     in->robot.room_T_body ? (*in->robot.room_T_body)(0, 3) : 0.0, in->robot.room_T_body ? (*in->robot.room_T_body)(1, 3) : 0.0, st->dbg_pose_kappa);
+                                     in->robot.room_T_body ? (*in->robot.room_T_body)(0, 3) : 0.0, in->robot.room_T_body ? (*in->robot.room_T_body)(1, 3) : 0.0, st->dbg_pose_kappa,
+                                     st->model.state().cx, st->model.state().cy, st->model.state().ap_cx,
+                                     st->model.state().ap_cy, st->model.state().ap_yaw);
                     }
         }
         world.end_cycle();

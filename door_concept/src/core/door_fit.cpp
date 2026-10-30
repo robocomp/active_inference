@@ -1339,8 +1339,17 @@ void DoorFit::estimate_phi(rc::DoorFitState& inst)
                           ? 0.0f : std::chrono::duration<float>(now - inst.along_wall_t).count();
         inst.along_wall_t = now;
         // Task D-C round 2 (tour3C): the aperture stays in its own wall — the extent the polygon gives it.
+        // ★ pingpong1 (2026-10-30): ONLY WHEN THE POLYGON'S EDGES ARE WALLS. A provisional room's polygon is room_concept's
+        //   free-space ring, and at the doorway the robot entered through it runs ACROSS the hole, as wide as the free space
+        //   seen in it — room_2's edge there was 0.60 m (x −0.33..+0.27) for a 1.00 m door. Read as "the wall this doorway
+        //   is cut in" it says the aperture must fit in 0.60 m, which nothing can satisfy; the Φ factors then favour the span
+        //   that sits furthest along that edge (a 1-bin through-sliver at its +x end over the true 0.53 m span), and the
+        //   entry mirror door_2 slid +0.28 m off the hole in 10 cycles (σ_s 0.5 → 0.1), its hinge flipped to the wrong jamb
+        //   seconds later, and room_concept saw the way back cross 0.20-0.26 m off the published opening (p_cross 0.914,
+        //   the leg failed). A frontier is no evidence of where a wall ENDS, so the extent of this door's wall is unknown:
+        //   the term is absent, exactly as with no polygon. It returns with the promoted layout (walls).
         float wall_lo = std::numeric_limits<float>::quiet_NaN(), wall_hi = wall_lo;
-        if (has_room_polygon())
+        if (has_room_polygon() and not room_is_proto_)
             std::tie(wall_lo, wall_hi) = rc::door::door_wall_extent(ap, room_polygon_, nz.depth_lo, nz.depth_hi);
         inst.dbg_along = rc::door::along_wall_update(inst.ai2_belief, inst.along_wall, runs, reg_sweep.reg,
                                                      rc::door::clear_fraction(post.curve), chain_s + rl * rl, range, dt_aw,

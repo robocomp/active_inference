@@ -214,6 +214,10 @@ DoorCycleOutput DoorCore::step(const DoorCycleInput& in)
     claims_ = claims_from(in.objects);
     // The containment prior's polygon, as the world holds it (live: the fit's own copy, set by refresh_room_geometry).
     fit_.set_room_polygon(world_->room_polygon());
+    // …and what that polygon IS: a provisional room's is a free-space frontier, not walls (DoorFit::set_room_is_proto).
+    // Read from the cycle's own snapshot of the rooms, so a replay of the tape decides it exactly as the live run did.
+    fit_.set_room_is_proto(std::ranges::any_of(in.rooms.rooms, [&](const RoomInfo& r)
+                                               { return r.id == world_->room_id() and r.is_proto; }));
     info_ = {};
 
     merge(out);                 // enforce physical exclusion before associating/birthing this cycle

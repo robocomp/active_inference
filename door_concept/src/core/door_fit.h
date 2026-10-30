@@ -115,6 +115,11 @@ public:
     void set_room_polygon(std::vector<Eigen::Vector2f> polygon) { room_polygon_ = std::move(polygon); }
     [[nodiscard]] const std::vector<Eigen::Vector2f>& room_polygon() const { return room_polygon_; }
     [[nodiscard]] bool has_room_polygon() const { return room_polygon_.size() >= 3; }
+    /// The polygon's room is PROVISIONAL (rc::room::is_proto: room_concept's free-space ring, layout not promoted). Its
+    /// edges are the frontier of what has been seen free, not walls — see estimate_phi's along-wall extent. Set per cycle
+    /// by DoorCore::step from the input's RoomInfo, next to the polygon.
+    void set_room_is_proto(bool p) { room_is_proto_ = p; }
+    [[nodiscard]] bool room_is_proto() const { return room_is_proto_; }
     [[nodiscard]] rc::door::RoomBand room_band() const { return {cfg_.exist_wall_thickness_m, cfg_.exist_boundary_sigma_m}; }
 
     // ── instance lifecycle ──
@@ -167,6 +172,7 @@ private:
     CameraIntrinsics cam_{};
     float ego_lin_mps_ = 0.0f, ego_ang_radps_ = 0.0f;
     std::vector<Eigen::Vector2f> room_polygon_;
+    bool room_is_proto_ = false;
     std::optional<Eigen::Vector2f> ricoh_origin_;
     std::optional<Eigen::Vector2f> body_xy_;
     std::optional<Eigen::Matrix2f> body_cov_;
