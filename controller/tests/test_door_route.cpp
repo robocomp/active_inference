@@ -120,7 +120,8 @@ int main()
         CHECK(dw.why.empty() and dw.pre_omitted and dw.waypoints.size() == 2);
         CHECK(dw.waypoints.size() == 2 and (dw.waypoints[0] - kCentre).norm() < 1e-4f);
         const auto dws = dr::plan(kAppr, std::nullopt, kCentre, Eigen::Vector2f(2.f, 0.21f), false, prm, doorway);
-        CHECK(not dws.why.empty());   // a shut door with no vantage: nothing to drive to
+        // recog_proto14 leg 2: an APPROACH leg from the doorway — already past every vantage: no waypoints, and no failure
+        CHECK(dws.why.empty() and dws.pre_omitted and dws.waypoints.empty());
     }
 
     std::println("7. the PERCEIVED hole (interaction anchor) is the axis; the room-frame door 0.45 m off is ignored");

@@ -127,9 +127,10 @@ struct Params
         out.s_pre = std::min(s_pub, s_robot);
         const auto s = first_free_standoff(*ax, out.s_pre, prm.body_reach_m, prm.step_m, face, is_free);
         // No free pose between the robot and the body's reach, the robot being NEARER the hole than the published vantage: it
-        // stands in the doorway, and no vantage lies in front of it — the route starts at the aperture (recog_proto13 leg 2:
-        // 0.21 m from the hole, the jambs inside every footprint). Not a tolerance: the grid says no such pose exists.
-        out.pre_omitted = not s.has_value() and s_robot < s_pub and out.through;
+        // stands in the doorway, and no vantage lies in front of it — a through-leg starts at the aperture (recog_proto13 leg 2:
+        // 0.21 m from the hole, the jambs inside every footprint), an approach leg has nothing left to approach: no waypoints,
+        // no failure (recog_proto14 leg 2). Not a tolerance: the grid says no such pose exists.
+        out.pre_omitted = not s.has_value() and s_robot < s_pub;
         if (not s.has_value() and not out.pre_omitted)
         {
             out.why = std::format("no free standpoint on the door axis between {:.2f} m (published) and {:.2f} m (the body's reach)",
@@ -165,7 +166,7 @@ struct Params
             out.waypoints.push_back(out.post);
             return out;
         }
-        out.waypoints.push_back(out.pre);
+        if (not out.pre_omitted) out.waypoints.push_back(out.pre);
         return out;
     }
     // no aperture centre: the targets as published (logged by the caller)

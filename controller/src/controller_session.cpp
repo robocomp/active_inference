@@ -3279,6 +3279,15 @@ bool ControllerSession::build_door_route(const ControllerRobotPose &robot_pose, 
         door_passage_.note_route(leg.key, rc::DoorPassage::RouteReport::Failed, plan.why);
         return false;
     }
+    if (plan.waypoints.empty() and plan.pre_omitted)
+    {
+        // An approach leg from the doorway: the robot is nearer the hole than any vantage the grid admits — the approach is
+        // done. Reported as the route's arrival, so the passage goes on to `open` / `cross` as from the vantage itself.
+        std::println("[door-route] {}: the robot stands in the doorway, nearer the hole than any vantage — the approach is done",
+                     leg.door);
+        door_passage_.note_route(leg.key, rc::DoorPassage::RouteReport::Arrived);
+        return true;
+    }
     if (not plan.has_axis)
         std::println("[door-route] {}: no aperture centre in this frame — driving door_concept's targets as published", leg.door);
     last_plan_failure_.clear();
