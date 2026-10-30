@@ -170,3 +170,109 @@ Example: room_3 → DOOR_2 → room_2 (room_2 known only through DOOR_1).
 The loop above, run end to end by `room_concept/estimation_scripts/scripts/recognition_tour.sh`, completes 6/6 legs with
 the report's C-checks passing, and the LTSM map it leaves on disk draws consistently: every door face on a wall of its
 room, and every loop of passages closing (the try32 check: two paths room_1 → room_2 agreeing).
+
+---
+
+# Revision 2 — 2026-10-30: the crossing is a fact, the transition is a phase, known rooms are predicted
+
+## Why this revision
+
+Three live tours on 10-30 (recog_proto8–10) failed in three different places, and every fix so far repaired one agent's
+private reconstruction of an event that nobody writes down: *the robot went from room A into room B through hole H*.
+
+| Run | What broke | The inference that broke |
+|---|---|---|
+| proto8 | `cross new` found no door: DOOR_2 was paired with the entry door of the same room | ltsm: "a door under a provisional room is an entry; pair it with the nearest door of the current room" |
+| proto9 | room_2 adopted 179° off; DOOR_1's face removed; the robot drove back into room_3 | room_concept: shape recognition AFTER entry, then a free pose search inside K |
+| proto10 | a look at a stale door from another run's frame held `explored` < 0.9 | door_concept: "a room is the remembered one if its NAME matches" |
+
+The Python protocol mock (`protocol_mock.py`, 435686b4) adds a fourth: `cross new` and room_concept's case-1/case-2
+choice both read the ABSENCE of a recall, and a late write is indistinguishable from no write (281/300 schedules fail
+with ltsm lagging). The controller survives today only through the `recall_<prev>` guard (11936d55).
+
+Lucas Bonilla's TFM (2024, ch. 6.3.2–6.5), which closed the loop over four rooms, had three mechanisms this protocol lacks:
+an `exit` edge written at the crossing; a transition phase in which nothing else acts (no current room; the Scheduler's
+"door crossing exception"); and the known/unknown decision taken BEFORE crossing, from the metric map. This revision adopts
+all three. It REPLACES parts of the 10-29 design; it does not add to them.
+
+## R1 — The crossing is ONE fact, written once (`exit` edge; the edge type exists in cortex, no reinstall)
+
+- **room_concept** owns "where the robot is", and already decides the switch from the robot's odometric passage through a
+  specific aperture (PassageMemory). At that decision it writes **`exit`: OLD_FACE → NEW_ROOM** (the door node it crossed,
+  in the room left; the room entered, provisional or known). This edge IS fact 3 ("the crossing"). The robot's RT
+  re-parenting follows; consumers key on the edge, never on the RT parent or on timing.
+- **door_concept**, on the `exit` edge, creates NEW_FACE (the hole's face in NEW_ROOM, today's "entry mirror") and writes
+  **`exit`: NEW_FACE → OLD_FACE** ("this face is the far side of the hole the robot came through"). It is the door
+  owner's statement that the two faces are one hole.
+- **ltsm** pairs the two faces of the passage **from that edge only** (no nearest-door search, no "door under a provisional
+  room" rule).
+- **controller**: `cross new` excludes a door with an outgoing `exit` edge (the way back is known by FACT, not by the
+  later recall). The `recall_<prev>` guard (11936d55) is removed.
+- The `exit` edges are deleted with their faces (owners: room_concept's OLD_FACE→NEW_ROOM goes when the old room is
+  archived; door_concept's with NEW_FACE).
+
+## R2 — The transition is a PHASE, opened and closed by facts
+
+- **Opens** on the `exit` edge OLD_FACE → NEW_ROOM.
+- **Closes** on `recall_<OLD_ROOM>` under NEW_FACE, posted by ltsm after it has archived OLD_ROOM and joined the passage.
+  (One existing fact; its meaning becomes "the transition is complete".)
+- **While open**: no door affordance (approach / cross / look) is offered or selected, and no mission step resolves a door.
+  What runs: the cross that is finishing (the body clears the doorway), room_concept's own estimation/explorer of the new
+  room, and the agents' writes that close the phase. No timer: the phase waits for its closing fact; the mission's own
+  budget remains the only bound (a fact that never comes fails the step as `door_unresolved`, as today).
+- **Cleanup of the room left is driven by the closing fact, each owner deleting its own nodes** (fixes a mock finding: the
+  old room outliving its re-creation). On `recall_<OLD_ROOM>`: room_concept deletes OLD_ROOM, its walls and floor;
+  door_concept deletes OLD_ROOM's doors. ltsm deletes nothing it does not own (today's eviction deleting room_concept's
+  and door_concept's nodes is removed — rule 1).
+
+## R3 — Known rooms are PREDICTED before crossing; recognition after entry becomes the fallback
+
+- **ltsm**, for every live door D of the current room that has no recall: using its map layout (`topology_layout`, the
+  rooms placed in one frame through the passages' seams), it takes the point just beyond D (the door's cross target) and
+  asks which remembered room K contains it. If one does, it posts `recall_K` under D exactly as for case 1, with
+  T(K ← D) composed through the map and its covariance from the layout's chain (it grows with the number of seams
+  traversed; recog_try32's loop error ~1 m / 0.8° is the scale to expect). A predicted recall is marked as predicted
+  (`recall_late`'s sibling flag, or `state="predicted"` on the recall node — existing attributes).
+- Crossing such a door is **case 1**: room_concept instantiates K from the recall. Because a predicted transform carries
+  the map's error, room_concept verifies it with the EXISTING adoption test, run as a test of the given pose (Params
+  `prior_only`, 7ba0ad18: refine locally, never search K for another basin). Accept: K is current, as in case 1.
+  Reject: room_concept falls back to a provisional room P (case 2).
+- door_concept, on entry into a predicted K: restores K's remembered doors (merge by place), and NEW_FACE (R1) is K's new
+  face of the hole (DOOR_2 seen from room_2 for the first time).
+- **Case 2 (shape recognition after entry) remains only where the map predicts nothing** — a door whose far side lies
+  outside every remembered room in the map (a genuinely new room), or a map component the current room is not connected
+  to (a kidnapped robot). Its proposal/adoption path is unchanged (prior_only applies there too).
+
+## R4 — One long-term memory
+
+- The remembered doors of a room come from ltsm's memory only: the recall carries K's door faces (name, pose in K, width,
+  last existence belief), and door_concept restores from the recall, never from `etc/door_identities.csv`.
+- `door_identities.csv` keeps only door_concept's naming counter (opaque, monotonic names). A memory wipe (the tour
+  harness) is then one wipe, and rows from another run's frame cannot exist.
+- door_concept's looks at remembered doors are offered only inside a recalled room (66699077), from the recall's list.
+
+## Ownership additions (the mock's spec gaps)
+
+- `proto` self-edge: room_concept writes it when P is created and removes it when P is adopted as K or when P's estimate
+  is first publishable (P stays a new room).
+- Proposal node: ltsm creates and deletes it; room_concept owns ONE attribute on it, `state` (+ the accepted transform in
+  the same update, Task 20). Attribute-level ownership is written into CONCEPT_AGENT_LIFECYCLE.md.
+- A provisional room left before recognition decides is archived as a new room (known limitation: a duplicate in memory).
+  R3 makes this rare: a room the map can predict never becomes provisional.
+- `cross new` with several qualifying doors: the one door_concept has looked at, else the nearest (unchanged, now stated).
+
+## What is REMOVED by this revision
+
+- ltsm's passage pairing by "door under a provisional room + nearest door" (passage_live.cpp step 2) → R1.
+- The controller's `recall_<prev>` guard on `cross new` (11936d55) → R1.
+- ltsm's eviction deleting other agents' nodes → R2.
+- door_concept's restore and looks from `door_identities.csv` rows → R4.
+- The tour's `explore … until=explored>=0.9` step (done, 66699077).
+
+## Verification
+
+1. The protocol mock implements Revision 2 (`--protocol v2`), with the same adversary (write delays, agent stalls) plus
+   map error on predicted transforms, and must pass ≥ 1000 seeds with the faults still detected; it also runs the cases
+   R3 routes to the fallback (no prediction; prediction rejected).
+2. Each R-item's C++ change is pinned by a unit test in its owner, then the six-leg tour, graded with the ground-truth log
+   (gt_pose.tsv, f6f5353d).
