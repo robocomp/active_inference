@@ -11,6 +11,10 @@ export WT=${WT:-/home/pbustos/robocomp/components/active_inference.worktrees/int
 export FLEET="retina room_concept residual_concept controller door_concept ltsm_agent table_concept"
 echo stop > $B/controller/remote_cmd.txt
 rm -f ../etc/last_robot_pose.txt ../etc/room_name_hwm.txt $B/ltsm_agent/etc/ltsm_memory.json
+# door_concept's remembered faces are keyed by ROOM NAME, meaningless across runs (recog_proto15: a previous run's
+# 'room_2:door_46' was restored onto a fresh detection). Archived, then cleared — the run starts with no door memory.
+[ -f $B/door_concept/etc/door_identities.csv ] && mkdir -p crossing/door_identities_archive && cp $B/door_concept/etc/door_identities.csv crossing/door_identities_archive/door_identities_before_$1_$(date +%Y%m%d_%H%M%S).csv
+rm -f $B/door_concept/etc/door_identities.csv
 NORUN=1 bash scripts/run_crossing.sh crossing/$1 -5.33 3.66 0.58 >/dev/null 2>&1
 python3 scripts/door.py close; python3 scripts/door.py close DOOR_0
 # ★ No wait for door_2 here (tour3A, 10-21): the controller is not armed until leg 1's `run`, so waiting HELD the robot
