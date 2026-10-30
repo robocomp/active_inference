@@ -1179,7 +1179,9 @@ private:
     bool door_route_installed_ = false;                             // handed to the tracker (policy off)
     std::uint64_t door_route_build_ms_ = 0;                         // last build attempt
     Eigen::Vector2f door_route_n0_{0.f, 1.f};                      // the perceived opening's through-normal, latched per leg (near side)
-    std::string door_route_n0_key_, door_route_through_key_;       // the leg it was latched for / the leg already reported THROUGH
+    std::string door_route_n0_key_, door_route_through_key_;       // door|room it was latched for / already reported THROUGH
+    std::string door_route_latch_room_;                            // the room the latch belongs to (a change resets it)
+    bool door_route_body_in_opening_ = false;                      // some part of the body is in the perceived opening
     std::uint64_t door_route_anchor_id_ = 0;                        // the anchor whose PERCEIVED opening the route was built on (0 = the room-frame door)
     // The opening door_concept's interaction anchor measures for this door (robot frame ∘ the robot's pose), if one is fresh:
     // the door route's axis (door_route.h) and the gap the installed route must still pass through.
