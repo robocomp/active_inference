@@ -21,6 +21,7 @@
  */
 #include <cstdint>
 #include <optional>
+#include <string>
 #include <vector>
 
 #include <dsr/api/dsr_api.h>
@@ -31,6 +32,13 @@ inline bool is_type(DSR::DSRGraph& G, std::uint64_t id, const char* type)
 {
     const auto n = G.get_node(id);
     return n.has_value() and n->type() == type;
+}
+/// A door face: door_concept's generic `object` node carrying object_subtype "door" (door_scene_graph.cpp).
+inline bool is_door(DSR::DSRGraph& G, std::uint64_t id)
+{
+    const auto n = G.get_node(id);
+    return n.has_value() and n->type() == "object"
+       and G.get_attrib_by_name<object_subtype_att>(n.value()).value_or(std::string{}) == "door";
 }
 
 // ── link 1 ─────────────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -67,10 +75,10 @@ inline std::optional<Crossed> crossed_through(DSR::DSRGraph& G, const std::vecto
 inline bool is_crossed_face(DSR::DSRGraph& G, std::uint64_t face)
 {
     for (const auto& e : G.get_edges_to_id(face))
-        if (e.type() == "exit" and (is_type(G, e.from(), "robot") or is_type(G, e.from(), "door"))) return true;
+        if (e.type() == "exit" and (is_type(G, e.from(), "robot") or is_door(G, e.from()))) return true;
     if (const auto n = G.get_node(face); n.has_value())
         for (const auto& e : DSR::DSRGraph::get_node_edges_by_type(n.value(), "exit"))
-            if (is_type(G, e.to(), "door")) return true;
+            if (is_door(G, e.to())) return true;
     return false;
 }
 
@@ -83,7 +91,7 @@ inline bool write_entered(DSR::DSRGraph& G, std::uint64_t old_face, std::uint64_
 inline std::optional<std::uint64_t> entered_through(DSR::DSRGraph& G, std::uint64_t room)
 {
     for (const auto& e : G.get_edges_to_id(room))
-        if (e.type() == "exit" and is_type(G, e.from(), "door")) return e.from();
+        if (e.type() == "exit" and is_door(G, e.from())) return e.from();
     return std::nullopt;
 }
 
@@ -98,7 +106,7 @@ inline std::optional<std::uint64_t> twin_of(DSR::DSRGraph& G, std::uint64_t new_
     const auto n = G.get_node(new_face);
     if (not n.has_value()) return std::nullopt;
     for (const auto& e : DSR::DSRGraph::get_node_edges_by_type(n.value(), "exit"))
-        if (is_type(G, e.to(), "door")) return e.to();
+        if (is_door(G, e.to())) return e.to();
     return std::nullopt;
 }
 /// Link 4's guard: is the crossing into `room` complete (its entry face's twin written)?

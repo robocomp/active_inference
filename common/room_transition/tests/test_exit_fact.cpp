@@ -27,12 +27,18 @@ int main()
     using namespace rc::exit_fact;
     auto G = std::make_shared<DSR::DSRGraph>("exit_fact_test", 990, std::string(SHADOW_JSON), true, int8_t(90), DSR::Queue);
     const auto add = [&](DSR::Node n) { return G->insert_node(n).value_or(0); };
+    const auto door = [&](const char* name)   // door_concept's face: an `object` with object_subtype "door"
+    {
+        auto n = DSR::Node::create<object_node_type>(name);
+        G->add_or_modify_attrib_local<object_subtype_att>(n, std::string("door"));
+        return add(n);
+    };
     const auto robot = G->get_nodes_by_type("robot").front().id();
     const auto room_1 = add(DSR::Node::create<room_node_type>("room_1"));
     const auto room_2 = add(DSR::Node::create<room_node_type>("room_2"));
-    const auto d13 = add(DSR::Node::create<door_node_type>("door_13"));   // room_1's face of DOOR_1
-    const auto d20 = add(DSR::Node::create<door_node_type>("door_20"));   // another door of room_1
-    const auto d49 = add(DSR::Node::create<door_node_type>("door_49"));   // room_2's face of DOOR_1 (link 3 makes it)
+    const auto d13 = door("door_13");   // room_1's face of DOOR_1
+    const auto d20 = door("door_20");   // another door of room_1
+    const auto d49 = door("door_49");   // room_2's face of DOOR_1 (link 3 makes it)
 
     CHECK(not crossed_through(*G, {d13, d20}).has_value());
     CHECK(not is_crossed_face(*G, d13));
