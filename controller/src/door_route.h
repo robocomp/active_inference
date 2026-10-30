@@ -91,6 +91,7 @@ struct Plan
     float s_pre = 0.f, s_post = 0.f;          ///< standoffs along the axis (s_post measured PAST the aperture)
     float pre_yaw = 0.f, post_yaw = 0.f;      ///< the final headings: facing the door at P_pre, the travel direction at P_post
     bool through = false, pre_moved = false, post_moved = false, has_axis = false;
+    bool pre_omitted = false;                 ///< the robot stands in the doorway: no free vantage between it and the hole
     bool perceived = false;                   ///< the axis is the interaction anchor's opening (else the published targets')
     std::string why;                          ///< non-empty on failure
 };
@@ -121,17 +122,26 @@ struct Params
     {
         const float face = std::atan2(-ax->n.y(), -ax->n.x());   // facing the door = the travel direction through it
         // the published standoff (along this axis), capped by the robot's own distance to the hole
-        out.s_pre = std::min((approach.p - ax->c).dot(ax->n), (robot - ax->c).norm());
+        const float s_robot = (robot - ax->c).norm();
+        const float s_pub = (approach.p - ax->c).dot(ax->n);
+        out.s_pre = std::min(s_pub, s_robot);
         const auto s = first_free_standoff(*ax, out.s_pre, prm.body_reach_m, prm.step_m, face, is_free);
-        if (not s.has_value())
+        // No free pose between the robot and the body's reach, the robot being NEARER the hole than the published vantage: it
+        // stands in the doorway, and no vantage lies in front of it — the route starts at the aperture (recog_proto13 leg 2:
+        // 0.21 m from the hole, the jambs inside every footprint). Not a tolerance: the grid says no such pose exists.
+        out.pre_omitted = not s.has_value() and s_robot < s_pub and out.through;
+        if (not s.has_value() and not out.pre_omitted)
         {
             out.why = std::format("no free standpoint on the door axis between {:.2f} m (published) and {:.2f} m (the body's reach)",
                                   out.s_pre, prm.body_reach_m);
             return out;
         }
-        out.pre_moved = std::abs(*s - out.s_pre) > 1e-4f;
-        out.s_pre = *s;
-        out.pre = ax->c + *s * ax->n;
+        if (s.has_value())
+        {
+            out.pre_moved = std::abs(*s - out.s_pre) > 1e-4f;
+            out.s_pre = *s;
+        }
+        out.pre = ax->c + out.s_pre * ax->n;
         out.pre_yaw = face;
         out.ap = ax->c;
         if (out.through)
@@ -150,7 +160,7 @@ struct Params
             out.post_yaw = face;
             // P_pre always: at most as far from the hole as the robot (above), so it is never behind the robot; a robot beside
             // the doorway still gets the axis before the jambs (recog_try16).
-            out.waypoints.push_back(out.pre);
+            if (not out.pre_omitted) out.waypoints.push_back(out.pre);
             out.waypoints.push_back(out.ap);
             out.waypoints.push_back(out.post);
             return out;

@@ -113,6 +113,14 @@ int main()
         const auto jambs = [](const Eigen::Vector2f& p, float) { return std::abs(p.y()) > 0.3f; };   // the footprint clears them 0.3 m out
         const auto cj = dr::plan(kAppr, kCross, kCentre, Eigen::Vector2f(2.f, 0.15f), true, prm, jambs);
         CHECK(cj.why.empty() and cj.s_pre > 0.3f and cj.s_pre <= prm.body_reach_m + 1e-4f);
+        // recog_proto13 leg 2: IN the doorway (0.21 m), no footprint free between it and the reach: no vantage, the route
+        // starts at the aperture — while a robot FARTHER than the published vantage with nothing free still fails (case 3)
+        const auto doorway = [](const Eigen::Vector2f& p, float) { return std::abs(p.y()) > 0.4f; };
+        const auto dw = dr::plan(kAppr, kCross, kCentre, Eigen::Vector2f(2.f, 0.21f), true, prm, doorway);
+        CHECK(dw.why.empty() and dw.pre_omitted and dw.waypoints.size() == 2);
+        CHECK(dw.waypoints.size() == 2 and (dw.waypoints[0] - kCentre).norm() < 1e-4f);
+        const auto dws = dr::plan(kAppr, std::nullopt, kCentre, Eigen::Vector2f(2.f, 0.21f), false, prm, doorway);
+        CHECK(not dws.why.empty());   // a shut door with no vantage: nothing to drive to
     }
 
     std::println("7. the PERCEIVED hole (interaction anchor) is the axis; the room-frame door 0.45 m off is ignored");

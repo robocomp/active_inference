@@ -3318,7 +3318,8 @@ bool ControllerSession::build_door_route(const ControllerRobotPose &robot_pose, 
                                             plan.post_moved ? " (slid along the axis)" : "")
                               : std::string("— (the door reads shut: the route ends at the vantage)"),
                  plan.waypoints.size(), door_route_.path().size(), door_route_.length(),
-                 seen.has_value() ? std::format(", on the PERCEIVED opening of {}", seen->name) : std::string(", on the room-frame door"));
+                 std::string(seen.has_value() ? ", on the PERCEIVED opening of " + seen->name : ", on the room-frame door")
+                     + (plan.pre_omitted ? " (no vantage: the robot stands in the doorway)" : ""));
     // The policy's Place goals: the curve's points every 2·tol_xy of arc (consecutive arrival discs touch, never overlap),
     // the last one with the leg's final heading (facing the door at P_pre; the travel direction at P_post).
     door_route_goals_.clear();
