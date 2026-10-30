@@ -3366,8 +3366,30 @@ bool ControllerSession::drive_door_route(const ControllerPlanningStep &step, rc:
         {
             const float half_w = std::max(approach_body_.support_radius(0.f, Eigen::Vector2f(1.f, 0.f)),
                                           approach_body_.support_radius(0.f, Eigen::Vector2f(-1.f, 0.f)));
+            // ★ THROUGH, MEASURED ON THE PERCEIVED OPENING (spec 2026-10-29 Rev 3, X1; pingpong3 leg 1). The crossing fact is
+            //   the body wholly past the opening's plane, in the robot's own frame — not the route's end: pingpong3 drove the
+            //   body into room_2 and then failed `cross_unreachable` rebuilding a route from inside the doorway, so the fact
+            //   was never written. The normal is the anchor's +y (through, from the robot's side) LATCHED at the leg's first
+            //   reading, when the robot is on the near side by construction, so an anchor re-oriented from the far side
+            //   cannot undo it. "Wholly past" = s beyond the body's circumscribed radius: true for any heading.
+            const float half_len = std::max(approach_body_.support_radius(0.f, Eigen::Vector2f(0.f, 1.f)),
+                                            approach_body_.support_radius(0.f, Eigen::Vector2f(0.f, -1.f)));
+            const float r_body = std::hypot(half_w, half_len);
+            Eigen::Vector2f n = seen->gap.normal.normalized();
+            if (door_route_n0_key_ != leg.key) { door_route_n0_ = n; door_route_n0_key_ = leg.key; }
+            if (n.dot(door_route_n0_) < 0.f) n = -n;
+            const float s_body = (step.robot_pose.pos - seen->gap.centre).dot(n);
+            if (leg.through and door_route_through_key_ != leg.key and s_body > r_body)
+            {
+                door_route_through_key_ = leg.key;
+                std::println("[door-route] {}: the body is wholly past {} (s {:.2f} m > body radius {:.2f} m) — THROUGH",
+                             leg.door, seen->name, s_body, r_body);
+                door_passage_.note_route(leg.key, rc::DoorPassage::RouteReport::Arrived);
+            }
             const bool first = door_route_anchor_id_ != seen->anchor_id;
-            if (first or not rc::band_cross_route_passes(door_route_.path(), seen->gap, half_w))
+            // Once any part of the body is in the opening (s > −r_body) the route is not rebuilt on it: a route from inside
+            // the doorway is what failed in pingpong3; the installed one already carries the body through.
+            if (s_body <= -r_body and (first or not rc::band_cross_route_passes(door_route_.path(), seen->gap, half_w)))
             {
                 std::println("[door-route] {}: rebuilt on the perceived opening of {} ({})", leg.door, seen->name,
                              first ? "the anchor is up" : "the route no longer passes through it as measured");

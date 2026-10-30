@@ -41,6 +41,7 @@
 
 #pragma once
 
+#include "../room_transition/exit_fact.h"   // rc::exit_fact::twin_of (a twin under a non-current room is a mirror)
 #include <algorithm>
 #include <cstdint>
 #include <optional>
@@ -185,7 +186,13 @@ inline bool is_proto_mirror(DSR::DSRGraph& G, const DSR::Node& node)
     if (not p.has_value())
         return false;
     const auto pn = G.get_node(p.value());
-    if (not (pn.has_value() and pn->type() == "room" and is_proto(G, pn->id())))
+    if (not (pn.has_value() and pn->type() == "room"))
+        return false;
+    // ★ …OR the TWIN of the face crossed (spec 2026-10-29 Rev 3, link 3: `exit` this door -> a door), under a room `current`
+    //   has not reached yet. A REMEMBERED room is entered already promoted (no `proto` edge), so its entry face was read as
+    //   an ordinary door and the tracker merged it into its source, one hole by place (pingpong4 leg 2: 25 mirrors, each
+    //   MERGED away the cycle it was born). ltsm moves `current` only after link 3, so the twin is a mirror exactly until then.
+    if (not is_proto(G, pn->id()) and not rc::exit_fact::twin_of(G, node.id()).has_value())
         return false;
     return current_room(G) != std::optional<std::uint64_t>{pn->id()};
 }
