@@ -1,0 +1,10 @@
+cmake_minimum_required(VERSION 3.16)
+project(graph_recorder CXX)
+# Same standard and flags as the agents (CLAUDE.md: NO -march=native, NO -DEIGEN_MAX_ALIGN_BYTES=0 — libdsr's Eigen alignment).
+set(CMAKE_CXX_STANDARD 23)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+find_package(Qt6 REQUIRED COMPONENTS Core)
+find_package(Eigen3 3.3 REQUIRED NO_MODULE)
+add_executable(graph_recorder main.cpp)
+target_link_libraries(graph_recorder dsr_core dsr_api fastcdr fastdds Qt6::Core Eigen3::Eigen)
+set_target_properties(graph_recorder PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/bin)
