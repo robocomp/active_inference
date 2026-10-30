@@ -42,7 +42,9 @@ GT=crossing/$1/gt_pose.tsv; printf 't_ms\tx\ty\tyaw\troom_concept\tltsm_agent\td
 TSV=crossing/$1/legs.tsv; printf 'leg\tstatus\tt0_ms\tt1_ms\tltsm0\tltsm1\tdoor0\tdoor1\troom0\troom1\n' > $TSV
 run_leg() {   # label cross_arg here   (sets r)
   echo run > $B/controller/remote_cmd.txt; sleep 0.7   # the controller reads remote_cmd.txt every 300 ms
-  printf 'mission "leg %s"\n  explore %s until=explored(%s)>=0.9 budget_s=%ss\n  cross %s retry=2\n' $1 $3 $3 $EXPLORE_S $2 > $B/controller/remote_cmd.txt
+  # NO explore gate (user 10-30: "we can't have those 0.9 hard constraints"; recog_proto10 leg 2 failed when explored(room_2)
+  # never reached 0.9 in its budget). `cross` waits for its door's FACT (recall / new door) and explores meanwhile.
+  printf 'mission "leg %s"\n  cross %s retry=2\n' $1 $2 > $B/controller/remote_cmd.txt
   t0=$(date +%s); r="FAILED (no end in 600 s)"
   for i in $(seq 1 1200); do
     grep -a -q "mission 'leg $1': completed" $L/controller.log && { r="OK in $(( $(date +%s)-t0 )) s"; break; }

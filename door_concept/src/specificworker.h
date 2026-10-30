@@ -326,6 +326,7 @@ private:
     void step_remembered_looks();
     void drop_looks(const char* why);
     std::uint64_t pending_restore_room_ = 0;
+    std::uint64_t recalled_room_id_ = 0;   ///< the room entered by an ltsm recall / accepted proposal (remembered looks only there)
     void latch_recall_names();
     void reseat_doors_after_adoption(std::uint64_t room_id, const rc::door::Rigid2& K_from_P);
     std::optional<rc::door::Rigid2> proposal_P_from_K(std::uint64_t room_id, const std::vector<rc::door::ProposalView>& props) const;

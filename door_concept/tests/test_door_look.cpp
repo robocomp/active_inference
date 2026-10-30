@@ -61,19 +61,22 @@ int main()
 
     // ── 2. Which rows are offered: this room's rows whose door is not live and not ruled out ──
     {
-        const auto c = look::offer_rows(rows, "room_1", {}, {}, 0.5f);
+        const auto c = look::offer_rows(rows, "room_1", {}, {}, 0.5f, true);
         CHECK(c.size() == 2);                                            // door_2 and door_1, not room_2's door_3
         // Re-born by identity (same name) → withdrawn.
         const std::vector<LiveDoor> live{{"door_2", Eigen::Vector2f(1.52f, 4.0f)}};
-        const auto c2 = look::offer_rows(rows, "room_1", live, {}, 0.5f);
+        const auto c2 = look::offer_rows(rows, "room_1", live, {}, 0.5f, true);
         CHECK(c2.size() == 1 and c2[0].name == "door_1");
         // Re-born under ANOTHER name at the same hole → withdrawn too.
         const std::vector<LiveDoor> live2{{"door_9", Eigen::Vector2f(1.70f, 4.0f)}};
-        CHECK(look::offer_rows(rows, "room_1", live2, {}, 0.5f).size() == 1);
+        CHECK(look::offer_rows(rows, "room_1", live2, {}, 0.5f, true).size() == 1);
         // Ruled out this visit → not offered again.
         const std::vector<std::string> ruled{"door_1"};
-        const auto c3 = look::offer_rows(rows, "room_1", {}, ruled, 0.5f);
+        const auto c3 = look::offer_rows(rows, "room_1", {}, ruled, 0.5f, true);
         CHECK(c3.size() == 1 and c3[0].name == "door_2");
+        // A room entered FRESH (no ltsm recall, no accepted proposal) is not the remembered room: its frame is unrelated to
+        // the rows' places, so nothing is offered (recog_proto10: a stale room_2:door_48 look exhausted the explore budget).
+        CHECK(look::offer_rows(rows, "room_1", {}, {}, 0.5f, false).empty());
     }
 
     // ── 3. Absence evidence is POOLED PER VIEWPOINT (tourP9: door_2 ruled out from ONE spot 2.8 m away, p_detect 0.41,

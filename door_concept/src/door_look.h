@@ -175,12 +175,15 @@ inline float p_detect_from(const IdentityRow& r, const Eigen::Vector2f& cam, flo
 }
 
 /// Which of `room`'s remembered doors to offer a look at: not live (by name, or a live door on the same hole —
-/// reacquire radius + remembered width), and not ruled out this visit.
+/// reacquire radius + remembered width), and not ruled out this visit. Only in a room that IS the remembered one
+/// (`room_recalled`: entered by an ltsm recall or an accepted proposal): a room entered fresh may share the name, but the
+/// rows' places are in another frame (recog_proto10), so nothing is offered there.
 inline std::vector<IdentityRow> offer_rows(std::span<const IdentityRow> rows, std::string_view room,
                                            std::span<const LiveDoor> live, std::span<const std::string> ruled_out,
-                                           float reacquire_radius_m)
+                                           float reacquire_radius_m, bool room_recalled)
 {
     std::vector<IdentityRow> out;
+    if (not room_recalled) return out;
     for (const auto& r : rows)
     {
         if (r.room != room) continue;

@@ -3739,6 +3739,7 @@ void SpecificWorker::enter_room_memory(std::uint64_t room_id, bool first_resolut
                                     recall_late_names_.contains(room->name()), left_room, room->name())
         : rc::door::RoomEntryPlan{};
     const bool recalled = plan.recalled;
+    recalled_room_id_ = recalled ? room_id : 0;   // remembered looks are offered only in the remembered room
     recall_names_seen_.clear();      // a recall is evidence about ONE crossing only
     recall_late_names_.clear();
     if (not room.has_value())
@@ -3935,7 +3936,8 @@ void SpecificWorker::step_remembered_looks()
     }
     std::vector<std::string> ruled;
     for (const auto& [nm, e] : looks_) if (e.ruled_out) ruled.push_back(nm);
-    const auto offer = rc::door::look::offer_rows(identities_, room, live, ruled, cfg_.exist_reacquire_radius_m);
+    const auto offer = rc::door::look::offer_rows(identities_, room, live, ruled, cfg_.exist_reacquire_radius_m,
+                                                       recalled_room_id_ == room_node_id_);
 
     // Withdraw what is no longer offered: re-born (the common, good ending). Ruled-out entries stay, inert, as the mark.
     for (auto it = looks_.begin(); it != looks_.end();)
