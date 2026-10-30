@@ -226,6 +226,23 @@ int main(int argc, char **argv)
         check(c.out.mem_door_old == "r0_door_1_h1", "this hole's face is archived under its own name: " + c.out.mem_door_old);
     }
 
+    std::printf("[same_room] a second door of the provisional room, once it is current, is never paired with its own room's doors\n");
+    {   // recog_proto8: room_3 provisional AND current; DOOR_2 (door_50, 3 m from the entry) got 'passage_1 match door_49 ↔ door_50'
+        auto live = graph("pid_live_e", "etc/stage_two_rooms.json");
+        const auto [T, T1] = stage_crossing(*live, "door_1");
+        ltsm::PassageLive pl(live);
+        pl.step();
+        check(pl.owned().size() == 1, "the crossing makes one passage");
+        live->delete_edge(200, 300, "current");
+        live->insert_or_assign_edge(DSR::Edge::create<current_edge_type>(200, 400));   // room_1 (still proto) is current
+        Mat::RTMat far = T1;
+        far.translation().x() += 3.0;
+        const auto d6 = add_door(*live, "door_6", 400, far);                           // another hole of room_1
+        pl.step();
+        check(pl.owned().size() == 1, "still one passage (" + std::to_string(pl.owned().size()) + ")");
+        check(not pl.passage_of(d6).has_value(), "door_6 has no passage: it stays a NEW door for `cross new`");
+    }
+
     std::printf("%s (%d failures)\n", failures ? "FAILED" : "PASSED", failures);
     std::fflush(stdout);
     std::_Exit(failures ? 1 : 0);

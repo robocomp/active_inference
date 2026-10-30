@@ -137,6 +137,10 @@ PassageLive::Step PassageLive::step()
                 continue;
             }
             warned_no_current_ = false;
+            // A passage joins TWO rooms. Once the provisional room is itself current, a door hung from it is that room's own
+            // door, not an entry mirror: pairing it with "the current room's nearest door" joined two holes of ONE room
+            // (recog_proto8: 'passage_1 match door_49 ↔ door_50', 3.13 m apart in room_3) and hid DOOR_2 from `cross new`.
+            if (proto == cur.value()) continue;
 
             const auto entry_in_cur = ie->get_transformation_matrix(cur_node->name(), entry.name());
             if (not entry_in_cur.has_value()) continue;
