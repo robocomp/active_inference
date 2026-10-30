@@ -7,7 +7,9 @@
 #   legs 3,5,..  cross room_2   the door with a recall_room_2 child
 # Every leg is GRADED ON GROUND TRUTH, not on the controller's word: when the mission completes, the robot's true pose must be on
 # the expected side of DOOR_1's line (recog_proto15 "completed" a leg on a false room switch with the robot in the doorway).
-# usage: pingpong_tour.sh <run_name> [round_trips=6]      env WT / WT_AGENTS / LEG_TIMEOUT_S (default 600)
+# usage: pingpong_tour.sh <run_name> [round_trips=6]      env WT / WT_AGENTS / LEG_TIMEOUT_S (default 600) / CROSS_NAME
+# CROSS_NAME=door_1: every leg is `cross door_1` BY NAME instead of by relation — for a controller older than the relation
+#   picker (the 10-19 known-good fleet, feat/interaction-anchor), so the same graded tour can bisect a regression.
 # Writes crossing/<run>/legs.tsv (leg windows, controller verdict, true side), gt_pose.tsv (1 Hz true pose), graph_trace.csv
 # (graph_recorder), and runs trace_check.py. Stop agents with SIGTERM only (run_crossing.sh collect does).
 LOCK=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/ai_fleet_tour.lock; echo $$ > $LOCK; trap 'rm -f $LOCK; [ -n "$REC_PID" ] && kill -TERM $REC_PID 2>/dev/null' EXIT
@@ -62,7 +64,7 @@ explore_once() {
   for i in $(seq 1 60); do grep -a -q -E "mission 'look$1': (completed|failed|aborted)" $L/controller.log && break; sleep 3; done; }
 ok=0; n_legs=$((2 * TRIPS))
 for leg in $(seq 1 $n_legs); do
-  if [ $leg = 1 ]; then a=new; elif [ $((leg % 2)) = 0 ]; then a=room_1; else a=room_2; fi
+  if [ -n "$CROSS_NAME" ]; then a=$CROSS_NAME; elif [ $leg = 1 ]; then a=new; elif [ $((leg % 2)) = 0 ]; then a=room_1; else a=room_2; fi
   want=$([ $((leg % 2)) = 1 ] && echo room_2 || echo room_1)   # the room the leg must END in (true side of DOOR_1)
   T0=$(now_ms); ts=$(date +%s)
   run_leg $leg $a; n=0
