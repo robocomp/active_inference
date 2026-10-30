@@ -11,8 +11,17 @@
  *   approach leg (door shut, or no cross target yet):   [P_pre]
  *   through leg  (door open):                           [P_pre]?  →  P_ap  →  P_post
  *
- * P_ap (the aperture centre, projected onto the axis) keeps the through-segment straight on the axis; P_pre is dropped when
- * the robot already stands at or nearer the door than it along the axis (after an open-wait it IS there).
+ * P_ap (the aperture centre, projected onto the axis) keeps the through-segment straight on the axis.
+ *
+ * ★THE HOLE THE ROBOT PERCEIVES (2026-10-30, user: "the hole is already in robot (local) coordinates so the hole that is
+ *  perceived has to be the right one"). When door_concept's interaction anchor (door_N@robot) is up, its opening — measured in
+ *  the robot frame, composed with the robot's pose — IS the axis: the room-frame door (recog_proto11/12: re-fitted 0.45 m along
+ *  the wall seconds after the crossing) only places the route before an anchor exists.
+ * ★P_pre NEVER LIES FARTHER FROM THE HOLE THAN THE ROBOT. Its standoff is min(the published one, the robot's distance to the
+ *  aperture centre): from far away it is the published vantage; from close by it is the point of the axis at the robot's own
+ *  distance — reached by turning onto the axis, never by driving away from the door. This replaced a corridor gate (drop P_pre
+ *  when |lateral| ≤ the body's reach), which with the door 0.45 m off sent the robot back to a vantage behind it, where it spun
+ *  in place for minutes (recog_proto12 leg 2).
  *
  * ★THE AXIS IS THE ONLY FREEDOM. A published target whose footprint is NOT free on the controller's grid (door_concept does
  *  not see the controller's occupancy — a bed foot) is moved ALONG THE AXIS, never sideways: P_pre toward the door, down to
@@ -81,7 +90,8 @@ struct Plan
     Eigen::Vector2f pre = Eigen::Vector2f::Zero(), ap = Eigen::Vector2f::Zero(), post = Eigen::Vector2f::Zero();
     float s_pre = 0.f, s_post = 0.f;          ///< standoffs along the axis (s_post measured PAST the aperture)
     float pre_yaw = 0.f, post_yaw = 0.f;      ///< the final headings: facing the door at P_pre, the travel direction at P_post
-    bool through = false, pre_moved = false, post_moved = false, pre_dropped = false, has_axis = false;
+    bool through = false, pre_moved = false, post_moved = false, has_axis = false;
+    bool perceived = false;                   ///< the axis is the interaction anchor's opening (else the published targets')
     std::string why;                          ///< non-empty on failure
 };
 
@@ -93,21 +103,26 @@ struct Params
 };
 
 /// The door route's waypoints. through = the door is open and a cross target is published.
+/// `perceived`: the axis of the opening the robot measures (the interaction anchor, in the room frame) — preferred over the
+/// one built from the published targets.
 [[nodiscard]] inline Plan plan(const Target& approach, const std::optional<Target>& cross, const std::optional<Eigen::Vector2f>& door_centre,
                                const Eigen::Vector2f& robot, bool through, const Params& prm,
-                               const std::function<bool(const Eigen::Vector2f&, float)>& is_free)
+                               const std::function<bool(const Eigen::Vector2f&, float)>& is_free,
+                               const std::optional<Axis>& perceived = std::nullopt)
 {
     Plan out;
     out.through = through and cross.has_value();
-    const auto ax = axis_from(approach, door_centre);
+    const auto ax = perceived.has_value() ? perceived : axis_from(approach, door_centre);
+    out.perceived = perceived.has_value();
     out.has_axis = ax.has_value();
     out.pre = approach.p;
     out.pre_yaw = approach.yaw;
     if (ax.has_value())
     {
         const float face = std::atan2(-ax->n.y(), -ax->n.x());   // facing the door = the travel direction through it
-        out.s_pre = (approach.p - ax->c).dot(ax->n);
-        const auto s = first_free_standoff(*ax, out.s_pre, std::min(prm.body_reach_m, out.s_pre), prm.step_m, face, is_free);
+        // the published standoff (along this axis), capped by the robot's own distance to the hole
+        out.s_pre = std::min((approach.p - ax->c).dot(ax->n), (robot - ax->c).norm());
+        const auto s = first_free_standoff(*ax, out.s_pre, prm.body_reach_m, prm.step_m, face, is_free);
         if (not s.has_value())
         {
             out.why = std::format("no free standpoint on the door axis between {:.2f} m (published) and {:.2f} m (the body's reach)",
@@ -133,14 +148,9 @@ struct Params
             out.s_post = -*sp;
             out.post = ax->c + *sp * ax->n;
             out.post_yaw = face;
-            // P_pre only while the robot is still farther from the door than it along the axis
-            // …and already IN the door's corridor: a robot beside the doorway (small along-axis coordinate, large lateral one)
-            // has not passed the vantage, it is exactly who needs it (recog_try16: dropped, the route came at the jambs
-            // diagonally and the tracker was pinned by the returns). FLAGGED: the corridor half-width is the body's reach.
-            const Eigen::Vector2f rel = robot - ax->c;
-            const float lateral = std::abs(rel.x() * ax->n.y() - rel.y() * ax->n.x());
-            out.pre_dropped = rel.dot(ax->n) <= out.s_pre and lateral <= prm.body_reach_m;
-            if (not out.pre_dropped) out.waypoints.push_back(out.pre);
+            // P_pre always: at most as far from the hole as the robot (above), so it is never behind the robot; a robot beside
+            // the doorway still gets the axis before the jambs (recog_try16).
+            out.waypoints.push_back(out.pre);
             out.waypoints.push_back(out.ap);
             out.waypoints.push_back(out.post);
             return out;

@@ -35,6 +35,7 @@
 #include "../../common/affordance_manager/affordance_manager.h"
 #include "mission_door_relation.h"
 #include "local_policy/goal_adapter.h"
+#include "door_route.h"                 // rc::door_route::Axis (the perceived door axis)
 #include "local_policy/doorway_hypotheses.h"   // Task 3e: the MAP goal line, the anchor re-init test
 #include "local_policy/navigator.h"
 #include "local_policy/field_extent.h"     // Task 3f (b): the field over extent ∪ goals; unseen cells at the prior
@@ -1177,6 +1178,11 @@ private:
     bool door_route_active_ = false;                                // built for the current leg and not yet ended
     bool door_route_installed_ = false;                             // handed to the tracker (policy off)
     std::uint64_t door_route_build_ms_ = 0;                         // last build attempt
+    std::uint64_t door_route_anchor_id_ = 0;                        // the anchor whose PERCEIVED opening the route was built on (0 = the room-frame door)
+    // The opening door_concept's interaction anchor measures for this door (robot frame ∘ the robot's pose), if one is fresh:
+    // the door route's axis (door_route.h) and the gap the installed route must still pass through.
+    struct PerceivedDoor { rc::door_route::Axis axis; rc::policy::RoomGap gap; std::uint64_t anchor_id = 0; std::string name; };
+    std::optional<PerceivedDoor> perceived_door(const std::string &door, const ControllerRobotPose &robot_pose) const;
     std::uint64_t door_route_failed_ms_ = 0;                        // last failure (build or drive): a rebuild waits kDoorRouteRebuildMs
     static constexpr std::uint64_t kDoorRouteRebuildMs = 2000;      // as the mission route's build retry: the map gets a moment
     std::vector<rc::policy::RouteWaypoint> door_route_goals_;       // the curve's points as Place goals (policy on)

@@ -86,13 +86,49 @@ int main()
         CHECK(not dr::plan(kAppr, kCross, kCentre, robot_far, true, prm, all_leaf).why.empty());
     }
 
-    std::println("5. the robot already at the vantage (an open-wait there)");
+    std::println("5. P_pre is never farther from the hole than the robot (no corridor gate)");
     {
-        const auto pl = dr::plan(kAppr, kCross, kCentre, Eigen::Vector2f(2.03f, 1.58f), true, prm, free_all);
-        CHECK(pl.why.empty() and pl.pre_dropped and pl.waypoints.size() == 2);
-        CHECK((pl.waypoints[0] - kCentre).norm() < 1e-4f and (pl.waypoints[1] - kCross.p).norm() < 1e-4f);
-        const auto behind = dr::plan(kAppr, kCross, kCentre, Eigen::Vector2f(2.5f, 2.4f), true, prm, free_all);
-        CHECK(not behind.pre_dropped and behind.waypoints.size() == 3);
+        // at the vantage (an open-wait there): P_pre is where it stands, the route goes on through
+        const auto at = dr::plan(kAppr, kCross, kCentre, Eigen::Vector2f(2.03f, 1.58f), true, prm, free_all);
+        CHECK(at.why.empty() and at.waypoints.size() == 3);
+        CHECK(at.s_pre <= (Eigen::Vector2f(2.03f, 1.58f) - kCentre).norm() + 1e-4f);
+        // recog_proto12 leg 2: on the axis 1.1 m out, facing the door — the published 1.6 m vantage is BEHIND it; now P_pre
+        // is at its own distance (no way back), whatever its lateral offset
+        const Eigen::Vector2f in_front(2.f, 1.1f);
+        const auto pl = dr::plan(kAppr, kCross, kCentre, in_front, true, prm, free_all);
+        std::println("    robot 1.1 m out: pre s={:.2f}", pl.s_pre);
+        CHECK(pl.why.empty() and std::abs(pl.s_pre - 1.1f) < 1e-4f and on_axis(pl.pre));
+        // farther than the vantage: the published vantage
+        const auto far = dr::plan(kAppr, kCross, kCentre, Eigen::Vector2f(2.5f, 2.4f), true, prm, free_all);
+        CHECK(far.waypoints.size() == 3 and std::abs(far.s_pre - 1.6f) < 1e-4f);
+        // beside the doorway (recog_try16): the axis comes BEFORE the jambs, at the robot's distance from the hole
+        const Eigen::Vector2f beside(3.f, 0.2f);
+        const auto bs = dr::plan(kAppr, kCross, kCentre, beside, true, prm, free_all);
+        std::println("    beside the door: pre ({:.2f},{:.2f}) s={:.2f}", bs.pre.x(), bs.pre.y(), bs.s_pre);
+        CHECK(bs.waypoints.size() == 3 and on_axis(bs.pre) and std::abs(bs.s_pre - (beside - kCentre).norm()) < 1e-4f);
+        // already in the doorway (nearer than the body's reach): P_pre is where the robot stands when the grid admits that
+        // pose — never behind it; where it does not, it slides OUT along the axis to the first free pose, at most the reach
+        const auto close = dr::plan(kAppr, kCross, kCentre, Eigen::Vector2f(2.f, 0.15f), true, prm, free_all);
+        CHECK(close.why.empty() and std::abs(close.s_pre - 0.15f) < 1e-4f);
+        const auto jambs = [](const Eigen::Vector2f& p, float) { return std::abs(p.y()) > 0.3f; };   // the footprint clears them 0.3 m out
+        const auto cj = dr::plan(kAppr, kCross, kCentre, Eigen::Vector2f(2.f, 0.15f), true, prm, jambs);
+        CHECK(cj.why.empty() and cj.s_pre > 0.3f and cj.s_pre <= prm.body_reach_m + 1e-4f);
+    }
+
+    std::println("7. the PERCEIVED hole (interaction anchor) is the axis; the room-frame door 0.45 m off is ignored");
+    {
+        // the room-frame door says x = 2.45; the anchor's opening says x = 2.0, normal +y into this room
+        const dr::Target appr_off{{2.45f, 1.6f}, -std::numbers::pi_v<float> / 2.f};
+        const dr::Target cross_off{{2.45f, -0.8f}, -std::numbers::pi_v<float> / 2.f};
+        const dr::Axis seen{kCentre, Eigen::Vector2f(0.f, 1.f)};
+        const auto pl = dr::plan(appr_off, cross_off, Eigen::Vector2f(2.45f, 0.f), Eigen::Vector2f(2.f, 1.1f), true, prm, free_all, seen);
+        std::println("    pre ({:.2f},{:.2f}) ap ({:.2f},{:.2f}) post ({:.2f},{:.2f})", pl.pre.x(), pl.pre.y(), pl.ap.x(), pl.ap.y(),
+                     pl.post.x(), pl.post.y());
+        CHECK(pl.why.empty() and pl.perceived and pl.waypoints.size() == 3);
+        for (const auto& w : pl.waypoints) CHECK(on_axis(w));
+        CHECK((pl.ap - kCentre).norm() < 1e-4f and std::abs(pl.s_pre - 1.1f) < 1e-4f and std::abs(pl.s_post - 0.8f) < 1e-4f);
+        const auto room = dr::plan(appr_off, cross_off, Eigen::Vector2f(2.45f, 0.f), Eigen::Vector2f(2.f, 1.1f), true, prm, free_all);
+        CHECK(not room.perceived and std::abs(room.ap.x() - 2.45f) < 1e-4f);   // without the anchor: the room-frame door
     }
 
     std::println("6. a lateral door-node offset is projected onto the published axis");

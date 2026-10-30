@@ -3235,6 +3235,22 @@ bool ControllerSession::drive_mission_route(const ControllerPlanningStep &step,
 // The waypoints come from door_route.h (door_concept's two published targets + the aperture centre, slid ALONG THE AXIS only
 // where the grid says the footprint is not free); RouteFollower::build plans every hop with the grid planner and fits ONE
 // curve, exactly as a mission route is built. A build that fails is reported to the passage, which re-keys the leg once.
+std::optional<ControllerSession::PerceivedDoor> ControllerSession::perceived_door(const std::string &door,
+                                                                                 const ControllerRobotPose &robot_pose) const
+{
+    if (graph_ == nullptr) return std::nullopt;
+    const std::string aff = "aff_" + door + "_cross";
+    const auto n = graph_->get_node(aff);
+    if (not n.has_value()) return std::nullopt;
+    const auto a = read_cross_anchor(n->id(), aff, /*accept_stale=*/false);
+    if (not a.has_value() or not a->fresh or a->width_m <= 0.f or not a->pose.x.allFinite()) return std::nullopt;
+    const ControllerRobotPose &cpose = tracker_pose_.has_value() ? *tracker_pose_ : robot_pose;
+    const auto g = rc::policy::gap_in_room(a->pose, a->width_m, cpose);
+    // the anchor's +y goes THROUGH the opening from the robot's side (door_concept Task 21); the route's axis normal points
+    // INTO the current room
+    return PerceivedDoor{.axis = {g.centre, -g.normal.normalized()}, .gap = g, .anchor_id = a->anchor_id, .name = a->name};
+}
+
 bool ControllerSession::build_door_route(const ControllerRobotPose &robot_pose, std::uint64_t now_ms, float tol_xy)
 {
     const auto &leg = *door_route_leg_;
@@ -3251,8 +3267,12 @@ bool ControllerSession::build_door_route(const ControllerRobotPose &robot_pose, 
     prm.body_reach_m = approach_body_.support_radius(0.f, Eigen::Vector2f(0.f, 1.f));
     prm.step_m = grid_planner_.cell_size();
     prm.post_slide_m = 0.8f;
+    // ★The hole the robot PERCEIVES (its interaction anchor) is the axis when there is one (door_route.h).
+    const auto seen = perceived_door(leg.door, robot_pose);
+    door_route_anchor_id_ = seen.has_value() ? seen->anchor_id : 0;
     const auto plan = rc::door_route::plan(appr, cross, passage_door_centre_, robot_pose.pos, leg.through, prm,
-                                           [this](const Eigen::Vector2f &p, float h) { return grid_planner_.pose_free(p, h); });
+                                           [this](const Eigen::Vector2f &p, float h) { return grid_planner_.pose_free(p, h); },
+                                           seen.has_value() ? std::optional<rc::door_route::Axis>(seen->axis) : std::nullopt);
     if (not plan.why.empty())
     {
         std::println("[door-route] {}: cannot place the route: {}", leg.door, plan.why);
@@ -3297,7 +3317,8 @@ bool ControllerSession::build_door_route(const ControllerRobotPose &robot_pose, 
                  plan.through ? std::format("({:.2f},{:.2f}) s={:.2f}{}", plan.post.x(), plan.post.y(), plan.s_post,
                                             plan.post_moved ? " (slid along the axis)" : "")
                               : std::string("— (the door reads shut: the route ends at the vantage)"),
-                 plan.waypoints.size(), door_route_.path().size(), door_route_.length(), plan.pre_dropped ? ", pre dropped (robot past it)" : "");
+                 plan.waypoints.size(), door_route_.path().size(), door_route_.length(),
+                 seen.has_value() ? std::format(", on the PERCEIVED opening of {}", seen->name) : std::string(", on the room-frame door"));
     // The policy's Place goals: the curve's points every 2·tol_xy of arc (consecutive arrival discs touch, never overlap),
     // the last one with the leg's final heading (facing the door at P_pre; the travel direction at P_post).
     door_route_goals_.clear();
@@ -3315,6 +3336,23 @@ bool ControllerSession::drive_door_route(const ControllerPlanningStep &step, rc:
 {
     const auto &leg = *door_route_leg_;
     const std::uint64_t now = time_source();
+    // ★A route built on the room-frame door is rebuilt on the PERCEIVED opening as soon as the anchor is up; one built on the
+    //  anchor is rebuilt when it no longer takes the body through the opening as now measured (band_cross_route_passes: the
+    //  same physical test as the band's route, no tolerance of its own).
+    if (door_route_active_ and leg.key == door_route_key_)
+        if (const auto seen = perceived_door(leg.door, step.robot_pose); seen.has_value())
+        {
+            const float half_w = std::max(approach_body_.support_radius(0.f, Eigen::Vector2f(1.f, 0.f)),
+                                          approach_body_.support_radius(0.f, Eigen::Vector2f(-1.f, 0.f)));
+            const bool first = door_route_anchor_id_ != seen->anchor_id;
+            if (first or not rc::band_cross_route_passes(door_route_.path(), seen->gap, half_w))
+            {
+                std::println("[door-route] {}: rebuilt on the perceived opening of {} ({})", leg.door, seen->name,
+                             first ? "the anchor is up" : "the route no longer passes through it as measured");
+                door_route_installed_ = false;
+                if (not build_door_route(step.robot_pose, now, path_controller.goal_threshold())) door_route_failed_ms_ = now;
+            }
+        }
     // A leg is built ONCE (its key); a re-keyed leg after a failure waits kDoorRouteRebuildMs from that failure.
     if (not door_route_active_ and leg.key != door_route_key_ and now - door_route_failed_ms_ >= kDoorRouteRebuildMs)
         if (not build_door_route(step.robot_pose, now, path_controller.goal_threshold())) door_route_failed_ms_ = now;
