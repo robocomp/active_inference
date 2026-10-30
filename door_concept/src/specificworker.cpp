@@ -3187,7 +3187,6 @@ void SpecificWorker::step_room_following()
     {
         step_adoption();          // a rename of THIS room (same id) is followed here, never released
         step_pending_restore();   // a recalled room's doors, once its polygon is loaded
-        step_entry_twin();        // link 3 for a remembered room: its restored face of the hole crossed
         // The crossed door was HELD at the switch and has been deleted with its room since: carry it across now.
         if (carry_pending_room_ == room_node_id_ and not lost_doors_.empty())
         {
@@ -3219,52 +3218,6 @@ void SpecificWorker::step_room_following()
 }
 
 // ═══ ENTRY MIRRORS — the door a proto-room was entered through ════════════════════════════════════
-
-// Link 3 for the room this agent follows, when no mirror wrote it: a REMEMBERED room has no mirror (its doors are restored
-// from the identity table), so its face of the hole crossed is the restored door nearest the old face, the old face's pose
-// carried into this room's frame by the pose chain (both faces are one hole; argmin, no gate — the crossing fact says one
-// of them is it). Waits for the restore, and for the old face's transform to resolve. Once per crossing: a written twin ends it.
-void SpecificWorker::step_entry_twin()
-{
-    if (not G or not fitter_ or not inner_eigen_ or room_node_id_ == 0 or pending_restore_room_ == room_node_id_)
-        return;
-    const auto old_face = rc::exit_fact::entered_through(*G, room_node_id_);
-    const auto room = G->get_node(room_node_id_);
-    if (not old_face.has_value() or not room.has_value())
-        return;
-    const auto old_n = G->get_node(*old_face);
-    if (not old_n.has_value())
-        return;
-    const auto parent_of = [&](std::uint64_t x) -> std::uint64_t
-    {
-        const auto xn = G->get_node(x);
-        return xn.has_value() ? G->get_attrib_by_name<parent_att>(xn.value()).value_or(0) : 0;
-    };
-    std::vector<std::uint64_t> faces;
-    for (const auto& [id, inst] : fitter_->instances())
-        if (id != *old_face and rc::door::descends_from(id, room_node_id_, parent_of))
-            faces.push_back(id);
-    if (std::ranges::any_of(faces, [&](std::uint64_t f) { return rc::exit_fact::twin_of(*G, f) == *old_face; }))
-        return;
-    const auto T_old = inner_eigen_->get_transformation_matrix(room->name(), old_n->name(), 0);
-    if (not T_old.has_value() or not T_old->matrix().allFinite())
-        return;
-    std::uint64_t best = 0;
-    double best_d = std::numeric_limits<double>::max();
-    for (const auto f : faces)
-        if (const auto fn = G->get_node(f); fn.has_value())
-            if (const auto T = inner_eigen_->get_transformation_matrix(room->name(), fn->name(), 0); T.has_value())
-                if (const double d = (T->translation() - T_old->translation()).head<2>().norm(); d < best_d)
-                {
-                    best_d = d;
-                    best = f;
-                }
-    if (best == 0)
-        return;   // nothing restored here yet
-    if (rc::exit_fact::write_twin(*G, best, *old_face))
-        std::print("door_concept: [exit] link 3: {} is the twin of {} ({:.2f} m from it, remembered '{}')\n",
-                   best, old_n->name(), best_d, room->name());
-}
 
 void SpecificWorker::step_entry_mirrors()
 {
@@ -3301,24 +3254,14 @@ void SpecificWorker::step_entry_mirrors()
     }
 
     // 2. Birth: one mirror per proto-room, of the face room_concept says it was entered through (link 2), with link 3.
-    announced_rooms_.prune([&](std::uint64_t id) { return G->get_node(id).has_value(); });
-    std::erase_if(announced_no_mirror_logged_, [&](std::uint64_t id) { return not G->get_node(id).has_value(); });
     for (const auto& room : G->get_nodes_by_type("room"))
     {
         if (entry_mirrors_.contains(room.id()))
             continue;
-        // ANNOUNCED room: remembered, not new — its doors are restored from the identity table on entry (enter_room_memory),
-        // the crossed face included. No invented mirror. The verdict is fixed at the room's FIRST SIGHT from the live
-        // recall_<name> node and kept by room id (AnnouncedRooms), so it survives ltsm retiring the recall and the latch
-        // being cleared at the switch.
-        if (not announced_rooms_.seen(room.id()))
-            announced_rooms_.observe(room.id(), recall_node_live(room.name()));
-        if (not rc::door::entry_mirror_wanted(rc::room::is_proto(*G, room.id()), announced_rooms_.announced(room.id())))
-        {
-            if (rc::room::is_proto(*G, room.id()) and announced_no_mirror_logged_.insert(room.id()).second)
-                std::print("door_concept: [proto] no entry mirror into '{}' — ltsm announced it as remembered; its doors are restored on entry\n", room.name());
-            continue;
-        }
+        // EVERY room entered by a crossing fact gets the mirror, new or remembered (spec Rev 3: the face exists on link 2). A
+        // remembered room's restore then skips its remembered face of this hole by place (plan_restore PlaceLive: within
+        // ReacquireRadius + the width), so the hole keeps ONE face — made before `current` moves, so ltsm's archive (which
+        // waits for link 3) and this agent's follow never wait on each other.
         // The room this agent is IN needs no mirror: its doors are its own instances (release_room adopted the
         // entry mirror). Without this the adopted door — whose aperture holds the proto origin by construction —
         // would be mirrored into its own room. A proto stays proto until room_concept promotes its LAYOUT.

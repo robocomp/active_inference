@@ -174,6 +174,7 @@ private:
 	ltsm::Candidate last_promotion_cand_;
 	Mat::Vector3d   door_in_new_before_{0, 0, 0};   ///< live: old door in the new room's frame, pre-promotion
 	bool step_promotion();
+	std::uint64_t waiting_twin_for_ = 0;   // the entered room whose link 3 the archive waits for (logged once)
 	/// r_body = half the larger footprint side of the `body` node (width_m/depth_m) -- the same definition
 	/// room_concept uses for its crossing test. nullopt when the graph does not say.
 	std::optional<double> body_radius() const;

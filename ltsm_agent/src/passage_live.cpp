@@ -5,6 +5,7 @@
 
 #include "room_eviction.h"                                   // ltsm::is_door
 #include "../../common/room_resolve/room_resolve.h"          // rc::room::current_room / is_proto
+#include "../../common/room_transition/exit_fact.h"           // rc::exit_fact::twin_of (link 3 = the passage)
 
 #include <dsr/api/dsr_inner_eigen_api.h>
 
@@ -114,54 +115,20 @@ PassageLive::Step PassageLive::step()
     for (const auto &n : G_->get_nodes_by_type("object"))
         if (is_door(*G_, n)) doors.push_back(n);
 
-    std::vector<std::uint64_t> proto_rooms;
-    for (const auto &r : G_->get_nodes_by_type("room"))
-        if (rc::room::is_proto(*G_, r.id())) proto_rooms.push_back(r.id());
-
-    const auto cur = rc::room::current_room(*G_);
-    const auto cur_node = cur.has_value() ? G_->get_node(cur.value()) : std::optional<DSR::Node>{};
-
-    auto ie = G_->get_inner_eigen_api();
-    for (const auto proto : proto_rooms)
-        for (const auto &entry : doors)
+    // ★ THE PAIR IS THE CROSSING FACT, NOT THE NEAREST DOOR (spec 2026-10-29 Rev 3, link 3): door_concept writes `exit`
+    //   NEW_FACE -> OLD_FACE when it makes the face of the hole crossed in the room entered. That edge IS the passage: the
+    //   two faces of one hole. (The argmin over the current room's doors it replaces joined two holes of one room —
+    //   recog_proto8 — and needed a guard per case.)
+    for (const auto &entry : doors)
+    {
+        const auto old_id = rc::exit_fact::twin_of(*G_, entry.id());
+        if (not old_id.has_value()) continue;
+        const auto old = G_->get_node(*old_id);
+        if (not old.has_value()) continue;
+        const std::optional<DSR::Node> best = old;
+        const std::string where = owning_room(entry) != 0
+            ? G_->get_node(owning_room(entry)).transform([](const auto &n) { return n.name(); }).value_or("?") : "?";
         {
-            const auto parent = G_->get_attrib_by_name<parent_att>(entry);
-            if (not parent.has_value() or parent.value() != proto) continue;
-
-            // nullopt = nobody has said which room we are in -- never guess a counterpart.
-            if (not cur_node.has_value())
-            {
-                if (not std::exchange(warned_no_current_, true))
-                    qWarning() << "[passage] entry door" << QString::fromStdString(entry.name())
-                               << "has no counterpart yet: the current room is unresolved";
-                continue;
-            }
-            warned_no_current_ = false;
-            // A passage joins TWO rooms. Once the provisional room is itself current, a door hung from it is that room's own
-            // door, not an entry mirror: pairing it with "the current room's nearest door" joined two holes of ONE room
-            // (recog_proto8: 'passage_1 match door_49 ↔ door_50', 3.13 m apart in room_3) and hid DOOR_2 from `cross new`.
-            if (proto == cur.value()) continue;
-
-            const auto entry_in_cur = ie->get_transformation_matrix(cur_node->name(), entry.name());
-            if (not entry_in_cur.has_value()) continue;
-
-            // COUNTERPART = argmin distance over the current room's own doors (not mirrors).
-            std::optional<DSR::Node> best;
-            double best_d = std::numeric_limits<double>::max();
-            for (const auto &d : doors)
-            {
-                if (d.id() == entry.id() or rc::room::is_proto_mirror(*G_, d)) continue;
-                if (owning_room(d) != cur.value()) continue;
-                const auto d_in_cur = ie->get_transformation_matrix(cur_node->name(), d.name());
-                if (not d_in_cur.has_value()) continue;
-                if (const double dist = (d_in_cur->translation() - entry_in_cur->translation()).norm(); dist < best_d)
-                {
-                    best_d = dist;
-                    best = d;
-                }
-            }
-            if (not best.has_value()) continue;
-
             // The passage this entry already belongs to, if any.
             std::optional<DSR::Node> passage;
             for (const auto &p : owned())
@@ -221,9 +188,10 @@ PassageLive::Step PassageLive::step()
             G_->insert_or_assign_edge(std::move(to_entry));
             ++st.created;
             qInfo().noquote() << QString::fromStdString(std::format(
-                "[passage] {} match {} ↔ {}  ({:.2f} m apart in {}; {})",
-                node.name(), best->name(), entry.name(), best_d, cur_node->name(), why));
+                "[passage] {} match {} ↔ {}  (link 3: {} entered through {}; {})",
+                node.name(), best->name(), entry.name(), where, best->name(), why));
         }
+    }
 
     st.passages = static_cast<int>(owned().size());
     return st;

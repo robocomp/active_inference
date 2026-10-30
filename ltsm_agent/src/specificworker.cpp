@@ -19,6 +19,7 @@
 #include "specificworker.h"
 #include "../../common/window_geometry/window_geometry_saver.h"
 #include "../../common/room_resolve/room_resolve.h"   // current_edge_room
+#include "../../common/room_transition/exit_fact.h"   // rc::exit_fact: links 2-3 gate the archive (link 4)
 
 #include "../../common/config_report/config_read.h"   // rc::cfg::Reader (SHARED)
 
@@ -544,6 +545,24 @@ bool SpecificWorker::step_promotion()
     //   level. The candidate is that room, whenever it differs from `current`. No threshold: the fact is the edge.
     const auto robot_room = rc::room::robot_rt_room(*G_dsr);
     if (not ltsm::promotion_due(robot_room, rc::room::current_edge_room(*G_dsr))) return false;
+    // ★ LINK 4 WAITS FOR LINK 3 (spec 2026-10-29 Rev 3, encoding A). The room left is archived — and with it the old face,
+    //   links 1 and 2 dying with it — only once door_concept has made the entered room's face of the hole and written the
+    //   twin. Archiving first deleted the fact door_concept still had to read (the model's race). A room entered with no
+    //   crossing fact (the start-up room, a recognition swap) carries no link 2 and is not held.
+    if (const auto via = rc::exit_fact::entered_through(*G_dsr, robot_room.value()); via.has_value())
+    {
+        std::vector<std::uint64_t> faces;
+        for (const auto &n : G_dsr->get_nodes_by_type("object"))
+            if (rc::exit_fact::is_door(*G_dsr, n.id())) faces.push_back(n.id());
+        if (not rc::exit_fact::twin_written(*G_dsr, robot_room.value(), faces))
+        {
+            if (std::exchange(waiting_twin_for_, robot_room.value()) != robot_room.value())
+                qInfo() << "[promotion] room" << static_cast<qulonglong>(robot_room.value())
+                        << "entered through" << static_cast<qulonglong>(via.value())
+                        << "-- waiting for door_concept's twin face (link 3) before archiving the room left";
+            return false;
+        }
+    }
 
     // The geometric evidence is kept for the LOG only (and to fill the candidate's record).
     ltsm::PromotionReading r;
@@ -576,7 +595,14 @@ bool SpecificWorker::step_promotion()
                        << "is ready but there is no `current` room to promote it from";
             return false;
         }
-        if (live_passage)
+        // The crossed pair IS the fact: OLD_FACE (link 2's source) and its twin (link 3). The live passage is the fallback for
+        // a room entered without one.
+        if (const auto via = rc::exit_fact::entered_through(*G_dsr, r.proto_id); via.has_value())
+        {
+            for (const auto &n : G_dsr->get_nodes_by_type("object"))
+                if (rc::exit_fact::twin_of(*G_dsr, n.id()) == via) { cand->old_door_id = via.value(); cand->new_door_id = n.id(); break; }
+        }
+        else if (live_passage)
             if (const auto pair = live_passage->pair_for(r.proto_id); pair.has_value())
                 std::tie(cand->old_door_id, cand->new_door_id) = pair.value();
 
