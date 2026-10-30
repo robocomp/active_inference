@@ -3324,6 +3324,11 @@ void SpecificWorker::step_entry_mirrors()
             // from it and archives the room left only once it exists.
             if (rc::exit_fact::write_twin(*G, id, best->id()))
                 std::print("door_concept: [exit] link 3: {} is the twin of {} (entered '{}')\n", id, best->name(), room.name());
+            // The node-added path may have built a tracker instance at insert, BEFORE the twin edge made it a mirror
+            // (rc::room::is_proto_mirror); the tracker then merged it into its source, one hole by place (pingpong6 leg 2:
+            // 566 s of mirrors merged away). A mirror is not a belief: drop it. release_room adopts it as this room's door.
+            if (fitter_->instances().contains(id))
+                fitter_->forget_node(id);
             else
                 std::print("door_concept: [exit] could not write link 3 ({} -> {})\n", id, best->name());
         }
