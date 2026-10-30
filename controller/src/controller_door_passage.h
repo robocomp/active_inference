@@ -38,7 +38,12 @@
  *   target (a vantage on the door axis) and, once the door reads open, the aperture and the cross target just past it.
  *     Approach  the route to P_pre (through P_ap to P_post at once if the door already reads open)
  *     Open      at P_pre with the door shut: door_concept's `open` runs as in the chain (the selector takes it)
- *     Cross     the route on through P_ap to P_post; DONE on the room switch into a room this door leads to, or at P_post
+ *     Cross     the route on through P_ap to P_post. P_post reached = the body is THROUGH (the controller's own
+ *               measurement, on the perceived opening): it writes the crossing fact (`exit`, common/room_transition/
+ *               exit_fact.h, spec Revision 3) ONCE, then holds until room_concept has switched the robot's room and ltsm
+ *               has archived the room left (`current` = that room) — DONE. Nothing else ends a cross: no room-switch
+ *               guess, no "rooms this door leads to" filter, no re-reading of the door's state mid-cross (a door that
+ *               really is shut blocks the route, and a route that fails twice ends the passage, as for any route).
  *   The session reports the route's end (note_route): Arrived advances, Failed rebuilds ONCE from the current pose (a new
  *   leg key), and a second failure ends the passage failed with `cross_unreachable`. UseRoute = false is the chain, unchanged.
  *
@@ -46,7 +51,7 @@
  * the GUI thread, hence the mutex.
  */
 
-#include "door_passage_done.h"
+#include "../../common/room_transition/exit_fact.h"
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -113,8 +118,9 @@ public:
         route_epoch_ = 0;
         route_failures_ = 0;
         route_arrived_ = false;
-        post_reached_ = false;
-        cross_id_ = 0;
+                cross_id_ = 0;
+        exited_ = false;
+        predicted_room_id_ = 0;
         route_wait_logged_.clear();
         route_key_.clear();
         route_approach_.reset();
@@ -267,6 +273,8 @@ public:
     /// The robot's resolved room ID this cycle (the controller's track_room id, graph_state().room_id; 0 = unknown). The
     /// route's room switch is decided on ids, never names (a same-id rename is not a switch).
     void note_room_id(std::uint64_t id) { std::scoped_lock lk(m_); room_id_ = id; }
+    /// The room ltsm has archived up to (its `current` edge; 0 = unknown): a crossing is closed when it equals the room id.
+    void note_archived_room_id(std::uint64_t id) { std::scoped_lock lk(m_); archived_id_ = id; }
     /// What the session is to drive this cycle (route mode): the published targets, read from the graph by update(). `key`
     /// changes exactly when the route must be (re)built — another leg, a rebuild after a failure, another room frame — and
     /// NOT when door_concept refines a target by millimetres: a route is a commitment, not a re-decision per cycle.
@@ -310,6 +318,9 @@ public:
         std::vector<std::vector<Eigen::Vector2f>> passages; ///< free corridor while crossing (room frame)
         std::unordered_set<std::string> exempt;             ///< node names that are not obstacles now
         std::optional<std::string> event;                   ///< a one-line log of a transition this cycle
+        /// Set ONCE per crossing, the cycle the body is through: the caller writes link 1 (exit_fact::write_crossed).
+        struct Exit { std::string door; std::uint64_t predicted_room_id = 0; };
+        std::optional<Exit> exit;
     };
 
     /// One control cycle. `room_frame` = the controller's current room node name (the frame the affordances and
@@ -795,38 +806,27 @@ private:
         if (appr.has_value()) route_approach_ = *appr;   // the last published vantage (the open-wait keeps using it)
         if (cross.has_value()) route_cross_ = *cross;
 
-        // ── the room switch: the robot is through (a room this door leads to — M-8 — or any other when unknown)
-        if (step_ == Step::Cross and passage_room_switched(cross_id_, room_id_, post_reached_))
-        {
-            const auto targets = target_rooms(G);
-            if (targets.empty() or std::ranges::find(targets, room_frame) != targets.end())
-                return route_through(out, std::format("the room changed {} -> {}", cross_room_, room_frame));
-            if (target_ignored_logged_ != room_frame)
-            {
-                target_ignored_logged_ = room_frame;
-                std::println("[door-route] {}: the room changed {} -> {}, which this door does not lead to ({}) — not a switch "
-                             "through it", door_, cross_room_, room_frame, targets.front());
-            }
-        }
+        // ── DONE: the crossing fact was written, room_concept switched the room and ltsm archived the room left
+        if (step_ == Step::Cross and exited_ and room_id_ != 0 and room_id_ != cross_id_ and archived_id_ == room_id_)
+            return route_through(out, std::format("{} -> {}", cross_room_, room_frame));
         // ── the route's end, as the session reported it
         if (std::exchange(route_arrived_, false))
         {
-            if (step_ == Step::Cross)
+            if (step_ == Step::Cross and not exited_)
             {
-                // Task 17: P_post alone is NOT the end. The passage is done on room_concept's room switch (fact 3, handled
-                // above); until it arrives the robot holds here — no driving back, no failure; the mission step's budget bounds it.
-                if (not post_reached_)
-                {
-                    post_reached_ = true;
-                    route_event(out, std::format("[door-route] {}: past the door — waiting for room_concept's room switch", door_));
-                }
+                exited_ = true;
+                out.exit = Out::Exit{.door = door_, .predicted_room_id = predicted_room_id_};
+                route_event(out, std::format("[door-route] {}: THROUGH — the crossing fact is written ({}); waiting for the room "
+                                             "switch and its archive", door_,
+                                             predicted_room_id_ != 0 ? std::format("into remembered room id {}", predicted_room_id_)
+                                                                     : std::string("into a new room")));
             }
             if (step_ == Step::Approach)
             {
                 if (open_now and route_cross_.has_value())
                 {
                     route_event(out, std::format("[door-route] {}: at the vantage, the door reads open — on through it", door_));
-                    enter_cross(room_frame);
+                    enter_cross(G, room_frame);
                 }
                 else
                 {
@@ -842,7 +842,7 @@ private:
         if (step_ == Step::Approach and open_now and route_cross_.has_value())
         {
             route_event(out, std::format("[door-route] {}: the door reads open — the route goes on through it", door_));
-            enter_cross(room_frame);
+            enter_cross(G, room_frame);
         }
         if (step_ == Step::Open)
         {
@@ -864,17 +864,8 @@ private:
                 if (so == State::Executing) preempted_ = true;   // the caller releases the claim on `open`
                 opened_ = true;
                 route_event(out, std::format("[door-route] {}: the door is open — the route continues through it", door_));
-                enter_cross(room_frame);
+                enter_cross(G, room_frame);
             }
-        }
-        // ★ BACK TO THE OPEN-WAIT WHEN door_concept SAYS SHUT before the robot is through (the chain's "back to open" rule): the
-        //   route ends at P_pre again. Not once this passage opened it (a re-offer then is the flicker, try38).
-        if (step_ == Step::Cross and not opened_ and not open_now and not post_reached_)   // the door READS shut — not merely `open` on offer (its offer is P(shut), 04620a74)
-        {
-            route_event(out, std::format("[door-route] {}: {} is offered — the door is shut: the route stops at the vantage", door_,
-                                         name_of(Step::Open)));
-            step_ = Step::Approach;
-            cross_room_.clear();
         }
         if (step_ == Step::Done) { note_ = "done"; return out; }
         if (static_cast<int>(step_) > static_cast<int>(stop_after_))   // `open door`: done once open
@@ -895,12 +886,12 @@ private:
             return out;
         }
         const bool through = step_ == Step::Cross;
-        if (through and post_reached_)   // past the door, waiting for the room switch: hold (no route, the claim stays)
+        if (through and exited_)   // through, the fact written: hold (no route, the claim stays) until the switch is archived
         {
             out.route.reset();
             out.required = name_of(step_) + kRouteSuffix;
-            step_state_ = "past the door";
-            note_ = std::format("{} (past the door, waiting for room_concept's room switch)", name_of(step_));
+            step_state_ = "through";
+            note_ = std::format("{} (through, waiting for the room switch and its archive)", name_of(step_));
             out.exempt = {door_};
             if (auto c = corridor(G, nullptr, room_frame); c.has_value()) out.passages.push_back(std::move(*c));
             return out;
@@ -937,15 +928,22 @@ private:
         }
         return out;
     }
-    void enter_cross(const std::string& room_frame)   // under m_
+    void enter_cross(DSR::DSRGraph& G, const std::string& room_frame)   // under m_
     {
         step_ = Step::Cross;
         cross_room_ = room_frame;
         seen_executing_ = false;
         attempts_ = 0;
         route_arrived_ = false;
-        post_reached_ = false;
-        cross_id_ = room_id_;   // the room ID the step began in (0 = unknown: the first known id is captured later)
+        exited_ = false;
+        cross_id_ = room_id_;   // the room ID the step began in
+        // THE PREDICTION, taken before crossing: the remembered room ltsm's recall under this door names (recall_<k>, its
+        // room_id), else a new room. It travels in the crossing fact; nobody reads a recall at crossing time.
+        predicted_room_id_ = 0;
+        if (const auto dn = G.get_node(door_); dn.has_value())
+            for (const auto& e : DSR::DSRGraph::get_node_edges_by_type(dn.value(), "RT"))
+                if (const auto c = G.get_node(e.to()); c.has_value() and c->name().starts_with("recall_"))
+                    predicted_room_id_ = G.get_attrib_by_name<room_id_att>(c.value()).value_or(0);
     }
     Out route_through(Out& out, const std::string& why)   // under m_
     {
@@ -969,11 +967,11 @@ private:
     int route_epoch_ = 0;
     int route_failures_ = 0;
     bool route_arrived_ = false;
-    /// Task 17: P_post reached, no room switch yet (hold; logged once). Cleared ONLY by enter_cross/start: a robot shoved back
-    /// out of the doorway while holding stays held until the mission step's budget (accepted).
-    bool post_reached_ = false;
-    std::uint64_t cross_id_ = 0;   ///< the room ID the Cross step began in (0 = unknown)
-    std::uint64_t room_id_ = 0;    ///< the robot's resolved room id this cycle (note_room_id; 0 = unknown)
+    bool exited_ = false;                  ///< through: the crossing fact was handed to the caller (once per Cross)
+    std::uint64_t predicted_room_id_ = 0;  ///< the remembered room behind the door at enter_cross (0 = new)
+    std::uint64_t cross_id_ = 0;           ///< the room ID the Cross step began in (0 = unknown)
+    std::uint64_t room_id_ = 0;            ///< room_concept's room for the robot this cycle (note_room_id; 0 = unknown)
+    std::uint64_t archived_id_ = 0;        ///< the room ltsm's `current` names (note_archived_room_id; 0 = unknown)
     std::string route_key_;
     std::string route_wait_logged_;
     std::optional<std::pair<Eigen::Vector2f, float>> route_approach_, route_cross_;

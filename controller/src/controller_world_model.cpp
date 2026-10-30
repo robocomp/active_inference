@@ -46,10 +46,14 @@ bool ControllerWorldModel::refresh_graph_state()
     //   is kept through a moment of ambiguity.
     // every room's name -> id, so a mission naming a room that was renamed ELSEWHERE (not the current one) still resolves
     for (const auto &n : graph_->get_nodes_by_type("room")) graph_state_.room_aliases[n.name()] = n.id();
-    if (const auto room = rc::room::current_room_node(*graph_); room.has_value())
+    // The robot's room is room_concept's (its live robot->room RT edge); ltsm's `current` only says how far it has archived
+    // (spec Revision 3: a crossing closes when the two agree).
+    graph_state_.archived_room_id = rc::room::current_edge_room(*graph_).value_or(0);
+    const auto rt_room = rc::room::robot_rt_room(*graph_);
+    if (const auto room = rt_room.has_value() ? graph_->get_node(*rt_room) : std::optional<DSR::Node>{}; room.has_value())
     {
         const std::string old_name = graph_state_.room_name;
-        switch (rc::track_room(graph_state_.room_id, graph_state_.room_name, graph_state_.prev_room_name, room->id(), room->name()))
+        switch (rc::track_room(graph_state_.room_id, graph_state_.room_name, room->id(), room->name()))
         {
             case rc::RoomEvent::Changed:
                 if (not old_name.empty())

@@ -5,9 +5,19 @@
 (*                                                                                     *)
 (* The controller drives the body through a hole it perceives in its own frame (the    *)
 (* interaction anchor) and measures, there, when the body is through. At that moment   *)
-(* it writes the `exit` fact: [seq, the face it crossed, its hole, the room it left,   *)
-(* the room it predicted behind the face -- the recall it resolved the leg with when   *)
-(* the cross STARTED, or "new"]. One writer, one measurement, written once.            *)
+(* it writes the `exit` fact: an edge ROBOT -> the face it crossed (Lucas Bonilla s   *)
+(* TFM edge), carrying the                                                            *)
+(* room it predicted behind the face (room_id: the recall it resolved the leg with when *)
+(* the cross STARTED, 0 = "new"). One writer, one measurement, written once.           *)
+(*                                                                                     *)
+(* ENCODING A -- a CHAIN of edges, each dying with its source node (as in the graph):  *)
+(*  1 controller   `exit` robot -> OLD_FACE (room_id = prediction)                     *)
+(*  2 room_concept on 1 naming a face of ITS room: enters NEW_ROOM, `exit` OLD_FACE -> *)
+(*                 NEW_ROOM                                                            *)
+(*  3 door_concept on 2: NEW_FACE in NEW_ROOM, `exit` NEW_FACE -> OLD_FACE (the twin)  *)
+(*  4 ltsm         on 3: archives OLD_ROOM (deleting it and OLD_FACE: 1 and 2 die)     *)
+(* No counters: a fact about leaving room R cannot fire twice, the robot is no longer   *)
+(* in R once it has been acted on.                                                     *)
 (*                                                                                     *)
 (*  room_concept   switches on the exit fact alone: the predicted room if its name is  *)
 (*                 free, else a new provisional room. No p_cross, no PassageMemory, no  *)
@@ -71,19 +81,18 @@ Legs  == IF SCENARIO = "pingpong" THEN PingPong ELSE Tour3
 NLegs == Len(Legs)
 Detectable(r) == IF SCENARIO = "pingpong" THEN HolesOf(r) \cap {"D1"} ELSE HolesOf(r)
 
+NoEx   == 999   \* "no controller exit edge on this face" (a room_id no room has)
 NoProp == [p |-> 0, k |-> 0, old |-> 0, st |-> "none"]
-NoExit == [seq |-> 0, door |-> 0, hole |-> NoHole, from |-> 0, pred |-> 0]
 Max(S) == CHOOSE x \in S : \A y \in S : x >= y
 
 VARIABLES
   pos, near, doorway, lastHole, degr, phantoms,          \* world / environment
-  exitF, exitSeq,                                        \* controller: the latest exit fact, its counter
-  rooms,        \* room_concept: id -> [name, truth, proto, from, via, entered (the exit seq it was entered by)]
+  rooms,        \* room_concept: id -> [name, truth, proto, from, via, face (its `exit` OLD_FACE -> this room; 0 none)]
   rcRT,         \* room_concept: the robot's room
-  rcAck,        \* room_concept: the last exit seq it acted on
   current,      \* ltsm_agent: `current` (still written; nobody but ltsm reads it)
-  doors,        \* door_concept: id -> [hole, room, pass (leaf open enough to offer a cross), fact (backed), twin]
-  dcAck,        \* door_concept: the last exit seq it acted on
+  doors,        \* door_concept: id -> [hole, room, pass (leaf open enough to offer a cross), fact (backed),
+                \*   twin (its `exit` NEW_FACE -> OLD_FACE; 0 none), ex (the CONTROLLER's `exit` edge on it: its room_id,
+                \*   NoEx = no edge)]
   passages, recalls, proposal,
   rcStartup, rcPromoted, hwm, rejects,
   memTruth, memFaces, memPass, carry,
@@ -92,8 +101,7 @@ VARIABLES
   nextRoom, nextDoor,
   issued, arrived
 
-vars == << pos, near, doorway, lastHole, degr, phantoms, exitF, exitSeq, rooms, rcRT, rcAck, current, doors, dcAck,
-           passages, recalls, proposal, rcStartup, rcPromoted, hwm, rejects, memTruth, memFaces, memPass, carry,
+vars == << pos, near, doorway, lastHole, degr, phantoms, rooms, rcRT, current, doors, passages, recalls, proposal, rcStartup, rcPromoted, hwm, rejects, memTruth, memFaces, memPass, carry,
            dcRoom, idFile, ctl, ctlRoom, ctlName, nextRoom, nextDoor, issued, arrived >>
 envVars  == << pos, near, doorway, lastHole, degr, phantoms >>
 rcVars   == << rcStartup, rcPromoted, hwm, rejects >>
@@ -107,7 +115,7 @@ RecallsOn(d)   == {x.name : x \in {y \in recalls : y.door = d}}
 HasMatch(d)    == \E p \in passages : d \in p
 Offered(d)     == d \in DOMAIN doors /\ doors[d].room = dcRoom /\ doors[d].pass
 Executing(d)   == ctl.step = "cross" /\ ctl.door = d /\ Offered(d)
-NewDoor(h, r, f, tw) == [hole |-> h, room |-> r, pass |-> TRUE, fact |-> f, twin |-> tw]
+NewDoor(h, r, f, tw) == [hole |-> h, room |-> r, pass |-> TRUE, fact |-> f, twin |-> tw, ex |-> NoEx]
 
 TypeOK ==
   /\ pos \in PRooms /\ near \in Holes \cup {NoHole} /\ lastHole \in Holes \cup {NoHole}
@@ -117,36 +125,37 @@ TypeOK ==
 
 Init ==
   /\ pos = 1 /\ near = NoHole /\ doorway = FALSE /\ lastHole = NoHole /\ degr = 0 /\ phantoms = 0
-  /\ exitF = NoExit /\ exitSeq = 0
-  /\ rooms = (1 :> [name |-> 1, truth |-> 1, proto |-> FALSE, from |-> 0, via |-> NoHole, entered |-> 0])
-  /\ rcRT = 1 /\ rcAck = 0 /\ current = 1
-  /\ doors = [d \in {} |-> NewDoor("D0", 0, FALSE, 0)] /\ dcAck = 0
+  /\ rooms = (1 :> [name |-> 1, truth |-> 1, proto |-> FALSE, from |-> 0, via |-> NoHole, face |-> 0])
+  /\ rcRT = 1 /\ current = 1
+  /\ doors = [d \in {} |-> NewDoor("D0", 0, FALSE, 0)]
   /\ passages = {} /\ recalls = {} /\ proposal = NoProp
   /\ rcStartup = FALSE /\ rcPromoted = TRUE /\ hwm = 1 /\ rejects = 0
   /\ memTruth = (1 :> 1) /\ memFaces = {} /\ memPass = {} /\ carry = {}
   /\ dcRoom = 1
   /\ idFile = IF STALE_FILE THEN {[name |-> 2, hole |-> "X"]} ELSE {}
   /\ ctl = [leg |-> 1, step |-> "idle", door |-> 0, hole |-> NoHole, croom |-> 0, pred |-> 0, passed |-> FALSE,
-            seq |-> 0]
+            exited |-> FALSE]
   /\ ctlRoom = 1 /\ ctlName = 1
   /\ nextRoom = 2 /\ nextDoor = 1
   /\ issued = (1 :> 1) /\ arrived = << >>
 
 \* =================================================================================== room_concept
-\* The switch, on the exit fact alone. Guards: a fact it has not acted on, about leaving ITS room.
+\* Link 2. The switch, on the controller's `exit` edge on a face of ITS room (the only guard).
 RC_Switch ==
-  /\ exitF.seq > rcAck /\ exitF.from = rcRT
+  /\ \E d \in DoorsOf(rcRT) : doors[d].ex # NoEx
   /\ nextRoom <= MaxRoomIds
-  /\ LET useRc == exitF.pred # 0 /\ exitF.pred \notin LiveNames
-         k     == IF useRc THEN exitF.pred ELSE Max(LiveNames \cup {hwm}) + 1
+  /\ LET d     == CHOOSE x \in DoorsOf(rcRT) : doors[x].ex # NoEx
+         pred  == doors[d].ex
+         useRc == pred # 0 /\ pred \notin LiveNames
+         k     == IF useRc THEN pred ELSE Max(LiveNames \cup {hwm}) + 1
          t     == IF useRc THEN issued[k] ELSE pos
      IN /\ rooms' = rooms @@ (nextRoom :> [name |-> k, truth |-> t, proto |-> ~useRc, from |-> rooms[rcRT].name,
-                                            via |-> exitF.hole, entered |-> exitF.seq])
+                                            via |-> doors[d].hole, face |-> d])
         /\ hwm' = Max({hwm, k})
         /\ issued' = IF k \in DOMAIN issued THEN issued ELSE issued @@ (k :> t)
         /\ rcPromoted' = useRc
-  /\ rcRT' = nextRoom /\ nextRoom' = nextRoom + 1 /\ rcStartup' = TRUE /\ rcAck' = exitF.seq
-  /\ UNCHANGED << envVars, exitF, exitSeq, current, doors, dcAck, passages, recalls, proposal, rejects, ltVars, dcVars,
+  /\ rcRT' = nextRoom /\ nextRoom' = nextRoom + 1 /\ rcStartup' = TRUE
+  /\ UNCHANGED << envVars, current, doors, passages, recalls, proposal, rejects, ltVars, dcVars,
                   ctVars, nextDoor, arrived >>
 
 Young == rcStartup /\ ~rcPromoted
@@ -156,7 +165,7 @@ RC_Promote ==
   /\ ~(proposal.st = "pending" /\ proposal.p = rcRT)
   /\ rooms' = [rooms EXCEPT ![rcRT].proto = FALSE]
   /\ rcPromoted' = TRUE
-  /\ UNCHANGED << envVars, exitF, exitSeq, rcRT, rcAck, current, doors, dcAck, passages, recalls, proposal, rcStartup,
+  /\ UNCHANGED << envVars, rcRT, current, doors, passages, recalls, proposal, rcStartup,
                   hwm, rejects, ltVars, dcVars, ctVars, nextRoom, nextDoor, issued, arrived >>
 
 RC_Judge ==
@@ -178,7 +187,7 @@ RC_Judge ==
            /\ proposal' = [proposal EXCEPT !.st = "rejected"]
            /\ rejects' = rejects + 1
            /\ UNCHANGED << rooms, rcPromoted >>
-  /\ UNCHANGED << envVars, exitF, exitSeq, rcRT, rcAck, current, doors, dcAck, passages, recalls, rcStartup, hwm,
+  /\ UNCHANGED << envVars, rcRT, current, doors, passages, recalls, rcStartup, hwm,
                   ltVars, dcVars, ctVars, nextRoom, nextDoor, issued, arrived >>
 
 \* =================================================================================== ltsm_agent
@@ -217,7 +226,9 @@ LT_Cycle(K) ==
       mt1 == [n \in DOMAIN memTruth \ {dropName} |-> memTruth[n]]
       mf1 == {f \in memFaces : f[1] # dropName}
       mp1 == {m \in memPass : m.a[1] # dropName /\ m.b[1] # dropName}
+      \* link 4: archive only once door_concept's twin of the crossed face exists (link 3)
       due  == rcRT # current /\ current \in DOMAIN rooms
+              /\ \E f \in DoorsOf(rcRT) : doors[f].twin = rooms[rcRT].face /\ rooms[rcRT].face # 0
       old  == current
       new  == rcRT
       viaH == rooms[new].via                    \* written by room_concept FROM the exit fact
@@ -248,7 +259,7 @@ LT_Cycle(K) ==
      /\ memTruth' = mt2 /\ memFaces' = mf3 /\ memPass' = mp3
      /\ carry' = cr1 \ done
      /\ recalls' = Wanted(rm2, dr2, mt2, mp3, stg)
-     /\ UNCHANGED << envVars, exitF, exitSeq, rcRT, rcAck, rcVars, dcAck, dcVars, ctVars, nextRoom, nextDoor, issued,
+     /\ UNCHANGED << envVars, rcRT, rcVars, dcVars, ctVars, nextRoom, nextDoor, issued,
                      arrived >>
 
 \* =================================================================================== door_concept
@@ -256,30 +267,30 @@ LT_Cycle(K) ==
 DC_Follow ==
   /\ rcRT # dcRoom
   /\ dcRoom' = rcRT
-  /\ UNCHANGED << envVars, exitF, exitSeq, rooms, rcRT, rcAck, current, doors, dcAck, passages, recalls, proposal,
+  /\ UNCHANGED << envVars, rooms, rcRT, current, doors, passages, recalls, proposal,
                   rcVars, ltVars, idFile, ctVars, nextRoom, nextDoor, issued, arrived >>
 
-\* On the exit fact, once room_concept has entered a room by it: the hole's face in that room, passable, backed by the
-\* crossing, and the twin of the face crossed (which is backed too while it lives).
+\* Link 3, on room_concept's `exit` OLD_FACE -> NEW_ROOM (alive while OLD_FACE is): the hole's face in NEW_ROOM,
+\* passable, backed by the crossing, `exit` NEW_FACE -> OLD_FACE; OLD_FACE is backed too while it lives.
+Pending(r) == /\ rooms[r].face \in DOMAIN doors
+              /\ ~\E f \in DoorsOf(r) : doors[f].twin = rooms[r].face
 DC_Face ==
-  /\ exitF.seq > dcAck
-  /\ \E r \in DOMAIN rooms : rooms[r].entered = exitF.seq
-  /\ LET r   == CHOOSE x \in DOMAIN rooms : rooms[x].entered = exitF.seq
-         has == {d \in DoorsOf(r) : doors[d].hole = exitF.hole}
-         old == IF exitF.door \in DOMAIN doors THEN {exitF.door} ELSE {}
+  /\ \E r \in DOMAIN rooms : Pending(r)
+  /\ LET r   == CHOOSE x \in DOMAIN rooms : Pending(x)
+         o   == rooms[r].face
+         has == {d \in DoorsOf(r) : doors[d].hole = doors[o].hole}
      IN IF has = {}
         THEN /\ nextDoor <= MaxDoorIds
-             /\ doors' = [d \in DOMAIN doors |-> IF d \in old THEN [doors[d] EXCEPT !.fact = TRUE, !.pass = TRUE]
+             /\ doors' = [d \in DOMAIN doors |-> IF d = o THEN [doors[d] EXCEPT !.fact = TRUE, !.pass = TRUE]
                                                  ELSE doors[d]]
-                         @@ (nextDoor :> NewDoor(exitF.hole, r, TRUE, exitF.door))
+                         @@ (nextDoor :> NewDoor(doors[o].hole, r, TRUE, o))
              /\ nextDoor' = nextDoor + 1
         ELSE /\ doors' = [d \in DOMAIN doors |->
-                            IF d \in old THEN [doors[d] EXCEPT !.fact = TRUE, !.pass = TRUE]
-                            ELSE IF d \in has THEN [doors[d] EXCEPT !.fact = TRUE, !.pass = TRUE, !.twin = exitF.door]
+                            IF d = o THEN [doors[d] EXCEPT !.fact = TRUE, !.pass = TRUE]
+                            ELSE IF d \in has THEN [doors[d] EXCEPT !.fact = TRUE, !.pass = TRUE, !.twin = o]
                             ELSE doors[d]]
              /\ nextDoor' = nextDoor
-  /\ dcAck' = exitF.seq
-  /\ UNCHANGED << envVars, exitF, exitSeq, rooms, rcRT, rcAck, current, passages, recalls, proposal, rcVars, ltVars,
+  /\ UNCHANGED << envVars, rooms, rcRT, current, passages, recalls, proposal, rcVars, ltVars,
                   dcVars, ctVars, nextRoom, issued, arrived >>
 
 DC_Birth(h) ==
@@ -288,7 +299,7 @@ DC_Birth(h) ==
   /\ nextDoor <= MaxDoorIds
   /\ doors' = doors @@ (nextDoor :> NewDoor(h, dcRoom, FALSE, 0))
   /\ nextDoor' = nextDoor + 1
-  /\ UNCHANGED << envVars, exitF, exitSeq, rooms, rcRT, rcAck, current, dcAck, passages, recalls, proposal, rcVars,
+  /\ UNCHANGED << envVars, rooms, rcRT, current, passages, recalls, proposal, rcVars,
                   ltVars, dcVars, ctVars, nextRoom, issued, arrived >>
 
 DC_Phantom ==
@@ -300,7 +311,7 @@ DC_Phantom ==
   /\ doors' = doors @@ (nextDoor :> NewDoor("X", dcRoom, FALSE, 0))
   /\ nextDoor' = nextDoor + 1
   /\ phantoms' = phantoms + 1
-  /\ UNCHANGED << pos, near, doorway, lastHole, degr, exitF, exitSeq, rooms, rcRT, rcAck, current, dcAck, passages,
+  /\ UNCHANGED << pos, near, doorway, lastHole, degr, rooms, rcRT, current, passages,
                   recalls, proposal, rcVars, ltVars, dcVars, ctVars, nextRoom, issued, arrived >>
 
 \* A WRONG verdict from poor views on a door of the hole being / just crossed (or any, ABSENCE_ANYTIME): the door is
@@ -318,13 +329,13 @@ DC_Degrade(d) ==
      \/ /\ doors' = [doors EXCEPT ![d].pass = FALSE]
         /\ UNCHANGED recalls
   /\ degr' = degr + 1
-  /\ UNCHANGED << pos, near, doorway, lastHole, phantoms, exitF, exitSeq, rooms, rcRT, rcAck, current, dcAck, passages,
+  /\ UNCHANGED << pos, near, doorway, lastHole, phantoms, rooms, rcRT, current, passages,
                   proposal, rcVars, ltVars, dcVars, ctVars, nextRoom, nextDoor, issued, arrived >>
 DC_PhantomGone(d) ==
   /\ Offered(d) /\ doors[d].hole = "X"
   /\ FIX_HOLD => ~Executing(d)
   /\ DelDoor(d)
-  /\ UNCHANGED << envVars, exitF, exitSeq, rooms, rcRT, rcAck, current, dcAck, passages, proposal, rcVars, ltVars,
+  /\ UNCHANGED << envVars, rooms, rcRT, current, passages, proposal, rcVars, ltVars,
                   dcVars, ctVars, nextRoom, nextDoor, issued, arrived >>
 
 \* =================================================================================== controller
@@ -334,7 +345,7 @@ CT_Track ==
         /\ ctlRoom' = rcRT /\ ctlName' = rooms[rcRT].name
      \/ /\ rcRT = ctlRoom /\ rooms[rcRT].name # ctlName
         /\ ctlName' = rooms[rcRT].name /\ UNCHANGED ctlRoom
-  /\ UNCHANGED << envVars, exitF, exitSeq, rooms, rcRT, rcAck, current, doors, dcAck, passages, recalls, proposal,
+  /\ UNCHANGED << envVars, rooms, rcRT, current, doors, passages, recalls, proposal,
                   rcVars, ltVars, dcVars, ctl, nextRoom, nextDoor, issued, arrived >>
 
 \* `room` -> a door with a recall_<room> child; `new` -> a door no recall/passage/crossing names (+ harness: its hole).
@@ -351,10 +362,10 @@ CT_Start ==
   /\ \E d \in Pick :
        /\ Offered(d)
        /\ ctl' = [leg |-> ctl.leg, step |-> "cross", door |-> d, hole |-> doors[d].hole, croom |-> ctlRoom,
-                  pred |-> IF Legs[ctl.leg].rel = "room" THEN Legs[ctl.leg].name ELSE 0, passed |-> FALSE, seq |-> 0]
+                  pred |-> IF Legs[ctl.leg].rel = "room" THEN Legs[ctl.leg].name ELSE 0, passed |-> FALSE,
+                  exited |-> FALSE]
        /\ near' = doors[d].hole
-  /\ UNCHANGED << pos, doorway, lastHole, degr, phantoms, exitF, exitSeq, rooms, rcRT, rcAck, current, doors, dcAck,
-                  passages, recalls, proposal, rcVars, ltVars, dcVars, ctlRoom, ctlName, nextRoom, nextDoor, issued,
+  /\ UNCHANGED << pos, doorway, lastHole, degr, phantoms, rooms, rcRT, current, doors, passages, recalls, proposal, rcVars, ltVars, dcVars, ctlRoom, ctlName, nextRoom, nextDoor, issued,
                   arrived >>
 
 \* The body passes the hole (environment, fair). The route runs on the anchor, not on the graph door.
@@ -362,33 +373,32 @@ CT_Pass ==
   /\ ctl.step = "cross" /\ ~ctl.passed /\ near # NoHole /\ pos \in Ends(near)
   /\ pos' = Other(near, pos) /\ lastHole' = near /\ doorway' = TRUE
   /\ ctl' = [ctl EXCEPT !.passed = TRUE]
-  /\ UNCHANGED << near, degr, phantoms, exitF, exitSeq, rooms, rcRT, rcAck, current, doors, dcAck, passages, recalls,
+  /\ UNCHANGED << near, degr, phantoms, rooms, rcRT, current, doors, passages, recalls,
                   proposal, rcVars, ltVars, dcVars, ctlRoom, ctlName, nextRoom, nextDoor, issued, arrived >>
 
-\* The anchor measures the body through: the exit fact (one writer, once per crossing).
+\* Link 1. The body is through: the `exit` edge controller -> the face crossed (one at a time: the last one goes).
 CT_Exit ==
-  /\ ctl.step = "cross" /\ ctl.passed /\ ctl.seq = 0
-  /\ exitF' = [seq |-> exitSeq + 1, door |-> ctl.door, hole |-> ctl.hole, from |-> ctl.croom, pred |-> ctl.pred]
-  /\ exitSeq' = exitSeq + 1
-  /\ ctl' = [ctl EXCEPT !.seq = exitSeq + 1]
-  /\ UNCHANGED << envVars, rooms, rcRT, rcAck, current, doors, dcAck, passages, recalls, proposal, rcVars, ltVars,
+  /\ ctl.step = "cross" /\ ctl.passed /\ ~ctl.exited /\ ctl.door \in DOMAIN doors
+  /\ doors' = [d \in DOMAIN doors |-> [doors[d] EXCEPT !.ex = IF d = ctl.door THEN ctl.pred ELSE NoEx]]
+  /\ ctl' = [ctl EXCEPT !.exited = TRUE]
+  /\ UNCHANGED << envVars, rooms, rcRT, current, passages, recalls, proposal, rcVars, ltVars,
                   dcVars, ctlRoom, ctlName, nextRoom, nextDoor, issued, arrived >>
 
 CT_LeaveDoorway ==
   /\ doorway /\ ctl.step = "idle"
   /\ doorway' = FALSE
-  /\ UNCHANGED << pos, near, lastHole, degr, phantoms, exitF, exitSeq, rooms, rcRT, rcAck, current, doors, dcAck,
-                  passages, recalls, proposal, rcVars, ltVars, dcVars, ctVars, nextRoom, nextDoor, issued, arrived >>
+  /\ UNCHANGED << pos, near, lastHole, degr, phantoms, rooms, rcRT, current, doors, passages, recalls, proposal, rcVars, ltVars, dcVars, ctVars, nextRoom, nextDoor, issued, arrived >>
 
-\* A leg completes when room_concept has acted on THIS leg's exit fact (and the controller sees that room).
+\* A leg completes once the controller has written its exit and room_concept has switched (the only cause of a switch
+\* now is an exit fact), and -- X3 -- ltsm has archived the room left.
 CT_Done ==
-  /\ ctl.step = "cross" /\ ctl.seq # 0 /\ rcAck = ctl.seq /\ ctlRoom = rcRT
+  /\ ctl.step = "cross" /\ ctl.exited /\ rcRT # ctl.croom /\ ctlRoom = rcRT
   /\ CLOSE_ON_ARCHIVE => current = rcRT
   /\ arrived' = Append(arrived, pos)
   /\ ctl' = [leg |-> ctl.leg + 1, step |-> "idle", door |-> 0, hole |-> NoHole, croom |-> 0, pred |-> 0,
-             passed |-> FALSE, seq |-> 0]
+             passed |-> FALSE, exited |-> FALSE]
   /\ near' = NoHole
-  /\ UNCHANGED << pos, doorway, lastHole, degr, phantoms, exitF, exitSeq, rooms, rcRT, rcAck, current, doors, dcAck,
+  /\ UNCHANGED << pos, doorway, lastHole, degr, phantoms, rooms, rcRT, current, doors,
                   passages, recalls, proposal, rcVars, ltVars, dcVars, ctlRoom, ctlName, nextRoom, nextDoor, issued >>
 
 \* =================================================================================== spec
@@ -428,8 +438,8 @@ RecallsPointRight ==
          r == rooms[doors[x.door].room].truth
      IN r \in Ends(h) /\ issued[x.name] = Other(h, r)
 ArrivedRight == \A i \in 1..Len(arrived) : arrived[i] = Legs[i].dest
-\* Once room_concept has acted on the latest exit fact, its room is the robot's room.
-RoomRightAfterExit == (rcAck = exitSeq /\ ctl.step = "idle") => pos = rooms[rcRT].truth
+\* Between legs, room_concept's room is the robot's room.
+RoomRightAfterExit == ctl.step = "idle" => pos = rooms[rcRT].truth
 RenamedInPlace == [][proposal.st = "pending" /\ proposal'.st = "accepted" => DOMAIN rooms' = DOMAIN rooms]_vars
 
 CrossingNoticed == [](pos # rooms[rcRT].truth ~> pos = rooms[rcRT].truth)
@@ -443,5 +453,4 @@ VacDegraded   == degr = 0
 VacShutBacked == ~\E d \in DOMAIN doors : doors[d].fact /\ ~doors[d].pass
 VacPhantom    == phantoms = 0
 VacLeg7       == ctl.leg < 7
-VacPromoted   == ~(\E r \in DOMAIN rooms : rooms[r].entered > 0 /\ ~rooms[r].proto /\ rcRT = r /\ ~rcPromoted)
 ==========================================================================================

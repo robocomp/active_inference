@@ -28,6 +28,7 @@ struct DoorFacts
     std::string name{};
     std::set<std::string> recall_rooms{};   ///< rooms R for which the door has a child `recall_R`
     bool has_match = false;                 ///< a passage `match` edge points at the door
+    bool crossed = false;                   ///< a crossing fact names it (exit_fact::is_crossed_face): never `new`
     bool looked = false;                    ///< an aff_door_look_<name> node exists or existed
     double dist = std::numeric_limits<double>::infinity();   ///< metres from the robot (inf = unknown)
 };
@@ -57,7 +58,7 @@ enum class DoorRelationKind { None, Room, New };
         }
         else if (kind == DoorRelationKind::New)
         {
-            if (not d.recall_rooms.empty() or d.has_match) continue;
+            if (not d.recall_rooms.empty() or d.has_match or d.crossed) continue;
             const bool better = best == nullptr or (d.looked != best->looked ? d.looked
                                                     : d.dist != best->dist   ? d.dist < best->dist
                                                                              : d.name < best->name);
@@ -71,12 +72,11 @@ enum class RoomEvent { None, Renamed, Changed };
 
 /// The room the robot is in, tracked by node id. The id says WHICH room; the name is owned by room_concept and can change
 /// under the same id (a recognised room adopts its remembered name in place: room_4 -> room_2). A rename is not a room
-/// change: prev_name stays the name the room had when the robot LEFT it (so ltsm's recall_<prev> is found by that name).
-inline RoomEvent track_room(std::uint64_t &id, std::string &name, std::string &prev_name, std::uint64_t new_id, const std::string &new_name)
+/// change.
+inline RoomEvent track_room(std::uint64_t &id, std::string &name, std::uint64_t new_id, const std::string &new_name)
 {
     if (new_id != id)
     {
-        if (not name.empty()) prev_name = name;
         id = new_id; name = new_name;
         return RoomEvent::Changed;
     }

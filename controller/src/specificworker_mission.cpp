@@ -470,6 +470,7 @@ std::vector<rc::DoorFacts> SpecificWorker::door_facts()
 				f.recall_rooms.insert(child->name().substr(7));
 		for (const auto &e : G->get_edges_to_id(door->id()))
 			if (e.type() == "match") f.has_match = true;
+		f.crossed = rc::exit_fact::is_crossed_face(*G, door->id());
 		if (G->get_node(rc::DoorPassage::look_name(name)).has_value()) door_looked_.insert(name);
 		f.looked = door_looked_.contains(name);
 		if (robot_T.has_value() and inner_eigen_api_)
@@ -495,13 +496,6 @@ std::expected<std::string, std::string> SpecificWorker::resolve_door(const rc::m
 	if (rc::relation_of(r) != rc::DoorRelationKind::None)
 	{
 		const auto facts = door_facts();
-		// `new` only once the way BACK is known: right after a crossing the entry door carries no recall yet and would read
-		// "new" (recog_try30 leg 4 took the door it had just come through). ltsm marks it recall_<previous room> once it has
-		// processed the crossing; until then nothing in this room is known to be new. A relation, not a timer: if ltsm never
-		// marks it, the step's hold runs out and the caller scans/retries as for any unresolved door.
-		if (const auto &gs = world_model_.graph_state(); rc::relation_of(r) == rc::DoorRelationKind::New and not gs.prev_room_name.empty()
-		    and std::ranges::none_of(facts, [&](const rc::DoorFacts &f) { return f.recall_rooms.contains(gs.prev_room_name); }))
-			return std::unexpected(std::format("no door of '{}' is known yet to lead back to '{}'", gs.room_name, gs.prev_room_name));
 		auto expanded = facts;
 		if (rc::relation_of(r) == rc::DoorRelationKind::Room)
 		{

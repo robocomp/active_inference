@@ -202,8 +202,20 @@ bool ControllerSession::sync_world_state(std::uint64_t timestamp_ms,
         }
         door_passage_.set_look_enabled(policy_enabled());   // Task E: the look-vs-step choice belongs to the [Policy] chain
         door_passage_.note_room_id(world_model.graph_state().room_id);
+        door_passage_.note_archived_room_id(world_model.graph_state().archived_room_id);
         auto dp = door_passage_.update(*graph_, world_model.inner_eigen(), world_model.graph_state().room_name);
         if (dp.event.has_value()) std::println("{}", *dp.event);
+        // THE CROSSING FACT (link 1, common/room_transition/exit_fact.h): the body is through this door.
+        if (dp.exit.has_value())
+        {
+            const auto robot = world_model.graph_state().robot_id;
+            const auto face = graph_->get_node(dp.exit->door);
+            if (robot != 0 and face.has_value() and rc::exit_fact::write_crossed(*graph_, robot, face->id(), dp.exit->predicted_room_id))
+                std::println("[door-route] {}: exit written (predicted room id {})", dp.exit->door, dp.exit->predicted_room_id);
+            else
+                std::println("[door-route] {}: exit NOT written (robot node {}, door node {})", dp.exit->door, robot,
+                             face.has_value());
+        }
         // A single command's passage is over (crossed, door closed behind or left open): the base goes back to the
         // affordances until the next command or mission (2026-10-18, user). A mission's passage hands over to its
         // next step instead (then_affordances false).

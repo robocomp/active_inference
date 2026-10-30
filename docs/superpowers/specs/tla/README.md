@@ -259,8 +259,10 @@ not vacuous. Results (TLC 2026.10.28, 8 workers):
 
 | Config | Result | Distinct states |
 |---|---|---|
-| `_pingpong` | no error | 85,308 |
-| `_pingpong_nohold` | `TourCompletes` violated (pingpong2: the entered face judged shut) | 24,788 |
-| `_pingpong_noclose` | no error | 124,090 |
-| `_tour3_noclose` | `MemoryPassagesSound` violated (a leg opens before ltsm archives the last crossing) | 100,756 |
-| `_tour3` | no error | 9,265,682 (~25 min) |
+| `_pingpong` | no error | 24,933 |
+| `_pingpong_nohold` | `TourCompletes` violated (pingpong2: the entered face judged shut) | 32,114 |
+| `_pingpong_noclose` | `TourCompletes` violated (a leg opens before ltsm archives the last crossing; link 4 stalls) | 32,072 |
+| `_tour3_noclose` | `TourCompletes` violated (same) | 36,135 |
+| `_tour3` | no error | 3,125,038 |
+
+Encoding A (the facts as graph edges that die with their source node): spec Revision 3, "Verification".

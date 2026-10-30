@@ -18,21 +18,21 @@ DoorFacts door(std::string n, std::set<std::string> recalls = {}, bool match = f
 
 int main()
 {
-    {   // a rename under the same id is not a room change; prev stays the name at LEAVING
-        std::uint64_t id = 7; std::string name = "room_4", prev = "room_1";
-        CHECK(track_room(id, name, prev, 7, "room_2") == RoomEvent::Renamed and name == "room_2" and prev == "room_1");
-        CHECK(track_room(id, name, prev, 7, "room_2") == RoomEvent::None);
-        CHECK(track_room(id, name, prev, 9, "room_5") == RoomEvent::Changed and prev == "room_2" and name == "room_5" and id == 9);
+    {   // a rename under the same id is not a room change
+        std::uint64_t id = 7; std::string name = "room_4";
+        CHECK(track_room(id, name, 7, "room_2") == RoomEvent::Renamed and name == "room_2");
+        CHECK(track_room(id, name, 7, "room_2") == RoomEvent::None);
+        CHECK(track_room(id, name, 9, "room_5") == RoomEvent::Changed and name == "room_5" and id == 9);
     }
     {   // a mission's room is the room BY ID: survives a same-id rename, ends on an id change
-        std::uint64_t id = 7; std::string name = "room_4", prev;
+        std::uint64_t id = 7; std::string name = "room_4";
         RoomAliases al;
         CHECK(robot_in_room(id, name, al, 7, "room_4"));                       // explore room_4 starts: live node of that name
-        track_room(id, name, prev, 7, "room_2"); al["room_4"] = id;            // room_concept adopts room_2 in place
+        track_room(id, name, 7, "room_2"); al["room_4"] = id;            // room_concept adopts room_2 in place
         CHECK(robot_in_room(id, name, al, std::nullopt, "room_4"));            // the step still holds: same id
         CHECK(robot_in_room(id, name, al, 7, "room_2"));
         CHECK(not robot_in_room(id, name, al, 9, "room_5"));                   // another live room
-        track_room(id, name, prev, 9, "room_5");                               // the robot really leaves
+        track_room(id, name, 9, "room_5");                               // the robot really leaves
         CHECK(not robot_in_room(id, name, al, std::nullopt, "room_4"));        // id differs -> outside
         CHECK(robot_in_room(id, name, al, 9, "room_5"));
         CHECK(not robot_in_room(0, "", al, std::nullopt, "room_4"));           // unresolved is not "in"
@@ -106,6 +106,15 @@ int main()
     CHECK(pick_door(node("new"), ds) == "door_9");
     ds = {door("door_1", {"room_2"}), door("door_11", {}, true)};
     CHECK(not pick_door(node("new"), ds).has_value());
+    // …and a door a crossing fact names (the face just come through, before ltsm marks it with a recall)
+    {
+        auto entry = door("door_49");
+        entry.crossed = true;
+        std::vector<DoorFacts> fresh{entry};
+        CHECK(not pick_door(node("new"), fresh).has_value());
+        fresh.push_back(door("door_50"));
+        CHECK(pick_door(node("new"), fresh) == "door_50");
+    }
 
     // new among several: looked first, else nearest, else name
     ds = {door("door_5", {}, false, false, 1.0), door("door_6", {}, false, false, 3.0), door("door_7", {}, false, true, 9.0)};

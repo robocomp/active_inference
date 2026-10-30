@@ -418,13 +418,21 @@ Model of the DESIGN (RoomTransition.tla stays the model of the code). Adversary 
 doorway, a stale identities row, wrong recognition proposals, wrong verdicts (absent OR leaf shut) on the faces of the hole
 being / just crossed, which may PERSIST.
 
+**Encoding A (user 10-30, the model as committed): the fact is a CHAIN of edges, each dying with its source node** —
+link 1 `exit` ROBOT → OLD_FACE (written by the controller, `room_id` = prediction; Lucas Bonilla's edge), link 2 `exit`
+OLD_FACE → NEW_ROOM (room_concept), link 3 `exit` NEW_FACE → OLD_FACE (door_concept), link 4 ltsm archives OLD_ROOM only
+once link 3 exists (its archive deletes OLD_FACE and with it links 1 and 2). No sequence counters: a fact about leaving
+room R cannot be acted on twice. Shared reader/writer: `common/room_transition/exit_fact.h`. (The first model kept the
+fact as persistent controller state; in the graph it dies with OLD_FACE, so ltsm could have archived before door_concept
+read it — encoding A orders them.)
+
 | Config | FACT_HOLD | CLOSE_ON_ARCHIVE | Result | Distinct states |
 |---|---|---|---|---|
-| `_pingpong` (6 round trips) | on | on | **no error** (10 invariants, RenamedInPlace, CrossingNoticed, TourCompletes) | 85,308 |
-| `_pingpong_nohold` | off | on | **TourCompletes violated** — pingpong2 exactly: room_2's face judged shut after leg 1 | 24,788 |
-| `_pingpong_noclose` | on | off | no error (ping-pong cannot expose X3) | 124,090 |
-| `_tour3_noclose` | on | off | **MemoryPassagesSound violated** (X3's counterexample) | 100,756 |
-| `_tour3` (three rooms, case-2 recognition) | on | on | **no error** | 9,265,682 |
+| `_pingpong` (6 round trips) | on | on | **no error** (10 invariants, RenamedInPlace, CrossingNoticed, TourCompletes) | 24,933 |
+| `_pingpong_nohold` | off | on | **TourCompletes violated** — pingpong2 exactly: room_2's face judged shut after leg 1 | 32,114 |
+| `_pingpong_noclose` | on | off | **TourCompletes violated**: a leg opens before ltsm archives; link 4 then waits on a crossing that is no longer the latest | 32,072 |
+| `_tour3_noclose` | on | off | **TourCompletes violated** (same) | 36,135 |
+| `_tour3` (three rooms, case-2 recognition) | on | on | **no error** | 3,125,038 |
 
 Vacuity (`RoomTransitionExit_vacuity.sh`): tour end, leg 7, a rejected proposal, a wrong verdict, a phantom — reached in
 both scenarios; an accepted recognition — reached in tour3 (impossible in ping-pong, where no correct proposal exists).
@@ -435,11 +443,12 @@ driven by a mission (teleop) — it writes no fact, so the room does not switch.
 
 ## Order of work
 
-1. controller: write `exit` at `through` (+ unit test on the passage state machine); keep the old completion behind the
-   flag until 3.
+1. controller: write `exit` at `through` (+ unit test on the passage state machine). DONE (route mode): P_post = through →
+   link 1; Done on room_concept's switch + ltsm's archive; room = room_concept's RT room; `cross new` skips crossed faces;
+   `recall_<prev>` guard, the room-switch guess, the target-rooms filter and the mid-cross shut re-read removed.
 2. room_concept: switch on `exit`; PassageMemory crossing detection OFF behind a flag, deleted after the live ping-pong.
 3. door_concept: NEW_FACE + twin + backed faces on `exit`; entry-mirror guess OFF.
 4. ltsm: pair from the twin; passage from `via`.
-5. controller: complete on ack + archive; track room_concept's room; drop `recall_<prev>`.
+5. (folded into 1.)
 6. trace_check.py: S9 every room switch has an `exit` fact; S10 no backed face deleted or shut.
 7. Live ping-pong ×6 (pingpong_tour.sh); only then the three-room tour.
