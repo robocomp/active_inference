@@ -237,6 +237,22 @@ void late_recall_section()
           (std::snprintf(buf, sizeof buf, "top err=%.3f m w=%.3f", res_b.modes.empty() ? -1.f : err(res_b.modes[0]).head<2>().norm(),
                          res_b.modes.empty() ? 0.f : res_b.modes[0].weight), buf));
 
+    // (b') THE ADOPTION SEARCH TESTS THE PROPOSAL AS MADE (recog_proto9): "this is K AND the robot is here". A tight prior
+    // 3 m off the pose the scan prefers must NOT be overruled by a jump to that pose (live: 4.96 m / 179° to the one doorway
+    // K remembers) — with prior_only the search only refines the proposal's own modes; the SDF verdict then judges them.
+    rc::reloc::Params only = base;
+    rc::reloc::PriorMode pt;
+    pt.mu = truth + Eigen::Vector3f(3.0f, 0.f, 0.f);
+    pt.S = Eigen::Vector3f(0.15f * 0.15f, 0.15f * 0.15f, 0.1f * 0.1f).asDiagonal();
+    only.prior_modes = {pt};
+    only.prior_only = true;
+    const auto res_o = rc::reloc::search(raster, poly, pts, {provisional}, only, 99u);
+    const bool o_ok = not res_o.modes.empty()
+                      and std::ranges::all_of(res_o.modes, [&](const rc::reloc::Mode& m) { return (m.pose - pt.mu).head<2>().norm() < 1.0f; });
+    check("(b') prior_only: no mode leaves the proposal's basin for the scan's preferred pose 3 m away", o_ok,
+          (std::snprintf(buf, sizeof buf, "modes=%zu top dist from prior=%.2f m", res_o.modes.size(),
+                         res_o.modes.empty() ? -1.f : (res_o.modes[0].pose - pt.mu).head<2>().norm()), buf));
+
     rc::reloc::Params empty = base;
     empty.prior_modes.clear();
     const auto res_c = rc::reloc::search(raster, poly, pts, {provisional}, empty, 99u);

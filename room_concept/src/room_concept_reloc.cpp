@@ -69,6 +69,7 @@ namespace rc
         {
             std::scoped_lock lk(late_prior_mutex_);
             rp.prior_modes = late_prior_;
+            rp.prior_only = true;   // the proposal is the hypothesis: refine it, never jump to another basin (recog_proto9)
         }
         return rp;
     }
@@ -488,7 +489,9 @@ namespace rc
             // belief itself says the episode is over (P(lost) back under ½ — the same decision as the trigger).
             if (rivals_.empty() or p_lost < 0.5f)
                 rt_.hold_open = false;
-            if (p_lost >= 0.5f and not rt_.hold_open)   // ⚠ the equal-cost Bayes decision, flagged
+            // While a proposal is judged the pose is the PROPOSAL's: a lost view is evidence against K for the verdict
+            // (accumulate_late_evidence), not a reason to search K for another pose (recog_proto9 jumped 2.08 m / 93°).
+            if (p_lost >= 0.5f and not rt_.hold_open and not late_pending_.load(std::memory_order_acquire))   // ⚠ the equal-cost Bayes decision, flagged
                 relocalise_from_belief(lidar_points, s, p_lost);
             // RETIRE THE DOOR ANCHOR BY INFORMATION (Task R2; fix round 1, M-1: one currency). Both sides are pose
             // information in nats, KL(· ‖ uniform over the room × the circle):
@@ -736,6 +739,11 @@ namespace rc
         h.rival_ref_valid = rival_ref_valid_;
         h.covariance = current_covariance;
         hypothesis_ = std::move(h);
+        // The survey's rival modes live in P's frame and would switch the pose away from the proposal while it is judged;
+        // the snapshot above restores them on a rejection.
+        rivals_.clear();
+        rival_ref_valid_ = false;
+        publish_rival_snapshot();
         set_map_layout(std::move(K_int));
         adopt_map_layout_as_given();
         seed_reloc_prior(modes, prior_log_odds);

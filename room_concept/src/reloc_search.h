@@ -156,6 +156,10 @@ namespace rc::reloc
         /// FLAGGED: a modelling constant, the same kind as `list_wrong` (a prior on a hypothesis source, not a gate); 0.1 as
         /// there. No model-level term can replace it: how often the recogniser is wrong is a fact about the recogniser.
         float prior_wrong = 0.1f;
+        /// The prior IS the hypothesis under test (a recognition proposal: "K, and the robot here"): only its own modes are
+        /// polished — no lattice maxima, no caller seeds — so the search refines the proposal and never jumps to another
+        /// basin of K. Whether K at that pose explains the scans is then the verdict's call. Ignored without prior_modes.
+        bool prior_only = false;
     };
 
     /// log of the prior density at a pose whose own Laplace covariance is `cov`: log[(1−prior_wrong)·Σ_c w_c N(pose;

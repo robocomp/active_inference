@@ -838,8 +838,11 @@ namespace rc::reloc
 
         // 3. polish every seed (lattice maxima + caller's seeds), then merge seeds that converged together.
         std::vector<Eigen::Vector3f> starts;
-        for (const auto& c : maxima) starts.push_back(c.pose);
-        for (const auto& sp : seed_poses) starts.push_back(sp);
+        if (not (p.prior_only and not p.prior_modes.empty()))
+        {
+            for (const auto& c : maxima) starts.push_back(c.pose);
+            for (const auto& sp : seed_poses) starts.push_back(sp);
+        }
         for (const auto& pm : p.prior_modes) starts.push_back(pm.mu);   // the prior's own hypotheses are always polished
 
         // The lattice ran on the subsample for speed; the polish is per seed and cheap, so it uses the
