@@ -211,19 +211,40 @@ all three. It REPLACES parts of the 10-29 design; it does not add to them.
 - The `exit` edges are deleted with their faces (owners: room_concept's OLD_FACE→NEW_ROOM goes when the old room is
   archived; door_concept's with NEW_FACE).
 
-## R2 — The transition is a PHASE, opened and closed by facts
+## R2 — Structural changes are SERIALIZED: one transition token freezes the fleet until done
 
-- **Opens** on the `exit` edge OLD_FACE → NEW_ROOM.
-- **Closes** on `recall_<OLD_ROOM>` under NEW_FACE, posted by ltsm after it has archived OLD_ROOM and joined the passage.
-  (One existing fact; its meaning becomes "the transition is complete".)
-- **While open**: no door affordance (approach / cross / look) is offered or selected, and no mission step resolves a door.
-  What runs: the cross that is finishing (the body clears the doorway), room_concept's own estimation/explorer of the new
-  room, and the agents' writes that close the phase. No timer: the phase waits for its closing fact; the mission's own
-  budget remains the only bound (a fact that never comes fails the step as `door_unresolved`, as today).
-- **Cleanup of the room left is driven by the closing fact, each owner deleting its own nodes** (fixes a mock finding: the
-  old room outliving its re-creation). On `recall_<OLD_ROOM>`: room_concept deletes OLD_ROOM, its walls and floor;
-  door_concept deletes OLD_ROOM's doors. ltsm deletes nothing it does not own (today's eviction deleting room_concept's
-  and door_concept's nodes is removed — rule 1).
+User 10-30: "structural changes kind of freeze the fleet until done to preserve coherence". Lucas's Scheduler allowed one
+action at a time; this keeps that discipline only where it matters, without a central agent.
+
+- **The token** is ONE node, `transition` (type `metaconcept`, existing `state` attribute; no new attributes). It exists
+  only while a structural change is in progress; at most one exists. Its `state` names the step being executed and,
+  through the table below, the ONE agent allowed to act. That agent does its step, then advances `state` (its only write
+  on the token). A stuck transition therefore says, in one attribute, who it is waiting for.
+- **The freeze.** While `transition` exists:
+  - only the agent named by `state` creates, deletes or renames nodes or edges (tracker births, wall creation, look and
+    affordance nodes all wait; the agent keeps its estimate internally and publishes after);
+  - every agent may still update ATTRIBUTES of nodes it owns (poses, beliefs, the robot's RT) — perception never stops;
+  - no door affordance is offered or selected and no mission step resolves a door; the controller only finishes the cross
+    already executing (the body clears the doorway) and otherwise holds.
+- **Kind `cross`** (opened by room_concept at its switch decision, together with `exit` OLD_FACE → NEW_ROOM, R1):
+
+  | state | actor | step | advances to |
+  |---|---|---|---|
+  | `cross:entering` | room_concept | verify a predicted K (R3) or create P; re-parent the robot; final NEW_ROOM on the `exit` edge | `cross:entered` |
+  | `cross:entered` | door_concept | NEW_FACE + `exit` NEW_FACE → OLD_FACE; restore K's doors from the recall (R4) | `cross:faced` |
+  | `cross:faced` | ltsm | archive OLD_ROOM; passage from the `exit` pair; `recall_<OLD_ROOM>` under NEW_FACE | `cross:archived` |
+  | `cross:archived` | door_concept | delete OLD_ROOM's doors (and with them their `exit` edges) | `cross:released` |
+  | `cross:released` | room_concept | delete OLD_ROOM, its walls and floor; delete the token | — |
+
+- **Kind `adopt`** (case 2 only, R3's fallback; opened by ltsm when it posts a proposal):
+  `adopt:proposed` (room_concept judges; accept = rename P→K in place with the accepted transform, or reject) →
+  `adopt:judged` (door_concept re-seats/restores on accept; nothing on reject) → `adopt:seated` (ltsm carry-over on accept)
+  → deleted by ltsm. A proposal is never opened while another transition exists; it waits.
+- **Who may open a token**: room_concept (`cross`), ltsm (`adopt`), each only when none exists. Creation is the opener's
+  only structural act before its first step.
+- **Failure**: an actor that is absent (presence protocol) leaves the token in place and the fleet frozen — visible and
+  safe, never a wrong graph. No timers advance a state; the mission's own budget fails the leg as today.
+- `exit` edges (R1) say WHICH hole was crossed; the token says WHERE the transition is. Both are kept.
 
 ## R3 — Known rooms are PREDICTED before crossing; recognition after entry becomes the fallback
 
@@ -264,14 +285,15 @@ all three. It REPLACES parts of the 10-29 design; it does not add to them.
 ## What is REMOVED by this revision
 
 - ltsm's passage pairing by "door under a provisional room + nearest door" (passage_live.cpp step 2) → R1.
-- The controller's `recall_<prev>` guard on `cross new` (11936d55) → R1.
+- The controller's `recall_<prev>` guard on `cross new` (11936d55) → R1 + the freeze (R2).
 - ltsm's eviction deleting other agents' nodes → R2.
 - door_concept's restore and looks from `door_identities.csv` rows → R4.
 - The tour's `explore … until=explored>=0.9` step (done, 66699077).
 
 ## Verification
 
-1. The protocol mock implements Revision 2 (`--protocol v2`), with the same adversary (write delays, agent stalls) plus
+1. The protocol mock implements Revision 2 both as the implicit chain of facts (`--protocol v2`) and with the explicit
+   token (`--protocol v2t`), compared side by side, with the same adversary (write delays, agent stalls) plus
    map error on predicted transforms, and must pass ≥ 1000 seeds with the faults still detected; it also runs the cases
    R3 routes to the fallback (no prediction; prediction rejected).
 2. Each R-item's C++ change is pinned by a unit test in its owner, then the six-leg tour, graded with the ground-truth log
