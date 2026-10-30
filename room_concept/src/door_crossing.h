@@ -24,8 +24,10 @@
 //     covariance projected on the aperture tangent. Without this a robot beside the wall, outside the
 //     polygon for any other reason (a bad fit), would be read as having used this door.
 //
-// No threshold lives here. The one decision taken on p_cross (birth of the proto-room) is at its call
-// site and flagged there.
+// ★ NO DECISION IS TAKEN ON p_cross ANY MORE (2026-10-30, spec Revision 3): room_concept switches rooms on the controller's
+//   crossing fact (common/room_transition/exit_fact.h, link 1). PassageMemory, the path memory that decided it, is gone.
+//   What is used here is GEOMETRY: the crossed aperture's frame (proto_frame, mouth_of) and the in-doorway term that
+//   tempers the lost belief (step_proto_room_impl).
 
 #include <Eigen/Dense>
 #include <algorithm>
@@ -319,71 +321,6 @@ namespace rc::crossing
                              const Eigen::Vector2f& xy, const Eigen::Matrix2f& cov_xy, float r_body,
                              float sigma_normal = 0.f);
 
-    /// ★ THE PASSAGE MEMORY (Task 16, round 5 — 2026-10-29). One per room (the caller clears it on a room change and
-    ///   moves it with the frame on a re-anchor). The robot's position IS the localiser's estimate (after a relocalisation
-    ///   the relocaliser is trusted: room_concept owns the pose — controller ruling). What the memory adds is the SPLIT of
-    ///   each frame's displacement: the ODOMETRIC step (pred − previous estimate: motion of the body, both hypotheses
-    ///   below agree on it) and the estimate's CORRECTION (est − pred), which with probability w = p_continuous(est − pred,
-    ///   P_pred + Σ) is a continuous re-seed (the labels of the past mass are kept) and with 1 − w a frame shift (what it
-    ///   pushes past the line carries no passage: it is "jumped", priced as not crossed; 0 on a committed relocalisation).
-    ///   Per door, an ANCHOR read of the line and the two masses A / J (evaluate_core).
-    ///   Cycle: begin_frame(est, pred, area, jump_committed, pred_cov) → evaluate(...) per door.
-    class PassageMemory
-    {
-        std::unordered_map<std::uint64_t, DoorPassage> doors_;
-        std::optional<PoseSample> prev_;         ///< the previous frame's estimate (pred − prev_ = the odometric step)
-        Eigen::Vector2f d_{0.f, 0.f};            ///< cumulative odometric displacement since the memory started
-        double half_body_ = 0.0;
-        double w_last_ = 1.0;
-        static std::uint64_t key(const DoorAperture& ap)
-        { return ap.id != 0 ? ap.id : std::hash<std::string>{}(ap.name); }
-    public:
-        explicit PassageMemory(float half_body_width = 0.f) : half_body_(half_body_width) {}
-        void set_half_body_width(float h) { half_body_ = h; }
-        void clear() { doors_.clear(); prev_.reset(); d_.setZero(); w_last_ = 1.0; }
-        std::size_t doors() const { return doors_.size(); }
-        double last_continuity() const { return w_last_; }   ///< w of the last frame's correction
-
-        /// `pred` = the localiser's odometry prediction of this frame (previous estimate + this frame's odometric step),
-        /// `pred_cov` its covariance P_pred = F P F' + Q (the innovation est − pred has covariance ≤ P_pred; P_pred + Σ_est
-        /// is the generous side, so a doorway snap the prediction's own noise explains is never read as a jump — fix
-        /// round 2). A zero / non-finite pred_cov (a caller without one) falls back to Σ_now + Σ_prev.
-        void begin_frame(const Eigen::Vector2f& xy, const Eigen::Matrix2f& cov, const Eigen::Vector2f& pred,
-                         double area, bool jump_committed,
-                         const Eigen::Matrix2f& pred_cov = Eigen::Matrix2f::Zero())
-        {
-            if (prev_.has_value())
-            {
-                d_ += pred - prev_->xy;
-                const bool have_pred_cov = pred_cov.allFinite() and pred_cov.trace() > 0.f;
-                const Eigen::Matrix2f S = have_pred_cov ? Eigen::Matrix2f(pred_cov + cov) : Eigen::Matrix2f(cov + prev_->cov);
-                w_last_ = p_continuous(xy - pred, S, area, jump_committed);
-                for (auto& [k, d] : doors_) d.w_since *= w_last_;
-            }
-            prev_ = PoseSample{xy, cov};
-        }
-
-        Crossing evaluate(const DoorAperture& ap, const std::vector<Eigen::Vector2f>& polygon,
-                          const Eigen::Vector2f& xy, const Eigen::Matrix2f& cov_xy, float r_body, float sigma_normal);
-
-        /// The frame moved: p_new = T · p_old (the estimator's re-anchor).
-        void apply(const Eigen::Affine2f& T)
-        {
-            const Eigen::Matrix2f R = T.linear();
-            const auto mv = [&](PoseSample& p) { p.xy = T * p.xy; p.cov = R * p.cov * R.transpose(); };
-            if (prev_.has_value()) mv(*prev_);
-            d_ = R * d_;
-            for (auto& [k, d] : doors_)
-            {
-                mv(d.last);
-                d.d_last      = R * d.d_last;
-                d.geo.centre  = T * d.geo.centre;
-                d.geo.tangent = (R * d.geo.tangent).normalized();
-                d.geo.n_out   = (R * d.geo.n_out).normalized();
-            }
-        }
-    };
-
     inline Crossing evaluate_core(const DoorAperture& ap, const std::vector<Eigen::Vector2f>& polygon,
                                   const Eigen::Vector2f& xy, const Eigen::Matrix2f& cov_xy, float r_body,
                                   float sigma_normal, double half_body, DoorPassage* state, const Eigen::Vector2f& d_odo)
@@ -563,13 +500,6 @@ namespace rc::crossing
                              float sigma_normal)
     {
         return evaluate_core(ap, polygon, xy, cov_xy, r_body, sigma_normal, 0.0, nullptr, Eigen::Vector2f::Zero());
-    }
-
-    inline Crossing PassageMemory::evaluate(const DoorAperture& ap, const std::vector<Eigen::Vector2f>& polygon,
-                                            const Eigen::Vector2f& xy, const Eigen::Matrix2f& cov_xy, float r_body,
-                                            float sigma_normal)
-    {
-        return evaluate_core(ap, polygon, xy, cov_xy, r_body, sigma_normal, half_body_, &doors_[key(ap)], d_);
     }
 
     inline void log_row(const std::string& name, float p_open, const Crossing& c,

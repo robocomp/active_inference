@@ -14,6 +14,7 @@
 #include "wall_sync.h"                                       // rc::walls::plan_wall_sync (rule 1)
 #include "door_crossing.h"                                   // rc::crossing (proto-room evidence)
 #include "proto_mouth.h"                                      // rc::crossing::write_mouth (the proto birth)
+#include "../../common/room_transition/exit_fact.h"           // rc::exit_fact: the crossing chain (links 1-2)
 #include "../../common/room_resolve/room_resolve.h"          // rc::room::current_room / is_proto
 
 #include <array>
@@ -902,9 +903,7 @@ void RoomSceneGraph::step_proto_room(const rc::RoomConcept::UpdateResult& res)
     //  seen, the robot stood in room_1 localised in room_2 for good, and the recall of room_1 behind that door went unused.
     //  The entry door IS a door of the unpromoted room (door_concept's face of the crossed hole), and the outline the
     //  crossing needs for the door's outward side is the confirmed free-space ring the survey publishes (below).
-    //  ⚠ Safe only with PassageMemory's first-sight rule (door_crossing.h, F2): a young room's doors are first seen with the
-    //  robot standing anywhere, and the old seeding credited whatever was already past a door's line — recog_proto15 crossed
-    //  "through" door_46 five seconds after room_2's birth. Both are flags F1/F2 of docs/superpowers/specs/tla (ping-pong).
+    //  Safe because the switch keys on the controller's crossing fact (link 1), never on where the pose says the body is.
     if (params_->PROTO_ROOM_ENABLED)
         step_proto_room_impl(res, row);
     if (not startup_event_.empty())
@@ -937,7 +936,6 @@ void RoomSceneGraph::step_proto_room_impl(const rc::RoomConcept::UpdateResult& r
         //   geometry silently starts measuring from the wrong place.
         // (Consumed once per update by absorb_reanchor, at the top of update(), which also moves the
         //  start-up proto's frame; the event column is set by step_proto_room.)
-        crossing_mem_.clear();   // nothing to cross out of until the new room is promoted (memory restarts there)
         const float sig_s = std::sqrt(proto_n_out_.dot(cov_xy * proto_n_out_) + 1e-8f);
         const float s = (xy - proto_centre_).dot(proto_n_out_);
         room_concept_->set_outside_prob(rc::crossing::phi((s - r_body) / sig_s));
@@ -959,12 +957,6 @@ void RoomSceneGraph::step_proto_room_impl(const rc::RoomConcept::UpdateResult& r
         polygon.clear();
         for (const auto& v : fs_published_) polygon.push_back(T_int_pub * v);
     }
-    rc::crossing::Crossing best;
-    const rc::DoorAperture* best_ap = nullptr;
-    // ★ ONLY THIS ROOM'S DOORS CAN TAKE THE ROBOT OUT OF IT (2026-10-12). Every door resolves into this frame through
-    //   root, including those of the room just left. try19: room_1 was RE-ENTERED through door_33 (recall, promoted at
-    //   once, so no proto blocks this path) and 100 ms later door_33 — still room_2's, the robot still in its doorway —
-    //   "crossed" again and birthed room_3 in a fresh frame. A door belongs to the room its RT chain hangs from.
     const auto room_of = [this](std::uint64_t id) -> std::uint64_t
     {
         for (int hop = 0; hop < 8 and id != 0; ++hop)
@@ -979,68 +971,69 @@ void RoomSceneGraph::step_proto_room_impl(const rc::RoomConcept::UpdateResult& r
         }
         return 0;
     };
-    // ★ THE PATH, NOT ONLY THE POSE (2026-10-29, Task 16; fix round 1). "Went through the door" is accumulated per door,
-    //   one step per frame, in this room's frame (door_crossing.h: PassageMemory). One memory per room: a new room id
-    //   starts a new one; the estimator's re-anchors move it (pending ones here, absorbed ones in absorb_reanchor).
-    if (crossing_mem_room_ != dsr_room_id_)
-    {
-        crossing_mem_.clear();
-        crossing_mem_room_ = dsr_room_id_;
-    }
-    // A re-anchor the publisher has NOT absorbed (absorb_reanchor returns early while the gauge is not frozen and there
-    // is no proto) has still moved the INTERNAL frame xy and the polygon are read in: move the memory with it now, and
-    // remember how much was applied so the eventual absorption (or rejection) applies only the remainder.
-    if (Eigen::Affine2f Tp; room_concept_->peek_pending_reanchor(Tp))
-    {
-        crossing_mem_.apply(Tp * crossing_seen_pending_.inverse());
-        crossing_seen_pending_ = Tp;
-    }
-    // This frame's displacement is split into the odometric step (pred − previous estimate: the body's motion, the only
-    // thing that creates passage) and the estimate's correction, continuous with P(p_continuous) and a frame shift
-    // otherwise (always when the localiser committed a discrete jump: reloc_epoch advanced). See crossing::PassageMemory.
-    crossing_mem_.set_half_body_width(0.5f * params_->ROBOT_WIDTH);
-    crossing_mem_.begin_frame(xy, cov_xy, Eigen::Vector2f(res.pred_x, res.pred_y), rc::crossing::polygon_area(polygon),
-                              res.reloc_epoch != crossing_epoch_, res.pred_cov);
-    crossing_epoch_ = res.reloc_epoch;
+    // ★ ONLY THIS ROOM'S DOORS CAN TAKE THE ROBOT OUT OF IT (2026-10-12): a door belongs to the room its RT chain hangs
+    //   from (try19: room_2's door_33, re-read from room_1's frame, "crossed" again 100 ms after re-entry).
+    const float sigma_wall = room_concept_->params.wall_map.publish_corner_sigma;
+    std::vector<std::uint64_t> faces;
     float p_in_doorway = 0.f;   // max over this room's apertures — see the outside_prob note below
     for (const auto& ap : apertures)
-        if (room_of(ap.id) != dsr_room_id_)
-            continue;
-        else if (const auto c = crossing_mem_.evaluate(ap, polygon, xy, cov_xy, r_body,
-                                                       room_concept_->params.wall_map.publish_corner_sigma); c.valid)
+    {
+        if (room_of(ap.id) != dsr_room_id_) continue;
+        faces.push_back(ap.id);
+        if (const auto c = rc::crossing::evaluate(ap, polygon, xy, cov_xy, r_body, sigma_wall); c.valid)
         {
             const float p_open = ap.p_open < 0.f ? 0.5f : std::clamp(ap.p_open, 0.f, 1.f);
             p_in_doorway = std::max(p_in_doorway,
                                     p_open * c.p_span * rc::crossing::phi((c.s + r_body) / std::max(c.sig_s, 1e-4f)));
-            if (c.p_cross > best.p_cross) { best = c; best_ap = &ap; }
         }
+    }
     // ★ IN THE DOORWAY, NOT ONLY PAST IT (2026-10-18). This tells the lost belief how far the room still owes the scan
-    //   an explanation. Past-the-line (p_past) is ~0 while the body straddles the mouth, yet there the sensor already
-    //   sees mostly the next room: live try58 leg 3, s jumped 0.02 → 4.18 m in the doorway, P(lost) hit ½ before
-    //   room_2's birth, and the search jumped the pose 4.32 m to the 180° mode. The room stops owing the view once
-    //   the body's FRONT reaches the mouth: Φ((s + r_body)/σ_s), within the span and with the door open — the
-    //   same conjunction as p_cross (door_crossing.h), one body radius earlier.
-    //   ★ Over EVERY valid aperture, not the best-crossing one: in front of the mouth p_cross underflows to exactly 0
-    //   for all of them, best_ap stayed null and this was 0 throughout the approach (try60 leg 1: the same jump).
+    //   an explanation: once the body's FRONT reaches the mouth the sensor already sees mostly the next room (try58 leg 3:
+    //   P(lost) hit ½ in the doorway and the search jumped the pose 4.32 m). Over EVERY aperture of this room.
     room_concept_->set_outside_prob(p_in_doorway);
     row.n_apert = static_cast<int>(apertures.size());
-    if (best_ap == nullptr)
-        return;   // row keeps NaN across the aperture columns; n_apert says whether any were offered
+
+    // ★ THE CROSSING IS A FACT, NOT A GUESS (spec 2026-10-29 Revision 3, link 2 of the `exit` chain, common/room_transition/
+    //   exit_fact.h). The controller drives the body through the hole in its own frame and writes `exit` ROBOT -> OLD_FACE
+    //   once the body is through (link 1). This agent switches rooms on that edge and nothing else: no passage
+    //   probability, no path memory, no birth threshold. Six 10-30 failures were all an agent re-deciding from room-frame
+    //   geometry what the robot had already done (pingpong2: the leaf re-judged mid-crossing).
+    const auto crossed = rc::exit_fact::crossed_through(*G_, faces);
+    if (not crossed.has_value())
+        return;
+    const auto ap_it = std::ranges::find(apertures, crossed->face, &rc::DoorAperture::id);
+    if (ap_it == apertures.end())
+        return;   // the face is this room's but door_concept offers no aperture for it this frame: next frame
+    const rc::DoorAperture* best_ap = &*ap_it;
+    // The crossed opening's geometry, for the new room's frame and the passage hand-over. The outward side comes from this
+    // room's outline (robust to the pose); with no outline yet, from the side the body is on — it is through.
+    rc::crossing::Crossing best = rc::crossing::evaluate(*best_ap, polygon, xy, cov_xy, r_body, sigma_wall);
+    if (not best.valid)
+    {
+        const Eigen::Vector2f ab = best_ap->b - best_ap->a;
+        if (ab.squaredNorm() <= 0.f) return;
+        best.tangent = ab.normalized();
+        best.centre  = 0.5f * (best_ap->a + best_ap->b);
+        const Eigen::Vector2f perp(-best.tangent.y(), best.tangent.x());
+        best.n_out  = perp.dot(xy - best.centre) >= 0.f ? perp : Eigen::Vector2f(-perp);
+        best.s      = (xy - best.centre).dot(best.n_out);
+        best.u      = (xy - best.centre).dot(best.tangent);
+        best.sig_s  = std::sqrt(std::max(0.f, best.n_out.dot(cov_xy * best.n_out)));
+        best.sig_t  = std::sqrt(std::max(0.f, best.tangent.dot(cov_xy * best.tangent)));
+        best.span_w = ab.norm();
+        best.valid  = true;
+    }
     row.door    = best_ap->name;
     row.p_open  = best_ap->p_open;
     row.p_past  = best.p_past;
     row.p_span  = best.p_span;
     row.p_geom  = best.p_geom;
-    row.p_cross = best.p_cross;
+    row.p_cross = 1.f;   // the fact
     row.s       = best.s;
     row.u       = best.u;
     row.sig_s   = best.sig_s;
     row.sig_t   = best.sig_t;
     row.span_w  = best.span_w;
-
-    // ⚠ DECISION LEVEL (ProtoRoom.BirthProb) — the one threshold in this path; see room_config.h.
-    if (best.p_cross < params_->PROTO_ROOM_BIRTH_PROB)
-        return;
 
     // ── Birth. Frame = the crossed aperture, frozen: x along a→b, +y outward.
     //    Right-handed: tangent × n_out must be +z, otherwise flip the tangent (the aperture's a/b order is
@@ -1072,7 +1065,20 @@ void RoomSceneGraph::step_proto_room_impl(const rc::RoomConcept::UpdateResult& r
     // ★ A REMEMBERED ROOM KEEPS ITS NAME (2026-10-12, return to room 1). ltsm_agent posts, under each door whose other
     //   side it remembers, a recall of that room; crossing such a door re-creates THAT room (same name, same frame,
     //   remembered outline) instead of surveying a new one. Only if the name is free in the live graph.
-    const auto recall = find_recall(*best_ap);
+    // The room behind the face is the one the controller PREDICTED when the cross started (link 1's room_id: the recall it
+    // resolved the leg with; 0 = a new room). The recall supplies that room's name, frame and outline.
+    std::optional<Recall> recall;
+    if (crossed->predicted_room_id != 0)
+    {
+        recall = find_recall(*best_ap);
+        if (not recall.has_value() or recall->room_index != crossed->predicted_room_id)
+        {
+            qWarning().noquote() << QString("[room][exit] %1 crossed toward remembered room id %2, but no recall of it hangs "
+                                            "under the door now — entering a NEW room")
+                                        .arg(QString::fromStdString(best_ap->name)).arg(crossed->predicted_room_id);
+            recall.reset();
+        }
+    }
     if (recall.has_value())
     {
         bool taken = false;
@@ -1118,6 +1124,10 @@ void RoomSceneGraph::step_proto_room_impl(const rc::RoomConcept::UpdateResult& r
     // The `proto` self-edge: identity unresolved. Promotion (ltsm_agent's decision) removes it, same id.
     if (not G_->insert_or_assign_edge(DSR::Edge::create<proto_edge_type>(id.value(), id.value())))
         qWarning() << "[room][proto] could not write the proto self-edge on" << QString::fromStdString(name);
+    // Link 2: `exit` OLD_FACE -> NEW_ROOM. door_concept makes the new room's face of the hole on it (link 3).
+    if (not rc::exit_fact::write_entered(*G_, best_ap->id, id.value()))
+        qWarning() << "[room][exit] could not write link 2 (exit" << QString::fromStdString(best_ap->name) << "->"
+                   << QString::fromStdString(name) << ")";
 
     proto_room_id_ = id.value();
     T_room_proto_  = T;
@@ -1129,13 +1139,9 @@ void RoomSceneGraph::step_proto_room_impl(const rc::RoomConcept::UpdateResult& r
     // the numbers are in tmp/proto_room.csv, which is the record meant to be read.
     qInfo().noquote() << QString("[room][proto] %1 BORN through %2 — see tmp/proto_room.csv")
                              .arg(QString::fromStdString(name)).arg(QString::fromStdString(best_ap->name));
-    qInfo().noquote() << QString("[room][proto] passage evidence: odometric path through the jambs %1 (past by re-read/jump only %2), "
-                                 "door prior P(open) %3 -> P(open | path) %4, p_cross %5 (%6 doors in memory, "
-                                 "last correction continuous with P %7)")
-                             .arg(best.p_through, 0, 'g', 4).arg(best.p_reread, 0, 'g', 4).arg(best_ap->p_open, 0, 'g', 4)
-                             .arg(best.p_open_post, 0, 'g', 4).arg(best.p_cross, 0, 'g', 6)
-                             .arg(crossing_mem_.doors()).arg(crossing_mem_.last_continuity(), 0, 'g', 4);
-    crossing_mem_.clear();   // the next room's memory starts at its own promotion
+    qInfo().noquote() << QString("[room][exit] link 1 on %1 (predicted room id %2) -> link 2 written: entered %3 (%4)")
+                             .arg(QString::fromStdString(best_ap->name)).arg(crossed->predicted_room_id)
+                             .arg(QString::fromStdString(name)).arg(recall.has_value() ? "remembered" : "new");
     // ── THE HAND-OVER, IN THIS ORDER ────────────────────────────────────────────────────────────────
     // 1. Stamp the room's RT edge while it still holds the last pose that was true of it. Do it BEFORE
     //    retiring, so the mark and the last honest pose belong to the same edge state.
@@ -1156,7 +1162,7 @@ void RoomSceneGraph::step_proto_room_impl(const rc::RoomConcept::UpdateResult& r
     last_crossing_sig_heading_ = std::sqrt(std::max(0.f, (res.estimate_valid ? res.estimate_covariance : res.covariance)(2, 2)));
     if (params_->STARTUP_PROTO_ENABLED)
     {
-        rearm_after_crossing(id.value(), name, best_ap->name, best.p_cross,
+        rearm_after_crossing(id.value(), name, best_ap->name,
                              recall.has_value() and recall->name == name ? recall : std::nullopt);
         return;
     }
@@ -1166,8 +1172,7 @@ void RoomSceneGraph::step_proto_room_impl(const rc::RoomConcept::UpdateResult& r
     //    and losing the pose look identical from inside a room — SDF misfit up, pose degraded — so the
     //    agent must not try to relocalise its way out of a room it is no longer in. Entering SEARCHING
     //    turns the map-guided checks off because there is no map, not because a flag says so.
-    room_concept_->begin_room_estimation(
-        "crossed " + best_ap->name + " at p_cross=" + std::to_string(best.p_cross));
+    room_concept_->begin_room_estimation("crossed " + best_ap->name + " (exit fact)");
     trigger_layout_();
     // The RT edge follows on this frame's pose write (write_robot_room_rt), which runs right after this.
 }
@@ -1345,9 +1350,6 @@ void RoomSceneGraph::absorb_reanchor(const Eigen::Affine2f& int_now)
             qWarning().noquote() << QString("[room][gauge] estimator re-anchor NOT absorbed: the internal robot pose did "
                                             "not move with it (kept %1 vs moved %2); published frame unchanged.")
                                         .arg(e_kept, 0, 'f', 3).arg(e_moved, 0, 'f', 3);
-            // The robot was not re-expressed: undo what step_proto_room applied to the crossing memory from the peek.
-            crossing_mem_.apply(crossing_seen_pending_.inverse());
-            crossing_seen_pending_ = Eigen::Affine2f::Identity();
             reanchor_this_update_ = true;
             return;
         }
@@ -1373,8 +1375,6 @@ void RoomSceneGraph::absorb_reanchor(const Eigen::Affine2f& int_now)
     }
     for (auto& [c, until] : layout_refused_)
         c = T_new_old * c;
-    crossing_mem_.apply(T_new_old * crossing_seen_pending_.inverse());   // only what step_proto_room did not already apply
-    crossing_seen_pending_ = Eigen::Affine2f::Identity();
     if (not std::isnan(armed_tx_))
     {
         const Eigen::Vector2f a = T_new_old * Eigen::Vector2f(armed_tx_, armed_ty_);
@@ -1635,7 +1635,7 @@ std::optional<RoomSceneGraph::Recall> RoomSceneGraph::find_recall(const rc::Door
 }
 
 void RoomSceneGraph::rearm_after_crossing(std::uint64_t new_room_id, const std::string& new_name,
-                                          const std::string& door, float p_cross, const std::optional<Recall>& recall)
+                                          const std::string& door, const std::optional<Recall>& recall)
 {
     abandon_proposal_fit("the robot crossed out of P");   // before begin_room_estimation below re-arms the estimator
     remember_camera_cover();   // the room left keeps what its cameras saw: a re-entry resumes it (camera_coverage.h)
@@ -1705,7 +1705,7 @@ void RoomSceneGraph::rearm_after_crossing(std::uint64_t new_room_id, const std::
     room_rt_retired_ = false;      // the RT goes to dsr_room_id_ (the new room) through the frozen-gauge branch
     // The estimator first: off the old room's given layout and back to plain SLAM on the SAME scan map (the pose stays
     // continuous through the doorway; the map simply grows into the new room).
-    room_concept_->begin_room_estimation("crossed " + door + " at p_cross=" + std::to_string(p_cross));
+    room_concept_->begin_room_estimation("crossed " + door + " (exit fact)");
     arm_startup_proto(new_room_id, T_pub_int);
     startup_event_ = "crossing_born";
     trigger_layout_();

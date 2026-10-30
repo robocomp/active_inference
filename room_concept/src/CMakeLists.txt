@@ -206,12 +206,6 @@ add_executable(crossing_open_posterior_test EXCLUDE_FROM_ALL ../tools/crossing_o
 target_include_directories(crossing_open_posterior_test PRIVATE ${CMAKE_CURRENT_LIST_DIR}/../src)
 set_target_properties(crossing_open_posterior_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../../bin)
 
-# ── crossing_passage_test ─────────────────────────────────────────────────────
-# Task 16: "went through the door" is read from the PATH (PassagePath + evaluate's history), and a path through the
-# jambs overrides a wrong near-shut P(open) prior; parked at a vantage / driving along the wall never births.
-add_executable(crossing_passage_test EXCLUDE_FROM_ALL ../tools/crossing_passage_test.cpp)
-target_include_directories(crossing_passage_test PRIVATE ${CMAKE_CURRENT_LIST_DIR}/../src)
-set_target_properties(crossing_passage_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../../bin)
 
 # ── corner_gather_test ────────────────────────────────────────────────────────
 # Offline check that the layout-wide explain-away removes a perpendicular face from a wall fit

@@ -190,7 +190,7 @@ private:
                              std::uint64_t child_override = 0);
 
     // ── PROTO-ROOM: space the room does not explain, entered through one of its open doors ───────────
-    // Born once, when p_cross (door_crossing.h) reaches ProtoRoom.BirthProb. A `room` node `room_<k>` with a
+    // Born once, on the controller's crossing fact (exit_fact.h link 1) naming one of this room's doors. A `room` node `room_<k>` with a
     // `proto` SELF-edge — room IDENTITY is unresolved (ltsm_agent's call); this agent owns its GEOMETRY.
     // ★ITS FRAME IS THE CROSSED APERTURE, FROZEN AT BIRTH: origin at the aperture centre, x along a→b, +y away
     //   from this room's interior. It never moves, so a consumer holding it is never teleported, and the
@@ -259,7 +259,7 @@ private:
     bool room_name_hwm_loaded_ = false;
     std::uint64_t room_name_hwm();
     void note_room_name_issued(std::uint64_t k);
-    void rearm_after_crossing(std::uint64_t new_room_id, const std::string& new_name, const std::string& door, float p_cross,
+    void rearm_after_crossing(std::uint64_t new_room_id, const std::string& new_name, const std::string& door,
                               const std::optional<Recall>& recall = std::nullopt);
     [[nodiscard]] float startup_erode_m() const;
     void step_startup_proto(const rc::RoomConcept::UpdateResult& res, std::string& reason);
@@ -391,10 +391,6 @@ private:
     Eigen::Affine2f T_room_proto_  = Eigen::Affine2f::Identity();   ///< proto frame in the room frame
     Eigen::Vector2f proto_centre_{0.f, 0.f};                        ///< crossed aperture, room frame
     Eigen::Vector2f proto_n_out_{0.f, 1.f};                         ///< its outward normal, room frame
-    rc::crossing::PassageMemory crossing_mem_;                      ///< per-door passage state, this room's frame (Task 16)
-    std::uint64_t crossing_mem_room_ = 0;                           ///< the room that memory belongs to
-    std::uint64_t crossing_epoch_ = 0;                              ///< last reloc_epoch seen (a change = committed jump)
-    Eigen::Affine2f crossing_seen_pending_ = Eigen::Affine2f::Identity();   ///< pending re-anchor already applied to it
 
     // ── THE ROLES INVERT AT THE CROSSING ────────────────────────────────────────────────────────────
     // Before: this agent's room is the published child and the proto-room rides along as a constant
