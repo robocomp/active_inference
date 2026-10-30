@@ -272,6 +272,31 @@ action at a time; this keeps that discipline only where it matters, without a ce
   harness) is then one wipe, and rows from another run's frame cannot exist.
 - door_concept's looks at remembered doors are offered only inside a recalled room (66699077), from the recall's list.
 
+## R5 — One identity rule for rooms AND doors: ltsm issues identities, names are never keys
+
+User 10-30: room naming "faces a similar problem as door naming". Both kinds of long-lived entity had identity split
+between a live agent's private counter and ltsm's memory, and a NAME doubling as the identity:
+
+| | today | failures |
+|---|---|---|
+| rooms | room_concept names `room_<k>`, `room_id = k`, k from the live graph + `etc/room_name_hwm.txt`; ltsm names memory `r<room_id>_<name>`; adoption renames P→K (name AND room_id) | T18 stale prefix cache, T14 controller aliases, proto9 room_4→room_2 burns a number |
+| doors | door_concept names `door_<n>` from its counter; remembered rows keyed by ROOM NAME in `etc/door_identities.csv`; a crossed hole gets a new face name (door_13 ↔ door_49) | proto10 stale look from another run, try-era duplicate names, "why door_49?" |
+
+The rule, for both:
+- **Identity = (kind, id) issued by ltsm**, the only long-term memory. Rooms carry `room_id`; a hole carries its passage
+  (already the hole's identity); a door FACE is identified by (room_id, passage). ltsm publishes the next free `room_id`
+  as an attribute of its own agent node; room_concept takes it at `cross:entering` for a new room. A provisional room that
+  is adopted as K returns its number (ltsm does not advance its counter for it). `etc/room_name_hwm.txt` is removed;
+  door_concept's counter only makes DSR node names unique.
+- **Names are display only.** `room_<room_id>`; doors keep opaque `door_<n>`. Nothing keys on a name: recalls, remembered
+  door rows (R4: they live in ltsm memory, keyed by (room_id, passage)), caches (ltsm's memory prefix), controller
+  aliases and missions resolve by id. A mission that names `room_1` is resolved to its room_id once, when it is accepted.
+- **Renames are cosmetic and happen only inside the token.** With R3 a predicted room enters with its own name and id, so
+  a room rename happens only in `adopt` (case 2). A door face may be renamed to its hole's remembered face name at
+  `cross:faced` (the 10-30 note "rename the entry mirror to the old face's name"), purely for the human reader; since
+  nothing keys on names, it can never break anything, and it can be dropped if it costs anything.
+- **One wipe.** Resetting memory = deleting ltsm's memory file; no other agent persists identities.
+
 ## Ownership additions (the mock's spec gaps)
 
 - `proto` self-edge: room_concept writes it when P is created and removes it when P is adopted as K or when P's estimate
@@ -289,6 +314,7 @@ action at a time; this keeps that discipline only where it matters, without a ce
 - ltsm's eviction deleting other agents' nodes → R2.
 - door_concept's restore and looks from `door_identities.csv` rows → R4.
 - The tour's `explore … until=explored>=0.9` step (done, 66699077).
+- `room_concept/etc/room_name_hwm.txt`, and every lookup of a room or door by NAME (prefix caches, aliases, rows) → R5.
 
 ## Verification
 
