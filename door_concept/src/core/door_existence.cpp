@@ -12,6 +12,7 @@
 #include <limits>
 #include <locale>
 #include <numbers>
+#include <set>
 #include <sstream>
 #include <unordered_map>
 #include <unordered_set>
@@ -811,6 +812,20 @@ void DoorCore::update_existence(const DoorCycleInput& in, DoorCycleOutput& out)
     const std::optional<Mat4d> room_T_zed = CameraModel::room_T_zed(in.robot);
     const ExistenceScene scene{cfg, room_T_zed, in.camera, pkt, fit_.room_polygon(), fit_.room_band(), states};
 
+    // ★A DOOR THE ROBOT IS CROSSING IS NOT JUDGED (user 2026-10-30: "you CANNOT remove a door while the robot is crossing
+    //  it"). recog_proto11 leg 2: the controller held `executing` on aff_door_55_cross, the robot stood 0.66 m past the hole,
+    //  and door_55 — the hole it was passing — went to L −4 and was REMOVED 3 s later; ltsm then retired the recall that
+    //  hung from it and room_concept, with no aperture left, could never close the crossing. In the doorway the sensors
+    //  look AT the robot's own hole from inside it or from behind: no channel can resolve that door there, so its
+    //  existence belief HOLDS (no evidence, no prior update, no removal streak) for as long as the consumer's `executing`
+    //  edge names this door's cross — the same graph fact the interaction anchor is born on (specificworker_anchor.cpp).
+    //  The crossing's end is the consumer's to declare (it drops the edge), and the room switch is the protocol's.
+    std::set<std::string> being_crossed;
+    for (const auto& e : in.executing)
+        for (const auto& a : in.affordances)
+            if (a.node_id == e.to and a.name.starts_with("aff_") and a.name.ends_with("_cross"))
+                being_crossed.insert(a.name.substr(4, a.name.size() - 4 - 6));
+
     std::vector<std::uint64_t> to_remove;
     for (const auto& [id, instp] : states)
     {
@@ -823,6 +838,14 @@ void DoorCore::update_existence(const DoorCycleInput& in, DoorCycleOutput& out)
             inst.existence_entry_L = inst.existence.logodds();
             inst.existence_since_entry = 0.0f;
         }
+        if (const bool crossed = being_crossed.contains(inst.node_name); crossed != inst.existence_held_crossing)
+        {
+            inst.existence_held_crossing = crossed;
+            diag("stdout", std::format("door_concept: [existence] {} {} (L={:.2f})\n", inst.node_name,
+                                       crossed ? "HELD — the robot is crossing it" : "released — the crossing is over",
+                                       inst.existence.logodds()), out);
+        }
+        if (inst.existence_held_crossing) continue;
 
         // ── ROOM-CONTAINMENT PRIOR: THE WALL BAND (door_room_band.h) ────────────────────────────────────
         // A door's aperture lies IN a wall: between the room polygon (drawn at the room-side face) and the far

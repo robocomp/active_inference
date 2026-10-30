@@ -12,6 +12,7 @@
 //   3. TURNED AWAY = HOLD: the same absence with the camera looking -y (the door behind it) moves L by nothing.
 //   4. DETERMINISM: two cores fed the same inputs write bit-identical Existence rows.
 //   5. The existence CSV row (etc/door_existence_log.csv) is formatted in the classic locale under es_ES.
+//   7. CROSSING = HOLD: while the controller's `executing` edge names the door's cross, absence removes nothing.
 //   6. ImageSource (the tape path): a gray frame rebuilt from ROI patches + the recorded frame_ref scores exactly as
 //      the full frame does inside the patch (prepare_frame's blur + Sobel see the same pixels).
 //
@@ -215,7 +216,7 @@ struct Run
 // evidence is from new looks, not one look repeated (Task 5b item 4: the existence channels pool the looks of one view —
 // door_view_pool.h — so a parked robot's repeats are one observation). false = parked.
 static Run run(int present, int absent, bool turned_away = false, int repeat_at = -1, ExistWorld* out_world = nullptr,
-               bool sweep = true)
+               bool sweep = true, int cross_from = -1, int cross_to = -1)
 {
     DoorCoreConfig cfg;
     ExistWorld local;
@@ -242,7 +243,14 @@ static Run run(int present, int absent, bool turned_away = false, int repeat_at 
             const int k = c % 12;
             rx = 1.0f + 1.5f * (k < 6 ? (static_cast<float>(k) / 3.0f - 1.0f) : (1.0f - static_cast<float>(k - 6) / 3.0f));
         }
-        const auto out = core.step(cycle_input(static_cast<std::uint64_t>(c), frame, ph, turned_away and c > present, kWallY, rx));
+        auto in = cycle_input(static_cast<std::uint64_t>(c), frame, ph, turned_away and c > present, kWallY, rx);
+        if (c >= cross_from and c < cross_to)   // the controller executes door_1's cross (the only door born here)
+        {
+            in.affordances.push_back({.node_id = 555, .exists = true, .name = "aff_door_1_cross"});
+            in.affordances.push_back({.node_id = 556, .exists = true, .name = "aff_door_1_approach"});
+            in.executing.push_back({.from = 8, .to = 555});
+        }
+        const auto out = core.step(in);
         for (const auto& d : out.decisions)
         {
             if (d.kind == static_cast<std::uint16_t>(K::Existence)) r.exist.push_back(d);
@@ -699,6 +707,24 @@ int main()
                 same = same and prep.gx.at<float>(y, x) == ref.gx.at<float>(y, x) and prep.gy.at<float>(y, x) == ref.gy.at<float>(y, x);
         CHECK(same);
         CHECK(prep.frame_ref == ref.frame_ref);
+    }
+
+    // ── 7. CROSSING = HOLD (recog_proto11 door_55): while the consumer's `executing` edge names the door's cross, the
+    //       same absence that removes it in case 1 moves L by nothing and removes nothing; once the edge goes, it is judged
+    //       again and removed as in case 1. An edge to another affordance of the same door (approach) does not hold it.
+    {
+        const Run h = run(40, 200, false, -1, nullptr, true, /*cross_from=*/41, /*cross_to=*/241);
+        double L40 = 0;
+        int rows_held = 0, rows_moved = 0;   // the decision log still records every door each cycle: L must not move
+        for (const auto& d : h.exist) { if (d.cycle <= 40) L40 = d.a; else { ++rows_held; rows_moved += d.a != L40; } }
+        std::print("crossing: L at 40 {:.3f}, {} rows while held, {} moved, {} REMOVE\n", L40, rows_held, rows_moved,
+                   h.removes.size());
+        CHECK(h.birth_cycle > 0);
+        CHECK(rows_held > 0 and rows_moved == 0);
+        CHECK(h.removes.empty());
+        const Run e = run(40, 300, false, -1, nullptr, true, /*cross_from=*/41, /*cross_to=*/101);
+        CHECK(e.removes.size() == 1);
+        if (e.removes.size() == 1) CHECK(e.removes.front().cycle >= 101);
     }
 
     if (fails == 0) std::print("test_door_core_existence: ALL PASS\n");
