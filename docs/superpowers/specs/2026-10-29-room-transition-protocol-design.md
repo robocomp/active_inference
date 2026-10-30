@@ -335,3 +335,111 @@ The rule, for both:
    R3 routes to the fallback (no prediction; prediction rejected).
 2. Each R-item's C++ change is pinned by a unit test in its owner, then the six-leg tour, graded with the ground-truth log
    (gt_pose.tsv, f6f5353d).
+
+# Revision 3 — 2026-10-30 evening: the crossing is an ACTION, its fact is written by the agent that performs it
+
+## Why this revision
+
+Revision 2's R1 was never built (no agent writes `exit`), and the day was spent patching the agents that GUESS the
+crossing instead. pingpong2 (all of 10-30's fixes in: F1, F2, F3, the door_2 proto-wall fix) passed leg 1 and blocked on
+leg 2: door_concept re-judged door_1's leaf from inside the doorway, the entry face inherited it, read "shut", and the
+robot was told to open a door it had just walked through. Every failure of the day has the same shape:
+
+| Failure | Who re-decided something the robot had already done |
+|---|---|
+| door_55 deleted mid-crossing (proto11) | door_concept re-judged the EXISTENCE of the door being crossed |
+| room never switched (proto11, pingpong1) | room_concept re-inferred "crossed?" (p_cross) from a room-frame door estimate |
+| false room_3 (proto15) | room_concept inferred a crossing through a phantom door |
+| robot spinning (proto12) | controller planned on the room-frame door, 0.45 m off |
+| door_2 drift (pingpong1) | door_concept re-fitted the hole the robot had just passed through |
+| leaf "shut" (pingpong2) | door_concept re-judged the LEAF of the door being crossed |
+
+Four agents each reconstruct, privately, from room-frame estimates that are at their WORST during a crossing (a new frame,
+no walls yet, views from inside the doorway), an event one agent MEASURES: the controller drives the body through a hole
+it perceives in its own frame (the interaction anchor) and its servo reports `through` once the opening is
+`anchor_cross_standoff_m` behind (controller_door_passage.h:197-230, controller_runtime_types.h:204). Every disagreement
+between the guesses needed a guard; every guard broke the next case.
+
+Revision 3 changes WHO writes R1's fact and what it carries; everything else follows from it. Agents still coordinate by
+guarded actions over shared facts (the DSR pattern); what changes is that the guards read a RECORD OF AN ACTION, written
+once by its one performer, instead of thresholded estimates that several agents recompute.
+
+## X1 — The controller writes the crossing fact
+
+- When the anchor servo reports `through` on the door it is executing, the controller writes ONE `exit` fact (edge type
+  installed in cortex, dsr_edge_type.h:65-72): the face crossed (OLD_FACE), its room (OLD_ROOM), a sequence number, and the
+  room PREDICTED behind the face — the `recall_<k>` the leg resolved its door with when the cross STARTED, or "new". The
+  known/unknown decision is therefore taken before crossing (Revision 2 R3's intent, from the recall that exists today) and
+  frozen in the fact: no agent reads a recall's ABSENCE at crossing time (CE-4 / the staged-recall gap cannot arise).
+- One writer, written once per crossing. Nothing else creates a crossing.
+
+## X2 — Everyone keys on that fact
+
+- **room_concept** switches on the `exit` fact alone, if it names a face of ITS room: the predicted room if that name is
+  free, else a new provisional room; it records the fact's seq and hole on the room it enters (`via`). No p_cross, no
+  PassageMemory, no survey gate (F1), no first-sight rule (F2).
+- **door_concept**, on the `exit` fact once room_concept has entered a room by it: the hole's face in that room
+  (NEW_FACE) exists, is passable, and is the twin of OLD_FACE (`exit` NEW_FACE → OLD_FACE as in R1). Both faces are
+  BACKED by the crossing: a verdict from poor views (absent, leaf shut) does not overturn a backed face. In Active
+  Inference terms the crossing is an observation of passability far more precise than any doorway view, so the posterior
+  stays there; no new gate is introduced, the views simply cannot outweigh it. (A door really closed later by a person is
+  out of scope here; it needs evidence of comparable precision, e.g. a failed push, and is noted as open.)
+- **ltsm** pairs a passage from the twin only (no "door under a provisional room + nearest door"), and remembers it from
+  the entered room's `via` (written from the fact) — no nearest-door / derived-face fallback in the eviction.
+- **controller** tracks room_concept's room (not ltsm's `current`). A leg completes when room_concept has acted on THIS
+  leg's `exit` fact (no "any room change ends the leg"; FIX_COMPLETE_ON_DOOR is built in). `cross new` excludes a backed
+  face; the `recall_<prev>` guard (11936d55) goes.
+- **door_concept** follows room_concept's room (not `current`).
+
+## X3 — One transition at a time: a leg closes on the archive (Revision 2 R2, reduced to one guard)
+
+The model found that X1+X2 alone are NOT enough in the three-room tour: the controller may open leg 3 (a `new` leg, which
+needs no recall) before ltsm has archived leg 2's crossing; ltsm, which handles one switch per archive, then remembers a
+passage room_2–room_3 through DOOR_0, which does not exist (`MemoryPassagesSound`). Ping-pong cannot show it, because every
+return leg needs a recall that exists only after the archive. The cure is R2's closing fact with nothing else of R2: **a
+leg completes only when ltsm's `current` equals room_concept's room** (the left room is archived). No token, no barrier,
+no phase flag.
+
+## What X1–X3 remove (each was a guard or a rule added to cover a guess)
+
+| Agent | Removed | Replaced by |
+|---|---|---|
+| room_concept | PassageMemory crossing detection, p_cross, the survey gate (HEAD:901 / F1), the first-sight rule (F2), the recall read at birth | switch on `exit` (2 guards) |
+| ltsm | pairing by provisional-room + nearest door (passage_live.cpp:119-176), eviction's 3-case nearest/derived-face fallback (room_eviction.cpp:700-930), the staging exception (F3) | pair from the twin (1 guard); passage from `via` |
+| door_concept | entry mirror's 4-way guess (step_entry_mirrors :3221-3330), adopt/recreate on follow (:3432/:3442), any re-judging of a crossed face | NEW_FACE on `exit` (2 guards); backed faces (1 guard) |
+| controller | `recall_<prev>` guard, completion on any `current` change / target_rooms (controller_door_passage.h:799-803, :1169) | `exit` write (1 guard); completion on ack + archive (2 guards) |
+
+In the models: the current code needs ~20 crossing guard conjuncts plus F1–F3 and FIX_HOLD to pass ping-pong; the design
+needs 9 plus FIX_HOLD (kept: it protects the face during the approach, before any fact exists).
+
+## Verification (docs/superpowers/specs/tla/RoomTransitionExit.tla, README "Revision 3")
+
+Model of the DESIGN (RoomTransition.tla stays the model of the code). Adversary = proto15 + pingpong2: phantom doors in a
+doorway, a stale identities row, wrong recognition proposals, wrong verdicts (absent OR leaf shut) on the faces of the hole
+being / just crossed, which may PERSIST.
+
+| Config | FACT_HOLD | CLOSE_ON_ARCHIVE | Result | Distinct states |
+|---|---|---|---|---|
+| `_pingpong` (6 round trips) | on | on | **no error** (10 invariants, RenamedInPlace, CrossingNoticed, TourCompletes) | 85,308 |
+| `_pingpong_nohold` | off | on | **TourCompletes violated** — pingpong2 exactly: room_2's face judged shut after leg 1 | 24,788 |
+| `_pingpong_noclose` | on | off | no error (ping-pong cannot expose X3) | 124,090 |
+| `_tour3_noclose` | on | off | **MemoryPassagesSound violated** (X3's counterexample) | 100,756 |
+| `_tour3` (three rooms, case-2 recognition) | on | on | **no error** | 9,265,682 |
+
+Vacuity (`RoomTransitionExit_vacuity.sh`): tour end, leg 7, a rejected proposal, a wrong verdict, a phantom — reached in
+both scenarios; an accepted recognition — reached in tour3 (impossible in ping-pong, where no correct proposal exists).
+
+Not modelled (residual hazards to watch live): the anchor reporting `through` without the body being through (a controller
+bug, no adversary for it); a robot that crosses and comes back before the controller writes the fact; a crossing not
+driven by a mission (teleop) — it writes no fact, so the room does not switch.
+
+## Order of work
+
+1. controller: write `exit` at `through` (+ unit test on the passage state machine); keep the old completion behind the
+   flag until 3.
+2. room_concept: switch on `exit`; PassageMemory crossing detection OFF behind a flag, deleted after the live ping-pong.
+3. door_concept: NEW_FACE + twin + backed faces on `exit`; entry-mirror guess OFF.
+4. ltsm: pair from the twin; passage from `via`.
+5. controller: complete on ack + archive; track room_concept's room; drop `recall_<prev>`.
+6. trace_check.py: S9 every room switch has an `exit` fact; S10 no backed face deleted or shut.
+7. Live ping-pong ×6 (pingpong_tour.sh); only then the three-room tour.

@@ -249,3 +249,18 @@ Notes on how the checker reads the trace:
   `executing` edge (the recorder logs no edge_delete for edges into a deleted node). The checker therefore attributes
   an `executing` edge lost with the affordance to the door removal that follows from the same agent within 1 s.
 * A removal by an agent whose own agent node was just deleted is a graceful shutdown and is reported but not counted.
+
+## Revision 3: the exit-fact design (`RoomTransitionExit.tla`)
+
+A model of the DESIGN in the spec's "Revision 3" (the crossing is an action; the controller writes the `exit` fact;
+everyone keys on it). Run as above with `-config RoomTransitionExit_<c>.cfg RoomTransitionExit.tla`, c ∈ {pingpong,
+pingpong_nohold, pingpong_noclose, tour3, tour3_noclose}; `./RoomTransitionExit_vacuity.sh <cfg>` checks each scenario is
+not vacuous. Results (TLC 2026.10.28, 8 workers):
+
+| Config | Result | Distinct states |
+|---|---|---|
+| `_pingpong` | no error | 85,308 |
+| `_pingpong_nohold` | `TourCompletes` violated (pingpong2: the entered face judged shut) | 24,788 |
+| `_pingpong_noclose` | no error | 124,090 |
+| `_tour3_noclose` | `MemoryPassagesSound` violated (a leg opens before ltsm archives the last crossing) | 100,756 |
+| `_tour3` | no error | 9,265,682 (~25 min) |
