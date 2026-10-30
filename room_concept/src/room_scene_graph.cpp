@@ -896,9 +896,16 @@ void RoomSceneGraph::step_proto_room(const rc::RoomConcept::UpdateResult& res)
         row.event = "reanchor";
     if (startup_proto_)
         row.reason = startup_reason_.empty() ? std::string("startup") : startup_reason_;
-    // A start-up proto that is still proto has no doors of its own yet and is not a room anyone could
-    // cross OUT of: the crossing evidence starts once it is promoted (and is a surveyed room).
-    if (params_->PROTO_ROOM_ENABLED and not (startup_proto_ and not startup_promoted_))
+    // ★A room is crossed OUT of whether or not its survey has promoted it (user 2026-10-30; spec R2 "a provisional room
+    //  left before recognition decides is archived as a new room"). recog_proto11 leg 2: room_2, entered 30 s earlier and
+    //  still surveying, was left back through its entry door; with this step gated on promotion the crossing was never
+    //  seen, the robot stood in room_1 localised in room_2 for good, and the recall of room_1 behind that door went unused.
+    //  The entry door IS a door of the unpromoted room (door_concept's face of the crossed hole), and the outline the
+    //  crossing needs for the door's outward side is the confirmed free-space ring the survey publishes (below).
+    //  ⚠ Safe only with PassageMemory's first-sight rule (door_crossing.h, F2): a young room's doors are first seen with the
+    //  robot standing anywhere, and the old seeding credited whatever was already past a door's line — recog_proto15 crossed
+    //  "through" door_46 five seconds after room_2's birth. Both are flags F1/F2 of docs/superpowers/specs/tla (ping-pong).
+    if (params_->PROTO_ROOM_ENABLED)
         step_proto_room_impl(res, row);
     if (not startup_event_.empty())
         row.event = row.event.empty() ? startup_event_ : row.event + "+" + startup_event_;
@@ -943,7 +950,15 @@ void RoomSceneGraph::step_proto_room_impl(const rc::RoomConcept::UpdateResult& r
 
     // ── Before birth: the best crossing over this room's open apertures.
     const auto apertures = room_concept_->door_apertures();
-    const auto polygon   = room_concept_->nominal_room_polygon();
+    // The room's outline in the INTERNAL frame (the one xy and the apertures are in). A room still being surveyed has no
+    // derived polygon until its walls close; its outline is then the free-space ring it publishes (published frame).
+    auto polygon = room_concept_->nominal_room_polygon();
+    if (polygon.size() < 3 and fs_published_.size() >= 3)
+    {
+        const Eigen::Affine2f T_int_pub = internal_from_published();
+        polygon.clear();
+        for (const auto& v : fs_published_) polygon.push_back(T_int_pub * v);
+    }
     rc::crossing::Crossing best;
     const rc::DoorAperture* best_ap = nullptr;
     // ★ ONLY THIS ROOM'S DOORS CAN TAKE THE ROBOT OUT OF IT (2026-10-12). Every door resolves into this frame through

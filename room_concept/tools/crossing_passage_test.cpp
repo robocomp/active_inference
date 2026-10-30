@@ -459,6 +459,42 @@ int main()
         check(c.p_cross >= kBirth, "still a birth in the moved frame");
     }
 
+    std::printf("(n) FIRST SIGHT credits no passage: what is already past a door's line when it is first seen is not evidence\n");
+    {
+        // recog_proto15: door_46 appeared while the robot stood in ANOTHER doorway, past door_46's line and sideways of its
+        // mouth (p_span 0.08). It was first seen there, the robot parked — the old seeding gave p_cross 0.954 (a duplicate room).
+        auto mem = mem_new();
+        std::vector<Vector2f> path; park(path, {0.35f, 3.35f}, 80);   // p_span ~0.09, as door_46 (0.08)
+        const auto r = drive(door(0.95f), path, mem);
+        std::printf("  first seen past its line, at the edge of its mouth (p_span ~0.09), parked: max p_cross %.4f\n", r.max_p);
+        check(r.max_p < kBirth, "no crossing through a door first seen with the robot already past it (proto15)");
+        // the same, first seen square in its mouth and past it: nothing moved through it either
+        auto mem2 = mem_new();
+        std::vector<Vector2f> p2; park(p2, {0.f, 3.6f}, 80);
+        const auto r2 = drive(door(0.95f), p2, mem2);
+        std::printf("  first seen past its line, in its mouth, parked: max p_cross %.4f\n", r2.max_p);
+        check(r2.max_p < kBirth, "no crossing while parked past a door first seen there");
+        // first seen from INSIDE (the usual case: the entry face of a room seen from the room), then driven through
+        auto mem3 = mem_new();
+        std::vector<Vector2f> p3; park(p3, {0.f, 2.2f}, 5); line(p3, {0.f, 2.2f}, {0.f, 4.2f});
+        const auto r3 = drive(door(0.95f), p3, mem3);
+        std::printf("  first seen from inside, then through: max p_cross %.4f\n", r3.max_p);
+        check(r3.max_p >= kBirth, "a door first seen from inside still gives the crossing when the robot goes through");
+        // first seen with the robot IN the doorway, centre just inside the line (recog_proto13/15 leg 2 stood 0.21-0.29 m
+        // from the hole), then through
+        auto mem4 = mem_new();
+        std::vector<Vector2f> p4; park(p4, {0.f, 2.75f}, 5); line(p4, {0.f, 2.75f}, {0.f, 4.2f});
+        const auto r4 = drive(door(0.95f), p4, mem4);
+        std::printf("  first seen in the doorway 0.25 m inside, then through: max p_cross %.4f\n", r4.max_p);
+        check(r4.max_p >= kBirth, "a door first seen from the doorway (inside the line) still gives the crossing");
+        // THE STATED COST: first seen with the centre already past the line, then through — that part is never credited
+        auto mem5 = mem_new();
+        std::vector<Vector2f> p5; park(p5, {0.f, 3.1f}, 5); line(p5, {0.f, 3.1f}, {0.f, 4.2f});
+        const auto r5 = drive(door(0.95f), p5, mem5);
+        std::printf("  first seen 0.10 m past the line, then on: max p_cross %.4f (by design below the birth level)\n", r5.max_p);
+        check(r5.max_p < kBirth, "cost, by design: the part already past at first sight is never credited");
+    }
+
     std::printf("%s (%d failures)\n", failures ? "FAIL" : "PASS", failures);
     return failures ? 1 : 0;
 }

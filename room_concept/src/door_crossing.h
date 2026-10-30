@@ -448,9 +448,16 @@ namespace rc::crossing
             qA = now.past * now.span;   // no memory: the instantaneous reading
         else
         {
-            if (state->geo.half <= 0.0)   // first sight of this door: no path relative to it yet, the instantaneous reading
+            // FIRST SIGHT of this door: no path relative to it yet. Whatever of the robot is already past its line got there
+            // BEFORE the door was known, so none of it is evidence of a passage through it: the past mass starts in J ("not
+            // crossed — past only because the read appeared there"), and only motion seen from now on can move mass into A.
+            // ★It used to start in A as past·span (the instantaneous reading): recog_proto15's door_46, first seen with the
+            //  robot standing in ANOTHER doorway past its line (p_span 0.08), got A 0.08 against W ~0.9 priced at ε — p_cross
+            //  0.954, a false crossing and a duplicate room. Cost: a door first seen with the body already partly past its line
+            //  can never credit that part (p_cross ≤ 1 − past at first sight) — crossing_passage_test (n).
+            if (state->geo.half <= 0.0)
             {
-                state->geo = g; state->thru = now.past * now.span; state->jumped = 0.0;
+                state->geo = g; state->thru = 0.0; state->jumped = now.past;
                 state->last = PoseSample{xy, cov_xy}; state->d_last = d_odo; state->w_since = 1.0;
             }
             const ApertureGeo& G = state->geo;
