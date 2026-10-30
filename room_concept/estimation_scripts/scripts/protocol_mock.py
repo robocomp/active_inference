@@ -89,7 +89,7 @@ class Store:
     def __init__(s, rng, cfg, agents):
         s.rng = rng; s.cfg = cfg; s.seq = 0; s.nid = 0; s.auth = View(cfg.v2); s.views = {a: View(cfg.v2) for a in agents}
         s.log = []; s.last_write = 0; s.t = 0; s.T_reads = []; s.lag = cfg.lag_map
-        s.types = {}; s.archived = set(); s.stats = collections.Counter(); s.restores = []
+        s.types = {}; s.archived = set(); s.archived_rids = set(); s.stats = collections.Counter(); s.restores = []
 
     def new_id(s): s.nid += 1; return s.nid
 
@@ -111,6 +111,20 @@ class Store:
                 if key[0] == 'e' or key[0] == 'n' or (key[0] == 'a' and key[2] == 'name'):
                     if who != actor:
                         raise Violation(17, f"STRUCTURAL write by {who} ({s._fmt(key, val)}) while the token says {st} (turn of {actor})")
+
+    def m_checks(s, who, ops):
+        a = s.auth
+        for key, val in ops:
+            if key[0] != 'n' or not val: continue
+            attrs = {k[2]: v for k, v in ops if k[0] == 'a' and k[1] == key[1]}
+            if val['type'] == 'recall':
+                if attrs.get('state') == 'predicted' and is_open(a, s.cfg):
+                    raise Violation(22, f"{who} posted a PREDICTED recall (names room_id {attrs.get('mkey')}) while a crossing phase is open (M3)")
+                if attrs.get('state') == 'certain' and is_open(a, s.cfg) and attrs.get('mkey') not in s.archived_rids and \
+                        any(x == val['parent'] and y in a.nodes and a.nodes[y]['type'] == 'door' for (x, y) in a.edges['exit']):
+                    raise Violation(23, f"{who} posted recall for room_id {attrs.get('mkey')} under the way-back face BEFORE archiving it (M3)")
+            if val['type'] == 'proposal' and not attrs.get('final') and is_open(a, s.cfg):
+                raise Violation(26, f"{who} posted a proposal while a crossing phase is open (M8)")
 
     def lookup_by_name(s, who, name):
         """R5 instrumentation: a consumer resolved a room/door by NAME.  Fails once any rename has happened (names are display only)."""
@@ -154,6 +168,7 @@ class Store:
         for key, val in ops:
             if key[0] == 'n' and val: s.types[key[1]] = val['type']
         if s.cfg.v2t: s.freeze_check(who, ops)
+        if s.cfg.m: s.m_checks(who, ops)
         for key, val in ops: s.check_owner(who, key, val)
         for key, val in ops:
             s.seq += 1; sq = s.seq
@@ -425,7 +440,7 @@ class Ltsm(Agent):
                         if ok in s.rooms and not any(v.attr(c, 'mkey') == ok for c in v.kids_of(f, 'recall')):
                             m = s.rooms[ok]
                             s.put(node_ops(s.S.new_id(), 'recall', f, LT, m['truth'],
-                                           dict(name=f"recall_{m['name']}", room_name=m['name'], outline=m['outline'],
+                                           dict(name=(f"recall_{ok}_{f}" if s.cfg.m else f"recall_{m['name']}"), room_name=m['name'], outline=m['outline'],
                                                 frame_T=m['frame_T'], mkey=ok, **(dict(rows=m.get('rows'), state='certain') if s.cfg.v2 else {}))), t)
         if s.cfg.fault == 'pair_same_room' and v.proto(cur):
             fs = [(v.attr(f, 'hole'), f) for f in v.kids_of(cur, 'door')]
@@ -544,14 +559,17 @@ def closing_ok(v, c, cfg):      # SPEC GAP: a PREDICTED recall_<OLD> under NEW_F
     return cfg.closing_any or v.attr(c, 'state') != 'predicted'
 
 
-def closed_for(v, old, b, cfg):
+def closed_for(v, old, b, cfg, a=None):
+    if cfg.m:        # M1: a phase closes ONLY on the positive fact (recall naming OLD's room_id under a face of b); "old room gone" is not a fact
+        rid = v.attr(a, 'room_id') if a is not None and v.attr(a, 'room_id') is not None else v.attr(old, 'room_id')
+        return any(v.attr(c, 'mkey') == rid and closing_ok(v, c, cfg) for f in v.kids_of(b, 'door') for c in v.kids_of(f, 'recall'))
     if old not in v.nodes: return True
     rid = v.attr(old, 'room_id')                                     # R5: the closing recall names the room by ID (its `mkey` attr), never by name
     return any(v.attr(c, 'mkey') == rid and closing_ok(v, c, cfg) for f in v.kids_of(b, 'door') for c in v.kids_of(f, 'recall'))
 
 
 def open_list(v, cfg):
-    return [(a, b) for (a, b) in exits_valid(v) if not closed_for(v, v.nodes[a]['parent'], b, cfg)]
+    return [(a, b) for (a, b) in exits_valid(v) if not closed_for(v, v.nodes[a]['parent'], b, cfg, a)]
 
 
 def is_open(v, cfg):
@@ -591,6 +609,15 @@ class RoomConceptV2(RoomConcept):
             if v.proto(r): ops.append((('e', 'proto', r, r), None))
             s.put(ops, t); s.count_transition(r, t)
 
+    def drop_proto(s, cur, t):
+        """M5: proto leaves only on adoption (done in the adoption put) or when ltsm stated the episode over.  Checked on the authoritative graph."""
+        v = s.v
+        if not v.proto(cur): return
+        a = s.S.auth
+        if not any(a.attr(p, 'final') for p in a.kids_of(cur, 'proposal')):
+            raise Violation(24, f"room_concept removed P's proto edge (n{cur}) but ltsm had not stated that recognition is over (and P was not adopted)")
+        s.put([(('e', 'proto', cur, cur), None)], t)
+
     def issued_id(s):
         ag = next(iter(s.v.by_type['agent']), None)
         return s.v.attr(ag, 'next_room_id') if ag is not None else None
@@ -614,10 +641,14 @@ class RoomConceptV2(RoomConcept):
                 ops = [(('a', cur, 'est_steps'), e + 1)]
                 if e + 1 >= 3 and v.attr(cur, 'outline') is None:
                     ops += [(('a', cur, 'outline'), v.nodes[cur]['truth']), (('a', cur, 'frame_T'), T_FRAME[v.nodes[cur]['truth']])]
-                if e + 1 >= cfg.publishable: ops.append((('e', 'proto', cur, cur), None))     # first publishable: P stays a NEW room
+                if e + 1 >= cfg.publishable and not cfg.m: ops.append((('e', 'proto', cur, cur), None))     # first publishable: P stays a NEW room
                 s.put(ops, t)
+            elif cfg.m and cfg.fault == 'proto_at_publishable': s.drop_proto(cur, t)       # the old stand-in
+            if cfg.m and cfg.fault == 'proto_at_publishable' and e + 1 >= cfg.publishable: s.drop_proto(cur, t)
             for p in v.kids_of(cur, 'proposal'):
                 if v.attr(p, 'verdict') is not None: continue
+                if v.attr(p, 'final'):                                  # M5: ltsm states the recognition episode for P is over
+                    s.drop_proto(cur, t); continue
                 if v.attr(p, 'target_outline') == v.attr(cur, 'outline'):
                     tt = T_FRAME[v.nodes[p]['truth']]
                     s.put([(('a', cur, 'name'), v.attr(p, 'target_name')), (('a', cur, 'outline'), v.attr(p, 'target_outline')),
@@ -642,6 +673,12 @@ class RoomConceptV2(RoomConcept):
         if s.issued_id() is None: return                # R5: wait for ltsm's next free room_id
         s.handled = w.epoch
         a = s.S.auth
+        if cfg.m:
+            if cfg.fault != 'no_reject_pending':
+                for p in v.kids_of(old, 'proposal'):
+                    if v.attr(p, 'verdict') is None and not v.attr(p, 'final'): s.put([(('a', p, 'verdict'), 'rejected')], t)
+            pend = [p for p in a.kids_of(old, 'proposal') if a.attr(p, 'verdict') is None and not a.attr(p, 'final')]
+            if pend: raise Violation(27, f"room_concept opened a crossing while proposal n{pend[0]} on the room left was still pending (M8)")
         recs = v.kids_of(face, 'recall')
         certain = [r for r in recs if v.attr(r, 'state') != 'predicted']
         pred = [r for r in recs if v.attr(r, 'state') == 'predicted']
@@ -684,6 +721,7 @@ class DoorConceptV2(DoorConcept):
         if aff and is_open(s.S.auth, s.cfg):
             raise Violation(11, f"door_concept OFFERED an affordance on a new face ({name}) while a transition is open (its view did not show it)")
         attrs = dict(name=name, hole=hole, aff=1 if aff else 0)
+        if s.cfg.m: attrs['room_id'] = v.attr(cur, 'room_id')                # R5: a face is identified by (room_id, passage)
         if T is not None: attrs['T_used'] = T
         fid = s.S.new_id(); s.put(node_ops(fid, 'door', cur, DC, None, attrs), t); return fid
 
@@ -703,6 +741,7 @@ class DoorConceptV2(DoorConcept):
         faces = {v.attr(f, 'hole'): f for f in v.kids_of(cur, 'door')}
         if state == 'adopted':
             for h, f in faces.items():
+                if s.cfg.m and v.attr(f, 'room_id') != v.attr(cur, 'room_id'): s.put([(('a', f, 'room_id'), v.attr(cur, 'room_id'))], t)
                 if h in rows and v.name(f) != rows[h] and rows[h] not in {v.name(x) for x in v.by_type['door']}: s.put([(('a', f, 'name'), rows[h])], t)
                 if v.attr(f, 'T_used') != T: s.put([(('a', f, 'T_used'), T)], t)
             s.merged.add(cur)
@@ -749,7 +788,7 @@ class DoorConceptV2(DoorConcept):
 
 
 class LtsmV2(Ltsm):
-    def init(s): Ltsm.init(s); s.done_tr = set(); s.key_truth = {}; s.settled = set(); s.agent = None; s.issued = None
+    def init(s): Ltsm.init(s); s.done_tr = set(); s.key_truth = {}; s.settled = set(); s.agent = None; s.issued = None; s.issued_names = None
 
     def assert_exit(s, p):
         a = s.S.auth; fa, fb, new, o = p.get('fa'), p.get('fb'), p['new'], p['old']
@@ -771,7 +810,7 @@ class LtsmV2(Ltsm):
         else:
             s.passages[pid]['crossings'] += 1
             s.put([(('a', s.pass_node[pid], 'crossings'), s.passages[pid]['crossings'])], t)
-        s.S.archived.add(o['id'])
+        s.S.archived.add(o['id']); s.S.archived_rids.add(o['key'])
         aid = s.S.new_id(); s.put(node_ops(aid, 'archive', None, LT, None, dict(name=f"archive_{o['id']}", node=o['id'])), t)
         if s.cfg.fault == 'ltsm_deletes_old_room': s.put([(('n', o['id']), None)], t)       # the old eviction
         s.settled.add(new); s.reconcile(new, t)                      # closing fact: recall_<OLD> under NEW_FACE, AFTER archive + passage
@@ -782,6 +821,29 @@ class LtsmV2(Ltsm):
         if new not in s.v.nodes: return
         if not any(s.v.attr(f, 'hole') == hole for f in s.v.kids_of(new, 'door')): return
         s.commit(p, t); s.pending = None
+
+    def recognise(s, cur, t):
+        if not s.cfg.m: return Ltsm.recognise(s, cur, t)
+        v = s.v
+        if not v.proto(cur): return
+        props = v.kids_of(cur, 'proposal')
+        if any(v.attr(p, 'verdict') != 'rejected' for p in props): return
+        o = v.attr(cur, 'outline')
+        if o is None: return
+        if props: s.ev[cur] = 0
+        s.ev[cur] = s.ev.get(cur, 0) + 1
+        if s.ev[cur] < s.cfg.evidence: return
+        k = s.key_for(cur)
+        cand = [kk for kk, m in s.rooms.items() if m['outline'] == o and kk != k]
+        if not cand:                                                 # M5: the recognition episode for P ended without a proposal -> say so
+            s.put(node_ops(s.S.new_id(), 'proposal', cur, LT, None, dict(name=f"episode_over_{cur}", final=1)), t); return
+        if s.cfg.fault != 'proposal_during_phase' and is_open(v, s.cfg): return      # M8: never while a crossing phase is open
+        m = s.rooms[cand[0]]
+        s.put(node_ops(s.S.new_id(), 'proposal', cur, LT, m['truth'],
+                       dict(name=f"proposal_{m['name']}", target_mkey=cand[0], target_name=m['name'], target_outline=o,
+                            T_prior=m['frame_T'] + 0.05, rows=m.get('rows'))), t)
+        s.note(t, f"PROPOSAL: n{cur} is {m['name']}")
+        if s.cfg.fault == 'ltsm_deletes_provisional': s.put([(('n', cur), None)], t)
 
     def key_for(s, r):                                               # R5: the memory key IS the room_id
         k = s.v.attr(r, 'room_id'); s.node_key.setdefault(r, k); return k
@@ -802,9 +864,16 @@ class LtsmV2(Ltsm):
         v = s.v
         used = set(s.rooms) | {v.attr(r, 'room_id') for r in v.by_type['room']}
         nxt = next(i for i in range(1, 99) if i not in used)
+        names = tuple(sorted({(v.name(r), v.attr(r, 'room_id')) for r in v.by_type['room']} | {(m['name'], k) for k, m in s.rooms.items()},
+                             key=lambda x: (x[0], x[1] or 0)))        # M7: display name -> room_id, live rooms first, then memory
         if s.agent is None:
-            s.agent = s.S.new_id(); s.put(node_ops(s.agent, 'agent', None, LT, None, dict(name='ltsm_agent', next_room_id=nxt)), t); s.issued = nxt
-        elif nxt != s.issued: s.put([(('a', s.agent, 'next_room_id'), nxt)], t); s.issued = nxt
+            s.agent = s.S.new_id(); s.put(node_ops(s.agent, 'agent', None, LT, None, dict(name='ltsm_agent', next_room_id=nxt, names=names)), t)
+            s.issued = nxt; s.issued_names = names
+        else:
+            ops = []
+            if nxt != s.issued: ops.append((('a', s.agent, 'next_room_id'), nxt)); s.issued = nxt
+            if names != s.issued_names: ops.append((('a', s.agent, 'names'), names)); s.issued_names = names
+            if ops: s.put(ops, t)
 
     def snap(s, r):
         d = Ltsm.snap(s, r); v = s.v
@@ -854,6 +923,19 @@ class LtsmV2(Ltsm):
             if old not in v.nodes or fb is None: continue            # wait for the far face's answering edge
             s.carry_over(old, t)
             sn = s.snap(old); sn['key'] = s.key_for(old)
+            if cfg.m and cfg.fault == 'recall_before_archive' and a not in s.done_tr:       # M3 violated: the closing fact before archive + passage
+                s.put(node_ops(s.S.new_id(), 'recall', fb, LT, sn['truth'], dict(name=f"recall_{sn['key']}_{fb}", room_name=sn['name'], outline=sn['outline'],
+                                                                              frame_T=sn['frame_T'], mkey=sn['key'], rows=sn['rows'], state='certain')), t)
+            if cfg.m and cfg.fault == 'proposal_during_phase' and a not in s.done_tr:       # M8 violated: a proposal posted while the crossing phase is open
+                cand = [k for k, m in s.rooms.items() if m['truth'] == v.nodes[b]['truth']]
+                if cand:
+                    m = s.rooms[cand[0]]
+                    s.put(node_ops(s.S.new_id(), 'proposal', b, LT, m['truth'], dict(name=f"proposal_{m['name']}", target_mkey=cand[0], target_name=m['name'],
+                                                                              target_outline=m['outline'], T_prior=m['frame_T'] + 0.05, rows=m.get('rows'))), t)
+            if cfg.m and cfg.fault == 'predict_during_phase' and a not in s.done_tr:        # M3 violated: a predicted recall naming OLD while the phase is open
+                s.put(node_ops(s.S.new_id(), 'recall', fb, LT, sn['truth'], dict(name=f"recall_{sn['key']}_{fb}", room_name=sn['name'], outline=sn['outline'],
+                                                                              frame_T=sn['frame_T'], mkey=sn['key'], rows=sn['rows'], state='predicted',
+                                                                              sigma=1.0, oracle_err=0.0)), t)
             s.done_tr.add(a); s.commit(dict(old=sn, new=b, hole=v.attr(a, 'hole'), fa=a, fb=fb), t)
         cur = v.current()
         if cur in v.nodes:
@@ -874,14 +956,14 @@ class LtsmV2(Ltsm):
             if pr is None: continue
             x, d, err = pr; m = s.rooms[x]
             s.put(node_ops(s.S.new_id(), 'recall', f, LT, m['truth'],
-                           dict(name=f"recall_{m['name']}", room_name=m['name'], outline=m['outline'], frame_T=m['frame_T'] + err, mkey=x,
+                           dict(name=(f"recall_{x}_{f}" if s.cfg.m else f"recall_{m['name']}"), room_name=m['name'], outline=m['outline'], frame_T=m['frame_T'] + err, mkey=x,
                                 rows=m.get('rows'), state='predicted', sigma=s.cfg.map_sigma * math.sqrt(d), oracle_err=err)), t)
             s.note(t, f"PREDICTED recall_{m['name']} under n{f} ({d} seams, err={err:.2f} m, sigma={s.cfg.map_sigma * math.sqrt(d):.2f})")
 
 
 class ControllerV2(Controller):
     def init(s):
-        Controller.init(s); s.chosen = None
+        Controller.init(s); s.chosen = None; s.left_rid = None; s.start_rid = None; s.mission_id = None; s.start_node = None
         # R5: a mission that names room_N is resolved to its room_id ONCE, when accepted; display names are room_<room_id>
         s.mission = {rel: int(rel[5:]) for rel, _ in LEGS if rel.startswith('room_')}; s.S.stats['lookup_name_at_accept'] += len(s.mission)
 
@@ -911,8 +993,106 @@ class ControllerV2(Controller):
                 if hit and (best is None or d['name'] < best['name']): best = d
         return best
 
+    # ---- M1/M2/M6/M7 ----------------------------------------------------------------------------------------------------------
+    def facts_m(s, cur):
+        v = s.v; out = []
+        for f in v.kids_of(cur, 'door'):
+            recs = [(v.attr(c, 'mkey'), v.attr(c, 'state')) for c in v.kids_of(f, 'recall')]
+            out.append(dict(name=v.name(f), id=f, hole=v.attr(f, 'hole'), aff=bool(v.attr(f, 'aff')), dist=DIST[v.attr(f, 'hole')],
+                            cert_ids={r for r, st in recs if st != 'predicted'},
+                            cert_names={v.attr(c, 'room_name') for c in v.kids_of(f, 'recall') if v.attr(c, 'state') != 'predicted'}, all_ids={r for r, _ in recs}, has_cert=any(st != 'predicted' for _, st in recs),
+                            match=any(b == f and pn in v.nodes for (pn, b) in v.edges['match'])))
+        return out
+
+    def pick_m(s, rel, doors):
+        best = None
+        for d in doors:
+            if s.cfg.fault != 'no_transition_hold' and not d['aff']: continue
+            if rel == 'new':
+                if s.cfg.close_doors and d['hole'] != LEG_HOLE.get(s.leg): continue
+                if d['has_cert'] or d['match']: continue                              # M1: a lasting fact marks the way back / a known door
+                if best is None or (d['dist'], d['name']) < (best['dist'], best['name']): best = d
+            else:
+                ids = d['all_ids'] if s.cfg.fault == 'cross_via_predicted' else d['cert_ids']          # M6: unverified predictions do not resolve `cross K`
+                if s.cfg.fault == 'name_keyed_lookup': s.S.lookup_by_name(s.name, rel); hit = rel in d['cert_names']
+                else: s.S.stats['lookup_id'] += 1; hit = s.mission_id in ids
+                if hit and (best is None or d['name'] < best['name']): best = d
+        return best
+
+    def resolve(s, rel):
+        """M7: a mission's room_N is resolved, when accepted, through ltsm's identities (its published display-name -> room_id table)."""
+        ag = next(iter(s.v.by_type['agent']), None)
+        if ag is None: return None
+        tbl = dict(s.v.attr(ag, 'names') or ())
+        if rel not in tbl: return None
+        s.S.stats['lookup_name_at_accept'] += 1; return tbl[rel]
+
+    def closing_seen(s, cur):
+        v = s.v
+        return any(v.attr(c, 'mkey') == s.left_rid and v.attr(c, 'state') != 'predicted' for f in v.kids_of(cur, 'door') for c in v.kids_of(f, 'recall'))
+
+    def step_m(s, t):
+        if s.leg >= len(LEGS): s.done = True; return
+        v, w, cfg = s.v, s.w, s.cfg; rel, expect = LEGS[s.leg]; cur = v.current()
+        if s.phase == 'start':
+            if cur in v.nodes:
+                if rel.startswith('room_'):
+                    rid = s.resolve(rel)
+                    if rid is None: return                                           # not resolvable yet: the mission is not accepted yet
+                    s.mission_id = rid
+                s.phase = 'explore'; s.timer = cfg.explore
+        elif s.phase == 'explore':
+            s.timer -= 1
+            if s.timer <= 0: s.phase = 'hold'; s.since = t
+        elif s.phase == 'hold':
+            if cur not in v.nodes: return
+            if s.left_rid is not None and cfg.fault != 'no_transition_hold':
+                if s.closing_seen(cur): s.left_rid = None
+                else:
+                    s.wait_desc = f"leg {s.leg + 1} cross {rel}: crossing phase of room_id {s.left_rid} not closed (no recall naming it seen)"
+                    if t - s.since > cfg.hold: s.stuck(t)
+                    return
+            d = s.pick_m(rel, s.facts_m(cur))
+            if d is None:
+                s.wait_desc = f"leg {s.leg + 1} cross {rel}: no door resolves in {v.name(cur)}"
+                if t - s.since > cfg.hold: s.stuck(t)
+                return
+            a = s.S.auth
+            if cur not in a.nodes or a.nodes[cur]['truth'] != w.true_room:
+                raise Violation(5, f"controller (room {v.name(cur)}) drives while the robot is truly in {w.true_room}")
+            if d['id'] not in a.nodes: raise Violation(2, f"controller drives at door n{d['id']} that no longer exists")
+            if is_open(a, cfg): raise Violation(11, f"controller SELECTED door {d['name']} while a transition is open (its view did not show it)")
+            af = d['id']; certs = {a.attr(c, 'mkey') for c in a.kids_of(af, 'recall') if a.attr(c, 'state') != 'predicted'}
+            if rel == 'new':
+                if certs or any(b == af for (_, b) in a.edges['match']):
+                    raise Violation(2, f"controller took {d['name']} as 'new' but a recall/match already marks it (absence read)")
+            elif s.mission_id not in certs:
+                raise Violation(25, f"controller resolved `cross {rel}` through {d['name']} on an UNVERIFIED predicted recall (M6)")
+            hole = a.attr(af, 'hole')
+            if hole not in holes_of(w.true_room): raise Violation(5, f"door {d['name']} ({hole}) is not in the true room {w.true_room}")
+            s.chosen = af; s.start_rid = v.attr(cur, 'room_id'); s.start_node = cur; w.start_cross(hole, t); s.phase = 'drive'
+        elif s.phase == 'drive':
+            if w.crossing is None: s.phase = 'switch'; s.since = t
+        elif s.phase == 'switch':
+            if cfg.fault == 'leg_on_exit_edge':
+                ex = [b for (x, b) in exits_valid(v) if x == s.chosen]; nb = ex[0] if ex else None
+            else:
+                if cfg.m2_node: nb = cur if (cur in v.nodes and cur != s.start_node) else None            # variant: the room NODE changed
+                else: nb = cur if (cur in v.nodes and v.attr(cur, 'room_id') != s.start_rid) else None   # M2 as written: the robot's room, by room_id
+            if nb is not None:
+                a = s.S.auth
+                if a.nodes[nb]['truth'] != w.true_room:
+                    raise Violation(5, f"leg {s.leg + 1} done: room {v.name(nb)} is {a.nodes[nb]['truth']}, robot truly in {w.true_room}")
+                if w.true_room != expect: raise Violation(5, f"leg {s.leg + 1} (cross {rel}) landed in {w.true_room}, expected {expect}")
+                s.legs_done.append((s.leg + 1, t, v.name(nb), nb)); s.note(t, f"LEG {s.leg + 1} done in {v.name(nb)} n{nb}")
+                s.left_rid = v.attr(s.start_node, 'room_id') if s.start_node in v.nodes else s.start_rid; s.leg += 1; s.phase = 'start'
+            else:
+                s.wait_desc = f"leg {s.leg + 1} waiting for the robot's room to change"
+                if t - s.since > cfg.hold: s.stuck(t)
+
     def step(s, t):
         if s.cfg.fault == 'no_exit_edge': return Controller.step(s, t)
+        if s.cfg.m: return s.step_m(t)
         if s.leg >= len(LEGS): s.done = True; return
         v, w, cfg = s.v, s.w, s.cfg; rel, expect = LEGS[s.leg]; cur = v.current()
         if s.phase == 'start':
@@ -1162,7 +1342,7 @@ def check_tick(S, w, agents, prov_ids):
         for k, m in agents[LT].rooms.items():
             if k in ids and a.nodes[ids[k]]['truth'] != m['truth']:
                 raise Violation(19, f"room_id {k} names two different rooms: live {a.name(ids[k])} ({a.nodes[ids[k]]['truth']}) vs memory {m['name']} ({m['truth']})")
-    for typ in (('room', 'door', 'passage') if S.cfg.v2 else ('room', 'door')):
+    for typ in ((('room', 'door', 'passage', 'recall') if S.cfg.m else ('room', 'door', 'passage')) if S.cfg.v2 else ('room', 'door')):
         names = collections.Counter(a.name(n) for n in a.by_type[typ])
         dup = [n for n, c in names.items() if c > 1]
         if dup: raise Violation(8, f"duplicate live {typ} names {dup}")
@@ -1248,8 +1428,11 @@ def main():
     ap.add_argument('--detect', type=int, default=6); ap.add_argument('--evidence', type=int, default=6)
     ap.add_argument('--hold', type=int, default=120)
     ap.add_argument('--fault', choices=['name_keyed_lookup', 'pair_same_room', 'read_prior_not_accepted', 'ltsm_deletes_provisional',
-                                        'no_exit_edge', 'no_transition_hold', 'door_rows_from_csv', 'ltsm_deletes_old_room', 'no_freeze'])
-    ap.add_argument('--protocol', choices=['v1', 'v2', 'v2t'], default='v2')
+                                        'no_exit_edge', 'no_transition_hold', 'door_rows_from_csv', 'ltsm_deletes_old_room', 'no_freeze',
+                                        'leg_on_exit_edge', 'predict_during_phase', 'recall_before_archive', 'proto_at_publishable', 'cross_via_predicted',
+                                        'proposal_during_phase', 'no_reject_pending'])
+    ap.add_argument('--m2-node', dest='m2_node', action='store_true', help='v2: complete a leg when the room NODE changes (M2 as written uses room_id, which an adoption changes mid-leg)')
+    ap.add_argument('--protocol', choices=['v1', 'v2', 'v2old', 'v2t'], default='v2', help='v2 = Revision 2 with mock rules M1-M8; v2old = v2 before M1-M8; v2t = token')
     ap.add_argument('--scenario', choices=['tour', 'no_map', 'bad_map'], default='tour')
     ap.add_argument('--map-err', dest='map_err', type=float, default=None, help='std (m, per axis) of the TRUE error of each layout seam (default 0.2; bad_map 2.5)')
     ap.add_argument('--map-sigma', dest='map_sigma', type=float, default=0.3, help='ltsm\'s CLAIMED per-seam sigma (m); predicted sigma = this * sqrt(#seams)')
@@ -1262,7 +1445,7 @@ def main():
     ap.add_argument('--tail', type=int, default=90, help='trace lines printed for the first failure')
     cfg = ap.parse_args()
     if cfg.stress: cfg.dmax, cfg.drop, cfg.stall = 10, 12, 12
-    cfg.v2 = cfg.protocol in ('v2', 'v2t'); cfg.v2t = cfg.protocol == 'v2t'; cfg.no_map = cfg.scenario == 'no_map'
+    cfg.v2 = cfg.protocol in ('v2', 'v2old', 'v2t'); cfg.v2t = cfg.protocol == 'v2t'; cfg.m = cfg.protocol == 'v2'; cfg.no_map = cfg.scenario == 'no_map'
     if cfg.map_err is None: cfg.map_err = 2.5 if cfg.scenario == 'bad_map' else 0.2
     cfg.lag_map = {{'room': RC, 'door': DC, 'ltsm': LT, 'controller': CT}.get(k, k): int(v) for k, v in (x.split('=') for x in cfg.lag.split(',') if x)}
     if cfg.seed is not None:
