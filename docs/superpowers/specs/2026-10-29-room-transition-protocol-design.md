@@ -211,40 +211,52 @@ all three. It REPLACES parts of the 10-29 design; it does not add to them.
 - The `exit` edges are deleted with their faces (owners: room_concept's OLD_FACE→NEW_ROOM goes when the old room is
   archived; door_concept's with NEW_FACE).
 
-## R2 — Structural changes are SERIALIZED: one transition token freezes the fleet until done
+## R2 — Structural changes are SERIALIZED by a chain of facts; the transition is a phase that freezes door actions
 
-User 10-30: "structural changes kind of freeze the fleet until done to preserve coherence". Lucas's Scheduler allowed one
-action at a time; this keeps that discipline only where it matters, without a central agent.
+User 10-30: "structural changes kind of freeze the fleet until done to preserve coherence". Serialization is achieved by a
+CHAIN: each structural step is taken by its one owner only when its predecessor's fact is visible, so no two structural
+steps of a transition can overlap, whatever the DDS delays.
 
-- **The token** is ONE node, `transition` (type `metaconcept`, existing `state` attribute; no new attributes). It exists
-  only while a structural change is in progress; at most one exists. Its `state` names the step being executed and,
-  through the table below, the ONE agent allowed to act. That agent does its step, then advances `state` (its only write
-  on the token). A stuck transition therefore says, in one attribute, who it is waiting for.
-- **The freeze.** While `transition` exists:
-  - only the agent named by `state` creates, deletes or renames nodes or edges (tracker births, wall creation, look and
-    affordance nodes all wait; the agent keeps its estimate internally and publishes after);
-  - every agent may still update ATTRIBUTES of nodes it owns (poses, beliefs, the robot's RT) — perception never stops;
-  - no door affordance is offered or selected and no mission step resolves a door; the controller only finishes the cross
-    already executing (the body clears the doorway) and otherwise holds.
-- **Kind `cross`** (opened by room_concept at its switch decision, together with `exit` OLD_FACE → NEW_ROOM, R1):
-
-  | state | actor | step | advances to |
-  |---|---|---|---|
-  | `cross:entering` | room_concept | verify a predicted K (R3) or create P; re-parent the robot; final NEW_ROOM on the `exit` edge | `cross:entered` |
-  | `cross:entered` | door_concept | NEW_FACE + `exit` NEW_FACE → OLD_FACE; restore K's doors from the recall (R4) | `cross:faced` |
-  | `cross:faced` | ltsm | archive OLD_ROOM; passage from the `exit` pair; `recall_<OLD_ROOM>` under NEW_FACE | `cross:archived` |
-  | `cross:archived` | door_concept | delete OLD_ROOM's doors (and with them their `exit` edges) | `cross:released` |
-  | `cross:released` | room_concept | delete OLD_ROOM, its walls and floor; delete the token | — |
-
-- **Kind `adopt`** (case 2 only, R3's fallback; opened by ltsm when it posts a proposal):
-  `adopt:proposed` (room_concept judges; accept = rename P→K in place with the accepted transform, or reject) →
-  `adopt:judged` (door_concept re-seats/restores on accept; nothing on reject) → `adopt:seated` (ltsm carry-over on accept)
-  → deleted by ltsm. A proposal is never opened while another transition exists; it waits.
-- **Who may open a token**: room_concept (`cross`), ltsm (`adopt`), each only when none exists. Creation is the opener's
-  only structural act before its first step.
-- **Failure**: an actor that is absent (presence protocol) leaves the token in place and the fleet frozen — visible and
-  safe, never a wrong graph. No timers advance a state; the mission's own budget fails the leg as today.
-- `exit` edges (R1) say WHICH hole was crossed; the token says WHERE the transition is. Both are kept.
+- **Chain of kind `cross`** (each step = one owner, one fact):
+  1. room_concept: `exit` OLD_FACE → NEW_ROOM (opens the phase), then verifies a predicted K (R3) or creates P, and
+     re-parents the robot (fact: the robot's RT parent is NEW_ROOM).
+  2. door_concept, on fact 1: NEW_FACE + `exit` NEW_FACE → OLD_FACE; restores K's doors from the recall (R4).
+  3. ltsm, on fact 2: archives OLD_ROOM; passage from the `exit` pair; THEN posts `recall_<OLD_ROOM>` under NEW_FACE
+     (closes the phase).
+  4. door_concept and room_concept, on fact 3: each deletes its own nodes of OLD_ROOM (doors; room, walls, floor).
+- **The phase** is open from fact 1 until fact 3. While open: no door affordance is offered or selected, and no mission
+  step resolves a door; the controller only finishes the cross already executing. Perception and each agent's attribute
+  updates continue. No timer: the mission's own budget is the only bound.
+- **Rules found by the protocol mock (10-30, `protocol_mock_v2_report.md`)**:
+  - **M1 — the way back is marked by a LASTING fact.** `exit` edges die with OLD_FACE at cleanup; the lasting mark is
+    `recall_<OLD_ROOM>` under NEW_FACE (and the passage `match`). `cross new` excludes doors with a recall child or a
+    match (as today); because no door resolves while the phase is open and fact 3 closes it, the controller never reads an
+    ABSENCE: the `recall_<prev>` guard (11936d55) is removed.
+  - **M2 — a leg completes on a lasting fact**: the robot's room (room_concept's RT parent, by room_id), never on an
+    `exit` edge.
+  - **M3 — ordering inside ltsm**: `recall_<OLD_ROOM>` under NEW_FACE is posted only AFTER OLD_ROOM is archived and the
+    passage joined (it is the phase's closing fact). A PREDICTED recall (R3) is never posted under a door of a room while a
+    phase is open, and never names OLD_ROOM.
+  - **M4 — recall nodes are keyed by identity (R5)**: `recall_<room_id>_<door node id>`, unique while the left room is
+    still alive; its `room_id` attribute is what consumers read.
+  - **M5 — `proto` lasts while recognition can still answer**: room_concept removes P's `proto` edge only when P is adopted,
+    or when ltsm has stated that recognition is over for P (its recognition episode for P ended without a proposal), not at
+    "first publishable".
+  - **M6 — a predicted recall does not satisfy `cross <room>` until verified**: the controller resolves `cross K` only by a
+    recall that is not predicted, or by a predicted one whose crossing room_concept has already verified (the recall is
+    re-posted as ordinary after verification). Unverified predictions only shape the crossing (R3).
+  - **M8 — adoption is a chain too, and never overlaps a crossing**: ltsm posts a proposal (case 2) only while no
+    crossing phase is open; room_concept's verdict, door_concept's re-seat/restore and ltsm's carry-over follow as in case 2
+    steps 7–9, each on its predecessor's fact. A crossing decided while a proposal is pending abandons the proposal first
+    (room_concept answers it `rejected`, then opens the crossing).
+  - **M7 — missions resolve room names through ltsm's identities**: a mission's `room_N` is resolved, when the mission is
+    accepted, by ltsm's memory (live room with that display name, else the remembered room with it) to a room_id; from then
+    on the mission holds the id.
+- **Tried and rejected: an explicit transition token** (one `transition` node whose `state` names the only agent allowed to
+  write). In the mock (1000 seeds, ltsm lag 8 / explore 6) it passed 496/1000 vs the chain's 965/1000, and was slower (5.6 vs
+  4.1 ticks per transition). Cause: in a replicated graph the token is ADVISORY — agents keep writing until its creation
+  reaches them. Making it real needs an acknowledged barrier (every agent confirms "frozen" before the first step), more
+  state and more ways to stall. The chain serializes without it.
 
 ## R3 — Known rooms are PREDICTED before crossing; recognition after entry becomes the fallback
 
@@ -285,15 +297,15 @@ between a live agent's private counter and ltsm's memory, and a NAME doubling as
 The rule, for both:
 - **Identity = (kind, id) issued by ltsm**, the only long-term memory. Rooms carry `room_id`; a hole carries its passage
   (already the hole's identity); a door FACE is identified by (room_id, passage). ltsm publishes the next free `room_id`
-  as an attribute of its own agent node; room_concept takes it at `cross:entering` for a new room. A provisional room that
+  as an attribute of its own agent node; room_concept takes it at step 1 of the crossing chain (R2) for a new room. A provisional room that
   is adopted as K returns its number (ltsm does not advance its counter for it). `etc/room_name_hwm.txt` is removed;
   door_concept's counter only makes DSR node names unique.
 - **Names are display only.** `room_<room_id>`; doors keep opaque `door_<n>`. Nothing keys on a name: recalls, remembered
   door rows (R4: they live in ltsm memory, keyed by (room_id, passage)), caches (ltsm's memory prefix), controller
   aliases and missions resolve by id. A mission that names `room_1` is resolved to its room_id once, when it is accepted.
-- **Renames are cosmetic and happen only inside the token.** With R3 a predicted room enters with its own name and id, so
+- **Renames are cosmetic and happen only inside a chain (R2: the adoption's).** With R3 a predicted room enters with its own name and id, so
   a room rename happens only in `adopt` (case 2). A door face may be renamed to its hole's remembered face name at
-  `cross:faced` (the 10-30 note "rename the entry mirror to the old face's name"), purely for the human reader; since
+  step 2 of the crossing chain (the 10-30 note "rename the entry mirror to the old face's name"), purely for the human reader; since
   nothing keys on names, it can never break anything, and it can be dropped if it costs anything.
 - **One wipe.** Resetting memory = deleting ltsm's memory file; no other agent persists identities.
 
@@ -310,7 +322,7 @@ The rule, for both:
 ## What is REMOVED by this revision
 
 - ltsm's passage pairing by "door under a provisional room + nearest door" (passage_live.cpp step 2) → R1.
-- The controller's `recall_<prev>` guard on `cross new` (11936d55) → R1 + the freeze (R2).
+- The controller's `recall_<prev>` guard on `cross new` (11936d55) → R2 (phase + M1).
 - ltsm's eviction deleting other agents' nodes → R2.
 - door_concept's restore and looks from `door_identities.csv` rows → R4.
 - The tour's `explore … until=explored>=0.9` step (done, 66699077).
@@ -318,8 +330,7 @@ The rule, for both:
 
 ## Verification
 
-1. The protocol mock implements Revision 2 both as the implicit chain of facts (`--protocol v2`) and with the explicit
-   token (`--protocol v2t`), compared side by side, with the same adversary (write delays, agent stalls) plus
+1. The protocol mock implements Revision 2 (`--protocol v2`, the chain with M1–M7; v2t kept only as the rejected comparison), with the same adversary (write delays, agent stalls) plus
    map error on predicted transforms, and must pass ≥ 1000 seeds with the faults still detected; it also runs the cases
    R3 routes to the fallback (no prediction; prediction rejected).
 2. Each R-item's C++ change is pinned by a unit test in its owner, then the six-leg tour, graded with the ground-truth log
