@@ -284,6 +284,16 @@ int main(int argc, char **argv)
         check(mem_rooms() == 3, "no duplicate room node while staged");
         check(live->get_node("room_4").has_value(), "rule 1: the live provisional room stays");
         check(live->get_node("proposal_room_3").has_value(), "proposal for K posted under it");
+        // F3 (TLA ping-pong): while the proposal is pending, the provisional room's OWN door still leads where memory says —
+        // its face in the staged twin identifies the hole, the room behind it (archived L) is not staged. recog_proto15 /
+        // the model: the recall was retired here and a crossing back in this window birthed a NEW room.
+        f.recall.step();
+        {
+            const auto rc2 = live->get_node("recall_room_2");
+            check(rc2.has_value(), "F3: recall_room_2 is posted under the provisional room's door while its twin is staged");
+            if (rc2.has_value())
+                check(live->get_attrib_by_name<parent_att>(rc2.value()).value_or(0) == live_M, "F3: it hangs under door_9");
+        }
         // an archived-room passage into the staged twin must not feed the recall of a live door
         const auto L2 = live_node("room", "room_2", robot_id, -3, -1, 0.2, 2);
         live_node("object", "door_3", L2, 4, 2, 0, std::nullopt, "door");
@@ -327,7 +337,11 @@ int main(int argc, char **argv)
         check(snapshot_room("r3_room_3") == snapK, "the known room's subtree (nodes, attrs, RT edges) is bit-identical");
         check(snapshot_room("r4_room_4") == snapP, "the provisional twin is restored exactly (subtype, door face)");
         check(mem_names() == before, "no node added or lost in memory");
-        check(live->get_node("room_4").has_value() and recall_nodes() == 0, "the provisional room never left the live graph: nothing to re-post");
+        // the provisional room itself is never recalled (it never left the live graph); the recall under ITS door to the archived
+        // room L behind it is F3's, and is right (TLA ping-pong: retiring it here birthed a new room on the way back)
+        check(live->get_node("room_4").has_value() and not live->get_node("recall_room_4").has_value(),
+              "the provisional room never left the live graph: nothing to re-post");
+        check(live->get_node("recall_room_2").has_value(), "F3: the way back to the archived room stays recalled through the staging");
         check(proposal_nodes() == 0, "K's proposal is gone");
         check(not f.ev.held("r3_room_3"), "the archive is released");
     }

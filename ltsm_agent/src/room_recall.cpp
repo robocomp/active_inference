@@ -134,7 +134,7 @@ int RoomRecall::step()
         // label door_concept re-makes at every crossing (try28: door_37 in room_1 for the face r1_door_19), never the key.
         // A re-entered room is published in its own remembered frame, so the live door and its room's memory faces are
         // directly comparable; the name is consulted only when the door's pose in its room does not resolve.
-        const auto hole = ev_.remembered_hole(door);
+        const auto hole = ev_.remembered_hole(door, /*staged_twin_ok=*/true);   // F3: see the face_room test below
         if (not hole.has_value()) continue;
         const auto &face = hole->face;
 
@@ -143,7 +143,13 @@ int RoomRecall::step()
         // room_1's own door, so no recall_room_2 was ever posted.
         std::optional<DSR::Node> other;
         const auto face_room = room_of(*mem_, face);
-        if (face_room.has_value() and is_staged_room(*mem_, face_room.value())) continue;
+        // A face in a STAGED room is skipped — except in the staged twin of the door's OWN live room (F3, TLA ping-pong): while
+        // a recognition proposal for the provisional room is pending, RoomSwap stages its twin, and the twin's face still
+        // identifies the hole the live door is; the room BEHIND it (the other face's, checked below) is not staged. Skipping it
+        // retired the recall back to the room just left, and a crossing back in that window birthed a NEW room.
+        const bool own_twin = face_room.has_value()
+            and face_room->name() == std::format("r{}_{}", live_->get_attrib_by_name<room_id_att>(room.value()).value_or(0), room->name());
+        if (face_room.has_value() and is_staged_room(*mem_, face_room.value()) and not own_twin) continue;
         for (const auto &e : DSR::DSRGraph::get_node_edges_by_type(hole->passage, "match"))
             if (e.to() != face.id())
                 if (const auto f = mem_->get_node(e.to()); f.has_value())

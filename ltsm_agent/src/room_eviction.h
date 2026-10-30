@@ -215,7 +215,10 @@ public:
     /// twin's passage faces are directly comparable — the face whose aperture contains the door's centre (argmin, within
     /// half the door's width: a point-in-segment membership test, not a tuning constant). The door's NAME is consulted
     /// only when its pose in its room cannot be resolved. nullopt = memory holds no passage for this hole.
-    [[nodiscard]] std::optional<RememberedHole> remembered_hole(const DSR::Node &live_door) const;
+    /// `staged_twin_ok`: also resolve through a twin RoomSwap has STAGED (a recognition proposal for the door's room is
+    /// pending). Only RoomRecall asks for it (F3, TLA ping-pong): the staged twin's face still names the hole; every other
+    /// caller treats a staged twin as absent, as before.
+    [[nodiscard]] std::optional<RememberedHole> remembered_hole(const DSR::Node &live_door, bool staged_twin_ok = false) const;
 
     /// BOOTSTRAP. With a single room and no `current` edge anywhere, place one. The let-go rule
     /// reads "a current edge exists AND points elsewhere", so a graph with no edge at all releases
@@ -258,7 +261,7 @@ private:
     [[nodiscard]] std::vector<DSR::Node>   rooms_under_robot(const DSR::Node &robot) const;
     /// Memory's abstract passages: type `metaconcept` AND object_subtype "passage" -- the type is
     /// shared with dining-set style groupings, which eviction can copy in from a room.
-    [[nodiscard]] std::vector<DSR::Node>   passages() const;
+    [[nodiscard]] std::vector<DSR::Node>   passages(bool staged_ok = false) const;   // staged_ok: also passages into a STAGED twin (remembered_hole)
 
     /// "room_3" → 3; falls back to the room_id attribute, then to a running counter, so a room
     /// whose name carries no index still gets a unique prefix in memory.

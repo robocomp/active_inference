@@ -463,7 +463,10 @@ int main(int argc, char **argv)
               "promoted P: recall_room_2 posted under its mirror door_9 (P's memory index is memoised here)");
         check(f.sw.swap(3, pose_k(), live_P), "swap accepted");
         rc.step();
-        check(not live->get_node("recall_room_2").has_value(), "staged: P's twin is not part of the map, the recall retires");
+        // F3 (TLA ping-pong, 2026-10-30): the staging does NOT retire the way back — the twin's face still names the hole and
+        // L behind it is not staged. It used to retire here, and a crossing back before the verdict birthed a NEW room.
+        check(live->get_node("recall_room_2").has_value() and live->get_attrib_by_name<parent_att>(live->get_node("recall_room_2").value()).value_or(0) == live_M,
+              "staged: the recall of the way back STAYS under door_9 while the proposal is pending (F3)");
         answer("accepted");
         check(f.sw.step() == ltsm::RoomSwap::Event::Accepted and k_faces_in("passage_5") == 1, "accepted: passage_5 carries a K face");
         // the carried K face, in K's frame

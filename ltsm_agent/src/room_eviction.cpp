@@ -323,7 +323,7 @@ bool is_staged_room(DSR::DSRGraph &g, const DSR::Node &room)
     return room.type() == "room" and g.get_attrib_by_name<object_subtype_att>(room).value_or(std::string{}) == "staged";
 }
 
-std::vector<DSR::Node> RoomEviction::passages() const
+std::vector<DSR::Node> RoomEviction::passages(bool staged_ok) const
 {
     // ★ THE SUBTYPE FILTER IS LOAD-BEARING. `metaconcept` is a shared type -- ring_metaconcept's
     // dining_set is one -- and eviction copies whatever hangs under a room, so memory can hold
@@ -344,7 +344,7 @@ std::vector<DSR::Node> RoomEviction::passages() const
                         if (not p.has_value() or p.value() == cur->id()) break;
                         cur = mem_->get_node(p.value());
                     }
-            if (not into_staged) out.push_back(n);
+            if (not into_staged or staged_ok) out.push_back(n);
         }
     return out;
 }
@@ -1073,7 +1073,7 @@ void RoomEviction::guard_recycled_door_names(std::uint64_t live_room_id, const s
     }
 }
 
-std::optional<RememberedHole> RoomEviction::remembered_hole(const DSR::Node &live_door) const
+std::optional<RememberedHole> RoomEviction::remembered_hole(const DSR::Node &live_door, bool staged_twin_ok) const
 {
     // The live room the door belongs to (a door hangs from a wall, an entry mirror from the room itself).
     std::optional<DSR::Node> room;
@@ -1087,9 +1087,9 @@ std::optional<RememberedHole> RoomEviction::remembered_hole(const DSR::Node &liv
     if (not room.has_value()) return {};
     const std::string prefix = memory_prefix(room.value());
     const auto twin = mem_->get_node(prefix + room->name());
-    if (not twin.has_value() or is_staged_room(*mem_, twin.value())) return {};
+    if (not twin.has_value() or (is_staged_room(*mem_, twin.value()) and not staged_twin_ok)) return {};
 
-    const auto all = passages();
+    const auto all = passages(staged_twin_ok);
     const auto passage_of_face = [&](std::uint64_t face_id) -> std::optional<DSR::Node>
     {
         for (const auto &p : all)
