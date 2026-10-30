@@ -31,6 +31,14 @@ for i in $(seq 1 90); do grep -a -q 'room polygon LOADED' $L/door_concept.log 2>
 room_now() { grep -a "current room changed" $L/controller.log | tail -1 | awk '{print $NF}'; }
 nl() { wc -l < $L/$1.log 2>/dev/null || echo 0; }
 now_ms() { date +%s%3N; }
+# GROUND TRUTH at 1 Hz (recog_proto9: a 179° adoption could not be graded without it): wall ms, Webots pose, and every
+# agent log's line count, so any log line (e.g. room_concept's "[room][proposal] ACCEPTED") maps to the true pose then.
+GT=crossing/$1/gt_pose.tsv; printf 't_ms\tx\ty\tyaw\troom_concept\tltsm_agent\tdoor_concept\tcontroller\n' > $GT
+( while [ -f $LOCK ]; do
+    p=$(python3 $S/tp.py get 2>/dev/null | tail -1 | awk '{print $1"\t"$2"\t"$5}')
+    [ -n "$p" ] && printf '%s\t%s\t%s\t%s\t%s\t%s\n' $(now_ms) "$p" $(nl room_concept) $(nl ltsm_agent) $(nl door_concept) $(nl controller) >> $GT
+    sleep 1
+  done ) &
 TSV=crossing/$1/legs.tsv; printf 'leg\tstatus\tt0_ms\tt1_ms\tltsm0\tltsm1\tdoor0\tdoor1\troom0\troom1\n' > $TSV
 run_leg() {   # label cross_arg here   (sets r)
   echo run > $B/controller/remote_cmd.txt; sleep 0.7   # the controller reads remote_cmd.txt every 300 ms
