@@ -17,13 +17,14 @@ end of the tour) eventually holds.
 TLA=/home/pbustos/.vscode/extensions/tlaplus.vscode-ide-2026.10.280155/tools/tla2tools.jar
 cd docs/superpowers/specs/tla
 java -Xmx3g -XX:+UseParallelGC -cp $TLA tlc2.TLC -workers 4 -noGenerateSpecTE -config RoomTransition.cfg RoomTransition.tla
-#   other configs: RoomTransition_{bug1,bug1_liveness,bug2,strict,owner,broad}.cfg
+#   other configs: RoomTransition_{bug1,bug1_liveness,bug2,strict,owner,broad,fixed}.cfg
+#   ping-pong: RoomTransition_pingpong.cfg (code now, fails) and RoomTransition_pingpong_fixed.cfg (F1+F2+F3, passes)
 
 python3 room_concept/estimation_scripts/scripts/trace_check.py \
     ~/robocomp/components/active_inference/room_concept/estimation_scripts/crossing/recog_proto11 [--bound 20]
 ```
 
-Every config finishes in under 10 s; the largest state space is 45k states.
+A failing config finishes in seconds. A ping-pong property that HOLDS on the current code is checked over 2.94M states (a few minutes each).
 
 ## The model
 
@@ -33,8 +34,8 @@ Every config finishes in under 10 s; the largest state space is 45k states.
 
 | Agent | Action | Guard (from the code) | Writes |
 |---|---|---|---|
-| room_concept | `RC_Cross` | Robot physically outside the RT room. PassageMemory was evaluating while the robot passed (`HEAD:901` old / `:905` fix). A door of the passed hole hangs from this room (`:1004`). | New room node (`proto` edge, `:1116`), or the recalled room (`:1072-1077`, promoted at once `:1738`). Robot RT re-parented (`:1139`). Name `room_<max(live, hwm)+1>` (`:1054-1068`). |
-| room_concept | `RC_Promote` | Start-up survey finished (`:1838`). Not fair. Optionally impossible (`SURVEY_CAN_PROMOTE`). | `proto` edge removed (`:2055`). |
+| room_concept | `RC_Cross` | Robot physically outside the RT room. PassageMemory was evaluating while the robot passed (`HEAD:901`; the reverted patch made it unconditional). A door of the passed hole hangs from this room (`:992`). | New room node (`proto` edge, `:1104`), or the recalled room (`:1060-1065`, promoted at once `:1726`). Robot RT re-parented (`:1127`). Name `room_<max(live, hwm)+1>` (`:1042-1056`). |
+| room_concept | `RC_Promote` | Start-up survey finished (`:1826`). Not fair. Optionally impossible (`SURVEY_CAN_PROMOTE`). | `proto` edge removed (`:2043`). |
 | room_concept | `RC_Judge` | Pending proposal. `admit` (`proposal_adoption.cpp:287-296`): P is room_concept's provisional room (`late_recall.cpp:66`), still proto, name K free. | Rename in place (`:337`) + `accepted`, or `rejected`. |
 | ltsm_agent | `LT_Cycle` | One `compute()` (`specificworker.cpp:343-397`), in the code's order, in **one atomic step**: **(1) passages** (`passage_live.cpp`): retire dead passages (`:103`); pair each door of a proto room ≠ `current` with the current room's nearest door (`:119-176`). **(2) Recognition**: verdict → commit/carry-over (`room_swap.cpp:343-383`); withdraw if the robot left P (`:399`); else may propose K (`room_recognizer.cpp:352`). **(3) Promotion**, when room_concept's RT room ≠ `current` (`:546`): archive the old room; memory passage from the live pair, or from the old room's door nearest the robot plus a DERIVED face (`room_eviction.cpp:700-930`); flip `current` (`:975`); **delete the old room's subtree, doors included** (`:990`, `:1288`, `:1543`). **(4) Recalls** (`room_recall.cpp`): `recall_<k>` under every door whose hole memory knows (`:137`), unless room k is live (`:162`). | `passage_N`, memory, `current`, deletions, `recall_*`. |
 | door_concept | `DC_Follow` | `current` ≠ the followed room (`:3216`). | Adopt the entry mirror (`:3432`), else recreate the lost crossed door (`:3442`); offers move with the room. |
@@ -67,10 +68,11 @@ Every config finishes in under 10 s; the largest state space is 45k states.
 | `LiveNamesUnique`, `NameIsIdentity` | safety | One live room per name; a name (room_id) always denotes the same physical room, live and in memory. |
 | `RecallsPointRight` | safety | `recall_<k>` under door d names the room really behind d. |
 | `ArrivedRight` | safety | Each completed leg ends with the robot in the leg's destination. |
+| `NoDuplicateRoom` | safety | One physical room, one name: no room is surveyed a second time under a new name (used for ping-pong; in the three-room tour, case 2's provisional room is a duplicate by design). |
 | `RenamedInPlace` | action | An accepted recognition creates and deletes no room node. |
 | `CrossingNoticed` | liveness | The robot physically past a hole ~> room_concept's room is the robot's room. **Bug 2.** |
 | `CurrentFollows` | liveness | room_concept's RT room ≠ `current` ~> they agree. |
-| `TourCompletes` | liveness | The six-leg tour completes. |
+| `TourCompletes` | liveness | The tour completes (6 legs, or 12 in ping-pong). |
 
 ## Results (TLC 2026.10.28, 4 workers, 3 GB)
 
@@ -79,8 +81,10 @@ Every config finishes in under 10 s; the largest state space is 45k states.
 | `_bug1` | off | on | **`ExecCrossDoorLiveBeforeSwitch` violated** in 5 states: leg 1, the robot passes DOOR_1, door_concept removes the door, and the controller is still `executing` its cross. | 20 |
 | `_bug1_liveness` | off | on | **`CrossingNoticed` violated**: with the crossed door gone, room_concept has no aperture to close the crossing on. The door cannot be reborn either, because the robot is no longer in its room. Stuck for ever. | 33,314 |
 | `_bug2` | on | off | **`CrossingNoticed` violated**: recog_proto11 leg 2, step for step (below). | 233 |
-| `RoomTransition` | on | on | **No error.** All 8 invariants, `RenamedInPlace`, and the 3 liveness properties hold. | 11,663 |
-| `_broad` | on | on | **No error**, with any fitted door absent at any time, ≤ 2 verdicts. | 45,131 |
+| `RoomTransition` | on | on | **`TourCompletes` violated: the staged-recall gap** (below). Before the recall gap was modelled this config passed on 11,663 states. | 82,979 |
+| `_broad` | on | on | **`TourCompletes` violated**: the same gap. | 278k |
+| `_fixed` | on | on | **No error** with F2 + F3 added (README "Minimal changes"). | 26,371 |
+| `_fixed` + broad adversary | on | on | **No error** (scratch run). | 126,395 |
 | `_strict` | on | on | **`ExecCrossDoorLive` violated**: ltsm's eviction deletes the crossed door in the same step as it flips `current`, while the controller still holds `executing` (it only sees the switch on its next cycle). | 17 |
 | `_owner` | on | on | **`OneOwner` violated** at the first eviction: ltsm deletes room_concept's room, walls and floor and door_concept's doors (`room_eviction.cpp:1288`, `:1543`). | 17 |
 
@@ -106,6 +110,93 @@ mirror. With no live pair, memory then had no passage, and `TourCompletes` faile
 `evict()` falls back to the old room's door nearest the robot (read through the RETIRED RT edge, which is frozen at the
 crossing) and DERIVES the far face (`room_eviction.cpp:700-930`). With that in the model, the race is harmless.
 
+## The staged-recall gap (found 2026-10-30 evening; it also breaks the three-room tour)
+
+A pending recognition proposal for the provisional room P makes RoomSwap STAGE P's memory twin (case B,
+`room_swap.cpp:143`). `room_recall.cpp:146` then skips every door of P, so the recalls under P's doors are retired until
+the verdict. If the robot is crossing out of P through a recalled door in that window:
+
+1. room_concept's `find_recall` (`room_scene_graph.cpp:1060`) finds nothing.
+2. It births a NEW room instead of re-entering the remembered one.
+3. That room's memory twin knows only the crossed hole, so the next `cross <room>` never resolves.
+
+proto15 shows the gap live: recall_room_2 was re-posted 17 times in 65 s, alternating with 16 rejected proposals. The
+first model missed this because it did not model staging; with staging modelled, `RoomTransition.cfg` fails
+`TourCompletes` (82,979 states).
+
+## Ping-pong: room_1 ↔ room_2 through DOOR_1, 6 round trips (12 crossings)
+
+`SCENARIO = "pingpong"`. The legs are `cross new`, then `cross room_1` / `cross room_2` alternately. Perception only
+detects DOOR_1, because the other doors are shut and never crossed.
+
+**Code state modelled.**
+- `FIX_HOLD` is in (d57997dc).
+- `FIX_UNPROMOTED_CROSSING` is OUT (reverted; HEAD:901 gates crossings on the survey's promotion).
+- The controller route commits 2b9d1d2c, 748fbdf3 and cac93507 change route geometry only. No protocol guard changes:
+  the model never required a vantage, so `CT_Start` may already fire from the doorway.
+
+**Environment added for proto15** (constants, all on in `RoomTransition_pingpong.cfg`):
+
+| Constant / action | What it models | Code |
+|---|---|---|
+| (c) `doorway`, `CT_LeaveDoorway` | After a crossing the robot may stand in the doorway, for minutes. proto15: y=9.46 vs a door line at 9.38, turning in place. Leaving is fair. | the controller's route ends past the door |
+| (b) `PHANTOMS`, `STALE_FILE`, `DC_Phantom` | A door at a place with no hole (pseudo-hole "X"). Either a tracker birth at the robot standing in a doorway, first seen with the body PAST its line (proto15 door_46: born 4 s after room_2, later L=−4). Or a door restored from a `door_identities.csv` row of the room's NAME, from another run's frame. The file persists, the tour does not clear it, and door_concept writes the left room's doors under its name at every release. | `door_identity_table.h:57`, `door_core.cpp:879`, `specificworker.cpp:3466` |
+| (a) `RC_FalseCross(d)` | room_concept crosses through a door the robot is not passing. **Mechanism**, from proto15's proto_room.csv row t=1793366230834 (door_46: p_span 0.08, s=+0.55 m, p_cross 0.954): on a door's FIRST SIGHT, PassageMemory seeds its "through" mass with the instantaneous reading (`door_crossing.h:451`). A door first seen with the body already past its line has q_N ≈ 0, and the three-class posterior (`:527-544`, wall prior ε) gives A ≈ 1. Enabled for first-sight-past doors whenever crossings are evaluated (HEAD:901). `FALSE_CROSS_ANY` widens it to any door of a young room while the robot is in a doorway. | `door_crossing.h:451`, `:527-544` |
+| `WRONG_RECOG` | ltsm may propose a WRONG remembered room (proto15: "room_3 is room_1", rejected 16 times). The fit is sound and rejects every wrong K. | `room_recognizer.cpp:352`, `late_recall.cpp:211` |
+
+### Ping-pong on the code as it is now (`RoomTransition_pingpong.cfg`)
+
+Each property was checked alone (2.94M distinct states when it holds):
+
+| Property | Result | Trace | Mechanism |
+|---|---|---|---|
+| `ExecCrossDoorLiveBeforeSwitch`, `PassageJoinsTwoRooms`, `LiveNamesUnique`, `NameIsIdentity`, `RenamedInPlace`, `CurrentFollows` | hold | | |
+| `NoDuplicateRoom` | **violated** | 12 | **CE-1 (proto15 exactly).** Leg 1 → room_2 (proto). The robot stays in DOOR_1's doorway; a phantom is born at it (first seen past). room_2's survey promotes, so crossings are evaluated again (HEAD:901). `RC_FalseCross` through the phantom births room_3, which is R2 again. |
+| `MemoryPassagesSound` | **violated** | 13 | CE-1, then ltsm evicts room_2 with the memory passage room_2(X)–room_3(X): a passage through no hole (proto15: passage_1 door_46 ↔ door_60, 0.20 m apart). |
+| `RecallsPointRight` | **violated** | 14 | CE-1, then `recall_room_2` under room_3's mirror of the phantom (proto15: recall_room_2 under door_60). |
+| `ArrivedRight` | **violated** | 17 | **CE-2.** The false crossing happens while leg 2 (`cross room_1` via the D1 face) is executing. ltsm flips `current` to room_3. The door has no passage (ltsm evicted before pairing), so `target_rooms` is empty and ANY room switch completes the leg (`controller_door_passage.h:799-803`, `:1169`). Leg 2 is "done" with the robot in R2: proto15 leg 2 exactly. |
+| `TourCompletes` | **violated** | 21 | CE-1, then room_3 is promoted. Its D1 face carries `recall_room_2` (memory: room_2–room_3 through X, and the D1 face is remembered nowhere). `cross room_1` never resolves. |
+| `CrossingNoticed` | **violated** | 25 | **CE-3.** A false crossing mid-leg moves room_concept's room from under the door being crossed. ltsm's eviction deletes that door with room_2. The robot then passes DOOR_1 for real, but room_concept's room (room_3, recognised and renamed room_2) has no aperture of D1 (`:992`), so the crossing is never closed. |
+
+**The fix iteration** (`scratchpad/tlc/round.sh`, full config, first counterexample each time):
+
+| Round | Fixes | Result |
+|---|---|---|
+| A | F2 | `CrossingNoticed` + `TourCompletes` violated: **BUG 2 is back.** room_2 is left unpromoted; HEAD:901 never evaluates the passage. |
+| B | F2 + F1 | `NoDuplicateRoom` violated: **CE-4, the staged-recall gap.** While the robot passes back through the D1 face, ltsm posts a (wrong) proposal "room_2 is room_1", staging retires `recall_room_1`, and room_concept births room_3 = R1 instead of re-entering room_1. |
+| D | F1 + F3 (no F2) | `NoDuplicateRoom` violated in 47 states (CE-1). |
+| E | F2 + F3 (no F1) | `CrossingNoticed` violated (bug 2). |
+| **C** | **F1 + F2 + F3** | **No error: all 9 invariants, `RenamedInPlace`, and 3 liveness properties, 12 legs.** 3,570 states. Vacuity: tour end, a phantom, a wrong proposal, an absence, a stale restore, leg 7 and a survey promotion are all reached. |
+| F | F1 + F2 + F3, with `MaxPhantom=2`, `MaxAbsent=2`, `MaxRejects=2`, `ABSENCE_ANYTIME` | No error, 20,260 states. |
+| G / H | F1 + F2 + F3 + `FALSE_CROSS_ANY` (± F4) | `NoDuplicateRoom` and `RecallsPointRight` violated. A false crossing that room_concept itself commits writes a duplicate room and a wrong memory passage by construction. No downstream guard can undo the owner's wrong fact, and F4 does not change this. |
+
+The same F1 + F2 + F3 also make the three-room tour pass (`RoomTransition_fixed.cfg`: 26,371 states; 126,395 with
+the broad adversary).
+
+## Minimal changes (each one guard or one fact, per agent; NOT implemented, modelled as flags)
+
+| # | Agent | Change | Flag | Without it |
+|---|---|---|---|---|
+| F1 | room_concept | Evaluate crossings out of a room whose start-up survey has not promoted it: re-apply `scratchpad/room_concept_unpromoted_crossing.patch` (HEAD:901 → `if (PROTO_ROOM_ENABLED)`). | `FIX_UNPROMOTED_CROSSING` | bug 2 (rounds A, E) |
+| F2 | room_concept | A door FIRST SEEN with the body already past its line is not crossed. `door_crossing.h:451`: on first sight seed `thru = 0`, and give the instantaneous past mass to R ("past only by a re-read", class N). A crossing then needs the odometric path to carry the body across the line between the jambs AFTER the door was first seen. This is the guard that made the reverted F1 produce proto15's false crossing; with it, F1 is safe. | `FIX_FIRST_SIGHT` | CE-1/2/3 (rounds D, and the current code) |
+| F3 | ltsm_agent | Keep the recalls under P's doors while a proposal for P is pending. In `room_recall.cpp:146/:156` and `remembered_hole` (`room_eviction.cpp:1090`), a twin that is staged FOR A PROPOSAL still answers for its own doors. Equivalent alternative: post no proposal while room_concept's RT room differs from `current` or a cross is executing (M8). | `FIX_NO_STAGED_RECALL_GAP` | CE-4 (round B; the three-room main config) |
+
+Not needed for the 12 crossings: `FIX_COMPLETE_ON_DOOR` (the controller completes only on a switch whose crossing
+fact names its door and start room). It hardens CE-2 if false crossings recur, but cannot repair the duplicate room
+they create. Also not needed: clearing `door_identities.csv`. With F2, a stale-identity phantom can no longer produce
+a crossing. Clearing it is still R4 and costs nothing: delete the file with `ltsm_memory.json` in the tour script.
+
+## Which code-vs-design contradiction each counterexample comes from
+
+| Counterexample | Agent / guard | Contradiction (numbering of the list below) |
+|---|---|---|
+| CE-1 false crossing → duplicate room, passage through no hole, wrong recall | room_concept `door_crossing.h:451`, `:527-544` (first sight); door_concept `door_core.cpp:879` (identity by room NAME from a persistent file) | **#1** (no `exit` fact: "the crossing" is room_concept's private PassageMemory verdict, which nothing cross-checks); **#5/#8** (identities keyed by NAME, restored from `door_identities.csv`, not from ltsm memory: R4/R5); **#7** (ltsm pairs by "nearest door": passage_1 door_46 ↔ door_60, 0.20 m apart) |
+| CE-2 leg completed without a crossing | controller `controller_door_passage.h:799-803`, `:1169` (no passage ⇒ any switch completes) | **#2** (legs complete on ltsm's `current`, not on a crossing fact naming the door: M2/R1); **#1** |
+| CE-3 crossing never noticed after a false crossing mid-leg | room_concept `:992` (apertures only of its own room) + ltsm `room_eviction.cpp:1543` (deletes the door being crossed) | **#3** (ltsm deletes door_concept's doors); **#4** (no transition phase: a second structural change starts while the first cross executes) |
+| bug 2 (round A) | room_concept HEAD:901 | **#10**, and **#6** (crossing evidence tied to the survey's promotion, M5) |
+| CE-4 staged-recall gap | ltsm `room_swap.cpp:143` + `room_recall.cpp:146`; room_concept `:1060` | **#4** (M8: a proposal is posted while a crossing is in flight); **#5** (a recall's ABSENCE is read as "unknown room", the Revision 2 "late write = no write") |
+| proposal/recall churn (proto15 C1/C2) | ltsm re-proposes after every rejection (`recognition_cycle.h`, rebase at rejection) | **#4/#6** (no fact says "recognition is over for P") |
+
 ## Code vs design (docs/superpowers/specs/2026-10-29-room-transition-protocol-design.md)
 
 1. **R1 `exit` edge: not written by any agent.** No `exit_edge_type` anywhere in room_concept or door_concept. ltsm
@@ -120,9 +211,9 @@ crossing) and DERIVES the far face (`room_eviction.cpp:700-930`). With that in t
 4. **R2: there is no transition phase.** Offers and selections continue throughout. The `recall_<prev>` guard
    (11936d55), which R2/M1 remove, is still in `resolve_door` (`:502`).
 5. **M4/R5: identity is still by NAME.** Recalls are `recall_<name>` (`room_recall.cpp:169`). Room names come from
-   room_concept's live scan plus `room_name_hwm.txt` (`:1054-1068`), not from ltsm. The controller matches recall names
+   room_concept's live scan plus `room_name_hwm.txt` (`:1042-1056`), not from ltsm. The controller matches recall names
    to mission names (`pick_door`, plus `expand_recalls` aliases).
-6. **M5: `proto` is removed at the survey's promotion** (`:1838` → `:2055`), not when recognition is over. If the survey
+6. **M5: `proto` is removed at the survey's promotion** (`:1826` → `:2043`), not when recognition is over. If the survey
    finishes first, `admit` refuses every later proposal ("not provisional"), and the room stays a duplicate.
 7. **R1 "pairing from the exit edge only": not implemented.** Pairing is still "door under a proto room ≠ current +
    the current room's nearest door" (`passage_live.cpp:119-176`). Eviction adds its own nearest-door / derived-face
@@ -136,12 +227,21 @@ crossing) and DERIVES the far face (`room_eviction.cpp:700-930`). With that in t
 
 ## Trace checker results (`trace_check.py`, bound 20 s)
 
-| Run | S1 exec-door | S2 owner | S3–S6 | L1 crossing (gt) | L2 |
-|---|---|---|---|---|---|
-| recog_proto11 | **2**: door_55 by door_concept, BEFORE-SWITCH (**bug 1**, t=1793362894464); door_13 by ltsm, AFTER-SWITCH | 35 (ltsm eviction) | OK | **1**: DOOR_1 crossed back at t=1793362888893, no room fact for the remaining 254 s of ground truth (**bug 2**) | OK |
-| recog_proto12 | 1 (door_13, AFTER-SWITCH) | 35 | OK | OK (1 crossing, fact at −0.1 s) | OK |
-| recog_proto13 | 1 (door_13, AFTER-SWITCH); door_57 at shutdown, not counted | 35 | OK | OK | OK |
-| recog_proto14 | 1 (door_13, AFTER-SWITCH) | 35 | OK | OK | OK |
+New checks (2026-10-30 evening):
+- **S7 false-switch** (gt): a room_concept switch that no true crossing explains. Crossings and switches are matched
+  one-to-one: each crossing explains one switch.
+- **S8 leg-without-crossing** (gt): a `controller_mission` leg goes in_progress → completed with no true crossing in
+  between.
+- **C1 recall-churn**: the same `recall_*` node inserted ≥ 3 times.
+- **C2 proposal-churn**: the same proposal rejected ≥ 3 times.
+
+| Run | S1 exec-door | S2 owner | S3–S6 | S7 / S8 (gt) | L1 crossing (gt) | L2 | C1 / C2 |
+|---|---|---|---|---|---|---|---|
+| recog_proto11 | **2**: door_55 by door_concept, BEFORE-SWITCH (**bug 1**, t=1793362894464); door_13 by ltsm, AFTER-SWITCH | 35 | OK | OK | **1**: DOOR_1 crossed back at t=1793362888893, no room fact for the remaining 254 s of gt (**bug 2**) | OK | OK |
+| recog_proto12 | 1 (door_13, AFTER-SWITCH) | 35 | OK | OK | OK | OK | OK |
+| recog_proto13 | 1 (door_13, AFTER-SWITCH); door_57 at shutdown, not counted | 35 | OK | OK | OK | OK | OK |
+| recog_proto14 | 1 (door_13, AFTER-SWITCH) | 35 | OK | OK | OK | OK | OK |
+| recog_proto15 | 2 AFTER-SWITCH: door_13, and **door_59, deleted by ltsm while leg 2 was executing its cross**, at the FALSE switch to room_3 | 39 | OK | **S7**: room_3 at t=1793366230843, no crossing explains it (**CE-1**). **S8**: leg 2, in_progress t=1793366227464 → completed t=1793366231852 with no crossing (**CE-2**). | OK | OK | **C1**: recall_room_2 inserted 17× in 65 s. **C2**: proposal_room_1 rejected 16× (**CE-4's churn**). |
 
 Notes on how the checker reads the trace:
 

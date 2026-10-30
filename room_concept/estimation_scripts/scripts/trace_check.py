@@ -24,6 +24,10 @@ Safety (each violation printed with its timestamp):
   S4 names          two live room nodes with one name.
   S5 passage        a live passage_N whose two `match`ed doors hang from the SAME room.
   S6 recall-live    recall_<room> inserted while a live room carries that name (room_recall.cpp:162 says never).
+  S7 false-switch  (gt) a room_concept switch that no true door crossing explains (crossings matched one-to-one).
+  S8 leg-without-crossing (gt) a controller_mission leg went in_progress -> completed with no true crossing between.
+  C1 recall-churn   the same recall_<room> node inserted >= 3 times (ltsm re-posting it: RoomSwap staging, proto15).
+  C2 proposal-churn the same recognition proposal rejected >= 3 times.
 Liveness (bounded):
   L1 crossing       a true door-line crossing (gt + world) with no room-change fact (room_concept's robot->room RT
                     insert, or ltsm's `current` insert) in [t - 2 s, t + bound].
@@ -108,8 +112,13 @@ def check_trace(path, bound_ms):
     stopping = {}                         # agent -> t its agent node was deleted (graceful stop)
     info = []
     exec_lost = {}                        # door name -> (t, deleter, executor) when its aff_<door>_cross went executing
+    extra = {'mission': [], 'recall_ins': [], 'proposal': []}
     for r in read_trace(path):
         ev, t, w, a, b, et = r['event'], r['t'], r['agent'], r['a'], r['b'], r['edge_type']
+        if ev in ('attr', 'attr_birth') and r['attr'] == 'state':
+            if r['a_name'] == 'controller_mission': extra['mission'].append((t, r['value']))
+            if r['a_name'].startswith('proposal_'): extra['proposal'].append((t, r['a_name'], r['value'], w))
+        if ev == 'node_insert' and r['a_name'].startswith('recall_'): extra['recall_ins'].append((t, r['a_name']))
         if ev == 'snap_node':
             G.add_node(a, r['a_name'], r['a_type'], 0)
         elif ev == 'snap_edge':
@@ -190,7 +199,7 @@ def check_trace(path, bound_ms):
             later = [tc for tc, rc in cur_ins if rc == room and tc > t]
             viol['L2 current'].append(f"t={t} robot RT -> {nm}: no `current` on it within {bound_ms/1000:.0f} s"
                                       + (f" (it came {(later[0]-t)/1000:.1f} s later)" if later else " (never)"))
-    return viol, room_changes, G, info
+    return viol, room_changes, G, info, extra
 
 
 # ---------------------------------------------------------------- ground truth
@@ -244,13 +253,26 @@ def main():
     trace = A.trace or os.path.join(A.run, 'graph_trace.csv')
     gtp = A.gt or os.path.join(A.run, 'gt_pose.tsv')
     bound = int(A.bound * 1000)
-    viol, changes, G, info = check_trace(trace, bound)
+    viol, changes, G, info, extra = check_trace(trace, bound)
     t_end = max(r['t'] for r in read_trace(trace))
 
     print(f"trace: {trace}")
     print("room-change facts:")
     for t, kind, room, nm, w in changes:
         print(f"  t={t}  {kind:7s} -> {nm:10s} by {ag(w)}")
+    # C1/C2 churn: the same recall re-posted, the same proposal rejected, again and again (proto15: every 3 s)
+    rc_by = collections.Counter(n for _, n in extra['recall_ins'])
+    for n, c in sorted(rc_by.items()):
+        if c >= 3:
+            ts = [t for t, m in extra['recall_ins'] if m == n]
+            viol['C1 recall-churn'].append(f"{n} inserted {c} times between t={ts[0]} and t={ts[-1]} "
+                                           f"({(ts[-1] - ts[0]) / 1000:.0f} s)")
+    rej = [x for x in extra['proposal'] if x[2] == 'rejected']
+    by = collections.Counter(n for _, n, _, _ in rej)
+    for n, c in sorted(by.items()):
+        if c >= 3:
+            ts = [t for t, m, _, _ in rej if m == n]
+            viol['C2 proposal-churn'].append(f"{n} rejected {c} times between t={ts[0]} and t={ts[-1]}")
     if os.path.exists(gtp) and os.path.exists(A.world):
         doors = read_doors(A.world)
         gt = read_gt(gtp)
@@ -270,13 +292,36 @@ def main():
                 viol['L1 crossing'].append(f"t={t} the robot truly crossed {door}; no room-change fact within "
                                            f"{A.bound:.0f} s -- {tail}")
                 print(f"  t={t} {door}: NO room fact within {A.bound:.0f} s")
+        # S7: room_concept switched the robot into a NEW room node with no true crossing near it (inside the gt span)
+        # ONE crossing justifies ONE switch: each true crossing is matched to the first unmatched RT switch in
+        # [tx - 2 s, tx + bound]; a switch left unmatched is false (proto15: room_3 5 s after room_2, the robot in the doorway).
+        rts = [(t, nm) for t, kind, room, nm, w in changes if kind == 'RT' and gt[0][0] <= t <= gt[-1][0]]
+        used = set()
+        for tx, door, _ in xs:
+            for i, (t, nm) in enumerate(rts):
+                if i not in used and tx - 2000 <= t <= tx + bound:
+                    used.add(i); break
+        for i, (t, nm) in enumerate(rts):
+            if i not in used:
+                viol['S7 false-switch'].append(f"t={t} room_concept moved the robot into {nm}; no true door crossing is left "
+                                               f"to explain it (each crossing explains one switch)")
+        # S8: a mission leg reported `completed` with no true crossing since it went in_progress
+        start = None
+        for t, st in extra['mission']:
+            if st == 'in_progress': start = t
+            elif st == 'completed' and start is not None:
+                if not any(start <= tx <= t for tx, _, _ in xs):
+                    viol['S8 leg-without-crossing'].append(f"leg in_progress t={start} -> completed t={t}: the robot crossed "
+                                                           f"no door in between (ground truth)")
+                start = None
     else:
-        print(f"(no ground truth: {gtp} / {A.world} missing -- L1 skipped)")
+        print(f"(no ground truth: {gtp} / {A.world} missing -- L1, S7, S8 skipped)")
 
     for line in info:
         print(f"note: {line}")
     print()
-    names = ['S1 exec-door', 'S2 owner', 'S3 one-current', 'S4 names', 'S5 passage', 'S6 recall-live', 'L1 crossing', 'L2 current']
+    names = ['S1 exec-door', 'S2 owner', 'S3 one-current', 'S4 names', 'S5 passage', 'S6 recall-live', 'S7 false-switch',
+             'S8 leg-without-crossing', 'L1 crossing', 'L2 current', 'C1 recall-churn', 'C2 proposal-churn']
     for k in names:
         v = viol.get(k, [])
         print(f"{k:15s} {'OK' if not v else f'{len(v)} VIOLATION(S)'}")
