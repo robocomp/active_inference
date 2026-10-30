@@ -38,7 +38,6 @@
 #include <limits>
 
 #include "../../common/dashboard/timeseries_plot.h"
-#include "motion_verdict.h"
 #include "controller_mission_panel.h"
 
 
@@ -187,17 +186,8 @@ public:
         toolbar_layout_ = toolbar_layout;
 
 
-        // ── WHY IS THE ROBOT NOT MOVING (motion_verdict.h) — permanent, replaces the old STUCK chip ──────────────
-        // One chip, always visible, taking the toolbar's slack: the binding cause, its detail and since-when, coloured
-        // by who has to act (driving / deliberate / operator / waiting on another agent / blocked by the world / fault).
-        // The escape manoeuvre the STUCK chip used to show is one of its causes (ESCAPING). Full text in the tooltip;
-        // the label is elided to its width so a long detail never sets the window's minimum width.
-        why_label_ = new QLabel(QStringLiteral(" no verdict yet "), toolbar);
-        why_label_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
-        why_label_->setMinimumWidth(120);
-        why_label_->setTextFormat(Qt::PlainText);
-        why_label_->setStyleSheet(why_style("#7f8c8d", "white"));
-        toolbar_layout->addWidget(why_label_, /*stretch=*/1);
+        // The WHY verdict (motion_verdict.h) heads the status column to the right of the 2D view; slack goes here.
+        toolbar_layout->addStretch(1);
 
         // Which affordance the epistemic planner picked. It belongs beside the drive controls — it is
         // the answer to "why is it going there", not a pose readout.
@@ -228,7 +218,12 @@ public:
         frame->setFrameShape(QFrame::StyledPanel);
         frame->setFrameShadow(QFrame::Sunken);
         frame->setMinimumSize(320, 320);
-        main_layout->addWidget(frame, 3);
+        // The 2D view shares its row with the status column (attach_status_line), on its RIGHT: the status
+        // text is long, and as a row of its own it set the window's width and was still elided.
+        canvas_row_ = new QHBoxLayout;
+        canvas_row_->setSpacing(6);
+        canvas_row_->addWidget(frame, 1);
+        main_layout->addLayout(canvas_row_, 3);
 
         // Affordance EFE time-series panel, below the 2D view.
         auto *efe_panel = new QFrame(this);
@@ -401,44 +396,8 @@ public:
         selected_affordance_value_->setToolTip(current + QStringLiteral("   (prev: ") + previous + ")");
     }
 
-    // The escape manoeuvre is shown by the WHY chip now (cause ESCAPING); kept so callers need not change.
+    // The escape manoeuvre is shown by the WHY verdict in the status column now (cause ESCAPING); kept so callers need not change.
     void set_stuck_active(bool active) { stuck_active_shown_ = active; }
-
-    // The WHY chip (motion_verdict.h). Called every frame from present(); dedups text, tooltip and colour.
-    void set_motion_verdict(const rc::why::View &v)
-    {
-        if (why_label_ == nullptr) return;
-        if (not v.valid)
-            return;   // keeps "no verdict yet" until the first control pass selects one
-        const char *bg = "#7f8c8d", *fg = "white";
-        switch (v.klass)
-        {
-            case rc::why::Klass::Driving:        bg = "#27ae60"; break;
-            case rc::why::Klass::Deliberate:     bg = "#2980b9"; break;
-            case rc::why::Klass::Operator:       bg = "#7f8c8d"; break;
-            case rc::why::Klass::WaitingOnAgent: bg = "#f1c40f"; fg = "black"; break;
-            case rc::why::Klass::BlockedByWorld: bg = "#e67e22"; break;
-            case rc::why::Klass::Fault:          bg = "#c0392b"; break;
-        }
-        const QString head = QString::fromStdString(std::format("{} {} · {}", v.driving ? "▶ MOVING" : "■ STOPPED",
-                                                                rc::why::cause_name(v.cause),
-                                                                rc::why::format_duration(v.duration_ms)));
-        const QString full = head + QStringLiteral(" — ") + QString::fromStdString(v.detail);
-        const QString text = why_label_->fontMetrics().elidedText(full, Qt::ElideRight,
-                                                                 std::max(80, why_label_->width() - 20));
-        if (text != why_text_shown_) { why_text_shown_ = text; why_label_->setText(text); }
-        const QString tip = full + QStringLiteral("\n\nclass: ") + QString::fromUtf8(rc::why::klass_name(v.klass).data(),
-                                                                                   int(rc::why::klass_name(v.klass).size()))
-                          + QStringLiteral("\nLogged as [why] on change; every change in why_log.jsonl.");
-        if (tip != why_tip_shown_) { why_tip_shown_ = tip; why_label_->setToolTip(tip); }
-        const QString style = why_style(bg, fg);
-        if (style != why_style_shown_) { why_style_shown_ = style; why_label_->setStyleSheet(style); }
-    }
-    static QString why_style(const char *bg, const char *fg)
-    {
-        return QString("QLabel { background-color: %1; color: %2; font-weight: bold; border-radius: 4px; padding: 2px 8px; }")
-            .arg(bg, fg);
-    }
 
     // What the ARRIVAL test is waiting on, at the right end of the pose row. `yaw_err_rad` is nullopt
     // when the target carries no commanded facing yaw (a plain mouse target), in which case theta reads
@@ -473,6 +432,7 @@ public:
     rc::MissionPanel *mission_panel = nullptr;
     int mission_row_index = 0;   // where attach_mission_panel() inserts the panel
     QHBoxLayout *toolbar_layout_ = nullptr;   // top line; hosts the drive button
+    QHBoxLayout *canvas_row_ = nullptr;       // 2D view + the status column on its right
 
     void attach_mission_panel(rc::MissionPanel *panel)
     {
@@ -489,13 +449,11 @@ public:
             toolbar_layout_->insertWidget(1, panel->pause_button());
     }
 
-    // The status line (controller_status_line.h), directly under the mission row (attach_mission_panel must run
-    // first). It took the place of the door-passage row.
+    // The status column (controller_status_line.h), to the right of the 2D view.
     void attach_status_line(QWidget *line)
     {
-        if (line == nullptr) return;
-        if (auto *lay = qobject_cast<QVBoxLayout *>(layout()); lay != nullptr)
-            lay->insertWidget(mission_row_index + (mission_panel != nullptr ? 1 : 0), line);
+        if (line == nullptr or canvas_row_ == nullptr) return;
+        canvas_row_->addWidget(line);
     }
 
     rc::TimeSeriesPlot *affordance_efe_plot = nullptr;
@@ -536,8 +494,6 @@ private:
     QString goal_dist_shown_, goal_theta_shown_;
     QLabel *selected_affordance_value_ = nullptr;
     QString affordance_shown_;
-    QLabel *why_label_ = nullptr;   // the WHY chip (set_motion_verdict)
-    QString why_text_shown_, why_tip_shown_, why_style_shown_;
 
     std::function<void()> affordance_clicked_;   // opens the affordance program window
     QLCDNumber *session_dist_lcd_ = nullptr;   // session totals, top row

@@ -466,9 +466,35 @@ void ControllerDisplay::set_lidar_stall(bool stalled, float seconds)
 // never disagree with the rest of the window, and it adds no state of its own. Ordered from the coarsest fact to
 // the finest — is the base allowed to move, in which mode, doing which task, in which step — and then whatever is
 // stopping it, which is the reason anyone looks at a status line in the first place.
+// The verdict's class, as the status column's border colour: who has to act (driving / deliberate / operator /
+// waiting on another agent / blocked by the world / fault). Grey before the first verdict.
+QString ControllerDisplay::verdict_colour(const rc::why::View &v)
+{
+    if (not v.valid) return QStringLiteral("#7f8c8d");
+    switch (v.klass)
+    {
+        case rc::why::Klass::Driving:        return QStringLiteral("#27ae60");
+        case rc::why::Klass::Deliberate:     return QStringLiteral("#2980b9");
+        case rc::why::Klass::Operator:       return QStringLiteral("#7f8c8d");
+        case rc::why::Klass::WaitingOnAgent: return QStringLiteral("#f1c40f");
+        case rc::why::Klass::BlockedByWorld: return QStringLiteral("#e67e22");
+        case rc::why::Klass::Fault:          return QStringLiteral("#c0392b");
+    }
+    return QStringLiteral("#7f8c8d");
+}
+
 QString ControllerDisplay::compose_status(const DisplaySnapshot &snap)
 {
     std::vector<std::string> parts;
+    // WHY the robot is (not) moving (motion_verdict.h) heads the column: the binding cause, since-when, and its detail.
+    // It was a chip of its own in the toolbar, elided to the toolbar's width; here it wraps and is read in full.
+    if (const auto &v = snap.motion_verdict; v.valid)
+    {
+        parts.push_back(std::format("{} {} · {}", v.driving ? "▶ MOVING" : "■ STOPPED", rc::why::cause_name(v.cause),
+                                    rc::why::format_duration(v.duration_ms)));
+        parts.push_back(v.detail);
+        parts.emplace_back();   // blank line between the verdict and the rest
+    }
     const auto &mv = snap.mission_view;
     const auto mode = rc::from_index(mv.mode_index);
     parts.push_back(not mv.driving ? (mv.paused ? "PAUSED" : "STOPPED") : "RUN");
@@ -516,8 +542,8 @@ QString ControllerDisplay::compose_status(const DisplaySnapshot &snap)
     std::string line;
     for (const auto &p : parts)
     {
-        if (p.empty()) continue;
-        if (not line.empty()) line += "  ·  ";
+        if (p.empty() and (line.empty() or line.ends_with('\n'))) continue;
+        if (not line.empty()) line += '\n';   // one item per line in the status column
         line += p;
     }
     return QString::fromStdString(line);
@@ -562,10 +588,9 @@ void ControllerDisplay::present()
     }
 
     custom_widget_->set_stuck_active(snap.stuck_active);   // widget dedups same-state calls
-    custom_widget_->set_motion_verdict(snap.motion_verdict);   // the WHY chip (motion_verdict.h); widget dedups
     custom_widget_->set_goal_distance(snap.goal_dist_m, snap.goal_yaw_err_rad, snap.goal_aligning);
     custom_widget_->set_session(snap.session_distance_m, snap.session_elapsed_s);
-    if (status_line_) status_line_->apply(compose_status(snap));
+    if (status_line_) status_line_->apply(compose_status(snap), verdict_colour(snap.motion_verdict));
     if (mission_panel_)
     {
         if (snap.mission_list_pending)

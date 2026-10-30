@@ -20,6 +20,7 @@
 #include "controller_mission_panel.h"
 #include "controller_affordance_panel.h"
 #include "controller_status_line.h"
+#include "motion_verdict.h"
 #include "controller_camera_masks.h"
 #include "custom_widget.h"
 #include "viewer_2d.h"
@@ -264,6 +265,7 @@ private:
     void restore_window_geometry();
     // GUI thread: the one-line summary for status_line_, composed from the snapshot present() just took.
     static QString compose_status(const DisplaySnapshot &snap);
+    static QString verdict_colour(const rc::why::View &v);
 
     std::unique_ptr<Custom_widget> custom_widget_;
     std::unique_ptr<rc::MissionPanel> mission_panel_;

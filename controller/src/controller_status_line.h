@@ -1,9 +1,14 @@
 #pragma once
 /*
- * controller_status_line.h — the STATUS row of the controller window: one read-only line saying what the
- * controller is doing right now.
+ * controller_status_line.h — the STATUS column of the controller window, to the right of the 2D view: read-only
+ * text saying what the controller is doing right now, one item per line:
  *
- *   ● RUN · command · passage door_19: OPEN (executing) · aff aff_door_19_open [lock-on] · goal 1.2 m · hold: <why>
+ *   RUN
+ *   command
+ *   passage door_19: OPEN (executing)
+ *   aff aff_door_19_open [lock-on] 3/20 s
+ *   goal 1.20 m
+ *   hold: <why>
  *
  * It replaced the door-passage row (door combo + Cross / Stop). Those two commands still exist — chat_agent and the
  * remote file send `cross <door>` / `stop`, and the mission row's command box takes them — so the row's buttons
@@ -16,8 +21,7 @@
 
 #include <string>
 
-#include <QLabel>
-#include <QResizeEvent>
+#include <QPlainTextEdit>
 
 namespace rc
 {
@@ -33,45 +37,43 @@ struct DoorPassageStatus
     std::string last_event;
 };
 
-class StatusLine : public QLabel
+class StatusLine : public QPlainTextEdit
 {
 public:
-    explicit StatusLine(QWidget *parent) : QLabel(parent)
+    explicit StatusLine(QWidget *parent) : QPlainTextEdit(parent)
     {
+        setReadOnly(true);
         setFrameShape(QFrame::StyledPanel);
-        setTextFormat(Qt::PlainText);
-        setTextInteractionFlags(Qt::TextSelectableByMouse);
-        setContentsMargins(4, 2, 4, 2);
-        // IGNORED horizontally: a label sizes to its text, and a long status at the end of a row would set the
-        // window's minimum width (the toolbar's affordance label had that bug). Elided instead; full text in the tooltip.
-        setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
+        // ONE ITEM PER LINE, wrapped, in a fixed-width column to the right of the 2D view. As a single elided
+        // line under the mission row it set the window's width and was still cut off; a column costs no width
+        // beyond its own and shows every word. Wrap ANYWHERE as a last resort: node names have no spaces.
+        setWordWrapMode(QTextOption::WrapAtWordBoundaryOrAnywhere);
+        setLineWrapMode(QPlainTextEdit::WidgetWidth);
+        setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        setFixedWidth(230);
+        setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Expanding);
         setToolTip(QStringLiteral("What the controller is doing now"));
     }
 
-    /// GUI thread. Deduplicated: present() calls it every frame and an unchanged line costs nothing.
-    void apply(const QString &line)
+    /// GUI thread. Deduplicated: present() calls it every frame and an unchanged text costs nothing (and
+    /// re-setting it would also drop a selection the user is making).
+    /// `colour` frames the column in the motion verdict's class colour (who has to act).
+    void apply(const QString &text, const QString &colour)
     {
-        if (line == full_) return;
-        full_ = line;
-        setToolTip(full_);
-        relayout();
-    }
-
-protected:
-    void resizeEvent(QResizeEvent *e) override
-    {
-        QLabel::resizeEvent(e);
-        relayout();
+        if (text != full_)
+        {
+            full_ = text;
+            setPlainText(full_);
+        }
+        if (colour != colour_)
+        {
+            colour_ = colour;
+            setStyleSheet(QStringLiteral("QPlainTextEdit { border: 3px solid %1; border-radius: 4px; }").arg(colour_));
+        }
     }
 
 private:
-    void relayout()
-    {
-        const int w = contentsRect().width();
-        setText(w > 0 ? fontMetrics().elidedText(full_, Qt::ElideRight, w) : full_);
-    }
-
-    QString full_;
+    QString full_, colour_;
 };
 
 }   // namespace rc
