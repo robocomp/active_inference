@@ -1046,6 +1046,11 @@ void DoorFit::estimate_phi(rc::DoorFitState& inst)
             phi_prior = inst.phi_cmd_to;
         have_prior = true;
     }
+    // ★ A FACE BACKED BY A CROSSING KEEPS ITS LEAF (FACT_HOLD, spec 2026-10-29 Rev 3). The body went through: that is the
+    //   observation of the leaf, and views from in or near the doorway cannot outweigh it (pingpong2: door_1's leaf re-judged
+    //   from inside the doorway, the entry face inherited "shut"). Our own command still moves it (close-behind).
+    if (inst.fact_backed and not have_prior)
+        return;
 
     // ─── THE CAMERA DOES NOT SCORE THE LEAF ANGLE (removed 2026-09-14) ─────────────────────────────
     // ★The semantic "door" mask labels the doorway FRAME, not the leaf. Once the leaf swings out of the

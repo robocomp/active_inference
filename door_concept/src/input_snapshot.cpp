@@ -15,6 +15,7 @@
 #include "../../common/room_resolve/room_resolve.h"
 #include "../../common/rt_twist/rt_twist.h"
 #include "../../common/interaction_anchor/interaction_anchor.h"
+#include "../../common/room_transition/exit_fact.h"
 #include "door_semantic_field.h"
 
 namespace rc::door
@@ -280,6 +281,15 @@ void InputSnapshot::begin_cycle(DSR::DSRGraph& G, DSR::InnerEigenAPI* inner, DSR
         if (const auto v = G.get_attrib_by_name<epistemic_target_yaw_rad_att>(n); v.has_value()) f.target_yaw = v.value();
         cur_.affordances.push_back(std::move(f));
     }
+    // ── our door faces backed by a crossing (FACT_HOLD): an `exit` edge on them, or an ltsm recall under them ──────
+    for (const auto& n : G.get_nodes_by_type("object"))
+        if (not is_foreign(n.id(), agent_id_) and rc::exit_fact::is_door(G, n.id()) and rc::exit_fact::is_crossed_face(G, n.id()))
+            cur_.backed_faces.push_back(n.id());
+    for (const auto& n : G.get_nodes_by_type("metaconcept"))
+        if (G.get_attrib_by_name<object_subtype_att>(n).value_or(std::string{}) == "room_recall")
+            if (const auto d = G.get_attrib_by_name<parent_att>(n).value_or(0);
+                d != 0 and not is_foreign(d, agent_id_) and not std::ranges::contains(cur_.backed_faces, d))
+                cur_.backed_faces.push_back(d);
     for (const auto& e : G.get_edges_by_type("executing"))
     {
         core::ExecutingEdge x;

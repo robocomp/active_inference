@@ -109,9 +109,6 @@ DCIO_FIELDS(OwnedNodesSwept, x.why, x.removed)
 DCIO_FIELDS(DoorEvent, x.t_steady_ns, x.payload)
 DCIO_FIELDS(IdentityLoad, x.file_present, x.csv_text, x.initial_room, x.initial_room_name, x.registration_present,
             x.registration_csv_text)
-DCIO_FIELDS(DoorCycleInput, x.cycle, x.t_steady_ns, x.t_wall_ms, x.rooms, x.walls, x.objects, x.robot, x.camera, x.masks,
-            x.mask_stream_ms_since_last_frame, x.bpearl, x.semantic_state, x.semantic, x.rgb_gray, x.depth,
-            x.affordances, x.executing, x.identity_load, x.events, x.actuator_calls)
 DCIO_FIELDS(DoorStateOut, x.node_id, x.name, x.parent, x.pose, x.width_m, x.depth_m, x.height_m, x.open_prob, x.phi,
             x.phi_sigma, x.exist_logodds, x.p_exists, x.cov, x.flags)
 DCIO_FIELDS(NodeCreateOut, x.seq, x.kind, x.parent, x.name, x.preferred_name, x.pose, x.width_m, x.depth_m, x.height_m,
@@ -505,6 +502,21 @@ void fields(Reader& r, MaskPacket& x)
     if (r.ok) get_words(r, x.support_points_cam);
     if (r.ok) get_derived(r, x.support_points, x.support_points_cam, x.room_T_zed_capture);
     if (r.ok) get_pixels(r, x.mask_pixels);
+}
+// DoorCycleInput: hand-written for the v4 tail (backed_faces).
+void fields(Writer& w, const DoorCycleInput& x)
+{
+    w(x.cycle, x.t_steady_ns, x.t_wall_ms, x.rooms, x.walls, x.objects, x.robot, x.camera, x.masks,
+      x.mask_stream_ms_since_last_frame, x.bpearl, x.semantic_state, x.semantic, x.rgb_gray, x.depth,
+      x.affordances, x.executing, x.identity_load, x.events, x.actuator_calls);
+    if (w.version >= 4) w(x.backed_faces);
+}
+void fields(Reader& r, DoorCycleInput& x)
+{
+    r(x.cycle, x.t_steady_ns, x.t_wall_ms, x.rooms, x.walls, x.objects, x.robot, x.camera, x.masks,
+      x.mask_stream_ms_since_last_frame, x.bpearl, x.semantic_state, x.semantic, x.rgb_gray, x.depth,
+      x.affordances, x.executing, x.identity_load, x.events, x.actuator_calls);
+    if (r.version >= 4 and r.ok) r(x.backed_faces);
 }
 void fields(Writer& w, const BpearlSweep& x)
 {

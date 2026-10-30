@@ -35,6 +35,7 @@
 
 #include "../../common/config_report/config_read.h"   // rc::cfg::Reader (SHARED)
 #include "../../common/room_resolve/room_resolve.h"   // rc::room:: current_room / is_proto / is_proto_mirror
+#include "../../common/room_transition/exit_fact.h"   // rc::exit_fact: the crossing chain (links 2-3)
 
 #include "../../common/detectability/detectability.h"   // rc::detect — the YOLO inverse model
 #include "../../common/contour_edge/contour_edge_check.h"   // rc::edges — classifier-free check
@@ -3186,6 +3187,7 @@ void SpecificWorker::step_room_following()
     {
         step_adoption();          // a rename of THIS room (same id) is followed here, never released
         step_pending_restore();   // a recalled room's doors, once its polygon is loaded
+        step_entry_twin();        // link 3 for a remembered room: its restored face of the hole crossed
         // The crossed door was HELD at the switch and has been deleted with its room since: carry it across now.
         if (carry_pending_room_ == room_node_id_ and not lost_doors_.empty())
         {
@@ -3217,6 +3219,52 @@ void SpecificWorker::step_room_following()
 }
 
 // ═══ ENTRY MIRRORS — the door a proto-room was entered through ════════════════════════════════════
+
+// Link 3 for the room this agent follows, when no mirror wrote it: a REMEMBERED room has no mirror (its doors are restored
+// from the identity table), so its face of the hole crossed is the restored door nearest the old face, the old face's pose
+// carried into this room's frame by the pose chain (both faces are one hole; argmin, no gate — the crossing fact says one
+// of them is it). Waits for the restore, and for the old face's transform to resolve. Once per crossing: a written twin ends it.
+void SpecificWorker::step_entry_twin()
+{
+    if (not G or not fitter_ or not inner_eigen_ or room_node_id_ == 0 or pending_restore_room_ == room_node_id_)
+        return;
+    const auto old_face = rc::exit_fact::entered_through(*G, room_node_id_);
+    const auto room = G->get_node(room_node_id_);
+    if (not old_face.has_value() or not room.has_value())
+        return;
+    const auto old_n = G->get_node(*old_face);
+    if (not old_n.has_value())
+        return;
+    const auto parent_of = [&](std::uint64_t x) -> std::uint64_t
+    {
+        const auto xn = G->get_node(x);
+        return xn.has_value() ? G->get_attrib_by_name<parent_att>(xn.value()).value_or(0) : 0;
+    };
+    std::vector<std::uint64_t> faces;
+    for (const auto& [id, inst] : fitter_->instances())
+        if (id != *old_face and rc::door::descends_from(id, room_node_id_, parent_of))
+            faces.push_back(id);
+    if (std::ranges::any_of(faces, [&](std::uint64_t f) { return rc::exit_fact::twin_of(*G, f) == *old_face; }))
+        return;
+    const auto T_old = inner_eigen_->get_transformation_matrix(room->name(), old_n->name(), 0);
+    if (not T_old.has_value() or not T_old->matrix().allFinite())
+        return;
+    std::uint64_t best = 0;
+    double best_d = std::numeric_limits<double>::max();
+    for (const auto f : faces)
+        if (const auto fn = G->get_node(f); fn.has_value())
+            if (const auto T = inner_eigen_->get_transformation_matrix(room->name(), fn->name(), 0); T.has_value())
+                if (const double d = (T->translation() - T_old->translation()).head<2>().norm(); d < best_d)
+                {
+                    best_d = d;
+                    best = f;
+                }
+    if (best == 0)
+        return;   // nothing restored here yet
+    if (rc::exit_fact::write_twin(*G, best, *old_face))
+        std::print("door_concept: [exit] link 3: {} is the twin of {} ({:.2f} m from it, remembered '{}')\n",
+                   best, old_n->name(), best_d, room->name());
+}
 
 void SpecificWorker::step_entry_mirrors()
 {
@@ -3252,12 +3300,7 @@ void SpecificWorker::step_entry_mirrors()
         it = entry_mirrors_.erase(it);
     }
 
-    // 2. Birth: one mirror per proto-room, from the instance whose aperture CONTAINS the proto-room origin.
-    //    room_concept puts that origin at the centre of the crossed aperture, read from THIS agent's door node,
-    //    so for the right door the origin sits on its aperture segment and for every other door it does not.
-    //    The containment test is geometric identity, not a tuned gate: along the aperture within the door's own
-    //    half-width, across it within the same half-width (the fit may have refined the door since the
-    //    proto-room froze its frame).
+    // 2. Birth: one mirror per proto-room, of the face room_concept says it was entered through (link 2), with link 3.
     announced_rooms_.prune([&](std::uint64_t id) { return G->get_node(id).has_value(); });
     std::erase_if(announced_no_mirror_logged_, [&](std::uint64_t id) { return not G->get_node(id).has_value(); });
     for (const auto& room : G->get_nodes_by_type("room"))
@@ -3282,39 +3325,22 @@ void SpecificWorker::step_entry_mirrors()
         if (room.id() == room_node_id_)
             continue;
 
-        std::optional<DSR::Node> best;
-        Mat::RTMat best_T;
-        double best_d = std::numeric_limits<double>::max();
-        for (const auto& [door_id, inst] : fitter_->instances())
-        {
-            const auto dn = G->get_node(door_id);
-            if (not dn.has_value() or rc::room::is_proto_mirror(*G, dn.value()))
-                continue;
-            // proto <- door, through the robot (both rooms hang from it). ts==0 on the main-thread instance.
-            const auto T = inner_eigen_->get_transformation_matrix(room.name(), dn->name(), 0);
-            if (not T.has_value())
-                continue;
-            // The proto origin in the DOOR frame: x along the aperture, y across it.
-            const Eigen::Vector3d o = T->inverse().translation();
-            const double half_w = 0.5 * G->get_attrib_by_name<width_m_att>(dn.value()).value_or(cfg_.door_prior_w_m);
-            if (std::abs(o.x()) > half_w or std::abs(o.y()) > half_w)
-                continue;
-            if (const double d = o.head<2>().norm(); d < best_d)
-            {
-                best_d = d;
-                best = dn;
-                best_T = T.value();
-            }
-        }
-        if (not best.has_value())
-        {
-            static int miss = 0;
-            if (miss++ % 60 == 0)
-                std::print("door_concept: [proto] proto-room '{}' id={} has no door of ours on its origin yet "
-                           "(RT not written, or the crossed door is not an instance)\n", room.name(), room.id());
+        // ★ THE CROSSED FACE IS NAMED, NOT SEARCHED FOR (spec 2026-10-29 Rev 3, link 2 of the `exit` chain): room_concept
+        //   wrote `exit` OLD_FACE -> this room when it entered it through OLD_FACE. Until then there is no mirror. (The search
+        //   it replaces — the door whose aperture contains the proto origin — was a guess about the same fact.)
+        const auto old_face = rc::exit_fact::entered_through(*G, room.id());
+        if (not old_face.has_value() or not fitter_->instances().contains(*old_face))
             continue;
-        }
-
+        const auto best = G->get_node(*old_face);
+        if (not best.has_value())
+            continue;
+        // proto <- door, through the robot (both rooms hang from it): the old face carried into the new room's frame by the
+        // pose chain room_concept kept continuous through the doorway (Lucas Bonilla's TFM: the exit door's pose carried by
+        // odometry). ts==0 on the main-thread instance.
+        const auto T_opt = inner_eigen_->get_transformation_matrix(room.name(), best->name(), 0);
+        if (not T_opt.has_value() or not T_opt->matrix().allFinite())
+            continue;   // the new room's RT is not written yet: next cycle
+        const Mat::RTMat best_T = T_opt.value();
         const Eigen::Matrix3d R = best_T.rotation();
         // R = Rx(a)Ry(b)Rz(c) — cortex's rt_rotation_euler_xyz. Closed form, NOT Eigen::eulerAngles (see
         // room_concept/src/mount_calibrator.cpp for the decomposition it silently picks otherwise).
@@ -3351,6 +3377,12 @@ void SpecificWorker::step_entry_mirrors()
             if (src_it != fitter_->instances().end() and src_it->second.existence_seeded)
                 em.existence_L = src_it->second.existence.logodds();
             entry_mirrors_[room.id()] = std::move(em);
+            // Link 3: `exit` NEW_FACE -> OLD_FACE — the mirror is the far side of the face crossed. ltsm pairs the passage
+            // from it and archives the room left only once it exists.
+            if (rc::exit_fact::write_twin(*G, id, best->id()))
+                std::print("door_concept: [exit] link 3: {} is the twin of {} (entered '{}')\n", id, best->name(), room.name());
+            else
+                std::print("door_concept: [exit] could not write link 3 ({} -> {})\n", id, best->name());
         }
     }
 
@@ -3387,6 +3419,9 @@ void SpecificWorker::step_entry_mirrors()
 
 void SpecificWorker::release_room(std::uint64_t old_room, std::uint64_t new_room)
 {
+    // `current` may move in the same cycle room_concept wrote link 2: make the entry face now, while room_node_id_ still
+    // names the room left (step_entry_mirrors skips the followed room), so it is adopted below rather than guessed.
+    step_entry_mirrors();
     decision_log_.record(rc::door::DoorDecisionKind::RoomSwitch, new_room, {}, double(old_room),
                        fitter_ ? double(fitter_->instances().size()) : 0.0);
     std::print("door_concept: [room] LET GO — `current` moved {} → {}. Releasing {} door(s) that belong "

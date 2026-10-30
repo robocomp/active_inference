@@ -85,7 +85,7 @@ using Mat3f = Eigen::Matrix3f;
 using Mat4d = Eigen::Matrix4d;
 using Mat6d = Eigen::Matrix<double, 6, 6>;
 
-inline constexpr std::uint32_t kCycleIoVersion = 3;     // written
+inline constexpr std::uint32_t kCycleIoVersion = 4;     // written (v4: DoorCycleInput::backed_faces)
 inline constexpr std::uint32_t kCycleIoOldestReadable = 1;   // read (v1: unpacked arrays)
 
 /// DSR ids carry the generating agent's id in their low bits (cortex core/id_generator.h, agent_id_size = 12).
@@ -474,6 +474,10 @@ struct DoorCycleInput
 
     std::vector<AffordanceFlags> affordances;
     std::vector<ExecutingEdge>   executing;
+    /// Our door faces BACKED by a crossing (spec 2026-10-29 Rev 3, FACT_HOLD): named by an `exit` edge (the controller's
+    /// link 1, room_concept's link 2, our twin link 3) or carrying an ltsm recall (a remembered passage face). No verdict
+    /// from views overturns one: its existence and its leaf HOLD. v4 (empty when replaying an older tape).
+    std::vector<std::uint64_t>   backed_faces;
 
     std::optional<IdentityLoad>  identity_load;    // once, on the first recorded cycle
     std::vector<DoorEvent>       events;           // since the previous cycle, in arrival order

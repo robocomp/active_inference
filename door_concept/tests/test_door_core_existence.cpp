@@ -215,6 +215,7 @@ struct Run
 // sweep: the robot walks a triangle wave x ∈ 1 ± 1.5 m (period 12 frames) — every few frames a NEW view of the door, so
 // evidence is from new looks, not one look repeated (Task 5b item 4: the existence channels pool the looks of one view —
 // door_view_pool.h — so a parked robot's repeats are one observation). false = parked.
+static bool g_backed = false;   // case 8: the window holds by a crossing FACT (backed_faces), not by `executing`
 static Run run(int present, int absent, bool turned_away = false, int repeat_at = -1, ExistWorld* out_world = nullptr,
                bool sweep = true, int cross_from = -1, int cross_to = -1)
 {
@@ -244,7 +245,9 @@ static Run run(int present, int absent, bool turned_away = false, int repeat_at 
             rx = 1.0f + 1.5f * (k < 6 ? (static_cast<float>(k) / 3.0f - 1.0f) : (1.0f - static_cast<float>(k - 6) / 3.0f));
         }
         auto in = cycle_input(static_cast<std::uint64_t>(c), frame, ph, turned_away and c > present, kWallY, rx);
-        if (c >= cross_from and c < cross_to)   // the controller executes door_1's cross (the only door born here)
+        if (c >= cross_from and c < cross_to and g_backed)   // door_1 (id 1000, the only door born here) backed by `exit`
+            in.backed_faces.push_back(1000);
+        else if (c >= cross_from and c < cross_to)   // the controller executes door_1's cross (the only door born here)
         {
             in.affordances.push_back({.node_id = 555, .exists = true, .name = "aff_door_1_cross"});
             in.affordances.push_back({.node_id = 556, .exists = true, .name = "aff_door_1_approach"});
@@ -725,6 +728,24 @@ int main()
         const Run e = run(40, 300, false, -1, nullptr, true, /*cross_from=*/41, /*cross_to=*/101);
         CHECK(e.removes.size() == 1);
         if (e.removes.size() == 1) CHECK(e.removes.front().cycle >= 101);
+    }
+
+    // ── 8. BACKED = HOLD (spec 2026-10-29 Rev 3, FACT_HOLD; pingpong2): a face named by a crossing fact is not removed by
+    //       absence, with no `executing` edge at all; once the fact goes (its edge died with the old face), it is judged again.
+    {
+        g_backed = true;
+        const Run h = run(40, 200, false, -1, nullptr, true, /*cross_from=*/41, /*cross_to=*/241);
+        double L40 = 0;
+        int rows_held = 0, rows_moved = 0;
+        for (const auto& d : h.exist) { if (d.cycle <= 40) L40 = d.a; else { ++rows_held; rows_moved += d.a != L40; } }
+        std::print("backed: L at 40 {:.3f}, {} rows while held, {} moved, {} REMOVE\n", L40, rows_held, rows_moved,
+                   h.removes.size());
+        CHECK(rows_held > 0 and rows_moved == 0);
+        CHECK(h.removes.empty());
+        const Run e = run(40, 300, false, -1, nullptr, true, /*cross_from=*/41, /*cross_to=*/101);
+        CHECK(e.removes.size() == 1);
+        if (e.removes.size() == 1) CHECK(e.removes.front().cycle >= 101);
+        g_backed = false;
     }
 
     if (fails == 0) std::print("test_door_core_existence: ALL PASS\n");

@@ -838,11 +838,13 @@ void DoorCore::update_existence(const DoorCycleInput& in, DoorCycleOutput& out)
             inst.existence_entry_L = inst.existence.logodds();
             inst.existence_since_entry = 0.0f;
         }
-        if (const bool crossed = being_crossed.contains(inst.node_name); crossed != inst.existence_held_crossing)
+        // …and a face BACKED by a crossing (FACT_HOLD, door_fit_state.h): views do not overturn what the body did.
+        if (const bool crossed = being_crossed.contains(inst.node_name) or inst.fact_backed; crossed != inst.existence_held_crossing)
         {
             inst.existence_held_crossing = crossed;
             diag("stdout", std::format("door_concept: [existence] {} {} (L={:.2f})\n", inst.node_name,
-                                       crossed ? "HELD — the robot is crossing it" : "released — the crossing is over",
+                                       crossed ? (inst.fact_backed ? "HELD — backed by a crossing" : "HELD — the robot is crossing it")
+                                               : "released — the crossing is over",
                                        inst.existence.logodds()), out);
         }
         if (inst.existence_held_crossing) continue;

@@ -219,6 +219,8 @@ DoorCycleOutput DoorCore::step(const DoorCycleInput& in)
     fit_.set_room_is_proto(std::ranges::any_of(in.rooms.rooms, [&](const RoomInfo& r)
                                                { return r.id == world_->room_id() and r.is_proto; }));
     info_ = {};
+    for (const auto& [id, inst] : world_->fit_states())
+        inst->fact_backed = std::ranges::contains(in.backed_faces, id);
 
     merge(out);                 // enforce physical exclusion before associating/birthing this cycle
     associate(in, out);
