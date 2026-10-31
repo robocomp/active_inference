@@ -907,18 +907,6 @@ std::uint64_t RoomSceneGraph::room_of_node(std::uint64_t id) const
 //   other owners' nodes hang BELOW them (door <- wall <- floor <- room), so ours go only when none of theirs is left in
 //   the subtree (they would lose the RT chain that tells them which room they were in). Deepest first, the room last;
 //   the link-4 edge dies with it. Model: RoomTransitionExit.tla RC_Reap.
-// THE ROOM STOPS AT ITS DOORS (FreeSpacePolygon::set_openings): every seated aperture (its outward normal known), moved
-// into the PUBLISHED frame the free-space raster lives in.
-void RoomSceneGraph::refresh_free_space_openings()
-{
-    if (not free_space_.has_value()) return;
-    std::vector<rc::freespace::FreeSpacePolygon::Opening> ops;
-    for (const auto& ap : room_concept_->door_apertures())
-        if (ap.n_out.squaredNorm() > 0.25f)
-            ops.push_back({T_pub_int_ * ap.a, T_pub_int_ * ap.b, (T_pub_int_.linear() * ap.n_out).normalized()});
-    free_space_->set_openings(std::move(ops));
-}
-
 void RoomSceneGraph::reap_archived_rooms()
 {
     for (const auto room : rc::exit_fact::archived_rooms(*G_))
@@ -1945,17 +1933,15 @@ void RoomSceneGraph::step_startup_proto(const rc::RoomConcept::UpdateResult& res
     resolve_lidar_origin();
 
     // ── accumulate, every update: the beams of this scan, in the PUBLISHED (frozen) frame ────────────
-    // The room stops at its doors: ONE mechanism, the geometric cut at each seated aperture (set_openings, applied in
-    // add_scan). The probabilistic filter_through_door no longer feeds free space (user 2026-10-31): it kept returns
-    // whenever door_concept's P(open) or door list was unsure, and pingpong25's room_2 swallowed a band of room_1.
-    const auto& pts = res.lidar_scan;
+    // Through the door-aperture filter first: a return seen through an open doorway is the NEXT room, and
+    // one open door would otherwise pour the free region through it.
+    const auto pts = room_concept_->filter_through_door(res.lidar_scan);
     const Eigen::Affine2f pose_pub = T_pub_int_ * res.robot_pose;
     std::vector<Eigen::Vector2f> ends;
     ends.reserve(pts.size());
     for (const auto& p : pts)
         if (p.allFinite())
             ends.push_back(pose_pub * p.head<2>());
-    refresh_free_space_openings();
     free_space_->add_scan(pose_pub * lidar_origin_, ends);
     // the robot's own footprint is confirmed free — see FreeSpacePolygon::add_footprint. Radius = circumscribed
     // body radius PLUS the erosion the ring is cut back by: with the body alone (0.33 m) the eroded ring still
@@ -4459,10 +4445,9 @@ void RoomSceneGraph::step_layout_refiner(const rc::RoomConcept::UpdateResult& re
     slam.translation() = res.slam_pose.head<2>();
     slam.linear() = Eigen::Rotation2Df(res.slam_pose.z()).toRotationMatrix();
     const Eigen::Affine2f pose_pub = T_pub_int_ * slam;
-    const auto& pts = res.lidar_scan;   // the door-plane cut is the one mechanism (see the SDF-pose site above)
+    const auto pts = room_concept_->filter_through_door(res.lidar_scan);
     std::vector<Eigen::Vector2f> ends; ends.reserve(pts.size());
     for (const auto& p : pts) if (p.allFinite()) ends.push_back(pose_pub * p.head<2>());
-    refresh_free_space_openings();
     free_space_->add_scan(pose_pub * lidar_origin_, ends);
 
     // ── evaluate, throttled ─────────────────────────────────────────────────────────────────────────────────

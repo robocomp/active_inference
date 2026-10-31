@@ -198,7 +198,6 @@ private:
     //   is this room's pose composed with that constant, written on every pose write.
     // Not removed while this agent runs (first test: topology only); owned cleanup reaps it with the room.
     void step_proto_room(const rc::RoomConcept::UpdateResult& res);
-    void refresh_free_space_openings();   ///< the room's seated door apertures into the free-space raster (published frame)
     void reap_archived_rooms();   ///< link 5: delete our room/floor/walls once ltsm archived it and no foreign node remains
     bool cross_executing() const;   ///< a cross of one of this room's doors is executing (controller's `executing` edge)
     std::uint64_t room_of_node(std::uint64_t id) const;   ///< the room a node's RT chain hangs from; 0 = none
