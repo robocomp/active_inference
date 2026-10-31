@@ -1085,6 +1085,14 @@ QString ChatSession::answer_query(const QString& name, const QJsonObject& args)
 
 namespace
 {
+/// The DSR attributes rc::card's graph readers use (card_io.h keeps the header free of DSR).
+struct CardAtts
+{
+    using card = perception_card_att;
+    using presence = agent_presence_state_att;
+    using stamp = timestamp_agent_att;
+};
+
 /// The cards: the concept agents publish them into their agent node's perception_card attribute (read first, main
 /// thread), and mirror them to etc/perception_card.json (the fallback for an agent that is down or older). Re-read once per
 /// call; the files from the active_inference root as canvas_model.cpp has it (assets_root: two levels above the binary's
@@ -1095,10 +1103,10 @@ std::vector<rc::card::Card> load_cards(DSR::DSRGraph& G, std::filesystem::path& 
     namespace fs = std::filesystem;
     std::error_code ec;
     root = rc::chat::assets_root();
-    auto cards = rc::card::read_all_cards(G, root);
+    auto cards = rc::card::read_all_cards<CardAtts>(G, root);
     if (cards.empty())
         if (const fs::path alt = fs::current_path(ec).parent_path(); alt != root)
-            if (auto c2 = rc::card::read_all_cards(G, alt); not c2.empty()) { cards = std::move(c2); root = alt; }
+            if (auto c2 = rc::card::read_all_cards<CardAtts>(G, alt); not c2.empty()) { cards = std::move(c2); root = alt; }
     looked_in = "the graph and " + root.string();
     return cards;
 }
