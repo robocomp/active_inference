@@ -34,3 +34,7 @@ add_executable(evaluator_combine_test tests/evaluator_combine_test.cpp)
 target_include_directories(evaluator_combine_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/.. ${CMAKE_CURRENT_SOURCE_DIR}/../media_transport)
 target_link_libraries(evaluator_combine_test PRIVATE Eigen3::Eigen)
 add_test(NAME evaluator_combine_test COMMAND evaluator_combine_test)
+
+add_executable(card_io_test tests/card_io_test.cpp)
+target_include_directories(card_io_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/.. ${CMAKE_CURRENT_SOURCE_DIR}/../media_transport)
+add_test(NAME card_io_test COMMAND card_io_test)
