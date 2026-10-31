@@ -32,10 +32,10 @@ inline card::Generative make_generative(const ChairPrior& pr)
     g.shape.push_back({Prim::LegSet, {{"n", K(4.0f)}, {"half", K(ChairModel::LEG_HALF)},
                                       {"fw", V("seat_w")}, {"fd", V("seat_d")},
                                       {"z0", K(0.0f)}, {"z1", V("seat_h", 1.0f, -T)}}});
-    g.vars = {{"seat_w", pr.seat_w, pr.size_std, pr.seat_w_b.lo, pr.seat_w_b.hi, false},
-              {"seat_d", pr.seat_d, pr.size_std, pr.seat_d_b.lo, pr.seat_d_b.hi, false},
-              {"seat_h", pr.seat_h, pr.size_std, pr.seat_h_b.lo, pr.seat_h_b.hi, false},
-              {"back_h", pr.back_h, pr.size_std, pr.back_h_b.lo, pr.back_h_b.hi, false}};
+    g.vars = {{"seat_w", pr.seat_w, pr.seat_w_std, pr.seat_w_b.lo, pr.seat_w_b.hi, false},
+              {"seat_d", pr.seat_d, pr.seat_d_std, pr.seat_d_b.lo, pr.seat_d_b.hi, false},
+              {"seat_h", pr.seat_h, pr.seat_h_std, pr.seat_h_b.lo, pr.seat_h_b.hi, false},
+              {"back_h", pr.back_h, pr.back_h_std, pr.back_h_b.lo, pr.back_h_b.hi, false}};
     g.placement.support = "floor";
     g.placement.contexts = {{"free", pr.p_free}, {"against_wall", pr.p_against_wall}};
     g.placement.wall_gap_mean = pr.wall_gap_mean;

@@ -97,7 +97,8 @@ int main()
             const float h = v.var == "seat_w" ? hi.seat_w : v.var == "seat_d" ? hi.seat_d : v.var == "seat_h" ? hi.seat_h : hi.back_h;
             const float l = v.var == "seat_w" ? lo.seat_w : v.var == "seat_d" ? lo.seat_d : v.var == "seat_h" ? lo.seat_h : lo.back_h;
             CHECK(v.hi == h and v.lo == l);
-            CHECK(v.sigma == prior->size_std);
+            const float s = v.var == "seat_w" ? prior->seat_w_std : v.var == "seat_d" ? prior->seat_d_std : v.var == "seat_h" ? prior->seat_h_std : prior->back_h_std;
+            CHECK(v.sigma == s);
         }
     }
 

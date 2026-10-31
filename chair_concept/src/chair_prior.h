@@ -17,7 +17,7 @@ namespace rc
 struct ChairPrior
 {
     float seat_w = 0.0f, seat_d = 0.0f, seat_h = 0.0f, back_h = 0.0f, seat_thick = 0.0f;
-    float size_std = 0.0f;                                  // std of the size prior (m)
+    float seat_w_std = 0.0f, seat_d_std = 0.0f, seat_h_std = 0.0f, back_h_std = 0.0f;   // per-variable std of the size prior (m)
     // [prior.bounds]: physical bounds of the four size DOFs. They CONTAIN the template (checked at load).
     struct Range { float lo = 0.0f, hi = 0.0f; };
     Range seat_w_b, seat_d_b, seat_h_b, back_h_b;
@@ -37,7 +37,7 @@ inline std::string_view trim(std::string_view s)
 }
 }  // namespace chair_prior_detail
 
-// Reads the six keys of [prior.template], the four of [prior.placement] and the eight of [prior.bounds]. STRICT, because this parser is the startup gate for the size prior:
+// Reads the nine keys of [prior.template], the four of [prior.placement] and the eight of [prior.bounds]. STRICT, because this parser is the startup gate for the size prior:
 //  - the whole numeric token must be consumed (only whitespace or a `#` comment may follow);
 //  - every value must be finite and > 0 (a size of 0, a NaN or an Inf is a mistake, not a prior);
 //  - a duplicate key in the section is an error;
@@ -58,7 +58,10 @@ inline std::expected<ChairPrior, std::string> load_chair_prior(const std::string
                   {"[prior.template]", "seat_h_m", &out.seat_h, false},
                   {"[prior.template]", "back_h_m", &out.back_h, false},
                   {"[prior.template]", "seat_thick_m", &out.seat_thick, false},
-                  {"[prior.template]", "size_std_m", &out.size_std, false},
+                  {"[prior.template]", "seat_w_std_m", &out.seat_w_std, false},
+                  {"[prior.template]", "seat_d_std_m", &out.seat_d_std, false},
+                  {"[prior.template]", "seat_h_std_m", &out.seat_h_std, false},
+                  {"[prior.template]", "back_h_std_m", &out.back_h_std, false},
                   {"[prior.placement]", "p_free", &out.p_free, false},
                   {"[prior.placement]", "p_against_wall", &out.p_against_wall, false},
                   {"[prior.placement]", "wall_gap_mean_m", &out.wall_gap_mean, false},
