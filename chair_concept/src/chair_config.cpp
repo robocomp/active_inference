@@ -294,9 +294,9 @@ ChairConfig load_chair_config(const ConfigLoader& cfg)
     // restating is how hood_concept, cloned from a floor-anchored parent, ran for days with a LiDAR band
     // DISJOINT from its body while every channel reported full coverage.
     // ★z_top = seat top + backrest = 0.595 + 0.655 = 1.25 m, from the BIRTH template that actually runs.
-    // ⚠The manifest declares 0.90 (a 0.45/0.45 split from chair_model.h). Those disagree, and adopt_span
-    // PRINTS it rather than one of them winning quietly — which is the whole reason this call exists. Resolve
-    // it by measuring these chairs, then set `from = "measured"`; do not silently align one to the other.
+    // The manifest declares the same 1.25 (z_top_m = extent_m), and the prior is read from the same file, so the
+    // two cannot drift; adopt_span still PRINTS any disagreement rather than one of them winning quietly.
+    // The values are NOMINAL: measure these chairs, then set `from = "measured"`.
     {
         const auto span = rc::manifest::adopt_span(kManifestPath, "chair",
                                                   rc::manifest::Support::floor_anchored,
