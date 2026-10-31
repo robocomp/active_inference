@@ -24,3 +24,8 @@ add_executable(evaluator_camera_test tests/evaluator_camera_test.cpp)
 target_include_directories(evaluator_camera_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/.. ${CMAKE_CURRENT_SOURCE_DIR}/../media_transport)
 target_link_libraries(evaluator_camera_test PRIVATE Eigen3::Eigen)
 add_test(NAME evaluator_camera_test COMMAND evaluator_camera_test)
+
+add_executable(evaluator_lidar_test tests/evaluator_lidar_test.cpp)
+target_include_directories(evaluator_lidar_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/.. ${CMAKE_CURRENT_SOURCE_DIR}/../media_transport)
+target_link_libraries(evaluator_lidar_test PRIVATE Eigen3::Eigen)
+add_test(NAME evaluator_lidar_test COMMAND evaluator_lidar_test)

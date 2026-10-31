@@ -22,8 +22,10 @@
 #include <array>
 #include <cmath>
 #include <numbers>
+#include <span>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -223,6 +225,220 @@ inline ChannelResult evaluate_camera(const Card& card, const World& world, const
             for (std::size_t m = 0; m < world.obstacles.size(); ++m)
                 if (m != k) rest.push_back(world.obstacles[m].second);
             const float gain = nbv::visible_fraction(t, from, yaw, sensor, rest) - v_all;
+            if (gain > best_gain) { best_gain = gain; out.occluder = world.obstacles[k].first; }
+        }
+    }
+    return out;
+}
+// ── LiDAR half (spec §4b) ───────────────────────────────────────────────────────────────────────────────────
+// A ring is a cone about the device z axis; `mount` (room frame) carries it into the room, so an INVERTED sensor
+// (Helios, Bpearl) simply has room elevation = -device elevation: nothing is hard-coded, the rotation does it.
+// lambda = sum over crossing rings of (columns across the target) x visible_fraction, x range_factor(r);
+// P = 1 - exp(-lambda q_return). A ring is a line, so "does it cross the z span" is geometry, not a gate.
+namespace detail
+{
+inline constexpr float kDeg2Rad = std::numbers::pi_v<float> / 180.0f;
+
+// Device ring elevations [deg]: the model's table, else `rings` spread uniformly over fov_start..fov_end.
+inline std::vector<float> ring_elevations_deg(const rc::media::SensorModel& m)
+{
+    if (not m.ring_elev_deg.empty()) return m.ring_elev_deg;
+    std::vector<float> e;
+    const int n = m.rings.value_or(0);
+    if (n < 1 or not m.fov_start_deg or not m.fov_end_deg) return e;
+    for (int i = 0; i < n; ++i)
+        e.push_back(n == 1 ? 0.5f * (*m.fov_start_deg + *m.fov_end_deg)
+                           : *m.fov_start_deg + (*m.fov_end_deg - *m.fov_start_deg) * static_cast<float>(i) / static_cast<float>(n - 1));
+    return e;
+}
+
+// Elevation [rad] in the ROOM frame of the ring at device elevation `e_deg`, at the device azimuth whose room
+// bearing is closest to `bearing` (1 degree sampling: exact for a pure flip, a 0.5 degree error otherwise).
+inline float room_elevation(const Eigen::Isometry3f& mount, float e_deg, float bearing)
+{
+    const float e = e_deg * kDeg2Rad, ce = std::cos(e), se = std::sin(e);
+    float best = 1e9f, el = 0.0f;
+    for (int a = 0; a < 360; ++a)
+    {
+        const float az = static_cast<float>(a) * kDeg2Rad;
+        const Eigen::Vector3f d = mount.linear() * Eigen::Vector3f(ce * std::cos(az), ce * std::sin(az), se);
+        const float err = std::abs(std::remainder(std::atan2(d.y(), d.x()) - bearing, 2.0f * std::numbers::pi_v<float>));
+        if (err < best) { best = err; el = std::asin(std::clamp(d.z(), -1.0f, 1.0f)); }
+    }
+    return el;
+}
+
+inline float norm_cdf(float x) { return 0.5f * std::erfc(-x / std::numbers::sqrt2_v<float>); }
+
+// Soft at both ends of the usable range: a smooth dead zone and a smooth far limit, no hard cutoff.
+inline float range_factor(float r, float rmin, float rmax, float sigma)
+{
+    return norm_cdf((r - rmin) / sigma) * norm_cdf((rmax - r) / sigma);
+}
+
+struct LidarGeom
+{
+    Eigen::Vector2f origin{0, 0};
+    float oz = 0, r = 0, bearing = 0, ang_width = 0, az_step = 0, rmin = 0, rmax = 0, sigma_r = 0.02f;
+    int n_cross = 0;
+    float min_el = 0, max_el = 0;      // room elevations of the fan at this bearing [rad]
+    bool ok = false;                   // false: the model cannot be evaluated (no rings / no azimuth step)
+};
+
+inline LidarGeom lidar_geom(const LidarRig& rig, const rc::nbv::Target& t, const Eigen::Vector2f& from)
+{
+    LidarGeom g;
+    const auto& m = rig.model;
+    g.origin = from; g.oz = rig.mount.translation().z();
+    const Eigen::Vector2f rel = t.centre() - from;
+    g.r = rel.norm();
+    g.bearing = g.r > 1e-6f ? std::atan2(rel.y(), rel.x()) : 0.0f;
+    g.rmin = m.range_min_m.value_or(0.0f);
+    g.rmax = m.range_max_m.value_or(1e9f);
+    g.sigma_r = std::max(m.range_sigma_floor_m.value_or(0.02f), 1e-3f);   // 1 mm: keeps Phi finite, not a knob on P
+    g.az_step = m.azimuth_step_deg.value_or(0.0f) * kDeg2Rad;
+
+    // Angular width of the footprint's silhouette seen from `from`; a sensor inside the footprint sees all round.
+    const Eigen::Vector2f ex = t.axis_x(), ey = t.axis_y();
+    float lo = 0.0f, hi = 0.0f;
+    bool inside = std::abs((from - t.centre()).dot(ex)) <= 0.5f * t.w and std::abs((from - t.centre()).dot(ey)) <= 0.5f * t.h;
+    for (int i = 0; i < 4 and not inside; ++i)
+    {
+        const Eigen::Vector2f c = t.centre() + ((i & 1) ? 0.5f : -0.5f) * t.w * ex + ((i & 2) ? 0.5f : -0.5f) * t.h * ey;
+        const float a = std::remainder(std::atan2(c.y() - from.y(), c.x() - from.x()) - g.bearing, 2.0f * std::numbers::pi_v<float>);
+        lo = std::min(lo, a); hi = std::max(hi, a);
+    }
+    g.ang_width = inside ? 2.0f * std::numbers::pi_v<float> : hi - lo;
+
+    const auto elevs = ring_elevations_deg(m);
+    if (elevs.empty() or g.az_step <= 0.0f) return g;
+    g.ok = true;
+    g.min_el = 1e9f; g.max_el = -1e9f;
+    for (float e : elevs)
+    {
+        const float el = room_elevation(rig.mount, e, g.bearing);
+        g.min_el = std::min(g.min_el, el); g.max_el = std::max(g.max_el, el);
+        const float zr = g.oz + g.r * std::tan(std::clamp(el, -1.5707f, 1.5707f));
+        if (zr >= t.z0 and zr <= t.z1) ++g.n_cross;
+    }
+    return g;
+}
+
+// lambda for a given visible fraction; `ring_fix` = "one ring crosses it at least", `range_on` = apply the range factor.
+inline float lidar_lambda(const LidarGeom& g, float v, bool range_on = true, bool ring_fix = false)
+{
+    if (not g.ok) return 0.0f;
+    const float cols = g.ang_width / g.az_step;
+    const float rings = static_cast<float>(ring_fix ? std::max(g.n_cross, 1) : g.n_cross);
+    return rings * cols * v * (range_on ? range_factor(g.r, g.rmin, g.rmax, g.sigma_r) : 1.0f);
+}
+inline const rc::nbv::Sensor& lidar_sight(float oz)
+{
+    // An all-round sight line for visible_fraction: ~172 deg either side of the heading (the clamp is 3 rad),
+    // a vertical channel on so heights of obstacles and target count, at the sensor's height. The ring geometry
+    // above decides what is in the fan; this only asks "is the line of sight clear".
+    static thread_local rc::nbv::Sensor s;
+    s.hfov_rad = 3.0f; s.vfov_rad = 2.9f; s.height_m = oz;
+    return s;
+}
+}  // namespace detail
+
+// Expected number of returns on `t` from a LiDAR whose origin is `from` (xy; z and orientation from rig.mount).
+inline float expected_returns(const LidarRig& rig, const rc::nbv::Target& t, const Eigen::Vector2f& from,
+                              std::span<const rc::nbv::Obstacle> obstacles)
+{
+    const detail::LidarGeom g = detail::lidar_geom(rig, t, from);
+    const float v = rc::nbv::visible_fraction(t, from, g.bearing, detail::lidar_sight(g.oz), obstacles);
+    return detail::lidar_lambda(g, v);
+}
+
+// `sensor` = "helios" | "bpearl". The rig's mount.xy is a lever arm from the robot (at vp.xy, heading vp.yaw or 0);
+// z and the orientation come from the mount as given.
+inline ChannelResult evaluate_lidar(const Card& card, const World& world, const Hypothesis& h, const Viewpoint& vp,
+                                    std::string_view sensor)
+{
+    namespace nbv = rc::nbv;
+    ChannelResult out;
+    out.sensor = std::string(sensor);
+    const std::optional<LidarRig>& rig_opt = sensor == "bpearl" ? world.bpearl : world.helios;
+    const auto ch = std::ranges::find_if(card.channels, [&](const Channel& c) { return c.sensor == sensor; });
+    if (ch == card.channels.end() or not ch->modelled or not rig_opt)
+    {
+        out.limit = Limit::NotModelled;
+        out.notes.push_back(not rig_opt ? "no " + out.sensor + " in the world" : "card does not model the " + out.sensor + " channel");
+        return out;                                  // left out of the combination by the caller
+    }
+    if (world.polygon.size() < 3) out.notes.push_back("walls unknown");
+
+    // The rig as it sits for this viewpoint: robot at vp.xy / vp.yaw, the mount's own xy a lever arm.
+    LidarRig rig = *rig_opt;
+    {
+        Eigen::Isometry3f robot = Eigen::Isometry3f::Identity();
+        robot.linear() = Eigen::AngleAxisf(vp.yaw.value_or(0.0f), Eigen::Vector3f::UnitZ()).toRotationMatrix();
+        robot.translation() = Eigen::Vector3f(vp.xy.x(), vp.xy.y(), 0.0f);
+        rig.mount = robot * rig_opt->mount;
+    }
+    const Eigen::Vector2f from = rig.mount.translation().head<2>();
+    if (not rig.model.range_sigma_floor_m) out.notes.push_back("range sigma 0.02 m assumed (model has none)");
+    if (rig.model.ring_elev_deg.empty()) out.notes.push_back("rings spaced uniformly over the fov (no ring table)");
+
+    const SubtypeParams& sp = params_for(card, h.subtype);
+    const GeometryPrior gp = h.size.value_or(card.geometry);
+    nbv::Target t;
+    t.cx = h.x; t.cy = h.y; t.yaw = h.yaw; t.w = gp.w; t.h = gp.d; t.z0 = gp.z0; t.z1 = gp.z1;
+
+    const std::vector<nbv::Obstacle> walls = nbv::wall_obstacles(world.polygon, detail::kWallThicknessM, world.gaps);
+    std::vector<nbv::Obstacle> objs, all = walls;
+    for (const auto& [name, o] : world.obstacles) { objs.push_back(o); all.push_back(o); }
+
+    if (nbv::stands_inside(from, objs))
+    {
+        out.limit = Limit::Inside; out.limit_gain = 1.0f; out.p = 0.0f;
+        return out;
+    }
+
+    const detail::LidarGeom g = detail::lidar_geom(rig, t, from);
+    if (not g.ok)
+    {
+        out.limit = Limit::NotModelled; out.notes.push_back("lidar model lacks rings or azimuth step");
+        return out;
+    }
+    const nbv::Sensor& sight = detail::lidar_sight(g.oz);
+    const float q = sp.q_return;
+    const auto p_of = [&](float lam) { return 1.0f - std::exp(-std::max(lam, 0.0f) * q); };
+
+    const float v_all     = nbv::visible_fraction(t, from, g.bearing, sight, all);
+    const float v_no_wall = nbv::visible_fraction(t, from, g.bearing, sight, objs);
+    const float v_no_obj  = nbv::visible_fraction(t, from, g.bearing, sight, walls);
+    out.p = p_of(detail::lidar_lambda(g, v_all));
+    if (not std::isfinite(out.p)) out.p = 0.0f;
+
+    // Leave-one-out: the factor whose removal raises P the most.
+    Limit ring_label = Limit::BetweenRings;
+    if (g.n_cross == 0)
+    {
+        const float a0 = std::atan2(t.z0 - g.oz, g.r), a1 = std::atan2(t.z1 - g.oz, g.r);
+        ring_label = a1 < g.min_el ? Limit::BelowFan : a0 > g.max_el ? Limit::AboveFan : Limit::BetweenRings;
+    }
+    const Limit range_label = g.r < g.rmin ? Limit::DeadZone : Limit::Range;
+    const std::array<std::pair<float, Limit>, 4> gains{{
+        {p_of(detail::lidar_lambda(g, v_all, true, true)) - out.p,   ring_label},
+        {p_of(detail::lidar_lambda(g, v_all, false))      - out.p,   range_label},
+        {p_of(detail::lidar_lambda(g, v_no_wall))         - out.p,   Limit::BehindWall},
+        {p_of(detail::lidar_lambda(g, v_no_obj))          - out.p,   Limit::Occluded}}};
+    const auto best = std::ranges::max_element(gains, {}, &std::pair<float, Limit>::first);
+    out.limit = best->first > 0.0f ? best->second : Limit::None;
+    out.limit_gain = best->first > 0.0f ? best->first : 0.0f;
+
+    if (v_no_obj - v_all > 0.0f)
+    {
+        float best_gain = 0.0f;
+        for (std::size_t k = 0; k < world.obstacles.size(); ++k)
+        {
+            std::vector<nbv::Obstacle> rest = walls;
+            for (std::size_t m = 0; m < world.obstacles.size(); ++m)
+                if (m != k) rest.push_back(world.obstacles[m].second);
+            const float gain = nbv::visible_fraction(t, from, g.bearing, sight, rest) - v_all;
             if (gain > best_gain) { best_gain = gain; out.occluder = world.obstacles[k].first; }
         }
     }
