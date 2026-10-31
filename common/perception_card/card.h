@@ -9,6 +9,7 @@
 
 #include "detectability/detectability.h"
 #include "media_transport/flat_json.h"
+#include "perception_card/term_spec.h"   // TermSpec (split out so terms.h stays free of the JSON / media_transport includes)
 
 #include <algorithm>
 #include <array>
@@ -33,12 +34,6 @@ struct Channel
     std::string sensor;     // graph node name: zed | helios | bpearl | ricoh
     Role        role = Role::Both;
     bool        modelled = false;
-};
-
-struct TermSpec
-{
-    std::string                  name;     // one of kTermNames
-    std::map<std::string, float> params;
 };
 
 struct SubtypeParams

@@ -224,11 +224,7 @@ PoseOverlap pose_overlap_factor(const std::optional<Mat6d>& rt_cov, const std::o
     if (not (var_b > 0.0))
         return {};
     const double sb = std::sqrt(var_b);
-    const double a = 2.0 * std::atan(std::max(1e-3, static_cast<double>(half_diag_m)) / range);
-    const double z = a / sb;
-    const double k = std::erf(z / std::sqrt(2.0))
-                   - (2.0 / (z * std::sqrt(2.0 * std::numbers::pi))) * (1.0 - std::exp(-0.5 * z * z));
-    return {static_cast<float>(std::clamp(k, 0.0, 1.0)), static_cast<float>(sb * range)};
+    return {rc::card::term_kappa(var_b, range, static_cast<double>(half_diag_m)), static_cast<float>(sb * range)};
 }
 
 // ─── the probes (DoorFitter's, moved) ────────────────────────────────────────────────────────────────────────────────
@@ -655,11 +651,8 @@ float door_view_obliquity(const std::optional<Mat4d>& room_T_zed, const rc::Door
     if (not M.has_value())
         return 1.0f;                      // no extrinsic → can't judge → don't suppress
     const Eigen::Vector2f cam(static_cast<float>(M->coeff(0, 3)), static_cast<float>(M->coeff(1, 3)));
-    Eigen::Vector2f r = inst.leaf_pose.centre_xy - cam;
-    if (r.norm() < 1e-6f)
-        return 1.0f;
-    r.normalize();
-    return std::clamp(std::abs(r.dot(inst.leaf_pose.ey)), 0.0f, 1.0f);   // ey = the leaf's face normal
+    const Eigen::Vector2f r = inst.leaf_pose.centre_xy - cam;
+    return rc::card::term_leaf_obliquity(r.x(), r.y(), inst.leaf_pose.ey.x(), inst.leaf_pose.ey.y());   // ey = the leaf's face normal
 }
 
 float aperture_band_offset(const std::vector<Eigen::Vector2f>& polygon, const rc::DoorFitState& inst)
@@ -1257,7 +1250,7 @@ void DoorCore::update_existence(const DoorCycleInput& in, DoorCycleOutput& out)
         // visible_frac is passed as 1.0 on purpose: occlusion/frustum loss is already carried by
         // in_fov_frac() below, and passing it twice would square it.
         const rc::detect::DetectorEnvelope env{cfg.detect_min_fill, cfg.detect_max_fill, cfg.detect_soft};
-        const float p_env = rc::detect::p_detect(inst.roi_fill, 1.0f, env);
+        const float p_env = rc::card::term_envelope(inst.roi_fill, 1.0f, env);
         inst.dbg_p_env = p_env;
         // ★OBLIQUITY OF THE LEAF, which only became a live variable when phi did. A panel seen edge-on
         // presents almost no area to segment: |ray . leaf face normal| falls from 0.99 at phi=5 deg to
@@ -1276,7 +1269,8 @@ void DoorCore::update_existence(const DoorCycleInput& in, DoorCycleOutput& out)
         // is the same shape as the documented hood failure, so a door believed permanently edge-on
         // would be hard to remove. The aperture-side evidence is what has to keep that in check.
         const float leaf_oblq = door_view_obliquity(room_T_zed, inst);
-        float p_detect = p_env * leaf_oblq * sil.resolvability() * sil.in_fov_frac() * sil.central_frac() * kappa;
+        float p_detect = p_env * leaf_oblq * sil.resolvability() * rc::card::term_in_fov(sil.in_fov_frac())
+                       * rc::card::term_central(sil.central_frac()) * kappa;
 
         // ★THE CONTOUR CHECK. Everything above is geometry: it says how well the camera could have
         // resolved the door IN PRINCIPLE. This asks what the classifier actually computed AT the door's

@@ -13,3 +13,7 @@ target_include_directories(card_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/.. ${CM
 
 enable_testing()
 add_test(NAME card_test COMMAND card_test)
+
+add_executable(terms_test tests/terms_test.cpp)
+target_include_directories(terms_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/.. ${CMAKE_CURRENT_SOURCE_DIR}/../media_transport)
+add_test(NAME terms_test COMMAND terms_test)

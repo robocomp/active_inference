@@ -39,6 +39,7 @@
 #include "../door_room_band.h"
 #include "../door_frame_evidence.h"
 #include "../../../common/contour_edge/contour_edge_project.h"   // rc::edges::ContourSet
+#include "../../../common/perception_card/terms.h"            // rc::card::term_* — the P(detect) factor formulas (SHARED)
 
 namespace rc::door::core
 {
@@ -158,7 +159,7 @@ struct DoorSilhouette
     // foreshortened edge-on). This one covariate replaces the old ZedRangeFull/ZedRangeRef falloff AND the
     // obliquity ramp, with no tuning constant and — unlike that ramp, which returned exactly 0 below cos 0.20
     // and made a grazing phantom permanently unjudgeable — it never reaches zero while the door is in view.
-    float resolvability() const { return n_detectable > 0 ? static_cast<float>(n_cells) / n_detectable : 0.0f; }
+    float resolvability() const { return rc::card::term_resolvability(n_cells, n_detectable); }   // the formula lives in the shared term library
 };
 
 /// rc::SemanticProbField (door_semantic_field.h) over the RECORDED door plane: the same background mean and the same
