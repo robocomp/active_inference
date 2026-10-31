@@ -3389,13 +3389,23 @@ bool ControllerSession::drive_door_route(const ControllerPlanningStep &step, rc:
             const float s_body = (cpose.pos - seen->gap.centre).dot(n);
             // Once any part of the body is in the opening the route is not rebuilt on it (a route from the doorway failed).
             door_route_body_in_opening_ = s_body > -r_body;
-            if (door_route_through_key_ != latch and s_body > r_body)
+            // Driven on the anchor, THROUGH is the servo's own: the body at the cross target (deep entry, note_deep).
+            const bool through_now = door_passage_.servo() ? door_passage_.deep() : s_body > r_body;
+            if (door_route_through_key_ != latch and through_now)
             {
                 door_route_through_key_ = latch;
-                std::println("[door-route] {}: the body is wholly past {} (s {:.2f} m > body radius {:.2f} m) — THROUGH",
-                             leg.door, seen->name, s_body, r_body);
+                std::println("[door-route] {}: the body is {} past {} (s {:.2f} m; body radius {:.2f} m) — THROUGH", leg.door,
+                             door_passage_.servo() ? "at the cross target" : "wholly", seen->name, s_body, r_body);
                 door_passage_.note_route(leg.key, rc::DoorPassage::RouteReport::Arrived);
             }
+        }
+    // the servo's THROUGH needs no fresh reading of the opening: it was measured on it (or its held gap) by the servo itself
+    if (leg.through and door_passage_.servo() and door_passage_.deep())
+        if (const std::string latch = leg.door + "|" + leg.key.substr(leg.key.rfind('|') + 1); door_route_through_key_ != latch)
+        {
+            door_route_through_key_ = latch;
+            std::println("[door-route] {}: the servo has the body at the cross target — THROUGH", leg.door);
+            door_passage_.note_route(leg.key, rc::DoorPassage::RouteReport::Arrived);
         }
     // ★ THE DOORWAY ON THE ANCHOR, IN THE ROBOT FRAME ([DoorPassage] CrossServo; spec 2026-10-31-door-cross-aif-servo).
     //   From the cycle the cross's interaction anchor is fresh, the body is driven through the hole it perceives by the
@@ -3411,6 +3421,7 @@ bool ControllerSession::drive_door_route(const ControllerPlanningStep &step, rc:
             on_anchor.target.from_affordance = true;
             if (update_cross_anchor(on_anchor) and anchor_cross_.has_value())
             {
+                door_passage_.note_servo();
                 if (door_servo_logged_ != leg.key)
                 {
                     door_servo_logged_ = leg.key;
@@ -4518,6 +4529,7 @@ ControllerSession::CrossProtocol ControllerSession::cross_protocol(const Control
         if (progress == rc::CrossProgress::Through)
         {
             const auto g = rc::anchor_cross_geometry(drive_pose);
+            door_passage_.note_deep();   // route mode: the servo's THROUGH is the crossing fact (drive_door_route)
             // Task 12 Fix E: past a room switch the cross's node is gone — `through` is the door passage's to act on.
             anchor_through_ = true;
             if (door_passage_.clearing())
