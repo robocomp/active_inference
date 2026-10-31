@@ -8,6 +8,9 @@ for t in test_ndjson test_gate test_objects test_canvas test_gpu test_fleet; do
     g++ -std=c++23 -O0 -g -Wall -Wextra -o "$out/$t" "$t.cpp"
     "$out/$t"
 done
+g++ -std=c++23 -O0 -g -Wall -Wextra -Wno-deprecated-literal-operator -fPIC -o "$out/test_history_trim" test_history_trim.cpp \
+    $(pkg-config --cflags Qt6Core | sed "s/-I/-isystem /g") $(pkg-config --libs Qt6Core)
+"$out/test_history_trim"
 g++ -std=c++23 -O0 -g -Wall -Wextra -isystem /usr/include/eigen3 -o "$out/test_sim_door" test_sim_door.cpp
 "$out/test_sim_door"
 g++ -std=c++23 -O0 -g -Wall -Wextra -Wno-deprecated-enum-enum-conversion -Wno-deprecated-literal-operator -fPIC \

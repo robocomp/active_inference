@@ -101,6 +101,8 @@ struct SessionConfig
 {
     OllamaConfig llm;
     int max_history = 16;
+    int history_trim_to = 0;                 ///< a full history is cut down to this many messages at once (<= 0 ⇒ max_history/2)
+    double history_token_budget_frac = 0.75; ///< request estimate above this share of num_ctx ⇒ drop a block from the front
     int digest_period_ms = 500;
     int status_period_ms = 250;
     std::string log_dir = "logs";

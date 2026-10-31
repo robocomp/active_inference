@@ -1,4 +1,5 @@
 #include "chat_session.h"
+#include "history_trim.h"
 
 #include <csignal>
 #include <filesystem>
@@ -802,9 +803,9 @@ QJsonArray ChatSession::tools_json() const
 void ChatSession::push_history(QJsonObject m)
 {
     history_.push_back(std::move(m));
-    // Trim from the front, never leaving a tool result whose call was cut (a leading role:"tool" message).
-    while (static_cast<int>(history_.size()) > cfg_.max_history) history_.pop_front();
-    while (not history_.empty() and history_.front().value("role").toString() == "tool") history_.pop_front();
+    // Block trim (history_trim.h): the prefix changes once per block, not per message, so ollama's prompt cache holds.
+    // Never leaves a tool result whose call was cut (a leading role:"tool" message).
+    trim_history(history_, cfg_.max_history, cfg_.history_trim_to);
 }
 
 // ★ THE STATE GOES LAST. ollama reuses the processed prompt up to the first token that differs from the previous
@@ -845,13 +846,22 @@ void ChatSession::ask_model(bool followup, bool offer_tools)
     state_extra_ += q(alive_line(system_.agents())) + "\n";   // the names from the graph, so none are made up
     state_extra_ += QStringLiteral("last move/turn sent from this chat: ") +
                     (last_relative_.empty() ? QStringLiteral("none") : q(explain_relative_command(last_relative_))) + "\n";
-    const QJsonArray msgs = messages_for_request();
     // ★ A follow-up carries the SAME tools as the turn before it. ollama reuses the processed prompt only up to the first
     //   token that differs, and the template writes the tools right after the system prompt: dropping them on the
     //   follow-up and restoring them on the next message reprocessed the whole history twice per tool round (873 ms of
     //   a 1086 ms cold prompt on the 5070 Ti, measured 2026-10-22; several seconds on a Jetson). With the tools on offer
     //   the 8b still answered 35/35 follow-ups in words; a call it makes anyway is never run (on_done).
     const QJsonArray tools = offer_tools ? tools_json() : QJsonArray{};
+    // Token guard: ollama silently truncates a prompt over num_ctx, which could cut the system prompt. Estimate the
+    // request (system + tools + STATE + history) and drop blocks of history from the front while it is over budget.
+    {
+        const auto fixed = estimate_tokens_chars(static_cast<std::size_t>(
+            system_prompt().size() + state_message().size() +
+            QJsonDocument(tools).toJson(QJsonDocument::Compact).size()));
+        const auto budget = static_cast<std::size_t>(std::max(0.0, cfg_.history_token_budget_frac) * cfg_.llm.num_ctx);
+        trim_to_budget(history_, fixed, budget, [](const std::string& l) { std::println("[chat_agent] {}", l); });
+    }
+    const QJsonArray msgs = messages_for_request();
     QJsonArray hist;
     for (const auto& m : history_)
     {

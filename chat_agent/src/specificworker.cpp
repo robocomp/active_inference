@@ -131,6 +131,10 @@ rc::chat::SessionConfig SpecificWorker::load_session_config(const ConfigLoader& 
     c.llm.planner_model = QString::fromStdString(r.s("LLM.planner_model", c.llm.model.toStdString(),
             "model of plan_mission's planner request (missions from the skills); default = LLM.model"));
     c.max_history = r.i("Chat.max_history", 16, "messages of history sent with each request (tool pairs kept together)");
+    c.history_trim_to = r.i("Chat.history_trim_to", c.max_history / 2,
+            "a history over max_history is cut down to this many messages AT ONCE, so the prompt prefix (and ollama's cache) changes only every max_history - history_trim_to messages");
+    c.history_token_budget_frac = r.d("Chat.history_token_budget_frac", 0.75,
+            "estimated request tokens above this share of LLM.num_ctx drop a block of history from the front (ollama would silently truncate the prompt)");
     c.digest_period_ms = r.i("Chat.digest_period_ms", 500, "period of the graph STATE digest (main thread poll)");
     c.status_period_ms = r.i("Chat.status_period_ms", 250, "period of the chat_intention state poll");
     c.log_dir = r.s("Chat.log_dir", "logs", "directory for logs/chat_<date>.jsonl");
