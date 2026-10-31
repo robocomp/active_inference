@@ -16,6 +16,7 @@
 #include <limits>
 #include <numbers>
 #include <random>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -166,14 +167,16 @@ struct ImaginedScan
     std::vector<float> ring_elev_room_deg;              // per ring, at the sector's centre bearing (room frame)
     float lambda0 = 0;                                  // rays whose nearest hit is a part, before q_return and the range factor
     bool modelled = false;
+    std::vector<std::string> notes;                     // e.g. "sensor inside a part"
 };
 
 // The imagined LiDAR scan of `placed` from `vp`. `rig` is the BODY-frame rig (as evaluate_lidar takes it); null or ringless
 // = not modelled. Each ring is cast through the real mount (rig_in_room) over the azimuths subtended by the parts' bounding
 // box +-5 deg (all round if the sensor is inside it), against the parts, the world's obstacles and the wall slabs [0,
 // room_height] (card thickness, own-wall skip). A ray with range in [range_min, range_max] that hits a part is kept with
-// probability q_return (the card's, for `subtype`) and displaced along the ray by N(0, range_sigma_floor_m); lambda0 is the
-// evaluator's, computed on the compound shape. The target must NOT also be in World.obstacles. Same seed, same points.
+// probability q_return (the card's, for `subtype`) and displaced along the ray by N(0, range_sigma_floor_m); lambda0 (rays whose nearest hit is a
+// part) is counted BEFORE the range gate and q, as in the evaluator (its range factor lives on P); the gate only decides
+// which points are pushed. The target must NOT also be in World.obstacles. Same seed, same points.
 inline ImaginedScan render_lidar(const World& world, const Viewpoint& vp, const LidarRig* rig, const Placed& placed,
                                  std::uint64_t seed, const Card& card, std::string_view subtype = "")
 {
@@ -219,11 +222,19 @@ inline ImaginedScan render_lidar(const World& world, const Viewpoint& vp, const 
     for (const auto& [name, ob] : world.obstacles) others.push_back(detail::ray_box(ob));
     for (const auto& p : placed.boxes) parts.push_back(detail::ray_box(p));
 
+    // a sensor inside a part sees nothing of it (mirrors render_zed's Inside): modelled, no points
+    for (const auto& b : parts)
+    {
+        bool in = false;
+        detail::slab_hit(b, o.x(), o.y(), o.z(), 1.0f, 0.0f, 0.0f, &in);
+        if (in) { sc.notes.push_back("sensor inside a part: no returns"); return sc; }
+    }
+
     std::mt19937_64 rng(seed);
     std::uniform_real_distribution<float> U(0.0f, 1.0f);
     std::normal_distribution<float> N(0.0f, sigma);
     const float inf = std::numeric_limits<float>::infinity();
-    const int n_az = static_cast<int>(std::ceil(2.0f * pi / az_step));
+    const int n_az = std::max(1, static_cast<int>(std::lround(2.0f * pi / az_step)));
     for (const float e_deg : elevs)
     {
         const float e = e_deg * detail::kDeg2Rad, ce = std::cos(e), se = std::sin(e);
@@ -240,10 +251,11 @@ inline ImaginedScan render_lidar(const World& world, const Viewpoint& vp, const 
             for (const auto& b : parts) t_part = std::min(t_part, detail::slab_hit(b, o.x(), o.y(), o.z(), d.x(), d.y(), d.z(), nullptr));
             for (const auto& b : others) t_other = std::min(t_other, detail::slab_hit(b, o.x(), o.y(), o.z(), d.x(), d.y(), d.z(), nullptr));
             const float t = std::min(t_part, t_other);
-            if (not std::isfinite(t) or t < rmin or t > rmax) continue;
+            if (not std::isfinite(t)) continue;
+            if (t_part < t_other) sc.lambda0 += 1.0f;   // counted BEFORE the range gate: the evaluator's range factor lives on P
+            if (t < rmin or t > rmax) continue;
             if (t_part < t_other)
             {
-                sc.lambda0 += 1.0f;
                 if (U(rng) < q) sc.on_target.push_back(o + (t + N(rng)) * d);
             }
             else sc.on_other.push_back(o + t * d);

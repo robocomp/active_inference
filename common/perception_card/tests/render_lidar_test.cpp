@@ -4,6 +4,7 @@
 #include <chrono>
 #include <clocale>
 #include <cstdio>
+#include <map>
 
 static int bad = 0;
 #define CHECK(c) do { if (not (c)) { std::printf("FAIL line %d: %s\n", __LINE__, #c); ++bad; } } while (0)
@@ -84,23 +85,76 @@ int main()
                             front ? "front-on" : "edge-on", sc.lambda0, box, box > 0 ? sc.lambda0 / box : 0.0f, sc.on_target.size(), sc.on_other.size());
                 CHECK(sc.modelled and box > 20.0f);
                 CHECK(sc.lambda0 <= 1.05f * box);
-                if (front) CHECK(sc.lambda0 >= 0.3f * box);
+                // Edge-on bpearl is 0.273 of the box: its sparse dome rings (2.9 deg apart, mostly at floor level) meet only the
+                // thin backrest edge. 0.25 is a regression floor there; everywhere else the 0.3 bound holds.
+                CHECK(sc.lambda0 >= ((not front and std::string(name) == "bpearl") ? 0.25f : 0.3f) * box);
                 CHECK(sc.ring_elev_room_deg.size() == 32);
             }
         }
     }
-    { // (b) a thin seat midway between two helios rings at 6 m: no returns on the seat's z band
+    { // (b) a 2 cm seat slab 4 m away: ON the height of helios ring 28 it is hit; midway between rings 28 and 29 it is not.
         World wb = w; wb.helios->model.range_sigma_floor_m = 0.001f;
-        const float step = 70.0f / 31.0f, e = (-55.0f + 10 * step + 0.5f * step) * std::numbers::pi_v<float> / 180.0f;
-        const float z = 1.075f - 6.0f * std::tan(e);
-        Placed p;
-        p.boxes.push_back(rc::nbv::Obstacle{6.0f, 0.0f, 0.45f, 0.45f, 0.0f, z - 0.01f, z + 0.01f});
-        p.boxes.push_back(rc::nbv::Obstacle{6.0f, 0.0f, 0.04f, 0.04f, 0.0f, 0.0f, z - 0.05f});
-        const auto sc = render_lidar(wb, kO, &*wb.helios, p, 1, card);
-        int on_seat = 0;
-        for (const auto& q : sc.on_target) if (std::abs(q.z() - z) < 0.02f) ++on_seat;
-        std::printf("b: seat z=%.3f on_target=%zu on_seat_band=%d lambda0=%.0f\n", z, sc.on_target.size(), on_seat, sc.lambda0);
-        CHECK(on_seat == 0);
+        const float step = 70.0f / 31.0f, d2r = std::numbers::pi_v<float> / 180.0f;
+        const auto slab = [&](float z) { Placed p; p.boxes.push_back(rc::nbv::Obstacle{4.0f, 0.0f, 0.45f, 0.45f, 0.0f, z - 0.01f, z + 0.01f}); return p; };
+        const float z_on = 1.075f - 4.0f * std::tan((-55.0f + 28 * step) * d2r);
+        const float z_mid = 1.075f - 4.0f * std::tan((-55.0f + 28.5f * step) * d2r);
+        const auto count = [&](float z, const Placed& p)
+        {
+            const auto sc = render_lidar(wb, kO, &*wb.helios, p, 1, card);
+            int n = 0; for (const auto& q : sc.on_target) if (std::abs(q.z() - z) < 0.02f) ++n;
+            return n;
+        };
+        const int on = count(z_on, slab(z_on)), mid = count(z_mid, slab(z_mid));
+        std::printf("b: seat on ring z=%.3f returns=%d ; between rings z=%.3f returns=%d\n", z_on, on, z_mid, mid);
+        CHECK(on > 0);
+        CHECK(mid == 0);
+    }
+    { // (b2) lambda0 is counted before the range gate: a target inside the dead zone has lambda0 > 0 and no points
+        LidarRig rg = *w.helios; rg.model.range_min_m = 5.0f;
+        const auto sc = render_lidar(w, kO, &rg, chair_at(3.0f, 0.0f, yaw0), 1, card);
+        std::printf("b2: dead zone lambda0=%.0f on_target=%zu\n", sc.lambda0, sc.on_target.size());
+        CHECK(sc.lambda0 > 0.0f and sc.on_target.empty());
+    }
+    { // (b3) a sensor inside a part: modelled, no returns, a note
+        Placed p; p.boxes.push_back(rc::nbv::Obstacle{0.0f, 0.0f, 1.0f, 1.0f, 0.0f, 0.0f, 2.0f});
+        const auto sc = render_lidar(w, kO, &*w.helios, p, 1, card);
+        CHECK(sc.modelled and sc.on_target.empty() and not sc.notes.empty());
+    }
+    { // (b4) no two returned columns of a ring share an azimuth (all-round scan: the footprint contains the sensor)
+        World wc = w; wc.helios->model.range_sigma_floor_m = 0.001f;
+        Placed p;   // two far-apart small parts whose bounding box contains the sensor
+        p.boxes.push_back(rc::nbv::Obstacle{ 0.6f,  0.6f, 0.05f, 0.05f, 0.0f, 0.0f, 0.2f});
+        p.boxes.push_back(rc::nbv::Obstacle{-0.6f, -0.6f, 0.05f, 0.05f, 0.0f, 0.0f, 0.2f});
+        const auto sc = render_lidar(wc, kO, &*wc.helios, p, 1, card);
+        std::map<int, std::vector<float>> by_ring;
+        for (const auto& q : sc.on_other)
+        {
+            const Eigen::Vector3f d = q - Eigen::Vector3f(0, 0, 1.075f);
+            by_ring[static_cast<int>(std::lround(std::asin(d.z() / d.norm()) * 2000.0f))].push_back(std::atan2(d.y(), d.x()));
+        }
+        float min_gap = 1e9f; std::size_t cols = 0;
+        for (auto& [k, az] : by_ring)
+        {
+            std::ranges::sort(az); cols = std::max(cols, az.size());
+            for (std::size_t i = 1; i < az.size(); ++i) min_gap = std::min(min_gap, az[i] - az[i - 1]);
+        }
+        std::printf("b4: rings=%zu max columns per ring=%zu min azimuth gap=%.5f rad (step %.5f)\n", by_ring.size(), cols, min_gap, 0.4f * 3.14159265f / 180.0f);
+        CHECK(cols > 800 and min_gap > 0.5f * 0.4f * 3.14159265f / 180.0f);
+    }
+    { // (b5) the same obstacle in render_lidar and expected_returns: partial occlusion, render <= 1.05 x box
+        World wo = w; const rc::nbv::Obstacle ob{1.5f, 0.15f, 0.4f, 0.4f, 0.0f, 0.0f, 2.5f};
+        wo.obstacles.push_back({"box_1", ob});
+        const Placed ch = chair_at(3.0f, 0.0f, yaw0);
+        const rc::nbv::Target t = detail::target_of(ch);
+        Hypothesis h; h.x = 3.0f; h.y = 0.0f;
+        for (const LidarRig* rig : {&*w.helios, &*w.bpearl})
+        {
+            const LidarRig rr = rig_in_room(*rig, kO, h);
+            const float box = expected_returns(rr, t, rr.mount.translation().head<2>(), std::span<const rc::nbv::Obstacle>(&ob, 1));
+            const auto sc = render_lidar(wo, kO, rig, ch, 1, card);
+            std::printf("b5 %s: with obstacle render lambda0=%.1f box lambda0=%.1f\n", rig == &*w.helios ? "helios" : "bpearl", sc.lambda0, box);
+            CHECK(sc.lambda0 <= 1.05f * box);
+        }
     }
     { // (c) determinism, and a different seed differs (q < 1 so the draw matters)
         const Card c5 = chair_card(0.5f);
