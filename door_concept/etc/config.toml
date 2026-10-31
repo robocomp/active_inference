@@ -191,7 +191,8 @@ DecisionLog = false         # etc/door_decisions.bin: binary per-cycle decision 
 RecordInputs = false        # DoorCycleInput per compute() cycle (DCIN v1, input_snapshot.h): the tape the DoorCore replay runs over
 RecordInputsPath = "etc/door_inputs.bin"   # rotated per run (3 previous kept)
 RecordMaxMB = 12000         # at the cap recording STOPS (one log line); est. 2-8 MB/s ⇒ a full 40-min tour
-AnchorLog = false           # etc/anchor_log.csv: one row per cycle while an anchor exists
+AnchorLog = true            # etc/anchor_log.csv: one row per cycle while an anchor exists. 2026-10-31 ON: the anchor's lateral
+                            # error at the jamb contacts (anchor_vs_truth.py, collected by run_crossing.sh)
 
 [DoorAffordance]
 # ── THE THREE PRAGMATIC AFFORDANCES: approach / open / cross ────────────────────────────────────────
