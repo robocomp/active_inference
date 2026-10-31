@@ -4917,6 +4917,11 @@ void ControllerSession::step_anchor_cross(const ControllerRobotPose &robot_pose,
             : std::format("on the anchor {} ({:.2f} m): s {:+.2f} e {:+.2f}", drive_name, cp.drive_width, gd.s, gd.e);
         if (cap.bound_lin or cap.bound_rot)
             cross_status_ += std::format(" | live returns cap v {:.2f} m/s{}", cap.v_lim, cap.bound_rot ? ", rotation capped" : "");
+        if (anchor_turn_room_logged_)
+            cross_status_ += " | the turn toward the opening is refused by obstacles its sweep reaches: making room";
+        if (guard.backoff)
+            cross_status_ += std::format(" | JAMB GUARD: a jamb or leaf of the anchor is {:.3f} m inside the safety margin — "
+                                         "backing off", -guard.min_clearance);
         if (door_passage_.driving_in()) cross_status_ += " | driving in";
     }
     // v4 step 3 (user 2026-10-31: "if there is not much space after the door, just stop"): past THROUGH, the live returns

@@ -19,6 +19,7 @@
  * read off the GUI thread and no new state is kept — every word comes from something already shown elsewhere.
  */
 
+#include <algorithm>
 #include <string>
 
 #include <QPlainTextEdit>
@@ -56,6 +57,9 @@ public:
         setFixedWidth(230);
         setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Expanding);
         setToolTip(QStringLiteral("What the controller is doing now"));
+        QFont f = font();   // a bit smaller than the window's (user 2026-10-31): the column carries the "cross:" line too
+        if (f.pointSizeF() > 0) f.setPointSizeF(f.pointSizeF() * 0.85); else f.setPixelSize(std::max(8, f.pixelSize() * 85 / 100));
+        setFont(f);
     }
 
     /// GUI thread. Deduplicated: present() calls it every frame and an unchanged text costs nothing (and
