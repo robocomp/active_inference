@@ -12,15 +12,15 @@ namespace rc
 {
 // The chair's generative block: the SAME compound the SDF in chair_model.cpp evaluates (seat slab + backrest + 4 legs),
 // written as closed primitives bound to the four size variables. The numbers that are NOT variables come from
-// ChairModel (SEAT_THICKNESS, LEG_HALF): the SDF's own, which differ from the manifest's seat_thick (0.04 vs 0.075,
-// see chair_shape_test). The variable bounds are ChairModel::apply_constraints' own constants.
+// ChairModel (LEG_HALF) and the prior (seat_thick, the SDF's own: one value, see chair_shape_test). The variable
+// bounds are the prior's [prior.bounds], which ChairModel::apply_constraints clamps to as well.
 inline card::Generative make_generative(const ChairPrior& pr)
 {
     using card::Bind;
     using card::Prim;
     const auto K = [](float b) { return Bind{"", 0.0f, b}; };
     const auto V = [](const char* v, float a = 1.0f, float b = 0.0f) { return Bind{v, a, b}; };
-    constexpr float T = ChairModel::SEAT_THICKNESS;
+    const float T = pr.seat_thick;
     card::Generative g;
     // seat slab: x,y centred, z base = seat_h - T, thickness T
     g.shape.push_back({Prim::Slab, {{"w", V("seat_w")}, {"d", V("seat_d")}, {"h", K(T)},
@@ -32,15 +32,15 @@ inline card::Generative make_generative(const ChairPrior& pr)
     g.shape.push_back({Prim::LegSet, {{"n", K(4.0f)}, {"half", K(ChairModel::LEG_HALF)},
                                       {"fw", V("seat_w")}, {"fd", V("seat_d")},
                                       {"z0", K(0.0f)}, {"z1", V("seat_h", 1.0f, -T)}}});
-    g.vars = {{"seat_w", pr.seat_w, pr.size_std, ChairModel::SEAT_W_MIN, ChairModel::SEAT_W_MAX, false},
-              {"seat_d", pr.seat_d, pr.size_std, ChairModel::SEAT_D_MIN, ChairModel::SEAT_D_MAX, false},
-              {"seat_h", pr.seat_h, pr.size_std, ChairModel::SEAT_H_MIN, ChairModel::SEAT_H_MAX, false},
-              {"back_h", pr.back_h, pr.size_std, ChairModel::BACK_H_MIN, ChairModel::BACK_H_MAX, false}};
+    g.vars = {{"seat_w", pr.seat_w, pr.size_std, pr.seat_w_b.lo, pr.seat_w_b.hi, false},
+              {"seat_d", pr.seat_d, pr.size_std, pr.seat_d_b.lo, pr.seat_d_b.hi, false},
+              {"seat_h", pr.seat_h, pr.size_std, pr.seat_h_b.lo, pr.seat_h_b.hi, false},
+              {"back_h", pr.back_h, pr.size_std, pr.back_h_b.lo, pr.back_h_b.hi, false}};
     g.placement.support = "floor";
     g.placement.contexts = {{"free", pr.p_free}, {"against_wall", pr.p_against_wall}};
     g.placement.wall_gap_mean = pr.wall_gap_mean;
     g.placement.wall_gap_sigma = pr.wall_gap_sigma;
-    g.bounds_source = "ChairModel::apply_constraints";
+    g.bounds_source = "chair.concept.toml [prior.bounds]";
     return g;
 }
 

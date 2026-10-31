@@ -9,7 +9,7 @@
  * to render the mesh in ChairSceneGraph.
  *
  * State vector θ = [cx, cy, cz, yaw, seat_w, seat_d, seat_h, back_h]  (8 params)
- * Fixed geometry: SEAT_THICKNESS = 0.04 m, LEG_HALF = 0.02 m (square leg half-side)
+ * Fixed geometry: seat thickness = ChairPrior::seat_thick (manifest), LEG_HALF = 0.02 m (square leg half-side)
  * Compound SDF = min(SDF_seat, SDF_back, min_k SDF_leg_k)
  */
 
@@ -49,6 +49,8 @@ struct ChairModelParams
 {
     // Observation noise band used by the compound-SDF candidate/residual split.
     float sigma_obs = 0.05f;
+    // The manifest prior: seat_thick for the SDF / mesh and the bounds apply_constraints clamps to. ONE source.
+    ChairPrior chair;
 };
 
 // ─── ChairModel ──────────────────────────────────────────────────────────────
@@ -58,17 +60,9 @@ class ChairModel
 public:
     using State = ChairState;   // for any shared Model-templated helper
 
-    static constexpr float SEAT_THICKNESS = 0.04f;
     static constexpr float LEG_HALF       = 0.02f;   // square leg half-side
     static constexpr float SDF_SMOOTH_K  = 0.02f;
     static constexpr float SDF_INSIDE_SCALE = 0.3f;
-
-    // Physical bounds of the size DOFs (apply_constraints clamps to them; the perception card's generative block
-    // exports the same numbers as the lo/hi of each variable: ONE source).
-    static constexpr float SEAT_W_MIN = 0.30f, SEAT_W_MAX = 0.65f;
-    static constexpr float SEAT_D_MIN = 0.30f, SEAT_D_MAX = 0.65f;
-    static constexpr float SEAT_H_MIN = 0.38f, SEAT_H_MAX = 0.55f;
-    static constexpr float BACK_H_MIN = 0.30f, BACK_H_MAX = 0.65f;
 
     ChairModel() = default;
     ChairModel(const ChairState& prior, const ChairModelParams& params);

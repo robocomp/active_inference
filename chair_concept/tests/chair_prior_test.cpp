@@ -29,6 +29,10 @@ int main()
     CHECK(near(pr->p_free, 0.5f) and near(pr->p_against_wall, 0.5f)
           and near(pr->wall_gap_mean, 0.05f) and near(pr->wall_gap_sigma, 0.05f));   // [prior.placement]
 
+    // [prior.bounds] loads and CONTAINS the template
+    CHECK(near(pr->seat_w_b.lo, 0.30f) and near(pr->seat_w_b.hi, 0.65f) and near(pr->seat_d_b.lo, 0.30f) and near(pr->seat_d_b.hi, 0.65f));
+    CHECK(near(pr->seat_h_b.lo, 0.38f) and near(pr->seat_h_b.hi, 0.70f) and near(pr->back_h_b.lo, 0.30f) and near(pr->back_h_b.hi, 0.80f));
+
     // a manifest missing seat_w_m is an error naming the key
     const std::string bad_path = std::string(AGENT_DIR) + "/tests/chair_prior_missing.tmp.toml";
     {
@@ -64,6 +68,19 @@ int main()
     CHECK(not variant("seat_w_m     = 0.60", "seat_w_m     = nan").has_value());
     CHECK(not variant("seat_w_m     = 0.60", "seat_w_m     = 0.0").has_value());          // zero size
     CHECK(not variant("seat_w_m     = 0.60", "seat_w_m     = 0.60\nseat_w_m = 0.61").has_value());   // duplicate
+    CHECK(not variant("seat_h_max_m = 0.70", "seat_h_max_m = 0.55").has_value());          // template 0.595 outside its bounds
+    CHECK(not variant("back_h_max_m = 0.80", "back_h_max_m = 0.65").has_value());          // template 0.655 outside its bounds
+    CHECK(not variant("seat_w_min_m = 0.30", "seat_w_min_m = 0.70").has_value());          // lo >= hi
+    CHECK(not variant("seat_d_max_m = 0.65", "seat_d_max_m = 0.30").has_value());          // lo == hi
+    CHECK(not variant("seat_w_max_m = 0.65", "seat_w_max_m = 0.65x").has_value());         // as strict as the template
+    {   // a ChairModel built from the prior keeps the template through set_state (no longer clamped)
+        ChairModelParams mp; mp.chair = *pr;
+        ChairState s; s.seed_size(*pr);
+        ChairModel m(s, mp);
+        m.set_state(s);
+        CHECK(near(m.state().seat_h, 0.595f) and near(m.state().back_h, 0.655f)
+              and near(m.state().seat_w, 0.60f) and near(m.state().seat_d, 0.52f));
+    }
     {   // a """ block holding `seat_w_m = 9` (and a section header) must not be read
         const auto r = variant("why          = \"\"\"", "why          = \"\"\"\nseat_w_m = 9\n[other]");
         CHECK(r.has_value() and near(r->seat_w, 0.60f));

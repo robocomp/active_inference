@@ -22,7 +22,7 @@ target_link_libraries(chair_detect_test PRIVATE Eigen3::Eigen)
 add_test(NAME chair_detect_test COMMAND chair_detect_test)
 
 # The manifest is the single source of the chair's size prior. Run: LANG=es_ES.UTF-8 ./chair_prior_test
-add_executable(chair_prior_test chair_prior_test.cpp ../src/chair_belief.cpp)
+add_executable(chair_prior_test chair_prior_test.cpp ../src/chair_belief.cpp ../src/chair_model.cpp)
 target_include_directories(chair_prior_test PRIVATE ../src ../../common ../../common/media_transport)
 target_compile_definitions(chair_prior_test PRIVATE AGENT_DIR="${CMAKE_CURRENT_LIST_DIR}/..")
 target_compile_options(chair_prior_test PRIVATE -O2)

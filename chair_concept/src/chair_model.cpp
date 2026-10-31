@@ -68,7 +68,8 @@ float ChairModel::sdf_point_at(const Eigen::Vector3f& p, const ChairState& s) co
 
     const float half_w = s.seat_w * 0.5f;
     const float half_d = s.seat_d * 0.5f;
-    const float half_t = SEAT_THICKNESS * 0.5f;
+    const float seat_t = params_.chair.seat_thick;
+    const float half_t = seat_t * 0.5f;
 
     const float seat_cz = s.seat_h - half_t;
     const float sdf_seat = box_sdf(std::abs(lx) - half_w, std::abs(ly) - half_d, std::abs(lz - seat_cz) - half_t);
@@ -77,7 +78,7 @@ float ChairModel::sdf_point_at(const Eigen::Vector3f& p, const ChairState& s) co
     const float back_cz =  s.seat_h + s.back_h * 0.5f;
     const float sdf_back = box_sdf(std::abs(lx) - half_w, std::abs(ly - back_cy) - half_t, std::abs(lz - back_cz) - s.back_h * 0.5f);
 
-    const float leg_top    = s.seat_h - SEAT_THICKNESS;
+    const float leg_top    = s.seat_h - seat_t;
     const float leg_cz     = leg_top * 0.5f;
     const float leg_half_z = leg_top * 0.5f;
     const float ox = half_w - LEG_HALF;
@@ -99,12 +100,13 @@ float ChairModel::sdf_point(const Eigen::Vector3f& p) const
 
 void ChairModel::apply_constraints()
 {
-    // Physical bounds for a wooden chair (Webots WoodenChair ≈ 0.45×0.45, seat ~0.46 m, total ~0.92).
-    // A hard ceiling stops the flat seat slab from ballooning to swallow contaminated mask points.
-    state_.seat_w = std::clamp(state_.seat_w, SEAT_W_MIN, SEAT_W_MAX);
-    state_.seat_d = std::clamp(state_.seat_d, SEAT_D_MIN, SEAT_D_MAX);
-    state_.seat_h = std::clamp(state_.seat_h, SEAT_H_MIN, SEAT_H_MAX);
-    state_.back_h = std::clamp(state_.back_h, BACK_H_MIN, BACK_H_MAX);
+    // Bounds come from the manifest [prior.bounds] (they contain the template, so a live chair is never clamped below it).
+    // A default-constructed model (all-zero prior) has the degenerate range [0, 0] and clamps nothing useful: build from a prior.
+    const auto& P = params_.chair;
+    state_.seat_w = std::clamp(state_.seat_w, P.seat_w_b.lo, P.seat_w_b.hi);
+    state_.seat_d = std::clamp(state_.seat_d, P.seat_d_b.lo, P.seat_d_b.hi);
+    state_.seat_h = std::clamp(state_.seat_h, P.seat_h_b.lo, P.seat_h_b.hi);
+    state_.back_h = std::clamp(state_.back_h, P.back_h_b.lo, P.back_h_b.hi);
 }
 
 }  // namespace rc

@@ -86,7 +86,8 @@ int main()
 
     // the exported bounds ARE apply_constraints' (one source): a model clamped by apply_constraints stays inside [lo, hi]
     {
-        ChairModel m;
+        ChairModelParams mp; mp.chair = *prior;
+        ChairModel m(ChairState{}, mp);
         m.set_state(ChairState::from_array({0, 0, 0, 0, 9.f, 9.f, 9.f, 9.f}));
         const auto hi = m.state();
         m.set_state(ChairState::from_array({0, 0, 0, 0, -9.f, -9.f, -9.f, -9.f}));
@@ -118,7 +119,8 @@ int main()
         }
     }
 
-    ChairModel model;
+    ChairModelParams mparams; mparams.chair = *prior;   // seat_thick 0.075 from the manifest, like the card's primitives
+    ChairModel model(ChairState{}, mparams);
     std::mt19937 rng(12345);
     std::size_t n_pts = 0, sign_checked = 0, sign_bad = 0, near_out = 0, near_in = 0;
     float max_out = 0, max_in = 0, max_in_quirk = 0;

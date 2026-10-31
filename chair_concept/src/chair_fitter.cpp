@@ -1061,6 +1061,7 @@ ChairModelParams ChairFitter::make_model_params() const
 {
     ChairModelParams p;
     p.sigma_obs = cfg_.sigma_obs;
+    p.chair     = cfg_.prior;
     return p;
 }
 

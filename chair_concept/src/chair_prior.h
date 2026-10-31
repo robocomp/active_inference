@@ -18,6 +18,9 @@ struct ChairPrior
 {
     float seat_w = 0.0f, seat_d = 0.0f, seat_h = 0.0f, back_h = 0.0f, seat_thick = 0.0f;
     float size_std = 0.0f;                                  // std of the size prior (m)
+    // [prior.bounds]: physical bounds of the four size DOFs. They CONTAIN the template (checked at load).
+    struct Range { float lo = 0.0f, hi = 0.0f; };
+    Range seat_w_b, seat_d_b, seat_h_b, back_h_b;
     // [prior.placement]: where a chair stands. Weights of the two contexts (unnormalised) and the gap to the wall
     // when it stands against one.
     float p_free = 0.0f, p_against_wall = 0.0f, wall_gap_mean = 0.0f, wall_gap_sigma = 0.0f;
@@ -34,7 +37,7 @@ inline std::string_view trim(std::string_view s)
 }
 }  // namespace chair_prior_detail
 
-// Reads the six keys of [prior.template] and the four of [prior.placement]. STRICT, because this parser is the startup gate for the size prior:
+// Reads the six keys of [prior.template], the four of [prior.placement] and the eight of [prior.bounds]. STRICT, because this parser is the startup gate for the size prior:
 //  - the whole numeric token must be consumed (only whitespace or a `#` comment may follow);
 //  - every value must be finite and > 0 (a size of 0, a NaN or an Inf is a mistake, not a prior);
 //  - a duplicate key in the section is an error;
@@ -48,18 +51,22 @@ inline std::expected<ChairPrior, std::string> load_chair_prior(const std::string
     std::ifstream f(manifest_path);
     if (not f) return std::unexpected("cannot open manifest " + manifest_path);
 
-    struct Key { const char* section; const char* name; float ChairPrior::* dst; bool seen; };
-    Key keys[] = {{"[prior.template]", "seat_w_m", &ChairPrior::seat_w, false},
-                  {"[prior.template]", "seat_d_m", &ChairPrior::seat_d, false},
-                  {"[prior.template]", "seat_h_m", &ChairPrior::seat_h, false},
-                  {"[prior.template]", "back_h_m", &ChairPrior::back_h, false},
-                  {"[prior.template]", "seat_thick_m", &ChairPrior::seat_thick, false},
-                  {"[prior.template]", "size_std_m", &ChairPrior::size_std, false},
-                  {"[prior.placement]", "p_free", &ChairPrior::p_free, false},
-                  {"[prior.placement]", "p_against_wall", &ChairPrior::p_against_wall, false},
-                  {"[prior.placement]", "wall_gap_mean_m", &ChairPrior::wall_gap_mean, false},
-                  {"[prior.placement]", "wall_gap_sigma_m", &ChairPrior::wall_gap_sigma, false}};
     ChairPrior out;
+    struct Key { const char* section; const char* name; float* dst; bool seen; };
+    Key keys[] = {{"[prior.template]", "seat_w_m", &out.seat_w, false},
+                  {"[prior.template]", "seat_d_m", &out.seat_d, false},
+                  {"[prior.template]", "seat_h_m", &out.seat_h, false},
+                  {"[prior.template]", "back_h_m", &out.back_h, false},
+                  {"[prior.template]", "seat_thick_m", &out.seat_thick, false},
+                  {"[prior.template]", "size_std_m", &out.size_std, false},
+                  {"[prior.placement]", "p_free", &out.p_free, false},
+                  {"[prior.placement]", "p_against_wall", &out.p_against_wall, false},
+                  {"[prior.placement]", "wall_gap_mean_m", &out.wall_gap_mean, false},
+                  {"[prior.placement]", "wall_gap_sigma_m", &out.wall_gap_sigma, false},
+                  {"[prior.bounds]", "seat_w_min_m", &out.seat_w_b.lo, false}, {"[prior.bounds]", "seat_w_max_m", &out.seat_w_b.hi, false},
+                  {"[prior.bounds]", "seat_d_min_m", &out.seat_d_b.lo, false}, {"[prior.bounds]", "seat_d_max_m", &out.seat_d_b.hi, false},
+                  {"[prior.bounds]", "seat_h_min_m", &out.seat_h_b.lo, false}, {"[prior.bounds]", "seat_h_max_m", &out.seat_h_b.hi, false},
+                  {"[prior.bounds]", "back_h_min_m", &out.back_h_b.lo, false}, {"[prior.bounds]", "back_h_max_m", &out.back_h_b.hi, false}};
     std::string section;                                    // the header of the section the scanner is in
     bool in_string = false;
     std::string line;
@@ -89,12 +96,22 @@ inline std::expected<ChairPrior, std::string> load_chair_prior(const std::string
             const auto rest = trim(std::string_view(r.ptr, val.data() + val.size() - r.ptr));
             if (not rest.empty() and rest.front() != '#') return std::unexpected(where + " has trailing garbage");
             if (not std::isfinite(x) or not (x > 0.0f)) return std::unexpected(where + " must be finite and > 0");
-            out.*(k.dst) = x;
+            *k.dst = x;
             k.seen = true;
         }
     }
     for (const auto& k : keys)
         if (not k.seen) return std::unexpected(std::string(k.section) + ' ' + k.name + " missing in " + manifest_path);
+    // bounds: lo < hi, and the template mean lies inside [lo, hi] (a birth template the model would clamp is a contradiction)
+    const struct { const char* name; ChairPrior::Range r; float mean; } dofs[] = {
+        {"seat_w", out.seat_w_b, out.seat_w}, {"seat_d", out.seat_d_b, out.seat_d},
+        {"seat_h", out.seat_h_b, out.seat_h}, {"back_h", out.back_h_b, out.back_h}};
+    for (const auto& d : dofs)
+    {
+        if (not (d.r.lo < d.r.hi)) return std::unexpected(std::string("[prior.bounds] ") + d.name + ": lo must be < hi in " + manifest_path);
+        if (d.mean < d.r.lo or d.mean > d.r.hi)
+            return std::unexpected(std::string("[prior.bounds] ") + d.name + ": template mean outside [lo, hi] in " + manifest_path);
+    }
     return out;
 }
 }  // namespace rc

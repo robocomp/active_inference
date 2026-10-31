@@ -52,6 +52,23 @@ Placement of a chair on the floor of a room: either free-standing or pushed to a
 observations that use it (appearance sampling) are only as good as these four numbers.
 """
 
+[prior.bounds]
+seat_w_min_m = 0.30
+seat_w_max_m = 0.65
+seat_d_min_m = 0.30
+seat_d_max_m = 0.65
+seat_h_min_m = 0.38
+seat_h_max_m = 0.70                # was 0.55 in code: it clamped the live seat_h (0.595) below its own birth template
+back_h_min_m = 0.30
+back_h_max_m = 0.80                # was 0.65 in code: the template back_h is 0.655
+from         = "nominal"
+why          = """
+Physical bounds of the four size DOFs; ChairModel::apply_constraints clamps to them and the perception card exports
+them as the lo/hi of each variable (one source). They must CONTAIN the template (load_chair_prior refuses otherwise):
+the former code constants did not (seat_h <= 0.55, back_h <= 0.65 vs template 0.595/0.655), so live chairs were clamped
+below the very template they were born with. NOMINAL: a generous envelope for domestic chairs, not measured.
+"""
+
 # ── DELIBERATELY ABSENT ────────────────────────────────────────────────────────────────────────────────
 # [prior.identity]   — chair has no shape log-evidence ratio. Stated as absent so it is asked about rather
 #                      than assumed present; the table manifest records the same gap.

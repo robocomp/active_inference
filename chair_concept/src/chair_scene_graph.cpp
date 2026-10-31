@@ -231,7 +231,7 @@ void ChairSceneGraph::write_rt_covariance(std::uint64_t room_id, ChairInstance& 
     rc::rtcov::publish(*G_, room_id, inst.node_id, v, inst.last_pub_cov_trace, force, inst.node_name);
 }
 
-std::vector<float> ChairSceneGraph::make_chair_mesh(const ChairState& s)
+std::vector<float> ChairSceneGraph::make_chair_mesh(const ChairState& s, float seat_thick)
 {
     // Flat triangle list (room frame): seat slab + backrest + 4 square legs = 6 boxes × 12 tri.
     std::vector<float> verts;
@@ -264,7 +264,7 @@ std::vector<float> ChairSceneGraph::make_chair_mesh(const ChairState& s)
 
     const float hw = s.seat_w * 0.5f;
     const float hd = s.seat_d * 0.5f;
-    const float ht = ChairModel::SEAT_THICKNESS * 0.5f;
+    const float ht = seat_thick * 0.5f;
 
     // Seat slab — its TOP face sits at cz + seat_h, so its centre is half a thickness below.
     push_box(s.cx, s.cy, s.cz + s.seat_h - ht, hw, hd, ht);
@@ -280,7 +280,7 @@ std::vector<float> ChairSceneGraph::make_chair_mesh(const ChairState& s)
 
     // 4 legs — square cross-section (2×LEG_HALF), at the seat corners, floor → seat underside.
     const float lr  = ChairModel::LEG_HALF;
-    const float leg_top = s.seat_h - ChairModel::SEAT_THICKNESS;   // underside of the seat slab
+    const float leg_top = s.seat_h - seat_thick;   // underside of the seat slab
     const float lhz = std::max(0.01f, leg_top) * 0.5f;
     for (int ix : {-1, 1})
         for (int iy : {-1, 1})
@@ -297,7 +297,7 @@ std::vector<float> ChairSceneGraph::make_chair_mesh(const ChairState& s)
 
 void ChairSceneGraph::write_chair_mesh(ChairInstance& inst, DSR::Node& node)
 {
-    const std::vector<float> verts = make_chair_mesh(inst.model.state());
+    const std::vector<float> verts = make_chair_mesh(inst.model.state(), cfg_.prior.seat_thick);
     G_->add_or_modify_attrib_local<mesh_vertices_att>(node, verts);
 }
 
