@@ -70,7 +70,7 @@ struct ChannelResult
 struct Result
 {
     float p_notice = 0, p_recognise = 0;
-    std::vector<ChannelResult> channels;
+    std::vector<ChannelResult> channels;   // EMPTY for an infeasible viewpoint/target (limit Inside): no sensor was asked
     Limit limit = Limit::None;           // of the best Identity-capable channel (highest p)
     float limit_gain = 0;                // that channel's limit_gain
     std::string occluder;
@@ -494,10 +494,13 @@ inline Result evaluate(const Card& card, const World& world, const Hypothesis& h
         if (c.sensor == "zed") r = evaluate_camera(card, world, h, vp);
         else if (c.sensor == "helios" or c.sensor == "bpearl") r = evaluate_lidar(card, world, h, vp, c.sensor);
         else { r.sensor = c.sensor; r.limit = Limit::NotModelled; r.notes.push_back("no evaluator for " + c.sensor); }
-        const bool counts = r.limit != Limit::NotModelled and c.modelled;
+        const bool finite = std::isfinite(r.p);
+        if (not finite and r.limit != Limit::NotModelled)
+            out.notes.push_back(r.sensor + ": non-finite p, channel excluded");
+        const bool counts = r.limit != Limit::NotModelled and c.modelled and finite;
         if (counts)
         {
-            const float p = std::isfinite(r.p) ? std::clamp(r.p, 0.0f, 1.0f) : 0.0f;
+            const float p = std::clamp(r.p, 0.0f, 1.0f);
             if (c.role == Role::Occupancy or c.role == Role::Both) miss_notice *= 1.0f - p;
             if (c.role == Role::Identity or c.role == Role::Both)
             {
