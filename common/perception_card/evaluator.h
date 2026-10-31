@@ -71,7 +71,8 @@ struct Result
 {
     float p_notice = 0, p_recognise = 0;
     std::vector<ChannelResult> channels;
-    Limit limit = Limit::None;
+    Limit limit = Limit::None;           // of the best Identity-capable channel (highest p)
+    float limit_gain = 0;                // that channel's limit_gain
     std::string occluder;
     std::vector<std::string> notes;
 };
@@ -460,5 +461,101 @@ inline ChannelResult evaluate_lidar(const Card& card, const World& world, const 
     if (v_no_obj - v_all > 0.0f)
         out.occluder = detail::name_occluder(world, t, from, g.bearing, sight, v_all, ob);
     return out;
+}
+
+// ── combining the channels (spec §5) ─────────────────────────────────────────────────────────────────────────
+// Independent looks: P = 1 - prod(1 - p_c). Notice = the channels that can say "something is there" (Occupancy or
+// Both); recognise = the ones that can say "it is THIS" (Identity or Both). A NotModelled channel is not a zero
+// look, it is no look: it is left out of both products.
+inline Result evaluate(const Card& card, const World& world, const Hypothesis& h, const Viewpoint& vp)
+{
+    namespace nbv = rc::nbv;
+    Result out;
+
+    // Feasibility first: an impossible viewpoint or target gets P = 0 whatever the sensors would say.
+    const detail::Obstacles ob = detail::build_obstacles(world);
+    const auto zero = [&](std::string occluder, std::string note)
+    {
+        out.p_notice = out.p_recognise = 0.0f;
+        out.limit = Limit::Inside; out.limit_gain = 1.0f;
+        out.occluder = std::move(occluder);
+        out.notes.push_back(std::move(note));
+        return out;
+    };
+    if (not nbv::is_reachable(vp.xy, world.polygon)) return zero("", "viewpoint outside the room polygon");
+    for (const auto& [name, o] : world.obstacles)
+        if (nbv::stands_inside(vp.xy, std::span<const nbv::Obstacle>(&o, 1))) return zero(name, "viewpoint inside " + name);
+    if (nbv::stands_inside({h.x, h.y}, ob.walls)) return zero("wall", "target inside a wall");
+
+    float miss_notice = 1.0f, miss_recognise = 1.0f, best_id = -1.0f;
+    for (const Channel& c : card.channels)
+    {
+        ChannelResult r;
+        if (c.sensor == "zed") r = evaluate_camera(card, world, h, vp);
+        else if (c.sensor == "helios" or c.sensor == "bpearl") r = evaluate_lidar(card, world, h, vp, c.sensor);
+        else { r.sensor = c.sensor; r.limit = Limit::NotModelled; r.notes.push_back("no evaluator for " + c.sensor); }
+        const bool counts = r.limit != Limit::NotModelled and c.modelled;
+        if (counts)
+        {
+            const float p = std::isfinite(r.p) ? std::clamp(r.p, 0.0f, 1.0f) : 0.0f;
+            if (c.role == Role::Occupancy or c.role == Role::Both) miss_notice *= 1.0f - p;
+            if (c.role == Role::Identity or c.role == Role::Both)
+            {
+                miss_recognise *= 1.0f - p;
+                if (p > best_id) { best_id = p; out.limit = r.limit; out.limit_gain = r.limit_gain; out.occluder = r.occluder; }
+            }
+        }
+        out.notes.insert(out.notes.end(), r.notes.begin(), r.notes.end());
+        out.channels.push_back(std::move(r));
+    }
+    out.p_notice = 1.0f - miss_notice;
+    out.p_recognise = 1.0f - miss_recognise;
+    if (best_id < 0.0f) out.limit = Limit::NotModelled;     // no modelled channel can identify it
+    return out;
+}
+
+struct Stand { Eigen::Vector2f xy; float yaw; Result r; };
+
+// Viewpoints that maximise P(recognise): 36 bearings round the target x 3 standoffs inside the camera's
+// standoff_band (near edge, peak, far edge). The band is the SAME scan the planners use. Stands that are inside an
+// obstacle or outside the room are dropped (feasibility, as in rc::nbv), the rest are scored by evaluate() with
+// the heading on the target, and the best k returned.
+inline std::vector<Stand> where_to_stand(const Card& card, const World& world, const Hypothesis& h, int k = 3)
+{
+    namespace nbv = rc::nbv;
+    constexpr int kBearings = 36;
+    constexpr float kRobotRadiusM = 0.30f;     // body clearance, a property of the robot (as the planners pass it)
+    constexpr float kBandCapM = 8.0f;          // the band scan's own range (standoff_band max_m)
+    const SubtypeParams& sp = params_for(card, h.subtype);
+    const GeometryPrior g = h.size.value_or(card.geometry);
+    nbv::Target t;
+    t.cx = h.x; t.cy = h.y; t.yaw = h.yaw; t.w = g.w; t.h = g.d; t.z0 = g.z0; t.z1 = g.z1;
+    nbv::Sensor sensor = world.zed.value_or(nbv::Sensor{});
+    sensor.env = sp.env;
+    if (world.zed_mount_z > 1e-3f) sensor.height_m = world.zed_mount_z;
+    const float floor_m = kRobotRadiusM + 0.5f * std::max(g.w, g.d);
+
+    const detail::Obstacles ob = detail::build_obstacles(world);
+    std::vector<Stand> stands;
+    for (int i = 0; i < kBearings; ++i)
+    {
+        const float a = 2.0f * std::numbers::pi_v<float> * static_cast<float>(i) / kBearings;
+        const Eigen::Vector2f dir(std::cos(a), std::sin(a));
+        const nbv::StandoffBand band = nbv::standoff_band(t, sensor, t.centre(), dir, floor_m);
+        for (const float d : {band.near_m, band.best, std::min(band.far_m, kBandCapM)})
+        {
+            const Eigen::Vector2f xy = t.centre() + dir * d;
+            if (nbv::stands_inside(xy, ob.objs, kRobotRadiusM) or not nbv::is_reachable(xy, world.polygon, kRobotRadiusM))
+                continue;
+            const Eigen::Vector2f to = t.centre() - xy;
+            Stand s{xy, std::atan2(to.y(), to.x()), {}};
+            s.r = evaluate(card, world, h, Viewpoint{xy, s.yaw});
+            stands.push_back(std::move(s));
+        }
+    }
+    const std::size_t n = std::min<std::size_t>(stands.size(), static_cast<std::size_t>(std::max(k, 0)));
+    std::ranges::partial_sort(stands, stands.begin() + n, {}, [](const Stand& s) { return -s.r.p_recognise; });
+    stands.resize(n);
+    return stands;
 }
 }  // namespace rc::card
