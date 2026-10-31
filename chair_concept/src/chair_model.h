@@ -22,6 +22,8 @@
 #include <vector>
 #include <Eigen/Dense>
 
+#include "chair_prior.h"
+
 namespace rc {
 
 struct ChairState
@@ -30,11 +32,15 @@ struct ChairState
     float cy     = 0.0f;   // room-frame Y of chair centre
     float cz     = 0.0f;   // floor height (ANCHORED — set by support step, not freely fit)
     float yaw    = 0.0f;   // heading about Z (room frame); +Y local = forward
-    float seat_w = 0.45f;  // seat width  (local X)
-    float seat_d = 0.45f;  // seat depth  (local Y)
-    float seat_h = 0.45f;  // seat-TOP height above floor
-    float back_h = 0.45f;  // backrest height above the seat top
+    // The size DOFs default to 0 ON PURPOSE: the initial state always comes from ChairPrior (the concept manifest),
+    // never from a number typed here. Seed with seed_size(state, prior).
+    float seat_w = 0.0f;   // seat width  (local X)
+    float seat_d = 0.0f;   // seat depth  (local Y)
+    float seat_h = 0.0f;   // seat-TOP height above floor
+    float back_h = 0.0f;   // backrest height above the seat top
     std::array<float, 8> to_array() const { return {cx, cy, cz, yaw, seat_w, seat_d, seat_h, back_h}; }
+    // The initial size DOFs, from the manifest prior (the only legitimate source of a chair's nominal size).
+    void seed_size(const ChairPrior& p) { seat_w = p.seat_w; seat_d = p.seat_d; seat_h = p.seat_h; back_h = p.back_h; }
     static ChairState from_array(const std::array<float, 8>& a)
     { return {a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7]}; }
 };

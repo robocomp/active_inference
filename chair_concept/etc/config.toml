@@ -59,7 +59,6 @@ AI2SigmaBaseM = 0.03
 AI2ClutterFrac = 0.10
 AI2ClutterScaleM = 0.12
 AI2ClutterStructureGain = 1.0    # density-aware clutter: shrink the clutter prior for seat-coplanar points (closes the escape valve → seat_d recovers with honest Σ). 0 = flat clutter
-AI2PriorSizeStd = 0.15
 AI2ProcessStdM = 0.005
 AI2ProcessStdYaw = 0.01
 AI2ProcessStdSize = 0.0005       # process noise for RIGID size DOFs (≪ pose; furniture shape doesn't drift)
@@ -198,11 +197,6 @@ MergeOverlap = 0.20      # collapse two instances whose seat footprints overlap 
 # that mismatch routed 99% of SEAT points into the BACKREST component (the z-band gate keys on SeatH)
 # and dumped 30-56% of every mask above the model into flat clutter. Fixing SeatH alone moved a chair's
 # continuous yaw error from 98.1 deg to 1.0 deg. Re-derive these for any different chair model.
-BirthSeatW = 0.60        # x extent — the span the backrest covers
-BirthSeatD = 0.52        # y extent — front-to-back; the backrest sits on the -y edge
-BirthSeatH = 0.595       # seat TOP above the floor
-BirthBackH = 0.655       # backrest height above the seat top (top ends up at 1.25)
-BirthSeatThick = 0.075   # seat slab thickness — also sets the leg/seat z-band split
 BirthLegHalf = 0.0375    # square leg half-side
 
 NllCost = false          # association cost = ½(m²+ln|S|) NLL (compete by likelihood, not raw distance)

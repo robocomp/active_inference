@@ -19,9 +19,9 @@ inline card::Card make_card(const ChairConfig& cfg)
     // absence never removes it ("RICOH CONFIRMS, NEVER REMOVES", chair_existence.cpp), so ricoh is not modelled.
     c.channels = {{"zed", card::Role::Identity, true},
                   {"ricoh", card::Role::Identity, false}};
-    // The chair the model projects: the Tracker.BirthSeat* template (a floor-anchored seat + backrest to its top).
-    const float top = cfg.tracker_birth_seat_h + cfg.tracker_birth_back_h;
-    c.geometry = {cfg.tracker_birth_seat_w, cfg.tracker_birth_seat_d, top, 0.0f, top};
+    // The chair the model projects: the manifest [prior.template] (a floor-anchored seat + backrest to its top).
+    const float top = cfg.prior.top();
+    c.geometry = {cfg.prior.seat_w, cfg.prior.seat_d, top, 0.0f, top};
     // Level 1: chair_detect.h's walls_block(cam, chair centre, polygon, rc::occlusion::kOwnWallSkipM): LINE walls, 0.15 m.
     c.walls = card::WallOcclusion{rc::occlusion::kOwnWallSkipM, -1.0f, 0.0f};
     card::SubtypeParams sp;

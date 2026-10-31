@@ -25,6 +25,7 @@
 #include <Eigen/Dense>
 
 #include "../../common/ai_belief/recursive_laplace.h"
+#include "chair_prior.h"
 
 namespace rc
 {
@@ -41,12 +42,17 @@ struct ChairBeliefState
 
 struct ChairBeliefParams
 {
+    // The birth TEMPLATE, from the manifest prior (single source). The tpl_* defaults below only serve a belief built
+    // directly (self_test); the agent always overrides them through this.
+    void seed_template(const ChairPrior& p)
+    { tpl_seat_w = p.seat_w; tpl_seat_d = p.seat_d; tpl_seat_h = p.seat_h; tpl_back_h = p.back_h; seat_thickness = p.seat_thick; }
+
     // ── Fixed standard-chair TEMPLATE (the belief estimates pose only; a global scale can multiply these
     //    later). Legs sit at the seat corners; the backrest on the −y seat edge. ──
     // ★Defaults match the real Webots SimpleChair (2026-07-27). The fitter overrides all of these from
     // config; they matter for anyone constructing a belief directly (e.g. self_test). Keeping them at a
     // fictional 0.45 cube is how the seat/backrest z-band misattribution went unnoticed — see
-    // ChairConfig::tracker_birth_seat_* for the full account.
+    // chair.concept.toml [prior.template] for the full account.
     float tpl_seat_w = 0.60f, tpl_seat_d = 0.52f, tpl_seat_h = 0.595f, tpl_back_h = 0.655f;
     float seat_thickness = 0.075f;
     float leg_half       = 0.0375f;   // square leg half-side

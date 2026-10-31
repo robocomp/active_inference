@@ -65,9 +65,9 @@ std::uint64_t ChairSceneGraph::create_instance_from_detection(const Eigen::Vecto
     // No base-colour texture → the viewer renders the chair in its flat class colour (color_for_category),
     // keeping it visually distinct from the table (which wears the gray mesa_1 wood texture).
     G_->add_or_modify_attrib_local<mesh_texture_path_att>(chair_node, std::string(""));
-    G_->add_or_modify_attrib_local<width_m_att> (chair_node, cfg_.tracker_birth_seat_w);
-    G_->add_or_modify_attrib_local<depth_m_att> (chair_node, cfg_.tracker_birth_seat_d);
-    G_->add_or_modify_attrib_local<height_m_att>(chair_node, cfg_.tracker_birth_seat_h + cfg_.tracker_birth_back_h);
+    G_->add_or_modify_attrib_local<width_m_att> (chair_node, cfg_.prior.seat_w);
+    G_->add_or_modify_attrib_local<depth_m_att> (chair_node, cfg_.prior.seat_d);
+    G_->add_or_modify_attrib_local<height_m_att>(chair_node, cfg_.prior.top());
     G_->add_or_modify_attrib_local<object_subtype_att>(chair_node, std::string("chair"));  // type-agnostic consumers
     G_->add_or_modify_attrib_local<level_att>   (chair_node, 3);
     G_->add_or_modify_attrib_local<parent_att>  (chair_node, room_node_id);
