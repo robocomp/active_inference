@@ -25,7 +25,8 @@ int main()
     CHECK(pr.has_value());
     if (not pr) { std::printf("%s\n", pr.error().c_str()); return 1; }
     CHECK(near(pr->seat_w, 0.60f) and near(pr->seat_d, 0.52f) and near(pr->seat_h, 0.595f)
-          and near(pr->back_h, 0.655f) and near(pr->seat_thick, 0.075f) and near(pr->size_std, 0.15f));
+          and near(pr->back_h, 0.655f) and near(pr->seat_thick, 0.075f) and near(pr->seat_w_std, 0.05f)
+          and near(pr->seat_d_std, 0.04f) and near(pr->seat_h_std, 0.03f) and near(pr->back_h_std, 0.06f));
     CHECK(near(pr->p_free, 0.5f) and near(pr->p_against_wall, 0.5f)
           and near(pr->wall_gap_mean, 0.05f) and near(pr->wall_gap_sigma, 0.05f));   // [prior.placement]
 
@@ -46,6 +47,19 @@ int main()
     std::remove(bad_path.c_str());
     CHECK(not miss.has_value() and miss.error().find("seat_w_m") != std::string::npos);
     CHECK(not load_chair_prior("/nonexistent/chair.toml").has_value());
+    // each of the four sigmas is required: dropping its line refuses to start, naming the key
+    for (const char* key : {"seat_w_std_m", "seat_d_std_m", "seat_h_std_m", "back_h_std_m"})
+    {
+        std::ifstream in(manifest);
+        std::ofstream out(bad_path);
+        std::string line;
+        while (std::getline(in, line))
+            if (line.find(key) == std::string::npos) out << line << '\n';
+        out.close();
+        const auto r = load_chair_prior(bad_path);
+        std::remove(bad_path.c_str());
+        CHECK(not r.has_value() and r.error().find(key) != std::string::npos);
+    }
 
     // strictness: each variant of the real manifest must be REJECTED (or, for the string block, ignored)
     const auto variant = [&](const std::string& from, const std::string& to) -> std::expected<ChairPrior, std::string>
@@ -66,6 +80,7 @@ int main()
     CHECK(not variant("wall_gap_mean_m  = 0.05 ", "wall_gap_mean_m  = 0.05x ").has_value());   // placement is as strict
     CHECK(not variant("p_free           = 0.5 ", "p_free           = 0 ").has_value());
     CHECK(not variant("seat_w_m     = 0.60", "seat_w_m     = nan").has_value());
+    CHECK(not variant("seat_d_std_m = 0.04", "seat_d_std_m = 0.0").has_value());          // zero sigma
     CHECK(not variant("seat_w_m     = 0.60", "seat_w_m     = 0.0").has_value());          // zero size
     CHECK(not variant("seat_w_m     = 0.60", "seat_w_m     = 0.60\nseat_w_m = 0.61").has_value());   // duplicate
     CHECK(not variant("seat_h_max_m = 0.70", "seat_h_max_m = 0.55").has_value());          // template 0.595 outside its bounds
