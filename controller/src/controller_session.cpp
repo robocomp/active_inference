@@ -3417,7 +3417,16 @@ bool ControllerSession::drive_door_route(const ControllerPlanningStep &step, rc:
     //   Active-Inference law (door_cross_aif.h) on the servo's guard chain (step_anchor_cross) — no route past the door, no
     //   grid lookup beyond it (pingpong6/8/10: "no free point past the door on its axis"), no rebuild. THROUGH and link 1
     //   stay above; the passage's room-switch / archive end is unchanged. Before the anchor is up the route still drives.
-    if (door_cross_servo_ and leg.through and graph_ != nullptr)
+    // ★ ONLY FROM THE VANTAGE (spec §4: "the route is kept up to the vantage P_pre"; pingpong17 leg 2): the servo is a law
+    //   for the doorway, not a planner. Handed the doorway with the robot 5 m away after its survey, it aimed straight at
+    //   the door through the furniture, the live returns held it, and it wedged — while the planned 5.35 m route sat
+    //   unused. The planned route drives until the body is at least as close to the door as the vantage (its arrival
+    //   tolerance included); from there the servo takes the hole.
+    // (no room-frame door centre known: nothing to gate on — the anchor alone, as before)
+    const bool at_vantage = not passage_door_centre_.has_value()
+                            or (step.robot_pose.pos - *passage_door_centre_).norm()
+                                   <= (leg.approach - *passage_door_centre_).norm() + path_controller.goal_threshold();
+    if (door_cross_servo_ and leg.through and graph_ != nullptr and at_vantage)
         if (const auto aff = graph_->get_node("aff_" + leg.door + "_cross"); aff.has_value())
         {
             ControllerPlanningStep on_anchor = step;
@@ -9014,11 +9023,19 @@ void ControllerSession::step_escape(const ControllerRobotPose &robot_pose,
         escape_phase2_ = true;
         escape_turn_sign_ = -escape_turn_sign_;   // both directions: the second half turns back the other way
     }
-    if (now_ms - escape_start_ms_ > static_cast<std::uint64_t>(max_ms) || backed > max_dist)
+    // ★ BACK INTO FREE SPACE, NOT A FIXED DISTANCE (user 2026-10-31: "it has to move back further into free space to have
+    //   a chance to replan"; pingpong17 leg 2: ended 0.135 m back, still at 0.00 m side clearance). The escape ends once
+    //   the body is at least its level's distance back AND free to turn in place — no live return within its
+    //   circumscribed radius (the hull self-filtered) — so any heading is open to the replan. The time is only a cap
+    //   (twice the level's), for a body that cannot get free (the next wedge escalates, the 5th gives up).
+    const float free_turn = raw_return_clearance(robot_pose.pos, robot_pose, obstacle_tracker);
+    const bool free_now = free_turn > path_controller.footprint().circumscribed_radius();
+    if (now_ms - escape_start_ms_ > static_cast<std::uint64_t>(2.f * max_ms) or (backed > max_dist and free_now))
     {
         escape_active_ = false;
         motion_commander.stop_robot();   // plan already reset in begin_escape → next cycle replans
-        qInfo() << "[recovery] escape done | backed" << backed << "m";
+        qInfo() << "[recovery] escape done | backed" << backed << "m | nearest return" << free_turn << "m"
+                << (free_now ? "(free to turn)" : "(NOT free: time cap)");
         return;
     }
 
