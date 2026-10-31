@@ -498,6 +498,7 @@ std::vector<rc::DoorFacts> SpecificWorker::door_facts()
 		f.crossed = rc::exit_fact::is_crossed_face(*G, door->id());
 		if (G->get_node(rc::DoorPassage::look_name(name)).has_value()) door_looked_.insert(name);
 		f.looked = door_looked_.contains(name);
+		f.open = G->get_attrib_by_name<door_open_prob_att>(door.value()).value_or(-1.f) >= 0.5f;
 		if (robot_T.has_value() and inner_eigen_api_)
 			if (const auto T = inner_eigen_api_->get_transformation_matrix(gs.room_name, name); T.has_value())
 				f.dist = (T->translation() - robot_T->translation()).head<2>().norm();

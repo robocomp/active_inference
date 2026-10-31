@@ -30,6 +30,7 @@ struct DoorFacts
     bool has_match = false;                 ///< a passage `match` edge points at the door
     bool crossed = false;                   ///< a crossing fact names it (exit_fact::is_crossed_face): never `new`
     bool looked = false;                    ///< an aff_door_look_<name> node exists or existed
+    bool open = false;                      ///< door_concept believes it open: P(passable) = door_open_prob >= 1/2
     double dist = std::numeric_limits<double>::infinity();   ///< metres from the robot (inf = unknown)
 };
 
@@ -59,9 +60,15 @@ enum class DoorRelationKind { None, Room, New };
         else if (kind == DoorRelationKind::New)
         {
             if (not d.recall_rooms.empty() or d.has_match or d.crossed) continue;
-            const bool better = best == nullptr or (d.looked != best->looked ? d.looked
-                                                    : d.dist != best->dist   ? d.dist < best->dist
-                                                                             : d.name < best->name);
+            // ★ THE CLOSEST OPEN DOOR FIRST (user 2026-10-31): an open door costs no `open` action, and a shut one may be
+            //   shut on purpose (pingpong24: `cross new` took the shut DOOR_0, door_concept opened it, the tour left its
+            //   room_1 <-> room_2 plan). Among open doors the nearest; among shut ones as before (looked first, else nearest).
+            const bool better = best == nullptr
+                or (d.open != best->open                   ? d.open
+                    : d.open                               ? (d.dist != best->dist ? d.dist < best->dist : d.name < best->name)
+                    : d.looked != best->looked             ? d.looked
+                    : d.dist != best->dist                 ? d.dist < best->dist
+                                                           : d.name < best->name);
             if (better) best = &d;
         }
     }

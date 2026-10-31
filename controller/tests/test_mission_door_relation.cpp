@@ -124,6 +124,18 @@ int main()
     ds[1].dist = 1.0;
     CHECK(pick_door(node("new"), ds) == "door_5");
 
+    // the closest OPEN door first (user 2026-10-31): open beats shut-but-looked-and-near; among open, the nearest
+    {
+        auto shut_near = door("door_2", {}, false, true, 1.0);
+        auto open_far = door("door_1", {}, false, false, 6.0);
+        open_far.open = true;
+        auto open_mid = door("door_7", {}, false, false, 3.0);
+        open_mid.open = true;
+        CHECK(pick_door(node("new"), std::vector<DoorFacts>{shut_near, open_far}) == "door_1");
+        CHECK(pick_door(node("new"), std::vector<DoorFacts>{shut_near, open_far, open_mid}) == "door_7");
+        CHECK(pick_door(node("new"), std::vector<DoorFacts>{shut_near}) == "door_2");   // none open: as before
+    }
+
     // room-scoped: a relation waits for the room
     mission::Step cross{.id = "1", .op = "cross"};
     cross.args["door"] = node("new");
