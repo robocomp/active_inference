@@ -3472,6 +3472,7 @@ bool ControllerSession::drive_door_route(const ControllerPlanningStep &step, rc:
                 const bool facing = std::abs(g.heading_err) < 0.5f * static_cast<float>(M_PI);
                 // the checks gate the START: once engaged on this crossing the servo keeps the hole (past the plane s > 0)
                 front_of_open = door_passage_.servo() or (open_belief and open_seen and near_side and within and facing);
+                door_gate_refused_geometry_ = not (near_side and within and facing);   // with an anchor in hand
                 if (not front_of_open)
                     why_not = std::format("P(open) {:.2f}{} · seen {} · s {:+.2f} m{} · e {:+.2f} m of ±{:.2f}{} · heading {:+.0f} deg{}",
                                           p_open, open_belief ? "" : " ✗", open_seen ? "yes" : "no ✗", g.s, near_side ? "" : " ✗",
@@ -3520,6 +3521,17 @@ bool ControllerSession::drive_door_route(const ControllerPlanningStep &step, rc:
     // A leg is built ONCE (its key); a re-keyed leg after a failure waits kDoorRouteRebuildMs from that failure.
     if (not door_route_active_ and leg.key != door_route_key_ and now - door_route_failed_ms_ >= kDoorRouteRebuildMs)
         if (not build_door_route(step.robot_pose, now, path_controller.goal_threshold())) door_route_failed_ms_ = now;
+    // ★ A SERVO LEG'S ROUTE ENDED AT THE VANTAGE BUT THE GATE STILL REFUSES (pingpong20 leg 2: the room-frame vantage was
+    //   1.4 m off the perceived door's axis, facing 113 deg away; nothing rebuilt it, the leg held for minutes). That is the
+    //   route failing: one rebuild — on the PERCEIVED opening when its anchor is up (build_door_route) — then
+    //   cross_unreachable, through the passage's own failure count.
+    if (not door_route_active_ and door_cross_servo_ and leg.through and door_route_at_vantage_key_ == leg.key
+        and not door_passage_.servo() and door_gate_refused_geometry_)
+    {
+        door_route_at_vantage_key_.clear();
+        door_passage_.note_route(leg.key, rc::DoorPassage::RouteReport::Failed,
+                                 "at the vantage but not in front of the open door");
+    }
     if (not door_route_active_)
     {
         path_controller.stop();
@@ -7251,8 +7263,11 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
             if (not (door_cross_servo_ and door_route_leg_->through))
                 door_passage_.note_route(door_route_leg_->key, rc::DoorPassage::RouteReport::Arrived);
             else
+            {
+                door_route_at_vantage_key_ = door_route_leg_->key;
                 std::println("[door-route] {}: at the vantage — the servo takes the hole once in front of the open door",
                              door_route_leg_->door);
+            }
             door_route_active_ = false;
             door_route_installed_ = false;
             path_controller.stop();
