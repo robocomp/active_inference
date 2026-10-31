@@ -1696,7 +1696,7 @@ std::optional<RoomSceneGraph::Recall> RoomSceneGraph::find_recall(const rc::Door
         // ★ DIAGNOSTIC (pingpong16 leg 3: the recalled room_2 placed ~4.6 m into room_1): every factor of the placement.
         {
             const auto yaw = [](const Eigen::Affine2f& A) { return std::atan2(A.linear()(1, 0), A.linear()(0, 0)) * 57.29578f; };
-            qInfo().noquote() << QString::fromStdString(std::format(
+            std::println("{}", std::format(
                 "[room][recall] {} via {}: T_door_recall ({:+.3f},{:+.3f}) {:+.1f} deg | T_int_door ({:+.3f},{:+.3f}) {:+.1f} deg "
                 "[a ({:+.3f},{:+.3f}) b ({:+.3f},{:+.3f})] | T_int_recall ({:+.3f},{:+.3f}) {:+.1f} deg",
                 rc_.name, ap.name, T_door_recall.translation().x(), T_door_recall.translation().y(), yaw(T_door_recall),
