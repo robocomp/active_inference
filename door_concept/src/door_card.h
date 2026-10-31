@@ -21,6 +21,11 @@ inline card::Card make_card(const DoorConfig& cfg)
                   {"bpearl", card::Role::Occupancy, true}};
     // The leaf the fit holds: width/height priors of etc/config.toml [DoorModel] (a 1.00 x 2.10 m Webots door, thickness fixed).
     c.geometry = {cfg.door_prior_w_m, cfg.door_thickness_m, cfg.door_prior_h_m, 0.0f, cfg.door_prior_h_m};
+    // Level 1: door_existence.cpp tests walls_block's EXPLICIT-EDGE form (own_wall_edges -> door_wall_edges), not a radius:
+    // the own wall is every polygon edge whose two ends lie within the phi-field depth band [-0.20, +0.20] m of the
+    // door's plane (DoorBelief::FieldNuisance depth_lo/hi); every other wall occludes however close it passes (the
+    // DOOR_0 partition, 7 cm from the jamb). LINE walls (walls_block tests edges as lines).
+    c.walls = card::WallOcclusion{0.0f, kDoorOwnWallPlaneM, 0.0f};
     card::SubtypeParams sp;
     sp.env = {cfg.detect_min_fill, cfg.detect_max_fill, cfg.detect_soft};
     // q_return (per-beam LiDAR return probability) is left at its default 1.0: UNCALIBRATED for the door. The only door

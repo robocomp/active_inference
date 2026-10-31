@@ -36,7 +36,9 @@
 
 namespace rc::card
 {
-struct LidarRig { rc::media::SensorModel model; Eigen::Isometry3f mount; };   // mount in the room frame (Task 4)
+// mount = body_T_sensor, in the robot BODY frame (Shadow: x right, y FORWARD, z up; ROBOT_GEOMETRY.md). evaluate_lidar
+// places it in the room as Rz(heading - pi/2) * mount at the viewpoint, heading being the room bearing of body +y.
+struct LidarRig { rc::media::SensorModel model; Eigen::Isometry3f mount; };
 
 struct World
 {
@@ -84,16 +86,85 @@ struct Result
 
 namespace detail
 {
-// Wall thickness handed to wall_obstacles. A modelling constant of the room, not a tuning knob on P.
-inline constexpr float kWallThicknessM = 0.12f;
+// Wall thickness for a card that declares no level-1 settings (Card::walls unset, an old card): the value the
+// evaluator used before cards carried their own. A declared card uses its own wall_thickness_m.
+inline constexpr float kLegacyWallThicknessM = 0.12f;
+// A declared thickness of 0 is a LINE (rc::occlusion::walls_block tests polygon edges as lines). wall_obstacles needs
+// a positive depth, so a line is a 1 mm box -- the representation door_look.h already uses -- not a model knob.
+inline constexpr float kLineWallM = 1e-3f;
 
 struct Obstacles { std::vector<rc::nbv::Obstacle> walls, objs, all; };
 
-// Walls (door gaps cut out), the named obstacles, and both together. Shared by every channel.
-inline Obstacles build_obstacles(const World& world)
+inline float wall_thickness_for(const Card& card)
+{
+    return card.walls ? std::max(kLineWallM, card.walls->wall_thickness_m) : kLegacyWallThicknessM;
+}
+
+// Distance from p to the oriented footprint rectangle of t (0 inside it).
+inline float point_rect_dist(const Eigen::Vector2f& p, const rc::nbv::Target& t)
+{
+    const Eigen::Vector2f d = p - t.centre();
+    const float lx = std::max(0.0f, std::abs(d.dot(t.axis_x())) - 0.5f * t.w);
+    const float ly = std::max(0.0f, std::abs(d.dot(t.axis_y())) - 0.5f * t.h);
+    return std::hypot(lx, ly);
+}
+inline float point_segment_dist(const Eigen::Vector2f& p, const Eigen::Vector2f& a, const Eigen::Vector2f& b)
+{
+    const Eigen::Vector2f ab = b - a;
+    const float l2 = ab.squaredNorm();
+    const float s = l2 > 1e-12f ? std::clamp((p - a).dot(ab) / l2, 0.0f, 1.0f) : 0.0f;
+    return (p - (a + s * ab)).norm();
+}
+inline bool segments_cross(const Eigen::Vector2f& a, const Eigen::Vector2f& b, const Eigen::Vector2f& c, const Eigen::Vector2f& d)
+{
+    const auto cr = [](const Eigen::Vector2f& p, const Eigen::Vector2f& q) { return p.x() * q.y() - p.y() * q.x(); };
+    const float d1 = cr(b - a, c - a), d2 = cr(b - a, d - a), d3 = cr(d - c, a - c), d4 = cr(d - c, b - c);
+    return ((d1 > 0) != (d2 > 0)) and ((d3 > 0) != (d4 > 0));
+}
+// Distance from the wall segment ab to the footprint of t: 0 if it touches or crosses it.
+inline float segment_rect_dist(const Eigen::Vector2f& a, const Eigen::Vector2f& b, const rc::nbv::Target& t)
+{
+    std::array<Eigen::Vector2f, 4> c;
+    for (int i = 0; i < 4; ++i)
+        c[i] = t.centre() + ((i == 1 or i == 2) ? 0.5f : -0.5f) * t.w * t.axis_x() + (i >= 2 ? 0.5f : -0.5f) * t.h * t.axis_y();
+    float d = std::min(point_rect_dist(a, t), point_rect_dist(b, t));
+    for (int i = 0; i < 4; ++i)
+    {
+        if (segments_cross(a, b, c[i], c[(i + 1) % 4])) return 0.0f;
+        d = std::min(d, point_segment_dist(c[i], a, b));
+    }
+    return d;
+}
+
+// Is this wall run the target's OWN wall under the card's level-1 rule (so it never occludes the target)?
+//  · radius form (own_wall_skip_m > 0): rc::occlusion::walls_block skips a segment closer than the skip to the SAMPLE
+//    it tests; the agents sample the object's surface, and the samples nearest a wall are the ones it could hide, so
+//    the honest summary of "per sample" is the distance from the segment to the FOOTPRINT (its nearest point).
+//  · plane form (own_wall_plane_m >= 0, door): both ends within +-own_wall_plane_m of the target's face plane, as
+//    door_wall_edges does with the polygon vertices. A run is a sub-segment of its polygon edge, so an edge inside the
+//    band gives runs inside it; only an edge slanting out of the band while a gap-cut piece of it stays inside would
+//    differ, and that piece sits at the gap itself.
+inline bool own_wall(const rc::nbv::Obstacle& run, const WallOcclusion& wo, const rc::nbv::Target& t)
+{
+    const Eigen::Vector2f u(std::cos(run.yaw), std::sin(run.yaw));
+    const Eigen::Vector2f a = Eigen::Vector2f(run.cx, run.cy) - 0.5f * run.w * u, b = Eigen::Vector2f(run.cx, run.cy) + 0.5f * run.w * u;
+    if (wo.own_wall_plane_m >= 0.0f)
+    {
+        const Eigen::Vector2f n = t.axis_y();
+        return std::abs(n.dot(a - t.centre())) <= wo.own_wall_plane_m and std::abs(n.dot(b - t.centre())) <= wo.own_wall_plane_m;
+    }
+    return wo.own_wall_skip_m > 0.0f and segment_rect_dist(a, b, t) < wo.own_wall_skip_m;
+}
+
+// Walls (door gaps cut out, at the card's thickness), the named obstacles, and both together. Shared by every
+// channel. With a target, the target's OWN walls (card level 1) are left out: they never occlude it. Without one
+// (feasibility: "is the target inside a wall?") every wall stays.
+inline Obstacles build_obstacles(const World& world, const Card& card, const rc::nbv::Target* target = nullptr)
 {
     Obstacles o;
-    o.walls = rc::nbv::wall_obstacles(world.polygon, kWallThicknessM, world.gaps);
+    o.walls = rc::nbv::wall_obstacles(world.polygon, wall_thickness_for(card), world.gaps);
+    if (target and card.walls)
+        std::erase_if(o.walls, [&](const rc::nbv::Obstacle& w) { return own_wall(w, *card.walls, *target); });
     o.all = o.walls;
     for (const auto& [name, ob] : world.obstacles) { o.objs.push_back(ob); o.all.push_back(ob); }
     return o;
@@ -155,6 +226,7 @@ inline ChannelResult evaluate_camera(const Card& card, const World& world, const
         return out;
     }
     if (world.polygon.size() < 3) out.notes.push_back("walls unknown");
+    else if (not card.walls) out.notes.push_back("card declares no wall-occlusion settings: 0.12 m walls, no own-wall skip");
 
     const SubtypeParams& sp = params_for(card, h.subtype);
     nbv::Sensor sensor = *world.zed;
@@ -195,8 +267,8 @@ inline ChannelResult evaluate_camera(const Card& card, const World& world, const
     const Eigen::Vector2f to_obj = t.centre() - from;
     const float yaw = vp.yaw ? *vp.yaw : (to_obj.norm() > 1e-6f ? std::atan2(to_obj.y(), to_obj.x()) : 0.0f);
 
-    // Occluder lists: walls (with the door gaps cut out) and the named obstacles.
-    const detail::Obstacles ob = detail::build_obstacles(world);
+    // Occluder lists: walls (with the door gaps cut out, the target's own walls left out) and the named obstacles.
+    const detail::Obstacles ob = detail::build_obstacles(world, card, &t);
     const auto& walls = ob.walls; const auto& objs = ob.objs; const auto& all = ob.all;
 
     if (nbv::stands_inside(from, objs))
@@ -224,11 +296,26 @@ inline ChannelResult evaluate_camera(const Card& card, const World& world, const
     const bool marginal_phi = articulated and not h.phi;
     if (marginal_phi)
         out.notes.push_back("phi unknown: marginalised over uniform [0, " + std::to_string(phi_max) + "] rad (8-node Gauss-Legendre)");
+    // central: the agents' central_frac = clamp(1 - |centroid offset from the principal point| / half-frame). With a
+    // given heading the HORIZONTAL offset is the projected bearing of the target centre; with best heading
+    // (vp.yaw unset) the camera faces the centre, the offset is 0 and central stays 1. The VERTICAL part of the
+    // agent's centroid depends on which surfaces it samples (a fridge its faces, a table its top), which a card does
+    // not carry, so it is not modelled: central is an upper bound in that direction.
+    const auto central_of = [&](const nbv::Target& tt) -> float
+    {
+        if (not vp.yaw) return 1.0f;
+        const Eigen::Vector2f r = tt.centre() - from;
+        const Eigen::Vector2f fwd(std::cos(yaw), std::sin(yaw)), right(std::sin(yaw), -std::cos(yaw));
+        const float depth = r.dot(fwd);
+        if (depth <= 1e-3f) return 0.0f;                   // centre at / behind the image plane
+        return std::clamp(1.0f - std::abs(r.dot(right) / depth) / sensor.tan_half_h(), 0.0f, 1.0f);
+    };
     const auto card_factors = [&](const nbv::Target& tt) -> std::pair<float, float>   // {obliquity, rest}
     {
         TermInputs in;
         in.range = (tt.centre() - from).norm();
         in.seconds_unseen = h.seconds_unseen;
+        in.central = central_of(tt);
         const Eigen::Vector2f r = tt.centre() - from;
         const auto set_phi = [&](TermInputs& ti, float phi)
         {
@@ -240,7 +327,7 @@ inline ChannelResult evaluate_camera(const Card& card, const World& world, const
         float f_obl = 1.0f, f_rest = 1.0f;
         for (const TermSpec& s : sp.terms)
         {
-            if (s.name == "envelope" or s.name == "in_fov" or s.name == "central" or s.name == "coverage" or s.name == "motion")
+            if (s.name == "envelope" or s.name == "in_fov" or s.name == "coverage" or s.name == "motion")
                 continue;                                  // carried by the geometry above / by the GH below
             if (s.name == "leaf_obliquity")
             {
@@ -475,8 +562,23 @@ inline float expected_returns(const LidarRig& rig, const rc::nbv::Target& t, con
     return detail::lidar_lambda(g, v);        // lambda0: the range factor is common-mode and lives on P
 }
 
-// `sensor` = "helios" | "bpearl". The rig's mount.xy is a lever arm from the robot (at vp.xy, heading vp.yaw or 0);
-// z and the orientation come from the mount as given.
+// room_T_sensor for a robot at vp facing the target (see evaluate_lidar below for the convention).
+inline LidarRig rig_in_room(const LidarRig& body_rig, const Viewpoint& vp, const Hypothesis& h)
+{
+    const Eigen::Vector2f to_t = Eigen::Vector2f(h.x, h.y) - vp.xy;
+    const float heading = vp.yaw ? *vp.yaw : (to_t.norm() > 1e-6f ? std::atan2(to_t.y(), to_t.x()) : 0.0f);
+    Eigen::Isometry3f robot = Eigen::Isometry3f::Identity();
+    robot.linear() = Eigen::AngleAxisf(heading - std::numbers::pi_v<float> / 2.0f, Eigen::Vector3f::UnitZ()).toRotationMatrix();
+    robot.translation() = Eigen::Vector3f(vp.xy.x(), vp.xy.y(), 0.0f);
+    LidarRig rig = body_rig;
+    rig.mount = robot * body_rig.mount;
+    return rig;
+}
+
+// `sensor` = "helios" | "bpearl". The rig's mount is body_T_sensor (BODY frame). The robot stands at vp.xy with heading
+// vp.yaw (the room bearing it faces, the camera's optical heading as in rc::nbv) or, unset, the bearing to the target
+// centre -- the same best heading the camera takes. Shadow's forward is body +y, so the body frame is the heading
+// rotated by -pi/2: room_T_sensor = [Rz(heading - pi/2), (vp.xy, 0)] * body_T_sensor.
 inline ChannelResult evaluate_lidar(const Card& card, const World& world, const Hypothesis& h, const Viewpoint& vp,
                                     std::string_view sensor)
 {
@@ -493,14 +595,8 @@ inline ChannelResult evaluate_lidar(const Card& card, const World& world, const 
     }
     if (world.polygon.size() < 3) out.notes.push_back("walls unknown");
 
-    // The rig as it sits for this viewpoint: robot at vp.xy / vp.yaw, the mount's own xy a lever arm.
-    LidarRig rig = *rig_opt;
-    {
-        Eigen::Isometry3f robot = Eigen::Isometry3f::Identity();
-        robot.linear() = Eigen::AngleAxisf(vp.yaw.value_or(0.0f), Eigen::Vector3f::UnitZ()).toRotationMatrix();
-        robot.translation() = Eigen::Vector3f(vp.xy.x(), vp.xy.y(), 0.0f);
-        rig.mount = robot * rig_opt->mount;
-    }
+    // The rig as it sits for this viewpoint: robot at vp.xy facing `heading`, the mount's own xy a lever arm.
+    const LidarRig rig = rig_in_room(*rig_opt, vp, h);
     const Eigen::Vector2f from = rig.mount.translation().head<2>();
     if (not rig.model.range_sigma_floor_m) out.notes.push_back("range sigma 0.02 m assumed (model has none)");
     if (rig.model.ring_elev_deg.empty()) out.notes.push_back("rings spaced uniformly over the fov (no ring table)");
@@ -510,7 +606,7 @@ inline ChannelResult evaluate_lidar(const Card& card, const World& world, const 
     nbv::Target t;
     t.cx = h.x; t.cy = h.y; t.yaw = h.yaw; t.w = gp.w; t.h = gp.d; t.z0 = gp.z0; t.z1 = gp.z1;
 
-    const detail::Obstacles ob = detail::build_obstacles(world);
+    const detail::Obstacles ob = detail::build_obstacles(world, card, &t);
     const auto& walls = ob.walls; const auto& objs = ob.objs; const auto& all = ob.all;
 
     if (nbv::stands_inside(from, objs))
@@ -553,6 +649,15 @@ inline ChannelResult evaluate_lidar(const Card& card, const World& world, const 
     const auto best = std::ranges::max_element(gains, {}, &std::pair<float, Limit>::first);
     out.limit = best->first > 0.0f ? best->second : Limit::None;
     out.limit_gain = best->first > 0.0f ? best->first : 0.0f;
+    // No single removal helps when TWO factors each zero P on their own: a target beyond the far limit (or in the dead
+    // zone) that no ring crosses either -- fixing the rings leaves the range at 0, fixing the range leaves no returns.
+    // Leave-two-out then: name the pair's range side, the one that holds whatever the height (a ring crossing could be
+    // bought by a different target height at this distance, the range could not).
+    if (out.limit == Limit::None)
+    {
+        const float both = p_of(detail::lidar_lambda(g, v_all, true), 1.0f) - out.p;
+        if (both > 0.0f) { out.limit = (g.r < g.rmin or g.r > g.rmax) ? range_label : ring_label; out.limit_gain = both; }
+    }
 
     if (v_no_obj - v_all > 0.0f)
         out.occluder = detail::name_occluder(world, t, from, g.bearing, sight, v_all, ob);
@@ -560,8 +665,8 @@ inline ChannelResult evaluate_lidar(const Card& card, const World& world, const 
 }
 
 // ── combining the channels (spec §5) ─────────────────────────────────────────────────────────────────────────
-// Independent looks: P = 1 - prod(1 - p_c). Notice = the channels that can say "something is there" (Occupancy or
-// Both); recognise = the ones that can say "it is THIS" (Identity or Both). A NotModelled channel is not a zero
+// Independent looks: P = 1 - prod(1 - p_c). Notice = ANY channel says "something is there" (an identifying look also
+// notices); recognise = the ones that can say "it is THIS" (Identity or Both). A NotModelled channel is not a zero
 // look, it is no look: it is left out of both products.
 inline Result evaluate(const Card& card, const World& world, const Hypothesis& h, const Viewpoint& vp)
 {
@@ -569,7 +674,7 @@ inline Result evaluate(const Card& card, const World& world, const Hypothesis& h
     Result out;
 
     // Feasibility first: an impossible viewpoint or target gets P = 0 whatever the sensors would say.
-    const detail::Obstacles ob = detail::build_obstacles(world);
+    const detail::Obstacles ob = detail::build_obstacles(world, card);   // every wall: "is the target inside one?"
     const auto zero = [&](std::string occluder, std::string note)
     {
         out.p_notice = out.p_recognise = 0.0f;
@@ -583,6 +688,10 @@ inline Result evaluate(const Card& card, const World& world, const Hypothesis& h
         if (nbv::stands_inside(vp.xy, std::span<const nbv::Obstacle>(&o, 1))) return zero(name, "viewpoint inside " + name);
     if (nbv::stands_inside({h.x, h.y}, ob.walls)) return zero("wall", "target inside a wall");
 
+    // Recognising implies noticing: P(notice) is the noisy-OR over EVERY counted channel (the union of the Occupancy,
+    // Identity and Both ones, each once), so P(notice) >= P(recognise) by construction. Without any Both channel it is
+    // exactly 1 - (1 - p_occ)(1 - p_rec) with p_occ, p_rec the noisy-ORs over Occupancy and Identity; a Both channel
+    // enters once, not twice (it is one look).
     float miss_notice = 1.0f, miss_recognise = 1.0f, best_id = -1.0f;
     for (const Channel& c : card.channels)
     {
@@ -597,7 +706,7 @@ inline Result evaluate(const Card& card, const World& world, const Hypothesis& h
         if (counts)
         {
             const float p = std::clamp(r.p, 0.0f, 1.0f);
-            if (c.role == Role::Occupancy or c.role == Role::Both) miss_notice *= 1.0f - p;
+            miss_notice *= 1.0f - p;
             if (c.role == Role::Identity or c.role == Role::Both)
             {
                 miss_recognise *= 1.0f - p;
@@ -634,7 +743,7 @@ inline std::vector<Stand> where_to_stand(const Card& card, const World& world, c
     if (world.zed_mount_z > 1e-3f) sensor.height_m = world.zed_mount_z;
     const float floor_m = kRobotRadiusM + 0.5f * std::max(g.w, g.d);
 
-    const detail::Obstacles ob = detail::build_obstacles(world);
+    const detail::Obstacles ob = detail::build_obstacles(world, card);
     std::vector<Stand> stands;
     for (int i = 0; i < kBearings; ++i)
     {

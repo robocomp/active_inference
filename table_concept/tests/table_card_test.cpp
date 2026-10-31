@@ -41,6 +41,8 @@ int main(int argc, char**)
     CHECK(c.instance_terms == (std::vector<std::string>{"p_clear", "blind_spot_map"}) and near(c.instance_prior.at("p_clear"), 1.0f));
     CHECK(near(c.geometry.w, 1.0f) and near(c.geometry.d, 0.6f) and near(c.geometry.h, 0.75f));   // TableState defaults
     CHECK(c.calibration == "prior" and c.blind_spot_map_path.empty());
+    CHECK(c.walls and near(c.walls->own_wall_skip_m, rc::occlusion::kOwnWallSkipM) and near(c.walls->own_wall_skip_m, 0.15f));
+    CHECK(c.walls and c.walls->own_wall_plane_m < 0.0f and near(c.walls->wall_thickness_m, 0.0f));
     { // existence_absence_envelope = false: the terms the agent then runs (config ref/power, in_fov, central), no envelope
         TableConfig f = cfg;  f.existence_absence_envelope = false;
         f.existence_absence_range_ref_m = toml_peek(toml, "ExistenceAbsenceRangeRefM", f.existence_absence_range_ref_m);

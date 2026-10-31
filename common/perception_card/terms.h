@@ -115,8 +115,9 @@ struct TermInputs
 };
 
 // Dispatch by name. Parameters come from spec.params: envelope {min_fill,max_fill,soft}; range_conf {ref_m,power}.
-// A parameter that is absent takes the DetectorEnvelope default / disables range_conf. motion is Task 3's: until
-// then it (and any unknown name) is neutral, 1.
+// A parameter that is absent takes the DetectorEnvelope default / disables range_conf. Every name returns a factor in
+// [0, 1] EXCEPT motion, which returns the position spread sigma in METRES (the evaluator marginalises over it, it does
+// not multiply it in). A name outside kTermNames aborts.
 inline float eval_term(const TermSpec& s, const TermInputs& in)
 {
     const auto p = [&](const char* k, float d) { const auto it = s.params.find(k); return it != s.params.end() ? it->second : d; };

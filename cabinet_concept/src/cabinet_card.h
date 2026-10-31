@@ -21,6 +21,8 @@ inline card::Card make_card(const CabinetConfig& cfg)
                   {"helios", card::Role::Occupancy, true}};
     const CabinetState tpl{};
     c.geometry = {tpl.L, tpl.d, tpl.z1 - tpl.z0, tpl.z0, tpl.z1};
+    // Level 1: cabinet_projection.cpp's walls_block(cam, sample, polygon, kCabinetOwnWallSkipM): LINE walls, own-wall radius 0.70 m.
+    c.walls = card::WallOcclusion{kCabinetOwnWallSkipM, -1.0f, 0.0f};
     card::SubtypeParams sp;   // no detector envelope: the removal path runs the one-sided range confidence instead
     sp.q_return = cfg.existence_detection_prob;
     // cabinet_existence.cpp:128: p_detect = absence_range_conf(mean_range) * in_fov_frac * central_frac. Deliberately NOT

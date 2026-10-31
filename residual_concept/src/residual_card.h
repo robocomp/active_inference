@@ -32,6 +32,10 @@ inline card::Card make_card(const ResidualConfig& cfg, float cell_size_m = 0.05f
     // A mass has no natural size. Footprint = one grid cell (the unit residual reasons in); z = the nav band the grid
     // marks hits in: Clusterer.FloorZ0 .. Clusterer.CeilZ (floor returns below it, ceiling above it are not residual).
     c.geometry = {cell_size_m, cell_size_m, cfg.cluster.ceil_z - cfg.cluster.floor_z0, cfg.cluster.floor_z0, cfg.cluster.ceil_z};
+    // Level 1: residual has NO wall line-of-sight test of its own: its grid is fed by real beams, which the physical
+    // walls stop. So: walls as lines (where the beams stop), no own-wall skip. (Returns within the wall margin of the
+    // polygon are DROPPED, which is a blind spot, not an occlusion: see blind_spots.)
+    c.walls = card::WallOcclusion{0.0f, -1.0f, 0.0f};
     card::SubtypeParams sp;
     // q_return stays at the default 1.0: UNCALIBRATED. residual has CarveParams detection/clutter rates, but those
     // are the old carve's per-box rates (and the grid's inverse-sensor model), not a measured per-beam return probability.
@@ -40,7 +44,8 @@ inline card::Card make_card(const ResidualConfig& cfg, float cell_size_m = 0.05f
     c.blind_spots = {
         "A mass has no identity and no size prior: the card gives only how much of a region the sensors can see (coverage).",
         "Nothing thinner than the beam spacing can hide between rings; the nav band excludes returns below Clusterer.FloorZ0 and above Clusterer.CeilZ.",
-        "q_return is uncalibrated (1.0); no per-beam return probability is measured for residual."};
+        "q_return is uncalibrated (1.0); no per-beam return probability is measured for residual.",
+        "Returns within Clusterer.WallMarginM of the room polygon are dropped as wall: anything standing against a wall is invisible to it."};
     c.calibration = "prior";
     return c;
 }

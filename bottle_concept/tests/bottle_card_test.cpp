@@ -35,6 +35,8 @@ int main(int argc, char**)
     CHECK(p.terms.size() == 1 and p.terms[0].name == "envelope" and near(p.terms[0].params.at("axes"), 2.0f));
     CHECK(near(c.geometry.w, 0.062f) and near(c.geometry.h, 0.20f) and near(c.geometry.z1, 0.20f));
     CHECK(c.calibration == "prior");
+    CHECK(c.walls and near(c.walls->own_wall_skip_m, 0.0f) and c.walls->own_wall_plane_m < 0.0f);
+    CHECK(c.walls and near(c.walls->wall_thickness_m, kBottleWallThicknessM) and near(kBottleWallThicknessM, 0.10f));
     const auto back = card::card_from_json(card::to_json(c));
     CHECK(back.has_value() and card::to_json(*back) == card::to_json(c));
     std::printf(bad ? "bottle_card_test: %d FAILED\n" : "bottle_card_test: OK\n", bad);

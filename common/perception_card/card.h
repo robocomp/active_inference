@@ -16,6 +16,7 @@
 #include <cmath>
 #include <expected>
 #include <map>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -45,6 +46,22 @@ struct SubtypeParams
 
 struct GeometryPrior { float w = 0, d = 0, h = 0, z0 = 0, z1 = 0; };
 
+// Level 1 (spec §3): how the agent's own line-of-sight test treats the ROOM WALLS, as the agent actually runs it.
+//   own_wall_skip_m   a wall segment closer than this to the object never occludes it (rc::occlusion::walls_block's
+//                     radius form: the object's OWN wall). 0 = no radius skip.
+//   own_wall_plane_m  >= 0: the own wall is given by PLANE instead (walls_block's explicit-edge form, door_concept): a
+//                     polygon edge whose two ends both lie within +-own_wall_plane_m of the object's face plane (the
+//                     plane through its centre, normal = its local y axis) is its own wall; every other wall occludes
+//                     however close it passes. < 0 = not used.
+//   wall_thickness_m  the depth of the wall boxes the agent tests against. 0 = a LINE (walls_block tests polygon
+//                     edges as lines); the evaluator represents a line as a 1 mm box, as door_look.h does.
+struct WallOcclusion
+{
+    float own_wall_skip_m  = 0.0f;
+    float own_wall_plane_m = -1.0f;
+    float wall_thickness_m = 0.0f;
+};
+
 struct Card
 {
     int version = 1;
@@ -52,6 +69,7 @@ struct Card
     Level level = Level::Countable;
     std::vector<Channel> channels;
     GeometryPrior geometry;
+    std::optional<WallOcclusion> walls;               // level 1; nullopt = the card does not declare it (old card)
     std::map<std::string, SubtypeParams> subtypes;   // key "" = default
     std::vector<std::string> instance_terms;          // names from kInstanceTermNames (per-INSTANCE state, not hypothesis terms)
     std::map<std::string, float> instance_prior;       // value a hypothesis (no instance history) takes for an instance term: "p_clear"
@@ -148,6 +166,12 @@ inline std::string to_json(const Card& c)
     }
     kvf("geom.w", c.geometry.w); kvf("geom.d", c.geometry.d); kvf("geom.h", c.geometry.h);
     kvf("geom.z0", c.geometry.z0); kvf("geom.z1", c.geometry.z1);
+    if (c.walls)
+    {
+        kvf("wall.own_skip_m", c.walls->own_wall_skip_m);
+        kvf("wall.own_plane_m", c.walls->own_wall_plane_m);
+        kvf("wall.thickness_m", c.walls->wall_thickness_m);
+    }
     kv("subtypes", std::to_string(c.subtypes.size()));
     std::size_t si = 0;
     for (const auto& [name, sp] : c.subtypes)
@@ -234,6 +258,22 @@ inline std::expected<Card, std::string> card_from_json(std::string_view json)
         const auto f = num(key);
         if (not f) return Err("card: " + f.error());
         *dst = *f;
+    }
+
+    // Level 1: optional as a block (a card written before it existed still loads, as "not declared"); once
+    // "wall.own_skip_m" is present the other two must be too.
+    if (str("wall.own_skip_m"))
+    {
+        WallOcclusion wo;
+        for (const auto& [key, dst] : std::initializer_list<std::pair<const char*, float*>>{
+                 {"wall.own_skip_m", &wo.own_wall_skip_m}, {"wall.own_plane_m", &wo.own_wall_plane_m},
+                 {"wall.thickness_m", &wo.wall_thickness_m}})
+        {
+            const auto f = num(key);
+            if (not f) return Err("card: " + f.error());
+            *dst = *f;
+        }
+        c.walls = wo;
     }
 
     const auto nst = cnt("subtypes");

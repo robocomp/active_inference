@@ -15,6 +15,11 @@ class ConfigLoader;   // RoboComp config façade (defined in genericworker.h)
 
 namespace rc {
 
+// Half-width of the depth band about a door's plane inside which a polygon edge counts as the door's OWN wall
+// (door_wall_edges, called with DoorBelief::FieldNuisance depth_lo/hi = -/+0.20 m; door_card_test pins the two equal).
+// Read by the perception card's level-1 settings.
+inline constexpr float kDoorOwnWallPlaneM = 0.20f;
+
 
 // ─── the three PRAGMATIC door affordances: approach / open / cross ────────────────────────────────
 // The tunables, all PHYSICAL: a body width, a reach, two stand-offs, plus the OFFER POLICY (the one

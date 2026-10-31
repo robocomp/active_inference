@@ -38,6 +38,8 @@ int main(int argc, char**)
     CHECK(near(c.geometry.w, 0.90f) and near(c.geometry.d, 0.50f) and near(c.geometry.h, 0.50f));
     CHECK(near(c.geometry.z0, 1.55f) and near(c.geometry.z1, 2.05f));
     CHECK(c.calibration == "prior");
+    CHECK(c.walls and near(c.walls->own_wall_skip_m, kHoodOwnWallSkipM) and near(kHoodOwnWallSkipM, 0.70f));
+    CHECK(c.walls and c.walls->own_wall_plane_m < 0.0f and near(c.walls->wall_thickness_m, 0.0f));
     const auto back = card::card_from_json(card::to_json(c));
     CHECK(back.has_value() and card::to_json(*back) == card::to_json(c));
     std::printf(bad ? "hood_card_test: %d FAILED\n" : "hood_card_test: OK\n", bad);

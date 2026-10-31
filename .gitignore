@@ -101,3 +101,7 @@ retina/etc/zed_frames
 retina/etc/view_atlas_dataset
 retina/models/dinov3
 .superpowers/
+
+# perception cards written by each agent at startup (card_io.h write_card_file), and its atomic-write temp file
+*/etc/perception_card.json
+*/etc/perception_card.json.tmp

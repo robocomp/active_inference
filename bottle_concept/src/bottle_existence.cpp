@@ -124,7 +124,7 @@ void BottleExistence::update_and_remove(BottleFitter& fitter, const Inputs& in,
                                                      cfg_.existence_occluder_heights);
         if (in.room_polygon != nullptr and in.room_polygon->size() >= 3)
         {
-            const auto walls = rc::nbv::wall_obstacles(std::span<const Eigen::Vector2f>(*in.room_polygon), 0.10f);
+            const auto walls = rc::nbv::wall_obstacles(std::span<const Eigen::Vector2f>(*in.room_polygon), kBottleWallThicknessM);
             obstacles.insert(obstacles.end(), walls.begin(), walls.end());
         }
     }

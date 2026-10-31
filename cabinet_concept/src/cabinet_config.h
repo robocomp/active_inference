@@ -14,6 +14,11 @@ class ConfigLoader;   // RoboComp config façade (defined in genericworker.h)
 
 namespace rc {
 
+// Own-wall skip of this agent's wall line-of-sight test (rc::occlusion::walls_block radius form, cabinet_projection.cpp):
+// a wall segment closer than this to a silhouette sample never occludes it -- a cabinet run has real depth off the wall face (deeper than table's 0.15 m).
+// A code constant, not a config key; it lives here so the projection and the perception card read ONE definition.
+inline constexpr float kCabinetOwnWallSkipM = 0.70f;
+
 struct CabinetConfig
 {
     // ── Agent convergence & cadence ───────────────────────────────────────────────────────────────

@@ -19,6 +19,20 @@ static Card fridge()
     c.subtypes[""] = d;
     return c;
 }
+// The refrigerator agent's card as refrigerator_card.h builds it from etc/config.toml (refrigerator_card_test pins
+// those numbers): 0.60 x 0.60 x 1.90 m, envelope 0.0/1.32/0.26 single-fill (axes 1) x central, q_return 0.85, and
+// level 1 = refrigerator_projection.cpp's own-wall skip 0.70 m against walls_block's LINE walls.
+static Card real_fridge()
+{
+    Card c; c.concept_ = "refrigerator"; c.graph_type = "object"; c.level = Level::Countable;
+    c.channels = {{"zed", Role::Identity, true}, {"helios", Role::Occupancy, true}, {"ricoh", Role::Identity, false}};
+    c.geometry = {0.60f, 0.60f, 1.90f, 0.0f, 1.90f};
+    c.walls = WallOcclusion{0.70f, -1.0f, 0.0f};
+    SubtypeParams d; d.env = {0.0f, 1.32f, 0.26f}; d.q_return = 0.85f;
+    d.terms = {{"envelope", {{"min_fill", 0.0f}, {"max_fill", 1.32f}, {"soft", 0.26f}, {"axes", 1.0f}}}, {"central", {}}};
+    c.subtypes[""] = d;
+    return c;
+}
 // SYNTHETIC: not a real card. A high-envelope fridge (MinFill 0.02, Soft 0.05) whose clear view reaches ~0.96, so the
 // absolute 'recognised' level (> 0.8) can be exercised; the real envelope caps a clear view near 0.57.
 static Card synthetic_high_envelope()
@@ -65,10 +79,72 @@ int main()
         CHECK(r.p_notice > 0.9f and r.p_recognise < 0.5f * r.p_notice);
         CHECK(r.limit == Limit::Occluded and r.occluder == "low_box" and r.limit_gain > 0.0f);
     }
-    { // NotModelled channels are left out of both products
+    { // I3, a ZED-only look: NotModelled channels are left out of both products, and the identifying ZED look also
+      // NOTICES (recognising implies noticing), so with no Occupancy channel P(notice) = P(recognise), not 0.
         World w = room(); w.helios.reset();
         const auto r = evaluate(c, w, at(5.0f, 2.0f), {{2.0f, 2.0f}, std::nullopt});
-        CHECK(r.p_notice == 0.0f and r.p_recognise > 0.0f);
+        std::printf("I3 zed-only: notice=%.3f recognise=%.3f\n", r.p_notice, r.p_recognise);
+        CHECK(r.p_recognise > 0.0f and r.p_notice >= r.p_recognise and std::abs(r.p_notice - r.p_recognise) < 1e-6f);
+        // both channels: p_notice = 1 - (1 - p_occ)(1 - p_rec), and >= p_recognise
+        const auto b = evaluate(c, room(), at(5.0f, 2.0f), {{2.0f, 2.0f}, std::nullopt});
+        float p_occ = 0, p_rec = 0;
+        for (const auto& ch : b.channels) (ch.sensor == "zed" ? p_rec : p_occ) = ch.p;
+        CHECK(std::abs(b.p_notice - (1.0f - (1.0f - p_occ) * (1.0f - p_rec))) < 1e-6f and b.p_notice >= b.p_recognise);
+        // an occluded fridge with the real card too
+        World wo = room(); wo.helios.reset();
+        wo.obstacles.push_back({"box_1", rc::nbv::Obstacle{3.5f, 2.0f, 1.0f, 1.0f, 0.0f, 0.0f, 1.2f}});
+        const auto ro = evaluate(real_fridge(), wo, at(5.0f, 2.0f), {{2.0f, 2.0f}, std::nullopt});
+        CHECK(ro.p_notice >= ro.p_recognise);
+    }
+    { // I4: own-wall occlusion, the REAL fridge card. Back 0.35 m from the x = 6 wall (centre 6 - 0.35 - 0.30 = 5.35),
+      // seen from a 3.15 m stand-off. P must be the same with that wall and with it moved 3 m away.
+        const Card rf = real_fridge();
+        const Hypothesis h = at(5.35f, 2.0f);
+        const Viewpoint vp{{5.35f - 3.15f, 2.0f}, std::nullopt};
+        World far = room(); far.polygon = {{0, 0}, {9, 0}, {9, 4}, {0, 4}};
+        const auto rw = evaluate(rf, room(), h, vp), rn = evaluate(rf, far, h, vp);
+        std::printf("I4 back 0.35 m: with wall rec=%.4f notice=%.4f limit=%d | wall far rec=%.4f notice=%.4f\n",
+                    rw.p_recognise, rw.p_notice, int(rw.limit), rn.p_recognise, rn.p_notice);
+        CHECK(std::abs(rw.p_recognise - rn.p_recognise) < 1e-6f and std::abs(rw.p_notice - rn.p_notice) < 1e-6f);
+        CHECK(rw.limit != Limit::BehindWall);
+        for (const auto& ch : rw.channels) CHECK(ch.limit != Limit::BehindWall);
+        // The case the skip exists for: the estimated wall line cuts the carcass (x = 5.5, 0.15 m in front of the back
+        // face). Behind the 0.70 m skip it is the fridge's OWN wall and hides nothing; an undeclared card (the old
+        // evaluator: 0.12 m boxes, no skip) reads the back half as behind a wall.
+        World cut = room(); cut.polygon = {{0, 0}, {5.5f, 0}, {5.5f, 4}, {0, 4}};
+        const auto rc_ = evaluate(rf, cut, h, vp);
+        std::printf("I4 wall through the carcass: rec=%.4f notice=%.4f limit=%d\n", rc_.p_recognise, rc_.p_notice, int(rc_.limit));
+        CHECK(std::abs(rc_.p_recognise - rn.p_recognise) < 1e-6f and std::abs(rc_.p_notice - rn.p_notice) < 1e-6f);
+        CHECK(rc_.limit != Limit::BehindWall);
+        Card legacy = rf; legacy.walls.reset();
+        const auto rl = evaluate(legacy, cut, h, vp);
+        std::printf("I4 same, no level-1 settings: rec=%.4f notice=%.4f limit=%d\n", rl.p_recognise, rl.p_notice, int(rl.limit));
+        CHECK(rl.p_recognise < rn.p_recognise - 0.1f);
+        CHECK(std::ranges::any_of(rl.channels, [](const ChannelResult& ch) { return ch.limit == Limit::BehindWall; }));
+        // A wall that is NOT its own still hides it: a partition between the robot and the fridge.
+        World part = room(); part.polygon = {{0, 0}, {6, 0}, {6, 4}, {3.5f, 4}, {3.5f, 0.5f}, {3.4f, 0.5f}, {3.4f, 4}, {0, 4}};
+        const auto rp = evaluate(rf, part, h, {{2.2f, 3.0f}, std::nullopt});
+        std::printf("I4 behind a partition: rec=%.4f limit=%d\n", rp.p_recognise, int(rp.limit));
+        CHECK(rp.p_recognise < 0.05f and rp.limit == Limit::BehindWall);
+        // the card's thickness is used: the same polygon as 1 mm lines vs 0.12 m boxes lands on the card's own walls
+        CHECK(detail::wall_thickness_for(rf) == detail::kLineWallM and detail::wall_thickness_for(legacy) == 0.12f);
+    }
+    { // central from the projected offset when the heading is GIVEN: 20 deg off the optical axis, the factor is
+      // 1 - tan(20 deg) / tan(hfov / 2), exactly (compare against the same card without the central term)
+        const Card rf = real_fridge();
+        Card nc = rf; nc.subtypes[""].terms.pop_back();
+        const Hypothesis h = at(5.0f, 2.0f);
+        const float yaw = -20.0f * std::numbers::pi_v<float> / 180.0f;   // target bearing 0 from (2, 2)
+        const Viewpoint off{{2.0f, 2.0f}, yaw};
+        World w = room(); w.helios.reset();
+        const float pc = evaluate(rf, w, h, off).p_recognise, pn = evaluate(nc, w, h, off).p_recognise;
+        const float expect = 1.0f - std::tan(20.0f * std::numbers::pi_v<float> / 180.0f) / (640.0f / 448.0f);
+        std::printf("central: with %.4f without %.4f ratio %.4f expect %.4f\n", pc, pn, pc / pn, expect);
+        CHECK(pn > 0.0f and std::abs(pc / pn - expect) < 1e-3f);
+        // best heading: central is 1, the two cards agree
+        const float bc = evaluate(rf, w, h, {{2.0f, 2.0f}, std::nullopt}).p_recognise;
+        const float bn = evaluate(nc, w, h, {{2.0f, 2.0f}, std::nullopt}).p_recognise;
+        CHECK(std::abs(bc - bn) < 1e-6f);
     }
     { // (b) viewpoint inside the box
         World w = room();
@@ -100,6 +176,17 @@ int main()
         {
             const float p_clear = evaluate(c, room(), h, {st.front().xy, st.front().yaw}).p_recognise;   // same stand, no box
             std::printf("c: p_clear=%.3f best_stand=%.3f occluded_view=%.3f\n", p_clear, st.front().r.p_recognise, p_occ);
+            // The REAL fridge card's clear-view ceiling (R6), with its own-wall settings and without them.
+            const Card rf = real_fridge();
+            Card rl = rf; rl.walls.reset();
+            const auto st_r = where_to_stand(rf, w, h);
+            if (not st_r.empty())
+            {
+                const Viewpoint v{st_r.front().xy, st_r.front().yaw};
+                std::printf("c(real card): p_clear=%.3f (no level-1: %.3f) best_stand=%.3f occluded_view=%.3f\n",
+                            evaluate(rf, room(), h, v).p_recognise, evaluate(rl, room(), h, v).p_recognise,
+                            st_r.front().r.p_recognise, evaluate(rf, w, h, occluded).p_recognise);
+            }
             CHECK(st.front().r.p_recognise >= 0.95f * p_clear);
             CHECK(st.front().r.p_recognise > p_occ);
             const Eigen::Vector2f s = st.front().xy;

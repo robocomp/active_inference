@@ -7,6 +7,7 @@
 #include "table_config.h"
 #include "table_model.h"   // TableState: the class template (w, h, table_height)
 #include "../../common/perception_card/card.h"
+#include "../../common/occlusion/occlusion.h"   // rc::occlusion::kOwnWallSkipM (the skip table_projection.cpp passes)
 
 namespace rc
 {
@@ -24,6 +25,8 @@ inline card::Card make_card(const TableConfig& cfg, std::size_t bsm_samples = 0)
     // Class template of table_model.h's TableState (the manifest sizes are mean-less, std 0.30); floor-anchored [0, H].
     const TableState tpl{};
     c.geometry = {tpl.w, tpl.h, tpl.table_height, 0.0f, tpl.table_height};
+    // Level 1: table_projection.cpp's walls_block(cam, sample, polygon, rc::occlusion::kOwnWallSkipM): LINE walls, 0.15 m.
+    c.walls = card::WallOcclusion{rc::occlusion::kOwnWallSkipM, -1.0f, 0.0f};
     card::SubtypeParams sp;
     sp.env = {cfg.detect_min_fill, cfg.detect_max_fill, cfg.detect_soft};
     sp.q_return = cfg.existence_detection_prob;

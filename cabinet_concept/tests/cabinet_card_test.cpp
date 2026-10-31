@@ -32,6 +32,8 @@ int main(int argc, char**)
     CHECK(near(c.geometry.w, 1.0f) and near(c.geometry.d, 0.6f) and near(c.geometry.h, 0.9f));
     CHECK(near(c.geometry.z0, 0.0f) and near(c.geometry.z1, 0.9f));
     CHECK(c.instance_terms.empty() and c.calibration == "prior" and c.blind_spot_map_path.empty());
+    CHECK(c.walls and near(c.walls->own_wall_skip_m, kCabinetOwnWallSkipM) and near(kCabinetOwnWallSkipM, 0.70f));
+    CHECK(c.walls and c.walls->own_wall_plane_m < 0.0f and near(c.walls->wall_thickness_m, 0.0f));
     const auto back = card::card_from_json(card::to_json(c));
     CHECK(back.has_value() and card::to_json(*back) == card::to_json(c));
     std::printf(bad ? "cabinet_card_test: %d FAILED\n" : "cabinet_card_test: OK\n", bad);

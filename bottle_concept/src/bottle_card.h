@@ -21,6 +21,9 @@ inline card::Card make_card(const BottleConfig& cfg)
                   {"ricoh", card::Role::Identity, false}};
     // Cylinder: width = depth = 2 r, span [0, h] relative to the instance's resolved support (floor or a table).
     c.geometry = {2.0f * cfg.prior_radius, 2.0f * cfg.prior_radius, cfg.prior_height, 0.0f, cfg.prior_height};
+    // Level 1: bottle_existence.cpp adds rc::nbv::wall_obstacles(polygon, 0.10) to the occluders: 0.10 m boxes, and no
+    // own-wall rule at all (a bottle stands on a support, never in a wall).
+    c.walls = card::WallOcclusion{0.0f, -1.0f, kBottleWallThicknessM};
     // bottle_existence.cpp:219-224: rc::nbv::expected_p_detect(fill_max, fill_min, f_sig, visible, env) -- the
     // two-axis envelope with the visible fraction, marginalised over the belief's own fill sigma (that
     // marginalisation is the evaluator's job, not a card term).
