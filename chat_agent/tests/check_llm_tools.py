@@ -473,7 +473,7 @@ CASES = [
      lambda n, a, c: n == "imagine_view" and re.search("chair|silla", str(a.get("concept", "")).lower()) is not None
      and re.search("wall|pared", str(a.get("where", "")).lower()) is not None),
     ("imagine_view NOT: can you see the chair", [], "none", "can you see the chair?",
-     lambda n, a, c: n != "imagine_view"),
+     lambda n, a, c: n == "can_see" or n is None),
     ("imagine_view NOT: draw the graph", [], "none", "draw the graph",
      lambda n, a, c: n == "draw" or n == "show"),
     # long-term memory (ltsm_topology): rooms the robot remembers and the route to one

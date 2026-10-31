@@ -36,6 +36,7 @@ namespace rc::chat
 inline constexpr int kMcSamples = 32;      ///< draws behind a P(detect) mean ± sd
 inline constexpr int kDisplaySamples = 8;  ///< default samples drawn on the canvas
 inline constexpr int kMaxDisplaySamples = 16;
+inline constexpr std::uint64_t kHypotheticalSeed = 1;   ///< can_see is a question, not a picture: a fixed seed, so the same question gets the same answer
 
 struct ImagineRequest
 {
@@ -92,26 +93,39 @@ struct ImaginePlace
     return std::unexpected("ASK: which place do you mean? Name a door or an object, or say against the wall.");
 }
 
-/// A hypothetical target: the concept has no instance in the room and `where` names a door or an object.
+/// A hypothetical target: no instance of the concept exists and `where` names a door, or an object of a KNOWN, different
+/// class. False whenever `where` names an object whose class is empty or the concept's own (the old can_see path keeps
+/// resolving named instances), and false while an instance of the concept exists (the old path then evaluates the named
+/// instance by its own class).
 [[nodiscard]] inline bool is_hypothetical(const SeeScene& s, const std::string& what, const std::string& where)
 {
     if (what.empty() or where.empty()) return false;
     const std::string cls = canonical_concept(what), w = lower_ascii(where);
     for (const auto& o : s.objects)
         if (canonical_concept(o.subtype) == cls or lower_ascii(o.name) == cls) return false;
-    return std::ranges::any_of(s.doors, [&](const SeeDoor& d) { return lower_ascii(d.name) == w; }) or
-           std::ranges::any_of(s.objects, [&](const SeeObject& o) { return lower_ascii(o.name) == w; });
+    if (std::ranges::any_of(s.doors, [&](const SeeDoor& d) { return lower_ascii(d.name) == w; })) return true;
+    return std::ranges::any_of(s.objects, [&](const SeeObject& o)
+                               { return lower_ascii(o.name) == w and not o.subtype.empty(); });
+}
+
+/// Does the place lie inside the instance's own oriented footprint (its w, d, yaw; the card's geometry when unpublished)?
+[[nodiscard]] inline bool footprint_contains(const SeeObject& o, const rc::card::Card& card, const Eigen::Vector2f& p)
+{
+    const float w = o.w.value_or(card.geometry.w), d = o.d.value_or(card.geometry.d);
+    const Eigen::Vector2f r = p - Eigen::Vector2f(o.x, o.y);
+    const float c = std::cos(o.yaw), sn = std::sin(o.yaw);
+    return std::abs(c * r.x() + sn * r.y()) <= 0.5f * w and std::abs(-sn * r.x() + c * r.y()) <= 0.5f * d;
 }
 
 /// The World the sampler and the renderers share: the scene without the instances in `exclude` (plus, for a fixed
-/// place, any same-class instance whose centre lies within 0.3 m of it: the same thing seen twice).
-[[nodiscard]] inline rc::card::World imagine_world(const SeeScene& s, const std::string& cls, const ImaginePlace& pl,
-                                                   std::vector<std::string>& excluded)
+/// place, any same-class instance whose own footprint contains it: the same thing seen twice).
+[[nodiscard]] inline rc::card::World imagine_world(const SeeScene& s, const rc::card::Card& card, const std::string& cls,
+                                                   const ImaginePlace& pl, std::vector<std::string>& excluded)
 {
     excluded = pl.exclude;
     if (pl.ctx.at)
         for (const auto& o : s.objects)
-            if (canonical_concept(o.subtype) == cls and (Eigen::Vector2f(o.x, o.y) - *pl.ctx.at).norm() < 0.3f and
+            if (canonical_concept(o.subtype) == cls and footprint_contains(o, card, *pl.ctx.at) and
                 std::ranges::find(excluded, o.name) == excluded.end())
                 excluded.push_back(o.name);
     SeeScene t = s;
@@ -226,7 +240,8 @@ struct ImagineFacts
 /// The answer to can_see for a concept with no instance, placed at a named place: Monte-Carlo over the card's size prior.
 [[nodiscard]] inline std::string answer_can_see_hypothetical(const rc::card::Card& card, const std::string& cls,
                                                              const std::string& place_words, const std::string& from_label,
-                                                             const rc::card::McResult& mc, bool room_height_known, float room_height)
+                                                             const rc::card::McResult& mc, bool room_height_known, float room_height,
+                                                             std::uint64_t seed = 1)
 {
     using namespace see_detail;
     const std::string at = from_label.empty() ? "from here" : "from " + from_label;
@@ -240,7 +255,7 @@ struct ImagineFacts
     if (mc.modal_limit != rc::card::Limit::None)
         out += std::format(" What most often limits it: {}.", limit_words(mc.modal_limit, ""));
     if (not room_height_known) out += std::format(" Room height {:.1f} m assumed.", room_height);
-    out += std::format(" (Mean over {} draws of the {} size prior.)", mc.n, cls);
+    out += std::format(" (n={} size samples from the {} prior; seed {}.)", mc.n, cls, seed);
     out += calibration_note(card);
     return out;
 }
@@ -255,12 +270,12 @@ struct ImagineFacts
     const auto vp = resolve_from(s, from);
     if (not vp.has_value()) return vp.error();
     std::vector<std::string> excluded;
-    const auto world = imagine_world(s, cls, *place, excluded);
+    const auto world = imagine_world(s, card, cls, *place, excluded);
     rc::card::Hypothesis base;
     base.concept_ = cls;
     base.x = place->ctx.at->x(); base.y = place->ctx.at->y(); base.yaw = 0.0f;
-    const auto mc = rc::card::evaluate_mc(card, world, base, *vp, kMcSamples, 1);
-    return answer_can_see_hypothetical(card, cls, place->words, from, mc, s.room_height_known, s.room_height);
+    const auto mc = rc::card::evaluate_mc(card, world, base, *vp, kMcSamples, kHypotheticalSeed);
+    return answer_can_see_hypothetical(card, cls, place->words, from, mc, s.room_height_known, s.room_height, kHypotheticalSeed);
 }
 
 struct ImagineOutcome
@@ -293,7 +308,7 @@ struct ImagineOutcome
     f.cls = cls; f.place_words = place->words; f.from_label = rq.from;
     f.room_height_known = s.room_height_known; f.room_height = s.room_height;
     f.seed = seed; f.calibration = card.calibration; f.sensor = sensor;
-    const auto world = imagine_world(s, cls, *place, f.excluded);
+    const auto world = imagine_world(s, card, cls, *place, f.excluded);
 
     // one draw behind both the canvas (its first n) and the P(detect)
     auto set = rc::card::sample_concept(card, world, place->ctx, std::max(n, kMcSamples), seed);
@@ -331,7 +346,7 @@ struct ImagineOutcome
 
     out.caption = std::format("{} imagined {} {}: P(notice) {}, P(recognise) {}", f.shown, f.shown == 1 ? cls : see_detail::plural(cls),
                               place->words, pm(mc.p_notice_mean, mc.p_notice_sd), pm(mc.p_recognise_mean, mc.p_recognise_sd));
-    out.drawn = write_imagined(run_dir, set, images, scans, mc, out.caption);
+    out.drawn = write_imagined(run_dir, set, images, scans, mc, out.caption, {"helios", "bpearl"});
     if (not out.drawn) out.text += " (I could not write the picture's data.)";
     return out;
 }

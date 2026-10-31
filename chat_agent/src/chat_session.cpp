@@ -1148,13 +1148,36 @@ QString ChatSession::do_imagine_view(const QJsonObject& args)
     rq.where = args.value("where").toString().trimmed().toStdString();
     rq.from = args.value("from").toString().trimmed().toStdString();
     if (const auto sn = args.value("sensor").toString().trimmed().toLower().toStdString(); sn == "zed" or sn == "lidar") rq.sensor = sn;
-    if (args.value("n").isDouble()) rq.n = args.value("n").toInt(rq.n);
+    std::vector<std::string> notes;   // arguments I could not use as given: said in the answer, never silently replaced
+    if (args.contains("n") and not args.value("n").isNull())
+    {
+        const double nv = args.value("n").isDouble() ? args.value("n").toDouble() : -1.0;
+        if (nv >= 1 and nv == std::floor(nv)) rq.n = static_cast<int>(std::min<double>(nv, rc::chat::kMaxDisplaySamples));
+        else notes.push_back(std::format("n must be a whole number from 1 to {}; I drew {}", rc::chat::kMaxDisplaySamples, rq.n));
+        if (nv > rc::chat::kMaxDisplaySamples)
+            notes.push_back(std::format("n={} is more than I draw at once; I drew {}", static_cast<long long>(nv), rq.n));
+    }
     // The seed: random unless the person (or the model) passes one; echoed in the answer so a picture can be repeated.
     std::uint64_t seed = (std::uint64_t(std::random_device{}()) << 32) ^ std::random_device{}();
     seed &= (1ull << 53) - 1;   // a JSON number round-trips below 2^53
-    const auto sv = args.value("seed");
-    if (sv.isString()) seed = sv.toString().toULongLong();
-    else if (sv.isDouble() and sv.toDouble() >= 0) seed = static_cast<std::uint64_t>(sv.toDouble());
+    if (const auto sv = args.value("seed"); args.contains("seed") and not sv.isNull())
+    {
+        bool ok = false;
+        std::uint64_t v = 0;
+        if (sv.isString()) v = sv.toString().toULongLong(&ok);
+        else if (sv.isDouble() and sv.toDouble() >= 0 and sv.toDouble() == std::floor(sv.toDouble()) and sv.toDouble() < 9007199254740992.0)
+        {
+            v = static_cast<std::uint64_t>(sv.toDouble());
+            ok = true;
+        }
+        if (ok) seed = v;
+        else notes.push_back("the seed must be a non-negative whole number; I used a random one");
+    }
+    const auto with_notes = [&](QString text)
+    {
+        for (const auto& n : notes) text += q(" (Note: " + n + ".)");
+        return text;
+    };
 
     const auto card = std::ranges::find(cards, rq.concept_, &rc::card::Card::concept_);
     if (card == cards.end()) return q(rc::chat::answer_no_card(not cards.empty(), root.string()));
@@ -1162,17 +1185,17 @@ QString ChatSession::do_imagine_view(const QJsonObject& args)
     if (scene.room.empty()) return QStringLiteral("I do not know which room I am in, so I cannot imagine it here.");
 
     const auto out = rc::chat::imagine_view(*card, scene, rq, seed, canvas_runner_.run_dir().toStdString());
-    if (not out.drawn) return q(out.text);
+    if (not out.drawn) return with_notes(q(out.text));
     // the fixed script stock/imagined.py draws imagined.json + imagined_zed.png (rcanvas.draw_imagined_zed / _lidar)
     auto job = library_job("imagined", {});
-    if (not job.has_value()) return q(out.text) + QStringLiteral(" (The picture script is missing.)");
+    if (not job.has_value()) return with_notes(q(out.text) + QStringLiteral(" (The picture script is missing.)"));
     job->title = q("imagined " + rq.concept_);
     const QString err = draw_now(std::move(*job), false);
     log_.write("imagine_view", QJsonObject{{"concept", q(rq.concept_)}, {"where", q(rq.where)}, {"seed", QString::number(seed)},
                                            {"drawn", err.isEmpty()}, {"error", err}});
-    if (not err.isEmpty()) return q(out.text) + QStringLiteral(" (The picture could not be drawn: ") + err + QStringLiteral(")");
+    if (not err.isEmpty()) return with_notes(q(out.text) + QStringLiteral(" (The picture could not be drawn: ") + err + QStringLiteral(")"));
     window_->append_system(QStringLiteral("canvas: ") + q(out.caption));
-    return q(out.text);
+    return with_notes(q(out.text));
 }
 
 std::optional<rc::chat::Topology> ChatSession::remembered_topology() const

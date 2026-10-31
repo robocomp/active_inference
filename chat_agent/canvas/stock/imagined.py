@@ -8,7 +8,6 @@ from rcanvas import *
 im = imagined()
 if im is None:
     sys.exit("nothing imagined yet: ask the robot to imagine something first")
-names = ["helios", "bpearl"]
 has_zed = int(getattr(im.image, "w", 0) or 0) > 0
 lidars = [k for k, sensor in enumerate(im.lidar) if sensor]
 if not has_zed and not lidars:
@@ -29,7 +28,5 @@ if lidars:
     inner = bottom.subgridspec(1, len(lidars))
     side = {k: fig.add_subplot(inner[0, j]) for j, k in enumerate(lidars)}
     draw_imagined_lidar(top, [side.get(k) for k in range(len(im.lidar))], im)
-    for k, ax in side.items():
-        ax.set_title(f"{names[k] if k < len(names) else f'lidar {k}'}: side view", fontsize=8)
 fig.tight_layout()
 save(fig)

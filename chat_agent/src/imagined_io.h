@@ -56,7 +56,8 @@ inline QJsonArray points(const std::vector<Eigen::Vector3f>& pts, std::size_t& n
 inline bool write_imagined(const std::filesystem::path& run_dir, const rc::card::SampleSet& set,
                            const std::vector<rc::card::ImaginedImage>& images,
                            const std::array<std::vector<rc::card::ImaginedScan>, 2>& scans,
-                           const rc::card::McResult& mc, std::string_view caption)
+                           const rc::card::McResult& mc, std::string_view caption,
+                           const std::array<std::string_view, 2>& lidar_names = {"lidar 0", "lidar 1"})
 {
     using namespace imagined_detail;
     QJsonArray samples;
@@ -121,6 +122,8 @@ inline bool write_imagined(const std::filesystem::path& run_dir, const rc::card:
                            {"p_recognise_mean", std::round(double(mc.p_recognise_mean) * 1e4) / 1e4},
                            {"p_recognise_sd", std::round(double(mc.p_recognise_sd) * 1e4) / 1e4},
                            {"modal_limit", int(mc.modal_limit)}, {"n", mc.n}}},
+        {"lidar_names", QJsonArray{QString::fromUtf8(lidar_names[0].data(), int(lidar_names[0].size())),
+                                   QString::fromUtf8(lidar_names[1].data(), int(lidar_names[1].size()))}},
         {"image", QJsonObject{{"w", iw}, {"h", ih}}}, {"samples", samples}, {"lidar", lidar}};
 
     std::error_code ec;

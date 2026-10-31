@@ -190,11 +190,40 @@ int main()
         const auto o2 = imagine_view(chair_card(), s, rq, 7, dir);
         CHECK(not has(o2.text, "left ") and not has(o2.text, "inside the imagined") and has(o2.text, "by table_1"));
     }
+    // ---- exclusion by the instance's own footprint; is_hypothetical never steals a named instance ----
+    {
+        const auto card = chair_card();
+        const auto count = [&](const SeeScene& sc, const Eigen::Vector2f& at, const char* cls, std::vector<std::string>& ex)
+        {
+            ImaginePlace pl; pl.ctx.at = at;
+            return imagine_world(sc, card, cls, pl, ex).obstacles.size();
+        };
+        std::vector<std::string> ex;
+        auto s = scene(true);                                   // table_1 (4.5,2) 1.2x0.7, chair_1 (2,2) 0.45x0.45
+        const auto n0 = s.objects.size();
+        CHECK(count(s, {2.1f, 2.1f}, "chair", ex) == n0 - 1 and ex == std::vector<std::string>{"chair_1"});   // inside it
+        CHECK(count(s, {2.4f, 2.0f}, "chair", ex) == n0 and ex.empty());            // 0.4 m away, outside the footprint
+        CHECK(count(s, {4.1f, 2.0f}, "chair", ex) == n0 and ex.empty());            // inside the TABLE: another class stays
+        SeeObject fr; fr.name = "refrigerator_1"; fr.subtype = "refrigerator"; fr.x = 1.0f; fr.y = 1.0f; fr.w = 1.2f; fr.d = 1.0f; fr.h = 1.8f;
+        s.objects.push_back(fr);
+        CHECK(count(s, {1.5f, 1.0f}, "refrigerator", ex) == n0 and ex == std::vector<std::string>{"refrigerator_1"});   // 0.5 m from its centre
+        s.objects.back().w.reset(); s.objects.back().d.reset();   // unpublished: the card's geometry half-extents (0.45)
+        CHECK(count(s, {1.5f, 1.0f}, "refrigerator", ex) == n0 and ex.empty());   // not excluded (a sizeless instance is no obstacle either)
+        CHECK(count(s, {1.1f, 1.0f}, "refrigerator", ex) == n0 and ex == std::vector<std::string>{"refrigerator_1"});   // inside the card-sized footprint
+        // is_hypothetical
+        auto h = scene(false);
+        SeeObject blank; blank.name = "thing_1"; blank.subtype = ""; blank.x = 1; blank.y = 1;
+        h.objects.push_back(blank);
+        CHECK(not is_hypothetical(h, "chair", "thing_1"));          // an instance with an empty class: the old path
+        CHECK(is_hypothetical(h, "chair", "table_1"));              // no chair, a known different class
+        CHECK(not is_hypothetical(scene(true), "chair", "table_1")); // a chair exists: the old path evaluates the named instance
+        CHECK(not is_hypothetical(scene(true), "chair", "chair_1"));
+    }
     // ---- hypothetical can_see ----
     {
         const auto s = scene(false);
         const auto t = can_see_hypothetical_reply(chair_card(), s, "chair", "table_1", "door_1");
-        CHECK(has(t, "imagined one by table_1") and has(t, "from door_1") and has(t, "±") and has(t, "32 draws"));
+        CHECK(has(t, "imagined one by table_1") and has(t, "from door_1") and has(t, "±") and has(t, "n=32 size samples") and has(t, "seed 1"));
         CHECK(has(can_see_hypothetical_reply(chair_card("prior"), s, "chair", "table_1", ""), "isn't calibrated yet"));
         CHECK(has(can_see_hypothetical_reply(chair_card(), s, "chair", "the moon", ""), "ASK"));
     }

@@ -432,19 +432,21 @@ def draw_imagined_lidar(ax_top, ax_sides, im=None):
     import matplotlib.pyplot as plt
     cmap = plt.get_cmap("tab10")
     ring_colors = ["tab:red", "tab:blue", "tab:green"]
+    names = list(getattr(im, "lidar_names", None) or [])
     for k, sensor in enumerate(im.lidar):
         rc_col = ring_colors[k % len(ring_colors)]
+        lname = names[k] if k < len(names) else f"lidar {k}"
         ax_side = ax_sides[k] if k < len(ax_sides) else None
         modelled = [sc for sc in sensor if sc.modelled]
         if not modelled:
             notes = "; ".join(sorted({n for sc in sensor for n in sc.notes}))
-            msg = f"lidar {k}: not modelled" + (f" ({notes})" if notes else "")
+            msg = f"{lname}: not modelled" + (f" ({notes})" if notes else "")
             ax_top.text(0.02, 0.98 - 0.07 * k, msg, transform=ax_top.transAxes, va="top", fontsize=7, color=rc_col)
             if ax_side is not None:
                 ax_side.text(0.5, 0.5, msg, ha="center", va="center", transform=ax_side.transAxes, fontsize=8, color=rc_col)
                 ax_side.set_xticks([])
                 ax_side.set_yticks([])
-                ax_side.set_title(f"lidar {k}", fontsize=8)
+                ax_side.set_title(lname, fontsize=8)
             continue
         reach = 3.0
         for i, sc in enumerate(sensor):
@@ -467,7 +469,7 @@ def draw_imagined_lidar(ax_top, ax_sides, im=None):
             ax_side.plot([0, reach], [oz, oz + reach * math.tan(math.radians(e))], color=rc_col, linewidth=0.5, alpha=0.5)
         ax_side.set_xlim(0, reach)
         ax_side.set_ylim(-0.5, 3.0)
-        ax_side.set_title(f"lidar {k}: side view", fontsize=8)
+        ax_side.set_title(f"{lname}: side view", fontsize=8)
         ax_side.set_xlabel("distance along bearing (m)")
         ax_side.set_ylabel("z (m)")
         ax_side.grid(True, linewidth=0.3, alpha=0.5)
