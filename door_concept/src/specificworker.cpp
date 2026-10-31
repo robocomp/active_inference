@@ -2626,7 +2626,9 @@ void SpecificWorker::step_pragmatic_affordances(rc::DoorInstance& inst)
         const auto& pose = choice.pose;
         // The offer's probability: the share of the band's serviceability the hand-backs have left — the best score now
         // over the best score with no hand-back remembered. 1 with no hand-back (as before), → 0 as the band is used up.
-        o.p   = rc::door::approach_offer_prob(choice, free_choice);
+        // ★ A DOOR THAT DOES NOT EXIST AFFORDS NOTHING (user 2026-10-31, pingpong27: the robot drove at a phantom door_1 on
+        //   the other wall, existence p 0.05, while its offers stood): every offer of this door carries P(exists).
+        o.p   = rc::door::approach_offer_prob(choice, free_choice) * inst.existence.p_exists();
         o.x_m = pose.x; o.y_m = pose.y; o.yaw_rad = pose.yaw;
         inst.approach_offered_xy = {pose.x, pose.y};
         inst.approach_offered_valid = true;
@@ -2661,6 +2663,7 @@ void SpecificWorker::step_pragmatic_affordances(rc::DoorInstance& inst)
                                  st.p_reach, st.p_open_known ? st.p_open : 0.0f, st.p_band, o.value, st.robot_range_m,
                                  st.safe_standoff_m, std::max(pg.actuation_reach_m, st.safe_standoff_m + 0.30f),
                                  st.range_sigma_m, inst.aperture.w);
+        o.why += std::format(" × P(exists) {:.2f}", inst.existence.p_exists());
         inst.aff_approach.update(o);
         log_affordance_transitions(inst, "approach", inst.aff_approach);
     }
@@ -2677,7 +2680,7 @@ void SpecificWorker::step_pragmatic_affordances(rc::DoorInstance& inst)
         //   robot must stand (the band, outside the leaf's arc) is the contract's pre: clause, not the offer: multiplied in,
         //   a robot that stopped 0.2 m short of the vantage (P(in band) 0.27 at the band's edge under σ) saw `open`
         //   WITHDRAWN, and nothing ever moved it back — the door route waited 600 s at a shut door.
-        o.p     = std::clamp(1.0f - st.p_open, 0.0f, 1.0f);
+        o.p     = std::clamp(1.0f - st.p_open, 0.0f, 1.0f) * inst.existence.p_exists();   // a phantom affords no `open`
         if (inst.actuation_refused)
         {
             // ★A REFUSAL IS INFORMATION, and this kind is permanent: UnknownDoor / NotActuable mean never
@@ -2696,6 +2699,7 @@ void SpecificWorker::step_pragmatic_affordances(rc::DoorInstance& inst)
         o.x_m = pose.x; o.y_m = pose.y; o.yaw_rad = pose.yaw;
         o.value    = pg.value_open;
         o.contract = rc::door::open_contract(pg);
+        o.why += std::format(" × P(exists) {:.2f}", inst.existence.p_exists());
         inst.aff_open.update(o);
         log_affordance_transitions(inst, "open", inst.aff_open);
     }
@@ -2708,7 +2712,7 @@ void SpecificWorker::step_pragmatic_affordances(rc::DoorInstance& inst)
         o.known = located and st.p_open_known;
         // D3: the OFFER is availability (P(passable)); the robot's pose enters only through the contract's `pre:`
         // (door_cross_exec_prob), which makes the controller re-approach. See rc::door::cross_offer_prob.
-        o.p     = rc::door::cross_offer_prob(st.p_open);
+        o.p     = rc::door::cross_offer_prob(st.p_open) * inst.existence.p_exists();   // a phantom affords no `cross`
         if (not inst.aff_cross.claimed() or inst.cross_side_latched == 0.0f)
             inst.cross_side_latched = rc::door::interior_side(inst.aperture, st.approach_standoff_m,
                                                               fitter_->room_polygon(), st.approach_side);   // leave THIS room
@@ -2739,6 +2743,7 @@ void SpecificWorker::step_pragmatic_affordances(rc::DoorInstance& inst)
                                  st.robot_range_m,
                                  std::max(pg.actuation_reach_m, st.safe_standoff_m + 0.30f), st.range_sigma_m,
                                  st.p_corridor_clear, st.corr_lateral_m, st.corr_hinge_llr, st.corr_swing_llr, st.p_cross_exec);
+        o.why += std::format(" × P(exists) {:.2f}", inst.existence.p_exists());
         inst.aff_cross.update(o);
         log_affordance_transitions(inst, "cross", inst.aff_cross);
     }
