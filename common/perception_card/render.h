@@ -145,6 +145,8 @@ struct ImaginedScan
     float lambda0 = 0;                                  // rays whose nearest hit is a part, before q_return and the range factor
     bool modelled = false;
     std::vector<std::string> notes;                     // e.g. "sensor inside a part"
+    Eigen::Vector3f mount_xyz = Eigen::Vector3f::Zero();   // the sensor origin in the room frame
+    float bearing_rad = 0;                              // the sector's centre bearing (room frame), toward the target
 };
 
 // The imagined LiDAR scan of `placed` from `vp`. `rig` is the BODY-frame rig (as evaluate_lidar takes it); null or ringless
@@ -188,6 +190,8 @@ inline ImaginedScan render_lidar(const World& world, const Viewpoint& vp, const 
         lo = std::min(lo, a); hi = std::max(hi, a);
     }
     const float pad = 5.0f * detail::kDeg2Rad;
+    sc.mount_xyz = o;
+    sc.bearing_rad = bearing;
     for (const float e : elevs) sc.ring_elev_room_deg.push_back(detail::room_elevation(r.mount, e, bearing) / detail::kDeg2Rad);
 
     // occluders, as in render_zed

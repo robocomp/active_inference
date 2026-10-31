@@ -89,6 +89,8 @@ int main()
                 // thin backrest edge. 0.25 is a regression floor there; everywhere else the 0.3 bound holds.
                 CHECK(sc.lambda0 >= ((not front and std::string(name) == "bpearl") ? 0.25f : 0.3f) * box);
                 CHECK(sc.ring_elev_room_deg.size() == 32);
+                CHECK(std::abs(sc.mount_xyz.z() - rig.mount.translation().z()) < 1e-4f);   // rig height in the room
+                CHECK(std::abs(std::remainder(sc.bearing_rad - std::atan2(t.centre().y() - sc.mount_xyz.y(), t.centre().x() - sc.mount_xyz.x()), 6.2831853f)) < 1e-3f);   // points at the target
             }
         }
     }
