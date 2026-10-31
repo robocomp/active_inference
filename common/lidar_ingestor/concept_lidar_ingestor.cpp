@@ -38,6 +38,7 @@ bool ConceptLidarIngestor::pump()
     helios_fresh_ = false;
     bpearl_fresh_ = false;
     bpearl_robot_fresh_ = false;
+    helios_robot_fresh_ = false;
 
     const LidarGates g = gates_ ? gates_() : LidarGates{};
 
@@ -46,7 +47,7 @@ bool ConceptLidarIngestor::pump()
     // feature switches so the reader stays dormant while BOTH helios-side features are off.
     if (reader_)
     {
-        const bool en = g.helios_precision > 0.0f or g.free_space_precision > 0.0f;
+        const bool en = g.helios_precision > 0.0f or g.free_space_precision > 0.0f or g.helios_robot;
         if (const auto sweep = reader_->poll(rc::room::current_room_frame(*G_), /*interpolate=*/true, /*enabled=*/en);
             sweep.has_value() and not sweep->points.empty())
         {
@@ -54,6 +55,17 @@ bool ConceptLidarIngestor::pump()
             origin_room_  = sweep->origin;
             helios_fresh_ = true;
         }
+        // The same capture in the ROBOT frame, from the reader's cache (no second drain), as the bpearl's below.
+        if (g.helios_robot)
+            if (const auto ts = reader_->newest_cache_stamp(); ts > helios_robot_stamp_ms_)
+                if (const auto robots = G_->get_nodes_by_type("robot"); not robots.empty())
+                    if (auto rh = reader_->restage(robots.front().name(), /*interpolate=*/false); rh.has_value() and not rh->points.empty())
+                    {
+                        sweep_helios_robot_    = std::move(rh->points);
+                        origin_helios_robot_   = rh->origin;
+                        helios_robot_stamp_ms_ = ts;
+                        helios_robot_fresh_    = true;
+                    }
     }
     // Low bpearl plane — its OWN capture stamp, its OWN origin. Only pumped while its feature is on.
     if (reader_bpearl_)

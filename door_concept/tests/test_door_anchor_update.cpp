@@ -265,6 +265,43 @@ static std::vector<V3> scan3d(const std::vector<Seg>& segs, const Pose2& r, unsi
     }
     return pts;
 }
+// 2026-11-01: the HELIOS (inverted H32F70: 32 layers over -15.5..+54.5 deg, at 1.1075 m, 0.155 m behind the centre) in a world
+// whose walls reach a ceiling at `ceil`, with the door's LINTEL: a beam crossing the opening's span (|u| < W/2 at y = 0) higher
+// than `lintel` stops on the wall above it. Returns (robot frame) whose endpoint is above the lintel — the only ones that can
+// have crossed the plane above it (the fan rises from 1.11 m).
+static const V3 kHelios(0.f, -0.155f, 1.1075f);
+static std::vector<V3> helios_scan(const std::vector<Seg>& segs, const Pose2& r, float lintel, float ceil, unsigned seed = 9)
+{
+    std::mt19937 rng(seed);
+    std::normal_distribution<float> noise(0.f, 0.02f);
+    const float c = std::cos(r.psi), s = std::sin(r.psi);
+    const V2 o_w = r.p + V2(c * kHelios.x() - s * kHelios.y(), s * kHelios.x() + c * kHelios.y());
+    std::vector<V3> pts;
+    for (float a = 0.f; a < 360.f; a += 1.f)
+    {
+        const float b = r.psi + a * float(M_PI) / 180.f;
+        const V2 u(std::cos(b), std::sin(b));
+        float r_wall = 1e9f;
+        for (const auto& sg : segs) if (const float t = ray_seg(o_w, u, sg); t > 0.f and t < r_wall) r_wall = t;
+        const float t_plane = std::abs(u.y()) > 1e-6f ? -o_w.y() / u.y() : -1.f;   // where the beam's line crosses y = 0
+        const bool in_span = t_plane > 0.f and std::abs(o_w.x() + t_plane * u.x()) < 0.5f * W;
+        for (int k = 0; k < 32; ++k)
+        {
+            const float el = (-15.5f + 70.f * float(k) / 31.f) * float(M_PI) / 180.f;
+            const float te = std::tan(el);
+            float rr = r_wall;
+            if (te > 0.f) rr = std::min(rr, (ceil - kHelios.z()) / te);
+            if (te < 0.f) rr = std::min(rr, kHelios.z() / -te);
+            if (in_span and t_plane < rr and kHelios.z() + t_plane * te > lintel) rr = t_plane;   // the wall above the opening
+            if (rr > 8.f) continue;
+            const float rn = rr + noise(rng), z = kHelios.z() + rn * te;
+            if (z <= lintel) continue;
+            const V2 pr = to_robot(r, o_w + u * rn);
+            pts.emplace_back(pr.x(), pr.y(), z);
+        }
+    }
+    return pts;
+}
 // A scan from the robot at `r`: beams every 0.25 deg within ±half_sector of the robot's forward, from the sensor at
 // `sensor_robot`; returned in the ROBOT frame (z = 0.5, the wall band).
 static std::vector<V3> scan(const std::vector<Seg>& segs, const Pose2& r, float half_sector_deg = 90.f, unsigned seed = 7)
@@ -1380,6 +1417,59 @@ int main()
         check(frames > 0, "the update returns a leaf posterior from the far side");
         check(worst < 6.f * float(M_PI) / 180.f, "the published phi (read in the stated block) stays within 6 deg of 90");
         check(uncovered == 0, "the truth is within 2 sigma of the published phi on every frame");
+    }
+
+    // pingpong33 leg 3 (2026-11-01): room_1's CORRIDOR STUB before DOOR_1 — the door's wall visible only as 0.52 m (west, behind the
+    // open leaf) and 0.14 m (east) stubs, the corridor's side walls running 2.07 m back, the leaf open 90 deg along the west side,
+    // room_1 behind. Live the anchor's depth went 1.5 m short. The wall ABOVE the lintel (2.1 m) spans the whole stub: with the
+    // Helios returns up there the depth must hold.
+    std::print("corridor_stub_depth (bpearl only vs + the Helios above the lintel)\n");
+    {
+        std::vector<Seg> segs;
+        const float wl = 0.5f * W + 0.52f, wr = 0.5f * W + 0.14f, dep = 2.07f;
+        box(segs, -6.f, -0.5f * W, -0.5f * T, 0.5f * T);  box(segs, 0.5f * W, 6.f, -0.5f * T, 0.5f * T);   // the door's wall (room_2's side too)
+        box(segs, -wl - 0.1f, -wl, -dep, 0.5f * T);       box(segs, wr, wr + 0.1f, -dep, 0.5f * T);        // the stub's side walls
+        box(segs, -6.f, -wl, -dep - 0.1f, -dep);          box(segs, wr, 6.f, -dep - 0.1f, -dep);           // room_1's wall at the stub's mouth
+        box(segs, -6.f, 6.f, -6.1f, -6.f);  box(segs, -6.1f, -6.f, -6.f, 4.f);  box(segs, 6.f, 6.1f, -6.f, 4.f);  box(segs, -6.f, 6.f, 4.f, 4.1f);
+        box(segs, -0.5f * W, -0.5f * W + 0.04f, -0.5f * T - W, -0.5f * T);                                  // the leaf, 90 deg, west, robot side
+        const float clear = rc::door::anchor_clear_width(W, 0.06f);
+        rc::door::LeafPrior lp;
+        lp.known = true; lp.hinge_u = -0.5f * clear; lp.len = clear; lp.dir_u = 1.f; lp.swing_y = -1.f;
+        lp.phi = float(M_PI_2); lp.phi_sigma = 0.25f; lp.phi_known = true; lp.phi_max = 2.094f; lp.p_hinge = 0.999f; lp.p_swing = 0.999f;
+        const float lintel = 2.1f, ceil = 3.0f;
+        for (const bool with_helios : {false, true})
+        {
+            Pose2 robot{V2(0.05f, -1.6f), 0.f};
+            RelPose belief = creation_prior(robot);
+            float worst = 0.f, last = 0.f;
+            int n_h_min = 1 << 30, n_h_max = 0;
+            for (int k = 0; k <= 26; ++k)
+            {
+                if (k > 0)
+                {
+                    rc::rt::Twist tw; tw.linear = V3(0.f, 0.5f, 0.f);
+                    belief = rc::interaction::predict(belief, tw, V3(1e-4f, 1e-4f, 1e-4f), 0.1f);
+                    robot.p.y() += 0.05f;
+                }
+                const auto rays = rc::door::select_anchor_rays(belief, W, T, kFloorZ, 2.0f, kSensor, scan3d(segs, robot, 111 + k), 2.0f);
+                const auto hel = with_helios ? helios_scan(segs, robot, lintel, ceil, 211 + k) : std::vector<V3>{};
+                n_h_min = std::min<int>(n_h_min, int(hel.size())); n_h_max = std::max<int>(n_h_max, int(hel.size()));
+                const auto [post, ev] = update_door_anchor(belief, W, T, -wl, wr, kSensor, rays, {}, {}, 0.8f, lp, kFloorZ, nullptr, nullptr,
+                                                           kHelios, hel, with_helios ? lintel : std::numeric_limits<float>::infinity());
+                belief = post;
+                const V3 tr = anchor_truth(robot);
+                const V2 n(-std::sin(tr.z()), std::cos(tr.z()));
+                const float depth_err = (post.x.head<2>() - tr.head<2>()).dot(n);
+                worst = std::max(worst, std::abs(depth_err)); last = depth_err;
+                if (k % 5 == 0 or k == 26)
+                    std::print("      {} s {:+.2f}: depth err {:+.3f} m, lateral err {:+.3f} m (Helios returns {})\n", with_helios ? "helios+bpearl" : "bpearl only  ",
+                               robot.p.y() + kSensor.y(), depth_err,
+                               (post.x.head<2>() - tr.head<2>()).dot(V2(std::cos(tr.z()), std::sin(tr.z()))), hel.size());
+            }
+            std::print("    {}: worst |depth err| {:.3f} m, last {:+.3f} m; Helios returns per frame {}..{}\n",
+                       with_helios ? "with the Helios" : "bpearl only", worst, last, with_helios ? n_h_min : 0, n_h_max);
+            if (with_helios) check(worst < 0.10f, "with the wall above the lintel the anchor's depth stays within 0.10 m in the corridor stub");
+        }
     }
 
     std::print("{}\n", g_fail == 0 ? "ALL PASS" : std::format("{} FAILED", g_fail));

@@ -562,7 +562,7 @@ void SpecificWorker::initialize()
     // ingestor itself discovers the sensor node lazily inside pump() and stays dormant (no DDS
     // participant at all) while its precision gate is 0, so this costs nothing when switched off.
     lidar_ingestor_ = std::make_unique<rc::ConceptLidarIngestor>(G, inner_eigen_.get(),
-        [this] { return rc::LidarGates{0.0f, 0.0f, cfg_.lidar_bpearl_precision}; });
+        [this] { return rc::LidarGates{0.0f, 0.0f, cfg_.lidar_bpearl_precision, /*helios_robot=*/true}; });   // the anchor's wall above the lintel
 
     // Build rc::EpistemicPlanner (Σ-based D-optimal NBV) with the configured stand-off.
     epistemic_planner_ = rc::EpistemicPlanner(cfg_.obs_distance);

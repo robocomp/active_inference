@@ -49,6 +49,9 @@ struct LidarGates
     float helios_precision     = 0.0f;   // per-ray range precision on the high 360 plane (0 = OFF)
     float free_space_precision = 0.0f;   // free-space/carve factor — also feeds off the helios sweep (0 = OFF)
     float bpearl_precision     = 0.0f;   // per-ray range precision on the low bpearl dome (0 = OFF)
+    // 2026-11-01: also stage the helios sweep in the ROBOT frame (door_concept's interaction anchor: the wall above the
+    // lintel). Wakes the helios reader even with both precisions above at 0. Off = no cost for the other agents.
+    bool  helios_robot         = false;
 };
 
 class ConceptLidarIngestor
@@ -76,6 +79,11 @@ public:
     // Staged on every pump() that sees a new bpearl capture, even when the ROOM transform did not resolve:
     // a robot-frame consumer (the interaction anchor) must not depend on the room existing.
     const std::vector<Eigen::Vector3f>& sweep_bpearl_robot()  const { return sweep_bpearl_robot_; }
+    // The helios sweep in the ROBOT frame (LidarGates::helios_robot), staged like the bpearl's below.
+    const std::vector<Eigen::Vector3f>& sweep_helios_robot()  const { return sweep_helios_robot_; }
+    const Eigen::Vector3f&              origin_helios_robot() const { return origin_helios_robot_; }
+    bool                                helios_robot_fresh()  const { return helios_robot_fresh_; }
+    std::int64_t                        helios_robot_stamp_ms() const { return helios_robot_stamp_ms_; }   // capture stamp
     const Eigen::Vector3f&              origin_bpearl_robot() const { return origin_bpearl_robot_; }
     bool                                bpearl_robot_fresh()  const { return bpearl_robot_fresh_; }
     std::int64_t                        bpearl_robot_stamp_ms() const { return bpearl_robot_stamp_ms_; }   // capture stamp
@@ -100,6 +108,10 @@ private:
     Eigen::Vector3f              origin_bpearl_robot_ = Eigen::Vector3f::Zero();
     bool                         bpearl_robot_fresh_ = false;
     std::int64_t                 bpearl_robot_stamp_ms_ = 0;               // capture stamp of the staged sweep
+    std::vector<Eigen::Vector3f> sweep_helios_robot_;                      // latest helios sweep, ROBOT frame (helios_robot)
+    Eigen::Vector3f              origin_helios_robot_ = Eigen::Vector3f::Zero();
+    bool                         helios_robot_fresh_ = false;
+    std::int64_t                 helios_robot_stamp_ms_ = 0;
 };
 
 }  // namespace rc

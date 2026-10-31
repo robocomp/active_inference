@@ -805,8 +805,8 @@ void SpecificWorker::step_passage_anchor()
     //   mask at ITS capture stamp, i.e. in the robot frame of THEN. Both are brought forward to now with the same body
     //   twist the anchor is predicted by (to_now). A robot turning at 0.5 rad/s with a capture 100 ms old saw the
     //   wall 0.05 rad away from where the anchor (rightly) expects it.
-    std::vector<Eigen::Vector3f> rays, mask_pts;
-    Eigen::Vector3f lidar_origin = Eigen::Vector3f::Zero();
+    std::vector<Eigen::Vector3f> rays, mask_pts, helios_rays;   // helios_rays: the wall above the lintel (below)
+    Eigen::Vector3f lidar_origin = Eigen::Vector3f::Zero(), helios_origin = Eigen::Vector3f::Zero();
     const Eigen::Vector2f c = pa.pose.x.head<2>();
     if (lidar_ingestor_ and lidar_ingestor_->bpearl_robot_stamp_ms() > pa.last_lidar_stamp)
     {
@@ -824,6 +824,20 @@ void SpecificWorker::step_passage_anchor()
         for (const auto& p_then : lidar_ingestor_->sweep_bpearl_robot()) sweep_now.push_back(to_now(p_then, tw, age_s));
         rays = rc::door::select_anchor_rays(pa.pose, pa.width, pa.thickness, kFloorBandM, pa.height, lidar_origin,
                                             sweep_now, kRayReachM);
+        // THE WALL ABOVE THE LINTEL (2026-11-01, user: "the wall as the only visible certain cue for the door depth"): the
+        // helios returns higher than the opening (pa.height, the door's aperture), moved to now like the bpearl's and within
+        // the same reach of the opening. A rising helios beam can cross the wall plane above the lintel only if it ENDS
+        // above it, so this is the exact candidate set, not a cut. update_door_anchor's Model::lintel does the rest.
+        if (pa.height > 0.f and not lidar_ingestor_->sweep_helios_robot().empty())
+        {
+            const float age_h = sim_age_s(lidar_ingestor_->helios_robot_stamp_ms());
+            helios_origin = to_now(lidar_ingestor_->origin_helios_robot(), tw, age_h);
+            const Eigen::Vector2f c = pa.pose.x.head<2>();
+            for (const auto& p_then : lidar_ingestor_->sweep_helios_robot())
+                if (p_then.z() > pa.height)
+                    if (const Eigen::Vector3f p = to_now(p_then, tw, age_h); (p.head<2>() - c).norm() <= kRayReachM)
+                        helios_rays.push_back(p);
+        }
     }
     // The zed: its pose in the robot frame (static mount) and its frustum, for the mask AND the camera visibility.
     rc::door::CameraFrustum cam;
@@ -957,7 +971,8 @@ void SpecificWorker::step_passage_anchor()
         // Floor returns (below the wall band) are told apart by z: in the visibility they PASS, never end (Task 8).
         auto [post, e] = rc::door::update_door_anchor(pa.pose, pa.width, pa.thickness, pa.wall_u_min, pa.wall_u_max,
                                                       lidar_origin, rays, mask_pts, cam, pa.p_open_belief, leaf, kFloorBandM,
-                                                      &staging, &pa.bias);
+                                                      &staging, &pa.bias, helios_origin, helios_rays,
+                                                      helios_rays.empty() ? std::numeric_limits<float>::infinity() : pa.height);
         post.stamp_ms = now;
         pa.pose = post;
         ev = e;

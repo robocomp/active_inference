@@ -420,11 +420,12 @@ inline double log1m_exp(double a)
 
 // A 2-D ray in ROBOT coordinates.
 // floor: the return is on the FLOOR (below the caller's wall band): it hit no wall (Task 8, visibility only).
-struct Ray2 { Eigen::Vector2d o, e; bool floor = false; std::uint32_t src = 0; };   // src: index into the caller's rays
+struct Ray2 { Eigen::Vector2d o, e; bool floor = false; std::uint32_t src = 0;   // src: index into the caller's rays
+              double zo = 0, ze = 0; };   // the origin's / endpoint's heights (m): where the ray crosses the wall line, how HIGH
 
 // The ray in anchor coordinates: along-wall crossing u, the endpoint's signed depth d and the ORIGIN's signed
 // depth d_o (both along the ray's travel; d_o < 0 while the beam starts in front of the plane).
-struct UD { double u, d, d_o; };
+struct UD { double u, d, d_o, zc = 0; };   // zc: the height at which the ray's line crosses the wall plane (m)
 inline UD to_anchor(const Ray2& r, const V3d& x)
 {
     const double c = std::cos(x.z()), s = std::sin(x.z());
@@ -436,7 +437,8 @@ inline UD to_anchor(const Ray2& r, const V3d& x)
     // Where the ray's LINE crosses y = 0. A ray parallel to the wall never crosses it: put its crossing far along
     // the wall (1e9 m, finite so differences stay finite), where m = 0 and only the depth terms speak.
     const double u = std::abs(dy) > 1e-12 ? oa.x() - oa.y() * (ea.x() - oa.x()) / dy : std::copysign(1e9, ea.x() - oa.x());
-    return {u, sgn * ea.y(), sgn * oa.y()};
+    const double lam = std::abs(dy) > 1e-12 ? -oa.y() / dy : 1.0;   // the crossing's fraction of the ray, origin -> endpoint
+    return {u, sgn * ea.y(), sgn * oa.y(), r.zo + lam * (r.ze - r.zo)};
 }
 
 // The PREDICTIVE spread of one ray's (u, d) under the current pose belief P: J P Jᵀ, J by finite differences.
@@ -491,6 +493,13 @@ struct Model
     double u_min, u_max;               // the door's wall run along the wall, anchor coordinates (m)
     std::vector<double> leaf_depths;   // the δ grid
     double short_level, count_level;   // both 3σ + t/2 (see the header: counting only)
+    // THE OPENING HAS A HEIGHT (2026-11-01, user: "the wall as the only visible certain cue for the door depth"). Above the
+    // lintel the door's wall is continuous across the opening, so a ray whose line crosses the wall plane higher than
+    // `lintel` must end on the wall wherever along it it crosses: its opening membership is m(u) · P(zc < lintel), the
+    // height's edge blurred by the range noise. +inf = no height (the opening's membership by u alone, as before). In room_1's
+    // corridor stub the wall beside the door is hidden (the open leaf, 0.14 m on the other side) and depth went 1.5 m short
+    // (pingpong33 leg 3); the wall above the lintel spans the whole stub and the Helios sees it from 0.8-2 m.
+    double lintel = std::numeric_limits<double>::infinity();
     Model(double w_, double t_, double u_min_, double u_max_)
         : w(std::max(0.0, w_)), t(std::max(0.0, t_)),
           // the run always contains the opening itself (a run that excludes its own door is not this door's wall)
@@ -526,6 +535,11 @@ struct Model
         Terms k;
         k.log_in      = log_sigmoid(z);
         k.log_out     = k.log_in - z;                                         // log σ(−z) = log σ(z) − z
+        if (std::isfinite(lintel))   // the opening ends at the lintel: above it the wall closes the span (see `lintel`)
+        {
+            k.log_in  += log_sigmoid((lintel - a.zc) / kRangeSigma);
+            k.log_out  = log1m_exp(std::min(k.log_in, -1e-12));
+        }
         k.log_wall    = -0.5 * (a.d - near) * (a.d - near) / sd2 - sp.log_norm; // stops on the NEAR face
         k.log_through = log_sigmoid((a.d - 0.5 * t) / sd) + log_bg;           // beyond the far face
         k.log_clutter = log_eps + log_add_exp(log_occ, log_bg);
@@ -759,7 +773,8 @@ struct Problem
         const double sgn = q.oa.y() <= 0 ? 1.0 : -1.0;
         const double dy = q.ea.y() - q.oa.y();
         const double u = std::abs(dy) > 1e-12 ? q.oa.x() - q.oa.y() * (q.ea.x() - q.oa.x()) / dy : std::copysign(1e9, q.ea.x() - q.oa.x());
-        q.a = {u, sgn * q.ea.y(), sgn * q.oa.y()};
+        const double lam = std::abs(dy) > 1e-12 ? -q.oa.y() / dy : 1.0;
+        q.a = {u, sgn * q.ea.y(), sgn * q.oa.y(), r.zo + lam * (r.ze - r.zo)};
         return q;
     }
     // The open branch with configuration c's leaf, minus the plain open mixture, for one ray (0 when its line misses
@@ -1339,15 +1354,22 @@ inline Mask make_mask(const std::vector<Eigen::Vector3f>& mask_pts_robot, const 
     mask.valid = mask.sigma2 > 0;   // all points at one abscissa: no spread ⇒ no measured σ
     return mask;
 }
+// `origin2` / `n_first` (2026-11-01): rays from index n_first on come from a SECOND sensor at origin2 — the Helios returns above the
+// lintel, appended after the bpearl's (Model::lintel). They are never floor returns. Every ray keeps its heights (Ray2::zo, ze).
 inline std::vector<Ray2> make_rays(const Eigen::Vector3f& lidar_origin_robot, const std::vector<Eigen::Vector3f>& rays_robot,
-                                   float floor_below = -std::numeric_limits<float>::infinity())
+                                   float floor_below = -std::numeric_limits<float>::infinity(),
+                                   const Eigen::Vector3f* origin2 = nullptr, std::size_t n_first = std::numeric_limits<std::size_t>::max())
 {
-    const Eigen::Vector2d o = lidar_origin_robot.head<2>().cast<double>();
     std::vector<Ray2> all_rays;
     all_rays.reserve(rays_robot.size());
     for (std::size_t i = 0; i < rays_robot.size(); ++i)
+    {
+        const bool second = origin2 != nullptr and i >= n_first;
+        const Eigen::Vector3f& oo = second ? *origin2 : lidar_origin_robot;
+        const Eigen::Vector2d o = oo.head<2>().cast<double>();
         if (const Eigen::Vector2d e = rays_robot[i].head<2>().cast<double>(); (e - o).squaredNorm() > 1e-12)   // a zero-length ray has no direction
-            all_rays.push_back({o, e, rays_robot[i].z() < floor_below, std::uint32_t(i)});
+            all_rays.push_back({o, e, not second and rays_robot[i].z() < floor_below, std::uint32_t(i), double(oo.z()), double(rays_robot[i].z())});
+    }
     return all_rays;
 }
 // The scanner's azimuth step, MEASURED from the frame (Task 8): the median gap between its distinct beam azimuths. The
@@ -1808,9 +1830,25 @@ update_door_anchor(const rc::interaction::RelPose& prior, float width, float thi
                    const std::vector<Eigen::Vector3f>& mask_pts_robot, const CameraFrustum& cam = {},
                    float p_open_prior = 0.5f, const LeafPrior& leaf = {},
                    float floor_below = -std::numeric_limits<float>::infinity(), AnchorStaging* staging = nullptr,
-                   AnchorBias* bias = nullptr)
+                   AnchorBias* bias = nullptr,
+                   // 2026-11-01: the Helios returns ABOVE the lintel (robot frame) and its origin, and the lintel's height: the
+                   // wall above the opening (Model::lintel). Empty / +inf = the bpearl alone, as before.
+                   const Eigen::Vector3f& helios_origin_robot = Eigen::Vector3f::Zero(),
+                   const std::vector<Eigen::Vector3f>& helios_rays_robot = {},
+                   float lintel = std::numeric_limits<float>::infinity())
 {
     using namespace anchor_detail;
+    // The bpearl's rays, then the Helios ones (src indices continue, so the frame record's mapping holds; ⚠ the record keeps
+    // ONE origin, so a replay casts the Helios rays from the bpearl's — approximate for those frames).
+    const bool use_helios = not helios_rays_robot.empty() and std::isfinite(lintel);
+    std::vector<Eigen::Vector3f> rays_both;
+    if (use_helios)
+    {
+        rays_both.reserve(rays_robot.size() + helios_rays_robot.size());
+        rays_both = rays_robot;
+        rays_both.insert(rays_both.end(), helios_rays_robot.begin(), helios_rays_robot.end());
+    }
+    const std::vector<Eigen::Vector3f>& rays_in = use_helios ? rays_both : rays_robot;
     AnchorEvidence ev;
     // Task 10: the data-space prior P_z = P − L Lᵀ. When the carried factor no longer fits under P (the caller re-set
     // or fused the belief without it), the bookkeeping restarts: L = 0, P is the data-space belief.
@@ -1834,7 +1872,9 @@ update_door_anchor(const rc::interaction::RelPose& prior, float width, float thi
     pb.leaf = make_leaf_model(leaf, pb.model.w);
     // Replay (staging->replay): the record's prior-staged set stands for the frame (the counts below then see only it).
     const bool replay = staging != nullptr and staging->replay;
-    const std::vector<Ray2> all_rays = make_rays(lidar_origin_robot, replay ? staging->prior.rays : rays_robot, floor_below);
+    const std::vector<Ray2> all_rays = make_rays(lidar_origin_robot, replay ? staging->prior.rays : rays_in, floor_below,
+                                                 use_helios and not replay ? &helios_origin_robot : nullptr, rays_robot.size());
+    if (std::isfinite(lintel)) pb.model.lintel = double(lintel);
 
     if (all_rays.empty() and not mask.valid)
         return {prior, ev};   // nothing measured: the prior IS the posterior, bit for bit
@@ -1846,7 +1886,7 @@ update_door_anchor(const rc::interaction::RelPose& prior, float width, float thi
     else
     {
         stage_rays(pb, all_rays, x, P);
-        if (staging != nullptr) staging->prior = export_staged(pb, rays_robot, rays_robot.size());
+        if (staging != nullptr) staging->prior = export_staged(pb, rays_in, rays_in.size());
     }
     ev.n_budget = int(pb.rays.size());
     ev.az_step = float(pb.az_step);
