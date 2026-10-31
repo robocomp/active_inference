@@ -3433,7 +3433,42 @@ bool ControllerSession::drive_door_route(const ControllerPlanningStep &step, rc:
             on_anchor.target.node_id = aff->id();
             on_anchor.target.node_name = aff->name();
             on_anchor.target.from_affordance = true;
+            // ★ ONLY IN FRONT OF AN OPEN DOOR (user 2026-10-31), checked several independent ways, all of which must hold:
+            //   (1) door_concept believes it open: P(passable) = door_open_prob ≥ ½ on the door node;
+            //   (2) the LiDAR sees through it: the measured gap seen (last cycle) or the anchor itself fresh;
+            //   (3) the body before the plane: s < 0 on the anchor (robot frame);
+            //   (4) laterally within the opening: |e| < w/2;
+            //   (5) facing it: |heading error| < 90°;
+            //   (6) at least as close as the vantage (at_vantage above).
+            //   Otherwise the planned route keeps driving; the reason is logged once per leg and verdict.
+            bool front_of_open = false;
+            std::string why_not;
             if (update_cross_anchor(on_anchor) and anchor_cross_.has_value())
+            {
+                const auto g = rc::anchor_cross_geometry(anchor_cross_->pose);
+                const auto dn = graph_->get_node(leg.door);
+                const float p_open = dn.has_value() ? graph_->get_attrib_by_name<door_open_prob_att>(dn.value()).value_or(-1.f) : -1.f;
+                const bool open_belief = p_open >= 0.5f;
+                const bool open_seen = gap_seen_now_ or anchor_cross_->fresh;
+                const bool near_side = g.s < 0.f;
+                const bool within = std::abs(g.e) < 0.5f * anchor_cross_->width_m;
+                const bool facing = std::abs(g.heading_err) < 0.5f * static_cast<float>(M_PI);
+                // the checks gate the START: once engaged on this crossing the servo keeps the hole (past the plane s > 0)
+                front_of_open = door_passage_.servo() or (open_belief and open_seen and near_side and within and facing);
+                if (not front_of_open)
+                    why_not = std::format("P(open) {:.2f}{} · seen {} · s {:+.2f} m{} · e {:+.2f} m of ±{:.2f}{} · heading {:+.0f} deg{}",
+                                          p_open, open_belief ? "" : " ✗", open_seen ? "yes" : "no ✗", g.s, near_side ? "" : " ✗",
+                                          g.e, 0.5f * anchor_cross_->width_m, within ? "" : " ✗", g.heading_err * 57.2958f,
+                                          facing ? "" : " ✗");
+                if (not front_of_open) anchor_cross_.reset();   // execute() must not run the servo on it
+            }
+            if (not front_of_open and not why_not.empty() and door_servo_refused_logged_ != leg.key)
+            {
+                door_servo_refused_logged_ = leg.key;
+                std::println("[door-route] {}: at the vantage but not in front of an open door ({}) — the route keeps driving",
+                             leg.door, why_not);
+            }
+            if (front_of_open)
             {
                 door_passage_.note_servo();
                 if (door_servo_logged_ != leg.key)

@@ -1190,6 +1190,7 @@ private:
     float door_route_last_r_body_ = 0.f;      ///< the body's circumscribed radius used with it
     std::uint64_t anchor_servo_last_ms_ = 0;  ///< the AIF law's last step (its control period)
     std::string door_servo_logged_;           ///< the leg key whose servo hand-over was logged
+    std::string door_servo_refused_logged_;   ///< the leg key whose refused hand-over was logged
     std::uint64_t door_route_anchor_id_ = 0;                        // the anchor whose PERCEIVED opening the route was built on (0 = the room-frame door)
     // The opening door_concept's interaction anchor measures for this door (robot frame ∘ the robot's pose), if one is fresh:
     // the door route's axis (door_route.h) and the gap the installed route must still pass through.
