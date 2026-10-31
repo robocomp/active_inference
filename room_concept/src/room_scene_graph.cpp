@@ -1922,6 +1922,11 @@ void RoomSceneGraph::arm_startup_proto(std::uint64_t room_id, const Eigen::Affin
 
 void RoomSceneGraph::step_startup_proto(const rc::RoomConcept::UpdateResult& res, std::string& reason)
 {
+    // ★ THE ROOM LEFT IS FROZEN WHILE ONE OF ITS DOORS IS CROSSED (spec 2026-10-31 room-crossing v4, step 4; user): no
+    //   scan, footprint, layout or promotion while the controller's link 0 is up (crossing(), the same signal that
+    //   puts the pose on odometry only). With the body in the doorway the scan is mostly the next room; the door filter
+    //   takes the rays through the opening, and this takes everything else the doorway view could add.
+    if (room_concept_->crossing()) { reason = "frozen_crossing"; return; }
     // ★ PROMOTION = the layout is publishable AND the explorer has nothing left worth visiting (2026-10-09).
     //   map_ready alone fired on the FIRST update of the first live run: one parked view made a 4-wall
     //   rectangle "publishable" that was ~8 x 9 m and rotated against the real walls (localiser sdf_med 0.21 m);
@@ -4446,6 +4451,7 @@ void RoomSceneGraph::check_init_graph_is_valid()
 // ═══════════════════════════════════════════════════════════════════════════════════════════════════════════
 void RoomSceneGraph::step_layout_refiner(const rc::RoomConcept::UpdateResult& res)
 {
+    if (room_concept_->crossing()) return;   // the room left is frozen while one of its doors is crossed (v4, step 4)
     if (not free_space_.has_value() or not res.slam_pose_valid) return;
     resolve_lidar_origin();
     // ── accumulate at the SHADOW SLAM pose, never the SDF pose: the evidence must not depend on the model it judges ──
