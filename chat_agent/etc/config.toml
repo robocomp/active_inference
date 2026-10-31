@@ -58,7 +58,7 @@ url = "http://192.168.1.34:11434"
 model = "gemma4:26b"
 # plan_mission's planner request (the mission skills, temperature 0, no tools); default = model.
 planner_model = "gemma4:26b"
-# 128k (2026-10-31, was 16k). Measured on the Orin (32 GB unified memory) with gemma4:26b.
+# 262k (2026-10-31, was 16k; the user chose the full window, 2.5 GB free judged a wide margin). Measured on the Orin (32 GB unified memory) with gemma4:26b.
 # Most of gemma4's layers use sliding-window attention, so the KV cache grows only ~0.6 GB per doubling. Memory in use:
 #   16k 21.4 GB · 32k 21.9 · 64k 22.5 · 128k 23.3 (5.3 GB left) · 262k ~26 (2.5 GB left, too tight).
 # Speed is unchanged: a 9.6k-token prompt prefills in 9.5 s at 16k vs 10.9 s at 128k, and generation runs at ~40
@@ -68,7 +68,7 @@ planner_model = "gemma4:26b"
 # The STATE is the LAST message of a request so the rest of the prompt stays cached between turns
 # (chat_session.cpp messages_for_request).
 # (Before the Orin: 16k on a 16 GB desktop GPU shared with retina's YOLO and the ZED SDK; check nvidia-smi there.)
-num_ctx = 131072
+num_ctx = 262144
 temperature = 0.2
 # No content and no tool call within this long ⇒ the request is aborted (a cold model load is the usual cause;
 # the agent warms the model up at start for exactly that reason).
