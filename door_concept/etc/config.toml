@@ -232,7 +232,9 @@ CrossStandoffM    = 2.00     # how far PAST the aperture the cross target sits. 
 # ([DoorPassage] UseRoute) ends there and the room switch completes the passage. Body reach (Shadow circumscribed radius
 # 0.325 m) + ~0.5 m so the whole footprint is past the plane. ≤ 0 restores the old depth (max(CrossStandoffM, past the
 # leaf's swept radius)). The leaf may stand there: the controller slides it outward ALONG THE AXIS until its footprint is free.
-CrossTargetM      = 0.80
+# 2026-10-31 (user): "make the robot enter a bit deeper into the room when crossing" — 0.80 → 1.30: the body ends ~1 m
+# past the plane, out of the doorway band, so the entered room's walls fill the scan before the relocaliser re-arms.
+CrossTargetM      = 1.30
 CrossClearanceM   = 0.80     # distance past the aperture plane that counts as fully through
 # ★THE ROBOT'S OWN BODY, in the one direction in which a doorway closes. Shadow's lateral half-width
 # measured off the robocomp meshes is 0.2938 m per side (0.588 m across); the hull compiled into
