@@ -119,7 +119,7 @@ public:
         route_failures_ = 0;
         route_arrived_ = false;
                 cross_id_ = 0;
-        servo_ = deep_ = false;
+        servo_ = false;
         reapproach_ = false;
         exited_ = false;
         predicted_room_id_ = 0;
@@ -277,17 +277,15 @@ public:
     void note_room_id(std::uint64_t id) { std::scoped_lock lk(m_); room_id_ = id; }
     /// The room ltsm has archived up to (its `current` edge; 0 = unknown): a crossing is closed when it equals the room id.
     void note_archived_room_id(std::uint64_t id) { std::scoped_lock lk(m_); archived_id_ = id; }
-    /// DEEP ENTRY (user 2026-10-31 "enter a bit deeper"). Once the doorway is driven on the anchor (note_servo), THROUGH —
-    /// the crossing fact, link 1 — is the servo's own `through`: the body at the cross target past the plane, robot frame
-    /// (note_deep), not merely past it. The body is then deep in the room BEFORE room_concept switches, and the switch's
-    /// short transition (link 2 until the old face goes) no longer ends with scans looking back through the door
-    /// (pingpong11 leg 4: 0.4 m in, the relocaliser flipped the pose 179 deg 0.37 s after the transition closed).
+    /// The doorway is driven on the anchor by the servo (CrossServo). Spec 2026-10-31 room-crossing v4: THROUGH — the
+    /// crossing fact — is the body wholly past the opening (drive_door_route) whoever drives; the deep-entry variant that
+    /// held THROUGH back until the body was at the cross target (e4c6067c) made room_concept map the next room as the old
+    /// one's floor and is gone. Its reason (pingpong11 leg 4: 0.4 m in, a 179 deg relocaliser flip looking back through
+    /// the door) is now met by the new room carrying the crossed door (room_concept note_passage_handover, every crossing).
     void note_servo() { std::scoped_lock lk(m_); servo_ = true; }
     /// Some part of the body is in the perceived opening (drive_door_route): a withdrawn cross does not send it back then.
     void note_in_opening(bool in) { std::scoped_lock lk(m_); in_opening_ = in; }
-    void note_deep() { std::scoped_lock lk(m_); deep_ = true; }
     [[nodiscard]] bool servo() const { std::scoped_lock lk(m_); return servo_; }
-    [[nodiscard]] bool deep() const { std::scoped_lock lk(m_); return deep_; }
     /// What the session is to drive this cycle (route mode): the published targets, read from the graph by update(). `key`
     /// changes exactly when the route must be (re)built — another leg, a rebuild after a failure, another room frame — and
     /// NOT when door_concept refines a target by millimetres: a route is a commitment, not a re-decision per cycle.
@@ -978,7 +976,7 @@ private:
         attempts_ = 0;
         route_arrived_ = false;
         exited_ = false;
-        servo_ = deep_ = false;
+        servo_ = false;
         reapproach_ = false;
         cross_id_ = room_id_;   // the room ID the step began in
         // THE PREDICTION, taken before crossing: the remembered room ltsm's recall under this door names (recall_<k>, its
@@ -1015,7 +1013,6 @@ private:
     bool servo_ = false;                   ///< the doorway is driven on the anchor (note_servo)
     bool in_opening_ = false;              ///< some part of the body in the perceived opening (note_in_opening)
     bool reapproach_ = false;              ///< back to the vantage after a withdrawn cross: no auto-cross before it
-    bool deep_ = false;                    ///< the servo has the body at the cross target past the plane (note_deep)
     std::uint64_t predicted_room_id_ = 0;  ///< the remembered room behind the door at enter_cross (0 = new)
     std::uint64_t cross_id_ = 0;           ///< the room ID the Cross step began in (0 = unknown)
     std::uint64_t room_id_ = 0;            ///< room_concept's room for the robot this cycle (note_room_id; 0 = unknown)
