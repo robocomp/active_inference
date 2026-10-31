@@ -120,6 +120,7 @@ public:
         route_arrived_ = false;
                 cross_id_ = 0;
         servo_ = false;
+        drive_in_done_ = false;
         reapproach_ = false;
         exited_ = false;
         predicted_room_id_ = 0;
@@ -283,6 +284,12 @@ public:
     /// one's floor and is gone. Its reason (pingpong11 leg 4: 0.4 m in, a 179 deg relocaliser flip looking back through
     /// the door) is now met by the new room carrying the crossed door (room_concept note_passage_handover, every crossing).
     void note_servo() { std::scoped_lock lk(m_); servo_ = true; }
+    /// DRIVE-IN (spec 2026-10-31 room-crossing v4, step 3): past THROUGH the servo keeps driving along the door axis into
+    /// the new room, as far as its cross target or the live returns allow; the session says here when that is over (at
+    /// the target, no room ahead, or no anchor to drive on). The passage ends only after it AND the room switch.
+    void note_drive_in_done() { std::scoped_lock lk(m_); drive_in_done_ = true; }
+    [[nodiscard]] bool exited() const { std::scoped_lock lk(m_); return exited_; }
+    [[nodiscard]] bool driving_in() const { std::scoped_lock lk(m_); return exited_ and servo_ and not drive_in_done_; }
     /// Some part of the body is in the perceived opening (drive_door_route): a withdrawn cross does not send it back then.
     void note_in_opening(bool in) { std::scoped_lock lk(m_); in_opening_ = in; }
     [[nodiscard]] bool servo() const { std::scoped_lock lk(m_); return servo_; }
@@ -829,7 +836,8 @@ private:
         if (cross.has_value()) route_cross_ = *cross;
 
         // ── DONE: the crossing fact was written, room_concept switched the room and ltsm archived the room left
-        if (step_ == Step::Cross and exited_ and room_id_ != 0 and room_id_ != cross_id_ and archived_id_ == room_id_)
+        if (step_ == Step::Cross and exited_ and room_id_ != 0 and room_id_ != cross_id_ and archived_id_ == room_id_
+            and (not servo_ or drive_in_done_))   // v4 step 3: and the servo has driven in as far as it will
             return route_through(out, std::format("{} -> {}", cross_room_, room_frame));
         // ── the route's end, as the session reported it
         if (std::exchange(route_arrived_, false))
@@ -926,6 +934,22 @@ private:
             return out;
         }
         const bool through = step_ == Step::Cross;
+        if (through and exited_ and servo_ and not drive_in_done_)   // v4 step 3: past THROUGH, the servo drives in
+        {
+            RouteLeg leg;
+            leg.door = door_;
+            leg.through = true;
+            if (route_approach_.has_value()) { leg.approach = route_approach_->first; leg.approach_yaw = route_approach_->second; }
+            if (route_cross_.has_value()) { leg.cross = route_cross_->first; leg.cross_yaw = route_cross_->second; }
+            leg.key = std::format("{}|drive_in|{}|{}", door_, route_epoch_, room_frame);
+            route_key_ = leg.key;
+            out.route = std::move(leg);
+            out.required = name_of(step_) + kRouteSuffix;
+            step_state_ = "driving in";
+            note_ = std::format("{} (through, driving into the new room on the anchor)", name_of(step_));
+            out.exempt = {door_};
+            return out;
+        }
         if (through and exited_)   // through, the fact written: hold (no route, the claim stays) until the switch is archived
         {
             out.route.reset();
@@ -977,6 +1001,7 @@ private:
         route_arrived_ = false;
         exited_ = false;
         servo_ = false;
+        drive_in_done_ = false;
         reapproach_ = false;
         cross_id_ = room_id_;   // the room ID the step began in
         // THE PREDICTION, taken before crossing: the remembered room ltsm's recall under this door names (recall_<k>, its
@@ -1011,6 +1036,7 @@ private:
     bool route_arrived_ = false;
     bool exited_ = false;                  ///< through: the crossing fact was handed to the caller (once per Cross)
     bool servo_ = false;                   ///< the doorway is driven on the anchor (note_servo)
+    bool drive_in_done_ = false;           ///< past THROUGH, the servo has driven in as far as it will (note_drive_in_done)
     bool in_opening_ = false;              ///< some part of the body in the perceived opening (note_in_opening)
     bool reapproach_ = false;              ///< back to the vantage after a withdrawn cross: no auto-cross before it
     std::uint64_t predicted_room_id_ = 0;  ///< the remembered room behind the door at enter_cross (0 = new)

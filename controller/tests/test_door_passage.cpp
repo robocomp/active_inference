@@ -970,6 +970,34 @@ int main()
         out = p.update(*G, nullptr, "room_1");
         CHECK(p.view().step == Step::Cross and out.route.has_value() and out.route->through and out.route->key == k);
     }
+    {   // v4 DRIVE-IN (spec 2026-10-31 room-crossing v4, step 3): with the servo, past THROUGH the passage keeps handing the
+        //   session the leg so the servo drives into the new room; DONE needs the room switch AND the drive-in over
+        auto G = make_graph(65);
+        DoorPassage p;
+        p.set_clock(clock);
+        p.set_use_route(true);
+        p.note_room_id(1);
+        p.start("door_v", Step::Cross);
+        offered(*G, "aff_door_v_approach"); target(*G, "aff_door_v_approach", 2.f, 1.6f, down);
+        offered(*G, "aff_door_v_cross");    target(*G, "aff_door_v_cross", 2.f, -0.8f, down);
+        { DSR::Node m = DSR::Node::create<object_node_type>("door_v"); G->insert_node(m); }
+        auto out = p.update(*G, nullptr, "room_1");
+        CHECK(out.route.has_value() and out.route->through);
+        p.note_servo();                                            // the session engaged the servo on the anchor
+        p.note_route(out.route->key, RR::Arrived);                 // the body wholly past the opening: THROUGH
+        out = p.update(*G, nullptr, "room_1");
+        CHECK(out.exit.has_value() and out.exit->door == "door_v");
+        CHECK(p.driving_in());
+        CHECK(out.route.has_value() and out.route->key.find("drive_in") != std::string::npos);   // still driven, on the servo
+        p.note_room_id(2); p.note_archived_room_id(2);             // room_concept switched, ltsm archived
+        out = p.update(*G, nullptr, "room_2");
+        CHECK(p.view().step == Step::Cross and out.route.has_value());   // …but the drive-in is not over: not DONE
+        p.note_drive_in_done();                                    // the target reached / no room ahead / no anchor
+        out = p.update(*G, nullptr, "room_2");
+        CHECK(p.view().step == Step::Done and not p.view().failed);
+        CHECK(not out.route.has_value());
+        CHECK(p.take_finished());
+    }
     {   // FLAG OFF: the affordance chain, unchanged — no route, the approach affordance required
         auto G = make_graph(64);
         DoorPassage p;

@@ -3482,6 +3482,14 @@ bool ControllerSession::drive_door_route(const ControllerPlanningStep &step, rc:
                                           facing ? "" : " ✗");
                 if (not front_of_open) anchor_cross_.reset();   // execute() must not run the servo on it
             }
+            if (door_passage_.driving_in() and not anchor_cross_.has_value())   // v4 step 3: nothing left to drive in on
+            {
+                std::println("[door-route] drive-in: {}'s anchor is gone after the switch — stopped in the new room", leg.door);
+                path_controller.stop();
+                motion_commander.stop_robot();
+                door_passage_.note_drive_in_done();
+                return true;
+            }
             if (not front_of_open and not why_not.empty() and door_servo_refused_logged_ != leg.key)
             {
                 door_servo_refused_logged_ = leg.key;
@@ -4600,6 +4608,12 @@ ControllerSession::CrossProtocol ControllerSession::cross_protocol(const Control
             const auto g = rc::anchor_cross_geometry(drive_pose);
             // Task 12 Fix E: past a room switch the cross's node is gone — `through` is the door passage's to act on.
             anchor_through_ = true;
+            if (door_passage_.driving_in())   // v4 step 3: the drive-in reached the cross target
+            {
+                std::println("[door-route] drive-in: {} at the cross target, {:.2f} m past the plane — stopped in the new room",
+                             drive_name, g.s);
+                door_passage_.note_drive_in_done();
+            }
             if (door_passage_.clearing())
             {
                 if (p_through > 0.5)
@@ -4898,6 +4912,18 @@ void ControllerSession::step_anchor_cross(const ControllerRobotPose &robot_pose,
                          rc::anchor_signed_distance(returns_body(), q), base_speed_lin_, base_speed_ang_, returns.capture_self);
     }
     const auto cap = cap_by_returns(returns, adv_mps, side_mps, rot_rps);
+    // v4 step 3 (user 2026-10-31: "if there is not much space after the door, just stop"): past THROUGH, the live returns
+    // leaving the body no forward speed IS the end of the free space ahead — the drive-in stops there, no escape; the
+    // room's own affordances move the robot on (a new room's survey) or the leg ends (a recalled room).
+    if (door_passage_.driving_in() and cap.bound_lin and not (cap.v_lim > 0.f))
+    {
+        std::println("[door-route] drive-in: no free space ahead ({} live returns bind the body) — stopped in the new room",
+                     returns.r.obstacles.size());
+        path_controller.stop();
+        note_no_command(); motion_commander.stop_robot();
+        door_passage_.note_drive_in_done();
+        return;
+    }
     if (const bool binding = cap.bound_lin and cap.v_lim < v_field; binding != anchor_returns_binding_logged_)
     {
         anchor_returns_binding_logged_ = binding;
