@@ -11,6 +11,7 @@
 
 #pragma once
 
+#include <algorithm>
 #include <cstdint>
 #include <functional>
 #include <map>
@@ -18,6 +19,7 @@
 #include <optional>
 #include <print>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "generated/idl/image_framePubSubTypes.hpp"
@@ -207,6 +209,45 @@ descriptor_from_graph(Graph& graph, const std::string& node_name,
         return std::nullopt;
     try { return MediaDescriptor::from_json(it->second.str()); }
     catch (...) { return std::nullopt; }   // attribute present but not a string / malformed
+}
+
+// ── SensorModel accessors ────────────────────────────────────────────────────
+// Pure (no DSR, no DDS) so they are unit-testable; the graph reader below is a thin shell over the first.
+// NO FALLBACK CONSTANTS in here: absent model => nullopt, and the CONSUMER decides what it falls back to
+// (and says which source it used). A fallback hidden in the accessor would make a nominal number look measured.
+
+// Descriptor JSON -> its model, only if it carries one (version > 0). Malformed JSON => nullopt.
+[[nodiscard]] inline std::optional<SensorModel> sensor_model_from_json(const std::string& json)
+{
+    std::optional<MediaDescriptor> d;
+    try { d = MediaDescriptor::from_json(json); }
+    catch (...) { return std::nullopt; }
+    if (not d.has_value() or d->model.empty()) return std::nullopt;
+    return d->model;
+}
+
+// Lowest / highest beam elevation in DEVICE frame [deg]: from the per-ring table if there is one, else the
+// fov span. nullopt when the model carries neither.
+[[nodiscard]] inline std::optional<float> lowest_elev_deg(const SensorModel& m)
+{
+    if (not m.ring_elev_deg.empty()) return std::ranges::min(m.ring_elev_deg);
+    return m.fov_start_deg;
+}
+[[nodiscard]] inline std::optional<float> highest_elev_deg(const SensorModel& m)
+{
+    if (not m.ring_elev_deg.empty()) return std::ranges::max(m.ring_elev_deg);
+    return m.fov_end_deg;
+}
+
+// Mean angular spacing between rings [rad]. With a table: (max-min)/(n-1) of it; without: the fov span over
+// (rings-1). nullopt when it cannot be formed (fewer than 2 rings, or no span).
+[[nodiscard]] inline std::optional<float> mean_ring_spacing_rad(const SensorModel& m)
+{
+    constexpr float deg2rad = 3.14159265358979f / 180.f;
+    const auto lo = lowest_elev_deg(m), hi = highest_elev_deg(m);
+    const int n = m.ring_elev_deg.empty() ? m.rings.value_or(0) : static_cast<int>(m.ring_elev_deg.size());
+    if (n < 2 or not lo.has_value() or not hi.has_value() or *hi <= *lo) return std::nullopt;
+    return (*hi - *lo) * deg2rad / static_cast<float>(n - 1);
 }
 
 namespace detail
@@ -515,6 +556,21 @@ make_lidar_subscriber_from_graph(Graph& graph, const std::string& node_name,
     std::print("[media] LiDAR subscriber up from '{}' descriptor: domain={} topic='{}'\n",
                node_name, cfg->domain_id, cfg->topic_name);
     return sub;
+}
+
+// The sensor model the producer advertised on `node_name`'s media descriptor, or nullopt (no node, no
+// attribute, unparsable, or no model / version 0).
+template <class Graph>
+[[nodiscard]] std::optional<SensorModel>
+sensor_model_from_graph(Graph& graph, std::string_view node_name)
+{
+    auto node = graph.get_node(std::string(node_name));
+    if (not node.has_value()) return std::nullopt;
+    const auto& attrs = node->attrs();
+    auto it = attrs.find(MEDIA_DESCRIPTOR_ATTR);
+    if (it == attrs.end()) return std::nullopt;
+    try { return sensor_model_from_json(it->second.str()); }
+    catch (...) { return std::nullopt; }
 }
 
 template <class Graph>
