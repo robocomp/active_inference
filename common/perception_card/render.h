@@ -14,6 +14,9 @@
 #include <cmath>
 #include <cstdint>
 #include <limits>
+#include <numbers>
+#include <random>
+#include <string_view>
 #include <vector>
 
 namespace rc::card
@@ -31,11 +34,10 @@ namespace detail
 {
 struct RayBox { float cx, cy, c, s, hw, hh, z0, z1; };   // c,s = cos/sin(-yaw): room -> local
 
-inline RayBox ray_box(const rc::nbv::Obstacle& o, float room_height)
+inline RayBox ray_box(const rc::nbv::Obstacle& o)
 {
     const float inf = std::numeric_limits<float>::infinity();
     // z1 <= z0 = height unknown (viewpoint_score.h): taller than anything; walls are capped at the room height by the caller
-    (void)room_height;
     return {o.cx, o.cy, std::cos(-o.yaw), std::sin(-o.yaw), 0.5f * o.w, 0.5f * o.h, o.z0, o.has_height() ? o.z1 : inf};
 }
 
@@ -62,13 +64,37 @@ inline float slab_hit(const RayBox& b, float ox, float oy, float oz, float dx, f
     if (inside) *inside = in;
     return (hit and not in and tmin > 0.0f) ? tmin : inf;
 }
+
+// The parts' footprint bounding box in the first part's frame (the sample's yaw), as the evaluator's Target.
+inline rc::nbv::Target target_of(const Placed& placed)
+{
+    rc::nbv::Target tgt;
+    const float inf = std::numeric_limits<float>::infinity();
+    tgt.yaw = placed.boxes.front().yaw;
+    const float c = std::cos(tgt.yaw), s = std::sin(tgt.yaw);
+    float x0 = inf, x1 = -inf, y0 = inf, y1 = -inf, z0 = inf, z1 = -inf;
+    for (const auto& b : placed.boxes)
+    {
+        const float bc = std::cos(b.yaw), bs = std::sin(b.yaw);
+        for (const float sx : {-0.5f, 0.5f}) for (const float sy : {-0.5f, 0.5f})
+        {
+            const float px = b.cx + sx * b.w * bc - sy * b.h * bs, py = b.cy + sx * b.w * bs + sy * b.h * bc;
+            const float lx = px * c + py * s, ly = -px * s + py * c;
+            x0 = std::min(x0, lx); x1 = std::max(x1, lx); y0 = std::min(y0, ly); y1 = std::max(y1, ly);
+        }
+        z0 = std::min(z0, b.z0); z1 = std::max(z1, b.has_height() ? b.z1 : b.z0);
+    }
+    const float mx = 0.5f * (x0 + x1), my = 0.5f * (y0 + y1);
+    tgt.cx = mx * c - my * s; tgt.cy = mx * s + my * c; tgt.w = x1 - x0; tgt.h = y1 - y0; tgt.z0 = z0; tgt.z1 = z1;
+    return tgt;
+}
 }  // namespace detail
 
-// The imagined ZED image of `placed` seen from `vp`. `card` (optional) supplies the wall thickness and the own-wall skip, so
-// the numbers agree with evaluate_camera on the same card; without it, the legacy 0.12 m walls and no skip. Callers add the
-// note "room height 2.5 m assumed" when !world.room_height_known.
-inline ImaginedImage render_zed(const World& world, const Viewpoint& vp, const Placed& placed, int out_w = 320, int out_h = 180,
-                                const Card* card = nullptr)
+// The imagined ZED image of `placed` seen from `vp`. `card` is REQUIRED: it supplies the wall thickness and the own-wall
+// skip, so the numbers agree with evaluate_camera on the same card. Callers add the note "room height 2.5 m assumed" when
+// !world.room_height_known. The target must NOT also be in World.obstacles (it would occlude itself).
+inline ImaginedImage render_zed(const World& world, const Viewpoint& vp, const Placed& placed, const Card& card,
+                                int out_w = 320, int out_h = 180)
 {
     namespace nbv = rc::nbv;
     ImaginedImage im;
@@ -80,38 +106,19 @@ inline ImaginedImage render_zed(const World& world, const Viewpoint& vp, const P
     const float mount = world.zed_mount_z > 1e-3f ? world.zed_mount_z : sensor.height_m;
     const float inf = std::numeric_limits<float>::infinity();
 
-    // the target: the parts' footprint bounding box in the first part's frame (the sample's yaw); also the aim point
-    nbv::Target tgt;
-    {
-        tgt.yaw = placed.boxes.front().yaw;
-        const float c = std::cos(tgt.yaw), s = std::sin(tgt.yaw);
-        float x0 = inf, x1 = -inf, y0 = inf, y1 = -inf, z0 = inf, z1 = -inf;
-        for (const auto& b : placed.boxes)
-        {
-            const float bc = std::cos(b.yaw), bs = std::sin(b.yaw);
-            for (const float sx : {-0.5f, 0.5f}) for (const float sy : {-0.5f, 0.5f})
-            {
-                const float px = b.cx + sx * b.w * bc - sy * b.h * bs, py = b.cy + sx * b.w * bs + sy * b.h * bc;
-                const float lx = px * c + py * s, ly = -px * s + py * c;
-                x0 = std::min(x0, lx); x1 = std::max(x1, lx); y0 = std::min(y0, ly); y1 = std::max(y1, ly);
-            }
-            z0 = std::min(z0, b.z0); z1 = std::max(z1, b.has_height() ? b.z1 : b.z0);
-        }
-        const float mx = 0.5f * (x0 + x1), my = 0.5f * (y0 + y1);
-        tgt.cx = mx * c - my * s; tgt.cy = mx * s + my * c; tgt.w = x1 - x0; tgt.h = y1 - y0; tgt.z0 = z0; tgt.z1 = z1;
-    }
+    const nbv::Target tgt = detail::target_of(placed);
     const Eigen::Vector2f to = tgt.centre() - vp.xy;
     const float yaw = vp.yaw ? *vp.yaw : (to.norm() > 1e-6f ? std::atan2(to.y(), to.x()) : 0.0f);
 
     // occluders: walls as slabs [0, room_height] (own walls left out when the card says so), then the named obstacles
-    const float wall_t = card ? detail::wall_thickness_for(*card) : detail::kLegacyWallThicknessM;
+    const float wall_t = detail::wall_thickness_for(card);
     auto walls = nbv::wall_obstacles(world.polygon, wall_t, world.gaps);
-    if (card and card->walls)
-        std::erase_if(walls, [&](const nbv::Obstacle& w) { return detail::own_wall(w, *card->walls, tgt); });
+    if (card.walls)
+        std::erase_if(walls, [&](const nbv::Obstacle& w) { return detail::own_wall(w, *card.walls, tgt); });
     std::vector<detail::RayBox> others, parts;
-    for (const auto& w : walls) { auto b = detail::ray_box(w, world.room_height); b.z0 = 0.0f; b.z1 = world.room_height; others.push_back(b); }
-    for (const auto& [name, o] : world.obstacles) others.push_back(detail::ray_box(o, world.room_height));
-    for (const auto& p : placed.boxes) parts.push_back(detail::ray_box(p, world.room_height));
+    for (const auto& w : walls) { auto b = detail::ray_box(w); b.z0 = 0.0f; b.z1 = world.room_height; others.push_back(b); }
+    for (const auto& [name, o] : world.obstacles) others.push_back(detail::ray_box(o));
+    for (const auto& p : placed.boxes) parts.push_back(detail::ray_box(p));
 
     // a camera inside a part sees nothing (and the evaluator calls the stand infeasible: Inside)
     for (const auto& b : parts)
@@ -151,5 +158,97 @@ inline ImaginedImage render_zed(const World& world, const Viewpoint& vp, const P
         im.visible_frac = static_cast<float>(n_vis) / static_cast<float>(n_vis + n_occ);
     }
     return im;
+}
+
+struct ImaginedScan
+{
+    std::vector<Eigen::Vector3f> on_target, on_other;   // room-frame points: kept returns on the parts / on walls+obstacles in the sector
+    std::vector<float> ring_elev_room_deg;              // per ring, at the sector's centre bearing (room frame)
+    float lambda0 = 0;                                  // rays whose nearest hit is a part, before q_return and the range factor
+    bool modelled = false;
+};
+
+// The imagined LiDAR scan of `placed` from `vp`. `rig` is the BODY-frame rig (as evaluate_lidar takes it); null or ringless
+// = not modelled. Each ring is cast through the real mount (rig_in_room) over the azimuths subtended by the parts' bounding
+// box +-5 deg (all round if the sensor is inside it), against the parts, the world's obstacles and the wall slabs [0,
+// room_height] (card thickness, own-wall skip). A ray with range in [range_min, range_max] that hits a part is kept with
+// probability q_return (the card's, for `subtype`) and displaced along the ray by N(0, range_sigma_floor_m); lambda0 is the
+// evaluator's, computed on the compound shape. The target must NOT also be in World.obstacles. Same seed, same points.
+inline ImaginedScan render_lidar(const World& world, const Viewpoint& vp, const LidarRig* rig, const Placed& placed,
+                                 std::uint64_t seed, const Card& card, std::string_view subtype = "")
+{
+    namespace nbv = rc::nbv;
+    ImaginedScan sc;
+    if (not rig or placed.boxes.empty()) return sc;
+    const auto elevs = detail::ring_elevations_deg(rig->model);
+    const float az_step = rig->model.azimuth_step_deg.value_or(0.0f) * detail::kDeg2Rad;
+    if (elevs.empty() or az_step <= 0.0f) return sc;
+    sc.modelled = true;
+
+    const nbv::Target tgt = detail::target_of(placed);
+    Hypothesis h; h.x = tgt.cx; h.y = tgt.cy;
+    const LidarRig r = rig_in_room(*rig, vp, h);
+    const Eigen::Vector3f o = r.mount.translation();
+    const Eigen::Matrix3f R = r.mount.linear();
+    const float rmin = r.model.range_min_m.value_or(0.0f), rmax = r.model.range_max_m.value_or(1e9f);
+    const float sigma = std::max(r.model.range_sigma_floor_m.value_or(0.02f), 1e-3f);
+    const float q = params_for(card, subtype).q_return;
+    constexpr float pi = std::numbers::pi_v<float>;
+
+    // the sector: bearings subtended by the footprint, +-5 deg; all round when the sensor is inside it
+    const Eigen::Vector2f from = o.head<2>(), rel = tgt.centre() - from;
+    const float bearing = rel.norm() > 1e-6f ? std::atan2(rel.y(), rel.x()) : 0.0f;
+    const Eigen::Vector2f ex = tgt.axis_x(), ey = tgt.axis_y();
+    bool inside = std::abs((from - tgt.centre()).dot(ex)) <= 0.5f * tgt.w and std::abs((from - tgt.centre()).dot(ey)) <= 0.5f * tgt.h;
+    float lo = 0.0f, hi = 0.0f;
+    for (int i = 0; i < 4 and not inside; ++i)
+    {
+        const Eigen::Vector2f c = tgt.centre() + ((i & 1) ? 0.5f : -0.5f) * tgt.w * ex + ((i & 2) ? 0.5f : -0.5f) * tgt.h * ey;
+        const float a = std::remainder(std::atan2(c.y() - from.y(), c.x() - from.x()) - bearing, 2.0f * pi);
+        lo = std::min(lo, a); hi = std::max(hi, a);
+    }
+    const float pad = 5.0f * detail::kDeg2Rad;
+    for (const float e : elevs) sc.ring_elev_room_deg.push_back(detail::room_elevation(r.mount, e, bearing) / detail::kDeg2Rad);
+
+    // occluders, as in render_zed
+    auto walls = nbv::wall_obstacles(world.polygon, detail::wall_thickness_for(card), world.gaps);
+    if (card.walls)
+        std::erase_if(walls, [&](const nbv::Obstacle& w) { return detail::own_wall(w, *card.walls, tgt); });
+    std::vector<detail::RayBox> others, parts;
+    for (const auto& w : walls) { auto b = detail::ray_box(w); b.z0 = 0.0f; b.z1 = world.room_height; others.push_back(b); }
+    for (const auto& [name, ob] : world.obstacles) others.push_back(detail::ray_box(ob));
+    for (const auto& p : placed.boxes) parts.push_back(detail::ray_box(p));
+
+    std::mt19937_64 rng(seed);
+    std::uniform_real_distribution<float> U(0.0f, 1.0f);
+    std::normal_distribution<float> N(0.0f, sigma);
+    const float inf = std::numeric_limits<float>::infinity();
+    const int n_az = static_cast<int>(std::ceil(2.0f * pi / az_step));
+    for (const float e_deg : elevs)
+    {
+        const float e = e_deg * detail::kDeg2Rad, ce = std::cos(e), se = std::sin(e);
+        for (int k = 0; k < n_az; ++k)
+        {
+            const float az = static_cast<float>(k) * az_step;
+            const Eigen::Vector3f d = R * Eigen::Vector3f(ce * std::cos(az), ce * std::sin(az), se);
+            if (not inside)
+            {
+                const float rb = std::remainder(std::atan2(d.y(), d.x()) - bearing, 2.0f * pi);
+                if (rb < lo - pad or rb > hi + pad) continue;
+            }
+            float t_part = inf, t_other = inf;
+            for (const auto& b : parts) t_part = std::min(t_part, detail::slab_hit(b, o.x(), o.y(), o.z(), d.x(), d.y(), d.z(), nullptr));
+            for (const auto& b : others) t_other = std::min(t_other, detail::slab_hit(b, o.x(), o.y(), o.z(), d.x(), d.y(), d.z(), nullptr));
+            const float t = std::min(t_part, t_other);
+            if (not std::isfinite(t) or t < rmin or t > rmax) continue;
+            if (t_part < t_other)
+            {
+                sc.lambda0 += 1.0f;
+                if (U(rng) < q) sc.on_target.push_back(o + (t + N(rng)) * d);
+            }
+            else sc.on_other.push_back(o + t * d);
+        }
+    }
+    return sc;
 }
 }  // namespace rc::card

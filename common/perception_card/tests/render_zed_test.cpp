@@ -76,7 +76,7 @@ int main()
 
     { // (a) clear view at 3 m
         const World w = room();
-        const auto im = render_zed(w, vp, ch, 320, 180, &card);
+        const auto im = render_zed(w, vp, ch, card, 320, 180);
         const auto ev = rc::nbv::predicted_fill_axes(
             [&]{ rc::nbv::Target t; t.cx = h.x; t.cy = h.y; t.yaw = h.yaw; t.w = h.size->w; t.h = h.size->d; t.z0 = h.size->z0; t.z1 = h.size->z1; return t; }(),
             vp.xy, [&]{ auto s = *w.zed; s.height_m = w.zed_mount_z; return s; }(), std::atan2(2.0f - 2.0f, 5.0f - 2.0f)).first;
@@ -96,7 +96,7 @@ int main()
         {
             World w = room();
             w.obstacles.push_back({"box_1", rc::nbv::Obstacle{3.5f, oy, 1.0f, 1.0f, 0.0f, 0.0f, 1.2f}});
-            const auto im = render_zed(w, vp, solid, 320, 180, &card);
+            const auto im = render_zed(w, vp, solid, card, 320, 180);
             rc::nbv::Target t; t.cx = hs.x; t.cy = hs.y; t.yaw = hs.yaw; t.w = hs.size->w; t.h = hs.size->d; t.z0 = hs.size->z0; t.z1 = hs.size->z1;
             auto s = *w.zed; s.height_m = w.zed_mount_z;
             const auto ob = detail::build_obstacles(w, card, &t);
@@ -113,7 +113,7 @@ int main()
         std::printf("b: worst |render - evaluator| visible_frac over the sweep = %.4f\n", worst);
         World w = room();
         w.obstacles.push_back({"box_1", rc::nbv::Obstacle{3.5f, 2.5f, 1.0f, 1.0f, 0.0f, 0.0f, 1.2f}});
-        const auto im = render_zed(w, vp, ch, 320, 180, &card);
+        const auto im = render_zed(w, vp, ch, card, 320, 180);
         std::printf("b (legged chair, for information): visible_frac=%.4f\n", im.visible_frac);
         CHECK(im.visible_frac < 0.99f);
     }
@@ -121,7 +121,7 @@ int main()
         World w = room();
         w.polygon = {{0, 0}, {6, 0}, {6, 4}, {0, 4}};
         w.obstacles.push_back({"wall_piece", rc::nbv::Obstacle{3.5f, 2.0f, 0.1f, 6.0f, 0.0f, 0.0f, 2.5f}});
-        const auto im = render_zed(w, vp, ch, 320, 180, &card);
+        const auto im = render_zed(w, vp, ch, card, 320, 180);
         const auto n = std::ranges::count(im.visible, 1);
         std::printf("c: visible px=%ld occluded px=%ld\n", long(n), long(std::ranges::count(im.occluded, 1)));
         CHECK(n == 0);
@@ -132,7 +132,7 @@ int main()
         World w = room();
         Placed here; here.boxes.push_back(rc::nbv::Obstacle{2.0f, 2.0f, 0.45f, 0.45f, 0.0f, 0.0f, 1.2f});   // tall enough to hold the camera (0.945 m)
         w.obstacles.push_back({"chair_here", rc::nbv::Obstacle{2.0f, 2.0f, 0.45f, 0.45f, 0.0f, 0.0f, 1.2f}});
-        const auto im = render_zed(w, vp, here, 320, 180, &card);
+        const auto im = render_zed(w, vp, here, card, 320, 180);
         CHECK(std::ranges::count(im.visible, 1) == 0 and std::ranges::count(im.occluded, 1) == 0);
         CHECK(finite_all(im));
         Hypothesis hh = bbox_hyp(here, 0.0f);
@@ -147,7 +147,7 @@ int main()
         constexpr int N = 20;
         const auto t0 = std::chrono::steady_clock::now();
         float sink = 0;
-        for (int i = 0; i < N; ++i) sink += render_zed(w, vp, ch, 320, 180, &card).fill_max;
+        for (int i = 0; i < N; ++i) sink += render_zed(w, vp, ch, card, 320, 180).fill_max;
         const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count() / N;
         std::printf("timing: one 320x180 render = %.2f ms (sink %.3f)\n", ms, sink);
     }
