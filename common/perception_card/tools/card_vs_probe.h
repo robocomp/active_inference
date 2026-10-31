@@ -34,7 +34,7 @@ namespace rc::card::probe
 {
 struct Row
 {
-    double rx = 0, ry = 0, cam_z = 0, ocx = 0, ocy = 0, oyaw = 0;
+    double rx = 0, ry = 0, cam_z = 0, ocx = 0, ocy = 0, oyaw = std::numeric_limits<double>::quiet_NaN();   // NaN = absent
     double roi_fill = 0, p_detect = 0;
     bool roi_valid = false, fired = false;
 };
@@ -147,8 +147,13 @@ inline Report analyse(const Log& log, const Card* card, const Options& o = {})
     if (not card) { rep.note = "no card given: geometric comparison skipped (use --agent-dir)"; return rep; }
     if (not log.has_oyaw)
     {
-        rep.note = "log has no `oyaw` column (written by logs from this commit on): the hypothesis cannot be rebuilt; "
+        rep.note = "log has no `oyaw` column: the hypothesis cannot be rebuilt; "
                    "the geometric comparison needs new logs. Only the agent's own logged p is scored.";
+        return rep;
+    }
+    if (std::ranges::none_of(log.rows, [](const Row& r) { return std::isfinite(r.oyaw); }))
+    {
+        rep.note = "oyaw not populated by the agent: geometric comparison skipped. Only the agent's own logged p is scored.";
         return rep;
     }
     rep.geometric = true;
@@ -163,6 +168,7 @@ inline Report analyse(const Log& log, const Card* card, const Options& o = {})
     double sb = 0, sl = 0; std::size_t cov_ok = 0;
     for (const Row& r : log.rows)
     {
+        if (not std::isfinite(r.oyaw)) continue;   // a row without a believed yaw has no hypothesis: never invent one
         w.zed_mount_z = float(r.cam_z); s.height_m = float(r.cam_z); s.env = sp.env;
         Hypothesis h; h.concept_ = card->concept_; h.x = float(r.ocx); h.y = float(r.ocy); h.yaw = float(r.oyaw);
         const Eigen::Vector2f from{float(r.rx), float(r.ry)};

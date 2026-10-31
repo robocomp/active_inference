@@ -24,6 +24,9 @@ int main()
     w.zed = s; w.zed_mount_z = 0.945f; s.height_m = 0.945f; s.env = d.env;
 
     const auto path = (std::filesystem::temp_directory_path() / "card_vs_probe_test.csv").string();
+    // gen(): rows from the evaluator under belief sigmas `gs`; `nan_yaw` writes oyaw=nan; `junk` appends roi_valid=0 rows
+    // whose roi_fill is garbage (they must be excluded from coverage).
+    const auto gen = [&](float gs, bool nan_yaw, bool junk)
     {
         std::ofstream f(path); f.imbue(std::locale::classic());
         f << "cycle,rx,ry,cam_z,ocx,ocy,roi_fill,roi_valid,p_detect,fired,oyaw\n";
@@ -37,21 +40,51 @@ int main()
             const Eigen::Vector2f from{float(5.0 + rr * std::cos(ang)), float(2.0 + rr * std::sin(ang))};
             const double p = evaluate_camera(c, w, h, {from, std::nullopt}).p;
             rc::nbv::Target t; t.cx = h.x; t.cy = h.y; t.yaw = h.yaw; t.w = 0.7f; t.h = 0.7f; t.z0 = 0; t.z1 = 1.8f;
-            t.sigma_extent_m = opt.sigma_extent; t.sigma_pos_m = opt.sigma_pos;
+            t.sigma_extent_m = gs; t.sigma_pos_m = gs;
             const double fp = rc::nbv::predicted_fill(t, from, s), sg = rc::nbv::predicted_fill_sigma(t, from, s);
             if (not std::isfinite(fp)) continue;
-            f << i << ',' << from.x() << ',' << from.y() << ",0.945,5,2," << fp + sg * N(rng) << ",1," << p << ','
-              << (U(rng) < p ? 1 : 0) << ',' << h.yaw << '\n';
+            const bool bad_row = junk and i % 4 == 0;
+            f << i << ',' << from.x() << ',' << from.y() << ",0.945,5,2," << (bad_row ? 99.0 : fp + sg * N(rng)) << ','
+              << (bad_row ? 0 : 1) << ',' << p << ',' << (U(rng) < p ? 1 : 0) << ',';
+            if (nan_yaw) f << "nan"; else f << h.yaw;
+            f << '\n';
         }
-    }
+    };
+    gen(opt.sigma_extent, false, false);
     const auto log = probe::read_log(path);
     CHECK(log.error.empty() and log.has_oyaw and log.rows.size() > 15000);
     const auto rep = probe::analyse(log, &c, opt);
     probe::print(stdout, "synthetic", rep);
     CHECK(rep.geometric);
     CHECK(std::abs(rep.bias_geo) < 0.02);
-    CHECK(std::abs(rep.bias_geo_vs_logged) < 1e-3);
+    CHECK(std::abs(rep.bias_geo_vs_logged) < 1e-3);   // PLUMBING check only: p_detect was written from the same evaluator, so this holds by construction
     CHECK(std::abs(rep.coverage - 0.954) < 0.03);
+    int big = 0;   // the real calibration check: observed rate tracks predicted p in every well-populated bin
+    for (const auto& b : rep.rel_geo) if (b.n > 500) { ++big; CHECK(std::abs(b.rate - b.mean_pred) < 0.03); }
+    CHECK(big >= 1);
+
+    { // non-default sigma: data generated with 0.12; scoring with the matching sigma covers ~0.954, with the default it does not
+        gen(0.12f, false, false);
+        probe::Options o2 = opt; o2.sigma_extent = o2.sigma_pos = 0.12f;
+        const auto l2 = probe::read_log(path);
+        const auto r_ok = probe::analyse(l2, &c, o2), r_bad = probe::analyse(l2, &c, opt);
+        std::printf("sigma 0.12: coverage matched %.3f, default %.3f\n", r_ok.coverage, r_bad.coverage);
+        CHECK(std::abs(r_ok.coverage - 0.954) < 0.03);
+        CHECK(r_bad.coverage < 0.90);
+    }
+    { // roi_valid = 0 rows carry garbage fill: they must not reach the coverage
+        gen(opt.sigma_extent, false, true);
+        const auto l3 = probe::read_log(path);
+        const auto r3 = probe::analyse(l3, &c, opt);
+        CHECK(r3.n_cov < r3.n_geo and r3.n_cov > 0.6 * double(r3.n_geo) and std::abs(r3.coverage - 0.954) < 0.03);
+    }
+    { // oyaw column present but NaN (agent does not populate it): logged-p statistics only
+        gen(opt.sigma_extent, true, false);
+        const auto l4 = probe::read_log(path);
+        CHECK(l4.has_oyaw and l4.rows.size() > 15000);
+        const auto r4 = probe::analyse(l4, &c, opt);
+        CHECK(not r4.geometric and r4.n > 15000 and r4.note.find("oyaw not populated") != std::string::npos);
+    }
     // an old log (no oyaw) must degrade to the logged-p part, plainly
     { std::ofstream f(path); f << "cycle,rx,ry,cam_z,ocx,ocy,roi_fill,roi_valid,p_detect,fired\n1,0,0,0.9,2,2,0.3,1,0.5,1\n"; }
     const auto old = probe::analyse(probe::read_log(path), &c, opt);

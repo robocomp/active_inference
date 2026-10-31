@@ -7,6 +7,13 @@
 #include <clocale>
 #include <cstdlib>
 
+static int usage()
+{
+    std::fprintf(stderr, "usage: card_vs_probe probe.csv... [--agent-dir DIR] [--zed f,w,h] [--sigma ext,pos] [--csv out.csv]\n"
+                         "  --zed needs 3 numbers (focal px, width px, height px); --sigma needs 2 (extent m, position m)\n");
+    return 2;
+}
+
 int main(int argc, char** argv)
 {
     std::setlocale(LC_ALL, "");   // CLAUDE.md: reproduce the agents' locale; parsing is from_chars regardless
@@ -17,19 +24,19 @@ int main(int argc, char** argv)
     for (int i = 1; i < argc; ++i)
     {
         const std::string a = argv[i];
-        const auto two = [&](double& x, double& y, double& z)
+        const auto two = [&](double& x, double& y, double& z, std::size_t need)
         {
             if (i + 1 >= argc) return false;
             const auto p = P::split(argv[++i]);
-            return p.size() >= 2 and P::num(p[0], x) and P::num(p[1], y) and (p.size() < 3 or P::num(p[2], z));
+            return p.size() == need and P::num(p[0], x) and P::num(p[1], y) and (need < 3 or P::num(p[2], z));
         };
         if (a == "--agent-dir" and i + 1 < argc) agent_dir = argv[++i];
         else if (a == "--csv" and i + 1 < argc) csv_out = argv[++i];
-        else if (a == "--zed") { if (not two(opt.zed_f, opt.zed_w, opt.zed_h)) return 2; }
-        else if (a == "--sigma") { double e = 0, p = 0, z = 0; if (not two(e, p, z)) return 2; opt.sigma_extent = float(e); opt.sigma_pos = float(p); }
+        else if (a == "--zed") { if (not two(opt.zed_f, opt.zed_w, opt.zed_h, 3)) return usage(); }
+        else if (a == "--sigma") { double e = 0, p = 0, z = 0; if (not two(e, p, z, 2)) return usage(); opt.sigma_extent = float(e); opt.sigma_pos = float(p); }
         else files.push_back(a);
     }
-    if (files.empty()) { std::fprintf(stderr, "usage: card_vs_probe probe.csv... [--agent-dir DIR] [--zed f,w,h] [--sigma ext,pos] [--csv out.csv]\n"); return 2; }
+    if (files.empty()) return usage();
     std::optional<rc::card::Card> card;
     if (not agent_dir.empty())
     {
