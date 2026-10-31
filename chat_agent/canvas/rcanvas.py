@@ -39,7 +39,7 @@ from types import SimpleNamespace
 OUT = "out.png"
 
 __all__ = ["world", "image", "figure", "save", "save_image", "layout_axes", "draw_table", "draw_room", "draw_doors", "draw_objects",
-           "draw_robot", "draw_target", "draw_layout", "fit_view", "graph", "draw_graph", "plt", "np", "math"]
+           "draw_robot", "draw_target", "draw_layout", "fit_view", "graph", "draw_graph", "imagined", "draw_imagined_zed", "draw_imagined_lidar", "plt", "np", "math"]
 
 
 def __getattr__(name):
@@ -375,3 +375,83 @@ def _draw_graph_networkx(g, w, h):
     buf = BytesIO()
     fig.savefig(buf, format="png")
     return Image.open(buf).convert("RGB")
+
+
+# ---- imagined observations (written by chat_agent's imagined_io.h: imagined.json + imagined_zed.png) ----
+def imagined():
+    """The imagined-observation set as a namespace (samples, lidar, mc, caption, image, ...), or None if there is none."""
+    try:
+        with open("imagined.json", encoding="utf-8") as f:
+            return _ns(json.load(f))
+    except FileNotFoundError:
+        return None
+
+
+def draw_imagined_zed(ax, im=None):
+    """Per-pixel visible frequency (red) and occluded frequency (green) of the imagined ZED view over the samples; the
+    pixels occluded in any sample are hatched, and the frame border is drawn."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import numpy as np
+    from matplotlib.patches import Rectangle
+    from PIL import Image
+    im = im or imagined()
+    ax.set_xticks([])
+    ax.set_yticks([])
+    if im is None or not os.path.exists("imagined_zed.png"):
+        ax.text(0.5, 0.5, "no imagined view", ha="center", va="center", transform=ax.transAxes)
+        return ax
+    a = np.asarray(Image.open("imagined_zed.png").convert("RGB")).astype(float) / 255.0
+    h, w = a.shape[:2]
+    vis, occ = a[..., 0], a[..., 1]
+    ax.imshow(np.stack([vis, 0.35 * occ, 0.35 * occ], axis=-1), extent=(0, w, h, 0), interpolation="nearest")
+    if (occ > 0).any():
+        ax.contourf(np.arange(w) + 0.5, np.arange(h) + 0.5, (occ > 0).astype(float), levels=[0.5, 1.5],
+                    hatches=["///"], colors="none")
+    ax.add_patch(Rectangle((0, 0), w, h, fill=False, edgecolor="black", linewidth=1.5))
+    ax.set_xlim(0, w)
+    ax.set_ylim(h, 0)
+    ax.set_title(getattr(im, "caption", "") or "imagined view", fontsize=8)
+    return ax
+
+
+def draw_imagined_lidar(ax_top, ax_side, im=None):
+    """The imagined LiDAR returns, one faint colour per sample: top view (x, y) and side view (x, z). Points on the
+    target are coloured, points on walls/obstacles grey. The side view also carries the ring elevation lines (room
+    frame), drawn from the robot's position at floor level."""
+    im = im or imagined()
+    if im is None:
+        for ax in (ax_top, ax_side):
+            ax.text(0.5, 0.5, "no imagined scan", ha="center", va="center", transform=ax.transAxes)
+        return ax_top, ax_side
+    import matplotlib.pyplot as plt
+    cmap = plt.get_cmap("tab10")
+    ring = []
+    for sensor in im.lidar:
+        for i, sc in enumerate(sensor):
+            for pts, col, alpha in ((sc.on_other, "0.6", 0.15), (sc.on_target, cmap(i % 10), 0.35)):
+                if pts:
+                    xs, ys, zs = zip(*pts)
+                    ax_top.scatter(xs, ys, s=3, color=col, alpha=alpha, linewidths=0)
+                    ax_side.scatter(xs, zs, s=3, color=col, alpha=alpha, linewidths=0)
+            if not ring and sc.ring_elev_room_deg:
+                ring = list(sc.ring_elev_room_deg)
+    w = world()
+    x0 = w.robot.x if w.robot is not None else 0.0
+    lo, hi = ax_side.get_xlim()
+    reach = max(abs(hi - x0), abs(lo - x0), 1.0)
+    for e in ring:
+        t = math.tan(math.radians(e))
+        ax_side.plot([x0, x0 + reach], [0, reach * t], color="tab:red", linewidth=0.5, alpha=0.5)
+    for s in im.samples:
+        for b in s.parts:
+            ax_top.plot([b.cx], [b.cy], marker="+", color="black", markersize=4, alpha=0.4)
+    ax_top.set_aspect("equal", adjustable="datalim")
+    ax_top.set_xlabel("x (m)")
+    ax_top.set_ylabel("y (m)")
+    ax_side.set_xlabel("x (m)")
+    ax_side.set_ylabel("z (m)")
+    ax_side.set_ylim(-0.5, 3.0)
+    ax_top.grid(True, linewidth=0.3, alpha=0.5)
+    ax_side.grid(True, linewidth=0.3, alpha=0.5)
+    return ax_top, ax_side

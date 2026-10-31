@@ -66,6 +66,11 @@ g++ -std=c++23 -O0 -g -Wall -Wextra -Wno-missing-field-initializers -fPIC -o "$o
 "$out/test_chat_window" 2>&1 | grep -v -E "propagateSizeHints|QOpenGLWidget"
 else echo "test_chat_window: skipped (no DISPLAY)"; fi
 python3 test_canvas_stock.py
+MPLBACKEND=Agg python3 test_imagined_canvas.py
+g++ -std=c++23 -O0 -g -Wall -Wextra -Wno-deprecated-literal-operator -fPIC -isystem /usr/include/eigen3 -I../../common \
+    -I../../common/media_transport -o "$out/test_imagined_io" test_imagined_io.cpp \
+    $(pkg-config --cflags Qt6Gui | sed "s/-I/-isystem /g") $(pkg-config --libs Qt6Gui)
+"$out/test_imagined_io"
 g++ -std=c++23 -O0 -g -Wall -Wextra -Wno-deprecated-literal-operator -fPIC -o "$out/test_topology" test_topology.cpp \
     $(pkg-config --cflags Qt6Core | sed "s/-I/-isystem /g") $(pkg-config --libs Qt6Core)
 "$out/test_topology"
