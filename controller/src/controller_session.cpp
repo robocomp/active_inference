@@ -8873,10 +8873,50 @@ void ControllerSession::begin_escape(const ControllerRobotPose &robot_pose,
                               raw_return_clearance(T * Eigen::Vector2f(+probe, 0.f), robot_pose, obstacle_tracker));
     const float rear_probe = params_ ? params_->escape_rear_probe_m : 0.45f;
     escape_rear_raw_m_ = raw_return_clearance(T * Eigen::Vector2f(0.f, -rear_probe), robot_pose, obstacle_tracker);
-    if (std::abs(cl - cr) > 0.05f)
-        escape_turn_sign_ = (cl > cr) ? +1.f : -1.f;
+    // ★ ESCALATION (user 2026-10-31: "progressively more energetic, more movement backwards and rotations in both
+    //   directions; eventually it has to give up and publish that it is stuck"). One EPISODE = the escapes while the robot
+    //   has not left a body radius of where it first wedged; each one backs further and turns harder, the first toward
+    //   the clearer side, then alternating, and from the second on turning both ways within the escape.
+    {
+        const float r_episode = path_controller.footprint().circumscribed_radius();
+        if (escape_level_ > 0 and (robot_pose.pos - escape_episode_origin_).norm() > r_episode)
+        {
+            escape_level_ = 0;          // it got out last time: a new episode
+            stuck_given_up_ = false;
+        }
+        if (escape_level_ == 0) escape_episode_origin_ = robot_pose.pos;
+        ++escape_level_;
+    }
+    if (escape_level_ > kMaxEscapeLevels)
+    {
+        stuck_given_up_ = true;
+        escape_active_ = false;
+        clear_tracking_state();
+        current_plan_.reset();
+        plan_spline_valid_ = false;
+        path_controller.stop();
+        const std::string why = std::format("{} escalating escapes within {:.2f} m of where it wedged", kMaxEscapeLevels,
+                                            path_controller.footprint().circumscribed_radius());
+        door_passage_.fail_stuck(why);
+        if (last_target_info_.has_value() and last_target_info_->from_affordance and active_target_id_ != 0)
+        {
+            reject_affordance_id_ = active_target_id_;
+            reject_affordance_name_ = last_target_info_->node_name;
+        }
+        note_why(rc::why::Cause::Escape, std::format("STUCK — gave up: {}", why));
+        std::println("[recovery] STUCK — gave up after {}; the task fails 'stuck'", why);
+        return;
+    }
+    if (escape_level_ == 1)
+    {
+        if (std::abs(cl - cr) > 0.05f)
+            escape_turn_sign_ = (cl > cr) ? +1.f : -1.f;
+        else
+            escape_turn_sign_ = (escape_count_ % 2 == 0) ? +1.f : -1.f;
+    }
     else
-        escape_turn_sign_ = (escape_count_ % 2 == 0) ? +1.f : -1.f;
+        escape_turn_sign_ = -escape_turn_sign_;   // the other way from the last attempt
+    escape_phase2_ = false;
 
     // Mark the stuck spot just ahead of the robot so the replanner routes around whatever we
     // wedged on. We drop a LOCAL-ONLY VIRTUAL obstacle (not the LiDAR-observed temp obstacle):
@@ -8909,8 +8949,9 @@ void ControllerSession::begin_escape(const ControllerRobotPose &robot_pose,
     // An escape is an exceptional state transition, so it gets one line — but only the facts that identify
     // the episode. The geometry dump that used to live here existed to prove the disc was not trapping the
     // robot on itself; that is now guaranteed by construction (fwd_off clears the footprint above).
-    std::println("[controller] ESCAPE #{} — wedged, reversing and turning {}. Side clearance L={:.2f} R={:.2f} m.",
-                 escape_count_ + 1, escape_turn_sign_ > 0 ? "left" : "right", cl, cr);
+    std::println("[controller] ESCAPE #{} (level {}/{} of this episode) — wedged, reversing and turning {}{}. Side clearance "
+                 "L={:.2f} R={:.2f} m.", escape_count_ + 1, escape_level_, kMaxEscapeLevels, escape_turn_sign_ > 0 ? "left" : "right",
+                 escape_level_ >= 2 ? " then back the other way" : "", cl, cr);
 
     mission_.note_escape();
     escape_active_   = true;
@@ -8963,8 +9004,15 @@ void ControllerSession::step_escape(const ControllerRobotPose &robot_pose,
     note_why(rc::why::Cause::Escape,
              std::format("wedged: reverse + turn {} out of it, {:.2f} m backed so far (escape {} on this target)",
                          escape_turn_sign_ > 0.f ? "LEFT" : "RIGHT", backed, escapes_on_target_));
-    const float max_ms = params_ ? params_->escape_max_ms : 1500.f;
-    const float max_dist = params_ ? params_->escape_distance_m : 0.30f;
+    // escalation: level k backs k times as far, for k times as long, faster and turning harder (to the base's limits)
+    const float k = static_cast<float>(std::max(1, escape_level_));
+    const float max_ms = k * (params_ ? params_->escape_max_ms : 1500.f);
+    const float max_dist = k * (params_ ? params_->escape_distance_m : 0.30f);
+    if (escape_level_ >= 2 and not escape_phase2_ and (backed > 0.5f * max_dist or now_ms - escape_start_ms_ > 0.5f * max_ms))
+    {
+        escape_phase2_ = true;
+        escape_turn_sign_ = -escape_turn_sign_;   // both directions: the second half turns back the other way
+    }
     if (now_ms - escape_start_ms_ > static_cast<std::uint64_t>(max_ms) || backed > max_dist)
     {
         escape_active_ = false;
@@ -8986,8 +9034,9 @@ void ControllerSession::step_escape(const ControllerRobotPose &robot_pose,
     // The raw-return reading taken at escape start (see begin_escape) ANDed with the live field: the
     // field is blind inside its 0.405 m self-filter disc, which is where a wedged body's contacts are.
     const float rear = std::min(path_controller.clearance_at(0.f, -rear_probe), escape_rear_raw_m_);
-    const float adv = (rear < rear_min) ? 0.f : -(params_ ? params_->escape_adv_speed_mps : 0.15f);
-    float rot = escape_turn_sign_ * (params_ ? params_->escape_rot_speed_rps : 0.35f);
+    const float v_lim = params_ ? params_->max_adv_speed_mps : 0.35f, w_lim = params_ ? params_->max_rot_speed_rps : 1.0f;
+    const float adv = (rear < rear_min) ? 0.f : -std::min(v_lim, k * (params_ ? params_->escape_adv_speed_mps : 0.15f));
+    float rot = escape_turn_sign_ * std::min(w_lim, k * (params_ ? params_->escape_rot_speed_rps : 0.35f));
     // ★ Task 14 fix round 1, item 2 (a): the escape's reverse-and-turn goes through the SAME live-returns net as every
     //   other command — it may not back a corner into a real return or turn one into a jamb it is beside.
     float adv_c = adv, side_c = 0.f;

@@ -320,6 +320,17 @@ public:
         std::println("{}", last_event_);
     }
     static constexpr int kMaxRouteFailures = 2;   ///< the build or the drive failing twice ends the passage (one rebuild)
+    /// The session's escalating recovery gave up (begin_escape): the passage ends FAILED with outcome "stuck".
+    void fail_stuck(const std::string& why)
+    {
+        std::scoped_lock lk(m_);
+        if (step_ == Step::Idle or step_ == Step::Done) return;
+        finish();
+        failed_ = true;
+        last_outcome_ = "stuck";
+        last_event_ = std::format("[door-passage] {}: the robot is STUCK ({}) — passage FAILED (stuck)", door_, why);
+        std::println("{}", last_event_);
+    }
 
     struct Out
     {

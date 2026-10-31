@@ -1440,6 +1440,13 @@ private:
     float         escape_turn_sign_ = 1.0f;     // +1 / −1: rotation direction during escape
     float         escape_rear_raw_m_ = 100.f;   // raw-return clearance behind the body at escape start
     int           escape_count_ = 0;            // consecutive escapes (alternating fallback for turn dir)
+    // ESCALATING RECOVERY (user 2026-10-31): the escapes of ONE stuck episode — the robot not having left a body radius
+    // of where it first wedged — grow: further back, faster, turning both ways; past kMaxEscapeLevels it gives up.
+    int             escape_level_ = 0;          ///< escapes in the current stuck episode (1 = the first)
+    Eigen::Vector2f escape_episode_origin_ = Eigen::Vector2f::Zero();
+    bool            escape_phase2_ = false;     ///< level ≥ 2: the second half of the escape turns the other way
+    bool            stuck_given_up_ = false;    ///< the recovery gave up: the task failed "stuck" (chat-agent reads it)
+    static constexpr int kMaxEscapeLevels = 4;  ///< ⚠ a decision bound: escapes per episode before giving up
     // ── REJECT RATHER THAN STRUGGLE ──────────────────────────────────────────────────────────────
     // Escapes charged to the affordance they happened under, because escape_count_ is a session-lifetime
     // counter and says nothing about WHICH target the robot keeps failing to reach. Measured live: 12
