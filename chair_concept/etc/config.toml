@@ -197,7 +197,6 @@ MergeOverlap = 0.20      # collapse two instances whose seat footprints overlap 
 # that mismatch routed 99% of SEAT points into the BACKREST component (the z-band gate keys on SeatH)
 # and dumped 30-56% of every mask above the model into flat clutter. Fixing SeatH alone moved a chair's
 # continuous yaw error from 98.1 deg to 1.0 deg. Re-derive these for any different chair model.
-BirthLegHalf = 0.0375    # square leg half-side
 
 NllCost = false          # association cost = ½(m²+ln|S|) NLL (compete by likelihood, not raw distance)
 # ZED-only BIRTH: only a ZED slice (per-pixel depth ⇒ depth_var==0) may SPAWN a chair. A ricoh LiDAR-reprojected

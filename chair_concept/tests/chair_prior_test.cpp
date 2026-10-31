@@ -3,12 +3,15 @@
 // Run under the agent locale:  LANG=es_ES.UTF-8 ./chair_prior_test
 #include "chair_card.h"
 #include "chair_belief.h"
+#include "chair_mesh.h"
 #include "chair_model.h"
 #include "chair_prior.h"
+#include <algorithm>
 #include <clocale>
 #include <cmath>
 #include <cstdio>
 #include <expected>
+#include <filesystem>
 #include <fstream>
 #include <iterator>
 
@@ -26,7 +29,7 @@ int main()
     if (not pr) { std::printf("%s\n", pr.error().c_str()); return 1; }
     CHECK(near(pr->seat_w, 0.60f) and near(pr->seat_d, 0.52f) and near(pr->seat_h, 0.595f)
           and near(pr->back_h, 0.655f) and near(pr->seat_thick, 0.075f) and near(pr->seat_w_std, 0.05f)
-          and near(pr->seat_d_std, 0.04f) and near(pr->seat_h_std, 0.03f) and near(pr->back_h_std, 0.06f));
+          and near(pr->leg_half, 0.0375f) and near(pr->seat_d_std, 0.04f) and near(pr->seat_h_std, 0.03f) and near(pr->back_h_std, 0.06f));
     CHECK(near(pr->p_free, 0.5f) and near(pr->p_against_wall, 0.5f)
           and near(pr->wall_gap_mean, 0.05f) and near(pr->wall_gap_sigma, 0.05f));   // [prior.placement]
 
@@ -35,7 +38,7 @@ int main()
     CHECK(near(pr->seat_h_b.lo, 0.38f) and near(pr->seat_h_b.hi, 0.70f) and near(pr->back_h_b.lo, 0.30f) and near(pr->back_h_b.hi, 0.80f));
 
     // a manifest missing seat_w_m is an error naming the key
-    const std::string bad_path = std::string(AGENT_DIR) + "/tests/chair_prior_missing.tmp.toml";
+    const std::string bad_path = (std::filesystem::temp_directory_path() / "chair_prior_missing.tmp.toml").string();
     {
         std::ifstream in(manifest);
         std::ofstream out(bad_path);
@@ -69,7 +72,7 @@ int main()
         const auto at = text.find(from);
         CHECK(at != std::string::npos);
         if (at != std::string::npos) text.replace(at, from.size(), to);
-        const std::string path = std::string(AGENT_DIR) + "/tests/chair_prior_variant.tmp.toml";
+        const std::string path = (std::filesystem::temp_directory_path() / "chair_prior_variant.tmp.toml").string();
         { std::ofstream out(path); out << text; }
         auto r = load_chair_prior(path);
         std::remove(path.c_str());
@@ -79,6 +82,7 @@ int main()
     CHECK(variant("seat_w_m     = 0.60                # x", "seat_w_m     = 0.60 # x").has_value());   // comment is fine
     CHECK(not variant("wall_gap_mean_m  = 0.05 ", "wall_gap_mean_m  = 0.05x ").has_value());   // placement is as strict
     CHECK(not variant("p_free           = 0.5 ", "p_free           = 0 ").has_value());
+    CHECK(not variant("leg_half_m   = 0.0375", "leg_half_m   = 0.0").has_value());       // leg_half is as strict
     CHECK(not variant("seat_w_m     = 0.60", "seat_w_m     = nan").has_value());
     CHECK(not variant("seat_d_std_m = 0.04", "seat_d_std_m = 0.0").has_value());          // zero sigma
     CHECK(not variant("seat_w_m     = 0.60", "seat_w_m     = 0.0").has_value());          // zero size
@@ -120,6 +124,32 @@ int main()
     CHECK(s.seat_w == 0.0f and s.back_h == 0.0f);
     s.seed_size(*pr);
     CHECK(near(s.seat_w, 0.60f) and near(s.seat_d, 0.52f) and near(s.seat_h, 0.595f) and near(s.back_h, 0.655f));
+
+    // The intended LIVE change, pinned: the published height is the prior's top (1.25), the mesh's seat slab is the manifest
+    // thickness (0.075), the legs are the manifest leg_half in the belief, the SDF and the mesh, and ChairModel does not
+    // clamp the template (seat_h 0.595 and back_h 0.655 used to be clamped to 0.55 / 0.65).
+    {
+        CHECK(near(pr->top(), 1.25f));
+        ChairState tpl; tpl.seed_size(*pr);
+        const auto mesh = make_chair_mesh(tpl, *pr);
+        CHECK(mesh.size() == 6u * 108u);
+        float zlo = 1e9f, zhi = -1e9f;
+        for (std::size_t i = 0; i < 108; ++i) if (i % 3 == 2) { zlo = std::min(zlo, mesh[i]); zhi = std::max(zhi, mesh[i]); }
+        CHECK(near(zhi - zlo, 0.075f));                                   // box 0 = the seat slab
+        float xlo = 1e9f, xhi = -1e9f;
+        for (std::size_t i = 4 * 108; i < 5 * 108; ++i) if (i % 3 == 0) { xlo = std::min(xlo, mesh[i]); xhi = std::max(xhi, mesh[i]); }
+        CHECK(near(xhi - xlo, 2.0f * pr->leg_half));                      // box 4 = a leg (yaw 0)
+        ChairModelParams mp; mp.chair = *pr;
+        ChairModel m(tpl, mp);
+        m.set_state(tpl);
+        CHECK(near(m.state().seat_h, 0.595f) and near(m.state().back_h, 0.655f));   // not clamped
+        ChairBeliefParams bp; bp.seed_template(*pr);
+        CHECK(near(bp.leg_half, 0.0375f));
+        // the SDF's legs are leg_half wide: a point 0.03 inside the corner leg is inside, one just beyond 0.0375 is outside
+        const float ox = 0.5f * pr->seat_w - pr->leg_half, oy = 0.5f * pr->seat_d - pr->leg_half;
+        CHECK(m.sdf_point(Eigen::Vector3f(ox + 0.03f, oy, 0.1f)) < 0.0f);
+        CHECK(m.sdf_point(Eigen::Vector3f(ox + 0.05f, oy, 0.1f)) > 0.0f);
+    }
     std::printf(bad ? "chair_prior_test: %d FAILED\n" : "chair_prior_test: OK\n", bad);
     return bad != 0;
 }

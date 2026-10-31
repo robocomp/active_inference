@@ -17,6 +17,7 @@ namespace rc
 struct ChairPrior
 {
     float seat_w = 0.0f, seat_d = 0.0f, seat_h = 0.0f, back_h = 0.0f, seat_thick = 0.0f;
+    float leg_half = 0.0f;                                  // square leg half-side (m): ONE value for belief, SDF, mesh and card
     float seat_w_std = 0.0f, seat_d_std = 0.0f, seat_h_std = 0.0f, back_h_std = 0.0f;   // per-variable std of the size prior (m)
     // [prior.bounds]: physical bounds of the four size DOFs. They CONTAIN the template (checked at load).
     struct Range { float lo = 0.0f, hi = 0.0f; };
@@ -37,7 +38,7 @@ inline std::string_view trim(std::string_view s)
 }
 }  // namespace chair_prior_detail
 
-// Reads the nine keys of [prior.template], the four of [prior.placement] and the eight of [prior.bounds]. STRICT, because this parser is the startup gate for the size prior:
+// Reads the ten keys of [prior.template], the four of [prior.placement] and the eight of [prior.bounds]. STRICT, because this parser is the startup gate for the size prior:
 //  - the whole numeric token must be consumed (only whitespace or a `#` comment may follow);
 //  - every value must be finite and > 0 (a size of 0, a NaN or an Inf is a mistake, not a prior);
 //  - a duplicate key in the section is an error;
@@ -58,6 +59,7 @@ inline std::expected<ChairPrior, std::string> load_chair_prior(const std::string
                   {"[prior.template]", "seat_h_m", &out.seat_h, false},
                   {"[prior.template]", "back_h_m", &out.back_h, false},
                   {"[prior.template]", "seat_thick_m", &out.seat_thick, false},
+                  {"[prior.template]", "leg_half_m", &out.leg_half, false},
                   {"[prior.template]", "seat_w_std_m", &out.seat_w_std, false},
                   {"[prior.template]", "seat_d_std_m", &out.seat_d_std, false},
                   {"[prior.template]", "seat_h_std_m", &out.seat_h_std, false},

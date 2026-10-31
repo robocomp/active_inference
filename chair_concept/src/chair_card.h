@@ -12,7 +12,7 @@ namespace rc
 {
 // The chair's generative block: the SAME compound the SDF in chair_model.cpp evaluates (seat slab + backrest + 4 legs),
 // written as closed primitives bound to the four size variables. The numbers that are NOT variables come from
-// ChairModel (LEG_HALF) and the prior (seat_thick, the SDF's own: one value, see chair_shape_test). The variable
+// the prior (seat_thick and leg_half, the SDF's own: one value, see chair_shape_test). The variable
 // bounds are the prior's [prior.bounds], which ChairModel::apply_constraints clamps to as well.
 inline card::Generative make_generative(const ChairPrior& pr)
 {
@@ -29,7 +29,7 @@ inline card::Generative make_generative(const ChairPrior& pr)
     g.shape.push_back({Prim::Panel, {{"w", V("seat_w")}, {"t", K(T)}, {"h", V("back_h")},
                                      {"x", K(0.0f)}, {"y", V("seat_d", -0.5f, 0.5f * T)}, {"z", V("seat_h")}}});
     // four legs under the seat, flush with its footprint, from the floor to the seat's underside
-    g.shape.push_back({Prim::LegSet, {{"n", K(4.0f)}, {"half", K(ChairModel::LEG_HALF)},
+    g.shape.push_back({Prim::LegSet, {{"n", K(4.0f)}, {"half", K(pr.leg_half)},
                                       {"fw", V("seat_w")}, {"fd", V("seat_d")},
                                       {"z0", K(0.0f)}, {"z1", V("seat_h", 1.0f, -T)}}});
     g.vars = {{"seat_w", pr.seat_w, pr.seat_w_std, pr.seat_w_b.lo, pr.seat_w_b.hi, false},

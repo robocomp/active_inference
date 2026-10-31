@@ -76,18 +76,19 @@ P(detect) it implies.
 - Test: `chair_concept/tests/chair_prior_test.cpp`
 
 **Interfaces (produces):**
-- `struct ChairPrior { float seat_w, seat_d, seat_h, back_h, seat_thick, size_std; };` in
+- `struct ChairPrior { float seat_w, seat_d, seat_h, back_h, seat_thick, leg_half, seat_w_std, seat_d_std, seat_h_std, back_h_std; };` in
   `chair_concept/src/chair_prior.h`
 - `std::expected<ChairPrior, std::string> load_chair_prior(const std::string& manifest_path)`, which reads the
-  `[prior.template]` keys `seat_w_m`, `seat_d_m`, `seat_h_m`, `back_h_m`, `seat_thick_m`, `size_std_m` via the
+  `[prior.template]` keys `seat_w_m`, `seat_d_m`, `seat_h_m`, `back_h_m`, `seat_thick_m`, `leg_half_m`, `seat_w_std_m`, `seat_d_std_m`, `seat_h_std_m`, `back_h_std_m` via the
   manifest's ConfigLoader, using from_chars.
 
 **What changes:**
 - The manifest `[prior.template]` gets the values the agent runs today:
   - `seat_w_m = 0.60`, `seat_d_m = 0.52`, `seat_h_m = 0.595`, `back_h_m = 0.655`, `seat_thick_m = 0.075`,
-    `size_std_m = 0.15`;
+    `leg_half_m = 0.0375`, and one sigma per variable: `seat_w_std_m = 0.05`, `seat_d_std_m = 0.04`,
+    `seat_h_std_m = 0.03`, `back_h_std_m = 0.06` (the shared 0.15 was never read by the code);
   - `from = "config"`, with a `why` saying these are the values chair ran as `Tracker.BirthSeat*` /
-    `AI2PriorSizeStd` until 2026-10-31.
+    `AI2PriorSizeStd` (never actually read) until 2026-10-31.
 - `[model.geometry] z_top_m` and `extent_m` become 1.25. Correct the stale text: "fixed template, pose-only" stays
   true (the belief is pose-only), but the `zed_detectability` sentence goes and the 0.45 numbers are replaced.
 - `chair_config` loads the ChairPrior at startup. On error it logs and refuses to start, via the same exit path as
@@ -140,9 +141,9 @@ Steps:
 
 **chair export (chair_card.h):**
 - **Shape:** a seat Slab, a backrest Panel at the −y edge from z = seat_h, and a LegSet with n = 4,
-  half = `ChairModel::LEG_HALF`, from 0 to seat_h − thick. The constants come from `chair_model.h`.
+  half = `ChairPrior::leg_half` (manifest, 0.0375), from 0 to seat_h − thick. One source: the manifest.
 - **Vars:**
-  - seat_w, seat_d, seat_h and back_h: mean from `ChairPrior`, sigma = `size_std`;
+  - seat_w, seat_d, seat_h and back_h: mean from `ChairPrior`, sigma = the variable's own `*_std`;
   - lo/hi taken FROM `ChairModel::apply_constraints`'s bounds. Expose them as `static constexpr` in chair_model.h
     and use them in both places.
 - **Placement:** support floor, contexts {free: 0.5, against_wall: 0.5}, wall gap mean 0.05 m and sigma 0.05 m.

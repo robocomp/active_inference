@@ -252,8 +252,6 @@ ChairConfig load_chair_config(const ConfigLoader& cfg)
             "Existence.RoomMarginM — tolerance a chair centre may sit OUTSIDE the walls");
     out.exist_out_of_room_gain   = getf("Existence.OutOfRoomGain", 1.5f,
             "Existence.OutOfRoomGain — |ΔL| per frame while outside (debounces a 1-frame glitch)");
-    out.tracker_birth_leg_half   = getf("Tracker.BirthLegHalf", 0.0375f,
-            "square leg half-side");
     out.ai2_mode_obs_weighting   = getb("ChairModel.AI2ModeObsWeighting", true,
             "Weight each frame's yaw-mode vote by the information it carries (backrest mass × viewpoint novelty) instead of counting every frame equally. false =…");
     out.ai2_mode_sat_back_pts    = getf("ChairModel.AI2ModeSatBackPts", 60.0f,

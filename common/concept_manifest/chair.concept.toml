@@ -30,19 +30,23 @@ seat_d_m     = 0.52                # y extent — front-to-back; the backrest si
 seat_h_m     = 0.595               # seat TOP above the floor
 back_h_m     = 0.655               # backrest above the seat top (top at 1.25)
 seat_thick_m = 0.075               # seat slab thickness (also sets the leg/seat z-band split)
+leg_half_m   = 0.0375              # square leg half-side: the Webots SimpleChair legs are 7.5 cm across
 seat_w_std_m = 0.05                # std of the seat_w prior (real chair variation)
 seat_d_std_m = 0.04                # std of the seat_d prior
 seat_h_std_m = 0.03                # std of the seat_h prior
 back_h_std_m = 0.06                # std of the back_h prior
 from         = "nominal"
 why          = """
-These are the values chair ran as Tracker.BirthSeatW/D/H/BackH/SeatThick and ChairModel.AI2PriorSizeStd in
-etc/config.toml until 2026-10-31, when the manifest became their single source. chair's size is a FIXED TEMPLATE,
+The size numbers are the values chair ran as Tracker.BirthSeatW/D/H/BackH/SeatThick in etc/config.toml until
+2026-10-31, when the manifest became their single source. leg_half_m (0.0375) is the Webots SimpleChair's legs, 7.5 cm
+across (the user's ruling, 2026-10-31); it is ONE value feeding the belief, ChairModel's SDF, the mesh and the card's
+LegSet (it replaces Tracker.BirthLegHalf and the SDF's former 0.02 constant, which disagreed with each other). chair's size is a FIXED TEMPLATE,
 not a fitted DOF — chair_belief's state is pose only (cx, cy, yaw). That is a modelling claim: a chair seen from
 one side gives almost no extent information, and estimating it produced the size oscillation this lineage is
 named for. ⚠seat_h has an open gauge question (see the seat_h memory); when it is settled, this becomes `measured`.
-The four *_std_m sigmas describe how much real chairs vary in each size (the user's call, 2026-10-31); they replace the
-old single 0.15 m fitting prior, which was far wider than any real chair and skewed imagined chairs against the bounds.
+The four *_std_m sigmas describe how much real chairs vary in each size (the user's call, 2026-10-31). They are new
+numbers: the old ChairModel.AI2PriorSizeStd (a single 0.15 m) was never read by any code path, so the agent never ran with
+it, and it was far wider than any real chair; the imagined observations sample from these four sigmas instead.
 """
 
 [prior.placement]

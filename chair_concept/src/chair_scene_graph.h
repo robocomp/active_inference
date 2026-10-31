@@ -58,9 +58,6 @@ public:
     // Write the epistemic next-best-view proposal onto a chair node.
     void write_epistemic_proposal(DSR::Node& node, const EpistemicProposal& prop);
 
-    // Flat triangle list (room frame): top slab + 4 legs.
-    static std::vector<float> make_chair_mesh(const ChairState& s, float seat_thick);
-
 private:
     void write_chair_mesh(ChairInstance& inst, DSR::Node& node);
 
