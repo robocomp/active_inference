@@ -26,6 +26,11 @@ echo stop > $B/controller/remote_cmd.txt
 [ -f $B/door_concept/etc/door_identities.csv ] && mkdir -p crossing/door_identities_archive && cp $B/door_concept/etc/door_identities.csv crossing/door_identities_archive/door_identities_before_$1_$(date +%Y%m%d_%H%M%S).csv
 rm -f ../etc/last_robot_pose.txt ../etc/room_name_hwm.txt $B/ltsm_agent/etc/ltsm_memory.json $B/ltsm_agent/etc/ltsm_memory.json.prev
 rm -f $B/door_concept/etc/door_identities.csv
+# ltsm also opens the NEWEST dated generation in its history_dir (28a27091) — deleting ltsm_memory.json alone left every run
+# reloading the previous one (walls 31 -> 205 over the evening of 10-31). Archived, like the memory file.
+for h in $B/ltsm_agent/etc/ltsm_history $WT/ltsm_agent/etc/ltsm_history; do
+  [ -d "$h" ] && [ -n "$(ls -A "$h" 2>/dev/null)" ] && mkdir -p crossing/ltsm_archive && mv "$h" crossing/ltsm_archive/ltsm_history_before_$1_$(date +%Y%m%d_%H%M%S)_$(basename $(dirname $(dirname $(dirname "$h"))))
+done
 rm -rf $B/retina/etc/place_maps/; rm -f $WT/ltsm_agent/etc/recognition_trace.csv $B/ltsm_agent/etc/recognition_trace.csv
 # DOOR_1 starts shut (the cross mission opens it); DOOR_0 and DOOR_2 stay shut for the whole run
 for d in DOOR_1 DOOR_0 DOOR_2; do python3 $S/door.py close $d; done
