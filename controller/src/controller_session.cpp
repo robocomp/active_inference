@@ -3460,7 +3460,6 @@ bool ControllerSession::drive_door_route(const ControllerPlanningStep &step, rc:
             //   Otherwise the planned route keeps driving; the reason is logged once per leg and verdict.
             bool front_of_open = false;
             std::string why_not;
-            door_gate_refused_geometry_ = door_gate_turn_only_ = false;   // judged afresh this cycle (needs an anchor)
             if (update_cross_anchor(on_anchor) and anchor_cross_.has_value())
             {
                 const auto g = rc::anchor_cross_geometry(anchor_cross_->pose);
@@ -3473,10 +3472,7 @@ bool ControllerSession::drive_door_route(const ControllerPlanningStep &step, rc:
                 const bool facing = std::abs(g.heading_err) < 0.5f * static_cast<float>(M_PI);
                 // the checks gate the START: once engaged on this crossing the servo keeps the hole (past the plane s > 0)
                 front_of_open = door_passage_.servo() or (open_belief and open_seen and near_side and within and facing);
-                // with an anchor in hand: off the axis or past the plane is the route's failure; facing away is a turn
-                door_gate_refused_geometry_ = not (near_side and within);
-                door_gate_turn_only_ = near_side and within and not facing and open_belief;
-                door_gate_pose_ = anchor_cross_->pose;
+                door_gate_refused_geometry_ = not (near_side and within and facing);   // with an anchor in hand
                 if (not front_of_open)
                     why_not = std::format("P(open) {:.2f}{} · seen {} · s {:+.2f} m{} · e {:+.2f} m of ±{:.2f}{} · heading {:+.0f} deg{}",
                                           p_open, open_belief ? "" : " ✗", open_seen ? "yes" : "no ✗", g.s, near_side ? "" : " ✗",
@@ -3529,18 +3525,6 @@ bool ControllerSession::drive_door_route(const ControllerPlanningStep &step, rc:
     //   1.4 m off the perceived door's axis, facing 113 deg away; nothing rebuilt it, the leg held for minutes). That is the
     //   route failing: one rebuild — on the PERCEIVED opening when its anchor is up (build_door_route) — then
     //   cross_unreachable, through the passage's own failure count.
-    // ★ AT THE VANTAGE, FACING AWAY: TURN, DO NOT RE-PLAN (pingpong21 leg 2: the route ended well placed — s -1.45, e +0.13 —
-    //   but 114 deg away, the route follower ending by arc length; counted as a route failure, then cross_unreachable). The
-    //   turn is the servo's own toward the opening (anchor_wait_turn), sent by execute() through the live-returns guard.
-    door_vantage_turn_.reset();
-    if (not door_route_active_ and door_cross_servo_ and leg.through and door_route_at_vantage_key_ == leg.key
-        and not door_passage_.servo() and door_gate_turn_only_)
-    {
-        const float w_max = params_ != nullptr ? params_->max_rot_speed_rps : 1.0f;
-        door_vantage_turn_ = rc::anchor_wait_turn(door_gate_pose_, w_max, approach_body_.support_radius(0.f, Eigen::Vector2f(0.f, 1.f)));
-        note_why(rc::why::Cause::PassageClearing, std::format("at the vantage of {}: turning to face the open door", leg.door));
-        return true;
-    }
     if (not door_route_active_ and door_cross_servo_ and leg.through and door_route_at_vantage_key_ == leg.key
         and not door_passage_.servo() and door_gate_refused_geometry_)
     {
@@ -6985,17 +6969,6 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
 
     // The door cross on its interaction anchor owns the base (drive_point_target found a fresh one this cycle and
     // installed no route). Its command goes through the same guard chain as the tracker's — see step_anchor_cross.
-    // At a servo leg's vantage facing away: the turn drive_door_route asked for, through the live-returns guard.
-    if (door_vantage_turn_.has_value())
-    {
-        float adv = 0.f, side = 0.f, rot = *door_vantage_turn_;
-        const auto &cpose = tracker_pose_.has_value() ? *tracker_pose_ : robot_pose;
-        (void)cap_by_returns(live_returns(cpose, obstacle_tracker, path_controller), adv, side, rot);
-        if (rot == 0.f) { note_no_command(); motion_commander.stop_robot(); }
-        else motion_commander.send_speed_command(0.f, 0.f, rot);
-        refresh_view_only();
-        return;
-    }
     band_cross_driving_ = false;   // [Route] BandDrivesCross: set by step_anchor_cross on a cycle it hands the motion over
     if (anchor_cross_.has_value())
     {

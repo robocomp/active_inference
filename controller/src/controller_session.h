@@ -1182,9 +1182,6 @@ private:
     bool door_route_installed_ = false;                             // handed to the tracker (policy off)
     std::string door_route_at_vantage_key_;                         // a servo leg whose route ended at the vantage
     bool door_gate_refused_geometry_ = false;                       // the open-door gate refused on position/heading
-    bool door_gate_turn_only_ = false;                              // ... only on heading (in place, beside the axis is fine)
-    rc::interaction::RelPose door_gate_pose_;                       // the anchor the gate last judged
-    std::optional<float> door_vantage_turn_;                        // execute(): turn in place at the vantage (rad/s)
     std::uint64_t door_route_build_ms_ = 0;                         // last build attempt
     Eigen::Vector2f door_route_n0_{0.f, 1.f};                      // the perceived opening's through-normal, latched per leg (near side)
     std::string door_route_n0_key_, door_route_through_key_;       // door|room it was latched for / already reported THROUGH
