@@ -29,6 +29,9 @@
  */
 
 #include "specificworker.h"
+#include "table_card.h"   // make_card(): this agent's perception card
+#include "../../common/perception_card/card_io.h"   // write_card_file
+#include <filesystem>
 
 #include "../../common/config_report/config_read.h"   // rc::cfg::Reader (SHARED)
 #include "../../common/room_resolve/room_resolve.h"   // rc::room::current_room (proto-aware, deterministic)
@@ -149,6 +152,9 @@ void SpecificWorker::request_shutdown()
     if (existence_ and cfg_.existence_blind_spot_map)   // the class map survives the run (BLIND_SPOT_MAP.md §7)
         std::print("table_concept: blind-spot map {} ({})\n", cfg_.existence_blind_spot_file,
                    existence_->save_blind_spot_map() ? "saved" : "SAVE FAILED");
+    if (existence_ and cfg_.existence_blind_spot_map)   // the map just grew: re-publish the card with its sample count
+        rc::card::write_card_file(std::filesystem::current_path(),
+                                  rc::make_card(cfg_, existence_->blind_spot_samples()));
     save_strip_geometry();       // …nor is the compact belief strip
 
     cleanup_owned_nodes();
@@ -277,6 +283,8 @@ void SpecificWorker::initialize()
     if (cfg_.existence_blind_spot_map)
         std::print("table_concept: blind-spot map: {} class samples loaded from {}\n",
                    existence_->load_blind_spot_map(), cfg_.existence_blind_spot_file);
+    // Perception card (see refrigerator_concept for the cwd rationale). Written again at the blind-spot save.
+    rc::card::write_card_file(std::filesystem::current_path(), rc::make_card(cfg_, existence_->blind_spot_samples()));
 
     // Part B: localization/chain covariance on the published RT edge (mirrors bottle_concept).
     gaussian_api_ = std::make_unique<DSR::InnerGaussianAPI>(G.get());

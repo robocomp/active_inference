@@ -67,6 +67,7 @@ public:
     // graceful exit. Returns the number of samples read / whether the write succeeded.
     std::size_t load_blind_spot_map() { return bsm_.load(cfg_.existence_blind_spot_file); }
     bool        save_blind_spot_map() { return bsm_.save(cfg_.existence_blind_spot_file); }
+    std::size_t blind_spot_samples() const { return bsm_.size(); }
 
     void set_camera_frames(const cv::Mat* rgb, std::uint64_t rgb_stamp_ms,
                            const cv::Mat* depth, std::uint64_t depth_stamp_ms)
