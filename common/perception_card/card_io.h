@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <utility>
 #include <filesystem>
 #include <fstream>
 #include <locale>
@@ -94,12 +95,10 @@ inline std::vector<Card> read_all_cards(const std::filesystem::path& root)
 // Writes to_json(card) into the agent node's perception_card attribute, only when it differs from the current
 // value. Returns false when the node does not exist yet (the agent node is created lazily by the DSR heartbeat:
 // the caller retries); true when the attribute is up to date.
-template <class Att, class G>
-bool publish_card(G& graph, std::uint64_t agent_node_id, const Card& card)
+template <class Att, class G, class Node>
+bool publish_card_json(G& graph, Node& node_ref, const std::string& json)
 {
-    auto node = graph.get_node(agent_node_id);
-    if (not node.has_value()) return false;
-    const std::string json = to_json(card);
+    auto* node = &node_ref;
     const auto cur = graph.template get_attrib_by_name<Att>(*node);
     if (cur.has_value() and std::string(cur.value()) == json) return true;
     graph.template add_or_modify_attrib_local<Att>(*node, json);
@@ -107,25 +106,79 @@ bool publish_card(G& graph, std::uint64_t agent_node_id, const Card& card)
     return true;
 }
 
-// The card of `concept_name`: from the graph (any "agent" node whose perception_card parses and names that
-// concept), else from <root>/<concept>_concept/etc/perception_card.json. `from_graph` (optional) reports which.
-template <class G>
+template <class Att, class G>
+bool publish_card(G& graph, std::uint64_t agent_node_id, const Card& card)
+{
+    auto node = graph.get_node(agent_node_id);
+    if (not node.has_value()) return false;
+    return publish_card_json<Att>(graph, *node, to_json(card));
+}
+
+// Graph-side card selection. `A` names the attributes (a struct of aliases, defined where the DSR is visible):
+//   A::card (perception_card_att), A::presence (agent_presence_state_att), A::stamp (timestamp_agent_att).
+// Two agent nodes can claim one concept (a restarted agent whose old node lingers): the live one wins
+// (presence == "Operating"), then the most recent heartbeat.
+namespace detail
+{
+struct GraphCard { Card card; bool live = false; std::uint64_t stamp = 0; };
+
+template <class A, class G>
+std::vector<GraphCard> graph_cards(G& graph)
+{
+    std::vector<GraphCard> out;
+    for (auto& n : graph.get_nodes_by_type("agent"))
+    {
+        const auto js = graph.template get_attrib_by_name<typename A::card>(n);
+        if (not js.has_value()) continue;
+        auto r = card_from_json(std::string(js.value()));
+        if (not r) continue;
+        GraphCard gc{std::move(*r), false, 0};
+        if (const auto pr = graph.template get_attrib_by_name<typename A::presence>(n); pr.has_value())
+            gc.live = std::string(pr.value()) == "Operating";
+        if (const auto ts = graph.template get_attrib_by_name<typename A::stamp>(n); ts.has_value())
+            gc.stamp = static_cast<std::uint64_t>(ts.value());
+        if (const auto dup = std::ranges::find(out, gc.card.concept_, [](const GraphCard& g) { return g.card.concept_; });
+            dup == out.end()) out.push_back(std::move(gc));
+        else if (std::pair(gc.live, gc.stamp) > std::pair(dup->live, dup->stamp)) *dup = std::move(gc);
+    }
+    return out;
+}
+}
+
+// The card of `concept_name`: from the graph, else from <root>/<concept>_concept/etc/perception_card.json.
+// `from_graph` (optional) reports which.
+template <class A, class G>
 std::optional<Card> read_card(G& graph, std::string_view concept_name, const std::filesystem::path& root,
                               bool* from_graph = nullptr)
 {
     if (from_graph) *from_graph = false;
-    for (const auto& n : graph.get_nodes_by_type("agent"))
-    {
-        const auto& attrs = n.attrs();
-        const auto it = attrs.find("perception_card");
-        if (it == attrs.end()) continue;
-        auto r = card_from_json(it->second.str());
-        if (r and r->concept_ == concept_name)
+    for (auto& gc : detail::graph_cards<A>(graph))
+        if (gc.card.concept_ == concept_name)
         {
             if (from_graph) *from_graph = true;
-            return std::move(*r);
+            return std::move(gc.card);
         }
-    }
     return read_card_file(root / (std::string(concept_name) + "_concept"));
+}
+
+// Every concept's card: the graph's first, then the files for the concepts the graph did not give; sorted by
+// concept name. `n_graph` (optional) = how many came from the graph.
+template <class A, class G>
+std::vector<Card> read_all_cards(G& graph, const std::filesystem::path& root, std::size_t* n_graph = nullptr)
+{
+    std::vector<Card> out;
+    for (auto& gc : detail::graph_cards<A>(graph)) out.push_back(std::move(gc.card));
+    if (n_graph) *n_graph = out.size();
+    for (auto& c : read_all_cards(root))
+        if (std::ranges::find(out, c.concept_, &Card::concept_) == out.end()) out.push_back(std::move(c));
+    std::ranges::sort(out, {}, &Card::concept_);
+    return out;
+}
+
+// What an agent hands to its presence coordinator: the card as the graph copy (absolute paths), pre-serialised so
+// the shared publisher never needs to know the card type.
+inline std::string graph_json(const Card& c)
+{
+    return to_json(with_absolute_paths(std::filesystem::current_path(), c));
 }
 }

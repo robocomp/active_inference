@@ -576,7 +576,7 @@ void SpecificWorker::initialize()
 
     // Perception card: what this agent's P(detect) really multiplies, from the config it runs with (cwd = the agent dir).
     rc::card::write_card_file(std::filesystem::current_path(), rc::make_card(cfg_));
-    presence_coordinator_.publish_card(rc::make_card(cfg_));
+    presence_coordinator_.publish_card_json(rc::card::graph_json(rc::make_card(cfg_)));
 
     // ZED RGB consumer for the contour check. Lazily brought up inside pump() once the descriptor exists
     // (media-plane consumer pattern); dormant while DoorConcept.RgbContourCheck is false.

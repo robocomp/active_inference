@@ -309,7 +309,7 @@ void SpecificWorker::initialize()
     // Perception card: what this agent's P(detect) really multiplies, from the config it runs with. The agent's
     // directory is the cwd (the fleet scripts start every agent with `cd $B/$a`), so etc/perception_card.json lands next to etc/config.toml.
     rc::card::write_card_file(std::filesystem::current_path(), rc::make_card(cfg_));
-    presence_coordinator_.publish_card(rc::make_card(cfg_));
+    presence_coordinator_.publish_card_json(rc::card::graph_json(rc::make_card(cfg_)));
 
     // Stale affordance nodes are swept on entering Operating (presence hook) and on shutdown — see
     // remove_stale_affordance_nodes(), keyed on the parent object type (robust to node-name renames).
