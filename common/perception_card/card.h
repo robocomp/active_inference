@@ -89,7 +89,9 @@ struct PlacementPrior
 {
     std::string support;                          // "floor"
     std::map<std::string, float> contexts;        // keys "free" | "against_wall" -> weight
-    float wall_gap_mean = 0.0f, wall_gap_sigma = 0.0f;   // gap to the wall when against_wall (m)
+    // Gap to the wall when against_wall (m): the distance from the BACKREST's OUTER face (the object's local -y edge) to the
+    // wall line (the polygon edge), drawn from this normal truncated at 0. The backrest faces the wall.
+    float wall_gap_mean = 0.0f, wall_gap_sigma = 0.0f;
 };
 
 struct Generative

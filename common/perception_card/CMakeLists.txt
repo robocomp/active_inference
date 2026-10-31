@@ -47,3 +47,8 @@ add_executable(card_vs_probe_test tests/card_vs_probe_test.cpp)
 target_include_directories(card_vs_probe_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/.. ${CMAKE_CURRENT_SOURCE_DIR}/../media_transport)
 target_link_libraries(card_vs_probe_test PRIVATE Eigen3::Eigen)
 add_test(NAME card_vs_probe_test COMMAND card_vs_probe_test)
+
+add_executable(generative_test tests/generative_test.cpp)
+target_include_directories(generative_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/.. ${CMAKE_CURRENT_SOURCE_DIR}/../media_transport)
+target_link_libraries(generative_test PRIVATE Eigen3::Eigen)
+add_test(NAME generative_test COMMAND generative_test)
