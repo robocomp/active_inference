@@ -63,6 +63,13 @@ public:
     static constexpr float SDF_SMOOTH_K  = 0.02f;
     static constexpr float SDF_INSIDE_SCALE = 0.3f;
 
+    // Physical bounds of the size DOFs (apply_constraints clamps to them; the perception card's generative block
+    // exports the same numbers as the lo/hi of each variable: ONE source).
+    static constexpr float SEAT_W_MIN = 0.30f, SEAT_W_MAX = 0.65f;
+    static constexpr float SEAT_D_MIN = 0.30f, SEAT_D_MAX = 0.65f;
+    static constexpr float SEAT_H_MIN = 0.38f, SEAT_H_MAX = 0.55f;
+    static constexpr float BACK_H_MIN = 0.30f, BACK_H_MAX = 0.65f;
+
     ChairModel() = default;
     ChairModel(const ChairState& prior, const ChairModelParams& params);
 
@@ -80,10 +87,10 @@ public:
     /** Enforce wooden-chair physical bounds on the size DOFs; leave cx,cy,cz,yaw free. */
     void apply_constraints();
 
-private:
-    // SDF evaluated for a given explicit state.
+    // SDF evaluated for a given explicit state (public: the shape-identity test compares the card's primitives to it).
     float sdf_point_at(const Eigen::Vector3f& p, const ChairState& s) const;
 
+private:
     ChairState        state_;
     ChairState        prior_;
     ChairModelParams  params_;

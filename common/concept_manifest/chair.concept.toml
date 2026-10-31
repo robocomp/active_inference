@@ -40,6 +40,18 @@ one side gives almost no extent information, and estimating it produced the size
 named for. ⚠seat_h has an open gauge question (see the seat_h memory); when it is settled, this becomes `measured`.
 """
 
+[prior.placement]
+p_free           = 0.5             # weight of "stands free in the room" (the two weights are normalised by the reader)
+p_against_wall   = 0.5             # weight of "pushed against a wall"
+wall_gap_mean_m  = 0.05            # gap between the backrest-side/any side and the wall when against a wall
+wall_gap_sigma_m = 0.05            # std of that gap
+from             = "nominal"
+why              = """
+Placement of a chair on the floor of a room: either free-standing or pushed to a wall, half and half, with a
+5 cm gap (std 5 cm). NOMINAL — a guess from how rooms are furnished, not measured on this world; the imagined
+observations that use it (appearance sampling) are only as good as these four numbers.
+"""
+
 # ── DELIBERATELY ABSENT ────────────────────────────────────────────────────────────────────────────────
 # [prior.identity]   — chair has no shape log-evidence ratio. Stated as absent so it is asked about rather
 #                      than assumed present; the table manifest records the same gap.

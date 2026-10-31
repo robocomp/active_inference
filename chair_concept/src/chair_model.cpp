@@ -101,10 +101,10 @@ void ChairModel::apply_constraints()
 {
     // Physical bounds for a wooden chair (Webots WoodenChair ≈ 0.45×0.45, seat ~0.46 m, total ~0.92).
     // A hard ceiling stops the flat seat slab from ballooning to swallow contaminated mask points.
-    state_.seat_w = std::clamp(state_.seat_w, 0.30f, 0.65f);
-    state_.seat_d = std::clamp(state_.seat_d, 0.30f, 0.65f);
-    state_.seat_h = std::clamp(state_.seat_h, 0.38f, 0.55f);
-    state_.back_h = std::clamp(state_.back_h, 0.30f, 0.65f);
+    state_.seat_w = std::clamp(state_.seat_w, SEAT_W_MIN, SEAT_W_MAX);
+    state_.seat_d = std::clamp(state_.seat_d, SEAT_D_MIN, SEAT_D_MAX);
+    state_.seat_h = std::clamp(state_.seat_h, SEAT_H_MIN, SEAT_H_MAX);
+    state_.back_h = std::clamp(state_.back_h, BACK_H_MIN, BACK_H_MAX);
 }
 
 }  // namespace rc

@@ -28,3 +28,11 @@ target_compile_definitions(chair_prior_test PRIVATE AGENT_DIR="${CMAKE_CURRENT_L
 target_compile_options(chair_prior_test PRIVATE -O2)
 target_link_libraries(chair_prior_test PRIVATE Eigen3::Eigen)
 add_test(NAME chair_prior_test COMMAND chair_prior_test)
+
+# The card's generative shape (closed primitives) against ChairModel's compound SDF. Run: LANG=es_ES.UTF-8 ./chair_shape_test
+add_executable(chair_shape_test chair_shape_test.cpp ../src/chair_model.cpp)
+target_include_directories(chair_shape_test PRIVATE ../src ../../common ../../common/media_transport)
+target_compile_definitions(chair_shape_test PRIVATE AGENT_DIR="${CMAKE_CURRENT_LIST_DIR}/..")
+target_compile_options(chair_shape_test PRIVATE -O2)
+target_link_libraries(chair_shape_test PRIVATE Eigen3::Eigen)
+add_test(NAME chair_shape_test COMMAND chair_shape_test)

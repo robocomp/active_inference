@@ -4,11 +4,46 @@
 #pragma once
 
 #include "chair_config.h"
+#include "chair_model.h"   // the SDF constants and size bounds the generative block exports
 #include "../../common/perception_card/card.h"
 #include "../../common/occlusion/occlusion.h"   // rc::occlusion::kOwnWallSkipM (the skip chair_detect.h passes)
 
 namespace rc
 {
+// The chair's generative block: the SAME compound the SDF in chair_model.cpp evaluates (seat slab + backrest + 4 legs),
+// written as closed primitives bound to the four size variables. The numbers that are NOT variables come from
+// ChairModel (SEAT_THICKNESS, LEG_HALF): the SDF's own, which differ from the manifest's seat_thick (0.04 vs 0.075,
+// see chair_shape_test). The variable bounds are ChairModel::apply_constraints' own constants.
+inline card::Generative make_generative(const ChairPrior& pr)
+{
+    using card::Bind;
+    using card::Prim;
+    const auto K = [](float b) { return Bind{"", 0.0f, b}; };
+    const auto V = [](const char* v, float a = 1.0f, float b = 0.0f) { return Bind{v, a, b}; };
+    constexpr float T = ChairModel::SEAT_THICKNESS;
+    card::Generative g;
+    // seat slab: x,y centred, z base = seat_h - T, thickness T
+    g.shape.push_back({Prim::Slab, {{"w", V("seat_w")}, {"d", V("seat_d")}, {"h", K(T)},
+                                    {"x", K(0.0f)}, {"y", K(0.0f)}, {"z", V("seat_h", 1.0f, -T)}}});
+    // backrest panel: width = seat_w, thickness T on the -y edge (centre y = -seat_d/2 + T/2), base at the seat top
+    g.shape.push_back({Prim::Panel, {{"w", V("seat_w")}, {"t", K(T)}, {"h", V("back_h")},
+                                     {"x", K(0.0f)}, {"y", V("seat_d", -0.5f, 0.5f * T)}, {"z", V("seat_h")}}});
+    // four legs under the seat, flush with its footprint, from the floor to the seat's underside
+    g.shape.push_back({Prim::LegSet, {{"n", K(4.0f)}, {"half", K(ChairModel::LEG_HALF)},
+                                      {"fw", V("seat_w")}, {"fd", V("seat_d")},
+                                      {"z0", K(0.0f)}, {"z1", V("seat_h", 1.0f, -T)}}});
+    g.vars = {{"seat_w", pr.seat_w, pr.size_std, ChairModel::SEAT_W_MIN, ChairModel::SEAT_W_MAX, false},
+              {"seat_d", pr.seat_d, pr.size_std, ChairModel::SEAT_D_MIN, ChairModel::SEAT_D_MAX, false},
+              {"seat_h", pr.seat_h, pr.size_std, ChairModel::SEAT_H_MIN, ChairModel::SEAT_H_MAX, false},
+              {"back_h", pr.back_h, pr.size_std, ChairModel::BACK_H_MIN, ChairModel::BACK_H_MAX, false}};
+    g.placement.support = "floor";
+    g.placement.contexts = {{"free", pr.p_free}, {"against_wall", pr.p_against_wall}};
+    g.placement.wall_gap_mean = pr.wall_gap_mean;
+    g.placement.wall_gap_sigma = pr.wall_gap_sigma;
+    g.bounds_source = "ChairModel::apply_constraints";
+    return g;
+}
+
 inline card::Card make_card(const ChairConfig& cfg)
 {
     card::Card c;
@@ -41,6 +76,7 @@ inline card::Card make_card(const ChairConfig& cfg)
     const rc::detect::DetectorEnvelope fleet{};
     const bool fitted = sp.env.min_fill != fleet.min_fill or sp.env.max_fill != fleet.max_fill or sp.env.soft != fleet.soft;
     c.calibration = fitted ? "fitted" : "prior";
+    c.generative = make_generative(cfg.prior);
     return c;
 }
 }  // namespace rc
