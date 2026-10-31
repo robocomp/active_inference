@@ -246,21 +246,10 @@ ContourCheck = true      # classifier-free contour channel (common/contour_edge,
 RoomPrior = true         # enforce the room-containment pose prior
 RoomMarginM = 0.40       # tolerance a chair centre may sit OUTSIDE the walls (wall-hugging chair + centroid noise)
 OutOfRoomGain = 1.5      # |ΔL| per frame while outside → removed in a few frames (also debounces a 1-frame glitch)
-# "ZED removes, ricoh confirms": a ricoh WIN confirms existence but a ricoh mask's ABSENCE never removes — only ZED
-# absence does, weighted by how reliably ZED would have detected a present chair (falls off toward the image edge +
-# with range). Fixes removal of a far/peripheral only-ricoh-visible chair when its 360 view is momentarily occluded.
-ZedEdgeOffset = 1.0      # normalised ROI offset (0=centred, 1=image edge) at which ZED detectability → 0
-ZedRangeFull  = 4.0      # within this range (m) ZED detects reliably → absence fully counts (pd=1)
-ZedRangeRef   = 7.0      # beyond this range (m) ZED absence says nothing about existence (pd=0)
-ZedClearLosFloor = 0.0   # ★0 SINCE 2026-07-29 (was 0.15) — this floor WAS the "chairs vanish when unobserved" bug.
-                         # It overrode zed_detectability()==0 (chair beyond ZedRangeRef or at the image edge = ZED
-                         # provably cannot resolve it) and vacated anyway at a constant rate once since_det passed
-                         # VacateConfidentFrames, so L walked to RemoveLogodds on ZERO informative looks. Live proof
-                         # in etc/chair_existence_log.csv: 51 of 69 vacate rows had zed_pd == 0 exactly; chair_2 fell
-                         # 3.09→1.74 and chair_3 2.44→1.09 on the floor alone, then were deleted. Out-of-room glitch
-                         # phantoms (the case this was aimed at) are still reaped by the room-containment prior.
-                         # 0 = pure pd (a peripheral phantom then persists until the robot centres it). Tune down
-                         # if real peripheral chairs get removed; up to clear glitch phantoms faster.
+# "ZED removes, ricoh confirms": ricoh absence never removes; ZED absence is weighted by the shared P(detect)
+# (envelope x in_fov x central x wall line of sight; envelope = ChairModel.DetectMinFill/MaxFill/Soft, defaults 0.10/0.60/0.06).
+# Retired 2026-10-31: ZedEdgeOffset, ZedRangeFull, ZedRangeRef, ZedClearLosFloor -- replaced by that shared formula
+# (range now falls out of the fill; wall line of sight added; a pd floor contradicts "absence is weighted by P(detect)").
 
 [Ice]
 Warn.Connections = "0"

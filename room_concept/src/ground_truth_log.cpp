@@ -118,15 +118,7 @@ void GroundTruthLog::log_ground_truth(const rc::RoomConcept::UpdateResult &res)
                        "calib_sig_kv,calib_sig_kw,calib_sig_yaw,calib_pos_var,"
                        "calib_b_omega,calib_informed,calib_cond,"
                        "imu_dvx,imu_dvy,wheel_dvx,wheel_dvy,imu_dpx,imu_dpy,imu_lin_segs,"
-                       // ── FACTOR B of the camera-extrinsic experiment ─────────────────────────
-                       // The same window solved twice in the shadow: under the mount as it is, and
-                       // under the mount with the self-calibration removed. Both poses RAW and on
-                       // the SAME ROW as the ground truth, so M1 is a subtraction here rather than
-                       // a join across two files with two clocks. Never pre-differenced: a mean and
-                       // its counterfactual travelling as one number is how a mismatch hides.
-                       // fb_ts = 0 means the shadow did not produce a pair on this cycle.
-                       "fb_ts,fb_cal_x,fb_cal_y,fb_cal_th,fb_nom_x,fb_nom_y,fb_nom_th,"
-                       "fb_corr_pitch,fb_corr_height,fb_corr_yaw,gt_x_world,gt_y_world\n";
+                       "gt_x_world,gt_y_world\n";
         }
         else
             qWarning() << "[gt] cannot open tmp/sdf_localizer/gt_error.csv";
@@ -145,10 +137,6 @@ void GroundTruthLog::log_ground_truth(const rc::RoomConcept::UpdateResult &res)
     gt_frame_report(p.translation().x() - (gx.value() - off_x_.load()),
                     p.translation().y() - (gy.value() - off_y_.load()),
                     res.covariance.rows() > 1 ? res.covariance(0, 0) + res.covariance(1, 1) : NAN);
-    // Fetched once and used raw: the pose error each implies is computed from this row offline,
-    // because the subtraction is the analysis and not the measurement.
-    const auto fb = room_concept_.get_factor_b();
-    const std::int64_t fb_ts = fb.valid ? fb.ts_ms : 0;
     gt_csv_ << res.timestamp_ms
             << ',' << gx.value() - off_x_.load() << ',' << gy.value() - off_y_.load() << ',' << gt_th
             << ',' << p.translation().x() << ',' << p.translation().y() << ',' << est_th
@@ -188,11 +176,6 @@ void GroundTruthLog::log_ground_truth(const rc::RoomConcept::UpdateResult &res)
             << ',' << res.imu_dvx << ',' << res.imu_dvy
             << ',' << res.wheel_dvx << ',' << res.wheel_dvy
             << ',' << res.imu_dpx << ',' << res.imu_dpy << ',' << res.imu_lin_segs
-            // ── Factor B: both poses RAW, on this row, never differenced here ────────────────────
-            << ',' << fb_ts
-            << ',' << fb.pose_calibrated.x() << ',' << fb.pose_calibrated.y() << ',' << fb.pose_calibrated.z()
-            << ',' << fb.pose_nominal.x()    << ',' << fb.pose_nominal.y()    << ',' << fb.pose_nominal.z()
-            << ',' << fb.correction.x() << ',' << fb.correction.y() << ',' << fb.correction.z()
             << ',' << gx.value() << ',' << gy.value()
             << '\n';
     gt_csv_.flush();
@@ -319,11 +302,7 @@ void GroundTruthLog::log_heading(const rc::RoomConcept::UpdateResult &res)
 // makes no DSR call at all — in particular no room<-robot lookup, which is the circularity trap the
 // whole design is built to avoid (see image_edge_source.h). The only graph access in this subsystem
 // is CameraIngestor::bind_camera(), which is main-thread by construction because of the ts==0 cache.
-// Every camera in ImageEdge.calibCameras that is NOT the driving one: bind, extract, pair against
-// the same LiDAR corners, and feed its own evidence file. Deliberately a separate function from
-// pump_image_edges(): the driving camera's path also produces the pose factor and the shadow, and
-// none of that should run twice.
-// The RGB channels that lived here — the driving camera's extraction, the calibration-only cameras,
-// and the triple-point placement, 424 lines — are now rc::CalibChannels (src/calib_channels.{h,cpp}).
+// The RGB channel that lived here (the driving camera's extraction and the triple-point placement) is
+// rc::CalibChannels (src/calib_channels.{h,cpp}).
 
 }   // namespace rc

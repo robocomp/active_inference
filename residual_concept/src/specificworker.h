@@ -85,6 +85,8 @@ private:
     void on_optional_peer_ready(const std::string& name, std::uint32_t id);
     // Delete every "residual_*" obstacle node this agent owns (startup sweep + teardown).
     void remove_owned_residual_nodes();
+    void refresh_beam_spacing();        // helios/bpearl SensorModel -> cfg_ beam spacing (the grid reads cfg_ per sweep)
+    void write_perception_card();       // card.json from make_card(cfg_); called from initialize() (via refresh_beam_spacing) and again when the LiDAR model arrives
 
     // A modelled horizontal support surface (a tabletop): its top-z and oriented footprint. An obstacle
     // whose observed bottom is at/above this surface, over its footprint, is assumed to REST on it.
@@ -204,6 +206,7 @@ private:
     // ── Members ──
     bool startup_check_flag = false;
     bool owned_nodes_cleaned_ = false;
+    bool beam_spacing_refreshed_ = false;   // one-time SensorModel re-read at first Operating (producer may start later)
     bool startup_sweep_done_ = false;   // one-time leftover-residual sweep at first Operating (graph joined)
     std::atomic<bool> shutting_down_{false};
     AgentPresenceCoordinator presence_coordinator_;

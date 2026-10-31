@@ -489,7 +489,7 @@ table is the source of truth). Taken:
 |----|-------|----|-------|----|-------|
 | 5 | room_concept | 10 | bottle_concept | 20 | chair_concept |
 | 6 | robot_concept | 11 | kinova_controller | 21 | cabinet_concept |
-| 7 | table_concept | 12 | self_calibration | 22 | refrigerator_concept |
+| 7 | table_concept | 12 | arm_calibration | 22 | refrigerator_concept |
 | 8 | controller | 13 | human_concept | 23 | ring_metaconcept |
 | 9 | retina | 14 | residual_concept | 15 | door_concept |
 | 16 | scene_graph_viewer | 24 | kitchen_metaconcept | 17 | hood_concept |

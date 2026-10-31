@@ -29,6 +29,9 @@
  */
 
 #include "specificworker.h"
+#include "refrigerator_card.h"   // make_card(): this agent's perception card
+#include "../../common/perception_card/card_io.h"   // write_card_file
+#include <filesystem>
 
 #include "../../common/config_report/config_read.h"   // rc::cfg::Reader (SHARED)
 #include "../../common/room_resolve/room_resolve.h"   // rc::room::current_room (proto-aware, deterministic)
@@ -302,6 +305,10 @@ void SpecificWorker::initialize()
     const rc::detect::DetectorEnvelope det_env{cfg_.detect_min_fill, cfg_.detect_max_fill, cfg_.detect_soft};
     epistemic_planner_.set_detector_envelope(det_env);
     if (existence_) existence_->set_detector_envelope(det_env);
+
+    // Perception card: what this agent's P(detect) really multiplies, from the config it runs with. The agent's
+    // directory is the cwd (the fleet scripts start every agent with `cd $B/$a`), so etc/perception_card.json lands next to etc/config.toml.
+    rc::card::write_card_file(std::filesystem::current_path(), rc::make_card(cfg_));
 
     // Stale affordance nodes are swept on entering Operating (presence hook) and on shutdown — see
     // remove_stale_affordance_nodes(), keyed on the parent object type (robust to node-name renames).

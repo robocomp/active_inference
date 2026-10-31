@@ -42,6 +42,8 @@
 #include "../../common/exclusion/exclusion.h"   // rc::exclusion:: (SHARED)
 #include "../../common/diag_log/rotating_csv.h"   // keep the previous run instead of wiping it
 #include "../../common/nbv/graph_obstacles.h"   // rc::nbv::collect_graph_obstacles — shared, DSR-side
+#include "cabinet_card.h"   // make_card(): this agent's perception card
+#include "../../common/perception_card/card_io.h"   // write_card_file
 #include "cabinet_geometry.h"   // rc::geom pure footprint/uncertainty helpers
 
 #include <print>
@@ -287,6 +289,9 @@ void SpecificWorker::initialize()
     // arriving, so reading them in initialize() races the producer. Losing that race leaves
     // vfov = 0, which silently collapses the fill model to horizontal-only — the exact bug
     // rc::nbv exists to fix, and it drives the robot nose-to-nose with tall objects.
+
+    // Perception card: what this agent's P(detect) really multiplies, from the config it runs with (cwd = the agent dir).
+    rc::card::write_card_file(std::filesystem::current_path(), rc::make_card(cfg_));
 
     // Stale affordance nodes are swept on entering Operating (presence hook) and on shutdown — see
     // remove_stale_affordance_nodes(), keyed on the parent object type (robust to node-name renames).

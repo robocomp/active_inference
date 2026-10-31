@@ -5,7 +5,9 @@
 #include "room_eviction.h"   // ltsm::is_door, ltsm::seam_through_passage
 
 #include <algorithm>
+#include <chrono>
 #include <deque>
+#include <functional>
 #include <limits>
 #include <map>
 #include <ranges>
@@ -64,6 +66,19 @@ Eigen::Vector2d apply(const Mat::RTMat &t, const Eigen::Vector2d &p)
     return (t * Eigen::Vector3d(p.x(), p.y(), 0.0)).head<2>();
 }
 
+layout::Vec3 se2(const Mat::RTMat &T)
+{
+    return {T.translation().x(), T.translation().y(), std::atan2(T.rotation()(1, 0), T.rotation()(0, 0))};
+}
+
+Mat::RTMat rtmat(const layout::Vec3 &p)
+{
+    Mat::RTMat T = Mat::RTMat::Identity();
+    T.translate(Mat::Vector3d(p.x(), p.y(), 0.0));
+    T.rotate(Eigen::AngleAxisd(p.z(), Eigen::Vector3d::UnitZ()));
+    return T;
+}
+
 struct LocalDoor
 {
     std::string name;
@@ -80,7 +95,8 @@ std::optional<std::size_t> Map::room_index(const std::string &name) const
 }
 
 Map build(DSR::DSRGraph &mem, const std::string &anchor,
-          const std::map<std::string, std::vector<Eigen::Vector2d>> &live_outlines)
+          const std::map<std::string, std::vector<Eigen::Vector2d>> &live_outlines,
+          LayoutCache *cache, const layout::Model &model)
 {
     Map map;
 
@@ -125,6 +141,7 @@ Map build(DSR::DSRGraph &mem, const std::string &anchor,
 
     // ── Passages: the two faces, their rooms, and the seam that relates them ───────────────────
     std::vector<std::optional<Mat::RTMat>> seam_ab;   ///< T(room_a <- room_b) per passage
+    std::vector<std::optional<seam::Measured>> seam_m;   ///< the same with its covariance (only when solving)
     for (const auto &n : mem.get_nodes_by_type("metaconcept"))
     {
         if (mem.get_attrib_by_name<object_subtype_att>(n).value_or("") != "passage") continue;
@@ -142,44 +159,180 @@ Map build(DSR::DSRGraph &mem, const std::string &anchor,
             slot_room = doors[it->second].room;
         }
         std::optional<Mat::RTMat> s;
+        std::optional<seam::Measured> sm;
         if (p.room_a.has_value() and p.room_b.has_value() and p.room_a != p.room_b)
+        {
             s = ltsm::seam_through_passage(mem, n.name(), map.rooms[*p.room_a].name, map.rooms[*p.room_b].name);
+            if (s.has_value() and cache)
+                sm = ltsm::seam_measured_through_passage(mem, n.name(), map.rooms[*p.room_a].name,
+                                                         map.rooms[*p.room_b].name, p.stated_faces);
+        }
         p.seam_ok = s.has_value();
         seam_ab.push_back(s);
+        seam_m.push_back(sm);
         map.passages.push_back(std::move(p));
     }
 
     // ── Place: BFS over the passages, one component at a time. Room 0 (the anchor) starts the first
-    //    component at the identity, so every room it reaches is expressed in the anchor's frame. ───
-    std::vector<bool> placed(map.rooms.size(), false);
+    //    component at the identity, so every room it reaches is expressed in the anchor's frame. `preset` overrides
+    //    a room's pose as soon as the walk reaches it (the cached MAP poses): a newcomer is then placed from its
+    //    neighbours' settled poses, not from where the bare tree would put them. ─────────────────────────────
+    std::vector<int> start_of;                            ///< component → the room that starts it (its gauge)
     std::vector<bool> tree_edge(map.passages.size(), false);
-    int component = 0;
-    for (std::size_t start = 0; start < map.rooms.size(); ++start)
+    const auto place = [&](const std::function<std::optional<Mat::RTMat>(std::size_t)> &preset)
     {
-        if (placed[start]) continue;
-        placed[start] = true;
-        map.rooms[start].component = component;
-        std::deque<std::size_t> frontier{start};
-        while (not frontier.empty())
+        std::vector<Mat::RTMat> world(map.rooms.size(), Mat::RTMat::Identity());
+        std::vector<bool> placed(map.rooms.size(), false);
+        std::ranges::fill(tree_edge, false);
+        start_of.clear();
+        int component = 0;
+        for (std::size_t start = 0; start < map.rooms.size(); ++start)
         {
-            const auto u = frontier.front();
-            frontier.pop_front();
-            for (const auto &[k, p] : std::views::enumerate(map.passages))
+            if (placed[start]) continue;
+            placed[start] = true;
+            if (const auto p = preset(start); p.has_value()) world[start] = p.value();
+            map.rooms[start].component = component;
+            start_of.push_back(static_cast<int>(start));
+            std::deque<std::size_t> frontier{start};
+            while (not frontier.empty())
             {
-                if (not p.seam_ok) continue;
-                const bool from_a = p.room_a == u, from_b = p.room_b == u;
-                if (not from_a and not from_b) continue;
-                const auto v = from_a ? *p.room_b : *p.room_a;
-                if (placed[v]) continue;
-                map.rooms[v].world = from_a ? Mat::RTMat(map.rooms[u].world * seam_ab[k].value())
-                                            : Mat::RTMat(map.rooms[u].world * seam_ab[k]->inverse());
-                map.rooms[v].component = component;
-                placed[v] = true;
-                tree_edge[k] = true;
-                frontier.push_back(v);
+                const auto u = frontier.front();
+                frontier.pop_front();
+                for (const auto &[k, p] : std::views::enumerate(map.passages))
+                {
+                    if (not p.seam_ok) continue;
+                    const bool from_a = p.room_a == u, from_b = p.room_b == u;
+                    if (not from_a and not from_b) continue;
+                    const auto v = from_a ? *p.room_b : *p.room_a;
+                    if (placed[v]) continue;
+                    world[v] = from_a ? Mat::RTMat(world[u] * seam_ab[k].value())
+                                      : Mat::RTMat(world[u] * seam_ab[k]->inverse());
+                    if (const auto pv = preset(v); pv.has_value()) world[v] = pv.value();
+                    map.rooms[v].component = component;
+                    placed[v] = true;
+                    tree_edge[k] = true;
+                    frontier.push_back(v);
+                }
             }
+            ++component;
         }
-        ++component;
+        return world;
+    };
+    const auto raw = place([](std::size_t) { return std::optional<Mat::RTMat>{}; });
+    const int component = static_cast<int>(start_of.size());
+    for (auto &&[r, w] : std::views::zip(map.rooms, raw)) { r.world = w; r.world_raw = w; }
+
+    // ── MAP: solve when the structure changed, else reuse. The key is what the solve depends on structurally: which
+    //    rooms exist and which passages relate them. Outlines are read at solve time and not re-solved for. ───────
+    if (cache)
+    {
+        std::vector<std::string> names;
+        for (const auto &r : map.rooms) names.push_back(r.name);
+        std::ranges::sort(names);
+        std::vector<std::string> pnames;
+        for (const auto &p : map.passages)
+            if (p.seam_ok) pnames.push_back(p.name);
+        std::ranges::sort(pnames);
+        std::string key;
+        for (const auto &x : names) key += x + ",";
+        key += "|";
+        for (const auto &x : pnames) key += x + ",";
+
+        if (key != cache->key)
+        {
+            const auto t0 = std::chrono::steady_clock::now();
+            const auto init = place([&](std::size_t i) -> std::optional<Mat::RTMat>
+            {
+                const auto it = cache->pose.find(map.rooms[i].name);
+                if (it == cache->pose.end()) return std::nullopt;
+                return rtmat(it->second);
+            });
+            LayoutCache next;
+            next.key = key;
+            next.solves = cache->solves + 1;
+            next.fresh = true;
+            for (int c = 0; c < component; ++c)
+            {
+                std::vector<std::size_t> members;   // global room index, in local order
+                std::map<std::size_t, std::size_t> local_of;
+                for (std::size_t i = 0; i < map.rooms.size(); ++i)
+                    if (map.rooms[i].component == c) { local_of[i] = members.size(); members.push_back(i); }
+                std::vector<layout::Room> lr;
+                for (const auto i : members)
+                {
+                    layout::Room room{.name = map.rooms[i].name, .init = se2(init[i]),
+                                      .fixed = static_cast<int>(i) == start_of[c]};
+                    for (const auto &q : local[i]) room.outline.push_back(q);
+                    lr.push_back(std::move(room));
+                }
+                std::vector<layout::Seam> ls;
+                std::vector<std::size_t> ls_passage;
+                for (const auto &[k, p] : std::views::enumerate(map.passages))
+                {
+                    if (not p.seam_ok or map.rooms[*p.room_a].component != c) continue;
+                    layout::Seam s{.name = p.name, .a = local_of.at(*p.room_a), .b = local_of.at(*p.room_b)};
+                    if (seam_m[k].has_value()) { s.z = seam_m[k]->pose; s.cov = seam_m[k]->cov; }
+                    else
+                    {
+                        // The faces composed but their chains did not (no parent_att path): the mean is still the
+                        // graph's, the covariance the remembered-seam one (room_eviction.cpp kRemembered*).
+                        s.z = se2(seam_ab[k].value());
+                        s.cov = layout::Vec3(0.1 * 0.1, 0.1 * 0.1, 0.03 * 0.03).asDiagonal();
+                    }
+                    if (p.door_a.has_value()) s.aperture_a = std::array{doors[*p.door_a].a, doors[*p.door_a].b};
+                    if (p.door_b.has_value()) s.aperture_b = std::array{doors[*p.door_b].a, doors[*p.door_b].b};
+                    // The outlier component's support: b's origin is within the two rooms' reach of a's.
+                    const auto reach = [&](std::size_t i)
+                    {
+                        double r = 0;
+                        for (const auto &q : local[i]) r = std::max(r, q.norm());
+                        return r;
+                    };
+                    s.extent = reach(*p.room_a) + reach(*p.room_b);
+                    ls.push_back(std::move(s));
+                    ls_passage.push_back(static_cast<std::size_t>(k));
+                }
+                const auto res = layout::optimise(lr, ls, model);
+                for (const auto &[li, gi] : std::views::enumerate(members))
+                {
+                    next.pose[map.rooms[gi].name] = res.pose[li];
+                    next.cov[map.rooms[gi].name] = res.cov[li];
+                    next.p_manhattan[map.rooms[gi].name] = res.p_manhattan[li];
+                }
+                for (const auto &[si, k] : std::views::enumerate(ls_passage))
+                {
+                    next.seam_d2[map.passages[k].name] = res.seam_d2[si];
+                    next.seam_p_inlier[map.passages[k].name] = res.seam_p_inlier[si];
+                    next.stated_faces[map.passages[k].name] = map.passages[k].stated_faces;
+                }
+                if (c == 0) next.building_axis = res.building_axis;
+                next.before.seam += res.before.seam;   next.after.seam += res.after.seam;
+                next.before.manhattan += res.before.manhattan;   next.after.manhattan += res.after.manhattan;
+                next.before.overlap += res.before.overlap;   next.after.overlap += res.after.overlap;
+                next.before.wall += res.before.wall;   next.after.wall += res.after.wall;
+                next.iterations = std::max(next.iterations, res.iterations);
+                next.starts += res.starts;
+                if (res.winning_start != 0) ++next.restarted;
+                next.converged = next.converged and res.converged;
+            }
+            next.rooms = static_cast<int>(map.rooms.size());
+            next.passages = static_cast<int>(pnames.size());
+            next.ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+            *cache = std::move(next);
+        }
+        for (auto &r : map.rooms)
+            if (const auto it = cache->pose.find(r.name); it != cache->pose.end())
+            {
+                r.world = rtmat(it->second);
+                r.cov = cache->cov[r.name];
+                r.p_manhattan = cache->p_manhattan[r.name];
+            }
+        for (auto &p : map.passages)
+        {
+            if (const auto it = cache->seam_d2.find(p.name); it != cache->seam_d2.end()) p.seam_d2 = it->second;
+            if (const auto it = cache->seam_p_inlier.find(p.name); it != cache->seam_p_inlier.end()) p.p_inlier = it->second;
+        }
+        map.optimised = true;
     }
 
     // ── Pack components left to right, bottoms aligned; the gap is a median room size. Component 0
@@ -219,14 +372,19 @@ Map build(DSR::DSRGraph &mem, const std::string &anchor,
             cursor += (boxes[c].x1 - boxes[c].x0) + gap;
         }
         for (auto &r : map.rooms)
+        {
             r.world.translation().head<2>() += shift[r.component];
+            r.world_raw.translation().head<2>() += shift[r.component];
+        }
     }
 
     // ── World geometry ─────────────────────────────────────────────────────────────────────────
     for (const auto &[i, r] : std::views::enumerate(map.rooms))
     {
         r.outline.clear();
+        r.outline_raw.clear();
         for (const auto &q : local[i]) r.outline.push_back(apply(r.world, q));
+        for (const auto &q : local[i]) r.outline_raw.push_back(apply(r.world_raw, q));
         r.centre = local[i].empty() ? apply(r.world, Eigen::Vector2d::Zero()) : centroid(r.outline);
     }
     for (const auto &d : doors)

@@ -41,9 +41,9 @@ declare -A STANDALONE_EXTRA=(
     [layout_explorer_selftest]="src/layout_explorer.cpp src/wall_map.cpp src/wall_segmenter.cpp"
 )
 STANDALONE=(free_space_polygon_selftest layout_explorer_selftest image_edge_frame_selftest stride_span_selftest
-            motion_noise_vc_selftest surprise_selftest joint_calib_selftest joint_mounts_selftest
-            lidar_mount_selftest motion_calib_lever_selftest motion_noise_innov_selftest mount_factors_selftest
-            mount_info_selftest pose_field_bias_selftest rest_density_selftest wheel_noise_selftest
+            motion_noise_vc_selftest surprise_selftest
+            motion_calib_lever_selftest motion_noise_innov_selftest
+            pose_field_bias_selftest rest_density_selftest wheel_noise_selftest
             calib_estimator_selftest calib_intake_selftest)
 
 # ── cases: name | env | command ─────────────────────────────────────────────────────────────────
@@ -52,7 +52,6 @@ CASES=(
     "reloc_selftest||$BIN/reloc_selftest"
     "corner_gather_test||$BIN/corner_gather_test"
     "motion_calib||$BIN/motion_calib --selftest"
-    "mount_replay||$BIN/mount_replay --selftest"
     "wss_default||$BIN/wall_slam_selftest"
     "wss_tour|WS_TOUR=1|$BIN/wall_slam_selftest"
     # Box estimator, single rooms of the WS_BOXES_RANDOM sweep (the 12-room sweep takes 17 min): its
@@ -67,14 +66,14 @@ CHAOTIC=" reloc_selftest wss_default wss_tour wss_box_room0 wss_box_room2 wss_bo
 if (( build )); then
     if (( $(pgrep -c cc1plus) > 0 )); then echo "another build is running (pgrep cc1plus) — wait for it"; exit 2; fi
     echo "building CMake selftests (-j8) ..."
-    make -C build -j8 gn_selftest reloc_selftest wall_slam_selftest corner_gather_test motion_calib mount_replay \
+    make -C build -j8 gn_selftest reloc_selftest wall_slam_selftest corner_gather_test motion_calib \
         > "$WORK/build.log" 2>&1 || { echo "BUILD FAILED — see $WORK/build.log"; exit 1; }
 fi
 # Standalone selftests are always compiled (seconds): --no-build skips only the CMake targets, and a
 # stale or missing standalone binary would silently record "file not found" as the oracle.
 echo "building standalone selftests ..."
 for t in "${STANDALONE[@]}"; do
-    g++ -std=c++23 -O2 -Isrc -I/usr/include/eigen3 tools/$t.cpp ${STANDALONE_EXTRA[$t]:-} -o "$WORK/$t" \
+    g++ -std=c++23 -O2 -Isrc -I../common -I/usr/include/eigen3 tools/$t.cpp ${STANDALONE_EXTRA[$t]:-} -o "$WORK/$t" \
         2> "$WORK/$t.cerr" || { echo "COMPILE FAILED: $t — see $WORK/$t.cerr"; exit 1; }
 done
 for c in "${CASES[@]}"; do

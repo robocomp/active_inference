@@ -933,8 +933,19 @@ bool is_descendant(DSR::DSRGraph &mem, std::uint64_t node_id, const std::string 
     return false;
 }
 
-std::optional<Mat::RTMat> seam_through_passage(DSR::DSRGraph &mem, const std::string &passage, const std::string &room_to,
-                                               const std::string &room_from)
+namespace
+{
+/// The seam and HOW it was composed: which face in each room, and whether the π turn was applied. Shared by the mean
+/// (seam_through_passage) and the covariance (seam_measured_through_passage), so the two can never pick differently.
+struct ResolvedSeam
+{
+    Mat::RTMat seam;
+    std::uint64_t face_to = 0, face_from = 0;
+    bool flipped = false;
+};
+
+std::optional<ResolvedSeam> resolve_seam(DSR::DSRGraph &mem, const std::string &passage, const std::string &room_to,
+                                         const std::string &room_from)
 {
     // The two faces are ONE physical hole (door_concept births the entry mirror at the exact pose of its source), so
     // T(face_to <- face_from) = I and   T(to <- from) = T(to <- face_to) · T(face_from <- from).
@@ -943,6 +954,7 @@ std::optional<Mat::RTMat> seam_through_passage(DSR::DSRGraph &mem, const std::st
     auto ie = mem.get_inner_eigen_api();
     std::optional<Mat::RTMat> to_face, face_from;
     bool to_derived = false, from_derived = false;
+    std::uint64_t to_id = 0, from_id = 0;
     for (const auto &e : DSR::DSRGraph::get_node_edges_by_type(dw.value(), "match"))
     {
         const auto f = mem.get_node(e.to());
@@ -953,14 +965,15 @@ std::optional<Mat::RTMat> seam_through_passage(DSR::DSRGraph &mem, const std::st
         const bool d = f->name().ends_with(kDerivedFaceSuffix);
         if (is_descendant(mem, f->id(), room_to) and (not to_face.has_value() or (to_derived and not d)))
             if (auto t = ie->get_transformation_matrix(room_to, f->name()); t.has_value())
-            { to_face = t; to_derived = d; }
+            { to_face = t; to_derived = d; to_id = f->id(); }
         if (is_descendant(mem, f->id(), room_from) and (not face_from.has_value() or (from_derived and not d)))
             if (auto t = ie->get_transformation_matrix(room_from, f->name()); t.has_value())
-            { face_from = t->inverse(); from_derived = d; }
+            { face_from = t->inverse(); from_derived = d; from_id = f->id(); }
     }
     if (not to_face.has_value() or not face_from.has_value()) return std::nullopt;
     const bool derived = to_derived or from_derived;
-    Mat::RTMat seam(to_face.value() * face_from.value());
+    ResolvedSeam out{Mat::RTMat(to_face.value() * face_from.value()), to_id, from_id, false};
+    auto &seam = out.seam;
     // ★ THE TWO FACES MAY BE THE SAME HOLE TURNED BY π (2026-10-12). door_concept orients a door's frame from the room
     //   that fits it (+y into that room), so the face seen from the other room is the same doorway rotated half a turn.
     //   Rooms do not overlap: if room_from's outline lands on room_to's side of the face, the turned face is the one.
@@ -978,7 +991,7 @@ std::optional<Mat::RTMat> seam_through_passage(DSR::DSRGraph &mem, const std::st
     };
     //   NOT for a DERIVED face: it was built from the other face through the measured seam, so the two are exactly
     //   consistent by construction and there is no independent orientation to correct.
-    if (derived) return seam;
+    if (derived) return out;
     if (const auto c_to = centroid(room_to), c_from = centroid(room_from); c_to.has_value() and c_from.has_value())
     {
         const Eigen::Vector2d o = to_face->translation().head<2>();
@@ -989,9 +1002,53 @@ std::optional<Mat::RTMat> seam_through_passage(DSR::DSRGraph &mem, const std::st
             Mat::RTMat flip = Mat::RTMat::Identity();
             flip.linear() = Eigen::AngleAxisd(M_PI, Eigen::Vector3d::UnitZ()).toRotationMatrix();
             seam = Mat::RTMat(to_face.value() * flip * face_from.value());
+            out.flipped = true;
         }
     }
-    return seam;
+    return out;
+}
+}   // namespace
+
+std::optional<Mat::RTMat> seam_through_passage(DSR::DSRGraph &mem, const std::string &passage, const std::string &room_to,
+                                               const std::string &room_from)
+{
+    const auto r = resolve_seam(mem, passage, room_to, room_from);
+    if (not r.has_value()) return std::nullopt;
+    return r->seam;
+}
+
+std::optional<ltsm::seam::Measured> seam_measured_through_passage(DSR::DSRGraph &mem, const std::string &passage,
+                                                                  const std::string &room_to, const std::string &room_from,
+                                                                  int &stated_faces)
+{
+    stated_faces = 0;
+    const auto r = resolve_seam(mem, passage, room_to, room_from);
+    const auto rt = mem.get_node(room_to), rf = mem.get_node(room_from);
+    if (not r.has_value() or not rt.has_value() or not rf.has_value()) return std::nullopt;
+    const auto ft = mem.get_node(r->face_to), ff = mem.get_node(r->face_from);
+    if (not ft.has_value() or not ff.has_value()) return std::nullopt;
+    // Each face's pose in its room with the covariance its RT chain states. A face whose OWN edge states none (a derived
+    // face, or one door_concept wrote without) is as accurate as a remembered seam: the flagged kRemembered sigmas.
+    const auto face = [&](std::uint64_t room_id, const DSR::Node &f) -> std::optional<ltsm::seam::Measured>
+    {
+        bool leaf = false;
+        auto m = pose_in_room(mem, room_id, f, leaf);
+        if (not m.has_value()) return std::nullopt;
+        if (leaf) ++stated_faces;
+        else m->cov.diagonal() += ltsm::seam::Vec3(kRememberedSigmaXY * kRememberedSigmaXY,
+                                                   kRememberedSigmaXY * kRememberedSigmaXY,
+                                                   kRememberedSigmaYaw * kRememberedSigmaYaw);
+        return m;
+    };
+    const auto m_to = face(rt->id(), ft.value()), m_from = face(rf->id(), ff.value());
+    if (not m_to.has_value() or not m_from.has_value()) return std::nullopt;
+    // T(to <- from) = T(to <- face_to) · [π] · T(from <- face_from)⁻¹. The mean is the graph's own composition; the
+    // covariance is propagated through the same composition.
+    ltsm::seam::Measured acc = m_to.value();
+    if (r->flipped) acc = ltsm::seam::compose_cov(acc, {ltsm::seam::Vec3(0, 0, M_PI), ltsm::seam::Mat3::Zero()});
+    acc = ltsm::seam::compose_cov(acc, ltsm::seam::inverse_cov(m_from.value()));
+    acc.pose = se2_of(r->seam);
+    return acc;
 }
 
 std::optional<Mat::RTMat> RoomEviction::seam_through_passage(const std::string &passage, const std::string &room_to,

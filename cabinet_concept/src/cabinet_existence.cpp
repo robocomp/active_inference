@@ -17,6 +17,7 @@
 #include "cabinet_model.h"                                       // CabinetModel::TOP_THICKNESS / LEG_RADIUS
 #include "../../common/existence_belief/existence_belief.h"    // rc::exist:: carve_box / mask_evidence / …
 #include "../../common/dashboard/evidence_monitor.h"           // rc::EvidenceGlobals
+#include "../../common/perception_card/terms.h"                 // rc::card::term_* — the P(detect) factor formulas (SHARED)
 
 namespace rc {
 
@@ -59,11 +60,10 @@ void CabinetExistence::update_and_remove(CabinetFitter& fitter, ConceptLidarInge
     // Absence-confidence vs range: a miss at long range is weak evidence of removal (the sensor likely could
     // not resolve the object). c = (range_ref/range)^power capped at 1 → 1 up close, →0 far. Scales the FREE
     // (absence) half only; occupancy stays fully informative. power 0 disables (constant 1).
+    // The formula is the shared term library's (rc::card::term_range_conf); only the config binding lives here.
     const auto absence_range_conf = [&](float range_m) -> float
     {
-        const float rr = cfg_.existence_absence_range_ref_m;
-        if (rr <= 0.0f or cfg_.existence_absence_range_power <= 0.0f) return 1.0f;
-        return std::min(1.0f, std::pow(rr / std::max(range_m, 1e-3f), cfg_.existence_absence_range_power));
+        return rc::card::term_range_conf(range_m, cfg_.existence_absence_range_ref_m, cfg_.existence_absence_range_power);
     };
     // ONE removal policy, shared (rc::exist::RemovalPolicy) so the debounce cannot drift again — it had
     // drifted three ways by 2026-08-10, and door paid for it with twelve deaths at fixated = 0.
@@ -125,7 +125,8 @@ void CabinetExistence::update_and_remove(CabinetFitter& fitter, ConceptLidarInge
                 // A verifying view = CLOSE (range_conf) + in frustum & unoccluded (in_fov_frac) + the robot is
                 // LOOKING at it (central_frac). NOT obliquity: this robot is chronically edge-on and an edge-on
                 // cabinet IS detectable up close (cabinet_1), so obliquity would wrongly block legitimate removal.
-                const float p_detect = absence_range_conf(sil.mean_range_m) * sil.in_fov_frac() * sil.central_frac();
+                const float p_detect = absence_range_conf(sil.mean_range_m) * rc::card::term_in_fov(sil.in_fov_frac())
+                                       * rc::card::term_central(sil.central_frac());
                 cycle_p_detect = p_detect;
                 const float sfree  = raw_free * p_detect;                 // confident absence → removal log-odds
                 const float verify = raw_free * (1.0f - p_detect);        // un-confident absence → go-verify surprise

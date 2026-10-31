@@ -237,27 +237,10 @@ struct ChairConfig
     bool  exist_room_prior         = true;   // Existence.RoomPrior — enforce the room-containment pose prior
     float exist_room_margin_m      = 0.40f;  // Existence.RoomMarginM — tolerance a chair centre may sit OUTSIDE the walls
     float exist_out_of_room_gain   = 1.5f;   // Existence.OutOfRoomGain — |ΔL| per frame while outside (debounces a 1-frame glitch)
-    // "ZED removes, ricoh confirms": a ricoh WIN confirms existence (resets staleness) but a ricoh mask's ABSENCE
-    // never removes — only ZED absence does, and only to the degree ZED would RELIABLY have detected a present
-    // chair (falls off toward the image edge + with range). Stops removal of a far/peripheral, only-ricoh-visible
-    // chair whose 360 view is momentarily occluded (the reported bug).
-    float exist_zed_edge_offset = 1.0f;   // Existence.ZedEdgeOffset — normalised ROI offset at which ZED detectability→0
-    float exist_zed_range_full  = 4.0f;   // Existence.ZedRangeFull — within this range (m) ZED detects reliably (pd=1)
-    float exist_zed_range_ref   = 7.0f;   // Existence.ZedRangeRef — beyond this range (m) ZED absence is uninformative (pd=0)
-    // pd FLOOR for an UNOCCLUDED, in-frustum chair. ★DEFAULT 0 SINCE 2026-07-29 — this floor was the live cause
-    // of "chairs disappear when the robot isn't looking at them". It overrides zed_detectability()==0 (chair past
-    // ZedRangeRef or at the image edge, i.e. the ZED provably CANNOT resolve it) and vacates anyway at the floor
-    // rate; with conf saturated (since_det ≥ VacateConfidentFrames) that is a constant −g·floor every sensor frame
-    // and L walks to RemoveLogodds with ZERO informative observations. Measured in chair_existence_log.csv: 53 of
-    // 69 vacate-branch rows had zed_pd < 0.15 (51 of them exactly 0), and chair_2/chair_3 fell 3.09→1.74 and
-    // 2.44→1.09 purely on the floor before being deleted — the real chairs the user reported.
-    // It is also a hard threshold of exactly the kind CLAUDE.md forbids: "absence removes only to the degree the
-    // sensor could have detected" IS the model, and the floor contradicts it. The glitch-stranded phantom it was
-    // aimed at is already handled by the room-containment prior above (a mislocalised chair lands outside the
-    // walls and draws exist_out_of_room_gain every frame regardless of visibility). A phantom that is genuinely
-    // in-room and never resolvable should drive the robot to GO LOOK (table_concept's wants_verification pull),
-    // not be deleted unseen. Set > 0 only to reinstate the old unseen-decay.
-    float exist_zed_clear_los_floor = 0.0f;  // Existence.ZedClearLosFloor
+    // "ZED removes, ricoh confirms": a ricoh WIN confirms existence but a ricoh mask's ABSENCE never removes.
+    // ZED absence is weighted by the shared P(detect) (chair_detect.h: envelope x in_fov x central x wall line of sight).
+    // Existence.ZedEdgeOffset / ZedRangeFull / ZedRangeRef / ZedClearLosFloor were RETIRED 2026-10-31 (replaced by that
+    // formula; the floor was already a no-op at 0 and a floor under P(detect) is forbidden by the lifecycle).
     // ★TEMPLATE GEOMETRY — this is the chair the belief actually believes in. The pose-only belief does
     // NOT fit size, so any error here is a systematic model-vs-world mismatch that the clutter component
     // silently absorbs. 2026-07-27: these were 0.45 across the board against a real Webots SimpleChair of

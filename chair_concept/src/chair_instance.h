@@ -185,6 +185,8 @@ struct ChairInstance
     float roi_offset_x = 0.0f;   // [-1,1], 0 = horizontally centred in the image
     float roi_offset_y = 0.0f;   // [-1,1], 0 = vertically centred
     float roi_fill     = 0.0f;   // max(w/W, h/H): projected extent as a fraction of the image
+    float roi_in_fov   = 0.0f;   // fraction of the projected box inside the image, [0,1] (continuous, no gate)
+    Eigen::Vector2f roi_cam_xy = Eigen::Vector2f::Zero();   // camera in the room frame this cycle (wall line of sight)
 
     // ── Level-2 rig prior actually received this cycle (diagnostics; see refresh_rig_yaw_prior) ──
     // Room-frame bearing chair→camera (rad), NaN until an extrinsic is available. Identifies the

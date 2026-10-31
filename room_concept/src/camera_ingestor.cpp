@@ -121,37 +121,14 @@ void CameraIngestor::apply_graph_extrinsic_(const Eigen::Matrix4d& M)
     cam_R_robot_ = M.block<3, 3>(0, 0).cast<float>();
     cam_t_robot_ = M.block<3, 1>(0, 3).cast<float>();
 
-    // ── Measured boresight-yaw correction, applied LOCALLY ───────────────────────────────────────
-    // ★ THE AXIS IS DERIVED, NOT ASSUMED. A yaw is a rotation about the VERTICAL, and which camera
-    //   axis that is depends on the camera's internal convention (the ZED is x-right, y-DEPTH,
-    //   z-up — but ricoh is not, and the file header above already warns "fix the model rather
-    //   than guessing a sign"). So take the robot's own up-axis and express it in camera
-    //   coordinates: cam_R_robot * e_z IS the vertical, whatever the camera calls it. Rotating
-    //   about that is unambiguously a pan, for any camera on any mount.
-    // ★ LEFT-multiplied: R' = Rot(axis, d) * R turns the CAMERA after the robot->camera mapping,
-    //   which is a boresight. Right-multiplying would rotate the ROBOT frame instead — that is a
-    //   pose correction wearing a mount's clothes, and it would fight the localiser rather than
-    //   inform it.
-    if (std::abs(mount_yaw_correction_) > 0.f)
-    {
-        const Eigen::Vector3f up_cam = (cam_R_robot_ * Eigen::Vector3f::UnitZ()).normalized();
-        cam_R_robot_ = Eigen::AngleAxisf(mount_yaw_correction_, up_cam).toRotationMatrix()
-                     * cam_R_robot_;
-        rc::status::print("[imgedge] boresight yaw correction {:+.5f} rad ({:+.3f} deg) applied about the "
-                   "robot vertical, in camera coords [{:+.3f} {:+.3f} {:+.3f}]\n",
-                   mount_yaw_correction_, mount_yaw_correction_ * 180.0 / M_PI,
-                   up_cam.x(), up_cam.y(), up_cam.z());
-    }
-    // Freeze the base AFTER the configured boresight and BEFORE anything the estimator applies, so
-    // a live correction is always measured from the same place however many times it is revised.
-    cam_R_robot_base_ = cam_R_robot_;
-    cam_t_robot_base_ = cam_t_robot_;
-    rebuild_extrinsic_();
+    // The graph's extrinsic as it stands, nothing on top: boresights and calibrated mounts are robot_concept's
+    // (Transforms.boresight_yaw_*, etc/mount_calib_<robot>_<world>.txt). The local boresight knob and the live
+    // self-calibration correction were removed with the camera mount calibrator on 2026-10-29.
 }
 
 bool CameraIngestor::refresh_graph_extrinsic()
 {
-    if (not live_refresh_ or not inner_ or robot_frame_.empty() or not extrinsic_ok_) return false;
+    if (not inner_ or robot_frame_.empty() or not extrinsic_ok_) return false;
     const auto T = inner_->get_transformation_matrix(camera_node_, robot_frame_, 0, "RT",
                                                      DSR::RT_API::TimeQuery::Nearest);
     if (not T.has_value()) return false;                       // chain momentarily unresolvable: keep the last
@@ -370,34 +347,3 @@ std::int64_t CameraIngestor::ms_since_last_frame() const noexcept
 
 }  // namespace rc
 
-void rc::CameraIngestor::rebuild_extrinsic_()
-{
-    // pc' = R_x(pitch) · R_z(yaw) · pc + height · ẑ_cam, exactly the transformation whose derivative
-    // the J columns are — so applying the reported parameter cancels the error it reported.
-    const Eigen::Matrix3f R =
-        Eigen::AngleAxisf(mount_corr_.x(), Eigen::Vector3f::UnitX()).toRotationMatrix() *
-        Eigen::AngleAxisf(mount_corr_.z(), Eigen::Vector3f::UnitZ()).toRotationMatrix();
-    cam_R_robot_ = R * cam_R_robot_base_;
-    // ★ t is rotated TOO. pc = R·p + t, so turning the camera about its own centre takes the whole
-    //   expression: pc' = R_corr(R·p + t). Rotating only the 3x3 would turn the ray directions and
-    //   leave the origin behind, which is a different mount, not a smaller correction.
-    cam_t_robot_ = R * cam_t_robot_base_ + mount_corr_.y() * Eigen::Vector3f::UnitZ();
-}
-
-void rc::CameraIngestor::set_base(const Eigen::Matrix3f &R, const Eigen::Vector3f &t)
-{
-    if (not R.allFinite() or not t.allFinite()) return;
-    cam_R_robot_base_ = R;
-    cam_t_robot_base_ = t;
-    rebuild_extrinsic_();                 // the correction in force is re-applied to the new base
-    extrinsic_ok_ = cam_R_robot_.allFinite() and cam_t_robot_.allFinite();
-}
-
-void rc::CameraIngestor::set_mount_correction(float pitch_rad, float height_m, float yaw_rad)
-{
-    const Eigen::Vector3f next(pitch_rad, height_m, yaw_rad);
-    if (not next.allFinite()) return;
-    mount_corr_ = next;
-    rebuild_extrinsic_();
-    extrinsic_ok_ = cam_R_robot_.allFinite() and cam_t_robot_.allFinite();
-}

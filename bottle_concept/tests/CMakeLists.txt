@@ -42,3 +42,11 @@ add_executable(test_bottle_contour
 target_include_directories(test_bottle_contour PRIVATE ${OpenCV_INCLUDE_DIRS})
 target_link_libraries(test_bottle_contour PRIVATE ${OpenCV_LIBS} Eigen3::Eigen)
 target_compile_options(test_bottle_contour PRIVATE -O2)
+
+enable_testing()
+# Perception card: make_card() against etc/config.toml; header-only, no Qt/DSR. Run: LANG=es_ES.UTF-8 ./bottle_card_test
+add_executable(bottle_card_test bottle_card_test.cpp)
+target_include_directories(bottle_card_test PRIVATE ../src ../../common ../../common/media_transport)
+target_compile_definitions(bottle_card_test PRIVATE AGENT_DIR="${CMAKE_CURRENT_LIST_DIR}/..")
+target_compile_options(bottle_card_test PRIVATE -O2)
+add_test(NAME bottle_card_test COMMAND bottle_card_test)

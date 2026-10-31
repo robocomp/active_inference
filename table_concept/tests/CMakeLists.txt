@@ -43,3 +43,12 @@ target_compile_options(contour_test PRIVATE -O2)
 # locale-proof persistence.
 add_executable(blind_spot_test blind_spot_test.cpp)
 target_compile_options(blind_spot_test PRIVATE -O2)
+
+enable_testing()
+# Perception card: make_card() against etc/config.toml; header-only, no Qt/DSR. Run: LANG=es_ES.UTF-8 ./table_card_test
+add_executable(table_card_test table_card_test.cpp)
+target_include_directories(table_card_test PRIVATE ../src ../../common ../../common/media_transport)
+target_compile_definitions(table_card_test PRIVATE AGENT_DIR="${CMAKE_CURRENT_LIST_DIR}/..")
+target_compile_options(table_card_test PRIVATE -O2)
+add_test(NAME table_card_test COMMAND table_card_test)
+target_link_libraries(table_card_test PRIVATE Eigen3::Eigen)

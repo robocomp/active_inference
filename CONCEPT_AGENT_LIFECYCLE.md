@@ -218,7 +218,7 @@ Derived by reading each agent, not inferred from includes. `—` = not applicabl
 | agent | CREATE | UPDATE | admissibility | REMOVE | P(detect) | wall LoS | HISTORY record | OWNERSHIP |
 |---|---|---|---|---|---|---|---|---|
 | table | ✅ | ✅ | ✅ trunc + fixation | ✅ `rc::exist` | ✅ | ✅ shared helper | ✅ | ✅ |
-| chair | ✅ | ✅ | ✅ trunc + confirm_only + fixation | ❌ **hand-rolled** | ✅ `zed_detectability` | — no silhouette channel | ✅ | ✅ *(fixed)* |
+| chair | ✅ | ✅ | ✅ trunc + confirm_only + fixation | ❌ **hand-rolled** | ✅ shared envelope (`chair_detect.h`: `term_envelope` axes 1 × in_fov × central) | ✅ `walls_block` *(2026-10-31, below)* | ✅ | ✅ *(fixed)* |
 | bottle | ✅ | ✅ | ✅ confirm_only | ⚠️ tracker death only | — | — | ⚠️ unattributable | ✅ |
 | cabinet | ✅ | ✅ | ✅ trunc | ✅ `rc::exist` | ✅ | ✅ shared helper | ✅ | ✅ |
 | door | ✅ tracker + 2 justified non-tracker creations *(2026-10-20, below)* | ✅ | ✅ trunc + confirm_only | ✅ `rc::exist` | ✅ | ✅ shared helper | ✅ | ✅ *(fixed; + `aff_door_look_*` 2026-10-21, below)* |
@@ -226,7 +226,9 @@ Derived by reading each agent, not inferred from includes. `—` = not applicabl
 | residual | ✅ | ✅ | — field model, no per-frame gate | ✅ `rc::exist` | — | — | ⚠️ unattributable | ✅ |
 | human | ❌ | ❌ `belief_stabilizer` | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
 | chat_agent *(2026-10-12)* | — no instances | — no belief | — | — | — | — | — | ✅ |
-| sensor_calibration *(2026-10-23, skeleton)* | — no instances | — no belief | — | — | — | — | — | ✅ |
+| self_calibration *(2026-10-23, skeleton)* | — no instances | — no belief | — | — | — | — | — | ✅ |
+
+*2026-10-31 (perception cards, Task 9):* chair's wall LoS cell went from `—` to ✅. `ChairFitter::zed_detectability` now delegates to `chair_p_detect` (`chair_concept/src/chair_detect.h`): `term_envelope(roi_fill) × in_fov × central × walls_block(camera, chair, room polygon)`; a chair in another room gets P(detect) 0 and its absence is no longer charged. Retired `Existence.ZedEdgeOffset/ZedRangeFull/ZedRangeRef/ZedClearLosFloor`. Live check pending.
 
 **chat_agent** is not a concept agent: it births no instance and holds no belief, so CREATE…HISTORY do not apply
 (`—`, not `❌`). It owns exactly one node, `chat_intention` (type `intention`, has_intention edge from `Shadow`), the
@@ -235,10 +237,10 @@ stamped with `rc::provenance::stamp_creation`, swept at `initialize()` and again
 shared coordinator on SIGTERM/SIGINT (verified 2026-10-12: `[Graph] node 'chat_intention' deleted`). It connects no
 DSR signal; the digest and the command status are polled on the main thread.
 
-**sensor_calibration** (skeleton, 2026-10-23) is not a concept agent either: no instance, no belief, so CREATE…HISTORY are
-`—`. It owns only its own agent node `sensor_calibration 27` (`[Owns] nodes = ["sensor_calibration 27"]`, id matches
+**self_calibration** (skeleton, 2026-10-23) is not a concept agent either: no instance, no belief, so CREATE…HISTORY are
+`—`. It owns only its own agent node `self_calibration 27` (`[Owns] nodes = ["self_calibration 27"]`, id matches
 `[Agent].id = 27`), deleted by the shared coordinator on SIGTERM (verified 5/5 on an isolated domain: `[Graph] node
-'sensor_calibration 27' deleted`, exit 0). Presence is the shared `rc::presence::ConceptProtocol` (debounced Degraded,
+'self_calibration 27' deleted`, exit 0). Presence is the shared `rc::presence::ConceptProtocol` (debounced Degraded,
 grace 3000 ms; required `robot_concept`, `room_concept`); it connects no DSR signal. No ❌. When it later writes
 proposal attributes on its own node, that node stays its only owned state (robot_concept remains the sole writer of
 body→sensor RT edges).

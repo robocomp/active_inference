@@ -18,7 +18,6 @@
 
 #include "calib_channels.h"
 #include "ground_truth_log.h"
-#include "mount_calibrator.h"
 #include "pose_publisher.h"
 
 #include <dsr/api/dsr_api.h>
@@ -256,23 +255,12 @@ void SpecificWorker::initialize()
 
     // ── Load all config (agent + RoomConcept + EpistemicController params) ──
     rc::load_room_config(configLoader, params, room_concept_, epistemic_controller_);
-    // The mount calibrator borrows the viewer SLOT, not the viewer: it is constructed here, long
-    // before RoomViewer exists, and reads through the pointer whenever it needs to display.
-    mount_ = std::make_unique<rc::MountCalibrator>(G, params, &viewer_raw_slot_);
     // No RT_API here: it is assigned further down, so passing it at this point handed the publisher a
     // permanent nullptr behind a signature that claimed otherwise (found in review, 2026-09-13). The
     // publisher writes through RoomSceneGraph, which gets the RT_API after the assignment.
     pose_pub_ = std::make_unique<rc::PosePublisher>(G, params, room_concept_,
                                                     &viewer_raw_slot_, shutting_down_);
-    calib_ = std::make_unique<rc::CalibChannels>(G, params, room_concept_, *mount_, &viewer_raw_slot_);
-    if (status_stream_)
-    {
-        const rc::camcal::Sink sink = [this](const std::string& cam, const std::array<float, 4>& v,
-                                             const std::array<float, 4>& s, int informed, float cond, long pairs)
-        { status_.note_camcal(cam, v, s, informed, cond, pairs); };
-        mount_->set_camcal_sink(sink);
-        calib_->set_camcal_sink(sink);
-    }
+    calib_ = std::make_unique<rc::CalibChannels>(G, params, room_concept_, &viewer_raw_slot_);
     gt_log_ = std::make_unique<rc::GroundTruthLog>(G, room_concept_, shutting_down_);
     // AFTER gt_log_ exists. The lambda captures `this` and dereferences gt_log_, so registering it
     // first left a window in which a corrected publish would have null-dereferenced. Nothing could
@@ -429,11 +417,6 @@ void SpecificWorker::initialize()
     // handler was never installed — a Reset that silently cleared only half the evidence.
     phase("viewer_window");   // the window EXISTS from here; everything after this is visible hang time
     viewer_raw_slot_ = viewer_.get();   // collaborators built before the viewer read through this
-    viewer_->set_camera_reset_handler([this]
-    {
-        mount_->reset_evidence();
-        qInfo() << "[camcal] evidence cleared and etc/camera_calib.txt deleted";
-    });
 
     if (auto* w = viewer_->widget())
     {

@@ -79,14 +79,10 @@ void PosePublisher::update_rt_rate_readout(std::int64_t now_ms, bool on_gui_thre
             if (res_csv.is_open())
             {
                 res_csv.imbue(std::locale::classic());   // CLAUDE.md: never a comma decimal
-                std::string cams;
-                for (const auto &c : params.CALIB_CAMERAS)
-                { if (not cams.empty()) cams += "+"; cams += c; }
                 res_csv << "# camera=" << params.IMAGE_EDGE_CAMERA
                         << " drive=" << (params.IMAGE_EDGE_DRIVE ? 1 : 0)
                         << " shadow=" << (params.IMAGE_EDGE_SHADOW ? 1 : 0)
                         << " triple=" << (params.IMAGE_EDGE_USE_TRIPLE_POINTS ? 1 : 0)
-                        << " calib_cameras=" << (cams.empty() ? "none" : cams)
                         << " enable=" << (params.IMAGE_EDGE_ENABLE ? 1 : 0) << '\n';
                 res_csv << "ts_ms,cpu_pct,rss_mb,opt_hz,corr_hz,early_exit_pct,avg_update_ms\n";
             }
@@ -576,11 +572,6 @@ void PosePublisher::publish_predicted_tick(std::int64_t imu_ts_ms)
 // a CONSTANT offset (the room frame's arbitrary orientation datum), the wrong one leaves an offset
 // that swings with the robot's heading. Score both by circular concentration R = |mean unit vector|;
 // R -> 1 is constant, R -> 0 is uniformly spread. Reported once, on the first few hundred samples.
-// ── STAGE 2: pair each RGB triple point with the LiDAR corner of the SAME polygon vertex ─────────
-// See mount_lidar_pair.h for why the residual has no pose in it and why that is the point.
-// The camera<->LiDAR mount calibration that lived here — 691 lines, eight methods and their whole
-// state — is now rc::MountCalibrator (src/mount_calibrator.{h,cpp}). It was never coordination: it is
-// a self-contained measurement channel that happened to run on this thread.
 
 void PosePublisher::apply_base_capability_to_pose_clamp()
 {

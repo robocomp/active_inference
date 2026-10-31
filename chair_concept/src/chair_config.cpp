@@ -244,14 +244,6 @@ ChairConfig load_chair_config(const ConfigLoader& cfg)
             "Existence.RoomMarginM — tolerance a chair centre may sit OUTSIDE the walls");
     out.exist_out_of_room_gain   = getf("Existence.OutOfRoomGain", 1.5f,
             "Existence.OutOfRoomGain — |ΔL| per frame while outside (debounces a 1-frame glitch)");
-    out.exist_zed_edge_offset    = getf("Existence.ZedEdgeOffset", 1.0f,
-            "Existence.ZedEdgeOffset — normalised ROI offset at which ZED detectability→0");
-    out.exist_zed_range_full     = getf("Existence.ZedRangeFull", 4.0f,
-            "Existence.ZedRangeFull — within this range (m) ZED detects reliably (pd=1)");
-    out.exist_zed_range_ref      = getf("Existence.ZedRangeRef", 7.0f,
-            "Existence.ZedRangeRef — beyond this range (m) ZED absence is uninformative (pd=0)");
-    out.exist_zed_clear_los_floor = getf("Existence.ZedClearLosFloor", 0.0f,
-            "Existence.ZedClearLosFloor");   // 0 = pure pd (see chair_config.h)
     out.tracker_birth_seat_w     = getf("Tracker.BirthSeatW", 0.60f,
             "x extent — the span the backrest covers");
     out.tracker_birth_seat_d     = getf("Tracker.BirthSeatD", 0.52f,

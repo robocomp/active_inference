@@ -15,7 +15,6 @@
 #include "wall_segmenter.h"
 #include "se2_preintegration.h"
 #include "motion_calibration.h"
-#include "mount_factors.h"
 #include "surprise.h"
 
 namespace rc::loc
@@ -124,16 +123,6 @@ namespace rc::loc
         Eigen::Matrix<float, rc::calib::P_COUNT, 1> calib_sigma =
             Eigen::Matrix<float, rc::calib::P_COUNT, 1>::Zero();
         float calib_b_omega = 0.f;      ///< rad/s, the gyro bias the joint solve can now separate
-        /// The motion block's normal equations as of its last re-solve (plan 2026-10-05 Task 4), for
-        /// the joint calibration monitor on the MAIN thread. A copy, because motion_calib_ is fed on
-        /// the localizer thread and its window must not be iterated from another one.
-        rc::calib::BatchEstimator::Information calib_information{};
-        /// r2 KINEMATIC mount factor (mount_factors.h), a COPY made on the localizer thread every cycle (r1
-        /// thread rule): helios (dx, dy, psi) with the odometry nuisance already Schur-marginalised.
-        rc::mountf::Info3 mount_kin_info{};
-        /// The motion calibrator's ACTING eps on the odometry (yaw_offset()): must read 0 while the mount
-        /// factors own the helios yaw (r2.2 items 4/9). Logged in the mounts CSV.
-        float mount_yaw_offset = 0.f;
         /// Bitmask over rc::calib::Param: which parameters this window actually TAUGHT (posterior
         /// shrank against the prior). A parameter the driving never excited reads 0 here and sits at
         /// its previous value -- which a bare value cannot be distinguished from convergence.

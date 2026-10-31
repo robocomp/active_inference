@@ -75,8 +75,6 @@ namespace rc
             // P(the body moved this cycle): the rest channel's own belief (RestMotionChannel), either motion
             const float p_move = 1.f - (1.f - std::clamp(zupt_pred_gain_tr_, 0.f, 1.f)) * (1.f - std::clamp(zupt_pred_gain_ro_, 0.f, 1.f));
             noise_innov_.observe(delta, T, cyc_U_, innov_R_ + innov_R_prev_, odom_body, p_move, cyc_dt_s_);
-            // r2 kinematic mount factor: the same delta, the learner's per-axis model variance (plan 2026-10-08)
-            if (params.mount_factors) observe_kinematic_mount(delta, T, odom_body, res);
             if (params.motion_noise_learn)
             {   // the coefficients the NEXT prediction is built with
                 np.k_long     = float(noise_innov_.k(0)); np.k_lat     = float(noise_innov_.k(1));
@@ -144,33 +142,6 @@ namespace rc
             res.surprise.pf_xx      = 0.5f * (Sb(0, 0) + Sb(1, 1));
             res.surprise.pf_tt      = Sb(2, 2);
             if (params.pose_field_publish and Sb.allFinite()) res.covariance += Sb;
-        }
-        if (params.mount_factors)
-        {   // r2: the kinematic block and the acting eps travel to the main thread as COPIES (r1 thread rule)
-            res.mount_kin_info   = kin_mount_.info();
-            res.mount_yaw_offset = motion_calib_.yaw_offset();
-            // ... and the wall map + pose the ingest thread's vertical factor reads (one copy under a lock)
-            if (scan_ok and map_guided_checks_allowed())
-            {
-                MountSnapshot snap;
-                snap.valid = true;
-                snap.ts_ms = res.timestamp_ms;
-                const Eigen::Matrix2f Rl = res.robot_pose.linear();
-                snap.pose = Eigen::Vector3f(res.robot_pose.translation().x(), res.robot_pose.translation().y(),
-                                            std::atan2(Rl(1, 0), Rl(0, 0)));
-                if (cyc_dt_s_ > 0.f and cyc_odom_.allFinite()) snap.vel = cyc_odom_ / cyc_dt_s_;
-                snap.polygon = nominal_room_polygon();
-                if (snap.polygon.size() >= 3)
-                {
-                    std::scoped_lock lk(mount_snap_mutex_);
-                    mount_snap_ = std::move(snap);
-                }
-            }
-            else
-            {
-                std::scoped_lock lk(mount_snap_mutex_);
-                mount_snap_.valid = false;
-            }
         }
         innov_prev_ok_ = scan_ok;
         if (scan_ok) { innov_z_prev_ = innov_z_; innov_R_prev_ = innov_R_; innov_prev_cycle_ = innov_cycle_; }
