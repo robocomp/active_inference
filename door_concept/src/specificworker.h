@@ -437,6 +437,10 @@ private:
         bool  publishing = false;                         // fix 3: last cycle wrote the RT edge (logs the transitions)
         std::int64_t unseen_charge_ms = 0, charge_stamp_ms = 0;   // Task 12 fix B: the charged unseen time (anchor_unseen_charge)
         bool  leaf_published = false;
+        // The leaf as the anchor update's own rays see it (spec 2026-10-31 anchor-leaf-from-robot-frame): the last
+        // measured posterior (AnchorEvidence::leaf_*), published on the anchor and carried as the next frame's phi.
+        // Empty until the first measured frame of this anchor; the room-frame belief seeds only that first frame.
+        rc::door::LeafRunning leaf_run;   // the frames' leaf posteriors over this passage (door_anchor_update.h)
         bool  crossing_through = false;
         double view_lost_llr = 0.0;                       // Task 17 add-on: the belief's own visibility evidence (view_lost_llr_step)
         rc::door::AnchorLostMode lost;                    // Task D-B: P(the beams track an alias): filtered at updates, published while the cross is claimed

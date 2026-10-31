@@ -1275,6 +1275,65 @@ int main()
               "evidence is empty");
     }
 
+    // ── spec 2026-10-31 anchor-leaf-from-robot-frame: the update RETURNS its leaf posterior, and carried as the next frame's
+    //    phi it converges on the leaf the rays see. pingpong31: door_concept's room-frame leaf said 83 deg, the real one 90.
+    std::print("leaf_posterior_from_the_rays (prior 83 deg, the scene's leaf 90 deg beside the +u jamb, robot side)\n");
+    {
+        WorldOpts wo; wo.u0 = -4.f; wo.u1 = 4.f; wo.corner = false; wo.shut = false; wo.back_wall = true; wo.leaf90 = true;
+        const auto segs = world(wo);
+        const float clear = rc::door::anchor_clear_width(W, 0.06f);
+        rc::door::LeafPrior lp;
+        lp.known = true; lp.hinge_u = 0.5f * clear; lp.len = clear; lp.dir_u = -1.f; lp.swing_y = -1.f;   // the +u jamb, robot side
+        lp.phi = 83.f * float(M_PI) / 180.f; lp.phi_sigma = 0.25f; lp.phi_known = true; lp.phi_max = 2.094f;
+        lp.p_hinge = 0.5f; lp.p_swing = 0.5f;
+        for (const bool carried : {false, true})
+        {
+            Pose2 robot{V2(0.f, -0.5f - kSensor.y()), 0.f};
+            RelPose belief = creation_prior(robot);
+            rc::door::LeafPrior prior = lp;
+            int frames = 0, have = 0, uncovered = 0;
+            float phi_last = 0.f, ph_last = 0.f, ps_last = 0.f, worst = 0.f, sig_last = 0.f;
+            rc::door::LeafRunning run;   // what door_concept publishes and carries (specificworker_anchor.cpp)
+            for (int k = 0; k <= 12; ++k)
+            {
+                if (k > 0)
+                {
+                    rc::rt::Twist tw; tw.linear = V3(0.f, 0.5f, 0.f);
+                    belief = rc::interaction::predict(belief, tw, V3(1e-4f, 1e-4f, 1e-4f), 0.1f);
+                    robot.p.y() += 0.05f;
+                }
+                const auto rays = rc::door::select_anchor_rays(belief, W, T, kFloorZ, 2.0f, kSensor, scan3d(segs, robot, 71 + k), 2.0f);
+                const auto [post, ev] = update_door_anchor(belief, W, T, wo.u0, wo.u1, kSensor, rays, {}, {}, 0.8f, prior, kFloorZ);
+                belief = post;
+                ++frames;
+                if (not ev.leaf_post) continue;
+                ++have;
+                run.add(ev.leaf_phi, ev.leaf_p_hinge, ev.leaf_p_swing);
+                const float pub = carried ? run.phi() : ev.leaf_phi, sig = carried ? run.sigma(lp.phi_sigma) : ev.leaf_phi_sigma;
+                phi_last = pub; sig_last = sig; ph_last = carried ? run.p_hinge() : ev.leaf_p_hinge;
+                ps_last = carried ? run.p_swing() : ev.leaf_p_swing;
+                if (k >= 4) worst = std::max(worst, std::abs(pub - float(M_PI_2)));
+                if (std::abs(pub - float(M_PI_2)) > 2.f * std::max(sig, 1e-6f)) ++uncovered;   // the published sigma's honesty
+                if (carried) prior.phi = run.phi();   // what door_concept now does between frames
+                if (carried) std::print("      frame {:2d} s {:+.2f}: this frame {:.1f} (sigma {:.1f}) -> published {:.1f} sigma {:.1f}\n", k,
+                                        robot.p.y() + kSensor.y(), ev.leaf_phi * 57.2958f, ev.leaf_phi_sigma * 57.2958f,
+                                        pub * 57.2958f, sig * 57.2958f);
+            }
+            std::print("    {}: {}/{} frames with a posterior; last phi {:.1f} deg sigma {:.1f}, P(hinge as stated) {:.2f}, "
+                       "P(swing as stated) {:.2f}; worst |phi - 90| after frame 4: {:.1f} deg; frames with the truth outside 2 sigma: {}\n",
+                       carried ? "RUNNING (published)" : "per frame", have, frames, phi_last * 57.2958f, sig_last * 57.2958f, ph_last,
+                       ps_last, worst * 57.2958f, uncovered);
+            check(have == frames, "every frame returns a leaf posterior");
+            check(std::abs(phi_last - float(M_PI_2)) < 4.f * float(M_PI) / 180.f, "the posterior's phi is the scene's 90 deg within 4 deg");
+            check(ph_last > 0.5f and ps_last > 0.5f, "the hinge and swing the rays see are the stated ones");
+            if (carried)
+            {
+                check(worst < 4.f * float(M_PI) / 180.f, "published, it stays on the leaf (within 4 deg after frame 4)");
+                check(uncovered == 0, "published, the truth is within 2 sigma on every frame");
+            }
+        }
+    }
+
     std::print("{}\n", g_fail == 0 ? "ALL PASS" : std::format("{} FAILED", g_fail));
     return g_fail == 0 ? 0 : 1;
 }

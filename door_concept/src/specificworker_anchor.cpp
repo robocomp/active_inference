@@ -71,6 +71,13 @@
 
 namespace
 {
+// log(p / (1 − p)) for a probability that may sit at 0 or 1 (an all-or-nothing frame): bounded at ±log(1e4), the
+// float resolution of the published hypotheses' weights.
+float logit_clamped(float p)
+{
+    const float q = std::clamp(p, 1e-4f, 1.f - 1e-4f);
+    return std::log(q / (1.f - q));
+}
 // ★ σ_model (fix round 1, controller ruling): the room-frame-vs-sensor DISCREPANCY the anchor exists to absorb —
 //   the error a confident room-frame chain can still carry and that neither the door belief nor the localisation
 //   covariance can see (try63 leg 2: the door belief's σ_s was 0.04 m with the door 0.45 m off):
@@ -376,6 +383,7 @@ void SpecificWorker::retry_broad_prior(const rc::DoorInstance& inst, PassageAnch
         pa.init_pose = r.value();
         pa.axis_sign = near_sign;
         pa.bias = {};
+        pa.leaf_run.reset();   // a re-initialised belief: the leaf is seeded from the room frame again
         pa.view_lost_llr = 0.0;
         pa.lost = {};   // Task D-B: a re-initialised belief starts the lost mode at its prior
         refresh_anchor_geometry(inst, pa);
@@ -406,7 +414,8 @@ void SpecificWorker::retry_broad_prior(const rc::DoorInstance& inst, PassageAnch
     pa.pose.P = fused.P;
     pa.view_lost_llr = 0.0;   // Task 17 add-on: a new belief, a new visibility record
     pa.lost = {};   // Task D-B: a re-initialised belief starts the lost mode at its prior
-    pa.bias = {};   // Task 10: the fused belief carries no bias bookkeeping — it restarts from this P
+    pa.bias = {};
+    pa.leaf_run.reset();   // a re-initialised belief: the leaf is seeded from the room frame again   // Task 10: the fused belief carries no bias bookkeeping — it restarts from this P
     // Fix round 2: one fusion per retry claim (a later claim_rose in the same passage is not pulled again unless another
     // claim fails), and nothing seen before it may be published as "predicted" after it.
     pa.retry = false;
@@ -657,6 +666,7 @@ void SpecificWorker::step_passage_anchor()
                     pa.pose = r.value();
                     pa.init_pose = r.value();   // Task 11 fix 4
                     pa.bias = {};
+                    pa.leaf_run.reset();   // a re-initialised belief: the leaf is seeded from the room frame again
                     pa.view_lost_llr = 0.0;   // Task 17 add-on: a re-initialised belief, a new visibility record
                     pa.lost = {};   // Task D-B: a re-initialised belief starts the lost mode at its prior
                     refresh_anchor_geometry(*inst, pa);
@@ -678,6 +688,7 @@ void SpecificWorker::step_passage_anchor()
                         pa.pose = r.value();
                         pa.init_pose = r.value();   // Task 11 fix 4
                         pa.bias = {};
+                        pa.leaf_run.reset();   // a re-initialised belief: the leaf is seeded from the room frame again
                         pa.view_lost_llr = 0.0;   // Task 17 add-on: a re-initialised belief, a new visibility record
                         pa.lost = {};   // Task D-B: a re-initialised belief starts the lost mode at its prior
                         refresh_anchor_geometry(*inst, pa);
@@ -924,8 +935,12 @@ void SpecificWorker::step_passage_anchor()
             leaf.dir_u     = pa.axis_sign * near;
             leaf.swing_y   = pa.axis_sign * inst->leaf.swing;
             leaf.phi_max   = phi_max;
-            leaf.phi_known = inst->ai2_initialized;
-            leaf.phi       = std::clamp(inst->phi_est, 0.f, phi_max);
+            leaf.phi_known = inst->ai2_initialized or pa.leaf_run.valid();
+            // The leaf is carried RIGID in the anchor frame from frame to frame: its phi is this anchor's own last posterior
+            // once there is one, the room-frame belief only before (spec 2026-10-31). The prior's WIDTH stays the config's
+            // phi_sigma: the posterior's own sigma would count one view seen again as fresh evidence (it would collapse to
+            // the grid while parked), and the "not as believed" branch still finds a leaf that moved.
+            leaf.phi       = std::clamp(pa.leaf_run.valid() ? pa.leaf_run.phi() : inst->phi_est, 0.f, phi_max);
             leaf.phi_sigma = std::max(0.f, pg.phi_sigma_rad);
             // ★THE DOOR'S OWN POSTERIOR, NOT A UNIFORM (try103 leg 3). With p_hinge = p_swing = 0.5 all four hinge × swing
             //   placements weigh the same, so a 79°-rotated anchor frame always had a placement whose swung leaf explained
@@ -946,6 +961,7 @@ void SpecificWorker::step_passage_anchor()
         post.stamp_ms = now;
         pa.pose = post;
         ev = e;
+        if (e.leaf_post) pa.leaf_run.add(e.leaf_phi, e.leaf_p_hinge, e.leaf_p_swing);
     }
     // ── Task 8 fix 1 (fix round 1): the last mask frame is HELD within the controller's staleness window ───────────
     //    A new frame replaces it (no door slice ⇒ no points: the camera looked and saw none). Its camera term is
@@ -1141,15 +1157,17 @@ void SpecificWorker::step_passage_anchor()
         // Fix round 1 (I-4): every hinge × swing hypothesis with its probability (σ of the door's hinge / swing log-odds),
         // so the guards weigh the minority leaf too and the cross line moves only as far as the MAP is believed.
         std::vector<rc::interaction::AnchorLeaf> al;
-        if (inst != nullptr and inst->ai2_initialized and inst->interaction.phi_known)
+        if (inst != nullptr and ((inst->ai2_initialized and inst->interaction.phi_known) or pa.leaf_run.valid()))
         {
             const float near = inst->leaf.hinge == rc::door::HingeSide::Near ? 1.f : -1.f;
             const float phi_max = std::clamp(cfg_.phi_max_rad, 0.f, float(M_PI));
             const float sy = pa.axis_sign * inst->leaf.swing;
             al = rc::interaction::anchor_leaf_hypotheses(pa.axis_sign * (near > 0.f ? -0.5f : 0.5f) * pa.clear_width,
                                                          sy * 0.5f * pa.thickness, pa.axis_sign * near, sy, pa.clear_width,
-                                                         std::clamp(inst->phi_est, 0.f, phi_max), inst->phi_sigma,
-                                                         inst->hinge_llr, inst->swing_llr);
+                                                         std::clamp(pa.leaf_run.valid() ? pa.leaf_run.phi() : inst->phi_est, 0.f, phi_max),
+                                                         pa.leaf_run.valid() ? pa.leaf_run.sigma(cfg_.pragmatic.phi_sigma_rad) : inst->phi_sigma,
+                                                         pa.leaf_run.valid() ? logit_clamped(pa.leaf_run.p_hinge()) : inst->hinge_llr,
+                                                         pa.leaf_run.valid() ? logit_clamped(pa.leaf_run.p_swing()) : inst->swing_llr);
             // Task 5b: onto the leaf plane door_concept believes in (DoorBeliefState::d, relative to the wall the anchor
             // registers) — the controller's known-obstacle leaf and this agent's model are one (door_anchor_leaf_plane.h).
             rc::door::place_leaves_on_plane(al, rc::door::anchor_leaf_plane_y(inst->ai2_belief.recess(), inst->wall_reg.depth,

@@ -134,6 +134,7 @@
 #pragma once
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <limits>
@@ -171,6 +172,49 @@ struct AnchorEvidence
     // Task 10 diagnostics (the replay prints them): the frame's model information I_L, its score-space misfit J_s, the gain.
     Eigen::Matrix3f info = Eigen::Matrix3f::Zero(), misfit = Eigen::Matrix3f::Zero(), gain = Eigen::Matrix3f::Zero();
     Eigen::Vector3f info_innov = Eigen::Vector3f::Zero();   // I_L ν: the data-only optimum's pull on the prior mean
+    // ─── THE LEAF AS THIS FRAME'S RAYS SEE IT (spec 2026-10-31 anchor-leaf-from-robot-frame) ────────────────────────────
+    // The posterior over the swung-leaf configurations the update already marginalises (LeafModel::active / active_w at
+    // the final pose), summarised in the LeafPrior's own terms so it can be published and carried: the probabilities that
+    // the hinge and the swing are as the prior STATED them, and phi's mean / spread within the most probable hinge × swing
+    // block. leaf_post false = no leaf in the model this frame (LeafPrior::known false, or nothing measured).
+    bool  leaf_post = false;
+    float leaf_p_hinge = 0.5f, leaf_p_swing = 0.5f;   // P(hinge as stated), P(swing as stated)
+    float leaf_phi = 0.f, leaf_phi_sigma = 0.f;       // within the MAP block (rad)
+    float leaf_p_none = 0.f;                          // the "no leaf in the model" branch's weight
+};
+
+// ─── THE LEAF OVER A PASSAGE (spec 2026-10-31 anchor-leaf-from-robot-frame, user: "add the running estimate") ──────────
+// One frame's leaf posterior (AnchorEvidence::leaf_*) is a MEASUREMENT of the leaf, and an overconfident one: it treats a few
+// thousand rays as independent, so its phi sigma is 0-0.6 deg while phi itself hops between grid nodes 81-97 deg from frame
+// to frame on a static 90 deg leaf (test leaf_posterior_from_the_rays). So the published leaf is this running estimate:
+//   - every measured frame is ONE observation of phi; the leaf does not move within a passage (a new passage re-inits it);
+//   - the published sigma is the observations' own SPREAD, not the spread of their mean: successive frames see the same
+//     doorway from nearly the same place and their errors are shared, so a sigma shrinking as 1/sqrt(n) would count one
+//     view many times — the overconfidence this replaces;
+//   - the config's phi sigma enters as one pseudo-observation (nu0 = 1), so one or two frames are not reported as certain;
+//   - P(hinge as stated) and P(swing as stated) are the frames' average.
+struct LeafRunning
+{
+    int n = 0;
+    double mean = 0.0, m2 = 0.0, p_hinge_sum = 0.0, p_swing_sum = 0.0;
+    void reset() { *this = LeafRunning{}; }
+    void add(float phi, float p_hinge, float p_swing)
+    {
+        ++n;
+        const double d = double(phi) - mean;
+        mean += d / double(n);
+        m2 += d * (double(phi) - mean);
+        p_hinge_sum += p_hinge; p_swing_sum += p_swing;
+    }
+    [[nodiscard]] bool valid() const { return n > 0; }
+    [[nodiscard]] float phi() const { return float(mean); }
+    [[nodiscard]] float sigma(float sigma_prior) const
+    {
+        const double nu0 = 1.0, s0 = double(std::max(0.f, sigma_prior));
+        return float(std::sqrt((m2 + nu0 * s0 * s0) / (double(n) + nu0)));
+    }
+    [[nodiscard]] float p_hinge() const { return n > 0 ? float(p_hinge_sum / n) : 0.5f; }
+    [[nodiscard]] float p_swing() const { return n > 0 ? float(p_swing_sum / n) : 0.5f; }
 };
 
 // The door's own belief about its SWUNG leaf, in ANCHOR coordinates (fix round 3). The leaf is a segment of length w
@@ -2012,6 +2056,37 @@ update_door_anchor(const rc::interaction::RelPose& prior, float width, float thi
     {
         const double r = mask.centroid_u(x);
         ev.camera_nis = float(r * r / mask.sigma2);
+    }
+    // The leaf posterior at the final pose (select_leaf_configs ran there, above), in the prior's terms (see AnchorEvidence).
+    if (not pb.leaf.cfgs.empty() and not pb.leaf.active.empty())
+    {
+        std::array<double, 4> wb{0, 0, 0, 0};
+        double w_none = 0.0;
+        for (std::size_t q = 0; q < pb.leaf.active.size(); ++q)
+        {
+            const int c = pb.leaf.active[q];
+            if (c < 0) w_none += pb.leaf.active_w[q];
+            else wb[std::size_t(pb.leaf.cfgs[std::size_t(c)].block)] += pb.leaf.active_w[q];
+        }
+        const double w_leaf = wb[0] + wb[1] + wb[2] + wb[3];
+        if (w_leaf > 0.0)
+        {
+            const int map = int(std::ranges::max_element(wb) - wb.begin());
+            double m = 0.0, m2 = 0.0, z = 0.0;
+            for (std::size_t q = 0; q < pb.leaf.active.size(); ++q)
+                if (const int c = pb.leaf.active[q]; c >= 0 and pb.leaf.cfgs[std::size_t(c)].block == map)
+                {
+                    const double w = pb.leaf.active_w[q], ph = pb.leaf.cfgs[std::size_t(c)].phi;
+                    m += w * ph; m2 += w * ph * ph; z += w;
+                }
+            m /= z;
+            ev.leaf_post      = true;
+            ev.leaf_p_hinge   = float((wb[0] + wb[1]) / w_leaf);
+            ev.leaf_p_swing   = float((wb[0] + wb[2]) / w_leaf);
+            ev.leaf_phi       = float(m);
+            ev.leaf_phi_sigma = float(std::sqrt(std::max(0.0, m2 / z - m * m)));
+            ev.leaf_p_none    = float(w_none);
+        }
     }
     return {post, ev};
 }
