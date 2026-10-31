@@ -38,3 +38,12 @@ add_test(NAME evaluator_combine_test COMMAND evaluator_combine_test)
 add_executable(card_io_test tests/card_io_test.cpp)
 target_include_directories(card_io_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/.. ${CMAKE_CURRENT_SOURCE_DIR}/../media_transport)
 add_test(NAME card_io_test COMMAND card_io_test)
+
+add_executable(card_vs_probe tools/card_vs_probe.cpp)
+target_include_directories(card_vs_probe PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/.. ${CMAKE_CURRENT_SOURCE_DIR}/../media_transport)
+target_link_libraries(card_vs_probe PRIVATE Eigen3::Eigen)
+
+add_executable(card_vs_probe_test tests/card_vs_probe_test.cpp)
+target_include_directories(card_vs_probe_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/.. ${CMAKE_CURRENT_SOURCE_DIR}/../media_transport)
+target_link_libraries(card_vs_probe_test PRIVATE Eigen3::Eigen)
+add_test(NAME card_vs_probe_test COMMAND card_vs_probe_test)
