@@ -58,6 +58,12 @@ inline std::optional<Eigen::Isometry3f> mount_of(DSR::InnerEigenAPI& inner, cons
             const auto& ys = py.value().get();
             for (std::size_t i = 0; i < std::min(xs.size(), ys.size()); ++i) s.polygon.emplace_back(xs[i], ys[i]);
         }
+        // The wall height the renderers use (imagine_view); absent or implausible = the 2.5 m default, flagged as assumed.
+        if (const auto rh = G.get_attrib_by_name<room_height_att>(rn.value()); rh.has_value() and std::isfinite(*rh) and *rh > 0.0f)
+        {
+            s.room_height = *rh;
+            s.room_height_known = true;
+        }
     }
 
     // robot pose: room <- body, the SAME base frame the LiDAR mounts below are expressed in (body <- sensor).

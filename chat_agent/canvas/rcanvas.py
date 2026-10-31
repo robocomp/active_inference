@@ -415,27 +415,38 @@ def draw_imagined_zed(ax, im=None):
     return ax
 
 
-def draw_imagined_lidar(ax_top, ax_side, im=None):
-    """The imagined LiDAR returns, one faint colour per sample. Top view: (x, y). Side view: height z against the
-    distance along each scan's own bearing from its own mount, with that LiDAR's ring elevation lines drawn from its real
-    mount origin (every LiDAR). Target points are coloured, wall/obstacle points grey. An unmodelled LiDAR is annotated."""
+def draw_imagined_lidar(ax_top, ax_sides, im=None):
+    """The imagined LiDAR returns, one faint colour per sample. Top view: (x, y) of every LiDAR. Then ONE side-view panel
+    per LiDAR (`ax_sides`: a list of axes, one per LiDAR in the file's order; a single axis is taken as a list of one):
+    height z against the distance along that LiDAR's own bearing from its own mount, its ring elevation lines drawn
+    from that mount to the panel's right edge. Target points are coloured, wall/obstacle points grey. A LiDAR that is
+    not modelled gets an annotated empty panel."""
+    if ax_sides is not None and not isinstance(ax_sides, (list, tuple)):
+        ax_sides = [ax_sides]
+    ax_sides = list(ax_sides or [])
     im = im or imagined()
     if im is None:
-        for ax in (ax_top, ax_side):
+        for ax in [ax_top] + ax_sides:
             ax.text(0.5, 0.5, "no imagined scan", ha="center", va="center", transform=ax.transAxes)
-        return ax_top, ax_side
+        return ax_top, ax_sides
     import matplotlib.pyplot as plt
     cmap = plt.get_cmap("tab10")
     ring_colors = ["tab:red", "tab:blue", "tab:green"]
-    reach = 3.0
     for k, sensor in enumerate(im.lidar):
         rc_col = ring_colors[k % len(ring_colors)]
+        ax_side = ax_sides[k] if k < len(ax_sides) else None
         modelled = [sc for sc in sensor if sc.modelled]
         if not modelled:
             notes = "; ".join(sorted({n for sc in sensor for n in sc.notes}))
-            ax_top.text(0.02, 0.98 - 0.07 * k, f"lidar {k}: not modelled" + (f" ({notes})" if notes else ""),
-                        transform=ax_top.transAxes, va="top", fontsize=7, color=rc_col)
+            msg = f"lidar {k}: not modelled" + (f" ({notes})" if notes else "")
+            ax_top.text(0.02, 0.98 - 0.07 * k, msg, transform=ax_top.transAxes, va="top", fontsize=7, color=rc_col)
+            if ax_side is not None:
+                ax_side.text(0.5, 0.5, msg, ha="center", va="center", transform=ax_side.transAxes, fontsize=8, color=rc_col)
+                ax_side.set_xticks([])
+                ax_side.set_yticks([])
+                ax_side.set_title(f"lidar {k}", fontsize=8)
             continue
+        reach = 3.0
         for i, sc in enumerate(sensor):
             ox, oy, oz = sc.mount_xyz
             ux, uy = math.cos(sc.bearing_rad), math.sin(sc.bearing_rad)
@@ -444,13 +455,22 @@ def draw_imagined_lidar(ax_top, ax_side, im=None):
                     xs, ys, zs = zip(*pts)
                     ax_top.scatter(xs, ys, s=3, color=col, alpha=alpha, linewidths=0)
                     ds = [(x - ox) * ux + (y - oy) * uy for x, y in zip(xs, ys)]
-                    ax_side.scatter(ds, zs, s=3, color=col, alpha=alpha, linewidths=0)
+                    if ax_side is not None:
+                        ax_side.scatter(ds, zs, s=3, color=col, alpha=alpha, linewidths=0)
                     reach = max(reach, max(ds))
-        # the ring lines of this LiDAR, from its first modelled scan's mount, along its own bearing
+        if ax_side is None:
+            continue
+        # this LiDAR's ring lines, from its first modelled scan's mount along its own bearing, to the final x-limit
         sc = modelled[0]
         oz = sc.mount_xyz[2]
         for e in sc.ring_elev_room_deg:
             ax_side.plot([0, reach], [oz, oz + reach * math.tan(math.radians(e))], color=rc_col, linewidth=0.5, alpha=0.5)
+        ax_side.set_xlim(0, reach)
+        ax_side.set_ylim(-0.5, 3.0)
+        ax_side.set_title(f"lidar {k}: side view", fontsize=8)
+        ax_side.set_xlabel("distance along bearing (m)")
+        ax_side.set_ylabel("z (m)")
+        ax_side.grid(True, linewidth=0.3, alpha=0.5)
     for s in im.samples:
         for b in s.parts:
             ax_top.plot([b.cx], [b.cy], marker="+", color="black", markersize=4, alpha=0.4)
@@ -459,10 +479,5 @@ def draw_imagined_lidar(ax_top, ax_side, im=None):
     ax_top.set_aspect("equal", adjustable="datalim")
     ax_top.set_xlabel("x (m)")
     ax_top.set_ylabel("y (m)")
-    ax_side.set_xlabel("distance along bearing (m)")
-    ax_side.set_ylabel("z (m)")
-    ax_side.set_xlim(0, reach)
-    ax_side.set_ylim(-0.5, 3.0)
     ax_top.grid(True, linewidth=0.3, alpha=0.5)
-    ax_side.grid(True, linewidth=0.3, alpha=0.5)
-    return ax_top, ax_side
+    return ax_top, ax_sides

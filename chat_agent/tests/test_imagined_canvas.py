@@ -55,16 +55,29 @@ def main():
         check("draw_imagined_zed runs headless", os.path.getsize("zed.png") > 0)
     except Exception as e:
         check(f"draw_imagined_zed ({e!r})", False)
-    fig, (a, b) = plt.subplots(1, 2)
+    fig, (a, b, c) = plt.subplots(1, 3)
     try:
-        rcanvas.draw_imagined_lidar(a, b)
+        rcanvas.draw_imagined_lidar(a, [b, c])
         fig.savefig("lidar.png")
         check("draw_imagined_lidar runs headless", os.path.getsize("lidar.png") > 0)
     except Exception as e:
         check(f"draw_imagined_lidar ({e!r})", False)
-    # every LiDAR draws its ring lines from its own mount: 2 + 2 lines, starting at heights 1.0 and 0.6
-    starts = sorted(round(l.get_ydata()[0], 2) for l in b.get_lines())
-    check("ring lines of every LiDAR, from their own mount height", starts == [0.6, 0.6, 1.0, 1.0])
+    # one side panel per LiDAR, each with its own ring lines from its own mount, reaching that panel's x-limit
+    check("lidar 0 panel: 2 ring lines from z 1.0", sorted(round(l.get_ydata()[0], 2) for l in b.get_lines()) == [1.0, 1.0])
+    check("lidar 1 panel: 2 ring lines from z 0.6", sorted(round(l.get_ydata()[0], 2) for l in c.get_lines()) == [0.6, 0.6])
+    check("ring lines reach the final x-limit", all(abs(l.get_xdata()[-1] - ax.get_xlim()[1]) < 1e-6
+                                                    for ax in (b, c) for l in ax.get_lines()))
+    # an unmodelled LiDAR: annotated empty panel
+    with open("imagined.json", "w") as f:
+        d = json.loads(json.dumps(IMAGINED))
+        d["lidar"][0][0]["modelled"] = False
+        d["lidar"][0][0]["on_target"] = []
+        json.dump(d, f)
+    fig, (a2, b2, c2) = plt.subplots(1, 3)
+    rcanvas.draw_imagined_lidar(a2, [b2, c2])
+    check("unmodelled LiDAR panel is annotated and empty", len(b2.get_lines()) == 0 and any("not modelled" in t.get_text() for t in b2.texts))
+    with open("imagined.json", "w") as f:
+        json.dump(IMAGINED, f)
     # a stale PNG with no image in the JSON is not drawn
     with open("imagined.json", "w") as f:
         json.dump(dict(IMAGINED, image={"w": 0, "h": 0}), f)

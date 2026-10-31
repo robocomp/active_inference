@@ -156,6 +156,22 @@ def tools():
                                                      "robot is now"},
            "stand": {"type": "boolean", "description": "true = answer WHERE the robot should stand to see it"}},
           ["concept"]),
+        t("imagine_view", "Show how the robot IMAGINES a kind of thing (a chair, a table...) looks to its own sensors: draws "
+          "several imagined instances on the side canvas, with what the camera (ZED) and the two LiDARs would pick up, and "
+          "says the chance it would be noticed and recognised. Use for \"show me how you imagine a chair\", \"how would a "
+          "chair look to your lidar?\", \"imagine a chair against the wall\". Read-only; it moves nothing. NOT for a real "
+          "object that is in the room (can_see) nor for the live camera (draw).",
+          {"concept": {"type": "string", "description": "what to imagine, in English singular (chair, table, fridge, "
+                                                        "bottle, cabinet, hood)"},
+           "where": {"type": "string", "description": "where to put it: a door or object name (door_1, table_1), or "
+                                                      "\"wall\" for against the wall (also for \"junto a la pared\"); "
+                                                      "empty = wherever such things usually stand"},
+           "from": {"type": "string", "description": "the place to look from: a door or object name; empty = where the "
+                                                     "robot is now"},
+           "sensor": {"type": "string", "enum": ["zed", "lidar", "both"], "description": "which sensor to draw; default both"},
+           "n": {"type": "integer", "description": "how many imagined instances to draw (default 8)"},
+           "seed": {"type": "integer", "description": "random seed, to repeat a picture; default random"}},
+          ["concept"]),
         t("agent_control", "Start, stop or restart one of the robot's software agents (room_concept, residual_concept, "
           "retina, door_concept, table_concept, chair_concept, bottle_concept, cabinet_concept, hood_concept, "
           "human_concept, refrigerator_concept, controller, ltsm_agent, episodic_agent). When the person asks to start, "
@@ -447,6 +463,19 @@ CASES = [
      lambda n, a, c: n != "can_see"),
     ("can_see NOT: where is the fridge", [], "none", "where is the fridge",
      lambda n, a, c: n == "where_is" or (n is None and re.search(r"not (yet )?(perceived|seen)|haven't (perceived|seen)|have not (perceived|seen)", c.lower()) is not None)),
+    # imagine_view (2026-10-31): the robot's own appearance model drawn on the canvas; a REAL object stays can_see
+    ("imagine_view: show how you imagine a chair", [], "none", "show me how you imagine a chair",
+     lambda n, a, c: n == "imagine_view" and re.search("chair|silla", str(a.get("concept", "")).lower()) is not None),
+    ("imagine_view: chair to your lidar", [], "none", "how would a chair look to your lidar?",
+     lambda n, a, c: n == "imagine_view" and re.search("chair|silla", str(a.get("concept", "")).lower()) is not None
+     and str(a.get("sensor", "lidar")).lower() in ("lidar", "both")),
+    ("imagine_view: es silla junto a la pared", [], "none", "imagina una silla junto a la pared",
+     lambda n, a, c: n == "imagine_view" and re.search("chair|silla", str(a.get("concept", "")).lower()) is not None
+     and re.search("wall|pared", str(a.get("where", "")).lower()) is not None),
+    ("imagine_view NOT: can you see the chair", [], "none", "can you see the chair?",
+     lambda n, a, c: n != "imagine_view"),
+    ("imagine_view NOT: draw the graph", [], "none", "draw the graph",
+     lambda n, a, c: n == "draw" or n == "show"),
     # long-term memory (ltsm_topology): rooms the robot remembers and the route to one
     ("passages remembered", [], "none", "which rooms do you remember?",
      lambda n, a, c: n == "known_rooms" or (n is None and "room_2" in c and "room_3" in c)),

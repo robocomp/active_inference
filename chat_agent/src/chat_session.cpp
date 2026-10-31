@@ -5,6 +5,7 @@
 #include <filesystem>
 #include <cmath>
 #include <print>
+#include <random>
 #include <ranges>
 #include <vector>
 
@@ -36,6 +37,7 @@
 #include "look_messages.h"
 #include "mission_plan.h"
 #include "perception_world.h"
+#include "imagine_view.h"
 #include "../../common/perception_card/card_io.h"
 #include "sim_door.h"
 #include "topology.h"
@@ -649,6 +651,27 @@ QJsonArray ChatSession::tools_json() const
                     {"stand", QJsonObject{{"type", "boolean"},
                                           {"description", "true = answer WHERE the robot should stand to see it"}}}},
         QJsonArray{"concept"}));
+    tools.append(tool_def("imagine_view",
+        "Show how the robot IMAGINES a kind of thing (a chair, a table...) looks to its own sensors: draws several "
+        "imagined instances on the side canvas, with what the camera (ZED) and the two LiDARs would pick up, and says "
+        "the chance it would be noticed and recognised. Use for \"show me how you imagine a chair\", \"how would a chair "
+        "look to your lidar?\", \"imagine a chair against the wall\". Read-only; it moves nothing. NOT for a real object "
+        "that is in the room (can_see) nor for the live camera (draw).",
+        QJsonObject{{"concept", QJsonObject{{"type", "string"},
+                                            {"description", "what to imagine, in English singular (chair, table, "
+                                                            "fridge, bottle, cabinet, hood)"}}},
+                    {"where", QJsonObject{{"type", "string"},
+                                          {"description", "where to put it: a door or object name (door_1, table_1), or "
+                                                          "\"wall\" for against the wall (also for \"junto a la pared\"); "
+                                                          "empty = wherever such things usually stand"}}},
+                    {"from", QJsonObject{{"type", "string"},
+                                         {"description", "the place to look from: a door or object name; empty = where the "
+                                                         "robot is now"}}},
+                    {"sensor", QJsonObject{{"type", "string"}, {"enum", QJsonArray{"zed", "lidar", "both"}},
+                                           {"description", "which sensor to draw; default both"}}},
+                    {"n", QJsonObject{{"type", "integer"}, {"description", "how many imagined instances to draw (default 8)"}}},
+                    {"seed", QJsonObject{{"type", "integer"}, {"description", "random seed, to repeat a picture; default random"}}}},
+        QJsonArray{"concept"}));
     tools.append(tool_def("agents",
         "The robot's software agents: which are running, their state (Operating / Degraded / Waiting), uptime, CPU "
         "and memory of each. Read-only.",
@@ -1041,6 +1064,8 @@ QString ChatSession::answer_query(const QString& name, const QJsonObject& args)
     }
     else if (name == "can_see")
         out = do_can_see(args);
+    else if (name == "imagine_view")
+        out = do_imagine_view(args);
     else if (name == "agents")
         out = q(answer_agents(system_.agents()));
     else if (name == "sensors")
@@ -1058,19 +1083,28 @@ QString ChatSession::answer_query(const QString& name, const QJsonObject& args)
     return out.trimmed();
 }
 
-QString ChatSession::do_can_see(const QJsonObject& args)
+namespace
 {
-    // The cards are the concept agents' files (the perception_card graph attribute is not installed yet): re-read once
-    // per call, from the active_inference root = the parent of chat_agent/ (the fleet scripts start us from chat_agent/).
-    // The active_inference root as canvas_model.cpp has it (assets_root: two levels above the binary's directory); the
-    // cwd's parent when that holds no cards (started from chat_agent/ by the fleet scripts).
+/// The cards are the concept agents' files (the perception_card graph attribute is not installed yet): re-read once per
+/// call, from the active_inference root as canvas_model.cpp has it (assets_root: two levels above the binary's directory);
+/// the cwd's parent when that holds no cards (started from chat_agent/ by the fleet scripts). `root` ends as the one used.
+std::vector<rc::card::Card> load_cards(std::filesystem::path& root)
+{
     namespace fs = std::filesystem;
     std::error_code ec;
-    fs::path root = rc::chat::assets_root();
+    root = rc::chat::assets_root();
     auto cards = rc::card::read_all_cards(root);
     if (cards.empty())
         if (const fs::path alt = fs::current_path(ec).parent_path(); alt != root)
             if (auto c2 = rc::card::read_all_cards(alt); not c2.empty()) { cards = std::move(c2); root = alt; }
+    return cards;
+}
+}   // namespace
+
+QString ChatSession::do_can_see(const QJsonObject& args)
+{
+    std::filesystem::path root;
+    auto cards = load_cards(root);
     const bool any_cards = not cards.empty();
 
     const std::string what = rc::chat::canonical_concept(args.value("concept").toString().toStdString());
@@ -1080,6 +1114,15 @@ QString ChatSession::do_can_see(const QJsonObject& args)
 
     // The card is the target's CLASS: the named instance's subtype when `where` names one.
     const auto scene = rc::chat::build_see_scene(*G_, *inner_, digest_);
+
+    // A hypothetical target: a concept with no instance in the room, at a named place: Monte-Carlo over the card's size prior.
+    if (not stand and not scene.room.empty() and rc::chat::is_hypothetical(scene, what, where))
+    {
+        const auto c = std::ranges::find(cards, what, &rc::card::Card::concept_);
+        if (c == cards.end()) return q(rc::chat::answer_no_card(any_cards, root.string()));
+        return q(rc::chat::can_see_hypothetical_reply(*c, scene, what, where, from));
+    }
+
     std::string cls = what;
     if (const auto it = std::ranges::find_if(scene.objects, [&](const auto& o) { return rc::chat::lower_ascii(o.name) == rc::chat::lower_ascii(where); });
         it != scene.objects.end() and not it->subtype.empty())
@@ -1094,6 +1137,42 @@ QString ChatSession::do_can_see(const QJsonObject& args)
     if (stand)   // doors of unknown state at their MOST PROBABLE state (R12), never an average slit
         return q(rc::chat::where_to_stand_reply(*card, scene, *target));
     return q(rc::chat::can_see_reply(*card, scene, *target, from));   // "from here" = current heading + "if I turn" (R11)
+}
+
+QString ChatSession::do_imagine_view(const QJsonObject& args)
+{
+    std::filesystem::path root;
+    auto cards = load_cards(root);
+    rc::chat::ImagineRequest rq;
+    rq.concept_ = rc::chat::canonical_concept(args.value("concept").toString().toStdString());
+    rq.where = args.value("where").toString().trimmed().toStdString();
+    rq.from = args.value("from").toString().trimmed().toStdString();
+    if (const auto sn = args.value("sensor").toString().trimmed().toLower().toStdString(); sn == "zed" or sn == "lidar") rq.sensor = sn;
+    if (args.value("n").isDouble()) rq.n = args.value("n").toInt(rq.n);
+    // The seed: random unless the person (or the model) passes one; echoed in the answer so a picture can be repeated.
+    std::uint64_t seed = (std::uint64_t(std::random_device{}()) << 32) ^ std::random_device{}();
+    seed &= (1ull << 53) - 1;   // a JSON number round-trips below 2^53
+    const auto sv = args.value("seed");
+    if (sv.isString()) seed = sv.toString().toULongLong();
+    else if (sv.isDouble() and sv.toDouble() >= 0) seed = static_cast<std::uint64_t>(sv.toDouble());
+
+    const auto card = std::ranges::find(cards, rq.concept_, &rc::card::Card::concept_);
+    if (card == cards.end()) return q(rc::chat::answer_no_card(not cards.empty(), root.string()));
+    const auto scene = rc::chat::build_see_scene(*G_, *inner_, digest_);
+    if (scene.room.empty()) return QStringLiteral("I do not know which room I am in, so I cannot imagine it here.");
+
+    const auto out = rc::chat::imagine_view(*card, scene, rq, seed, canvas_runner_.run_dir().toStdString());
+    if (not out.drawn) return q(out.text);
+    // the fixed script stock/imagined.py draws imagined.json + imagined_zed.png (rcanvas.draw_imagined_zed / _lidar)
+    auto job = library_job("imagined", {});
+    if (not job.has_value()) return q(out.text) + QStringLiteral(" (The picture script is missing.)");
+    job->title = q("imagined " + rq.concept_);
+    const QString err = draw_now(std::move(*job), false);
+    log_.write("imagine_view", QJsonObject{{"concept", q(rq.concept_)}, {"where", q(rq.where)}, {"seed", QString::number(seed)},
+                                           {"drawn", err.isEmpty()}, {"error", err}});
+    if (not err.isEmpty()) return q(out.text) + QStringLiteral(" (The picture could not be drawn: ") + err + QStringLiteral(")");
+    window_->append_system(QStringLiteral("canvas: ") + q(out.caption));
+    return q(out.text);
 }
 
 std::optional<rc::chat::Topology> ChatSession::remembered_topology() const

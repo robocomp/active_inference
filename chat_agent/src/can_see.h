@@ -79,6 +79,8 @@ struct SeeScene
     std::optional<rc::nbv::Sensor> zed;
     float zed_mount_z = 0;
     std::optional<rc::card::LidarRig> helios, bpearl;
+    float room_height = 2.5f;              ///< room_height of the room node: the wall slab top for the renderers
+    bool room_height_known = false;        ///< false: 2.5 m is an assumption, and the answers say so
 };
 
 /// A door's possible states as (weight, half-gap) pairs; the weights sum to 1.
@@ -165,6 +167,8 @@ inline constexpr float kSentinelFree = 0.0f;        // door_phi_rad / door_open_
     }
     w.zed = s.zed;
     w.zed_mount_z = s.zed_mount_z;
+    w.room_height = s.room_height;
+    w.room_height_known = s.room_height_known;
     w.helios = s.helios;
     w.bpearl = s.bpearl;
     return w;

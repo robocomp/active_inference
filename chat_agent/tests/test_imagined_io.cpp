@@ -66,6 +66,7 @@ int main()
                 sc.on_target.push_back({std::numeric_limits<float>::quiet_NaN(), 0, 0});
                 sc.on_target.push_back({0, std::numeric_limits<float>::infinity(), 0});
             }
+            if (k == 0 and i == 1) sc.ring_elev_room_deg = {-10.f, std::numeric_limits<float>::quiet_NaN(), 5.f, std::numeric_limits<float>::infinity()};
             scans[k].push_back(sc);
         }
     McResult mc; mc.p_notice_mean = 0.8f; mc.p_recognise_mean = 0.25f; mc.p_recognise_sd = 0.05f; mc.n = 3;
@@ -103,6 +104,9 @@ int main()
         CHECK(big["on_target"].toArray().size() <= 500 and big["on_target"].toArray().size() > 100);   // the cap
         CHECK(big["n_total_target"].toInt() == 1200 and big["n_total_other"].toInt() == 1);
         CHECK(big["notes"].toArray().size() == 1 and big["notes"].toArray()[0].toString().startsWith("2 non-finite"));
+        const auto nanring = s0[1].toObject();   // review item 4: non-finite ring elevations skipped and noted
+        CHECK(nanring["ring_elev_room_deg"].toArray().size() == 2 and nanring["ring_elev_room_deg"].toArray()[1].toDouble() == 5.0);
+        CHECK(nanring["notes"].toArray().size() == 1 and nanring["notes"].toArray()[0].toString().startsWith("2 non-finite ring"));
         CHECK(std::abs(big["mount_xyz"].toArray()[2].toDouble() - 1.075) < 1e-9 and std::abs(big["bearing_rad"].toDouble() - 0.5) < 1e-9);
     }
     CHECK(not QRegularExpression("\":-?[0-9]+,[0-9]").match(QString::fromStdString(j)).hasMatch());   // no comma decimal separator

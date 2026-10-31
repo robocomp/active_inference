@@ -161,6 +161,26 @@ def main():
         ok = rc == 0 and png
         print(f"{'PASS' if ok else 'FAIL'}  table, header=True" + ("" if ok else f"\n{err}"))
         fails += not ok
+        # stock/imagined.py: the imagine_view picture (ZED panel, LiDAR top view, one side panel per LiDAR)
+        sys.path.insert(0, HERE)
+        from test_imagined_canvas import IMAGINED
+        import numpy as np
+        script = os.path.join(CANVAS, "stock", "imagined.py")
+        rc, err, png = run(rundir, script)
+        ok = rc != 0 and "nothing imagined" in err
+        print(f"{'PASS' if ok else 'FAIL'}  imagined: nothing imagined yet is said" + ("" if ok else f"\n{err}"))
+        fails += not ok
+        Image.fromarray(np.zeros((6, 8, 3), np.uint8)).save(os.path.join(rundir, "imagined_zed.png"))
+        variants = {"imagined_both": IMAGINED,
+                    "imagined_zed_only": dict(IMAGINED, lidar=[[], []]),
+                    "imagined_lidar_only": dict(IMAGINED, image={"w": 0, "h": 0})}
+        for name, doc in variants.items():
+            with open(os.path.join(rundir, "imagined.json"), "w") as f:
+                json.dump(doc, f)
+            rc, err, png = run(rundir, script)
+            ok = rc == 0 and png
+            print(f"{'PASS' if ok else 'FAIL'}  {name}" + ("" if ok else f"\n{err}"))
+            fails += not ok
         with open(os.path.join(rundir, "snapshot.json"), "w") as f:
             json.dump(SNAPSHOT, f)
         with open(os.path.join(rundir, "net.py"), "w") as f:

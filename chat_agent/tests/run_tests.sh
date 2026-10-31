@@ -71,6 +71,10 @@ g++ -std=c++23 -O0 -g -Wall -Wextra -Wno-deprecated-literal-operator -fPIC -isys
     -I../../common/media_transport -o "$out/test_imagined_io" test_imagined_io.cpp \
     $(pkg-config --cflags Qt6Gui | sed "s/-I/-isystem /g") $(pkg-config --libs Qt6Gui)
 "$out/test_imagined_io"
+g++ -std=c++23 -O0 -g -Wall -Wextra -Wno-deprecated-literal-operator -fPIC -isystem /usr/include/eigen3 -I../../common \
+    -I../../common/media_transport -o "$out/test_imagine_view" test_imagine_view.cpp \
+    $(pkg-config --cflags Qt6Gui | sed "s/-I/-isystem /g") $(pkg-config --libs Qt6Gui)
+"$out/test_imagine_view"
 g++ -std=c++23 -O0 -g -Wall -Wextra -Wno-deprecated-literal-operator -fPIC -o "$out/test_topology" test_topology.cpp \
     $(pkg-config --cflags Qt6Core | sed "s/-I/-isystem /g") $(pkg-config --libs Qt6Core)
 "$out/test_topology"

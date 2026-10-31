@@ -85,9 +85,15 @@ inline bool write_imagined(const std::filesystem::path& run_dir, const rc::card:
         for (const auto& sc : per_sample)
         {
             QJsonArray ring;
-            for (const float e : sc.ring_elev_room_deg) ring.append(std::round(double(e) * 100.0) / 100.0);
+            std::size_t ring_skipped = 0;
+            for (const float e : sc.ring_elev_room_deg)
+            {
+                if (std::isfinite(e)) ring.append(std::round(double(e) * 100.0) / 100.0);
+                else ++ring_skipped;
+            }
             QJsonArray notes;
             for (const auto& n : sc.notes) notes.append(QString::fromStdString(n));
+            if (ring_skipped > 0) notes.append(QString("%1 non-finite ring elevation(s) skipped").arg(ring_skipped));
             std::size_t n_target = 0, n_other = 0, skipped = 0;
             auto on_target = points(sc.on_target, n_target, skipped);
             auto on_other = points(sc.on_other, n_other, skipped);
