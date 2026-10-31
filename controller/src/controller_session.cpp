@@ -3389,6 +3389,7 @@ bool ControllerSession::drive_door_route(const ControllerPlanningStep &step, rc:
             const float s_body = (cpose.pos - seen->gap.centre).dot(n);
             // Once any part of the body is in the opening the route is not rebuilt on it (a route from the doorway failed).
             door_route_body_in_opening_ = s_body > -r_body;
+            door_passage_.note_in_opening(door_route_body_in_opening_);
             door_route_last_s_body_ = s_body;
             door_route_last_r_body_ = r_body;
             // Driven on the anchor, THROUGH is the servo's own (the body at the cross target, deep entry) AND the body

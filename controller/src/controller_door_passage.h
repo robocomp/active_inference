@@ -120,6 +120,7 @@ public:
         route_arrived_ = false;
                 cross_id_ = 0;
         servo_ = deep_ = false;
+        reapproach_ = false;
         exited_ = false;
         predicted_room_id_ = 0;
         route_wait_logged_.clear();
@@ -282,6 +283,8 @@ public:
     /// short transition (link 2 until the old face goes) no longer ends with scans looking back through the door
     /// (pingpong11 leg 4: 0.4 m in, the relocaliser flipped the pose 179 deg 0.37 s after the transition closed).
     void note_servo() { std::scoped_lock lk(m_); servo_ = true; }
+    /// Some part of the body is in the perceived opening (drive_door_route): a withdrawn cross does not send it back then.
+    void note_in_opening(bool in) { std::scoped_lock lk(m_); in_opening_ = in; }
     void note_deep() { std::scoped_lock lk(m_); deep_ = true; }
     [[nodiscard]] bool servo() const { std::scoped_lock lk(m_); return servo_; }
     [[nodiscard]] bool deep() const { std::scoped_lock lk(m_); return deep_; }
@@ -844,6 +847,7 @@ private:
             }
             if (step_ == Step::Approach)
             {
+                reapproach_ = false;
                 if (open_now and route_cross_.has_value())
                 {
                     route_event(out, std::format("[door-route] {}: at the vantage, the door reads open — on through it", door_));
@@ -859,8 +863,25 @@ private:
                 }
             }
         }
-        // ── a door that opens / shuts changes the leg
-        if (step_ == Step::Approach and open_now and route_cross_.has_value())
+        // ── A WITHDRAWN CROSS SENDS THE ROBOT BACK TO THE APPROACH (user 2026-10-31, pingpong15 leg 2): door_concept withdrew
+        //    `cross` because the robot is not oriented to the door (P(reach) 0.15) and offers `approach`; holding the cross
+        //    waited for ever. Before the body is in the opening (and before the crossing fact), go to the vantage again —
+        //    the approach leg ends there and the open door takes the passage on through it.
+        if (step_ == Step::Cross and not exited_ and not in_opening_)
+        {
+            const State sc = state_of(G, name_of(Step::Cross));
+            if (sc != State::Offered and sc != State::Executing and state_of(G, name_of(Step::Approach)) == State::Offered)
+            {
+                route_event(out, std::format("[door-route] {}: {} withdrawn and {} offered, the body not in the opening — back to "
+                                             "the vantage", door_, name_of(Step::Cross), name_of(Step::Approach)));
+                step_ = Step::Approach;
+                reapproach_ = true;
+                seen_executing_ = false;
+                ++route_epoch_;
+            }
+        }
+        // ── a door that opens / shuts changes the leg (not on a re-approach: that one ends at the vantage)
+        if (step_ == Step::Approach and open_now and route_cross_.has_value() and not reapproach_)
         {
             route_event(out, std::format("[door-route] {}: the door reads open — the route goes on through it", door_));
             enter_cross(G, room_frame);
@@ -958,6 +979,7 @@ private:
         route_arrived_ = false;
         exited_ = false;
         servo_ = deep_ = false;
+        reapproach_ = false;
         cross_id_ = room_id_;   // the room ID the step began in
         // THE PREDICTION, taken before crossing: the remembered room ltsm's recall under this door names (recall_<k>, its
         // room_id), else a new room. It travels in the crossing fact; nobody reads a recall at crossing time.
@@ -991,6 +1013,8 @@ private:
     bool route_arrived_ = false;
     bool exited_ = false;                  ///< through: the crossing fact was handed to the caller (once per Cross)
     bool servo_ = false;                   ///< the doorway is driven on the anchor (note_servo)
+    bool in_opening_ = false;              ///< some part of the body in the perceived opening (note_in_opening)
+    bool reapproach_ = false;              ///< back to the vantage after a withdrawn cross: no auto-cross before it
     bool deep_ = false;                    ///< the servo has the body at the cross target past the plane (note_deep)
     std::uint64_t predicted_room_id_ = 0;  ///< the remembered room behind the door at enter_cross (0 = new)
     std::uint64_t cross_id_ = 0;           ///< the room ID the Cross step began in (0 = unknown)
