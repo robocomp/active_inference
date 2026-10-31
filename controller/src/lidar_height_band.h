@@ -68,24 +68,8 @@ inline LidarSource lidar_source_of_plane(int plane_id)
 // legacy_min_m, and the points it is applied to arrive in the robot frame through the GRAPH's body<-helios edge
 // (LidarPlaneReader::poll), so a mount corrected or planted through robot_concept's overlay already reaches it.
 // This is the NOMINAL height (shadow.json body<-helios z), used to explain why 0.20 m is the right cut.
-// kHeliosLowestBeamRad is the FALLBACK for the lowest beam: the controller derives the live value from the helios
-// SensorModel + the body<-helios rotation at start-up (lowest_beam_below_horizon_rad) and logs which source it used.
 inline constexpr float kHeliosMountZ = 1.075f;                       // nominal, shadow.json body<-helios z
 inline constexpr float kHeliosLowestBeamRad = 15.5f * 3.14159265f / 180.f;   // the inverted fan's lowest beam below horizontal
-
-// The lowest beam BELOW THE HORIZON in the ROBOT frame [rad, positive down], derived from the sensor's advertised
-// device-frame elevation span [lo, hi] and the rotation R of the body<-sensor RT edge. Nothing assumes the helios is
-// inverted: a beam at device elevation e and azimuth az is R*(cos e cos az, cos e sin az, sin e), so with a = R*ez and
-// s = sqrt(1-a.z^2) its robot-frame height component over all azimuths bottoms out at sin(e)*a.z - cos(e)*s. That is a
-// sinusoid in e, so the minimum over [lo, hi] is at an end of it (the fan is < 90 deg wide) -> min of the two ends.
-// Inverted mount (a = -ez): -sin(e), lowest at the HIGHEST device elevation -- hence +14.6 deg sim, +15 real.
-inline float lowest_beam_below_horizon_rad(float lo_elev_rad, float hi_elev_rad, const Eigen::Matrix3f &R)
-{
-    const float az = (R * Eigen::Vector3f::UnitZ()).z();
-    const float s = std::sqrt(std::max(0.f, 1.f - az * az));
-    const auto zmin = [&](float e) { return std::sin(e) * az - std::cos(e) * s; };
-    return -std::asin(std::clamp(std::min(zmin(lo_elev_rad), zmin(hi_elev_rad)), -1.f, 1.f));
-}
 
 inline LidarBandMembership lidar_band_membership(float z, const LidarHeightBands &b, LidarSource src = LidarSource::Unknown)
 {

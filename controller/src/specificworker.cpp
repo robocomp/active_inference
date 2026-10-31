@@ -26,8 +26,6 @@
 
 #include "../../common/robust_metrics/robust_metrics.h"
 #include "../../common/media_transport/lidar_plane_reader.h"
-#include "../../common/media_transport/media_transport.h"   // sensor_model_from_graph, lowest/highest_elev_deg
-#include "lidar_height_band.h"
 
 #include "custom_widget.h"
 #include "corner_visibility.h"   // point_in_polygon: a relative move must end inside the room
@@ -280,7 +278,6 @@ void SpecificWorker::initialize()
 	// come from the descriptor JSON; if the node/descriptor is absent we log and fall
 	// back to the DSR laser_* path.
 	init_lidar_media();
-	init_lidar_band_geometry();
 
 	// Camera + YOLO masks for the affordance panel. Built here (graph loaded, main thread) but it
 	// touches NO DDS in its constructor — its rgb subscriber comes up lazily from the control thread,
@@ -1888,27 +1885,6 @@ void SpecificWorker::init_lidar_media()
 	lidar_reader_ = std::make_unique<rc::media::LidarPlaneReader>(
 		G, inner_eigen_api_.get(),
 		std::vector<std::string>{params.lidar_helios_name, params.lidar_bpearl_name}, "lidar");
-}
-
-void SpecificWorker::init_lidar_band_geometry()
-{
-	helios_lowest_beam_rad_ = rc::kHeliosLowestBeamRad;
-	const char *source = "fallback constant";
-	if (G and inner_eigen_api_)
-	{
-		const auto model = rc::media::sensor_model_from_graph(*G, params.lidar_helios_name);
-		const auto lo = model ? rc::media::lowest_elev_deg(*model) : std::nullopt;
-		const auto hi = model ? rc::media::highest_elev_deg(*model) : std::nullopt;
-		const auto T = inner_eigen_api_->get_transformation_matrix("body", params.lidar_helios_name);
-		if (lo.has_value() and hi.has_value() and T.has_value())
-		{
-			constexpr float d2r = 3.14159265f / 180.f;
-			const Eigen::Matrix3f R = T->rotation().template cast<float>();
-			helios_lowest_beam_rad_ = rc::lowest_beam_below_horizon_rad(*lo * d2r, *hi * d2r, R);
-			source = "descriptor";
-		}
-	}
-	std::print("[LidarBand] helios lowest beam {:.2f} deg from {}\n", helios_lowest_beam_rad_ * 180.f / 3.14159265f, source);
 }
 
 // See the note on kMaxLidarRecoveries in the header for why rebuilding can help and why it is bounded.

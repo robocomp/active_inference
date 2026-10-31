@@ -440,10 +440,6 @@ private:
 		// cycle to the obstacle tracker (which then applies the dynamic room<-robot pose).
 		std::unique_ptr<rc::media::LidarPlaneReader> lidar_reader_;
 		void init_lidar_media();
-		// Lowest helios beam below the horizon in the robot frame [rad]: from the helios SensorModel + the body<-helios
-		// rotation when the descriptor carries them, else rc::kHeliosLowestBeamRad. Set once at start-up (main thread).
-		float helios_lowest_beam_rad_;
-		void init_lidar_band_geometry();
 		LidarPoll poll_lidar_media();
 
 signals:

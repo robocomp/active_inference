@@ -716,23 +716,6 @@ int main()
         CHECK(r_020 > 3.0f);
     }
 
-    // lowest_beam_below_horizon_rad: derived through the RT rotation, nothing assumes the flip
-    {
-        constexpr float d2r = 3.14159265f / 180.f;
-        const Eigen::Matrix3f inverted = Eigen::AngleAxisf(3.14159265f, Eigen::Vector3f::UnitY()).toRotationMatrix();
-        const float sim  = rc::lowest_beam_below_horizon_rad(-54.4f * d2r, 14.6f * d2r, inverted) / d2r;
-        const float real = rc::lowest_beam_below_horizon_rad(-55.f * d2r, 15.f * d2r, inverted) / d2r;
-        CHECK(std::abs(sim - 14.6f) < 1e-3f and std::abs(real - 15.f) < 1e-3f);
-        // upright mount: the lowest beam is the lowest DEVICE elevation
-        const float upright = rc::lowest_beam_below_horizon_rad(-15.f * d2r, 54.f * d2r, Eigen::Matrix3f::Identity()) / d2r;
-        CHECK(std::abs(upright - 15.f) < 1e-3f);
-        // a 5 deg pitch of the inverted mount moves the lowest beam by 5 deg one way (cone axis tilts)
-        const Eigen::Matrix3f tilted = Eigen::AngleAxisf(5.f * d2r, Eigen::Vector3f::UnitX()).toRotationMatrix() * inverted;
-        const float t = rc::lowest_beam_below_horizon_rad(-54.4f * d2r, 14.6f * d2r, tilted) / d2r;
-        CHECK(std::abs(t - 19.6f) < 1e-2f or std::abs(t - 9.6f) < 1e-2f);
-        std::println("  lowest_beam: sim {:.2f} real {:.2f} upright {:.2f} tilted {:.2f}", sim, real, upright, t);
-    }
-
     std::println("{} / {} checks passed", checks - failures, checks);
     return failures == 0 ? 0 : 1;
 }
