@@ -350,12 +350,38 @@ public:
         if (ready()) rasterise_exclusion();
     }
 
+    /// THE ROOM STOPS AT ITS DOORS (2026-10-31, user: "the door-plane cut"). The openings of this room, in this raster's
+    /// frame: the aperture's two ends and the unit normal pointing OUT of the room (zero = unknown side: not cut).
+    struct Opening { Eigen::Vector2f a, b, n_out; };
+    void set_openings(std::vector<Opening> o) { openings_ = std::move(o); }
+
     void add_scan(const Eigen::Vector2f& origin, const std::vector<Eigen::Vector2f>& endpoints)
     {
         if (not ready())
             init(origin);
         for (const auto& e : endpoints)
-            trace(origin, e);
+        {
+            // A beam that starts on this room's side of an opening and passes THROUGH it is looking into the next room:
+            // free up to the opening, nothing recorded beyond it, no matter mark at the cut (the hole is not a wall).
+            // pingpong25: room_2's outline held a 7.3 x ~2 m band of room_1 seen through the open DOOR_1 (43 m2 for a
+            // ~30 m2 room), the model turned nearly square, and the relocaliser took a 90-degree mode. A beam from beyond
+            // the plane (the robot in the doorway) is not cut by that opening.
+            float t_cut = 2.f;
+            for (const auto& op : openings_)
+            {
+                if (op.n_out.squaredNorm() < 0.25f) continue;
+                const Eigen::Vector2f m = 0.5f * (op.a + op.b);
+                const float so = (origin - m).dot(op.n_out), se = (e - m).dot(op.n_out);
+                if (not (so < 0.f and se > 0.f)) continue;
+                const float t = so / (so - se);
+                const Eigen::Vector2f p = origin + t * (e - origin);
+                const Eigen::Vector2f ab = op.b - op.a;
+                const float u = (p - op.a).dot(ab) / std::max(1e-9f, ab.squaredNorm());
+                if (u >= 0.f and u <= 1.f) t_cut = std::min(t_cut, t);
+            }
+            if (t_cut <= 1.f) trace(origin, origin + t_cut * (e - origin), /*mark_end=*/false);
+            else trace(origin, e);
+        }
     }
 
     /// Raw state of the cell holding `q` (for tests / diagnostics): 0 unknown, 1 free, 2 matter, -1 outside.
@@ -754,6 +780,7 @@ private:
                                                 // cell CENTRE is biased by up to cell/2 from the wall face; offline that
                                                 // bias moved every refined wall 2-3 cm and cost 2.3 cm of pose (walhit).
     std::vector<std::vector<Eigen::Vector2f>> excl_polys_;   // set_exclusion: other rooms' outlines (this frame)
+    std::vector<Opening> openings_;                          // set_openings: this room's doors (this frame)
     std::vector<std::uint8_t> excl_;                         // their raster (1 = another room's cell)
     long  n_free_ = 0;
     int   fi0_ = std::numeric_limits<int>::max(), fj0_ = std::numeric_limits<int>::max();
@@ -847,7 +874,7 @@ private:
     }
 
     /// Amanatides–Woo walk from `a` to `b`: every cell strictly before b's cell is free, b's cell is matter.
-    void trace(const Eigen::Vector2f& a, const Eigen::Vector2f& b)
+    void trace(const Eigen::Vector2f& a, const Eigen::Vector2f& b, bool mark_end = true)
     {
         auto [i, j] = cell_of(a);
         const auto [ie, je] = cell_of(b);
@@ -877,7 +904,7 @@ private:
             ours = true;
             if (i == ie and j == je)
             {
-                if (in(i, j)) set_matter(i, j, b);
+                if (in(i, j) and mark_end) set_matter(i, j, b);
                 return;
             }
             if (not in(i, j))
