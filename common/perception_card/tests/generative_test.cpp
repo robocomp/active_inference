@@ -258,20 +258,40 @@ int main()
         Hypothesis base; base.concept_ = "chair"; base.x = 3.0f; base.y = 2.0f; base.yaw = 0.0f;
         const Viewpoint vp{{3.0f - 1.3f, 2.0f}, std::nullopt};
 
-        { // n = 1, all sigmas 0: equals evaluate() on the prior box
+        { // n = 1, all sigmas 0: equals evaluate() at the bbox-CENTRED hypothesis. The reference is built by hand from the
+          // chair's primitives (seat 0.60 x 0.52 at the origin, backrest inside it, legs at the corners): the bbox is
+          // symmetric, so the centre is the origin and the size is the seat plus the tallest part (seat_h + back_h).
             Card z = mc; for (auto& v : z.generative->vars) v.sigma = 0.0f;
-            std::mt19937_64 rng(1);
-            const auto t = detail::target_of(instantiate(*z.generative, sample_sizes(*z.generative, rng), base.x, base.y, base.yaw));
-            Hypothesis h = base; h.size = GeometryPrior{t.w, t.h, t.z1 - t.z0, t.z0, t.z1};
+            Hypothesis h = base; h.size = GeometryPrior{0.60f, 0.52f, 0.595f + 0.655f, 0.0f, 0.595f + 0.655f};
             const auto r = evaluate(z, w, h, vp);
             const auto m = evaluate_mc(z, w, base, vp, 1, 5);
-            CHECK(m.n == 1 and m.p_notice_mean == r.p_notice and m.p_recognise_mean == r.p_recognise);
+            CHECK(m.n == 1 and std::abs(m.p_notice_mean - r.p_notice) < 1e-6f and std::abs(m.p_recognise_mean - r.p_recognise) < 1e-6f);
             CHECK(m.p_notice_sd == 0.0f and m.p_recognise_sd == 0.0f and m.modal_limit == r.limit);
             const auto m2 = evaluate_mc(z, w, base, vp, 32, 5);
             CHECK(m2.p_recognise_sd == 0.0f and m2.p_recognise_mean == r.p_recognise);
             Card ng = mc; ng.generative.reset();
             const auto m3 = evaluate_mc(ng, w, base, vp, 32, 5); const auto r3 = evaluate(ng, w, base, vp);
             CHECK(m3.n == 1 and m3.p_recognise_mean == r3.p_recognise and m3.p_recognise_sd == 0.0f);
+        }
+        { // asymmetric template: one box 0.4 x 0.2 x 1.0 whose centre is 0.5 m along local +y of the origin; yaw 0.5
+            Card az = mc; az.generative = Generative{};
+            const auto K = [](float v) { return Bind{"", 0.0f, v}; };
+            az.generative->shape.push_back({Prim::Box, {{"w", K(0.4f)}, {"d", K(0.2f)}, {"h", K(1.0f)}, {"x", K(0.0f)}, {"y", K(0.5f)}, {"z", K(0.0f)}}});
+            az.generative->vars = {{"dummy", 1.0f, 0.0f, 0.0f, 2.0f, false}};
+            az.generative->placement = chair_gen().placement;
+            Hypothesis b2 = base; b2.x = 3.0f; b2.y = 3.2f; b2.yaw = 0.5f;               // near the y = 4 wall
+            const float cx = b2.x - 0.5f * std::sin(0.5f), cy = b2.y + 0.5f * std::cos(0.5f);   // centre by hand: R(yaw) * (0, 0.5)
+            const Viewpoint v2{{1.7f, 3.7f}, std::nullopt};
+            Hypothesis hc = b2; hc.x = cx; hc.y = cy; hc.size = GeometryPrior{0.4f, 0.2f, 1.0f, 0.0f, 1.0f};
+            Hypothesis hu = hc; hu.x = b2.x; hu.y = b2.y;                                   // the uncorrected (origin) centre
+            const auto rc_ = evaluate(az, w, hc, v2), ru = evaluate(az, w, hu, v2);
+            const auto m = evaluate_mc(az, w, b2, v2, 1, 5);
+            const auto t = detail::target_of(instantiate(*az.generative, {{"dummy", 1.0f}}, b2.x, b2.y, b2.yaw));
+            CHECK(std::abs(t.cy - b2.y) > 0.3f and std::abs(t.cx - cx) < 1e-5f and std::abs(t.cy - cy) < 1e-5f);
+            CHECK(std::abs(m.p_notice_mean - rc_.p_notice) < 1e-6f and std::abs(m.p_recognise_mean - rc_.p_recognise) < 1e-6f);
+            CHECK(std::abs(rc_.p_recognise - ru.p_recognise) > 1e-3f or std::abs(rc_.p_notice - ru.p_notice) > 1e-3f);   // the test can see the offset
+            CHECK(std::abs(m.p_recognise_mean - ru.p_recognise) > 1e-3f or std::abs(m.p_notice_mean - ru.p_notice) > 1e-3f);
+            std::printf("offset box: corrected p=%.4f uncorrected p=%.4f mc p=%.4f\n", rc_.p_recognise, ru.p_recognise, m.p_recognise_mean);
         }
         { // reproducible; a different seed differs
             const auto a = evaluate_mc(mc, w, base, vp, 32, 9), b = evaluate_mc(mc, w, base, vp, 32, 9), c = evaluate_mc(mc, w, base, vp, 32, 10);

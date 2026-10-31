@@ -354,7 +354,7 @@ struct McResult { float p_notice_mean = 0, p_notice_sd = 0, p_recognise_mean = 0
 
 // Samples the SIZES from the card's generative prior (pose stays at base x, y, yaw), instantiates each, and evaluates with
 // the sample's overall bounding box as the Hypothesis size. sd = population SD over the n samples. modal_limit = most
-// frequent limit (ties to the lower enum value). A card without a generative block yields one plain evaluate() (n = 1).
+// frequent limit (ties to the lower enum value). n < 1 is clamped to 1. A card without a generative block yields one plain evaluate() (n = 1).
 inline McResult evaluate_mc(const Card& card, const World& world, const Hypothesis& base, const Viewpoint& vp, int n, std::uint64_t seed)
 {
     McResult out;
@@ -367,7 +367,9 @@ inline McResult evaluate_mc(const Card& card, const World& world, const Hypothes
         {
             const Placed pl = instantiate(*card.generative, sample_sizes(*card.generative, rng), base.x, base.y, base.yaw);
             const auto t = detail::target_of(pl);
-            Hypothesis h = base; h.size = GeometryPrior{t.w, t.h, t.z1 - t.z0, t.z0, t.z1};
+            Hypothesis h = base;   // the evaluator puts the target at h.x/h.y: centre it on the parts' bbox, not on the origin
+            h.x = t.cx; h.y = t.cy; h.yaw = t.yaw;
+            h.size = GeometryPrior{t.w, t.h, t.z1 - t.z0, t.z0, t.z1};
             rs.push_back(evaluate(card, world, h, vp));
         }
     }
