@@ -27,8 +27,9 @@ echo stop > $B/controller/remote_cmd.txt
 rm -f ../etc/last_robot_pose.txt ../etc/room_name_hwm.txt $B/ltsm_agent/etc/ltsm_memory.json $B/ltsm_agent/etc/ltsm_memory.json.prev
 rm -f $B/door_concept/etc/door_identities.csv
 rm -rf $B/retina/etc/place_maps/; rm -f $WT/ltsm_agent/etc/recognition_trace.csv $B/ltsm_agent/etc/recognition_trace.csv
-# DOOR_1 starts shut (the cross mission opens it); DOOR_0 and DOOR_2 stay shut for the whole run
-for d in DOOR_1 DOOR_0 DOOR_2; do python3 $S/door.py close $d; done
+# DOOR_1 starts OPEN (2026-10-31: `cross new` takes the closest open door; with all three shut it took the bathroom's);
+# DOOR_0 and DOOR_2 stay shut for the whole run
+for d in DOOR_0 DOOR_2; do python3 $S/door.py close $d; done; python3 $S/door.py open DOOR_1
 sleep 3
 # graph recorder (passive DSR participant, agent id 28): every structural write with its writer — for trace_check.py
 REC=$(cd $S/../../.. && pwd)/graph_recorder/bin/graph_recorder; mkdir -p crossing/$1
