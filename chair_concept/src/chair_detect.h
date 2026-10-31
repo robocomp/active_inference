@@ -32,15 +32,12 @@ struct ChairDetectInputs
     Eigen::Vector2f chair_xy = Eigen::Vector2f::Zero();
 };
 
-// A chair standing against a wall must not be hidden by that wall (same value table uses).
-inline constexpr float kChairOwnWallSkipM = 0.15f;
-
 inline float chair_p_detect(const ChairDetectInputs& in, const rc::detect::DetectorEnvelope& env,
                             const std::vector<Eigen::Vector2f>& room_polygon)
 {
     if (not in.roi_valid)
         return 0.0f;
-    if (rc::occlusion::walls_block(in.cam_xy, in.chair_xy, room_polygon, kChairOwnWallSkipM))
+    if (rc::occlusion::walls_block(in.cam_xy, in.chair_xy, room_polygon, rc::occlusion::kOwnWallSkipM))
         return 0.0f;
     const float central = std::clamp(1.0f - std::hypot(in.roi_offset_x, in.roi_offset_y), 0.0f, 1.0f);
     return rc::card::term_envelope(in.roi_fill, 1.0f, env)

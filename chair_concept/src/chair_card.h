@@ -4,7 +4,6 @@
 #pragma once
 
 #include "chair_config.h"
-#include "chair_model.h"   // ChairState: the class template sizes
 #include "../../common/perception_card/card.h"
 
 namespace rc
@@ -19,8 +18,9 @@ inline card::Card make_card(const ChairConfig& cfg)
     // absence never removes it ("RICOH CONFIRMS, NEVER REMOVES", chair_existence.cpp), so ricoh is not modelled.
     c.channels = {{"zed", card::Role::Identity, true},
                   {"ricoh", card::Role::Identity, false}};
-    const ChairState tpl{};   // class template (a floor-anchored seat + backrest)
-    c.geometry = {tpl.seat_w, tpl.seat_d, tpl.seat_h + tpl.back_h, 0.0f, tpl.seat_h + tpl.back_h};
+    // The chair the model projects: the Tracker.BirthSeat* template (a floor-anchored seat + backrest to its top).
+    const float top = cfg.tracker_birth_seat_h + cfg.tracker_birth_back_h;
+    c.geometry = {cfg.tracker_birth_seat_w, cfg.tracker_birth_seat_d, top, 0.0f, top};
     card::SubtypeParams sp;
     sp.env = {cfg.detect_min_fill, cfg.detect_max_fill, cfg.detect_soft};
     // chair_detect.h: envelope(roi_fill) * in_fov * central * wall line of sight. The envelope is the single-fill
@@ -31,6 +31,7 @@ inline card::Card make_card(const ChairConfig& cfg)
                 {"central", {}}};
     c.subtypes[""] = sp;
     c.blind_spots = {
+        "in_fov = overlap-area fraction of the projected box with the image; central = 1 minus the norm of the normalised ROI offset (0 at the image edge).",
         "Close range: a chair that overflows the ZED frame gets no YOLO mask; the envelope's upper shoulder makes that a blind spot, not absence.",
         "The envelope is the fleet default (ChairModel.Detect* are not set in etc/config.toml), not fitted to chairs.",
         "Wall line of sight is applied per view from the room polygon; the card cannot list it, so the card's P is an upper bound in another room."};

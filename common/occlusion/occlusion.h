@@ -80,6 +80,9 @@ inline float across_ray_half_extent(const Eigen::Vector3f& O, const Eigen::Vecto
     return 0.5f * (std::abs(ext.x() * perp.x()) + std::abs(ext.y() * perp.y()));
 }
 
+// The own-wall skip radius table and chair use: a target standing flush against a wall is not hidden by that wall.
+inline constexpr float kOwnWallSkipM = 0.15f;
+
 // Does the 2D sightline cam→target cross any room-polygon wall segment OTHER than the target's OWN wall
 // (a segment whose distance to the target is < own_wall_skip_m, i.e. the wall the target is embedded in)?
 // True ⇒ a wall blocks the view. polygon = ordered room corners (room frame); < 3 corners ⇒ no walls.

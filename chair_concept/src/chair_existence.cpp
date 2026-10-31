@@ -168,17 +168,14 @@ void ChairExistence::update_and_remove(ChairFitter& fitter, const Inputs& in,
             // WON NOTHING while in the frustum, UNOCCLUDED, on a ZED-active frame → absence evidence, but weighted
             // TWO ways: (1) CONFIDENCE ramps with frames_since_detection (freshness-as-precision, anti-death-spiral
             // — a chair that just lost the slice or is briefly hidden barely moves and recovers on its next win);
-            // (2) ZED EXPECTED-DETECTABILITY pd ∈ [0,1] — absence only removes to the degree ZED would RELIABLY
-            // have detected a present chair (falls off toward the image edge + with range). A far/peripheral chair
-            // that only ricoh can see has pd≈0 → it HOLDs (maintained by ricoh confirmations) and is removed only
-            // once a clean, close, centred ZED look comes up empty. This is "ZED removes".
+            // (2) ZED EXPECTED-DETECTABILITY pd ∈ [0,1] — the shared P(detect) (envelope on the projected fill × in_fov × central × wall
+            // line of sight): absence removes only to the degree ZED would have detected a present chair. A chair behind
+            // a wall or out of frame has pd≈0 and HOLDs. No pd floor. This is "ZED removes".
             const float conf = (cfg_.exist_vacate_confident_frames > 0)
                 ? std::clamp(static_cast<float>(inst.frames_since_detection)
                              / static_cast<float>(cfg_.exist_vacate_confident_frames), 0.0f, 1.0f)
                 : 0.0f;
-            // pd FLOOR (clear line of sight): occlusion is already HELD above, so here the LoS is clear. Even a
-            // peripheral chair (low pd) then vacates at ≥ the floor rate, so a glitch-stranded phantom the robot
-            // never centres still dies over time; conf gates on staleness so a recently-seen chair is untouched.
+            // pd is used as is (no floor): a chair the ZED cannot resolve is not charged absence.
             const float pd = fitter.zed_detectability(inst);
             // ★OCCLUSION SCALES ABSENCE, IT NO LONGER SKIPS THE CYCLE. This used to `continue` on a boolean
             // los_occluded(), which is a HOLD with no way out: a phantom chair born inside the dining set is
