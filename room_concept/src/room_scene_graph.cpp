@@ -1795,6 +1795,26 @@ void RoomSceneGraph::rearm_after_crossing(std::uint64_t new_room_id, const std::
     arm_startup_proto(new_room_id, T_pub_int);
     startup_event_ = "crossing_born";
     trigger_layout_();
+    // ── THE NEW ROOM CARRIES THE DOOR IT WAS ENTERED BY (spec 2026-10-31 room-crossing v4, amendment 1; user) ─────────
+    // The opening just crossed, as this agent measured it (internal frame, continuous through the doorway), is handed to
+    // the localiser for EVERY crossing — new room or recalled. rc::reloc::seated_doors adds it to the room's door list
+    // until door_concept's face of the doorway (same door id) replaces its geometry, so the returns looking back through
+    // it into the room left are "the next room" for the tracker's weights AND for the free-space map
+    // (filter_through_door) from the first frame after the switch. It was handed over for a RECALLED room only; a new
+    // room's door list stayed empty until door_concept wrote its face. After begin_room_estimation, which clears it.
+    // It also tempers the lost belief while the body is in the passage and anchors the relocaliser's prior (Task R1b).
+    {
+        rc::passage::Passage pg;
+        pg.centre = last_crossing_.centre;   pg.n_in  = last_crossing_.n_out;   pg.tangent = last_crossing_.tangent;
+        pg.width  = last_crossing_.span_w;   pg.p_open = last_crossing_p_open_;
+        pg.r_body = 0.5f * std::max(params_->ROBOT_WIDTH, params_->ROBOT_LENGTH);
+        pg.body_w = params_->ROBOT_WIDTH;    pg.body_l = params_->ROBOT_LENGTH;
+        pg.sig_s  = last_crossing_.sig_s;    pg.sig_t  = last_crossing_.sig_t;
+        pg.s      = last_crossing_.s;        pg.u      = last_crossing_.u;
+        pg.door_id = last_crossing_door_id_;
+        pg.heading = last_crossing_heading_;  pg.sig_heading = last_crossing_sig_heading_;   // forward or backing through
+        room_concept_->note_passage_handover(pg);
+    }
     // A re-entry is not surveyed: the recall below adopts the remembered outline in this same call.
     if (not recall.has_value() or recall_int.size() < 3)
         qInfo().noquote() << QString("[room][startup-proto] %1 BORN through %2 as a PROTO-ROOM (id %3): frame = the crossed "
@@ -1811,18 +1831,6 @@ void RoomSceneGraph::rearm_after_crossing(std::uint64_t new_room_id, const std::
     {
         room_concept_->set_map_layout(recall_int);
         room_concept_->adopt_map_layout_as_given();
-        // The robot is standing in the passage it just crossed: its geometry tempers the lost belief while the body is
-        // in it and anchors the relocaliser's prior (passage_prior.h, Task R1b). n_out of the room left = into this one.
-        rc::passage::Passage pg;
-        pg.centre = last_crossing_.centre;   pg.n_in  = last_crossing_.n_out;   pg.tangent = last_crossing_.tangent;
-        pg.width  = last_crossing_.span_w;   pg.p_open = last_crossing_p_open_;
-        pg.r_body = 0.5f * std::max(params_->ROBOT_WIDTH, params_->ROBOT_LENGTH);
-        pg.body_w = params_->ROBOT_WIDTH;    pg.body_l = params_->ROBOT_LENGTH;
-        pg.sig_s  = last_crossing_.sig_s;    pg.sig_t  = last_crossing_.sig_t;
-        pg.s      = last_crossing_.s;        pg.u      = last_crossing_.u;
-        pg.door_id = last_crossing_door_id_;
-        pg.heading = last_crossing_heading_;  pg.sig_heading = last_crossing_sig_heading_;   // forward or backing through
-        room_concept_->note_passage_handover(pg);
         std::string reason;
         promote_startup_proto(reason, true);
         recalled_visit_ = true;   // the remembered outline is not re-refined on this visit: see step_layout_refiner
