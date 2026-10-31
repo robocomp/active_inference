@@ -66,4 +66,7 @@ python3 test_canvas_stock.py
 g++ -std=c++23 -O0 -g -Wall -Wextra -Wno-deprecated-literal-operator -fPIC -o "$out/test_topology" test_topology.cpp \
     $(pkg-config --cflags Qt6Core | sed "s/-I/-isystem /g") $(pkg-config --libs Qt6Core)
 "$out/test_topology"
+g++ -std=c++23 -O0 -g -Wall -Wextra -Wno-deprecated-literal-operator -isystem /usr/include/eigen3 -I../../common \
+    -I../../common/media_transport -o "$out/test_can_see" test_can_see.cpp
+"$out/test_can_see"
 rm -rf "$out"

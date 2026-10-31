@@ -1,6 +1,7 @@
 #include "chat_session.h"
 
 #include <csignal>
+#include <filesystem>
 #include <cmath>
 #include <print>
 #include <ranges>
@@ -33,6 +34,8 @@
 #include "image_prep.h"
 #include "look_messages.h"
 #include "mission_plan.h"
+#include "perception_world.h"
+#include "../../common/perception_card/card_io.h"
 #include "sim_door.h"
 #include "topology.h"
 
@@ -626,6 +629,25 @@ QJsonArray ChatSession::tools_json() const
         "getting to a remembered room: the STATE names those rooms but not the passages.",
         QJsonObject{{"room", QJsonObject{{"type", "string"}, {"description", "a remembered room name, e.g. room_3"}}}},
         QJsonArray{"room"}));
+    tools.append(tool_def("can_see",
+        "Can the robot see something (from somewhere), or where should it stand to see it? Uses the detection models "
+        "(perception cards) the robot's own detectors publish: names the sensor that decides it, what limits it (an "
+        "occluder, a wall, the field of view, distance) and the chance it would be noticed and recognised. Read-only; "
+        "it does not move the robot. For a question like \"can you see the fridge from here?\", \"can you see the chair "
+        "from the door?\" or \"where should you stand to see the table?\" (stand=true). Not for where something IS "
+        "(where_is) nor to go somewhere.",
+        QJsonObject{{"concept", QJsonObject{{"type", "string"},
+                                            {"description", "what to see, in English singular (fridge, table, chair, "
+                                                            "bottle, cabinet, hood, door)"}}},
+                    {"where", QJsonObject{{"type", "string"},
+                                          {"description", "a particular object by name (fridge_1); empty = the only one of "
+                                                          "that class"}}},
+                    {"from", QJsonObject{{"type", "string"},
+                                         {"description", "the place to look from: a door or object name; empty = where the "
+                                                         "robot is now"}}},
+                    {"stand", QJsonObject{{"type", "boolean"},
+                                          {"description", "true = answer WHERE the robot should stand to see it"}}}},
+        QJsonArray{"concept"}));
     tools.append(tool_def("agents",
         "The robot's software agents: which are running, their state (Operating / Degraded / Waiting), uptime, CPU "
         "and memory of each. Read-only.",
@@ -1007,6 +1029,8 @@ QString ChatSession::answer_query(const QString& name, const QJsonObject& args)
         else if (name == "known_rooms") out = q(rc::chat::answer_known_rooms(*topo, digest_.facts.room));
         else out = q(rc::chat::answer_route_to(*topo, digest_.facts.room, args.value("room").toString().trimmed().toStdString()));
     }
+    else if (name == "can_see")
+        out = do_can_see(args);
     else if (name == "agents")
         out = q(answer_agents(system_.agents()));
     else if (name == "sensors")
@@ -1022,6 +1046,43 @@ QString ChatSession::answer_query(const QString& name, const QJsonObject& args)
     else return {};
     log_.write("query", QJsonObject{{"tool", name}, {"args", args}, {"result", out}});
     return out.trimmed();
+}
+
+QString ChatSession::do_can_see(const QJsonObject& args)
+{
+    // The cards are the concept agents' files (the perception_card graph attribute is not installed yet): re-read once
+    // per call, from the active_inference root = the parent of chat_agent/ (the fleet scripts start us from chat_agent/).
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    const fs::path cwd = fs::current_path(ec);
+    const fs::path root = cwd.filename() == "chat_agent" ? cwd.parent_path() : cwd;
+    const auto cards = rc::card::read_all_cards(root);
+
+    const std::string what = rc::chat::canonical_concept(args.value("concept").toString().toStdString());
+    const std::string where = args.value("where").toString().trimmed().toStdString();
+    const std::string from = args.value("from").toString().trimmed().toStdString();
+    const bool stand = args.value("stand").toBool(false);
+
+    // The card is the target's CLASS: the named instance's subtype when `where` names one.
+    const auto scene = rc::chat::build_see_scene(*G_, *inner_, digest_);
+    std::string cls = what;
+    if (const auto it = std::ranges::find_if(scene.objects, [&](const auto& o) { return rc::chat::lower_ascii(o.name) == rc::chat::lower_ascii(where); });
+        it != scene.objects.end() and not it->subtype.empty())
+        cls = rc::chat::canonical_concept(it->subtype);
+    std::optional<rc::card::Card> card;
+    if (const auto c = std::ranges::find(cards, cls, &rc::card::Card::concept_); c != cards.end()) card = *c;
+    if (not card.has_value()) return QStringLiteral("I have no detector for that.");
+    if (scene.room.empty()) return QStringLiteral("I do not know which room I am in, so I cannot judge what I can see.");
+
+    const auto target = rc::chat::resolve_target(scene, what, where, card);
+    if (not target.has_value()) return q(target.error());
+    const auto world = rc::chat::world_for(scene, target->name);
+    if (stand)
+        return q(rc::chat::answer_where_to_stand(card, target->label, rc::card::where_to_stand(*card, world, target->h, 3),
+                                                 rc::chat::landmarks_of(scene)));
+    const auto vp = rc::chat::resolve_from(scene, from);
+    if (not vp.has_value()) return q(vp.error());
+    return q(rc::chat::answer_can_see(card, target->label, from, rc::card::evaluate(*card, world, target->h, *vp)));
 }
 
 std::optional<rc::chat::Topology> ChatSession::remembered_topology() const

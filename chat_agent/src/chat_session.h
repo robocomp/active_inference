@@ -208,6 +208,7 @@ private:
     QString do_go_around(const QJsonObject& args);
     /// sim_door: the door's world pose through the sim witness → tools/sim_door.py, async; told by on_sim_door_done.
     QString do_sim_door(const QJsonObject& args);
+    QString do_can_see(const QJsonObject& args);   ///< can_see: the perception cards answer (perception_world.h, can_see.h)
     void on_sim_door_done(int code);
     [[nodiscard]] bool sim_door_available() const;   ///< endpoint configured AND robot_gt_* on the robot node (sim)
     /// episodes / episode / outcome_stats / last_episode → the tool-result text; "" if `name` is not one of them.

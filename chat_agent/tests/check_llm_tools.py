@@ -137,6 +137,20 @@ def tools():
           "order. Read-only; it does not move the robot (to go, plan a mission with the passages it lists). Call it for any "
           "question about getting to a remembered room: the STATE names those rooms but not the passages.",
           {"room": {"type": "string", "description": "a remembered room name, e.g. room_3"}}, ["room"]),
+        t("can_see", "Can the robot see something (from somewhere), or where should it stand to see it? Uses the detection "
+          "models (perception cards) the robot's own detectors publish: names the sensor that decides it, what limits it "
+          "(an occluder, a wall, the field of view, distance) and the chance it would be noticed and recognised. "
+          "Read-only; it does not move the robot. For a question like \"can you see the fridge from here?\", \"can you "
+          "see the chair from the door?\" or \"where should you stand to see the table?\" (stand=true). Not for where "
+          "something IS (where_is) nor to go somewhere.",
+          {"concept": {"type": "string", "description": "what to see, in English singular (fridge, table, chair, bottle, "
+                                                        "cabinet, hood, door)"},
+           "where": {"type": "string", "description": "a particular object by name (fridge_1); empty = the only one of "
+                                                      "that class"},
+           "from": {"type": "string", "description": "the place to look from: a door or object name; empty = where the "
+                                                     "robot is now"},
+           "stand": {"type": "boolean", "description": "true = answer WHERE the robot should stand to see it"}},
+          ["concept"]),
         t("agent_control", "Start, stop or restart one of the robot's software agents (room_concept, residual_concept, "
           "retina, door_concept, table_concept, chair_concept, bottle_concept, cabinet_concept, hood_concept, "
           "human_concept, refrigerator_concept, controller, ltsm_agent, episodic_agent). When the person asks to start, "
@@ -415,6 +429,19 @@ CASES = [
     ("where is the fridge", [], "none", "where is the fridge?",
      lambda n, a, c: (n == "where_is" and re.search("fridge|refrigerator", str(a.get("name", "")).lower()) is not None)
      or (n is None and re.search(r"not (yet )?(perceived|seen)|haven't (perceived|seen)|have not (perceived|seen)", c.lower()) is not None)),
+    # can_see (2026-10-31): the perception cards answer; where_is / approach keep their own questions
+    ("can_see: fridge from here", [], "none", "can you see the fridge from here?",
+     lambda n, a, c: n == "can_see" and re.search("fridge|refrigerator", str(a.get("concept", "")).lower()) is not None
+     and not a.get("stand")),
+    ("can_see: where to stand", [], "none", "where should you stand to see the table?",
+     lambda n, a, c: n == "can_see" and "table" in str(a.get("concept", "")).lower() and a.get("stand") is True),
+    ("can_see: es chair from door", [], "none", "\u00bfves la silla desde la puerta?",
+     lambda n, a, c: n == "can_see" and re.search("chair|silla", str(a.get("concept", "")).lower()) is not None
+     and re.search("door|puerta", str(a.get("from", "")).lower()) is not None),
+    ("can_see NOT: go to the fridge", [], "none", "go to the fridge",
+     lambda n, a, c: n != "can_see"),
+    ("can_see NOT: where is the fridge", [], "none", "where is the fridge",
+     lambda n, a, c: n == "where_is" or (n is None and re.search(r"not (yet )?(perceived|seen)|haven't (perceived|seen)|have not (perceived|seen)", c.lower()) is not None)),
     # long-term memory (ltsm_topology): rooms the robot remembers and the route to one
     ("passages remembered", [], "none", "which rooms do you remember?",
      lambda n, a, c: n == "known_rooms" or (n is None and "room_2" in c and "room_3" in c)),
