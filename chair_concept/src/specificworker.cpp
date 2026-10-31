@@ -593,8 +593,8 @@ void SpecificWorker::run_instance_tracker()
                 // publishes as height_m. It matters here because a chair TUCKED UNDER a table sits inside the
                 // tabletop's footprint while occupying none of the table's own volume.
                 const float unclaimed = rc::exclusion::p_unclaimed(
-                    {dv.xy.x(), dv.xy.y(), cfg_.tracker_birth_seat_w, cfg_.tracker_birth_seat_d, 0.0f}, foreign_claims_, &who,
-                    0.0f, cfg_.tracker_birth_seat_h + cfg_.tracker_birth_back_h);
+                    {dv.xy.x(), dv.xy.y(), cfg_.prior.seat_w, cfg_.prior.seat_d, 0.0f}, foreign_claims_, &who,
+                    0.0f, cfg_.prior.top());
                 dv.birth_evidence *= unclaimed;
                 if (cfg_.chair_log_period_frames > 0 and unclaimed < 0.99f)
                     std::print("[chair] birth cand CLAIMED by '{}' ({:.0f}%): birth_ev x{:.2f}\n",
@@ -829,9 +829,9 @@ void SpecificWorker::run_instance_tracker()
             // find the neighbour present, and declare ITSELF the junior. Anything not created this run
             // stays senior by default — the rule can fail to catch a collision, never invent one.
             if (auto it = fitter_->instances().find(new_id); it != fitter_->instances().end())
-                it->second.exclusion.resolve_at_birth({c.x(), c.y(), cfg_.tracker_birth_seat_w, cfg_.tracker_birth_seat_d, 0.0f},
+                it->second.exclusion.resolve_at_birth({c.x(), c.y(), cfg_.prior.seat_w, cfg_.prior.seat_d, 0.0f},
                                                       foreign_claims_,
-                                                      0.0f, cfg_.tracker_birth_seat_h + cfg_.tracker_birth_back_h);
+                                                      0.0f, cfg_.prior.top());
             // Materialise the ChairInstance NOW, at birth — do not wait for the freshly inserted DSR node
             // to surface in get_nodes_by_type (it is not reliably visible the same cycle). Birth was
             // decoupled across three async steps (create node → ensure_instance when the node appears →

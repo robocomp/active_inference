@@ -17,6 +17,7 @@
 #include <expected>
 #include <map>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -62,6 +63,46 @@ struct WallOcclusion
     float wall_thickness_m = 0.0f;
 };
 
+// ── Generative block (imagined observations): what the concept looks like, as DATA ────────────────────────────
+// A shape program of CLOSED primitives, a distribution per state variable, and a placement prior. All lengths in m,
+// all in the object's LOCAL frame (+y forward, as ChairState), a floor-anchored object's z = 0 at the floor.
+// Conventions (so a sampler and a renderer read the same thing):
+//   Slab, Box, Panel : x,y = CENTRE of the footprint, z = BASE (lowest z); w along x, d (Panel: t) along y, h along z.
+//   Cylinder         : x,y = centre of the axis, z = base; r radius, h height.
+//   LegSet           : n legs of square half-side `half`, one at each corner of the fw x fd footprint, inset so the
+//                      leg's outer face is flush with the footprint (centre at +-(fw/2 - half), +-(fd/2 - half));
+//                      z0..z1 is the leg's z span.
+// A dimension is a Bind: a*state[var] + b (var empty: the constant b).
+enum class Prim { Slab, Panel, LegSet, Box, Cylinder };
+
+struct Bind { std::string var; float a = 0.0f, b = 0.0f; };
+
+struct Primitive
+{
+    Prim type = Prim::Slab;
+    std::map<std::string, Bind> dims;     // keys from prim_dim_names(type), all required
+};
+
+struct VarDist { std::string var; float mean = 0, sigma = 0, lo = 0, hi = 0; bool log_normal = false; };
+
+struct PlacementPrior
+{
+    std::string support;                          // "floor"
+    std::map<std::string, float> contexts;        // keys "free" | "against_wall" -> weight
+    // Gap to the wall when against_wall (m): the distance from the BACKREST's OUTER face (the object's local -y edge) to the
+    // wall's INNER face (the room side of the wall box), so the backrest stands at wall_thickness/2 + gap from the
+    // polygon edge line. Drawn from this normal truncated at 0. The backrest faces the wall.
+    float wall_gap_mean = 0.0f, wall_gap_sigma = 0.0f;
+};
+
+struct Generative
+{
+    std::vector<Primitive> shape;
+    std::vector<VarDist> vars;
+    PlacementPrior placement;
+    std::string bounds_source;                    // where lo/hi come from (a human-readable provenance)
+};
+
 struct Card
 {
     int version = 1;
@@ -77,6 +118,7 @@ struct Card
     std::string calibration;                          // "prior" | "fitted" | "blind_spot_map"
     std::string calibration_date;
     std::string blind_spot_map_path;
+    std::optional<Generative> generative;             // nullopt = the card does not describe its own appearance
 };
 
 // The closed list of term names. Task 2 implements one function per name.
@@ -103,6 +145,27 @@ inline const SubtypeParams& params_for(const Card& c, std::string_view subtype)
     if (const auto it = c.subtypes.find(std::string(subtype)); it != c.subtypes.end()) return it->second;
     if (const auto it = c.subtypes.find(std::string{}); it != c.subtypes.end()) return it->second;
     return empty;
+}
+
+// Closed vocabularies of the generative block.
+inline constexpr std::array<std::string_view, 5> kPrimNames{"slab", "panel", "legset", "box", "cylinder"};
+inline constexpr std::array<std::string_view, 2> kContextNames{"free", "against_wall"};
+inline constexpr std::array<std::string_view, 1> kSupportNames{"floor"};
+
+inline std::span<const std::string_view> prim_dim_names(Prim p)
+{
+    static constexpr std::array<std::string_view, 6> slab{"w", "d", "h", "x", "y", "z"};
+    static constexpr std::array<std::string_view, 6> panel{"w", "t", "h", "x", "y", "z"};
+    static constexpr std::array<std::string_view, 6> legs{"n", "half", "fw", "fd", "z0", "z1"};
+    static constexpr std::array<std::string_view, 5> cyl{"r", "h", "x", "y", "z"};
+    switch (p)
+    {
+        case Prim::Slab: case Prim::Box: return slab;
+        case Prim::Panel: return panel;
+        case Prim::LegSet: return legs;
+        case Prim::Cylinder: return cyl;
+    }
+    return {};
 }
 
 namespace detail
@@ -196,6 +259,36 @@ inline std::string to_json(const Card& c)
     kvs("calibration", c.calibration);
     kvs("calibration_date", c.calibration_date);
     kvs("blind_spot_map_path", c.blind_spot_map_path);
+    if (c.generative)
+    {
+        const Generative& g = *c.generative;
+        kv("gen.shapes", std::to_string(g.shape.size()));
+        for (std::size_t i = 0; i < g.shape.size(); ++i)
+        {
+            const auto p = "gen.shape." + std::to_string(i) + '.';
+            kvs(p + "type", kPrimNames[static_cast<std::size_t>(g.shape[i].type)]);
+            for (const auto& [dn, b] : g.shape[i].dims)
+            {
+                kvs(p + "dim." + dn + ".var", b.var);
+                kvf(p + "dim." + dn + ".a", b.a);
+                kvf(p + "dim." + dn + ".b", b.b);
+            }
+        }
+        kv("gen.vars", std::to_string(g.vars.size()));
+        for (std::size_t i = 0; i < g.vars.size(); ++i)
+        {
+            const auto p = "gen.var." + std::to_string(i) + '.';
+            kvs(p + "name", g.vars[i].var);
+            kvf(p + "mean", g.vars[i].mean); kvf(p + "sigma", g.vars[i].sigma);
+            kvf(p + "lo", g.vars[i].lo);     kvf(p + "hi", g.vars[i].hi);
+            kv(p + "log_normal", g.vars[i].log_normal ? "true" : "false");
+        }
+        kvs("gen.placement.support", g.placement.support);
+        for (const auto& [k, w] : g.placement.contexts) kvf("gen.placement.ctx." + k, w);
+        kvf("gen.placement.wall_gap_mean", g.placement.wall_gap_mean);
+        kvf("gen.placement.wall_gap_sigma", g.placement.wall_gap_sigma);
+        kvs("gen.bounds_source", g.bounds_source);
+    }
     o.back() = '}';
     return o;
 }
@@ -324,6 +417,84 @@ inline std::expected<Card, std::string> card_from_json(std::string_view json)
     c.calibration = text("calibration");
     c.calibration_date = text("calibration_date");
     c.blind_spot_map_path = text("blind_spot_map_path");
+
+    // Generative block: optional as a whole (a card written before it existed still loads), strict once "gen.shapes"
+    // is present: closed primitive / dim / context / support names, every dim of a primitive declared, every Bind
+    // naming a declared variable.
+    if (str("gen.shapes"))
+    {
+        Generative g;
+        const auto ns = cnt("gen.shapes");
+        if (not ns) return Err("card: " + ns.error());
+        const auto nv = cnt("gen.vars");
+        if (not nv) return Err("card: " + nv.error());
+        for (std::size_t i = 0; i < *nv; ++i)
+        {
+            const auto p = "gen.var." + std::to_string(i) + '.';
+            VarDist v;
+            v.var = text(p + "name");
+            if (v.var.empty()) return Err("card: gen variable " + std::to_string(i) + " has no name");
+            for (const auto& [key, dst] : std::initializer_list<std::pair<const char*, float*>>{
+                     {"mean", &v.mean}, {"sigma", &v.sigma}, {"lo", &v.lo}, {"hi", &v.hi}})
+            {
+                const auto f = num(p + key);
+                if (not f) return Err("card: " + f.error());
+                *dst = *f;
+            }
+            v.log_normal = text(p + "log_normal") == "true";
+            g.vars.push_back(std::move(v));
+        }
+        const auto declared = [&](const std::string& n)
+        { return std::ranges::any_of(g.vars, [&](const VarDist& v) { return v.var == n; }); };
+        for (std::size_t i = 0; i < *ns; ++i)
+        {
+            const auto p = "gen.shape." + std::to_string(i) + '.';
+            Primitive pr;
+            const int pi = index_of(kPrimNames, text(p + "type"));
+            if (pi < 0) return Err("card: unknown primitive '" + text(p + "type") + "'");
+            pr.type = static_cast<Prim>(pi);
+            const auto names = prim_dim_names(pr.type);
+            const std::string dp = p + "dim.";
+            for (const auto& [k, v] : kv)     // reject any dim key outside the closed list for this type
+                if (k.starts_with(dp))
+                {
+                    const std::string dn = k.substr(dp.size(), k.find('.', dp.size()) - dp.size());
+                    if (not std::ranges::any_of(names, [&](std::string_view n) { return n == dn; }))
+                        return Err("card: unknown dim '" + dn + "' on primitive " + std::to_string(i));
+                }
+            for (const auto dn : names)
+            {
+                const std::string kp = dp + std::string(dn) + '.';
+                if (not str(kp + "var")) return Err("card: primitive " + std::to_string(i) + " lacks dim '" + std::string(dn) + "'");
+                Bind b;
+                b.var = text(kp + "var");
+                if (not b.var.empty() and not declared(b.var)) return Err("card: dim '" + std::string(dn) + "' binds undeclared variable '" + b.var + "'");
+                const auto fa = num(kp + "a"), fb = num(kp + "b");
+                if (not fa) return Err("card: " + fa.error());
+                if (not fb) return Err("card: " + fb.error());
+                b.a = *fa; b.b = *fb;
+                pr.dims[std::string(dn)] = std::move(b);
+            }
+            g.shape.push_back(std::move(pr));
+        }
+        g.placement.support = text("gen.placement.support");
+        if (index_of(kSupportNames, g.placement.support) < 0) return Err("card: unknown support '" + g.placement.support + "'");
+        for (const auto& [k, v] : kv)
+            if (k.starts_with("gen.placement.ctx."))
+            {
+                const std::string cn = k.substr(18);
+                if (index_of(kContextNames, cn) < 0) return Err("card: unknown placement context '" + cn + "'");
+                const auto f = num(k);
+                if (not f) return Err("card: " + f.error());
+                g.placement.contexts[cn] = *f;
+            }
+        const auto gm = num("gen.placement.wall_gap_mean"), gs = num("gen.placement.wall_gap_sigma");
+        if (not gm) return Err("card: " + gm.error());
+        if (not gs) return Err("card: " + gs.error());
+        g.placement.wall_gap_mean = *gm; g.placement.wall_gap_sigma = *gs;
+        g.bounds_source = text("gen.bounds_source");
+        c.generative = std::move(g);
+    }
     return c;
 }
 } // namespace rc::card

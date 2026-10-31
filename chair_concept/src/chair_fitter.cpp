@@ -35,14 +35,10 @@ ChairFitter::ChairFitter(std::shared_ptr<DSR::DSRGraph> graph,
 ChairBeliefParams ChairFitter::make_belief_params() const
 {
     ChairBeliefParams p;
-    p.tpl_seat_w = cfg_.tracker_birth_seat_w;   // fixed standard-chair template (pose-only belief)
-    p.tpl_seat_d = cfg_.tracker_birth_seat_d;
-    p.tpl_seat_h = cfg_.tracker_birth_seat_h;
-    p.tpl_back_h = cfg_.tracker_birth_back_h;
+    p.seed_template(cfg_.prior);   // fixed standard-chair template (pose-only belief), from the manifest
     // Thickness + leg size are part of the TEMPLATE too: seat_thickness sets the leg/seat z-band split in
     // responsibilities() (z_low = tpl_seat_h - seat_thickness), so leaving it at a default while the seat
     // height is corrected would just move the misattribution rather than remove it.
-    p.seat_thickness = cfg_.tracker_birth_seat_thick;
     p.leg_half       = cfg_.tracker_birth_leg_half;
     p.mode_obs_weighting = cfg_.ai2_mode_obs_weighting;
     p.mode_sat_back_pts  = cfg_.ai2_mode_sat_back_pts;
@@ -118,6 +114,7 @@ bool ChairFitter::ensure_instance(const DSR::Node& node, std::uint64_t room_id)
         return false;
 
     ChairState init_state;
+    init_state.seed_size(cfg_.prior);   // the initial size always comes from the manifest prior
     init_state.cx  = 0.0f;
     init_state.cy  = 0.0f;
     init_state.yaw = 0.0f;
@@ -171,10 +168,10 @@ bool ChairFitter::ensure_instance(const DSR::Node& node, std::uint64_t room_id)
         fix(init_state.cy, 0.0f, "cy");
         fix(init_state.cz, 0.0f, "cz");
         fix(init_state.yaw, 0.0f, "yaw");
-        fix(init_state.seat_w, 0.45f, "seat_w");
-        fix(init_state.seat_d, 0.45f, "seat_d");
-        fix(init_state.seat_h, 0.45f, "seat_h");
-        fix(init_state.back_h, 0.45f, "back_h");
+        fix(init_state.seat_w, cfg_.prior.seat_w, "seat_w");
+        fix(init_state.seat_d, cfg_.prior.seat_d, "seat_d");
+        fix(init_state.seat_h, cfg_.prior.seat_h, "seat_h");
+        fix(init_state.back_h, cfg_.prior.back_h, "back_h");
     }
 
     ChairInstance inst;
@@ -1064,6 +1061,7 @@ ChairModelParams ChairFitter::make_model_params() const
 {
     ChairModelParams p;
     p.sigma_obs = cfg_.sigma_obs;
+    p.chair     = cfg_.prior;
     return p;
 }
 

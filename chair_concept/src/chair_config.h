@@ -11,6 +11,8 @@
 
 #include <string>
 
+#include "chair_prior.h"
+
 class ConfigLoader;   // RoboComp config façade (defined in genericworker.h)
 
 namespace rc {
@@ -62,7 +64,6 @@ struct ChairConfig
     float ai2_clutter_frac       = 0.10f;
     float ai2_clutter_scale_m    = 0.12f;
     float ai2_clutter_structure_gain = 1.0f;  // density-aware clutter: shrink the clutter prior for seat-coplanar points (closes the escape valve → fixes seat_d collapse + its overconfidence). 0 → flat clutter
-    float ai2_prior_size_std     = 0.15f;
     float ai2_process_std_m      = 0.005f;
     float ai2_process_std_yaw    = 0.01f;
     float ai2_process_std_size   = 0.0005f;  // rigid size DOFs ≪ pose (Tier-1: kills the vertical random walk)
@@ -253,11 +254,8 @@ struct ChairConfig
     //     — the tallest, most yaw-informative surface in the scene was invisible to the model.
     // Also note the real seat is RECTANGULAR: the 4-fold yaw ambiguity resolve_orientation exists to fight
     // was largely an artefact of the square 0.45x0.45 template. Re-derive these for any new chair model.
-    float tracker_birth_seat_w     = 0.60f;   // x extent — the span the backrest covers
-    float tracker_birth_seat_d     = 0.52f;   // y extent — front-to-back; backrest sits on the -y edge
-    float tracker_birth_seat_h     = 0.595f;  // seat TOP above the floor
-    float tracker_birth_back_h     = 0.655f;  // backrest height above the seat top (→ top at 1.25)
-    float tracker_birth_seat_thick = 0.075f;  // seat slab thickness (also sets the leg/seat z-band split)
+    // seat_w/d/h, back_h, seat_thick and the size std come from the concept manifest (single source).
+    ChairPrior prior;
     float tracker_birth_leg_half   = 0.0375f; // square leg half-side
 
     // ── Discrete yaw-mode evidence weighting (see ChairBeliefParams::mode_obs_weighting) ──────────

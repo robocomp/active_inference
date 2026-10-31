@@ -28,6 +28,16 @@ ChairConfig load_chair_config(const ConfigLoader& cfg)
     if (not rc::manifest::provenance_ok(kManifestPath, "chair"))
         std::exit(EXIT_FAILURE);
 
+    // ★THE SIZE PRIOR COMES FROM THE MANIFEST, and only from there. A manifest that cannot give it is as fatal as an
+    // inherited block: the agent must not run on a size nobody wrote down.
+    if (auto p = rc::load_chair_prior(kManifestPath); p.has_value())
+        out.prior = *p;
+    else
+    {
+        std::print("[manifest] ★★ chair REFUSES TO START: {}\n", p.error());
+        std::exit(EXIT_FAILURE);
+    }
+
     // ConfigLoader::get has no default overload; TOML numeric floats are stored as double.
     // Every read below registers its key, its CODE DEFAULT and a one-line description,
     // so the startup table can say where each value came from - not just what it is.
@@ -90,8 +100,6 @@ ChairConfig load_chair_config(const ConfigLoader& cfg)
             "");
     out.ai2_clutter_structure_gain = getf("ChairModel.AI2ClutterStructureGain", 1.0f,
             "density-aware clutter: shrink the clutter prior for seat-coplanar points (closes the escape valve → fixes seat_d collapse + its overconfidence). 0 → f");
-    out.ai2_prior_size_std       = getf("ChairModel.AI2PriorSizeStd", 0.15f,
-            "");
     out.ai2_process_std_m        = getf("ChairModel.AI2ProcessStdM", 0.005f,
             "");
     out.ai2_process_std_yaw      = getf("ChairModel.AI2ProcessStdYaw", 0.01f,
@@ -244,16 +252,6 @@ ChairConfig load_chair_config(const ConfigLoader& cfg)
             "Existence.RoomMarginM — tolerance a chair centre may sit OUTSIDE the walls");
     out.exist_out_of_room_gain   = getf("Existence.OutOfRoomGain", 1.5f,
             "Existence.OutOfRoomGain — |ΔL| per frame while outside (debounces a 1-frame glitch)");
-    out.tracker_birth_seat_w     = getf("Tracker.BirthSeatW", 0.60f,
-            "x extent — the span the backrest covers");
-    out.tracker_birth_seat_d     = getf("Tracker.BirthSeatD", 0.52f,
-            "y extent — front-to-back; backrest sits on the -y edge");
-    out.tracker_birth_seat_h     = getf("Tracker.BirthSeatH", 0.595f,
-            "seat TOP above the floor");
-    out.tracker_birth_back_h     = getf("Tracker.BirthBackH", 0.655f,
-            "backrest height above the seat top (→ top at 1.25)");
-    out.tracker_birth_seat_thick = getf("Tracker.BirthSeatThick", 0.075f,
-            "seat slab thickness (also sets the leg/seat z-band split)");
     out.tracker_birth_leg_half   = getf("Tracker.BirthLegHalf", 0.0375f,
             "square leg half-side");
     out.ai2_mode_obs_weighting   = getb("ChairModel.AI2ModeObsWeighting", true,
@@ -296,17 +294,17 @@ ChairConfig load_chair_config(const ConfigLoader& cfg)
     // restating is how hood_concept, cloned from a floor-anchored parent, ran for days with a LiDAR band
     // DISJOINT from its body while every channel reported full coverage.
     // ★z_top = seat top + backrest = 0.595 + 0.655 = 1.25 m, from the BIRTH template that actually runs.
-    // ⚠The manifest declares 0.90 (a 0.45/0.45 split from chair_model.h). Those disagree, and adopt_span
-    // PRINTS it rather than one of them winning quietly — which is the whole reason this call exists. Resolve
-    // it by measuring these chairs, then set `from = "measured"`; do not silently align one to the other.
+    // The manifest declares the same 1.25 (z_top_m = extent_m), and the prior is read from the same file, so the
+    // two cannot drift; adopt_span still PRINTS any disagreement rather than one of them winning quietly.
+    // The values are NOMINAL: measure these chairs, then set `from = "measured"`.
     {
         const auto span = rc::manifest::adopt_span(kManifestPath, "chair",
                                                   rc::manifest::Support::floor_anchored,
-                                                  (out.tracker_birth_seat_h + out.tracker_birth_back_h), (out.tracker_birth_seat_h + out.tracker_birth_back_h));
+                                                  out.prior.top(), out.prior.top());
         rc::manifest::Geometry decl;
         decl.support  = span.support;
-        decl.z_top_m  = (out.tracker_birth_seat_h + out.tracker_birth_back_h);
-        decl.extent_m = (out.tracker_birth_seat_h + out.tracker_birth_back_h);
+        decl.z_top_m  = out.prior.top();
+        decl.extent_m = out.prior.top();
         decl.valid    = true;
         bool ok_bands = true;
         ok_bands &= rc::manifest::band_contains_body("chair ", "point_ownership",

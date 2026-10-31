@@ -16,7 +16,7 @@ static float old_pd(float off_x, float off_y, float range)
     return pc * pr;
 }
 
-// A pinhole ZED (1280x720, f = 448 px (robot_concept/shadow.json cam_rgb_focalx = cam_rgb_focaly = 448)) looking along +x from the origin at a 0.60 x 1.25 m chair (Tracker.BirthSeat* template, width x top) at `range`, `off` px right of centre.
+// A pinhole ZED (1280x720, f = 448 px (robot_concept/shadow.json cam_rgb_focalx = cam_rgb_focaly = 448)) looking along +x from the origin at a 0.60 x 1.25 m chair (manifest [prior.template], width x top) at `range`, `off` px right of centre.
 static ChairDetectInputs view(float range, float lateral_m)
 {
     const float f = 448.0f, W = 1280.0f, H = 720.0f;

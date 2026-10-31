@@ -47,3 +47,18 @@ add_executable(card_vs_probe_test tests/card_vs_probe_test.cpp)
 target_include_directories(card_vs_probe_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/.. ${CMAKE_CURRENT_SOURCE_DIR}/../media_transport)
 target_link_libraries(card_vs_probe_test PRIVATE Eigen3::Eigen)
 add_test(NAME card_vs_probe_test COMMAND card_vs_probe_test)
+
+add_executable(generative_test tests/generative_test.cpp)
+target_include_directories(generative_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/.. ${CMAKE_CURRENT_SOURCE_DIR}/../media_transport)
+target_link_libraries(generative_test PRIVATE Eigen3::Eigen)
+add_test(NAME generative_test COMMAND generative_test)
+
+add_executable(render_zed_test tests/render_zed_test.cpp)
+target_include_directories(render_zed_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/.. ${CMAKE_CURRENT_SOURCE_DIR}/../media_transport)
+target_link_libraries(render_zed_test PRIVATE Eigen3::Eigen)
+add_test(NAME render_zed_test COMMAND render_zed_test)
+
+add_executable(render_lidar_test tests/render_lidar_test.cpp)
+target_include_directories(render_lidar_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/.. ${CMAKE_CURRENT_SOURCE_DIR}/../media_transport)
+target_link_libraries(render_lidar_test PRIVATE Eigen3::Eigen)
+add_test(NAME render_lidar_test COMMAND render_lidar_test)

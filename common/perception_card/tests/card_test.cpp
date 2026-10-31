@@ -108,6 +108,46 @@ int main()
         j.erase(k, j.find(',', k) - k + 1);
         CHECK(not card_from_json(j));   // a half-declared block is a schema error
     }
+    { // generative block: round trip (es_ES locale), absent block loads as nullopt, closed vocabularies
+        Card g = make();
+        Generative gb;
+        gb.shape = {{Prim::Slab, {{"w", {"sw", 1.0f, 0.0f}}, {"d", {"", 0.0f, 0.4f}}, {"h", {"", 0.0f, 0.04f}},
+                                  {"x", {"", 0.0f, 0.0f}}, {"y", {"", 0.0f, 0.0f}}, {"z", {"sh", 1.0f, -0.04f}}}},
+                    {Prim::LegSet, {{"n", {"", 0.0f, 4.0f}}, {"half", {"", 0.0f, 0.02f}}, {"fw", {"sw", 1.0f, 0.0f}},
+                                    {"fd", {"", 0.0f, 0.4f}}, {"z0", {"", 0.0f, 0.0f}}, {"z1", {"sh", 1.0f, -0.04f}}}}};
+        gb.vars = {{"sw", 0.6f, 0.15f, 0.3f, 0.65f, false}, {"sh", 0.595f, 0.123456f, 0.38f, 0.55f, true}};
+        gb.placement = {"floor", {{"free", 0.5f}, {"against_wall", 0.25f}}, 0.05f, 0.05f};
+        gb.bounds_source = "unit test";
+        g.generative = gb;
+        const std::string gj = to_json(g);
+        const auto e = card_from_json(gj);
+        CHECK(e and e->generative and to_json(*e) == gj);
+        if (e and e->generative)
+        {
+            const Generative& r = *e->generative;
+            CHECK(r.shape.size() == 2 and r.shape[0].type == Prim::Slab and r.shape[1].type == Prim::LegSet);
+            CHECK(r.shape[0].dims.at("z").var == "sh" and r.shape[0].dims.at("z").b == -0.04f);
+            CHECK(r.vars.size() == 2 and r.vars[1].sigma == 0.123456f and r.vars[1].log_normal and not r.vars[0].log_normal);
+            CHECK(r.placement.contexts.at("against_wall") == 0.25f and r.placement.wall_gap_mean == 0.05f);
+            CHECK(r.bounds_source == "unit test");
+        }
+        CHECK(not card_from_json(to_json(make()))->generative);
+        const auto bad_edit = [&](const std::string& from, const std::string& to) -> std::expected<Card, std::string>
+        { std::string j = gj; const auto p = j.find(from); CHECK(p != std::string::npos); if (p != std::string::npos) j.replace(p, from.size(), to); return card_from_json(j); };
+        const auto e1 = bad_edit("\"slab\"", "\"torus\"");
+        CHECK(not e1 and e1.error().find("torus") != std::string::npos);
+        const auto e2 = bad_edit("gen.shape.0.dim.w.", "gen.shape.0.dim.q.");     // a dim outside the closed list (and w now missing)
+        CHECK(not e2 and e2.error().find("'q'") != std::string::npos);
+        const auto e3 = bad_edit("gen.placement.ctx.free", "gen.placement.ctx.afloat");
+        CHECK(not e3 and e3.error().find("afloat") != std::string::npos);
+        const auto e4 = bad_edit("\"floor\"", "\"ceiling\"");
+        CHECK(not e4 and e4.error().find("ceiling") != std::string::npos);
+        Card u = g; u.generative->shape[0].dims["z"].var = "undeclared";
+        const auto e6 = card_from_json(to_json(u));
+        CHECK(not e6 and e6.error().find("undeclared") != std::string::npos);
+        Card m = g; m.generative->shape[0].dims.erase("h");
+        CHECK(not card_from_json(to_json(m)));   // a primitive must declare every dim of its type
+    }
     std::printf(bad ? "FAILED (%d)\n" : "ALL OK\n", bad);
     return bad ? 1 : 0;
 }

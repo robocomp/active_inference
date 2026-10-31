@@ -393,13 +393,14 @@ Eigen::Matrix<float, 3, 1> ChairBelief::common_mode_inv_diag(const ChairFrame& f
 
 // ─── Self-test ───────────────────────────────────────────────────────────────────
 
-bool ChairBelief::self_test()
+bool ChairBelief::self_test(const ChairPrior& prior)
 {
     std::mt19937 rng(2026);
     std::normal_distribution<float> noise(0.0f, 0.008f);
     std::uniform_real_distribution<float> U(-1.0f, 1.0f), U01(0.0f, 1.0f);
 
     ChairBeliefParams P;
+    P.seed_template(prior);
     const ChairBeliefState gt{0.20f, -0.30f, 0.40f};   // pose ground truth (size = template)
 
     const float c = std::cos(gt.yaw), sn = std::sin(gt.yaw);
