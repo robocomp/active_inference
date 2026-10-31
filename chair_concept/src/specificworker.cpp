@@ -323,7 +323,7 @@ void SpecificWorker::initialize()
     epistemic_planner_.set_robot_radius(0.30f);   // Shadow's footprint radius
     // Perception card: what this agent's P(detect) really multiplies, from the config it runs with (cwd = the agent dir).
     rc::card::write_card_file(std::filesystem::current_path(), rc::make_card(cfg_));
-    presence_coordinator_.publish_card(rc::make_card(cfg_));
+    presence_coordinator_.publish_card_json(rc::card::graph_json(rc::make_card(cfg_)));
     epistemic_planner_.set_log_period(cfg_.chair_log_period_frames);
 
     // The camera's REAL geometry, read once (intrinsics and the zed mount are both static). BOTH FoVs: for a

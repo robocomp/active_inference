@@ -274,7 +274,7 @@ void SpecificWorker::initialize()
     // Perception card: what this agent's P(detect) really multiplies, from the config it runs with. The agent's
     // directory is the cwd (the fleet scripts start every agent with `cd $B/$a`), so etc/perception_card.json lands next to etc/config.toml.
     rc::card::write_card_file(std::filesystem::current_path(), rc::make_card(cfg_));
-    presence_coordinator_.publish_card(rc::make_card(cfg_));
+    presence_coordinator_.publish_card_json(rc::card::graph_json(rc::make_card(cfg_)));
     // ★The camera model is read PER CYCLE at the compute site (rc::nbv::sensor_from_graph),
     // NOT once here: the zed intrinsics are published by robot_concept when frames start
     // arriving, so reading them in initialize() races the producer. Losing that race leaves

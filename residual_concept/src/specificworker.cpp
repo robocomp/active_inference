@@ -149,7 +149,7 @@ void SpecificWorker::refresh_beam_spacing()
 void SpecificWorker::write_perception_card()
 {
     rc::card::write_card_file(std::filesystem::current_path(), rc::make_card(cfg_, grid_.params().cell_size_m));
-    presence_coordinator_.publish_card(rc::make_card(cfg_, grid_.params().cell_size_m));
+    presence_coordinator_.publish_card_json(rc::card::graph_json(rc::make_card(cfg_, grid_.params().cell_size_m)));
 }
 
 void SpecificWorker::initialize()
