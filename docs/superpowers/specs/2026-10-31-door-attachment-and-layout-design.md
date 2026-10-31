@@ -28,13 +28,15 @@ ltsm-map-layout-optimizer, "v2"). And that work is not on this branch.
 
 ## 2. The design
 
-### D1 — One convention for a door FACE (door_concept)
+### D1 — One convention for a door FACE, applied where faces are composed (room_concept, ltsm)
 
-A door node is one FACE of a doorway: the hole as seen from the room it hangs in. Its frame (its RT edge from its wall/room):
-origin = the aperture centre on the wall line, **+y = into the room it belongs to**, x = +y rotated −90°. door_concept
-already orients faces this way ("+y into the room that fits it"); D1 makes it the contract, asserted where the face is
-born (fit, entry mirror, restore) and checked in a unit test: a point 0.3 m along +y from the origin is inside its room's
-polygon.
+AMENDED 2026-10-31 (user approved): a door node's frame takes its yaw from its WALL (x = the wall tangent, y = x + 90°),
+so "+y into its room" holds only for a counter-clockwise outline — pingpong19's room_1 (area −60.4 m², clockwise) and
+room_2 (+66.8 m²) put DOOR_1's two faces π apart, which is why the centroid flip fired on every recall. door_concept's
+frames are LEFT AS THEY ARE (its leaf / hinge / swing models are defined in them). The convention is applied where faces
+are composed: a FACE = the door node's pose in its own room, turned by π if needed so that +y points INTO that room, decided
+LOCALLY — the point half the door's width along +y from the aperture centre must lie inside the room's own outline. No
+other room is consulted.
 
 Consequence: the two faces F_a (in room a) and F_b (in room b) of ONE doorway are related by a half-turn, always:
 
