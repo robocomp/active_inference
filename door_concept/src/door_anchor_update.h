@@ -192,7 +192,8 @@ struct AnchorEvidence
 //     doorway from nearly the same place and their errors are shared, so a sigma shrinking as 1/sqrt(n) would count one
 //     view many times — the overconfidence this replaces;
 //   - the config's phi sigma enters as one pseudo-observation (nu0 = 1), so one or two frames are not reported as certain;
-//   - P(hinge as stated) and P(swing as stated) are the frames' average.
+//   - P(hinge as stated) and P(swing as stated) are the frames' average (diagnostic: door_concept publishes its own hinge /
+//     swing belief, the frames' flip when the leaf is seen through the opening — pingpong33 leg 2).
 struct LeafRunning
 {
     int n = 0;
@@ -2071,7 +2072,10 @@ update_door_anchor(const rc::interaction::RelPose& prior, float width, float thi
         const double w_leaf = wb[0] + wb[1] + wb[2] + wb[3];
         if (w_leaf > 0.0)
         {
-            const int map = int(std::ranges::max_element(wb) - wb.begin());
+            // phi is read in the STATED hinge x swing block (block 0: door_concept's own belief, which the caller keeps for
+            // hinge and swing — pingpong33 leg 2), not in this frame's MAP block: seen through the opening from the far side a
+            // frame can flip to the other side, and its phi is then another leaf's. The frame's MAP block only if 0 is empty.
+            const int map = wb[0] > 0.0 ? 0 : int(std::ranges::max_element(wb) - wb.begin());
             double m = 0.0, m2 = 0.0, z = 0.0;
             for (std::size_t q = 0; q < pb.leaf.active.size(); ++q)
                 if (const int c = pb.leaf.active[q]; c >= 0 and pb.leaf.cfgs[std::size_t(c)].block == map)

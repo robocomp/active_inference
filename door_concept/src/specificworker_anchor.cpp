@@ -1166,8 +1166,12 @@ void SpecificWorker::step_passage_anchor()
                                                          sy * 0.5f * pa.thickness, pa.axis_sign * near, sy, pa.clear_width,
                                                          std::clamp(pa.leaf_run.valid() ? pa.leaf_run.phi() : inst->phi_est, 0.f, phi_max),
                                                          pa.leaf_run.valid() ? pa.leaf_run.sigma(cfg_.pragmatic.phi_sigma_rad) : inst->phi_sigma,
-                                                         pa.leaf_run.valid() ? logit_clamped(pa.leaf_run.p_hinge()) : inst->hinge_llr,
-                                                         pa.leaf_run.valid() ? logit_clamped(pa.leaf_run.p_swing()) : inst->swing_llr);
+                                                         // hinge and swing: door_concept's OWN belief (log-odds ±60 after a few views from both
+                                                         // sides). The frames' own hinge/swing flip all-or-nothing when the leaf is seen THROUGH
+                                                         // the opening from the far side, and their average sat near ½: pingpong33 leg 2 put the
+                                                         // MAP leaf (P 0.42) on the robot's side, in room_2, and the jamb guard stalled on it. Only
+                                                         // the ANGLE was stale in the room-frame belief (83 vs 90 deg); it alone comes from the rays.
+                                                         inst->hinge_llr, inst->swing_llr);
             // Task 5b: onto the leaf plane door_concept believes in (DoorBeliefState::d, relative to the wall the anchor
             // registers) — the controller's known-obstacle leaf and this agent's model are one (door_anchor_leaf_plane.h).
             rc::door::place_leaves_on_plane(al, rc::door::anchor_leaf_plane_y(inst->ai2_belief.recess(), inst->wall_reg.depth,

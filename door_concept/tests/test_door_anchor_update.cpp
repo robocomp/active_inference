@@ -221,7 +221,7 @@ static Pose2 try64_start() { return {V2(-0.172f, -2.440f), 0.84f}; }
 static const V3 kSensor(0.f, 0.14f, 0.67f);   // the bpearl in the robot frame
 constexpr float kFloorZ = 0.05f;               // the wall band's floor (the caller's kFloorBandM): below it, a floor return
 struct WorldOpts { float u0 = -1.5f, u1 = 4.0f; bool corner = true, shut = true, collinear_beyond = false, back_wall = false, leaf90 = false,
-                  corner_u1 = false; };
+                  corner_u1 = false, leaf90_far = false; };
 static std::vector<Seg> world(const WorldOpts& o)
 {
     std::vector<Seg> s;
@@ -234,6 +234,7 @@ static std::vector<Seg> world(const WorldOpts& o)
     box(s, -6.f, 6.f, 4.f, 4.1f);
     if (o.back_wall) box(s, -6.f, 6.f, -4.1f, -4.f);   // the robot's own room closes behind it
     if (o.leaf90) box(s, 0.5f * W - 0.04f, 0.5f * W, -0.5f * T - W, -0.5f * T);   // open 90°, beside the +u jamb, robot side
+    if (o.leaf90_far) box(s, 0.5f * W - 0.04f, 0.5f * W, 0.5f * T, 0.5f * T + W);  // open 90°, beside the +u jamb, the FAR side
     return s;
 }
 // A 3-D bpearl-like scan: the sensor at kSensor (z = 0.67), 360° in azimuth at 1°, layers from 0 to -60° at 2°. A beam
@@ -1332,6 +1333,53 @@ int main()
                 check(uncovered == 0, "published, the truth is within 2 sigma on every frame");
             }
         }
+    }
+
+    // pingpong33 leg 2: the leaf seen THROUGH the opening from the far side (it swings away from the robot). door_concept's
+    // belief states hinge and swing firmly (log-odds ~60 -> P 0.999) and phi 83; the published phi must still be the rays'
+    // 90, read in the STATED block (the frames' own swing flips; their average sat near 1/2 and put a leaf on the robot's side).
+    std::print("leaf_seen_through_the_opening (far side, belief firm on hinge/swing, phi 83 vs the scene's 90)\n");
+    {
+        WorldOpts wo; wo.u0 = -4.f; wo.u1 = 4.f; wo.corner = false; wo.shut = false; wo.back_wall = true; wo.leaf90_far = true;
+        const auto segs = world(wo);
+        const float clear = rc::door::anchor_clear_width(W, 0.06f);
+        rc::door::LeafPrior lp;
+        lp.known = true; lp.hinge_u = 0.5f * clear; lp.len = clear; lp.dir_u = -1.f; lp.swing_y = +1.f;   // +u jamb, FAR side
+        lp.phi = 83.f * float(M_PI) / 180.f; lp.phi_sigma = 0.25f; lp.phi_known = true; lp.phi_max = 2.094f;
+        lp.p_hinge = 0.999f; lp.p_swing = 0.999f;
+        Pose2 robot{V2(0.f, -1.3f - kSensor.y()), 0.f};
+        RelPose belief = creation_prior(robot);
+        rc::door::LeafPrior prior = lp;
+        rc::door::LeafRunning run;
+        int frames = 0, flips = 0, uncovered = 0;
+        float worst = 0.f;
+        for (int k = 0; k <= 16; ++k)
+        {
+            if (k > 0)
+            {
+                rc::rt::Twist tw; tw.linear = V3(0.f, 0.5f, 0.f);
+                belief = rc::interaction::predict(belief, tw, V3(1e-4f, 1e-4f, 1e-4f), 0.1f);
+                robot.p.y() += 0.05f;
+            }
+            const auto rays = rc::door::select_anchor_rays(belief, W, T, kFloorZ, 2.0f, kSensor, scan3d(segs, robot, 91 + k), 2.0f);
+            const auto [post, ev] = update_door_anchor(belief, W, T, wo.u0, wo.u1, kSensor, rays, {}, {}, 0.8f, prior, kFloorZ);
+            belief = post;
+            if (not ev.leaf_post) continue;
+            ++frames;
+            flips += ev.leaf_p_swing < 0.5f ? 1 : 0;
+            run.add(ev.leaf_phi, ev.leaf_p_hinge, ev.leaf_p_swing);
+            prior.phi = run.phi();
+            const float pub = run.phi(), sig = run.sigma(lp.phi_sigma);
+            if (k >= 4) worst = std::max(worst, std::abs(pub - float(M_PI_2)));
+            if (std::abs(pub - float(M_PI_2)) > 2.f * sig) ++uncovered;
+            std::print("      frame {:2d} s {:+.2f}: P(swing as stated) {:.2f}, this frame phi {:.1f} -> published {:.1f} sigma {:.1f}\n", k,
+                       robot.p.y() + kSensor.y(), ev.leaf_p_swing, ev.leaf_phi * 57.2958f, pub * 57.2958f, sig * 57.2958f);
+        }
+        std::print("    {} frames, {} with the frame's swing flipped to the robot's side; published {:.1f} deg, worst after frame 4 {:.1f} deg; "
+                   "truth outside 2 sigma on {} frames\n", frames, flips, run.phi() * 57.2958f, worst * 57.2958f, uncovered);
+        check(frames > 0, "the update returns a leaf posterior from the far side");
+        check(worst < 6.f * float(M_PI) / 180.f, "the published phi (read in the stated block) stays within 6 deg of 90");
+        check(uncovered == 0, "the truth is within 2 sigma of the published phi on every frame");
     }
 
     std::print("{}\n", g_fail == 0 ? "ALL PASS" : std::format("{} FAILED", g_fail));
