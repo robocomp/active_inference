@@ -1180,9 +1180,9 @@ QString ChatSession::do_imagine_view(const QJsonObject& args)
     };
 
     const auto card = std::ranges::find(cards, rq.concept_, &rc::card::Card::concept_);
-    if (card == cards.end()) return q(rc::chat::answer_no_card(not cards.empty(), root.string()));
+    if (card == cards.end()) return with_notes(q(rc::chat::answer_no_card(not cards.empty(), root.string())));
     const auto scene = rc::chat::build_see_scene(*G_, *inner_, digest_);
-    if (scene.room.empty()) return QStringLiteral("I do not know which room I am in, so I cannot imagine it here.");
+    if (scene.room.empty()) return with_notes(QStringLiteral("I do not know which room I am in, so I cannot imagine it here."));
 
     const auto out = rc::chat::imagine_view(*card, scene, rq, seed, canvas_runner_.run_dir().toStdString());
     if (not out.drawn) return with_notes(q(out.text));

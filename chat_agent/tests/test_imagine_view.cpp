@@ -183,12 +183,37 @@ int main()
         const auto s = scene(true, 0.55f);
         ImagineRequest rq; rq.concept_ = "chair"; rq.where = "chair_1"; rq.from = "chair_1"; rq.n = 8;
         const auto o = imagine_view(chair_card(), s, rq, 7, dir);
-        CHECK(o.drawn and has(o.text, "left chair_1 out"));
-        CHECK(has(o.text, "the viewpoint is inside the imagined chair"));
+        // the robot's body is an obstacle of the sampler: where it stands nothing can be imagined, so no P for a chair it stands in
+        CHECK(not o.drawn and has(o.text, "could not place any imagined chair") and has(o.text, "my own body"));
+        CHECK(not has(o.text, "I would notice"));
+        // at door_1, from door_1: the same, never a P
+        rq.where = "door_1"; rq.from = "door_1";
+        const auto od = imagine_view(chair_card(), s, rq, 7, dir);
+        CHECK(not od.drawn and has(od.text, "could not place any imagined chair at door_1") and not has(od.text, "I would notice"));
+        CHECK(has(can_see_hypothetical_reply(chair_card(), scene(false), "chair", "door_1", "door_1"), "no free place"));
+        CHECK(not has(can_see_hypothetical_reply(chair_card(), scene(false), "chair", "door_1", "door_1"), "recognise it"));
+        // the footprint test: a seat below the camera counts, the camera's own height does not matter
+        {
+            Placed pl = instantiate(chair_gen(), {{"seat_w", 0.6f}, {"seat_d", 0.52f}, {"seat_h", 0.595f}, {"back_h", 0.655f}}, 2.0f, 2.0f, 0.3f);
+            CHECK(viewpoint_in_footprint(Viewpoint{{2.0f, 2.0f}, std::nullopt}, pl));
+            CHECK(not viewpoint_in_footprint(Viewpoint{{3.0f, 2.0f}, std::nullopt}, pl));
+        }
+        rq.where = "chair_1"; rq.from = "chair_1";
         // another place: nothing excluded, nothing inside
         rq.where = "table_1"; rq.from = "door_1";
         const auto o2 = imagine_view(chair_card(), s, rq, 7, dir);
         CHECK(not has(o2.text, "left ") and not has(o2.text, "inside the imagined") and has(o2.text, "by table_1"));
+        // fixed place: the P(detect) is over the pictures' own draw (heading drawn, rejection), n = max(8, 32) accepted
+        CHECK(o2.drawn);
+        const auto doc = QJsonDocument::fromJson(QByteArray::fromStdString(slurp(dir / "imagined.json"))).object();
+        CHECK(doc["mc"].toObject()["n"].toInt() == 32 and doc["samples"].toArray().size() == 8);
+        // R12: an uncertain door (no phi, no P(open)) is taken as shut, and the answer says so; a measured door says nothing
+        CHECK(not has(o2.text, "Assumed"));
+        auto su = s; su.doors[0].phi_rad.reset();
+        const auto o3 = imagine_view(chair_card(), su, rq, 7, dir);
+        CHECK(has(o3.text, "Assumed: door_1") and has(o3.text, "taken as shut"));
+        auto hu = scene(false); hu.doors[0].phi_rad.reset();
+        CHECK(has(can_see_hypothetical_reply(chair_card(), hu, "chair", "table_1", "door_1"), "Assumed: door_1"));
     }
     // ---- exclusion by the instance's own footprint; is_hypothetical never steals a named instance ----
     {
@@ -223,7 +248,7 @@ int main()
     {
         const auto s = scene(false);
         const auto t = can_see_hypothetical_reply(chair_card(), s, "chair", "table_1", "door_1");
-        CHECK(has(t, "imagined one by table_1") and has(t, "from door_1") and has(t, "±") and has(t, "n=32 size samples") and has(t, "seed 1"));
+        CHECK(has(t, "imagined one by table_1") and has(t, "from door_1") and has(t, "±") and has(t, "n=32 imagined chairs") and has(t, "seed 1"));
         CHECK(has(can_see_hypothetical_reply(chair_card("prior"), s, "chair", "table_1", ""), "isn't calibrated yet"));
         CHECK(has(can_see_hypothetical_reply(chair_card(), s, "chair", "the moon", ""), "ASK"));
     }

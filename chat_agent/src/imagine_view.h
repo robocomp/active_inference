@@ -12,9 +12,12 @@
  *     the card's own mixture. `from` is as in can_see (resolve_from).
  *   · The target must not also be an obstacle: the named same-class instance at the `at` place (and any same-class
  *     instance sitting on that point) is left out of the World, and the answer says so.
- *   · The viewpoint inside the imagined object is reported here, from render_zed's own Inside test.
- *   · n samples are drawn for display; the P(detect) is a Monte-Carlo over kMcSamples draws (evaluate_mc when the place
- *     is fixed; the evaluator on each drawn place otherwise, same aggregate).
+ *   · The robot's own body (kRobotRadiusM, as can_see) at the viewpoint is an obstacle of the SAMPLER only (not of the
+ *     renderers): the robot cannot stand inside the thing it imagines. A viewpoint that lies in the 2-D footprint of a
+ *     drawn sample's parts is reported ("the viewpoint is inside the imagined <concept>").
+ *   · n samples are drawn for display; the P(detect) is a Monte-Carlo over max(n, kMcSamples) draws of the SAME
+ *     distribution as the pictures (sizes AND place AND heading, physical rejection), fixed place or not.
+ *   · Doors sit at their most probable state (R12, world_for's default), and the answer names each assumption.
  */
 
 #include <algorithm>
@@ -133,22 +136,28 @@ struct ImaginePlace
     return world_for(t, "");
 }
 
-/// render_zed's own Inside test: the camera (at its mount height) lies within one of the sample's parts.
-[[nodiscard]] inline bool camera_inside_part(const rc::card::World& w, const rc::card::Viewpoint& vp, const rc::card::Placed& pl)
+/// The viewpoint lies in the 2-D footprint of one of the sample's parts (any height: a seat below the camera counts).
+[[nodiscard]] inline bool viewpoint_in_footprint(const rc::card::Viewpoint& vp, const rc::card::Placed& pl)
 {
-    if (not w.zed) return false;
-    const float mount = w.zed_mount_z > 1e-3f ? w.zed_mount_z : w.zed->height_m;
-    for (const auto& b : pl.boxes)
+    return std::ranges::any_of(pl.boxes, [&](const rc::nbv::Obstacle& b)
     {
-        bool in = false;
-        rc::card::detail::slab_hit(rc::card::detail::ray_box(b), vp.xy.x(), vp.xy.y(), mount, 1.0f, 0.0f, 0.0f, &in);
-        if (in) return true;
-    }
-    return false;
+        const float c = std::cos(b.yaw), sn = std::sin(b.yaw);
+        const float rx = vp.xy.x() - b.cx, ry = vp.xy.y() - b.cy;
+        return std::abs(c * rx + sn * ry) <= 0.5f * b.w and std::abs(-sn * rx + c * ry) <= 0.5f * b.h;
+    });
 }
 
-/// The evaluator over the drawn places AND sizes (a fixed place goes through evaluate_mc instead). Same aggregate as
-/// evaluate_mc: mean, population sd, modal limit (ties to the lower enum value).
+/// The sampler's World: the render World plus the robot's body at the viewpoint as a floor-to-ceiling box of the robot's
+/// radius (kRobotRadiusM, sourced as can_see's). Not given to the renderers: the robot does not occlude its own sensors.
+[[nodiscard]] inline rc::card::World with_robot_body(rc::card::World w, const rc::card::Viewpoint& vp)
+{
+    rc::nbv::Obstacle ob;
+    ob.cx = vp.xy.x(); ob.cy = vp.xy.y(); ob.w = ob.h = 2.0f * kRobotRadiusM; ob.yaw = 0.0f; ob.z0 = 0.0f; ob.z1 = 0.0f;
+    w.obstacles.emplace_back("robot", ob);
+    return w;
+}
+
+/// The evaluator over the drawn places, headings AND sizes (fixed place or not). Same aggregate as evaluate_mc: mean, population sd, modal limit (ties to the lower enum value).
 [[nodiscard]] inline rc::card::McResult mc_over_samples(const rc::card::Card& card, const rc::card::World& world,
                                                         const std::string& cls, const std::vector<rc::card::Sample>& samples,
                                                         const rc::card::Viewpoint& vp)
@@ -195,6 +204,7 @@ struct ImagineFacts
     int rejected = 0, outside_polygon = 0;
     int inside_count = 0;                   ///< shown samples whose render has the camera inside a part
     std::vector<std::string> excluded;
+    std::vector<std::string> assumed;       ///< door assumptions ("assumption: " notes without the prefix), as can_see words them
     bool room_height_known = false;
     float room_height = 2.5f;
     std::uint64_t seed = 0;
@@ -202,13 +212,31 @@ struct ImagineFacts
     std::string sensor = "both";
 };
 
+/// " Assumed: door_1: ...; door_2: ...." from the doors' notes; empty when nothing was assumed.
+[[nodiscard]] inline std::string assumed_suffix(const std::vector<std::string>& assumed)
+{
+    std::string s;
+    for (const auto& a : assumed) s += (s.empty() ? "" : "; ") + a;
+    return s.empty() ? std::string{} : " Assumed: " + s + ".";
+}
+
+/// Each uncertain (or widthless) door's note, without the "assumption: " prefix: world_for put it at its most probable state.
+[[nodiscard]] inline std::vector<std::string> door_assumptions(const SeeScene& s)
+{
+    std::vector<std::string> out;
+    for (const auto& d : s.doors)
+        if (auto n = door_probable_note(d); not n.empty()) out.push_back(n.starts_with("assumption: ") ? n.substr(12) : n);
+    return out;
+}
+
 [[nodiscard]] inline std::string answer_imagine_view(const ImagineFacts& f, const rc::card::McResult& mc)
 {
     using namespace see_detail;
     const std::string pl = plural(f.cls);
     if (f.shown == 0)
-        return std::format("I could not place any imagined {} {}: of {} draws, {} fell inside a wall or another object and "
-                           "{} outside the room. (seed {})", f.cls, f.place_words, f.drawn, f.rejected, f.outside_polygon, f.seed);
+        return std::format("I could not place any imagined {} {}: of {} draws, {} fell inside a wall or another object "
+                           "(my own body at the viewpoint counts as one: I cannot stand inside what I imagine) and {} outside the "
+                           "room. (seed {}){}", f.cls, f.place_words, f.drawn, f.rejected, f.outside_polygon, f.seed, assumed_suffix(f.assumed));
     const std::string at = f.from_label.empty() ? "from here" : "from " + f.from_label;
     std::string out = std::format("I imagined {} {} {}, seen {}. I would notice that something is there with P {}, and "
                                   "recognise it as a {} with P {} ({}).",
@@ -229,6 +257,7 @@ struct ImagineFacts
         for (const auto& n : f.excluded) names += (names.empty() ? "" : ", ") + n;
         out += std::format(" I left {} out of the scene, as it is the {} at that place.", names, f.cls);
     }
+    out += assumed_suffix(f.assumed);
     if (not f.room_height_known)
         out += std::format(" Room height {:.1f} m assumed (the room does not publish one).", f.room_height);
     out += std::format(" (P over {} draws of the {} prior; seed {}.)", mc.n, f.cls, f.seed);
@@ -241,10 +270,13 @@ struct ImagineFacts
 [[nodiscard]] inline std::string answer_can_see_hypothetical(const rc::card::Card& card, const std::string& cls,
                                                              const std::string& place_words, const std::string& from_label,
                                                              const rc::card::McResult& mc, bool room_height_known, float room_height,
-                                                             std::uint64_t seed = 1)
+                                                             std::uint64_t seed = 1, const std::vector<std::string>& assumed = {})
 {
     using namespace see_detail;
     const std::string at = from_label.empty() ? "from here" : "from " + from_label;
+    if (mc.n == 0)   // not one physically possible place: never a P for a chair the robot would be standing in
+        return std::format("I cannot judge a {} {} {}: there is no free place for one there (a wall, another object or my own "
+                           "body at the viewpoint is in the way).{}{}", cls, place_words, at, assumed_suffix(assumed), calibration_note(card));
     if (mc.modal_limit == rc::card::Limit::Inside)
         return std::format("I cannot judge a {} {} {}: that spot is not somewhere I can look from.{}", cls, place_words, at,
                            calibration_note(card));
@@ -254,13 +286,15 @@ struct ImagineFacts
                                   pm(mc.p_recognise_mean, mc.p_recognise_sd), likelihood(mc.p_recognise_mean));
     if (mc.modal_limit != rc::card::Limit::None)
         out += std::format(" What most often limits it: {}.", limit_words(mc.modal_limit, ""));
+    out += assumed_suffix(assumed);
     if (not room_height_known) out += std::format(" Room height {:.1f} m assumed.", room_height);
-    out += std::format(" (n={} size samples from the {} prior; seed {}.)", mc.n, cls, seed);
+    out += std::format(" (n={} imagined {}, sizes and place drawn from the prior; seed {}.)", mc.n, plural(cls), seed);
     out += calibration_note(card);
     return out;
 }
 
-/// can_see for a hypothetical target (is_hypothetical): the card's size prior at the named place, n = kMcSamples.
+/// can_see for a hypothetical target (is_hypothetical): the SAME draw as imagine_view's pictures (sizes, heading, physical
+/// rejection, the robot's body at the viewpoint an obstacle) at the named place, n = kMcSamples.
 [[nodiscard]] inline std::string can_see_hypothetical_reply(const rc::card::Card& card, const SeeScene& s, const std::string& what,
                                                             const std::string& where, const std::string& from)
 {
@@ -271,11 +305,10 @@ struct ImagineFacts
     if (not vp.has_value()) return vp.error();
     std::vector<std::string> excluded;
     const auto world = imagine_world(s, card, cls, *place, excluded);
-    rc::card::Hypothesis base;
-    base.concept_ = cls;
-    base.x = place->ctx.at->x(); base.y = place->ctx.at->y(); base.yaw = 0.0f;
-    const auto mc = rc::card::evaluate_mc(card, world, base, *vp, kMcSamples, kHypotheticalSeed);
-    return answer_can_see_hypothetical(card, cls, place->words, from, mc, s.room_height_known, s.room_height, kHypotheticalSeed);
+    const auto set = rc::card::sample_concept(card, with_robot_body(world, *vp), place->ctx, kMcSamples, kHypotheticalSeed);
+    const auto mc = mc_over_samples(card, world, cls, set.samples, *vp);
+    return answer_can_see_hypothetical(card, cls, place->words, from, mc, s.room_height_known, s.room_height, kHypotheticalSeed,
+                                       door_assumptions(s));
 }
 
 struct ImagineOutcome
@@ -307,32 +340,25 @@ struct ImagineOutcome
     ImagineFacts f;
     f.cls = cls; f.place_words = place->words; f.from_label = rq.from;
     f.room_height_known = s.room_height_known; f.room_height = s.room_height;
-    f.seed = seed; f.calibration = card.calibration; f.sensor = sensor;
+    f.seed = seed; f.calibration = card.calibration; f.sensor = sensor; f.assumed = door_assumptions(s);
     const auto world = imagine_world(s, card, cls, *place, f.excluded);
 
     // one draw behind both the canvas (its first n) and the P(detect)
-    auto set = rc::card::sample_concept(card, world, place->ctx, std::max(n, kMcSamples), seed);
+    auto set = rc::card::sample_concept(card, with_robot_body(world, *vp), place->ctx, std::max(n, kMcSamples), seed);
     f.drawn = set.drawn; f.accepted = static_cast<int>(set.samples.size());
     f.rejected = set.rejected; f.outside_polygon = set.outside_polygon;
     const rc::card::SampleSet whole = set;
     if (static_cast<int>(set.samples.size()) > n) set.samples.resize(static_cast<std::size_t>(n));
     f.shown = static_cast<int>(set.samples.size());
 
-    rc::card::McResult mc;
-    if (place->ctx.at)
-    {
-        rc::card::Hypothesis base;
-        base.concept_ = cls; base.x = place->ctx.at->x(); base.y = place->ctx.at->y();
-        mc = rc::card::evaluate_mc(card, world, base, *vp, kMcSamples, seed);
-    }
-    else mc = mc_over_samples(card, world, cls, whole.samples, *vp);
+    const rc::card::McResult mc = mc_over_samples(card, world, cls, whole.samples, *vp);   // fixed place or not: the pictures' distribution
 
     std::vector<rc::card::ImaginedImage> images;
     std::array<std::vector<rc::card::ImaginedScan>, 2> scans;
     for (std::size_t i = 0; i < set.samples.size(); ++i)
     {
         const auto& sm = set.samples[i];
-        if (camera_inside_part(world, *vp, sm.parts)) ++f.inside_count;
+        if (viewpoint_in_footprint(*vp, sm.parts)) ++f.inside_count;
         if (want_zed) images.push_back(rc::card::render_zed(world, *vp, sm.parts, card));
         if (want_lidar)
         {
