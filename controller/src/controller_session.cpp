@@ -281,7 +281,8 @@ bool ControllerSession::sync_world_state(std::uint64_t timestamp_ms,
         // The window's status line and corridor overlay.
         const auto v = door_passage_.view();
         display.set_door_passage({.door = v.door, .step = rc::DoorPassage::step_name(v.step), .step_state = v.step_state,
-                                  .attempts = v.attempts, .last_event = v.last_event},
+                                  .attempts = v.attempts, .last_event = v.last_event,
+                                  .cross = v.step == rc::DoorPassage::Step::Cross ? cross_status_ : std::string{}},
                                  door_passages_);
         observe_door_passage_why(timestamp_ms);   // motion_verdict.h — observability only
     }
@@ -3488,8 +3489,10 @@ bool ControllerSession::drive_door_route(const ControllerPlanningStep &step, rc:
                 path_controller.stop();
                 motion_commander.stop_robot();
                 door_passage_.note_drive_in_done();
+                cross_status_ = "drive-in stopped: the anchor is gone after the switch";
                 return true;
             }
+            if (not front_of_open and not why_not.empty()) cross_status_ = "servo not started, route drives: " + why_not;
             if (not front_of_open and not why_not.empty() and door_servo_refused_logged_ != leg.key)
             {
                 door_servo_refused_logged_ = leg.key;
@@ -3510,22 +3513,9 @@ bool ControllerSession::drive_door_route(const ControllerPlanningStep &step, rc:
                 return true;
             }
         }
-    if (door_route_active_ and leg.key == door_route_key_)
-        if (const auto seen = perceived_door(leg.door, step.robot_pose); seen.has_value())
-        {
-            const float half_w = std::max(approach_body_.support_radius(0.f, Eigen::Vector2f(1.f, 0.f)),
-                                          approach_body_.support_radius(0.f, Eigen::Vector2f(-1.f, 0.f)));
-            const bool first = door_route_anchor_id_ != seen->anchor_id;
-            // Once any part of the body is in the opening (s > −r_body) the route is not rebuilt on it: a route from inside
-            // the doorway is what failed in pingpong3; the installed one already carries the body through.
-            if (not door_route_body_in_opening_ and (first or not rc::band_cross_route_passes(door_route_.path(), seen->gap, half_w)))
-            {
-                std::println("[door-route] {}: rebuilt on the perceived opening of {} ({})", leg.door, seen->name,
-                             first ? "the anchor is up" : "the route no longer passes through it as measured");
-                door_route_installed_ = false;
-                if (not build_door_route(step.robot_pose, now, path_controller.goal_threshold())) door_route_failed_ms_ = now;
-            }
-        }
+    // ★ 2026-10-31 (user; Fable review): the route is built ONCE per leg, on door_concept's targets. It was rebuilt "on the
+    //   perceived opening" whenever the anchor came up or the route stopped passing through it as measured; pingpong30
+    //   leg 3 a rebuild put the opening 0.66 m short of the door ("no vantage: the robot stands in the doorway").
     // A leg is built ONCE (its key); a re-keyed leg after a failure waits kDoorRouteRebuildMs from that failure.
     if (not door_route_active_ and leg.key != door_route_key_ and now - door_route_failed_ms_ >= kDoorRouteRebuildMs)
         if (not build_door_route(step.robot_pose, now, path_controller.goal_threshold())) door_route_failed_ms_ = now;
@@ -4506,11 +4496,13 @@ ControllerSession::CrossProtocol ControllerSession::cross_protocol(const Control
     //   the servo, the jamb guard and `through` all run on the GAP (re-measured every cycle, carried by odometry while not
     //   seen), with no leaf model: the measured span already ends at the leaf. The anchor stays the prior that says where to
     //   look. Before that, the anchor law below is unchanged.
-    float heading_var = -1.f;   // the localiser's heading variance (the room wall's yaw is seen through it); unknown ⇒ none
-    if (const auto ud = motion_commander.last_uncertainty_diag(); ud.valid and ud.theta_std_rad >= 0.f)
-        heading_var = ud.theta_std_rad * ud.theta_std_rad;
-    const bool on_gap = update_doorway_gap(a, tracker_pose_.has_value() ? *tracker_pose_ : robot_pose, obstacle_tracker,
-                                           heading_var);
+    // ★ 2026-10-31 (user; Fable review point 3): THE SERVO DRIVES ON door_concept's ANCHOR ONLY. The measured gap is no
+    //   longer measured here: pingpong30 leg 3 it found a 0.75 m "gap" at the open leaf's TIP, 0.89 m ahead, while the door
+    //   was 1.87 m ahead and the anchor was right; the servo steered on the false opening and stalled in the corridor. A
+    //   second estimate of the door, in competition with the one its owner publishes, is the "two pictures of one door"
+    //   defect. If the anchor is off, that is door_concept's estimate to fix. on_gap is false on every path below; the
+    //   tracker's code (update_doorway_gap, gap_line_) is left for the controller clean-up to delete.
+    const bool on_gap = false;
     if (on_gap and not gap_steering_logged_)
     {
         gap_steering_logged_ = true;
@@ -4613,6 +4605,7 @@ ControllerSession::CrossProtocol ControllerSession::cross_protocol(const Control
                 std::println("[door-route] drive-in: {} at the cross target, {:.2f} m past the plane — stopped in the new room",
                              drive_name, g.s);
                 door_passage_.note_drive_in_done();
+                cross_status_ = std::format("drive-in stopped: at the cross target, {:.2f} m past the plane", g.s);
             }
             if (door_passage_.clearing())
             {
@@ -4912,6 +4905,20 @@ void ControllerSession::step_anchor_cross(const ControllerRobotPose &robot_pose,
                          rc::anchor_signed_distance(returns_body(), q), base_speed_lin_, base_speed_ang_, returns.capture_self);
     }
     const auto cap = cap_by_returns(returns, adv_mps, side_mps, rot_rps);
+    // THE STATUS COLUMN'S "cross:" LINE (user 2026-10-31: "any reason that keeps it from advancing should be output in the
+    // text canvas"): what the servo steers on and where it is, the anchor's own reading beside a measured gap (two pictures
+    // of one door, side by side), and the live-returns cap when it binds.
+    {
+        const auto gd = rc::anchor_cross_geometry(drive_pose);
+        cross_status_ = cp.on_gap
+            ? std::format("steering on the MEASURED gap {:.2f} m: s {:+.2f} e {:+.2f} | anchor {} says s {:+.2f} e {:+.2f}",
+                          cp.drive_width, gd.s, gd.e, cp.drive_name, rc::anchor_cross_geometry(cp.anchor_pose).s,
+                          rc::anchor_cross_geometry(cp.anchor_pose).e)
+            : std::format("on the anchor {} ({:.2f} m): s {:+.2f} e {:+.2f}", drive_name, cp.drive_width, gd.s, gd.e);
+        if (cap.bound_lin or cap.bound_rot)
+            cross_status_ += std::format(" | live returns cap v {:.2f} m/s{}", cap.v_lim, cap.bound_rot ? ", rotation capped" : "");
+        if (door_passage_.driving_in()) cross_status_ += " | driving in";
+    }
     // v4 step 3 (user 2026-10-31: "if there is not much space after the door, just stop"): past THROUGH, the live returns
     // leaving the body no forward speed IS the end of the free space ahead — the drive-in stops there, no escape; the
     // room's own affordances move the robot on (a new room's survey) or the leg ends (a recalled room).
@@ -4922,6 +4929,7 @@ void ControllerSession::step_anchor_cross(const ControllerRobotPose &robot_pose,
         path_controller.stop();
         note_no_command(); motion_commander.stop_robot();
         door_passage_.note_drive_in_done();
+        cross_status_ = "drive-in stopped: no free space ahead";
         return;
     }
     if (const bool binding = cap.bound_lin and cap.v_lim < v_field; binding != anchor_returns_binding_logged_)
@@ -8851,6 +8859,7 @@ bool ControllerSession::detect_stuck(bool pursuing, float asked_lin_mps, float c
     //  Unreachable). Reported; the servo keeps the base. Bounded by its caller (the cross contract's timeout).
     if (r.verdict == rc::StallVerdict::Spinning and spin_is_not_a_wedge)
     {
+        cross_status_ += " | not advancing: SPINNING (turns asked, none delivered)";
         std::println("[anchor] cross: SPINNING verdict ({:.2f} rad commanded over {:.1f} s, {:.2f} netted, {:.3f} m moved) on "
                      "the servo's rotation-dominant command — not a wedge: no escape, the servo keeps the base",
                      r.asked_rot_rad, r.window_s, r.achieved_rot_rad, r.achieved_m);
@@ -8977,6 +8986,8 @@ void ControllerSession::begin_escape(const ControllerRobotPose &robot_pose,
         if (escape_level_ == 0) escape_episode_origin_ = robot_pose.pos;
         ++escape_level_;
     }
+    if (door_passage_.active() and door_passage_.view().step == rc::DoorPassage::Step::Cross)
+        cross_status_ += std::format(" | STUCK: escape {} of {}", escape_level_, kMaxEscapeLevels);
     if (escape_level_ > kMaxEscapeLevels)
     {
         stuck_given_up_ = true;

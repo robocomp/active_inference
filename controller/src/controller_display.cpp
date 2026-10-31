@@ -514,6 +514,7 @@ QString ControllerDisplay::compose_status(const DisplaySnapshot &snap)
             if (dp.attempts > 0) s += std::format(" x{} failed", dp.attempts);
         }
         parts.push_back(std::move(s));
+        if (not dp.cross.empty()) parts.push_back("cross: " + dp.cross);
     }
 
     // The affordance being executed and its stage (lock-on phase / pipeline stage), or the dwell after it.

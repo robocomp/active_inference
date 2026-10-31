@@ -35,6 +35,9 @@ struct DoorPassageStatus
     std::string step_state;
     int attempts = 0;
     std::string last_event;
+    /// The crossing, in the numbers it acts on (ControllerSession::cross_status_): what it steers on and where that is,
+    /// the anchor's own reading beside a measured gap, and whatever keeps it from advancing. Empty off the Cross step.
+    std::string cross;
 };
 
 class StatusLine : public QPlainTextEdit
