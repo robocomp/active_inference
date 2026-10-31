@@ -95,6 +95,9 @@ int main()
         const auto re = read_card(empty, "door", root, &fg);
         CHECK(re and not fg and re->calibration == "fitted");
         CHECK(not read_card(empty, "nothing", root, &fg).has_value());
+        std::size_t ng = 9;
+        const auto all2 = read_all_cards(g, root, &ng);             // door from the graph, bottle from its file
+        CHECK(ng == 1 and all2.size() == 2 and all2[0].concept_ == "bottle" and all2[1].calibration == "other");
     }
 
     fs::remove_all(root);

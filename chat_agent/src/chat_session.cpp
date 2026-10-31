@@ -1085,18 +1085,21 @@ QString ChatSession::answer_query(const QString& name, const QJsonObject& args)
 
 namespace
 {
-/// The cards are the concept agents' files (the perception_card graph attribute is not installed yet): re-read once per
-/// call, from the active_inference root as canvas_model.cpp has it (assets_root: two levels above the binary's directory);
-/// the cwd's parent when that holds no cards (started from chat_agent/ by the fleet scripts). `root` ends as the one used.
-std::vector<rc::card::Card> load_cards(std::filesystem::path& root)
+/// The cards: the concept agents publish them into their agent node's perception_card attribute (read first, main
+/// thread), and mirror them to etc/perception_card.json (the fallback for an agent that is down or older). Re-read once per
+/// call; the files from the active_inference root as canvas_model.cpp has it (assets_root: two levels above the binary's
+/// directory), else the cwd's parent when that holds no cards (started from chat_agent/ by the fleet scripts). `root` ends
+/// as the one used; `looked_in` is what an empty answer says was searched ("the graph and <root>").
+std::vector<rc::card::Card> load_cards(DSR::DSRGraph& G, std::filesystem::path& root, std::string& looked_in)
 {
     namespace fs = std::filesystem;
     std::error_code ec;
     root = rc::chat::assets_root();
-    auto cards = rc::card::read_all_cards(root);
+    auto cards = rc::card::read_all_cards(G, root);
     if (cards.empty())
         if (const fs::path alt = fs::current_path(ec).parent_path(); alt != root)
-            if (auto c2 = rc::card::read_all_cards(alt); not c2.empty()) { cards = std::move(c2); root = alt; }
+            if (auto c2 = rc::card::read_all_cards(G, alt); not c2.empty()) { cards = std::move(c2); root = alt; }
+    looked_in = "the graph and " + root.string();
     return cards;
 }
 }   // namespace
@@ -1104,7 +1107,8 @@ std::vector<rc::card::Card> load_cards(std::filesystem::path& root)
 QString ChatSession::do_can_see(const QJsonObject& args)
 {
     std::filesystem::path root;
-    auto cards = load_cards(root);
+    std::string looked_in;
+    auto cards = load_cards(*G_, root, looked_in);
     const bool any_cards = not cards.empty();
 
     const std::string what = rc::chat::canonical_concept(args.value("concept").toString().toStdString());
@@ -1119,7 +1123,7 @@ QString ChatSession::do_can_see(const QJsonObject& args)
     if (not stand and not scene.room.empty() and rc::chat::is_hypothetical(scene, what, where))
     {
         const auto c = std::ranges::find(cards, what, &rc::card::Card::concept_);
-        if (c == cards.end()) return q(rc::chat::answer_no_card(any_cards, root.string()));
+        if (c == cards.end()) return q(rc::chat::answer_no_card(any_cards, looked_in));
         return q(rc::chat::can_see_hypothetical_reply(*c, scene, what, where, from));
     }
 
@@ -1129,7 +1133,7 @@ QString ChatSession::do_can_see(const QJsonObject& args)
         cls = rc::chat::canonical_concept(it->subtype);
     std::optional<rc::card::Card> card;
     if (const auto c = std::ranges::find(cards, cls, &rc::card::Card::concept_); c != cards.end()) card = *c;
-    if (not card.has_value()) return q(rc::chat::answer_no_card(any_cards, root.string()));
+    if (not card.has_value()) return q(rc::chat::answer_no_card(any_cards, looked_in));
     if (scene.room.empty()) return QStringLiteral("I do not know which room I am in, so I cannot judge what I can see.");
 
     const auto target = rc::chat::resolve_target(scene, what, where, card);
@@ -1142,7 +1146,8 @@ QString ChatSession::do_can_see(const QJsonObject& args)
 QString ChatSession::do_imagine_view(const QJsonObject& args)
 {
     std::filesystem::path root;
-    auto cards = load_cards(root);
+    std::string looked_in;
+    auto cards = load_cards(*G_, root, looked_in);
     rc::chat::ImagineRequest rq;
     rq.concept_ = rc::chat::canonical_concept(args.value("concept").toString().toStdString());
     rq.where = args.value("where").toString().trimmed().toStdString();
@@ -1180,7 +1185,7 @@ QString ChatSession::do_imagine_view(const QJsonObject& args)
     };
 
     const auto card = std::ranges::find(cards, rq.concept_, &rc::card::Card::concept_);
-    if (card == cards.end()) return with_notes(q(rc::chat::answer_no_card(not cards.empty(), root.string())));
+    if (card == cards.end()) return with_notes(q(rc::chat::answer_no_card(not cards.empty(), looked_in)));
     const auto scene = rc::chat::build_see_scene(*G_, *inner_, digest_);
     if (scene.room.empty()) return with_notes(QStringLiteral("I do not know which room I am in, so I cannot imagine it here."));
 

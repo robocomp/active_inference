@@ -128,4 +128,24 @@ std::optional<Card> read_card(G& graph, std::string_view concept_name, const std
     }
     return read_card_file(root / (std::string(concept_name) + "_concept"));
 }
+
+// Every concept's card: the graph's agent nodes first, then the files for the concepts the graph did not give.
+// Sorted by concept name. `n_graph` (optional) = how many came from the graph.
+template <class G>
+std::vector<Card> read_all_cards(G& graph, const std::filesystem::path& root, std::size_t* n_graph = nullptr)
+{
+    std::vector<Card> out;
+    for (const auto& n : graph.get_nodes_by_type("agent"))
+    {
+        const auto it = n.attrs().find("perception_card");
+        if (it == n.attrs().end()) continue;
+        if (auto r = card_from_json(it->second.str()))
+            if (std::ranges::find(out, r->concept_, &Card::concept_) == out.end()) out.push_back(std::move(*r));
+    }
+    if (n_graph) *n_graph = out.size();
+    for (auto& c : read_all_cards(root))
+        if (std::ranges::find(out, c.concept_, &Card::concept_) == out.end()) out.push_back(std::move(c));
+    std::ranges::sort(out, {}, &Card::concept_);
+    return out;
+}
 }
