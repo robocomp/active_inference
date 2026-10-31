@@ -261,11 +261,15 @@ def main():
     for t, kind, room, nm, w in changes:
         print(f"  t={t}  {kind:7s} -> {nm:10s} by {ag(w)}")
     # C1/C2 churn: the same recall re-posted, the same proposal rejected, again and again (proto15: every 3 s)
-    rc_by = collections.Counter(n for _, n in extra['recall_ins'])
-    for n, c in sorted(rc_by.items()):
+    # Counted per STAY in a room (between room_concept's RT switches): ltsm re-posts a recall once per entry by design
+    # (pingpong8: recall_room_1 once per entry into room_2, 3 entries = 3 posts, flagged as churn).
+    sw = sorted(t for t, kind, room, nm, w in changes if kind == 'RT')
+    stay = lambda t: sum(1 for x in sw if x <= t)
+    rc_by = collections.Counter((n, stay(t)) for t, n in extra['recall_ins'])
+    for (n, k), c in sorted(rc_by.items()):
         if c >= 3:
-            ts = [t for t, m in extra['recall_ins'] if m == n]
-            viol['C1 recall-churn'].append(f"{n} inserted {c} times between t={ts[0]} and t={ts[-1]} "
+            ts = [t for t, m in extra['recall_ins'] if m == n and stay(t) == k]
+            viol['C1 recall-churn'].append(f"{n} inserted {c} times in one room stay between t={ts[0]} and t={ts[-1]} "
                                            f"({(ts[-1] - ts[0]) / 1000:.0f} s)")
     rej = [x for x in extra['proposal'] if x[2] == 'rejected']
     by = collections.Counter(n for _, n, _, _ in rej)
