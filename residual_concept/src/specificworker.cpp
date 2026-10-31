@@ -11,6 +11,7 @@
 
 #include "../../common/config_report/config_read.h"   // rc::cfg::Reader (SHARED)
 #include "../../common/room_resolve/room_resolve.h"   // rc::room::current_room (proto-aware, deterministic)
+#include "../../common/media_transport/media_transport.h"   // sensor_model_from_graph, mean_ring_spacing_rad
 #include "../../common/interaction_anchor/interaction_anchor.h"   // rc::interaction::is_anchor (header-inline: no link change)
 
 #include <cstdlib>
@@ -194,6 +195,18 @@ void SpecificWorker::initialize()
 
     QObject::connect(QCoreApplication::instance(), &QCoreApplication::aboutToQuit,
                      this, &SpecificWorker::terminal_shutdown, Qt::UniqueConnection);
+
+    // Beam spacing is a property of the sensor, so take it from the model the driver advertised when there is one
+    // and keep the config value (a datasheet constant) otherwise. Before scene_graph_/ingestors copy cfg_.
+    const auto beam_spacing = [this](const char* node, float& spacing)
+    {
+        const auto model = rc::media::sensor_model_from_graph(*G, node);
+        const auto s = model ? rc::media::mean_ring_spacing_rad(*model) : std::nullopt;
+        if (s.has_value()) spacing = *s;
+        std::print("[LidarModel] {} beam spacing {:.4f} rad from {}\n", node, spacing, s.has_value() ? "descriptor" : "config");
+    };
+    beam_spacing("helios", cfg_.helios_beam_spacing_rad);
+    beam_spacing("bpearl", cfg_.bpearl_beam_spacing_rad);
 
     rt_api_       = G->get_rt_api();
     inner_eigen_  = G->get_inner_eigen_api();
