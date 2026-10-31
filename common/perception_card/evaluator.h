@@ -13,7 +13,7 @@
 #pragma once
 
 #include "nbv/viewpoint_score.h"
-#include "media_transport.h"       // rc::media::SensorModel -- a plain struct (FastDDS IDL types only, no DSR)
+#include "media_transport/sensor_model.h"   // rc::media::SensorModel -- DDS-free (factored out of media_transport.h)
 #include "perception_card/card.h"
 #include "perception_card/terms.h"
 
@@ -21,7 +21,6 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
-#include <limits>
 #include <numbers>
 #include <optional>
 #include <string>
@@ -54,14 +53,15 @@ struct Hypothesis
 struct Viewpoint { Eigen::Vector2f xy{0, 0}; std::optional<float> yaw; };   // nullopt = best heading: face the target centre
 
 enum class Limit { None, OutOfView, BehindWall, Occluded, TooSmall, TooClose, EdgeOn, BetweenRings, BelowFan,
-                   AboveFan, DeadZone, NotModelled, Inside };
+                   AboveFan, DeadZone, NotModelled, Inside, Range };
 
 struct ChannelResult
 {
     std::string sensor;
     float p = 0;
-    Limit limit = Limit::None;
-    std::string occluder;                // name of the obstacle whose removal helps most; only when limit == Occluded
+    Limit limit = Limit::None;           // the factor whose removal raises P most; None only when no factor would help at all
+    float limit_gain = 0;                // P with that factor removed (set to 1) minus P: the consumer decides whether to show it
+    std::string occluder;                // name of the obstacle whose removal raises visibility most (empty if none does)
     std::vector<std::string> notes;      // e.g. "walls unknown"
 };
 
@@ -115,12 +115,13 @@ inline ChannelResult evaluate_camera(const Card& card, const World& world, const
 
     if (nbv::stands_inside(from, objs))
     {
-        out.limit = Limit::Inside; out.p = 0.0f;
+        out.limit = Limit::Inside; out.limit_gain = 1.0f; out.p = 0.0f;
         return out;
     }
 
     // Card factors beyond the envelope. leaf_obliquity needs phi; the others are neutral for a hypothetical.
     const bool articulated = card.level == Level::Articulated;
+    const bool mass = card.level == Level::Mass;
     if (articulated and not h.phi) out.notes.push_back("phi unknown: leaf taken closed");
     const float phi = h.phi.value_or(0.0f);
     const auto card_factors = [&](const nbv::Target& tt) -> std::pair<float, float>   // {obliquity, rest}
@@ -145,9 +146,10 @@ inline ChannelResult evaluate_camera(const Card& card, const World& world, const
 
     const auto p_at = [&](const nbv::Target& tt)
     {
-        const auto [fmax, fmin] = nbv::predicted_fill_axes(tt, from, sensor, yaw);
         const float v = nbv::visible_fraction(tt, from, yaw, sensor, all);
         const auto [fo, fr] = card_factors(tt);
+        if (mass) return v * fo * fr;                      // spec §2: a mass is COVERAGE only, no detector envelope
+        const auto [fmax, fmin] = nbv::predicted_fill_axes(tt, from, sensor, yaw);
         return nbv::expected_p_detect(fmax, fmin, nbv::predicted_fill_sigma(tt, from, sensor), v, sensor.env) * fo * fr;
     };
 
@@ -163,7 +165,7 @@ inline ChannelResult evaluate_camera(const Card& card, const World& world, const
             sigma = eval_term(*m, in);
         }
     }
-    if (sigma > 1e-4f)
+    if (sigma > 1e-4f)   // numerical guard only: below 0.1 mm the 25-node quadrature collapses onto one point
     {
         float acc = 0.0f;
         for (std::size_t i = 0; i < nbv::detail::kGHx.size(); ++i)
@@ -177,6 +179,7 @@ inline ChannelResult evaluate_camera(const Card& card, const World& world, const
         out.p = std::clamp(acc, 0.0f, 1.0f);
     }
     else out.p = std::clamp(p_at(t), 0.0f, 1.0f);
+    if (not std::isfinite(out.p)) out.p = 0.0f;       // never hand a NaN to a planner
 
     // ── the limiting factor: the one whose REMOVAL would raise P the most (leave-one-out, as for the occluder) ───
     // Evaluated at the nominal position. Order-free, unlike peeling factors one by one (which hands everything to
@@ -189,7 +192,7 @@ inline ChannelResult evaluate_camera(const Card& card, const World& world, const
     const float v_no_wall = nbv::visible_fraction(t, from, yaw, sensor, objs);
     const float v_no_obj  = nbv::visible_fraction(t, from, yaw, sensor, walls);
     const auto [f_obl, f_rest] = card_factors(t);
-    const auto env_p = [&](float v) { return nbv::expected_p_detect(fmax, fmin, sig_fill, v, sensor.env); };
+    const auto env_p = [&](float v) { return mass ? v : nbv::expected_p_detect(fmax, fmin, sig_fill, v, sensor.env); };
     const float now = env_p(v_all) * f_obl * f_rest;
 
     Limit env_label = fmax > nbv::framing_fill(sensor) ? Limit::TooClose : Limit::TooSmall;
@@ -199,19 +202,19 @@ inline ChannelResult evaluate_camera(const Card& card, const World& world, const
         {env_p(v_no_wall) * f_obl * f_rest - now,      Limit::BehindWall},
         {env_p(v_no_obj) * f_obl * f_rest - now,       Limit::Occluded},
         {env_p(v_all) * f_rest - now,                  Limit::EdgeOn},        // f_obl -> 1
-        {env_p(v_all) * f_obl - now,                   Limit::TooSmall}}};    // the other card terms (range_conf)
-    if (not std::isfinite(fmax))        // a corner at / behind the image plane: standing on it, or looking away
+        {env_p(v_all) * f_obl - now,                   Limit::Range}}};      // the other card terms (range_conf)
+    if (not mass and not std::isfinite(fmax))   // a corner at / behind the image plane: standing on it, or looking away
     {
         const float bear = std::abs(std::remainder(std::atan2(to_obj.y(), to_obj.x()) - yaw, 2.0f * std::numbers::pi_v<float>));
-        gains = {{{1.0f, bear <= 0.5f * sensor.hfov_rad ? Limit::TooClose : Limit::OutOfView}}};
+        const bool ahead = to_obj.norm() < 1e-3f or bear <= 0.5f * sensor.hfov_rad;   // standing on it counts as too close
+        gains = {{{1.0f, ahead ? Limit::TooClose : Limit::OutOfView}}};
     }
     const auto best = std::ranges::max_element(gains, {}, &std::pair<float, Limit>::first);
-    // ★ A REPORTING cut, not a model term: P is never touched. "Limit" explains a miss, so there is none to name
-    // while detection is at least as likely as not (p >= 1/2), or when no single fix would help.
-    out.limit = (out.p >= 0.5f or best->first <= 1e-6f) ? Limit::None : best->second;
+    out.limit = best->first > 0.0f ? best->second : Limit::None;
+    out.limit_gain = best->first > 0.0f ? best->first : 0.0f;
 
     // ── occluder by leave-one-out: the obstacle whose removal raises visible_fraction the most ───────────────────
-    if (out.limit == Limit::Occluded)
+    if (v_no_obj - v_all > 0.0f)       // some obstacle costs visibility: name the worst, whatever the label says
     {
         float best_gain = 0.0f;
         for (std::size_t k = 0; k < world.obstacles.size(); ++k)
