@@ -3282,11 +3282,7 @@ bool ControllerSession::build_door_route(const ControllerRobotPose &robot_pose, 
     // ★The hole the robot PERCEIVES (its interaction anchor) is the axis when there is one (door_route.h).
     const auto seen = perceived_door(leg.door, robot_pose);
     door_route_anchor_id_ = seen.has_value() ? seen->anchor_id : 0;
-    // ★ With the servo the route ends AT THE VANTAGE facing the door, whatever the leg (pingpong6/8/10/19: "no free point
-    //   past the door on its axis" failed passages whose P_post the servo would never have driven to): the servo takes the
-    //   hole from the vantage (the open-door gate above), so no point past the door is planned or needed.
-    const bool route_through = leg.through and not door_cross_servo_;
-    const auto plan = rc::door_route::plan(appr, cross, passage_door_centre_, robot_pose.pos, route_through, prm,
+    const auto plan = rc::door_route::plan(appr, cross, passage_door_centre_, robot_pose.pos, leg.through, prm,
                                            [this](const Eigen::Vector2f &p, float h) { return grid_planner_.pose_free(p, h); },
                                            seen.has_value() ? std::optional<rc::door_route::Axis>(seen->axis) : std::nullopt);
     if (not plan.why.empty())
@@ -3294,15 +3290,6 @@ bool ControllerSession::build_door_route(const ControllerRobotPose &robot_pose, 
         std::println("[door-route] {}: cannot place the route: {}", leg.door, plan.why);
         door_passage_.note_route(leg.key, rc::DoorPassage::RouteReport::Failed, plan.why);
         return false;
-    }
-    if (plan.waypoints.empty() and plan.pre_omitted and leg.through and door_cross_servo_)
-    {
-        // nearer the hole than any vantage on a servo leg: nothing to drive, the servo's gate decides (no Arrived: on a
-        // through leg that would be the crossing fact)
-        std::println("[door-route] {}: the robot stands nearer the hole than any vantage — waiting for the servo's gate", leg.door);
-        door_route_active_ = true;   // a leg that needs no route: keep the leg, drive nothing
-        door_route_installed_ = true;
-        return true;
     }
     if (plan.waypoints.empty() and plan.pre_omitted)
     {
@@ -3507,9 +3494,7 @@ bool ControllerSession::drive_door_route(const ControllerPlanningStep &step, rc:
             const bool first = door_route_anchor_id_ != seen->anchor_id;
             // Once any part of the body is in the opening (s > −r_body) the route is not rebuilt on it: a route from inside
             // the doorway is what failed in pingpong3; the installed one already carries the body through.
-            // (a servo leg's route ends at the vantage and never passes through the opening: only the first anchor rebuilds it)
-            if (not door_route_body_in_opening_
-                and (first or (not door_cross_servo_ and not rc::band_cross_route_passes(door_route_.path(), seen->gap, half_w))))
+            if (not door_route_body_in_opening_ and (first or not rc::band_cross_route_passes(door_route_.path(), seen->gap, half_w)))
             {
                 std::println("[door-route] {}: rebuilt on the perceived opening of {} ({})", leg.door, seen->name,
                              first ? "the anchor is up" : "the route no longer passes through it as measured");
@@ -7246,13 +7231,7 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
         {
             std::println("[door-route] {}: the route's end reached ({:.2f} of {:.2f} m)", door_route_leg_->door, door_route_.progress(),
                          door_route_.length());
-            // On a servo leg the route ends at the vantage: arriving there is NOT the crossing (on a through leg Arrived would
-            // write link 1). The servo's open-door gate takes it on from here.
-            if (not (door_cross_servo_ and door_route_leg_->through))
-                door_passage_.note_route(door_route_leg_->key, rc::DoorPassage::RouteReport::Arrived);
-            else
-                std::println("[door-route] {}: at the vantage — the servo takes the hole once in front of the open door",
-                             door_route_leg_->door);
+            door_passage_.note_route(door_route_leg_->key, rc::DoorPassage::RouteReport::Arrived);
             door_route_active_ = false;
             door_route_installed_ = false;
             path_controller.stop();
