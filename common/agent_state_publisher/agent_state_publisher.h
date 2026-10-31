@@ -41,6 +41,7 @@
 #include <string>
 
 #include "agent_status.h"
+#include "../perception_card/card_io.h"
 
 namespace rc
 {
@@ -110,6 +111,15 @@ public:
         publish();
     }
 
+    // This agent's perception card, mirrored into the perception_card attribute of its own agent node
+    // (main thread; the 1 s re-assert tick retries until the lazily created node exists, and rewrites only on a
+    // change). Relative blind-spot paths are resolved against the cwd = the agent dir, as write_card_file does.
+    void set_card(const rc::card::Card &card)
+    {
+        card_ = rc::card::with_absolute_paths(std::filesystem::current_path(), card);
+        publish();
+    }
+
     void stop()
     {
         if (reassert_timer_)
@@ -156,10 +166,13 @@ private:
         }
         if (dirty)
             graph_->update_node(n);
+        if (card_.has_value())
+            rc::card::publish_card<perception_card_att>(*graph_, n.id(), *card_);
     }
 
     std::shared_ptr<DSR::DSRGraph> graph_;
     std::string node_name_;
+    std::optional<rc::card::Card> card_;
     agent_status::Fsm fsm_ = agent_status::Fsm::Unknown;
     agent_status::Presence presence_ = agent_status::Presence::Unknown;
     std::unique_ptr<QTimer> reassert_timer_;

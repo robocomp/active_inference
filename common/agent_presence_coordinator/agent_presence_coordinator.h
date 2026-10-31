@@ -82,6 +82,7 @@ public:
     // stream must be visible fleet-wide (Emergency -> Bad -> red node) WITHOUT the teardown that a
     // Degraded presence transition triggers — the stream may come back, and killing the agent for a
     // transient media flap is the failure this codebase already learned to debounce.
+    void publish_card(const rc::card::Card &c) { state_publisher_.set_card(c); }   // own agent node, main thread
     void publish_fsm(rc::agent_status::Fsm f) { state_publisher_.set_fsm(f); }
 
     [[nodiscard]] AgentPresenceMonitor *monitor() const { return presence_monitor_.get(); }

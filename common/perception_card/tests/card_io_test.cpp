@@ -3,11 +3,27 @@
 #include <clocale>
 #include <cstdio>
 #include <fstream>
+#include <map>
 
 static int bad = 0;
 #define CHECK(c) do { if (not (c)) { std::printf("FAIL line %d: %s\n", __LINE__, #c); ++bad; } } while (0)
 using namespace rc::card;
 namespace fs = std::filesystem;
+
+// Stub graph: one "agent" node with a string attribute map, counting writes.
+struct StubAttr { std::string v; const std::string& str() const { return v; } };
+struct StubNode { std::uint64_t id_ = 7; std::map<std::string, StubAttr> a; const auto& attrs() const { return a; } };
+struct StubAtt {};
+struct StubGraph
+{
+    std::optional<StubNode> node; int writes = 0;
+    std::optional<StubNode> get_node(std::uint64_t id) { return (node and id == node->id_) ? node : std::nullopt; }
+    std::vector<StubNode> get_nodes_by_type(const std::string&) { return node ? std::vector{*node} : std::vector<StubNode>{}; }
+    template <class A> std::optional<std::string> get_attrib_by_name(const StubNode& n)
+    { auto it = n.a.find("perception_card"); return it == n.a.end() ? std::nullopt : std::optional(it->second.v); }
+    template <class A> void add_or_modify_attrib_local(StubNode& n, const std::string& s) { n.a["perception_card"].v = s; }
+    void update_node(const StubNode& n) { node = n; ++writes; }
+};
 
 static Card make(const std::string& name)
 {
@@ -61,6 +77,25 @@ int main()
     const auto all = read_all_cards(root);
     CHECK(all.size() == 2);
     CHECK(all.size() == 2 and all[0].concept_ == "bottle" and all[1].concept_ == "door");
+
+    { // graph publication: one write for two identical publishes; absent node -> false; read prefers the graph
+        StubGraph g;
+        CHECK(not publish_card<StubAtt>(g, 7, a) and g.writes == 0);
+        g.node = StubNode{};
+        CHECK(publish_card<StubAtt>(g, 7, a) and g.writes == 1);
+        CHECK(publish_card<StubAtt>(g, 7, a) and g.writes == 1);
+        Card a2 = a;  a2.calibration = "other";
+        CHECK(publish_card<StubAtt>(g, 7, a2) and g.writes == 2);
+        bool fg = false;
+        const auto rg = read_card(g, "door", root, &fg);
+        CHECK(rg and fg and rg->calibration == "other");
+        const auto rf = read_card(g, "bottle", root, &fg);          // not in the graph -> file
+        CHECK(rf and not fg and rf->concept_ == "bottle");
+        StubGraph empty;                                            // no attribute anywhere -> file fallback
+        const auto re = read_card(empty, "door", root, &fg);
+        CHECK(re and not fg and re->calibration == "fitted");
+        CHECK(not read_card(empty, "nothing", root, &fg).has_value());
+    }
 
     fs::remove_all(root);
     std::printf(bad ? "FAILED %d\n" : "card_io_test OK\n", bad);
