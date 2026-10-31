@@ -395,7 +395,7 @@ def ask_model(system, user, state=None):
     msgs = [{"role": "system", "content": system}, {"role": "system", "content": state or STATE_TEXT},
             {"role": "user", "content": planner_request(user)}]
     body = {"model": MODEL, "messages": msgs, "stream": False, "think": False, "keep_alive": "30m",
-            "options": {"temperature": 0, "num_ctx": 16384, "num_predict": NUM_PREDICT}}
+            "options": {"temperature": 0, "num_ctx": 131072, "num_predict": NUM_PREDICT}}
     if FORM == "json":
         body["format"] = SCHEMA
     req = urllib.request.Request(URL, json.dumps(body).encode(), {"Content-Type": "application/json"})

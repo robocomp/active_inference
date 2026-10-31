@@ -283,7 +283,7 @@ def state(last_move="none", extra=""):
 
 def ask(messages):
     body = {"model": MODEL, "messages": messages, "tools": tools(), "stream": False, "think": False,
-            "keep_alive": "30m", "options": {"temperature": 0.2, "num_ctx": 16384, "num_predict": NUM_PREDICT}}
+            "keep_alive": "30m", "options": {"temperature": 0.2, "num_ctx": 131072, "num_predict": NUM_PREDICT}}
     req = urllib.request.Request(URL, json.dumps(body).encode(), {"Content-Type": "application/json"})
     try:
         with urllib.request.urlopen(req, timeout=180) as r:
