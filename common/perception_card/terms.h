@@ -18,7 +18,8 @@
 //   resolvability     door_existence.h DoorSilhouette::resolvability           n_cells, n_detectable
 //   kappa             door_existence.cpp pose_overlap_factor (closed form)     RT covariance -> var_b, range
 //   coverage          the visible fraction, passed through
-//   motion            Task 3 (instance-level, not a view factor)
+//   motion            Task 3: animate position SPREAD (m) sigma^2 = sigma0^2 + k*seconds_unseen -- a spread, not a factor;
+//                     the evaluator marginalises over it (Gauss-Hermite), it is not multiplied in
 #pragma once
 
 #include "../detectability/detectability.h"
@@ -26,6 +27,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <numbers>
 
 namespace rc::card
@@ -90,6 +93,13 @@ inline float term_kappa(double var_b, double range, double half_diag_m)
 // The visible fraction, passed through.
 inline float term_coverage(float visible) { return visible; }
 
+// Animate objects drift while unseen: the position belief widens linearly in variance (a random walk), no clamp.
+// Returns the SPREAD (sigma, m). k is the card's "motion" parameter (m^2/s), sigma0 the spread at the last sighting.
+inline float term_motion(float sigma0, float k, float seconds_unseen)
+{
+    return std::sqrt(sigma0 * sigma0 + k * std::max(0.0f, seconds_unseen));
+}
+
 // The intermediate quantities a view produces; eval_term picks what each term needs.
 struct TermInputs
 {
@@ -101,6 +111,7 @@ struct TermInputs
     float obliquity = 1;                // cos of the ray vs the face normal (sign irrelevant)
     float resolvability = 1;            // distinct-cell fraction (a measurement the evaluator must supply)
     float kappa    = 1;                 // pose-overlap factor (likewise)
+    float seconds_unseen = 0;           // animate: time since last sighting
 };
 
 // Dispatch by name. Parameters come from spec.params: envelope {min_fill,max_fill,soft}; range_conf {ref_m,power}.
@@ -122,6 +133,10 @@ inline float eval_term(const TermSpec& s, const TermInputs& in)
     if (s.name == "resolvability")  return in.resolvability;
     if (s.name == "kappa")          return in.kappa;
     if (s.name == "coverage")       return term_coverage(in.visible);
-    return 1.0f;
+    if (s.name == "motion")         return term_motion(p("sigma0", 0.0f), p("k", 0.0f), in.seconds_unseen);
+    // A name outside kTermNames is a card bug (card_from_json already rejects it): refuse loudly rather than
+    // return a neutral 1.0 that would silently drop a factor from P(detect). (std::expected would churn every caller.)
+    std::fprintf(stderr, "eval_term: unknown term '%s' (not in kTermNames)\n", s.name.c_str());
+    std::abort();
 }
 }  // namespace rc::card

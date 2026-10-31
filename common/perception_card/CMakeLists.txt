@@ -17,3 +17,10 @@ add_test(NAME card_test COMMAND card_test)
 add_executable(terms_test tests/terms_test.cpp)
 target_include_directories(terms_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/.. ${CMAKE_CURRENT_SOURCE_DIR}/../media_transport)
 add_test(NAME terms_test COMMAND terms_test)
+
+# Needs Eigen (nbv/viewpoint_score.h) and the media_transport generated IDL headers (SensorModel's TU).
+find_package(Eigen3 REQUIRED)
+add_executable(evaluator_camera_test tests/evaluator_camera_test.cpp)
+target_include_directories(evaluator_camera_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/.. ${CMAKE_CURRENT_SOURCE_DIR}/../media_transport)
+target_link_libraries(evaluator_camera_test PRIVATE Eigen3::Eigen fastdds fastcdr)   # SensorModel lives in media_transport.h, whose IDL types need fastdds to link
+add_test(NAME evaluator_camera_test COMMAND evaluator_camera_test)

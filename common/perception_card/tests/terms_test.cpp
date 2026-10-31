@@ -1,11 +1,14 @@
 // Golden test for the closed term library. Every table below was PRINTED by a scratch harness that called the
 // agents' CURRENT (pre-move) code on 20 fixed input tuples per term; the terms must reproduce them to 1e-6.
 // Runs under the AGENT's locale:   LANG=es_ES.UTF-8 ./terms_test
+#include "perception_card/card.h"
 #include "perception_card/terms.h"
 #include <array>
 #include <clocale>
 #include <cmath>
 #include <cstdio>
+#include <sys/wait.h>
+#include <unistd.h>
 
 static int bad = 0;
 #define CHECK(c) do { if (not (c)) { std::printf("FAIL line %d: %s\n", __LINE__, #c); ++bad; } } while (0)
@@ -237,7 +240,24 @@ int main()
     CHECK(near(eval_term({"resolvability", {}}, in), 0.9f));
     CHECK(near(eval_term({"kappa", {}}, in), 0.4f));
     CHECK(near(eval_term({"coverage", {}}, in), 0.8f));
-    CHECK(near(eval_term({"motion", {}}, in), 1.0f));   // Task 3 supplies the real one; neutral until then
+    // motion: sigma^2 = sigma0^2 + k * seconds_unseen; eval_term returns the SPREAD (m), not a factor.
+    CHECK(near(term_motion(0.1f, 0.04f, 0.0f), 0.1f));
+    CHECK(near(term_motion(0.0f, 0.04f, 25.0f), 1.0f));
+    CHECK(near(term_motion(0.3f, 0.16f, 5.0f), std::sqrt(0.09f + 0.8f)));
+    in.seconds_unseen = 25.0f;
+    CHECK(near(eval_term({"motion", {{"sigma0", 0.0f}, {"k", 0.04f}}}, in), 1.0f));
+    CHECK(near(eval_term({"motion", {}}, in), 0.0f));   // no k, no sigma0: no spread
+
+    // every name the card may carry is handled (an unhandled one aborts, which would kill this process)
+    for (const char* n : kTermNames) { volatile float v = eval_term({n, {}}, in); (void) v; }
+    // ... and a name outside the list is REFUSED, not silently 1.0 (checked in a child: it aborts)
+    {
+        std::fflush(stdout);
+        const pid_t pid = fork();
+        if (pid == 0) { std::freopen("/dev/null", "w", stderr); (void) eval_term({"no_such_term", {}}, in); _exit(0); }
+        int st = 0; waitpid(pid, &st, 0);
+        CHECK(WIFSIGNALED(st) and WTERMSIG(st) == SIGABRT);
+    }
 
     if (bad) { std::printf("terms_test: %d FAILURES\n", bad); return 1; }
     std::printf("terms_test: ok\n");
