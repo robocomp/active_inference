@@ -230,12 +230,13 @@ inline ChannelResult evaluate_camera(const Card& card, const World& world, const
         in.range = (tt.centre() - from).norm();
         in.seconds_unseen = h.seconds_unseen;
         const Eigen::Vector2f r = tt.centre() - from;
-        const auto obl_at = [&](float phi)
+        const auto set_phi = [&](TermInputs& ti, float phi)
         {
-            in.phi = phi;
+            ti.phi = phi;
             const Eigen::Vector2f n = std::cos(phi) * tt.axis_y() + std::sin(phi) * tt.axis_x();   // leaf normal at phi
-            in.obliquity = r.norm() > 1e-6f ? n.dot(r / r.norm()) : 1.0f;
+            ti.obliquity = r.norm() > 1e-6f ? n.dot(r / r.norm()) : 1.0f;
         };
+        set_phi(in, h.phi.value_or(0.0f));                 // once, for every term of the loop
         float f_obl = 1.0f, f_rest = 1.0f;
         for (const TermSpec& s : sp.terms)
         {
@@ -244,17 +245,18 @@ inline ChannelResult evaluate_camera(const Card& card, const World& world, const
             if (s.name == "leaf_obliquity")
             {
                 if (not articulated) continue;
-                if (not marginal_phi) { obl_at(h.phi.value_or(0.0f)); f_obl *= eval_term(s, in); continue; }
+                if (not marginal_phi) { f_obl *= eval_term(s, in); continue; }
                 float acc = 0.0f;                          // mean over [0, phi_max]: weights sum to 2 on [-1, 1]
+                TermInputs q = in;
                 for (std::size_t i = 0; i < kGLx.size(); ++i)
                     for (const float sgn : {-1.0f, 1.0f})
                     {
-                        obl_at(0.5f * phi_max * (1.0f + sgn * kGLx[i]));
-                        acc += 0.5f * kGLw[i] * eval_term(s, in);
+                        set_phi(q, 0.5f * phi_max * (1.0f + sgn * kGLx[i]));
+                        acc += 0.5f * kGLw[i] * eval_term(s, q);
                     }
                 f_obl *= acc;
             }
-            else { obl_at(h.phi.value_or(0.0f)); f_rest *= eval_term(s, in); }
+            else f_rest *= eval_term(s, in);
         }
         return {f_obl, f_rest * f_inst};
     };

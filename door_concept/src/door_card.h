@@ -23,7 +23,8 @@ inline card::Card make_card(const DoorConfig& cfg)
     c.geometry = {cfg.door_prior_w_m, cfg.door_thickness_m, cfg.door_prior_h_m, 0.0f, cfg.door_prior_h_m};
     card::SubtypeParams sp;
     sp.env = {cfg.detect_min_fill, cfg.detect_max_fill, cfg.detect_soft};
-    sp.q_return = cfg.exist_detection_prob;
+    // q_return (per-beam LiDAR return probability) is left at its default 1.0: UNCALIBRATED for the door. The only door
+    // number nearby, Existence.DetectionProb, is a camera mask-pixel probability, a different quantity.
     // door_existence.cpp:1279: p_detect = envelope(roi_fill, visible = 1) * leaf_obliquity * resolvability * in_fov *
     // central * kappa. The envelope is the single-fill overload (axes = 1). The agent passes visible = 1 and applies
     // in_fov as its own factor; the evaluator folds visibility into the envelope's visible argument and skips in_fov,
