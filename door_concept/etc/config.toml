@@ -186,7 +186,7 @@ RtCovUpload = true          # upload the door pose covariance (rt_covariance_att
 RtCovScale = 1.0            # var = RtCovScale · Σ_ii; calibrate toward NEES≈1
 RtCovAddChain = true        # Part B: add the localization/chain cov J·Σ_chain·Jᵀ to the published RT cov
 # Interaction-anchor development instruments (final review I-4), both OFF by default. Neither flushes per row.
-AnchorFrameRecord = false   # etc/anchor_frames.bin: every measured anchor cycle for tests/replay_anchor_frames (~17 KB/frame, ≤ 200 MB/run)
+AnchorFrameRecord = true    # 2026-11-01 ON: replay the corridor-stub anchor fit (pingpong32 leg 3). etc/anchor_frames.bin: every measured anchor cycle for tests/replay_anchor_frames (~17 KB/frame, ≤ 200 MB/run)
 DecisionLog = false         # etc/door_decisions.bin: binary per-cycle decision log (decision_log.h), the reference for the DoorCore replay
 RecordInputs = false        # DoorCycleInput per compute() cycle (DCIN v1, input_snapshot.h): the tape the DoorCore replay runs over
 RecordInputsPath = "etc/door_inputs.bin"   # rotated per run (3 previous kept)
