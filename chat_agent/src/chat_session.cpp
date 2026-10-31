@@ -638,7 +638,7 @@ QJsonArray ChatSession::tools_json() const
         "(where_is) nor to go somewhere.",
         QJsonObject{{"concept", QJsonObject{{"type", "string"},
                                             {"description", "what to see, in English singular (fridge, table, chair, "
-                                                            "bottle, cabinet, hood, door)"}}},
+                                                            "bottle, cabinet, hood)"}}},
                     {"where", QJsonObject{{"type", "string"},
                                           {"description", "a particular object by name (fridge_1); empty = the only one of "
                                                           "that class"}}},
@@ -1081,13 +1081,9 @@ QString ChatSession::do_can_see(const QJsonObject& args)
 
     const auto target = rc::chat::resolve_target(scene, what, where, card);
     if (not target.has_value()) return q(target.error());
-    if (stand)   // doors of unknown state sit at their expected opening here (the stand search is ~100 evaluations)
-        return q(rc::chat::answer_where_to_stand(card, target->label,
-                                                 rc::card::where_to_stand(*card, rc::chat::world_for(scene, target->name), target->h, 3),
-                                                 rc::chat::landmarks_of(scene)));
-    const auto vp = rc::chat::resolve_from(scene, from);
-    if (not vp.has_value()) return q(vp.error());
-    return q(rc::chat::answer_can_see(card, target->label, from, rc::chat::evaluate_scene(*card, scene, *target, *vp)));
+    if (stand)   // doors of unknown state at their MOST PROBABLE state (R12), never an average slit
+        return q(rc::chat::where_to_stand_reply(*card, scene, *target));
+    return q(rc::chat::can_see_reply(*card, scene, *target, from));   // "from here" = current heading + "if I turn" (R11)
 }
 
 std::optional<rc::chat::Topology> ChatSession::remembered_topology() const

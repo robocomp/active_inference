@@ -46,11 +46,26 @@ struct SeeDoor
 
 struct SeeObject
 {
-    std::string name, subtype;
+    std::string name, subtype;             ///< subtype = object_subtype, the CLASS (chair, table, refrigerator ...)
+    std::string shape;                     ///< obj_shape ("round" | "square" for a table): the card's subtype key
     float x = 0, y = 0, yaw = 0;           ///< room frame
+    std::optional<float> z_origin;         ///< room -> object RT translation z (nullopt: not read)
+    bool origin_is_centre = false;         ///< the node origin is the object's CENTRE (bottle), not its base
     std::optional<float> w, d, h;          ///< published sizes (metres)
     std::optional<Eigen::Vector2f> standoff;   ///< where the robot stands to look at / approach it
 };
+
+/// The robot's body clearance: rc::card::where_to_stand's kRobotRadiusM (evaluator.h, function-local there).
+inline constexpr float kRobotRadiusM = 0.30f;
+
+/// The base height of an object from its RT translation z. Every concept agent's node origin is the object's BASE
+/// (table / refrigerator / chair *_scene_graph.cpp: z = 0; cabinet: its carcass z0; hood: its body's underside), except
+/// the bottle, whose origin is the cylinder CENTRE (bottle_scene_graph.cpp:293 publishes s.cz = table_top + h/2).
+[[nodiscard]] inline float object_base_z(const SeeObject& o, float height)
+{
+    const float z = o.z_origin.value_or(0.0f);
+    return o.origin_is_centre ? z - 0.5f * height : z;
+}
 
 /// Everything the evaluator needs from the graph, as plain data.
 struct SeeScene
@@ -60,7 +75,7 @@ struct SeeScene
     std::vector<SeeDoor> doors;
     std::vector<SeeObject> objects;        ///< current room only
     std::optional<Eigen::Vector2f> robot_xy;
-    float robot_yaw = 0;
+    float robot_yaw = 0;                   ///< the BODY x axis' room bearing; Shadow faces body +y, i.e. robot_yaw + pi/2
     std::optional<rc::nbv::Sensor> zed;
     float zed_mount_z = 0;
     std::optional<rc::card::LidarRig> helios, bpearl;
@@ -104,30 +119,48 @@ inline constexpr float kSentinelFree = 0.0f;        // door_phi_rad / door_open_
 
 [[nodiscard]] inline bool door_uncertain(const SeeDoor& d) { return door_states(d).size() > 1; }
 
-/// The expected half-gap (the door "at its expected state").
-[[nodiscard]] inline float door_half_gap(const SeeDoor& d)
+/// A door at its MOST PROBABLE state (ruling R12), never an average slit: visibility is not linear in the aperture, so
+/// the mean half-gap of an uncertain door is a state the door is never in. phi measured -> its gap; P(open) measured ->
+/// shut when P(open) < 0.5, else open at pi/2; both unmeasured -> shut (a door is shut until something says otherwise);
+/// no width -> open at the nominal width (as door_states).
+[[nodiscard]] inline float door_probable_half_gap(const SeeDoor& d)
 {
-    float g = 0;
-    for (const auto& st : door_states(d)) g += st.weight * st.half_gap;
-    return g;
+    if (d.width_m <= 0 or not door_uncertain(d)) return door_states(d).front().half_gap;
+    if (d.p_open.has_value() and *d.p_open >= kSentinelFree and *d.p_open >= 0.5f) return 0.5f * d.width_m;
+    return 0.0f;
+}
+
+/// The note naming that assumption for one door ("" when there is nothing to assume).
+[[nodiscard]] inline std::string door_probable_note(const SeeDoor& d)
+{
+    if (d.width_m <= 0)
+        return std::format("assumption: {}: width unknown, taken as open at a nominal {:.1f} m", d.name, kNominalDoorWidthM);
+    if (not door_uncertain(d)) return {};
+    if (d.p_open.has_value() and *d.p_open >= kSentinelFree)
+        return std::format("assumption: {}: leaf angle unmeasured, taken at its most probable state, {} (P open {:.2f})", d.name,
+                           *d.p_open >= 0.5f ? "open" : "shut", *d.p_open);
+    return std::format("assumption: {}: leaf angle and P(open) unmeasured, taken as shut", d.name);
 }
 
 /// The evaluator's World, without `exclude` (the target itself must not occlude itself). `half_gaps` (one per door)
-/// overrides each door's gap; null = every door at its expected state.
+/// overrides each door's gap; null = every door at its most probable state.
+/// Obstacles stand at their REAL height: base from the RT z (object_base_z), top = base + height_m. With no height_m
+/// published the obstacle's height is unknown (z1 <= z0), which nbv reads as infinitely tall: the conservative side.
 [[nodiscard]] inline rc::card::World world_for(const SeeScene& s, const std::string& exclude,
                                                const std::vector<float>* half_gaps = nullptr)
 {
     rc::card::World w;
     w.polygon = s.polygon;
     for (std::size_t i = 0; i < s.doors.size(); ++i)
-        if (const float hg = half_gaps != nullptr ? (*half_gaps)[i] : door_half_gap(s.doors[i]); hg > 0)
+        if (const float hg = half_gaps != nullptr ? (*half_gaps)[i] : door_probable_half_gap(s.doors[i]); hg > 0)
             w.gaps.push_back({s.doors[i].xy, hg});
     for (const auto& o : s.objects)
     {
         if (o.name == exclude or not o.w.has_value() or not o.d.has_value()) continue;   // no size ⇒ not an occluder
         rc::nbv::Obstacle ob;
         ob.cx = o.x; ob.cy = o.y; ob.w = *o.w; ob.h = *o.d; ob.yaw = o.yaw;
-        ob.z0 = 0.0f; ob.z1 = o.h.value_or(0.0f);
+        ob.z0 = o.h ? object_base_z(o, *o.h) : o.z_origin.value_or(0.0f);
+        ob.z1 = o.h ? ob.z0 + *o.h : ob.z0;
         w.obstacles.emplace_back(o.name, ob);
     }
     w.zed = s.zed;
@@ -154,8 +187,8 @@ struct Target
 
 namespace see_detail
 {
-/// Where the door's span lies: centre ± w/2 along the nearest polygon edge. Does the sight segment a->b cross it?
-inline bool door_on_sight_line(const SeeScene& s, const SeeDoor& d, const Eigen::Vector2f& a, const Eigen::Vector2f& b)
+/// The unit direction of the polygon edge nearest the door (the wall it is cut in), walked in the polygon's order.
+inline Eigen::Vector2f door_wall_dir(const SeeScene& s, const SeeDoor& d)
 {
     Eigen::Vector2f dir(1, 0);
     float best = std::numeric_limits<float>::max();
@@ -169,6 +202,32 @@ inline bool door_on_sight_line(const SeeScene& s, const SeeDoor& d, const Eigen:
         const float dist = (d.xy - (p + t * e)).norm();
         if (dist < best) { best = dist; dir = e.normalized(); }
     }
+    return dir;
+}
+
+/// Where the robot looks "from door_X": the door centre lies ON the polygon edge, where inside/outside is a coin toss
+/// (half the doors were refused as "outside the room"), so step inward along the wall normal, toward the current room,
+/// by the robot's body radius: the closest the robot's centre can be to that wall. Inward = the interior side of the
+/// edge, from the polygon's orientation (left of each edge for a counter-clockwise polygon).
+inline Eigen::Vector2f door_viewpoint(const SeeScene& s, const SeeDoor& d)
+{
+    if (s.polygon.size() < 3) return d.xy;
+    float area2 = 0.0f;
+    for (std::size_t i = 0; i < s.polygon.size(); ++i)
+    {
+        const Eigen::Vector2f& p = s.polygon[i];
+        const Eigen::Vector2f& q = s.polygon[(i + 1) % s.polygon.size()];
+        area2 += p.x() * q.y() - q.x() * p.y();
+    }
+    const Eigen::Vector2f dir = door_wall_dir(s, d);
+    const Eigen::Vector2f left(-dir.y(), dir.x());
+    return d.xy + (area2 >= 0.0f ? left : Eigen::Vector2f(-left)) * kRobotRadiusM;
+}
+
+/// Where the door's span lies: centre ± w/2 along the nearest polygon edge. Does the sight segment a->b cross it?
+inline bool door_on_sight_line(const SeeScene& s, const SeeDoor& d, const Eigen::Vector2f& a, const Eigen::Vector2f& b)
+{
+    const Eigen::Vector2f dir = door_wall_dir(s, d);
     const float hw = 0.5f * (d.width_m > 0 ? d.width_m : kNominalDoorWidthM);
     const Eigen::Vector2f c = d.xy - dir * hw, e = d.xy + dir * hw;
     const auto cross = [](const Eigen::Vector2f& u, const Eigen::Vector2f& v) { return u.x() * v.y() - u.y() * v.x(); };
@@ -182,8 +241,9 @@ inline bool door_on_sight_line(const SeeScene& s, const SeeDoor& d, const Eigen:
 
 /// evaluate() with the doors' uncertainty marginalised (ruling R10): the doors whose span the sight line viewpoint ->
 /// target crosses and whose state is uncertain (at most 2, nearest the viewpoint first) are enumerated and the results
-/// mixed linearly (p_notice, p_recognise); every other door sits at its expected state. limit / occluder / channels
-/// come from the heaviest component.
+/// mixed linearly (p_notice, p_recognise); every other door sits at its most probable state (off the sight line it
+/// cannot change the answer, and R12 forbids an average slit). limit / occluder / channels come from the heaviest
+/// component. "Assumed" notes name only the doors actually mixed and the width-unknown ones.
 [[nodiscard]] inline rc::card::Result evaluate_scene(const rc::card::Card& card, const SeeScene& s, const Target& tg,
                                                      const rc::card::Viewpoint& vp)
 {
@@ -201,7 +261,7 @@ inline bool door_on_sight_line(const SeeScene& s, const SeeDoor& d, const Eigen:
         relevant = std::move(cand);
     }
     std::vector<float> gaps(s.doors.size());
-    for (std::size_t i = 0; i < s.doors.size(); ++i) gaps[i] = door_half_gap(s.doors[i]);
+    for (std::size_t i = 0; i < s.doors.size(); ++i) gaps[i] = door_probable_half_gap(s.doors[i]);
 
     std::vector<std::vector<DoorState>> opts;
     for (const auto i : relevant) opts.push_back(door_states(s.doors[i]));
@@ -230,16 +290,18 @@ inline bool door_on_sight_line(const SeeScene& s, const SeeDoor& d, const Eigen:
     mixed.limit = heaviest.limit; mixed.limit_gain = heaviest.limit_gain; mixed.occluder = heaviest.occluder;
     mixed.notes = std::move(heaviest.notes);
     for (const auto& d : s.doors)
-    {
         if (d.width_m <= 0)
             mixed.notes.push_back(std::format("assumption: {}: width unknown, taken as open at a nominal {:.1f} m", d.name, kNominalDoorWidthM));
-        else if (door_uncertain(d))
-            mixed.notes.push_back(d.p_open.has_value() and *d.p_open >= kSentinelFree
-                                      ? std::format("assumption: {}: leaf angle unmeasured, mixed over open (P {:.2f}) and shut", d.name, *d.p_open)
-                                      : std::format("assumption: {}: leaf angle and P(open) unmeasured, averaged over a uniform opening", d.name));
+    for (const auto i : relevant)
+    {
+        const auto& d = s.doors[i];
+        if (d.width_m <= 0) continue;            // already named above
+        mixed.notes.push_back(d.p_open.has_value() and *d.p_open >= kSentinelFree
+                                  ? std::format("assumption: {}: leaf angle unmeasured, mixed over open (P {:.2f}) and shut", d.name, *d.p_open)
+                                  : std::format("assumption: {}: leaf angle and P(open) unmeasured, averaged over a uniform opening", d.name));
     }
     if (dropped > 0)
-        mixed.notes.push_back(std::format("assumption: {} further uncertain door(s) on the sight line taken at their expected state", dropped));
+        mixed.notes.push_back(std::format("assumption: {} further uncertain door(s) on the sight line taken at their most probable state", dropped));
     return mixed;
 }
 
@@ -295,31 +357,43 @@ inline bool door_on_sight_line(const SeeScene& s, const SeeDoor& d, const Eigen:
     t.name = pick->name;
     t.label = pick->name;
     t.h.concept_ = canonical_concept(pick->subtype.empty() ? cls : pick->subtype);
+    // The card's subtype key for this instance: its obj_shape (table: round | square), else its object_subtype, when
+    // the card has an entry under that name; else "" (the card's default entry).
     t.h.subtype = "";
+    if (card)
+        for (const std::string* k : {&pick->shape, &pick->subtype})
+            if (not k->empty() and card->subtypes.contains(*k)) { t.h.subtype = *k; break; }
     t.h.x = pick->x; t.h.y = pick->y; t.h.yaw = pick->yaw;
-    if (pick->w.has_value() or pick->d.has_value() or pick->h.has_value())
+    // The object where it IS, at its real height: base from the RT z (object_base_z: bottle origin = its centre), top =
+    // base + height_m. Without a published height the card's own span is kept (its length, and its base when the pose
+    // gives none) -- so a hood keeps its hanging span and a bottle on a table stays on the table.
+    if (pick->w.has_value() or pick->d.has_value() or pick->h.has_value() or pick->z_origin.has_value())
     {
         rc::card::GeometryPrior g = card ? card->geometry : rc::card::GeometryPrior{};
         if (pick->w) g.w = *pick->w;
         if (pick->d) g.d = *pick->d;
-        if (pick->h) g.h = *pick->h;
-        g.z0 = 0.0f; g.z1 = g.h;
+        const float span = pick->h ? *pick->h : (g.z1 > g.z0 ? g.z1 - g.z0 : g.h);
+        g.h = span;
+        if (pick->z_origin) g.z0 = object_base_z(*pick, span);
+        g.z1 = g.z0 + span;
         t.h.size = g;
     }
     return t;
 }
 
-/// "" = from where the robot is; a door gives its centre; an object its standoff (else its centre); else ASK.
+/// "" = from where the robot is, at the heading it HAS (ruling R11: body yaw + pi/2, Shadow faces body +y); a door gives
+/// a point one robot radius inside the room from its centre (see_detail::door_viewpoint); an object its standoff (else
+/// its centre); else ASK. A named viewpoint takes best heading (yaw unset): the robot would arrive facing the target.
 [[nodiscard]] inline std::expected<rc::card::Viewpoint, std::string> resolve_from(const SeeScene& s, const std::string& from)
 {
     const std::string f = lower_ascii(from);
     if (f.empty() or f == "here" or f == "me" or f == "the robot")
     {
         if (not s.robot_xy.has_value()) return std::unexpected("I do not know where I am in this room right now.");
-        return rc::card::Viewpoint{*s.robot_xy, std::nullopt};
+        return rc::card::Viewpoint{*s.robot_xy, s.robot_yaw + std::numbers::pi_v<float> / 2.0f};
     }
     for (const auto& d : s.doors)
-        if (lower_ascii(d.name) == f) return rc::card::Viewpoint{d.xy, std::nullopt};
+        if (lower_ascii(d.name) == f) return rc::card::Viewpoint{see_detail::door_viewpoint(s, d), std::nullopt};
     for (const auto& o : s.objects)
         if (lower_ascii(o.name) == f) return rc::card::Viewpoint{o.standoff.value_or(Eigen::Vector2f(o.x, o.y)), std::nullopt};
     return std::unexpected("ASK: which place do you mean?");
@@ -385,6 +459,23 @@ inline const rc::card::ChannelResult* lead_channel(const rc::card::Result& r)
     return best;
 }
 
+/// Why an Inside result is infeasible, as the evaluator said it: the feasibility note evaluate() wrote ("viewpoint
+/// outside the room polygon", "viewpoint inside X", "target inside a wall"), not whatever note happens to come first.
+inline std::string inside_reason(const rc::card::Result& r)
+{
+    for (const auto& n : r.notes)
+        if (n.starts_with("viewpoint outside") or n.starts_with("viewpoint inside") or n.starts_with("target inside")) return n;
+    return limit_words(r.limit, r.occluder);
+}
+
+inline std::string assumed_words(const std::vector<std::string>& notes)
+{
+    std::string assumed;
+    for (const auto& n : notes)
+        if (n.starts_with("assumption: ")) assumed += (assumed.empty() ? "" : "; ") + n.substr(12);
+    return assumed.empty() ? std::string{} : " Assumed: " + assumed + ".";
+}
+
 inline std::string calibration_note(const rc::card::Card& c)
 {
     return c.calibration == "prior"
@@ -402,15 +493,18 @@ inline std::string calibration_note(const rc::card::Card& c)
 }
 
 /// The answer to "can you see <target> from <from>?". `card` nullopt = no agent published a card for the concept.
+/// `turned` (from here only): the same look at best heading; when its printed numbers differ and it is better, the
+/// answer adds what turning to face the target would give (ruling R11).
 [[nodiscard]] inline std::string answer_can_see(const std::optional<rc::card::Card>& card, const std::string& target,
-                                                const std::string& from_label, const rc::card::Result& r)
+                                                const std::string& from_label, const rc::card::Result& r,
+                                                const rc::card::Result* turned = nullptr)
 {
     using namespace see_detail;
     if (not card.has_value()) return "I have no detector for that.";
     const std::string at = from_label.empty() ? "from here" : "from " + from_label;
     if (r.limit == rc::card::Limit::Inside)
     {
-        const std::string why = r.notes.empty() ? limit_words(r.limit, r.occluder) : r.notes.front();
+        const std::string why = inside_reason(r);
         return std::format("I cannot judge {} {}: {}.{}", target, at, why, calibration_note(*card));
     }
     const auto* lead = lead_channel(r);
@@ -430,12 +524,26 @@ inline std::string calibration_note(const rc::card::Card& c)
     const std::string occ = lead->occluder.empty() ? r.occluder : lead->occluder;
     if (lim != rc::card::Limit::None) out += std::format("; what limits it: {}", limit_words(lim, occ));
     out += ".";
-    std::string assumed;
-    for (const auto& n : r.notes)
-        if (n.starts_with("assumption: ")) assumed += (assumed.empty() ? "" : "; ") + n.substr(12);
-    if (not assumed.empty()) out += " Assumed: " + assumed + ".";
+    if (turned != nullptr and turned->limit != rc::card::Limit::Inside and turned->p_recognise > r.p_recognise
+        and (p2(turned->p_recognise) != p2(r.p_recognise) or p2(turned->p_notice) != p2(r.p_notice)))
+        out += p2(turned->p_notice) != p2(turned->p_recognise)
+                   ? std::format(" If I turn to face it, P recognise {} (P notice {}).", p2(turned->p_recognise), p2(turned->p_notice))
+                   : std::format(" If I turn to face it, P {}.", p2(turned->p_recognise));
+    out += assumed_words(r.notes);
     out += calibration_note(*card);
     return out;
+}
+
+/// The whole "can you see <target> from <from>?" path: the viewpoint, the evaluation (doors marginalised), and for
+/// "from here" a second look at best heading for the "if I turn" clause. Returns the reply text.
+[[nodiscard]] inline std::string can_see_reply(const rc::card::Card& card, const SeeScene& s, const Target& tg, const std::string& from)
+{
+    const auto vp = resolve_from(s, from);
+    if (not vp.has_value()) return vp.error();
+    const auto r = evaluate_scene(card, s, tg, *vp);
+    if (not vp->yaw.has_value()) return answer_can_see(card, tg.label, from, r);
+    const auto best = evaluate_scene(card, s, tg, rc::card::Viewpoint{vp->xy, std::nullopt});
+    return answer_can_see(card, tg.label, from, r, &best);
 }
 
 /// A named thing to say a place relative to.
@@ -464,10 +572,12 @@ struct Landmark { std::string name; Eigen::Vector2f xy; };
                            : std::format("{:.1f} m from {}", bd, best->name);
 }
 
-/// The answer to "where should you stand to see <target>?": the best stand, then the runners-up.
+/// The answer to "where should you stand to see <target>?": the best stand, then the runners-up. `notes` = the
+/// assumptions the stand search made (each uncertain door's most probable state).
 [[nodiscard]] inline std::string answer_where_to_stand(const std::optional<rc::card::Card>& card, const std::string& target,
                                                        const std::vector<rc::card::Stand>& stands,
-                                                       const std::vector<Landmark>& lm)
+                                                       const std::vector<Landmark>& lm,
+                                                       const std::vector<std::string>& notes = {})
 {
     using namespace see_detail;
     if (not card.has_value()) return "I have no detector for that.";
@@ -490,8 +600,24 @@ struct Landmark { std::string name; Eigen::Vector2f xy; };
             out += std::format("{}{} (P {})", i > 1 ? "; " : "", place_words(stands[i].xy, lm, target), p2(stands[i].r.p_recognise));
         out += ".";
     }
+    out += assumed_words(notes);
     out += calibration_note(*card);
     return out;
+}
+
+/// The whole "where should you stand to see <target>?" path (ruling R12): every door at its most probable state, the
+/// shared where_to_stand search, and the assumption named.
+[[nodiscard]] inline std::string where_to_stand_reply(const rc::card::Card& card, const SeeScene& s, const Target& tg, int k = 3)
+{
+    std::vector<float> gaps;
+    std::vector<std::string> notes;
+    for (const auto& d : s.doors)
+    {
+        gaps.push_back(door_probable_half_gap(d));
+        if (auto n = door_probable_note(d); not n.empty()) notes.push_back(std::move(n));
+    }
+    const auto stands = rc::card::where_to_stand(card, world_for(s, tg.name, &gaps), tg.h, k);
+    return answer_where_to_stand(card, tg.label, stands, landmarks_of(s), notes);
 }
 
 }   // namespace rc::chat

@@ -149,7 +149,7 @@ def tools():
           "see the chair from the door?\" or \"where should you stand to see the table?\" (stand=true). Not for where "
           "something IS (where_is) nor to go somewhere.",
           {"concept": {"type": "string", "description": "what to see, in English singular (fridge, table, chair, bottle, "
-                                                        "cabinet, hood, door)"},
+                                                        "cabinet, hood)"},
            "where": {"type": "string", "description": "a particular object by name (fridge_1); empty = the only one of "
                                                       "that class"},
            "from": {"type": "string", "description": "the place to look from: a door or object name; empty = where the "

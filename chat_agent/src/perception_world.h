@@ -4,7 +4,7 @@
  *
  *   room polygon     delimiting_polygon_x/_y of the current room node (a proto-room's polygon is fine)
  *   doors            centre via room->door, width_m, door_phi_rad, door_open_prob (the gap is cut in can_see.h)
- *   objects          the digest's current-room objects: pose via room->object, sizes from the digest
+ *   objects          the digest's current-room objects: pose (incl. its z) via room->object, sizes and shape from the digest
  *   ZED              cam_rgb_width/height/focalx/focaly of the `zed` node (the field of view), mount height via
  *                    room->zed
  *   helios / bpearl  rc::media::sensor_model_from_graph + the mount from the RT chain room->sensor
@@ -61,6 +61,8 @@ inline std::optional<Eigen::Isometry3f> mount_of(DSR::InnerEigenAPI& inner, cons
     }
 
     // robot pose: room <- body, the SAME base frame the LiDAR mounts below are expressed in (body <- sensor).
+    // robot_yaw is the body x axis' bearing; the robot FACES body +y (ROBOT_GEOMETRY.md), so its heading is
+    // robot_yaw + pi/2 (can_see.h resolve_from).
     if (const auto T = inner.get_transformation_matrix(s.room, robot_frame); T.has_value())
     {
         s.robot_xy = Eigen::Vector2f(static_cast<float>(T->translation().x()), static_cast<float>(T->translation().y()));
@@ -92,6 +94,11 @@ inline std::optional<Eigen::Isometry3f> mount_of(DSR::InnerEigenAPI& inner, cons
         so.x = static_cast<float>(T->translation().x());
         so.y = static_cast<float>(T->translation().y());
         so.yaw = static_cast<float>(std::atan2(T->matrix()(1, 0), T->matrix()(0, 0)));
+        // Its real height: the RT z is the node origin, the BASE for every concept but the bottle, whose origin is its
+        // centre (bottle_scene_graph.cpp:293; can_see.h object_base_z).
+        so.z_origin = static_cast<float>(T->translation().z());
+        so.origin_is_centre = o.subtype == "bottle";
+        so.shape = o.shape;
         so.w = o.width_m; so.d = o.depth_m; so.h = o.height_m;
         // The standoff: its approach affordance's side nearest the robot (room frame), else the robot-side point at the
         // collision floor + half the footprint, on the line from the object to the robot.
