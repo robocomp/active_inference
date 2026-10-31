@@ -383,7 +383,7 @@ def imagined():
     try:
         with open("imagined.json", encoding="utf-8") as f:
             return _ns(json.load(f))
-    except FileNotFoundError:
+    except (FileNotFoundError, json.JSONDecodeError):
         return None
 
 
@@ -398,7 +398,7 @@ def draw_imagined_zed(ax, im=None):
     im = im or imagined()
     ax.set_xticks([])
     ax.set_yticks([])
-    if im is None or not os.path.exists("imagined_zed.png"):
+    if im is None or int(getattr(getattr(im, "image", None), "w", 0) or 0) <= 0 or not os.path.exists("imagined_zed.png"):
         ax.text(0.5, 0.5, "no imagined view", ha="center", va="center", transform=ax.transAxes)
         return ax
     a = np.asarray(Image.open("imagined_zed.png").convert("RGB")).astype(float) / 255.0
@@ -416,9 +416,9 @@ def draw_imagined_zed(ax, im=None):
 
 
 def draw_imagined_lidar(ax_top, ax_side, im=None):
-    """The imagined LiDAR returns, one faint colour per sample: top view (x, y) and side view (x, z). Points on the
-    target are coloured, points on walls/obstacles grey. The side view also carries the ring elevation lines (room
-    frame), drawn from the robot's position at floor level."""
+    """The imagined LiDAR returns, one faint colour per sample. Top view: (x, y). Side view: height z against the
+    distance along each scan's own bearing from its own mount, with that LiDAR's ring elevation lines drawn from its real
+    mount origin (every LiDAR). Target points are coloured, wall/obstacle points grey. An unmodelled LiDAR is annotated."""
     im = im or imagined()
     if im is None:
         for ax in (ax_top, ax_side):
@@ -426,31 +426,42 @@ def draw_imagined_lidar(ax_top, ax_side, im=None):
         return ax_top, ax_side
     import matplotlib.pyplot as plt
     cmap = plt.get_cmap("tab10")
-    ring = []
-    for sensor in im.lidar:
+    ring_colors = ["tab:red", "tab:blue", "tab:green"]
+    reach = 3.0
+    for k, sensor in enumerate(im.lidar):
+        rc_col = ring_colors[k % len(ring_colors)]
+        modelled = [sc for sc in sensor if sc.modelled]
+        if not modelled:
+            notes = "; ".join(sorted({n for sc in sensor for n in sc.notes}))
+            ax_top.text(0.02, 0.98 - 0.07 * k, f"lidar {k}: not modelled" + (f" ({notes})" if notes else ""),
+                        transform=ax_top.transAxes, va="top", fontsize=7, color=rc_col)
+            continue
         for i, sc in enumerate(sensor):
+            ox, oy, oz = sc.mount_xyz
+            ux, uy = math.cos(sc.bearing_rad), math.sin(sc.bearing_rad)
             for pts, col, alpha in ((sc.on_other, "0.6", 0.15), (sc.on_target, cmap(i % 10), 0.35)):
                 if pts:
                     xs, ys, zs = zip(*pts)
                     ax_top.scatter(xs, ys, s=3, color=col, alpha=alpha, linewidths=0)
-                    ax_side.scatter(xs, zs, s=3, color=col, alpha=alpha, linewidths=0)
-            if not ring and sc.ring_elev_room_deg:
-                ring = list(sc.ring_elev_room_deg)
-    w = world()
-    x0 = w.robot.x if w.robot is not None else 0.0
-    lo, hi = ax_side.get_xlim()
-    reach = max(abs(hi - x0), abs(lo - x0), 1.0)
-    for e in ring:
-        t = math.tan(math.radians(e))
-        ax_side.plot([x0, x0 + reach], [0, reach * t], color="tab:red", linewidth=0.5, alpha=0.5)
+                    ds = [(x - ox) * ux + (y - oy) * uy for x, y in zip(xs, ys)]
+                    ax_side.scatter(ds, zs, s=3, color=col, alpha=alpha, linewidths=0)
+                    reach = max(reach, max(ds))
+        # the ring lines of this LiDAR, from its first modelled scan's mount, along its own bearing
+        sc = modelled[0]
+        oz = sc.mount_xyz[2]
+        for e in sc.ring_elev_room_deg:
+            ax_side.plot([0, reach], [oz, oz + reach * math.tan(math.radians(e))], color=rc_col, linewidth=0.5, alpha=0.5)
     for s in im.samples:
         for b in s.parts:
             ax_top.plot([b.cx], [b.cy], marker="+", color="black", markersize=4, alpha=0.4)
+    mc = im.mc
+    ax_top.set_title(f"{im.caption}: P(notice) {mc.p_notice_mean:.2f}, P(recognise) {mc.p_recognise_mean:.2f}", fontsize=8)
     ax_top.set_aspect("equal", adjustable="datalim")
     ax_top.set_xlabel("x (m)")
     ax_top.set_ylabel("y (m)")
-    ax_side.set_xlabel("x (m)")
+    ax_side.set_xlabel("distance along bearing (m)")
     ax_side.set_ylabel("z (m)")
+    ax_side.set_xlim(0, reach)
     ax_side.set_ylim(-0.5, 3.0)
     ax_top.grid(True, linewidth=0.3, alpha=0.5)
     ax_side.grid(True, linewidth=0.3, alpha=0.5)

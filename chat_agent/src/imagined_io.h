@@ -18,6 +18,7 @@
 #include <string_view>
 #include <vector>
 
+#include <QSaveFile>
 #include <QFile>
 #include <QImage>
 #include <QJsonArray>
@@ -30,10 +31,23 @@ namespace imagined_detail
 {
 inline double mm(double v) { return std::round(v * 1000.0) / 1000.0; }
 
-inline QJsonArray points(const std::vector<Eigen::Vector3f>& pts)
+// The JSON stays bounded: at most kMaxPoints per list, taken by a fixed stride (deterministic). Non-finite points are
+// skipped (counted in `skipped`); n_total is the finite count before decimation.
+constexpr std::size_t kMaxPoints = 500;
+
+inline QJsonArray points(const std::vector<Eigen::Vector3f>& pts, std::size_t& n_total, std::size_t& skipped)
 {
+    std::vector<const Eigen::Vector3f*> ok;
+    for (const auto& p : pts)
+    {
+        if (std::isfinite(p.x()) and std::isfinite(p.y()) and std::isfinite(p.z())) ok.push_back(&p);
+        else ++skipped;
+    }
+    n_total = ok.size();
+    const std::size_t stride = std::max<std::size_t>(1, (ok.size() + kMaxPoints - 1) / kMaxPoints);
     QJsonArray a;
-    for (const auto& p : pts) a.append(QJsonArray{mm(p.x()), mm(p.y()), mm(p.z())});
+    for (std::size_t i = 0; i < ok.size(); i += stride)
+        a.append(QJsonArray{mm(ok[i]->x()), mm(ok[i]->y()), mm(ok[i]->z())});
     return a;
 }
 }   // namespace imagined_detail
@@ -74,7 +88,15 @@ inline bool write_imagined(const std::filesystem::path& run_dir, const rc::card:
             for (const float e : sc.ring_elev_room_deg) ring.append(std::round(double(e) * 100.0) / 100.0);
             QJsonArray notes;
             for (const auto& n : sc.notes) notes.append(QString::fromStdString(n));
-            sensor.append(QJsonObject{{"on_target", points(sc.on_target)}, {"on_other", points(sc.on_other)},
+            std::size_t n_target = 0, n_other = 0, skipped = 0;
+            auto on_target = points(sc.on_target, n_target, skipped);
+            auto on_other = points(sc.on_other, n_other, skipped);
+            if (skipped > 0) notes.append(QString("%1 non-finite points skipped").arg(skipped));
+            const bool mount_ok = std::isfinite(sc.mount_xyz.x()) and std::isfinite(sc.mount_xyz.y()) and std::isfinite(sc.mount_xyz.z());
+            sensor.append(QJsonObject{{"on_target", on_target}, {"on_other", on_other},
+                                      {"n_total_target", int(n_target)}, {"n_total_other", int(n_other)},
+                                      {"mount_xyz", mount_ok ? QJsonArray{mm(sc.mount_xyz.x()), mm(sc.mount_xyz.y()), mm(sc.mount_xyz.z())} : QJsonArray{0, 0, 0}},
+                                      {"bearing_rad", std::isfinite(sc.bearing_rad) ? std::round(double(sc.bearing_rad) * 1e4) / 1e4 : 0.0},
                                       {"ring_elev_room_deg", ring}, {"lambda0", mm(sc.lambda0)},
                                       {"modelled", sc.modelled}, {"notes", notes}});
         }
@@ -97,13 +119,20 @@ inline bool write_imagined(const std::filesystem::path& run_dir, const rc::card:
 
     std::error_code ec;
     std::filesystem::create_directories(run_dir, ec);
-    QFile f(QString::fromStdString((run_dir / "imagined.json").string()));
-    if (not f.open(QIODevice::WriteOnly | QIODevice::Truncate)) return false;
-    const QByteArray bytes = QJsonDocument(root).toJson(QJsonDocument::Compact);
-    if (f.write(bytes) != bytes.size()) return false;
-    f.close();
+    const QString json_path = QString::fromStdString((run_dir / "imagined.json").string());
+    const QString png_path = QString::fromStdString((run_dir / "imagined_zed.png").string());
+    {
+        QSaveFile f(json_path);   // atomic: a reader never sees half a file
+        if (not f.open(QIODevice::WriteOnly)) return false;
+        const QByteArray bytes = QJsonDocument(root).toJson(QJsonDocument::Compact);
+        if (f.write(bytes) != bytes.size() or not f.commit()) return false;
+    }
 
-    if (iw == 0) return true;   // nothing rendered: no PNG
+    if (iw == 0)   // nothing rendered: no PNG, and a stale one from an earlier run must not outlive this write
+    {
+        QFile::remove(png_path);
+        return true;
+    }
     std::vector<int> vis(std::size_t(iw) * ih, 0), occ(std::size_t(iw) * ih, 0);
     int n = 0;
     for (const auto& im : images)
@@ -125,6 +154,8 @@ inline bool write_imagined(const std::filesystem::path& run_dir, const rc::card:
             row[3 * x + 2] = 0;
         }
     }
-    return png.save(QString::fromStdString((run_dir / "imagined_zed.png").string()), "PNG");
+    QSaveFile pf(png_path);
+    if (not pf.open(QIODevice::WriteOnly)) return false;
+    return png.save(&pf, "PNG") and pf.commit();
 }
 }   // namespace rc::chat

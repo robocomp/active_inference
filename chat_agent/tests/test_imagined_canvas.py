@@ -16,8 +16,12 @@ IMAGINED = {
     "samples": [{"x": 1, "y": 0, "yaw": 0, "weight": 1, "state": {}, "parts": [{"cx": 1, "cy": 0, "w": .5, "h": .5, "yaw": 0, "z0": 0, "z1": .9}]},
                 {"x": 1.2, "y": 0, "yaw": 0.1, "weight": 1, "state": {}, "parts": []}],
     "lidar": [[{"on_target": [[1, 0, .5], [1.1, 0.1, .6]], "on_other": [[3, 0, 1]], "ring_elev_room_deg": [-10, 5],
-                "lambda0": 2, "modelled": True, "notes": []},
-               {"on_target": [], "on_other": [], "ring_elev_room_deg": [], "lambda0": 0, "modelled": False, "notes": []}], []],
+                "lambda0": 2, "modelled": True, "notes": [], "mount_xyz": [0, 0, 1.0], "bearing_rad": 0.0,
+                "n_total_target": 2, "n_total_other": 1},
+               {"on_target": [], "on_other": [], "ring_elev_room_deg": [], "lambda0": 0, "modelled": False, "notes": [],
+                "mount_xyz": [0, 0, 1.0], "bearing_rad": 0.0, "n_total_target": 0, "n_total_other": 0}],
+              [{"on_target": [], "on_other": [], "ring_elev_room_deg": [0, 20], "lambda0": 0, "modelled": True, "notes": [],
+                "mount_xyz": [0, 0, 0.6], "bearing_rad": 0.0, "n_total_target": 0, "n_total_other": 0}]],
 }
 
 
@@ -58,6 +62,18 @@ def main():
         check("draw_imagined_lidar runs headless", os.path.getsize("lidar.png") > 0)
     except Exception as e:
         check(f"draw_imagined_lidar ({e!r})", False)
+    # every LiDAR draws its ring lines from its own mount: 2 + 2 lines, starting at heights 1.0 and 0.6
+    starts = sorted(round(l.get_ydata()[0], 2) for l in b.get_lines())
+    check("ring lines of every LiDAR, from their own mount height", starts == [0.6, 0.6, 1.0, 1.0])
+    # a stale PNG with no image in the JSON is not drawn
+    with open("imagined.json", "w") as f:
+        json.dump(dict(IMAGINED, image={"w": 0, "h": 0}), f)
+    fig, ax = plt.subplots()
+    rcanvas.draw_imagined_zed(ax)
+    check("stale PNG is not drawn", len(ax.images) == 0)
+    with open("imagined.json", "w") as f:
+        f.write('{"version": 1, "cap')
+    check("truncated imagined.json is None", rcanvas.imagined() is None)
     print("all imagined canvas checks passed" if fails == 0 else f"{fails} imagined canvas check(s) FAILED")
     return 1 if fails else 0
 
