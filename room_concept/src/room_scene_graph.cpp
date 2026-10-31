@@ -952,19 +952,19 @@ void RoomSceneGraph::reap_archived_rooms()
     }
 }
 
-// Is a cross of one of THIS room's doors executing? The controller's `executing` edge on aff_<door>_cross is the action
-// itself (spec Rev 3: the crossing is an action), from the moment the passage claims it until the room switch moves the
-// robot out of this room — read here, not inferred from where the pose says the body is.
+// Is a cross of one of THIS room's doors under way? The controller's link 0 (`interacting` robot -> door, exit_fact.h) from
+// its passage's Cross step until it sees this agent's switch, or its link 1 on the door (Fable review 2026-10-31, B1). Was
+// the controller's `executing` edge on door_concept's aff_<door>_cross, which died whenever door_concept withdrew the cross
+// with the body in the doorway (crossing_window_mock.py: 1834/2000 seeds broke "odometry only in the doorway", this 0).
 bool RoomSceneGraph::cross_executing() const
 {
+    if (dsr_robot_id_ == 0) return false;
+    if (const auto d = rc::exit_fact::crossing_door(*G_, dsr_robot_id_); d.has_value() and room_of_node(*d) == dsr_room_id_)
+        return true;
+    std::vector<std::uint64_t> faces;
     for (const auto& ap : room_concept_->door_apertures())
-    {
-        if (ap.name.empty() or room_of_node(ap.id) != dsr_room_id_) continue;
-        if (const auto aff = G_->get_node("aff_" + ap.name + "_cross"); aff.has_value())
-            for (const auto& e : G_->get_edges_to_id(aff->id()))
-                if (e.type() == "executing") return true;
-    }
-    return false;
+        if (ap.id != 0 and room_of_node(ap.id) == dsr_room_id_) faces.push_back(ap.id);
+    return rc::exit_fact::crossed_through(*G_, faces).has_value();
 }
 
 void RoomSceneGraph::step_proto_room(const rc::RoomConcept::UpdateResult& res)

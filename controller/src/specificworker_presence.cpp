@@ -1,4 +1,5 @@
 #include "specificworker.h"
+#include "../../common/room_transition/exit_fact.h"
 
 void SpecificWorker::waiting_enter()
 {
@@ -43,7 +44,9 @@ void SpecificWorker::cleanup_owned_nodes()
 
     obstacle_tracker_.clear_published_obstacles();
     mission_node_.remove(*G);
-    journal_node_.remove(*G);   // episodic_agent sees it go and closes what is open `lost`
+    journal_node_.remove(*G);
+    // link 0 is the controller's: a leaked `interacting` robot->door would hold room_concept on odometry for ever.
+    for (const auto& r : G->get_nodes_by_type("robot")) rc::exit_fact::clear_crossing(*G, r.id());   // episodic_agent sees it go and closes what is open `lost`
     presence_coordinator_.cleanup_owned_nodes();
 }
 

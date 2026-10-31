@@ -205,6 +205,27 @@ bool ControllerSession::sync_world_state(std::uint64_t timestamp_ms,
         door_passage_.note_archived_room_id(world_model.graph_state().archived_room_id);
         auto dp = door_passage_.update(*graph_, world_model.inner_eigen(), world_model.graph_state().room_name);
         if (dp.event.has_value()) std::println("{}", *dp.event);
+        // LINK 0 — THE CROSS IS UNDER WAY (exit_fact.h; Fable review 2026-10-31 B1/B2): `interacting` robot -> door from
+        // the passage's Cross step until room_concept has SWITCHED (the door is no longer in the controller's room), so
+        // room_concept localises on odometry only across the whole doorway on a fact the controller owns. The `executing`
+        // edge on door_concept's cross affordance died whenever door_concept withdrew the cross mid-doorway.
+        // Model: room_concept/estimation_scripts/scripts/crossing_window_mock.py (current keying 1834/2000 violations, this 0).
+        {
+            const auto robot = world_model.graph_state().robot_id;
+            const auto v = door_passage_.view();
+            std::uint64_t want = 0;
+            if (robot != 0 and door_passage_.active() and v.step == rc::DoorPassage::Step::Cross)
+                if (const auto d = graph_->get_node(v.door); d.has_value()
+                    and rc::exit_fact::room_of(*graph_, d->id()) == world_model.graph_state().room_id)
+                    want = d->id();
+            if (want != crossing_door_ and robot != 0)
+            {
+                if (crossing_door_ != 0) rc::exit_fact::clear_crossing(*graph_, robot);
+                if (want != 0) rc::exit_fact::write_crossing(*graph_, robot, want);
+                std::println("[door-route] link 0 {} ({})", want != 0 ? "written" : "cleared", want != 0 ? v.door : std::string("-"));
+                crossing_door_ = want;
+            }
+        }
         // THE CROSSING FACT (link 1, common/room_transition/exit_fact.h): the body is through this door.
         if (dp.exit.has_value())
         {

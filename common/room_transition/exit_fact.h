@@ -41,6 +41,35 @@ inline bool is_door(DSR::DSRGraph& G, std::uint64_t id)
        and G.get_attrib_by_name<object_subtype_att>(n.value()).value_or(std::string{}) == "door";
 }
 
+// ── link 0 — the cross is UNDER WAY ────────────────────────────────────────────────────────────────────────────────────
+/// The controller, from the start of its passage's Cross step until it writes link 1: `interacting` ROBOT -> the door being
+/// crossed. room_concept keys odometry-only and the relocaliser's disarm on it (Fable review 2026-10-31, B1/B2): it was keyed
+/// on the controller's `executing` edge to door_concept's cross AFFORDANCE, which door_concept deletes mid-cross, and on link 2
+/// living, which ends on ltsm's archive timing — neither is a fact about the body.
+inline bool write_crossing(DSR::DSRGraph& G, std::uint64_t robot, std::uint64_t door)
+{
+    if (G.get_edge(robot, door, "interacting").has_value()) return true;
+    return G.insert_or_assign_edge(DSR::Edge::create<interacting_edge_type>(robot, door));
+}
+inline void clear_crossing(DSR::DSRGraph& G, std::uint64_t robot)
+{
+    if (const auto out = G.get_edges(robot); out.has_value())
+    {
+        std::vector<std::uint64_t> doors;
+        for (const auto& [key, e] : out.value())
+            if (key.second == "interacting" and is_door(G, key.first)) doors.push_back(key.first);
+        for (const auto d : doors) G.delete_edge(robot, d, "interacting");
+    }
+}
+/// The door the robot is crossing (link 0), if any.
+inline std::optional<std::uint64_t> crossing_door(DSR::DSRGraph& G, std::uint64_t robot)
+{
+    if (const auto out = G.get_edges(robot); out.has_value())
+        for (const auto& [key, e] : out.value())
+            if (key.second == "interacting" and is_door(G, key.first)) return key.first;
+    return std::nullopt;
+}
+
 // ── link 1 ─────────────────────────────────────────────────────────────────────────────────────────────────────────────
 /// The controller: the body is through `face`. Replaces the robot's previous link-1 edge (one crossing at a time).
 inline bool write_crossed(DSR::DSRGraph& G, std::uint64_t robot, std::uint64_t face, std::uint64_t predicted_room_id)

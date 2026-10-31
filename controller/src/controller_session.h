@@ -1164,6 +1164,7 @@ private:
 
     rc::MissionRunner mission_;
     rc::DoorPassage door_passage_;                                  // controller_door_passage.h
+    std::uint64_t crossing_door_ = 0;                               // link 0 written on this door (0 = none)
     std::string door_required_;                                     // its required affordance this cycle ("" = none)
     rc::ApproachOrder approach_order_;                              // controller_approach_order.h
     std::string approach_required_, approach_option_;               // its node and side this cycle ("" = none)
