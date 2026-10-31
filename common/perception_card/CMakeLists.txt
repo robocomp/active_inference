@@ -52,3 +52,8 @@ add_executable(generative_test tests/generative_test.cpp)
 target_include_directories(generative_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/.. ${CMAKE_CURRENT_SOURCE_DIR}/../media_transport)
 target_link_libraries(generative_test PRIVATE Eigen3::Eigen)
 add_test(NAME generative_test COMMAND generative_test)
+
+add_executable(render_zed_test tests/render_zed_test.cpp)
+target_include_directories(render_zed_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/.. ${CMAKE_CURRENT_SOURCE_DIR}/../media_transport)
+target_link_libraries(render_zed_test PRIVATE Eigen3::Eigen)
+add_test(NAME render_zed_test COMMAND render_zed_test)

@@ -47,6 +47,8 @@ struct World
     std::vector<std::pair<std::string, rc::nbv::Obstacle>>    obstacles;  // NAMED, so an occluder can be reported
     std::optional<rc::nbv::Sensor>                            zed;
     float                                                     zed_mount_z = 0.0f;
+    float                                                     room_height = 2.5f;      // wall slab top for the renderer
+    bool                                                      room_height_known = false;   // false: callers note "room height 2.5 m assumed"
     std::optional<LidarRig>                                   helios, bpearl;   // Task 4
 };
 
