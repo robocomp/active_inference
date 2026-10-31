@@ -3383,7 +3383,10 @@ bool ControllerSession::drive_door_route(const ControllerPlanningStep &step, rc:
             Eigen::Vector2f n = seen->gap.normal.normalized();
             if (door_route_n0_key_ != latch) { door_route_n0_ = n; door_route_n0_key_ = latch; }
             if (n.dot(door_route_n0_) < 0.f) n = -n;
-            const float s_body = (step.robot_pose.pos - seen->gap.centre).dot(n);
+            // ONE pose for both ends: perceived_door maps the anchor into the room through tracker_pose_, so the body is
+            // measured from that same pose (pingpong9 leg 3: step.robot_pose had jumped, s read 1.64 m, a false THROUGH).
+            const ControllerRobotPose &cpose = tracker_pose_.has_value() ? *tracker_pose_ : step.robot_pose;
+            const float s_body = (cpose.pos - seen->gap.centre).dot(n);
             // Once any part of the body is in the opening the route is not rebuilt on it (a route from the doorway failed).
             door_route_body_in_opening_ = s_body > -r_body;
             if (door_route_through_key_ != latch and s_body > r_body)

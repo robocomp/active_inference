@@ -417,9 +417,9 @@ namespace rc
             if (not rivals_.empty()) { rivals_.clear(); publish_rival_snapshot(); }
             rival_ref_valid_ = false;
         }
-        // Disarmed while a door of this room is being crossed (update_dead_reckon): the misfit is the room ahead, not a
-        // lost pose, and nothing in this room can say where the body is going.
-        if (params.reloc_enabled and map_guided_checks_allowed() and not searching() and not crossing())
+        // Disarmed while the room transition is open (crossing a door of this room, or just entered through a face that
+        // still lives — set_transition_open): the misfit is the other room seen through the door, not a lost pose.
+        if (params.reloc_enabled and map_guided_checks_allowed() and not searching() and not transition_open())
         {
             if (late_pending_.load(std::memory_order_acquire) and not lidar_points.empty())
                 if (not late_forced_done_) { run_late_recall_search(lidar_points); late_forced_this_frame_ = late_forced_done_; }   // once, at adoption

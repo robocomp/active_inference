@@ -959,9 +959,12 @@ void RoomSceneGraph::step_proto_room(const rc::RoomConcept::UpdateResult& res)
     if (!G_ or !room_node_created_ or dsr_robot_id_ == 0)
     {
         room_concept_->set_crossing(false);
+        room_concept_->set_transition_open(false);
         return;
     }
-    room_concept_->set_crossing(cross_executing());
+    const bool crossing = cross_executing();
+    room_concept_->set_crossing(crossing);
+    room_concept_->set_transition_open(crossing or rc::exit_fact::entered_through(*G_, dsr_room_id_).has_value());
     reap_archived_rooms();
     // ONE ROW PER UPDATE, WHATEVER PATH THE IMPL TAKES. The run is driven by hand and nobody is
     // reading the terminal, so a branch that returns early must still say so in the file — otherwise

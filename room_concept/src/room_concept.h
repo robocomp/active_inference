@@ -651,6 +651,12 @@ public:
     /// pingpong7 leg 4: room_1's scan fitted into room_2's model jumped the pose 3.7 m / 90° the frame the body cleared).
     void set_crossing(bool on) { crossing_.store(on, std::memory_order_relaxed); }
     bool crossing() const { return crossing_.load(std::memory_order_relaxed); }
+    /// The room transition is still OPEN: a cross of this room's doors executes, or the room was entered through a face
+    /// that still lives (link 2, exit_fact.h: it dies when door_concept deletes the face after ltsm archives the room left).
+    /// The relocaliser is disarmed meanwhile (pingpong9 leg 2: 0.4 s after entering the remembered room_1, on scans still
+    /// seeing back through the door, it flipped the pose 4.10 m / 177° to the room's mirror twin; nothing recovered).
+    void set_transition_open(bool on) { transition_open_.store(on, std::memory_order_relaxed); }
+    bool transition_open() const { return transition_open_.load(std::memory_order_relaxed); }
 
     // Process noise covariance (diagonal [x, y, theta])
     Eigen::Vector3f process_noise = {0.01f, 0.01f, 0.01f};
@@ -696,6 +702,7 @@ private:
    mutable std::mutex door_apertures_mutex_;
    std::atomic<float> outside_prob_{0.f};
    std::atomic<bool> crossing_{false};
+   std::atomic<bool> transition_open_{false};
    /// Set by begin_room_estimation; never cleared for the life of the run (a room learnt is not
    /// un-learnt by walking back). Read by estimating() from any thread, hence atomic.
    std::atomic<bool>  runtime_estimate_{false};
