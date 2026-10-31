@@ -66,29 +66,6 @@ inline float slab_hit(const RayBox& b, float ox, float oy, float oz, float dx, f
     return (hit and not in and tmin > 0.0f) ? tmin : inf;
 }
 
-// The parts' footprint bounding box in the first part's frame (the sample's yaw), as the evaluator's Target.
-inline rc::nbv::Target target_of(const Placed& placed)
-{
-    rc::nbv::Target tgt;
-    const float inf = std::numeric_limits<float>::infinity();
-    tgt.yaw = placed.boxes.front().yaw;
-    const float c = std::cos(tgt.yaw), s = std::sin(tgt.yaw);
-    float x0 = inf, x1 = -inf, y0 = inf, y1 = -inf, z0 = inf, z1 = -inf;
-    for (const auto& b : placed.boxes)
-    {
-        const float bc = std::cos(b.yaw), bs = std::sin(b.yaw);
-        for (const float sx : {-0.5f, 0.5f}) for (const float sy : {-0.5f, 0.5f})
-        {
-            const float px = b.cx + sx * b.w * bc - sy * b.h * bs, py = b.cy + sx * b.w * bs + sy * b.h * bc;
-            const float lx = px * c + py * s, ly = -px * s + py * c;
-            x0 = std::min(x0, lx); x1 = std::max(x1, lx); y0 = std::min(y0, ly); y1 = std::max(y1, ly);
-        }
-        z0 = std::min(z0, b.z0); z1 = std::max(z1, b.has_height() ? b.z1 : b.z0);
-    }
-    const float mx = 0.5f * (x0 + x1), my = 0.5f * (y0 + y1);
-    tgt.cx = mx * c - my * s; tgt.cy = mx * s + my * c; tgt.w = x1 - x0; tgt.h = y1 - y0; tgt.z0 = z0; tgt.z1 = z1;
-    return tgt;
-}
 }  // namespace detail
 
 // The imagined ZED image of `placed` seen from `vp`. `card` is REQUIRED: it supplies the wall thickness and the own-wall

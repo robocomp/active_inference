@@ -154,6 +154,54 @@ inline Placed instantiate(const Generative& g, const std::map<std::string, float
     return out;
 }
 
+// The concept prior over the card's size variables: one draw of every var (truncated normal, or log-normal in log space).
+// Shared by sample_concept and evaluate_mc so both draw the same way from the same rng stream.
+inline std::map<std::string, float> sample_sizes(const Generative& g, std::mt19937_64& rng)
+{
+    std::map<std::string, float> state;
+    for (const auto& v : g.vars)
+    {
+        double x;
+        if (v.log_normal and v.mean > 0.0f and v.sigma > 0.0f)   // log x ~ N(log mean, (sigma/mean)^2), truncated in log space
+        {
+            const double llo = std::log(std::max(v.lo, 1e-9f)), lhi = std::log(std::max(v.hi, 1e-9f));
+            x = std::exp(detail::trunc_normal(std::log(v.mean), v.sigma / v.mean, llo, lhi, rng));
+            x = v.lo < v.hi ? std::clamp(x, static_cast<double>(v.lo), static_cast<double>(v.hi)) : v.lo;
+        }
+        else
+            x = detail::trunc_normal(v.mean, v.sigma, v.lo, v.hi, rng);
+        state[v.var] = static_cast<float>(x);
+    }
+    return state;
+}
+
+namespace detail
+{
+// The parts' footprint bounding box in the first part's frame (the sample's yaw), as the evaluator's Target.
+inline rc::nbv::Target target_of(const Placed& placed)
+{
+    rc::nbv::Target tgt;
+    const float inf = std::numeric_limits<float>::infinity();
+    tgt.yaw = placed.boxes.front().yaw;
+    const float c = std::cos(tgt.yaw), s = std::sin(tgt.yaw);
+    float x0 = inf, x1 = -inf, y0 = inf, y1 = -inf, z0 = inf, z1 = -inf;
+    for (const auto& b : placed.boxes)
+    {
+        const float bc = std::cos(b.yaw), bs = std::sin(b.yaw);
+        for (const float sx : {-0.5f, 0.5f}) for (const float sy : {-0.5f, 0.5f})
+        {
+            const float px = b.cx + sx * b.w * bc - sy * b.h * bs, py = b.cy + sx * b.w * bs + sy * b.h * bc;
+            const float lx = px * c + py * s, ly = -px * s + py * c;
+            x0 = std::min(x0, lx); x1 = std::max(x1, lx); y0 = std::min(y0, ly); y1 = std::max(y1, ly);
+        }
+        z0 = std::min(z0, b.z0); z1 = std::max(z1, b.has_height() ? b.z1 : b.z0);
+    }
+    const float mx = 0.5f * (x0 + x1), my = 0.5f * (y0 + y1);
+    tgt.cx = mx * c - my * s; tgt.cy = mx * s + my * c; tgt.w = x1 - x0; tgt.h = y1 - y0; tgt.z0 = z0; tgt.z1 = z1;
+    return tgt;
+}
+}  // namespace detail
+
 // Placement against a wall (ruling P4): the backrest's OUTER face stands `gap` from the wall's INNER face, i.e. at
 // (wall thickness / 2 + gap) from the polygon edge line, inward. The thickness is the one the evaluator's wall pieces
 // are built with (detail::wall_thickness_for). Edges are picked over their SOLID runs only (door gaps removed), by the
@@ -240,19 +288,7 @@ inline SampleSet sample_concept(const Card& card, const World& world, const Cont
     {
         ++out.drawn;
         Sample sm;
-        for (const auto& v : g.vars)
-        {
-            double x;
-            if (v.log_normal and v.mean > 0.0f and v.sigma > 0.0f)   // log x ~ N(log mean, (sigma/mean)^2), truncated in log space
-            {
-                const double llo = std::log(std::max(v.lo, 1e-9f)), lhi = std::log(std::max(v.hi, 1e-9f));
-                x = std::exp(detail::trunc_normal(std::log(v.mean), v.sigma / v.mean, llo, lhi, rng));
-                x = v.lo < v.hi ? std::clamp(x, static_cast<double>(v.lo), static_cast<double>(v.hi)) : v.lo;
-            }
-            else
-                x = detail::trunc_normal(v.mean, v.sigma, v.lo, v.hi, rng);
-            sm.state[v.var] = static_cast<float>(x);
-        }
+        sm.state = sample_sizes(g, rng);
         double r = U(0, wsum); std::string chosen = ctxs.back().first;
         for (const auto& kv : ctxs) { if (r < kv.second) { chosen = kv.first; break; } r -= kv.second; }
 
@@ -310,6 +346,44 @@ inline SampleSet sample_concept(const Card& card, const World& world, const Cont
         note("drew " + std::to_string(out.drawn) + ": accepted " + std::to_string(out.samples.size()) + " of " + std::to_string(n) +
              ", physical rejections " + std::to_string(out.rejected) + ", centre outside polygon " + std::to_string(out.outside_polygon) +
              (static_cast<int>(out.samples.size()) < n ? " (stopped at max_draws)" : ""));
+    return out;
+}
+
+// ---- Monte-Carlo P(detect) of a HYPOTHETICAL object: the evaluator averaged over the concept prior on its sizes ----
+struct McResult { float p_notice_mean = 0, p_notice_sd = 0, p_recognise_mean = 0, p_recognise_sd = 0; Limit modal_limit = Limit::None; int n = 0; };
+
+// Samples the SIZES from the card's generative prior (pose stays at base x, y, yaw), instantiates each, and evaluates with
+// the sample's overall bounding box as the Hypothesis size. sd = population SD over the n samples. modal_limit = most
+// frequent limit (ties to the lower enum value). A card without a generative block yields one plain evaluate() (n = 1).
+inline McResult evaluate_mc(const Card& card, const World& world, const Hypothesis& base, const Viewpoint& vp, int n, std::uint64_t seed)
+{
+    McResult out;
+    std::vector<Result> rs;
+    if (not card.generative) rs.push_back(evaluate(card, world, base, vp));
+    else
+    {
+        std::mt19937_64 rng(seed);
+        for (int i = 0; i < std::max(n, 1); ++i)
+        {
+            const Placed pl = instantiate(*card.generative, sample_sizes(*card.generative, rng), base.x, base.y, base.yaw);
+            const auto t = detail::target_of(pl);
+            Hypothesis h = base; h.size = GeometryPrior{t.w, t.h, t.z1 - t.z0, t.z0, t.z1};
+            rs.push_back(evaluate(card, world, h, vp));
+        }
+    }
+    out.n = static_cast<int>(rs.size());
+    const double m = out.n;
+    double sn = 0, sr = 0;
+    for (const auto& r : rs) { sn += r.p_notice; sr += r.p_recognise; }
+    sn /= m; sr /= m;
+    double vn = 0, vr = 0;
+    for (const auto& r : rs) { vn += (r.p_notice - sn) * (r.p_notice - sn); vr += (r.p_recognise - sr) * (r.p_recognise - sr); }
+    out.p_notice_mean = static_cast<float>(sn); out.p_recognise_mean = static_cast<float>(sr);
+    out.p_notice_sd = static_cast<float>(std::sqrt(vn / m)); out.p_recognise_sd = static_cast<float>(std::sqrt(vr / m));
+    std::map<Limit, int> cnt;
+    for (const auto& r : rs) ++cnt[r.limit];
+    int best = -1;
+    for (const auto& [l, c] : cnt) if (c > best) { best = c; out.modal_limit = l; }   // std::map iterates ascending: ties keep the lower
     return out;
 }
 }  // namespace rc::card

@@ -1,6 +1,7 @@
 // Sampler of the generative block (imagined observations, Task 3).   LANG=es_ES.UTF-8 ./generative_test
 // A chair-equivalent Generative is built by hand (chair_card.h make_generative, same numbers as chair.concept.toml).
 #include "perception_card/generative.h"
+#include <chrono>
 #include <clocale>
 #include <cstdio>
 #include <numbers>
@@ -243,6 +244,49 @@ int main()
             }
         CHECK(near_door_wall > 50); CHECK(clear);
         std::printf("P4 doorway: %d of 1000 chairs on the doorway's wall, none over the gap: %s\n", near_door_wall, clear ? "yes" : "NO");
+    }
+    // 11. evaluate_mc: the evaluator averaged over the size prior
+    {
+        Card mc = chair_card(); mc.graph_type = "object"; mc.level = Level::Countable;
+        mc.channels = {{"zed", Role::Identity, true}};
+        mc.geometry = {0.6f, 0.6f, 1.2f, 0.0f, 1.2f};
+        SubtypeParams sp; sp.env = {0.0f, 1.32f, 0.26f}; mc.subtypes[""] = sp;
+        World w; w.polygon = room(6, 4);
+        rc::nbv::Sensor s; constexpr float f = 448.0f;
+        s.hfov_rad = 2.0f * std::atan(640.0f / f); s.vfov_rad = 2.0f * std::atan(360.0f / f); s.height_m = 0.945f;
+        w.zed = s; w.zed_mount_z = 0.945f;
+        Hypothesis base; base.concept_ = "chair"; base.x = 3.0f; base.y = 2.0f; base.yaw = 0.0f;
+        const Viewpoint vp{{3.0f - 1.3f, 2.0f}, std::nullopt};
+
+        { // n = 1, all sigmas 0: equals evaluate() on the prior box
+            Card z = mc; for (auto& v : z.generative->vars) v.sigma = 0.0f;
+            std::mt19937_64 rng(1);
+            const auto t = detail::target_of(instantiate(*z.generative, sample_sizes(*z.generative, rng), base.x, base.y, base.yaw));
+            Hypothesis h = base; h.size = GeometryPrior{t.w, t.h, t.z1 - t.z0, t.z0, t.z1};
+            const auto r = evaluate(z, w, h, vp);
+            const auto m = evaluate_mc(z, w, base, vp, 1, 5);
+            CHECK(m.n == 1 and m.p_notice_mean == r.p_notice and m.p_recognise_mean == r.p_recognise);
+            CHECK(m.p_notice_sd == 0.0f and m.p_recognise_sd == 0.0f and m.modal_limit == r.limit);
+            const auto m2 = evaluate_mc(z, w, base, vp, 32, 5);
+            CHECK(m2.p_recognise_sd == 0.0f and m2.p_recognise_mean == r.p_recognise);
+            Card ng = mc; ng.generative.reset();
+            const auto m3 = evaluate_mc(ng, w, base, vp, 32, 5); const auto r3 = evaluate(ng, w, base, vp);
+            CHECK(m3.n == 1 and m3.p_recognise_mean == r3.p_recognise and m3.p_recognise_sd == 0.0f);
+        }
+        { // reproducible; a different seed differs
+            const auto a = evaluate_mc(mc, w, base, vp, 32, 9), b = evaluate_mc(mc, w, base, vp, 32, 9), c = evaluate_mc(mc, w, base, vp, 32, 10);
+            CHECK(a.n == 32 and a.p_recognise_mean == b.p_recognise_mean and a.p_notice_sd == b.p_notice_sd and a.modal_limit == b.modal_limit);
+            CHECK(a.p_recognise_mean != c.p_recognise_mean);
+        }
+        { // near the envelope's upper shoulder the size prior spreads P; and 32 samples are cheap
+            const auto t0 = std::chrono::steady_clock::now();
+            const auto m = evaluate_mc(mc, w, base, vp, 32, 3);
+            const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+            std::printf("evaluate_mc n=32: notice %.3f +- %.3f  recognise %.3f +- %.3f  limit %d  %.2f ms\n",
+                        m.p_notice_mean, m.p_notice_sd, m.p_recognise_mean, m.p_recognise_sd, int(m.modal_limit), ms);
+            CHECK(m.p_recognise_sd > 0.0f or m.p_notice_sd > 0.0f);
+            CHECK(ms < 200.0);
+        }
     }
     std::printf(bad ? "generative_test: %d FAILED\n" : "generative_test: OK\n", bad);
     return bad ? 1 : 0;
