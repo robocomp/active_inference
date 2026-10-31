@@ -239,15 +239,25 @@ descriptor_from_graph(Graph& graph, const std::string& node_name,
     return m.fov_end_deg;
 }
 
-// Mean angular spacing between rings [rad]. With a table: (max-min)/(n-1) of it; without: the fov span over
-// (rings-1). nullopt when it cannot be formed (fewer than 2 rings, or no span).
-[[nodiscard]] inline std::optional<float> mean_ring_spacing_rad(const SensorModel& m)
+// LARGEST angular gap between adjacent rings [rad]: from the sorted per-ring table if there is one, else the fov
+// span over (rings-1). This is the quantity a "nothing thinner than gap*range can hide between rings" argument
+// needs; the mean under-states it for a non-uniform table. nullopt when it cannot be formed.
+[[nodiscard]] inline std::optional<float> max_ring_gap_rad(const SensorModel& m)
 {
     constexpr float deg2rad = 3.14159265358979f / 180.f;
-    const auto lo = lowest_elev_deg(m), hi = highest_elev_deg(m);
-    const int n = m.ring_elev_deg.empty() ? m.rings.value_or(0) : static_cast<int>(m.ring_elev_deg.size());
-    if (n < 2 or not lo.has_value() or not hi.has_value() or *hi <= *lo) return std::nullopt;
-    return (*hi - *lo) * deg2rad / static_cast<float>(n - 1);
+    if (m.ring_elev_deg.size() >= 2)
+    {
+        auto t = m.ring_elev_deg;
+        std::ranges::sort(t);
+        float g = 0.f;
+        for (std::size_t i = 1; i < t.size(); ++i) g = std::max(g, t[i] - t[i - 1]);
+        if (g <= 0.f) return std::nullopt;
+        return g * deg2rad;
+    }
+    const int n = m.rings.value_or(0);
+    if (not m.ring_elev_deg.empty() or n < 2 or not m.fov_start_deg.has_value() or not m.fov_end_deg.has_value()
+        or *m.fov_end_deg <= *m.fov_start_deg) return std::nullopt;
+    return (*m.fov_end_deg - *m.fov_start_deg) * deg2rad / static_cast<float>(n - 1);
 }
 
 namespace detail

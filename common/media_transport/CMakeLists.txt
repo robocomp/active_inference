@@ -60,7 +60,7 @@ add_executable(lag_probe
 target_include_directories(lag_probe PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(lag_probe PRIVATE fastdds fastcdr)
 
-# SensorModel accessors (sensor_model_from_json, lowest/highest_elev_deg, mean_ring_spacing_rad). Pure; sets
+# SensorModel accessors (sensor_model_from_json, lowest/highest_elev_deg, max_ring_gap_rad). Pure; sets
 # the agent's locale itself. Run as:  LANG=es_ES.UTF-8 ./sensor_model_test
 add_executable(sensor_model_test
   bench/sensor_model_test.cpp
@@ -69,3 +69,6 @@ add_executable(sensor_model_test
 )
 target_include_directories(sensor_model_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(sensor_model_test PRIVATE fastdds fastcdr)
+
+enable_testing()
+add_test(NAME sensor_model_test COMMAND sensor_model_test)

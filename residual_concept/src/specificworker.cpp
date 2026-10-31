@@ -11,7 +11,7 @@
 
 #include "../../common/config_report/config_read.h"   // rc::cfg::Reader (SHARED)
 #include "../../common/room_resolve/room_resolve.h"   // rc::room::current_room (proto-aware, deterministic)
-#include "../../common/media_transport/media_transport.h"   // sensor_model_from_graph, mean_ring_spacing_rad
+#include "../../common/media_transport/media_transport.h"   // sensor_model_from_graph, max_ring_gap_rad
 #include "../../common/interaction_anchor/interaction_anchor.h"   // rc::interaction::is_anchor (header-inline: no link change)
 
 #include <cstdlib>
@@ -125,6 +125,23 @@ void SpecificWorker::terminal_shutdown()
     std::_Exit(EXIT_SUCCESS);
 }
 
+// Beam spacing is a property of the sensor, so take it from the model the driver advertised when there is one
+// and keep the config value (a datasheet constant) otherwise. The occupancy grid reads cfg_ at every sweep
+// (set_sensor_beam_spacing), so updating cfg_ is enough. "Nothing thinner than spacing*t can hide between
+// rings" is about the WIDEST gap, hence max_ring_gap_rad.
+void SpecificWorker::refresh_beam_spacing()
+{
+    const auto beam_spacing = [this](const char* node, float& spacing)
+    {
+        const auto model = rc::media::sensor_model_from_graph(*G, node);
+        const auto s = model ? rc::media::max_ring_gap_rad(*model) : std::nullopt;
+        if (s.has_value()) spacing = *s;
+        std::print("[LidarModel] {} beam spacing {:.4f} rad from {}\n", node, spacing, s.has_value() ? "descriptor" : "config");
+    };
+    beam_spacing("helios", cfg_.helios_beam_spacing_rad);
+    beam_spacing("bpearl", cfg_.bpearl_beam_spacing_rad);
+}
+
 void SpecificWorker::initialize()
 {
     std::print("residual_concept: initialize()\n");
@@ -170,6 +187,11 @@ void SpecificWorker::initialize()
             // One-time leftover sweep AFTER the graph is fully joined — catches residual_* nodes left by a
             // crashed/uncleaned prior run that were still syncing in when initialize() ran. Guarded so a
             // Degraded→Operating re-entry (transient peer flap) does NOT wipe THIS run's live residuals.
+            if (not beam_spacing_refreshed_)
+            {
+                beam_spacing_refreshed_ = true;
+                refresh_beam_spacing();
+            }
             if (not startup_sweep_done_)
             {
                 startup_sweep_done_ = true;
@@ -196,17 +218,9 @@ void SpecificWorker::initialize()
     QObject::connect(QCoreApplication::instance(), &QCoreApplication::aboutToQuit,
                      this, &SpecificWorker::terminal_shutdown, Qt::UniqueConnection);
 
-    // Beam spacing is a property of the sensor, so take it from the model the driver advertised when there is one
-    // and keep the config value (a datasheet constant) otherwise. Before scene_graph_/ingestors copy cfg_.
-    const auto beam_spacing = [this](const char* node, float& spacing)
-    {
-        const auto model = rc::media::sensor_model_from_graph(*G, node);
-        const auto s = model ? rc::media::mean_ring_spacing_rad(*model) : std::nullopt;
-        if (s.has_value()) spacing = *s;
-        std::print("[LidarModel] {} beam spacing {:.4f} rad from {}\n", node, spacing, s.has_value() ? "descriptor" : "config");
-    };
-    beam_spacing("helios", cfg_.helios_beam_spacing_rad);
-    beam_spacing("bpearl", cfg_.bpearl_beam_spacing_rad);
+    // Before scene_graph_/ingestors copy cfg_. Re-read once at first Operating: robot_concept may write the
+    // media_descriptor after this agent starts.
+    refresh_beam_spacing();
 
     rt_api_       = G->get_rt_api();
     inner_eigen_  = G->get_inner_eigen_api();

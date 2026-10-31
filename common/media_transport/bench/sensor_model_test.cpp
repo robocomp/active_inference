@@ -12,7 +12,9 @@ static bool near(float a, float b, float tol = 1e-5f) { return std::abs(a - b) <
 
 int main()
 {
-    std::setlocale(LC_ALL, "");
+    // Fail loudly on a machine without the agent's locale: silently testing in "C" hides the decimal-comma bug.
+    CHECK(std::setlocale(LC_ALL, "") != nullptr);
+    std::printf("LC_NUMERIC = %s\n", std::setlocale(LC_NUMERIC, nullptr));
     using namespace rc::media;
 
     MediaDescriptor d;
@@ -33,7 +35,7 @@ int main()
         CHECK(m->ring_elev_deg.size() == 4);
         CHECK(near(lowest_elev_deg(*m).value_or(0), -15.5f));
         CHECK(near(highest_elev_deg(*m).value_or(0), 14.6f));
-        CHECK(near(mean_ring_spacing_rad(*m).value_or(0), (14.6f + 15.5f) * 3.14159265f / 180.f / 3.f, 1e-4f));
+        CHECK(near(max_ring_gap_rad(*m).value_or(0), 14.6f * 3.14159265f / 180.f, 1e-4f));  // gaps 8.25, 7.25, 14.6
     }
 
     // 3. malformed JSON, empty string, wrong type
@@ -45,13 +47,17 @@ int main()
     SensorModel f; f.version = 1; f.rings = 32; f.fov_start_deg = -15.f; f.fov_end_deg = 15.f;
     CHECK(near(lowest_elev_deg(f).value_or(99), -15.f));
     CHECK(near(highest_elev_deg(f).value_or(99), 15.f));
-    CHECK(near(mean_ring_spacing_rad(f).value_or(0), 30.f * 3.14159265f / 180.f / 31.f, 1e-6f));
+    CHECK(near(max_ring_gap_rad(f).value_or(0), 30.f * 3.14159265f / 180.f / 31.f, 1e-6f));
+
+    // non-uniform and unsorted table: the widest gap wins, order is irrelevant
+    SensorModel nu; nu.version = 1; nu.ring_elev_deg = {10.f, -5.f, 0.f, -4.f};
+    CHECK(near(max_ring_gap_rad(nu).value_or(0), 10.f * 3.14159265f / 180.f, 1e-6f));
 
     // 5. nothing to derive from
     SensorModel e; e.version = 1;
-    CHECK(not lowest_elev_deg(e) and not highest_elev_deg(e) and not mean_ring_spacing_rad(e));
+    CHECK(not lowest_elev_deg(e) and not highest_elev_deg(e) and not max_ring_gap_rad(e));
     SensorModel one; one.version = 1; one.rings = 1; one.fov_start_deg = 0.f; one.fov_end_deg = 10.f;
-    CHECK(not mean_ring_spacing_rad(one).has_value());
+    CHECK(not max_ring_gap_rad(one).has_value());
 
     std::printf("%s\n", bad ? "FAILURES" : "ALL OK");
     return bad != 0;
