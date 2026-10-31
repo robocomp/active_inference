@@ -197,6 +197,7 @@ private:
 		std::uint64_t approach_id_ = 0;   // approach: the ApproachOrder this leaf started
 		std::string room_;                 ///< explore: the room it explores (its name when the step started; may be renamed since)
 		std::uint64_t room_id_ = 0;        ///< explore: that room's NODE ID — the identity; leaving it (an id change) ends the step
+		std::uint64_t survey_room_id_ = 0; ///< cross: the provisional room entered and being surveyed until promoted
 		/// The episodic journal's StepStart text for what start() resolved (R3): {"target","grounding"}.
 		void ground(const rc::mission::Step &leaf, const std::string &target, const QJsonObject &grounding);
 	};

@@ -19,6 +19,7 @@
 //     never assessed = unknown, which never satisfies an `until`.
 // Everything here runs on the control thread.
 #include "specificworker.h"
+#include "../../common/room_resolve/room_resolve.h"   // rc::room::is_proto: a cross into a provisional room is surveyed
 
 #include <chrono>
 #include <cmath>
@@ -246,7 +247,31 @@ LeafStatus SpecificWorker::MissionHost::poll(const rc::mission::Step &leaf)
 		if (v.door != door_ or v.step == rc::DoorPassage::Step::Idle) return {.state = LeafState::Failed, .detail = "abandoned"};
 		// a FAILED passage ends Done too (finish()): it is a failure, not a success (Live fix 3: a ruled-out look)
 		if (v.failed) return {.state = LeafState::Failed, .detail = v.last_outcome.empty() ? std::string("failed") : v.last_outcome};
-		if (v.step == rc::DoorPassage::Step::Done) return {.state = LeafState::Succeeded};
+		if (v.step == rc::DoorPassage::Step::Done)
+		{
+			// ★ A NEW ROOM IS SURVEYED BEFORE IT IS LEFT (user 2026-10-31: "until the room is established the robot must follow
+			//   the affordances drawn by the epistemic planner"). pingpong13 leg 1 stood 18 s in the provisional room_2 and
+			//   left it unpromoted; ltsm archived that half-seen layout and every re-entry relocalised against it. So a cross
+			//   that lands in a PROVISIONAL room ends only when room_concept promotes it; meanwhile the room is explored —
+			//   the selector free to take room_concept's epistemic affordances (afford_room), as `explore <room>`.
+			const auto &gs = w_.world_model_.graph_state();
+			if (op == "cross" and w_.G != nullptr and gs.room_id != 0 and rc::room::is_proto(*w_.G, gs.room_id))
+			{
+				if (survey_room_id_ != gs.room_id)
+				{
+					survey_room_id_ = gs.room_id;
+					std::println("[mission] step {}: through into '{}', still provisional — surveying it on the epistemic "
+					             "affordances until room_concept establishes it", leaf.id, gs.room_name);
+					w_.session_.mission().set_mode(rc::DriveMode::Command);
+					w_.session_.set_command_explore(true, gs.room_name);
+				}
+				return {};
+			}
+			if (survey_room_id_ != 0)
+				std::println("[mission] step {}: '{}' is established — the cross is complete", leaf.id, gs.room_name);
+			survey_room_id_ = 0;
+			return {.state = LeafState::Succeeded};
+		}
 		// A hand-back of the APPROACH is not a failure: door_concept re-sites it; wait for the re-offer (ApproachHold).
 		const bool on_approach = v.step == rc::DoorPassage::Step::Approach;
 		const bool present = on_approach and w_.G != nullptr and w_.G->get_node("aff_" + door_ + "_approach").has_value();
