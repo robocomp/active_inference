@@ -16,6 +16,8 @@
 #include <numbers>
 #include <optional>
 #include <random>
+#include <ranges>
+#include <utility>
 #include <string>
 #include <vector>
 
@@ -40,7 +42,9 @@ struct Context
 struct SampleSet
 {
     std::vector<Sample> samples;
-    int drawn = 0, rejected = 0;
+    int drawn = 0;
+    int rejected = 0;          // physical: a part inside a wall or an obstacle (or no room beside the wall)
+    int outside_polygon = 0;   // the draw's centre fell outside the room polygon (counted apart from rejected)
     std::uint64_t seed = 0;
     std::vector<std::string> notes;
 };
@@ -66,23 +70,29 @@ inline double phi_inv(double p)   // bisection on the CDF; p in (0,1)
     }
     return 0.5 * (lo + hi);
 }
-// N(mean, sigma) truncated to [lo, hi] (either may be +-inf).
+// N(mean, sigma) truncated to [lo, hi] (either may be +-inf). lo >= hi returns lo (never calls clamp with lo > hi).
 inline double trunc_normal(double mean, double sigma, double lo, double hi, std::mt19937_64& rng)
 {
+    if (not (lo < hi)) return lo;
     if (not (sigma > 0.0)) return std::clamp(mean, lo, hi);
     double a = (lo - mean) / sigma, b = (hi - mean) / sigma;
     const bool flip = a > 0.0;          // work in the lower tail, where erfc keeps its precision
     if (flip) { const double na = -b, nb = -a; a = na; b = nb; }
     const double pa = phi_cdf(a), pb = phi_cdf(b);
+    const double u01 = std::uniform_real_distribution<double>(0.0, 1.0)(rng);
     double z;
-    if (not (pb - pa > 1e-14))          // the whole interval is >~7 sigma out in a tail: uniform over it
+    if (not (pb - pa > 1e-14))
     {
-        const double ca = std::max(a, -40.0), cb = std::min(b, 40.0);
-        z = ca + std::uniform_real_distribution<double>(0.0, 1.0)(rng) * (cb - ca);
+        // The whole interval lies > ~7 sigma out in the lower tail (b < 0 here). There the density is
+        // exp(-z^2/2) = exp(-b^2/2) exp(|b| e - e^2/2)... with z = b - e, e >= 0: ~ exp(-|b| e), an exponential in the
+        // distance e below the upper end b, truncated to e <= b - a. Inverse CDF of that.
+        const double lam = std::max(-b, 1e-9), L = b - a;
+        const double e = -std::log1p(-u01 * (1.0 - std::exp(-lam * L))) / lam;
+        z = std::clamp(b - e, a, b);
     }
     else
     {
-        const double u = pa + std::uniform_real_distribution<double>(0.0, 1.0)(rng) * (pb - pa);
+        const double u = pa + u01 * (pb - pa);
         z = std::clamp(phi_inv(std::clamp(u, 1e-300, 1.0 - 1e-16)), a, b);
     }
     if (flip) z = -z;
@@ -144,8 +154,14 @@ inline Placed instantiate(const Generative& g, const std::map<std::string, float
     return out;
 }
 
+// Placement against a wall (ruling P4): the backrest's OUTER face stands `gap` from the wall's INNER face, i.e. at
+// (wall thickness / 2 + gap) from the polygon edge line, inward. The thickness is the one the evaluator's wall pieces
+// are built with (detail::wall_thickness_for). Edges are picked over their SOLID runs only (door gaps removed), by the
+// run length the chair can actually use: a run loses the chair's half-width at each end (plus half a wall thickness
+// at a polygon corner), so a chair never lands in a doorway or straddles a corner.
+// max_draws < 0 means 50 * n (a default argument cannot name n).
 inline SampleSet sample_concept(const Card& card, const World& world, const Context& ctx, int n, std::uint64_t seed,
-                                int max_draws = -1)   // -1 = 50 * n (a default argument cannot name n)
+                                int max_draws = -1)
 {
     SampleSet out;
     out.seed = seed;
@@ -158,9 +174,11 @@ inline SampleSet sample_concept(const Card& card, const World& world, const Cont
     const auto U = [&](double a, double b) { return std::uniform_real_distribution<double>(a, b)(rng); };
     constexpr double inf = std::numeric_limits<double>::infinity();
 
+    for (const auto& v : g.vars)
+        if (v.lo > v.hi) note("var '" + v.var + "': lo > hi, drawn at lo");
+
     const auto& P = world.polygon;
     const bool has_poly = P.size() >= 3;
-    // contexts: usable ones with their weights
     std::vector<std::pair<std::string, float>> ctxs;
     if (ctx.at) ctxs = {{"at", 1.0f}};
     else if (ctx.force_context) ctxs = {{*ctx.force_context, 1.0f}};
@@ -176,17 +194,33 @@ inline SampleSet sample_concept(const Card& card, const World& world, const Cont
     if (not has_poly) note("no room polygon: free placement in a 6x6 m square around the origin (robot pose unknown to the sampler)");
     float wsum = 0; for (const auto& kv : ctxs) wsum += kv.second;
 
-    // polygon geometry for the wall placement and the free-space bounding box
-    float minx = -3, maxx = 3, miny = -3, maxy = 3;
-    std::vector<float> elen; float ltot = 0, area2 = 0;
+    const float thick = detail::wall_thickness_for(card);
+    float minx = -3, maxx = 3, miny = -3, maxy = 3, area2 = 0;
+    struct Run { Eigen::Vector2f A, u; float s0, s1, len; };   // a solid span [s0,s1] of the edge starting at A (direction u)
+    std::vector<Run> runs;
     if (has_poly)
     {
         minx = miny = inf; maxx = maxy = -inf;
         for (const auto& p : P) { minx = std::min(minx, p.x()); maxx = std::max(maxx, p.x()); miny = std::min(miny, p.y()); maxy = std::max(maxy, p.y()); }
         for (std::size_t i = 0, j = P.size() - 1; i < P.size(); j = i++)
         {
-            elen.push_back((P[i] - P[j]).norm()); ltot += elen.back();
             area2 += P[j].x() * P[i].y() - P[i].x() * P[j].y();
+            const Eigen::Vector2f A = P[j], d = P[i] - P[j];
+            const float len = d.norm();
+            if (len < 1e-3f) continue;
+            const Eigen::Vector2f u = d / len, nrm(-u.y(), u.x());
+            std::vector<std::pair<float, float>> open;     // the same ownership test as wall_obstacles
+            for (const auto& gp : world.gaps)
+            {
+                const Eigen::Vector2f r = gp.centre - A;
+                if (std::abs(r.dot(nrm)) > 0.5f * thick + gp.half_w) continue;
+                const float s = r.dot(u), s0 = std::max(0.0f, s - gp.half_w), s1 = std::min(len, s + gp.half_w);
+                if (s1 > s0) open.emplace_back(s0, s1);
+            }
+            std::ranges::sort(open);
+            float cur = 0;
+            for (const auto& [o0, o1] : open) { if (o0 > cur) runs.push_back({A, u, cur, o0, len}); cur = std::max(cur, o1); }
+            if (len > cur) runs.push_back({A, u, cur, len, len});
         }
     }
     const auto inside = [&](float px, float py)
@@ -198,17 +232,9 @@ inline SampleSet sample_concept(const Card& card, const World& world, const Cont
         return in;
     };
 
-    auto obstacles = rc::nbv::wall_obstacles(P, detail::wall_thickness_for(card), world.gaps);
+    auto obstacles = rc::nbv::wall_obstacles(P, thick, world.gaps);
     for (auto& o : obstacles) { o.z0 = 0.0f; o.z1 = 0.0f; }   // a wall is floor-to-ceiling: z1 <= z0 = unbounded
     for (const auto& [name, o] : world.obstacles) obstacles.push_back(o);
-
-    // the offset from the local origin to the backrest's OUTER face, measured on the template itself
-    const auto back_offset = [&](const std::map<std::string, float>& st)
-    {
-        const auto p = instantiate(g, st, 0, 0, 0);
-        float m = 0; for (const auto& b : p.boxes) m = std::min(m, b.cy - 0.5f * b.h);
-        return -m;
-    };
 
     while (static_cast<int>(out.samples.size()) < n and out.drawn < max_draws)
     {
@@ -218,7 +244,11 @@ inline SampleSet sample_concept(const Card& card, const World& world, const Cont
         {
             double x;
             if (v.log_normal and v.mean > 0.0f and v.sigma > 0.0f)   // log x ~ N(log mean, (sigma/mean)^2), truncated in log space
-                x = std::exp(detail::trunc_normal(std::log(v.mean), v.sigma / v.mean, std::log(std::max(v.lo, 1e-9f)), std::log(std::max(v.hi, 1e-9f)), rng));
+            {
+                const double llo = std::log(std::max(v.lo, 1e-9f)), lhi = std::log(std::max(v.hi, 1e-9f));
+                x = std::exp(detail::trunc_normal(std::log(v.mean), v.sigma / v.mean, llo, lhi, rng));
+                x = v.lo < v.hi ? std::clamp(x, static_cast<double>(v.lo), static_cast<double>(v.hi)) : v.lo;
+            }
             else
                 x = detail::trunc_normal(v.mean, v.sigma, v.lo, v.hi, rng);
             sm.state[v.var] = static_cast<float>(x);
@@ -228,14 +258,35 @@ inline SampleSet sample_concept(const Card& card, const World& world, const Cont
 
         if (chosen == "against_wall")
         {
-            double r2 = U(0, ltot); std::size_t e = elen.size() - 1;
-            for (std::size_t k = 0; k < elen.size(); ++k) { if (r2 < elen[k]) { e = k; break; } r2 -= elen[k]; }
-            const Eigen::Vector2f A = P[(e + P.size() - 1) % P.size()], B = P[e];   // elen[e] is the edge (e-1 -> e)
-            const Eigen::Vector2f u = (B - A) / std::max(1e-6f, (B - A).norm());
-            const Eigen::Vector2f nin = (area2 > 0 ? 1.0f : -1.0f) * Eigen::Vector2f(-u.y(), u.x());   // inward normal
+            // The template's extent in its local frame: back = distance from the origin to the backrest's outer face
+            // (-y), hx = half-width along x.
+            const auto tp = instantiate(g, sm.state, 0, 0, 0);
+            float back = 0, hx = 0;
+            for (const auto& b : tp.boxes) { back = std::max(back, -(b.cy - 0.5f * b.h)); hx = std::max(hx, std::abs(b.cx) + 0.5f * b.w); }
+            std::vector<std::pair<float, float>> usable(runs.size());   // [lo, hi] along the edge, empty when hi <= lo
+            double tot = 0;
+            for (std::size_t k = 0; k < runs.size(); ++k)
+            {
+                const auto& rn = runs[k];
+                const float lo = rn.s0 + hx + (rn.s0 <= 0.0f ? 0.5f * thick : 0.0f);
+                const float hi = rn.s1 - hx - (rn.s1 >= rn.len ? 0.5f * thick : 0.0f);
+                usable[k] = {lo, hi};
+                tot += std::max(0.0f, hi - lo);
+            }
+            if (not (tot > 0.0)) { ++out.rejected; continue; }          // no wall long enough for this chair
+            double r2 = U(0, tot); std::size_t e = 0;
+            for (std::size_t k = 0; k < runs.size(); ++k)
+            {
+                const double l = std::max(0.0f, usable[k].second - usable[k].first);
+                if (l > 0.0) e = k;
+                if (r2 < l) break;
+                r2 -= l;
+            }
+            const auto& rn = runs[e];
+            const Eigen::Vector2f nin = (area2 > 0 ? 1.0f : -1.0f) * Eigen::Vector2f(-rn.u.y(), rn.u.x());   // inward normal
             const float gap = static_cast<float>(detail::trunc_normal(g.placement.wall_gap_mean, g.placement.wall_gap_sigma, 0.0, inf, rng));
-            const Eigen::Vector2f on = A + u * static_cast<float>(U(0, elen[e]));
-            const Eigen::Vector2f c = on + nin * (back_offset(sm.state) + gap);
+            const float s = static_cast<float>(U(usable[e].first, std::max(usable[e].first, usable[e].second)));
+            const Eigen::Vector2f c = rn.A + rn.u * s + nin * (0.5f * thick + gap + back);
             sm.x = c.x(); sm.y = c.y();
             sm.yaw = std::atan2(-nin.x(), nin.y());       // local +y = inward normal, so the backrest (-y) faces the wall
         }
@@ -247,17 +298,18 @@ inline SampleSet sample_concept(const Card& card, const World& world, const Cont
         {
             sm.x = static_cast<float>(U(minx, maxx)); sm.y = static_cast<float>(U(miny, maxy));
             sm.yaw = static_cast<float>(U(-std::numbers::pi, std::numbers::pi));
-            if (has_poly and not inside(sm.x, sm.y)) { ++out.rejected; continue; }
         }
+        if (has_poly and chosen != "at" and not inside(sm.x, sm.y)) { ++out.outside_polygon; continue; }
         sm.parts = instantiate(g, sm.state, sm.x, sm.y, sm.yaw);
         const bool hit = std::ranges::any_of(sm.parts.boxes, [&](const auto& b)
         { return std::ranges::any_of(obstacles, [&](const auto& o) { return boxes_overlap(b, o); }); });
         if (hit) { ++out.rejected; continue; }
         out.samples.push_back(std::move(sm));
     }
-    if (static_cast<int>(out.samples.size()) < n)
-        note("drew " + std::to_string(out.drawn) + ", rejected " + std::to_string(out.rejected) + ": only " +
-             std::to_string(out.samples.size()) + " of " + std::to_string(n) + " samples fit (stopped at max_draws)");
+    if (out.rejected > 0 or out.outside_polygon > 0 or static_cast<int>(out.samples.size()) < n)
+        note("drew " + std::to_string(out.drawn) + ": accepted " + std::to_string(out.samples.size()) + " of " + std::to_string(n) +
+             ", physical rejections " + std::to_string(out.rejected) + ", centre outside polygon " + std::to_string(out.outside_polygon) +
+             (static_cast<int>(out.samples.size()) < n ? " (stopped at max_draws)" : ""));
     return out;
 }
 }  // namespace rc::card

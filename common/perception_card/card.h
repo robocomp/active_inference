@@ -90,7 +90,8 @@ struct PlacementPrior
     std::string support;                          // "floor"
     std::map<std::string, float> contexts;        // keys "free" | "against_wall" -> weight
     // Gap to the wall when against_wall (m): the distance from the BACKREST's OUTER face (the object's local -y edge) to the
-    // wall line (the polygon edge), drawn from this normal truncated at 0. The backrest faces the wall.
+    // wall's INNER face (the room side of the wall box), so the backrest stands at wall_thickness/2 + gap from the
+    // polygon edge line. Drawn from this normal truncated at 0. The backrest faces the wall.
     float wall_gap_mean = 0.0f, wall_gap_sigma = 0.0f;
 };
 
