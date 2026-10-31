@@ -179,7 +179,7 @@ void ChairExistence::update_and_remove(ChairFitter& fitter, const Inputs& in,
             // pd FLOOR (clear line of sight): occlusion is already HELD above, so here the LoS is clear. Even a
             // peripheral chair (low pd) then vacates at ≥ the floor rate, so a glitch-stranded phantom the robot
             // never centres still dies over time; conf gates on staleness so a recently-seen chair is untouched.
-            const float pd = std::max(fitter.zed_detectability(inst), cfg_.exist_zed_clear_los_floor);
+            const float pd = fitter.zed_detectability(inst);
             // ★OCCLUSION SCALES ABSENCE, IT NO LONGER SKIPS THE CYCLE. This used to `continue` on a boolean
             // los_occluded(), which is a HOLD with no way out: a phantom chair born inside the dining set is
             // permanently "occluded" by the very furniture it overlaps, so its absence was never charged and

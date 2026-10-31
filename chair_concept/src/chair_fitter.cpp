@@ -8,6 +8,7 @@
 
 #include "../../common/diag_log/rotating_csv.h"   // keep the previous run instead of wiping it
 #include "chair_support_bank.h"
+#include "chair_detect.h"   // rc::chair_p_detect: shared countable P(detect) + wall LoS
 #include "chair_contour.h"   // rc::chair_contour_set — the contour channel's silhouette (pure, tested)
 #include "../../common/occlusion/occlusion.h"   // rc::occlusion:: (SHARED LoS occlusion)   // rc::support_bank:: adapter (SHARED bank)
 
@@ -735,20 +736,27 @@ float ChairFitter::frame_reliability(const ChairInstance& inst) const
     return 1.0f - u;
 }
 
+// The chair's P(detect): the shared countable formula (chair_detect.h) on what compute_projected_roi measured,
+// with wall line of sight against the room polygon. Replaced the private centre x range ramp 2026-10-31.
 float ChairFitter::zed_detectability(const ChairInstance& inst) const
 {
-    if (not inst.roi_valid)
-        return 0.0f;
-    // Off-centre falloff: YOLO/depth degrade toward the ZED image edge. roi_offset is normalised (0=centred,
-    // ±1=image edge). Reliable near the axis, → 0 at the configured edge reach.
-    const float off = std::hypot(inst.roi_offset_x, inst.roi_offset_y);
-    const float pd_center = std::clamp(1.0f - off / std::max(1e-3f, cfg_.exist_zed_edge_offset), 0.0f, 1.0f);
-    // Range falloff: a far chair is a small, unreliable ZED detection → its ABSENCE is weak evidence. 1 within
-    // ZedRangeFull, smoothly → 0 by ZedRangeRef (beyond which ZED absence says nothing about existence).
-    const float r = std::max(0.0f, inst.last_range);
-    const float span = std::max(1e-3f, cfg_.exist_zed_range_ref - cfg_.exist_zed_range_full);
-    const float pd_range = std::clamp((cfg_.exist_zed_range_ref - r) / span, 0.0f, 1.0f);
-    return pd_center * pd_range;
+    static bool warned = false;
+    if (not has_room_polygon() and not warned)
+    {
+        warned = true;
+        std::print("chair_concept: [detect] no room polygon yet: wall line of sight = 1 until it arrives\n");
+    }
+    ChairDetectInputs in;
+    in.roi_valid = inst.roi_valid;
+    in.roi_fill = inst.roi_fill;
+    in.in_fov = inst.roi_in_fov;
+    in.roi_offset_x = inst.roi_offset_x;
+    in.roi_offset_y = inst.roi_offset_y;
+    in.cam_xy = inst.roi_cam_xy;
+    const auto& s = inst.model.state();
+    in.chair_xy = Eigen::Vector2f(s.cx, s.cy);
+    return chair_p_detect(in, rc::detect::DetectorEnvelope{cfg_.detect_min_fill, cfg_.detect_max_fill, cfg_.detect_soft},
+                          room_polygon_);
 }
 
 // FIXATION (attention): true only when this view may touch the chair's POSE — RESOLVABLE, CENTRED and STILL.
@@ -1035,6 +1043,12 @@ void ChairFitter::compute_projected_roi(ChairInstance& inst)
     inst.roi_offset_x = std::clamp(off_x, -3.0f, 3.0f);
     inst.roi_offset_y = std::clamp(off_y, -3.0f, 3.0f);
     inst.roi_fill     = std::clamp(fill, 0.0f, 4.0f);
+    // Fraction of the projected box inside the image: overlap area / box area (continuous; 1 = fully in frame).
+    const float bw = std::max(max_col - min_col, 1e-3f), bh = std::max(max_row - min_row, 1e-3f);
+    const float ow = std::max(0.0f, std::min(max_col, W) - std::max(min_col, 0.0f));
+    const float oh = std::max(0.0f, std::min(max_row, H) - std::max(min_row, 0.0f));
+    inst.roi_in_fov = std::clamp((ow / bw) * (oh / bh), 0.0f, 1.0f);
+    inst.roi_cam_xy = Eigen::Vector2f(static_cast<float>(Mopt.value()(0, 3)), static_cast<float>(Mopt.value()(1, 3)));
     inst.roi_valid    = sane;
 }
 
