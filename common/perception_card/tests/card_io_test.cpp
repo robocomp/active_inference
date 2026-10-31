@@ -38,6 +38,18 @@ int main()
     CHECK(r and to_json(*r) == to_json(a));
     CHECK(r and r->subtypes.at("").terms[0].params.at("k") == 0.123456f);
 
+    { // a relative blind_spot_map_path is resolved against agent_dir on write; an absolute one is left alone
+        Card m = make("table");  m.calibration = "blind_spot_map";  m.blind_spot_map_path = "etc/bsm.csv";
+        CHECK(write_card_file(root / "table_concept", m));
+        const auto rm = read_card_file(root / "table_concept");
+        CHECK(rm and fs::path(rm->blind_spot_map_path).is_absolute());
+        CHECK(rm and rm->blind_spot_map_path == (fs::absolute(root / "table_concept") / "etc/bsm.csv").lexically_normal().string());
+        m.blind_spot_map_path = "/abs/bsm.csv";
+        CHECK(write_card_file(root / "table_concept", m));
+        const auto ra = read_card_file(root / "table_concept");
+        CHECK(ra and ra->blind_spot_map_path == "/abs/bsm.csv");
+        fs::remove_all(root / "table_concept");
+    }
     CHECK(write_card_file(root / "bottle_concept", make("bottle")));
     CHECK(write_card_file(root / "not_an_agent", make("zzz")));      // ignored: no _concept suffix
     fs::create_directories(root / "empty_concept");                  // no card: skipped silently

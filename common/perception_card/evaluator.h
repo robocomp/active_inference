@@ -6,7 +6,7 @@
 // the answer a planner gets and the answer the dashboard shows are one function. Per level (spec §2):
 //   coverage     = visible_fraction (frustum ^ walls ^ named obstacles)
 //   countable    x the envelope, expected_p_detect over predicted_fill_axes / predicted_fill_sigma
-//   articulated  x the card's configuration terms at phi (leaf_obliquity; resolvability / kappa need a MEASUREMENT a
+//   articulated  x the card's configuration terms at phi, or marginalised over [0, phi_max] when phi is unset (leaf_obliquity; resolvability / kappa need a MEASUREMENT a
 //                hypothetical object does not have, so they stay at their neutral 1)
 //   animate      x Gauss-Hermite over the position, sigma^2 = sigma0^2 + k * seconds_unseen (term_motion)
 // Pure: Eigen + the headers above, no DSR, no Qt. Frames: the ROOM frame, metres, yaw in radians (as rc::nbv).
@@ -208,24 +208,53 @@ inline ChannelResult evaluate_camera(const Card& card, const World& world, const
     // Card factors beyond the envelope. leaf_obliquity needs phi; the others are neutral for a hypothetical.
     const bool articulated = card.level == Level::Articulated;
     const bool mass = card.level == Level::Mass;
-    if (articulated and not h.phi) out.notes.push_back("phi unknown: leaf taken closed");
-    const float phi = h.phi.value_or(0.0f);
+    // phi unset on an articulated card: the agent has not measured the hinge angle, so the leaf is neither closed nor
+    // open -- marginalise the obliquity over the agent's own prior, uniform on [0, phi_max] (door: Openable.PhiMaxRad,
+    // carried as leaf_obliquity's `phi_max` param; absent = pi/2). Only leaf_obliquity depends on phi, so the
+    // marginal is a mean of that one factor. Gauss-Legendre with 8 nodes: the integrand is |cos(phi - bearing)|,
+    // smooth except for one kink where the leaf turns edge-on to the ray; 8 nodes put that error well under 1e-2 in P
+    // (the card's other numbers are good to ~0.05) for 8 cheap evaluations of one scalar term, the visibility
+    // geometry being computed once. The result is the mean, so P(phi unset) lies between its extremes by construction.
+    constexpr std::array<float, 4> kGLx{0.1834346425f, 0.5255324099f, 0.7966664774f, 0.9602898565f};
+    constexpr std::array<float, 4> kGLw{0.3626837834f, 0.3137066459f, 0.2223810345f, 0.1012285363f};
+    float phi_max = std::numbers::pi_v<float> / 2.0f;
+    if (const auto lo = std::ranges::find_if(sp.terms, [](const TermSpec& s) { return s.name == "leaf_obliquity"; });
+        lo != sp.terms.end() and lo->params.contains("phi_max"))
+        phi_max = lo->params.at("phi_max");
+    const bool marginal_phi = articulated and not h.phi;
+    if (marginal_phi)
+        out.notes.push_back("phi unknown: marginalised over uniform [0, " + std::to_string(phi_max) + "] rad (8-node Gauss-Legendre)");
     const auto card_factors = [&](const nbv::Target& tt) -> std::pair<float, float>   // {obliquity, rest}
     {
         TermInputs in;
         in.range = (tt.centre() - from).norm();
-        in.phi = phi;
         in.seconds_unseen = h.seconds_unseen;
-        const Eigen::Vector2f n = std::cos(phi) * tt.axis_y() + std::sin(phi) * tt.axis_x();   // leaf normal at phi
         const Eigen::Vector2f r = tt.centre() - from;
-        in.obliquity = r.norm() > 1e-6f ? n.dot(r / r.norm()) : 1.0f;
+        const auto obl_at = [&](float phi)
+        {
+            in.phi = phi;
+            const Eigen::Vector2f n = std::cos(phi) * tt.axis_y() + std::sin(phi) * tt.axis_x();   // leaf normal at phi
+            in.obliquity = r.norm() > 1e-6f ? n.dot(r / r.norm()) : 1.0f;
+        };
         float f_obl = 1.0f, f_rest = 1.0f;
         for (const TermSpec& s : sp.terms)
         {
             if (s.name == "envelope" or s.name == "in_fov" or s.name == "central" or s.name == "coverage" or s.name == "motion")
                 continue;                                  // carried by the geometry above / by the GH below
-            if (s.name == "leaf_obliquity") { if (articulated) f_obl *= eval_term(s, in); }
-            else f_rest *= eval_term(s, in);
+            if (s.name == "leaf_obliquity")
+            {
+                if (not articulated) continue;
+                if (not marginal_phi) { obl_at(h.phi.value_or(0.0f)); f_obl *= eval_term(s, in); continue; }
+                float acc = 0.0f;                          // mean over [0, phi_max]: weights sum to 2 on [-1, 1]
+                for (std::size_t i = 0; i < kGLx.size(); ++i)
+                    for (const float sgn : {-1.0f, 1.0f})
+                    {
+                        obl_at(0.5f * phi_max * (1.0f + sgn * kGLx[i]));
+                        acc += 0.5f * kGLw[i] * eval_term(s, in);
+                    }
+                f_obl *= acc;
+            }
+            else { obl_at(h.phi.value_or(0.0f)); f_rest *= eval_term(s, in); }
         }
         return {f_obl, f_rest * f_inst};
     };

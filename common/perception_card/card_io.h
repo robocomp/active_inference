@@ -23,9 +23,14 @@ inline std::filesystem::path card_file_path(const std::filesystem::path& agent_d
     return agent_dir / "etc" / "perception_card.json";
 }
 
-inline bool write_card_file(const std::filesystem::path& agent_dir, const Card& c)
+inline bool write_card_file(const std::filesystem::path& agent_dir, const Card& card_in)
 {
     namespace fs = std::filesystem;
+    // blind_spot_map_path must be ABSOLUTE in a card: the reader (chat_agent) runs from another directory. The
+    // agents' config paths are relative to their own working dir (= agent_dir), so resolve them here, once, for all.
+    Card c = card_in;
+    if (not c.blind_spot_map_path.empty() and fs::path(c.blind_spot_map_path).is_relative())
+        c.blind_spot_map_path = (fs::absolute(agent_dir) / c.blind_spot_map_path).lexically_normal().string();
     const fs::path target = card_file_path(agent_dir);
     fs::path tmp = target;  tmp += ".tmp";
     std::error_code ec;

@@ -137,10 +137,16 @@ int main()
         std::printf("iv: clear=%.3f p=%.3f occ=%s\n", clear.p, r.p, r.occluder.c_str());
         CHECK(r.p < clear.p and r.p > 0.3f and r.occluder == "post");
     }
-    { // (v) articulated, phi unset: says so
-        Card d = fridge(); d.level = Level::Articulated; d.subtypes[""].terms = {{"leaf_obliquity", {}}};
-        const auto r = evaluate_camera(d, room(), at(5.0f, 2.0f), {{2.0f, 2.0f}, std::nullopt});
-        CHECK(std::ranges::find(r.notes, std::string("phi unknown: leaf taken closed")) != r.notes.end());
+    { // (v) articulated, phi unset: marginalised over [0, phi_max], says so, and lies strictly between the extremes
+        Card d = fridge(); d.level = Level::Articulated;
+        d.subtypes[""].terms = {{"leaf_obliquity", {{"phi_max", 1.5707963f}}}};
+        const Viewpoint vp{{5.0f, 0.5f}, std::nullopt};   // along the leaf normal: shut = face-on, wide = edge-on
+        Hypothesis hu = at(5.0f, 2.0f), h0 = hu, h90 = hu;  h0.phi = 0.0f;  h90.phi = 1.5707963f;
+        const auto ru = evaluate_camera(d, room(), hu, vp);
+        const float p0 = evaluate_camera(d, room(), h0, vp).p, p90 = evaluate_camera(d, room(), h90, vp).p;
+        std::printf("v: p(unset)=%.4f p(0)=%.4f p(pi/2)=%.4f\n", ru.p, p0, p90);
+        CHECK(std::ranges::any_of(ru.notes, [](const std::string& n) { return n.starts_with("phi unknown: marginalised"); }));
+        CHECK(std::min(p0, p90) < ru.p and ru.p < std::max(p0, p90));
     }
     { // NaN safety: standing at the target centre (no obstacle) is finite, p = 0, too close
         const auto r = evaluate_camera(c, room(), at(3.0f, 2.0f), {{3.0f, 2.0f}, std::nullopt});
