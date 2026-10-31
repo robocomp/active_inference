@@ -3426,12 +3426,16 @@ bool ControllerSession::drive_door_route(const ControllerPlanningStep &step, rc:
     const bool at_vantage = not passage_door_centre_.has_value()
                             or (step.robot_pose.pos - *passage_door_centre_).norm()
                                    <= (leg.approach - *passage_door_centre_).norm() + path_controller.goal_threshold();
-    if (door_cross_servo_ and leg.through and graph_ != nullptr and at_vantage)
-        if (const auto aff = graph_->get_node("aff_" + leg.door + "_cross"); aff.has_value())
+    // Once engaged on this crossing the servo keeps going on the anchor LATCHED for it even after door_concept withdraws
+    // the cross (it does as the body passes the plane): pingpong18 leg 4 stopped 1.1 m in, 0.2 m short of the cross
+    // target, the crossing fact never written, because this block needed the affordance node.
+    const auto aff = graph_ != nullptr ? graph_->get_node("aff_" + leg.door + "_cross") : std::nullopt;
+    if (door_cross_servo_ and leg.through and graph_ != nullptr
+        and (door_passage_.servo() or (at_vantage and aff.has_value())))
         {
             ControllerPlanningStep on_anchor = step;
-            on_anchor.target.node_id = aff->id();
-            on_anchor.target.node_name = aff->name();
+            on_anchor.target.node_id = aff.has_value() ? aff->id() : 0;
+            on_anchor.target.node_name = "aff_" + leg.door + "_cross";
             on_anchor.target.from_affordance = true;
             // ★ ONLY IN FRONT OF AN OPEN DOOR (user 2026-10-31), checked several independent ways, all of which must hold:
             //   (1) door_concept believes it open: P(passable) = door_open_prob ≥ ½ on the door node;
