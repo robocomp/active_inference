@@ -3,6 +3,9 @@
 #include "perception_card/evaluator.h"
 #include <clocale>
 #include <cstdio>
+#include <filesystem>
+#include <fstream>
+#include <locale>
 
 static int bad = 0;
 #define CHECK(c) do { if (not (c)) { std::printf("FAIL line %d: %s\n", __LINE__, #c); ++bad; } } while (0)
@@ -146,6 +149,58 @@ int main()
     { // not modelled
         Card n = fridge(); n.channels[0].modelled = false;
         CHECK(evaluate_camera(n, room(), at(5, 2), {{2, 2}, std::nullopt}).limit == Limit::NotModelled);
+    }
+    { // R8: axes = 1 is EXACTLY the agents' single-fill call p_detect(fill_max, visible, env), no sigma marginalisation
+        Card a = fridge(); a.geometry = {0.3f, 1.5f, 1.8f, 0.0f, 1.8f};   // axes differ: tall and narrow on the image
+        a.subtypes[""].terms = {{"envelope", {{"min_fill", 0.0f}, {"max_fill", 1.32f}, {"soft", 0.26f}, {"axes", 1.0f}}}};
+        Card b = a; b.subtypes[""].terms[0].params["axes"] = 2.0f;
+        World w = room();
+        const Viewpoint vp{{2.0f, 2.0f}, 0.0f};
+        const auto r1 = evaluate_camera(a, w, at(5.0f, 2.0f), vp), r2 = evaluate_camera(b, w, at(5.0f, 2.0f), vp);
+        rc::nbv::Sensor sn = *w.zed; sn.env = a.subtypes[""].env;
+        const auto walls = rc::nbv::wall_obstacles(w.polygon, 0.12f, w.gaps);
+        rc::nbv::Target t; t.cx = 5; t.cy = 2; t.yaw = 0; t.w = 0.3f; t.h = 1.5f; t.z0 = 0; t.z1 = 1.8f;
+        const auto [fmax, fmin] = rc::nbv::predicted_fill_axes(t, {2.0f, 2.0f}, sn, 0.0f);
+        const float v = rc::nbv::visible_fraction(t, {2.0f, 2.0f}, 0.0f, sn, walls);
+        std::printf("axes: fmax=%.4f fmin=%.4f p1=%.6f p2=%.6f\n", fmax, fmin, r1.p, r2.p);
+        CHECK(std::abs(fmax - fmin) > 0.05f);
+        CHECK(r1.p == std::clamp(rc::detect::p_detect(fmax, v, sn.env), 0.0f, 1.0f));
+        CHECK(r1.p != r2.p);
+    }
+    { // R7: a p_clear prior < 1 scales p by exactly that factor; absent from instance_terms it does nothing
+        Card a = fridge(); a.instance_terms = {"p_clear"}; a.instance_prior = {{"p_clear", 0.5f}};
+        const Viewpoint vp{{2.0f, 2.0f}, 0.0f};
+        const float base = evaluate_camera(c, room(), at(5.0f, 2.0f), vp).p;
+        const float low = evaluate_camera(a, room(), at(5.0f, 2.0f), vp).p;
+        CHECK(std::abs(low - 0.5f * base) < 1e-6f and low < base);
+        a.instance_terms.clear();
+        CHECK(evaluate_camera(a, room(), at(5.0f, 2.0f), vp).p == base);
+    }
+    { // R7: a synthetic blind-spot map changes p at the viewpoint it describes; an unreadable one is noted and skipped
+        Card a = fridge();
+        a.calibration = "blind_spot_map"; a.instance_terms = {"blind_spot_map"};
+        const std::string path = (std::filesystem::temp_directory_path() / "evaluator_camera_test_bsm.csv").string();
+        // Viewpoint (2,2,0.945) looking at the fridge centre (5,2), top 1.8 m: az 0 (folded), el atan2(0.945-1.8, 3), lr log(hypot(3,0.855)).
+        const float el = std::atan2(0.945f - 1.8f, 3.0f), lr = std::log(std::hypot(3.0f, 0.945f - 1.8f));
+        {
+            std::ofstream f(path, std::ios::trunc); f.imbue(std::locale::classic());
+            f << "az,el,lr,r,w\n";
+            for (int i = 0; i < 20; ++i) f << 0 << ',' << el << ',' << lr << ",0,1\n";   // 20 misses right here
+        }
+        const Viewpoint vp{{2.0f, 2.0f}, 0.0f};
+        const float base = evaluate_camera(a, room(), at(5.0f, 2.0f), vp).p;      // no path yet: the card has none
+        a.blind_spot_map_path = path;
+        const auto mapped = evaluate_camera(a, room(), at(5.0f, 2.0f), vp);
+        std::printf("bsm: base=%.4f mapped=%.4f\n", base, mapped.p);
+        CHECK(mapped.p < 0.5f * base);
+        const auto far = evaluate_camera(a, room(), at(5.0f, 2.0f), {{5.0f, 0.3f}, std::nullopt});   // another viewpoint: untouched by those samples
+        Card nomap = a; nomap.blind_spot_map_path.clear();
+        CHECK(std::abs(far.p - evaluate_camera(nomap, room(), at(5.0f, 2.0f), {{5.0f, 0.3f}, std::nullopt}).p) < 0.02f);
+        a.blind_spot_map_path = path + ".missing";
+        const auto gone = evaluate_camera(a, room(), at(5.0f, 2.0f), vp);
+        CHECK(gone.p == base);
+        CHECK(std::ranges::any_of(gone.notes, [](const std::string& n) { return n.find("unreadable") != std::string::npos; }));
+        std::filesystem::remove(path);
     }
     if (bad) { std::printf("evaluator_camera_test: %d FAILURES\n", bad); return 1; }
     std::printf("evaluator_camera_test: ok\n");

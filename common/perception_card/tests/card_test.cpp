@@ -18,7 +18,7 @@ static Card make()
     d.terms = {{"envelope", {}}, {"range_conf", {{"r0", 4.5f}, {"k", 0.123456f}}}};
     SubtypeParams r;  r.env = {0.2f, 0.7f, 0.05f}; r.q_return = 0.5f; r.terms = {{"kappa", {{"x", -0.0005f}}}};
     c.subtypes[""] = d; c.subtypes["round"] = r;
-    c.instance_terms = {"motion", "coverage"};
+    c.instance_terms = {"p_clear", "blind_spot_map"}; c.instance_prior = {{"p_clear", 0.8f}};
     c.blind_spots = {"glass", "mirror"};
     c.calibration = "fitted"; c.calibration_date = "2026-10-31"; c.blind_spot_map_path = "etc/bsm \"x\".json";
     return c;
@@ -56,6 +56,7 @@ int main()
         CHECK(b.subtypes.size() == 2);
         for (const auto& [k, v] : a.subtypes) CHECK(b.subtypes.contains(k) and eq(v, b.subtypes.at(k)));
         CHECK(b.instance_terms == a.instance_terms and b.blind_spots == a.blind_spots);
+        CHECK(b.instance_prior == a.instance_prior and b.instance_prior.at("p_clear") == 0.8f);
         CHECK(b.calibration == a.calibration and b.calibration_date == a.calibration_date);
         CHECK(b.blind_spot_map_path == a.blind_spot_map_path);
         CHECK(to_json(b) == js);
@@ -68,6 +69,11 @@ int main()
         Card n = make(); n.instance_terms.push_back("magic");
         const auto e2 = card_from_json(to_json(n));
         CHECK(not e2 and e2.error().find("magic") != std::string::npos);
+        // a hypothesis term is not an instance term, and vice versa
+        Card o = make(); o.instance_terms.push_back("motion");
+        CHECK(not card_from_json(to_json(o)));
+        Card q2 = make(); q2.subtypes[""].terms.push_back({"p_clear", {}});
+        CHECK(not card_from_json(to_json(q2)));
     }
     { // missing level
         std::string j = js;

@@ -32,7 +32,7 @@ int main(int argc, char**)
     const auto& p = c.subtypes.at("");
     CHECK(near(p.env.min_fill, 0.10f) and near(p.env.max_fill, 0.60f) and near(p.env.soft, 0.06f));
     CHECK(near(p.q_return, 0.85f));
-    CHECK(p.terms.size() == 1 and p.terms[0].name == "envelope");
+    CHECK(p.terms.size() == 1 and p.terms[0].name == "envelope" and near(p.terms[0].params.at("axes"), 2.0f));
     CHECK(near(c.geometry.w, 0.062f) and near(c.geometry.h, 0.20f) and near(c.geometry.z1, 0.20f));
     CHECK(c.calibration == "prior");
     const auto back = card::card_from_json(card::to_json(c));

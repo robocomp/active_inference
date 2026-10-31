@@ -26,8 +26,9 @@ inline card::Card make_card(const RefrigeratorConfig& cfg)
     card::SubtypeParams sp;
     sp.env = {cfg.detect_min_fill, cfg.detect_max_fill, cfg.detect_soft};
     sp.q_return = cfg.existence_detection_prob;
-    sp.terms = {{"envelope", {{"min_fill", sp.env.min_fill}, {"max_fill", sp.env.max_fill}, {"soft", sp.env.soft}}},
+    sp.terms = {{"envelope", {{"min_fill", sp.env.min_fill}, {"max_fill", sp.env.max_fill}, {"soft", sp.env.soft}, {"axes", 1.0f}}},
                 {"central", {}}};
+    // axes = 1: the agent calls the single-fill p_detect(sil.fill = max axis, in_fov, env), with no sigma marginalisation.
     c.subtypes[""] = sp;
     c.blind_spots = {
         "Nose-to-nose (fill above about 1.3 of the frame) the mask truncates; the envelope shoulder is gradual (soft 0.26).",

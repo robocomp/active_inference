@@ -53,7 +53,8 @@ struct Card
     std::vector<Channel> channels;
     GeometryPrior geometry;
     std::map<std::string, SubtypeParams> subtypes;   // key "" = default
-    std::vector<std::string> instance_terms;
+    std::vector<std::string> instance_terms;          // names from kInstanceTermNames (per-INSTANCE state, not hypothesis terms)
+    std::map<std::string, float> instance_prior;       // value a hypothesis (no instance history) takes for an instance term: "p_clear"
     std::vector<std::string> blind_spots;
     std::string calibration;                          // "prior" | "fitted" | "blind_spot_map"
     std::string calibration_date;
@@ -63,6 +64,15 @@ struct Card
 // The closed list of term names. Task 2 implements one function per name.
 inline constexpr std::array kTermNames{"envelope", "in_fov", "central", "range_conf", "leaf_obliquity",
                                        "resolvability", "kappa", "coverage", "motion"};
+
+// Instance terms are NOT hypothesis terms: they describe per-instance state (a score history, a learned map).
+// Their own closed list; the evaluator marginalises each at its prior for a hypothetical object.
+inline constexpr std::array kInstanceTermNames{"p_clear", "blind_spot_map"};
+
+inline bool is_instance_term_name(std::string_view n)
+{
+    return std::ranges::any_of(kInstanceTermNames, [&](std::string_view k) { return k == n; });
+}
 
 inline bool is_term_name(std::string_view n)
 {
@@ -156,6 +166,7 @@ inline std::string to_json(const Card& c)
             for (const auto& [pn, pv] : sp.terms[t].params) kvf(tp + "p." + pn, pv);
         }
     }
+    for (const auto& [k, v] : c.instance_prior) kvf("instance_prior." + k, v);
     kvs("instance_terms", detail::join(c.instance_terms));
     kvs("blind_spots", detail::join(c.blind_spots));
     kvs("calibration", c.calibration);
@@ -261,7 +272,14 @@ inline std::expected<Card, std::string> card_from_json(std::string_view json)
     }
     c.instance_terms = detail::split(text("instance_terms"));
     for (const auto& t : c.instance_terms)
-        if (not is_term_name(t)) return Err("card: unknown term '" + t + "'");
+        if (not is_instance_term_name(t)) return Err("card: unknown instance term '" + t + "'");
+    for (const auto& [k, v] : kv)
+        if (k.starts_with("instance_prior."))
+        {
+            const auto f = num(k);
+            if (not f) return Err("card: " + f.error());
+            c.instance_prior[k.substr(15)] = *f;
+        }
     c.blind_spots = detail::split(text("blind_spots"));
     c.calibration = text("calibration");
     c.calibration_date = text("calibration_date");

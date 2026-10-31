@@ -51,3 +51,4 @@ target_include_directories(table_card_test PRIVATE ../src ../../common ../../com
 target_compile_definitions(table_card_test PRIVATE AGENT_DIR="${CMAKE_CURRENT_LIST_DIR}/..")
 target_compile_options(table_card_test PRIVATE -O2)
 add_test(NAME table_card_test COMMAND table_card_test)
+target_link_libraries(table_card_test PRIVATE Eigen3::Eigen)

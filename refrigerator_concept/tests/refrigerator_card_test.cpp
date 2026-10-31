@@ -33,6 +33,7 @@ int main(int argc, char**)
     CHECK(near(p.env.min_fill, 0.0f) and near(p.env.max_fill, 1.32f) and near(p.env.soft, 0.26f));
     CHECK(near(p.q_return, 0.85f));
     CHECK(p.terms.size() == 2 and p.terms[0].name == "envelope" and p.terms[1].name == "central");
+    CHECK(near(p.terms[0].params.at("axes"), 1.0f));
     CHECK(near(c.geometry.w, 0.60f) and near(c.geometry.d, 0.60f) and near(c.geometry.h, 1.90f));
     CHECK(near(c.geometry.z0, 0.0f) and near(c.geometry.z1, 1.90f));
     CHECK(c.calibration == "fitted" and c.calibration_date == "2026-08-08");

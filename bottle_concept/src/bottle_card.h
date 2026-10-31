@@ -27,7 +27,7 @@ inline card::Card make_card(const BottleConfig& cfg)
     card::SubtypeParams sp;
     sp.env = {cfg.detect_min_fill, cfg.detect_max_fill, cfg.detect_soft};
     sp.q_return = cfg.existence_detection_prob;
-    sp.terms = {{"envelope", {{"min_fill", sp.env.min_fill}, {"max_fill", sp.env.max_fill}, {"soft", sp.env.soft}}}};
+    sp.terms = {{"envelope", {{"min_fill", sp.env.min_fill}, {"max_fill", sp.env.max_fill}, {"soft", sp.env.soft}, {"axes", 2.0f}}}};
     c.subtypes[""] = sp;
     c.blind_spots = {
         "A 6 cm object is where YOLO gives up first: a missing mask can be absence of the label, not of the bottle.",

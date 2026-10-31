@@ -34,6 +34,7 @@ int main(int argc, char**)
     CHECK(near(p.env.min_fill, 0.10f) and near(p.env.max_fill, 0.60f) and near(p.env.soft, 0.06f));
     CHECK(near(p.q_return, 0.55f));   // etc/config.toml ExistenceDetectionProb (the manifest's measured 0.355 is not what runs)
     CHECK(p.terms.size() == 2 and p.terms[0].name == "envelope" and p.terms[1].name == "central");
+    CHECK(near(p.terms[0].params.at("axes"), 1.0f));
     CHECK(near(c.geometry.w, 0.90f) and near(c.geometry.d, 0.50f) and near(c.geometry.h, 0.50f));
     CHECK(near(c.geometry.z0, 1.55f) and near(c.geometry.z1, 2.05f));
     CHECK(c.calibration == "prior");

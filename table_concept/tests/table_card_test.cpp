@@ -5,6 +5,7 @@
 #include <clocale>
 #include <cmath>
 #include <cstdio>
+#include <algorithm>
 
 static int bad = 0;
 #define CHECK(c) do { if (not (c)) { std::printf("FAIL line %d: %s\n", __LINE__, #c); ++bad; } } while (0)
@@ -35,9 +36,23 @@ int main(int argc, char**)
         CHECK(near(p.env.min_fill, 0.10f) and near(p.env.max_fill, 0.60f) and near(p.env.soft, 0.06f));
         CHECK(near(p.q_return, 0.85f));
         CHECK(p.terms.size() == 2 and p.terms[0].name == "envelope" and p.terms[1].name == "central");
-        CHECK(near(p.terms[0].params.at("max_fill"), 0.60f));
+        CHECK(near(p.terms[0].params.at("max_fill"), 0.60f) and near(p.terms[0].params.at("axes"), 1.0f));
     }
+    CHECK(c.instance_terms == (std::vector<std::string>{"p_clear", "blind_spot_map"}) and near(c.instance_prior.at("p_clear"), 1.0f));
+    CHECK(near(c.geometry.w, 1.0f) and near(c.geometry.d, 0.6f) and near(c.geometry.h, 0.75f));   // TableState defaults
     CHECK(c.calibration == "prior" and c.blind_spot_map_path.empty());
+    { // existence_absence_envelope = false: the terms the agent then runs (config ref/power, in_fov, central), no envelope
+        TableConfig f = cfg;  f.existence_absence_envelope = false;
+        f.existence_absence_range_ref_m = toml_peek(toml, "ExistenceAbsenceRangeRefM", f.existence_absence_range_ref_m);
+        f.existence_absence_range_power = toml_peek(toml, "ExistenceAbsenceRangePower", f.existence_absence_range_power);
+        const card::Card k = make_card(f);
+        const auto& t = k.subtypes.at("round").terms;
+        CHECK(t.size() == 3 and t[0].name == "range_conf" and t[1].name == "in_fov" and t[2].name == "central");
+        CHECK(near(t[0].params.at("ref_m"), 2.5f) and near(t[0].params.at("power"), 2.0f));
+        CHECK(not std::ranges::any_of(t, [](const card::TermSpec& s) { return s.name == "envelope"; }));
+        const auto back = card::card_from_json(card::to_json(k));
+        CHECK(back.has_value() and card::to_json(*back) == card::to_json(k));
+    }
     CHECK(near(c.geometry.z1, 0.75f) and near(c.geometry.z0, 0.0f));
     // A loaded blind-spot map switches calibration and carries its path.
     cfg.existence_blind_spot_map = true;

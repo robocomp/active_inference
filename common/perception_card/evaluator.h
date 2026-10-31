@@ -16,11 +16,16 @@
 #include "media_transport/sensor_model.h"   // rc::media::SensorModel -- DDS-free (factored out of media_transport.h)
 #include "perception_card/card.h"
 #include "perception_card/terms.h"
+#include "detectability/blind_spot_map.h"   // the existing loader/query of the learned per-viewpoint correction
 
 #include <Eigen/Geometry>
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <filesystem>
+#include <map>
+#include <memory>
+#include <mutex>
 #include <numbers>
 #include <span>
 #include <optional>
@@ -113,6 +118,29 @@ inline std::string name_occluder(const World& world, const rc::nbv::Target& t, c
 }
 }  // namespace detail
 
+namespace detail
+{
+// The blind-spot map a card points at, loaded through rc::detect::BlindSpotMap::load and cached per (path, mtime)
+// so where_to_stand's ~100 evaluations read the file once. nullptr (and *err set) when it cannot be read or is empty.
+inline std::shared_ptr<const rc::detect::BlindSpotMap> blind_spot_map_for(const std::string& path, std::string* err)
+{
+    static std::mutex mu;
+    static std::map<std::string, std::pair<std::filesystem::file_time_type, std::shared_ptr<const rc::detect::BlindSpotMap>>> cache;
+    std::error_code ec;
+    const auto mt = std::filesystem::last_write_time(path, ec);
+    if (ec) { *err = "blind-spot map unreadable: " + path; return nullptr; }
+    const std::scoped_lock lk(mu);
+    auto& slot = cache[path];
+    if (not slot.second or slot.first != mt)
+    {
+        auto m = std::make_shared<rc::detect::BlindSpotMap>();
+        slot = {mt, m->load(path) > 0 ? std::shared_ptr<const rc::detect::BlindSpotMap>(m) : nullptr};
+    }
+    if (not slot.second) *err = "blind-spot map empty or unreadable: " + path;
+    return slot.second;
+}
+}  // namespace detail
+
 inline ChannelResult evaluate_camera(const Card& card, const World& world, const Hypothesis& h, const Viewpoint& vp)
 {
     namespace nbv = rc::nbv;
@@ -136,6 +164,32 @@ inline ChannelResult evaluate_camera(const Card& card, const World& world, const
     const GeometryPrior g = h.size.value_or(card.geometry);
     nbv::Target t;
     t.cx = h.x; t.cy = h.y; t.yaw = h.yaw; t.w = g.w; t.h = g.d; t.z0 = g.z0; t.z1 = g.z1;
+
+    // The envelope's arity (R8): axes = 1 is the agents' single-fill call p_detect(fill = max axis, visible, env), with
+    // no fill-sigma marginalisation (table / refrigerator / hood do none); axes = 2 is the two-axis marginalised path.
+    // A card that lists range_conf and no envelope (table with existence_absence_envelope = false) has no fill model.
+    const auto env_it = std::ranges::find_if(sp.terms, [](const TermSpec& s) { return s.name == "envelope"; });
+    const bool has_range_conf = std::ranges::any_of(sp.terms, [](const TermSpec& s) { return s.name == "range_conf"; });
+    const bool use_env = env_it != sp.terms.end() or not has_range_conf;
+    const int axes = env_it != sp.terms.end() and env_it->params.contains("axes") and env_it->params.at("axes") < 1.5f ? 1 : 2;
+    const auto env_val = [&](float fmax, float fmin, float sig, float v)
+    {
+        if (not use_env) return std::clamp(v, 0.0f, 1.0f);
+        if (axes == 1) return rc::detect::p_detect(fmax, v, sensor.env);
+        return nbv::expected_p_detect(fmax, fmin, sig, v, sensor.env);
+    };
+    // Instance terms, marginalised at their prior for a hypothetical object (no score history).
+    const auto has_inst = [&](std::string_view n) { return std::ranges::find(card.instance_terms, n) != card.instance_terms.end(); };
+    const float f_inst = has_inst("p_clear") and card.instance_prior.contains("p_clear")
+                             ? std::clamp(card.instance_prior.at("p_clear"), 0.0f, 1.0f) : 1.0f;
+    std::shared_ptr<const rc::detect::BlindSpotMap> bsm;
+    if (card.calibration == "blind_spot_map" and not card.blind_spot_map_path.empty())
+    {
+        std::string err;
+        bsm = detail::blind_spot_map_for(card.blind_spot_map_path, &err);
+        if (not bsm) out.notes.push_back(err + " (skipped)");
+        else out.notes.push_back("limit analysis ignores the blind-spot map");
+    }
 
     const Eigen::Vector2f from = vp.xy;
     const Eigen::Vector2f to_obj = t.centre() - from;
@@ -173,7 +227,7 @@ inline ChannelResult evaluate_camera(const Card& card, const World& world, const
             if (s.name == "leaf_obliquity") { if (articulated) f_obl *= eval_term(s, in); }
             else f_rest *= eval_term(s, in);
         }
-        return {f_obl, f_rest};
+        return {f_obl, f_rest * f_inst};
     };
 
     const auto p_at = [&](const nbv::Target& tt)
@@ -182,7 +236,18 @@ inline ChannelResult evaluate_camera(const Card& card, const World& world, const
         const auto [fo, fr] = card_factors(tt);
         if (mass) return v * fo * fr;                      // spec §2: a mass is COVERAGE only, no detector envelope
         const auto [fmax, fmin] = nbv::predicted_fill_axes(tt, from, sensor, yaw);
-        return nbv::expected_p_detect(fmax, fmin, nbv::predicted_fill_sigma(tt, from, sensor), v, sensor.env) * fo * fr;
+        const float sg = nbv::predicted_fill_sigma(tt, from, sensor);
+        if (not bsm) return env_val(fmax, fmin, sg, v) * fo * fr;
+        // The learned correction is per VIEWPOINT, so it applies to a hypothesis too: same view coordinates, prior
+        // (without visibility) and re-multiplication by visibility as table_existence.cpp does at the query site.
+        const Eigen::Vector2f d = from - tt.centre();
+        const float horiz = d.norm(), dz = sensor.height_m - tt.z1;
+        rc::detect::Viewpoint view;
+        view.az = rc::detect::fold_bearing(std::atan2(d.y(), d.x()) - tt.yaw, h.subtype == "round");
+        view.el = std::atan2(dz, horiz);
+        view.lr = std::log(std::max(0.05f, std::hypot(horiz, dz)));
+        const float prior = std::clamp(env_val(fmax, fmin, sg, 1.0f) * fo * fr, 0.0f, 1.0f);
+        return bsm->query(0, view, prior).p * v;
     };
 
     // ── P: the animate level marginalises the position over sigma^2 = sigma0^2 + k * seconds_unseen ────────────
@@ -224,7 +289,7 @@ inline ChannelResult evaluate_camera(const Card& card, const World& world, const
     const float v_no_wall = nbv::visible_fraction(t, from, yaw, sensor, objs);
     const float v_no_obj  = nbv::visible_fraction(t, from, yaw, sensor, walls);
     const auto [f_obl, f_rest] = card_factors(t);
-    const auto env_p = [&](float v) { return mass ? v : nbv::expected_p_detect(fmax, fmin, sig_fill, v, sensor.env); };
+    const auto env_p = [&](float v) { return mass ? v : env_val(fmax, fmin, sig_fill, v); };
     const float now = env_p(v_all) * f_obl * f_rest;
 
     Limit env_label = fmax > nbv::framing_fill(sensor) ? Limit::TooClose : Limit::TooSmall;
