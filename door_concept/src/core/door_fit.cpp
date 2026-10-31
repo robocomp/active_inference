@@ -1049,7 +1049,10 @@ void DoorFit::estimate_phi(rc::DoorFitState& inst)
     // ★ A FACE BACKED BY A CROSSING KEEPS ITS LEAF (FACT_HOLD, spec 2026-10-29 Rev 3). The body went through: that is the
     //   observation of the leaf, and views from in or near the doorway cannot outweigh it (pingpong2: door_1's leaf re-judged
     //   from inside the doorway, the entry face inherited "shut"). Our own command still moves it (close-behind).
-    if (inst.fact_backed and not have_prior)
+    //   ★ 2026-10-31 (user: "hold both"): held WHATEVER the prior — pingpong13 door_6, the entry mirror, carried the
+    //   remembered 85 deg as a prior, so the old `and not have_prior` let it be re-estimated from inside room_1: 85 -> 66.6
+    //   deg, P(passable) 0.045, RETRACTED, `open` on an open door, door_wont_open. Only our own swing moves a backed leaf.
+    if (inst.fact_backed and not inst.phi_cmd_active)
         return;
 
     // ─── THE CAMERA DOES NOT SCORE THE LEAF ANGLE (removed 2026-09-14) ─────────────────────────────

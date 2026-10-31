@@ -252,6 +252,12 @@ void DoorCore::fit_doors(DoorCycleOutput& out)
         // Stale check: skip heavy update if data hasn't moved for too long
         if (not rc::door::fitted_this_cycle(observation.has_fresh_data, inst->matched_frames))
             continue;
+        // ★ A FACE BACKED BY A CROSSING KEEPS ITS POSE AND ITS LEAF (FACT_HOLD; user 2026-10-31 "hold both"): the body went
+        //   through it, where it is and that it is open are what the crossing measured. pingpong13 door_6 (the entry mirror)
+        //   was refit from inside room_1 1 m along the wall and its leaf 85 -> 66.6 deg, then retracted. No refit while
+        //   backed, except while our own command swings the leaf (close-behind).
+        if (inst->fact_backed and not inst->phi_cmd_active)
+            continue;
 
         const float free_energy = fit_.run_inference(*inst, observation);
         world_->after_fit(id, observation, free_energy);
