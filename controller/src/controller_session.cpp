@@ -3373,7 +3373,7 @@ bool ControllerSession::drive_door_route(const ControllerPlanningStep &step, rc:
         if (const auto seen = perceived_door(leg.door, step.robot_pose); seen.has_value())
         {
             const std::string room = leg.key.substr(leg.key.rfind('|') + 1);
-            if (door_route_latch_room_ != room) { door_route_latch_room_ = room; door_route_n0_key_.clear(); door_route_through_key_.clear(); }
+            if (door_route_latch_room_ != room) { door_route_latch_room_ = room; door_route_n0_key_.clear(); door_route_through_key_.clear(); door_route_last_s_body_ = -1e9f; }
             const std::string latch = leg.door + "|" + room;
             const float half_w = std::max(approach_body_.support_radius(0.f, Eigen::Vector2f(1.f, 0.f)),
                                           approach_body_.support_radius(0.f, Eigen::Vector2f(-1.f, 0.f)));
@@ -3389,8 +3389,12 @@ bool ControllerSession::drive_door_route(const ControllerPlanningStep &step, rc:
             const float s_body = (cpose.pos - seen->gap.centre).dot(n);
             // Once any part of the body is in the opening the route is not rebuilt on it (a route from the doorway failed).
             door_route_body_in_opening_ = s_body > -r_body;
-            // Driven on the anchor, THROUGH is the servo's own: the body at the cross target (deep entry, note_deep).
-            const bool through_now = door_passage_.servo() ? door_passage_.deep() : s_body > r_body;
+            door_route_last_s_body_ = s_body;
+            door_route_last_r_body_ = r_body;
+            // Driven on the anchor, THROUGH is the servo's own (the body at the cross target, deep entry) AND the body
+            // wholly past the opening as measured here: two measures of one doorway must agree (pingpong14 leg 7: the
+            // servo's measured gap read 1.31 m past while this read 0.27 m, the robot pressed on the jamb 0.38 m short).
+            const bool through_now = door_passage_.servo() ? door_passage_.deep() and s_body > r_body : s_body > r_body;
             if (door_route_through_key_ != latch and through_now)
             {
                 door_route_through_key_ = latch;
@@ -3400,7 +3404,7 @@ bool ControllerSession::drive_door_route(const ControllerPlanningStep &step, rc:
             }
         }
     // the servo's THROUGH needs no fresh reading of the opening: it was measured on it (or its held gap) by the servo itself
-    if (leg.through and door_passage_.servo() and door_passage_.deep())
+    if (leg.through and door_passage_.servo() and door_passage_.deep() and door_route_last_s_body_ > door_route_last_r_body_)
         if (const std::string latch = leg.door + "|" + leg.key.substr(leg.key.rfind('|') + 1); door_route_through_key_ != latch)
         {
             door_route_through_key_ = latch;

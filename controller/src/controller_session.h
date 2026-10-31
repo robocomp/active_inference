@@ -1186,6 +1186,8 @@ private:
     std::string door_route_latch_room_;                            // the room the latch belongs to (a change resets it)
     bool door_route_body_in_opening_ = false;                      // some part of the body is in the perceived opening
     bool door_cross_servo_ = false;          ///< [DoorPassage] CrossServo
+    float door_route_last_s_body_ = -1e9f;    ///< the body's s past the perceived opening, last measured (drive_door_route)
+    float door_route_last_r_body_ = 0.f;      ///< the body's circumscribed radius used with it
     std::uint64_t anchor_servo_last_ms_ = 0;  ///< the AIF law's last step (its control period)
     std::string door_servo_logged_;           ///< the leg key whose servo hand-over was logged
     std::uint64_t door_route_anchor_id_ = 0;                        // the anchor whose PERCEIVED opening the route was built on (0 = the room-frame door)
