@@ -202,9 +202,12 @@ int RoomRecall::step()
             const auto ins = live_->insert_node(node.value());
             if (not ins.has_value()) continue;
             id = ins.value();
+            const Eigen::Matrix4d M = T.value().matrix();
             qInfo().noquote() << QString::fromStdString(std::format(
-                "[recall] {} posted under {}: behind it lies remembered {} (passage face {} ↔ {})",
-                rname, door.name(), mroom->name(), face.name(), other->name()));
+                "[recall] {} posted under {}: behind it lies remembered {} (passage face {} ↔ {}); RT door<-room = "
+                "face {} <- {} in memory: ({:+.3f},{:+.3f}) yaw {:+.1f} deg",
+                rname, door.name(), mroom->name(), face.name(), other->name(), other->name(), mroom->name(),
+                M(0, 3), M(1, 3), std::atan2(M(1, 0), M(0, 0)) * 57.29578));
         }
         else
             live_->update_node(node.value());
