@@ -9,7 +9,7 @@
  * to render the mesh in ChairSceneGraph.
  *
  * State vector θ = [cx, cy, cz, yaw, seat_w, seat_d, seat_h, back_h]  (8 params)
- * Fixed geometry: seat thickness = ChairPrior::seat_thick (manifest), LEG_HALF = 0.02 m (square leg half-side)
+ * Fixed geometry: seat thickness = ChairPrior::seat_thick (manifest), leg half-side = ChairPrior::leg_half (manifest)
  * Compound SDF = min(SDF_seat, SDF_back, min_k SDF_leg_k)
  */
 
@@ -60,7 +60,6 @@ class ChairModel
 public:
     using State = ChairState;   // for any shared Model-templated helper
 
-    static constexpr float LEG_HALF       = 0.02f;   // square leg half-side
     static constexpr float SDF_SMOOTH_K  = 0.02f;
     static constexpr float SDF_INSIDE_SCALE = 0.3f;
 

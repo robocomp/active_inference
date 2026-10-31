@@ -256,7 +256,6 @@ struct ChairConfig
     // was largely an artefact of the square 0.45x0.45 template. Re-derive these for any new chair model.
     // seat_w/d/h, back_h, seat_thick and the size std come from the concept manifest (single source).
     ChairPrior prior;
-    float tracker_birth_leg_half   = 0.0375f; // square leg half-side
 
     // ── Discrete yaw-mode evidence weighting (see ChairBeliefParams::mode_obs_weighting) ──────────
     // Weight each frame's yaw-mode vote by the information it carries (backrest mass × viewpoint

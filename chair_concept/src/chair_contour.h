@@ -48,7 +48,8 @@ namespace rc
 
 struct ChairOutlineDims
 {
-    float seat_w = 0.60f, seat_d = 0.52f, seat_h = 0.595f, back_h = 0.655f, seat_thickness = 0.075f;
+    // 0 ON PURPOSE (like ChairState): the only caller seeds every field from the belief, which holds the manifest template.
+    float seat_w = 0.0f, seat_d = 0.0f, seat_h = 0.0f, back_h = 0.0f, seat_thickness = 0.0f;
     float floor_z = 0.0f;
 };
 

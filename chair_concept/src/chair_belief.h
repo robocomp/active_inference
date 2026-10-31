@@ -44,7 +44,7 @@ struct ChairBeliefParams
 {
     // The birth TEMPLATE, from the manifest prior (single source). Every user of a ChairBeliefParams calls this.
     void seed_template(const ChairPrior& p)
-    { tpl_seat_w = p.seat_w; tpl_seat_d = p.seat_d; tpl_seat_h = p.seat_h; tpl_back_h = p.back_h; seat_thickness = p.seat_thick; }
+    { tpl_seat_w = p.seat_w; tpl_seat_d = p.seat_d; tpl_seat_h = p.seat_h; tpl_back_h = p.back_h; seat_thickness = p.seat_thick; leg_half = p.leg_half; }
 
     // ── Fixed standard-chair TEMPLATE (the belief estimates pose only; a global scale can multiply these
     //    later). Legs sit at the seat corners; the backrest on the −y seat edge. ──
@@ -53,7 +53,7 @@ struct ChairBeliefParams
     // misattributed the seat/backrest z-band — see chair.concept.toml [prior.template] for the full account.
     float tpl_seat_w = 0.0f, tpl_seat_d = 0.0f, tpl_seat_h = 0.0f, tpl_back_h = 0.0f;
     float seat_thickness = 0.0f;
-    float leg_half       = 0.0375f;   // square leg half-side
+    float leg_half       = 0.0f;      // square leg half-side; from the manifest via seed_template()
     float floor_z        = 0.0f;    // room-frame floor: cz is PINNED here (not a DOF)
     float floor_std      = 0.03f;   // floor-height uncertainty (m) → published z covariance
 

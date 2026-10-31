@@ -44,7 +44,7 @@ struct SampleSet
     std::vector<Sample> samples;
     int drawn = 0;
     int rejected = 0;          // physical: a part inside a wall or an obstacle (or no room beside the wall)
-    int outside_polygon = 0;   // the draw's centre fell outside the room polygon (counted apart from rejected)
+    int outside_polygon = 0;   // the draw's centre (or, for a free draw, any part-box corner) fell outside the room polygon
     std::uint64_t seed = 0;
     std::vector<std::string> notes;
 };
@@ -337,6 +337,19 @@ inline SampleSet sample_concept(const Card& card, const World& world, const Cont
         }
         if (has_poly and chosen != "at" and not inside(sm.x, sm.y)) { ++out.outside_polygon; continue; }
         sm.parts = instantiate(g, sm.state, sm.x, sm.y, sm.yaw);
+        // A free draw must lie wholly in the room: ANY part-box corner outside the polygon rejects it (a centre inside
+        // is not enough: a chair centred beside a door gap would straddle the wall line through the gap).
+        if (has_poly and chosen == "free")
+        {
+            const bool all_in = std::ranges::all_of(sm.parts.boxes, [&](const auto& b)
+            {
+                const float bc = std::cos(b.yaw), bs = std::sin(b.yaw);
+                for (const float sx : {-0.5f, 0.5f}) for (const float sy : {-0.5f, 0.5f})
+                    if (not inside(b.cx + sx * b.w * bc - sy * b.h * bs, b.cy + sx * b.w * bs + sy * b.h * bc)) return false;
+                return true;
+            });
+            if (not all_in) { ++out.outside_polygon; continue; }
+        }
         const bool hit = std::ranges::any_of(sm.parts.boxes, [&](const auto& b)
         { return std::ranges::any_of(obstacles, [&](const auto& o) { return boxes_overlap(b, o); }); });
         if (hit) { ++out.rejected; continue; }
@@ -344,7 +357,7 @@ inline SampleSet sample_concept(const Card& card, const World& world, const Cont
     }
     if (out.rejected > 0 or out.outside_polygon > 0 or static_cast<int>(out.samples.size()) < n)
         note("drew " + std::to_string(out.drawn) + ": accepted " + std::to_string(out.samples.size()) + " of " + std::to_string(n) +
-             ", physical rejections " + std::to_string(out.rejected) + ", centre outside polygon " + std::to_string(out.outside_polygon) +
+             ", physical rejections " + std::to_string(out.rejected) + ", centre/corner outside polygon " + std::to_string(out.outside_polygon) +
              (static_cast<int>(out.samples.size()) < n ? " (stopped at max_draws)" : ""));
     return out;
 }
@@ -352,7 +365,8 @@ inline SampleSet sample_concept(const Card& card, const World& world, const Cont
 // ---- Monte-Carlo P(detect) of a HYPOTHETICAL object: the evaluator averaged over the concept prior on its sizes ----
 struct McResult { float p_notice_mean = 0, p_notice_sd = 0, p_recognise_mean = 0, p_recognise_sd = 0; Limit modal_limit = Limit::None; int n = 0; };
 
-// Samples the SIZES from the card's generative prior (pose stays at base x, y, yaw), instantiates each, and evaluates with
+// Samples the SIZES from the card's generative prior; the POSE IS FIXED at base x, y, yaw (a caller that wants the pose drawn
+// too, with physical rejection, uses sample_concept and aggregates with mc_over_samples instead), instantiates each, and evaluates with
 // the sample's overall bounding box as the Hypothesis size. sd = population SD over the n samples. modal_limit = most
 // frequent limit (ties to the lower enum value). n < 1 is clamped to 1. A card without a generative block yields one plain evaluate() (n = 1).
 inline McResult evaluate_mc(const Card& card, const World& world, const Hypothesis& base, const Viewpoint& vp, int n, std::uint64_t seed)

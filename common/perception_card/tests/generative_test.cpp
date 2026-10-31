@@ -245,6 +245,25 @@ int main()
         CHECK(near_door_wall > 50); CHECK(clear);
         std::printf("P4 doorway: %d of 1000 chairs on the doorway's wall, none over the gap: %s\n", near_door_wall, clear ? "yes" : "NO");
     }
+    // free placement: EVERY part-box corner lies inside the polygon, not only the centre
+    {
+        Card pc = chair_card(); Context ctx; ctx.force_context = "free";
+        World e; e.polygon = room(2.0f, 1.4f);   // small, so many centre-inside draws would overhang a wall
+        const auto s = sample_concept(pc, e, ctx, 300, 31);
+        CHECK(s.samples.size() == 300);
+        bool all_in = true;
+        for (const auto& sm : s.samples)
+            for (const auto& b : sm.parts.boxes)
+            {
+                const float bc = std::cos(b.yaw), bs = std::sin(b.yaw);
+                for (const float sx : {-0.5f, 0.5f}) for (const float sy : {-0.5f, 0.5f})
+                {
+                    const float px = b.cx + sx * b.w * bc - sy * b.h * bs, py = b.cy + sx * b.w * bs + sy * b.h * bc;
+                    if (px < 0 or px > 2.0f or py < 0 or py > 1.4f) all_in = false;
+                }
+            }
+        CHECK(all_in); CHECK(s.outside_polygon > 0);
+    }
     // 11. evaluate_mc: the evaluator averaged over the size prior
     {
         Card mc = chair_card(); mc.graph_type = "object"; mc.level = Level::Countable;

@@ -32,8 +32,11 @@ perception cards' closed-term principle applied to shape: imagination must not d
 
 **The shape model.** `chair_model.h` holds the compound SDF the fitter uses to split masks:
 - the state is `ChairState{cx, cy, cz, yaw, seat_w, seat_d, seat_h, back_h}`, with `cz` pinned to the floor;
-- the fixed constants are seat thickness (0.04 m in the model; `Tracker.BirthSeatThick` 0.075 in the config) and
-  leg half-side 0.02 m;
+- the fixed constants were seat thickness (0.04 m in the model; `Tracker.BirthSeatThick` 0.075 in the config) and
+  leg half-side (0.02 m in the SDF; `Tracker.BirthLegHalf` 0.0375 in the config, used by the belief). Resolved
+  (ruling P8, 2026-10-31): both are manifest values, `seat_thick_m = 0.075` and `leg_half_m = 0.0375` (the Webots
+  SimpleChair's legs are 7.5 cm across), read once into `ChairPrior` and fed to the belief, ChairModel's SDF, the mesh
+  and the card;
 - SDF = min(seat slab, backrest panel, 4 legs).
 
 **Three sources disagree on the chair's size:**
@@ -44,7 +47,7 @@ perception cards' closed-term principle applied to shape: imagination must not d
 | `common/concept_manifest/chair.concept.toml` (`from = "nominal"`; says size is a FIXED template, pose-only state) | — | 0.45 | 0.45 | 0.90 |
 | `etc/config.toml` `Tracker.BirthSeat*`, which the agent RUNS and the card now uses (Task 9) | 0.60 × 0.52 | 0.595 | 0.655 | 1.25 |
 
-Plus a size spread `ChairModel.AI2PriorSizeStd = 0.15`. The manifest also still says removal uses
+Plus a size spread `ChairModel.AI2PriorSizeStd = 0.15`, which no code path ever read (the agent never ran with it). The manifest also still says removal uses
 `zed_detectability()`, which Task 9 replaced.
 
 **Decision (step 0). The user said "we need one source of truth"; the mechanism below is my proposal, pending a
@@ -52,11 +55,11 @@ yes.**
 - **The concept manifest becomes the single source of the chair prior.** `common/concept_manifest/chair.concept.toml`
   holds "what a chair IS, world facts"; config is tuning.
 - **The values it takes** are the ones the agent RUNS today:
-  - seat 0.60 × 0.52, seat top 0.595, backrest 0.655 (top 1.25), seat thickness 0.075, size σ 0.15;
+  - seat 0.60 × 0.52, seat top 0.595, backrest 0.655 (top 1.25), seat thickness 0.075, leg half-side 0.0375, and one σ per size variable (seat_w 0.05, seat_d 0.04, seat_h 0.03, back_h 0.06; the user's call, replacing the unread shared 0.15);
   - each with provenance;
   - the stale "fixed template" and `zed_detectability` text is corrected.
 - **chair_concept reads the prior from the manifest at startup.**
-  - `Tracker.BirthSeat*` and `ChairModel.AI2PriorSizeStd` are removed from `etc/config.toml`.
+  - `Tracker.BirthSeat*`, `Tracker.BirthLegHalf` and `ChairModel.AI2PriorSizeStd` are removed from `etc/config.toml`.
   - The birth template, the belief prior and the card's generative block all read the same struct.
 - **`ChairState{}` defaults stop carrying chair facts.**
   - The initial state is built from the manifest.
@@ -73,7 +76,7 @@ its own model and config, the same way it fills the detection terms. The block h
 **4.1 Shape program.** A closed vocabulary of primitives parameterised by state variables:
 - primitives: `box`, `cylinder`, `slab`, `panel`, `leg_set` (n legs at the corners of a footprint);
 - for chair: `slab(seat_w, seat_d, thick @ z = seat_h − thick)`, `panel(seat_w, thick, back_h @ the −y edge, from
-  z = seat_h)`, `leg_set(4, half = 0.02, from 0 to seat_h − thick)`;
+  z = seat_h)`, `leg_set(4, half = leg_half_m = 0.0375, from 0 to seat_h − thick)`;
 - the program is written by the agent from the same constants its SDF uses.
 - Test: the primitives' union must match `ChairModel::sdf_point_at` at sampled points (the sign agrees, the
   distance agrees within the primitive approximation). This is the shape version of the term-identity test.
@@ -81,8 +84,9 @@ its own model and config, the same way it fills the detection terms. The block h
 **4.2 State distribution.**
 - One entry per state variable: `mean`, `sigma`, `lo`, `hi`.
   - Sizes are log-normal or truncated normal within physical bounds.
-  - Means come from the birth template; sigmas from `AI2PriorSizeStd` (and per-variable values where the config
-    has them).
+  - Means come from the birth template; sigmas are one per variable, from the manifest `[prior.template]`
+    (`seat_w_std_m` 0.05, `seat_d_std_m` 0.04, `seat_h_std_m` 0.03, `back_h_std_m` 0.06). `AI2PriorSizeStd` was never
+    read and is gone. The manifest is the single source; no config entry mirrors it.
 - Categorical subtypes, where the concept has them: table round/square from `obj_shape`. Chair has none today; an
   armchair / stool split is out of scope.
 - Correlations are optional, as a small covariance block. Seat height and back height are plausibly correlated.

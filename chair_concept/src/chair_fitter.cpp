@@ -36,10 +36,9 @@ ChairBeliefParams ChairFitter::make_belief_params() const
 {
     ChairBeliefParams p;
     p.seed_template(cfg_.prior);   // fixed standard-chair template (pose-only belief), from the manifest
-    // Thickness + leg size are part of the TEMPLATE too: seat_thickness sets the leg/seat z-band split in
+    // Thickness + leg size are part of the TEMPLATE too (both seeded above from the manifest): seat_thickness sets the leg/seat z-band split in
     // responsibilities() (z_low = tpl_seat_h - seat_thickness), so leaving it at a default while the seat
     // height is corrected would just move the misattribution rather than remove it.
-    p.leg_half       = cfg_.tracker_birth_leg_half;
     p.mode_obs_weighting = cfg_.ai2_mode_obs_weighting;
     p.mode_sat_back_pts  = cfg_.ai2_mode_sat_back_pts;
     p.view_budget        = cfg_.ai2_view_budget;   // saturating per-viewpoint evidence budget (not 1/(1+n))

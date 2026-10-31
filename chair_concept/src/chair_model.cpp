@@ -81,12 +81,13 @@ float ChairModel::sdf_point_at(const Eigen::Vector3f& p, const ChairState& s) co
     const float leg_top    = s.seat_h - seat_t;
     const float leg_cz     = leg_top * 0.5f;
     const float leg_half_z = leg_top * 0.5f;
-    const float ox = half_w - LEG_HALF;
-    const float oy = half_d - LEG_HALF;
+    const float leg_half = params_.chair.leg_half;   // manifest, shared with the belief, the mesh and the card
+    const float ox = half_w - leg_half;
+    const float oy = half_d - leg_half;
     const float leg_off[4][2] = {{ ox, oy}, {-ox, oy}, {-ox, -oy}, { ox, -oy}};
     float sdf_legs = std::numeric_limits<float>::max();
     for (const auto& o : leg_off)
-        sdf_legs = std::min(sdf_legs, box_sdf(std::abs(lx - o[0]) - LEG_HALF, std::abs(ly - o[1]) - LEG_HALF, std::abs(lz - leg_cz) - leg_half_z));
+        sdf_legs = std::min(sdf_legs, box_sdf(std::abs(lx - o[0]) - leg_half, std::abs(ly - o[1]) - leg_half, std::abs(lz - leg_cz) - leg_half_z));
 
     return std::min(sdf_seat, std::min(sdf_back, sdf_legs));
 }
