@@ -119,6 +119,7 @@ public:
         route_failures_ = 0;
         route_arrived_ = false;
                 cross_id_ = 0;
+        deep_needed_ = deep_ = false;
         exited_ = false;
         predicted_room_id_ = 0;
         route_wait_logged_.clear();
@@ -275,6 +276,17 @@ public:
     void note_room_id(std::uint64_t id) { std::scoped_lock lk(m_); room_id_ = id; }
     /// The room ltsm has archived up to (its `current` edge; 0 = unknown): a crossing is closed when it equals the room id.
     void note_archived_room_id(std::uint64_t id) { std::scoped_lock lk(m_); archived_id_ = id; }
+    /// DEEP ENTRY (user 2026-10-31 "enter a bit deeper"; RoomTransitionExit.tla CT_Deep). Once the doorway is driven on the
+    /// anchor (note_deep_needed), the passage is not done until the body is at the cross target past the plane, as the
+    /// servo measures it in the robot frame (note_deep). The caller removes link 1 then, once the room switch has
+    /// acknowledged it (switched()), and door_concept deletes the old face only after that — so room_concept's transition
+    /// (link 2) stays open, and its relocaliser disarmed, until the body is deep in the room (pingpong11 leg 4: 0.4 m in,
+    /// 0.37 s after a 1 s transition, it flipped the pose 179 deg).
+    void note_deep_needed() { std::scoped_lock lk(m_); deep_needed_ = true; }
+    void note_deep() { std::scoped_lock lk(m_); deep_ = true; }
+    [[nodiscard]] bool deep() const { std::scoped_lock lk(m_); return deep_; }
+    [[nodiscard]] bool switched() const { std::scoped_lock lk(m_); return room_id_ != 0 and cross_id_ != 0 and room_id_ != cross_id_; }
+    [[nodiscard]] std::string crossing_door() const { std::scoped_lock lk(m_); return exited_ ? door_ : std::string{}; }
     /// What the session is to drive this cycle (route mode): the published targets, read from the graph by update(). `key`
     /// changes exactly when the route must be (re)built — another leg, a rebuild after a failure, another room frame — and
     /// NOT when door_concept refines a target by millimetres: a route is a commitment, not a re-decision per cycle.
@@ -807,7 +819,8 @@ private:
         if (cross.has_value()) route_cross_ = *cross;
 
         // ── DONE: the crossing fact was written, room_concept switched the room and ltsm archived the room left
-        if (step_ == Step::Cross and exited_ and room_id_ != 0 and room_id_ != cross_id_ and archived_id_ == room_id_)
+        if (step_ == Step::Cross and exited_ and room_id_ != 0 and room_id_ != cross_id_ and archived_id_ == room_id_
+            and (not deep_needed_ or deep_))
             return route_through(out, std::format("{} -> {}", cross_room_, room_frame));
         // ── the route's end, as the session reported it
         if (std::exchange(route_arrived_, false))
@@ -936,6 +949,7 @@ private:
         attempts_ = 0;
         route_arrived_ = false;
         exited_ = false;
+        deep_needed_ = deep_ = false;
         cross_id_ = room_id_;   // the room ID the step began in
         // THE PREDICTION, taken before crossing: the remembered room ltsm's recall under this door names (recall_<k>, its
         // room_id), else a new room. It travels in the crossing fact; nobody reads a recall at crossing time.
@@ -968,6 +982,8 @@ private:
     int route_failures_ = 0;
     bool route_arrived_ = false;
     bool exited_ = false;                  ///< through: the crossing fact was handed to the caller (once per Cross)
+    bool deep_needed_ = false;             ///< the doorway is driven on the anchor: the passage ends deep (note_deep)
+    bool deep_ = false;                    ///< the servo has the body at the cross target past the plane
     std::uint64_t predicted_room_id_ = 0;  ///< the remembered room behind the door at enter_cross (0 = new)
     std::uint64_t cross_id_ = 0;           ///< the room ID the Cross step began in (0 = unknown)
     std::uint64_t room_id_ = 0;            ///< room_concept's room for the robot this cycle (note_room_id; 0 = unknown)

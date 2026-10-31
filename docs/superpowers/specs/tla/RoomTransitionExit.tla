@@ -17,7 +17,10 @@
 (*  3 door_concept on 2: NEW_FACE in NEW_ROOM, `exit` NEW_FACE -> OLD_FACE (the twin)  *)
 (*  4 ltsm         on 3: copies OLD_ROOM into memory and writes `exit` OLD_ROOM ->     *)
 (*                 NEW_ROOM (archived); it deletes NOTHING it does not own.           *)
-(*  5 owners       on 4: door_concept deletes OLD_ROOM's doors (OLD_FACE: 1, 2 die),  *)
+(*  5 owners       on 4: door_concept deletes OLD_ROOM's doors once the controller's  *)
+(*                 link 1 is gone (OLD_FACE: 2 dies); the controller removes link 1  *)
+(*                 when the body is DEEP in the room (the cross target), so link 2 -- *)
+(*                 room_concept's "transition open" -- lasts until then (pingpong11).*)
 (*                 room_concept deletes OLD_ROOM once nothing else hangs from it.     *)
 (* No counters: a fact about leaving room R cannot fire twice, the robot is no longer   *)
 (* in R once it has been acted on.                                                     *)
@@ -138,7 +141,7 @@ Init ==
   /\ dcRoom = 1
   /\ idFile = IF STALE_FILE THEN {[name |-> 2, hole |-> "X"]} ELSE {}
   /\ ctl = [leg |-> 1, step |-> "idle", door |-> 0, hole |-> NoHole, croom |-> 0, pred |-> 0, passed |-> FALSE,
-            exited |-> FALSE]
+            exited |-> FALSE, deep |-> FALSE]
   /\ ctlRoom = 1 /\ ctlName = 1
   /\ nextRoom = 2 /\ nextDoor = 1
   /\ issued = (1 :> 1) /\ arrived = << >>
@@ -345,9 +348,10 @@ DC_PhantomGone(d) ==
 
 \* =================================================================================== owners delete (link 5)
 \* door_concept: a door of a room ltsm has archived is deleted by its owner (OLD_FACE with it: links 1, 2 die).
+Reapable(x) == doors[x].room \in DOMAIN rooms /\ rooms[doors[x].room].arch /\ doors[x].ex = NoEx
 DC_Reap ==
-  /\ \E d \in DOMAIN doors : doors[d].room \in DOMAIN rooms /\ rooms[doors[d].room].arch
-  /\ LET d == CHOOSE x \in DOMAIN doors : doors[x].room \in DOMAIN rooms /\ rooms[doors[x].room].arch
+  /\ \E d \in DOMAIN doors : Reapable(d)
+  /\ LET d == CHOOSE x \in DOMAIN doors : Reapable(x)
      IN DelDoor(d)
   /\ UNCHANGED << envVars, rooms, rcRT, current, passages, proposal, rcVars, ltVars,
                   dcVars, ctVars, nextRoom, nextDoor, issued, arrived >>
@@ -384,7 +388,7 @@ CT_Start ==
        /\ Offered(d)
        /\ ctl' = [leg |-> ctl.leg, step |-> "cross", door |-> d, hole |-> doors[d].hole, croom |-> ctlRoom,
                   pred |-> IF Legs[ctl.leg].rel = "room" THEN Legs[ctl.leg].name ELSE 0, passed |-> FALSE,
-                  exited |-> FALSE]
+                  exited |-> FALSE, deep |-> FALSE]
        /\ near' = doors[d].hole
   /\ UNCHANGED << pos, doorway, lastHole, degr, phantoms, rooms, rcRT, current, doors, passages, recalls, proposal, rcVars, ltVars, dcVars, ctlRoom, ctlName, nextRoom, nextDoor, issued,
                   arrived >>
@@ -405,6 +409,15 @@ CT_Exit ==
   /\ UNCHANGED << envVars, rooms, rcRT, current, passages, recalls, proposal, rcVars, ltVars,
                   dcVars, ctlRoom, ctlName, nextRoom, nextDoor, issued, arrived >>
 
+\* The body reaches the cross target, deep in the entered room: the controller removes its link 1.
+CT_Deep ==
+  /\ ctl.step = "cross" /\ ctl.exited /\ ~ctl.deep
+  /\ ctlRoom # ctl.croom            \* link 1 acknowledged: room_concept switched on it (else nobody ever does)
+  /\ doors' = [d \in DOMAIN doors |-> IF d = ctl.door THEN [doors[d] EXCEPT !.ex = NoEx] ELSE doors[d]]
+  /\ ctl' = [ctl EXCEPT !.deep = TRUE]
+  /\ UNCHANGED << envVars, rooms, rcRT, current, passages, recalls, proposal, rcVars, ltVars,
+                  dcVars, ctlRoom, ctlName, nextRoom, nextDoor, issued, arrived >>
+
 CT_LeaveDoorway ==
   /\ doorway /\ ctl.step = "idle"
   /\ doorway' = FALSE
@@ -413,11 +426,11 @@ CT_LeaveDoorway ==
 \* A leg completes once the controller has written its exit and room_concept has switched (the only cause of a switch
 \* now is an exit fact), and -- X3 -- ltsm has archived the room left.
 CT_Done ==
-  /\ ctl.step = "cross" /\ ctl.exited /\ rcRT # ctl.croom /\ ctlRoom = rcRT
+  /\ ctl.step = "cross" /\ ctl.exited /\ ctl.deep /\ rcRT # ctl.croom /\ ctlRoom = rcRT
   /\ CLOSE_ON_ARCHIVE => current = rcRT   \* archived; the owners' deletion need not be awaited (checked 10-31)
   /\ arrived' = Append(arrived, pos)
   /\ ctl' = [leg |-> ctl.leg + 1, step |-> "idle", door |-> 0, hole |-> NoHole, croom |-> 0, pred |-> 0,
-             passed |-> FALSE, exited |-> FALSE]
+             passed |-> FALSE, exited |-> FALSE, deep |-> FALSE]
   /\ near' = NoHole
   /\ UNCHANGED << pos, doorway, lastHole, degr, phantoms, rooms, rcRT, current, doors,
                   passages, recalls, proposal, rcVars, ltVars, dcVars, ctlRoom, ctlName, nextRoom, nextDoor, issued >>
@@ -430,14 +443,14 @@ Next ==
   \/ DC_Follow \/ DC_Face \/ \E h \in RealHoles : DC_Birth(h) \/ DC_Phantom
   \/ \E d \in DOMAIN doors : DC_Degrade(d) \/ DC_PhantomGone(d)
   \/ DC_Reap \/ RC_Reap
-  \/ CT_Track \/ CT_Start \/ CT_Pass \/ CT_Exit \/ CT_LeaveDoorway \/ CT_Done
+  \/ CT_Track \/ CT_Start \/ CT_Pass \/ CT_Exit \/ CT_Deep \/ CT_LeaveDoorway \/ CT_Done
 
 Fairness ==
   /\ WF_vars(RC_Switch) /\ WF_vars(RC_Judge)
   /\ WF_vars(LT_Cycle(0))
   /\ WF_vars(DC_Follow) /\ WF_vars(DC_Face) /\ WF_vars(\E h \in RealHoles : DC_Birth(h))
   /\ WF_vars(\E d \in DOMAIN doors : DC_PhantomGone(d))
-  /\ WF_vars(CT_Track) /\ SF_vars(CT_Start) /\ WF_vars(CT_Pass) /\ WF_vars(CT_Exit) /\ WF_vars(CT_LeaveDoorway)
+  /\ WF_vars(CT_Track) /\ SF_vars(CT_Start) /\ WF_vars(CT_Pass) /\ WF_vars(CT_Exit) /\ WF_vars(CT_Deep) /\ WF_vars(CT_LeaveDoorway)
   /\ WF_vars(CT_Done) /\ WF_vars(DC_Reap) /\ WF_vars(RC_Reap)
 
 Spec == Init /\ [][Next]_vars /\ Fairness

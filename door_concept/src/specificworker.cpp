@@ -3378,7 +3378,10 @@ void SpecificWorker::reap_archived_rooms()
     if (archived.empty()) return;
     std::vector<std::uint64_t> gone;
     for (const auto& n : G->get_nodes_by_type("object"))
-        if (rc::exit_fact::is_door(*G, n.id()) and not rc::interaction::is_anchor(*G, n))
+        // ...and not while the controller's link 1 is still on it: it comes off when the body is deep in the room
+        // (RoomTransitionExit.tla DC_Reap), so link 2 keeps room_concept's transition open until then
+        if (rc::exit_fact::is_door(*G, n.id()) and not rc::interaction::is_anchor(*G, n)
+            and not rc::exit_fact::crossed_through(*G, {n.id()}).has_value())
             if (const auto r = rc::exit_fact::room_of(*G, n.id()); r != 0 and std::ranges::contains(archived, r))
                 gone.push_back(n.id());
     for (const auto id : gone)

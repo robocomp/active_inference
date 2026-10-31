@@ -3402,15 +3402,27 @@ bool ControllerSession::drive_door_route(const ControllerPlanningStep &step, rc:
     //   Active-Inference law (door_cross_aif.h) on the servo's guard chain (step_anchor_cross) — no route past the door, no
     //   grid lookup beyond it (pingpong6/8/10: "no free point past the door on its axis"), no rebuild. THROUGH and link 1
     //   stay above; the passage's room-switch / archive end is unchanged. Before the anchor is up the route still drives.
+    // LINK 1 COMES OFF WHEN THE BODY IS DEEP (RoomTransitionExit.tla CT_Deep): the servo has it at the cross target AND
+    // room_concept has switched on the fact. door_concept deletes the old face only after this, so link 2 — room_concept's
+    // open transition, its relocaliser disarmed — lasts until the body is well inside the room.
+    if (door_passage_.deep() and door_passage_.switched() and graph_ != nullptr)
+        if (const auto face = graph_->get_node(leg.door); face.has_value())
+            if (const auto robot = graph_->get_nodes_by_type("robot"); not robot.empty()
+                and graph_->get_edge(robot.front().id(), face->id(), "exit").has_value())
+                if (graph_->delete_edge(robot.front().id(), face->id(), "exit"))
+                    std::println("[door-route] {}: the body is deep in the room — link 1 removed (the old face may go now)", leg.door);
     if (door_cross_servo_ and leg.through and graph_ != nullptr)
-        if (const auto aff = graph_->get_node("aff_" + leg.door + "_cross"); aff.has_value())
         {
+            // past the room switch door_concept has dropped the old room's affordances: the cross is then named only, and
+            // update_cross_anchor carries on with the anchor latched for that same name
+            const auto aff = graph_->get_node("aff_" + leg.door + "_cross");
             ControllerPlanningStep on_anchor = step;
-            on_anchor.target.node_id = aff->id();
-            on_anchor.target.node_name = aff->name();
+            on_anchor.target.node_id = aff.has_value() ? aff->id() : 0;
+            on_anchor.target.node_name = "aff_" + leg.door + "_cross";
             on_anchor.target.from_affordance = true;
             if (update_cross_anchor(on_anchor) and anchor_cross_.has_value())
             {
+                door_passage_.note_deep_needed();
                 if (door_servo_logged_ != leg.key)
                 {
                     door_servo_logged_ = leg.key;
@@ -4518,6 +4530,7 @@ ControllerSession::CrossProtocol ControllerSession::cross_protocol(const Control
         if (progress == rc::CrossProgress::Through)
         {
             const auto g = rc::anchor_cross_geometry(drive_pose);
+            door_passage_.note_deep();   // the body at the standoff past the plane, robot frame (route mode: DONE may follow)
             // Task 12 Fix E: past a room switch the cross's node is gone — `through` is the door passage's to act on.
             anchor_through_ = true;
             if (door_passage_.clearing())
