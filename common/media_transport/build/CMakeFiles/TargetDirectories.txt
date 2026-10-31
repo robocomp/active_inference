@@ -1,8 +1,0 @@
-/home/pbustos/robocomp/components/active_inference.worktrees/perception-cards/common/media_transport/build/CMakeFiles/media_bench.dir
-/home/pbustos/robocomp/components/active_inference.worktrees/perception-cards/common/media_transport/build/CMakeFiles/descriptor_roundtrip.dir
-/home/pbustos/robocomp/components/active_inference.worktrees/perception-cards/common/media_transport/build/CMakeFiles/lidar_probe.dir
-/home/pbustos/robocomp/components/active_inference.worktrees/perception-cards/common/media_transport/build/CMakeFiles/lag_probe.dir
-/home/pbustos/robocomp/components/active_inference.worktrees/perception-cards/common/media_transport/build/CMakeFiles/sensor_model_test.dir
-/home/pbustos/robocomp/components/active_inference.worktrees/perception-cards/common/media_transport/build/CMakeFiles/test.dir
-/home/pbustos/robocomp/components/active_inference.worktrees/perception-cards/common/media_transport/build/CMakeFiles/edit_cache.dir
-/home/pbustos/robocomp/components/active_inference.worktrees/perception-cards/common/media_transport/build/CMakeFiles/rebuild_cache.dir

@@ -1,1 +1,0 @@
-/usr/bin/c++ -O2 CMakeFiles/evaluator_camera_test.dir/tests/evaluator_camera_test.cpp.o -o evaluator_camera_test 
