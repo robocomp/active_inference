@@ -1180,8 +1180,6 @@ private:
     std::string door_route_key_;                                    // the leg door_route_ was built (or last tried) for
     bool door_route_active_ = false;                                // built for the current leg and not yet ended
     bool door_route_installed_ = false;                             // handed to the tracker (policy off)
-    std::string door_route_at_vantage_key_;                         // a servo leg whose route ended at the vantage
-    bool door_gate_refused_geometry_ = false;                       // the open-door gate refused on position/heading
     std::uint64_t door_route_build_ms_ = 0;                         // last build attempt
     Eigen::Vector2f door_route_n0_{0.f, 1.f};                      // the perceived opening's through-normal, latched per leg (near side)
     std::string door_route_n0_key_, door_route_through_key_;       // door|room it was latched for / already reported THROUGH
