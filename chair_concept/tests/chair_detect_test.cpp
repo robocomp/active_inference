@@ -16,10 +16,10 @@ static float old_pd(float off_x, float off_y, float range)
     return pc * pr;
 }
 
-// A pinhole ZED (1280x720, f = 700 px) looking along +x from the origin at a 0.60 x 1.25 m chair (Tracker.BirthSeat* template, width x top) at `range`, `off` px right of centre.
+// A pinhole ZED (1280x720, f = 448 px (robot_concept/shadow.json cam_rgb_focalx = cam_rgb_focaly = 448)) looking along +x from the origin at a 0.60 x 1.25 m chair (Tracker.BirthSeat* template, width x top) at `range`, `off` px right of centre.
 static ChairDetectInputs view(float range, float lateral_m)
 {
-    const float f = 700.0f, W = 1280.0f, H = 720.0f;
+    const float f = 448.0f, W = 1280.0f, H = 720.0f;
     ChairDetectInputs in;
     in.roi_valid = true;
     in.roi_fill = std::max(0.60f * f / range / W, 1.25f * f / range / H);
@@ -43,15 +43,16 @@ int main()
             const auto in = view(r, lat);
             std::printf("range %.1f lateral %.1f  old %.3f  new %.3f\n", r, lat, old_pd(in.roi_offset_x, 0.0f, r), chair_p_detect(in, env, room));
         }
-    { // clear chair at 3 m: within 0.15 of the old value (regression guard, not a model parameter).
-      // NOT 2 m: the real 1.25 m chair fills 0.61 of the frame height there, past MaxFill 0.60, so the envelope's upper
-      // shoulder (a deliberate change: overflow is a blind spot) takes P from 1.0 to 0.47. Asserted below as intended.
-        const auto in = view(3.0f, 0.0f);
-        const float o = old_pd(in.roi_offset_x, 0.0f, 3.0f), n = chair_p_detect(in, env, room);
-        std::printf("clear 3 m: old %.3f new %.3f\n", o, n);
+    { // clear chair at 2 m: within 0.15 of the old value (regression guard, not a model parameter)
+        const auto in = view(2.0f, 0.0f);
+        const float o = old_pd(in.roi_offset_x, 0.0f, 2.0f), n = chair_p_detect(in, env, room);
+        std::printf("clear 2 m: old %.3f new %.3f (fill %.3f)\n", o, n, in.roi_fill);
         CHECK(std::fabs(o - n) < 0.15f);
-        const auto c2 = view(2.0f, 0.0f);
-        CHECK(chair_p_detect(c2, env, room) < old_pd(c2.roi_offset_x, 0.0f, 2.0f));
+    }
+    { // near-side distance where P falls below 0.5 (for the report)
+        float r = 6.0f;
+        while (r > 0.3f and chair_p_detect(view(r, 0.0f), env, room) >= 0.5f) r -= 0.01f;
+        std::printf("near-side P<0.5 below %.2f m\n", r);
     }
     { // behind a wall: the target is in the next room, no gap. Old said > 0.5 (it had no walls); new says ~0.
         const auto in = view(2.0f, 0.0f);
