@@ -14,6 +14,7 @@
 #include "wall_sync.h"                                       // rc::walls::plan_wall_sync (rule 1)
 #include "door_crossing.h"                                   // rc::crossing (proto-room evidence)
 #include "proto_mouth.h"                                      // rc::crossing::write_mouth (the proto birth)
+#include "../../common/room_transition/door_face.h"           // rc::door_face: the doorway as the attaching point
 #include "../../common/room_transition/exit_fact.h"           // rc::exit_fact: the crossing chain (links 1-2)
 #include "../../common/room_resolve/room_resolve.h"          // rc::room::current_room / is_proto
 
@@ -1664,33 +1665,44 @@ std::optional<RoomSceneGraph::Recall> RoomSceneGraph::find_recall(const rc::Door
         Eigen::Affine2f T_door_recall = Eigen::Affine2f::Identity();
         T_door_recall.linear() = Eigen::Rotation2Df(std::atan2(R(1, 0), R(0, 0))).toRotationMatrix();
         T_door_recall.translation() = Eigen::Vector2f(t->get()[0], t->get()[1]);
-        // The door node's frame in the INTERNAL one, from the aperture itself: x = a→b (the node's own x axis,
-        // door_apertures.cpp), origin = the aperture centre, y = z × x.
-        const Eigen::Vector2f u = (ap.b - ap.a).normalized();
-        Eigen::Affine2f T_int_door = Eigen::Affine2f::Identity();
-        T_int_door.linear().col(0) = u;
-        T_int_door.linear().col(1) = Eigen::Vector2f(-u.y(), u.x());
-        T_int_door.translation() = 0.5f * (ap.a + ap.b);
-        rc_.T_int_recall = T_int_door * T_door_recall;
-        // ★ THE REMEMBERED ROOM IS ON THE OTHER SIDE OF THE DOOR (2026-10-12). The recall's transform is relative to
-        //   the door FACE as seen from the remembered room, and door_concept orients a door's frame from the room
-        //   that fits it (+y into that room) — so the face we cross through may be the same doorway turned by π.
-        //   try22: room_1 re-entered 172° rotated, the robot estimated on room_2's side of the door. Rooms do not
-        //   overlap: if the recalled outline lands on THIS room's side of the aperture, the face is the turned one.
-        if (const auto here = room_concept_->nominal_room_polygon(); here.size() >= 3)
+        // ★ THE DOORWAY IS THE ROOMS' ONE ATTACHING POINT (spec 2026-10-31-door-attachment-and-layout, D1/D2). A FACE is a
+        //   door node's pose in its own room, turned by π if needed so that +y points INTO that room — decided locally:
+        //   the point half the door's width along +y must lie inside that room's own outline. The two faces of one doorway
+        //   are then a half-turn apart, ALWAYS, and the recalled room is placed by the exact composition
+        //       T_int_recall = F_live · Rπ · F_mem⁻¹
+        //   No centroid test, no flip guessed from where the outline lands (pingpong16: room_2 drawn mirrored inside room_1;
+        //   pingpong19: the old flip fired on every recall because door frames follow their WALL's winding).
+        const float half_w = 0.5f * (ap.b - ap.a).norm();
+        // F_live: the live door node's pose in the current room (its RT chain), in the INTERNAL frame.
+        const auto rn = G_->get_node(dsr_room_id_);
+        if (not rn.has_value()) continue;
+        auto ie = G_->get_inner_eigen_api();   // fresh instance: empty ts==0 cache, nothing to go stale
+        const auto Tr = ie->get_transformation_matrix(rn->name(), ap.name);   // T(room <- door), published frame
+        if (not Tr.has_value()) continue;
+        Eigen::Affine2f T_pub_door = Eigen::Affine2f::Identity();
+        T_pub_door.translation() = Eigen::Vector2f(static_cast<float>(Tr->translation().x()), static_cast<float>(Tr->translation().y()));
+        T_pub_door.linear() = Eigen::Rotation2Df(static_cast<float>(std::atan2((*Tr)(1, 0), (*Tr)(0, 0)))).toRotationMatrix();
+        auto here = room_concept_->nominal_room_polygon();   // internal frame
+        if (here.size() < 3 and fs_published_.size() >= 3)
         {
-            const auto centroid = [](const std::vector<Eigen::Vector2f>& P)
-            { Eigen::Vector2f c = Eigen::Vector2f::Zero(); for (const auto& q : P) c += q; return Eigen::Vector2f(c / static_cast<float>(P.size())); };
-            const Eigen::Vector2f n = T_int_door.linear().col(1), o = T_int_door.translation();
-            const Eigen::Vector2f c_here = centroid(here);
-            const Eigen::Vector2f c_rec  = rc_.T_int_recall * centroid(rc_.poly_pub);
-            if (n.dot(c_here - o) * n.dot(c_rec - o) > 0.f)
+            here.clear();
+            for (const auto& v : fs_published_) here.push_back(internal_from_published() * v);
+        }
+        const Eigen::Affine2f T_int_door = rc::door_face::face(internal_from_published() * T_pub_door, here, half_w);
+        // F_mem: the remembered room's own face of this doorway, in its frame (ltsm's recall RT is face <- room).
+        const Eigen::Affine2f F_mem = rc::door_face::face(T_door_recall.inverse(), rc_.poly_pub, half_w);
+        rc_.T_int_recall = rc::door_face::attach(T_int_door, F_mem);
+        // A composition that lays the recalled outline over the current room is a wrong face pairing: refused, logged.
+        {
+            Eigen::Vector2f c_rec = Eigen::Vector2f::Zero();
+            for (const auto& q : rc_.poly_pub) c_rec += q;
+            c_rec = rc_.T_int_recall * Eigen::Vector2f(c_rec / static_cast<float>(std::max<std::size_t>(1, rc_.poly_pub.size())));
+            if (here.size() >= 3 and rc::door_face::inside(here, c_rec))
             {
-                Eigen::Affine2f flip = Eigen::Affine2f::Identity();
-                flip.linear() = Eigen::Rotation2Df(static_cast<float>(M_PI)).toRotationMatrix();
-                rc_.T_int_recall = T_int_door * flip * T_door_recall;
-                qInfo().noquote() << QString("[room][recall] %1: the door face is the turned one (recalled outline fell on "
-                                             "this room's side) — rotated π about the aperture").arg(QString::fromStdString(rc_.name));
+                std::println("[room][recall] {} via {}: the door composition lays its outline over THIS room (centroid "
+                             "({:+.2f},{:+.2f}) inside) — a wrong face pairing; refused, entering as a new room", rc_.name, ap.name,
+                             c_rec.x(), c_rec.y());
+                continue;
             }
         }
         // ★ DIAGNOSTIC (pingpong16 leg 3: the recalled room_2 placed ~4.6 m into room_1): every factor of the placement.
