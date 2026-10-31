@@ -1,6 +1,6 @@
 # The doorway as the rooms' one attaching point; the layout optimizer's poses used — design
 
-2026-10-31 · branch `feat/room-recognition` (worktree rt-build) · status: **DRAFT, for review**
+2026-10-31 · branch `feat/room-recognition` (worktree rt-build) · status: **APPROVED (Q1, Q2 decided)**
 Relates to: `2026-10-29-room-transition-protocol-design.md` (Rev 3, exit chain), ltsm `layout_optimizer.{h,cpp}` (main,
 52149a90, not yet on this branch), `room_scene_graph.cpp::find_recall`.
 
@@ -91,9 +91,8 @@ rule. The TLA model is unaffected (it models identity and order, not geometry).
 
 D5 → D1 (+ test 1) → D2 (+ test 2, 4) → D3 → D4 → live (test 5).
 
-## 6. Open questions for review
+## 6. Decisions (user, 2026-10-31)
 
-- Q1. D4 fusion vs replacement: when the layout and the door disagree strongly (many σ), which wins? Proposed: the
-  mixture the optimizer already uses (inlier/outlier), i.e. the door when the layout calls that seam an outlier.
-- Q2. Should the optimizer also move FACES along their wall (pingpong18's 25 cm drift), or only rooms? Proposed: rooms
-  only in v1; a face's along-wall position becomes a nuisance variable in v2.
+- Q1. D4 fusion vs replacement — DECIDED: the optimizer's own inlier/outlier mixture judges the seam; the door placement
+  stands when the layout calls that seam an outlier.
+- Q2. DECIDED: v1 moves rooms only; a face's along-wall position becomes a nuisance variable in v2.
