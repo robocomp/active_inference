@@ -195,6 +195,90 @@ Agents at the same level must use **the same formula** with their own parameters
   brainstorm, out of scope here).
 - **Registration:** read-only, so it goes in `allowed_in_wake`. Eval cases are added to `check_llm_tools.py`.
 
+### 7b. How one `can_see` question is handled (end to end)
+
+Added on 2026-10-31. This describes the flow once the final-review fixes are in, including rulings R10–R12. The
+numbers are illustrative. The flow has not yet run against the live robot.
+
+**0. The person asks.** For example: "Can you see the fridge from the kitchen door?"
+
+**1. gemma picks the tool.** In the normal chat turn, gemma4:26b on the Orin calls
+`can_see(concept="fridge", from="door_2")`.
+- `stand=true` turns it into the reverse question: "where should you stand to see it?".
+- `where` names a specific instance.
+- The tool is read-only, so it is also allowed in robot-event turns.
+
+**2. chat_agent finds the card.** This runs on the main thread.
+- It reads every `*_concept/etc/perception_card.json` under the active_inference root. Later it reads the
+  `perception_card` graph attribute, once cortex has it.
+- It picks the card for the concept. For the fridge that is: countable; ZED identity, Helios occupancy;
+  envelope (axes=1) × central; own-wall skip; calibration state.
+- If there is no card for the concept: "I have no detector for that".
+- If there are no cards at all: "I couldn't find any perception cards (looked in …)".
+
+**3. It resolves the target.**
+- The concept is matched to its instance in the graph (`refrigerator_1`): pose, size, the real z span from the
+  room→object transform, and `object_subtype`.
+- If several instances match, it asks which one.
+
+**4. It resolves the viewpoint.**
+- **A named door:** the door centre, stepped one robot radius into the current room. The heading faces the target,
+  because the robot would arrive facing it.
+- **A named object:** a stand-off point beside it, again facing the target.
+- **"Here":** the robot's actual pose and its real heading, which is body yaw + π/2 because Shadow's forward is
+  body +y. Best heading is evaluated as well (R11).
+- **Anything else:** "which place do you mean?".
+
+**5. It takes a world snapshot.** This is read-only and comes from the live graph.
+- The room polygon, as walls with the card's wall thickness.
+- The other objects, as named obstacles at their real heights. The target is excluded.
+- The ZED's intrinsics and mount height.
+- The Helios and Bpearl, each as a `SensorModel` from its node's media descriptor plus its body→sensor mount. A
+  missing model or transform leaves that channel out (NotModelled); it is never P = 0.
+- Doors, as gaps in the walls (R10):
+  - a measured φ gives its gap;
+  - otherwise a known P(open) gives a two-point mixture of open and shut;
+  - with neither, the gap is averaged over a uniform φ prior.
+  - The mixture covers at most 2 doors that lie on the sight line. It is never an average slit.
+
+**6. The evaluator runs per channel.** This is `common/perception_card/evaluator.h`.
+- **ZED (identity).**
+  - Visible fraction past walls and obstacles. A wall within the card's own-wall skip of the target does not
+    occlude it.
+  - Predicted image fill → detector envelope × central × instance-prior terms × blind-spot map → P_zed.
+  - The limit is found by leave-one-out (the term whose removal raises P the most), and the occluder is named the
+    same way.
+- **Helios / Bpearl (occupancy).**
+  - The rings whose elevation, taken through the mount, crosses the target's z span.
+  - Expected returns: λ0 = Σ columns × visibility.
+  - P = range_factor · (1 − e^(−λ0·q)). The range factor is common-mode across returns (R5).
+  - The limit is one of: between rings, below/above the fan, dead zone, range, occluded.
+- **Combined.**
+  - P(recognise) is the noisy-OR over the identity channels.
+  - P(notice) = 1 − (1 − P_occ)(1 − P_rec), so it is never below P(recognise).
+
+**7. Where to stand (only if `stand=true`).**
+- `where_to_stand` scores 36 bearings × 3 stand-offs inside the detector's stand-off band.
+- It drops spots that are unreachable or inside obstacles.
+- Uncertain doors are taken at their most probable state (R12).
+- It describes the best spot relative to the nearest landmark. Measured cost is about 10 ms.
+
+**8. The answer is worded.** This is a pure, tested function in `chat_agent/src/can_see.h`. The numbers are always
+shown. The answer names the channel, the limit and the occluder, and the door assumptions made. It adds the
+calibration caveat when the card is only a prior, and it never claims the ricoh. For example:
+> "Probably (P 0.74) from the kitchen door: my camera would see it, though the chair hides part of it. My detector
+> for fridges isn't calibrated yet."
+
+When notice and recognise differ at the printed decimals:
+> "I'd notice something there (P 0.95) but couldn't tell it's the fridge (P 0.30): too far for my camera."
+
+"From here", when turning would help (R11):
+> "Not from where I'm facing (P 0.05); if I turn to face it, P 0.81."
+
+**9. gemma replies to the person,** working from that text.
+
+Nothing in this flow writes to the graph.
+
 ## 8. Goals, non-goals, anti-goals
 
 **Goals:**
