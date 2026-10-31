@@ -115,10 +115,16 @@ objects_nearest = 6
 # Object births/removals are shown in the window at most this often; a flap inside the window cancels out.
 object_change_period_ms = 2000
 # look() tool: the newest ZED ("front") / Ricoh ("360") frame is shrunk to this longest side and JPEG-encoded, then
-# attached to the tool result for ONE request (then dropped from the history). ollama resizes images to ~1 Mpx itself,
-# so <=1280 px all cost ~1050 prompt tokens; smaller only loses detail (src/image_prep.h). 2 images + the ~2600-token
-# system message + the history (block-trimmed at 400 messages, token-guarded at 75% of the 262k num_ctx) fit.
-look_max_side = 1280
+# attached to the tool result for ONE request (then dropped from the history).
+# Measured with gemma4:26b on the Orin on 2026-10-31 (warm vision encoder):
+#   1280 px: ~370 image tokens, ~3 s per look
+#   640 px: ~133 tokens, ~1.8 s; it still recognises the scene
+#   448 px and below: the ~106-token floor, ~1.7 s
+#   320 px and below: it loses the scene ("kitchen" becomes "room")
+# The 360 view stays at 1280: an equirectangular frame packs 360 deg into its width.
+# 2 images + the ~2600-token system message + the history (block-trimmed at 400 messages, token-guarded at 75% of
+# the 262k num_ctx) fit.
+look_max_side = 640
 look_max_side_360 = 1280
 look_jpeg_quality = 85
 
