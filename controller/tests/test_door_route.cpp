@@ -75,15 +75,16 @@ int main()
         CHECK(not pl.why.empty() and pl.waypoints.empty());
     }
 
-    std::println("4. the open leaf stands on the cross target: P_post slides outward along the axis");
+    std::println("4. the point beyond the door is the DOOR's (Lucas Bonilla's TFM): never searched in this room's grid");
     {
+        // the far side blocked in THIS room's grid (it is the next room): P_post is still the published cross target, unmoved
         const auto leaf = [](const Eigen::Vector2f& p, float) { return not (p.y() < -0.5f and p.y() > -1.05f); };
         const auto pl = dr::plan(kAppr, kCross, kCentre, robot_far, true, prm, leaf);
         std::println("    post ({:.2f},{:.2f}) s={:.2f} moved {}", pl.post.x(), pl.post.y(), pl.s_post, pl.post_moved);
-        CHECK(pl.why.empty() and pl.post_moved and on_axis(pl.post));
-        CHECK(pl.s_post >= 1.05f - 1e-4f and pl.s_post <= 1.1f + 1e-4f);
+        CHECK(pl.why.empty() and not pl.post_moved and on_axis(pl.post));
+        CHECK(std::abs(pl.s_post - (kCross.p - kCentre).norm()) < 1e-3f);
         const auto all_leaf = [](const Eigen::Vector2f& p, float) { return not (p.y() < -0.5f); };
-        CHECK(not dr::plan(kAppr, kCross, kCentre, robot_far, true, prm, all_leaf).why.empty());
+        CHECK(dr::plan(kAppr, kCross, kCentre, robot_far, true, prm, all_leaf).why.empty());   // no "no free point past"
     }
 
     std::println("5. P_pre is never farther from the hole than the robot (no corridor gate)");

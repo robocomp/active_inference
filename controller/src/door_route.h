@@ -147,17 +147,15 @@ struct Params
         out.ap = ax->c;
         if (out.through)
         {
+            // ★ THE POINT BEYOND THE DOOR IS THE DOOR'S, AS IN LUCAS BONILLA'S TFM (§5.1, §6.4.3; user 2026-10-31): the cross
+            //   target is fixed in the door's frame (door_concept's, on this axis) and driven to; it is NOT searched for in the
+            //   current room's grid. Beyond the door is the NEXT room, which this room's map does not hold: the old search for
+            //   "a free point past the door on its axis" failed passages that were physically clear (pingpong6/8/10/19/23 —
+            //   and succeeded only where a free-space outline happened to leak through the door). The live-returns guard
+            //   still protects the body on the way.
             out.s_post = (cross->p - ax->c).dot(-ax->n);
-            const auto sp = first_free_standoff(*ax, -out.s_post, -(out.s_post + prm.post_slide_m), prm.step_m, face, is_free);
-            if (not sp.has_value())
-            {
-                out.why = std::format("no free point past the door on its axis between {:.2f} and {:.2f} m", out.s_post,
-                                      out.s_post + prm.post_slide_m);
-                return out;
-            }
-            out.post_moved = std::abs(-*sp - out.s_post) > 1e-4f;
-            out.s_post = -*sp;
-            out.post = ax->c + *sp * ax->n;
+            out.post_moved = false;
+            out.post = ax->c - out.s_post * ax->n;
             out.post_yaw = face;
             // P_pre always: at most as far from the hole as the robot (above), so it is never behind the robot; a robot beside
             // the doorway still gets the axis before the jambs (recog_try16).
