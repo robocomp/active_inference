@@ -58,6 +58,11 @@ today: 2 missions (1 succeeded); last: cross door_0 → room_1
 """
 
 
+# STATE with a refrigerator perceived (the can_see case "fridge from here": with none, "not perceived" is the right answer)
+FRIDGE_STATE = (STATE.replace("1 bottle, 2 chair, 1 table", "1 bottle, 2 chair, 1 refrigerator, 1 table")
+                .replace("  nearest 4:", "  nearest 5:")
+                .replace("  - bottle_1 2.9 m", "  - refrigerator_1 2.5 m, +20 deg ahead, 0.70x0.70x1.80 m\n  - bottle_1 2.9 m"))
+
 # the fleet down (live 2026-10-19): no room, no controller, nothing perceived
 EMPTY_STATE = """time: 12:17:35
 can move: NO (the motion controller is not running)
@@ -432,7 +437,7 @@ CASES = [
     # can_see (2026-10-31): the perception cards answer; where_is / approach keep their own questions
     ("can_see: fridge from here", [], "none", "can you see the fridge from here?",
      lambda n, a, c: n == "can_see" and re.search("fridge|refrigerator", str(a.get("concept", "")).lower()) is not None
-     and not a.get("stand")),
+     and not a.get("stand"), FRIDGE_STATE),
     ("can_see: where to stand", [], "none", "where should you stand to see the table?",
      lambda n, a, c: n == "can_see" and "table" in str(a.get("concept", "")).lower() and a.get("stand") is True),
     ("can_see: es chair from door", [], "none", "\u00bfves la silla desde la puerta?",
