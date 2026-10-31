@@ -2042,6 +2042,23 @@ void SpecificWorker::read_ricoh_thread()
 				}
 			}
 
+			// Keep the ricoh node's image geometry equal to what the source actually delivers, as the zed
+			// path does for its node. Written ONLY ON CHANGE (a frame size is constant for a run, so this
+			// is one update, not one per frame). cam_fov / cam_projection are NOT touched: an
+			// equirectangular panorama's projection is fixed by the projection, not by the frame.
+			if (auto ricoh_node = G->get_node("ricoh"); ricoh_node.has_value())
+			{
+				const auto w = G->get_attrib_by_name<cam_rgb_width_att>(ricoh_node.value());
+				const auto h = G->get_attrib_by_name<cam_rgb_height_att>(ricoh_node.value());
+				if (not w.has_value() or not h.has_value() or w.value() != frame.width or h.value() != frame.height)
+				{
+					G->add_or_modify_attrib_local<cam_rgb_width_att>(ricoh_node.value(), static_cast<int>(frame.width));
+					G->add_or_modify_attrib_local<cam_rgb_height_att>(ricoh_node.value(), static_cast<int>(frame.height));
+					rc::safe_update_node(*G, ricoh_node.value());
+					qInfo() << "[read_ricoh] ricoh node image size ->" << frame.width << "x" << frame.height;
+				}
+			}
+
 			// Publish the RGB panorama on the wide Image360Frame plane. The Camera360RGB source is
 			// webots-derived and delivers RGB-ordered bytes (same as the ZED path above), so tag the
 			// TRUE order IMG360_FORMAT_RGB8. Consumers' RGB8 path (retina RGB2BGR) then yields correct
