@@ -11,6 +11,8 @@
 
 #include "../../common/config_report/config_read.h"   // rc::cfg::Reader (SHARED)
 #include "../../common/room_resolve/room_resolve.h"   // rc::room::current_room (proto-aware, deterministic)
+#include "residual_card.h"   // make_card(): this agent's perception card
+#include "../../common/perception_card/card_io.h"   // write_card_file
 #include "../../common/media_transport/media_transport.h"   // sensor_model_from_graph, max_ring_gap_rad
 #include "../../common/interaction_anchor/interaction_anchor.h"   // rc::interaction::is_anchor (header-inline: no link change)
 
@@ -140,6 +142,13 @@ void SpecificWorker::refresh_beam_spacing()
     };
     beam_spacing("helios", cfg_.helios_beam_spacing_rad);
     beam_spacing("bpearl", cfg_.bpearl_beam_spacing_rad);
+    write_perception_card();   // the LiDAR model can arrive late: rewrite the card when it does
+}
+
+// Perception card: what this agent's coverage model uses, from the config it runs with (cwd = the agent dir).
+void SpecificWorker::write_perception_card()
+{
+    rc::card::write_card_file(std::filesystem::current_path(), rc::make_card(cfg_, grid_.params().cell_size_m));
 }
 
 void SpecificWorker::initialize()
@@ -220,7 +229,7 @@ void SpecificWorker::initialize()
 
     // Before scene_graph_/ingestors copy cfg_. Re-read once at first Operating: robot_concept may write the
     // media_descriptor after this agent starts.
-    refresh_beam_spacing();
+    refresh_beam_spacing();   // also writes the perception card (write_perception_card)
 
     rt_api_       = G->get_rt_api();
     inner_eigen_  = G->get_inner_eigen_api();

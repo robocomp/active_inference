@@ -86,6 +86,7 @@ private:
     // Delete every "residual_*" obstacle node this agent owns (startup sweep + teardown).
     void remove_owned_residual_nodes();
     void refresh_beam_spacing();        // helios/bpearl SensorModel -> cfg_ beam spacing (the grid reads cfg_ per sweep)
+    void write_perception_card();       // card.json from make_card(cfg_); called from initialize() (via refresh_beam_spacing) and again when the LiDAR model arrives
 
     // A modelled horizontal support surface (a tabletop): its top-z and oriented footprint. An obstacle
     // whose observed bottom is at/above this surface, over its footprint, is assumed to REST on it.

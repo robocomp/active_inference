@@ -12,4 +12,6 @@ $CXX -o "$out/test_self_tests" tests/test_self_tests.cpp src/residual_occupancy_
 "$out/test_self_tests"
 $CXX -o "$out/test_curtain" tests/test_curtain.cpp src/residual_occupancy_grid.cpp
 "$out/test_curtain"
+$CXX -I src -I ../common -I ../common/media_transport -DAGENT_DIR="\"$PWD\"" -o "$out/test_residual_card" tests/test_residual_card.cpp
+LANG=es_ES.UTF-8 "$out/test_residual_card"
 echo "residual_concept tests: ALL PASS"
