@@ -1,3 +1,4 @@
+#include "../../common/room_transition/exit_fact.h"   // link 4: is_archived
 #include "room_recall.h"
 #include "room_eviction.h"
 
@@ -129,6 +130,7 @@ int RoomRecall::step()
         if (not is_door(*live_, door)) continue;
         const auto room = room_of(*live_, door);
         if (not room.has_value()) continue;
+        if (rc::exit_fact::is_archived(*live_, room->id())) continue;   // link 4: the room left; its owners are deleting it
 
         // The hole memory already knows behind this door, BY PLACE (RoomEviction::remembered_hole): the door's NAME is a
         // label door_concept re-makes at every crossing (try28: door_37 in room_1 for the face r1_door_19), never the key.

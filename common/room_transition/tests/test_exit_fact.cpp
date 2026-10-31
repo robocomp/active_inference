@@ -65,11 +65,21 @@ int main()
     CHECK(is_crossed_face(*G, d49));                     // the entry face is never `cross new`
     CHECK(twin_written(*G, room_2, {d49}));              // link 4 may archive room_1
 
-    // link 4 deletes OLD_FACE: links 1 and 2 die with it, the twin's target is gone
+    // link 4: ltsm archives room_1 (room -> room `exit`), deleting nothing; it is not mistaken for links 2/3
+    CHECK(not is_archived(*G, room_1));
+    CHECK(write_archived(*G, room_1, room_2));
+    CHECK(is_archived(*G, room_1) and not is_archived(*G, room_2));
+    CHECK(archived_rooms(*G) == std::vector<std::uint64_t>{room_1});
+    CHECK(entered_through(*G, room_2) == d13);           // a room->room edge is not a door->room one
+    CHECK(twin_of(*G, d49) == d13);
+    CHECK(room_of(*G, d13) == 0);                        // (no RT chain built in this test)
+    // link 5: door_concept deletes OLD_FACE (links 1 and 2 die with it), room_concept the room (link 4 dies with it)
     CHECK(G->delete_node(d13));
     CHECK(not crossed_through(*G, {d13}).has_value());
     CHECK(not entered_through(*G, room_2).has_value());
     CHECK(not twin_of(*G, d49).has_value());
+    CHECK(G->delete_node(room_1));
+    CHECK(archived_rooms(*G).empty());
 
     std::println("test_exit_fact: {} checks, {} failures", checks, failures);
     return failures == 0 ? 0 : 1;

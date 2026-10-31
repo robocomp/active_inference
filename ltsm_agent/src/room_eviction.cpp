@@ -2,6 +2,7 @@
  * room_eviction.cpp — see room_eviction.h for the shape of the transaction and ../EVICTION.md for
  * why it is shaped that way.
  */
+#include "../../common/room_transition/exit_fact.h"   // link 4: write_archived
 #include "room_eviction.h"
 #include "seam_fusion.h"
 
@@ -982,10 +983,12 @@ Outcome RoomEviction::evict(const Candidate &cand)
         return out;
     }
 
-    // THE OLD ROOM LEAVES THE WORKING MEMORY. Decided 2026-09-14 (user): ltsm deletes it, after the copy
-    // is verified and the fence has moved. Owners that follow `current` (door_concept's release_room) will
-    // already be letting their own nodes go; this removes whatever is left, room_concept's room/floor/walls
-    // included.
+    // ★ LINK 4: THE OLD ROOM IS ARCHIVED, ITS OWNERS DELETE IT (user 2026-10-31, replacing the 2026-09-14 decision that
+    //   ltsm deletes it). ltsm deleted 133 nodes of room_concept / door_concept / residual_concept per pingpong8 (trace S2),
+    //   the crossed door among them while the controller's cross was still executing (S1). Now the copy is verified and
+    //   the fence has moved, so ltsm writes `exit` OLD_ROOM -> NEW_ROOM (exit_fact.h) and each owner lets its own nodes
+    //   go on it (link 5). Model: RoomTransitionExit.tla DC_Reap / RC_Reap. remove_old stays for the backstop only.
+    rc::exit_fact::write_archived(*live_, cand.old_room_id, cand.new_room_id);
     if (cand.remove_old)
         out.live_removed = remove_live_room(cand.old_room_id);
     return out;
@@ -1315,6 +1318,7 @@ std::vector<PromotionReading> RoomEviction::promotion_evidence(double body_radiu
     {
         const auto proto = live_->get_node(e.to());
         if (not proto.has_value() or proto->type() != "room") continue;
+        if (rc::exit_fact::is_archived(*live_, proto->id())) continue;   // link 4: left and archived, awaiting its owners
         const bool entered = cur_retired and proto->id() != cur.value()
                              and live_->get_attrib_by_name<valid_att>(e).value_or(true);
         if (not rc::room::is_proto(*live_, proto->id()) and not entered)
@@ -1384,7 +1388,7 @@ std::optional<Candidate> RoomEviction::promotion_candidate(const PromotionReadin
     // ★ `proto` IS ROOM_CONCEPT'S (2026-10-12, user decision): "layout still provisional", removed by room_concept when
     //   the layout is promoted. This agent's identity decision is the `current` move alone.
     c.promote    = false;
-    c.remove_old = true;
+    c.remove_old = false;   // link 4: archived, the owners delete (2026-10-31)
     c.p_inside   = static_cast<float>(reading.p_inside);
     c.crossing_born = true;   // it was read through the crossing evidence: its frame is the crossed aperture
     return c;

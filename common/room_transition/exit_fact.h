@@ -109,6 +109,48 @@ inline std::optional<std::uint64_t> twin_of(DSR::DSRGraph& G, std::uint64_t new_
         if (is_door(G, e.to())) return e.to();
     return std::nullopt;
 }
+// ── link 4 ─────────────────────────────────────────────────────────────────────────────────────────────────────────────
+/// ltsm: OLD_ROOM is in long-term memory and the robot has left it for NEW_ROOM. ltsm deletes nothing it does not own
+/// (CONCEPT_AGENT_LIFECYCLE OWNERSHIP; user 2026-10-31): on this edge each OWNER deletes its own nodes under OLD_ROOM
+/// (link 5) — door_concept its doors (links 1 and 2 die with OLD_FACE), residual_concept its grid, room_concept its walls,
+/// floor and, last, OLD_ROOM itself once nothing else hangs from it (the edge dies with it).
+inline bool write_archived(DSR::DSRGraph& G, std::uint64_t old_room, std::uint64_t new_room)
+{
+    return G.insert_or_assign_edge(DSR::Edge::create<exit_edge_type>(old_room, new_room));
+}
+/// Has ltsm archived `room` (link 4)?
+inline bool is_archived(DSR::DSRGraph& G, std::uint64_t room)
+{
+    const auto n = G.get_node(room);
+    if (not n.has_value() or n->type() != "room") return false;
+    for (const auto& e : DSR::DSRGraph::get_node_edges_by_type(n.value(), "exit"))
+        if (is_type(G, e.to(), "room")) return true;
+    return false;
+}
+/// The room a node's RT chain hangs from (0 = none): the owner's test for "is this node of mine under an archived room".
+inline std::uint64_t room_of(DSR::DSRGraph& G, std::uint64_t id)
+{
+    for (int hop = 0; hop < 8 and id != 0; ++hop)
+    {
+        const auto n = G.get_node(id);
+        if (not n.has_value()) return 0;
+        if (n->type() == "room") return id;
+        std::uint64_t up = 0;
+        for (const auto& e : G.get_edges_to_id(id))
+            if (e.type() == "RT") { up = e.from(); break; }
+        id = up;
+    }
+    return 0;
+}
+/// The archived rooms in the graph (link 4 edges), for an owner's reap pass.
+inline std::vector<std::uint64_t> archived_rooms(DSR::DSRGraph& G)
+{
+    std::vector<std::uint64_t> out;
+    for (const auto& r : G.get_nodes_by_type("room"))
+        if (is_archived(G, r.id())) out.push_back(r.id());
+    return out;
+}
+
 /// Link 4's guard: is the crossing into `room` complete (its entry face's twin written)?
 inline bool twin_written(DSR::DSRGraph& G, std::uint64_t room, const std::vector<std::uint64_t>& faces_of_room)
 {

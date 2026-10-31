@@ -281,6 +281,7 @@ private:
     // Follow `current`, and LET GO of the room we leave. Called once per cycle before anything reads
     // room_node_id_.
     void step_room_following();
+    void reap_archived_rooms();   ///< link 5: delete our doors under a room ltsm archived (exit_fact.h)
 
     // ★THE LET-GO RULE (agreed with ltsm_agent 2026-09-12; belongs in CONCEPT_AGENT_LIFECYCLE.md beside
     // REMOVE). An agent anchored to a room that is no longer the current one lets that room go: it stops

@@ -900,6 +900,45 @@ std::uint64_t RoomSceneGraph::room_of_node(std::uint64_t id) const
     return 0;
 }
 
+// ★ LINK 5: THE OWNER DELETES ITS ROOM ONCE LTSM HAS ARCHIVED IT (exit_fact.h; user 2026-10-31). ltsm used to delete the
+//   room left with its whole subtree — 133 nodes of three agents per pingpong8. Now it writes `exit` OLD_ROOM -> NEW_ROOM
+//   once the room is in memory, and each owner lets its own nodes go. Ours are the room, its floor and its walls; the
+//   other owners' nodes hang BELOW them (door <- wall <- floor <- room), so ours go only when none of theirs is left in
+//   the subtree (they would lose the RT chain that tells them which room they were in). Deepest first, the room last;
+//   the link-4 edge dies with it. Model: RoomTransitionExit.tla RC_Reap.
+void RoomSceneGraph::reap_archived_rooms()
+{
+    for (const auto room : rc::exit_fact::archived_rooms(*G_))
+    {
+        if (room == dsr_room_id_) continue;   // never the room the robot is in
+        std::vector<std::pair<std::uint64_t, int>> ours;   // id, depth
+        bool foreign = false;
+        std::vector<std::pair<std::uint64_t, int>> stack{{room, 0}};
+        while (not stack.empty() and not foreign)
+        {
+            const auto [id, depth] = stack.back();
+            stack.pop_back();
+            const auto n = G_->get_node(id);
+            if (not n.has_value()) continue;
+            for (const auto& e : DSR::DSRGraph::get_node_edges_by_type(n.value(), "RT"))
+            {
+                const auto c = G_->get_node(e.to());
+                if (not c.has_value() or c->type() == "robot" or c->type() == "root") continue;
+                if (c->type() != "wall" and c->type() != "floor") { foreign = true; break; }
+                ours.emplace_back(c->id(), depth + 1);
+                stack.emplace_back(c->id(), depth + 1);
+            }
+        }
+        if (foreign) continue;   // another owner has not let its nodes go yet: next update
+        std::ranges::sort(ours, [](const auto& a, const auto& b) { return a.second > b.second; });
+        for (const auto& [id, depth] : ours) G_->delete_node(id);
+        const std::string name = G_->get_node(room).has_value() ? G_->get_node(room)->name() : std::string("<gone>");
+        if (G_->delete_node(room))
+            std::println("[room] {} deleted with its {} wall/floor node(s): archived by ltsm (link 4), nothing else under it",
+                         name, ours.size());
+    }
+}
+
 // Is a cross of one of THIS room's doors executing? The controller's `executing` edge on aff_<door>_cross is the action
 // itself (spec Rev 3: the crossing is an action), from the moment the passage claims it until the room switch moves the
 // robot out of this room — read here, not inferred from where the pose says the body is.
@@ -923,6 +962,7 @@ void RoomSceneGraph::step_proto_room(const rc::RoomConcept::UpdateResult& res)
         return;
     }
     room_concept_->set_crossing(cross_executing());
+    reap_archived_rooms();
     // ONE ROW PER UPDATE, WHATEVER PATH THE IMPL TAKES. The run is driven by hand and nobody is
     // reading the terminal, so a branch that returns early must still say so in the file — otherwise
     // "the agent stopped" and "the code returned somewhere I forgot to log" look the same afterwards.

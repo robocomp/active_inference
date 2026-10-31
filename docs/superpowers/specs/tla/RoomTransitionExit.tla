@@ -15,7 +15,10 @@
 (*  2 room_concept on 1 naming a face of ITS room: enters NEW_ROOM, `exit` OLD_FACE -> *)
 (*                 NEW_ROOM                                                            *)
 (*  3 door_concept on 2: NEW_FACE in NEW_ROOM, `exit` NEW_FACE -> OLD_FACE (the twin)  *)
-(*  4 ltsm         on 3: archives OLD_ROOM (deleting it and OLD_FACE: 1 and 2 die)     *)
+(*  4 ltsm         on 3: copies OLD_ROOM into memory and writes `exit` OLD_ROOM ->     *)
+(*                 NEW_ROOM (archived); it deletes NOTHING it does not own.           *)
+(*  5 owners       on 4: door_concept deletes OLD_ROOM's doors (OLD_FACE: 1, 2 die),  *)
+(*                 room_concept deletes OLD_ROOM once nothing else hangs from it.     *)
 (* No counters: a fact about leaving room R cannot fire twice, the robot is no longer   *)
 (* in R once it has been acted on.                                                     *)
 (*                                                                                     *)
@@ -32,8 +35,9 @@
 (*                 acknowledged THIS leg's exit fact (no "any room change ends a leg"). *)
 (*  everyone       follows room_concept's room (no consumer keys on ltsm's `current`).  *)
 (*                                                                                     *)
-(* Kept from the code as it is, deliberately (NOT part of this step): ltsm's eviction  *)
-(* deleting the left room's subtree, its recognition/staging, door_concept's existence *)
+(* OWNERS DELETE (2026-10-31, user): ltsm used to delete the left room's subtree, 133 *)
+(* nodes of room_concept/door_concept/residual_concept per pingpong8 (trace S2).       *)
+(* Kept from the code as it is: ltsm's recognition/staging, door_concept's existence  *)
 (* hold on the face being executed (d57997dc), name-keyed identities.                  *)
 (*                                                                                     *)
 (* Adversary (proto15 + pingpong2): phantom doors where the robot stands in a doorway, *)
@@ -125,7 +129,7 @@ TypeOK ==
 
 Init ==
   /\ pos = 1 /\ near = NoHole /\ doorway = FALSE /\ lastHole = NoHole /\ degr = 0 /\ phantoms = 0
-  /\ rooms = (1 :> [name |-> 1, truth |-> 1, proto |-> FALSE, from |-> 0, via |-> NoHole, face |-> 0])
+  /\ rooms = (1 :> [name |-> 1, truth |-> 1, proto |-> FALSE, from |-> 0, via |-> NoHole, face |-> 0, arch |-> FALSE])
   /\ rcRT = 1 /\ current = 1
   /\ doors = [d \in {} |-> NewDoor("D0", 0, FALSE, 0)]
   /\ passages = {} /\ recalls = {} /\ proposal = NoProp
@@ -150,7 +154,7 @@ RC_Switch ==
          k     == IF useRc THEN pred ELSE Max(LiveNames \cup {hwm}) + 1
          t     == IF useRc THEN issued[k] ELSE pos
      IN /\ rooms' = rooms @@ (nextRoom :> [name |-> k, truth |-> t, proto |-> ~useRc, from |-> rooms[rcRT].name,
-                                            via |-> doors[d].hole, face |-> d])
+                                            via |-> doors[d].hole, face |-> d, arch |-> FALSE])
         /\ hwm' = Max({hwm, k})
         /\ issued' = IF k \in DOMAIN issued THEN issued ELSE issued @@ (k :> t)
         /\ rcPromoted' = useRc
@@ -199,7 +203,7 @@ NewPassages == {{e, doors[e].twin} : e \in {x \in DOMAIN doors : doors[x].twin \
 BehindDoor(rm, dr, mt, mp, stg, d) ==
   {o \in DOMAIN mt :
      LET x == rm[dr[d].room].name IN
-     /\ dr[d].room \in DOMAIN rm
+     /\ dr[d].room \in DOMAIN rm /\ ~rm[dr[d].room].arch
      /\ x \in DOMAIN mt /\ x # stg
      /\ o # x /\ o \notin {rm[r].name : r \in DOMAIN rm}
      /\ \E m \in mp : \/ (m.a = << x, dr[d].hole >> /\ m.b[1] = o)
@@ -243,8 +247,9 @@ LT_Cycle(K) ==
       \* the remembered passage is the crossing itself: (left room, hole) -- (entered room, hole)
       mp2  == IF due THEN mp1 \cup {[a |-> << rooms[old].name, viaH >>, b |-> << rooms[new].name, viaH >>]}
               ELSE mp1
-      rm2  == IF due THEN [r \in DOMAIN rooms \ {old} |-> rooms[r]] ELSE rooms
-      dr2  == [d \in DOMAIN doors \ gone |-> doors[d]]
+      \* link 4: archived, NOT deleted -- the owners delete (DC_Reap, RC_Reap)
+      rm2  == IF due THEN [rooms EXCEPT ![old].arch = TRUE] ELSE rooms
+      dr2  == doors
       cr1  == carry \cup verdictCarry
       done == {c \in cr1 : << c.from, c.h >> \in mf2}
       mp3  == mp2 \cup {[a |-> << c.from, c.h >>, b |-> << c.to, c.h >>] : c \in done}
@@ -338,6 +343,22 @@ DC_PhantomGone(d) ==
   /\ UNCHANGED << envVars, rooms, rcRT, current, passages, proposal, rcVars, ltVars,
                   dcVars, ctVars, nextRoom, nextDoor, issued, arrived >>
 
+\* =================================================================================== owners delete (link 5)
+\* door_concept: a door of a room ltsm has archived is deleted by its owner (OLD_FACE with it: links 1, 2 die).
+DC_Reap ==
+  /\ \E d \in DOMAIN doors : doors[d].room \in DOMAIN rooms /\ rooms[doors[d].room].arch
+  /\ LET d == CHOOSE x \in DOMAIN doors : doors[x].room \in DOMAIN rooms /\ rooms[doors[x].room].arch
+     IN DelDoor(d)
+  /\ UNCHANGED << envVars, rooms, rcRT, current, passages, proposal, rcVars, ltVars,
+                  dcVars, ctVars, nextRoom, nextDoor, issued, arrived >>
+\* room_concept: an archived room is deleted once no other owner's node hangs from it.
+RC_Reap ==
+  /\ \E r \in DOMAIN rooms : rooms[r].arch /\ DoorsOf(r) = {}
+  /\ LET r == CHOOSE x \in DOMAIN rooms : rooms[x].arch /\ DoorsOf(x) = {}
+     IN rooms' = [x \in DOMAIN rooms \ {r} |-> rooms[x]]
+  /\ UNCHANGED << envVars, rcRT, current, doors, passages, recalls, proposal, rcVars, ltVars,
+                  dcVars, ctVars, nextRoom, nextDoor, issued, arrived >>
+
 \* =================================================================================== controller
 \* tracks room_concept's room (id; a rename is not a room change)
 CT_Track ==
@@ -393,7 +414,7 @@ CT_LeaveDoorway ==
 \* now is an exit fact), and -- X3 -- ltsm has archived the room left.
 CT_Done ==
   /\ ctl.step = "cross" /\ ctl.exited /\ rcRT # ctl.croom /\ ctlRoom = rcRT
-  /\ CLOSE_ON_ARCHIVE => current = rcRT
+  /\ CLOSE_ON_ARCHIVE => current = rcRT   \* archived; the owners' deletion need not be awaited (checked 10-31)
   /\ arrived' = Append(arrived, pos)
   /\ ctl' = [leg |-> ctl.leg + 1, step |-> "idle", door |-> 0, hole |-> NoHole, croom |-> 0, pred |-> 0,
              passed |-> FALSE, exited |-> FALSE]
@@ -408,6 +429,7 @@ Next ==
   \/ \E K \in {0} \cup MemNames : LT_Cycle(K)
   \/ DC_Follow \/ DC_Face \/ \E h \in RealHoles : DC_Birth(h) \/ DC_Phantom
   \/ \E d \in DOMAIN doors : DC_Degrade(d) \/ DC_PhantomGone(d)
+  \/ DC_Reap \/ RC_Reap
   \/ CT_Track \/ CT_Start \/ CT_Pass \/ CT_Exit \/ CT_LeaveDoorway \/ CT_Done
 
 Fairness ==
@@ -416,7 +438,7 @@ Fairness ==
   /\ WF_vars(DC_Follow) /\ WF_vars(DC_Face) /\ WF_vars(\E h \in RealHoles : DC_Birth(h))
   /\ WF_vars(\E d \in DOMAIN doors : DC_PhantomGone(d))
   /\ WF_vars(CT_Track) /\ SF_vars(CT_Start) /\ WF_vars(CT_Pass) /\ WF_vars(CT_Exit) /\ WF_vars(CT_LeaveDoorway)
-  /\ WF_vars(CT_Done)
+  /\ WF_vars(CT_Done) /\ WF_vars(DC_Reap) /\ WF_vars(RC_Reap)
 
 Spec == Init /\ [][Next]_vars /\ Fairness
 
@@ -453,4 +475,5 @@ VacDegraded   == degr = 0
 VacShutBacked == ~\E d \in DOMAIN doors : doors[d].fact /\ ~doors[d].pass
 VacPhantom    == phantoms = 0
 VacLeg7       == ctl.leg < 7
+VacArchived   == ~\E r \in DOMAIN rooms : rooms[r].arch   \* an archived room still waiting for its owners
 ==========================================================================================

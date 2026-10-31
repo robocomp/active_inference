@@ -1290,6 +1290,7 @@ void SpecificWorker::compute()
     // Must run before anything below reads room_node_id_ — births, the containment prior and every RT
     // write are all parented by it.
     step_room_following();
+    reap_archived_rooms();   // link 5: our doors under a room ltsm has archived
     if (room_node_id_ == 0)
     {
         // ★ NO ROOM, BUT A PASSAGE IN FLIGHT (mid room-switch): the anchor's prediction and its robot-frame LiDAR /
@@ -3363,6 +3364,26 @@ void SpecificWorker::step_entry_mirrors()
         if (changed)
             G->update_node(dst.value());
     }
+}
+
+// ─── LINK 5: THE OWNER DELETES ITS DOORS UNDER AN ARCHIVED ROOM ────────────────────────────────────────────────────────
+// ltsm copies the room left into memory and writes `exit` OLD_ROOM -> NEW_ROOM (link 4, exit_fact.h); it deletes nothing
+// of ours (user 2026-10-31: it used to delete the whole subtree — 133 foreign nodes per pingpong8, the door being crossed
+// among them). Every door node under that room is this agent's (HELD by release_room, or a mirror it made): deleted here,
+// and del_node_slot does the held-door bookkeeping (lost_doors_ ⇒ the late carry) exactly as when ltsm deleted it. Links
+// 1 and 2 die with OLD_FACE. room_concept deletes the room itself once nothing of ours hangs from it.
+void SpecificWorker::reap_archived_rooms()
+{
+    const auto archived = rc::exit_fact::archived_rooms(*G);
+    if (archived.empty()) return;
+    std::vector<std::uint64_t> gone;
+    for (const auto& n : G->get_nodes_by_type("object"))
+        if (rc::exit_fact::is_door(*G, n.id()) and not rc::interaction::is_anchor(*G, n))
+            if (const auto r = rc::exit_fact::room_of(*G, n.id()); r != 0 and std::ranges::contains(archived, r))
+                gone.push_back(n.id());
+    for (const auto id : gone)
+        if (G->delete_node(id))
+            std::print("door_concept: [room] door {} deleted — its room was archived by ltsm (link 4)\n", id);
 }
 
 void SpecificWorker::release_room(std::uint64_t old_room, std::uint64_t new_room)

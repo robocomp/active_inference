@@ -9,6 +9,7 @@
 
 #include "specificworker.h"
 
+#include "../../common/room_transition/exit_fact.h"   // link 5: our grid under an archived room
 #include "../../common/config_report/config_read.h"   // rc::cfg::Reader (SHARED)
 #include "../../common/room_resolve/room_resolve.h"   // rc::room::current_room (proto-aware, deterministic)
 #include "../../common/interaction_anchor/interaction_anchor.h"   // rc::interaction::is_anchor (header-inline: no link change)
@@ -1758,6 +1759,13 @@ void SpecificWorker::publish_grid_display(const rc::OccupancyGrid::CellExplained
     auto room = G->get_node(room_node_id_);
     if (not room.has_value()) return;
 
+    // ★ LINK 5 (exit_fact.h, user 2026-10-31): our `residual` node still hangs from the room the robot left. When ltsm has
+    //   archived that room (link 4) the owner deletes it — ltsm deletes nothing of ours any more — and it is re-made
+    //   under the current room just below.
+    if (const auto old = G->get_node("residual"); old.has_value())
+        if (const auto r = rc::exit_fact::room_of(*G, old->id()); r != 0 and r != room_node_id_ and rc::exit_fact::is_archived(*G, r))
+            if (G->delete_node(old->id()))
+                std::println("[grid] 'residual' deleted under archived room {} (link 4); re-made under the current room", r);
     // Create the `residual` node once (owned; cleaned up on exit via the "residual" [Owns] entry). Node NAME is
     // "residual"; node TYPE stays grid_node_type ("grid") — consumers still key attrs off the grid_* type.
     auto gopt = G->get_node("residual");
