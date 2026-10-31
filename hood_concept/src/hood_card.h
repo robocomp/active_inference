@@ -22,6 +22,8 @@ inline card::Card make_card(const HoodConfig& cfg)
     const float depth = cfg.ai2_prior_depth_m < 0.0f ? cfg.ai2_prior_footprint_m : cfg.ai2_prior_depth_m;
     c.geometry = {cfg.ai2_prior_footprint_m, depth, cfg.vertical_extent_m,
                   cfg.ai2_prior_height_m - cfg.vertical_extent_m, cfg.ai2_prior_height_m};
+    // Level 1: hood_projection.cpp's walls_block(cam, sample, polygon, kHoodOwnWallSkipM): LINE walls, own-wall radius 0.70 m.
+    c.walls = card::WallOcclusion{kHoodOwnWallSkipM, -1.0f, 0.0f};
     // hood_existence.cpp:185: envelope(sil.fill, visible = in_fov_frac) * central_frac. The comment there
     // names range_conf but the code does not multiply it (same as the refrigerator), so it is not listed.
     card::SubtypeParams sp;

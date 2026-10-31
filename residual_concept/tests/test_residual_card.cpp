@@ -47,6 +47,7 @@ int main(int argc, char**)
     CHECK(c.calibration == "prior" and c.instance_terms.empty());
     ResidualConfig off = cfg; off.use_bpearl = false;
     CHECK(not make_card(off).channels[1].modelled);
+    CHECK(c.walls and near(c.walls->own_wall_skip_m, 0.0f) and c.walls->own_wall_plane_m < 0.0f and near(c.walls->wall_thickness_m, 0.0f));
     const auto back = card::card_from_json(card::to_json(c));
     CHECK(back.has_value() and card::to_json(*back) == card::to_json(c));
 

@@ -96,6 +96,18 @@ int main()
         CHECK(params_for(c, "oval").q_return == 0.85f);
         CHECK(params_for(c, "").q_return == 0.85f);
     }
+    { // level 1 (wall occlusion): round trip, negative plane sentinel survives; a card without it loads as "not declared"
+        Card w = make(); w.walls = WallOcclusion{0.70f, -1.0f, 0.0f};
+        const auto e = card_from_json(to_json(w));
+        CHECK(e and e->walls and e->walls->own_wall_skip_m == 0.70f and e->walls->own_wall_plane_m == -1.0f
+              and e->walls->wall_thickness_m == 0.0f and to_json(*e) == to_json(w));
+        const auto old = card_from_json(to_json(make()));
+        CHECK(old and not old->walls);
+        std::string j = to_json(w);
+        const auto k = j.find("\"wall.thickness_m\"");
+        j.erase(k, j.find(',', k) - k + 1);
+        CHECK(not card_from_json(j));   // a half-declared block is a schema error
+    }
     std::printf(bad ? "FAILED (%d)\n" : "ALL OK\n", bad);
     return bad ? 1 : 0;
 }

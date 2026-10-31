@@ -146,6 +146,53 @@ int main()
         CHECK(evaluate_lidar(c, w, hi, kO, "helios").limit == Limit::AboveFan);
         CHECK(evaluate_lidar(c, room(), hi, kO, "helios").limit != Limit::AboveFan);
     }
+    { // I5: the mount is body_T_sensor and Shadow's forward is body +y, so room_T_sensor = Rz(heading - pi/2) * mount.
+      // Helios at body (0, -0.155) (ROBOT_GEOMETRY.md: 15.5 cm BEHIND the body origin), robot at (0, 0):
+      //   heading pi/2 (facing room +y): Rz(0) * (0, -0.155)          = (0, -0.155)   -- behind, toward -y
+      //   heading 0    (facing room +x): Rz(-pi/2) * (0, -0.155)
+      //                                  = (0*cos(-pi/2) - (-0.155)*sin(-pi/2), 0*sin(-pi/2) + (-0.155)*cos(-pi/2))
+      //                                  = (-0.155, 0)                                 -- behind, toward -x
+      // (The old x-forward lever Rz(heading) put it at (0.155, 0) for heading pi/2: beside the robot, not behind.)
+        LidarRig hb = helios(); hb.mount.translation() = Eigen::Vector3f(0.0f, -0.155f, 1.075f);
+        const Hypothesis far = at(0.0f, 2.9f, 0.3f, 0.3f, 0.0f, 1.8f);
+        const Eigen::Vector3f o_up = rig_in_room(hb, {{0.0f, 0.0f}, std::numbers::pi_v<float> / 2.0f}, far).mount.translation();
+        const Eigen::Vector3f o_x  = rig_in_room(hb, {{0.0f, 0.0f}, 0.0f}, far).mount.translation();
+        std::printf("I5: heading pi/2 -> (%.4f, %.4f, %.3f); heading 0 -> (%.4f, %.4f)\n", o_up.x(), o_up.y(), o_up.z(), o_x.x(), o_x.y());
+        CHECK(std::abs(o_up.x()) < 1e-5f and std::abs(o_up.y() + 0.155f) < 1e-5f and std::abs(o_up.z() - 1.075f) < 1e-5f);
+        CHECK(std::abs(o_x.x() + 0.155f) < 1e-5f and std::abs(o_x.y()) < 1e-5f);
+        // best heading (vp.yaw unset) = the bearing to the target: a target on +x gives the heading-0 origin
+        const Eigen::Vector3f o_best = rig_in_room(hb, {{0.0f, 0.0f}, std::nullopt}, at(2.9f, 0.0f, 0.3f, 0.3f, 0.0f, 1.8f)).mount.translation();
+        CHECK(std::abs(o_best.x() + 0.155f) < 1e-5f and std::abs(o_best.y()) < 1e-5f);
+        // End to end through evaluate(): a 3.0 m far limit (sigma 1 cm) and the target 2.9 m from the ROBOT. Behind
+        // the robot by 0.155 the sensor is 3.055 m away (past the limit, P ~ 0); the x-forward lever would have put it
+        // 2.904 m away (inside, P ~ 1).
+        LidarRig sh = hb; sh.model.range_max_m = 3.0f; sh.model.range_sigma_floor_m = 0.01f;
+        Card hc = thing(); hc.channels = {{"helios", Role::Both, true}};
+        World w = room(); w.helios = sh; w.bpearl.reset();
+        const auto r_up = evaluate(hc, w, far, {{0.0f, 0.0f}, std::numbers::pi_v<float> / 2.0f});
+        const auto r_best = evaluate(hc, w, at(2.9f, 0.0f, 0.3f, 0.3f, 0.0f, 1.8f), {{0.0f, 0.0f}, std::nullopt});
+        std::printf("I5 evaluate: heading pi/2 p=%.4f limit=%d; best heading p=%.4f limit=%d\n",
+                    r_up.p_notice, int(r_up.limit), r_best.p_notice, int(r_best.limit));
+        CHECK(r_up.p_notice < 1e-3f and r_up.limit == Limit::Range);
+        CHECK(r_best.p_notice < 1e-3f and r_best.limit == Limit::Range);
+        // facing AWAY from it (heading -pi/2) the helios is 0.155 m closer: 2.745 m, inside the limit
+        const auto r_away = evaluate(hc, w, far, {{0.0f, 0.0f}, -std::numbers::pi_v<float> / 2.0f});
+        CHECK(r_away.p_notice > 0.99f);
+    }
+    { // beyond range with NO ring crossing: bpearl (room elevations -90..0 deg) and a target ABOVE it, 32 m away.
+      // Neither fixing the rings nor fixing the range alone raises P; the limit must still say why, never None at p 0.
+        World w = room(); w.polygon = {{-40, -40}, {40, -40}, {40, 40}, {-40, 40}};
+        const auto r = evaluate_lidar(c, w, at(32.0f, 0, 3.0f, 3.0f, 1.0f, 1.2f), kO, "bpearl");
+        std::printf("beyond+nofan: p=%.4f limit=%d gain=%.3f\n", r.p, int(r.limit), r.limit_gain);
+        CHECK(r.p < 1e-3f and r.limit == Limit::Range and r.limit_gain > 0.5f);
+        // the same height in range: the fan is what is missing
+        const auto rn = evaluate_lidar(c, w, at(3.0f, 0, 0.3f, 0.3f, 1.0f, 1.2f), kO, "bpearl");
+        CHECK(rn.limit == Limit::AboveFan);
+        // and in the dead zone with no ring: DeadZone, not None
+        const auto rd = evaluate_lidar(c, w, at(0.05f, 0, 0.02f, 0.02f, 1.0f, 1.2f), kO, "bpearl");
+        std::printf("dead+nofan: p=%.4f limit=%d\n", rd.p, int(rd.limit));
+        CHECK(rd.limit != Limit::None);
+    }
     std::printf(bad ? "FAILED %d\n" : "all passed\n", bad);
     return bad ? 1 : 0;
 }

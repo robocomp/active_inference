@@ -15,6 +15,11 @@ class ConfigLoader;   // RoboComp config façade (defined in genericworker.h)
 
 namespace rc {
 
+// Own-wall skip of this agent's wall line-of-sight test (rc::occlusion::walls_block radius form, refrigerator_projection.cpp):
+// a wall segment closer than this to a silhouette sample never occludes it -- ≈ fridge depth: protects the whole carcass of a wall-flush fridge.
+// A code constant, not a config key; it lives here so the projection and the perception card read ONE definition.
+inline constexpr float kRefrigeratorOwnWallSkipM = 0.70f;
+
 struct RefrigeratorConfig
 {
     // ── Agent convergence & cadence ───────────────────────────────────────────────────────────────

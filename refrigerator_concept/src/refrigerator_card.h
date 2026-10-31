@@ -21,6 +21,9 @@ inline card::Card make_card(const RefrigeratorConfig& cfg)
                   {"ricoh", card::Role::Identity, false}};
     // etc/config.toml AI2PriorFootprintM / AI2PriorHeightM (= manifest prior.footprint / prior.height): floor-anchored [0, H].
     c.geometry = {cfg.ai2_prior_footprint_m, cfg.ai2_prior_footprint_m, cfg.ai2_prior_height_m, 0.0f, cfg.ai2_prior_height_m};
+    // Level 1: refrigerator_projection.cpp's walls_block(cam, sample, polygon, kRefrigeratorOwnWallSkipM): LINE walls
+    // (thickness 0), own-wall radius 0.70 m.
+    c.walls = card::WallOcclusion{kRefrigeratorOwnWallSkipM, -1.0f, 0.0f};
     // refrigerator_existence.cpp:170: p_detect = envelope(sil.fill, visible = in_fov_frac) * central_frac.
     // The comment there names range_conf, but the code no longer multiplies it, so it is not listed.
     card::SubtypeParams sp;

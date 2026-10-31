@@ -16,6 +16,10 @@ class ConfigLoader;   // RoboComp config façade (defined in genericworker.h)
 
 namespace rc {
 
+// Depth of the wall boxes bottle_existence.cpp adds to its occluders (rc::nbv::wall_obstacles). A code constant, shared
+// with the perception card's level-1 settings.
+inline constexpr float kBottleWallThicknessM = 0.10f;
+
 struct BottleConfig
 {
     float fe_eps           = 1e-3f;

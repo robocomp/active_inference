@@ -2,6 +2,7 @@
 // geometry, and the card survives a JSON round trip. Also: an unmeasured door is marginalised over the phi prior.
 // Run under the agent locale:  LANG=es_ES.UTF-8 ./door_card_test
 #include "door_card.h"
+#include "door_belief.h"   // DoorBelief::FieldNuisance: the depth band the card's own-wall plane must equal
 #include "perception_card/tests/toml_peek.h"   // via -I common
 #include "perception_card/evaluator.h"
 #include <clocale>
@@ -40,6 +41,32 @@ int main(int argc, char**)
     CHECK(near(c.geometry.w, 1.0f) and near(c.geometry.d, 0.05f) and near(c.geometry.h, 2.1f));
     CHECK(near(c.geometry.z0, 0.0f) and near(c.geometry.z1, 2.1f));
     CHECK(c.instance_terms.empty() and c.calibration == "prior" and c.blind_spot_map_path.empty());
+    // Level 1: the own wall by PLANE (door_wall_edges' depth band), no radius, line walls. The band IS the phi field's.
+    CHECK(c.walls and near(c.walls->own_wall_skip_m, 0.0f) and near(c.walls->wall_thickness_m, 0.0f));
+    CHECK(c.walls and near(c.walls->own_wall_plane_m, rc::DoorBelief::FieldNuisance{}.depth_hi)
+          and near(c.walls->own_wall_plane_m, -rc::DoorBelief::FieldNuisance{}.depth_lo));
+    { // end to end: a door in the y = 4 wall (gap cut), seen from 2.5 m. Its OWN wall (the runs either side of the gap)
+      // never hides it; a partition meeting that wall 7 cm from the jamb DOES (the DOOR_0 case a radius skip missed).
+        card::World w;
+        w.polygon = {{0, 0}, {6, 0}, {6, 4}, {0, 4}};
+        w.gaps = {{Eigen::Vector2f(3.0f, 4.0f), 0.5f}};
+        rc::nbv::Sensor z;
+        z.hfov_rad = 2.0f * std::atan(640.0f / 448.0f); z.vfov_rad = 2.0f * std::atan(360.0f / 448.0f); z.height_m = 0.945f;
+        w.zed = z; w.zed_mount_z = 0.945f;
+        card::Hypothesis h; h.concept_ = "door"; h.x = 3.0f; h.y = 4.0f; h.yaw = 0.0f; h.phi = 0.0f;
+        const card::Viewpoint vp{{3.0f, 1.5f}, std::nullopt};
+        card::World open_room = w; open_room.polygon = {{0, 0}, {6, 0}, {6, 9}, {0, 9}}; open_room.gaps.clear();
+        const auto r_own = card::evaluate(c, w, h, vp), r_none = card::evaluate(c, open_room, h, vp);
+        std::printf("door own wall: rec=%.4f limit=%d | no wall rec=%.4f\n", r_own.p_recognise, int(r_own.limit), r_none.p_recognise);
+        CHECK(std::fabs(r_own.p_recognise - r_none.p_recognise) < 1e-6f and r_own.limit != card::Limit::BehindWall);
+        // partition: a wall from (3.57, 4) down to (3.57, 2.5) and back, 7 cm beyond the right jamb (x = 3.5); seen
+        // from the right of it the door is behind it.
+        card::World part = w;
+        part.polygon = {{0, 0}, {6, 0}, {6, 4}, {3.62f, 4}, {3.62f, 2.5f}, {3.57f, 2.5f}, {3.57f, 4}, {0, 4}};
+        const auto r_part = card::evaluate(c, part, h, {{5.0f, 3.0f}, std::nullopt});
+        std::printf("door behind partition: rec=%.4f limit=%d\n", r_part.p_recognise, int(r_part.limit));
+        CHECK(r_part.limit == card::Limit::BehindWall);
+    }
     const auto back = card::card_from_json(card::to_json(c));
     CHECK(back.has_value() and card::to_json(*back) == card::to_json(c));
 

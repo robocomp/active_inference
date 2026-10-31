@@ -5,6 +5,7 @@
 
 #include "chair_config.h"
 #include "../../common/perception_card/card.h"
+#include "../../common/occlusion/occlusion.h"   // rc::occlusion::kOwnWallSkipM (the skip chair_detect.h passes)
 
 namespace rc
 {
@@ -21,6 +22,8 @@ inline card::Card make_card(const ChairConfig& cfg)
     // The chair the model projects: the Tracker.BirthSeat* template (a floor-anchored seat + backrest to its top).
     const float top = cfg.tracker_birth_seat_h + cfg.tracker_birth_back_h;
     c.geometry = {cfg.tracker_birth_seat_w, cfg.tracker_birth_seat_d, top, 0.0f, top};
+    // Level 1: chair_detect.h's walls_block(cam, chair centre, polygon, rc::occlusion::kOwnWallSkipM): LINE walls, 0.15 m.
+    c.walls = card::WallOcclusion{rc::occlusion::kOwnWallSkipM, -1.0f, 0.0f};
     card::SubtypeParams sp;
     sp.env = {cfg.detect_min_fill, cfg.detect_max_fill, cfg.detect_soft};
     // chair_detect.h: envelope(roi_fill) * in_fov * central * wall line of sight. The envelope is the single-fill
