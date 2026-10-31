@@ -1,0 +1,1 @@
+/usr/bin/c++ -O2 CMakeFiles/terms_test.dir/tests/terms_test.cpp.o -o terms_test 

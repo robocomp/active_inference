@@ -1,0 +1,7 @@
+/home/pbustos/robocomp/components/active_inference.worktrees/perception-cards/common/perception_card/build/CMakeFiles/card_test.dir
+/home/pbustos/robocomp/components/active_inference.worktrees/perception-cards/common/perception_card/build/CMakeFiles/terms_test.dir
+/home/pbustos/robocomp/components/active_inference.worktrees/perception-cards/common/perception_card/build/CMakeFiles/evaluator_camera_test.dir
+/home/pbustos/robocomp/components/active_inference.worktrees/perception-cards/common/perception_card/build/CMakeFiles/evaluator_lidar_test.dir
+/home/pbustos/robocomp/components/active_inference.worktrees/perception-cards/common/perception_card/build/CMakeFiles/test.dir
+/home/pbustos/robocomp/components/active_inference.worktrees/perception-cards/common/perception_card/build/CMakeFiles/edit_cache.dir
+/home/pbustos/robocomp/components/active_inference.worktrees/perception-cards/common/perception_card/build/CMakeFiles/rebuild_cache.dir

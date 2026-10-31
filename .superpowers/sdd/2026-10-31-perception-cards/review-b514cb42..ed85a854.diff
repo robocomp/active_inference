@@ -1,0 +1,725 @@
+# Review package: b514cb42..HEAD
+
+## Commits
+ed85a854 perception_card: closed term library; door + cabinet factors moved, identical by construction
+
+## Files changed
+ cabinet_concept/src/cabinet_existence.cpp   |   9 +-
+ common/perception_card/CMakeLists.txt       |   4 +
+ common/perception_card/card.h               |   7 +-
+ common/perception_card/term_spec.h          |  16 ++
+ common/perception_card/terms.h              | 127 ++++++++++++++
+ common/perception_card/tests/terms_test.cpp | 245 ++++++++++++++++++++++++++++
+ door_concept/src/core/door_existence.cpp    |  18 +-
+ door_concept/src/core/door_existence.h      |   3 +-
+ 8 files changed, 406 insertions(+), 23 deletions(-)
+
+## Diff
+diff --git a/cabinet_concept/src/cabinet_existence.cpp b/cabinet_concept/src/cabinet_existence.cpp
+index 9fdd3aea..9f14da06 100644
+--- a/cabinet_concept/src/cabinet_existence.cpp
++++ b/cabinet_concept/src/cabinet_existence.cpp
+@@ -10,20 +10,21 @@
+ #include <cstdint>
+ #include <print>
+ #include <utility>
+ #include <vector>
+ 
+ #include "cabinet_fitter.h"                                       // rc::CabinetFitter (instances, silhouette)
+ #include "../../common/lidar_ingestor/concept_lidar_ingestor.h"                              // rc::ConceptLidarIngestor (per-plane sweeps)
+ #include "cabinet_model.h"                                       // CabinetModel::TOP_THICKNESS / LEG_RADIUS
+ #include "../../common/existence_belief/existence_belief.h"    // rc::exist:: carve_box / mask_evidence / …
+ #include "../../common/dashboard/evidence_monitor.h"           // rc::EvidenceGlobals
++#include "../../common/perception_card/terms.h"                 // rc::card::term_* — the P(detect) factor formulas (SHARED)
+ 
+ namespace rc {
+ 
+ // ─── Existence-based removal ─────────────────────────────────────────────────────────────────────
+ 
+ // Carve the LiDAR sweep(s) + silhouette against every cabinet footprint, integrate the per-instance existence
+ // log-odds, and remove the cabinets whose volume is demonstrably empty (debounced). See cabinet_existence.h.
+ void CabinetExistence::update_and_remove(CabinetFitter& fitter, ConceptLidarIngestor* lidar,
+                                        bool fresh_masks, bool fresh_sweep, EvidenceGlobals& ev_g,
+                                        const std::function<void(std::uint64_t, const CabinetInstance&)>& on_remove)
+@@ -52,25 +53,24 @@ void CabinetExistence::update_and_remove(CabinetFitter& fitter, ConceptLidarInge
+         return;
+ 
+     rc::exist::SensorModel sm;
+     sm.sensor_sigma_m = cfg_.existence_sensor_sigma_m;
+     sm.detection_prob = cfg_.existence_detection_prob;
+     sm.clutter_prob   = cfg_.existence_clutter_prob;
+ 
+     // Absence-confidence vs range: a miss at long range is weak evidence of removal (the sensor likely could
+     // not resolve the object). c = (range_ref/range)^power capped at 1 → 1 up close, →0 far. Scales the FREE
+     // (absence) half only; occupancy stays fully informative. power 0 disables (constant 1).
++    // The formula is the shared term library's (rc::card::term_range_conf); only the config binding lives here.
+     const auto absence_range_conf = [&](float range_m) -> float
+     {
+-        const float rr = cfg_.existence_absence_range_ref_m;
+-        if (rr <= 0.0f or cfg_.existence_absence_range_power <= 0.0f) return 1.0f;
+-        return std::min(1.0f, std::pow(rr / std::max(range_m, 1e-3f), cfg_.existence_absence_range_power));
++        return rc::card::term_range_conf(range_m, cfg_.existence_absence_range_ref_m, cfg_.existence_absence_range_power);
+     };
+     // ONE removal policy, shared (rc::exist::RemovalPolicy) so the debounce cannot drift again — it had
+     // drifted three ways by 2026-08-10, and door paid for it with twelve deaths at fixated = 0.
+     rc::exist::RemovalPolicy policy;
+     policy.logodds_max       = cfg_.existence_logodds_max;
+     policy.removal_prob      = cfg_.existence_removal_prob;
+     policy.frame_correlation = cfg_.existence_frame_correlation;
+     policy.remove_frames     = static_cast<float>(cfg_.existence_remove_frames);
+ 
+ 
+@@ -118,21 +118,22 @@ void CabinetExistence::update_and_remove(CabinetFitter& fitter, ConceptLidarInge
+                 const float raw_free = (observed or view_untrustworthy) ? 0.0f : sil.e_free;
+                 // P(detect | present, geometry): how confidently the ZED would resolve this cabinet FROM HERE.
+                 // in_fov_frac folds the real FRUSTUM + occlusion; range_conf the angular-size drop; central_frac
+                 // whether the robot is actually LOOKING at it (a peripheral cabinet clipping the wide FoV edge is
+                 // NOT a verifying view). A predicted-visible-but-absent observation is only evidence of REMOVAL in
+                 // proportion to P(detect); the REST is epistemic surprise — "I can't resolve this from here" — which
+                 // must make the robot GO VERIFY, never delete a cabinet it never properly looked at.
+                 // A verifying view = CLOSE (range_conf) + in frustum & unoccluded (in_fov_frac) + the robot is
+                 // LOOKING at it (central_frac). NOT obliquity: this robot is chronically edge-on and an edge-on
+                 // cabinet IS detectable up close (cabinet_1), so obliquity would wrongly block legitimate removal.
+-                const float p_detect = absence_range_conf(sil.mean_range_m) * sil.in_fov_frac() * sil.central_frac();
++                const float p_detect = absence_range_conf(sil.mean_range_m) * rc::card::term_in_fov(sil.in_fov_frac())
++                                       * rc::card::term_central(sil.central_frac());
+                 cycle_p_detect = p_detect;
+                 const float sfree  = raw_free * p_detect;                 // confident absence → removal log-odds
+                 const float verify = raw_free * (1.0f - p_detect);        // un-confident absence → go-verify surprise
+                 inst.dbg_ex_sil_free_eff = sfree;
+                 inst.dbg_ex_pdetect = p_detect; inst.dbg_ex_central = sil.central_frac();
+                 inst.existence.integrate(rc::exist::mask_evidence(sil.e_occ, sfree, sil.n_detectable, sm));
+                 integrated = true;
+                 // Route the un-resolvable absence into an epistemic VERIFY pull (decayed accumulator). When it
+                 // builds up, the cabinet is flagged for verification (the epistemic planner drives the robot to a
+                 // good ZED viewpoint). Removal then only ever fires from a HIGH-p_detect view — verification-gated.
+diff --git a/common/perception_card/CMakeLists.txt b/common/perception_card/CMakeLists.txt
+index 305f971a..9ad921f4 100644
+--- a/common/perception_card/CMakeLists.txt
++++ b/common/perception_card/CMakeLists.txt
+@@ -6,10 +6,14 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
+ # Tests are timing-sensitive in later tasks: always optimised.
+ set(CMAKE_BUILD_TYPE Release)
+ set(CMAKE_CXX_FLAGS_RELEASE "-O2")
+ 
+ # Header-only module. Run directly (ctest is unusable on this machine):  LANG=es_ES.UTF-8 ./card_test
+ add_executable(card_test tests/card_test.cpp)
+ target_include_directories(card_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/.. ${CMAKE_CURRENT_SOURCE_DIR}/../media_transport)
+ 
+ enable_testing()
+ add_test(NAME card_test COMMAND card_test)
++
++add_executable(terms_test tests/terms_test.cpp)
++target_include_directories(terms_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/.. ${CMAKE_CURRENT_SOURCE_DIR}/../media_transport)
++add_test(NAME terms_test COMMAND terms_test)
+diff --git a/common/perception_card/card.h b/common/perception_card/card.h
+index 62ff1ca8..596eae29 100644
+--- a/common/perception_card/card.h
++++ b/common/perception_card/card.h
+@@ -2,20 +2,21 @@
+ // Header-only. The card is DATA (which sensors see the concept, at what detectability, which closed-list
+ // terms apply); the term functions themselves live elsewhere and are looked up by the names below.
+ //
+ // JSON: the same flat-JSON facility the media descriptors use (media_transport/flat_json.h), so no second
+ // parser. A card is nested, so it is written as a FLAT object with dotted keys ("subtype.0.env.min_fill"),
+ // string lists as a ';'-joined quoted string. Numbers go through to_chars/from_chars only (es_ES safe).
+ #pragma once
+ 
+ #include "detectability/detectability.h"
+ #include "media_transport/flat_json.h"
++#include "perception_card/term_spec.h"   // TermSpec (split out so terms.h stays free of the JSON / media_transport includes)
+ 
+ #include <algorithm>
+ #include <array>
+ #include <cmath>
+ #include <expected>
+ #include <map>
+ #include <string>
+ #include <string_view>
+ #include <vector>
+ 
+@@ -28,26 +29,20 @@ namespace rc::card
+ enum class Level { Mass, Countable, Articulated, Animate };
+ enum class Role  { Identity, Occupancy, Both };
+ 
+ struct Channel
+ {
+     std::string sensor;     // graph node name: zed | helios | bpearl | ricoh
+     Role        role = Role::Both;
+     bool        modelled = false;
+ };
+ 
+-struct TermSpec
+-{
+-    std::string                  name;     // one of kTermNames
+-    std::map<std::string, float> params;
+-};
+-
+ struct SubtypeParams
+ {
+     rc::detect::DetectorEnvelope env;
+     float                        q_return = 1.0f;   // per-beam LiDAR return probability
+     std::vector<TermSpec>        terms;
+ };
+ 
+ struct GeometryPrior { float w = 0, d = 0, h = 0, z0 = 0, z1 = 0; };
+ 
+ struct Card
+diff --git a/common/perception_card/term_spec.h b/common/perception_card/term_spec.h
+new file mode 100644
+index 00000000..70f5d7a4
+--- /dev/null
++++ b/common/perception_card/term_spec.h
+@@ -0,0 +1,16 @@
++// term_spec.h -- the one card type the term library needs. Split out of card.h so that terms.h (which the agents'
++// framework-free cores include) does not drag in the card's JSON codec, and with it media_transport/flat_json.h:
++// door_concept's test_door_core_tracker forbids any media_transport include under src/core.
++#pragma once
++
++#include <map>
++#include <string>
++
++namespace rc::card
++{
++struct TermSpec
++{
++    std::string                  name;     // one of kTermNames (card.h)
++    std::map<std::string, float> params;
++};
++}  // namespace rc::card
+diff --git a/common/perception_card/terms.h b/common/perception_card/terms.h
+new file mode 100644
+index 00000000..ab116202
+--- /dev/null
++++ b/common/perception_card/terms.h
+@@ -0,0 +1,127 @@
++// terms.h -- the CLOSED LIBRARY of P(detect) factor functions a perception card may name (card.h kTermNames).
++// Header-only, pure, no Eigen / OpenCV / DSR: every function takes plain scalars.
++//
++// ★THESE ARE MOVED, NOT WRITTEN. Each body is the formula door_concept / cabinet_concept computed privately until
++// 2026-10-31; those agents now CALL these functions, so the agent and the shared evaluator (card -> P(detect) for
++// the planner and the dashboard) are the same code by construction and cannot drift. What stays in the agent is the
++// MEASUREMENT (the silhouette counting, the pose covariance); what is here is the formula applied to it.
++// (It includes term_spec.h, not card.h: the door core is framework-free and test_door_core_tracker forbids any
++// media_transport include under src/core, which card.h's JSON codec would bring.)
++// Pinned to the agents' pre-move outputs by tests/terms_test.cpp (golden tables, 1e-6).
++//
++//   term              moved from                                              agent still measures
++//   envelope          rc::detect::p_detect (detectability.h), both overloads   roi_fill, visible fraction
++//   in_fov            identity on the fraction (see below)                     DoorSilhouette / CabinetSilhouette::in_fov_frac
++//   central           identity on the fraction (see below)                     ...::central_frac (centroid vs principal point)
++//   range_conf        cabinet_existence.cpp absence_range_conf                 mean range of the detectable samples
++//   leaf_obliquity    door_existence.cpp door_view_obliquity                   leaf pose, camera pose
++//   resolvability     door_existence.h DoorSilhouette::resolvability           n_cells, n_detectable
++//   kappa             door_existence.cpp pose_overlap_factor (closed form)     RT covariance -> var_b, range
++//   coverage          the visible fraction, passed through
++//   motion            Task 3 (instance-level, not a view factor)
++#pragma once
++
++#include "../detectability/detectability.h"
++#include "term_spec.h"
++
++#include <algorithm>
++#include <cmath>
++#include <numbers>
++
++namespace rc::card
++{
++// P(detect | geometry) from the detector envelope. Both overloads of rc::detect::p_detect, unchanged.
++inline float term_envelope(float fill_max, float fill_min, float visible, const rc::detect::DetectorEnvelope& e)
++{
++    return rc::detect::p_detect(fill_max, fill_min, visible, e);
++}
++inline float term_envelope(float fill, float visible, const rc::detect::DetectorEnvelope& e)
++{
++    return rc::detect::p_detect(fill, visible, e);
++}
++
++// Both agents use the silhouette fractions DIRECTLY as P(detect) factors, with no further formula, so these two
++// terms are the identity on the fraction. The fraction itself is the agent's measurement (it folds the real
++// frustum + occluders for in_fov; the centroid-vs-principal-point radius for central) and stays there.
++inline float term_in_fov(float in_fov_frac) { return in_fov_frac; }
++inline float term_central(float central_frac) { return central_frac; }
++
++// Cabinet's absence confidence vs range: min(1, (ref/range)^power), 1 up close and ->0 far. ref<=0 or power<=0
++// disables it (constant 1).
++inline float term_range_conf(float range_m, float ref_m, float power)
++{
++    if (ref_m <= 0.0f or power <= 0.0f) return 1.0f;
++    return std::min(1.0f, std::pow(ref_m / std::max(range_m, 1e-3f), power));
++}
++
++// |cos| of the camera->leaf ray against the LEAF's face normal. 1 = square-on, 0 = grazing. (rx, ry) = leaf centre
++// minus camera, in the plan; (nx, ny) = the leaf's unit face normal. Coincident camera and leaf -> 1 (cannot judge,
++// do not suppress). The caller decides when there is no pose / no fitted leaf (it passes nothing and keeps 1).
++inline float term_leaf_obliquity(float rx, float ry, float nx, float ny)
++{
++    const float z = rx * rx + ry * ry;
++    if (std::sqrt(z) < 1e-6f) return 1.0f;
++    const float n = std::sqrt(z);
++    rx /= n; ry /= n;
++    return std::clamp(std::abs(rx * nx + ry * ny), 0.0f, 1.0f);
++}
++
++// Resolvability in (0,1]: the fraction of the sampling budget landing in DISTINCT image cells. 0 if nothing was
++// detectable.
++inline float term_resolvability(int n_cells, int n_detectable)
++{
++    return n_detectable > 0 ? static_cast<float>(n_cells) / n_detectable : 0.0f;
++}
++
++// Expected overlap of the predicted image window with the true door under the robot-pose uncertainty (door
++// pose_overlap_factor). var_b = bearing variance (sigma_yaw^2 + sigma_xy^2/range^2), range = camera->door distance,
++// half_diag_m = the door's half-diagonal. Closed form (2Phi(a/sb)-1) - (2 sb/(a sqrt(2pi)))(1-exp(-a^2/(2 sb^2))),
++// a = 2 atan(half_diag/range): 1 for a well-localised robot, -> 0 as the pose spreads. Requires var_b > 0.
++inline float term_kappa(double var_b, double range, double half_diag_m)
++{
++    const double sb = std::sqrt(var_b);
++    const double a = 2.0 * std::atan(std::max(1e-3, half_diag_m) / range);
++    const double z = a / sb;
++    const double k = std::erf(z / std::sqrt(2.0))
++                   - (2.0 / (z * std::sqrt(2.0 * std::numbers::pi))) * (1.0 - std::exp(-0.5 * z * z));
++    return static_cast<float>(std::clamp(k, 0.0, 1.0));
++}
++
++// The visible fraction, passed through.
++inline float term_coverage(float visible) { return visible; }
++
++// The intermediate quantities a view produces; eval_term picks what each term needs.
++struct TermInputs
++{
++    float fill_max = 0, fill_min = 0;   // projected bbox fill, larger / smaller axis
++    float visible  = 1;                 // fraction left visible by frustum + occluders
++    float in_fov   = 1, central = 1;    // the silhouette fractions
++    float range    = 0;                 // camera -> object, m
++    float phi      = 0;                 // articulation angle (reserved for Task 3 / instance terms)
++    float obliquity = 1;                // cos of the ray vs the face normal (sign irrelevant)
++    float resolvability = 1;            // distinct-cell fraction (a measurement the evaluator must supply)
++    float kappa    = 1;                 // pose-overlap factor (likewise)
++};
++
++// Dispatch by name. Parameters come from spec.params: envelope {min_fill,max_fill,soft}; range_conf {ref_m,power}.
++// A parameter that is absent takes the DetectorEnvelope default / disables range_conf. motion is Task 3's: until
++// then it (and any unknown name) is neutral, 1.
++inline float eval_term(const TermSpec& s, const TermInputs& in)
++{
++    const auto p = [&](const char* k, float d) { const auto it = s.params.find(k); return it != s.params.end() ? it->second : d; };
++    if (s.name == "envelope")
++    {
++        const rc::detect::DetectorEnvelope def;
++        const rc::detect::DetectorEnvelope e{p("min_fill", def.min_fill), p("max_fill", def.max_fill), p("soft", def.soft)};
++        return term_envelope(in.fill_max, in.fill_min, in.visible, e);
++    }
++    if (s.name == "in_fov")         return term_in_fov(in.in_fov);
++    if (s.name == "central")        return term_central(in.central);
++    if (s.name == "range_conf")     return term_range_conf(in.range, p("ref_m", 0.0f), p("power", 0.0f));
++    if (s.name == "leaf_obliquity") return std::clamp(std::abs(in.obliquity), 0.0f, 1.0f);
++    if (s.name == "resolvability")  return in.resolvability;
++    if (s.name == "kappa")          return in.kappa;
++    if (s.name == "coverage")       return term_coverage(in.visible);
++    return 1.0f;
++}
++}  // namespace rc::card
+diff --git a/common/perception_card/tests/terms_test.cpp b/common/perception_card/tests/terms_test.cpp
+new file mode 100644
+index 00000000..f86cb64f
+--- /dev/null
++++ b/common/perception_card/tests/terms_test.cpp
+@@ -0,0 +1,245 @@
++// Golden test for the closed term library. Every table below was PRINTED by a scratch harness that called the
++// agents' CURRENT (pre-move) code on 20 fixed input tuples per term; the terms must reproduce them to 1e-6.
++// Runs under the AGENT's locale:   LANG=es_ES.UTF-8 ./terms_test
++#include "perception_card/terms.h"
++#include <array>
++#include <clocale>
++#include <cmath>
++#include <cstdio>
++
++static int bad = 0;
++#define CHECK(c) do { if (not (c)) { std::printf("FAIL line %d: %s\n", __LINE__, #c); ++bad; } } while (0)
++using namespace rc::card;
++
++static bool near(float a, float b) { return std::abs(a - b) <= 1e-6f; }
++#define EXPECT_NEAR(name, i, got, want) do { if (not near((got), (want))) { std::printf("FAIL %s[%d]: got %.9g want %.9g\n", name, i, double(got), double(want)); ++bad; } } while (0)
++
++struct Env4 { float fmax, fmin, vis, lo, hi, soft, out; };
++struct Env3 { float fill, vis, lo, hi, soft, out; };
++struct Rng  { float range, ref, power, out; };
++struct Obl  { float rx, ry, nx, ny, out; };
++struct Res  { int cells, det; float out; };
++struct Kap  { double var_b; float range, half_diag, out; };
++
++// golden: generated from the pre-move agent code (door_concept core/door_existence, cabinet_existence), 20 tuples
++inline constexpr std::array<Env4,20> kEnv4{{
++    {0.426833093f, 0.0703623965f, 0.124689914f, 0.18361491f, 0.577911615f, 0.0972006023f, 0.0244713333f},
++    {0.343562841f, 0.311715871f, 0.985067129f, 0.168281063f, 0.797448397f, 0.0546695404f, 0.918218791f},
++    {0.575247586f, 0.359238505f, 0.746475339f, 0.137504563f, 0.40177995f, 0.0637212545f, 0.0446596257f},
++    {0.163248613f, 0.159148112f, 0.594456911f, 0.161398783f, 0.755241513f, 0.0585470311f, 0.291504264f},
++    {0.489752889f, 0.289889514f, 1.07577264f, 0.0604887456f, 0.563178718f, 0.0546362251f, 0.781398416f},
++    {0.389755577f, 0.138753816f, 0.721064448f, 0.119636059f, 0.596500754f, 0.0239344593f, 0.497235775f},
++    {0.823115826f, 0.379609555f, 0.411333114f, 0.0593430847f, 0.728623271f, 0.0537727103f, 0.0603647232f},
++    {0.702670455f, 0.0595027283f, 0.368371218f, 0.0788645819f, 0.728889108f, 0.0794792473f, 0.0941596031f},
++    {0.522074997f, 0.321307868f, 0.359320402f, 0.181016892f, 0.716585279f, 0.0755805671f, 0.288738102f},
++    {0.814159095f, 0.812873423f, 0.817529917f, 0.0515643694f, 0.698040962f, 0.0477135181f, 0.0659274459f},
++    {0.34753868f, 0.311873913f, 0.00641468912f, 0.0937846676f, 0.6107288f, 0.06202906f, 0.00614132918f},
++    {0.21464926f, 0.121479563f, 1.04611397f, 0.121173218f, 0.680363178f, 0.0953104645f, 0.49705115f},
++    {0.0640017241f, 0.0124136806f, 0.00879215449f, 0.133811027f, 0.524703622f, 0.0899458379f, 0.00179978192f},
++    {0.131057322f, 0.0951626673f, -0.036090605f, 0.0902260244f, 0.598720789f, 0.0599330403f, 0.0f},
++    {0.0545081794f, 0.0542544201f, 0.619185269f, 0.0758538246f, 0.520247698f, 0.0958284885f, 0.272735506f},
++    {0.208491474f, 0.135723114f, 0.683921456f, 0.0832487345f, 0.45963186f, 0.0896995813f, 0.414043099f},
++    {0.591745615f, 0.0481917113f, 0.775730371f, 0.13662684f, 0.49227038f, 0.0246171951f, 0.000359126396f},
++    {0.138024122f, 0.0541303828f, 0.878146589f, 0.139306054f, 0.701624036f, 0.0432575643f, 0.107566178f},
++    {0.193889603f, 0.186111182f, 0.388420135f, 0.5f, 0.200000003f, 0.0599999987f, 0.388420135f},
++    {0.823887527f, 0.400425643f, 0.787724078f, 0.100000001f, 0.600000024f, 9.99999975e-06f, 0.787724078f},
++}};
++// golden: generated from the pre-move agent code (door_concept core/door_existence, cabinet_existence), 20 tuples
++inline constexpr std::array<Env3,20> kEnv3{{
++    {0.786953926f, 1.0f, 0.0810240805f, 0.781225085f, 0.0341038704f, 0.458102942f},
++    {0.173394471f, 0.808860123f, 0.0793864429f, 0.506762326f, 0.0511794314f, 0.696668267f},
++    {0.651446819f, 0.0287490264f, 0.155394912f, 0.435746819f, 0.0283491947f, 1.42560511e-05f},
++    {0.654431701f, 1.0f, 0.110716209f, 0.401969403f, 0.0396572314f, 0.00171588163f},
++    {0.646547079f, 1.01269376f, 0.0681401193f, 0.44423154f, 0.054225333f, 0.0234069005f},
++    {0.572132707f, 0.543952465f, 0.088067174f, 0.624599218f, 0.0592760704f, 0.384944975f},
++    {0.372670382f, 1.0f, 0.143138796f, 0.464876652f, 0.0252944492f, 0.97443974f},
++    {0.32814756f, 0.568730772f, 0.0804738849f, 0.641895413f, 0.0564916879f, 0.559557974f},
++    {0.208855703f, 1.01038122f, 0.0868511498f, 0.454399884f, 0.0584977493f, 0.876324475f},
++    {0.331222713f, 1.0f, 0.180316791f, 0.632027328f, 0.0812037364f, 0.844321251f},
++    {0.165290177f, 0.169500321f, 0.192151964f, 0.494237363f, 0.0452052876f, 0.0602441318f},
++    {0.733323932f, 0.683544993f, 0.191005468f, 0.440446794f, 0.0888959467f, 0.0243866444f},
++    {0.518643439f, 1.0f, 0.115859613f, 0.682054877f, 0.0785648227f, 0.88369447f},
++    {0.823224008f, -0.00568573177f, 0.0554815903f, 0.470674515f, 0.0687057003f, 0.0f},
++    {0.773902953f, 0.525915027f, 0.137215376f, 0.419437736f, 0.0515570305f, 0.000542751804f},
++    {0.669760227f, 1.0f, 0.104121074f, 0.459080935f, 0.0395470038f, 0.00483362144f},
++    {0.75991112f, 0.668072879f, 0.111953616f, 0.499237984f, 0.0473361239f, 0.00270064711f},
++    {0.428812295f, 0.949134946f, 0.196003228f, 0.401036203f, 0.0320985951f, 0.28095907f},
++    {0.602228463f, 1.0f, 0.128152952f, 0.44811976f, 0.0900205225f, 0.152128354f},
++    {0.747475922f, 0.193855435f, 0.5f, 0.200000003f, 0.0599999987f, 0.193855435f},
++}};
++// golden: generated from the pre-move agent code (door_concept core/door_existence, cabinet_existence), 20 tuples
++inline constexpr std::array<Rng,20> kRng{{
++    {10.8076229f, 1.91268182f, 0.740701079f, 0.277286053f},
++    {4.77511549f, 2.8933835f, 2.00916553f, 0.365468591f},
++    {4.3303256f, 3.51605248f, 0.739788413f, 0.857185602f},
++    {4.96265888f, 3.89820766f, 1.59269714f, 0.680779636f},
++    {8.10584927f, 4.64367771f, 1.95229149f, 0.337030739f},
++    {7.49112034f, 3.47674441f, 1.44680452f, 0.329361618f},
++    {8.51913452f, 5.07564259f, 0.763219714f, 0.673516929f},
++    {6.90794468f, 5.08523035f, 2.74545813f, 0.431269944f},
++    {6.06570721f, 2.715065f, 2.73774004f, 0.110726513f},
++    {9.04131031f, 1.8916409f, 2.34591007f, 0.0254803784f},
++    {0.424814761f, 3.94682121f, 0.777249932f, 1.0f},
++    {2.67707682f, 1.64257574f, 1.08831859f, 0.587663949f},
++    {6.57745266f, 3.76719356f, 2.90498805f, 0.198096707f},
++    {8.17692184f, 5.28240299f, 2.72903848f, 0.303488493f},
++    {8.37175274f, 5.8536582f, 0.959750712f, 0.709357619f},
++    {9.53363514f, 2.05041313f, 2.96122003f, 0.0105591975f},
++    {7.01852608f, 0.0f, 0.69945848f, 1.0f},
++    {2.96869993f, 4.0669899f, 0.0f, 1.0f},
++    {0.0f, 1.76910269f, 2.66589594f, 1.0f},
++    {0.5f, 5.07525444f, 0.781533122f, 1.0f},
++}};
++// golden: generated from the pre-move agent code (door_concept core/door_existence, cabinet_existence), 20 tuples
++inline constexpr std::array<Obl,20> kObl{{
++    {2.04790306f, -3.33972621f, 0.765151978f, -0.64384973f, 0.948853433f},
++    {0.463448048f, 1.18509102f, 0.525044799f, -0.851074576f, 0.60139668f},
++    {-2.95055413f, 4.24330139f, -0.840037882f, 0.542527795f, 0.925000846f},
++    {1.29101658f, -4.05149841f, -0.970659077f, 0.240459993f, 0.52381134f},
++    {-0.453801632f, 4.56976795f, -0.873495221f, -0.486832768f, 0.398131907f},
++    {-0.569581985f, 0.0453233719f, 0.181117654f, 0.98346144f, 0.102536522f},
++    {-1.571913f, -2.8233881f, -0.995407224f, 0.0957314447f, 0.400562137f},
++    {-4.85376596f, 4.12017441f, -0.995378435f, 0.0960302353f, 0.820989549f},
++    {-3.07210326f, 3.68489552f, 0.748993099f, 0.662577808f, 0.0292954743f},
++    {3.54361343f, 0.831949234f, -0.234677494f, 0.972073257f, 0.00628872216f},
++    {-2.58495688f, 3.99589252f, 0.726065695f, -0.687625289f, 0.97171998f},
++    {-1.34134388f, 2.99765539f, 0.854758918f, 0.519025207f, 0.124641865f},
++    {-2.68276191f, -3.20365477f, 0.724613845f, 0.689155102f, 0.993584216f},
++    {4.85058308f, 3.90823174f, -0.771436214f, -0.636306703f, 0.999934196f},
++    {-1.45614684f, -2.98449659f, 0.535494149f, 0.844538927f, 0.993826985f},
++    {-0.356541634f, 1.13128853f, -0.698256791f, -0.715847373f, 0.47285378f},
++    {-0.82805407f, 1.84146309f, 0.313128889f, 0.949710667f, 0.737748861f},
++    {-3.69199777f, 3.41505527f, 0.0233040974f, 0.999728441f, 0.661745429f},
++    {4.0f, 0.0f, 0.0f, 1.0f, 0.0f},
++    {0.0f, 0.0f, -0.497853637f, 0.867261052f, 1.0f},
++}};
++// golden: generated from the pre-move agent code (door_concept core/door_existence, cabinet_existence), 20 tuples
++inline constexpr std::array<Res,20> kRes{{
++    {756, 775, 0.975483894f},
++    {4, 279, 0.0143369175f},
++    {224, 734, 0.305177122f},
++    {78, 247, 0.315789461f},
++    {3, 334, 0.00898203626f},
++    {115, 589, 0.195246175f},
++    {124, 128, 0.96875f},
++    {28, 93, 0.30107528f},
++    {151, 535, 0.282242984f},
++    {9, 110, 0.0818181783f},
++    {144, 306, 0.470588237f},
++    {13, 31, 0.419354826f},
++    {652, 791, 0.82427305f},
++    {45, 505, 0.0891089141f},
++    {563, 659, 0.854324758f},
++    {21, 62, 0.338709682f},
++    {345, 421, 0.819477439f},
++    {720, 727, 0.990371406f},
++    {770, 770, 1.0f},
++    {0, 0, 0.0f},
++}};
++// golden: generated from the pre-move agent code (door_concept core/door_existence, cabinet_existence), 20 tuples
++inline constexpr std::array<float,20> kInFov{{
++    0.352412969f,
++    0.0f,
++    0.0476696081f,
++    1.0f,
++    0.958051562f,
++    0.544541895f,
++    0.819926679f,
++    0.0f,
++    0.146450654f,
++    0.106684729f,
++    0.619071782f,
++    0.438299656f,
++    0.8768152f,
++    0.187863424f,
++    0.301279306f,
++    0.334326684f,
++    0.761795461f,
++    0.65635848f,
++    0.217304319f,
++    1.0f,
++}};
++// golden: generated from the pre-move agent code (door_concept core/door_existence, cabinet_existence), 20 tuples
++inline constexpr std::array<float,20> kCentral{{
++    1.0f,
++    0.192041814f,
++    0.698853374f,
++    0.0702776313f,
++    0.124744415f,
++    0.256475568f,
++    0.420080841f,
++    0.150885582f,
++    0.0421508551f,
++    0.399103343f,
++    0.356537342f,
++    0.370223045f,
++    0.0f,
++    0.115897834f,
++    0.302245438f,
++    0.0f,
++    0.818705738f,
++    0.962259054f,
++    0.0f,
++    0.0f,
++}};
++// golden: generated from the pre-move agent code (door_concept core/door_existence, cabinet_existence), 20 tuples
++inline constexpr std::array<Kap,20> kKap{{
++    {0.01477515806340509, 7.5f, 1.28725183f, 0.715261281f},
++    {0.1268875339812886, 8.5f, 0.285966516f, 0.0751061291f},
++    {0.17882640470978969, 8.25f, 1.04828227f, 0.231611982f},
++    {0.87193136413892114, 0.75f, 0.83913976f, 0.573031008f},
++    {0.083073737289623126, 8.25f, 0.551540196f, 0.18155849f},
++    {0.082479125003755829, 4.5f, 0.534012318f, 0.310833305f},
++    {0.14199728751555085, 8.0f, 0.727782071f, 0.188468471f},
++    {0.17383307402231254, 8.75f, 1.04302931f, 0.22111252f},
++    {0.18213666754740257, 6.75f, 0.629033625f, 0.171029642f},
++    {0.039685248500770993, 6.0f, 1.24979389f, 0.619976044f},
++    {0.059857245350693478, 4.5f, 0.417157888f, 0.287894845f},
++    {0.24350628712453132, 2.75f, 0.794246793f, 0.411138356f},
++    {0.10552218936156699, 4.75f, 1.37222373f, 0.55875057f},
++    {0.14198962319642305, 4.0f, 0.304103941f, 0.158534557f},
++    {0.064715476706624031, 4.0f, 0.202375233f, 0.156494558f},
++    {0.039681936651468276, 10.0f, 1.19114113f, 0.425833851f},
++    {1.7225313037633896, 0.5f, 0.671472192f, 0.487099469f},
++    {0.14215594651747723, 1.75f, 0.682890534f, 0.604945064f},
++    {1.8446101099252701, 0.25f, 1.57921171f, 0.623285949f},
++    {1.036281179138322e-09, 5.25f, 1.20250642f, 0.999942958f},
++}};
++
++int main()
++{
++    CHECK(std::setlocale(LC_ALL, "") != nullptr);
++    for (int i = 0; i < 20; ++i)
++    {
++        { const auto& t = kEnv4[i]; const rc::detect::DetectorEnvelope e{t.lo, t.hi, t.soft};
++          EXPECT_NEAR("envelope4", i, term_envelope(t.fmax, t.fmin, t.vis, e), t.out); }
++        { const auto& t = kEnv3[i]; const rc::detect::DetectorEnvelope e{t.lo, t.hi, t.soft};
++          EXPECT_NEAR("envelope3", i, term_envelope(t.fill, t.vis, e), t.out); }
++        { const auto& t = kRng[i];  EXPECT_NEAR("range_conf", i, term_range_conf(t.range, t.ref, t.power), t.out); }
++        { const auto& t = kObl[i];  EXPECT_NEAR("leaf_obliquity", i, term_leaf_obliquity(t.rx, t.ry, t.nx, t.ny), t.out); }
++        { const auto& t = kRes[i];  EXPECT_NEAR("resolvability", i, term_resolvability(t.cells, t.det), t.out); }
++        EXPECT_NEAR("in_fov", i, term_in_fov(kInFov[i]), kInFov[i]);
++        EXPECT_NEAR("central", i, term_central(kCentral[i]), kCentral[i]);
++        { const auto& t = kKap[i];  EXPECT_NEAR("kappa", i, term_kappa(t.var_b, t.range, t.half_diag), t.out); }
++    }
++    // coverage passes the visible fraction through
++    CHECK(term_coverage(0.37f) == 0.37f);
++
++    // eval_term dispatch: by name, parameters from the spec, quantities from the inputs.
++    TermInputs in;  in.fill_max = 0.3f; in.fill_min = 0.25f; in.visible = 0.8f; in.in_fov = 0.7f; in.central = 0.6f;
++    in.range = 3.0f; in.obliquity = -0.5f; in.resolvability = 0.9f; in.kappa = 0.4f;
++    const TermSpec env{"envelope", {{"min_fill", 0.1f}, {"max_fill", 0.6f}, {"soft", 0.06f}}};
++    CHECK(near(eval_term(env, in), term_envelope(0.3f, 0.25f, 0.8f, rc::detect::DetectorEnvelope{0.1f, 0.6f, 0.06f})));
++    CHECK(near(eval_term({"in_fov", {}}, in), 0.7f));
++    CHECK(near(eval_term({"central", {}}, in), 0.6f));
++    CHECK(near(eval_term({"range_conf", {{"ref_m", 2.0f}, {"power", 1.0f}}}, in), term_range_conf(3.0f, 2.0f, 1.0f)));
++    CHECK(near(eval_term({"leaf_obliquity", {}}, in), 0.5f));
++    CHECK(near(eval_term({"resolvability", {}}, in), 0.9f));
++    CHECK(near(eval_term({"kappa", {}}, in), 0.4f));
++    CHECK(near(eval_term({"coverage", {}}, in), 0.8f));
++    CHECK(near(eval_term({"motion", {}}, in), 1.0f));   // Task 3 supplies the real one; neutral until then
++
++    if (bad) { std::printf("terms_test: %d FAILURES\n", bad); return 1; }
++    std::printf("terms_test: ok\n");
++    return 0;
++}
+diff --git a/door_concept/src/core/door_existence.cpp b/door_concept/src/core/door_existence.cpp
+index 01d5d5dd..f5e83f7f 100644
+--- a/door_concept/src/core/door_existence.cpp
++++ b/door_concept/src/core/door_existence.cpp
+@@ -217,25 +217,21 @@ PoseOverlap pose_overlap_factor(const std::optional<Mat6d>& rt_cov, const std::o
+     if (not rt_cov.has_value() or not room_T_zed.has_value() or not rt_cov->allFinite())
+         return {};
+     const Eigen::Vector2d cam(room_T_zed->coeff(0, 3), room_T_zed->coeff(1, 3));
+     const double range = std::max(1e-2, (door_xy.cast<double>() - cam).norm());
+     const Eigen::Matrix2d Pxy = rt_cov->topLeftCorner<2, 2>();
+     const double var_xy = std::max(0.0, Eigen::SelfAdjointEigenSolver<Eigen::Matrix2d>(Pxy).eigenvalues().maxCoeff());
+     const double var_b = std::max(0.0, rt_cov->coeff(5, 5)) + var_xy / (range * range);
+     if (not (var_b > 0.0))
+         return {};
+     const double sb = std::sqrt(var_b);
+-    const double a = 2.0 * std::atan(std::max(1e-3, static_cast<double>(half_diag_m)) / range);
+-    const double z = a / sb;
+-    const double k = std::erf(z / std::sqrt(2.0))
+-                   - (2.0 / (z * std::sqrt(2.0 * std::numbers::pi))) * (1.0 - std::exp(-0.5 * z * z));
+-    return {static_cast<float>(std::clamp(k, 0.0, 1.0)), static_cast<float>(sb * range)};
++    return {rc::card::term_kappa(var_b, range, static_cast<double>(half_diag_m)), static_cast<float>(sb * range)};
+ }
+ 
+ // ─── the probes (DoorFitter's, moved) ────────────────────────────────────────────────────────────────────────────────
+ 
+ bool camera_usable(const CameraIntrinsics& c)
+ {
+     return c.present and c.projection_model == 0 /*CameraAPI::ProjectionModel::Pinhole*/ and c.width > 0 and c.height > 0;
+ }
+ 
+ // PIXEL-LEVEL silhouette existence evidence — see DoorSilhouette / DoorFitState::existence.
+@@ -648,25 +644,22 @@ rc::door::FrameProbe compute_frame_probe(const ExistenceScene& sc, const rc::Doo
+ // the wall, so it stays meaningful once phi is fitted: an open door presents its face at a different angle than its
+ // aperture does.
+ float door_view_obliquity(const std::optional<Mat4d>& room_T_zed, const rc::DoorFitState& inst)
+ {
+     if (not inst.ai2_initialized)
+         return 1.0f;
+     const auto& M = room_T_zed;           // camera→room (the cycle's pose)
+     if (not M.has_value())
+         return 1.0f;                      // no extrinsic → can't judge → don't suppress
+     const Eigen::Vector2f cam(static_cast<float>(M->coeff(0, 3)), static_cast<float>(M->coeff(1, 3)));
+-    Eigen::Vector2f r = inst.leaf_pose.centre_xy - cam;
+-    if (r.norm() < 1e-6f)
+-        return 1.0f;
+-    r.normalize();
+-    return std::clamp(std::abs(r.dot(inst.leaf_pose.ey)), 0.0f, 1.0f);   // ey = the leaf's face normal
++    const Eigen::Vector2f r = inst.leaf_pose.centre_xy - cam;
++    return rc::card::term_leaf_obliquity(r.x(), r.y(), inst.leaf_pose.ey.x(), inst.leaf_pose.ey.y());   // ey = the leaf's face normal
+ }
+ 
+ float aperture_band_offset(const std::vector<Eigen::Vector2f>& polygon, const rc::DoorFitState& inst)
+ {
+     if (polygon.size() < 3)
+         return std::numeric_limits<float>::quiet_NaN();
+     const auto& ms = inst.model.state();
+     return rc::door::signed_boundary_distance(polygon, Eigen::Vector2f(ms.ap_cx, ms.ap_cy));
+ }
+ 
+@@ -1250,40 +1243,41 @@ void DoorCore::update_existence(const DoorCycleInput& in, DoorCycleOutput& out)
+         //     roi_fill 0.20-0.25 -> fired 90%   |               0.67
+         //     roi_fill 0.25-0.30 -> fired 55%   |               0.80
+         //     roi_fill 0.30-0.35 -> fired 23%   |               0.97
+         // Detectability is UNIMODAL in fill and the geometric product is monotone: the wrong SHAPE, not
+         // wrong constants. Past ~4 m of range (fill ~0.31) absence was charged ~4x harder than the truth,
+         // which is what drove L to its -4.00 clamp and deleted a door in plain view.
+         //
+         // visible_frac is passed as 1.0 on purpose: occlusion/frustum loss is already carried by
+         // in_fov_frac() below, and passing it twice would square it.
+         const rc::detect::DetectorEnvelope env{cfg.detect_min_fill, cfg.detect_max_fill, cfg.detect_soft};
+-        const float p_env = rc::detect::p_detect(inst.roi_fill, 1.0f, env);
++        const float p_env = rc::card::term_envelope(inst.roi_fill, 1.0f, env);
+         inst.dbg_p_env = p_env;
+         // ★OBLIQUITY OF THE LEAF, which only became a live variable when phi did. A panel seen edge-on
+         // presents almost no area to segment: |ray . leaf face normal| falls from 0.99 at phi=5 deg to
+         // 0.43 at 60 deg and 0.21 at 85 deg. door_view_obliquity() has computed exactly this all along —
+         // against inst.leaf_pose.ey, so it follows the leaf — and was labelled "diagnostic only" and
+         // never used. With phi pinned at 0 that was harmless: a flush door is always face-on, the term
+         // is ~1, and it changed nothing. The moment the leaf can swing it becomes the dominant
+         // detectability factor, and leaving it out charges a full-strength absence against a look that
+         // physically could not have resolved the door.
+         //
+         // Measured 2026-09-09 on the deaths: absence was charged at p_detect 0.55 with the leaf at 37
+         // deg and 0.28 at 60 deg; with obliquity those become 0.39 and 0.12.
+         //
+         // ⚠It cuts BOTH ways, as every p_detect does: an edge-on leaf can no longer refute the door,
+         // and also can no longer defend it. That is the honest reading of an unresolvable view, but it
+         // is the same shape as the documented hood failure, so a door believed permanently edge-on
+         // would be hard to remove. The aperture-side evidence is what has to keep that in check.
+         const float leaf_oblq = door_view_obliquity(room_T_zed, inst);
+-        float p_detect = p_env * leaf_oblq * sil.resolvability() * sil.in_fov_frac() * sil.central_frac() * kappa;
++        float p_detect = p_env * leaf_oblq * sil.resolvability() * rc::card::term_in_fov(sil.in_fov_frac())
++                       * rc::card::term_central(sil.central_frac()) * kappa;
+ 
+         // ★THE CONTOUR CHECK. Everything above is geometry: it says how well the camera could have
+         // resolved the door IN PRINCIPLE. This asks what the classifier actually computed AT the door's
+         // own projected pixels, which is the only place the question is really settled.
+         //
+         // The statistic is a CONTRAST, not an absolute. At 4.2 m over a plainly visible door the field
+         // reads P(door)=0.265 while calling it `wall` at 0.676 — so "P(door) is high" would fail on the
+         // exact case this exists for. What still holds is WHERE the door-ness sits: if the contour is
+         // markedly more door-like than the rest of the frame, the door is where the belief says it is,
+         // even while the argmax disagrees.
+diff --git a/door_concept/src/core/door_existence.h b/door_concept/src/core/door_existence.h
+index f8732a90..97b134c9 100644
+--- a/door_concept/src/core/door_existence.h
++++ b/door_concept/src/core/door_existence.h
+@@ -32,20 +32,21 @@
+ #include <utility>
+ #include <vector>
+ #include <Eigen/Dense>
+ #include <opencv2/core.hpp>
+ #include "door_cycle_io.h"
+ #include "../door_config.h"
+ #include "../door_fit_state.h"
+ #include "../door_room_band.h"
+ #include "../door_frame_evidence.h"
+ #include "../../../common/contour_edge/contour_edge_project.h"   // rc::edges::ContourSet
++#include "../../../common/perception_card/terms.h"            // rc::card::term_* — the P(detect) factor formulas (SHARED)
+ 
+ namespace rc::door::core
+ {
+ 
+ // Pixel-level silhouette existence evidence for ONE door (see compute_silhouette_existence below; moved from door_fitter.h).
+ // Feeds rc::exist::mask_evidence — the shared channel table/chair use — so removal is a Bayesian decision on
+ // P(exists), never a miss-counter or a detectability heuristic.
+ struct DoorSilhouette
+ {
+     float e_occ  = 0.0f;       // predicted samples LIT by a "door" mask     ⇒ still there
+@@ -151,21 +152,21 @@ struct DoorSilhouette
+         const float xn = (cx - 0.5f * img_w) / (0.5f * img_w);   // [-1,1], 0 = principal point
+         const float yn = (cy - 0.5f * img_h) / (0.5f * img_h);
+         return std::clamp(1.0f - std::hypot(xn, yn), 0.0f, 1.0f);
+     }
+     // RESOLVABILITY ∈ (0,1]: the fraction of the sampling budget that lands in DISTINCT image cells — i.e. how
+     // many independent pixels the panel subtends per unit of model. Scale-free and reference-free: it is 1 when
+     // every sample resolves separately (close, face-on) and falls as samples collapse together (far away, or
+     // foreshortened edge-on). This one covariate replaces the old ZedRangeFull/ZedRangeRef falloff AND the
+     // obliquity ramp, with no tuning constant and — unlike that ramp, which returned exactly 0 below cos 0.20
+     // and made a grazing phantom permanently unjudgeable — it never reaches zero while the door is in view.
+-    float resolvability() const { return n_detectable > 0 ? static_cast<float>(n_cells) / n_detectable : 0.0f; }
++    float resolvability() const { return rc::card::term_resolvability(n_cells, n_detectable); }   // the formula lives in the shared term library
+ };
+ 
+ /// rc::SemanticProbField (door_semantic_field.h) over the RECORDED door plane: the same background mean and the same
+ /// nearest-cell lookup. Fresh replaces the plane, Unchanged keeps it, Invalid invalidates it — what refresh() left in
+ /// the worker's field each cycle (InputSnapshot::capture_semantic records exactly those three outcomes).
+ class SemanticField
+ {
+ public:
+     void apply(SemanticState state, const std::optional<SemanticPlane>& plane);
+     [[nodiscard]] bool valid() const noexcept { return valid_; }

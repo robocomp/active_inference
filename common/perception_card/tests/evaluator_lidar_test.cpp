@@ -82,12 +82,30 @@ int main()
     { // (d) 0.05 m from the bpearl
         const auto r = evaluate_lidar(c, room(), at(0.05f, 0, 0.02f, 0.02f, 0.0f, 0.6f), kO, "bpearl");
         std::printf("d: p=%.4f limit=%d\n", r.p, int(r.limit));
-        CHECK(r.limit == Limit::DeadZone);
+        CHECK(r.limit == Limit::DeadZone and r.p < 0.05f);   // range factor is common-mode: ~Phi(-2.5)=0.006
+    }
+    { // (d3) range limit named: a target the bpearl rings DO cross, beyond 30 m. Bpearl room elevation reaches only
+      // -90..0, so a z span at the sensor height (0.67) crosses the 0 deg ring.
+        World w = room(); w.polygon = {{-40, -40}, {40, -40}, {40, 40}, {-40, 40}};
+        const auto r = evaluate_lidar(c, w, at(32.0f, 0, 3.0f, 3.0f, 0.5f, 0.9f), kO, "bpearl");
+        std::printf("d3: p=%.4f limit=%d\n", r.p, int(r.limit));
+        CHECK(r.limit == Limit::Range and r.p < 0.05f);
+    }
+    { // AboveFan: helios room fan tops out at +55 deg; a 2.5 m high object at 0.5 m is above it
+        const auto r = evaluate_lidar(c, room(), at(0.5f, 0, 0.3f, 0.3f, 2.5f, 2.7f), kO, "helios");
+        std::printf("above: p=%.4f limit=%d\n", r.p, int(r.limit));
+        CHECK(r.limit == Limit::AboveFan);
     }
     { // (e) no helios in the world
         World w = room(); w.helios.reset();
         const auto r = evaluate_lidar(c, w, at(3, 0, 0.7f, 0.7f, 0, 1.8f), kO, "helios");
-        CHECK(r.limit == Limit::NotModelled and r.p == 0.0f);
+        // Not-modelled is expressed by the limit alone (ChannelResult has no other flag), so a combiner drops the
+        // channel on `limit == NotModelled`. p is deliberately not asserted.
+        CHECK(r.limit == Limit::NotModelled);
+    }
+    { // (e2) bpearl absent
+        World w = room(); w.bpearl.reset();
+        CHECK(evaluate_lidar(c, w, at(3, 0, 0.7f, 0.7f, 0, 1.8f), kO, "bpearl").limit == Limit::NotModelled);
     }
     { // (f) q_return = 0.1 lowers p. A distant small target keeps lambda moderate.
         const Hypothesis h = at(7.4f, 0, 0.1f, 0.1f, 0.0f, 1.0f);
@@ -101,7 +119,32 @@ int main()
         w.obstacles.push_back({"box_1", rc::nbv::Obstacle{1.5f, 0.0f, 0.5f, 2.0f, 0.0f, 0.0f, 2.5f}});
         const auto r = evaluate_lidar(c, w, at(3, 0, 0.7f, 0.7f, 0, 1.8f), kO, "helios");
         std::printf("g: p=%.4f limit=%d occ=%s\n", r.p, int(r.limit), r.occluder.c_str());
-        CHECK(r.occluder == "box_1" and r.p < 0.99f);
+        CHECK(r.limit == Limit::Occluded and r.occluder == "box_1" and r.p < 0.99f);
+    }
+    { // uniform-ring fallback == the same rings given explicitly
+        LidarRig a = helios(), b = helios();
+        for (int i = 0; i < 32; ++i) b.model.ring_elev_deg.push_back(-55.0f + 70.0f * i / 31.0f);
+        const rc::nbv::Target t{3, 0, 0, 0.7f, 0.7f, 0, 1.8f};
+        const float la = expected_returns(a, t, {0, 0}, {}), lb = expected_returns(b, t, {0, 0}, {});
+        std::printf("uniform: %.2f vs table %.2f\n", la, lb);
+        CHECK(std::abs(la - lb) < 1e-3f and la > 0.0f);
+        World w = room();
+        const auto r = evaluate_lidar(c, w, at(3, 0, 0.7f, 0.7f, 0, 1.8f), kO, "helios");
+        CHECK(std::ranges::any_of(r.notes, [](const std::string& n) { return n.find("uniformly") != std::string::npos; }));
+    }
+    { // upright (non-flipped) mount: same ring set mirrored about the sensor height
+        LidarRig up = helios(); up.mount.linear() = Eigen::Matrix3f::Identity();
+        const float oz = 1.075f;
+        const rc::nbv::Target inv{3, 0, 0, 0.7f, 0.7f, 0.35f, 1.85f};
+        const rc::nbv::Target mir{3, 0, 0, 0.7f, 0.7f, 2 * oz - 1.85f, 2 * oz - 0.35f};
+        const float l1 = expected_returns(helios(), inv, {0, 0}, {}), l2 = expected_returns(up, mir, {0, 0}, {});
+        std::printf("mirror: inverted %.2f upright-mirrored %.2f\n", l1, l2);
+        CHECK(std::abs(l1 - l2) < 1e-3f and l1 > 0.0f);
+        // and the fan really is flipped: an object at +40 deg elevation is above the upright fan, inside the inverted one
+        World w = room(); w.helios = up;
+        const Hypothesis hi = at(0.5f, 0, 0.3f, 0.3f, 1.5f, 1.6f);
+        CHECK(evaluate_lidar(c, w, hi, kO, "helios").limit == Limit::AboveFan);
+        CHECK(evaluate_lidar(c, room(), hi, kO, "helios").limit != Limit::AboveFan);
     }
     std::printf(bad ? "FAILED %d\n" : "all passed\n", bad);
     return bad ? 1 : 0;

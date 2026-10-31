@@ -80,6 +80,36 @@ namespace detail
 {
 // Wall thickness handed to wall_obstacles. A modelling constant of the room, not a tuning knob on P.
 inline constexpr float kWallThicknessM = 0.12f;
+
+struct Obstacles { std::vector<rc::nbv::Obstacle> walls, objs, all; };
+
+// Walls (door gaps cut out), the named obstacles, and both together. Shared by every channel.
+inline Obstacles build_obstacles(const World& world)
+{
+    Obstacles o;
+    o.walls = rc::nbv::wall_obstacles(world.polygon, kWallThicknessM, world.gaps);
+    o.all = o.walls;
+    for (const auto& [name, ob] : world.obstacles) { o.objs.push_back(ob); o.all.push_back(ob); }
+    return o;
+}
+
+// Leave-one-out: the named obstacle whose removal raises visible_fraction the most ("" if none does).
+// `v_all` is the visible fraction with everything present.
+inline std::string name_occluder(const World& world, const rc::nbv::Target& t, const Eigen::Vector2f& from, float yaw,
+                                 const rc::nbv::Sensor& sensor, float v_all, const Obstacles& ob)
+{
+    std::string name;
+    float best_gain = 0.0f;
+    for (std::size_t k = 0; k < world.obstacles.size(); ++k)
+    {
+        std::vector<rc::nbv::Obstacle> rest = ob.walls;
+        for (std::size_t m = 0; m < world.obstacles.size(); ++m)
+            if (m != k) rest.push_back(world.obstacles[m].second);
+        const float gain = rc::nbv::visible_fraction(t, from, yaw, sensor, rest) - v_all;
+        if (gain > best_gain) { best_gain = gain; name = world.obstacles[k].first; }
+    }
+    return name;
+}
 }  // namespace detail
 
 inline ChannelResult evaluate_camera(const Card& card, const World& world, const Hypothesis& h, const Viewpoint& vp)
@@ -111,9 +141,8 @@ inline ChannelResult evaluate_camera(const Card& card, const World& world, const
     const float yaw = vp.yaw ? *vp.yaw : (to_obj.norm() > 1e-6f ? std::atan2(to_obj.y(), to_obj.x()) : 0.0f);
 
     // Occluder lists: walls (with the door gaps cut out) and the named obstacles.
-    const std::vector<nbv::Obstacle> walls = nbv::wall_obstacles(world.polygon, detail::kWallThicknessM, world.gaps);
-    std::vector<nbv::Obstacle> objs, all = walls;
-    for (const auto& [name, o] : world.obstacles) { objs.push_back(o); all.push_back(o); }
+    const detail::Obstacles ob = detail::build_obstacles(world);
+    const auto& walls = ob.walls; const auto& objs = ob.objs; const auto& all = ob.all;
 
     if (nbv::stands_inside(from, objs))
     {
@@ -217,17 +246,7 @@ inline ChannelResult evaluate_camera(const Card& card, const World& world, const
 
     // ── occluder by leave-one-out: the obstacle whose removal raises visible_fraction the most ───────────────────
     if (v_no_obj - v_all > 0.0f)       // some obstacle costs visibility: name the worst, whatever the label says
-    {
-        float best_gain = 0.0f;
-        for (std::size_t k = 0; k < world.obstacles.size(); ++k)
-        {
-            std::vector<nbv::Obstacle> rest = walls;
-            for (std::size_t m = 0; m < world.obstacles.size(); ++m)
-                if (m != k) rest.push_back(world.obstacles[m].second);
-            const float gain = nbv::visible_fraction(t, from, yaw, sensor, rest) - v_all;
-            if (gain > best_gain) { best_gain = gain; out.occluder = world.obstacles[k].first; }
-        }
-    }
+        out.occluder = detail::name_occluder(world, t, from, yaw, sensor, v_all, ob);
     return out;
 }
 // ── LiDAR half (spec §4b) ───────────────────────────────────────────────────────────────────────────────────
@@ -324,20 +343,27 @@ inline LidarGeom lidar_geom(const LidarRig& rig, const rc::nbv::Target& t, const
     return g;
 }
 
-// lambda for a given visible fraction; `ring_fix` = "one ring crosses it at least", `range_on` = apply the range factor.
-inline float lidar_lambda(const LidarGeom& g, float v, bool range_on = true, bool ring_fix = false)
+// lambda0 = expected returns BEFORE the range factor, for a given visible fraction; `ring_fix` = "one ring
+// crosses it at least".
+//
+// ★ THE RANGE FACTOR IS COMMON-MODE, SO IT MULTIPLIES P, NOT lambda. Every return from one target shares the same
+// range r: whether r lies in the dead zone / past the far limit is ONE event for the whole target, not an
+// independent coin per return. Folding Phi into lambda lets a large column count outvote it (a 2 cm target
+// 0.05 m inside a 0.1 m dead zone got p = 0.93); as a factor on P the shared event cannot be averaged away by
+// the number of returns (same reasoning as the common-mode marginalisation in CLAUDE.md).
+inline float lidar_lambda(const LidarGeom& g, float v, bool ring_fix = false)
 {
     if (not g.ok) return 0.0f;
     const float cols = g.ang_width / g.az_step;
     const float rings = static_cast<float>(ring_fix ? std::max(g.n_cross, 1) : g.n_cross);
-    return rings * cols * v * (range_on ? range_factor(g.r, g.rmin, g.rmax, g.sigma_r) : 1.0f);
+    return rings * cols * v;
 }
-inline const rc::nbv::Sensor& lidar_sight(float oz)
+inline rc::nbv::Sensor lidar_sight(float oz)
 {
     // An all-round sight line for visible_fraction: ~172 deg either side of the heading (the clamp is 3 rad),
     // a vertical channel on so heights of obstacles and target count, at the sensor's height. The ring geometry
-    // above decides what is in the fan; this only asks "is the line of sight clear".
-    static thread_local rc::nbv::Sensor s;
+    // decides what is in the fan; this only asks "is the line of sight clear".
+    rc::nbv::Sensor s;
     s.hfov_rad = 3.0f; s.vfov_rad = 2.9f; s.height_m = oz;
     return s;
 }
@@ -349,7 +375,7 @@ inline float expected_returns(const LidarRig& rig, const rc::nbv::Target& t, con
 {
     const detail::LidarGeom g = detail::lidar_geom(rig, t, from);
     const float v = rc::nbv::visible_fraction(t, from, g.bearing, detail::lidar_sight(g.oz), obstacles);
-    return detail::lidar_lambda(g, v);
+    return detail::lidar_lambda(g, v);        // lambda0: the range factor is common-mode and lives on P
 }
 
 // `sensor` = "helios" | "bpearl". The rig's mount.xy is a lever arm from the robot (at vp.xy, heading vp.yaw or 0);
@@ -387,9 +413,8 @@ inline ChannelResult evaluate_lidar(const Card& card, const World& world, const 
     nbv::Target t;
     t.cx = h.x; t.cy = h.y; t.yaw = h.yaw; t.w = gp.w; t.h = gp.d; t.z0 = gp.z0; t.z1 = gp.z1;
 
-    const std::vector<nbv::Obstacle> walls = nbv::wall_obstacles(world.polygon, detail::kWallThicknessM, world.gaps);
-    std::vector<nbv::Obstacle> objs, all = walls;
-    for (const auto& [name, o] : world.obstacles) { objs.push_back(o); all.push_back(o); }
+    const detail::Obstacles ob = detail::build_obstacles(world);
+    const auto& walls = ob.walls; const auto& objs = ob.objs; const auto& all = ob.all;
 
     if (nbv::stands_inside(from, objs))
     {
@@ -403,9 +428,11 @@ inline ChannelResult evaluate_lidar(const Card& card, const World& world, const 
         out.limit = Limit::NotModelled; out.notes.push_back("lidar model lacks rings or azimuth step");
         return out;
     }
-    const nbv::Sensor& sight = detail::lidar_sight(g.oz);
+    const nbv::Sensor sight = detail::lidar_sight(g.oz);
     const float q = sp.q_return;
-    const auto p_of = [&](float lam) { return 1.0f - std::exp(-std::max(lam, 0.0f) * q); };
+    const float rf = detail::range_factor(g.r, g.rmin, g.rmax, g.sigma_r);   // common-mode: multiplies P
+    const auto p_of = [&](float lam, float range = -1.0f)
+    { return (range < 0.0f ? rf : range) * (1.0f - std::exp(-std::max(lam, 0.0f) * q)); };
 
     const float v_all     = nbv::visible_fraction(t, from, g.bearing, sight, all);
     const float v_no_wall = nbv::visible_fraction(t, from, g.bearing, sight, objs);
@@ -422,8 +449,8 @@ inline ChannelResult evaluate_lidar(const Card& card, const World& world, const 
     }
     const Limit range_label = g.r < g.rmin ? Limit::DeadZone : Limit::Range;
     const std::array<std::pair<float, Limit>, 4> gains{{
-        {p_of(detail::lidar_lambda(g, v_all, true, true)) - out.p,   ring_label},
-        {p_of(detail::lidar_lambda(g, v_all, false))      - out.p,   range_label},
+        {p_of(detail::lidar_lambda(g, v_all, true)) - out.p,   ring_label},
+        {p_of(detail::lidar_lambda(g, v_all), 1.0f)      - out.p,   range_label},
         {p_of(detail::lidar_lambda(g, v_no_wall))         - out.p,   Limit::BehindWall},
         {p_of(detail::lidar_lambda(g, v_no_obj))          - out.p,   Limit::Occluded}}};
     const auto best = std::ranges::max_element(gains, {}, &std::pair<float, Limit>::first);
@@ -431,17 +458,7 @@ inline ChannelResult evaluate_lidar(const Card& card, const World& world, const 
     out.limit_gain = best->first > 0.0f ? best->first : 0.0f;
 
     if (v_no_obj - v_all > 0.0f)
-    {
-        float best_gain = 0.0f;
-        for (std::size_t k = 0; k < world.obstacles.size(); ++k)
-        {
-            std::vector<nbv::Obstacle> rest = walls;
-            for (std::size_t m = 0; m < world.obstacles.size(); ++m)
-                if (m != k) rest.push_back(world.obstacles[m].second);
-            const float gain = nbv::visible_fraction(t, from, g.bearing, sight, rest) - v_all;
-            if (gain > best_gain) { best_gain = gain; out.occluder = world.obstacles[k].first; }
-        }
-    }
+        out.occluder = detail::name_occluder(world, t, from, g.bearing, sight, v_all, ob);
     return out;
 }
 }  // namespace rc::card
