@@ -4695,7 +4695,7 @@ ControllerSession::CrossProtocol ControllerSession::cross_protocol(const Control
 //      live field (LiDAR only, see refresh_lidar_field) along the same direction, floored at 0.05 m/s exactly as
 //      set_speed_limit floors the tracker's; and (Task 14) the raw returns, body-filtered, on the swept path and the
 //      corner sweep, UNFLOORED (lidar_body_guard.h) — the net that does not trust the anchor;
-//   2. motion_commander.apply_uncertainty_speed_limit;
+//   2. (no pose-uncertainty limiter: the servo drives in the robot frame — 2026-10-31, see the step below);
 //   3. detect_stuck → begin_escape / step_escape (the Wedge and Spinning verdicts — Task 9: a Spinning verdict on the
 //      servo's own rotation-dominant command is not a wedge, bounded below by the cross contract's timeout);
 //   4. a zero command stops through stop_robot, anything else goes out through send_speed_command.
@@ -4969,8 +4969,11 @@ void ControllerSession::step_anchor_cross(const ControllerRobotPose &robot_pose,
             std::println("[anchor] cross: the returns' backoff ends");
     }
     const bool returns_hold = cap.bound_lin or cap.bound_rot or returns_backoff;
-    // 2. Pose-uncertainty limiter.
-    motion_commander.apply_uncertainty_speed_limit(adv_mps, side_mps, rot_rps, time_source());
+    // 2. NO pose-uncertainty limiter here (2026-10-31, pingpong31 leg 3: "STALLED BY OUR OWN SPEED LIMIT", position sigma
+    //    0.25 m). The servo's target is the anchor, in the ROBOT frame; the room-frame pose is not used to drive it, so its
+    //    sigma says nothing about how fast the body may approach the opening. During a crossing room_concept is on odometry
+    //    only (link 0) and that sigma grows by design; applying it here cut the servo to 0.006 m in 3 s in front of an open
+    //    door. What keeps the body safe here are the jamb guard and the live returns, both in the robot frame.
     // 3. Stall judge → escape. Rotation-dominant = the body's corners sweep faster than its centre translates (r_max: the
     //    grown body's reach) — then a Spinning verdict is the servo working, not a wedge (bounded: the contract timeout).
     float r_max = 0.f;

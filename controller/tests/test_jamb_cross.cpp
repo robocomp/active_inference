@@ -42,6 +42,7 @@
 //     -o /tmp/tjc -lfastdds -lfastcdr -lQt5Core && /tmp/tjc          (one line; TRACE=1 prints every cycle)
 #include "../src/doorway_gap.h"
 #include "../src/controller_anchor_servo.h"
+#include "../src/door_cross_aif.h"
 #include "../src/lidar_body_guard.h"
 #include "../../common/robot_footprint/robot_footprint.h"
 
@@ -161,8 +162,13 @@ struct Outcome { bool through = false, physically_through = false; int contacts 
 
 // The session's cross chain (ControllerSession::step_anchor_cross with update_doorway_gap), closed loop.
 // `near_seen`: the claim already observed the robot on the near side (the CrossThroughGate of a claim that began further out).
-Outcome run(Pose r, V2 anchor_c, float anchor_dpsi, bool near_seen, unsigned seed, float t_max = 60.f)
+// `leaves` non-null = ANCHOR-ONLY (pingpong31, 2026-10-31): no measured gap; the servo, the obstacle model and the jamb guard
+// get door_concept's leaf hypotheses (anchor frame), as ControllerSession now drives.
+Outcome run(Pose r, V2 anchor_c, float anchor_dpsi, bool near_seen, unsigned seed, float t_max = 60.f,
+            const std::vector<rc::interaction::AnchorLeaf>* leaves = nullptr, bool aif = false, float* p_fit_min = nullptr)
 {
+    const std::span<const rc::interaction::AnchorLeaf> lv = leaves != nullptr ? std::span<const rc::interaction::AnchorLeaf>(*leaves)
+                                                                               : std::span<const rc::interaction::AnchorLeaf>{};
     const bool trace = std::getenv("TRACE") != nullptr;
     const auto w = scene();
     std::vector<V2> solid;   // every scene surface within reach, every 5 mm: the contact test
@@ -216,21 +222,29 @@ Outcome run(Pose r, V2 anchor_c, float anchor_dpsi, bool near_seen, unsigned see
                 pr = rc::doorway_gap_fuse_wall_yaw(pr, *wall);
         }
 #endif
-        const auto g = rc::measure_doorway_gap(pts, pr, hw_rb, kSigma, depth);
+        auto g = rc::measure_doorway_gap(pts, pr, hw_rb, kSigma, depth);
+        if (leaves != nullptr) g.seen = false;   // anchor-only: the gap is not measured
         if (g.seen) { line = rc::doorway_gap_pose(g, kSigma); gap_w = g.width; }
         const auto drive = line.has_value() ? *line : anchor;
         const float dw = line.has_value() ? gap_w : kDoorWidth;
-        (void)gate.observe(g.seen, rc::anchor_cross_geometry(drive).s, 0.2472f);
+        (void)gate.observe(leaves != nullptr ? true : g.seen, rc::anchor_cross_geometry(drive).s, 0.2472f);
         // step_anchor_cross: servo (P(fit) at entry, free advance) → the turn's room → jamb guard → returns caps → backoff.
         const auto returns = rc::lidar_guard_returns(pts, body, kSigma, reach, self, hull);
         const float free = rc::lidar_free_advance(pts, rc::anchor_cross_geometry(drive).n, body);
-        const auto c = rc::anchor_cross_command(drive, dw, half_w, kStandoff, kVmax, kWmax, false, {}, front, free);
+        auto c = rc::anchor_cross_command(drive, dw, half_w, kStandoff, kVmax, kWmax, false, lv, front, free);
+        if (aif)   // [DoorPassage] CrossServo=true, as live: the Active-Inference law (door_cross_aif.h)
+        {
+            const auto st = rc::door_cross_aif(drive, dw, lv, rc::DoorCrossAifBody{half_w, front}, kStandoff, kVmax, kWmax, kDt, free);
+            c = st.cmd;
+            if (p_fit_min != nullptr) *p_fit_min = std::min(*p_fit_min, st.p_fit);
+            if (trace) std::println("    aif p_fit {:.3f} e {:+.3f} s {:+.3f}", st.p_fit, st.e, st.s);
+        }
         if (gate.through(c.through)) { o.through = true; break; }
-        const auto model = rc::anchor_obstacles(drive, dw, {});
+        const auto model = rc::anchor_obstacles(drive, dw, lv);
         const std::array<rc::AnchorTurnBlockers, 2> sets{rc::AnchorTurnBlockers{model, hull},
                                                          rc::AnchorTurnBlockers{returns.obstacles, body}};
         const auto room = rc::anchor_make_turn_room(c, sets, kMargin, kAdec, kVmax, kWmax, false);
-        const auto guard = rc::anchor_jamb_guard(drive, dw, room.cmd, false, hull, kMargin, kAdec, kVmax, kWmax);
+        const auto guard = rc::anchor_jamb_guard(drive, dw, room.cmd, false, hull, kMargin, kAdec, kVmax, kWmax, lv);
         float adv = guard.cmd.adv, side = 0.f, rot = guard.cmd.rot;
         const bool had = adv != 0.f or rot != 0.f;
         const auto cap = rc::lidar_cap_command(returns.obstacles, body, kMargin, kAdec, kVmax, kWmax, adv, side, rot);
@@ -366,5 +380,25 @@ int main()
             CHECK(o.contacts == 0);
         }
     std::println("{} checks, {} failures", checks, failures);
+    // (p31) pingpong31 legs 1 and 3 (2026-10-31): ANCHOR-ONLY from the vantage stall pose (0.12 m east of the axis, 1.64 m
+    //   before the plane, facing it), door_concept's MAP leaf as logged (hinge e -0.42, tip (-0.31,-0.94), phi 83 deg, P 0.99)
+    //   vs the leaf where the scene has it (west casing, 90 deg). The anchor itself right (the door plane at y -0.24).
+    {
+        std::println("(p31) anchor-only, the leaf as door_concept published it vs the true leaf");
+        auto mk = [](V2 h, V2 t, float phi) { rc::interaction::AnchorLeaf l; l.hinge = h; l.tip = t; l.phi = phi; l.p = 0.99f; return l; };
+        const std::vector<rc::interaction::AnchorLeaf> logged{mk(V2(-0.42f, -0.06f), V2(-0.31f, -0.94f), 83.f * deg)};
+        const std::vector<rc::interaction::AnchorLeaf> truth{mk(V2(-0.50f, 0.04f), V2(-0.50f, -0.91f), 90.f * deg)};
+        const std::vector<rc::interaction::AnchorLeaf> none{};
+        for (const bool aif : {false, true})
+            for (const auto* L : {&logged, &truth, &none})
+            {
+                float pf = 1.f;
+                const auto o = run(Pose{V2(0.12f, -1.88f), 90.f * deg}, V2(0.f, -0.24f), 0.f, true, 7u, 60.f, L, aif, &pf);
+                report(std::format("{} law, {}", aif ? "AIF" : "old servo",
+                                   L == &logged ? "leaf as logged (83 deg)" : L == &truth ? "leaf as in the scene (90 deg)" : "no leaf"), o);
+                if (aif) std::println("      min P(fit) {:.3f}", pf);
+            }
+    }
+
     return failures == 0 ? 0 : 1;
 }
