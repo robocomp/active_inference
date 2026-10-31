@@ -885,10 +885,44 @@ void RoomSceneGraph::write_robot_room_rt(const Eigen::Affine2f& robot_pose_int,
 
 ///////////////////////////////////////////////////////////////////////////////
 // PROTO-ROOM — see the declaration in room_scene_graph.h and door_crossing.h for the model.
+std::uint64_t RoomSceneGraph::room_of_node(std::uint64_t id) const
+{
+    for (int hop = 0; hop < 8 and id != 0; ++hop)
+    {
+        const auto n = G_->get_node(id);
+        if (not n.has_value()) return 0;
+        if (n->type() == "room") return id;
+        std::uint64_t up = 0;
+        for (const auto& e : G_->get_edges_to_id(id))
+            if (e.type() == "RT") { up = e.from(); break; }
+        id = up;
+    }
+    return 0;
+}
+
+// Is a cross of one of THIS room's doors executing? The controller's `executing` edge on aff_<door>_cross is the action
+// itself (spec Rev 3: the crossing is an action), from the moment the passage claims it until the room switch moves the
+// robot out of this room — read here, not inferred from where the pose says the body is.
+bool RoomSceneGraph::cross_executing() const
+{
+    for (const auto& ap : room_concept_->door_apertures())
+    {
+        if (ap.name.empty() or room_of_node(ap.id) != dsr_room_id_) continue;
+        if (const auto aff = G_->get_node("aff_" + ap.name + "_cross"); aff.has_value())
+            for (const auto& e : G_->get_edges_to_id(aff->id()))
+                if (e.type() == "executing") return true;
+    }
+    return false;
+}
+
 void RoomSceneGraph::step_proto_room(const rc::RoomConcept::UpdateResult& res)
 {
     if (!G_ or !room_node_created_ or dsr_robot_id_ == 0)
+    {
+        room_concept_->set_crossing(false);
         return;
+    }
+    room_concept_->set_crossing(cross_executing());
     // ONE ROW PER UPDATE, WHATEVER PATH THE IMPL TAKES. The run is driven by hand and nobody is
     // reading the terminal, so a branch that returns early must still say so in the file — otherwise
     // "the agent stopped" and "the code returned somewhere I forgot to log" look the same afterwards.
@@ -957,20 +991,7 @@ void RoomSceneGraph::step_proto_room_impl(const rc::RoomConcept::UpdateResult& r
         polygon.clear();
         for (const auto& v : fs_published_) polygon.push_back(T_int_pub * v);
     }
-    const auto room_of = [this](std::uint64_t id) -> std::uint64_t
-    {
-        for (int hop = 0; hop < 8 and id != 0; ++hop)
-        {
-            const auto n = G_->get_node(id);
-            if (not n.has_value()) return 0;
-            if (n->type() == "room") return id;
-            std::uint64_t up = 0;
-            for (const auto& e : G_->get_edges_to_id(id))
-                if (e.type() == "RT") { up = e.from(); break; }
-            id = up;
-        }
-        return 0;
-    };
+    const auto room_of = [this](std::uint64_t id) { return room_of_node(id); };
     // ★ ONLY THIS ROOM'S DOORS CAN TAKE THE ROBOT OUT OF IT (2026-10-12): a door belongs to the room its RT chain hangs
     //   from (try19: room_2's door_33, re-read from room_1's frame, "crossed" again 100 ms after re-entry).
     const float sigma_wall = room_concept_->params.wall_map.publish_corner_sigma;

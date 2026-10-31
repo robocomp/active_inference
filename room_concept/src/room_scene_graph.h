@@ -198,6 +198,8 @@ private:
     //   is this room's pose composed with that constant, written on every pose write.
     // Not removed while this agent runs (first test: topology only); owned cleanup reaps it with the room.
     void step_proto_room(const rc::RoomConcept::UpdateResult& res);
+    bool cross_executing() const;   ///< a cross of one of this room's doors is executing (controller's `executing` edge)
+    std::uint64_t room_of_node(std::uint64_t id) const;   ///< the room a node's RT chain hangs from; 0 = none
     /// Consume the estimator's one-shot re-anchor (take_pending_reanchor) into EVERY frame published as a
     /// fixed transform of the internal one: the start-up proto's T_pub_int_ and the crossing proto's
     /// T_room_proto_. One consumer, at the top of update(), so neither can miss it.

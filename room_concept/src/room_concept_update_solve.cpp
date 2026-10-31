@@ -28,6 +28,33 @@
 namespace rc
 {
 
+    // ★ ODOMETRY ONLY WHILE A DOOR OF THIS ROOM IS BEING CROSSED (Lucas Bonilla TFM §6.3; spec 2026-10-29 Rev 3). From the
+    //   cross's start to the room switch the scan shows more and more of the room ahead, which this room's model cannot
+    //   explain: pingpong7 leg 4, sdf_mse climbed 1.10 → 1.51 m as the body went through and then the solve snapped the
+    //   pose 3.7 m / 90° onto a wrong fit of room_1's walls in room_2's model (mse 0.13), and door_concept, predicting the
+    //   door from that pose, declared its correct robot-frame anchor lost. So the walls are not consulted at all: the pose
+    //   is the motion prediction (the new window slot) and the covariance grows by the motion prior, the Kalman
+    //   prediction step with no update. A metre or two of odometry costs centimetres; a wrong fit costs the crossing.
+    std::optional<RoomConcept::UpdateResult> RoomConcept::update_dead_reckon(UpdateCycle& c)
+    {
+        if (not crossing()) return std::nullopt;
+        // update_predict has already set current_covariance = F P Fᵀ + Q from model_->prev_cov when it could propagate;
+        // prev_cov is carried below so the recursion accumulates across the crossing instead of restarting each frame.
+        if (not model_->robot_prev_pose.has_value())
+            if (const auto& q = c.selected_prior(); q.valid and q.covariance_eigen.allFinite())
+                current_covariance += q.covariance_eigen;
+        const Eigen::Vector3f p = window_mgr_.newest().pose;   // the PREDICTION (update_build_slot)
+        const Eigen::VectorXf sdf = model_->sdf_at_pose(c.sampled_points, p);   // reported, never used
+        last_t_adam_ms_ = 0.f;
+        sdf_polished_this_cycle_ = false;
+        UpdateResult r = build_early_exit_result(c.sampled_points, sdf, sdf.size() > 0 ? sdf.cwiseAbs().mean() : 0.f,
+                                                 c.lidar.second, p.x(), p.y(), std::remainder(p.z(), 2.f * float(M_PI)));
+        model_->prev_cov = current_covariance;
+        r.lidar_scan = std::move(c.res.lidar_scan);
+        record_slam_shadow(r);
+        return r;
+    }
+
     std::optional<RoomConcept::UpdateResult> RoomConcept::update_early_exit(UpdateCycle& c)
     {
         const auto& lidar = c.lidar;

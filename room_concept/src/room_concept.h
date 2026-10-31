@@ -645,6 +645,12 @@ public:
     /// if a writer ever moves. It is NOT a hand-off between threads — do not add a queue for it.
     void set_outside_prob(float p) { outside_prob_.store(std::clamp(p, 0.f, 1.f)); }
     float outside_prob() const { return outside_prob_.load(); }
+    /// A cross of one of this room's doors is EXECUTING (the controller's `executing` edge on aff_<door>_cross; written by
+    /// the scene graph each update). While true the pose is odometry only — no wall evidence, no relocalisation — until
+    /// the room switch (Lucas Bonilla TFM §6.3: the walls of the room being left cannot localise a body that is leaving it;
+    /// pingpong7 leg 4: room_1's scan fitted into room_2's model jumped the pose 3.7 m / 90° the frame the body cleared).
+    void set_crossing(bool on) { crossing_.store(on, std::memory_order_relaxed); }
+    bool crossing() const { return crossing_.load(std::memory_order_relaxed); }
 
     // Process noise covariance (diagonal [x, y, theta])
     Eigen::Vector3f process_noise = {0.01f, 0.01f, 0.01f};
@@ -689,6 +695,7 @@ private:
    std::vector<TriplePoint> latest_triple_points_;   ///< display copy, see triple_points()
    mutable std::mutex door_apertures_mutex_;
    std::atomic<float> outside_prob_{0.f};
+   std::atomic<bool> crossing_{false};
    /// Set by begin_room_estimation; never cleared for the life of the run (a room learnt is not
    /// un-learnt by walking back). Read by estimating() from any thread, hence atomic.
    std::atomic<bool>  runtime_estimate_{false};
@@ -1403,6 +1410,7 @@ private:
     void update_observe_walls(UpdateCycle& c);
     void update_observe_corners(UpdateCycle& c);
     void update_open_cycle(UpdateCycle& c);
+    std::optional<UpdateResult> update_dead_reckon(UpdateCycle& c);
     std::optional<UpdateResult> update_early_exit(UpdateCycle& c);
     void update_solve(UpdateCycle& c);
     void update_extract(UpdateCycle& c);

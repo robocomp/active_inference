@@ -61,6 +61,8 @@ namespace rc
         update_predict(c);
         update_build_slot(c);
         update_carry_doors();
+        if (auto dr = update_dead_reckon(c))   // a door of this room is being crossed: odometry only
+            return *dr;
         update_observe_walls(c);
         update_observe_corners(c);
         update_open_cycle(c);
