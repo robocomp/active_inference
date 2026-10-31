@@ -18,6 +18,7 @@
 #include "controller_door_passage.h"
 #include "motion_verdict.h"
 #include "controller_anchor_servo.h"
+#include "door_cross_aif.h"
 #include "lidar_guard_buffer.h"
 #include "doorway_gap.h"
 #include "../../common/interaction_anchor/interaction_anchor.h"
@@ -281,6 +282,8 @@ public:
     [[nodiscard]] bool route_reverse() const { return route_reverse_; }
 
     rc::DoorPassage &door_passage() { return door_passage_; }
+    /// [DoorPassage] CrossServo: the doorway of a route-mode passage is driven on the anchor (door_cross_aif.h).
+    void set_door_cross_servo(bool on) { door_cross_servo_ = on; }
     rc::ApproachOrder &approach_order() { return approach_order_; }
     /// Mission (Command) mode: the open affordance contest runs only while an `explore` order holds it open — and,
     /// when the order names its room, only for affordances whose target is in that room (affordance_room_scope.h).
@@ -1182,6 +1185,9 @@ private:
     std::string door_route_n0_key_, door_route_through_key_;       // door|room it was latched for / already reported THROUGH
     std::string door_route_latch_room_;                            // the room the latch belongs to (a change resets it)
     bool door_route_body_in_opening_ = false;                      // some part of the body is in the perceived opening
+    bool door_cross_servo_ = false;          ///< [DoorPassage] CrossServo
+    std::uint64_t anchor_servo_last_ms_ = 0;  ///< the AIF law's last step (its control period)
+    std::string door_servo_logged_;           ///< the leg key whose servo hand-over was logged
     std::uint64_t door_route_anchor_id_ = 0;                        // the anchor whose PERCEIVED opening the route was built on (0 = the room-frame door)
     // The opening door_concept's interaction anchor measures for this door (robot frame ∘ the robot's pose), if one is fresh:
     // the door route's axis (door_route.h) and the gap the installed route must still pass through.

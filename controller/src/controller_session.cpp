@@ -3397,6 +3397,31 @@ bool ControllerSession::drive_door_route(const ControllerPlanningStep &step, rc:
                 door_passage_.note_route(leg.key, rc::DoorPassage::RouteReport::Arrived);
             }
         }
+    // ★ THE DOORWAY ON THE ANCHOR, IN THE ROBOT FRAME ([DoorPassage] CrossServo; spec 2026-10-31-door-cross-aif-servo).
+    //   From the cycle the cross's interaction anchor is fresh, the body is driven through the hole it perceives by the
+    //   Active-Inference law (door_cross_aif.h) on the servo's guard chain (step_anchor_cross) — no route past the door, no
+    //   grid lookup beyond it (pingpong6/8/10: "no free point past the door on its axis"), no rebuild. THROUGH and link 1
+    //   stay above; the passage's room-switch / archive end is unchanged. Before the anchor is up the route still drives.
+    if (door_cross_servo_ and leg.through and graph_ != nullptr)
+        if (const auto aff = graph_->get_node("aff_" + leg.door + "_cross"); aff.has_value())
+        {
+            ControllerPlanningStep on_anchor = step;
+            on_anchor.target.node_id = aff->id();
+            on_anchor.target.node_name = aff->name();
+            on_anchor.target.from_affordance = true;
+            if (update_cross_anchor(on_anchor) and anchor_cross_.has_value())
+            {
+                if (door_servo_logged_ != leg.key)
+                {
+                    door_servo_logged_ = leg.key;
+                    std::println("[door-route] {}: the doorway is driven on the anchor {} in the robot frame (Active-Inference "
+                                 "cross) — the route is dropped", leg.door, anchor_cross_->name);
+                }
+                if (door_route_installed_) { path_controller.stop(); door_route_installed_ = false; }
+                current_plan_.reset();
+                return true;
+            }
+        }
     if (door_route_active_ and leg.key == door_route_key_)
         if (const auto seen = perceived_door(leg.door, step.robot_pose); seen.has_value())
         {
@@ -4679,8 +4704,20 @@ void ControllerSession::step_anchor_cross(const ControllerRobotPose &robot_pose,
                 pts.has_value())
                 free_advance = rc::lidar_free_advance(*pts, rc::anchor_cross_geometry(drive_pose).n, returns_body());
         }
-        cmd = rc::anchor_cross_command(drive_pose, drive_width, half_w, standoff, v_max, w_max, holonomic, drive_leaves,
-                                       approach_body_.support_radius(0.f, Eigen::Vector2f(0.f, 1.f)), free_advance);
+        if (door_cross_servo_ and not holonomic)
+        {
+            // [DoorPassage] CrossServo: the Active-Inference law (door_cross_aif.h); same anchor, same guards below.
+            const float dt = anchor_servo_last_ms_ != 0 and now > anchor_servo_last_ms_
+                                 ? std::min(0.5f, 1e-3f * static_cast<float>(now - anchor_servo_last_ms_)) : 0.05f;
+            anchor_servo_last_ms_ = now;
+            const auto st = rc::door_cross_aif(drive_pose, drive_width, drive_leaves,
+                                               rc::DoorCrossAifBody{half_w, approach_body_.support_radius(0.f, Eigen::Vector2f(0.f, 1.f))},
+                                               standoff, v_max, w_max, dt, free_advance);
+            cmd = st.cmd;
+        }
+        else
+            cmd = rc::anchor_cross_command(drive_pose, drive_width, half_w, standoff, v_max, w_max, holonomic, drive_leaves,
+                                           approach_body_.support_radius(0.f, Eigen::Vector2f(0.f, 1.f)), free_advance);
     }
     else
     {

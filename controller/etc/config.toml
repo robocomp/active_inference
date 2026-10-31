@@ -86,6 +86,10 @@ DoorCloseOfferWaitS = 5.0
 # room switch or at the route's end; built twice without success = cross_unreachable. false: the approach/open/cross
 # affordance chain (each step a goal the local policy re-decides) — kept for the A/B. controller_door_passage.h ROUTE MODE.
 UseRoute = true
+# 2026-10-31 (user: "build the new one"): true = once the cross's interaction anchor is fresh, the doorway is driven in the
+# ROBOT frame by the Active-Inference law (src/door_cross_aif.h) on the anchor servo's guard chain, not by the route.
+# false = the route through the door (pingpong3-10). Spec docs/superpowers/specs/2026-10-31-door-cross-aif-servo-design.md.
+CrossServo = true
 
 [Planner]
 # A* planning grid. Collision is the robot's real footprint tested against this grid, so the ONLY thing

@@ -1020,6 +1020,12 @@ void SpecificWorker::load_params()
 		     "target, RouteFollower over the grid planner); false = the approach/open/cross affordance chain — controller_door_passage.h");
 		session_.door_passage().set_use_route(use_route);
 		std::println("[door-passage] UseRoute = {}", use_route);
+		bool cross_servo = false;
+		cfgr.opt("DoorPassage.CrossServo", cross_servo,
+		     "true = in route mode the doorway is driven in the ROBOT frame on the cross's interaction anchor by the "
+		     "Active-Inference law (door_cross_aif.h) as soon as the anchor is fresh; false = the route through it");
+		session_.set_door_cross_servo(cross_servo);
+		std::println("[door-passage] CrossServo = {}", cross_servo);
 	}
 	cfgr.opt("Mission.MetricsCsvPath", params.mission_csv_path,
          "One row of continuous trajectory statistics per completed run is appended here");
