@@ -1052,11 +1052,16 @@ QString ChatSession::do_can_see(const QJsonObject& args)
 {
     // The cards are the concept agents' files (the perception_card graph attribute is not installed yet): re-read once
     // per call, from the active_inference root = the parent of chat_agent/ (the fleet scripts start us from chat_agent/).
+    // The active_inference root as canvas_model.cpp has it (assets_root: two levels above the binary's directory); the
+    // cwd's parent when that holds no cards (started from chat_agent/ by the fleet scripts).
     namespace fs = std::filesystem;
     std::error_code ec;
-    const fs::path cwd = fs::current_path(ec);
-    const fs::path root = cwd.filename() == "chat_agent" ? cwd.parent_path() : cwd;
-    const auto cards = rc::card::read_all_cards(root);
+    fs::path root = rc::chat::assets_root();
+    auto cards = rc::card::read_all_cards(root);
+    if (cards.empty())
+        if (const fs::path alt = fs::current_path(ec).parent_path(); alt != root)
+            if (auto c2 = rc::card::read_all_cards(alt); not c2.empty()) { cards = std::move(c2); root = alt; }
+    const bool any_cards = not cards.empty();
 
     const std::string what = rc::chat::canonical_concept(args.value("concept").toString().toStdString());
     const std::string where = args.value("where").toString().trimmed().toStdString();
@@ -1071,18 +1076,18 @@ QString ChatSession::do_can_see(const QJsonObject& args)
         cls = rc::chat::canonical_concept(it->subtype);
     std::optional<rc::card::Card> card;
     if (const auto c = std::ranges::find(cards, cls, &rc::card::Card::concept_); c != cards.end()) card = *c;
-    if (not card.has_value()) return QStringLiteral("I have no detector for that.");
+    if (not card.has_value()) return q(rc::chat::answer_no_card(any_cards, root.string()));
     if (scene.room.empty()) return QStringLiteral("I do not know which room I am in, so I cannot judge what I can see.");
 
     const auto target = rc::chat::resolve_target(scene, what, where, card);
     if (not target.has_value()) return q(target.error());
-    const auto world = rc::chat::world_for(scene, target->name);
-    if (stand)
-        return q(rc::chat::answer_where_to_stand(card, target->label, rc::card::where_to_stand(*card, world, target->h, 3),
+    if (stand)   // doors of unknown state sit at their expected opening here (the stand search is ~100 evaluations)
+        return q(rc::chat::answer_where_to_stand(card, target->label,
+                                                 rc::card::where_to_stand(*card, rc::chat::world_for(scene, target->name), target->h, 3),
                                                  rc::chat::landmarks_of(scene)));
     const auto vp = rc::chat::resolve_from(scene, from);
     if (not vp.has_value()) return q(vp.error());
-    return q(rc::chat::answer_can_see(card, target->label, from, rc::card::evaluate(*card, world, target->h, *vp)));
+    return q(rc::chat::answer_can_see(card, target->label, from, rc::chat::evaluate_scene(*card, scene, *target, *vp)));
 }
 
 std::optional<rc::chat::Topology> ChatSession::remembered_topology() const

@@ -49,25 +49,75 @@ bool has(const std::string& s, const char* w) { return s.find(w) != std::string:
 
 int main()
 {
-    // door aperture: flush = shut, a full swing = the whole width, unmeasured = width x P(open)
+    // door states: flush = shut, a full swing = the whole width, P(open) = a two-point mixture, none = uniform phi
     {
         SeeDoor d; d.width_m = 1.0f; d.phi_rad = 0.0f;
-        assert(door_half_gap(d) == 0.0f);
+        assert(door_half_gap(d) == 0.0f and door_states(d).size() == 1);
         d.phi_rad = std::numbers::pi_v<float> / 2;
         assert(std::abs(door_half_gap(d) - 0.5f) < 1e-5f);
-        d.phi_rad = -1.0f; d.p_open = 0.5f;
-        assert(std::abs(door_half_gap(d) - 0.25f) < 1e-6f);
-        d.p_open.reset();
-        assert(door_half_gap(d) == 0.0f);
-        d.width_m = 0;
-        d.p_open = 1.0f;
-        assert(door_half_gap(d) == 0.0f);
+        d.phi_rad = -1.0f; d.p_open = 0.3f;
+        const auto st = door_states(d);
+        assert(st.size() == 2 and std::abs(st[0].weight - 0.7f) < 1e-6f and st[0].half_gap == 0 and std::abs(st[1].half_gap - 0.5f) < 1e-6f);
+        d.p_open = -1.0f;                       // both unmeasured: 8 nodes, weights sum to 1, mean inside (0, 0.5)
+        const auto u = door_states(d);
+        float sw = 0; for (const auto& x : u) sw += x.weight;
+        assert(u.size() == 8 and std::abs(sw - 1.0f) < 1e-5f and door_half_gap(d) > 0 and door_half_gap(d) < 0.5f);
+        d.width_m = 0;                           // no width: open at the nominal width, never a shut wall
+        assert(door_states(d).size() == 1 and door_half_gap(d) > 0);
+    }
+    // LiDAR mount is body <- sensor: the evaluator's origin is robot pose x mount, the pose applied ONCE
+    {
+        rc::media::SensorModel m;
+        Eigen::Isometry3f mount = Eigen::Isometry3f::Identity();
+        mount.translation() = Eigen::Vector3f(0.10f, 0.0f, 0.50f);
+        const auto rig = lidar_rig_from_body_mount(m, mount);
+        assert(rig.mount.translation().isApprox(mount.translation()));          // no robot pose inside the mount
+        Eigen::Isometry3f robot = Eigen::Isometry3f::Identity();                // what evaluate_lidar does
+        robot.linear() = Eigen::AngleAxisf(0.7f, Eigen::Vector3f::UnitZ()).toRotationMatrix();
+        robot.translation() = Eigen::Vector3f(2, 1, 0);
+        const Eigen::Vector3f o = (robot * rig.mount).translation();
+        assert(std::abs(o.x() - (2 + 0.10f * std::cos(0.7f))) < 1e-5f and std::abs(o.y() - (1 + 0.10f * std::sin(0.7f))) < 1e-5f);
+        assert(std::abs(o.z() - 0.50f) < 1e-6f);
+    }
+    // doors as a mixture (R10): a wall at x=6, door in it, target behind, seen only through the door
+    {
+        Card c;
+        c.concept_ = "fridge"; c.level = rc::card::Level::Countable;
+        c.channels = {{"zed", rc::card::Role::Identity, true}};
+        c.geometry = {0.7f, 0.7f, 1.8f, 0.0f, 1.8f};
+        rc::card::SubtypeParams sp; sp.env = {0.0f, 1.32f, 0.26f};
+        c.subtypes[""] = sp;
+        SeeScene s;
+        s.room = "r"; s.polygon = {{0, 0}, {6, 0}, {6, 4}, {0, 4}};
+        rc::nbv::Sensor z; constexpr float f = 448.0f;
+        z.hfov_rad = 2.0f * std::atan(640.0f / f); z.vfov_rad = 2.0f * std::atan(360.0f / f); z.height_m = 0.945f;
+        s.zed = z; s.zed_mount_z = 0.945f;
+        SeeDoor d; d.name = "door_1"; d.xy = {6, 2}; d.width_m = 0.9f;
+        s.doors = {d};
+        Target tg; tg.name = ""; tg.label = "fridge"; tg.h.concept_ = "fridge"; tg.h.x = 7.5f; tg.h.y = 2.0f;
+        const rc::card::Viewpoint vp{Eigen::Vector2f(3, 2), std::nullopt};
+        const auto at_phi = [&](float phi) { auto s2 = s; s2.doors[0].phi_rad = phi; s2.doors[0].p_open.reset(); return evaluate_scene(c, s2, tg, vp); };
+        const auto shut = at_phi(0.0f), open = at_phi(std::numbers::pi_v<float> / 2);
+        assert(open.p_recognise > shut.p_recognise);
+        auto s3 = s; s3.doors[0].phi_rad = -1.0f; s3.doors[0].p_open = 0.3f;
+        const auto m = evaluate_scene(c, s3, tg, vp);
+        assert(std::abs(m.p_recognise - (0.3f * open.p_recognise + 0.7f * shut.p_recognise)) < 1e-5f);
+        assert(std::abs(m.p_notice - (0.3f * open.p_notice + 0.7f * shut.p_notice)) < 1e-5f);
+        assert(std::ranges::any_of(m.notes, [](const std::string& n) { return n.starts_with("assumption: door_1"); }));
+        assert(has(answer_can_see(std::optional<Card>(c), "fridge", "", m), "Assumed: door_1"));
+        s3.doors[0].p_open.reset();               // both unmeasured: strictly between shut and open
+        const auto u = evaluate_scene(c, s3, tg, vp);
+        assert(u.p_recognise > shut.p_recognise and u.p_recognise < open.p_recognise);
+        // a door not on the sight line is not mixed (expected state), and unmeasured width never cuts a shut wall
+        auto s4 = s3; s4.doors[0].xy = {6, 0.2f}; s4.doors[0].p_open = 0.3f;
+        assert(not see_detail::door_on_sight_line(s4, s4.doors[0], vp.xy, Eigen::Vector2f(7.5f, 2.0f)));
+        assert(see_detail::door_on_sight_line(s3, s3.doors[0], vp.xy, Eigen::Vector2f(7.5f, 2.0f)));
     }
     // the World excludes the target and keeps the others as NAMED obstacles
     {
         const auto w = world_for(scene(), "refrigerator_1");
         assert(w.obstacles.size() == 2 and w.obstacles[0].first == "chair_1");
-        assert(w.polygon.size() == 4 and w.gaps.empty());   // the door is shut
+        assert(w.polygon.size() == 4 and w.gaps.empty());   // the door is shut (phi = 0)
         assert(not w.zed.has_value());
     }
     // names: fridge = refrigerator, plural stripped
@@ -104,15 +154,20 @@ int main()
         const auto card = std::optional<Card>(fridge_card());
         assert(answer_can_see(std::nullopt, "x", "", result(1, 1, Limit::None)) == "I have no detector for that.");
         // notice and recognise within 0.1: ONE probability
-        auto a = answer_can_see(card, "refrigerator_1", "", result(0.80f, 0.75f, Limit::Occluded, "chair_1"));
+        auto a = answer_can_see(card, "refrigerator_1", "", result(0.75f, 0.75f, Limit::Occluded, "chair_1"));
         assert(has(a, "Yes") and has(a, "0.75") and not has(a, "0.80") and has(a, "my camera (the zed)"));
         assert(has(a, "hidden behind chair_1") and has(a, "from here"));
         // differing by more than 0.1: both
         auto b = answer_can_see(card, "refrigerator_1", "door_1", result(0.90f, 0.40f, Limit::TooSmall));
         assert(has(b, "0.90") and has(b, "0.40") and has(b, "from door_1") and has(b, "too small"));
-        // within 0.1 is NOT "more than"
-        auto c = answer_can_see(card, "x", "", result(0.79f, 0.70f, Limit::None));
-        assert(not has(c, "0.79"));
+        // no separation threshold: they are shown apart whenever the printed decimals differ, together when they agree
+        auto c = answer_can_see(card, "x", "", result(0.71f, 0.70f, Limit::None));
+        assert(has(c, "0.71") and has(c, "0.70"));
+        auto c2 = answer_can_see(card, "x", "", result(0.701f, 0.699f, Limit::None));
+        assert(not has(c2, "0.70 ") and has(c2, "(P 0.70)") and not has(c2, "notice"));
+        // the two "no card" messages
+        assert(answer_no_card(true, "/r") == "I have no detector for that.");
+        assert(answer_no_card(false, "/r") == "I couldn't find any perception cards (looked in /r).");
         // a wall
         assert(has(answer_can_see(card, "x", "", result(0.1f, 0.1f, Limit::BehindWall)), "a wall is in the way"));
         // the ricoh is never claimed, whatever it reports

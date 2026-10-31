@@ -29,9 +29,11 @@ namespace rc::chat
 
 namespace see_detail
 {
-inline std::optional<Eigen::Isometry3f> mount_of(DSR::InnerEigenAPI& inner, const std::string& room, const std::string& node)
+/// body <- sensor: the mount in the ROBOT BASE frame (`body`, as canvas_lidar.cpp), NOT in the room: the evaluator
+/// applies robot(vp) * mount itself, and a room-frame mount would carry the robot's pose a second time.
+inline std::optional<Eigen::Isometry3f> mount_of(DSR::InnerEigenAPI& inner, const std::string& robot_frame, const std::string& node)
 {
-    const auto T = inner.get_transformation_matrix(room, node);
+    const auto T = inner.get_transformation_matrix(robot_frame, node);
     if (not T.has_value()) return std::nullopt;
     Eigen::Isometry3f m = Eigen::Isometry3f::Identity();
     m.matrix() = T->matrix().cast<float>();
@@ -58,6 +60,7 @@ inline std::optional<Eigen::Isometry3f> mount_of(DSR::InnerEigenAPI& inner, cons
         }
     }
 
+    // robot pose: room <- body, the SAME base frame the LiDAR mounts below are expressed in (body <- sensor).
     if (const auto T = inner.get_transformation_matrix(s.room, robot_frame); T.has_value())
     {
         s.robot_xy = Eigen::Vector2f(static_cast<float>(T->translation().x()), static_cast<float>(T->translation().y()));
@@ -112,10 +115,13 @@ inline std::optional<Eigen::Isometry3f> mount_of(DSR::InnerEigenAPI& inner, cons
         }
         if (not so.standoff.has_value() and s.robot_xy.has_value())
         {
+            // body clearance 0.30 m = kRobotRadiusM in rc::card::where_to_stand (evaluator.h), plus half the footprint,
+            // plus a viewing margin.
+            constexpr float kRobotRadiusM = 0.30f, kViewMarginM = 0.5f;
             const Eigen::Vector2f c(so.x, so.y);
             const Eigen::Vector2f dir = (*s.robot_xy - c);
             if (dir.norm() > 1e-3f)
-                so.standoff = c + dir.normalized() * (0.30f + 0.5f * std::max(so.w.value_or(0.f), so.d.value_or(0.f)) + 0.5f);
+                so.standoff = c + dir.normalized() * (kRobotRadiusM + 0.5f * std::max(so.w.value_or(0.f), so.d.value_or(0.f)) + kViewMarginM);
         }
         s.objects.push_back(std::move(so));
     }
@@ -143,9 +149,9 @@ inline std::optional<Eigen::Isometry3f> mount_of(DSR::InnerEigenAPI& inner, cons
     const auto rig = [&](const char* name) -> std::optional<rc::card::LidarRig>
     {
         const auto m = rc::media::sensor_model_from_graph(G, name);
-        const auto mt = see_detail::mount_of(inner, s.room, name);
+        const auto mt = see_detail::mount_of(inner, robot_frame, name);
         if (not m.has_value() or not mt.has_value()) return std::nullopt;
-        return rc::card::LidarRig{*m, *mt};
+        return lidar_rig_from_body_mount(*m, *mt);
     };
     s.helios = rig("helios");
     s.bpearl = rig("bpearl");
