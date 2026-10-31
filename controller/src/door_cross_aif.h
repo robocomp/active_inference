@@ -85,7 +85,11 @@ struct DoorCrossAifStep
     const float line = anchor_cross_line(width, leaves, body.half_width, g.sigma_lat);
     out.e = g.a.dot(P - A) - line;
     out.s = g.n.dot(P - A);
-    out.s_goal = standoff + d;
+    // AIM BEYOND THE LINE TO BE CROSSED (2026-10-31): `through` is the body's centre at s >= standoff; a goal that puts the centre
+    // EXACTLY there (s_goal = standoff + d for the front point) is the law's own attractor, approached asymptotically and
+    // crossed only by an overshoot — test_jamb_cross p31: every run ended at the threshold, and with a leaf (P(fit) < 1, a
+    // slower approach) never crossed it in 60 s. The attractor is one front reach further, so the centre passes standoff.
+    out.s_goal = standoff + 2.f * d;
 
     // the room each side: the clear gap beside any leaf, less the body
     float clear_half = 0.5f * width;
