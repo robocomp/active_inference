@@ -177,7 +177,10 @@ bool ControllerCameraMasks::draw_target_pose(QPainter &p, const std::string &obj
     }
     // ALWAYS check the optional — get_transformation_matrix bails to {} at every missing node/edge in
     // the chain, and dereferencing that is the documented crash mode.
-    const auto room_T_robot = inner_->get_transformation_matrix(room_name_, robot_name_, stamp_ms);
+    // INTERPOLATED, not the API's default Nearest (user 2026-11-01): the capture stamp falls between two localiser writes, and the
+    // nearest one is up to half a publish period away — at turning speed a visible heading error in both marks.
+    const auto room_T_robot = inner_->get_transformation_matrix(room_name_, robot_name_, stamp_ms, "RT",
+                                                                DSR::RT_API::TimeQuery::Interpolated);
     if (not room_T_robot.has_value())
     {
         note = QStringLiteral("no %1←%2 RT at the capture stamp")
@@ -190,7 +193,8 @@ bool ControllerCameraMasks::draw_target_pose(QPainter &p, const std::string &obj
     const Eigen::Affine3d cam_T_room = (room_T_robot.value() * robot_T_zed_.value()).inverse();
     const auto room_T_obj = object.empty()
                                 ? std::nullopt
-                                : inner_->get_transformation_matrix(room_name_, object, stamp_ms);
+                                : inner_->get_transformation_matrix(room_name_, object, stamp_ms, "RT",
+                                                                    DSR::RT_API::TimeQuery::Interpolated);
     if (not object.empty() and not room_T_obj.has_value() and note.isEmpty())
         note = QStringLiteral("no %1←%2 RT at the capture stamp")
                    .arg(QString::fromStdString(room_name_), QString::fromStdString(object));
