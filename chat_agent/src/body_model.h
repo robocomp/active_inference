@@ -20,6 +20,7 @@
 
 #include <ConfigLoader/ConfigLoader.h>
 
+#include "../../common/footprint/robot_body_check.h"
 #include "../../common/robot_footprint/robot_footprint.h"
 #include "../../controller/src/controller_runtime_types.h"
 
@@ -60,17 +61,8 @@ struct BodyModel
     rc::RobotFootprint body = *fp;
     if (is_shadow)
     {
-        const rc::RobotFootprint ref = rc::RobotFootprint::shadow();
-        float rx = 0.f, ry = 0.f, ref_area = 0.f;
-        const auto& q = ref.polygon();
-        for (std::size_t i = 0, n = q.size(); i < n; ++i)
-        {
-            rx = std::max(rx, std::abs(q[i].x()));
-            ry = std::max(ry, std::abs(q[i].y()));
-            ref_area += 0.5f * (q[i].x() * q[(i + 1) % n].y() - q[(i + 1) % n].x() * q[i].y());
-        }
-        if (std::abs(rep.x_max - rx) > 1e-3f or std::abs(rep.y_max - ry) > 1e-3f or std::abs(rep.area_m2 - ref_area) > 0.01f * ref_area)
-            body = ref;   // the controller's fall-back: the compiled hull
+        if (rc::shadow_mesh_disagreement(rep, mesh.string()).has_value())
+            body = rc::RobotFootprint::shadow();   // the controller's fall-back: the compiled hull
     }
     BodyModel m;
     if (margin.has_value()) body.set_safety_margin(*margin);
