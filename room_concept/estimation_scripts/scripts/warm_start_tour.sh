@@ -83,6 +83,16 @@ grep -a "\[restore\].*room_1" $L/door_concept.log | grep -a -v "recalled" | head
 grep -a -m1 "\[recall\] recall_room_2 posted" $L/ltsm_agent.log
 [ $ready = 1 ] || { echo "ABORT: not ready in 120 s"; bash $S/run_crossing.sh crossing/$1 collect >/dev/null 2>&1; exit 1; }
 sleep 5
+# ── LOCALISATION GOOD ENOUGH TO ACT ON (user 2026-11-01, warm12: the pose drifted 0.2-0.4 m in room_1, the door was misplaced
+# and everything after failed: "check confidence is good enough to proceed"). loc_ok.py: median scan residual over 5 s.
+# Logged every 2 s for the whole run (crossing/<run>/loc.txt) so a drift DURING a leg is visible afterwards.
+( while [ -f $LOCK ]; do echo "$(now_ms) $(python3 -I $S/loc_ok.py $B/room_concept)" >> crossing/$1/loc.txt; sleep 2; done ) &
+loc_gate() {   # label max_wait_s
+  local i; for i in $(seq 1 $2); do python3 -I $S/loc_ok.py $B/room_concept > /dev/null && break; sleep 1; done
+  local v; v=$(python3 -I $S/loc_ok.py $B/room_concept); echo "[$1] $v"
+  case "$v" in "loc OK"*) return 0;; *) return 1;; esac; }
+loc_gate start 60 || { echo "ABORT: localisation not good enough to start"; echo stop > $B/controller/remote_cmd.txt
+                      bash $S/run_crossing.sh crossing/$1 collect >/dev/null 2>&1; exit 1; }
 run_leg() {   # label cross_arg [close_arg]   (sets r: the crossing; c: the close)
   # THE LEG'S PLAN (user 2026-11-01): `cross X`, then — a healthy habit — `close <room just left>`: the plan claims
   # door_concept's close affordance of the door behind (mission op `close`). The leg is the CROSSING: r is OK once this leg's
@@ -124,6 +134,7 @@ echo "leg plan: ${ARGS[*]} (fixture remembers $(cat $FIX/room_name_hwm.txt) room
 ok=0; n_legs=${N_LEGS:-4}
 for leg in $(seq 1 $n_legs); do
   a=${ARGS[$((leg-1))]}; want=${WANT[$((leg-1))]}
+  loc_gate "before leg $leg" 30 || { echo "leg $leg NOT STARTED: localisation not good enough"; break; }
   T0=$(now_ms); ts=$(date +%s)
   run_leg $leg $a ${BEHIND[$((leg-1))]}; n=0
   # the next door AS SOON AS IT EXISTS: a door named by relation (room_X) that is not resolvable yet (its recall not posted)
