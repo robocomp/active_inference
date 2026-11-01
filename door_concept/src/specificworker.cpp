@@ -2470,7 +2470,12 @@ rc::door::InteractionState SpecificWorker::compute_interaction_state(const rc::D
                                                             0.5f * needed, sigma);
         st.corr_lateral_m = (robot - ap.centre_xy()).dot(ap.wall_u);
         st.corr_hinge_llr = cb.hinge_llr; st.corr_swing_llr = cb.swing_llr;
-        st.p_cross_exec = rc::door::cross_exec_prob(st.p_within, st.p_corridor_clear, st.p_open);
+        // ★ "AT THE DOOR" FOR A CROSS IS FACING THE OPENING, NOT THE ACTUATION BAND (2026-11-01, user: "the prob of going
+        //   through is too low even for really good starting positions"). p_within is P(range <= the actuation reach, 2.0 m):
+        //   the question for `open`/`close`, which ask a provider to move a leaf. warm10: facing the opening at 1-5 deg from
+        //   2.2-2.4 m it read 0.00-0.01 and P(cross executable) with it; farther away only takes longer to drive through.
+        //   What decides whether the run can be made from here is the opening's apparent span (P(facing)) and the leaf.
+        st.p_cross_exec = rc::door::cross_exec_prob(st.p_facing, st.p_corridor_clear, st.p_open);
         st.p_cross_exec_known = true;
     }
 
@@ -2748,7 +2753,7 @@ void SpecificWorker::step_pragmatic_affordances(rc::DoorInstance& inst)
         o.value    = pg.value_cross;
         o.contract = rc::door::cross_contract(pg);
         o.why      = std::format("P(passable)={:.2f} (log-odds {:+.1f}) — clear span {:.2f} m at phi={:.2f} rad vs {:.2f} m of body"
-                                 " × P(at the door)={:.2f} (P(facing) {:.2f} at {:.0f} deg; range {:.2f} m ≤ {:.2f}, σ {:.2f})"
+                                 " × P(at the door)={:.2f} [actuation band; the cross uses P(facing) {:.2f} at {:.0f} deg] (range {:.2f} m ≤ {:.2f}, σ {:.2f})"
                                  " × P(corridor clear of the leaf)={:.2f} (robot {:+.2f} m along the wall, hinge llr {:+.1f}, swing llr {:+.1f}) ⇒ P(cross executable)={:.2f} [pre: only; the offer is P(passable)]",
                                  st.p_open, st.p_open_logit, st.clear_width_m, st.phi_rad,
                                  pg.robot_passage_width_m + pg.passage_margin_m, st.p_within, st.p_facing, st.facing_deg,
