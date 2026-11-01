@@ -6950,6 +6950,18 @@ bool ControllerSession::consume_goal_reached(bool goal_reached, const Controller
             motion_commander.stop_robot();
             return true;
         }
+        // ★ ALREADY WAITING (warm17: with [Policy] on, the policy drive re-arrives every cycle and its arrival lands HERE, not in the
+        //   tracker's orient branch — the second arrival consumed the waiting close as Timeout). The wait runs here too.
+        if (active_target_id_ != 0 and reach_wait_target_ == active_target_id_ and last_target_info_.has_value())
+        {
+            if (step_orient(robot_pose, path_controller, obstacle_tracker, motion_commander, time_source,
+                            last_target_info_->yaw_rad))
+            {
+                reach_wait_target_ = 0;
+                finalize_reached(affordance_manager, path_controller, motion_commander, display, robot_pose.pos, time_source());
+            }
+            return true;
+        }
         // A Reach whose goal is the world's to bring about (it asks for stillness — `.still` — and its goal does not hold yet):
         // keep the claim and WAIT at the standpoint (the orient branch above, reach_wait_target_), instead of completing it
         // as Timeout on the spot (warm15: every close behind).
