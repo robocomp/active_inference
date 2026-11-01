@@ -86,8 +86,7 @@ New config `[WarmStart] Room = "room_1"` (absent = off). After loading the memor
 (robot_concept's, born before the others), ltsm posts **one** recall node for that room in the live graph, the same kind RoomRecall posts at a crossing:
 `recall_room_1`, `metaconcept`, `object_subtype "room_recall"`, `room_id` (1), the stored outline
 `delimiting_polygon_x/y` in the room's own frame, and a marker that it is a **start-up** recall (it hangs from the
-robot node, carries no door transform, and claims no pose). It also carries (a) the
-highest `room_id` the memory holds (for §5) and (b) room_1's remembered door faces as data (for §4). The outline is read
+robot node, carries no door transform, and claims no pose). The outline is read
 from the same memory attributes RoomRecall reads. ltsm keeps the node until room_concept has created the live `room_1`,
 then retires it (the RoomRecall rule "the room is live again"); if room_concept restarts before that, the node is simply
 still there. *(Builder-check answers, Claude's call.)*
@@ -103,24 +102,27 @@ be taken for the delivered one), then creates no room and estimates nothing; it 
    and no hint** (`last_robot_pose.txt` is ignored in this mode — Claude's call: the user wants the robot found, not
    told); if the search cannot decide, the pose is held as undecided and
    nothing downstream acts on it (existing `pose_undecided_` path);
-3. notes the room name as issued, and raises the name counter past the highest `room_id` the recall carries (§5);
+3. names the live room after the recall (`room_1`, room_id 1); the counter comes from the fixture's file (§5);
 4. from then on behaves exactly as a recalled room (crossings, hand-overs, recalls unchanged).
 While waiting it says so in its status; it never falls back to estimating or to an SVG.
 
 ### 4. room_1's doors in the working memory
 
-door_concept's door memory (`door_identities.csv`) only gives a RE-DETECTED door its old name back; it creates no node
-(builder check, `door_identity_table.h`, `door_core.cpp:892`). And CONCEPT_AGENT_LIFECYCLE.md: birth is the owning
-agent's. So the doors are **born by door_concept** from the start-up recall's door data (remembered face: pose in
-room_1's frame, width, its memory name), after its own start-up sweep and once the live `room_1` exists, as nodes of
-its own (`[Owns]`), then adopted into the normal life-cycle (`DoorFitter::ensure_instance`): in sight they gather
-evidence, out of sight they are left alone. (User's decision, 2026-11-01: option (a) — door_concept creates them; ltsm only carries
-the data.)
+**door_concept creates them** (user's option (a)), through the path it ALREADY has for a recalled room
+(`enter_room_memory` → `restore_remembered_doors`, `specificworker.cpp:3742-3860`): when door_concept has seen ltsm's
+`recall_<room>` for the room it enters, it restores that room's doors from its own remembered-door table
+(`door_identities.csv` rows WITH a pose), as door nodes of its own, then the normal life-cycle takes over. Two
+consequences (revised 2026-11-01 while planning, superseding the first draft):
+- the start-up recall carries **no door data**: the fixture includes door_concept's table from the same run
+  (pingpong41's ends with `room_1:door_1` at (-0.54, 4.61), yaw 3.13 — DOOR_1, matching ltsm's archive of that face);
+- door_concept's entry rule `recalled = announced and not first_resolution` (`door_identity_table.h:416`) gains one
+  exception: an announcement by a **start-up recall** counts on the first room too.
 
 ### 5. Names
 
-room_concept raises its name counter past the highest `room_id` carried by the start-up recall (Claude's call: derived
-from the memory itself rather than a counter file the tour must remember to install).
+The fixture includes room_concept's own counter file `etc/room_name_hwm.txt` (= 2 for the pingpong41 memory), installed
+by the tour. (Revised while planning: carrying the highest `room_id` on the recall would need a new DSR attribute and a
+cortex reinstall; the counter file needs nothing new.)
 
 ### 6. The tour
 
@@ -149,6 +151,6 @@ bridge advertises DOOR_2 and, if not, flags it as a separate Webots-side item.
 - The robot node is robot_concept's and exists first; ltsm posts the start-up recall after it and keeps it until room_1 is live.
 - room_concept still sweeps stale room nodes before waiting.
 - Global relocalisation room-wide, no pose hint; `last_robot_pose.txt` ignored in this mode.
-- The name counter comes from the highest `room_id` in the recall, not from a fixture file.
+- (Revised) The name counter comes from the fixture's `room_name_hwm.txt`; doors from door_concept's own table.
 - The fixture is copied into ltsm's `history_dir`, never used in place.
 - Acceptance tolerance 0.10 m / 3°.
