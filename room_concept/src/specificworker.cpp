@@ -137,7 +137,7 @@ void SpecificWorker::compute()
         if (t - ltsm_wait_logged_ >= std::chrono::seconds(10))
         {
             ltsm_wait_logged_ = t;
-            qInfo().noquote() << QString("[room] MapMode=ltsm: still waiting for ltsm's start-up recall (%1 s)")
+            qWarning().noquote() << QString("[room] MapMode=ltsm: still waiting for ltsm's start-up recall (%1 s)")
                                      .arg(std::chrono::duration_cast<std::chrono::seconds>(t - ltsm_wait_since_).count());
         }
     }
@@ -570,7 +570,7 @@ bool SpecificWorker::initialize_room_model_from_recall()
         room_initialized_from_svg_polygon_ = true;
         room_concept_.set_awaiting_layout(false);
         rc::StatusReporter::loaded("layout", n.name(), std::format("{} vertices from ltsm's start-up recall, stored frame", poly->size()));
-        qInfo().noquote() << QString("[room] MapMode=ltsm: layout of '%1' (room_id %2, %3 vertices) from ltsm's start-up recall — localising")
+        qWarning().noquote() << QString("[room] MapMode=ltsm: layout of '%1' (room_id %2, %3 vertices) from ltsm's start-up recall — localising")
                                  .arg(QString::fromStdString(room))
                                  .arg(G->get_attrib_by_name<room_id_att>(n).value_or(0))
                                  .arg(poly->size());

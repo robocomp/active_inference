@@ -406,7 +406,7 @@ void SpecificWorker::initialize()
         room_concept_.set_awaiting_layout(true);
         ltsm_wait_since_ = std::chrono::steady_clock::now();
         rc::StatusReporter::loaded("layout", "", "RoomShape.MapMode = ltsm: waiting for ltsm's start-up recall");
-        qInfo() << "[room] RoomShape.MapMode = ltsm: waiting for ltsm's start-up recall of the starting room";
+        qWarning() << "[room] RoomShape.MapMode = ltsm: waiting for ltsm's start-up recall of the starting room";
     }
     else
         initialize_room_model_from_svg();
