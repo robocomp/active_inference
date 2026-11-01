@@ -45,7 +45,15 @@ namespace rc
         std::vector<double> log_post;
         int top_idx = 0, keep_idx = -1;
         bool keep_travelled = false;
-        const double pl = std::clamp(static_cast<double>(pending_episode_p_lost_), 1e-9, 1.0 - 1e-9);
+        // ★ PRIOR WEIGHT OF "ANYWHERE IN THE ROOM" = THE KIDNAP RATE, NOT P(LOST) (2026-11-01). P(lost) sits at ~0.50
+        //   whenever the scan fits a little worse (LOST and MISMATCH share an emission), and with it as the weight a
+        //   90-180 deg twin paid ~5 nats against a pose the tracker still held to a few cm — live warm28: a hand push
+        //   gave 0.56 m/89 deg, then 1.49 m, 1.36 m, 3.87 m/180 deg. A pose far from the tracked one is a KIDNAP
+        //   hypothesis and costs what a kidnap is believed to cost (RelocHazard, the same rate as the HMM and the SPRT);
+        //   a tracker that really diverged is admitted through its own covariance (S_inc), and a real kidnap through
+        //   the likelihood, which a wrong incumbent loses by far more than ln(1/h). Interim, ahead of the redesign
+        //   (docs/superpowers/specs/2026-11-01-relocaliser-redesign.md), whose prior this is.
+        const double pl = std::clamp(static_cast<double>(params.reloc_hazard), 1e-9, 0.25);
         double area2 = 0.0;
         for (std::size_t i = 0, j = poly.size() - 1; i < poly.size(); j = i++)
             area2 += static_cast<double>(poly[j].x()) * poly[i].y() - static_cast<double>(poly[i].x()) * poly[j].y();
