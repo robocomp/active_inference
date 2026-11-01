@@ -1472,6 +1472,23 @@ int main()
         }
     }
 
+    // pingpong35 leg 2: door_2 carried phi 90 from the crossing; seen from room_2 at > 1.2 m (P(door in view) low) its frames
+    // said phi 0 and, counted equally, published 49 deg. Seeded with the belief and weighted by visibility, it stays at 90.
+    std::print("leaf_running_seeded_and_weighted\n");
+    {
+        rc::door::LeafRunning run;
+        run.seed(float(M_PI_2));
+        for (int k = 0; k < 20; ++k) run.add(0.f, 1.f, 1.f, 0.05f);                                   // far: sees little
+        for (int k = 0; k < 5; ++k) run.add(float(M_PI_2) + 0.02f * float(k - 2), 1.f, 1.f, 0.9f);    // near: sees the leaf
+        const float phi = run.phi() * 57.2958f;
+        std::print("    published phi {:.1f} deg (sigma {:.1f})\n", phi, run.sigma(0.25f) * 57.2958f);
+        check(std::abs(phi - 90.f) < 20.f, "seeded at the belief and weighted by visibility, the published leaf stays near 90 deg");
+        rc::door::LeafRunning eq;   // the old behaviour, for contrast: unseeded, equal weights
+        for (int k = 0; k < 20; ++k) eq.add(0.f, 1.f, 1.f);
+        for (int k = 0; k < 5; ++k) eq.add(float(M_PI_2), 1.f, 1.f);
+        std::print("    (unseeded, equal weights: {:.1f} deg)\n", eq.phi() * 57.2958f);
+    }
+
     std::print("{}\n", g_fail == 0 ? "ALL PASS" : std::format("{} FAILED", g_fail));
     return g_fail == 0 ? 0 : 1;
 }

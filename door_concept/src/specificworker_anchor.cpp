@@ -993,7 +993,20 @@ void SpecificWorker::step_passage_anchor()
         post.stamp_ms = now;
         pa.pose = post;
         ev = e;
-        if (e.leaf_post) pa.leaf_run.add(e.leaf_phi, e.leaf_p_hinge, e.leaf_p_swing);
+        if (e.leaf_post)
+        {
+            // The running estimate starts at door_concept's belief (the leaf carried from the crossing). A frame updates it
+            // only when the leaf swings to the ROBOT's side of the plane. A leaf on the far side cannot block the approach and
+            // the robot's sensors do not resolve it from here: pingpong35 leg 2, door_2's frames (P(door in view) ~0.92) said
+            // phi ~0 for a leaf open 90 deg on the far side, the published leaf crept to 49 +- 47 deg across the opening and
+            // the servo stopped. ⚑ A modelling simplification (the far-side leaf is unobserved), not a fit; why the far-side
+            // frames read 0 is still open.
+            if (inst != nullptr and inst->ai2_initialized) pa.leaf_run.seed(inst->phi_est);
+            // the robot's side of the plane: its origin along the anchor's normal n = (-sin yaw, cos yaw) (< 0: the near side)
+            const float s_robot = std::sin(prior_pose.x.z()) * prior_pose.x.x() - std::cos(prior_pose.x.z()) * prior_pose.x.y();
+            if (leaf.known and leaf.swing_y * s_robot > 0.f)
+                pa.leaf_run.add(e.leaf_phi, e.leaf_p_hinge, e.leaf_p_swing, e.p_view);
+        }
     }
     // ── Task 8 fix 1 (fix round 1): the last mask frame is HELD within the controller's staleness window ───────────
     //    A new frame replaces it (no door slice ⇒ no points: the camera looked and saw none). Its camera term is

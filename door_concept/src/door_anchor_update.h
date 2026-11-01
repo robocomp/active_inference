@@ -196,23 +196,31 @@ struct AnchorEvidence
 //     swing belief, the frames' flip when the leaf is seen through the opening — pingpong33 leg 2).
 struct LeafRunning
 {
+    // 2026-11-01 (pingpong35 leg 2): the mean STARTS at door_concept's own belief (seed: the leaf carried from the crossing,
+    // phi 90) as one pseudo-observation, and each frame counts by how much of the door it SEES (its P(door in view)): from
+    // room_2 at > 1.2 m the bpearl dome reaches the floor before the opening, those frames' phi said 0 and, counted like the
+    // rest, they published a 49 +- 47 deg leaf across the opening (P(fit) collapsed, the servo stopped).
+    double w_sum = 0.0, mean = 0.0, m2 = 0.0, p_hinge_sum = 0.0, p_swing_sum = 0.0;
     int n = 0;
-    double mean = 0.0, m2 = 0.0, p_hinge_sum = 0.0, p_swing_sum = 0.0;
     void reset() { *this = LeafRunning{}; }
-    void add(float phi, float p_hinge, float p_swing)
+    void seed(float phi) { if (n == 0 and w_sum == 0.0) { w_sum = 1.0; mean = double(phi); } }   // the belief: one observation
+    void add(float phi, float p_hinge, float p_swing, float weight = 1.f)
     {
+        const double w = std::clamp(double(weight), 0.0, 1.0);
+        if (not (w > 0.0)) return;
         ++n;
+        w_sum += w;
         const double d = double(phi) - mean;
-        mean += d / double(n);
-        m2 += d * (double(phi) - mean);
+        mean += w * d / w_sum;
+        m2 += w * d * (double(phi) - mean);
         p_hinge_sum += p_hinge; p_swing_sum += p_swing;
     }
-    [[nodiscard]] bool valid() const { return n > 0; }
+    [[nodiscard]] bool valid() const { return w_sum > 0.0; }
     [[nodiscard]] float phi() const { return float(mean); }
     [[nodiscard]] float sigma(float sigma_prior) const
     {
         const double nu0 = 1.0, s0 = double(std::max(0.f, sigma_prior));
-        return float(std::sqrt((m2 + nu0 * s0 * s0) / (double(n) + nu0)));
+        return float(std::sqrt((m2 + nu0 * s0 * s0) / (w_sum + nu0)));
     }
     [[nodiscard]] float p_hinge() const { return n > 0 ? float(p_hinge_sum / n) : 0.5f; }
     [[nodiscard]] float p_swing() const { return n > 0 ? float(p_swing_sum / n) : 0.5f; }
