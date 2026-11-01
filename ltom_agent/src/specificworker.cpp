@@ -4,6 +4,9 @@
 
 #include "../../common/config_report/config_read.h"   // rc::cfg::Reader (SHARED)
 #include "graph_sightings.h"
+#include "recall_select.h"
+#include "../../common/room_resolve/room_resolve.h"
+#include "../../common/owned_nodes/owned_nodes.h"
 #include "repertory_io.h"
 
 #include <QCoreApplication>
@@ -14,6 +17,7 @@
 #include <cstdlib>   // std::_Exit -- crash-free terminal shutdown
 #include <iostream>
 #include <print>
+#include <utility>
 #include <thread>
 
 #include <dsr/api/dsr_api.h>
@@ -121,7 +125,12 @@ void SpecificWorker::initialize()
     });
     presence_coordinator_.set_lifecycle_hooks({
         .on_waiting_enter   = []() { qInfo("[SM] -> Waiting"); },
-        .on_operating_enter = [this]() { operating_ = true; qInfo("[SM] -> Operating"); },
+        .on_operating_enter = [this]()
+        {
+            operating_ = true;
+            qInfo("[SM] -> Operating");
+            if (not std::exchange(recall_swept_on_operating_, true)) sweep_stale_recalls();
+        },
         .on_operating_loop  = [this]() { compute(); },
         .on_degraded_enter  = [this]()
         {
@@ -154,6 +163,8 @@ void SpecificWorker::initialize()
     params_.csv_path       = r.s("LTOM.csv_path", "etc/ltom_repertory.csv", "repertory CSV for inspection");
     params_.classes        = r.v<std::string>("LTOM.classes", {"chair", "table", "bottle", "cabinet", "refrigerator"},
             "object classes in scope (name prefix <class>_ and an object_uid)");
+    params_.recall_classes = r.v<std::string>("LTOM.recall_classes", {"chair"},
+            "classes whose remembered, absent members are offered as ltom_recall_<uid> nodes in the current room");
     std::println("[ltom] config: owner grace {} ms, save {} s, {} class(es), repertory {}",
                  params_.owner_grace_ms, params_.save_period_s, params_.classes.size(),
                  params_.repertory_path);
@@ -168,6 +179,8 @@ void SpecificWorker::initialize()
                     : res == ltom::LoadResult::missing ? "no file, starting empty"
                     : res == ltom::LoadResult::blocked ? "BAD FILE NOT MOVED ASIDE, saving disabled" : "UNREADABLE, starting empty";
     std::println("[ltom] repertory {}: {} ({} entries)", params_.repertory_path, how, repertory_->entries().size());
+    recall_pub_ = std::make_unique<ltom::RecallPublisher>(G);
+    sweep_stale_recalls();   // may run before leaked nodes finish syncing; the first Operating entry sweeps again
     inner_eigen_ = G->get_inner_eigen_api();   // once, on the main thread, after the graph is up
 
     rc::cfg::exempt_generated_prefixes();
@@ -207,8 +220,27 @@ void SpecificWorker::compute()
     log("died", ch.died);
     log("owner_exit", ch.owner_exited);
 
+    // Recall nodes: the remembered, absent members of the offered classes, in the room the robot is in now.
+    if (recall_pub_)
+    {
+        const auto room = rc::room::current_room(*G);
+        const auto room_node = room ? G->get_node(*room) : std::nullopt;
+        const auto key = room_node ? ltom::room_key_of(*G, *room_node) : std::nullopt;
+        if (key)
+            recall_pub_->sync(room, ltom::select_recalls(*repertory_, *key, view.present, params_.recall_classes));
+        else
+            recall_pub_->sync(std::nullopt, {});
+    }
+
     if (repertory_->dirty() and std::chrono::steady_clock::now() - last_save_ >= std::chrono::seconds(params_.save_period_s))
         save_now("period");
+}
+
+// A crashed or SIGKILLed previous run leaves its recall nodes behind (CLAUDE.md "Startup stale-sweep").
+void SpecificWorker::sweep_stale_recalls()
+{
+    const rc::owned::Spec spec{.agent = "ltom_agent", .name_prefix = "ltom_recall_", .node_types = {"metaconcept"}};
+    rc::owned::remove_instance_nodes(*G, spec);
 }
 
 void SpecificWorker::emergency() {}

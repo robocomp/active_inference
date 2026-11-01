@@ -40,8 +40,8 @@ stale_grace_ms = 120000
 agent_info_period_ms = 1000
 
 [Owns]
-# Only the presence agent node on the live graph. ltom never writes an object node.
-nodes = ["ltom_agent 28"]
+# The presence agent node and the recall nodes (metaconcept ltom_recall_<uid>). ltom never writes an object node.
+nodes = ["ltom_agent 28", "ltom_recall_*"]
 
 [Period]
 # Compute = the poll period of the live graph (ms): compute() runs once per Operating step. Single source of truth.
@@ -66,3 +66,5 @@ repertory_path  = "etc/ltom_repertory.json"
 csv_path        = "etc/ltom_repertory.csv"
 # Object classes in scope (name prefix "<class>_" and an object_uid). Doors are excluded.
 classes         = ["chair", "table", "bottle", "cabinet", "refrigerator"]
+# Classes whose remembered members that are absent from the graph are offered as recall nodes in the current room.
+recall_classes  = ["chair"]

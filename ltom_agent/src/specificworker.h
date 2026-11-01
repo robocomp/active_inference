@@ -17,6 +17,7 @@
 #include "../../common/agent_presence_coordinator/agent_presence_coordinator.h"
 
 #include "repertory.h"
+#include "recall_publisher.h"
 
 #include <atomic>
 #include <chrono>
@@ -59,6 +60,7 @@ private:
         std::string repertory_path = "etc/ltom_repertory.json";
         std::string csv_path = "etc/ltom_repertory.csv";
         std::vector<std::string> classes;
+        std::vector<std::string> recall_classes;   // classes whose remembered, absent members are offered as recall nodes
     };
     Params params_;
 
@@ -66,6 +68,9 @@ private:
     void save_now(const char* why);
     std::unique_ptr<ltom::Repertory> repertory_;
     std::unique_ptr<DSR::InnerEigenAPI> inner_eigen_;   // created ONCE in initialize(), on the main thread (owns the ts==0 cache)
+    std::unique_ptr<ltom::RecallPublisher> recall_pub_;
+    bool recall_swept_on_operating_ = false;            // the post-sync stale sweep runs once, on the first Operating entry
+    void sweep_stale_recalls();
     bool save_blocked_ = false;                         // load could not move a bad file aside: never save over the good copy
     bool operating_ = false;                            // compute() polls only while the presence SM is Operating
     std::chrono::steady_clock::time_point last_save_{std::chrono::steady_clock::now()};

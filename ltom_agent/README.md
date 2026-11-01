@@ -26,3 +26,18 @@ because its owner agent was gone or Degraded, not a death; an instance still on 
 - Run from this directory: `bin/ltom_agent etc/config.toml`. Stop with SIGTERM / Ctrl-C, never `kill -9`.
 - Smoke test without touching the live graph: copy the config with `domain = 64` (not committed), plus a seed peer on
   the same domain (the same binary with `configFile = "../robot_concept/shadow.json"`, another id/name).
+
+## Recall nodes (step 3)
+
+While Operating, each poll `ltom_agent` offers the remembered objects that are missing from the room the robot is in
+(`rc::room::current_room`) as **recall nodes**: candidates for a concept agent to resurrect; ltom never decides identity.
+- Shape: node type `metaconcept`, name `ltom_recall_<uid decimal>`, attributes `object_uid` and `object_subtype` (the
+  class) plus `parent`/`level`; no size attributes (viewers would draw it as a body). RT edge from the room at the last
+  keyframe's x, y, yaw (z = 0), `rt_covariance` from the keyframe variances (z 1e-4, roll/pitch the floor prior; unused by consumers).
+- Appears when: class in `[LTOM] recall_classes` (default `["chair"]`), the entry's last life is not alive, its last
+  keyframe is in the current room (room key = `room_id` attribute, else trailing digits of the name) and its uid is not on
+  the graph. A changed keyframe moves the same node (RT pose rewritten, no re-insert).
+- Disappears when any of that stops holding (uid alive again, robot in another room, no current room, class unlisted),
+  on graceful exit (`[Owns]` has `ltom_recall_*`), and at startup / first Operating entry (stale sweep of `metaconcept`
+  nodes named `ltom_recall_*` left by a crashed run). Other nodes are never touched.
+- Test: `tests/test_recall_publisher` (DSR domain 63).

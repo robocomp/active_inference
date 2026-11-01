@@ -15,6 +15,8 @@ LIST(APPEND SOURCES
   ../src/repertory.cpp
   ../src/repertory_io.cpp
   ../src/graph_sightings.cpp
+  ../src/recall_select.cpp
+  ../src/recall_publisher.cpp
 )
 
 # Headers set
@@ -23,6 +25,8 @@ LIST(APPEND HEADERS
   ../src/repertory.h
   ../src/repertory_io.h
   ../src/graph_sightings.h
+  ../src/recall_select.h
+  ../src/recall_publisher.h
 )
 
 LIST(APPEND LIBS ${LIBS})

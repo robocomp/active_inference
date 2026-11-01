@@ -11,8 +11,6 @@
 
 namespace ltom
 {
-namespace
-{
 // ltsm_agent's room_index() rule: the room_id attribute, else the trailing digits of the name.
 std::optional<std::int64_t> room_key_of(DSR::DSRGraph& G, const DSR::Node& room)
 {
@@ -27,6 +25,8 @@ std::optional<std::int64_t> room_key_of(DSR::DSRGraph& G, const DSR::Node& room)
     return std::nullopt;
 }
 
+namespace
+{
 // The first ancestor of type room (bounded walk: a malformed parent loop must not hang the agent).
 std::optional<DSR::Node> room_of(DSR::DSRGraph& G, const DSR::Node& n)
 {

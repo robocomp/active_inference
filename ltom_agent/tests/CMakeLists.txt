@@ -36,3 +36,11 @@ set_target_properties(test_graph_sightings PROPERTIES CXX_STANDARD 23 CXX_STANDA
 
 add_executable(test_recall_select test_recall_select.cpp ../src/recall_select.cpp ../src/repertory.cpp)
 set_target_properties(test_recall_select PROPERTIES CXX_STANDARD 23 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
+
+add_executable(test_recall_publisher test_recall_publisher.cpp ../src/recall_publisher.cpp ../src/recall_select.cpp ../src/repertory.cpp)
+target_compile_definitions(test_recall_publisher PRIVATE LTOM_ROOT_JSON="${CMAKE_CURRENT_LIST_DIR}/ltom_root.json")
+target_include_directories(test_recall_publisher PRIVATE ../../common $ENV{ROBOCOMP}/classes)
+target_link_libraries(test_recall_publisher
+  ${LIBS} dsr_core dsr_gui dsr_api fastcdr fastdds osgDB OpenThreads Eigen3::Eigen QGLViewer-qt6 Qt6OpenGLWidgets
+  ${STATIC_LIBS} ${SPECIFIC_LIBS} ${QT_LIBRARIES} ${Ice_LIBRARIES})
+set_target_properties(test_recall_publisher PROPERTIES CXX_STANDARD 23 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)

@@ -9,8 +9,9 @@ void SpecificWorker::operating_loop()  { presence_coordinator_.operating_loop();
 void SpecificWorker::degraded_enter()  { presence_coordinator_.degraded_enter(); }
 void SpecificWorker::degraded_loop()   { presence_coordinator_.degraded_loop(); }
 
-// [Owns] = ["ltom_agent 28"]: ltom owns only its agent node (no instance prefix, no affordances), so the shared
-// coordinator's [Owns] deletion is the whole cleanup (it stops the monitor first); rc::owned::Spec has nothing to sweep.
+// [Owns] = ["ltom_agent 28", "ltom_recall_*"]: the agent node plus the recall nodes (trailing * = name prefix), so the
+// shared coordinator's [Owns] deletion is the whole graceful cleanup (it stops the monitor first). The crash-recovery
+// sweep of ltom_recall_* is sweep_stale_recalls() in specificworker.cpp.
 void SpecificWorker::cleanup_owned_nodes()
 {
     if (owned_nodes_cleaned_)
