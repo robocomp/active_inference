@@ -49,9 +49,12 @@ inline std::uint64_t make_uid(std::uint32_t agent_id, int n)
 
 namespace detail
 {
-// The whole of `s` must be a non-negative integer; "5b", "7,0", "" and "-3" are not.
+// The whole of `s`, after trimming spaces/tabs/CR at either end, must be a non-negative integer; "5b", "7,0", "" and
+// "-3" are not. Trimming matters: a CRLF file or a hand edit with a trailing space is not corruption.
 inline bool parse_count(std::string_view s, int& out)
 {
+    while (not s.empty() and (s.front() == ' ' or s.front() == '\t' or s.front() == '\r')) s.remove_prefix(1);
+    while (not s.empty() and (s.back() == ' ' or s.back() == '\t' or s.back() == '\r')) s.remove_suffix(1);
     if (s.empty()) return false;
     int v = 0;
     const auto [p, ec] = std::from_chars(s.data(), s.data() + s.size(), v);
@@ -115,14 +118,16 @@ private:
             if (key == "agent_id") have_agent = detail::parse_count(val, agent);
             else if (key == "last") have_last = detail::parse_count(val, last);
         }
+        // A readable `last` is kept even when the rest is damaged: under max(...) a real counter can never be wrong,
+        // and dropping it would let the live graph re-issue every dead instance's number.
+        if (have_last) last_ = last;
         if (not have_agent or not have_last)
         {
             status_ = LoadStatus::corrupt;
-            std::println(stderr, "[identity] {}: corrupt ({}) — numbering continues from the live graph",
-                         file_.string(), not have_agent ? "no readable agent_id" : "no readable last");
+            std::println(stderr, "[identity] ⚠ {}: corrupt ({}) — numbering continues from max(live graph, {})",
+                         file_.string(), not have_agent ? "no readable agent_id" : "no readable last", last_);
             return;
         }
-        last_ = last;
         if (static_cast<std::uint32_t>(agent) != agent_id_)
         {
             status_ = LoadStatus::agent_mismatch;

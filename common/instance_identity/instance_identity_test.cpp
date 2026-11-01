@@ -109,6 +109,25 @@ static void test_corrupt_file()
     }
 }
 
+static void test_readable_last_survives_bad_agent_line()   // review finding 1: never drop a readable counter
+{
+    const auto f = fresh_dir() / "id.csv";
+    write_file(f, "agent_idX 20\nlast 40\n");
+    auto c = InstanceCounter::open(f, 20);
+    CHECK(c.status() == LoadStatus::corrupt);
+    CHECK(c.last() == 40);
+    CHECK(c.issue(3) == 41);
+}
+
+static void test_trailing_whitespace_and_crlf()   // review finding 2: a hand edit or CRLF is not corruption
+{
+    const auto f = fresh_dir() / "id.csv";
+    write_file(f, "agent_id 20\r\nlast 40 \r\n");
+    auto c = InstanceCounter::open(f, 20);
+    CHECK(c.status() == LoadStatus::ok);
+    CHECK(c.issue(0) == 41);
+}
+
 static void test_agent_mismatch_keeps_max()
 {
     const auto f = fresh_dir() / "id.csv";
@@ -163,6 +182,8 @@ int main()
     test_live_max_wins();
     test_file_wins_over_live();
     test_corrupt_file();
+    test_readable_last_survives_bad_agent_line();
+    test_trailing_whitespace_and_crlf();
     test_agent_mismatch_keeps_max();
     test_two_issues_consecutive();
     test_make_uid();
