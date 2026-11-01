@@ -217,6 +217,28 @@ int main()
         assert(near(*answer_fit_between(sh, "chair_1", "wall").p, 1.0f));
         // an ignored referent still reports the footprint clearance
         assert(up.text.contains("55 cm") and near(up.slack_m, 0.55f - 0.62f, 1e-3f));
+        // move away by a distance (the person's phrasing): chair at 4.25, wall at x = 5, gap 0.55
+        const auto away = with_object_moved_away(f, "chair_1", "wall", 0.2f);
+        assert(away.has_value() and near(away->scene.objects[0].x, 4.05f, 1e-3f) and near(away->scene.objects[0].y, 0.f, 1e-3f));
+        assert(away->notes.back() == "imagined: chair_1 moved 20 cm away from the wall");
+        assert(*answer_fit_between(*away, "chair_1", "wall").p > *lo.p);
+        const auto toward = with_object_moved_away(f, "chair_1", "wall", -0.1f);
+        assert(answer_fit_between(*toward, "chair_1", "wall").slack_m < lo.slack_m and *answer_fit_between(*toward, "chair_1", "wall").p <= *lo.p and toward->notes.back().contains("toward the wall"));
+        // the direction is right for a wall on the other side
+        ImaginedWorld wl = f; wl.scene.objects[0].x = -4.25f;
+        const auto awl = with_object_moved_away(wl, "chair_1", "wall", 0.2f);
+        assert(awl.has_value() and near(awl->scene.objects[0].x, -4.05f, 1e-3f));
+        assert(*answer_fit_between(*awl, "chair_1", "wall").p > *answer_fit_between(wl, "chair_1", "wall").p);
+        ImaginedWorld wt = f; wt.scene.objects[0].x = 0.f; wt.scene.objects[0].y = 4.25f;   // top wall
+        assert(near(with_object_moved_away(wt, "chair_1", "wall", 0.2f)->scene.objects[0].y, 4.05f, 1e-3f));
+        // away from another object
+        SeeObject tb; tb.name = "table_1"; tb.subtype = "table"; tb.x = 3.0f; tb.y = 0; tb.w = 0.4f; tb.d = 0.4f; tb.h = 0.7f;
+        ImaginedWorld tw2 = f; tw2.scene.objects.push_back(tb);
+        assert(near(with_object_moved_away(tw2, "chair_1", "table_1", 0.3f)->scene.objects[0].x, 4.55f, 1e-3f));
+        assert(not with_object_moved_away(f, "sofa", "wall", 0.2f).has_value() and not with_object_moved_away(f, "chair_1", "sofa", 0.2f).has_value());
+        // distance words
+        assert(near(*parse_distance_m("20 cm"), 0.2f) and near(*parse_distance_m("0.2"), 0.2f) and near(*parse_distance_m("-10cm"), -0.1f));
+        assert(near(*parse_distance_m("0.5 m"), 0.5f) and near(*parse_distance_m("50 mm"), 0.05f) and not parse_distance_m("far").has_value());
         // unknown size (no w, no d): no judgement
         ImaginedWorld us = f; us.scene.objects[0].w.reset(); us.scene.objects[0].d.reset(); us.scene.objects[0].h.reset();
         us.scene.objects[0].x = 4.2f; us.robot_sigma_m = 0.05f;

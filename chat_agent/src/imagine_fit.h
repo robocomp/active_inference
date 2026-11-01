@@ -249,6 +249,61 @@ inline std::vector<Pt> box_corners(float x, float y, float yaw, float w, float d
 }
 }   // namespace fit_detail
 
+/// "if the chair were moved 20 cm away from the wall": the object shifts along the line from the OTHER referent's closest
+/// point (the nearest wall segment for "wall", else the other object's footprint) to the object's centre; distance > 0 is
+/// AWAY from it, < 0 toward it. The actual shift is with_object_moved.
+[[nodiscard]] inline Intervened with_object_moved_away(ImaginedWorld w, std::string_view object, std::string_view other, float distance_m)
+{
+    using namespace fit_detail;
+    const std::string key = norm_name(object);
+    const auto it = std::ranges::find_if(w.scene.objects, [&](const SeeObject& o) { return norm_name(o.name) == key; });
+    if (it == w.scene.objects.end()) return std::unexpected(std::format("I don't know an object called {}", object));
+    const Pt c(it->x, it->y);
+    std::vector<std::pair<Pt, Pt>> edges;
+    std::string other_name;
+    const std::string on = norm_name(other);
+    if (on == "wall" or on == "pared" or on.empty())
+    {
+        other_name = "the wall";
+        const auto& poly = w.scene.polygon;
+        if (poly.size() < 2) return std::unexpected("I have no room outline, so I cannot place the wall");
+        for (std::size_t i = 0; i < poly.size(); ++i) edges.emplace_back(poly[i], poly[(i + 1) % poly.size()]);
+    }
+    else
+    {
+        const SeeObject* pick = nullptr;
+        for (const auto& o : w.scene.objects) if (norm_name(o.name) == on) { pick = &o; break; }
+        if (pick == nullptr)
+        {
+            const std::string cls = canonical_concept(on);
+            std::vector<const SeeObject*> same;
+            for (const auto& o : w.scene.objects) if (lower_ascii(o.subtype) == cls and &o != &*it) same.push_back(&o);
+            if (same.size() == 1) pick = same.front();
+        }
+        if (pick == nullptr) return std::unexpected(std::format("I don't know an object called {}", other));
+        other_name = pick->name;
+        edges = edges_of(box_corners(pick->x, pick->y, pick->yaw, pick->w.value_or(0.f), pick->d.value_or(0.f)));
+    }
+    Pt best_pt = c;
+    float best = std::numeric_limits<float>::infinity();
+    for (const auto& [a, b] : edges)
+    {
+        const Pt ab = b - a;
+        const float L2 = ab.squaredNorm();
+        const float t = L2 > 0.f ? std::clamp((c - a).dot(ab) / L2, 0.f, 1.f) : 0.f;
+        const Pt p = a + t * ab;
+        if ((c - p).norm() < best) { best = (c - p).norm(); best_pt = p; }
+    }
+    if (not (best > 1e-6f)) return std::unexpected(std::format("{} is on {}, so there is no side to move it away to", it->name, other_name));
+    const Pt dir = (c - best_pt) / best;
+    const std::string name = it->name;
+    auto r = with_object_moved(std::move(w), name, dir.x() * distance_m, dir.y() * distance_m);
+    if (not r.has_value()) return r;
+    r->notes.back() = std::format("imagined: {} moved {:.0f} cm {} {}", name, std::abs(distance_m) * 100.f,
+                                  distance_m >= 0.f ? "away from" : "toward", other_name);
+    return r;
+}
+
 [[nodiscard]] inline FitAnswer answer_fit_between(const ImaginedWorld& w, std::string_view a_name, std::string_view b_name)
 {
     using namespace fit_detail;

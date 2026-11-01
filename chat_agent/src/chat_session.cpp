@@ -665,8 +665,9 @@ QJsonArray ChatSession::tools_json() const
         "(\u00bfcabr\u00eda?, \u00bfsi estuviera ...?). It works on an imagined COPY of what the robot knows; it never moves "
         "the robot and the imagined state is never written to the graph. question=fit: would the robot's body fit through a "
         "door (door, and opening = shut | ajar | half | wide | as_is or degrees) or between two named things (between = "
-        "[a, b]); `move` + `dx`, `dy` (metres) imagines that object moved first. question=see: would it see `target` (a name or class), `from` a place (pass a NAME: a door, room or "
-        "object, empty = here), optionally if `door` were `opening` or `move` moved. question=succeed: how likely is a trip from `from` "
+        "[a, b]); or `move` an object by `distance` (\"20 cm\", positive = away from the other thing, `target`, default the wall) "
+        "and ask whether the body fits then. question=see: would it see `target` (a name or class), `from` a place (pass a NAME: a door, room or "
+        "object, empty = here), optionally if `door` were `opening`. question=succeed: how likely is a trip from `from` "
         "(a room NAME) to `to` (a room), optionally going `via` a named door instead. Not for what is true now (can_see, "
         "route_to, where_is) nor to go anywhere (plan_mission).",
         QJsonObject{{"question", QJsonObject{{"type", "string"}, {"enum", QJsonArray{"fit", "see", "succeed"}},
@@ -676,7 +677,7 @@ QJsonArray ChatSession::tools_json() const
                     {"opening", QJsonObject{{"type", "string"},
                                             {"description", "shut | ajar | half | wide | as_is, or degrees (\"30\")"}}},
                     {"via", QJsonObject{{"type", "string"}, {"description", "succeed: the door to go through instead"}}},
-                    {"target", QJsonObject{{"type", "string"}, {"description", "see: what to look at, a name (fridge_1) or a class"}}},
+                    {"target", QJsonObject{{"type", "string"}, {"description", "see: what to look at, a name (fridge_1) or a class; fit with move: the other thing (default the wall)"}}},
                     {"from", QJsonObject{{"type", "string"},
                                          {"description", "a NAME: the place to look or start from (door_1, room_1, chair_1); "
                                                          "empty = here"}}},
@@ -684,9 +685,10 @@ QJsonArray ChatSession::tools_json() const
                     {"between", QJsonObject{{"type", "array"}, {"items", QJsonObject{{"type", "string"}}},
                                             {"description", "fit: exactly two names (two objects, or an object and a wall)"}}},
                     {"move", QJsonObject{{"type", "string"},
-                                         {"description", "fit (between) or see: an object name to imagine moved first, by dx, dy"}}},
-                    {"dx", QJsonObject{{"type", "number"}, {"description", "move: metres along the room x axis (a number)"}}},
-                    {"dy", QJsonObject{{"type", "number"}, {"description", "move: metres along the room y axis (a number)"}}}},
+                                         {"description", "fit: an object name to imagine moved first, by `distance` away from the other thing"}}},
+                    {"distance", QJsonObject{{"type", "string"},
+                                             {"description", "move: metres, signed, positive = AWAY from the other thing "
+                                                             "(the `target`, default the wall); a number or \"20 cm\""}}}},
         QJsonArray{"question"}));
     tools.append(tool_def("imagine_view",
         "Show how the robot IMAGINES a kind of thing (a chair, a table...) looks to its own sensors: draws several "
@@ -1265,39 +1267,38 @@ QString ChatSession::do_imagine(const QJsonObject& args)
     w.em_available = st.has_value();
     if (st.has_value()) w.records = st->today;
 
-    // A deliberate move of one object (fit-between, see): dx, dy in metres, room frame; numbers or strings.
-    const auto num = [&](const char* k) -> std::expected<float, std::string>
-    {
-        const auto v = args.value(k);
-        if (v.isUndefined() or v.isNull()) return 0.f;
-        if (v.isDouble()) return static_cast<float>(v.toDouble());
-        const std::string t = v.toString().trimmed().toStdString();
-        if (t.empty()) return 0.f;
-        float x = 0;
-        const auto [p, ec] = std::from_chars(t.data(), t.data() + t.size(), x);
-        if (ec != std::errc{} or p != t.data() + t.size() or not std::isfinite(x))
-            return std::unexpected(std::format("REJECTED: {} must be a number of metres, not '{}'", k, t));
-        return x;
-    };
-    if (const std::string mv = str("move"); not mv.empty() and question != "succeed")
-    {
-        const auto dx = num("dx"), dy = num("dy");
-        if (not dx.has_value()) return q(dx.error());
-        if (not dy.has_value()) return q(dy.error());
-        if (w.scene.room.empty()) return QStringLiteral("I do not know which room I am in, so I cannot move anything in it.");
-        auto moved = im::with_object_moved(std::move(w), mv, *dx, *dy);
-        if (not moved.has_value()) return q(moved.error());
-        w = std::move(*moved);
-    }
-
     if (question == "fit")
     {
+        const std::string mv = str("move");
+        std::string pa, pb;
         if (const auto b = args.value("between"); b.isArray() and not b.toArray().isEmpty())
         {
             const auto arr = b.toArray();
             if (arr.size() != 2) return QStringLiteral("REJECTED: between needs exactly two names");
-            return q(im::answer_fit_between(w, arr.at(0).toString().toStdString(), arr.at(1).toString().toStdString()).text);
+            pa = arr.at(0).toString().toStdString();
+            pb = arr.at(1).toString().toStdString();
         }
+        else if (not mv.empty())   // tolerant: the model gives `move` (+ `target`) and no `between`
+        {
+            pa = mv;
+            pb = str("target").empty() ? "wall" : str("target");
+        }
+        if (not mv.empty())
+        {
+            // "if you moved the chair 20 cm away from the wall": distance, signed, positive = away from the other thing
+            const auto dv = args.value("distance");
+            if (dv.isUndefined() or dv.isNull() or (dv.isString() and dv.toString().trimmed().isEmpty()))
+                return q(std::format("ASK: how far should I imagine moving {}?", mv));
+            const auto dist = dv.isDouble() ? std::expected<float, std::string>(static_cast<float>(dv.toDouble()))
+                                            : im::parse_distance_m(dv.toString().toStdString());
+            if (not dist.has_value()) return q(dist.error());
+            if (w.scene.room.empty()) return QStringLiteral("I do not know which room I am in, so I cannot move anything in it.");
+            const bool mover_first = rc::chat::norm_name(pa) == rc::chat::norm_name(mv);
+            auto moved = im::with_object_moved_away(std::move(w), mv, mover_first ? pb : pa, *dist);
+            if (not moved.has_value()) return q(moved.error());
+            w = std::move(*moved);
+        }
+        if (not pa.empty()) return q(im::answer_fit_between(w, pa, pb).text);
         const std::string door = str("door");
         if (door.empty()) return QStringLiteral("ASK: which door, or which two things (between), should I try to fit through?");
         const auto op = im::parse_opening(str("opening"));

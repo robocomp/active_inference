@@ -80,6 +80,16 @@ today: 1 mission (0 succeeded); last: leg 3 → room_1
 """
 
 
+def _distance_m(v):
+    """metres from a number or '0.2' / '20 cm' / '-10cm' (None if it does not parse)"""
+    if isinstance(v, (int, float)):
+        return float(v)
+    m = re.fullmatch(r"\s*([+-]?\d+(?:\.\d+)?)\s*(cm|mm|m)?\s*", str(v or "").lower())
+    if not m:
+        return None
+    return float(m.group(1)) * {"cm": 0.01, "mm": 0.001, "m": 1.0, None: 1.0}[m.group(2)]
+
+
 def tools():
     def t(name, desc, props, req):
         p = {"type": "object", "properties": props}
@@ -176,8 +186,9 @@ def tools():
           "...\" (\u00bfcabr\u00eda?, \u00bfsi estuviera ...?). It works on an imagined COPY of what the robot knows; it "
           "never moves the robot and the imagined state is never written to the graph. question=fit: would the robot's body "
           "fit through a door (door, and opening = shut | ajar | half | wide | as_is or degrees) or between two named things "
-          "(between = [a, b]); `move` + `dx`, `dy` (metres) imagines that object moved first. question=see: would it see `target` (a name or class), `from` a place (pass a NAME: a door, "
-          "room or object, empty = here), optionally if `door` were `opening` or `move` moved. question=succeed: how likely is a trip from "
+          "(between = [a, b]); or `move` an object by `distance` (\"20 cm\", positive = away from the other thing, `target`, default the wall) "
+          "and ask whether the body fits then. question=see: would it see `target` (a name or class), `from` a place (pass a NAME: a door, "
+          "room or object, empty = here), optionally if `door` were `opening`. question=succeed: how likely is a trip from "
           "`from` (a room NAME) to `to` (a room), optionally going `via` a named door instead. Not for what is true now "
           "(can_see, route_to, where_is) nor to go anywhere (plan_mission).",
           {"question": {"type": "string", "enum": ["fit", "see", "succeed"],
@@ -185,15 +196,15 @@ def tools():
            "door": {"type": "string", "description": "a door name (door_1)"},
            "opening": {"type": "string", "description": "shut | ajar | half | wide | as_is, or degrees (\"30\")"},
            "via": {"type": "string", "description": "succeed: the door to go through instead"},
-           "target": {"type": "string", "description": "see: what to look at, a name (fridge_1) or a class"},
+           "target": {"type": "string", "description": "see: what to look at, a name (fridge_1) or a class; fit with move: the other thing (default the wall)"},
            "from": {"type": "string", "description": "a NAME: the place to look or start from (door_1, room_1, chair_1); "
                                                      "empty = here"},
            "to": {"type": "string", "description": "succeed: the destination room name"},
            "between": {"type": "array", "items": {"type": "string"},
                        "description": "fit: exactly two names (two objects, or an object and a wall)"},
-           "move": {"type": "string", "description": "fit (between) or see: an object name to imagine moved first, by dx, dy"},
-           "dx": {"type": "number", "description": "move: metres along the room x axis (a number)"},
-           "dy": {"type": "number", "description": "move: metres along the room y axis (a number)"}},
+           "move": {"type": "string", "description": "fit: an object name to imagine moved first, by `distance` away from the other thing"},
+           "distance": {"type": "string", "description": "move: metres, signed, positive = AWAY from the other thing "
+                                                         "(the `target`, default the wall); a number or \"20 cm\""}},
           ["question"]),
         t("agent_control", "Start, stop or restart one of the robot's software agents (room_concept, residual_concept, "
           "retina, door_concept, table_concept, chair_concept, bottle_concept, cabinet_concept, hood_concept, "
@@ -509,7 +520,8 @@ CASES = [
      and "wall" in " ".join(map(str, a.get("between") or [])).lower()),
     ("imagine: fit chair moved", [], "none",
      "would I fit between the wall and the chair if you moved the chair 20 cm away from the wall?",
-     lambda n, a, c: n == "imagine" and a.get("question") == "fit" and "chair" in str(a.get("move", "")).lower()),
+     lambda n, a, c: n == "imagine" and a.get("question") == "fit" and "chair" in str(a.get("move", "")).lower()
+     and _distance_m(a.get("distance")) is not None and 0.15 <= _distance_m(a.get("distance")) <= 0.25),
     ("imagine: succeed via door_2", [], "none", "would the mission to room_2 succeed if you went through door_2 instead?",
      # do_imagine also takes a door passed as `from` for the via (the model's habit, eval 2026-11-01)
      lambda n, a, c: n == "imagine" and a.get("question") == "succeed"

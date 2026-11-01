@@ -132,6 +132,24 @@ using Intervened = std::expected<ImaginedWorld, std::string>;
     return w;
 }
 
+/// A signed distance in metres from the person's words: a number, or "0.2", "20 cm", "-10cm", "5 mm", "0.2 m".
+[[nodiscard]] inline std::expected<float, std::string> parse_distance_m(std::string_view s)
+{
+    std::string t = imagine_detail::trim_lower(s);
+    float scale = 1.0f;
+    for (const auto& [suffix, k] : {std::pair<std::string_view, float>{"centimetres", 0.01f}, {"centimeters", 0.01f}, {"centimetros", 0.01f},
+                                    {"cm", 0.01f}, {"millimetres", 0.001f}, {"mm", 0.001f}, {"metres", 1.f}, {"meters", 1.f},
+                                    {"metros", 1.f}, {"metre", 1.f}, {"meter", 1.f}, {"m", 1.f}})
+        if (t.ends_with(suffix)) { t.resize(t.size() - suffix.size()); scale = k; break; }
+    while (not t.empty() and std::isspace(static_cast<unsigned char>(t.back()))) t.pop_back();
+    if (not t.empty() and t.front() == '+') t.erase(0, 1);
+    float v = 0;
+    const auto [p, ec] = std::from_chars(t.data(), t.data() + t.size(), v);
+    if (t.empty() or ec != std::errc{} or p != t.data() + t.size() or not std::isfinite(v))
+        return std::unexpected(std::format("REJECTED: distance must be a number of metres (\"0.2\" or \"20 cm\"), not '{}'", std::string(s)));
+    return v * scale;
+}
+
 // ── "there" ──
 struct Standpoint { Eigen::Vector2f xy; std::optional<float> yaw; std::string words; };
 
