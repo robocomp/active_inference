@@ -122,6 +122,7 @@ struct InteractionState
     float robot_range_m = 0.0f;       // |robot - aperture centre| (m)
     float range_sigma_m = 0.0f;       // σ of that range (door Σ projected + pose chain, floored)
     float safe_standoff_m = 0.0f;     // near edge of the actuation band = the leaf's swept arc + the body
+    float p_close_clear = 0.0f;       // P(the robot is clear of the leaf's swing), swing side included (door_close_clear.h)
     float clear_width_m = 0.0f;       // along-wall clear span at the MODAL phi (diagnostic only)
 };
 
@@ -201,10 +202,13 @@ inline rc::affordance::Contract open_contract(const DoorPragmaticCfg& p)
 
 // close: the mirror of open, after a crossing — Orient (no navigation: the robot stands clear of the swing, which is
 // close's precondition) and WAIT until the leaf is seen shut. Completion is perception, never the provider's Delivered.
+// ★ 2026-11-01 (user: the robot stood still waiting): a REACH to a standpoint facing the door, clear of its swing — the robot
+//   drives there (backs off, turns to the door) instead of waiting for a clearance nobody brings about. door_concept sends the
+//   close request only once P(clear of the swing) holds (door_close_clear.h): the leaf never swings onto the robot.
 inline rc::affordance::Contract close_contract(const DoorPragmaticCfg& p)
 {
     using enum rc::affordance::CompareOp;
-    return rc::affordance::Contract::orient()
+    return rc::affordance::Contract::reach()
         .until ("door_open_prob", LE, 0.30f)
         .still (0.05f, 0.10f)
         .yaw_rate(kTurnAtBaseLimit)

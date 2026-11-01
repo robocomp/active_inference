@@ -469,6 +469,7 @@ struct DoorFitState
     int  actuation_requests = 0;      // how many times we have asked, this door, this run
     bool open_claim_unserved = false; // an `open` claim landed and no request has been sent for it yet
     bool close_claim_unserved = false; // the same for `close`
+    bool close_wait_logged = false;    // "the close request waits for clearance" said once per claim
     bool actuation_refused  = false;  // the provider said never-ask-again (UnknownDoor / NotActuable)
     std::string actuation_note;       // last provider state or local refusal reason, for the UI/log
 

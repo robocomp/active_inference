@@ -32,6 +32,7 @@
  */
 
 #include "../../common/room_transition/startup_recall.h"   // warm start
+#include "door_close_clear.h"   // close: P(clear of the leaf's swing)
 #include "specificworker.h"
 
 #include "../../common/config_report/config_read.h"   // rc::cfg::Reader (SHARED)
@@ -2438,6 +2439,14 @@ rc::door::InteractionState SpecificWorker::compute_interaction_state(const rc::D
                      + (1.0f - p_open_now) * st.p_band;
     st.p_reach_known = true;
     st.range_sigma_m = sigma;
+    // P(clear of the leaf's swing) for `close`, the swing SIDE included (door_close_clear.h): the MAP side's log-odds read as
+    // the cross corridor reads them (signed against the reference they were accumulated for).
+    {
+        const bool swing_same = not inst.swing_llr_ref.has_value() or (*inst.swing_llr_ref > 0.f) == (inst.leaf.swing > 0.f);
+        st.p_close_clear = rc::door::prob_clear_of_swing(st.robot_range_m, st.robot_side, d_min, sigma, inst.leaf.swing,
+                                                          swing_same ? inst.swing_llr : -inst.swing_llr,
+                                                          0.5f * pg.robot_passage_width_m);
+    }
 
     // ── P(the cross is executable from HERE): at the door x corridor clear of the leaf x passable ────────────────
     // The run is robot -> through-pose (the far side of the room being LEFT, the same side the cross offer latches).
@@ -2752,27 +2761,28 @@ void SpecificWorker::step_pragmatic_affordances(rc::DoorInstance& inst)
     }
 
     // ── close ────────────────────────────────────────────────────────────────────────────────────
-    // Possible while the door is believed OPEN and the robot believed CLEAR of the leaf's swing — beyond
-    // safe_standoff (the swept arc + the body, the near edge of the actuation band): closing a door onto the
-    // robot is the one request this must never make. No far bound: the building closes it, not the robot. The
-    // product is the joint probability, no gate. Pragmatic, so never selected by default: the controller's
-    // passage asks for it once the robot is through (controller_door_passage.h).
+    // Possible while the door is believed OPEN. 2026-11-01 (user: the robot stood still after crossing): a REACH — the
+    // standpoint faces the door from where the robot is CLEAR of the leaf's swing (swing side included, door_close_clear.h),
+    // so the robot drives there; the close REQUEST waits for that clearance (below, where the claim is served). Closing a door
+    // onto the robot is the one request this must never make. Pragmatic, so never selected by default: a mission's `close`
+    // asks for it.
     {
         rc::pragmatic::Offer o;
         o.known = located and st.p_open_known and not cfg_.door_control_endpoint.empty();
-        const float p_clear = 1.0f - rc::door::prob_within(st.robot_range_m, st.safe_standoff_m, st.range_sigma_m);
-        o.p     = st.p_open * p_clear;
+        o.p     = st.p_open;
         if (inst.actuation_refused)
         {
             o.p   = 0.0f;   // never-ask-again from the provider: see `open`
             o.why = "the provider cannot actuate this door: " + inst.actuation_note;
         }
         else
-            o.why = std::format("P(open)={:.2f} × P(clear of the swing)={:.2f} (range {:.2f} m vs swept {:.2f} m, σ {:.2f})",
-                                st.p_open, p_clear, st.robot_range_m, st.safe_standoff_m, st.range_sigma_m);
-        // Orient policy, as `open`: the robot does not navigate, it faces the leaf where it stands and waits.
-        const auto pose = rc::door::front_pose(inst.aperture, st.approach_side,
-                                               std::max(st.robot_range_m, st.safe_standoff_m));
+            o.why = std::format("P(open)={:.2f}; P(clear of the swing)={:.2f} here (range {:.2f} m vs swept {:.2f} m, side {:+.2f} m, "
+                                "swing {:+.0f} llr {:+.1f}, σ {:.2f})", st.p_open, st.p_close_clear, st.robot_range_m,
+                                st.safe_standoff_m, st.robot_side, inst.leaf.swing, inst.swing_llr, st.range_sigma_m);
+        // the standpoint: where the robot is if it is already clear, else the middle of the actuation band (beyond the arc)
+        const float standoff = st.p_close_clear >= rc::door::kApproachCompleteProb
+                                   ? st.robot_range_m : std::max(st.robot_range_m, st.approach_standoff_m);
+        const auto pose = rc::door::front_pose(inst.aperture, st.approach_side, standoff);
         o.x_m = pose.x; o.y_m = pose.y; o.yaw_rad = pose.yaw;
         o.value    = pg.value_open;
         o.contract = rc::door::close_contract(pg);
@@ -2842,9 +2852,16 @@ void SpecificWorker::step_pragmatic_affordances(rc::DoorInstance& inst)
         inst.close_claim_unserved = true;
     if (inst.close_claim_unserved and not inst.aff_close.claimed())
         inst.close_claim_unserved = false;
-    if (inst.close_claim_unserved)
+    if (inst.close_claim_unserved and st.p_close_clear < rc::door::kApproachCompleteProb)
+    {
+        if (not std::exchange(inst.close_wait_logged, true))
+            std::print("door_concept: [close] {} claimed — the request waits until the robot is clear of the swing "
+                       "(P(clear) {:.2f})\n", inst.node_name, st.p_close_clear);
+    }
+    else if (inst.close_claim_unserved)
     {
         inst.close_claim_unserved = false;
+        inst.close_wait_logged = false;
         if (not pg.autonomous_actuation)
         {
             inst.actuation_note = "autonomous actuation is disabled (DoorAffordance.AutonomousActuation)";
