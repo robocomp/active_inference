@@ -128,8 +128,16 @@ std::optional<ControllerRobotPose> ControllerWorldModel::pose_from_rt(
 
     const auto time_query = params_->interpolate_rt ? DSR::RT_API::TimeQuery::Interpolated
                                                     : DSR::RT_API::TimeQuery::Nearest;
+    const bool interpolated = params_->interpolate_rt;
     for (const std::uint64_t ts : instants)
     {
+        if (ts != 0)
+        {
+            std::lock_guard lock(pose_memo_mutex_);
+            for (const auto &m : pose_memo_)
+                if (m.ts == ts and m.interpolated == interpolated)
+                    return m.pose;
+        }
         const auto room_T_robot = inner_eigen_api_->get_transformation_matrix(graph_state_.room_name,
                                                                              graph_state_.robot_name,
                                                                              ts, "RT", time_query);
@@ -138,6 +146,12 @@ std::optional<ControllerRobotPose> ControllerWorldModel::pose_from_rt(
         ControllerRobotPose pose;
         pose.pos = Eigen::Vector2f(static_cast<float>(matrix(0, 3)), static_cast<float>(matrix(1, 3)));
         pose.theta = std::atan2(static_cast<float>(matrix(1, 0)), static_cast<float>(matrix(0, 0)));
+        if (ts != 0)
+        {
+            std::lock_guard lock(pose_memo_mutex_);
+            pose_memo_[pose_memo_next_] = {ts, interpolated, pose};
+            pose_memo_next_ = (pose_memo_next_ + 1) % pose_memo_.size();
+        }
         return pose;
     }
     return std::nullopt;

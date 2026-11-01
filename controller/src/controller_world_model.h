@@ -3,6 +3,8 @@
 #include <genericworker.h>
 
 #include <optional>
+#include <array>
+#include <mutex>
 
 #include "controller_runtime_types.h"
 #include "../../common/affordance_manager/affordance_manager.h"
@@ -68,6 +70,15 @@ private:
     // They were two copies, and the one that gets forgotten on the next change is the one feeding the
     // control law. Tried in order; the first instant that resolves wins.
     std::optional<ControllerRobotPose> pose_from_rt(std::initializer_list<std::uint64_t> instants) const;
+
+    // room<-robot memo: each cycle asks for the same two instants (scan stamp, now) from 4-5 call sites and each
+    // ask is a full RT-tree walk that copies the room node per hop. Same instant => same answer, so keep the last
+    // few resolved poses keyed on the instant. Only successes of a stamped query are kept (ts 0 = "latest" is not
+    // a fixed instant); the ring is tiny and overwritten oldest-first, so it never outlives a couple of cycles.
+    struct PoseMemo { std::uint64_t ts = 0; bool interpolated = false; ControllerRobotPose pose{}; };
+    mutable std::array<PoseMemo, 4> pose_memo_{};
+    mutable std::size_t pose_memo_next_ = 0;
+    mutable std::mutex pose_memo_mutex_;
 
     const ControllerParams *params_ = nullptr;
     rc::AffordanceManager *affordance_manager_ = nullptr;

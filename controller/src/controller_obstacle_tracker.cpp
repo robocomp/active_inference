@@ -818,6 +818,26 @@ ControllerPolygons ControllerObstacleTracker::read_obstacle_polygons(std::uint64
 
     const auto time_query = params_ && params_->interpolate_rt ? DSR::RT_API::TimeQuery::Interpolated
                                                                : DSR::RT_API::TimeQuery::Nearest;
+    // room<-node: ONE RT lookup per object. Objects hang directly off the room, so read that single room->node
+    // RT edge (an Edge copy, no parent-node copy) instead of two InnerEigen tree walks (transform + euler),
+    // each of which copies the whole room node (an RT edge per object) at every hop. Objects not parented to the
+    // room keep the full-chain lookup. Yaw is atan2 of the rotation (objects are yaw-only).
+    struct RoomPose { Eigen::Vector2f xy; float yaw; };
+    const auto room_pose_of = [&](const DSR::Node &node) -> std::optional<RoomPose>
+    {
+        std::optional<Mat::RTMat> m;
+        if (rt_api_ and graph_state_->room_id != 0)
+            if (const auto edge = graph_->get_edge(graph_state_->room_id, node.id(), "RT"); edge.has_value())
+                m = rt_api_->get_edge_RT_as_rtmat(edge.value(), timestamp_ms, time_query);
+        if (not m.has_value())
+            m = inner_eigen_api_->get_transformation_matrix(graph_state_->room_name, node.name(),
+                                                            timestamp_ms, "RT", time_query);
+        if (not m.has_value()) return std::nullopt;
+        const auto &M = m->matrix();
+        return RoomPose{Eigen::Vector2f(static_cast<float>(M(0, 3)), static_cast<float>(M(1, 3))),
+                        static_cast<float>(std::atan2(M(1, 0), M(0, 0)))};
+    };
+
     auto is_robot_body_node = [this](const auto &node)
     {
         return graph_state_ && (node.id() == graph_state_->robot_id
@@ -907,17 +927,7 @@ ControllerPolygons ControllerObstacleTracker::read_obstacle_polygons(std::uint64
             if (!width_attr.has_value() || !depth_attr.has_value())
                 continue;
 
-            const auto translation = inner_eigen_api_->transform(graph_state_->room_name,
-                                                                 node.name(),
-                                                                 timestamp_ms,
-                                                                 "RT",
-                                                                 time_query);
-            const auto euler = inner_eigen_api_->get_euler_xyz_angles(graph_state_->room_name,
-                                                                      node.name(),
-                                                                      timestamp_ms,
-                                                                      "RT",
-                                                                      time_query);
-            if (!translation.has_value() || !euler.has_value())
+            if (not room_pose_of(node).has_value())
                 continue;
 
             obstacle_nodes.push_back(node);
@@ -973,24 +983,15 @@ ControllerPolygons ControllerObstacleTracker::read_obstacle_polygons(std::uint64
         }
 
         report << " | node='" << node.name() << "' type='" << node.type() << "'";
-        const auto translation = inner_eigen_api_->transform(graph_state_->room_name,
-                                                             node.name(),
-                                                             timestamp_ms,
-                                                             "RT",
-                                                             time_query);
-        const auto euler = inner_eigen_api_->get_euler_xyz_angles(graph_state_->room_name,
-                                                                  node.name(),
-                                                                  timestamp_ms,
-                                                                  "RT",
-                                                                  time_query);
-        if (!translation.has_value() || !euler.has_value())
+        const auto room_pose = room_pose_of(node);
+        if (not room_pose.has_value())
         {
             report << " missing_rt";
             continue;
         }
 
-        const Eigen::Vector2f center(static_cast<float>(translation->x()), static_cast<float>(translation->y()));
-        const float yaw = static_cast<float>(euler->z());
+        const Eigen::Vector2f center = room_pose->xy;
+        const float yaw = room_pose->yaw;
         ControllerObstacleState state{.center = center,
                                       .yaw_rad = yaw,
                                       .width_m = 0.f,
