@@ -363,6 +363,7 @@ RicohBirthConf = 0.60      # min YOLO confidence for a ricoh birth (only when Ri
 RicohBirthMaxVar = 0.005   # max depth_var (m²) for a ricoh birth (only when RicohBirthEnabled)
 
 [Existence]
+ActuationLlr = 3.0   # a door that changed state on OUR command (open/close satisfied after our request) exists: ln(0.9/0.05)
 # Existence log-odds on the SHARED rc::exist channel (common/existence_belief/existence_belief.h) — the same
 # one table_concept and chair_concept use. Evidence is the PIXEL-LEVEL silhouette: the fitted panel is
 # projected into the ZED and every predicted sample votes

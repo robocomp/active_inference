@@ -433,6 +433,7 @@ struct DoorConfig
     bool  exist_enabled            = true;   // Existence.Enabled — use the log-odds belief (else the old prune)
     float exist_birth_logodds      = 1.0f;   // Existence.BirthLogodds — L seeded at birth (a birth already needed birth_frames of evidence)
     float exist_max_logodds        =  4.0f;  // Existence.MaxLogodds — saturation cap (a real door can't earn infinite immunity)
+    float exist_actuation_llr      =  3.0f;  // Existence.ActuationLlr — log-odds of "it changed state when WE commanded it"
     // The ONE honest decision boundary: remove when P(exists) drops below this. Replaces RemoveLogodds — same
     // quantity, stated as a probability instead of a log-odds so it reads as the decision it is.
     float exist_removal_prob       = 0.12f;  // Existence.RemovalProb

@@ -2857,7 +2857,8 @@ void SpecificWorker::step_pragmatic_affordances(rc::DoorInstance& inst)
             // No provider id from here: the request path CHOOSES the provider door per door (nearest by
             // place); pg.actuation_provider_id is only its fallback when no frame resolves.
             if (request_door_actuation(inst, /*open=*/true, /*provider_id=*/std::string{},
-                                        "robot needs to pass through", why))
+                                        "robot needs to pass through", why)
+                and (inst.open_actuated = true))
                 std::print("door_concept: [open] {} claimed → asked the provider to OPEN it "
                            "(request {} of this run)\n", inst.node_name, inst.actuation_requests);
             else
@@ -2890,7 +2891,8 @@ void SpecificWorker::step_pragmatic_affordances(rc::DoorInstance& inst)
             std::print("door_concept: [close] {} was CLAIMED but autonomous actuation is off\n", inst.node_name);
         }
         else if (std::string why; request_door_actuation(inst, /*open=*/false, /*provider_id=*/std::string{},
-                                                          "the robot has gone through; closing the door behind it", why))
+                                                          "the robot has gone through; closing the door behind it", why)
+                 and (inst.close_actuated = true))
             std::print("door_concept: [close] {} claimed → asked the provider to CLOSE it (request {} of this run)\n",
                        inst.node_name, inst.actuation_requests);
         else
@@ -2899,13 +2901,34 @@ void SpecificWorker::step_pragmatic_affordances(rc::DoorInstance& inst)
             std::print("door_concept: [close] {} claimed but the request was refused LOCALLY: {}\n", inst.node_name, why);
         }
     }
+    // ★ A DOOR THAT CHANGES STATE ON OUR COMMAND EXISTS (2026-11-01, warm22 leg 2: door_3 opened on request, was seen open, and
+    //   still read P(exists) 0.66 — its remembered evidence aged — so `cross` (P(passable)·P(exists) 0.58) was never offered).
+    //   `open` is offered while the door reads SHUT and completes `satisfied` only once it is SEEN open (perceptual goal), and
+    //   only after OUR request: a phantom has no leaf to swing on command. One likelihood ratio, Existence.ActuationLlr.
+    const auto actuation_evidence = [&](const char* kind, bool& actuated, const rc::pragmatic::PragmaticAffordance& aff)
+    {
+        if (actuated and aff.outcome() == rc::affordance::Outcome::Satisfied)
+        {
+            const float before = inst.existence.p_exists();
+            inst.existence.integrate(1.0f, cfg_.exist_actuation_llr);
+            std::print("door_concept: [existence] {} changed state on our {} — P(exists) {:.2f} -> {:.2f}\n", inst.node_name,
+                       kind, before, inst.existence.p_exists());
+        }
+        actuated = false;
+    };
     if (consume_completion_logged(inst, "close", inst.aff_close))
+    {
         std::print("door_concept: [close] {} finished, outcome = {} (P(passable) is now {:.2f})\n", inst.node_name,
                    rc::affordance::to_string(inst.aff_close.outcome()), st.p_open);
+        actuation_evidence("close", inst.close_actuated, inst.aff_close);
+    }
     if (consume_completion_logged(inst, "open", inst.aff_open))
+    {
         std::print("door_concept: [open] {} finished, outcome = {} (P(passable) is now {:.2f}{})\n",
                    inst.node_name, rc::affordance::to_string(inst.aff_open.outcome()),
                    st.p_open, st.p_open_known ? "" : ", unmeasured");
+        actuation_evidence("open", inst.open_actuated, inst.aff_open);
+    }
 
     if (inst.aff_cross.consume_claim())
     {

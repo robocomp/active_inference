@@ -194,6 +194,9 @@ void read_door_config_fields(DoorConfig& out, GetF&& getf, GetI&& geti, GetS&& g
             "Existence.Enabled — use the log-odds belief (else the old prune)");
     out.exist_birth_logodds      = getf("Existence.BirthLogodds", 1.0f,
             "Existence.BirthLogodds — L seeded at birth (a birth already needed birth_frames of evidence)");
+    out.exist_actuation_llr      = getf("Existence.ActuationLlr", 3.0f,
+            "Existence.ActuationLlr — log-odds a door gains when it changed state on OUR command (open/close satisfied after "
+            "our request): ln(P(change | a real leaf, commanded) / P(a perceived change | a phantom)) ≈ ln(0.9/0.05)");
     out.exist_max_logodds        = getf("Existence.MaxLogodds", 4.0f,
             "Existence.MaxLogodds — saturation cap (a real door can't earn infinite immunity)");
     out.exist_removal_prob       = getf("Existence.RemovalProb", 0.12f,
