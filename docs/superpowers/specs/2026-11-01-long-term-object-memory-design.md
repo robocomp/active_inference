@@ -169,6 +169,14 @@ In the memory graph each remembered object is a node; **edges are reserved for a
    persistence, no MemoryStore copy); one node per remembered object under per-room nodes, history and lives as
    attributes, the §6.4 relation edges between object nodes. language_agent joins it read-only and lazily while
    ltom is present (episodic's pattern for ltsm). Recall nodes stay on domain 0: concept agents never join domain 5.
+   First consumers of the domain-5 graph (user, 11-01): language_agent AND an object inspector — click a
+   remembered object (3-D graph viewer or belief-inspector dashboard) and see its node: identity, lives, keyframe
+   trail on the room map, permanence, relations; its DINO atlas as structure (filled bins, directions, view counts,
+   quality — embeddings are not decodable into a usable image); and an inverse sensor projection (the object's
+   model rendered at its remembered pose into the ZED/LiDAR view from the current pose or from each atlas bin's
+   direction — the imagined-observations renders, which the permanence visibility test needs anyway).
+   OPEN (user): may ltom keep one thumbnail crop per atlas bin? It is what a person would want to see, but it
+   contradicts the §3 non-goal "no raw images or crops".
 
 ## 9. Constraints
 CLAUDE.md throughout: and/or/not, C++23, `std::from_chars` (es_ES locale) and `imbue(classic)` on every file
