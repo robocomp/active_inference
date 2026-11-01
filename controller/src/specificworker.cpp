@@ -2116,6 +2116,23 @@ SpecificWorker::MissionResult SpecificWorker::dispatch_mission_command(const std
 }
 
 // `cross door_N` and a mission's cross / open: the door must exist now; the passage restricts the selector to its steps.
+SpecificWorker::MissionResult SpecificWorker::start_door_close(const std::string &door, const char *source)
+{
+	if (not G->get_node(door).has_value())
+	{
+		std::println("[{}] close '{}': the door is not in the graph — nothing to close", source, door);
+		return {.kind = "close", .door = door, .reason = std::format("door '{}' is not in the graph", door)};
+	}
+	cancel_relative_motion("superseded by a door close");
+	session_.approach_order().stop();
+	session_.mission().set_mode(rc::DriveMode::Command);
+	session_.set_command_explore(false);   // the close affordance is the order now
+	session_.door_passage().start_close(door);
+	std::println("[{}] close '{}' -> claiming aff_{}_close{}", source, door, door,
+	             driving_enabled_ ? "" : "  (base not armed: press Run to drive)");
+	return {.accepted = true, .kind = "close", .door = door};
+}
+
 SpecificWorker::MissionResult SpecificWorker::start_door_passage(const std::string &door, rc::DoorPassage::Step stop_after,
                                                                  const char *source, bool then_affordances)
 {

@@ -106,6 +106,7 @@ requires standoff_m
   wait s=5s until=door_open(passage:passage_0@room_1)<0.5
   explore room_1 budget_s=120s
   cross door_19
+  close door_19
   approach table_1 side=yp
 )";
         const auto m = parse_text(all);
@@ -161,6 +162,15 @@ requires standoff_m
     CHECK(rejected("mission\n  stop retry=0\n") == "bad_value");
     CHECK(rejected("mission\n  stop\n").empty());
     CHECK(rejected("mission \"t\"\n  stop  # trailing comment\n\n").empty());
+
+    // ── close (2026-11-01, user: the PLAN triggers door_concept's close affordance, not the door passage) ─────────────────
+    CHECK(rejected("mission\n  cross room_2\n  close room_1\n").empty());   // the door of this room back to room_1
+    CHECK(rejected("mission\n  close door_7\n").empty());
+    CHECK(rejected("mission\n  close\n") == "missing_field");
+    if (const auto m = parse_text("mission\n  close room_1\n"); m.has_value())
+        CHECK(m->steps[0].op == "close" and m->steps[0].ref("door").has_value() and m->steps[0].ref("door")->name == "room_1");
+    else
+        CHECK(false);
 
     // ── Locale: decimals parse the same under es_ES ─────────────────────────────────────────────────────────────
     if (const auto m = parse_text("mission\n  move distance_m=-1.25 turn_deg=1e1\n"); m.has_value())

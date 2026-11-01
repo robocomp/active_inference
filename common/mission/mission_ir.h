@@ -252,6 +252,11 @@ inline const std::vector<OpSpec>& ops()
                     {.name = "expect", .type = String}}},
         {.name = "open", .claims = kBase, .instant = false, .has_body = false,
          .fields = {{.name = "door", .type = Ref, .required = true, .ref_kinds = kDoor, .positional = true}}},
+        // `close <door>` (2026-11-01, user: "the plan triggers the close affordance", not the door passage): claims
+        // door_concept's close affordance of that door — offered while it is open and the robot is within reach and clear
+        // of its swing. A relation names the door like `cross`: `close room_1` = this room's door that leads to room_1.
+        {.name = "close", .claims = kBase, .instant = false, .has_body = false,
+         .fields = {{.name = "door", .type = Ref, .required = true, .ref_kinds = kDoor, .positional = true}}},
         {.name = "go_to", .claims = kBase, .instant = false, .has_body = false,
          .fields = {{.name = "to", .type = Ref, .required = true, .ref_kinds = kPlace, .positional = true},
                     {.name = "standoff_m", .type = Number, .positive = true}}},

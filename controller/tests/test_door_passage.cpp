@@ -1009,6 +1009,36 @@ int main()
         CHECK(out.required == "aff_door_v_approach");
     }
 
+    // ── a mission's `close <door>` (2026-11-01, user: the PLAN triggers the close affordance): the Close step alone ────
+    {
+        auto G = make_graph(66);
+        DoorPassage p;
+        p.set_clock(clock);
+        p.start_close("door_7");
+        CHECK(p.view().step == Step::Close);
+        offered(*G, "aff_door_7_close");
+        auto out = p.update(*G, nullptr, "room_2");
+        CHECK(out.required == "aff_door_7_close");   // no approach, no cross: the selector may take only `close`
+        executing(*G, "aff_door_7_close");
+        p.update(*G, nullptr, "room_2");
+        satisfied(*G, "aff_door_7_close");
+        p.update(*G, nullptr, "room_2");
+        CHECK(p.view().step == Step::Done);
+        CHECK(not p.view().failed);                   // closed: the plan's step succeeds
+    }
+    {   // never offered (out of reach, robot inside the swing): Done and FAILED, door left open — the plan decides
+        auto G = make_graph(67);
+        DoorPassage p;
+        p.set_clock(clock);
+        p.set_close_wait_ms(5000);
+        p.start_close("door_8");
+        now += 6000;
+        p.update(*G, nullptr, "room_2");
+        CHECK(p.view().step == Step::Done);
+        CHECK(p.view().failed);
+        CHECK(p.view().last_outcome == "door_left_open");
+    }
+
     std::println("test_door_passage: {} checks, {} failures", checks, failures);
     return failures == 0 ? 0 : 1;
 }

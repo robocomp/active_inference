@@ -165,6 +165,7 @@ private:
 	void abort_all(const char *source);
 	/// The door-passage start shared by `cross door_N` and a mission's cross / open (the door must exist).
 	MissionResult start_door_passage(const std::string &door, rc::DoorPassage::Step stop_after, const char *source, bool then_affordances = false);
+	MissionResult start_door_close(const std::string &door, const char *source);   ///< a mission's `close <door>`: the Close step alone
 	/// `approach <object> [from <side>]` and a mission's approach: the object must offer its approach and list the side.
 	MissionResult start_approach(const std::string &object, const std::string &side, const char *source, rc::ApproachOrder::After after);
 	/// The relative-motion start shared by `move` / `turn` and a mission's move (text in RelativeMotion's grammar).

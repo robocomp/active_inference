@@ -97,6 +97,7 @@ public:
         finished_ = false;
         last_outcome_.clear();
         step_ = look_first ? Step::Look : Step::Approach;
+        close_only_ = false;
         seen_executing_ = false;
         attempts_ = 0;
         cross_room_.clear();
@@ -155,6 +156,28 @@ public:
     {
         std::scoped_lock lk(m_);
         return std::exchange(finished_, false);
+    }
+    /// A mission's `close <door>` (2026-11-01, user: the PLAN triggers the close affordance, not the passage): the Close step
+    /// alone — no approach, no cross. Done when door_concept completes `close`; FAILED (last_outcome "door_left_open" or the
+    /// close's own outcome) when it ends otherwise or is not offered within close_wait_ms_ — the plan decides what follows.
+    void start_close(std::string door)
+    {
+        std::scoped_lock lk(m_);
+        door_ = std::move(door);
+        stop_after_ = Step::Close;
+        then_affordances_ = false;
+        finished_ = false;
+        failed_ = false;
+        last_outcome_.clear();
+        step_ = Step::Close;
+        close_only_ = true;
+        close_since_ms_ = now_ms();
+        seen_executing_ = false;
+        attempts_ = 0;
+        cross_room_.clear();
+        note_ = "started (close)";
+        step_state_.clear();
+        last_event_ = std::format("[door-passage] {}: close — claiming {}", door_, name_of(Step::Close));
     }
     /// How long the Close step waits for door_concept to OFFER `close` (see the header comment).
     void set_close_wait_ms(std::uint64_t ms)
@@ -663,6 +686,13 @@ public:
                                        "DONE", name_of(Step::Close), double(close_wait_ms_) / 1000.0);
             if (why_done.has_value())
             {
+                const bool satisfied = seen_executing_ and st == State::Completed and G.get_node(name_of(Step::Close)).has_value()
+                    and rc::affordance::read_outcome(G.get_node(name_of(Step::Close)).value()) == rc::affordance::Outcome::Satisfied;
+                if (close_only_ and not satisfied)
+                {
+                    failed_ = true;
+                    if (last_outcome_.empty()) last_outcome_ = "door_left_open";
+                }
                 finish();
                 out.event = std::format("[door-passage] {}: {}", door_, *why_done);
                 last_event_ = *out.event;
@@ -1226,6 +1256,7 @@ private:
     }
     int  cross_unreachable_ = 0;   // Unreachable cross completions in this passage (kMaxCrossUnreachable)
     bool failed_ = false;          // finished by the cap, not by crossing
+    bool close_only_ = false;      // start_close(): a mission's `close <door>`, the Close step alone
     bool clearing_ = false;        // Task 12 Fix E: crossing on past the room switch, on the anchor
     bool anchored_ = false;        // the session: the cross is being driven on an anchor
     bool through_ = false;         // the session: the servo reached `through`

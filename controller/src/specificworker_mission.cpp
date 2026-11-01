@@ -75,6 +75,27 @@ std::optional<std::string> SpecificWorker::MissionHost::start_now(const rc::miss
 		std::lock_guard lock(w_.journal_mx_);
 		w_.journal_grounding_.erase(leaf.id);   // this attempt's grounding, or none if it is refused
 	}
+	if (op == "close")
+	{
+		// `close <door>` (2026-11-01, user: the PLAN triggers door_concept's close affordance). A relation may resolve late —
+		// `close room_1` waits for ltsm's recall_room_1 under the face just crossed — and the robot HOLDS meanwhile (it is at
+		// the door it is about to close: exploring would walk it out of reach).
+		const Ref ref = *leaf.ref("door");
+		const auto door = w_.resolve_door(ref);
+		if (not door.has_value() and rc::relation_of(ref) != rc::DoorRelationKind::None)
+		{
+			std::println("[mission] step {} (close {}) waits: no door in '{}' resolves yet — holding", leaf.id, ref.name, here);
+			relation_hold_.hold(leaf, hold_clock_ms());
+			w_.hold_base();
+			return std::nullopt;
+		}
+		if (not door.has_value()) return door.error();
+		const auto r = w_.start_door_close(*door, "mission");
+		if (not r.accepted) return r.reason;
+		door_ = *door;
+		ground(leaf, *door, QJsonObject{{"door", QString::fromStdString(*door)}});
+		return std::nullopt;
+	}
 	if (op == "cross" or op == "open")
 	{
 		const Ref ref = *leaf.ref("door");   // ref() returns by value: a copy, not a reference to a temporary
@@ -223,6 +244,14 @@ LeafStatus SpecificWorker::MissionHost::poll(const rc::mission::Step &leaf)
 				break;   // started: this very poll reports it as any started leaf
 		}
 	}
+	if (op == "close")
+	{
+		const auto v = w_.session_.door_passage().view();
+		if (v.door != door_ or v.step == rc::DoorPassage::Step::Idle) return {.state = LeafState::Failed, .detail = "abandoned"};
+		if (v.step != rc::DoorPassage::Step::Done) return {};
+		if (v.failed) return {.state = LeafState::Failed, .detail = v.last_outcome.empty() ? std::string("door_left_open") : v.last_outcome};
+		return {.state = LeafState::Succeeded};
+	}
 	if (op == "cross" or op == "open")
 	{
 		// `cross new` / `cross <room>` name a RELATION, not a node: if the door it resolved to leaves the graph before the
@@ -351,7 +380,7 @@ void SpecificWorker::MissionHost::cancel(const rc::mission::Step &leaf)
 	const std::string &op = leaf.op;
 	if (hold_.holding()) { hold_.clear(); return; }   // never started: nothing to stop
 	if (relation_hold_.holding()) { relation_hold_.clear(); return; }
-	if (op == "cross" or op == "open")
+	if (op == "cross" or op == "open" or op == "close")
 	{
 		if (w_.session_.door_passage().view().door == door_) w_.session_.door_passage().stop();
 	}
