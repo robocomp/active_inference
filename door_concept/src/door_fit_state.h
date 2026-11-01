@@ -347,6 +347,7 @@ struct DoorFitState
     // this hole, an observation of passability far more precise than any view from the doorway. Its existence and its
     // leaf HOLD (spec 2026-10-29 Rev 3, FACT_HOLD; pingpong2: the face just crossed was re-judged shut).
     bool fact_backed = false;
+    bool fact_hold_leaf = false;   // backed AND the robot still at the doorway: leaf + pose frozen (door_core.cpp, 2026-11-01)
     // Silhouette diagnostics (last evidence cycle) — the columns of etc/door_existence_log.csv.
     float dbg_sil_occ = 0.0f, dbg_sil_free = 0.0f, dbg_sil_free_eff = 0.0f;
     int   dbg_sil_ndet = 0, dbg_sil_ntotal = 0, dbg_sil_noccl = 0, dbg_sil_ncells = 0;

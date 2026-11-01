@@ -1054,7 +1054,7 @@ void DoorFit::estimate_phi(rc::DoorFitState& inst)
     //   ★ 2026-10-31 (user: "hold both"): held WHATEVER the prior — pingpong13 door_6, the entry mirror, carried the
     //   remembered 85 deg as a prior, so the old `and not have_prior` let it be re-estimated from inside room_1: 85 -> 66.6
     //   deg, P(passable) 0.045, RETRACTED, `open` on an open door, door_wont_open. Only our own swing moves a backed leaf.
-    if (inst.fact_backed and not inst.phi_cmd_active)
+    if (inst.fact_hold_leaf and not inst.phi_cmd_active)
         return;
 
     // ─── THE CAMERA DOES NOT SCORE THE LEAF ANGLE (removed 2026-09-14) ─────────────────────────────

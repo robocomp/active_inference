@@ -285,11 +285,9 @@ void InputSnapshot::begin_cycle(DSR::DSRGraph& G, DSR::InnerEigenAPI* inner, DSR
     for (const auto& n : G.get_nodes_by_type("object"))
         if (not is_foreign(n.id(), agent_id_) and rc::exit_fact::is_door(G, n.id()) and rc::exit_fact::is_crossed_face(G, n.id()))
             cur_.backed_faces.push_back(n.id());
-    for (const auto& n : G.get_nodes_by_type("metaconcept"))
-        if (G.get_attrib_by_name<object_subtype_att>(n).value_or(std::string{}) == "room_recall")
-            if (const auto d = G.get_attrib_by_name<parent_att>(n).value_or(0);
-                d != 0 and not is_foreign(d, agent_id_) and not std::ranges::contains(cur_.backed_faces, d))
-                cur_.backed_faces.push_back(d);
+    // ★ NOT a door with an ltsm recall under it (2026-11-01, user approved): in a warm start EVERY door to a remembered room has
+    //   one, so every remembered leaf was frozen from the first cycle — wrong sides held at 117 nats, doors opened or closed
+    //   by hand never noticed (warm22-26). A remembered leaf is a PRIOR (aged by restore_leaf_phi) that what is seen updates.
     for (const auto& e : G.get_edges_by_type("executing"))
     {
         core::ExecutingEdge x;

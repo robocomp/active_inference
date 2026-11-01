@@ -219,8 +219,21 @@ DoorCycleOutput DoorCore::step(const DoorCycleInput& in)
     fit_.set_room_is_proto(std::ranges::any_of(in.rooms.rooms, [&](const RoomInfo& r)
                                                { return r.id == world_->room_id() and r.is_proto; }));
     info_ = {};
+    // ★ FACT_HOLD OF THE LEAF ONLY WHILE THE ROBOT IS STILL AT THE DOORWAY (2026-11-01, user approved). The hold exists because views from
+    //   in or right beside the doorway re-judged a just-crossed leaf wrongly (pingpong2/13). It held FOR EVER: warm26's DOOR_0,
+    //   crossed in leg 3, kept an unmeasured 69 deg through a hand open and close while the robot stood in front of it, wide
+    //   open. Held while the robot's body is within the leaf's swept radius of the opening (the leaf's width plus the body's
+    //   reach) — where those views come from; beyond it the crossing is the prior and the door is measured again.
+    constexpr float kBodyReachM = 0.45f;   // Shadow's circumscribed radius hypot(0.284, 0.23) = 0.37 m, + its pose sigma
     for (const auto& [id, inst] : world_->fit_states())
-        inst->fact_backed = std::ranges::contains(in.backed_faces, id);
+    {
+        const bool crossed = std::ranges::contains(in.backed_faces, id);
+        bool at_doorway = false;
+        if (crossed and cam_xy_.has_value())
+            at_doorway = (*cam_xy_ - inst->aperture.centre_xy()).norm() < inst->aperture.w + kBodyReachM;
+        inst->fact_backed = crossed;                       // EXISTENCE: a crossed door is not removed for being out of view
+        inst->fact_hold_leaf = crossed and at_doorway;     // LEAF + POSE frozen only while the robot is at the doorway
+    }
 
     merge(out);                 // enforce physical exclusion before associating/birthing this cycle
     associate(in, out);
@@ -256,7 +269,7 @@ void DoorCore::fit_doors(DoorCycleOutput& out)
         //   through it, where it is and that it is open are what the crossing measured. pingpong13 door_6 (the entry mirror)
         //   was refit from inside room_1 1 m along the wall and its leaf 85 -> 66.6 deg, then retracted. No refit while
         //   backed, except while our own command swings the leaf (close-behind).
-        if (inst->fact_backed and not inst->phi_cmd_active)
+        if (inst->fact_hold_leaf and not inst->phi_cmd_active)
             continue;
 
         const float free_energy = fit_.run_inference(*inst, observation);
