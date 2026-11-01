@@ -35,6 +35,8 @@ struct Params
     float range_sigma = 0.03f;   // a return's range noise (m)
     float span_margin = 0.6f;    // |u| <= w/2 + this: the points that can be this wall near the opening (m)
     float sigma_slope = 0.03f;   // the wall direction's prior (rad): the room's Manhattan wall
+    float sigma_width = 0.08f;   // a door-sized gap's width spread around the model's width (m): jamb blur + the model's own
+    float max_gap = 3.0f;        // the "any other gap" alternative: uniform over [0.3 w, max_gap] (a corridor, a room's run)
 };
 struct Result
 {
@@ -71,9 +73,11 @@ inline Result measure(const rc::interaction::RelPose& prior, const std::vector<E
         if (p.z() < pp.floor_z) continue;
         const Eigen::Vector2f a = to_anchor(prior, p);
         if (std::abs(a.x()) > half + pp.span_margin or std::abs(a.y() + 0.5f * pp.thickness) > win) continue;
-        const bool above = p.z() > pp.lintel;
-        const bool beside = std::abs(a.x()) > half;
-        if (above or beside) cand.push_back(a);
+        // ONLY THE WALL ABOVE THE LINTEL (user 2026-11-01: "the wall as the only visible certain cue for the door depth").
+        // Beside the opening the faces are ambiguous (DOOR_1 sits in a double wall; jamb reveals; pingpong37 leg 4 read the
+        // depth 0.4-0.75 m off from them within 0.8 m of the door). Out of the Helios' sight (< ~0.6 m) there is no depth
+        // measurement and the motion-predicted depth carries it (the design's step 3).
+        if (p.z() > pp.lintel) cand.push_back(a);
     }
     if (cand.size() >= 8)
     {
@@ -132,11 +136,17 @@ inline Result measure(const rc::interaction::RelPose& prior, const std::vector<E
     {
         std::ranges::sort(us);
         // the empty intervals; the hole = the one whose width and centre best match the door's (both in units of sigma)
+        // A GAP IS THE DOOR ONLY IF ITS WIDTH SAYS SO (pingpong37 leg 1: with no wall measured, the stub's whole 1.74 m width
+        // was taken as the opening and the lateral drifted 1 m): its width must be more probable under the door's width
+        // model N(w; width, sigma_width) than under "any other gap", uniform over [0.3 width, max_gap]. A likelihood ratio.
+        const float log_u = -std::log(std::max(1e-3f, pp.max_gap - 0.3f * pp.width));
         float best = std::numeric_limits<float>::infinity();
         for (std::size_t i = 0; i + 1 < us.size(); ++i)
         {
             const float l = us[i], rr = us[i + 1], w = rr - l;
             if (w < 0.3f * pp.width) continue;   // not a door-sized hole (a third of it: the gap between two returns)
+            const float zw = (w - pp.width) / pp.sigma_width;
+            if (-0.5f * zw * zw - std::log(pp.sigma_width * 2.5066283f) < log_u) continue;   // not this door's width
             const float su = std::sqrt(std::max(1e-6f, prior.P(0, 0) + prior.P(1, 1)));
             const float cost = std::pow((w - pp.width) / 0.1f, 2.f) + std::pow((0.5f * (l + rr)) / std::max(su, 0.05f), 2.f);
             if (cost < best) { best = cost; r.u_left = l; r.u_right = rr; r.gap = true; }

@@ -58,7 +58,7 @@ namespace rc::door::rec
 {
 
 inline constexpr char          kMagic[8] = {'D', 'A', 'N', 'C', 'H', 'O', 'R', 'F'};
-inline constexpr std::uint32_t kVersion  = 4;
+inline constexpr std::uint32_t kVersion  = 5;   // v5 (2026-11-01): the helios returns the wall-then-hole pose saw
 inline constexpr std::uint64_t kMaxBytes = 200ull * 1024ull * 1024ull;   // ⚑ disk budget
 // I/O batching, not a model level: the recorder (and door_concept's anchor_log.csv) flush every this many records and at
 // close — never per record on the compute thread (final review I-4).
@@ -79,6 +79,10 @@ struct Frame
     float p_lidar = 0.f, p_cam = 0.f, p_view = 0.f;
     float lidar_open = 0.f, lidar_door = 0.f, lidar_wall = 0.f;
     AnchorBias bias;                       // v4: the persistent-bias factor handed to the update with `prior`
+    // v5: the Helios returns above the lintel (robot frame) and their origin, as door_wall_gap.h saw them (the staged rays
+    // above are the bpearl's only, the ray-likelihood update's input)
+    std::vector<Eigen::Vector3f> helios;
+    Eigen::Vector3f helios_origin = Eigen::Vector3f::Zero();
     // Version-1 records only (read, never written): the pre-budget rays and the budgeted count.
     std::uint32_t version = kVersion;
     std::vector<Eigen::Vector3f> rays_v1;
@@ -171,6 +175,8 @@ inline std::string encode(const Frame& f)
     put_pose(b, f.post);
     for (const float v : {f.p_lidar, f.p_cam, f.p_view, f.lidar_open, f.lidar_door, f.lidar_wall}) put(b, v);
     for (int i = 0; i < 3; ++i) for (int j = 0; j < kBiasCols; ++j) put(b, f.bias.L(i, j));
+    put(b, f.helios_origin.x()); put(b, f.helios_origin.y()); put(b, f.helios_origin.z());   // v5
+    put_pts(b, f.helios);
     return b;
 }
 
@@ -203,6 +209,12 @@ inline bool decode(const char* p, const char* e, Frame& f, std::uint32_t version
     f.bias = {};
     if (version >= 4)
         for (int i = 0; i < 3; ++i) for (int j = 0; j < kBiasCols; ++j) ok = ok and get(p, e, f.bias.L(i, j));
+    if (version >= 5)
+    {
+        float hx = 0, hy = 0, hz = 0;
+        ok = ok and get(p, e, hx) and get(p, e, hy) and get(p, e, hz) and get_pts(p, e, f.helios);
+        f.helios_origin = {hx, hy, hz};
+    }
     return ok;
 }
 
@@ -257,7 +269,7 @@ inline bool read_all(std::istream& in, std::vector<Frame>& frames, std::uint32_t
     char magic[8] = {};
     std::uint32_t ver = 0;
     if (not in.read(magic, sizeof(magic)) or std::memcmp(magic, kMagic, sizeof(kMagic)) != 0) return false;
-    if (not in.read(reinterpret_cast<char*>(&ver), sizeof(ver)) or (ver != kVersion and ver != 3 and ver != 2 and ver != 1)) return false;
+    if (not in.read(reinterpret_cast<char*>(&ver), sizeof(ver)) or (ver != kVersion and ver != 4 and ver != 3 and ver != 2 and ver != 1)) return false;
     if (version != nullptr) *version = ver;
     // A record's length word is bounded by what the file still holds: a corrupt word cannot allocate gigabytes.
     const std::streampos here = in.tellg();

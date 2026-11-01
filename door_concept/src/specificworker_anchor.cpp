@@ -987,8 +987,23 @@ void SpecificWorker::step_passage_anchor()
         {
             rc::door::wallgap::Params wp;
             wp.width = pa.width; wp.thickness = pa.thickness; wp.lintel = pa.height; wp.floor_z = kFloorBandM;
-            const auto wm = rc::door::wallgap::measure(prior_pose, wall_pts, wp);
-            post = rc::door::wallgap::fuse(prior_pose, wm, wp);
+            // THE WALL'S DIRECTION FROM THE ROOM, EVERY FRAME (the design's step 1; 2026-11-01, pingpong37 leg 4: with the
+            // anchor's own previous yaw as the prior, each frame's small slope correction compounded and the yaw walked 22-36
+            // deg at the doorway, where the Helios no longer sees above the lintel). The room's view of this door in the
+            // robot frame (anchor_from_room: the door's wall direction and the robot's pose in the room) gives an ABSOLUTE
+            // direction, ~1 deg from the localiser's heading; only its yaw is used (its position is the room-frame node's,
+            // tenths of a metre off), aligned to the anchor's axes modulo pi.
+            rc::interaction::RelPose wg_prior = prior_pose;
+            if (inst != nullptr)
+                if (const auto rv = anchor_from_room(*inst, nullptr, false); rv.has_value() and std::isfinite(rv->x.z()))
+                {
+                    float yaw = rv->x.z();
+                    if (std::abs(rc::interaction::wrap_pi(yaw - prior_pose.x.z())) > float(M_PI_2)) yaw = rc::interaction::wrap_pi(yaw + float(M_PI));
+                    wg_prior.x.z() = yaw;
+                    if (std::isfinite(rv->P(2, 2)) and rv->P(2, 2) > 0.f) wg_prior.P(2, 2) = rv->P(2, 2);
+                }
+            const auto wm = rc::door::wallgap::measure(wg_prior, wall_pts, wp);
+            post = rc::door::wallgap::fuse(wg_prior, wm, wp);
         }
         post.stamp_ms = now;
         pa.pose = post;
@@ -1099,6 +1114,8 @@ void SpecificWorker::step_passage_anchor()
         fr.leaf = leaf;
         fr.pi_open = pa.p_open_belief;
         fr.post = pa.pose;
+        fr.helios = helios_rays;          // v5: what door_wall_gap.h saw above the lintel
+        fr.helios_origin = helios_origin;
         fr.p_lidar = ev.p_lidar; fr.p_cam = ev.p_cam; fr.p_view = ev.p_view;
         fr.lidar_open = ev.lidar_open; fr.lidar_door = ev.lidar_door; fr.lidar_wall = ev.lidar_wall;
         const bool was_capped = anchor_frames_.capped();

@@ -15,6 +15,8 @@
 #include "../src/door_wall_gap.h"
 
 #include <charconv>
+#include <cstdlib>
+#include <random>
 #include <cstring>
 #include <fstream>
 #include <map>
@@ -75,12 +77,15 @@ std::optional<Err> err_at(const std::vector<GtRow>& gt, std::int64_t t, const rc
 int main(int argc, char** argv)
 {
     if (argc < 3) { std::print(stderr, "usage: wall_gap_replay anchor_frames.bin gt_error.csv [--no-memory] [--lintel H]\n"); return 2; }
-    bool memory = true;
+    bool memory = true, room_yaw = false;
+    std::mt19937 rng(17);
+    std::normal_distribution<float> yaw_noise(0.f, 1.f * float(M_PI) / 180.f);   // the localiser's heading error (~1 deg)
     rc::door::wallgap::Params pp;
     for (int i = 3; i < argc; ++i)
     {
         double v;
         if (std::strcmp(argv[i], "--no-memory") == 0) memory = false;
+        else if (std::strcmp(argv[i], "--room-yaw") == 0) room_yaw = true;
         else if (std::strcmp(argv[i], "--lintel") == 0 and i + 1 < argc and num(argv[++i], v)) pp.lintel = float(v);
     }
     std::ifstream in(argv[1], std::ios::binary);
@@ -119,7 +124,9 @@ int main(int argc, char** argv)
             x.P = J * x.P * J.transpose() + Q;
             for (auto& p : mem) { const Eigen::Vector3f q = rc::interaction::move_mean(Eigen::Vector3f(p.x(), p.y(), 0.f), side, adv, dth); p.x() = q.x(); p.y() = q.y(); }
         }
-        const auto& rays = f.staging.prior.rays;
+        // the points the agent's wall-then-hole saw: the staged bpearl rays, plus (record v5) the Helios returns above the lintel
+        std::vector<Eigen::Vector3f> rays = f.staging.prior.rays;
+        rays.insert(rays.end(), f.helios.begin(), f.helios.end());
         if (memory)
         {
             mem.insert(mem.end(), rays.begin(), rays.end());
@@ -134,7 +141,24 @@ int main(int argc, char** argv)
         }
         pp.width = f.width > 0.f ? f.width : pp.width;
         pp.thickness = f.thickness > 0.f ? f.thickness : pp.thickness;
+        // --room-yaw: the agent's room-given wall direction (anchor_from_room), emulated: the TRUE wall direction in the
+        // robot frame + the localiser's heading error, sigma 2 deg — reset every frame, as door_concept now does
+        if (room_yaw)
+            if (const auto g = gt_at(gt, f.t_ms); g.has_value())
+            {
+                float yaw = float(std::remainder(-g->th, 2 * M_PI)) + yaw_noise(rng);
+                if (std::abs(rc::interaction::wrap_pi(yaw - x.x.z())) > float(M_PI_2)) yaw = rc::interaction::wrap_pi(yaw + float(M_PI));
+                x.x.z() = yaw; x.P(2, 2) = std::pow(2.f * float(M_PI) / 180.f, 2.f);
+            }
         const auto m = rc::door::wallgap::measure(x, memory ? mem : rays, pp);
+        if (std::getenv("WG_DEBUG") != nullptr and anchor == std::atoi(std::getenv("WG_DEBUG")) and k % 15 == 0)
+        {
+            int n_above = 0; for (const auto& p : (memory ? mem : rays)) n_above += p.z() > pp.lintel ? 1 : 0;
+            const auto e0 = err_at(gt, f.t_ms, x);
+            std::print("  dbg t {:.1f}s dist {:.2f}: wall {} d_face {:+.3f} n_in {} slope {:+.3f} | gap {} [{:+.2f},{:+.2f}] n_plane {} | pts above lintel {} of {} | prior err depth {:+.2f} lat {:+.2f}\n",
+                       (f.t_ms - t0) * 1e-3, e0 ? e0->dist : -1.0, m.wall, m.d_face, m.n_wall, m.slope, m.gap, m.u_left, m.u_right, m.n_plane,
+                       n_above, (memory ? mem : rays).size(), e0 ? e0->depth : 0.0, e0 ? e0->lat : 0.0);
+        }
         x = rc::door::wallgap::fuse(x, m, pp);
         const auto e = err_at(gt, f.t_ms, x), el = err_at(gt, f.t_ms, f.post);
         if (e.has_value() and el.has_value())
