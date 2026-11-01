@@ -6960,7 +6960,10 @@ bool ControllerSession::consume_goal_reached(bool goal_reached, const Controller
             const std::uint64_t fb = active_contract_.feedback_node_id != 0
                                          ? active_contract_.feedback_node_id
                                          : (last_target_info_.has_value() ? last_target_info_->parent_node_id : 0);
-            if (fb != 0 and not goal_met(fb))
+            // ★ NOT `and not goal_met(fb)` (warm16 leg 1: on the claim cycle the door had just been re-made as the mirror in the
+            //   new room, its door_open_prob not yet written, the goal read true for ONE cycle and the close ended Timeout). The
+            //   wait itself demands the goal for stable_n cycles: a goal that really holds completes it Satisfied in a few cycles.
+            if (fb != 0)
             {
                 reach_wait_target_ = active_target_id_;
                 feedback_node_id_ = fb;
