@@ -40,10 +40,11 @@ namespace rc::chat::imagine
     const auto r = evaluate_scene(*card, iw.scene, *tg, rc::card::Viewpoint{sp->xy, std::nullopt});
     std::string out = "Imagining" + (assumption.empty() ? std::string{} : " " + assumption) + ": ";
     out += answer_can_see(card, tg->label, sp->words, r);
-    if (not iw.notes.empty())
+    // The caller's earlier interventions only: this call's door is already said in `assumption`.
+    if (not w.notes.empty())
     {
         out += " (";
-        for (std::size_t i = 0; i < iw.notes.size(); ++i) out += (i ? "; " : "") + iw.notes[i];
+        for (std::size_t i = 0; i < w.notes.size(); ++i) out += (i ? "; " : "") + w.notes[i];
         out += ")";
     }
     return out;
