@@ -96,5 +96,43 @@ int main()
     sweep("AIF point-ahead (door_cross_aif)", [](const rc::interaction::RelPose& r)
           { return rc::door_cross_aif(r, kDoorW, {}, rc::DoorCrossAifBody{kHalfW, kHalfL}, kStandoff, kVmax, kWmax, kDt).cmd; });
   }
-    return 0;
+    // ── warm24 (2026-11-01): 1.27 m in front of DOOR_1 (clear 0.88 m), turned 52 deg off the normal, e ~ 0: the law sent adv 0, rot 0
+    //    for minutes — P(fit) 0 because of the heading, and nothing in the objective asked for the heading. Must cross, no contact.
+    int fails = 0;
+    {
+        kDoorW = 0.88f;
+        std::mt19937 rng(11);
+        for (const float deg : {52.f, -52.f, 70.f, -70.f})
+        {
+            const auto o = run(0.f, -1.27f, deg * std::numbers::pi_v<float> / 180.f, [](const rc::interaction::RelPose& r)
+                { return rc::door_cross_aif(r, kDoorW, {}, rc::DoorCrossAifBody{kHalfW, kHalfL}, kStandoff, kVmax, kWmax, kDt).cmd; }, rng);
+            const bool ok = o.through and not o.contact;
+            std::println("  warm24 start {:+.0f} deg: through {} contact {} t {:.1f} s -> {}", deg, o.through, o.contact, o.t, ok ? "ok" : "FAIL");
+            if (not ok) ++fails;
+        }
+        kDoorW = 1.0f;
+    }
+    // ── warm24 leg 2: THROUGH (body wholly past the opening), then the drive-in stalled ~0.9 m past the door — the anchor seen
+    //    from inside re-initialised, heading_err grew to -59 deg, and P(fit AT ENTRY) (0.003-0.09) still scaled the progress.
+    //    The entry has happened: P(fit) no longer gates the drive-in.
+    {
+        const float x = 0.f, y = 0.9f, phi = -59.f * std::numbers::pi_v<float> / 180.f;   // centre 0.9 m past, turned 59 deg
+        const float c = std::cos(phi), sn = std::sin(phi);
+        const Eigen::Vector2f d(-x, -y);
+        rc::interaction::RelPose r;
+        r.x = Eigen::Vector3f(c * d.x() + sn * d.y(), -sn * d.x() + c * d.y(), -phi);
+        r.P = Eigen::Vector3f(4e-4f, 4e-4f, 3e-4f).asDiagonal();
+        // DOOR_2 swings into the room entered: after the crossing its leaf stands on the robot's side, beside it (live: P(MAP) 1)
+        rc::interaction::AnchorLeaf leaf;
+        leaf.hinge = Eigen::Vector2f(0.44f, 0.02f);
+        leaf.tip = Eigen::Vector2f(0.44f - 0.29f, 0.02f + 0.86f);
+        leaf.phi = 1.90f; leaf.sigma_phi = 0.17f; leaf.p = 1.f;
+        const std::vector<rc::interaction::AnchorLeaf> leaves{leaf};
+        const auto st = rc::door_cross_aif(r, 0.88f, leaves, rc::DoorCrossAifBody{kHalfW, kHalfL}, kStandoff, kVmax, kWmax, kDt);
+        std::println("  drive-in 0.9 m past, -59 deg, leaf beside: p_fit {:.3f} adv {:+.3f} rot {:+.3f}", st.p_fit, st.cmd.adv, st.cmd.rot);
+        if (not (st.p_fit > 0.99f and (st.cmd.adv > 0.05f or std::abs(st.cmd.rot) > 0.1f)))
+        { ++fails; std::println("  FAIL drive-in held back by the entry fit"); }
+    }
+    std::println("{}", fails == 0 ? "warm24 cases: ALL PASS" : std::format("warm24 cases: {} FAILED", fails));
+    return fails == 0 ? 0 : 1;
 }

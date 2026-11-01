@@ -105,6 +105,11 @@ struct DoorCrossAifStep
     const float sigma_n2 = std::max(1e-6f, g.n.dot(r.P.topLeftCorner<2, 2>() * g.n));
     out.pi_e = 1.f / std::max(1e-6f, room * room + g.sigma_lat * g.sigma_lat);
     out.p_fit = anchor_p_fit_at_entry(width, leaves, body.half_width, g.e, line, g.s, d, v_max, g.sigma_lat, free_advance);
+    // ★ THE ENTRY HAS HAPPENED once the body is wholly past the opening (its centre beyond the body's radius along the normal —
+    //   the passage's own THROUGH test). warm24 leg 2: through DOOR_2, the drive-in stalled ~0.9 m past it for 600 s — DOOR_2's
+    //   leaf, which swings into the room entered, stood beside the robot, the heading drifted to -59 deg, and P(fit AT ENTRY)
+    //   0.003 still scaled the progress of a body that had already entered.
+    if (g.s > std::hypot(body.half_width, d)) out.p_fit = 1.f;
     out.pi_s = 1.f / sigma_n2;
     out.t_e = std::max(-out.s, 0.f) / v_max + dt;
     out.t_s = std::max(out.s_goal - out.s, 0.f) / v_max + dt;
