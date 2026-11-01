@@ -83,6 +83,8 @@ std::uint64_t ChairSceneGraph::create_instance_from_detection(const Eigen::Vecto
     }
 
     rc::provenance::stamp_creation(*G_, chair_node);   // birth stamp: epoch ms + local ISO-8601
+    // Persistent identity (common/instance_identity): written once at birth, never changed, key for ltom/atlas/EM.
+    G_->add_or_modify_attrib_local<object_uid_att>(chair_node, rc::identity::make_uid(static_cast<std::uint32_t>(G_->get_agent_id()), n_issued));
     const auto id_opt = G_->insert_node(chair_node);
     if (not id_opt.has_value())
         return 0;

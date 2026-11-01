@@ -85,6 +85,8 @@ std::uint64_t CabinetSceneGraph::create_instance_from_detection(const Eigen::Vec
     }
 
     rc::provenance::stamp_creation(*G_, cabinet_node);   // birth stamp: epoch ms + local ISO-8601
+    // Persistent identity (common/instance_identity): written once at birth, never changed, key for ltom/atlas/EM.
+    G_->add_or_modify_attrib_local<object_uid_att>(cabinet_node, rc::identity::make_uid(static_cast<std::uint32_t>(G_->get_agent_id()), n_issued));
     const auto id_opt = G_->insert_node(cabinet_node);
     if (not id_opt.has_value())
         return 0;
