@@ -293,6 +293,36 @@ int main()
                           d.ch.swing.llr(), expect));
     }
 
+    // ── (e) ─────────────────────────────────────────────────────────────────────────────────────────────────────────────
+    // warm11 door_23 (2026-11-01): the swing flipped 10 times while the door was SHUT or nearly (phi 4-48 deg), single frames
+    // scoring -27..-75 nats, and settled on the wrong side (the leaf hangs in the other room). The two sides' phi filters had
+    // drifted apart (one near 0, one far open), so "the + side at ITS phi vs the - side at ITS phi" compared two ANGLES, not
+    // two sides. A shut leaf is the same geometry under both sides: the frame must say ~nothing about the swing.
+    std::print("\n(e) a shut door says nothing about the swing, however far apart the two sides' phi filters have drifted\n");
+    {
+        Door d;
+        auto b = make_belief(+1.0f);
+        const float H = 12.0f;
+        auto frame = [&](float phi_plus, float phi_minus, float dt)
+        {
+            rc::door::LeafChannelInput in;
+            const bool plus_believed = b.params().leaf.swing > 0.0f;
+            const float pb = plus_believed ? phi_plus : phi_minus, po = plus_believed ? phi_minus : phi_plus;
+            in.bb = peaked(pb, 0.0f); in.ob = peaked(pb, H); in.bs = peaked(po, 0.0f); in.os = peaked(po, H);
+            in.have_sensor = true; in.sensor = {0.0f, 2.0f}; in.dt = dt;
+            in.phi_min = PHI_MIN; in.phi_max = PHI_MAX; in.nstep = NSTEP; in.view_rad = PHI_STEP;
+            return rc::door::leaf_channel_step(d.ch, b, d.hinge_llr, d.swing_llr, d.phi_est, d.phi_sigma, in);
+        };
+        // ambiguous frames: under + the leaf reads 4 deg, under - it reads 57 deg, equally well — the filters part
+        for (int f = 0; f < 20; ++f) (void)frame(0.07f, 1.0f, f == 0 ? std::numeric_limits<float>::infinity() : 0.1f);
+        const float before = d.ch.swing.llr();
+        // now the door is shut: both sides predict the leaf at 4 deg, identically
+        const auto r = frame(0.07f, 0.07f, 0.1f);
+        std::print("  shut frame: swing evidence {:+.3f} nats (pooled along {:+.3f} -> {:+.3f})\n", r.frame_swing, before,
+                   d.ch.swing.llr());
+        check(std::abs(r.frame_swing) < 0.5, std::format("identical predictions give ~0 swing evidence ({:+.3f})", r.frame_swing));
+    }
+
     std::print("\n{}\n", g_fail == 0 ? "ALL PASS" : std::format("{} FAILED", g_fail));
     return g_fail == 0 ? 0 : 1;
 }

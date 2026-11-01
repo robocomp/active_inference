@@ -556,13 +556,35 @@ inline LeafChannelResult leaf_channel_step(LeafChannel& ch, rc::DoorBelief& b, f
         }
     const double hl0 = hinge_llr, sl0 = swing_llr;
     const double lp_h[2] = {log_sig(hl0), log_sig(-hl0)}, lp_s[2] = {log_sig(sl0), log_sig(-sl0)};
+    // ★ THE SWING IS SCORED UNDER ONE COMMON phi PREDICTION (warm11 door_23, 2026-11-01). e[h][sw] scores each side under ITS
+    //   OWN phi filter; when the two filters have drifted apart (a near-shut leaf reads ~0 deg under one side and far open
+    //   under the other, equally well) "+ at its phi vs - at its phi" compares two ANGLES, and a shut frame — the same
+    //   geometry under both sides — scored up to 75 nats for whichever filter happened to sit near 0: the swing flipped 10
+    //   times while the door was shut and settled on the wrong side. The phi dynamics' share of that evidence was also
+    //   re-counted on every frame (frames are pooled as independent). So the swing comparison uses, per hinge, the MIXTURE of
+    //   the two sides' filters weighted by P(side): only what the two sides predict DIFFERENTLY at the same phi counts — a
+    //   shut leaf gives ~0 by itself, no gate. The per-side filters still track phi, and the hinge keeps e[][] as before.
+    double es[2][2];
+    for (int h = 0; h < 2; ++h)
+    {
+        es[h][0] = es[h][1] = kNinf;
+        if (not (have[h][0] and have[h][1])) continue;
+        const auto p0 = ch.phi[std::size_t(fidx[h][0])].posterior(in.eps_v_phi);
+        const auto p1 = ch.phi[std::size_t(fidx[h][1])].posterior(in.eps_v_phi);
+        for (std::size_t k = 0; k < NN; ++k)
+        {
+            const double pk = lae(lp_s[0] + p0[k], lp_s[1] + p1[k]);   // the mixture's log weight at phi_k
+            for (int sw = 0; sw < 2; ++sw)
+                if (const double l = double((*curve[h][sw])[k].second); std::isfinite(l)) es[h][sw] = lae(es[h][sw], l + pk);
+        }
+    }
     if (have[0][0])
     {
         double num = kNinf, den = kNinf;
         for (int sw = 0; sw < 2; ++sw) if (have[0][sw] and have[1][sw]) { num = lae(num, lp_s[sw] + e[0][sw]); den = lae(den, lp_s[sw] + e[1][sw]); }
         if (std::isfinite(num) and std::isfinite(den)) res.frame_hinge = num - den;
         num = kNinf; den = kNinf;
-        for (int h = 0; h < 2; ++h) if (have[h][0] and have[h][1]) { num = lae(num, lp_h[h] + e[h][0]); den = lae(den, lp_h[h] + e[h][1]); }
+        for (int h = 0; h < 2; ++h) if (have[h][0] and have[h][1]) { num = lae(num, lp_h[h] + es[h][0]); den = lae(den, lp_h[h] + es[h][1]); }
         if (std::isfinite(num) and std::isfinite(den)) res.frame_swing = num - den;
         // The frame's φ curve under the leaf mixture, for the trace: log Σ P(h)P(s) L_hs(φ) over the hypotheses scored.
         res.frame_loglik.reserve(NN);
