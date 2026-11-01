@@ -1,8 +1,8 @@
 # ltom_agent -- long-term object memory (spec: docs/superpowers/specs, ltom-agent-design 2026-11-01).
-# Step 2: OBSERVE the live graph and keep a persisted repertory (a file). ONE graph, ONE DDS domain.
+# Steps 2-3: OBSERVE the live graph, keep a persisted repertory (a file), and OFFER recall nodes. ONE graph, ONE DDS domain.
 #
-#   [Agent.dsr]  the LIVE working graph. domain 0, configFile "" => joins the fleet. READ ONLY: the presence
-#                monitor's own agent node ("ltom_agent 28") is the only thing this agent puts there.
+#   [Agent.dsr]  the LIVE working graph. domain 0, configFile "" => joins the fleet. Never writes an object node: it puts there
+#                only its presence agent node ("ltom_agent 28") and the ltom_recall_<uid> metaconcept nodes.
 #
 # DDS domain 5 is RESERVED for ltom's future memory graph (a projection of the repertory file, added when its
 # first reader exists: language_agent, step 4). No [Agent.*] table for it now. Never add a table whose FLATTENED

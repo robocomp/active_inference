@@ -1,5 +1,5 @@
 /*
- * SpecificWorker -- ltom_agent (2026-11-01). Long-term object memory. An OBSERVER: it never writes an object node,
+ * SpecificWorker -- ltom_agent (2026-11-01). Long-term object memory. An OBSERVER that offers ltom_recall_* metaconcept nodes: it never writes an object node,
  * never decides identity, and no concept agent requires it.
  *
  * Task 1 (skeleton): joins the live graph (domain 0), publishes its agent node "ltom_agent 28" through the shared

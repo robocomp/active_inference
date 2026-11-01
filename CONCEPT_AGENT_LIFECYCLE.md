@@ -230,7 +230,7 @@ Derived by reading each agent, not inferred from includes. `—` = not applicabl
 | human | ❌ | ❌ `belief_stabilizer` | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
 | language_agent *(2026-10-12)* | — no instances | — no belief | — | — | — | — | — | ✅ |
 | self_calibration *(2026-10-23, skeleton)* | — no instances | — no belief | — | — | — | — | — | ✅ |
-| ltom_agent *(2026-11-01, observer)* | — never writes an instance | — no belief | — | — | — | — | — | ✅ |
+| ltom_agent *(2026-11-01, observer + recall offers)* | — never writes an instance | — no belief | — | — | — | — | — | ✅ |
 
 *2026-10-31 (perception cards, Task 9):* chair's wall LoS cell went from `—` to ✅. `ChairFitter::zed_detectability` now delegates to `chair_p_detect` (`chair_concept/src/chair_detect.h`): `term_envelope(roi_fill) × in_fov × central × walls_block(camera, chair, room polygon)`; a chair in another room gets P(detect) 0 and its absence is no longer charged. Retired `Existence.ZedEdgeOffset/ZedRangeFull/ZedRangeRef/ZedClearLosFloor`. Live check pending.
 
@@ -251,8 +251,8 @@ grace 3000 ms; required `robot_concept`, `room_concept`); it connects no DSR sig
 proposal attributes on its own node, that node stays its only owned state (robot_concept remains the sole writer of
 body→sensor RT edges).
 
-**ltom_agent** (2026-11-01) is a pure OBSERVER: CREATE/UPDATE/REMOVE of instances are `—` (it never writes an object node and never decides
-identity). It owns only its agent node `ltom_agent 28` (`[Owns] nodes = ["ltom_agent 28"]`, id matches `[Agent].id = 28`), deleted by the
+**ltom_agent** (2026-11-01) is an OBSERVER that also OFFERS recalls: CREATE/UPDATE/REMOVE of instances are `—` (it never writes an object node and never decides
+identity). It owns its agent node `ltom_agent 28` plus the `ltom_recall_<uid>` metaconcept nodes it publishes (RT children of the current room, never a proto-room) for remembered, absent objects (`[Owns] nodes = ["ltom_agent 28", "ltom_recall_*"]`, id matches `[Agent].id = 28`; crash recovery: `RecallPublisher::sync` reconciles to the wanted set every poll, plus a stale sweep at `initialize()` and first Operating), deleted by the
 shared coordinator on SIGTERM (verified on isolated domain 64: `[Graph] node 'ltom_agent 28' deleted`). It connects no DSR signal (polls on the
 main thread while Operating) and keeps its repertory in a file; a node disappearing while its owner is gone or Degraded is "owner exit", never death, and an instance still on the graph but not resolvable this poll (room deleted, no covariance, ...) is HELD, never counted as gone.
 

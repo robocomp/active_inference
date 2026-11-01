@@ -1,7 +1,7 @@
 # ltom_agent
 
 Long-term object memory (spec: ltom-agent-design 2026-11-01). Step 2 = OBSERVE the live graph and keep a persisted
-repertory file. It never writes an object node, never decides identity, and no concept agent requires it.
+repertory file. It never writes an object node (it publishes only `ltom_recall_<uid>` metaconcept offers), never decides identity, and no concept agent requires it.
 
 **State (step 2, write path):** joins the live graph (domain 0), publishes its agent node `ltom_agent 28` via the shared
 presence coordinator (no required peers) and, while Operating, polls the graph once per `Period.Compute` (the single
