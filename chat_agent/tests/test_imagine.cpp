@@ -1,5 +1,5 @@
 // imagined_world.h: opening words, interventions on a copy, the "there" resolver.
-#include "../src/imagined_world.h"
+#include "../src/imagine_fit.h"
 
 #include <cassert>
 #include <print>
@@ -97,6 +97,104 @@ int main()
     assert(near(*parse_opening("fully_open")->phi_rad, kPi / 2) and near(*parse_opening("all the way")->phi_rad, kPi / 2));
     assert(not parse_opening("as_is")->phi_rad.has_value());
     assert(resolve_standpoint(w0, "the moon").error() == "ASK: which place do you mean by 'there'?");
+
+    // ── Q1: through a door ──
+    {
+        ImaginedWorld f = world();
+        f.body_half_width = 0.31f;
+        f.robot_sigma_m = 0.02f; f.door_sigma_m["door_1"] = 0.02f;
+        const auto leaves = rc::chat::imagine::fit_detail::leaves_at(0.9f, kPi / 4);
+        const auto g = rc::anchor_clear_gap(0.9f, &leaves[0]);
+        assert(g.width > 0.2f and g.width < 0.3f);
+        const auto a45 = answer_fit_door(f, "door_1", *parse_opening("45"));
+        assert(a45.p and *a45.p < 0.05f and near(a45.slack_m, g.width - 0.62f, 1e-3f));
+        assert(a45.text.contains("P(fit) = ") and a45.text.contains("cm") and a45.text.contains("45") and a45.text.contains("about 7")
+               and a45.text.contains("depth across the doorway") and not a45.text.contains("passable"));
+        const auto a90 = answer_fit_door(f, "door_1", *parse_opening("wide"));
+        assert(a90.p and *a90.p > 0.9f);
+        // phi* round trip
+        assert(a45.phi_needed_rad.has_value());
+        const auto rt = answer_fit_door(f, "door_1", Opening{*a45.phi_needed_rad, "phi*"});
+        assert(rt.p and std::abs(*rt.p - 0.5f) < 0.02f);
+        // sigma pulls P toward 0.5, from below and from above
+        ImaginedWorld big = f; big.door_sigma_m["door_1"] = 0.3f;
+        assert(*answer_fit_door(big, "door_1", *parse_opening("45")).p > *a45.p);
+        assert(*answer_fit_door(big, "door_1", *parse_opening("wide")).p < *a90.p);
+        // no body model, unknown door, unknown opening, exact geometry, never fits
+        ImaginedWorld nb = f; nb.body_half_width.reset();
+        assert(not answer_fit_door(nb, "door_1", *parse_opening("45")).p and answer_fit_door(nb, "door_1", *parse_opening("45")).text == "I have no model of my body width");
+        assert(answer_fit_door(f, "door_7", *parse_opening("45")).text == "I don't know a door called door_7");
+        const auto unk = answer_fit_door(f, "door_1", *parse_opening("as_is"));
+        assert(not unk.p and unk.text.contains("shut") and unk.text.contains("wide open"));
+        ImaginedWorld ex = f; ex.robot_sigma_m.reset(); ex.door_sigma_m.clear();
+        assert(answer_fit_door(ex, "door_1", *parse_opening("wide")).text.contains("treating the geometry as exact"));
+        ImaginedWorld fat = f; fat.body_half_width = 0.6f;
+        assert(answer_fit_door(fat, "door_1", *parse_opening("wide")).text.contains("even fully open I would not fit"));
+        ImaginedWorld thin = f; thin.body_half_width = 0.0f;
+        assert(answer_fit_door(thin, "door_1", *parse_opening("wide")).text.contains("I fit at any opening"));
+    }
+
+    // ── geometry ──
+    {
+        using namespace rc::chat::imagine::fit_detail;
+        const auto A = box_corners(0, 0, 0, 1, 1), B = box_corners(2, 0, 0, 1, 1);
+        assert(near(footprint_distance(A, B), 1.0f));
+        const auto C = box_corners(2, 2, 0, 1, 1);
+        assert(near(footprint_distance(A, C), std::sqrt(2.0f)));                     // corner to corner
+        const auto R = box_corners(2, 0, std::numbers::pi_v<float> / 4, 1, 1);                              // diamond, near vertex at x = 2 - 0.7071
+        assert(near(footprint_distance(A, R), 2.0f - std::sqrt(0.5f) - 0.5f));
+        assert(near(footprint_distance(A, box_corners(0.5f, 0, 0, 1, 1)), 0.0f));     // overlap
+        assert(near(footprint_distance(A, box_corners(0, 0, 0, 0.2f, 0.2f)), 0.0f));  // containment
+        assert(near(footprint_distance(A, {Eigen::Vector2f(3, -5), Eigen::Vector2f(3, 5)}), 2.5f));   // box-segment
+        assert(near(footprint_distance(A, {Eigen::Vector2f(-5, 2), Eigen::Vector2f(5, 2)}), 1.5f));
+        assert(near(footprint_distance(A, {Eigen::Vector2f(-5, 0), Eigen::Vector2f(5, 0)}), 0.0f));   // crosses it
+    }
+
+    // ── Q1b: between two referents ──
+    {
+        ImaginedWorld f = world();
+        f.body_half_width = 0.31f;
+        f.scene.polygon = {{-5, -5}, {5, -5}, {5, 5}, {-5, 5}};
+        f.scene.objects.clear();
+        SeeObject c; c.name = "chair_1"; c.subtype = "chair"; c.x = 4.45f - 0.2f; c.y = 0; c.w = 0.4f; c.d = 0.4f; c.h = 0.9f; c.z_origin = 0.f;
+        // wall at x = 5; chair's far face at 4.45 ⇒ gap 0.55
+        c.x = 4.25f;
+        f.scene.objects = {c};
+        const auto lo = answer_fit_between(f, "chair_1", "wall");
+        assert(lo.p and *lo.p < 0.1f and near(lo.slack_m, 0.55f - 0.62f, 1e-3f) and lo.text.contains("chair_1")
+               and lo.text.contains("would have to move") and lo.text.contains("7 cm") and lo.text.contains("live LiDAR"));
+        assert(answer_fit_between(f, "the chair", "wall").p.has_value());              // class with one instance
+        const auto mv = with_object_moved(f, "chair_1", -0.2f, 0);
+        assert(mv.has_value());
+        const auto hi = answer_fit_between(*mv, "chair_1", "wall");
+        assert(hi.p and *hi.p > *lo.p and near(hi.slack_m, 0.75f - 0.62f, 1e-3f));
+        ImaginedWorld wide = f; wide.scene.objects[0].x = 4.1f - 0.2f + 0.2f;          // gap 0.80 - sizes: far face 4.3, gap 0.70
+        wide.scene.objects[0].x = 4.0f;                                                 // far face 4.2 ⇒ gap 0.80
+        assert(*answer_fit_between(wide, "chair_1", "wall").p > 0.9f);
+        // the displacement needed round-trips to P = 0.5
+        const float need = -lo.slack_m;
+        ImaginedWorld fs = f; fs.robot_sigma_m = 0.05f;
+        const auto mv2 = with_object_moved(fs, "chair_1", -need, 0);
+        assert(std::abs(*answer_fit_between(*mv2, "chair_1", "wall").p - 0.5f) < 0.02f);
+        // a wall shelf above the band does not block; at base 0 it does
+        ImaginedWorld sh = f;
+        sh.scene.objects[0].z_origin = 1.4f; sh.scene.objects[0].h = 0.3f;
+        const auto up = answer_fit_between(sh, "chair_1", "wall");
+        assert(up.p and near(*up.p, 1.0f) and up.text.contains("does not block"));
+        sh.scene.objects[0].z_origin = 0.f;
+        assert(*answer_fit_between(sh, "chair_1", "wall").p < 0.1f);
+        // errors
+        assert(answer_fit_between(f, "wall", "the wall").text == "between two walls is the room, ask me about a door");
+        assert(answer_fit_between(f, "sofa", "wall").text == "I don't know an object called sofa");
+        // two objects: the larger sigma moves
+        SeeObject t; t.name = "table_1"; t.subtype = "table"; t.x = 4.25f - 1.0f; t.y = 0; t.w = 0.4f; t.d = 0.4f; t.h = 0.7f;
+        ImaginedWorld two = f; two.scene.objects.push_back(t);
+        two.object_sigma_m["chair_1"] = 0.01f; two.object_sigma_m["table_1"] = 0.1f;
+        const auto tw = answer_fit_between(two, "chair_1", "table_1");
+        assert(tw.p and near(tw.slack_m, 0.6f - 0.62f, 1e-3f) and tw.text.contains("table_1 would have to move"));
+        ImaginedWorld nb = f; nb.body_half_width.reset();
+        assert(not answer_fit_between(nb, "chair_1", "wall").p);
+    }
 
     std::println("test_imagine: ok");
     return 0;
