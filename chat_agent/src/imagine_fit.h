@@ -101,7 +101,11 @@ inline constexpr std::string_view kDoorCaveat = "an upper bound: the leaf's dept
         star = std::format("I would need it open to about {}°", deg1(*a.phi_needed_rad));
     }
 
-    const std::string sig_note = exact ? " (treating the geometry as exact)" : "";
+    std::string sig_note;
+    if (exact) sig_note = " (treating the geometry as exact)";
+    else if (not sd.has_value()) sig_note = std::format(" ({}'s position uncertainty is unknown; counted as exact)", it->name);
+    else if (not sr.has_value()) sig_note = " (my own position uncertainty is unknown; counted as exact)";
+    if (not (it->width_m > 0.f)) sig_note += std::format(" (its width is not measured; taken as {:.2f} m)", kNominalDoorWidthM);
     const auto line = [&](const DoorEval& e, std::string_view angle)
     {
         return std::format("P(fit) = {:.2f} with the door {}, slack {:+.0f} cm", e.p, angle, (e.mean_gap - target) * 100.f);
@@ -176,7 +180,7 @@ inline bool inside_convex(const Pt& p, const std::vector<Pt>& poly)
         pos = pos or c > 0.f;
         neg = neg or c < 0.f;
     }
-    return not (pos and neg);
+    return (pos or neg) and not (pos and neg);   // a footprint with no area (all crosses 0) contains nothing
 }
 inline std::vector<std::pair<Pt, Pt>> edges_of(const std::vector<Pt>& p)
 {
@@ -240,8 +244,10 @@ inline std::vector<Pt> box_corners(float x, float y, float yaw, float w, float d
             if (not (base < kRobotHeightM and top > 0.f)) { s.ignored = true; }
         }
         else s.note = std::format("{}'s height is unknown, so I treated it as blocking", pick->name);
-        if (not pick->w.has_value() or not pick->d.has_value())
-            s.note += std::string(s.note.empty() ? "" : "; ") + std::format("{}'s size is not fully known, so I used what is known", pick->name);
+        if (not pick->w.has_value() and not pick->d.has_value())
+            s.note += std::string(s.note.empty() ? "" : "; ") + std::format("{}'s size is unknown, so I treated it as a point at its centre", pick->name);
+        else if (not pick->w.has_value() or not pick->d.has_value())
+            s.note += std::string(s.note.empty() ? "" : "; ") + std::format("{}'s size is only partly known, so I used what is known", pick->name);
         std::optional<float> sg;
         if (const auto f = w.object_sigma_m.find(pick->name); f != w.object_sigma_m.end()) sg = f->second;
         s.ref = Referent{pick->name, box_corners(pick->x, pick->y, pick->yaw, pick->w.value_or(0.f), pick->d.value_or(0.f)), false, sg};
@@ -252,15 +258,6 @@ inline std::vector<Pt> box_corners(float x, float y, float yaw, float w, float d
     if (not A.err.empty()) { ans.text = A.err; return ans; }
     if (not B.err.empty()) { ans.text = B.err; return ans; }
     if (A.ref->is_wall and B.ref->is_wall) { ans.text = "between two walls is the room, ask me about a door"; return ans; }
-
-    for (Side* s : {&A, &B})
-        if (s->ignored)
-        {
-            ans.p = 1.f;
-            ans.text = std::format("{} sits entirely above my body (my band is 0 to {:.2f} m), so it does not block: the gap counts as open, P(fit) = 1.00. Caveat: {}.",
-                                   s->label, kRobotHeightM, kCaveat);
-            return ans;
-        }
 
     // the wall side: the room-polygon segment nearest the other referent
     for (auto [self, other] : {std::pair{&A, &B}, std::pair{&B, &A}})
@@ -278,6 +275,19 @@ inline std::vector<Pt> box_corners(float x, float y, float yaw, float w, float d
         }
 
     const float gap = footprint_distance(A.ref->pts, B.ref->pts);
+    if (A.ignored or B.ignored)
+    {
+        const Side& up = A.ignored ? A : B;
+        const Side& other = A.ignored ? B : A;
+        ans.p = 1.f;
+        ans.slack_m = gap - 2.f * bh;
+        std::string t = std::format("{} sits entirely outside my body's height band (0 to {:.2f} m), so it does not block. ", up.label, kRobotHeightM);
+        if (other.ignored) t += std::format("Neither side is at my height: nothing at my height blocks there. P(fit) = 1.00.");
+        else t += std::format("Their footprints are {:.0f} cm apart (I am {:.0f} cm wide), but nothing at my height blocks there. P(fit) = 1.00.", gap * 100.f, 2.f * bh * 100.f);
+        for (const Side* sd : {&A, &B}) if (not sd->note.empty()) t += " Note: " + sd->note + ".";
+        ans.text = t + std::format(" Caveat: {}.", kCaveat);
+        return ans;
+    }
     std::optional<float> sg;
     if (A.ref->sigma or B.ref->sigma) sg = std::hypot(A.ref->sigma.value_or(0.f), B.ref->sigma.value_or(0.f));
     const float sigma = sg.value_or(0.f);

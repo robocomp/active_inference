@@ -156,9 +156,8 @@ int main()
         f.body_half_width = 0.31f;
         f.scene.polygon = {{-5, -5}, {5, -5}, {5, 5}, {-5, 5}};
         f.scene.objects.clear();
-        SeeObject c; c.name = "chair_1"; c.subtype = "chair"; c.x = 4.45f - 0.2f; c.y = 0; c.w = 0.4f; c.d = 0.4f; c.h = 0.9f; c.z_origin = 0.f;
-        // wall at x = 5; chair's far face at 4.45 ⇒ gap 0.55
-        c.x = 4.25f;
+        SeeObject c; c.name = "chair_1"; c.subtype = "chair"; c.x = 4.25f; c.y = 0; c.w = 0.4f; c.d = 0.4f; c.h = 0.9f; c.z_origin = 0.f;
+        // wall at x = 5; the chair's far face at 4.45 ⇒ gap 0.55
         f.scene.objects = {c};
         const auto lo = answer_fit_between(f, "chair_1", "wall");
         assert(lo.p and *lo.p < 0.1f and near(lo.slack_m, 0.55f - 0.62f, 1e-3f) and lo.text.contains("chair_1")
@@ -168,8 +167,7 @@ int main()
         assert(mv.has_value());
         const auto hi = answer_fit_between(*mv, "chair_1", "wall");
         assert(hi.p and *hi.p > *lo.p and near(hi.slack_m, 0.75f - 0.62f, 1e-3f));
-        ImaginedWorld wide = f; wide.scene.objects[0].x = 4.1f - 0.2f + 0.2f;          // gap 0.80 - sizes: far face 4.3, gap 0.70
-        wide.scene.objects[0].x = 4.0f;                                                 // far face 4.2 ⇒ gap 0.80
+        ImaginedWorld wide = f; wide.scene.objects[0].x = 4.0f;                         // far face 4.2 ⇒ gap 0.80
         assert(*answer_fit_between(wide, "chair_1", "wall").p > 0.9f);
         // the displacement needed round-trips to P = 0.5
         const float need = -lo.slack_m;
@@ -183,6 +181,21 @@ int main()
         assert(up.p and near(*up.p, 1.0f) and up.text.contains("does not block"));
         sh.scene.objects[0].z_origin = 0.f;
         assert(*answer_fit_between(sh, "chair_1", "wall").p < 0.1f);
+        // below the floor: ignored too
+        sh.scene.objects[0].z_origin = -1.f; sh.scene.objects[0].h = 0.5f;
+        assert(near(*answer_fit_between(sh, "chair_1", "wall").p, 1.0f));
+        // an ignored referent still reports the footprint clearance
+        assert(up.text.contains("55 cm") and near(up.slack_m, 0.55f - 0.62f, 1e-3f));
+        // unknown size: a point at its centre, 0.8 m from the wall
+        ImaginedWorld us = f; us.scene.objects[0].w.reset(); us.scene.objects[0].d.reset(); us.scene.objects[0].h.reset();
+        us.scene.objects[0].x = 4.2f; us.robot_sigma_m = 0.05f;
+        const auto unk = answer_fit_between(us, "chair_1", "wall");
+        assert(unk.p and *unk.p > 0.9f and unk.text.contains("size is unknown") and unk.text.contains("point at its centre"));
+        // one sigma missing is named; unmeasured width is stated
+        ImaginedWorld os = f; os.door_sigma_m["door_1"] = 0.02f;
+        assert(answer_fit_door(os, "door_1", *parse_opening("wide")).text.contains("my own position uncertainty is unknown"));
+        os.scene.doors[0].width_m = 0;
+        assert(answer_fit_door(os, "door_1", *parse_opening("wide")).text.contains("its width is not measured; taken as 0.90 m"));
         // errors
         assert(answer_fit_between(f, "wall", "the wall").text == "between two walls is the room, ask me about a door");
         assert(answer_fit_between(f, "sofa", "wall").text == "I don't know an object called sofa");
