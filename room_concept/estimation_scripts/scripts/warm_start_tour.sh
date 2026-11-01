@@ -131,6 +131,9 @@ if [ -n "$R1_LOOP" ]; then
   # memory (it is held until the robot leaves): a run that ends in room_1 never saves the room_3 <-> room_1 passage.
   # (user 2026-11-01: leg 4 goes on to room_2 through the passage door, DOOR_1, not back through DOOR_0)
   ARGS=(room_2 room_3 new room_2); WANT=(room_2 room_3 room_1 room_2); BEHIND=(room_1 room_2 room_3 room_1)
+  # ALL DOORS KNOWN (user 2026-11-01: "all are known now"): a fixture whose memory holds the DOOR_0 passage (passage_2)
+  # crosses into room_1 BY RELATION, door to door, no `cross new` search.
+  grep -q '"passage_2"' $FIX/ltsm_history/*[0-9].json 2>/dev/null && ARGS[2]=room_1
   N_LEGS=${N_LEGS:-$([ -n "$R1_LOOP_BACK" ] && echo 4 || echo 3)}
 elif [ "$(cat $FIX/room_name_hwm.txt)" -ge 3 ]; then
   ARGS=(room_2 room_3 room_2 room_1); WANT=(room_2 room_3 room_2 room_1); BEHIND=(room_1 room_2 room_3 room_2)
@@ -141,7 +144,9 @@ echo "leg plan: ${ARGS[*]} (fixture remembers $(cat $FIX/room_name_hwm.txt) room
 ok=0; n_legs=${N_LEGS:-4}
 for leg in $(seq 1 $n_legs); do
   a=${ARGS[$((leg-1))]}; want=${WANT[$((leg-1))]}
-  loc_gate "before leg $leg" 30 || { echo "leg $leg NOT STARTED: localisation not good enough"; break; }
+  # DOOR TO DOOR (user 2026-11-01): the gate only before the first leg; after a crossing the next leg's mission goes out at
+  # once (its `open` waits for the next door's affordances by itself). The 2 s loc trace still records every leg.
+  [ $leg -eq 1 ] && { loc_gate "before leg $leg" 30 || { echo "leg $leg NOT STARTED: localisation not good enough"; break; }; }
   T0=$(now_ms); ts=$(date +%s)
   run_leg $leg $a ${BEHIND[$((leg-1))]}; n=0
   # the next door AS SOON AS IT EXISTS: a door named by relation (room_X) that is not resolvable yet (its recall not posted)
