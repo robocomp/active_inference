@@ -1,3 +1,4 @@
+#include <unordered_map>
 #include <chrono>
 #include <source_location>
 #include <locale>
@@ -911,14 +912,30 @@ std::optional<AffordanceManager::Target> AffordanceManager::select_target(const 
     // has retired is not a competitor, and demoting the room in favour of something nobody is offering
     // would leave the robot doing neither. Computed once, before scoring, because the demotion is a
     // property of the CONTEST and must be the same for every candidate in it.
+    // ★ ONE READ PER NODE PER CALL. The five passes below each re-read the same ~10 attributes (and the parent node) of
+    //   every affordance; the node copies in `affordances` are a snapshot, so the values cannot differ between passes.
+    struct Parsed { std::optional<Target> target; bool active = false; bool pending = true; };
+    std::unordered_map<std::uint64_t, Parsed> parsed_cache;
+    parsed_cache.reserve(affordances.size());
+    const auto parsed = [&](const DSR::Node &node) -> const Parsed &
+    {
+        auto it = parsed_cache.find(node.id());
+        if (it != parsed_cache.end()) return it->second;
+        Parsed p;
+        p.target = read_target(graph, node);
+        p.active = graph->get_attrib_by_name<active_att>(node).value_or(false);
+        p.pending = graph->get_attrib_by_name<epistemic_pending_att>(node).value_or(true);
+        return parsed_cache.emplace(node.id(), std::move(p)).first->second;
+    };
     bool object_competing = false;
     for (const auto &node : affordances)
     {
-        const auto t = read_target(graph, node);
+        const auto &pc = parsed(node);
+        const auto &t = pc.target;
         if (!t.has_value() || t->parent_node_type == "room")
             continue;
-        const auto a = graph->get_attrib_by_name<active_att>(node).value_or(false);
-        const auto pd = graph->get_attrib_by_name<epistemic_pending_att>(node).value_or(true);
+        const auto a = pc.active;
+        const auto pd = pc.pending;
         if (const auto st = decode_protocol_state(a, pd);
             st == ProtocolState::Offered || st == ProtocolState::Executing)
         {
@@ -963,11 +980,12 @@ std::optional<AffordanceManager::Target> AffordanceManager::select_target(const 
     last_candidates_.clear();
     for (const auto &node : affordances)
     {
-        const auto target = read_target(graph, node);
+        const auto &pc = parsed(node);
+        const auto &target = pc.target;
         if (!target.has_value())
             continue;
-        const auto active = graph->get_attrib_by_name<active_att>(node).value_or(false);
-        const auto pending = graph->get_attrib_by_name<epistemic_pending_att>(node).value_or(true);
+        const auto active = pc.active;
+        const auto pending = pc.pending;
         const auto state = decode_protocol_state(active, pending);
         const bool just_done = node.id() == last_completed_id_
             and is_same_request(*target, last_completed_x_, last_completed_y_, last_completed_yaw_,
@@ -1020,9 +1038,11 @@ std::optional<AffordanceManager::Target> AffordanceManager::select_target(const 
             if (node.id() != current_affordance_id_)
                 continue;
 
-            const auto target = read_target(graph, node);
-            const auto active = graph->get_attrib_by_name<active_att>(node).value_or(false);
-            const auto pending = graph->get_attrib_by_name<epistemic_pending_att>(node).value_or(true);
+            const auto &pc = parsed(node);
+
+            const auto &target = pc.target;
+            const auto active = pc.active;
+            const auto pending = pc.pending;
             if (target.has_value() && decode_protocol_state(active, pending) == ProtocolState::Executing)
             {
                 if (const auto key = make_affordance_key(*target); key != selected_target_debug_report_)
@@ -1054,12 +1074,13 @@ std::optional<AffordanceManager::Target> AffordanceManager::select_target(const 
     std::optional<Target> resumed_target;
     for (const auto &node : affordances)
     {
-        const auto target = read_target(graph, node);
+        const auto &pc = parsed(node);
+        const auto &target = pc.target;
         if (!target.has_value())
             continue;
 
-        const auto active = graph->get_attrib_by_name<active_att>(node).value_or(false);
-        const auto pending = graph->get_attrib_by_name<epistemic_pending_att>(node).value_or(true);
+        const auto active = pc.active;
+        const auto pending = pc.pending;
         if (decode_protocol_state(active, pending) != ProtocolState::Executing)
             continue;
 
@@ -1098,12 +1119,13 @@ std::optional<AffordanceManager::Target> AffordanceManager::select_target(const 
     std::optional<Target> suppressed_target;
     for (const auto &node : affordances)
     {
-        const auto target = read_target(graph, node);
+        const auto &pc = parsed(node);
+        const auto &target = pc.target;
         if (!target.has_value())
             continue;
 
-        const auto active = graph->get_attrib_by_name<active_att>(node).value_or(false);
-        const auto pending = graph->get_attrib_by_name<epistemic_pending_att>(node).value_or(true);
+        const auto active = pc.active;
+        const auto pending = pc.pending;
         if (decode_protocol_state(active, pending) != ProtocolState::Offered)
         { last_reject_reason_ = "not-offered"; continue; }
 

@@ -1,6 +1,7 @@
 #include "mission_door_relation.h"
 #include "controller_world_model.h"
 #include "../../common/room_resolve/room_resolve.h"   // rc::room::current_room (proto-aware, deterministic)
+#include "controller_stage_timer.h"
 #include "rt_ring.h"                                  // rc::rt::latest_slot_from_head (cortex head-index decode)
 
 #include <algorithm>
@@ -272,7 +273,8 @@ std::optional<ControllerTargetInfo> ControllerWorldModel::read_target_in_room(st
         std::optional<Eigen::Vector2f> robot_pos;
         if (const auto pose = read_robot_pose_in_room(timestamp_ms, std::nullopt); pose.has_value())
             robot_pos = pose->pos;
-        if (const auto affordance_target = affordance_manager_->select_target(graph_, robot_pos); affordance_target.has_value())
+        const auto affordance_target = [&]{ RC_STAGE("wm.select_target"); return affordance_manager_->select_target(graph_, robot_pos); }();
+        if (affordance_target.has_value())
         {
             ControllerTargetInfo info;
             info.node_id = affordance_target->node_id;

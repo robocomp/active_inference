@@ -41,6 +41,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include "controller_stage_timer.h"
 #include <locale>
 #include <sstream>
 
@@ -781,7 +782,9 @@ void SpecificWorker::compute()
 	}
 
 	const auto now_ms = current_time_ms();
-	if (!sync_world_state(now_ms))
+	bool world_ok;
+	{ RC_STAGE("compute.sync_world_state"); world_ok = sync_world_state(now_ms); }
+	if (!world_ok)
 	{
 		session_.policy_interrupt();   // review I1
 		// No world this cycle: a relative motion must not coast on its last command.
@@ -803,7 +806,7 @@ void SpecificWorker::compute()
 		return;
 	}
 
-	const auto step = build_planning_step(now_ms);
+	const auto step = [&]{ RC_STAGE("compute.build_planning_step"); return build_planning_step(now_ms); }();
 	update_selected_affordance_label();
 	if (!step.has_value())
 	{
@@ -838,7 +841,8 @@ void SpecificWorker::compute()
 	}
 	stop_sent_when_halted_ = false;
 
-	if (!ensure_current_plan(*step))
+	const bool plan_ok = [&]{ RC_STAGE("compute.ensure_current_plan"); return ensure_current_plan(*step); }();
+	if (!plan_ok)
 	{
 		session_.policy_interrupt();   // review I1: a hold — the policy did not drive this cycle
 		// No route held too long ⇒ tell the producer (the early return below never reaches execute_plan).
@@ -886,8 +890,8 @@ void SpecificWorker::compute()
 		log_hold("end", hold_started_reason_, &step->robot_pose);
 		hold_started_ms_ = 0;
 	}
-	execute_plan(step->robot_pose);
-	update_custom_widget(step->robot_pose);
+	{ RC_STAGE("compute.execute_plan"); execute_plan(step->robot_pose); }
+	{ RC_STAGE("compute.update_custom_widget"); update_custom_widget(step->robot_pose); }
 }
 
 /////////////////////////////////////////////////////////////////
@@ -1595,6 +1599,7 @@ void SpecificWorker::control_loop()
 		}
 		if (!control_running_.load(std::memory_order_acquire))
 			break;
+		RC_STAGE("ctl.iteration_busy");
 		session_.why().begin();   // this pass's evidence (motion_verdict.h); selected in finish_why_cycle below
 
 		// 1) Drain user commands (target clicks, follow toggle) on the owning thread.
@@ -1633,8 +1638,8 @@ void SpecificWorker::control_loop()
 		//   room is re-read — does not run while the stream is stalled. When ltsm deleted the room just left
 		//   before this agent had followed `current`, that closed a loop: no room ⇒ sweeps rejected ⇒ stall ⇒ no
 		//   compute() ⇒ no room, for ever (live try15: robot halted in the doorway, 175 s and counting).
-		world_model_.refresh_graph_state();
-		last_lidar_poll_ = poll_lidar_media();
+		{ RC_STAGE("ctl.refresh_graph_state"); world_model_.refresh_graph_state(); }
+		{ RC_STAGE("ctl.poll_lidar_media"); last_lidar_poll_ = poll_lidar_media(); }
 		const bool fresh_lidar = (last_lidar_poll_ == LidarPoll::Fresh);
 		if (fresh_lidar)
 		{
@@ -1788,11 +1793,12 @@ void SpecificWorker::control_loop()
 
 			if (!lidar_stalled_)
 			{
-				compute();
+				{ RC_STAGE("compute.total"); compute(); }
 				pipeline_ran = true;
 			}
 		}
 
+		rc::StageProfile::instance().report_if_due(5.0);
 		// ── WHY IS THE ROBOT NOT MOVING (motion_verdict.h) ── observability only.
 		// A verdict is selected when this pass DECIDED something: compute() ran, or the pipeline is held for a reason
 		// only this loop knows. A pass that merely found no fresh scan (about half of all healthy passes) decides

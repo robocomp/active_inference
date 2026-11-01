@@ -14,6 +14,7 @@
 #include "band_cross.h"                 // Task 6 fix round 1: [Route] BandDrivesCross's route through the opening
 #include "local_policy/contact.h"       // Task 6: denoise_returns, the policy's surface model
 
+#include "controller_stage_timer.h"
 #include <algorithm>
 #include <array>
 #include <ranges>
@@ -143,7 +144,8 @@ bool ControllerSession::sync_world_state(std::uint64_t timestamp_ms,
     // (stepped before build_planning_step) reads them fresh too.
     read_base_odometry(world_model, timestamp_ms);
 
-    if (!world_model.refresh_graph_state())
+    // control_loop refreshes the graph state at the top of every pass, right before compute(); no second scan here.
+    if (!world_model.graph_state().ready())
     {
         room_polygon_.clear();
         current_plan_.reset();
@@ -487,7 +489,7 @@ bool ControllerSession::sync_world_state(std::uint64_t timestamp_ms,
                        " dropped by the base. Watch base_commands.jsonl's `side` field.";
     }
 
-    obstacle_tracker.update_active_obstacle_polygons(timestamp_ms, path_controller);
+    { RC_STAGE("session.update_obstacle_polygons"); obstacle_tracker.update_active_obstacle_polygons(timestamp_ms, path_controller); }
     // Rasterise the SAME obstacle set the visibility graph used into the footprint planner's grid. Cheap
     // enough to redo every cycle (0.3 ms on the apartment) and independent of polygon count, so the obstacle
     // set can be as detailed as perception makes it without the planner degrading.
@@ -545,6 +547,8 @@ bool ControllerSession::sync_world_state(std::uint64_t timestamp_ms,
         policy_leaf_evidence_ = std::move(ev);
     }
     else policy_leaf_mass_logged_ = -1.f;
+    {
+    RC_STAGE("session.grid_set_world");
     grid_planner_.set_world(room_polygon_, obstacle_tracker.obstacle_polygons(),
                             {.centres = obstacle_tracker.residual_cells(),
                              .cell_size_m = obstacle_tracker.residual_cell_size_m(),
@@ -555,6 +559,7 @@ bool ControllerSession::sync_world_state(std::uint64_t timestamp_ms,
                                      live_hard[k] = (live_hard[k] and k < residual_risk.size() and not std::isfinite(residual_risk[k])) ? 1 : 0;
                                  return std::move(live_hard);
                              }()});
+    }
     // One line when the split changes materially — the soft/hard census is what says whether a "no route"
     // was decided by belief or by measurement.
     {
@@ -6411,6 +6416,7 @@ void ControllerSession::update_display(const std::optional<ControllerRobotPose> 
                                        const ControllerPolygons &obstacle_rfe_points,
                                        int max_lidar_draw_points) const
 {
+    RC_STAGE("session.update_display");
     // The displayed cloud and icon are drawn at the scan's own pose. Display-side dead-reckoning to
     // "now" was removed 2026-08-04: it only ever applied when overlay_draw_one_frame_old was OFF, and
     // that A/B settled ON (see etc/config.toml) — the cloud is registered exactly at its scan stamp,
