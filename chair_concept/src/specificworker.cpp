@@ -786,9 +786,9 @@ void SpecificWorker::run_instance_tracker()
         std::set<std::string> live_names;
         for (const auto& n : G->get_nodes_by_type("object"))
             if (n.name().starts_with("chair_")) live_names.insert(n.name());
-        // Read under the room whose frame the birth centroid is in (ltom publishes under current_room too).
-        if (const auto cur = rc::room::current_room(*G))
-            recall_cands = rc::recall_candidates(*G, *cur, static_cast<std::uint32_t>(G->get_agent_id()),
+        // Only when the birth parent (latched room) IS the current room ltom publishes under (rc::recall_room).
+        if (const auto room = rc::recall_room(room_node_id_, rc::room::current_room(*G)))
+            recall_cands = rc::recall_candidates(*G, *room, static_cast<std::uint32_t>(G->get_agent_id()),
                                                  scene_graph_->identity_last(), live_names);
     }
     for (const int d : res.births)

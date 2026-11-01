@@ -124,6 +124,14 @@ static void test_polygon_area()
     CHECK(rc::polygon_area({}) == 0.f);
 }
 
+static void test_recall_room_only_when_latched_is_current()
+{
+    CHECK(rc::recall_room(7, std::optional<std::uint64_t>{7}) == std::optional<std::uint64_t>{7});
+    CHECK(not rc::recall_room(7, std::optional<std::uint64_t>{9}).has_value());   // room change in flight
+    CHECK(not rc::recall_room(7, std::nullopt).has_value());                        // nobody says where we are
+    CHECK(not rc::recall_room(0, std::optional<std::uint64_t>{0}).has_value());    // not latched yet
+}
+
 int main()
 {
     const auto run = [](const char* name, void (*fn)(Fixture&))
@@ -145,5 +153,6 @@ int main()
     };
     plain("test_candidate_taken_once", test_candidate_taken_once);
     plain("test_polygon_area", test_polygon_area);
+    plain("test_recall_room_only_when_latched_is_current", test_recall_room_only_when_latched_is_current);
     return failures ? 1 : 0;
 }

@@ -28,6 +28,17 @@ struct RecallCand
 
 inline constexpr std::uint64_t kUidNumberMask = (std::uint64_t{1} << 40) - 1;
 
+// The room to read recall candidates under, or none. A birth is parented under chair's LATCHED room
+// (room_node_id_, which every existing chair's RT edge is written from), while ltom publishes recalls under the
+// CURRENT room. They differ only for the few cycles of a room change (the latch re-resolves when the old room is
+// evicted). Resurrect only when they agree, so candidates, birth parent and ltom's room are one frame; otherwise
+// the newborn simply takes a fresh number.
+inline std::optional<std::uint64_t> recall_room(std::uint64_t latched, std::optional<std::uint64_t> current)
+{
+    if (latched == 0 or not current.has_value() or *current != latched) return std::nullopt;
+    return latched;
+}
+
 inline std::vector<RecallCand> recall_candidates(DSR::DSRGraph& G, std::uint64_t room_id, std::uint32_t my_agent_id, int max_n,
                                                  const std::set<std::string>& live_names)
 {
