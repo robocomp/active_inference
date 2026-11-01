@@ -50,6 +50,15 @@ inline std::string trim_lower(std::string_view s)
     while (not s.empty() and std::isspace(static_cast<unsigned char>(s.back()))) s.remove_suffix(1);
     return lower_ascii(std::string(s));
 }
+/// Loose names from the model: one leading article dropped (EN/ES), '-' / ' ' / '_' equivalent, case folded.
+inline std::string norm_name(std::string_view s)
+{
+    std::string t = trim_lower(s);
+    for (const std::string_view art : {"the ", "an ", "a ", "el ", "la ", "los ", "las ", "unas ", "unos ", "una ", "un "})
+        if (t.starts_with(art)) { t.erase(0, art.size()); break; }
+    for (auto& c : t) if (c == '-' or c == ' ') c = '_';
+    return t;
+}
 inline Opening angle_opening(float deg, std::string_view word)
 {
     const float rad = deg * std::numbers::pi_v<float> / 180.0f;
@@ -62,12 +71,16 @@ inline Opening angle_opening(float deg, std::string_view word)
 [[nodiscard]] inline std::expected<Opening, std::string> parse_opening(std::string_view s)
 {
     using imagine_detail::angle_opening;
-    const std::string t = imagine_detail::trim_lower(s);
-    if (t.empty() or t == "as_is") return Opening{std::nullopt, "as it is now"};
-    if (t == "shut" or t == "closed") return angle_opening(0.0f, t);
-    if (t == "ajar") return angle_opening(15.0f, t);
-    if (t == "half" or t == "half open") return angle_opening(45.0f, t);
-    if (t == "wide" or t == "wide open" or t == "open" or t == "fully open") return angle_opening(90.0f, t);
+    std::string t = imagine_detail::trim_lower(s);
+    for (std::size_t i = 0; i < t.size(); ++i)
+        if (t[i] == '_' or (t[i] == '-' and i > 0)) t[i] = ' ';   // a leading '-' is a sign
+    if (t.empty() or t == "as is") return Opening{std::nullopt, "as it is now"};
+    const auto is = [&](std::initializer_list<std::string_view> ws) { return std::ranges::find(ws, t) != ws.end(); };
+    if (is({"shut", "closed", "cerrada", "cerrado"})) return angle_opening(0.0f, t);
+    if (is({"ajar", "slightly open", "a bit open", "cracked", "entreabierta", "entreabierto"})) return angle_opening(15.0f, t);
+    if (is({"half", "half open", "halfway", "medio abierta", "medio abierto", "a medias"})) return angle_opening(45.0f, t);
+    if (is({"wide", "wide open", "open", "fully open", "all the way", "abierta", "abierto", "abierta del todo", "de par en par"}))
+        return angle_opening(90.0f, t);
 
     std::string_view n = t;
     for (const std::string_view suffix : {"degrees", "degree", "deg", "°"})
@@ -90,8 +103,8 @@ using Intervened = std::expected<ImaginedWorld, std::string>;
 
 [[nodiscard]] inline Intervened with_door_phi(ImaginedWorld w, std::string_view door, float phi_rad)
 {
-    const std::string key = lower_ascii(std::string(door));
-    const auto it = std::ranges::find_if(w.scene.doors, [&](const SeeDoor& d) { return lower_ascii(d.name) == key; });
+    const std::string key = imagine_detail::norm_name(door);
+    const auto it = std::ranges::find_if(w.scene.doors, [&](const SeeDoor& d) { return imagine_detail::norm_name(d.name) == key; });
     if (it == w.scene.doors.end()) return std::unexpected(std::format("I don't know a door called {}", door));
     it->phi_rad = phi_rad;
     it->p_open.reset();   // the evaluator then uses phi, not the old P(open)
@@ -111,8 +124,8 @@ using Intervened = std::expected<ImaginedWorld, std::string>;
 
 [[nodiscard]] inline Intervened with_object_moved(ImaginedWorld w, std::string_view object, float dx, float dy)
 {
-    const std::string key = lower_ascii(std::string(object));
-    const auto it = std::ranges::find_if(w.scene.objects, [&](const SeeObject& o) { return lower_ascii(o.name) == key; });
+    const std::string key = imagine_detail::norm_name(object);
+    const auto it = std::ranges::find_if(w.scene.objects, [&](const SeeObject& o) { return imagine_detail::norm_name(o.name) == key; });
     if (it == w.scene.objects.end()) return std::unexpected(std::format("I don't know an object called {}", object));
     it->x += dx;
     it->y += dy;
@@ -127,21 +140,21 @@ struct Standpoint { Eigen::Vector2f xy; std::optional<float> yaw; std::string wo
 [[nodiscard]] inline std::expected<Standpoint, std::string> resolve_standpoint(const ImaginedWorld& w, std::string_view from)
 {
     const SeeScene& s = w.scene;
-    const std::string f = imagine_detail::trim_lower(from);
-    if (f.empty() or f == "here" or f == "me" or f == "the robot" or f == lower_ascii(s.room))
+    const std::string f = imagine_detail::norm_name(from);
+    if (f.empty() or f == "here" or f == "me" or f == "robot" or f == imagine_detail::norm_name(s.room))
     {
         if (not s.robot_xy.has_value()) return std::unexpected("I don't know where I am");
         return Standpoint{*s.robot_xy, s.robot_yaw + std::numbers::pi_v<float> / 2.0f, "where I am"};
     }
     for (const auto& d : s.doors)
-        if (lower_ascii(d.name) == f) return Standpoint{d.xy, std::nullopt, std::format("the doorway of {}", d.name)};
+        if (imagine_detail::norm_name(d.name) == f) return Standpoint{d.xy, std::nullopt, std::format("the doorway of {}", d.name)};
 
     const SeeObject* pick = nullptr;
     for (const auto& o : s.objects)
-        if (lower_ascii(o.name) == f) { pick = &o; break; }
+        if (imagine_detail::norm_name(o.name) == f) { pick = &o; break; }
     if (pick == nullptr)
     {
-        const std::string cls = canonical_concept(f);
+        const std::string cls = canonical_concept(f);   // f has '_' for spaces; classes are single words
         std::vector<const SeeObject*> same;
         for (const auto& o : s.objects)
             if (lower_ascii(o.subtype) == cls) same.push_back(&o);

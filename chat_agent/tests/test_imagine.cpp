@@ -83,11 +83,19 @@ int main()
     assert(op->xy.x() > 1);                       // the robot's side (robot at x = 4)
     assert(near(std::cos(*op->yaw), -1.0f));      // facing the object, back toward -x
     const auto byclass = resolve_standpoint(w0, "the table");
-    assert(not byclass.has_value());              // "the table" is not a class word: ASK
+    assert(byclass.has_value() and near(byclass->xy.x(), op->xy.x()));   // article stripped
     assert(resolve_standpoint(w0, "table").has_value());
     const auto nosize = resolve_standpoint(w0, "chair_1");
     assert(nosize.has_value() and nosize->words.contains("size is unknown"));
     assert(near((nosize->xy - Eigen::Vector2f(-1, 1)).norm(), kRobotRadiusM));
+    assert(resolve_standpoint(w0, "door 2").has_value() and resolve_standpoint(w0, "the door_2").has_value());
+    assert(with_door_phi(w0, "the Door-2", 0.1f).has_value() and with_object_moved(w0, "the table_1", 1, 0).has_value());
+    assert(near(*parse_opening("half-open")->phi_rad, kPi / 4) and near(*parse_opening("half_open")->phi_rad, kPi / 4));
+    assert(near(*parse_opening("halfway")->phi_rad, kPi / 4) and parse_opening("half-open")->words.contains("45"));
+    assert(near(*parse_opening("medio abierta")->phi_rad, kPi / 4) and near(*parse_opening("cracked")->phi_rad, kPi / 12));
+    assert(near(*parse_opening("de par en par")->phi_rad, kPi / 2) and near(*parse_opening("cerrada")->phi_rad, 0));
+    assert(near(*parse_opening("fully_open")->phi_rad, kPi / 2) and near(*parse_opening("all the way")->phi_rad, kPi / 2));
+    assert(not parse_opening("as_is")->phi_rad.has_value());
     assert(resolve_standpoint(w0, "the moon").error() == "ASK: which place do you mean by 'there'?");
 
     std::println("test_imagine: ok");
