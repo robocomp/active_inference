@@ -35,6 +35,7 @@ Goals
 - G4. A concept agent creating a new instance can find the remembered candidates and resurrect one (old uid,
   internal name, given name) when the evidence says it is the same object.
 - G5. language_agent can answer "where was grandma's chair yesterday" and "what is usually in the kitchen".
+- G6. Relations acquired over time, learned or told, are kept as edges between object nodes (§6.4).
 
 Non-goals
 - Deciding identity (U4). The memory offers candidates and stores decisions; it does not make them.
@@ -116,6 +117,31 @@ Anti-goals
 - **Encoder id** on every atlas (model hash + fitted-constants version). Different ids are not compared:
   likelihood ratio 1, never a low similarity.
 - **Later:** with every atlas in one place, cross-class re-identification (first a chair, later a table).
+
+### 6.4 Acquired relations: edges between object nodes (user, 11-01)
+In the memory graph each remembered object is a node; **edges are reserved for acquired relations**, both kinds
+(user: "both"):
+
+- **Learned from repeated observation** — habitual relations, e.g. `usually_on` (bottle → table),
+  `usually_near` (chair → table), `member_of` (chair → dining set, from ring_metaconcept's arrangements),
+  object → room `usually_in`. Each edge carries a belief that grows with evidence (a Beta of "held when both
+  were observed" against "both observed, relation did not hold"), updated in the same visibility-aware way as
+  permanence (§5): only co-observations count, deletions never do. No edge is "created at a threshold": an edge
+  exists once the pair has been co-observed, its strength is the belief.
+- **Told by the person** — e.g. `belongs_to` ("grandma's chair"), `goes_in` ("the remote goes in that
+  drawer"), properties as attributes ("fragile"). Written by ltom on language_agent's request (same
+  request/adopt pattern as given names: language_agent never writes the memory graph), carrying
+  `source = told`, who said it and when. The robot can then answer "you told me".
+- **Not stored:** relations computable from current poses ("40 cm from the table now") — the live graph has them.
+  Memory edges hold only what accumulates over time or what was said.
+- **Uses:** recall priors (the bottle is not where it was left ⇒ look on the table: the edge's target and strength
+  go on the recall node), spatial descriptions (instance-names spec §5: a habitual relation is a better
+  landmark), language_agent's history questions ("where does the remote usually go?").
+- Edge types are registered in cortex (`REGISTER_EDGE_TYPE`, the user reinstalls). Relation vocabulary beyond the
+  examples is the builder's, kept small; each learned relation's geometric likelihood reuses the relation model
+  of the instance-names spec §5.1 so "near" means the same thing when learned, spoken and understood.
+- Rollout: after step 3 of §8 (learned `usually_in` and `usually_near` first; told relations with the
+  instance-names work).
 
 ## 7. Identity and names without waiting for the memory
 
