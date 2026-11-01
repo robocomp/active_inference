@@ -226,8 +226,8 @@ void SpecificWorker::compute()
         const auto room = rc::room::current_room(*G);
         const auto room_node = room ? G->get_node(*room) : std::nullopt;
         const auto key = room_node ? ltom::room_key_of(*G, *room_node) : std::nullopt;
-        if (key)
-            recall_pub_->sync(room, ltom::select_recalls(*repertory_, *key, view.present, params_.recall_classes));
+        if (const auto offer = ltom::recall_room(*G, key ? room : std::nullopt))
+            recall_pub_->sync(offer, ltom::select_recalls(*repertory_, *key, view.present, params_.recall_classes));
         else
             recall_pub_->sync(std::nullopt, {});
     }
@@ -239,8 +239,7 @@ void SpecificWorker::compute()
 // A crashed or SIGKILLed previous run leaves its recall nodes behind (CLAUDE.md "Startup stale-sweep").
 void SpecificWorker::sweep_stale_recalls()
 {
-    const rc::owned::Spec spec{.agent = "ltom_agent", .name_prefix = "ltom_recall_", .node_types = {"metaconcept"}};
-    rc::owned::remove_instance_nodes(*G, spec);
+    rc::owned::remove_instance_nodes(*G, ltom::kRecallSpec);
 }
 
 void SpecificWorker::emergency() {}

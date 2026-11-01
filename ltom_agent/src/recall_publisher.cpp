@@ -51,8 +51,13 @@ void RecallPublisher::write_pose(std::uint64_t room_id, std::uint64_t node_id, c
                                       {static_cast<float>(p.x), static_cast<float>(p.y), 0.0f},
                                       {0.0f, 0.0f, static_cast<float>(p.yaw)});
     float last_trace = 0.0f;
+    // Record the pose as written only when the edge exists AND its covariance landed: otherwise the next sync retries.
+    if (not G_->get_edge(room_id, node_id, "RT")) { warn_once(name, "RT edge write failed"); return; }
     if (not rc::rtcov::publish(*G_, room_id, node_id, variances(r.kf), last_trace, true, name))
+    {
         warn_once(name, "rt_covariance write failed");
+        return;
+    }
     written_[r.uid] = r.kf;
 }
 

@@ -13,8 +13,22 @@
 #include <set>
 #include <span>
 
+#include "../../common/owned_nodes/owned_nodes.h"
+
 namespace ltom
 {
+// The nodes this agent owns besides its agent node: the stale sweep (agent + test) and nothing else defines them.
+inline const rc::owned::Spec kRecallSpec{.agent = "ltom_agent", .name_prefix = "ltom_recall_", .node_types = {"metaconcept"},
+                                                  .legacy_parent_types = {}, .affordance_prefix = {}};
+
+// The room recalls may be offered under: `room` unless it is a proto-room (provisional frame; graph_sightings records
+// nothing there either, and a trailing-digit key could coincide with a remembered room's).
+inline std::optional<std::uint64_t> recall_room(DSR::DSRGraph& G, std::optional<std::uint64_t> room)
+{
+    if (room and G.get_edge(*room, *room, "proto").has_value()) return std::nullopt;   // == rc::room::is_proto
+    return room;
+}
+
 class RecallPublisher
 {
 public:

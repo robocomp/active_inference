@@ -136,10 +136,53 @@ static void test_stale_sweep(Fixture& f)
     add_node(*f.G, DSR::Node::create<metaconcept_node_type>("ltom_recall_9"), f.room1);
     add_node(*f.G, DSR::Node::create<metaconcept_node_type>("recall_room_1"), f.room1);
     CHECK(f.recall_count() == 1);
-    const rc::owned::Spec spec{.agent = "ltom_agent", .name_prefix = "ltom_recall_", .node_types = {"metaconcept"}};
-    CHECK(rc::owned::remove_instance_nodes(*f.G, spec) == 1);
+    CHECK(rc::owned::remove_instance_nodes(*f.G, ltom::kRecallSpec) == 1);
     CHECK(f.recall_count() == 0);
     CHECK(f.node("recall_room_1").has_value());
+}
+
+static void test_sync_cleans_leftover_from_previous_run(Fixture& f)
+{
+    const auto leftover = [&]
+    {
+        const auto id = add_node(*f.G, DSR::Node::create<metaconcept_node_type>(rname(kUid3)), f.room1);
+        auto e = DSR::Edge::create<RT_edge_type>(f.room1, id);
+        f.G->add_or_modify_attrib_local<rt_translation_att>(e, std::vector<float>{9.f, 9.f, 0.f});
+        f.G->add_or_modify_attrib_local<rt_rotation_euler_xyz_att>(e, std::vector<float>{0.f, 0.f, 0.f});
+        f.G->insert_or_assign_edge(e);
+        return id;
+    };
+    // wanted at a new pose: the fresh publisher (empty record) re-poses the leftover instead of trusting it
+    const auto id = leftover();
+    f.pub->sync(f.room1, std::vector{recall(kUid3, 1.0, 2.0, 0.0)});
+    CHECK(f.recall_count() == 1);
+    const auto e = f.G->get_edge(f.room1, id, "RT");
+    CHECK(e.has_value());
+    if (e)
+    {
+        const auto T = f.G->get_rt_api()->get_edge_RT_as_rtmat(*e);
+        CHECK(T.has_value() and std::abs(T->translation().x() - 1.0) < 1e-5 and std::abs(T->translation().y() - 2.0) < 1e-5);
+    }
+    // not wanted: a fresh publisher deletes it
+    f.pub->sync(f.room1, std::vector<ltom::Recall>{});
+    CHECK(f.recall_count() == 0);
+    leftover();
+    ltom::RecallPublisher fresh(f.G);
+    fresh.sync(f.room1, std::vector<ltom::Recall>{});
+    CHECK(f.recall_count() == 0);
+}
+
+static void test_proto_room_offers_nothing(Fixture& f)
+{
+    auto e = DSR::Edge::create<proto_edge_type>(f.room1, f.room1);
+    f.G->insert_or_assign_edge(e);
+    CHECK(not ltom::recall_room(*f.G, f.room1).has_value());
+    CHECK(ltom::recall_room(*f.G, f.room2) == f.room2);
+    CHECK(not ltom::recall_room(*f.G, std::nullopt).has_value());
+    f.pub->sync(ltom::recall_room(*f.G, f.room1), std::vector{recall(kUid3, 1.0, 1.0, 0.0)});
+    CHECK(f.recall_count() == 0);
+    f.pub->sync(ltom::recall_room(*f.G, f.room2), std::vector{recall(kUid3, 1.0, 1.0, 0.0)});
+    CHECK(f.recall_count() == 1);
 }
 
 static void test_never_touches_other_nodes(Fixture& f)
@@ -169,6 +212,8 @@ int main()
     run("test_removed_when_alive", test_removed_when_alive);
     run("test_no_room_no_recall", test_no_room_no_recall);
     run("test_stale_sweep", test_stale_sweep);
+    run("test_sync_cleans_leftover_from_previous_run", test_sync_cleans_leftover_from_previous_run);
+    run("test_proto_room_offers_nothing", test_proto_room_offers_nothing);
     run("test_never_touches_other_nodes", test_never_touches_other_nodes);
     return failures ? 1 : 0;
 }
