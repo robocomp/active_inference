@@ -91,6 +91,7 @@ namespace rc
         std::optional<Eigen::Affine2f> last_published_pose_;
         std::int64_t                   last_published_ts_ms_ = 0;
         long                           pose_clamp_hits_      = 0;
+        long                           pose_clamp_mrej_      = 0;   // measured motions rejected as outside the dynamics
         std::optional<Eigen::Vector3f> last_published_est_;
         std::uint64_t                  last_published_reloc_epoch_ = 0;   // see UpdateResult::reloc_epoch
 

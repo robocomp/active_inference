@@ -343,6 +343,11 @@ bool PosePublisher::maybe_publish_corrected_pose()
                 last_published_pose_.value(), last_published_est_, loc_res->robot_pose,
                 Eigen::Vector3f(loc_res->pred_x, loc_res->pred_y, loc_res->pred_theta),
                 params.POSE_CLAMP_V_MAX * dt, params.POSE_CLAMP_W_MAX * dt);
+            if (cl.m_rejected and (++pose_clamp_mrej_ % 20 == 1))   // the measured motion was outside the dynamics: ignored
+                qWarning().noquote() << QString("[pose-clamp] MEASURED MOTION REJECTED (%1 times): pred (%2,%3,%4) vs the last estimate "
+                    "implies more than the robot can move in %5 s — treated as no motion (a default prediction after a reset?)")
+                    .arg(pose_clamp_mrej_).arg(loc_res->pred_x, 0, 'f', 3).arg(loc_res->pred_y, 0, 'f', 3)
+                    .arg(loc_res->pred_theta, 0, 'f', 3).arg(dt, 0, 'f', 3);
             if (cl.fired)
             {
                 // The part of the correction NOT applied is real, known error in the published pose: surfaced as

@@ -46,6 +46,7 @@ struct Clamp
     float res_th = 0.f;
     bool  fired = false;
     float n_xy = 0.f, c_th = 0.f, m_th = 0.f;             ///< for the log
+    bool  m_rejected = false;                             ///< the measured motion was outside the dynamics (ignored)
 };
 
 /// The kinematic clamp. `prev` = last published pose, `prev_est` = the localiser's estimate at that publish (pre-clamp),
@@ -87,6 +88,18 @@ inline Clamp clamp_correction(const Eigen::Affine2f& prev, const std::optional<E
         const Eigen::Vector3f& pe = prev_est.value();
         m_xy = Eigen::Vector2f(pred.x() - pe.x(), pred.y() - pe.y());
         m_th = std::remainder(pred.z() - pe.z(), 2.f * static_cast<float>(M_PI));
+    }
+
+    // ★ THE MEASURED MOTION HAS THE SAME SUPPORT AS THE CORRECTION (2026-11-01, warm21): a step the robot's dynamics cannot
+    //   produce is not a measurement of where it went. A frame whose prediction was never made (the DEFAULT (0,0,0) after a
+    //   model reset) "measured" -(the whole pose); passed through unbounded it re-based the published pose by about (-4.1,
+    //   -6.3) m every frame — (-268,-458) after minutes, covariance 290+ m, the controller blind. Outside the support it
+    //   counts as NO measured motion, and the whole step goes through the bounded correction below.
+    if (not m_xy.allFinite() or not std::isfinite(m_th) or m_xy.norm() > max_xy or std::abs(m_th) > max_th)
+    {
+        out.m_rejected = true;
+        m_xy = Eigen::Vector2f::Zero();
+        m_th = 0.f;
     }
 
     // What is left after the measured motion is accounted for IS the correction — the only
