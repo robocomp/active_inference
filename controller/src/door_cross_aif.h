@@ -103,13 +103,19 @@ struct DoorCrossAifStep
     const float span = body.half_width * std::abs(std::cos(g.heading_err)) + d * std::abs(std::sin(g.heading_err));
     const float room = std::max(0.f, clear_half - span);
     const float sigma_n2 = std::max(1e-6f, g.n.dot(r.P.topLeftCorner<2, 2>() * g.n));
-    out.pi_e = 1.f / std::max(1e-6f, room * room + g.sigma_lat * g.sigma_lat);
+    // ★ THE JAMBS BIND ONLY THE PART OF THE BODY NOT YET PAST THEM (2026-11-01). The lateral preference exists because of
+    //   the jambs; its precision is weighted by the share of the body (radius r_b about its centre, s along the normal)
+    //   still in or before the opening: 1 wholly before, 0 wholly past, linear between. warm28 leg 2: 0.75 m past DOOR_2 and
+    //   0.31 m off the line, the servo spun at 1 rad/s with adv 0 to recentre a body the jambs no longer constrained.
+    const float r_b = std::hypot(body.half_width, d);
+    const float before = std::clamp((r_b - g.s) / (2.f * r_b), 0.f, 1.f);
+    out.pi_e = before * before / std::max(1e-6f, room * room + g.sigma_lat * g.sigma_lat);
     out.p_fit = anchor_p_fit_at_entry(width, leaves, body.half_width, g.e, line, g.s, d, v_max, g.sigma_lat, free_advance);
     // ★ THE ENTRY HAS HAPPENED once the body is wholly past the opening (its centre beyond the body's radius along the normal —
     //   the passage's own THROUGH test). warm24 leg 2: through DOOR_2, the drive-in stalled ~0.9 m past it for 600 s — DOOR_2's
     //   leaf, which swings into the room entered, stood beside the robot, the heading drifted to -59 deg, and P(fit AT ENTRY)
     //   0.003 still scaled the progress of a body that had already entered.
-    if (g.s > std::hypot(body.half_width, d)) out.p_fit = 1.f;
+    if (g.s > r_b) out.p_fit = 1.f;
     out.pi_s = 1.f / sigma_n2;
     out.t_e = std::max(-out.s, 0.f) / v_max + dt;
     out.t_s = std::max(out.s_goal - out.s, 0.f) / v_max + dt;

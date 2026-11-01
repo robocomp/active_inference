@@ -133,6 +133,18 @@ int main()
         if (not (st.p_fit > 0.99f and (st.cmd.adv > 0.05f or std::abs(st.cmd.rot) > 0.1f)))
         { ++fails; std::println("  FAIL drive-in held back by the entry fit"); }
     }
+    // ── warm28 leg 2: THROUGH DOOR_2, centre 0.75 m past and 0.31 m off the centre line — the servo spun at the full
+    //    1 rad/s with adv 0 to put a body already past the jambs back on the line. Past the opening the jambs bound nothing:
+    //    squared up, it must DRIVE ON (adv near v_max), not turn to null the offset.
+    {
+        rc::interaction::RelPose r;
+        r.x = Eigen::Vector3f(-0.31f, -0.75f, 0.f);
+        r.P = Eigen::Vector3f(4e-4f, 4e-4f, 3e-4f).asDiagonal();
+        const auto st = rc::door_cross_aif(r, 0.88f, {}, rc::DoorCrossAifBody{kHalfW, kHalfL}, kStandoff, kVmax, kWmax, kDt);
+        std::println("  drive-in 0.75 m past, 0.31 m off the line, squared up: adv {:+.3f} rot {:+.3f}", st.cmd.adv, st.cmd.rot);
+        if (not (st.cmd.adv > 0.5f * kVmax and std::abs(st.cmd.rot) < 0.2f))
+        { ++fails; std::println("  FAIL past the opening the servo still turns to recentre"); }
+    }
     std::println("{}", fails == 0 ? "warm24 cases: ALL PASS" : std::format("warm24 cases: {} FAILED", fails));
     return fails == 0 ? 0 : 1;
 }
