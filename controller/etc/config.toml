@@ -548,7 +548,7 @@ AffordanceSwitchMargin = 0.5  # commitment hysteresis (nats): held affordance mu
 # what should happen when the pose belief has genuinely degraded. Inert when no object is competing,
 # so a lost robot in an empty room is unaffected. 1.0 restores the old behaviour.
 AffordanceRoomGainScale = 0.35
-MaxAdvSpeed = 0.35   # 2026-10-09: was 0.7. With plain SLAM (mm pose) the pose-covariance limiter no longer holds speed down, and at 0.7 m/s the robot hit walls hard (WEDGE: 2.13 m commanded in 3 s). Revisit once collision handling is fixed.
+MaxAdvSpeed = 0.6    # 2026-11-01 (user: 0.35 too slow): 0.6, below room_concept PoseClampVMax 0.7 (a step faster is read as impossible motion); the look-ahead policy now checks contact risk. 2026-10-09: was 0.7. With plain SLAM (mm pose) the pose-covariance limiter no longer holds speed down, and at 0.7 m/s the robot hit walls hard (WEDGE: 2.13 m commanded in 3 s). Revisit once collision handling is fixed.
 # Lateral-acceleration budget, m/s^2. Sets BOTH the curvature speed ceiling (v = sqrt(a_lat/kappa), so the
 # robot arrives at a corner already slow enough to follow it) and the route optimiser's curvature
 # normaliser. Lower = gentler corners and slower laps; it does not affect straight-line speed at all.
