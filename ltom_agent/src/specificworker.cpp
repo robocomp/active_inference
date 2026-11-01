@@ -70,7 +70,7 @@ void SpecificWorker::request_shutdown()
 {
     if (shutting_down_.exchange(true))
         return;
-    save_now("exit");          // the repertory needs no graph: persist BEFORE the node cleanup / graph reset
+    if (repertory_ and repertory_->dirty()) save_now("exit");   // persist BEFORE the node cleanup / graph reset (nothing changed: keep .prev a real older generation)
     cleanup_owned_nodes();     // our presence agent node on the live graph, through the shared coordinator ([Owns])
 }
 
@@ -161,8 +161,12 @@ void SpecificWorker::initialize()
     repertory_ = std::make_unique<ltom::Repertory>(params_.owner_grace_ms);
     const auto res = ltom::load_repertory(params_.repertory_path, *repertory_);
     repertory_->close_open_lives_as_gap();   // our own downtime is a gap, never a death
+    save_blocked_ = res == ltom::LoadResult::blocked;
+    if (save_blocked_)
+        std::println(stderr, "⚠⚠ [ltom] a bad repertory file could not be moved aside: NOT SAVING until it is removed and the agent restarted");
     const char* how = res == ltom::LoadResult::loaded ? "loaded" : res == ltom::LoadResult::loaded_prev ? "loaded from .prev"
-                    : res == ltom::LoadResult::missing ? "no file, starting empty" : "UNREADABLE, starting empty";
+                    : res == ltom::LoadResult::missing ? "no file, starting empty"
+                    : res == ltom::LoadResult::blocked ? "BAD FILE NOT MOVED ASIDE, saving disabled" : "UNREADABLE, starting empty";
     std::println("[ltom] repertory {}: {} ({} entries)", params_.repertory_path, how, repertory_->entries().size());
     inner_eigen_ = G->get_inner_eigen_api();   // once, on the main thread, after the graph is up
 
@@ -173,7 +177,7 @@ void SpecificWorker::initialize()
 
 void SpecificWorker::save_now(const char* why)
 {
-    if (not repertory_) return;
+    if (not repertory_ or save_blocked_) return;
     const bool ok = ltom::save_repertory(params_.repertory_path, *repertory_) and ltom::write_csv(params_.csv_path, *repertory_);
     if (ok) repertory_->clear_dirty();
     last_save_ = std::chrono::steady_clock::now();
@@ -187,7 +191,7 @@ void SpecificWorker::compute()
     const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::system_clock::now().time_since_epoch()).count();   // same clock as timestamp_creation
     const auto view = ltom::read_graph(*G, *inner_eigen_, params_.classes);
-    const auto ch = repertory_->observe(view.alive, view.owners_present, now_ms);
+    const auto ch = repertory_->observe(view.alive, view.owners_present, view.present, now_ms);
 
     const auto log = [this](const char* what, const std::vector<std::uint64_t>& uids)
     {

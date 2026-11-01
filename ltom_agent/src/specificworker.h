@@ -66,6 +66,7 @@ private:
     void save_now(const char* why);
     std::unique_ptr<ltom::Repertory> repertory_;
     std::unique_ptr<DSR::InnerEigenAPI> inner_eigen_;   // created ONCE in initialize(), on the main thread (owns the ts==0 cache)
+    bool save_blocked_ = false;                         // load could not move a bad file aside: never save over the good copy
     bool operating_ = false;                            // compute() polls only while the presence SM is Operating
     std::chrono::steady_clock::time_point last_save_{std::chrono::steady_clock::now()};
 

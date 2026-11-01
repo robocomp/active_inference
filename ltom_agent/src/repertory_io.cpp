@@ -1,5 +1,6 @@
 #include "repertory_io.h"
 
+#include <array>
 #include <QByteArray>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -155,10 +156,17 @@ LoadResult load_repertory(const fs::path& file, Repertory& into)
 
     const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
     // A bad file is never left where the next save would rotate it over a good copy.
+    bool blocked = false;
     auto move_aside = [&](const fs::path& p)
     {
         fs::path bad = p; bad += ".bad." + std::to_string(ms);
         fs::rename(p, bad, ec);
+        if (ec)
+        {
+            blocked = true;
+            std::println(stderr, "⚠⚠ ltom: CANNOT move bad {} aside ({}): saving is disabled so it cannot clobber the good copy",
+                         p.string(), ec.message());
+        }
         return bad;
     };
 
@@ -172,14 +180,22 @@ LoadResult load_repertory(const fs::path& file, Repertory& into)
     if (have_prev and try_parse(prev, got))
     {
         std::println(stderr, "⚠ ltom: {} unreadable or missing, falling back to {}", file.string(), prev.string());
-        if (have_main) std::println(stderr, "⚠ ltom: bad main moved aside to {}", move_aside(file).string());
+        if (have_main)
+        {
+            const auto bad = move_aside(file);
+            if (not blocked) std::println(stderr, "⚠ ltom: bad main moved aside to {}", bad.string());
+        }
         for (Entry& e : got) into.insert_loaded(std::move(e));
-        return LoadResult::loaded_prev;
+        return blocked ? LoadResult::blocked : LoadResult::loaded_prev;
     }
-    if (have_main) std::println(stderr, "⚠⚠ ltom: unreadable repertory moved aside to {}", move_aside(file).string());
-    if (have_prev) std::println(stderr, "⚠⚠ ltom: unreadable .prev moved aside to {}", move_aside(prev).string());
+    for (const fs::path* p : std::array<const fs::path*, 2>{&file, &prev})
+        if (fs::exists(*p, ec))
+        {
+            const auto bad = move_aside(*p);
+            if (not blocked) std::println(stderr, "⚠⚠ ltom: unreadable {} moved aside to {}", p->string(), bad.string());
+        }
     std::println(stderr, "⚠⚠ ltom: starting EMPTY");
-    return LoadResult::unreadable;
+    return blocked ? LoadResult::blocked : LoadResult::unreadable;
 }
 
 bool save_repertory(const fs::path& file, const Repertory& r)

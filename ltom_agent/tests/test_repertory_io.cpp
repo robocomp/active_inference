@@ -7,6 +7,7 @@
 #include <fstream>
 #include <print>
 #include <sstream>
+#include <sys/stat.h>
 #include <unistd.h>
 
 using namespace ltom;
@@ -175,6 +176,23 @@ static void test_missing_main_bad_prev_moved_aside()
     CHECK(count_prefix(f.parent_path(), "rep.json.prev.bad.") == 1);
 }
 
+static void test_failed_move_aside_blocks_saving()
+{
+    if (::geteuid() == 0) return;   // root ignores the permission bits
+    const auto d = fresh_dir();
+    const auto f = d / "rep.json";
+    const auto r0 = make_repertory();
+    CHECK(save_repertory(f, r0));
+    CHECK(save_repertory(f, r0));                     // main + .prev both good
+    write_file(f, "garbage");                         // main torn
+    ::chmod(d.c_str(), 0500);                         // rename out of d now fails
+    Repertory r(3000);
+    CHECK(load_repertory(f, r) == LoadResult::blocked);
+    CHECK(r.entries().size() == 2);                   // the good .prev is still read
+    ::chmod(d.c_str(), 0700);
+    CHECK(fs::exists(f) and fs::exists(fs::path(f).concat(".prev")));   // nothing was lost or rotated
+}
+
 int main()
 {
     if (not std::setlocale(LC_ALL, "es_ES.UTF-8")) std::setlocale(LC_ALL, "");
@@ -184,6 +202,7 @@ int main()
     test_missing_is_missing();
     test_fallback_moves_bad_main_aside();
     test_missing_main_bad_prev_moved_aside();
+    test_failed_move_aside_blocks_saving();
     test_csv_has_points_not_commas();
     test_csv_row_count_and_header();
     if (failures == 0) std::println("test_repertory_io: ok");
