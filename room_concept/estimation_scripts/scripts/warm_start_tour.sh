@@ -24,7 +24,11 @@ cp $RC_CFG $RC_CFG.warm_bak; cp $LT_CFG $LT_CFG.warm_bak
 trap 'mv -f $RC_CFG.warm_bak $RC_CFG; mv -f $LT_CFG.warm_bak $LT_CFG; rm -f $LOCK; [ -n "$REC_PID" ] && kill -TERM $REC_PID 2>/dev/null' EXIT
 sed -i 's/^MapMode = "[a-z]*"/MapMode = "ltsm"/' $RC_CFG
 sed -i 's/^# Room = "room_1"/Room = "room_1"/' $LT_CFG
-grep -q '^MapMode = "ltsm"' $RC_CFG && grep -q '^Room = "room_1"' $LT_CFG || { echo "could not set MapMode=ltsm / WarmStart.Room"; exit 1; }
+# RECOGNITION ON (user 2026-11-01, warm11: R1 entered through DOOR_0 — a door never crossed in the memory — was promoted as a
+# NEW room_4 because recognition was off; ltsm then placed it on top of the remembered room_1)
+sed -i '/^\[Recognition\]/,/^\[/ s/^enabled = false/enabled = true/' $LT_CFG
+grep -q '^MapMode = "ltsm"' $RC_CFG && grep -q '^Room = "room_1"' $LT_CFG && grep -q '^enabled = true   # RoomSwap' $LT_CFG \
+    || { echo "could not set MapMode=ltsm / WarmStart.Room / Recognition.enabled"; exit 1; }
 echo stop > $B/controller/remote_cmd.txt
 # ── archive what is there (never just delete), then install the fixture (COPIES) ──
 STAMP=$(date +%Y%m%d_%H%M%S)
