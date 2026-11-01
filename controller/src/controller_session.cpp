@@ -6950,6 +6950,31 @@ bool ControllerSession::consume_goal_reached(bool goal_reached, const Controller
             motion_commander.stop_robot();
             return true;
         }
+        // A Reach whose goal is the world's to bring about (it asks for stillness — `.still` — and its goal does not hold yet):
+        // keep the claim and WAIT at the standpoint (the orient branch above, reach_wait_target_), instead of completing it
+        // as Timeout on the spot (warm15: every close behind).
+        if (active_target_id_ != 0 and reach_wait_target_ != active_target_id_
+            and active_contract_.policy == rc::affordance::Policy::Reach and not active_contract_.goal.empty()
+            and active_contract_.max_observe_vel > 0.f)
+        {
+            const std::uint64_t fb = active_contract_.feedback_node_id != 0
+                                         ? active_contract_.feedback_node_id
+                                         : (last_target_info_.has_value() ? last_target_info_->parent_node_id : 0);
+            if (fb != 0 and not goal_met(fb))
+            {
+                reach_wait_target_ = active_target_id_;
+                feedback_node_id_ = fb;
+                orient_start_ms_.reset();
+                orient_stable_ = 0;
+                path_controller.stop();
+                motion_commander.stop_robot();
+                std::println("[affordance] {} reached — its goal is the world's to bring about: holding the claim and WAITING at the "
+                             "standpoint (until the goal holds, or {:.0f} s)",
+                             last_target_info_.has_value() ? last_target_info_->node_name : std::string{"?"},
+                             active_contract_.timeout_ms * 1e-3);
+                return true;
+            }
+        }
         qInfo() << "[affordance]" << (last_target_info_.has_value() ? last_target_info_->node_name.c_str() : "?")
                 << "reached -> REACH (consume immediately)";
         audit_standpoint("arrival-end", time_source(),
@@ -7113,7 +7138,12 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
                 if (const auto pn = graph_->get_node(last_target_info_->parent_node_id); pn.has_value())
                     parent_type = parent_contract_key(pn.value());
             const auto contract = rc::affordance::read_contract(aff.value(), parent_type);
-            if (contract.policy == rc::affordance::Policy::Orient)
+            // ★ A REACH THAT WAITS (2026-11-01, warm15: every `close` behind ended Timeout at arrival — the claim and its completion
+            //   in ONE cycle, so door_concept never saw the claim and never sent the request). A Reach whose goal is the WORLD's
+            //   to bring about (`close`: the provider swings the leaf) keeps its claim at the standpoint and waits here, as an
+            //   Orient does, until the goal holds or the contract's timeout — armed at arrival (reach_wait_target_).
+            const bool reach_waits = reach_wait_target_ != 0 and reach_wait_target_ == active_target_id_;
+            if (contract.policy == rc::affordance::Policy::Orient or reach_waits)
             {
                 // ★ KNOWN DEFECT (Task O, left as is — the old chain stays unchanged by standing order): this branch completes an orient on
                 //   step_orient's own predicate at wherever the repair left the robot, not on the affordance's precondition probability, and
@@ -7130,8 +7160,11 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
                                                                 last_target_info_->node_name));
                 if (step_orient(robot_pose, path_controller, obstacle_tracker, motion_commander, time_source,
                                 last_target_info_->yaw_rad))
+                {
+                    reach_wait_target_ = 0;
                     finalize_reached(affordance_manager, path_controller, motion_commander, display,
                              robot_pose.pos, time_source());
+                }
                 return;
             }
         }
