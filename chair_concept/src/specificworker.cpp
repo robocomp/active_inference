@@ -32,6 +32,7 @@
  */
 
 #include "specificworker.h"
+#include "recall_candidates.h"   // ltom recall: resurrect a remembered chair at birth
 #include "chair_card.h"   // make_card(): this agent's perception card
 #include "../../common/perception_card/card_io.h"   // write_card_file
 
@@ -71,6 +72,7 @@
 #include <array>
 #include <vector>
 #include <unordered_set>
+#include <set>
 
 // DSR attribute name tags — generated from dsr_attr_name.h
 #include <dsr/api/dsr_api.h>
@@ -777,6 +779,15 @@ void SpecificWorker::run_instance_tracker()
         update_existence_beliefs();
     // BIRTH: spawn an instance from each promoted (persistently-unexplained) detection, seeding the
     // fitter with the detection XY so the model starts AT the chair (not the 0,0 RT-read default).
+    // ltom recall candidates, read once per cycle; a candidate taken by a birth leaves the list (take once).
+    std::vector<rc::RecallCand> recall_cands;
+    if (not res.births.empty())
+    {
+        std::set<std::string> live_names;
+        for (const auto& n : G->get_nodes_by_type("object"))
+            if (n.name().starts_with("chair_")) live_names.insert(n.name());
+        recall_cands = rc::recall_candidates(*G, room_node_id_, static_cast<std::uint32_t>(G->get_agent_id()), live_names);
+    }
     for (const int d : res.births)
     {
         const int slice = dets[d].slice_index;
@@ -820,7 +831,37 @@ void SpecificWorker::run_instance_tracker()
                 continue;
             }
         }
-        const auto new_id = scene_graph_->create_instance_from_detection(c, room_node_id_);
+        // RESURRECTION: only chooses which identity the newborn takes (birth stays tracker-only). MAP over
+        // {recalled candidates, new} on position alone; measurement cov = DetectionNoiseM^2 I (the tracker's R).
+        std::optional<rc::ChairSceneGraph::Resurrect> resurrect;
+        float resurrect_p = 0.f;
+        if (not recall_cands.empty())
+        {
+            const float area = rc::polygon_area(fitter_->room_polygon());
+            rc::recall::Params rp{cfg_.recall_pi_move, cfg_.recall_log_prior_new};
+            if (area > 0.f) rp.room_area_m2 = area;
+            else if (not warned_recall_area_)
+            {
+                warned_recall_area_ = true;
+                std::print(stderr, "chair_concept: [recall] no room polygon — using the default room area {} m2\n", rp.room_area_m2);
+            }
+            const Eigen::Matrix2f R = Eigen::Matrix2f::Identity() * (cfg_.tracker_detection_noise_m * cfg_.tracker_detection_noise_m);
+            const auto dec = rc::recall::decide(Eigen::Vector2f(c.x(), c.y()), R, rc::as_candidates(recall_cands), rp);
+            if (dec.index)
+            {
+                const auto taken = rc::take_candidate(recall_cands, *dec.index);
+                resurrect = rc::ChairSceneGraph::Resurrect{taken.n, taken.cand.uid};
+                resurrect_p = dec.posterior[*dec.index];
+            }
+        }
+        const auto new_id = scene_graph_->create_instance_from_detection(c, room_node_id_, resurrect);
+        if (new_id != 0 and resurrect)
+        {
+            const auto what = std::format("uid={} p={:.3f}", resurrect->uid, resurrect_p);
+            std::print("chair_concept: [tracker] RESURRECT chair_{} {}\n", resurrect->n, what);
+            log_tracker_event("RESURRECT", new_id, c.x(), c.y(), what);
+            log_phantom_event("RESURRECT", new_id, "", c.x(), c.y(), nullptr, what);
+        }
         if (new_id != 0)
         {
             fitter_->note_birth(new_id, Eigen::Vector2f(c.x(), c.y()));

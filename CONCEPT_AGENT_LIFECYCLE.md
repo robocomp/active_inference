@@ -234,6 +234,8 @@ Derived by reading each agent, not inferred from includes. `—` = not applicabl
 
 *2026-10-31 (perception cards, Task 9):* chair's wall LoS cell went from `—` to ✅. `ChairFitter::zed_detectability` now delegates to `chair_p_detect` (`chair_concept/src/chair_detect.h`): `term_envelope(roi_fill) × in_fov × central × walls_block(camera, chair, room polygon)`; a chair in another room gets P(detect) 0 and its absence is no longer charged. Retired `Existence.ZedEdgeOffset/ZedRangeFull/ZedRangeRef/ZedClearLosFloor`. Live check pending.
 
+*2026-11-01 (ltom recall, step 3):* chair's CREATE gained **resurrection**: at a tracker birth, `chair_concept/src/recall_candidates.h` reads the `ltom_recall_<uid>` metaconcept nodes ltom offers under the current room (own agent's uid, `chair_<N>` not live) and `rc::recall::decide` (common/recall_match) picks the MAP hypothesis over {recalled candidates, new} on the room-frame centroid alone (measurement cov `DetectionNoiseM^2 I`, `Tracker.RecallPiMove` / `RecallLogPriorNew`). The newborn then takes that candidate's `chair_<N>` and `object_uid` instead of issuing new ones; a candidate is taken once per cycle. Birth stays tracker-only: resurrection only chooses the identity, never creates, delays or suppresses a birth. Logged as `RESURRECT chair_N uid=.. p=..`. Live check pending.
+
 **language_agent** is not a concept agent: it births no instance and holds no belief, so CREATE…HISTORY do not apply
 (`—`, not `❌`). It owns exactly one node, `chat_intention` (type `intention`, has_intention edge from `Shadow`), the
 command channel to the controller: listed in `[Owns]` (`["language_agent 25", "chat_intention"]`, id matches `[Agent].id`),

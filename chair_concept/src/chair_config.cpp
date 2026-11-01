@@ -200,6 +200,10 @@ ChairConfig load_chair_config(const ConfigLoader& cfg)
             "metric XY gate (m) before an instance has a usable covariance");
     out.tracker_detection_noise_m = getf("Tracker.DetectionNoiseM", 0.20f,
             "R in the association innovation cov S=P+R²I (≥ centroid-vs-fit offset)");
+    out.recall_pi_move = getf("Tracker.RecallPiMove", 0.5f,
+            "Mixture weight of 'the remembered chair was moved' in the recall location likelihood (class prior; GUESS, chairs get moved)");
+    out.recall_log_prior_new = getf("Tracker.RecallLogPriorNew", 0.0f,
+            "Log prior of 'new chair' against one recalled candidate (0 = equal)");
     out.tracker_birth_frames     = geti("Tracker.BirthFrames", 8,
             "frames a mask must stay unexplained before spawning a chair");
     out.tracker_birth_min_sep_m  = getf("Tracker.BirthMinSepM", 0.70f,

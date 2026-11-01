@@ -189,6 +189,8 @@ struct ChairConfig
     // is retired. Chairs are persistent furniture: death OFF by default; birth_min_sep wide. Mirrors table.
     float tracker_gate_mahalanobis = 9.0f;    // χ²₂ gate (~3σ) for a mask↔instance match once it has a cov
     float tracker_gate_fallback_m  = 0.40f;   // metric XY gate (m) before an instance has a usable covariance
+    float recall_pi_move = 0.5f;              // Tracker.RecallPiMove — class prior that a remembered chair was MOVED (guess; learned in step 4)
+    float recall_log_prior_new = 0.0f;        // Tracker.RecallLogPriorNew — log prior of "new chair" vs one recalled candidate
     float tracker_detection_noise_m = 0.20f;  // R in the association innovation cov S=P+R²I (≥ centroid-vs-fit offset)
     int   tracker_birth_frames     = 8;       // frames a mask must stay unexplained before spawning a chair
     float tracker_birth_min_sep_m  = 0.70f;   // a birth must be ≥ this (m) from every existing chair (anti-dup)

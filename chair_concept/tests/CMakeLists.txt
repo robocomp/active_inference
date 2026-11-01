@@ -36,3 +36,22 @@ target_compile_definitions(chair_shape_test PRIVATE AGENT_DIR="${CMAKE_CURRENT_L
 target_compile_options(chair_shape_test PRIVATE -O2)
 target_link_libraries(chair_shape_test PRIVATE Eigen3::Eigen)
 add_test(NAME chair_shape_test COMMAND chair_shape_test)
+
+# Recall candidates read off ltom's recall nodes: DSR-linked, private DDS domain 65 (63 ltom, 62 episodic).
+# Run: LANG=es_ES.UTF-8 ./recall_candidates_test
+if ("$ENV{ROBOCOMP}" STREQUAL "")
+  set(ENV{ROBOCOMP} "/home/robocomp/robocomp/")
+endif ()
+include($ENV{ROBOCOMP}/cmake/robocomp.cmake)
+include($ENV{ROBOCOMP}/cmake/modules/qt.cmake)
+find_package(Eigen3 3.3 REQUIRED NO_MODULE)
+add_definitions("-DICE_CPP11_MAPPING")
+find_package(Ice REQUIRED COMPONENTS Ice++11 IceStorm++11)
+add_definitions(-fno-char8_t)
+add_executable(recall_candidates_test recall_candidates_test.cpp)
+target_compile_definitions(recall_candidates_test PRIVATE CHAIR_TEST_ROOT_JSON="${CMAKE_CURRENT_LIST_DIR}/../../ltom_agent/tests/ltom_root.json")
+target_include_directories(recall_candidates_test PRIVATE ../src ../../common $ENV{ROBOCOMP}/classes)
+target_link_libraries(recall_candidates_test
+  ${LIBS} dsr_core dsr_gui dsr_api fastcdr fastdds osgDB OpenThreads Eigen3::Eigen QGLViewer-qt6 Qt6OpenGLWidgets
+  ${STATIC_LIBS} ${SPECIFIC_LIBS} ${QT_LIBRARIES} ${Ice_LIBRARIES})
+set_target_properties(recall_candidates_test PROPERTIES CXX_STANDARD 23 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)

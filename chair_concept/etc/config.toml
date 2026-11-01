@@ -185,6 +185,8 @@ RtCovAddChain = true        # Part B: add the localization/chain cov J·Σ_chain
 GateMahalanobis = 9.0     # χ²₂ gate (~3σ) for a mask↔instance match once it has a cov
 GateFallbackM = 0.40     # metric XY gate (m) before an instance has a usable covariance
 DetectionNoiseM = 0.20   # R in the association innovation cov S=P+R²I (≥ centroid-vs-fit offset)
+RecallPiMove = 0.5       # ltom recall: weight of "the remembered chair was moved" (a GUESS - chairs get moved; learned permanence replaces it in step 4). 1 = location says nothing
+RecallLogPriorNew = 0.0  # ltom recall: log prior of "a NEW chair" vs one recalled candidate (0 = equal); the newborn takes a candidate only if it is the strict MAP
 BirthFrames = 8          # frames a mask must stay unexplained before spawning a chair
 BirthMinSepM = 0.70      # a birth must be ≥ this (m) from every existing chair (anti-duplicate)
 MergeOverlap = 0.20      # collapse two instances whose seat footprints overlap ≥ this fraction of the smaller, keeping the more-observed. 0 disables.

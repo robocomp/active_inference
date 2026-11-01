@@ -28,7 +28,8 @@ ChairSceneGraph::ChairSceneGraph(std::shared_ptr<DSR::DSRGraph> graph,
 {}
 
 std::uint64_t ChairSceneGraph::create_instance_from_detection(const Eigen::Vector3f& centroid_room,
-                                                              std::uint64_t room_node_id)
+                                                              std::uint64_t room_node_id,
+                                                              std::optional<Resurrect> r)
 {
     auto room_opt = G_->get_node(room_node_id);
     if (not room_opt.has_value())
@@ -56,7 +57,10 @@ std::uint64_t ChairSceneGraph::create_instance_from_detection(const Eigen::Vecto
     if (not identity_)
         identity_.emplace(rc::identity::InstanceCounter::open("etc/instance_identity.csv",
                                                               static_cast<std::uint32_t>(G_->get_agent_id())));
-    const int n_issued = identity_->issue(rc::identity::max_suffix(live_names, "chair_"));
+    // Resurrection: the number was issued in the past (<= the persisted `last`), so the counter never issues it again.
+    if (r and r->n > identity_->last())
+        std::print(stderr, "chair_concept: [recall] ⚠ resurrected chair_{} is above the persisted counter ({})\n", r->n, identity_->last());
+    const int n_issued = r ? r->n : identity_->issue(rc::identity::max_suffix(live_names, "chair_"));
     const std::string name = "chair_" + std::to_string(n_issued);
 
     // Generic `object` node named "chair_*"; class carried in object_subtype ("chair"). Every
@@ -85,6 +89,8 @@ std::uint64_t ChairSceneGraph::create_instance_from_detection(const Eigen::Vecto
     rc::provenance::stamp_creation(*G_, chair_node);   // birth stamp: epoch ms + local ISO-8601
     // Persistent identity (common/instance_identity): written once at birth, never changed, key for ltom/atlas/EM.
     G_->add_or_modify_attrib_local<object_uid_att>(chair_node, rc::identity::make_uid(static_cast<std::uint32_t>(G_->get_agent_id()), n_issued));
+    if (r and rc::identity::make_uid(static_cast<std::uint32_t>(G_->get_agent_id()), n_issued) != r->uid)
+        std::print(stderr, "chair_concept: [recall] ⚠ uid of resurrected chair_{} does not match the recalled uid\n", n_issued);
     const auto id_opt = G_->insert_node(chair_node);
     if (not id_opt.has_value())
         return 0;

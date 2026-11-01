@@ -42,8 +42,11 @@ public:
     // Data-driven birth: create a fresh "chair_N" node at the detection centroid (room frame), seeded
     // with the Tracker.Birth* default geometry. Returns the new node id (0 on failure). Used by the
     // worker's instance tracker — the only instance-lifecycle path.
+    // A resurrection (ltom recall): the newborn takes the remembered chair's number and uid instead of issuing new ones.
+    struct Resurrect { int n; std::uint64_t uid; };
     std::uint64_t create_instance_from_detection(const Eigen::Vector3f& centroid_room,
-                                                 std::uint64_t room_node_id);
+                                                 std::uint64_t room_node_id,
+                                                 std::optional<Resurrect> r = std::nullopt);
 
     // Publish the instance's fitted model to its DSR node (geometry + FE + mesh + RFE/support-bank) and
     // the room→chair RT edge. persist_* resolves the node by id first; both no-op if the node is gone.
