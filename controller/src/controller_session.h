@@ -1282,6 +1282,7 @@ private:
     // cycle read a fresh anchor), cleared at every cycle's start and whenever update_cross_anchor finds none.
     // update_display re-checks its age against kAnchorStaleMs, so a cycle that returns early never shows a stale one.
     std::optional<AnchorCrossReading> anchor_drawn_;
+    std::uint64_t door_views_last_ms_ = 0;   // throttle of the canvas's believed-door drawing (door_leaf_geometry.h)
     // ── Task 18: THE DOORWAY AS THE LIDAR MEASURES IT (doorway_gap.h) ──────────────────────────────────────────────────
     // From the first cycle the through-span of the anchor's wall is SEEN, the cross steers on it (re-measured every cycle;
     // carried by the robot's own motion — room-frame pose deltas within one room — while it is not seen). The anchor stays

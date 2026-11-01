@@ -125,6 +125,8 @@ public:
     struct AnchorView { Eigen::Vector2f centre; float yaw = 0.f; float width = 0.f; bool predicted = false;   // predicted: not seen, carried by odometry
                         std::optional<ServoView> servo; };
     void set_anchor_overlay(const std::optional<AnchorView> &a);
+    /// Every door of the room as believed (aperture + leaf), ROOM frame; thread-safe staging. Empty clears.
+    void set_door_views(std::vector<rc::Viewer2D::DoorView> v);
     // Stage the Orient bearing overlay for the 2D view (thread-safe; applied in present()).
     // Pass visible=false whenever the running affordance is not an Orient, so a finished turn cannot
     // leave a ray pointing at a bearing nobody is asking for any more.
@@ -268,6 +270,7 @@ private:
         std::string hold_reason;   // set_hold_reason; "" = planning normally
         rc::why::View motion_verdict;   // set_motion_verdict
         std::vector<std::vector<Eigen::Vector2f>> door_passages;
+        std::vector<rc::Viewer2D::DoorView> door_views;   // set_door_views
         std::optional<AnchorView> anchor;   // set_anchor_overlay: robot frame; drawn through robot_pose
     };
 

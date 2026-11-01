@@ -68,6 +68,21 @@ class Viewer2D : public QObject
                            std::vector<Eigen::Vector2f> own_arc, out_arc, blockers, jambs;
                            std::vector<std::string> why; };
     void draw_anchor(const std::optional<AnchorOverlay> &a);
+    // EVERY door of the room as the world model believes it, ROOM frame (door_leaf_geometry.h): the aperture exactly as the
+    // door node publishes it (never snapped; the part past the wall's end in a warning colour) plus the LEAF at its believed
+    // hinge / swing / phi. `side_known` false = door_concept has not published hinge/swing (only the anchor carries them):
+    // the four candidates are drawn faint. Empty clears.
+    struct DoorLeafHyp { Eigen::Vector2f hinge, tip; float p = 1.f; float sigma_phi = 0.f; };
+    struct DoorView
+    {
+        std::string name;
+        Eigen::Vector2f jamb_l, jamb_r;            // c -/+ w/2 u, as published
+        float over_l = 0.f, over_r = 0.f;          // metres past the wall's end at each jamb (0 = within)
+        float phi = -1.f;                          // < 0: not measured
+        bool side_known = false;
+        std::vector<DoorLeafHyp> leaves;           // side_known: the believed hypotheses (Sum p = 1); else the 4 candidates
+    };
+    void draw_doors(const std::vector<DoorView> &doors);
     void set_lidar_buffer(LidarPointBuffer *buffer);
     void set_lidar_visible(bool visible);
     void set_lidar_draw_correction(const Eigen::Affine2f &correction) { lidar_draw_correction_ = correction; }
@@ -163,6 +178,7 @@ private:
     AbstractGraphicViewer *agv_ = nullptr;
     QGraphicsPolygonItem *polygon_item_ = nullptr;
     std::vector<QGraphicsPolygonItem *> passage_items_;   // draw_passages
+    std::vector<QGraphicsItem *> door_items_;              // draw_doors
     std::vector<QGraphicsItem *> anchor_items_;            // draw_anchor (lines, dots, the servo's text)
     LidarPointBuffer *lidar_buffer_ = nullptr;
     Eigen::Affine2f lidar_draw_correction_ = Eigen::Affine2f::Identity();   // overlay dead-reckoning (room→room)

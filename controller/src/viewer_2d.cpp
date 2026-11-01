@@ -308,6 +308,71 @@ void Viewer2D::draw_passages(const std::vector<std::vector<Eigen::Vector2f>> &pa
     }
 }
 
+void Viewer2D::draw_doors(const std::vector<DoorView> &doors)
+{
+    for (auto *item : door_items_) { agv_->scene.removeItem(item); delete item; }
+    door_items_.clear();
+    auto line = [&](const Eigen::Vector2f &p, const Eigen::Vector2f &q, const QPen &pen)
+    {
+        auto *item = agv_->scene.addLine(p.x(), p.y(), q.x(), q.y(), pen);
+        item->setZValue(10);   // above the passage corridor (9), below the anchor (12)
+        door_items_.push_back(item);
+    };
+    const QColor ap_c(0, 140, 150), leaf_c(150, 90, 20), warn_c(230, 0, 120);
+    for (const auto &d : doors)
+    {
+        // the aperture exactly as published; the overhang (past the wall's end) in the warning colour
+        Eigen::Vector2f u = d.jamb_r - d.jamb_l;
+        const float w = u.norm();
+        if (w > 1e-4f) u /= w;
+        const Eigen::Vector2f a = d.jamb_l + std::min(d.over_l, w) * u, b = d.jamb_r - std::min(d.over_r, w) * u;
+        line(a, b, QPen(ap_c, 0.06));
+        if (d.over_l > 0.f) line(d.jamb_l, a, QPen(warn_c, 0.08));
+        if (d.over_r > 0.f) line(b, d.jamb_r, QPen(warn_c, 0.08));
+        QString txt = QString::fromStdString(d.name);
+        if (d.phi >= 0.f) txt += QString(" phi %1 deg").arg(int(std::lround(d.phi * 57.29578f)));
+        if (d.phi >= 0.f and not d.side_known) txt += " (side unknown)";
+        if (d.over_l > 0.f or d.over_r > 0.f) txt += QString(" PAST WALL +%1 m").arg(std::max(d.over_l, d.over_r), 0, 'f', 2);
+        if (d.phi >= 0.f)
+            for (const auto &l : d.leaves)
+            {
+                // the belief's weight: opaque for the MAP leaf, faint for the minority; unknown-side candidates faint dotted
+                const int alpha = d.side_known ? int(60 + 195 * std::clamp(l.p, 0.f, 1.f)) : 70;
+                QColor col = leaf_c; col.setAlpha(alpha);
+                line(l.hinge, l.tip, QPen(col, d.side_known ? 0.05 : 0.03, d.side_known ? Qt::SolidLine : Qt::DotLine));
+                if (not d.side_known) continue;
+                auto *pin = agv_->scene.addEllipse(l.hinge.x() - 0.04, l.hinge.y() - 0.04, 0.08, 0.08, QPen(col, 0.01), QBrush(col));
+                pin->setZValue(10);
+                door_items_.push_back(pin);
+                const Eigen::Vector2f dv = l.tip - l.hinge;
+                if (l.sigma_phi > 0.f)   // phi +- sigma: a faint wedge about the hinge
+                {
+                    QPolygonF poly;
+                    constexpr int kSteps = 8;
+                    poly << QPointF(l.hinge.x(), l.hinge.y());
+                    for (int k = 0; k <= kSteps; ++k)
+                    {
+                        const float ang = -l.sigma_phi + 2.f * l.sigma_phi * float(k) / float(kSteps);
+                        poly << QPointF(l.hinge.x() + std::cos(ang) * dv.x() - std::sin(ang) * dv.y(),
+                                        l.hinge.y() + std::sin(ang) * dv.x() + std::cos(ang) * dv.y());
+                    }
+                    QColor fill = leaf_c; fill.setAlpha(int(25 + 60 * std::clamp(l.p, 0.f, 1.f)));
+                    auto *wedge = agv_->scene.addPolygon(poly, QPen(Qt::NoPen), QBrush(fill));
+                    wedge->setZValue(9);
+                    door_items_.push_back(wedge);
+                }
+                if (&l == &d.leaves.front()) txt += QString(" P(MAP) %1").arg(int(std::lround(100.f * l.p)));
+            }
+        auto *t = agv_->scene.addSimpleText(txt);
+        t->setBrush(QBrush(d.over_l > 0.f or d.over_r > 0.f ? warn_c : ap_c));
+        t->setFlag(QGraphicsItem::ItemIgnoresTransformations, true);
+        const Eigen::Vector2f m = 0.5f * (d.jamb_l + d.jamb_r);
+        t->setPos(m.x() + 0.05, m.y() + 0.05);
+        t->setZValue(11);
+        door_items_.push_back(t);
+    }
+}
+
 // The anchor: the opening as a green segment between the jambs, each jamb a short dark-red bar ALONG the normal (the
 // wall's thickness direction), and a short tick from the centre along the normal so the crossing direction reads.
 void Viewer2D::draw_anchor(const std::optional<AnchorOverlay> &a)

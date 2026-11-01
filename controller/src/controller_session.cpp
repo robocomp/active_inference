@@ -9,6 +9,7 @@
 #include "standpoint_fit.h"      // Task 3c: does an affordance standpoint serve, or is it handed back
 #include "../../common/affordance_manager/affordance_room_scope.h"   // Task 4: explore room_X scopes the contest
 #include "near_field_clearance.h"        // Task 6: [Route] NearFieldClearance — the band's structured near field
+#include "door_leaf_geometry.h"      // the canvas draws every door as aperture + believed leaf
 #include "door_route.h"                 // the door route's waypoints (controller_door_passage.h ROUTE MODE)
 #include "band_cross.h"                 // Task 6 fix round 1: [Route] BandDrivesCross's route through the opening
 #include "local_policy/contact.h"       // Task 6: denoise_returns, the policy's surface model
@@ -184,6 +185,71 @@ bool ControllerSession::sync_world_state(std::uint64_t timestamp_ms,
 
     room_polygon_ = room_polygon.value();
     mission_.set_room_polygon(room_polygon_);   // missions record their frame / are registered against it
+
+    // ── EVERY DOOR ON THE CANVAS, as the world model believes it (door_leaf_geometry.h): the aperture from the door node's
+    //    pose + width_m exactly as published (a belief that pokes past its wall stays visible, the overhang flagged), and the
+    //    LEAF. Hinge and swing side are NOT on the door node — door_concept publishes them only on the anchor "<door>@robot"
+    //    (hinge x swing hypotheses with their P) — so a door with a live anchor shows those, any other shows phi with the four
+    //    candidates faint ("side unknown"). Display only; ~5 Hz.
+    if (graph_ != nullptr and timestamp_ms - door_views_last_ms_ >= 200)
+    {
+        door_views_last_ms_ = timestamp_ms;
+        std::vector<rc::Viewer2D::DoorView> views;
+        auto *ie = world_model.inner_eigen();
+        const auto rp = world_model.read_robot_pose_latest(timestamp_ms);
+        const std::string &room_name = world_model.graph_state().room_name;
+        const auto now_ms = static_cast<std::int64_t>(rc::provenance::now_ms());
+        std::vector<rc::doordraw::V2> poly(room_polygon_.begin(), room_polygon_.end());
+        if (ie != nullptr)
+            for (const auto &door : rc::world::doors_of_room(*graph_, world_model.graph_state().room_id))
+            {
+                const auto dn = graph_->get_node(door);
+                const auto T = ie->get_transformation_matrix(room_name, door);
+                const auto w = dn.has_value() ? graph_->get_attrib_by_name<width_m_att>(dn.value()) : std::nullopt;
+                if (not T.has_value() or not w.has_value() or not (w.value() > 0.f)) continue;
+                const rc::doordraw::V2 c(static_cast<float>(T->matrix()(0, 3)), static_cast<float>(T->matrix()(1, 3)));
+                rc::doordraw::V2 u(static_cast<float>(T->matrix()(0, 0)), static_cast<float>(T->matrix()(1, 0)));
+                if (not (u.norm() > 1e-3f)) continue;
+                u.normalize();
+                rc::Viewer2D::DoorView v;
+                v.name = door;
+                v.jamb_l = c - 0.5f * w.value() * u;
+                v.jamb_r = c + 0.5f * w.value() * u;
+                const auto ov = rc::doordraw::aperture_overhang(c, u, w.value(), poly);
+                v.over_l = ov.lo; v.over_r = ov.hi;
+                const float phi = graph_->get_attrib_by_name<door_phi_rad_att>(dn.value()).value_or(-1.f);
+                // the anchor's believed leaf hypotheses, while its block is fresh (its pose is robot-relative)
+                if (rp.has_value())
+                    if (const auto an = graph_->get_node(door + std::string(rc::interaction::kAnchorSuffix)); an.has_value())
+                        if (const auto rd = rc::interaction::read_anchor_latest(*graph_, an->id());
+                            rd.has_value() and now_ms - rd->first.stamp_ms <= rc::interaction::kAnchorStaleMs)
+                        {
+                            const Eigen::Affine2f Tr = rp->as_transform();
+                            const rc::doordraw::V2 ac = rd->first.x.head<2>();
+                            const float ayaw = rd->first.x.z();
+                            for (const auto &l : rc::interaction::read_anchor_leaves(*graph_, an->id()))
+                            {
+                                v.leaves.push_back({.hinge = rc::doordraw::anchor_to_room(l.hinge, ac, ayaw, Tr),
+                                                    .tip = rc::doordraw::anchor_to_room(l.tip, ac, ayaw, Tr),
+                                                    .p = l.p, .sigma_phi = l.sigma_phi});
+                                v.phi = l.phi;
+                            }
+                            v.side_known = not v.leaves.empty();
+                        }
+                if (not v.side_known and phi >= 0.f)
+                {
+                    v.phi = phi;
+                    for (const int h : {-1, 1})
+                        for (const int s : {-1, 1})
+                        {
+                            const auto l = rc::doordraw::leaf_from_aperture(c, u, w.value(), h, s, phi);
+                            v.leaves.push_back({.hinge = l.hinge, .tip = l.tip, .p = 0.25f, .sigma_phi = 0.f});
+                        }
+                }
+                views.push_back(std::move(v));
+            }
+        display.set_door_views(std::move(views));
+    }
 
     // ── DOOR PASSAGE (controller_door_passage.h): which affordance may be selected, and the corridor through the
     //    doorway while crossing. Before set_world below, so the grid built this cycle already includes it.

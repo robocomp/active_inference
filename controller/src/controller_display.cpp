@@ -209,6 +209,12 @@ void ControllerDisplay::set_anchor_overlay(const std::optional<AnchorView> &a)
     snapshot_.anchor = a;
 }
 
+void ControllerDisplay::set_door_views(std::vector<rc::Viewer2D::DoorView> v)
+{
+    std::lock_guard<std::mutex> lock(snapshot_mutex_);
+    snapshot_.door_views = std::move(v);
+}
+
 void ControllerDisplay::set_door_passage(const rc::DoorPassageStatus &view,
                                          const std::vector<std::vector<Eigen::Vector2f>> &passages)
 {
@@ -766,6 +772,7 @@ void ControllerDisplay::present()
 
     viewer_2d_->draw_room_polygon(snap.room_polygon);
     viewer_2d_->draw_passages(snap.door_passages);
+    viewer_2d_->draw_doors(snap.door_views);
     // The anchor lives in the ROBOT frame; it is placed through the same pose the robot icon is drawn at.
     {
         std::optional<rc::Viewer2D::AnchorOverlay> ov;
