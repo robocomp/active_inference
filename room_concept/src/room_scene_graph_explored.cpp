@@ -155,17 +155,17 @@ rc::layout::Plan RoomSceneGraph::plan_camera_cover(const rc::layout::FeasibleGri
                                                    const rc::layout::Admissible& standable,
                                                    const rc::layout::Admissible& deferred)
 {
-    // A standpoint is in the internal frame; the coverage is in the published one. The look is scored at the ARRIVAL
-    // heading (robot → standpoint): what the camera will see on getting there, whether or not the controller turns to
-    // the published yaw (camera_coverage.h). The zed sits a few cm from the robot origin — ignored here, as the LiDAR
+    // A standpoint is in the internal frame; the coverage is in the published one. The look is scored at its BEST heading
+    // (camera_coverage.h best_look) — and that heading is the yaw published with it (plan_layout), which the controller
+    // turns to on arrival. (It was the ARRIVAL heading: the L's short leg left the robot facing its end wall, user 2026-11-01.) The zed sits a few cm from the robot origin — ignored here, as the LiDAR
     // gain ignores its own mount; observe() uses the real zed pose. An unreachable best target is excluded and the plan
     // re-run (plan_coverage_reachable): it never ends the phase by itself.
     const Eigen::Vector2f r_pub = T_pub_int_ * robot;
     return rc::layout::plan_coverage_reachable(grid, robot, ep, standable,
         [this, r_pub](const Eigen::Vector2f& v)
         {
-            const Eigen::Vector2f v_pub = T_pub_int_ * v, d = v_pub - r_pub;
-            return d.squaredNorm() > 1e-9f ? cam_cover_.look_gain(v_pub, std::atan2(d.y(), d.x()), cam_sensor_) : 0.f;
+            const Eigen::Vector2f v_pub = T_pub_int_ * v;
+            return (v_pub - r_pub).squaredNorm() > 1e-9f ? cam_cover_.best_look(v_pub, cam_sensor_).first : 0.f;
         },
         cam_cover_.price(cam_sensor_), deferred);
 }

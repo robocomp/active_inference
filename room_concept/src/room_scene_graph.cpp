@@ -2534,7 +2534,10 @@ void RoomSceneGraph::dsr_update_layout_affordance(const rc::RoomConcept::UpdateR
             layout_target_ = tgt;
             layout_best_d_ = std::numeric_limits<float>::infinity();   // the motion clock is NOT reset by a replan
             layout_yaw_    = dir.squaredNorm() > 1e-9f ? std::atan2(dir.y(), dir.x()) : 0.f;
-            if (layout_plan_camera_) layout_yaw_ = std::atan2(tgt.y() - robot.y(), tgt.x() - robot.x());   // its ARRIVAL heading
+            // the camera phase: the heading of the BEST look from the standpoint (camera_coverage.h best_look), not the arrival
+            // heading (user 2026-11-01: that left the robot facing the end wall of the L's short leg). Published frame → internal.
+            if (layout_plan_camera_)
+                layout_yaw_ = wrap_pi(cam_cover_.best_look(T_pub_int_ * tgt, cam_sensor_).second - angle_of(T_pub_int_));
             layout_gain_   = layout_last_plan_.gain;
         }
         else

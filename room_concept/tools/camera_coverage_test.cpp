@@ -103,6 +103,26 @@ rc::layout::Plan plan(const rc::camcov::Coverage& cov, const rc::layout::Feasibl
 rc::layout::FeasibleGrid grid_of(const Poly& room) { return rc::layout::FeasibleGrid(room, rc::layout::ExplorerParams{}.cell, 0.4f); }
 const auto any = [](const Eigen::Vector2f&) { return true; };
 
+// user 2026-11-01: the camera phase sent the robot into the L's short leg and left it FACING THE END WALL — its arrival
+// heading. A look is a choice of heading: the published yaw is the one that shows the detector the most unseen wall.
+void best_look_case()
+{
+    const Poly room{{0.f, 0.f}, {6.f, 0.f}, {6.f, 4.f}, {0.f, 4.f}};
+    const auto s = zed();
+    rc::camcov::Coverage cov;
+    cov.set_outline(room);
+    const Eigen::Vector2f from(3.f, 2.f), v(5.6f, 2.f);   // driven east, it would arrive 0.4 m from the east wall, facing it
+    const float arrival = cov.look_gain(v, heading(from, v), s);
+    const auto [g, yaw] = cov.best_look(v, s);
+    float sampled = 0.f;
+    for (int k = 0; k < 72; ++k) sampled = std::max(sampled, cov.look_gain(v, -kPi + kPi * float(k) / 36.f, s));
+    std::println("best look at (5.6,2.0): {:.2f} m at {:.0f} deg; arrival (east) {:.2f} m; 5-deg sampled max {:.2f} m", g,
+                 yaw * 180.f / kPi, arrival, sampled);
+    CHECK(g > arrival);                      // facing the near wall is a poor look
+    CHECK(g >= 0.9f * sampled);              // and the scan finds (nearly) the best heading
+    CHECK(std::abs(cov.look_gain(v, yaw, s) - g) < 1e-5f);   // the yaw returned is the one scored
+}
+
 void synthetic_room()
 {
     const Poly room{{0.f, 0.f}, {6.f, 0.f}, {6.f, 4.f}, {0.f, 4.f}};   // CCW, the published outline
@@ -258,6 +278,7 @@ int main()
 {
     std::setlocale(LC_ALL, "");
     ownership();
+    best_look_case();
     synthetic_room();
     unseen_stub();
     narrow_room();

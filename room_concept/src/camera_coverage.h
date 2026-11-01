@@ -143,6 +143,20 @@ public:
         return g;
     }
 
+    /// The best look from `v`: the heading that newly shows the detector the most boundary, and that gain (user 2026-11-01:
+    /// the camera phase left the robot FACING THE END WALL of the L's short leg — its arrival heading, not a look anyone
+    /// chose). Headings scanned every 360/n degrees; the controller turns to the published yaw on arrival (lock-on).
+    [[nodiscard]] std::pair<float, float> best_look(const Eigen::Vector2f& v, const rc::nbv::Sensor& s, int n = 36) const
+    {
+        float best_g = -1.f, best_yaw = 0.f;
+        for (int k = 0; k < n; ++k)
+        {
+            const float yaw = -static_cast<float>(M_PI) + 2.f * static_cast<float>(M_PI) * static_cast<float>(k) / static_cast<float>(n);
+            if (const float g = look_gain(v, yaw, s); g > best_g) { best_g = g; best_yaw = yaw; }
+        }
+        return {std::max(0.f, best_g), best_yaw};
+    }
+
     /// Boundary metres the detector could still be shown: Σ len·max(0, attainable P − seen).
     [[nodiscard]] float residual_length(const rc::nbv::Sensor& s) const
     {
