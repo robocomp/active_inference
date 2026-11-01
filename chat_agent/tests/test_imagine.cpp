@@ -4,6 +4,7 @@
 #include "../src/imagine_succeed.h"
 
 #include <cassert>
+#include <charconv>
 #include <print>
 
 using namespace rc::chat;
@@ -46,6 +47,7 @@ int main()
     assert(near(*parse_opening("30°")->phi_rad, kPi / 6));
     assert(near(*parse_opening("120")->phi_rad, kPi / 2));
     assert(near(*parse_opening("-5")->phi_rad, 0));
+    assert(parse_opening("-5")->words.contains("taken as 0°") and parse_opening("120")->words.contains("taken as 90°"));
     assert(not parse_opening("as_is")->phi_rad.has_value());
     assert(not parse_opening("")->phi_rad.has_value());
     const auto bad = parse_opening("banana");
@@ -74,6 +76,10 @@ int main()
     const auto here = resolve_standpoint(w0, "");
     assert(here.has_value() and near(here->xy.x(), 4) and here->yaw.has_value());
     assert(resolve_standpoint(w0, "room_1").has_value());
+    assert(resolve_standpoint(w0, "aquí").has_value() and resolve_standpoint(w0, "aqui").has_value() and resolve_standpoint(w0, "Aquí").has_value());
+    assert(canonical_concept("silla") == "chair" and canonical_concept("nevera") == "refrigerator");
+    assert(canonical_concept("frigorífico") == "refrigerator" and canonical_concept("Mesa") == "table" and canonical_concept("puerta") == "door");
+    assert(norm_name("la nevera") == "nevera" and norm_name("The Door-2") == "door_2");
     ImaginedWorld lost = w0; lost.scene.robot_xy.reset();
     assert(resolve_standpoint(lost, "here").error() == "I don't know where I am");
     const auto dp = resolve_standpoint(w0, "door_2");
@@ -125,9 +131,29 @@ int main()
         // no body model, unknown door, unknown opening, exact geometry, never fits
         ImaginedWorld nb = f; nb.body_half_width.reset();
         assert(not answer_fit_door(nb, "door_1", *parse_opening("45")).p and answer_fit_door(nb, "door_1", *parse_opening("45")).text == "I have no model of my body width");
-        assert(answer_fit_door(f, "door_7", *parse_opening("45")).text == "I don't know a door called door_7");
+        assert(answer_fit_door(f, "door_7", *parse_opening("45")).text.contains("door_7 is not in this room")
+               and answer_fit_door(f, "door_7", *parse_opening("45")).text.contains("only judge doors of the room I am in"));
+        assert(answer_fit_door(f, "Door 1", *parse_opening("45")).p.has_value() and answer_fit_door(f, "the door-1", *parse_opening("45")).p.has_value());
+        ImaginedWorld noroom = f; noroom.scene.room.clear();
+        assert(not answer_fit_door(noroom, "door_1", *parse_opening("45")).p
+               and answer_fit_door(noroom, "door_1", *parse_opening("45")).text.starts_with("I do not know which room I am in"));
+        assert(a45.text.contains("line up centred on the gap"));
+        // as_is with no measured phi: weighted over the door's own states (door_1: P(open) = 0.3)
         const auto unk = answer_fit_door(f, "door_1", *parse_opening("as_is"));
-        assert(not unk.p and unk.text.contains("shut") and unk.text.contains("wide open"));
+        const auto pshut = *answer_fit_door(f, "door_1", *parse_opening("shut")).p, pwide = *answer_fit_door(f, "door_1", *parse_opening("wide")).p;
+        assert(unk.p and near(*unk.p, 0.7f * pshut + 0.3f * pwide, 1e-3f));
+        assert(unk.text.contains("door state not measured: weighted over shut/open by P(open)=0.30") and unk.text.contains("shut:") and unk.text.contains("wide open:"));
+        ImaginedWorld uni = f; uni.scene.doors[0].p_open.reset();
+        const auto un = answer_fit_door(uni, "door_1", *parse_opening("as_is"));
+        assert(un.p and *un.p > pshut and *un.p < pwide and un.text.contains("uniform opening"));
+        // a measured phi is used as it is, with no mixture
+        ImaginedWorld ph = f; ph.scene.doors[0].phi_rad = kPi / 4;
+        assert(near(*answer_fit_door(ph, "door_1", *parse_opening("as_is")).p, *a45.p, 1e-3f) and not answer_fit_door(ph, "door_1", *parse_opening("as_is")).text.contains("not measured"));
+        // the body note and the interventions' notes are said
+        ImaginedWorld bn = f; bn.body_note = "without the controller's safety margin";
+        assert(answer_fit_door(bn, "door_1", *parse_opening("45")).text.contains("(without the controller's safety margin)"));
+        ImaginedWorld ob = *with_door_phi(f, "door_2", 0.1f);
+        assert(answer_fit_door(ob, "door_1", *parse_opening("45")).text.contains("imagined: door_2 opened"));
         ImaginedWorld ex = f; ex.robot_sigma_m.reset(); ex.door_sigma_m.clear();
         assert(answer_fit_door(ex, "door_1", *parse_opening("wide")).text.contains("treating the geometry as exact"));
         ImaginedWorld fat = f; fat.body_half_width = 0.6f;
@@ -180,7 +206,10 @@ int main()
         ImaginedWorld sh = f;
         sh.scene.objects[0].z_origin = 1.4f; sh.scene.objects[0].h = 0.3f;
         const auto up = answer_fit_between(sh, "chair_1", "wall");
-        assert(up.p and near(*up.p, 1.0f) and up.text.contains("does not block"));
+        assert(up.p and near(*up.p, 1.0f) and up.text.contains("does not block") and up.text.contains("my body's height is not known"));
+        // the band is the body's own height when known: a shelf at 1.4 m blocks a 1.5 m body
+        ImaginedWorld tall = sh; tall.robot_height_m = 1.5f;
+        assert(*answer_fit_between(tall, "chair_1", "wall").p < 0.1f and not answer_fit_between(tall, "chair_1", "wall").text.contains("height is not known"));
         sh.scene.objects[0].z_origin = 0.f;
         assert(*answer_fit_between(sh, "chair_1", "wall").p < 0.1f);
         // below the floor: ignored too
@@ -188,11 +217,19 @@ int main()
         assert(near(*answer_fit_between(sh, "chair_1", "wall").p, 1.0f));
         // an ignored referent still reports the footprint clearance
         assert(up.text.contains("55 cm") and near(up.slack_m, 0.55f - 0.62f, 1e-3f));
-        // unknown size: a point at its centre, 0.8 m from the wall
+        // unknown size (no w, no d): no judgement
         ImaginedWorld us = f; us.scene.objects[0].w.reset(); us.scene.objects[0].d.reset(); us.scene.objects[0].h.reset();
         us.scene.objects[0].x = 4.2f; us.robot_sigma_m = 0.05f;
         const auto unk = answer_fit_between(us, "chair_1", "wall");
-        assert(unk.p and *unk.p > 0.9f and unk.text.contains("size is unknown") and unk.text.contains("point at its centre"));
+        assert(not unk.p and unk.text == "I can't judge: chair_1's size is unknown");
+        // one size known: judged on what is known, and said
+        us.scene.objects[0].w = 0.4f;
+        const auto part = answer_fit_between(us, "chair_1", "wall");
+        assert(part.p and part.text.contains("only partly known"));
+        // an unknown room is said first; the moved chair's note is printed
+        ImaginedWorld nr = f; nr.scene.room.clear();
+        assert(answer_fit_between(nr, "chair_1", "wall").text.starts_with("I do not know which room I am in"));
+        assert(answer_fit_between(*mv, "chair_1", "wall").text.contains("imagined: chair_1 moved by"));
         // one sigma missing is named; unmeasured width is stated
         ImaginedWorld os = f; os.door_sigma_m["door_1"] = 0.02f;
         assert(answer_fit_door(os, "door_1", *parse_opening("wide")).text.contains("my own position uncertainty is unknown"));
@@ -236,6 +273,9 @@ int main()
         const auto base = txt(sw, "here");
         std::println("{}", base);
         assert(base.contains("refrigerator_1") and base.contains("P "));
+        // one name rule: "the fridge", "la nevera" and "Refrigerator_1" are the same target
+        for (const char* nm : {"the fridge", "la nevera", "Refrigerator_1", "the refrigerator-1"})
+            assert(answer_see(sw, cd, nm, "here").contains("refrigerator_1"));
         // a box between the standpoint and the fridge is named as the occluder
         ImaginedWorld bw = sw;
         SeeObject bx; bx.name = "box_1"; bx.subtype = "box"; bx.x = 3.0f; bx.y = 2.0f; bx.w = 1.2f; bx.d = 1.2f; bx.h = 2.2f;
@@ -268,7 +308,13 @@ int main()
         const auto wide = answer_see(dw, cd, "fridge", "here", "door_2", *parse_opening("wide"));
         std::println("{}\n{}", shut, wide);
         assert(wide.contains("if door_2 were wide (taken as 90°)") and shut.contains("if door_2 were shut"));
-        const auto p_of = [](const std::string& a) { const auto i = a.find("(P "); return std::stof(a.substr(i + 3)); };
+        const auto p_of = [](const std::string& a)
+        {
+            const auto i = a.find("(P ");
+            float v = 0;
+            std::from_chars(a.data() + i + 3, a.data() + a.size(), v);
+            return v;
+        };
         assert(p_of(wide) > p_of(shut));
         assert(answer_see(dw, std::nullopt, "fridge", "here") == "I have no detector for that.");
     }
@@ -290,6 +336,7 @@ int main()
         // room_1 -door_1-> room_2 directly; or room_1 -door_2-> room_3 -door_3-> room_2
         sw.topology.passages = {pas("passage_0", "room_1", "room_2", "door_1", 1, 1), pas("passage_1", "room_1", "room_3", "door_2", 1, 1),
                                 pas("passage_2", "room_3", "room_2", "door_3", 9, 1)};
+        sw.em_available = true;
         for (int i = 0; i < 15; ++i) sw.records.push_back(rec("door_1", "satisfied", i % 2 ? "room_1" : "room_2", ""));
         for (int i = 0; i < 3; ++i) sw.records.push_back(rec("door_1", "door_wont_open", "room_1", ""));
         for (int i = 0; i < 7; ++i) sw.records.push_back(rec("door_2", "satisfied", "room_1", "", 20000));
@@ -323,6 +370,22 @@ int main()
         assert(answer_succeed(sw, "room_1", "room_2", "door_9") == "I don't know a door called door_9");
         ImaginedWorld iso = sw; iso.topology.passages.push_back(pas("passage_9", "room_8", "room_9", "door_9", 1, 1));
         assert(answer_succeed(iso, "room_1", "room_2", "door_9") == "no remembered route through door_9 reaches room_2");
+        // one name rule across succeed: spellings of rooms and doors
+        assert(answer_succeed(sw, "Room 1", "room-2", "the door 2").contains(" vs "));
+        assert(route_via(sw.topology, "Room_1", "ROOM 2", "passage_1").has_value() and not route(sw.topology, "room 1", "Room_2").empty());
+        assert(resolve_passage(sw.topology, "the door 2") == "passage_1" and resolve_passage(sw.topology, "Door-3") == "passage_2");
+        assert(answer_succeed(sw, "", "room_2", "").starts_with("I do not know which room I am in"));
+        assert(answer_succeed(sw, "Room_2", "room 2", "").contains("already in"));
+        // excluded crossings are counted aloud
+        assert(a.contains("not counted") == false);
+        const auto exa = answer_succeed(ex, "room_1", "room_2", "");
+        assert(exa.contains("stopped by you") and exa.contains("superseded") and exa.contains("not counted"));
+        // episodic memory not joined
+        ImaginedWorld withem = nd; withem.em_available = true;
+        assert(answer_succeed(nd, "room_1", "room_2", "").contains("not connected to my episodic memory"));
+        assert(not answer_succeed(withem, "room_1", "room_2", "").contains("not connected"));
+        ImaginedWorld notopo; notopo.em_available = true;
+        assert(answer_succeed(notopo, "room_1", "room_2", "").contains("no remembered topology"));
         assert(answer_succeed(sw, "room_1", "", "") == "ASK: where should the mission end?");
         assert(answer_succeed(sw, "room_1", "room_1", "").contains("already in room_1"));
         assert(answer_succeed(sw, "room_1", "room_2", "").contains("door_1"));

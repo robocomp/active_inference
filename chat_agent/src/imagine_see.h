@@ -34,7 +34,10 @@ namespace rc::chat::imagine
     if (not sp.has_value()) return sp.error();
     if (not card.has_value()) return answer_no_card(true, "");
 
-    const std::string tgt(target);
+    // One name rule: "the fridge" is the class "fridge", "Chair 1" the instance chair_1.
+    std::string tgt = norm_name(target);
+    for (const auto& o : iw.scene.objects)
+        if (norm_name(o.name) == tgt) { tgt = o.name; break; }
     const auto tg = resolve_target(iw.scene, tgt, tgt, card);
     if (not tg.has_value()) return tg.error();
     const auto r = evaluate_scene(*card, iw.scene, *tg, rc::card::Viewpoint{sp->xy, std::nullopt});

@@ -21,6 +21,7 @@
 #include <vector>
 
 #include "can_see.h"
+#include "name_norm.h"
 #include "topology.h"
 #include "../../common/episodic/em_schema.h"
 
@@ -30,7 +31,10 @@ namespace rc::chat::imagine
 struct ImaginedWorld
 {
     SeeScene scene;                                   ///< the room facts (can_see.h)
-    std::optional<float> body_half_width;             ///< m, from the robot mesh footprint; nullopt = "no body model"
+    std::optional<float> body_half_width;             ///< m, the controller's body: support_radius along +-x incl. its safety margin; nullopt = "no body model"
+    std::string body_note;                            ///< how the width was obtained, when it needs saying ("without the controller's safety margin")
+    std::optional<float> robot_height_m;              ///< m, the z-extent of the body mesh; nullopt = unknown (the answer says so)
+    bool em_available = false;                        ///< the episodic memory is joined (records below are today's, possibly none)
     std::optional<float> robot_sigma_m;               ///< robot localisation 1-sigma (m); nullopt = unknown
     std::map<std::string, float> door_sigma_m;        ///< per door: 1-sigma of its centre along the wall
     std::map<std::string, float> object_sigma_m;      ///< per object instance: 1-sigma of its position
@@ -50,15 +54,7 @@ inline std::string trim_lower(std::string_view s)
     while (not s.empty() and std::isspace(static_cast<unsigned char>(s.back()))) s.remove_suffix(1);
     return lower_ascii(std::string(s));
 }
-/// Loose names from the model: one leading article dropped (EN/ES), '-' / ' ' / '_' equivalent, case folded.
-inline std::string norm_name(std::string_view s)
-{
-    std::string t = trim_lower(s);
-    for (const std::string_view art : {"the ", "an ", "a ", "el ", "la ", "los ", "las ", "unas ", "unos ", "una ", "un "})
-        if (t.starts_with(art)) { t.erase(0, art.size()); break; }
-    for (auto& c : t) if (c == '-' or c == ' ') c = '_';
-    return t;
-}
+using ::rc::chat::norm_name;   // the one name rule (name_norm.h)
 inline Opening angle_opening(float deg, std::string_view word)
 {
     const float rad = deg * std::numbers::pi_v<float> / 180.0f;
@@ -92,7 +88,9 @@ inline Opening angle_opening(float deg, std::string_view word)
     {
         const float c = std::clamp(deg, 0.0f, 90.0f);
         Opening o = angle_opening(c, "");
-        if (c != deg) o.words = std::format("{:.0f} degrees (the leaf only opens to 90°, taken as 90°)", deg);
+        if (c != deg)
+            o.words = deg < 0.0f ? std::format("{:.0f} degrees (a door does not open backwards, taken as 0°)", deg)
+                                 : std::format("{:.0f} degrees (the leaf only opens to 90°, taken as 90°)", deg);
         return o;
     }
     return std::unexpected(std::format("I don't know how open '{}' is; say shut, ajar, half, wide or an angle in degrees", std::string(s)));
@@ -141,7 +139,7 @@ struct Standpoint { Eigen::Vector2f xy; std::optional<float> yaw; std::string wo
 {
     const SeeScene& s = w.scene;
     const std::string f = imagine_detail::norm_name(from);
-    if (f.empty() or f == "here" or f == "me" or f == "robot" or f == imagine_detail::norm_name(s.room))
+    if (f.empty() or f == "here" or f == "aqu\u00ed" or f == "aqui" or f == "me" or f == "robot" or f == imagine_detail::norm_name(s.room))
     {
         if (not s.robot_xy.has_value()) return std::unexpected("I don't know where I am");
         return Standpoint{*s.robot_xy, s.robot_yaw + std::numbers::pi_v<float> / 2.0f, "where I am"};

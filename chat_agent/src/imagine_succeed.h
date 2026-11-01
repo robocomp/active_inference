@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <cmath>
 #include <format>
+#include <map>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -32,6 +33,7 @@ struct LegStats
     std::optional<double> mean_duration_s;
     int n_duration = 0;
     int ok_ab = 0, n_ab = 0, ok_ba = 0, n_ba = 0;   ///< per direction (room -> room_after of the crossing / its reverse)
+    std::map<std::string, int> excluded;            ///< crossings seen but not counted, by the plain words for why
 };
 struct RouteOdds { std::vector<LegStats> legs; double p = 0, sd = 0; double e2 = 1; };
 
@@ -45,6 +47,15 @@ inline Verdict verdict(const rc::em::Record& r)
     for (const std::string_view f : {"door_wont_open", "cross_unreachable", "approach_unreachable", "unreachable"})
         if (r.outcome == f) return Verdict::Failure;
     return Verdict::Excluded;
+}
+/// Why a record is not counted, in the person's words.
+inline std::string excluded_why(const rc::em::Record& r)
+{
+    if (r.outcome == "stopped_by_user") return "stopped by you";
+    if (r.outcome == "superseded") return "superseded";
+    if (r.outcome == "lost") return "lost";
+    if (r.outcome == "preempted") return "interrupted without leaving the room";
+    return "with another outcome";
 }
 inline double e2_of(double a, double b) { return a * (a + 1) / ((a + b) * (a + b + 1)); }
 }   // namespace succeed_detail
@@ -69,7 +80,7 @@ inline double e2_of(double a, double b) { return a * (a + 1) / ((a + b) * (a + b
             const std::string kt = imagine_detail::norm_name(r.target);
             if (kt != kd and kt != ki) continue;
             const auto v = verdict(r);
-            if (v == Verdict::Excluded) continue;
+            if (v == Verdict::Excluded) { ++L.excluded[excluded_why(r)]; continue; }
             const bool ab = P and r.room == P->room_a;
             (ab ? L.n_ab : L.n_ba) += 1;
             if (v == Verdict::Success)
@@ -96,14 +107,20 @@ inline double e2_of(double a, double b) { return a * (a + 1) / ((a + b) * (a + b
 
 namespace succeed_detail
 {
-inline std::string leg_text(const LegStats& L, const TopoPassageInfo* P)
+inline std::string leg_text(const LegStats& L, const TopoPassageInfo* P, bool em_available)
 {
     std::string s;
     const int n = L.n_success + L.n_fail;
     if (n == 0)
     {
         const bool flat = P == nullptr or (P->pass_alpha == 1 and P->pass_beta == 1);
-        if (flat) s = std::format("I have no data on {} (0.50 by default)", L.door);
+        if (not em_available)
+        {
+            const std::string_view em = "I am not connected to my episodic memory";
+            if (flat) s = std::format("I have no data on {} (0.50 by default): {}", L.door, em);
+            else s = std::format("{}: {}; its remembered record gives {:.2f}", L.door, em, L.mean);
+        }
+        else if (flat) s = std::format("I have no data on {} (0.50 by default)", L.door);
         else s = std::format("{} has no crossing today; its remembered record gives {:.2f}", L.door, L.mean);
     }
     else
@@ -114,6 +131,12 @@ inline std::string leg_text(const LegStats& L, const TopoPassageInfo* P)
         s += ")";
     }
     if (L.mean_duration_s) s += std::format(", about {:.0f} s per crossing over {} successes", *L.mean_duration_s, L.n_duration);
+    if (not L.excluded.empty())
+    {
+        std::string ex;
+        for (const auto& [why, k] : L.excluded) ex += std::format("{}{} {}", ex.empty() ? "" : ", ", k, why);
+        s += std::format(" ({}, not counted)", ex);
+    }
     return s;
 }
 inline std::string route_text(const ImaginedWorld& w, const RouteOdds& o)
@@ -122,7 +145,7 @@ inline std::string route_text(const ImaginedWorld& w, const RouteOdds& o)
     for (const auto& L : o.legs)
     {
         const auto pit = std::ranges::find(w.topology.passages, L.passage, &TopoPassageInfo::id);
-        s += (s.empty() ? "" : "; ") + leg_text(L, pit == w.topology.passages.end() ? nullptr : &*pit);
+        s += (s.empty() ? "" : "; ") + leg_text(L, pit == w.topology.passages.end() ? nullptr : &*pit, w.em_available);
     }
     return s;
 }
@@ -138,8 +161,11 @@ inline std::string names_of(const RouteOdds& o)
                                                 std::string_view via)
 {
     using namespace succeed_detail;
+    if (from_room.empty()) return "I do not know which room I am in, so I cannot judge a trip from here.";
     if (to_room.empty()) return "ASK: where should the mission end?";
-    if (from_room == to_room) return std::format("I am already in {}; there is no route to succeed at.", to_room);
+    if (norm_name(from_room) == norm_name(to_room)) return std::format("I am already in {}; there is no route to succeed at.", to_room);
+    if (w.topology.rooms.empty() and w.topology.passages.empty())
+        return "I have no remembered topology (my long-term memory of rooms is not joined, or still empty), so I cannot judge a route.";
     const auto normal = route(w.topology, from_room, to_room);
     if (normal.empty()) return std::format("I know no remembered route from {} to {}.", from_room, to_room);
     const RouteOdds base = route_odds(w, normal);

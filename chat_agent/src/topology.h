@@ -19,6 +19,8 @@
 #include <string_view>
 #include <vector>
 
+#include "name_norm.h"
+
 namespace rc::chat
 {
 struct TopoRoomInfo { std::string name; bool live = false; };
@@ -75,10 +77,25 @@ inline std::expected<Topology, std::string> decode_topology(std::string_view jso
 // The edge cost of crossing a passage: 1 / E[p_pass].
 inline double passage_cost(const TopoPassageInfo& p) { return (p.pass_alpha + p.pass_beta) / p.pass_alpha; }
 
+// A room name as the person/model spelled it -> the topology's own spelling ("Room 2" -> "room_2"); unchanged when no
+// remembered room matches under the one name rule (name_norm.h).
+[[nodiscard]] inline std::string canon_room(const Topology& t, std::string_view name)
+{
+    const std::string k = norm_name(name);
+    for (const auto& r : t.rooms) if (norm_name(r.name) == k) return r.name;
+    for (const auto& p : t.passages)
+    {
+        if (norm_name(p.room_a) == k) return p.room_a;
+        if (norm_name(p.room_b) == k) return p.room_b;
+    }
+    return std::string(name);
+}
+
 // Cheapest route as (cost, passage ids in order); nullopt when unreachable; from == to is (0, {}).
 [[nodiscard]] inline std::optional<std::pair<double, std::vector<std::string>>>
-route_cost(const Topology& t, std::string_view from_room, std::string_view to_room)
+route_cost(const Topology& t, std::string_view from_given, std::string_view to_given)
 {
+    const std::string from_room = canon_room(t, from_given), to_room = canon_room(t, to_given);
     if (from_room == to_room) return std::pair{0.0, std::vector<std::string>{}};
     struct Prev { std::string room; std::size_t passage; };
     std::map<std::string, double, std::less<>> dist;
@@ -126,8 +143,9 @@ inline std::vector<std::string> route(const Topology& t, std::string_view from_r
 // the passage, the other end -> to; the cheaper of the two directions. nullopt when the id is unknown or neither
 // direction is reachable.
 [[nodiscard]] inline std::optional<std::vector<std::string>>
-route_via(const Topology& t, std::string_view from_room, std::string_view to_room, std::string_view passage_id)
+route_via(const Topology& t, std::string_view from_given, std::string_view to_given, std::string_view passage_id)
 {
+    const std::string from_room = canon_room(t, from_given), to_room = canon_room(t, to_given);
     const auto pit = std::ranges::find(t.passages, passage_id, &TopoPassageInfo::id);
     if (pit == t.passages.end()) return std::nullopt;
     std::optional<std::pair<double, std::vector<std::string>>> best;
@@ -149,15 +167,13 @@ route_via(const Topology& t, std::string_view from_room, std::string_view to_roo
     return std::move(best->second);
 }
 
-// A name the person/LLM uses -> the passage id: a passage id, or the live door a passage carries. Case-insensitive.
+// A name the person/LLM uses -> the passage id: a passage id, or the live door a passage carries. The one name rule
+// (name_norm.h): "the door 2", "Door-2" and "door_2" are the same.
 [[nodiscard]] inline std::optional<std::string> resolve_passage(const Topology& t, std::string_view name)
 {
-    const auto same = [&](std::string_view s)
-    {
-        return std::ranges::equal(s, name, [](unsigned char x, unsigned char y) { return std::tolower(x) == std::tolower(y); });
-    };
-    for (const auto& p : t.passages) if (same(p.id)) return p.id;
-    for (const auto& p : t.passages) if (p.live_door and same(*p.live_door)) return p.id;
+    const std::string k = norm_name(name);
+    for (const auto& p : t.passages) if (norm_name(p.id) == k) return p.id;
+    for (const auto& p : t.passages) if (p.live_door and norm_name(*p.live_door) == k) return p.id;
     return std::nullopt;
 }
 // ── tool answers (text the model reads; PURE) ─────────────────────────────────────────────────────────────────

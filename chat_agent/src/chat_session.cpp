@@ -1,7 +1,10 @@
 #include "chat_session.h"
 #include "history_trim.h"
 
+#include <charconv>
 #include <csignal>
+#include <expected>
+#include <format>
 #include <filesystem>
 #include <cmath>
 #include <print>
@@ -23,6 +26,8 @@
 #include <opencv2/imgcodecs.hpp>
 
 #include "approach.h"
+#include "name_norm.h"
+#include "body_model.h"
 #include "canvas_model.h"
 #include "canvas_snapshot.h"
 #include "controller_facts.h"
@@ -660,8 +665,8 @@ QJsonArray ChatSession::tools_json() const
         "(\u00bfcabr\u00eda?, \u00bfsi estuviera ...?). It works on an imagined COPY of what the robot knows; it never moves "
         "the robot and the imagined state is never written to the graph. question=fit: would the robot's body fit through a "
         "door (door, and opening = shut | ajar | half | wide | as_is or degrees) or between two named things (between = "
-        "[a, b]). question=see: would it see `target` (a name or class), `from` a place (pass a NAME: a door, room or "
-        "object, empty = here), optionally if `door` were `opening`. question=succeed: how likely is a trip from `from` "
+        "[a, b]); `move` + `dx`, `dy` (metres) imagines that object moved first. question=see: would it see `target` (a name or class), `from` a place (pass a NAME: a door, room or "
+        "object, empty = here), optionally if `door` were `opening` or `move` moved. question=succeed: how likely is a trip from `from` "
         "(a room NAME) to `to` (a room), optionally going `via` a named door instead. Not for what is true now (can_see, "
         "route_to, where_is) nor to go anywhere (plan_mission).",
         QJsonObject{{"question", QJsonObject{{"type", "string"}, {"enum", QJsonArray{"fit", "see", "succeed"}},
@@ -677,7 +682,11 @@ QJsonArray ChatSession::tools_json() const
                                                          "empty = here"}}},
                     {"to", QJsonObject{{"type", "string"}, {"description", "succeed: the destination room name"}}},
                     {"between", QJsonObject{{"type", "array"}, {"items", QJsonObject{{"type", "string"}}},
-                                            {"description", "fit: exactly two names (two objects, or an object and a wall)"}}}},
+                                            {"description", "fit: exactly two names (two objects, or an object and a wall)"}}},
+                    {"move", QJsonObject{{"type", "string"},
+                                         {"description", "fit (between) or see: an object name to imagine moved first, by dx, dy"}}},
+                    {"dx", QJsonObject{{"type", "number"}, {"description", "move: metres along the room x axis (a number)"}}},
+                    {"dy", QJsonObject{{"type", "number"}, {"description", "move: metres along the room y axis (a number)"}}}},
         QJsonArray{"question"}));
     tools.append(tool_def("imagine_view",
         "Show how the robot IMAGINES a kind of thing (a chair, a table...) looks to its own sensors: draws several "
@@ -1198,16 +1207,16 @@ std::optional<float> edge_sigma_m(DSR::DSRGraph& G, std::uint64_t room_id, std::
 }
 }   // namespace
 
-std::optional<float> ChatSession::robot_body_half_width()
+void ChatSession::load_robot_body()
 {
-    if (body_half_width_.has_value()) return body_half_width_;   // the mesh does not change
+    if (body_half_width_.has_value()) return;   // cached: the mesh and the controller's config do not change
     const auto robots = G_->get_nodes_by_type("robot");
-    if (robots.empty()) return std::nullopt;
+    if (robots.empty()) return;
     // Shadow's meshes are already in the robot frame (x lateral): yaw 0. Another robot's yaw is a config of the controller
     // this agent does not have, so it has no body model here rather than a guessed one.
-    if (robots.front().name() != "Shadow") return std::nullopt;
+    if (robots.front().name() != "Shadow") return;
     const auto p = G_->get_attrib_by_name<path_att>(robots.front());
-    if (not p.has_value() or p->get().empty()) return std::nullopt;
+    if (not p.has_value() or p->get().empty()) return;
     namespace fs = std::filesystem;
     std::error_code ec;
     const fs::path rel(p->get());
@@ -1216,12 +1225,13 @@ std::optional<float> ChatSession::robot_body_half_width()
     for (const auto& c : {rel, root / rel, root / "robot_concept" / rel, fs::current_path(ec) / rel,
                           fs::current_path(ec).parent_path() / "robot_concept" / rel})
         if (fs::exists(c, ec)) { file = c; break; }
-    if (not file.has_value()) return std::nullopt;
-    rc::RobotFootprint::MeshReport rep;
-    const auto fp = rc::RobotFootprint::from_obj(file->string(), 0.f, rep);
-    if (not fp.has_value()) return std::nullopt;
-    body_half_width_ = rep.x_max;   // |x| max in the robot frame, margin not applied: half the lateral width
-    return body_half_width_;
+    if (not file.has_value()) return;
+    // The controller's own body and margin (body_model.h), not the raw mesh.
+    const auto body = rc::chat::load_body_model(*file, true, rc::chat::controller_safety_margin(root / "controller" / "etc" / "config.toml"));
+    if (not body.has_value()) return;
+    body_half_width_ = body->half_width;
+    robot_height_m_ = body->height_m;
+    body_note_ = body->note;
 }
 
 QString ChatSession::do_imagine(const QJsonObject& args)
@@ -1235,7 +1245,10 @@ QString ChatSession::do_imagine(const QJsonObject& args)
     // The snapshot, built now and only now (main thread): the scene, the body, the uncertainties, the memory.
     im::ImaginedWorld w;
     w.scene = rc::chat::build_see_scene(*G_, *inner_, digest_);
-    w.body_half_width = robot_body_half_width();
+    load_robot_body();
+    w.body_half_width = body_half_width_;
+    w.robot_height_m = robot_height_m_;
+    w.body_note = body_note_;
     if (const auto room = G_->get_node(w.scene.room); room.has_value())
     {
         const auto robots = G_->get_nodes_by_type("robot");
@@ -1248,7 +1261,34 @@ QString ChatSession::do_imagine(const QJsonObject& args)
                 if (const auto sg = edge_sigma_m(*G_, room->id(), n->id()); sg.has_value()) w.object_sigma_m[o.name] = *sg;
     }
     if (const auto topo = remembered_topology(); topo.has_value()) w.topology = *topo;
-    if (const auto st = em_store(); st.has_value()) w.records = st->today;
+    const auto st = em_store();
+    w.em_available = st.has_value();
+    if (st.has_value()) w.records = st->today;
+
+    // A deliberate move of one object (fit-between, see): dx, dy in metres, room frame; numbers or strings.
+    const auto num = [&](const char* k) -> std::expected<float, std::string>
+    {
+        const auto v = args.value(k);
+        if (v.isUndefined() or v.isNull()) return 0.f;
+        if (v.isDouble()) return static_cast<float>(v.toDouble());
+        const std::string t = v.toString().trimmed().toStdString();
+        if (t.empty()) return 0.f;
+        float x = 0;
+        const auto [p, ec] = std::from_chars(t.data(), t.data() + t.size(), x);
+        if (ec != std::errc{} or p != t.data() + t.size() or not std::isfinite(x))
+            return std::unexpected(std::format("REJECTED: {} must be a number of metres, not '{}'", k, t));
+        return x;
+    };
+    if (const std::string mv = str("move"); not mv.empty() and question != "succeed")
+    {
+        const auto dx = num("dx"), dy = num("dy");
+        if (not dx.has_value()) return q(dx.error());
+        if (not dy.has_value()) return q(dy.error());
+        if (w.scene.room.empty()) return QStringLiteral("I do not know which room I am in, so I cannot move anything in it.");
+        auto moved = im::with_object_moved(std::move(w), mv, *dx, *dy);
+        if (not moved.has_value()) return q(moved.error());
+        w = std::move(*moved);
+    }
 
     if (question == "fit")
     {
@@ -1273,8 +1313,8 @@ QString ChatSession::do_imagine(const QJsonObject& args)
         const std::string target = str("target");
         if (target.empty()) return QStringLiteral("ASK: what should I imagine looking at?");
         // The card is the target's CLASS: the named instance's subtype, else the word itself.
-        std::string cls = rc::chat::canonical_concept(target);
-        if (const auto it = std::ranges::find_if(w.scene.objects, [&](const auto& o) { return rc::chat::lower_ascii(o.name) == rc::chat::lower_ascii(target); });
+        std::string cls = rc::chat::canonical_concept(rc::chat::norm_name(target));
+        if (const auto it = std::ranges::find_if(w.scene.objects, [&](const auto& o) { return rc::chat::norm_name(o.name) == rc::chat::norm_name(target); });
             it != w.scene.objects.end() and not it->subtype.empty())
             cls = rc::chat::canonical_concept(it->subtype);
         std::optional<rc::card::Card> card;
@@ -1296,7 +1336,7 @@ QString ChatSession::do_imagine(const QJsonObject& args)
     std::string from = str("from"), via = str("via"), to = str("to");
     if (to.empty()) to = str("target");
     if (via.empty() and not from.empty() and rc::chat::resolve_passage(w.topology, from).has_value()) { via = from; from.clear(); }
-    if (from.empty() or rc::chat::lower_ascii(from) == "here") from = digest_.facts.room;
+    if (const std::string nf = rc::chat::norm_name(from); nf.empty() or nf == "here" or nf == "aqu\u00ed" or nf == "aqui") from = digest_.facts.room;
     return q(im::answer_succeed(w, from, to, via));
 }
 

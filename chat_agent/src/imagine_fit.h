@@ -27,16 +27,14 @@ namespace rc::chat::imagine
 
 struct FitAnswer { std::optional<float> p; float slack_m = 0; std::optional<float> phi_needed_rad; std::string text; };
 
-/// Shadow's published height (m): the robot body occupies the vertical band [0, kRobotHeightM].
-inline constexpr float kRobotHeightM = 1.25f;
+/// The robot body occupies the vertical band [0, height]; the height is the body mesh's z-extent (ImaginedWorld::
+/// robot_height_m). Only when the mesh gives none is this fallback used, and the answer says so.
+inline constexpr float kRobotHeightFallbackM = 1.25f;
 
 namespace fit_detail
 {
 inline constexpr float kPi = std::numbers::pi_v<float>;
 inline constexpr float kDeg = 180.0f / kPi;
-/// Anchor-frame y of the hinge pin. It shifts the leaf across the wall only; the gap ALONG the wall (all the fit model
-/// reads) does not depend on it.
-inline constexpr float kHingeFaceY = -0.05f;
 
 /// The four hinge (left/right) x swing (toward/away) leaves at the given opening, p = 0.25 each (hinge and swing are not
 /// published on the door node; a published hinge belief replaces the weights later). anchor_clear_gap reads only the
@@ -44,7 +42,8 @@ inline constexpr float kHingeFaceY = -0.05f;
 /// differ only through the model's leaf thickness; the mixture is kept whole on purpose.
 inline std::vector<rc::interaction::AnchorLeaf> leaves_at(float width, float phi)
 {
-    return rc::interaction::anchor_leaf_hypotheses(0.5f * width, kHingeFaceY, -1.f, -1.f, width, phi, 0.f, 0.f, 0.f);
+    // hinge-pin face y = 0: it shifts the leaf across the wall only; the gap ALONG the wall (all the fit model reads) does not depend on it
+    return rc::interaction::anchor_leaf_hypotheses(0.5f * width, 0.f, -1.f, -1.f, width, phi, 0.f, 0.f, 0.f);
 }
 
 struct DoorEval { float p = 0, mean_gap = 0; };
@@ -63,9 +62,29 @@ inline DoorEval eval_door(float width, float phi, float body_half, float sigma)
 }
 
 inline std::string deg1(float rad) { return std::format("{:.0f}", rad * kDeg); }
+
+/// The body's vertical extent and the plain words about it when it is the fallback.
+inline float robot_height(const ImaginedWorld& w, std::string& note)
+{
+    if (w.robot_height_m.has_value()) return *w.robot_height_m;
+    note = std::format("my body's height is not known, so I assumed {:.2f} m", kRobotHeightFallbackM);
+    return kRobotHeightFallbackM;
+}
+/// The leaf angle at which a state with clear half-gap `half_gap` sits (door_states' inverse: half_gap = w/2 (1 - cos phi)).
+inline float phi_of_half_gap(float width, float half_gap)
+{
+    return std::acos(std::clamp(1.f - half_gap / (0.5f * width), -1.f, 1.f));
+}
+inline std::string notes_text(const ImaginedWorld& w)
+{
+    std::string t = w.body_note;
+    for (const auto& n : w.notes) t += (t.empty() ? "" : "; ") + n;
+    return t.empty() ? t : " (" + t + ")";
+}
 }   // namespace fit_detail
 
-inline constexpr std::string_view kDoorCaveat = "an upper bound: the leaf's depth across the doorway is not modelled";
+inline constexpr std::string_view kDoorCaveat = "an upper bound: the leaf's depth across the doorway is not modelled, "
+                                                "and I assume I line up centred on the gap";
 
 [[nodiscard]] inline FitAnswer answer_fit_door(const ImaginedWorld& w, std::string_view door, const Opening& opening)
 {
@@ -73,7 +92,12 @@ inline constexpr std::string_view kDoorCaveat = "an upper bound: the leaf's dept
     FitAnswer a;
     const std::string key = imagine_detail::norm_name(door);
     const auto it = std::ranges::find_if(w.scene.doors, [&](const SeeDoor& d) { return imagine_detail::norm_name(d.name) == key; });
-    if (it == w.scene.doors.end()) { a.text = std::format("I don't know a door called {}", door); return a; }
+    if (w.scene.room.empty()) { a.text = "I do not know which room I am in, so I cannot judge a door."; return a; }
+    if (it == w.scene.doors.end())
+    {
+        a.text = std::format("{} is not in this room ({}); I only judge doors of the room I am in", door, w.scene.room);
+        return a;
+    }
     if (not w.body_half_width.has_value()) { a.text = "I have no model of my body width"; return a; }
     const float bh = *w.body_half_width;
     const float width = it->width_m > 0.f ? it->width_m : kNominalDoorWidthM;
@@ -128,12 +152,28 @@ inline constexpr std::string_view kDoorCaveat = "an upper bound: the leaf's dept
     }
     else
     {
+        // Not measured: weight over the door's own states, the mixture can_see uses (door_states): P(open) when it has
+        // one (shut / swung open), else a uniform opening.
         const auto shut = eval_door(width, 0.f, bh, sigma), wide = eval_door(width, kPi / 2, bh, sigma);
-        head = std::format("I don't know how open {} is now; shut: P(fit) = {:.2f}, slack {:+.0f} cm; wide open: P(fit) = {:.2f}, slack {:+.0f} cm",
-                           it->name, shut.p, (shut.mean_gap - target) * 100.f, wide.p, (wide.mean_gap - target) * 100.f);
+        SeeDoor sized = *it;
+        sized.width_m = width;
+        float p = 0.f, gap = 0.f;
+        for (const auto& st : door_states(sized))
+        {
+            const auto e = eval_door(width, phi_of_half_gap(width, st.half_gap), bh, sigma);
+            p += st.weight * e.p;
+            gap += st.weight * e.mean_gap;
+        }
+        a.p = std::clamp(p, 0.f, 1.f);
+        a.slack_m = gap - target;
+        const bool has_p_open = it->p_open.has_value() and *it->p_open >= kSentinelFree;
+        const std::string how = has_p_open ? std::format("weighted over shut/open by P(open)={:.2f}", std::clamp(*it->p_open, 0.f, 1.f))
+                                           : std::string("weighted over a uniform opening, 0 to 90°");
+        head = std::format("P(fit) = {:.2f} with {} as it is now (door state not measured: {}, slack {:+.0f} cm; shut: {:.2f}, wide open: {:.2f})",
+                           *a.p, it->name, how, a.slack_m * 100.f, shut.p, wide.p);
     }
-    a.text = std::format("{}{}. For P = 0.5, {}. Hinge side and swing are not known, so I averaged the four combinations. Caveat: {}.",
-                         head, sig_note, star, kDoorCaveat);
+    a.text = std::format("{}{}. For P = 0.5, {}. Hinge side and swing are not known, so I averaged the four combinations. Caveat: {}.{}",
+                         head, sig_note, star, kDoorCaveat, notes_text(w));
     return a;
 }
 
@@ -215,8 +255,11 @@ inline std::vector<Pt> box_corners(float x, float y, float yaw, float w, float d
     FitAnswer ans;
     constexpr std::string_view kCaveat = "a prediction from what I believe; while driving my local controller decides from the live LiDAR "
                                          "and may meet legs, cables or clutter I have not modelled";
+    if (w.scene.room.empty()) { ans.text = "I do not know which room I am in, so I cannot judge what is around me."; return ans; }
     if (not w.body_half_width.has_value()) { ans.text = "I have no model of my body width"; return ans; }
     const float bh = *w.body_half_width;
+    std::string height_note;
+    const float robot_h = robot_height(w, height_note);
 
     struct Side { std::optional<Referent> ref; std::string label, note; bool ignored = false; std::string err; };
     const auto resolve = [&](std::string_view raw) -> Side
@@ -241,12 +284,15 @@ inline std::vector<Pt> box_corners(float x, float y, float yaw, float w, float d
         if (pick->h.has_value())
         {
             const float base = object_base_z(*pick, *pick->h), top = base + *pick->h;
-            if (not (base < kRobotHeightM and top > 0.f)) { s.ignored = true; }
+            if (not (base < robot_h and top > 0.f)) { s.ignored = true; }
         }
         else s.note = std::format("{}'s height is unknown, so I treated it as blocking", pick->name);
-        if (not pick->w.has_value() and not pick->d.has_value())
-            s.note += std::string(s.note.empty() ? "" : "; ") + std::format("{}'s size is unknown, so I treated it as a point at its centre", pick->name);
-        else if (not pick->w.has_value() or not pick->d.has_value())
+        if (not pick->w.has_value() and not pick->d.has_value() and not s.ignored)
+        {
+            s.err = std::format("I can't judge: {}'s size is unknown", pick->name);
+            return s;
+        }
+        if (pick->w.has_value() != pick->d.has_value())
             s.note += std::string(s.note.empty() ? "" : "; ") + std::format("{}'s size is only partly known, so I used what is known", pick->name);
         std::optional<float> sg;
         if (const auto f = w.object_sigma_m.find(pick->name); f != w.object_sigma_m.end()) sg = f->second;
@@ -281,11 +327,12 @@ inline std::vector<Pt> box_corners(float x, float y, float yaw, float w, float d
         const Side& other = A.ignored ? B : A;
         ans.p = 1.f;
         ans.slack_m = gap - 2.f * bh;
-        std::string t = std::format("{} sits entirely outside my body's height band (0 to {:.2f} m), so it does not block. ", up.label, kRobotHeightM);
+        std::string t = std::format("{} sits entirely outside my body's height band (0 to {:.2f} m), so it does not block. ", up.label, robot_h);
         if (other.ignored) t += std::format("Neither side is at my height: nothing at my height blocks there. P(fit) = 1.00.");
         else t += std::format("Their footprints are {:.0f} cm apart (I am {:.0f} cm wide), but nothing at my height blocks there. P(fit) = 1.00.", gap * 100.f, 2.f * bh * 100.f);
         for (const Side* sd : {&A, &B}) if (not sd->note.empty()) t += " Note: " + sd->note + ".";
-        ans.text = t + std::format(" Caveat: {}.", kCaveat);
+        if (not height_note.empty()) t += " Note: " + height_note + ".";
+        ans.text = t + std::format(" Caveat: {}.{}", kCaveat, notes_text(w));
         return ans;
     }
     std::optional<float> sg;
@@ -303,7 +350,8 @@ inline std::vector<Pt> box_corners(float x, float y, float yaw, float w, float d
     if (*ans.p < 0.5f)
         text += std::format(" To make it 50/50, {} would have to move away by about {:.0f} cm.", mover->name, -ans.slack_m * 100.f);
     for (const Side* s : {&A, &B}) if (not s->note.empty()) text += " Note: " + s->note + ".";
-    text += std::format(" Caveat: {}.", kCaveat);
+    if (not height_note.empty()) text += " Note: " + height_note + ".";
+    text += std::format(" Caveat: {}.{}", kCaveat, notes_text(w));
     ans.text = std::move(text);
     return ans;
 }

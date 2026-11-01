@@ -176,8 +176,8 @@ def tools():
           "...\" (\u00bfcabr\u00eda?, \u00bfsi estuviera ...?). It works on an imagined COPY of what the robot knows; it "
           "never moves the robot and the imagined state is never written to the graph. question=fit: would the robot's body "
           "fit through a door (door, and opening = shut | ajar | half | wide | as_is or degrees) or between two named things "
-          "(between = [a, b]). question=see: would it see `target` (a name or class), `from` a place (pass a NAME: a door, "
-          "room or object, empty = here), optionally if `door` were `opening`. question=succeed: how likely is a trip from "
+          "(between = [a, b]); `move` + `dx`, `dy` (metres) imagines that object moved first. question=see: would it see `target` (a name or class), `from` a place (pass a NAME: a door, "
+          "room or object, empty = here), optionally if `door` were `opening` or `move` moved. question=succeed: how likely is a trip from "
           "`from` (a room NAME) to `to` (a room), optionally going `via` a named door instead. Not for what is true now "
           "(can_see, route_to, where_is) nor to go anywhere (plan_mission).",
           {"question": {"type": "string", "enum": ["fit", "see", "succeed"],
@@ -190,7 +190,10 @@ def tools():
                                                      "empty = here"},
            "to": {"type": "string", "description": "succeed: the destination room name"},
            "between": {"type": "array", "items": {"type": "string"},
-                       "description": "fit: exactly two names (two objects, or an object and a wall)"}},
+                       "description": "fit: exactly two names (two objects, or an object and a wall)"},
+           "move": {"type": "string", "description": "fit (between) or see: an object name to imagine moved first, by dx, dy"},
+           "dx": {"type": "number", "description": "move: metres along the room x axis (a number)"},
+           "dy": {"type": "number", "description": "move: metres along the room y axis (a number)"}},
           ["question"]),
         t("agent_control", "Start, stop or restart one of the robot's software agents (room_concept, residual_concept, "
           "retina, door_concept, table_concept, chair_concept, bottle_concept, cabinet_concept, hood_concept, "
@@ -504,6 +507,9 @@ CASES = [
      lambda n, a, c: n == "imagine" and a.get("question") == "fit"
      and "chair" in " ".join(map(str, a.get("between") or [])).lower()
      and "wall" in " ".join(map(str, a.get("between") or [])).lower()),
+    ("imagine: fit chair moved", [], "none",
+     "would I fit between the wall and the chair if you moved the chair 20 cm away from the wall?",
+     lambda n, a, c: n == "imagine" and a.get("question") == "fit" and "chair" in str(a.get("move", "")).lower()),
     ("imagine: succeed via door_2", [], "none", "would the mission to room_2 succeed if you went through door_2 instead?",
      # do_imagine also takes a door passed as `from` for the via (the model's habit, eval 2026-11-01)
      lambda n, a, c: n == "imagine" and a.get("question") == "succeed"
