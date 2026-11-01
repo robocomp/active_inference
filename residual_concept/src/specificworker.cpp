@@ -1155,9 +1155,10 @@ void SpecificWorker::integrate_zed_into_grid()
     zed_ingestor_->pump();                                   // main-thread drain of the newest depth frame
     if (not zed_ingestor_->has_depth()) return;
 
-    // room←zed at the sweep stamp (Nearest — the camera pose moves with the robot).
+    // room←zed at the sweep stamp, INTERPOLATED between the localiser's writes (user 2026-11-01; was Nearest, up to half a
+    // publish period off while the robot moves).
     const auto rt = inner_eigen_->get_transformation_matrix(rc::room::current_room_frame(*G), "zed", current_ts_, "RT",
-                                                            DSR::RT_API::TimeQuery::Nearest);
+                                                            DSR::RT_API::TimeQuery::Interpolated);
     if (not rt.has_value()) return;
     const Eigen::Matrix4f room_T_cam = rt->matrix().cast<float>();
     if (not room_T_cam.allFinite()) return;

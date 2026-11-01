@@ -97,7 +97,8 @@ void BottleExistence::update_and_remove(BottleFitter& fitter, const Inputs& in,
         // ★PINNED to the mask's capture stamp (see Inputs::masks_stamp_ms). Reading ts=0 judges a frame by
         // a pose the robot may have left: while moving, the fill and the visibility would be computed for a
         // viewpoint that never took the picture, and absence would be charged for a look never made.
-        if (const auto T = in.inner_eigen->get_transformation_matrix(rc::room::current_room_frame(*in.G), "zed", in.masks_stamp_ms);
+        if (const auto T = in.inner_eigen->get_transformation_matrix(rc::room::current_room_frame(*in.G), "zed", in.masks_stamp_ms,
+                                                              "RT", DSR::RT_API::TimeQuery::Interpolated);
             T.has_value())
         {
             const auto& M = T.value();

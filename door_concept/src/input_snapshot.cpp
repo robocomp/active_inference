@@ -117,12 +117,12 @@ std::vector<core::RtChainStep> room_zed_chain(DSR::DSRGraph& G, DSR::RT_API* rt,
     {
         const auto e = G.get_edge(parent.id(), child.id(), "RT");
         if (not e.has_value()) return false;
-        const auto T = rt->get_edge_RT_as_rtmat(e.value(), ts);
+        const auto T = rt->get_edge_RT_as_rtmat(e.value(), ts, DSR::RT_API::TimeQuery::Interpolated);   // interpolated (2026-11-01)
         if (not T.has_value()) return false;
         core::RtChainStep s;
         s.parent = parent.name(); s.child = child.name(); s.inverted = inverted;
         s.T = T->matrix();
-        if (const auto C = rt->get_edge_RT_covariance(e.value(), ts); C.has_value()) s.cov = C.value();
+        if (const auto C = rt->get_edge_RT_covariance(e.value(), ts, DSR::RT_API::TimeQuery::Interpolated); C.has_value()) s.cov = C.value();
         steps.push_back(std::move(s));
         return true;
     };

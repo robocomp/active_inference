@@ -52,7 +52,7 @@ namespace rc::object_anchor
                                                          const std::string&     room_frame)
     {
         // M = robot_frame ← room_frame : maps a room point/heading into the robot base frame.
-        const auto m = inner.get_transformation_matrix(robot_frame, room_frame, ts);
+        const auto m = inner.get_transformation_matrix(robot_frame, room_frame, ts, "RT", DSR::RT_API::TimeQuery::Interpolated);
         if (not m.has_value())
             return std::nullopt;
         const Mat::RTMat& M = m.value();

@@ -107,7 +107,7 @@ bool PlaceStage::robot_pose_in_room(std::uint64_t stamp,
     const auto& robot = robots.front();
 
     // room<-robot, pinned to the panorama stamp (ts != 0 ⇒ no InnerEigenAPI cache).
-    const auto T = inner_->get_transformation_matrix(room.name(), robot.name(), stamp);
+    const auto T = inner_->get_transformation_matrix(room.name(), robot.name(), stamp, "RT", DSR::RT_API::TimeQuery::Interpolated);   // interpolated (user 2026-11-01)
     if (not T.has_value()) return false;                  // ALWAYS check: the documented crash mode
     pose = se2_of(T.value());
 
@@ -132,8 +132,8 @@ bool PlaceStage::robot_pose_in_room(std::uint64_t stamp,
     // ★PINNED TO THE SAME STAMP AS THE POSE ABOVE. Called with the default it returned whatever block
     // was newest, while `pose` is pinned to the panorama stamp -- so the descriptor could carry a
     // confidence measured at a different moment than the pose it qualifies. Same instant now, and the
-    // default TimeQuery (Nearest) matches how the pose itself was fetched.
-    const auto c6 = rt_api_->get_edge_RT_covariance(edge.value(), stamp);
+    // same TimeQuery (Interpolated, user 2026-11-01) as the pose itself.
+    const auto c6 = rt_api_->get_edge_RT_covariance(edge.value(), stamp, DSR::RT_API::TimeQuery::Interpolated);
     if (not c6.has_value()) return true;
 
     // SE(2) lives at SE3 slots {0, 1, 5} -- (2,2) is var_Z, and reading yaw from there is a defect
