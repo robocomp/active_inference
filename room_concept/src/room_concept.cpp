@@ -547,7 +547,12 @@ namespace rc
         //   The shadow's scan map is KEPT: it is already registered through the doorway, so the pose that plain SLAM
         //   takes back over is continuous with the one the SDF localiser was publishing (they differ by the shadow's
         //   disagreement, centimetres), and the map simply grows into the new room.
-        const bool keep_slam_map = map_layout_adopted_;
+        // ★ ONLY WHEN THE SHADOW RAN (2026-11-01, warm3): the shadow runs only while estimating() (update_observe_walls). A
+        //   room left without ever estimating — a warm start's given room_1 and recalled room_2 (MapMode = "ltsm") — has an
+        //   adopted layout but NO shadow map: kept, it was never seeded and plain SLAM took R3 over from (0,0,0), froze
+        //   while the robot drove 2 m and drifted 3.3 m from the SDF pose (slam_shadow.csv). Then the map starts afresh
+        //   from the current pose, as on the first crossing.
+        const bool keep_slam_map = map_layout_adopted_ and not was_given;
         map_layout_adopted_ = false;
         {
             std::scoped_lock lk(wall_map_mutex_);
