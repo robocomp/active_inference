@@ -71,6 +71,29 @@ int main()
         t.passages = {info("direct", "a", "c", 1, 9), info("h1", "a", "b", 9, 1), info("h2", "b", "c", 9, 1)};
         assert((route(t, "a", "c") == std::vector<std::string>{"h1", "h2"}));
     }
+    // imagined routes: route_cost / route_via / resolve_passage
+    {
+        Topology t;
+        t.passages = {info("p1", "A", "B", 9, 1), info("p2", "A", "B", 1, 3), info("q", "B", "C"), info("far", "X", "Y")};
+        t.passages[1].live_door = "door_2";
+        assert((route(t, "A", "C") == std::vector<std::string>{"p1", "q"}));
+        const auto normal = route_cost(t, "A", "C");
+        assert(normal and normal->second == route(t, "A", "C"));
+        assert(route_cost(t, "A", "A") and route_cost(t, "A", "A")->first == 0 and not route_cost(t, "A", "X"));
+        const auto via = route_via(t, "A", "C", "p2");
+        assert(via and (*via == std::vector<std::string>{"p2", "q"}));
+        double via_cost = 0;
+        for (const auto& id : *via) via_cost += passage_cost(*std::ranges::find(t.passages, id, &TopoPassageInfo::id));
+        assert(via_cost > normal->first);   // p2 is dear: 4 + 2 against 10/9 + 2
+        // from the far end: the passage is crossed B -> A, so the C side is entered first
+        const auto back = route_via(t, "C", "A", "p2");
+        assert(back and (*back == std::vector<std::string>{"q", "p2"}));
+        assert(not route_via(t, "A", "C", "far"));       // joins rooms not connected to the goal
+        assert(not route_via(t, "A", "C", "nope"));      // unknown passage
+        assert(resolve_passage(t, "p1") == "p1" and resolve_passage(t, "P1") == "p1");
+        assert(resolve_passage(t, "door_2") == "p2" and resolve_passage(t, "DOOR_2") == "p2");
+        assert(not resolve_passage(t, "door_9"));
+    }
     // tool answers
     {
         Topology t;
