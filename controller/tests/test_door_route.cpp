@@ -1,7 +1,8 @@
 // door_route.h — the door route's waypoints from door_concept's published targets (controller_door_passage.h ROUTE MODE).
 //   1. a free axis: [P_pre] for a shut door; [P_pre, P_ap, P_post] in that order, on the axis, on the right sides, for an open one
 //   2. a BED in front of the door (live 2026-10-24): P_pre stays ON THE AXIS and SHORTENS to the largest free standoff
-//   3. nothing free on the axis down to the body's reach ⇒ no plan (why says so) — never a sideways pose
+//   3. nothing free on the axis down to the body's reach ⇒ no plan (why says so) — never a sideways pose, unless:
+//   6. given the opening's half-width (Params::opening_half_m), a vantage may shift sideways WITHIN the opening's span
 //   4. the leaf standing on the published cross target ⇒ P_post slides OUTWARD along the axis
 //   5. the robot already at the vantage (after an open-wait) ⇒ P_pre is dropped, the route starts at the aperture
 // Build + run:
@@ -145,6 +146,23 @@ int main()
     {
         const auto pl = dr::plan(kAppr, kCross, Eigen::Vector2f(2.3f, 0.05f), robot_far, true, prm, free_all);
         CHECK(on_axis(pl.ap) and std::abs(pl.ap.y() - 0.05f) < 1e-4f);
+    }
+    std::println("6. a wall ALONG the axis, the door near a corner (warm11 door_23: centre 0.1 m from the side wall)");
+    {
+        // free only where the body (half-width 0.3) clears a side wall at x = 1.6 (0.4 m left of the axis x = 2):
+        // on the axis (x = 2) the body reaches x = 1.7 — clear; put the wall at x = 1.8 so the axis is NOT free
+        const auto side_wall = [](const Eigen::Vector2f& q, float) { return q.x() - 0.3f >= 1.8f and q.y() > 0.f; };
+        dr::Params p6 = prm;
+        const auto none = dr::plan(kAppr, std::nullopt, kCentre, robot_far, false, p6, side_wall);
+        CHECK(not none.why.empty());                                  // no width given: on the axis only, as before (3.)
+        p6.opening_half_m = 0.5f;                                     // a 1 m door: a vantage may sit anywhere in front of it
+        const auto pl = dr::plan(kAppr, kCross, kCentre, robot_far, true, p6, side_wall);
+        CHECK(pl.why.empty());
+        CHECK(pl.pre.x() >= 2.1f - 1e-4f and pl.pre.x() <= 2.5f + 1e-4f);   // shifted sideways, within the opening's span
+        CHECK(pl.pre.y() > 0.33f - 1e-4f);                            // still in front of the door, in the current room
+        CHECK(pl.waypoints.size() == 3 and (pl.waypoints[1] - kCentre).norm() < 1e-4f);   // then the aperture, then past
+        // the nearest offset wins: with the wall at x = 1.8, the first free x is 2.1 (0.1 m off the axis)
+        CHECK(std::abs(pl.pre.x() - 2.1f) < 0.051f);
     }
     std::println("test_door_route: {} checks, {} failures", checks, failures);
     return failures == 0 ? 0 : 1;

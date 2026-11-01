@@ -84,6 +84,27 @@ struct Axis
     return std::nullopt;
 }
 
+/// The vantage nearest the axis: for each sideways offset u (0, then ±step, ±2·step, … up to `lat_max`), the first free standoff
+/// from `s_from` toward `s_to` — the smallest offset that has any free standoff wins. Returns (s, u), u along t = the wall.
+[[nodiscard]] inline std::optional<std::pair<float, float>> first_free_vantage(const Axis& ax, float s_from, float s_to, float lat_max,
+                                                                                float step, float heading,
+                                                                                const std::function<bool(const Eigen::Vector2f&, float)>& is_free)
+{
+    const float st = std::max(step, 1e-3f);
+    const Eigen::Vector2f t(-ax.n.y(), ax.n.x());
+    const int nu = static_cast<int>(std::floor(std::max(0.f, lat_max) / st + 1e-4f));
+    for (int k = 0; k <= nu; ++k)
+        for (const float sgn : {1.f, -1.f})
+        {
+            if (k == 0 and sgn < 0.f) continue;
+            const float u = sgn * st * static_cast<float>(k);
+            const Axis shifted{ax.c + u * t, ax.n};
+            if (const auto s = first_free_standoff(shifted, s_from, s_to, st, heading, is_free); s.has_value())
+                return std::make_pair(*s, u);
+        }
+    return std::nullopt;
+}
+
 struct Plan
 {
     std::vector<Eigen::Vector2f> waypoints;   ///< what RouteFollower::build is given, in order
@@ -101,6 +122,11 @@ struct Params
     float body_reach_m = 0.33f;   ///< nearest P_pre may come to the aperture plane (the body's reach toward the door)
     float step_m = 0.05f;         ///< the grid's cell
     float post_slide_m = 0.8f;    ///< how far past the published cross target P_post may move (the corridor's forward extent)
+    /// Half the opening's width (m). > 0: when nothing is free ON the axis, a vantage may shift sideways (along the wall) as
+    /// far as this — still in front of the opening and facing through it (user 2026-11-01, warm11 door_23: mapped 0.1 m from
+    /// a side wall, every on-axis pose clipped it; "it has to be a spot in front of the door, which is free"). 0 = on the
+    /// axis only (the pre-2026-11-01 rule).
+    float opening_half_m = 0.f;
 };
 
 /// The door route's waypoints. through = the door is open and a cross target is published.
@@ -125,7 +151,12 @@ struct Params
         const float s_robot = (robot - ax->c).norm();
         const float s_pub = (approach.p - ax->c).dot(ax->n);
         out.s_pre = std::min(s_pub, s_robot);
-        const auto s = first_free_standoff(*ax, out.s_pre, prm.body_reach_m, prm.step_m, face, is_free);
+        auto s = first_free_standoff(*ax, out.s_pre, prm.body_reach_m, prm.step_m, face, is_free);
+        float lateral = 0.f;   // the vantage's sideways offset along the wall (0 = on the axis)
+        if (not s.has_value() and prm.opening_half_m > 0.f)
+            if (const auto v = first_free_vantage(*ax, out.s_pre, prm.body_reach_m, prm.opening_half_m, prm.step_m, face, is_free);
+                v.has_value())
+            { s = v->first; lateral = v->second; }
         // No free pose between the robot and the body's reach, the robot being NEARER the hole than the published vantage: it
         // stands in the doorway, and no vantage lies in front of it — a through-leg starts at the aperture (recog_proto13 leg 2:
         // 0.21 m from the hole, the jambs inside every footprint), an approach leg has nothing left to approach: no waypoints,
@@ -142,7 +173,7 @@ struct Params
             out.pre_moved = std::abs(*s - out.s_pre) > 1e-4f;
             out.s_pre = *s;
         }
-        out.pre = ax->c + out.s_pre * ax->n;
+        out.pre = ax->c + out.s_pre * ax->n + lateral * Eigen::Vector2f(-ax->n.y(), ax->n.x());
         out.pre_yaw = face;
         out.ap = ax->c;
         if (out.through)

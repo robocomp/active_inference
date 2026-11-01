@@ -3301,6 +3301,12 @@ bool ControllerSession::build_door_route(const ControllerRobotPose &robot_pose, 
     prm.body_reach_m = approach_body_.support_radius(0.f, Eigen::Vector2f(0.f, 1.f));
     prm.step_m = grid_planner_.cell_size();
     prm.post_slide_m = 0.8f;
+    // the opening's half-width (the door node's width_m): how far sideways a vantage may sit and still face through it, when
+    // nothing on the axis is free (door_route.h Params::opening_half_m; warm11 door_23 mapped 0.1 m from a side wall)
+    if (graph_ != nullptr)
+        if (const auto dn = graph_->get_node(leg.door); dn.has_value())
+            if (const auto w = graph_->get_attrib_by_name<width_m_att>(dn.value()); w.has_value() and w.value() > 0.f)
+                prm.opening_half_m = 0.5f * w.value();
     // ★The hole the robot PERCEIVES (its interaction anchor) is the axis when there is one (door_route.h).
     const auto seen = perceived_door(leg.door, robot_pose);
     door_route_anchor_id_ = seen.has_value() ? seen->anchor_id : 0;
