@@ -1,5 +1,6 @@
 // imagined_world.h: opening words, interventions on a copy, the "there" resolver.
 #include "../src/imagine_fit.h"
+#include "../src/imagine_see.h"
 
 #include <cassert>
 #include <print>
@@ -207,6 +208,68 @@ int main()
         assert(tw.p and near(tw.slack_m, 0.6f - 0.62f, 1e-3f) and tw.text.contains("table_1 would have to move"));
         ImaginedWorld nb = f; nb.body_half_width.reset();
         assert(not answer_fit_between(nb, "chair_1", "wall").p);
+    }
+
+    // answer_see: can_see's evaluator on the intervened scene
+    {
+        rc::card::Card c;
+        c.concept_ = "refrigerator"; c.level = rc::card::Level::Countable; c.calibration = "fitted";
+        c.channels = {{"zed", rc::card::Role::Identity, true}};
+        c.geometry = {0.7f, 0.7f, 1.8f, 0.0f, 1.8f};
+        rc::card::SubtypeParams sp; sp.env = {0.0f, 1.32f, 0.26f};
+        c.subtypes[""] = sp;
+        const auto cd = std::optional<rc::card::Card>(c);
+        ImaginedWorld sw;
+        SeeScene& s = sw.scene;
+        s.room = "r"; s.polygon = {{0, 0}, {6, 0}, {6, 4}, {0, 4}};
+        rc::nbv::Sensor z; constexpr float f = 448.0f;
+        z.hfov_rad = 2.0f * std::atan(640.0f / f); z.vfov_rad = 2.0f * std::atan(360.0f / f); z.height_m = 0.945f;
+        s.zed = z; s.zed_mount_z = 0.945f;
+        s.robot_xy = Eigen::Vector2f(0.8f, 2.0f);
+        SeeObject fr; fr.name = "refrigerator_1"; fr.subtype = "refrigerator"; fr.x = 5.2f; fr.y = 2.0f; fr.w = 0.7f; fr.d = 0.7f; fr.h = 1.8f;
+        SeeObject st; st.name = "stool_1"; st.subtype = "stool"; st.x = 1.0f; st.y = 3.0f; st.w = 0.3f; st.d = 0.3f; st.h = 0.5f;
+        s.objects = {fr, st};
+        const auto txt = [&](const ImaginedWorld& iw, std::string_view from, std::string_view door = {}, const std::optional<Opening>& o = {}) {
+            return answer_see(iw, cd, "fridge", from, door, o);
+        };
+        const auto base = txt(sw, "here");
+        std::println("{}", base);
+        assert(base.contains("refrigerator_1") and base.contains("P "));
+        // a box between the standpoint and the fridge is named as the occluder
+        ImaginedWorld bw = sw;
+        SeeObject bx; bx.name = "box_1"; bx.subtype = "box"; bx.x = 3.0f; bx.y = 2.0f; bx.w = 1.2f; bx.d = 1.2f; bx.h = 2.2f;
+        bw.scene.objects.push_back(bx);
+        const auto occ = txt(bw, "here");
+        std::println("{}", occ);
+        assert(occ.contains("hidden behind box_1"));
+        // standing against the fridge: too close
+        ImaginedWorld cw = sw;
+        cw.scene.robot_xy = Eigen::Vector2f(3.0f, 3.5f);
+        SeeObject nx; nx.name = "stool_2"; nx.subtype = "stool"; nx.x = 4.3f; nx.y = 2.0f; nx.w = 0.3f; nx.d = 0.3f; nx.h = 0.5f;
+        cw.scene.objects.push_back(nx);
+        const auto close = txt(cw, "stool_2");
+        std::println("{}", close);
+        assert(close.contains("too close for the sensor") or close.contains("viewpoint inside"));
+        // opening words + the unknown place
+        assert(txt(sw, "here", "door_9", *parse_opening("half")) == "I don't know a door called door_9");
+        assert(txt(sw, "the sofa") == "ASK: which place do you mean by 'there'?");
+        assert(txt(sw, "here", "door_1", *parse_opening("as_is")) == base);
+        // a doorway between the standpoint and the fridge: shut < open (the can_see construction: wall x = 3 with a door)
+        ImaginedWorld dw;
+        dw.scene.room = "r"; dw.scene.polygon = {{0, 0}, {6, 0}, {6, 4}, {0, 4}};
+        dw.scene.zed = z; dw.scene.zed_mount_z = 0.945f;
+        dw.scene.robot_xy = Eigen::Vector2f(2.0f, 2.0f);
+        SeeDoor dr; dr.name = "door_2"; dr.xy = {6, 2}; dr.width_m = 0.9f; dr.phi_rad = 0.0f;
+        dw.scene.doors = {dr};
+        fr.x = 7.5f; fr.y = 2.0f;
+        dw.scene.objects = {fr};
+        const auto shut = answer_see(dw, cd, "fridge", "here", "door_2", *parse_opening("shut"));
+        const auto wide = answer_see(dw, cd, "fridge", "here", "door_2", *parse_opening("wide"));
+        std::println("{}\n{}", shut, wide);
+        assert(wide.contains("if door_2 were wide (taken as 90°)") and shut.contains("if door_2 were shut"));
+        const auto p_of = [](const std::string& a) { const auto i = a.find("(P "); return std::stof(a.substr(i + 3)); };
+        assert(p_of(wide) > p_of(shut));
+        assert(answer_see(dw, std::nullopt, "fridge", "here") == "I have no detector for that.");
     }
 
     std::println("test_imagine: ok");
