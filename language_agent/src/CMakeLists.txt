@@ -14,6 +14,7 @@ LIST(APPEND LIBS
   ai_common::presence     # agent presence monitor + coordinator
   ai_common::core         # header-only helpers (room_resolve, world_query, graph_provenance)
   ai_common::media        # zero-copy media plane — the ZED / Ricoh frames the look() tool shows the model
+  ai_common::geometry     # robot_footprint: the body width the imagine tool fits through doors
   ai_common::obj          # OBJ loader — the canvas' 3-D page (canvas_model.cpp)
   Qt6::OpenGL Qt6::OpenGLWidgets   # common/viewers/gl_mesh_viewer.h on that page
   Qt6::Network

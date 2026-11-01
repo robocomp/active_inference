@@ -211,6 +211,8 @@ private:
     /// sim_door: the door's world pose through the sim witness → tools/sim_door.py, async; told by on_sim_door_done.
     QString do_sim_door(const QJsonObject& args);
     QString do_imagine_view(const QJsonObject& args);   ///< imagine_view: sample → render → canvas (imagine_view.h)
+    QString do_imagine(const QJsonObject& args);   ///< imagine: fit / see / succeed on an imagined copy (imagine_*.h)
+    void load_robot_body();   ///< the controller's body (body_model.h) into body_half_width_ / robot_height_m_ / body_note_, cached on success
     QString do_can_see(const QJsonObject& args);   ///< can_see: the perception cards answer (perception_world.h, can_see.h)
     void on_sim_door_done(int code);
     [[nodiscard]] bool sim_door_available() const;   ///< endpoint configured AND robot_gt_* on the robot node (sim)
@@ -243,6 +245,9 @@ private:
     [[nodiscard]] QString agent_log(const std::string& agent) const;
 
     std::shared_ptr<DSR::DSRGraph> G_;
+    std::optional<float> body_half_width_;   ///< load_robot_body()'s cache (the mesh and the controller's config do not change)
+    std::optional<float> robot_height_m_;
+    std::string body_note_;
     std::shared_ptr<DSR::DSRGraph> em_G_;   ///< episodic memory (domain 4), nullptr = not joined
     SessionConfig cfg_;
     std::unique_ptr<DSR::InnerEigenAPI> inner_;

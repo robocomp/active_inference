@@ -224,7 +224,7 @@ int main()
     // ── allowed_in_wake: a robot event's turn may look, stop and propose, never act (final review C1) ───────────
     {
         for (const char* t : {"stop", "cancel_passage", "plan_mission", "look", "find_objects", "where_is", "known_rooms",
-                              "route_to", "agents", "sensors", "graph_summary", "inspect", "use_skill", "episodes",
+                              "route_to", "can_see", "imagine_view", "imagine", "agents", "sensors", "graph_summary", "inspect", "use_skill", "episodes",
                               "episode", "outcome_stats", "last_episode", "show", "draw", "table", "hide_canvas"})
             CHECK(allowed_in_wake(t));
         for (const char* t : {"cross_door", "approach_object", "go_around_object", "move_relative", "sim_door",

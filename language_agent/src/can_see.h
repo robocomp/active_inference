@@ -28,6 +28,8 @@
 #include <numbers>
 #include <optional>
 #include <string>
+#include <string_view>
+#include <utility>
 #include <vector>
 
 #include "perception_card/evaluator.h"
@@ -323,6 +325,11 @@ inline bool door_on_sight_line(const SeeScene& s, const SeeDoor& d, const Eigen:
     while (not c.empty() and c.front() == ' ') c.erase(c.begin());
     while (not c.empty() and c.back() == ' ') c.pop_back();
     if (c == "fridge") return "refrigerator";
+    // Spanish names for the classes the cards cover (the person may ask in Spanish; the cards say English).
+    for (const auto& [es, en] : std::initializer_list<std::pair<std::string_view, std::string_view>>{
+             {"silla", "chair"}, {"sillas", "chair"}, {"nevera", "refrigerator"}, {"frigor\u00edfico", "refrigerator"},
+             {"frigorifico", "refrigerator"}, {"mesa", "table"}, {"mesas", "table"}, {"puerta", "door"}, {"puertas", "door"}})
+        if (c == es) return std::string(en);
     if (c.size() > 2 and c.ends_with('s') and not c.ends_with("ss") and not c.contains('_')) c.pop_back();   // plural
     return c;
 }

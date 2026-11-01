@@ -9,6 +9,7 @@
 #include <QJsonObject>
 
 #include <algorithm>
+#include <cctype>
 #include <expected>
 #include <format>
 #include <map>
@@ -17,6 +18,8 @@
 #include <string>
 #include <string_view>
 #include <vector>
+
+#include "name_norm.h"
 
 namespace rc::chat
 {
@@ -71,10 +74,29 @@ inline std::expected<Topology, std::string> decode_topology(std::string_view jso
     return t;
 }
 
-// Passage ids in order from `from_room` to `to_room`; empty when unreachable (or from == to).
-inline std::vector<std::string> route(const Topology& t, std::string_view from_room, std::string_view to_room)
+// The edge cost of crossing a passage: 1 / E[p_pass].
+inline double passage_cost(const TopoPassageInfo& p) { return (p.pass_alpha + p.pass_beta) / p.pass_alpha; }
+
+// A room name as the person/model spelled it -> the topology's own spelling ("Room 2" -> "room_2"); unchanged when no
+// remembered room matches under the one name rule (name_norm.h).
+[[nodiscard]] inline std::string canon_room(const Topology& t, std::string_view name)
 {
-    if (from_room == to_room) return {};
+    const std::string k = norm_name(name);
+    for (const auto& r : t.rooms) if (norm_name(r.name) == k) return r.name;
+    for (const auto& p : t.passages)
+    {
+        if (norm_name(p.room_a) == k) return p.room_a;
+        if (norm_name(p.room_b) == k) return p.room_b;
+    }
+    return std::string(name);
+}
+
+// Cheapest route as (cost, passage ids in order); nullopt when unreachable; from == to is (0, {}).
+[[nodiscard]] inline std::optional<std::pair<double, std::vector<std::string>>>
+route_cost(const Topology& t, std::string_view from_given, std::string_view to_given)
+{
+    const std::string from_room = canon_room(t, from_given), to_room = canon_room(t, to_given);
+    if (from_room == to_room) return std::pair{0.0, std::vector<std::string>{}};
     struct Prev { std::string room; std::size_t passage; };
     std::map<std::string, double, std::less<>> dist;
     std::map<std::string, Prev> prev;
@@ -92,7 +114,7 @@ inline std::vector<std::string> route(const Topology& t, std::string_view from_r
             const auto& p = t.passages[i];
             const std::string* other = p.room_a == r ? &p.room_b : p.room_b == r ? &p.room_a : nullptr;
             if (not other) continue;
-            const double nd = d + (p.pass_alpha + p.pass_beta) / p.pass_alpha;
+            const double nd = d + passage_cost(p);
             if (const auto it = dist.find(*other); it == dist.end() or nd < it->second)
             {
                 dist[*other] = nd;
@@ -101,12 +123,58 @@ inline std::vector<std::string> route(const Topology& t, std::string_view from_r
             }
         }
     }
-    if (not dist.contains(std::string(to_room))) return {};
+    const auto end = dist.find(to_room);
+    if (end == dist.end()) return std::nullopt;
     std::vector<std::string> out;
     for (std::string r(to_room); r != from_room; r = prev.at(r).room)
         out.push_back(t.passages[prev.at(r).passage].id);
     std::ranges::reverse(out);
-    return out;
+    return std::pair{end->second, std::move(out)};
+}
+
+// Passage ids in order from `from_room` to `to_room`; empty when unreachable (or from == to).
+inline std::vector<std::string> route(const Topology& t, std::string_view from_room, std::string_view to_room)
+{
+    if (auto r = route_cost(t, from_room, to_room)) return std::move(r->second);
+    return {};
+}
+
+// The cheapest route that crosses `passage_id` (the imagined "go through that one instead"): from -> one end,
+// the passage, the other end -> to; the cheaper of the two directions. nullopt when the id is unknown or neither
+// direction is reachable.
+[[nodiscard]] inline std::optional<std::vector<std::string>>
+route_via(const Topology& t, std::string_view from_given, std::string_view to_given, std::string_view passage_id)
+{
+    const std::string from_room = canon_room(t, from_given), to_room = canon_room(t, to_given);
+    const auto pit = std::ranges::find(t.passages, passage_id, &TopoPassageInfo::id);
+    if (pit == t.passages.end()) return std::nullopt;
+    std::optional<std::pair<double, std::vector<std::string>>> best;
+    const auto side = [&](const std::string& near_room, const std::string& far_room)
+    {
+        const auto head = route_cost(t, from_room, near_room);
+        const auto tail = route_cost(t, far_room, to_room);
+        if (not head or not tail) return;
+        const double cost = head->first + passage_cost(*pit) + tail->first;
+        if (best and best->first <= cost) return;
+        std::vector<std::string> ids = head->second;
+        ids.push_back(pit->id);
+        ids.insert(ids.end(), tail->second.begin(), tail->second.end());
+        best = std::pair{cost, std::move(ids)};
+    };
+    side(pit->room_a, pit->room_b);
+    side(pit->room_b, pit->room_a);
+    if (not best) return std::nullopt;
+    return std::move(best->second);
+}
+
+// A name the person/LLM uses -> the passage id: a passage id, or the live door a passage carries. The one name rule
+// (name_norm.h): "the door 2", "Door-2" and "door_2" are the same.
+[[nodiscard]] inline std::optional<std::string> resolve_passage(const Topology& t, std::string_view name)
+{
+    const std::string k = norm_name(name);
+    for (const auto& p : t.passages) if (norm_name(p.id) == k) return p.id;
+    for (const auto& p : t.passages) if (p.live_door and norm_name(*p.live_door) == k) return p.id;
+    return std::nullopt;
 }
 // ── tool answers (text the model reads; PURE) ─────────────────────────────────────────────────────────────────
 // The other end of a passage, as seen from `room`; empty when `room` is neither end.
