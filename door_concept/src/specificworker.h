@@ -362,6 +362,12 @@ private:
         bool            has_leaf = false;
         Eigen::Vector2f hinge_local{0.f, 0.f};
         Eigen::Vector2f open_local{0.f, 0.f};
+        // ★ THE SWING, FRAME-FREE (2026-11-01, warm11: user "the leaf is in the other room, it should know that"). The two
+        //   faces' node frames are NOT shared (the entry mirror is rotated ~pi): mapping open_local through them reversed the
+        //   side — DOOR_2's leaf, opening into R3, was inherited by room_2's face as "opens INTO this room" at swing log-odds
+        //   +37. Each face's across_u points into its OWN room, so a leaf that opens into the room left opens OUT of the room
+        //   entered: +1 = the source's leaf opens into the SOURCE room, -1 = out of it.
+        float           swing_into_source = 0.f;
         float           phi_est = 0.f, phi_sigma = 0.f;
         float           hinge_llr = 0.f;   // Task 11: the source's confidence in the hinge it hands over (≥ 0)
         float           swing_llr = 0.f;   // Task 13: …and in the swing side (≥ 0), carried the same way

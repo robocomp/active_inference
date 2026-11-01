@@ -617,11 +617,13 @@ float DoorFit::run_inference(rc::DoorFitState& inst, const DoorObservation& obse
             const Eigen::Vector2f n(-p.wall_u.y(), p.wall_u.x());
             p.leaf.hinge = (hinge_pt - near_edge).norm() <= (hinge_pt - far_edge).norm() ? door::HingeSide::Near
                                                                                            : door::HingeSide::Far;
-            p.leaf.swing = n.dot(open_dir) >= 0.0f ? +1.0f : -1.0f;
+            p.leaf.swing = inst.leaf_swing_hint.has_value() ? (*inst.leaf_swing_hint >= 0.f ? +1.0f : -1.0f)   // frame-free
+                                                            : (n.dot(open_dir) >= 0.0f ? +1.0f : -1.0f);
             say(std::format("door_concept: [{}] leaf side inherited from the other room: hinge {} swing {:+.0f} (opens {} this room)\n",
                             inst.node_name, p.leaf.hinge == door::HingeSide::Near ? "near" : "far", p.leaf.swing,
                             p.leaf.swing > 0.0f ? "INTO" : "OUT OF"));
             inst.leaf_side_hint.reset();
+            inst.leaf_swing_hint.reset();
         }
         inst.ai2_belief = rc::DoorBelief(s0, p);
         // ★Task D-C round 2 (tour3C): A REMEMBERED PLACE IS NOT A BIRTH SEED. A door restored from memory came back with the

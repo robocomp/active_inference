@@ -3341,6 +3341,7 @@ void SpecificWorker::step_entry_mirrors()
                     em.has_leaf    = true;
                     em.hinge_local = R.transpose() * (si.leaf_pose.hinge_xy - o);
                     em.open_local  = R.transpose() * (si.leaf.swing * si.aperture.across_u());
+                    em.swing_into_source = si.leaf.swing >= 0.f ? 1.f : -1.f;
                     em.phi_est     = si.phi_est;
                     em.phi_sigma   = si.phi_sigma;
                     em.hinge_llr   = si.hinge_llr;
@@ -4108,6 +4109,8 @@ void SpecificWorker::install_carried_door(std::uint64_t new_room, std::uint64_t 
                         const Eigen::Vector2f o = Tm->translation().head<2>().cast<float>();
                         dst.leaf_side_hint = std::make_pair(Eigen::Vector2f(R * em.hinge_local + o),
                                                             Eigen::Vector2f(R * em.open_local));
+                        // the swing, frame-free: the room entered is on the other side of the same opening
+                        if (em.swing_into_source != 0.f) dst.leaf_swing_hint = -em.swing_into_source;
                         dst.phi_est   = em.phi_est;
                         dst.phi_sigma = em.phi_sigma;
                         dst.hinge_llr = em.hinge_llr;   // the hinge hint is the source's MAP jamb; this is how sure it was
@@ -4414,6 +4417,7 @@ void SpecificWorker::remember_door(const rc::DoorInstance& inst)
     em.has_leaf       = true;
     em.hinge_local    = R.transpose() * (inst.leaf_pose.hinge_xy - o);
     em.open_local     = R.transpose() * (inst.leaf.swing * inst.aperture.across_u());
+    em.swing_into_source = inst.leaf.swing >= 0.f ? 1.f : -1.f;
     em.phi_est        = inst.phi_est;
     em.phi_sigma      = inst.phi_sigma;
     em.hinge_llr      = inst.hinge_llr;
