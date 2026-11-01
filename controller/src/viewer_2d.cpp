@@ -333,6 +333,38 @@ void Viewer2D::draw_anchor(const std::optional<AnchorOverlay> &a)
     line(a->jamb_l - half, a->jamb_l + half, QPen(jamb_c, 0.08, st));
     line(a->jamb_r - half, a->jamb_r + half, QPen(jamb_c, 0.08, st));
     line(c, c + 2.f * half, QPen(open_c, 0.03, Qt::DashLine));
+    if (not a->servo) return;
+    // THE SERVO: where it aims (magenta cross + sight line), where it heads (its own 1-s arc dashed, the sent one solid — a gap
+    // between them is a guard cutting it), what blocks it (orange returns, red jambs), and why, as text beside the robot.
+    const QColor aim_c(200, 0, 200), own_c(120, 120, 255), out_c(0, 60, 220), blk_c(255, 140, 0);
+    if (a->aim.has_value())
+    {
+        const Eigen::Vector2f q = a->aim.value();
+        line(a->robot, q, QPen(aim_c, 0.02, Qt::DotLine));
+        line(q - Eigen::Vector2f(0.08f, 0.08f), q + Eigen::Vector2f(0.08f, 0.08f), QPen(aim_c, 0.04));
+        line(q - Eigen::Vector2f(0.08f, -0.08f), q + Eigen::Vector2f(0.08f, -0.08f), QPen(aim_c, 0.04));
+    }
+    for (std::size_t i = 1; i < a->own_arc.size(); ++i) line(a->own_arc[i - 1], a->own_arc[i], QPen(own_c, 0.03, Qt::DashLine));
+    for (std::size_t i = 1; i < a->out_arc.size(); ++i) line(a->out_arc[i - 1], a->out_arc[i], QPen(out_c, 0.05));
+    auto dot = [&](const Eigen::Vector2f &p, float r, const QColor &col)
+    {
+        auto *item = agv_->scene.addEllipse(p.x() - r, p.y() - r, 2 * r, 2 * r, QPen(col, 0.01), QBrush(col));
+        item->setZValue(13);
+        anchor_items_.push_back(item);
+    };
+    for (const auto &b : a->blockers) dot(b, 0.04f, blk_c);
+    for (const auto &j : a->jambs) dot(j, 0.07f, QColor(220, 0, 0));
+    if (not a->why.empty())
+    {
+        QString txt;
+        for (const auto &w : a->why) txt += (txt.isEmpty() ? QString() : QString("\n")) + QString::fromStdString(w);
+        auto *t = agv_->scene.addSimpleText(txt);
+        t->setBrush(QBrush(QColor(160, 0, 0)));
+        t->setFlag(QGraphicsItem::ItemIgnoresTransformations, true);   // readable at any zoom
+        t->setPos(a->robot.x() + 0.4, a->robot.y() + 0.4);
+        t->setZValue(14);
+        anchor_items_.push_back(t);
+    }
 }
 
 void Viewer2D::draw_room_polygon(const std::vector<Eigen::Vector2f> &verts)

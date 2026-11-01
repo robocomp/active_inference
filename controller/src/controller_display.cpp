@@ -779,6 +779,33 @@ void ControllerDisplay::present()
                                          .jamb_r = T * (snap.anchor->centre + hw * a),
                                          .normal = T.linear() * n,
                                          .predicted = snap.anchor->predicted};
+            if (const auto &sv = snap.anchor->servo; sv.has_value())
+            {
+                // a unicycle's 1-s path for (adv, rot), robot frame (forward +y, rot CCW), into the world
+                auto arc = [&](float adv, float rot)
+                {
+                    std::vector<Eigen::Vector2f> pts;
+                    Eigen::Vector2f p = Eigen::Vector2f::Zero();
+                    float th = 0.f;
+                    constexpr int kSteps = 20; constexpr float kHorizonS = 1.f;
+                    for (int k = 0; k <= kSteps; ++k)
+                    {
+                        pts.push_back(T * p);
+                        const float dt = kHorizonS / kSteps;
+                        p += adv * dt * Eigen::Vector2f(-std::sin(th), std::cos(th));
+                        th += rot * dt;
+                    }
+                    return pts;
+                };
+                ov->servo = true;
+                ov->robot = T * Eigen::Vector2f::Zero();
+                if (sv->aim.has_value()) ov->aim = T * sv->aim.value();
+                ov->own_arc = arc(sv->own_adv, sv->own_rot);
+                ov->out_arc = arc(sv->out_adv, sv->out_rot);
+                for (const auto &b : sv->blockers) ov->blockers.push_back(T * b);
+                for (const auto &j : sv->jambs) ov->jambs.push_back(T * j);
+                ov->why = sv->why;
+            }
         }
         viewer_2d_->draw_anchor(ov);
     }

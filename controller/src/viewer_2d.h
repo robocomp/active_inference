@@ -59,7 +59,14 @@ class Viewer2D : public QObject
     void draw_passages(const std::vector<std::vector<Eigen::Vector2f>> &passages);
     // The door-cross INTERACTION ANCHOR (Task 7, fix 3), already in the ROOM frame: the opening's two jamb points
     // (left, right) and its unit normal (away from the robot). nullopt = draw nothing (clears the previous one).
-    struct AnchorOverlay { Eigen::Vector2f jamb_l, jamb_r, normal; bool predicted = false; };   // predicted: drawn dashed, lighter
+    struct AnchorOverlay { Eigen::Vector2f jamb_l, jamb_r, normal; bool predicted = false;   // predicted: drawn dashed, lighter
+                           // the cross servo, WORLD frame (empty when not servoing): the robot, the aim, the 1-s arcs of the servo's
+                           // own command and of the one sent, the binding returns / jambs, and why the command was cut
+                           bool servo = false;
+                           Eigen::Vector2f robot = Eigen::Vector2f::Zero();
+                           std::optional<Eigen::Vector2f> aim;
+                           std::vector<Eigen::Vector2f> own_arc, out_arc, blockers, jambs;
+                           std::vector<std::string> why; };
     void draw_anchor(const std::optional<AnchorOverlay> &a);
     void set_lidar_buffer(LidarPointBuffer *buffer);
     void set_lidar_visible(bool visible);
@@ -156,7 +163,7 @@ private:
     AbstractGraphicViewer *agv_ = nullptr;
     QGraphicsPolygonItem *polygon_item_ = nullptr;
     std::vector<QGraphicsPolygonItem *> passage_items_;   // draw_passages
-    std::vector<QGraphicsLineItem *> anchor_items_;        // draw_anchor
+    std::vector<QGraphicsItem *> anchor_items_;            // draw_anchor (lines, dots, the servo's text)
     LidarPointBuffer *lidar_buffer_ = nullptr;
     Eigen::Affine2f lidar_draw_correction_ = Eigen::Affine2f::Identity();   // overlay dead-reckoning (room→room)
     bool lidar_visible_ = true;

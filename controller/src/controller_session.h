@@ -1165,6 +1165,22 @@ private:
     rc::MissionRunner mission_;
     rc::DoorPassage door_passage_;                                  // controller_door_passage.h
     std::uint64_t crossing_door_ = 0;                               // link 0 written on this door (0 = none)
+    /// THE SERVO ON THE CANVAS (user 2026-11-01: "show in the controller canvas the target direction once it has entered the
+    /// servo mode — where it is heading at and what is blocking it"). Robot frame, written every servo cycle, drawn while
+    /// fresh (kCrossVizFreshMs).
+    struct CrossViz
+    {
+        std::int64_t stamp_ms = 0;
+        bool has_aim = false;
+        Eigen::Vector2f aim = Eigen::Vector2f::Zero();          ///< the law's target for the body's front
+        float own_adv = 0.f, own_rot = 0.f;                     ///< the servo's own command (before any guard)
+        float out_adv = 0.f, out_rot = 0.f;                     ///< what was sent
+        std::vector<Eigen::Vector2f> blockers;                  ///< live returns binding the cap
+        std::vector<Eigen::Vector2f> jambs;                     ///< the anchor's jambs/leaf, when the jamb guard backs off
+        std::vector<std::string> why;                           ///< one short line per active limiter
+    };
+    static constexpr std::int64_t kCrossVizFreshMs = 500;   // display staleness: a few control cycles
+    CrossViz cross_viz_;
     std::string cross_status_;   // the status column's "cross:" line (user 2026-10-31: say why it does not advance)
     std::string door_required_;                                     // its required affordance this cycle ("" = none)
     rc::ApproachOrder approach_order_;                              // controller_approach_order.h

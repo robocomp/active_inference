@@ -66,6 +66,9 @@ struct DoorCrossAifStep
     float pi_e = 0.f, pi_s = 0.f; ///< the goal precisions
     float p_fit = 1.f;            ///< P(body fits at entry): the weight of the progress preference
     float t_e = 0.f, t_s = 0.f;   ///< the horizons (s)
+    float line = 0.f;             ///< the cross line's offset along the wall (m): the clear gap's centre
+    /// Where the law aims the body's front, robot frame: on the cross line, s* past the plane (e = 0, s = s*).
+    Eigen::Vector2f aim = Eigen::Vector2f::Zero();
 };
 
 [[nodiscard]] inline DoorCrossAifStep door_cross_aif(const rc::interaction::RelPose& r, float width,
@@ -90,6 +93,8 @@ struct DoorCrossAifStep
     // crossed only by an overshoot — test_jamb_cross p31: every run ended at the threshold, and with a leaf (P(fit) < 1, a
     // slower approach) never crossed it in 60 s. The attractor is one front reach further, so the centre passes standoff.
     out.s_goal = standoff + 2.f * d;
+    out.line = line;
+    out.aim = A + line * g.a + out.s_goal * g.n;
 
     // the room each side: the clear gap beside any leaf, less the body
     float clear_half = 0.5f * width;

@@ -4776,6 +4776,8 @@ void ControllerSession::step_anchor_cross(const ControllerRobotPose &robot_pose,
     const std::span<const rc::interaction::AnchorLeaf> drive_leaves(cp.drive_leaves);
     rc::AnchorCommand cmd;
     rc::interaction::RelPose pose = cp.pose;   // the pose the guards are asked about
+    cross_viz_ = CrossViz{};
+    cross_viz_.stamp_ms = now;
     if (drive)
     {
         // try101: P(body fits) read where the body will ENTER the opening — a differential base re-centres by advancing, not
@@ -4801,6 +4803,10 @@ void ControllerSession::step_anchor_cross(const ControllerRobotPose &robot_pose,
                                                rc::DoorCrossAifBody{half_w, approach_body_.support_radius(0.f, Eigen::Vector2f(0.f, 1.f))},
                                                standoff, v_max, w_max, dt, free_advance);
             cmd = st.cmd;
+            cross_viz_.has_aim = true;
+            cross_viz_.aim = st.aim;
+            if (st.p_fit < 0.5f)
+                cross_viz_.why.push_back(std::format("P(body fits at entry) {:.2f}: progress held back", st.p_fit));
         }
         else
             cmd = rc::anchor_cross_command(drive_pose, drive_width, half_w, standoff, v_max, w_max, holonomic, drive_leaves,
@@ -4817,6 +4823,9 @@ void ControllerSession::step_anchor_cross(const ControllerRobotPose &robot_pose,
         if (anchor_wait_blocked_) cmd.rot = 0.f;
     }
 
+    cross_viz_.own_adv = cmd.adv; cross_viz_.own_rot = cmd.rot;
+    if (not drive) cross_viz_.why.push_back(a.fresh ? "waiting: anchor not yet engaged — turning to face the opening"
+                                                    : "waiting: the anchor is stale — turning to face the opening");
     const auto &body = approach_body_.polygon();
     const auto &control_pose = tracker_pose_.has_value() ? *tracker_pose_ : robot_pose;
     path_controller.refresh_lidar_field(control_pose.as_transform());
@@ -4904,7 +4913,31 @@ void ControllerSession::step_anchor_cross(const ControllerRobotPose &robot_pose,
                          "at capture", a.name, q.x(), q.y(), std::atan2(q.x(), q.y()) * 57.29578f,
                          rc::anchor_signed_distance(returns_body(), q), base_speed_lin_, base_speed_ang_, returns.capture_self);
     }
+    const float pre_cap_lin = std::hypot(adv_mps, side_mps), pre_cap_rot = rot_rps;
     const auto cap = cap_by_returns(returns, adv_mps, side_mps, rot_rps);
+    // the canvas: which returns bind (each one's own limit at the cap — display only), and why the command is cut
+    if (returns.valid and (cap.bound_lin or cap.bound_rot))
+        for (const auto &o : returns.r.obstacles)
+        {
+            const std::span<const rc::AnchorJamb> one(&o, 1);
+            bool binds = false;
+            if (cap.bound_lin and pre_cap_lin > 0.f)
+                binds = rc::lidar_return_speed_limit(one, Eigen::Vector2f(guard.cmd.side / pre_cap_lin, guard.cmd.adv / pre_cap_lin),
+                                                     returns_body(), returns.margin, returns.a_dec, returns.v_max) <= cap.v_lim + 1e-3f;
+            if (not binds and cap.bound_rot and pre_cap_rot != 0.f)
+                binds = rc::lidar_return_rot_limit(one, pre_cap_rot, returns_body(), returns.margin, returns.a_dec, returns.w_max)
+                        <= cap.w_lim + 1e-3f;
+            if (binds) cross_viz_.blockers.push_back(o.mean);
+        }
+    if (cap.bound_lin) cross_viz_.why.push_back(std::format("live returns cap v at {:.2f} m/s", cap.v_lim));
+    if (cap.bound_rot) cross_viz_.why.push_back(std::format("live returns cap turn at {:.2f} rad/s", cap.w_lim));
+    if (anchor_turn_room_logged_) cross_viz_.why.push_back("turn refused by its sweep: making room");
+    if (guard.backoff)
+    {
+        cross_viz_.why.push_back(std::format("JAMB GUARD: {:.3f} m inside the margin, backing off", -guard.min_clearance));
+        for (const auto &j : rc::anchor_obstacles(pose, drive_width, drive_leaves)) cross_viz_.jambs.push_back(j.mean);
+    }
+    if (v_field < v_max - 1e-3f and pre_cap_lin > 0.f) cross_viz_.why.push_back(std::format("clearance field caps v at {:.2f} m/s", v_field));
     // THE STATUS COLUMN'S "cross:" LINE (user 2026-10-31: "any reason that keeps it from advancing should be output in the
     // text canvas"): what the servo steers on and where it is, the anchor's own reading beside a measured gap (two pictures
     // of one door, side by side), and the live-returns cap when it binds.
@@ -5014,6 +5047,8 @@ void ControllerSession::step_anchor_cross(const ControllerRobotPose &robot_pose,
     else if (last_judged_verdict_ != rc::StallVerdict::Spinning)
         anchor_spin_since_ms_ = 0;
     // 4. Out.
+    cross_viz_.out_adv = adv_mps; cross_viz_.out_rot = rot_rps;
+    if (returns_backoff) cross_viz_.why.push_back("live returns close every motion: backing off");
     if (std::abs(adv_mps) < 5e-4f and std::abs(side_mps) < 5e-4f and std::abs(rot_rps) < 1e-3f)
     {
         // WHY (observability only): which of the guards above took the whole command.
@@ -6282,6 +6317,13 @@ void ControllerSession::update_display(const std::optional<ControllerRobotPose> 
             and static_cast<std::int64_t>(rc::provenance::now_ms()) - anchor_drawn_->pose.stamp_ms <= rc::interaction::kAnchorStaleMs)
             av = ControllerDisplay::AnchorView{.centre = anchor_drawn_->pose.x.head<2>(), .yaw = anchor_drawn_->pose.x.z(),
                                                .width = anchor_drawn_->width_m, .predicted = anchor_drawn_->unseen_ms > 0};
+        if (av.has_value() and cross_viz_.stamp_ms > 0
+            and static_cast<std::int64_t>(rc::provenance::now_ms()) - cross_viz_.stamp_ms <= kCrossVizFreshMs)
+            av->servo = ControllerDisplay::ServoView{
+                .aim = cross_viz_.has_aim ? std::optional<Eigen::Vector2f>(cross_viz_.aim) : std::nullopt,
+                .own_adv = cross_viz_.own_adv, .own_rot = cross_viz_.own_rot,
+                .out_adv = cross_viz_.out_adv, .out_rot = cross_viz_.out_rot,
+                .blockers = cross_viz_.blockers, .jambs = cross_viz_.jambs, .why = cross_viz_.why};
         display.set_anchor_overlay(av);
     }
     display.update(icon_pose,

@@ -114,7 +114,16 @@ public:
                           const std::vector<std::vector<Eigen::Vector2f>> &passages);
     // The door-cross interaction anchor in the ROBOT frame (opening centre, yaw of its along-wall axis, width), staged
     // for the 2-D view; nullopt = not engaged or not fresh ⇒ nothing drawn. Thread-safe staging, like update().
-    struct AnchorView { Eigen::Vector2f centre; float yaw = 0.f; float width = 0.f; bool predicted = false; };   // predicted: not seen, carried by odometry
+    /// The cross servo's reading, robot frame (ControllerSession::CrossViz): the aim, its own and the sent command, the blockers.
+    struct ServoView
+    {
+        std::optional<Eigen::Vector2f> aim;
+        float own_adv = 0.f, own_rot = 0.f, out_adv = 0.f, out_rot = 0.f;
+        std::vector<Eigen::Vector2f> blockers, jambs;
+        std::vector<std::string> why;
+    };
+    struct AnchorView { Eigen::Vector2f centre; float yaw = 0.f; float width = 0.f; bool predicted = false;   // predicted: not seen, carried by odometry
+                        std::optional<ServoView> servo; };
     void set_anchor_overlay(const std::optional<AnchorView> &a);
     // Stage the Orient bearing overlay for the 2D view (thread-safe; applied in present()).
     // Pass visible=false whenever the running affordance is not an Orient, so a finished turn cannot
