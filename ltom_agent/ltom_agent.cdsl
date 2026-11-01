@@ -1,0 +1,8 @@
+Component ltom_agent
+{
+    Communications
+    {
+    };
+    language Cpp11;
+    options dsr;
+};
