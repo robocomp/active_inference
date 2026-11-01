@@ -327,6 +327,65 @@ The HISTORY column above tracks §4.2 recording only, which is the part that mus
    view) or by the wall-band prior. Accepted, deliberately: removing a door the detector IS detecting on image geometry
    alone is exactly what removed the REAL DOOR_0 at rtD1i cycle 614 (D-C review C1).
 
+### 6.1 Object-kind axes (2026-10-18, DRAFT — classification only, nothing refactored yet)
+
+Three **independent** questions about how a concept is individuated and how it changes. Each agent combines
+its own answers; they are not four exclusive classes. The vocabulary is borrowed from linguistics (count vs
+mass nouns, the animacy hierarchy). Computer vision draws the same line as *things* vs *stuff* (panoptic
+segmentation). **Each agent declares its kind. The kind describes how we individuate the concept, not what it
+intrinsically is**: shelving along a wall is mass, a freestanding shelf unit is count, and "a glass of water"
+turns a mass into a count by packaging.
+
+- **Individuation: count | mass.** A *count* concept has a natural unit, and its boundary is part of its
+  identity (half a chair is not a chair). A *mass* concept is cumulative and divisive: any part of a counter is
+  counter, and two abutting runs are one counter. Its identity comes from its **support** (the wall it runs
+  along), not from its extent. Mass can be **per dimension**: a counter has a count-like cross-section (a tight
+  prior on height and depth) and a mass-like length (a broad, support-bounded prior). A mass concept is
+  rarely detectable without context, because detectors are trained on things, so its evidence is geometry,
+  support and co-occurrence.
+- **Kinematics: rigid | articulated.** An *articulated* concept carries latent joint states (door φ, drawer
+  extension, fridge-door angle) and a parent/child part tree. Its affordances attach to joints. Visibility
+  and absence must be computed **given the joint state**: an open leaf predicts the wall behind it is
+  visible, and a shut one predicts it is not.
+- **Agency: passive | animate.** An *animate* concept moves under its own policy. It is the one principled
+  source of **intrinsic** process noise (§4.1 forbids constant Q for passive objects, whose state changes
+  only when something acts on them). Occlusion should HOLD it more weakly, since it keeps moving while unseen.
+  Eventually it needs an inferred intention, i.e. a model of another agent.
+
+What each answer implies for the stages:
+
+| | CREATE | UPDATE | REMOVE | HISTORY |
+|---|---|---|---|---|
+| **count** | tracker births one unit | bounded extent prior; pose + appearance identity | one `rc::exist` belief per unit | phantom = whole unit |
+| **mass** | birth of an extent *cell* keyed to its support; growth/split/merge are UPDATES, not births/deaths | broad prior along mass dims, tight along count dims | per cell; absence trims, never deletes the whole | phantom = a cell; "re-key" churn is the mass-as-count symptom |
+| **articulated** | parts are born under the parent | joint posterior; geometry predicted *through* the joint | absence evaluated under the joint posterior | joint changes recorded as events, not noise |
+| **animate** | — | intrinsic, inferred process noise | occlusion HOLD decays with time unseen | trajectory history |
+
+Current agents (read from code 2026-10-18; ⚠ = mismatch between the kind and how the agent treats it):
+
+| agent | individuation | kinematics | agency | note |
+|---|---|---|---|---|
+| bottle | count | rigid | passive | |
+| chair | count | rigid | passive | |
+| table | count | rigid | passive | shape subtype is a count-like attribute |
+| hood | count | rigid | passive | wall-mounted: count with a support parent |
+| refrigerator | count | ⚠ rigid | passive | the door is only a *facing mode* (`resolve_front`); no door angle. Becomes articulated when the door is a joint |
+| door | count | articulated (φ) | passive | the only agent with a joint posterior (`door_phi_posterior.h`); the phantom-door / "open door = missing wall" issue is the §6.1 visibility-given-joint rule |
+| cabinet | **mass** (along the wall) | ⚠ rigid | passive | `cabinet_kitchen.h` already models runs as cells (`cell_mass`), and churn went to 0 after the kitchen-of-runs fix: the agent *discovered* it is mass. Drawers/doors are absent |
+| residual | ⚠ count | rigid | passive | unexplained occupancy is closer to *stuff*, but it is born as box units |
+| room | **mass** (walls, floor) | rigid | passive | no `instance_tracker`; the box cover of free space is a mass representation |
+| human | count | articulated (skeleton) | **animate** | off-lineage (§6 deviation 1); its velocity/accel limits live in an output controller, not in an inferred Q |
+| kitchen / ring metaconcepts | count (of an arrangement) | — | — | group members; a kitchen unit is a count wrapper over mass runs (packaging) |
+
+Observations that motivated the draft. These are hypotheses, not decisions:
+
+1. Every shared module in `common/` today (`instance_tracker`, `existence_belief`, `track/merge_instances`) is
+   **count-shaped**. Cabinet and room implement mass behaviour privately. A shared mass/extent module (cells
+   keyed to a support, with per-cell existence) is the main gap.
+2. No shared joint module exists. Door φ is door-private. A drawer or fridge door would duplicate it.
+3. Animate needs a different §4.1: inferred intrinsic Q is required, not forbidden. That should be stated, not
+   left implicit in `human_concept`.
+
 ---
 
 ## 7. Checklist for a new agent
@@ -338,3 +397,5 @@ The HISTORY column above tracks §4.2 recording only, which is the part that mus
 4. HISTORY: no constant `Q`; record phantom events from day one.
 5. `[Owns]` lists the agent node **with the correct id** and the object glob; SIGTERM-only; startup stale-sweep.
 6. Add a row to §6 and justify every `❌`.
+7. Declare the concept's kind on the three §6.1 axes (count|mass per dimension, rigid|articulated, passive|animate)
+   and add it to the §6.1 table.
