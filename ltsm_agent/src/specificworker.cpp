@@ -431,6 +431,13 @@ void SpecificWorker::compute()
         recall_->step_startup();
     }
     if (recall_) recall_->step();
+    // A DOOR FOUND IS REMEMBERED WHEN IT IS FOUND (room_eviction.h sync_found_doors; user 2026-11-01), every 2 s.
+    if (evictor)
+        if (const auto t = std::chrono::steady_clock::now(); t >= door_sync_next_)
+        {
+            door_sync_next_ = t + std::chrono::seconds(2);
+            if (const int n = evictor->sync_found_doors(); n > 0 and store) store->mark_dirty();
+        }
 
     if (not probe_enabled)
         return;

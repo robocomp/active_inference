@@ -257,7 +257,17 @@ public:
     int sweep_orphans(std::uint64_t room_id,
                       std::string_view why = "its owner was not running to let it go");
 
+    /// A DOOR FOUND IS REMEMBERED WHEN IT IS FOUND (user 2026-11-01: "we don't have the second bathroom door in ltsm; if we find
+    /// it now it should be added"). While the robot is in a REMEMBERED room, its live doors are mirrored into that room's
+    /// memory: a live door the memory lacks is added (r<k>_<name>, hung from the remembered room node at its room-frame pose —
+    /// the room is live in its stored frame); a door THIS sync added and door_concept has since deleted (existence below its
+    /// removal bound) is removed again. Never overwrites: a memory node of that name at ANOTHER place is left alone (eviction's
+    /// renaming handles a recycled name). Returns the number of memory changes (> 0 ⇒ the caller marks the store dirty).
+    int sync_found_doors();
+
 private:
+    struct SyncedDoor { std::string mem_name; std::uint64_t live_room = 0; };
+    std::unordered_map<std::uint64_t, SyncedDoor> synced_doors_;   ///< live door id -> what sync_found_doors added
     std::shared_ptr<DSR::DSRGraph> live_, mem_;
 
     /// live id → memory id, for the subtree being copied.

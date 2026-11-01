@@ -1736,4 +1736,90 @@ int RoomEviction::sweep_orphans(std::uint64_t room_id, std::string_view why)
     return removed;
 }
 
+//////////////////////////////////////////////////////////////////////////////////////////////////
+int RoomEviction::sync_found_doors()
+{
+    const auto robot = robot_node();
+    if (not robot.has_value()) return 0;
+    const auto rp = live_->get_attrib_by_name<parent_att>(robot.value());
+    if (not rp.has_value()) return 0;
+    const auto room = live_->get_node(rp.value());
+    if (not room.has_value() or room->type() != "room") return 0;
+    const auto mem_room = remembered(room.value());
+    if (not mem_room.has_value()) return 0;   // a room memory does not hold yet: its eviction archives it whole
+    const auto idx = mem_->get_attrib_by_name<room_id_att>(mem_room.value());
+    if (not idx.has_value()) return 0;
+    const std::string prefix = std::format("r{}_", idx.value());
+    int changes = 0;
+
+    // the live doors under this room (RT subtree; never climb into the robot)
+    std::vector<DSR::Node> doors;
+    std::deque<std::uint64_t> q{room->id()};
+    for (int guard = 0; not q.empty() and guard < 4096; ++guard)
+    {
+        const auto n = live_->get_node(q.front()); q.pop_front();
+        if (not n.has_value()) continue;
+        for (const auto &e : DSR::DSRGraph::get_node_edges_by_type(n.value(), "RT"))
+            if (const auto c = live_->get_node(e.to()); c.has_value() and c->type() != "robot" and c->type() != "root")
+            {
+                if (is_door(*live_, c.value())) doors.push_back(c.value());
+                else q.push_back(c->id());
+            }
+    }
+    for (const auto &d : doors)
+    {
+        if (synced_doors_.contains(d.id())) continue;
+        bool lc = false;
+        const auto live_pose = pose_in_room(*live_, room->id(), d, lc);
+        if (not live_pose.has_value()) continue;
+        const std::string mem_name = prefix + d.name();
+        const float half_w = 0.5f * live_->get_attrib_by_name<width_m_att>(d).value_or(1.f);
+        // already remembered AT THIS PLACE under any name? (a door memory holds from an earlier visit)
+        bool known_here = false;
+        for (const auto &m : mem_->get_nodes_by_type(d.type()))
+        {
+            if (not m.name().starts_with(prefix) or not is_door(*mem_, m)) continue;
+            bool mc = false;
+            if (const auto mp = pose_in_room(*mem_, mem_room->id(), m, mc);
+                mp.has_value() and (mp->pose.head<2>() - live_pose->pose.head<2>()).norm() < half_w)
+            { known_here = true; break; }
+        }
+        if (known_here) continue;
+        if (mem_->get_node(mem_name).has_value())
+        {
+            qInfo().noquote() << QString::fromStdString(std::format("[memory] found door {} in {}: memory's {} is ANOTHER hole — not "
+                "overwritten (eviction renames it)", d.name(), mem_room->name(), mem_name));
+            synced_doors_[d.id()] = {std::string{}, room->id()};   // decided: do not retry every cycle
+            continue;
+        }
+        const auto id = twin(d, mem_room->id(), prefix, idx.value());
+        if (not id.has_value()) continue;
+        const Mat::RTMat T(Eigen::Translation3d(live_pose->pose.x(), live_pose->pose.y(), 0.0)
+                           * Eigen::AngleAxisd(live_pose->pose.z(), Eigen::Vector3d::UnitZ()));
+        mem_->insert_or_assign_edge(DSR::Edge::create<RT_edge_type>(mem_room->id(), id.value(), rt_attrs(T)));
+        synced_doors_[d.id()] = {mem_name, room->id()};
+        ++changes;
+        qInfo().noquote() << QString::fromStdString(std::format("[memory] found door {} in remembered {}: ADDED as {} at ({:.2f},{:.2f}) "
+            "yaw {:.2f} — remembered now, not only when the room is left", d.name(), mem_room->name(), mem_name,
+            live_pose->pose.x(), live_pose->pose.y(), live_pose->pose.z()));
+    }
+    // a door this sync added that door_concept has since deleted: it was not a door after all
+    for (auto it = synced_doors_.begin(); it != synced_doors_.end();)
+    {
+        if (live_->get_node(it->first).has_value()) { ++it; continue; }
+        // gone WITH its room (the eviction archived the room and removed it from the working memory): the door is the
+        // archive's now — forget it, never delete it
+        if (it->second.live_room != 0 and live_->get_node(it->second.live_room).has_value() and not it->second.mem_name.empty())
+            if (const auto m = mem_->get_node(it->second.mem_name); m.has_value())
+            {
+                mem_->delete_node(m->id());
+                ++changes;
+                qInfo().noquote() << QString::fromStdString(std::format("[memory] {} removed from memory: door_concept deleted the live door "
+                    "it was added from", it->second.mem_name));
+            }
+        it = synced_doors_.erase(it);
+    }
+    return changes;
+}
+
 }   // namespace ltsm
