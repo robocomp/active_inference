@@ -67,7 +67,7 @@ explore_once() {
   echo run > $B/controller/remote_cmd.txt; sleep 0.7
   printf 'mission "look%s"\n  explore %s budget_s=90s\n' "$1" "$(room_now)" > $B/controller/remote_cmd.txt
   for i in $(seq 1 60); do grep -a -q -E "mission 'look$1': (completed|failed|aborted)" $L/controller.log && break; sleep 3; done; }
-ok=0; n_legs=$((2 * TRIPS))
+ok=0; n_legs=${N_LEGS:-$((2 * TRIPS))}   # N_LEGS: run only the first N legs (e.g. 1 = the first R1->R2 crossing)
 for leg in $(seq 1 $n_legs); do
   if [ -n "$CROSS_NAME" ]; then a=$CROSS_NAME; elif [ $leg = 1 ]; then a=new; elif [ $((leg % 2)) = 0 ]; then a=room_1; else a=room_2; fi
   want=$([ $((leg % 2)) = 1 ] && echo room_2 || echo room_1)   # the room the leg must END in (true side of DOOR_1)
