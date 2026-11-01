@@ -163,6 +163,12 @@ In the memory graph each remembered object is a node; **edges are reserved for a
 3. Recall nodes for chair only + the shared matching helper + chair resurrecting from them. Live tour: leave a
    room, come back, the same chair_N with the same given name.
 4. Other agents; permanence feeding ltsm landmarks; language_agent history questions.
+   Includes the memory graph on DDS domain 5 (user, 11-01: part of step 4, not a step of its own). Steps 2-3
+   kept the repertory JSON as the store of record with no memory graph (no reader yet). In step 4 the graph is a
+   ONE-WAY PROJECTION of the repertory: ltom owns domain 5 and rebuilds it from the JSON at start-up (no second
+   persistence, no MemoryStore copy); one node per remembered object under per-room nodes, history and lives as
+   attributes, the §6.4 relation edges between object nodes. language_agent joins it read-only and lazily while
+   ltom is present (episodic's pattern for ltsm). Recall nodes stay on domain 0: concept agents never join domain 5.
 
 ## 9. Constraints
 CLAUDE.md throughout: and/or/not, C++23, `std::from_chars` (es_ES locale) and `imbue(classic)` on every file
