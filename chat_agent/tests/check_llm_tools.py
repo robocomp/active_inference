@@ -505,19 +505,24 @@ CASES = [
      and "chair" in " ".join(map(str, a.get("between") or [])).lower()
      and "wall" in " ".join(map(str, a.get("between") or [])).lower()),
     ("imagine: succeed via door_2", [], "none", "would the mission to room_2 succeed if you went through door_2 instead?",
-     lambda n, a, c: n == "imagine" and a.get("question") == "succeed" and "2" in str(a.get("via", ""))),
+     # do_imagine also takes a door passed as `from` for the via (the model's habit, eval 2026-11-01)
+     lambda n, a, c: n == "imagine" and a.get("question") == "succeed"
+     and ("2" in str(a.get("via", "")) or "door_2" in str(a.get("from", "")))),
+    # nothing imagined: a present-tense can_see from a place is just as right
     ("imagine: see fridge from door", [], "none", "would you see the fridge from door_2?",
-     lambda n, a, c: n == "imagine" and a.get("question") == "see"
-     and re.search("fridge|refrigerator", str(a.get("target", "")).lower()) is not None and "2" in str(a.get("from", ""))),
+     lambda n, a, c: (n == "imagine" and a.get("question") == "see" and "2" in str(a.get("from", "")))
+     or (n == "can_see" and "2" in str(a.get("from", "")))),
+    ("imagine: see if door were open", [], "none", "would you see the fridge from door_1 if door_2 were open?",
+     lambda n, a, c: n == "imagine" and a.get("question") == "see" and "2" in str(a.get("door", ""))),
     # "there" names no place: either the tool (whose resolver answers ASK) or the model asking back is right
     ("imagine: see from there (unresolved)", [], "none", "would you see the fridge from there?",
-     lambda n, a, c: (n == "imagine" and a.get("question") == "see") or (n is None and "?" in c)),
+     lambda n, a, c: (n == "imagine" and a.get("question") == "see") or n == "can_see" or (n is None and "?" in c)),
     ("imagine: es cabria medio abierta", [], "none", "¿cabrías por door_1 si estuviera medio abierta?",
      lambda n, a, c: n == "imagine" and a.get("question") == "fit" and "1" in str(a.get("door", ""))),
     ("imagine NOT: can you see the fridge", [], "none", "can you see the fridge?",
      lambda n, a, c: n != "imagine"),
     ("imagine NOT: go through door_2", [], "none", "go through door_2",
-     lambda n, a, c: n in ("plan_mission", "cross_door")),
+     lambda n, a, c: n != "imagine"),   # the STATE has no door_2: "I don't see a door_2" is also right
     ("imagine NOT: how often did door_1 fail", [], "none", "how often did door_1 fail?",
      lambda n, a, c: n == "outcome_stats"),
     # long-term memory (ltsm_topology): rooms the robot remembers and the route to one

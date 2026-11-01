@@ -1291,8 +1291,13 @@ QString ChatSession::do_imagine(const QJsonObject& args)
     }
     // succeed: `from` is a room NAME (empty = the current room); the destination is `to`. The mission IR's destination is
     // not consulted: an empty `to` goes through as the answer's own ASK.
-    const std::string from = str("from").empty() or rc::chat::lower_ascii(str("from")) == "here" ? digest_.facts.room : str("from");
-    return q(im::answer_succeed(w, from, str("to"), str("via")));
+    // The model sometimes names the destination `target` and puts the door in `from` (eval 2026-11-01, 3/3): a `from`
+    // that is a passage (or a door a passage carries) is the via, and `target` stands in for an empty `to`.
+    std::string from = str("from"), via = str("via"), to = str("to");
+    if (to.empty()) to = str("target");
+    if (via.empty() and not from.empty() and rc::chat::resolve_passage(w.topology, from).has_value()) { via = from; from.clear(); }
+    if (from.empty() or rc::chat::lower_ascii(from) == "here") from = digest_.facts.room;
+    return q(im::answer_succeed(w, from, to, via));
 }
 
 QString ChatSession::do_imagine_view(const QJsonObject& args)
