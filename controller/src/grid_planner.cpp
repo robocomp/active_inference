@@ -6,6 +6,7 @@
 #include "door_passage_corridor.h"   // self_test (12)
 
 #include <algorithm>
+#include <bit>
 #include <charconv>
 #include <cmath>
 #include <cstdio>
@@ -120,6 +121,28 @@ void GridPlanner::set_world(const std::vector<Eigen::Vector2f>& room_polygon,
                             const OccupiedCells& cells)
 {
     cell_ = std::max(0.02f, params.cell_size_m);
+    // ── SKIP THE RASTERISATION WHEN NOTHING IT READS HAS CHANGED ─────────────────────────────────
+    // The caller rebuilds the world every control cycle (20 Hz) although room, passages, obstacles and residual's
+    // grid move at a few Hz at most; the rasterisation (every room cell through point_in_polygon) is the cost.
+    // The key is a hash of EXACTLY the inputs the rasteriser reads (their float bit patterns), so equal key =>
+    // identical occ_/risk_/live_only_/hash — nothing is approximated. dist_ stays valid too: it describes this very world.
+    {
+        std::size_t k = 1469598103934665603ull;
+        const auto mix = [&k](std::uint32_t v) { k ^= v; k *= 1099511628211ull; };
+        const auto mixf = [&](float f) { mix(std::bit_cast<std::uint32_t>(f)); };
+        const auto mixpoly = [&](const std::vector<Eigen::Vector2f>& poly)
+        { mix(static_cast<std::uint32_t>(poly.size())); for (const auto& v : poly) { mixf(v.x()); mixf(v.y()); } };
+        mixf(cell_); mixf(params.safety_margin_m);
+        mixf(footprint.circumscribed_radius()); mixf(footprint.inscribed_radius());
+        mixpoly(room_polygon);
+        mix(static_cast<std::uint32_t>(passages_.size())); for (const auto& pass : passages_) mixpoly(pass);
+        mix(static_cast<std::uint32_t>(obstacles.size())); for (const auto& poly : obstacles) mixpoly(poly);
+        mixf(cells.cell_size_m); mixpoly(cells.centres);
+        mix(static_cast<std::uint32_t>(cells.risk_nats.size())); for (const float r : cells.risk_nats) mixf(r);
+        mix(static_cast<std::uint32_t>(cells.live_hard.size())); for (const auto v : cells.live_hard) mix(v);
+        if (k == world_key_ and w_ > 0 and room_polygon.size() >= 3) return;
+        world_key_ = k;
+    }
     dist_valid_ = false;          // the world changed; any cached distance field describes the old one
     risk_.clear();
     residual_soft_in_ = residual_hard_in_ = 0;
@@ -384,7 +407,7 @@ void GridPlanner::write_grid(std::ostream& os) const
 
 bool GridPlanner::read_grid(std::istream& is)
 {
-    w_ = h_ = 0; occ_.clear(); live_only_.clear(); dist_.clear(); dist_valid_ = false; risk_.clear();
+    w_ = h_ = 0; occ_.clear(); live_only_.clear(); dist_.clear(); dist_valid_ = false; risk_.clear(); world_key_ = 0;
     std::string tok;
     while (is >> tok and tok != "grid") is.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
     if (tok != "grid") return false;

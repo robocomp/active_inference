@@ -736,6 +736,8 @@ namespace
 // keeps a RING of blocks on edges it manages; block 0 of a ring is not the newest, and quietly planning
 // against a stale covariance is worse than not using one at all. A ring needs the head index, which is
 // a separate change.
+struct NullReport { template <class T> NullReport &operator<<(const T &) { return *this; } };
+
 float object_position_sigma_from_edge(const std::shared_ptr<DSR::DSRGraph> &graph, const DSR::Node &node)
 {
     if (graph == nullptr) return 0.f;
@@ -798,8 +800,9 @@ ControllerPolygons ControllerObstacleTracker::read_obstacle_polygons(std::uint64
     display_obstacle_polygons_.clear();
     object_label_counts_.clear();   // per-type object tags (t_1/c_1/b_1) restart each rebuild
     obstacle_label_count_ = 0;      // shared o_N counter spans graph "obstacle" nodes + temporaries
-    std::ostringstream report;
-    std::ostringstream object_report;
+    // The two debug reports were built every cycle (float formatting per object) and never printed or stored.
+    // The sink keeps the call sites as documentation of what each branch decided, at no cost.
+    NullReport report, object_report;
     if (!graph_ || !inner_eigen_api_ || !graph_state_ || graph_state_->room_name.empty())
     {
         if (obstacle_debug_report_ != "Obstacle debug: graph or inner api not ready")
@@ -1198,6 +1201,21 @@ ControllerPolygons ControllerObstacleTracker::read_obstacle_polygons(std::uint64
     // directly. The robot's shape is then applied exactly once, where it belongs.
     if (const auto g = graph_->get_node("residual"); g.has_value())
     {
+        // residual republishes its grid at its own rate, not ours: key on the publish stamps of the cells and the
+        // belief field (exact — an attribute's stamp changes on every write). Unchanged => the cells, risks and
+        // display squares from the last read are still the truth; a vanished node never reaches here, so a stale
+        // grid cannot outlive its source any longer than it did before.
+        const auto stamp_cells = graph_->get_attrib_timestamp<grid_occupied_cells_att>(g.value()).value_or(0);
+        const auto stamp_prob  = graph_->get_attrib_timestamp<grid_occupancy_prob_att>(g.value()).value_or(0);
+        if (residual_stamp_cells_ == stamp_cells and residual_stamp_prob_ == stamp_prob and stamp_cells != 0)
+        {
+            display_obstacle_polygons_.insert(display_obstacle_polygons_.end(),
+                                              residual_display_.begin(), residual_display_.end());
+            return obstacles;
+        }
+        residual_stamp_cells_ = stamp_cells;
+        residual_stamp_prob_  = stamp_prob;
+        residual_display_.clear();
         residual_cells_.clear();
         residual_cell_risk_nats_.clear();
         residual_cell_size_m_ = 0.f;
@@ -1233,12 +1251,13 @@ ControllerPolygons ControllerObstacleTracker::read_obstacle_polygons(std::uint64
             {
                 const float h = 0.5f * residual_cell_size_m_;
                 for (const auto &c : residual_cells_)
-                    display_obstacle_polygons_.push_back(ControllerObstacleVisual{
+                    residual_display_.push_back(ControllerObstacleVisual{
                         .polygon = ControllerPolygon{{c.x() - h, c.y() - h}, {c.x() + h, c.y() - h},
                                                      {c.x() + h, c.y() + h}, {c.x() - h, c.y() + h}},
                         .kind = ControllerObstacleKind::GridOccupancy, .label = {}});
             }
         }
+        display_obstacle_polygons_.insert(display_obstacle_polygons_.end(), residual_display_.begin(), residual_display_.end());
         report << " | grid_cells=" << residual_cells_.size() << " @" << residual_cell_size_m_ << "m";
     }
 
@@ -1255,25 +1274,8 @@ void ControllerObstacleTracker::update_active_obstacle_polygons(std::uint64_t ti
     prune_expired_temporary_obstacles(timestamp_ms);
     obstacle_polygons_ = read_obstacle_polygons(timestamp_ms);
     retire_temporary_obstacles_explained_by_graph();
-    std::ostringstream current_obstacles_report;
-    current_obstacles_report << "Current obstacles debug:";
-    for (const auto &record : known_graph_obstacles_)
-    {
-        current_obstacles_report << " | kind="
-                                 << (record.kind == ControllerObstacleKind::Object ? "object" : "obstacle")
-                                 << " name='" << record.node_name << "' id=" << record.node_id
-                                 << " pos=(" << record.state.center.x() << "," << record.state.center.y() << ")"
-                                 << " size=(" << record.state.width_m << "," << record.state.depth_m << ")"
-                                 << " yaw=" << record.state.yaw_rad;
-    }
     for (const auto &instance : temporary_obstacles_)
     {
-        const auto &state = instance.model.state();
-        current_obstacles_report << " | kind=temporary"
-                                 << " name='" << published_obstacle_name(instance.id) << "' id=" << instance.id
-                                 << " pos=(" << state.center.x() << "," << state.center.y() << ")"
-                                 << " size=(" << state.width_m << "," << state.depth_m << ")"
-                                 << " yaw=" << state.yaw_rad;
         const auto polygon = instance.model.polygon();
         obstacle_polygons_.push_back(polygon);
         display_obstacle_polygons_.push_back(ControllerObstacleVisual{.polygon = polygon,
@@ -2086,8 +2088,15 @@ bool ControllerObstacleTracker::handle_lidar_points(const std::string &lidar_nod
     std::vector<std::uint8_t> proc_plane_ids = std::move(plane_ids);
     std::vector<std::int64_t> proc_plane_stamps = std::move(plane_stamps);
     last_lidar_timestamp_ms_ = proc_ts;
-    update_rt_block_lead(proc_ts);            // caches the ring bounds + twist the two calls below use
-    update_twist_prediction_error(proc_ts);
+    update_rt_block_lead(proc_ts);            // caches the ring bounds + twist the probes below use
+    // ★THE TWO PROBES (twist-vs-RT residual, extrapolation settle) ARE DIAGNOSTICS: their only reader is the
+    // overlay CSV, which is itself written at <=10 Hz. Together they cost 3 timestamped RT-tree walks per scan, so
+    // they run at 1 Hz and only when that CSV is on; between probes their outputs are cleared (empty CSV cells).
+    const bool run_probes = not params_->overlay_csv_path.empty() and proc_ts >= last_probe_ts_ + 1000;
+    if (run_probes) last_probe_ts_ = proc_ts;
+    else { twist_pred_err_m_.reset(); twist_pred_err_deg_.reset(); twist_pred_dt_ms_ = 0;
+           extrap_check_err_m_.reset(); extrap_check_err_deg_.reset(); extrap_check_dt_ms_.reset(); }
+    if (run_probes) update_twist_prediction_error(proc_ts);
 
     // ── THE RT QUERY DOES THE EXTRAPOLATION NOW (2026-09-09) ─────────────────────────────────
     // TimeQuery::Extrapolated is Interpolated inside the ring and, past its ends, walks the pose along
@@ -2118,8 +2127,8 @@ bool ControllerObstacleTracker::handle_lidar_points(const std::string &lidar_nod
 
     // Settle any earlier forward-nudged pose whose instant the ring has now caught up with, THEN park
     // this one. In that order, so a pose is never graded against itself.
-    settle_extrapolation_checks(lidar_node_name, proc_ts);
-    if (rt_info.outcome == DSR::RT_API::TimeQueryInfo::Outcome::Extrapolated
+    if (run_probes) settle_extrapolation_checks(lidar_node_name, proc_ts);
+    if (run_probes and rt_info.outcome == DSR::RT_API::TimeQueryInfo::Outcome::Extrapolated
         and rt_info.applied_dt_ms != 0 and room_from_lidar.has_value())
     {
         const auto &nudged = room_from_lidar->matrix();
@@ -2134,11 +2143,13 @@ bool ControllerObstacleTracker::handle_lidar_points(const std::string &lidar_nod
         while (pending_extrap_checks_.size() > 128)
             pending_extrap_checks_.pop_front();
     }
-    const auto robot_from_lidar = inner_eigen_api_->get_transformation_matrix(graph_state_->robot_name,
-                                                                               lidar_node_name,
-                                                                               proc_ts,
-                                                                               "RT",
-                                                                               interp);
+    // The reader already merged into the robot frame (lidar_node_name == robot_name): robot<-robot is the
+    // identity by definition, so skip the timestamped tree walk for it.
+    const auto robot_from_lidar =
+        lidar_node_name == graph_state_->robot_name
+            ? std::optional<Mat::RTMat>{Mat::RTMat::Identity()}
+            : inner_eigen_api_->get_transformation_matrix(graph_state_->robot_name, lidar_node_name,
+                                                          proc_ts, "RT", interp);
     // ── THE POSE THIS CLOUD IS ACTUALLY REGISTERED WITH ─────────────────────────────────────────
     // Recorded so it can be compared against the pose the ICON is drawn at. The two are supposed to be
     // the same instant — both are pinned to proc_ts — but "supposed to" is what an instrument is for.

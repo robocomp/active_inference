@@ -409,6 +409,7 @@ private:
     float xmin_ = 0, ymin_ = 0, cell_ = 0.1f;
     int   w_ = 0, h_ = 0;
     std::size_t world_hash_ = 0;
+    std::size_t world_key_ = 0;   // hash of set_world's inputs; equal => the rasterisation is skipped
     // Precomputed footprint coverage per heading bucket — the reason exact collision is affordable here.
     std::vector<std::vector<Eigen::Vector2i>> offsets_;
     // The SAME coverage as it was rasterised before the yaw correction, i.e. with the body turned 90 deg

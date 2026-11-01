@@ -365,6 +365,8 @@ class ControllerObstacleTracker
 
         std::vector<Eigen::Vector2f> residual_cells_;
         std::vector<float> residual_cell_risk_nats_;
+        std::uint64_t residual_stamp_cells_ = 0, residual_stamp_prob_ = 0;   // publish stamps the cells above were read at
+        ControllerObstacleVisuals residual_display_;                         // their display squares, rebuilt only when the stamps move
         float residual_cell_size_m_ = 0.f;
         std::unordered_map<std::string, int> object_label_counts_;   // per-type object tag counter (t/c/b)
         int obstacle_label_count_ = 0;                               // shared o_N counter (graph + temp)
@@ -380,6 +382,7 @@ class ControllerObstacleTracker
         };
         std::vector<VirtualObstacle> virtual_obstacles_;
         std::uint64_t last_scan_ms_ = 0;   // throttle for scan_for_unmodelled_obstacles
+        std::uint64_t last_probe_ts_ = 0;                                 // last scan stamp the 1 Hz diagnostic probes ran at
         mutable std::optional<std::uint64_t> last_lidar_timestamp_ms_;   // stamp of the scan actually buffered
         std::optional<std::uint64_t> newest_raw_lidar_ts_;               // newest RAW stamp (dedup + period)
         std::optional<std::int64_t> rt_block_lead_ms_;                   // newest RT block − buffered scan stamp
