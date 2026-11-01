@@ -882,6 +882,43 @@ int main()
         CHECK(not out.route.has_value() and out.required.empty());
         CHECK(p.take_finished());
     }
+    {   // warm22 leg 2: the door opened, but door_concept does NOT offer `cross` yet (its existence belief low): the passage
+        //   must leave `open` (whose offer never comes for an open door) for the CROSS step, wait there for the cross target,
+        //   and build the through-route when it arrives — it used to wait on `open` for 600 s.
+        auto G = make_graph(61);
+        DoorPassage p;
+        p.set_clock(clock);
+        p.set_use_route(true);
+        p.note_room_id(1);
+        p.start("door_w", Step::Cross);
+        offered(*G, "aff_door_w_approach");
+        target(*G, "aff_door_w_approach", 2.f, 1.6f, down);
+        auto out = p.update(*G, nullptr, "room_1");
+        p.note_route(out.route->key, RR::Arrived);                // at P_pre, the door shut
+        out = p.update(*G, nullptr, "room_1");
+        CHECK(p.view().step == Step::Open);
+        offered(*G, "aff_door_w_open");   p.update(*G, nullptr, "room_1");
+        executing(*G, "aff_door_w_open"); p.update(*G, nullptr, "room_1");
+        satisfied(*G, "aff_door_w_open");                         // perceived open — and NO cross offered
+        out = p.update(*G, nullptr, "room_1");
+        CHECK(p.view().step == Step::Cross);                      // on the cross, not stuck on `open`
+        CHECK(not out.route.has_value() and out.required == "aff_door_w_cross#route");   // waiting for the cross target
+        G->delete_node("aff_door_w_open");                        // door_concept withdraws the completed open
+        out = p.update(*G, nullptr, "room_1");
+        // the cross not on offer and the approach is: back to the vantage (pingpong15 rule), never failed, never stuck on `open`
+        CHECK(not p.view().failed and p.view().step != Step::Open);
+        offered(*G, "aff_door_w_cross");                          // …then the cross is offered
+        target(*G, "aff_door_w_cross", 2.f, -0.8f, down);
+        { DSR::Node m = DSR::Node::create<object_node_type>("door_w"); G->insert_node(m); }
+        out = p.update(*G, nullptr, "room_1");
+        if (p.view().step == Step::Approach and out.route.has_value())   // at the vantage again: the open door, on through it
+        {
+            p.note_route(out.route->key, RR::Arrived);
+            out = p.update(*G, nullptr, "room_1");
+        }
+        CHECK(p.view().step == Step::Cross);
+        CHECK(out.route.has_value() and out.route->through and out.route->cross.has_value());
+    }
     {   // an OPEN door: one route P_pre -> P_ap -> P_post. P_post = THROUGH: the crossing fact, ONCE, carrying the prediction
         //   taken when the cross started (ltsm's recall_<k> under the door); DONE only on room_concept's switch AND ltsm's archive
         auto G = make_graph(61);

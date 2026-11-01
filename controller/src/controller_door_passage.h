@@ -948,12 +948,17 @@ private:
                 route_event(out, std::format("[door-route] {}: open reached — passage DONE (it was asked to stop after open)", door_));
                 return out;
             }
-            if ((open_now or open_satisfied) and route_cross_.has_value())
+            // ★ ON THE CROSS once the door is open — WITH OR WITHOUT a cross target yet (warm22 leg 2: the route was built while
+            //   DOOR_2 was shut, so it had none; the passage stayed on `open`, whose offer never comes for an open door, and
+            //   waited 600 s). On the cross step the route builder waits for door_concept's cross target and says so.
+            if (open_now or open_satisfied)
             {
                 if (so == State::Executing) preempted_ = true;   // the caller releases the claim on `open`
                 opened_ = true;
-                route_event(out, std::format("[door-route] {}: the door is open — the route continues through it", door_));
+                route_event(out, std::format("[door-route] {}: the door is open — the route continues through it{}", door_,
+                                             route_cross_.has_value() ? "" : " (once door_concept publishes the cross target)"));
                 enter_cross(G, room_frame);
+                ++route_epoch_;   // a new key: the leg is rebuilt as a through-route when the target arrives
             }
         }
         if (step_ == Step::Done) { note_ = "done"; return out; }
