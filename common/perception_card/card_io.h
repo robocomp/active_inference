@@ -1,5 +1,5 @@
 // card_io.h -- perception cards as FILES: a concept agent writes <agent_dir>/etc/perception_card.json next to
-// itself, chat_agent reads them all. Header-only. Atomic write (temp file in the same dir + rename) so a reader
+// itself, language_agent reads them all. Header-only. Atomic write (temp file in the same dir + rename) so a reader
 // never sees a half-written card. Locale-safe: output is imbued with the classic locale, parsing is card.h's.
 #pragma once
 
@@ -26,7 +26,7 @@ inline std::filesystem::path card_file_path(const std::filesystem::path& agent_d
     return agent_dir / "etc" / "perception_card.json";
 }
 
-// blind_spot_map_path must be ABSOLUTE in a card: the reader (chat_agent) runs from another directory. The
+// blind_spot_map_path must be ABSOLUTE in a card: the reader (language_agent) runs from another directory. The
 // agents' config paths are relative to their own working dir (= agent_dir), so resolve them here, once, for all
 // (file AND graph publication).
 inline Card with_absolute_paths(const std::filesystem::path& agent_dir, Card c)

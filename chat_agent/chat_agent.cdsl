@@ -1,9 +1,0 @@
-Component chat_agent
-{
-    Communications
-    {
-    };
-    language Cpp11;
-    options dsr;
-
-};

@@ -168,7 +168,7 @@ private:
 	/// The relative-motion start shared by `move` / `turn` and a mission's move (text in RelativeMotion's grammar).
 	MissionResult start_relative_motion(const std::string &text, const char *source);
 
-	// ── GROUNDED MISSIONS (common/mission/, chat_agent/docs/mission_language_2026-10-13.md) ──
+	// ── GROUNDED MISSIONS (common/mission/, language_agent/docs/mission_language_2026-10-13.md) ──
 	// The interpreter owns the control flow (seq, repeat, on_fail, until, budgets, anchors); this Host maps each leaf
 	// to what the controller already does. Everything runs on the control thread (specificworker_mission.cpp).
 	class MissionHost final : public rc::mission::Host
@@ -214,7 +214,7 @@ private:
 	void hold_base();
 	/// The live door a door reference names now: a node by name, or the face of a passage in the current room.
 	std::expected<std::string, std::string> resolve_door(const rc::mission::Ref &r);
-	// ── chat_agent's command channel (chat_inbox.h): polled on the control thread, never signalled ──
+	// ── language_agent's command channel (chat_inbox.h): polled on the control thread, never signalled ──
 	rc::ChatInbox chat_inbox_;
 	rc::ChatInbox::Tracked chat_tracked_;
 	std::uint64_t chat_poll_ms_ = 0;

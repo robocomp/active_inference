@@ -1,7 +1,7 @@
 #pragma once
 /*
  * anchor_fit.h — the controller's door-fit model (P(body fits), the clear gap a swung leaf leaves), moved VERBATIM
- * from controller/src/controller_anchor_servo.h so chat_agent's `imagine` answers with the SAME model.
+ * from controller/src/controller_anchor_servo.h so language_agent's `imagine` answers with the SAME model.
  * Header-only, pure std; no controller / DSR / Qt dependency.
  */
 

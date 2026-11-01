@@ -34,11 +34,11 @@
  * Graphs (etc/config.toml): G == "dsr" (live, domain 0, read), "em" (domain 4, owned).
  *
  * LTSM MEMORY (domain [EM].ltsm_domain = 2) is joined LAZILY, read-only, only while ltsm_agent is up — the scheme of
- * chat_agent's domain-4 join (chat_agent/src/specificworker.h). Not an [Agent.ltsm] sub-table on purpose: the generated
+ * language_agent's domain-4 join (language_agent/src/specificworker.h). Not an [Agent.ltsm] sub-table on purpose: the generated
  * code joins every [Agent.<name>] graph at startup, and a DSRGraph built with configFile "" qFatal()s the whole process
  * after ~15 s when no peer answers — EM must start and run with ltsm_agent down; doors then carry no ltsm_id, and their
  * stats are keyed by action kind alone (spec §7).
- * HOW "UP" IS SEEN: ltsm_agent runs no presence coordinator, so it has no agent node to stamp (chat_agent's test). EM
+ * HOW "UP" IS SEEN: ltsm_agent runs no presence coordinator, so it has no agent node to stamp (language_agent's test). EM
  * reads cortex's DDS participant set on the live graph instead (G->get_connected_agents(), names
  * "Participant_<id> ( ltsm_agent )"), every poll. Its domain-0 participant exists ~1 s before its domain-2 graph is
  * seeded; harmless, the joiner re-sends its graph request every second for 15 s (cortex fullgraph_request_thread).
@@ -91,7 +91,7 @@ public slots:
     int  startup_check();
 
 private:
-    // ── Presence protocol (copied from chat_agent / the level-1 agents; CLAUDE.md "Presence protocol") ──
+    // ── Presence protocol (copied from language_agent / the level-1 agents; CLAUDE.md "Presence protocol") ──
     void waiting_enter();
     void waiting_loop();
     void operating_enter();

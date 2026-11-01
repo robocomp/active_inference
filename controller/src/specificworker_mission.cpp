@@ -1,4 +1,4 @@
-// GROUNDED MISSIONS — the controller's side of chat_agent/docs/mission_language_2026-10-13.md (2026-10-17).
+// GROUNDED MISSIONS — the controller's side of language_agent/docs/mission_language_2026-10-13.md (2026-10-17).
 //
 // rc::mission::Interpreter (common/mission/mission_interpreter.h) runs the step tree; MissionHost maps each leaf to
 // what the controller already does (§3.1):

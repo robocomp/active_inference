@@ -1,6 +1,6 @@
 #pragma once
 /*
- * robot_body_check.h — the Shadow mesh-vs-compiled-hull cross-check, ONE copy (controller and chat_agent both call it).
+ * robot_body_check.h — the Shadow mesh-vs-compiled-hull cross-check, ONE copy (controller and language_agent both call it).
  * The robot node's `path` is shadow_footprint.obj (shadow.stl + the two drive wheels). An OLD mesh (shadow.obj: no wheels,
  * |x|max 0.242) would shrink the body 4 cm per side, so the mesh is accepted only if it agrees with the compiled hull:
  * |x|max and |y|max within 1 mm, area within 1 %. Header-only, no DSR/Qt.

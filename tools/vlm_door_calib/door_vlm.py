@@ -28,7 +28,7 @@ import numpy as np
 
 OLLAMA_URL = "http://localhost:11434/api/chat"
 MODEL = "qwen3-vl:8b-instruct"
-NUM_CTX = 4096          # match what chat_agent loads: a different num_ctx makes ollama RELOAD the model
+NUM_CTX = 4096          # match what language_agent loads: a different num_ctx makes ollama RELOAD the model
 NUM_PREDICT = 40
 MAX_SIDE = 512          # crops are small; ollama would rescale anyway (~1 Mpx cap)
 JPEG_Q = 90
