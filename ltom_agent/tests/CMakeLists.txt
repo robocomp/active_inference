@@ -33,3 +33,6 @@ target_link_libraries(test_graph_sightings
   ${LIBS} dsr_core dsr_gui dsr_api fastcdr fastdds osgDB OpenThreads Eigen3::Eigen QGLViewer-qt6 Qt6OpenGLWidgets
   ${STATIC_LIBS} ${SPECIFIC_LIBS} ${QT_LIBRARIES} ${Ice_LIBRARIES})
 set_target_properties(test_graph_sightings PROPERTIES CXX_STANDARD 23 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
+
+add_executable(test_recall_select test_recall_select.cpp ../src/recall_select.cpp ../src/repertory.cpp)
+set_target_properties(test_recall_select PROPERTIES CXX_STANDARD 23 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
