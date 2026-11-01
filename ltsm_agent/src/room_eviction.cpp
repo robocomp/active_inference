@@ -18,6 +18,9 @@
 #include <cmath>
 #include <Eigen/Dense>
 #include <utility>
+#include <unordered_set>
+#include <limits>
+#include <optional>
 #include <format>
 
 namespace ltsm
@@ -667,6 +670,8 @@ Outcome RoomEviction::evict(const Candidate &cand)
     mem_name_of_.clear();
     guard_recycled_door_names(cand.old_room_id, old_prefix);
     if (not new_held) guard_recycled_door_names(cand.new_room_id, new_prefix);
+    match_remembered_walls(cand.old_room_id, old_prefix);
+    if (not new_held) match_remembered_walls(cand.new_room_id, new_prefix);
 
     IdMap map;
     if (not copy_subtree(cand.old_room_id, mem_parent, old_prefix, old_idx, root_edge, map, out))
@@ -697,6 +702,8 @@ Outcome RoomEviction::evict(const Candidate &cand)
     }
     hang_walls_on_floor(map);
     hang_walls_on_floor(new_map);
+    drop_stale_walls(cand.old_room_id, old_prefix, map);
+    if (not new_held) drop_stale_walls(cand.new_room_id, new_prefix, new_map);
 
     // ── 4. THE DOOR, ONCE PER SIDE ─────────────────────────────────────────────────────────────
     // The crossed door is the one nearest the robot in the room it is leaving: an argmin over the
@@ -1032,6 +1039,124 @@ std::optional<DSR::Node> live_passage_of(DSR::DSRGraph &live, std::uint64_t door
             and live.get_edge(p.id(), door_id, "match").has_value())
             return p;
     return {};
+}
+
+namespace
+{
+// A wall's segment in its floor's frame (= the room's: floor->room is the identity), from the parent->wall RT edge and width_m.
+struct WallSeg { std::uint64_t id; std::string name; Eigen::Vector2d a, b; };
+std::optional<WallSeg> wall_segment(DSR::DSRGraph &g, const DSR::Node &w, std::uint64_t parent_id)
+{
+    const auto e = g.get_edge(parent_id, w.id(), "RT");
+    if (not e.has_value()) return std::nullopt;
+    const auto tr = g.get_attrib_by_name<rt_translation_att>(e.value());
+    const auto rot = g.get_attrib_by_name<rt_rotation_euler_xyz_att>(e.value());
+    const auto len = g.get_attrib_by_name<width_m_att>(w);
+    if (not tr.has_value() or not rot.has_value() or not len.has_value()) return std::nullopt;
+    const auto &t = tr.value().get(); const auto &r = rot.value().get();
+    if (t.size() < 2 or r.size() < 3) return std::nullopt;
+    const Eigen::Vector2d m(t[0], t[1]), u(std::cos(r[2]), std::sin(r[2]));
+    const double h = 0.5 * static_cast<double>(len.value());
+    return WallSeg{w.id(), w.name(), m - h * u, m + h * u};
+}
+// Endpoint distance between two segments, either orientation (a wall has no preferred direction).
+double seg_cost(const WallSeg &x, const WallSeg &y)
+{
+    return std::min((x.a - y.a).norm() + (x.b - y.b).norm(), (x.a - y.b).norm() + (x.b - y.a).norm());
+}
+// The walls under `floor` in graph g, with their segments.
+std::vector<WallSeg> walls_under(DSR::DSRGraph &g, const DSR::Node &floor)
+{
+    std::vector<WallSeg> out;
+    for (const auto &e : DSR::DSRGraph::get_node_edges_by_type(floor, "RT"))
+        if (const auto w = g.get_node(e.to()); w.has_value() and w->type() == "wall")
+            if (const auto sg = wall_segment(g, w.value(), floor.id()); sg.has_value()) out.push_back(sg.value());
+    return out;
+}
+std::optional<DSR::Node> live_floor_of(DSR::DSRGraph &g, std::uint64_t room_id)
+{
+    const auto room = g.get_node(room_id);
+    if (not room.has_value()) return std::nullopt;
+    for (const auto &e : DSR::DSRGraph::get_node_edges_by_type(room.value(), "RT"))
+        if (const auto f = g.get_node(e.to()); f.has_value() and f->type() == "floor") return f;
+    return std::nullopt;
+}
+}  // namespace
+
+void RoomEviction::match_remembered_walls(std::uint64_t live_room_id, const std::string &prefix)
+{
+    const auto lf = live_floor_of(*live_, live_room_id);
+    if (not lf.has_value()) return;
+    const auto mf = mem_->get_node(prefix + lf->name());
+    if (not mf.has_value()) return;                       // a room memory has not seen yet: names are new anyway
+    const auto live_walls = walls_under(*live_, lf.value());
+    const auto mem_walls = walls_under(*mem_, mf.value());
+    if (live_walls.empty() or mem_walls.empty()) return;
+    // MUTUAL NEAREST: a live wall and a memory wall are the same wall when each is the other's closest (an argmin both ways,
+    // no distance gate). A recalled room is placed from memory's own layout, so its walls coincide with the remembered ones.
+    std::vector<int> best_mem(live_walls.size(), -1), best_live(mem_walls.size(), -1);
+    for (std::size_t i = 0; i < live_walls.size(); ++i)
+    {
+        double bc = std::numeric_limits<double>::infinity();
+        for (std::size_t j = 0; j < mem_walls.size(); ++j)
+            if (const double c = seg_cost(live_walls[i], mem_walls[j]); c < bc) { bc = c; best_mem[i] = int(j); }
+    }
+    for (std::size_t j = 0; j < mem_walls.size(); ++j)
+    {
+        double bc = std::numeric_limits<double>::infinity();
+        for (std::size_t i = 0; i < live_walls.size(); ++i)
+            if (const double c = seg_cost(live_walls[i], mem_walls[j]); c < bc) { bc = c; best_live[j] = int(i); }
+    }
+    int matched = 0, renamed = 0;
+    double worst = 0.0;
+    for (std::size_t i = 0; i < live_walls.size(); ++i)
+        if (const int j = best_mem[i]; j >= 0 and best_live[std::size_t(j)] == int(i))
+        {
+            ++matched;
+            worst = std::max(worst, seg_cost(live_walls[i], mem_walls[std::size_t(j)]));
+            if (mem_walls[std::size_t(j)].name != prefix + live_walls[i].name)
+            { mem_name_of_[live_walls[i].id] = mem_walls[std::size_t(j)].name; ++renamed; }
+        }
+    // A NEW wall (no mutual match) whose plain name is already a remembered wall would be written over that wall: it gets a
+    // memory name of its own.
+    for (std::size_t i = 0; i < live_walls.size(); ++i)
+    {
+        if (mem_name_of_.contains(live_walls[i].id)) continue;
+        const int j = best_mem[i];
+        const bool matched_i = j >= 0 and best_live[std::size_t(j)] == int(i);
+        const std::string plain = prefix + live_walls[i].name;
+        if (matched_i or not mem_->get_node(plain).has_value()) continue;
+        for (int k = 1;; ++k)
+            if (const auto c = std::format("{}_n{}", plain, k); not mem_->get_node(c).has_value()) { mem_name_of_[live_walls[i].id] = c; break; }
+    }
+    qInfo().noquote() << QString::fromStdString(std::format(
+        "[eviction] {}: {} of {} live walls are remembered walls ({} archived under the memory name; worst endpoint "
+        "distance {:.3f} m); {} remembered walls before the copy", prefix + lf->name(), matched, live_walls.size(), renamed,
+        worst, mem_walls.size()));
+}
+
+int RoomEviction::drop_stale_walls(std::uint64_t live_room_id, const std::string &prefix, const IdMap &map)
+{
+    const auto lf = live_floor_of(*live_, live_room_id);
+    if (not lf.has_value()) return 0;
+    const auto mf = mem_->get_node(prefix + lf->name());
+    if (not mf.has_value()) return 0;
+    std::unordered_set<std::uint64_t> written;
+    for (const auto &[live_id, mem_id] : map) written.insert(mem_id);
+    std::vector<std::pair<std::uint64_t, std::string>> stale;
+    int kept_for_children = 0;
+    for (const auto &e : DSR::DSRGraph::get_node_edges_by_type(mf.value(), "RT"))
+        if (const auto w = mem_->get_node(e.to()); w.has_value() and w->type() == "wall" and not written.contains(w->id()))
+        {
+            if (not DSR::DSRGraph::get_node_edges_by_type(w.value(), "RT").empty()) { ++kept_for_children; continue; }
+            stale.emplace_back(w->id(), w->name());
+        }
+    for (const auto &[id, name] : stale) mem_->delete_node(id);
+    if (not stale.empty() or kept_for_children > 0)
+        qInfo().noquote() << QString::fromStdString(std::format(
+            "[eviction] {}: {} remembered wall(s) no live wall was archived onto removed, {} kept (something hangs from them)",
+            prefix + lf->name(), stale.size(), kept_for_children));
+    return static_cast<int>(stale.size());
 }
 
 void RoomEviction::guard_recycled_door_names(std::uint64_t live_room_id, const std::string &prefix)

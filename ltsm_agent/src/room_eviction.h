@@ -318,6 +318,14 @@ private:
     /// (decided by place, guard_recycled_door_names); twin() writes the door there instead of over that face.
     std::unordered_map<std::uint64_t, std::string> mem_name_of_;
     void guard_recycled_door_names(std::uint64_t live_room_id, const std::string &prefix);
+    /// ONE MEMORY WALL PER WALL (2026-11-01, pingpong40: r1_wall_0..92 for a 31-wall room). room_concept never reuses a wall
+    /// name (wall_<k> is an identity per process), so a RECALLED room comes back as wall_31.., wall_62.. and a by-name archive
+    /// added a fresh set on every eviction. Each live wall of the room's floor is paired with the remembered wall of the same
+    /// memory floor at the same place (mutual nearest segment: no distance gate) and archived under that name (mem_name_of_).
+    void match_remembered_walls(std::uint64_t live_room_id, const std::string &prefix);
+    /// After the copy: the remembered walls of this room's floor that no live wall was archived onto are the layout's old
+    /// edges — removed, unless something still hangs from them (a door face). Returns how many were removed.
+    int drop_stale_walls(std::uint64_t live_room_id, const std::string &prefix, const IdMap &map);
 
     mutable std::uint64_t next_index_ = 0;   ///< fallback room numbering
     mutable std::unordered_map<std::uint64_t, std::uint64_t> index_of_;   ///< live room id → memory index
