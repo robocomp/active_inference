@@ -799,6 +799,10 @@ private:
    mutable std::mutex late_prior_mutex_;                ///< guards late_prior_ (seed_reloc_prior)
    std::vector<rc::reloc::PriorMode> late_prior_;
    std::atomic<bool> late_pending_{false};      ///< a late-recall search is armed
+   // 2026-11-01 diagnostics (pingpong36 leg 2: a correct pose misfit 0.24 m after the switch): the last hand-over's time and
+   // the doorway record (tmp/reloc_doorway.csv), written for 15 s after each hand-over. Observability only.
+   std::int64_t handover_ts_ms_ = 0;
+   std::ofstream doorway_csv_;
    std::atomic<int>  late_verdict_{0};          ///< LateVerdict
    // late_log_odds_, late_forced_done_, last_search_top_median_ and the track_* emission are non-atomic: owned by the LOCALISER
    // thread (RoomConcept::run -> relocalisation_step, and the scene graph's update() it calls inline, which seeds them).

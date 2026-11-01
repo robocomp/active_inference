@@ -411,7 +411,10 @@ namespace rc
             rt_.door_anchor.clear();
             rt_.door_anchor_frames = 0;
             if (rt_.passage.has_value())
+            {
                 rt_.door_anchor = rc::passage::anchor_at_handover(*rt_.passage);
+                handover_ts_ms_ = res.timestamp_ms;
+            }
             rt_.hold_open = false;
             belief_prev_pose_valid_ = false;
             if (not rivals_.empty()) { rivals_.clear(); publish_rival_snapshot(); }
@@ -486,6 +489,30 @@ namespace rc
                 lidar_points, params.rfe_obs_sigma);
             outside = 1.f - (1.f - outside) * (1.f - rt_.view_beyond);
             const float p_lost = update_lost_belief(s, outside, view_change);
+            // ── DOORWAY RECORD (diagnostic, 15 s after a hand-over): why a pose can read "lost" right after a room switch ──
+            if (handover_ts_ms_ != 0 and res.timestamp_ms - handover_ts_ms_ <= 15000 and model_ != nullptr and not lidar_points.empty())
+            {
+                if (not doorway_csv_.is_open())
+                {
+                    doorway_csv_.imbue(std::locale::classic());
+                    doorway_csv_.open("tmp/reloc_doorway.csv", std::ios::out | std::ios::trunc);
+                    doorway_csv_ << "ts_ms,since_handover_ms,x,y,theta,s_used,sdf_mse,pred_sdf_median,s_unweighted,s_weighted,"
+                                    "door_discount,view_beyond,passage_term,outside,p_lost,n_doors,passage,n_points\n";
+                }
+                const Eigen::VectorXf sdf = model_->sdf_at_pose(lidar_points, pose_now);
+                const Eigen::VectorXf ones = Eigen::VectorXf::Ones(sdf.size());
+                const Eigen::VectorXf w = door_point_weights(lidar_points);
+                const float s_unw = weighted_median_abs_sdf(sdf, ones);
+                const float s_w = w.size() == sdf.size() ? weighted_median_abs_sdf(sdf, w) : s_unw;
+                const float discount = w.size() == sdf.size() and w.size() > 0 ? 1.f - w.mean() : 0.f;
+                const auto seated = rc::reloc::seated_doors(door_apertures(), rt_.passage, current_room_polygon(), true);
+                doorway_csv_ << res.timestamp_ms << ',' << (res.timestamp_ms - handover_ts_ms_) << ',' << pose_now.x() << ','
+                             << pose_now.y() << ',' << pose_now.z() << ',' << s << ',' << res.sdf_mse << ',' << res.pred_sdf_median
+                             << ',' << s_unw << ',' << s_w << ',' << discount << ',' << rt_.view_beyond << ',' << rt_.passage_term
+                             << ',' << outside << ',' << p_lost << ',' << seated.size() << ',' << int(rt_.passage.has_value())
+                             << ',' << lidar_points.size() << '\n';
+                doorway_csv_.flush();
+            }
             // A HELD episode (msprt_decide → Hold) is carried by its rivals: step_rival_modes above scores them on
             // every scan and switches the moment one is decisive. It ends when they resolve or empty, or when the
             // belief itself says the episode is over (P(lost) back under ½ — the same decision as the trigger).
