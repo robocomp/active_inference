@@ -6,6 +6,8 @@
 #include <cmath>
 #include <optional>
 #include <print>
+#include <set>
+#include <utility>
 
 namespace ltom
 {
@@ -52,6 +54,14 @@ bool finite(const Pose2& p)
     return std::isfinite(p.x) and std::isfinite(p.y) and std::isfinite(p.yaw)
        and std::isfinite(p.vx) and std::isfinite(p.vy) and std::isfinite(p.vyaw);
 }
+
+// A held instance is logged once per (uid, reason), not once per poll.
+void log_held_once(std::uint64_t uid, const std::string& name, const char* why)
+{
+    static std::set<std::pair<std::uint64_t, std::string>> logged;
+    if (logged.emplace(uid, why).second)
+        std::println(stderr, "[ltom] {} uid={} is on the graph but unresolvable ({}): held, not counted as gone", name, uid, why);
+}
 }   // namespace
 
 GraphView read_graph(DSR::DSRGraph& G, DSR::InnerEigenAPI& ie, std::span<const std::string> classes)
@@ -60,6 +70,9 @@ GraphView read_graph(DSR::DSRGraph& G, DSR::InnerEigenAPI& ie, std::span<const s
 
     for (const auto& a : G.get_nodes_by_type("agent"))
     {
+        // spec 12: an owner that is gone OR Degraded is absent (graceful exit, flap).
+        if (const auto st = G.get_attrib_by_name<agent_presence_state_att>(a); st.has_value() and st.value() == "Degraded")
+            continue;
         const auto sp = a.name().rfind(' ');
         std::uint32_t id = 0;
         if (sp != std::string::npos and sp + 1 < a.name().size()
@@ -80,7 +93,8 @@ GraphView read_graph(DSR::DSRGraph& G, DSR::InnerEigenAPI& ie, std::span<const s
         if (not uid.has_value()) continue;                       // pre-step-1 binary
 
         const auto room = room_of(G, n);
-        if (not room or rc::room::is_proto(G, room->id())) continue;
+        if (not room) { out.present.insert(uid.value()); log_held_once(uid.value(), n.name(), "no room ancestor"); continue; }
+        if (rc::room::is_proto(G, room->id())) { out.present.insert(uid.value()); continue; }   // out of scope by design, but still there
         const auto key = room_key_of(G, *room);
 
         Sighting s;
@@ -93,8 +107,9 @@ GraphView read_graph(DSR::DSRGraph& G, DSR::InnerEigenAPI& ie, std::span<const s
         s.h = G.get_attrib_by_name<height_m_att>(n).value_or(0.f);
         s.born_ms = static_cast<std::int64_t>(G.get_attrib_by_name<timestamp_creation_att>(n).value_or(0));
 
+        out.present.insert(s.uid);                               // on the graph from here on, resolvable or not
         const auto T = ie.get_transformation_matrix(room->name(), n.name());
-        if (not T) continue;
+        if (not T) { log_held_once(s.uid, s.name, "no transform to the room"); continue; }
         s.pose.x = (*T).translation().x();
         s.pose.y = (*T).translation().y();
         s.pose.yaw = std::atan2((*T).linear()(1, 0), (*T).linear()(0, 0));
@@ -104,13 +119,13 @@ GraphView read_graph(DSR::DSRGraph& G, DSR::InnerEigenAPI& ie, std::span<const s
         const auto parent = G.get_attrib_by_name<parent_att>(n);
         const auto edge = parent.has_value() ? G.get_edge(parent.value(), n.id(), "RT") : std::nullopt;
         const auto cov = edge ? G.get_attrib_by_name<rt_covariance_att>(*edge) : std::nullopt;
-        if (not cov.has_value() or cov.value().get().size() < 36) continue;
+        if (not cov.has_value() or cov.value().get().size() < 36) { log_held_once(s.uid, s.name, "no covariance"); continue; }
         const auto& c = cov.value().get();
         s.pose.vx = c[0];
         s.pose.vy = c[7];
         s.pose.vyaw = c[35];
 
-        if (not finite(s.pose)) continue;                        // a NaN would poison the keyframe chi2 for good
+        if (not finite(s.pose)) { log_held_once(s.uid, s.name, "non-finite pose"); continue; }                        // a NaN would poison the keyframe chi2 for good
         if (not seen.insert(s.uid).second)
         {
             if (not std::exchange(warned, true))

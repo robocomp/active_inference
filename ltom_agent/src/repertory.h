@@ -50,7 +50,10 @@ class Repertory
 public:
     explicit Repertory(std::int64_t owner_grace_ms) : grace_ms_(owner_grace_ms) {}
 
-    Changes observe(std::span<const Sighting> alive, const std::set<std::uint32_t>& owners_present, std::int64_t now_ms);
+    // `present` = every in-scope uid on the graph, resolvable or not. A uid present but absent from `alive` is HELD
+    // (no information is not absence): no update, no end, no pending.
+    Changes observe(std::span<const Sighting> alive, const std::set<std::uint32_t>& owners_present,
+                    const std::set<std::uint64_t>& present, std::int64_t now_ms);
     void close_open_lives_as_gap();     // at load: every alive life -> End::gap, end_ms = last_seen_ms
     const std::map<std::uint64_t, Entry>& entries() const { return entries_; }
     void insert_loaded(Entry e);        // the loader's door; marks nothing dirty

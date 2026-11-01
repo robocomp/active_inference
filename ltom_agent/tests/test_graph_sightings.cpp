@@ -150,6 +150,38 @@ static void test_duplicate_uid_emitted_once(Fixture& f)
     CHECK(find(v, "chair_8") == nullptr);
 }
 
+static void test_unresolvable_instance_is_present(Fixture& f)
+{
+    // no covariance on its parent edge
+    auto n = DSR::Node::create<object_node_type>("chair_10");
+    f.G->add_or_modify_attrib_local<object_uid_att>(n, (std::uint64_t{20} << 40) | 10);
+    const auto id = add_node(*f.G, n, f.room);
+    auto e = DSR::Edge::create<RT_edge_type>(f.room, id);
+    f.G->add_or_modify_attrib_local<rt_translation_att>(e, std::vector<float>{0.f, 0.f, 0.f});
+    f.G->add_or_modify_attrib_local<rt_rotation_euler_xyz_att>(e, std::vector<float>{0.f, 0.f, 0.f});
+    f.G->insert_or_assign_edge(e);
+    // room ancestor deleted (room_concept's clean stop): the chair node stays
+    const Id orphan = add_object(*f.G, "chair_11", f.room, (std::uint64_t{20} << 40) | 11, {0.f, 0.f, 0.f}, 0.f, 0.01f);
+    CHECK(f.G->delete_node(f.room));
+    const auto v = f.read();
+    const std::uint64_t u10 = (std::uint64_t{20} << 40) | 10, u11 = (std::uint64_t{20} << 40) | 11;
+    (void)orphan;
+    CHECK(find(v, "chair_10") == nullptr and find(v, "chair_11") == nullptr);
+    CHECK(v.present.contains(u10) and v.present.contains(u11));
+}
+static void test_degraded_owner_not_present(Fixture& f)
+{
+    auto a = f.G->get_node("chair_concept 20");
+    CHECK(a.has_value());
+    if (not a) return;
+    f.G->add_or_modify_attrib_local<agent_presence_state_att>(*a, std::string("Degraded"));
+    f.G->update_node(*a);
+    CHECK(f.read().owners_present.empty());
+    f.G->add_or_modify_attrib_local<agent_presence_state_att>(*a, std::string("Operating"));
+    f.G->update_node(*a);
+    CHECK(f.read().owners_present == std::set<std::uint32_t>({20}));
+}
+
 int main()
 {
     std::setlocale(LC_ALL, "");
@@ -167,5 +199,7 @@ int main()
     run("test_owners_present_parsed", test_owners_present_parsed);
     run("test_nonfinite_pose_skipped", test_nonfinite_pose_skipped);
     run("test_duplicate_uid_emitted_once", test_duplicate_uid_emitted_once);
+    run("test_unresolvable_instance_is_present", test_unresolvable_instance_is_present);
+    run("test_degraded_owner_not_present", test_degraded_owner_not_present);
     return failures ? 1 : 0;
 }

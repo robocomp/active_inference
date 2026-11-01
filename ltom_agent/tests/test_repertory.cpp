@@ -2,6 +2,7 @@
 #include "../src/repertory.h"
 
 #include <cstdio>
+#include <numbers>
 #include <print>
 
 using namespace ltom;
@@ -21,9 +22,12 @@ static Sighting mk(std::uint64_t uid = kUid, double x = 1.0, std::int64_t room =
     s.w = 0.5f; s.d = 0.5f; s.h = 1.0f; s.born_ms = 100;
     return s;
 }
-static Changes obs(Repertory& r, std::vector<Sighting> v, std::set<std::uint32_t> owners, std::int64_t t)
+static Changes obs(Repertory& r, std::vector<Sighting> v, std::set<std::uint32_t> owners, std::int64_t t,
+                   std::set<std::uint64_t> extra_present = {})
 {
-    return r.observe(v, owners, t);
+    std::set<std::uint64_t> present = std::move(extra_present);
+    for (const auto& s : v) present.insert(s.uid);
+    return r.observe(v, owners, present, t);
 }
 static const std::set<std::uint32_t> kHere{kOwner};
 static const std::set<std::uint32_t> kGone{};
@@ -123,6 +127,38 @@ static void test_death_then_same_uid_is_new_life()
     const auto ch = obs(r, {mk()}, kHere, 7000);
     CHECK(ch.born.size() == 1 and r.entries().at(kUid).lives.size() == 2);
 }
+static void test_present_but_unresolved_is_held()
+{
+    Repertory r(kGrace);
+    obs(r, {mk()}, kHere, 1000);
+    for (int i = 0; i < 10; ++i)
+    {
+        const auto ch = obs(r, {}, kHere, 2000 + 600 * i, {kUid});   // still on the graph, just not resolvable
+        CHECK(ch.died.empty() and ch.owner_exited.empty());
+    }
+    const Entry& e = r.entries().at(kUid);
+    CHECK(e.lives.size() == 1 and e.lives[0].end == End::alive and e.lives[0].end_ms == -1 and e.n_sightings == 1);
+    // owner gone while merely unresolvable is still not an end: the node is there
+    CHECK(obs(r, {}, kGone, 9000, {kUid}).owner_exited.empty());
+}
+static void test_pending_cleared_when_present_again()
+{
+    Repertory r(kGrace);
+    obs(r, {mk()}, kHere, 1000);
+    obs(r, {}, kHere, 2000);                       // vanishes: pending
+    obs(r, {}, kHere, 3000, {kUid});               // back on the graph (unresolved): flap, pending cleared
+    CHECK(obs(r, {}, kHere, 5100).died.empty());   // would be death had the pending survived (5100-2000 >= 3000)
+    CHECK(r.entries().at(kUid).lives[0].end == End::alive);
+}
+static void test_yaw_wrap_no_keyframe()
+{
+    Repertory r(kGrace);
+    Sighting a = mk(); a.pose.yaw = 0.1; a.pose.vyaw = 0.05 * 0.05;
+    Sighting b = a;    b.pose.yaw = 2 * std::numbers::pi - 0.1;
+    obs(r, {a}, kHere, 1000);
+    obs(r, {b}, kHere, 1100);
+    CHECK(r.entries().at(kUid).keyframes.size() == 1);
+}
 static void test_owner_of() { CHECK(owner_of((20ull << 40) | 7) == 20); }
 
 int main()
@@ -137,6 +173,9 @@ int main()
     test_flap_within_grace_is_not_an_end();
     test_gap_then_same_uid_reopens();
     test_death_then_same_uid_is_new_life();
+    test_present_but_unresolved_is_held();
+    test_pending_cleared_when_present_again();
+    test_yaw_wrap_no_keyframe();
     test_owner_of();
     if (failures) return 1;
     std::println("test_repertory: ok");

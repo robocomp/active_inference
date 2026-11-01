@@ -12,7 +12,8 @@
 
 namespace ltom
 {
-struct GraphView { std::vector<Sighting> alive; std::set<std::uint32_t> owners_present; };
+struct GraphView { std::vector<Sighting> alive; std::set<std::uint32_t> owners_present;
+                 std::set<std::uint64_t> present; };   // present: every in-scope uid on the graph, resolvable or not
 
 GraphView read_graph(DSR::DSRGraph& G, DSR::InnerEigenAPI& ie, std::span<const std::string> classes);
 }

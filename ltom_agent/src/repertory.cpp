@@ -32,7 +32,8 @@ bool wants_keyframe(const Entry& e, const Sighting& s)
 }
 }
 
-Changes Repertory::observe(std::span<const Sighting> alive, const std::set<std::uint32_t>& owners_present, std::int64_t now_ms)
+Changes Repertory::observe(std::span<const Sighting> alive, const std::set<std::uint32_t>& owners_present,
+                          const std::set<std::uint64_t>& present, std::int64_t now_ms)
 {
     Changes ch;
     std::set<std::uint64_t> seen;
@@ -71,6 +72,7 @@ Changes Repertory::observe(std::span<const Sighting> alive, const std::set<std::
     for (auto& [uid, e] : entries_)
     {
         if (seen.contains(uid) or e.lives.empty() or e.lives.back().end != End::alive) continue;
+        if (present.contains(uid)) { pending_.erase(uid); continue; }   // on the graph, only unresolvable: HOLD
         Life& l = e.lives.back();
         const bool owner_absent = not owners_present.contains(owner_of(uid));
         const auto [pit, first_miss] = pending_.try_emplace(uid, Pending{now_ms});
