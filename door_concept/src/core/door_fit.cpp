@@ -1450,9 +1450,28 @@ void DoorFit::compute_projected_roi(rc::DoorFitState& inst)
     //   panoramic silhouette — the channel that charges the absence, with its own field of view in
     //   in_fov_frac — had 403 of 420 samples on it. So the leaf box is projected into a VIRTUAL camera with
     //   the ZED's intrinsics, aimed at the box centre: the size it would have if looked at.
-    Eigen::Vector3d ctr = Eigen::Vector3d::Zero();
-    for (const auto& q : P) ctr += q;
-    ctr /= static_cast<double>(P.size());
+    // ★ THE DOOR THE DETECTOR SEES IS THE APERTURE, NOT THE LEAF (2026-11-01, warm10's detect probe). The detector fires
+    //   on the doorway and its frame; the leaf box was projected here, and an OPEN leaf stands edge-on to a robot in front
+    //   of the opening: door_1's fill_h read 0.03 on all 128 viewpoints (2.5 m median range) while the detector fired on
+    //   a third of them, and the implied FOV of the logged fills ranged 30-1400 deg. The aperture box (w x h in the wall
+    //   plane, its thickness across, on the floor datum) gives fills that follow the range. The ROI centring above keeps
+    //   the leaf box: it frames the panel the servo turns to.
+    std::array<Eigen::Vector3d, 8> V{};
+    {
+        const auto& ap = inst.aperture;
+        const Eigen::Vector2f c = ap.centre_xy(), u = ap.wall_u.normalized(), n = ap.across_u().normalized();
+        int k = 0;
+        for (const float su : {-0.5f, 0.5f})
+            for (const float sn : {-0.5f, 0.5f})
+                for (const float sz : {0.f, 1.f})
+                {
+                    const Eigen::Vector2f q = c + su * ap.w * u + sn * ap.thickness * n;
+                    V[k++] = (zed_T_room * Eigen::Vector4d(q.x(), q.y(), ap.floor_z + sz * ap.h, 1.0)).head<3>();
+                }
+    }
+    Eigen::Vector3d ctr = Eigen::Vector3d::Zero();   // the virtual camera aims at the APERTURE's centre
+    for (const auto& q : V) ctr += q;
+    ctr /= static_cast<double>(V.size());
     float fh = 0.f, fv = 0.f;
     if (ctr.norm() > 1e-6)
     {
@@ -1469,8 +1488,6 @@ void DoorFit::compute_projected_roi(rc::DoorFitState& inst)
             lo_c = std::min(lo_c, col); hi_c = std::max(hi_c, col);
             lo_r = std::min(lo_r, row); hi_r = std::max(hi_r, row);
         };
-        std::array<Eigen::Vector3d, 8> V{};
-        for (std::size_t i = 0; i < P.size(); ++i) V[i] = P[i];
         int n_front = 0;
         for (const auto& q : V) if (q.dot(fwd) >= kNear) { add_v(q); ++n_front; }
         for (int i = 0; i < 8; ++i)
