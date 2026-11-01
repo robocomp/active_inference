@@ -7,10 +7,10 @@ Agent.name = "ltom_agent"
 # Use this if you only have one graph.
 Agent.configFile = ""
 Agent.domain = 0
-Agent.tree = true
-Agent.graph = true
-Agent.2d = true
-Agent.3d = true
+Agent.tree = false
+Agent.graph = false
+Agent.2d = false
+Agent.3d = false
 
 # --- Multiple Instance Template ---
 # If you define sub-instances, the single instance config above will be ignored.
@@ -21,7 +21,7 @@ Agent.3d = true
 # Agent.instance_name.2d = true
 # Agent.instance_name.3d = true
 
-Period.Compute = 100
+Period.Compute = 500
 Period.Emergency = 500
 
 Component.Debug.Verbose = true

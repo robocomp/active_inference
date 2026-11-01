@@ -17,7 +17,7 @@ pose keyframes). No DSR signal is connected.
 
 **Log lines** (stdout): `[ltom] repertory <path>: <how> (N entries)` at start (our own downtime is closed as a gap);
 `[ltom] born|reopened|died|owner_exit <name> uid=<uid> room <room_key>` per change (`owner_exit` = the instance vanished
-because its owner agent left, not a death); `[ltom] saved (period|exit): N entries`.
+because its owner agent was gone or Degraded, not a death; an instance still on the graph but unresolvable this poll is held, not ended); `[ltom] saved (period|exit): N entries`.
 
 - Config: `etc/config.toml`. ONE graph, `[Agent.dsr]` (the single-graph generated worker also reads the flat
   `Agent.tree/graph/2d`, so both are defined). DDS domain 5 is reserved for the future memory graph (not joined).

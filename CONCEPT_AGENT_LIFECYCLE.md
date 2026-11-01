@@ -252,7 +252,7 @@ body→sensor RT edges).
 **ltom_agent** (2026-11-01) is a pure OBSERVER: CREATE/UPDATE/REMOVE of instances are `—` (it never writes an object node and never decides
 identity). It owns only its agent node `ltom_agent 28` (`[Owns] nodes = ["ltom_agent 28"]`, id matches `[Agent].id = 28`), deleted by the
 shared coordinator on SIGTERM (verified on isolated domain 64: `[Graph] node 'ltom_agent 28' deleted`). It connects no DSR signal (polls on the
-main thread while Operating) and keeps its repertory in a file; a node disappearing while its owner is gone is "owner exit", never death.
+main thread while Operating) and keeps its repertory in a file; a node disappearing while its owner is gone or Degraded is "owner exit", never death, and an instance still on the graph but not resolvable this poll (room deleted, no covariance, ...) is HELD, never counted as gone.
 
 **door_concept CREATE exceptions (2026-10-20).** Birth stays tracker-only for every door *first seen*. Two creations do
 not go through the tracker, and neither is a birth in §1's sense — both RESTORE a door that some earlier evidence
