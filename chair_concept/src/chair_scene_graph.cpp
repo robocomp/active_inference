@@ -46,15 +46,18 @@ std::uint64_t ChairSceneGraph::create_instance_from_detection(const Eigen::Vecto
     //
     // The high-water mark only ever rises, so a freed number stays retired. (Same defect and same reasoning
     // as door_concept's identity registry; see [[door-identity-name-recycling]].)
-    // ⚠REMAINING GAP: this is per-RUN. Across a restart the mark is rebuilt from the live graph, so a name
-    // freed before the restart can still be re-issued after it. door_concept persists its registry to
-    // etc/door_identities.csv for exactly that reason; chair does not yet.
-    int max_n = name_high_water_;
+    // Across restarts too, since 2026-11-01: common/instance_identity persists the counter in
+    // etc/instance_identity.csv and issues max(persisted, highest live chair_<N>) + 1, written to disk before use.
+    // DSR node type is the generic "object"; the class is the name prefix "chair_".
+    std::vector<std::string> live_names;
     for (const auto& n : G_->get_nodes_by_type("object"))
-        if (n.name().rfind("chair_", 0) == 0)
-            try { max_n = std::max(max_n, std::stoi(n.name().substr(6))); } catch (...) {}
-    name_high_water_ = max_n + 1;
-    const std::string name = "chair_" + std::to_string(max_n + 1);
+        if (n.name().starts_with("chair_"))
+            live_names.push_back(n.name());
+    if (not identity_)
+        identity_.emplace(rc::identity::InstanceCounter::open("etc/instance_identity.csv",
+                                                              static_cast<std::uint32_t>(G_->get_agent_id())));
+    const int n_issued = identity_->issue(rc::identity::max_suffix(live_names, "chair_"));
+    const std::string name = "chair_" + std::to_string(n_issued);
 
     // Generic `object` node named "chair_*"; class carried in object_subtype ("chair"). Every
     // get_nodes_by_type("object") MUST therefore be paired with a starts_with("chair") filter.

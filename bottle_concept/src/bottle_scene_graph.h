@@ -37,6 +37,8 @@
 #include "bottle_instance.h"
 #include "bottle_model.h"        // BottleState
 #include "../../common/mask_ingestor/mask_ingestor.h"   // MaskIngestor::MasksPacket
+#include <optional>
+#include "../../common/instance_identity/instance_identity.h"   // rc::identity::InstanceCounter
 
 namespace rc {
 
@@ -101,7 +103,7 @@ private:
     BottleConfig&        cfg_;
     std::function<void()> relayout_;   // re-run the graph twopi layout after a node is created/removed
 
-    int name_high_water_ = 0;   // highest bottle_<N> ever issued; never decreases — see create_instance_from_detection
+    std::optional<rc::identity::InstanceCounter> identity_;   // persisted bottle_<N> numbers (common/instance_identity), opened at the first birth
 };
 
 }  // namespace rc

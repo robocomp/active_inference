@@ -32,6 +32,8 @@ rejoin_grace_ms = 1500
 stale_grace_ms = 120000
 agent_info_period_ms = 1000
 
+# instance names: etc/instance_identity.csv (common/instance_identity) keeps the last refrigerator_<N> issued across restarts;
+# delete it to restart numbering (the live graph still bounds it from below).
 [Owns]
 # "refrigerator*" matches every refrigerator this agent births/scaffolds (refrigerator_1, refrigerator_2, …) so none survive a
 # restart as a stale node (mirrors bottle_concept owning "bottle*").

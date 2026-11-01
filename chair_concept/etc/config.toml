@@ -32,6 +32,8 @@ rejoin_grace_ms = 1500
 stale_grace_ms = 120000
 agent_info_period_ms = 1000
 
+# instance names: etc/instance_identity.csv (common/instance_identity) keeps the last chair_<N> issued across restarts;
+# delete it to restart numbering (the live graph still bounds it from below).
 [Owns]
 # "chair_*" added 2026-07-31: the per-instance chair nodes (chair_scene_graph.cpp names them "chair_<N>")
 # were swept ONLY by the bespoke SpecificWorker::remove_owned_chair_nodes(), duplicating what the shared

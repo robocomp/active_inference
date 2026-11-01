@@ -26,6 +26,8 @@
 #include "chair_instance.h"     // rc::ChairInstance, ChairState
 #include "../../common/mask_ingestor/mask_ingestor.h"      // MaskIngestor::MasksPacket
 #include "epistemic_planner.h"  // EpistemicProposal
+#include <optional>
+#include "../../common/instance_identity/instance_identity.h"   // rc::identity::InstanceCounter
 
 namespace rc {
 
@@ -61,7 +63,7 @@ public:
 private:
     void write_chair_mesh(ChairInstance& inst, DSR::Node& node);
 
-    int name_high_water_ = 0;   // highest chair_<N> ever issued; never decreases — see create_instance_from_detection
+    std::optional<rc::identity::InstanceCounter> identity_;   // persisted chair_<N> numbers (common/instance_identity), opened at the first birth
 
     std::shared_ptr<DSR::DSRGraph> G_;
     DSR::RT_API*          rt_api_ = nullptr;

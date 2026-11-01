@@ -49,14 +49,18 @@ std::uint64_t CabinetSceneGraph::create_instance_from_detection(const Eigen::Vec
     // series, a level-2 rig's membership) silently splices them together. It reads as a TELEPORT rather
     // than an identity swap, which is what makes it expensive to notice. Same defect and fix as
     // chair_concept 9aef57a / table_concept; door_concept solves it with a persistent registry instead.
-    // ⚠Per-RUN only: across a restart the mark is rebuilt from the live graph, so a name freed before
-    // the restart can still be re-issued after it (door persists etc/door_identities.csv for that).
-    int max_n = name_high_water_;
+    // Across restarts too, since 2026-11-01: common/instance_identity persists the counter in
+    // etc/instance_identity.csv and issues max(persisted, highest live cabinet_<N>) + 1, written to disk before use.
+    // DSR node type is the generic "object"; the class is the name prefix "cabinet_".
+    std::vector<std::string> live_names;
     for (const auto& n : G_->get_nodes_by_type("object"))
-        if (n.name().rfind("cabinet_", 0) == 0)
-            try { max_n = std::max(max_n, std::stoi(n.name().substr(8))); } catch (...) {}
-    name_high_water_ = max_n + 1;
-    const std::string name = "cabinet_" + std::to_string(max_n + 1);
+        if (n.name().starts_with("cabinet_"))
+            live_names.push_back(n.name());
+    if (not identity_)
+        identity_.emplace(rc::identity::InstanceCounter::open("etc/instance_identity.csv",
+                                                              static_cast<std::uint32_t>(G_->get_agent_id())));
+    const int n_issued = identity_->issue(rc::identity::max_suffix(live_names, "cabinet_"));
+    const std::string name = "cabinet_" + std::to_string(n_issued);
 
     // Cortex registers no `cabinet` node type, so a run is a generic `object` node named "cabinet_*"
     // (class carried in the `object_subtype` string attr) — the same reuse-a-primitive-type + name-prefix

@@ -60,6 +60,8 @@ agent_info_period_ms = 1000
 
 # Owned graph nodes torn down on shutdown / peer-loss. "bottle*" matches every
 # cylinder this agent scaffolds (bottle_1, bottle_2, …) so none survive a restart.
+# instance names: etc/instance_identity.csv (common/instance_identity) keeps the last bottle_<N> issued across restarts;
+# delete it to restart numbering (the live graph still bounds it from below).
 [Owns]
 nodes = ["bottle_concept 10", "bottle*"]
 

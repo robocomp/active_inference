@@ -50,16 +50,18 @@ std::uint64_t RefrigeratorSceneGraph::create_instance_from_detection(const Eigen
     // series, a level-2 rig's membership) silently splices them together. It reads as a TELEPORT rather
     // than an identity swap, which is what makes it expensive to notice. Same defect and fix as
     // chair_concept 9aef57a / table_concept; door_concept solves it with a persistent registry instead.
-    // ⚠Per-RUN only: across a restart the mark is rebuilt from the live graph, so a name freed before
-    // the restart can still be re-issued after it (door persists etc/door_identities.csv for that).
-    int max_n = name_high_water_;
-    // DSR node type is the GENERIC "object" (cortex REGISTER_NODE_TYPE(object)); the CLASS discriminator is the
-    // name prefix "refrigerator_" + the object_subtype string attribute (mirrors cabinet_concept's box/cabinet_*).
+    // Across restarts too, since 2026-11-01: common/instance_identity persists the counter in
+    // etc/instance_identity.csv and issues max(persisted, highest live refrigerator_<N>) + 1, written to disk before use.
+    // DSR node type is the generic "object"; the class is the name prefix "refrigerator_".
+    std::vector<std::string> live_names;
     for (const auto& n : G_->get_nodes_by_type("object"))
-        if (n.name().rfind("refrigerator_", 0) == 0)
-            try { max_n = std::max(max_n, std::stoi(n.name().substr(13))); } catch (...) {}
-    name_high_water_ = max_n + 1;
-    const std::string name = "refrigerator_" + std::to_string(max_n + 1);
+        if (n.name().starts_with("refrigerator_"))
+            live_names.push_back(n.name());
+    if (not identity_)
+        identity_.emplace(rc::identity::InstanceCounter::open("etc/instance_identity.csv",
+                                                              static_cast<std::uint32_t>(G_->get_agent_id())));
+    const int n_issued = identity_->issue(rc::identity::max_suffix(live_names, "refrigerator_"));
+    const std::string name = "refrigerator_" + std::to_string(n_issued);
 
     DSR::Node refrigerator_node = DSR::Node::create<object_node_type>(name);
     G_->add_or_modify_attrib_local<object_subtype_att>(refrigerator_node, std::string("refrigerator"));

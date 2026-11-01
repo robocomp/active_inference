@@ -24,6 +24,8 @@
 #include "cabinet_instance.h"     // rc::CabinetInstance, CabinetState
 #include "../../common/mask_ingestor/mask_ingestor.h"      // MaskIngestor::MasksPacket
 #include "epistemic_planner.h"  // EpistemicProposal
+#include <optional>
+#include "../../common/instance_identity/instance_identity.h"   // rc::identity::InstanceCounter
 
 namespace rc {
 
@@ -67,7 +69,7 @@ private:
     const CabinetConfig&    cfg_;
     std::function<void()> relayout_;
 
-    int name_high_water_ = 0;   // highest cabinet_<N> ever issued; never decreases — see create_instance_from_detection
+    std::optional<rc::identity::InstanceCounter> identity_;   // persisted cabinet_<N> numbers (common/instance_identity), opened at the first birth
 };
 
 }  // namespace rc

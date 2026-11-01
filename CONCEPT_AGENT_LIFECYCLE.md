@@ -26,6 +26,9 @@ Five stages: **CREATE · UPDATE · REMOVE · HISTORY · OWNERSHIP**.
 - `Detection::birthable = false` marks a detection that may **refine** an existing track but never birth one
   (e.g. a peripheral/360 sensor). Multi-sensor policy: **one sensor births, peripheral sensors only cue
   attention.**
+- **Names and uids come from `common/instance_identity`** (2026-11-01): the next `<prefix>_<N>` is max(persisted counter in
+  `etc/instance_identity.csv`, highest live N) + 1, written before use — never from a live-graph scan alone, which
+  re-issued a dead instance's name after a restart. `object_uid = (agent_id << 40) | N`.
 - `birth_min_sep_m` from every existing track *and* every other pending candidate — anti-duplicate.
 
 **Invariant:** an agent must never create a graph node for an instance the tracker has not birthed.
