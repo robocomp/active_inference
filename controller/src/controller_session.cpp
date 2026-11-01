@@ -4813,6 +4813,22 @@ void ControllerSession::step_anchor_cross(const ControllerRobotPose &robot_pose,
             cross_viz_.aim = st.aim;
             if (st.p_fit < 0.5f)
                 cross_viz_.why.push_back(std::format("P(body fits at entry) {:.2f}: progress held back", st.p_fit));
+            // [cross-aif] trace, 1 Hz (warm14: the servo sent ~0 for minutes at an open door and its state reached only the
+            // canvas): what the law saw and chose, and each leaf hypothesis it weighed.
+            if (now >= aif_trace_next_ms_)
+            {
+                aif_trace_next_ms_ = now + 1000;
+                std::string lv;
+                for (const auto &l : drive_leaves)
+                    lv += std::format(" [p {:.2f} hinge ({:+.2f},{:+.2f}) tip ({:+.2f},{:+.2f}) phi {:.0f}]", l.p, l.hinge.x(),
+                                      l.hinge.y(), l.tip.x(), l.tip.y(), l.phi * 57.2958f);
+                std::println("[cross-aif] e {:+.3f} line {:+.3f} s {:+.3f} s* {:.2f} p_fit {:.3f} heading_err {:+.1f} deg "
+                             "width {:.2f} half_w {:.3f} sigma_lat {:.3f} free_adv {:.2f} | cmd adv {:+.3f} rot {:+.3f} | {} leaves{}",
+                             st.e, st.line, st.s, st.s_goal, st.p_fit,
+                             rc::anchor_cross_geometry(drive_pose).heading_err * 57.2958f, drive_width, half_w,
+                             rc::anchor_cross_geometry(drive_pose).sigma_lat, free_advance, st.cmd.adv, st.cmd.rot,
+                             drive_leaves.size(), lv);
+            }
         }
         else
             cmd = rc::anchor_cross_command(drive_pose, drive_width, half_w, standoff, v_max, w_max, holonomic, drive_leaves,
