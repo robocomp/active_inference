@@ -29,7 +29,7 @@
 namespace
 {
 bool num(const char* s, double& v) { const auto r = std::from_chars(s, s + std::strlen(s), v); return r.ec == std::errc(); }
-struct GtRow { std::int64_t t; double x, y, th; };
+struct GtRow { std::int64_t t; double x, y, th, loc_err = 0; };
 std::vector<GtRow> read_gt(const std::string& path)   // as replay_anchor_frames: robot world yaw = -gt_theta_raw - pi/2
 {
     std::vector<GtRow> out; std::ifstream f(path); std::string line;
@@ -37,13 +37,22 @@ std::vector<GtRow> read_gt(const std::string& path)   // as replay_anchor_frames
     std::vector<std::string> head; { std::stringstream ss(line); std::string c; while (std::getline(ss, c, ',')) head.push_back(c); }
     auto col = [&](const char* n) { return int(std::find(head.begin(), head.end(), n) - head.begin()); };
     const int it = col("ts_ms"), ix = col("gt_x_world"), iy = col("gt_y_world"), ith = col("gt_theta_raw");
+    const int ig = col("gt_theta"), ie = col("est_theta");
     while (std::getline(f, line))
     {
         std::vector<std::string> c; std::stringstream ss(line); std::string v; while (std::getline(ss, v, ',')) c.push_back(v);
         if (int(c.size()) <= std::max({it, ix, iy, ith})) continue;
         GtRow r{}; double t = 0, raw = 0;
         if (num(c[it].c_str(), t) and num(c[ix].c_str(), r.x) and num(c[iy].c_str(), r.y) and num(c[ith].c_str(), raw))
-        { r.t = std::int64_t(t); r.th = -raw - M_PI / 2; out.push_back(r); }
+        {
+            r.t = std::int64_t(t); r.th = -raw - M_PI / 2;
+            // the localiser's heading error: est - gt in the room's frame, less the room frame's own rotation (the sim's rooms
+            // are axis-aligned with the world: the nearest multiple of 90 deg — an assumption of this tool, flagged)
+            double g = 0, e = 0;
+            if (int(c.size()) > std::max(ig, ie) and num(c[ig].c_str(), g) and num(c[ie].c_str(), e))
+            { const double d = std::remainder(e - g, 2 * M_PI); r.loc_err = d - M_PI / 2 * std::round(d / (M_PI / 2)); }
+            out.push_back(r);
+        }
     }
     return out;
 }
@@ -54,7 +63,7 @@ std::optional<GtRow> gt_at(const std::vector<GtRow>& gt, std::int64_t t)
     const GtRow& g1 = *it; const GtRow& g0 = *std::prev(it);
     if (g1.t - g0.t > 200 or g1.t == g0.t) return std::nullopt;
     const double a = double(t - g0.t) / double(g1.t - g0.t);
-    return GtRow{t, g0.x + a * (g1.x - g0.x), g0.y + a * (g1.y - g0.y), g0.th + a * std::remainder(g1.th - g0.th, 2 * M_PI)};
+    return GtRow{t, g0.x + a * (g1.x - g0.x), g0.y + a * (g1.y - g0.y), g0.th + a * std::remainder(g1.th - g0.th, 2 * M_PI), g0.loc_err};
 }
 constexpr double kDoorX = -4.77, kDoorY = 9.425;   // DOOR_1's opening on the wall's mid-plane (replay_anchor_frames)
 // error of an anchor estimate against the truth: depth / lateral (m) in the TRUE anchor's axes, yaw (rad), and the robot's
@@ -77,7 +86,7 @@ std::optional<Err> err_at(const std::vector<GtRow>& gt, std::int64_t t, const rc
 int main(int argc, char** argv)
 {
     if (argc < 3) { std::print(stderr, "usage: wall_gap_replay anchor_frames.bin gt_error.csv [--no-memory] [--lintel H]\n"); return 2; }
-    bool memory = true, room_yaw = false;
+    bool memory = true, room_yaw = false, loc_heading = false, recorded_yaw = false, recursive = false;
     double room_yaw_sigma_deg = 2.0;
     std::mt19937 rng(17);
     std::normal_distribution<float> yaw_noise(0.f, 1.f * float(M_PI) / 180.f);   // the localiser's heading error (~1 deg)
@@ -87,6 +96,11 @@ int main(int argc, char** argv)
         double v;
         if (std::strcmp(argv[i], "--no-memory") == 0) memory = false;
         else if (std::strcmp(argv[i], "--room-yaw") == 0) room_yaw = true;
+        else if (std::strcmp(argv[i], "--loc-heading") == 0) { room_yaw = true; loc_heading = true; }   // the localiser's REAL heading error
+        else if (std::strcmp(argv[i], "--recorded-yaw") == 0) recorded_yaw = true;
+        // the room's yaw only at an anchor's (re)start; afterwards the yaw is carried (odometry) and corrected by the wall
+        else if (std::strcmp(argv[i], "--recursive-yaw") == 0) recursive = true;
+        else if (std::strcmp(argv[i], "--slope-prior") == 0 and i + 1 < argc and num(argv[++i], v)) pp.sigma_slope = float(v * M_PI / 180.0);   // v6: the prior the agent was handed
         else if (std::strcmp(argv[i], "--room-yaw-sigma") == 0 and i + 1 < argc and num(argv[++i], v)) room_yaw_sigma_deg = v;
         else if (std::strcmp(argv[i], "--lintel") == 0 and i + 1 < argc and num(argv[++i], v)) pp.lintel = float(v);
     }
@@ -104,10 +118,19 @@ int main(int argc, char** argv)
     for (std::size_t k = 0; k < frames.size(); ++k)
     {
         const auto& f = frames[k];
-        const bool restart = k == 0 or f.t_ms - frames[k - 1].t_ms > 2000;
+        // a new anchor belief: a record gap, a new sequence number (v6), or (v5 and older) the prior's covariance reset to a
+        // creation/re-init P0 — its position spread jumping past 4x the previous posterior's and past (0.15 m)^2
+        bool restart = k == 0 or f.t_ms - frames[k - 1].t_ms > 2000;
+        if (not restart and version >= 6) restart = f.anchor_seq != frames[k - 1].anchor_seq;
+        if (not restart and version < 6)
+        {
+            const float tp = f.prior.P(0, 0) + f.prior.P(1, 1), tq = frames[k - 1].post.P(0, 0) + frames[k - 1].post.P(1, 1);
+            restart = tp > 4.f * tq and tp > 0.0225f;
+        }
         if (restart)
         {
             ++anchor; x = f.prior; mem.clear();
+            if (version >= 6) std::print("  (seq {})\n", f.anchor_seq);
             std::print("anchor {} at t {:.1f} s: creation prior ({:+.2f},{:+.2f}) yaw {:+.1f} deg\n", anchor, (f.t_ms - t0) * 1e-3,
                        f.prior.x.x(), f.prior.x.y(), f.prior.x.z() * 57.2958f);
         }
@@ -145,21 +168,28 @@ int main(int argc, char** argv)
         pp.thickness = f.thickness > 0.f ? f.thickness : pp.thickness;
         // --room-yaw: the agent's room-given wall direction (anchor_from_room), emulated: the TRUE wall direction in the
         // robot frame + the localiser's heading error, sigma 2 deg — reset every frame, as door_concept now does
-        if (room_yaw)
+        if (recorded_yaw and version >= 6 and std::isfinite(f.wall_yaw_prior))
+        {
+            float yaw = f.wall_yaw_prior;
+            if (std::abs(rc::interaction::wrap_pi(yaw - x.x.z())) > float(M_PI_2)) yaw = rc::interaction::wrap_pi(yaw + float(M_PI));
+            x.x.z() = yaw; x.P(2, 2) = f.wall_yaw_prior_sigma * f.wall_yaw_prior_sigma;
+        }
+        else if (room_yaw and (not recursive or restart))
             if (const auto g = gt_at(gt, f.t_ms); g.has_value())
             {
-                float yaw = float(std::remainder(-g->th, 2 * M_PI)) + yaw_noise(rng);
+                // the robot-frame wall direction = -(heading); a heading over-estimated by e puts the wall at -e
+                float yaw = float(std::remainder(-g->th, 2 * M_PI)) + (loc_heading ? -float(g->loc_err) : yaw_noise(rng));
                 if (std::abs(rc::interaction::wrap_pi(yaw - x.x.z())) > float(M_PI_2)) yaw = rc::interaction::wrap_pi(yaw + float(M_PI));
                 x.x.z() = yaw; x.P(2, 2) = float(std::pow(room_yaw_sigma_deg * M_PI / 180.0, 2.0));
             }
         const auto m = rc::door::wallgap::measure(x, memory ? mem : rays, pp);
-        if (std::getenv("WG_DEBUG") != nullptr and anchor == std::atoi(std::getenv("WG_DEBUG")) and k % 15 == 0)
+        if (std::getenv("WG_DEBUG") != nullptr and anchor == std::atoi(std::getenv("WG_DEBUG")) and k % 5 == 0)
         {
             int n_above = 0; for (const auto& p : (memory ? mem : rays)) n_above += p.z() > pp.lintel ? 1 : 0;
             const auto e0 = err_at(gt, f.t_ms, x);
-            std::print("  dbg t {:.1f}s dist {:.2f}: wall {} d_face {:+.3f} n_in {} slope {:+.3f} | gap {} [{:+.2f},{:+.2f}] n_plane {} | pts above lintel {} of {} | prior err depth {:+.2f} lat {:+.2f}\n",
+            std::print("  dbg t {:.1f}s dist {:.2f}: wall {} d_face {:+.3f} n_in {} slope {:+.3f} | gap {} [{:+.2f},{:+.2f}] n_plane {} | pts above lintel {} of {} | prior err depth {:+.2f} lat {:+.2f} yaw {:+.1f} deg\n",
                        (f.t_ms - t0) * 1e-3, e0 ? e0->dist : -1.0, m.wall, m.d_face, m.n_wall, m.slope, m.gap, m.u_left, m.u_right, m.n_plane,
-                       n_above, (memory ? mem : rays).size(), e0 ? e0->depth : 0.0, e0 ? e0->lat : 0.0);
+                       n_above, (memory ? mem : rays).size(), e0 ? e0->depth : 0.0, e0 ? e0->lat : 0.0, e0 ? e0->yaw * 57.2958 : 0.0);
         }
         x = rc::door::wallgap::fuse(x, m, pp);
         const auto e = err_at(gt, f.t_ms, x), el = err_at(gt, f.t_ms, f.post);

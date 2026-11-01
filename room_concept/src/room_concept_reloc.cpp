@@ -61,7 +61,13 @@ namespace rc
         // The room's open doorways, seated on its boundary — the tracker's per-beam doorway mixture inside ℓ, evaluated
         // per hypothesis (reloc_search.h, Aperture; Task R2). Never while the room is being estimated: there is no room
         // polygon of THIS room to seat them on, and relocalisation is disarmed then anyway.
-        if (not estimating())
+        // ★ "NOT WHILE A ROOM IS LEARNT" IS searching(), NOT estimating() (2026-11-01, pingpong39 leg 6). estimating() stays
+        //   true for the rest of the run after the first crossing (runtime_estimate_ is never cleared), so every search in
+        //   a RECALLED room — frozen, map ready, localising — ran with NO doorways: the returns through the door the body
+        //   had just come through were scored as room or clutter, a 4.35 m / 179° twin explained them better, and the
+        //   search moved there one frame after the recall (tools/reloc_handover_replay: without the aperture it picks that
+        //   exact pose; with door_7's, at any openness >= 0.5 and P(shut) up to 0.95, it keeps the pose by the door).
+        if (not searching())
             rp.apertures = rc::reloc::reloc_apertures(
                 rc::reloc::seated_doors(door_apertures(), rt_.passage, current_room_polygon(), false), params.reloc_hazard);
         rp.beyond_extent     = DoorApertures::kBeyondExtentM;
@@ -71,6 +77,20 @@ namespace rc
             rp.prior_modes = late_prior_;
             rp.prior_only = true;   // the proposal is the hypothesis: refine it, never jump to another basin (recog_proto9)
         }
+        // ★ WHILE THE HAND-OVER'S DOOR ANCHOR LIVES, SEARCH THE ENTRY AREA (Params::local_seeds). The robot has just come
+        //   through a known door: its pose is the anchor carried by odometry, forward or reversed. Each component seeds the
+        //   polish at its mean and at ±1σ, ±2σ of its own heading spread (the yaw is what a wrong placement gets wrong; the
+        //   position is the door's, within the polish's basin). The anchor retires by information (relocalisation_step),
+        //   and the room-wide search is back for a kidnap after that. A component of weight 0 (impossible) seeds nothing.
+        else if (not rt_.door_anchor.empty())
+            for (const auto& an : rt_.door_anchor)
+            {
+                if (not (an.w > 0.f) or not an.pose.allFinite()) continue;
+                const float sth = std::sqrt(std::max(0.f, an.cov(2, 2)));
+                for (const int k : {-2, -1, 0, 1, 2})
+                    rp.local_seeds.emplace_back(an.pose.x(), an.pose.y(),
+                                                std::remainder(an.pose.z() + float(k) * sth, 2.f * static_cast<float>(M_PI)));
+            }
         return rp;
     }
 
@@ -570,7 +590,13 @@ namespace rc
                 const double trust = std::clamp(belief_[kTrack], 0.0, 1.0) * (1.0 - std::clamp(static_cast<double>(outside), 0.0, 1.0));
                 const double track_kl = trust * rc::reloc::gaussian_information(res.covariance, area);
                 if (rt_.passage_term < 0.5f and track_kl >= anchor_kl)
+                {
+                    qInfo().noquote() << QString("[reloc] door anchor retired %1 ms after the hand-over (%2 frames): tracker %3 nats "
+                                                 ">= anchor %4 nats")
+                                             .arg(res.timestamp_ms - handover_ts_ms_).arg(rt_.door_anchor_frames)
+                                             .arg(track_kl, 0, 'f', 1).arg(anchor_kl, 0, 'f', 1);
                     rt_.door_anchor.clear();
+                }
             }
             // A HELD episode publishes its mixture spread on EVERY frame it stays open (added to the next published
             // covariance in run()): Σ_k w_k d_k d_kᵀ over the held pose (d = 0) and its rivals, w from the carried odds.

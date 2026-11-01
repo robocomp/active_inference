@@ -415,6 +415,9 @@ private:
         bool  cross_was_claimed = false;   // Task 19: the cross is the only claim an anchor serves
         std::uint64_t consumer_id = 0;                    // the agent node whose `executing` edge we serve (0 = legacy)
         bool  reinit_on_next_claim = false;               // relinked by a room switch: the next claim re-inits from the room
+        std::uint32_t seq = 0;                            // record v6: bumped on create / every re-init / retry fusion
+        float wall_yaw_prior = std::numeric_limits<float>::quiet_NaN();        // record v6: the wall direction prior handed
+        float wall_yaw_prior_sigma = std::numeric_limits<float>::quiet_NaN();  //   to wall-then-hole this cycle (robot frame)
         int   last_mask_frame = -1;                       // each mask frame is evidence ONCE
         std::int64_t last_lidar_stamp = 0;                // each bpearl capture is evidence ONCE
         // Task 7. The anchor's x-axis relative to the door's wall_u: +1 same, −1 flipped (anchor_from_room puts the
@@ -450,6 +453,7 @@ private:
         bool  az_logged = false;                          // the bpearl's measured azimuth step logged once per anchor
     };
     std::optional<PassageAnchor> passage_anchor_;
+    std::uint32_t anchor_seq_ = 0;   // record v6: PassageAnchor::seq's source
     std::ofstream anchor_log_;
     // Decision log (decision_log.h). dec_cycle_ counts compute() cycles that got past the graph guard.
     rc::door::DoorDecisionLog decision_log_;
@@ -484,6 +488,9 @@ private:
     std::optional<Eigen::Matrix3f> robot_pose_cov_in_room() const;
     std::optional<rc::interaction::RelPose> anchor_from_room(const rc::DoorInstance& inst,
                                                              float* axis_sign_out = nullptr, bool log_p0 = true) const;
+    // The direction (room-frame yaw, mod pi) of the WALL NODE this door hangs from — room_concept's wall, re-estimated with the
+    // room — when that wall belongs to the current room frame. nullopt: no wall parent, or it is another room's.
+    std::optional<float> door_wall_node_yaw(const rc::DoorInstance& inst) const;
     void remove_passage_anchor(std::string_view why);
     void anchor_geometry_from_door(const rc::DoorInstance& inst, PassageAnchor& pa) const;   // width, thickness, height, run
     void refresh_anchor_geometry(const rc::DoorInstance& inst, PassageAnchor& pa);            // ...and the published clear width

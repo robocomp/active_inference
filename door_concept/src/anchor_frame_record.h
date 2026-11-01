@@ -27,6 +27,7 @@
  *            posterior RelPose: f32 x[3], f32 P[9], i64 stamp_ms
  *            f32 p_lidar, p_cam, p_view          — AS PUBLISHED: p_cam / p_view include fix 1's held camera term
  *            f32 lidar_open, lidar_door, lidar_wall   — p_lidar's three factors
+ *   VERSION 6 adds, after the helios: u32 anchor_seq, f32 wall_yaw_prior, f32 wall_yaw_prior_sigma (Frame's comment).
  *   Binary, so no text parsing (and no locale) is involved anywhere.
  *   VERSION 4 (Task 10) adds, after p_view's trio of factors, f32 bias_L[3 × kBiasCols] (row-major): the persistent-bias
  *   factor the update was handed with its prior (door_anchor_update.h AnchorBias), so a plain replay re-runs the same
@@ -43,6 +44,7 @@
 
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <fstream>
 #include <istream>
 #include <ostream>
@@ -58,7 +60,7 @@ namespace rc::door::rec
 {
 
 inline constexpr char          kMagic[8] = {'D', 'A', 'N', 'C', 'H', 'O', 'R', 'F'};
-inline constexpr std::uint32_t kVersion  = 5;   // v5 (2026-11-01): the helios returns the wall-then-hole pose saw
+inline constexpr std::uint32_t kVersion  = 6;   // v6 (2026-11-01): the anchor sequence + the wall direction prior used
 inline constexpr std::uint64_t kMaxBytes = 200ull * 1024ull * 1024ull;   // ⚑ disk budget
 // I/O batching, not a model level: the recorder (and door_concept's anchor_log.csv) flush every this many records and at
 // close — never per record on the compute thread (final review I-4).
@@ -83,6 +85,11 @@ struct Frame
     // above are the bpearl's only, the ray-likelihood update's input)
     std::vector<Eigen::Vector3f> helios;
     Eigen::Vector3f helios_origin = Eigen::Vector3f::Zero();
+    // v6: which anchor belief this frame belongs to (it changes on every create / re-init / retry fusion — a replay restarts
+    // its chain there), and the wall direction prior wall-then-hole was handed (robot-frame yaw, its sigma; NaN = none:
+    // the anchor's own predicted yaw was used). v5 and older read seq 0 and NaN.
+    std::uint32_t anchor_seq = 0;
+    float wall_yaw_prior = std::numeric_limits<float>::quiet_NaN(), wall_yaw_prior_sigma = std::numeric_limits<float>::quiet_NaN();
     // Version-1 records only (read, never written): the pre-budget rays and the budgeted count.
     std::uint32_t version = kVersion;
     std::vector<Eigen::Vector3f> rays_v1;
@@ -177,6 +184,7 @@ inline std::string encode(const Frame& f)
     for (int i = 0; i < 3; ++i) for (int j = 0; j < kBiasCols; ++j) put(b, f.bias.L(i, j));
     put(b, f.helios_origin.x()); put(b, f.helios_origin.y()); put(b, f.helios_origin.z());   // v5
     put_pts(b, f.helios);
+    put(b, f.anchor_seq); put(b, f.wall_yaw_prior); put(b, f.wall_yaw_prior_sigma);   // v6
     return b;
 }
 
@@ -215,6 +223,7 @@ inline bool decode(const char* p, const char* e, Frame& f, std::uint32_t version
         ok = ok and get(p, e, hx) and get(p, e, hy) and get(p, e, hz) and get_pts(p, e, f.helios);
         f.helios_origin = {hx, hy, hz};
     }
+    if (version >= 6) ok = ok and get(p, e, f.anchor_seq) and get(p, e, f.wall_yaw_prior) and get(p, e, f.wall_yaw_prior_sigma);
     return ok;
 }
 
@@ -269,7 +278,7 @@ inline bool read_all(std::istream& in, std::vector<Frame>& frames, std::uint32_t
     char magic[8] = {};
     std::uint32_t ver = 0;
     if (not in.read(magic, sizeof(magic)) or std::memcmp(magic, kMagic, sizeof(kMagic)) != 0) return false;
-    if (not in.read(reinterpret_cast<char*>(&ver), sizeof(ver)) or (ver != kVersion and ver != 4 and ver != 3 and ver != 2 and ver != 1)) return false;
+    if (not in.read(reinterpret_cast<char*>(&ver), sizeof(ver)) or (ver != kVersion and ver != 5 and ver != 4 and ver != 3 and ver != 2 and ver != 1)) return false;
     if (version != nullptr) *version = ver;
     // A record's length word is bounded by what the file still holds: a corrupt word cannot allocate gigabytes.
     const std::streampos here = in.tellg();

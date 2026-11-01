@@ -160,6 +160,14 @@ namespace rc::reloc
         /// polished — no lattice maxima, no caller seeds — so the search refines the proposal and never jumps to another
         /// basin of K. Whether K at that pose explains the scans is then the verdict's call. Ignored without prior_modes.
         bool prior_only = false;
+        /// THE ENTRY AREA AFTER A HAND-OVER (2026-11-01, user: "the relocalization, in these situations, should focus in the
+        /// entry area and robot heading, which is much smaller than the whole apartment"). Non-empty ⇒ only these poses and
+        /// the caller's seeds (the incumbent) are polished: no lattice maxima anywhere else in the room. The caller fills it
+        /// from the door anchor carried since the hand-over, spanning its own heading spread. pingpong39 leg 6: a recall
+        /// placed 8° off in room_1's corridor stub, and the room-wide lattice took a 4.35 m / 179° twin that explained the
+        /// through-door returns better (the independent-point ℓ outweighs the anchor's few nats), lost for the next leg.
+        /// Ignored when prior_only holds (a recognition proposal is its own hypothesis).
+        std::vector<Eigen::Vector3f> local_seeds;
     };
 
     /// log of the prior density at a pose whose own Laplace covariance is `cov`: log[(1−prior_wrong)·Σ_c w_c N(pose;

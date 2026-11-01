@@ -256,6 +256,33 @@ SpecificWorker::anchor_from_room(const rc::DoorInstance& inst,
     return r;
 }
 
+// The door's parent WALL node's direction, room frame. The door model's wall_u is authored once, when its belief is
+// created (door_fit associate_wall on the polygon of that moment), and moves afterwards only on a room adoption; room_concept
+// keeps re-estimating the wall itself. The anchor's wall direction is the room's (the wall-then-hole design's step 1), so it
+// is read from the wall node, every frame. The wall belongs to the current room when it hangs from it or from its floor.
+std::optional<float> SpecificWorker::door_wall_node_yaw(const rc::DoorInstance& inst) const
+{
+    if (not G or inst.wall_node_id == 0) return std::nullopt;
+    const std::string room = rc::room::current_room_frame(*G);
+    const auto room_n = room.empty() ? std::nullopt : G->get_node(room);
+    const auto wn = G->get_node(inst.wall_node_id);
+    if (not room_n.has_value() or not wn.has_value() or wn->type() != "wall") return std::nullopt;
+    const auto parent_id = G->get_attrib_by_name<parent_att>(wn.value());
+    if (not parent_id.has_value()) return std::nullopt;
+    if (parent_id.value() != room_n->id())
+    {
+        const auto pn = G->get_node(parent_id.value());
+        if (not pn.has_value() or pn->type() != "floor"
+            or G->get_attrib_by_name<parent_att>(pn.value()).value_or(0) != room_n->id())
+            return std::nullopt;
+    }
+    const auto e = G->get_edge(parent_id.value(), wn->id(), "RT");
+    if (not e.has_value()) return std::nullopt;
+    const auto rot = G->get_attrib_by_name<rt_rotation_euler_xyz_att>(e.value());
+    if (not rot.has_value() or rot->get().size() < 3 or not std::isfinite(rot->get()[2])) return std::nullopt;
+    return rot->get()[2];
+}
+
 bool SpecificWorker::create_passage_anchor(rc::DoorInstance& inst, const rc::pragmatic::PragmaticAffordance& aff)
 {
     float axis_sign = 1.f;
@@ -286,6 +313,7 @@ bool SpecificWorker::create_passage_anchor(rc::DoorInstance& inst, const rc::pra
     pa.pose         = init.value();
     pa.init_pose    = init.value();   // Task 11 fix 4
     pa.axis_sign    = axis_sign;
+    pa.seq          = ++anchor_seq_;
     anchor_geometry_from_door(inst, pa);   // Task 9: the geometry is read with the pose, once (width_m set below)
     pa.cross_was_claimed = inst.aff_cross.claimed();
     pa.last_seen_ms = init->stamp_ms;   // never seen yet: unseen since creation (unseen_time)
@@ -384,7 +412,7 @@ void SpecificWorker::retry_broad_prior(const rc::DoorInstance& inst, PassageAnch
         pa.init_pose = r.value();
         pa.axis_sign = near_sign;
         pa.bias = {};
-        pa.leaf_run.reset();   // a re-initialised belief: the leaf is seeded from the room frame again
+        pa.leaf_run.reset(); pa.seq = ++anchor_seq_;   // a re-initialised belief: the leaf is seeded from the room frame again
         pa.view_lost_llr = 0.0;
         pa.lost = {};   // Task D-B: a re-initialised belief starts the lost mode at its prior
         refresh_anchor_geometry(inst, pa);
@@ -416,7 +444,7 @@ void SpecificWorker::retry_broad_prior(const rc::DoorInstance& inst, PassageAnch
     pa.view_lost_llr = 0.0;   // Task 17 add-on: a new belief, a new visibility record
     pa.lost = {};   // Task D-B: a re-initialised belief starts the lost mode at its prior
     pa.bias = {};
-    pa.leaf_run.reset();   // a re-initialised belief: the leaf is seeded from the room frame again   // Task 10: the fused belief carries no bias bookkeeping — it restarts from this P
+    pa.leaf_run.reset(); pa.seq = ++anchor_seq_;   // a re-initialised belief: the leaf is seeded from the room frame again   // Task 10: the fused belief carries no bias bookkeeping — it restarts from this P
     // Fix round 2: one fusion per retry claim (a later claim_rose in the same passage is not pulled again unless another
     // claim fails), and nothing seen before it may be published as "predicted" after it.
     pa.retry = false;
@@ -667,7 +695,7 @@ void SpecificWorker::step_passage_anchor()
                     pa.pose = r.value();
                     pa.init_pose = r.value();   // Task 11 fix 4
                     pa.bias = {};
-                    pa.leaf_run.reset();   // a re-initialised belief: the leaf is seeded from the room frame again
+                    pa.leaf_run.reset(); pa.seq = ++anchor_seq_;   // a re-initialised belief: the leaf is seeded from the room frame again
                     pa.view_lost_llr = 0.0;   // Task 17 add-on: a re-initialised belief, a new visibility record
                     pa.lost = {};   // Task D-B: a re-initialised belief starts the lost mode at its prior
                     refresh_anchor_geometry(*inst, pa);
@@ -689,7 +717,7 @@ void SpecificWorker::step_passage_anchor()
                         pa.pose = r.value();
                         pa.init_pose = r.value();   // Task 11 fix 4
                         pa.bias = {};
-                        pa.leaf_run.reset();   // a re-initialised belief: the leaf is seeded from the room frame again
+                        pa.leaf_run.reset(); pa.seq = ++anchor_seq_;   // a re-initialised belief: the leaf is seeded from the room frame again
                         pa.view_lost_llr = 0.0;   // Task 17 add-on: a re-initialised belief, a new visibility record
                         pa.lost = {};   // Task D-B: a re-initialised belief starts the lost mode at its prior
                         refresh_anchor_geometry(*inst, pa);
@@ -998,6 +1026,14 @@ void SpecificWorker::step_passage_anchor()
                 if (const auto rv = anchor_from_room(*inst, nullptr, false); rv.has_value() and std::isfinite(rv->x.z()))
                 {
                     float yaw = rv->x.z();
+                    // the room's CURRENT wall (its wall node), not the door model's wall_u authored at the belief's birth:
+                    // rotate the room-given yaw by their difference (mod pi; the anchor's axis sign is the same for both)
+                    if (const auto wy = door_wall_node_yaw(*inst); wy.has_value())
+                    {
+                        float dw = rc::interaction::wrap_pi(wy.value() - inst->aperture.yaw());
+                        if (std::abs(dw) > float(M_PI_2)) dw = rc::interaction::wrap_pi(dw + float(M_PI));
+                        yaw = rc::interaction::wrap_pi(yaw + dw);
+                    }
                     if (std::abs(rc::interaction::wrap_pi(yaw - prior_pose.x.z())) > float(M_PI_2)) yaw = rc::interaction::wrap_pi(yaw + float(M_PI));
                     wg_prior.x.z() = yaw;
                     // Its spread is the LOCALISER's heading (+ the door's yaw belief): anchor_from_room's yaw variance less the
@@ -1007,7 +1043,10 @@ void SpecificWorker::step_passage_anchor()
                     // inherited it (4.35 m / 179 deg relocaliser jump).
                     if (std::isfinite(rv->P(2, 2)))
                         wg_prior.P(2, 2) = std::max(1e-6f, rv->P(2, 2) - kSigmaModel.z() * kSigmaModel.z());
+                    pa.wall_yaw_prior = wg_prior.x.z();
+                    pa.wall_yaw_prior_sigma = std::sqrt(wg_prior.P(2, 2));
                 }
+                else { pa.wall_yaw_prior = pa.wall_yaw_prior_sigma = std::numeric_limits<float>::quiet_NaN(); }
             const auto wm = rc::door::wallgap::measure(wg_prior, wall_pts, wp);
             post = rc::door::wallgap::fuse(wg_prior, wm, wp);
         }
@@ -1122,6 +1161,8 @@ void SpecificWorker::step_passage_anchor()
         fr.post = pa.pose;
         fr.helios = helios_rays;          // v5: what door_wall_gap.h saw above the lintel
         fr.helios_origin = helios_origin;
+        fr.anchor_seq = pa.seq;                                                       // v6
+        fr.wall_yaw_prior = pa.wall_yaw_prior; fr.wall_yaw_prior_sigma = pa.wall_yaw_prior_sigma;
         fr.p_lidar = ev.p_lidar; fr.p_cam = ev.p_cam; fr.p_view = ev.p_view;
         fr.lidar_open = ev.lidar_open; fr.lidar_door = ev.lidar_door; fr.lidar_wall = ev.lidar_wall;
         const bool was_capped = anchor_frames_.capped();

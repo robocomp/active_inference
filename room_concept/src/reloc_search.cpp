@@ -840,7 +840,8 @@ namespace rc::reloc
         std::vector<Eigen::Vector3f> starts;
         if (not (p.prior_only and not p.prior_modes.empty()))
         {
-            for (const auto& c : maxima) starts.push_back(c.pose);
+            if (p.local_seeds.empty()) for (const auto& c : maxima) starts.push_back(c.pose);
+            else starts.insert(starts.end(), p.local_seeds.begin(), p.local_seeds.end());   // the entry area only
             for (const auto& sp : seed_poses) starts.push_back(sp);
         }
         for (const auto& pm : p.prior_modes) starts.push_back(pm.mu);   // the prior's own hypotheses are always polished
