@@ -136,6 +136,45 @@ static void test_csv_row_count_and_header()
     CHECK(rows == 2);
 }
 
+static int count_prefix(const fs::path& dir, const std::string& pre)
+{
+    int n = 0;
+    for (const auto& e : fs::directory_iterator(dir))
+        if (e.path().filename().string().starts_with(pre)) ++n;
+    return n;
+}
+
+static void test_fallback_moves_bad_main_aside()
+{
+    const auto f = fresh_dir() / "rep.json";
+    const fs::path prev = fs::path(f).concat(".prev");
+    CHECK(save_repertory(f, make_repertory()));
+    CHECK(save_repertory(f, make_repertory()));
+    write_file(f, "{ broken");
+    const std::string prev_before = read_file(prev);
+    Repertory got(3000);
+    CHECK(load_repertory(f, got) == LoadResult::loaded_prev);
+    CHECK(not fs::exists(f));
+    CHECK(count_prefix(f.parent_path(), "rep.json.bad.") == 1);
+    CHECK(read_file(prev) == prev_before);
+    CHECK(save_repertory(f, got));
+    Repertory a(3000), b(3000);
+    CHECK(load_repertory(f, a) == LoadResult::loaded and a.entries().size() == 2);
+    write_file(f, "x");
+    CHECK(load_repertory(f, b) == LoadResult::loaded_prev and b.entries().size() == 2);
+}
+
+static void test_missing_main_bad_prev_moved_aside()
+{
+    const auto f = fresh_dir() / "rep.json";
+    const fs::path prev = fs::path(f).concat(".prev");
+    write_file(prev, "garbage");
+    Repertory r(3000);
+    CHECK(load_repertory(f, r) == LoadResult::unreadable);
+    CHECK(not fs::exists(prev));
+    CHECK(count_prefix(f.parent_path(), "rep.json.prev.bad.") == 1);
+}
+
 int main()
 {
     if (not std::setlocale(LC_ALL, "es_ES.UTF-8")) std::setlocale(LC_ALL, "");
@@ -143,6 +182,8 @@ int main()
     test_load_closes_open_lives_as_gap();
     test_corrupt_main_falls_back_to_prev();
     test_missing_is_missing();
+    test_fallback_moves_bad_main_aside();
+    test_missing_main_bad_prev_moved_aside();
     test_csv_has_points_not_commas();
     test_csv_row_count_and_header();
     if (failures == 0) std::println("test_repertory_io: ok");

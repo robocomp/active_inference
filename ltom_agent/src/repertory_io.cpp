@@ -153,6 +153,15 @@ LoadResult load_repertory(const fs::path& file, Repertory& into)
     const bool have_prev = fs::exists(prev, ec);
     if (not have_main and not have_prev) return LoadResult::missing;
 
+    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+    // A bad file is never left where the next save would rotate it over a good copy.
+    auto move_aside = [&](const fs::path& p)
+    {
+        fs::path bad = p; bad += ".bad." + std::to_string(ms);
+        fs::rename(p, bad, ec);
+        return bad;
+    };
+
     std::vector<Entry> got;
     if (have_main and try_parse(file, got))
     {
@@ -163,14 +172,13 @@ LoadResult load_repertory(const fs::path& file, Repertory& into)
     if (have_prev and try_parse(prev, got))
     {
         std::println(stderr, "⚠ ltom: {} unreadable or missing, falling back to {}", file.string(), prev.string());
+        if (have_main) std::println(stderr, "⚠ ltom: bad main moved aside to {}", move_aside(file).string());
         for (Entry& e : got) into.insert_loaded(std::move(e));
         return LoadResult::loaded_prev;
     }
-    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
-    fs::path bad = file; bad += ".bad." + std::to_string(ms);
-    if (have_main) fs::rename(file, bad, ec);
-    std::println(stderr, "⚠⚠ ltom: repertory {} and its .prev are both unreadable; moved aside to {} and starting EMPTY",
-                 file.string(), bad.string());
+    if (have_main) std::println(stderr, "⚠⚠ ltom: unreadable repertory moved aside to {}", move_aside(file).string());
+    if (have_prev) std::println(stderr, "⚠⚠ ltom: unreadable .prev moved aside to {}", move_aside(prev).string());
+    std::println(stderr, "⚠⚠ ltom: starting EMPTY");
     return LoadResult::unreadable;
 }
 
