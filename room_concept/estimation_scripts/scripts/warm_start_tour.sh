@@ -150,6 +150,15 @@ for leg in $(seq 1 $n_legs); do
     if [ "$a" = new ]; then explore_once "${leg}_$n"; else sleep 2; fi
     run_leg "${leg}s$n" $a ${BEHIND[$((leg-1))]}
   done
+  # RELOCALISE AT THE ROOM'S CENTRE (user 2026-11-01: "localization close to the walls will always be worse — switch to the room
+  # affordance just after crossing, biased to the room centre"). room_concept's first afford_room after a crossing is the room's
+  # centre (dsr_update_entry_relocalisation); a bounded explore claims it. Only after a crossing leg.
+  case "$r" in OK*)
+    rn=$(room_now); echo run > $B/controller/remote_cmd.txt; sleep 0.7
+    printf 'mission "settle %s"\n  explore %s budget_s=25s\n' $leg "$rn" > $B/controller/remote_cmd.txt
+    for i in $(seq 1 70); do grep -a -q -E "mission 'settle $leg': (co|failed|aborted)" $L/controller.log && break; sleep 0.5; done
+    echo "  settle $leg in $rn: $(grep -a -o -E "mission 'settle $leg': [a-z]+[^\"]{0,60}" $L/controller.log | tail -1)";;
+  esac
   # the ground-truth track is sampled at 1 Hz: wait (<= 5 s) for it to show the crossing instead of a fixed pause
   for i in $(seq 1 10); do side=$(python3 -I $S/true_room.py crossing/$1/gt_pose.tsv); [ "$side" = "$want" ] && break; sleep 0.5; done
   xy=$(true_xy)

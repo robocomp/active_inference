@@ -1775,6 +1775,8 @@ void RoomSceneGraph::rearm_after_crossing(std::uint64_t new_room_id, const std::
                 G_->insert_or_assign_edge(DSR::Edge::create<has_intention_edge_type>(new_room_id, n->id()));
         }
     affordance_manager_.release_execution_claim(G_);
+    entry_reloc_ = true;   // the first afford_room in the room entered: its centre (dsr_update_entry_relocalisation)
+    entry_reloc_target_pub_.reset();
     // A remembered room comes back in ITS OWN frame (the one memory holds), placed through the crossed door.
     const Eigen::Affine2f T_pub_int = recall.has_value() ? recall->T_int_recall.inverse() : T_room_proto_.inverse();
     std::vector<Eigen::Vector2f> recall_int;
@@ -3096,6 +3098,54 @@ void RoomSceneGraph::dsr_update_calibration(const rc::RoomConcept::UpdateResult&
     }
 }
 
+// ★ ENTRY RELOCALISATION (user 2026-11-01: "localization close to the walls will always be worse; that is the reason to switch to
+//   the room affordance just after crossing — bias it to the room centre, so we favour relocalization"). After a crossing the
+//   robot stands at the doorway, the walls close, the localiser at its weakest (warm16/19/20: R1 after the swap, residual
+//   0.07 m). The first afford_room in the room entered is the free standpoint nearest the room's centroid (area-weighted, the
+//   published outline), where the walls are far and all in view; once the robot is there (within the body's own reach of it)
+//   the normal planners take over. Returns true while it owns afford_room.
+bool RoomSceneGraph::dsr_update_entry_relocalisation(const rc::RoomConcept::UpdateResult& res)
+{
+    if (not entry_reloc_ or fs_published_.size() < 3) return false;
+    const Eigen::Vector2f robot_pub = T_pub_int_ * res.robot_pose.translation();
+    if (not entry_reloc_target_pub_.has_value())
+    {
+        // area-weighted centroid of the published outline (shoelace)
+        double a2 = 0.0, cx = 0.0, cy = 0.0;
+        for (std::size_t i = 0; i < fs_published_.size(); ++i)
+        {
+            const auto& p = fs_published_[i];
+            const auto& q = fs_published_[(i + 1) % fs_published_.size()];
+            const double cr = double(p.x()) * q.y() - double(q.x()) * p.y();
+            a2 += cr; cx += (p.x() + q.x()) * cr; cy += (p.y() + q.y()) * cr;
+        }
+        if (std::abs(a2) < 1e-9) return false;
+        const Eigen::Vector2f centroid(static_cast<float>(cx / (3.0 * a2)), static_cast<float>(cy / (3.0 * a2)));
+        // the free standpoint nearest it: the body clear of the outline (an L's centroid can lie outside the room)
+        rc::layout::ExplorerParams ep;
+        const float body = 0.5f * std::hypot(params_->ROBOT_WIDTH, params_->ROBOT_LENGTH);
+        rc::layout::FeasibleGrid grid(fs_published_, ep.cell, body + 0.15f);
+        entry_reloc_target_pub_ = grid.nearest_free(centroid);
+        rc::status::print("[entry-reloc] '{}': afford_room -> the room's centre ({:.2f},{:.2f}) (centroid ({:.2f},{:.2f})), "
+                          "robot at ({:.2f},{:.2f}) — relocalise away from the walls before anything else\n", room_node_name(),
+                          entry_reloc_target_pub_->x(), entry_reloc_target_pub_->y(), centroid.x(), centroid.y(),
+                          robot_pub.x(), robot_pub.y());
+    }
+    const Eigen::Vector2f t = *entry_reloc_target_pub_;
+    const float reach = 0.5f * std::hypot(params_->ROBOT_WIDTH, params_->ROBOT_LENGTH);
+    if ((robot_pub - t).norm() <= reach)
+    {
+        entry_reloc_ = false;
+        entry_reloc_target_pub_.reset();
+        rc::status::print("[entry-reloc] '{}': at the centre — the room's planners take afford_room over\n", room_node_name());
+        return false;
+    }
+    const float yaw = std::atan2(t.y() - robot_pub.y(), t.x() - robot_pub.x());   // the arrival heading: LiDAR sees all round
+    affordance_manager_.publish_target(G_, dsr_room_id_, t.x(), t.y(), yaw, /*gain=*/1.0f,
+                                       [this]() { trigger_layout_(); }, [this]() { trigger_layout_(); });
+    return true;
+}
+
 void RoomSceneGraph::dsr_update_affordance(const rc::RoomConcept::UpdateResult& res)
 {
     if (!G_ || !room_node_created_) return;
@@ -3107,6 +3157,7 @@ void RoomSceneGraph::dsr_update_affordance(const rc::RoomConcept::UpdateResult& 
     // an edit. Empty contested set = nothing to test = the pose planner as before.
     // (and a partly remembered room until the explorer is `finished` — room_explored.h; P(explored) from each plan)
     observe_camera_cover(res);   // what the ZED is offered of the boundary this frame (camera_coverage.h, Task 12)
+    if (dsr_update_entry_relocalisation(res)) return;   // just crossed: the room's centre first (user 2026-11-01)
     if (layout_explorer_owns_room()) { dsr_update_layout_affordance(res); publish_plan_explored(); return; }
     publish_explored(explored_.settled(room_node_name()));   // nothing left for the explorer: p = 1 (room_explored.h)
     if (!epistemic_) return;

@@ -313,6 +313,7 @@ private:
     [[nodiscard]] bool recalled_partial() const { return recalled_visit_ and explored_.recalled_partial(); }
     /// Who drives afford_room: the layout explorer (proto survey, contested refiner cells, a partly remembered room,
     /// and a promoted fresh room until its boundary has been put before the cameras — camera_coverage.h, Task 12)
+    bool dsr_update_entry_relocalisation(const rc::RoomConcept::UpdateResult& res);
     [[nodiscard]] bool layout_explorer_owns_room() const
     {
         return rc::camcov::explorer_owns_room({.proto = startup_proto_, .promoted = startup_promoted_,
@@ -378,6 +379,11 @@ private:
     void dsr_update_layout_affordance(const rc::RoomConcept::UpdateResult& res);
     void layout_publish_armed();          ///< (re)publish the held target through affordance_manager_
     std::optional<Eigen::Vector2f> layout_target_;   ///< internal frame
+    /// ENTRY RELOCALISATION (user 2026-11-01): set by rearm_after_crossing. Right after a crossing the robot stands at the
+    /// doorway, close to walls, where the localiser is weakest; afford_room is the free standpoint nearest the room's
+    /// CENTROID until the robot reaches it, then the planners resume (dsr_update_entry_relocalisation).
+    bool entry_reloc_ = false;
+    std::optional<Eigen::Vector2f> entry_reloc_target_pub_;
     float         layout_yaw_  = 0.f;               ///< internal frame
     float         layout_gain_ = 0.f;
     std::int64_t  layout_plan_ms_ = 0;
