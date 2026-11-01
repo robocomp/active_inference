@@ -78,18 +78,22 @@ grep -a "\[restore\].*room_1" $L/door_concept.log | grep -a -v "recalled" | head
 grep -a -m1 "\[recall\] recall_room_2 posted" $L/ltsm_agent.log
 [ $ready = 1 ] || { echo "ABORT: not ready in 120 s"; bash $S/run_crossing.sh crossing/$1 collect >/dev/null 2>&1; exit 1; }
 sleep 5
-run_leg() {   # label cross_arg   (sets r)
-  # A LEG ENDS AT THE CROSSING (user 2026-11-01: "remove the pause after crossing and move to the new door as soon as it is
-  # available"): the controller's `through (A -> B) — passage DONE` for THIS leg ends it; the next leg's mission then replaces
-  # whatever the mission would still do (drive-in, the new room's survey). Mission completion still counts if it comes first.
+run_leg() {   # label cross_arg [close_arg]   (sets r: the crossing; c: the close)
+  # THE LEG'S PLAN (user 2026-11-01): `cross X`, then — a healthy habit — `close <room just left>`: the plan claims
+  # door_concept's close affordance of the door behind (mission op `close`). The leg is the CROSSING: r is OK once this leg's
+  # passage logs DONE; the leg ends when the mission ends (the close succeeded or failed), and c reports the close.
   local l0; l0=$(nl controller)
   echo run > $B/controller/remote_cmd.txt; sleep 0.7   # the controller reads remote_cmd.txt every 300 ms
-  printf 'mission "leg %s"\n  cross %s retry=2\n' $1 $2 > $B/controller/remote_cmd.txt
-  local t0; t0=$(date +%s); r="FAILED (no end in ${LEG_TIMEOUT_S} s)"
+  if [ -n "$3" ]; then printf 'mission "leg %s"\n  cross %s retry=2\n  close %s\n' $1 $2 $3 > $B/controller/remote_cmd.txt
+  else printf 'mission "leg %s"\n  cross %s retry=2\n' $1 $2 > $B/controller/remote_cmd.txt; fi
+  local t0; t0=$(date +%s); r="FAILED (no end in ${LEG_TIMEOUT_S} s)"; c="-"; local crossed=""
   for i in $(seq 1 $((LEG_TIMEOUT_S * 2))); do
-    tail -n +$((l0+1)) $L/controller.log | grep -a -q -E "\[door-route\] [a-z_0-9]+: through \([a-z_0-9]+ -> [a-z_0-9]+\) — passage DONE" && { r="OK (through) in $(( $(date +%s)-t0 )) s"; break; }
-    grep -a -q -E "mission 'leg $1': co(mpleted)?" $L/controller.log && { r="OK in $(( $(date +%s)-t0 )) s"; break; }
-    grep -a -q -E "mission 'leg $1': (failed|aborted)" $L/controller.log && { r="FAILED: $(grep -a -o -E "mission 'leg $1': (failed|aborted)[^\"]*" $L/controller.log | tail -1)"; break; }
+    if [ -z "$crossed" ] && tail -n +$((l0+1)) $L/controller.log | grep -a -q -E "passage DONE|mission 'leg $1': co"; then
+      crossed=1; r="OK in $(( $(date +%s)-t0 )) s"; fi
+    if grep -a -q -E "mission 'leg $1': co(mpleted)?" $L/controller.log; then [ -n "$3" ] && c="closed"; break; fi
+    if grep -a -q -E "mission 'leg $1': (failed|aborted)" $L/controller.log; then
+      f=$(grep -a -o -E "mission 'leg $1': (failed|aborted)[^\"]*" $L/controller.log | tail -1)
+      if [ -n "$crossed" ]; then c="NOT closed ($f)"; else r="FAILED: $f"; fi; break; fi
     sleep 0.5
   done; }
 # `cross new` only needs a door to APPEAR: when the controller reports door_unresolved, one explore, then the leg again (bounded)
@@ -100,25 +104,25 @@ explore_once() {
 true_xy() { python3 $S/tp.py get 2>/dev/null | tail -1 | awk '{print $1, $2}'; }
 side_of() { awk -v x="$1" -v y="$2" -v dy=$DOOR1_Y -v dx=$DOOR2_X 'BEGIN{ if (y=="") print "unknown"; else if (x > dx) print "room_3"; else if (y > dy) print "room_2"; else print "room_1" }'; }
 TSV=crossing/$1/legs.tsv; printf 'leg\targ\tverdict\ttrue_side\ttrue_xy\tstatus\tt0_ms\tt1_ms\tgraph_room\n' > $TSV
-ARGS=(room_2 new room_2 room_1); WANT=(room_2 room_3 room_2 room_1)
+ARGS=(room_2 new room_2 room_1); WANT=(room_2 room_3 room_2 room_1); BEHIND=(room_1 room_2 room_3 room_2)   # close behind: the room left
 ok=0; n_legs=${N_LEGS:-4}
 for leg in $(seq 1 $n_legs); do
   a=${ARGS[$((leg-1))]}; want=${WANT[$((leg-1))]}
   T0=$(now_ms); ts=$(date +%s)
-  run_leg $leg $a; n=0
+  run_leg $leg $a ${BEHIND[$((leg-1))]}; n=0
   # the next door AS SOON AS IT EXISTS: a door named by relation (room_X) that is not resolvable yet (its recall not posted)
   # is asked for again every 2 s; only `cross new` explores, since that door may still have to be found
   while case "$r" in *door_unresolved*) true;; *) false;; esac && [ $(( $(date +%s)-ts )) -lt $LEG_TIMEOUT_S ]; do
     n=$((n+1))
     if [ "$a" = new ]; then explore_once "${leg}_$n"; else sleep 2; fi
-    run_leg "${leg}s$n" $a
+    run_leg "${leg}s$n" $a ${BEHIND[$((leg-1))]}
   done
   # the ground-truth track is sampled at 1 Hz: wait (<= 5 s) for it to show the crossing instead of a fixed pause
   for i in $(seq 1 10); do side=$(python3 -I $S/true_room.py crossing/$1/gt_pose.tsv); [ "$side" = "$want" ] && break; sleep 0.5; done
   xy=$(true_xy)
   case "$r" in OK*) [ "$side" = "$want" ] && st=OK || st=FALSE_OK;; *) st=FAILED;; esac
   [ $st = OK ] && ok=$((ok+1))
-  echo "leg $leg (cross $a, want $want): controller '$r', true side $side (xy $xy), graph room $(room_now) -> $st"
+  echo "leg $leg (cross $a, want $want): controller '$r', true side $side (xy $xy), graph room $(room_now) -> $st; door behind: $c"
   printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' $leg $a "$r" $side "$xy" $st $T0 $(now_ms) "$(room_now)" >> $TSV
   [ $st = OK ] || break
 done
