@@ -711,7 +711,8 @@ private:
    /// Set by begin_room_estimation; never cleared for the life of the run (a room learnt is not
    /// un-learnt by walking back). Read by estimating() from any thread, hence atomic.
    std::atomic<bool>  runtime_estimate_{false};
-   std::atomic<bool>  awaiting_layout_{false};   ///< MapMode = "ltsm": no layout from ltsm yet (set_awaiting_layout)
+   std::atomic<bool>  awaiting_layout_{false};
+   int dbg_newroom_frames_ = 0;   ///< [dbg-newroom] instrumentation: slam steps still to log after a new room starts   ///< MapMode = "ltsm": no layout from ltsm yet (set_awaiting_layout)
    /// Accumulated, un-consumed re-anchor (T_new_old). Localiser thread only; see take_pending_reanchor.
    Eigen::Affine2f    pending_reanchor_ = Eigen::Affine2f::Identity();
    bool               has_pending_reanchor_ = false;

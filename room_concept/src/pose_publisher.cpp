@@ -352,6 +352,15 @@ bool PosePublisher::maybe_publish_corrected_pose()
                 loc_res->covariance(2, 2) += cl.res_th * cl.res_th;
                 loc_res->robot_pose = cl.pose;
                 clamp_fired = true;
+                if (pose_clamp_hits_ < 40)   // [dbg-newroom] every early clamp, with what it compared
+                {
+                    const auto pp = [](const Eigen::Affine2f& T) { return QString("(%1,%2,%3)").arg(T.translation().x(), 0, 'f', 3)
+                        .arg(T.translation().y(), 0, 'f', 3).arg(std::atan2(T.linear()(1, 0), T.linear()(0, 0)), 0, 'f', 3); };
+                    qWarning().noquote() << QString("[dbg-newroom] clamp #%1: last published %2 est %3 pred (%4,%5,%6) -> published %7 dt %8")
+                        .arg(pose_clamp_hits_ + 1).arg(pp(last_published_pose_.value())).arg(pp(est_pre_clamp))
+                        .arg(loc_res->pred_x, 0, 'f', 3).arg(loc_res->pred_y, 0, 'f', 3).arg(loc_res->pred_theta, 0, 'f', 3)
+                        .arg(pp(cl.pose)).arg(dt, 0, 'f', 3);
+                }
                 if (++pose_clamp_hits_ % 20 == 1)
                     qWarning() << "[pose-clamp] CORRECTION implied" << (cl.n_xy / dt) << "m/s /"
                                << (std::abs(cl.c_th) / dt) << "rad/s over dt" << dt << "s — limits"

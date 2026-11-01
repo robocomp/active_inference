@@ -562,6 +562,17 @@ namespace rc
         wall_frozen_ = false;          // layout_state() is Localizing while this is set, whatever the mode
         configure_room_estimate();     // fresh WallMap, map_ready_ = false, derived polygon gone
         if (keep_slam_map) plain_slam_seed_ = false;
+        {   // [dbg-newroom] (2026-11-01, warm4's 3.4 m jump at R3's birth): the state the new room starts from
+            const Eigen::Vector3f wp = window_mgr_.newest().pose;
+            Eigen::Vector3f mp = Eigen::Vector3f::Constant(std::numeric_limits<float>::quiet_NaN());
+            if (model_ != nullptr and model_->has_state()) { const auto st = model_->get_state(); mp = {st[2], st[3], st[4]}; }
+            qWarning().noquote() << QString("[dbg-newroom] begin_room_estimation(%1): window newest (%2,%3,%4) model (%5,%6,%7) "
+                                            "was_given %8 keep_slam_map %9 freeze_internal %10")
+                .arg(QString::fromStdString(std::string(why))).arg(wp.x(), 0, 'f', 3).arg(wp.y(), 0, 'f', 3).arg(wp.z(), 0, 'f', 3)
+                .arg(mp.x(), 0, 'f', 3).arg(mp.y(), 0, 'f', 3).arg(mp.z(), 0, 'f', 3).arg(was_given).arg(keep_slam_map)
+                .arg(freeze_internal_frame_.load());
+            dbg_newroom_frames_ = 30;
+        }
 
         // ⚠ NOT RESET HERE, and deliberately: the camera-calibration channels were handed the OLD room's
         // polygon at startup (calib_->set_room_polygon in specificworker_startup) and this class has no

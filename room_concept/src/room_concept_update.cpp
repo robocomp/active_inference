@@ -349,6 +349,9 @@ namespace rc
                     plain_slam_.reset();
                     plain_slam_.set_pose(wall_pose - rec_odom_delta_);   // step() adds this frame's delta back
                     plain_slam_seed_ = false;
+                    qWarning().noquote() << QString("[dbg-newroom] plain SLAM seeded at (%1,%2,%3) (window pose minus this frame's delta)")
+                        .arg(wall_pose.x() - rec_odom_delta_.x(), 0, 'f', 3).arg(wall_pose.y() - rec_odom_delta_.y(), 0, 'f', 3)
+                        .arg(wall_pose.z() - rec_odom_delta_.z(), 0, 'f', 3);
                 }
                 // The shadow's own prediction for this frame (step() adds the delta to its pose): what a publisher must
                 // difference its measured motion against while the shadow is the published pose (hypothesis fit).
@@ -359,6 +362,15 @@ namespace rc
                 for (const auto& q : sampled_points) xy.emplace_back(q.x(), q.y());
                 const auto t_slam0 = std::chrono::steady_clock::now();
                 const Eigen::Vector3f slam_pose = plain_slam_.step(rec_odom_delta_, xy);
+                if (dbg_newroom_frames_ > 0)
+                {
+                    --dbg_newroom_frames_;
+                    qWarning().noquote() << QString("[dbg-newroom] slam step: window (%1,%2,%3) pred (%4,%5,%6) slam (%7,%8,%9) driving %10 pts %11")
+                        .arg(wall_pose.x(), 0, 'f', 3).arg(wall_pose.y(), 0, 'f', 3).arg(wall_pose.z(), 0, 'f', 3)
+                        .arg(plain_slam_pred_.x(), 0, 'f', 3).arg(plain_slam_pred_.y(), 0, 'f', 3).arg(plain_slam_pred_.z(), 0, 'f', 3)
+                        .arg(slam_pose.x(), 0, 'f', 3).arg(slam_pose.y(), 0, 'f', 3).arg(slam_pose.z(), 0, 'f', 3)
+                        .arg(plain_slam_driving()).arg(xy.size());
+                }
                 last_t_slam_ms_ = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - t_slam0).count();
                 if (plain_slam_driving())
                 {

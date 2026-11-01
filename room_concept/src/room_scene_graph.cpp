@@ -1912,6 +1912,12 @@ void RoomSceneGraph::arm_startup_proto(std::uint64_t room_id, const Eigen::Affin
         std::scoped_lock lk(gauge_mutex_);
         T_pub_int_ = T_pub_int;
     }
+    {   // [dbg-newroom] the new published frame
+        const auto& L = T_pub_int.linear();
+        qWarning().noquote() << QString("[dbg-newroom] proto birth: T_pub_int t (%1,%2) yaw %3")
+            .arg(T_pub_int.translation().x(), 0, 'f', 3).arg(T_pub_int.translation().y(), 0, 'f', 3)
+            .arg(std::atan2(L(1, 0), L(0, 0)), 0, 'f', 3);
+    }
     if (Eigen::Affine2f stale; room_concept_->take_pending_reanchor(stale))
         qWarning() << "[room][startup-proto] discarded a re-anchor pending from before the birth (it moved a"
                    << "frame nobody had published)";
