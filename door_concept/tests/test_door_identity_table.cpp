@@ -453,6 +453,23 @@ int main()
         CHECK(not plan_room_entry(true, false, false, "", "room_1", true).recalled);    // no announcement, nothing restored
     }
 
+    // ── the REMEMBERED LEAF AGES (2026-11-01, warm13): DOOR_2 was remembered open at 120 deg from a run 5517 s earlier and
+    //    restored at its old σ; the door was shut, door_concept kept P(passable) 1.00 staring at it, nothing asked to open it.
+    //    The angle is a STATE (the hinge and swing side are structure, they do not age): with probability e^{-hΔt} the leaf is
+    //    still where it was, else it was moved and is anywhere in [0, phi_max] — moment-matched.
+    {
+        const float pm = 2.0944f;   // 120 deg
+        const auto fresh = restore_leaf_phi(2.0f, 0.05f, kNowMs, kNowMs, pm);   // seen just now
+        CHECK(near(fresh.first, 2.0f, 1e-4f) and near(fresh.second, 0.05f, 1e-4f));
+        const auto old = restore_leaf_phi(2.0f, 0.05f, kNowMs - 5'517'000, kNowMs, pm);   // warm13: 5517 s
+        CHECK(near(old.first, 0.5f * pm, 0.01f));                       // ≈ the uniform prior's mean
+        CHECK(near(old.second, pm / std::sqrt(12.f), 0.01f));           // ≈ its σ (34.6 deg)
+        const auto mid = restore_leaf_phi(2.0f, 0.05f, kNowMs - 600'000, kNowMs, pm);   // one hazard time
+        CHECK(mid.first < 2.0f and mid.first > 0.5f * pm and mid.second > 0.05f and mid.second < 1.0f);
+        const auto unknown = restore_leaf_phi(2.0f, 0.05f, std::nullopt, kNowMs, pm);   // no stamp ⇒ the prior
+        CHECK(near(unknown.first, 0.5f * pm, 1e-3f) and near(unknown.second, pm / std::sqrt(12.f), 1e-3f));
+    }
+
     if (fails == 0) std::print("test_door_identity_table: ALL PASS\n");
     return fails == 0 ? 0 : 1;
 }

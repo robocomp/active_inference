@@ -3889,9 +3889,15 @@ void SpecificWorker::restore_remembered_doors(std::uint64_t new_room)
         const auto counter_before = next_door_index_;
         // Task D-C: the remembered belief, decayed toward BirthLogodds by the time since the door was last seen.
         const float prior_L = rc::door::restore_existence_prior(r, cfg_.exist_birth_logodds, static_cast<std::int64_t>(rc::provenance::now_ms()));
+        // the remembered leaf ANGLE ages like the existence (door_identity_table.h restore_leaf_phi; warm13 DOOR_2): the node is
+        // created with, and the belief seeded from, the aged angle
+        const auto aged_leaf = r.leaf.has_value()
+            ? std::optional<std::pair<float, float>>(rc::door::restore_leaf_phi(r.leaf->phi, r.leaf->phi_sigma, r.seen_wall_ms,
+                                                       static_cast<std::int64_t>(rc::provenance::now_ms()), cfg_.phi_max_rad))
+            : std::nullopt;
         // Door node origin = aperture centre on the floor, yaw = the aperture's (write_rt_pose's room-frame form).
         const auto id = scene_graph_->create_door_copy(room.value(), r.pose->width, r.pose->depth, r.pose->height,
-                                                       std::nullopt, r.leaf.has_value() ? std::optional<float>(r.leaf->phi) : std::nullopt,
+                                                       std::nullopt, aged_leaf.has_value() ? std::optional<float>(aged_leaf->first) : std::nullopt,
                                                        Eigen::Vector3f(r.xy.x(), r.xy.y(), 0.0f),
                                                        Eigen::Vector3f(0.0f, 0.0f, r.pose->yaw), next_door_index_,
                                                        std::format("'{}' remembered in {}", r.name, room->name()), r.name);
@@ -3922,6 +3928,15 @@ void SpecificWorker::restore_remembered_doors(std::uint64_t new_room)
         //  absence, a restored door was ALIVE when left — see rc::door::restore_existence_prior.
         // Fitted without a fresh detection (as the carried door is), at the remembered pose and size, with its leaf memory.
         rc::door::seed_restored_instance(inst, r, prior_L, cfg_.exist_max_logodds, std::chrono::steady_clock::now());
+        // the remembered leaf ANGLE ages like the existence above (door_identity_table.h restore_leaf_phi; warm13 DOOR_2)
+        if (r.leaf.has_value() and aged_leaf.has_value())
+        {
+            const auto [phi0, sd0] = *aged_leaf;
+            std::print("door_concept: [restore] '{}' leaf phi {:.0f} deg σ {:.0f} remembered -> {:.0f} deg σ {:.0f} now (aged)\n",
+                       n->name(), r.leaf->phi * 57.2958f, r.leaf->phi_sigma * 57.2958f, phi0 * 57.2958f, sd0 * 57.2958f);
+            inst.phi_est = phi0;
+            inst.phi_sigma = sd0;
+        }
         log_tracker_event("RESTORE", id, r.xy.x(), r.xy.y(), std::format("remembered in {}", room->name()), n->name());
         std::print("door_concept: [restore] '{}' RESTORED in remembered '{}' at ({:.2f},{:.2f}) yaw={:.2f} w={:.2f} h={:.2f} — "
                    "existence prior L={:.2f} (P={:.2f}, {}), leaf memory {}\n",

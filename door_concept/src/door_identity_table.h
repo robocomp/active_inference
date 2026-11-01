@@ -565,6 +565,24 @@ inline float restore_existence_prior(const IdentityRow& r, float default_L, std:
     return static_cast<float>(std::log(p / (1.0 - p)));
 }
 
+/// THE REMEMBERED LEAF AGES (2026-11-01, warm13: DOOR_2 remembered open at 120 deg from a run 5517 s earlier, restored at its
+/// old σ; the door was shut, P(passable) stayed 1.00 while the robot stared at it, and nothing asked to open it). The angle
+/// is a STATE: with probability e^{-hΔt} (the same hazard as above — here it is the leaf channel's own move hazard, its
+/// proper source) the leaf is still where it was seen, else it was moved since and is anywhere in [0, phi_max] (uniform).
+/// The mixture, moment-matched to the (phi, σ) the belief is seeded with. Hinge and swing side are STRUCTURE: not aged.
+/// No stamp ⇒ the age is unknown ⇒ the uniform prior.
+[[nodiscard]] inline std::pair<float, float> restore_leaf_phi(float phi, float sigma, std::optional<std::int64_t> seen_wall_ms,
+                                                              std::int64_t now_wall_ms, float phi_max)
+{
+    const double surv = seen_wall_ms.has_value()
+        ? std::exp(-kRememberedExistenceHazardPerS * std::max<double>(0.0, double(now_wall_ms - *seen_wall_ms) * 1e-3)) : 0.0;
+    const double pm = std::max(1e-3, double(phi_max));
+    const double u_mean = 0.5 * pm, u_m2 = pm * pm / 3.0;   // uniform on [0, pm]: E[phi], E[phi^2]
+    const double mean = surv * double(phi) + (1.0 - surv) * u_mean;
+    const double m2 = surv * (double(sigma) * sigma + double(phi) * phi) + (1.0 - surv) * u_m2;
+    return {static_cast<float>(mean), static_cast<float>(std::sqrt(std::max(0.0, m2 - mean * mean)))};
+}
+
 /// (Task D-C review I-1) THE EXISTENCE A ROW REMEMBERS IS THE EVIDENCE, NOT THE WALL-BAND PRIOR. The core adds the band's
 /// log-prior to L every cycle as a REPLACED term (DoorFitState::room_prior_term); a restored instance starts with that term
 /// at 0 and the core adds it again, so writing the full L counted the prior twice on every round trip. The row stores
