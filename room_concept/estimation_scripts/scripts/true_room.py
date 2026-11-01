@@ -6,6 +6,7 @@ crossing DOOR_1's line (y = 9.3796, |x - -4.769| < 0.7) toggles room_1 <-> room_
 usage: true_room.py gt_pose.tsv"""
 import csv, sys
 D1Y, D1X, D2X, D2Y, HALF = 9.3796, -4.769, -1.705, 10.77, 0.7
+D0Y, D0X = 7.2256, -3.593   # DOOR_0, the bathroom's second door: room_3 (north, y > D0Y) <-> room_1 (south)
 room, prev = 'room_1', None
 for r in csv.DictReader(open(sys.argv[1]), delimiter='\t'):
     try: x, y = float(r['x']), float(r['y'])
@@ -16,5 +17,7 @@ for r in csv.DictReader(open(sys.argv[1]), delimiter='\t'):
             room = {'room_1': 'room_2', 'room_2': 'room_1'}.get(room, room)
         if (px - D2X) * (x - D2X) < 0 and abs(0.5 * (y + py) - D2Y) < HALF:
             room = {'room_2': 'room_3', 'room_3': 'room_2'}.get(room, room)
+        if (py - D0Y) * (y - D0Y) < 0 and abs(0.5 * (x + px) - D0X) < HALF:
+            room = {'room_3': 'room_1', 'room_1': 'room_3'}.get(room, room)
     prev = (x, y)
 print(room)

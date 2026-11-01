@@ -111,7 +111,11 @@ side_of() { awk -v x="$1" -v y="$2" -v dy=$DOOR1_Y -v dx=$DOOR2_X 'BEGIN{ if (y=
 TSV=crossing/$1/legs.tsv; printf 'leg\targ\tverdict\ttrue_side\ttrue_xy\tstatus\tt0_ms\tt1_ms\tgraph_room\n' > $TSV
 # THE PLAN FOLLOWS WHAT THE FIXTURE KNOWS (its room_name_hwm): two rooms remembered -> leg 2 crosses into a NEW room (room_3);
 # three remembered -> every leg goes by relation, room_3 included (user 2026-11-01: "start the next tour with the three rooms").
-if [ "$(cat $FIX/room_name_hwm.txt)" -ge 3 ]; then
+# R1_LOOP=1 (user 2026-11-01): room_1 -> room_2 -> room_3 -> back into room_1 through DOOR_0 (the bathroom's second door, never
+# crossed in the memory: `cross new` from room_3). Tests RECOGNITION: the room entered must become room_1, not a new room_4.
+if [ -n "$R1_LOOP" ]; then
+  ARGS=(room_2 room_3 new); WANT=(room_2 room_3 room_1); BEHIND=(room_1 room_2 room_3); N_LEGS=${N_LEGS:-3}
+elif [ "$(cat $FIX/room_name_hwm.txt)" -ge 3 ]; then
   ARGS=(room_2 room_3 room_2 room_1); WANT=(room_2 room_3 room_2 room_1); BEHIND=(room_1 room_2 room_3 room_2)
 else
   ARGS=(room_2 new room_2 room_1); WANT=(room_2 room_3 room_2 room_1); BEHIND=(room_1 room_2 room_3 room_2)   # close behind: the room left
