@@ -81,4 +81,8 @@ g++ -std=c++23 -O0 -g -Wall -Wextra -Wno-deprecated-literal-operator -fPIC -o "$
 g++ -std=c++23 -O0 -g -Wall -Wextra -Wno-deprecated-literal-operator -isystem /usr/include/eigen3 -I../../common \
     -I../../common/media_transport -o "$out/test_can_see" test_can_see.cpp
 "$out/test_can_see"
+g++ -std=c++23 -O0 -g -Wall -Wextra -Wno-deprecated-literal-operator -fPIC -isystem /usr/include/eigen3 -I../../common \
+    -I../../common/media_transport -o "$out/test_imagine" test_imagine.cpp \
+    $(pkg-config --cflags Qt6Core | sed "s/-I/-isystem /g") $(pkg-config --libs Qt6Core)
+"$out/test_imagine"
 rm -rf "$out"
