@@ -724,7 +724,7 @@ public:
         return "?";
     }
     /// The doors a passage can be started through, and the one "cross door" means. Both live in the shared
-    /// common/world_query/door_query.h (2026-10-12) so chat_agent validates a request with the same predicate the
+    /// common/world_query/door_query.h (2026-10-12) so language_agent validates a request with the same predicate the
     /// controller executes it with; these wrappers keep every existing call site unchanged.
     [[nodiscard]] static std::vector<std::string> list_doors(DSR::DSRGraph& G) { return rc::world::list_doors(G); }
     [[nodiscard]] static std::optional<std::string> nearest_door(DSR::DSRGraph& G, DSR::InnerEigenAPI& inner,

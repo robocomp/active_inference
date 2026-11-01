@@ -2,7 +2,7 @@
 /*
  * mission_text.h — the people-facing syntax of the grounded mission (mission_ir.h): the confirmation card, logs and
  * remote_cmd.txt mission scripts (2026-10-17). The wire is JSON (mission_json.h); this is the SAME IR, written for
- * people. Design: chat_agent/docs/mission_language_2026-10-13.md §7.3.
+ * people. Design: language_agent/docs/mission_language_2026-10-13.md §7.3.
  *
  *   mission "explore room_2 and return"                     ← column 0: the mission line, then header lines
  *   anchor start = pose:room_1(0.42, -1.1, 1.54, 0.05)      ← pose:ROOM(x, y[, yaw[, sigma_xy]])

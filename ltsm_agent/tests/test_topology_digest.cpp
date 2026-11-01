@@ -1,7 +1,7 @@
 // g++ -std=c++23 -O0 -g -Wall -Wextra ltsm_agent/tests/test_topology_digest.cpp -o /tmp/test_topology_digest && /tmp/test_topology_digest
 //
 // The ltsm_topology summary's encoder (src/topology_digest.h), pinned without a graph: field names, nesting, optional
-// live_door, locale-proof numbers. The decode side is checked in chat_agent/tests/test_topology.cpp (round trip).
+// live_door, locale-proof numbers. The decode side is checked in language_agent/tests/test_topology.cpp (round trip).
 #include "../src/topology_digest.h"
 
 #include <cassert>

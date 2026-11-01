@@ -1,7 +1,7 @@
 #pragma once
 /*
  * controller_relative_motion.h — "move <metres>" / "turn <degrees>": short ROBOT-RELATIVE motions (2026-10-12, robot
- * chat phase 2). One grammar for the Mission text box, remote_cmd.txt and chat_agent's intention node
+ * chat phase 2). One grammar for the Mission text box, remote_cmd.txt and language_agent's intention node
  * (SpecificWorker::run_mission_command).
  *
  *   move <m>                 drive straight along the current heading; + forward, − backward (reverse)

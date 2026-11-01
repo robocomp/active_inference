@@ -1,7 +1,7 @@
 #pragma once
 /*
- * mission_ir.h — the GROUNDED mission: the language chat_agent and the controller speak (2026-10-17).
- * Design: chat_agent/docs/mission_language_2026-10-13.md, §7 (extensibility, limits, syntax, v1 reservations).
+ * mission_ir.h — the GROUNDED mission: the language language_agent and the controller speak (2026-10-17).
+ * Design: language_agent/docs/mission_language_2026-10-13.md, §7 (extensibility, limits, syntax, v1 reservations).
  *
  * The IR is the step tree AFTER resolution: every reference is a node name, a passage id, an anchor or a pose; every
  * predicate names a graph fact and, when it is a probability, carries the decision boundary the user stated. The LLM

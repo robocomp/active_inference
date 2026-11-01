@@ -65,7 +65,7 @@ Anti-goals (failure even if it "works")
 
 ### 4.1 Graph shape
 - Request: a NON-RT edge `named`, `chat_intention → <instance node>` (chat's one owned node, intention_node.h),
-  carrying attribute `given_name` (string). Written and deleted by chat_agent only.
+  carrying attribute `given_name` (string). Written and deleted by language_agent only.
 - Result: attribute `given_name` on the instance node, written by its owning concept agent only.
 - New cortex registrations (the user reinstalls cortex; never `sudo cp`):
   `REGISTER_EDGE_TYPE(named)` in `dsr_edge_type.h` with a comment block in the style of `exit`;
@@ -112,7 +112,7 @@ Anti-goals (failure even if it "works")
 ## 5. Spatial descriptions (layer 2b, speaking and listening)
 
 ### 5.1 One relation model
-In `chat_agent/src/referents.h` (C++, Eigen/plain, no DSR include), built on the facts chat already snapshots
+In `language_agent/src/referents.h` (C++, Eigen/plain, no DSR include), built on the facts chat already snapshots
 (world_digest / `SeeScene`): instances with class, room, pose, size, σ; doors; walls; the robot.
 
 Each relation is a likelihood `P(relation(target, landmark) | geometry)`, smooth, with scales taken from the
@@ -203,7 +203,7 @@ never with a relation back to the target.
   door_concept owns both faces and pairs them through the `exit` edges (dsr_edge_type.h); it copies `given_name`
   to the paired face. No LTSM write.
 - **Snapshot data:** if world_digest / SeeScene lacks a footprint size, σ or room for some class, extending the
-  snapshot is in scope (chat_agent only).
+  snapshot is in scope (language_agent only).
 - **front/behind:** v1 supports only the robot as landmark ("the chair in front of you"), in the robot frame.
   Front/behind of objects and of the person are deferred.
 - **Ids in tool args:** an exact internal id (after `name_norm`) wins before any parsing. `name_thing` names only

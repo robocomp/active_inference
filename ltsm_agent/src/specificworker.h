@@ -216,7 +216,7 @@ private:
 	void forget_memory_room(const std::string &mem_room);
 
 	// ── ltsm_topology summary node (src/topology_publish.h) ─────────────────────────────────────
-	// Memory lives on domain 2, which chat_agent cannot read, so rooms + passages are summarised onto the LIVE graph.
+	// Memory lives on domain 2, which language_agent cannot read, so rooms + passages are summarised onto the LIVE graph.
 	// Rebuilt after every memory write (topology_dirty_, set where store->save is called) and every 2 s
 	// for live_door / crossing churn; the node is written only when the JSON differs. Main thread (compute()).
 	std::unique_ptr<ltsm::TopologyPublisher> topo_pub_;

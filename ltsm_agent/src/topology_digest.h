@@ -1,5 +1,5 @@
 // The topology summary ltsm publishes on the live graph (node `ltsm_topology`, attribute ltsm_topology_att), because
-// long-term memory lives on ltsm's own DSR domain and chat_agent cannot read it (10-13 design §1.5, §3.2(i)).
+// long-term memory lives on ltsm's own DSR domain and language_agent cannot read it (10-13 design §1.5, §3.2(i)).
 // PURE: no graph access; the caller turns memory records into TopoRoom / TopoPassage. Room names are the LIVE names
 // (`room_1`, not the memory prefix `r<idx>_room_1`). Numbers go through std::format, which ignores LC_NUMERIC.
 #pragma once

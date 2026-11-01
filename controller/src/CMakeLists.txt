@@ -38,7 +38,7 @@ LIST(APPEND SOURCES
   ../src/controller_robot_body.cpp
   ../src/controller_mission.cpp
   ../src/controller_mission_panel.cpp
-  # chat_agent's command channel (intention node, polled on the control thread).
+  # language_agent's command channel (intention node, polled on the control thread).
   ../src/chat_inbox.cpp
   ../src/route_spline.cpp
   ../src/route_follower.cpp

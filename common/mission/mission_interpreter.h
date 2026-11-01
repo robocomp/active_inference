@@ -1,7 +1,7 @@
 #pragma once
 /*
  * mission_interpreter.h — the step machine that runs a grounded mission (mission_ir.h), 2026-10-17.
- * Design: chat_agent/docs/mission_language_2026-10-13.md §3.1 (what each primitive compiles to), §3.5 (failure),
+ * Design: language_agent/docs/mission_language_2026-10-13.md §3.1 (what each primitive compiles to), §3.5 (failure),
  * §3.6 (progress), §7.5 (which requests replace a running mission).
  *
  * The interpreter owns the CONTROL FLOW every mission shares — seq, repeat, on_fail, `until`, budgets, anchors,

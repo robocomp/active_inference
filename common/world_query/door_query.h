@@ -3,7 +3,7 @@
  * common/world_query/door_query.h — WHICH DOORS EXIST, WHICH ROOM EACH BELONGS TO, AND WHICH IS NEAREST.
  * SHARED, header-only, graph reads only (DSRGraph serialises them; safe from any thread).
  *
- * Moved out of controller_door_passage.h (2026-10-12) so the controller and chat_agent answer "which door is
+ * Moved out of controller_door_passage.h (2026-10-12) so the controller and language_agent answer "which door is
  * 'the door'?" with ONE piece of code: the chat agent validates a `cross door` request with exactly the predicate
  * the controller will execute it with, so the two can never disagree about which door that is.
  *

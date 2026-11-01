@@ -5,7 +5,7 @@
 
 **How to read this brief**
 - Every `path:line` is **at `b97c05f9`**. Paths are relative to `/home/pbustos/robocomp/components/active_inference/`.
-- The working tree holds newer, uncommitted edits in `controller/`, `door_concept/` and `chat_agent/`. They are not cited, except where they are named as pending in §10.
+- The working tree holds newer, uncommitted edits in `controller/`, `door_concept/` and `language_agent/`. They are not cited, except where they are named as pending in §10.
 - **PROVISIONAL** marks anything still moving.
 - Numbers measured through a bug that was fixed later are **removed**, not caveated. §7.1 says which runs are clean, quantity by quantity.
 
@@ -18,7 +18,7 @@
 | `6a1262fe` | 10:27 | ltsm **evicts** the room left behind; per-beam doorway filter; controller re-resolves the room before every LiDAR poll. |
 | `7a6802bb` | 14:45 | Return to room 1 **from memory**: ltsm recall, door leaf carried across, controller step pre-emption. |
 | `63265729` | 14:45 | Window geometry only. Irrelevant to the chapter. |
-| `b97c05f9` | 19:48 | Repeated round trips; a door recreated on re-entry; passage reuse; controller Mission mode; chat_agent phase 1. |
+| `b97c05f9` | 19:48 | Repeated round trips; a door recreated on re-entry; passage reuse; controller Mission mode; language_agent phase 1. |
 
 The commit messages (`git show --stat <c>`) summarise each mechanism and the live finding that forced it. They are the best one-paragraph sources.
 
@@ -232,7 +232,7 @@ Earlier, recorded on 09-16 (memory `proto-room-for-estimation-time-navigation.md
 ### 4.1 Command
 - **Grammar.** `cross door` | `cross door_N` | `stop` | `uncross`, parsed by `SpecificWorker::run_mission_command` (`controller/src/specificworker.cpp:1743-1801`).
   - The remote file channel uses the same parser (`:561-566`).
-  - **chat_agent** (new in `b97c05f9`, id 25) emits the same closed grammar through a `chat_intention` node, with human confirmation for motion. See `CONCEPT_AGENT_LIFECYCLE.md:222-228`.
+  - **language_agent** (new in `b97c05f9`, id 25) emits the same closed grammar through a `chat_intention` node, with human confirmation for motion. See `CONCEPT_AGENT_LIFECYCLE.md:222-228`.
 - **`cross door`** = the nearest door whose RT chain ends in the **current** room (`common/world_query/door_query.h:45-88`). Doors of a room left behind still resolve through root, so they are filtered out.
 - **Acceptance.** It sets Command mode and `DoorPassage::start(door)` (`specificworker.cpp:1792-1793`).
 
@@ -547,7 +547,7 @@ These are **PROVISIONAL** while the open items in §10 are fixed. The direction 
 So report the GT-based re-entry error. Describe the logged seam as a diagnostic that, as written, mixes the robot's motion after RT retirement into the transform. This diagnosis is **PROVISIONAL**: it is structural, and it has not been checked by time-aligning the ltsm log, which carries no timestamps, with GT.
 
 ### 7.5 Data provenance
-- **Run folders:** `room_concept/estimation_scripts/crossing/try*/`. Each holds `crossing.log`, `logs/{room_concept,door_concept,controller,ltsm_agent,residual_concept,retina[,chat_agent]}.log`, `gt_error.csv`, `proto_room.csv`, `door_filter.csv`, `promotion_select.csv`, `map_layout.csv`, `layout_refine.csv`, `door_events.csv`, `door_existence_log.csv`, `slam_shadow.csv`, `refine_input.bin` and `events.jsonl`. try13–15 hold only `crossing.log` + `logs/`.
+- **Run folders:** `room_concept/estimation_scripts/crossing/try*/`. Each holds `crossing.log`, `logs/{room_concept,door_concept,controller,ltsm_agent,residual_concept,retina[,language_agent]}.log`, `gt_error.csv`, `proto_room.csv`, `door_filter.csv`, `promotion_select.csv`, `map_layout.csv`, `layout_refine.csv`, `door_events.csv`, `door_existence_log.csv`, `slam_shadow.csv`, `refine_input.bin` and `events.jsonl`. try13–15 hold only `crossing.log` + `logs/`.
   - The folders are **not committed**; only `rooms_tworooms.json` is.
 - **Launcher:** `room_concept/estimation_scripts/scripts/run_crossing.sh` @b97c05f9: teleport, start the fleet, `collect`, `CHAT=1`.
 - **The analysis behind §7.3–7.4 is not in the repo.** These three steps re-create it in a few lines:

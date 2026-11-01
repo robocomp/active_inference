@@ -6,7 +6,7 @@
 
 #include <print>
 
-// ── GRAFCET state hooks → the shared presence coordinator (copied from chat_agent / the level-1 protocol) ──
+// ── GRAFCET state hooks → the shared presence coordinator (copied from language_agent / the level-1 protocol) ──
 
 void SpecificWorker::waiting_enter()   { presence_coordinator_.waiting_enter(); }
 void SpecificWorker::waiting_loop()    { presence_coordinator_.waiting_loop(); }

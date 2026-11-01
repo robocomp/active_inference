@@ -67,7 +67,7 @@ qdbus org.kde.yakuake /yakuake/sessions org.kde.yakuake.addSession
 #get id of open session
 sess0=`qdbus org.kde.yakuake /yakuake/sessions org.kde.yakuake.activeSessionId`
 #change to the saved working directory
-qdbus org.kde.yakuake /yakuake/sessions org.kde.yakuake.runCommand " cd /home/pbustos/robocomp/components/active_inference/chat_agent"
+qdbus org.kde.yakuake /yakuake/sessions org.kde.yakuake.runCommand " cd /home/pbustos/robocomp/components/active_inference/language_agent"
 #change the title of session
 qdbus org.kde.yakuake /yakuake/tabs org.kde.yakuake.setTabTitle $sess0 "chat"
 
@@ -103,7 +103,7 @@ qdbus org.kde.yakuake /yakuake/sessions org.kde.yakuake.addSession
 #get id of open session
 sess0=`qdbus org.kde.yakuake /yakuake/sessions org.kde.yakuake.activeSessionId`
 #change to the saved working directory
-qdbus org.kde.yakuake /yakuake/sessions org.kde.yakuake.runCommand " cd /home/pbustos/robocomp/components/active_inference/chat_agent"
+qdbus org.kde.yakuake /yakuake/sessions org.kde.yakuake.runCommand " cd /home/pbustos/robocomp/components/active_inference/language_agent"
 #change the title of session
 qdbus org.kde.yakuake /yakuake/tabs org.kde.yakuake.setTabTitle $sess0 "claude-chat"
 

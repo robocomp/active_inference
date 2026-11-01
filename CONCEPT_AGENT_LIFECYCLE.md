@@ -225,14 +225,14 @@ Derived by reading each agent, not inferred from includes. `—` = not applicabl
 | refrigerator | ✅ | ✅ | ✅ trunc + confirm_only | ✅ `rc::exist` | ✅ | ✅ *(now shared)* | ✅ | ✅ |
 | residual | ✅ | ✅ | — field model, no per-frame gate | ✅ `rc::exist` | — | — | ⚠️ unattributable | ✅ |
 | human | ❌ | ❌ `belief_stabilizer` | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
-| chat_agent *(2026-10-12)* | — no instances | — no belief | — | — | — | — | — | ✅ |
+| language_agent *(2026-10-12)* | — no instances | — no belief | — | — | — | — | — | ✅ |
 | self_calibration *(2026-10-23, skeleton)* | — no instances | — no belief | — | — | — | — | — | ✅ |
 
 *2026-10-31 (perception cards, Task 9):* chair's wall LoS cell went from `—` to ✅. `ChairFitter::zed_detectability` now delegates to `chair_p_detect` (`chair_concept/src/chair_detect.h`): `term_envelope(roi_fill) × in_fov × central × walls_block(camera, chair, room polygon)`; a chair in another room gets P(detect) 0 and its absence is no longer charged. Retired `Existence.ZedEdgeOffset/ZedRangeFull/ZedRangeRef/ZedClearLosFloor`. Live check pending.
 
-**chat_agent** is not a concept agent: it births no instance and holds no belief, so CREATE…HISTORY do not apply
+**language_agent** is not a concept agent: it births no instance and holds no belief, so CREATE…HISTORY do not apply
 (`—`, not `❌`). It owns exactly one node, `chat_intention` (type `intention`, has_intention edge from `Shadow`), the
-command channel to the controller: listed in `[Owns]` (`["chat_agent 25", "chat_intention"]`, id matches `[Agent].id`),
+command channel to the controller: listed in `[Owns]` (`["language_agent 25", "chat_intention"]`, id matches `[Agent].id`),
 stamped with `rc::provenance::stamp_creation`, swept at `initialize()` and again on first Operating, deleted by the
 shared coordinator on SIGTERM/SIGINT (verified 2026-10-12: `[Graph] node 'chat_intention' deleted`). It connects no
 DSR signal; the digest and the command status are polled on the main thread.
