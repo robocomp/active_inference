@@ -78,6 +78,7 @@ int main(int argc, char** argv)
 {
     if (argc < 3) { std::print(stderr, "usage: wall_gap_replay anchor_frames.bin gt_error.csv [--no-memory] [--lintel H]\n"); return 2; }
     bool memory = true, room_yaw = false;
+    double room_yaw_sigma_deg = 2.0;
     std::mt19937 rng(17);
     std::normal_distribution<float> yaw_noise(0.f, 1.f * float(M_PI) / 180.f);   // the localiser's heading error (~1 deg)
     rc::door::wallgap::Params pp;
@@ -86,6 +87,7 @@ int main(int argc, char** argv)
         double v;
         if (std::strcmp(argv[i], "--no-memory") == 0) memory = false;
         else if (std::strcmp(argv[i], "--room-yaw") == 0) room_yaw = true;
+        else if (std::strcmp(argv[i], "--room-yaw-sigma") == 0 and i + 1 < argc and num(argv[++i], v)) room_yaw_sigma_deg = v;
         else if (std::strcmp(argv[i], "--lintel") == 0 and i + 1 < argc and num(argv[++i], v)) pp.lintel = float(v);
     }
     std::ifstream in(argv[1], std::ios::binary);
@@ -148,7 +150,7 @@ int main(int argc, char** argv)
             {
                 float yaw = float(std::remainder(-g->th, 2 * M_PI)) + yaw_noise(rng);
                 if (std::abs(rc::interaction::wrap_pi(yaw - x.x.z())) > float(M_PI_2)) yaw = rc::interaction::wrap_pi(yaw + float(M_PI));
-                x.x.z() = yaw; x.P(2, 2) = std::pow(2.f * float(M_PI) / 180.f, 2.f);
+                x.x.z() = yaw; x.P(2, 2) = float(std::pow(room_yaw_sigma_deg * M_PI / 180.0, 2.0));
             }
         const auto m = rc::door::wallgap::measure(x, memory ? mem : rays, pp);
         if (std::getenv("WG_DEBUG") != nullptr and anchor == std::atoi(std::getenv("WG_DEBUG")) and k % 15 == 0)

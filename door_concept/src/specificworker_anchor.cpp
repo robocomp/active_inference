@@ -1000,7 +1000,13 @@ void SpecificWorker::step_passage_anchor()
                     float yaw = rv->x.z();
                     if (std::abs(rc::interaction::wrap_pi(yaw - prior_pose.x.z())) > float(M_PI_2)) yaw = rc::interaction::wrap_pi(yaw + float(M_PI));
                     wg_prior.x.z() = yaw;
-                    if (std::isfinite(rv->P(2, 2)) and rv->P(2, 2) > 0.f) wg_prior.P(2, 2) = rv->P(2, 2);
+                    // Its spread is the LOCALISER's heading (+ the door's yaw belief): anchor_from_room's yaw variance less the
+                    // model term kSigmaModel.z (5.7 deg) — that term is the room-frame-vs-sensor discrepancy of the opening's
+                    // POSITION, not of the wall's direction. Kept whole (pingpong39), the loose prior let the noisy per-frame slope
+                    // win and the anchor's yaw swung -25..+23 deg live; at leg 6's switch it was +7 deg and the placement
+                    // inherited it (4.35 m / 179 deg relocaliser jump).
+                    if (std::isfinite(rv->P(2, 2)))
+                        wg_prior.P(2, 2) = std::max(1e-6f, rv->P(2, 2) - kSigmaModel.z() * kSigmaModel.z());
                 }
             const auto wm = rc::door::wallgap::measure(wg_prior, wall_pts, wp);
             post = rc::door::wallgap::fuse(wg_prior, wm, wp);
