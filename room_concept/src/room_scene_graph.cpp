@@ -1775,7 +1775,9 @@ void RoomSceneGraph::rearm_after_crossing(std::uint64_t new_room_id, const std::
                 G_->insert_or_assign_edge(DSR::Edge::create<has_intention_edge_type>(new_room_id, n->id()));
         }
     affordance_manager_.release_execution_claim(G_);
-    entry_reloc_ = true;   // the first afford_room in the room entered: its centre (dsr_update_entry_relocalisation)
+    // the first afford_room in a NEW room entered: its centre (dsr_update_entry_relocalisation). Not in a room ltsm RECALLED
+    // (user 2026-11-01: "if the room is known, recalled from ltsm, do not activate room affordances").
+    entry_reloc_ = not recall.has_value();
     entry_reloc_target_pub_.reset();
     // A remembered room comes back in ITS OWN frame (the one memory holds), placed through the crossed door.
     const Eigen::Affine2f T_pub_int = recall.has_value() ? recall->T_int_recall.inverse() : T_room_proto_.inverse();

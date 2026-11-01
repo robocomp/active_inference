@@ -154,7 +154,8 @@ for leg in $(seq 1 $n_legs); do
   # RELOCALISE AT THE ROOM'S CENTRE (user 2026-11-01: "localization close to the walls will always be worse — switch to the room
   # affordance just after crossing, biased to the room centre"). room_concept's first afford_room after a crossing is the room's
   # centre (dsr_update_entry_relocalisation); a bounded explore claims it. Only after a crossing leg.
-  case "$r" in OK*)
+  # …only into a NEW room (`cross new`): a room ltsm recalled is known — no room affordances there (user 2026-11-01)
+  case "$r$a" in OK*new)
     rn=$(room_now); echo run > $B/controller/remote_cmd.txt; sleep 0.7
     printf 'mission "settle %s"\n  explore %s budget_s=25s\n' $leg "$rn" > $B/controller/remote_cmd.txt
     for i in $(seq 1 70); do grep -a -q -E "mission 'settle $leg': (co|failed|aborted)" $L/controller.log && break; sleep 0.5; done
