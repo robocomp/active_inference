@@ -40,7 +40,10 @@ cp $FIX/ltsm_history/* $B/ltsm_agent/etc/ltsm_history/ && chmod u+w $B/ltsm_agen
 cp $FIX/door_identities.csv $B/door_concept/etc/door_identities.csv && chmod u+w $B/door_concept/etc/door_identities.csv
 cp $FIX/room_name_hwm.txt ../etc/room_name_hwm.txt && chmod u+w ../etc/room_name_hwm.txt
 echo "fixture installed: $FIX (hwm $(cat ../etc/room_name_hwm.txt))"
-for d in DOOR_1 DOOR_0 DOOR_2; do python3 $S/door.py close $d; done
+# DOOR_1 OPEN at start: the fixture remembers it open (pingpong41 ended with the leaf at ~105 deg) and door_concept restores that
+# leaf belief at full confidence (PENDING model fix: a restored leaf should lose precision with the time since it was seen).
+# DOOR_0 and DOOR_2 shut (DOOR_2 is the way to room_3: the cross mission opens it).
+python3 $S/door.py open DOOR_1; for d in DOOR_0 DOOR_2; do python3 $S/door.py close $d; done
 sleep 3
 # graph recorder (passive DSR participant, agent id 28): every structural write with its writer — for trace_check.py
 REC=$(cd $S/../../.. && pwd)/graph_recorder/bin/graph_recorder; mkdir -p crossing/$1
