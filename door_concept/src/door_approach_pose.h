@@ -255,42 +255,68 @@ struct ApproachChoice
     const float s_lo = pb.s_floor > 0.0f ? std::min(pb.s_floor, pb.d_min) : pb.d_min;
     const int n = std::max(1, static_cast<int>(std::floor((pb.d_max - s_lo) / step + 1e-3f)) + 1);
 
+    // ★ THE VANTAGE MAY STAND OFF AT AN ANGLE, FACING THE DOOR (2026-11-01, warm19 DOOR_0: the door beside a corner of the
+    //   remembered outline, its AXIS along the wall — every on-axis standpoint was outside, the approach WITHDRAWN, the robot
+    //   never got in front of the shut door. User: "not so close to the wall, and turn toward the door — that close it hits it
+    //   and delocalises"). Bearings off the normal, nearest the axis first (0, ±10°, …, ±40°), each scanned far to near; the
+    //   heading faces the door's CENTRE (the open's P(facing) tolerates an oblique stance: 0.96 at 23°). And the room must hold
+    //   the WHOLE BODY: P(inside) is taken at the footprint's edge (signed distance + footprint_r), not at the centre.
+    constexpr float kBearingStepRad = 0.17453293f;   // 10°: the search's resolution, not a decision level
+    constexpr int kBearingSteps = 4;                 // up to 40°: beyond it the robot no longer sees the opening as an opening
+    const Eigen::Vector2f c0 = ap.centre_xy();
+    const Eigen::Vector2f nrm = (pb.side < 0.0f ? -1.0f : 1.0f) * ap.across_u();
+    const Eigen::Vector2f tan = ap.wall_u.normalized();
     ApproachChoice best;
     bool have = false;
-    for (int k = 0; k < n; ++k)
+    const auto eval = [&](float standoff, float alpha) -> ApproachChoice
     {
-        const float standoff = pb.d_max - step * static_cast<float>(k);
-        const Pose2 q = front_pose(ap, pb.side, standoff);
-        const Eigen::Vector2f qxy(q.x, q.y);
+        const Eigen::Vector2f dir = std::cos(alpha) * nrm + std::sin(alpha) * tan;
+        const Eigen::Vector2f qxy = c0 + standoff * dir;
         ApproachChoice ch;
-        ch.pose = q; ch.standoff = standoff; ch.lateral = 0.0f;
+        ch.pose = {qxy.x(), qxy.y(), std::atan2(-dir.y(), -dir.x())};   // facing the door's centre
+        ch.standoff = standoff; ch.lateral = standoff * std::sin(alpha);
         ch.p_reach    = reach_prob_at(ap, pb, qxy);
         ch.p_complete = complete_prob_closed(ap, pb, qxy, pb.sigma, pb.sigma);
         if (pb.polygon.size() >= 3)
-        {   // P(inside the room): the standpoint's signed distance to the polygon under the pose σ
+        {   // P(the BODY is inside the room): the footprint's edge's signed distance to the polygon under the pose σ
             const float dist = signed_boundary_distance(pb.polygon, qxy);   // > 0 outside
-            ch.p_inside = std::isfinite(dist) ? 1.0f - prob_within(0.0f, dist, pb.sigma) : 1.0f;
+            ch.p_inside = std::isfinite(dist) ? 1.0f - prob_within(0.0f, dist + pb.footprint_r, pb.sigma) : 1.0f;
         }
         ch.p_refused = mem.p_refused(ap, pb.side, pb.room, qxy, now_ms, pb.memory_s, pb.footprint_r, /*disc_overlap=*/true);
         ch.score = ch.p_complete * ch.p_inside * (1.0f - ch.p_refused);
-        if (not have or ch.score > best.score)
+        return ch;
+    };
+    // The bearings are for a room that rules the AXIS out (no on-axis standpoint holds the body); a refusal on the axis still
+    // shortens the standoff on it (2026-10-24, test 2) — it is not a reason to move beside the door.
+    bool axis_in_room = false;
+    for (int j = 0; j <= 2 * kBearingSteps; ++j)
+    {
+        if (j > 0 and axis_in_room) break;
+        const float alpha = (j == 0 ? 0.0f : ((j % 2) ? 1.0f : -1.0f) * kBearingStepRad * static_cast<float>((j + 1) / 2));
+        for (int k = 0; k < n; ++k)
         {
-            best = ch;
-            have = true;
-        }
-        // ★THE VANTAGE IS THE FARTHEST FREE STANDOFF (user 2026-10-24: "a vantage position in front of the door"). Far to
-        // near, the FIRST candidate that is unrefused (the footprint-overlap kernel is exactly 0 there), inside the room and
-        // completable — in the band for a shut door, anywhere within reach for an open one — IS the vantage. Scanning on for
-        // a "better" score only follows the plateau's float creep toward the door (live: 0.42 m from it after one hand-back).
-        // FLAGGED: inside/open are MAP readings (≥ ½); "completable" is the contract's OWN completion level (complete_at, the
-        // approach contract's pre: clause), not a new number. The argmax above is the fallback when no candidate qualifies.
-        const bool door_open = pb.p_open >= 0.5f;
-        const bool in_band = standoff >= pb.d_min - 1e-4f;
-        if (ch.p_refused == 0.0f and ch.p_inside >= 0.5f and ch.p_complete >= pb.complete_at and (door_open or in_band))
-        {
-            best = ch;
-            have = true;
-            break;
+            const float standoff = pb.d_max - step * static_cast<float>(k);
+            const ApproachChoice ch = eval(standoff, alpha);
+            if (j == 0 and ch.p_inside >= 0.5f) axis_in_room = true;
+            if (not have or ch.score > best.score)
+            {
+                best = ch;
+                have = true;
+            }
+            // ★THE VANTAGE IS THE FARTHEST FREE STANDOFF (user 2026-10-24: "a vantage position in front of the door"). Far to
+            // near, the FIRST candidate that is unrefused (the footprint-overlap kernel is exactly 0 there), inside the room and
+            // completable — in the band for a shut door, anywhere within reach for an open one — IS the vantage. Scanning on for
+            // a "better" score only follows the plateau's float creep toward the door (live: 0.42 m from it after one hand-back).
+            // FLAGGED: inside/open are MAP readings (≥ ½); "completable" is the contract's OWN completion level (complete_at, the
+            // approach contract's pre: clause), not a new number. The argmax above is the fallback when no candidate qualifies.
+            const bool door_open = pb.p_open >= 0.5f;
+            const bool in_band = standoff >= pb.d_min - 1e-4f;
+            if (ch.p_refused == 0.0f and ch.p_inside >= 0.5f and ch.p_complete >= pb.complete_at and (door_open or in_band))
+            {
+                best = ch;
+                best.p_complete_live = complete_prob_closed(ap, pb, {best.pose.x, best.pose.y}, pb.sigma, pb.sigma_arrival);
+                return best;
+            }
         }
     }
     // σ_meas stays NOMINAL: door_reach_prob, measured AT the standpoint, uses the range σ floored by the pose floor, and at

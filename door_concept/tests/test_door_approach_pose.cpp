@@ -278,6 +278,31 @@ int main()
         check(std::abs(old_depth - 2.0f) < 1e-5f, "the unset depth is not the old max(CrossStandoffM, swept radius)");
         check(std::abs(near_depth - 0.8f) < 1e-5f, "CrossTargetM is not the published depth");
     }
+    // ── warm19 (2026-11-01): DOOR_0 beside the corner of room_3's remembered outline — its AXIS runs along the wall, every
+    //    on-axis standpoint had P(inside) 0, the approach was WITHDRAWN and the robot never got in front of the shut door.
+    //    User: "the robot must not be so close to the wall, and turn toward the door — that close it hits it and delocalises".
+    //    The vantage: the WHOLE BODY inside (footprint, not the centre), at the band's distance from the opening, moved round
+    //    to a bearing off the normal when straight-on is not clear, and FACING THE DOOR'S CENTRE.
+    std::println("\n(warm19) the door's axis along a wall: an oblique vantage, body clear of the wall, facing the door");
+    {
+        auto pc = pb;
+        pc.polygon = {{1.6f, 0.0f}, {6.0f, 0.0f}, {6.0f, 4.0f}, {1.6f, 4.0f}};   // west wall 0.1 m past the door centre (x 1.5)
+        const auto c = rc::door::choose_approach_pose(ap, pc, rc::door::ApproachMemory{}, 0);
+        std::println("    pose ({:.2f},{:.2f}) yaw {:.2f} lateral {:+.2f} P(inside) {:.2f} score {:.2f}", c.pose.x, c.pose.y, c.pose.yaw,
+                     c.lateral, c.p_inside, c.score);
+        check(c.p_inside >= 0.5f, "the vantage is inside the room");
+        check(c.pose.x - pc.footprint_r >= 1.6f - 1e-3f, "the whole body clears the wall (footprint, not the centre)");
+        check(c.score > 0.0f, "the approach is serviceable (offered), not withdrawn");
+        const auto cen = ap.centre_xy();
+        const float face = std::atan2(cen.y() - c.pose.y, cen.x() - c.pose.x);
+        check(std::abs(std::remainder(c.pose.yaw - face, 6.2831853f)) < 1e-3f, "facing the door's centre");
+        const float r = std::hypot(cen.x() - c.pose.x, cen.y() - c.pose.y);
+        check(r >= pc.d_min - 1e-3f and r <= pc.d_max + 1e-3f, "at the band's distance from the opening");
+        // the ordinary case is untouched: a room that contains the axis keeps the on-axis vantage
+        auto po = pb;
+        po.polygon = {{-2.0f, 0.0f}, {6.0f, 0.0f}, {6.0f, 4.0f}, {-2.0f, 4.0f}};
+        check(rc::door::choose_approach_pose(ap, po, rc::door::ApproachMemory{}, 0).lateral == 0.0f, "on the axis when the axis is clear");
+    }
     std::println("{} / {} checks passed", g_checks - g_fail, g_checks);
     return g_fail == 0 ? 0 : 1;
 }
