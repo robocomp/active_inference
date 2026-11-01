@@ -48,8 +48,19 @@ static void test_pi_move_one_never_resurrects()
     const auto d = decide({0.f, 0.f}, kMeas, c, p);
     CHECK(not d.index.has_value());
     CHECK(d.posterior.size() == 3);
-    CHECK(std::abs(d.posterior[0] - d.posterior[2]) < 1e-5f);
-    CHECK(std::abs(d.posterior[1] - d.posterior[2]) < 1e-5f);
+    CHECK(d.posterior[0] == d.posterior[2]);
+    CHECK(d.posterior[1] == d.posterior[2]);
+}
+static void test_pi_move_one_never_resurrects_any_area()
+{
+    const std::vector<Candidate> c{cand(1, 0.f, 0.f)};
+    for (int i = 10; i <= 2000; ++i)
+    {
+        Params p; p.pi_move = 1.f; p.log_prior_new = 0.f; p.room_area_m2 = float(i) * 0.1f;
+        const auto d = decide({0.f, 0.f}, kMeas, c, p);
+        CHECK(not d.index.has_value());
+        if (d.index.has_value()) { std::println(stderr, "area {}", p.room_area_m2); break; }
+    }
 }
 static void test_posterior_sums_to_one()
 {
@@ -67,6 +78,7 @@ int main()
     test_nearest_of_two();
     test_no_candidates_is_new();
     test_pi_move_one_never_resurrects();
+    test_pi_move_one_never_resurrects_any_area();
     test_posterior_sums_to_one();
     if (failures) return 1;
     std::println("recall_match_test: ok");

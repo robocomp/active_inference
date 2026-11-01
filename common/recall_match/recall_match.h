@@ -28,13 +28,18 @@ struct Decision  { std::optional<std::size_t> index; std::vector<float> posterio
 inline Decision decide(const Eigen::Vector2f& x, const Eigen::Matrix2f& meas_cov,
                        std::span<const Candidate> cands, const Params& p)
 {
-    std::vector<rc::atlas::ReidCandidate> rc_;
-    rc_.reserve(cands.size());
+    std::vector<rc::atlas::ReidCandidate> atlas_cands;
+    atlas_cands.reserve(cands.size());
     for (const auto& c : cands)
-        rc_.push_back({0.f, rc::atlas::location_log_lik(x, c.mu, c.cov + meas_cov, p.pi_move, p.room_area_m2), 0.f});
+        atlas_cands.push_back({0.f, rc::atlas::location_log_lik(x, c.mu, c.cov + meas_cov, p.pi_move, p.room_area_m2), 0.f});
+
+    // "new" is uniform over the room. Written as log(1/A), the very expression the candidate mixture reduces to
+    // when pi_move = 1, so the two terms are bit-identical there (no float-rounding lead on uninformative evidence).
+    const float log_loc_new = std::log(1.f / p.room_area_m2);
 
     Decision d;
-    d.posterior = rc::atlas::reid_posterior(rc_, p.log_prior_new, -std::log(p.room_area_m2));
+    // reid_posterior returns candidates..., new: the last element is "new".
+    d.posterior = rc::atlas::reid_posterior(atlas_cands, p.log_prior_new, log_loc_new);
     if (cands.empty()) return d;
     const auto best = std::max_element(d.posterior.begin(), d.posterior.end() - 1);
     if (*best > d.posterior.back()) d.index = static_cast<std::size_t>(best - d.posterior.begin());
