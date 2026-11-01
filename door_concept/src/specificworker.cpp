@@ -2802,8 +2802,9 @@ void SpecificWorker::step_pragmatic_affordances(rc::DoorInstance& inst)
                                 "swing {:+.0f} llr {:+.1f}, σ {:.2f})", st.p_open, st.p_close_clear, st.robot_range_m,
                                 st.safe_standoff_m, st.robot_side, inst.leaf.swing, inst.swing_llr, st.range_sigma_m);
         // the standpoint: where the robot is if it is already clear, else the middle of the actuation band (beyond the arc)
+        // clear here: stay; else far enough that the close can go out WHEREVER the robot stops (door_close_clear.h close_standoff)
         const float standoff = st.p_close_clear >= 1.0f - rc::door::kCloseContactRiskMax
-                                   ? st.robot_range_m : std::max(st.robot_range_m, st.approach_standoff_m);
+                                   ? st.robot_range_m : rc::door::close_standoff(st.robot_range_m, st.safe_standoff_m, st.range_sigma_m);
         const auto pose = rc::door::front_pose(inst.aperture, st.approach_side, standoff);
         o.x_m = pose.x; o.y_m = pose.y; o.yaw_rad = pose.yaw;
         o.value    = pg.value_open;

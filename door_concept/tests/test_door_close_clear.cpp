@@ -39,6 +39,15 @@ int main()
         const float far = prob_clear_of_swing(1.8f, 1.75f, 1.5f, 0.10f, -1.f, 4.2f, 0.3f);   // beyond the arc on either side
         check(far >= 1.f - rc::door::kCloseContactRiskMax, "beyond the arc: clear whatever the swing");
     }
+    // warm24 leg 1: standpoint at the band's middle 1.75 m, arc 1.5 m, stop up to 0.25 m short ⇒ P(clear) < 0.99, close timed out
+    {
+        const float sp = rc::door::close_standoff(1.0f, 1.5f, 0.10f);
+        const float worst = sp - rc::door::kPlaceArrivalTolM;   // where the robot may come to rest
+        const float p = prob_clear_of_swing(worst, worst, 1.5f, 0.10f, +1.f, 6.f, 0.3f);
+        std::println("    close standpoint {:.2f} m; stopping {:.2f} m short leaves P(clear) {:.4f}", sp, rc::door::kPlaceArrivalTolM, p);
+        check(p >= 1.f - rc::door::kCloseContactRiskMax, "the close request can go out wherever the robot stops");
+        check(rc::door::close_standoff(2.6f, 1.5f, 0.10f) == 2.6f, "already clear: stay where it is");
+    }
     std::println("{} / {} checks passed", checks - failures, checks);
     return failures == 0 ? 0 : 1;
 }

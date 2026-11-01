@@ -25,6 +25,21 @@ namespace rc::door
 /// leaf closed onto the robot. Not a tuning knob: the same number as the policy's, kept a copy here (pure header).
 inline constexpr float kCloseContactRiskMax = 0.01f;
 
+/// Where a robot that comes to rest NEAR its goal has stopped: the controller's place goal is reached within this many metres
+/// (controller local_policy.h Goal::tol_xy = 0.25 — a copy, this header stays pure).
+inline constexpr float kPlaceArrivalTolM = 0.25f;
+
+/// THE CLOSE STANDPOINT (warm24 leg 1, 2026-11-01): door_concept put it at the band's middle (1.75 m) against a 1.5 m swept
+/// arc; the controller counts a place reached within kPlaceArrivalTolM, stopped at ~1.5-1.6 m, P(clear) stayed below the 0.99
+/// the request needs, and the close timed out. The standpoint is where P(clear) >= 1 - kCloseContactRiskMax holds wherever the
+/// robot ACTUALLY stops: the arc plus z(0.99) times the stop's scatter (the range sigma and the arrival tolerance, combined).
+/// Already clear here: stay (`range`).
+[[nodiscard]] inline float close_standoff(float range, float arc, float range_sigma, float arrival_tol = kPlaceArrivalTolM)
+{
+    constexpr float z99 = 2.3263479f;   // Phi^-1(1 - kCloseContactRiskMax)
+    return std::max(range, arc + z99 * std::hypot(range_sigma, arrival_tol));
+}
+
 /// `range` = |robot − aperture centre|, `robot_side` = its signed distance to the aperture plane along across_u, `arc` = the
 /// leaf's swept radius + the body (safe_standoff), `sigma` = the range's σ, `swing_map` = the MAP swing side (±1, the leaf
 /// opens toward across_u·swing), `swing_llr_map` = log-odds of that MAP side, `body_radius` = the robot's.
