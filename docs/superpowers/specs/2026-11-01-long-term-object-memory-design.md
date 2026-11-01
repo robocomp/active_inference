@@ -38,7 +38,7 @@ Goals
 
 Non-goals
 - Deciding identity (U4). The memory offers candidates and stores decisions; it does not make them.
-- Storing raw DINO views itself in v1 (§6.3).
+- Storing raw images or crops (only the atlas state of VIEW_ATLAS.md §3.1).
 - Events and steps (episodic_agent), room layouts and passages (ltsm_agent).
 - Room naming (U5).
 
@@ -105,12 +105,17 @@ Anti-goals
 - On request (no room known, or another room): language_agent can ask for one object or one class; v1 may
   serve this from the memory graph read directly rather than a request channel.
 
-### 6.3 Appearance
-- v1: the entry stores a pointer to the owning agent's atlas archive record (agent + `object_uid`), not the
-  views. Matching that needs appearance is done by the owning agent with its own atlas.
-- Later: agents publish a compact signature per instance (one or a few embeddings) as an attribute, and the
-  memory keeps it, so re-identification works even across agents (an object first taken for a chair, later a
-  table). Decided with the atlas work.
+### 6.3 Appearance: the DINO atlas lives here once the object is dead (user, 11-01)
+- **Alive:** the atlas stays with the owning agent (used every cycle; single writer). The owner publishes it at
+  a low rate as an attribute of the instance node (< 10 KB, VIEW_ATLAS.md §3.1); ltom copies it by observation,
+  like any other attribute. No files cross agents.
+- **Dead:** ltom keeps the atlas in the object's entry. It is the store of record; the owner's
+  `AtlasArchive` file stays only as its cache for when ltom is down (VIEW_ATLAS.md §13, on feat/view-atlas-2b).
+- **Recall:** the recall node carries the remembered atlas; the owner scores a birth candidate against it
+  (VIEW_ATLAS.md §3.4 maths unchanged).
+- **Encoder id** on every atlas (model hash + fitted-constants version). Different ids are not compared:
+  likelihood ratio 1, never a low similarity.
+- **Later:** with every atlas in one place, cross-class re-identification (first a chair, later a table).
 
 ## 7. Identity and names without waiting for the memory
 
@@ -151,7 +156,7 @@ checked. Live runs coordinated with the room session.
 - Recall publishes every remembered object of the room, weighted by permanence; removed on leaving the room or
   when the real instance is alive.
 - uid = (agent id, persisted counter), allocated by the agent; counters in one `common/` module.
-- Appearance stays in the owner's atlas in v1.
+- Atlas published by the owner at a change-driven low rate; ltom is the archive (VIEW_ATLAS.md §13).
 - Rollout order of §8, starting with the counter fix.
 
 ## 12. Settled after the builder check (my calls)
