@@ -201,6 +201,12 @@ void SpecificWorker::initialize()
     // false, so the table shows `default false` rather than leaving the reader to infer that an
     // absent key means off. That inference is what "absent is not off, but it reads as off" warns
     // about, and here it happens to be right - which is exactly why it should be stated, not assumed.
+    // ── Warm start (docs/superpowers/specs/2026-11-01-ltsm-warm-start-design.md). Absent/empty ⇒ OFF. ──────────────────
+    cfgr.opt("WarmStart.Room", warm_room_,
+             "warm start: post a START-UP recall of this remembered room (the robot's starting room) for room_concept "
+             "(MapMode = \"ltsm\") and door_concept; empty = off");
+    if (not warm_room_.empty())
+        qInfo().noquote() << QString::fromStdString(std::format("[warm] WarmStart.Room = {}: a start-up recall will be posted", warm_room_));
     const auto flag = [&](const char *key, std::string_view what)
     { return cfgr.b(key, false, what); };
     eviction_enabled     = flag("Eviction.enabled",
@@ -403,6 +409,13 @@ void SpecificWorker::compute()
     }
     // What lies behind each door memory knows the far side of (room_recall.h). After the promotion, so a room that has
     // just become live again retires its own recall in the same cycle.
+    // WARM START: the start-up recall of the starting room, until posted; retired once the robot is elsewhere. Before step(),
+    // so a crossing recall of the same room (the robot has left it) is posted by step() in the same cycle.
+    if (recall_ and not warm_room_.empty())
+    {
+        if (not warm_posted_) warm_posted_ = recall_->post_startup(warm_room_) != 0;
+        recall_->step_startup();
+    }
     if (recall_) recall_->step();
 
     if (not probe_enabled)

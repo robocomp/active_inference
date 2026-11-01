@@ -146,6 +146,8 @@ private:
 
 	/// Rooms remembered behind live doors, posted for room_concept (room_recall.h). Armed with eviction.
 	std::unique_ptr<ltsm::RoomRecall> recall_;
+	std::string warm_room_;      // [WarmStart] Room (empty = off)
+	bool warm_posted_ = false;   // its start-up recall is in the live graph
 	/// Which known room is the provisional room behind a fresh door? Posterior + staged commit REQUESTS (room_recognizer.h);
 	/// RoomSwap executes them. [Recognition] enabled; absent => OFF. Needs eviction (it reads memory).
 	std::unique_ptr<ltsm::RoomRecognizer> recognizer_;

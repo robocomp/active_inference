@@ -1,4 +1,6 @@
 #include "../../common/room_transition/exit_fact.h"   // link 4: is_archived
+#include "../../common/room_transition/startup_recall.h"   // warm start
+#include "../../common/room_resolve/room_resolve.h"       // rc::room::current_room
 #include "room_recall.h"
 #include "room_eviction.h"
 
@@ -228,5 +230,65 @@ int RoomRecall::step()
         it = owned_.erase(it);
     }
     return static_cast<int>(owned_.size());
+}
+std::uint64_t RoomRecall::post_startup(const std::string &live_room)
+{
+    const auto missing = [&](std::string why) -> std::uint64_t
+    {
+        if (why != startup_missing_)
+            qInfo().noquote() << QString::fromStdString(std::format("[warm] start-up recall of {} not posted yet: {}", live_room, why));
+        startup_missing_ = std::move(why);
+        return 0;
+    };
+    const std::string rname = "recall_" + live_room;
+    if (const auto existing = live_->get_node(rname); existing.has_value())
+        return startup_id_ = existing->id(), startup_room_ = live_room, startup_id_;
+
+    // the remembered room: memory r<k>_<live_room> with room_id k (RoomEviction::remembered's rule)
+    std::optional<DSR::Node> mroom;
+    for (const auto &r : mem_->get_nodes_by_type("room"))
+        if (const auto k = mem_->get_attrib_by_name<room_id_att>(r); k.has_value() and r.name() == std::format("r{}_{}", k.value(), live_room))
+            mroom = r;
+    if (not mroom.has_value()) return missing(std::format("memory holds no r<k>_{}", live_room));
+    const auto px = mem_->get_attrib_by_name<delimiting_polygon_x_att>(mroom.value());
+    const auto py = mem_->get_attrib_by_name<delimiting_polygon_y_att>(mroom.value());
+    if (not px.has_value() or not py.has_value() or not rc::room_transition::recall_outline(px->get(), py->get()).has_value())
+        return missing(std::format("{} has no usable outline", mroom->name()));
+    const auto robots = live_->get_nodes_by_type("robot");
+    if (robots.empty()) return missing("no robot node in the working memory yet");
+    const auto &robot = robots.front();
+
+    DSR::Node n;
+    n.type("metaconcept");
+    n.name(rname);
+    live_->add_or_modify_attrib_local<object_subtype_att>(n, std::string(rc::room_transition::kRecallSubtype));
+    live_->add_or_modify_attrib_local<parent_att>(n, robot.id());
+    live_->add_or_modify_attrib_local<level_att>(n, live_->get_node_level(robot).value_or(0) + 1);
+    live_->add_or_modify_attrib_local<room_id_att>(n, mem_->get_attrib_by_name<room_id_att>(mroom.value()).value_or(0));
+    live_->add_or_modify_attrib_local<delimiting_polygon_x_att>(n, std::vector<float>(px->get()));
+    live_->add_or_modify_attrib_local<delimiting_polygon_y_att>(n, std::vector<float>(py->get()));
+    live_->add_or_modify_attrib_local<pos_x_att>(n, live_->get_attrib_by_name<pos_x_att>(robot).value_or(0.f) + 60.f);
+    live_->add_or_modify_attrib_local<pos_y_att>(n, live_->get_attrib_by_name<pos_y_att>(robot).value_or(0.f) - 60.f);
+    const auto id = live_->insert_node(n);
+    if (not id.has_value()) return missing("insert_node failed");
+    startup_id_ = id.value();
+    startup_room_ = live_room;
+    qInfo().noquote() << QString::fromStdString(std::format(
+        "[warm] start-up recall {} posted under {} (room_id {}, {} vertices, remembered {})", rname, robot.name(),
+        mem_->get_attrib_by_name<room_id_att>(mroom.value()).value_or(0), px->get().size(), mroom->name()));
+    return startup_id_;
+}
+
+void RoomRecall::step_startup()
+{
+    if (startup_id_ == 0) return;
+    const auto cur = rc::room::current_room_node(*live_);
+    if (not cur.has_value() or cur->name() == startup_room_) return;
+    if (const auto n = live_->get_node(startup_id_); n.has_value())
+    {
+        qInfo().noquote() << QString::fromStdString(std::format("[warm] start-up recall {} retired: the robot is in {}", n->name(), cur->name()));
+        live_->delete_node(startup_id_);
+    }
+    startup_id_ = 0;
 }
 }   // namespace ltsm

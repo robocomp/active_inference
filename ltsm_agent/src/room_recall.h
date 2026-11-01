@@ -53,9 +53,21 @@ public:
     /// Delete every recall_* node in the live graph (startup sweep and graceful exit).
     int remove_all();
 
+    /// WARM START (docs/superpowers/specs/2026-11-01-ltsm-warm-start-design.md, [WarmStart] Room): the START-UP recall of the
+    /// remembered room `live_room` (memory `r<k>_<live_room>`), the robot's starting room — `recall_<live_room>`, object_subtype
+    /// "room_recall", room_id k, the remembered outline, hung from the ROBOT node, no RT edge, no `recall_late`
+    /// (rc::room_transition::is_startup_recall). Idempotent. Returns its id, 0 when the memory room, its outline or the robot
+    /// node is missing (logged once per reason).
+    std::uint64_t post_startup(const std::string &live_room);
+    /// Retires the start-up recall once `current` points at another room: the robot has left it, every agent has latched it.
+    void step_startup();
+
 private:
     std::shared_ptr<DSR::DSRGraph> live_, mem_;
     const RoomEviction &ev_;
     std::unordered_map<std::uint64_t, std::uint64_t> owned_;   ///< live door id -> recall node id
+    std::uint64_t startup_id_ = 0;        ///< the start-up recall (post_startup), 0 = none
+    std::string   startup_room_;          ///< its room's live name
+    std::string   startup_missing_;       ///< the last "why not posted" logged (once per reason)
 };
 }   // namespace ltsm
