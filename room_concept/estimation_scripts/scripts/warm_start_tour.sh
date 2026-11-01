@@ -15,8 +15,9 @@ B=/home/pbustos/robocomp/components/active_inference; E=$B/room_concept/estimati
 FIX=$(cd "$2" 2>/dev/null && pwd) || { echo "usage: $0 <run_name> <fixture_dir>"; rm -f $LOCK; exit 2; }
 (cd $FIX && sha256sum -c --quiet SHA256SUMS) || { echo "fixture $FIX: checksums FAIL before the run"; rm -f $LOCK; exit 1; }
 LEG_TIMEOUT_S=${LEG_TIMEOUT_S:-600}
-export WT=${WT:-/home/pbustos/robocomp/components/active_inference.worktrees/rt-build} WT_AGENTS=${WT_AGENTS:-"controller door_concept table_concept room_concept residual_concept ltsm_agent"}
-export FLEET="retina room_concept residual_concept controller door_concept ltsm_agent table_concept"
+export WT=${WT:-/home/pbustos/robocomp/components/active_inference.worktrees/rt-build} WT_AGENTS=${WT_AGENTS:-"controller door_concept room_concept residual_concept ltsm_agent"}
+# table_concept left the tour (user 2026-11-01): the object agents run apart, scripts/run_objects.sh
+export FLEET="retina room_concept residual_concept controller door_concept ltsm_agent"
 DOOR1_Y=9.3796; DOOR2_X=-1.705
 # ── the two switches, for THIS run only (restored on exit) ──
 RC_CFG=$WT/room_concept/etc/config.toml; LT_CFG=$WT/ltsm_agent/etc/config.toml
