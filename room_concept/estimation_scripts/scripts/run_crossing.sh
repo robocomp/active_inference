@@ -57,7 +57,9 @@ rm -rf $R/tmp/snapshots; rm -f $R/tmp/refine_input.bin $R/tmp/promotion_select.c
 for a in $FLEET; do
   exe=bin/$a; cfg=etc/config.toml
   if [[ -n "$WT" && " $WT_AGENTS " == *" $a "* ]]; then exe=$WT/$a/bin/$a; cfg=$WT/$a/etc/config.toml; fi
-  (cd $B/$a && DISPLAY=:0 setsid nohup $exe $cfg > $OUT/logs/$a.log 2>&1 < /dev/null &) ; sleep 4
+  # stdbuf -oL: LINE-buffered logs (2026-11-01, warm17: stdout to a file is block-buffered, so "[mission] … failed" reached
+  # controller.log ~10 s late and the tour — which reads the log to learn a leg has ended — left the robot idle that long)
+  (cd $B/$a && DISPLAY=:0 setsid nohup stdbuf -oL -eL $exe $cfg > $OUT/logs/$a.log 2>&1 < /dev/null &) ; sleep 4
 done
 if [[ "$2" == "here" || -n "$NORUN" ]]; then log "fleet up: $FLEET; controller left STOPPED"
 else sleep 6; echo run > $B/controller/remote_cmd.txt; log "fleet up: $FLEET; controller RUN"; fi
