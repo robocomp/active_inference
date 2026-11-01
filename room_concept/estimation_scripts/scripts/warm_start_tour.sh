@@ -105,7 +105,7 @@ for leg in $(seq 1 $n_legs); do
     n=$((n+1)); explore_once "${leg}_$n"; run_leg "${leg}s$n" $a
   done
   sleep 2
-  xy=$(true_xy); side=$(side_of $xy)
+  xy=$(true_xy); side=$(python3 -I $S/true_room.py crossing/$1/gt_pose.tsv)   # by the door lines crossed (true_room.py)
   case "$r" in OK*) [ "$side" = "$want" ] && st=OK || st=FALSE_OK;; *) st=FAILED;; esac
   [ $st = OK ] && ok=$((ok+1))
   echo "leg $leg (cross $a, want $want): controller '$r', true side $side (xy $xy), graph room $(room_now) -> $st"
