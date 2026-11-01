@@ -166,6 +166,9 @@ struct DoorPragmaticCfg
     // registration). This id is used only when NO such frame resolves, and the request log says so. It
     // used to be passed as if an operator had picked it, which sent every door's request to one id.
     std::string actuation_provider_id;
+    // Per-provider-door travel limits, "DOOR_0:90,DOOR_2:110" (degrees): a wall behind a leaf stops it short of
+    // actuation_open_rad (user 2026-11-01: DOOR_0 has a wall behind it at 90 deg). Empty = no limits.
+    std::string actuation_open_limits_deg;
     // Max distance (m, provider world frame) between our door and the nearest advertised door for the
     // match to be accepted. ⚠A deliberate gate on an ACT (a door swings), not on a belief: "none of
     // these" must be a possible answer. Set by geometry: advertised doors are >= 2.5 m apart; a correct

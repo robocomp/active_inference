@@ -128,6 +128,8 @@ DoorConfig load_door_config(const ConfigLoader& cfg)
                 "★MAY THIS AGENT ASK A PROVIDER TO MOVE A DOOR WITHOUT A HUMAN? The `open` affordance's whole point is that it can, and the consumer's claim is the…");
         pg.actuation_provider_id = gets("DoorAffordance.ActuationProviderId", pg.actuation_provider_id,
                 "FALLBACK provider door id, used only when no world frame resolves to match our door by place");
+        pg.actuation_open_limits_deg = gets("DoorAffordance.ActuationOpenLimitsDeg", pg.actuation_open_limits_deg,
+                "per provider door, how far an OPEN may swing it (deg): \"DOOR_0:90,…\" — a wall behind the leaf");
         pg.actuation_match_max_m = getf("DoorAffordance.ActuationMatchMaxM", pg.actuation_match_max_m,
                 "max distance (m, provider world) from our door to the nearest advertised door to accept the match");
 

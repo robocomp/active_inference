@@ -84,6 +84,7 @@
 #include <thread>    // brief DDS flush before _Exit
 #include <chrono>
 #include <fstream>   // per-cycle detection-slice diagnostic CSV
+#include <ranges>
 #include <charconv>  // locale-independent parsing of etc/door_identities.csv (CLAUDE.md)
 #include <locale>    // classic-locale writers
 #include <format>
@@ -584,6 +585,22 @@ void SpecificWorker::initialize()
     // door here — a Webots supervisor today, home automation or a person tomorrow.
     door_actuator_.configure(cfg_.door_control_endpoint);
     door_actuator_.set_open_angle(std::min(cfg_.pragmatic.actuation_open_rad, cfg_.phi_max_rad));
+    // per-door travel limits ("DOOR_0:90,…" in degrees), parsed with from_chars (locale-proof)
+    for (auto part : std::views::split(std::string_view(cfg_.pragmatic.actuation_open_limits_deg), ','))
+    {
+        const std::string_view item(part.begin(), part.end());
+        const auto c = item.find(':');
+        if (c == std::string_view::npos) continue;
+        auto id = item.substr(0, c);
+        while (not id.empty() and id.front() == ' ') id.remove_prefix(1);
+        const auto num = item.substr(c + 1);
+        float deg = 0.f;
+        if (std::from_chars(num.data(), num.data() + num.size(), deg).ec == std::errc{} and deg > 0.f)
+        {
+            door_actuator_.set_open_limit(std::string(id), deg * 0.017453293f);
+            std::print("door_concept: [actuator] {} opens at most {:.0f} deg (DoorAffordance.ActuationOpenLimitsDeg)\n", id, deg);
+        }
+    }
     // Input recording (spec §6.6): the identity table + learned registration exactly as loaded, and the room entered.
     input_snapshot_.on_identity_load("etc/door_identities.csv", "etc/door_world_registration.csv",
         room_node_id_ != 0 ? std::optional<std::uint64_t>{room_node_id_} : std::nullopt,
@@ -2785,7 +2802,7 @@ void SpecificWorker::step_pragmatic_affordances(rc::DoorInstance& inst)
                                 "swing {:+.0f} llr {:+.1f}, σ {:.2f})", st.p_open, st.p_close_clear, st.robot_range_m,
                                 st.safe_standoff_m, st.robot_side, inst.leaf.swing, inst.swing_llr, st.range_sigma_m);
         // the standpoint: where the robot is if it is already clear, else the middle of the actuation band (beyond the arc)
-        const float standoff = st.p_close_clear >= rc::door::kApproachCompleteProb
+        const float standoff = st.p_close_clear >= 1.0f - rc::door::kCloseContactRiskMax
                                    ? st.robot_range_m : std::max(st.robot_range_m, st.approach_standoff_m);
         const auto pose = rc::door::front_pose(inst.aperture, st.approach_side, standoff);
         o.x_m = pose.x; o.y_m = pose.y; o.yaw_rad = pose.yaw;
@@ -2857,7 +2874,7 @@ void SpecificWorker::step_pragmatic_affordances(rc::DoorInstance& inst)
         inst.close_claim_unserved = true;
     if (inst.close_claim_unserved and not inst.aff_close.claimed())
         inst.close_claim_unserved = false;
-    if (inst.close_claim_unserved and st.p_close_clear < rc::door::kApproachCompleteProb)
+    if (inst.close_claim_unserved and st.p_close_clear < 1.0f - rc::door::kCloseContactRiskMax)
     {
         if (not std::exchange(inst.close_wait_logged, true))
             std::print("door_concept: [close] {} claimed — the request waits until the robot is clear of the swing "

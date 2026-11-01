@@ -18,6 +18,13 @@
 
 namespace rc::door
 {
+/// The acceptable P(the leaf touches the robot) for a close: the motion policy's own chance constraint (controller
+/// [Policy] RiskEps = 0.01, local_policy.h PolicyParams::risk_eps — "acceptable P(contact) per decision"). Swinging a door
+/// is an action that can hit the robot like any motion. warm18 leg 3 (2026-11-01): gated at kApproachCompleteProb (0.90),
+/// a close went out at P(clear) 0.94 with the robot 0.48 m past the plane, under a WRONG swing belief (llr +4.2), and the
+/// leaf closed onto the robot. Not a tuning knob: the same number as the policy's, kept a copy here (pure header).
+inline constexpr float kCloseContactRiskMax = 0.01f;
+
 /// `range` = |robot − aperture centre|, `robot_side` = its signed distance to the aperture plane along across_u, `arc` = the
 /// leaf's swept radius + the body (safe_standoff), `sigma` = the range's σ, `swing_map` = the MAP swing side (±1, the leaf
 /// opens toward across_u·swing), `swing_llr_map` = log-odds of that MAP side, `body_radius` = the robot's.

@@ -37,6 +37,7 @@
 #include <chrono>
 #include <cmath>
 #include <memory>
+#include <map>
 #include <optional>
 #include <string>
 #include <utility>
@@ -114,6 +115,8 @@ public:
 
     /// How far an OPEN request swings the leaf (rad, > 0), sent as the provider's apertureHint. 0 = the provider's default.
     void set_open_angle(float rad) { open_rad_ = rad; }
+    /// Per provider door, the most an OPEN may swing it (rad): a wall behind the leaf. Applied when the request names it.
+    void set_open_limit(const std::string& provider_door, float rad) { open_limit_rad_[provider_door] = rad; }
 
     // Poll a pending request. Updates `p.state` / `p.settled` in place.
     void poll(Pending& p);
@@ -129,6 +132,7 @@ private:
     Caps                                          caps_;
     std::chrono::steady_clock::time_point         last_connect_attempt_{};
     float open_rad_ = 0.f;   // set_open_angle
+    std::map<std::string, float> open_limit_rad_;   // set_open_limit
 };
 
 // ─── WHICH PROVIDER DOOR IS OURS — pure, header-only so an offline harness can test it ───────────

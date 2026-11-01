@@ -229,6 +229,7 @@ SwingClearanceM   = 0.20     # margin on top of the swept arc and the body half-
 # duplication is forced — advertising it is the real fix.
 ActuationSwingRate = 0.5
 ActuationOpenRad  = 2.0944   # 120 deg: an OPEN request swings the leaf this far (user 2026-11-01: 30 deg more, sets the leaf-on-the-left problem aside)
+ActuationOpenLimitsDeg = "DOOR_0:90"   # per provider door: a wall behind DOOR_0's leaf at 90 deg (user 2026-11-01)
 CrossStandoffM    = 2.00     # how far PAST the aperture the cross target sits. 2026-10-18 (user): 1.2 left the robot in the doorway region seeing half of each room; 2.0 ends inside, where it localises in the room it entered
 # ★2026-10-24 (user): the cross target is "a point just at the other side of the door" — the controller's door route
 # ([DoorPassage] UseRoute) ends there and the room switch completes the passage. Body reach (Shadow circumscribed radius

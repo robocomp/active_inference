@@ -8653,7 +8653,8 @@ void ControllerSession::finalize_reached(rc::AffordanceManager &affordance_manag
                        and last_target_info_->node_name.starts_with("aff_door_")
                        and (last_target_info_->node_name.ends_with("_approach")
                             or last_target_info_->node_name.ends_with("_open")
-                            or last_target_info_->node_name.ends_with("_cross"));
+                            or last_target_info_->node_name.ends_with("_cross")
+                            or last_target_info_->node_name.ends_with("_close"));   // warm17: a 3 s mask dwell after every close
     if (allow_dwell and was_affordance and not door_step and params_ and params_->affordance_dwell_ms > 0.f)
     {
         affordance_dwell_until_ms_ = now_ms + static_cast<std::uint64_t>(params_->affordance_dwell_ms);

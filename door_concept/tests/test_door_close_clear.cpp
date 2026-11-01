@@ -29,6 +29,16 @@ int main()
     check(half > 0.4f and half < 0.6f, "swing unknown: about one half inside the arc");
     // standing IN the doorway plane (robot_side 0): the body reaches both sides — the leaf's side is the robot's side
     check(prob_clear_of_swing(0.3f, 0.f, R, s, -1.f, 6.f, rb) < 0.05f, "in the doorway: never clear");
+    // warm18 leg 3 (2026-11-01): DOOR_0's leaf believed to swing OUT of the robot's room at llr +4.2 (it swings INTO it); the
+    // robot 0.48 m past the plane. P(clear) 0.94 passed the old bar (kApproachCompleteProb 0.90) and the door was closed
+    // onto the robot. Closing is an action that can hit the robot: it takes the motion policy's chance constraint.
+    {
+        const float p = prob_clear_of_swing(0.48f, 0.48f, 1.5f, 0.10f, -1.f, 4.2f, 0.3f);
+        std::println("    warm18 leg 3: P(clear) {:.3f}; beyond the arc {:.3f}", p, prob_clear_of_swing(1.8f, 1.75f, 1.5f, 0.10f, -1.f, 4.2f, 0.3f));
+        check(p < 1.f - rc::door::kCloseContactRiskMax, "warm18 leg 3: not clear enough to close");
+        const float far = prob_clear_of_swing(1.8f, 1.75f, 1.5f, 0.10f, -1.f, 4.2f, 0.3f);   // beyond the arc on either side
+        check(far >= 1.f - rc::door::kCloseContactRiskMax, "beyond the arc: clear whatever the swing");
+    }
     std::println("{} / {} checks passed", checks - failures, checks);
     return failures == 0 ? 0 : 1;
 }

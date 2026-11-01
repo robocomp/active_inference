@@ -149,7 +149,10 @@ DoorActuator::request(const std::string& door_name, const Eigen::Vector2f& xy_m,
     req.door.width = width_m * 1000.0f;
     req.action = open ? RoboCompDoorControl::DoorAction::OpenDoor
                       : RoboCompDoorControl::DoorAction::CloseDoor;
-    req.apertureHint = open and open_rad_ > 0.f ? -open_rad_ : 0.0f;   // the bridge: a magnitude, -rad (binary providers ignore it)
+    float rad = open_rad_;
+    if (const auto it = open_limit_rad_.find(provider_id); it != open_limit_rad_.end() and it->second > 0.f)
+        rad = rad > 0.f ? std::min(rad, it->second) : it->second;   // a wall behind this leaf
+    req.apertureHint = open and rad > 0.f ? -rad : 0.0f;   // the bridge: a magnitude, -rad (binary providers ignore it)
     req.purpose = purpose;
 
     Pending p;
