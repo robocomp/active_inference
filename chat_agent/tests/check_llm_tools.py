@@ -172,6 +172,26 @@ def tools():
            "n": {"type": "integer", "description": "how many imagined instances to draw (default 8)"},
            "seed": {"type": "integer", "description": "random seed, to repeat a picture; default random"}},
           ["concept"]),
+        t("imagine", "Answer a SUBJUNCTIVE question about the robot and its world: \"would / if / instead / what if / could it "
+          "...\" (\u00bfcabr\u00eda?, \u00bfsi estuviera ...?). It works on an imagined COPY of what the robot knows; it "
+          "never moves the robot and the imagined state is never written to the graph. question=fit: would the robot's body "
+          "fit through a door (door, and opening = shut | ajar | half | wide | as_is or degrees) or between two named things "
+          "(between = [a, b]). question=see: would it see `target` (a name or class), `from` a place (pass a NAME: a door, "
+          "room or object, empty = here), optionally if `door` were `opening`. question=succeed: how likely is a trip from "
+          "`from` (a room NAME) to `to` (a room), optionally going `via` a named door instead. Not for what is true now "
+          "(can_see, route_to, where_is) nor to go anywhere (plan_mission).",
+          {"question": {"type": "string", "enum": ["fit", "see", "succeed"],
+                        "description": "fit = would the body pass; see = would it be seen; succeed = chance a trip works"},
+           "door": {"type": "string", "description": "a door name (door_1)"},
+           "opening": {"type": "string", "description": "shut | ajar | half | wide | as_is, or degrees (\"30\")"},
+           "via": {"type": "string", "description": "succeed: the door to go through instead"},
+           "target": {"type": "string", "description": "see: what to look at, a name (fridge_1) or a class"},
+           "from": {"type": "string", "description": "a NAME: the place to look or start from (door_1, room_1, chair_1); "
+                                                     "empty = here"},
+           "to": {"type": "string", "description": "succeed: the destination room name"},
+           "between": {"type": "array", "items": {"type": "string"},
+                       "description": "fit: exactly two names (two objects, or an object and a wall)"}},
+          ["question"]),
         t("agent_control", "Start, stop or restart one of the robot's software agents (room_concept, residual_concept, "
           "retina, door_concept, table_concept, chair_concept, bottle_concept, cabinet_concept, hood_concept, "
           "human_concept, refrigerator_concept, controller, ltsm_agent, episodic_agent). When the person asks to start, "

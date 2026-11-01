@@ -38,6 +38,10 @@
 #include "mission_plan.h"
 #include "perception_world.h"
 #include "imagine_view.h"
+#include "imagine_fit.h"
+#include "imagine_see.h"
+#include "imagine_succeed.h"
+#include "../../common/robot_footprint/robot_footprint.h"
 #include "../../common/perception_card/card_io.h"
 #include "sim_door.h"
 #include "topology.h"
@@ -651,6 +655,30 @@ QJsonArray ChatSession::tools_json() const
                     {"stand", QJsonObject{{"type", "boolean"},
                                           {"description", "true = answer WHERE the robot should stand to see it"}}}},
         QJsonArray{"concept"}));
+    tools.append(tool_def("imagine",
+        "Answer a SUBJUNCTIVE question about the robot and its world: \"would / if / instead / what if / could it ...\" "
+        "(\u00bfcabr\u00eda?, \u00bfsi estuviera ...?). It works on an imagined COPY of what the robot knows; it never moves "
+        "the robot and the imagined state is never written to the graph. question=fit: would the robot's body fit through a "
+        "door (door, and opening = shut | ajar | half | wide | as_is or degrees) or between two named things (between = "
+        "[a, b]). question=see: would it see `target` (a name or class), `from` a place (pass a NAME: a door, room or "
+        "object, empty = here), optionally if `door` were `opening`. question=succeed: how likely is a trip from `from` "
+        "(a room NAME) to `to` (a room), optionally going `via` a named door instead. Not for what is true now (can_see, "
+        "route_to, where_is) nor to go anywhere (plan_mission).",
+        QJsonObject{{"question", QJsonObject{{"type", "string"}, {"enum", QJsonArray{"fit", "see", "succeed"}},
+                                             {"description", "fit = would the body pass; see = would it be seen; succeed = "
+                                                             "chance a trip works"}}},
+                    {"door", QJsonObject{{"type", "string"}, {"description", "a door name (door_1)"}}},
+                    {"opening", QJsonObject{{"type", "string"},
+                                            {"description", "shut | ajar | half | wide | as_is, or degrees (\"30\")"}}},
+                    {"via", QJsonObject{{"type", "string"}, {"description", "succeed: the door to go through instead"}}},
+                    {"target", QJsonObject{{"type", "string"}, {"description", "see: what to look at, a name (fridge_1) or a class"}}},
+                    {"from", QJsonObject{{"type", "string"},
+                                         {"description", "a NAME: the place to look or start from (door_1, room_1, chair_1); "
+                                                         "empty = here"}}},
+                    {"to", QJsonObject{{"type", "string"}, {"description", "succeed: the destination room name"}}},
+                    {"between", QJsonObject{{"type", "array"}, {"items", QJsonObject{{"type", "string"}}},
+                                            {"description", "fit: exactly two names (two objects, or an object and a wall)"}}}},
+        QJsonArray{"question"}));
     tools.append(tool_def("imagine_view",
         "Show how the robot IMAGINES a kind of thing (a chair, a table...) looks to its own sensors: draws several "
         "imagined instances on the side canvas, with what the camera (ZED) and the two LiDARs would pick up, and says "
@@ -1066,6 +1094,8 @@ QString ChatSession::answer_query(const QString& name, const QJsonObject& args)
         out = do_can_see(args);
     else if (name == "imagine_view")
         out = do_imagine_view(args);
+    else if (name == "imagine")
+        out = do_imagine(args);
     else if (name == "agents")
         out = q(answer_agents(system_.agents()));
     else if (name == "sensors")
@@ -1149,6 +1179,119 @@ QString ChatSession::do_can_see(const QJsonObject& args)
     if (stand)   // doors of unknown state at their MOST PROBABLE state (R12), never an average slit
         return q(rc::chat::where_to_stand_reply(*card, scene, *target));
     return q(rc::chat::can_see_reply(*card, scene, *target, from));   // "from here" = current heading + "if I turn" (R11)
+}
+
+namespace
+{
+/// 1-sigma (m) of the xy position on the room->node RT edge: sqrt of the larger of the two diagonal variances of the
+/// published 6x6 rt_covariance (row-major). nullopt = no edge, no covariance, or a malformed block. Type-attributed read.
+std::optional<float> edge_sigma_m(DSR::DSRGraph& G, std::uint64_t room_id, std::uint64_t node_id)
+{
+    const auto e = G.get_edge(room_id, node_id, "RT");
+    if (not e.has_value()) return std::nullopt;
+    const auto cov = G.get_attrib_by_name<rt_covariance_att>(e.value());
+    if (not cov.has_value() or cov->get().size() < 36) return std::nullopt;
+    const auto& v = cov->get();
+    const float var = std::max(v[0], v[7]);
+    if (not std::isfinite(var) or var < 0.f) return std::nullopt;
+    return std::sqrt(var);
+}
+}   // namespace
+
+std::optional<float> ChatSession::robot_body_half_width()
+{
+    if (body_half_width_.has_value()) return body_half_width_;   // the mesh does not change
+    const auto robots = G_->get_nodes_by_type("robot");
+    if (robots.empty()) return std::nullopt;
+    // Shadow's meshes are already in the robot frame (x lateral): yaw 0. Another robot's yaw is a config of the controller
+    // this agent does not have, so it has no body model here rather than a guessed one.
+    if (robots.front().name() != "Shadow") return std::nullopt;
+    const auto p = G_->get_attrib_by_name<path_att>(robots.front());
+    if (not p.has_value() or p->get().empty()) return std::nullopt;
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    const fs::path rel(p->get());
+    const auto root = rc::chat::assets_root();
+    std::optional<fs::path> file;
+    for (const auto& c : {rel, root / rel, root / "robot_concept" / rel, fs::current_path(ec) / rel,
+                          fs::current_path(ec).parent_path() / "robot_concept" / rel})
+        if (fs::exists(c, ec)) { file = c; break; }
+    if (not file.has_value()) return std::nullopt;
+    rc::RobotFootprint::MeshReport rep;
+    const auto fp = rc::RobotFootprint::from_obj(file->string(), 0.f, rep);
+    if (not fp.has_value()) return std::nullopt;
+    body_half_width_ = rep.x_max;   // |x| max in the robot frame, margin not applied: half the lateral width
+    return body_half_width_;
+}
+
+QString ChatSession::do_imagine(const QJsonObject& args)
+{
+    namespace im = rc::chat::imagine;
+    const auto str = [&](const char* k) { return args.value(k).toString().trimmed().toStdString(); };
+    const std::string question = rc::chat::lower_ascii(str("question"));
+    if (question != "fit" and question != "see" and question != "succeed")
+        return QStringLiteral("REJECTED: question must be fit, see or succeed");
+
+    // The snapshot, built now and only now (main thread): the scene, the body, the uncertainties, the memory.
+    im::ImaginedWorld w;
+    w.scene = rc::chat::build_see_scene(*G_, *inner_, digest_);
+    w.body_half_width = robot_body_half_width();
+    if (const auto room = G_->get_node(w.scene.room); room.has_value())
+    {
+        const auto robots = G_->get_nodes_by_type("robot");
+        if (not robots.empty()) w.robot_sigma_m = edge_sigma_m(*G_, room->id(), robots.front().id());
+        for (const auto& d : w.scene.doors)
+            if (const auto n = G_->get_node(d.name); n.has_value())
+                if (const auto sg = edge_sigma_m(*G_, room->id(), n->id()); sg.has_value()) w.door_sigma_m[d.name] = *sg;
+        for (const auto& o : w.scene.objects)
+            if (const auto n = G_->get_node(o.name); n.has_value())
+                if (const auto sg = edge_sigma_m(*G_, room->id(), n->id()); sg.has_value()) w.object_sigma_m[o.name] = *sg;
+    }
+    if (const auto topo = remembered_topology(); topo.has_value()) w.topology = *topo;
+    if (const auto st = em_store(); st.has_value()) w.records = st->today;
+
+    if (question == "fit")
+    {
+        if (const auto b = args.value("between"); b.isArray() and not b.toArray().isEmpty())
+        {
+            const auto arr = b.toArray();
+            if (arr.size() != 2) return QStringLiteral("REJECTED: between needs exactly two names");
+            return q(im::answer_fit_between(w, arr.at(0).toString().toStdString(), arr.at(1).toString().toStdString()).text);
+        }
+        const std::string door = str("door");
+        if (door.empty()) return QStringLiteral("ASK: which door, or which two things (between), should I try to fit through?");
+        const auto op = im::parse_opening(str("opening"));
+        if (not op.has_value()) return q(op.error());
+        return q(im::answer_fit_door(w, door, *op).text);
+    }
+    if (question == "see")
+    {
+        std::filesystem::path root;
+        std::string looked_in;
+        const auto cards = load_cards(*G_, root, looked_in);
+        const std::string target = str("target");
+        if (target.empty()) return QStringLiteral("ASK: what should I imagine looking at?");
+        // The card is the target's CLASS: the named instance's subtype, else the word itself.
+        std::string cls = rc::chat::canonical_concept(target);
+        if (const auto it = std::ranges::find_if(w.scene.objects, [&](const auto& o) { return rc::chat::lower_ascii(o.name) == rc::chat::lower_ascii(target); });
+            it != w.scene.objects.end() and not it->subtype.empty())
+            cls = rc::chat::canonical_concept(it->subtype);
+        std::optional<rc::card::Card> card;
+        if (const auto c = std::ranges::find(cards, cls, &rc::card::Card::concept_); c != cards.end()) card = *c;
+        if (not card.has_value()) return q(rc::chat::answer_no_card(not cards.empty(), looked_in));
+        std::optional<im::Opening> op;
+        if (not str("door").empty())
+        {
+            auto po = im::parse_opening(str("opening"));
+            if (not po.has_value()) return q(po.error());
+            op = *po;
+        }
+        return q(im::answer_see(w, card, target, str("from"), str("door"), op));
+    }
+    // succeed: `from` is a room NAME (empty = the current room); the destination is `to`. The mission IR's destination is
+    // not consulted: an empty `to` goes through as the answer's own ASK.
+    const std::string from = str("from").empty() or str("from") == "here" ? digest_.facts.room : str("from");
+    return q(im::answer_succeed(w, from, str("to"), str("via")));
 }
 
 QString ChatSession::do_imagine_view(const QJsonObject& args)
