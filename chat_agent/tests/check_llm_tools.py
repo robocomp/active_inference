@@ -496,6 +496,30 @@ CASES = [
      lambda n, a, c: n == "can_see" or n is None),
     ("imagine_view NOT: draw the graph", [], "none", "draw the graph",
      lambda n, a, c: n == "draw" or n == "show"),
+    # imagine (2026-11-01): subjunctive questions on an imagined copy of the world; the present tense stays elsewhere
+    ("imagine: fit door half open", [], "none", "would I fit through door_1 if it were half open?",
+     lambda n, a, c: n == "imagine" and a.get("question") == "fit" and "1" in str(a.get("door", ""))
+     and "half" in str(a.get("opening", "")).lower()),
+    ("imagine: fit wall chair", [], "none", "do you fit between the wall and the chair?",
+     lambda n, a, c: n == "imagine" and a.get("question") == "fit"
+     and "chair" in " ".join(map(str, a.get("between") or [])).lower()
+     and "wall" in " ".join(map(str, a.get("between") or [])).lower()),
+    ("imagine: succeed via door_2", [], "none", "would the mission to room_2 succeed if you went through door_2 instead?",
+     lambda n, a, c: n == "imagine" and a.get("question") == "succeed" and "2" in str(a.get("via", ""))),
+    ("imagine: see fridge from door", [], "none", "would you see the fridge from door_2?",
+     lambda n, a, c: n == "imagine" and a.get("question") == "see"
+     and re.search("fridge|refrigerator", str(a.get("target", "")).lower()) is not None and "2" in str(a.get("from", ""))),
+    # "there" names no place: either the tool (whose resolver answers ASK) or the model asking back is right
+    ("imagine: see from there (unresolved)", [], "none", "would you see the fridge from there?",
+     lambda n, a, c: (n == "imagine" and a.get("question") == "see") or (n is None and "?" in c)),
+    ("imagine: es cabria medio abierta", [], "none", "¿cabrías por door_1 si estuviera medio abierta?",
+     lambda n, a, c: n == "imagine" and a.get("question") == "fit" and "1" in str(a.get("door", ""))),
+    ("imagine NOT: can you see the fridge", [], "none", "can you see the fridge?",
+     lambda n, a, c: n != "imagine"),
+    ("imagine NOT: go through door_2", [], "none", "go through door_2",
+     lambda n, a, c: n in ("plan_mission", "cross_door")),
+    ("imagine NOT: how often did door_1 fail", [], "none", "how often did door_1 fail?",
+     lambda n, a, c: n == "outcome_stats"),
     # long-term memory (ltsm_topology): rooms the robot remembers and the route to one
     ("passages remembered", [], "none", "which rooms do you remember?",
      lambda n, a, c: n == "known_rooms" or (n is None and "room_2" in c and "room_3" in c)),

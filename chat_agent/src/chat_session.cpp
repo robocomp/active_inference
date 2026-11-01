@@ -1266,6 +1266,7 @@ QString ChatSession::do_imagine(const QJsonObject& args)
     }
     if (question == "see")
     {
+        if (w.scene.room.empty()) return QStringLiteral("I do not know which room I am in, so I cannot imagine what I would see.");
         std::filesystem::path root;
         std::string looked_in;
         const auto cards = load_cards(*G_, root, looked_in);
@@ -1290,7 +1291,7 @@ QString ChatSession::do_imagine(const QJsonObject& args)
     }
     // succeed: `from` is a room NAME (empty = the current room); the destination is `to`. The mission IR's destination is
     // not consulted: an empty `to` goes through as the answer's own ASK.
-    const std::string from = str("from").empty() or str("from") == "here" ? digest_.facts.room : str("from");
+    const std::string from = str("from").empty() or rc::chat::lower_ascii(str("from")) == "here" ? digest_.facts.room : str("from");
     return q(im::answer_succeed(w, from, str("to"), str("via")));
 }
 
