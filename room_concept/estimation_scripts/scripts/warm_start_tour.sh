@@ -126,7 +126,10 @@ TSV=crossing/$1/legs.tsv; printf 'leg\targ\tverdict\ttrue_side\ttrue_xy\tstatus\
 # R1_LOOP=1 (user 2026-11-01): room_1 -> room_2 -> room_3 -> back into room_1 through DOOR_0 (the bathroom's second door, never
 # crossed in the memory: `cross new` from room_3). Tests RECOGNITION: the room entered must become room_1, not a new room_4.
 if [ -n "$R1_LOOP" ]; then
-  ARGS=(room_2 room_3 new); WANT=(room_2 room_3 room_1); BEHIND=(room_1 room_2 room_3); N_LEGS=${N_LEGS:-3}
+  # leg 4 (R1_LOOP_BACK=1): back to room_3 through DOOR_0 — leaving the recognised room_1 is what commits the swap to ltsm's
+  # memory (it is held until the robot leaves): a run that ends in room_1 never saves the room_3 <-> room_1 passage.
+  ARGS=(room_2 room_3 new room_3); WANT=(room_2 room_3 room_1 room_3); BEHIND=(room_1 room_2 room_3 room_1)
+  N_LEGS=${N_LEGS:-$([ -n "$R1_LOOP_BACK" ] && echo 4 || echo 3)}
 elif [ "$(cat $FIX/room_name_hwm.txt)" -ge 3 ]; then
   ARGS=(room_2 room_3 room_2 room_1); WANT=(room_2 room_3 room_2 room_1); BEHIND=(room_1 room_2 room_3 room_2)
 else
