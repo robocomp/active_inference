@@ -230,6 +230,7 @@ Derived by reading each agent, not inferred from includes. `—` = not applicabl
 | human | ❌ | ❌ `belief_stabilizer` | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
 | language_agent *(2026-10-12)* | — no instances | — no belief | — | — | — | — | — | ✅ |
 | self_calibration *(2026-10-23, skeleton)* | — no instances | — no belief | — | — | — | — | — | ✅ |
+| ltom_agent *(2026-11-01, observer)* | — never writes an instance | — no belief | — | — | — | — | — | ✅ |
 
 *2026-10-31 (perception cards, Task 9):* chair's wall LoS cell went from `—` to ✅. `ChairFitter::zed_detectability` now delegates to `chair_p_detect` (`chair_concept/src/chair_detect.h`): `term_envelope(roi_fill) × in_fov × central × walls_block(camera, chair, room polygon)`; a chair in another room gets P(detect) 0 and its absence is no longer charged. Retired `Existence.ZedEdgeOffset/ZedRangeFull/ZedRangeRef/ZedClearLosFloor`. Live check pending.
 
@@ -247,6 +248,11 @@ DSR signal; the digest and the command status are polled on the main thread.
 grace 3000 ms; required `robot_concept`, `room_concept`); it connects no DSR signal. No ❌. When it later writes
 proposal attributes on its own node, that node stays its only owned state (robot_concept remains the sole writer of
 body→sensor RT edges).
+
+**ltom_agent** (2026-11-01) is a pure OBSERVER: CREATE/UPDATE/REMOVE of instances are `—` (it never writes an object node and never decides
+identity). It owns only its agent node `ltom_agent 28` (`[Owns] nodes = ["ltom_agent 28"]`, id matches `[Agent].id = 28`), deleted by the
+shared coordinator on SIGTERM (verified on isolated domain 64: `[Graph] node 'ltom_agent 28' deleted`). It connects no DSR signal (polls on the
+main thread while Operating) and keeps its repertory in a file; a node disappearing while its owner is gone is "owner exit", never death.
 
 **door_concept CREATE exceptions (2026-10-20).** Birth stays tracker-only for every door *first seen*. Two creations do
 not go through the tracker, and neither is a birth in §1's sense — both RESTORE a door that some earlier evidence

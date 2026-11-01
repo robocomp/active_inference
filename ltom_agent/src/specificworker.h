@@ -16,7 +16,11 @@
 
 #include "../../common/agent_presence_coordinator/agent_presence_coordinator.h"
 
+#include "repertory.h"
+
 #include <atomic>
+#include <chrono>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -47,10 +51,9 @@ private:
     void terminal_shutdown();
     static constexpr int REQUIRED_LOSS_GRACE_MS = 3000;
 
-    // -- [LTOM] config (read in initialize(); later tasks consume it) --
+    // -- [LTOM] config (read in initialize()). The poll period is Period.Compute (one source of truth) --
     struct Params
     {
-        int period_ms = 500;
         int owner_grace_ms = 3000;
         int save_period_s = 30;
         std::string repertory_path = "etc/ltom_repertory.json";
@@ -58,6 +61,13 @@ private:
         std::vector<std::string> classes;
     };
     Params params_;
+
+    // -- observe / consolidate / persist (Tasks 2-4) --
+    void save_now(const char* why);
+    std::unique_ptr<ltom::Repertory> repertory_;
+    std::unique_ptr<DSR::InnerEigenAPI> inner_eigen_;   // created ONCE in initialize(), on the main thread (owns the ts==0 cache)
+    bool operating_ = false;                            // compute() polls only while the presence SM is Operating
+    std::chrono::steady_clock::time_point last_save_{std::chrono::steady_clock::now()};
 
     bool startup_check_flag = false;
     bool owned_nodes_cleaned_ = false;

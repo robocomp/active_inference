@@ -44,7 +44,8 @@ agent_info_period_ms = 1000
 nodes = ["ltom_agent 28"]
 
 [Period]
-Compute   = 250
+# Compute = the poll period of the live graph (ms): compute() runs once per Operating step. Single source of truth.
+Compute   = 500
 Emergency = 500
 
 [Component.Debug]
@@ -57,8 +58,6 @@ Trace.Protocol = "0"
 MessageSizeMax = "20004800"
 
 [LTOM]
-# Poll period of the live graph (main-thread QTimer / compute; no DSR signals are connected).
-period_ms       = 500
 # How long an owner may be gone before its disappearance is read as owner exit rather than death. = presence heartbeat_timeout_ms.
 owner_grace_ms  = 3000
 # The repertory file is the store of record; saved at this period and on a graceful stop.

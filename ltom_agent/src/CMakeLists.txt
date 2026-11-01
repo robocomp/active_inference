@@ -12,11 +12,17 @@ LIST(APPEND LIBS
 LIST(APPEND SOURCES
   ../src/specificworker.cpp
   ../src/specificworker_presence.cpp
+  ../src/repertory.cpp
+  ../src/repertory_io.cpp
+  ../src/graph_sightings.cpp
 )
 
 # Headers set
 LIST(APPEND HEADERS
   ../src/specificworker.h
+  ../src/repertory.h
+  ../src/repertory_io.h
+  ../src/graph_sightings.h
 )
 
 LIST(APPEND LIBS ${LIBS})
