@@ -97,6 +97,8 @@ namespace rc
     {
         if (is_initialized())
             return true;
+        if (awaiting_layout())   // MapMode = "ltsm": no layout yet — nothing to localise against, and never a guessed room
+            return false;
         if (run_ctx_.high_lidar_buffer == nullptr)
             return false;
 

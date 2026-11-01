@@ -114,7 +114,7 @@ void SpecificWorker::start_status_stream()
     status_.set_sources({
         .room = [this](rc::status::Obj& o)
         {
-            o.s("map_mode", room_concept_.estimating() ? "estimate" : "given")
+            o.s("map_mode", room_concept_.estimating() ? "estimate" : room_concept_.params.map_mode == rc::RoomConcept::Params::MapMode::Ltsm ? "ltsm" : "given")
              .b("node_created", scene_graph_ and scene_graph_->room_node_created())
              .i("stable_frames", scene_graph_ ? scene_graph_->stable_frames() : 0)
              .i("needed", params.STABLE_FRAMES_REQUIRED)
@@ -399,13 +399,24 @@ void SpecificWorker::initialize()
         qInfo() << "[room] RoomShape.MapMode = estimate: no layout loaded; the room will be learnt from the LiDAR"
                 << "(first pose = origin until the polygon closes and is re-anchored).";
     }
+    else if (room_concept_.params.map_mode == rc::RoomConcept::Params::MapMode::Ltsm)
+    {
+        // WARM START: the layout is ltsm's start-up recall (compute() polls for it, initialize_room_model_from_recall).
+        // Nothing is localised until it arrives; never an SVG, never an estimate.
+        room_concept_.set_awaiting_layout(true);
+        ltsm_wait_since_ = std::chrono::steady_clock::now();
+        rc::StatusReporter::loaded("layout", "", "RoomShape.MapMode = ltsm: waiting for ltsm's start-up recall");
+        qInfo() << "[room] RoomShape.MapMode = ltsm: waiting for ltsm's start-up recall of the starting room";
+    }
     else
         initialize_room_model_from_svg();
     const std::string pose_path = pose_file_path();
     phase("room_model");
-    room_concept_.set_seed_pose_file(pose_path);
+    const bool ltsm_mode = room_concept_.params.map_mode == rc::RoomConcept::Params::MapMode::Ltsm;
+    if (not ltsm_mode)   // a warm start finds the robot by its global search: no seed (a stopped tour must not place it)
+        room_concept_.set_seed_pose_file(pose_path);
     rc::StatusReporter::loaded("seed_pose", pose_path,
-                               room_concept_.estimating() ? "ignored in estimate mode" : "");
+                               room_concept_.estimating() ? "ignored in estimate mode" : ltsm_mode ? "ignored in ltsm mode" : "");
     phase("seed_pose");
 
     // The DSR graph viewer is OPTIONAL now: the layout GUI lives in its own top-level window

@@ -195,6 +195,10 @@ class SpecificWorker : public GenericWorker
         // outline in the un-shifted frame.
         // Old-frame coordinates of the new origin; zero when no recentring was applied.
         void initialize_room_model_from_svg();
+        /// WARM START (MapMode = "ltsm"): adopt the outline of ltsm's start-up recall as the given layout, in the stored frame
+        /// (no recentring). True once done (then the localiser is released: set_awaiting_layout(false)).
+        bool initialize_room_model_from_recall();
+        std::chrono::steady_clock::time_point ltsm_wait_since_{}, ltsm_wait_logged_{};
         void save_robot_pose_on_exit() const;
 
         // ── Epistemic controller ────────────────────────────────────────────────

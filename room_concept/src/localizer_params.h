@@ -621,7 +621,9 @@ namespace rc::loc
         // replace the SDF factor, the first pose is the origin until the polygon closes and is
         // re-anchored to the bbox-centred frame the fleet expects (reanchor_map_frame). No second gate
         // inside Estimate mode: freezing is by accumulated precision, structure change by ΔF.
-        enum class MapMode { Given, Estimate };
+        // Ltsm (warm start, docs/superpowers/specs/2026-11-01-ltsm-warm-start-design.md): a GIVEN room whose layout comes from
+        // ltsm's start-up recall instead of an SVG; nothing is localised until it arrives.
+        enum class MapMode { Given, Estimate, Ltsm };
         MapMode map_mode = MapMode::Given;
         wallseg::Params wall_seg;              // segmenter: sensor σ, χ² levels, RANSAC budget
         /// The box layout sidecar. Off by default; see room_boxes_channel.h for why it is a

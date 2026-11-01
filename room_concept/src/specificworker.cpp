@@ -42,6 +42,7 @@
 #include <QElapsedTimer>
 #include <QCoreApplication>
 #include <fstream>
+#include "../../common/room_transition/startup_recall.h"   // warm start
 #include <unordered_set>
 #include <QDir>
 #include <QFile>
@@ -128,6 +129,17 @@ void SpecificWorker::compute()
         // much it is allowed to move, and one that only draws it can ignore the second number.
         room_concept_.set_measured_ceiling_sigma(
             lidar_ingestor_->measured_ceiling_sigma_.load(std::memory_order_relaxed));
+    }
+    // WARM START (MapMode = "ltsm"): wait for ltsm's start-up recall; the localiser does nothing until it is adopted.
+    if (room_concept_.awaiting_layout() and not initialize_room_model_from_recall())
+    {
+        const auto t = std::chrono::steady_clock::now();
+        if (t - ltsm_wait_logged_ >= std::chrono::seconds(10))
+        {
+            ltsm_wait_logged_ = t;
+            qInfo().noquote() << QString("[room] MapMode=ltsm: still waiting for ltsm's start-up recall (%1 s)")
+                                     .arg(std::chrono::duration_cast<std::chrono::seconds>(t - ltsm_wait_since_).count());
+        }
     }
     auto init_time = std::chrono::steady_clock::now();
     // MICROSECONDS, not milliseconds. These were qint64 *_ms read off QElapsedTimer::elapsed(),
@@ -523,6 +535,48 @@ void SpecificWorker::initialize_room_model_from_svg()
     room_initialized_from_svg_polygon_ = false;
     qWarning() << "SVG polygon not loaded; using rectangular fallback.";
     rc::StatusReporter::loaded("layout", svg_path, "FAILED: fewer than 3 points — rectangular fallback in use");
+}
+
+bool SpecificWorker::initialize_room_model_from_recall()
+{
+    if (not G) return false;
+    for (const auto& n : G->get_nodes_by_type("metaconcept"))
+    {
+        const auto par = G->get_attrib_by_name<parent_att>(n);
+        const auto pn = par.has_value() ? G->get_node(par.value()) : std::nullopt;
+        if (not pn.has_value()
+            or not rc::room_transition::is_startup_recall(G->get_attrib_by_name<object_subtype_att>(n).value_or(std::string{}),
+                                                          pn->type(), G->get_attrib_by_name<recall_late_att>(n).value_or(false)))
+            continue;
+        const std::string room = n.name().starts_with("recall_") ? n.name().substr(7) : n.name();
+        // Only room_1 for now (spec non-goal): the given-mode room node this agent creates is room_1 / room_id 1.
+        if (room != "room_1")
+        {
+            static bool warned = false;
+            if (not std::exchange(warned, true))
+                qWarning().noquote() << QString("[room] MapMode=ltsm: start-up recall is '%1', only room_1 is supported for now — not adopted")
+                                            .arg(QString::fromStdString(room));
+            return false;
+        }
+        const auto px = G->get_attrib_by_name<delimiting_polygon_x_att>(n);
+        const auto py = G->get_attrib_by_name<delimiting_polygon_y_att>(n);
+        if (not px.has_value() or not py.has_value()) return false;
+        const auto poly = rc::room_transition::recall_outline(px->get(), py->get());
+        if (not poly.has_value()) return false;
+        // The STORED frame, exactly: no recentring (the doors, the passage and ltsm's by-place matching are in it).
+        calib_->set_room_polygon(*poly, Eigen::Vector2f::Zero());
+        if (gt_log_) gt_log_->set_world_offset(Eigen::Vector2f::Zero());
+        room_concept_.configure_room_from_polygon(calib_->room_polygon());
+        room_initialized_from_svg_polygon_ = true;
+        room_concept_.set_awaiting_layout(false);
+        rc::StatusReporter::loaded("layout", n.name(), std::format("{} vertices from ltsm's start-up recall, stored frame", poly->size()));
+        qInfo().noquote() << QString("[room] MapMode=ltsm: layout of '%1' (room_id %2, %3 vertices) from ltsm's start-up recall — localising")
+                                 .arg(QString::fromStdString(room))
+                                 .arg(G->get_attrib_by_name<room_id_att>(n).value_or(0))
+                                 .arg(poly->size());
+        return true;
+    }
+    return false;
 }
 
 ///////////////////////////////////////////////////////////////////////////////

@@ -215,6 +215,7 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
     {
         p.MAP_MODE = m;
         room_concept.params.map_mode = (m == "estimate") ? rc::RoomConcept::Params::MapMode::Estimate
+                                     : (m == "ltsm")     ? rc::RoomConcept::Params::MapMode::Ltsm
                                                          : rc::RoomConcept::Params::MapMode::Given;
         if (m == "last")
         {
@@ -234,8 +235,8 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
                 qInfo() << "[cfg] RoomShape.MapMode = last: no learnt layout for" << QString::fromStdString(stem)
                         << "yet — resolved again once the scenario names its layout";
         }
-        else if (m != "estimate" and m != "given")
-            qWarning() << "[cfg] RoomShape.MapMode" << QString::fromStdString(m) << "is not 'given'|'estimate'|'last' — treated as given";
+        else if (m != "estimate" and m != "given" and m != "ltsm")
+            qWarning() << "[cfg] RoomShape.MapMode" << QString::fromStdString(m) << "is not 'given'|'estimate'|'last'|'ltsm' — treated as given";
     });
     {
         auto& ws = room_concept.params.wall_seg;

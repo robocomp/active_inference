@@ -1214,7 +1214,9 @@ BoxObsZMax = 1.45
 # ── MODEL CHOICES MEASURED IN tools/wall_slam_selftest (2026-09-21..24) ───────────────────────────
 # These were WS_* environment flags while they were being measured; they are parameters now, so the
 # agent runs what the bench validated instead of the defaults nobody set. ⚠ They apply to the BOX
-# SIDECAR only (BoxLayout): MapMode = "given" and the wall-map estimator are untouched by all of it.
+# SIDECAR only (BoxLayout): # MapMode = "ltsm" (warm start, docs/superpowers/specs/2026-11-01-ltsm-warm-start-design.md): the starting room's layout
+# comes from ltsm's START-UP recall ([WarmStart] Room in ltsm), in its stored frame; nothing is localised until it arrives.
+MapMode = "given" and the wall-map estimator are untouched by all of it.
 #
 # The layout frame is fitted by the layout's own likelihood instead of a vote of wall-segment
 # directions that never forgets. The vote landed 0.5-3.6 deg off run to run; the fit lands within

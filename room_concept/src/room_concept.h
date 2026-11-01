@@ -430,6 +430,11 @@ public:
     // it has to mean exactly that -- reporting "initialised" for a model with undefined state made
     // the viewer throw out of a Qt timer handler every tick.
     bool is_initialized() const { return model_ != nullptr and model_->has_state(); }
+    /// WARM START (MapMode = "ltsm"): while set, the localiser does not initialise (bootstrap_initialization_from_lidar
+    /// returns false) — the layout has not arrived from ltsm yet. Set before start(), cleared by the main thread once the
+    /// polygon is configured (release), read by the localiser thread (acquire).
+    void set_awaiting_layout(bool v) { awaiting_layout_.store(v, std::memory_order_release); }
+    bool awaiting_layout() const { return awaiting_layout_.load(std::memory_order_acquire); }
 
     /// True while a global grid search is running, and for `hold_ms` after one finishes. The hold
     /// exists because the GUI polls at ~15-30 Hz from another thread: a search that completes between
@@ -706,6 +711,7 @@ private:
    /// Set by begin_room_estimation; never cleared for the life of the run (a room learnt is not
    /// un-learnt by walking back). Read by estimating() from any thread, hence atomic.
    std::atomic<bool>  runtime_estimate_{false};
+   std::atomic<bool>  awaiting_layout_{false};   ///< MapMode = "ltsm": no layout from ltsm yet (set_awaiting_layout)
    /// Accumulated, un-consumed re-anchor (T_new_old). Localiser thread only; see take_pending_reanchor.
    Eigen::Affine2f    pending_reanchor_ = Eigen::Affine2f::Identity();
    bool               has_pending_reanchor_ = false;
