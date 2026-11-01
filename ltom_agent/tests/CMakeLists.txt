@@ -6,7 +6,11 @@ project(ltom_agent_tests CXX)
 
 # NO -march=native, NO -DEIGEN_MAX_ALIGN_BYTES=0 (house rule).
 add_compile_options(-O2 -fmax-errors=1 -Wall -Wextra)
-find_package(Qt6 COMPONENTS Core)    # kept available for the persistence test (Task 3); not linked here
+find_package(Qt6 REQUIRED COMPONENTS Core)
 
 add_executable(test_repertory test_repertory.cpp ../src/repertory.cpp)
 set_target_properties(test_repertory PROPERTIES CXX_STANDARD 23 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
+
+add_executable(test_repertory_io test_repertory_io.cpp ../src/repertory_io.cpp ../src/repertory.cpp)
+set_target_properties(test_repertory_io PROPERTIES CXX_STANDARD 23 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
+target_link_libraries(test_repertory_io PRIVATE Qt6::Core)

@@ -1,1 +1,6 @@
 tests/build/
+# runtime data (etc/ltom_repertory.csv is already covered by the top-level **/etc/*.csv)
+etc/ltom_repertory.json
+etc/ltom_repertory.json.prev
+etc/ltom_repertory.json.tmp
+etc/ltom_repertory.json.bad.*
