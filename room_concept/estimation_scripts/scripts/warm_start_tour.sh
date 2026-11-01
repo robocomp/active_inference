@@ -3,6 +3,7 @@
 # room_1 and room_2 (a fixture made by make_warm_fixture.sh), and goes on to the third room:
 #   leg 1  cross room_2   (the door with a recall_room_2 child: DOOR_1)          want room_2
 #   leg 2  cross new      (room_2's door nobody remembers the far side of: DOOR_2) want room_3
+#          (a THREE-room fixture: leg 2 is `cross room_3` — the door with a recall_room_3 child)
 #   leg 3  cross room_2   (back through DOOR_2)                                    want room_2
 #   leg 4  cross room_1   (back through DOOR_1)                                    want room_1
 # Graded on GROUND TRUTH (threerooms-piso.wbt): DOOR_1's line y = 9.3796 (room_1 below), DOOR_2's line x = -1.705 (room_3 east).
@@ -104,7 +105,14 @@ explore_once() {
 true_xy() { python3 $S/tp.py get 2>/dev/null | tail -1 | awk '{print $1, $2}'; }
 side_of() { awk -v x="$1" -v y="$2" -v dy=$DOOR1_Y -v dx=$DOOR2_X 'BEGIN{ if (y=="") print "unknown"; else if (x > dx) print "room_3"; else if (y > dy) print "room_2"; else print "room_1" }'; }
 TSV=crossing/$1/legs.tsv; printf 'leg\targ\tverdict\ttrue_side\ttrue_xy\tstatus\tt0_ms\tt1_ms\tgraph_room\n' > $TSV
-ARGS=(room_2 new room_2 room_1); WANT=(room_2 room_3 room_2 room_1); BEHIND=(room_1 room_2 room_3 room_2)   # close behind: the room left
+# THE PLAN FOLLOWS WHAT THE FIXTURE KNOWS (its room_name_hwm): two rooms remembered -> leg 2 crosses into a NEW room (room_3);
+# three remembered -> every leg goes by relation, room_3 included (user 2026-11-01: "start the next tour with the three rooms").
+if [ "$(cat $FIX/room_name_hwm.txt)" -ge 3 ]; then
+  ARGS=(room_2 room_3 room_2 room_1); WANT=(room_2 room_3 room_2 room_1); BEHIND=(room_1 room_2 room_3 room_2)
+else
+  ARGS=(room_2 new room_2 room_1); WANT=(room_2 room_3 room_2 room_1); BEHIND=(room_1 room_2 room_3 room_2)   # close behind: the room left
+fi
+echo "leg plan: ${ARGS[*]} (fixture remembers $(cat $FIX/room_name_hwm.txt) rooms)"
 ok=0; n_legs=${N_LEGS:-4}
 for leg in $(seq 1 $n_legs); do
   a=${ARGS[$((leg-1))]}; want=${WANT[$((leg-1))]}
