@@ -445,6 +445,14 @@ int main()
         CHECK(d.skipped.size() == 1 and d.skipped[0].name == "door_1" and d.skipped[0].reason == SkipReason::PlaceLive);
     }
 
+    // ── WARM START (2026-11-01): a START-UP recall announces the FIRST room too; without it the first room stays fresh ──
+    {
+        CHECK(plan_room_entry(true, true, false, "", "room_1", true).recalled);         // start-up recall: restore room_1's doors
+        CHECK(not plan_room_entry(true, true, false, "", "room_1", false).recalled);    // today's rule: the first room is fresh
+        CHECK(plan_room_entry(false, true, false, "room_2", "room_1").recalled);        // a crossing recall, as before
+        CHECK(not plan_room_entry(true, false, false, "", "room_1", true).recalled);    // no announcement, nothing restored
+    }
+
     if (fails == 0) std::print("test_door_identity_table: ALL PASS\n");
     return fails == 0 ? 0 : 1;
 }

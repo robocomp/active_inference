@@ -305,6 +305,7 @@ private:
     std::unordered_set<std::string> recall_names_seen_;
     [[nodiscard]] bool recall_node_live(const std::string& room_name) const;
     std::unordered_set<std::string> recall_late_names_;   // the subset announced with recall_late (recognition swap)
+    std::unordered_set<std::string> recall_startup_names_;   // the subset announced by a START-UP recall (warm start)
 
     // ── LOOK AT A REMEMBERED DOOR (2026-10-21, tourP5; door_look.h) ─────────────────────────────────────────────
     // Each identity row of the CURRENT room whose door is not instantiated gets an epistemic "look here" affordance

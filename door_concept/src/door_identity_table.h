@@ -413,11 +413,13 @@ inline int strip_restorable(std::vector<IdentityRow>& rows, std::string_view roo
 /// are restored) and the provisional room just left is dead: room names are never reused, so its identity rows go
 /// (drop_room), not merely stripped to identity. An early recall, or none, drops nothing.
 struct RoomEntryPlan { bool recalled = false; bool drop_left = false; };
+// `startup_announced` (warm start, 2026-11-01): the announcement is ltsm's START-UP recall of the room the robot starts in
+// (common/room_transition/startup_recall.h) — the first room is then a remembered one and its doors are restored.
 inline RoomEntryPlan plan_room_entry(bool first_resolution, bool recall_announced, bool recall_late,
-                                     std::string_view left_room, std::string_view entered_room)
+                                     std::string_view left_room, std::string_view entered_room, bool startup_announced = false)
 {
     RoomEntryPlan p;
-    p.recalled = recall_announced and not first_resolution;
+    p.recalled = recall_announced and (not first_resolution or startup_announced);
     p.drop_left = p.recalled and recall_late and not left_room.empty() and left_room != entered_room;
     return p;
 }

@@ -31,6 +31,7 @@
  *  ⑦ Detect divergence and set request_full_sample_att
  */
 
+#include "../../common/room_transition/startup_recall.h"   // warm start
 #include "specificworker.h"
 
 #include "../../common/config_report/config_read.h"   // rc::cfg::Reader (SHARED)
@@ -604,6 +605,7 @@ void SpecificWorker::initialize()
     // Which door is which — remembered from earlier runs. Without this the numbering falls out of the order
     // the robot happens to sweep the room, so the same door was door_1 one run and door_2 the next.
     load_identities();
+    latch_recall_names();   // a warm start's start-up recall may already be there (an agent restart mid-run)
     if (room_node_id_ != 0)
         enter_room_memory(room_node_id_, true);   // the first room is a fresh entry: older runs' poses can't come back
 
@@ -3553,8 +3555,16 @@ void SpecificWorker::latch_recall_names()
             and G->get_attrib_by_name<object_subtype_att>(n).value_or(std::string{}) == "room_recall")
             if (const auto room = n.name().substr(7); not room.empty())
             {
-                if (G->get_attrib_by_name<recall_late_att>(n).value_or(false))
+                const bool late = G->get_attrib_by_name<recall_late_att>(n).value_or(false);
+                if (late)
                     recall_late_names_.insert(room);
+                // WARM START: hung from the robot, not late — ltsm's start-up recall of the room the robot starts in
+                if (const auto par = G->get_attrib_by_name<parent_att>(n); par.has_value())
+                    if (const auto pn = G->get_node(par.value()); pn.has_value()
+                        and rc::room_transition::is_startup_recall(rc::room_transition::kRecallSubtype, pn->type(), late)
+                        and recall_startup_names_.insert(room).second)
+                        std::print("door_concept: [restore] ltsm's START-UP recall announces '{}' — the room the robot starts in "
+                                   "is a remembered one; its doors will be restored\n", room);
                 if (not recall_names_seen_.insert(room).second) continue;
                 std::print("door_concept: [restore] ltsm announces remembered '{}' behind a door — its doors will be "
                            "restored if the robot enters it\n", room);
@@ -3746,7 +3756,8 @@ void SpecificWorker::enter_room_memory(std::uint64_t room_id, bool first_resolut
     const auto room = G->get_node(room_id);
     const auto plan = room.has_value()
         ? rc::door::plan_room_entry(first_resolution, recall_names_seen_.contains(room->name()),
-                                    recall_late_names_.contains(room->name()), left_room, room->name())
+                                    recall_late_names_.contains(room->name()), left_room, room->name(),
+                                    recall_startup_names_.contains(room->name()))
         : rc::door::RoomEntryPlan{};
     const bool recalled = plan.recalled;
     recalled_room_id_ = recalled ? room_id : 0;   // remembered looks are offered only in the remembered room
