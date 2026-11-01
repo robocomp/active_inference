@@ -27,6 +27,14 @@ ChairSceneGraph::ChairSceneGraph(std::shared_ptr<DSR::DSRGraph> graph,
     : G_(std::move(graph)), rt_api_(rt_api), cfg_(cfg), relayout_(std::move(relayout))
 {}
 
+int ChairSceneGraph::identity_last()
+{
+    if (not identity_)
+        identity_.emplace(rc::identity::InstanceCounter::open("etc/instance_identity.csv",
+                                                              static_cast<std::uint32_t>(G_->get_agent_id())));
+    return identity_->last();
+}
+
 std::uint64_t ChairSceneGraph::create_instance_from_detection(const Eigen::Vector3f& centroid_room,
                                                               std::uint64_t room_node_id,
                                                               std::optional<Resurrect> r)

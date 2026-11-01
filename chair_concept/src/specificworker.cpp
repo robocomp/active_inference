@@ -786,7 +786,8 @@ void SpecificWorker::run_instance_tracker()
         std::set<std::string> live_names;
         for (const auto& n : G->get_nodes_by_type("object"))
             if (n.name().starts_with("chair_")) live_names.insert(n.name());
-        recall_cands = rc::recall_candidates(*G, room_node_id_, static_cast<std::uint32_t>(G->get_agent_id()), live_names);
+        recall_cands = rc::recall_candidates(*G, room_node_id_, static_cast<std::uint32_t>(G->get_agent_id()),
+                                             scene_graph_->identity_last(), live_names);
     }
     for (const int d : res.births)
     {

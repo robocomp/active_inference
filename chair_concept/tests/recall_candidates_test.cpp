@@ -61,7 +61,7 @@ struct Fixture
 static void test_reads_own_chair_recalls(Fixture& f)
 {
     f.recall(f.room, uid_of(kMe, 3), 1.5f, -2.0f, 0.02f);
-    const auto c = rc::recall_candidates(*f.G, f.room, kMe, {});
+    const auto c = rc::recall_candidates(*f.G, f.room, kMe, 100, {});
     CHECK(c.size() == 1);
     if (c.size() != 1) return;
     CHECK(c[0].cand.uid == uid_of(kMe, 3) and c[0].n == 3);
@@ -74,7 +74,7 @@ static void test_live_name_excluded(Fixture& f)
 {
     f.recall(f.room, uid_of(kMe, 3), 1.f, 1.f, 0.02f);
     f.recall(f.room, uid_of(kMe, 4), 2.f, 2.f, 0.02f);
-    const auto c = rc::recall_candidates(*f.G, f.room, kMe, {"chair_3"});
+    const auto c = rc::recall_candidates(*f.G, f.room, kMe, 100, {"chair_3"});
     CHECK(c.size() == 1 and c[0].n == 4);
 }
 
@@ -84,7 +84,15 @@ static void test_other_agent_uid_excluded(Fixture& f)
     f.recall(f.room, uid_of(kMe, 5), 1.f, 1.f, 0.02f, "table");     // not a chair
     f.recall(f.other_room, uid_of(kMe, 6), 1.f, 1.f, 0.02f);        // another room
     f.recall(f.room, uid_of(kMe, 7), 1.f, 1.f, 0.02f, "chair", false);   // no rt_covariance: skipped
-    CHECK(rc::recall_candidates(*f.G, f.room, kMe, {}).empty());
+    CHECK(rc::recall_candidates(*f.G, f.room, kMe, 100, {}).empty());
+}
+
+static void test_candidate_above_counter_excluded(Fixture& f)
+{
+    f.recall(f.room, uid_of(kMe, 9), 1.f, 1.f, 0.02f);
+    f.recall(f.room, uid_of(kMe, 4), 2.f, 2.f, 0.02f);
+    const auto c = rc::recall_candidates(*f.G, f.room, kMe, 5, {});
+    CHECK(c.size() == 1 and c[0].n == 4);
 }
 
 static void test_candidate_taken_once()
@@ -128,7 +136,14 @@ int main()
     run("test_reads_own_chair_recalls", test_reads_own_chair_recalls);
     run("test_live_name_excluded", test_live_name_excluded);
     run("test_other_agent_uid_excluded", test_other_agent_uid_excluded);
-    test_candidate_taken_once(); std::println("done test_candidate_taken_once");
-    test_polygon_area(); std::println("done test_polygon_area");
+    run("test_candidate_above_counter_excluded", test_candidate_above_counter_excluded);
+    const auto plain = [](const char* name, void (*fn)())
+    {
+        const int before = failures;
+        fn();
+        std::println("{} {}", failures == before ? "ok  " : "FAIL", name);
+    };
+    plain("test_candidate_taken_once", test_candidate_taken_once);
+    plain("test_polygon_area", test_polygon_area);
     return failures ? 1 : 0;
 }

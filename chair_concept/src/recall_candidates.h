@@ -1,7 +1,7 @@
 // recall_candidates.h — what chair_concept may resurrect: the chairs ltom offers back in this room.
 // Reads `metaconcept` nodes named `ltom_recall_<uid>` that hang under the room (RT child), class "chair", whose uid
 // belongs to THIS agent (uid >> 40 == agent id; inline, chair_concept does not include ltom headers) and whose
-// chair_<N> is not live. The decision itself (MAP over {candidates, new}) is common/recall_match; this file only
+// chair_<N> is not live and N <= max_n (the persisted identity counter's last()). The decision itself (MAP over {candidates, new}) is common/recall_match; this file only
 // gathers candidates and removes a taken one. Main thread only.
 #pragma once
 
@@ -28,7 +28,7 @@ struct RecallCand
 
 inline constexpr std::uint64_t kUidNumberMask = (std::uint64_t{1} << 40) - 1;
 
-inline std::vector<RecallCand> recall_candidates(DSR::DSRGraph& G, std::uint64_t room_id, std::uint32_t my_agent_id,
+inline std::vector<RecallCand> recall_candidates(DSR::DSRGraph& G, std::uint64_t room_id, std::uint32_t my_agent_id, int max_n,
                                                  const std::set<std::string>& live_names)
 {
     static std::set<std::string> warned;   // log a malformed candidate once, not every cycle
@@ -40,6 +40,12 @@ inline std::vector<RecallCand> recall_candidates(DSR::DSRGraph& G, std::uint64_t
         const auto uid = G.get_attrib_by_name<object_uid_att>(node);
         if (not uid or (*uid >> 40) != my_agent_id) continue;
         const int n = static_cast<int>(*uid & kUidNumberMask);
+        if (n > max_n)   // above the persisted counter: it could be re-issued to another birth, so never offer it
+        {
+            if (warned.insert(node.name()).second)
+                std::println(stderr, "chair_concept: [recall] {} is above the identity counter ({}) — not offered", node.name(), max_n);
+            continue;
+        }
         if (live_names.contains("chair_" + std::to_string(n))) continue;
         const auto edge = G.get_edge(room_id, node.id(), "RT");
         if (not edge) continue;                                    // hangs under another room

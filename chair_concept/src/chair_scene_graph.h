@@ -43,6 +43,8 @@ public:
     // with the Tracker.Birth* default geometry. Returns the new node id (0 on failure). Used by the
     // worker's instance tracker — the only instance-lifecycle path.
     // A resurrection (ltom recall): the newborn takes the remembered chair's number and uid instead of issuing new ones.
+    // Last number the persisted counter issued (opens the counter on first use).
+    int identity_last();
     struct Resurrect { int n; std::uint64_t uid; };
     std::uint64_t create_instance_from_detection(const Eigen::Vector3f& centroid_room,
                                                  std::uint64_t room_node_id,
