@@ -1,6 +1,7 @@
 // imagined_world.h: opening words, interventions on a copy, the "there" resolver.
 #include "../src/imagine_fit.h"
 #include "../src/imagine_see.h"
+#include "../src/imagine_succeed.h"
 
 #include <cassert>
 #include <print>
@@ -270,6 +271,61 @@ int main()
         const auto p_of = [](const std::string& a) { const auto i = a.find("(P "); return std::stof(a.substr(i + 3)); };
         assert(p_of(wide) > p_of(shut));
         assert(answer_see(dw, std::nullopt, "fridge", "here") == "I have no detector for that.");
+    }
+
+    // would-succeed (Task 6)
+    {
+        const auto rec = [](const char* door, const char* outcome, const char* room, const char* after, std::uint64_t dur_ms = 10000)
+        {
+            rc::em::Record r; r.level = rc::em::Level::Step; r.kind = "cross"; r.target = door; r.t0 = 1000; r.t1 = 1000 + dur_ms;
+            r.room = room; r.room_after = after; r.outcome = outcome;
+            return r;
+        };
+        const auto pas = [](const char* id, const char* a, const char* b, const char* door, double al, double be)
+        {
+            TopoPassageInfo p; p.id = id; p.room_a = a; p.room_b = b; p.live_door = door; p.pass_alpha = al; p.pass_beta = be;
+            return p;
+        };
+        ImaginedWorld sw;
+        // room_1 -door_1-> room_2 directly; or room_1 -door_2-> room_3 -door_3-> room_2
+        sw.topology.passages = {pas("passage_0", "room_1", "room_2", "door_1", 1, 1), pas("passage_1", "room_1", "room_3", "door_2", 1, 1),
+                                pas("passage_2", "room_3", "room_2", "door_3", 9, 1)};
+        for (int i = 0; i < 15; ++i) sw.records.push_back(rec("door_1", "satisfied", i % 2 ? "room_1" : "room_2", ""));
+        for (int i = 0; i < 3; ++i) sw.records.push_back(rec("door_1", "door_wont_open", "room_1", ""));
+        for (int i = 0; i < 7; ++i) sw.records.push_back(rec("door_2", "satisfied", "room_1", "", 20000));
+        sw.records.push_back(rec("door_2", "cross_unreachable", "room_1", ""));
+        const auto m1 = route_odds(sw, {"passage_0"});
+        assert(near(float(m1.legs[0].mean), 16.0f / 20.0f) and m1.legs[0].n_success == 15 and m1.legs[0].n_fail == 3);
+        assert(not m1.legs[0].used_ltsm_prior and near(float(*m1.legs[0].mean_duration_s), 10.0f) and m1.legs[0].n_duration == 15);
+        const auto two = route_odds(sw, {"passage_1", "passage_2"});
+        const double m2 = 8.0 / 10.0, e2 = m2 * 9.0 / 11.0 * 0 + (8.0 * 9.0) / (10.0 * 11.0);
+        assert(two.legs[1].used_ltsm_prior and near(float(two.legs[1].mean), 0.9f));
+        const double p = m2 * 0.9, e2b = 9.0 * 10.0 / (10.0 * 11.0);
+        assert(near(float(two.p), float(p)) and near(float(two.sd), float(std::sqrt(e2 * e2b - p * p))));
+        assert(near(float(*two.legs[0].mean_duration_s), 20.0f));
+        // exclusions change nothing; preempted with a room change is a success
+        ImaginedWorld ex = sw;
+        for (const char* o : {"stopped_by_user", "superseded", "lost", "banana"}) ex.records.push_back(rec("door_1", o, "room_1", ""));
+        ex.records.push_back(rec("door_1", "preempted", "room_1", "room_1"));
+        ex.records.push_back(rec("door_1", "preempted", "room_1", ""));
+        assert(near(float(route_odds(ex, {"passage_0"}).legs[0].mean), 0.8f) and route_odds(ex, {"passage_0"}).legs[0].n_success == 15);
+        ex.records.push_back(rec("door_1", "preempted", "room_1", "room_2"));
+        assert(route_odds(ex, {"passage_0"}).legs[0].n_success == 16);
+        // no data: LTSM Beta(9,1) vs flat
+        ImaginedWorld nd;
+        nd.topology.passages = {pas("passage_0", "room_1", "room_2", "door_1", 9, 1), pas("passage_1", "room_1", "room_2", "door_2", 1, 1)};
+        assert(near(float(route_odds(nd, {"passage_0"}).legs[0].mean), 0.9f) and route_odds(nd, {"passage_0"}).legs[0].used_ltsm_prior);
+        assert(answer_succeed(nd, "room_1", "room_2", "door_2").contains("no data on door_2"));
+        // answers
+        const auto a = answer_succeed(sw, "room_1", "room_2", "door_2");
+        std::println("{}", a);
+        assert(a.contains(" vs ") and a.contains("15 of 18") and a.contains("7 of 8"));
+        assert(answer_succeed(sw, "room_1", "room_2", "door_9") == "I don't know a door called door_9");
+        ImaginedWorld iso = sw; iso.topology.passages.push_back(pas("passage_9", "room_8", "room_9", "door_9", 1, 1));
+        assert(answer_succeed(iso, "room_1", "room_2", "door_9") == "no remembered route through door_9 reaches room_2");
+        assert(answer_succeed(sw, "room_1", "", "") == "ASK: where should the mission end?");
+        assert(answer_succeed(sw, "room_1", "room_1", "").contains("already in room_1"));
+        assert(answer_succeed(sw, "room_1", "room_2", "").contains("door_1"));
     }
 
     std::println("test_imagine: ok");
