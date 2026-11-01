@@ -153,6 +153,7 @@ private:
 	std::unique_ptr<ltsm::RoomRecognizer> recognizer_;
 	/// Executes the recogniser's Swap/Undo requests: a swap posts a room_proposal and stages memory (room_swap.h); acknowledges them back.
 	std::unique_ptr<ltsm::RoomSwap> swap_;
+	bool swap_adopted_marked_ = false;   // the accepted swap's memory change has been marked dirty (once per adoption)
 	/// Startup seed of long-term memory; retried from compute() until room_concept has published a room.
 	void seed_memory();
 	bool seeded_ = false;

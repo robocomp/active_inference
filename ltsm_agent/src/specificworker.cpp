@@ -400,6 +400,20 @@ void SpecificWorker::compute()
     // before it, it always sees the cycle the promotion consumes (and caches the seam for the promoted stay). After the
     // live passage step (it reads the door pair that step matched) and before the recall, which a swap will feed.
     if (recognizer_) ltsm::recognition_cycle(*recognizer_, swap_.get());     // recognition_cycle.h: step, close a released window, execute
+    // ★ AN ACCEPTED SWAP CHANGES THE MEMORY NOW (2026-11-01, warm16/warm20): commit() writes the carry-over passage and drops the
+    //   twin, but nothing marked the store dirty — a run that ended in the recognised room (the robot never left it, so no
+    //   eviction save) shut down with `dirty_ == false` and the swap was lost: the last generation still held r4_room_4.
+    //   Marked here, on the transition into Adopted, the shutdown save (graceful SIGTERM) writes it.
+    if (swap_)
+    {
+        const bool adopted = swap_->state() == ltsm::RoomSwap::State::Adopted;
+        if (adopted and not swap_adopted_marked_ and store)
+        {
+            store->mark_dirty();
+            qInfo() << "[memory] the accepted swap changed the memory: marked for saving (the next save, at the latest the shutdown's)";
+        }
+        swap_adopted_marked_ = adopted;
+    }
     // AFTER the live passage step: the promotion reads the door pair that step matched.
     if (promotion_enabled and evictor)
     {
