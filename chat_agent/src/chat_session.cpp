@@ -1288,7 +1288,11 @@ QString ChatSession::do_imagine(const QJsonObject& args)
             // "if you moved the chair 20 cm away from the wall": distance, signed, positive = away from the other thing
             const auto dv = args.value("distance");
             if (dv.isUndefined() or dv.isNull() or (dv.isString() and dv.toString().trimmed().isEmpty()))
-                return q(std::format("ASK: how far should I imagine moving {}?", mv));
+                // gemma drops `distance` 3/3 (Orin eval 2026-11-01) although the person said it: tell the MODEL to retry
+                // with the person's own number; only if they gave none should it ask them.
+                return q(std::format("REJECTED: move needs distance. Call imagine again with distance = how far the person "
+                                     "said to move {} (e.g. \"20 cm\", positive = away from the other thing); if they said "
+                                     "no distance, ask them.", mv));
             const auto dist = dv.isDouble() ? std::expected<float, std::string>(static_cast<float>(dv.toDouble()))
                                             : im::parse_distance_m(dv.toString().toStdString());
             if (not dist.has_value()) return q(dist.error());
