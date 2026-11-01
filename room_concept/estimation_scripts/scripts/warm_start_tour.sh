@@ -99,11 +99,13 @@ run_leg() {   # label cross_arg [close_arg]   (sets r: the crossing; c: the clos
   # passage logs DONE; the leg ends when the mission ends (the close succeeded or failed), and c reports the close.
   local l0; l0=$(nl controller)
   echo run > $B/controller/remote_cmd.txt; sleep 0.7   # the controller reads remote_cmd.txt every 300 ms
-  if [ -n "$3" ]; then printf 'mission "leg %s"\n  cross %s retry=2\n  close %s\n' $1 $2 $3 > $B/controller/remote_cmd.txt
-  else printf 'mission "leg %s"\n  cross %s retry=2\n' $1 $2 > $B/controller/remote_cmd.txt; fi
+  # OPEN IS A STEP OF THE PLAN (user 2026-11-01, warm13: DOOR_2 shut but remembered open — the cross never asked for it):
+  # `open X` approaches, looks, and opens when the door is SEEN shut (satisfied when seen open); then `cross X`.
+  if [ -n "$3" ]; then printf 'mission "leg %s"\n  open %s\n  cross %s retry=2\n  close %s\n' $1 $2 $2 $3 > $B/controller/remote_cmd.txt
+  else printf 'mission "leg %s"\n  open %s\n  cross %s retry=2\n' $1 $2 $2 > $B/controller/remote_cmd.txt; fi
   local t0; t0=$(date +%s); r="FAILED (no end in ${LEG_TIMEOUT_S} s)"; c="-"; local crossed=""
   for i in $(seq 1 $((LEG_TIMEOUT_S * 2))); do
-    if [ -z "$crossed" ] && tail -n +$((l0+1)) $L/controller.log | grep -a -q -E "passage DONE|mission 'leg $1': co"; then
+    if [ -z "$crossed" ] && tail -n +$((l0+1)) $L/controller.log | grep -a -v "asked to stop after open" | grep -a -q -E "passage DONE|mission 'leg $1': co"; then
       crossed=1; r="OK in $(( $(date +%s)-t0 )) s"; fi
     if grep -a -q -E "mission 'leg $1': co(mpleted)?" $L/controller.log; then [ -n "$3" ] && c="closed"; break; fi
     if grep -a -q -E "mission 'leg $1': (failed|aborted)" $L/controller.log; then
