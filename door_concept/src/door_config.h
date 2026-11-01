@@ -73,6 +73,10 @@ struct DoorPragmaticCfg
     // DoorControl.idsl's Capabilities carries typicalLatencySec and nothing about rate, so there is
     // currently nothing to read. Extending the interface means regenerating the Ice stubs on both sides.
     float actuation_swing_rate = 0.5f;   // rad/s; 90 deg in ~3.1 s
+    // How far an OPEN request swings the leaf (rad; the request's apertureHint, and the anticipated swing's end). 2026-11-01
+    // (user): 120 deg — 30 deg past the old 90, to set the leaf-on-the-left problem aside for now. ⚠ DoorModel.PhiMaxRad
+    // (the leaf estimator's range, 120 deg) must be >= this.
+    float actuation_open_rad = 2.0943951f;
     // ★THE WIDTH OF THE LEAF-ANGLE BELIEF WHEN THE IMAGE IS NOT RESOLVING IT. estimate_phi() refills
     // phi_curve only from a fresh mask, and this agent's own [DoorConcept] notes record that the ADE20K
     // posterior over a plainly visible closed door collapses 0.995 → 0.048 as the robot CLOSES on it —

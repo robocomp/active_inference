@@ -112,6 +112,9 @@ public:
                                    const std::string& purpose,
                                    const std::string& provider_id = {});
 
+    /// How far an OPEN request swings the leaf (rad, > 0), sent as the provider's apertureHint. 0 = the provider's default.
+    void set_open_angle(float rad) { open_rad_ = rad; }
+
     // Poll a pending request. Updates `p.state` / `p.settled` in place.
     void poll(Pending& p);
 
@@ -125,6 +128,7 @@ private:
     std::shared_ptr<RoboCompDoorControl::DoorControlPrx> prx_;
     Caps                                          caps_;
     std::chrono::steady_clock::time_point         last_connect_attempt_{};
+    float open_rad_ = 0.f;   // set_open_angle
 };
 
 // ─── WHICH PROVIDER DOOR IS OURS — pure, header-only so an offline harness can test it ───────────

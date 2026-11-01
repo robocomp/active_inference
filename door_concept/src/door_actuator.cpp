@@ -149,7 +149,7 @@ DoorActuator::request(const std::string& door_name, const Eigen::Vector2f& xy_m,
     req.door.width = width_m * 1000.0f;
     req.action = open ? RoboCompDoorControl::DoorAction::OpenDoor
                       : RoboCompDoorControl::DoorAction::CloseDoor;
-    req.apertureHint = 0.0f;               // binary providers ignore it; we do not claim an angle
+    req.apertureHint = open and open_rad_ > 0.f ? -open_rad_ : 0.0f;   // the bridge: a magnitude, -rad (binary providers ignore it)
     req.purpose = purpose;
 
     Pending p;

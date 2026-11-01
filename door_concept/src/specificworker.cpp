@@ -581,6 +581,7 @@ void SpecificWorker::initialize()
     // DoorControl client. The endpoint is config, not compiled in: the provider is whatever can move a
     // door here — a Webots supervisor today, home automation or a person tomorrow.
     door_actuator_.configure(cfg_.door_control_endpoint);
+    door_actuator_.set_open_angle(std::min(cfg_.pragmatic.actuation_open_rad, cfg_.phi_max_rad));
     // Input recording (spec §6.6): the identity table + learned registration exactly as loaded, and the room entered.
     input_snapshot_.on_identity_load("etc/door_identities.csv", "etc/door_world_registration.csv",
         room_node_id_ != 0 ? std::optional<std::uint64_t>{room_node_id_} : std::nullopt,
@@ -3119,7 +3120,7 @@ bool SpecificWorker::request_door_actuation_impl(rc::DoorInstance& inst, bool op
     if (not door_pending_->settled)
     {
         inst.phi_cmd_from   = inst.phi_est;
-        inst.phi_cmd_to     = open ? static_cast<float>(M_PI) / 2.0f : 0.0f;
+        inst.phi_cmd_to     = open ? std::min(cfg_.pragmatic.actuation_open_rad, cfg_.phi_max_rad) : 0.0f;
         inst.phi_cmd_rate   = cfg_.pragmatic.actuation_swing_rate;   // MUST match the bridge; see the config
         inst.phi_cmd_t0     = std::chrono::steady_clock::now();
         inst.phi_cmd_active = true;

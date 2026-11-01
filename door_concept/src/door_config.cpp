@@ -94,6 +94,8 @@ DoorConfig load_door_config(const ConfigLoader& cfg)
                 "★CLEARANCE FOR THE LEAF'S OWN SWEPT ARC — a SAFETY quantity, not a preference");
         pg.actuation_swing_rate  = getf("DoorAffordance.ActuationSwingRate", pg.actuation_swing_rate,
                 "rad/s; 90 deg in ~3.1 s");
+        pg.actuation_open_rad    = getf("DoorAffordance.ActuationOpenRad", pg.actuation_open_rad,
+                "rad an OPEN request swings the leaf to (120 deg, user 2026-11-01)");
         pg.phi_sigma_rad         = getf("DoorAffordance.PhiSigmaRad", pg.phi_sigma_rad,
                 "★THE WIDTH OF THE LEAF-ANGLE BELIEF WHEN THE IMAGE IS NOT RESOLVING IT. estimate_phi() refills phi_curve only from a fresh mask, and this agent's own…");
         pg.value_approach        = getf("DoorAffordance.ValueApproach", pg.value_approach,
