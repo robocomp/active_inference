@@ -1123,7 +1123,9 @@ private:
     // not be delivered at all: a static factory has nowhere to put "which robot".
     rc::RobotFootprint approach_body_ = rc::RobotFootprint::shadow();
     std::uint64_t aif_trace_next_ms_ = 0;
-    std::uint64_t reach_wait_target_ = 0;   // a Reach whose goal the world brings about, waiting at its standpoint (close)   // [cross-aif] 1 Hz trace of the door servo's state
+    std::uint64_t reach_wait_target_ = 0;
+    bool anchor_cross_last_mouth_missing_ = false;   // at the vantage, no mouth seen through the door (or not believed open)
+    std::string door_mouth_hold_logged_;   // a Reach whose goal the world brings about, waiting at its standpoint (close)   // [cross-aif] 1 Hz trace of the door servo's state
     // Task 14 fix round 5: the returns net's two footprints (lidar_body_guard.h): the RETURNS body (planning hull ∪ the
     // mesh outline — what a return can hit) and the SELF footprint (hull ∪ mesh ⊕ σ_r — what the LiDAR sees of the robot).
     // Empty until the body loads ⇒ the planning hull.

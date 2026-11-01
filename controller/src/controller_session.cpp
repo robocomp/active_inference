@@ -3536,6 +3536,7 @@ bool ControllerSession::drive_door_route(const ControllerPlanningStep &step, rc:
             //   Otherwise the planned route keeps driving; the reason is logged once per leg and verdict.
             bool front_of_open = false;
             std::string why_not;
+            anchor_cross_last_mouth_missing_ = false;
             if (update_cross_anchor(on_anchor) and anchor_cross_.has_value())
             {
                 const auto g = rc::anchor_cross_geometry(anchor_cross_->pose);
@@ -3553,6 +3554,7 @@ bool ControllerSession::drive_door_route(const ControllerPlanningStep &step, rc:
                                           p_open, open_belief ? "" : " ✗", open_seen ? "yes" : "no ✗", g.s, near_side ? "" : " ✗",
                                           g.e, 0.5f * anchor_cross_->width_m, within ? "" : " ✗", g.heading_err * 57.2958f,
                                           facing ? "" : " ✗");
+                anchor_cross_last_mouth_missing_ = not front_of_open and (not open_seen or not open_belief);
                 if (not front_of_open) anchor_cross_.reset();   // execute() must not run the servo on it
             }
             if (door_passage_.driving_in() and not anchor_cross_.has_value())   // v4 step 3: nothing left to drive in on
@@ -3562,6 +3564,24 @@ bool ControllerSession::drive_door_route(const ControllerPlanningStep &step, rc:
                 motion_commander.stop_robot();
                 door_passage_.note_drive_in_done();
                 cross_status_ = "drive-in stopped: the anchor is gone after the switch";
+                return true;
+            }
+            // ★ NO MOUTH, NO CROSSING (user 2026-11-01: "you can't throw the robot into a closed door — there has to be a mouth to go
+            //   through"). warm24: DOOR_1 believed open at P 0.97, nothing seen through it, and the through-route drove on into the
+            //   shut door. When the opening is not SEEN through (or not believed open) the robot HOLDS at the vantage: the mouth
+            //   appears and the servo takes it through, or door_concept sees the door shut, withdraws `cross` and the passage
+            //   falls back to `open`. Lateral offset / heading still let the route drive — that only places the robot.
+            if (not front_of_open and anchor_cross_last_mouth_missing_)
+            {
+                path_controller.stop();
+                motion_commander.stop_robot();
+                cross_status_ = "holding at the vantage — no mouth seen through the door: " + why_not;
+                if (door_mouth_hold_logged_ != leg.key)
+                {
+                    door_mouth_hold_logged_ = leg.key;
+                    std::println("[door-route] {}: at the vantage, NO MOUTH seen through the door ({}) — holding here, not driving "
+                                 "into it", leg.door, why_not);
+                }
                 return true;
             }
             if (not front_of_open and not why_not.empty()) cross_status_ = "servo not started, route drives: " + why_not;
