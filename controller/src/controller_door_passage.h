@@ -937,6 +937,17 @@ private:
                 route_event(out, std::format("[door-route] {}: {} ended {} (attempt {}) — waiting for it to be offered again", door_,
                                              name_of(Step::Open), last_outcome_, attempts_));
             }
+            // ★ `open door` (stop after Open) ENDS when the door is open — with or without a cross target in the route (warm22
+            //   leg 2: the route was built while the door was shut, so it had none; the open completed SATISFIED and the
+            //   passage waited for ever on a withdrawn step, the selector idle).
+            if ((open_now or open_satisfied) and stop_after_ == Step::Open)
+            {
+                if (so == State::Executing) preempted_ = true;
+                opened_ = true;
+                finish();
+                route_event(out, std::format("[door-route] {}: open reached — passage DONE (it was asked to stop after open)", door_));
+                return out;
+            }
             if ((open_now or open_satisfied) and route_cross_.has_value())
             {
                 if (so == State::Executing) preempted_ = true;   // the caller releases the claim on `open`
