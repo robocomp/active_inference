@@ -512,6 +512,32 @@ namespace rc
                              << ',' << outside << ',' << p_lost << ',' << seated.size() << ',' << int(rt_.passage.has_value())
                              << ',' << lidar_points.size() << '\n';
                 doorway_csv_.flush();
+                // THE POINTS (first 2 s after each hand-over): every high-band return in the robot frame with its door weight and
+                // its misfit at this pose, and once per hand-over the outline the model scores against (internal frame) — so the
+                // misfit can be recomputed offline at the TRUE pose, point by point.
+                if (res.timestamp_ms - handover_ts_ms_ <= 2000)
+                {
+                    if (not doorway_pts_csv_.is_open())
+                    {
+                        doorway_pts_csv_.imbue(std::locale::classic());
+                        doorway_pts_csv_.open("tmp/reloc_doorway_points.csv", std::ios::out | std::ios::trunc);
+                        doorway_pts_csv_ << "ts_ms,handover_ms,kind,i,x,y,z,w,sdf,pose_x,pose_y,pose_theta\n";
+                    }
+                    if (doorway_poly_written_for_ != handover_ts_ms_)
+                    {
+                        doorway_poly_written_for_ = handover_ts_ms_;
+                        const auto poly = current_room_polygon();
+                        for (std::size_t i = 0; i < poly.size(); ++i)
+                            doorway_pts_csv_ << res.timestamp_ms << ',' << handover_ts_ms_ << ",poly," << i << ',' << poly[i].x() << ','
+                                             << poly[i].y() << ",0,0,0," << pose_now.x() << ',' << pose_now.y() << ',' << pose_now.z() << '\n';
+                    }
+                    for (std::size_t i = 0; i < lidar_points.size(); ++i)
+                        doorway_pts_csv_ << res.timestamp_ms << ',' << handover_ts_ms_ << ",pt," << i << ',' << lidar_points[i].x() << ','
+                                         << lidar_points[i].y() << ',' << lidar_points[i].z() << ','
+                                         << (w.size() == sdf.size() ? w(Eigen::Index(i)) : 1.f) << ',' << sdf(Eigen::Index(i)) << ','
+                                         << pose_now.x() << ',' << pose_now.y() << ',' << pose_now.z() << '\n';
+                    doorway_pts_csv_.flush();
+                }
             }
             // A HELD episode (msprt_decide → Hold) is carried by its rivals: step_rival_modes above scores them on
             // every scan and switches the moment one is decisive. It ends when they resolve or empty, or when the

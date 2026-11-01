@@ -22,7 +22,7 @@ stop_fleet(){ pkill -TERM -x door_concept; pkill -TERM -x controller; pkill -TER
       || { [[ -n "$CHAT" ]] && pgrep -x chat_agent >/dev/null; } || return 0; done
   log "WARN fleet did not stop in 30 s"; }
 collect(){
-  cp $R/tmp/reloc_doorway.csv $R/tmp/proto_room.csv $R/tmp/door_filter.csv $R/tmp/promotion_select.csv $R/tmp/map_layout.csv $R/tmp/layout_refine.csv \
+  cp $R/tmp/reloc_doorway.csv $R/tmp/reloc_doorway_points.csv $R/tmp/proto_room.csv $R/tmp/door_filter.csv $R/tmp/promotion_select.csv $R/tmp/map_layout.csv $R/tmp/layout_refine.csv \
      $R/tmp/slam_shadow.csv $R/tmp/refine_input.bin $OUT/ 2>/dev/null
   cp $R/tmp/sdf_localizer/gt_error.csv $OUT/ 2>/dev/null
   [[ -d $R/tmp/snapshots ]] && cp -r $R/tmp/snapshots $OUT/

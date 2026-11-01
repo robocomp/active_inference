@@ -1677,8 +1677,18 @@ std::optional<RoomSceneGraph::Recall> RoomSceneGraph::find_recall(const rc::Door
         const auto rn = G_->get_node(dsr_room_id_);
         if (not rn.has_value()) continue;
         auto ie = G_->get_inner_eigen_api();   // fresh instance: empty ts==0 cache, nothing to go stale
-        const auto Tr = ie->get_transformation_matrix(rn->name(), ap.name);   // T(room <- door), published frame
+        // ★ THE LIVE FACE FROM THE ANCHOR WHEN THERE IS ONE (2026-11-01, user "Go"; pingpong36/37: placed via the door NODE the
+        //   recalled room landed 0.13-0.25 m off sideways and, in room_1's narrow corridor stub, that misfit set P(lost) to
+        //   0.5 in two frames and the relocaliser jumped). door_concept's interaction anchor `<door>@robot` is the same opening
+        //   measured in the ROBOT frame (wall, then hole: 1-2 cm, ~1 deg), and the graph composes it as room <- robot <- anchor,
+        //   so the robot's own pose estimate cancels out of the placement: the robot's pose in the recalled room is the
+        //   recalled face composed with the anchor's measured robot-to-door relation. Same axes as the node (x along the wall);
+        //   face() below turns it +y into this room. The node is the fallback.
+        auto Tr = ie->get_transformation_matrix(rn->name(), ap.name + "@robot");   // T(room <- anchor) = room <- robot <- anchor
+        const bool from_anchor = Tr.has_value();
+        if (not from_anchor) Tr = ie->get_transformation_matrix(rn->name(), ap.name);   // T(room <- door), published frame
         if (not Tr.has_value()) continue;
+        std::println("[room][recall] {} via {}: the live face from the {}", rc_.name, ap.name, from_anchor ? "ANCHOR (robot frame)" : "door node");
         Eigen::Affine2f T_pub_door = Eigen::Affine2f::Identity();
         T_pub_door.translation() = Eigen::Vector2f(static_cast<float>(Tr->translation().x()), static_cast<float>(Tr->translation().y()));
         T_pub_door.linear() = Eigen::Rotation2Df(static_cast<float>(std::atan2((*Tr)(1, 0), (*Tr)(0, 0)))).toRotationMatrix();

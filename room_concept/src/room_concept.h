@@ -803,6 +803,8 @@ private:
    // the doorway record (tmp/reloc_doorway.csv), written for 15 s after each hand-over. Observability only.
    std::int64_t handover_ts_ms_ = 0;
    std::ofstream doorway_csv_;
+   std::ofstream doorway_pts_csv_;          // tmp/reloc_doorway_points.csv: the points of the first 2 s after each hand-over
+   std::int64_t doorway_poly_written_for_ = 0;   // the hand-over whose outline was written
    std::atomic<int>  late_verdict_{0};          ///< LateVerdict
    // late_log_odds_, late_forced_done_, last_search_top_median_ and the track_* emission are non-atomic: owned by the LOCALISER
    // thread (RoomConcept::run -> relocalisation_step, and the scene graph's update() it calls inline, which seeds them).
