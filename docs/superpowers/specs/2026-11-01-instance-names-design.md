@@ -96,10 +96,12 @@ Anti-goals (failure even if it "works")
 - On resurrection/recognition the agent restores `given_name` together with the internal name (D1).
 - An agent with no deleted-instance record yet keeps the name only for the instance's lifetime; the handler
   still works. The life-cycle doc gets a row in its conformance audit.
-- Wire into each concept agent that owns nameable instances (chair, table, refrigerator, cabinet, bottle, door).
-  Doors: the given name goes on the door node like any instance; the passage in LTSM already joins both faces,
-  so a door seen from the other room is described by the same name via the passage (builder: copy the face's
-  `given_name` onto the mirror face through door_concept, which owns both).
+- **Rollout (architecture review 11-01, user agreed): chair first, as a vertical slice** — cortex entries,
+  common/ handler, chair's adapter, language_agent's tool and acknowledgement — validated live before the
+  handler is wired into table, refrigerator, cabinet, bottle and door.
+  Doors: the given name goes on the face it was given to, like any instance. **No mirror copy in v1:**
+  language_agent reads a door's given name from either face, pairing the faces through the `exit` edges
+  (dsr_edge_type.h), so door_concept needs only the standard handler.
 
 ### 4.4 Clean-up cases
 - Instance deleted before adoption: DSR drops its edges; chat reports "it is gone".
@@ -177,13 +179,13 @@ never with a relation back to the target.
 ## 8. Left to the builder
 - Exact likelihood forms and their scales, as long as they come from sizes and σ, not constants.
 - Module and function names, the persistence interface's shape, file layout of tests.
-- Order of wiring the concept agents (chair first is suggested: it has the most instances).
+- Order of wiring the five agents after chair.
 - Whether the clarifying question lists two or three candidates.
 
 ## 9. Calls I made (not stated by the user)
 - Edge type `named` from `chat_intention`; attribute `given_name` on both edge and node.
 - One given name per instance; a new name replaces the old; an empty name clears it.
-- Doors: the name copied to the mirror face by door_concept.
+- Doors: no mirror copy; language_agent reads the name from either face (architecture review 11-01).
 - Landmark list (§5.1) and the speaking order (§5.3).
 - No timeout on a pending request.
 
@@ -200,8 +202,7 @@ never with a relation back to the target.
   that is now taken, the owner restores it and chat, on seeing two equal names, tells the person and asks which
   one keeps it. Accepted residual risk.
 - **Doors:** the request targets the face in the robot's current room, else the face the resolver picked.
-  door_concept owns both faces and pairs them through the `exit` edges (dsr_edge_type.h); it copies `given_name`
-  to the paired face. No LTSM write.
+  The other face is not written; language_agent finds the name through the `exit` pairing (§4.3). No LTSM write.
 - **Snapshot data:** if world_digest / SeeScene lacks a footprint size, σ or room for some class, extending the
   snapshot is in scope (language_agent only).
 - **front/behind:** v1 supports only the robot as landmark ("the chair in front of you"), in the robot frame.
@@ -210,3 +211,17 @@ never with a relation back to the target.
   concept-agent instances, not rooms, walls or the robot (rooms keep the reserved `room_label`).
 - **Eval bar for new cases:** each new case at least 2/3 on gemma4:26b; old cases no worse than the last run
   (362/378 on feat/imagine).
+
+## 11. Architecture review (2026-11-01)
+Options compared: (A) a names file kept by language_agent, (B) this design, (C) label nodes owned by
+language_agent. A and C are simpler but key the name on an instance id, and **internal names are not stable
+across restarts today**: chair, table and bottle rebuild their name high-water mark from the live graph
+(chair_scene_graph.cpp:49 "REMAINING GAP"), so a freed `chair_3` can be re-issued to a different chair after a
+restart. B carries the name on the node and in the owner's deleted-instance record, so it survives that. Kept B
+(user, 11-01), with two changes folded in above: chair-first vertical slice, no door mirror copy.
+
+### Separate fix (not part of this project)
+chair_concept, table_concept and bottle_concept must persist their name high-water mark across restarts, as
+door_concept does with etc/door_identities.csv. Without it one internal name denotes two objects in logs,
+the phantom log, episodic memory and the dashboard, whatever happens to given names. Check refrigerator and
+cabinet for the same pattern.
