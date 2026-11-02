@@ -405,7 +405,10 @@ inline ChannelResult evaluate_camera(const Card& card, const World& world, const
     const float sig_fill = nbv::predicted_fill_sigma(t, from, sensor);
     nbv::Sensor wide = sensor;  wide.hfov_rad = 3.0f; wide.vfov_rad = 3.0f;       // "in view" everywhere
     const float v_all     = nbv::visible_fraction(t, from, yaw, sensor, all);
-    const float v_no_fov  = nbv::visible_fraction(t, from, 0.0f, wide, all);
+    // "in view everywhere" must still LOOK at the target: a fixed yaw 0 only sees targets within +-86 deg of world +x, so
+    // every other out-of-view target got v_no_fov = 0, no OutOfView gain, and limit None (or another factor's label).
+    const float face_target = to_obj.norm() > 1e-6f ? std::atan2(to_obj.y(), to_obj.x()) : 0.0f;
+    const float v_no_fov  = nbv::visible_fraction(t, from, face_target, wide, all);
     const float v_no_wall = nbv::visible_fraction(t, from, yaw, sensor, objs);
     const float v_no_obj  = nbv::visible_fraction(t, from, yaw, sensor, walls);
     const auto [f_obl, f_rest] = card_factors(t);
