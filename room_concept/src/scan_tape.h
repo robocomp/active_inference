@@ -54,6 +54,18 @@ struct Tape
     std::vector<int> frame_room;   ///< per frame: index into rooms of the record in force (-1 = none yet)
 };
 
+/// Does a new RoomRecord have to be written? When the name, the polygon or the doorway GEOMETRY (a, b, name) differ from
+/// the record in force. p_open etc. drift every frame and do not count. A name change alone (polygon unchanged) counts:
+/// the label and the geometry are published by different code and can change in either order.
+inline bool room_state_changed(const RoomRecord& last, const RoomRecord& now)
+{
+    if (last.room != now.room or last.polygon != now.polygon or last.apertures.size() != now.apertures.size()) return true;
+    for (std::size_t i = 0; i < now.apertures.size(); ++i)
+        if (last.apertures[i].a != now.apertures[i].a or last.apertures[i].b != now.apertures[i].b
+            or last.apertures[i].name != now.apertures[i].name) return true;
+    return false;
+}
+
 inline constexpr char kMagic[4] = {'S', 'C', 'T', 'P'};
 inline constexpr std::uint32_t kVersion = 1;
 inline constexpr std::uint8_t kTypeRoom = 1, kTypeFrame = 2;

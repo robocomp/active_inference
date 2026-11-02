@@ -413,22 +413,16 @@ namespace rc
             }
             qInfo() << "[ScanTape] recording to" << QString::fromStdString(path);
         }
-        auto poly = current_room_polygon();
-        std::vector<rc::tape::Aperture> aps;
+        rc::tape::RoomRecord now;
+        now.room = room_name();
+        now.polygon = current_room_polygon();
         for (const auto& d : door_apertures())
-            aps.push_back({d.a, d.b, d.n_out, d.p_open, d.prior_closed, d.half_depth, d.recess, d.sigma_along, d.name});
-        // Only the geometry decides a new record: p_open drifts every frame and would write one each time.
-        const auto geom_same = [](const auto& x, const auto& y)
+            now.apertures.push_back({d.a, d.b, d.n_out, d.p_open, d.prior_closed, d.half_depth, d.recess, d.sigma_along, d.name});
+        if (not tape_has_room_ or rc::tape::room_state_changed(tape_state_, now))
         {
-            return x.size() == y.size() and std::ranges::equal(x, y, [](const auto& p, const auto& q)
-                                                                { return p.a == q.a and p.b == q.b and p.name == q.name; });
-        };
-        if (poly != tape_poly_ or not geom_same(aps, tape_apertures_))
-        {
-            if (poly != tape_poly_ or tape_room_.empty()) tape_room_ = room_name_fn_ ? room_name_fn_() : std::string{};
-            tape_poly_ = poly;
-            tape_apertures_ = aps;
-            scan_tape_->write_room({tape_room_, std::move(poly), std::move(aps)});
+            scan_tape_->write_room(now);
+            tape_state_ = std::move(now);
+            tape_has_room_ = true;
         }
         rc::tape::Frame fr;
         fr.t_ms = res.timestamp_ms;
@@ -437,7 +431,7 @@ namespace rc
         fr.cov = res.covariance;
         fr.odo_delta = get_predictor_delta();
         fr.odo_cov = get_predictor_cov();
-        fr.room = tape_room_;
+        fr.room = tape_state_.room;
         fr.pts_robot.reserve(lidar_points.size());
         for (const auto& q : lidar_points) fr.pts_robot.emplace_back(q.x(), q.y());
         scan_tape_->write(fr);

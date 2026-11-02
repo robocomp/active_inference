@@ -1469,6 +1469,7 @@ void RoomSceneGraph::forget_room(const char* why)
                    << "was this agent's room; its frozen frame is released.";
     room_node_created_ = false;
     dsr_room_id_ = 0;
+    publish_room_name();
     affordance_manager_.reset();
     stable_frames_ = 0; stability_.reset();
     published_polygon_verts_ = 0;
@@ -1896,6 +1897,7 @@ void RoomSceneGraph::arm_startup_proto(std::uint64_t room_id, const Eigen::Affin
     // room, the frozen published frame, a fresh free-space accumulator and an explorer with no history. Shared by
     // the first room (birth_startup_proto) and every room entered through a door after it (rearm_after_crossing).
     dsr_room_id_       = room_id;
+    publish_room_name();
     published_is_lost_.reset();   // a new room node: `is_lost` is written on it afresh
     room_node_created_ = true;
     stable_frames_     = 0; stability_.reset();
@@ -2612,6 +2614,7 @@ void RoomSceneGraph::dsr_create_room_and_reparent(const rc::RoomConcept::UpdateR
     if (const auto adopted = rc::room::current_room(*G_); adopted.has_value())
     {
         dsr_room_id_ = adopted.value();
+        publish_room_name();
         room_node_created_ = true;
         stable_frames_ = 0; stability_.reset();
         // Idempotent polygon write: a room node ADOPTED here (persisted from a prior session, or created bare by
@@ -2678,6 +2681,7 @@ void RoomSceneGraph::dsr_create_room_and_reparent(const rc::RoomConcept::UpdateR
     }
 
     dsr_room_id_ = room_id_opt.value();
+    publish_room_name();
     room_node_created_ = true;
     stable_frames_ = 0; stability_.reset();
     published_polygon_verts_ = room_polygon.size();

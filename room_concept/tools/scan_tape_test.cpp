@@ -87,6 +87,21 @@ int main()
                   and tape.rooms[0].apertures[0].a == r1.apertures[0].a and tape.rooms[0].apertures[0].recess == 0.1f);
         }
     }
+    // A new record is due on a name change alone, on polygon/doorway geometry, not on p_open drift.
+    {
+        auto a = make_room("room_1", 2.f), b = a;
+        CHECK(not rc::tape::room_state_changed(a, b));
+        b.apertures[0].p_open = 0.1f; b.apertures[0].prior_closed = 0.9f;
+        CHECK(not rc::tape::room_state_changed(a, b));
+        b.room = "room_2";
+        CHECK(rc::tape::room_state_changed(a, b));
+        b = a; b.polygon[0].x() += 0.01f;
+        CHECK(rc::tape::room_state_changed(a, b));
+        b = a; b.apertures[0].b.y() += 0.01f;
+        CHECK(rc::tape::room_state_changed(a, b));
+        b = a; b.apertures.clear();
+        CHECK(rc::tape::room_state_changed(a, b));
+    }
     // Truncated last frame (a crash / SIGKILL mid-write): dropped, earlier frames kept, no throw.
     std::filesystem::resize_file(path, size_full - 3);
     {

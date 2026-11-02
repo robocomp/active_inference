@@ -208,9 +208,10 @@ public:
     Eigen::Vector3f get_predictor_delta() const;
     /// The covariance the predictor attached to that same increment (same lock, same frame).
     Eigen::Matrix3f get_predictor_cov() const;
-    /// The scan tape's room label: the scene graph's current room node name. Called by the tape (compute thread) only
-    /// when the room polygon changes, never per frame.
-    void set_room_name_provider(std::function<std::string()> fn) { room_name_fn_ = std::move(fn); }
+    /// The scan tape's room label: the scene graph PUSHES the current room node's name here wherever its room id changes
+    /// (any thread; mutex-guarded), and the tape reads it every frame. "" = no room yet.
+    void set_room_name(std::string name) { std::scoped_lock lk(room_name_mutex_); room_name_ = std::move(name); }
+    std::string room_name() const { std::scoped_lock lk(room_name_mutex_); return room_name_; }
     /// The MEASURED odometry increment used for the last fusion — [dx, dy, dtheta] in the body frame,
     /// with `valid`/`fresh` saying whether there was one at all. Exposed for the calibration channel,
     /// which regresses this against the localiser posterior over the same interval; it is the only
@@ -1294,10 +1295,10 @@ private:
    void record_scan_tape(const UpdateResult& res, const std::vector<Eigen::Vector3f>& lidar_points);
    std::unique_ptr<rc::tape::Writer> scan_tape_;
    bool                              scan_tape_failed_ = false;
-   std::function<std::string()>      room_name_fn_;
-   std::vector<Eigen::Vector2f>      tape_poly_;
-   std::vector<rc::tape::Aperture>   tape_apertures_;
-   std::string                       tape_room_;
+   mutable std::mutex                room_name_mutex_;
+   std::string                       room_name_;
+   rc::tape::RoomRecord              tape_state_;   // the record in force on the tape
+   bool                              tape_has_room_ = false;
     MotionPriorSource  last_motion_prior_source_ = MotionPriorSource::None;
    Eigen::Matrix3f    last_cmd_cov_ = Eigen::Matrix3f::Identity();
     bool               last_command_prior_fresh_ = false;

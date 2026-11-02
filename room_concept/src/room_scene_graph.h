@@ -72,7 +72,6 @@ public:
           room_concept_(&room_concept), epistemic_(&epistemic),
           trigger_layout_(trigger_layout ? std::move(trigger_layout) : [] {})
     {
-        room_concept.set_room_name_provider([this] { return room_node_name(); });   // the scan tape's room label
         // ★TWO SWITCHES GUARDED THIS FEATURE AND ONLY ONE WAS WIRED. RoomConcept.CalibPivotEnabled
         // gates the active half here, but CalibChannel has its OWN `enabled` -- deliberately, as a
         // second safety catch on something that had never driven a robot -- and nothing ever set it
@@ -307,6 +306,8 @@ private:
     std::uint64_t explored_room_id_ = 0;            ///< the node explored_p_ was written on
     /// Write the belief on the room node (nullopt = not assessed: nothing is written). Deduplicated on the value.
     void publish_explored(std::optional<float> p);
+    /// Push the room node's name to RoomConcept (the scan tape's label); call after every dsr_room_id_ change.
+    void publish_room_name() { if (room_concept_ != nullptr) room_concept_->set_room_name(room_node_name()); }
     [[nodiscard]] std::string room_node_name() const;   ///< dsr_room_id_'s name ("" = none)
     /// A re-entry: restore p_mem from the recall (or this agent's record) and give the explorer the remembered outline.
     void note_recall_memory(const Recall& recall);
