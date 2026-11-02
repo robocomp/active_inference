@@ -1,6 +1,6 @@
 # Chained actions: each step ends where the next one wants to begin
 
-Date: 2026-11-02 · Status: DRAFT for the user's review · Scope: controller (mission + target selection), door_concept (close target)
+Date: 2026-11-02 · Status: APPROVED 2026-11-02 (user answers below) · Scope: controller (mission + target selection), door_concept (close target)
 
 ## Why
 
@@ -75,9 +75,25 @@ or a turn. That is the outcome of §3 with C_route, not a special case; check th
 - Same with the next step unresolvable: old behaviour (representative pose).
 - Regression: `test_door_passage` (state machine), `test_door_approach_law`, the close-judgement cases (1aeac589).
 
-## Open questions for the user
+## Leaf direction in memory (user 2026-11-02, the prerequisite)
 
-1. Is `close` allowed to fire while the robot is still moving (out of the arc, on the way)? It is remote and the arc
-   test is already probabilistic — this removes the stop entirely.
-2. Should the same apply to `cross`'s end (the post-crossing point)? Today the cross target is a point 1.3 m past the
-   door; with §3 it would be chosen toward the next goal — but only if the next step is known at that time.
+"The important thing is that leaf opening direction gets stored in LTSM and appears as an attribute in the WM instantiated
+doors. With this info the decision about how far the robot has to be from the door to open or close is trivial."
+
+- Two new DSR attributes (cortex `dsr_attr_name.h`, user reinstalls): `door_leaf_into_room_prob` (P(the leaf swings INTO
+  the room this door node hangs from)) and `door_leaf_hinge_plus_prob` (P(hinge at the +x end of the aperture in the
+  door node's own frame)). Probabilities; 0.5 = no information.
+- door_concept WRITES them on every door node from its swing/hinge log-odds (sigmoid). ltsm already persists door-node
+  attributes (door_phi_rad is in the memory JSON), so a remembered face carries them with no ltsm change beyond checking.
+- On restore/recall, door_concept SEEDS the leaf belief of the live door from the remembered face's attributes (the
+  face in the room being entered; the opposite face's `into_room` is the complement). `etc/door_identities.csv`
+  stops being the source of the leaf side (it may stay as a cache, but the graph/memory is authoritative).
+- The fixture three_rooms_door0's memory gets the corrected sides written as attributes (DOOR_1 into R2, DOOR_2 into R3,
+  DOOR_0 into R1).
+- Standoffs follow directly: opening/closing a leaf that swings AWAY from the robot's side needs no clearance beyond the
+  body; one that swings TOWARD it needs the leaf length (= aperture width) plus σ. The swept-arc test uses the prob.
+
+## Answers (user 2026-11-02)
+
+1. Yes: `close` may fire while the robot is moving, as it leaves the swept arc on its way to the next goal.
+2. Yes, definitely: `cross`'s end point is also chosen toward the next step's goal when it is known.
