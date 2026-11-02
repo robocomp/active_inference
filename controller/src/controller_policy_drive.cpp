@@ -667,7 +667,7 @@ void ControllerSession::drive_with_policy(const ControllerRobotPose &robot_pose,
         policy_held_leaf_ = {};
         policy_held_room_.clear();
     }
-    const float standoff = params_ != nullptr ? params_->anchor_cross_standoff_m : 2.0f;
+    const float standoff = cross_standoff_m();
     rc::RobotFootprint bare = approach_body_;
     bare.set_safety_margin(0.f);
     rc::policy::GoalAdapterParams gp;

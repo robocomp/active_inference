@@ -57,6 +57,7 @@
 #include "controller_world_model.h"
 #include "chat_inbox.h"
 #include "mission_node.h"
+#include "chained_action.h"
 #include "controller_relative_motion.h"
 #include "controller_base_probe.h"
 #include "../../common/mission/mission_interpreter.h"
@@ -165,7 +166,7 @@ private:
 	void abort_all(const char *source);
 	/// The door-passage start shared by `cross door_N` and a mission's cross / open (the door must exist).
 	MissionResult start_door_passage(const std::string &door, rc::DoorPassage::Step stop_after, const char *source, bool then_affordances = false);
-	MissionResult start_door_close(const std::string &door, const char *source);   ///< a mission's `close <door>`: the Close step alone
+	MissionResult start_door_close(const std::string &door, const char *source, std::optional<rc::chain::NextGoal> next = std::nullopt);   ///< a mission's `close <door>`: the Close step alone
 	/// `approach <object> [from <side>]` and a mission's approach: the object must offer its approach and list the side.
 	MissionResult start_approach(const std::string &object, const std::string &side, const char *source, rc::ApproachOrder::After after);
 	/// The relative-motion start shared by `move` / `turn` and a mission's move (text in RelativeMotion's grammar).
@@ -187,7 +188,14 @@ private:
 		void halt() override;
 		std::optional<rc::mission::Pose> pose() override;
 		std::optional<double> eval(const rc::mission::Pred &p) override;
+		/// The mission's steps, for the look-ahead of ONE step (chained_action.h): set by start_mission before the first tick.
+		void set_plan(std::vector<rc::mission::Step> steps) { plan_ = std::move(steps); }
+		/// The step AFTER `leaf` that has a standpoint (a `close` runs on the way and is skipped), as a goal in the current room's
+		/// frame; nullopt = unknown / unresolvable -> every step behaves as before.
+		std::optional<rc::chain::NextGoal> next_goal_of(const rc::mission::Step &leaf);
 	private:
+		std::vector<rc::mission::Step> plan_;   ///< the running mission's step tree (look-ahead)
+		bool chain_target_ = false;        ///< close: a click target to the next goal is standing (cleared when the step ends)
 		SpecificWorker &w_;
 		rc::RoomHold hold_;                ///< a room-scoped step waiting for current_room to resolve (mission_room_hold.h)
 		rc::RelationHold relation_hold_;   ///< a cross <room>/new waiting for its door to resolve (mission_door_relation.h)

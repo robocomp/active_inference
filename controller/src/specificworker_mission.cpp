@@ -90,9 +90,11 @@ std::optional<std::string> SpecificWorker::MissionHost::start_now(const rc::miss
 			return std::nullopt;
 		}
 		if (not door.has_value()) return door.error();
-		const auto r = w_.start_door_close(*door, "mission");
+		const auto next = next_goal_of(leaf);
+		const auto r = w_.start_door_close(*door, "mission", next);
 		if (not r.accepted) return r.reason;
 		door_ = *door;
+		chain_target_ = next.has_value();
 		ground(leaf, *door, QJsonObject{{"door", QString::fromStdString(*door)}});
 		return std::nullopt;
 	}
@@ -114,6 +116,7 @@ std::optional<std::string> SpecificWorker::MissionHost::start_now(const rc::miss
 		                                     "mission");
 		if (not r.accepted) return r.reason;
 		door_ = *door;
+		w_.session_.door_passage().set_next_goal(next_goal_of(leaf));   // one step of look-ahead (re-tried each poll while unknown)
 		QJsonObject g{{"door", QString::fromStdString(*door)}};
 		if (ref.kind == Ref::Kind::Passage)
 		{
@@ -218,6 +221,52 @@ void SpecificWorker::MissionHost::explore_while_waiting(const std::string &room)
 	w_.session_.set_command_explore(true, room);
 }
 
+// ── LOOK-AHEAD OF ONE STEP (chained_action.h) ─────────────────────────────────────────────────────────────────────────────
+// The first standpoint of the step after `leaf` (a `close` is skipped: it runs on the way), in the CURRENT room's frame:
+//   open/cross <door>  -> door_concept's approach vantage on that door's axis (aff_<door>_approach), carried over from the door's
+//                         own room through the graph's RT chain when it is another room;
+//   go_to <pose>       -> the pose, when it is in this room.
+// Anything else, or anything that does not resolve now, is nullopt: the step then behaves exactly as before.
+std::optional<rc::chain::NextGoal> SpecificWorker::MissionHost::next_goal_of(const rc::mission::Step &leaf)
+{
+	const rc::mission::Step *nx = rc::chain::next_step(plan_, leaf.id);
+	if (nx == nullptr or w_.G == nullptr) return std::nullopt;
+	const std::string label = std::format("{} -> {}", leaf.id, nx->id);
+	if (nx->op == "go_to")
+	{
+		const auto to = nx->ref("to");
+		if (not to.has_value() or to->kind != Ref::Kind::Pose or not w_.robot_in_named_room(to->pose.room)) return std::nullopt;
+		return rc::chain::NextGoal{"", {static_cast<float>(to->pose.x), static_cast<float>(to->pose.y)}, static_cast<float>(to->pose.yaw), label};
+	}
+	if (nx->op != "open" and nx->op != "cross") return std::nullopt;
+	const auto ref = nx->ref("door");
+	if (not ref.has_value()) return std::nullopt;
+	const auto door = w_.resolve_door(*ref);
+	if (not door.has_value()) return std::nullopt;
+	const auto dn = w_.G->get_node(*door);
+	const auto an = w_.G->get_node("aff_" + *door + "_approach");
+	if (not dn.has_value() or not an.has_value()) return std::nullopt;
+	const auto x = w_.G->get_attrib_by_name<epistemic_target_x_m_att>(*an);
+	const auto y = w_.G->get_attrib_by_name<epistemic_target_y_m_att>(*an);
+	const auto yaw = w_.G->get_attrib_by_name<epistemic_target_yaw_rad_att>(*an);
+	if (not x.has_value() or not y.has_value() or not std::isfinite(*x) or not std::isfinite(*y)) return std::nullopt;
+	Eigen::Vector2f p(*x, *y);
+	float heading = yaw.has_value() and std::isfinite(*yaw) ? *yaw : 0.f;
+	const auto &gs = w_.world_model_.graph_state();
+	if (const auto room_id = rc::world::room_of(*w_.G, dn->id()); room_id != 0 and room_id != gs.room_id)
+	{
+		const auto room = w_.G->get_node(room_id);
+		auto *ie = w_.world_model_.inner_eigen();
+		if (not room.has_value() or ie == nullptr) return std::nullopt;
+		const auto T = ie->get_transformation_matrix(gs.room_name, room->name());
+		if (not T.has_value()) return std::nullopt;
+		const Eigen::Vector3d q = T->matrix().block<3, 3>(0, 0).cast<double>() * Eigen::Vector3d(*x, *y, 0.0) + T->matrix().block<3, 1>(0, 3).cast<double>();
+		p = Eigen::Vector2f(static_cast<float>(q.x()), static_cast<float>(q.y()));
+		heading += static_cast<float>(std::atan2(T->matrix()(1, 0), T->matrix()(0, 0)));
+	}
+	return rc::chain::NextGoal{*door, p, heading, label};
+}
+
 LeafStatus SpecificWorker::MissionHost::poll(const rc::mission::Step &leaf)
 {
 	const std::string &op = leaf.op;
@@ -247,13 +296,23 @@ LeafStatus SpecificWorker::MissionHost::poll(const rc::mission::Step &leaf)
 	if (op == "close")
 	{
 		const auto v = w_.session_.door_passage().view();
-		if (v.door != door_ or v.step == rc::DoorPassage::Step::Idle) return {.state = LeafState::Failed, .detail = "abandoned"};
+		const auto end_chain = [&]
+		{
+			if (not std::exchange(chain_target_, false)) return;
+			w_.session_.mission().set_click_target(std::nullopt);   // the next step owns the base
+			w_.clear_manual_target();
+		};
+		if (v.door != door_ or v.step == rc::DoorPassage::Step::Idle) { end_chain(); return {.state = LeafState::Failed, .detail = "abandoned"}; }
 		if (v.step != rc::DoorPassage::Step::Done) return {};
+		end_chain();
 		if (v.failed) return {.state = LeafState::Failed, .detail = v.last_outcome.empty() ? std::string("door_left_open") : v.last_outcome};
 		return {.state = LeafState::Succeeded};
 	}
 	if (op == "cross" or op == "open")
 	{
+		// the look-ahead may resolve late (the next door is in a room not yet known): keep trying until it does
+		if (not door_.empty() and w_.session_.door_passage().view().door == door_ and not w_.session_.door_passage().next_goal().has_value())
+			if (const auto ng = next_goal_of(leaf); ng.has_value()) w_.session_.door_passage().set_next_goal(ng);
 		// `cross new` / `cross <room>` name a RELATION, not a node: if the door it resolved to leaves the graph before the
 		// crossing (door_concept removed it for absence — recog_try26 leg 3: phantom door_12 removed, the passage then waited
 		// 600 s for a door that no longer existed), drop the passage and resolve the relation again.
@@ -383,6 +442,11 @@ void SpecificWorker::MissionHost::cancel(const rc::mission::Step &leaf)
 	if (op == "cross" or op == "open" or op == "close")
 	{
 		if (w_.session_.door_passage().view().door == door_) w_.session_.door_passage().stop();
+		if (std::exchange(chain_target_, false))
+		{
+			w_.session_.mission().set_click_target(std::nullopt);
+			w_.clear_manual_target();
+		}
 	}
 	else if (op == "go_to")
 	{
@@ -448,12 +512,14 @@ std::optional<double> SpecificWorker::MissionHost::eval(const rc::mission::Pred 
 std::optional<rc::mission::Error> SpecificWorker::start_mission(rc::mission::Mission m, const char *source)
 {
 	const std::string title = m.title;
+	const std::vector<rc::mission::Step> plan_steps = m.steps;
 	std::string ir = rc::mission::encode_json(m);
 	if (auto e = interpreter_.start(std::move(m), current_time_ms()); e.has_value())
 	{
 		std::println("[{}] mission '{}' refused: {}", source, title, e->message());
 		return e;
 	}
+	mission_host_.set_plan(plan_steps);   // the look-ahead reads the step tree (chained_action.h)
 	journal_mission_started(source, ir);   // before the first tick: the superseded mission's steps close first
 	mission_source_ = source;
 	mission_ir_json_ = std::move(ir);

@@ -1224,6 +1224,18 @@ private:
     std::vector<rc::policy::RouteWaypoint> door_route_goals_;       // the curve's points as Place goals (policy on)
     int door_route_goal_index_ = 0;
     std::uint64_t door_route_cross_claim_ = 0;                      // aff_<door>_cross claimed by the through-leg (0 = none)
+    // ── CHAINED ACTIONS (spec 2026-11-02, chained_action.h) ──
+    std::string dp_chain_close_;                 ///< this cycle's chained close (DoorPassage::Out::chain_close)
+    std::uint64_t chain_close_claim_ = 0;        ///< aff_<door>_close claimed while the robot drives on to the next goal (0 = none)
+    struct ChainEnd { float s = 0.f; float yaw = 0.f; };   ///< the cross's end, chosen toward the next step's goal
+    std::optional<ChainEnd> chain_end_;          ///< for the CURRENT through-leg (reset when the leg ends)
+    std::string chain_end_key_;                  ///< the leg key (+ next goal) chain_end_ was computed for
+    /// The cross servo's / policy's through standoff: the chosen chained end, else Controller.AnchorCrossStandoffM.
+    [[nodiscard]] float cross_standoff_m() const
+    {
+        return chain_end_.has_value() ? chain_end_->s : (params_ != nullptr ? params_->anchor_cross_standoff_m : 2.0f);
+    }
+    void update_chain_end(const ControllerPlanningStep &step);
     // ── THE DOOR APPROACH LAW (door_approach_law.h): state feedback on the vantage, no latched sub-steps ──
     Eigen::Vector2f door_vantage_ = Eigen::Vector2f::Zero(), door_centre_pt_ = Eigen::Vector2f::Zero();   // V and the aperture centre
     float door_vantage_s_ = 0.f;                    // arc length of V along the route

@@ -74,6 +74,7 @@
 #include "../../common/world_query/door_query.h"
 #include "door_passage_corridor.h"
 #include "controller_anchor_servo.h"   // rc::anchor_cross_end (Task 12 Fix E)
+#include "chained_action.h"            // rc::chain::NextGoal (spec 2026-11-02 chained actions)
 
 namespace rc
 {
@@ -129,6 +130,8 @@ public:
         route_key_.clear();
         route_approach_.reset();
         route_cross_.reset();
+        next_goal_.reset();      // the mission hands the next step's goal after start() (set_next_goal)
+        close_chained_ = false;
         last_event_ = std::format("[door-passage] {}: started", door_);
     }
     void stop()
@@ -160,9 +163,17 @@ public:
     /// A mission's `close <door>` (2026-11-01, user: the PLAN triggers the close affordance, not the passage): the Close step
     /// alone — no approach, no cross. Done when door_concept completes `close`; FAILED (last_outcome "door_left_open" or the
     /// close's own outcome) when it ends otherwise or is not offered within close_wait_ms_ — the plan decides what follows.
-    void start_close(std::string door)
+    ///
+    /// CLOSE ON THE WAY (spec 2026-11-02 chained actions, user decision 1): with `next` (the next step's first standpoint) the
+    /// close is CHAINED — the passage claims nothing for the selector to drive to (`required` empty) and asks the session, through
+    /// Out::chain_close, to publish the claim on the affordance WHILE the robot follows its route to `next`. door_concept serves
+    /// the claim the moment its own precondition P(clear of the swing) holds; the step is judged by the door's state as always.
+    /// Without `next`: the old close (drive to door_concept's standpoint, which faces the door just crossed).
+    void start_close(std::string door, std::optional<chain::NextGoal> next = std::nullopt)
     {
         std::scoped_lock lk(m_);
+        next_goal_ = next;
+        close_chained_ = next.has_value();
         door_ = std::move(door);
         stop_after_ = Step::Close;
         then_affordances_ = false;
@@ -178,6 +189,19 @@ public:
         note_ = "started (close)";
         step_state_.clear();
         last_event_ = std::format("[door-passage] {}: close — claiming {}", door_, name_of(Step::Close));
+    }
+    /// The mission's look-ahead of ONE step (spec 2026-11-02): the next step's first standpoint in the current room's frame, or
+    /// nullopt (unknown / unresolvable -> every step behaves as before). May be (re)set while the step runs; a built route is a
+    /// commitment and is not rebuilt for it.
+    void set_next_goal(std::optional<chain::NextGoal> g)
+    {
+        std::scoped_lock lk(m_);
+        next_goal_ = std::move(g);
+    }
+    [[nodiscard]] std::optional<chain::NextGoal> next_goal() const
+    {
+        std::scoped_lock lk(m_);
+        return next_goal_;
     }
     /// How long the Close step waits for door_concept to OFFER `close` (see the header comment).
     void set_close_wait_ms(std::uint64_t ms)
@@ -328,6 +352,7 @@ public:
         float approach_yaw = 0.f;
         std::optional<Eigen::Vector2f> cross;
         float cross_yaw = 0.f;
+        std::optional<chain::NextGoal> next;               ///< the next step's first standpoint (spec 2026-11-02): the cross's end is chosen toward it
     };
     enum class RouteReport { Arrived, Failed };
     /// The session's word on the route of the CURRENT leg (`key` = the leg it was built for; a stale report is ignored).
@@ -366,6 +391,7 @@ public:
     struct Out
     {
         std::optional<RouteLeg> route;                      ///< route mode: the leg to drive now (nullopt = drive nothing)
+        std::string chain_close;                            ///< a CHAINED close: the affordance to claim while the robot drives on (else "")
         std::string required;                               ///< "" = no restriction (passage idle or done)
         std::vector<std::vector<Eigen::Vector2f>> passages; ///< free corridor while crossing (room frame)
         std::unordered_set<std::string> exempt;             ///< node names that are not obstacles now
@@ -710,6 +736,12 @@ public:
             step_state_ = state_name(st);
             note_ = std::format("{} ({})", name_of(step_), step_state_);
             if (out.event.has_value()) last_event_ = *out.event;
+            if (close_chained_)
+            {
+                out.chain_close = name_of(Step::Close);   // claimed by the session while the robot drives on; nothing to select
+                note_ = std::format("{} ({}) — on the way to the next step", name_of(step_), step_state_);
+                return out;
+            }
             out.required = name_of(Step::Close);
             return out;
         }
@@ -1004,6 +1036,7 @@ private:
             leg.through = true;
             if (route_approach_.has_value()) { leg.approach = route_approach_->first; leg.approach_yaw = route_approach_->second; }
             if (route_cross_.has_value()) { leg.cross = route_cross_->first; leg.cross_yaw = route_cross_->second; }
+            leg.next = next_goal_;
             leg.key = std::format("{}|drive_in|{}|{}", door_, route_epoch_, room_frame);
             route_key_ = leg.key;
             out.route = std::move(leg);
@@ -1042,6 +1075,7 @@ private:
         leg.approach = route_approach_->first;
         leg.approach_yaw = route_approach_->second;
         if (route_cross_.has_value()) { leg.cross = route_cross_->first; leg.cross_yaw = route_cross_->second; }
+        leg.next = through ? next_goal_ : std::nullopt;
         leg.key = std::format("{}|{}|{}|{}", door_, through ? "through" : "approach", route_epoch_, room_frame);
         route_key_ = leg.key;
         out.route = std::move(leg);
@@ -1289,6 +1323,8 @@ private:
     }
     int  cross_unreachable_ = 0;   // Unreachable cross completions in this passage (kMaxCrossUnreachable)
     bool failed_ = false;          // finished by the cap, not by crossing
+    std::optional<chain::NextGoal> next_goal_;   // set_next_goal(): the next step's first standpoint
+    bool close_chained_ = false;   // start_close(door, next): claimed while driving on, not driven to
     bool close_only_ = false;      // start_close(): a mission's `close <door>`, the Close step alone
     bool clearing_ = false;        // Task 12 Fix E: crossing on past the room switch, on the anchor
     bool anchored_ = false;        // the session: the cross is being driven on an anchor

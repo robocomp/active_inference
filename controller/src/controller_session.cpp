@@ -320,6 +320,7 @@ bool ControllerSession::sync_world_state(std::uint64_t timestamp_ms,
             }
         }
         door_required_ = std::move(dp.required);
+        dp_chain_close_ = std::move(dp.chain_close);
         // Route mode: the leg to drive. A leg that ended or changed drops the route built for it (and the tracker's copy).
         door_route_leg_ = std::move(dp.route);
         if (not door_route_leg_.has_value() or door_route_leg_->key != door_route_key_)
@@ -333,6 +334,11 @@ bool ControllerSession::sync_world_state(std::uint64_t timestamp_ms,
                 door_route_installed_ = false;
             }
             if (not door_route_leg_.has_value()) door_route_key_.clear();
+        }
+        if (not door_route_leg_.has_value() or not door_route_leg_->through)
+        {
+            chain_end_.reset();   // the through-leg is over: the next one chooses its own end (chained_action.h)
+            chain_end_key_.clear();
         }
         // Where the passage's door IS in this room — the door line the cross axis must be centred on. The cross
         // standpoint sits CrossStandoffM past it, a configured distance the controller must not assume.
@@ -1197,6 +1203,29 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
                                               door_passage_.view().failed ? rc::affordance::Outcome::Unreachable
                                                                           : rc::affordance::Outcome::Satisfied);
             door_route_cross_claim_ = 0;
+        }
+    }
+    // ★ A CHAINED CLOSE IS CLAIMED WHILE THE ROBOT DRIVES ON (spec 2026-11-02 chained actions, user: "close may fire while the robot
+    //   is moving, as it leaves the swept arc"). The claim names the pose the robot stands at now (door_concept's note: a close is
+    //   beside THIS door; its request waits for P(clear of the swing) >= 1 - 0.01 on its own); the base is the mission's (a click
+    //   target to the next goal) — nothing here drives. The claim ends with the step: Satisfied unless the passage failed.
+    {
+        std::uint64_t want = 0;
+        if (not dp_chain_close_.empty() and robot_pose.has_value())
+            if (const auto n = graph_->get_node(dp_chain_close_); n.has_value()) want = n->id();
+        if (want != 0)
+        {
+            const int epoch = rc::AffordanceManager::producer_epoch(graph_, want).value_or(0);
+            if (epoch != 0) affordance_manager.publish_executing(graph_, want, epoch, robot_pose->pos.x(), robot_pose->pos.y(), robot_pose->theta);
+            else affordance_manager.note_claim(graph_, want, 0);
+            chain_close_claim_ = want;
+        }
+        else if (chain_close_claim_ != 0)
+        {
+            affordance_manager.complete_claim(graph_, chain_close_claim_,
+                                              door_passage_.view().failed ? rc::affordance::Outcome::Unreachable
+                                                                          : rc::affordance::Outcome::Satisfied);
+            chain_close_claim_ = 0;
         }
     }
     // ── DOOR ROUTE (route mode): the passage's route owns the base, as a running mission's route does — nothing to select.
@@ -3461,6 +3490,17 @@ bool ControllerSession::build_door_route(const ControllerRobotPose &robot_pose, 
     auto plan = rc::door_route::plan(appr, cross, passage_door_centre_, robot_pose.pos, leg.through, prm,
                                      [this](const Eigen::Vector2f &p, float h) { return grid_planner_.pose_free(p, h); },
                                      seen.has_value() ? std::optional<rc::door_route::Axis>(seen->axis) : std::nullopt);
+    // ★ CHAINED END (chained_action.h): the route's post is the chosen standoff, never past door_concept's published cross target
+    //   (the far room is not in this grid); the servo's drive-in goes on to the chosen standoff (cross_standoff_m).
+    if (plan.through and plan.has_axis and chain_end_.has_value() and not plan.waypoints.empty())
+    {
+        const float s = std::min(chain_end_->s, plan.s_post);
+        const Eigen::Vector2f n_in = (plan.post - plan.ap).norm() > 1e-4f ? (plan.ap - plan.post).normalized() : Eigen::Vector2f::UnitY();
+        plan.s_post = s;
+        plan.post = plan.ap - s * n_in;
+        plan.post_yaw = chain_end_->yaw;
+        plan.waypoints.back() = plan.post;
+    }
     if (not plan.why.empty())
     {
         std::println("[door-route] {}: cannot place the route: {}", leg.door, plan.why);
@@ -3602,11 +3642,70 @@ rc::door_approach::Command ControllerSession::door_approach_command(const Contro
     return cmd;
 }
 
+// ── THE CROSS'S END, CHOSEN TOWARD THE NEXT STEP (spec 2026-11-02, chained_action.h) ──────────────────────────────────────────
+// Once per through-leg and next goal. The region is the axis from "wholly past the leaf's swept arc" to today's end (the servo's
+// standoff, else door_concept's cross target); the point is the one whose cost-to-go to the next goal — travel at v_max plus the
+// turn at w_max, in seconds — is least, and the heading is the first segment of that route. The far room is not in this room's
+// grid, so the route is the straight line (the planner is asked only where it can answer: nowhere past the door).
+void ControllerSession::update_chain_end(const ControllerPlanningStep &step)
+{
+    const auto &leg = *door_route_leg_;
+    if (not leg.through or not leg.next.has_value()) { chain_end_.reset(); chain_end_key_.clear(); return; }
+    const std::string key = std::format("{}|{:.2f},{:.2f}", leg.key, leg.next->p.x(), leg.next->p.y());
+    if (key == chain_end_key_) return;
+    chain_end_key_ = key;
+    chain_end_.reset();
+    std::optional<rc::door_route::Axis> axis;
+    if (const auto seen = perceived_door(leg.door, step.robot_pose); seen.has_value()) axis = seen->axis;
+    else axis = rc::door_route::axis_from({leg.approach, leg.approach_yaw}, passage_door_centre_);
+    if (not axis.has_value() or not leg.cross.has_value())
+    {
+        std::println("[chain] {}: no door axis / cross target to place the end on — the end stays as published", leg.door);
+        return;
+    }
+    const float half_w = std::max(approach_body_.support_radius(0.f, Eigen::Vector2f(1.f, 0.f)),
+                                  approach_body_.support_radius(0.f, Eigen::Vector2f(-1.f, 0.f)));
+    const float half_len = std::max(approach_body_.support_radius(0.f, Eigen::Vector2f(0.f, 1.f)),
+                                    approach_body_.support_radius(0.f, Eigen::Vector2f(0.f, -1.f)));
+    const float r_body = std::hypot(half_w, half_len);   // "wholly past" = beyond the circumscribed radius (drive_door_route)
+    const float s_pub = (*leg.cross - axis->c).dot(-axis->n);
+    // today's end: the servo drives in to its standoff past the plane when it takes the doorway, else the route ends at the cross target
+    const float s_max = door_cross_servo_ ? std::max(s_pub, params_ != nullptr ? params_->anchor_cross_standoff_m : 2.0f) : s_pub;
+    std::optional<float> p_entered;   // P(the leaf sits on the side being ENTERED) = 1 - P(it swings into the room the door hangs from)
+    float leaf_len = 0.f;
+    if (graph_ != nullptr)
+        if (const auto dn = graph_->get_node(leg.door); dn.has_value())
+        {
+            if (const auto pi = graph_->get_attrib_by_name<door_leaf_into_room_prob_att>(dn.value()); pi.has_value())
+                p_entered = 1.f - *pi;
+            if (const auto w = graph_->get_attrib_by_name<width_m_att>(dn.value()); w.has_value() and w.value() > 0.f) leaf_len = w.value();
+        }
+    if (leaf_len <= 0.f) p_entered.reset();   // no leaf length: no swept region to place the end beyond
+    rc::chain::EndRegion reg;
+    reg.centre = axis->c;
+    reg.n = axis->n;
+    reg.s_max = s_max;
+    reg.s_min = rc::chain::swept_standoff(r_body, p_entered, leaf_len, s_max);
+    reg.step_m = grid_planner_.cell_size();
+    reg.v_max = params_ != nullptr ? params_->max_adv_speed_mps : 0.35f;
+    reg.w_max = params_ != nullptr ? params_->max_rot_speed_rps : 1.0f;
+    const auto c = rc::chain::choose_end(reg, *leg.next);
+    if (not c.has_value()) return;
+    chain_end_ = ChainEnd{.s = c->s, .yaw = c->yaw};
+    std::println("[chain] step {}: end pose chosen ({:.2f},{:.2f},{:.0f} deg) for next goal {} at ({:.2f},{:.2f}) (cost-to-go {:.1f} s, turn {:.0f} deg) "
+                 "— {:.2f} m past {} in [{:.2f}, {:.2f}] (leaf on the entered side: {})",
+                 leg.next->label.empty() ? leg.door : leg.next->label, c->p.x(), c->p.y(), c->yaw * 57.2958f,
+                 leg.next->door.empty() ? std::string("?") : leg.next->door, leg.next->p.x(), leg.next->p.y(), c->cost_s, c->turn_deg,
+                 c->s, leg.door, reg.s_min, reg.s_max,
+                 p_entered.has_value() ? std::format("P {:.2f}", *p_entered) : std::string("unknown"));
+}
+
 bool ControllerSession::drive_door_route(const ControllerPlanningStep &step, rc::TrajectoryController &path_controller,
                                          ControllerMotionCommander &motion_commander, const TimeSource &time_source)
 {
     const auto &leg = *door_route_leg_;
     const std::uint64_t now = time_source();
+    update_chain_end(step);
     // ★A route built on the room-frame door is rebuilt on the PERCEIVED opening as soon as the anchor is up; one built on the
     //  anchor is rebuilt when it no longer takes the body through the opening as now measured (band_cross_route_passes: the
     //  same physical test as the band's route, no tolerance of its own).
@@ -3863,7 +3962,7 @@ bool ControllerSession::drive_point_target(const ControllerPlanningStep &step,
             or not rc::band_cross_route_passes(current_plan_->room_path, g, half_w))
         {
             const float front = approach_body_.support_radius(0.f, Eigen::Vector2f(0.f, 1.f));
-            const float standoff = params_ != nullptr ? params_->anchor_cross_standoff_m : 2.0f;
+            const float standoff = cross_standoff_m();
             // past the protocol's `through` (s >= standoff) by two goal tolerances, as the policy's doorway goal line is
             const float past = standoff + 2.f * path_controller.goal_threshold();
             const auto poly = rc::band_cross_polyline(cpose.pos, g, front + rc::kBandCrossWallHalfDepthM, past);
@@ -4716,7 +4815,7 @@ ControllerSession::CrossProtocol ControllerSession::cross_protocol(const Control
     CrossProtocol out;
     const auto &a = *anchor_cross_;
     const std::uint64_t now = time_source();
-    const float standoff = params_ != nullptr ? params_->anchor_cross_standoff_m : 2.0f;
+    const float standoff = cross_standoff_m();
     const float half_w = std::max(approach_body_.support_radius(0.f, Eigen::Vector2f(1.f, 0.f)),
                                   approach_body_.support_radius(0.f, Eigen::Vector2f(-1.f, 0.f)));
     auto hand_back = [&](const std::string &why, bool timed_out = true) { cross_hand_back(why, timed_out, motion_commander); };
@@ -4959,7 +5058,7 @@ rc::policy::DoorwayRisk ControllerSession::band_cross_doorway_risk(const CrossPr
     const float g_body = rc::policy::PolicyInput{}.body_geometry_sigma_m;
     const float sigma_s = std::hypot(params_ != nullptr ? params_->policy_sigma_rel_xy_m : 0.f, g_body);
     const float sigma_r = params_ != nullptr ? params_->lidar_range_sigma_m : ControllerParams{}.lidar_range_sigma_m;
-    const float standoff = params_ != nullptr ? params_->anchor_cross_standoff_m : 2.0f;
+    const float standoff = cross_standoff_m();
     auto jambs_of = [&](const rc::interaction::RelPose &rp, float width)
     {
         const auto geo = rc::anchor_cross_geometry(rp);
@@ -4984,7 +5083,7 @@ void ControllerSession::step_anchor_cross(const ControllerRobotPose &robot_pose,
     const std::uint64_t now = time_source();
     const float v_max = params_ != nullptr ? params_->max_adv_speed_mps : 0.35f;
     const float w_max = params_ != nullptr ? params_->max_rot_speed_rps : 1.0f;
-    const float standoff = params_ != nullptr ? params_->anchor_cross_standoff_m : 2.0f;
+    const float standoff = cross_standoff_m();
     // The body's lateral half-width: the footprint's reach along body ±x (the passage code's own body model, safety
     // margin included).
     const float half_w = std::max(approach_body_.support_radius(0.f, Eigen::Vector2f(1.f, 0.f)),

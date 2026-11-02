@@ -2126,7 +2126,8 @@ SpecificWorker::MissionResult SpecificWorker::dispatch_mission_command(const std
 }
 
 // `cross door_N` and a mission's cross / open: the door must exist now; the passage restricts the selector to its steps.
-SpecificWorker::MissionResult SpecificWorker::start_door_close(const std::string &door, const char *source)
+SpecificWorker::MissionResult SpecificWorker::start_door_close(const std::string &door, const char *source,
+                                                               std::optional<rc::chain::NextGoal> next)
 {
 	if (not G->get_node(door).has_value())
 	{
@@ -2137,8 +2138,19 @@ SpecificWorker::MissionResult SpecificWorker::start_door_close(const std::string
 	session_.approach_order().stop();
 	session_.mission().set_mode(rc::DriveMode::Command);
 	session_.set_command_explore(false);   // the close affordance is the order now
-	session_.door_passage().start_close(door);
-	std::println("[{}] close '{}' -> claiming aff_{}_close{}", source, door, door,
+	// ★ CLOSE ON THE WAY (spec 2026-11-02): with the next step's goal known the robot does NOT drive to door_concept's close
+	//   standpoint. The passage claims the close while the robot follows its route to the next goal (a point target, as go_to),
+	//   and door_concept serves it once the robot is clear of the swing.
+	session_.door_passage().start_close(door, next);
+	if (next.has_value())
+	{
+		session_.mission().set_mode(rc::DriveMode::Target);   // mode first: set_mode drops a click target
+		session_.mission().set_click_target(next->p);
+		set_manual_target(QPointF(next->p.x(), next->p.y()));
+	}
+	std::println("[{}] close '{}' -> claiming aff_{}_close{}{}", source, door, door,
+	             next.has_value() ? std::format(" while driving on to ({:.2f},{:.2f}) — executed on the way", next->p.x(), next->p.y())
+	                              : std::string{},
 	             driving_enabled_ ? "" : "  (base not armed: press Run to drive)");
 	return {.accepted = true, .kind = "close", .door = door};
 }

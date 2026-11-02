@@ -4,6 +4,7 @@
 //       $(pkg-config --cflags Qt6Core) -o /tmp/tdp test_door_passage.cpp \
 //       -ldsr_api -ldsr_core -lfastcdr -lfastdds $(pkg-config --libs Qt6Core) && /tmp/tdp
 #include "../src/controller_door_passage.h"
+#include "../../door_concept/src/door_close_clear.h"   // the SAME P(clear of the swing) the real door_concept serves a close on
 
 #include <print>
 
@@ -27,7 +28,7 @@ using Step = DoorPassage::Step;
 std::shared_ptr<DSR::DSRGraph> make_graph(int k)
 {
     return std::make_shared<DSR::DSRGraph>("door_passage_test_" + std::to_string(k), 970 + k,
-                                           std::string(SHADOW_JSON), true, static_cast<int8_t>(60 + k), DSR::Queue);
+                                           std::string(SHADOW_JSON), true, static_cast<int8_t>(60 + (k % 60)), DSR::Queue);
 }
 
 /// An affordance node in a protocol state: offered (pending, not active), executing (both), completed (neither).
@@ -1111,6 +1112,90 @@ int main()
         p.update(*G, nullptr, "room_2");
         CHECK(p.view().step == Step::Done);
         CHECK(p.view().failed);
+    }
+
+
+    // ══ CHAINED ACTIONS (spec 2026-11-02): `cross R2; close R1; open R3` — the close happens ON THE WAY to the next step ═════════
+    {   // the cross's leg carries the next step's goal; without one (unresolvable / last step) it carries none — old behaviour
+        for (const bool known : {true, false})
+        {
+            auto G = make_graph(70 + (known ? 0 : 1));
+            DoorPassage p;
+            p.set_clock(clock);
+            p.set_use_route(true);
+            p.note_room_id(1);
+            p.start("door_k", Step::Cross);
+            if (known) p.set_next_goal(rc::chain::NextGoal{"door_n", {-1.f, -3.f}, 0.f});
+            offered(*G, "aff_door_k_approach");
+            target(*G, "aff_door_k_approach", 2.f, 1.6f, down);
+            offered(*G, "aff_door_k_cross");
+            target(*G, "aff_door_k_cross", 2.f, -0.8f, down);
+            { DSR::Node m = DSR::Node::create<object_node_type>("door_k"); G->add_or_modify_attrib_local<door_open_prob_att>(m, 1.0f); G->insert_node(m); }
+            auto out = p.update(*G, nullptr, "room_1");
+            CHECK(out.route.has_value() and out.route->through);
+            CHECK(out.route.has_value() and out.route->next.has_value() == known);
+            CHECK(not known or (out.route->next.has_value() and out.route->next->door == "door_n"));
+        }
+    }
+    {   // the close WITHOUT a next goal is the old one: the selector is told to drive to door_concept's close standpoint
+        auto G = make_graph(72);
+        DoorPassage p;
+        p.set_clock(clock);
+        p.start_close("door_c");
+        offered(*G, "aff_door_c_close");
+        const auto out = p.update(*G, nullptr, "room_2");
+        CHECK(out.required == "aff_door_c_close" and out.chain_close.empty());
+    }
+    {   // the close WITH a next goal: no standpoint to drive to; the claim is published while the robot follows its route to the
+        //   next goal, door_concept serves it as soon as P(clear of the swing) holds, and the robot never stops for it.
+        auto G = make_graph(73);
+        DoorPassage p;
+        p.set_clock(clock);
+        p.start_close("door_c", rc::chain::NextGoal{"door_n", {-1.f, -3.2f}, 0.f});
+        { DSR::Node m = DSR::Node::create<object_node_type>("door_c"); G->add_or_modify_attrib_local<door_open_prob_att>(m, 1.0f); G->insert_node(m); }
+        offered(*G, "aff_door_c_close");
+        // the door: aperture centre (2,0), across_u = +y (the room left); the robot is in the entered room (y < 0), just past
+        // the cross end (1.3 m), the leaf sweeping the ENTERED side (swing -1 = toward -y) with a 1.2 m arc
+        Eigen::Vector2f pos(2.f, -1.3f);
+        const Eigen::Vector2f goal(-1.f, -3.2f);
+        constexpr float v = 0.3f, dt = 0.1f, arc = 1.2f;
+        int stopped = 0, ticks = 0, claim_ticks = 0;
+        int served_at = -1;
+        float served_speed = 0.f;
+        bool claimed = false;
+        for (; ticks < 1500; ++ticks)
+        {
+            const auto out = p.update(*G, nullptr, "room_2");
+            if (p.view().step == Step::Done) break;
+            CHECK(out.required.empty());                       // nothing for the selector to drive to
+            CHECK(out.chain_close == "aff_door_c_close");
+            if (not out.chain_close.empty() and not claimed) { executing(*G, "aff_door_c_close"); claimed = true; }   // the session's claim
+            if (not out.chain_close.empty()) ++claim_ticks;
+            const float range = (pos - Eigen::Vector2f(2.f, 0.f)).norm();
+            const float p_clear = rc::door::prob_clear_of_swing(range, /*robot_side=*/pos.y(), arc, 0.05f, /*swing=*/-1.f, 6.f, 0.35f);
+            if (claimed and served_at < 0 and p_clear >= 1.f - rc::door::kCloseContactRiskMax)   // door_concept serves the claim
+            {
+                served_at = ticks;
+                auto d = G->get_node("door_c");
+                G->add_or_modify_attrib_local<door_open_prob_att>(*d, 0.0f);   // the leaf reads shut
+                G->update_node(*d);
+                satisfied(*G, "aff_door_c_close");
+            }
+            const Eigen::Vector2f step = goal - pos;                // the robot follows its route to the next goal
+            if (step.norm() > 0.05f)
+            {
+                const Eigen::Vector2f before = pos;
+                pos += step.normalized() * v * dt;
+                if ((pos - before).norm() < 1e-6f) ++stopped;
+                if (served_at == ticks) served_speed = (pos - before).norm() / dt;
+            }
+            else ++stopped;
+        }
+        CHECK(p.view().step == Step::Done and not p.view().failed);
+        CHECK(claimed and served_at > 0);                      // not served at the start: the robot began INSIDE the arc
+        CHECK(served_speed > 0.1f);                            // …and served while MOVING, out of the arc
+        CHECK(stopped == 0);                                   // the robot never stopped for the close
+        CHECK(claim_ticks > 1);
     }
 
     std::println("test_door_passage: {} checks, {} failures", checks, failures);
