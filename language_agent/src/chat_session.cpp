@@ -1,4 +1,5 @@
 #include "chat_session.h"
+#include "verbatim_reply.h"
 #include "history_trim.h"
 
 #include <charconv>
@@ -976,7 +977,21 @@ void ChatSession::ask_model(bool followup, bool offer_tools)
             }
             push_history({{"role", "assistant"}, {"content", content}, {"tool_calls", turn_.tool_calls}});
             draw_failed_ = false;
+            verbatim_ = {};
             const bool image = handle_tool_calls(turn_.tool_calls);
+            // A tool refused: the person hears the refusal as it is. Left to the model's follow-up it was paraphrased into
+            // a false limitation (live 2026-11-02: "I do not have a way to imagine things").
+            if (not planner_.has_value())
+                if (auto said = verbatim_.take(); said.has_value())
+                {
+                    const QString text = q(*said);
+                    log_.write("verbatim_reply", QJsonObject{{"text", text}});
+                    window_->begin_assistant();
+                    window_->append_token(text);
+                    window_->end_assistant();
+                    push_history({{"role", "assistant"}, {"content", text}});
+                    return;
+                }
             // plan_mission queued the planner: it runs once THIS callback has returned (the client is the same, one
             // request at a time); its result is the round's last tool message, and the follow-up waits for it.
             if (planner_.has_value())
@@ -1172,7 +1187,7 @@ QString ChatSession::do_can_see(const QJsonObject& args)
     if (not stand and not scene.room.empty() and rc::chat::is_hypothetical(scene, what, where))
     {
         const auto c = std::ranges::find(cards, what, &rc::card::Card::concept_);
-        if (c == cards.end()) return q(rc::chat::answer_no_card(any_cards, looked_in));
+        if (c == cards.end()) return refusal(q(rc::chat::answer_no_card(any_cards, looked_in)));
         return q(rc::chat::can_see_hypothetical_reply(*c, scene, what, where, from));
     }
 
@@ -1182,8 +1197,8 @@ QString ChatSession::do_can_see(const QJsonObject& args)
         cls = rc::chat::canonical_concept(it->subtype);
     std::optional<rc::card::Card> card;
     if (const auto c = std::ranges::find(cards, cls, &rc::card::Card::concept_); c != cards.end()) card = *c;
-    if (not card.has_value()) return q(rc::chat::answer_no_card(any_cards, looked_in));
-    if (scene.room.empty()) return QStringLiteral("I do not know which room I am in, so I cannot judge what I can see.");
+    if (not card.has_value()) return refusal(q(rc::chat::answer_no_card(any_cards, looked_in)));
+    if (scene.room.empty()) return refusal(QStringLiteral("I do not know which room I am in, so I cannot judge what I can see."));
 
     const auto target = rc::chat::resolve_target(scene, what, where, card);
     if (not target.has_value()) return q(target.error());
@@ -1296,7 +1311,7 @@ QString ChatSession::do_imagine(const QJsonObject& args)
             const auto dist = dv.isDouble() ? std::expected<float, std::string>(static_cast<float>(dv.toDouble()))
                                             : im::parse_distance_m(dv.toString().toStdString());
             if (not dist.has_value()) return q(dist.error());
-            if (w.scene.room.empty()) return QStringLiteral("I do not know which room I am in, so I cannot move anything in it.");
+            if (w.scene.room.empty()) return refusal(QStringLiteral("I do not know which room I am in, so I cannot move anything in it."));
             const bool mover_first = rc::chat::norm_name(pa) == rc::chat::norm_name(mv);
             auto moved = im::with_object_moved_away(std::move(w), mv, mover_first ? pb : pa, *dist);
             if (not moved.has_value()) return q(moved.error());
@@ -1311,7 +1326,7 @@ QString ChatSession::do_imagine(const QJsonObject& args)
     }
     if (question == "see")
     {
-        if (w.scene.room.empty()) return QStringLiteral("I do not know which room I am in, so I cannot imagine what I would see.");
+        if (w.scene.room.empty()) return refusal(QStringLiteral("I do not know which room I am in, so I cannot imagine what I would see."));
         std::filesystem::path root;
         std::string looked_in;
         const auto cards = load_cards(*G_, root, looked_in);
@@ -1324,7 +1339,7 @@ QString ChatSession::do_imagine(const QJsonObject& args)
             cls = rc::chat::canonical_concept(it->subtype);
         std::optional<rc::card::Card> card;
         if (const auto c = std::ranges::find(cards, cls, &rc::card::Card::concept_); c != cards.end()) card = *c;
-        if (not card.has_value()) return q(rc::chat::answer_no_card(not cards.empty(), looked_in));
+        if (not card.has_value()) return refusal(q(rc::chat::answer_no_card(not cards.empty(), looked_in)));
         std::optional<im::Opening> op;
         if (not str("door").empty())
         {
@@ -1387,12 +1402,12 @@ QString ChatSession::do_imagine_view(const QJsonObject& args)
     };
 
     const auto card = std::ranges::find(cards, rq.concept_, &rc::card::Card::concept_);
-    if (card == cards.end()) return with_notes(q(rc::chat::answer_no_card(not cards.empty(), looked_in)));
+    if (card == cards.end()) return with_notes(refusal(q(rc::chat::answer_no_card(not cards.empty(), looked_in))));
+    // No current room is not a refusal for a thing imagined in free space (imagine_view says so); a named place needs one.
     const auto scene = rc::chat::build_see_scene(*G_, *inner_, digest_);
-    if (scene.room.empty()) return with_notes(QStringLiteral("I do not know which room I am in, so I cannot imagine it here."));
 
     const auto out = rc::chat::imagine_view(*card, scene, rq, seed, canvas_runner_.run_dir().toStdString());
-    if (not out.drawn) return with_notes(q(out.text));
+    if (not out.drawn) return with_notes(out.refusal ? refusal(q(out.text)) : q(out.text));
     // the fixed script stock/imagined.py draws imagined.json + imagined_zed.png (rcanvas.draw_imagined_zed / _lidar)
     auto job = library_job("imagined", {});
     if (not job.has_value()) return with_notes(q(out.text) + QStringLiteral(" (The picture script is missing.)"));
