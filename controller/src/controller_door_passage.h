@@ -671,13 +671,20 @@ public:
             const State st = state_of(G, name_of(Step::Close));
             if (st == State::Executing) seen_executing_ = true;
             std::optional<std::string> why_done;
-            if (seen_executing_ and st == State::Completed)
+            if (seen_executing_ and (st == State::Completed or (st == State::Missing and door_reads_shut(G))))
             {
                 const auto node = G.get_node(name_of(Step::Close));
                 const auto outcome = node.has_value() ? rc::affordance::read_outcome(node.value())
                                                       : rc::affordance::Outcome::None;
-                why_done = outcome == rc::affordance::Outcome::Satisfied
+                // ★ THE GOAL IS THE WORLD'S STATE, NOT THE CLAIM'S LABEL (warm30 leg 1: door_concept's actuator CLOSE was
+                //   accepted and the door read shut, but the controller had ended the claim `unreachable` (cost-to-go infinite
+                //   behind the closing leaf) and the step reported door_left_open). A close that was executed and whose door now
+                //   reads shut succeeded, whatever outcome the claim was ended with.
+                why_done = (outcome == rc::affordance::Outcome::Satisfied)
                                ? std::format("{} SATISFIED — door closed behind, passage DONE", name_of(Step::Close))
+                           : door_reads_shut(G)
+                               ? std::format("{} ended {} but {} reads shut — door closed behind, passage DONE",
+                                             name_of(Step::Close), rc::affordance::to_string(outcome), door_)
                                : std::format("{} ended {} — door left open, passage DONE", name_of(Step::Close),
                                              rc::affordance::to_string(outcome));
             }
@@ -686,8 +693,10 @@ public:
                                        "DONE", name_of(Step::Close), double(close_wait_ms_) / 1000.0);
             if (why_done.has_value())
             {
-                const bool satisfied = seen_executing_ and st == State::Completed and G.get_node(name_of(Step::Close)).has_value()
-                    and rc::affordance::read_outcome(G.get_node(name_of(Step::Close)).value()) == rc::affordance::Outcome::Satisfied;
+                const bool satisfied = seen_executing_ and (st == State::Completed or st == State::Missing)
+                    and ((G.get_node(name_of(Step::Close)).has_value()
+                          and rc::affordance::read_outcome(G.get_node(name_of(Step::Close)).value()) == rc::affordance::Outcome::Satisfied)
+                         or door_reads_shut(G));
                 if (close_only_ and not satisfied)
                 {
                     failed_ = true;
@@ -838,6 +847,14 @@ private:
         if (not owner_live) return false;
         if (const auto dn = G.get_node(door_); dn.has_value())
             if (const auto v = G.get_attrib_by_name<door_open_prob_att>(*dn); v.has_value() and *v >= 0.f and *v > 0.5f) return true;
+        return false;
+    }
+    /// The door node's own MAP says SHUT: door_open_prob known (not its -1 sentinel) and at most 1/2 (the complement of
+    /// door_reads_open's MAP test, which is for the open side). Used to judge a `close` by the world, not by the claim's label.
+    [[nodiscard]] bool door_reads_shut(DSR::DSRGraph& G) const
+    {
+        if (const auto dn = G.get_node(door_); dn.has_value())
+            if (const auto v = G.get_attrib_by_name<door_open_prob_att>(*dn); v.has_value() and *v >= 0.f and *v <= 0.5f) return true;
         return false;
     }
     /// An affordance's published target pose (x, y, yaw); nullopt = node or attribute absent / not finite.

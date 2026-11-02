@@ -1076,6 +1076,43 @@ int main()
         CHECK(p.view().last_outcome == "door_left_open");
     }
 
+    // ── warm30 leg 1: the controller ended the close claim `unreachable` but the door READS SHUT (the actuator closed it):
+    //    the plan's step succeeded — the world's state is the judge, not the claim's label ────────────────────────────────
+    {
+        auto G = make_graph(12);
+        DoorPassage p;
+        p.set_clock(clock);
+        p.start_close("door_10");
+        offered(*G, "aff_door_10_close");
+        p.update(*G, nullptr, "room_2");
+        executing(*G, "aff_door_10_close");
+        p.update(*G, nullptr, "room_2");
+        DSR::Node d = DSR::Node::create<object_node_type>("door_10");
+        G->add_or_modify_attrib_local<door_open_prob_att>(d, 0.0f);
+        G->insert_node(d);
+        put(*G, "aff_door_10_close", false, false, rc::affordance::Outcome::Unreachable);
+        p.update(*G, nullptr, "room_2");
+        CHECK(p.view().step == Step::Done);
+        CHECK(not p.view().failed);
+    }
+    {   // the same end with the door still OPEN: the close failed
+        auto G = make_graph(13);
+        DoorPassage p;
+        p.set_clock(clock);
+        p.start_close("door_11");
+        offered(*G, "aff_door_11_close");
+        p.update(*G, nullptr, "room_2");
+        executing(*G, "aff_door_11_close");
+        p.update(*G, nullptr, "room_2");
+        DSR::Node d = DSR::Node::create<object_node_type>("door_11");
+        G->add_or_modify_attrib_local<door_open_prob_att>(d, 1.0f);
+        G->insert_node(d);
+        put(*G, "aff_door_11_close", false, false, rc::affordance::Outcome::Unreachable);
+        p.update(*G, nullptr, "room_2");
+        CHECK(p.view().step == Step::Done);
+        CHECK(p.view().failed);
+    }
+
     std::println("test_door_passage: {} checks, {} failures", checks, failures);
     return failures == 0 ? 0 : 1;
 }
