@@ -72,6 +72,7 @@ level), not one per affordance.
 | C6 | Chaining: the controller knows the next step's goal; the post-crossing pose is chosen toward it; `close` is claimed while moving and served by door_concept when its precondition holds | ✅ 35e5ad39 (unproven live) |
 | C7 | The crossing is reported by the exit fact (room change) only after **through**; the controller never declares a crossing room_concept/ltsm did not see | ✅ |
 | C8 | Rates: the controller runs at its nominal 20 Hz with all of the above (re-planning cost measured) | ✅ 19 Hz now; C1 must be measured |
+| C9 | **Minimum operating frequency for the policy to drive** (user 2026-11-02). The policy predicts contact from rollouts that assume a command is held for one control period plus the sensing latency; a slower loop invalidates that. So: (a) the policy's rollouts use the MEASURED period and latency each cycle (hold_s = measured period), so a slower loop yields slower, more cautious commands through the contact probability itself; (b) below a stated minimum control rate (proposal: 10 Hz = 2x the nominal period; flagged constant) the policy may not drive: the base holds, the passage waits, and `[policy] control rate X Hz below the minimum — holding` is logged; (c) per the rates-first rule, a run whose controller falls below nominal (20 Hz) is a FAILED run even if it completed. | ❌ |
 
 ## 5. Shared invariants (either side breaking one is a bug, not an edge case)
 
