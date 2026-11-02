@@ -110,6 +110,7 @@ public:
     // tracking or a planning fault. Inferring it from behaviour cost most of an afternoon on 2026-08-19.
     [[nodiscard]] bool endpoint_arrival() const { return endpoint_arrival_; }
     [[nodiscard]] float goal_threshold() const { return active_params_.goal_threshold; }
+    [[nodiscard]] float align_yaw_tol() const { return active_params_.align_yaw_tol_rad; }
 
     // CURVATURE-LIMITED SPEED. A ceiling on max_adv for this cycle, supplied by whoever owns the
     // reference curve. A tracker cannot derive it from what it sees locally; the route does know — it

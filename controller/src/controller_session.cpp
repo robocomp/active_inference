@@ -802,6 +802,7 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
                                                                              ControllerDisplay &display)
 {
     const auto robot_pose = world_model.read_robot_pose_in_room(timestamp_ms, obstacle_tracker.last_lidar_timestamp_ms());
+    if (robot_pose.has_value()) { live_esdf_src_ = &path_controller; live_esdf_pose_ = *robot_pose; }   // see make_route_optimizer_config
     if (!robot_pose.has_value())
     {
         qInfo() << "Controller waiting for robot pose in room frame";
@@ -2152,6 +2153,61 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
     return commit_step();
 }
 
+namespace
+{
+// A room-frame snapshot of the controller's LIVE robot-frame ESDF, sampled at the ESDF's own resolution, so a stored
+// RouteOptimizerConfig does not hold a pointer into the (mutating) controller. Outside the ESDF box: 1e6, no opinion.
+struct LiveClearance
+{
+    Eigen::Vector2f origin = Eigen::Vector2f::Zero();   // room-frame corner of cell (0,0)
+    float res = 0.05f;
+    int n = 0;
+    std::vector<float> data;
+
+    static std::shared_ptr<const LiveClearance> snapshot(const rc::TrajectoryController &pc, const ControllerRobotPose &pose)
+    {
+        const float res = std::max(0.02f, pc.params.grid_resolution);
+        const float half = pc.params.grid_half_size;
+        const float unknown = pc.params.esdf_unknown_distance;
+        const float reach = half * 1.4143f;               // the room-frame box covers the rotated ESDF square
+        auto lf = std::make_shared<LiveClearance>();
+        lf->res = res;
+        lf->n = static_cast<int>(std::ceil(2.f * reach / res)) + 1;
+        lf->origin = pose.pos - Eigen::Vector2f(reach, reach);
+        lf->data.assign(static_cast<std::size_t>(lf->n) * lf->n, 1e6f);
+        const Eigen::Matrix2f Rt = pose.as_transform().linear().transpose();
+        for (int iy = 0; iy < lf->n; ++iy)
+            for (int ix = 0; ix < lf->n; ++ix)
+            {
+                const Eigen::Vector2f r = Rt * (lf->origin + Eigen::Vector2f(ix * res, iy * res) - pose.pos);
+                if (std::abs(r.x()) >= half or std::abs(r.y()) >= half) continue;
+                const float d = pc.clearance_at(r.x(), r.y());
+                if (d < unknown) lf->data[static_cast<std::size_t>(iy) * lf->n + ix] = d;
+            }
+        return lf;
+    }
+    float at(const Eigen::Vector2f &p) const
+    {
+        const float gx = (p.x() - origin.x()) / res, gy = (p.y() - origin.y()) / res;
+        const int ix = static_cast<int>(std::floor(gx)), iy = static_cast<int>(std::floor(gy));
+        if (ix < 0 or iy < 0 or ix >= n - 1 or iy >= n - 1) return 1e6f;
+        const float fx = gx - ix, fy = gy - iy;
+        const auto v = [&](int x, int y) { return data[static_cast<std::size_t>(y) * n + x]; };
+        // a 1e6 neighbour means the ESDF had no opinion there: do not blend it into a finite value
+        const float a = v(ix, iy), b = v(ix + 1, iy), c = v(ix, iy + 1), d = v(ix + 1, iy + 1);
+        if (std::max({a, b, c, d}) >= 1e5f) return 1e6f;
+        return (1.f - fx) * (1.f - fy) * a + fx * (1.f - fy) * b + (1.f - fx) * fy * c + fx * fy * d;
+    }
+    Eigen::Vector2f gradient(const Eigen::Vector2f &p) const
+    {
+        const float e = res;
+        const Eigen::Vector2f g(at({p.x() + e, p.y()}) - at({p.x() - e, p.y()}), at({p.x(), p.y() + e}) - at({p.x(), p.y() - e}));
+        const float m = g.norm();
+        return (m > 1e-6f and m < 1e5f) ? Eigen::Vector2f(g / m) : Eigen::Vector2f(Eigen::Vector2f::Zero());
+    }
+};
+}  // namespace
+
 // The optimiser's configuration, in ONE place. Every constant here is read off a measured physical
 // quantity of THIS robot, not tuned:
 //   d_target = what the body actually occupies (worst-case reach, since the field carries no bearing)
@@ -2161,12 +2217,32 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
 //              the same sense as carrot_max_route_cut_m, not a safety number.
 // The distance field is EXACT (GridPlanner's EDT): an optimiser follows the gradient of whatever it is
 // handed, so a chamfer's direction-dependent error would be baked into the route's SHAPE.
-rc::RouteOptimizerConfig ControllerSession::make_route_optimizer_config() const
+rc::RouteOptimizerConfig ControllerSession::make_route_optimizer_config(bool with_live) const
 {
     rc::RouteOptimizerConfig opt;
     opt.enabled = params_ == nullptr or params_->route_optimize;
-    opt.distance = [this](const Eigen::Vector2f &p) { return grid_planner_.distance_at(p); };
-    opt.distance_gradient = [this](const Eigen::Vector2f &p) { return grid_planner_.distance_gradient_at(p); };
+    // ── DISTANCE = min(STATIC room EDT, LIVE local ESDF) ─────────────────────────────────────────
+    // GridPlanner::distance_at is the EDT of the planner grid: room polygon + passages + the tracker's obstacle
+    // polygons + the residual's HARD cells (set_world) — no raw LiDAR return, and what the grid has forgotten it
+    // has forgotten. The route used to be shaped against that alone, so a fitting the scan sees but the grid does
+    // not (a tank, a washbasin) was invisible to the clearance term. The live robot-frame ESDF (the MPPI's) is
+    // SNAPSHOT into room-frame cells now (the config outlives this call, and the pointer would not) and the
+    // route sees the nearer of the two. Outside the ESDF's box the snapshot reads 1e6 (no opinion).
+    // Skipped when there is no live source yet or the caller (the band) overrides distance with the live field anyway.
+    std::shared_ptr<const LiveClearance> live;
+    if (with_live and live_esdf_src_ != nullptr) live = LiveClearance::snapshot(*live_esdf_src_, live_esdf_pose_);
+    opt.distance = [this, live](const Eigen::Vector2f &p)
+    {
+        const float d = grid_planner_.distance_at(p);
+        return live ? std::min(d, live->at(p)) : d;
+    };
+    opt.distance_gradient = [this, live](const Eigen::Vector2f &p)
+    {
+        if (live and live->at(p) < grid_planner_.distance_at(p)) return live->gradient(p);
+        return grid_planner_.distance_gradient_at(p);
+    };
+    opt.clearance_barrier = params_ ? params_->route_clearance_barrier : true;
+    opt.clear_sigma_m = params_ ? params_->route_clear_sigma_m : 0.20f;
     opt.d_target = approach_body_.circumscribed_radius()
                  + (params_ ? params_->comfort_standoff_m : 0.35f);
     const float v_max = params_ ? params_->max_adv_speed_mps : 0.7f;
@@ -3372,6 +3448,7 @@ bool ControllerSession::build_door_route(const ControllerRobotPose &robot_pose, 
     prm.body_reach_m = approach_body_.support_radius(0.f, Eigen::Vector2f(0.f, 1.f));
     prm.step_m = grid_planner_.cell_size();
     prm.post_slide_m = 0.8f;
+    prm.lead_m = params_ ? params_->route_smoothing_m : 0.f;   // the last segment is the door's normal (door_route.h Params::lead_m)
     // the opening's half-width (the door node's width_m): how far sideways a vantage may sit and still face through it, when
     // nothing on the axis is free (door_route.h Params::opening_half_m; warm11 door_23 mapped 0.1 m from a side wall)
     if (graph_ != nullptr)
@@ -3381,9 +3458,9 @@ bool ControllerSession::build_door_route(const ControllerRobotPose &robot_pose, 
     // ★The hole the robot PERCEIVES (its interaction anchor) is the axis when there is one (door_route.h).
     const auto seen = perceived_door(leg.door, robot_pose);
     door_route_anchor_id_ = seen.has_value() ? seen->anchor_id : 0;
-    const auto plan = rc::door_route::plan(appr, cross, passage_door_centre_, robot_pose.pos, leg.through, prm,
-                                           [this](const Eigen::Vector2f &p, float h) { return grid_planner_.pose_free(p, h); },
-                                           seen.has_value() ? std::optional<rc::door_route::Axis>(seen->axis) : std::nullopt);
+    auto plan = rc::door_route::plan(appr, cross, passage_door_centre_, robot_pose.pos, leg.through, prm,
+                                     [this](const Eigen::Vector2f &p, float h) { return grid_planner_.pose_free(p, h); },
+                                     seen.has_value() ? std::optional<rc::door_route::Axis>(seen->axis) : std::nullopt);
     if (not plan.why.empty())
     {
         std::println("[door-route] {}: cannot place the route: {}", leg.door, plan.why);
@@ -3422,8 +3499,15 @@ bool ControllerSession::build_door_route(const ControllerRobotPose &robot_pose, 
         if (not r.has_value()) last_plan_failure_ = grid_planner_.last_failure();
         return r;
     };
-    const bool ok = door_route_.build(robot_pose.pos, plan.waypoints, 1, door_plan, route_free_fn(),
-                                      params_ ? params_->route_spacing_m : 0.05f, params_ ? params_->route_smoothing_m : 0.40f);
+    bool ok = door_route_.build(robot_pose.pos, plan.waypoints, 1, door_plan, route_free_fn(),
+                                params_ ? params_->route_spacing_m : 0.05f, params_ ? params_->route_smoothing_m : 0.40f);
+    if ((not ok or not door_route_.valid()) and plan.has_lead)   // the lead-in is unreachable: the route without it
+    {
+        plan.waypoints.erase(plan.waypoints.begin());
+        plan.has_lead = false;
+        ok = door_route_.build(robot_pose.pos, plan.waypoints, 1, door_plan, route_free_fn(),
+                               params_ ? params_->route_spacing_m : 0.05f, params_ ? params_->route_smoothing_m : 0.40f);
+    }
     if (not ok or not door_route_.valid())
     {
         const std::string why = last_plan_failure_.empty() ? std::string("the planner refused a hop") : last_plan_failure_;
@@ -3440,6 +3524,18 @@ bool ControllerSession::build_door_route(const ControllerRobotPose &robot_pose, 
                  plan.waypoints.size(), door_route_.path().size(), door_route_.length(),
                  std::string(seen.has_value() ? ", on the PERCEIVED opening of " + seen->name : ", on the room-frame door")
                      + (plan.pre_omitted ? " (no vantage: the robot stands in the doorway)" : ""));
+    // The approach law's frame: V, the aperture centre and V's arc length along the curve (the nearest curve point).
+    door_vantage_ = plan.pre;
+    door_centre_pt_ = plan.has_axis ? plan.ap : plan.pre;
+    door_vantage_s_ = door_route_.length();
+    if (not plan.pre_omitted)
+    {
+        float best = std::numeric_limits<float>::infinity();
+        for (float sa = 0.f; sa <= door_route_.length(); sa += 0.02f)
+            if (const float dd = (door_route_.spline().position_at(sa) - plan.pre).norm(); dd < best) { best = dd; door_vantage_s_ = sa; }
+    }
+    door_law_done_key_ = plan.has_axis ? std::string{} : leg.key;   // no axis: no door to face — the tracker, as before
+    door_trail_.clear();
     // The policy's Place goals: the curve's points every 2·tol_xy of arc (consecutive arrival discs touch, never overlap),
     // the last one with the leg's final heading (facing the door at P_pre; the travel direction at P_post).
     door_route_goals_.clear();
@@ -3450,6 +3546,60 @@ bool ControllerSession::build_door_route(const ControllerRobotPose &robot_pose, 
     door_route_goal_index_ = 0;
     door_route_active_ = true;
     return true;
+}
+
+// ── THE DOOR APPROACH LAW, ONE CYCLE (door_approach_law.h) ───────────────────────────────────────────────────────────────
+void ControllerSession::note_door_trail(const ControllerRobotPose &pose)
+{
+    constexpr float kStep = 0.05f;   // the trail's spacing (m): the route's own sample spacing
+    if (door_trail_.empty() or (door_trail_.back() - pose.pos).norm() >= kStep) door_trail_.push_back(pose.pos);
+    if (door_trail_.size() > 200) door_trail_.erase(door_trail_.begin(), door_trail_.begin() + (door_trail_.size() - 200));
+}
+
+rc::door_approach::Command ControllerSession::door_approach_command(const ControllerRobotPose &pose, const LiveReturns &lr,
+                                                                    const rc::TrajectoryController &path_controller,
+                                                                    std::uint64_t now_ms)
+{
+    namespace da = rc::door_approach;
+    door_route_.advance(pose.pos);
+    const float lookahead = params_ ? params_->route_smoothing_m : 0.4f;
+    const float prog = door_route_.progress();
+    da::State st;
+    st.p = pose.pos;
+    st.theta = pose.theta;
+    st.vantage = door_vantage_;
+    st.door = door_centre_pt_;
+    const float aim_s = std::min(prog + lookahead, door_vantage_s_);
+    st.aim = prog <= door_vantage_s_ ? door_route_.spline().position_at(aim_s) : door_vantage_;
+    st.d_route = prog <= door_vantage_s_
+                     ? std::max(0.f, door_vantage_s_ - prog) + (pose.pos - door_route_.spline().position_at(prog)).norm()
+                     : (pose.pos - door_vantage_).norm();
+    st.rho = path_controller.goal_threshold();
+    st.yaw_tol = path_controller.align_yaw_tol();
+    st.v_max = lr.valid ? lr.v_max : (params_ ? params_->max_adv_speed_mps : 0.5f);
+    st.w_max = lr.valid ? lr.w_max : (params_ ? params_->max_rot_speed_rps : 0.7f);
+    st.tau = rc::kAnchorTauS;
+    st.trail = door_trail_;
+    // the turn the live returns allow, in the direction the law wants (a first pass with no cap names the direction)
+    auto cmd = da::law(st);
+    if (lr.valid and cmd.rot != 0.f)
+    {
+        st.w_cap = rc::lidar_return_rot_limit(lr.r.obstacles, cmd.rot, returns_body(), lr.margin, lr.a_dec, lr.w_max);
+        cmd = da::law(st);
+    }
+    door_law_done_now_ = cmd.done;
+    if (now_ms - door_law_trace_ms_ >= 1000)
+    {
+        door_law_trace_ms_ = now_ms;
+        float clr = std::numeric_limits<float>::infinity();
+        if (lr.valid)
+            for (const auto &j : lr.r.obstacles) clr = std::min(clr, rc::anchor_signed_distance(returns_body(), j.mean));
+        std::println("[approach] {}: d {:.2f} m  psi_V {:+.0f} deg  psi_door {:+.0f} deg  lateral {:+.2f} m  -> {} (adv {:+.2f} m/s, rot {:+.2f} rad/s)  "
+                     "min clearance {:.2f} m{}",
+                     door_route_leg_.has_value() ? door_route_leg_->door : std::string("?"), cmd.d, cmd.psi_V * 57.2958f,
+                     cmd.psi_door * 57.2958f, cmd.lateral, da::mode_name(cmd.mode), cmd.adv, cmd.rot, clr, cmd.done ? "  DONE (in band, facing)" : "");
+    }
+    return cmd;
 }
 
 bool ControllerSession::drive_door_route(const ControllerPlanningStep &step, rc::TrajectoryController &path_controller,
@@ -6683,7 +6833,7 @@ void ControllerSession::step_route_band(const DrivenCurve &curve,
         // one: optimize_route always pins the endpoints, which is exactly the requirement ("still start
         // where I am and still end at the target"). Everything between is free to answer to clearance
         // and bending alone, which is what makes this useful in a corner.
-        rc::RouteOptimizerConfig cfg = make_route_optimizer_config();
+        rc::RouteOptimizerConfig cfg = make_route_optimizer_config(/*with_live=*/false);   // overridden by the band's own live field just below
         cfg.enabled = true;
         cfg.distance = distance;
         cfg.distance_gradient = gradient;
@@ -7388,6 +7538,7 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
     // the right argument for the whole call, not merely tolerable for half of it.
     // Everything else in this function keeps `robot_pose`, the scan-aligned one.
     const auto &control_pose = tracker_pose_.has_value() ? *tracker_pose_ : robot_pose;
+    note_door_trail(control_pose);
     const auto control_output = path_controller.compute(control_pose.as_transform());
     // Surface what the ARRIVAL test is waiting on, every cycle, before any of the branches below can return
     // early — otherwise the readout would freeze exactly in the states worth watching (aligning, blocked).
@@ -7488,7 +7639,13 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
     if (door_route_active_ and door_route_installed_ and door_route_leg_.has_value())
     {
         door_route_.advance(robot_pose.pos);
-        if (door_route_.finished(robot_pose.pos))
+        const bool law_on = door_law_active();
+        if (law_on and door_law_done_now_ and door_route_leg_->through)   // at the vantage, facing the door: the tracker goes on through
+        {
+            door_law_done_key_ = door_route_leg_->key;
+            std::println("[door-route] {}: at the vantage, facing the door — the route goes on", door_route_leg_->door);
+        }
+        if (law_on ? (door_law_done_now_ and not door_route_leg_->through) : door_route_.finished(robot_pose.pos))
         {
             std::println("[door-route] {}: the route's end reached ({:.2f} of {:.2f} m)", door_route_leg_->door, door_route_.progress(),
                          door_route_.length());
@@ -7942,7 +8099,18 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
         // cycle against the wall.
         const auto lr = live_returns(pose, obstacle_tracker, path_controller);
         rc::LidarCapResult cap{.v_lim = lr.v_max, .w_lim = lr.w_max};
-        if (lr.valid)
+        if (door_law_active())
+        {
+            // THE DOOR APPROACH IS A STATE-FEEDBACK LAW (door_approach_law.h): it replaces the tracker's command, and where the
+            // returns refuse its turn it backs off along the trail (no "MAKING ROOM" nudge); the caps still bound what is sent.
+            const auto cmd = door_approach_command(control_pose, lr, path_controller, time_source());
+            adv_mps = cmd.adv;
+            side_mps = 0.f;
+            rot_rps = cmd.rot;
+            if (lr.valid) cap = rc::lidar_cap_command(lr.r.obstacles, returns_body(), lr.margin, lr.a_dec, lr.v_max, lr.w_max,
+                                                      adv_mps, side_mps, rot_rps);
+        }
+        else if (lr.valid)
         {
             const auto g = rc::lidar_guard_command(lr.r.obstacles, returns_body(), lr.margin, lr.a_dec, lr.v_max, lr.w_max,
                                                    base_capability_.holonomic.value_or(false),

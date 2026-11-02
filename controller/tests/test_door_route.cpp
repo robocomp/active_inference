@@ -57,6 +57,17 @@ int main()
         CHECK(std::abs(open.post_yaw - kCross.yaw) < 1e-4f);            // travel heading through the door
     }
 
+    std::println("1b. lead-in: the last segment of the approach is the door's normal");
+    {
+        dr::Params lp = prm; lp.lead_m = 0.4f;
+        const auto a = dr::plan(kAppr, std::nullopt, kCentre, robot_far, false, lp, free_all);
+        CHECK(a.why.empty() and a.has_lead and a.waypoints.size() == 2);
+        CHECK(a.waypoints.size() == 2 and (a.waypoints[1] - kAppr.p).norm() < 1e-4f and on_axis(a.waypoints[0]));
+        CHECK(a.has_lead and std::abs((a.lead - kCentre).norm() - (a.s_pre + 0.4f)) < 1e-3f);   // 0.4 m further out on the axis
+        const auto near_robot = dr::plan(kAppr, std::nullopt, kCentre, kCentre + (kAppr.p - kCentre).normalized() * 1.5f, false, lp, free_all);
+        CHECK(not near_robot.has_lead);   // the robot is nearer the hole than the lead would be: no lead behind it
+    }
+
     std::println("2. a bed foot in front of the door: everything farther than 0.9 m out is occupied");
     {
         const auto bed = [](const Eigen::Vector2f& p, float) { return not (p.y() > 0.9f and p.y() < 3.f and std::abs(p.x() - 2.f) < 1.f); };

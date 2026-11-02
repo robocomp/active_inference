@@ -108,6 +108,8 @@ struct Axis
 struct Plan
 {
     std::vector<Eigen::Vector2f> waypoints;   ///< what RouteFollower::build is given, in order
+    Eigen::Vector2f lead = Eigen::Vector2f::Zero();   ///< the lead-in on the vantage line (has_lead)
+    bool has_lead = false;
     Eigen::Vector2f pre = Eigen::Vector2f::Zero(), ap = Eigen::Vector2f::Zero(), post = Eigen::Vector2f::Zero();
     float s_pre = 0.f, s_post = 0.f;          ///< standoffs along the axis (s_post measured PAST the aperture)
     float pre_yaw = 0.f, post_yaw = 0.f;      ///< the final headings: facing the door at P_pre, the travel direction at P_post
@@ -127,6 +129,11 @@ struct Params
     /// a side wall, every on-axis pose clipped it; "it has to be a spot in front of the door, which is free"). 0 = on the
     /// axis only (the pre-2026-11-01 rule).
     float opening_half_m = 0.f;
+    /// LEAD-IN (2026-11-02, thermostat approach): a point further out on the vantage line, this far from P_pre, so the route's
+    /// LAST segment is the door's normal and the robot ARRIVES facing the door instead of turning beside the walls. Set to the
+    /// route's smoothing length (the scale over which the curve bends). Never farther from the hole than the robot; the first
+    /// free pose toward P_pre; 0 = none.
+    float lead_m = 0.f;
 };
 
 /// The door route's waypoints. through = the door is open and a cross target is published.
@@ -176,6 +183,18 @@ struct Params
         out.pre = ax->c + out.s_pre * ax->n + lateral * Eigen::Vector2f(-ax->n.y(), ax->n.x());
         out.pre_yaw = face;
         out.ap = ax->c;
+        if (not out.pre_omitted and prm.lead_m > 0.f)
+        {
+            const float s_lead = std::min(out.s_pre + prm.lead_m, s_robot);
+            if (s_lead > out.s_pre + prm.step_m)
+                if (const auto sl = first_free_standoff(Axis{ax->c + lateral * Eigen::Vector2f(-ax->n.y(), ax->n.x()), ax->n}, s_lead,
+                                                        out.s_pre + prm.step_m, prm.step_m, face, is_free);
+                    sl.has_value())
+                {
+                    out.has_lead = true;
+                    out.lead = ax->c + *sl * ax->n + lateral * Eigen::Vector2f(-ax->n.y(), ax->n.x());
+                }
+        }
         if (out.through)
         {
             // ★ THE POINT BEYOND THE DOOR IS THE DOOR'S, AS IN LUCAS BONILLA'S TFM (§5.1, §6.4.3; user 2026-10-31): the cross
@@ -190,11 +209,13 @@ struct Params
             out.post_yaw = face;
             // P_pre always: at most as far from the hole as the robot (above), so it is never behind the robot; a robot beside
             // the doorway still gets the axis before the jambs (recog_try16).
+            if (out.has_lead) out.waypoints.push_back(out.lead);
             if (not out.pre_omitted) out.waypoints.push_back(out.pre);
             out.waypoints.push_back(out.ap);
             out.waypoints.push_back(out.post);
             return out;
         }
+        if (out.has_lead) out.waypoints.push_back(out.lead);
         if (not out.pre_omitted) out.waypoints.push_back(out.pre);
         return out;
     }

@@ -36,6 +36,7 @@
 #include "../../common/affordance_manager/affordance_manager.h"
 #include "mission_door_relation.h"
 #include "local_policy/goal_adapter.h"
+#include "door_approach_law.h"
 #include "door_route.h"                 // rc::door_route::Axis (the perceived door axis)
 #include "local_policy/doorway_hypotheses.h"   // Task 3e: the MAP goal line, the anchor re-init test
 #include "local_policy/navigator.h"
@@ -1223,6 +1224,19 @@ private:
     std::vector<rc::policy::RouteWaypoint> door_route_goals_;       // the curve's points as Place goals (policy on)
     int door_route_goal_index_ = 0;
     std::uint64_t door_route_cross_claim_ = 0;                      // aff_<door>_cross claimed by the through-leg (0 = none)
+    // ── THE DOOR APPROACH LAW (door_approach_law.h): state feedback on the vantage, no latched sub-steps ──
+    Eigen::Vector2f door_vantage_ = Eigen::Vector2f::Zero(), door_centre_pt_ = Eigen::Vector2f::Zero();   // V and the aperture centre
+    float door_vantage_s_ = 0.f;                    // arc length of V along the route
+    std::string door_law_done_key_;                 // the leg whose approach law reached "in band and facing"
+    bool door_law_done_now_ = false;                // this cycle's verdict (read by the arrival block next cycle)
+    std::vector<Eigen::Vector2f> door_trail_;       // the poses the robot arrived through (0.05 m apart, newest last)
+    std::uint64_t door_law_trace_ms_ = 0;
+    /// This cycle's approach command (door_approach_law.h): updates the trail, the law's verdict and the 1 Hz [approach] trace.
+    [[nodiscard]] rc::door_approach::Command door_approach_command(const ControllerRobotPose &pose, const LiveReturns &lr,
+                                                                  const rc::TrajectoryController &path_controller, std::uint64_t now_ms);
+    void note_door_trail(const ControllerRobotPose &pose);
+    bool door_law_active() const
+    { return door_route_active_ and door_route_installed_ and door_route_leg_.has_value() and door_law_done_key_ != door_route_leg_->key; }
     bool build_door_route(const ControllerRobotPose &robot_pose, std::uint64_t now_ms, float tol_xy);
     bool drive_door_route(const ControllerPlanningStep &step, rc::TrajectoryController &path_controller,
                           ControllerMotionCommander &motion_commander, const TimeSource &time_source);
@@ -1442,7 +1456,11 @@ private:
     // same smooth path a mission gets. Returns the polyline unchanged if smoothing is off or fails.
     // One place builds the optimiser's configuration; the mission route and every other planned path
     // both use it, so a clearance preference cannot apply to one and silently not the other.
-    rc::RouteOptimizerConfig make_route_optimizer_config() const;
+    rc::RouteOptimizerConfig make_route_optimizer_config(bool with_live = true) const;
+    // The controller's live ESDF and the (scan-aligned) pose it was built at: refreshed each planning step, read only
+    // synchronously by make_route_optimizer_config, which snapshots it (see there).
+    const rc::TrajectoryController *live_esdf_src_ = nullptr;
+    ControllerRobotPose live_esdf_pose_;
     // NOT const: it RETAINS the fitted spline so the band can keep deforming it. A plan that is only a
     // list of samples cannot be re-optimised — the control polygon is the decision variable, and
     // throwing it away is what made an affordance route a one-shot fit.
