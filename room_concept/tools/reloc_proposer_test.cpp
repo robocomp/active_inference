@@ -50,6 +50,17 @@ int main()
     {   // real search path on an empty job returns without crashing
         Proposer p; CHECK(sub(p, 5)); CHECK(wait_poll(p, out, 5000)); CHECK(out->first == 5);
     }
+    {   // no_incumbent_prior: prior_modes reaches the search untouched
+        Proposer p; std::size_t seen = 99; std::size_t nseeds = 0;
+        p.set_search_fn([&](const rc::reloc::LikelihoodRaster&, const auto&, const auto&, const auto& seeds, const rc::reloc::Params& pr)
+        { seen = pr.prior_modes.size(); nseeds = seeds.size(); return rc::reloc::Result{}; });
+        CHECK(sub(p, 1)); CHECK(wait_poll(p, out, 2000)); CHECK(seen == 0 and nseeds == 1);
+    }
+    {   // exception clears running_
+        Proposer p; p.set_search_fn([](const rc::reloc::LikelihoodRaster&, const auto&, const auto&, const auto&, const rc::reloc::Params&)
+        -> rc::reloc::Result { throw 1; });
+        CHECK(sub(p, 1)); CHECK(wait_poll(p, out, 2000)); CHECK(out->second.modes.empty()); CHECK(not p.busy()); CHECK(sub(p, 2));
+    }
     std::println("{}", failures ? "FAILED" : "all passed");
     return failures != 0;
 }

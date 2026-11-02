@@ -28,7 +28,7 @@ bool Proposer::submit(std::uint64_t epoch, rc::reloc::LikelihoodRaster raster, s
     {
         std::scoped_lock l(m_);
         if (running_ or job_) return false;
-        params.prior_modes.push_back({around, sampling_cov, 1.f});
+        (void)sampling_cov;   // search() has no sampling-only hook; the pose prior belongs to birth_lambda, never here
         job_ = Job{epoch, std::move(raster), std::move(polygon), std::move(pts_robot), std::move(params), {around}};
         running_ = true;
         done_.reset();
@@ -59,12 +59,14 @@ void Proposer::run(std::stop_token st)
         SearchFn fn;
         {
             std::unique_lock l(m_);
-            if (not cv_.wait(l, st, [this] { return job_.has_value(); })) return;
+            if (not cv_.wait(l, st, [this] { return job_.has_value(); }) or st.stop_requested()) return;
             job = std::move(*job_);
             job_.reset();
             fn = fn_;
         }
-        auto res = fn(job.raster, job.polygon, job.pts, job.seeds, job.params);
+        rc::reloc::Result res;
+        try { res = fn(job.raster, job.polygon, job.pts, job.seeds, job.params); }
+        catch (...) { res = {}; }
         std::scoped_lock l(m_);
         done_ = std::make_pair(job.epoch, std::move(res));
         running_ = false;

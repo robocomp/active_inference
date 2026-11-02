@@ -34,8 +34,9 @@ public:
 
     void set_search_fn(SearchFn f);   ///< test hook; call while idle
 
-    /// Copy-in; false if a search is already RUNNING. `epoch` = room-generation counter. `around` seeds the search and,
-    /// with `sampling_cov`, enters it as a Gaussian pose prior (continuity term with a uniform floor, never a gate).
+    /// Copy-in; false if a search is already RUNNING. `epoch` = room-generation counter. `around` seeds the search ONLY; it is
+    /// never added as a prior mode (a continuity prior would bias proposals toward the pose being challenged and hide a
+    /// kidnap; that prior belongs to birth_lambda). `sampling_cov` is currently unused: search() has no sampling-only hook.
     /// An unpolled older result is replaced by the new job's.
     bool submit(std::uint64_t epoch, rc::reloc::LikelihoodRaster raster, std::vector<Eigen::Vector2f> polygon,
                 std::vector<Eigen::Vector2f> pts_robot, rc::reloc::Params params,
