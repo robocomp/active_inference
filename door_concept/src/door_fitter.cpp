@@ -86,6 +86,14 @@ bool DoorFitter::ensure_instance(const DSR::Node& node, std::uint64_t room_id)
     DoorInstance inst;
     fit_.init_instance(inst, node.id(), node.name(), init_state);
     inst.affordance.init(G_, node.id(), node.name(), "door");
+    // A node that arrives with the leaf's side on it (a remembered face) hands it to the belief init. 0.5 is "unknown" by definition.
+    {
+        const auto pi = G_->get_attrib_by_name<door_leaf_into_room_prob_att>(node);
+        const auto ph = G_->get_attrib_by_name<door_leaf_hinge_plus_prob_att>(node);
+        const float p_into = pi.value_or(0.5f), p_plus = ph.value_or(0.5f);
+        if (p_into != 0.5f or p_plus != 0.5f)
+            inst.leaf_memory = std::make_pair(p_into, p_plus);
+    }
 
     instances_.emplace(node.id(), std::move(inst));
     std::print("door_concept: created instance for node '{}' id={}\n", node.name(), node.id());

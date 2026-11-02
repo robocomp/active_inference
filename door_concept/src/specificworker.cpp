@@ -33,6 +33,7 @@
 
 #include "../../common/room_transition/startup_recall.h"   // warm start
 #include "door_close_clear.h"   // close: P(clear of the leaf's swing)
+#include "door_leaf_memory.h"   // the leaf side as a remembered probability; the side-weighted swept arc
 #include "specificworker.h"
 
 #include "../../common/config_report/config_read.h"   // rc::cfg::Reader (SHARED)
@@ -2429,8 +2430,21 @@ rc::door::InteractionState SpecificWorker::compute_interaction_state(const rc::D
     // from us. A robot inside that arc is struck by the door it just asked to be opened. Far edge = beyond
     // it a request is not unambiguously about THIS door. Both edges are physical; the old disc modelled
     // only the far one, so `open` stayed on offer right up against the leaf — failing toward the danger.
-    const float d_min = rc::door::safe_standoff(ap.w, pg);
-    const float d_max = std::max(pg.actuation_reach_m, d_min + 0.30f);   // a band, never empty
+    const float d_arc = rc::door::safe_standoff(ap.w, pg);   // the FULL swept arc: the leaf surely swings toward the robot
+    // The leaf's side as the node publishes it (door_leaf_memory.h): the same probabilities the memory stores.
+    {
+        const bool swing_same_ = not inst.swing_llr_ref.has_value() or (*inst.swing_llr_ref > 0.f) == (inst.leaf.swing > 0.f);
+        const bool hinge_same_ = not inst.hinge_llr_ref.has_value() or *inst.hinge_llr_ref == inst.leaf.hinge;
+        st.leaf_into_room_prob = rc::door::leafmem::p_into_room(inst.leaf.swing, swing_same_ ? inst.swing_llr : -inst.swing_llr);
+        // the node's +x end (its yaw = the aperture's) is the belief's FAR jamb iff x_node . wall_u >= 0
+        const bool plus_is_far = Eigen::Vector2f(std::cos(inst.model.state().ap_yaw), std::sin(inst.model.state().ap_yaw))
+                                     .dot(ap.wall_u) >= 0.0f;
+        st.leaf_hinge_plus_prob = rc::door::leafmem::p_hinge_plus((inst.leaf.hinge == rc::door::HingeSide::Far) == plus_is_far,
+                                                                  hinge_same_ ? inst.hinge_llr : -inst.hinge_llr);
+    }
+    // First pass at the FULL arc: it only picks the side of the wall to stand on.
+    float d_min = d_arc;
+    float d_max = std::max(pg.actuation_reach_m, d_min + 0.30f);   // a band, never empty
     st.safe_standoff_m = d_min;
     // Stand in the MIDDLE of the actuation band: furthest from both failure modes (inside the leaf's arc on
     // one side, too far to be about this door on the other) and so the most tolerant of the pose error that
@@ -2442,6 +2456,18 @@ rc::door::InteractionState SpecificWorker::compute_interaction_state(const rc::D
     // whose stand-off is in the same region of the room polygon as the robot; see rc::door::approach_side.
     st.approach_side = rc::door::approach_side(ap, robot, st.robot_side, st.approach_standoff_m,
                                                fitter_->room_polygon());
+    // ★THE ARC FOLLOWS THE LEAF'S SIDE (chained-actions spec, "Leaf direction in memory"): a leaf that swings AWAY from the side
+    //  we stand on needs only the body's clearance; one that swings TOWARD it, its length + the swing clearance. A chance
+    //  constraint on P(hit), weighted by P(toward) (door_leaf_memory.h swing_weighted_arc) — equal to the full arc when it surely
+    //  swings toward us, so a door of unknown or toward leaf keeps the old standoff.
+    {
+        const float p_toward = rc::door::leafmem::p_leaf_toward(st.leaf_into_room_prob, st.approach_side > 0.0f ? 1.0f : 0.0f);
+        d_min = rc::door::leafmem::swing_weighted_arc(d_arc, 0.5f * pg.robot_passage_width_m, sigma, p_toward,
+                                                      rc::door::kCloseContactRiskMax);
+        d_max = std::max(pg.actuation_reach_m, d_min + 0.30f);
+        st.safe_standoff_m = d_min;
+        st.approach_standoff_m = 0.5f * (d_min + d_max);
+    }
     // ★AT THE DOOR INCLUDES THE VIEWING ANGLE (tourP8): range alone put the robot "in band" 58° off the normal, 0.69 m from
     //  the wall, from where the doorway could not be seen. The opening must be in front: P(w·|cos θ| ≥ body) under the same σ.
     const float cos_t = rc::door::facing_cos(delta.x(), delta.y(), normal.x(), normal.y());
@@ -2460,7 +2486,7 @@ rc::door::InteractionState SpecificWorker::compute_interaction_state(const rc::D
     // the cross corridor reads them (signed against the reference they were accumulated for).
     {
         const bool swing_same = not inst.swing_llr_ref.has_value() or (*inst.swing_llr_ref > 0.f) == (inst.leaf.swing > 0.f);
-        st.p_close_clear = rc::door::prob_clear_of_swing(st.robot_range_m, st.robot_side, d_min, sigma, inst.leaf.swing,
+        st.p_close_clear = rc::door::prob_clear_of_swing(st.robot_range_m, st.robot_side, d_arc, sigma, inst.leaf.swing,
                                                           swing_same ? inst.swing_llr : -inst.swing_llr,
                                                           0.5f * pg.robot_passage_width_m);
     }

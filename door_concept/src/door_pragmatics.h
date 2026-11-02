@@ -103,6 +103,10 @@ struct InteractionState
     float p_facing = 1.0f;
     float facing_deg = 0.0f;          // θ, the robot's angle off the aperture normal (diagnostic)
 
+    // The leaf's SIDE as the node publishes it (door_leaf_memory.h: sign conventions). 0.5 = unknown.
+    float leaf_into_room_prob  = 0.5f;   // P(the leaf swings INTO the room this door node hangs from)
+    float leaf_hinge_plus_prob = 0.5f;   // P(the hinge is at the +x end of the aperture, in the node's own frame)
+
     // P(the cross is EXECUTABLE from here) = P(at the door) x P(the run robot -> through-pose is clear of the leaf) x P(passable)
     // (door_cross_exec.h) — the cross contract's `pre:` clause. Needs the phi posterior AND a robot pose.
     float p_cross_exec = 0.0f;

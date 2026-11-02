@@ -9,6 +9,7 @@
 #include "../door_phi_posterior.h"      // the phi channel as pure functions (tested offline)
 #include "../door_opening_edges.h"      // try96: wall registration, the opening's through-span, the registration offset
 #include "../door_support_bank.h"       // rc::support_bank:: adapter (SHARED bank)
+#include "../door_leaf_memory.h"       // the leaf side as a remembered probability
 
 #include <algorithm>
 #include <array>
@@ -624,6 +625,26 @@ float DoorFit::run_inference(rc::DoorFitState& inst, const DoorObservation& obse
                             p.leaf.swing > 0.0f ? "INTO" : "OUT OF"));
             inst.leaf_side_hint.reset();
             inst.leaf_swing_hint.reset();
+        }
+        if (inst.leaf_memory.has_value())
+        {
+            // THE GRAPH IS AUTHORITATIVE (door_leaf_memory.h): the node's own remembered side replaces the cache's hint. The swing
+            // is relative to THIS room (+1 = into it), frame-free. The hinge is stated in the NODE's frame (x = the node's yaw);
+            // the belief's jambs are along wall_u, so the +x end is the Far jamb iff the node's x axis points along wall_u.
+            const auto [p_into, p_plus] = *inst.leaf_memory;
+            const auto sw = rc::door::leafmem::swing_from_into_room(p_into);
+            p.leaf.swing = sw.swing;
+            inst.swing_llr = sw.llr;
+            const Eigen::Vector2f node_x(std::cos(m.yaw), std::sin(m.yaw));
+            const bool plus_is_far = not wf.ok or node_x.dot(p.wall_u) >= 0.0f;
+            const auto hg = rc::door::leafmem::hinge_from_plus(p_plus, plus_is_far);
+            p.leaf.hinge = hg.far ? door::HingeSide::Far : door::HingeSide::Near;
+            inst.hinge_llr = hg.llr;
+            inst.hinge_llr_ref.reset(); inst.swing_llr_ref.reset();   // relative to the belief built just below
+            inst.leaf_side_hint.reset(); inst.leaf_swing_hint.reset();
+            say(std::format("door_concept: [{}] leaf side from the graph: P(into this room)={:.2f} P(hinge at +x)={:.2f} -> swing {:+.0f} hinge {}\n",
+                            inst.node_name, p_into, p_plus, p.leaf.swing, hg.far ? "far" : "near"));
+            inst.leaf_memory.reset();
         }
         inst.ai2_belief = rc::DoorBelief(s0, p);
         // ★Task D-C round 2 (tour3C): A REMEMBERED PLACE IS NOT A BIRTH SEED. A door restored from memory came back with the

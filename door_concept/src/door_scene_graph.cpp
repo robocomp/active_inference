@@ -568,6 +568,9 @@ void DoorSceneGraph::write_interaction_state(DSR::Node& node, const rc::door::In
     G_->add_or_modify_attrib_local<door_cross_exec_prob_att>  (node, st.p_cross_exec_known ? st.p_cross_exec : kUnmeasured);
     G_->add_or_modify_attrib_local<door_crossing_progress_att>(node, st.crossing_known ? st.crossing_progress
                                                                                        : kUnmeasuredSigned);
+    // The leaf's side, remembered by ltsm with the node (door_leaf_memory.h). 0.5 = unknown, a legitimate reading (not a sentinel).
+    G_->add_or_modify_attrib_local<door_leaf_into_room_prob_att>  (node, st.leaf_into_room_prob);
+    G_->add_or_modify_attrib_local<door_leaf_hinge_plus_prob_att> (node, st.leaf_hinge_plus_prob);
 }
 
 }  // namespace rc
