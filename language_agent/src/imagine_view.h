@@ -68,7 +68,10 @@ struct ImaginePlace
 {
     ImaginePlace pl;
     const std::string w = lower_ascii(where);
-    if (w.empty()) { pl.words = "wherever such things usually stand"; return pl; }
+    // "here" / "in this room": the room-based mixture (free or against a wall). An EMPTY `where` is the canonical view
+    // (imagine_view handles it before this): the robot's idea of the thing, not a thing placed in its room.
+    if (w.empty() or w == "here" or w == "in this room" or w == "in the room" or w == "aqui" or w == "aqu\u00ed" or w == "en esta habitacion")
+    { pl.words = "wherever such things usually stand"; return pl; }
     for (const auto& d : s.doors)
         if (lower_ascii(d.name) == w)
         {
@@ -189,6 +192,24 @@ struct ImaginePlace
     return out;
 }
 
+/// How far in front of the robot the canonical instance stands. From the card's own detector envelope: the distance at which
+/// the prior's mean size fills the frame at the geometric mean of [min_fill, max_fill] (the middle of the band on a log
+/// scale), for the camera the card models. fill(d) = K / d, K = the larger axis' extent over the frame's full extent at
+/// unit range. Without a camera or a usable envelope: kFreeSpaceDistanceM, flagged.
+struct CanonicalDistance { float m = 2.0f; bool from_envelope = false; };
+[[nodiscard]] inline CanonicalDistance canonical_distance(const rc::card::Card& card, const std::optional<rc::nbv::Sensor>& zed)
+{
+    const auto it = card.subtypes.find("");
+    const auto sp = it != card.subtypes.end() ? it : card.subtypes.begin();
+    if (sp == card.subtypes.end() or not zed.has_value()) return {};
+    const auto& e = sp->second.env;
+    const auto& g = card.geometry;
+    if (not (e.min_fill > 0.0f and e.max_fill > e.min_fill) or not (g.w > 0.0f and g.z1 > g.z0)) return {};
+    const float width = std::max(g.w, g.d), height = g.z1 - g.z0;
+    const float k = std::max(width / (2.0f * zed->tan_half_h()), height / (2.0f * zed->tan_half_v()));
+    return {k / std::sqrt(e.min_fill * e.max_fill), true};
+}
+
 /// "0.62 ± 0.11"
 [[nodiscard]] inline std::string pm(float mean, float sd)
 {
@@ -210,6 +231,9 @@ struct ImagineFacts
     std::uint64_t seed = 0;
     std::string calibration;                ///< the card's, for the "isn't calibrated yet" note
     std::string sensor = "both";
+    bool canonical = false;                 ///< the canonical view: a typical instance on the floor in empty space, no room
+    float distance_m = 0;                   ///< canonical: how far in front of the robot
+    bool distance_from_envelope = true;     ///< false: the card has no envelope, 2 m assumed
 };
 
 /// " Assumed: door_1: ...; door_2: ...." from the doors' notes; empty when nothing was assumed.
@@ -238,10 +262,18 @@ struct ImagineFacts
                            "(my own body at the viewpoint counts as one: I cannot stand inside what I imagine) and {} outside the "
                            "room. (seed {}){}", f.cls, f.place_words, f.drawn, f.rejected, f.outside_polygon, f.seed, assumed_suffix(f.assumed));
     const std::string at = f.from_label.empty() ? "from here" : "from " + f.from_label;
-    std::string out = std::format("I imagined {} {} {}, seen {}. I would notice that something is there with P {}, and "
-                                  "recognise it as a {} with P {} ({}).",
-                                  f.shown, f.shown == 1 ? f.cls : pl, f.place_words, at, pm(mc.p_notice_mean, mc.p_notice_sd),
-                                  f.cls, pm(mc.p_recognise_mean, mc.p_recognise_sd), likelihood(mc.p_recognise_mean));
+    std::string out;
+    if (f.canonical)
+        out = std::format("I imagined {} typical {} standing on the floor {:.1f} m in front of me{}. I would notice that something "
+                          "is there with P {}, and recognise it as a {} with P {} ({}).",
+                          f.shown, f.shown == 1 ? f.cls : pl, f.distance_m,
+                          f.distance_from_envelope ? "" : " (my model of it has no detector envelope, so I assumed that distance)",
+                          pm(mc.p_notice_mean, mc.p_notice_sd), f.cls, pm(mc.p_recognise_mean, mc.p_recognise_sd), likelihood(mc.p_recognise_mean));
+    else
+        out = std::format("I imagined {} {} {}, seen {}. I would notice that something is there with P {}, and "
+                          "recognise it as a {} with P {} ({}).",
+                          f.shown, f.shown == 1 ? f.cls : pl, f.place_words, at, pm(mc.p_notice_mean, mc.p_notice_sd),
+                          f.cls, pm(mc.p_recognise_mean, mc.p_recognise_sd), likelihood(mc.p_recognise_mean));
     if (mc.modal_limit != rc::card::Limit::None)
         out += std::format(" What most often limits it: {}.", limit_words(mc.modal_limit, ""));
     if (f.inside_count > 0)
@@ -330,13 +362,13 @@ struct ImagineOutcome
                                                  std::uint64_t seed, const std::filesystem::path& run_dir)
 {
     ImagineOutcome out;
-    // No current room and no named place ("how do you imagine a chair?" needs no room): imagine it in free space in front
-    // of the robot, no walls, no doors. The robot is the origin of its own frame, heading straight ahead. A named place
-    // (a wall, a door, an object) does need the room: that refusal keeps its text.
-    const bool free_space = scene_in.room.empty() and rq.where.empty();
+    // An EMPTY `where` is the canonical view: the robot's idea of the thing, a typical instance on the floor in empty space in
+    // front of its real sensors (no room polygon, walls, doors or other objects), whether or not a room is known. Only a
+    // named place (a wall, a door, an object, "here") puts it in the room, and then the room is needed.
+    const bool canonical = rq.where.empty();
     SeeScene s = scene_in;
-    if (scene_in.room.empty() and not rq.where.empty()) { out.text = kNoRoomRefusal; out.refusal = true; return out; }
-    if (free_space)
+    if (not canonical and scene_in.room.empty()) { out.text = kNoRoomRefusal; out.refusal = true; return out; }
+    if (canonical)
     {
         s.robot_xy = Eigen::Vector2f(0.0f, 0.0f);
         s.robot_yaw = 0.0f;
@@ -352,12 +384,14 @@ struct ImagineOutcome
     }
     auto place = resolve_place(s, cls, rq.where);
     if (not place.has_value()) { out.text = place.error(); out.refusal = true; return out; }
-    const auto vp = resolve_from(s, rq.from);
+    const auto vp = resolve_from(s, canonical ? std::string{} : rq.from);   // the canonical view is from the robot itself
     if (not vp.has_value()) { out.text = vp.error(); out.refusal = true; return out; }
-    if (free_space)
+    CanonicalDistance cd;
+    if (canonical)
     {
-        place->ctx.at = vp->xy + kFreeSpaceDistanceM * Eigen::Vector2f(std::cos(*vp->yaw), std::sin(*vp->yaw));
-        place->words = "in free space in front of me";
+        cd = canonical_distance(card, s.zed);
+        place->ctx.at = vp->xy + cd.m * Eigen::Vector2f(std::cos(*vp->yaw), std::sin(*vp->yaw));
+        place->words = std::format("standing on the floor {:.1f} m in front of me", cd.m);
     }
     const std::string sensor = lower_ascii(rq.sensor);
     const bool want_zed = sensor != "lidar", want_lidar = sensor != "zed";
@@ -366,6 +400,7 @@ struct ImagineOutcome
     ImagineFacts f;
     f.cls = cls; f.place_words = place->words; f.from_label = rq.from;
     f.room_height_known = s.room_height_known; f.room_height = s.room_height;
+    f.canonical = canonical; f.distance_m = cd.m; f.distance_from_envelope = cd.from_envelope;
     f.seed = seed; f.calibration = card.calibration; f.sensor = sensor; f.assumed = door_assumptions(s);
     const auto world = imagine_world(s, card, cls, *place, f.excluded);
 
@@ -394,7 +429,6 @@ struct ImagineOutcome
     }
     if (not s.room_height_known) set.notes.push_back(std::format("room height {:.1f} m assumed", s.room_height));
     out.text = answer_imagine_view(f, mc);
-    if (free_space) out.text += " (Imagined in front of me; I don't know which room I'm in.)";
     if (f.shown == 0) return out;
 
     out.caption = std::format("{} imagined {} {}: P(notice) {}, P(recognise) {}", f.shown, f.shown == 1 ? cls : see_detail::plural(cls),

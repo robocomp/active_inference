@@ -279,11 +279,11 @@ int main()
         ImagineRequest rq; rq.concept_ = "chair"; rq.n = 8;
         const auto o = imagine_view(chair_card(), s, rq, 7, dir);
         CHECK(o.drawn and not o.refusal);
-        CHECK(has(o.text, "in free space in front of me") and has(o.text, "I don't know which room I'm in") and has(o.text, "±"));
-        CHECK(not has(o.text, "Room height") and not has(o.text, "against a wall"));
+        CHECK(has(o.text, "typical chairs standing on the floor") and has(o.text, "m in front of me") and has(o.text, "±"));
+        CHECK(not has(o.text, "from here") and not has(o.text, "room") and not has(o.text, "Room height") and not has(o.text, "against a wall"));
         const auto doc = QJsonDocument::fromJson(QByteArray::fromStdString(slurp(dir / "imagined.json"))).object();
         CHECK(doc["samples"].toArray().size() == 8);
-        // the thing stands 2 m straight ahead, in view of the camera: it is noticed, not 0.00 from a wrong heading
+        // the thing stands straight ahead, in view of the camera: it is noticed, not 0.00 from a wrong heading
         CHECK(doc["mc"].toObject()["p_notice_mean"].toDouble() > 0.2);
         ImagineRequest rw = rq; rw.where = "against the wall";
         const auto r = imagine_view(chair_card(), s, rw, 7, dir);
@@ -294,6 +294,49 @@ int main()
         ImagineRequest rbad = rq; rbad.where = "the moon";
         CHECK(imagine_view(chair_card(), scene(true), rbad, 1, dir).refusal);
         CHECK(not imagine_view(chair_card(), scene(true), rq, 1, dir).refusal);
+    }
+    // ---- the canonical view: the robot's idea of the thing, independent of the room ----
+    {
+        auto none = scene(false);
+        none.room.clear(); none.polygon.clear(); none.doors.clear(); none.objects.clear(); none.robot_xy.reset();
+        auto walled = scene(true);                       // a room, doors, a chair and a table; wall 1 m in front of the robot
+        walled.polygon = {{0, 0}, {2, 0}, {2, 4}, {0, 4}};
+        ImagineRequest rq; rq.concept_ = "chair"; rq.n = 8;
+        const auto a = imagine_view(chair_card(), none, rq, 11, dir);
+        const auto b = imagine_view(chair_card(), walled, rq, 11, dir);
+        CHECK(a.drawn and b.drawn and a.text == b.text);
+        // "here" is a named place: the room mixture, and it needs the room
+        ImagineRequest rh = rq; rh.where = "here";
+        const auto h = imagine_view(chair_card(), scene(false), rh, 11, dir);
+        CHECK(has(h.text, "wherever such things usually stand"));
+        CHECK(imagine_view(chair_card(), none, rh, 11, dir).refusal);
+        // the distance comes from the envelope: fills [0.1, 0.4] -> the mean-size instance fills 0.2 there
+        Card c = chair_card();
+        c.subtypes[""].env = {0.1f, 0.4f, 0.05f};
+        c.geometry = {0.45f, 0.45f, 0.9f, 0.0f, 0.9f};
+        const auto sc = scene(false);
+        const auto cd = canonical_distance(c, sc.zed);
+        CHECK(cd.from_envelope);
+        rc::nbv::Target t; t.cx = cd.m; t.cy = 0; t.yaw = 0; t.w = 0.45f; t.h = 0.45f; t.z0 = 0; t.z1 = 0.9f;
+        const auto [fmax, fmin] = rc::nbv::predicted_fill_axes(t, {0, 0}, *sc.zed, 0.0f);
+        CHECK(std::abs(fmax - 0.2f) < 0.03f);
+        CHECK(has(imagine_view(c, none, rq, 11, dir).text, std::format("{:.1f} m in front of me", cd.m).c_str()));
+        // no envelope: 2 m, said so
+        Card ne = chair_card(); ne.subtypes.clear();
+        CHECK(not canonical_distance(ne, sc.zed).from_envelope and canonical_distance(ne, sc.zed).m == 2.0f);
+        CHECK(has(imagine_view(ne, none, rq, 11, dir).text, "no detector envelope"));
+    }
+    // the real chair card (fleet envelope, 71 deg camera): the canonical P(notice) is clearly above 0, not the live 0.00
+    {
+        auto none = scene(false);
+        none.room.clear(); none.polygon.clear(); none.doors.clear(); none.objects.clear(); none.robot_xy.reset();
+        none.zed->hfov_rad = 2.0f * std::atan(640.0f / 2.0f / 448.0f); none.zed->vfov_rad = 2.0f * std::atan(360.0f / 2.0f / 448.0f);
+        Card c = chair_card();
+        c.subtypes[""].env = {0.1f, 0.6f, 0.06f};
+        ImagineRequest rq; rq.concept_ = "chair"; rq.n = 8;
+        (void)imagine_view(c, none, rq, 5, dir);
+        const auto doc = QJsonDocument::fromJson(QByteArray::fromStdString(slurp(dir / "imagined.json"))).object();
+        CHECK(doc["mc"].toObject()["p_notice_mean"].toDouble() > 0.3);
     }
     // ---- hypothetical can_see ----
     {
