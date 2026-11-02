@@ -220,6 +220,9 @@ namespace rc::loc
         float reloc_lost_s_max         = 5.0f;   // m
         bool        scan_tape_enabled = false;   // ScanTape.Enabled: record what the relocaliser sees (scan_tape.h)
         std::string scan_tape_path    = "etc/scan_tape_{ts}.bin";   // {ts} = start time, epoch s
+        // RelocMode: "legacy" = the lost-belief HMM + SPRT rival modes (default); "rivals" = the Bayes-factor rival
+        // belief of docs/superpowers/specs/2026-11-01-relocaliser-redesign.md (reloc_rivals.h). A flag the tours switch.
+        std::string reloc_mode         = "legacy";
         bool  reloc_enabled            = true;   // false = relocalisation never moves the pose (lost, mode_switch, seed_validation)
         int orientation_search_max_samples = 100;      // Lidar subsample for orientation candidates
 

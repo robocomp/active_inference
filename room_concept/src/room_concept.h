@@ -33,6 +33,8 @@
 #include "corner_detector.h"
 #include "wall_map.h"
 #include "scan_tape.h"
+#include "reloc_rivals.h"      // rc::rivals::Belief (RelocMode = "rivals")
+#include "reloc_proposer.h"    // rc::rivals::Proposer
 #include "room_boxes_channel.h"   // the box layout sidecar; it reaches into nothing here
 #include "rerun_logger.h"
 #include "object_anchor_types.h"
@@ -857,6 +859,50 @@ private:
    void step_rival_modes(const std::vector<Eigen::Vector3f>& lidar_points);
    /// Carry the door anchor (passage_prior.h) by this frame's odometry increment.
    void step_door_anchor(const UpdateResult& res);
+   // ── RelocMode = "rivals" (room_concept_reloc_rivals.cpp; spec 2026-11-01-relocaliser-redesign) ──
+   // NB the legacy `rivals_` above is a different object (SPRT modes); this is the Bayes-factor belief.
+   void step_rivals(const UpdateResult& res, const std::vector<Eigen::Vector3f>& lidar_points);
+   void clear_rival_belief();                    ///< room change / disarm: drop rivals, stale proposer results, job context
+   bool rivals_mode() const { return params.reloc_mode == "rivals"; }
+   rc::rivals::Belief   rbelief_;
+   bool                 rbelief_ready_ = false;
+   rc::rivals::Proposer proposer_;
+   std::uint64_t        room_epoch_ = 0;         ///< bumped on every room change and every swap: a proposer result carries its epoch
+   struct RivalPrior                             ///< H0's prior at one frame (spec sec 3, 5): what a birth is priced against
+   {
+       Eigen::Vector3f pred = Eigen::Vector3f::Zero();
+       Eigen::Matrix3f P = Eigen::Matrix3f::Identity();
+       float volume = 1.f;                        ///< V of the kidnap prior: room area x 2pi, or V_entry while the door anchor lives
+       float ln_w = 0.f;                          ///< ln weight of the anchor component used (0 = none)
+   };
+   struct RivalJob                                ///< the context a proposal was priced in (its scan, H0, its prior)
+   {
+       Eigen::Vector3f pose0 = Eigen::Vector3f::Zero();
+       Eigen::Matrix3f cov0 = Eigen::Matrix3f::Identity();
+       RivalPrior prior;
+       std::vector<Eigen::Vector2f> pts;
+       rc::reloc::Params rp;
+       Eigen::Matrix3f basin = Eigen::Matrix3f::Zero();   ///< the width of one basin of the likelihood (legacy relocalise_from_belief)
+       Eigen::Vector3f odo = Eigen::Vector3f::Zero();   ///< H0's body motion since the scan (composed)
+   };
+   std::optional<RivalJob> rival_job_;
+   Eigen::Matrix3f tracker_cov_ = Eigen::Matrix3f::Zero();   ///< res.covariance as update() left it (before held_spread)
+   bool            tracker_cov_valid_ = false;
+   Eigen::Vector3f rv_ref_ = Eigen::Vector3f::Zero();         ///< H0 pose at the previous rivals step
+   bool            rv_ref_valid_ = false;
+   Eigen::Vector3f rv_h0s_ = Eigen::Vector3f::Zero();        ///< H0 re-seated on its own mode of ell (tracked like the rivals)
+   bool            rv_h0s_valid_ = false;
+   Eigen::Matrix3f rv_prev_cov_ = Eigen::Matrix3f::Identity();   ///< H0's posterior covariance at the previous step (P_pred's base)
+   bool            rv_prev_cov_valid_ = false;
+   float           rv_novelty_acc_ = 0.f;                    ///< sum of view_change since the last submit
+   std::int64_t    rv_last_submit_ms_ = 0;
+   float           rv_last_search_ms_ = 0.f;
+   std::uint64_t   rv_next_id_ = 1;
+   std::uint64_t   rv_submits_ = 0;                         ///< proposals handed to the worker (diagnostic, selftest)
+   std::uint64_t   rv_swaps_ = 0;                           ///< incumbent swaps so far (diagnostic, selftest)
+   std::vector<float> rv_timing_us_;                         ///< hot-path time per step (selftest, rv_timing_on_)
+   bool            rv_timing_on_ = false;
+   std::atomic<float> p_rival_pub_{0.f};
    using ModePosterior = rc::reloc::ModePosterior;   ///< a lost search's posterior (room_concept_reloc_modes.cpp)
    ModePosterior mode_posterior(rc::reloc::Result& res, const std::vector<Eigen::Vector2f>& poly,
                                 const std::vector<Eigen::Vector2f>& pts2, const Eigen::Vector3f& incumbent,

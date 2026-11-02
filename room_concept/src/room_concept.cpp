@@ -463,6 +463,7 @@ namespace rc
             }
 
                 // A held relocalisation episode: the published σ carries the mixture's spread (Task R1b, room_concept_reloc).
+                tracker_cov_ = res.covariance; tracker_cov_valid_ = true;   // H0's own Laplace cov, for the rivals' births
                 res.covariance += rt_.held_spread;
                 // ===== 7. PUBLISH RESULT =====
                 {

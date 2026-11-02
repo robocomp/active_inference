@@ -119,6 +119,8 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
             "record one scan-tape frame per relocalisation_step (pose, odometry, scan, room polygon)");
     reader.opt<std::string>("ScanTape.Path", room_concept.params.scan_tape_path,
             "tape file; {ts} = start time (epoch s)");
+    reader.opt<std::string>("RoomConcept.RelocMode", room_concept.params.reloc_mode,
+            "\"legacy\" (lost-belief HMM + SPRT modes) | \"rivals\" (Bayes-factor rival belief, relocaliser redesign)");
     reader.opt<bool>("RoomConcept.RelocEnabled", room_concept.params.reloc_enabled,
             "false = relocalisation never moves the pose (lost, mode_switch, seed_validation)");
 

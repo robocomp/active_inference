@@ -484,6 +484,7 @@ namespace rc
             belief_prev_pose_valid_ = false;
             if (not rivals_.empty()) { rivals_.clear(); publish_rival_snapshot(); }
             rival_ref_valid_ = false;
+            if (rivals_mode()) clear_rival_belief();   // a new room: the rivals, their epoch, any in-flight proposal (spec sec 5)
         }
         // Disarmed while the room transition is open (crossing a door of this room, or just entered through a face that
         // still lives — set_transition_open): the misfit is the other room seen through the door, not a lost pose.
@@ -492,6 +493,19 @@ namespace rc
             if (late_pending_.load(std::memory_order_acquire) and not lidar_points.empty())
                 if (not late_forced_done_) { run_late_recall_search(lidar_points); late_forced_this_frame_ = late_forced_done_; }   // once, at adoption
             step_door_anchor(res);
+            if (rivals_mode())
+            {
+                // RelocMode = "rivals": the Bayes-factor rival belief replaces the lost belief, the SPRT modes and the
+                // anchor retirement (room_concept_reloc_rivals.cpp). The legacy path below is untouched.
+                step_rivals(res, lidar_points);
+                if (model_ != nullptr and model_->has_state())
+                {
+                    const auto st = model_->get_state();
+                    rt_.anchor_prev_est = Eigen::Vector3f(st[2], st[3], st[4]);
+                    rt_.anchor_prev_valid = true;
+                }
+                return;
+            }
             // Rivals first: they are scored on THIS scan against the pose update() just committed.
             step_rival_modes(lidar_points);
 
@@ -665,6 +679,7 @@ namespace rc
         }
         else
         {
+            if (rivals_mode()) clear_rival_belief();
             if (not rivals_.empty()) { rivals_.clear(); publish_rival_snapshot(); }
             rival_ref_valid_ = false;
             rt_.hold_open = false;

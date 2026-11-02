@@ -81,6 +81,9 @@ set(RC_ESTIMATOR_SOURCES
   ${CMAKE_CURRENT_LIST_DIR}/room_concept_reloc_bootstrap.cpp
   ${CMAKE_CURRENT_LIST_DIR}/room_concept_reloc.cpp
   ${CMAKE_CURRENT_LIST_DIR}/room_concept_reloc_modes.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/room_concept_reloc_rivals.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/reloc_rival_score.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/reloc_proposer.cpp
   ${CMAKE_CURRENT_LIST_DIR}/room_concept_wall_slam.cpp
   ${CMAKE_CURRENT_LIST_DIR}/room_concept_wall_slam_after.cpp
   ${CMAKE_CURRENT_LIST_DIR}/room_concept_update.cpp

@@ -148,6 +148,9 @@ public:
         return S;
     }
 
+    // A rival is a TRACKED pose: the caller re-seats it on its own local mode of ell each scan (RoomConcept::step_rivals).
+    void set_pose(std::size_t i, const Eigen::Vector3f& pose) { rivals_.at(i).pose = pose; }
+
     void clear() { rivals_.clear(); }
     const std::vector<Rival>& rivals() const { return rivals_; }
 
