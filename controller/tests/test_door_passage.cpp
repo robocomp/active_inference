@@ -1181,6 +1181,38 @@ int main()
         CHECK(p.next_eligible(out.route->key));
     }
 
+    {   // warm37 leg 2: the door READS open at the start (memory), cross starts, then the door reads SHUT: the passage goes back to
+        //   `open` (claims aff_open so door_concept actuates), and once the door opens the cross resumes and completes
+        auto G = make_graph(90);
+        DoorPassage p;
+        p.set_clock(clock);
+        p.set_use_route(true);
+        p.note_room_id(1);
+        p.start("door_h", Step::Cross);
+        offered(*G, "aff_door_h_approach"); target(*G, "aff_door_h_approach", 2.f, 1.6f, down);
+        offered(*G, "aff_door_h_cross");    target(*G, "aff_door_h_cross", 2.f, -0.8f, down);
+        { DSR::Node m = DSR::Node::create<door_node_type>("door_h"); G->add_or_modify_attrib_local<door_open_prob_att>(m, 1.0f); G->insert_node(m); }
+        auto out = p.update(*G, nullptr, "room_1");
+        CHECK(p.view().step == Step::Cross and out.route.has_value() and out.route->through);
+        auto set_p = [&](float v)
+        { auto d = G->get_node("door_h"); G->add_or_modify_attrib_local<door_open_prob_att>(*d, v); G->update_node(*d); };
+        set_p(0.0f);                                              // a fresh look: the door is shut
+        offered(*G, "aff_door_h_open");                           // door_concept offers `open`
+        out = p.update(*G, nullptr, "room_1");
+        CHECK(p.view().step == Step::Open);
+        CHECK(not out.route.has_value() and out.required == "aff_door_h_open");
+        executing(*G, "aff_door_h_open"); p.update(*G, nullptr, "room_1");
+        satisfied(*G, "aff_door_h_open"); set_p(1.0f);            // the door opened
+        out = p.update(*G, nullptr, "room_1");
+        CHECK(p.view().step == Step::Cross and out.route.has_value() and out.route->through);
+        p.note_route(out.route->key, RR::Arrived);
+        out = p.update(*G, nullptr, "room_1");
+        CHECK(out.exit.has_value() and out.exit->door == "door_h");
+        p.note_room_id(2); p.note_archived_room_id(2);
+        out = p.update(*G, nullptr, "room_2");
+        CHECK(p.view().step == Step::Done and not p.view().failed);
+    }
+
     // ══ CHAINED ACTIONS (spec 2026-11-02): `cross R2; close R1; open R3` — the close happens ON THE WAY to the next step ═════════
     {   // the cross's leg carries the next step's goal; without one (unresolvable / last step) it carries none — old behaviour
         for (const bool known : {true, false})

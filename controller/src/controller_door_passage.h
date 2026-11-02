@@ -986,6 +986,27 @@ private:
                 ++route_epoch_;
             }
         }
+        // ── THE PASSAGE FOLLOWS THE DOOR'S CURRENT STATE, NOT THE STEP HISTORY (warm37 leg 2, 2026-11-02): `open` was satisfied from a
+        //    MEMORY of the door open, the door was in fact shut, and the cross held for 600 s at the vantage ("no mouth", P(open) 0.00)
+        //    while nobody ever asked the door to open. Contract §6 "door shut mid-cross -> back out, then open": while the body is not
+        //    yet in the opening nor through, a door whose own belief reads SHUT (door_open_prob known and at most 1/2 -- the SAME MAP
+        //    level door_reads_open uses for the opposite transition, no new constant) sends the passage back to `open`, which claims
+        //    aff_<door>_open so door_concept sends the actuator request. Once the door reads open again (cross offered / MAP > 1/2, or
+        //    the open completes satisfied) the `open` step below resumes the cross. No oscillation: Cross->Open needs MAP <= 1/2 and
+        //    Open->Cross needs MAP > 1/2 or `open` completed satisfied, disjoint conditions on one belief. A mission step already
+        //    reported "satisfied" stays so: this passage re-opens internally, the mission host sees only its own step.
+        if (step_ == Step::Cross and not exited_ and not in_opening_ and door_reads_shut(G))
+        {
+            route_event(out, std::format("[door-route] {}: the door reads SHUT while crossing (not yet in the opening) — back to {}",
+                                         door_, name_of(Step::Open)));
+            if (state_of(G, name_of(Step::Cross)) == State::Executing) preempted_ = true;   // the caller releases the cross claim
+            step_ = Step::Open;
+            seen_executing_ = false;
+            attempts_ = 0;
+            open_was_on_ = false;
+            reapproach_ = false;
+            ++route_epoch_;
+        }
         // ── a door that opens / shuts changes the leg (not on a re-approach: that one ends at the vantage)
         if (step_ == Step::Approach and open_now and route_cross_.has_value() and not reapproach_)
         {
