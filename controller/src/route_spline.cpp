@@ -92,7 +92,10 @@ bool RouteSpline::build(const std::vector<Eigen::Vector2f> &polyline, float spac
     if (ctrl.size() < 2) return false;          // genuinely nothing to follow
     if (ctrl.size() < 4)   // too short to smooth; the polyline IS the answer
     {
-        samples_ = ctrl;
+        // ★SAMPLES ARE UNIFORM AT spacing_ — position_at()/project() index them by s / spacing_. The control points are
+        // spaced at ctrl_step (0.31-0.40 m), so keeping them as samples made arc length 0.13 m read as the curve's END on a
+        // 0.62 m route: progress stalled, finished() never held, and the robot drove 1.9 m past its vantage (warm30 leg 2).
+        samples_ = resample(polyline, spacing_);
         for (std::size_t i = 0; i + 1 < samples_.size(); ++i) length_ += (samples_[i + 1] - samples_[i]).norm();
         // The polygon IS the state here too: < 4 points, so the band's own M < 4 guard leaves this curve alone.
         ctrl_      = std::move(ctrl);
@@ -140,7 +143,7 @@ bool RouteSpline::evaluate_from_ctrl(bool measure_deviation)
     max_dev_ = mean_dev_ = 0.f;
     if (ctrl.size() < 4)
     {
-        samples_ = ctrl;
+        samples_ = resample(ctrl, spacing_);   // uniform at spacing_, as build()'s short branch
         for (std::size_t i = 0; i + 1 < samples_.size(); ++i) length_ += (samples_[i + 1] - samples_[i]).norm();
         return valid();
     }

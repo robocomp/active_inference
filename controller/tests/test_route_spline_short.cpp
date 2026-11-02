@@ -5,6 +5,7 @@
 //       src/route_spline.cpp src/route_optimizer.cpp -o /tmp/test_route_spline_short && /tmp/test_route_spline_short
 #include "route_spline.h"
 
+#include <cmath>
 #include <cstdio>
 #include <vector>
 
@@ -30,6 +31,19 @@ int main()
     check(c.size() < 4, "short route's polygon is NOT the old one (< 4 points ⇒ the band skips it)");
     check(not c.empty() and (c.front() - short_path.front()).norm() < 1e-4f, "polygon starts at the new path");
     check((s.samples().back() - short_path.back()).norm() < 0.41f, "samples end near the new goal");
+
+    // warm30 leg 2: a 0.62 m robot -> vantage route drove 1.9 m. Its < 4 control points were kept as SAMPLES at the 0.31 m
+    // control spacing while position_at()/project() divide arc length by the 5 cm sample spacing, so arc length 0.13 m already
+    // read as the END of the curve: progress stalled, finished() never held and nothing stopped the tracker at the vantage.
+    {
+        const std::vector<Eigen::Vector2f> pre_leg{{0.70f, 1.70f}, {1.29f, 1.52f}};
+        check(s.build(pre_leg, 0.05f, free_all, 0.40f), "a 0.62 m leg builds");
+        const Eigen::Vector2f mid = 0.5f * (pre_leg[0] + pre_leg[1]);
+        check((s.position_at(0.5f * s.length()) - mid).norm() < 0.02f, "arc length is distance along a short route (midpoint)");
+        check((s.position_at(s.length()) - pre_leg[1]).norm() < 0.02f, "the curve's end is the leg's end");
+        const float sp = s.project(pre_leg[1], 0.f, 2.0f);
+        check(std::abs(sp - s.length()) < 0.06f, "a robot AT the end projects to the end (progress can reach it)");
+    }
 
     const std::vector<Eigen::Vector2f> one_point{{0.f, 0.f}};
     check(not s.build(one_point, 0.05f, free_all, 0.40f), "degenerate route fails");
