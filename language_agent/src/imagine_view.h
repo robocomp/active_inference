@@ -192,22 +192,36 @@ struct ImaginePlace
     return out;
 }
 
-/// How far in front of the robot the canonical instance stands. From the card's own detector envelope: the distance at which
-/// the prior's mean size fills the frame at the geometric mean of [min_fill, max_fill] (the middle of the band on a log
-/// scale), for the camera the card models. fill(d) = K / d, K = the larger axis' extent over the frame's full extent at
-/// unit range. Without a camera or a usable envelope: kFreeSpaceDistanceM, flagged.
-struct CanonicalDistance { float m = 2.0f; bool from_envelope = false; };
-[[nodiscard]] inline CanonicalDistance canonical_distance(const rc::card::Card& card, const std::optional<rc::nbv::Sensor>& zed)
+/// How far in front of the robot the canonical instance stands: "how I would best see one" = the distance that maximises
+/// the card's own mean P(recognise) over the canonical scene (empty space, the robot at the origin heading +y, the same
+/// Monte-Carlo as the answer but kSearchSamples draws with a fixed seed: deterministic and cheap). Grid 0.5..8 m, step
+/// 0.1 m; ties keep the nearer distance (strict improvement only). When the card cannot be evaluated anywhere (no camera,
+/// no draw placed): kFreeSpaceDistanceM, flagged.
+struct CanonicalDistance { float m = 2.0f; bool searched = false; };
+inline constexpr int kSearchSamples = 8;
+inline constexpr std::uint64_t kSearchSeed = 1;
+[[nodiscard]] inline CanonicalDistance canonical_distance(const rc::card::Card& card, const SeeScene& s, const std::string& cls)
 {
-    const auto it = card.subtypes.find("");
-    const auto sp = it != card.subtypes.end() ? it : card.subtypes.begin();
-    if (sp == card.subtypes.end() or not zed.has_value()) return {};
-    const auto& e = sp->second.env;
-    const auto& g = card.geometry;
-    if (not (e.min_fill > 0.0f and e.max_fill > e.min_fill) or not (g.w > 0.0f and g.z1 > g.z0)) return {};
-    const float width = std::max(g.w, g.d), height = g.z1 - g.z0;
-    const float k = std::max(width / (2.0f * zed->tan_half_h()), height / (2.0f * zed->tan_half_v()));
-    return {k / std::sqrt(e.min_fill * e.max_fill), true};
+    const auto vp = resolve_from(s, "");
+    if (not vp.has_value() or not vp->yaw.has_value() or not card.generative or not s.zed.has_value()) return {};
+    ImaginePlace place;
+    std::vector<std::string> excluded;
+    const auto world = imagine_world(s, card, cls, place, excluded);
+    const Eigen::Vector2f dir(std::cos(*vp->yaw), std::sin(*vp->yaw));
+    CanonicalDistance best;
+    float best_p = -1.0f;
+    for (int i = 5; i <= 80; ++i)
+    {
+        const float d = static_cast<float>(i) * 0.1f;
+        rc::card::Context ctx;
+        ctx.at = vp->xy + d * dir;
+        const auto set = rc::card::sample_concept(card, with_robot_body(world, *vp), ctx, kSearchSamples, kSearchSeed);
+        const auto mc = mc_over_samples(card, world, cls, set.samples, *vp);
+        if (mc.n == 0) continue;
+        if (mc.p_recognise_mean > best_p) { best_p = mc.p_recognise_mean; best = {d, true}; }
+    }
+    if (best_p <= 0.0f) return {};   // nowhere recognisable: nothing to maximise
+    return best;
 }
 
 /// "0.62 ± 0.11"
@@ -233,7 +247,7 @@ struct ImagineFacts
     std::string sensor = "both";
     bool canonical = false;                 ///< the canonical view: a typical instance on the floor in empty space, no room
     float distance_m = 0;                   ///< canonical: how far in front of the robot
-    bool distance_from_envelope = true;     ///< false: the card has no envelope, 2 m assumed
+    bool distance_searched = true;          ///< false: the card could not be evaluated, 2 m assumed
 };
 
 /// " Assumed: door_1: ...; door_2: ...." from the doors' notes; empty when nothing was assumed.
@@ -267,7 +281,7 @@ struct ImagineFacts
         out = std::format("I imagined {} typical {} standing on the floor {:.1f} m in front of me{}. I would notice that something "
                           "is there with P {}, and recognise it as a {} with P {} ({}).",
                           f.shown, f.shown == 1 ? f.cls : pl, f.distance_m,
-                          f.distance_from_envelope ? "" : " (my model of it has no detector envelope, so I assumed that distance)",
+                          f.distance_searched ? "" : " (I could not evaluate my detector for it, so I assumed that distance)",
                           pm(mc.p_notice_mean, mc.p_notice_sd), f.cls, pm(mc.p_recognise_mean, mc.p_recognise_sd), likelihood(mc.p_recognise_mean));
     else
         out = std::format("I imagined {} {} {}, seen {}. I would notice that something is there with P {}, and "
@@ -389,7 +403,7 @@ struct ImagineOutcome
     CanonicalDistance cd;
     if (canonical)
     {
-        cd = canonical_distance(card, s.zed);
+        cd = canonical_distance(card, s, cls);
         place->ctx.at = vp->xy + cd.m * Eigen::Vector2f(std::cos(*vp->yaw), std::sin(*vp->yaw));
         place->words = std::format("standing on the floor {:.1f} m in front of me", cd.m);
     }
@@ -400,7 +414,7 @@ struct ImagineOutcome
     ImagineFacts f;
     f.cls = cls; f.place_words = place->words; f.from_label = rq.from;
     f.room_height_known = s.room_height_known; f.room_height = s.room_height;
-    f.canonical = canonical; f.distance_m = cd.m; f.distance_from_envelope = cd.from_envelope;
+    f.canonical = canonical; f.distance_m = cd.m; f.distance_searched = cd.searched;
     f.seed = seed; f.calibration = card.calibration; f.sensor = sensor; f.assumed = door_assumptions(s);
     const auto world = imagine_world(s, card, cls, *place, f.excluded);
 

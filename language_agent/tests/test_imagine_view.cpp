@@ -310,21 +310,40 @@ int main()
         const auto h = imagine_view(chair_card(), scene(false), rh, 11, dir);
         CHECK(has(h.text, "wherever such things usually stand"));
         CHECK(imagine_view(chair_card(), none, rh, 11, dir).refusal);
-        // the distance comes from the envelope: fills [0.1, 0.4] -> the mean-size instance fills 0.2 there
+        // the distance maximises the card's own P(recognise): a narrow band of fills picks the matching distance
         Card c = chair_card();
-        c.subtypes[""].env = {0.1f, 0.4f, 0.05f};
-        c.geometry = {0.45f, 0.45f, 0.9f, 0.0f, 0.9f};
-        const auto sc = scene(false);
-        const auto cd = canonical_distance(c, sc.zed);
-        CHECK(cd.from_envelope);
-        rc::nbv::Target t; t.cx = cd.m; t.cy = 0; t.yaw = 0; t.w = 0.45f; t.h = 0.45f; t.z0 = 0; t.z1 = 0.9f;
-        const auto [fmax, fmin] = rc::nbv::predicted_fill_axes(t, {0, 0}, *sc.zed, 0.0f);
-        CHECK(std::abs(fmax - 0.2f) < 0.03f);
-        CHECK(has(imagine_view(c, none, rq, 11, dir).text, std::format("{:.1f} m in front of me", cd.m).c_str()));
-        // no envelope: 2 m, said so
-        Card ne = chair_card(); ne.subtypes.clear();
-        CHECK(not canonical_distance(ne, sc.zed).from_envelope and canonical_distance(ne, sc.zed).m == 2.0f);
-        CHECK(has(imagine_view(ne, none, rq, 11, dir).text, "no detector envelope"));
+        c.subtypes[""].env = {0.25f, 0.35f, 0.02f};
+        for (auto& v : c.generative->vars) v.sigma = 1e-4f;       // one size: the fill is then a function of distance
+        auto sc = scene(false);
+        sc.room.clear(); sc.polygon.clear(); sc.doors.clear(); sc.objects.clear();
+        sc.robot_xy = Eigen::Vector2f(0, 0); sc.robot_yaw = 0.0f; sc.room_height_known = true;
+        const auto cd = canonical_distance(c, sc, "chair");
+        CHECK(cd.searched);
+        // independent: the same chair at each distance, yaws swept, scored by the evaluator directly
+        const auto vp = *resolve_from(sc, "");
+        float best_d = 0, best_p = -1;
+        for (int i = 5; i <= 80; ++i)
+        {
+            const float d = 0.1f * float(i);
+            float sum = 0;
+            for (int k = 0; k < 8; ++k)
+            {
+                Hypothesis h; h.concept_ = "chair"; h.x = d * std::cos(*vp.yaw); h.y = d * std::sin(*vp.yaw);
+                h.yaw = 0.785f * float(k); h.size = GeometryPrior{0.6f, 0.52f, 1.25f, 0.0f, 1.25f};
+                sum += evaluate(c, world_for(sc, ""), h, vp).p_recognise;
+            }
+            if (sum > best_p + 1e-4f) { best_p = sum; best_d = d; }
+        }
+        CHECK(std::abs(cd.m - best_d) <= 0.2f);
+        CHECK(cd.m > 0.6f and cd.m < 7.9f);
+        const auto cd2 = canonical_distance(c, sc, "chair");
+        CHECK(cd2.m == cd.m);                                      // deterministic
+        CHECK(has(imagine_view(c, none, rq, 11, dir).text, "m in front of me"));
+        // a card that cannot be evaluated (no camera): 2 m, said so
+        auto nocam = sc; nocam.zed.reset();
+        CHECK(not canonical_distance(c, nocam, "chair").searched and canonical_distance(c, nocam, "chair").m == 2.0f);
+        auto nocam_none = none; nocam_none.zed.reset();
+        CHECK(has(imagine_view(c, nocam_none, rq, 11, dir).text, "could not evaluate my detector"));
     }
     // the real chair card (fleet envelope, 71 deg camera): the canonical P(notice) is clearly above 0, not the live 0.00
     {
@@ -335,6 +354,19 @@ int main()
         c.subtypes[""].env = {0.1f, 0.6f, 0.06f};
         ImagineRequest rq; rq.concept_ = "chair"; rq.n = 8;
         (void)imagine_view(c, none, rq, 5, dir);
+        {   // a normal chair distance, and no worse than the old 6.4 m
+            auto sc = none; sc.robot_xy = Eigen::Vector2f(0, 0); sc.robot_yaw = 0.0f;
+            const auto cd = canonical_distance(c, sc, "chair");
+            CHECK(cd.searched and cd.m >= 1.0f and cd.m <= 4.0f);
+            const auto vp = *resolve_from(sc, "");
+            const auto world = imagine_world(sc, c, "chair", ImaginePlace{}, *std::make_unique<std::vector<std::string>>());
+            const auto p_at = [&](float d)
+            {
+                rc::card::Context ctx; ctx.at = vp.xy + d * Eigen::Vector2f(std::cos(*vp.yaw), std::sin(*vp.yaw));
+                return mc_over_samples(c, world, "chair", sample_concept(c, with_robot_body(world, vp), ctx, kSearchSamples, kSearchSeed).samples, vp).p_recognise_mean;
+            };
+            CHECK(p_at(cd.m) >= p_at(6.4f));
+        }
         const auto doc = QJsonDocument::fromJson(QByteArray::fromStdString(slurp(dir / "imagined.json"))).object();
         CHECK(doc["mc"].toObject()["p_notice_mean"].toDouble() > 0.3);
     }
