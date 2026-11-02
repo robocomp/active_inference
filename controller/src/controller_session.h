@@ -1240,7 +1240,7 @@ private:
     Eigen::Vector2f door_vantage_ = Eigen::Vector2f::Zero(), door_centre_pt_ = Eigen::Vector2f::Zero();   // V and the aperture centre
     float door_vantage_s_ = 0.f;                    // arc length of V along the route
     std::string door_law_done_key_;                 // the leg whose approach law reached "in band and facing"
-    bool door_law_done_now_ = false;                // this cycle's verdict (read by the arrival block next cycle)
+    rc::door_approach::Verdict door_law_verdict_;   // this cycle's verdict (read by the arrival block next cycle); cleared per installed route
     std::vector<Eigen::Vector2f> door_trail_;       // the poses the robot arrived through (0.05 m apart, newest last)
     std::uint64_t door_law_trace_ms_ = 0;
     /// This cycle's approach command (door_approach_law.h): updates the trail, the law's verdict and the 1 Hz [approach] trace.

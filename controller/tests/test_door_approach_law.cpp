@@ -120,6 +120,18 @@ int main()
         CHECK(std::abs(da::heading_error(s.p, s.theta, door)) < 0.087f);
         std::println("(c) travelled {:.2f} m before facing within 46 deg", s.travelled_before_aligned);
     }
+    {   // (d) warm32 leg 3: door A's approach ends DONE; door B installed 7 m away must not report arrived on its first cycle
+        da::Verdict v;
+        const V2 va{1.f, 1.f}, vb{8.f, -2.f};
+        da::Command done; done.done = true;
+        v.note(done);
+        CHECK(v.arrived(va, va, 0.1f));              // A: at its vantage
+        v.install();                                 // B is installed
+        CHECK(not v.arrived(va, vb, 0.1f));          // first cycle, 7 m away
+        v.note(done);                                // even a stale DONE seen by the block
+        CHECK(not v.arrived(va, vb, 0.1f));          // needs the disc too
+        CHECK(v.arrived(vb, vb, 0.1f));
+    }
     std::println("{} checks, {} failures", checks, failures);
     return failures == 0 ? 0 : 1;
 }

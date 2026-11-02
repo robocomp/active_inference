@@ -3576,6 +3576,7 @@ bool ControllerSession::build_door_route(const ControllerRobotPose &robot_pose, 
     }
     door_law_done_key_ = plan.has_axis ? std::string{} : leg.key;   // no axis: no door to face — the tracker, as before
     door_trail_.clear();
+    door_law_verdict_.install();   // the previous door's DONE must not mark this route arrived (warm32 leg 3)
     // The policy's Place goals: the curve's points every 2·tol_xy of arc (consecutive arrival discs touch, never overlap),
     // the last one with the leg's final heading (facing the door at P_pre; the travel direction at P_post).
     door_route_goals_.clear();
@@ -3627,7 +3628,7 @@ rc::door_approach::Command ControllerSession::door_approach_command(const Contro
         st.w_cap = rc::lidar_return_rot_limit(lr.r.obstacles, cmd.rot, returns_body(), lr.margin, lr.a_dec, lr.w_max);
         cmd = da::law(st);
     }
-    door_law_done_now_ = cmd.done;
+    door_law_verdict_.note(cmd);
     if (now_ms - door_law_trace_ms_ >= 1000)
     {
         door_law_trace_ms_ = now_ms;
@@ -7739,12 +7740,13 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
     {
         door_route_.advance(robot_pose.pos);
         const bool law_on = door_law_active();
-        if (law_on and door_law_done_now_ and door_route_leg_->through)   // at the vantage, facing the door: the tracker goes on through
+        const bool law_arrived = law_on and door_law_verdict_.arrived(robot_pose.pos, door_vantage_, path_controller.goal_threshold());
+        if (law_arrived and door_route_leg_->through)   // at the vantage, facing the door: the tracker goes on through
         {
             door_law_done_key_ = door_route_leg_->key;
             std::println("[door-route] {}: at the vantage, facing the door — the route goes on", door_route_leg_->door);
         }
-        if (law_on ? (door_law_done_now_ and not door_route_leg_->through) : door_route_.finished(robot_pose.pos))
+        if (law_on ? (law_arrived and not door_route_leg_->through) : door_route_.finished(robot_pose.pos))
         {
             std::println("[door-route] {}: the route's end reached ({:.2f} of {:.2f} m)", door_route_leg_->door, door_route_.progress(),
                          door_route_.length());
