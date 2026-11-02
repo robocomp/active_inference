@@ -16,6 +16,11 @@ int main()
     v.add(""); CHECK(not v.pending());                         // an empty result is not a refusal
     v.add("A."); v.add("B.");
     CHECK(v.take() == std::optional<std::string>("A.\nB."));
+    // only an all-refusal round is said verbatim; a mixed round keeps the follow-up
+    v.add("refused");
+    CHECK(v.all_refused(1) and not v.all_refused(2) and not v.all_refused(0));
+    (void)v.take();
+    CHECK(not v.all_refused(1));                               // taking resets the count
     std::puts(fails == 0 ? "all verbatim checks passed" : "verbatim checks FAILED");
     return fails ? 1 : 0;
 }

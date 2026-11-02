@@ -980,10 +980,14 @@ void ChatSession::ask_model(bool followup, bool offer_tools)
             push_history({{"role", "assistant"}, {"content", content}, {"tool_calls", turn_.tool_calls}});
             draw_failed_ = false;
             verbatim_ = {};
+            round_calls_ = turn_.tool_calls.size();
             const bool image = handle_tool_calls(turn_.tool_calls);
-            // A tool refused: the person hears the refusal as it is. Left to the model's follow-up it was paraphrased into
-            // a false limitation (live 2026-11-02: "I do not have a way to imagine things").
-            if (not planner_.has_value())
+            // EVERY call of the round refused: the person hears the refusal as it is. Left to the model's follow-up it was
+            // paraphrased into a false limitation (live 2026-11-02: "I do not have a way to imagine things"). A mixed round
+            // (a refusal beside a movement, a picture, a draw to repair) goes through the normal follow-up. The words are
+            // shown, not kept in history: the tool message already holds the refusal, and the model replays kept
+            // post-tool words as the answer to the next request (see above).
+            if (not planner_.has_value() and verbatim_.all_refused(round_calls_))
                 if (auto said = verbatim_.take(); said.has_value())
                 {
                     const QString text = q(*said);
@@ -991,9 +995,9 @@ void ChatSession::ask_model(bool followup, bool offer_tools)
                     window_->begin_assistant();
                     window_->append_token(text);
                     window_->end_assistant();
-                    push_history({{"role", "assistant"}, {"content", text}});
                     return;
                 }
+            (void)verbatim_.take();
             // plan_mission queued the planner: it runs once THIS callback has returned (the client is the same, one
             // request at a time); its result is the round's last tool message, and the follow-up waits for it.
             if (planner_.has_value())
@@ -1404,12 +1408,12 @@ QString ChatSession::do_imagine_view(const QJsonObject& args)
     };
 
     const auto card = std::ranges::find(cards, rq.concept_, &rc::card::Card::concept_);
-    if (card == cards.end()) return with_notes(refusal(q(rc::chat::answer_no_card(not cards.empty(), looked_in))));
+    if (card == cards.end()) return refusal(with_notes(q(rc::chat::answer_no_card(not cards.empty(), looked_in))));
     // No current room is not a refusal for a thing imagined in free space (imagine_view says so); a named place needs one.
     const auto scene = rc::chat::build_see_scene(*G_, *inner_, digest_);
 
     const auto out = rc::chat::imagine_view(*card, scene, rq, seed, canvas_runner_.run_dir().toStdString());
-    if (not out.drawn) return with_notes(out.refusal ? refusal(q(out.text)) : q(out.text));
+    if (not out.drawn) return out.refusal ? refusal(with_notes(q(out.text))) : with_notes(q(out.text));
     // the fixed script stock/imagined.py draws imagined.json + imagined_zed.png (rcanvas.draw_imagined_zed / _lidar)
     auto job = library_job("imagined", {});
     if (not job.has_value()) return with_notes(q(out.text) + QStringLiteral(" (The picture script is missing.)"));

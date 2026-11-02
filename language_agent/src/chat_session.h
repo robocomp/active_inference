@@ -281,6 +281,7 @@ private:
     int lost_answers_ = 0;          ///< model answers this user message that came back empty (one is re-asked)
     bool draw_failed_ = false;      ///< a draw in the current tool round failed
     rc::chat::VerbatimReply verbatim_;   ///< refusals of this tool round: the reply is these texts, not a model paraphrase
+    int round_calls_ = 0;                ///< tool calls of the current round (all_refused compares against it)
     QString refusal(QString text) { verbatim_.add(text.toStdString()); return text; }   ///< a tool's refusal site
     QTimer canvas_timer_;
     QByteArray look_jpeg_;   ///< set by do_look(), attached to that call's role:"tool" message

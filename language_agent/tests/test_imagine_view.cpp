@@ -292,7 +292,11 @@ int main()
         Card nogen = chair_card(); nogen.generative.reset();
         CHECK(imagine_view(nogen, scene(true), rq, 1, dir).refusal);
         ImagineRequest rbad = rq; rbad.where = "the moon";
-        CHECK(imagine_view(chair_card(), scene(true), rbad, 1, dir).refusal);
+        CHECK(not imagine_view(chair_card(), scene(true), rbad, 1, dir).refusal);   // an ASK goes back to the model, not to the person
+        CHECK(has(imagine_view(chair_card(), scene(true), rbad, 1, dir).text, "ASK:"));
+        CHECK(resolve_place(scene(true), "chair", "the moon").error().ask and resolve_from(scene(true), "the kitchen").error().ask);
+        { auto lost = scene(true); lost.robot_xy.reset(); ImagineRequest rl; rl.concept_ = "chair"; rl.where = "wall";
+          const auto ol = imagine_view(chair_card(), lost, rl, 1, dir); CHECK(ol.refusal and not resolve_from(lost, "").error().ask); }
         CHECK(not imagine_view(chair_card(), scene(true), rq, 1, dir).refusal);
     }
     // ---- the canonical view: the robot's idea of the thing, independent of the room ----
@@ -318,7 +322,7 @@ int main()
         sc.room.clear(); sc.polygon.clear(); sc.doors.clear(); sc.objects.clear();
         sc.robot_xy = Eigen::Vector2f(0, 0); sc.robot_yaw = 0.0f; sc.room_height_known = true;
         const auto cd = canonical_distance(c, sc, "chair");
-        CHECK(cd.searched);
+        CHECK(cd.searched());
         // independent: the same chair at each distance, yaws swept, scored by the evaluator directly
         const auto vp = *resolve_from(sc, "");
         float best_d = 0, best_p = -1;
@@ -342,16 +346,38 @@ int main()
             f.subtypes[""].env = {0.0005f, 0.55f, 0.0005f};   // saturated for every fill under ~0.54: a plateau from ~1.5 m out to 8 m
             for (auto& v : f.generative->vars) v.sigma = 1e-4f;
             const auto cf = canonical_distance(f, sc, "chair");
-            CHECK(cf.searched and cf.m >= 1.3f and cf.m <= 2.0f);   // the plateau's NEAR edge
+            CHECK(cf.searched() and cf.m >= 1.3f and cf.m <= 2.0f);   // the plateau's NEAR edge
+        }
+        // evaluated and recognised nowhere: say that (not "could not evaluate"), with the limit
+        {
+            Card nv = chair_card();
+            nv.subtypes[""].env = {0.9f, 0.95f, 0.001f};          // nothing fills the frame that much at 0.5..8 m
+            const auto cn = canonical_distance(nv, sc, "chair");
+            CHECK(cn.kind == CanonicalDistance::Kind::NeverRecognised);
+            const auto tn = imagine_view(nv, none, rq, 11, dir).text;
+            CHECK(has(tn, "would not recognise one at any distance") and not has(tn, "could not evaluate"));
+        }
+        // a LiDAR-only card is searched like any other (no camera in the scene is no reason to refuse)
+        {
+            Card lc = chair_card();
+            lc.channels = {{"helios", Role::Identity, true}};
+            lc.subtypes[""].q_return = 0.9f;
+            auto ls = sc; ls.zed.reset();
+            CHECK(canonical_distance(lc, ls, "chair").kind != CanonicalDistance::Kind::NoSensor);
+        }
+        // what the scene could not read is said in the answer
+        {
+            auto ns = none; ns.notes.push_back("I could not read my camera's mount or intrinsics, so I left it out");
+            CHECK(has(imagine_view(chair_card(), ns, rq, 11, dir).text, "left it out"));
         }
         const auto cd2 = canonical_distance(c, sc, "chair");
         CHECK(cd2.m == cd.m);                                      // deterministic
         CHECK(has(imagine_view(c, none, rq, 11, dir).text, "m in front of me"));
         // a card that cannot be evaluated (no camera): 2 m, said so
         auto nocam = sc; nocam.zed.reset();
-        CHECK(not canonical_distance(c, nocam, "chair").searched and canonical_distance(c, nocam, "chair").m == 2.0f);
-        auto nocam_none = none; nocam_none.zed.reset();
-        CHECK(has(imagine_view(c, nocam_none, rq, 11, dir).text, "could not evaluate my detector"));
+        CHECK(not canonical_distance(c, nocam, "chair").searched() and canonical_distance(c, nocam, "chair").m == 2.0f);
+        auto nocam_none = none; nocam_none.zed.reset(); nocam_none.helios.reset(); nocam_none.bpearl.reset();
+        CHECK(has(imagine_view(c, nocam_none, rq, 11, dir).text, "no sensor to evaluate"));
     }
     // the real chair card (fleet envelope, 71 deg camera): the canonical P(notice) is clearly above 0, not the live 0.00
     {
@@ -365,7 +391,7 @@ int main()
         {   // a normal chair distance, and no worse than the old 6.4 m
             auto sc = none; sc.robot_xy = Eigen::Vector2f(0, 0); sc.robot_yaw = 0.0f;
             const auto cd = canonical_distance(c, sc, "chair");
-            CHECK(cd.searched and cd.m >= 1.0f and cd.m <= 4.0f);
+            CHECK(cd.searched() and cd.m >= 1.0f and cd.m <= 4.0f);
             const auto vp = *resolve_from(sc, "");
             const auto world = imagine_world(sc, c, "chair", ImaginePlace{}, *std::make_unique<std::vector<std::string>>());
             const auto p_at = [&](float d)

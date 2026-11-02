@@ -17,16 +17,22 @@ public:
     void add(std::string text)
     {
         if (text.empty()) return;
+        ++refusals_;
         text_ += (text_.empty() ? "" : "\n") + std::move(text);
     }
     [[nodiscard]] bool pending() const { return not text_.empty(); }
+    /// The verbatim reply replaces the model's follow-up ONLY when every call of the round refused: a mixed round has an
+    /// outcome (a movement, a picture, a draw to repair) the follow-up must still word.
+    [[nodiscard]] bool all_refused(int calls_in_round) const { return calls_in_round > 0 and refusals_ == calls_in_round; }
     /// The text to show, and clears it for the next round.
     [[nodiscard]] std::optional<std::string> take()
     {
         if (text_.empty()) return std::nullopt;
+        refusals_ = 0;
         return std::exchange(text_, {});
     }
 private:
     std::string text_;
+    int refusals_ = 0;
 };
 }   // namespace rc::chat
