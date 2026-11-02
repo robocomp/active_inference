@@ -60,6 +60,7 @@
 #include "epistemic_planner.h"
 #include "../../common/object_affordance/object_affordance.h"
 #include "door_model.h"
+#include "door_provider_faces.h"   // rc::door::ProviderFaces: one physical door, one leaf (warm34)
 #include "door_identity_table.h"   // rc::door::IdentityRow + plan_restore (etc/door_identities.csv)
 #include "door_look.h"             // rc::door::look — the look-at-a-remembered-door affordance
 #include "door_anchor_open.h"       // rc::door::AnchorLostMode (Task D-B: the passage anchor's per-cycle lost check)
@@ -239,6 +240,7 @@ private:
     std::string current_room_name() const;
     mutable std::pair<std::uint64_t, std::string> room_name_cache_{0, {}};   // the left room may already be deleted
     std::vector<DoorIdentity> identities_;
+    rc::door::ProviderFaces provider_faces_;   // provider door id -> the faces actuated through it (in-memory; not persisted)
     // The door-name counter (2026-10-29): every fresh name is `door_<next_door_index_++>`, persisted with the table
     // (`#next_door,N`) so a name is never handed out twice, across runs too. Names are OPAQUE (door_identity_table.h).
     std::uint64_t next_door_index_ = 1;

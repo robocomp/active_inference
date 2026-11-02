@@ -3217,6 +3217,26 @@ bool SpecificWorker::request_door_actuation_impl(rc::DoorInstance& inst, bool op
         inst.phi_cmd_active = true;
         std::println("door_concept: [phi] anticipating {} swing {:.2f} -> {:.2f} rad at {:.2f} rad/s",
                      inst.node_name, inst.phi_cmd_from, inst.phi_cmd_to, inst.phi_cmd_rate);
+        // ★ONE PHYSICAL DOOR, ONE LEAF (warm34). The provider door id names the PHYSICAL leaf; this face is one of its faces.
+        //   The command is evidence about the leaf for every OTHER face of it (door_provider_faces.h): their remembered
+        //   rows move toward the commanded angle, so a face nobody has looked at since does not keep believing the old state.
+        if (not chosen_id.empty())
+        {
+            const std::string face_room = current_room_name();
+            provider_faces_.note(chosen_id, face_room, xy);
+            bool changed = false;
+            for (const auto& other : provider_faces_.others(chosen_id, face_room))
+                if (rc::door::apply_actuation_to_face(identities_, other, inst.phi_cmd_to, cfg_.phi_max_rad,
+                                                      static_cast<std::int64_t>(rc::provenance::now_ms()),
+                                                      cfg_.exist_birth_logodds, cfg_.exist_reacquire_radius_m))
+                {
+                    changed = true;
+                    std::println("door_concept: [phi] {} '{}' of provider door '{}' -> its other face in '{}' told: leaf commanded to "
+                                 "{:.2f} rad (obeyed p={:.2f})", open ? "OPEN" : "CLOSE", inst.node_name, chosen_id, other.room,
+                                 inst.phi_cmd_to, rc::door::kActuationObeyed);
+                }
+            if (changed) save_identities();
+        }
     }
     return true;
 }
