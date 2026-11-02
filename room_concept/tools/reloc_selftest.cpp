@@ -52,6 +52,8 @@ namespace rc
         static float belief(RoomConcept& r, float s, float outside) { return r.update_lost_belief(s, outside); }
         static void  reset(RoomConcept& r) { r.reset_lost_belief(); }
         static void  step(RoomConcept& r, const std::vector<Eigen::Vector3f>& pts) { r.step_rival_modes(pts); }
+        static void  late(RoomConcept& r, const std::vector<Eigen::Vector3f>& pts) { r.run_late_recall_search(pts); }
+        static bool  late_done(RoomConcept& r) { return r.late_forced_done_; }
         static auto& rivals(RoomConcept& r) { return r.rivals_; }
         static void  set_ref(RoomConcept& r, const Eigen::Vector3f& p) { r.rival_ref_pose_ = p; r.rival_ref_valid_ = true; }
         static bool  confirmed(RoomConcept& r) { return r.last_search_confirmed_incumbent_; }
@@ -1693,6 +1695,38 @@ int main(int argc, char** argv)
         std::printf("  %-52s false fires=%d in 40000 healthy frames (5%% turn spikes x3)\n", "D healthy stream", false_fires);
         std::printf("  %-52s fired in %.1f frames on average, missed %d/20\n", "E kidnap (s -> 0.40 m)",
                     kidnaps > 0 ? static_cast<double>(kidnap_delay_sum) / kidnaps : std::nan(""), missed);
+    }
+    if (Acc::mode == "rivals")   // W: adoption after a recognition swap = multi-scan fit (Task 6), end to end through the worker
+    {
+        std::mt19937 rng(606);
+        int ok = 0, runs = 8;
+        double err_sum = 0.0;
+        const auto room_list = rooms(); const auto& room = room_list.front();
+        for (int run = 0; run < runs; ++run)
+        {
+            rc::RoomConcept rcn;
+            Acc::set_mode(rcn);
+            rcn.set_polygon_room(room.poly);
+            const Eigen::Vector3f truth = random_pose(room.poly, rng, 1.0f);
+            rcn.set_robot_pose(truth.x() + 2.f, truth.y() - 1.f, truth.z() + 2.f, false);   // the provisional frame: meaningless
+            rc::reloc::PriorMode m;
+            m.mu = truth + Eigen::Vector3f(0.15f, -0.05f, 0.05f);
+            m.S = Eigen::Vector3f(0.09f, 0.09f, 0.04f).asDiagonal();
+            rcn.seed_reloc_prior({m});   // commits the prior's mean as the pose
+            for (int f = 0; f < 400 and not Acc::late_done(rcn); ++f)
+            {
+                Acc::late(rcn, to3(synth_scan(room.poly, truth, 360, 0.02f, 0.30f, rng)));
+                std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            }
+            const auto st = rcn.get_current_state();
+            const Eigen::Vector3f now(st[2], st[3], st[4]);
+            err_sum += (now.head<2>() - truth.head<2>()).norm();
+            if (Acc::late_done(rcn) and near(now, truth, 0.05f, 3.f)) ++ok;
+        }
+        const bool pass = ok == runs;
+        r1_failures += pass ? 0 : 1;
+        std::printf("  W adoption by multi-scan fit (prior 0.16 m / 3 deg off)  within 5 cm / 3 deg %d/%d, mean error %.3f m — %s\n",
+                    ok, runs, err_sum / runs, pass ? "PASS" : "FAIL");
     }
     return r1_failures > 0 ? 1 : 0;
 }

@@ -35,6 +35,8 @@
 #include "scan_tape.h"
 #include "reloc_rivals.h"      // rc::rivals::Belief (RelocMode = "rivals")
 #include "reloc_proposer.h"    // rc::rivals::Proposer
+#include "multi_scan_fit.h"     // rc::rivals::multi_scan_fit (adoption after a recognition swap, RelocMode = "rivals")
+#include <future>
 #include "room_boxes_channel.h"   // the box layout sidecar; it reaches into nothing here
 #include "rerun_logger.h"
 #include "object_anchor_types.h"
@@ -796,6 +798,14 @@ private:
    bool late_forced_this_frame_ = false;        ///< the forced search consumed this frame's scan
    bool late_forced_done_ = false;              ///< the one forced lost-branch search at adoption has run
    void run_late_recall_search(const std::vector<Eigen::Vector3f>& lidar_points);
+   // ── RelocMode = "rivals": the adoption fit is the last M keyframes jointly (spec sec 6; multi_scan_fit.h) ──
+   void run_late_recall_fit(const std::vector<Eigen::Vector3f>& lidar_points);
+   struct LateKeyframe { Eigen::Vector3f pose; std::vector<Eigen::Vector2f> pts; };   ///< tracker pose (current frame) + subsampled scan
+   std::deque<LateKeyframe> late_ring_;           ///< localiser thread; cleared by seed_reloc_prior (its pose jump breaks relative poses)
+   Eigen::Vector3f late_ref_pose_ = Eigen::Vector3f::Zero();   ///< the pose the prior mean belongs to: the tracker pose at the ring's first frame
+   bool late_ref_valid_ = false;
+   struct LateFit { rc::reloc::Mode mode; Eigen::Vector3f submit_pose; };
+   std::future<LateFit> late_fit_;                ///< one-off worker job (deep-copied inputs, no DSR); valid() = in flight
    void accumulate_late_evidence(float s, float novelty);      ///< one scan's LLR into late_log_odds_ (localiser thread only)
    rc::reloc::Runtime rt_;                      ///< Task R1/R1b relocalisation runtime (reloc_runtime.h)
    std::atomic<bool> pose_undecided_{false};

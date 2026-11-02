@@ -819,6 +819,8 @@ namespace rc
         { std::scoped_lock lk(late_prior_mutex_); late_prior_ = modes; }
         late_log_odds_ = std::isfinite(prior_log_odds) ? prior_log_odds : 0.0;
         late_forced_done_ = false;
+        if (late_fit_.valid()) { late_fit_.wait(); late_fit_ = {}; }   // a stale job belongs to the previous proposal
+        late_ring_.clear(); late_ref_valid_ = false;   // the commit below moves the pose: relative poses across it are meaningless
         late_verdict_.store(static_cast<int>(modes.empty() ? LateVerdict::None : LateVerdict::Pending), std::memory_order_release);
         late_pending_.store(not modes.empty(), std::memory_order_release);
         belief_reset_requested_.store(true, std::memory_order_relaxed);
@@ -949,6 +951,7 @@ namespace rc
     // forces a search, a belief reset or a mismatch again.
     void RoomConcept::run_late_recall_search(const std::vector<Eigen::Vector3f>& lidar_points)
     {
+        if (rivals_mode()) { run_late_recall_fit(lidar_points); return; }   // multi-scan fit (room_concept_reloc_late_fit.cpp)
         std::vector<rc::reloc::PriorMode> prior;
         { std::scoped_lock lk(late_prior_mutex_); prior = late_prior_; }
         if (prior.empty() or model_ == nullptr or not model_->has_state())
