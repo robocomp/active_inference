@@ -387,6 +387,13 @@ def imagined():
         return None
 
 
+def _wrap_title(text, width=44):
+    """A two-column figure gives each panel half the width: a long caption is wrapped onto lines instead of running into
+    the neighbouring panel's title (live 2026-11-02: the ZED and top-view titles overlapped and were cut off)."""
+    import textwrap
+    return textwrap.fill(str(text), width=width)
+
+
 def draw_imagined_zed(ax, im=None):
     """Per-pixel visible frequency (red) and occluded frequency (green) of the imagined ZED view over the samples; the
     pixels occluded in any sample are hatched, and the frame border is drawn."""
@@ -411,7 +418,7 @@ def draw_imagined_zed(ax, im=None):
     ax.add_patch(Rectangle((0, 0), w, h, fill=False, edgecolor="black", linewidth=1.5))
     ax.set_xlim(0, w)
     ax.set_ylim(h, 0)
-    ax.set_title(getattr(im, "caption", "") or "imagined view", fontsize=8)
+    ax.set_title(_wrap_title(getattr(im, "caption", "") or "imagined view"), fontsize=8)
     return ax
 
 
@@ -477,7 +484,7 @@ def draw_imagined_lidar(ax_top, ax_sides, im=None):
         for b in s.parts:
             ax_top.plot([b.cx], [b.cy], marker="+", color="black", markersize=4, alpha=0.4)
     mc = im.mc
-    ax_top.set_title(f"{im.caption}: P(notice) {mc.p_notice_mean:.2f}, P(recognise) {mc.p_recognise_mean:.2f}", fontsize=8)
+    ax_top.set_title(_wrap_title(f"{im.caption}: P(notice) {mc.p_notice_mean:.2f}, P(recognise) {mc.p_recognise_mean:.2f}"), fontsize=8)
     ax_top.set_aspect("equal", adjustable="datalim")
     ax_top.set_xlabel("x (m)")
     ax_top.set_ylabel("y (m)")

@@ -84,6 +84,14 @@ def main():
     fig, ax = plt.subplots()
     rcanvas.draw_imagined_zed(ax)
     check("stale PNG is not drawn", len(ax.images) == 0)
+    # a long caption is wrapped, so the two panels' titles do not run into each other
+    with open("imagined.json", "w") as f:
+        json.dump(dict(IMAGINED, caption="8 imagined chairs wherever such things usually stand: P(notice) 0.00 ± 0.00"), f)
+    fig, (za, ta) = plt.subplots(1, 2)
+    rcanvas.draw_imagined_zed(za)
+    check("long ZED title is wrapped", "\n" in za.get_title() and all(len(x) <= 44 for x in za.get_title().split("\n")))
+    with open("imagined.json", "w") as f:
+        json.dump(IMAGINED, f)
     with open("imagined.json", "w") as f:
         f.write('{"version": 1, "cap')
     check("truncated imagined.json is None", rcanvas.imagined() is None)

@@ -244,6 +244,57 @@ int main()
         CHECK(not is_hypothetical(scene(true), "chair", "table_1")); // a chair exists: the old path evaluates the named instance
         CHECK(not is_hypothetical(scene(true), "chair", "chair_1"));
     }
+    // ---- the evaluator and the renderer agree on where the camera looks (live: chair in the ZED render, P 0.00 everywhere) ----
+    {
+        const auto s = scene(false);                      // robot at (1,2), faces +x
+        const auto vp = resolve_from(s, "");
+        CHECK(vp.has_value());
+        Hypothesis h; h.concept_ = "chair"; h.x = 2.5f; h.y = 2.0f; h.yaw = 0.0f;   // 1.5 m straight ahead
+        const auto r = evaluate(chair_card(), world_for(s, ""), h, *vp);
+        CHECK(r.p_notice > 0.5f and r.p_recognise > 0.5f);
+        CHECK(r.limit != Limit::OutOfView);
+        Hypothesis hb = h; hb.x = 1.0f; hb.y = 3.5f;      // 1.5 m to the LEFT of the robot (+y): outside the field of view
+        const auto rb = evaluate(chair_card(), world_for(s, ""), hb, *vp);
+        CHECK(rb.p_notice < 0.1f and rb.limit == Limit::OutOfView);
+        // the SAME out-of-view judgement for every heading: the label must not depend on the world bearing of the target
+        // (v_no_fov looked along world +x, so a target beyond +-86 deg of +x was never "out of view": limit None)
+        int n_heading = 0;
+        for (float rad = -3.0f; rad <= 3.0f; rad += 0.5f)
+            for (const float off : {-2.5f, -1.5f, -1.0f, 1.0f, 1.5f, 2.5f, 3.1f})   // beyond the +-30 deg half field of view
+            {
+                auto sr = s; sr.robot_yaw = rad; sr.robot_xy = Eigen::Vector2f(3.0f, 2.0f); sr.objects.clear(); sr.doors.clear();
+                const auto vr = resolve_from(sr, "");
+                Hypothesis ho; ho.concept_ = "chair"; ho.yaw = 0.0f;
+                ho.x = 3.0f + 1.5f * std::cos(*vr->yaw + off); ho.y = 2.0f + 1.5f * std::sin(*vr->yaw + off);
+                if (ho.x < 0.2f or ho.x > 5.8f or ho.y < 0.2f or ho.y > 3.8f) continue;   // keep it inside the 6x4 room
+                ++n_heading;
+                CHECK(evaluate(chair_card(), world_for(sr, ""), ho, *vr).limit == Limit::OutOfView);
+            }
+        CHECK(n_heading >= 30);
+    }
+    // ---- no room: imagine in free space in front of the robot; a named place still needs the room ----
+    {
+        auto s = scene(false);
+        s.room.clear(); s.polygon.clear(); s.doors.clear(); s.objects.clear(); s.robot_xy.reset();
+        ImagineRequest rq; rq.concept_ = "chair"; rq.n = 8;
+        const auto o = imagine_view(chair_card(), s, rq, 7, dir);
+        CHECK(o.drawn and not o.refusal);
+        CHECK(has(o.text, "in free space in front of me") and has(o.text, "I don't know which room I'm in") and has(o.text, "±"));
+        CHECK(not has(o.text, "Room height") and not has(o.text, "against a wall"));
+        const auto doc = QJsonDocument::fromJson(QByteArray::fromStdString(slurp(dir / "imagined.json"))).object();
+        CHECK(doc["samples"].toArray().size() == 8);
+        // the thing stands 2 m straight ahead, in view of the camera: it is noticed, not 0.00 from a wrong heading
+        CHECK(doc["mc"].toObject()["p_notice_mean"].toDouble() > 0.2);
+        ImagineRequest rw = rq; rw.where = "against the wall";
+        const auto r = imagine_view(chair_card(), s, rw, 7, dir);
+        CHECK(not r.drawn and r.refusal and r.text == kNoRoomRefusal);
+        // a refusal flag on the other refusal sites
+        Card nogen = chair_card(); nogen.generative.reset();
+        CHECK(imagine_view(nogen, scene(true), rq, 1, dir).refusal);
+        ImagineRequest rbad = rq; rbad.where = "the moon";
+        CHECK(imagine_view(chair_card(), scene(true), rbad, 1, dir).refusal);
+        CHECK(not imagine_view(chair_card(), scene(true), rq, 1, dir).refusal);
+    }
     // ---- hypothetical can_see ----
     {
         const auto s = scene(false);

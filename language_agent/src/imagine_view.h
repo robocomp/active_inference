@@ -311,28 +311,54 @@ struct ImagineFacts
                                        door_assumptions(s));
 }
 
+/// The refusal for a place that needs the room when there is none. A refusal is a limitation the person must hear as it is
+/// (ImagineOutcome::refusal), never a model paraphrase.
+inline constexpr const char* kNoRoomRefusal = "I do not know which room I am in, so I cannot imagine it here.";
+/// How far in front of the robot a room-less imagined thing stands (the cards carry no typical viewing distance).
+inline constexpr float kFreeSpaceDistanceM = 2.0f;
+
 struct ImagineOutcome
 {
     std::string text;
+    bool refusal = false;   ///< `text` is a refusal / limitation: the robot's reply is this text unchanged
     bool drawn = false;     ///< the canvas data were written: the caller draws stock/imagined.py
     std::string caption;
 };
 
 /// The whole imagine_view path. Writes <run_dir>/imagined.json + imagined_zed.png when it placed anything.
-[[nodiscard]] inline ImagineOutcome imagine_view(const rc::card::Card& card, const SeeScene& s, const ImagineRequest& rq,
+[[nodiscard]] inline ImagineOutcome imagine_view(const rc::card::Card& card, const SeeScene& scene_in, const ImagineRequest& rq,
                                                  std::uint64_t seed, const std::filesystem::path& run_dir)
 {
     ImagineOutcome out;
+    // No current room and no named place ("how do you imagine a chair?" needs no room): imagine it in free space in front
+    // of the robot, no walls, no doors. The robot is the origin of its own frame, heading straight ahead. A named place
+    // (a wall, a door, an object) does need the room: that refusal keeps its text.
+    const bool free_space = scene_in.room.empty() and rq.where.empty();
+    SeeScene s = scene_in;
+    if (scene_in.room.empty() and not rq.where.empty()) { out.text = kNoRoomRefusal; out.refusal = true; return out; }
+    if (free_space)
+    {
+        s.robot_xy = Eigen::Vector2f(0.0f, 0.0f);
+        s.robot_yaw = 0.0f;
+        s.polygon.clear(); s.doors.clear(); s.objects.clear();
+        s.room_height_known = true;
+    }
     const std::string cls = canonical_concept(rq.concept_);
     if (not card.generative)
     {
         out.text = std::format("My model of {} does not say what one looks like, so I cannot imagine it.", see_detail::plural(cls));
+        out.refusal = true;
         return out;
     }
-    const auto place = resolve_place(s, cls, rq.where);
-    if (not place.has_value()) { out.text = place.error(); return out; }
+    auto place = resolve_place(s, cls, rq.where);
+    if (not place.has_value()) { out.text = place.error(); out.refusal = true; return out; }
     const auto vp = resolve_from(s, rq.from);
-    if (not vp.has_value()) { out.text = vp.error(); return out; }
+    if (not vp.has_value()) { out.text = vp.error(); out.refusal = true; return out; }
+    if (free_space)
+    {
+        place->ctx.at = vp->xy + kFreeSpaceDistanceM * Eigen::Vector2f(std::cos(*vp->yaw), std::sin(*vp->yaw));
+        place->words = "in free space in front of me";
+    }
     const std::string sensor = lower_ascii(rq.sensor);
     const bool want_zed = sensor != "lidar", want_lidar = sensor != "zed";
     const int n = std::clamp(rq.n, 1, kMaxDisplaySamples);
@@ -368,6 +394,7 @@ struct ImagineOutcome
     }
     if (not s.room_height_known) set.notes.push_back(std::format("room height {:.1f} m assumed", s.room_height));
     out.text = answer_imagine_view(f, mc);
+    if (free_space) out.text += " (Imagined in front of me; I don't know which room I'm in.)";
     if (f.shown == 0) return out;
 
     out.caption = std::format("{} imagined {} {}: P(notice) {}, P(recognise) {}", f.shown, f.shown == 1 ? cls : see_detail::plural(cls),
