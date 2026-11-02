@@ -24,6 +24,7 @@ collect(){
   cp $R/tmp/reloc_doorway.csv $R/tmp/reloc_doorway_points.csv $R/tmp/proto_room.csv $R/tmp/door_filter.csv $R/tmp/promotion_select.csv $R/tmp/map_layout.csv $R/tmp/layout_refine.csv \
      $R/tmp/slam_shadow.csv $R/tmp/refine_input.bin $OUT/ 2>/dev/null
   cp $R/tmp/sdf_localizer/gt_error.csv $OUT/ 2>/dev/null
+  cp $(ls -t $R/etc/scan_tape_*.bin 2>/dev/null | head -1) $OUT/ 2>/dev/null   # the relocaliser's scan tape (see room_concept/src/scan_tape.h)
   [[ -d $R/tmp/snapshots ]] && cp -r $R/tmp/snapshots $OUT/
   cp $(ls -t $R/tmp/agent_events_*.jsonl | head -1) $OUT/events.jsonl 2>/dev/null
   cp $B/door_concept/etc/door_events.csv $B/door_concept/etc/door_existence_log.csv $B/door_concept/etc/ai2_log.csv $B/door_concept/etc/ai2_log_phi.csv $B/door_concept/etc/anchor_log.csv $B/door_concept/etc/anchor_frames.bin $OUT/ 2>/dev/null

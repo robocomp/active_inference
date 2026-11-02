@@ -1135,6 +1135,10 @@ BoundaryMuQualityThreshold      = 0.084
 #                fleet expects of a room frame). The first pose is the origin until then.
 #                After closure the walls stay variables (their precision only grows) and a new wall
 #                can still be born by model comparison — there is no second gate inside this mode.
+[ScanTape]
+Enabled = true                        # 2026-11-02: record what the relocaliser sees (pose, odometry increment, scan, room polygon + doorways) so an old and a new relocaliser can be replayed offline; ~2 k points/frame at the scan rate
+Path = "etc/scan_tape_{ts}.bin"       # {ts} = start time (epoch s); estimation_scripts/scripts/run_crossing.sh collects these
+
 [RoomShape]
 # ── THE BOX LAYOUT SIDECAR ───────────────────────────────────────────────────────────────────
 # The room as a UNION OF AXIS-ALIGNED BOXES (src/room_boxes.h). Manhattan, closure and simple

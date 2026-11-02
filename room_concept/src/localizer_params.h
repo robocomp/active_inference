@@ -218,6 +218,8 @@ namespace rc::loc
         int   reloc_track_memory_frames= 200;    // forgetting timescale of the learnt tracking emission
         float reloc_lost_s_min         = 0.01f;  // m — support of the lost emission (log-uniform)
         float reloc_lost_s_max         = 5.0f;   // m
+        bool        scan_tape_enabled = false;   // ScanTape.Enabled: record what the relocaliser sees (scan_tape.h)
+        std::string scan_tape_path    = "etc/scan_tape_{ts}.bin";   // {ts} = start time, epoch s
         bool  reloc_enabled            = true;   // false = relocalisation never moves the pose (lost, mode_switch, seed_validation)
         int orientation_search_max_samples = 100;      // Lidar subsample for orientation candidates
 

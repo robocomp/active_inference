@@ -133,6 +133,12 @@ namespace rc
         return predictor_delta_;
     }
 
+    Eigen::Matrix3f RoomConcept::get_predictor_cov() const
+    {
+        std::lock_guard lock(motion_ingress_debug_mutex_);
+        return predictor_cov_;
+    }
+
     void RoomConcept::push_command(Command cmd)
     {
         {

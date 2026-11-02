@@ -360,6 +360,7 @@ namespace rc
         {   // mirror for the viewer, same lock as the ingress debug
             std::lock_guard lock(motion_ingress_debug_mutex_);
             predictor_delta_ = selection.selected_prior.delta_pose;
+            predictor_cov_   = selection.selected_prior.covariance_eigen;
         }
         last_motion_prior_source_ = selection.source;
         return selection;

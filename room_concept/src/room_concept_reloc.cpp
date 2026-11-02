@@ -393,6 +393,56 @@ namespace rc
         reloc_epoch_.fetch_add(1, std::memory_order_relaxed);   // release the publisher's clamp for this jump
     }
 
+    // One tape frame per relocalisation_step call: the pose update() just committed, the odometry increment + covariance the
+    // PREDICT step used (not differences of estimated poses), and the scan as the relocaliser receives it. The room polygon +
+    // doorway apertures go in as a record whenever they change, ahead of the first frame that uses them.
+    void RoomConcept::record_scan_tape(const UpdateResult& res, const std::vector<Eigen::Vector3f>& lidar_points)
+    {
+        if (scan_tape_failed_ or not res.ok) return;
+        if (not scan_tape_)
+        {
+            std::string path = params.scan_tape_path;
+            if (const auto k = path.find("{ts}"); k != std::string::npos)
+                path.replace(k, 4, std::to_string(std::chrono::duration_cast<std::chrono::seconds>(
+                                                      std::chrono::system_clock::now().time_since_epoch()).count()));
+            scan_tape_ = std::make_unique<rc::tape::Writer>(path);
+            if (not scan_tape_->is_open())
+            {
+                qWarning() << "[ScanTape] cannot open" << QString::fromStdString(path) << "- tape disabled";
+                scan_tape_.reset(); scan_tape_failed_ = true; return;
+            }
+            qInfo() << "[ScanTape] recording to" << QString::fromStdString(path);
+        }
+        auto poly = current_room_polygon();
+        std::vector<rc::tape::Aperture> aps;
+        for (const auto& d : door_apertures())
+            aps.push_back({d.a, d.b, d.n_out, d.p_open, d.prior_closed, d.half_depth, d.recess, d.sigma_along, d.name});
+        // Only the geometry decides a new record: p_open drifts every frame and would write one each time.
+        const auto geom_same = [](const auto& x, const auto& y)
+        {
+            return x.size() == y.size() and std::ranges::equal(x, y, [](const auto& p, const auto& q)
+                                                                { return p.a == q.a and p.b == q.b and p.name == q.name; });
+        };
+        if (poly != tape_poly_ or not geom_same(aps, tape_apertures_))
+        {
+            if (poly != tape_poly_ or tape_room_.empty()) tape_room_ = room_name_fn_ ? room_name_fn_() : std::string{};
+            tape_poly_ = poly;
+            tape_apertures_ = aps;
+            scan_tape_->write_room({tape_room_, std::move(poly), std::move(aps)});
+        }
+        rc::tape::Frame fr;
+        fr.t_ms = res.timestamp_ms;
+        fr.pose = {res.robot_pose.translation().x(), res.robot_pose.translation().y(),
+                   std::atan2(res.robot_pose.linear()(1, 0), res.robot_pose.linear()(0, 0))};
+        fr.cov = res.covariance;
+        fr.odo_delta = get_predictor_delta();
+        fr.odo_cov = get_predictor_cov();
+        fr.room = tape_room_;
+        fr.pts_robot.reserve(lidar_points.size());
+        for (const auto& q : lidar_points) fr.pts_robot.emplace_back(q.x(), q.y());
+        scan_tape_->write(fr);
+    }
+
     void RoomConcept::relocalisation_step(const UpdateResult& res, const std::vector<Eigen::Vector3f>& lidar_points)
     {
         // ONE mechanism (see Params, "Relocalisation"; reloc_search.h). It replaces three that fought:
@@ -414,6 +464,7 @@ namespace rc
         // map_ready also keeps the older contract: entering SEARCHING for a proto-room clears it, which is how the
         // agent LEAVES relocalisation, and after the room is retired nothing here may write the robot→room pose
         // again (mark_room_rt_not_current's ring must stay the edge's last write).
+        if (params.scan_tape_enabled) record_scan_tape(res, lidar_points);
         if (belief_reset_requested_.exchange(false, std::memory_order_relaxed))
         {
             reset_lost_belief();

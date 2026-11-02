@@ -72,6 +72,7 @@ public:
           room_concept_(&room_concept), epistemic_(&epistemic),
           trigger_layout_(trigger_layout ? std::move(trigger_layout) : [] {})
     {
+        room_concept.set_room_name_provider([this] { return room_node_name(); });   // the scan tape's room label
         // ★TWO SWITCHES GUARDED THIS FEATURE AND ONLY ONE WAS WIRED. RoomConcept.CalibPivotEnabled
         // gates the active half here, but CalibChannel has its OWN `enabled` -- deliberately, as a
         // second safety catch on something that had never driven a robot -- and nothing ever set it

@@ -21,6 +21,7 @@
 #include <optional>
 #include <string>
 #include <fstream>
+#include <chrono>
 #include <functional>
 #include <random>
 
@@ -31,6 +32,7 @@
 #include "room_model.h"
 #include "corner_detector.h"
 #include "wall_map.h"
+#include "scan_tape.h"
 #include "room_boxes_channel.h"   // the box layout sidecar; it reaches into nothing here
 #include "rerun_logger.h"
 #include "object_anchor_types.h"
@@ -204,6 +206,11 @@ public:
     /// to the optimiser. Mirrored under the motion-ingress lock: written on the localiser thread,
     /// read by the viewer on the main one.
     Eigen::Vector3f get_predictor_delta() const;
+    /// The covariance the predictor attached to that same increment (same lock, same frame).
+    Eigen::Matrix3f get_predictor_cov() const;
+    /// The scan tape's room label: the scene graph's current room node name. Called by the tape (compute thread) only
+    /// when the room polygon changes, never per frame.
+    void set_room_name_provider(std::function<std::string()> fn) { room_name_fn_ = std::move(fn); }
     /// The MEASURED odometry increment used for the last fusion — [dx, dy, dtheta] in the body frame,
     /// with `valid`/`fresh` saying whether there was one at all. Exposed for the calibration channel,
     /// which regresses this against the localiser posterior over the same interval; it is the only
@@ -1282,6 +1289,15 @@ private:
    OdometryPrior      last_measured_prior_; // saved by apply_dual_prior_fusion for logging
     OdometryPrior      last_selected_prior_;
    Eigen::Vector3f    predictor_delta_ = Eigen::Vector3f::Zero();  // viewer mirror; see get_predictor_delta()
+   Eigen::Matrix3f    predictor_cov_   = Eigen::Matrix3f::Zero();  // its covariance; see get_predictor_cov()
+   // ── scan tape (scan_tape.h): touched only by relocalisation_step, on the compute thread ──
+   void record_scan_tape(const UpdateResult& res, const std::vector<Eigen::Vector3f>& lidar_points);
+   std::unique_ptr<rc::tape::Writer> scan_tape_;
+   bool                              scan_tape_failed_ = false;
+   std::function<std::string()>      room_name_fn_;
+   std::vector<Eigen::Vector2f>      tape_poly_;
+   std::vector<rc::tape::Aperture>   tape_apertures_;
+   std::string                       tape_room_;
     MotionPriorSource  last_motion_prior_source_ = MotionPriorSource::None;
    Eigen::Matrix3f    last_cmd_cov_ = Eigen::Matrix3f::Identity();
     bool               last_command_prior_fresh_ = false;
