@@ -108,6 +108,53 @@ level), not one per affordance.
    offers the affordance.
 2. The AIF cross servo stays for now; C1 is a proposal the user will review separately. The contract's other
    requirements apply to the existing chain.
-3. The "level": ONE probability that means "good enough to start this action", used by every affordance's precondition
-   and completion (today kApproachCompleteProb) — so there is one decision constant in the whole crossing, not one per
-   step. Pending the user's yes/no.
+3. YES (2026-11-02): ONE level L for every precondition and completion, always written "P(what this step needs) ≥ L":
+   open done = P(open) ≥ L (was 0.70), close done = P(shut) ≥ L (was P(open) ≤ 0.30), cross start = P(open)·P(run
+   clear) ≥ L. The end of one step is then exactly the start of the next (today open could be "done" at 0.70 while cross
+   could not start below ~0.9 — a seam).
+
+## C1 — the proposal in detail (for the user's review; NOT adopted)
+
+### What the code already has
+The controller already contains a single motion authority: the **local look-ahead policy** (`[Policy] Enabled = true`,
+`controller_policy_drive.cpp`, `local_policy/`). Its own header: "ONE authority drives the base … none of [escape,
+returns backoff, anchor servo + jamb guards + make-room, …] run". It has, ready:
+- `contact.h` — rollouts of (v, w) with the REAL swept body and the probability of touching nothing, against the live
+  LiDAR surfaces (with their measurement σ);
+- `cost_to_go.h` — geodesic distance-to-goal over free space, with trap memory;
+- `doorway_corridor.h`, `door_leaf.h` — the measured doorway and the leaf as a KNOWN obstacle from door_concept's leaf
+  hypotheses (hinge × swing, φ, σ_φ);
+- `cross_through.h` — "through" as a posterior;
+- `goal_adapter.h` — the one place controller and policy types meet.
+
+### The problem it would solve
+In parallel, the door passage still runs its own motion pieces: the approach law (door_approach_law.h), the AIF cross
+servo (door_cross_aif.h, step_anchor_cross), the drive-in, the "route dropped / doorway driven on the anchor" switch,
+MAKING ROOM / escape. warm28–33 logs show BOTH kinds of output ([approach], [cross-aif], MAKING ROOM, ESCAPING) during
+crossings. So today there are effectively two drivers with hand-offs between them — the seams of §Why.
+
+### C1 = one goal, one driver
+1. door_concept's affordances give GOALS, never motions: `approach` → the target surface (§3); `cross` → the through
+   region beyond the plane (chosen toward the next step, C6).
+2. The policy (Navigator) is the ONLY thing that turns a goal into (v, w), every cycle, from the current pose: swept-body
+   contact probability against live LiDAR + the leaf obstacle (D5, inflated by σ_φ and by the side probability) +
+   cost-to-go through the gap. Heading, "no mouth", recovery after a push all come from that one evaluation.
+3. The door passage keeps the PROTOCOL only: which goal to ask for, when the contract's completion holds (perceptual),
+   claim/consume of affordances, the exit fact.
+4. Delete (not disable) the door-specific motion: approach law, AIF cross servo, drive-in, anchor-drive switch,
+   door-specific MAKING ROOM/escape.
+
+### What it costs / risks
+- A 0.88 m gap leaves ~0.10 m per side: the policy's contact probability must resolve that with the live surfaces' σ
+  (contact.h models it). If its σ is too pessimistic it will call the door impassable — must be measured.
+- The policy's rollouts at 20 Hz near the door (more surface samples): measure the per-cycle cost (rates first).
+- The servo was built because something failed without it (10-18/10-21 doorway work, gap steering); the bench must
+  include those cases.
+
+### How to decide (no live run until the bench says yes)
+1. AUDIT (logs only, no code): in warm32/33, cycle by cycle, which component wrote the base command in each phase.
+2. BENCH A/B (tests/test_policy_scenarios.cpp is the policy's closed-loop harness; test_door_cross_aif the servo's): the
+   same doorways and start states (80° off at 2 m, stale arrival 7 m out, leaf beside, shut door, door closing at s=0,
+   pushed 0.5 m, 0.88 and 1.0 m gaps, anchor noise 2–5 cm): policy-only vs today's chain — success, contacts, time,
+   min clearance, per-cycle cost.
+3. If policy-only wins: switch, then delete the door motion pieces in the same change.
