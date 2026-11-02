@@ -39,6 +39,8 @@
 #include "passage_harvest.h"
 #include "passage_live.h"
 #include "topology_view.h"
+#include "topology_publish.h"
+#include <chrono>
 #include "room_forget.h"
 
 #include <memory>
@@ -224,6 +226,15 @@ private:
 	std::optional<std::string> forget_blocker(const std::string &mem_room) const;
 	/// Remove `mem_room` from memory (src/room_forget.h) and persist at once. Re-checks the blocker.
 	void forget_memory_room(const std::string &mem_room);
+
+	// ── ltsm_topology summary node (src/topology_publish.h) ─────────────────────────────────────
+	// Memory lives on domain 2, which language_agent cannot read, so rooms + passages are summarised onto the LIVE graph.
+	// Rebuilt after every memory write (topology_dirty_, set where store->save is called) and every 2 s
+	// for live_door / crossing churn; the node is written only when the JSON differs. Main thread (compute()).
+	std::unique_ptr<ltsm::TopologyPublisher> topo_pub_;
+	bool topology_dirty_ = true;
+	std::chrono::steady_clock::time_point topo_last_{};
+	void step_topology_publish();
 
 	// ── Live passage (src/passage_live.h) ─────────────────────────────────────────────────────
 	// The proto-room's entry door matched to the current room's door by one live `passage_<n>`.

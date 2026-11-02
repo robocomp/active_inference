@@ -1,3 +1,4 @@
+#include <unordered_set>
 #include "scene_processor.h"
 #include "../../common/room_resolve/room_resolve.h"   // rc::room::current_room (proto-aware, deterministic)
 
@@ -565,9 +566,12 @@ std::optional<GraphObjectBox> SceneProcessor::build_graph_object_box(const DSR::
     const auto height_opt = graph_->get_attrib_by_name<height_m_att>(node);
     if (!width_opt.has_value() || !depth_opt.has_value() || !height_opt.has_value())
     {
-        std::println("[build_graph_object_box] node='{}' type='{}': missing dimensions (w={} d={} h={})",
-                     node.name(), node.type(),
-                     width_opt.has_value(), depth_opt.has_value(), height_opt.has_value());
+        // Once per node name: recall_room_*/passage_* metaconcepts are not boxes and used to log ~31x/s.
+        static std::unordered_set<std::string> reported;
+        if (reported.insert(node.name()).second)
+            std::println("[build_graph_object_box] node='{}' type='{}': missing dimensions (w={} d={} h={})",
+                         node.name(), node.type(),
+                         width_opt.has_value(), depth_opt.has_value(), height_opt.has_value());
         return std::nullopt;
     }
 
@@ -749,6 +753,10 @@ std::vector<GraphObjectBox> SceneProcessor::get_graph_object_boxes(const std::st
     graph_boxes.reserve(object_nodes.size());
     for (const auto& node : object_nodes)
     {
+        // Not a box (recall_room_*, passage_* ...): skip before any RT query.
+        if (not node.attrs().contains("width_m") or not node.attrs().contains("depth_m")
+            or not node.attrs().contains("height_m"))
+            continue;
         // Chairs with NO display mesh stay mesh-only (fitted mesh pass) — skip them here so the pre-migration
         // behaviour is preserved. A chair that DOES publish a mesh_path is boxed like any other object so the
         // box pass renders its scaled display template (the mesh pass then suppresses its fitted carcass).

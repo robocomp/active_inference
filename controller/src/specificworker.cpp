@@ -539,6 +539,10 @@ void SpecificWorker::initialize()
 			// progress all survive, so un-pausing resumes exactly where it stopped. The base output stays
 			// ARMED and keeps receiving zeros — a paused robot is still under control, and a base watchdog
 			// should keep hearing from us. That is precisely the difference from Stop.
+			// ★ With a mission running, Pause IS the interpreter's freeze (same as the chat word), so the panel
+			// and chat cannot disagree; with none it stays the plain base hold it always was.
+			if (paused) interpreter_.pause(current_time_ms());
+			else interpreter_.unpause(current_time_ms());
 			paused_ = paused;
 			if (paused_)
 			{
@@ -617,10 +621,10 @@ void SpecificWorker::initialize()
 					if (ok and n > 0 and n <= 200) { obstacle_tracker_.arm_z_dump(n); std::println("[remote] ZDUMP {} sweeps", n); }
 					else std::println("[remote] zdump refused: '{}' (expected zdump <1..200>)", c.toStdString());
 				}
-				else if (c == "cancel" or c == "resume")
+				else if (c == "cancel" or c == "resume" or c == "pause" or c == "unpause")
 					enqueue_command([this, cmd = c.toStdString()]() { run_mission_command(cmd, "remote"); });
 				else std::println("[remote] ignored '{}' (expected run | stop | cross <door> | move <m> | turn <deg> | mission <text> | "
-				                  "uncross | cancel | resume | probe <v> <w> <s> | zdump <n>, or a mission script)", c.toStdString());
+				                  "uncross | cancel | resume | pause | unpause | probe <v> <w> <s> | zdump <n>, or a mission script)", c.toStdString());
 			}
 		});
 		t->start(300);
@@ -1613,7 +1617,7 @@ void SpecificWorker::control_loop()
 			for (auto &command : commands)
 				if (command) command();
 		}
-		// chat_agent's intention node: a new command runs here, between cycles, like every button press above.
+		// language_agent's intention node: a new command runs here, between cycles, like every button press above.
 		service_mission();
 		service_chat_inbox();
 		service_journal();   // the episodic journal: step transitions, command ends, drive mode → em_journal
@@ -2005,7 +2009,7 @@ void SpecificWorker::enqueue_command(std::function<void()> command)
 
 /////////////////////////////////////////////////////////////////////////////////////////////////////////
 // MISSION COMMANDS — the (simple) natural-language missions of mode "Mission". One grammar for the panel's text box,
-// the remote file and chat_agent's intention node. Understood so far:
+// the remote file and language_agent's intention node. Understood so far:
 //   cross door          the nearest door of the current room
 //   cross [the] door_N  that door (it must exist in the graph now)
 //   approach <object> [from <side>]   the object's approach affordance, from one of the sides it offers; then hold
@@ -2017,7 +2021,7 @@ void SpecificWorker::enqueue_command(std::function<void()> command)
 //   resume              end the mission's current `wait` (the person says "I'm here")
 // Any other command REPLACES a running mission, which reports aborted|superseded (doc §7.5).
 // Runs on the control thread (enqueue_command / the chat inbox; the remote timer enqueues every command).
-// Returns what it decided, so a caller that must report back (chat_agent) does not have to parse the log.
+// Returns what it decided, so a caller that must report back (language_agent) does not have to parse the log.
 // The episodic journal records what was accepted (specificworker_mission.cpp, journal_command).
 SpecificWorker::MissionResult SpecificWorker::run_mission_command(const std::string &text, const char *source)
 {
@@ -2041,6 +2045,24 @@ SpecificWorker::MissionResult SpecificWorker::dispatch_mission_command(const std
 		const bool ended = interpreter_.resume(current_time_ms());
 		std::println("[{}] mission 'resume' -> {}", source, ended ? "the wait ended" : "nothing was waiting");
 		return {.accepted = ended, .kind = "resume", .reason = ended ? "" : "the mission is not waiting"};
+	}
+	if (t == "pause")
+	{
+		const bool ok = interpreter_.pause(current_time_ms());
+		if (ok)
+		{
+			paused_ = true;   // the same hold as the panel's Pause: route kept, base armed, zeros sent
+			stop_robot();
+		}
+		std::println("[{}] mission 'pause' -> {}", source, ok ? "frozen, base held" : "nothing to pause");
+		return {.accepted = ok, .kind = "pause", .reason = ok ? "" : "nothing to pause (no running mission, or already paused)"};
+	}
+	if (t == "unpause")
+	{
+		const bool ok = interpreter_.unpause(current_time_ms());
+		if (ok) paused_ = false;
+		std::println("[{}] mission 'unpause' -> {}", source, ok ? "thawed" : "not paused");
+		return {.accepted = ok, .kind = "unpause", .reason = ok ? "" : "the mission is not paused"};
 	}
 	if (t == "stop")
 	{
@@ -2239,7 +2261,7 @@ SpecificWorker::MissionResult SpecificWorker::start_relative_motion(const std::s
 	session_.mission().set_click_target(std::nullopt);
 	clear_manual_target();
 	// ★A RELATIVE MOVE IS A "GO", like a click: it arms the base output (Stop disarmed it). Small moves are sent
-	// by chat_agent without a confirmation card, so this is what lets "advance a bit" work after a stop.
+	// by language_agent without a confirmation card, so this is what lets "advance a bit" work after a stop.
 	// ★ Task 8: NOT with the local policy driving (refused above when disarmed) — there is nothing to arm here then.
 	if (not session_.policy_enabled())
 	{
@@ -2284,7 +2306,7 @@ void SpecificWorker::abort_all(const char *source)
 	             "Run starts '{}' fresh.", session_.mission().selected_name());
 }
 
-// chat_agent's intention node (chat_inbox.h). Called every control-loop pass, throttled to 10 Hz: run a new command
+// language_agent's intention node (chat_inbox.h). Called every control-loop pass, throttled to 10 Hz: run a new command
 // through the same grammar as the panel and the remote file, then mirror how it is going back into the node.
 // Here rather than in compute() on purpose: compute() does not run while the LiDAR stream is stalled, and `stop`
 // must still be heard then.
@@ -2323,7 +2345,7 @@ void SpecificWorker::service_chat_inbox()
 		{
 			std::println("[chat] command '{}' (stamp {})", cmd->text, cmd->stamp_ms);
 			const auto r = run_mission_command(cmd->text, "chat");
-			if (r.kind == "cancel" or r.kind == "resume")
+			if (r.kind == "cancel" or r.kind == "resume" or r.kind == "pause" or r.kind == "unpause")
 			{
 				// About the mission, not a new one: the report on this stamp is the mission's own.
 				if (r.accepted) chat_tracked_ = {.kind = K::Mission, .mission_serial = interpreter_.serial()};

@@ -117,7 +117,7 @@ zed_thread_period_ms = 4
 # Second YOLO-pose model on the same RGB frame → BODY_18 3D skeletons on the 'skeleton' DSR node
 # (camera frame, metres) consumed by human_concept. Default OFF — set enabled=true once the ONNX
 # model exists. Export with: yolo export model=yolo26m-pose.pt format=onnx  (gives yolo26m-pose.onnx).
-enabled = true
+enabled = false   # OFF 2026-11-01 (user: agents at nominal rate): pose has no consumer in the door/room tours (human_concept only); 4.8 ms/frame of the ZED worker + a CUDA session
 model_path = "models/yolo26/yolo26l-pose.onnx"
 conf_thresh = 0.30          # person-detection confidence floor
 kp_conf_min = 0.30          # per-joint floor; below this a keypoint is dropped (NaN)
@@ -275,7 +275,7 @@ yolo_strips_per_frame = 1
 # consumer already refuses to fit it.
 # Model/thresholds are shared with [Semantic] (the ZED's ADE20K block); this is a SECOND session on the
 # ricoh worker, so watch cpu on the panel after enabling.
-semantic_enabled      = true    # ON 2026-08-16 — cabinet/hood get a peripheral channel for the first time
+semantic_enabled      = false   # OFF 2026-11-01 (user: agents at nominal rate): 6.5 ms/frame + a CUDA session; its consumers are hood/cabinet (not in the tours). ON 2026-08-16 for cabinet/hood
                                 # Classes resolve from [Semantic].accepted_labels, which has both.
 semantic_decimation   = 1       # run every ricoh frame; raise if the second session costs too much
 yolo_strip_overlap_px = 200   # circular-pad margin so a seam-straddling object survives whole. 80→200 so a
@@ -316,7 +316,7 @@ azimuth_tune_deg      = 0.0   # tune in DEGREES: extra yaw on room_T_ricoh over 
 # panorama. See src/depth_processor.h.
 
 [RicohDepth]
-enabled             = true    # ON 2026-08-02 (user) — restart, then use the popup's "Depth" toggle
+enabled             = false   # OFF 2026-11-01 (user: agents at nominal rate): no consumer (overlay + depth calibration only; 360 masks take LiDAR depth); 6 strips/frame
 model_path          = "models/yolo26/yolo26l-depth.onnx"
 input_size          = 768     # exported imgsz; changing it without re-exporting will letterbox wrongly
 use_gpu             = true

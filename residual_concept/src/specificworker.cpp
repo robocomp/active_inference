@@ -12,6 +12,9 @@
 #include "../../common/room_transition/exit_fact.h"   // link 5: our grid under an archived room
 #include "../../common/config_report/config_read.h"   // rc::cfg::Reader (SHARED)
 #include "../../common/room_resolve/room_resolve.h"   // rc::room::current_room (proto-aware, deterministic)
+#include "residual_card.h"   // make_card(): this agent's perception card
+#include "../../common/perception_card/card_io.h"   // write_card_file
+#include "../../common/media_transport/media_transport.h"   // sensor_model_from_graph, max_ring_gap_rad
 #include "../../common/interaction_anchor/interaction_anchor.h"   // rc::interaction::is_anchor (header-inline: no link change)
 
 #include <cstdlib>
@@ -125,6 +128,31 @@ void SpecificWorker::terminal_shutdown()
     std::_Exit(EXIT_SUCCESS);
 }
 
+// Beam spacing is a property of the sensor, so take it from the model the driver advertised when there is one
+// and keep the config value (a datasheet constant) otherwise. The occupancy grid reads cfg_ at every sweep
+// (set_sensor_beam_spacing), so updating cfg_ is enough. "Nothing thinner than spacing*t can hide between
+// rings" is about the WIDEST gap, hence max_ring_gap_rad.
+void SpecificWorker::refresh_beam_spacing()
+{
+    const auto beam_spacing = [this](const char* node, float& spacing)
+    {
+        const auto model = rc::media::sensor_model_from_graph(*G, node);
+        const auto s = model ? rc::media::max_ring_gap_rad(*model) : std::nullopt;
+        if (s.has_value()) spacing = *s;
+        std::print("[LidarModel] {} beam spacing {:.4f} rad from {}\n", node, spacing, s.has_value() ? "descriptor" : "config");
+    };
+    beam_spacing("helios", cfg_.helios_beam_spacing_rad);
+    beam_spacing("bpearl", cfg_.bpearl_beam_spacing_rad);
+    write_perception_card();   // the LiDAR model can arrive late: rewrite the card when it does
+}
+
+// Perception card: what this agent's coverage model uses, from the config it runs with (cwd = the agent dir).
+void SpecificWorker::write_perception_card()
+{
+    rc::card::write_card_file(std::filesystem::current_path(), rc::make_card(cfg_, grid_.params().cell_size_m));
+    presence_coordinator_.publish_card_json(rc::card::graph_json(rc::make_card(cfg_, grid_.params().cell_size_m)));
+}
+
 void SpecificWorker::initialize()
 {
     std::print("residual_concept: initialize()\n");
@@ -170,6 +198,11 @@ void SpecificWorker::initialize()
             // One-time leftover sweep AFTER the graph is fully joined — catches residual_* nodes left by a
             // crashed/uncleaned prior run that were still syncing in when initialize() ran. Guarded so a
             // Degraded→Operating re-entry (transient peer flap) does NOT wipe THIS run's live residuals.
+            if (not beam_spacing_refreshed_)
+            {
+                beam_spacing_refreshed_ = true;
+                refresh_beam_spacing();
+            }
             if (not startup_sweep_done_)
             {
                 startup_sweep_done_ = true;
@@ -195,6 +228,10 @@ void SpecificWorker::initialize()
 
     QObject::connect(QCoreApplication::instance(), &QCoreApplication::aboutToQuit,
                      this, &SpecificWorker::terminal_shutdown, Qt::UniqueConnection);
+
+    // Before scene_graph_/ingestors copy cfg_. Re-read once at first Operating: robot_concept may write the
+    // media_descriptor after this agent starts.
+    refresh_beam_spacing();   // also writes the perception card (write_perception_card)
 
     rt_api_       = G->get_rt_api();
     inner_eigen_  = G->get_inner_eigen_api();

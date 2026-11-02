@@ -48,7 +48,7 @@ cd episodic_agent && bin/episodic_agent etc/config.toml
 - **Stop with SIGTERM or Ctrl-C (`kill <pid>`), never `kill -9`.** A graceful stop closes every open record as
   `interrupted_by_em_shutdown`, writes those records to the archive and to domain 4, and deletes the presence node.
   SIGKILL skips all of that. The next start still closes those records, as `lost`.
-- **chat_agent re-joins by itself.** This agent re-seeds domain 4 from `em_root.json` on every launch. chat_agent
+- **language_agent re-joins by itself.** This agent re-seeds domain 4 from `em_root.json` on every launch. language_agent
   joins domain 4 only while `episodic_agent` is present on domain 0, leaves it when this agent's node is gone or
   carries a new process stamp (a restart), and joins the fresh graph again (R23, R24) — no reader restart needed.
 

@@ -172,7 +172,7 @@ private:
 	/// The relative-motion start shared by `move` / `turn` and a mission's move (text in RelativeMotion's grammar).
 	MissionResult start_relative_motion(const std::string &text, const char *source);
 
-	// ── GROUNDED MISSIONS (common/mission/, chat_agent/docs/mission_language_2026-10-13.md) ──
+	// ── GROUNDED MISSIONS (common/mission/, language_agent/docs/mission_language_2026-10-13.md) ──
 	// The interpreter owns the control flow (seq, repeat, on_fail, until, budgets, anchors); this Host maps each leaf
 	// to what the controller already does. Everything runs on the control thread (specificworker_mission.cpp).
 	class MissionHost final : public rc::mission::Host
@@ -187,6 +187,8 @@ private:
 		void say(const std::string &text) override;
 		void halt() override;
 		std::optional<rc::mission::Pose> pose() override;
+		std::optional<std::string> current_room() override;
+		void on_bind(const std::string &name, const std::string &room) override;
 		std::optional<double> eval(const rc::mission::Pred &p) override;
 		/// The mission's steps, for the look-ahead of ONE step (chained_action.h): set by start_mission before the first tick.
 		void set_plan(std::vector<rc::mission::Step> steps) { plan_ = std::move(steps); }
@@ -230,7 +232,7 @@ private:
 	std::expected<std::string, std::string> resolve_door(const rc::mission::Ref &r);
 	std::vector<rc::DoorFacts> door_facts();   ///< the live doors of the current room, with their relations (mission_door_relation.h)
 	std::set<std::string> door_looked_;        ///< doors a door_concept look has ever targeted
-	// ── chat_agent's command channel (chat_inbox.h): polled on the control thread, never signalled ──
+	// ── language_agent's command channel (chat_inbox.h): polled on the control thread, never signalled ──
 	rc::ChatInbox chat_inbox_;
 	rc::ChatInbox::Tracked chat_tracked_;
 	std::uint64_t chat_poll_ms_ = 0;

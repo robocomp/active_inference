@@ -9,7 +9,7 @@
  * to render the mesh in ChairSceneGraph.
  *
  * State vector θ = [cx, cy, cz, yaw, seat_w, seat_d, seat_h, back_h]  (8 params)
- * Fixed geometry: SEAT_THICKNESS = 0.04 m, LEG_HALF = 0.02 m (square leg half-side)
+ * Fixed geometry: seat thickness = ChairPrior::seat_thick (manifest), leg half-side = ChairPrior::leg_half (manifest)
  * Compound SDF = min(SDF_seat, SDF_back, min_k SDF_leg_k)
  */
 
@@ -22,6 +22,8 @@
 #include <vector>
 #include <Eigen/Dense>
 
+#include "chair_prior.h"
+
 namespace rc {
 
 struct ChairState
@@ -30,11 +32,15 @@ struct ChairState
     float cy     = 0.0f;   // room-frame Y of chair centre
     float cz     = 0.0f;   // floor height (ANCHORED — set by support step, not freely fit)
     float yaw    = 0.0f;   // heading about Z (room frame); +Y local = forward
-    float seat_w = 0.45f;  // seat width  (local X)
-    float seat_d = 0.45f;  // seat depth  (local Y)
-    float seat_h = 0.45f;  // seat-TOP height above floor
-    float back_h = 0.45f;  // backrest height above the seat top
+    // The size DOFs default to 0 ON PURPOSE: the initial state always comes from ChairPrior (the concept manifest),
+    // never from a number typed here. Seed with seed_size(state, prior).
+    float seat_w = 0.0f;   // seat width  (local X)
+    float seat_d = 0.0f;   // seat depth  (local Y)
+    float seat_h = 0.0f;   // seat-TOP height above floor
+    float back_h = 0.0f;   // backrest height above the seat top
     std::array<float, 8> to_array() const { return {cx, cy, cz, yaw, seat_w, seat_d, seat_h, back_h}; }
+    // The initial size DOFs, from the manifest prior (the only legitimate source of a chair's nominal size).
+    void seed_size(const ChairPrior& p) { seat_w = p.seat_w; seat_d = p.seat_d; seat_h = p.seat_h; back_h = p.back_h; }
     static ChairState from_array(const std::array<float, 8>& a)
     { return {a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7]}; }
 };
@@ -43,6 +49,8 @@ struct ChairModelParams
 {
     // Observation noise band used by the compound-SDF candidate/residual split.
     float sigma_obs = 0.05f;
+    // The manifest prior: seat_thick for the SDF / mesh and the bounds apply_constraints clamps to. ONE source.
+    ChairPrior chair;
 };
 
 // ─── ChairModel ──────────────────────────────────────────────────────────────
@@ -52,8 +60,6 @@ class ChairModel
 public:
     using State = ChairState;   // for any shared Model-templated helper
 
-    static constexpr float SEAT_THICKNESS = 0.04f;
-    static constexpr float LEG_HALF       = 0.02f;   // square leg half-side
     static constexpr float SDF_SMOOTH_K  = 0.02f;
     static constexpr float SDF_INSIDE_SCALE = 0.3f;
 
@@ -74,10 +80,10 @@ public:
     /** Enforce wooden-chair physical bounds on the size DOFs; leave cx,cy,cz,yaw free. */
     void apply_constraints();
 
-private:
-    // SDF evaluated for a given explicit state.
+    // SDF evaluated for a given explicit state (public: the shape-identity test compares the card's primitives to it).
     float sdf_point_at(const Eigen::Vector3f& p, const ChairState& s) const;
 
+private:
     ChairState        state_;
     ChairState        prior_;
     ChairModelParams  params_;

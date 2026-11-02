@@ -10,6 +10,7 @@ LIST(APPEND SOURCES
   ../src/layout_optimizer.cpp
   ../src/layout_sidecar.cpp
   ../src/topology_view.cpp
+  ../src/topology_publish.cpp
   ../src/room_forget.cpp
   ../src/room_chain.cpp
   ../src/room_recognizer.cpp
@@ -29,6 +30,7 @@ LIST(APPEND HEADERS
   ../src/layout_optimizer.h
   ../src/layout_sidecar.h
   ../src/topology_view.h
+  ../src/topology_publish.h
   ../src/room_forget.h
   ../src/room_chain.h
   ../src/room_recognizer.h

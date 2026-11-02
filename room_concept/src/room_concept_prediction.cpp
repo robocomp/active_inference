@@ -104,7 +104,6 @@ namespace rc
         }
         res.calib_value = motion_calib_.last_solve().value;
         res.calib_sigma = motion_calib_.last_solve().sigma;
-        res.calib_information = motion_calib_.last_information();   // joint calib monitor (plan 2026-10-05 Task 4)
         res.calib_b_omega = motion_calib_.estimated_omega_bias();
         {
             const auto &r = motion_calib_.last_solve();

@@ -5,7 +5,7 @@
 #       explore <current room> budget_s=<S>s     ← the affordance selector has the base for S seconds (from leg 2)
 #       cross door_1                              ← then the door passage, on the measured gap
 # usage: round_trips_mission.sh <run_name> [explore_s=60]   (same env as round_trips.sh: WT / WT_AGENTS)
-# TOUR LOCK (shared with chat_agent's fleet tool): held while this tour runs, i.e. while this PID is alive; chat_agent
+# TOUR LOCK (shared with language_agent's fleet tool): held while this tour runs, i.e. while this PID is alive; language_agent
 # refuses to start/stop/restart fleet agents meanwhile. Removed on any exit; a crashed script's PID is dead, so it never sticks.
 LOCK=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/ai_fleet_tour.lock; echo $$ > $LOCK; trap 'rm -f $LOCK' EXIT
 B=/home/pbustos/robocomp/components/active_inference; E=$B/room_concept/estimation_scripts; cd $E; L=crossing/$1/logs

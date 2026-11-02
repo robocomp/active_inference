@@ -120,6 +120,33 @@ inline std::optional<std::uint64_t> robot_rt_room(DSR::DSRGraph& G)
     return resolve_robot_rt_room(room_facts(G));
 }
 
+/// The room the robot is PHYSICALLY in, a proto-room included (room_resolve_rule.h resolve_physical_room): the unique
+/// room with a LIVE robot RT edge, else current_room. RT edges between a `robot` and a `room` count in either direction
+/// (the chat's original physical_room read both); `valid=false` (retired at a door crossing) is not live.
+inline std::optional<std::uint64_t> physical_room(DSR::DSRGraph& G)
+{
+    std::vector<RoomFact> rooms;
+    for (const auto& e : G.get_edges_by_type("RT"))
+    {
+        const auto a = G.get_node(e.from());
+        const auto b = G.get_node(e.to());
+        if (not a.has_value() or not b.has_value()) continue;
+        const DSR::Node* room = a->type() == "room" and b->type() == "robot"   ? &*a
+                                : b->type() == "room" and a->type() == "robot" ? &*b
+                                                                               : nullptr;
+        if (room == nullptr or not G.get_attrib_by_name<valid_att>(e).value_or(true)) continue;
+        rooms.push_back({.id = room->id(), .rt = RoomFact::Rt::Live});
+    }
+    return resolve_physical_room(rooms, current_room(G));
+}
+
+/// Its NAME, "" when unknown.
+inline std::string physical_room_name(DSR::DSRGraph& G)
+{
+    const auto id = physical_room(G);
+    return id.has_value() ? G.get_name_from_id(*id).value_or(std::string{}) : std::string{};
+}
+
 /// Same, returning the node (convenience for call sites that read attributes off it).
 inline std::optional<DSR::Node> current_room_node(DSR::DSRGraph& G)
 {

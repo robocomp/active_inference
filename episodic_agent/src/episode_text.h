@@ -2,7 +2,7 @@
 /*
  * episode_text.h — the text the em window shows for a domain-4 node (2026-10-18): left-click a node → "View data"
  * → a popup (SpecificWorker::show_node_text). Records are told in plain words (episode_story.h); the statistics keep
- * chat_agent's wording (common/episodic/em_answers.h). Pure over a Store, keyed by the node NAME
+ * language_agent's wording (common/episodic/em_answers.h). Pure over a Store, keyed by the node NAME
  * (em_graph.h names nodes by record id, EmGraph::stats_name, and "root"); tested in tests/dsr_adapters_test.cpp.
  *
  *   record node → its mission told as a story for a person (episode_story.h): start, what happened in order, end.

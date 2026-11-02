@@ -25,6 +25,9 @@
  */
 
 #include "specificworker.h"
+#include "bottle_card.h"   // make_card(): this agent's perception card
+#include "../../common/perception_card/card_io.h"   // write_card_file
+#include <filesystem>
 
 #include "../../common/config_report/config_read.h"   // rc::cfg::Reader (SHARED)
 #include "../../common/room_resolve/room_resolve.h"   // rc::room::current_room (proto-aware, deterministic)
@@ -267,6 +270,11 @@ void SpecificWorker::initialize()
     epistemic_planner_.set_detector_envelope(
         rc::detect::DetectorEnvelope{cfg_.detect_min_fill, cfg_.detect_max_fill, cfg_.detect_soft});
     epistemic_planner_.set_robot_radius(0.30f);   // Shadow's footprint radius
+
+    // Perception card: what this agent's P(detect) really multiplies, from the config it runs with. The agent's
+    // directory is the cwd (the fleet scripts start every agent with `cd $B/$a`), so etc/perception_card.json lands next to etc/config.toml.
+    rc::card::write_card_file(std::filesystem::current_path(), rc::make_card(cfg_));
+    presence_coordinator_.publish_card_json(rc::card::graph_json(rc::make_card(cfg_)));
     // ★The camera model is read PER CYCLE at the compute site (rc::nbv::sensor_from_graph),
     // NOT once here: the zed intrinsics are published by robot_concept when frames start
     // arriving, so reading them in initialize() races the producer. Losing that race leaves

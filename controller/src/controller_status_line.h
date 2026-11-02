@@ -10,7 +10,7 @@
  *   goal 1.20 m
  *   hold: <why>
  *
- * It replaced the door-passage row (door combo + Cross / Stop). Those two commands still exist — chat_agent and the
+ * It replaced the door-passage row (door combo + Cross / Stop). Those two commands still exist — language_agent and the
  * remote file send `cross <door>` / `stop`, and the mission row's command box takes them — so the row's buttons
  * were a third way to issue them, while nothing in the window said in ONE place what the robot was up to.
  *

@@ -109,14 +109,18 @@ std::uint64_t BottleSceneGraph::create_instance_from_detection(const Eigen::Vect
     // series, a level-2 rig's membership) silently splices them together. It reads as a TELEPORT rather
     // than an identity swap, which is what makes it expensive to notice. Same defect and fix as
     // chair_concept 9aef57a / table_concept; door_concept solves it with a persistent registry instead.
-    // ⚠Per-RUN only: across a restart the mark is rebuilt from the live graph, so a name freed before
-    // the restart can still be re-issued after it (door persists etc/door_identities.csv for that).
-    int max_n = name_high_water_;
+    // Across restarts too, since 2026-11-01: common/instance_identity persists the counter in
+    // etc/instance_identity.csv and issues max(persisted, highest live bottle_<N>) + 1, written to disk before use.
+    // DSR node type is the generic "object"; the class is the name prefix "bottle_".
+    std::vector<std::string> live_names;
     for (const auto& n : G_->get_nodes_by_type("object"))
-        if (n.name().rfind("bottle_", 0) == 0)
-            try { max_n = std::max(max_n, std::stoi(n.name().substr(7))); } catch (...) {}
-    name_high_water_ = max_n + 1;
-    const std::string name = "bottle_" + std::to_string(max_n + 1);
+        if (n.name().starts_with("bottle_"))
+            live_names.push_back(n.name());
+    if (not identity_)
+        identity_.emplace(rc::identity::InstanceCounter::open("etc/instance_identity.csv",
+                                                              static_cast<std::uint32_t>(G_->get_agent_id())));
+    const int n_issued = identity_->issue(rc::identity::max_suffix(live_names, "bottle_"));
+    const std::string name = "bottle_" + std::to_string(n_issued);
 
     DSR::Node bottle_node = DSR::Node::create<object_node_type>(name);
     G_->add_or_modify_attrib_local<width_m_att> (bottle_node, 2.0f * cfg_.prior_radius);
@@ -141,6 +145,8 @@ std::uint64_t BottleSceneGraph::create_instance_from_detection(const Eigen::Vect
     }
 
     rc::provenance::stamp_creation(*G_, bottle_node);   // birth stamp: epoch ms + local ISO-8601
+    // Persistent identity (common/instance_identity): written once at birth, never changed, key for ltom/atlas/EM.
+    G_->add_or_modify_attrib_local<object_uid_att>(bottle_node, rc::identity::make_uid(static_cast<std::uint32_t>(G_->get_agent_id()), n_issued));
     const auto id_opt = G_->insert_node(bottle_node);
     if (not id_opt.has_value())
         return 0;

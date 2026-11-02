@@ -1,0 +1,32 @@
+
+# --- Common Agent Data ---
+Agent.id = 28  # legacy format; etc/config.toml is the one used
+Agent.name = "ltom_agent"
+
+# --- Single Instance Configuration ---
+# Use this if you only have one graph.
+Agent.configFile = ""
+Agent.domain = 0
+Agent.tree = false
+Agent.graph = false
+Agent.2d = false
+Agent.3d = false
+
+# --- Multiple Instance Template ---
+# If you define sub-instances, the single instance config above will be ignored.
+# Agent.instance_name.configFile = ""
+# Agent.instance_name.domain = 1
+# Agent.instance_name.tree = true
+# Agent.instance_name.graph = true
+# Agent.instance_name.2d = true
+# Agent.instance_name.3d = true
+
+Period.Compute = 500
+Period.Emergency = 500
+
+Component.Debug.Verbose = true
+
+Ice.Warn.Connections = "0"
+Ice.Trace.Network = "0"
+Ice.Trace.Protocol = "0"
+Ice.MessageSizeMax = "20004800"

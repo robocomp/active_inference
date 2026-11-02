@@ -64,8 +64,11 @@ inline LidarSource lidar_source_of_plane(int plane_id)
 {
     return plane_id == 0 ? LidarSource::Helios : plane_id == 1 ? LidarSource::Bpearl : LidarSource::Unknown;
 }
-// The geometry behind the helios cut (documentation and test only; the rule itself uses legacy_min_m).
-inline constexpr float kHeliosMountZ = 1.075f;                       // shadow.json body<-helios z
+// The geometry behind the helios cut: DOCUMENTATION AND TEST ONLY, never read at runtime. The rule itself uses
+// legacy_min_m, and the points it is applied to arrive in the robot frame through the GRAPH's body<-helios edge
+// (LidarPlaneReader::poll), so a mount corrected or planted through robot_concept's overlay already reaches it.
+// This is the NOMINAL height (shadow.json body<-helios z), used to explain why 0.20 m is the right cut.
+inline constexpr float kHeliosMountZ = 1.075f;                       // nominal, shadow.json body<-helios z
 inline constexpr float kHeliosLowestBeamRad = 15.5f * 3.14159265f / 180.f;   // the inverted fan's lowest beam below horizontal
 
 inline LidarBandMembership lidar_band_membership(float z, const LidarHeightBands &b, LidarSource src = LidarSource::Unknown)

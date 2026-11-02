@@ -1,4 +1,8 @@
-# Head-sensor calibration agent (`sensor_calibration`): implementation plan
+# Head-sensor calibration agent (`self_calibration`): implementation plan
+
+> **RENAMED 2026-10-29:** this agent was `sensor_calibration` (directory, binary, `[Agent] name`, node `sensor_calibration 27`)
+> and is now `self_calibration` (id 27 unchanged). The OLD arm-camera agent that was called `self_calibration` (id 12) is now
+> `arm_calibration`. Mentions below were rewritten to the new names; the plan file keeps its original filename.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or
 > superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax.
@@ -10,7 +14,7 @@ localiser loop. Move the localiser-free calibration code out of room_concept.
 **Architecture:** The split follows the localiser-loop boundary. The motion calibrator and the kinematic mount
 factor stay in room_concept, because they read per-cycle localiser internals and must undo their own applied
 feedback. Every factor that needs only sensor streams, odometry/IMU and the published pose/polygon moves to a new
-agent, `sensor_calibration`. These are Noé's offline factors plus the r2 floor/vertical factors. That agent
+agent, `self_calibration`. These are Noé's offline factors plus the r2 floor/vertical factors. That agent
 writes *proposals*. `robot_concept`, which owns the body→sensor RT edges, *commits* them to the graph and to a
 versioned per-robot mount file. Consumers already transform through the RT tree, so a committed edge reaches
 them without new plumbing.
@@ -60,9 +64,9 @@ motion calibrator (~1.5k with glue) remains.
   Webots description and is never overwritten with real values.
 - Ownership:
   - `robot_concept` is the **only** writer of body→sensor RT edges.
-  - `sensor_calibration` writes only its own node's proposal attributes.
+  - `self_calibration` writes only its own node's proposal attributes.
   - `room_concept`'s `mountPublish` path is removed in Phase 5.
-- Ignore the existing `self_calibration/` agent (arm camera). Do not modify or reuse it.
+- Ignore the existing `arm_calibration/` agent (arm camera). Do not modify or reuse it.
 
 ## Review Focus
 
@@ -86,7 +90,7 @@ motion calibrator (~1.5k with glue) remains.
 **Open question for the user:** where are the four real runs and two static takes recorded, and in what format
 (rosbag / our DDS record / CSV)? The format decides whether they replay through the media plane or need a
 converter.
-- Deliverable: `sensor_calibration/bench/shadow_real_2026-10-22/README.md`, recording each run's path plus Noé's
+- Deliverable: `self_calibration/bench/shadow_real_2026-10-22/README.md`, recording each run's path plus Noé's
   per-sensor offline values as `expected.csv`. Columns: `sensor,dof,value,sigma,unit,source`, with the rows
   from his doc. Examples: `helios,yaw_vs_chassis,1.84,,deg,straight-line`; `helios,roll,0.46,,deg,walls`;
   `helios,pitch,-0.30,,deg,walls`; `zed,roll,0.62,,deg,floor`.
@@ -132,19 +136,19 @@ converter.
   (`camera_ingestor.h:84`).
 - [ ] Step 4: Commit.
 
-## Phase 2: `sensor_calibration` agent skeleton
+## Phase 2: `self_calibration` agent skeleton
 
 ### Task 2.1: generate the agent
 **Files:**
-- Create: `sensor_calibration/sensor_calibration.cdsl`, `etc/config.toml`, `src/specificworker.{h,cpp}`,
+- Create: `self_calibration/self_calibration.cdsl`, `etc/config.toml`, `src/specificworker.{h,cpp}`,
   `CMakeLists.txt`.
 
 Steps:
 - Generate with `robocompdsl` from a cdsl copied from `bottle_concept`.
-- `[Agent] id = 27`, name `sensor_calibration`.
+- `[Agent] id = 27`, name `self_calibration`.
 - Presence: debounced Degraded, as in bottle_concept. Required peers: `robot_concept`, `room_concept`.
 - Connect no DSR signals; poll instead.
-- On start, create its own node `sensor_calibration` (type `"agent"`-style, mirroring bottle's own node).
+- On start, create its own node `self_calibration` (type `"agent"`-style, mirroring bottle's own node).
 - Verify: the agent starts and stops cleanly with SIGTERM 5/5, and the node is deleted on stop.
 - Commit.
 
@@ -272,7 +276,7 @@ Test: on a synthetic trajectory (straight 5 m, a π hairpin, a 30 s stop), check
 ## Status after Phases 1–2 (2026-10-23, branch feat/sensor-calibration)
 
 Phases 1–2 (Tasks 1.1–1.3, 2.1–2.4) are DONE and reviewed. Nothing has been run on the live fleet (domain 0); all
-tests ran on private DSR domains. Live check for the user: `sensor_calibration/bin/sensor_calibration etc/config.toml`
+tests ran on private DSR domains. Live check for the user: `self_calibration/bin/self_calibration etc/config.toml`
 → "subscriber up" for helios, bpearl, zed rgb/depth, ricoh, imu, then `[inputs] rates: … odom=yes pose=yes+cov
 poly=Nv` with no `STALLED`.
 
@@ -310,5 +314,54 @@ poly=Nv` with no `STALLED`.
   - The input layer's `pose_` and `polygon_` are not cleared on room change.
   - The factory "no descriptor" log repeats every 5 s.
   - A stall hold extrapolates the last rate (gated only by the input layer).
-  - The stale sweep in `sensor_calibration` uses a placeholder `metaconcept` type and a name-prefix match.
+  - The stale sweep in `self_calibration` uses a placeholder `metaconcept` type and a name-prefix match.
   - The selftests are EXCLUDE_FROM_ALL and not registered with ctest.
+
+## Status after Phase 3 (2026-10-29, branch feat/sensor-calib-phase3)
+
+Tasks 3.1–3.3 DONE (no live run yet).
+- **3.1** `common/sensor_calib/mount_factors.h` (Info3/Info6, PlaceCells, place_key, FloorPlaneMount, VerticalMount) and
+  `common/sensor_calib/lidar_mount.h` are shared. `KinematicMount` split out to `room_concept/src/kinematic_mount.h`.
+- **3.2** `self_calibration/src/lidar_mount_stage.*` runs the floor + vertical factors, `[MountFactors]` config,
+  logs `tmp/mount_factors/{mounts,bpearl_sweeps}_<ts>.csv` + a `[mounts]` line every 10 s. Inputs now carry the
+  robot (Shadow) frame mount, the pose AT the sweep stamp (`TimeQuery::Extrapolated`; Stale/Clamped = no pose) and
+  the room's `room_height`. Test: `mount_factors_test` (parts 2/3/P byte-identical to the pre-move oracle, + part S).
+- **3.3** Removed from room_concept: `mount_factor_step`, `walls_at`, the mount snapshot, `BpearlMountInject*`,
+  `BpearlMountRate`, `MountPoseSigma*`, the joint monitor (`joint_calibration.h`, `joint_calib_monitor.h`,
+  `JointCalibMonitor`, `UpdateResult::{calib_information, mount_kin_info, mount_yaw_offset}`), their selftests and
+  `tools/joint_calib_report.py`. `RoomConcept.MountFactors` STAYS: it gates the kinematic factor AND the single-owner
+  rule (`lidar_side_yaw`, eps apply bit), so it is not log-only.
+
+**Rulings:**
+- Equivalence (Review Focus 5) is satisfied by construction: the room_concept copy is deleted, not disabled, and the
+  estimators are byte-identical on the synthetic oracle. A replayed Webots A/B (plan 3.2 "within 0.1σ") was NOT run;
+  the inputs legitimately differ (pose from the RT ring vs room's velocity carry; published polygon vs
+  nominal_room_polygon; room_height only when measured).
+- Planted errors for these factors go through robot_concept's overlay file, not per-agent inject keys.
+- The joint fusion (helios tilt ↔ bpearl planar coupling, cameras) is not ported; the agent reports the three
+  blocks separately.
+
+**Carry-forwards:** `calibration_estimator.h`'s `last_information()` and the camera pools' `marginal_information()`
+/ `lidar_yaw_ref()` lost their only consumer (the monitor); clean them up in Phase 5. Room_concept's `kin_csv_` is
+now the only output of `KinematicMount` (until 4.4 replaces it).
+
+## room_concept extrinsic code removed (2026-10-29, ahead of Phases 4-5, user decision)
+
+User ruling: extrinsic sensor calibration resumes and is developed ONLY in self_calibration; room_concept keeps
+just the robot base params and the odometry/motion calibrator (it needs the localiser's prediction errors).
+Removed from room_concept (src 63,008 -> 59,015 lines; ~6.6k incl. tools/tests):
+- camera mount calibrator: mount_calibrator.*, camera_calibration.h, mount_lidar_pair.h, the zed calibration-only
+  channel, the camera half of the Calib window, the status `camcal` field, the pooled mount monitors (mnt_*),
+  factor B (and gt_error.csv's fb_* columns), ImageEdge.{mountVertexOffsetSigmaPx, mountYawCorrection, mountApply,
+  mountPublish, mountDescriptionFile, calibCameras, calibMinConvertIntervalMs}, CameraIngestor's live correction /
+  local boresight / base override; tools mount_replay, mount_info_selftest, solve_mount.py.
+- helios: KinematicMount (+kin CSV), LidarMountApply, LidarMountInject*, RoomConcept.MountFactors; lidar_mount.h.
+  eps_yaw stays ESTIMATED, never applied (apply bit cleared unconditionally = the old MountFactors=true behaviour).
+Kept: ImageEdge.mount{Pitch,Height,Yaw}Sigma (the driving term's marginalised nuisance priors), the motion
+calibrator incl. its lever/eps rows (estimated, not applied), the calib pivot.
+- The Ricoh correction room_concept had learned on Webots (yaw +0.206 deg, height -3.4 mm) moved EXACTLY into
+  robot_concept/etc/mount_calib_Shadow_webots.txt, so the driving camera's extrinsic is unchanged.
+- The driving camera's live extrinsic + ceiling refresh had been sitting inside the zed calibration-channel loop
+  (it only ran because that channel existed); moved into pump_image_edges.
+- Not ported anywhere yet: the per-camera evidence files etc/camera_calib_Shadow_*.txt and image_edge_replay_*.txt
+  are left on disk, unused.

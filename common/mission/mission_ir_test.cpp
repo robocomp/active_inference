@@ -1,7 +1,7 @@
 // g++ -std=c++23 -O0 -g -Wall -Wextra -Wno-deprecated-literal-operator -fPIC common/mission/mission_ir_test.cpp -o /tmp/mission_ir_test $(pkg-config --cflags --libs Qt6Core) && /tmp/mission_ir_test
 //
 // The grounded mission IR (mission_ir.h) and its wire codec (mission_json.h), pinned without a graph or an LLM.
-// What is pinned is the CONTRACT between chat_agent and the controller (docs/mission_language_2026-10-13.md §7):
+// What is pinned is the CONTRACT between language_agent and the controller (docs/mission_language_2026-10-13.md §7):
 //   · a mission round-trips through JSON unchanged;
 //   · compatibility: an unknown op / ref kind / predicate rejects the WHOLE mission, an unknown optional field is
 //     ignored, a field named in `requires` that this build does not know rejects, `v` must match;
@@ -102,6 +102,20 @@ int main()
     }
     CHECK(decode_json(R"({"v":1,"request":3,"steps":[{"id":"1","op":"stop"}]})").error().code == "bad_type");
     CHECK(decode_json(R"({"v":1,"fixes":["m1"],"steps":[{"id":"1","op":"stop"}]})").error().code == "bad_type");
+
+    // ── bind / $NAME survive the JSON round trip ──────────────────────────────────────────────────────────────────
+    {
+        const auto b = decode_json(R"({"v":1,"steps":[
+          {"id":"1","op":"cross","door":{"node":"door_1"},"bind":"next"},
+          {"id":"2","op":"explore","room":{"var":"next"},"budget_s":10},
+          {"id":"3","op":"report","text":"objects here"}]})");
+        CHECK(b.has_value());
+        if (b.has_value())
+        {
+            const auto again = decode_json(encode_json(b.value()));
+            CHECK(again.has_value() and again.value() == b.value());
+        }
+    }
 
     // ── Resources come from the registry as a SET (one owner per resource; §7.4 point 3, §7.6) ─────────────────
     CHECK(op_spec("cross") != nullptr and op_spec("cross")->claims == kBase and not op_spec("cross")->instant);

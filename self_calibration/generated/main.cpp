@@ -59,6 +59,9 @@
  * ...
  *
  */
+#include <clocale>
+#include <cstdlib>   // std::_Exit -- see the exit note at the end of main()
+#include <cstdio>    // std::fflush
 #include <signal.h>
 
 // QT includes
@@ -113,10 +116,38 @@ public:
 Ice::InitializationData self_calibration::getInitializationDataIce(){
         Ice::InitializationData initData;
         initData.properties = Ice::createProperties();
-        initData.properties->setProperty("Ice.Warn.Connections", this->configLoader.get<std::string>("Ice.Warn.Connections"));
-        initData.properties->setProperty("Ice.Trace.Network", this->configLoader.get<std::string>("Ice.Trace.Network"));
-        initData.properties->setProperty("Ice.Trace.Protocol", this->configLoader.get<std::string>("Ice.Trace.Protocol"));
-        initData.properties->setProperty("Ice.MessageSizeMax", this->configLoader.get<std::string>("Ice.MessageSizeMax"));
+
+        // Forward EVERY Ice property the config declares, not a fixed list of four.
+        //
+        // Until 2026-09-11 this function copied exactly Ice.Warn.Connections, Ice.Trace.Network,
+        // Ice.Trace.Protocol and Ice.MessageSizeMax, and nothing else. Every other Ice setting a
+        // component config declared was therefore INERT: it was loaded, printed by printConfig(),
+        // and never reached the communicator. A config block that is read and ignored looks exactly
+        // like one that works, so this cost real time to find — in webots-bridge the config had
+        // carried an [omnirobot.ThreadPool] block for months, with a comment explaining that it
+        // gave base commands their own dispatch thread so they could not queue behind a camera.
+        // They had always shared the default pool. It only became visible when some servants began
+        // to block: four blocking calls took the single pool and the whole fleet serialised, an
+        // untouched IMU stream falling from 113 Hz to 29 Hz while its data stayed 5 ms fresh.
+        //
+        // These properties are only read when the communicator is created, which is why this must
+        // happen here and cannot be moved into SpecificWorker.
+        //
+        // "Ice.*" covers the run time's own settings; "*.ThreadPool.*" covers the per-object-adapter
+        // pools, which are named after the adapter (see the implement<>() calls below) and so cannot
+        // be listed in advance. Anything else in the config is the component's own business and is
+        // deliberately not forwarded. A value that will not convert to a string is skipped rather
+        // than aborting startup.
+        for (const auto &key_view : this->configLoader.getKeys())
+        {
+            const std::string key{key_view};
+            const bool is_ice_runtime  = key.rfind("Ice.", 0) == 0;
+            const bool is_adapter_pool = key.find(".ThreadPool.") != std::string::npos;
+            if (not (is_ice_runtime or is_adapter_pool))
+                continue;
+            try { initData.properties->setProperty(key, this->configLoader.get<std::string>(key)); }
+            catch (...) { /* not string-convertible: leave Ice's default for this one */ }
+        }
 		return initData;
 }
 
@@ -135,6 +166,17 @@ int self_calibration::run(int argc, char* argv[])
 	QCoreApplication a(argc, argv);  // NON-GUI application
 #endif
 
+	// The Q*Application constructor above calls setlocale(LC_ALL, "") — it adopts the user's
+	// locale for the C library. On a machine whose locale uses a decimal COMMA (es_ES, fr_FR,
+	// de_DE, ...) that silently breaks numeric I/O: strtof/atof/scanf then stop at the '.' of a
+	// file written with decimal POINTS and return just the integer part, with NO error flag
+	// ("0.626452" -> 0). Meanwhile std::ofstream keeps formatting through the C++ global locale,
+	// which stays "C" and writes POINTS — so a component corrupts its own data on round-trip.
+	// Pin LC_NUMERIC back to "C" so the two agree. Text stays localised: LC_CTYPE / LC_TIME /
+	// LC_MESSAGES keep the user's locale, and Qt's own formatting goes through QLocale, which
+	// this does not touch. Prefer std::from_chars for parsing anyway — it is locale-independent
+	// by definition and cannot regress if someone changes the locale later.
+	std::setlocale(LC_NUMERIC, "C");
 
 	sigset_t sigs;
 	sigemptyset(&sigs);
@@ -236,5 +278,31 @@ int main(int argc, char* argv[])
 	}
 	self_calibration app(configFile, prefix, startup_check_flag);
 
-	return app.main(argc, argv, app.getInitializationDataIce());
+	const int status = app.main(argc, argv, app.getInitializationDataIce());
+
+	// Leave the process HERE, before C++ static destruction and the dynamic linker's finalizers.
+	//
+	// libIce 3.7 destroys its own globals in the wrong order. At exit _dl_call_fini runs libIce's
+	// finalizer, a static object inside it calls
+	// IceInternal::FactoryTable::removeExceptionFactory(), and that locks a mutex an EARLIER
+	// finalizer has already destroyed. pthread_mutex_lock returns EINVAL, IceUtil::Mutex::lock()
+	// (IceUtil/Mutex.h:295) throws ThreadSyscallException out of a destructor, and the process
+	// dies on EVERY otherwise-clean shutdown with
+	//     terminate called after throwing an instance of 'IceUtil::ThreadSyscallException'
+	//     what(): include/IceUtil/Mutex.h:295: syscall exception: Invalid argument
+	// and SIGABRT (exit 134) plus a core dump. The whole fault is inside libIce's own finalizer
+	// chain, so no link order or teardown ordering on the component's side can avoid it.
+	//
+	// Nothing the component owns is skipped: run() above ends with `delete worker`, so
+	// SpecificWorker and everything it holds -- DSR graphs, their FastDDS DomainParticipants, the
+	// owned-node cleanup in the destructor -- have already run, and Qt's application object is
+	// gone too. Only third-party library static teardown is bypassed. Verified against a DSR
+	// agent holding two DomainParticipants: no /dev/shm FastDDS segments leaked (99 before, 99
+	// after), clean exit code 0 on both SIGTERM and SIGINT, no core dump.
+	//
+	// std::_Exit does not flush stdio, so flush first or the tail of the log is lost.
+	std::cout.flush();
+	std::cerr.flush();
+	std::fflush(nullptr);
+	std::_Exit(status);
 }

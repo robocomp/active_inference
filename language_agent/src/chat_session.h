@@ -1,0 +1,357 @@
+#pragma once
+/*
+ * chat_session.h — one conversation between a person and the robot, grounded in the graph.
+ *
+ * THE FLOW OF ONE USER MESSAGE (on_user_text):
+ *   1. `stop` fast path (^(stop|para|detente|alto)\b) → the `stop` command is written at once, no model involved.
+ *      1d. pause / continue / cancel the mission → the controller's own word, no model, but only where the words mean
+ *          the mission (mission_plan.h mission_control_action); otherwise ("sigue recto") on to the normal path.
+ *      1a/1c. a plain yes to agent_control's question / to a mission card → carried out here; any other message
+ *      drops the card.
+ *   2. text already in the controller grammar (cross door / cross door_N / uncross / move / turn) → CommandGate → sent.
+ *   3. otherwise → the model, with ONE system message rebuilt this turn (robot description
+ *      from etc/system_prompt.md + interface rules + the STATE digest) and the last
+ *      ~16 history messages (a tool call and its results are never split by the trim).
+ *
+ * MISSIONS (plan_mission, 2026-10-24): the model passes the request; AFTER its turn's on_done a second request to the
+ * same OllamaClient (the planner: the three mission skills as the system prompt, the request, the STATE; no tools,
+ * temperature 0) writes the mission text. It is checked (mission_plan.h check_planned: fence, parse, validate, names);
+ * an error goes back to the planner at most kMaxPlanFixes times, then REJECTED. A checked mission is shown as a CARD
+ * and waits: only the person's NEXT message, if it is a plain yes, sends it (fast path 1c) — never the model.
+ *
+ * MISSION PROGRESS (2026-10-24): every controller_mission snapshot becomes fixed chat lines (mission_plan.h
+ * progress_lines), whoever started the mission. A mission started FROM THE CHAT also wakes the model (WakeQueue, a
+ * user-role message marked as a robot event, delivered only while neither the model nor the planner is busy): at a
+ * `report` step (its topic + the objects of the room the robot is in at that instant), on a failure (what failed, what
+ * is left: the model proposes a fix through plan_mission, whose card then carries `fixes`), and once on completion.
+ *
+ * TOOLS: cross_door(door ∈ current doors ∪ {nearest}), stop(), cancel_passage(), move_relative(distance_m, turn_deg),
+ * find_objects(subtype?), where_is(name), look(camera?), and the episodic-memory queries episodes(since?, until?,
+ * author?, kind?, target?), episode(id), outcome_stats(kind, target?), last_episode(target) (em_answers.h).
+ * Each call goes through CommandGate; a rejection returns to the model as a role:"tool" message with the reason.
+ * An accepted call is sent at once: no confirmation card since 2026-10-18 (command_gate.h); "stop" halts the robot.
+ * Read-only queries, answered here from the digest without the controller:
+ * find_objects(subtype?) and where_is(name) (object_facts.h).
+ * show(name) / draw(script) put a picture on the side canvas for the PERSON (canvas_runner.h runs the script against
+ * a snapshot, canvas_snapshot.h); a failed script returns its stderr and the model gets up to two re-asks WITH tools
+ * to fix it. "show me the zed camera / the room / the plan" never reach the model (canvas_commands.h).
+ * look(camera?) is read-only too: the newest frame of the front (ZED) or 360 (Ricoh) camera is shrunk, JPEG-encoded
+ * and attached to its tool result; the follow-up request, always made then, shows it to the model (look_messages.h
+ * has the message layout and the one-turn lifetime of an image; camera_grabber.h the media-plane side).
+ *
+ * OBJECT CHANGES: births/removals of the current room's objects are diffed (by node id) against two baselines — one
+ * shown in the window at most every object_change_period_ms, one put into the NEXT request's STATE ("changes in
+ * objects since the last message"). The model is never called because of them. A room change resets both silently. If a tool round produced no text, one follow-up request (without tools) lets the
+ * model say what happened.
+ *
+ * ROBOT STATUS: the controller mirrors the command's progress into chat_intention (state / bt_state); this polls it
+ * every 250 ms and prints transitions as robot status lines; completion/failure is appended to the history as a
+ * role:"tool" message so the model knows how the last command ended.
+ *
+ * EPISODIC MEMORY: episodic_agent's domain-4 graph, joined LAZILY by SpecificWorker while that agent is present
+ * (set_em_graph; nullptr = not joined). The memory tools and the STATE's "today:" line read it with
+ * rc::em::load_store on demand; absent or empty ⇒ "episodic memory is not available" (em_answers.h).
+ *
+ * Main (GUI) thread only — graph reads use the main thread's InnerEigenAPI (CLAUDE.md ts==0 ownership rule).
+ */
+
+#include <deque>
+#include <map>
+#include <memory>
+#include <optional>
+#include <string>
+#include <string_view>
+#include <vector>
+
+#include <QJsonArray>
+#include <QJsonObject>
+#include <QObject>
+#include <QNetworkAccessManager>
+#include <QNetworkReply>
+#include <QPointer>
+#include <QProcess>
+#include <QString>
+#include <QTimer>
+
+#include <dsr/api/dsr_api.h>
+#include <dsr/api/dsr_inner_eigen_api.h>
+
+#include "skills.h"
+#include "camera_grabber.h"
+#include "canvas_commands.h"
+#include "canvas_lidar.h"
+#include "canvas_runner.h"
+#include "chat_log.h"
+#include "chat_window.h"
+#include "command_gate.h"
+#include "fleet_control.h"
+#include "../../common/episodic/em_answers.h"
+#include "intention_node.h"
+#include "mission_plan.h"
+#include "mission_watch.h"
+#include "system_reader.h"
+#include "ollama_client.h"
+#include "topology.h"
+#include "world_digest.h"
+
+namespace rc::chat
+{
+
+struct SessionConfig
+{
+    OllamaConfig llm;
+    int max_history = 16;
+    int history_trim_to = 0;                 ///< a full history is cut down to this many messages at once (<= 0 ⇒ max_history/2)
+    double history_token_budget_frac = 0.75; ///< request estimate above this share of num_ctx ⇒ drop a block from the front
+    int digest_period_ms = 500;
+    int status_period_ms = 250;
+    std::string log_dir = "logs";
+    std::string system_prompt_path = "etc/system_prompt.md";   ///< robot description; empty/missing ⇒ built-in
+    std::string skills_dir = "etc/skills";   ///< *.md skills the model reads on demand (use_skill); missing ⇒ none
+    GateLimits limits;                 ///< move_relative ranges
+    double default_step_m = 0.3;       ///< "advance a bit"
+    double robot_radius_m = 0.35;      ///< approach_object: half the body width (0.70 m)
+    double approach_clearance_m = 0.30;   ///< approach_object: free space kept between the body and the object
+    int objects_nearest = 6;
+    int object_change_period_ms = 2000;
+    int look_max_side = 1280;          ///< look(): front frame shrunk to this longest side (px); see image_prep.h
+    int look_max_side_360 = 1280;      ///< look(): the same for the 2:1 panorama
+    int look_jpeg_quality = 80;
+    std::string canvas_dir = "canvas";   ///< bootstrap.py, rcanvas.py, stock/, library/ (canvas_runner.h)
+    int canvas_timeout_ms = 10000;       ///< a canvas script is killed after this long
+    int canvas_live_period_ms = 100;     ///< live drawings redraw at most this often (a redraw in flight skips a tick)
+    std::string canvas_memory_max = "1G";
+    int gpu_period_ms = 2000;            ///< status bar's GPU memory poll (nvidia-smi takes ~50 ms; 2 s is plenty to watch)
+    // agent_control (fleet_control.h): the agents the chat may start / stop, each as <fleet_dir>/<agent>/bin/<agent>
+    std::string fleet_dir = "..";
+    std::string fleet_agents = "room_concept,residual_concept,retina,door_concept,table_concept,chair_concept,"
+                               "bottle_concept,cabinet_concept,hood_concept,human_concept,refrigerator_concept,controller,"
+                               "ltsm_agent,episodic_agent";
+    std::string fleet_confirm = "controller,retina";
+    std::string fleet_lock;               ///< "" ⇒ $XDG_RUNTIME_DIR/ai_fleet_tour.lock (the tour scripts hold it)
+    std::string fleet_log_dir = "logs/agents";
+    // sim_door (sim_door.h): the simulator's DoorControl; "" = no sim_door tool (the real robot)
+    std::string sim_door_endpoint = "doorcontrol:tcp -h localhost -p 10017";
+    std::string sim_door_script = "tools/sim_door.py";
+    double sim_door_match_max_m = 1.0;   ///< nearest Webots door farther than this ⇒ refused (doors are >= 2.5 m apart)
+};
+
+class ChatSession
+{
+public:
+    ChatSession(std::shared_ptr<DSR::DSRGraph> G, SessionConfig cfg);
+    ~ChatSession();
+
+    void start();                                  ///< window up, timers running, ollama pinged + warmed
+    void set_controller_present(bool present);
+    /// Startup / first-Operating sweep of a crashed run's chat_intention.
+    void sweep_stale() { intention_.sweep_stale(); }
+    /// episodic_agent's domain-4 graph (joined by SpecificWorker while it is present); nullptr = not joined.
+    void set_em_graph(std::shared_ptr<DSR::DSRGraph> em) { em_G_ = std::move(em); }
+
+private:
+    // ── the three entry points from the window ──
+    void on_user_text(const QString& text);
+
+    /// offer_tools=false only for the retry of a follow-up that answered with a call instead of words.
+    void ask_model(bool followup, bool offer_tools = true);
+    /// Runs every call, pushes the tool results. Returns true if one of them attached an image (look()).
+    bool handle_tool_calls(const QJsonArray& calls);
+    QJsonArray tools_json() const;
+    QString system_prompt() const;   ///< fixed for the whole run: description + interface rules
+    QString state_message() const;   ///< "STATE:\n" + digest + this turn's extras: the LAST message of a request
+    static QString load_robot_description(const std::string& path);   ///< "" on failure (logged)
+    void push_history(QJsonObject m);
+    QJsonArray messages_for_request() const;
+
+    /// Run a gated call: accepted ⇒ sent now (no confirmation, 2026-10-18). Returns the tool-result text
+    /// (for a role:"tool" message); `reply`, if given, gets the same outcome as a plain sentence for the person —
+    /// what the history records when no model was involved (a raw tool-result string there is parroted back).
+    QString dispatch(const ToolCall& call, const char* origin, QString* reply = nullptr);
+    bool send_command(const std::string& command, const char* origin);
+
+    void tick_digest();
+    void track_object_changes();
+    /// find_objects / where_is → the tool-result text; "" if `name` is not a query tool.
+    QString answer_query(const QString& name, const QJsonObject& args);
+    /// ltsm_agent's published memory summary (node ltsm_topology); nullopt when absent or unreadable.
+    std::optional<rc::chat::Topology> remembered_topology() const;
+    /// look(camera?) → the tool-result text; on success the JPEG is left in look_jpeg_ for the tool message.
+    QString do_look(const QJsonObject& args);
+    /// show(name, args?, live?) / draw(script, title, live?) → the tool-result text; the picture goes to the canvas.
+    QString do_draw(const QString& tool, const QJsonObject& args);
+    QString do_table(const QJsonObject& args);   ///< the table tool: stock/table.py with the model's rows
+    /// Run `job` now and put its picture on the canvas; "" on success, else why (also shown on the canvas).
+    QString draw_now(CanvasJob job, bool savable);
+    void show_request(const ShowRequest& r, const QString& text);   ///< the canvas fast path
+    QString show_model(const std::string& what);   ///< the 3-D page (canvas_model.h); "OK: …" or "ERROR: …"
+    QString show_lidar(const std::string& which);  ///< the point-cloud page (canvas_lidar.h): helios | bpearl | both
+    void canvas_stop();   ///< stop whatever the canvas keeps live: a script worker, the camera, the lidars
+    std::optional<CanvasJob> library_job(const QString& name, const QStringList& args) const;
+    QStringList canvas_library() const;   ///< stock + saved script names
+    void write_canvas_inputs(const CanvasJob& job);
+    void tick_canvas();                   ///< live re-run
+    void save_canvas_script(const QString& name);
+    /// plan_mission(request): queue the planner request (run_planner, after this turn's on_done); "" = queued, else
+    /// the tool result at once (a refusal).
+    QString queue_planner(const QJsonObject& args);
+    void run_planner();                          ///< one planner request (the first, or a fix round)
+    void on_planned(const QString& reply);       ///< ask / fix round / REJECTED / card
+    void finish_planner(const QString& result, bool speak = true);   ///< the deferred tool result, then the follow-up
+    /// Abandon the job now (the person spoke, Esc): cancel its request, push `result` as its tool message, no follow-up.
+    void drop_planner(const QString& result);
+    [[nodiscard]] QString planner_state() const;   ///< state_message() + the `ways from here` line (planner only)
+    /// After a tool round of the model: re-ask to fix a failed draw, or one follow-up when it said nothing / saw a picture.
+    void after_tool_round(bool had_words, bool image);
+    [[nodiscard]] bool name_exists(std::string_view name) const;   ///< a node of the live graph or a remembered passage
+    /// approach_object: pick the object, put a standpoint short of it, send a one-step go_to mission (approach.h).
+    QString do_approach(const QJsonObject& args);
+    /// go_around_object: a loop of go_to stops around an object, back to the start (approach.h go_around_mission).
+    QString do_go_around(const QJsonObject& args);
+    /// sim_door: the door's world pose through the sim witness → tools/sim_door.py, async; told by on_sim_door_done.
+    QString do_sim_door(const QJsonObject& args);
+    QString do_imagine_view(const QJsonObject& args);   ///< imagine_view: sample → render → canvas (imagine_view.h)
+    QString do_imagine(const QJsonObject& args);   ///< imagine: fit / see / succeed on an imagined copy (imagine_*.h)
+    void load_robot_body();   ///< the controller's body (body_model.h) into body_half_width_ / robot_height_m_ / body_note_, cached on success
+    QString do_can_see(const QJsonObject& args);   ///< can_see: the perception cards answer (perception_world.h, can_see.h)
+    void on_sim_door_done(int code);
+    [[nodiscard]] bool sim_door_available() const;   ///< endpoint configured AND robot_gt_* on the robot node (sim)
+    /// episodes / episode / outcome_stats / last_episode → the tool-result text; "" if `name` is not one of them.
+    QString answer_memory(const QString& name, const QJsonObject& args) const;
+    /// Today's records + the all-time stats from the domain-4 graph; nullopt when it is not joined.
+    std::optional<rc::em::Store> em_store() const;
+    void tick_status();
+    /// A new controller_mission snapshot: its progress lines, and the wakes of a chat mission.
+    void on_mission_progress(rc::mission::Progress now);
+    void drain_wakes();   ///< the oldest robot event to the model, if it is idle
+    /// The room the robot is physically in: the one its pose is published in (live robot RT), else the current room.
+    [[nodiscard]] std::string physical_room() const;
+    [[nodiscard]] std::string sent_title() const;   ///< the title of the mission JSON last sent ('the mission' if none)
+    /// Fast path 1d: send mission_control_action's word (if any) and answer with its fixed reply.
+    void mission_control(const MissionControl& act, const QString& text);
+    void ping_llm();
+    void refresh_status_bar();
+    void poll_gpu();   ///< start an nvidia-smi query unless one is still running; its result lands in gpu_label_
+    void setup_vlm_status();   ///< decide local vs remote ollama from [LLM] url; remote ⇒ resolve its ip + host name
+    void poll_vlm();   ///< GET <url>/api/ps asynchronously (none stacked); its result lands in gpu_label_
+    /// agent_control: start / stop / restart a fleet agent (fleet_control.h); the outcome is told later by tick_fleet.
+    QString do_agent_control(const QJsonObject& args);
+    struct FleetEnd { bool ok = false; std::string note; };   ///< how a start / stop / restart ended, for the model
+    /// One look at the start / stop / restart in progress; when it has ended, whether it worked and the robot-event
+    /// note telling the model (fleet::control_done_note). The timer's ticks queue the note as a wake;
+    /// do_agent_control's first tick returns it as the tool result instead.
+    std::optional<FleetEnd> tick_fleet();
+    bool launch_agent(const std::string& agent);   ///< `cd <agent> && setsid bin/<agent> etc/config.toml`, detached
+    [[nodiscard]] QString agent_log(const std::string& agent) const;
+
+    std::shared_ptr<DSR::DSRGraph> G_;
+    std::optional<float> body_half_width_;   ///< load_robot_body()'s cache (the mesh and the controller's config do not change)
+    std::optional<float> robot_height_m_;
+    std::string body_note_;
+    std::shared_ptr<DSR::DSRGraph> em_G_;   ///< episodic memory (domain 4), nullptr = not joined
+    SessionConfig cfg_;
+    std::unique_ptr<DSR::InnerEigenAPI> inner_;
+    WorldDigest digest_builder_;
+    Digest digest_;
+    IntentionNode intention_;
+    MissionWatch mission_watch_;   ///< the controller's controller_mission node → the plan window
+    rc::mission::Progress mission_progress_;   ///< its last progress (the STATE's "controller mission now" line)
+    rc::mission::Mission mission_ir_;          ///< the IR that progress is about (progress_lines' step names)
+    bool mission_primed_ = false;              ///< the first snapshot of a run is a baseline unless it began after start
+    std::uint64_t start_ms_ = 0;               ///< when this session started (wall clock, the controller's ms)
+    WakeQueue wakes_;                          ///< robot events waiting for the model
+    std::string fix_key_;                      ///< "m<serial>" of the failed mission whose wake was delivered last
+    std::uint64_t fix_turn_ = 0;               ///< user_turn_ at that delivery (fix_still_open)
+    bool wake_turn_ = false;                   ///< the model's current turn answers a robot event, not the person
+    OllamaClient llm_;
+    std::unique_ptr<ChatWindow> window_;
+    ChatLog log_;
+    CameraGrabber cameras_;
+    SystemReader system_{G_, cameras_};   ///< agents / sensors / graph / inspect (after cameras_: it reads their rates)
+    CanvasRunner canvas_runner_;
+    CanvasJob canvas_job_;          ///< what the canvas shows now (re-run while live)
+    std::optional<Camera> canvas_camera_;   ///< the stock camera drawing: frames shown directly, no script
+    LidarGrabber lidars_{G_};               ///< the point-cloud page's subscribers (made only while it shows)
+    bool canvas_lidar_ = false;             ///< the point-cloud page is up: the canvas timer polls lidars_
+    bool lidar_logged_ = false;             ///< its first frame has been logged
+    bool canvas_live_ = false;
+    bool canvas_savable_ = false;
+    int draw_repairs_ = 0;          ///< model re-asks after a failed draw, this user message (cap kMaxDrawRepairs)
+    int lost_answers_ = 0;          ///< model answers this user message that came back empty (one is re-asked)
+    bool draw_failed_ = false;      ///< a draw in the current tool round failed
+    QTimer canvas_timer_;
+    QByteArray look_jpeg_;   ///< set by do_look(), attached to that call's role:"tool" message
+    QObject ctx_;
+    QTimer digest_timer_, status_timer_, ping_timer_;
+
+    // object change tracking (current room only; node id → fact)
+    std::map<std::uint64_t, ObjectFact> objects_now_, window_baseline_, turn_baseline_;
+    std::vector<std::string> turn_doors_;   ///< the current room's doors at the last request (doors_gone)
+    std::uint64_t objects_room_ = 0;
+    bool objects_init_ = false;
+    std::int64_t window_flush_ms_ = 0;
+    QString state_extra_;          ///< lines appended to the STATE for THIS request (changes, last move)
+    std::string last_relative_;    ///< last move/turn command this chat sent ("" = none)
+
+    std::vector<rc::chat::Skill> skills_;   ///< etc/skills/*.md, read once; listed in the system prompt, served by use_skill
+    QString robot_description_;   ///< etc/system_prompt.md, read once; empty ⇒ the built-in fallback
+    std::deque<QJsonObject> history_;
+    struct Turn
+    {
+        QString content;
+        QJsonArray tool_calls;
+        bool followup = false;
+        bool offer_tools = true;
+        bool streaming = false;
+        bool carries_image = false;   ///< this request sent an image ⇒ strip it from the history when it ends
+    } turn_;
+
+
+    // last command written and what the controller last said about it
+    std::string sent_command_;
+    std::uint64_t sent_stamp_ = 0;
+    std::string seen_state_, seen_step_, seen_event_;
+    bool warned_unarmed_ = false, warned_unacked_ = false, reported_end_ = false;
+
+    bool controller_present_ = false;
+    bool ollama_ok_ = false;
+    QString ollama_msg_ = "checking…";
+    QString gpu_label_ = QStringLiteral("GPU n/a");   ///< whole-GPU memory, from gpu_memory.h
+    QTimer gpu_timer_;
+    QProcess gpu_proc_;   ///< the async nvidia-smi query (never waited on in the GUI thread)
+    bool vlm_remote_ = false;   ///< [LLM] url points at another machine ⇒ the status bar shows ITS memory (vlm_status.h)
+    std::string vlm_ip_, vlm_host_;   ///< that machine's address and (reverse-looked-up) name; name may stay empty
+    QNetworkAccessManager vlm_nam_;
+    QPointer<QNetworkReply> vlm_reply_;   ///< the /api/ps request in flight, if any
+    fleet::Policy fleet_policy_;
+    fleet::Confirmations fleet_confirmations_;
+    std::optional<fleet::Op> fleet_op_;   ///< the start / stop / restart in progress
+    QTimer fleet_timer_;
+    QProcess sim_door_proc_;     ///< the sim_door.py request in flight (never waited on in the GUI thread)
+    QString sim_door_what_;      ///< "open door_1" — what the in-flight request is for
+    std::uint64_t user_turn_ = 0;          ///< messages typed by the person: a yes must come in a later one
+    QString last_user_text_;               ///< the person's last message: Mission::request of what it leads to
+
+    struct PlannerJob   ///< plan_mission's planner request, queued or in flight (one at a time)
+    {
+        QString request;           ///< what the conversation model asked to plan
+        QString request_text;      ///< the person's message that led to it (Mission::request), taken at queue time
+        std::uint64_t turn = 0;    ///< user_turn_ at queue time: any later message drops the job (plan_still_wanted)
+        QJsonArray rounds;         ///< earlier replies and why each was refused (assistant + user pairs)
+        QString reply;             ///< the reply being received
+        int fixes = 0;             ///< fix rounds done (cap kMaxPlanFixes)
+        bool image = false;        ///< the calling round attached a picture (look): its follow-up must show it
+        bool from_wake = false;    ///< queued in a robot event's turn: request_text is not about it (planner_request)
+    };
+    std::optional<PlannerJob> planner_;
+    struct MissionCard   ///< a checked mission shown to the person, waiting for their yes
+    {
+        rc::mission::Mission mission;
+        std::uint64_t serial = 0;   ///< counts the cards of this run (logs)
+        std::uint64_t turn = 0;     ///< user_turn_ when it was shown: card_still_valid
+    };
+    std::optional<MissionCard> pending_mission_;
+    std::uint64_t card_serial_ = 0;
+};
+
+}   // namespace rc::chat

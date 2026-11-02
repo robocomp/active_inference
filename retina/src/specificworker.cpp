@@ -1892,7 +1892,23 @@ std::optional<SpecificWorker::SceneFrame> SpecificWorker::process_scene_frame(FP
         { gate_log("get_room_robot_transform"); return std::nullopt; }
 
     scene_processor->mark_room_rt_ready();
-    const auto graph_object_boxes = scene_processor->get_graph_object_boxes(room_name, frame_ts_ms);
+    // Boxes + room layout are slow-changing and cost ~50 ms/cycle (full node copies, grows with the graph):
+    // refresh at ~5 Hz, reuse in between. Everything else (pose, lidar) stays per-cycle.
+    static std::vector<GraphObjectBox> cached_boxes;
+    static std::vector<float> cached_poly_x, cached_poly_y;
+    static float cached_room_height = 0.f;
+    static std::string cached_room_name;
+    static auto last_gather = std::chrono::steady_clock::time_point{};
+    const auto gather_now = std::chrono::steady_clock::now();
+    if (cached_room_name != room_name or gather_now - last_gather >= std::chrono::milliseconds(200))
+    {
+        cached_boxes = scene_processor->get_graph_object_boxes(room_name, frame_ts_ms);
+        cached_poly_x.clear(); cached_poly_y.clear(); cached_room_height = 0.f;
+        scene_processor->get_room_layout(cached_poly_x, cached_poly_y, cached_room_height);
+        cached_room_name = room_name;
+        last_gather = gather_now;
+    }
+    const auto& graph_object_boxes = cached_boxes;
 
     std::vector<Eigen::Vector3f> lidar_points_room;
     std::vector<std::uint8_t>    lidar_plane_id;   // per-point source plane (helios=0, bpearl=1) for colouring
@@ -2005,9 +2021,8 @@ std::optional<SpecificWorker::SceneFrame> SpecificWorker::process_scene_frame(FP
 
     // Gather the room floor polygon + ceiling height HERE (main thread) so the projection overlay
     // never traverses the graph itself — its per-frame reads raced DDS-thread residual inserts.
-    std::vector<float> room_poly_x, room_poly_y;
-    float room_height = 0.f;
-    scene_processor->get_room_layout(room_poly_x, room_poly_y, room_height);
+    std::vector<float> room_poly_x = cached_poly_x, room_poly_y = cached_poly_y;
+    const float room_height = cached_room_height;
 
     // Ricoh pose in the room frame — single source of truth is the graph (body→ricoh RT + the ricoh
     // node's equirect intrinsics, applied by CameraAPI). Resolve the static robot→ricoh mount ONCE,

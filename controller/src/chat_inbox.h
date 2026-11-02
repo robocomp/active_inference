@@ -1,25 +1,25 @@
 #pragma once
 /*
- * chat_inbox.h — the controller's end of chat_agent's command channel (2026-10-12, robot chat phase 1).
+ * chat_inbox.h — the controller's end of language_agent's command channel (2026-10-12, robot chat phase 1).
  *
- * chat_agent owns ONE node, `chat_intention` (type `intention`, has_intention edge from the robot node "Shadow").
+ * language_agent owns ONE node, `chat_intention` (type `intention`, has_intention edge from the robot node "Shadow").
  * It writes the command text into `current_intention` and stamps `timestamp_agent` (epoch ms); a new stamp is a new
  * command. The controller reads it here and writes back how that command is going — ON THE has_intention EDGE:
  *
  *   state            in_progress · completed · aborted · failed|<reason>
  *   bt_state         "<step>|<last [door-passage] event>|driving=on|off"
- *   timestamp_agent  the stamp of the command this status is about (chat_agent ignores a report on an older one)
+ *   timestamp_agent  the stamp of the command this status is about (language_agent ignores a report on an older one)
  *
  * ★ ONE WRITER PER OBJECT, BECAUSE OF THE LWW ENGINE. cortex's update_node re-versions EVERY attribute of the local
  *   copy at the writer's clock (dsr_lww_sync_engine.cpp update_node_local: to_attr_state_map(attrs, version)), even
- *   though it only SENDS the changed ones. A status write onto the node in the few ms before chat_agent's new command
+ *   though it only SENDS the changed ones. A status write onto the node in the few ms before language_agent's new command
  *   arrives would give the controller's stale `current_intention` a NEWER version, and the incoming command would lose
- *   the merge and never be seen. So chat_agent writes only the node, and the controller writes only the edge.
+ *   the merge and never be seen. So language_agent writes only the node, and the controller writes only the edge.
  *
  * ★ POLLED, NEVER SIGNALLED (CLAUDE.md): no update_node_signal connect. poll() and publish() are called from the
  *   control thread's loop, which owns the session and the door passage; graph reads/writes are thread-safe.
  *
- * ★ A STALE COMMAND IS NEVER EXECUTED. The first time a node is seen (controller restart, chat_agent restart) its
+ * ★ A STALE COMMAND IS NEVER EXECUTED. The first time a node is seen (controller restart, language_agent restart) its
  *   command is executed only if it is younger than kFirstSightMaxAgeMs; otherwise its stamp is merely adopted. A
  *   protocol rule, not a model threshold: a command typed minutes ago into a session that has since restarted is
  *   not a request anyone is still making.

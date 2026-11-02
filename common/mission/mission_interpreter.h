@@ -1,7 +1,7 @@
 #pragma once
 /*
  * mission_interpreter.h — the step machine that runs a grounded mission (mission_ir.h), 2026-10-17.
- * Design: chat_agent/docs/mission_language_2026-10-13.md §3.1 (what each primitive compiles to), §3.5 (failure),
+ * Design: language_agent/docs/mission_language_2026-10-13.md §3.1 (what each primitive compiles to), §3.5 (failure),
  * §3.6 (progress), §7.5 (which requests replace a running mission).
  *
  * The interpreter owns the CONTROL FLOW every mission shares — seq, repeat, on_fail, `until`, budgets, anchors,
@@ -70,6 +70,11 @@ public:
     virtual void halt() = 0;
     /// The robot's pose now, for `anchor`. nullopt = not known.
     virtual std::optional<Pose> pose() = 0;
+    /// The room the robot is physically in now, a proto-room included, for `cross … bind=NAME`. nullopt = not known.
+    /// (The controller answers with rc::room::physical_room, the same rule the chat reports by.)
+    virtual std::optional<std::string> current_room() = 0;
+    /// `bind=NAME` has just latched `room` (a log line for whoever runs the robot; the default says nothing).
+    virtual void on_bind(const std::string& /*name*/, const std::string& /*room*/) {}
     /// A predicate's belief now: a probability, or 0 / 1 for a fact. nullopt = cannot be evaluated now.
     virtual std::optional<double> eval(const Pred& p) = 0;
 };
@@ -116,10 +121,12 @@ public:
         title_ = std::move(m.title);
         anchors_ = std::move(m.anchors);
         captured_.clear();
+        vars_.clear();
         root_step_ = Step{.id = "", .op = "seq", .steps = std::move(m.steps)};
         root_ = build(root_step_);
         state_ = State::Running;
         abort_outcome_.clear();
+        paused_ = false;
         tick_ = 0;
         event(std::format("mission '{}': started ({} steps)", title_, root_step_.steps.size()));
         return std::nullopt;
@@ -127,7 +134,7 @@ public:
 
     void tick(std::uint64_t now_ms)
     {
-        if (state_ != State::Running) return;
+        if (state_ != State::Running or paused_) return;
         ++tick_;
         advance(root_, now_ms);
         if (root_.state == StepState::Satisfied)
@@ -148,8 +155,47 @@ public:
         cancel_subtree(root_, now_ms, outcome);
         state_ = State::Aborted;
         abort_outcome_ = outcome;
+        paused_ = false;
         event(std::format("mission '{}': aborted ({})", title_, outcome));
     }
+
+    /// Freeze the mission at any moment: the running leaf is cancelled (the host decides what holding means) and
+    /// every clock stops. True if a running, not yet paused mission was paused.
+    bool pause(std::uint64_t now_ms)
+    {
+        if (state_ != State::Running or paused_) return false;
+        if (Run* leaf = running_leaf(root_); leaf != nullptr)
+        {
+            if (leaf->started) host_.cancel(leaf->resolved);
+            leaf->started = false;
+            paused_leaf_ = leaf->step->id;
+            event(std::format("step {}: paused", label(*leaf->step)));
+        }
+        else paused_leaf_.clear();
+        paused_ = true;
+        paused_at_ = now_ms;
+        return true;
+    }
+
+    /// Thaw it: the interrupted leaf restarts from its beginning with its whole budget, and no attempt is spent.
+    /// Enclosing steps' budgets resume where they stopped (their clocks are shifted by the time paused).
+    bool unpause(std::uint64_t now_ms)
+    {
+        if (state_ != State::Running or not paused_) return false;
+        paused_ = false;
+        for (Run* r = running_child(root_); r != nullptr; r = running_child(*r))
+        {
+            if (r->kids.empty())
+            {
+                r->began = now_ms;
+                event(std::format("step {}: restarted", label(*r->step)));
+            }
+            else r->began += now_ms - paused_at_;
+        }
+        return true;
+    }
+
+    [[nodiscard]] bool paused() const { return paused_; }
 
     /// End the running `wait`, if that is what runs. True if one was ended.
     bool resume(std::uint64_t now_ms)
@@ -174,7 +220,7 @@ public:
         switch (state_)
         {
             case State::Idle: return "";
-            case State::Running: return "in_progress";
+            case State::Running: return paused_ ? "paused|" + paused_leaf_ : "in_progress";
             case State::Completed: return "completed";
             case State::Failed: return std::format("failed|{}|{}", root_.origin, root_.outcome);
             case State::Aborted: return "aborted|" + abort_outcome_;
@@ -186,6 +232,7 @@ public:
     [[nodiscard]] std::string progress() const
     {
         if (state_ != State::Running) return std::format("-|{}|{}", status(), last_event_);
+        // paused: the same step path, so the paused step is the one reported (status() carries "paused|<id>")
         std::vector<const Run*> path;
         for (const Run* r = &root_; r != nullptr; r = running_child(*r)) path.push_back(r);
         const Run& leaf = *path.back();
@@ -260,9 +307,13 @@ private:
     State state_ = State::Idle;
     std::string title_, abort_outcome_, last_event_;
     std::map<std::string, Pose, std::less<>> anchors_, captured_;
+    std::map<std::string, std::string, std::less<>> vars_;   ///< `bind=NAME` → the room name; cleared in start()
     Step root_step_{};
     Run root_{};
     std::uint64_t tick_ = 0;
+    bool paused_ = false;
+    std::uint64_t paused_at_ = 0;
+    std::string paused_leaf_;
     std::vector<std::string> events_;
     std::vector<StepTransition> transitions_;
     std::uint64_t mission_ = 0;
@@ -312,8 +363,26 @@ private:
         for (auto& k : r.kids) reset(k);
     }
 
-    bool holds(const Pred& p)
+    /// A ref with a `$NAME` replaced by the node it was bound to. False = the name is not bound (yet).
+    bool substitute(Ref& ref) const
     {
+        if (ref.kind != Ref::Kind::Var) return true;
+        const auto v = vars_.find(ref.name);
+        if (v == vars_.end()) return false;
+        ref = Ref{.kind = Ref::Kind::Node, .name = v->second};
+        return true;
+    }
+    bool substitute(Pred& p) const
+    {
+        for (auto& [_, ref] : p.refs)
+            if (not substitute(ref)) return false;
+        return true;
+    }
+
+    bool holds(const Pred& pred)
+    {
+        Pred p = pred;
+        if (not substitute(p)) return false;   // an unbound name is a belief that cannot be evaluated
         const auto v = host_.eval(p);
         if (not v.has_value()) return false;
         if (not p.cmp.has_value()) return *v != 0.0;
@@ -439,6 +508,7 @@ private:
             host_.halt();
             return satisfy(r, now);
         }
+        if (s.op == "report") return satisfy(r, now);   // the text is the model's, read by the chat; nothing to do here
         if (s.op == "anchor")
         {
             const auto p = host_.pose();
@@ -451,7 +521,7 @@ private:
         {
             if (until.has_value() and holds(*until)) return satisfy(r, now, "until");
             auto resolved = resolve(s);
-            if (not resolved.has_value()) return fail(r, now, "no_anchor", s.id);
+            if (not resolved.has_value()) return fail(r, now, resolve_failure_, s.id);
             r.resolved = std::move(*resolved);
             if (auto refused = host_.start(r.resolved); refused.has_value()) return fail(r, now, *refused, s.id);
             r.started = true;
@@ -480,6 +550,13 @@ private:
                 const Pred in_room{.name = "in_room", .refs = {{"room", Ref{.kind = Ref::Kind::Node, .name = *expect}}}};
                 if (not holds(in_room)) return fail(r, now, "wrong_room", s.id);
             }
+            if (const auto& name = s.bind; name.has_value())
+            {
+                const auto room = host_.current_room();
+                if (not room.has_value()) return fail(r, now, "no_room", s.id);
+                vars_[*name] = *room;
+                host_.on_bind(*name, *room);
+            }
             satisfy(r, now);
         }
     }
@@ -493,19 +570,39 @@ private:
     }
 
     /// A copy of the step with every anchor replaced by its pose: captured during this mission, else declared.
-    std::optional<Step> resolve(const Step& s) const
+    /// and every `$NAME` by the room it was bound to. nullopt: resolve_failure_ says why (no_anchor | unbound).
+    std::optional<Step> resolve(const Step& s)
     {
         Step out = s;
         for (auto& [_, v] : out.args)
-            if (auto* ref = std::get_if<Ref>(&v); ref != nullptr and ref->kind == Ref::Kind::Anchor)
+        {
+            if (auto* pred = std::get_if<Pred>(&v); pred != nullptr)
+            {
+                if (not substitute(*pred)) return unresolved("unbound");
+                continue;
+            }
+            auto* ref = std::get_if<Ref>(&v);
+            if (ref == nullptr) continue;
+            if (ref->kind == Ref::Kind::Var)
+            {
+                if (not substitute(*ref)) return unresolved("unbound");
+            }
+            else if (ref->kind == Ref::Kind::Anchor)
             {
                 const auto c = captured_.find(ref->name);
                 const auto d = anchors_.find(ref->name);
-                if (c == captured_.end() and d == anchors_.end()) return std::nullopt;
+                if (c == captured_.end() and d == anchors_.end()) return unresolved("no_anchor");
                 *ref = Ref{.kind = Ref::Kind::Pose, .pose = c != captured_.end() ? c->second : d->second};
             }
+        }
         return out;
     }
+    std::nullopt_t unresolved(std::string why)
+    {
+        resolve_failure_ = std::move(why);
+        return std::nullopt;
+    }
+    std::string resolve_failure_{};
 
     void cancel_subtree(Run& r, std::uint64_t now, const std::string& outcome)
     {

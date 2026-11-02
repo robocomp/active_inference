@@ -9,6 +9,7 @@
  */
 
 #include "cabinet_projection.h"
+#include "cabinet_config.h"   // rc::k*OwnWallSkipM (shared with the perception card)
 
 #include <algorithm>
 #include <cmath>
@@ -163,7 +164,7 @@ SilhouetteExistence CabinetProjection::compute_silhouette_existence(const Cabine
     // A cabinet is wall-anchored, so its own samples sit on/just inside its wall: skip segments this close to
     // the sample so the cabinet is never occluded by the very wall it hangs on. Deeper than table's 0.15 m
     // because a cabinet run has real depth off the wall face.
-    constexpr float kOwnWallSkipM = 0.70f;
+    constexpr float kOwnWallSkipM = rc::kCabinetOwnWallSkipM;   // cabinet_config.h: shared with the perception card
 
     const float fx = camera_api_->get_focal_x(), fy = camera_api_->get_focal_y();
     const float W  = static_cast<float>(camera_api_->get_width());

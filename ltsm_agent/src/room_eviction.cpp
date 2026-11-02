@@ -312,6 +312,10 @@ bool RoomEviction::copy_subtree(std::uint64_t live_id, std::uint64_t mem_parent_
             // INTO long-term memory, not part of the room — archiving one wrote `r2_recall_room_1` (live try22).
             if (live_->get_attrib_by_name<object_subtype_att>(child.value()).value_or(std::string{}) == "room_recall")
                 continue;
+            // ltom_agent's recall nodes (metaconcept, RT child of the live room) are a projection of ltom's own store,
+            // never room content; see docs/superpowers/plans/2026-11-01-ltom-recall-chair.md.
+            if (child->name().starts_with("ltom_recall_"))
+                continue;
             if (scope == Scope::Structure and child->type() != "floor" and child->type() != "wall"
                 and not is_door(*live_, child.value()))
                 continue;

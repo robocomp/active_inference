@@ -32,6 +32,8 @@ rejoin_grace_ms = 1500
 stale_grace_ms = 120000
 agent_info_period_ms = 1000
 
+# instance names: etc/instance_identity.csv (common/instance_identity) keeps the last chair_<N> issued across restarts;
+# delete it to restart numbering (the live graph still bounds it from below).
 [Owns]
 # "chair_*" added 2026-07-31: the per-instance chair nodes (chair_scene_graph.cpp names them "chair_<N>")
 # were swept ONLY by the bespoke SpecificWorker::remove_owned_chair_nodes(), duplicating what the shared
@@ -59,7 +61,6 @@ AI2SigmaBaseM = 0.03
 AI2ClutterFrac = 0.10
 AI2ClutterScaleM = 0.12
 AI2ClutterStructureGain = 1.0    # density-aware clutter: shrink the clutter prior for seat-coplanar points (closes the escape valve → seat_d recovers with honest Σ). 0 = flat clutter
-AI2PriorSizeStd = 0.15
 AI2ProcessStdM = 0.005
 AI2ProcessStdYaw = 0.01
 AI2ProcessStdSize = 0.0005       # process noise for RIGID size DOFs (≪ pose; furniture shape doesn't drift)
@@ -184,6 +185,8 @@ RtCovAddChain = true        # Part B: add the localization/chain cov J·Σ_chain
 GateMahalanobis = 9.0     # χ²₂ gate (~3σ) for a mask↔instance match once it has a cov
 GateFallbackM = 0.40     # metric XY gate (m) before an instance has a usable covariance
 DetectionNoiseM = 0.20   # R in the association innovation cov S=P+R²I (≥ centroid-vs-fit offset)
+RecallPiMove = 0.5       # ltom recall: weight of "the remembered chair was moved" (a GUESS - chairs get moved; learned permanence replaces it in step 4). 1 = location says nothing
+RecallLogPriorNew = 0.0  # ltom recall: log prior of "a NEW chair" vs one recalled candidate (0 = equal); the newborn takes a candidate only if it is the strict MAP
 BirthFrames = 8          # frames a mask must stay unexplained before spawning a chair
 BirthMinSepM = 0.70      # a birth must be ≥ this (m) from every existing chair (anti-duplicate)
 MergeOverlap = 0.20      # collapse two instances whose seat footprints overlap ≥ this fraction of the smaller, keeping the more-observed. 0 disables.
@@ -198,12 +201,6 @@ MergeOverlap = 0.20      # collapse two instances whose seat footprints overlap 
 # that mismatch routed 99% of SEAT points into the BACKREST component (the z-band gate keys on SeatH)
 # and dumped 30-56% of every mask above the model into flat clutter. Fixing SeatH alone moved a chair's
 # continuous yaw error from 98.1 deg to 1.0 deg. Re-derive these for any different chair model.
-BirthSeatW = 0.60        # x extent — the span the backrest covers
-BirthSeatD = 0.52        # y extent — front-to-back; the backrest sits on the -y edge
-BirthSeatH = 0.595       # seat TOP above the floor
-BirthBackH = 0.655       # backrest height above the seat top (top ends up at 1.25)
-BirthSeatThick = 0.075   # seat slab thickness — also sets the leg/seat z-band split
-BirthLegHalf = 0.0375    # square leg half-side
 
 NllCost = false          # association cost = ½(m²+ln|S|) NLL (compete by likelihood, not raw distance)
 # ZED-only BIRTH: only a ZED slice (per-pixel depth ⇒ depth_var==0) may SPAWN a chair. A ricoh LiDAR-reprojected
@@ -246,21 +243,10 @@ ContourCheck = true      # classifier-free contour channel (common/contour_edge,
 RoomPrior = true         # enforce the room-containment pose prior
 RoomMarginM = 0.40       # tolerance a chair centre may sit OUTSIDE the walls (wall-hugging chair + centroid noise)
 OutOfRoomGain = 1.5      # |ΔL| per frame while outside → removed in a few frames (also debounces a 1-frame glitch)
-# "ZED removes, ricoh confirms": a ricoh WIN confirms existence but a ricoh mask's ABSENCE never removes — only ZED
-# absence does, weighted by how reliably ZED would have detected a present chair (falls off toward the image edge +
-# with range). Fixes removal of a far/peripheral only-ricoh-visible chair when its 360 view is momentarily occluded.
-ZedEdgeOffset = 1.0      # normalised ROI offset (0=centred, 1=image edge) at which ZED detectability → 0
-ZedRangeFull  = 4.0      # within this range (m) ZED detects reliably → absence fully counts (pd=1)
-ZedRangeRef   = 7.0      # beyond this range (m) ZED absence says nothing about existence (pd=0)
-ZedClearLosFloor = 0.0   # ★0 SINCE 2026-07-29 (was 0.15) — this floor WAS the "chairs vanish when unobserved" bug.
-                         # It overrode zed_detectability()==0 (chair beyond ZedRangeRef or at the image edge = ZED
-                         # provably cannot resolve it) and vacated anyway at a constant rate once since_det passed
-                         # VacateConfidentFrames, so L walked to RemoveLogodds on ZERO informative looks. Live proof
-                         # in etc/chair_existence_log.csv: 51 of 69 vacate rows had zed_pd == 0 exactly; chair_2 fell
-                         # 3.09→1.74 and chair_3 2.44→1.09 on the floor alone, then were deleted. Out-of-room glitch
-                         # phantoms (the case this was aimed at) are still reaped by the room-containment prior.
-                         # 0 = pure pd (a peripheral phantom then persists until the robot centres it). Tune down
-                         # if real peripheral chairs get removed; up to clear glitch phantoms faster.
+# "ZED removes, ricoh confirms": ricoh absence never removes; ZED absence is weighted by the shared P(detect)
+# (envelope x in_fov x central x wall line of sight; envelope = ChairModel.DetectMinFill/MaxFill/Soft, defaults 0.10/0.60/0.06).
+# Retired 2026-10-31: ZedEdgeOffset, ZedRangeFull, ZedRangeRef, ZedClearLosFloor -- replaced by that shared formula
+# (range now falls out of the fill; wall line of sight added; a pd floor contradicts "absence is weighted by P(detect)").
 
 [Ice]
 Warn.Connections = "0"

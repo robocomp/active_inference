@@ -108,6 +108,7 @@ requires standoff_m
   cross door_19
   close door_19
   approach table_1 side=yp
+  report "objects here"
 )";
         const auto m = parse_text(all);
         CHECK(m.has_value());
@@ -171,6 +172,19 @@ requires standoff_m
         CHECK(m->steps[0].op == "close" and m->steps[0].ref("door").has_value() and m->steps[0].ref("door")->name == "room_1");
     else
         CHECK(false);
+
+    // ── bind / $NAME: a cross names the room it lands in; a later step may use it ───────────────────────────────
+    {
+        const std::string bound = "mission \"t\"\n  cross door_1 bind=next\n  explore $next budget_s=10s\n  report \"objects here\"\n";
+        CHECK(rejected(bound).empty());
+        const auto m = parse_text(bound);
+        CHECK(m.has_value() and print_text(m.value()) == bound);
+        CHECK(rejected("mission\n  explore $next budget_s=10s\n") == "unbound");
+        const auto u = parse_text("mission\n  explore $next budget_s=10s\n");
+        CHECK(not u.has_value() and u.error().text.find("next") != std::string::npos);
+        CHECK(rejected("mission\n  explore room_1 budget_s=10s bind=x\n") == "unsupported:bind");
+        CHECK(rejected("mission\n  report\n") == "missing_field");
+    }
 
     // ── Locale: decimals parse the same under es_ES ─────────────────────────────────────────────────────────────
     if (const auto m = parse_text("mission\n  move distance_m=-1.25 turn_deg=1e1\n"); m.has_value())

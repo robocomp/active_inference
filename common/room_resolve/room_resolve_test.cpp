@@ -94,6 +94,20 @@ int main()
     expect("rt: proto Live -> it (provisional rooms count)",
            resolve_robot_rt_room(std::vector<RoomFact>{{5, false, Rt::Retired}, {9, true, Rt::Live}}), 9);
 
+    // ── the PHYSICAL room (2026-10-24, final review I1): what a mission's bind latches, and the chat reports ───────
+    using rc::room::resolve_physical_room;
+    expect("physical: the crossing window -- current still names the old room, the live RT is the proto",
+           resolve_physical_room(std::vector<RoomFact>{{9, true, Rt::Live}}, resolve_current_room(cur_at_7,
+               std::vector<RoomFact>{{7, false, Rt::Retired}, {9, true, Rt::Live}})), 9);
+    expect("physical: one live RT, no current -> it",
+           resolve_physical_room(std::vector<RoomFact>{{5, false, Rt::Live}}, 5), 5);
+    expect("physical: no live RT -> the identity rule",
+           resolve_physical_room(std::vector<RoomFact>{}, 7), 7);
+    expect("physical: two live RTs -> abstains to the identity rule",
+           resolve_physical_room(std::vector<RoomFact>{{5, false, Rt::Live}, {9, true, Rt::Live}}, 5), 5);
+    expect("physical: nothing known -> nothing",
+           resolve_physical_room(std::vector<RoomFact>{}, std::nullopt), std::nullopt);
+
     std::printf("%s: %d failure(s)\n", fails == 0 ? "ALL PASS" : "FAILED", fails);
     return fails == 0 ? 0 : 1;
 }

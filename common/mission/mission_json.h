@@ -1,6 +1,6 @@
 #pragma once
 /*
- * mission_json.h — the wire form of the grounded mission (mission_ir.h): what chat_agent writes into
+ * mission_json.h — the wire form of the grounded mission (mission_ir.h): what language_agent writes into
  * chat_intention's `current_intention` and the controller decodes (2026-10-17).
  *
  *   {"v":1, "title":…, "request":…, "fixes":"m12", "anchors":{name:{room,x,y,yaw,sigma_xy}}, "prefs":{}, "requires":[…],

@@ -9,6 +9,7 @@
  */
 
 #include "hood_projection.h"
+#include "hood_config.h"   // rc::k*OwnWallSkipM (shared with the perception card)
 
 #include <algorithm>
 #include <array>
@@ -367,7 +368,7 @@ SilhouetteExistence HoodProjection::compute_silhouette_existence(const HoodInsta
     // intent. 0.70 m ≈ fridge depth. The validated failure this fixes (camera 7.0 m away through a wall,
     // in_fov_frac=1.00, ex_L −4 in three cycles → DELETED) is unaffected: that wall is metres from the
     // sample, far outside the skip. See [[hood-silhouette-line-of-sight]].
-    constexpr float kOwnWallSkipM = 0.70f;
+    constexpr float kOwnWallSkipM = rc::kHoodOwnWallSkipM;   // hood_config.h: shared with the perception card
     const auto wall_between = [&](const Eigen::Vector2f& q) -> bool
     { return rc::occlusion::walls_block(cam_xy, q, room_polygon_, kOwnWallSkipM); };
 

@@ -14,24 +14,68 @@ label = "chair"                    # the ADE20K/YOLO label this agent claims
 
 [model.geometry]
 support   = "floor_anchored"       # floor_anchored | leg_supported | hangs | counter_top | resolved
-z_top_m   = 0.90                   # seat_h + back_h = 0.45 + 0.45 (chair_model.h)
-extent_m  = 0.90
+z_top_m   = 1.25                   # seat_h + back_h = 0.595 + 0.655 ([prior.template])
+extent_m  = 1.25
 from      = "nominal"
 why       = """
 A chair stands on the floor and chair_belief PINS cz there (AI2FloorZ = 0.0, "cz is PINNED here, shared and
 view-independent"), so the span is [0, seat_h + back_h] by construction rather than by fit. NOMINAL — the
-0.45/0.45 split is the template in chair_model.h, from the appliance class and not from these chairs.
+0.595/0.655 split is the template the agent runs (the real Webots SimpleChair), from the appliance class and not
+measured on these chairs.
 """
 
 [prior.template]
-seat_h_m = 0.45                    # seat TOP above the floor
-back_h_m = 0.45                    # backrest above the seat top
-from     = "nominal"
-why      = """
-chair's size is a FIXED TEMPLATE, not a fitted DOF — chair_belief's state is pose only (cx, cy, yaw). That is
-a modelling claim: a chair seen from one side gives almost no extent information, and estimating it produced
-the size oscillation this lineage is named for. ⚠seat_h has an open gauge question (see the seat_h memory);
-when it is settled, this becomes `measured`.
+seat_w_m     = 0.60                # x extent — the span the backrest covers
+seat_d_m     = 0.52                # y extent — front-to-back; the backrest sits on the -y edge
+seat_h_m     = 0.595               # seat TOP above the floor
+back_h_m     = 0.655               # backrest above the seat top (top at 1.25)
+seat_thick_m = 0.075               # seat slab thickness (also sets the leg/seat z-band split)
+leg_half_m   = 0.0375              # square leg half-side: the Webots SimpleChair legs are 7.5 cm across
+seat_w_std_m = 0.05                # std of the seat_w prior (real chair variation)
+seat_d_std_m = 0.04                # std of the seat_d prior
+seat_h_std_m = 0.03                # std of the seat_h prior
+back_h_std_m = 0.06                # std of the back_h prior
+from         = "nominal"
+why          = """
+The size numbers are the values chair ran as Tracker.BirthSeatW/D/H/BackH/SeatThick in etc/config.toml until
+2026-10-31, when the manifest became their single source. leg_half_m (0.0375) is the Webots SimpleChair's legs, 7.5 cm
+across (the user's ruling, 2026-10-31); it is ONE value feeding the belief, ChairModel's SDF, the mesh and the card's
+LegSet (it replaces Tracker.BirthLegHalf and the SDF's former 0.02 constant, which disagreed with each other). chair's size is a FIXED TEMPLATE,
+not a fitted DOF — chair_belief's state is pose only (cx, cy, yaw). That is a modelling claim: a chair seen from
+one side gives almost no extent information, and estimating it produced the size oscillation this lineage is
+named for. ⚠seat_h has an open gauge question (see the seat_h memory); when it is settled, this becomes `measured`.
+The four *_std_m sigmas describe how much real chairs vary in each size (the user's call, 2026-10-31). They are new
+numbers: the old ChairModel.AI2PriorSizeStd (a single 0.15 m) was never read by any code path, so the agent never ran with
+it, and it was far wider than any real chair; the imagined observations sample from these four sigmas instead.
+"""
+
+[prior.placement]
+p_free           = 0.5             # weight of "stands free in the room" (the two weights are normalised by the reader)
+p_against_wall   = 0.5             # weight of "pushed against a wall"
+wall_gap_mean_m  = 0.05            # gap between the backrest-side/any side and the wall when against a wall
+wall_gap_sigma_m = 0.05            # std of that gap
+from             = "nominal"
+why              = """
+Placement of a chair on the floor of a room: either free-standing or pushed to a wall, half and half, with a
+5 cm gap (std 5 cm). NOMINAL — a guess from how rooms are furnished, not measured on this world; the imagined
+observations that use it (appearance sampling) are only as good as these four numbers.
+"""
+
+[prior.bounds]
+seat_w_min_m = 0.30
+seat_w_max_m = 0.65
+seat_d_min_m = 0.30
+seat_d_max_m = 0.65
+seat_h_min_m = 0.38
+seat_h_max_m = 0.70                # was 0.55 in code: it clamped the live seat_h (0.595) below its own birth template
+back_h_min_m = 0.30
+back_h_max_m = 0.80                # was 0.65 in code: the template back_h is 0.655
+from         = "nominal"
+why          = """
+Physical bounds of the four size DOFs; ChairModel::apply_constraints clamps to them and the perception card exports
+them as the lo/hi of each variable (one source). They must CONTAIN the template (load_chair_prior refuses otherwise):
+the former code constants did not (seat_h <= 0.55, back_h <= 0.65 vs template 0.595/0.655), so live chairs were clamped
+below the very template they were born with. NOMINAL: a generous envelope for domestic chairs, not measured.
 """
 
 # ── DELIBERATELY ABSENT ────────────────────────────────────────────────────────────────────────────────

@@ -97,6 +97,7 @@ SpecificWorker::~SpecificWorker()
 	if (recall_)
 		if (const int n = recall_->remove_all(); n > 0)
 			std::cout << "[recall] removed " << n << " recall node(s) on shutdown" << std::endl;
+	if (topo_pub_) topo_pub_->remove();
 	if (live_passage)
 		if (const int n = live_passage->remove_owned(); n > 0)
 			std::cout << "[passage] removed " << n << " owned live passage(s) on shutdown" << std::endl;
@@ -382,6 +383,8 @@ void SpecificWorker::compute()
         if (not seeded_) seed_memory();
     }
 
+    step_topology_publish();
+
     if (live_passage)
     {
         // The initialize() sweep can run before a crashed run's leftovers finish syncing; sweep once
@@ -488,8 +491,25 @@ void SpecificWorker::seed_memory()
     {
         store->mark_dirty();
         store->save("startup seed");
+        topology_dirty_ = true;
     }
     if (eviction_stage_check) check_seed(so);
+}
+
+void SpecificWorker::step_topology_publish()
+{
+    static constexpr auto kTopologyPoll = std::chrono::seconds(2);   // refresh period for live_door/crossings, not a model constant
+    if (not G_dsr or not G_ltsm) return;
+    if (not topo_pub_)
+    {
+        topo_pub_ = std::make_unique<ltsm::TopologyPublisher>(G_dsr, G_ltsm);
+        topo_pub_->remove();   // a previous run's node (SIGKILL) is replaced, not trusted
+    }
+    const auto now = std::chrono::steady_clock::now();
+    if (not topology_dirty_ and now - topo_last_ < kTopologyPoll) return;
+    topology_dirty_ = false;
+    topo_last_ = now;
+    if (topo_pub_->refresh()) qInfo() << "[topology] ltsm_topology published";
 }
 
 //////////////////////////////////////////////////////////////////////////////////////////////////
@@ -557,6 +577,7 @@ void SpecificWorker::finish_eviction(const ltsm::Outcome &out, const ltsm::Candi
         store->mark_dirty();
         store->save("eviction #" + std::to_string(evictions_done));
     }
+    topology_dirty_ = true;
 
     // The owners let their own nodes go now that their room is no longer current. The sweep is the
     // backstop for owners that are not running to do it -- never the normal path.
@@ -1322,6 +1343,7 @@ void SpecificWorker::forget_memory_room(const std::string &mem_room)
         store->mark_dirty();
         store->save("forgot " + mem_room);
     }
+    topology_dirty_ = true;
 }
 
 void SpecificWorker::restore_graph_zoom()

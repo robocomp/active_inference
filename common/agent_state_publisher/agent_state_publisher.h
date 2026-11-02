@@ -38,6 +38,7 @@
 #include <QTimer>
 
 #include <memory>
+#include <optional>
 #include <string>
 
 #include "agent_status.h"
@@ -110,6 +111,15 @@ public:
         publish();
     }
 
+    // This agent's perception card, pre-serialised (rc::card::graph_json), mirrored into the perception_card
+    // attribute of its own agent node. Main thread; the 1 s tick retries until the lazily created node exists and
+    // rewrites only when the string differs. The publisher knows nothing of the card's structure.
+    void set_card_json(std::string json)
+    {
+        card_json_ = std::move(json);
+        publish();
+    }
+
     void stop()
     {
         if (reassert_timer_)
@@ -154,12 +164,22 @@ private:
             graph_->add_or_modify_attrib_local<color_att>(n, color);
             dirty = true;
         }
+        if (card_json_.has_value())
+        {
+            const auto cur = graph_->get_attrib_by_name<perception_card_att>(n);
+            if (not cur.has_value() or std::string(cur.value()) != *card_json_)
+            {
+                graph_->add_or_modify_attrib_local<perception_card_att>(n, *card_json_);
+                dirty = true;
+            }
+        }
         if (dirty)
             graph_->update_node(n);
     }
 
     std::shared_ptr<DSR::DSRGraph> graph_;
     std::string node_name_;
+    std::optional<std::string> card_json_;
     agent_status::Fsm fsm_ = agent_status::Fsm::Unknown;
     agent_status::Presence presence_ = agent_status::Presence::Unknown;
     std::unique_ptr<QTimer> reassert_timer_;

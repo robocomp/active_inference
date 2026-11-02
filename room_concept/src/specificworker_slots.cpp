@@ -11,7 +11,6 @@
 
 #include "calib_channels.h"
 #include "ground_truth_log.h"
-#include "mount_calibrator.h"
 #include "pose_publisher.h"
 
 #include <dsr/api/dsr_api.h>

@@ -18,7 +18,6 @@
  */
 #include "specificworker.h"
 
-#include "mount_calibrator.h"
 #include "pose_publisher.h"
 #include "calib_channels.h"
 #include "ground_truth_log.h"
@@ -238,20 +237,12 @@ void SpecificWorker::compute()
 
     // ── WHERE THE CPU GOES WHEN NOTHING IS BEING OPTIMISED ──────────────────────────────────────
     // At 100% early exit the localiser update is ~1.6 ms at 20 Hz — 3% of a core — so the rest of
-    // the CPU is not the thing being watched. Both pumps below run EVERY compute tick regardless of
-    // whether the optimiser will: the driving camera's extraction, and then the SAME extraction
-    // again for each entry in ImageEdge.calibCameras (zed + ricoh today, so three per tick).
-    // Their only live consumers while the gate holds are the calibration accumulator and the canvas
-    // — the loss sees them just on optimised frames. Reported as ms per second, i.e. percent of one
-    // core, so the answer is a number rather than an argument about which pump is heavy.
+    // the CPU is not the thing being watched. The driving camera's extraction runs EVERY compute tick
+    // regardless of whether the optimiser will. Reported as ms per second, i.e. percent of one core.
     {
         QElapsedTimer t; t.start();
         calib_->pump_image_edges();
-        const auto t_edge = t.nsecsElapsed();
-        t.restart();
-        calib_->pump_calib_channels();   // extra cameras: calibration only, never the pose
-        const auto t_calib = t.nsecsElapsed();
-        pump_ns_edge_ += t_edge; pump_ns_calib_ += t_calib; ++pump_ticks_;
+        pump_ns_edge_ += t.nsecsElapsed(); ++pump_ticks_;
         const auto now_ms = QDateTime::currentMSecsSinceEpoch();
         if (pump_report_ms_ == 0) pump_report_ms_ = now_ms;
         else if (now_ms - pump_report_ms_ > 5000)
@@ -267,10 +258,9 @@ void SpecificWorker::compute()
             conv += QString::fromStdString(calib_->convert_stats_line());
             qInfo().nospace().noquote()
                 << "[pumps] over " << secs << " s: image_edge " << (1e-6 * pump_ns_edge_ / secs)
-                << " ms/s  calib_channels " << (1e-6 * pump_ns_calib_ / secs)
                 << " ms/s  (= % of one core) | " << pump_ticks_ << " ticks | conv" << conv
                 << " (converted/delivered)";
-            pump_report_ms_ = now_ms; pump_ns_edge_ = pump_ns_calib_ = 0; pump_ticks_ = 0;
+            pump_report_ms_ = now_ms; pump_ns_edge_ = 0; pump_ticks_ = 0;
         }
     }
 
@@ -281,7 +271,6 @@ void SpecificWorker::compute()
     if (status_stream_ and loc_res.has_value())
         status_.observe(*loc_res);   // scalars only; the snapshot timer serialises them
     t_loc_fetch_us = section_timer.nsecsElapsed() / 1000;
-    joint_calibration_step(loc_res);   // plan 2026-10-05: joint calib monitor (logs only unless LidarMountApply)
 
     const Eigen::Affine2f pose_for_draw = viewer_->best_available_pose(loc_res, have_loc);
     
@@ -410,85 +399,6 @@ void SpecificWorker::compute()
                 << "gui_thread=" << on_gui_thread;
     }
     fps_counter_.print("[Compute]", 3000);
-}
-
-// ── JOINT CALIBRATION (plan docs/superpowers/plans/2026-10-05-joint-calibration.md) ──────────────
-// Task 4, MONITOR: once per new motion solve, one joint posterior over odometry + helios mount + every
-// camera mount -> tmp/joint_calib/. Logs only.
-// ⚠ DEVIATION from the plan's call site: the motion block is read from the localizer's RESULT
-//   (UpdateResult::calib_information, a copy made on the localizer thread), not by reaching into
-//   room_concept_.motion_calibrator() -- that calibrator is fed on the LOCALIZER thread and its
-//   episode deque must not be iterated from this one. The camera pools are fed here, on the main
-//   thread, so they are read directly. The trigger is the monotonic episode counter
-//   (calib_episodes), not last_solve().episodes, which saturates at the 512-episode window.
-//
-// Task 5, LiDAR-SIDE CORRECTION (LidarMountApply, default OFF), every cycle:
-//   T_corr = Planar{lever_x, lever_y, eps_yaw / kEpsPerLidarYaw} from the motion calibrator's ACTING
-//   values (calib_applied bit set), points get compose(T_corr, T_inject).
-// ⚠ DEVIATION: the plan takes T_corr from the JOINT posterior. The acting MOTION values are used
-//   instead because p_applied (which undoes the feedback) records exactly those; applying the joint's
-//   value would act a number p_applied never hears about -- the Review Focus #2 failure. The joint
-//   remains the logged monitor.
-// Camera evidence is then re-referenced to the LiDAR frame in force (camcal::Estimator::
-// reference_to_lidar_yaw, idempotent, persisted), and the joint refers it back through
-// CameraBlock::lidar_yaw_applied. Runs whatever the flag, so evidence left referenced to a correction
-// from an earlier session is brought back to the frame now in force.
-void SpecificWorker::joint_calibration_step(const std::optional<rc::RoomConcept::UpdateResult>& loc_res)
-{
-    if (not loc_res.has_value()) return;
-    const double yaw_sigma = params.IMAGE_EDGE_MOUNT_YAW_SIGMA;
-    double psi_app = 0.0;
-    if (params.LIDAR_MOUNT_APPLY and lidar_ingestor_)
-    {
-        const auto acting = [&](int i)
-        { return ((loc_res->calib_applied >> i) & 1) ? loc_res->calib_value[i] : 0.f; };
-        const rc::lidar_mount::Planar T_corr{acting(rc::calib::P_LEVER_X), acting(rc::calib::P_LEVER_Y),
-                                             acting(rc::calib::P_EPS_YAW) / rc::joint::kEpsPerLidarYaw};
-        // The sim-only injection is now applied by the ingestor itself, BEFORE this (Pose6, plan 2026-10-08
-        // Task 4): T_corr alone here, same order T_corr(T_inject(p)) as before.
-        lidar_ingestor_->set_mount_extra(T_corr);
-        psi_app = T_corr.yaw;
-    }
-    if (mount_) mount_->pool().reference_to_lidar_yaw(psi_app, yaw_sigma);
-    if (calib_)
-        for (auto& ch : calib_->channels()) ch->calib.reference_to_lidar_yaw(psi_app, yaw_sigma);
-
-    if (not params.JOINT_CALIB_MONITOR) return;
-    const Eigen::Vector4d unit(params.IMAGE_EDGE_MOUNT_PITCH_SIGMA, params.IMAGE_EDGE_MOUNT_HEIGHT_SIGMA,
-                               yaw_sigma, 1.0);
-    const auto cameras = [&]
-    {
-        std::vector<rc::joint::CameraBlock> cams;
-        if (mount_)
-            cams.push_back({params.IMAGE_EDGE_CAMERA, mount_->pool().marginal_information(unit), mount_->pool().lidar_yaw_ref()});
-        if (calib_)
-            for (const auto& ch : calib_->channels())
-                cams.push_back({ch->name, ch->calib.marginal_information(unit), ch->calib.lidar_yaw_ref()});
-        return cams;
-    };
-    // ── r2 MOUNTS MONITOR (plan 2026-10-08 Task 5), ~1 Hz on the LiDAR clock: helios 6 + bpearl 6 + cameras from
-    //    the kinematic block (a COPY in UpdateResult, localizer thread) and the floor/vertical blocks (a COPY from
-    //    the ingestor's snapshot, ingest thread). LOG ONLY -> tmp/joint_calib/mounts_<ts>.csv. The r1 motion block
-    //    is deliberately NOT an input (single owner, r2.2 item 4). ──
-    if (params.MOUNT_FACTORS and lidar_ingestor_ and loc_res->timestamp_ms - mount_monitor_ms_ >= 1000)
-    {
-        mount_monitor_ms_ = loc_res->timestamp_ms;
-        const auto mf = lidar_ingestor_->mount_factor_snapshot();
-        rc::joint::MountBlocks B;
-        B.kinematic   = loc_res->mount_kin_info;
-        B.floor       = mf.floor;
-        B.vert_helios = mf.vert_helios;
-        B.vert_bpearl = mf.vert_bpearl;
-        B.s_helios = mf.s_helios; B.s_bpearl = mf.s_bpearl;
-        // the helios band's mean height above the helios origin: where its tilt moves the 2-D scan (r2.2 item 7)
-        B.band_dz = 0.5 * (double(params.LIDAR_HIGH_MIN_HEIGHT) + double(params.LIDAR_HIGH_MAX_HEIGHT)) - mf.s_helios.z();
-        rc::joint::MountMonitor::Extra ex; ex.yaw_offset = loc_res->mount_yaw_offset;
-        mount_monitor_.observe(loc_res->timestamp_ms, B, cameras(), ex);
-    }
-    const int ep = loc_res->calib_episodes;
-    if (ep == joint_last_episodes_ or loc_res->calib_information.episodes <= 0) return;
-    joint_last_episodes_ = ep;
-    joint_monitor_.observe(loc_res->timestamp_ms, ep, loc_res->calib_information, cameras());
 }
 
 void SpecificWorker::initialize_room_model_from_svg()

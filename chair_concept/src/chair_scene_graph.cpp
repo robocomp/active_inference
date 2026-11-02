@@ -14,6 +14,7 @@
 
 #include <QDebug>
 
+#include "chair_mesh.h"
 #include "chair_model.h"   // rc::ChairModel statics (TOP_THICKNESS, LEG_RADIUS)
 #include "../../common/graph_provenance/creation_stamp.h"   // rc::provenance::stamp_creation
 
@@ -26,8 +27,17 @@ ChairSceneGraph::ChairSceneGraph(std::shared_ptr<DSR::DSRGraph> graph,
     : G_(std::move(graph)), rt_api_(rt_api), cfg_(cfg), relayout_(std::move(relayout))
 {}
 
+int ChairSceneGraph::identity_last()
+{
+    if (not identity_)
+        identity_.emplace(rc::identity::InstanceCounter::open("etc/instance_identity.csv",
+                                                              static_cast<std::uint32_t>(G_->get_agent_id())));
+    return identity_->last();
+}
+
 std::uint64_t ChairSceneGraph::create_instance_from_detection(const Eigen::Vector3f& centroid_room,
-                                                              std::uint64_t room_node_id)
+                                                              std::uint64_t room_node_id,
+                                                              std::optional<Resurrect> r)
 {
     auto room_opt = G_->get_node(room_node_id);
     if (not room_opt.has_value())
@@ -45,15 +55,21 @@ std::uint64_t ChairSceneGraph::create_instance_from_detection(const Eigen::Vecto
     //
     // The high-water mark only ever rises, so a freed number stays retired. (Same defect and same reasoning
     // as door_concept's identity registry; see [[door-identity-name-recycling]].)
-    // ⚠REMAINING GAP: this is per-RUN. Across a restart the mark is rebuilt from the live graph, so a name
-    // freed before the restart can still be re-issued after it. door_concept persists its registry to
-    // etc/door_identities.csv for exactly that reason; chair does not yet.
-    int max_n = name_high_water_;
+    // Across restarts too, since 2026-11-01: common/instance_identity persists the counter in
+    // etc/instance_identity.csv and issues max(persisted, highest live chair_<N>) + 1, written to disk before use.
+    // DSR node type is the generic "object"; the class is the name prefix "chair_".
+    std::vector<std::string> live_names;
     for (const auto& n : G_->get_nodes_by_type("object"))
-        if (n.name().rfind("chair_", 0) == 0)
-            try { max_n = std::max(max_n, std::stoi(n.name().substr(6))); } catch (...) {}
-    name_high_water_ = max_n + 1;
-    const std::string name = "chair_" + std::to_string(max_n + 1);
+        if (n.name().starts_with("chair_"))
+            live_names.push_back(n.name());
+    if (not identity_)
+        identity_.emplace(rc::identity::InstanceCounter::open("etc/instance_identity.csv",
+                                                              static_cast<std::uint32_t>(G_->get_agent_id())));
+    // Resurrection: the number was issued in the past (<= the persisted `last`), so the counter never issues it again.
+    if (r and r->n > identity_->last())
+        std::print(stderr, "chair_concept: [recall] ⚠ resurrected chair_{} is above the persisted counter ({})\n", r->n, identity_->last());
+    const int n_issued = r ? r->n : identity_->issue(rc::identity::max_suffix(live_names, "chair_"));
+    const std::string name = "chair_" + std::to_string(n_issued);
 
     // Generic `object` node named "chair_*"; class carried in object_subtype ("chair"). Every
     // get_nodes_by_type("object") MUST therefore be paired with a starts_with("chair") filter.
@@ -65,9 +81,9 @@ std::uint64_t ChairSceneGraph::create_instance_from_detection(const Eigen::Vecto
     // No base-colour texture → the viewer renders the chair in its flat class colour (color_for_category),
     // keeping it visually distinct from the table (which wears the gray mesa_1 wood texture).
     G_->add_or_modify_attrib_local<mesh_texture_path_att>(chair_node, std::string(""));
-    G_->add_or_modify_attrib_local<width_m_att> (chair_node, cfg_.tracker_birth_seat_w);
-    G_->add_or_modify_attrib_local<depth_m_att> (chair_node, cfg_.tracker_birth_seat_d);
-    G_->add_or_modify_attrib_local<height_m_att>(chair_node, cfg_.tracker_birth_seat_h + cfg_.tracker_birth_back_h);
+    G_->add_or_modify_attrib_local<width_m_att> (chair_node, cfg_.prior.seat_w);
+    G_->add_or_modify_attrib_local<depth_m_att> (chair_node, cfg_.prior.seat_d);
+    G_->add_or_modify_attrib_local<height_m_att>(chair_node, cfg_.prior.top());
     G_->add_or_modify_attrib_local<object_subtype_att>(chair_node, std::string("chair"));  // type-agnostic consumers
     G_->add_or_modify_attrib_local<level_att>   (chair_node, 3);
     G_->add_or_modify_attrib_local<parent_att>  (chair_node, room_node_id);
@@ -79,6 +95,10 @@ std::uint64_t ChairSceneGraph::create_instance_from_detection(const Eigen::Vecto
     }
 
     rc::provenance::stamp_creation(*G_, chair_node);   // birth stamp: epoch ms + local ISO-8601
+    // Persistent identity (common/instance_identity): written once at birth, never changed, key for ltom/atlas/EM.
+    G_->add_or_modify_attrib_local<object_uid_att>(chair_node, rc::identity::make_uid(static_cast<std::uint32_t>(G_->get_agent_id()), n_issued));
+    if (r and rc::identity::make_uid(static_cast<std::uint32_t>(G_->get_agent_id()), n_issued) != r->uid)
+        std::print(stderr, "chair_concept: [recall] ⚠ uid of resurrected chair_{} does not match the recalled uid\n", n_issued);
     const auto id_opt = G_->insert_node(chair_node);
     if (not id_opt.has_value())
         return 0;
@@ -231,73 +251,9 @@ void ChairSceneGraph::write_rt_covariance(std::uint64_t room_id, ChairInstance& 
     rc::rtcov::publish(*G_, room_id, inst.node_id, v, inst.last_pub_cov_trace, force, inst.node_name);
 }
 
-std::vector<float> ChairSceneGraph::make_chair_mesh(const ChairState& s)
-{
-    // Flat triangle list (room frame): seat slab + backrest + 4 square legs = 6 boxes × 12 tri.
-    std::vector<float> verts;
-    verts.reserve(6 * 108);
-
-    const float cy = std::cos(s.yaw);
-    const float sy = std::sin(s.yaw);
-
-    auto push_box = [&](float bx, float by, float bz, float hw, float hd, float hh)
-    {
-        auto push = [&](float lx, float ly, float lz)
-        {
-            verts.push_back(bx + cy * lx - sy * ly);
-            verts.push_back(by + sy * lx + cy * ly);
-            verts.push_back(bz + lz);
-        };
-        push(-hw,-hd,-hh); push( hw,-hd,-hh); push( hw, hd,-hh);  // bottom
-        push(-hw,-hd,-hh); push( hw, hd,-hh); push(-hw, hd,-hh);
-        push(-hw,-hd, hh); push( hw, hd, hh); push( hw,-hd, hh);  // top
-        push(-hw,-hd, hh); push(-hw, hd, hh); push( hw, hd, hh);
-        push(-hw,-hd,-hh); push( hw,-hd,-hh); push( hw,-hd, hh);  // front -y
-        push(-hw,-hd,-hh); push( hw,-hd, hh); push(-hw,-hd, hh);
-        push( hw, hd,-hh); push(-hw, hd,-hh); push(-hw, hd, hh);  // back  +y
-        push( hw, hd,-hh); push(-hw, hd, hh); push( hw, hd, hh);
-        push(-hw,-hd,-hh); push(-hw,-hd, hh); push(-hw, hd, hh);  // left  -x
-        push(-hw,-hd,-hh); push(-hw, hd, hh); push(-hw, hd,-hh);
-        push( hw,-hd,-hh); push( hw, hd,-hh); push( hw, hd, hh);  // right +x
-        push( hw,-hd,-hh); push( hw, hd, hh); push( hw,-hd, hh);
-    };
-
-    const float hw = s.seat_w * 0.5f;
-    const float hd = s.seat_d * 0.5f;
-    const float ht = ChairModel::SEAT_THICKNESS * 0.5f;
-
-    // Seat slab — its TOP face sits at cz + seat_h, so its centre is half a thickness below.
-    push_box(s.cx, s.cy, s.cz + s.seat_h - ht, hw, hd, ht);
-
-    // Backrest — a thin slab along the -y edge (local), rising back_h above the seat top.
-    const float back_cy = -hd + ht;               // local y of backrest centre
-    const float back_cz = s.cz + s.seat_h + s.back_h * 0.5f;
-    {
-        const float brx = s.cx + cy * 0.0f - sy * back_cy;
-        const float bry = s.cy + sy * 0.0f + cy * back_cy;
-        push_box(brx, bry, back_cz, hw, ht, s.back_h * 0.5f);
-    }
-
-    // 4 legs — square cross-section (2×LEG_HALF), at the seat corners, floor → seat underside.
-    const float lr  = ChairModel::LEG_HALF;
-    const float leg_top = s.seat_h - ChairModel::SEAT_THICKNESS;   // underside of the seat slab
-    const float lhz = std::max(0.01f, leg_top) * 0.5f;
-    for (int ix : {-1, 1})
-        for (int iy : {-1, 1})
-        {
-            const float lx = ix * (hw - lr);
-            const float ly = iy * (hd - lr);
-            const float rx = s.cx + cy * lx - sy * ly;
-            const float ry = s.cy + sy * lx + cy * ly;
-            push_box(rx, ry, s.cz + lhz, lr, lr, lhz);
-        }
-
-    return verts;
-}
-
 void ChairSceneGraph::write_chair_mesh(ChairInstance& inst, DSR::Node& node)
 {
-    const std::vector<float> verts = make_chair_mesh(inst.model.state());
+    const std::vector<float> verts = make_chair_mesh(inst.model.state(), cfg_.prior);
     G_->add_or_modify_attrib_local<mesh_vertices_att>(node, verts);
 }
 

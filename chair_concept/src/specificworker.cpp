@@ -32,6 +32,9 @@
  */
 
 #include "specificworker.h"
+#include "recall_candidates.h"   // ltom recall: resurrect a remembered chair at birth
+#include "chair_card.h"   // make_card(): this agent's perception card
+#include "../../common/perception_card/card_io.h"   // write_card_file
 
 #include "../../common/config_report/config_read.h"   // rc::cfg::Reader (SHARED)
 #include "../../common/room_resolve/room_resolve.h"   // rc::room::current_room (proto-aware, deterministic)
@@ -69,6 +72,7 @@
 #include <array>
 #include <vector>
 #include <unordered_set>
+#include <set>
 
 // DSR attribute name tags — generated from dsr_attr_name.h
 #include <dsr/api/dsr_api.h>
@@ -319,6 +323,9 @@ void SpecificWorker::initialize()
     epistemic_planner_.set_detector_envelope(
         rc::detect::DetectorEnvelope{cfg_.detect_min_fill, cfg_.detect_max_fill, cfg_.detect_soft});
     epistemic_planner_.set_robot_radius(0.30f);   // Shadow's footprint radius
+    // Perception card: what this agent's P(detect) really multiplies, from the config it runs with (cwd = the agent dir).
+    rc::card::write_card_file(std::filesystem::current_path(), rc::make_card(cfg_));
+    presence_coordinator_.publish_card_json(rc::card::graph_json(rc::make_card(cfg_)));
     epistemic_planner_.set_log_period(cfg_.chair_log_period_frames);
 
     // The camera's REAL geometry, read once (intrinsics and the zed mount are both static). BOTH FoVs: for a
@@ -589,8 +596,8 @@ void SpecificWorker::run_instance_tracker()
                 // publishes as height_m. It matters here because a chair TUCKED UNDER a table sits inside the
                 // tabletop's footprint while occupying none of the table's own volume.
                 const float unclaimed = rc::exclusion::p_unclaimed(
-                    {dv.xy.x(), dv.xy.y(), cfg_.tracker_birth_seat_w, cfg_.tracker_birth_seat_d, 0.0f}, foreign_claims_, &who,
-                    0.0f, cfg_.tracker_birth_seat_h + cfg_.tracker_birth_back_h);
+                    {dv.xy.x(), dv.xy.y(), cfg_.prior.seat_w, cfg_.prior.seat_d, 0.0f}, foreign_claims_, &who,
+                    0.0f, cfg_.prior.top());
                 dv.birth_evidence *= unclaimed;
                 if (cfg_.chair_log_period_frames > 0 and unclaimed < 0.99f)
                     std::print("[chair] birth cand CLAIMED by '{}' ({:.0f}%): birth_ev x{:.2f}\n",
@@ -772,6 +779,18 @@ void SpecificWorker::run_instance_tracker()
         update_existence_beliefs();
     // BIRTH: spawn an instance from each promoted (persistently-unexplained) detection, seeding the
     // fitter with the detection XY so the model starts AT the chair (not the 0,0 RT-read default).
+    // ltom recall candidates, read once per cycle; a candidate taken by a birth leaves the list (take once).
+    std::vector<rc::RecallCand> recall_cands;
+    if (not res.births.empty())
+    {
+        std::set<std::string> live_names;
+        for (const auto& n : G->get_nodes_by_type("object"))
+            if (n.name().starts_with("chair_")) live_names.insert(n.name());
+        // Only when the birth parent (latched room) IS the current room ltom publishes under (rc::recall_room).
+        if (const auto room = rc::recall_room(room_node_id_, rc::room::current_room(*G)))
+            recall_cands = rc::recall_candidates(*G, *room, static_cast<std::uint32_t>(G->get_agent_id()),
+                                                 scene_graph_->identity_last(), live_names);
+    }
     for (const int d : res.births)
     {
         const int slice = dets[d].slice_index;
@@ -815,7 +834,37 @@ void SpecificWorker::run_instance_tracker()
                 continue;
             }
         }
-        const auto new_id = scene_graph_->create_instance_from_detection(c, room_node_id_);
+        // RESURRECTION: only chooses which identity the newborn takes (birth stays tracker-only). MAP over
+        // {recalled candidates, new} on position alone; measurement cov = DetectionNoiseM^2 I (the tracker's R).
+        std::optional<rc::ChairSceneGraph::Resurrect> resurrect;
+        float resurrect_p = 0.f;
+        if (not recall_cands.empty())
+        {
+            const float area = rc::polygon_area(fitter_->room_polygon());
+            rc::recall::Params rp{cfg_.recall_pi_move, cfg_.recall_log_prior_new};
+            if (area > 0.f) rp.room_area_m2 = area;
+            else if (not warned_recall_area_)
+            {
+                warned_recall_area_ = true;
+                std::print(stderr, "chair_concept: [recall] no room polygon — using the default room area {} m2\n", rp.room_area_m2);
+            }
+            const Eigen::Matrix2f R = Eigen::Matrix2f::Identity() * (cfg_.tracker_detection_noise_m * cfg_.tracker_detection_noise_m);
+            const auto dec = rc::recall::decide(Eigen::Vector2f(c.x(), c.y()), R, rc::as_candidates(recall_cands), rp);
+            if (dec.index)
+            {
+                const auto taken = rc::take_candidate(recall_cands, *dec.index);
+                resurrect = rc::ChairSceneGraph::Resurrect{taken.n, taken.cand.uid};
+                resurrect_p = dec.posterior[*dec.index];
+            }
+        }
+        const auto new_id = scene_graph_->create_instance_from_detection(c, room_node_id_, resurrect);
+        if (new_id != 0 and resurrect)
+        {
+            const auto what = std::format("uid={} p={:.3f}", resurrect->uid, resurrect_p);
+            std::print("chair_concept: [tracker] RESURRECT chair_{} {}\n", resurrect->n, what);
+            log_tracker_event("RESURRECT", new_id, c.x(), c.y(), what);
+            log_phantom_event("RESURRECT", new_id, "", c.x(), c.y(), nullptr, what);
+        }
         if (new_id != 0)
         {
             fitter_->note_birth(new_id, Eigen::Vector2f(c.x(), c.y()));
@@ -825,9 +874,9 @@ void SpecificWorker::run_instance_tracker()
             // find the neighbour present, and declare ITSELF the junior. Anything not created this run
             // stays senior by default — the rule can fail to catch a collision, never invent one.
             if (auto it = fitter_->instances().find(new_id); it != fitter_->instances().end())
-                it->second.exclusion.resolve_at_birth({c.x(), c.y(), cfg_.tracker_birth_seat_w, cfg_.tracker_birth_seat_d, 0.0f},
+                it->second.exclusion.resolve_at_birth({c.x(), c.y(), cfg_.prior.seat_w, cfg_.prior.seat_d, 0.0f},
                                                       foreign_claims_,
-                                                      0.0f, cfg_.tracker_birth_seat_h + cfg_.tracker_birth_back_h);
+                                                      0.0f, cfg_.prior.top());
             // Materialise the ChairInstance NOW, at birth — do not wait for the freshly inserted DSR node
             // to surface in get_nodes_by_type (it is not reliably visible the same cycle). Birth was
             // decoupled across three async steps (create node → ensure_instance when the node appears →

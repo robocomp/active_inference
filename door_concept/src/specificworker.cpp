@@ -63,6 +63,8 @@
 #include "../../common/track/merge_instances.h"   // rc::track::merge_overlapping — the SHARED merge sweep
 #include "../../common/instance_tracker/birth_evidence.h"   // rc::birth:: the shared CREATE policy
 #include "../../common/nbv/graph_obstacles.h"   // rc::nbv::collect_graph_obstacles — shared, DSR-side
+#include "door_card.h"   // make_card(): this agent's perception card
+#include "../../common/perception_card/card_io.h"   // write_card_file
 #include "door_dof.h"   // rc::kDoorDofs — names/units for the BeliefInspector rows
 #include "door_leaf_visibility.h"   // rc::door::crossing_logodds (Task D2)
 #include "../../common/graph_provenance/creation_stamp.h"   // rc::provenance::now_ms — the recorded cycle's wall clock
@@ -576,6 +578,10 @@ void SpecificWorker::initialize()
     epistemic_planner_.set_detector_envelope(
         rc::detect::DetectorEnvelope{cfg_.detect_min_fill, cfg_.detect_max_fill, cfg_.detect_soft});
     epistemic_planner_.set_robot_radius(0.30f);   // Shadow's footprint radius
+
+    // Perception card: what this agent's P(detect) really multiplies, from the config it runs with (cwd = the agent dir).
+    rc::card::write_card_file(std::filesystem::current_path(), rc::make_card(cfg_));
+    presence_coordinator_.publish_card_json(rc::card::graph_json(rc::make_card(cfg_)));
 
     // ZED RGB consumer for the contour check. Lazily brought up inside pump() once the descriptor exists
     // (media-plane consumer pattern); dormant while DoorConcept.RgbContourCheck is false.

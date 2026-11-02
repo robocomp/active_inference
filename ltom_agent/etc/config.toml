@@ -1,0 +1,70 @@
+# ltom_agent -- long-term object memory (spec: docs/superpowers/specs, ltom-agent-design 2026-11-01).
+# Steps 2-3: OBSERVE the live graph, keep a persisted repertory (a file), and OFFER recall nodes. ONE graph, ONE DDS domain.
+#
+#   [Agent.dsr]  the LIVE working graph. domain 0, configFile "" => joins the fleet. Never writes an object node: it puts there
+#                only its presence agent node ("ltom_agent 28") and the ltom_recall_<uid> metaconcept nodes.
+#
+# DDS domain 5 is RESERVED for ltom's future memory graph (a projection of the repertory file, added when its
+# first reader exists: language_agent, step 4). No [Agent.*] table for it now. Never add a table whose FLATTENED
+# key contains "Agent" and has >= 2 dots (getSurNames would build a phantom graph). Every sub-table MUST define
+# tree/graph/2d (setupViewer throws on a missing key).
+
+[Agent]
+# MUST be unique across the shared graph (CRDT actor id). 28 = ltom_agent, recorded in
+# CONCEPT_AGENT_RECIPE.md section 1 (the source of truth). 27 = self_calibration.
+id   = 28
+name = "ltom_agent"
+# GenericWorker::initialize reads the viewer flags at the FLAT prefix "Agent" when exactly ONE graph exists
+# (prefix "Agent.<name>" only when there are several), so a single-graph agent must define them here as well as
+# in [Agent.dsr]; a missing key THROWS ("Key not found: Agent.tree"). All false => no window.
+tree  = false
+graph = false
+2d    = false
+
+[Agent.dsr]
+configFile = ""
+domain     = 0
+# No viewer: robot_concept already shows the live graph.
+tree       = false
+graph      = false
+2d         = false
+
+[Presence]
+# Nothing is REQUIRED (ltom observes whatever exists and tolerates everything missing; no concept agent requires
+# it). required_agent_names is ABSENT on purpose, not `= []`: the ConfigLoader throws on an empty array.
+config_dir = "etc"
+monitor_period_ms = 500
+heartbeat_timeout_ms = 3000
+rejoin_grace_ms = 1500
+stale_grace_ms = 120000
+agent_info_period_ms = 1000
+
+[Owns]
+# The presence agent node and the recall nodes (metaconcept ltom_recall_<uid>). ltom never writes an object node.
+nodes = ["ltom_agent 28", "ltom_recall_*"]
+
+[Period]
+# Compute = the poll period of the live graph (ms): compute() runs once per Operating step. Single source of truth.
+Compute   = 500
+Emergency = 500
+
+[Component.Debug]
+Verbose = false
+
+[Ice]
+Warn.Connections = "0"
+Trace.Network = "0"
+Trace.Protocol = "0"
+MessageSizeMax = "20004800"
+
+[LTOM]
+# How long an owner may be gone before its disappearance is read as owner exit rather than death. = presence heartbeat_timeout_ms.
+owner_grace_ms  = 3000
+# The repertory file is the store of record; saved at this period and on a graceful stop.
+save_period_s   = 30
+repertory_path  = "etc/ltom_repertory.json"
+csv_path        = "etc/ltom_repertory.csv"
+# Object classes in scope (name prefix "<class>_" and an object_uid). Doors are excluded.
+classes         = ["chair", "table", "bottle", "cabinet", "refrigerator"]
+# Classes whose remembered members that are absent from the graph are offered as recall nodes in the current room.
+recall_classes  = ["chair"]

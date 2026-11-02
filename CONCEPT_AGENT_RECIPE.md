@@ -489,15 +489,15 @@ table is the source of truth). Taken:
 |----|-------|----|-------|----|-------|
 | 5 | room_concept | 10 | bottle_concept | 20 | chair_concept |
 | 6 | robot_concept | 11 | kinova_controller | 21 | cabinet_concept |
-| 7 | table_concept | 12 | self_calibration | 22 | refrigerator_concept |
+| 7 | table_concept | 12 | arm_calibration | 22 | refrigerator_concept |
 | 8 | controller | 13 | human_concept | 23 | ring_metaconcept |
 | 9 | retina | 14 | residual_concept | 15 | door_concept |
 | 16 | scene_graph_viewer | 24 | kitchen_metaconcept | 17 | hood_concept |
-| 18 | viewer3d | 19 | ltsm_agent | 25 | chat_agent |
-| 26 | episodic_agent | | | | |
+| 18 | viewer3d | 19 | ltsm_agent | 25 | language_agent |
+| 26 | episodic_agent | 28 | ltom_agent | | |
 
-Next free: **27+** (2026-10-17: 26 = episodic_agent. 2026-10-12: 18 = viewer3d and 19 = ltsm_agent were in use but MISSING from this table —
-the same omission as 16 below; recorded now together with 25 = chat_agent.) History: (15 = door_concept, 2026-07-26; 24 = kitchen_metaconcept, 2026-08-09 — the
+Next free: **29** (2026-11-01: 27 = self_calibration, 28 = ltom_agent; DDS domain **5** is RESERVED for ltom's future memory graph, not joined yet. 2026-10-17: 26 = episodic_agent. 2026-10-12: 18 = viewer3d and 19 = ltsm_agent were in use but MISSING from this table —
+the same omission as 16 below; recorded now together with 25 = language_agent.) History: (15 = door_concept, 2026-07-26; 24 = kitchen_metaconcept, 2026-08-09 — the
 second meta-concept schema, RECTILINEAR. ★16 was already taken by scene_graph_viewer and was MISSING
 from this table — the exact omission that caused both collisions below; added now.) (2026-07: cabinet=21 and refrigerator=21 collided because cabinet was never
 recorded — refrigerator moved to 22. Same cause again 2026-07-26: the ring_metaconcept scaffold shipped

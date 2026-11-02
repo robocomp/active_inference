@@ -26,6 +26,8 @@
 #include "chair_instance.h"     // rc::ChairInstance, ChairState
 #include "../../common/mask_ingestor/mask_ingestor.h"      // MaskIngestor::MasksPacket
 #include "epistemic_planner.h"  // EpistemicProposal
+#include <optional>
+#include "../../common/instance_identity/instance_identity.h"   // rc::identity::InstanceCounter
 
 namespace rc {
 
@@ -40,8 +42,13 @@ public:
     // Data-driven birth: create a fresh "chair_N" node at the detection centroid (room frame), seeded
     // with the Tracker.Birth* default geometry. Returns the new node id (0 on failure). Used by the
     // worker's instance tracker — the only instance-lifecycle path.
+    // A resurrection (ltom recall): the newborn takes the remembered chair's number and uid instead of issuing new ones.
+    // Last number the persisted counter issued (opens the counter on first use).
+    int identity_last();
+    struct Resurrect { int n; std::uint64_t uid; };
     std::uint64_t create_instance_from_detection(const Eigen::Vector3f& centroid_room,
-                                                 std::uint64_t room_node_id);
+                                                 std::uint64_t room_node_id,
+                                                 std::optional<Resurrect> r = std::nullopt);
 
     // Publish the instance's fitted model to its DSR node (geometry + FE + mesh + RFE/support-bank) and
     // the room→chair RT edge. persist_* resolves the node by id first; both no-op if the node is gone.
@@ -58,13 +65,10 @@ public:
     // Write the epistemic next-best-view proposal onto a chair node.
     void write_epistemic_proposal(DSR::Node& node, const EpistemicProposal& prop);
 
-    // Flat triangle list (room frame): top slab + 4 legs.
-    static std::vector<float> make_chair_mesh(const ChairState& s);
-
 private:
     void write_chair_mesh(ChairInstance& inst, DSR::Node& node);
 
-    int name_high_water_ = 0;   // highest chair_<N> ever issued; never decreases — see create_instance_from_detection
+    std::optional<rc::identity::InstanceCounter> identity_;   // persisted chair_<N> numbers (common/instance_identity), opened at the first birth
 
     std::shared_ptr<DSR::DSRGraph> G_;
     DSR::RT_API*          rt_api_ = nullptr;

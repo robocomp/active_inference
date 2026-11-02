@@ -223,7 +223,7 @@ SilhouetteExistence TableProjection::compute_silhouette_existence(const TableIns
     // A silhouette sample within this distance of a wall segment does not count as occluded BY that segment —
     // a table pushed flush against a wall must not hide behind it. Physical clearance, mirrors door_concept's
     // 0.30 m; smaller here because a table is free-standing and only grazes a wall.
-    constexpr float kOwnWallSkipM = 0.15f;
+    constexpr float kOwnWallSkipM = rc::occlusion::kOwnWallSkipM;   // shared with chair (same 0.15 m)
 
     const float fx = camera_api_->get_focal_x(), fy = camera_api_->get_focal_y();
     const float W  = static_cast<float>(camera_api_->get_width());

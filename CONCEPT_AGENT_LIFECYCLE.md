@@ -26,6 +26,9 @@ Five stages: **CREATE · UPDATE · REMOVE · HISTORY · OWNERSHIP**.
 - `Detection::birthable = false` marks a detection that may **refine** an existing track but never birth one
   (e.g. a peripheral/360 sensor). Multi-sensor policy: **one sensor births, peripheral sensors only cue
   attention.**
+- **Names and uids come from `common/instance_identity`** (2026-11-01): the next `<prefix>_<N>` is max(persisted counter in
+  `etc/instance_identity.csv`, highest live N) + 1, written before use — never from a live-graph scan alone, which
+  re-issued a dead instance's name after a restart. `object_uid = (agent_id << 40) | N`.
 - `birth_min_sep_m` from every existing track *and* every other pending candidate — anti-duplicate.
 
 **Invariant:** an agent must never create a graph node for an instance the tracker has not birthed.
@@ -218,29 +221,34 @@ Derived by reading each agent, not inferred from includes. `—` = not applicabl
 | agent | CREATE | UPDATE | admissibility | REMOVE | P(detect) | wall LoS | HISTORY record | OWNERSHIP |
 |---|---|---|---|---|---|---|---|---|
 | table | ✅ | ✅ | ✅ trunc + fixation | ✅ `rc::exist` | ✅ | ✅ shared helper | ✅ | ✅ |
-| chair | ✅ | ✅ | ✅ trunc + confirm_only + fixation | ❌ **hand-rolled** | ✅ `zed_detectability` | — no silhouette channel | ✅ | ✅ *(fixed)* |
+| chair | ✅ | ✅ | ✅ trunc + confirm_only + fixation | ❌ **hand-rolled** | ✅ shared envelope (`chair_detect.h`: `term_envelope` axes 1 × in_fov × central) | ✅ `walls_block` *(2026-10-31, below)* | ✅ | ✅ *(fixed)* |
 | bottle | ✅ | ✅ | ✅ confirm_only | ⚠️ tracker death only | — | — | ⚠️ unattributable | ✅ |
 | cabinet | ✅ | ✅ | ✅ trunc | ✅ `rc::exist` | ✅ | ✅ shared helper | ✅ | ✅ |
 | door | ✅ tracker + 2 justified non-tracker creations *(2026-10-20, below)* | ✅ | ✅ trunc + confirm_only | ✅ `rc::exist` | ✅ | ✅ shared helper | ✅ | ✅ *(fixed; + `aff_door_look_*` 2026-10-21, below)* |
 | refrigerator | ✅ | ✅ | ✅ trunc + confirm_only | ✅ `rc::exist` | ✅ | ✅ *(now shared)* | ✅ | ✅ |
 | residual | ✅ | ✅ | — field model, no per-frame gate | ✅ `rc::exist` | — | — | ⚠️ unattributable | ✅ |
 | human | ❌ | ❌ `belief_stabilizer` | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
-| chat_agent *(2026-10-12)* | — no instances | — no belief | — | — | — | — | — | ✅ |
-| sensor_calibration *(2026-10-23, skeleton)* | — no instances | — no belief | — | — | — | — | — | ✅ |
+| language_agent *(2026-10-12)* | — no instances | — no belief | — | — | — | — | — | ✅ |
+| self_calibration *(2026-10-23, skeleton)* | — no instances | — no belief | — | — | — | — | — | ✅ |
 | ltsm `recognition` / `recall_late` / `staged` *(2026-10-24)* | — no instances (decides which KNOWN room this is; births nothing) | — no belief | — | ❌ metric evidence only, no occupancy/absence channel | — | — | ❌ no phantom record | ✅ |
 | retina `place_evidence` *(2026-10-24, PLANNED, not producing)* | — | — | — | — | — | — | ❌ not built | ❌ not yet owned |
+| ltom_agent *(2026-11-01, observer + recall offers)* | — never writes an instance | — no belief | — | — | — | — | — | ✅ |
 
-**chat_agent** is not a concept agent: it births no instance and holds no belief, so CREATE…HISTORY do not apply
+*2026-10-31 (perception cards, Task 9):* chair's wall LoS cell went from `—` to ✅. `ChairFitter::zed_detectability` now delegates to `chair_p_detect` (`chair_concept/src/chair_detect.h`): `term_envelope(roi_fill) × in_fov × central × walls_block(camera, chair, room polygon)`; a chair in another room gets P(detect) 0 and its absence is no longer charged. Retired `Existence.ZedEdgeOffset/ZedRangeFull/ZedRangeRef/ZedClearLosFloor`. Live check pending.
+
+*2026-11-01 (ltom recall, step 3):* chair's CREATE gained **resurrection**: at a tracker birth, `chair_concept/src/recall_candidates.h` reads the `ltom_recall_<uid>` metaconcept nodes ltom offers under the current room (own agent's uid, `chair_<N>` not live) and `rc::recall::decide` (common/recall_match) picks the MAP hypothesis over {recalled candidates, new} on the room-frame centroid alone (measurement cov `DetectionNoiseM^2 I`, `Tracker.RecallPiMove` / `RecallLogPriorNew`). The newborn then takes that candidate's `chair_<N>` and `object_uid` instead of issuing new ones; a candidate is taken once per cycle. Birth stays tracker-only: resurrection only chooses the identity, never creates, delays or suppresses a birth. Logged as `RESURRECT chair_N uid=.. p=..`. Live check pending.
+
+**language_agent** is not a concept agent: it births no instance and holds no belief, so CREATE…HISTORY do not apply
 (`—`, not `❌`). It owns exactly one node, `chat_intention` (type `intention`, has_intention edge from `Shadow`), the
-command channel to the controller: listed in `[Owns]` (`["chat_agent 25", "chat_intention"]`, id matches `[Agent].id`),
+command channel to the controller: listed in `[Owns]` (`["language_agent 25", "chat_intention"]`, id matches `[Agent].id`),
 stamped with `rc::provenance::stamp_creation`, swept at `initialize()` and again on first Operating, deleted by the
 shared coordinator on SIGTERM/SIGINT (verified 2026-10-12: `[Graph] node 'chat_intention' deleted`). It connects no
 DSR signal; the digest and the command status are polled on the main thread.
 
-**sensor_calibration** (skeleton, 2026-10-23) is not a concept agent either: no instance, no belief, so CREATE…HISTORY are
-`—`. It owns only its own agent node `sensor_calibration 27` (`[Owns] nodes = ["sensor_calibration 27"]`, id matches
+**self_calibration** (skeleton, 2026-10-23) is not a concept agent either: no instance, no belief, so CREATE…HISTORY are
+`—`. It owns only its own agent node `self_calibration 27` (`[Owns] nodes = ["self_calibration 27"]`, id matches
 `[Agent].id = 27`), deleted by the shared coordinator on SIGTERM (verified 5/5 on an isolated domain: `[Graph] node
-'sensor_calibration 27' deleted`, exit 0). Presence is the shared `rc::presence::ConceptProtocol` (debounced Degraded,
+'self_calibration 27' deleted`, exit 0). Presence is the shared `rc::presence::ConceptProtocol` (debounced Degraded,
 grace 3000 ms; required `robot_concept`, `room_concept`); it connects no DSR signal. No ❌. When it later writes
 proposal attributes on its own node, that node stays its only owned state (robot_concept remains the sole writer of
 body→sensor RT edges).
@@ -265,6 +273,11 @@ the recognizer READS a `place_evidence` node if one is published (`room_recogniz
   clustered, and there is no place×bearing hypothesis to test on it. retina `place_evidence`: PLANNED, not producing;
   every cell is ❌ because there is nothing to conform yet. Revisit the row when Tasks 2 and 4 are built (its node will need
   an `[Owns]` entry matching `[Agent].id`; if retina ever publishes it; ltsm sweeps a leftover at start). The retina PLANNED row is excluded from conformance counts.
+
+**ltom_agent** (2026-11-01) is an OBSERVER that also OFFERS recalls: CREATE/UPDATE/REMOVE of instances are `—` (it never writes an object node and never decides
+identity). It owns its agent node `ltom_agent 28` plus the `ltom_recall_<uid>` metaconcept nodes it publishes (RT children of the current room, never a proto-room) for remembered, absent objects (`[Owns] nodes = ["ltom_agent 28", "ltom_recall_*"]`, id matches `[Agent].id = 28`; crash recovery: `RecallPublisher::sync` reconciles to the wanted set every poll, plus a stale sweep at `initialize()` and first Operating), deleted by the
+shared coordinator on SIGTERM (verified on isolated domain 64: `[Graph] node 'ltom_agent 28' deleted`). It connects no DSR signal (polls on the
+main thread while Operating) and keeps its repertory in a file; a node disappearing while its owner is gone or Degraded is "owner exit", never death, and an instance still on the graph but not resolvable this poll (room deleted, no covariance, ...) is HELD, never counted as gone.
 
 **door_concept CREATE exceptions (2026-10-20).** Birth stays tracker-only for every door *first seen*. Two creations do
 not go through the tracker, and neither is a birth in §1's sense — both RESTORE a door that some earlier evidence
@@ -345,6 +358,65 @@ The HISTORY column above tracks §4.2 recording only, which is the part that mus
    view) or by the wall-band prior. Accepted, deliberately: removing a door the detector IS detecting on image geometry
    alone is exactly what removed the REAL DOOR_0 at rtD1i cycle 614 (D-C review C1).
 
+### 6.1 Object-kind axes (2026-10-18, DRAFT — classification only, nothing refactored yet)
+
+Three **independent** questions about how a concept is individuated and how it changes. Each agent combines
+its own answers; they are not four exclusive classes. The vocabulary is borrowed from linguistics (count vs
+mass nouns, the animacy hierarchy). Computer vision draws the same line as *things* vs *stuff* (panoptic
+segmentation). **Each agent declares its kind. The kind describes how we individuate the concept, not what it
+intrinsically is**: shelving along a wall is mass, a freestanding shelf unit is count, and "a glass of water"
+turns a mass into a count by packaging.
+
+- **Individuation: count | mass.** A *count* concept has a natural unit, and its boundary is part of its
+  identity (half a chair is not a chair). A *mass* concept is cumulative and divisive: any part of a counter is
+  counter, and two abutting runs are one counter. Its identity comes from its **support** (the wall it runs
+  along), not from its extent. Mass can be **per dimension**: a counter has a count-like cross-section (a tight
+  prior on height and depth) and a mass-like length (a broad, support-bounded prior). A mass concept is
+  rarely detectable without context, because detectors are trained on things, so its evidence is geometry,
+  support and co-occurrence.
+- **Kinematics: rigid | articulated.** An *articulated* concept carries latent joint states (door φ, drawer
+  extension, fridge-door angle) and a parent/child part tree. Its affordances attach to joints. Visibility
+  and absence must be computed **given the joint state**: an open leaf predicts the wall behind it is
+  visible, and a shut one predicts it is not.
+- **Agency: passive | animate.** An *animate* concept moves under its own policy. It is the one principled
+  source of **intrinsic** process noise (§4.1 forbids constant Q for passive objects, whose state changes
+  only when something acts on them). Occlusion should HOLD it more weakly, since it keeps moving while unseen.
+  Eventually it needs an inferred intention, i.e. a model of another agent.
+
+What each answer implies for the stages:
+
+| | CREATE | UPDATE | REMOVE | HISTORY |
+|---|---|---|---|---|
+| **count** | tracker births one unit | bounded extent prior; pose + appearance identity | one `rc::exist` belief per unit | phantom = whole unit |
+| **mass** | birth of an extent *cell* keyed to its support; growth/split/merge are UPDATES, not births/deaths | broad prior along mass dims, tight along count dims | per cell; absence trims, never deletes the whole | phantom = a cell; "re-key" churn is the mass-as-count symptom |
+| **articulated** | parts are born under the parent | joint posterior; geometry predicted *through* the joint | absence evaluated under the joint posterior | joint changes recorded as events, not noise |
+| **animate** | — | intrinsic, inferred process noise | occlusion HOLD decays with time unseen | trajectory history |
+
+Current agents (read from code 2026-10-18; ⚠ = mismatch between the kind and how the agent treats it):
+
+| agent | individuation | kinematics | agency | note |
+|---|---|---|---|---|
+| bottle | count | rigid | passive | |
+| chair | count | rigid | passive | |
+| table | count | rigid | passive | shape subtype is a count-like attribute |
+| hood | count | rigid | passive | wall-mounted: count with a support parent |
+| refrigerator | count | ⚠ rigid | passive | the door is only a *facing mode* (`resolve_front`); no door angle. Becomes articulated when the door is a joint |
+| door | count | articulated (φ) | passive | the only agent with a joint posterior (`door_phi_posterior.h`); the phantom-door / "open door = missing wall" issue is the §6.1 visibility-given-joint rule |
+| cabinet | **mass** (along the wall) | ⚠ rigid | passive | `cabinet_kitchen.h` already models runs as cells (`cell_mass`), and churn went to 0 after the kitchen-of-runs fix: the agent *discovered* it is mass. Drawers/doors are absent |
+| residual | ⚠ count | rigid | passive | unexplained occupancy is closer to *stuff*, but it is born as box units |
+| room | **mass** (walls, floor) | rigid | passive | no `instance_tracker`; the box cover of free space is a mass representation |
+| human | count | articulated (skeleton) | **animate** | off-lineage (§6 deviation 1); its velocity/accel limits live in an output controller, not in an inferred Q |
+| kitchen / ring metaconcepts | count (of an arrangement) | — | — | group members; a kitchen unit is a count wrapper over mass runs (packaging) |
+
+Observations that motivated the draft. These are hypotheses, not decisions:
+
+1. Every shared module in `common/` today (`instance_tracker`, `existence_belief`, `track/merge_instances`) is
+   **count-shaped**. Cabinet and room implement mass behaviour privately. A shared mass/extent module (cells
+   keyed to a support, with per-cell existence) is the main gap.
+2. No shared joint module exists. Door φ is door-private. A drawer or fridge door would duplicate it.
+3. Animate needs a different §4.1: inferred intrinsic Q is required, not forbidden. That should be stated, not
+   left implicit in `human_concept`.
+
 ---
 
 ## 7. Checklist for a new agent
@@ -356,3 +428,5 @@ The HISTORY column above tracks §4.2 recording only, which is the part that mus
 4. HISTORY: no constant `Q`; record phantom events from day one.
 5. `[Owns]` lists the agent node **with the correct id** and the object glob; SIGTERM-only; startup stale-sweep.
 6. Add a row to §6 and justify every `❌`.
+7. Declare the concept's kind on the three §6.1 axes (count|mass per dimension, rigid|articulated, passive|animate)
+   and add it to the §6.1 table.

@@ -1,0 +1,15 @@
+cmake_minimum_required(VERSION 3.16)
+project(door_tests LANGUAGES CXX)
+
+set(CMAKE_CXX_STANDARD 23)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+enable_testing()
+find_package(Eigen3 REQUIRED)
+
+# Perception card: make_card() against etc/config.toml; header-only, no Qt/DSR. Run: LANG=es_ES.UTF-8 ./door_card_test
+add_executable(door_card_test door_card_test.cpp)
+target_include_directories(door_card_test PRIVATE ../src ../../common ../../common/media_transport)
+target_compile_definitions(door_card_test PRIVATE AGENT_DIR="${CMAKE_CURRENT_LIST_DIR}/..")
+target_compile_options(door_card_test PRIVATE -O2)
+target_link_libraries(door_card_test PRIVATE Eigen3::Eigen)
+add_test(NAME door_card_test COMMAND door_card_test)

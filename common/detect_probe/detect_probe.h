@@ -57,6 +57,7 @@
 #include <cmath>
 #include <cstdint>
 #include <fstream>
+#include <limits>
 #include <string>
 #include <string_view>
 
@@ -140,13 +141,18 @@ struct Sample
     int   n_my  = 0;              // slices of my label anywhere in the frame
     int   n_all = 0;              // slices of any label
     SiblingHit sibling;
+
+    // ── appended LAST (readers address columns by position or name; old logs simply lack it) ──
+    // The object's believed yaw in the room frame. With ocx/ocy + the card's size it completes the
+    // hypothesis, so common/perception_card/tools/card_vs_probe can rebuild the geometric prediction offline.
+    float oyaw = std::numeric_limits<float>::quiet_NaN();   // NaN = the agent does not populate it (R9: never invent yaw)
 };
 
 inline std::string_view header()
 {
     return "cycle,node,stamp_ms,rx,ry,rtheta,cam_z,ocx,ocy,ocz,range,"
            "roi_fill,roi_fill_h,roi_fill_v,roi_valid,obliquity_cos,trunc_frac,p_detect,ex_p_prior,"
-           "fired,conf,n_my,n_all,other_label,other_dist,other_conf\n";
+           "fired,conf,n_my,n_all,other_label,other_dist,other_conf,oyaw\n";
 }
 
 // Open on first use; a path that cannot be opened disables itself by clearing `path`.
@@ -178,7 +184,7 @@ inline void append(std::ofstream& out, const Sample& s)
         // an empty label is written as "-" so the column is never zero-width (a bare ",," is the one
         // thing a naive splitter gets wrong, and this file exists to be read by scripts)
         << (s.sibling.label.empty() ? "-" : s.sibling.label) << ','
-        << s.sibling.dist_m << ',' << s.sibling.confidence << '\n';
+        << s.sibling.dist_m << ',' << s.sibling.confidence << ',' << (std::isfinite(s.oyaw) ? s.oyaw : std::numeric_limits<float>::quiet_NaN()) << '\n';
     out.flush();
 }
 
