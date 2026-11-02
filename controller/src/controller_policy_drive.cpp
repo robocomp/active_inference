@@ -157,6 +157,28 @@ ControllerSession::PolicyTick ControllerSession::policy_tick(const rc::policy::G
         return out;
     }
     if (not grid_planner_.has_world()) { hold("no planner map yet — no cost-to-go"); return out; }
+    // ★ C9 (spec 2026-11-02): the CONTROL PERIOD is measured here, every cycle, between the policy's own ticks (a gap beyond the
+    //   gate's longest legitimate interval restarts the measure). It enters the rollouts below as part of the latency (the command
+    //   decided now stays in force one period beyond the data it was decided on), so a slower loop is more cautious THROUGH the
+    //   contact probability itself. Below Policy.MinControlHz the policy does not drive at all.
+    {
+        const double dt = policy_period_prev_s_ > 0.0 ? now_s - policy_period_prev_s_ : -1.0;
+        policy_period_prev_s_ = now_s;
+        if (dt > 0.0 and dt <= rc::policy::PolicyTickGate::kMaxTickGapS)
+            policy_period_s_ = policy_period_s_ > 0.f ? 0.8f * policy_period_s_ + 0.2f * static_cast<float>(dt) : static_cast<float>(dt);
+        else policy_period_s_ = 0.f;
+    }
+    if (prm.policy_min_control_hz > 0.f and policy_period_s_ > 1.f / prm.policy_min_control_hz)
+    {
+        const std::string why = std::format("control rate {:.1f} Hz below the minimum {:.1f} Hz — holding", 1.f / policy_period_s_,
+                                            prm.policy_min_control_hz);
+        if (why.substr(0, 30) != policy_last_why_.substr(0, 30) or policy_last_mode_ != -2)
+            std::println("[policy] {}", why);
+        policy_last_why_ = why;
+        policy_last_mode_ = -2;
+        hold(why);
+        return out;
+    }
     // ★ Live fix 2 — A ROOM-FRAME CHANGE (policy_tick_gate.h RoomFrameGuard): everything held is in the old frame — reset
     //   it (goal, field, plan, evidence), and hold until a scan accepted after the change (registered in the new frame).
     if (policy_frame_.on_room(current_room_name_, steady_now_ms()))
@@ -448,7 +470,7 @@ ControllerSession::PolicyTick ControllerSession::policy_tick(const rc::policy::G
     //    circumscribed radius + v_max over (2 horizons + latency) + the brake + 6 sigma — beyond it a return is dropped
     //    (the contact model would prune it anyway; this keeps the denoising cheap).
     std::vector<rc::policy::Return> returns;
-    const float latency_s = pose_age_s + cmd_latency;
+    const float latency_s = pose_age_s + cmd_latency + policy_period_s_;   // C9: + the measured control period
     const float sigma_r = prm.lidar_range_sigma_m;
     const float reach = body.circumscribed_radius() + limits.v_max * (2.f * pp.horizon_s + latency_s)
                       + limits.v_max * limits.v_max / (2.f * std::max(0.05f, limits.d_lin)) + 6.f * sigma_r;
@@ -733,47 +755,6 @@ void ControllerSession::drive_with_policy(const ControllerRobotPose &robot_pose,
     }
     policy_route_index_ = -1;   // no tour running: the next one latches afresh
 
-    // ── 0b. A DOOR ROUTE (controller_door_passage.h ROUTE MODE): the planned curve's points as successive Place goals, exactly
-    //        as a mission tour's waypoints are (step 0) — fixed points on ONE planned route, never re-decided per cycle. The
-    //        last carries the leg's heading. Arrived at the last ⇒ the passage is told; an Unreachable verdict (F1: not a Stuck)
-    //        ⇒ the route failed, and the passage rebuilds it once.
-    if (door_route_leg_.has_value())
-    {
-        if (not door_route_active_)
-        {
-            stop_here(rc::why::Cause::NoRoute, std::format("door route for '{}': not built", door_route_leg_->door));
-            return;
-        }
-        auto st = rc::policy::route_goal_step(door_route_goals_, 1, door_route_goal_index_, false, gp.tol_xy, gp.tol_yaw);
-        if (not st.finished and st.goal.has_value())
-        {
-            const std::string who = std::format("door route {} pt {}/{}", door_route_leg_->door, st.index + 1, door_route_goals_.size());
-            const auto tick = policy_tick(*st.goal, who, cpose, obstacle_tracker, motion_commander, now);
-            if (tick.verdict == PolicyVerdict::Unreachable)
-            {
-                std::println("[door-route] {}: {} cannot be reached ({}) — the route is blocked", door_route_leg_->door, who, tick.why);
-                door_route_active_ = false;
-                door_route_failed_ms_ = now;
-                door_passage_.note_route(door_route_leg_->key, rc::DoorPassage::RouteReport::Failed, tick.why);
-                policy_reset();
-                stop_here(rc::why::Cause::NoRoute, std::format("door route for '{}': blocked", door_route_leg_->door));
-                return;
-            }
-            if (tick.verdict == PolicyVerdict::Arrived)
-                st = rc::policy::route_goal_step(door_route_goals_, 1, door_route_goal_index_, true, gp.tol_xy, gp.tol_yaw);
-            door_route_goal_index_ = st.index;
-        }
-        if (st.finished)
-        {
-            std::println("[door-route] {}: the route's end reached (local policy)", door_route_leg_->door);
-            door_passage_.note_route(door_route_leg_->key, rc::DoorPassage::RouteReport::Arrived);
-            door_route_active_ = false;
-            policy_reset();
-            stop_here(rc::why::Cause::PolicyHold, std::format("door route for '{}': at its end", door_route_leg_->door));
-        }
-        return;
-    }
-
     // ── 1. THE CROSS: the protocol (gap, near side, through / not-a-crossing / waits) is shared; the motion is a Doorway goal
     //       on the MEASURED gap (the anchor while no gap is held), or — waiting for an anchor never seen — a Heading goal
     //       toward where it was last published
@@ -921,6 +902,57 @@ void ControllerSession::drive_with_policy(const ControllerRobotPose &robot_pose,
 
         }
         anchor_cross_.reset();
+        return;
+    }
+
+    // ── 2a. A DOOR ROUTE (controller_door_passage.h ROUTE MODE): the planned curve's points as successive Place goals, exactly
+    //        as a mission tour's waypoints are (step 0) — fixed points on ONE planned route, never re-decided per cycle. The
+    //        last carries the leg's heading. Arrived at the last ⇒ the passage is told; an Unreachable verdict (F1: not a Stuck)
+    //        ⇒ the route failed, and the passage rebuilds it once.
+    //        ★ C1 (2026-11-02): the policy drives the WHOLE passage. Up to the vantage the route's points are the APPROACH
+    //        target; past it the goal is the cross (step 1, anchor_cross_), which drive_door_route raises only when the
+    //        protocol's cross precondition holds (P(open), the mouth seen through it, near side, within, facing). Until it
+    //        does, the base HOLDS at the vantage — a shut door never gets a through goal.
+    if (door_route_leg_.has_value())
+    {
+        if (not door_route_active_)
+        {
+            stop_here(rc::why::Cause::NoRoute, std::format("door route for '{}': not built", door_route_leg_->door));
+            return;
+        }
+        if (door_route_leg_->through and door_route_goal_index_ >= door_route_vantage_goals_)
+        {
+            policy_reset();
+            stop_here(rc::why::Cause::PolicyHold, std::format("door route for '{}': at the vantage — waiting for the cross precondition", door_route_leg_->door));
+            return;
+        }
+        auto st = rc::policy::route_goal_step(door_route_goals_, 1, door_route_goal_index_, false, gp.tol_xy, gp.tol_yaw);
+        if (not st.finished and st.goal.has_value())
+        {
+            const std::string who = std::format("door route {} pt {}/{}", door_route_leg_->door, st.index + 1, door_route_goals_.size());
+            const auto tick = policy_tick(*st.goal, who, cpose, obstacle_tracker, motion_commander, now);
+            if (tick.verdict == PolicyVerdict::Unreachable)
+            {
+                std::println("[door-route] {}: {} cannot be reached ({}) — the route is blocked", door_route_leg_->door, who, tick.why);
+                door_route_active_ = false;
+                door_route_failed_ms_ = now;
+                door_passage_.note_route(door_route_leg_->key, rc::DoorPassage::RouteReport::Failed, tick.why);
+                policy_reset();
+                stop_here(rc::why::Cause::NoRoute, std::format("door route for '{}': blocked", door_route_leg_->door));
+                return;
+            }
+            if (tick.verdict == PolicyVerdict::Arrived)
+                st = rc::policy::route_goal_step(door_route_goals_, 1, door_route_goal_index_, true, gp.tol_xy, gp.tol_yaw);
+            door_route_goal_index_ = st.index;
+        }
+        if (st.finished)
+        {
+            std::println("[door-route] {}: the route's end reached (local policy)", door_route_leg_->door);
+            door_passage_.note_route(door_route_leg_->key, rc::DoorPassage::RouteReport::Arrived);
+            door_route_active_ = false;
+            policy_reset();
+            stop_here(rc::why::Cause::PolicyHold, std::format("door route for '{}': at its end", door_route_leg_->door));
+        }
         return;
     }
 

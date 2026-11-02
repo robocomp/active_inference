@@ -3564,9 +3564,7 @@ bool ControllerSession::build_door_route(const ControllerRobotPose &robot_pose, 
                  plan.waypoints.size(), door_route_.path().size(), door_route_.length(),
                  std::string(seen.has_value() ? ", on the PERCEIVED opening of " + seen->name : ", on the room-frame door")
                      + (plan.pre_omitted ? " (no vantage: the robot stands in the doorway)" : ""));
-    // The approach law's frame: V, the aperture centre and V's arc length along the curve (the nearest curve point).
-    door_vantage_ = plan.pre;
-    door_centre_pt_ = plan.has_axis ? plan.ap : plan.pre;
+    // V's arc length along the curve (the nearest curve point): the approach goals end there, a through leg's cross begins.
     door_vantage_s_ = door_route_.length();
     if (not plan.pre_omitted)
     {
@@ -3574,71 +3572,28 @@ bool ControllerSession::build_door_route(const ControllerRobotPose &robot_pose, 
         for (float sa = 0.f; sa <= door_route_.length(); sa += 0.02f)
             if (const float dd = (door_route_.spline().position_at(sa) - plan.pre).norm(); dd < best) { best = dd; door_vantage_s_ = sa; }
     }
-    door_law_done_key_ = plan.has_axis ? std::string{} : leg.key;   // no axis: no door to face — the tracker, as before
-    door_trail_.clear();
     // The policy's Place goals: the curve's points every 2·tol_xy of arc (consecutive arrival discs touch, never overlap),
     // the last one with the leg's final heading (facing the door at P_pre; the travel direction at P_post).
     door_route_goals_.clear();
     const float L = door_route_.length();
     const float ds = std::max(2.f * tol_xy, grid_planner_.cell_size());
-    for (float sa = ds; sa < L; sa += ds) door_route_goals_.push_back({door_route_.spline().position_at(sa), std::nullopt});
-    door_route_goals_.push_back({door_route_.spline().position_at(L), plan.through ? plan.post_yaw : plan.pre_yaw});
+    // up to the vantage: the approach target (the last of them faces the door); past it, a through leg's cross goals
+    for (float sa = ds; sa < door_vantage_s_ - 0.5f * ds; sa += ds) door_route_goals_.push_back({door_route_.spline().position_at(sa), std::nullopt});
+    if (door_vantage_s_ < L - 1e-3f)
+    {
+        door_route_goals_.push_back({door_route_.spline().position_at(door_vantage_s_), plan.pre_yaw});
+        door_route_vantage_goals_ = static_cast<int>(door_route_goals_.size());
+        for (float sa = door_vantage_s_ + ds; sa < L; sa += ds) door_route_goals_.push_back({door_route_.spline().position_at(sa), std::nullopt});
+        door_route_goals_.push_back({door_route_.spline().position_at(L), plan.through ? plan.post_yaw : plan.pre_yaw});
+    }
+    else
+    {
+        door_route_goals_.push_back({door_route_.spline().position_at(L), plan.through ? plan.post_yaw : plan.pre_yaw});
+        door_route_vantage_goals_ = static_cast<int>(door_route_goals_.size());
+    }
     door_route_goal_index_ = 0;
     door_route_active_ = true;
     return true;
-}
-
-// ── THE DOOR APPROACH LAW, ONE CYCLE (door_approach_law.h) ───────────────────────────────────────────────────────────────
-void ControllerSession::note_door_trail(const ControllerRobotPose &pose)
-{
-    constexpr float kStep = 0.05f;   // the trail's spacing (m): the route's own sample spacing
-    if (door_trail_.empty() or (door_trail_.back() - pose.pos).norm() >= kStep) door_trail_.push_back(pose.pos);
-    if (door_trail_.size() > 200) door_trail_.erase(door_trail_.begin(), door_trail_.begin() + (door_trail_.size() - 200));
-}
-
-rc::door_approach::Command ControllerSession::door_approach_command(const ControllerRobotPose &pose, const LiveReturns &lr,
-                                                                    const rc::TrajectoryController &path_controller,
-                                                                    std::uint64_t now_ms)
-{
-    namespace da = rc::door_approach;
-    door_route_.advance(pose.pos);
-    const float lookahead = params_ ? params_->route_smoothing_m : 0.4f;
-    const float prog = door_route_.progress();
-    da::State st;
-    st.p = pose.pos;
-    st.theta = pose.theta;
-    st.vantage = door_vantage_;
-    st.door = door_centre_pt_;
-    const float aim_s = std::min(prog + lookahead, door_vantage_s_);
-    st.aim = prog <= door_vantage_s_ ? door_route_.spline().position_at(aim_s) : door_vantage_;
-    st.d_route = prog <= door_vantage_s_
-                     ? std::max(0.f, door_vantage_s_ - prog) + (pose.pos - door_route_.spline().position_at(prog)).norm()
-                     : (pose.pos - door_vantage_).norm();
-    st.rho = path_controller.goal_threshold();
-    st.yaw_tol = path_controller.align_yaw_tol();
-    st.v_max = lr.valid ? lr.v_max : (params_ ? params_->max_adv_speed_mps : 0.5f);
-    st.w_max = lr.valid ? lr.w_max : (params_ ? params_->max_rot_speed_rps : 0.7f);
-    st.tau = rc::kAnchorTauS;
-    st.trail = door_trail_;
-    // the turn the live returns allow, in the direction the law wants (a first pass with no cap names the direction)
-    auto cmd = da::law(st);
-    if (lr.valid and cmd.rot != 0.f)
-    {
-        st.w_cap = rc::lidar_return_rot_limit(lr.r.obstacles, cmd.rot, returns_body(), lr.margin, lr.a_dec, lr.w_max);
-        cmd = da::law(st);
-    }
-    if (now_ms - door_law_trace_ms_ >= 1000)
-    {
-        door_law_trace_ms_ = now_ms;
-        float clr = std::numeric_limits<float>::infinity();
-        if (lr.valid)
-            for (const auto &j : lr.r.obstacles) clr = std::min(clr, rc::anchor_signed_distance(returns_body(), j.mean));
-        std::println("[approach] {}: d {:.2f} m  psi_V {:+.0f} deg  psi_door {:+.0f} deg  lateral {:+.2f} m  -> {} (adv {:+.2f} m/s, rot {:+.2f} rad/s)  "
-                     "min clearance {:.2f} m{}",
-                     door_route_leg_.has_value() ? door_route_leg_->door : std::string("?"), cmd.d, cmd.psi_V * 57.2958f,
-                     cmd.psi_door * 57.2958f, cmd.lateral, da::mode_name(cmd.mode), cmd.adv, cmd.rot, clr, cmd.done ? "  DONE (in band, facing)" : "");
-    }
-    return cmd;
 }
 
 // ── THE CROSS'S END, CHOSEN TOWARD THE NEXT STEP (spec 2026-11-02, chained_action.h) ──────────────────────────────────────────
@@ -3669,7 +3624,7 @@ void ControllerSession::update_chain_end(const ControllerPlanningStep &step)
     const float r_body = std::hypot(half_w, half_len);   // "wholly past" = beyond the circumscribed radius (drive_door_route)
     const float s_pub = (*leg.cross - axis->c).dot(-axis->n);
     // today's end: the servo drives in to its standoff past the plane when it takes the doorway, else the route ends at the cross target
-    const float s_max = door_cross_servo_ ? std::max(s_pub, params_ != nullptr ? params_->anchor_cross_standoff_m : 2.0f) : s_pub;
+    const float s_max = std::max(s_pub, params_ != nullptr ? params_->anchor_cross_standoff_m : 2.0f);
     std::optional<float> p_entered;   // P(the leaf sits on the side being ENTERED) = 1 - P(it swings into the room the door hangs from)
     float leaf_len = 0.f;
     if (graph_ != nullptr)
@@ -3754,9 +3709,9 @@ bool ControllerSession::drive_door_route(const ControllerPlanningStep &step, rc:
                 door_passage_.note_route(leg.key, rc::DoorPassage::RouteReport::Arrived);
             }
         }
-    // ★ THE DOORWAY ON THE ANCHOR, IN THE ROBOT FRAME ([DoorPassage] CrossServo; spec 2026-10-31-door-cross-aif-servo).
-    //   From the cycle the cross's interaction anchor is fresh, the body is driven through the hole it perceives by the
-    //   Active-Inference law (door_cross_aif.h) on the servo's guard chain (step_anchor_cross) — no route past the door, no
+    // ★ THE DOORWAY ON THE ANCHOR, IN THE ROBOT FRAME (C1, spec 2026-11-02: the LOCAL POLICY drives it, drive_with_policy step 1).
+    //   From the cycle the cross's interaction anchor is fresh AND the protocol's cross precondition holds (below), the body is
+    //   driven through the hole it perceives by the policy's Doorway goal — no route past the door, no
     //   grid lookup beyond it (pingpong6/8/10: "no free point past the door on its axis"), no rebuild. THROUGH and link 1
     //   stay above; the passage's room-switch / archive end is unchanged. Before the anchor is up the route still drives.
     // ★ ONLY FROM THE VANTAGE (spec §4: "the route is kept up to the vantage P_pre"; pingpong17 leg 2): the servo is a law
@@ -3772,7 +3727,7 @@ bool ControllerSession::drive_door_route(const ControllerPlanningStep &step, rc:
     // the cross (it does as the body passes the plane): pingpong18 leg 4 stopped 1.1 m in, 0.2 m short of the cross
     // target, the crossing fact never written, because this block needed the affordance node.
     const auto aff = graph_ != nullptr ? graph_->get_node("aff_" + leg.door + "_cross") : std::nullopt;
-    if (door_cross_servo_ and leg.through and graph_ != nullptr
+    if (leg.through and graph_ != nullptr
         and (door_passage_.servo() or (at_vantage and aff.has_value())))
         {
             ControllerPlanningStep on_anchor = step;
@@ -3809,15 +3764,6 @@ bool ControllerSession::drive_door_route(const ControllerPlanningStep &step, rc:
                                           facing ? "" : " ✗");
                 anchor_cross_last_mouth_missing_ = not front_of_open and (not open_seen or not open_belief);
                 if (not front_of_open) anchor_cross_.reset();   // execute() must not run the servo on it
-            }
-            if (door_passage_.driving_in() and not anchor_cross_.has_value())   // v4 step 3: nothing left to drive in on
-            {
-                std::println("[door-route] drive-in: {}'s anchor is gone after the switch — stopped in the new room", leg.door);
-                path_controller.stop();
-                motion_commander.stop_robot();
-                door_passage_.note_drive_in_done();
-                cross_status_ = "drive-in stopped: the anchor is gone after the switch";
-                return true;
             }
             // ★ NO MOUTH, NO CROSSING (user 2026-11-01: "you can't throw the robot into a closed door — there has to be a mouth to go
             //   through"). warm24: DOOR_1 believed open at P 0.97, nothing seen through it, and the through-route drove on into the
@@ -5068,369 +5014,6 @@ rc::policy::DoorwayRisk ControllerSession::band_cross_doorway_risk(const CrossPr
     rc::policy::DoorwayRisk risk{jambs_of(cp.anchor_pose, cp.anchor_width), std::nullopt, 0.f};
     if (cp.on_gap) { risk.gap = jambs_of(cp.drive_pose, cp.drive_width); risk.p_gap = cp.gap_score; }
     return risk;
-}
-
-void ControllerSession::step_anchor_cross(const ControllerRobotPose &robot_pose,
-                                          rc::TrajectoryController &path_controller,
-                                          ControllerObstacleTracker &obstacle_tracker,
-                                          ControllerMotionCommander &motion_commander,
-                                          ControllerDisplay &display,
-                                          rc::AffordanceManager &affordance_manager,
-                                          const TimeSource &time_source)
-{
-    const auto &a = *anchor_cross_;
-    const std::uint64_t now = time_source();
-    const float v_max = params_ != nullptr ? params_->max_adv_speed_mps : 0.35f;
-    const float w_max = params_ != nullptr ? params_->max_rot_speed_rps : 1.0f;
-    const float standoff = cross_standoff_m();
-    // The body's lateral half-width: the footprint's reach along body ±x (the passage code's own body model, safety
-    // margin included).
-    const float half_w = std::max(approach_body_.support_radius(0.f, Eigen::Vector2f(1.f, 0.f)),
-                                  approach_body_.support_radius(0.f, Eigen::Vector2f(-1.f, 0.f)));
-    // Shadow is DIFFERENTIAL (the bridge drops `side`); an unknown capability is treated the same way, since a side
-    // command the base may drop is the one assumption that fails silently.
-    const bool holonomic = base_capability_.holonomic.value_or(false);
-    auto hand_back = [&](const std::string &why, bool timed_out = true) { cross_hand_back(why, timed_out, motion_commander); };
-    // ★ Task 8: the PROTOCOL half (gap, near-side gate, through / not-a-crossing, the stale-anchor wait) is cross_protocol,
-    //   shared with the local policy's doorway drive; what follows is the servo's own motion law and its guard chain.
-    const CrossProtocol cp = cross_protocol(robot_pose, path_controller, obstacle_tracker, motion_commander, display,
-                                            affordance_manager, time_source);
-    if (cp.ended) return;
-    // ★ [Route] BandDrivesCross (Task 6 fix round 1): the protocol above ran (its `through` is still the crossing's end); the
-    //   MOTION goes to the follower on the route through the opening drive_point_target installed, with the opening's jambs in
-    //   the band's near field (execute_plan reads band_cross_driving_). Waiting for an anchor (not cp.drive) stays the servo's.
-    if (band_drives_cross() and cp.drive and current_plan_.has_value())
-    {
-        const ControllerRobotPose &cpose = tracker_pose_.has_value() ? *tracker_pose_ : robot_pose;
-        band_cross_risk_ = band_cross_doorway_risk(cp, cpose);
-        band_cross_driving_ = true;
-        if (not band_cross_logged_)
-        {
-            band_cross_logged_ = true;
-            std::println("[anchor] cross on {}: the SPLINE + band drive it ([Route] BandDrivesCross) — jambs of the anchor's "
-                         "{:.2f} m opening{} in the near field; the cross protocol still decides `through`", a.name,
-                         cp.anchor_width, cp.on_gap ? std::format(" and the measured {:.2f} m gap (score {:.2f})", cp.drive_width,
-                                                                  cp.gap_score) : std::string{});
-        }
-        return;
-    }
-    const bool drive = cp.drive;
-    const rc::interaction::RelPose &drive_pose = cp.drive_pose;
-    const float drive_width = cp.drive_width;
-    const std::string &drive_name = cp.drive_name;
-    const std::span<const rc::interaction::AnchorLeaf> drive_leaves(cp.drive_leaves);
-    rc::AnchorCommand cmd;
-    rc::interaction::RelPose pose = cp.pose;   // the pose the guards are asked about
-    cross_viz_ = CrossViz{};
-    cross_viz_.stamp_ms = now;
-    if (drive)
-    {
-        // try101: P(body fits) read where the body will ENTER the opening — a differential base re-centres by advancing, not
-        // by turning to face along the wall. The advance it has for that: up to the mouth (its front = the footprint's reach
-        // ahead, margin included, like half_w), and no further than the body, aligned with the normal where it stands, can go
-        // before the live cloud is in its way (rc::lidar_free_advance: a leaf, a jamb — the gap's span ends at the leaf, its
-        // depth toward the robot is only in the cloud).
-        float free_advance = std::numeric_limits<float>::infinity();
-        if (auto *lidar = obstacle_tracker.lidar_buffer(); lidar != nullptr and drive_pose.x.allFinite())
-        {
-            const auto &cp_pose = tracker_pose_.has_value() ? *tracker_pose_ : robot_pose;
-            if (const auto pts = rc::lidar_robot_points_from_buffer(*lidar, cp_pose.as_transform(), returns_body(), self_body_);
-                pts.has_value())
-                free_advance = rc::lidar_free_advance(*pts, rc::anchor_cross_geometry(drive_pose).n, returns_body());
-        }
-        if (door_cross_servo_ and not holonomic)
-        {
-            // [DoorPassage] CrossServo: the Active-Inference law (door_cross_aif.h); same anchor, same guards below.
-            const float dt = anchor_servo_last_ms_ != 0 and now > anchor_servo_last_ms_
-                                 ? std::min(0.5f, 1e-3f * static_cast<float>(now - anchor_servo_last_ms_)) : 0.05f;
-            anchor_servo_last_ms_ = now;
-            const auto st = rc::door_cross_aif(drive_pose, drive_width, drive_leaves,
-                                               rc::DoorCrossAifBody{half_w, approach_body_.support_radius(0.f, Eigen::Vector2f(0.f, 1.f))},
-                                               standoff, v_max, w_max, dt, free_advance);
-            cmd = st.cmd;
-            cross_viz_.has_aim = true;
-            cross_viz_.aim = st.aim;
-            if (st.p_fit < 0.5f)
-                cross_viz_.why.push_back(std::format("P(body fits at entry) {:.2f}: progress held back", st.p_fit));
-            // [cross-aif] trace, 1 Hz (warm14: the servo sent ~0 for minutes at an open door and its state reached only the
-            // canvas): what the law saw and chose, and each leaf hypothesis it weighed.
-            if (now >= aif_trace_next_ms_)
-            {
-                aif_trace_next_ms_ = now + 1000;
-                std::string lv;
-                for (const auto &l : drive_leaves)
-                    lv += std::format(" [p {:.2f} hinge ({:+.2f},{:+.2f}) tip ({:+.2f},{:+.2f}) phi {:.0f}]", l.p, l.hinge.x(),
-                                      l.hinge.y(), l.tip.x(), l.tip.y(), l.phi * 57.2958f);
-                std::println("[cross-aif] e {:+.3f} line {:+.3f} s {:+.3f} s* {:.2f} p_fit {:.3f} heading_err {:+.1f} deg "
-                             "width {:.2f} half_w {:.3f} sigma_lat {:.3f} free_adv {:.2f} | cmd adv {:+.3f} rot {:+.3f} | {} leaves{}",
-                             st.e, st.line, st.s, st.s_goal, st.p_fit,
-                             rc::anchor_cross_geometry(drive_pose).heading_err * 57.2958f, drive_width, half_w,
-                             rc::anchor_cross_geometry(drive_pose).sigma_lat, free_advance, st.cmd.adv, st.cmd.rot,
-                             drive_leaves.size(), lv);
-            }
-        }
-        else
-            cmd = rc::anchor_cross_command(drive_pose, drive_width, half_w, standoff, v_max, w_max, holonomic, drive_leaves,
-                                           approach_body_.support_radius(0.f, Eigen::Vector2f(0.f, 1.f)), free_advance);
-    }
-    else
-    {
-        // Fix round 1: toward the opening's centre while it is ahead; once the body's centre is within half a body length of
-        // the wall plane (or past it, a retry that starts in the doorway) the centre may lie BESIDE or BEHIND the robot, and
-        // the way to see it again is to face along the crossing: the normal (heading_err).
-        cmd.rot = rc::anchor_wait_turn(pose, w_max, approach_body_.support_radius(0.f, Eigen::Vector2f(0.f, 1.f)));
-        // Task 11 fix 3: this wait's turn was judged SPINNING — commanded, not delivered (a jamb, a leg): it is not ground
-        // on. The base holds until the anchor is seen again or the wait's own timeout hands the cross back.
-        if (anchor_wait_blocked_) cmd.rot = 0.f;
-    }
-
-    cross_viz_.own_adv = cmd.adv; cross_viz_.own_rot = cmd.rot;
-    if (not drive) cross_viz_.why.push_back(a.fresh ? "waiting: anchor not yet engaged — turning to face the opening"
-                                                    : "waiting: the anchor is stale — turning to face the opening");
-    const auto &body = approach_body_.polygon();
-    const auto &control_pose = tracker_pose_.has_value() ? *tracker_pose_ : robot_pose;
-    path_controller.refresh_lidar_field(control_pose.as_transform());
-    // ★ Task 14 (try74 leg 2: the anchor 0.2 m off at 12σ, the front-left corner driven into the REAL east jamb while the
-    //   field above saw nothing): the returns themselves, self-filtered by the BODY (lidar_body_guard.h), not by the
-    //   ESDF's 0.405 m disc. They cap translation on the swept body path and rotation by the corner sweep, UNFLOORED, and
-    //   trust nothing the anchor says.
-    const auto returns = live_returns(control_pose, obstacle_tracker, path_controller);
-    // 0. ★ try101 leg 1 (and its two retries): stood 0.37 m from room_1's corridor wall, facing it, the turn toward the door
-    //    refused by that wall and forward refused by it too — and the returns' backoff turned it back the other way each
-    //    cycle until the contract timed out. The servo's turn is given its ROOM: while the guards would cap the turn, the
-    //    translation is the one that moves its blockers (the anchor's jambs/leaf AND the live returns) out of the sweep
-    //    (rc::anchor_make_turn_room). It then goes through the same guards below, so it cannot close on anything else.
-    {
-        const auto model = rc::anchor_obstacles(pose, drive_width, drive_leaves);
-        const std::span<const rc::AnchorJamb> live = returns.valid ? std::span<const rc::AnchorJamb>(returns.r.obstacles)
-                                                                   : std::span<const rc::AnchorJamb>();
-        const std::array<rc::AnchorTurnBlockers, 2> sets{rc::AnchorTurnBlockers{model, body},
-                                                         rc::AnchorTurnBlockers{live, returns_body()}};
-        const auto room = rc::anchor_make_turn_room(cmd, sets, approach_body_.safety_margin(),
-                                                    anchor_brake_decel(path_controller), v_max, w_max, holonomic);
-        if (room.applied != anchor_turn_room_logged_)
-        {
-            anchor_turn_room_logged_ = room.applied;
-            if (room.applied)
-                std::println("[anchor] cross: the turn toward {} ({:+.2f} rad/s asked) is refused by {} obstacle(s) its sweep "
-                             "reaches ({:.3f} m short of a free turn) — MAKING ROOM for it: adv {:+.3f} side {:+.3f} (servo's "
-                             "own adv {:+.3f})", drive_name, cmd.rot, room.blockers, room.deficit, room.cmd.adv, room.cmd.side,
-                             cmd.adv);
-            else
-                std::println("[anchor] cross: the turn has its room — the servo's own translation resumes");
-        }
-        cmd = room.cmd;
-    }
-    // 1. The jambs (and the deadlock's way out), then the live LiDAR field along the direction the base actually moves
-    //    (on a differential base side is 0, so that is (0, adv)), floored at 0.05 m/s like the tracker's.
-    const auto guard = rc::anchor_jamb_guard(pose, drive_width, cmd, holonomic, body, approach_body_.safety_margin(),
-                                             anchor_brake_decel(path_controller), v_max, w_max, drive_leaves);
-    if (guard.backoff != anchor_backoff_logged_)   // logged on the transitions only
-    {
-        anchor_backoff_logged_ = guard.backoff;
-        if (guard.backoff)
-            std::println("[anchor] cross: a jamb of {} is {:.3f} m inside the body's safety margin and the servo's own command "
-                         "cannot open it — backing off: adv {:+.3f} side {:+.3f} rot {:+.3f}", a.name, -guard.min_clearance,
-                         guard.cmd.adv, guard.cmd.side, guard.cmd.rot);
-        else
-            std::println("[anchor] cross: clear of the jambs' margin again — the servo resumes");
-    }
-    // Fix round 1, item 4: once per cross, on its first cycle WITH A NON-EMPTY CLOUD (try76: the line logged before the first
-    // LiDAR frame read all zeros and looked like a blind net).
-    if (anchor_census_for_ != anchor_latched_for_ and returns.valid and returns.r.n_read > 0)
-    {
-        anchor_census_for_ = anchor_latched_for_;
-        log_returns_census(std::format("cross on {}, first non-empty cloud", a.name).c_str(), returns);
-    }
-    float adv_mps = guard.cmd.adv, side_mps = holonomic ? guard.cmd.side : 0.f, rot_rps = guard.cmd.rot;
-    // The ask the stall judge weighs the delivery against: the servo's own (the backoff's, when it took over).
-    // ★ Task 13: the ask the stall judge weighs is the command AFTER the jamb / leaf guards — a translation the model's own
-    //   obstacles capped to 0 was not asked of the base, and "spinning, translation asked" on it is a verdict on nothing.
-    //   (The LiDAR floor and the uncertainty limiter below are throttles, and stay out of the ask: stall_judge.h.)
-    const float asked_lin_mps = std::hypot(guard.cmd.adv, holonomic ? guard.cmd.side : 0.f);
-    float v_field = v_max;
-    if (const float lin = std::hypot(adv_mps, side_mps); lin > 0.f)
-    {
-        const Eigen::Vector2f dir(side_mps / lin, adv_mps / lin);   // robot frame: +x side, +y fwd
-        // Floored at 0.05 m/s like the tracker's — except a REVERSE (the jamb backoff): nothing the tracker does backs up,
-        // and the rear clearance must be able to stop it (fix round 1).
-        // Task 14: the 0.05 m/s floor stays on the FIELD's ceiling only — its disc-support model reads every return beside
-        // the body as no clearance, and the floor is what keeps that from deadlocking in clutter. A return on the swept
-        // body path, closing, is the returns' own ceiling below, which has no floor: at contact it gives 0.
-        v_field = anchor_clearance_speed_limit(dir, v_max, path_controller);
-        const float v_lidar = adv_mps < 0.f ? v_field : std::max(0.05f, v_field);
-        if (lin > v_lidar) { adv_mps *= v_lidar / lin; side_mps *= v_lidar / lin; }
-    }
-    const bool had_motion = adv_mps != 0.f or side_mps != 0.f or rot_rps != 0.f;
-    // Fix round 3, item 4 (try77: a single band return in open space capped the cross to 0 seven times): the FIRST band
-    // return of each cross, with its place on the body and the base's motion — a body part the hull misses sits at a fixed
-    // body position whatever the motion; a lag artefact moves with |ω|.
-    if (not returns.r.band_points.empty() and anchor_band_logged_for_ != anchor_latched_for_)
-    {
-        anchor_band_logged_for_ = anchor_latched_for_;
-        for (const auto &q : returns.r.band_points)
-            std::println("[returns] cross on {}: FIRST return in the contact band — body frame ({:+.3f}, {:+.3f}) m, bearing {:+.0f} deg "
-                         "(0 fwd, + right), {:.3f} m outside the hull; base v {:.3f} m/s, w {:+.3f} rad/s; {} dropped as the robot "
-                         "at capture", a.name, q.x(), q.y(), std::atan2(q.x(), q.y()) * 57.29578f,
-                         rc::anchor_signed_distance(returns_body(), q), base_speed_lin_, base_speed_ang_, returns.capture_self);
-    }
-    const float pre_cap_lin = std::hypot(adv_mps, side_mps), pre_cap_rot = rot_rps;
-    const auto cap = cap_by_returns(returns, adv_mps, side_mps, rot_rps);
-    // the canvas: which returns bind (each one's own limit at the cap — display only), and why the command is cut
-    if (returns.valid and (cap.bound_lin or cap.bound_rot))
-        for (const auto &o : returns.r.obstacles)
-        {
-            const std::span<const rc::AnchorJamb> one(&o, 1);
-            bool binds = false;
-            if (cap.bound_lin and pre_cap_lin > 0.f)
-                binds = rc::lidar_return_speed_limit(one, Eigen::Vector2f(guard.cmd.side / pre_cap_lin, guard.cmd.adv / pre_cap_lin),
-                                                     returns_body(), returns.margin, returns.a_dec, returns.v_max) <= cap.v_lim + 1e-3f;
-            if (not binds and cap.bound_rot and pre_cap_rot != 0.f)
-                binds = rc::lidar_return_rot_limit(one, pre_cap_rot, returns_body(), returns.margin, returns.a_dec, returns.w_max)
-                        <= cap.w_lim + 1e-3f;
-            if (binds) cross_viz_.blockers.push_back(o.mean);
-        }
-    if (cap.bound_lin) cross_viz_.why.push_back(std::format("live returns cap v at {:.2f} m/s", cap.v_lim));
-    if (cap.bound_rot) cross_viz_.why.push_back(std::format("live returns cap turn at {:.2f} rad/s", cap.w_lim));
-    if (anchor_turn_room_logged_) cross_viz_.why.push_back("turn refused by its sweep: making room");
-    if (guard.backoff)
-    {
-        cross_viz_.why.push_back(std::format("JAMB GUARD: {:.3f} m inside the margin, backing off", -guard.min_clearance));
-        for (const auto &j : rc::anchor_obstacles(pose, drive_width, drive_leaves)) cross_viz_.jambs.push_back(j.mean);
-    }
-    if (v_field < v_max - 1e-3f and pre_cap_lin > 0.f) cross_viz_.why.push_back(std::format("clearance field caps v at {:.2f} m/s", v_field));
-    // THE STATUS COLUMN'S "cross:" LINE (user 2026-10-31: "any reason that keeps it from advancing should be output in the
-    // text canvas"): what the servo steers on and where it is, the anchor's own reading beside a measured gap (two pictures
-    // of one door, side by side), and the live-returns cap when it binds.
-    {
-        const auto gd = rc::anchor_cross_geometry(drive_pose);
-        cross_status_ = cp.on_gap
-            ? std::format("steering on the MEASURED gap {:.2f} m: s {:+.2f} e {:+.2f} | anchor {} says s {:+.2f} e {:+.2f}",
-                          cp.drive_width, gd.s, gd.e, cp.drive_name, rc::anchor_cross_geometry(cp.anchor_pose).s,
-                          rc::anchor_cross_geometry(cp.anchor_pose).e)
-            : std::format("on the anchor {} ({:.2f} m): s {:+.2f} e {:+.2f}", drive_name, cp.drive_width, gd.s, gd.e);
-        if (cap.bound_lin or cap.bound_rot)
-            cross_status_ += std::format(" | live returns cap v {:.2f} m/s{}", cap.v_lim, cap.bound_rot ? ", rotation capped" : "");
-        if (anchor_turn_room_logged_)
-            cross_status_ += " | the turn toward the opening is refused by obstacles its sweep reaches: making room";
-        if (guard.backoff)
-            cross_status_ += std::format(" | JAMB GUARD: a jamb or leaf of the anchor is {:.3f} m inside the safety margin — "
-                                         "backing off", -guard.min_clearance);
-        if (door_passage_.driving_in()) cross_status_ += " | driving in";
-    }
-    // v4 step 3 (user 2026-10-31: "if there is not much space after the door, just stop"): past THROUGH, the live returns
-    // leaving the body no forward speed IS the end of the free space ahead — the drive-in stops there, no escape; the
-    // room's own affordances move the robot on (a new room's survey) or the leg ends (a recalled room).
-    if (door_passage_.driving_in() and cap.bound_lin and not (cap.v_lim > 0.f))
-    {
-        std::println("[door-route] drive-in: no free space ahead ({} live returns bind the body) — stopped in the new room",
-                     returns.r.obstacles.size());
-        path_controller.stop();
-        note_no_command(); motion_commander.stop_robot();
-        door_passage_.note_drive_in_done();
-        cross_status_ = "drive-in stopped: no free space ahead";
-        return;
-    }
-    if (const bool binding = cap.bound_lin and cap.v_lim < v_field; binding != anchor_returns_binding_logged_)
-    {
-        anchor_returns_binding_logged_ = binding;
-        if (binding)
-            std::println("[anchor] cross: a LIVE RETURN on the body's path caps translation at {:.3f} m/s (field {:.3f}) — {} "
-                         "returns near the body ({} within sigma_r outside the hull), {} filtered as the body itself",
-                         cap.v_lim, v_field, returns.r.obstacles.size(), returns.r.n_band, returns.r.n_self);
-        else
-            std::println("[anchor] cross: the live returns no longer bind the translation");
-    }
-    // ★ Fix round 1, item 2 (b): the returns' DEADLOCK — they left the servo nothing (forward and both turns closed by a
-    //   pinned corner). The servo's own way out, judged on the same returns (rc::lidar_return_backoff, the LiDAR twin of
-    //   fix C), already through their caps.
-    bool returns_backoff = false;
-    if (had_motion and adv_mps == 0.f and side_mps == 0.f and rot_rps == 0.f)
-        if (const auto b = rc::lidar_return_backoff(returns.r.obstacles, returns_body(), returns.margin, returns.sigma, returns.a_dec,
-                                                    v_max, w_max, holonomic);
-            b.has_value())
-        {
-            adv_mps = b->adv; side_mps = holonomic ? b->side : 0.f; rot_rps = b->rot;
-            returns_backoff = true;
-        }
-    if (returns_backoff != returns_backoff_logged_)
-    {
-        returns_backoff_logged_ = returns_backoff;
-        if (returns_backoff)
-            std::println("[anchor] cross: the live returns close every motion the servo has — BACKING OFF on them: adv {:+.3f} "
-                         "side {:+.3f} rot {:+.3f}", adv_mps, side_mps, rot_rps);
-        else
-            std::println("[anchor] cross: the returns' backoff ends");
-    }
-    const bool returns_hold = cap.bound_lin or cap.bound_rot or returns_backoff;
-    // 2. NO pose-uncertainty limiter here (2026-10-31, pingpong31 leg 3: "STALLED BY OUR OWN SPEED LIMIT", position sigma
-    //    0.25 m). The servo's target is the anchor, in the ROBOT frame; the room-frame pose is not used to drive it, so its
-    //    sigma says nothing about how fast the body may approach the opening. During a crossing room_concept is on odometry
-    //    only (link 0) and that sigma grows by design; applying it here cut the servo to 0.006 m in 3 s in front of an open
-    //    door. What keeps the body safe here are the jamb guard and the live returns, both in the robot frame.
-    // 3. Stall judge → escape. Rotation-dominant = the body's corners sweep faster than its centre translates (r_max: the
-    //    grown body's reach) — then a Spinning verdict is the servo working, not a wedge (bounded: the contract timeout).
-    float r_max = 0.f;
-    for (const auto &v : rc::anchor_grown_body(body, approach_body_.safety_margin())) r_max = std::max(r_max, v.norm());
-    const bool rotation_dominant = std::abs(rot_rps) * r_max > std::hypot(adv_mps, side_mps);
-    const auto unc = motion_commander.last_uncertainty_diag();
-    // The wait-turn (not engaged, a stale anchor): once it faces the opening its command is ~0, and the judge read every 3-s
-    // window of those near-zero asks as SPINNING (try68: nine "0.00 rad commanded" verdicts). ★Task 11 fix 3: skipped ONLY
-    // then — when the turn asked over one window is below the heading σ the localiser resolves (rc::anchor_wait_turn_judged).
-    // A real wait-turn is judged on delivered vs commanded yaw like any other turn, so a turn ground against a jamb is
-    // caught (spin_servo, no escape: the wait then holds, above) instead of running for the whole 40-s wait.
-    const float judge_window_s = params_ != nullptr ? params_->stuck_confirm_ms * 1e-3f : 0.f;
-    const bool judged = drive or rc::anchor_wait_turn_judged(rot_rps, judge_window_s, unc.valid ? unc.theta_std_rad : -1.f);
-    if (not judged) reset_stuck_window();
-    else if (detect_stuck(/*pursuing=*/true, asked_lin_mps, std::hypot(adv_mps, side_mps), unc.valid ? unc.xy_std_m : 0.f,
-                     robot_pose.pos, robot_pose.theta, rot_rps, now, /*spin_is_not_a_wedge=*/rotation_dominant,
-                     /*returns_hold=*/returns_hold))
-    {
-        begin_escape(robot_pose, obstacle_tracker, path_controller, time_source());
-        step_escape(robot_pose, path_controller, obstacle_tracker, motion_commander, time_source());
-        return;
-    }
-    if (not drive and judged and last_judged_verdict_ == rc::StallVerdict::Spinning and not anchor_wait_blocked_)
-    {
-        anchor_wait_blocked_ = true;
-        std::println("[anchor] cross: the wait-turn toward {} was commanded but not delivered (SPINNING) — holding still, "
-                     "not grinding, until it is seen again", a.name);
-    }
-    if (last_judged_verdict_ == rc::StallVerdict::Spinning and rotation_dominant)
-    {
-        if (anchor_spin_since_ms_ == 0) anchor_spin_since_ms_ = now;
-        else if (target_contract_known_ and double(now - anchor_spin_since_ms_) > double(target_contract_.timeout_ms))
-        {
-            hand_back(std::format("the servo's turn netted nothing for {:.1f} s", (now - anchor_spin_since_ms_) * 1e-3));
-            return;
-        }
-    }
-    else if (last_judged_verdict_ != rc::StallVerdict::Spinning)
-        anchor_spin_since_ms_ = 0;
-    // 4. Out.
-    cross_viz_.out_adv = adv_mps; cross_viz_.out_rot = rot_rps;
-    if (returns_backoff) cross_viz_.why.push_back("live returns close every motion: backing off");
-    if (std::abs(adv_mps) < 5e-4f and std::abs(side_mps) < 5e-4f and std::abs(rot_rps) < 1e-3f)
-    {
-        // WHY (observability only): which of the guards above took the whole command.
-        if (returns_hold)
-            note_why(rc::why::Cause::ReturnsHold,
-                     std::format("cross on {}: a live return closes every motion (v <= {:.3f} m/s, |w| <= {:.3f} rad/s; {} returns "
-                                 "near the body, {} in the contact band)", a.name, cap.v_lim, cap.w_lim,
-                                 returns.r.obstacles.size(), returns.r.n_band));
-        else if (not drive)
-            note_why(rc::why::Cause::AnchorWaiting,
-                     std::format("cross on {}: the anchor is {} — {}", a.name, a.fresh ? "not yet engaged" : "stale",
-                                 anchor_wait_blocked_ ? "the wait-turn was judged SPINNING, holding still"
-                                                      : "facing the opening, waiting for a fresh anchor"));
-        else
-            note_why(rc::why::Cause::TrackerZero, std::format("the anchor servo on {} commanded zero", a.name));
-        note_no_command(); motion_commander.stop_robot();
-        return;
-    }
-    why_.set_driving_detail(std::format("cross on the anchor {}: adv {:+.2f} m/s rot {:+.2f} rad/s{}", a.name, adv_mps, rot_rps,
-                                        returns_hold ? " — capped by live returns" : ""));
-    motion_commander.send_speed_command(adv_mps, side_mps, rot_rps);
 }
 
 // ── FINAL-APPROACH BLACK BOX ─────────────────────────────────────────────────────────────────────
@@ -6912,8 +6495,6 @@ void ControllerSession::step_route_band(const DrivenCurve &curve,
                          [&](const Eigen::Vector2f &q) { return in_reach(q) and not lidar_near(q); }))
                     model.push_back(e);
         nf->set_model(model);
-        if (band_cross_driving_ and band_cross_risk_.has_value())
-            nf->set_doorway(*band_cross_risk_, rc::kBandCrossWallHalfDepthM);
         band_near_elements_ = static_cast<int>(nf->surface_count() + nf->model_count());
         distance = [nf](const Eigen::Vector2f &p) { return nf->distance(p); };
         gradient = [nf](const Eigen::Vector2f &p) { return nf->gradient(p); };
@@ -7417,7 +6998,7 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
     //    returns' backoff, the anchor servo, lock-on and orient motion, the band, the clearance ceiling, the tracker's
     //    command path and its caps, the uncertainty limiter — none of which runs, so none can write the base. The
     //    protocol halves they carried (arrival, the cross's completion, the lock-on / orient predicates) are shared.
-    if (policy_enabled() and not door_route_leg_.has_value())   // a door route is followed by the tracker (drive_door_route)
+    if (policy_enabled())   // C1: the policy drives the WHOLE door passage too (approach, hold at the vantage, cross)
     {
         drive_with_policy(robot_pose, path_controller, obstacle_tracker, motion_commander, display, affordance_manager,
                           time_source);
@@ -7441,21 +7022,15 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
         return;
     }
 
-    // The door cross on its interaction anchor owns the base (drive_point_target found a fresh one this cycle and
-    // installed no route). Its command goes through the same guard chain as the tracker's — see step_anchor_cross.
-    band_cross_driving_ = false;   // [Route] BandDrivesCross: set by step_anchor_cross on a cycle it hands the motion over
+    // The door cross on its interaction anchor is the LOCAL POLICY's (drive_with_policy step 1). Without [Policy] Enabled there is
+    // no driver for it: the base holds (the old anchor servo and its guard chain are gone).
     if (anchor_cross_.has_value())
     {
-        step_anchor_cross(robot_pose, path_controller, obstacle_tracker, motion_commander, display,
-                          affordance_manager, time_source);
         anchor_cross_.reset();
-        if (not band_cross_driving_)
-        {
-            refresh_view_only();
-            return;
-        }
-        // ★ Task 6 fix round 1: the follower below drives the route through the opening, and the band deforms it against
-        //   the near field with the jambs (step_route_band) — only the DRIVER of the cross changed.
+        note_why(rc::why::Cause::NoRoute, "a door cross needs [Policy] Enabled — the anchor servo is gone");
+        note_no_command(); motion_commander.stop_robot();
+        refresh_view_only();
+        return;
     }
 
     if (!current_plan_.has_value())
@@ -7636,7 +7211,6 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
     // the right argument for the whole call, not merely tolerable for half of it.
     // Everything else in this function keeps `robot_pose`, the scan-aligned one.
     const auto &control_pose = tracker_pose_.has_value() ? *tracker_pose_ : robot_pose;
-    note_door_trail(control_pose);
     const auto control_output = path_controller.compute(control_pose.as_transform());
     // Surface what the ARRIVAL test is waiting on, every cycle, before any of the branches below can return
     // early — otherwise the readout would freeze exactly in the states worth watching (aligning, blocked).
@@ -7737,16 +7311,7 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
     if (door_route_active_ and door_route_installed_ and door_route_leg_.has_value())
     {
         door_route_.advance(robot_pose.pos);
-        const bool law_on = door_law_active();
-        // The approach does not decide "arrived" itself: it ends when the NEXT affordance is eligible by door_concept's own
-        // measure (`open` while the door reads shut, `cross` once open), read by the passage for THIS leg's key.
-        const bool law_arrived = law_on and door_passage_.next_eligible(door_route_leg_->key);
-        if (law_arrived and door_route_leg_->through)   // at the vantage, facing the door: the tracker goes on through
-        {
-            door_law_done_key_ = door_route_leg_->key;
-            std::println("[door-route] {}: at the vantage, facing the door — the route goes on", door_route_leg_->door);
-        }
-        if (law_on ? (law_arrived and not door_route_leg_->through) : door_route_.finished(robot_pose.pos))
+        if (door_route_.finished(robot_pose.pos))
         {
             std::println("[door-route] {}: the route's end reached ({:.2f} of {:.2f} m)", door_route_leg_->door, door_route_.progress(),
                          door_route_.length());
@@ -8200,18 +7765,7 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
         // cycle against the wall.
         const auto lr = live_returns(pose, obstacle_tracker, path_controller);
         rc::LidarCapResult cap{.v_lim = lr.v_max, .w_lim = lr.w_max};
-        if (door_law_active())
-        {
-            // THE DOOR APPROACH IS A STATE-FEEDBACK LAW (door_approach_law.h): it replaces the tracker's command, and where the
-            // returns refuse its turn it backs off along the trail (no "MAKING ROOM" nudge); the caps still bound what is sent.
-            const auto cmd = door_approach_command(control_pose, lr, path_controller, time_source());
-            adv_mps = cmd.adv;
-            side_mps = 0.f;
-            rot_rps = cmd.rot;
-            if (lr.valid) cap = rc::lidar_cap_command(lr.r.obstacles, returns_body(), lr.margin, lr.a_dec, lr.v_max, lr.w_max,
-                                                      adv_mps, side_mps, rot_rps);
-        }
-        else if (lr.valid)
+        if (lr.valid)
         {
             const auto g = rc::lidar_guard_command(lr.r.obstacles, returns_body(), lr.margin, lr.a_dec, lr.v_max, lr.w_max,
                                                    base_capability_.holonomic.value_or(false),

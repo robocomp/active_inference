@@ -86,10 +86,6 @@ DoorCloseOfferWaitS = 5.0
 # room switch or at the route's end; built twice without success = cross_unreachable. false: the approach/open/cross
 # affordance chain (each step a goal the local policy re-decides) — kept for the A/B. controller_door_passage.h ROUTE MODE.
 UseRoute = true
-# 2026-10-31 (user: "build the new one"): true = once the cross's interaction anchor is fresh, the doorway is driven in the
-# ROBOT frame by the Active-Inference law (src/door_cross_aif.h) on the anchor servo's guard chain, not by the route.
-# false = the route through the door (pingpong3-10). Spec docs/superpowers/specs/2026-10-31-door-cross-aif-servo-design.md.
-CrossServo = true
 
 [Planner]
 # A* planning grid. Collision is the robot's real footprint tested against this grid, so the ONLY thing
@@ -584,7 +580,7 @@ MaxRotSpeed = 1.0
 # from the robot (door_N@robot, the opening's pose in the ROBOT frame); the controller servoes on it instead of a
 # room-frame route (src/controller_anchor_servo.h). The servo is done once the opening is this far behind along
 # its normal (m) — the anchor-relative stand-in for door_concept's CrossStandoffM, which the controller cannot see.
-# 2026-10-31: = door_concept's CrossTargetM; with [DoorPassage] CrossServo the crossing fact is written here (deep entry).
+# 2026-10-31: = door_concept's CrossTargetM; the crossing fact is written here (deep entry).
 AnchorCrossStandoffM = 1.3
 # Task 14: the LiDAR's 1-sigma range noise (m). The anchor cross reads the raw returns as a safety net that does not
 # trust the anchor: a return is the robot itself only inside the body footprint grown by this; each kept return is an
@@ -1047,6 +1043,11 @@ ReleaseRiskMax = 0.5
 ProgressScaleM = 0.10
 # candidate hold time (s) before the brake tail
 HorizonS = 1.0
+# FLAGGED SAFETY CONSTANT (user, contract C9, 2026-11-02): below this control rate (Hz) the policy does not drive -- the base
+# holds, the passage waits, and the log says `[policy] control rate X Hz below the minimum -- holding`. 10 Hz = 2x the nominal
+# 50 ms period. The measured period also enters every rollout's latency (continuous caution above it). tests/bench_c1_door.cpp
+# RATES=1: no degradation down to 6 Hz in the bench, so 10 is a stated floor, not a fitted one. 0 = never hold on rate.
+MinControlHz = 10.0
 # PROVISIONAL: command latency (s) from send_speed_command to the wheels (the output loop period + the bridge); the policy
 # rolls out from the pose reached after pose age + this. 0.06 = the Task-6 harness's plant value — measure it live.
 CommandLatencyS = 0.06

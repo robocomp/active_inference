@@ -409,6 +409,10 @@ struct ControllerParams
     float policy_release_risk_max = 0.5f;
     float policy_progress_scale_m = 0.10f;
     float policy_horizon_s = 1.0f;
+    // ⚑ FLAGGED SAFETY CONSTANT (user, C9 2026-11-02): below this control rate the policy does not drive -- 10 Hz = 2x the nominal 50 ms
+    // period. The bench (tests/bench_c1_door.cpp RATES=1) shows NO degradation down to 6 Hz with the period in the rollouts, so this
+    // is not read off a curve; it is a stated floor. 0 = never hold on rate.
+    float policy_min_control_hz = 10.f;
     float policy_command_latency_s = 0.06f;     // PROVISIONAL (the harness's plant value)
     float policy_min_linear_speed_mps = 0.04f;  // PROVISIONAL deadband fallback (capability absent)
     float policy_min_rot_speed_rps = 0.10f;

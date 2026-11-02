@@ -42,7 +42,6 @@
 //     -o /tmp/tjc -lfastdds -lfastcdr -lQt5Core && /tmp/tjc          (one line; TRACE=1 prints every cycle)
 #include "../src/doorway_gap.h"
 #include "../src/controller_anchor_servo.h"
-#include "../src/door_cross_aif.h"
 #include "../src/lidar_body_guard.h"
 #include "../../common/robot_footprint/robot_footprint.h"
 
@@ -165,7 +164,7 @@ struct Outcome { bool through = false, physically_through = false; int contacts 
 // `leaves` non-null = ANCHOR-ONLY (pingpong31, 2026-10-31): no measured gap; the servo, the obstacle model and the jamb guard
 // get door_concept's leaf hypotheses (anchor frame), as ControllerSession now drives.
 Outcome run(Pose r, V2 anchor_c, float anchor_dpsi, bool near_seen, unsigned seed, float t_max = 60.f,
-            const std::vector<rc::interaction::AnchorLeaf>* leaves = nullptr, bool aif = false, float* p_fit_min = nullptr)
+            const std::vector<rc::interaction::AnchorLeaf>* leaves = nullptr)
 {
     const std::span<const rc::interaction::AnchorLeaf> lv = leaves != nullptr ? std::span<const rc::interaction::AnchorLeaf>(*leaves)
                                                                                : std::span<const rc::interaction::AnchorLeaf>{};
@@ -232,13 +231,6 @@ Outcome run(Pose r, V2 anchor_c, float anchor_dpsi, bool near_seen, unsigned see
         const auto returns = rc::lidar_guard_returns(pts, body, kSigma, reach, self, hull);
         const float free = rc::lidar_free_advance(pts, rc::anchor_cross_geometry(drive).n, body);
         auto c = rc::anchor_cross_command(drive, dw, half_w, kStandoff, kVmax, kWmax, false, lv, front, free);
-        if (aif)   // [DoorPassage] CrossServo=true, as live: the Active-Inference law (door_cross_aif.h)
-        {
-            const auto st = rc::door_cross_aif(drive, dw, lv, rc::DoorCrossAifBody{half_w, front}, kStandoff, kVmax, kWmax, kDt, free);
-            c = st.cmd;
-            if (p_fit_min != nullptr) *p_fit_min = std::min(*p_fit_min, st.p_fit);
-            if (trace) std::println("    aif p_fit {:.3f} e {:+.3f} s {:+.3f}", st.p_fit, st.e, st.s);
-        }
         if (gate.through(c.through)) { o.through = true; break; }
         const auto model = rc::anchor_obstacles(drive, dw, lv);
         const std::array<rc::AnchorTurnBlockers, 2> sets{rc::AnchorTurnBlockers{model, hull},
@@ -389,15 +381,11 @@ int main()
         const std::vector<rc::interaction::AnchorLeaf> logged{mk(V2(-0.42f, -0.06f), V2(-0.31f, -0.94f), 83.f * deg)};
         const std::vector<rc::interaction::AnchorLeaf> truth{mk(V2(-0.50f, 0.04f), V2(-0.50f, -0.91f), 90.f * deg)};
         const std::vector<rc::interaction::AnchorLeaf> none{};
-        for (const bool aif : {false, true})
-            for (const auto* L : {&logged, &truth, &none})
-            {
-                float pf = 1.f;
-                const auto o = run(Pose{V2(0.12f, -1.88f), 90.f * deg}, V2(0.f, -0.24f), 0.f, true, 7u, 60.f, L, aif, &pf);
-                report(std::format("{} law, {}", aif ? "AIF" : "old servo",
-                                   L == &logged ? "leaf as logged (83 deg)" : L == &truth ? "leaf as in the scene (90 deg)" : "no leaf"), o);
-                if (aif) std::println("      min P(fit) {:.3f}", pf);
-            }
+        for (const auto* L : {&logged, &truth, &none})
+        {
+            const auto o = run(Pose{V2(0.12f, -1.88f), 90.f * deg}, V2(0.f, -0.24f), 0.f, true, 7u, 60.f, L);
+            report(std::format("old servo law, {}", L == &logged ? "leaf as logged (83 deg)" : L == &truth ? "leaf as in the scene (90 deg)" : "no leaf"), o);
+        }
     }
 
     return failures == 0 ? 0 : 1;

@@ -18,7 +18,6 @@
 #include "controller_door_passage.h"
 #include "motion_verdict.h"
 #include "controller_anchor_servo.h"
-#include "door_cross_aif.h"
 #include "lidar_guard_buffer.h"
 #include "doorway_gap.h"
 #include "../../common/interaction_anchor/interaction_anchor.h"
@@ -36,7 +35,6 @@
 #include "../../common/affordance_manager/affordance_manager.h"
 #include "mission_door_relation.h"
 #include "local_policy/goal_adapter.h"
-#include "door_approach_law.h"
 #include "door_route.h"                 // rc::door_route::Axis (the perceived door axis)
 #include "local_policy/doorway_hypotheses.h"   // Task 3e: the MAP goal line, the anchor re-init test
 #include "local_policy/navigator.h"
@@ -120,13 +118,6 @@ public:
     std::optional<AnchorCrossReading> read_cross_anchor(std::uint64_t affordance_id,
                                                          const std::string &affordance_name,
                                                          bool accept_stale = false) const;
-    void step_anchor_cross(const ControllerRobotPose &robot_pose,
-                           rc::TrajectoryController &path_controller,
-                           ControllerObstacleTracker &obstacle_tracker,
-                           ControllerMotionCommander &motion_commander,
-                           ControllerDisplay &display,
-                           rc::AffordanceManager &affordance_manager,
-                           const TimeSource &time_source);
     // clearance_speed_limit's braking model along a robot-frame straight line (the servo's own direction of travel).
     float anchor_clearance_speed_limit(const Eigen::Vector2f &dir_robot, float v_cap,
                                        const rc::TrajectoryController &path_controller) const;
@@ -283,8 +274,6 @@ public:
     [[nodiscard]] bool route_reverse() const { return route_reverse_; }
 
     rc::DoorPassage &door_passage() { return door_passage_; }
-    /// [DoorPassage] CrossServo: the doorway of a route-mode passage is driven on the anchor (door_cross_aif.h).
-    void set_door_cross_servo(bool on) { door_cross_servo_ = on; }
     rc::ApproachOrder &approach_order() { return approach_order_; }
     /// Mission (Command) mode: the open affordance contest runs only while an `explore` order holds it open — and,
     /// when the order names its room, only for affordances whose target is in that room (affordance_room_scope.h).
@@ -432,6 +421,8 @@ private:
     std::deque<rc::policy::SentCommand> policy_sent_;            // send history (s, steady) for the commands in force
     std::optional<rc::policy::Pose2> policy_odom_;               // odometry pose: integrated wheel speeds, never relocalised
     rc::policy::RoomFrameGuard policy_frame_;                    // Live fix 2: a room-frame change resets the policy
+    float policy_period_s_ = 0.f;                                // C9: the measured control period (EMA over the policy's own ticks); 0 = not yet
+    double policy_period_prev_s_ = -1.0;
     rc::policy::PolicyTickGate policy_gate_;                     // review I1 / fix 2.1: holds and gaps interrupt the plan
     float odo_v_ = 0.f, odo_w_ = 0.f;                            // robot_current_advance / angular speed (CCW+), this cycle
     bool odo_valid_ = false;
@@ -1208,7 +1199,6 @@ private:
     std::string door_route_n0_key_, door_route_through_key_;       // door|room it was latched for / already reported THROUGH
     std::string door_route_latch_room_;                            // the room the latch belongs to (a change resets it)
     bool door_route_body_in_opening_ = false;                      // some part of the body is in the perceived opening
-    bool door_cross_servo_ = false;          ///< [DoorPassage] CrossServo
     float door_route_last_s_body_ = -1e9f;    ///< the body's s past the perceived opening, last measured (drive_door_route)
     float door_route_last_r_body_ = 0.f;      ///< the body's circumscribed radius used with it
     std::uint64_t anchor_servo_last_ms_ = 0;  ///< the AIF law's last step (its control period)
@@ -1223,6 +1213,7 @@ private:
     static constexpr std::uint64_t kDoorRouteRebuildMs = 2000;      // as the mission route's build retry: the map gets a moment
     std::vector<rc::policy::RouteWaypoint> door_route_goals_;       // the curve's points as Place goals (policy on)
     int door_route_goal_index_ = 0;
+    int door_route_vantage_goals_ = 0;                              // goals up to and including the vantage (a through leg holds there until the cross is raised)
     std::uint64_t door_route_cross_claim_ = 0;                      // aff_<door>_cross claimed by the through-leg (0 = none)
     // ── CHAINED ACTIONS (spec 2026-11-02, chained_action.h) ──
     std::string dp_chain_close_;                 ///< this cycle's chained close (DoorPassage::Out::chain_close)
@@ -1236,18 +1227,7 @@ private:
         return chain_end_.has_value() ? chain_end_->s : (params_ != nullptr ? params_->anchor_cross_standoff_m : 2.0f);
     }
     void update_chain_end(const ControllerPlanningStep &step);
-    // ── THE DOOR APPROACH LAW (door_approach_law.h): state feedback on the vantage, no latched sub-steps ──
-    Eigen::Vector2f door_vantage_ = Eigen::Vector2f::Zero(), door_centre_pt_ = Eigen::Vector2f::Zero();   // V and the aperture centre
-    float door_vantage_s_ = 0.f;                    // arc length of V along the route
-    std::string door_law_done_key_;                 // the leg whose approach ended (its next affordance eligible)
-    std::vector<Eigen::Vector2f> door_trail_;       // the poses the robot arrived through (0.05 m apart, newest last)
-    std::uint64_t door_law_trace_ms_ = 0;
-    /// This cycle's approach command (door_approach_law.h): updates the trail, the law's verdict and the 1 Hz [approach] trace.
-    [[nodiscard]] rc::door_approach::Command door_approach_command(const ControllerRobotPose &pose, const LiveReturns &lr,
-                                                                  const rc::TrajectoryController &path_controller, std::uint64_t now_ms);
-    void note_door_trail(const ControllerRobotPose &pose);
-    bool door_law_active() const
-    { return door_route_active_ and door_route_installed_ and door_route_leg_.has_value() and door_law_done_key_ != door_route_leg_->key; }
+    float door_vantage_s_ = 0.f;                    // arc length of the vantage V along the door route
     bool build_door_route(const ControllerRobotPose &robot_pose, std::uint64_t now_ms, float tol_xy);
     bool drive_door_route(const ControllerPlanningStep &step, rc::TrajectoryController &path_controller,
                           ControllerMotionCommander &motion_commander, const TimeSource &time_source);
@@ -1402,7 +1382,6 @@ private:
     // ── Task 6: the near field and [Route] BandDrivesCross ──
     float band_solve_ms_ = 0.f;              // this cycle's band wall time (band_diag.csv solve_ms)
     int   band_near_elements_ = 0;           // the near model's size this cycle (band_diag.csv near_elems)
-    bool  band_cross_driving_ = false;       // this cycle the cross protocol handed the motion to the follower + band
     std::optional<rc::policy::DoorwayRisk> band_cross_risk_;   // the opening's jambs this cycle (F4's two hypotheses)
     std::string band_cross_route_for_;       // the cross whose route through the opening is installed
     bool  band_cross_logged_ = false;

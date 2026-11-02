@@ -1024,12 +1024,6 @@ void SpecificWorker::load_params()
 		     "target, RouteFollower over the grid planner); false = the approach/open/cross affordance chain — controller_door_passage.h");
 		session_.door_passage().set_use_route(use_route);
 		std::println("[door-passage] UseRoute = {}", use_route);
-		bool cross_servo = false;
-		cfgr.opt("DoorPassage.CrossServo", cross_servo,
-		     "true = in route mode the doorway is driven in the ROBOT frame on the cross's interaction anchor by the "
-		     "Active-Inference law (door_cross_aif.h) as soon as the anchor is fresh; false = the route through it");
-		session_.set_door_cross_servo(cross_servo);
-		std::println("[door-passage] CrossServo = {}", cross_servo);
 	}
 	cfgr.opt("Mission.MetricsCsvPath", params.mission_csv_path,
          "One row of continuous trajectory statistics per completed run is appended here");
@@ -1123,6 +1117,7 @@ void SpecificWorker::load_params()
 	cfgr.opt_cast<double>("Policy.ReleaseRiskMax", params.policy_release_risk_max, "a Release only below this P(contact)");
 	cfgr.opt_cast<double>("Policy.ProgressScaleM", params.policy_progress_scale_m, "metres of progress worth one nat over one horizon");
 	cfgr.opt_cast<double>("Policy.HorizonS", params.policy_horizon_s, "candidate hold time (s) before the brake tail");
+	cfgr.opt_cast<double>("Policy.MinControlHz", params.policy_min_control_hz, "FLAGGED SAFETY CONSTANT: below this control rate (Hz) the policy holds the base (2x the nominal 50 ms period); 0 = never");
 	cfgr.opt_cast<double>("Policy.CommandLatencyS", params.policy_command_latency_s, "PROVISIONAL: send -> wheels latency (s)");
 	cfgr.opt_cast<double>("Policy.MinLinearSpeedMps", params.policy_min_linear_speed_mps, "PROVISIONAL deadband when the capability is absent");
 	cfgr.opt_cast<double>("Policy.MinRotSpeedRps", params.policy_min_rot_speed_rps, "PROVISIONAL deadband when the capability is absent");
