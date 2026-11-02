@@ -89,6 +89,24 @@ using LeafAttrs = std::pair<std::optional<float>, std::optional<float>>;
     return std::nullopt;
 }
 
+/// A remembered side arriving AFTER the belief was built (a recall posted once the room is current): the memory is one more
+/// independent observation of each binary latent, so it ADDS its signed log-odds to the belief's (naive Bayes, flat prior — the
+/// same evidence the pre-belief seed would have been, only it must not discard what was already gathered). Inputs are the
+/// belief's MAP side and its EFFECTIVE log-odds (>= 0 when settled; negative if the reference side differs). Output is the
+/// new MAP side and |log-odds|; a tie keeps the +/far side.
+struct FusedLeaf { float swing = 1.0f; float swing_llr = 0.0f; bool hinge_far = false; float hinge_llr = 0.0f; };
+[[nodiscard]] inline FusedLeaf fuse_recall(float swing, float swing_llr_eff, bool hinge_far, float hinge_llr_eff,
+                                           const LeafProbs& mem, bool plus_is_far)
+{
+    FusedLeaf o;
+    const float ls = (swing >= 0.0f ? 1.0f : -1.0f) * swing_llr_eff + logit(mem.first);
+    o.swing = ls >= 0.0f ? 1.0f : -1.0f;  o.swing_llr = std::abs(ls);
+    const auto hm = hinge_from_plus(mem.second, plus_is_far);
+    const float lh = (hinge_far ? 1.0f : -1.0f) * hinge_llr_eff + (hm.far ? 1.0f : -1.0f) * hm.llr;
+    o.hinge_far = lh >= 0.0f;  o.hinge_llr = std::abs(lh);
+    return o;
+}
+
 /// P(the leaf swings toward the side of the wall the robot stands on). `side` = +1 when the robot is on the across_u
 /// (room-interior) side, -1 beyond. A continuous mix over the two sides when `side` is a probability: pass P(robot on +).
 [[nodiscard]] inline float p_leaf_toward(float p_into, float p_robot_on_plus)

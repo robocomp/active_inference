@@ -8,6 +8,7 @@
 #include "door_fitter.h"
 #include "core/door_core.h"   // point_in_polygon — the containment rule, shared with the birth test
 #include "door_standpoint.h"
+#include "door_leaf_memory.h"
 #include "door_phi_posterior.h"   // the phi channel as pure functions (tested offline)
 #include "door_opening_edges.h"   // try96: wall registration, the opening's through-span, the registration offset
 
@@ -97,19 +98,11 @@ bool DoorFitter::ensure_instance(const DSR::Node& node, std::uint64_t room_id)
         {
             // No attributes on the node itself (a warm start): the recall_* RT child ltsm posted under it carries the remembered
             // face's side for THIS door (ltsm room_recall.cpp). Precedence: own node > recall child > door_identities.csv.
-            for (const auto& [key, edge] : node.fano())
+            if (const auto r = recall_leaf_of(node); r.has_value())
             {
-                if (edge.type() != "RT") continue;
-                const auto child = G_->get_node(edge.to());
-                if (not child.has_value() or not child->name().starts_with("recall_")) continue;
-                const auto ci = G_->get_attrib_by_name<door_leaf_into_room_prob_att>(child.value());
-                const auto ch = G_->get_attrib_by_name<door_leaf_hinge_plus_prob_att>(child.value());
-                if (not ci.has_value() and not ch.has_value()) continue;
-                const float qi = ci.value_or(0.5f), qh = ch.value_or(0.5f);
-                if (qi == 0.5f and qh == 0.5f) continue;
-                inst.leaf_memory = std::make_pair(qi, qh);
+                inst.leaf_memory = r->probs;
                 inst.leaf_memory_from_recall = true;
-                break;
+                inst.recall_seeded_ids.insert(r->id);
             }
         }
     }
@@ -119,6 +112,58 @@ bool DoorFitter::ensure_instance(const DSR::Node& node, std::uint64_t room_id)
     return true;
 }
 
+
+// The recall_* RT child of `node` carrying a remembered leaf side (ltsm room_recall.cpp), if any.
+std::optional<DoorFitter::RecallLeaf> DoorFitter::recall_leaf_of(const DSR::Node& node) const
+{
+    for (const auto& [key, edge] : node.fano())
+    {
+        if (edge.type() != "RT") continue;
+        const auto child = G_->get_node(edge.to());
+        if (not child.has_value() or not child->name().starts_with("recall_")) continue;
+        const auto ci = G_->get_attrib_by_name<door_leaf_into_room_prob_att>(child.value());
+        const auto ch = G_->get_attrib_by_name<door_leaf_hinge_plus_prob_att>(child.value());
+        if (not ci.has_value() and not ch.has_value()) continue;
+        const float qi = ci.value_or(0.5f), qh = ch.value_or(0.5f);
+        if (qi == 0.5f and qh == 0.5f) continue;
+        return RecallLeaf{child->id(), {qi, qh}};
+    }
+    return std::nullopt;
+}
+
+// A recall_* child FIRST appearing under an instance whose leaf side was never taken from the graph (warm start: the door was
+// restored before ltsm posted the recall). Once per recall id. Pre-belief -> becomes the ordinary seed; else fused into the belief.
+void DoorFitter::seed_leaf_from_recalls()
+{
+    for (auto& [id, inst] : instances_)
+    {
+        if (inst.leaf_graph_seeded or inst.leaf_memory.has_value()) continue;
+        const auto node = G_->get_node(id);
+        if (not node.has_value()) continue;
+        const auto r = recall_leaf_of(node.value());
+        if (not r.has_value() or not inst.recall_seeded_ids.insert(r->id).second) continue;
+        if (not inst.ai2_initialized)
+        {
+            inst.leaf_memory = r->probs; inst.leaf_memory_from_recall = true;
+            continue;
+        }
+        const auto& P = inst.ai2_belief.params();
+        const bool swing_same = not inst.swing_llr_ref.has_value() or (*inst.swing_llr_ref > 0.f) == (P.leaf.swing > 0.f);
+        const bool hinge_same = not inst.hinge_llr_ref.has_value() or *inst.hinge_llr_ref == P.leaf.hinge;
+        const bool plus_is_far = Eigen::Vector2f(std::cos(inst.model.state().ap_yaw), std::sin(inst.model.state().ap_yaw))
+                                     .dot(P.wall_u) >= 0.0f;
+        const auto f = rc::door::leafmem::fuse_recall(P.leaf.swing, swing_same ? inst.swing_llr : -inst.swing_llr,
+                                                      P.leaf.hinge == door::HingeSide::Far,
+                                                      hinge_same ? inst.hinge_llr : -inst.hinge_llr, r->probs, plus_is_far);
+        inst.ai2_belief.set_leaf_swing(f.swing);
+        inst.ai2_belief.set_leaf_hinge(f.hinge_far ? door::HingeSide::Far : door::HingeSide::Near);
+        inst.swing_llr = f.swing_llr; inst.hinge_llr = f.hinge_llr;
+        inst.hinge_llr_ref.reset(); inst.swing_llr_ref.reset();
+        inst.leaf_graph_seeded = true;
+        std::print("door_concept: [{}] leaf side from the graph (recall, fused with live evidence): P(into)={:.2f} P(hinge +x)={:.2f} -> swing {:+.0f} ({:.2f}) hinge {} ({:.2f})\n",
+                   inst.node_name, r->probs.first, r->probs.second, f.swing, f.swing_llr, f.hinge_far ? "far" : "near", f.hinge_llr);
+    }
+}
 
 // ─── RGB-mask ROI projection (active-perception aid) ──────────────────────────
 

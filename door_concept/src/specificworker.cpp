@@ -3285,6 +3285,7 @@ void SpecificWorker::step_room_following()
     {
         step_adoption();          // a rename of THIS room (same id) is followed here, never released
         step_pending_restore();   // a recalled room's doors, once its polygon is loaded
+        fitter_->seed_leaf_from_recalls();   // a recall_* child that appeared after the door was restored
         // The crossed door was HELD at the switch and has been deleted with its room since: carry it across now.
         if (carry_pending_room_ == room_node_id_ and not lost_doors_.empty())
         {

@@ -95,6 +95,16 @@ int main()
         check(h and near(h->first, 0.8f) and near(h->second, 0.5f), "recall: half-present near reads 0.5");
     }
 
+    // fuse_recall: memory adds signed log-odds to what the belief already holds
+    {
+        const auto same = lm::fuse_recall(+1.0f, 1.0f, true, 1.0f, {lm::sigmoid(2.0f), lm::sigmoid(2.0f)}, /*plus_is_far=*/true);
+        check(same.swing > 0 and near(same.swing_llr, 3.0f, 1e-3f) and same.hinge_far and near(same.hinge_llr, 3.0f, 1e-3f), "fuse: agreeing adds");
+        const auto opp = lm::fuse_recall(+1.0f, 1.0f, true, 1.0f, {lm::sigmoid(-3.0f), lm::sigmoid(-3.0f)}, true);
+        check(opp.swing < 0 and near(opp.swing_llr, 2.0f, 1e-3f) and not opp.hinge_far and near(opp.hinge_llr, 2.0f, 1e-3f), "fuse: stronger memory flips");
+        const auto fl = lm::fuse_recall(+1.0f, 0.0f, false, 0.0f, {0.5f, lm::sigmoid(2.0f)}, /*plus_is_far=*/false);
+        check(fl.swing > 0 and near(fl.swing_llr, 0.0f) and not fl.hinge_far and near(fl.hinge_llr, 2.0f, 1e-3f), "fuse: hinge plus maps to near when +x is near");
+    }
+
     std::println("{} checks, {} failures", checks, failures);
     return failures == 0 ? 0 : 1;
 }

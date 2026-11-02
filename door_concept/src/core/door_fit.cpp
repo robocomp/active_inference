@@ -646,6 +646,7 @@ float DoorFit::run_inference(rc::DoorFitState& inst, const DoorObservation& obse
                             inst.node_name, inst.leaf_memory_from_recall ? " (recall)" : "", p_into, p_plus, p.leaf.swing, hg.far ? "far" : "near"));
             inst.leaf_memory.reset();
             inst.leaf_memory_from_recall = false;
+            inst.leaf_graph_seeded = true;
         }
         inst.ai2_belief = rc::DoorBelief(s0, p);
         // ★Task D-C round 2 (tour3C): A REMEMBERED PLACE IS NOT A BIRTH SEED. A door restored from memory came back with the

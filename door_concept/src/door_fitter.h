@@ -74,6 +74,10 @@ public:
     // first time it is created (so the worker can register Qt series / canvas pos). Latches room_id.
     // The node's attributes and its room→door RT are read here; the rest is DoorFit::init_instance.
     bool ensure_instance(const DSR::Node& node, std::uint64_t room_id);
+    /// A recall_* child first appearing under an existing instance hands it the remembered leaf side (once per recall id).
+    void seed_leaf_from_recalls();
+    struct RecallLeaf { std::uint64_t id; std::pair<float, float> probs; };
+    [[nodiscard]] std::optional<RecallLeaf> recall_leaf_of(const DSR::Node& node) const;
 
     std::unordered_map<std::uint64_t, DoorInstance>& instances() { return instances_; }
     void forget_node(std::uint64_t id) { instances_.erase(id); }
