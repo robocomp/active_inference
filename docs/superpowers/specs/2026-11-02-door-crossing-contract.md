@@ -64,7 +64,7 @@ level), not one per affordance.
 
 | # | requirement | status |
 |---|---|---|
-| C1 | (PROPOSAL, NOT ADOPTED — user 2026-11-02: changing the servo is not an option now; the AIF cross servo stays and must meet C2–C5) **One motion law through the door**: reach a goal pose beyond the plane, re-planned EVERY cycle from the current pose in SE(2) with the body's true footprint over the LIVE local grid (room map ∩ LiDAR); the open gap is free space, the leaf is an obstacle at its belief (D4,D5) inflated by its σ. No separate approach law / cross servo / drive-in modes. | ❌ (today: route + approach law + AIF servo + drive-in) |
+| C1 | (ADOPTED FOR TRIAL 2026-11-02: audit → bench A/B → switch only if it wins) **One motion law through the door**: reach a goal pose beyond the plane, re-planned EVERY cycle from the current pose in SE(2) with the body's true footprint over the LIVE local grid (room map ∩ LiDAR); the open gap is free space, the leaf is an obstacle at its belief (D4,D5) inflated by its σ. No separate approach law / cross servo / drive-in modes. | ❌ (today: route + approach law + AIF servo + drive-in) |
 | C2 | **No mouth, no crossing**: the body never enters the aperture unless `door_open_prob` (D4) and the LIVE gap (D3) admit it; a shut door makes the goal unreachable ⇒ the only admissible action is `open` | ⚠ (NO MOUTH hold exists; must fall out of C1) |
 | C3 | Heading is a consequence, not a check: a feasible SE(2) path through a gap narrower than the body's diagonal faces the door | ❌ (today: facing checks + P(fit) gate) |
 | C4 | No latched state across doors or routes: every decision is recomputed from the current pose and the published facts; anything cached is keyed to the door id + route epoch | ⚠ (c5c0ae90 / c061bd36 fixed two instances) |
@@ -134,6 +134,8 @@ MAKING ROOM / escape. warm28–33 logs show BOTH kinds of output ([approach], [c
 crossings. So today there are effectively two drivers with hand-offs between them — the seams of §Why.
 
 ### C1 = one goal, one driver
+**The robot-frame door (anchor `door_N@robot`, D3) STAYS and feeds the policy** — its doorway/jambs and the cross goal are
+built from the anchor's measured opening (controller_policy_drive.cpp); only the MOTION LAWS that read it go.
 1. door_concept's affordances give GOALS, never motions: `approach` → the target surface (§3); `cross` → the through
    region beyond the plane (chosen toward the next step, C6).
 2. The policy (Navigator) is the ONLY thing that turns a goal into (v, w), every cycle, from the current pose: swept-body
