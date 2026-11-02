@@ -1,6 +1,6 @@
 # Door crossing — the contract between door_concept and the controller
 
-Date: 2026-11-02 · Status: DRAFT for the user's review · Supersedes the hand-off rules scattered across
+Date: 2026-11-02 · Status: DRAFT v2 — user answers 2026-11-02 folded in · Supersedes the hand-off rules scattered across
 controller_door_passage.h, door_cross_aif.h, door_approach_law.h, door_pragmatics.h (open/close/cross contracts).
 
 ## Why a contract
@@ -52,8 +52,8 @@ requires it (open/close are remote: they need no robot heading); latch the leaf 
 
 | affordance | precondition (P, on the robot's state) | effect | completion (perceptual) | status |
 |---|---|---|---|---|
-| approach | door exists (D1) | robot moves to where `open`/`cross` become eligible | **the next affordance is eligible** (no own radius) | ✅ c061bd36 (unbuilt) |
-| open | P(shut) × P(robot not in the swept arc of the opening leaf) × P(exists) — the actuator is remote: **no facing, no band** unless the sim/real actuator needs a line of sight (state which) | actuator request | `door_open_prob ≥ level`, held | ⚠ today requires P(in band)·P(facing) (orient) |
+| approach | door exists (D1) | robot moves onto the **target surface** door_concept publishes: the set of poses FACING the door, in line of sight of it, at a distance that depends on how the leaf opens — leaf swinging TOWARD the robot: beyond the swept arc (leaf length + σ); AWAY: body clearance only; blended by P(toward) from D5. The door offers it, so the door states the surface; the controller picks the point on it (chaining, C6) | **the next affordance is eligible** (no own radius) | ⚠ door offers one pose today; surface ❌; end on eligibility ✅ c061bd36 (unbuilt) |
+| open | **door in line of sight** of the robot (user 2026-11-02: only then does the door offer open) × P(shut) × P(robot not in the swept arc of the opening leaf) × P(exists). Before that, the door offers `approach` | actuator request | `door_open_prob ≥ level`, held | ⚠ today P(in band)·P(facing); line of sight ❌ as a factor |
 | cross | `door_open_prob` × D6 (`door_cross_exec_prob`) | robot passes the plane | **through** (s > r_b on the far side) — the exit fact | ✅ (completion = progress ≥ 0.9; make it "through") |
 | close | P(open) × P(robot clear of the swept arc of the CLOSING leaf) — from D5, the arc is on the leaf's side only | actuator request; robot does NOT stop (chained, 35e5ad39) | `door_open_prob ≤ level`, held | ⚠ still offers a single standpoint pose (reach) |
 
@@ -64,7 +64,7 @@ level), not one per affordance.
 
 | # | requirement | status |
 |---|---|---|
-| C1 | **One motion law through the door**: reach a goal pose beyond the plane, re-planned EVERY cycle from the current pose in SE(2) with the body's true footprint over the LIVE local grid (room map ∩ LiDAR); the open gap is free space, the leaf is an obstacle at its belief (D4,D5) inflated by its σ. No separate approach law / cross servo / drive-in modes. | ❌ (today: route + approach law + AIF servo + drive-in) |
+| C1 | (PROPOSAL, NOT ADOPTED — user 2026-11-02: changing the servo is not an option now; the AIF cross servo stays and must meet C2–C5) **One motion law through the door**: reach a goal pose beyond the plane, re-planned EVERY cycle from the current pose in SE(2) with the body's true footprint over the LIVE local grid (room map ∩ LiDAR); the open gap is free space, the leaf is an obstacle at its belief (D4,D5) inflated by its σ. No separate approach law / cross servo / drive-in modes. | ❌ (today: route + approach law + AIF servo + drive-in) |
 | C2 | **No mouth, no crossing**: the body never enters the aperture unless `door_open_prob` (D4) and the LIVE gap (D3) admit it; a shut door makes the goal unreachable ⇒ the only admissible action is `open` | ⚠ (NO MOUTH hold exists; must fall out of C1) |
 | C3 | Heading is a consequence, not a check: a feasible SE(2) path through a gap narrower than the body's diagonal faces the door | ❌ (today: facing checks + P(fit) gate) |
 | C4 | No latched state across doors or routes: every decision is recomputed from the current pose and the published facts; anything cached is keyed to the door id + route epoch | ⚠ (c5c0ae90 / c061bd36 fixed two instances) |
@@ -101,10 +101,13 @@ level), not one per affordance.
 - TLA+: the existing passage model updated to the four contracts of §3 + invariants §5 (one leg and the ping-pong).
 - Live: the 4-leg tour from three_rooms_door0 (sides now ground truth) — pass = 4/4, no manual help, rates nominal.
 
-## Open questions for the user
+## Answers (user 2026-11-02)
 
-1. `open`'s precondition: does the actuator (sim and real) need the robot facing / within a band, or is it fully remote?
-   If remote, open can be requested from anywhere clear of the arc — another stop removed.
-2. C1 replaces the AIF cross servo. Keep the servo's evidence (the live anchor's precision) as the planner's cost near
-   the plane, or drop it entirely?
-3. The "level" (one shared eligibility number, today kApproachCompleteProb): keep it as THE single decision constant?
+1. `open` is offered only with the door in LINE OF SIGHT. Before that the door offers `approach`, whose target is a
+   SURFACE (robot facing the door, at a distance set by how the leaf opens) — the door authors it because the door
+   offers the affordance.
+2. The AIF cross servo stays for now; C1 is a proposal the user will review separately. The contract's other
+   requirements apply to the existing chain.
+3. The "level": ONE probability that means "good enough to start this action", used by every affordance's precondition
+   and completion (today kApproachCompleteProb) — so there is one decision constant in the whole crossing, not one per
+   step. Pending the user's yes/no.
