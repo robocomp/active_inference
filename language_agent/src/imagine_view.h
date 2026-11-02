@@ -195,7 +195,7 @@ struct ImaginePlace
 /// How far in front of the robot the canonical instance stands: "how I would best see one" = the distance that maximises
 /// the card's own mean P(recognise) over the canonical scene (empty space, the robot at the origin heading +y, the same
 /// Monte-Carlo as the answer but kSearchSamples draws with a fixed seed: deterministic and cheap). Grid 0.5..8 m, step
-/// 0.1 m; ties keep the nearer distance (strict improvement only). When the card cannot be evaluated anywhere (no camera,
+/// 0.1 m; the NEAREST distance within one MC standard error of the maximum is taken. When the card cannot be evaluated anywhere (no camera,
 /// no draw placed): kFreeSpaceDistanceM, flagged.
 struct CanonicalDistance { float m = 2.0f; bool searched = false; };
 inline constexpr int kSearchSamples = 8;
@@ -208,8 +208,9 @@ inline constexpr std::uint64_t kSearchSeed = 1;
     std::vector<std::string> excluded;
     const auto world = imagine_world(s, card, cls, place, excluded);
     const Eigen::Vector2f dir(std::cos(*vp->yaw), std::sin(*vp->yaw));
-    CanonicalDistance best;
-    float best_p = -1.0f;
+    struct At { float d, p; };
+    std::vector<At> curve;
+    float best_p = -1.0f, best_se = 0.0f;
     for (int i = 5; i <= 80; ++i)
     {
         const float d = static_cast<float>(i) * 0.1f;
@@ -218,10 +219,19 @@ inline constexpr std::uint64_t kSearchSeed = 1;
         const auto set = rc::card::sample_concept(card, with_robot_body(world, *vp), ctx, kSearchSamples, kSearchSeed);
         const auto mc = mc_over_samples(card, world, cls, set.samples, *vp);
         if (mc.n == 0) continue;
-        if (mc.p_recognise_mean > best_p) { best_p = mc.p_recognise_mean; best = {d, true}; }
+        curve.push_back({d, mc.p_recognise_mean});
+        if (mc.p_recognise_mean > best_p)
+        {
+            best_p = mc.p_recognise_mean;
+            best_se = mc.p_recognise_sd / std::sqrt(static_cast<float>(mc.n));   // the search's own draws at the maximum
+        }
     }
     if (best_p <= 0.0f) return {};   // nowhere recognisable: nothing to maximise
-    return best;
+    // The NEAREST distance statistically as good as the maximum: within one Monte-Carlo standard error of it (exact ties
+    // when the SE is 0). On a plateau the maximum is a noise pick; the nearest plateau point is the one worth reporting.
+    for (const auto& at : curve)
+        if (at.p >= best_p - best_se) return {at.d, true};
+    return {};
 }
 
 /// "0.62 ± 0.11"

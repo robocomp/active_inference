@@ -336,6 +336,14 @@ int main()
         }
         CHECK(std::abs(cd.m - best_d) <= 0.2f);
         CHECK(cd.m > 0.6f and cd.m < 7.9f);
+        // a flat plateau (everything from ~1.5 m outwards recognised alike): the NEAREST distance on it, not a noise maximum
+        {
+            Card f = chair_card();
+            f.subtypes[""].env = {0.0005f, 0.55f, 0.0005f};   // saturated for every fill under ~0.54: a plateau from ~1.5 m out to 8 m
+            for (auto& v : f.generative->vars) v.sigma = 1e-4f;
+            const auto cf = canonical_distance(f, sc, "chair");
+            CHECK(cf.searched and cf.m >= 1.3f and cf.m <= 2.0f);   // the plateau's NEAR edge
+        }
         const auto cd2 = canonical_distance(c, sc, "chair");
         CHECK(cd2.m == cd.m);                                      // deterministic
         CHECK(has(imagine_view(c, none, rq, 11, dir).text, "m in front of me"));
