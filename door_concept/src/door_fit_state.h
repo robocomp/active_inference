@@ -231,6 +231,7 @@ struct DoorFitState
     // arrives carrying them: a remembered face, door_leaf_memory.h). {P(into this room), P(hinge at the node's +x end)}.
     // AUTHORITATIVE over leaf_side_hint / the identity table's cache; consumed once, at belief init.
     std::optional<std::pair<float, float>> leaf_memory;
+    bool leaf_memory_from_recall = false;   // leaf_memory came from the ltsm recall child, not the node itself (log tag only)
     // A door RESTORED from memory (SpecificWorker::restore_remembered_doors): its node carries the remembered width and
     // height, so the belief init seeds w,h from the published box instead of the template priors — otherwise a door never
     // re-seen would be re-remembered at the template size on the next room switch.

@@ -2,6 +2,7 @@
 #include "../../common/room_transition/startup_recall.h"   // warm start
 #include "../../common/room_resolve/room_resolve.h"       // rc::room::current_room
 #include "room_recall.h"
+#include "../../door_concept/src/door_leaf_memory.h"   // recall_leaf_probs: near face, else far complemented
 #include "room_eviction.h"
 
 #include <dsr/api/dsr_inner_eigen_api.h>
@@ -198,6 +199,20 @@ int RoomRecall::step()
         live_->add_or_modify_attrib_local<delimiting_polygon_y_att>(node.value(), std::vector<float>(py->get()));
         live_->add_or_modify_attrib_local<pos_x_att>(node.value(), live_->get_attrib_by_name<pos_x_att>(door).value_or(0.f) + 60.f);
         live_->add_or_modify_attrib_local<pos_y_att>(node.value(), live_->get_attrib_by_name<pos_y_att>(door).value_or(0.f) + 60.f);
+        // The remembered LEAF SIDE for the live door this recall hangs under: the near face's (the one the live door matches),
+        // else the far face's complemented (door_leaf_memory.h recall_leaf_probs). Neither -> nothing written.
+        {
+            const auto attrs = [&](const DSR::Node &f) {
+                return rc::door::leafmem::LeafAttrs{
+                    mem_->get_attrib_by_name<door_leaf_into_room_prob_att>(f),
+                    mem_->get_attrib_by_name<door_leaf_hinge_plus_prob_att>(f)};
+            };
+            if (const auto lp = rc::door::leafmem::recall_leaf_probs(attrs(face), attrs(other.value())); lp.has_value())
+            {
+                live_->add_or_modify_attrib_local<door_leaf_into_room_prob_att>(node.value(), lp->first);
+                live_->add_or_modify_attrib_local<door_leaf_hinge_plus_prob_att>(node.value(), lp->second);
+            }
+        }
         std::uint64_t id = node->id();
         if (fresh)
         {

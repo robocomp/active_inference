@@ -18,6 +18,8 @@
  */
 #include <algorithm>
 #include <cmath>
+#include <optional>
+#include <utility>
 
 namespace rc::door::leafmem
 {
@@ -66,6 +68,26 @@ struct HingeBelief { bool far = false; float llr = 0.0f; };
 /// The same hole's other face: swing flips (the room on the other side), the hinge flips with the frame.
 [[nodiscard]] inline float other_face_into_room(float p_into) { return 1.0f - p_into; }
 [[nodiscard]] inline float other_face_hinge_plus(float p_plus, bool frames_flipped) { return frames_flipped ? 1.0f - p_plus : p_plus; }
+
+/// What a recall node (ltsm, hung under a live door) carries: the leaf attributes of the remembered face IN THE CURRENT ROOM
+/// (the face the live door matches), as {P(into), P(hinge at +x)}. A face "has" them when either attribute is present and the
+/// pair is not the unknown {0.5, 0.5}. Near face first; otherwise the FAR face's, complemented (other_face_*: the far face's
+/// frame is rotated by pi, hinge flips with it); neither -> nullopt (write nothing). A single missing attribute reads 0.5.
+using LeafProbs = std::pair<float, float>;
+using LeafAttrs = std::pair<std::optional<float>, std::optional<float>>;
+[[nodiscard]] inline std::optional<LeafProbs> recall_leaf_probs(const LeafAttrs& near_face, const LeafAttrs& far_face)
+{
+    const auto known = [](const LeafAttrs& a) {
+        return (a.first.has_value() or a.second.has_value()) and (a.first.value_or(0.5f) != 0.5f or a.second.value_or(0.5f) != 0.5f);
+    };
+    if (known(near_face)) return LeafProbs{near_face.first.value_or(0.5f), near_face.second.value_or(0.5f)};
+    if (known(far_face))
+    {
+        const float pi = far_face.first.value_or(0.5f), ph = far_face.second.value_or(0.5f);
+        return LeafProbs{other_face_into_room(pi), other_face_hinge_plus(ph, /*frames_flipped=*/true)};
+    }
+    return std::nullopt;
+}
 
 /// P(the leaf swings toward the side of the wall the robot stands on). `side` = +1 when the robot is on the across_u
 /// (room-interior) side, -1 beyond. A continuous mix over the two sides when `side` is a probability: pass P(robot on +).

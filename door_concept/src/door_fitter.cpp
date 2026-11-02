@@ -93,6 +93,25 @@ bool DoorFitter::ensure_instance(const DSR::Node& node, std::uint64_t room_id)
         const float p_into = pi.value_or(0.5f), p_plus = ph.value_or(0.5f);
         if (p_into != 0.5f or p_plus != 0.5f)
             inst.leaf_memory = std::make_pair(p_into, p_plus);
+        else
+        {
+            // No attributes on the node itself (a warm start): the recall_* RT child ltsm posted under it carries the remembered
+            // face's side for THIS door (ltsm room_recall.cpp). Precedence: own node > recall child > door_identities.csv.
+            for (const auto& [key, edge] : node.fano())
+            {
+                if (edge.type() != "RT") continue;
+                const auto child = G_->get_node(edge.to());
+                if (not child.has_value() or not child->name().starts_with("recall_")) continue;
+                const auto ci = G_->get_attrib_by_name<door_leaf_into_room_prob_att>(child.value());
+                const auto ch = G_->get_attrib_by_name<door_leaf_hinge_plus_prob_att>(child.value());
+                if (not ci.has_value() and not ch.has_value()) continue;
+                const float qi = ci.value_or(0.5f), qh = ch.value_or(0.5f);
+                if (qi == 0.5f and qh == 0.5f) continue;
+                inst.leaf_memory = std::make_pair(qi, qh);
+                inst.leaf_memory_from_recall = true;
+                break;
+            }
+        }
     }
 
     instances_.emplace(node.id(), std::move(inst));

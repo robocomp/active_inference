@@ -82,6 +82,19 @@ int main()
     check(rc::door::close_standoff(0.1f, away, sigma) < rc::door::close_standoff(0.1f, toward, sigma), "close goal: away < toward");
     check(near(lm::normal_quantile(0.975f), 1.95996f, 1e-3f) and near(lm::normal_quantile(0.5f), 0.0f), "Phi^-1");
 
+    // recall node: near face wins, far face is complemented, neither -> nothing
+    {
+        const auto n = lm::recall_leaf_probs({0.9f, 0.7f}, {0.2f, 0.3f});
+        check(n and near(n->first, 0.9f) and near(n->second, 0.7f), "recall: near face wins over far");
+        const auto f = lm::recall_leaf_probs({std::nullopt, std::nullopt}, {0.9f, 0.7f});
+        check(f and near(f->first, 0.1f) and near(f->second, 0.3f), "recall: far face complemented");
+        const auto u = lm::recall_leaf_probs({0.5f, 0.5f}, {0.9f, 0.7f});
+        check(u and near(u->first, 0.1f), "recall: unknown near falls to far");
+        check(not lm::recall_leaf_probs({std::nullopt, std::nullopt}, {0.5f, std::nullopt}), "recall: nothing known -> none");
+        const auto h = lm::recall_leaf_probs({0.8f, std::nullopt}, {std::nullopt, std::nullopt});
+        check(h and near(h->first, 0.8f) and near(h->second, 0.5f), "recall: half-present near reads 0.5");
+    }
+
     std::println("{} checks, {} failures", checks, failures);
     return failures == 0 ? 0 : 1;
 }
