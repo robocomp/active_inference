@@ -140,6 +140,13 @@ elif [ "$(cat $FIX/room_name_hwm.txt)" -ge 3 ]; then
 else
   ARGS=(room_2 new room_2 room_1); WANT=(room_2 room_3 room_2 room_1); BEHIND=(room_1 room_2 room_3 room_2)   # close behind: the room left
 fi
+# LEGS="room_3 room_2 room_1" (user 2026-11-02: run the tour backwards, R1->R3->R2->R1): an explicit plan of rooms to
+# cross into, by relation, overriding the above. The robot starts in room_1; each leg closes the door behind it.
+if [ -n "$LEGS" ]; then
+  ARGS=($LEGS); WANT=($LEGS); BEHIND=(); prev=room_1
+  for r in $LEGS; do BEHIND+=($prev); prev=$r; done
+  N_LEGS=${#ARGS[@]}
+fi
 echo "leg plan: ${ARGS[*]} (fixture remembers $(cat $FIX/room_name_hwm.txt) rooms)"
 ok=0; n_legs=${N_LEGS:-4}
 for leg in $(seq 1 $n_legs); do
