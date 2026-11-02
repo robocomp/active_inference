@@ -50,10 +50,18 @@ namespace rc
         {
             const auto fit = late_fit_.get();
             late_fit_ = {};
+            if (fit.epoch != reloc_epoch_.load(std::memory_order_relaxed) or fit.poly != current_room_polygon())
+            {   // the pose was moved by someone else, or the room changed, while the job ran: its frame is gone
+                qInfo() << "[reloc] late recall: multi-scan fit dropped (pose or room changed while it ran)";
+                late_ring_.clear(); late_ref_valid_ = false;
+                return;
+            }
             if (std::isfinite(fit.mode.log_lik) and fit.mode.pose.allFinite() and fit.mode.cov.allFinite())
             {
                 const Eigen::Vector3f at_now = compose(fit.mode.pose, between(fit.submit_pose, now));
+                committing_own_fit_ = true;
                 commit_relocalised_pose(at_now, fit.mode.cov);
+                committing_own_fit_ = false;
                 late_forced_done_ = true;
                 clear_rival_belief();   // the pose moved: the rivals / in-flight proposals were priced against the old one
                 ++rt_.searches;
@@ -88,7 +96,7 @@ namespace rc
         scans.reserve(late_ring_.size());
         for (const auto& kf : late_ring_) scans.emplace_back(between(now, kf.pose), kf.pts);
         late_fit_ = std::async(std::launch::async,
-            [raster = reloc_raster_, poly, scans = std::move(scans), prior_now, S = best->S, rp, now]() mutable -> LateFit
-            { return {rc::rivals::multi_scan_fit(raster, poly, scans, prior_now, S, rp), now}; });
+            [raster = reloc_raster_, poly, epoch = reloc_epoch_.load(std::memory_order_relaxed), scans = std::move(scans), prior_now, S = best->S, rp, now]() mutable -> LateFit
+            { return {rc::rivals::multi_scan_fit(raster, poly, scans, prior_now, S, rp), now, epoch, poly}; });
     }
 }

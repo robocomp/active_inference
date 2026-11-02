@@ -804,7 +804,8 @@ private:
    std::deque<LateKeyframe> late_ring_;           ///< localiser thread; cleared by seed_reloc_prior (its pose jump breaks relative poses)
    Eigen::Vector3f late_ref_pose_ = Eigen::Vector3f::Zero();   ///< the pose the prior mean belongs to: the tracker pose at the ring's first frame
    bool late_ref_valid_ = false;
-   struct LateFit { rc::reloc::Mode mode; Eigen::Vector3f submit_pose; };
+   bool committing_own_fit_ = false;              ///< commit_relocalised_pose is the late fit's own (otherwise it invalidates the ring)
+   struct LateFit { rc::reloc::Mode mode; Eigen::Vector3f submit_pose; std::uint64_t epoch; std::vector<Eigen::Vector2f> poly; };   ///< epoch = reloc_epoch_ at submit
    std::future<LateFit> late_fit_;                ///< one-off worker job (deep-copied inputs, no DSR); valid() = in flight
    void accumulate_late_evidence(float s, float novelty);      ///< one scan's LLR into late_log_odds_ (localiser thread only)
    rc::reloc::Runtime rt_;                      ///< Task R1/R1b relocalisation runtime (reloc_runtime.h)

@@ -73,6 +73,16 @@ int main()
     std::println("single err {:.4f} m {:.3f} deg  sd {:.4f} m", es, as_, std::sqrt(single.cov(0, 0)));
     CHECK(em <= 0.02f and am <= 0.5f);
     CHECK(es > em);
+    // parked ring: 15 fresh-noise scans of ONE view must not be tighter than a single scan; the moving ring is tighter.
+    {
+        std::vector<std::pair<V3, std::vector<V2>>> parked;
+        for (int i = 0; i < 15; ++i) parked.push_back({V3::Zero(), scan(poly, truth, rng, 90.f)});
+        const auto mp = multi_scan_fit(K, poly, parked, prior, Sp, p);
+        const auto sp = multi_scan_fit(K, poly, {parked.back()}, prior, Sp, p);
+        std::println("parked sd {:.5f} m, single sd {:.5f} m, moving sd {:.5f} m", std::sqrt(mp.cov(0, 0)), std::sqrt(sp.cov(0, 0)), std::sqrt(multi.cov(0, 0)));
+        CHECK(std::sqrt(mp.cov(0, 0)) >= 0.99f * std::sqrt(sp.cov(0, 0)));
+        CHECK(std::sqrt(multi.cov(0, 0)) < std::sqrt(single.cov(0, 0)));
+    }
     // degenerate inputs return the prior
     const auto none = multi_scan_fit(K, poly, {}, prior, Sp, p);
     CHECK((none.pose - prior).norm() < 1e-6f);

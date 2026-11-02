@@ -364,6 +364,9 @@ namespace rc
 
     void RoomConcept::commit_relocalised_pose(const Eigen::Vector3f& pose, const Eigen::Matrix3f& cov)
     {
+        // A pose jump that is not the late fit's own (a rival swap, a search) makes the ring's stored poses and an in-flight
+        // job meaningless: the ring is cleared, the job is dropped at apply by its stale reloc_epoch_ (bumped below).
+        if (not committing_own_fit_) { late_ring_.clear(); late_ref_valid_ = false; }
         model_->set_pose(pose);
         model_->has_prediction  = false;
         model_->robot_prev_pose = std::nullopt;
