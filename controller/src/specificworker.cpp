@@ -1364,6 +1364,10 @@ void SpecificWorker::load_params()
          "Route optimiser: speed (0) <-> safety (1)");
 	cfgr.opt_cast<double>("Controller.RouteSafetyMargin", params.route_safety_margin_m,
          "Route optimiser: clearance target = the body's extent at the route heading + this (m); < 0 = old comfort target");
+	cfgr.opt("Controller.RouteClearanceBarrier", params.route_clearance_barrier,
+         "Route optimiser: clearance cost (sigma/gap)^2 active everywhere (true) instead of the one-sided deficit beyond body+margin (false)");
+	cfgr.opt_cast<double>("Controller.RouteClearanceSigma", params.route_clear_sigma_m,
+         "Route optimiser barrier scale (m): expected body offset from the curve (pose sigma + tracker cross-track)");
 	cfgr.opt_cast<double>("Controller.RouteJerkWeight", params.route_jerk_weight,
          "The robot delivers omega = v*kappa, so omega_dot = v_dot*kappa + v^2*(dkappa/ds): with speed roughly held, the roughness of the TURN RATE is the…");
 

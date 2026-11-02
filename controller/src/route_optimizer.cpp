@@ -333,6 +333,7 @@ void assemble(const std::vector<Eigen::Vector2f> &ctrl,
         const float sc = std::sqrt(sc_t.clear * (cfg.w_clear * bias_g) / static_cast<float>(std::max<std::size_t>(1, n_quad)));
         const float dstar = std::max(0.05f, cfg.d_target);
         const bool safe_only = cfg.safety_margin >= 0.f and static_cast<bool>(cfg.support_radius);
+        const bool barrier = cfg.clearance_barrier;
         for (std::size_t s = 0; s < n_spans; ++s)
             for (int q = 0; q < kQuadPerSpan; ++q)
             {
@@ -356,6 +357,36 @@ void assemble(const std::vector<Eigen::Vector2f> &ctrl,
                     for (int k = 0; k < 4; ++k) tan += B1[k] * pad[s + k];
                     if (tan.squaredNorm() > 1e-12f)
                         target = std::max(0.05f, cfg.support_radius(std::atan2(tan.y(), tan.x()), -g) + cfg.safety_margin);
+                }
+                if (barrier)
+                {
+                    // ── THE BARRIER FORM: everywhere active, no zero region ───────────────────────────────
+                    // The one-sided deficit pulled nothing beyond body+margin, so curvature + anchors took the
+                    // short smooth line and CUT CORNERS (live: clearance 0.497 -> 0.392 m). The generative model
+                    // of the tracker says the body will be off the curve by ~N(0, sigma_c^2) — pose sigma plus
+                    // cross-track error — so the expected cost of a route sample is the chance that error eats the
+                    // free gap: (sigma_c / gap)^2, gap = d - r_body(heading). Strongest at contact, still pulling
+                    // at range, ridge of d = medial axis. No cutoff: r = sc * sigma_c / gap_s with gap_s a SMOOTH
+                    // positive map of (d - r_body) (softplus-like, e = the EDT cell) so a sample inside the body
+                    // is finite and differentiable instead of a singularity.
+                    // L4 emphasis (clear_peak) is NOT applied: 1/gap^2 is already heavy-tailed, the worst sample
+                    // dominates by itself, and adding the quartic would square the singularity.
+                    const float x   = d - (safe_only ? std::max(0.f, target - cfg.safety_margin) : 0.f);
+                    const float e   = std::max(1e-3f, cfg.barrier_eps_m);
+                    const float rt  = std::sqrt(x * x + 4.f * e * e);
+                    const float gap = 0.5f * (x + rt);
+                    const float sg  = std::max(1e-3f, cfg.clear_sigma_m);
+                    out.r(row) = sc * sg / gap;
+                    const float dr = -sc * sg / (gap * gap) * 0.5f * (1.f + x / rt);   // d r / d d
+                    for (int k = 0; k < 4; ++k)
+                    {
+                        const int v = var_of(pad_to_ctrl(s + k, M), lo, hi);
+                        if (v < 0) continue;
+                        out.J(row, v)     += dr * g.x() * B[k];
+                        out.J(row, v + 1) += dr * g.y() * B[k];
+                    }
+                    ++row;
+                    continue;
                 }
                 const float deficit = target - d;
                 if (deficit <= 0.f) { ++row; continue; }      // clear here: zero residual, zero gradient
@@ -956,7 +987,7 @@ bool route_optimizer_self_test()
             RouteOptimizerConfig k;
             k.distance = dist1; k.distance_gradient = grad1;
             k.h = 0.40f; k.d_target = 0.60f; k.rho = 1.5f;
-            k.clear_peak = peak; k.iterations = 150; k.verbose = false;
+            k.clear_peak = peak; k.clearance_barrier = false;   // tests the legacy L4 deficit k.iterations = 150; k.verbose = false;
             optimize_route(c, k);
             float worst = std::numeric_limits<float>::max();
             for (const auto &p : c) worst = std::min(worst, (p - obstacle).norm());
@@ -1100,6 +1131,9 @@ bool route_optimizer_self_test()
         k.anchors = {{4.0f, 0.22f}};
         k.anchor_s = {4.0f};
         k.iterations = 40; k.verbose = false;
+        // This block tests the ACCEPTANCE GUARD against a solve that trades clearance for the anchor. The barrier resists
+        // the anchor far harder (its control polygon overshoots differently), so it would test another solve; pin the form.
+        k.clearance_barrier = false;
 
         auto c1 = base;
         const auto r1 = optimize_route(c1, k);     // no footprint, no floor ⇒ nothing can reject it

@@ -240,6 +240,15 @@ RouteSafetyBias = 0.75
 # from it against the waypoint anchors and made the route spiky. < 0 restores that comfort target.
 RouteSafetyMargin = 0.10
 
+# ── CLEARANCE AS A BARRIER (2026-11-02) ──────────────────────────────────────────────────────────────
+# The deficit above is silent beyond body+margin, so curvature + anchors cut corners (live: the optimiser
+# LOWERED clearance 0.497 -> 0.392 m). With the barrier the cost is (sigma/gap)^2, gap = d - body extent at
+# the route heading: active everywhere, strongest at contact, ridge = medial axis. RouteClearanceSigma is a
+# stated physical scale (flagged): expected body offset from the curve = pose sigma (~0.05) + tracker
+# cross-track (~0.10) + range noise. Larger = felt from further away. false restores the one-sided deficit.
+RouteClearanceBarrier = true
+RouteClearanceSigma = 0.20
+
 # ── SMOOTHNESS OF THE TURN, ATTACKED IN THE GEOMETRY ──────────────────────────────────────────────
 # Penalises dkappa/ds (the clothoid criterion) in the route objective. The robot must deliver
 # omega = v*kappa, so omega_dot = v_dot*kappa + v^2*(dkappa/ds): with speed roughly held, the roughness

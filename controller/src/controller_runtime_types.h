@@ -173,6 +173,8 @@ struct ControllerParams
     // it is inert until moved. Live from the UI slider; applies to the next route build or repair.
     float route_safety_bias = 0.5f;
     float route_safety_margin_m = 0.10f;   // Controller.RouteSafetyMargin: clearance target = body extent + this (< 0 ⇒ old comfort form)
+    bool  route_clearance_barrier = true;  // Controller.RouteClearanceBarrier: everywhere-active (sigma/gap)^2 clearance cost (false = legacy one-sided deficit)
+    float route_clear_sigma_m = 0.20f;     // Controller.RouteClearanceSigma: how far the body is expected off the curve (pose sigma + cross-track)
     // ── dkappa/ds PRIOR (see route_optimizer.h w_jerk) ───────────────────────────────────────────
     // The robot delivers omega = v*kappa, so omega_dot = v_dot*kappa + v^2*(dkappa/ds): with speed
     // roughly held, the roughness of the TURN RATE is the curvature RATE. Smoothing it in the geometry

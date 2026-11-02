@@ -91,6 +91,17 @@ struct RouteOptimizerConfig
     // ⚠ A stated margin, flagged: it stands for the cross-track error the tracker leaves, which is measured
     //   (tracker_diag) but not yet fed back here. < 0 ⇒ the old d_target form.
     float safety_margin = -1.f;
+    // ── CLEARANCE AS A BARRIER (2026-11-02) ──────────────────────────────────────────────────────
+    // true  ⇒ E_clear = mean (clear_sigma_m / gap)^2, gap = smooth(d - r_body(heading)): active EVERYWHERE and
+    //         rising toward contact (see the .cpp). The one-sided deficit below is the legacy form (false) and
+    //         is silent beyond body+margin, which let the route cut corners.
+    // clear_sigma_m: how far the body will be off the curve — pose sigma (~0.05) + tracker cross-track (~0.10)
+    //         + range noise. ⚠ A stated physical scale (flagged), not a threshold: it sets how far away the pull
+    //         is felt, never switches anything off. barrier_eps_m: the smoothing length of the positive-gap map,
+    //         one EDT cell — keeps a sample inside the body finite and differentiable.
+    bool  clearance_barrier = true;
+    float clear_sigma_m = 0.20f;
+    float barrier_eps_m = 0.02f;
     float rho       = 0.49f;   // curvature normaliser, v_max^2 / a_lat_max
     float sigma_a   = 0.30f;   // how far the route may drift from what was clicked
     // Below this the route is not drivable at all, so a solve that lands there has failed rather than
