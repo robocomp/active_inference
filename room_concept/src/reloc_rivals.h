@@ -78,7 +78,8 @@ public:
             rivals_.erase(std::ranges::min_element(rivals_, {}, &Rival::lambda));
     }
 
-    // rigid carry by the robot's motion expressed in the body frame (dx, dy, dyaw)
+    // Rigid carry by the robot's motion expressed in the body frame (dx, dy, dyaw): the rival's own yaw rotates the
+    // body-frame delta into the map frame. cov is NOT propagated (first order; no constant process noise, by rule).
     void carry(const Eigen::Vector3f& odo)
     {
         for (auto& r : rivals_)
@@ -108,12 +109,14 @@ public:
     }
 
     // Rival i becomes the incumbent (returned); the old incumbent takes its place as a rival with lambda = -lambda_i.
-    Rival swap(std::size_t i, const Eigen::Vector3f& pose_0, const Eigen::Matrix3f& cov_0)
+    // The demoted incumbent STARTS at -lambda_i but its floor is the kidnap birth price floor_birth (the caller passes
+    // birth_lambda for that pose), like any rival, so it decays away instead of sticking near -lambda_i.
+    Rival swap(std::size_t i, const Eigen::Vector3f& pose_0, const Eigen::Matrix3f& cov_0, float floor_birth)
     {
         Rival won = rivals_.at(i);
         Rival old;
         old.pose = pose_0; old.cov = cov_0;
-        old.lambda = old.lambda_birth = -won.lambda;
+        old.lambda = -won.lambda; old.lambda_birth = floor_birth;
         old.id = won.id + 1000000;   // distinct from any proposer id in practice; callers may overwrite
         rivals_[i] = old;
         return won;
