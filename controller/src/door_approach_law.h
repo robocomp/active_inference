@@ -85,18 +85,9 @@ struct Command
     float d = 0.f, psi_V = 0.f, psi_door = 0.f, lateral = 0.f;
 };
 
-/// The law's verdict as the ARRIVAL block reads it (the block runs BEFORE the cycle's own law call, so it reads the previous
-/// cycle's verdict). warm32 leg 3: the verdict of the PREVIOUS door's approach (DONE at its vantage) survived into the next
-/// installed route, which then reported Arrived on its first cycle, 7 m from its vantage. So: the verdict is cleared when a
-/// route is installed, and "arrived" is never the latch alone -- the robot must also stand in the arrival disc of the vantage.
-struct Verdict
-{
-    bool done_now = false;
-    void install() { done_now = false; }                    // a new route: no verdict carried over
-    void note(const Command& c) { done_now = c.done; }
-    [[nodiscard]] bool arrived(const Eigen::Vector2f& p, const Eigen::Vector2f& vantage, float rho) const
-    { return done_now and (p - vantage).norm() <= rho; }
-};
+// There is NO arrival verdict here. The approach leg ENDS when the NEXT affordance (`open` while the door reads shut, `cross` once
+// open) is eligible by door_concept's own measure -- DoorPassage::next_eligible(leg key), per installed route (warm32 leg 3: a
+// verdict carried from the previous door). `Command::done` below is the law's own trace label only.
 
 [[nodiscard]] inline Command law(const State& s)
 {

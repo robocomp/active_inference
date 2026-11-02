@@ -120,6 +120,8 @@ public:
         route_epoch_ = 0;
         route_failures_ = 0;
         route_arrived_ = false;
+        open_was_on_ = false;
+        eligible_key_.clear();
                 cross_id_ = 0;
         servo_ = false;
         drive_in_done_ = false;
@@ -374,6 +376,14 @@ public:
         last_outcome_ = "cross_unreachable";
         last_event_ = std::format("[door-route] {}: the route failed again ({}) — passage FAILED (cross_unreachable)", door_, why);
         std::println("{}", last_event_);
+    }
+    /// Is the NEXT affordance of this leg's door eligible by door_concept's own measure (the approach leg's end, 2026-11-02)?
+    /// Computed by update() for the leg it last published; a report for another leg's key is false -- a verdict is per installed
+    /// route, never carried to the next door (warm32 leg 3).
+    [[nodiscard]] bool next_eligible(const std::string& key) const
+    {
+        std::scoped_lock lk(m_);
+        return use_route_ and key == route_key_ and key == eligible_key_ and eligible_;
     }
     static constexpr int kMaxRouteFailures = 2;   ///< the build or the drive failing twice ends the passage (one rebuild)
     /// The session's escalating recovery gave up (begin_escape): the passage ends FAILED with outcome "stuck".
@@ -905,6 +915,17 @@ private:
         out.event = std::move(e);
         last_event_ = *out.event;
     }
+    /// The affordance the approach exists to make possible is ELIGIBLE by door_concept's own measure: while the door reads shut
+    /// `open` (offered = P(in band) x P(facing) x P(shut) x P(exists) above its offer level), once it reads open `cross` (offered
+    /// and its contract's `pre: door_cross_exec_prob >= level` holds -- P(at the door) x P(swept corridor clear) x P(passable)).
+    /// The approach does not decide "arrived" itself: no distance disc, no heading tolerance of its own. Under m_.
+    [[nodiscard]] bool route_next_eligible(DSR::DSRGraph& G, bool open_now) const
+    {
+        auto on = [&](Step s) { const State st = state_of(G, name_of(s)); return st == State::Offered or st == State::Executing; };
+        const bool cross_ok = on(Step::Cross) and cross_pre(G) != Pre::Fails;
+        if (step_ == Step::Cross) return cross_ok;
+        return open_now ? cross_ok : on(Step::Open);
+    }
     /// ROUTE MODE (header). Under m_.
     Out update_route(DSR::DSRGraph& G, const std::string& room_frame, Out out)
     {
@@ -970,6 +991,25 @@ private:
         {
             route_event(out, std::format("[door-route] {}: the door reads open — the route goes on through it", door_));
             enter_cross(G, room_frame);
+        }
+        // ── PUSHED AWAY AFTER THE APPROACH ENDED (2026-11-02): waiting at the vantage for `open`, the precondition that ended the
+        //    approach fell (door_concept withdrew `open`: the robot left the band / stopped facing the door) and the approach is
+        //    on offer again -- resume it. Not after a FAILED open (attempts_ > 0: that one retries where it stands).
+        if ((step_ == Step::Approach or step_ == Step::Open) and not open_now)
+            if (const State so1 = state_of(G, name_of(Step::Open)); so1 == State::Offered or so1 == State::Executing) open_was_on_ = true;
+        if (step_ == Step::Open and open_was_on_ and not open_now and not seen_executing_ and attempts_ == 0)
+        {
+            const State so0 = state_of(G, name_of(Step::Open));
+            if (so0 != State::Offered and so0 != State::Executing and state_of(G, name_of(Step::Approach)) == State::Offered)
+            {
+                route_event(out, std::format("[door-route] {}: {} withdrawn and {} offered — the approach resumes", door_,
+                                             name_of(Step::Open), name_of(Step::Approach)));
+                step_ = Step::Approach;
+                reapproach_ = true;
+                open_was_on_ = false;
+                seen_executing_ = false;
+                ++route_epoch_;
+            }
         }
         if (step_ == Step::Open)
         {
@@ -1039,6 +1079,7 @@ private:
             leg.next = next_goal_;
             leg.key = std::format("{}|drive_in|{}|{}", door_, route_epoch_, room_frame);
             route_key_ = leg.key;
+            eligible_key_.clear();
             out.route = std::move(leg);
             out.required = name_of(step_) + kRouteSuffix;
             step_state_ = "driving in";
@@ -1078,6 +1119,8 @@ private:
         leg.next = through ? next_goal_ : std::nullopt;
         leg.key = std::format("{}|{}|{}|{}", door_, through ? "through" : "approach", route_epoch_, room_frame);
         route_key_ = leg.key;
+        eligible_key_ = leg.key;
+        eligible_ = route_next_eligible(G, open_now);
         out.route = std::move(leg);
         out.required = name_of(step_) + kRouteSuffix;
         step_state_ = "route";
@@ -1131,6 +1174,9 @@ private:
     int route_epoch_ = 0;
     int route_failures_ = 0;
     bool route_arrived_ = false;
+    std::string eligible_key_;             ///< the leg next_eligible_ was computed for
+    bool open_was_on_ = false;             ///< `open` has been on offer in this approach/open wait: its later withdrawal is a push, not a wait
+    bool eligible_ = false;                ///< that leg's next affordance is eligible (route_next_eligible)
     bool exited_ = false;                  ///< through: the crossing fact was handed to the caller (once per Cross)
     bool servo_ = false;                   ///< the doorway is driven on the anchor (note_servo)
     bool drive_in_done_ = false;           ///< past THROUGH, the servo has driven in as far as it will (note_drive_in_done)

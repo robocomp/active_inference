@@ -1115,6 +1115,72 @@ int main()
     }
 
 
+    // ══ THE APPROACH ENDS WHEN THE NEXT AFFORDANCE IS ELIGIBLE (2026-11-02), not at a distance disc of its own ═══════════════
+    {   // (a) a SHUT door: the leg ends exactly when door_concept offers `open` (the graph says "in band, facing, shut"), whatever
+        //   the robot's distance to the vantage; before that -- close to V but not facing, so not offered -- it does not end
+        auto G = make_graph(80);
+        DoorPassage p;
+        p.set_clock(clock);
+        p.set_use_route(true);
+        p.note_room_id(1);
+        p.start("door_e", Step::Cross);
+        offered(*G, "aff_door_e_approach");
+        target(*G, "aff_door_e_approach", 2.f, 1.6f, down);
+        auto out = p.update(*G, nullptr, "room_1");
+        const std::string k = out.route->key;
+        CHECK(not p.next_eligible(k));                            // no `open` on offer: 0.1 m from V, poorly facing -- not ended
+        offered(*G, "aff_door_e_open");                           // 0.4 m from V but in band and facing: door_concept offers it
+        out = p.update(*G, nullptr, "room_1");
+        CHECK(p.next_eligible(k));                                // ended by the precondition alone
+        CHECK(not p.next_eligible("door_other|approach|0|room_1"));   // per leg key: another leg's question is false
+        G->delete_node("aff_door_e_open");                        // the precondition falls (pushed): not ended again
+        out = p.update(*G, nullptr, "room_1");
+        CHECK(not p.next_eligible(k));
+    }
+    {   // an OPEN door re-approached: it ends on `cross`'s own pre (door_cross_exec_prob >= level), not on `cross` merely offered
+        auto G = make_graph(81);
+        DoorPassage p;
+        p.set_clock(clock);
+        p.set_use_route(true);
+        p.note_room_id(1);
+        p.start("door_f", Step::Cross);
+        offered(*G, "aff_door_f_approach"); target(*G, "aff_door_f_approach", 2.f, 1.6f, down);
+        cross_with_pre(*G, "door_f", true, 0.20f);                // offered, but the robot is not yet at the door
+        target(*G, "aff_door_f_cross", 2.f, -0.8f, down);
+        auto out = p.update(*G, nullptr, "room_1");
+        CHECK(out.route.has_value() and out.route->through);
+        const std::string k = out.route->key;
+        CHECK(not p.next_eligible(k));
+        set_cross_exec(*G, "door_f", 0.95f);
+        out = p.update(*G, nullptr, "room_1");
+        CHECK(out.route.has_value() and out.route->key == k and p.next_eligible(k));
+    }
+    {   // (b) pushed away after the approach ended: waiting for `open` at the vantage, `open` is withdrawn and the approach is on
+        //   offer again -- the approach RESUMES (a new leg), and (c) the old leg's verdict does not carry over
+        auto G = make_graph(82);
+        DoorPassage p;
+        p.set_clock(clock);
+        p.set_use_route(true);
+        p.note_room_id(1);
+        p.start("door_g", Step::Cross);
+        offered(*G, "aff_door_g_approach"); target(*G, "aff_door_g_approach", 2.f, 1.6f, down);
+        offered(*G, "aff_door_g_open");
+        auto out = p.update(*G, nullptr, "room_1");
+        const std::string k0 = out.route->key;
+        CHECK(p.next_eligible(k0));
+        p.note_route(k0, RR::Arrived);                            // the session ended the leg on that
+        out = p.update(*G, nullptr, "room_1");
+        CHECK(p.view().step == Step::Open and not out.route.has_value());
+        G->delete_node("aff_door_g_open");                        // pushed off the band: `open` withdrawn
+        out = p.update(*G, nullptr, "room_1");
+        CHECK(p.view().step == Step::Approach and out.route.has_value() and out.route->key != k0);
+        CHECK(not p.next_eligible(k0));                           // the old verdict is for the old leg only
+        CHECK(not p.next_eligible(out.route->key));               // …and the new leg starts not-ended
+        offered(*G, "aff_door_g_open");
+        out = p.update(*G, nullptr, "room_1");
+        CHECK(p.next_eligible(out.route->key));
+    }
+
     // ══ CHAINED ACTIONS (spec 2026-11-02): `cross R2; close R1; open R3` — the close happens ON THE WAY to the next step ═════════
     {   // the cross's leg carries the next step's goal; without one (unresolvable / last step) it carries none — old behaviour
         for (const bool known : {true, false})
