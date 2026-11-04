@@ -142,6 +142,10 @@ namespace rc::reloc
         ///   truth's real but unlisted opening charged clutter per return — reloc_selftest O, the list 4.4 m off as it
         ///   is for ~1 s after every recall: the forced search MOVED a correct pose to the twin. Now the truth explains
         ///   its door at the price of log(N_cells/list_wrong) once.
+        /// ★ THE OPENINGS ARE A UNION (Task 7b). The boundary is open where ANY door is; a cell's beams are evidence once,
+        ///   however many doors could be in it. Marginalising each door on its own (Σ_k log Z_k) charged the cell a wrong
+        ///   pose stands next to once PER DOOR (every door reaches every cell through list_wrong): warm43 f358's 178° twin
+        ///   out-scored the truth 293 vs 191 nats with the tracker at the truth. Now 84 vs 191 (reloc_selftest X).
         /// ⚠ two modelling constants (priors, not gates), flagged: the cell scale and list_wrong. list_wrong = 0.1 is of
         ///   the order measured live: the crossed door placed 4.3–4.6 m off for ~1 s after each recall (rtD1g2), door_5
         ///   rotated 90° for whole visits (rtD1i).

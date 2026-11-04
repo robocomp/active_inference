@@ -176,7 +176,8 @@ namespace rc::reloc
         ///   Per cell C with beams S_C: shut ⇒ Π room_i; open ⇒ Π_i ((1−c)·o_i + c·room_i)·e^{−Occam(lines)}, o_i =
         ///   beyond_i for a return PAST the cell and the room's clutter term for one that ended before it (an open
         ///   stretch has no wall to return from). Δ_C = log open − log shut.
-        ///   ℓ = Σ_i room_i + Σ_k log[ q_k + (1 − q_k)·Σ_C π_k(C)·e^{Δ_C} ]   (cells without beams: Δ = 0)
+        ///   ℓ = Σ_i room_i + log Σ_{c_1..c_K} Π_k prior_k(c_k)·Π_{C ∈ ∪_k c_k} e^{Δ_C}   (cells without beams: Δ = 0;
+        ///   prior_k(shut) = q_k, prior_k(C) = (1 − q_k)·π_k(C)). Each open cell's beams count ONCE (Task 7b, below).
         /// ★ ONE OPENING PER LISTED DOOR, COMMON TO ITS BEAMS. A door's state is one fact shared by every beam through it
         ///   (a per-beam state charged a shut door wrongly listed open 199 nats, Q's exploration), and the room has as
         ///   many openings as doors are listed: a wrong pose cannot open the boundary wherever its scan crosses it. A
@@ -232,25 +233,112 @@ namespace rc::reloc
                 }
                 delta[cid] = so - ss;
             }
-            // Each door: shut, or open in one cell. P(cell C open) = 1 − Π_k (1 − r_k(C)).
-            std::unordered_map<int, double> stay;
-            for (std::size_t k = 0; k < cells.pi.size(); ++k)
+            // THE DOORS' OPENINGS, MARGINALISED JOINTLY (Task 7b). Door k is shut (q_k) or open in ONE cell c_k (prior
+            // (1 − q_k)·π_k(c_k)); the boundary is open on the UNION U of the doors' cells, and a cell's beams are evidence
+            // ONCE, however many doors name it:  Z = Σ_{c_1..c_K} Π_k prior_k(c_k) · Π_{C∈U} e^{Δ_C}.
+            // ⚠ The old Σ_k log Z_k (each door marginalised on its own) is this sum only when no two doors can reach the same
+            //   cell. Every door reaches EVERY cell through list_wrong, so the cell a wrong pose stands next to had its e^{Δ}
+            //   multiplied once per listed door: warm43 f358's 178° twin took Δ = 219 nats twice (ℓ 293 vs the truth's 191),
+            //   f459's Δ = 391 twice, warm45 f1651's Δ = 285 twice — and listing one doorway under two door nodes doubled its
+            //   evidence even at the truth. reloc_selftest X.
+            // Exact, by a forward-backward recursion over the cells with beams whose state is the SET of doors already
+            // placed (2^K states, 3^K transitions a cell; K = the room's listed doors, a handful). Doors whose cell has no
+            // beam contribute their mass  off_k = q_k + (1 − q_k)·Σ_{C without beams} π_k(C)  (Δ = 0 there). With every
+            // Δ = 0, Z = Π_k Σ prior_k = 1: a scan that says nothing about the doorways leaves ℓ at the room term.
+            std::vector<int> act;
+            act.reserve(delta.size());
+            for (const auto& [cid, d] : delta) act.push_back(cid);
+            std::ranges::sort(act);   // deterministic order (the sum does not depend on it; float rounding does)
+            const std::size_t K = cells.pi.size(), M = act.size(), NS = std::size_t{1} << K;
+            constexpr double kNeg = -std::numeric_limits<double>::infinity();
+            auto lse2 = [](double x, double y)
             {
-                const auto& pi = cells.pi[k];
+                if (x == kNeg) return y;
+                if (y == kNeg) return x;
+                const double hi = std::max(x, y);
+                return hi + std::log1p(std::exp(std::min(x, y) - hi));
+            };
+            // sub[m][T] = log Π_{k∈T} (1 − q_k)·π_k(C_m) + [T ≠ ∅]·Δ_m: the doors of T all open in cell m, its beams once.
+            std::vector<double> sub(M * NS, 0.0), off_of(NS, 0.0);
+            std::vector<double> loff(K);
+            for (std::size_t k = 0; k < K; ++k)
+            {
                 const double q = cells.q[k];
-                double hi = 0.0;
-                for (const auto& [cid, d] : delta) hi = std::max(hi, d);
-                // Z_k = q + (1 − q)·[1 + Σ_C π(C)(e^{Δ_C} − 1)], computed with e^{−hi} factored out.
-                double zs = (q + (1.0 - q)) * std::exp(-hi);
-                for (const auto& [cid, d] : delta)
-                    zs += (1.0 - q) * pi[static_cast<std::size_t>(cid)] * (std::exp(d - hi) - std::exp(-hi));
-                ll += hi + std::log(std::max(zs, 1e-300));
-                for (const auto& [cid, d] : delta)
+                double pa = 0.0;
+                for (const int cid : act) pa += cells.pi[k][static_cast<std::size_t>(cid)];
+                const double off = q + (1.0 - q) * std::max(0.0, 1.0 - pa);
+                loff[k] = off > 0.0 ? std::log(off) : kNeg;
+            }
+            for (std::size_t S = 0; S < NS; ++S)
+                for (std::size_t k = 0; k < K; ++k)
+                    if (not (S >> k & 1u)) off_of[S] = off_of[S] == kNeg or loff[k] == kNeg ? kNeg : off_of[S] + loff[k];
+            for (std::size_t m = 0; m < M; ++m)
+            {
+                const double dm = delta[act[m]];
+                for (std::size_t T = 1; T < NS; ++T)
                 {
-                    const double r = (1.0 - q) * pi[static_cast<std::size_t>(cid)] * std::exp(d - hi) / std::max(zs, 1e-300);
-                    auto [it, fresh] = stay.try_emplace(cid, 1.0);
-                    it->second *= 1.0 - std::clamp(r, 0.0, 1.0);
+                    double v = dm;
+                    for (std::size_t k = 0; k < K and v != kNeg; ++k)
+                        if (T >> k & 1u)
+                        {
+                            const double a = (1.0 - cells.q[k]) * cells.pi[k][static_cast<std::size_t>(act[m])];
+                            v = a > 0.0 ? v + std::log(a) : kNeg;
+                        }
+                    sub[m * NS + T] = v;
                 }
+            }
+            // F[m][S]: cells < m, doors S placed there. B[m][R]: cells ≥ m, doors R placed there.
+            std::vector<double> F((M + 1) * NS, kNeg), B((M + 1) * NS, kNeg);
+            F[0] = 0.0;
+            B[M * NS] = 0.0;
+            for (std::size_t m = 0; m < M; ++m)
+                for (std::size_t S = 0; S < NS; ++S)
+                {
+                    const double f = F[m * NS + S];
+                    if (f == kNeg) continue;
+                    const std::size_t free = (NS - 1) & ~S;
+                    for (std::size_t T = free;; T = (T - 1) & free)   // every subset of the unplaced doors, ∅ included
+                    {
+                        auto& dst = F[(m + 1) * NS + (S | T)];
+                        dst = lse2(dst, f + sub[m * NS + T]);
+                        if (T == 0) break;
+                    }
+                }
+            for (std::size_t m = M; m-- > 0;)
+                for (std::size_t R = 0; R < NS; ++R)
+                {
+                    const double b = B[(m + 1) * NS + R];
+                    if (b == kNeg) continue;
+                    const std::size_t free = (NS - 1) & ~R;
+                    for (std::size_t T = free;; T = (T - 1) & free)
+                    {
+                        auto& dst = B[m * NS + (R | T)];
+                        dst = lse2(dst, b + sub[m * NS + T]);
+                        if (T == 0) break;
+                    }
+                }
+            double logZ = kNeg;
+            for (std::size_t S = 0; S < NS; ++S)
+                if (F[M * NS + S] != kNeg and off_of[S] != kNeg) logZ = lse2(logZ, F[M * NS + S] + off_of[S]);
+            if (logZ != kNeg) ll += logZ;
+            // P(cell m shut | scan) = Σ over placements that leave cell m empty / Z.
+            std::unordered_map<int, double> stay;
+            for (std::size_t m = 0; m < M and logZ != kNeg; ++m)
+            {
+                double ls = kNeg;
+                for (std::size_t S = 0; S < NS; ++S)
+                {
+                    const double f = F[m * NS + S];
+                    if (f == kNeg) continue;
+                    const std::size_t free = (NS - 1) & ~S;
+                    for (std::size_t R = free;; R = (R - 1) & free)
+                    {
+                        const double b = B[(m + 1) * NS + R];
+                        if (b != kNeg and off_of[S | R] != kNeg) ls = lse2(ls, f + b + off_of[S | R]);
+                        if (R == 0) break;
+                    }
+                }
+                stay[act[m]] = ls == kNeg ? 0.0 : std::clamp(std::exp(ls - logZ), 0.0, 1.0);
             }
             for (const auto& [cid, idx] : groups)
             {
