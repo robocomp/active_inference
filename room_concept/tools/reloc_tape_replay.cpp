@@ -34,6 +34,7 @@
 #include <format>
 #include <fstream>
 #include <limits>
+#include <locale>
 #include <map>
 #include <optional>
 #include <numbers>
@@ -502,6 +503,23 @@ namespace
                                  [&] { auto q = rp; q.apertures.clear(); return rc::reloc::log_likelihood(poly, pts2, pt, q, 20.f); }(),
                                  [&] { auto q = rp; q.apertures.clear(); return rc::reloc::log_likelihood(poly, pts2, P, q, 20.f); }(), median_d(poly, pts2, P));
                     std::fflush(stdout);
+                    // RELOC_DUMP=<dir>: the frame as a fixture (polygon, apertures as the relocaliser sees them, the points,
+                    // pre/pub/truth) for reloc_selftest's recorded-frame twin test. Locale-independent writer.
+                    if (const char* dir = std::getenv("RELOC_DUMP"); dir != nullptr and fi.has)
+                    {
+                        std::ofstream df(std::format("{}/reloc_frame_{}_{}_f{}.txt", dir, cfg.d->label, cfg.mode, f));
+                        df.imbue(std::locale::classic());
+                        df.precision(7);
+                        df << "# reloc frame dump: " << cfg.d->name << " frame " << f << " mode " << cfg.mode << "\n";
+                        df << "poly " << poly.size(); for (const auto& v : poly) df << ' ' << v.x() << ' ' << v.y(); df << "\n";
+                        for (const auto& ap : rp.apertures)
+                            df << "ap " << ap.a.x() << ' ' << ap.a.y() << ' ' << ap.b.x() << ' ' << ap.b.y() << ' ' << ap.n_out.x() << ' ' << ap.n_out.y()
+                               << ' ' << ap.open << ' ' << ap.p_shut << ' ' << ap.sigma_along << "\n";
+                        df << "truth " << fi.truth.x() << ' ' << fi.truth.y() << ' ' << fi.truth.z() << "\n";
+                        df << "pre " << pt.x() << ' ' << pt.y() << ' ' << pt.z() << "\n";
+                        df << "twin " << P.x() << ' ' << P.y() << ' ' << P.z() << "\n";
+                        for (const auto& q : pts2) df << "pt " << q.x() << ' ' << q.y() << "\n";
+                    }
                 }
                 C = comp(P, inv(tp));
                 o.latency_ms = rivals ? std::max(0.f, rc::RelocSelftestAccess::last_search_ms(rcn)) : 0.f;
