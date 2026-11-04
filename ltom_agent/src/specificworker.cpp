@@ -161,9 +161,9 @@ void SpecificWorker::initialize()
     params_.save_period_s  = r.i("LTOM.save_period_s", 30, "repertory save period (s)");
     params_.repertory_path = r.s("LTOM.repertory_path", "etc/ltom_repertory.json", "repertory store of record");
     params_.csv_path       = r.s("LTOM.csv_path", "etc/ltom_repertory.csv", "repertory CSV for inspection");
-    params_.classes        = r.v<std::string>("LTOM.classes", {"chair", "table", "bottle", "cabinet", "refrigerator"},
+    params_.classes        = r.v<std::string>("LTOM.classes", {"chair", "table", "bottle", "cabinet", "refrigerator", "hood"},
             "object classes in scope (name prefix <class>_ and an object_uid)");
-    params_.recall_classes = r.v<std::string>("LTOM.recall_classes", {"chair"},
+    params_.recall_classes = r.v<std::string>("LTOM.recall_classes", {"chair", "table", "bottle", "cabinet", "refrigerator", "hood"},
             "classes whose remembered, absent members are offered as ltom_recall_<uid> nodes in the current room");
     std::println("[ltom] config: owner grace {} ms, save {} s, {} class(es), repertory {}",
                  params_.owner_grace_ms, params_.save_period_s, params_.classes.size(),
