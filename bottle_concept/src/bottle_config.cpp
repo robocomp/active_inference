@@ -215,6 +215,10 @@ BottleConfig load_bottle_config(const ConfigLoader& cfg)
             "a birth must be ≥ this from every existing bottle (anti-dup)");
     out.tracker_detection_noise_m = getf("Tracker.DetectionNoiseM", 0.05f,
             "R in the association innovation cov S=P+R²I (≥ centroid-vs-fit offset)");
+    out.recall_pi_move = getf("Tracker.RecallPiMove", 0.9f,
+            "Mixture weight of 'the remembered bottle was moved' in the recall location likelihood (class prior; GUESS, bottles are moved a lot)");
+    out.recall_log_prior_new = getf("Tracker.RecallLogPriorNew", 0.0f,
+            "Log prior of 'new bottle' against one recalled candidate (0 = equal)");
     out.tracker_merge_overlap    = getf("Tracker.MergeOverlap", 0.30f,
             "merge two instances whose footprints (circles) overlap ≥ this");
     out.tracker_nll_cost         = getb("Tracker.NllCost", false,

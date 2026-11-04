@@ -106,6 +106,9 @@ public slots:
     void log_phantom_event(std::string_view event, std::uint64_t id, std::string_view name,
                            float x, float y, const rc::BottleInstance* inst, std::string_view note);
 
+    // ltom recall: MAP over {recalled candidates, new} for a newborn at room-frame (x,y); nullopt = a brand-new bottle.
+    std::optional<rc::Resurrect> choose_resurrection(const Eigen::Vector2f& xy, float& p_out);
+
     void emergency();
     void restore();
     int  startup_check();
@@ -182,6 +185,7 @@ private:
     // ── Members ──────────────────────────────────────────────────────────────
     bool startup_check_flag = false;
     bool owned_nodes_cleaned_ = false;
+    bool warned_recall_area_ = false;   // log "no room polygon" for the recall area once
     std::atomic<bool> shutting_down_{false};
     // The presence protocol AND the gate state it owns (operating_since_ms / stall_reported /
     // degraded_from_input / first_operating_done) — SHARED, common/concept_presence. The transitions set

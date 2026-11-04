@@ -164,6 +164,7 @@ In the memory graph each remembered object is a node; **edges are reserved for a
 3. Recall nodes for chair only + the shared matching helper + chair resurrecting from them. Live tour: leave a
    room, come back, the same chair_N with the same given name.
 4. Other agents; permanence feeding ltsm landmarks; language_agent history questions.
+   4a (other agents resurrect from ltom recall): done on feat/ltom-recall-all, commits 7794c6d3..ea6aabfd, plus the bottle commit that follows.
    Includes the memory graph on DDS domain 5 (user, 11-01: part of step 4, not a step of its own). Steps 2-3
    kept the repertory JSON as the store of record with no memory graph (no reader yet). In step 4 the graph is a
    ONE-WAY PROJECTION of the repertory: ltom owns domain 5 and rebuilds it from the JSON at start-up (no second

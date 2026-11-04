@@ -180,6 +180,8 @@ struct BottleConfig
     int   tracker_death_frames     = 90;      // frames an instance may go unsupported before retirement
     float tracker_birth_min_sep_m  = 0.20f;   // a birth must be ≥ this from every existing bottle (anti-dup)
     float tracker_detection_noise_m = 0.05f;  // R in the association innovation cov S=P+R²I (≥ centroid-vs-fit offset)
+    float recall_pi_move = 0.9f;               // Tracker.RecallPiMove — class prior that a remembered bottle was MOVED (guess; learned in step 4)
+    float recall_log_prior_new = 0.0f;        // Tracker.RecallLogPriorNew — log prior of "new bottle" vs one recalled candidate
     float tracker_merge_overlap    = 0.30f;   // merge two instances whose footprints (circles) overlap ≥ this
                                               // fraction of the SMALLER one, keeping the more-observed. 0 disables.
     bool  tracker_nll_cost         = false;   // association cost = ½(m²+ln|S|) NLL (vs raw m²); see InstanceTracker

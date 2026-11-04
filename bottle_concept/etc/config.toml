@@ -230,6 +230,8 @@ DeathFrames = 90         # frames an instance may go unsupported before retireme
 BirthMinSepM = 0.10      # a birth must be ≥ this (m) from every existing bottle (anti-duplicate)
 DetectionNoiseM = 0.05   # R in the association innovation cov S=P+R²I — fixes the assigned=0 churn (the
                          # overconfident σ~mm fit cov otherwise rejects the ~6cm-offset mask centroid). ≥ that offset.
+RecallPiMove = 0.9       # ltom recall: weight of "the remembered bottle was moved" (a GUESS - bottles are moved a lot; learned permanence replaces it in step 4). 1 = location says nothing
+RecallLogPriorNew = 0.0  # ltom recall: log prior of "a NEW bottle" vs one recalled candidate (0 = equal); the newborn takes a candidate only if it is the strict MAP
 MergeOverlap = 0.30      # collapse two instances whose circle footprints overlap ≥ this fraction of the
                          # smaller (same bottle fitted twice), keeping the more-observed. 0 disables.
 NllCost = false          # association cost = ½(m²+ln|S|) NLL (tracks compete by likelihood, not raw
