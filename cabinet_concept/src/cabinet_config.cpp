@@ -159,6 +159,10 @@ CabinetConfig load_cabinet_config(const ConfigLoader& cfg)
             "metric XY gate (m) before an instance has a usable covariance");
     out.tracker_detection_noise_m = getf("Tracker.DetectionNoiseM", 0.35f,
             "Detection-noise std R (m) added to the fit cov in the Mahalanobis gate (S = P + R²I)");
+    out.recall_pi_move = getf("Tracker.RecallPiMove", 0.05f,
+            "Mixture weight of 'the remembered cabinet was moved' in the recall location likelihood (class prior; GUESS, cabinets almost never move)");
+    out.recall_log_prior_new = getf("Tracker.RecallLogPriorNew", 0.0f,
+            "Log prior of 'new cabinet' against one recalled candidate (0 = equal)");
     out.tracker_birth_frames     = geti("Tracker.BirthFrames", 8,
             "frames a mask must stay unexplained before spawning a cabinet");
     out.birth_fusion             = getb("Tracker.BirthFusion", false,
