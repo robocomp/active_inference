@@ -201,6 +201,7 @@ private:
     // ── Members ──────────────────────────────────────────────────────────────
     bool startup_check_flag = false;
     bool owned_nodes_cleaned_ = false;
+    bool warned_recall_area_ = false;   // log "no room polygon" for the recall area once
     std::atomic<bool> shutting_down_{false};
     // The presence protocol AND the gate state it owns (operating_since_ms / stall_reported /
     // degraded_from_input / first_operating_done) — SHARED, common/concept_presence. The transitions set

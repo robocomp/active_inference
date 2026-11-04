@@ -36,8 +36,17 @@ RefrigeratorSceneGraph::RefrigeratorSceneGraph(std::shared_ptr<DSR::DSRGraph> gr
 
 // ─── Node birth ──────────────────────────────────────────────────────────────────────────────────
 
+int RefrigeratorSceneGraph::identity_last()
+{
+    if (not identity_)
+        identity_.emplace(rc::identity::InstanceCounter::open("etc/instance_identity.csv",
+                                                              static_cast<std::uint32_t>(G_->get_agent_id())));
+    return identity_->last();
+}
+
 std::uint64_t RefrigeratorSceneGraph::create_instance_from_detection(const Eigen::Vector3f& centroid_room,
-                                                              std::uint64_t room_node_id)
+                                                              std::uint64_t room_node_id,
+                                                              std::optional<Resurrect> r)
 {
     auto room_opt = G_->get_node(room_node_id);
     if (not room_opt.has_value())
@@ -60,7 +69,10 @@ std::uint64_t RefrigeratorSceneGraph::create_instance_from_detection(const Eigen
     if (not identity_)
         identity_.emplace(rc::identity::InstanceCounter::open("etc/instance_identity.csv",
                                                               static_cast<std::uint32_t>(G_->get_agent_id())));
-    const int n_issued = identity_->issue(rc::identity::max_suffix(live_names, "refrigerator_"));
+    // Resurrection: the number was issued in the past (<= the persisted `last`), so the counter never issues it again.
+    if (r and r->n > identity_->last())
+        std::print(stderr, "refrigerator_concept: [recall] ⚠ resurrected refrigerator_{} is above the persisted counter ({})\n", r->n, identity_->last());
+    const int n_issued = r ? r->n : identity_->issue(rc::identity::max_suffix(live_names, "refrigerator_"));
     const std::string name = "refrigerator_" + std::to_string(n_issued);
 
     DSR::Node refrigerator_node = DSR::Node::create<object_node_type>(name);
@@ -84,6 +96,8 @@ std::uint64_t RefrigeratorSceneGraph::create_instance_from_detection(const Eigen
     rc::provenance::stamp_creation(*G_, refrigerator_node);   // birth stamp: epoch ms + local ISO-8601
     // Persistent identity (common/instance_identity): written once at birth, never changed, key for ltom/atlas/EM.
     G_->add_or_modify_attrib_local<object_uid_att>(refrigerator_node, rc::identity::make_uid(static_cast<std::uint32_t>(G_->get_agent_id()), n_issued));
+    if (r and rc::identity::make_uid(static_cast<std::uint32_t>(G_->get_agent_id()), n_issued) != r->uid)
+        std::print(stderr, "refrigerator_concept: [recall] ⚠ uid of resurrected refrigerator_{} does not match the recalled uid\n", n_issued);
     const auto id_opt = G_->insert_node(refrigerator_node);
     if (not id_opt.has_value())
         return 0;

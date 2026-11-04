@@ -482,6 +482,8 @@ DetectionNoiseM = 0.35    # det-noise std R added to fit cov in the gate (S=P+R�
 #   clean fridge at 1.5 m, conf 0.90, centred  → ~0.89/frame ⇒ ~9 mask frames (~0.9 s)  — unchanged in practice
 #   the `hood 0.53` wall blob at 2.5 m → ~0.36/frame ⇒ ~23 frames of a SUSTAINED, unexplained blob
 #   anything at 7 m (q_range = (2.5/7)² = 0.13) → ~0.11/frame ⇒ ~73 frames — a distant blob cannot birth
+RecallPiMove = 0.05      # ltom recall: weight of "the remembered hood was moved" (a GUESS - hoods never move; learned permanence replaces it in step 4). 1 = location says nothing
+RecallLogPriorNew = 0.0  # ltom recall: log prior of "a NEW hood" vs one recalled candidate (0 = equal); the newborn takes a candidate only if it is the strict MAP
 BirthFrames = 8
 # FUSED BIRTH: residual-grid surprise mass under a detection accelerates its birth (independent geometric
 # corroboration). birth_evidence = (1 + Gain·m/(m+MassRef)) · quality. Needs residual_concept.
