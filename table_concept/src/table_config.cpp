@@ -220,6 +220,10 @@ TableConfig load_table_config(const ConfigLoader& cfg)
             "metric XY gate (m) used before an instance has a usable covariance");
     out.tracker_detection_noise_m = getf("Tracker.DetectionNoiseM", 0.35f,
             "detection noise std R (m) added to the fit covariance in the gate: the mask centroid sits well off the geometric centre");
+    out.recall_pi_move = getf("Tracker.RecallPiMove", 0.5f,
+            "Mixture weight of 'the remembered table was moved' in the recall location likelihood (class prior; GUESS, tables get moved)");
+    out.recall_log_prior_new = getf("Tracker.RecallLogPriorNew", 0.0f,
+            "Log prior of 'new table' against one recalled candidate (0 = equal)");
     out.tracker_birth_frames     = geti("Tracker.BirthFrames", 8,
             "frames a mask must stay unexplained before a table is born");
     out.birth_fusion             = getb("Tracker.BirthFusion", false,
