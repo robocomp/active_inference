@@ -186,6 +186,16 @@ target_include_directories(reloc_selftest PRIVATE ${CMAKE_CURRENT_LIST_DIR}/../s
 target_link_libraries(reloc_selftest ${LIBS})
 set_target_properties(reloc_selftest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../../bin)
 
+# ── reloc_tape_replay ─────────────────────────────────────────────────────────
+# Offline A/B of RelocMode "legacy" vs "rivals" on recorded scan tapes + injected kidnaps (spec 2026-11-01 sec 9). EXCLUDE_FROM_ALL.
+#   make -C build reloc_tape_replay && ../bin/reloc_tape_replay TAPE GT [TAPE GT ...]
+add_executable(reloc_tape_replay EXCLUDE_FROM_ALL
+  ../tools/reloc_tape_replay.cpp
+)
+target_include_directories(reloc_tape_replay PRIVATE ${CMAKE_CURRENT_LIST_DIR}/../src)
+target_link_libraries(reloc_tape_replay ${LIBS})
+set_target_properties(reloc_tape_replay PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../../bin)
+
 # ── door_apertures_selftest ───────────────────────────────────────────────────
 # DoorApertures::refresh on a REAL DSR graph (private DDS domain 73): the aperture cache follows the door's own RT
 # edge (Task R2). EXCLUDE_FROM_ALL. Build and run with:
