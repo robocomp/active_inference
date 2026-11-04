@@ -147,6 +147,17 @@ if [ -n "$LEGS" ]; then
   for r in $LEGS; do BEHIND+=($prev); prev=$r; done
   N_LEGS=${#ARGS[@]}
 fi
+# HOLD=1 (user 2026-11-04, scan-tape recordings): no legs — the fleet stays up with the robot parked, recording, until
+# crossing/<run>/stop exists (touch it), then the run is collected and the fleet stopped as after a tour.
+if [ -n "$HOLD" ]; then
+  echo "HOLD: fleet up, robot parked; touch crossing/$1/stop to end"
+  while [ ! -f crossing/$1/stop ]; do sleep 2; done
+  echo "=== HOLD ended"
+  echo stop > $B/controller/remote_cmd.txt
+  [ -n "$REC_PID" ] && { sleep 3; kill -TERM $REC_PID 2>/dev/null; }
+  bash $S/run_crossing.sh crossing/$1 collect >/dev/null 2>&1
+  rm -f $LOCK; exit 0
+fi
 echo "leg plan: ${ARGS[*]} (fixture remembers $(cat $FIX/room_name_hwm.txt) rooms)"
 ok=0; n_legs=${N_LEGS:-4}
 for leg in $(seq 1 $n_legs); do
