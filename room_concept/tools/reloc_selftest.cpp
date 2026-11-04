@@ -25,6 +25,10 @@
  *  Build:  make -C build reloc_selftest && ./bin/reloc_selftest
  */
 #include <charconv>
+#include <filesystem>
+#include <fstream>
+#include <limits>
+#include <ranges>
 #include <chrono>
 #include <string_view>
 #include <cstdlib>
@@ -1410,6 +1414,71 @@ int main(int argc, char** argv)
         r2_failures += pass ? 0 : 1;
         std::printf("  R \"no pose explains this view\" keeps the rivals     reached in %d/10 searches, rival kept in %d "
                     "(expect all) — %s\n", branch, kept_rivals, pass ? "PASS" : "FAIL");
+    }
+    // X (Task 7b): THE TRUTH OUT-SCORES ITS 180° TWIN ON RECORDED FRAMES. The offline A/B (task-7-report) found, with the
+    //    tracker AT the truth (median |SDF| 0.008–0.010 m), a 4–6 m / 178° twin scoring HIGHER under ℓ: 293 vs 191 (warm43
+    //    f358), 231 vs 166 (warm45 f1651); without the doorway terms the truth wins by 300–770 nats. Cause: the twin stands by
+    //    the boundary, one 1 m cell takes half its scan "beyond" (Δ 219–391 nats), and BOTH listed doors charged that same
+    //    cell, each its own e^{Δ}. The frames are dumped by reloc_tape_replay (RELOC_DUMP) as the relocaliser saw them:
+    //    polygon, apertures, the 150-point subsample, truth and the twin the rival path swapped to.
+    //    Expect: ℓ(truth) − ℓ(twin) ≥ 50 nats on each frame; and listing every door TWICE (two door nodes for one doorway,
+    //    the entry-mirror case) changes ℓ by a few nats at most, at the truth and at the twin — an opening is one fact about
+    //    the boundary, not one per door node that names it. (The copies do add prior WAYS to open a set of cells — ~log 2
+    //    per door, more when two cells are open — hence a tolerance of 5 nats; the defect added each cell's whole Δ,
+    //    +421 / +765 / +553 nats at these twins.)
+    {
+        struct Frame { Poly poly; std::vector<rc::reloc::Aperture> aps; Eigen::Vector3f truth, twin; std::vector<Eigen::Vector2f> pts; };
+        auto load = [](const std::filesystem::path& path, Frame& fr) -> bool
+        {
+            std::ifstream f(path);
+            if (not f) return false;
+            auto num = [](std::string_view t) { float v = std::numeric_limits<float>::quiet_NaN(); std::from_chars(t.data(), t.data() + t.size(), v); return v; };
+            std::string line;
+            while (std::getline(f, line))
+            {
+                std::vector<std::string_view> tk;
+                for (const auto w : std::views::split(std::string_view(line), ' '))
+                    if (not w.empty()) tk.emplace_back(w.begin(), w.end());
+                if (tk.empty() or tk[0].starts_with('#')) continue;
+                auto v = [&](std::size_t i) { return i < tk.size() ? num(tk[i]) : std::numeric_limits<float>::quiet_NaN(); };
+                if (tk[0] == "poly")
+                    for (int i = 0, n = static_cast<int>(v(1)); i < n; ++i) fr.poly.emplace_back(v(2 + 2 * i), v(3 + 2 * i));
+                else if (tk[0] == "ap")
+                {
+                    rc::reloc::Aperture a;
+                    a.a = {v(1), v(2)}; a.b = {v(3), v(4)}; a.n_out = {v(5), v(6)}; a.open = v(7); a.p_shut = v(8); a.sigma_along = v(9);
+                    fr.aps.push_back(a);
+                }
+                else if (tk[0] == "truth") fr.truth = {v(1), v(2), v(3)};
+                else if (tk[0] == "twin")  fr.twin  = {v(1), v(2), v(3)};
+                else if (tk[0] == "pt")    fr.pts.emplace_back(v(1), v(2));
+            }
+            return fr.poly.size() >= 3 and not fr.aps.empty() and not fr.pts.empty();
+        };
+        const auto dir = std::filesystem::path(__FILE__).parent_path() / "fixtures";
+        int x_fail = 0;
+        for (const char* name : {"reloc_twin_warm43_f358.txt", "reloc_twin_warm43_f459.txt", "reloc_twin_warm45_f1651.txt"})
+        {
+            Frame fr;
+            if (not load(dir / name, fr)) { std::printf("  X %s: fixture missing or unreadable — FAIL\n", name); ++x_fail; continue; }
+            rc::reloc::Params p;            // the agent's defaults: σ 0.15, ε 0.30, beyond 20 m (as reloc_tape_replay scores)
+            p.beyond_extent = 20.f;
+            p.apertures = fr.aps;
+            const auto bl = rc::reloc::beyond_lines(fr.pts, p);
+            auto ell = [&](const rc::reloc::Params& q, const Eigen::Vector3f& x, const rc::reloc::BeyondLines* b)
+            { return rc::reloc::log_likelihood(fr.poly, fr.pts, x, q, 20.f, nullptr, b); };
+            const float lt = ell(p, fr.truth, &bl), lw = ell(p, fr.twin, &bl);
+            auto p2 = p;
+            p2.apertures.insert(p2.apertures.end(), fr.aps.begin(), fr.aps.end());
+            const auto bl2 = rc::reloc::beyond_lines(fr.pts, p2);
+            const float dt = ell(p2, fr.truth, &bl2) - lt, dw = ell(p2, fr.twin, &bl2) - lw;
+            constexpr float dup_bound = 5.f;   // a test tolerance (see above), not a model constant
+            const bool pass = lt - lw >= 50.f and std::abs(dt) <= dup_bound and std::abs(dw) <= dup_bound;
+            x_fail += pass ? 0 : 1;
+            std::printf("  X %-28s ℓ(truth) %.1f vs ℓ(twin) %.1f: margin %+.1f (expect ≥ 50); doors listed twice: Δℓ truth %+.1f twin %+.1f "
+                        "(expect |·| ≤ %.1f) — %s\n", name, lt, lw, lt - lw, dt, dw, dup_bound, pass ? "PASS" : "FAIL");
+        }
+        r2_failures += x_fail;
     }
     if (r2_failures > 0) std::printf("\n  Task R2 cases: %d FAILED\n", r2_failures);
     r1_failures += r2_failures;
