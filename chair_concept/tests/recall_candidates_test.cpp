@@ -1,5 +1,5 @@
-// Offline test of src/recall_candidates.h on a standalone DSR graph (private DDS domain 65). No fleet, no viewer.
-#include "../src/recall_candidates.h"
+// Offline test of common/recall_match/recall_candidates.h on a standalone DSR graph (private DDS domain 65). No fleet, no viewer.
+#include "../../common/recall_match/recall_candidates.h"
 #include "../../common/rt_covariance/rt_covariance.h"
 
 #include <cmath>
@@ -41,7 +41,7 @@ struct Fixture
     // A recall node as ltom_agent writes it.
     void recall(Id parent, std::uint64_t uid, float x, float y, float var, const std::string& cls = "chair", bool with_cov = true)
     {
-        auto n = DSR::Node::create<metaconcept_node_type>("ltom_recall_" + std::to_string(uid));
+        auto n = DSR::Node::create<metaconcept_node_type>("ltom_recall_" + std::to_string(uid) + (cls == "chair" ? "" : "_" + cls));   // cls suffix only so two classes can share a uid in one test
         G->add_or_modify_attrib_local<object_uid_att>(n, uid);
         G->add_or_modify_attrib_local<object_subtype_att>(n, cls);
         G->add_or_modify_attrib_local<parent_att>(n, parent);
@@ -61,7 +61,7 @@ struct Fixture
 static void test_reads_own_chair_recalls(Fixture& f)
 {
     f.recall(f.room, uid_of(kMe, 3), 1.5f, -2.0f, 0.02f);
-    const auto c = rc::recall_candidates(*f.G, f.room, kMe, 100, {});
+    const auto c = rc::recall_candidates(*f.G, f.room, "chair", kMe, 100, {});
     CHECK(c.size() == 1);
     if (c.size() != 1) return;
     CHECK(c[0].cand.uid == uid_of(kMe, 3) and c[0].n == 3);
@@ -74,7 +74,7 @@ static void test_live_name_excluded(Fixture& f)
 {
     f.recall(f.room, uid_of(kMe, 3), 1.f, 1.f, 0.02f);
     f.recall(f.room, uid_of(kMe, 4), 2.f, 2.f, 0.02f);
-    const auto c = rc::recall_candidates(*f.G, f.room, kMe, 100, {"chair_3"});
+    const auto c = rc::recall_candidates(*f.G, f.room, "chair", kMe, 100, {"chair_3"});
     CHECK(c.size() == 1 and c[0].n == 4);
 }
 
@@ -84,15 +84,40 @@ static void test_other_agent_uid_excluded(Fixture& f)
     f.recall(f.room, uid_of(kMe, 5), 1.f, 1.f, 0.02f, "table");     // not a chair
     f.recall(f.other_room, uid_of(kMe, 6), 1.f, 1.f, 0.02f);        // another room
     f.recall(f.room, uid_of(kMe, 7), 1.f, 1.f, 0.02f, "chair", false);   // no rt_covariance: skipped
-    CHECK(rc::recall_candidates(*f.G, f.room, kMe, 100, {}).empty());
+    CHECK(rc::recall_candidates(*f.G, f.room, "chair", kMe, 100, {}).empty());
 }
 
 static void test_candidate_above_counter_excluded(Fixture& f)
 {
     f.recall(f.room, uid_of(kMe, 9), 1.f, 1.f, 0.02f);
     f.recall(f.room, uid_of(kMe, 4), 2.f, 2.f, 0.02f);
-    const auto c = rc::recall_candidates(*f.G, f.room, kMe, 5, {});
+    const auto c = rc::recall_candidates(*f.G, f.room, "chair", kMe, 5, {});
     CHECK(c.size() == 1 and c[0].n == 4);
+}
+
+static void test_class_is_a_parameter(Fixture& f)
+{
+    f.recall(f.room, uid_of(kMe, 3), 1.f, 1.f, 0.02f, "table");
+    f.recall(f.room, uid_of(kMe, 4), 2.f, 2.f, 0.02f, "chair");
+    const auto t = rc::recall_candidates(*f.G, f.room, "table", kMe, 100, {});
+    const auto c = rc::recall_candidates(*f.G, f.room, "chair", kMe, 100, {});
+    CHECK(t.size() == 1 and t[0].n == 3);
+    CHECK(c.size() == 1 and c[0].n == 4);
+}
+
+static void test_live_name_uses_class_prefix(Fixture& f)
+{
+    f.recall(f.room, uid_of(kMe, 5), 1.f, 1.f, 0.02f, "table");
+    f.recall(f.room, uid_of(kMe, 5), 2.f, 2.f, 0.02f, "chair");
+    CHECK(rc::recall_candidates(*f.G, f.room, "table", kMe, 100, {"table_5"}).empty());
+    CHECK(rc::recall_candidates(*f.G, f.room, "chair", kMe, 100, {"table_5"}).size() == 1);
+}
+
+static void test_refrigerator_class_not_subtype(Fixture& f)
+{
+    f.recall(f.room, uid_of(kMe, 2), 1.f, 1.f, 0.02f, "refrigerator");
+    const auto c = rc::recall_candidates(*f.G, f.room, "refrigerator", kMe, 100, {});
+    CHECK(c.size() == 1 and c[0].n == 2);
 }
 
 static void test_candidate_taken_once()
@@ -145,6 +170,9 @@ int main()
     run("test_live_name_excluded", test_live_name_excluded);
     run("test_other_agent_uid_excluded", test_other_agent_uid_excluded);
     run("test_candidate_above_counter_excluded", test_candidate_above_counter_excluded);
+    run("test_class_is_a_parameter", test_class_is_a_parameter);
+    run("test_live_name_uses_class_prefix", test_live_name_uses_class_prefix);
+    run("test_refrigerator_class_not_subtype", test_refrigerator_class_not_subtype);
     const auto plain = [](const char* name, void (*fn)())
     {
         const int before = failures;
