@@ -245,100 +245,103 @@ namespace rc::reloc
             // placed (2^K states, 3^K transitions a cell; K = the room's listed doors, a handful). Doors whose cell has no
             // beam contribute their mass  off_k = q_k + (1 − q_k)·Σ_{C without beams} π_k(C)  (Δ = 0 there). With every
             // Δ = 0, Z = Π_k Σ prior_k = 1: a scan that says nothing about the doorways leaves ℓ at the room term.
+            // Linear domain, no exp/log in the inner loops (this runs on every ℓ, the rivals' hot path): each cell's weights
+            // are scaled by e^{−s_m}, s_m = max(Δ_m, 0), so none exceeds 1, and the forward/backward vectors are renormalised
+            // at every cell with the log of the scale carried — the dominant placement never underflows.
             std::vector<int> act;
             act.reserve(delta.size());
             for (const auto& [cid, d] : delta) act.push_back(cid);
             std::ranges::sort(act);   // deterministic order (the sum does not depend on it; float rounding does)
-            const std::size_t K = cells.pi.size(), M = act.size(), NS = std::size_t{1} << K;
-            constexpr double kNeg = -std::numeric_limits<double>::infinity();
-            auto lse2 = [](double x, double y)
-            {
-                if (x == kNeg) return y;
-                if (y == kNeg) return x;
-                const double hi = std::max(x, y);
-                return hi + std::log1p(std::exp(std::min(x, y) - hi));
-            };
-            // sub[m][T] = log Π_{k∈T} (1 − q_k)·π_k(C_m) + [T ≠ ∅]·Δ_m: the doors of T all open in cell m, its beams once.
-            std::vector<double> sub(M * NS, 0.0), off_of(NS, 0.0);
-            std::vector<double> loff(K);
+            const std::size_t K = cells.pi.size(), M = act.size(), NS = std::size_t{1} << K, full = NS - 1;
+            // w[m][T]: the doors T all open in cell m, its beams once — Π_{k∈T} (1 − q_k)·π_k(C_m) · e^{Δ_m − s_m}; T = ∅: the
+            // cell shut, e^{−s_m}. off_of[S] = Π_{k∉S} off_k.
+            std::vector<double> w(M * NS), off_of(NS, 1.0), offk(K);
             for (std::size_t k = 0; k < K; ++k)
             {
-                const double q = cells.q[k];
                 double pa = 0.0;
                 for (const int cid : act) pa += cells.pi[k][static_cast<std::size_t>(cid)];
-                const double off = q + (1.0 - q) * std::max(0.0, 1.0 - pa);
-                loff[k] = off > 0.0 ? std::log(off) : kNeg;
+                offk[k] = cells.q[k] + (1.0 - cells.q[k]) * std::max(0.0, 1.0 - pa);
             }
             for (std::size_t S = 0; S < NS; ++S)
                 for (std::size_t k = 0; k < K; ++k)
-                    if (not (S >> k & 1u)) off_of[S] = off_of[S] == kNeg or loff[k] == kNeg ? kNeg : off_of[S] + loff[k];
+                    if (not (S >> k & 1u)) off_of[S] *= offk[k];
+            double scale = 0.0;
             for (std::size_t m = 0; m < M; ++m)
             {
-                const double dm = delta[act[m]];
+                const double dm = delta[act[m]], sm = std::max(dm, 0.0);
+                scale += sm;
+                w[m * NS] = std::exp(-sm);
+                const double eo = std::exp(dm - sm);
                 for (std::size_t T = 1; T < NS; ++T)
                 {
-                    double v = dm;
-                    for (std::size_t k = 0; k < K and v != kNeg; ++k)
-                        if (T >> k & 1u)
-                        {
-                            const double a = (1.0 - cells.q[k]) * cells.pi[k][static_cast<std::size_t>(act[m])];
-                            v = a > 0.0 ? v + std::log(a) : kNeg;
-                        }
-                    sub[m * NS + T] = v;
+                    double v = eo;
+                    for (std::size_t k = 0; k < K; ++k)
+                        if (T >> k & 1u) v *= (1.0 - cells.q[k]) * cells.pi[k][static_cast<std::size_t>(act[m])];
+                    w[m * NS + T] = v;
                 }
             }
-            // F[m][S]: cells < m, doors S placed there. B[m][R]: cells ≥ m, doors R placed there.
-            std::vector<double> F((M + 1) * NS, kNeg), B((M + 1) * NS, kNeg);
-            F[0] = 0.0;
-            B[M * NS] = 0.0;
+            // F[m][S]: cells < m, the doors S placed there; B[m][R]: cells ≥ m, the doors R placed there. lF, lB: log scales.
+            std::vector<double> F((M + 1) * NS, 0.0), B((M + 1) * NS, 0.0), lF(M + 1, 0.0), lB(M + 1, 0.0);
+            F[0] = 1.0;
+            B[M * NS] = 1.0;
+            auto renorm = [&](double* v, double& lscale)
+            {
+                double mx = 0.0;
+                for (std::size_t S = 0; S < NS; ++S) mx = std::max(mx, v[S]);
+                if (mx > 0.0) { for (std::size_t S = 0; S < NS; ++S) v[S] /= mx; lscale += std::log(mx); }
+            };
             for (std::size_t m = 0; m < M; ++m)
+            {
                 for (std::size_t S = 0; S < NS; ++S)
                 {
                     const double f = F[m * NS + S];
-                    if (f == kNeg) continue;
-                    const std::size_t free = (NS - 1) & ~S;
-                    for (std::size_t T = free;; T = (T - 1) & free)   // every subset of the unplaced doors, ∅ included
+                    if (f == 0.0) continue;
+                    const std::size_t fr = full & ~S;
+                    for (std::size_t T = fr;; T = (T - 1) & fr)   // every subset of the unplaced doors, ∅ included
                     {
-                        auto& dst = F[(m + 1) * NS + (S | T)];
-                        dst = lse2(dst, f + sub[m * NS + T]);
+                        F[(m + 1) * NS + (S | T)] += f * w[m * NS + T];
                         if (T == 0) break;
                     }
                 }
+                lF[m + 1] = lF[m];
+                renorm(&F[(m + 1) * NS], lF[m + 1]);
+            }
             for (std::size_t m = M; m-- > 0;)
+            {
                 for (std::size_t R = 0; R < NS; ++R)
                 {
-                    const double b = B[(m + 1) * NS + R];
-                    if (b == kNeg) continue;
-                    const std::size_t free = (NS - 1) & ~R;
-                    for (std::size_t T = free;; T = (T - 1) & free)
+                    const double bv = B[(m + 1) * NS + R];
+                    if (bv == 0.0) continue;
+                    const std::size_t fr = full & ~R;
+                    for (std::size_t T = fr;; T = (T - 1) & fr)
                     {
-                        auto& dst = B[m * NS + (R | T)];
-                        dst = lse2(dst, b + sub[m * NS + T]);
+                        B[m * NS + (R | T)] += bv * w[m * NS + T];
                         if (T == 0) break;
                     }
                 }
-            double logZ = kNeg;
-            for (std::size_t S = 0; S < NS; ++S)
-                if (F[M * NS + S] != kNeg and off_of[S] != kNeg) logZ = lse2(logZ, F[M * NS + S] + off_of[S]);
-            if (logZ != kNeg) ll += logZ;
-            // P(cell m shut | scan) = Σ over placements that leave cell m empty / Z.
+                lB[m] = lB[m + 1];
+                renorm(&B[m * NS], lB[m]);
+            }
+            double zt = 0.0;
+            for (std::size_t S = 0; S < NS; ++S) zt += F[M * NS + S] * off_of[S];
+            if (zt > 0.0) ll += lF[M] + std::log(zt) + scale;
+            // P(cell m shut | scan) = Σ over placements that leave cell m empty / Z (the scales of cells ≠ m cancel).
             std::unordered_map<int, double> stay;
-            for (std::size_t m = 0; m < M and logZ != kNeg; ++m)
+            for (std::size_t m = 0; m < M and zt > 0.0; ++m)
             {
-                double ls = kNeg;
+                double num = 0.0;
                 for (std::size_t S = 0; S < NS; ++S)
                 {
                     const double f = F[m * NS + S];
-                    if (f == kNeg) continue;
-                    const std::size_t free = (NS - 1) & ~S;
-                    for (std::size_t R = free;; R = (R - 1) & free)
+                    if (f == 0.0) continue;
+                    const std::size_t fr = full & ~S;
+                    for (std::size_t R = fr;; R = (R - 1) & fr)
                     {
-                        const double b = B[(m + 1) * NS + R];
-                        if (b != kNeg and off_of[S | R] != kNeg) ls = lse2(ls, f + b + off_of[S | R]);
+                        num += f * B[(m + 1) * NS + R] * off_of[S | R];
                         if (R == 0) break;
                     }
                 }
-                stay[act[m]] = ls == kNeg ? 0.0 : std::clamp(std::exp(ls - logZ), 0.0, 1.0);
+                stay[act[m]] = std::clamp(num * w[m * NS] * std::exp(lF[m] + lB[m + 1] - lF[M]) / zt, 0.0, 1.0);
             }
             for (const auto& [cid, idx] : groups)
             {
