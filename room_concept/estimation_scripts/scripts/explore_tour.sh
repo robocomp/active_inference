@@ -14,9 +14,14 @@ export WT=/home/pbustos/robocomp/components/active_inference.worktrees/rt-build
 export WT_AGENTS="controller door_concept room_concept residual_concept ltsm_agent"
 export FLEET="retina room_concept residual_concept controller door_concept ltsm_agent"
 RC_CFG=$WT/room_concept/etc/config.toml
-cp $RC_CFG $RC_CFG.spike_bak
-trap 'mv -f $RC_CFG.spike_bak $RC_CFG; echo stop > $B/controller/remote_cmd.txt; rm -f $LOCK' EXIT
+LT_CFG=$WT/ltsm_agent/etc/config.toml
+cp $RC_CFG $RC_CFG.spike_bak; cp $LT_CFG $LT_CFG.spike_bak
+trap 'mv -f $RC_CFG.spike_bak $RC_CFG; mv -f $LT_CFG.spike_bak $LT_CFG; echo stop > $B/controller/remote_cmd.txt; rm -f $LOCK' EXIT
 sed -i 's/^MapMode = "[a-z]*"/MapMode = "estimate"/' $RC_CFG
+# RECOGNITION ON (as warm_start_tour.sh; explore_tour2: re-entering the start room through its second doorway, recognition
+# off, gave a NEW room_4 whose doors all looked uncrossed — the tour could not end)
+sed -i '/^\[Recognition\]/,/^\[/ s/^enabled = false/enabled = true/' $LT_CFG
+grep -q '^enabled = true   # RoomSwap' $LT_CFG || { echo "could not set Recognition.enabled"; exit 1; }
 grep -q '^MapMode = "estimate"' $RC_CFG || { echo "could not set MapMode=estimate"; exit 1; }
 echo stop > $B/controller/remote_cmd.txt
 # EMPTY memory: archive (never just delete) what is there, then clear
