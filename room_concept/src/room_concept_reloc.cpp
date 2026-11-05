@@ -371,6 +371,8 @@ namespace rc
                 handover_ts_ms_ = res.timestamp_ms;
             }
             clear_rival_belief();   // a new room: the rivals, their epoch, any in-flight proposal (spec sec 5)
+            startup_rival_.reset(); // ...and a start-up stash from the room left (re-review 98fb915e). NOT in clear_rival_belief():
+                                    //   that also runs on every disarmed frame, which would drop the stash before step_rivals sees it.
         }
         // Disarmed while the room transition is open (crossing a door of this room, or just entered through a face that
         // still lives — set_transition_open): the misfit is the other room seen through the door, not a lost pose.
