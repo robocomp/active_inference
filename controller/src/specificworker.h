@@ -242,6 +242,7 @@ private:
 	std::string explore_from_room_;            ///< the room the in-flight passage started in (a room change = it crossed)
 	std::string explore_pending_crossed_;      ///< a crossed door whose entry face is not resolved yet ("" = none)
 	std::string explore_pending_room_;         ///< …and the room it entered
+	double explore_pending_since_s_ = 0.0;     ///< when it was entered (the hold is bounded by ExploreTour.MaxRoomS)
 	std::uint64_t explore_poll_ms_ = 0;
 	/// Nothing drives and the base stays still, armed: Target mode with no target (a finished `move` does the same).
 	void hold_base();

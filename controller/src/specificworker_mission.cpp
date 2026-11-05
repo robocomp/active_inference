@@ -933,7 +933,7 @@ void SpecificWorker::service_explore_tour()
 				explore_drive_->note_crossed(explore_in_flight_);
 				std::string entry = explore_mirror_.empty() ? entry_mirror_of(explore_in_flight_) : explore_mirror_;
 				if (entry.empty()) entry = rc::topo::live_door_for(topo_json, explore_in_flight_).value_or("");   // the passage's face in view
-				if (entry.empty()) { explore_pending_crossed_ = explore_in_flight_; explore_pending_room_ = gs.room_name; }
+				if (entry.empty()) { explore_pending_crossed_ = explore_in_flight_; explore_pending_room_ = gs.room_name; explore_pending_since_s_ = now_s; }
 				explore_drive_->note_entered(gs.room_name, entry, now_s);
 				std::println("[explore-tour] entered '{}' through '{}' (entry door '{}')", gs.room_name, explore_in_flight_,
 				             entry.empty() ? "not resolved yet — no guess" : entry);
@@ -960,6 +960,12 @@ void SpecificWorker::service_explore_tour()
 			explore_pending_crossed_.clear();
 		}
 	}
+	// no decision until the face just come in by is known (explore_tour5: back in room_1 the drive decided in the cycle it entered
+	// and chose door_4, the mirror of the doorway just crossed — the twin edge's old face was gone and the LTSM not caught up).
+	// Bounded by the same flagged room limit: an entry never resolved stops holding the drive after MaxRoomS.
+	if (not explore_pending_crossed_.empty() and explore_pending_room_ == gs.room_name
+	    and now_s - explore_pending_since_s_ < params.explore_max_room_s)
+		return;
 	// the operator's and missions' orders come first (final review I1): no decision while either holds the base
 	if (interpreter_.state() == rc::mission::Interpreter::State::Running or session_.approach_order().active()) return;
 	// the drive's inputs
