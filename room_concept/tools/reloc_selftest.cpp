@@ -1480,6 +1480,77 @@ int main(int argc, char** argv)
         }
         r2_failures += x_fail;
     }
+    //  X, part 2 (Task 7c): THE TRUTH OUT-SCORES THE WRONG POSE ON THE warm44 NEAR-TIE FRAMES. After 7b, rivals still made
+    //    2 false moves on warm44 (f666-f688, f747/f756: a 0.9 m / 120° pose standing 0-0.11 m from a wall) and legacy, with
+    //    injected clutter, one 5.7 m move (f1346). Cause: off-map structure the truth sees (furniture faces, an unlisted
+    //    opening, an ajar door listed open) paid uniform clutter in the room, while the wrong pose opened the cell at its feet
+    //    and explained the same returns as "the next room" with lines fitted to the scan (7b report). Each fixture is the
+    //    frame as the relocaliser saw it at a move; the wrong pose is whichever of the move's two ends (pre, twin) is far
+    //    from the truth (a move back to the truth has the wrong pose as `pre`).
+    //    Expect ℓ(truth) > ℓ(wrong) on each single frame. Before the beam model (task 7c) 6 of these 11 frames scored the wrong
+    //    pose higher (by up to 55 nats). With it the margins are +26 to +179 nats, except f747 (+4: 26 furniture returns the
+    //    truth explains only as point-like unmapped surfaces, the wrong pose as next-room lines). One thin frame cannot move the
+    //    pose: the rival pays a ~16-nat birth price and the SPRT accumulates over novel scans (tape A/B: 0 false moves, warm44).
+    //    A wider f747 margin was measured with in-room fitted-line surfaces, which then explained synthetic uniform clutter as
+    //    lines (warm44 clutter30: 4 false moves, 6.6 m; mirrored room 3 flips) — not adopted (7c report).
+    {
+        struct Frame { Poly poly; std::vector<rc::reloc::Aperture> aps; Eigen::Vector3f truth, twin, pre; std::vector<Eigen::Vector2f> pts; };
+        auto load = [](const std::filesystem::path& path, Frame& fr) -> bool
+        {
+            std::ifstream f(path);
+            if (not f) return false;
+            auto num = [](std::string_view t) { float v = std::numeric_limits<float>::quiet_NaN(); std::from_chars(t.data(), t.data() + t.size(), v); return v; };
+            std::string line;
+            while (std::getline(f, line))
+            {
+                std::vector<std::string_view> tk;
+                for (const auto w : std::views::split(std::string_view(line), ' '))
+                    if (not w.empty()) tk.emplace_back(w.begin(), w.end());
+                if (tk.empty() or tk[0].starts_with('#')) continue;
+                auto v = [&](std::size_t i) { return i < tk.size() ? num(tk[i]) : std::numeric_limits<float>::quiet_NaN(); };
+                if (tk[0] == "poly")
+                    for (int i = 0, n = static_cast<int>(v(1)); i < n; ++i) fr.poly.emplace_back(v(2 + 2 * i), v(3 + 2 * i));
+                else if (tk[0] == "ap")
+                {
+                    rc::reloc::Aperture a;
+                    a.a = {v(1), v(2)}; a.b = {v(3), v(4)}; a.n_out = {v(5), v(6)}; a.open = v(7); a.p_shut = v(8); a.sigma_along = v(9);
+                    fr.aps.push_back(a);
+                }
+                else if (tk[0] == "truth") fr.truth = {v(1), v(2), v(3)};
+                else if (tk[0] == "twin")  fr.twin  = {v(1), v(2), v(3)};
+                else if (tk[0] == "pre")   fr.pre   = {v(1), v(2), v(3)};
+                else if (tk[0] == "pt")    fr.pts.emplace_back(v(1), v(2));
+            }
+            return fr.poly.size() >= 3 and not fr.aps.empty() and not fr.pts.empty();
+        };
+        const auto dir = std::filesystem::path(__FILE__).parent_path() / "fixtures";
+        auto far = [](const Eigen::Vector3f& a, const Eigen::Vector3f& b)
+        { return (a.head<2>() - b.head<2>()).norm() + std::abs(std::remainder(a.z() - b.z(), 2.f * std::numbers::pi_v<float>)); };
+        int x2_fail = 0;
+        for (const char* name : {"reloc_twin_warm44_f666.txt", "reloc_twin_warm44_f668.txt", "reloc_twin_warm44_f670.txt",
+                                 "reloc_twin_warm44_f674.txt", "reloc_twin_warm44_f677.txt", "reloc_twin_warm44_f681.txt",
+                                 "reloc_twin_warm44_f687.txt", "reloc_twin_warm44_f688.txt", "reloc_twin_warm44_f747.txt",
+                                 "reloc_twin_warm44_f756.txt", "reloc_twin_warm44_clutter_f1346.txt"})
+        {
+            Frame fr;
+            if (not load(dir / name, fr)) { std::printf("  X %s: fixture missing or unreadable — FAIL\n", name); ++x2_fail; continue; }
+            rc::reloc::Params p;            // the agent's defaults, as reloc_tape_replay scores
+            p.beyond_extent = 20.f;
+            p.apertures = fr.aps;
+            const Eigen::Vector3f wrong = far(fr.twin, fr.truth) >= far(fr.pre, fr.truth) ? fr.twin : fr.pre;
+            const auto bl = rc::reloc::beyond_lines(fr.pts, p);
+            const float lt = rc::reloc::log_likelihood(fr.poly, fr.pts, fr.truth, p, 20.f, nullptr, &bl);
+            const float lw = rc::reloc::log_likelihood(fr.poly, fr.pts, wrong, p, 20.f, nullptr, &bl);
+            constexpr float bar = 0.f;      // a test bar (see above), not a model constant
+            const bool pass = lt - lw > bar;
+            x2_fail += pass ? 0 : 1;
+            std::printf("  X %-36s ℓ(truth) %.1f vs ℓ(wrong, %.2f m / %.0f°) %.1f: margin %+.1f (expect > %.0f) — %s\n", name, lt,
+                        (wrong.head<2>() - fr.truth.head<2>()).norm(),
+                        std::abs(std::remainder(wrong.z() - fr.truth.z(), 2.f * std::numbers::pi_v<float>)) * 180.f / std::numbers::pi_v<float>,
+                        lw, lt - lw, bar, pass ? "PASS" : "FAIL");
+        }
+        r2_failures += x2_fail;
+    }
     if (r2_failures > 0) std::printf("\n  Task R2 cases: %d FAILED\n", r2_failures);
     r1_failures += r2_failures;
 
