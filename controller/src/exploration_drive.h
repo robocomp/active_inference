@@ -26,7 +26,7 @@ struct DoorCand
     double dist_m = std::numeric_limits<double>::infinity();
 };
 
-enum class Cause { None, Promoted, MaxTime, Return, Done };
+enum class Cause { None, Promoted, MaxTime, Return, Done, Stuck };
 
 [[nodiscard]] inline const char* to_string(Cause c)
 {
@@ -37,6 +37,7 @@ enum class Cause { None, Promoted, MaxTime, Return, Done };
         case Cause::MaxTime: return "max-time";
         case Cause::Return: return "return";
         case Cause::Done: return "done";
+        case Cause::Stuck: return "stuck";
     }
     return "?";
 }
@@ -53,7 +54,11 @@ class Drive
 public:
     explicit Drive(double max_room_s) : max_room_s_(max_room_s) {}
 
-    Decision step(const std::string& room, bool promoted, const std::vector<DoorCand>& doors, bool passage_active, double now_s)
+    // `remembered_uncrossed`: passages of this room the LTSM remembers, never crossed, whose door is not in view yet (a
+    // re-entered room shows only the face it was entered by at first — final review C1). While there is one, and the room's
+    // clock has not run out, the drive waits: the room's looks re-find it. No new limit: MaxRoomS bounds the wait.
+    Decision step(const std::string& room, bool promoted, const std::vector<DoorCand>& doors, bool passage_active, double now_s,
+                  int remembered_uncrossed = 0)
     {
         if (not start_room_.has_value()) start_room_ = room;
         if (not entered_s_.contains(room)) entered_s_[room] = now_s;
@@ -69,6 +74,9 @@ public:
             if (best == nullptr or d.dist_m < best->dist_m) best = &d;
         }
         if (best != nullptr) return {.cause = promoted ? Cause::Promoted : Cause::MaxTime, .door = best->door, .is_return = false};
+        if (remembered_uncrossed > 0 and not timed_out) return {};
+        // a Return that already failed is not retried (final review C2): the drive stops and says so
+        if (entry.has_value() and failed.contains(*entry)) return {.cause = Cause::Stuck, .door = std::nullopt, .is_return = false};
         if (entry.has_value()) return {.cause = Cause::Return, .door = *entry, .is_return = true};
         return {.cause = Cause::Done, .door = std::nullopt, .is_return = false};
     }
@@ -76,8 +84,11 @@ public:
     /// After a crossing into `room` through `via_door` (the door of `room` the robot came in by).
     void note_entered(const std::string& room, const std::string& via_door, double now_s)
     {
-        if (room != start_room_ and not entry_.contains(room)) entry_[room] = via_door;   // the FIRST entry: the DFS parent
-        crossed_.insert(via_door);   // the face just come in by is a crossed doorway in EVERY room, the start room included
+        if (not via_door.empty())   // never an empty entry (final review C2): a later real one is still the first REAL entry
+        {
+            if (room != start_room_ and not entry_.contains(room)) entry_[room] = via_door;   // the FIRST entry: the DFS parent
+            crossed_.insert(via_door);
+        }   // the face just come in by is a crossed doorway in EVERY room, the start room included
         entered_s_[room] = now_s;
         failed_[room].clear();
         current_ = room;

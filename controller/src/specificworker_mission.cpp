@@ -891,29 +891,16 @@ void SpecificWorker::set_explore_tour(bool on)
 std::string SpecificWorker::entry_mirror_of(const std::string &crossed)
 {
 	if (G == nullptr) return {};
-	const auto &gs = world_model_.graph_state();
-	const auto mine = rc::world::doors_of_room(*G, gs.room_id);
-	// the far side of the crossed face: door_concept's entry mirror carries an `exit` edge to it (exit_fact.h link 3)
-	if (const auto d = G->get_node(crossed); d.has_value())
-		for (const auto &name : mine)
-			if (const auto f = G->get_node(name); f.has_value() and rc::exit_fact::twin_of(*G, f->id()) == d->id())
-				return name;
-	if (const auto d = G->get_node(crossed); d.has_value())
-		for (const auto &e : G->get_edges_to_id(d->id()))
-			if (e.type() == "match")
-				if (const auto p = G->get_node(e.from()); p.has_value() and p->name().starts_with("passage_"))
-					for (const auto &m : DSR::DSRGraph::get_node_edges_by_type(p.value(), "match"))
-						if (const auto other = G->get_node(m.to()); other.has_value() and other->name() != crossed
-						    and std::ranges::find(mine, other->name()) != mine.end())
-							return other->name();
-	// fallback: the nearest door of the room just entered
-	std::string best;
-	double best_d = std::numeric_limits<double>::infinity();
-	for (const auto &f : door_facts())
-		if (f.dist < best_d) { best_d = f.dist; best = f.name; }
-	std::println("[explore-tour] entry door of '{}': no passage match for '{}' — the nearest door '{}' ({:.2f} m) stands in",
-	             gs.room_name, crossed, best, best_d);
-	return best;
+	const auto d = G->get_node(crossed);
+	if (not d.has_value()) return {};
+	for (const auto &n : G->get_nodes_by_type("door"))
+		if (n.name() != crossed and rc::exit_fact::twin_of(*G, n.id()) == d->id()) return n.name();
+	for (const auto &e : G->get_edges_to_id(d->id()))
+		if (e.type() == "match")
+			if (const auto p = G->get_node(e.from()); p.has_value() and p->name().starts_with("passage_"))
+				for (const auto &m : DSR::DSRGraph::get_node_edges_by_type(p.value(), "match"))
+					if (const auto other = G->get_node(m.to()); other.has_value() and other->name() != crossed) return other->name();
+	return {};
 }
 
 void SpecificWorker::service_explore_tour()
@@ -928,6 +915,8 @@ void SpecificWorker::service_explore_tour()
 	if (gs.room_id == 0 or gs.room_name.empty()) return;
 	auto &passage = session_.door_passage();
 	// the passage the drive started: crossed (into a new room), failed, or abandoned
+	if (not explore_in_flight_.empty() and explore_mirror_.empty())
+		explore_mirror_ = entry_mirror_of(explore_in_flight_);   // while the old face still lives (final review I2)
 	if (not explore_in_flight_.empty())
 	{
 		const auto v = passage.view();
@@ -937,9 +926,10 @@ void SpecificWorker::service_explore_tour()
 			if (v.door == explore_in_flight_ and v.step == rc::DoorPassage::Step::Done and not v.failed)
 			{
 				explore_drive_->note_crossed(explore_in_flight_);
-				const auto entry = entry_mirror_of(explore_in_flight_);
+				const auto entry = explore_mirror_.empty() ? entry_mirror_of(explore_in_flight_) : explore_mirror_;
 				explore_drive_->note_entered(gs.room_name, entry, now_s);
-				std::println("[explore-tour] entered '{}' through '{}' (entry door '{}')", gs.room_name, explore_in_flight_, entry);
+				std::println("[explore-tour] entered '{}' through '{}' (entry door '{}')", gs.room_name, explore_in_flight_,
+				             entry.empty() ? "not resolved yet — no guess" : entry);
 			}
 			else
 			{
@@ -948,20 +938,24 @@ void SpecificWorker::service_explore_tour()
 				             v.last_outcome.empty() ? "abandoned" : v.last_outcome);
 			}
 			explore_in_flight_.clear();
+			explore_mirror_.clear();
 			session_.mission().set_mode(rc::DriveMode::AffordancesOnly);
 		}
 	}
+	// the operator's and missions' orders come first (final review I1): no decision while either holds the base
+	if (interpreter_.state() == rc::mission::Interpreter::State::Running or session_.approach_order().active()) return;
 	// the drive's inputs
-	std::set<std::string> remembered;
+	std::string topo_json;
 	if (const auto t = G->get_node("ltsm_topology"); t.has_value())
-		if (const auto j = G->get_attrib_by_name<ltsm_topology_att>(t.value()); j.has_value())
-			remembered = rc::topo::crossed_doors(j.value());
+		if (const auto j = G->get_attrib_by_name<ltsm_topology_att>(t.value()); j.has_value()) topo_json = j.value();
+	const std::set<std::string> remembered = rc::topo::crossed_doors(topo_json);
 	std::vector<rc::explore::DoorCand> doors;
 	for (const auto &f : door_facts())
 		doors.push_back({.door = f.name, .found = G->get_node("aff_" + f.name + "_approach").has_value(),
 		                 .crossed = f.crossed or remembered.contains(f.name), .dist_m = f.dist});
 	const bool promoted = not rc::room::is_proto(*G, gs.room_id);
-	const auto d = explore_drive_->step(gs.room_name, promoted, doors, passage.active() or not explore_in_flight_.empty(), now_s);
+	const auto d = explore_drive_->step(gs.room_name, promoted, doors, passage.active() or not explore_in_flight_.empty(), now_s,
+	                                    rc::topo::remembered_uncrossed(topo_json, gs.room_name));
 	if (d.cause == rc::explore::Cause::None) return;
 	// the record (one row per decision) + one line
 	std::string cands;
@@ -972,6 +966,12 @@ void SpecificWorker::service_explore_tour()
 	             << d.door.value_or("") << ',' << (d.is_return ? 1 : 0) << ',' << cands << '\n';
 	explore_csv_.flush();
 	std::println("[explore-tour] {}: {} -> {}", gs.room_name, rc::explore::to_string(d.cause), d.door.value_or("-"));
+	if (d.cause == rc::explore::Cause::Stuck)
+	{
+		std::println("[explore-tour] STUCK in '{}': the way back failed and nothing else is left — the drive stops", gs.room_name);
+		set_explore_tour(false);
+		return;
+	}
 	if (d.cause == rc::explore::Cause::Done)
 	{
 		std::println("[explore-tour] DONE — no reachable room has a found, uncrossed door");
@@ -980,8 +980,16 @@ void SpecificWorker::service_explore_tour()
 	}
 	if (d.door.has_value())
 	{
-		const auto r = start_door_passage(*d.door, rc::DoorPassage::Step::Cross, "explore", /*then_affordances=*/true);
-		if (r.accepted) explore_in_flight_ = *d.door;
+		// a door name goes stale when its room is left and re-entered (final review C1): the passage's live door now
+		std::string door = *d.door;
+		if (not G->get_node(door).has_value())
+			if (const auto live = rc::topo::live_door_for(topo_json, door); live.has_value())
+			{
+				std::println("[explore-tour] '{}' is gone; its passage's live door is '{}'", door, *live);
+				door = *live;
+			}
+		const auto r = start_door_passage(door, rc::DoorPassage::Step::Cross, "explore", /*then_affordances=*/true);
+		if (r.accepted) explore_in_flight_ = door;
 		else explore_drive_->note_failed(*d.door);
 	}
 }

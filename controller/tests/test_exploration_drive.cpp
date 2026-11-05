@@ -91,6 +91,30 @@ int main()
         const auto r2 = d.step("room_1", true, {found("door_2", 3.6)}, false, 60.0);
         check(r2.cause == Cause::Done, "a door the drive itself crossed is never chosen again");
     }
+    {   // C2: a failed entry door is never retried in a loop; an empty entry door is never stored
+        Drive d(300.0);
+        (void)d.step("room_1", true, {}, true, 0.0);
+        d.note_entered("room_2", "", 1.0);   // no mirror resolved yet
+        check(not d.entry_door("room_2").has_value(), "empty_entry_never_stored");
+        d.note_entered("room_2", "door_3", 2.0);   // resolved later: still the first REAL entry
+        check(d.entry_door("room_2") == "door_3", "a later real entry is kept when the first was empty");
+        const auto r = d.step("room_2", true, {}, false, 3.0);
+        check(r.cause == Cause::Return and r.door == "door_3", "returns through it");
+        d.note_failed("door_3");
+        const auto r2 = d.step("room_2", true, {}, false, 3.2);
+        check(r2.cause == Cause::Stuck and not r2.door.has_value(), "failed_return_is_stuck_not_retried");
+    }
+    {   // C1: a re-entered promoted room whose remembered doors are not yet seen again waits (bounded by MaxRoomS)
+        Drive d(300.0);
+        (void)d.step("room_1", true, {}, true, 0.0);
+        d.note_entered("room_2", "door_3", 10.0);
+        d.note_entered("room_1", "door_4", 20.0);
+        check(d.step("room_1", true, {}, false, 30.0, /*remembered_uncrossed=*/1).cause == Cause::None,
+              "remembered_uncrossed_waits (not Done while the LTSM remembers an uncrossed door of this room)");
+        check(d.step("room_1", true, {}, false, 330.0, 1).cause == Cause::Done, "the wait is bounded by MaxRoomS");
+        check(d.step("room_1", true, {found("door_9", 2.0)}, false, 31.0, 1).door == "door_9", "a re-found door is taken at once");
+    }
+    check(std::string(rc::explore::to_string(Cause::Stuck)) == "stuck", "to_string stuck");
     check(std::string(rc::explore::to_string(Cause::MaxTime)) == "max-time", "to_string");
     std::println("{}/{} checks passed", checks - fails, checks);
     return fails == 0 ? 0 : 1;

@@ -57,8 +57,10 @@ while (( $(date +%s) - t0 < RUN_LIMIT_S )); do
 done
 echo "explore_tour: $result" | tee crossing/$RUN/result.txt
 echo "explore_tour off" > $B/controller/remote_cmd.txt; sleep 2
-cp $WT/controller/etc/exploration_drive.csv crossing/$RUN/ 2>/dev/null || cp $B/controller/etc/exploration_drive.csv crossing/$RUN/ 2>/dev/null \
-  || echo "WARN: exploration_drive.csv not found in $WT/controller/etc nor $B/controller/etc"
+# the drive's CSV from THIS run only (final review M2: the main checkout keeps an older one)
+CSV=$(ls -t $B/controller/etc/exploration_drive.csv $WT/controller/etc/exploration_drive.csv 2>/dev/null | head -1)
+if [ -n "$CSV" ] && [ "$CSV" -nt crossing/$RUN/legs.txt -o "$(stat -c %Y $CSV)" -ge "$t0" ]; then cp $CSV crossing/$RUN/
+else echo "WARN: no exploration_drive.csv written by this run (newest: ${CSV:-none})"; fi
 python3 scripts/tp.py get > crossing/$RUN/end_pose.txt 2>&1
 bash scripts/run_crossing.sh crossing/$RUN collect >/dev/null 2>&1
 python3 $S/grade_explore_tour.py crossing/$RUN

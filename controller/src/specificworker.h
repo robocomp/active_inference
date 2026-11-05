@@ -231,12 +231,14 @@ private:
 	void set_explore_tour(bool on);
 	/// One step of the exploration drive (control thread): build its inputs, act through start_door_passage.
 	void service_explore_tour();
-	/// The door of the current room a crossing through `crossed` entered by: the other face of the live passage_* that
-	/// `match`es it; else the nearest door of the current room (logged). "" when none.
+	/// The door a crossing through `crossed` enters by: any door whose `exit` edge points at `crossed` (door_concept's entry
+	/// mirror, exit_fact link 3), else the other face of a live passage_* that `match`es it. "" when neither resolves — never
+	/// a guess (final review I2: the nearest door could be the wrong one, marked crossed and never explored).
 	std::string entry_mirror_of(const std::string &crossed);
 	std::optional<rc::explore::Drive> explore_drive_;
 	std::ofstream explore_csv_;
 	std::string explore_in_flight_;            ///< the door whose passage the drive started ("" = none)
+	std::string explore_mirror_;               ///< the in-flight door's entry mirror, captured while the old face still lives
 	std::uint64_t explore_poll_ms_ = 0;
 	/// Nothing drives and the base stays still, armed: Target mode with no target (a finished `move` does the same).
 	void hold_base();

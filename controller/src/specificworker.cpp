@@ -2071,6 +2071,7 @@ SpecificWorker::MissionResult SpecificWorker::dispatch_mission_command(const std
 	}
 	if (t == "stop")
 	{
+		if (explore_drive_.has_value()) set_explore_tour(false);   // the operator's stop ends the exploration tour too (review I1)
 		session_.door_passage().stop();
 		session_.approach_order().stop();
 		abort_all(source);
@@ -2080,6 +2081,7 @@ SpecificWorker::MissionResult SpecificWorker::dispatch_mission_command(const std
 	// A command that is understood replaces a running mission (stop cancels it inside abort_all); a typo does not.
 	if (t == "uncross")
 	{
+		if (explore_drive_.has_value()) set_explore_tour(false);
 		cancel_mission("superseded", /*hold=*/false);
 		session_.door_passage().stop();
 		std::println("[{}] mission 'uncross' -> door passage stopped", source);

@@ -94,4 +94,27 @@ inline std::expected<Topology, std::string> decode_topology(std::string_view jso
     }
     return out;
 }
+// Passages of `room` the LTSM remembers, never crossed, whose door is not in view (no live_door): a re-entered room shows
+// only the face it was entered by at first, and its other remembered doors are found again by the room's looks. 0 when the
+// summary is absent or malformed.
+[[nodiscard]] inline int remembered_uncrossed(std::string_view json, std::string_view room)
+{
+    const auto t = decode_topology(json);
+    if (not t.has_value()) return 0;
+    int n = 0;
+    for (const auto& p : t->passages)
+        if ((p.room_a == room or p.room_b == room) and p.crossings < 1 and not p.live_door.has_value()) ++n;
+    return n;
+}
+
+// The live door now standing for the passage one of whose faces was called `name` (a door name goes stale when its room
+// is left and re-entered): that passage's live_door, or nullopt when none is in view / no passage has such a face.
+[[nodiscard]] inline std::optional<std::string> live_door_for(std::string_view json, const std::string& name)
+{
+    const auto t = decode_topology(json);
+    if (not t.has_value()) return std::nullopt;
+    for (const auto& p : t->passages)
+        if (face_live_name(p.face_a) == name or face_live_name(p.face_b) == name or p.live_door == name) return p.live_door;
+    return std::nullopt;
+}
 }  // namespace rc::topo

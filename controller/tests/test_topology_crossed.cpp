@@ -22,6 +22,17 @@ int main()
     check(c.contains("door_3") and c.contains("door_9"), "crossed_faces_and_live_door (memory prefix stripped)");
     check(not c.contains("door_4") and not c.contains("door_5"), "a passage never crossed contributes nothing");
     check(c.size() == 2, "exactly the crossed passage's names");
+    // final review C1: a re-entered room's remembered doors
+    const char* j2 = R"({"rooms":[],"passages":[
+      {"id":"passage_1","a":{"room":"room_1","face":"r1_door_1"},"b":{"room":"room_2","face":"r2_door_2"},"crossings":1,
+       "p_pass":{"alpha":1,"beta":1},"p_open":{"alpha":1,"beta":1},"live_door":"door_8"},
+      {"id":"passage_3","a":{"room":"room_1","face":"r1_door_9"},"b":{"room":"room_4","face":"r4_door_10"},"crossings":0,
+       "p_pass":{"alpha":1,"beta":1},"p_open":{"alpha":1,"beta":1}}]})";
+    check(rc::topo::remembered_uncrossed(j2, "room_1") == 1, "remembered_uncrossed counts the uncrossed passage not in view");
+    check(rc::topo::remembered_uncrossed(j2, "room_2") == 0, "a crossed passage does not count");
+    check(rc::topo::remembered_uncrossed("", "room_1") == 0, "no summary: nothing remembered");
+    check(rc::topo::live_door_for(j2, "door_1") == std::optional<std::string>("door_8"), "live_door_for resolves a stale face name");
+    check(not rc::topo::live_door_for(j2, "door_9").has_value(), "no live door in view: nullopt");
     std::println("{}/{} checks passed", checks - fails, checks);
     return fails == 0 ? 0 : 1;
 }
