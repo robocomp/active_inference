@@ -9,6 +9,7 @@
 #include <cstdlib>
 #include <algorithm>
 #include <ranges>
+#include "entry_reloc.h"
 #include "room_scene_graph.h"
 #include "status_reporter.h"
 #include "wall_sync.h"                                       // rc::walls::plan_wall_sync (rule 1)
@@ -1780,6 +1781,8 @@ void RoomSceneGraph::rearm_after_crossing(std::uint64_t new_room_id, const std::
     // (user 2026-11-01: "if the room is known, recalled from ltsm, do not activate room affordances").
     entry_reloc_ = not recall.has_value();
     entry_reloc_target_pub_.reset();
+    // the relocalisation ends on ITS claim's answer (entry_reloc.h): drop any completion still pending from the room left behind
+    if (entry_reloc_) (void)affordance_manager_.consume_completion_event();
     // A remembered room comes back in ITS OWN frame (the one memory holds), placed through the crossed door.
     const Eigen::Affine2f T_pub_int = recall.has_value() ? recall->T_int_recall.inverse() : T_room_proto_.inverse();
     std::vector<Eigen::Vector2f> recall_int;
@@ -3139,11 +3142,20 @@ bool RoomSceneGraph::dsr_update_entry_relocalisation(const rc::RoomConcept::Upda
     }
     const Eigen::Vector2f t = *entry_reloc_target_pub_;
     const float reach = 0.5f * std::hypot(params_->ROBOT_WIDTH, params_->ROBOT_LENGTH);
-    if ((robot_pub - t).norm() <= reach)
+    const bool at_centre = (robot_pub - t).norm() <= reach;
+    // The consumer's answer ends it too (entry_reloc.h; explore_spike1: the centre was handed back and never reached). The
+    // completion event is one-shot and the layout explorer is locked out while this runs, so it is consumed here.
+    const bool claim_completed = affordance_manager_.consume_completion_event();
+    if (not rc::entry::still_relocalising(at_centre, claim_completed))
     {
         entry_reloc_ = false;
         entry_reloc_target_pub_.reset();
-        rc::status::print("[entry-reloc] '{}': at the centre — the room's planners take afford_room over\n", room_node_name());
+        if (at_centre)
+            rc::status::print("[entry-reloc] '{}': at the centre — the room's planners take afford_room over\n", room_node_name());
+        else
+            rc::status::print("[entry-reloc] '{}': the centre was completed by the consumer (outcome={}) {:.2f} m away — the room's "
+                              "planners take afford_room over\n", room_node_name(),
+                              rc::affordance::to_string(affordance_manager_.last_outcome()), (robot_pub - t).norm());
         return false;
     }
     const float yaw = std::atan2(t.y() - robot_pub.y(), t.x() - robot_pub.x());   // the arrival heading: LiDAR sees all round
