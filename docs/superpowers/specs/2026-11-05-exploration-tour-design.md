@@ -91,10 +91,12 @@ the Webots ground truth, into the per-room table of the Goals.
   true)`). "Promoted" = room_concept's `startup_promoted_` as published on the room node (the builder names the attribute).
   It has not been run live from an empty LTSM; the spike checks it. If it fails live, fixing room_concept/ltsm so crossing-born
   rooms promote IS in scope (the goal needs it), reported to the user before the plan proceeds.
-- **"Crossed" is the drive's own run memory**, keyed by PASSAGE (from_room, to_room, via door face), written when a passage
-  completes. A door face counts as crossed if a recorded passage left its room through it; the face the robot ENTERED by (the
-  mirror face in the new room) is recorded as crossed at entry and remembered as R's entry door. The LTSM starts empty, so
-  nothing else is needed; reading LTSM passage records is not required.
+- **"Crossed" survives a restart (revised 11-05 after the paper session's review):** it is read from the LTSM's PASSAGE records
+  (persistent across sessions, so cumulative tours that restart from a saved LTSM — the paper's E1 — see doors crossed in
+  earlier sessions). A door face counts as crossed if the LTSM holds a passage through it (either face of the same passage).
+  The face the robot entered R by is R's entry door (for the return rule), remembered by the drive for the current visit.
+  Fallback only if a passage record is not yet written when the next choice is made: the drive's own run memory of the
+  passage it just completed.
 - **"Found"** = door_concept offers the door's `approach` affordance (its offer already carries P(exists) and door_concept's own
   offer rule) — no new level in the controller.
 - **Room promoted and no door found** ⇒ return (decision 7); the drive does not wait for further looks. A door found later in a
