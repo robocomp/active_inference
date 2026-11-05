@@ -969,8 +969,12 @@ void SpecificWorker::service_explore_tour()
 		return;
 	// a recognition proposal is being judged: this room may be about to become a remembered one (explore_tour6 decided a Return
 	// under the provisional name room_3 while ltsm proposed it was room_1) — no decision until the verdict
+	// Only while it is PENDING: ltsm keeps an accepted proposal node until the robot leaves the room (explore_tour7 held for
+	// 12 min after "ACCEPTED: room_4 adopted as r2_room_2"); room_concept writes state accepted | rejected (room_proposal.h).
 	for (const auto &n : G->get_nodes_by_type("metaconcept"))
-		if (G->get_attrib_by_name<object_subtype_att>(n).value_or(std::string{}) == "room_proposal") return;
+		if (G->get_attrib_by_name<object_subtype_att>(n).value_or(std::string{}) == "room_proposal"
+		    and G->get_attrib_by_name<state_att>(n).value_or(std::string("pending")) == "pending")
+			return;
 	// the operator's and missions' orders come first (final review I1): no decision while either holds the base
 	if (interpreter_.state() == rc::mission::Interpreter::State::Running or session_.approach_order().active()) return;
 	// the drive's inputs
