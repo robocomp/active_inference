@@ -20,59 +20,14 @@
 #include <vector>
 
 #include "name_norm.h"
+#include "../../common/ltsm_topology/topology_decode.h"
 
 namespace rc::chat
 {
-struct TopoRoomInfo { std::string name; bool live = false; };
-
-struct TopoPassageInfo
-{
-    std::string id, room_a, face_a, room_b, face_b;
-    int crossings = 0;
-    double pass_alpha = 1, pass_beta = 1, open_alpha = 1, open_beta = 1;
-    std::optional<std::string> live_door;
-    double p_pass() const { return pass_alpha / (pass_alpha + pass_beta); }
-};
-
-struct Topology
-{
-    std::vector<TopoRoomInfo> rooms;
-    std::vector<TopoPassageInfo> passages;
-};
-
-inline std::expected<Topology, std::string> decode_topology(std::string_view json)
-{
-    QJsonParseError err;
-    const auto doc = QJsonDocument::fromJson(QByteArray(json.data(), static_cast<qsizetype>(json.size())), &err);
-    if (err.error != QJsonParseError::NoError or not doc.isObject())
-        return std::unexpected("ltsm_topology: not a JSON object");
-    const auto root = doc.object();
-    const auto str = [](const QJsonObject& o, const char* k) { return o.value(k).toString().toStdString(); };
-    Topology t;
-    for (const auto& v : root.value("rooms").toArray())
-    {
-        const auto o = v.toObject();
-        t.rooms.push_back({str(o, "name"), o.value("live").toBool()});
-    }
-    for (const auto& v : root.value("passages").toArray())
-    {
-        const auto o = v.toObject();
-        TopoPassageInfo p;
-        p.id = str(o, "id");
-        p.room_a = o.value("a").toObject().value("room").toString().toStdString();
-        p.face_a = o.value("a").toObject().value("face").toString().toStdString();
-        p.room_b = o.value("b").toObject().value("room").toString().toStdString();
-        p.face_b = o.value("b").toObject().value("face").toString().toStdString();
-        p.crossings = o.value("crossings").toInt();
-        const auto pp = o.value("p_pass").toObject(), po = o.value("p_open").toObject();
-        p.pass_alpha = pp.value("alpha").toDouble(1); p.pass_beta = pp.value("beta").toDouble(1);
-        p.open_alpha = po.value("alpha").toDouble(1); p.open_beta = po.value("beta").toDouble(1);
-        if (o.contains("live_door")) p.live_door = str(o, "live_door");
-        if (p.id.empty()) return std::unexpected("ltsm_topology: passage without id");
-        t.passages.push_back(std::move(p));
-    }
-    return t;
-}
+using rc::topo::TopoRoomInfo;
+using rc::topo::TopoPassageInfo;
+using rc::topo::Topology;
+using rc::topo::decode_topology;
 
 // The edge cost of crossing a passage: 1 / E[p_pass].
 inline double passage_cost(const TopoPassageInfo& p) { return (p.pass_alpha + p.pass_beta) / p.pass_alpha; }
