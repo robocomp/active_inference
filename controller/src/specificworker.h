@@ -67,6 +67,7 @@
 #include "../../common/affordance_manager/affordance_manager.h"
 #include "../../common/agent_presence_coordinator/agent_presence_coordinator.h"
 #include "trajectory_controller.h"
+#include "exploration_drive.h"
 
 #include <chrono>
 #include <cstdint>
@@ -225,6 +226,18 @@ private:
 	void cancel_mission(const std::string &outcome, bool hold = true);
 	/// One step of the running mission (10 Hz) + its log lines; holds the base when it ends. Control thread.
 	void service_mission();
+	// ── EXPLORATION TOUR (exploration_drive.h; spec docs/superpowers/specs/2026-11-05-exploration-tour-design.md) ──
+	/// `explore_tour on|off` (remote_cmd.txt). On: AffordancesOnly + the drive; its CSV is etc/exploration_drive.csv.
+	void set_explore_tour(bool on);
+	/// One step of the exploration drive (control thread): build its inputs, act through start_door_passage.
+	void service_explore_tour();
+	/// The door of the current room a crossing through `crossed` entered by: the other face of the live passage_* that
+	/// `match`es it; else the nearest door of the current room (logged). "" when none.
+	std::string entry_mirror_of(const std::string &crossed);
+	std::optional<rc::explore::Drive> explore_drive_;
+	std::ofstream explore_csv_;
+	std::string explore_in_flight_;            ///< the door whose passage the drive started ("" = none)
+	std::uint64_t explore_poll_ms_ = 0;
 	/// Nothing drives and the base stays still, armed: Target mode with no target (a finished `move` does the same).
 	void hold_base();
 	/// The live door a door reference names now: a node by name, or the face of a passage in the current room.

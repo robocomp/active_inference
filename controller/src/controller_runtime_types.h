@@ -413,6 +413,7 @@ struct ControllerParams
     // period. The bench (tests/bench_c1_door.cpp RATES=1) shows NO degradation down to 6 Hz with the period in the rollouts, so this
     // is not read off a curve; it is a stated floor. 0 = never hold on rate.
     float policy_min_control_hz = 10.f;
+    double explore_max_room_s = 300.0;   ///< ExploreTour.MaxRoomS: the exploration drive's max-time fallback per room (spec 2026-11-05)
     float policy_command_latency_s = 0.06f;     // PROVISIONAL (the harness's plant value)
     float policy_min_linear_speed_mps = 0.04f;  // PROVISIONAL deadband fallback (capability absent)
     float policy_min_rot_speed_rps = 0.10f;

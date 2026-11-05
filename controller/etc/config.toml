@@ -1061,3 +1061,9 @@ UnseenOdoSigmaM = 0.005
 # observed 1.6-1.8 s reversal at 0.5); replace with a dedicated measurement (controller/tools/policy_smoke.md, LIVE TODO).
 # The per-wheel deceleration the rollout uses instead of the capability's max_linear_decel (1.0). <= 0 = the capability's.
 WheelDecelMps2 = 0.5
+
+[ExploreTour]
+# The exploration drive (src/exploration_drive.h; spec docs/superpowers/specs/2026-11-05-exploration-tour-design.md, decision 5).
+# FLAGGED: the one deliberate time limit. A room not yet promoted is left after this many seconds; every such leave is
+# logged as `max-time` in etc/exploration_drive.csv and counts against the run.
+MaxRoomS = 300

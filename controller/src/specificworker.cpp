@@ -608,6 +608,9 @@ void SpecificWorker::initialize()
 					enqueue_command([this, cmd = c.toStdString()]() { run_mission_command(cmd, "remote"); });
 				else if (c.startsWith("mission "))
 					enqueue_command([this, cmd = c.mid(8).trimmed().toStdString()]() { run_mission_command(cmd, "remote"); });
+				// EXPLORATION TOUR (exploration_drive.h, spec 2026-11-05): `explore_tour on` / `explore_tour off`.
+				else if (c == "explore_tour on" or c == "explore_tour off")
+					enqueue_command([this, on = (c == "explore_tour on")]() { set_explore_tour(on); });
 				else if (c == "uncross")
 					enqueue_command([this]() { run_mission_command("uncross", "remote"); });
 				// MEASUREMENT (Task 7, tools/measure_policy_inputs.md): `probe <v> <w> <s>` holds the base open-loop
@@ -1122,6 +1125,7 @@ void SpecificWorker::load_params()
 	cfgr.opt_cast<double>("Policy.ProgressScaleM", params.policy_progress_scale_m, "metres of progress worth one nat over one horizon");
 	cfgr.opt_cast<double>("Policy.HorizonS", params.policy_horizon_s, "candidate hold time (s) before the brake tail");
 	cfgr.opt_cast<double>("Policy.MinControlHz", params.policy_min_control_hz, "FLAGGED SAFETY CONSTANT: below this control rate (Hz) the policy holds the base (2x the nominal 50 ms period); 0 = never");
+	cfgr.opt_cast<double>("ExploreTour.MaxRoomS", params.explore_max_room_s, "FLAGGED (decision 5): the exploration drive leaves a room not yet promoted after this many seconds — every such leave is logged as max-time");
 	cfgr.opt_cast<double>("Policy.CommandLatencyS", params.policy_command_latency_s, "PROVISIONAL: send -> wheels latency (s)");
 	cfgr.opt_cast<double>("Policy.MinLinearSpeedMps", params.policy_min_linear_speed_mps, "PROVISIONAL deadband when the capability is absent");
 	cfgr.opt_cast<double>("Policy.MinRotSpeedRps", params.policy_min_rot_speed_rps, "PROVISIONAL deadband when the capability is absent");
@@ -1619,6 +1623,7 @@ void SpecificWorker::control_loop()
 		}
 		// language_agent's intention node: a new command runs here, between cycles, like every button press above.
 		service_mission();
+		service_explore_tour();
 		service_chat_inbox();
 		service_journal();   // the episodic journal: step transitions, command ends, drive mode → em_journal
 

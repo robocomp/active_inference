@@ -37,6 +37,7 @@
 #include "mission_room_hold.h"
 #include "mission_approach_hold.h"
 #include "mission_door_relation.h"
+#include "../../common/ltsm_topology/topology_decode.h"   // crossed_doors: the exploration drive's remembered crossings
 
 using rc::mission::LeafState;
 using rc::mission::LeafStatus;
@@ -863,4 +864,118 @@ void SpecificWorker::service_journal()
 	// The wire goes on our own em_journal node (journal_node.h), written only when it changed: nobody else writes
 	// that node, so there is nothing to re-assert.
 	if (journal_.dirty() and journal_node_.publish(*G, journal_.to_wire())) journal_.clear_dirty();
+}
+
+// ════ EXPLORATION TOUR (exploration_drive.h; spec docs/superpowers/specs/2026-11-05-exploration-tour-design.md) ════
+
+void SpecificWorker::set_explore_tour(bool on)
+{
+	if (not on)
+	{
+		explore_drive_.reset();
+		explore_in_flight_.clear();
+		if (explore_csv_.is_open()) explore_csv_.close();
+		std::println("[explore-tour] OFF");
+		return;
+	}
+	explore_drive_.emplace(params.explore_max_room_s);
+	explore_in_flight_.clear();
+	explore_csv_.open("etc/exploration_drive.csv", std::ios::trunc);
+	explore_csv_.imbue(std::locale::classic());
+	explore_csv_ << "t_ms,room,promoted,cause,door,is_return,candidates\n";
+	session_.mission().set_mode(rc::DriveMode::AffordancesOnly);
+	std::println("[explore-tour] ON (MaxRoomS {:.0f} s): explore each room until promoted, then cross the nearest found, "
+	             "uncrossed door; else return through the room's first entry door", params.explore_max_room_s);
+}
+
+std::string SpecificWorker::entry_mirror_of(const std::string &crossed)
+{
+	if (G == nullptr) return {};
+	const auto &gs = world_model_.graph_state();
+	const auto mine = rc::world::doors_of_room(*G, gs.room_id);
+	if (const auto d = G->get_node(crossed); d.has_value())
+		for (const auto &e : G->get_edges_to_id(d->id()))
+			if (e.type() == "match")
+				if (const auto p = G->get_node(e.from()); p.has_value() and p->name().starts_with("passage_"))
+					for (const auto &m : DSR::DSRGraph::get_node_edges_by_type(p.value(), "match"))
+						if (const auto other = G->get_node(m.to()); other.has_value() and other->name() != crossed
+						    and std::ranges::find(mine, other->name()) != mine.end())
+							return other->name();
+	// fallback: the nearest door of the room just entered
+	std::string best;
+	double best_d = std::numeric_limits<double>::infinity();
+	for (const auto &f : door_facts())
+		if (f.dist < best_d) { best_d = f.dist; best = f.name; }
+	std::println("[explore-tour] entry door of '{}': no passage match for '{}' — the nearest door '{}' ({:.2f} m) stands in",
+	             gs.room_name, crossed, best, best_d);
+	return best;
+}
+
+void SpecificWorker::service_explore_tour()
+{
+	if (not explore_drive_.has_value() or G == nullptr) return;
+	const auto now_ms = static_cast<std::uint64_t>(
+		std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
+	if (now_ms - explore_poll_ms_ < 200) return;   // 5 Hz: the drive decides on room-scale events
+	explore_poll_ms_ = now_ms;
+	const double now_s = static_cast<double>(now_ms) / 1000.0;
+	const auto &gs = world_model_.graph_state();
+	if (gs.room_id == 0 or gs.room_name.empty()) return;
+	auto &passage = session_.door_passage();
+	// the passage the drive started: crossed (into a new room), failed, or abandoned
+	if (not explore_in_flight_.empty())
+	{
+		const auto v = passage.view();
+		const bool ended = v.door != explore_in_flight_ or v.step == rc::DoorPassage::Step::Idle or v.step == rc::DoorPassage::Step::Done;
+		if (ended and not passage.active())
+		{
+			if (v.door == explore_in_flight_ and v.step == rc::DoorPassage::Step::Done and not v.failed)
+			{
+				const auto entry = entry_mirror_of(explore_in_flight_);
+				explore_drive_->note_entered(gs.room_name, entry, now_s);
+				std::println("[explore-tour] entered '{}' through '{}' (entry door '{}')", gs.room_name, explore_in_flight_, entry);
+			}
+			else
+			{
+				explore_drive_->note_failed(explore_in_flight_);
+				std::println("[explore-tour] the passage through '{}' did not cross ({}) — skipped for this visit", explore_in_flight_,
+				             v.last_outcome.empty() ? "abandoned" : v.last_outcome);
+			}
+			explore_in_flight_.clear();
+			session_.mission().set_mode(rc::DriveMode::AffordancesOnly);
+		}
+	}
+	// the drive's inputs
+	std::set<std::string> remembered;
+	if (const auto t = G->get_node("ltsm_topology"); t.has_value())
+		if (const auto j = G->get_attrib_by_name<ltsm_topology_att>(t.value()); j.has_value())
+			remembered = rc::topo::crossed_doors(j.value());
+	std::vector<rc::explore::DoorCand> doors;
+	for (const auto &f : door_facts())
+		doors.push_back({.door = f.name, .found = G->get_node("aff_" + f.name + "_approach").has_value(),
+		                 .crossed = f.crossed or remembered.contains(f.name), .dist_m = f.dist});
+	const bool promoted = not rc::room::is_proto(*G, gs.room_id);
+	const auto d = explore_drive_->step(gs.room_name, promoted, doors, passage.active() or not explore_in_flight_.empty(), now_s);
+	if (d.cause == rc::explore::Cause::None) return;
+	// the record (one row per decision) + one line
+	std::string cands;
+	for (const auto &c : doors)
+		cands += std::format("{}{}:{}:{}:{:.2f}", cands.empty() ? "" : ";", c.door, c.found ? 1 : 0, c.crossed ? 1 : 0, c.dist_m);
+	const auto wall_ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+	explore_csv_ << wall_ms << ',' << gs.room_name << ',' << (promoted ? 1 : 0) << ',' << rc::explore::to_string(d.cause) << ','
+	             << d.door.value_or("") << ',' << (d.is_return ? 1 : 0) << ',' << cands << '\n';
+	explore_csv_.flush();
+	std::println("[explore-tour] {}: {} -> {}", gs.room_name, rc::explore::to_string(d.cause), d.door.value_or("-"));
+	if (d.cause == rc::explore::Cause::Done)
+	{
+		std::println("[explore-tour] DONE — no reachable room has a found, uncrossed door");
+		set_explore_tour(false);
+		return;
+	}
+	if (d.door.has_value())
+	{
+		const auto r = start_door_passage(*d.door, rc::DoorPassage::Step::Cross, "explore", /*then_affordances=*/true);
+		if (r.accepted) explore_in_flight_ = *d.door;
+		else explore_drive_->note_failed(*d.door);
+	}
 }
