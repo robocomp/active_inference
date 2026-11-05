@@ -17,17 +17,22 @@ rc::reloc::Mode multi_scan_fit(const rc::reloc::LikelihoodRaster& K, const std::
     out.pose = prior; out.cov = prior_cov; out.log_lik = std::numeric_limits<float>::quiet_NaN();
     if (polygon.size() < 3 or not K.valid()) return out;
     // Every keyframe's returns in the latest keyframe's frame, each scan on the SAME subset the search polishes on.
-    std::vector<Eigen::Vector2f> joint;
+    // Each return keeps its own SENSOR origin (the keyframe it was taken from): the likelihood is a beam model, cast from
+    // where the beam started.
+    std::vector<Eigen::Vector2f> joint, origins;
     for (const auto& [rel, pts] : scans)
     {
         const float c = std::cos(rel.z()), s = std::sin(rel.z());
         for (const auto& q : rc::reloc::polish_points(pts, p))
+        {
             joint.emplace_back(rel.x() + c * q.x() - s * q.y(), rel.y() + s * q.x() + c * q.y());
+            origins.push_back(rel.head<2>());
+        }
     }
     if (joint.empty()) return out;
     rc::reloc::Params pp = p;
     pp.prior_modes.clear();   // the prior is fused below, once, as a Gaussian factor
-    auto m = rc::reloc::polish(polygon, joint, prior, pp, K.extent());
+    auto m = rc::reloc::polish(polygon, joint, prior, pp, K.extent(), nullptr, &origins);
     if (not m.pose.allFinite() or not m.cov.allFinite()) return out;
     // Information-form fusion of the scans' Laplace Gaussian with the prior (angles wrapped about the prior).
     // EFFECTIVE SAMPLE SIZE. The polish treats every point of every keyframe as independent, so N keyframes of one view
@@ -63,7 +68,7 @@ rc::reloc::Mode multi_scan_fit(const rc::reloc::LikelihoodRaster& K, const std::
     x.z() = wrap(x.z());
     out.pose = x;
     out.cov = 0.5f * (P + P.transpose());
-    out.log_lik = rc::reloc::log_likelihood(polygon, joint, x, pp, K.extent(), &out.median_abs);
+    out.log_lik = rc::reloc::log_likelihood(polygon, joint, x, pp, K.extent(), &out.median_abs, nullptr, &origins);
     return out;
 }
 }

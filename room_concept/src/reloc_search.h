@@ -16,6 +16,12 @@
  *      ℓ(x) = Σ_i log[ (1−ε)·2·N(d_i(x); 0, σ²) + ε/L ].
  *  A SUM over points: batchable as one integer gather per candidate on a precomputed raster, and exp(ℓ)
  *  IS the likelihood, so the posterior over candidates needs no temperature.
+ *  ★ Task 7c (2026-11-04): ℓ — every mode weight, polish and rival comparison — is now a BEAM MODEL on the room map
+ *  (reloc_search.cpp, BeamTerm): per return along its ray from the sensor, z* = the range to the first mapped wall;
+ *  p_short = λe^{−λz} on [0, z*) (unmapped surfaces, Params::unmapped_rate), p_hit = e^{−λz*}·N(z; z*, σ²/cos²),
+ *  p_beyond only through an open cell (and only up to the next mapped wall on the ray), p_rand = ε/L. A return SHORT of
+ *  a wall is cheap; one LONG of a wall the map says is there is expensive. The SDF band below survives only in the
+ *  lattice raster, which proposes seeds.
  *  With the room's open doorways (Params::apertures, Task R2) a return whose beam goes through a doorway under
  *  pose x is instead explained by the door: shut, or open and the return on a wall of the next room (see Aperture,
  *  BeyondLines). The lattice still scores the room-only raster; the polish and every mode weight use the full ℓ.
@@ -94,6 +100,7 @@ namespace rc::reloc
         std::vector<float> r;     ///< per point: perpendicular distance to its own line (m); +∞ when on none
         std::vector<float> t;     ///< per point: coordinate along its own line (m)
         std::vector<int>   seg;   ///< per point: its line, −1 none
+        std::vector<Eigen::Vector2f> n;   ///< per point: its line's unit normal (robot frame) — the beam's incidence on it
     };
 
     /// ── A PRIOR ABOUT WHERE THE ROBOT IS IN THIS ROOM, from somewhere other than the scan (Task 9) ─────────────────
@@ -115,6 +122,14 @@ namespace rc::reloc
     {
         float sigma_sdf      = 0.15f;   // m — SDF observation noise (RoomConcept::Params::sigma_sdf)
         float outlier_frac   = 0.30f;   // ε — clutter / through-door fraction ⚠ the modelling constant
+        /// 1/m — λ, the rate of UNMAPPED surfaces along a beam at wall-band height (furniture faces, door leaves, people,
+        /// unlisted structure) in the beam model's p_short = λe^{−λz} on [0, z*) (reloc_search.cpp, BeamTerm). A rate of
+        /// the WORLD, not a gate: a beam meets one before a wall z* away with probability 1 − e^{−λz*}.
+        /// ⚠ FLAGGED world constant. Measured on the recorded truth frames (warm43/44/45, tools/fixtures/reloc_twin_*,
+        ///   task-7c report): returns ending > 3σ_r short of z* (σ = 5 cm), per metre of ray travelled (the censored
+        ///   exponential's MLE): 0.02–0.16 /m per frame, 0.085 /m pooled over 19 frames. 0.1 /m ≈ one unmapped surface
+        ///   per 10 m of ray, i.e. a 4 m beam meets one with probability 0.33.
+        float unmapped_rate  = 0.10f;
         float raster_res     = 0.05f;   // m — likelihood raster cell (≪ σ, so quantisation is invisible)
         float lattice_step   = 0.10f;   // m — translation lattice (< σ, so every basin holds a sample)
         float body_clearance = 0.30f;   // m — robot body radius: a centre closer to a wall is impossible
@@ -243,7 +258,8 @@ namespace rc::reloc
     float log_likelihood(const std::vector<Eigen::Vector2f>& polygon,
                          const std::vector<Eigen::Vector2f>& pts_robot,
                          const Eigen::Vector3f& pose, const Params& p, float extent,
-                         float* median_abs = nullptr, const BeyondLines* beyond = nullptr);
+                         float* median_abs = nullptr, const BeyondLines* beyond = nullptr,
+                         const std::vector<Eigen::Vector2f>* origins = nullptr);
 
     /// The lines of a point set (robot frame) as the beyond-a-door density needs them. Empty without listed doors.
     /// Pass it to log_likelihood/polish when scoring many poses on ONE point set; omitted, they compute it themselves.
@@ -265,7 +281,8 @@ namespace rc::reloc
     /// Robust IRLS Gauss-Newton on ℓ from `start`; returns the polished mode (weight unset).
     Mode polish(const std::vector<Eigen::Vector2f>& polygon,
                 const std::vector<Eigen::Vector2f>& pts_robot,
-                const Eigen::Vector3f& start, const Params& p, float extent, const BeyondLines* beyond = nullptr);
+                const Eigen::Vector3f& start, const Params& p, float extent, const BeyondLines* beyond = nullptr,
+                const std::vector<Eigen::Vector2f>* origins = nullptr);
 
     /// The point subset search() polishes and scores its modes on. A caller scoring a hypothesis of its own
     /// (the KEEP hypothesis) against the search's modes must use THIS set: evidences over different point
