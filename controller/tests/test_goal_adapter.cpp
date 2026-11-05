@@ -642,6 +642,28 @@ int main()
         CHECK("13 manual: neither -> no target", not policy_place_target(std::nullopt, std::nullopt).has_value());
     }
 
+    // ---- 14. the vantage RE-AIM (door-passable spec step 2; final review C1): a robot-frame axis point + a turn by heading_err
+    //          become a room-frame Place goal whose yaw is the policy's FORWARD heading — facing the opening's normal
+    {
+        const ControllerRobotPose r{.pos = {1.f, 2.f}, .theta = 0.3f};
+        rc::interaction::RelPose a; a.x = {0.46f, 1.58f, 0.2f}; a.P = Eigen::Matrix3f::Identity() * 1e-4f;
+        const auto g = rc::anchor_cross_geometry(a);
+        const auto ra = rc::reaim_on_anchor(g);
+        const GoalSpec s = reaim_place_goal(r, ra.p_robot, ra.yaw_robot, 0.25f, 0.06f);
+        const Eigen::Vector2f n_room = Eigen::Rotation2Df(r.theta) * g.n;           // the opening's normal, room frame
+        const Eigen::Vector2f p_room = r.pos + Eigen::Rotation2Df(r.theta) * ra.p_robot;
+        CHECK("14 re-aim: a Place goal at the axis point", s.goal.kind == Goal::Kind::Place
+              and near(s.goal.p.x(), p_room.x()) and near(s.goal.p.y(), p_room.y()));
+        CHECK("14 re-aim: its yaw is the forward heading along the normal",
+              s.goal.yaw.has_value() and near(wrapf(*s.goal.yaw - std::atan2(n_room.y(), n_room.x())), 0.f));
+        // an anchor dead ahead (ψ = 0): the re-aim keeps the heading the robot already faces
+        rc::interaction::RelPose a0; a0.x = {0.46f, 1.58f, 0.f}; a0.P = a.P;
+        const auto r0 = rc::reaim_on_anchor(rc::anchor_cross_geometry(a0));
+        const GoalSpec s0 = reaim_place_goal(r, r0.p_robot, r0.yaw_robot, 0.25f, 0.06f);
+        CHECK("14 re-aim: psi 0 keeps the current forward heading",
+              s0.goal.yaw.has_value() and near(wrapf(*s0.goal.yaw - to_policy_pose(r).yaw), 0.f));
+    }
+
     std::printf(fails == 0 ? "ALL PASS\n" : "FAILURES (%d failing)\n", fails);
     return fails == 0 ? 0 : 1;
 }

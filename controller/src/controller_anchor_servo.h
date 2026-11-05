@@ -96,12 +96,14 @@ struct AnchorCrossGeometry
 // misfacing with the route arrived ⇒ re-aim on the perceived opening (the same anchor the servo will drive on, so success
 // makes `within` true by construction). No mouth ⇒ hold (warm24, unchanged). Past the plane ⇒ the engaged servo / the route.
 enum class VantageAction { Servo, HoldNoMouth, ReAim, RouteDrives };
+// `anchor_fresh` (final review I2): the re-aim goal is the anchor's robot-frame axis composed with the CURRENT pose, so it is
+// built only from a fresh anchor — a stale one, stamped at an older pose, would drag the goal along with the robot.
 [[nodiscard]] inline VantageAction vantage_action(bool servo_engaged, bool open_belief, bool open_seen, bool near_side,
-                                                  bool within, bool facing, bool route_arrived)
+                                                  bool within, bool facing, bool route_arrived, bool anchor_fresh)
 {
     if (servo_engaged or (open_belief and open_seen and near_side and within and facing)) return VantageAction::Servo;
     if (not open_seen or not open_belief) return VantageAction::HoldNoMouth;
-    if (near_side and route_arrived and (not within or not facing)) return VantageAction::ReAim;
+    if (near_side and route_arrived and anchor_fresh and (not within or not facing)) return VantageAction::ReAim;
     return VantageAction::RouteDrives;
 }
 // The re-aim goal in the ROBOT frame: the point on the anchor's axis at the robot's current progress s (robot − e·a), facing

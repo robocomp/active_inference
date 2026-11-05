@@ -38,7 +38,7 @@ int main()
         const auto g = rc::anchor_cross_geometry(anchor(0.46f, 1.58f, 0.0f));
         const bool within = std::abs(g.e) < 0.5f * 0.88f;
         CHECK(not within);
-        CHECK(rc::vantage_action(false, true, true, g.s < 0.f, within, true, true) == VantageAction::ReAim);
+        CHECK(rc::vantage_action(false, true, true, g.s < 0.f, within, true, true, true) == VantageAction::ReAim);
         const auto goal = rc::reaim_on_anchor(g);
         CHECK(std::abs(goal.p_robot.x() - 0.46f) < 1e-5f and std::abs(goal.p_robot.y()) < 1e-5f);
         CHECK(std::abs(goal.yaw_robot) < 1e-6f);
@@ -56,17 +56,20 @@ int main()
         CHECK(std::abs(g.n.dot(goal.p_robot - A) - g.s) < 1e-5f);    // at the same progress s
     }
     // no_mouth_still_holds
-    CHECK(rc::vantage_action(false, true, false, true, false, true, true) == VantageAction::HoldNoMouth);
-    CHECK(rc::vantage_action(false, false, true, true, false, true, true) == VantageAction::HoldNoMouth);
+    CHECK(rc::vantage_action(false, true, false, true, false, true, true, true) == VantageAction::HoldNoMouth);
+    CHECK(rc::vantage_action(false, false, true, true, false, true, true, true) == VantageAction::HoldNoMouth);
     // past_plane_never_reaims
-    CHECK(rc::vantage_action(false, true, true, false, false, true, true) == VantageAction::RouteDrives);
+    CHECK(rc::vantage_action(false, true, true, false, false, true, true, true) == VantageAction::RouteDrives);
     // engaged_servo_wins
-    CHECK(rc::vantage_action(true, false, false, false, false, false, true) == VantageAction::Servo);
-    CHECK(rc::vantage_action(false, true, true, true, true, true, false) == VantageAction::Servo);
+    CHECK(rc::vantage_action(true, false, false, false, false, false, true, true) == VantageAction::Servo);
+    CHECK(rc::vantage_action(false, true, true, true, true, true, false, true) == VantageAction::Servo);
     // route_not_arrived_drives
-    CHECK(rc::vantage_action(false, true, true, true, false, true, false) == VantageAction::RouteDrives);
+    CHECK(rc::vantage_action(false, true, true, true, false, true, false, true) == VantageAction::RouteDrives);
+    // stale_anchor_never_reaims (final review I2): a stale robot-frame anchor composed with the CURRENT pose drags the goal
+    // with the robot — no re-aim until the anchor is fresh again
+    CHECK(rc::vantage_action(false, true, true, true, false, true, true, false) != VantageAction::ReAim);
     // facing alone failing also re-aims once the route has arrived
-    CHECK(rc::vantage_action(false, true, true, true, true, false, true) == VantageAction::ReAim);
+    CHECK(rc::vantage_action(false, true, true, true, true, false, true, true) == VantageAction::ReAim);
 
     std::println("{}/{} checks passed", checks - failures, checks);
     return failures == 0 ? 0 : 1;

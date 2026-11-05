@@ -3761,13 +3761,14 @@ bool ControllerSession::drive_door_route(const ControllerPlanningStep &step, rc:
                 // ★ door-passable spec step 2 (warm61): the route ARRIVED at the vantage but the opening is off-axis or misfaced —
                 //   re-aim on the perceived opening instead of holding (rc::vantage_action / reaim_on_anchor).
                 const bool route_arrived = door_route_goal_index_ >= door_route_vantage_goals_;
-                if (rc::vantage_action(door_passage_.servo(), open_belief, open_seen, near_side, within, facing, route_arrived)
-                    == rc::VantageAction::ReAim)
+                if (rc::vantage_action(door_passage_.servo(), open_belief, open_seen, near_side, within, facing, route_arrived,
+                                       anchor_cross_->fresh) == rc::VantageAction::ReAim)
                 {
                     const ControllerRobotPose &rp = tracker_pose_.has_value() ? *tracker_pose_ : step.robot_pose;
                     const auto ra = rc::reaim_on_anchor(g);
-                    door_reaim_goal_ = std::make_pair(Eigen::Vector2f(rp.as_transform() * ra.p_robot),
-                                                      rc::interaction::wrap_pi(rp.theta + ra.yaw_robot));
+                    // the room-frame goal, yaw = the policy's FORWARD heading (goal_adapter.h, the one pose conversion)
+                    const auto gs = rc::policy::reaim_place_goal(rp, ra.p_robot, ra.yaw_robot, 0.f, 0.f);
+                    door_reaim_goal_ = std::make_pair(gs.goal.p, gs.goal.yaw.value_or(0.f));
                 }
                 if (not front_of_open)
                     why_not = std::format("P(open) {:.2f}{} · seen {} · s {:+.2f} m{} · e {:+.2f} m of ±{:.2f}{} · heading {:+.0f} deg{}",

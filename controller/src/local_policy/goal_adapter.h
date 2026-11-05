@@ -48,6 +48,7 @@ inline Pose2 to_policy_pose(const ControllerRobotPose& r)
 //   controller's body angle that faces it is yaw - pi/2 (the inverse of to_policy_pose).
 inline float facing_yaw_to_theta(float yaw) { return yaw - std::numbers::pi_v<float> / 2.f; }
 
+
 struct SessionCommand { float adv = 0.f, side = 0.f, rot = 0.f; };
 // A differential base: side is always 0 (Shadow's bridge drops it). rot = +w (see the header note).
 inline SessionCommand to_session_command(float v, float w) { return {v, 0.f, w}; }
@@ -112,6 +113,17 @@ inline GoalSpec place_goal(const Eigen::Vector2f& p, std::optional<float> yaw, f
     s.goal = Goal{.kind = Goal::Kind::Place, .p = p, .yaw = yaw, .tol_xy = tol_xy, .tol_yaw = tol_yaw};
     s.points = {p};
     return s;
+}
+// The vantage RE-AIM (door-passable spec step 2): a robot-frame point (x right, y forward) and a turn `yaw_robot` from the
+// robot's forward (CCW) — rc::reaim_on_anchor — as a room-frame Place goal. The goal's yaw is the policy's FORWARD heading:
+// the robot faces theta + pi/2 now, so after the turn it faces theta + pi/2 + yaw_robot (final review C1: theta + yaw_robot
+// aimed the body ALONG the wall, and the re-aim arrived misfaced for ever).
+inline GoalSpec reaim_place_goal(const ControllerRobotPose& r, const Eigen::Vector2f& p_robot, float yaw_robot, float tol_xy,
+                                 float tol_yaw)
+{
+    const Eigen::Vector2f p = r.pos + Eigen::Rotation2Df(r.theta) * p_robot;
+    return place_goal(p, std::remainder(r.theta + std::numbers::pi_v<float> / 2.f + yaw_robot, 2.f * std::numbers::pi_v<float>),
+                      tol_xy, tol_yaw);
 }
 // "Turn to face yaw, here": Heading goals hold position (round-4 ruling); the field is seeded at the robot.
 // ★ CONTRACT: a Heading goal's p IS its hold position (`here`) — decide() charges displacement from it as negative progress
