@@ -1,5 +1,5 @@
-// ADOPTION AFTER A RECOGNITION SWAP, RelocMode = "rivals" (spec 2026-11-01-relocaliser-redesign sec 6).
-// Replaces the legacy one-scan forced search (run_late_recall_search) by a JOINT fit of the last M keyframes against the
+// ADOPTION AFTER A RECOGNITION SWAP (spec 2026-11-01-relocaliser-redesign sec 6).
+// A JOINT fit of the last M keyframes against the
 // remembered room K, around ltsm's T(K<-P) prior with its covariance (rc::rivals::multi_scan_fit, which calls the
 // relocaliser's own per-point likelihood). The fit runs on a one-off worker with deep-copied inputs (no DSR, no Qt); the
 // compute thread only pushes keyframes, launches the job and applies a finished result.

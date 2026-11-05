@@ -158,7 +158,7 @@
 
 - [x] Step 1 (needs the user's live runs): record 3–4 tours with `ScanTape.Enabled` (forward, backwards, a parked minute with a person walking, one manual push).
 - [x] Step 2: replay both modes; metrics per §9: false relocalisations/h while healthy (|gt−est| < 5 cm), worst/p99 pose error, recovery on ≥ 300 injected kidnaps (median ≤ 0.5 s, p95 ≤ 1.5 s, ≥ 99 %), mirrored-room healthy segments (0 flips), hot-path p99 (< 1 ms). Report table.
-- [ ] Step 3: if rivals meets the §9 bar: delete the legacy path in the same change, keep the selftest (rivals only), build, live tour (forward + backwards) with nominal rates, commit `room_concept: relocaliser = rival hypotheses; legacy deleted`. If not: report where it loses, change nothing.
+- [x] Step 3 (code deleted 2026-11-05, offline; the live tour waits for the user): if rivals meets the §9 bar: delete the legacy path in the same change, keep the selftest (rivals only), build, live tour (forward + backwards) with nominal rates, commit `room_concept: relocaliser = rival hypotheses; legacy deleted`. If not: report where it loses, change nothing.
 
 ## Ledger: Task 7 A/B results (reloc_tape_replay, warm43/44/45, `--kidnaps 300 --people-kidnaps 100 --mirror 12`)
 

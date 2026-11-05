@@ -33,20 +33,22 @@ using rc::RoomConcept;
 
 namespace rc
 {
-    /// Test access to the late-recall search (declared friend in RoomConcept).
+    /// Test access to the late-recall verdict (declared friend in RoomConcept).
     struct RelocSelftestAccess
     {
-        static void late(RoomConcept& r, const std::vector<Eigen::Vector3f>& pts) { r.run_late_recall_search(pts); }
-        static void stale_emission(RoomConcept& r) { r.track_mu_ln_s_ = std::log(1.5f); r.track_var_ln_s_ = 1e-4f; }
         static void evidence(RoomConcept& r, float s, float nov = 1.f) { r.accumulate_late_evidence(s, nov); }
         static double log_odds(RoomConcept& r) { return r.late_log_odds_; }
+        /// The verdict's per-scan LLR "tracking-like vs broad" for a median |SDF| s: the two fixed densities of
+        /// accumulate_late_evidence (one-sided Gaussian in ln s, spread 2 sigma^2; log-uniform over [lost_s_min, lost_s_max]).
         static double llr(RoomConcept& r, float s)
         {
-            const double v = static_cast<double>(r.params.reloc_track_log_sigma) * r.params.reloc_track_log_sigma;
-            return r.log_tracking_emission(s, v) - r.log_broad_emission(s);
+            const auto& p = r.params;
+            const double smin = std::max(p.reloc_lost_s_min, 1e-4f), smax = std::max(static_cast<double>(p.reloc_lost_s_max), smin * 1.001);
+            const double v = 2.0 * static_cast<double>(p.reloc_track_log_sigma) * p.reloc_track_log_sigma;
+            const double dev = std::max(0.0, std::log(std::clamp(static_cast<double>(s), smin, smax))
+                                                 - std::log(std::max(static_cast<double>(p.reloc_track_s_median), 1e-4)));
+            return (-0.5 * std::log(2.0 * M_PI * v) - 0.5 * dev * dev / v) + std::log(std::log(smax / smin));
         }
-        static double lost(RoomConcept& r) { return r.belief_[RoomConcept::kLost]; }
-        static float track_mu(RoomConcept& r) { return r.track_mu_ln_s_; }
     };
 }
 
@@ -177,8 +179,9 @@ void proto_exclusion_section()
 /// ── late_recall (Task 9) ────────────────────────────────────────────────────────────────────────────────────
 /// A late recall hands room_concept a pose prior (the recogniser's posterior of "I am in K, here"). The robot is
 /// already inside a symmetric (rectangular) room and the tracker sits in a provisional frame at an arbitrary
-/// offset; the search must (a) let the prior break the 180 deg tie, (b) be overruled by the scan when the prior is
-/// 3 m off but its covariance admits the truth, (c) leave every number untouched when the prior is empty.
+/// offset; the search (rc::reloc::search, shared by the adoption's multi-scan fit and the proposer) must (a) let the prior
+/// break the 180 deg tie, (b) be overruled by the scan when the prior is 3 m off but its covariance admits the truth,
+/// (c) leave every number untouched when the prior is empty. Then the VERDICT accumulator, (d)-(h).
 void late_recall_section()
 {
     std::printf("\n[late_recall] pose prior in the relocalisation mixture search\n");
@@ -263,32 +266,28 @@ void late_recall_section()
                and res_c.modes[i].weight == free_res.modes[i].weight and res_c.modes[i].log_weight == free_res.modes[i].log_weight;
     check("(c) an empty prior reproduces today's result bit-for-bit", same, "");
 
-// (d)/(e): the ADOPTION VERDICT. The room was adopted from a late recall; the one search that judges it runs on the
-// next scan. A remembered layout that explains the scan is Accepted; one that explains it no better than clutter
-// is Rejected (the signal ltsm's undo is built on: valid = false on the recall node, written by the scene graph).
-// Tracker initialised in a provisional frame (an arbitrary SE(2) offset, and a tracking emission learnt there that is
-// absurdly stale), then NOISY scans, one search per scan: the accumulating verdict must never reject a correct K.
+// (d)/(e): the ADOPTION VERDICT accumulator. The room was adopted from a late recall; each scan's misfit of the tracker's
+// own pose in the remembered layout feeds it. A remembered layout that explains the scans is Accepted; one that explains
+// them no better than clutter is Rejected (the signal ltsm's undo is built on: valid = false on the recall node, written
+// by the scene graph). Tracker initialised in a provisional frame (an arbitrary SE(2) offset), then NOISY scans: the
+// accumulating verdict must never reject a correct K. (The multi-scan fit that feeds the live accumulator is exercised by
+// reloc_selftest W; the pre-redesign single forced search that used to start this is deleted.)
 const auto verdict_for = [&](const std::vector<Eigen::Vector2f>& remembered, const Eigen::Vector3f& at, bool* ever_rejected = nullptr)
 {
     rc::RoomConcept rcn;
     rcn.set_polygon_room(remembered);
     rcn.set_robot_pose(provisional.x(), provisional.y(), provisional.z(), false);
-    rc::RelocSelftestAccess::stale_emission(rcn);
     rc::reloc::PriorMode m;
     m.mu = at; m.S = Eigen::Vector3f(0.04f, 0.04f, 0.02f).asDiagonal();
     rcn.seed_reloc_prior({m});
-    const bool pending = rcn.late_recall_verdict() == RoomConcept::LateVerdict::Pending
-                         and rc::RelocSelftestAccess::track_mu(rcn) != std::log(1.5f);   // the emission was reset
+    const bool pending = rcn.late_recall_verdict() == RoomConcept::LateVerdict::Pending;
     std::mt19937 nrng(4242);
     for (int k = 0; k < 60 and rcn.late_recall_verdict() == RoomConcept::LateVerdict::Pending; ++k)
     {
         const auto sc = synth_scan(truth, 360, 0.03f, nrng);   // noisier than the first-scan section
-        std::vector<Eigen::Vector3f> p3;
         std::vector<Eigen::Vector2f> p2;
-        for (const auto& q : sc) { p3.emplace_back(q.x(), q.y(), 0.f); p2.emplace_back(q.x(), q.y()); }
-        if (k == 0) rc::RelocSelftestAccess::late(rcn, p3);   // the one forced search, at adoption
-        else
-        {   // normal tracking's misfit: median |SDF| of the scan at the tracker's own pose in the remembered layout
+        for (const auto& q : sc) p2.emplace_back(q.x(), q.y());
+        {   // the misfit: median |SDF| of the scan at the tracker's own pose in the remembered layout
             const auto st = rcn.get_current_state();
             float med = 0.f;
             rc::reloc::log_likelihood(remembered, p2, Eigen::Vector3f(st[2], st[3], st[4]), rc::reloc::Params{}, 10.f, &med);
@@ -307,8 +306,8 @@ const auto [pend_e, ver_e] = verdict_for(other, Eigen::Vector3f(0.f, 0.f, 0.f));
 check("(e) a layout that cannot explain the scan is REJECTED", pend_e and ver_e == RoomConcept::LateVerdict::Rejected,
       (std::snprintf(buf, sizeof buf, "pending-before=%d verdict=%d", pend_e ? 1 : 0, static_cast<int>(ver_e)), buf));
 
-// (f) WEAK evidence: s where the two emissions are equally likely (LLR ~ 0). Reading it never disturbs tracking (pose and
-// lost belief untouched), and it either reaches a verdict or stays Pending (= no objection), never Rejected for no reason.
+// (f) WEAK evidence: s where the two emissions are equally likely (LLR ~ 0). Reading it never disturbs tracking (the pose
+// is untouched), and it either reaches a verdict or stays Pending (= no objection), never Rejected for no reason.
 {
     rc::RoomConcept rcn;
     rcn.set_polygon_room(poly);
@@ -322,10 +321,9 @@ check("(e) a layout that cannot explain the scan is REJECTED", pend_e and ver_e 
         (rc::RelocSelftestAccess::llr(rcn, mid) > 0.0 ? lo : hi) = mid;
     }
     const auto before = rcn.get_current_state();
-    const double lost_before = rc::RelocSelftestAccess::lost(rcn);
     for (int i = 0; i < 200; ++i) rc::RelocSelftestAccess::evidence(rcn, 0.5f * (lo + hi));
     const auto after = rcn.get_current_state();
-    const bool same = (before - after).norm() == 0.f and rc::RelocSelftestAccess::lost(rcn) == lost_before;
+    const bool same = (before - after).norm() == 0.f;
     const auto vf = rcn.late_recall_verdict();
     check("(f) weak evidence never disturbs tracking, no spurious reject", same and vf != RoomConcept::LateVerdict::Rejected,
           (std::snprintf(buf, sizeof buf, "s0=%.3f verdict=%d untouched=%d", 0.5f * (lo + hi), static_cast<int>(vf), same ? 1 : 0), buf));

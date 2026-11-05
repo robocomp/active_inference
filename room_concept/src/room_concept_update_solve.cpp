@@ -565,8 +565,8 @@ namespace rc
             // Adam. The early-exit path at the bottom of try_prediction_early_exit was already
             // correct (it assigns res.early_exit_metric before logging).
             debug_log_ << ',' << last_early_exit_metric_
-                       << ',' << lost_logodds_
-                       << ',' << rivals_.size()
+                       << ',' << p_rival_pub_.load(std::memory_order_relaxed)
+                       << ',' << rivals_.rivals().size()
                        << ',' << (grid_search_active_.load(std::memory_order_relaxed) ? 1 : 0);
             write_debug_tail();
 

@@ -222,11 +222,6 @@ namespace rc
                             set_polygon_room(arg.vertices);
                         else if constexpr (std::is_same_v<T, CmdSetPose>)
                             set_robot_pose(arg.x, arg.y, arg.theta);
-                        else if constexpr (std::is_same_v<T, CmdGridSearch>)
-                        {
-                            search_trigger_ = "manual";
-                            grid_search_initial_pose(arg.lidar_points, arg.grid_res, arg.angle_res);
-                        }
                     }, cmd);
                 }
             }

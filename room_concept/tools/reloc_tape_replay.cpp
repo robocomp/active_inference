@@ -1,10 +1,10 @@
 /*
- *  reloc_tape_replay.cpp -- offline A/B of the LEGACY and the RIVAL relocaliser on recorded scan tapes (spec 2026-11-01-relocaliser-
- *  redesign.md sec 9; SDD Task 7, steps 1-2).
+ *  reloc_tape_replay.cpp -- offline replay of the rival-hypothesis relocaliser on recorded scan tapes (spec 2026-11-01-relocaliser-
+ *  redesign.md sec 9; SDD Task 7). It was an A/B against the legacy lost-belief relocaliser until that was deleted.
  *
  *  WHAT IS REPLAYED. The tape (scan_tape.h) holds, per relocalisation_step call, what the live tracker committed (pose, covariance),
  *  the odometry increment its predict step used and the scan. Each frame is handed to the REAL RoomConcept::relocalisation_step of a
- *  fresh RoomConcept in either RelocMode (the harness is reloc_selftest's: RelocSelftestAccess + set_robot_pose + step8), exactly the
+ *  fresh RoomConcept (the harness is reloc_selftest's: RelocSelftestAccess + set_robot_pose + step8), exactly the
  *  entry the agent calls. update() is NOT run: the tracker's pose per frame is the tape's, carried by a rigid correction C
  *  ("published = C o tape"). C starts at identity; when a relocaliser moves the pose (reloc_epoch_ ticks), C is re-seated on the new
  *  pose, so everything the tape's tracker does afterwards (its motion AND its own corrections) is applied on top of the relocaliser's
@@ -59,7 +59,6 @@ namespace rc
     {
         static void  step8(RoomConcept& r, const RoomConcept::UpdateResult& res, const std::vector<Eigen::Vector3f>& pts) { r.relocalisation_step(res, pts); }
         static std::uint64_t epoch(RoomConcept& r) { return r.reloc_epoch_.load(); }
-        static void  set_mode(RoomConcept& r, const std::string& m) { r.params.reloc_mode = m; }
         static void  timing_on(RoomConcept& r) { r.rv_timing_on_ = true; }
         static auto& timing(RoomConcept& r) { return r.rv_timing_us_; }
         static Eigen::Matrix3f spread(RoomConcept& r) { return r.rt_.held_spread; }
@@ -67,7 +66,6 @@ namespace rc
         static void set_crossing(RoomConcept& r, bool on) { r.set_crossing(on); r.set_transition_open(on); }   // the scene graph sets both while a cross executes
         static float last_search_ms(RoomConcept& r) { return r.rv_last_search_ms_; }
         static std::uint64_t swaps(RoomConcept& r) { return r.rv_swaps_; }
-        static std::uint64_t searches(RoomConcept& r) { return r.rt_.searches; }
         static void  set_odo(RoomConcept& r, const Eigen::Vector3f& global_delta, const Eigen::Matrix3f& cov)
         { r.last_selected_prior_.valid = true; r.last_selected_prior_.delta_pose = global_delta; r.last_selected_prior_.covariance_eigen = cov; }
         static bool  proposer_busy(RoomConcept& r) { return r.proposer_.busy(); }
@@ -430,12 +428,10 @@ namespace
         const auto& T = cfg.d->tape;
         const Poly& poly = T.rooms[T.frame_room[cfg.a]].polygon;
         rc::RoomConcept rcn;
-        rc::RelocSelftestAccess::set_mode(rcn, cfg.mode);
         rcn.set_polygon_room(poly);
         int rec = -1;
         V3 C = V3::Zero();   // published = C o tape
-        const bool rivals = cfg.mode == "rivals";
-        if (rivals) rc::RelocSelftestAccess::timing_on(rcn);
+        rc::RelocSelftestAccess::timing_on(rcn);
         rcn.set_robot_pose(T.frames[cfg.a].pose.x(), T.frames[cfg.a].pose.y(), T.frames[cfg.a].pose.z(), false);
         for (int f = cfg.a; f < cfg.b; ++f)
         {
@@ -480,7 +476,7 @@ namespace
             const auto t0 = std::chrono::steady_clock::now();
             rc::RelocSelftestAccess::step8(rcn, r, pts3);
             const auto t1 = std::chrono::steady_clock::now();
-            if (rivals) rc::RelocSelftestAccess::wait_proposer(rcn);   // the worker finishes before the next 50 ms frame, as live
+            rc::RelocSelftestAccess::wait_proposer(rcn);   // the worker finishes before the next 50 ms frame, as live
             FOut o;
             o.f = f; o.pre = pt; o.pub = pt;
             o.step_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
@@ -522,14 +518,14 @@ namespace
                     }
                 }
                 C = comp(P, inv(tp));
-                o.latency_ms = rivals ? std::max(0.f, rc::RelocSelftestAccess::last_search_ms(rcn)) : 0.f;
+                o.latency_ms = std::max(0.f, rc::RelocSelftestAccess::last_search_ms(rcn));
             }
             const M3 cov = r.covariance + rc::RelocSelftestAccess::spread(rcn);
             o.cov_maxdiag = cov.diagonal().maxCoeff();
             o.sigma = std::sqrt(std::max(0.f, Eigen::SelfAdjointEigenSolver<Eigen::Matrix2f>(r.covariance.topLeftCorner<2, 2>()).eigenvalues().maxCoeff()));
             out.fr.push_back(o);
         }
-        if (rivals) for (float u : rc::RelocSelftestAccess::timing(rcn)) out.hot_us.push_back(u);
+        for (float u : rc::RelocSelftestAccess::timing(rcn)) out.hot_us.push_back(u);
         return out;
     }
 
@@ -716,7 +712,6 @@ namespace
             std::normal_distribution<float> n01(0.f, 1.f);
             std::uniform_real_distribution<float> u01(0.f, 1.f);
             rc::RoomConcept rcn;
-            rc::RelocSelftestAccess::set_mode(rcn, mode);
             rcn.set_polygon_room(poly);
             const float ph0 = 2 * kPi * u01(rng), wx = 0.9f + 0.3f * u01(rng), wy = 0.7f + 0.3f * u01(rng), dir = u01(rng) < 0.5f ? 1.f : -1.f;
             auto truth_at = [&](double t)   // a slow Lissajous drive, heading along the path
@@ -753,7 +748,7 @@ namespace
                 prev = tr;
                 const auto e0 = rc::RelocSelftestAccess::epoch(rcn);
                 rc::RelocSelftestAccess::step8(rcn, r, p3);
-                if (mode == "rivals") rc::RelocSelftestAccess::wait_proposer(rcn);
+                rc::RelocSelftestAccess::wait_proposer(rcn);
                 if (rc::RelocSelftestAccess::epoch(rcn) != e0)
                 {
                     const auto st = rcn.get_current_state();
@@ -821,7 +816,7 @@ int main(int argc, char** argv)
             std::println("   [{}] visit [{},{}): median|SDF| at the tape pose on the replay's points: p50 {:.3f} p90 {:.3f} m; tracker's recorded sdf_mse p50 {:.3f} p90 {:.3f}; ell p50 {:.0f}",
                          d.label, v.a, v.b, pct(dt, 0.5), pct(dt, 0.9), pct(st, 0.5), pct(st, 0.9), pct(ell, 0.5));
         }
-    const std::vector<std::string> modes = {"legacy", "rivals"};
+    const std::vector<std::string> modes = {"rivals"};   // one relocaliser; the label stays in the report rows
     // ---- E1 -------------------------------------------------------------------------------------------------------------------
     // ---- E1b: a push / drag recorded on a tape ---------------------------------------------------------------------------------
     auto push_report = [&](const Data& d, const std::string& mode, const RunOut& ro, int a)

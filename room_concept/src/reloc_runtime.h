@@ -14,29 +14,23 @@ namespace rc::reloc
 {
     struct Runtime
     {
-        /// The last search HELD the pose (msprt_decide → Hold): nothing decisive, the held pose alive; rivals carry it.
-        bool last_search_held = false;
-        /// A held episode is open: its rivals accumulate what the search could not decide; re-searching would re-seed
-        /// them and discard that. Ends when they resolve, are rejected (lower SPRT bound) or empty, or P(lost) < ½.
-        bool hold_open = false;
-        std::uint64_t searches = 0;                              ///< searches fired by the lost belief (diagnostic)
+        std::uint64_t searches = 0;                              ///< multi-scan late-recall fits applied (diagnostic)
         std::optional<rc::passage::Passage> pending_passage;     ///< set by note_passage_handover, consumed with the reset
         std::optional<rc::passage::Passage> passage;             ///< the passage of the last hand-over
         std::vector<rc::passage::Anchor>    door_anchor;         ///< forward / reversed components, carried by odometry
-        Eigen::Matrix3f held_spread = Eigen::Matrix3f::Zero();   ///< while a held episode is open: Σ w_k d_k d_kᵀ
+        Eigen::Matrix3f held_spread = Eigen::Matrix3f::Zero();   ///< while rivals carry mass: Σ w_k d_k d_kᵀ about the pose
         int   door_anchor_frames = 0;                            ///< frames since: the kidnap hazard's exposure
         Eigen::Vector3f anchor_prev_est = Eigen::Vector3f::Zero();   ///< the pose the next prediction is built on
         bool  anchor_prev_valid = false;
         float passage_term = 0.f;                                ///< this frame's doorway term (0 = none)
-        float view_beyond  = 0.f;                                ///< this frame's through-a-doorway fraction (Task R2)
     };
 
     /// The room's doorways as the SCAN sees them, ROOM (internal) frame: the door list, the crossed door at the geometry
     /// the crossing measured (Task R1b: the 1 Hz list misplaces it for ~1 s after a hand-over), each seated on the
     /// room's own boundary (DoorApertures::seat_in_room). One source for the tracker's per-beam weights, the
-    /// relocaliser's likelihood and the lost belief's view-through-the-door fraction (Task R2).
+    /// relocaliser's likelihood.
     /// `passage_only`: also add the crossed door when the door list does not carry it (the tracker's weights do). The
-    /// relocaliser and the view fraction pass false: they score a doorway only on door_concept's LIVE open/leaf
+    /// relocaliser passes false: it scores a doorway only on door_concept's LIVE open/leaf
     /// belief — the passage alone carries the p_open of the crossing instant, never updated, and a doorway asserted open
     /// is strong evidence (every return at its line is charged as "should have been beyond").
     inline std::vector<DoorAperture> seated_doors(std::vector<DoorAperture> doors,
@@ -82,24 +76,6 @@ namespace rc::reloc
         return out;
     }
 
-    /// The fraction of the scan the room does NOT owe: the mean, over its returns, of the tracker's own posterior that a
-    /// return came from beyond an open doorway (1 − DoorApertures::weight) under `pose`. Room frame, points in the robot
-    /// frame. 0 with no doorway in view.
-    inline float view_beyond_fraction(const std::vector<DoorAperture>& seated, const Eigen::Vector3f& pose,
-                                      const std::vector<Eigen::Vector3f>& pts_robot, float sigma_obs)
-    {
-        if (seated.empty() or pts_robot.empty()) return 0.f;
-        const float c = std::cos(pose.z()), s = std::sin(pose.z());
-        const Eigen::Vector2f o = pose.head<2>();
-        double acc = 0.0;
-        for (const auto& p : pts_robot)
-        {
-            const Eigen::Vector2f q(c * p.x() - s * p.y() + o.x(), s * p.x() + c * p.y() + o.y());
-            acc += 1.0 - static_cast<double>(DoorApertures::weight(seated, o, q, sigma_obs));
-        }
-        return static_cast<float>(acc / static_cast<double>(pts_robot.size()));
-    }
-
     /// Pose information of a Gaussian in nats: KL(N(·, Σ) ‖ uniform over the room × the circle) = log(area·2π) − H(N),
     /// H = ½ log((2πe)³ |Σ|). Zero or less ⇔ it says no more than "somewhere in the room".
     inline double gaussian_information(const Eigen::Matrix3f& cov, double area)
@@ -121,7 +97,4 @@ namespace rc::reloc
         }
         return info - hw;
     }
-
-    /// A lost search's posterior over its modes and the held pose (RoomConcept::mode_posterior).
-    struct ModePosterior { std::vector<double> log_post; int top_idx = 0, keep_idx = -1; bool keep_travelled = false; };
 }   // namespace rc::reloc

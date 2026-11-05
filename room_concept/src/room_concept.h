@@ -33,9 +33,9 @@
 #include "corner_detector.h"
 #include "wall_map.h"
 #include "scan_tape.h"
-#include "reloc_rivals.h"      // rc::rivals::Belief (RelocMode = "rivals")
+#include "reloc_rivals.h"      // rc::rivals::Belief 
 #include "reloc_proposer.h"    // rc::rivals::Proposer
-#include "multi_scan_fit.h"     // rc::rivals::multi_scan_fit (adoption after a recognition swap, RelocMode = "rivals")
+#include "multi_scan_fit.h"     // rc::rivals::multi_scan_fit (adoption after a recognition swap)
 #include <future>
 #include "room_boxes_channel.h"   // the box layout sidecar; it reaches into nothing here
 #include "rerun_logger.h"
@@ -103,8 +103,7 @@ public:
     /// Thread-safe command variants (pushed from UI thread, drained in run loop)
     struct CmdSetPolygon  { std::vector<Eigen::Vector2f> vertices; };
     struct CmdSetPose     { float x; float y; float theta; };
-    struct CmdGridSearch  { std::vector<Eigen::Vector3f> lidar_points; float grid_res; float angle_res; };
-    using Command = std::variant<CmdSetPolygon, CmdSetPose, CmdGridSearch>;
+    using Command = std::variant<CmdSetPolygon, CmdSetPose>;
 
     RoomConcept() = default;
     ~RoomConcept();
@@ -348,7 +347,7 @@ public:
     bool map_layout_adopted() const { return map_layout_adopted_; }
     /// A recall hand-over through `p`: its doorway term and door anchor enter the relocaliser (passage_prior.h).
     void note_passage_handover(const rc::passage::Passage& p);
-    /// The pose is undecided: P(lost) ≥ ½ or a held episode is open (published as the room's `is_lost`).
+    /// The pose is undecided: the rivals hold the majority of the posterior mass (P(rival) ≥ ½) (published as the room's `is_lost`).
     bool pose_undecided() const { return pose_undecided_.load(std::memory_order_relaxed); }
     /// An ACCEPTED refinement edit (layout_refiner.h): the given room becomes `L` (INTERNAL frame) — same frame,
     /// same gauge, the SDF the localiser solves against is rebuilt; nothing else changes. Localiser thread.
@@ -438,13 +437,11 @@ public:
     /// exists because the GUI polls at ~15-30 Hz from another thread: a search that completes between
     /// two polls would otherwise never be seen, and the operator would have no way to tell a search
     /// from a freeze. Safe to call from any thread (two atomics, no lock).
-    /// "RELOCALISING" as the operator means it: a search is running, OR the localiser's own lost-belief filter no
-    /// longer believes it is tracking (P(TRACKING) < ½ — the label names the more probable state). The search alone
-    /// lasts ~80 ms; after a kidnap the pose can be wrong for tens of seconds between searches, and the window said
-    /// ROOM STABLE throughout (2026-10-18, user). Safe from any thread.
+    /// "RELOCALISING" as the operator means it: the start-up search is running, OR the majority of the posterior mass is
+    /// off the tracker's pose (the rival belief's P(rival) >= ½; pose_undecided_). Safe from any thread.
     bool is_relocalising() const
     {
-        return is_grid_searching() or p_track_display_.load(std::memory_order_relaxed) < 0.5f;
+        return is_grid_searching() or pose_undecided_.load(std::memory_order_relaxed);
     }
     bool is_grid_searching(int hold_ms = 1500) const
     {
@@ -457,19 +454,19 @@ public:
         return (now - ended) < hold_ms;
     }
 
-    // Grid search for initial pose (solves kidnapping problem)
-    // Returns true if a good pose was found, false otherwise
+    // The START-UP search for the initial pose (bootstrap + seed validation); the running agent never calls it.
+    // Returns true if a search ran, false otherwise
     bool grid_search_initial_pose(const std::vector<Eigen::Vector3f>& lidar_points,
                                    float grid_resolution = 0.5f,  // meters
                                    float angle_resolution = M_PI_4);  // 45 degrees
     /// ── LATE ADOPTION OF A RECALLED ROOM (Task 9) ────────────────────────────────────────────────────────────────
-    /// The recogniser's posterior of "I am in the remembered room K, here" as pose modes in K's frame. Arms ONE
-    /// relocalisation search on the next scan, run against the room that was just adopted as the GIVEN one: the tracker's
-    /// pose belongs to the abandoned provisional frame, so the search is the lost branch (P(lost) = 1) with these modes as
-    /// its prior — a continuity term in each mode's weight (reloc_search.h, PriorMode), never a gate. Its outcome is the
-    /// verdict below. Thread-safe (the scene graph arms it, the localiser thread runs it).
-    /// Also commits the prior's heaviest mean as the pose AT ONCE (the search refines it), so the new frame never pairs with
-    /// a provisional-frame pose, and resets the tracking emission (it was learnt in the abandoned frame). Called from the
+    /// The recogniser's posterior of "I am in the remembered room K, here" as pose modes in K's frame. Arms the multi-scan
+    /// fit (room_concept_reloc_late_fit.cpp) on the scans that follow, run against the room that was just adopted as the
+    /// GIVEN one: the tracker's pose belongs to the abandoned provisional frame, so the fit is centred on these modes (a
+    /// prior with its covariance, never a gate). Its outcome is the verdict below. Thread-safe (the scene graph arms it,
+    /// the localiser thread runs it).
+    /// Also commits the prior's heaviest mean as the pose AT ONCE (the fit refines it), so the new frame never pairs with
+    /// a provisional-frame pose. Called from the
     /// scene graph's update(), which runs on the localiser thread.
     /// prior_log_odds = ln P(K)/P(new) of the recogniser at adoption: the adoption test's starting log-odds (0 = even).
     void seed_reloc_prior(const std::vector<rc::reloc::PriorMode>& modes, double prior_log_odds = 0.0);
@@ -483,7 +480,7 @@ public:
     bool begin_hypothesis_fit(std::vector<Eigen::Vector2f> K_int, const std::vector<rc::reloc::PriorMode>& modes,
                               double prior_log_odds);
     /// Rejected / withdrawn: the survey is restored exactly as it was (layout flags, derived/model polygons, WallMap
-    /// untouched, tracking emission, lost belief) and the pose goes back to plain SLAM's shadow pose.
+    /// untouched, rival belief) and the pose goes back to plain SLAM's shadow pose.
     void end_hypothesis_fit();
     /// Accepted: K stays the given room; the snapshot is dropped.
     void keep_hypothesis_fit();
@@ -494,12 +491,12 @@ public:
     [[nodiscard]] std::optional<rc::publish::SurveyPose> survey_pose_during_fit() const;
     enum class LateVerdict : int { None = 0, Pending = 1, Accepted = 2, Rejected = 3 };
     /// Pending after seed_reloc_prior while scans accumulate evidence; then Accepted or Rejected. The evidence per scan
-    /// is the log-likelihood ratio "the median |SDF| is tracking-like vs broad" (the lost belief's own two emissions) of the
-    /// forced search at adoption and then of normal tracking, summed WITHOUT forgetting; decided at the sequential-test
+    /// is the log-likelihood ratio "the median |SDF| is tracking-like vs broad" (two fixed densities, accumulate_late_evidence) of the
+    /// adoption's multi-scan fit, summed WITHOUT forgetting; decided at the sequential-test
     /// boundary +-ln 19 (Wald SPRT, alpha = beta = 0.05). Weak evidence stays Pending (= no objection). A single noisy
     /// scan during the jump cannot reject. None until a prior was ever seeded.
     [[nodiscard]] LateVerdict late_recall_verdict() const { return static_cast<LateVerdict>(late_verdict_.load(std::memory_order_acquire)); }
-    /// The rival pose modes the localiser is carrying (thread-safe copy). Empty ⇔ the pose is unambiguous.
+    /// The rivals the localiser is carrying: pose + ln odds against the tracker's pose (thread-safe copy). Empty ⇔ the pose is unambiguous.
     std::vector<rc::reloc::PoseHypothesis> pose_hypotheses() const
     {
         std::scoped_lock lk(rival_snapshot_mutex_);
@@ -769,36 +766,20 @@ private:
    float flip_prev_x_ = 0.f, flip_prev_y_ = 0.f, flip_prev_th_ = 0.f;
    bool  flip_prev_valid_ = false;
 
-   friend struct RelocSelftestAccess;   // tools/reloc_selftest.cpp drives the belief and the rivals directly
-   // ===== Relocalisation state (see Params, "Relocalisation") =====
-   // Three-state HMM filter over {TRACKING, LOST, MISMATCH} and the online tracking emission of ln s.
-   // LOST and MISMATCH (the view changed: a door opened, furniture moved, the map is off) emit s
-   // identically, so s alone cannot separate them — the SEARCH is the experiment that does: after a kidnap
-   // some pose explains the scan the way tracking does; in a changed view none can.
-   enum BeliefState : std::size_t { kTrack = 0, kLost = 1, kMismatch = 2 };
-   std::array<double, 3> belief_{1.0, 0.0, 0.0};
-   bool  belief_init_       = false;
-   std::atomic<bool>  belief_reset_requested_{false};   ///< a new given room was adopted: reset the lost belief next frame
+   friend struct RelocSelftestAccess;   // tools/reloc_selftest.cpp drives the rival belief directly
+   // ===== Relocalisation state (see Params, "Relocalisation"; room_concept_reloc_rivals.cpp) =====
+   std::atomic<bool>  belief_reset_requested_{false};   ///< a new given room was adopted / a hand-over arrived: restart the rival belief next frame
    std::mutex passage_mutex_;                   ///< guards rt_.pending_passage (note_passage_handover)
    mutable std::mutex late_prior_mutex_;                ///< guards late_prior_ (seed_reloc_prior)
    std::vector<rc::reloc::PriorMode> late_prior_;
    std::atomic<bool> late_pending_{false};      ///< a late-recall search is armed
-   // 2026-11-01 diagnostics (pingpong36 leg 2: a correct pose misfit 0.24 m after the switch): the last hand-over's time and
-   // the doorway record (tmp/reloc_doorway.csv), written for 15 s after each hand-over. Observability only.
-   std::int64_t handover_ts_ms_ = 0;
-   std::ofstream doorway_csv_;
-   std::ofstream doorway_pts_csv_;          // tmp/reloc_doorway_points.csv: the points of the first 2 s after each hand-over
-   std::int64_t doorway_poly_written_for_ = 0;   // the hand-over whose outline was written
+   std::int64_t handover_ts_ms_ = 0;            ///< the last hand-over's time (the door anchor's age in the log)
    std::atomic<int>  late_verdict_{0};          ///< LateVerdict
-   // late_log_odds_, late_forced_done_, last_search_top_median_ and the track_* emission are non-atomic: owned by the LOCALISER
+   // late_log_odds_ and late_forced_done_ are non-atomic: owned by the LOCALISER
    // thread (RoomConcept::run -> relocalisation_step, and the scene graph's update() it calls inline, which seeds them).
    double late_log_odds_ = 0.0;                 ///< accumulated log-odds that K's layout explains the scans
-   float  last_search_top_median_ = std::numeric_limits<float>::quiet_NaN();   ///< top mode's median |SDF| of the last search
-   bool late_search_active_ = false;            ///< localiser thread: reloc_params() carries late_prior_
-   bool late_forced_this_frame_ = false;        ///< the forced search consumed this frame's scan
-   bool late_forced_done_ = false;              ///< the one forced lost-branch search at adoption has run
-   void run_late_recall_search(const std::vector<Eigen::Vector3f>& lidar_points);
-   // ── RelocMode = "rivals": the adoption fit is the last M keyframes jointly (spec sec 6; multi_scan_fit.h) ──
+   bool late_forced_done_ = false;              ///< the adoption's multi-scan fit has been applied
+   // ── the adoption fit is the last M keyframes jointly (spec sec 6; multi_scan_fit.h) ──
    void run_late_recall_fit(const std::vector<Eigen::Vector3f>& lidar_points);
    struct LateKeyframe { Eigen::Vector3f pose; std::vector<Eigen::Vector2f> pts; };   ///< tracker pose (current frame) + subsampled scan
    std::deque<LateKeyframe> late_ring_;           ///< localiser thread; cleared by seed_reloc_prior (its pose jump breaks relative poses)
@@ -810,73 +791,34 @@ private:
    void accumulate_late_evidence(float s, float novelty);      ///< one scan's LLR into late_log_odds_ (localiser thread only)
    rc::reloc::Runtime rt_;                      ///< Task R1/R1b relocalisation runtime (reloc_runtime.h)
    std::atomic<bool> pose_undecided_{false};
-   std::atomic<float> p_track_display_{1.f};   ///< P(TRACKING) mirrored for the GUI thread (is_relocalising)
-   float lost_logodds_      = std::numeric_limits<float>::quiet_NaN();   // logit P(LOST) — for the logs
-   float track_mu_ln_s_     = std::numeric_limits<float>::quiet_NaN();   // NaN ⇒ seed from the params
-   float track_var_ln_s_    = std::numeric_limits<float>::quiet_NaN();
-   /// Filter one frame's s; returns P(LOST). `outside` (P past a doorway) mixes the evidence away.
-   /// `view_change` ∈ [0,1]: how new this frame's view is (pose step in the likelihood's basin). It scales the
-   /// MISMATCH → TRACKING return and the emission learning; 1 = the old per-frame behaviour.
-   float update_lost_belief(float s, float outside, float view_change = 1.f);
-   Eigen::Vector3f belief_prev_pose_ = Eigen::Vector3f::Zero();
-   bool  belief_prev_pose_valid_ = false;
-   float last_search_top_weight_ = 0.f;   ///< posterior weight of the mode the last search committed/confirmed
-   void  reset_lost_belief();                       // → TRACKING (after a move, or at start)
-   void  set_belief_mismatch();                     // → MISMATCH (a search found nothing better to move to)
-   /// `extra_var` ADDS to the learnt spread of ln s (never replaces it): the steady-state filter's fit and a
-   /// freshly polished single-scan pose's fit are different quantities, and the second carries pose error too.
-   double log_tracking_emission(float s, double extra_var = 0.0);
-   double log_broad_emission(float s) const;
-   /// True when a FRESH pose (a search mode, a rival) whose median |SDF| is s is better explained as TRACKING
-   /// than as a broad misfit. Its spread is the learnt one plus the prior population spread of ln s.
-   bool  explains_like_tracking(float s)
-   {
-       const double prior_var = static_cast<double>(params.reloc_track_log_sigma) * params.reloc_track_log_sigma;
-       return log_tracking_emission(s, prior_var) > log_broad_emission(s);
-   }
-   /// Fire the search from the lost belief and fold its outcome back into the belief.
-   void  relocalise_from_belief(const std::vector<Eigen::Vector3f>& lidar_points, float s, float p_lost);
-   bool  last_search_moved_ = false;
+   Eigen::Vector3f view_prev_pose_ = Eigen::Vector3f::Zero();
+   bool  view_prev_pose_valid_ = false;
    /// Commit a relocalised pose as a DISCRETE JUMP: model tensors, the prediction base (last_update_result —
    /// the next frame predicts from it, not from the tensors), smoothing, last-good pose, window and stride
    /// state, and the publisher's clamp-release epoch. Every relocalisation that moves the pose goes through here.
    void  commit_relocalised_pose(const Eigen::Vector3f& pose, const Eigen::Matrix3f& cov);
-   /// Section 8 of the localisation loop, one frame: rival modes, the lost belief, and the search it fires.
+   /// Section 8 of the localisation loop, one frame: the rival belief (and the door anchor it prices births with).
    /// A method (not inline in run()) so tools/reloc_selftest can drive it through the real update().
    void  relocalisation_step(const UpdateResult& res, const std::vector<Eigen::Vector3f>& lidar_points);
    std::atomic<std::uint64_t> reloc_epoch_{0};   // see UpdateResult::reloc_epoch
-   /// A carried rival mode: its pose and its log-likelihood ratio against the committed pose.
-   struct RivalMode { Eigen::Vector3f pose; float llr = 0.f; };
-   std::vector<RivalMode> rivals_;
    struct HypothesisSnapshot   ///< what begin_hypothesis_fit overwrites, restored by end_hypothesis_fit
    {
        std::vector<Eigen::Vector2f> map_layout, derived_polygon, init_polygon, model_polygon;
        bool map_layout_adopted = false, map_ready = false, wall_frozen = false, wall_reanchored = false;
-       bool init_use_polygon = false, belief_init = false, belief_reset_requested = false;
-       float track_mu = 0.f, track_var = 0.f, lost_logodds = 0.f, p_track = 1.f;
-       std::array<double, 3> belief{1.0, 0.0, 0.0};
-       std::vector<RivalMode> rivals;
-       Eigen::Vector3f rival_ref_pose = Eigen::Vector3f::Zero();
-       bool rival_ref_valid = false;
+       bool init_use_polygon = false, belief_reset_requested = false;
        Eigen::Matrix3f covariance = Eigen::Matrix3f::Identity();
    };
    std::optional<HypothesisSnapshot> hypothesis_;
    mutable std::mutex rival_snapshot_mutex_;
    std::vector<rc::reloc::PoseHypothesis> rival_snapshot_;   // copy for the main thread (scene graph → planner)
    void publish_rival_snapshot();
-   Eigen::Vector3f rival_ref_pose_ = Eigen::Vector3f::Zero();   // committed pose rivals were last moved with
-   bool            rival_ref_valid_ = false;
-   /// Move rivals with the robot's motion, score them against the committed pose, switch when SPRT passes.
-   void step_rival_modes(const std::vector<Eigen::Vector3f>& lidar_points);
    /// Carry the door anchor (passage_prior.h) by this frame's odometry increment.
    void step_door_anchor(const UpdateResult& res);
-   // ── RelocMode = "rivals" (room_concept_reloc_rivals.cpp; spec 2026-11-01-relocaliser-redesign) ──
-   // NB the legacy `rivals_` above is a different object (SPRT modes); this is the Bayes-factor belief.
+   // ── the rival-hypothesis belief (room_concept_reloc_rivals.cpp; spec 2026-11-01-relocaliser-redesign) ──
    void step_rivals(const UpdateResult& res, const std::vector<Eigen::Vector3f>& lidar_points);
    void clear_rival_belief();                    ///< room change / disarm: drop rivals, stale proposer results, job context
-   bool rivals_mode() const { return params.reloc_mode == "rivals"; }
-   rc::rivals::Belief   rbelief_;
-   bool                 rbelief_ready_ = false;
+   rc::rivals::Belief   rivals_;
+   bool                 rivals_ready_ = false;
    rc::rivals::Proposer proposer_;
    std::uint64_t        room_epoch_ = 0;         ///< bumped on every room change and every swap: a proposer result carries its epoch
    struct RivalPrior                             ///< H0's prior at one frame (spec sec 3, 5): what a birth is priced against
@@ -893,7 +835,7 @@ private:
        RivalPrior prior;
        std::vector<Eigen::Vector2f> pts;
        rc::reloc::Params rp;
-       Eigen::Matrix3f basin = Eigen::Matrix3f::Zero();   ///< the width of one basin of the likelihood (legacy relocalise_from_belief)
+       Eigen::Matrix3f basin = Eigen::Matrix3f::Zero();   ///< the width of one basin of the likelihood 
        Eigen::Vector3f odo = Eigen::Vector3f::Zero();   ///< H0's body motion since the scan (composed)
    };
    std::optional<RivalJob> rival_job_;
@@ -914,17 +856,11 @@ private:
    std::vector<float> rv_timing_us_;                         ///< hot-path time per step (selftest, rv_timing_on_)
    bool            rv_timing_on_ = false;
    std::atomic<float> p_rival_pub_{0.f};
-   using ModePosterior = rc::reloc::ModePosterior;   ///< a lost search's posterior (room_concept_reloc_modes.cpp)
-   ModePosterior mode_posterior(rc::reloc::Result& res, const std::vector<Eigen::Vector2f>& poly,
-                                const std::vector<Eigen::Vector2f>& pts2, const Eigen::Vector3f& incumbent,
-                                const rc::reloc::Params& rp, const Eigen::Matrix3f& basin);
    // Likelihood raster for the current room polygon, rebuilt when the polygon changes.
    rc::reloc::LikelihoodRaster reloc_raster_;
    std::vector<Eigen::Vector2f> reloc_raster_poly_;
    rc::reloc::Params reloc_params() const;
    std::vector<Eigen::Vector2f> current_room_polygon() const;
-   bool  last_search_confirmed_incumbent_ = false;   // the last search's top mode WAS the pose it was handed
-   float pending_episode_p_lost_ = std::numeric_limits<float>::quiet_NaN();   // for the episode row
 
    // ===== Loss/recovery episode log =====
    // One row per grid_search_initial_pose() call, written wherever it returns. The per-frame debug log
@@ -941,7 +877,7 @@ private:
    struct SearchEpisode
    {
        std::int64_t ts_ms = 0;
-       const char*  trigger = "unknown";   // lost | mode_switch | seed | seed_validation | manual
+       const char*  trigger = "unknown";   // rival_swap | seed | seed_validation | manual
        int          n_lidar = 0;
        float        incumbent_x = 0.f, incumbent_y = 0.f, incumbent_theta = 0.f;
        float        incumbent_loss = std::numeric_limits<float>::quiet_NaN();

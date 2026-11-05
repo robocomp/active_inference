@@ -1,6 +1,6 @@
 # room_concept relocaliser — redesign from scratch (2026-11-01)
 
-Status: implemented, behind RelocMode; A/B results in the plan's ledger (`docs/superpowers/plans/2026-11-02-relocaliser-rivals.md`,
+Status: implemented; legacy deleted (2026-11-05). A/B results in the plan's ledger (`docs/superpowers/plans/2026-11-02-relocaliser-rivals.md`,
 tasks 7/7b/7c). Amended 2026-11-04: §3 likelihood, §4.2 prior, §5, §6, §7 and the §9 hot-path bar (each marked "Amended").
 Original author: design pass for the user's verdict "the relocaliser is a piece of garbage".
 Sources read: `memory/relocaliser-diagnosis-11-01.md`, `room_concept_reloc.cpp` (991 lines), `room_concept_reloc_modes.cpp` (282),

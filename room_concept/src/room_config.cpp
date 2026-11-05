@@ -109,8 +109,6 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
             "m — prior median of s when tracking (measured p50, 09-16)");
     reader.opt<float, double>("RoomConcept.RelocTrackLogSigma", room_concept.params.reloc_track_log_sigma,
             "prior spread of ln s when tracking (p99/p50 = 0.069/0.034)");
-    reader.opt<int>("RoomConcept.RelocTrackMemoryFrames", room_concept.params.reloc_track_memory_frames,
-            "forgetting timescale of the learnt tracking emission");
     reader.opt<float, double>("RoomConcept.RelocLostSMin", room_concept.params.reloc_lost_s_min,
             "m — support of the lost emission (log-uniform)");
     reader.opt<float, double>("RoomConcept.RelocLostSMax", room_concept.params.reloc_lost_s_max,
@@ -119,8 +117,6 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
             "record one scan-tape frame per relocalisation_step (pose, odometry, scan, room polygon)");
     reader.opt<std::string>("ScanTape.Path", room_concept.params.scan_tape_path,
             "tape file; {ts} = start time (epoch s)");
-    reader.opt<std::string>("RoomConcept.RelocMode", room_concept.params.reloc_mode,
-            "\"legacy\" (lost-belief HMM + SPRT modes) | \"rivals\" (Bayes-factor rival belief, relocaliser redesign)");
     reader.opt<bool>("RoomConcept.RelocEnabled", room_concept.params.reloc_enabled,
             "false = relocalisation never moves the pose (lost, mode_switch, seed_validation)");
 

@@ -53,42 +53,23 @@ namespace rc
     /// Test access to the relocalisation runtime (declared friend in RoomConcept).
     struct RelocSelftestAccess
     {
-        static float belief(RoomConcept& r, float s, float outside) { return r.update_lost_belief(s, outside); }
-        static void  reset(RoomConcept& r) { r.reset_lost_belief(); }
-        static void  step(RoomConcept& r, const std::vector<Eigen::Vector3f>& pts) { r.step_rival_modes(pts); }
-        static void  late(RoomConcept& r, const std::vector<Eigen::Vector3f>& pts) { r.run_late_recall_search(pts); }
+        static void  late(RoomConcept& r, const std::vector<Eigen::Vector3f>& pts) { r.run_late_recall_fit(pts); }
         static bool  late_done(RoomConcept& r) { return r.late_forced_done_; }
-        static auto& rivals(RoomConcept& r) { return r.rivals_; }
-        static void  set_ref(RoomConcept& r, const Eigen::Vector3f& p) { r.rival_ref_pose_ = p; r.rival_ref_valid_ = true; }
-        static bool  confirmed(RoomConcept& r) { return r.last_search_confirmed_incumbent_; }
-        static bool  moved(RoomConcept& r) { return r.last_search_moved_; }
         static std::uint64_t epoch(RoomConcept& r) { return r.reloc_epoch_.load(); }
         static void  step8(RoomConcept& r, const RoomConcept::UpdateResult& res, const std::vector<Eigen::Vector3f>& pts)
         { r.relocalisation_step(res, pts); }
         static void  force_searching_with_map_ready(RoomConcept& r)
         { r.runtime_estimate_.store(true); r.map_ready_.store(true); r.wall_frozen_ = false; }
         static bool  searching(RoomConcept& r) { return r.searching(); }
-        static float track_var(RoomConcept& r) { return r.track_var_ln_s_; }
         static std::vector<Eigen::Vector2f> poly(RoomConcept& r) { return r.current_room_polygon(); }
-        static bool  explains(RoomConcept& r, float s) { return r.explains_like_tracking(s); }
         static rc::reloc::Params rparams(RoomConcept& r) { return r.reloc_params(); }
-        static float& track_mu(RoomConcept& r) { return r.track_mu_ln_s_; }
-        static void  relocalise(RoomConcept& r, const std::vector<Eigen::Vector3f>& pts, float s, float p)
-        { r.relocalise_from_belief(pts, s, p); }
-        static bool  held(RoomConcept& r) { return r.rt_.last_search_held; }
         static bool  anchor_alive(RoomConcept& r) { return not r.rt_.door_anchor.empty(); }
         static Eigen::Matrix3f held_spread(RoomConcept& r) { return r.rt_.held_spread; }
-        static void  set_hold_open(RoomConcept& r) { r.rt_.hold_open = true; r.rt_.last_search_held = true; }
-        static bool  hold_open(RoomConcept& r) { return r.rt_.hold_open; }
-        static std::uint64_t searches(RoomConcept& r) { return r.rt_.searches; }
-        static double lost(RoomConcept& r) { return r.belief_[RoomConcept::kLost]; }
         static void  plain_reset(RoomConcept& r) { r.belief_reset_requested_.store(true); }   // the pre-R1 hand-over
-        static inline std::string mode = "legacy";                                              // argv[1]: legacy | rivals
-        static void  set_mode(RoomConcept& r) { r.params.reloc_mode = mode; }
         static float p_rival(RoomConcept& r) { return r.p_rival_pub_.load(); }
         static Eigen::Matrix3f spread(RoomConcept& r) { return r.rt_.held_spread; }
         static bool  undecided(RoomConcept& r) { return r.pose_undecided(); }
-        static std::size_t n_rivals(RoomConcept& r) { return r.rbelief_.rivals().size(); }
+        static std::size_t n_rivals(RoomConcept& r) { return r.rivals_.rivals().size(); }
         static std::uint64_t room_epoch(RoomConcept& r) { return r.room_epoch_; }
         static void  timing_on(RoomConcept& r) { r.rv_timing_on_ = true; }
         static auto& timing(RoomConcept& r) { return r.rv_timing_us_; }
@@ -101,13 +82,12 @@ namespace rc
         static void  wait_proposer(RoomConcept& r) { while (r.proposer_.busy()) std::this_thread::sleep_for(std::chrono::milliseconds(2)); }
         static void  clear_belief(RoomConcept& r) { r.clear_rival_belief(); }
         static void  add_rival(RoomConcept& r, const Eigen::Vector3f& pose, float lambda, float floor)
-        { rc::rivals::Rival v; v.pose = pose; v.cov = Eigen::Vector3f(1e-3f, 1e-3f, 1e-3f).asDiagonal(); v.lambda = lambda; v.lambda_birth = floor; r.rbelief_.add(v); }
+        { rc::rivals::Rival v; v.pose = pose; v.cov = Eigen::Vector3f(1e-3f, 1e-3f, 1e-3f).asDiagonal(); v.lambda = lambda; v.lambda_birth = floor; r.rivals_.add(v); }
     };
 }
 
 namespace
 {
-    std::uint64_t g_last_swaps = 0;   // K: swaps of the arm that just ran (RelocMode rivals)
     constexpr float kPi = std::numbers::pi_v<float>;
     float wrap(float a) { return std::remainder(a, 2.f * kPi); }
 
@@ -238,9 +218,8 @@ namespace
     };
 } // namespace
 
-int main(int argc, char** argv)
+int main()
 {
-    if (argc > 1) rc::RelocSelftestAccess::mode = argv[1];
     std::setlocale(LC_ALL, "");   // behave like the Qt agent (es_ES decimal comma) — see CLAUDE.md
     constexpr int kEpisodes = 25;
     std::printf("reloc_selftest: %d episodes per room x kind, 360-beam scans, 2 cm noise, 30%% clutter, "
@@ -344,7 +323,7 @@ int main(int argc, char** argv)
         }
     }
     // ══ CLOSED LOOP: the runtime that decides whether the published pose flips ══════════════════════
-    std::printf("\nclosed loop (RoomConcept lost belief + rival modes, live defaults)\n");
+    std::printf("\nclosed loop (RoomConcept rival belief, live defaults)\n");
     using Acc = rc::RelocSelftestAccess;
     const auto all_rooms = rooms();
     auto to3 = [](const std::vector<Eigen::Vector2f>& v)
@@ -370,183 +349,12 @@ int main(int argc, char** argv)
         for (const auto& room : all_rooms)
         {
             rc::RoomConcept rcn;
-            Acc::set_mode(rcn);
             rcn.set_polygon_room(room.poly);
             const auto pg = Acc::poly(rcn);
             std::printf("  poly %s: set %zu verts, model returns %zu:", room.name.c_str(), room.poly.size(), pg.size());
             for (const auto& v : pg) std::printf(" (%.2f,%.2f)", v.x(), v.y());
             std::printf("\n");
         }
-
-    // A / B: a wrong mode committed, the truth carried as a rival. Robot drives a slow arc.
-    for (const auto& [room_idx, label, llr0, expect_switch] :
-         std::vector<std::tuple<int, const char*, float, bool>>{{0, "A symmetric: twin committed, truth rival (llr 0)", 0.f, false},
-                                                                {2, "B notched: mirror committed, truth rival (llr -5)", -5.f, true}})
-    {
-        const auto& room = all_rooms[static_cast<std::size_t>(room_idx)];
-        std::mt19937 rng(777);
-        int switches = 0, first_switch = -1, final_ok = 0, runs = 20, epoch_mismatch = 0;
-        for (int run = 0; run < runs; ++run)
-        {
-            rc::RoomConcept rcn;
-            Acc::set_mode(rcn);
-            rcn.set_polygon_room(room.poly);
-            Eigen::Vector3f truth = random_pose(room.poly, rng, 1.2f);
-            Eigen::Vector3f wrong;
-            if (room_idx == 0) wrong = room.symmetries.front()(truth);
-            else
-            {
-                Eigen::Vector2f lo = room.poly.front(), hi = room.poly.front();
-                for (const auto& v : room.poly) { lo = lo.cwiseMin(v); hi = hi.cwiseMax(v); }
-                wrong = {lo.x() + hi.x() - truth.x(), truth.y(), wrap(kPi - truth.z())};
-                if (not rc::reloc::inside_polygon(room.poly, wrong.head<2>())) { --run; continue; }
-            }
-            rcn.set_robot_pose(wrong.x(), wrong.y(), wrong.z(), false);
-            Acc::rivals(rcn).clear();
-            Acc::rivals(rcn).push_back({truth, llr0});
-            Acc::set_ref(rcn, wrong);
-            Eigen::Vector3f committed = wrong;
-            const Eigen::Vector3f step(0.03f, 0.f, 0.02f);   // per frame, robot frame
-            int local_switches = 0;
-            const auto epoch0 = Acc::epoch(rcn);
-            for (int f = 0; f < 150; ++f)
-            {
-                truth = compose(truth, step);
-                if (not rc::reloc::inside_polygon(room.poly, truth.head<2>())
-                    or rc::reloc::polygon_distance(room.poly, truth.head<2>()) < 0.4f)
-                    break;
-                committed = compose(committed, step);
-                rcn.set_robot_pose(committed.x(), committed.y(), committed.z(), false);
-                const auto before = rcn.get_current_state();
-                Acc::step(rcn, to3(synth_scan(room.poly, truth, 360, 0.02f, 0.30f, rng)));
-                const auto after = rcn.get_current_state();
-                if (std::abs(after[2] - before[2]) + std::abs(after[3] - before[3]) > 1e-4f)
-                {
-                    ++local_switches;
-                    if (first_switch < 0) first_switch = f;
-                    committed = Eigen::Vector3f(after[2], after[3], after[4]);
-                }
-            }
-            switches += local_switches;
-            if (Acc::epoch(rcn) - epoch0 != static_cast<std::uint64_t>(local_switches)) ++epoch_mismatch;
-            if (near_or_twin(room, committed, truth, 0.30f, 10.f)
-                and (room_idx == 0 or near(committed, truth, 0.30f, 10.f))) ++final_ok;
-        }
-        std::printf("  %-52s switches=%d (%s), first at frame %d, final pose ok %d/%d, clamp releases != switches in %d runs (expect 0)\n", label, switches,
-                    expect_switch ? "expect >=runs, no flip-back" : "expect 0", first_switch, final_ok, runs, epoch_mismatch);
-    }
-
-    // C: door OPENING with the robot inside — a large through-door sector, pose CORRECT.
-    {
-        const auto& room = all_rooms[1];
-        std::mt19937 rng(4242);
-        int searches = 0, moved = 0, frames = 0, released = 0;
-        for (int run = 0; run < 10; ++run)
-        {
-            rc::RoomConcept rcn;
-            Acc::set_mode(rcn);
-            rcn.set_polygon_room(room.poly);
-            const Eigen::Vector3f truth = random_pose(room.poly, rng, 1.0f);
-            rcn.set_robot_pose(truth.x(), truth.y(), truth.z(), false);
-            Acc::reset(rcn);
-            const auto epoch0 = Acc::epoch(rcn);
-            for (int f = 0; f < 60; ++f, ++frames)
-            {
-                const auto scan = synth_scan(room.poly, truth, 360, 0.02f, 0.30f, rng, f < 10 ? 6.f : 100.f);
-                const float s = median_d(room.poly, scan, truth);
-                const float pl = Acc::belief(rcn, s, 0.f);
-                if (pl >= 0.5f)
-                {
-                    ++searches;
-                    const auto before = rcn.get_current_state();
-                    Acc::relocalise(rcn, to3(scan), s, pl);
-                    const auto after = rcn.get_current_state();
-                    if (std::hypot(after[2] - before[2], after[3] - before[3]) > 0.3f
-                        or std::abs(wrap(after[4] - before[4])) > 10.f * kPi / 180.f)
-                        ++moved;
-                }
-            }
-            released += static_cast<int>(Acc::epoch(rcn) - epoch0);
-        }
-        std::printf("  %-52s searches=%d over %d frames, pose MOVED %d times (expect 0), clamp released %d times (expect 0)\n",
-                    "C door opens (200° through-door), robot inside", searches, frames, moved, released);
-    }
-
-    // F: end-to-end kidnap. Robot tracked correctly, then carried elsewhere; the committed pose is stale.
-    //    The belief must fire, the search must MOVE the pose to the truth (or its true twin), and stay.
-    for (int room_idx = 0; room_idx < 3; ++room_idx)
-    {
-        const auto& room = all_rooms[static_cast<std::size_t>(room_idx)];
-        std::mt19937 rng(31337u + static_cast<unsigned>(room_idx));
-        int ok = 0, fired = 0, frames_sum = 0, runs = 15, right_without_release = 0;
-        for (int run = 0; run < runs; ++run)
-        {
-            rc::RoomConcept rcn;
-            Acc::set_mode(rcn);
-            rcn.set_polygon_room(room.poly);
-            const Eigen::Vector3f stale = random_pose(room.poly, rng, 0.8f);
-            Eigen::Vector3f truth = random_pose(room.poly, rng, 0.8f);
-            while ((truth.head<2>() - stale.head<2>()).norm() < 1.5f) truth = random_pose(room.poly, rng, 0.8f);
-            rcn.set_robot_pose(stale.x(), stale.y(), stale.z(), false);
-            Acc::reset(rcn);
-            // WARM-UP: tracking correctly at `stale` first, so the tracking emission is the one THIS scan
-            // model produces (a live robot learns it before any kidnap). Toggle off with RELOC_F_COLD.
-            if (std::getenv("RELOC_F_COLD") == nullptr)
-                for (int f = 0; f < 200; ++f)
-                {
-                    const auto scan = synth_scan(room.poly, stale, 360, 0.02f, 0.30f, rng);
-                    Acc::belief(rcn, median_d(room.poly, scan, stale), 0.f);
-                }
-            int f_fire = -1;
-            for (int f = 0; f < 30; ++f)
-            {
-                const auto scan = synth_scan(room.poly, truth, 360, 0.02f, 0.30f, rng);
-                const auto st = rcn.get_current_state();
-                const float s = median_d(room.poly, scan, Eigen::Vector3f(st[2], st[3], st[4]));
-                const float pl = Acc::belief(rcn, s, 0.f);
-                if (pl >= 0.5f)
-                {
-                    if (f_fire < 0) f_fire = f;
-                    if (std::getenv("RELOC_F_TRACE") != nullptr)
-                    {
-                        const auto st0 = rcn.get_current_state();
-                        rc::reloc::LikelihoodRaster ras;
-                        const auto rp2 = Acc::rparams(rcn);
-                        ras.build(room.poly, rp2);
-                        const auto res = rc::reloc::search(ras, room.poly, scan, {Eigen::Vector3f(st0[2], st0[3], st0[4])}, rp2);
-                        for (const auto& m : res.modes)
-                            std::printf("        mode (%.2f,%.2f,%.0f°) w=%.2f med=%.3f explains=%d truth_near=%d\n",
-                                        m.pose.x(), m.pose.y(), m.pose.z() * 180. / kPi, m.weight, m.median_abs,
-                                        Acc::explains(rcn, m.median_abs) ? 1 : 0, near_or_twin(room, m.pose, truth, 0.3f, 10.f) ? 1 : 0);
-                    }
-                    Acc::relocalise(rcn, to3(scan), s, pl);
-                    if (std::getenv("RELOC_F_TRACE") != nullptr)
-                    {
-                        const auto a = rcn.get_current_state();
-                        std::printf("      F %s run%d f%d s=%.3f -> pose (%.2f,%.2f,%.0f°) confirmed=%d moved=%d rivals=%zu | stale (%.2f,%.2f,%.0f°) truth (%.2f,%.2f,%.0f°)\n",
-                                    room.name.c_str(), run, f, s, a[2], a[3], a[4] * 180. / kPi,
-                                    Acc::confirmed(rcn) ? 1 : 0, Acc::moved(rcn) ? 1 : 0, Acc::rivals(rcn).size(),
-                                    stale.x(), stale.y(), stale.z() * 180. / kPi, truth.x(), truth.y(), truth.z() * 180. / kPi);
-                    }
-                }
-            }
-            const auto st = rcn.get_current_state();
-            if (f_fire >= 0) { ++fired; frames_sum += f_fire + 1; }
-            const bool right = near_or_twin(room, Eigen::Vector3f(st[2], st[3], st[4]), truth, 0.30f, 10.f);
-            if (right) ++ok;
-            if (right and Acc::epoch(rcn) == 0) ++right_without_release;
-            else if (std::getenv("RELOC_DUMP") != nullptr)
-            {
-                const auto scan = synth_scan(room.poly, truth, 360, 0.02f, 0.30f, rng);
-                std::printf("    F MISS %s run%d: final (%.2f,%.2f,%.0f°) truth (%.2f,%.2f,%.0f°) s@truth=%.3f "
-                            "sd_ln_s=%.3f mu_s=%.3f\n", room.name.c_str(), run, st[2], st[3], st[4] * 180. / kPi,
-                            truth.x(), truth.y(), truth.z() * 180. / kPi, median_d(room.poly, scan, truth),
-                            std::sqrt(Acc::track_var(rcn)), std::exp(Acc::track_mu(rcn)));
-            }
-        }
-        std::printf("  F kidnap end-to-end %-32s fired %d/%d (after %.1f frames), final pose right %d/%d, right but clamp never released %d (expect 0)\n",
-                    room.name.c_str(), fired, runs, fired > 0 ? static_cast<double>(frames_sum) / fired : std::nan(""), ok, runs, right_without_release);
-    }
 
     // G: planner mode disambiguation. Committed pose = the mirror of the truth in the notched room, truth carried
     //    as a rival with llr 0. The notch is the only asymmetry, so J must be largest where the notch is seen
@@ -599,7 +407,6 @@ int main(int argc, char** argv)
         for (int run = 0; run < runs; ++run)
         {
             rc::RoomConcept rcn;
-            Acc::set_mode(rcn);
             rcn.set_polygon_room(room.poly);
             const Eigen::Vector3f start = random_pose(room.poly, rng, 1.0f);
             Eigen::Vector3f truth = random_pose(room.poly, rng, 1.0f);
@@ -632,9 +439,9 @@ int main(int argc, char** argv)
                 if (std::getenv("RELOC_H_TRACE") != nullptr and Acc::epoch(rcn) != e_before)
                 {
                     const auto s2 = rcn.get_current_state();
-                    std::printf("      H run%d f%d epoch %llu: now (%.2f,%.2f,%.0f°) truth (%.2f,%.2f,%.0f°) moved=%d rivals=%zu\n",
+                    std::printf("      H run%d f%d epoch %llu: now (%.2f,%.2f,%.0f°) truth (%.2f,%.2f,%.0f°) rivals=%zu\n",
                                 run, f, static_cast<unsigned long long>(Acc::epoch(rcn)), s2[2], s2[3], s2[4] * 180. / kPi,
-                                truth.x(), truth.y(), truth.z() * 180. / kPi, Acc::moved(rcn) ? 1 : 0, Acc::rivals(rcn).size());
+                                truth.x(), truth.y(), truth.z() * 180. / kPi, Acc::n_rivals(rcn));
                 }
             }
             if (std::getenv("RELOC_H_TRACE") != nullptr and e_warm != 0)
@@ -672,101 +479,28 @@ int main(int argc, char** argv)
     }
 
     int r1_failures = 0;
-    // I (Task R1): A SYMMETRIC TIE NEVER TAKES A LIVE POSE. Symmetric rectangle, the held pose AT the truth, but its
-    //    covariance inflated to metres (live rtD1g2: σ 1.9–4.3 m once the pose clamp carried its backlog into it), so
-    //    the continuity prior can no longer tell the truth's mode from its 180° twin. The scan cannot either (the
-    //    room is symmetric: ℓ is identical at both). Before R1 the top mode was a coin flip and was committed; now
-    //    the held pose is a hypothesis and an undecided posterior holds it. Expect 0 flips; the twin is carried.
-    {
-        const auto& room = all_rooms[0];
-        std::mt19937 rng(8080);
-        int flips = 0, held = 0, kept = 0, runs = 30;
-        for (int run = 0; run < runs; ++run)
-        {
-            rc::RoomConcept rcn;
-            Acc::set_mode(rcn);
-            rcn.set_polygon_room(room.poly);
-            const Eigen::Vector3f truth = random_pose(room.poly, rng, 1.0f);
-            rcn.set_robot_pose(truth.x(), truth.y(), truth.z(), false);
-            Acc::reset(rcn);
-            rcn.current_covariance = Eigen::Vector3f(100.f, 100.f, 100.f).asDiagonal();   // σ 10 m / 10 rad: no continuity left
-            const auto scan = synth_scan(room.poly, truth, 360, 0.02f, 0.30f, rng);
-            Acc::relocalise(rcn, to3(scan), 0.3f, 0.5f);
-            const auto st = rcn.get_current_state();
-            const Eigen::Vector3f now(st[2], st[3], st[4]);
-            if (near(now, room.symmetries.front()(truth), 0.30f, 10.f)) ++flips;
-            if (Acc::held(rcn)) ++held;
-            if (near(now, truth, 0.30f, 10.f)) ++kept;
-        }
-        const bool pass = flips == 0 and kept == runs;
-        r1_failures += pass ? 0 : 1;
-        std::printf("  I symmetric tie, live pose, covariance inflated      flips to the twin %d/%d (expect 0), pose kept %d/%d, "
-                    "held %d — %s\n", flips, runs, kept, runs, held, pass ? "PASS" : "FAIL");
-    }
-
-    // J (Task R1): A GENUINE KIDNAP STILL MOVES under the same inflated covariance. The held pose is metres from the
-    //    truth and the scan rejects it (its polish leaves its basin), so the MAP mode is committed — the truth or its
-    //    twin in the symmetric room, the truth in the others.
-    for (int room_idx = 0; room_idx < 3; ++room_idx)
-    {
-        const auto& room = all_rooms[static_cast<std::size_t>(room_idx)];
-        std::mt19937 rng(9090u + static_cast<unsigned>(room_idx));
-        int right = 0, runs = 20, ftc_sum = 0;
-        for (int run = 0; run < runs; ++run)
-        {
-            rc::RoomConcept rcn;
-            Acc::set_mode(rcn);
-            rcn.set_polygon_room(room.poly);
-            const Eigen::Vector3f stale = random_pose(room.poly, rng, 0.8f);
-            Eigen::Vector3f truth = random_pose(room.poly, rng, 0.8f);
-            while ((truth.head<2>() - stale.head<2>()).norm() < 1.5f) truth = random_pose(room.poly, rng, 0.8f);
-            rcn.set_robot_pose(stale.x(), stale.y(), stale.z(), false);
-            Acc::reset(rcn);
-            rcn.current_covariance = Eigen::Vector3f(4.f, 4.f, 4.f).asDiagonal();
-            const auto scan = synth_scan(room.poly, truth, 360, 0.02f, 0.30f, rng);
-            Acc::relocalise(rcn, to3(scan), 0.4f, 0.9f);
-            // Frames to correct (I-5): 0 = the search itself committed it; k = the k-th following scan (rivals).
-            auto is_right = [&] { const auto q = rcn.get_current_state();
-                                  return near_or_twin(room, Eigen::Vector3f(q[2], q[3], q[4]), truth, 0.30f, 10.f); };
-            int ftc = is_right() ? 0 : -1;
-            for (int f = 0; f < 20; ++f)   // a HELD episode is the rivals' to resolve on the following scans
-            {
-                Acc::step(rcn, to3(synth_scan(room.poly, truth, 360, 0.02f, 0.30f, rng)));
-                if (ftc < 0 and is_right()) ftc = f + 1;
-            }
-            if (is_right()) { ++right; ftc_sum += std::max(ftc, 0); }
-        }
-        const bool pass = right >= runs - 1;   // F's own tally tolerates the odd search miss; the decision rule must not add misses
-        r1_failures += pass ? 0 : 1;
-        std::printf("  J kidnap, covariance inflated %-23s moved to the truth (or its twin) %d/%d, frames to correct %.2f — %s\n",
-                    room.name.c_str(), right, runs, right > 0 ? static_cast<double>(ftc_sum) / right : std::nan(""),
-                    pass ? "PASS" : "FAIL");
-    }
-
     // K (Task R1/R1b): THE HAND-OVER THROUGH A DOOR, GEOMETRY ROUTE. Live, every recall was followed by a misfit
     //    transient (rtD1g2 recall 1: s = 2.52 → 2.71 for 600 ms, 0.59 for 200 ms, then ~0.06). The robot enters a 6 × 4
     //    room through a 1 m door in its bottom wall, centre 0.06 m past the line at the hand-over (the R1b centre rule),
-    //    at 0.3 m/s. Arms, all through the real relocalisation_step:
-    //      passage — the doorway term tempers the transient while the body is in the mouth: expect 0 searches;
-    //      plain   — the pre-R1 reset: expect a search (the live defect);
-    //      wrong   — a WRONG recall (the misfit never clears): the search must come once the body has left the mouth,
-    //                i.e. within a time set by the geometry, not by the hazard (reviewer I-2).
+    //    at 0.3 m/s, the scans being what it would really see. Arms, all through the real relocalisation_step with the
+    //    proposer waited for at every frame:
+    //      passage — the hand-over's passage (the entry prior and the doorway view);
+    //      plain   — the pre-R1 reset, no passage.
+    //    A correct pose just through a door must not be moved by the doorway view: expect 0 swaps in both.
     {
         const auto& room = all_rooms[0];
         rc::passage::Passage pg;
         pg.centre = {1.0f, -2.f}; pg.n_in = {0.f, 1.f}; pg.tangent = {1.f, 0.f}; pg.width = 1.f; pg.p_open = 1.f;
         pg.r_body = 0.24f; pg.body_w = 0.46f; pg.body_l = 0.48f; pg.sig_s = 0.03f; pg.sig_t = 0.03f; pg.s = 0.06f; pg.u = 0.f;
         const float th_in = rc::passage::heading_along(pg.n_in);
-        auto run_arm = [&](int arm, int* frames_to_fire, float* depth_at_fire)
+        auto run_arm = [&](bool plain_arm) -> std::uint64_t
         {
             std::mt19937 rng(5150);
             std::normal_distribution<float> nz(0.f, 0.30f);
             rc::RoomConcept rcn;
-            Acc::set_mode(rcn);
             rcn.set_polygon_room(room.poly);
             const Eigen::Vector3f at(1.0f, -1.0f, th_in);
             rcn.set_robot_pose(at.x(), at.y(), at.z(), false);
-            const auto pts = to3(synth_scan(room.poly, Eigen::Vector3f(1.0f, -1.0f, th_in), 360, 0.02f, 0.30f, rng));
             std::int64_t kts = 0;
             auto frame = [&](const Eigen::Vector3f& p, float s)
             {
@@ -779,67 +513,35 @@ int main(int argc, char** argv)
                 r.pred_x = p.x(); r.pred_y = p.y(); r.pred_theta = p.z();
                 r.timestamp_ms = (kts += 50);
                 rcn.set_robot_pose(p.x(), p.y(), p.z(), false);
-                if (Acc::mode == "rivals")   // the scan the robot would really see at p (the legacy arms only read s)
-                {
-                    Acc::step8(rcn, r, to3(synth_scan(room.poly, p, 360, 0.02f, 0.30f, rng)));
-                    Acc::wait_proposer(rcn);
-                }
-                else
-                    Acc::step8(rcn, r, pts);
+                Acc::step8(rcn, r, to3(synth_scan(room.poly, p, 360, 0.02f, 0.30f, rng)));   // the scan the robot would really see at p
+                Acc::wait_proposer(rcn);
             };
             float ph = 0.f;
-            for (int f = 0; f < 300; ++f)   // tracking somewhere in the room: the emission is learnt
+            for (int f = 0; f < 300; ++f)   // tracking somewhere in the room
             {
                 ph += 0.05f;
                 frame({1.0f + 0.3f * std::cos(ph), -0.5f + 0.3f * std::sin(ph), th_in + ph}, 0.034f * std::exp(nz(rng)));
             }
             Eigen::Vector3f p(1.0f, -2.f + 0.06f, th_in);
             frame(p, 0.034f);
-            if (arm != 1) rcn.note_passage_handover(pg); else Acc::plain_reset(rcn);
-            const auto s0 = Acc::searches(rcn);
-            *frames_to_fire = -1;
+            if (not plain_arm) rcn.note_passage_handover(pg); else Acc::plain_reset(rcn);
             auto advance = [&](float s)
             {
                 p.y() += 0.015f;   // 0.3 m/s at 20 Hz, straight in
                 frame(p, s);
-                if (*frames_to_fire < 0 and Acc::searches(rcn) != s0)
-                { *frames_to_fire = 0; *depth_at_fire = p.y() + 2.f; }
             };
-            if (arm == 2)
-            {
-                int f = 0;
-                for (; f < 400 and *frames_to_fire < 0; ++f) advance(0.40f * std::exp(nz(rng)));
-                if (*frames_to_fire == 0) *frames_to_fire = f;
-                return Acc::searches(rcn) - s0;
-            }
-            // The doorway view: the body still in the mouth (centre 0.06 → 0.18 m in), the scan's back half through the
-            // door. (The live 0.6–1.7 s tail of 2.5 m after the mouth was the unweighted pred median and the misplaced
-            // door list, fixed at the source in R1b — case O measures those statistics through update().)
+            // The doorway view: the body still in the mouth (centre 0.06 → 0.18 m in), the scan's back half through the door.
             for (int f = 0; f < 8; ++f) advance(2.6f);
             for (int f = 0; f < 40; ++f) advance(0.06f * std::exp(-f / 20.f) + 0.03f);
-            g_last_swaps = Acc::swaps(rcn);
-            return Acc::searches(rcn) - s0;
+            return Acc::swaps(rcn);
         };
-        int fire_p = -1, fire_pl = -1, fire_w = -1;
-        float d_p = 0.f, d_pl = 0.f, d_w = 0.f;
-        const auto with_passage = run_arm(0, &fire_p, &d_p);
-        const auto rv_swaps_passage = g_last_swaps;
-        const auto plain        = run_arm(1, &fire_pl, &d_pl);
-        const auto rv_swaps_plain = g_last_swaps;
-        run_arm(2, &fire_w, &d_w);
-        // Geometry-set: the doorway term Φ((r_body − d)/σ_s) has fallen — within a few σ_s of the body leaving the mouth.
-        // RelocMode "rivals" has no lost belief and so no "search": the counter above (rt_.searches) stays 0 by construction. The
-        // property K protects -- a correct pose just through a door is not moved by the doorway view -- is read from the swaps.
-        const bool pass = Acc::mode == "rivals"
-                              ? (with_passage == 0 and plain == 0 and rv_swaps_passage == 0 and rv_swaps_plain == 0)
-                              : (with_passage == 0 and plain > 0 and fire_w > 0 and d_w > pg.r_body - 3.f * pg.sig_s
-                                 and d_w < pg.r_body + 0.25f);
+        const auto swaps_passage = run_arm(false);
+        const auto swaps_plain   = run_arm(true);
+        const bool pass = swaps_passage == 0 and swaps_plain == 0;
         r1_failures += pass ? 0 : 1;
-        std::printf("  K hand-over through the door (geometry route)       searches: with the passage %llu (expect 0), "
-                    "plain reset %llu (expect >0: the live defect); WRONG recall searched after %d frames at depth %.2f m "
-                    "(expect within a few σ of r_body %.2f m) — %s\n",
-                    static_cast<unsigned long long>(with_passage), static_cast<unsigned long long>(plain), fire_w, d_w,
-                    pg.r_body, pass ? "PASS" : "FAIL");
+        std::printf("  K hand-over through the door (geometry route)       swaps: with the passage %llu, plain reset %llu "
+                    "(expect 0, 0) — %s\n",
+                    static_cast<unsigned long long>(swaps_passage), static_cast<unsigned long long>(swaps_plain), pass ? "PASS" : "FAIL");
     }
 
     // M (Task R1b, reviewer I-1): THE DOOR ANCHOR PICKS THE TWIN THAT CAME THROUGH THE DOOR. Symmetric room, door off
@@ -859,7 +561,6 @@ int main(int argc, char** argv)
             for (int run = 0; run < runs; ++run)
             {
                 rc::RoomConcept rcn;
-                Acc::set_mode(rcn);
                 rcn.set_polygon_room(room.poly);
                 // reverse: the robot BACKED through the door (a doorway backoff re-crossing into the room it left).
                 const float th = rc::passage::heading_along(pg.n_in) + (reverse ? kPi : 0.f) + 0.5f * uj(rng);
@@ -886,10 +587,9 @@ int main(int argc, char** argv)
                 Acc::step8(rcn, r, pts0);
                 rcn.set_robot_pose(-1.5f, 0.8f, th + 1.2f, false);
                 rcn.current_covariance = Eigen::Vector3f(4e-4f, 4e-4f, 1e-4f).asDiagonal();
-                if (Acc::mode == "rivals")
                 {
-                    // The same event through the rival belief: the tracker (res.robot_pose) sits on the diverged pose, the
-                    // scans come from `truth` (odometry has driven to it, pred = truth), the proposer runs; wait for it each frame.
+                    // The tracker (res.robot_pose) sits on the diverged pose, the scans come from `truth` (odometry has
+                    // driven to it, pred = truth), the proposer runs; wait for it each frame.
                     const auto scan_t = to3(synth_scan(room.poly, truth, 360, 0.02f, 0.30f, rng));
                     for (int f = 0; f < 14; ++f)
                     {
@@ -901,8 +601,6 @@ int main(int argc, char** argv)
                         Acc::wait_proposer(rcn);
                     }
                 }
-                else
-                    Acc::relocalise(rcn, to3(synth_scan(room.poly, truth, 360, 0.02f, 0.30f, rng)), 0.4f, 0.5f);
                 const auto st = rcn.get_current_state();
                 const Eigen::Vector3f now(st[2], st[3], st[4]);
                 if (near(now, truth, 0.30f, 10.f)) ++truth_n;
@@ -920,33 +618,6 @@ int main(int argc, char** argv)
                     t_a, w_a, t_r, w_r, t_n, w_n, pass ? "PASS" : "FAIL");
     }
 
-    // N (Task R1b, reviewer I-4): A HELD EPISODE WHOSE RIVALS ARE ALL WRONG ENDS. The pose is right, the carried rivals
-    //    are not the truth; their ratios must fall past the LOWER SPRT bound and be dropped, which closes the episode.
-    {
-        const auto& room = all_rooms[2];
-        std::mt19937 rng(7070);
-        int closed = 0, runs = 10, frames_sum = 0;
-        for (int run = 0; run < runs; ++run)
-        {
-            rc::RoomConcept rcn;
-            Acc::set_mode(rcn);
-            rcn.set_polygon_room(room.poly);
-            const Eigen::Vector3f truth = random_pose(room.poly, rng, 1.0f);
-            rcn.set_robot_pose(truth.x(), truth.y(), truth.z(), false);
-            Acc::rivals(rcn).clear();
-            Acc::rivals(rcn).push_back({random_pose(room.poly, rng, 0.8f), 0.f});
-            Acc::rivals(rcn).push_back({random_pose(room.poly, rng, 0.8f), 0.f});
-            Acc::set_ref(rcn, truth);
-            int f = 0;
-            for (; f < 60 and not Acc::rivals(rcn).empty(); ++f)
-                Acc::step(rcn, to3(synth_scan(room.poly, truth, 360, 0.02f, 0.30f, rng)));
-            if (Acc::rivals(rcn).empty()) { ++closed; frames_sum += f; }
-        }
-        const bool pass = closed == runs;
-        r1_failures += pass ? 0 : 1;
-        std::printf("  N held episode, truth not among the rivals          rivals rejected (episode closed) %d/%d, after %.1f frames — %s\n",
-                    closed, runs, closed > 0 ? static_cast<double>(frames_sum) / closed : std::nan(""), pass ? "PASS" : "FAIL");
-    }
     // O (Task R1b): THE DOORWAY STATISTICS THROUGH update(). Two rooms joined by a 1 m door: the model is the 6 × 4
     //    room (y ∈ [−2, 2]); the world adds the room behind the door (y ∈ [−6, −2]). The robot stands just inside,
     //    centre 0.15 m past the door line, so its scan's back half goes through the door. The lost belief reads
@@ -992,7 +663,6 @@ int main(int argc, char** argv)
         {
             std::mt19937 rng(4040);
             rc::RoomConcept rcn;
-            Acc::set_mode(rcn);
             rcn.set_polygon_room(room.poly);
             Eigen::Vector3f at(1.2f, -1.85f, rc::passage::heading_along(pg.n_in));
             rcn.set_robot_pose(at.x(), at.y(), at.z(), false);
@@ -1028,13 +698,13 @@ int main(int argc, char** argv)
             return s_hist.empty() ? std::nanf("") : s_hist[s_hist.size() / 2];
         };
         const float s_ideal = run_arm(0), s_mis = run_arm(1), s_fix = run_arm(2);
-        // (rivals mode: a swap resets the tracker's window, so "frames with a separate prediction statistic" is a property of the
-        //  tracker's warm-up that the relocaliser's mode may legitimately interrupt; the s criteria stay.)
-        const bool pass = s_fix <= 2.f * s_ideal + 0.02f and s_mis > 3.f * s_fix and (n_pred_seen > 0 or Acc::mode == "rivals");
+        // (a swap resets the tracker's window, so "frames with a separate prediction statistic" is a property of the
+        //  tracker's warm-up that the relocaliser may legitimately interrupt: reported, not a criterion; the s criteria stay.)
+        const bool pass = s_fix <= 2.f * s_ideal + 0.02f and s_mis > 3.f * s_fix;
         r1_failures += pass ? 0 : 1;
         std::printf("  O doorway statistics through update()               median s: door list correct %.3f m, misplaced %.3f m "
                     "(the live defect), misplaced + the crossing's passage %.3f m (expect ≈ correct); frames with a separate "
-                    "prediction statistic %d (expect >0) — %s\n",
+                    "prediction statistic %d (info) — %s\n",
                     s_ideal, s_mis, s_fix, n_pred_seen, pass ? "PASS" : "FAIL");
     }
 
@@ -1051,7 +721,6 @@ int main(int argc, char** argv)
         pg.heading = rc::passage::heading_along(pg.n_in); pg.sig_heading = 0.05f;
         std::mt19937 rng(1212);
         rc::RoomConcept rcn;
-        Acc::set_mode(rcn);
         rcn.set_polygon_room(room.poly);
         Eigen::Vector3f p(1.2f, -1.94f, pg.heading);
         rcn.set_robot_pose(p.x(), p.y(), p.z(), false);
@@ -1081,14 +750,12 @@ int main(int argc, char** argv)
         }
         const float depth = p.y() + 2.f;
 
-        // (b) a held episode (the twin carried as a rival at even odds, as msprt_decide leaves it), then three frames
+        // (b) a held episode (the twin carried as a rival at even odds), then three frames
         //     with the misfit still high so the episode stays open.
         rc::RoomConcept rh;
-        Acc::set_mode(rh);
         rh.set_polygon_room(room.poly);
         const Eigen::Vector3f truth(-1.5f, 0.6f, 0.4f);
         rh.set_robot_pose(truth.x(), truth.y(), truth.z(), false);
-        if (Acc::mode == "rivals")
         {
             {   // consume the construction's belief reset first (a new room clears the rivals), THEN carry the twin
                 rc::RoomConcept::UpdateResult r0;
@@ -1101,13 +768,6 @@ int main(int argc, char** argv)
                 Acc::step8(rh, r0, to3(synth_scan(room.poly, truth, 360, 0.02f, 0.30f, rng)));
             }
             Acc::add_rival(rh, room.symmetries.front()(truth), 0.f, 0.f);   // the twin at even odds, held at its price
-        }
-        else
-        {
-            Acc::rivals(rh).clear();
-            Acc::rivals(rh).push_back({room.symmetries.front()(truth), 0.f});
-            Acc::set_ref(rh, truth);
-            Acc::set_hold_open(rh);
         }
         const auto scan = to3(synth_scan(room.poly, truth, 360, 0.02f, 0.30f, rng));
         const bool held = true;
@@ -1183,18 +843,14 @@ int main(int argc, char** argv)
     }
     if (r1_failures > 0) std::printf("\n  Task R1 cases: %d FAILED\n", r1_failures);
 
-    // Q (Task R2): A CORRECT POSE JUST INSIDE AN OPEN DOOR IS KEPT. Live rtD1i 742.71 s: 1.1 s after a recall, the robot
-    //    0.39 m inside the open door_1 (the aperture ≈104° of its scan), the pose 1 cm from the truth; P(lost) reached
-    //    0.506 and the search moved it 4.1 m / −160° to a twin that fitted the through-door returns onto walls, because
-    //    the relocaliser's ℓ scored every return against the room polygon alone. Fixture: the 6 × 4 model room
-    //    (y ∈ [−2, 2]) with a 1 m door in its bottom wall (x ∈ [0.7, 1.7]); the robot 0.39 m inside it, heading in; the
-    //    door's leaf open 90° INTO the room on its hinge jamb (live: door_1 at phi 94°, opening into the room); a search
-    //    forced at P(lost) = 0.506 through the real relocalise_from_belief, 20 jittered runs. Two worlds:
+    // Q/U (Task R2): A CORRECT POSE JUST INSIDE AN OPEN DOOR IS KEPT. Live rtD1i 742.71 s: 1.1 s after a recall, the robot
+    //    0.39 m inside the open door_1 (the aperture ≈104° of its scan), the pose 1 cm from the truth; the relocaliser moved it
+    //    4.1 m / −160° to a twin that fitted the through-door returns onto walls, because ℓ scored every return against the
+    //    room polygon alone. Fixture: the 6 × 4 model room (y ∈ [−2, 2]) with a 1 m door in its bottom wall (x ∈ [0.7, 1.7]);
+    //    the robot 0.39 m inside it, heading in; the door's leaf open 90° INTO the room on its hinge jamb. Worlds (U below):
     //      defect — behind the door a 6 × 2 room: the scan (this room + the next through the door) is then explained
-    //               by the room turned 90°, as rtD1i's was by its −160° twin. Pre-R2 ℓ (no door list) must MOVE (the
-    //               live defect, else the fixture proves nothing); with the door list the pose must be KEPT 20/20.
-    //      stale  — the door is in fact SHUT but door_concept lists it open (p_open 1, phi 90°; live door_5 visit 1):
-    //               the door's state is common to its beams, so the wrong belief costs log(1/h) once — KEPT 20/20.
+    //               by the room turned 90°, as rtD1i's was by its −160° twin;
+    //      stale  — the door is in fact SHUT but door_concept lists it open (p_open 1, phi 90°; live door_5 visit 1).
     int r2_failures = 0;
     {
         const auto& room = all_rooms[0];
@@ -1238,52 +894,12 @@ int main(int argc, char** argv)
         door.id = 91; door.name = "door_1"; door.p_open = 1.f; door.prior_closed = 0.f;   // phi 90°: cos φ = 0
         door.a = {0.7f, -2.f}; door.b = {1.7f, -2.f};
         const float th_in = rc::passage::heading_along({0.f, 1.f});
-        float through_frac = 0.f;
-        auto run_arm = [&](const std::vector<Seg>& world, bool doors)
-        {
-            std::mt19937 rng(9191);
-            std::uniform_real_distribution<float> uj(-1.f, 1.f);
-            int kept = 0;
-            for (int run = 0; run < 20; ++run)
-            {
-                rc::RoomConcept rcn;
-                Acc::set_mode(rcn);
-                rcn.set_polygon_room(room.poly);
-                const Eigen::Vector3f truth(1.2f + 0.08f * uj(rng), -2.f + 0.39f + 0.03f * uj(rng), th_in + 0.08f * uj(rng));
-                rcn.set_robot_pose(truth.x(), truth.y(), truth.z(), false);
-                rcn.current_covariance = Eigen::Vector3f(4e-4f, 4e-4f, 1e-4f).asDiagonal();
-                if (doors) rcn.set_door_apertures({door});
-                const auto pts = scan_world(world, truth, rng);
-                if (run == 0)
-                {
-                    int n = 0;
-                    for (const auto& q : pts)
-                        n += rc::reloc::exit_prior({{door.a, door.b, {0.f, -1.f}, 1.f, 0.f}}, truth.head<2>(),
-                                                   truth.head<2>() + Eigen::Rotation2Df(truth.z()) * q.head<2>()) > 0.5f;
-                    through_frac = static_cast<float>(n) / static_cast<float>(pts.size());
-                }
-                Acc::relocalise(rcn, pts, 0.055f, 0.506f);
-                const auto st = rcn.get_current_state();
-                if (near(Eigen::Vector3f(st[2], st[3], st[4]), truth, 0.10f, 5.f) and not Acc::moved(rcn) and not Acc::held(rcn))
-                    ++kept;
-            }
-            return kept;
-        };
         const auto w_open = make_world(false), w_shut = make_world(true);
-        const int kept_d = run_arm(w_open, true);
-        const float frac_open = through_frac;
-        const int kept_n = run_arm(w_open, false);
-        const int kept_s = run_arm(w_shut, true);
-        const bool pass = kept_d == 20 and kept_n < 20 and kept_s == 20;
-        r2_failures += pass ? 0 : 1;
-        std::printf("  Q correct pose 0.39 m inside an open door (%.0f%% of the scan through it): KEPT %d/20 with the door "
-                    "list (expect 20), %d/20 with the pre-R2 ℓ (the live defect: < 20); door SHUT but listed open: KEPT "
-                    "%d/20 (expect 20) — %s\n", 100.f * frac_open, kept_d, kept_n, kept_s, pass ? "PASS" : "FAIL");
 
-        // U (RelocMode rivals): the same three worlds through the REAL step (frames + proposer), not a forced search. A correct
-        //    pose 0.39 m inside an open door, the next room visible through it, 25 frames (1.25 s) of a parked robot: the
-        //    rivals the proposer finds (the room turned 90 deg, the twin) must never take the pose. Rivals mode only.
-        if (Acc::mode == "rivals")
+        // U (Task R2, through the real step): A CORRECT POSE JUST INSIDE AN OPEN DOOR IS KEPT. A correct pose 0.39 m inside an
+        //    open door, the next room visible through it (the room turned 90 deg explains the scan like the live -160 deg twin
+        //    did), 25 frames (1.25 s) of a parked robot, frames + proposer: the rivals the proposer finds must never take the
+        //    pose. Worlds: the door listed; no list (info); the door SHUT but listed open.
         {
             auto run_rv = [&](const std::vector<Seg>& world, bool doors)
             {
@@ -1293,7 +909,6 @@ int main(int argc, char** argv)
                 for (int run = 0; run < 20; ++run)
                 {
                     rc::RoomConcept rcn;
-                    Acc::set_mode(rcn);
                     rcn.set_polygon_room(room.poly);
                     const Eigen::Vector3f truth(1.2f + 0.08f * uj(rng), -2.f + 0.39f + 0.03f * uj(rng), th_in + 0.08f * uj(rng));
                     rcn.set_robot_pose(truth.x(), truth.y(), truth.z(), false);
@@ -1324,96 +939,6 @@ int main(int argc, char** argv)
                         "shut but listed open, kept %d/20 (expect 20) — %s\n", ku_d, ku_n, ku_s, pass_u ? "PASS" : "FAIL");
         }
 
-        // S (fix round 1, I-1): THE DOOR LIST IS WRONG — a correct pose 0.39 m inside the real door, a search forced at
-        //    P(lost) = 0.506, the listed door (a) MISPLACED 4.4 m onto the far wall (the 1 Hz list for ~1 s after every
-        //    recall, rtD1g2) or (b) ROTATED 90° onto the side wall (door_5 in rtD1i). Expect the pose kept 20/20 in both.
-        auto run_wrong = [&](const rc::DoorAperture& listed)
-        {
-            std::mt19937 rng(9292);
-            std::uniform_real_distribution<float> uj(-1.f, 1.f);
-            int kept = 0;
-            for (int run = 0; run < 20; ++run)
-            {
-                rc::RoomConcept rcn;
-                Acc::set_mode(rcn);
-                rcn.set_polygon_room(room.poly);
-                const Eigen::Vector3f truth(1.2f + 0.08f * uj(rng), -2.f + 0.39f + 0.03f * uj(rng), th_in + 0.08f * uj(rng));
-                rcn.set_robot_pose(truth.x(), truth.y(), truth.z(), false);
-                rcn.current_covariance = Eigen::Vector3f(4e-4f, 4e-4f, 1e-4f).asDiagonal();
-                rcn.set_door_apertures({listed});
-                Acc::relocalise(rcn, scan_world(w_open, truth, rng), 0.055f, 0.506f);
-                const auto st = rcn.get_current_state();
-                if (near(Eigen::Vector3f(st[2], st[3], st[4]), truth, 0.10f, 5.f) and not Acc::moved(rcn)) ++kept;
-            }
-            return kept;
-        };
-        rc::DoorAperture mis = door, rot = door;
-        mis.a = door.a + Eigen::Vector2f(-0.6f, 4.f); mis.b = door.b + Eigen::Vector2f(-0.6f, 4.f);   // onto the top wall
-        rot.a = {3.f, -1.7f}; rot.b = {3.f, -0.7f};                                                     // vertical, right wall
-        const int kept_mis = run_wrong(mis), kept_rot = run_wrong(rot);
-        const bool pass_s = kept_mis == 20 and kept_rot == 20;
-        r2_failures += pass_s ? 0 : 1;
-        std::printf("  S the door list is WRONG, correct pose inside the real door, forced search: kept %d/20 with the list "
-                    "4.4 m off, %d/20 with it rotated 90° (expect 20/20 both) — %s\n", kept_mis, kept_rot, pass_s ? "PASS" : "FAIL");
-
-        // T (fix round 1, I-1/M-2): A KIDNAP IN A ROOM WITH A LISTED DOOR STILL RECOVERS. The robot is carried elsewhere in
-        //    the doored room (the next room visible through the door when the geometry allows), the held pose stale with an
-        //    inflated covariance (J's protocol), a search at P(lost) = 0.9. Arms: the door listed vs no list (pre-R2 ℓ).
-        auto run_kidnap = [&](bool listed)
-        {
-            std::mt19937 rng(9393);
-            int right = 0;
-            for (int run = 0; run < 20; ++run)
-            {
-                rc::RoomConcept rcn;
-                Acc::set_mode(rcn);
-                rcn.set_polygon_room(room.poly);
-                const Eigen::Vector3f stale = random_pose(room.poly, rng, 0.8f);
-                Eigen::Vector3f truth = random_pose(room.poly, rng, 0.8f);
-                while ((truth.head<2>() - stale.head<2>()).norm() < 1.5f) truth = random_pose(room.poly, rng, 0.8f);
-                rcn.set_robot_pose(stale.x(), stale.y(), stale.z(), false);
-                rcn.current_covariance = Eigen::Vector3f(4.f, 4.f, 4.f).asDiagonal();
-                if (listed) rcn.set_door_apertures({door});
-                Acc::relocalise(rcn, scan_world(w_open, truth, rng), 0.4f, 0.9f);
-                const auto st = rcn.get_current_state();
-                const Eigen::Vector3f now(st[2], st[3], st[4]);
-                if (near(now, truth, 0.30f, 10.f) or near(now, room.symmetries.front()(truth), 0.30f, 10.f)) ++right;
-            }
-            return right;
-        };
-        const int k_listed = run_kidnap(true), k_none = run_kidnap(false);
-        const bool pass_t = k_listed >= k_none;
-        r2_failures += pass_t ? 0 : 1;
-        std::printf("  T kidnap in a room with a listed door (next room visible through it): recovered %d/20 with the door "
-                    "listed, %d/20 without a list (pre-R2 ℓ; expect listed ≥ none) — %s\n", k_listed, k_none, pass_t ? "PASS" : "FAIL");
-    }
-    // R (Task R2): "NO POSE EXPLAINS THIS VIEW" KEEPS THE RIVALS. Live rtD1i 742.81 s: that branch cleared them, so the
-    //    true pose (a rival since the wrong move 100 ms before) was never scored again. A carried rival, then a search on
-    //    a view nothing explains (a 200° through-door sector, the C scan): the rival must still be there afterwards.
-    {
-        const auto& room = all_rooms[1];
-        std::mt19937 rng(5353);
-        int branch = 0, kept_rivals = 0;
-        for (int run = 0; run < 10; ++run)
-        {
-            rc::RoomConcept rcn;
-            Acc::set_mode(rcn);
-            rcn.set_polygon_room(room.poly);
-            const Eigen::Vector3f truth = random_pose(room.poly, rng, 1.0f);
-            rcn.set_robot_pose(truth.x(), truth.y(), truth.z(), false);
-            Acc::rivals(rcn).clear();
-            Acc::rivals(rcn).push_back({random_pose(room.poly, rng, 0.8f), -1.f});
-            Acc::set_ref(rcn, truth);
-            const auto scan = synth_scan(room.poly, truth, 360, 0.02f, 0.30f, rng, 100.f);
-            Acc::relocalise(rcn, to3(scan), median_d(room.poly, scan, truth), 0.506f);
-            if (Acc::moved(rcn) or Acc::held(rcn) or Acc::confirmed(rcn)) continue;   // not the branch under test
-            ++branch;
-            kept_rivals += Acc::rivals(rcn).size() == 1 ? 1 : 0;
-        }
-        const bool pass = branch > 0 and kept_rivals == branch;
-        r2_failures += pass ? 0 : 1;
-        std::printf("  R \"no pose explains this view\" keeps the rivals     reached in %d/10 searches, rival kept in %d "
-                    "(expect all) — %s\n", branch, kept_rivals, pass ? "PASS" : "FAIL");
     }
     // X (Task 7b): THE TRUTH OUT-SCORES ITS 180° TWIN ON RECORDED FRAMES. The offline A/B (task-7-report) found, with the
     //    tracker AT the truth (median |SDF| 0.008–0.010 m), a 4–6 m / 178° twin scoring HIGHER under ℓ: 293 vs 191 (warm43
@@ -1555,9 +1080,8 @@ int main(int argc, char** argv)
     r1_failures += r2_failures;
 
 
-    // ═══ RelocMode = "rivals": the Task 5 scenarios (spec 2026-11-01-relocaliser-redesign sec 9; each through step8, the real
+    // ═══ the rival belief: the Task 5 scenarios (spec 2026-11-01-relocaliser-redesign sec 9; each through step8, the real
     //     step, with the proposer on its worker thread and waited for at every frame so the run is repeatable) ═══════════════
-    if (Acc::mode == "rivals")
     {
         int rv_failures = 0;
         const Eigen::Matrix3f cov_t = Eigen::Vector3f(9e-4f, 9e-4f, 1e-4f).asDiagonal();
@@ -1589,7 +1113,6 @@ int main(int argc, char** argv)
             std::mt19937 rng(424242);
             std::normal_distribution<float> n01(0.f, 1.f);
             rc::RoomConcept rcn;
-            Acc::set_mode(rcn);
             rcn.set_polygon_room(room.poly);
             Acc::timing_on(rcn);
             Eigen::Vector3f truth(-1.5f, -0.5f, 0.3f), h0_prev = truth;
@@ -1628,7 +1151,6 @@ int main(int argc, char** argv)
             {
                 std::mt19937 rng(777u + static_cast<unsigned>(run));
                 rc::RoomConcept rcn;
-                Acc::set_mode(rcn);
                 rcn.set_polygon_room(room.poly);
                 const Eigen::Vector3f a = random_pose(room.poly, rng, 0.8f);
                 Eigen::Vector3f b = random_pose(room.poly, rng, 0.8f);
@@ -1671,7 +1193,6 @@ int main(int argc, char** argv)
             {
                 std::mt19937 rng(31000u + static_cast<unsigned>(run));
                 rc::RoomConcept rcn;
-                Acc::set_mode(rcn);
                 rcn.set_polygon_room(room.poly);
                 Eigen::Vector3f h0 = random_pose(room.poly, rng, 0.8f), truth = h0, h0_prev = h0;
                 Eigen::Vector3f far = random_pose(room.poly, rng, 0.8f);
@@ -1714,7 +1235,6 @@ int main(int argc, char** argv)
             {
                 std::mt19937 rng(5500u + static_cast<unsigned>(run));
                 rc::RoomConcept rcn;
-                Acc::set_mode(rcn);
                 rcn.set_polygon_room(room.poly);
                 const Eigen::Vector3f truth = random_pose(room.poly, rng, 0.8f);
                 auto base = synth_scan(room.poly, truth, 360, 0.02f, 0.f, rng);
@@ -1745,7 +1265,6 @@ int main(int argc, char** argv)
             pg.centre = {truth.x(), truth.y()}; pg.n_in = {0.f, 1.f}; pg.tangent = {1.f, 0.f}; pg.width = 1.f; pg.p_open = 1.f;
             // (i) a live rival, then a room change
             rc::RoomConcept r1;
-            Acc::set_mode(r1);
             r1.set_polygon_room(room.poly);
             std::int64_t ts = 1000;
             rv_frame(r1, truth, truth, ts += 50, pts);
@@ -1777,7 +1296,6 @@ int main(int argc, char** argv)
             auto run_stale = [&](bool room_change)
             {
                 rc::RoomConcept rcn;
-                Acc::set_mode(rcn);
                 rcn.set_polygon_room(room.poly);
                 Acc::set_search_fn(rcn, make_hook());
                 std::int64_t t = 1000;
@@ -1803,40 +1321,11 @@ int main(int argc, char** argv)
                         static_cast<std::size_t>(n_before), Acc::n_rivals(r1), int(Acc::room_epoch(r1) > e_before), n_c,
                         static_cast<unsigned long long>(sw_c), n_s, static_cast<unsigned long long>(sw_s), pass ? "PASS" : "FAIL");
         }
-        if (rv_failures > 0) std::printf("\n  RelocMode rivals cases: %d FAILED\n", rv_failures);
+        if (rv_failures > 0) std::printf("\n  rival-belief cases: %d FAILED\n", rv_failures);
         r1_failures += rv_failures;
     }
 
-    // D / E: healthy residual stream with turn spikes, then a kidnap.
-    {
-        std::mt19937 rng(99);
-        std::normal_distribution<float> nz(0.f, 0.30f);
-        std::uniform_real_distribution<float> u01(0.f, 1.f);
-        int false_fires = 0, kidnap_delay_sum = 0, kidnaps = 0, missed = 0;
-        for (int run = 0; run < 20; ++run)
-        {
-            rc::RoomConcept rcn;
-            Acc::set_mode(rcn);
-            Acc::reset(rcn);
-            for (int f = 0; f < 2000; ++f)
-            {
-                float s = 0.034f * std::exp(nz(rng));
-                if (u01(rng) < 0.05f) s *= 3.f;          // a hard turn spikes the prediction error
-                if (Acc::belief(rcn, s, 0.f) >= 0.5f) { ++false_fires; Acc::reset(rcn); }   // a search that confirms
-            }
-            int delay = -1;
-            for (int f = 0; f < 40; ++f)
-            {
-                const float s = 0.40f * std::exp(nz(rng));   // lost: wrong pose
-                if (Acc::belief(rcn, s, 0.f) >= 0.5f) { delay = f + 1; break; }
-            }
-            if (delay < 0) ++missed; else { kidnap_delay_sum += delay; ++kidnaps; }
-        }
-        std::printf("  %-52s false fires=%d in 40000 healthy frames (5%% turn spikes x3)\n", "D healthy stream", false_fires);
-        std::printf("  %-52s fired in %.1f frames on average, missed %d/20\n", "E kidnap (s -> 0.40 m)",
-                    kidnaps > 0 ? static_cast<double>(kidnap_delay_sum) / kidnaps : std::nan(""), missed);
-    }
-    if (Acc::mode == "rivals")   // W: adoption after a recognition swap = multi-scan fit (Task 6), end to end through the worker
+    // W: adoption after a recognition swap = multi-scan fit (Task 6), end to end through the worker
     {
         std::mt19937 rng(606);
         int ok = 0, runs = 8;
@@ -1845,7 +1334,6 @@ int main(int argc, char** argv)
         for (int run = 0; run < runs; ++run)
         {
             rc::RoomConcept rcn;
-            Acc::set_mode(rcn);
             rcn.set_polygon_room(room.poly);
             const Eigen::Vector3f truth = random_pose(room.poly, rng, 1.0f);
             rcn.set_robot_pose(truth.x() + 2.f, truth.y() - 1.f, truth.z() + 2.f, false);   // the provisional frame: meaningless

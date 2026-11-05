@@ -25,8 +25,6 @@ struct RelocSelftestAccess   // friend of RoomConcept (one per test binary)
 {
     static std::size_t walls(RoomConcept& r) { return r.wall_map_.walls.size(); }
     static bool map_ready_raw(RoomConcept& r) { return r.map_ready_.load(); }
-    static float track_mu(RoomConcept& r) { return r.track_mu_ln_s_; }
-    static float track_var(RoomConcept& r) { return r.track_var_ln_s_; }
     static void evidence(RoomConcept& r, float s) { r.accumulate_late_evidence(s, 1.f); }
     static double log_odds(RoomConcept& r) { return r.late_log_odds_; }
     // The agent's run loop calls relocalisation_step after update() (room_concept.cpp, step 8); update() alone does not.
@@ -150,14 +148,13 @@ static float dpose(const Eigen::Vector3f& a, const Eigen::Vector3f& b)
 
 struct Before
 {
-    Eigen::Vector3f pose; std::size_t walls; bool map_ready, adopted, driving; float mu, var; Poly derived;
+    Eigen::Vector3f pose; std::size_t walls; bool map_ready, adopted, driving; Poly derived;
 };
 static Before snap(RoomConcept& r)
 {
     return {pose_of(r), Acc::walls(r), Acc::map_ready_raw(r), r.map_layout_adopted(), r.plain_slam_driving(),
-            Acc::track_mu(r), Acc::track_var(r), r.nominal_room_polygon()};
+            r.nominal_room_polygon()};
 }
-static bool same_f(float a, float b) { return (std::isnan(a) and std::isnan(b)) or a == b; }
 static void unchanged(RoomConcept& r, const Before& b, const std::string& tag)
 {
     const auto a = snap(r);
@@ -167,7 +164,6 @@ static void unchanged(RoomConcept& r, const Before& b, const std::string& tag)
     check(a.derived == b.derived, tag + ": derived polygon unchanged");
     check(a.adopted == b.adopted and a.driving == b.driving and not r.hypothesis_fit_active(),
           tag + ": SEARCHING with plain SLAM driving again");
-    check(same_f(a.mu, b.mu) and same_f(a.var, b.var), tag + ": the learnt tracking emission is the survey's");
 }
 
 int main()

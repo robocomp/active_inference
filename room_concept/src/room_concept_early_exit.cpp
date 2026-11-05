@@ -712,8 +712,8 @@ namespace rc
                        << ',' << learned_odom_bias_.y()
                        << ',' << learned_odom_bias_.z();
             debug_log_ << ',' << res.early_exit_metric
-                       << ',' << lost_logodds_
-                       << ',' << rivals_.size()
+                       << ',' << p_rival_pub_.load(std::memory_order_relaxed)
+                       << ',' << rivals_.rivals().size()
                        << ',' << (grid_search_active_.load(std::memory_order_relaxed) ? 1 : 0);
             write_debug_tail();
             debug_log_ << '\n';

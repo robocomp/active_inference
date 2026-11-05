@@ -121,7 +121,7 @@ namespace rc
             << ",ml_bias_x,ml_bias_y,ml_bias_theta"
             << ",early_exit_metric"
             // recovery_bad/recovery_cooldown RENAMED 09-16 (same positions): the RecoveryManager is gone.
-            << ",lost_logodds,n_rivals,search_active"
+            << ",p_rival,n_rivals,search_active"
             // ★ APPENDED 08-16, AT THE END, ON BOTH WRITERS TOGETHER. This file's history is the
             // reason for that discipline: a group once declared mid-header while both writers emitted
             // it LAST mislabelled every column from slot_poses_pre onward. New columns go at the tail

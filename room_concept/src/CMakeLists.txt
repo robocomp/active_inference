@@ -177,7 +177,7 @@ set_target_properties(mp3d_replay PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CU
 
 # ── reloc_selftest ────────────────────────────────────────────────────────────
 # Offline A/B of relocalisation on INJECTED lost-robot episodes (flip, mirror, drift, uniform kidnap):
-# today's grid_search_initial_pose() vs rc::reloc::search(). EXCLUDE_FROM_ALL. Build and run with:
+# the relocaliser (search table + closed-loop rival belief, no mode flag). EXCLUDE_FROM_ALL. Build and run with:
 #   make -C build reloc_selftest && ../bin/reloc_selftest
 add_executable(reloc_selftest EXCLUDE_FROM_ALL
   ../tools/reloc_selftest.cpp
@@ -187,7 +187,7 @@ target_link_libraries(reloc_selftest ${LIBS})
 set_target_properties(reloc_selftest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../../bin)
 
 # ── reloc_tape_replay ─────────────────────────────────────────────────────────
-# Offline A/B of RelocMode "legacy" vs "rivals" on recorded scan tapes + injected kidnaps (spec 2026-11-01 sec 9). EXCLUDE_FROM_ALL.
+# Offline replay of the rival-hypothesis relocaliser on recorded scan tapes + injected kidnaps (spec 2026-11-01 sec 9). EXCLUDE_FROM_ALL.
 #   make -C build reloc_tape_replay && ../bin/reloc_tape_replay TAPE GT [TAPE GT ...]
 add_executable(reloc_tape_replay EXCLUDE_FROM_ALL
   ../tools/reloc_tape_replay.cpp

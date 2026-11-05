@@ -193,37 +193,22 @@ namespace rc::loc
         int manual_reset_skip_frames = 5;      // Frames to skip optimization after manual pose set
 
         // ===== Relocalisation (reloc_search.h) =====
-        // ONE mechanism replaces the RecoveryManager (10 bad frames + 60-frame cooldown), the map-trust
-        // relocaliser and the periodic symmetry check — three relocalisers that fought each other: the
-        // symmetry check flipped a LOST robot on 74 of 80 checks (09-12) and reset the recovery counter
-        // every time, and it fired on a door OPENING with the robot 1.6 m inside (09-16).
-        //
-        // LOST BELIEF. A two-state HMM filter on s = median |SDF| (the worse of the post-fit residual and
-        // the prediction error, as before). Tracking emission: log-normal in s, LEARNT online from the
-        // frames it explains; lost emission: log-uniform over [reloc_lost_s_min, reloc_lost_s_max]. The
-        // per-frame transition probability is the kidnap hazard. Search when P(lost) ≥ ½.
-        // RIVAL MODES. The search returns a mixture; the non-committed modes are carried, moved with the
-        // robot's own motion, and scored against the committed pose on every scan. A rival takes over only
-        // when its accumulated log-likelihood ratio passes Wald's SPRT bound log((1−α)/α) with α = the
-        // hazard — so a symmetric twin (ratio ≡ 0) can never flip-flop, and a genuinely better mode wins
-        // in as few scans as its evidence allows.
+        // ONE mechanism: the rival-hypothesis belief (room_concept_reloc_rivals.cpp; docs/superpowers/specs/
+        // 2026-11-01-relocaliser-redesign.md). The tracker's pose is H0; a proposer only ADDS rivals priced by their Bayes
+        // factor, each novel scan moves a rival's log odds by the likelihood ratio, and +ln 19 swaps it in.
         float reloc_outlier_frac       = 0.30f;  // ε — clutter / through-door fraction ⚠ modelling constant
         float reloc_wall_offset_sigma  = 0.03f;  // m — per-wall common-mode error marginalised from mode Σ
         float reloc_body_clearance     = 0.30f;  // m — robot body radius; no pose closer to a wall
         int   reloc_max_points         = 150;    // wall-band subsample for the lattice
         int   reloc_max_modes          = 4;      // mixture budget
-        float reloc_hazard             = 1e-3f;  // per-frame P(kidnap / silent loss) — the HMM transition AND α
+        float reloc_hazard             = 1e-3f;  // per-frame P(kidnap / silent loss) — a birth's kidnap prior AND α
         float reloc_track_s_median     = 0.034f; // m — prior median of s when tracking (measured p50, 09-16)
         float reloc_track_log_sigma    = 0.30f;  // prior spread of ln s when tracking (p99/p50 = 0.069/0.034)
-        int   reloc_track_memory_frames= 200;    // forgetting timescale of the learnt tracking emission
-        float reloc_lost_s_min         = 0.01f;  // m — support of the lost emission (log-uniform)
+        float reloc_lost_s_min         = 0.01f;  // m — support of the broad emission of the adoption verdict (log-uniform)
         float reloc_lost_s_max         = 5.0f;   // m
         bool        scan_tape_enabled = false;   // ScanTape.Enabled: record what the relocaliser sees (scan_tape.h)
         std::string scan_tape_path    = "etc/scan_tape_{ts}.bin";   // {ts} = start time, epoch s
-        // RelocMode: "legacy" = the lost-belief HMM + SPRT rival modes (default); "rivals" = the Bayes-factor rival
-        // belief of docs/superpowers/specs/2026-11-01-relocaliser-redesign.md (reloc_rivals.h). A flag the tours switch.
-        std::string reloc_mode         = "legacy";
-        bool  reloc_enabled            = true;   // false = relocalisation never moves the pose (lost, mode_switch, seed_validation)
+        bool  reloc_enabled            = true;   // false = relocalisation never moves the pose (rival_swap, seed_validation)
         int orientation_search_max_samples = 100;      // Lidar subsample for orientation candidates
 
         // ===== Gauss-Newton / Levenberg-Marquardt (room_gn_solver.h) =====

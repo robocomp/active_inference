@@ -1,4 +1,4 @@
-// RoomConcept, relocalisation, RelocMode = "rivals" (docs/superpowers/specs/2026-11-01-relocaliser-redesign.md sec 3-5, 7).
+// RoomConcept, relocalisation: the rival-hypothesis belief (docs/superpowers/specs/2026-11-01-relocaliser-redesign.md sec 3-5, 7).
 //
 // The incumbent H0 is the tracker's own pose and covariance. A rival is a competing pose with ONE number, lambda = ln posterior
 // odds against H0 (reloc_rivals.h). A background proposer (reloc_proposer.h) only ever ADDS rivals, priced by their Bayes
@@ -35,30 +35,41 @@ namespace rc
 
     void RoomConcept::clear_rival_belief()
     {
-        rbelief_.clear();
+        rivals_.clear();
         ++room_epoch_;            // a proposal still in flight belongs to the room (or pose) we left: poll() results are dropped
         rival_job_.reset();
         rv_ref_valid_ = false;
         rv_h0s_valid_ = false;
         rv_prev_cov_valid_ = false;
-        belief_prev_pose_valid_ = false;
+        view_prev_pose_valid_ = false;
         rv_novelty_acc_ = 0.f;
         rt_.held_spread.setZero();
         pose_undecided_.store(false, std::memory_order_relaxed);
         p_rival_pub_.store(0.f, std::memory_order_relaxed);
+        publish_rival_snapshot();
+    }
+
+    // The rivals as the planner sees them (pose_hypotheses()): pose + ln odds against H0. Empty <=> the pose is unambiguous.
+    void RoomConcept::publish_rival_snapshot()
+    {
+        std::vector<rc::reloc::PoseHypothesis> snap;
+        snap.reserve(rivals_.rivals().size());
+        for (const auto& rv : rivals_.rivals()) snap.push_back({rv.pose, rv.lambda});
+        std::scoped_lock lk(rival_snapshot_mutex_);
+        rival_snapshot_ = std::move(snap);
     }
 
     void RoomConcept::step_rivals(const UpdateResult& res, const std::vector<Eigen::Vector3f>& lidar_points)
     {
         const auto t_start = std::chrono::steady_clock::now();
-        if (not rbelief_ready_)
+        if (not rivals_ready_)
         {
             rc::rivals::Params bp;
             bp.pi_kid = std::clamp(params.reloc_hazard, 1e-9f, 0.25f);        // RelocHazard: the kidnap rate, per frame
             bp.k_max = std::max(1, params.reloc_max_modes);
             bp.ln_eps = std::log(std::clamp(params.reloc_outlier_frac, 1e-6f, 1.f));   // ln(RelocOutlierFrac)
-            rbelief_ = rc::rivals::Belief(bp);
-            rbelief_ready_ = true;
+            rivals_ = rc::rivals::Belief(bp);
+            rivals_ready_ = true;
         }
         const Eigen::Vector3f pose0(res.robot_pose.translation().x(), res.robot_pose.translation().y(),
                                     std::atan2(res.robot_pose.linear()(1, 0), res.robot_pose.linear()(0, 0)));
@@ -72,23 +83,21 @@ namespace rc
         if (poly.size() < 3)
             return;
 
-        // ── how new this view is (the legacy measure, unchanged): w in [0,1] ──
+        // ── how new this view is: the pose step since the last frame, in the likelihood's own basin; w in [0,1] ──
         float w = 1.f;
-        if (belief_prev_pose_valid_)
+        if (view_prev_pose_valid_)
         {
             double r_sum = 0.0;
             for (const auto& q : lidar_points) r_sum += std::hypot(q.x(), q.y());
-            const double s_track = std::isfinite(track_mu_ln_s_) ? std::exp(static_cast<double>(track_mu_ln_s_))
-                                                                 : static_cast<double>(params.reloc_track_s_median);
-            const double sig = std::max(1e-3, s_track);
+            const double sig = std::max(1e-3, static_cast<double>(params.reloc_track_s_median));   // what tracking resolves
             const double r_mean = std::max(sig, r_sum / static_cast<double>(lidar_points.size()));
-            const double dp2 = (pose0.head<2>() - belief_prev_pose_.head<2>()).squaredNorm() / (sig * sig);
-            const double dth = std::remainder(pose0.z() - belief_prev_pose_.z(), 2.0 * M_PI);
+            const double dp2 = (pose0.head<2>() - view_prev_pose_.head<2>()).squaredNorm() / (sig * sig);
+            const double dth = std::remainder(pose0.z() - view_prev_pose_.z(), 2.0 * M_PI);
             const double dt2 = dth * dth / ((sig / r_mean) * (sig / r_mean));
             w = static_cast<float>(1.0 - std::exp(-0.5 * (dp2 + dt2)));
         }
-        belief_prev_pose_ = pose0;
-        belief_prev_pose_valid_ = true;
+        view_prev_pose_ = pose0;
+        view_prev_pose_valid_ = true;
         rv_novelty_acc_ += w;
 
         // ── carry: every rival (and the pending proposal) moves with the ROBOT'S ODOMETRY increment since the last step ──
@@ -104,7 +113,7 @@ namespace rc
         }
         rv_ref_ = pose0;
         rv_ref_valid_ = true;
-        rbelief_.carry(d);
+        rivals_.carry(d);
         if (rv_h0s_valid_) rv_h0s_ = se2_compose(rv_h0s_, d);
         if (rival_job_) rival_job_->odo = se2_compose(rival_job_->odo, d);
 
@@ -129,7 +138,7 @@ namespace rc
             return pts2;
         };
 
-        // ── the door anchor retires BY INFORMATION (the legacy rule, one currency: nats of pose information over the room x
+        // ── the door anchor retires BY INFORMATION (one currency: nats of pose information over the room x
         // circle): the tracker holds at least as much as the anchor carried by odometry since the hand-over, and the body has
         // left the doorway. The anchor is H0's entry prior (sec 5): once the tracker's own covariance is tighter it IS the prior.
         if (not rt_.door_anchor.empty())
@@ -203,7 +212,7 @@ namespace rc
         {
             Eigen::Vector3f dx = x - pr.pred;
             dx.z() = rc::rivals::wrap_pi(dx.z());
-            const double pi_k = rbelief_.params().pi_kid;
+            const double pi_k = rivals_.params().pi_kid;
             const double ln_n = -static_cast<double>(rc::rivals::half_log_det_2pi(pr.P)) - 0.5 * dx.dot(pr.P.inverse() * dx);
             const double a1 = std::log1p(-pi_k) + ln_n + pr.ln_w, b1 = std::log(pi_k) - std::log(static_cast<double>(pr.volume));
             const double hi = std::max(a1, b1);
@@ -216,7 +225,7 @@ namespace rc
                                       - ln_prior(inc, pr) - rc::rivals::half_log_det_2pi(inc_cov));
         };
 
-        // A basin of ell is as wide as the likelihood's noise scale (legacy relocalise_from_belief): sigma_sdf in translation,
+        // A basin of ell is as wide as the likelihood's noise scale : sigma_sdf in translation,
         // sigma_sdf / (median range of the scan) in rotation. No new constant.
         auto basin_of = [](const std::vector<Eigen::Vector2f>& pts, float sigma)
         {
@@ -255,7 +264,7 @@ namespace rc
         // Every hypothesis, H0 included, is evaluated at ITS OWN local mode of ell (a few GN steps from where it stands): the
         // rival is a tracked pose like the incumbent. Compared at carried/tracked poses instead, a twin carried by exact motion
         // beat a tracker pose 1 cm off by ~1.5 nats a scan -- a drift that took it from -28 to the band in ~20 s (selftest V1).
-        if (not rbelief_.rivals().empty())
+        if (not rivals_.rivals().empty())
         {
             const auto& pp_all = points();
             // The tracking evaluation uses every OTHER point of the search's polish subset: half the cost (hot path < 1 ms), the
@@ -300,19 +309,19 @@ namespace rc
             rv_h0s_ = h0_st.pose; rv_h0s_valid_ = true;
             const float l0 = h0_st.ll;
             std::vector<float> dl_v;
-            dl_v.reserve(rbelief_.rivals().size());
-            for (std::size_t i = 0; i < rbelief_.rivals().size(); ++i)
+            dl_v.reserve(rivals_.rivals().size());
+            for (std::size_t i = 0; i < rivals_.rivals().size(); ++i)
             {
-                const auto st = ell_star(rbelief_.rivals()[i].pose, rbelief_.rivals()[i].cov);
+                const auto st = ell_star(rivals_.rivals()[i].pose, rivals_.rivals()[i].cov);
                 dl_v.push_back(st.ll - l0);
-                rbelief_.set_pose(i, st.pose);   // tracked: re-seated on its own mode
+                rivals_.set_pose(i, st.pose);   // tracked: re-seated on its own mode
             }
-            rbelief_.update(dl_v, w);
+            rivals_.update(dl_v, w);
             // Tracked rivals can slide into one another's basin or into H0's: two hypotheses in one basin of ell are ONE (the
             // identity test of births, basin included). A rival that has become H0 is H0's own mass; of two that have merged the
             // better odds survive. (Rebuilt only when something merged: the common frame allocates nothing.)
             {
-                const auto& cur = rbelief_.rivals();
+                const auto& cur = rivals_.rivals();
                 bool any = false;
                 std::vector<char> drop(cur.size(), 0);
                 for (std::size_t i = 0; i < cur.size(); ++i)
@@ -333,8 +342,8 @@ namespace rc
                 {
                     std::vector<rc::rivals::Rival> keep;
                     for (std::size_t i = 0; i < cur.size(); ++i) if (not drop[i]) keep.push_back(cur[i]);
-                    rbelief_.clear();
-                    for (auto& r : keep) rbelief_.add(std::move(r));
+                    rivals_.clear();
+                    for (auto& r : keep) rivals_.add(std::move(r));
                 }
             }
         }
@@ -366,7 +375,7 @@ namespace rc
                 {
                     if (not m.pose.allFinite() or not m.cov.allFinite() or not std::isfinite(m.log_lik)) continue;
                     // THRESHOLD IN DISGUISE: "this mode IS H0" = Mahalanobis <= 3 under the summed covariances PLUS ell's own
-                    // basin (sigma_sdf in translation, sigma_sdf / median range in rotation: the legacy `basin`, no new constant), the
+                    // basin (sigma_sdf in translation, sigma_sdf / median range in rotation: `basin`, no new constant), the
                     // same identity test Belief::add uses between rivals. A better optimum inside H0's basin is the tracker's to
                     // refine (its SDF solve), not a rival: that would be 14 cm of model mismatch priced as a kidnap (selftest U).
                     if (in_h0_basin(m)) continue;
@@ -382,7 +391,7 @@ namespace rc
                         // Two proposals inside one basin of ell are ONE rival (the same identity test as H0's, basin included):
                         // Belief::add merges only at 3 sigma of the Laplace covariances, a few mm, and a re-proposed twin 8 cm away
                         // became a second twin accumulating its own odds (selftest V1). The merged rival keeps the better odds.
-                        auto all = rbelief_.rivals();
+                        auto all = rivals_.rivals();
                         bool merged = false;
                         for (auto& e : all)
                         {
@@ -397,11 +406,11 @@ namespace rc
                         }
                         if (merged)
                         {
-                            rbelief_.clear();
-                            for (auto& e : all) rbelief_.add(std::move(e));
+                            rivals_.clear();
+                            for (auto& e : all) rivals_.add(std::move(e));
                         }
                         else
-                            rbelief_.add(std::move(r));
+                            rivals_.add(std::move(r));
                     }
                 }
             }
@@ -410,16 +419,16 @@ namespace rc
         // ── 3. a winner becomes the incumbent: the tracker is reset to its pose, the old incumbent becomes a rival ──
         Eigen::Vector3f pose_pub = pose0;
         Eigen::Matrix3f cov_pub = cov0;
-        if (const auto wi = rbelief_.winner())
+        if (const auto wi = rivals_.winner())
         {
             RivalPrior pr = prior_now();
-            const rc::rivals::Rival won0 = rbelief_.rivals().at(*wi);
+            const rc::rivals::Rival won0 = rivals_.rivals().at(*wi);
             // The new incumbent's own prior is centred on it (its Laplace covariance): the price of every OTHER pose against
             // it is then the bare Occam price, not a chi-square against the OLD incumbent's odometry prediction.
             pr.pred = won0.pose; pr.P = won0.cov + 1e-8f * Eigen::Matrix3f::Identity(); pr.ln_w = 0.f;
-            rbelief_.swap(*wi, pose0, cov0, price(0.f, pose0, cov0, won0.pose, won0.cov, pr));
-            std::vector<rc::rivals::Rival> all = rbelief_.rivals();
-            rbelief_.clear();
+            rivals_.swap(*wi, pose0, cov0, price(0.f, pose0, cov0, won0.pose, won0.cov, pr));
+            std::vector<rc::rivals::Rival> all = rivals_.rivals();
+            rivals_.clear();
             for (std::size_t i = 0; i < all.size(); ++i)
             {
                 auto r = all[i];
@@ -429,7 +438,7 @@ namespace rc
                     r.lambda_birth = price(0.f, r.pose, r.cov, won0.pose, won0.cov, pr);
                     r.lambda = std::max(r.lambda, r.lambda_birth);
                 }
-                rbelief_.add(std::move(r));
+                rivals_.add(std::move(r));
             }
             const float jump_m = (won0.pose.head<2>() - pose0.head<2>()).norm();
             const float jump_rad = std::abs(rc::rivals::wrap_pi(won0.pose.z() - pose0.z()));
@@ -446,22 +455,21 @@ namespace rc
             ep.success = true;
             write_search_episode(ep);
             qWarning().noquote() << QString("[reloc/rivals] swap: rival out-explained the incumbent, lambda %1 (band %2) -- moving %3 m / %4 deg")
-                .arg(won0.lambda, 0, 'f', 1).arg(rbelief_.params().log_band, 0, 'f', 1).arg(jump_m, 0, 'f', 2).arg(jump_rad * 57.2958f, 0, 'f', 0);
+                .arg(won0.lambda, 0, 'f', 1).arg(rivals_.params().log_band, 0, 'f', 1).arg(jump_m, 0, 'f', 2).arg(jump_rad * 57.2958f, 0, 'f', 0);
             ++rv_swaps_;
             commit_relocalised_pose(won0.pose, won0.cov);
             pose_pub = won0.pose;
             cov_pub = won0.cov;
             rv_ref_ = won0.pose;
             rv_h0s_valid_ = false;
-            belief_prev_pose_ = won0.pose;
-            reset_lost_belief();
+            view_prev_pose_ = won0.pose;
             ++room_epoch_;        // the in-flight proposal was priced against the old incumbent: drop it
             rival_job_.reset();
         }
 
         // ── 4. scheduling: the proposer is never on the 50 ms path; one job in flight ──
         {
-            const bool gaining = std::ranges::any_of(rbelief_.rivals(), [](const rc::rivals::Rival& r) { return r.lambda > r.lambda_birth; });
+            const bool gaining = std::ranges::any_of(rivals_.rivals(), [](const rc::rivals::Rival& r) { return r.lambda > r.lambda_birth; });
             const bool entering = not rt_.door_anchor.empty();
             // Base 2 Hz; every novel scan (one unit of accumulated view_change) while a rival is gaining or the hand-over is
             // fresh. A duty cap of 25% of one core (gap >= 4 x the last search's duration) is a scheduling constant, flagged:
@@ -489,10 +497,11 @@ namespace rc
         rv_prev_cov_ = cov_pub; rv_prev_cov_valid_ = true;
 
         // ── 5. publish: H0 (or the winner), its covariance widened by the mixture spread while rivals carry mass ──
-        rt_.held_spread = rbelief_.spread(pose_pub);
-        const float pr_mass = rbelief_.p_rival();
+        rt_.held_spread = rivals_.spread(pose_pub);
+        const float pr_mass = rivals_.p_rival();
         p_rival_pub_.store(pr_mass, std::memory_order_relaxed);
         pose_undecided_.store(pr_mass >= 0.5f, std::memory_order_relaxed);   // the majority of the posterior mass is off H0
+        publish_rival_snapshot();
         if (rv_timing_on_)
             rv_timing_us_.push_back(static_cast<float>(
                 std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t_start).count()) * 1e-3f);
