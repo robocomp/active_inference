@@ -204,6 +204,25 @@ void DoorBelief::note_model_error(const DoorFrame& frame)
     };
     model_var_w_ = gain_move(params_.prior_w_std * params_.prior_w_std, Jw, r_w, R_w);
     model_var_s_ = gain_move(params_.prior_s_std * params_.prior_s_std, Js, r_s, R_s);
+    {
+        // step 0 (door-passable spec): the same residual against the jambs alone, and what the move was made of
+        const door::Aperture ap = aperture_at(state_);
+        const Eigen::Vector2f face = mb.jamb_depth * ap.across_u();
+        float jl = std::numeric_limits<float>::infinity(), jh = -std::numeric_limits<float>::infinity();
+        bool ok = true;
+        for (const Eigen::Vector2f& p : {Eigen::Vector2f(ap.wall_O + state_.s * ap.wall_u + face),
+                                         Eigen::Vector2f(ap.wall_O + (state_.s + state_.w) * ap.wall_u + face)})
+            for (const float z : {params_.floor_z, params_.floor_z + state_.h})
+            {
+                const Eigen::Vector3f q = mb.zed_T_room * Eigen::Vector4f(p.x(), p.y(), z, 1.0f);
+                if (not (q.y() > 1e-2f)) { ok = false; continue; }
+                const float u = mb.fx * q.x() / q.y() + mb.cx;
+                jl = std::min(jl, u); jh = std::max(jh, u);
+            }
+        width_diag_ = {.r_w = r_w,
+                       .r_w_jambs = ok ? (jh - jl) - (mb.hi - mb.lo) : std::numeric_limits<float>::quiet_NaN(),
+                       .J_w = Jw, .R_w = R_w, .var_model_w = model_var_w_, .var_post_w = Sigma_(1, 1), .valid = true};
+    }
     // remember where this was measured
     const Eigen::Matrix3f Rm = mb.zed_T_room.leftCols<3>();
     const Eigen::Vector3f cam = -Rm.transpose() * mb.zed_T_room.col(3);

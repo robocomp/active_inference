@@ -104,6 +104,15 @@
 #include <dsr/api/dsr_api.h>
 
 namespace {
+// door-passable spec step 0: the parts of P(passable), appended to the approach and cross why-lines.
+std::string passable_parts(const rc::door::InteractionState& st)
+{
+    const double l0 = st.p_open_logit_w0;
+    const double p0 = std::isfinite(l0) ? (l0 >= 0 ? 1.0 / (1.0 + std::exp(-l0)) : std::exp(l0) / (1.0 + std::exp(l0))) : -1.0;
+    return std::format(" | P(passable) parts: σ_w {:.3f} m (post {:.3f}, model {:.3f}); at σ_w 0: {:.2f}; φ curve {} pts",
+                       std::sqrt(st.sigma_w_post * st.sigma_w_post + st.sigma_w_model * st.sigma_w_model),
+                       st.sigma_w_post, st.sigma_w_model, p0, st.phi_curve_n);
+}
 
 // Scalar model-uncertainty readout for model_uncertainty_att / the dashboard: the sum of the belief's
 // per-DOF posterior stds from the AI2 covariance Σ over the wall-frame [s,w,h] (along-wall offset + panel
@@ -2352,6 +2361,10 @@ rc::door::InteractionState SpecificWorker::compute_interaction_state(const rc::D
     // ★ Task 11 fix round 1: IN LOG SPACE (rc::door::passable_logit over the posterior's log weights). The linear float
     //   sum underflowed every passable angle of a collapsed curve to exactly 0 — an absorbing "certainly shut" that no
     //   later evidence could move. The log-odds is kept beside p_open; p_open = σ(it).
+    st.sigma_w_post  = std::sqrt(std::max(0.0f, inst.ai2_belief.covariance()(1, 1)));
+    st.sigma_w_model = std::sqrt(std::max(0.0f, inst.ai2_belief.model_error_var().second));
+    st.phi_curve_n   = static_cast<int>(inst.phi_curve_log.size());
+    if (const auto l0 = rc::door::passable_logit(inst.phi_curve_log, ap.w, needed, 0.0f); l0.has_value()) st.p_open_logit_w0 = *l0;
     if (const auto l = rc::door::passable_logit(inst.phi_curve_log, ap.w, needed, sigma_w_rep); l.has_value())
     {
         st.p_open_logit = *l;
@@ -2730,6 +2743,7 @@ void SpecificWorker::step_pragmatic_affordances(rc::DoorInstance& inst)
                                  st.safe_standoff_m, std::max(pg.actuation_reach_m, st.safe_standoff_m + 0.30f),
                                  st.range_sigma_m, inst.aperture.w);
         o.why += std::format(" × P(exists) {:.2f}", inst.existence.p_exists());
+        o.why += passable_parts(st);
         inst.aff_approach.update(o);
         log_affordance_transitions(inst, "approach", inst.aff_approach);
     }
@@ -2810,6 +2824,7 @@ void SpecificWorker::step_pragmatic_affordances(rc::DoorInstance& inst)
                                  std::max(pg.actuation_reach_m, st.safe_standoff_m + 0.30f), st.range_sigma_m,
                                  st.p_corridor_clear, st.corr_lateral_m, st.corr_hinge_llr, st.corr_swing_llr, st.p_cross_exec);
         o.why += std::format(" × P(exists) {:.2f}", inst.existence.p_exists());
+        o.why += passable_parts(st);
         inst.aff_cross.update(o);
         log_affordance_transitions(inst, "cross", inst.aff_cross);
     }

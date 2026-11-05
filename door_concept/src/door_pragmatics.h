@@ -85,6 +85,11 @@ struct InteractionState
     // Task 11 fix round 1: the same quantity as a LOG-ODDS, log P(passable) − log P(not), taken in log space from the
     // φ posterior (passable_logit). p_open = σ(p_open_logit). Finite on a collapsed curve, so nothing is absorbing.
     double p_open_logit = 0.0;
+    // door-passable spec step 0 (2026-11-05): what P(passable) was made of — the width σ it marginalised over (posterior +
+    // model error), and the SAME question at σ_w = 0 (the leaf curve alone). A gap between the two is the width's doing.
+    float  sigma_w_post = 0.0f, sigma_w_model = 0.0f;
+    double p_open_logit_w0 = std::numeric_limits<double>::quiet_NaN();
+    int    phi_curve_n = 0;
 
     // P(the robot is AT the door for whatever comes next), marginalised over the door's state:
     //   P(open)·P(d ≤ reach) + P(shut)·P(in band).

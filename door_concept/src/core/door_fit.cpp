@@ -930,7 +930,9 @@ void DoorFit::log_ai2_csv(const rc::DoorFitState& inst, int npts, float R, bool 
         << inst.dbg_ray_hit0 << ',' << inst.dbg_ray_expl0 << ','
         << inst.dbg_ray_signed0 << ','
         << inst.dbg_phi_ninf << ',' << inst.dbg_phi_beta << ',' << inst.dbg_phi_lat << ','
-        << inst.ai2_belief.recess() << ',' << inst.ai2_belief.recess_sd() << '\n';
+        << inst.ai2_belief.recess() << ',' << inst.ai2_belief.recess_sd() << ',';
+    const auto& we = inst.ai2_belief.last_width_error();
+    row << we.r_w << ',' << we.r_w_jambs << ',' << we.J_w << ',' << we.R_w << ',' << we.var_model_w << ',' << we.var_post_w << '\n';
     diag_({"ai2_log.csv", row.str()});
 }
 

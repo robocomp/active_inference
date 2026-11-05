@@ -647,6 +647,17 @@ public:
     }
     /// The model-error variances [s, w] (m^2) of the last mask frame; replaced every mask frame, 0 = the masks agree.
     [[nodiscard]] std::pair<float, float> model_error_var() const { return {model_var_s_, model_var_w_}; }
+    /// Step 0 of the door-passable spec (2026-11-05): the last mask frame's WIDTH error inputs, for the log. r_w = hull width −
+    /// mask width (px) as note_model_error used it; r_w_jambs = the same with the hull over the two jambs only (no leaf corners);
+    /// J_w (px/m), R_w (px²); var_model_w = model_var_w_; var_post_w = the posterior Σ_ww the frame was judged against.
+    struct WidthErrorDiag
+    {
+        float r_w = std::numeric_limits<float>::quiet_NaN(), r_w_jambs = std::numeric_limits<float>::quiet_NaN();
+        float J_w = std::numeric_limits<float>::quiet_NaN(), R_w = std::numeric_limits<float>::quiet_NaN();
+        float var_model_w = 0.f, var_post_w = 0.f;
+        bool  valid = false;
+    };
+    [[nodiscard]] const WidthErrorDiag& last_width_error() const { return width_diag_; }
 
     void  apply_constraints(DoorBeliefState& s) const;
     void  canonicalize(DoorBeliefState&) const {}   // wall fixes yaw ⇒ no symmetry fold
@@ -683,6 +694,7 @@ private:
     // REPLACED each mask frame (not accumulated).
     void note_model_error(const DoorFrame& frame);
     float model_var_s_ = 0.f, model_var_w_ = 0.f;
+    WidthErrorDiag width_diag_;
     // Where (bearing/range seen from the aperture) the error was measured and how big it was there: the viewpoints a look
     // cannot improve on. One entry per distinct viewpoint (door_view_pool.h's similarity), updated in place.
     struct ErrView { float bearing = 0.f, range = 0.f, q = 0.f; };
