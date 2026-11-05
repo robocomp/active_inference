@@ -110,9 +110,8 @@ class SpecificWorker : public GenericWorker
         // whenever a sweep is late or the localiser stalls. 20 entries was ~2.0 s at the old ~10 Hz;
         // at 50 Hz the same 20 entries are 0.4 s, and the cap is HARD (doublebuffer_sync.h pop_front
         // evicts the oldest silently), so the bracket would fail as a coverage refusal rather than as
-        // an error anyone could see. 128 restores ~2.6 s at 50 Hz and still covers 6.4 s if a bridge
-        // is republishing at the old rate.
-        rc::OdometryBuffer odometry_buffer_{128};
+        // an error anyone could see. 256 is ~2.6 s at the ~100 Hz of the real base and of the bridge.
+        rc::OdometryBuffer odometry_buffer_{256};
         // Same rule: the IMU runs ~125 Hz and must span the gap between two lidar sweeps (50-100 ms)
         // with slack for a late one. 256 entries is ~2.0 s.
         rc::ImuBuffer imu_buffer_{256};
