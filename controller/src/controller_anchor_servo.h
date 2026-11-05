@@ -89,6 +89,29 @@ struct AnchorCrossGeometry
     return g;
 }
 
+// ─── AT THE VANTAGE, ALWAYS AN ACTION (door-passable spec step 2, 2026-11-05) ─────────────────────────────────────────────
+// warm61 leg 3 stood 9 minutes in front of an open door: the anchor put the opening 0.46 m to the side (the servo's start
+// check |e| < w/2 = 0.44 failed), the room-frame route had ARRIVED (it believed itself aligned), so each rule handed the decision
+// to the other and nothing was commanded. Each failing start check now maps to the action that reduces it: off-axis or
+// misfacing with the route arrived ⇒ re-aim on the perceived opening (the same anchor the servo will drive on, so success
+// makes `within` true by construction). No mouth ⇒ hold (warm24, unchanged). Past the plane ⇒ the engaged servo / the route.
+enum class VantageAction { Servo, HoldNoMouth, ReAim, RouteDrives };
+[[nodiscard]] inline VantageAction vantage_action(bool servo_engaged, bool open_belief, bool open_seen, bool near_side,
+                                                  bool within, bool facing, bool route_arrived)
+{
+    if (servo_engaged or (open_belief and open_seen and near_side and within and facing)) return VantageAction::Servo;
+    if (not open_seen or not open_belief) return VantageAction::HoldNoMouth;
+    if (near_side and route_arrived and (not within or not facing)) return VantageAction::ReAim;
+    return VantageAction::RouteDrives;
+}
+// The re-aim goal in the ROBOT frame: the point on the anchor's axis at the robot's current progress s (robot − e·a), facing
+// along the normal (the robot turns by heading_err). The anchor is already a filter (σ_lat); it is not re-filtered here.
+struct ReAimGoal { Eigen::Vector2f p_robot = Eigen::Vector2f::Zero(); float yaw_robot = 0.f; };
+[[nodiscard]] inline ReAimGoal reaim_on_anchor(const AnchorCrossGeometry& g)
+{
+    return {.p_robot = -g.e * g.a, .yaw_robot = g.heading_err};
+}
+
 // Loop time constants (s). Control-loop gains, not decision thresholds. Chosen on the differential base, where the
 // heading must turn toward d and back while e closes: the lateral loop must be slow against the rate-limited turn
 // (w_max = 1 rad/s) or the robot arrives on the line still pointing across it and overshoots. On a kinematic

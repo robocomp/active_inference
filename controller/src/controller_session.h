@@ -1204,6 +1204,10 @@ private:
     std::uint64_t anchor_servo_last_ms_ = 0;  ///< the AIF law's last step (its control period)
     std::string door_servo_logged_;           ///< the leg key whose servo hand-over was logged
     std::string door_servo_refused_logged_;   ///< the leg key whose refused hand-over was logged
+    /// Door-passable spec step 2 (warm61): the re-aim goal (room frame: position, yaw) set this cycle by drive_door_route when
+    /// the route has arrived at the vantage but the opening is off-axis/misfaced; drive_with_policy drives it instead of holding.
+    std::optional<std::pair<Eigen::Vector2f, float>> door_reaim_goal_;
+    std::string door_reaim_logged_;   ///< the leg key whose re-aim was logged
     std::uint64_t door_route_anchor_id_ = 0;                        // the anchor whose PERCEIVED opening the route was built on (0 = the room-frame door)
     // The opening door_concept's interaction anchor measures for this door (robot frame ∘ the robot's pose), if one is fresh:
     // the door route's axis (door_route.h) and the gap the installed route must still pass through.

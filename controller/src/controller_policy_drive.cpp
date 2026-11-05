@@ -920,6 +920,13 @@ void ControllerSession::drive_with_policy(const ControllerRobotPose &robot_pose,
             stop_here(rc::why::Cause::NoRoute, std::format("door route for '{}': not built", door_route_leg_->door));
             return;
         }
+        if (door_route_leg_->through and door_route_goal_index_ >= door_route_vantage_goals_ and door_reaim_goal_.has_value())
+        {
+            // door-passable spec step 2: off-axis at the vantage ⇒ re-aim on the perceived opening (set by drive_door_route)
+            const auto goal = rc::policy::place_goal(door_reaim_goal_->first, door_reaim_goal_->second, gp.tol_xy, gp.tol_yaw);
+            (void)policy_tick(goal, std::format("door re-aim {}", door_route_leg_->door), cpose, obstacle_tracker, motion_commander, now);
+            return;
+        }
         if (door_route_leg_->through and door_route_goal_index_ >= door_route_vantage_goals_)
         {
             policy_reset();

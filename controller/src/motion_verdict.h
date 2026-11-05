@@ -434,6 +434,7 @@ struct PassageFacts
     std::string last_outcome;
     std::string door_now;       ///< the door's precondition numbers now ("" = door node gone)
     std::string producer = "door_concept";
+    std::string waiting_on;     ///< what the passage itself is doing about it (the session's cross_status_; "" = nothing)
 };
 
 /// The passage's note for this cycle, or nullopt when the passage is not what holds the robot (idle, or its step is
@@ -454,6 +455,10 @@ struct PassageFacts
         d += std::format("'{}' completed {} (attempt {}) — waiting for {} to offer it again", f.required,
                          f.last_outcome.empty() ? std::string("without success") : f.last_outcome, f.attempts,
                          f.producer);
+    else if (const auto l = mem.last(f.required); l.has_value() and not mem.gone_since(f.required).has_value())
+        // warm61: still in the graph (e.g. claimed: active, not pending) — never "withdrawn"
+        d += std::format("'{}' is in the graph ({}){}", f.required, l->state,
+                         f.waiting_on.empty() ? std::string{} : " — waiting: " + f.waiting_on);
     else
         d += mem.describe_absent(f.required, f.producer, now_ms);
     if (not f.door_now.empty()) d += std::format("; {} now: {}", f.door, f.door_now);

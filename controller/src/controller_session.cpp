@@ -695,7 +695,7 @@ void ControllerSession::observe_door_passage_why(std::uint64_t now_ms)
     const rc::why::PassageFacts f{.door = v.door, .step = rc::DoorPassage::step_name(v.step), .required = v.required,
                                   .state = v.step_state, .reached_door = v.reached_door, .opened = v.opened,
                                   .clearing = v.clearing, .attempts = v.attempts, .last_outcome = v.last_outcome,
-                                  .door_now = door_now};
+                                  .door_now = door_now, .waiting_on = cross_status_};
     if (auto note = rc::why::passage_note(f, why_aff_memory_, now_ms); note.has_value())
         why_.add(std::move(*note));
 }
@@ -3660,6 +3660,7 @@ bool ControllerSession::drive_door_route(const ControllerPlanningStep &step, rc:
     const auto &leg = *door_route_leg_;
     const std::uint64_t now = time_source();
     update_chain_end(step);
+    door_reaim_goal_.reset();   // door-passable spec step 2: set afresh each cycle, only while the re-aim applies
     // ★A route built on the room-frame door is rebuilt on the PERCEIVED opening as soon as the anchor is up; one built on the
     //  anchor is rebuilt when it no longer takes the body through the opening as now measured (band_cross_route_passes: the
     //  same physical test as the band's route, no tolerance of its own).
@@ -3757,6 +3758,17 @@ bool ControllerSession::drive_door_route(const ControllerPlanningStep &step, rc:
                 const bool facing = std::abs(g.heading_err) < 0.5f * static_cast<float>(M_PI);
                 // the checks gate the START: once engaged on this crossing the servo keeps the hole (past the plane s > 0)
                 front_of_open = door_passage_.servo() or (open_belief and open_seen and near_side and within and facing);
+                // ★ door-passable spec step 2 (warm61): the route ARRIVED at the vantage but the opening is off-axis or misfaced —
+                //   re-aim on the perceived opening instead of holding (rc::vantage_action / reaim_on_anchor).
+                const bool route_arrived = door_route_goal_index_ >= door_route_vantage_goals_;
+                if (rc::vantage_action(door_passage_.servo(), open_belief, open_seen, near_side, within, facing, route_arrived)
+                    == rc::VantageAction::ReAim)
+                {
+                    const ControllerRobotPose &rp = tracker_pose_.has_value() ? *tracker_pose_ : step.robot_pose;
+                    const auto ra = rc::reaim_on_anchor(g);
+                    door_reaim_goal_ = std::make_pair(Eigen::Vector2f(rp.as_transform() * ra.p_robot),
+                                                      rc::interaction::wrap_pi(rp.theta + ra.yaw_robot));
+                }
                 if (not front_of_open)
                     why_not = std::format("P(open) {:.2f}{} · seen {} · s {:+.2f} m{} · e {:+.2f} m of ±{:.2f}{} · heading {:+.0f} deg{}",
                                           p_open, open_belief ? "" : " ✗", open_seen ? "yes" : "no ✗", g.s, near_side ? "" : " ✗",
@@ -3783,7 +3795,17 @@ bool ControllerSession::drive_door_route(const ControllerPlanningStep &step, rc:
                 }
                 return true;
             }
-            if (not front_of_open and not why_not.empty()) cross_status_ = "servo not started, route drives: " + why_not;
+            if (door_reaim_goal_.has_value())
+            {
+                cross_status_ = "re-aiming on the perceived opening: " + why_not;
+                if (door_reaim_logged_ != leg.key)
+                {
+                    door_reaim_logged_ = leg.key;
+                    std::println("[door-route] {}: route arrived but not in front of the opening ({}) — re-aiming on the anchor",
+                                 leg.door, why_not);
+                }
+            }
+            else if (not front_of_open and not why_not.empty()) cross_status_ = "servo not started, route drives: " + why_not;
             if (not front_of_open and not why_not.empty() and door_servo_refused_logged_ != leg.key)
             {
                 door_servo_refused_logged_ = leg.key;

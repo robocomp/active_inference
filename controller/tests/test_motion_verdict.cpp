@@ -115,6 +115,22 @@ int main()
         f.state = "executing";
         check(not passage_note(f, mem, 500000).has_value(), "an executing step is not a passage wait");
     }
+    // warm61 leg 3: the cross CLAIMED and still in the graph (active, not pending) was reported "withdrawn" for 9 minutes.
+    {
+        AffordanceMemory mem;
+        const std::string cross = "aff_door_2_cross";
+        mem.seen(cross, {.state = "active-not-pending", .outcome = "", .precondition = "P(passable)=0.99", .t_ms = 1000});
+        PassageFacts f{.door = "door_2", .step = "cross", .required = cross, .state = "not offered",
+                       .reached_door = true, .opened = true, .clearing = false, .attempts = 0, .last_outcome = "",
+                       .door_now = "P(passable)=0.99", .waiting_on = "re-aiming on the perceived opening: e -0.46 m of ±0.44 ✗"};
+        const auto n = passage_note(f, mem, 1000);
+        check(n.has_value(), "a present-but-not-offered cross still explains the wait");
+        const std::string &d = n.has_value() ? n->detail : std::string{};
+        check(not has(d, "withdrawn"), "a present affordance is never called withdrawn");
+        check(has(d, "'aff_door_2_cross' is in the graph (active-not-pending)"), "says it is present and its state");
+        check(has(d, "waiting: re-aiming on the perceived opening"), "says what the passage is doing about it");
+        std::println("  warm61 leg 3 verdict: {}", d);
+    }
     // Never offered at all.
     {
         AffordanceMemory mem;
