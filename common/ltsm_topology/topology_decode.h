@@ -114,7 +114,9 @@ inline std::expected<Topology, std::string> decode_topology(std::string_view jso
     const auto t = decode_topology(json);
     if (not t.has_value()) return std::nullopt;
     for (const auto& p : t->passages)
-        if (face_live_name(p.face_a) == name or face_live_name(p.face_b) == name or p.live_door == name) return p.live_door;
+        if (face_live_name(p.face_a) == name or face_live_name(p.face_b) == name or p.live_door == name)
+            // never the name asked about (explore_tour6: right after a crossing live_door still named the crossed face)
+            return p.live_door.has_value() and *p.live_door != name ? p.live_door : std::nullopt;
     return std::nullopt;
 }
 }  // namespace rc::topo

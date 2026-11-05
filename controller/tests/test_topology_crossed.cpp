@@ -33,6 +33,8 @@ int main()
     check(rc::topo::remembered_uncrossed("", "room_1") == 0, "no summary: nothing remembered");
     check(rc::topo::live_door_for(j2, "door_1") == std::optional<std::string>("door_8"), "live_door_for resolves a stale face name");
     check(not rc::topo::live_door_for(j2, "door_9").has_value(), "no live door in view: nullopt");
+    // explore_tour6: right after a crossing the passage's live_door still named the crossed face itself — never return it
+    check(not rc::topo::live_door_for(j2, "door_8").has_value(), "live_door_for never returns the name it was asked about");
     std::println("{}/{} checks passed", checks - fails, checks);
     return fails == 0 ? 0 : 1;
 }

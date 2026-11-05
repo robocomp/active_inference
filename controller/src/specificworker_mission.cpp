@@ -933,6 +933,7 @@ void SpecificWorker::service_explore_tour()
 				explore_drive_->note_crossed(explore_in_flight_);
 				std::string entry = explore_mirror_.empty() ? entry_mirror_of(explore_in_flight_) : explore_mirror_;
 				if (entry.empty()) entry = rc::topo::live_door_for(topo_json, explore_in_flight_).value_or("");   // the passage's face in view
+				if (entry == explore_in_flight_) entry.clear();   // the door just crossed is never its own entry face
 				if (entry.empty()) { explore_pending_crossed_ = explore_in_flight_; explore_pending_room_ = gs.room_name; explore_pending_since_s_ = now_s; }
 				explore_drive_->note_entered(gs.room_name, entry, now_s);
 				std::println("[explore-tour] entered '{}' through '{}' (entry door '{}')", gs.room_name, explore_in_flight_,
@@ -966,6 +967,10 @@ void SpecificWorker::service_explore_tour()
 	if (not explore_pending_crossed_.empty() and explore_pending_room_ == gs.room_name
 	    and now_s - explore_pending_since_s_ < params.explore_max_room_s)
 		return;
+	// a recognition proposal is being judged: this room may be about to become a remembered one (explore_tour6 decided a Return
+	// under the provisional name room_3 while ltsm proposed it was room_1) — no decision until the verdict
+	for (const auto &n : G->get_nodes_by_type("metaconcept"))
+		if (G->get_attrib_by_name<object_subtype_att>(n).value_or(std::string{}) == "room_proposal") return;
 	// the operator's and missions' orders come first (final review I1): no decision while either holds the base
 	if (interpreter_.state() == rc::mission::Interpreter::State::Running or session_.approach_order().active()) return;
 	// the drive's inputs
