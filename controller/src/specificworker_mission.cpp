@@ -920,6 +920,33 @@ void SpecificWorker::service_explore_tour()
 	// the passage the drive started: crossed (into a new room), failed, or abandoned
 	if (not explore_in_flight_.empty() and explore_mirror_.empty())
 		explore_mirror_ = entry_mirror_of(explore_in_flight_);   // while the old face still lives (final review I2)
+	// the in-flight door's node VANISHED before the crossing (explore_tour8: door_concept's existence removed door_3 under a
+	// misassociated mask; the passage then waited for ever for affordances of a node that no longer existed). A door that
+	// is gone cannot be crossed: retarget the passage to the live door now standing for the same passage, else end it as a
+	// failure so the drive decides again (a failed Return ends in a logged Stuck, never a loop).
+	if (not explore_in_flight_.empty() and gs.room_name == explore_from_room_ and not G->get_node(explore_in_flight_).has_value())
+	{
+		std::string topo_now;
+		if (const auto t = G->get_node("ltsm_topology"); t.has_value())
+			if (const auto j = G->get_attrib_by_name<ltsm_topology_att>(t.value()); j.has_value()) topo_now = j.value();
+		const auto live = rc::topo::live_door_for(topo_now, explore_in_flight_);
+		const std::string gone = explore_in_flight_;
+		passage.stop();
+		explore_in_flight_.clear();
+		explore_mirror_.clear();
+		if (live.has_value() and G->get_node(*live).has_value()
+		    and start_door_passage(*live, rc::DoorPassage::Step::Cross, "explore", /*then_affordances=*/true).accepted)
+		{
+			explore_in_flight_ = *live;
+			std::println("[explore-tour] '{}' vanished before the crossing — retargeted to its passage's live door '{}'", gone, *live);
+		}
+		else
+		{
+			explore_drive_->note_failed(gone);
+			session_.mission().set_mode(rc::DriveMode::AffordancesOnly);
+			std::println("[explore-tour] '{}' vanished before the crossing and no live door stands for its passage — failed", gone);
+		}
+	}
 	if (not explore_in_flight_.empty())
 	{
 		const auto v = passage.view();
