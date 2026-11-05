@@ -79,7 +79,9 @@ inline constexpr std::string_view kAi2CsvHeader =
     "phi_ninf,phi_beta,phi_lat,"
     "recess,std_recess,"
     // door-passable spec step 0 (2026-11-05): the width model error's inputs (DoorBelief::last_width_error)
-    "we_r_w,we_r_w_jambs,we_J_w,we_R_w,we_var_model_w,we_var_post_w\n";   // Task 5b: the leaf plane's depth beyond the wall line (DoorBeliefState::d) and its σ
+    "we_r_w,we_r_w_jambs,we_J_w,we_R_w,we_var_model_w,we_var_post_w,"
+    // explore_tour8: the share of the mask frame's points the door model explains — the mask-sides factor's weight
+    "mask_assoc\n";   // Task 5b: the leaf plane's depth beyond the wall line (DoorBeliefState::d) and its σ
 inline constexpr std::string_view kPhiCsvHeader =
     // ★try96: s per cycle (it was logged only on the rare mask frames, so the slide had no trace) and the along-wall
     //   channel. loglik stays the LAST column (a ;-separated list), so the new ones go in front of it, by name.

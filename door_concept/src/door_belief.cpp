@@ -283,9 +283,24 @@ void DoorBelief::accumulate_extra(const DoorBeliefState& s, const DoorFrame& fra
         //  ZED depth leaves open) without letting one mask's segmentation of the door's WIDTH — which varies frame to frame
         //  (tourR2 door_2: w 0.93 ↔ 1.08 at σ_w 0.015 when each side was a factor) — pass for a measurement of w. One
         //  censored side ⇒ no midpoint ⇒ no factor this frame.
+        // ★ THE MASK IS THIS DOOR'S ONLY AS FAR AS ITS POINTS ARE (explore_tour8, 2026-11-06): a mask of 313 points at 5.68 m,
+        //   clutter=100% (another doorway, seen through the one just crossed), moved door_3's aperture 0.8 m off its wall
+        //   through this factor at full precision; the wall-band prior fell to 0.01 and existence REMOVED the door. The frame's
+        //   points carry their clutter responsibility; the mask they came from is the same observation, so its sides are
+        //   believed with the same expected association — the mean non-clutter responsibility of the frame's points at this
+        //   state (an EM weight on the mask's mixture component, not a gate). No points: nothing says the mask is foreign (1).
+        float assoc = 1.0f;
+        if (ok and not frame.points.empty())
+        {
+            double acc = 0.0;
+            for (std::size_t i = 0; i < frame.points.size(); ++i)
+                acc += 1.0 - double(responsibilities(frame.points[i], s, i < frame.R.size() ? frame.R[i] : sigma2())[2]);
+            assoc = float(acc / double(frame.points.size()));
+        }
+        last_mask_assoc_ = assoc;
         if (ok)
         {
-            const float iv = 1.0f / std::max(1e-6f, 0.5f * mb.var + mb.var_common);
+            const float iv = assoc / std::max(1e-6f, 0.5f * mb.var + mb.var_common);
             const float r = 0.5f * (lo0 + hi0) - 0.5f * (mb.lo + mb.hi);
             Id.noalias() += iv * (J * J.transpose());
             bd.noalias() += -iv * J * r;

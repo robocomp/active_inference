@@ -658,6 +658,9 @@ public:
         bool  valid = false;
     };
     [[nodiscard]] const WidthErrorDiag& last_width_error() const { return width_diag_; }
+    /// The share of the last mask frame's points the door model explains (1 − mean clutter responsibility): the weight its
+    /// mask-sides factor was given (explore_tour8). 1 when the frame had no points or no usable mask.
+    [[nodiscard]] float last_mask_assoc() const { return last_mask_assoc_; }
 
     void  apply_constraints(DoorBeliefState& s) const;
     void  canonicalize(DoorBeliefState&) const {}   // wall fixes yaw ⇒ no symmetry fold
@@ -695,6 +698,7 @@ private:
     void note_model_error(const DoorFrame& frame);
     float model_var_s_ = 0.f, model_var_w_ = 0.f;
     WidthErrorDiag width_diag_;
+    mutable float last_mask_assoc_ = 1.0f;   // set by accumulate_extra (const: a diagnostic of the evaluation)
     // Where (bearing/range seen from the aperture) the error was measured and how big it was there: the viewpoints a look
     // cannot improve on. One entry per distinct viewpoint (door_view_pool.h's similarity), updated in place.
     struct ErrView { float bearing = 0.f, range = 0.f, q = 0.f; };

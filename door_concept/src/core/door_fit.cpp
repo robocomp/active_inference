@@ -899,8 +899,8 @@ float DoorFit::run_inference(rc::DoorFitState& inst, const DoorObservation& obse
     compute_projected_roi(inst);
 
     if (should_log(inst))
-        say(std::format("[{}] AI2 npts={} clutter={:.0f}% R={:.4f} range={:.2f} trunc={:.2f}{} | FE={:.2f} base={:.2f} surprise={:.2f} | s={:.2f} w={:.2f} h={:.2f} @({:.2f},{:.2f}) ψ={:.2f}\n",
-                        inst.node_name, npts, 100.0f * inst.last_clutter_frac, R, range, inst.last_trunc_frac, gated ? " GATED" : "",
+        say(std::format("[{}] AI2 npts={} clutter={:.0f}% mask_assoc={:.2f} R={:.4f} range={:.2f} trunc={:.2f}{} | FE={:.2f} base={:.2f} surprise={:.2f} | s={:.2f} w={:.2f} h={:.2f} @({:.2f},{:.2f}) ψ={:.2f}\n",
+                        inst.node_name, npts, 100.0f * inst.last_clutter_frac, inst.ai2_belief.last_mask_assoc(), R, range, inst.last_trunc_frac, gated ? " GATED" : "",
                         energy, inst.fe_baseline, inst.fe_surprise,
                         bs.s, bs.w, bs.h, c.x(), c.y(), ms.yaw));
 
@@ -932,7 +932,8 @@ void DoorFit::log_ai2_csv(const rc::DoorFitState& inst, int npts, float R, bool 
         << inst.dbg_phi_ninf << ',' << inst.dbg_phi_beta << ',' << inst.dbg_phi_lat << ','
         << inst.ai2_belief.recess() << ',' << inst.ai2_belief.recess_sd() << ',';
     const auto& we = inst.ai2_belief.last_width_error();
-    row << we.r_w << ',' << we.r_w_jambs << ',' << we.J_w << ',' << we.R_w << ',' << we.var_model_w << ',' << we.var_post_w << '\n';
+    row << we.r_w << ',' << we.r_w_jambs << ',' << we.J_w << ',' << we.R_w << ',' << we.var_model_w << ',' << we.var_post_w << ','
+        << inst.ai2_belief.last_mask_assoc() << '\n';
     diag_({"ai2_log.csv", row.str()});
 }
 
