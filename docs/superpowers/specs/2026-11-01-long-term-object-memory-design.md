@@ -39,7 +39,8 @@ Goals
 
 Non-goals
 - Deciding identity (U4). The memory offers candidates and stores decisions; it does not make them.
-- Storing raw images or crops (only the atlas state of VIEW_ATLAS.md §3.1).
+- Storing raw images or crops (only the atlas state of VIEW_ATLAS.md §3.1) — except one thumbnail crop per atlas
+  bin, for the inspector (user, 11-02; §8 step 4).
 - Events and steps (episodic_agent), room layouts and passages (ltsm_agent).
 - Room naming (U5).
 
@@ -175,8 +176,9 @@ In the memory graph each remembered object is a node; **edges are reserved for a
    quality — embeddings are not decodable into a usable image); and an inverse sensor projection (the object's
    model rendered at its remembered pose into the ZED/LiDAR view from the current pose or from each atlas bin's
    direction — the imagined-observations renders, which the permanence visibility test needs anyway).
-   OPEN (user): may ltom keep one thumbnail crop per atlas bin? It is what a person would want to see, but it
-   contradicts the §3 non-goal "no raw images or crops".
+   DECIDED (user, 11-02): ltom keeps ONE thumbnail crop per atlas bin (the best view that went into the bin), for
+   the inspector. This overrides the §3 non-goal "no raw images or crops" for that one crop per bin; full images
+   and per-frame crops stay out.
 
 ## 9. Constraints
 CLAUDE.md throughout: and/or/not, C++23, `std::from_chars` (es_ES locale) and `imbue(classic)` on every file

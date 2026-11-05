@@ -4,7 +4,7 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 out=$(mktemp -d)
-for t in test_ndjson test_gate test_objects test_canvas test_gpu test_fleet; do
+for t in test_ndjson test_gate test_objects test_canvas test_gpu test_fleet test_verbatim; do
     g++ -std=c++23 -O0 -g -Wall -Wextra -o "$out/$t" "$t.cpp"
     "$out/$t"
 done

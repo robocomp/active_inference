@@ -175,7 +175,9 @@ def tools():
                                                         "bottle, cabinet, hood)"},
            "where": {"type": "string", "description": "where to put it: a door or object name (door_1, table_1), or "
                                                       "\"wall\" for against the wall (also for \"junto a la pared\"); "
-                                                      "empty = wherever such things usually stand"},
+                                                      "\"here\" for somewhere in this room; EMPTY = the robot's own idea "
+                                                      "of the thing, a typical one standing on the floor in empty space in "
+                                                      "front of it (no room needed)"},
            "from": {"type": "string", "description": "the place to look from: a door or object name; empty = where the "
                                                      "robot is now"},
            "sensor": {"type": "string", "enum": ["zed", "lidar", "both"], "description": "which sensor to draw; default both"},

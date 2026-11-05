@@ -41,12 +41,54 @@ inline std::optional<Eigen::Isometry3f> mount_of(DSR::InnerEigenAPI& inner, cons
 }
 }   // namespace see_detail
 
+/// The sensors of the scene: the ZED (field of view from the intrinsics, mount height above the robot's floor node) and the two LiDARs
+/// (body <- sensor). The imagined thing in free space in front of the robot still needs its camera, room or not.
+inline void fill_sensors(DSR::DSRGraph& G, DSR::InnerEigenAPI& inner, SeeScene& s, const std::string& robot_frame)
+{
+    // The ZED's height is read from the robot-type node (Shadow, at the floor), the same on every path whether or not a room
+    // is known; room frames sit at z = 0, so it equals the room-relative height. No robot node, or no chain to the camera:
+    // the camera is left out and the answer says so (never silently dropped).
+    const auto robots = G.get_nodes_by_type("robot");
+    const std::string ref_frame = robots.empty() ? std::string{} : robots.front().name();
+    // ZED: the field of view from the intrinsics (pinhole), the mount height from the RT chain.
+    if (const auto zn = G.get_node("zed"); zn.has_value())
+    {
+        const auto w = G.get_attrib_by_name<cam_rgb_width_att>(zn.value());
+        const auto h = G.get_attrib_by_name<cam_rgb_height_att>(zn.value());
+        const auto fx = G.get_attrib_by_name<cam_rgb_focalx_att>(zn.value());
+        const auto fy = G.get_attrib_by_name<cam_rgb_focaly_att>(zn.value());
+        const auto Tz = ref_frame.empty() ? decltype(inner.get_transformation_matrix(ref_frame, "zed")){}
+                                          : inner.get_transformation_matrix(ref_frame, "zed");
+        if (w and h and fx and fy and Tz.has_value() and *w > 0 and *h > 0 and *fx > 0 and *fy > 0)
+        {
+            rc::nbv::Sensor z;
+            z.hfov_rad = 2.0f * std::atan(static_cast<float>(*w) / (2.0f * static_cast<float>(*fx)));
+            z.vfov_rad = 2.0f * std::atan(static_cast<float>(*h) / (2.0f * static_cast<float>(*fy)));
+            z.height_m = static_cast<float>(Tz->translation().z());
+            s.zed = z;
+            s.zed_mount_z = z.height_m;
+        }
+        else s.notes.push_back("I could not read my camera's mount or intrinsics, so I left it out");
+    }
+
+    // LiDARs: model from the media descriptor, mount from the RT chain; either missing ⇒ the channel is absent.
+    const auto rig = [&](const char* name) -> std::optional<rc::card::LidarRig>
+    {
+        const auto m = rc::media::sensor_model_from_graph(G, name);
+        const auto mt = see_detail::mount_of(inner, robot_frame, name);
+        if (not m.has_value() or not mt.has_value()) return std::nullopt;
+        return lidar_rig_from_body_mount(*m, *mt);
+    };
+    s.helios = rig("helios");
+    s.bpearl = rig("bpearl");
+}
+
 [[nodiscard]] inline SeeScene build_see_scene(DSR::DSRGraph& G, DSR::InnerEigenAPI& inner, const Digest& digest,
                                               const std::string& robot_frame = "body")
 {
     SeeScene s;
     s.room = digest.facts.room;
-    if (s.room.empty() or digest.room_id == 0) return s;
+    if (s.room.empty() or digest.room_id == 0) { s.room.clear(); fill_sensors(G, inner, s, robot_frame); return s; }
 
     if (const auto rn = G.get_node(digest.room_id); rn.has_value())
     {
@@ -139,35 +181,7 @@ inline std::optional<Eigen::Isometry3f> mount_of(DSR::InnerEigenAPI& inner, cons
         s.objects.push_back(std::move(so));
     }
 
-    // ZED: the field of view from the intrinsics (pinhole), the mount height from the RT chain.
-    if (const auto zn = G.get_node("zed"); zn.has_value())
-    {
-        const auto w = G.get_attrib_by_name<cam_rgb_width_att>(zn.value());
-        const auto h = G.get_attrib_by_name<cam_rgb_height_att>(zn.value());
-        const auto fx = G.get_attrib_by_name<cam_rgb_focalx_att>(zn.value());
-        const auto fy = G.get_attrib_by_name<cam_rgb_focaly_att>(zn.value());
-        const auto Tz = inner.get_transformation_matrix(s.room, "zed");
-        if (w and h and fx and fy and Tz.has_value() and *w > 0 and *h > 0 and *fx > 0 and *fy > 0)
-        {
-            rc::nbv::Sensor z;
-            z.hfov_rad = 2.0f * std::atan(static_cast<float>(*w) / (2.0f * static_cast<float>(*fx)));
-            z.vfov_rad = 2.0f * std::atan(static_cast<float>(*h) / (2.0f * static_cast<float>(*fy)));
-            z.height_m = static_cast<float>(Tz->translation().z());
-            s.zed = z;
-            s.zed_mount_z = z.height_m;
-        }
-    }
-
-    // LiDARs: model from the media descriptor, mount from the RT chain; either missing ⇒ the channel is absent.
-    const auto rig = [&](const char* name) -> std::optional<rc::card::LidarRig>
-    {
-        const auto m = rc::media::sensor_model_from_graph(G, name);
-        const auto mt = see_detail::mount_of(inner, robot_frame, name);
-        if (not m.has_value() or not mt.has_value()) return std::nullopt;
-        return lidar_rig_from_body_mount(*m, *mt);
-    };
-    s.helios = rig("helios");
-    s.bpearl = rig("bpearl");
+    fill_sensors(G, inner, s, robot_frame);
     return s;
 }
 

@@ -77,6 +77,7 @@
 #include <dsr/api/dsr_inner_eigen_api.h>
 
 #include "skills.h"
+#include "verbatim_reply.h"
 #include "camera_grabber.h"
 #include "canvas_commands.h"
 #include "canvas_lidar.h"
@@ -279,6 +280,9 @@ private:
     int draw_repairs_ = 0;          ///< model re-asks after a failed draw, this user message (cap kMaxDrawRepairs)
     int lost_answers_ = 0;          ///< model answers this user message that came back empty (one is re-asked)
     bool draw_failed_ = false;      ///< a draw in the current tool round failed
+    rc::chat::VerbatimReply verbatim_;   ///< refusals of this tool round: the reply is these texts, not a model paraphrase
+    int round_calls_ = 0;                ///< tool calls of the current round (all_refused compares against it)
+    QString refusal(QString text) { verbatim_.add(text.toStdString()); return text; }   ///< a tool's refusal site
     QTimer canvas_timer_;
     QByteArray look_jpeg_;   ///< set by do_look(), attached to that call's role:"tool" message
     QObject ctx_;

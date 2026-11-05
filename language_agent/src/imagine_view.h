@@ -63,12 +63,15 @@ struct ImaginePlace
 /// `where` → a place. A door or object name is `at` it (a door: one robot radius inside, as can_see's "from door"; an
 /// object of ANOTHER class: its standoff; an object of the SAME class: its own spot, and that instance is excluded).
 /// "wall"/"pared" forces against_wall; empty is the card's mixture; anything else asks.
-[[nodiscard]] inline std::expected<ImaginePlace, std::string> resolve_place(const SeeScene& s, const std::string& cls,
+[[nodiscard]] inline std::expected<ImaginePlace, SeeError> resolve_place(const SeeScene& s, const std::string& cls,
                                                                               const std::string& where)
 {
     ImaginePlace pl;
     const std::string w = lower_ascii(where);
-    if (w.empty()) { pl.words = "wherever such things usually stand"; return pl; }
+    // "here" / "in this room": the room-based mixture (free or against a wall). An EMPTY `where` is the canonical view
+    // (imagine_view handles it before this): the robot's idea of the thing, not a thing placed in its room.
+    if (w.empty() or w == "here" or w == "in this room" or w == "in the room" or w == "aqui" or w == "aqu\u00ed" or w == "en esta habitacion")
+    { pl.words = "wherever such things usually stand"; return pl; }
     for (const auto& d : s.doors)
         if (lower_ascii(d.name) == w)
         {
@@ -93,7 +96,7 @@ struct ImaginePlace
             return pl;
         }
     if (names_wall(w)) { pl.ctx.force_context = "against_wall"; pl.words = "against a wall"; return pl; }
-    return std::unexpected("ASK: which place do you mean? Name a door or an object, or say against the wall.");
+    return std::unexpected(see_ask("ASK: which place do you mean? Name a door or an object, or say against the wall."));
 }
 
 /// A hypothetical target: no instance of the concept exists and `where` names a door, or an object of a KNOWN, different
@@ -189,6 +192,70 @@ struct ImaginePlace
     return out;
 }
 
+/// How far in front of the robot the canonical instance stands: "how I would best see one" = the distance that maximises
+/// the card's own mean P(recognise) over the canonical scene (empty space, the robot at the origin heading +y, the same
+/// Monte-Carlo as the answer but kSearchSamples draws with a fixed seed: deterministic and cheap). Grid 0.5..8 m, step
+/// 0.1 m; the NEAREST distance within one MC standard error of the maximum is taken. When the card cannot be evaluated anywhere (no camera,
+/// no draw placed): kFreeSpaceDistanceM, flagged.
+/// How far in front the canonical instance stands when nothing better is known (the one constant for it).
+inline constexpr float kFreeSpaceDistanceM = 2.0f;
+struct CanonicalDistance
+{
+    enum class Kind { Searched, NoSensor, NeverRecognised };
+    float m = kFreeSpaceDistanceM;
+    Kind kind = Kind::NoSensor;
+    rc::card::Limit limit = rc::card::Limit::None;   ///< NeverRecognised: what most often stops it, over the whole search
+    [[nodiscard]] bool searched() const { return kind == Kind::Searched; }
+};
+inline constexpr int kSearchSamples = 8;
+inline constexpr std::uint64_t kSearchSeed = 1;
+[[nodiscard]] inline CanonicalDistance canonical_distance(const rc::card::Card& card, const SeeScene& s, const std::string& cls)
+{
+    const auto vp = resolve_from(s, "");
+    // No sensor at all (neither the camera nor a LiDAR rig) or no generative model: nothing to evaluate. A LiDAR-only card
+    // is searched like any other: mc_over_samples evaluates whatever channels the card models.
+    if (not vp.has_value() or not vp->yaw.has_value() or not card.generative
+        or not (s.zed.has_value() or s.helios.has_value() or s.bpearl.has_value())) return {};
+    ImaginePlace place;
+    std::vector<std::string> excluded;
+    const auto world = imagine_world(s, card, cls, place, excluded);
+    const Eigen::Vector2f dir(std::cos(*vp->yaw), std::sin(*vp->yaw));
+    struct At { float d, p; };
+    std::vector<At> curve;
+    std::map<rc::card::Limit, int> limits;
+    float best_p = -1.0f, best_se = 0.0f;
+    for (int i = 5; i <= 80; ++i)
+    {
+        const float d = static_cast<float>(i) * 0.1f;
+        rc::card::Context ctx;
+        ctx.at = vp->xy + d * dir;
+        const auto set = rc::card::sample_concept(card, with_robot_body(world, *vp), ctx, kSearchSamples, kSearchSeed);
+        const auto mc = mc_over_samples(card, world, cls, set.samples, *vp);
+        if (mc.n == 0) continue;
+        curve.push_back({d, mc.p_recognise_mean});
+        ++limits[mc.modal_limit];
+        if (mc.p_recognise_mean > best_p)
+        {
+            best_p = mc.p_recognise_mean;
+            best_se = mc.p_recognise_sd / std::sqrt(static_cast<float>(mc.n));   // the search's own draws at the maximum
+        }
+    }
+    if (curve.empty()) return {};
+    CanonicalDistance out;
+    if (best_p <= 0.0f)   // evaluated, and recognised nowhere: say that, with what most often stops it
+    {
+        out.kind = CanonicalDistance::Kind::NeverRecognised;
+        int most = -1;
+        for (const auto& [l, c] : limits) if (c > most) { most = c; out.limit = l; }
+        return out;
+    }
+    // The NEAREST distance statistically as good as the maximum: within one Monte-Carlo standard error of it (exact ties
+    // when the SE is 0). On a plateau the maximum is a noise pick; the nearest plateau point is the one worth reporting.
+    for (const auto& at : curve)
+        if (at.p >= best_p - best_se) { out.m = at.d; out.kind = CanonicalDistance::Kind::Searched; return out; }
+    return out;
+}
+
 /// "0.62 ± 0.11"
 [[nodiscard]] inline std::string pm(float mean, float sd)
 {
@@ -210,6 +277,10 @@ struct ImagineFacts
     std::uint64_t seed = 0;
     std::string calibration;                ///< the card's, for the "isn't calibrated yet" note
     std::string sensor = "both";
+    bool canonical = false;                 ///< the canonical view: a typical instance on the floor in empty space, no room
+    float distance_m = 0;                   ///< canonical: how far in front of the robot
+    CanonicalDistance::Kind distance_kind = CanonicalDistance::Kind::Searched;
+    rc::card::Limit never_limit = rc::card::Limit::None;   ///< NeverRecognised: what most often stops it
 };
 
 /// " Assumed: door_1: ...; door_2: ...." from the doors' notes; empty when nothing was assumed.
@@ -229,6 +300,17 @@ struct ImagineFacts
     return out;
 }
 
+/// The canonical answer's note on the distance: nothing when it was searched; why 2 m otherwise.
+[[nodiscard]] inline std::string canonical_note(const ImagineFacts& f)
+{
+    using K = CanonicalDistance::Kind;
+    if (f.distance_kind == K::NeverRecognised)
+        return std::format(" (I would not recognise one at any distance from 0.5 to 8 m; what most often stops it: {}; I show it at {:.0f} m)",
+                           see_detail::limit_words(f.never_limit, ""), kFreeSpaceDistanceM);
+    if (f.distance_kind == K::NoSensor) return " (I have no sensor to evaluate my detector with, so I assumed that distance)";
+    return "";
+}
+
 [[nodiscard]] inline std::string answer_imagine_view(const ImagineFacts& f, const rc::card::McResult& mc)
 {
     using namespace see_detail;
@@ -238,10 +320,18 @@ struct ImagineFacts
                            "(my own body at the viewpoint counts as one: I cannot stand inside what I imagine) and {} outside the "
                            "room. (seed {}){}", f.cls, f.place_words, f.drawn, f.rejected, f.outside_polygon, f.seed, assumed_suffix(f.assumed));
     const std::string at = f.from_label.empty() ? "from here" : "from " + f.from_label;
-    std::string out = std::format("I imagined {} {} {}, seen {}. I would notice that something is there with P {}, and "
-                                  "recognise it as a {} with P {} ({}).",
-                                  f.shown, f.shown == 1 ? f.cls : pl, f.place_words, at, pm(mc.p_notice_mean, mc.p_notice_sd),
-                                  f.cls, pm(mc.p_recognise_mean, mc.p_recognise_sd), likelihood(mc.p_recognise_mean));
+    std::string out;
+    if (f.canonical)
+        out = std::format("I imagined {} typical {} standing on the floor {:.1f} m in front of me{}. I would notice that something "
+                          "is there with P {}, and recognise it as a {} with P {} ({}).",
+                          f.shown, f.shown == 1 ? f.cls : pl, f.distance_m,
+                          canonical_note(f),
+                          pm(mc.p_notice_mean, mc.p_notice_sd), f.cls, pm(mc.p_recognise_mean, mc.p_recognise_sd), likelihood(mc.p_recognise_mean));
+    else
+        out = std::format("I imagined {} {} {}, seen {}. I would notice that something is there with P {}, and "
+                          "recognise it as a {} with P {} ({}).",
+                          f.shown, f.shown == 1 ? f.cls : pl, f.place_words, at, pm(mc.p_notice_mean, mc.p_notice_sd),
+                          f.cls, pm(mc.p_recognise_mean, mc.p_recognise_sd), likelihood(mc.p_recognise_mean));
     if (mc.modal_limit != rc::card::Limit::None)
         out += std::format(" What most often limits it: {}.", limit_words(mc.modal_limit, ""));
     if (f.inside_count > 0)
@@ -311,28 +401,54 @@ struct ImagineFacts
                                        door_assumptions(s));
 }
 
+/// The refusal for a place that needs the room when there is none. A refusal is a limitation the person must hear as it is
+/// (ImagineOutcome::refusal), never a model paraphrase.
+inline constexpr const char* kNoRoomRefusal = "I do not know which room I am in, so I cannot imagine it here.";
+/// How far in front of the robot a room-less imagined thing stands (the cards carry no typical viewing distance).
 struct ImagineOutcome
 {
     std::string text;
+    bool refusal = false;   ///< `text` is a refusal / limitation: the robot's reply is this text unchanged
     bool drawn = false;     ///< the canvas data were written: the caller draws stock/imagined.py
     std::string caption;
 };
 
 /// The whole imagine_view path. Writes <run_dir>/imagined.json + imagined_zed.png when it placed anything.
-[[nodiscard]] inline ImagineOutcome imagine_view(const rc::card::Card& card, const SeeScene& s, const ImagineRequest& rq,
+[[nodiscard]] inline ImagineOutcome imagine_view(const rc::card::Card& card, const SeeScene& scene_in, const ImagineRequest& rq,
                                                  std::uint64_t seed, const std::filesystem::path& run_dir)
 {
     ImagineOutcome out;
+    // An EMPTY `where` is the canonical view: the robot's idea of the thing, a typical instance on the floor in empty space in
+    // front of its real sensors (no room polygon, walls, doors or other objects), whether or not a room is known. Only a
+    // named place (a wall, a door, an object, "here") puts it in the room, and then the room is needed.
+    const bool canonical = rq.where.empty();
+    SeeScene s = scene_in;
+    if (not canonical and scene_in.room.empty()) { out.text = kNoRoomRefusal; out.refusal = true; return out; }
+    if (canonical)
+    {
+        s.robot_xy = Eigen::Vector2f(0.0f, 0.0f);
+        s.robot_yaw = 0.0f;
+        s.polygon.clear(); s.doors.clear(); s.objects.clear();
+        s.room_height_known = true;
+    }
     const std::string cls = canonical_concept(rq.concept_);
     if (not card.generative)
     {
         out.text = std::format("My model of {} does not say what one looks like, so I cannot imagine it.", see_detail::plural(cls));
+        out.refusal = true;
         return out;
     }
-    const auto place = resolve_place(s, cls, rq.where);
-    if (not place.has_value()) { out.text = place.error(); return out; }
-    const auto vp = resolve_from(s, rq.from);
-    if (not vp.has_value()) { out.text = vp.error(); return out; }
+    auto place = resolve_place(s, cls, rq.where);
+    if (not place.has_value()) { out.text = place.error(); out.refusal = not place.error().ask; return out; }
+    const auto vp = resolve_from(s, canonical ? std::string{} : rq.from);   // the canonical view is from the robot itself
+    if (not vp.has_value()) { out.text = vp.error(); out.refusal = not vp.error().ask; return out; }
+    CanonicalDistance cd;
+    if (canonical)
+    {
+        cd = canonical_distance(card, s, cls);
+        place->ctx.at = vp->xy + cd.m * Eigen::Vector2f(std::cos(*vp->yaw), std::sin(*vp->yaw));
+        place->words = std::format("standing on the floor {:.1f} m in front of me", cd.m);
+    }
     const std::string sensor = lower_ascii(rq.sensor);
     const bool want_zed = sensor != "lidar", want_lidar = sensor != "zed";
     const int n = std::clamp(rq.n, 1, kMaxDisplaySamples);
@@ -340,6 +456,7 @@ struct ImagineOutcome
     ImagineFacts f;
     f.cls = cls; f.place_words = place->words; f.from_label = rq.from;
     f.room_height_known = s.room_height_known; f.room_height = s.room_height;
+    f.canonical = canonical; f.distance_m = cd.m; f.distance_kind = cd.kind; f.never_limit = cd.limit;
     f.seed = seed; f.calibration = card.calibration; f.sensor = sensor; f.assumed = door_assumptions(s);
     const auto world = imagine_world(s, card, cls, *place, f.excluded);
 
@@ -368,6 +485,7 @@ struct ImagineOutcome
     }
     if (not s.room_height_known) set.notes.push_back(std::format("room height {:.1f} m assumed", s.room_height));
     out.text = answer_imagine_view(f, mc);
+    for (const auto& n : s.notes) out.text += " (" + n + ")";
     if (f.shown == 0) return out;
 
     out.caption = std::format("{} imagined {} {}: P(notice) {}, P(recognise) {}", f.shown, f.shown == 1 ? cls : see_detail::plural(cls),

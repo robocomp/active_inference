@@ -244,6 +244,166 @@ int main()
         CHECK(not is_hypothetical(scene(true), "chair", "table_1")); // a chair exists: the old path evaluates the named instance
         CHECK(not is_hypothetical(scene(true), "chair", "chair_1"));
     }
+    // ---- the evaluator and the renderer agree on where the camera looks (live: chair in the ZED render, P 0.00 everywhere) ----
+    {
+        const auto s = scene(false);                      // robot at (1,2), faces +x
+        const auto vp = resolve_from(s, "");
+        CHECK(vp.has_value());
+        Hypothesis h; h.concept_ = "chair"; h.x = 2.5f; h.y = 2.0f; h.yaw = 0.0f;   // 1.5 m straight ahead
+        const auto r = evaluate(chair_card(), world_for(s, ""), h, *vp);
+        CHECK(r.p_notice > 0.5f and r.p_recognise > 0.5f);
+        CHECK(r.limit != Limit::OutOfView);
+        Hypothesis hb = h; hb.x = 1.0f; hb.y = 3.5f;      // 1.5 m to the LEFT of the robot (+y): outside the field of view
+        const auto rb = evaluate(chair_card(), world_for(s, ""), hb, *vp);
+        CHECK(rb.p_notice < 0.1f and rb.limit == Limit::OutOfView);
+        // the SAME out-of-view judgement for every heading: the label must not depend on the world bearing of the target
+        // (v_no_fov looked along world +x, so a target beyond +-86 deg of +x was never "out of view": limit None)
+        int n_heading = 0;
+        for (float rad = -3.0f; rad <= 3.0f; rad += 0.5f)
+            for (const float off : {-2.5f, -1.5f, -1.0f, 1.0f, 1.5f, 2.5f, 3.1f})   // beyond the +-30 deg half field of view
+            {
+                auto sr = s; sr.robot_yaw = rad; sr.robot_xy = Eigen::Vector2f(3.0f, 2.0f); sr.objects.clear(); sr.doors.clear();
+                const auto vr = resolve_from(sr, "");
+                Hypothesis ho; ho.concept_ = "chair"; ho.yaw = 0.0f;
+                ho.x = 3.0f + 1.5f * std::cos(*vr->yaw + off); ho.y = 2.0f + 1.5f * std::sin(*vr->yaw + off);
+                if (ho.x < 0.2f or ho.x > 5.8f or ho.y < 0.2f or ho.y > 3.8f) continue;   // keep it inside the 6x4 room
+                ++n_heading;
+                CHECK(evaluate(chair_card(), world_for(sr, ""), ho, *vr).limit == Limit::OutOfView);
+            }
+        CHECK(n_heading >= 30);
+    }
+    // ---- no room: imagine in free space in front of the robot; a named place still needs the room ----
+    {
+        auto s = scene(false);
+        s.room.clear(); s.polygon.clear(); s.doors.clear(); s.objects.clear(); s.robot_xy.reset();
+        ImagineRequest rq; rq.concept_ = "chair"; rq.n = 8;
+        const auto o = imagine_view(chair_card(), s, rq, 7, dir);
+        CHECK(o.drawn and not o.refusal);
+        CHECK(has(o.text, "typical chairs standing on the floor") and has(o.text, "m in front of me") and has(o.text, "±"));
+        CHECK(not has(o.text, "from here") and not has(o.text, "room") and not has(o.text, "Room height") and not has(o.text, "against a wall"));
+        const auto doc = QJsonDocument::fromJson(QByteArray::fromStdString(slurp(dir / "imagined.json"))).object();
+        CHECK(doc["samples"].toArray().size() == 8);
+        // the thing stands straight ahead, in view of the camera: it is noticed, not 0.00 from a wrong heading
+        CHECK(doc["mc"].toObject()["p_notice_mean"].toDouble() > 0.2);
+        ImagineRequest rw = rq; rw.where = "against the wall";
+        const auto r = imagine_view(chair_card(), s, rw, 7, dir);
+        CHECK(not r.drawn and r.refusal and r.text == kNoRoomRefusal);
+        // a refusal flag on the other refusal sites
+        Card nogen = chair_card(); nogen.generative.reset();
+        CHECK(imagine_view(nogen, scene(true), rq, 1, dir).refusal);
+        ImagineRequest rbad = rq; rbad.where = "the moon";
+        CHECK(not imagine_view(chair_card(), scene(true), rbad, 1, dir).refusal);   // an ASK goes back to the model, not to the person
+        CHECK(has(imagine_view(chair_card(), scene(true), rbad, 1, dir).text, "ASK:"));
+        CHECK(resolve_place(scene(true), "chair", "the moon").error().ask and resolve_from(scene(true), "the kitchen").error().ask);
+        { auto lost = scene(true); lost.robot_xy.reset(); ImagineRequest rl; rl.concept_ = "chair"; rl.where = "wall";
+          const auto ol = imagine_view(chair_card(), lost, rl, 1, dir); CHECK(ol.refusal and not resolve_from(lost, "").error().ask); }
+        CHECK(not imagine_view(chair_card(), scene(true), rq, 1, dir).refusal);
+    }
+    // ---- the canonical view: the robot's idea of the thing, independent of the room ----
+    {
+        auto none = scene(false);
+        none.room.clear(); none.polygon.clear(); none.doors.clear(); none.objects.clear(); none.robot_xy.reset();
+        auto walled = scene(true);                       // a room, doors, a chair and a table; wall 1 m in front of the robot
+        walled.polygon = {{0, 0}, {2, 0}, {2, 4}, {0, 4}};
+        ImagineRequest rq; rq.concept_ = "chair"; rq.n = 8;
+        const auto a = imagine_view(chair_card(), none, rq, 11, dir);
+        const auto b = imagine_view(chair_card(), walled, rq, 11, dir);
+        CHECK(a.drawn and b.drawn and a.text == b.text);
+        // "here" is a named place: the room mixture, and it needs the room
+        ImagineRequest rh = rq; rh.where = "here";
+        const auto h = imagine_view(chair_card(), scene(false), rh, 11, dir);
+        CHECK(has(h.text, "wherever such things usually stand"));
+        CHECK(imagine_view(chair_card(), none, rh, 11, dir).refusal);
+        // the distance maximises the card's own P(recognise): a narrow band of fills picks the matching distance
+        Card c = chair_card();
+        c.subtypes[""].env = {0.25f, 0.35f, 0.02f};
+        for (auto& v : c.generative->vars) v.sigma = 1e-4f;       // one size: the fill is then a function of distance
+        auto sc = scene(false);
+        sc.room.clear(); sc.polygon.clear(); sc.doors.clear(); sc.objects.clear();
+        sc.robot_xy = Eigen::Vector2f(0, 0); sc.robot_yaw = 0.0f; sc.room_height_known = true;
+        const auto cd = canonical_distance(c, sc, "chair");
+        CHECK(cd.searched());
+        // independent: the same chair at each distance, yaws swept, scored by the evaluator directly
+        const auto vp = *resolve_from(sc, "");
+        float best_d = 0, best_p = -1;
+        for (int i = 5; i <= 80; ++i)
+        {
+            const float d = 0.1f * float(i);
+            float sum = 0;
+            for (int k = 0; k < 8; ++k)
+            {
+                Hypothesis h; h.concept_ = "chair"; h.x = d * std::cos(*vp.yaw); h.y = d * std::sin(*vp.yaw);
+                h.yaw = 0.785f * float(k); h.size = GeometryPrior{0.6f, 0.52f, 1.25f, 0.0f, 1.25f};
+                sum += evaluate(c, world_for(sc, ""), h, vp).p_recognise;
+            }
+            if (sum > best_p + 1e-4f) { best_p = sum; best_d = d; }
+        }
+        CHECK(std::abs(cd.m - best_d) <= 0.2f);
+        CHECK(cd.m > 0.6f and cd.m < 7.9f);
+        // a flat plateau (everything from ~1.5 m outwards recognised alike): the NEAREST distance on it, not a noise maximum
+        {
+            Card f = chair_card();
+            f.subtypes[""].env = {0.0005f, 0.55f, 0.0005f};   // saturated for every fill under ~0.54: a plateau from ~1.5 m out to 8 m
+            for (auto& v : f.generative->vars) v.sigma = 1e-4f;
+            const auto cf = canonical_distance(f, sc, "chair");
+            CHECK(cf.searched() and cf.m >= 1.3f and cf.m <= 2.0f);   // the plateau's NEAR edge
+        }
+        // evaluated and recognised nowhere: say that (not "could not evaluate"), with the limit
+        {
+            Card nv = chair_card();
+            nv.subtypes[""].env = {0.9f, 0.95f, 0.001f};          // nothing fills the frame that much at 0.5..8 m
+            const auto cn = canonical_distance(nv, sc, "chair");
+            CHECK(cn.kind == CanonicalDistance::Kind::NeverRecognised);
+            const auto tn = imagine_view(nv, none, rq, 11, dir).text;
+            CHECK(has(tn, "would not recognise one at any distance") and not has(tn, "could not evaluate"));
+        }
+        // a LiDAR-only card is searched like any other (no camera in the scene is no reason to refuse)
+        {
+            Card lc = chair_card();
+            lc.channels = {{"helios", Role::Identity, true}};
+            lc.subtypes[""].q_return = 0.9f;
+            auto ls = sc; ls.zed.reset();
+            CHECK(canonical_distance(lc, ls, "chair").kind != CanonicalDistance::Kind::NoSensor);
+        }
+        // what the scene could not read is said in the answer
+        {
+            auto ns = none; ns.notes.push_back("I could not read my camera's mount or intrinsics, so I left it out");
+            CHECK(has(imagine_view(chair_card(), ns, rq, 11, dir).text, "left it out"));
+        }
+        const auto cd2 = canonical_distance(c, sc, "chair");
+        CHECK(cd2.m == cd.m);                                      // deterministic
+        CHECK(has(imagine_view(c, none, rq, 11, dir).text, "m in front of me"));
+        // a card that cannot be evaluated (no camera): 2 m, said so
+        auto nocam = sc; nocam.zed.reset();
+        CHECK(not canonical_distance(c, nocam, "chair").searched() and canonical_distance(c, nocam, "chair").m == 2.0f);
+        auto nocam_none = none; nocam_none.zed.reset(); nocam_none.helios.reset(); nocam_none.bpearl.reset();
+        CHECK(has(imagine_view(c, nocam_none, rq, 11, dir).text, "no sensor to evaluate"));
+    }
+    // the real chair card (fleet envelope, 71 deg camera): the canonical P(notice) is clearly above 0, not the live 0.00
+    {
+        auto none = scene(false);
+        none.room.clear(); none.polygon.clear(); none.doors.clear(); none.objects.clear(); none.robot_xy.reset();
+        none.zed->hfov_rad = 2.0f * std::atan(640.0f / 2.0f / 448.0f); none.zed->vfov_rad = 2.0f * std::atan(360.0f / 2.0f / 448.0f);
+        Card c = chair_card();
+        c.subtypes[""].env = {0.1f, 0.6f, 0.06f};
+        ImagineRequest rq; rq.concept_ = "chair"; rq.n = 8;
+        (void)imagine_view(c, none, rq, 5, dir);
+        {   // a normal chair distance, and no worse than the old 6.4 m
+            auto sc = none; sc.robot_xy = Eigen::Vector2f(0, 0); sc.robot_yaw = 0.0f;
+            const auto cd = canonical_distance(c, sc, "chair");
+            CHECK(cd.searched() and cd.m >= 1.0f and cd.m <= 4.0f);
+            const auto vp = *resolve_from(sc, "");
+            const auto world = imagine_world(sc, c, "chair", ImaginePlace{}, *std::make_unique<std::vector<std::string>>());
+            const auto p_at = [&](float d)
+            {
+                rc::card::Context ctx; ctx.at = vp.xy + d * Eigen::Vector2f(std::cos(*vp.yaw), std::sin(*vp.yaw));
+                return mc_over_samples(c, world, "chair", sample_concept(c, with_robot_body(world, vp), ctx, kSearchSamples, kSearchSeed).samples, vp).p_recognise_mean;
+            };
+            CHECK(p_at(cd.m) >= p_at(6.4f));
+        }
+        const auto doc = QJsonDocument::fromJson(QByteArray::fromStdString(slurp(dir / "imagined.json"))).object();
+        CHECK(doc["mc"].toObject()["p_notice_mean"].toDouble() > 0.3);
+    }
     // ---- hypothetical can_see ----
     {
         const auto s = scene(false);

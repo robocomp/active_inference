@@ -83,6 +83,7 @@ struct SeeScene
     std::optional<rc::card::LidarRig> helios, bpearl;
     float room_height = 2.5f;              ///< room_height of the room node: the wall slab top for the renderers
     bool room_height_known = false;        ///< false: 2.5 m is an assumption, and the answers say so
+    std::vector<std::string> notes;        ///< what the scene could not read (a sensor mount): the answers say so
 };
 
 /// A door's possible states as (weight, half-gap) pairs; the weights sum to 1.
@@ -392,22 +393,28 @@ inline bool door_on_sight_line(const SeeScene& s, const SeeDoor& d, const Eigen:
     return t;
 }
 
+/// A resolver's error, typed: an ASK is an instruction TO THE MODEL (it re-asks or corrects the call); a limit is something the
+/// person must hear as it is (VerbatimReply). Still a string for every caller that only wants the words.
+struct SeeError : std::string { bool ask = false; };
+[[nodiscard]] inline SeeError see_ask(std::string t) { SeeError e; static_cast<std::string&>(e) = std::move(t); e.ask = true; return e; }
+[[nodiscard]] inline SeeError see_limit(std::string t) { SeeError e; static_cast<std::string&>(e) = std::move(t); return e; }
+
 /// "" = from where the robot is, at the heading it HAS (ruling R11: body yaw + pi/2, Shadow faces body +y); a door gives
 /// a point one robot radius inside the room from its centre (see_detail::door_viewpoint); an object its standoff (else
 /// its centre); else ASK. A named viewpoint takes best heading (yaw unset): the robot would arrive facing the target.
-[[nodiscard]] inline std::expected<rc::card::Viewpoint, std::string> resolve_from(const SeeScene& s, const std::string& from)
+[[nodiscard]] inline std::expected<rc::card::Viewpoint, SeeError> resolve_from(const SeeScene& s, const std::string& from)
 {
     const std::string f = lower_ascii(from);
     if (f.empty() or f == "here" or f == "me" or f == "the robot")
     {
-        if (not s.robot_xy.has_value()) return std::unexpected("I do not know where I am in this room right now.");
+        if (not s.robot_xy.has_value()) return std::unexpected(see_limit("I do not know where I am in this room right now."));
         return rc::card::Viewpoint{*s.robot_xy, s.robot_yaw + std::numbers::pi_v<float> / 2.0f};
     }
     for (const auto& d : s.doors)
         if (lower_ascii(d.name) == f) return rc::card::Viewpoint{see_detail::door_viewpoint(s, d), std::nullopt};
     for (const auto& o : s.objects)
         if (lower_ascii(o.name) == f) return rc::card::Viewpoint{o.standoff.value_or(Eigen::Vector2f(o.x, o.y)), std::nullopt};
-    return std::unexpected("ASK: which place do you mean?");
+    return std::unexpected(see_ask("ASK: which place do you mean?"));
 }
 
 // ── wording ──
