@@ -239,6 +239,9 @@ private:
 	std::ofstream explore_csv_;
 	std::string explore_in_flight_;            ///< the door whose passage the drive started ("" = none)
 	std::string explore_mirror_;               ///< the in-flight door's entry mirror, captured while the old face still lives
+	std::string explore_from_room_;            ///< the room the in-flight passage started in (a room change = it crossed)
+	std::string explore_pending_crossed_;      ///< a crossed door whose entry face is not resolved yet ("" = none)
+	std::string explore_pending_room_;         ///< …and the room it entered
 	std::uint64_t explore_poll_ms_ = 0;
 	/// Nothing drives and the base stays still, armed: Target mode with no target (a finished `move` does the same).
 	void hold_base();

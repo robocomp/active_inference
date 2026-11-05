@@ -914,6 +914,9 @@ void SpecificWorker::service_explore_tour()
 	const auto &gs = world_model_.graph_state();
 	if (gs.room_id == 0 or gs.room_name.empty()) return;
 	auto &passage = session_.door_passage();
+	std::string topo_json;
+	if (const auto t = G->get_node("ltsm_topology"); t.has_value())
+		if (const auto j = G->get_attrib_by_name<ltsm_topology_att>(t.value()); j.has_value()) topo_json = j.value();
 	// the passage the drive started: crossed (into a new room), failed, or abandoned
 	if (not explore_in_flight_.empty() and explore_mirror_.empty())
 		explore_mirror_ = entry_mirror_of(explore_in_flight_);   // while the old face still lives (final review I2)
@@ -923,10 +926,14 @@ void SpecificWorker::service_explore_tour()
 		const bool ended = v.door != explore_in_flight_ or v.step == rc::DoorPassage::Step::Idle or v.step == rc::DoorPassage::Step::Done;
 		if (ended and not passage.active())
 		{
-			if (v.door == explore_in_flight_ and v.step == rc::DoorPassage::Step::Done and not v.failed)
+			// the CROSSING is the room switch: explore_tour4 crossed into room_2 and the passage still ended `cross_unreachable`
+			const bool crossed = gs.room_name != explore_from_room_ or (v.door == explore_in_flight_ and v.step == rc::DoorPassage::Step::Done and not v.failed);
+			if (crossed)
 			{
 				explore_drive_->note_crossed(explore_in_flight_);
-				const auto entry = explore_mirror_.empty() ? entry_mirror_of(explore_in_flight_) : explore_mirror_;
+				std::string entry = explore_mirror_.empty() ? entry_mirror_of(explore_in_flight_) : explore_mirror_;
+				if (entry.empty()) entry = rc::topo::live_door_for(topo_json, explore_in_flight_).value_or("");   // the passage's face in view
+				if (entry.empty()) { explore_pending_crossed_ = explore_in_flight_; explore_pending_room_ = gs.room_name; }
 				explore_drive_->note_entered(gs.room_name, entry, now_s);
 				std::println("[explore-tour] entered '{}' through '{}' (entry door '{}')", gs.room_name, explore_in_flight_,
 				             entry.empty() ? "not resolved yet — no guess" : entry);
@@ -942,12 +949,20 @@ void SpecificWorker::service_explore_tour()
 			session_.mission().set_mode(rc::DriveMode::AffordancesOnly);
 		}
 	}
+	// an entry face not resolved at the crossing: the LTSM summary names the passage's face in view once it catches up
+	if (explore_in_flight_.empty() and not explore_pending_crossed_.empty())
+	{
+		if (explore_pending_room_ != gs.room_name) explore_pending_crossed_.clear();
+		else if (const auto e = rc::topo::live_door_for(topo_json, explore_pending_crossed_); e.has_value() and G->get_node(*e).has_value())
+		{
+			explore_drive_->note_entered(gs.room_name, *e, now_s);
+			std::println("[explore-tour] entry door of '{}' resolved from the LTSM passage: '{}'", gs.room_name, *e);
+			explore_pending_crossed_.clear();
+		}
+	}
 	// the operator's and missions' orders come first (final review I1): no decision while either holds the base
 	if (interpreter_.state() == rc::mission::Interpreter::State::Running or session_.approach_order().active()) return;
 	// the drive's inputs
-	std::string topo_json;
-	if (const auto t = G->get_node("ltsm_topology"); t.has_value())
-		if (const auto j = G->get_attrib_by_name<ltsm_topology_att>(t.value()); j.has_value()) topo_json = j.value();
 	const std::set<std::string> remembered = rc::topo::crossed_doors(topo_json);
 	std::vector<rc::explore::DoorCand> doors;
 	for (const auto &f : door_facts())
@@ -989,7 +1004,7 @@ void SpecificWorker::service_explore_tour()
 				door = *live;
 			}
 		const auto r = start_door_passage(door, rc::DoorPassage::Step::Cross, "explore", /*then_affordances=*/true);
-		if (r.accepted) explore_in_flight_ = door;
+		if (r.accepted) { explore_in_flight_ = door; explore_from_room_ = gs.room_name; explore_pending_crossed_.clear(); }
 		else explore_drive_->note_failed(*d.door);
 	}
 }
