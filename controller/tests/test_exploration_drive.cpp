@@ -78,6 +78,19 @@ int main()
         check(not d.entry_door("room_1").has_value(), "start_room_never_gets_entry_door");
         check(d.step("room_1", true, {}, false, 60.0).cause == Cause::Done, "start room, nothing left: Done");
     }
+    {   // reentered_face_is_crossed (explore_tour1: back in the START room through the mirror door_4 of door_3, the drive
+        // chose door_4 — the doorway it had just come through — and the passage held 7.5 min before failing)
+        Drive d(300.0);
+        (void)d.step("room_1", true, {}, true, 0.0);
+        d.note_crossed("door_2");
+        d.note_entered("room_2", "door_3", 10.0);
+        d.note_crossed("door_3");
+        d.note_entered("room_1", "door_4", 40.0);
+        const auto r = d.step("room_1", true, {found("door_4", 1.4), found("door_1", 3.7)}, false, 50.0);
+        check(r.cause == Cause::Promoted and r.door == "door_1", "reentered_face_is_crossed (door_4 skipped, door_1 chosen)");
+        const auto r2 = d.step("room_1", true, {found("door_2", 3.6)}, false, 60.0);
+        check(r2.cause == Cause::Done, "a door the drive itself crossed is never chosen again");
+    }
     check(std::string(rc::explore::to_string(Cause::MaxTime)) == "max-time", "to_string");
     std::println("{}/{} checks passed", checks - fails, checks);
     return fails == 0 ? 0 : 1;

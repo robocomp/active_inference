@@ -65,7 +65,7 @@ public:
         const DoorCand* best = nullptr;
         for (const auto& d : doors)
         {
-            if (not d.found or d.crossed or (entry.has_value() and d.door == *entry) or failed.contains(d.door)) continue;
+            if (not d.found or d.crossed or crossed_.contains(d.door) or (entry.has_value() and d.door == *entry) or failed.contains(d.door)) continue;
             if (best == nullptr or d.dist_m < best->dist_m) best = &d;
         }
         if (best != nullptr) return {.cause = promoted ? Cause::Promoted : Cause::MaxTime, .door = best->door, .is_return = false};
@@ -77,10 +77,14 @@ public:
     void note_entered(const std::string& room, const std::string& via_door, double now_s)
     {
         if (room != start_room_ and not entry_.contains(room)) entry_[room] = via_door;   // the FIRST entry: the DFS parent
+        crossed_.insert(via_door);   // the face just come in by is a crossed doorway in EVERY room, the start room included
         entered_s_[room] = now_s;
         failed_[room].clear();
         current_ = room;
     }
+
+    /// The drive itself crossed `door` (its run memory; the graph's crossing fact / the LTSM may name other faces).
+    void note_crossed(const std::string& door) { crossed_.insert(door); }
 
     /// The passage through `door` failed in the room the robot is in.
     void note_failed(const std::string& door) { failed_[current_.value_or(start_room_.value_or(""))].insert(door); }
@@ -97,5 +101,6 @@ private:
     std::map<std::string, std::string> entry_;
     std::map<std::string, double> entered_s_;
     std::map<std::string, std::set<std::string>> failed_;
+    std::set<std::string> crossed_;   ///< faces this drive crossed or entered by (explore_tour1: a re-entered face looked new)
 };
 }  // namespace rc::explore

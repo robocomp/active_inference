@@ -893,6 +893,11 @@ std::string SpecificWorker::entry_mirror_of(const std::string &crossed)
 	if (G == nullptr) return {};
 	const auto &gs = world_model_.graph_state();
 	const auto mine = rc::world::doors_of_room(*G, gs.room_id);
+	// the far side of the crossed face: door_concept's entry mirror carries an `exit` edge to it (exit_fact.h link 3)
+	if (const auto d = G->get_node(crossed); d.has_value())
+		for (const auto &name : mine)
+			if (const auto f = G->get_node(name); f.has_value() and rc::exit_fact::twin_of(*G, f->id()) == d->id())
+				return name;
 	if (const auto d = G->get_node(crossed); d.has_value())
 		for (const auto &e : G->get_edges_to_id(d->id()))
 			if (e.type() == "match")
@@ -931,6 +936,7 @@ void SpecificWorker::service_explore_tour()
 		{
 			if (v.door == explore_in_flight_ and v.step == rc::DoorPassage::Step::Done and not v.failed)
 			{
+				explore_drive_->note_crossed(explore_in_flight_);
 				const auto entry = entry_mirror_of(explore_in_flight_);
 				explore_drive_->note_entered(gs.room_name, entry, now_s);
 				std::println("[explore-tour] entered '{}' through '{}' (entry door '{}')", gs.room_name, explore_in_flight_, entry);
