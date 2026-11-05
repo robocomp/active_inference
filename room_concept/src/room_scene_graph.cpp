@@ -761,9 +761,7 @@ void RoomSceneGraph::write_robot_room_rt(const Eigen::Affine2f& robot_pose_int,
     // quadratic form) but the rotation and lever arm do not, and the result is DENSE: on this edge
     // the velocity uncertainty is no longer the body-fixed diagonal it is in the robot's own frame,
     // because how fast the room appears to move depends on where the robot is standing in it. That
-    // is a true consequence of the room being the child, not an approximation -- and it is one more
-    // argument for making the room the root, where the robot would be the child and the twist would
-    // simply be its own (see the pending root-removal note).
+    // is a true consequence of the room being the child, not an approximation.
     const Eigen::Vector2f v_body{last_side_, last_adv_};          // axis order: x lateral, y forward
     Eigen::Matrix3f adjoint = Eigen::Matrix3f::Identity();
     adjoint.topLeftCorner<2, 2>() = R;
