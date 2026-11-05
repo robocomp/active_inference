@@ -1,6 +1,8 @@
 # room_concept relocaliser — redesign from scratch (2026-11-01)
 
-Status: DESIGN ONLY. No code, no build, not committed. Author: design pass for the user's verdict "the relocaliser is a piece of garbage".
+Status: implemented, behind RelocMode; A/B results in the plan's ledger (`docs/superpowers/plans/2026-11-02-relocaliser-rivals.md`,
+tasks 7/7b/7c). Amended 2026-11-04: §3 likelihood, §4.2 prior, §5, §6, §7 and the §9 hot-path bar (each marked "Amended").
+Original author: design pass for the user's verdict "the relocaliser is a piece of garbage".
 Sources read: `memory/relocaliser-diagnosis-11-01.md`, `room_concept_reloc.cpp` (991 lines), `room_concept_reloc_modes.cpp` (282),
 `room_concept_reloc_bootstrap.cpp` (376), `reloc_search.cpp` (953), `published_pose.h` (133), `room_scene_graph_late_recall.cpp` (252),
 and the `[reloc]` lines of `estimation_scripts/crossing/warm19..warm27`.
@@ -47,10 +49,31 @@ subsamples). Control `u_t` = odometry/IMU delta with its covariance (as today).
 - `H_r`, r = 1..K: rival poses `(x_r, Σ_r)` carried rigidly by the same odometry delta each frame. Each has a single scalar of state: log-odds `λ_r` against H0.
 - Implicit `H_kid` = "kidnapped / unknown": uniform over `V = area(room) · 2π` (or `V_entry`, §5). It is never a state; it is the *prior* that rivals are drawn from.
 
-**Likelihood (shared by all hypotheses, so mismatch cancels):** per point, the existing robust wall-band model
-`p(z_i | x) = (1-ε) · N(sdf_i(x); 0, σ²) + ε · U` with ε = `RelocOutlierFrac` (clutter + beyond-door returns), and with open-door apertures
-masked in as they already are (`exit_prior`, `Params::apertures`). Per-wall common-mode offset σ = `RelocWallOffsetSigma` marginalised as today (Woodbury).
-This is the likelihood already in `reloc_search.cpp` and in the tracker; **no new likelihood is introduced**.
+**Likelihood (shared by all hypotheses, so mismatch cancels).** *Amended 2026-11-04 (tasks 7b, 7c; the user's decision (a)).* The per-point
+SDF band `(1-ε)·N(sdf_i(x); 0, σ²) + ε·U` of the original design charged off-map structure the TRUE pose sees (furniture, an unlisted
+opening, an ajar door listed open) uniform clutter, while a pose standing at a wall opened the cell at its feet and explained the same returns
+as "the next room" with lines fitted to the scan: on warm44 that pose won near-ties (2 false moves, 94 cm, cov 4.1 m²). ℓ is now a
+**beam model on the room map** (`reloc_search.cpp`, `BeamTerm`), per return along its ray from the sensor at the hypothesised pose, z the
+measured range, z* the range to the first mapped wall (ray cast on the polygon), σ_r = σ/|cos α| (σ = the wall-band σ, per-wall common-mode
+offset `RelocWallOffsetSigma` marginalised from each mode's covariance as before), λ = `Params::unmapped_rate`:
+- p_short(z) = λ·e^{−λz} on [0, z*): an unmapped surface meets the beam first (surfaces at λ per metre of ray);
+- p_hit(z) = e^{−λz*}·N(z; z*, σ_r²): nothing in the way, the beam returns from the wall;
+- p_beyond(z) = e^{−λz}·[N(z; z_line, σ_r'²) + λ] on (z*, z2), + e^{−λz2}·N(z; z2, σ_r2²): only through an OPEN cell; the same beam model in
+  the next room, whose walls are lines fitted to the scan (each paying its Occam marginal), ending at z2 = the next mapped wall on the ray
+  (this room's wall seen from behind). A return past z2 crossed a second mapped wall: clutter only;
+- p_rand(z) = 1/L: ε = `RelocOutlierFrac`, L the room's extent.
+Shut wall: `(1−ε)(p_short + p_hit) + ε/L`; open cell: `(1−c)·[(1−ε)(p_short + p_beyond) + ε/L] + c·shut`, c = P(leaf | open).
+*Not adopted*: giving in-room short returns the scan's fitted lines as unmapped planar surfaces (symmetric with the next room) widened
+the single-frame margins on warm44 but explained synthetic uniform clutter as lines (clutter30: 4 false moves, 6.6 m; mirrored room 3 flips).
+**The doors are a UNION (task 7b, 77ed4e95)**: each listed door is shut, or open where listed, or (`list_wrong`) open anywhere; a cell's beams
+are evidence once however many doors open it, `ℓ = Σ_i shut_i + log Σ_{c_1..c_K} Π_k prior_k(c_k)·Π_{C∈∪c_k} e^{Δ_C}`, exact by forward-backward
+over the cells with beams. *Task 7c*: the boundary cells are cut at each listed door's mouth (the mouth is one cell, so a listed door explains
+all its beams), and a door "anywhere" is a WINDOW one door wide (`opening_cell_m`) of consecutive quarter-door cells of one edge, the list_wrong
+mass uniform over windows — the door's position marginalised at ¼ of its width instead of snapped to a 1 m grid (the grid's alignment had
+decided reloc_selftest S). The recursion's state is (doors placed, cells still open by an earlier window): 2^K·(L+1) states; verified
+against brute-force enumeration to 1e-6 nats.
+λ is a flagged world constant: 0.1 /m (measured 0.02–0.16 /m per recorded truth frame, 0.085 pooled). The lattice (proposal only) still scores
+the SDF raster; every mode, rival and ℓ comparison uses the beam model.
 
 **Priors:**
 - H0: `N(pred_t, P_pred)`, pred = previous posterior ⊕ odometry delta (no scan). This is the *odometry-predicted view*: the evidence of "consistency over motion" is the
@@ -79,6 +102,13 @@ H0: `p(x|H0)=N(x;pred,P_pred)`. Rival: `p(x|H_r)=π_kid/V`.
 Order of magnitude (apartment room 40 m², Σ_r ≈ (0.02 m)²(0.02 m)²(0.01 rad)²): `ln(V/√|2πΣ|)` ≈ 9, `ln(1/π_kid)` = 6.9 ⇒ **≈ 16 nats up front**
 before any Δℓ; a 180° twin of a healthy pose therefore needs the scan to prefer it by 16 nats, and a twin explains the scan *as well as* the incumbent, not better
 (Δℓ ≈ 0). Gate-free: this is the Occam / prior-volume term; if the room is bigger or the pose tighter the price grows by itself.
+
+**Amended 2026-11-04 (implemented in `room_concept_reloc_rivals.cpp`): a BOUNDED MIXTURE PRIOR.** The `−ln N(x_0; pred, P_pred)` term above is
+unbounded: an overconfident P_pred priced a 5 cm tracker correction at 2·10⁴ nats. Every hypothesis now shares ONE prior over the pose,
+`p(x) = (1−π_kid)·N(x; pred, P_pred) + π_kid / V` (pred, P_pred = the odometry prediction or the entry anchor, §5), and in Laplace form
+`λ_r = [ℓ_r − ℓ_0] + [ln p(x_r) + ½ ln|2πΣ_r|] − [ln p(x_0) + ½ ln|2πΣ_0|]`. For x_r far from the prediction and x_0 near it this IS the
+formula above; it differs only where §4.2 was silent (a rival AT the prediction while the tracker jumped off it; a tracker that jumped by itself),
+and the incumbent can never be priced below `ln(V/π_kid)`.
 
 ### 4.3 Sequential update (per novel scan)
 ```
@@ -117,6 +147,12 @@ domain is `V_entry` for the first seconds (proposer samples ±3σ_entry only) an
 the **proposer's sampling prior = H0's prior**, so the cost is ≈ 100x smaller than a whole-room search (§7) and the Occam price ≈ 4.8 nats cheaper for the correct entry pose.
 No retirement logic exists: there is nothing to retire.
 
+**Amended 2026-11-04 (as implemented): the entry prior prices BIRTHS only.** The door anchor is H0's prior in the bounded mixture of §4.2
+(`pred`, `P_pred` = the best anchor component, `V = min(area·2π, V_entry)`, V_entry the ±3σ box of the anchor), so a rival inside the entry
+area is H0's own mass and one outside it pays the full price. It does NOT restrict the proposer: `search()` has no sampling-only hook, so
+the proposer still searches the whole room (`Proposer::submit`'s `sampling_cov` is unused). The anchor still retires by information
+(tracker ≥ anchor in nats, body out of the doorway).
+
 ## 6. Adoption after a recognition swap ("this new room is remembered room_1")
 
 Today: one forced search (`run_late_recall_search`) on one scan, the tracker continues from a mode, residual 0.07-0.26 m.
@@ -126,6 +162,11 @@ Proposal (kept structure of `seed_reloc_prior` + verdict; changed fit):
    Gauss-Newton on 3 DOF, multi-scan Hessian ⇒ rotation and translation constrained by many viewpoints. Cost one-off ~10-20 ms × M subsampled points, off the hot path.
 3. The verdict keeps accumulating `λ` (K explains vs does not), starting from the recogniser's log-odds (existing), by the SAME Bayes factor machinery (§4.3) with H_K = the fit and
    H_notK = broad emission. That folds `accumulate_late_evidence` and the lost-belief emission into one function.
+   *Amended 2026-11-04 (f7cfccb1): N_eff.* The fit treats every point of every keyframe as independent, so N keyframes of one view (a parked robot)
+   multiplied the information by N. Each keyframe is worth `1 / Σ_j exp(−½ d_ijᵀ B⁻¹ d_ij)` (B = the likelihood's basin: σ_sdf in translation,
+   σ_sdf / median range in rotation), and the Laplace information is scaled by `N_eff / N` before the Gaussian fusion with the prior: a parked
+   ring is no tighter than one scan, views a basin apart count fully. A late fit is dropped on a foreign pose jump or a room change. Each
+   keyframe's returns keep their own sensor origin in the beam model (task 7c).
 4. After acceptance the tracker's H0 = the multi-scan fit with its covariance (not a point). The 0.07-0.26 m residual is first diagnosed (§9 open question 3): if it is K's
    layout error (K remembered with that offset), no pose can remove it and it must be reported as such; if it is pose error, the multi-scan fit removes it.
 
@@ -141,6 +182,10 @@ Proposal (kept structure of `seed_reloc_prior` + verdict; changed fit):
 | Entry prior initialisation | once per hand-over | µs | closed form |
 | Multi-scan adoption fit | worker, once per swap | ~10-30 ms | off hot path |
 | Total added to the hot path | | < 0.1 ms | vs 50 ms cycle |
+
+*Amended 2026-11-04: the hot-path bar is **p99 ≤ 5 ms** (relaxed by the user from 1 ms).* Measured (task 7c, tape replay), rival scoring with the
+doors' union and the beam model costs 0.66–1.1 ms p50 and 1.6–2.6 ms p99 per frame (max 5.3 ms), not the ~0.05 ms estimated above: every ℓ
+is a ray cast per point on the polygon, the cells' forward-backward and the BeyondLines bookkeeping.
 
 Note the current mixture search runs synchronously inside `relocalisation_step` (`grid_search_initial_pose`, 8-222 ms), i.e. it can itself miss the 20 Hz budget.
 
@@ -179,7 +224,7 @@ Metrics:
 
 **Acceptance bar** (proposed, the user decides): (1) 0 false relocalisations in all healthy replays (≥ 1 h cumulated) and in the mirrored-room test; (2) recovery median ≤ 0.5 s, p95 ≤ 1.5 s, success
 ≥ 99 % of ≥ 300 injected kidnaps (not worse than the old 300/300); (3) worst pose error on warm19-27 replays ≤ the best old run (warm22/23/24 were quiet), no covariance above 1 m²; (4) hot-path
-added time < 1 ms p99, no frame over 50 ms attributable to relocalisation; (5) adoption residual ≤ 3 cm for pose-attributable error; (6) the deleted code stays deleted (net negative line count).
+added time ≤ 5 ms p99 (amended 2026-11-04, was < 1 ms), no frame over 50 ms attributable to relocalisation; (5) adoption residual ≤ 3 cm for pose-attributable error; (6) the deleted code stays deleted (net negative line count).
 
 ## 10. Risks and open questions for the user
 

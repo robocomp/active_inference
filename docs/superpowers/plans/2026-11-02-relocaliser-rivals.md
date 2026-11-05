@@ -43,10 +43,10 @@
   `std::vector<rc::tape::Frame> rc::tape::read_all(const std::string& path);`
   plus, once per room change, the room polygon: `struct RoomRecord { std::string room; std::vector<Eigen::Vector2f> polygon; std::vector<…> apertures; }` written before the first frame of that room.
 
-- [ ] Step 1: test `round_trip`: write 3 frames (2 rooms, polygon records) to a temp file, `read_all` returns them bit-identical; a truncated last frame is dropped, not an error. Run it → FAIL (header missing).
-- [ ] Step 2: implement `scan_tape.h` (little-endian binary, a 4-byte magic + version, length-prefixed records; ~2 k points/frame).
-- [ ] Step 3: hook the writer in `relocalisation_step` (compute thread; write is a buffered append, measure ≤ 0.2 ms p99 with the existing stage timing) — only when `ScanTape.Enabled`.
-- [ ] Step 4: test passes; build room_concept; commit `room_concept: scan tape (pose, odometry, wall-band points per frame)`.
+- [x] Step 1: test `round_trip`: write 3 frames (2 rooms, polygon records) to a temp file, `read_all` returns them bit-identical; a truncated last frame is dropped, not an error. Run it → FAIL (header missing).
+- [x] Step 2: implement `scan_tape.h` (little-endian binary, a 4-byte magic + version, length-prefixed records; ~2 k points/frame).
+- [x] Step 3: hook the writer in `relocalisation_step` (compute thread; write is a buffered append, measure ≤ 0.2 ms p99 with the existing stage timing) — only when `ScanTape.Enabled`.
+- [x] Step 4: test passes; build room_concept; commit `room_concept: scan tape (pose, odometry, wall-band points per frame)`.
 
 ### Task 2: The rival belief — pure core
 
@@ -79,7 +79,7 @@
   }
   ```
 
-- [ ] Step 1: tests (all must FAIL first — header missing):
+- [x] Step 1: tests (all must FAIL first — header missing):
   - `birth_price`: 40 m² room, Σ_r = diag(0.02²,0.02²,0.01²), ll_r = ll_0, H0 at pred ⇒ `birth_lambda` ∈ [−18, −14] nats.
   - `twin_never_switches`: twin rival, `update({0.f}, 1.f)` × 1000 ⇒ `winner()` empty, λ == λ_birth.
   - `mismatch_cancels`: both ℓ drop by 30 nats on the same scan ⇒ dll = 0 ⇒ λ unchanged.
@@ -88,7 +88,7 @@
   - `outlier_scan_bounded`: one dll = −1e6 ⇒ λ decreases by at most |ln_eps| and is floored at λ_birth.
   - `swap_is_honest`: after `swap(i)`, the old incumbent is a rival with λ = −λ_i.
   - `kmax_and_merge`: adding 6 distinct rivals keeps 4 (highest λ); adding a rival 1 cm from an existing one merges (count unchanged).
-- [ ] Step 2: run → FAIL. Step 3: implement. Step 4: run → PASS. Step 5: commit `room_concept: reloc rival belief (pure)`.
+- [x] Step 2: run → FAIL. Step 3: implement. Step 4: run → PASS. Step 5: commit `room_concept: reloc rival belief (pure)`.
 
 ### Task 3: Rival scorer and carry on the real likelihood
 
@@ -100,8 +100,8 @@
 - Consumes: `rc::reloc::LikelihoodRaster::ll_at`, `ll_outside` (reloc_search.h), the same point subsampling the search uses (`rc::reloc::polish_points` / Params).
 - Produces: `float rc::rivals::score(const rc::reloc::LikelihoodRaster&, const std::vector<Eigen::Vector2f>& pts_robot, const Eigen::Vector3f& pose, const rc::reloc::Params&);` — returns ℓ(pose) with EXACTLY the per-point robust model the search uses (so ℓ_0 and ℓ_r are comparable); and `std::vector<float> rc::rivals::dll(...)` for all rivals vs the incumbent on one scan.
 
-- [ ] Step 1: test `score_matches_search`: on a synthetic room + scan, `score(raster, pts, mode.pose)` equals `rc::reloc::search(...)`'s `Mode::log_lik` for the polished mode within 1e-3. Test `apertures_mask_both`: a scan with 30 % of points through an open door scores H0 and a rival equally lowered (dll unchanged vs the closed-door case within 1 nat). FAIL first.
-- [ ] Step 2: implement (bilinear `ll_at`, ≤128 subsampled points, same apertures). Measure: 4 rivals × 128 points < 0.1 ms. Commit.
+- [x] Step 1: test `score_matches_search`: on a synthetic room + scan, `score(raster, pts, mode.pose)` equals `rc::reloc::search(...)`'s `Mode::log_lik` for the polished mode within 1e-3. Test `apertures_mask_both`: a scan with 30 % of points through an open door scores H0 and a rival equally lowered (dll unchanged vs the closed-door case within 1 nat). FAIL first.
+- [x] Step 2: implement (bilinear `ll_at`, ≤128 subsampled points, same apertures). Measure: 4 rivals × 128 points < 0.1 ms. Commit.
 
 ### Task 4: Background proposer
 
@@ -122,8 +122,8 @@
   ```
   One `std::jthread`, one job slot, everything copied in (no shared buffers, no DSR access, no ts==0 transforms — the worker touches nothing but its copies).
 
-- [ ] Step 1: tests: `one_in_flight` (second submit while busy → false), `stale_epoch` (submit epoch 1, current becomes 2, `poll` result carries 1 → caller drops it), `never_blocks` (submit returns in < 1 ms with a 200 ms fake search injected via a test hook). FAIL first.
-- [ ] Step 2: implement; TSAN-clean build of the test (`-fsanitize=thread`). Commit.
+- [x] Step 1: tests: `one_in_flight` (second submit while busy → false), `stale_epoch` (submit epoch 1, current becomes 2, `poll` result carries 1 → caller drops it), `never_blocks` (submit returns in < 1 ms with a 200 ms fake search injected via a test hook). FAIL first.
+- [x] Step 2: implement; TSAN-clean build of the test (`-fsanitize=thread`). Commit.
 
 ### Task 5: Wire the rival path behind `RelocMode` (+ entry prior)
 
@@ -135,9 +135,9 @@
 - Consumes: Tasks 2–4.
 - Produces: `void RoomConcept::step_rivals(const UpdateResult&, const std::vector<Eigen::Vector3f>&)`. Published pose: H0 (or the winner after a swap); published covariance: H0's covariance + `rivals_.spread(...)` while `p_rival()` is non-negligible (mixture spread, never a flip); `pose_undecided_` ← `p_rival()`.
 
-- [ ] Step 1: selftest scenarios (FAIL first in rivals mode where they are new): existing 14 scenarios must PASS in rivals mode; new: "healthy mirrored room 10 min → 0 switches", "genuine kidnap to the twin → covariance spreads, no confident flip", "kidnap while driving → recovered ≤ 2 novel scans", "parked + people (mismatch, no novelty) → 0 switches", "room change with live rivals → rivals cleared, stale proposer result dropped".
-- [ ] Step 2: implement `step_rivals` (submit to proposer at 2 Hz base / every novel scan while a rival is gaining / every novel scan for the first seconds after a hand-over; births from results; `carry`; `dll` via Task 3; `update(novelty = view_change)`; `winner` → swap + reset tracker to the winner's pose/cov).
-- [ ] Step 3: selftest both modes; build; measure hot-path time per frame in rivals mode (stage timer) — < 1 ms p99. Commit.
+- [x] Step 1: selftest scenarios (FAIL first in rivals mode where they are new): existing 14 scenarios must PASS in rivals mode; new: "healthy mirrored room 10 min → 0 switches", "genuine kidnap to the twin → covariance spreads, no confident flip", "kidnap while driving → recovered ≤ 2 novel scans", "parked + people (mismatch, no novelty) → 0 switches", "room change with live rivals → rivals cleared, stale proposer result dropped".
+- [x] Step 2: implement `step_rivals` (submit to proposer at 2 Hz base / every novel scan while a rival is gaining / every novel scan for the first seconds after a hand-over; births from results; `carry`; `dll` via Task 3; `update(novelty = view_change)`; `winner` → swap + reset tracker to the winner's pose/cov).
+- [x] Step 3: selftest both modes; build; measure hot-path time per frame in rivals mode (stage timer) — < 1 ms p99. Commit.
 
 ### Task 6: Adoption after a recognition swap (§6)
 
@@ -148,7 +148,7 @@
 **Interfaces:**
 - Produces: `rc::reloc::Mode rc::rivals::multi_scan_fit(const rc::reloc::LikelihoodRaster& K, const std::vector<std::pair<Eigen::Vector3f /*rel pose*/, std::vector<Eigen::Vector2f>>>& scans, const Eigen::Vector3f& prior, const Eigen::Matrix3f& prior_cov);` — joint 3-DOF Gauss-Newton of the last M (10–20) keyframes against K's SDF; returns pose + Laplace covariance.
 
-- [ ] Step 1: test `multi_beats_single`: synthetic L-room, 15 scans from a short path, true offset (0.15 m, 3°) from the prior: multi-scan error ≤ 2 cm / 0.5°, single-scan error larger. FAIL first. Step 2: implement (worker, off the compute thread). Step 3: run on the warm-run swaps when tapes exist (Task 7) and report pose-vs-layout residual split (§10.3). Commit.
+- [x] Step 1: test `multi_beats_single`: synthetic L-room, 15 scans from a short path, true offset (0.15 m, 3°) from the prior: multi-scan error ≤ 2 cm / 0.5°, single-scan error larger. FAIL first. Step 2: implement (worker, off the compute thread). Step 3: run on the warm-run swaps when tapes exist (Task 7) and report pose-vs-layout residual split (§10.3). Commit.
 
 ### Task 7: Offline A/B on recorded tapes, then cutover
 
@@ -156,6 +156,26 @@
 - Create: `room_concept/tools/reloc_tape_replay.cpp` (reads Task 1 tapes + `gt_pose.tsv`; runs legacy and rivals on the same frames; injects teleports)
 - Modify (only if rivals wins): delete per §8 — `update_lost_belief`, `log_tracking_emission`, `log_broad_emission`, `belief_`, `reset_lost_belief`, `set_belief_mismatch`, `lost_logodds_`, `track_mu_ln_s_`/`track_var_ln_s_`, `relocalise_from_belief`, the `p_lost >= 0.5` trigger, `pending_episode_p_lost_`, `rt_.hold_open`, `mode_posterior`'s mixture prior, `explains_like_tracking`, `rt_.door_anchor`/`step_door_anchor`/`anchor_information` retirement, `published_pose.h::clamp_correction`, `run_late_recall_search`/`late_pending_`, config keys other than the kept ones, and `RelocMode` itself.
 
-- [ ] Step 1 (needs the user's live runs): record 3–4 tours with `ScanTape.Enabled` (forward, backwards, a parked minute with a person walking, one manual push).
-- [ ] Step 2: replay both modes; metrics per §9: false relocalisations/h while healthy (|gt−est| < 5 cm), worst/p99 pose error, recovery on ≥ 300 injected kidnaps (median ≤ 0.5 s, p95 ≤ 1.5 s, ≥ 99 %), mirrored-room healthy segments (0 flips), hot-path p99 (< 1 ms). Report table.
+- [x] Step 1 (needs the user's live runs): record 3–4 tours with `ScanTape.Enabled` (forward, backwards, a parked minute with a person walking, one manual push).
+- [x] Step 2: replay both modes; metrics per §9: false relocalisations/h while healthy (|gt−est| < 5 cm), worst/p99 pose error, recovery on ≥ 300 injected kidnaps (median ≤ 0.5 s, p95 ≤ 1.5 s, ≥ 99 %), mirrored-room healthy segments (0 flips), hot-path p99 (< 1 ms). Report table.
 - [ ] Step 3: if rivals meets the §9 bar: delete the legacy path in the same change, keep the selftest (rivals only), build, live tour (forward + backwards) with nominal rates, commit `room_concept: relocaliser = rival hypotheses; legacy deleted`. If not: report where it loses, change nothing.
+
+## Ledger: Task 7 A/B results (reloc_tape_replay, warm43/44/45, `--kidnaps 300 --people-kidnaps 100 --mirror 12`)
+
+Healthy-tape exposure is ~7 min per mode (bar: ≥ 1 h). §9 items 5 (adoption) and 6 (net line count) are not measured yet.
+
+| metric (§9) | 7 (66d17810) legacy / rivals | 7b (6ca0b9f2) legacy / rivals | 7c (beam model) legacy / rivals | bar |
+|---|---|---|---|---|
+| false relocs, healthy, warm43/44/45 | 0/0/0 / 16/17/0 | 0/0/0 / 0/2/0 | 0/0/0 / **0/0/0** | 0 |
+| worst pose error cm, warm43/44/45 | 24/19/1.0 / 791/644/1.0 | 24/19/1.0 / 24/94/1.0 | 24/109/1.0 / **24/19/1.0** | ≤ best old run |
+| max cov m², warm43/44 | 0.021/0.011 / 40.3/15.1 | same / 0.021/4.09 | 0.021/0.065 (person) / **0.021/0.011** | ≤ 1 |
+| kidnaps clean n=300 | 76.3 % / 75.3 % | 95.3 % / 99.7 % | 98.3 % / **99.7 %** (p95 0.10 s) | ≥ 99 %, p95 ≤ 1.5 s |
+| kidnaps people n=100 | 80 % / 71 % | 95 % / 100 % | 98 % / **100 %** | |
+| clutter30 false moves, warm43/44/45 | 0/0/0 / 32/53/5 | 0/0/0 / 0/3/0 | 0/0/0 / **0/0/0** | |
+| person false moves | 0/0/0 / 11/15/2 | 0/0/0 / 1/2/0 | 0/0/0 / **0/0/0** | |
+| mirrored room, 12 × 60 s | 0 / 0 flips | 0 / 0 | 0 / **0** | 0 |
+| hot path p99 (rivals) | 1.7–2.4 ms | 1.8–2.7 ms | **3.1–4.5 ms** (max 7.3 ms) | ≤ 5 ms (amended) |
+
+7c legacy notes: the 7b clutter30 regression (warm44, 3 moves, one 5.7 m) is gone; legacy now moves on warm44 clean (2 moves, 109 cm,
+f735-f743, to a pose of LOWER ℓ than the one it left) and person (3 moves, 385 cm) — legacy's own mode_posterior/trigger, not shared with rivals.
+Reports: `.superpowers/sdd/2026-11-02-relocaliser-rivals/task-7{,b,c}-report.md` (git-ignored workspace).
