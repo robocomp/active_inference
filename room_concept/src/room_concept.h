@@ -819,6 +819,10 @@ private:
    void clear_rival_belief();                    ///< room change / disarm: drop rivals, stale proposer results, job context
    rc::rivals::Belief   rivals_;
    bool                 rivals_ready_ = false;
+   /// The start-up search moved off the saved / seeded pose: that pose stays a RIVAL (priced like any other) so the scans can
+   /// still decide between it and the search's top mode. Consumed by the next step_rivals; no gate decided the move.
+   struct StartupRival { Eigen::Vector3f pose = Eigen::Vector3f::Zero(); Eigen::Matrix3f cov = Eigen::Matrix3f::Identity(); };
+   std::optional<StartupRival> startup_rival_;
    rc::rivals::Proposer proposer_;
    std::uint64_t        room_epoch_ = 0;         ///< bumped on every room change and every swap: a proposer result carries its epoch
    struct RivalPrior                             ///< H0's prior at one frame (spec sec 3, 5): what a birth is priced against

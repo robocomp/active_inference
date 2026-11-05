@@ -107,7 +107,7 @@ namespace rc::reloc
     /// One component of a Gaussian mixture over the pose in the ROOM frame: mean (x, y, θ), covariance, weight. The
     /// room recogniser's posterior of "I am in the remembered room K, here" arrives as such a mixture (ltsm's
     /// `recall_pose_prior`); a symmetric room cannot tell its twins apart from the scan, the prior can.
-    /// It enters search() exactly as the tracker's own pose does in mode_posterior: a continuity TERM in each mode's
+    /// It enters search() as a continuity TERM in each mode's
     /// weight — log Σ_c w_c N(x; μ_c, Σ_c + Σ_mode) with a uniform floor of mass `Params::prior_wrong` — never a gate:
     /// a prior metres off whose covariance admits the truth is overruled by the likelihood, and an empty prior leaves
     /// every number exactly as it was.

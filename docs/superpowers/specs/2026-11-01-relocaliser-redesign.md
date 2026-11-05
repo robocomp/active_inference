@@ -189,19 +189,36 @@ is a ray cast per point on the polygon, the cells' forward-backward and the Beyo
 
 Note the current mixture search runs synchronously inside `relocalisation_step` (`grid_search_initial_pose`, 8-222 ms), i.e. it can itself miss the 20 Hz budget.
 
-## 8. What is deleted
+## 8. What is deleted, and what was kept (as implemented, 2026-11-05)
 
-From `room_concept_reloc.cpp`/`_modes.cpp`/`room_concept.h`:
-- `update_lost_belief`, `log_tracking_emission`, `log_broad_emission`, `belief_`, `reset_lost_belief`, `set_belief_mismatch`, `lost_logodds_`, `track_mu_ln_s_`/`track_var_ln_s_`
-  learning, `reloc_track_memory_frames`, `RelocTrackSMedian`, `RelocTrackLogSigma` (the 3-state HMM and its learnt emission; ~100 lines + params).
-- `relocalise_from_belief` and the `p_lost >= 0.5f` trigger; `pending_episode_p_lost_` as the prior's scale; `rt_.hold_open` episode machinery (rivals replace it).
-- `mode_posterior`'s `(1-pl)N + pl·U` prior, the `explains_like_tracking` median gate, `last_search_confirmed_incumbent_`/`last_search_moved_` bookkeeping (≈ 280-line file shrinks to the rival list).
-- `rt_.door_anchor`, `step_door_anchor`, `anchor_information`/`gaussian_information` retirement block (~40 lines in `relocalisation_step`), `passage_prior.h` anchor mixture in `log_prior`
-  (replaced by the entry prior as H0's prior).
-- `published_pose.h::clamp_correction` and its kinematic limits (pose jumps are priced, not clamped); keep `substitute_survey`.
-- `late-recall` single-scan `run_late_recall_search` + `late_pending_` hostage logic is replaced by §6 (the verdict function stays, once, shared with rivals).
-- Config: `RelocHazard` stays (the one rate), `RelocOutlierFrac`, `RelocWallOffsetSigma`, `RelocBodyClearance` stay; the rest of the Reloc* keys go.
-Kept: `reloc_search.cpp` as the proposer (likelihood, apertures, Laplace modes), `bootstrap` for t0 seeding, `held_spread`.
+Deleted (commit af46a885, with the fixes after it):
+- `update_lost_belief`, `log_tracking_emission`, `log_broad_emission`, `belief_`, `reset_lost_belief`, `set_belief_mismatch`, `lost_logodds_`, the learnt `track_mu_ln_s_`/`track_var_ln_s_`,
+  `reloc_track_memory_frames` (the 3-state HMM and its learnt emission).
+- `relocalise_from_belief` and the `p_lost >= 0.5f` trigger; `pending_episode_p_lost_`; `rt_.hold_open` (rivals replace the held episode).
+- `mode_posterior`, the `explains_like_tracking` median gate, `last_search_confirmed_incumbent_`/`last_search_moved_` as members, the legacy SPRT mode list and `msprt_decide`.
+- The legacy late-recall branch (`run_late_recall_search`, `late_forced_this_frame_`, the `prior_modes` injection); the multi-scan fit (§6) is the only late-recall path.
+- The `RelocMode` switch and `CmdGridSearch`; the doorway CSV diagnostics.
+
+KEPT, against the first draft of this section, and why:
+- **The door anchor and its retirement** (`rt_.door_anchor`, `step_door_anchor`, `anchor_information`/`gaussian_information`, `passage_term`, `passage_prior.h`). §5 makes the anchor
+  H0's entry prior and its volume the birth volume, so `step_rivals` reads it every frame; the retirement-by-information rule is what hands the prior back to the tracker's own
+  covariance. Only the legacy copy of the retirement block was removed.
+- **`RelocTrackSMedian`, `RelocTrackLogSigma`, `RelocLostSMin`, `RelocLostSMax`.** They are no longer a learnt HMM emission: `RelocTrackSMedian` is the novelty scale of a view (the
+  pose step that counts as a new viewpoint, in the likelihood's own units) and the tracking-like scale of the start-up diagnostic; the other three are the two FIXED densities of the
+  late-recall verdict (`accumulate_late_evidence`). Numbers identical to before (in rivals mode they were never learnt).
+- **`grid_search_initial_pose`**, slimmed to the START-UP search (bootstrap seeding and `validate_seed_pose`). It has no explains-like-tracking gate and commits its top mode. What
+  replaces the gate is a model term, not a threshold: when it moves off the saved / seeded pose, that pose is kept as a RIVAL (`startup_rival_`, entered by the next `step_rivals`
+  and priced with the same `price()` as a birth, so its floor is the birth price), and the scans decide between the two. A top mode whose median |d| is not tracking-like is logged
+  as a warning (diagnostics only, decides nothing).
+- `RelocHazard` (the kidnap prior pi_kid), `RelocOutlierFrac`, `RelocWallOffsetSigma`, `RelocBodyClearance`, `RelocMaxPoints`, `RelocMaxModes` (K_max and the proposer), `RelocEnabled`.
+- `reloc_search.cpp` as the proposer, `held_spread`, `substitute_survey`.
+
+OPEN DECISION FOR THE USER: `published_pose.h::clamp_correction` was NOT deleted. It is the publisher's kinematic clamp (`pose_publisher.cpp`, the `POSE_CLAMP_*` keys,
+`apply_base_capability_to_pose_clamp`, the covariance carry); all live tours ran with it on, so removing it is an unmeasured change to the published pose, not part of the
+relocaliser deletion. It needs its own decision and a tour. F3's cause (the survey's `pred` defaulting to (0,0,0)) is guarded where the survey is built:
+`survey_pose_during_fit()` returns a survey only while `hypothesis_` exists, which requires an adopted map layout, and in that state `plain_slam_pred_` is rewritten every frame
+from the shadow's pose plus the odometry delta (`room_concept_update.cpp`, `plain_slam_driving() or map_layout_adopted_`). The (0,0,0) default of `SurveyPose::pred` is only the
+member's initial value, never reached on that path; it is not enforced by the type, so the guard is the call-site invariant, not a compile-time one.
 
 ## 9. Offline evaluation plan (on recorded runs with ground truth)
 

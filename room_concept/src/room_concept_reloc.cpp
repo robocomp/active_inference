@@ -1,5 +1,5 @@
 // RoomConcept, split out of room_concept.cpp (refactor step 2, docs/refactor_proposal_2026-10-13.md).
-// Relocalisation: the mixture search, episodes, the lost belief and rival modes.
+// Relocalisation: the mixture search, episodes, the start-up search and the rival-hypothesis belief.
 
 #include "room_concept.h"
 #include "../../common/status_stream/status_sink.h"
@@ -47,7 +47,7 @@ namespace rc
     }
 
     // =========================================================================
-    //  Relocalisation: mixture search, lost belief, rival modes (reloc_search.h)
+    //  Relocalisation: mixture search, start-up search, rival hypotheses (reloc_search.h)
     // =========================================================================
     rc::reloc::Params RoomConcept::reloc_params() const
     {
@@ -239,8 +239,15 @@ namespace rc
         ep.cov_xx = cov(0, 0); ep.cov_yy = cov(1, 1); ep.cov_tt = cov(2, 2);
 
         // A search that CONFIRMED the pose commits nothing: the estimate of that same basin is better than one scan's polish.
+        // Diagnostics only, deciding nothing: a top mode whose median |d| is not tracking-like means no mode explains the scan.
+        if (not (top.median_abs <= params.reloc_track_s_median))
+            qWarning().noquote() << QString("[reloc] %1: the top mode's median |d| %2 m is not tracking-like (%3 m) -- no mode explains this scan")
+                .arg(ep.trigger).arg(top.median_abs, 0, 'f', 3).arg(params.reloc_track_s_median, 0, 'f', 3);
         if (not confirmed)
         {
+            // The pose we leave stays in the belief as a rival: the scans, not this single search, decide between the two.
+            Eigen::Matrix3f rcov = inc_pol.cov.allFinite() ? inc_pol.cov : Eigen::Matrix3f::Identity() * 1e-2f;
+            startup_rival_ = StartupRival{incumbent, rcov};
             commit_relocalised_pose(top.pose, cov);
             qWarning().noquote() << QString("[reloc] %1: moved %2 m / %3° to (%4, %5, %6°), w=%7, %8 ms")
                 .arg(ep.trigger).arg(ep.jump_m, 0, 'f', 2).arg(ep.jump_rad * 57.2958f, 0, 'f', 0)

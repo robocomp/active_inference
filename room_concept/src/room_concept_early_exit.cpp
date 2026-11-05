@@ -254,7 +254,7 @@ namespace rc
         // value that TRIGGERED optimization (it exceeded the trust threshold). update() reads it back.
         last_early_exit_metric_ = mean_sdf_pred;
         // Same points, same pose, median instead of mean — see last_pred_sdf_median_. ★ AND THE SAME DOOR WEIGHTS
-        // (Task R1b): this median was the one statistic left unweighted, and it is half of the lost belief's s
+        // (Task R1b): this median was the one statistic left unweighted, and it is half of the verdict's s
         // (max(sdf_mse, pred_sdf_median)). Live rtD1g2 recall 1: pred 2.52–2.71 m for 600 ms after the hand-over
         // while the door-weighted post-fit median read 0.08–0.11 m — the returns seen back through the door just
         // used, counted against the room the robot had entered. P(lost) 0.501 and a search followed.

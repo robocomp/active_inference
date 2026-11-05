@@ -81,6 +81,10 @@ namespace rc
         static bool  proposer_busy(RoomConcept& r) { return r.proposer_.busy(); }
         static void  wait_proposer(RoomConcept& r) { while (r.proposer_.busy()) std::this_thread::sleep_for(std::chrono::milliseconds(2)); }
         static void  clear_belief(RoomConcept& r) { r.clear_rival_belief(); }
+        static bool  startup_search(RoomConcept& r, const std::vector<Eigen::Vector3f>& pts, const char* trigger)
+        { r.search_trigger_ = trigger; return r.grid_search_initial_pose(pts, 0.5f, 0.78f); }
+        static bool  startup_rival_pending(RoomConcept& r) { return r.startup_rival_.has_value(); }
+        static Eigen::Vector3f startup_rival_pose(RoomConcept& r) { return r.startup_rival_->pose; }
         static void  add_rival(RoomConcept& r, const Eigen::Vector3f& pose, float lambda, float floor)
         { rc::rivals::Rival v; v.pose = pose; v.cov = Eigen::Vector3f(1e-3f, 1e-3f, 1e-3f).asDiagonal(); v.lambda = lambda; v.lambda_birth = floor; r.rivals_.add(v); }
     };
@@ -429,6 +433,7 @@ int main()
                 }
                 const auto res = rcn.update(rc::LidarData{pts, ts}, {}, odom);
                 Acc::step8(rcn, res, pts);
+                Acc::wait_proposer(rcn);   // deterministic: the proposer's answer for this frame is in before the next one
             };
             for (int f = 0; f < 60; ++f) frame(start);           // tracking at `start`
             const auto e_warm = Acc::epoch(rcn);
@@ -477,8 +482,68 @@ int main()
                     "most relocalisations in one run %llu (expect 1); searching+map-ready relocalised in %d runs (expect 0)\n",
                     right, runs, stayed, runs, static_cast<unsigned long long>(epochs_max), gate_violations);
     }
+    if (std::getenv("RELOC_ONLY_H") != nullptr) return 0;   // H alone, for repeated runs
 
     int r1_failures = 0;
+    // SU: THE START-UP SEARCH (grid_search_initial_pose, called by bootstrap and validate_seed_pose). It has no explains-like-
+    //     tracking gate: it commits its top mode. What keeps the saved pose from being thrown away is that it STAYS as a rival
+    //     (startup_rival_, consumed by the next step_rivals and priced like any birth).
+    //     (i) saved pose in the right room: confirmed, nothing moved, no rival.
+    //     (ii) saved pose 180 deg off the truth (same place): the search moves to the truth (or its twin) AND the saved pose is
+    //          kept as the rival.
+    //     (iii) a room no pose explains (the scan comes from a much larger, different room): defined outcome = the search still
+    //          commits its top mode (it has no gate), and IF it moved, the saved pose is the rival.
+    {
+        const auto& room = all_rooms[0];                         // rect_6x4 (symmetric): a 180 deg yaw error is a different, wrong pose
+        std::mt19937 rng(77);
+        int ok_i = 0, ok_ii = 0, ok_iii = 0, n = 6;
+        for (int k = 0; k < n; ++k)
+        {
+            const Eigen::Vector3f truth = random_pose(room.poly, rng, 1.0f);
+            const auto pts = to3(synth_scan(room.poly, truth, 360, 0.02f, 0.30f, rng));
+            {   // (i) in the NOTCHED room: in the rectangle the saved pose and its exact twin tie at 0.5 and the search may
+                //     legitimately commit the twin (then the saved pose is the rival: case (ii)'s outcome).
+                const auto& nroom = all_rooms[2];
+                const Eigen::Vector3f tn = random_pose(nroom.poly, rng, 1.0f);
+                const auto npts = to3(synth_scan(nroom.poly, tn, 360, 0.02f, 0.30f, rng));
+                rc::RoomConcept rcn;
+                rcn.set_polygon_room(nroom.poly);
+                rcn.set_robot_pose(tn.x(), tn.y(), tn.z(), false);
+                Acc::startup_search(rcn, npts, "seed_validation");
+                const auto st = rcn.get_current_state();
+                if (not Acc::startup_rival_pending(rcn) and near(Eigen::Vector3f(st[2], st[3], st[4]), tn, 0.10f, 5.f)) ++ok_i;
+            }
+            {   // (ii)
+                rc::RoomConcept rcn;
+                rcn.set_polygon_room(room.poly);
+                const Eigen::Vector3f saved(truth.x(), truth.y(), wrap(truth.z() + kPi));
+                rcn.set_robot_pose(saved.x(), saved.y(), saved.z(), false);
+                Acc::startup_search(rcn, pts, "seed_validation");
+                const auto st = rcn.get_current_state();
+                if (Acc::startup_rival_pending(rcn) and near(Acc::startup_rival_pose(rcn), saved, 1e-3f, 0.1f)
+                    and near_or_twin(room, Eigen::Vector3f(st[2], st[3], st[4]), truth, 0.30f, 10.f)) ++ok_ii;
+            }
+            {   // (iii)
+                rc::RoomConcept rcn;
+                rcn.set_polygon_room(room.poly);
+                const Poly big = {{-9.f, -7.f}, {9.f, -7.f}, {9.f, 7.f}, {4.f, 7.f}, {4.f, 2.f}, {-9.f, 2.f}};
+                const Eigen::Vector3f at = random_pose(big, rng, 1.0f);
+                const auto alien = to3(synth_scan(big, at, 360, 0.02f, 0.30f, rng));
+                const Eigen::Vector3f saved = random_pose(room.poly, rng, 1.0f);
+                rcn.set_robot_pose(saved.x(), saved.y(), saved.z(), false);
+                const bool ran = Acc::startup_search(rcn, alien, "seed_validation");
+                const auto st = rcn.get_current_state();
+                const Eigen::Vector3f now(st[2], st[3], st[4]);
+                const bool moved = not near(now, saved, 1e-3f, 0.1f);
+                if (ran and now.allFinite() and (not moved or (Acc::startup_rival_pending(rcn) and near(Acc::startup_rival_pose(rcn), saved, 1e-3f, 0.1f)))) ++ok_iii;
+            }
+        }
+        std::printf("  SU start-up search                                  (i) confirm, no move, no rival %d/%d; (ii) 180 deg off: top mode + saved "
+                    "pose as rival %d/%d; (iii) no pose explains: commits, and the saved pose is the rival if it moved %d/%d\n",
+                    ok_i, n, ok_ii, n, ok_iii, n);
+        if (ok_i < n or ok_ii < n or ok_iii < n) { std::printf("  SU FAIL\n"); ++r1_failures; }
+    }
+
     // K (Task R1/R1b): THE HAND-OVER THROUGH A DOOR, GEOMETRY ROUTE. Live, every recall was followed by a misfit
     //    transient (rtD1g2 recall 1: s = 2.52 → 2.71 for 600 ms, 0.59 for 200 ms, then ~0.06). The robot enters a 6 × 4
     //    room through a 1 m door in its bottom wall, centre 0.06 m past the line at the hand-over (the R1b centre rule),

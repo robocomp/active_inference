@@ -260,6 +260,28 @@ namespace rc
             return dk.dot((basin + k.cov + cov).inverse() * dk) < rp_.chi2_merge ? k.pose : pose;
         };
 
+        // ── 0. the pose the start-up search left: a rival, priced like any other (its birth price is its floor) ──
+        if (startup_rival_.has_value())
+        {
+            const auto sr = *startup_rival_;
+            startup_rival_.reset();
+            if (sr.pose.allFinite() and sr.cov.allFinite() and rc::reloc::inside_polygon(poly, sr.pose.head<2>()))
+            {
+                const Eigen::Matrix3f basin0 = basin_of(points(), rp().sigma_sdf);
+                Eigen::Vector3f dh = sr.pose - pose0;
+                dh.z() = rc::rivals::wrap_pi(dh.z());
+                if (dh.dot((cov0 + sr.cov + basin0).inverse() * dh) > 9.f)   // the identity test of births: not H0's own basin
+                {
+                    rc::rivals::Rival r;
+                    r.pose = sr.pose; r.cov = sr.cov;
+                    r.lambda_birth = price(0.f, sr.pose, sr.cov, pose0, cov0, prior_now());
+                    r.lambda = r.lambda_birth;   // no evidence yet: step 1 below scores it on this very scan
+                    r.id = rv_next_id_++;
+                    if (std::isfinite(r.lambda)) rivals_.add(std::move(r));
+                }
+            }
+        }
+
         // ── 1. score the rivals that existed before this frame on THIS scan, update, test for a winner ──
         // Every hypothesis, H0 included, is evaluated at ITS OWN local mode of ell (a few GN steps from where it stands): the
         // rival is a tracked pose like the incumbent. Compared at carried/tracked poses instead, a twin carried by exact motion

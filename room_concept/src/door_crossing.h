@@ -27,7 +27,7 @@
 // ★ NO DECISION IS TAKEN ON p_cross ANY MORE (2026-10-30, spec Revision 3): room_concept switches rooms on the controller's
 //   crossing fact (common/room_transition/exit_fact.h, link 1). PassageMemory, the path memory that decided it, is gone.
 //   What is used here is GEOMETRY: the crossed aperture's frame (proto_frame, mouth_of) and the in-doorway term that
-//   tempers the lost belief (step_proto_room_impl).
+//   tempers the misfit (step_proto_room_impl).
 
 #include <Eigen/Dense>
 #include <algorithm>

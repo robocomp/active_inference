@@ -407,7 +407,7 @@ void RoomSceneGraph::update(const rc::RoomConcept::UpdateResult& res, float adv,
         }
         if (params_->PROTO_ROOM_ENABLED or startup_proto_)
             step_proto_room(res);   // crossing evidence → recovery weighting, the crossing proto's birth, the CSV row
-        // `is_lost` on the agent's room: the pose is undecided (P(lost) ≥ ½ or a held relocalisation episode). Written
+        // `is_lost` on the agent's room: the pose is undecided (P(rival) ≥ ½ or a held relocalisation episode). Written
         // on change only — an attribute rewritten every frame grows the CRDT without bound. (Task R1b, reviewer I-3.)
         if (const bool lost = room_concept_->pose_undecided(); published_is_lost_ != lost)
             if (auto rn = G_->get_node(dsr_room_id_); rn.has_value())
@@ -1052,9 +1052,9 @@ void RoomSceneGraph::step_proto_room_impl(const rc::RoomConcept::UpdateResult& r
                                     p_open * c.p_span * rc::crossing::phi((c.s + r_body) / std::max(c.sig_s, 1e-4f)));
         }
     }
-    // ★ IN THE DOORWAY, NOT ONLY PAST IT (2026-10-18). This tells the lost belief how far the room still owes the scan
+    // ★ IN THE DOORWAY, NOT ONLY PAST IT (2026-10-18). This tells the rival belief how far the room still owes the scan
     //   an explanation: once the body's FRONT reaches the mouth the sensor already sees mostly the next room (try58 leg 3:
-    //   P(lost) hit ½ in the doorway and the search jumped the pose 4.32 m). Over EVERY aperture of this room.
+    //   a rival hit P ½ in the doorway and the pose jumped the pose 4.32 m). Over EVERY aperture of this room.
     room_concept_->set_outside_prob(p_in_doorway);
     row.n_apert = static_cast<int>(apertures.size());
 
@@ -1679,8 +1679,8 @@ std::optional<RoomSceneGraph::Recall> RoomSceneGraph::find_recall(const rc::Door
         if (not rn.has_value()) continue;
         auto ie = G_->get_inner_eigen_api();   // fresh instance: empty ts==0 cache, nothing to go stale
         // ★ THE LIVE FACE FROM THE ANCHOR WHEN THERE IS ONE (2026-11-01, user "Go"; pingpong36/37: placed via the door NODE the
-        //   recalled room landed 0.13-0.25 m off sideways and, in room_1's narrow corridor stub, that misfit set P(lost) to
-        //   0.5 in two frames and the relocaliser jumped). door_concept's interaction anchor `<door>@robot` is the same opening
+        //   recalled room landed 0.13-0.25 m off sideways and, in room_1's narrow corridor stub, that misfit took a rival to
+        //   P 0.5 in two frames and the relocaliser jumped). door_concept's interaction anchor `<door>@robot` is the same opening
         //   measured in the ROBOT frame (wall, then hole: 1-2 cm, ~1 deg), and the graph composes it as room <- robot <- anchor,
         //   so the robot's own pose estimate cancels out of the placement: the robot's pose in the recalled room is the
         //   recalled face composed with the anchor's measured robot-to-door relation. Same axes as the node (x along the wall);
@@ -1817,7 +1817,7 @@ void RoomSceneGraph::rearm_after_crossing(std::uint64_t new_room_id, const std::
     // it into the room left are "the next room" for the tracker's weights AND for the free-space map
     // (filter_through_door) from the first frame after the switch. It was handed over for a RECALLED room only; a new
     // room's door list stayed empty until door_concept wrote its face. After begin_room_estimation, which clears it.
-    // It also tempers the lost belief while the body is in the passage and anchors the relocaliser's prior (Task R1b).
+    // It also tempers the misfit while the body is in the passage and anchors the relocaliser's prior (Task R1b).
     {
         rc::passage::Passage pg;
         pg.centre = last_crossing_.centre;   pg.n_in  = last_crossing_.n_out;   pg.tangent = last_crossing_.tangent;

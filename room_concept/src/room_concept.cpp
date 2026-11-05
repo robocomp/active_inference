@@ -476,7 +476,7 @@ namespace rc
                 if (res.ok && on_result_ready_)
                     on_result_ready_();
 
-                // ===== 8. RELOCALISATION: lost belief + rival modes (see relocalisation_step) =====
+                // ===== 8. RELOCALISATION: the rival-hypothesis belief (see relocalisation_step) =====
                 relocalisation_step(res, lidar_high.first);
 
                 wait_period = std::chrono::milliseconds(0);

@@ -104,7 +104,7 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
     reader.opt<int>("RoomConcept.RelocMaxModes", room_concept.params.reloc_max_modes,
             "mixture budget");
     reader.opt<float, double>("RoomConcept.RelocHazard", room_concept.params.reloc_hazard,
-            "per-frame P(kidnap / silent loss) — the HMM transition AND α");
+            "per-frame prior P(kidnap / silent loss) — the rival belief's pi_kid (birth price and the door anchor's retirement)");
     reader.opt<float, double>("RoomConcept.RelocTrackSMedian", room_concept.params.reloc_track_s_median,
             "m — prior median of s when tracking (measured p50, 09-16)");
     reader.opt<float, double>("RoomConcept.RelocTrackLogSigma", room_concept.params.reloc_track_log_sigma,

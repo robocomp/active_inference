@@ -292,7 +292,7 @@ namespace rc
         //   that door in the INTERNAL frame, continuous through the doorway, so its geometry is kept for the whole visit;
         //   door_concept's live belief (p_open, prior_closed) still rules whether it is open. Each aperture is seated on
         //   the room's OWN boundary (the polygon the SDF scores against): the crossing test runs at the mouth, the leaf δ
-        //   behind it. The relocaliser and the lost belief read the SAME list (Task R2).
+        //   behind it. The relocaliser and the rival belief read the SAME list (Task R2).
         const auto doors_room = rc::reloc::seated_doors(door_apertures(), rt_.passage, current_room_polygon());
         if (not doors_room.empty() and not window_mgr_.empty())
         {
