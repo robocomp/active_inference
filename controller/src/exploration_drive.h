@@ -67,18 +67,24 @@ public:
         if (not promoted and not timed_out) return {};
         const auto entry = entry_door(room);
         const auto& failed = failed_[room];
-        const DoorCand* best = nullptr;
-        for (const auto& d : doors)
-        {
-            if (not d.found or d.crossed or crossed_.contains(d.door) or (entry.has_value() and d.door == *entry) or failed.contains(d.door)) continue;
-            if (best == nullptr or d.dist_m < best->dist_m) best = &d;
-        }
-        if (best != nullptr) return {.cause = promoted ? Cause::Promoted : Cause::MaxTime, .door = best->door, .is_return = false};
+        if (const DoorCand* best = best_door(room, doors); best != nullptr)
+            return {.cause = promoted ? Cause::Promoted : Cause::MaxTime, .door = best->door, .is_return = false};
         if (remembered_uncrossed > 0 and not timed_out) return {};
         // a Return that already failed is not retried (final review C2): the drive stops and says so
         if (entry.has_value() and failed.contains(*entry)) return {.cause = Cause::Stuck, .door = std::nullopt, .is_return = false};
         if (entry.has_value()) return {.cause = Cause::Return, .door = *entry, .is_return = true};
         return {.cause = Cause::Done, .door = std::nullopt, .is_return = false};
+    }
+
+    /// A Return is a conclusion drawn from the doors KNOWN when it was decided; a door found while the robot is still in the
+    /// room is new evidence against it (explore_tour11: room_3 promoted, the drive returned 0.2 s later, DOOR_0 was born
+    /// 2.6 s after that, while the robot was still driving to the entry door). The caller asks this while its Return
+    /// passage has not yet committed to the doorway; a found, uncrossed, not-failed door supersedes it, nearest first.
+    [[nodiscard]] std::optional<Decision> reconsider_return(const std::string& room, const std::vector<DoorCand>& doors)
+    {
+        if (const DoorCand* best = best_door(room, doors); best != nullptr)
+            return Decision{.cause = Cause::Promoted, .door = best->door, .is_return = false};
+        return std::nullopt;
     }
 
     /// After a crossing into `room` through `via_door` (the door of `room` the robot came in by).
@@ -107,6 +113,20 @@ public:
     }
 
 private:
+    /// The nearest door of `room` that is found, not crossed, not the room's entry and not failed this visit (nullptr = none).
+    [[nodiscard]] const DoorCand* best_door(const std::string& room, const std::vector<DoorCand>& doors)
+    {
+        const auto entry = entry_door(room);
+        const auto& failed = failed_[room];
+        const DoorCand* best = nullptr;
+        for (const auto& d : doors)
+        {
+            if (not d.found or d.crossed or crossed_.contains(d.door) or (entry.has_value() and d.door == *entry) or failed.contains(d.door)) continue;
+            if (best == nullptr or d.dist_m < best->dist_m) best = &d;
+        }
+        return best;
+    }
+
     double max_room_s_;
     std::optional<std::string> start_room_, current_;
     std::map<std::string, std::string> entry_;

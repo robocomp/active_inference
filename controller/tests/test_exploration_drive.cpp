@@ -114,6 +114,23 @@ int main()
         check(d.step("room_1", true, {}, false, 330.0, 1).cause == Cause::Done, "the wait is bounded by MaxRoomS");
         check(d.step("room_1", true, {found("door_9", 2.0)}, false, 31.0, 1).door == "door_9", "a re-found door is taken at once");
     }
+    {   // explore_tour11: a door found AFTER a Return was decided (room_3 promoted, DOOR_0 born 2.6 s later) re-decides the leave
+        Drive d(300.0);
+        (void)d.step("room_1", true, {}, true, 0.0);
+        d.note_entered("room_3", "door_5", 10.0);
+        const auto r = d.step("room_3", true, {found("door_5", 2.0)}, false, 40.0);
+        check(r.cause == Cause::Return and r.door == "door_5", "late door: the first decision is the Return");
+        const auto late = d.reconsider_return("room_3", {found("door_5", 2.0), found("door_6", 2.5)});
+        check(late.has_value() and late->door == "door_6" and late->cause == Cause::Promoted and not late->is_return,
+              "late door: a newly found uncrossed door supersedes the Return");
+        check(not d.reconsider_return("room_3", {found("door_5", 2.0)}).has_value(), "late door: nothing new, the Return stands");
+        d.note_failed("door_6");
+        check(not d.reconsider_return("room_3", {found("door_5", 2.0), found("door_6", 2.5)}).has_value(),
+              "late door: a door that failed this visit never supersedes");
+        d.note_crossed("door_7");
+        check(not d.reconsider_return("room_3", {found("door_5", 2.0), found("door_7", 1.0)}).has_value(),
+              "late door: a crossed door never supersedes");
+    }
     check(std::string(rc::explore::to_string(Cause::Stuck)) == "stuck", "to_string stuck");
     check(std::string(rc::explore::to_string(Cause::MaxTime)) == "max-time", "to_string");
     std::println("{}/{} checks passed", checks - fails, checks);

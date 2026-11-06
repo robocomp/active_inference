@@ -903,6 +903,16 @@ std::string SpecificWorker::entry_mirror_of(const std::string &crossed)
 	return {};
 }
 
+std::vector<rc::explore::DoorCand> SpecificWorker::explore_doors(const std::string &topo_json)
+{
+	const std::set<std::string> remembered = rc::topo::crossed_doors(topo_json);
+	std::vector<rc::explore::DoorCand> doors;
+	for (const auto &f : door_facts())
+		doors.push_back({.door = f.name, .found = G->get_node("aff_" + f.name + "_approach").has_value(),
+		                 .crossed = f.crossed or remembered.contains(f.name), .dist_m = f.dist});
+	return doors;
+}
+
 void SpecificWorker::service_explore_tour()
 {
 	if (not explore_drive_.has_value() or G == nullptr) return;
@@ -947,6 +957,31 @@ void SpecificWorker::service_explore_tour()
 			std::println("[explore-tour] '{}' vanished before the crossing and no live door stands for its passage — failed", gone);
 		}
 	}
+	// a door found AFTER a Return was decided supersedes it while the Return has not committed to its doorway (explore_tour11:
+	// room_3 promoted, the drive returned 0.2 s later, DOOR_0 born 2.6 s after that while the robot drove to the entry door)
+	if (not explore_in_flight_.empty() and explore_in_flight_return_ and gs.room_name == explore_from_room_)
+		if (const auto st = passage.view().step; st == rc::DoorPassage::Step::Look or st == rc::DoorPassage::Step::Approach)
+			if (const auto late = explore_drive_->reconsider_return(gs.room_name, explore_doors(topo_json)); late.has_value())
+			{
+				const std::string was = explore_in_flight_;
+				passage.stop();
+				explore_in_flight_.clear();
+				explore_mirror_.clear();
+				explore_in_flight_return_ = false;
+				if (start_door_passage(*late->door, rc::DoorPassage::Step::Cross, "explore", /*then_affordances=*/true).accepted)
+				{
+					explore_in_flight_ = *late->door;
+					std::println("[explore-tour] {}: '{}' found after the return through '{}' was decided — it supersedes the return",
+					             gs.room_name, *late->door, was);
+				}
+				else
+				{
+					explore_drive_->note_failed(*late->door);
+					session_.mission().set_mode(rc::DriveMode::AffordancesOnly);
+					std::println("[explore-tour] {}: '{}' found after the return was decided, but its passage was refused — the drive decides again",
+					             gs.room_name, *late->door);
+				}
+			}
 	if (not explore_in_flight_.empty())
 	{
 		const auto v = passage.view();
@@ -1005,11 +1040,7 @@ void SpecificWorker::service_explore_tour()
 	// the operator's and missions' orders come first (final review I1): no decision while either holds the base
 	if (interpreter_.state() == rc::mission::Interpreter::State::Running or session_.approach_order().active()) return;
 	// the drive's inputs
-	const std::set<std::string> remembered = rc::topo::crossed_doors(topo_json);
-	std::vector<rc::explore::DoorCand> doors;
-	for (const auto &f : door_facts())
-		doors.push_back({.door = f.name, .found = G->get_node("aff_" + f.name + "_approach").has_value(),
-		                 .crossed = f.crossed or remembered.contains(f.name), .dist_m = f.dist});
+	const auto doors = explore_doors(topo_json);
 	const bool promoted = not rc::room::is_proto(*G, gs.room_id);
 	const auto d = explore_drive_->step(gs.room_name, promoted, doors, passage.active() or not explore_in_flight_.empty(), now_s,
 	                                    rc::topo::remembered_uncrossed(topo_json, gs.room_name));
@@ -1046,7 +1077,7 @@ void SpecificWorker::service_explore_tour()
 				door = *live;
 			}
 		const auto r = start_door_passage(door, rc::DoorPassage::Step::Cross, "explore", /*then_affordances=*/true);
-		if (r.accepted) { explore_in_flight_ = door; explore_from_room_ = gs.room_name; explore_pending_crossed_.clear(); }
+		if (r.accepted) { explore_in_flight_ = door; explore_from_room_ = gs.room_name; explore_pending_crossed_.clear(); explore_in_flight_return_ = d.is_return; }
 		else explore_drive_->note_failed(*d.door);
 	}
 }

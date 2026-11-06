@@ -231,6 +231,7 @@ private:
 	void set_explore_tour(bool on);
 	/// One step of the exploration drive (control thread): build its inputs, act through start_door_passage.
 	void service_explore_tour();
+	std::vector<rc::explore::DoorCand> explore_doors(const std::string &topo_json);   ///< the drive's door inputs, this cycle
 	/// The door a crossing through `crossed` enters by: any door whose `exit` edge points at `crossed` (door_concept's entry
 	/// mirror, exit_fact link 3), else the other face of a live passage_* that `match`es it. "" when neither resolves — never
 	/// a guess (final review I2: the nearest door could be the wrong one, marked crossed and never explored).
@@ -240,6 +241,7 @@ private:
 	std::string explore_in_flight_;            ///< the door whose passage the drive started ("" = none)
 	std::string explore_mirror_;               ///< the in-flight door's entry mirror, captured while the old face still lives
 	std::string explore_from_room_;            ///< the room the in-flight passage started in (a room change = it crossed)
+	bool explore_in_flight_return_ = false;    ///< the in-flight passage is a Return (a door found later may supersede it)
 	std::string explore_pending_crossed_;      ///< a crossed door whose entry face is not resolved yet ("" = none)
 	std::string explore_pending_room_;         ///< …and the room it entered
 	double explore_pending_since_s_ = 0.0;     ///< when it was entered (the hold is bounded by ExploreTour.MaxRoomS)
