@@ -66,7 +66,7 @@ ADD_EXECUTABLE( room_recognizer_test EXCLUDE_FROM_ALL ../tools/room_recognizer_t
 TARGET_LINK_LIBRARIES( room_recognizer_test ${LIBS} dsr_core dsr_gui dsr_api fastcdr fastdds OpenThreads Eigen3::Eigen QGLViewer-qt6 Qt6OpenGLWidgets ${STATIC_LIBS} ${SPECIFIC_LIBS} ${QT_LIBRARIES} ${Ice_LIBRARIES} )
 
 # Passage identity: ONE numbering live + memory, a re-crossed hole keeps its passage name (by place). make -C build passage_identity_test; run from the component root.
-ADD_EXECUTABLE( passage_identity_test EXCLUDE_FROM_ALL ../tools/passage_identity_test.cpp ../src/passage_live.cpp ../src/room_eviction.cpp )
+ADD_EXECUTABLE( passage_identity_test EXCLUDE_FROM_ALL ../tools/passage_identity_test.cpp ../src/passage_live.cpp ../src/room_eviction.cpp ../src/topology_publish.cpp )
 TARGET_LINK_LIBRARIES( passage_identity_test ${LIBS} dsr_core dsr_gui dsr_api fastcdr fastdds OpenThreads Eigen3::Eigen QGLViewer-qt6 Qt6OpenGLWidgets ${STATIC_LIBS} ${SPECIFIC_LIBS} ${QT_LIBRARIES} ${Ice_LIBRARIES} )
 
 # Swap/undo of a recognised room through the recall/promotion path. make -C build room_swap_test; run from the component root.

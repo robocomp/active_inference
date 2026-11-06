@@ -8,6 +8,8 @@
 //   two_holes  memory holds a passage for a DIFFERENT hole of the same room: the live crossing gets a fresh number
 #include "../src/room_eviction.h"
 #include "../src/passage_live.h"
+#include "../src/topology_publish.h"
+#include "../../common/ltsm_topology/topology_decode.h"
 #include <QCoreApplication>
 #include <cmath>
 #include <cstdio>
@@ -241,6 +243,31 @@ int main(int argc, char **argv)
         pl.step();
         check(pl.owned().size() == 1, "still one passage (" + std::to_string(pl.owned().size()) + ")");
         check(not pl.passage_of(d6).has_value(), "door_6 has no passage: it stays a NEW door for `cross new`");
+    }
+
+    std::printf("[live_door] the summary's live door of a passage whose face was re-made under another name\n");
+    {   // explore_tour13: memory knew the hole as r1_door_2, door_concept re-made it as door_4 ('passage_0 match door_3 <->
+        // door_4') — the summary looked for a live 'door_2', found none, and never named door_4: the controller could not
+        // resolve the entry face, crossed the same doorway again, and its final Return asked for a name that was gone.
+        auto live = graph("pid_live_f", "etc/stage_two_rooms.json");
+        auto mem = graph("pid_mem_f", "ltsm_root.json");
+        const auto [T, T1] = stage_crossing(*live, "door_17");   // room_0 current; its door is door_17
+        remember_hole(*mem, "passage_7", "r0_door_3", T, "r1_door_9", T1);
+        if (auto p = mem->get_node("passage_7"); p.has_value())
+        { mem->add_or_modify_attrib_local<passage_crossings_att>(p.value(), 1); mem->update_node(p.value()); }
+        const auto before = ltsm::build_topology_json(*mem, *live);
+        check(before.find("\"live_door\"") == std::string::npos, "no live passage yet: no live door (never a guess)");
+        DSR::Node lp; lp.type("metaconcept"); lp.name("passage_7");
+        live->add_or_modify_attrib_local<object_subtype_att>(lp, std::string("passage"));
+        const auto lpid = live->insert_node(lp).value();
+        live->insert_or_assign_edge(DSR::Edge::create<match_edge_type>(lpid, live->get_node("door_17")->id()));
+        live->insert_or_assign_edge(DSR::Edge::create<match_edge_type>(lpid, live->get_node("door_5")->id()));
+        const auto after = ltsm::build_topology_json(*mem, *live);
+        check(after.find("\"live_door\":\"door_17\"") != std::string::npos,
+              "the live passage's door in the CURRENT room names it: door_17 (not the proto's door_5): " + after);
+        check(rc::topo::live_door_for(after, "door_9") == std::optional<std::string>("door_17"),
+              "live_door_for(the far face's name) = door_17 — the entry face after a return");
+        check(rc::topo::crossed_doors(after).contains("door_17"), "door_17 counts as crossed (no re-crossing)");
     }
 
     std::printf("%s (%d failures)\n", failures ? "FAILED" : "PASSED", failures);

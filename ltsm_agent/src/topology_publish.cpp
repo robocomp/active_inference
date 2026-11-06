@@ -73,6 +73,15 @@ std::string build_topology_json(DSR::DSRGraph& memory, DSR::DSRGraph& live)
                 if (const auto d = live.get_node(fn); d.has_value() and is_door(live, d.value())) p.live_door = fn;
             if (++faces == 2) break;
         }
+        // A face is REMADE under another name when its room is re-entered (explore_tour13: memory's r1_door_2, live door_4;
+        // 'passage_0 match door_3 <-> door_4'). The name lookup above then finds nothing, yet the live passage of the same
+        // name already matches the door standing for this hole: the one of its matched doors in the CURRENT room.
+        if (not p.live_door.has_value() and not current.empty())
+            if (const auto lp = live.get_node(p.id); lp.has_value())
+                for (const auto& e : DSR::DSRGraph::get_node_edges_by_type(lp.value(), "match"))
+                    if (const auto d = live.get_node(e.to()); d.has_value() and is_door(live, d.value()))
+                        if (const auto r = owning_room(live, d.value()); r.has_value() and r->name() == current)
+                        { p.live_door = d->name(); break; }
         if (faces == 2) passages.push_back(std::move(p));   // a passage with one face joins nothing
     }
     std::ranges::sort(passages, {}, &rc::ltsm::TopoPassage::id);
