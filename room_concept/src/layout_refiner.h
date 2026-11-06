@@ -68,6 +68,13 @@ struct Edit
     float gain = 0.f;   ///< dNLL + kappa d|V| + ln n  (negative = adopted)
 };
 
+/// A known doorway of the room, map frame: its opening a..b and how far a return from its leaf may lie off that line.
+struct Doorway
+{
+    Eigen::Vector2f a{0.f, 0.f}, b{0.f, 0.f};
+    float depth = 0.f;   ///< m — DoorAperture::half_depth (LiDAR noise + half the door depth)
+};
+
 struct Result
 {
     std::vector<Eigen::Vector2f> polygon;   ///< map frame, CCW
@@ -91,9 +98,10 @@ public:
                                  const std::vector<Eigen::Vector2f>& surf,
                                  const std::vector<Eigen::Vector2f>& free,
                                  const std::vector<float>& conf_surf = {},
-                                 const std::vector<float>& conf_free = {})
+                                 const std::vector<float>& conf_free = {},
+                                 const std::vector<Doorway>& doorways = {})
     {
-        last_ = propose_impl(poly, surf, free, conf_surf, conf_free);
+        last_ = propose_impl(poly, surf, free, conf_surf, conf_free, doorways);
         return last_;
     }
     [[nodiscard]] const Result& last() const { return last_; }
@@ -139,7 +147,8 @@ private:
                                       const std::vector<Eigen::Vector2f>& surf,
                                       const std::vector<Eigen::Vector2f>& free,
                                       const std::vector<float>& conf_surf,
-                                      const std::vector<float>& conf_free) const
+                                      const std::vector<float>& conf_free,
+                                      const std::vector<Doorway>& doorways) const
     {
         Result R;
         if (poly.size() < 4 or surf.size() < 20) { R.polygon = poly; return R; }
@@ -147,6 +156,8 @@ private:
         auto V = rot(poly, -th); if (freespace::signed_area(V) < 0.f) std::ranges::reverse(V);
         V = snap_axes(V);
         const auto S = rot(surf, -th), Fr = rot(free, -th);
+        std::vector<Doorway> D;
+        for (const auto& d : doorways) { const auto ab = rot({d.a, d.b}, -th); D.push_back({ab[0], ab[1], d.depth}); }
         Scorer sc(S, Fr, p_, conf_surf.size() == S.size() ? conf_surf : std::vector<float>(S.size(), 1.f),
                   conf_free.size() == Fr.size() ? conf_free : std::vector<float>(Fr.size(), 1.f));
         sc.fit(V);
@@ -157,6 +168,7 @@ private:
         for (int round = 0; round < p_.max_rounds; ++round)
         {
             auto cands = candidates(V, sc);
+            std::erase_if(cands, [&](const auto& c) { return grows_through_doorway(V, c.second, D); });
             if (cands.empty()) break;
             std::optional<std::size_t> best; float best_gain = 0.f;
             std::vector<float> gains(cands.size());
@@ -180,6 +192,37 @@ private:
         R.polygon = rot(V, th);
         R.contested = rot(best_rejected_cells, th);
         return R;
+    }
+
+    // ── A DOORWAY IS WHERE A ROOM ENDS (explore_tour15) ──────────────────────────────────────────────────────
+    // Free cells seen through an opening are the next room's floor. The per-beam door filter keeps them out of the
+    // evidence only while the door is believed OPEN; live, door_concept held DOOR_0 shut (p_open 0.01) while it stood
+    // open, and the refiner adopted a 0.3 x 2.6 m 'extend' through it — which, excluded from the next room's map,
+    // then blinded that room. The opening's GEOMETRY is known whatever the leaf's state, so the outline is held to it:
+    // an edit that newly covers the line just past the door's own depth (one cell beyond, the raster's resolution)
+    // across the opening has grown through it. The room's side of the line is the side the current outline is on;
+    // when the outline is on both or neither (it does not end at this doorway) the doorway says nothing.
+    [[nodiscard]] bool grows_through_doorway(const std::vector<Eigen::Vector2f>& V, const std::vector<Eigen::Vector2f>& Vq,
+                                             const std::vector<Doorway>& D) const
+    {
+        for (const auto& d : D)
+        {
+            const Eigen::Vector2f m = 0.5f * (d.a + d.b), ab = d.b - d.a;
+            const float half = 0.5f * ab.norm();
+            if (half < p_.cell) continue;
+            const Eigen::Vector2f t = ab / (2.f * half);
+            Eigen::Vector2f n(-t.y(), t.x());
+            const float past = d.depth + p_.cell;
+            const bool in_plus = freespace::point_in_polygon(m + n * past, V), in_minus = freespace::point_in_polygon(m - n * past, V);
+            if (in_plus == in_minus) continue;
+            if (in_plus) n = -n;                       // n points OUT of the room
+            for (float u = -half; u <= half; u += p_.cell)
+            {
+                const Eigen::Vector2f q = m + t * u + n * past;
+                if (freespace::point_in_polygon(q, Vq) and not freespace::point_in_polygon(q, V)) return true;
+            }
+        }
+        return false;
     }
 
     // ── geometry ───────────────────────────────────────────────────────────────────────────────────────────

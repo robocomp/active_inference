@@ -768,9 +768,16 @@ private:
     }
 
     [[nodiscard]] bool excluded(int i, int j) const { return not excl_.empty() and excl_[idx(i, j)] != 0; }
+    // ── THE EXCLUSION IS THE OUTLINE OPENED BY THE BODY RADIUS (explore_tour15) ──────────────────────────────────────
+    // A room left behind is space the robot could stand in; a part of its outline narrower than the body (2 x erode_m,
+    // the same radius this room's own ring is eroded by) is not. Live, room_1's refined outline carried a 0.3 m spike
+    // through a doorway into the next room; excluded as-is it stopped every beam crossing it and room_2 saw a 1.6 m2
+    // pocket for 18 minutes. Opening = erode then dilate by erode_m: slivers vanish, the rest of the outline is kept.
     void rasterise_exclusion()
     {
         excl_.assign(st_.size(), 0);
+        std::vector<std::uint8_t> mask(st_.size(), 0);
+        int bi0 = n_, bj0 = n_, bi1 = -1, bj1 = -1;
         for (const auto& poly : excl_polys_)
         {
             if (poly.size() < 3) continue;
@@ -782,13 +789,33 @@ private:
                 for (int i = std::max(0, i0); i <= std::min(n_ - 1, i1); ++i)
                     if (point_in_polygon(Eigen::Vector2f(x0_ + (i + 0.5f) * p_.cell, y0_ + (j + 0.5f) * p_.cell), poly))
                     {
-                        const auto k = idx(i, j);
-                        excl_[k] = 1;
-                        if (st_[k] == 1) --n_free_;
-                        st_[k] = 2;                        // stops coverage rays; never unknown, never free
-                        hits_[k] = frees_[k] = 0;          // and no evidence: the refiner sees no surface here
+                        mask[idx(i, j)] = 1;
+                        bi0 = std::min(bi0, i); bj0 = std::min(bj0, j); bi1 = std::max(bi1, i); bj1 = std::max(bj1, j);
                     }
         }
+        if (bi1 < 0) return;
+        // the opening, on the mask's bounding box padded by one cell (beyond the raster counts as not excluded)
+        const int i0 = bi0 - 1, j0 = bj0 - 1, W = bi1 - bi0 + 3, H = bj1 - bj0 + 3;
+        const float r2 = (p_.erode_m / p_.cell) * (p_.erode_m / p_.cell);
+        const auto at = [&](int i, int j) { return static_cast<std::size_t>(j) * W + i; };
+        std::vector<float> d2(static_cast<std::size_t>(W) * H);
+        for (int j = 0; j < H; ++j)
+            for (int i = 0; i < W; ++i)
+                d2[at(i, j)] = in(i0 + i, j0 + j) and mask[idx(i0 + i, j0 + j)] ? kInf : 0.f;
+        edt_2d(d2, W, H);                                         // to the nearest cell OUTSIDE the outline
+        for (auto& v : d2) v = v > r2 ? 0.f : kInf;               // eroded core = the seeds of the dilation
+        edt_2d(d2, W, H);                                         // to the nearest core cell
+        for (int j = 0; j < H; ++j)
+            for (int i = 0; i < W; ++i)
+            {
+                const int gi = i0 + i, gj = j0 + j;
+                if (not in(gi, gj) or not mask[idx(gi, gj)] or d2[at(i, j)] > r2) continue;
+                const auto k = idx(gi, gj);
+                excl_[k] = 1;
+                if (st_[k] == 1) --n_free_;
+                st_[k] = 2;                        // stops coverage rays; never unknown, never free
+                hits_[k] = frees_[k] = 0;          // and no evidence: the refiner sees no surface here
+            }
     }
 
     void init(const Eigen::Vector2f& origin)

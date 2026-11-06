@@ -4583,7 +4583,11 @@ void RoomSceneGraph::step_layout_refiner(const rc::RoomConcept::UpdateResult& re
         put_pts(poly_pub, nullptr); put_pts(surf, &cs); put_pts(fr, &cf);
         refine_in_bin_.flush();
     }
-    const auto R = refiner_.propose(poly_pub, surf, fr, cs, cf);
+    // the room's doorways (published frame): an outline never grows through one (layout_refiner.h, grows_through_doorway)
+    std::vector<rc::refine::Doorway> doorways;
+    for (const auto& d : room_concept_->door_apertures())
+        doorways.push_back({.a = T_pub_int_ * d.a, .b = T_pub_int_ * d.b, .depth = d.half_depth});
+    const auto R = refiner_.propose(poly_pub, surf, fr, cs, cf, doorways);
     refine_contested_ = R.contested;
     if (not refine_csv_.is_open())
     {
