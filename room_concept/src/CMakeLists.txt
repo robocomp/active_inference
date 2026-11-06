@@ -263,6 +263,7 @@ target_sources(wall_slam_selftest PRIVATE
   ${CTRL_SRC}/trajectory_controller.cpp
   ${CTRL_SRC}/trackers/plain_tracker.cpp
   ${CTRL_SRC}/trackers/pd_tracker.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/layout_explorer.cpp   # WS_NEWROOM: the agent's own layout explorer (tools/newroom_bench.h)
   ${CMAKE_CURRENT_LIST_DIR}/../../common/robot_footprint/robot_footprint.cpp
   ${CMAKE_CURRENT_LIST_DIR}/../../common/robot_footprint/mesh_hull.cpp)
 target_include_directories(wall_slam_selftest PRIVATE ${CMAKE_CURRENT_LIST_DIR}/../src ${CTRL_SRC})
