@@ -301,6 +301,10 @@ inline NewRoomRun run_newroom(const Poly& room, unsigned seed, const std::vector
                     fs_published = Rr.polygon;             // refine_given_layout + the published polygon
                     map_layout = Rr.polygon;
                 }
+                if (std::getenv("WS_NR_REFINE_TRACE"))     // diagnostics: one line per refiner call
+                    std::printf("[refine] t=%.1fs edits=%zu total=%d verts=%zu iou=%.3f contested=%zu\n", now / 1000.0,
+                                Rr.edits.size(), R.edits_adopted, fs_published.size(),
+                                polygon_iou(to_world(fs_published, origin), room), Rr.contested.size());
             }
         }
 

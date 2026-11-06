@@ -3522,6 +3522,14 @@ int main()
                         r.stop.c_str(), r.wall_s);
             std::fflush(stdout);
             if (csv.is_open()) { newroom_csv_row(csv, i, order, r, seed, apt ? "apartamento" : "random", srot, sfrac); csv.flush(); }
+            // WS_NR_DUMP=<dir>: per-room geometry for figures (true polygon, final outline, trajectory), world frame.
+            if (const char* dd = std::getenv("WS_NR_DUMP"))
+            {
+                std::ofstream g(std::string(dd) + "/room_" + std::to_string(i) + ".json");
+                auto arr = [&g](const auto& P) { g << '['; for (size_t k = 0; k < P.size(); ++k) g << (k ? "," : "") << '[' << P[k].x() << ',' << P[k].y() << ']'; g << ']'; };
+                g << "{\"room\":" << i << ",\"order\":" << order << ",\"iou\":" << r.iou << ",\"truth\":"; arr(gen->first);
+                g << ",\"estimate\":"; arr(r.est_poly); g << ",\"traj\":"; arr(r.traj); g << "}\n";
+            }
         }
         return 0;
     }
