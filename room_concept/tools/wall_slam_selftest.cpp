@@ -3415,6 +3415,8 @@ int run_replay(const char* path)
     }
 
 
+#include "newroom_bench.h"   // the agent's own room-building pipeline over the same rooms (WS_NEWROOM)
+
 int main()
 {
     // ── DETERMINISM. torch::set_num_threads(1) alone was NOT enough: the same command returned
@@ -3471,6 +3473,59 @@ int main()
     // the agent derives the gauge from. Identical code, identical order, identical parameters. If
     // this bench passes and Webots fails, the difference is in the DATA, which is the only place
     // a difference should ever be.
+    // ═══ NEW-ROOM BENCH (WS_NEWROOM=N) ═══════════════════════════════════════════════════════
+    // room_concept's CURRENT room-building pipeline (plain SLAM -> free-space raster -> manhattan_layout ->
+    // coverage explorer -> description-length promotion -> LayoutRefiner) over the SAME random rooms and seeds as
+    // the WS_BOXES_RANDOM sweep (room i: random_room(1000+i, ORDER_LO + i%n), run seed 7+i). See newroom_bench.h.
+    //   WS_NEWROOM=N  WS_BOXES_INDEX_LO=k  WS_BOXES_ORDER_LO=4  WS_BOXES_ORDER_HI=12  WS_NR_FRAMES=F  WS_NR_OUT=csv
+    //   WS_BOXES_STYLE=apartamento: N starts spread round the hall's tour (start_frac = ii/N), or WS_BOXES_START_ROT/_FRAC.
+    if (std::getenv("WS_NEWROOM") != nullptr)
+    {
+        const auto geti = [](const char* n, int d)
+        { const char* v = std::getenv(n); int x = d; if (v) std::from_chars(v, v + std::strlen(v), x); return x; };
+        const int N = std::max(1, geti("WS_NEWROOM", 1));
+        const int ilo = geti("WS_BOXES_INDEX_LO", 0), olo = geti("WS_BOXES_ORDER_LO", 4), ohi = geti("WS_BOXES_ORDER_HI", 12);
+        const int frames = geti("WS_NR_FRAMES", 8000), nord = std::max(1, ohi - olo + 1);
+        const bool apt = std::getenv("WS_BOXES_STYLE") and std::string(std::getenv("WS_BOXES_STYLE")) == "apartamento";
+        const char* outp = std::getenv("WS_NR_OUT");
+        std::ofstream csv;
+        if (outp)
+        {
+            const bool fresh = not std::filesystem::exists(outp);
+            csv.open(outp, std::ios::app); csv.imbue(std::locale::classic());
+            if (fresh) csv << newroom_csv_header() << '\n';
+        }
+        for (int ii = 0; ii < N; ++ii)
+        {
+            const int i = ilo + ii;
+            const int order = apt ? 32 : olo + (i % nord);
+            const auto gen = apt ? apartamento_room() : random_room(static_cast<unsigned>(1000 + i), order);
+            if (not gen) { std::printf("room %d: no drivable circuit\n", i); continue; }
+            int srot = geti("WS_BOXES_START_ROT", 0);
+            // WS_NR_LEGAL_START=1: the generator only checks that the tour's waypoints lie inside the room, not that the
+            // body fits there; where the default start sits within the bumper's body_radius of a wall the robot is
+            // physically wedged. Start instead at the tour waypoint with the MOST clearance (no threshold: argmax).
+            if (std::getenv("WS_NR_LEGAL_START") and not gen->second.empty())
+            {
+                float best = -1.f; const int nw = static_cast<int>(gen->second.size());
+                for (int k = 0; k < nw; ++k)
+                    if (const float c = point_to_poly(gen->second[static_cast<size_t>(k)], gen->first); c > best) { best = c; srot = k; }
+            }
+            float sfrac = 0.f;
+            if (const char* sf = std::getenv("WS_BOXES_START_FRAC")) std::from_chars(sf, sf + std::strlen(sf), sfrac);
+            else if (apt) sfrac = static_cast<float>(ii) / static_cast<float>(N);
+            const unsigned seed = static_cast<unsigned>(7 + i);
+            const auto r = run_newroom(gen->first, seed, gen->second, frames, srot, sfrac);
+            std::printf("room %3d ord %2d  IoU %.3f (rot4 %.3f) verts %d/%d  pose %.3f m rot %.2f deg  seen %.0f%%  promo@%d edits %d  "
+                        "out %d blk %d  frames %d [%s]  %.1fs\n", i, order, r.iou, r.iou_rot4, r.est_verts, r.truth_verts, r.pose_med,
+                        r.rot_err_deg, 100.f * r.seen_frac, r.promo_frame, r.edits_adopted, r.frames_out, r.frames_blocked, r.frames,
+                        r.stop.c_str(), r.wall_s);
+            std::fflush(stdout);
+            if (csv.is_open()) { newroom_csv_row(csv, i, order, r, seed, apt ? "apartamento" : "random", srot, sfrac); csv.flush(); }
+        }
+        return 0;
+    }
+
     // ═══ RANDOM ROOM SWEEP (WS_BOXES_RANDOM=N) ═══════════════════════════════════════════════
     // N random Manhattan rooms spread over orders 1..6 (order = number of boxes: a bare rectangle
     // plus carves and alcoves). Prints ONLY aggregates — a per-room dump is not a result.
