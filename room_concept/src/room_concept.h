@@ -779,6 +779,7 @@ private:
    // thread (RoomConcept::run -> relocalisation_step, and the scene graph's update() it calls inline, which seeds them).
    double late_log_odds_ = 0.0;                 ///< accumulated log-odds that K's layout explains the scans
    bool late_forced_done_ = false;              ///< the adoption's multi-scan fit has been applied
+   bool late_fit_committed_this_frame_ = false; ///< the fit's own frame: its scan is already counted (no second count)
    // ── the adoption fit is the last M keyframes jointly (spec sec 6; multi_scan_fit.h) ──
    void run_late_recall_fit(const std::vector<Eigen::Vector3f>& lidar_points);
    struct LateKeyframe { Eigen::Vector3f pose; std::vector<Eigen::Vector2f> pts; };   ///< tracker pose (current frame) + subsampled scan

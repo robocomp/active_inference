@@ -99,6 +99,13 @@ namespace rc
         view_prev_pose_ = pose0;
         view_prev_pose_valid_ = true;
         rv_novelty_acc_ += w;
+        // ★ THE LATE RECALL'S VERDICT READS NORMAL TRACKING AFTER ITS FIRST FIT (restored 2026-11-06; lost in af46a885 with the
+        //   legacy lost-belief code that held the only per-scan call). Without it the verdict had ONE observation — the
+        //   multi-scan fit — and a recognition whose fit alone did not cross ±ln 19 stayed Pending for ever (explore_tour9:
+        //   the re-entered start room judged for minutes, the exploration drive holding on it). Each scan's misfit, weighted by
+        //   how new this view is (w above): a parked robot's repeated scans are one observation, not many.
+        if (late_pending_.load(std::memory_order_acquire) and late_forced_done_ and not std::exchange(late_fit_committed_this_frame_, false))
+            accumulate_late_evidence(std::max(res.sdf_mse, res.pred_sdf_median), w);
 
         // ── carry: every rival (and the pending proposal) moves with the ROBOT'S ODOMETRY increment since the last step ──
         // The motion prior's increment (global frame, what update()'s predict step added), rotated into the body frame of the
