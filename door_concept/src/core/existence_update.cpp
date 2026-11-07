@@ -255,10 +255,10 @@ ExistenceTrace observe_place(PlaceBelief& b, const rc::DoorFitState& th, const E
 }
 
 PlacePrior prior_of(const rc::DoorFitState& th, const std::vector<Vec2f>& polygon, bool proto, const rc::door::RoomBand& band,
-                    int doors_on_wall_before, float width_sd, float height_sd, bool size_resolved, const SizePrior& size)
+                    int doors_on_wall_before, float width_sd, float height_sd, bool size_resolved, const SizePrior& size, float aperture_sd)
 {
     const PlacePriorInput in{polygon, proto, band, th.aperture.centre_xy(), th.aperture.wall_u, th.aperture.w, th.aperture.h,
-                             width_sd, height_sd, size_resolved, doors_on_wall_before, size};
+                             width_sd, height_sd, size_resolved, doors_on_wall_before, size, aperture_sd};
     return place_prior(in);
 }
 

@@ -271,7 +271,7 @@ int main()
         Bench b;
         const rc::DoorFitState th = typical_door_at({1.0f, kWallY}, 3.0f, rc::DoorConfig{}.door_prior_h_m, kRoom);
         PlaceBelief pb;
-        pb.prior = prior_of(th, kRoom, false, {0.2f, 0.1f}, 0, b.cfg.tracker_detection_noise_m, 0.0f, true, fit_size_prior());
+        pb.prior = prior_of(th, kRoom, false, {0.2f, 0.1f}, 0, b.cfg.tracker_detection_noise_m, 0.0f, true, fit_size_prior(), 0.0f);
         int n = 0;
         bool born_after_one = false, born = false;
         while (not born and n < 200)
@@ -503,7 +503,7 @@ int main()
         Bench b;
         const rc::DoorFitState th = shut_door();
         PlaceBelief pb;
-        pb.prior = prior_of(th, kRoom, false, {0.2f, 0.1f}, 0, 0.05f, 0.03f, true, fit_size_prior());
+        pb.prior = prior_of(th, kRoom, false, {0.2f, 0.1f}, 0, 0.05f, 0.03f, true, fit_size_prior(), 0.0f);
         b.frame(pb, th, A0, kDoor, true, false, {{{1.0f, kWallY}, -1.0f, 0}}, 1);
         const float hit_view = pb.ledger.views().back().llr;
         bool removed = false;
@@ -526,7 +526,7 @@ int main()
         Bench b;
         const rc::DoorFitState th = shut_door();
         PlaceBelief pb;
-        pb.prior = prior_of(th, kRoom, false, {0.2f, 0.1f}, 0, 0.05f, 0.03f, true, fit_size_prior());
+        pb.prior = prior_of(th, kRoom, false, {0.2f, 0.1f}, 0, 0.05f, 0.03f, true, fit_size_prior(), 0.0f);
         b.frame(pb, th, A0, kDoor, true, false, {{{1.0f, kWallY}, -1.0f, 0}}, 1);   // the door was confirmed once by the ZED
         b.pkt.ricoh_windows = {Vec2f(0.0f, 2.0f * std::numbers::pi_v<float>)};    // every strip processed
         const float L0 = pb.L();
@@ -622,7 +622,7 @@ int main()
         CHECK(worst < 0.05f);
         // a detection while lost is about this door only in proportion to kappa: one lost hit view cannot birth a door
         PlaceBelief hb;
-        hb.prior = prior_of(th, kRoom, false, {0.2f, 0.1f}, 0, 0.05f, 0.03f, true, fit_size_prior());
+        hb.prior = prior_of(th, kRoom, false, {0.2f, 0.1f}, 0, 0.05f, 0.03f, true, fit_size_prior(), 0.0f);
         b.frame(hb, th, A0, kDoor, true, false, {{{1.0f, kWallY}, -1.0f, 0}}, 1, C);
         std::print("relocalising_robot_moves_nothing: one lost HIT view llr {:+.3f} -> L {:+.3f}\n", hb.ledger.sum(), hb.L());
         CHECK(not decide(hb.L(), Role::Ordinary, default_costs()).exists);
@@ -639,7 +639,7 @@ int main()
         th.phi_est = d80;
         th.phi_curve = {{d80 - d5, 0.5f}, {d80, 1.0f}, {d80 + d5, 0.5f}};
         PlaceBelief pb;
-        pb.prior = prior_of(th, kRoom, false, {0.2f, 0.1f}, 0, 0.05f, 0.03f, true, fit_size_prior());
+        pb.prior = prior_of(th, kRoom, false, {0.2f, 0.1f}, 0, 0.05f, 0.03f, true, fit_size_prior(), 0.0f);
         pb.carried = 0.5f;   // a door barely believed in
         const Vec2f leaf_xy = th.leaf_pose.centre_xy;
         int removes = 0;

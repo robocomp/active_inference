@@ -91,10 +91,11 @@ ExistenceTrace observe_place(PlaceBelief& b, const rc::DoorFitState& theta, cons
 
 /// The structural prior of θ in this room (place_prior.h). `doors_on_wall_before`: how many doors were on θ's wall before it.
 /// The size is scored on the FITTED width/height with their posterior sds (a candidate: what the fit will make of its blob) under
-/// `size`, the door fit's own width/height prior (one size prior for one quantity, place_prior.h).
+/// `size`, the door fit's own width/height prior (one size prior for one quantity, place_prior.h). `aperture_sd`: the sd of θ's
+/// aperture position along the wall normal (the band term is the marginal over it, place_prior.h).
 [[nodiscard]] PlacePrior prior_of(const rc::DoorFitState& theta, const std::vector<Vec2f>& polygon, bool proto,
                                   const rc::door::RoomBand& band, int doors_on_wall_before, float width_sd, float height_sd,
-                                  bool size_resolved, const SizePrior& size);
+                                  bool size_resolved, const SizePrior& size, float aperture_sd);
 
 /// The wall group (place_prior.h wall_groups) θ's aperture lies on: the group of the polygon edge nearest to it; -1 = none.
 [[nodiscard]] int wall_of(const Vec2f& xy, const std::vector<Vec2f>& polygon, const std::vector<int>& groups);

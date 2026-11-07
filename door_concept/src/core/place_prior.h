@@ -16,6 +16,11 @@
 //   no second, existence-only size constant: two priors for one door size made every real door pay ~−0.75 nats for being the
 //   size the fit holds it at (and scored a ŵ already pulled by the other prior). The spec's typical-real-door value
 //   (0.85 ± 0.12 / 2.05 ± 0.06, spec §3.2) is the recommended Door.* value for the real robot (etc/config.toml).
+// ★THE BAND TERM IS A MARGINAL LIKELIHOOD (Task 10 post-breaker ruling), the same form as the size term: the aperture's
+//   offset δ from the room-side face is measured with the fit's own across-wall sd σ_ap, so the band is scored under
+//   N(δ; band, σ_band² + σ_ap²), normalised to 0 on the band. A door placed by one long-range view (large σ_ap) pays little
+//   for sitting off the band; a well-measured aperture off the wall pays fully; on the band (δ in [0, T]) it pays nothing
+//   whatever the σ. No cutoff. The proto frontier keeps its one-sided form and adds σ_ap² on the outside too.
 //
 // ★CONSTANTS, each flagged (global-constraints): 0.4 / 0.01 are the per-wall base rates (§6).
 // ★THE ONE GATE, flagged: wall_groups joins edges whose endpoints lie within 2σ of the wall's line. That 2σ is a χ² gate:
@@ -49,6 +54,7 @@ struct PlacePriorInput
     bool size_resolved;
     int doors_on_wall_before;
     SizePrior size_prior;               ///< the fit's width/height prior (one prior for one quantity)
+    float aperture_sd_m;                ///< sd of the aperture's position ALONG THE WALL NORMAL (m): the fit's, or a candidate's detection's
     float edge_sigma_m = 0.0f;          ///< the proto outline edge's own published uncertainty (m); room_concept publishes none on the room node, so 0
 };
 
@@ -82,7 +88,9 @@ namespace detail
         // with sigma widened by the outline edge's own uncertainty (hypot; 0 when none is published - the graph carries only
         // delimiting_polygon_x/y): a door AT the frontier (within the outline's error of the edge) pays about 0, one metres beyond the
         // measured floor pays as off-wall. For a promoted room the same formula applies with edge_sigma_m = 0.
+        // The marginal over the aperture's own across-wall uncertainty: sigma^2 = sigma_band^2 + sigma_ap^2 (both sides).
         rc::door::RoomBand b = in.band;
+        b.sigma_m = std::hypot(b.sigma_m, in.aperture_sd_m);
         if (in.proto and delta >= 0.0f)
             b.sigma_m = std::hypot(b.sigma_m, in.edge_sigma_m);
         p.band = rc::door::band_log_prior(delta, b);

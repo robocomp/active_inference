@@ -376,7 +376,8 @@ void DoorCore::prepare_candidates(const DoorCycleInput& in, const std::vector<rc
                 th.aperture.h = cfg.door_prior_h_m;
             }
             cand.belief.prior = prior_of(th, polygon, fit_.room_is_proto(), fit_.room_band(),
-                                         wall >= 0 ? doors_on_wall[wall] : 0, w_sd, h_sd, cand.size_resolved, size_prior);
+                                         wall >= 0 ? doors_on_wall[wall] : 0, w_sd, h_sd, cand.size_resolved, size_prior,
+                                         std::sqrt(cand.var));   // no fit yet: the detection's own place sd (isotropic, so along the normal too)
             const auto it = self_det.find(c);
             const int self_sensor = it == self_det.end() ? -1 : (dets_[static_cast<std::size_t>(it->second)].sensor != 0 ? 1 : 0);
             const float self_w = it == self_det.end() ? 0.0f : det_w_[static_cast<std::size_t>(it->second)];
@@ -457,8 +458,13 @@ void DoorCore::update_existence(const DoorCycleInput& in, DoorCycleOutput& out)
                         and door_seq_[states[j].first] < door_seq_[id])
                         ++before;
                 const auto C = inst.ai2_belief.covariance();
+                // σ_ap, the aperture's sd ALONG THE WALL NORMAL: the fit's belief is [s, w, h, d] in its wall frame, and its only
+                // across-wall state is d, the door plane's depth off the wall line; its posterior sd (Σ(3,3), recess_sd()) is the
+                // fit's own uncertainty of where across the wall the door is. One long-range view leaves it near its prior
+                // (sqrt(T²/12 + σ_b²)); a well-measured door collapses it.
                 inst.belief.prior = prior_of(inst, polygon, fit_.room_is_proto(), fit_.room_band(), before,
-                                             std::sqrt(std::max(0.0f, C(1, 1))), std::sqrt(std::max(0.0f, C(2, 2))), true, size_prior);
+                                             std::sqrt(std::max(0.0f, C(1, 1))), std::sqrt(std::max(0.0f, C(2, 2))), true, size_prior,
+                                             inst.ai2_belief.recess_sd());
             }
             const float act = std::exchange(inst.pending_actuation_llr, 0.0f);
             std::vector<ViewRow> rows;

@@ -16,7 +16,7 @@ static constexpr SizePrior kSize{0.85f, 0.12f, 2.05f, 0.06f};
 
 static PlacePriorInput input(const std::vector<Vec2f>& poly, Vec2f ap, float w, int before = 0, bool proto = false)
 {
-    return PlacePriorInput{poly, proto, rc::door::RoomBand{0.20f, 0.10f}, ap, Vec2f(1, 0), w, 2.05f, 0.0f, 0.0f, true, before, kSize};
+    return PlacePriorInput{poly, proto, rc::door::RoomBand{0.20f, 0.10f}, ap, Vec2f(1, 0), w, 2.05f, 0.0f, 0.0f, true, before, kSize, 0.0f};
 }
 
 int main()
@@ -84,6 +84,25 @@ int main()
         CHECK(std::abs(place_prior(in).size) < 1e-6f);
         in.size_prior = kSize;
         CHECK(place_prior(in).size < -0.5f);
+    }
+    // band_is_a_marginal_over_the_aperture_sd (post-breaker ruling): N(δ; band, σ_band² + σ_ap²), normalised to 0 on the band
+    {
+        auto at = [&](float y, float sd, bool proto = false) { auto in = input(kRoom, {3, y}, 0.85f, 0, proto); in.aperture_sd_m = sd; return place_prior(in).band; };
+        // δ = 0.3 m into the room (y = +0.3): 0.3 m from the band [0, 0.2] beyond the face
+        const float before = at(0.3f, 0.0f);
+        CHECK(std::abs(before - (-0.5f * 0.3f * 0.3f / (0.10f * 0.10f))) < 1e-3f);           // σ_ap 0: exactly the old band (-4.5)
+        CHECK(std::abs(at(0.3f, 1e-3f) - before) < 1e-3f);                                  // a small σ_ap pays the same as before
+        CHECK(at(0.3f, 0.5f) > -0.2f);                                                       // a large σ_ap: the band at 0.3 m pays little
+        CHECK(at(0.3f, 0.5f) > at(0.3f, 0.1f) and at(0.3f, 0.1f) > before);                  // monotone in σ_ap
+        for (const float sd : {0.0f, 0.05f, 0.5f, 3.0f})                                     // on the band: nothing, whatever the σ
+        {
+            CHECK(at(0.0f, sd) == 0.0f);
+            CHECK(at(-0.1f, sd) == 0.0f);
+            CHECK(at(0.0f, sd, true) == 0.0f);
+        }
+        // the proto frontier: one-sided, and the outside adds σ_ap² too
+        CHECK(at(-0.6f, 0.5f, true) > at(-0.6f, 0.0f, true));
+        CHECK(at(0.3f, 0.5f, true) == at(0.3f, 0.5f, false));                                // the inside of a proto room is unchanged
     }
     std::printf(g_fail ? "FAILED\n" : "ALL PASS\n");
     return g_fail != 0;
