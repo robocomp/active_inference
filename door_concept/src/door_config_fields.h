@@ -235,6 +235,8 @@ void read_door_config_fields(DoorConfig& out, GetF&& getf, GetI&& geti, GetS&& g
             "Existence.ReacquireRadiusM (0 disables re-acquisition)");
     out.exist_ghost_max          = geti("Existence.GhostMax", 8,
             "Existence.GhostMax — most recent removals retained");
+    out.exist_geometry_may_refute = getb("Existence.GeometryMayRefute", false,
+            "Existence.GeometryMayRefute — false: the reprojection-agreement channel can only push L up (spec §8.5, until benched)");
     out.exist_max_room_s         = getf("Existence.MaxRoomS", 300.0f,
             "Existence.MaxRoomS — mirrors the controller's ExploreTour.MaxRoomS (s): a route door's delete cost is the ordinary cost plus this");
     // [Openable] — deliberately ABSENT from etc/config.toml (same as [Bearing]): a dormant, opt-in feature

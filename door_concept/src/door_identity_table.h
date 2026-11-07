@@ -609,7 +609,7 @@ inline float restore_existence_prior(const IdentityRow& r, float default_L, std:
 template <class Inst>
 [[nodiscard]] float remembered_logodds(const Inst& inst)
 {
-    return inst.existence.logodds() - inst.room_prior_term;
+    return inst.belief.L_evidence();   // Task 8: the place belief's evidence part (spec §3.7: the row is the belief)
 }
 
 /// A door with fewer matched frames than this and no fresh detection is not fitted this cycle (process_door_node). A door
@@ -644,6 +644,7 @@ void seed_restored_instance(Inst& inst, const IdentityRow& r, float prior_L, flo
     inst.existence.set_max(max_L);
     inst.existence.set(prior_L);
     inst.existence_seeded = true;
+    inst.belief.carried = prior_L;   // Task 8: THE belief continues the remembered evidence (aged); the prior re-enters from the room
     // Task D-C: the removal decision weighs what the data do SINCE this entry (DoorFitState::existence_entry_L), and the
     // door's age carries on from the row's stamp (a restored door not seen this visit keeps aging).
     inst.existence_entry_L = inst.existence.logodds();

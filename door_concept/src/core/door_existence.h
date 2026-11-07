@@ -192,13 +192,18 @@ class ImageSource
 {
 public:
     void apply(const std::optional<ImageFrame>& rgb_gray, const std::optional<ImageFrame>& depth);
-    void stage_live(const cv::Mat& bgr, const cv::Mat& depth_m);
+    /// `stamp_ms` = the RGB frame's capture stamp (0 = unknown: every staging counts as a new frame).
+    void stage_live(const cv::Mat& bgr, const cv::Mat& depth_m, std::uint64_t stamp_ms = 0);
     [[nodiscard]] const cv::Mat& rgb() const { return rgb_; }
+    /// Increments on every NEW RGB frame (a tape's recorded frame, or a live frame with a new stamp): the existence update's
+    /// geometry channel runs once per RGB frame (spec §3.4, ruling R3).
+    [[nodiscard]] std::uint64_t rgb_generation() const { return rgb_gen_; }
     [[nodiscard]] const cv::Mat& depth() const { return depth_; }
     [[nodiscard]] std::optional<float> frame_ref() const { return frame_ref_; }
 private:
     cv::Mat rgb_, depth_;
     std::optional<float> frame_ref_;
+    std::uint64_t rgb_gen_ = 0, last_stamp_ = 0;
 };
 
 /// What the input recorder must know about the frames a cycle's checks read (InputSnapshot::note_images' arguments that
@@ -274,5 +279,8 @@ struct PoseOverlap { float kappa = 1.0f; float spread_m = 0.0f; };
 
 /// The header line of etc/door_existence_log.csv (the adapter writes it once, when it opens the file).
 extern const char* const kExistenceCsvHeader;
+/// The header line of etc/door_views_log.csv: one row per (door, camera, view) each time a frame joins that view — the view's
+/// aggregate so far (the LAST row of a (door, camera, view_id) is the view's trial; tools/fit_detector_envelopes.py keeps it).
+extern const char* const kViewsCsvHeader;
 
 }  // namespace rc::door::core

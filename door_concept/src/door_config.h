@@ -486,6 +486,7 @@ struct DoorConfig
     // saw a brand-new object each time.
     float exist_reacquire_radius_m = 0.60f;  // Existence.ReacquireRadiusM (0 disables re-acquisition)
     int   exist_ghost_max          = 8;      // Existence.GhostMax — most recent removals retained
+    bool  exist_geometry_may_refute = false; // Existence.GeometryMayRefute — §8.5: the geometry channel may only RAISE L until benched on ROI tapes
     float exist_max_room_s         = 300.0f; // Existence.MaxRoomS — mirrors controller ExploreTour.MaxRoomS: the longest a room's exploration lasts (s); C_delete(route) = C_delete(ordinary) + this
     // ── Openable door: APERTURE / LEAF decomposition (M0 = structure only) ─────────────────────────
     // A door is an APERTURE (a static hole in a wall) plus a LEAF (a rigid panel hinged on one of its

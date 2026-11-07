@@ -31,7 +31,7 @@
 //
 // Build + run (from door_concept/):
 //   g++ -std=c++23 -O2 -I/usr/include/eigen3 -I/usr/include/opencv4 tools/door_replay.cpp src/core/door_core.cpp \
-//       src/core/door_fit.cpp src/core/door_existence.cpp src/core/door_visibility.cpp src/core/door_cycle_io.cpp src/door_belief.cpp src/door_model.cpp src/epistemic_planner.cpp \
+//       src/core/door_fit.cpp src/core/door_existence.cpp src/core/existence_update.cpp src/core/door_visibility.cpp src/core/door_cycle_io.cpp src/door_belief.cpp src/door_model.cpp src/epistemic_planner.cpp \
 //       src/door_frame_evidence.cpp ../common/contour_edge/contour_edge_check.cpp \
 //       ../common/contour_edge/contour_edge_project.cpp ../common/contour_edge/contour_depth_check.cpp \
 //       -lzstd -lopencv_core -lopencv_imgproc -o /tmp/door_replay
@@ -284,6 +284,10 @@ public:
             f.existence_entry_L = f.existence.logodds();
             f.existence_since_entry = 0.0f;
         }
+        // Task 8: THE belief — the source face's evidence plus the crossing (Task 9 rebuilds this path)
+        f.belief = {};
+        f.belief.carried = old.belief.L_evidence();
+        f.belief.crossing = rc::door::crossing_logodds(cfg_.exist_cross_passable_prior, cfg_.exist_cross_leak);
         live_.insert_or_assign(id, std::move(f));
         std::println("MIRROR cycle {} '{}' source w {:.3f} -> mirror at (0,0.02) in the new room; robot {:.2f} {:.2f}", cycle_, old.node_name, m.w, rb.x(), rb.y());
     }
@@ -567,12 +571,14 @@ int main(int argc, char** argv)
     // that cost), and the tool writes no file.
     long diag_rows = 0;
     // --csv DIR: the fit's two logs and the existence log, as the live agent writes them (diff them against its own)
-    std::ofstream ai2_csv, phi_csv, ex_csv;
+    std::ofstream ai2_csv, phi_csv, ex_csv, views_csv;
     if (not csv_dir.empty())
     {
         ai2_csv.open(csv_dir + "/ai2_log.csv");
         phi_csv.open(csv_dir + "/ai2_log_phi.csv");
         ex_csv.open(csv_dir + "/door_existence_log.csv");
+        views_csv.open(csv_dir + "/door_views_log.csv");
+        views_csv << kViewsCsvHeader;
         ai2_csv << kAi2CsvHeader;
         phi_csv << kPhiCsvHeader;
         ex_csv << kExistenceCsvHeader;
@@ -583,6 +589,7 @@ int main(int argc, char** argv)
         if (r.stream == "ai2_log.csv" and ai2_csv.is_open()) ai2_csv << r.line;
         else if (r.stream == "ai2_log_phi.csv" and phi_csv.is_open()) phi_csv << r.line;
         else if (r.stream == "door_existence_log.csv" and ex_csv.is_open()) ex_csv << r.line;
+        else if (r.stream == "door_views_log.csv" and views_csv.is_open()) views_csv << r.line;
     }});
 
     // the slices the tool does not rebuild — counted, so a tape that exercised them says so
@@ -728,7 +735,7 @@ int main(int argc, char** argv)
                                      "since_det {} mask {} px {} | sil occ {:.1f} free {:.1f} free_eff {:.2f} p_det {:.3f} | edge dL {:+.2f} "
                                      "frame exc {:+.2f} (true {:.1f} ctrl {:.1f}) | robot {:.3f} {:.3f} | kappa {:.3f} | leaf c {:+.3f} {:+.3f} "
                                      "| ap {:+.3f} {:+.3f} yaw {:+.3f}",
-                                     st->node_name, in->cycle, st->existence.logodds(), b.s, b.w, b.h, b.d, st->ai2_belief.recess_sd(),
+                                     st->node_name, in->cycle, st->belief.L(), b.s, b.w, b.h, b.d, st->ai2_belief.recess_sd(),
                                      st->phi_est, st->phi_sigma, st->frames_since_detection, st->assigned_mask_idx, mask_px,
                                      st->dbg_sil_occ, st->dbg_sil_free, st->dbg_sil_free_eff, st->dbg_sil_pdetect,
                                      st->dbg_edge_delta, st->dbg_frame_excess, st->dbg_frame_true, st->dbg_frame_ctrl,

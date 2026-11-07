@@ -1,6 +1,7 @@
 #!/usr/bin/env -S python3 -I
 """Maximum-likelihood fit of the per-camera detector envelope (rc::detect::DetectorEnvelope: min_fill, max_fill, soft) and hit_rate
-from PER-VIEW rows of door_existence_log.csv.
+from PER-VIEW rows of etc/door_views_log.csv (Task 8: the agent writes one row each time a frame joins a view, carrying that view's
+aggregate so far; the LAST row of each (door, camera, view_id) is the view's trial, and only it is kept — one trial per view).
 
 Input columns: cycle, door, camera (zed|ricoh), view_id, q, fill_h, fill_v, vis, kappa, hit (0/1 or an associated weight in [0,1]).
 Optional: alive_end (1 = the door ended alive with L>0), crossed (1 = the door was crossed). Rows are kept only for doors that ended
@@ -69,6 +70,10 @@ def main():
     a = ap.parse_args()
     rows = list(csv.DictReader(open(a.log, newline="")))
     cols = rows[0].keys() if rows else []
+    if rows and all(k in cols for k in ("door", "camera", "view_id")):   # one trial per view: its last (aggregate) row
+        last = {}
+        for r in rows: last[(r["door"], r["camera"], r["view_id"])] = r
+        rows = list(last.values())
     have_filter = "alive_end" in cols and "crossed" in cols
     if have_filter:
         rows = [r for r in rows if float(r["alive_end"]) > 0 and float(r["crossed"]) > 0]

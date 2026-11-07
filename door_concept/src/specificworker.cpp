@@ -247,6 +247,18 @@ void SpecificWorker::request_shutdown()
 
     cleanup_owned_nodes();
 
+    // Task 8: persist what the existence model learned this run (graceful exits only; SIGKILL loses it, like the nodes).
+    if (core_)
+    {
+        rc::door::core::save_detectors("etc/door_detectors.csv", core_->detectors(), "online");
+        core_->costs().save("etc/door_costs.csv");
+        const auto t = core_->detectors();
+        std::print("door_concept: [existence] saved etc/door_detectors.csv (zed n={:.0f}, ricoh n={:.0f}) and etc/door_costs.csv "
+                   "(keep n={}, delete n={})\n", t.zed.n_hit_trials, t.ricoh.n_hit_trials,
+                   core_->costs().n(rc::door::core::CostEstimator::Kind::Keep),
+                   core_->costs().n(rc::door::core::CostEstimator::Kind::DeleteOrdinary));
+    }
+
     // Flush the diagnostics' tails (up to 63 buffered rows each): exit is std::_Exit and this worker is never
     // deleted, so no ofstream destructor runs. Same thread as compute() (Qt timer), so no write can race this.
     anchor_frames_.close();
@@ -309,7 +321,7 @@ void SpecificWorker::refresh_belief_strip()
     rc::dash::fill_strip(belief_strip_, fitter_->instances(), *G,
         [](rc::BeliefStripRow& r, const auto& inst)
         {
-            if (inst.existence_seeded) r.p_exists = inst.existence.p_exists();
+            r.p_exists = inst.belief.p();   // Task 8: THE belief
             rc::dash::fill_certainty(r, inst.ai2_belief.covariance_reported(), rc::kDoorDofs);
         });
 }
@@ -457,6 +469,20 @@ void SpecificWorker::initialize()
     // existence probes that still need cortex) builds its instances through it and shares its room polygon.
     input_snapshot_.enable_for_core(static_cast<std::uint32_t>(agent_id));
     core_ = std::make_unique<rc::door::core::DoorCore>(rc::door::core::DoorCoreConfig{cfg_});
+    // Task 8: the existence model's learned tables — the per-camera detector model (spec §8.4) and the decision's costs
+    // (§8.2), loaded here and saved on a graceful shutdown (request_shutdown). Absent files ⇒ the compiled defaults / the
+    // no-sample prior; the line names n for each.
+    {
+        core_->set_detectors(rc::door::core::load_detectors("etc/door_detectors.csv"));
+        core_->costs() = rc::door::core::CostEstimator::load("etc/door_costs.csv");
+        const auto t = core_->detectors();
+        const auto c = core_->costs().costs(cfg_.exist_max_room_s);
+        std::print("door_concept: [existence] loaded etc/door_detectors.csv: zed hit {:.3f} fa {:.4f} (n={:.0f}), ricoh hit {:.3f} "
+                   "fa {:.4f} (n={:.0f}); etc/door_costs.csv: C_keep {:.1f} s (n={}), C_delete {:.1f} s (n={})\n",
+                   t.zed.hit_rate, t.zed.false_alarm, t.zed.n_hit_trials, t.ricoh.hit_rate, t.ricoh.false_alarm, t.ricoh.n_hit_trials,
+                   c.keep_s, core_->costs().n(rc::door::core::CostEstimator::Kind::Keep), c.delete_ordinary_s,
+                   core_->costs().n(rc::door::core::CostEstimator::Kind::DeleteOrdinary));
+    }
 
     // The DSR-bound side of the fit. Owns the instance map; collaborates with the ingestor + scene graph.
     fitter_ = std::make_unique<rc::DoorFitter>(
@@ -510,6 +536,13 @@ void SpecificWorker::initialize()
                 static std::ofstream ex_csv = []{ std::ofstream f; rc::diag::open_rotating(f, "etc/door_existence_log.csv");
                                                   f << rc::door::core::kExistenceCsvHeader; return f; }();
                 if (ex_csv) { ex_csv << r.line; ex_csv.flush(); }
+            }
+            else if (r.stream == "door_views_log.csv")
+            {
+                // Task 8 (ruling R8): the per-view rows tools/fit_detector_envelopes.py fits the detector envelopes on.
+                static std::ofstream v_csv = []{ std::ofstream f; rc::diag::open_rotating(f, "etc/door_views_log.csv");
+                                                 f << rc::door::core::kViewsCsvHeader; return f; }();
+                if (v_csv) { v_csv << r.line; v_csv.flush(); }
             }
             else if (r.stream == "ai2_log.csv" or r.stream == "ai2_log_phi.csv")
             {
@@ -1180,10 +1213,9 @@ void SpecificWorker::refresh_belief_inspector()
         c.s.fe_surprise = inst.fe_surprise;
         // Un-seeded until the existence channel's first visit; leave the card's NaN so it prints "-" rather
         // than a fake 0.5 probability.
-        if (inst.existence_seeded)
-        {
-            c.s.logodds  = inst.existence.logodds();
-            c.s.p_exists = inst.existence.p_exists();
+        {   // Task 8: THE belief (every door has one from its first candidate observation)
+            c.s.logodds  = inst.belief.L();
+            c.s.p_exists = inst.belief.p();
         }
         c.s.remove_streak = static_cast<int>(inst.existence_debounce.streak);
         c.s.age_s       = inst.last_belief_touch.time_since_epoch().count() == 0
@@ -1257,7 +1289,7 @@ void SpecificWorker::log_detect_probe()
         // door's p_detect is the REAL thing — it has a silhouette channel, so this is the number the
         // removal actually used, not a stand-in.
         row.p_detect      = inst.dbg_sil_pdetect;
-        row.p_exists_prior = inst.existence.p_exists();
+        row.p_exists_prior = inst.belief.p();
         // ★THE LABEL IS PER-CYCLE, and it is not detection_alive. That flag LATCHES (measured on hood:
         // 1 in 9432/9432 rows, still 1 at frames_since_det=6172), so as an outcome it is degenerate and
         // fit_envelope correctly refuses it. "A mask arrived THIS cycle" is the trial.
@@ -1295,7 +1327,7 @@ void SpecificWorker::log_phantom_event(std::string_view event, std::uint64_t id,
         e.in_fov_frac   = (inst->dbg_sil_ntotal > 0)   // ★a FRACTION: the denominator was
                         ? static_cast<float>(inst->dbg_sil_ndet) / inst->dbg_sil_ntotal : 0.0f;   // already here, unused
 
-        e.exist_logodds = inst->existence.logodds();
+        e.exist_logodds = inst->belief.L();
     }
     phantom_log_.write(e);
 }
@@ -1605,7 +1637,8 @@ void SpecificWorker::CoreWorld::stage_images(rc::door::core::ImageSource& images
 {
     static const cv::Mat empty;
     images.stage_live(w_.rgb_ingestor_ ? w_.rgb_ingestor_->frame() : empty,
-                      w_.depth_ingestor_ ? w_.depth_ingestor_->frame() : empty);
+                      w_.depth_ingestor_ ? w_.depth_ingestor_->frame() : empty,
+                      w_.rgb_ingestor_ ? w_.rgb_ingestor_->stamp_ms() : 0);   // Task 8: one geometry look per RGB frame
 }
 
 // An existence REMOVE, the graph half that ran BEFORE the old REMOVE row: remember the ghost (which forgets the stored
@@ -1862,7 +1895,7 @@ void SpecificWorker::note_identity(const std::string& name, const Eigen::Vector2
 
 float SpecificWorker::identity_weight(const rc::DoorInstance& inst) const
 {
-    return inst.existence_seeded ? inst.existence.p_exists() : 1.0f / (1.0f + std::exp(-cfg_.exist_birth_logodds));
+    return inst.belief.p();   // Task 8: THE belief (a newborn carries its candidate's)
 }
 
 void SpecificWorker::upsert_identity(DoorIdentity row, float width_m, float weight)
@@ -1897,8 +1930,9 @@ SpecificWorker::DoorIdentity SpecificWorker::identity_of(const rc::DoorInstance&
     row.xy   = Eigen::Vector2f(s.ap_cx, s.ap_cy);
     if (std::isfinite(s.ap_yaw) and s.w > 0.0f and s.h > 0.0f and s.thickness > 0.0f)
         row.pose = rc::door::RestorePose{s.ap_yaw, s.w, s.h, s.thickness};
-    if (inst.existence_seeded)
-        row.exist_logodds = rc::door::remembered_logodds(inst);   // review I-1: the evidence, without the band prior
+    row.exist_logodds = rc::door::remembered_logodds(inst);   // review I-1 / Task 8: the evidence, without the structural prior
+    if (not inst.belief.ledger.views().empty()) row.ledger = inst.belief.ledger.serialise();   // the views it came from (spec §3.7)
+    row.visit = inst.place_visit;
     if (inst.last_detection_wall_ms > 0)
         row.seen_wall_ms = inst.last_detection_wall_ms;   // Task D-C: the remembered belief's age
     if (inst.ai2_initialized)
@@ -2268,7 +2302,7 @@ void SpecificWorker::step_epistemic(rc::DoorInstance& inst, DSR::Node& node)
                                               0.5f * cfg_.pragmatic.robot_passage_width_m + cfg_.pragmatic.passage_margin_m);
         };
         // The existence question rides in the same gain (nats): high for a door only the 360 has reported, ~0 once the ZED settled it.
-        const rc::ExistenceLook exist_look{inst.existence.p_exists(), cfg_.exist_detection_prob, cfg_.exist_clutter_prob};
+        const rc::ExistenceLook exist_look{inst.belief.p(), cfg_.exist_detection_prob, cfg_.exist_clutter_prob};
         rc::EpistemicProposal prop =
             epistemic_planner_.compute(inst.ai2_belief, cfg_.ai2_range_noise_lat_per_m, cfg_.ai2_sigma_base_m,
                                        rc::nbv::sensor_from_graph(*G, inner_eigen_.get()), obstacles,
@@ -2707,7 +2741,7 @@ void SpecificWorker::step_pragmatic_affordances(rc::DoorInstance& inst)
         // over the best score with no hand-back remembered. 1 with no hand-back (as before), → 0 as the band is used up.
         // ★ A DOOR THAT DOES NOT EXIST AFFORDS NOTHING (user 2026-10-31, pingpong27: the robot drove at a phantom door_1 on
         //   the other wall, existence p 0.05, while its offers stood): every offer of this door carries P(exists).
-        o.p   = rc::door::approach_offer_prob(choice, free_choice) * inst.existence.p_exists();
+        o.p   = rc::door::approach_offer_prob(choice, free_choice) * inst.belief.p();
         o.x_m = pose.x; o.y_m = pose.y; o.yaw_rad = pose.yaw;
         inst.approach_offered_xy = {pose.x, pose.y};
         inst.approach_offered_valid = true;
@@ -2742,7 +2776,7 @@ void SpecificWorker::step_pragmatic_affordances(rc::DoorInstance& inst)
                                  st.p_reach, st.p_open_known ? st.p_open : 0.0f, st.p_band, o.value, st.robot_range_m,
                                  st.safe_standoff_m, std::max(pg.actuation_reach_m, st.safe_standoff_m + 0.30f),
                                  st.range_sigma_m, inst.aperture.w);
-        o.why += std::format(" × P(exists) {:.2f}", inst.existence.p_exists());
+        o.why += std::format(" × P(exists) {:.2f}", inst.belief.p());
         o.why += passable_parts(st);
         inst.aff_approach.update(o);
         log_affordance_transitions(inst, "approach", inst.aff_approach);
@@ -2760,7 +2794,7 @@ void SpecificWorker::step_pragmatic_affordances(rc::DoorInstance& inst)
         //   robot must stand (the band, outside the leaf's arc) is the contract's pre: clause, not the offer: multiplied in,
         //   a robot that stopped 0.2 m short of the vantage (P(in band) 0.27 at the band's edge under σ) saw `open`
         //   WITHDRAWN, and nothing ever moved it back — the door route waited 600 s at a shut door.
-        o.p     = std::clamp(1.0f - st.p_open, 0.0f, 1.0f) * inst.existence.p_exists();   // a phantom affords no `open`
+        o.p     = std::clamp(1.0f - st.p_open, 0.0f, 1.0f) * inst.belief.p();   // a phantom affords no `open`
         if (inst.actuation_refused)
         {
             // ★A REFUSAL IS INFORMATION, and this kind is permanent: UnknownDoor / NotActuable mean never
@@ -2779,7 +2813,7 @@ void SpecificWorker::step_pragmatic_affordances(rc::DoorInstance& inst)
         o.x_m = pose.x; o.y_m = pose.y; o.yaw_rad = pose.yaw;
         o.value    = pg.value_open;
         o.contract = rc::door::open_contract(pg);
-        o.why += std::format(" × P(exists) {:.2f}", inst.existence.p_exists());
+        o.why += std::format(" × P(exists) {:.2f}", inst.belief.p());
         inst.aff_open.update(o);
         log_affordance_transitions(inst, "open", inst.aff_open);
     }
@@ -2792,7 +2826,7 @@ void SpecificWorker::step_pragmatic_affordances(rc::DoorInstance& inst)
         o.known = located and st.p_open_known;
         // D3: the OFFER is availability (P(passable)); the robot's pose enters only through the contract's `pre:`
         // (door_cross_exec_prob), which makes the controller re-approach. See rc::door::cross_offer_prob.
-        o.p     = rc::door::cross_offer_prob(st.p_open) * inst.existence.p_exists();   // a phantom affords no `cross`
+        o.p     = rc::door::cross_offer_prob(st.p_open) * inst.belief.p();   // a phantom affords no `cross`
         if (not inst.aff_cross.claimed() or inst.cross_side_latched == 0.0f)
             inst.cross_side_latched = rc::door::interior_side(inst.aperture, st.approach_standoff_m,
                                                               fitter_->room_polygon(), st.approach_side);   // leave THIS room
@@ -2823,7 +2857,7 @@ void SpecificWorker::step_pragmatic_affordances(rc::DoorInstance& inst)
                                  st.robot_range_m,
                                  std::max(pg.actuation_reach_m, st.safe_standoff_m + 0.30f), st.range_sigma_m,
                                  st.p_corridor_clear, st.corr_lateral_m, st.corr_hinge_llr, st.corr_swing_llr, st.p_cross_exec);
-        o.why += std::format(" × P(exists) {:.2f}", inst.existence.p_exists());
+        o.why += std::format(" × P(exists) {:.2f}", inst.belief.p());
         o.why += passable_parts(st);
         inst.aff_cross.update(o);
         log_affordance_transitions(inst, "cross", inst.aff_cross);
@@ -2957,10 +2991,10 @@ void SpecificWorker::step_pragmatic_affordances(rc::DoorInstance& inst)
     {
         if (actuated and aff.outcome() == rc::affordance::Outcome::Satisfied)
         {
-            const float before = inst.existence.p_exists();
-            inst.existence.integrate(1.0f, cfg_.exist_actuation_llr);
-            std::print("door_concept: [existence] {} changed state on our {} — P(exists) {:.2f} -> {:.2f}\n", inst.node_name,
-                       kind, before, inst.existence.p_exists());
+            // Task 8: the likelihood ratio enters the door's view ledger ONCE, at the next existence update (ViewLedger::add_actuation)
+            inst.pending_actuation_llr += cfg_.exist_actuation_llr;
+            std::print("door_concept: [existence] {} changed state on our {} — P(exists) {:.2f}, +{:.2f} nats at the next update\n",
+                       inst.node_name, kind, inst.belief.p(), cfg_.exist_actuation_llr);
         }
         actuated = false;
     };
@@ -3458,8 +3492,8 @@ void SpecificWorker::step_entry_mirrors()
                     em.phi_curve   = si.phi_curve;
                     em.matched_frames = si.matched_frames;
                 }
-            if (src_it != fitter_->instances().end() and src_it->second.existence_seeded)
-                em.existence_L = src_it->second.existence.logodds();
+            if (src_it != fitter_->instances().end())
+                em.existence_L = src_it->second.belief.L_evidence();   // Task 8: the evidence the face carries (no prior)
             entry_mirrors_[room.id()] = std::move(em);
             // Link 3: `exit` NEW_FACE -> OLD_FACE — the mirror is the far side of the face crossed. ltsm pairs the passage
             // from it and archives the room left only once it exists.
@@ -3480,8 +3514,8 @@ void SpecificWorker::step_entry_mirrors()
     //    whatever anybody else added since.
     // (Task D2: the source's existence L is refreshed here too, while the source lives — ltsm deletes it with its room.)
     for (auto& [room_id, mir] : entry_mirrors_)
-        if (const auto si = fitter_->instances().find(mir.source_id); si != fitter_->instances().end() and si->second.existence_seeded)
-            mir.existence_L = si->second.existence.logodds();
+        if (const auto si = fitter_->instances().find(mir.source_id); si != fitter_->instances().end())
+            mir.existence_L = si->second.belief.L_evidence();
     for (const auto& [room_id, mir] : entry_mirrors_)
     {
         const auto src = G->get_node(mir.source_id);
@@ -4050,7 +4084,7 @@ void SpecificWorker::restore_remembered_doors(std::uint64_t new_room)
         std::print("door_concept: [restore] '{}' RESTORED in remembered '{}' at ({:.2f},{:.2f}) yaw={:.2f} w={:.2f} h={:.2f} — "
                    "existence prior L={:.2f} (P={:.2f}, {}), leaf memory {}\n",
                    n->name(), room->name(), r.xy.x(), r.xy.y(), r.pose->yaw, r.pose->width, r.pose->height, prior_L,
-                   inst.existence.p_exists(),
+                   inst.belief.p(),
                    not r.exist_logodds.has_value() ? "default BirthLogodds"
                    : r.seen_wall_ms.has_value() ? std::format("remembered L={:.2f}, seen {:.0f} s ago, decayed toward BirthLogodds",
                                                               *r.exist_logodds, 1e-3 * double(static_cast<std::int64_t>(rc::provenance::now_ms()) - *r.seen_wall_ms))
@@ -4264,13 +4298,16 @@ void SpecificWorker::install_carried_door(std::uint64_t new_room, std::uint64_t 
                     const float L_src = adopted_from->existence_L.value_or(cfg_.exist_birth_logodds);
                     const float dLx = rc::door::crossing_logodds(cfg_.exist_cross_passable_prior, cfg_.exist_cross_leak);
                     dst.existence.set(L_src + dLx);
+                    // Task 8: THE belief carries the source face's evidence plus the crossing (Task 9 owns this path's final form)
+                    dst.belief.carried = L_src;
+                    dst.belief.crossing = dLx;
                     dst.existence_seeded      = true;
                     dst.existence_entry_L     = dst.existence.logodds();
                     dst.existence_since_entry = 0.0f;
                     std::print("door_concept: [room] {} keeps its existence across the crossing: L {:.2f}{} + crossing {:.2f} "
                                "(prior {:.2f}, leak {:.2f}) -> {:.2f}\n", n->name(), L_src,
                                adopted_from->existence_L.has_value() ? "" : " (birth seed)", dLx, cfg_.exist_cross_passable_prior,
-                               cfg_.exist_cross_leak, dst.existence.logodds());
+                               cfg_.exist_cross_leak, dst.belief.L());
                 }
         }
     // ★ THE PASSAGE ANCHOR IS NOT A DOOR OF EITHER ROOM. It hangs from the robot, so nothing above touched it; the
@@ -4548,7 +4585,7 @@ void SpecificWorker::remember_door(const rc::DoorInstance& inst)
     em.swing_llr      = inst.swing_llr;
     em.phi_curve      = inst.phi_curve;
     em.matched_frames = inst.matched_frames;
-    if (inst.existence_seeded) em.existence_L = inst.existence.logodds();
+    em.existence_L = inst.belief.L_evidence();   // Task 8
     em.T_root_door    = Eigen::Affine3d(Tw->matrix());
     em.width  = G->get_attrib_by_name<width_m_att>(node.value()).value_or(cfg_.door_prior_w_m);
     em.depth  = G->get_attrib_by_name<depth_m_att>(node.value()).value_or(cfg_.door_thickness_m);

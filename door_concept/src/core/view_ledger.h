@@ -32,10 +32,12 @@
 #include <string>
 #include <string_view>
 #include <vector>
-#include "detector_model.h"
+#include <Eigen/Dense>
+#include "detector_llr.h"
 
 namespace rc::door::core
 {
+using Vec2f = Eigen::Vector2f;
 enum class Channel : std::uint8_t { Zed, Ricoh, Geometry, Actuation };
 
 struct ViewKey { float bearing = 0.f; float range = 0.f; int visit = 0; };   // door-relative

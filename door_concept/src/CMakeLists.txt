@@ -41,6 +41,7 @@ LIST(APPEND SOURCES
   ../src/core/door_fit.cpp       # the per-door fit (Task 4b): observe / run_inference / phi / ROI / chain cov
   ../src/core/door_existence.cpp # the existence slice (Task 5): silhouette / image geometry / P(detect) / removal
   ../src/core/door_visibility.cpp # camera-generic door visibility (Task 2): ViewRig / door_view
+  ../src/core/existence_update.cpp # one frame of evidence into one place belief (Task 8)
   # The adapter that records each cycle's DoorCycleInput (DoorConcept.RecordInputs, default off).
   ../src/input_snapshot.cpp
   # The robot-relative copy of a door hung from the robot while its affordance executes.

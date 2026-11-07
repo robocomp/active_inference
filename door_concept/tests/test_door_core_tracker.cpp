@@ -1,6 +1,7 @@
 // test_door_core_tracker.cpp — the DoorCore's TRACKER slice on synthetic inputs (Task 4 of the door-core replay plan).
 //
-//   1. BIRTH: a "door" mask slice seen on successive NEW frames accrues birth evidence until the InstanceTracker
+//   1. BIRTH (Task 8: birth by comparison — the door model's verdict on the candidate place, L > 0, is the birth evidence and the
+//      tracker's birth_frames is 1): a "door" mask slice seen on a NEW frame from a view the ZED can report it from; the InstanceTracker
 //      promotes it; the core asks the world to create and adopt the door and records a BIRTH decision at the slice
 //      centroid, named by the world.
 //   2. ASSOCIATION: the next packet at the same place is assigned to the newborn (Pass 2: no belief yet, nearest slice
@@ -13,7 +14,7 @@
 //
 // Build + run (from door_concept/):
 //   g++ -std=c++23 -O1 -I/usr/include/eigen3 -I/usr/include/opencv4 tests/test_door_core_tracker.cpp src/core/door_core.cpp src/core/door_fit.cpp \
-//       src/core/door_existence.cpp src/core/door_visibility.cpp src/core/door_cycle_io.cpp src/door_belief.cpp src/door_model.cpp src/door_frame_evidence.cpp \
+//       src/core/door_existence.cpp src/core/door_visibility.cpp src/core/existence_update.cpp src/core/door_cycle_io.cpp src/door_belief.cpp src/door_model.cpp src/door_frame_evidence.cpp \
 //       ../common/contour_edge/contour_edge_check.cpp ../common/contour_edge/contour_edge_project.cpp \
 //       ../common/contour_edge/contour_depth_check.cpp -lzstd -lopencv_core -lopencv_imgproc -o /tmp/test_door_core_tracker && /tmp/test_door_core_tracker
 #include <clocale>
@@ -42,6 +43,7 @@ struct FakeWorld final : TrackerWorld
     std::vector<TrackedDoor> live;
     std::uint64_t next_id = 1000;
     int created = 0, after_assoc = 0;
+    bool refuse_create = false;   // create_door fails (0): the core keeps judging its candidates and never births
     std::vector<std::uint64_t> retired;
 
     std::uint64_t room_id() const override { return room; }
@@ -54,7 +56,7 @@ struct FakeWorld final : TrackerWorld
     { for (auto& d : live) if (d.id == id) d.assigned_mask_idx = slice; }
     void after_association(const TrackerCycleInfo&) override { ++after_assoc; }
     void remove_door(std::uint64_t, float) override {}   // (the existence slice: no fit states here, nothing to remove)
-    std::uint64_t create_door(const BirthRequest&) override { ++created; return next_id++; }
+    std::uint64_t create_door(const BirthRequest&) override { if (refuse_create) return 0; ++created; return next_id++; }
     void reacquire(std::uint64_t, const GhostMatch&) override {}
     void forget_ghost(const Vec2f&) override {}
     std::optional<std::string> adopt_birth(std::uint64_t id, int slice, const Vec3f& c) override
@@ -95,8 +97,24 @@ static DoorCycleInput cycle_input(std::uint64_t cycle, int frame_id, const Scene
     in.t_steady_ns = static_cast<std::int64_t>(cycle) * 100'000'000;   // 10 Hz
     in.robot.present = true;
     in.robot.room_T_body = Mat4d::Identity();
+    // ★Task 8: the door model judges a birth by what each camera could report from here (detect_prob), so the cycle carries
+    //  the cameras: the ZED (1280 x 720, f 700, 1.2 m up) turned to face the scene's first door, and the ricoh (360) 1.0 m up.
+    //  A RICOH scene is a door only the 360 sees: the ZED looks the other way (a ZED looking at it and reporting nothing would
+    //  be evidence against it — the model's honest answer, not this case's question).
+    if (not sc.doors.empty())
+    {
+        const Vec2f d = (sc.doors.front().first - sc.cam).normalized();
+        const double th = std::atan2(d.y(), d.x()) - 1.5707963267948966 + (sc.ricoh ? 3.141592653589793 : 0.0);
+        in.robot.room_T_body->coeffRef(0, 0) = std::cos(th); in.robot.room_T_body->coeffRef(0, 1) = -std::sin(th);
+        in.robot.room_T_body->coeffRef(1, 0) = std::sin(th); in.robot.room_T_body->coeffRef(1, 1) = std::cos(th);
+    }
     in.robot.room_T_body->coeffRef(0, 3) = sc.cam.x(); in.robot.room_T_body->coeffRef(1, 3) = sc.cam.y();                          // the robot stands still ⇒ admissible
     in.robot.body_T_zed = Mat4d::Identity();
+    in.robot.body_T_zed->coeffRef(2, 3) = 1.2;
+    in.robot.body_T_ricoh = Mat4d::Identity();
+    in.robot.body_T_ricoh->coeffRef(2, 3) = 1.0;
+    in.camera.present = true; in.camera.width = 1280; in.camera.height = 720; in.camera.focal_x = 700.f; in.camera.focal_y = 700.f;
+    in.ricoh.present = true; in.ricoh.width = 3840; in.ricoh.height = 1920; in.ricoh.projection_model = 1;
     MaskPacket p;
     p.valid = true;
     p.frame_id = frame_id;
@@ -142,8 +160,8 @@ int main()
     // ★The agents' locale (CLAUDE.md): the core's CSV row must not pick up a decimal comma under es_ES.
     if (std::setlocale(LC_ALL, "es_ES.UTF-8") == nullptr) std::setlocale(LC_ALL, "");
 
-    DoorCoreConfig cfg;   // DoorConfig's code defaults: birth_frames 6.6, fallback gate 0.40 m, min height 1.80 m
-    const Vec2f door_xy(2.0f, 1.0f);
+    DoorCoreConfig cfg;   // DoorConfig's code defaults: fallback gate 0.40 m, min height 1.80 m (birth_frames: 1 in code, Task 8)
+    const Vec2f door_xy(2.0f, 4.99f);   // ★Task 8: in the wall y = 5 (a door off every wall is never born: the band prior)
 
     // ── 1–3. birth, association, repeated frame ──────────────────────────────────────────────────────────────────
     {
@@ -165,7 +183,7 @@ int main()
         }
         std::print("birth after {} new frames\n", birth_cycle);
         CHECK(births.size() == 1);
-        CHECK(birth_cycle == 7);                                  // ceil(6.6) observations of weight 1.0
+        CHECK(birth_cycle == 1);                                  // Task 8: born at L > 0 — one good hit view (birth by comparison)
         if (not births.empty())
         {
             CHECK(births[0].door_id == 1000);
@@ -176,7 +194,7 @@ int main()
         CHECK(w.created == 1 and w.live.size() == 1);
         CHECK(w.after_assoc == birth_cycle);                      // the old code's existence point ran every cycle
         // the dets CSV row: cx,cy then range 2.5 — written "2.5" under es_ES (classic locale), never "2,5"
-        CHECK(not csv_rows.empty() and csv_rows.back().find(",2,1,2.5,") != std::string::npos);
+        CHECK(not csv_rows.empty() and csv_rows.back().find(",2,4.99,2.5,") != std::string::npos);
 
         // the next packet associates to the newborn (Pass 2), and births nothing
         const auto out2 = core.step(cycle_input(++cyc, ++frame, sc));
@@ -191,7 +209,7 @@ int main()
         CHECK(w.created == 1);
     }
 
-    // ── 3b. repeated frames never accrue: 20 cycles of ONE frame id births nothing ───────────────────────────────
+    // ── 3b. repeated frames never accrue: 20 cycles of ONE frame id are ONE observation — at most one birth, on the first ──
     {
         FakeWorld w;
         DoorCore core(cfg);
@@ -200,7 +218,7 @@ int main()
         int nb = 0;
         for (std::uint64_t c = 1; c <= 20; ++c)
             nb += static_cast<int>(of_kind(core.step(cycle_input(c, 5, sc)).decisions, K::Birth).size());
-        CHECK(nb == 0 and w.created == 0);
+        CHECK(nb == 1 and w.created == 1);   // Task 8: the door model's verdict on the one observation (L > 0), never re-judged
     }
 
     // ── 3c. RICOH (360) door slices (task Q) ────────────────────────────────────────────────────────────────────
@@ -234,7 +252,7 @@ int main()
         std::print("ricoh-only birth after {} frames; removes {}\n", birth_cycle, removes);
         CHECK(births.size() == 1 and w.created == 1);           // exactly once over 400 frames (no remove/rebirth churn)
         CHECK(removes == 0 and w.live.size() == 1);
-        CHECK(birth_cycle > 7 and birth_cycle <= 150);
+        CHECK(birth_cycle >= 1 and birth_cycle <= 150);   // Task 8: born at the first view whose belief reaches L > 0
         if (not births.empty())
             CHECK(std::abs(births[0].a - wall_door.x()) < 0.05 and std::abs(births[0].b - wall_door.y()) < 0.05);
     }
@@ -261,17 +279,25 @@ int main()
         FakeWorld w;
         DoorCore core(cfg);
         core.connect(&w);
-        int born_at = -1;
+        FakeWorld tw; tw.refuse_create = true;
+        DoorCore twin(cfg);
+        twin.connect(&tw);
+        int born_at = -1, first_positive = -1;
         for (int k = 1; k <= 1500; ++k)
         {
             auto sc = ricoh_scene(wall_door, 0, 0.9f, 0.02f);
+            twin.step(cycle_input(k, k, sc));   // the same frame through a twin core whose world refuses every node: its candidate's L
+            if (first_positive < 0)
+                for (const auto& cd : twin.candidates()) if (cd.belief.L() > 0.0f) first_positive = k;
             core.step(cycle_input(k, k, sc));
             if (w.created > 0 and born_at < 0) born_at = k;
         }
         std::print("parked perfect ricoh door: born at frame {} ({:.0f} s at 10 Hz)\n", born_at, born_at / 10.0);
         CHECK(w.created == 1);
-        CHECK(born_at > 100);                                   // NOT ~9 looked hits (1 s): a parked stare is a few effective samples
+        // ★Task 8 (rewritten, brief step 4): born at L > 0. A parked stare is ONE view (its frames are one trial), so the birth is
+        //  the verdict on that view's aggregate: born on the first frame at which the candidate's belief is above the creation line.
         CHECK(born_at > 0 and born_at < 1500);
+        CHECK(born_at == first_positive);
     }
     {   // a PARKED robot whose ricoh sees the door only 1 frame in 3 (the detector runs on one of three strips per frame, the
         // others are not): with NO footprint published (MaskPacket::ricoh_windows empty) the other two thirds are fed as ricoh slices of
@@ -288,7 +314,8 @@ int main()
         }
         // ★HONEST RESULT: with an unknown footprint a detector that reports a real door on 1 look in 3 is indistinguishable from clutter at its
         // learned break-even (h = 0.5 prior), so a PARKED robot does not birth it; the footprint (next case) is what recovers the birth.
-        CHECK(w.created == 0);
+        // ★Task 8 (ruling R4): an UNKNOWN footprint is not "looked": the ricoh adds no miss evidence, so the 1-in-3 hits birth it.
+        CHECK(w.created == 1);
     }
     {   // THE THREE STATES of the 360 camera on a cycle (Q2 last link), a door seen on 1 frame in 3 from a parked robot:
         //   (a) fresh frames WITH windows: the two other strips' frames publish a window pointing away from the door => not looked at => no absence;
@@ -397,7 +424,7 @@ int main()
         std::print("birth frame: zed alone {}, zed+ricoh {}, ricoh+zed {}; instances {} {} {}\n", t0, t1, t2, nl[0], nl[1], nl[2]);
         CHECK(t0 > 0 and t1 > 0 and t2 > 0);
         CHECK(nb[1] == 1 and nl[1] == 1 and nb[2] == 1 and nl[2] == 1);
-        CHECK(t1 < t0 and t2 < t0);
+        CHECK(t1 <= t0 and t2 <= t0);   // Task 8: a good ZED view alone already births at its first frame (L > 0)
     }
 
     // ── 4. suppressions ──────────────────────────────────────────────────────────────────────────────────────────
@@ -405,20 +432,22 @@ int main()
         FakeWorld w;
         DoorCore core(cfg);
         core.connect(&w);
-        // outside the room (|x| = 8 > 5 + 0.40 margin) and a 1.2 m blob inside it
-        const Scene sc{{{Vec2f(8.0f, 0.0f), 2.0f}, {Vec2f(-2.0f, -2.0f), 1.2f}}};
+        // ★Task 8: OUTSIDE the room a door place pays the wall band (−½(3/σ)²): it is never even a birth to suppress — the door model
+        //  decides (birth by comparison) before births()'s polygon test is reached. A 1.2 m blob IN the wall is a door place the model
+        //  believes (the size prior is scored on the fitted size, never the raw mask), and births()'s min-height rule suppresses it.
+        const Scene sc{{{Vec2f(-2.0f, 4.99f), 1.2f}, {Vec2f(8.0f, 0.0f), 2.0f}}};
         std::vector<rc::door::DoorDecision> sup;
         for (std::uint64_t c = 1; c <= 8; ++c)
             for (const auto& d : of_kind(core.step(cycle_input(c, static_cast<int>(c), sc)).decisions, K::Suppress))
                 sup.push_back(d);
-        CHECK(sup.size() >= 2);
+        CHECK(not sup.empty());
         bool outside = false, short_blob = false;
         for (const auto& d : sup)
         {
             outside    |= d.note == "outside room" and d.a == 8.0;
             short_blob |= d.note == "top 1.20m" and d.a == -2.0;
         }
-        CHECK(outside and short_blob);
+        CHECK(short_blob and not outside);
         CHECK(w.created == 0);
     }
     {
@@ -427,9 +456,9 @@ int main()
         FakeWorld w;
         DoorCore core(cfg);
         core.connect(&w);
-        w.adopt_birth(42, -1, Vec3f(0.0f, 0.0f, 1.0f));
+        w.adopt_birth(42, -1, Vec3f(0.0f, 4.99f, 1.0f));   // Task 8: in the wall (a place off every wall is never a birth)
         w.live[0].name = "door_9";
-        const Scene sc{{{Vec2f(0.9f, 0.0f), 2.0f}}};
+        const Scene sc{{{Vec2f(0.9f, 4.99f), 2.0f}}};
         std::vector<rc::door::DoorDecision> sup;
         for (std::uint64_t c = 1; c <= 8; ++c)
             for (const auto& d : of_kind(core.step(cycle_input(c, static_cast<int>(c), sc)).decisions, K::Suppress))

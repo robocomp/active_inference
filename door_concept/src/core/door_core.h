@@ -51,6 +51,9 @@
 #include "sensing.h"
 #include "door_fit.h"
 #include "door_existence.h"   // the existence slice (Task 5): probes, SemanticField, ImageSource
+#include "existence_update.h" // Task 8: one frame of evidence into one place belief
+#include "door_decision.h"    // Task 8: the costed decision, the role, the cost estimator
+#include "place_table.h"      // Task 8: the place table (the row is the belief)
 #include "../door_config.h"   // rc::DoorConfig (plain struct)
 #include "../door_model.h"    // rc::DoorState
 #include "../door_belief.h"   // rc::DoorBelief (association_nll)
@@ -231,6 +234,29 @@ public:
     void set_cycle_views(const DoorCycleInput& in);
 
     [[nodiscard]] const TrackerCycleInfo& tracker_info() const { return info_; }
+
+    // ── Task 8: the existence model's learned / persisted tables (the worker loads them at start, saves them on a graceful
+    //    shutdown; a replay keeps the compiled defaults) ──
+    [[nodiscard]] DetectorTable detectors() const { return learner_.table(); }
+    void set_detectors(const DetectorTable& t) { learner_.set_prior(t); }
+    [[nodiscard]] CostEstimator& costs() { return costs_; }
+    [[nodiscard]] const CostEstimator& costs() const { return costs_; }
+    [[nodiscard]] PlaceTable& places() { return places_; }
+    [[nodiscard]] const DetectorLearner& detector_learner() const { return learner_; }
+    [[nodiscard]] const GeometryLearner& geometry_learner() const { return geo_learner_; }
+    /// A pending birth candidate (spec §3.1: the belief lives from the first candidate observation): its θ, belief and room.
+    struct Candidate
+    {
+        std::uint64_t key = 0;
+        std::string room;
+        Vec2f xy = Vec2f::Zero();
+        float var = 0.f;                         // its place variance (the detection's)
+        rc::DoorFitState theta;
+        PlaceBelief belief;
+        std::optional<std::int64_t> seeded_from_removed_ms;   // the removed row it was seeded from (C_delete sample at birth)
+        bool removed = false;                    // its row went below the delete line (kept: a later view may revive it)
+    };
+    [[nodiscard]] const std::vector<Candidate>& candidates() const { return candidates_; }
     [[nodiscard]] const EgoMotion& ego() const { return ego_; }
     [[nodiscard]] const MaskSource& masks() const { return masks_; }
     [[nodiscard]] const std::vector<rc::exclusion::Claim>& claims() const { return claims_; }
@@ -268,11 +294,30 @@ private:
     rc::InstanceTracker tracker_;
     long last_birth_mask_frame_ = -1;
     std::optional<Vec2f> cam_xy_;      // the camera's room xy this cycle (the ricoh slices' ray origin)
-    RicohViewPool ricoh_views_;
-    std::vector<std::pair<int, Vec2f>> ricoh_fold_;   // (detection index, door xy) of this frame's ricoh slices        // pooled viewpoints of the ricoh birth candidates
-    RicohBirthBank ricoh_bank_;
-    std::vector<RicohBirthBank::Look> ricoh_looks_;   // this frame's ricoh door detections (bank input), index = det index below
-    std::vector<int> ricoh_hit_det_;
+    // ── Task 8: the existence model ──
+    DetectorLearner learner_;          // the per-camera detector model, learned online (one trial per view)
+    GeometryLearner geo_learner_;      // the geometry channel's μ1 offset, learned online
+    CostEstimator   costs_;            // C_keep / C_delete, running medians (etc/door_costs.csv)
+    PlaceTable      places_{false};    // one row per door place per room (reset in the ctor from the config)
+    std::vector<Candidate> candidates_;
+    std::vector<float> det_w_;         // per dets_ index: its reliability (YOLO confidence x the ricoh's wall/variance weight)
+    std::vector<int> det_candidate_;   // per dets_ index: the candidate it fed this frame (-1 = none / a live door's)
+    std::uint64_t next_candidate_key_ = 0;
+    std::unordered_map<std::uint64_t, std::uint64_t> door_seq_;   // order in which doors entered (the per-wall base rate)
+    std::uint64_t next_door_seq_ = 0;
+    std::uint64_t visit_room_ = 0;     // the room the current visit is in
+    int visit_ = 0;                    // the ledger's visit counter: a new room entry is a new visit
+    std::uint64_t last_rgb_gen_ = 0;   // the RGB generation the last existence update scored
+    bool places_loaded_ = false;
+    std::string room_name_;            // this cycle's room name (place rows are keyed by it)
+    struct Episode { std::int64_t start_wall_ms = 0; bool crossed = false; std::uint64_t room = 0; };
+    std::unordered_map<std::string, Episode> episodes_;   // executing on a door's affordance → C_keep when it ends uncrossed
+    void track_episodes(const DoorCycleInput& in);
+    void prepare_candidates(const DoorCycleInput& in, const std::vector<rc::TrackView>& tracks, DoorCycleOutput& out);
+    /// Build the existence frame of this cycle (camera specs, poses, the prepared RGB frame when `use_rgb`) and hand it to f.
+    void with_frame(const DoorCycleInput& in, bool zed_ran, bool use_rgb, const std::function<void(const ExistenceFrame&)>& f);
+    [[nodiscard]] std::vector<FrameDetection> frame_detections() const;
+    void count_trials(std::uint64_t place, const PlaceBelief& b, bool alive);
     SourceCounters counters_[2];   // per source (0 ZED, 1 RICOH): where do door slices die on the way to a birth?
     int  dbg_cycles_ = 0;     // the "[tracker] instances=…" print throttle
     int  dets_csv_rows_ = 0;  // etc/door_dets_log.csv's cycle column (one per tracker call)
@@ -281,8 +326,6 @@ private:
     int  exist_last_mask_frame_ = -1;   // integrate once per NEW mask frame
     // The 360 camera's LEARNED hit rate on doors the ZED confirms (Beta(1,1) prior): P(ricoh detects | door there, ricoh ran).
     // Calibrated online - the same detection model births and removals use - instead of an asserted constant.
-    float ricoh_hits_ = 0.0f, ricoh_trials_ = 0.0f;   // …on SHUT leaves (each trial weighted by the leaf's closedness)
-    float ricoh_open_hits_ = 0.0f, ricoh_open_trials_ = 0.0f;   // …and on OPEN ones (weighted by 1 - closedness; door_leaf_visibility.h)
     bool exist_warned_ = false;         // the "no mask_pixels_xy" warning, once
     int  ex_dbg_ = 0;                   // the readout's throttle counter (= the existence CSV's cycle column)
     std::unordered_map<std::uint64_t, float> last_L_;   // last L per door (forces a readout row on |ΔL| > 1)

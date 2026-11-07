@@ -35,6 +35,8 @@
 #include "door_view_pool.h"     // rc::door::ViewPool — the image channel pooled by view novelty (Task 5b, D4)
 #include "door_leaf_channel.h"  // rc::door::LeafChannel — hinge / swing / φ per viewpoint (try102)
 #include "../../common/existence_belief/existence_belief.h"   // rc::exist::ExistenceBelief (shared w/ table/chair)
+#include "core/place_belief.h"   // rc::door::core::PlaceBelief — THE existence belief (Task 8)
+#include "core/door_decision.h"  // rc::door::core::Role
 
 namespace rc {
 
@@ -304,7 +306,16 @@ struct DoorFitState
     // around. Occlusion is likewise a continuous shrinkage of the detectable footprint, never an indefinite
     // freeze. Removal is a Bayesian decision on P(exists) (should_remove), debounced over consecutive
     // EVIDENCE cycles — no age immunity, and no removal from a view that could not have resolved the door.
-    rc::exist::ExistenceBelief existence{};
+    rc::exist::ExistenceBelief existence{};   // ⚠ RETIRED by Task 8 (no decision reads it); deleted in Task 10
+    // ★Task 8: THE existence belief of this door place — prior + carried + crossing + view ledger (core/place_belief.h).
+    // Birth, survival, deletion, the affordances, the look and the memory row all read belief.L(); P(door) = σ(L).
+    door::core::PlaceBelief belief{};
+    door::core::Role role = door::core::Role::Ordinary;   // this cycle's role (route / being crossed), for the decision and the log
+    door::core::ExistenceTrace exist_trace{};             // what the last existence update did, per channel (NaN = not computed)
+    // A commanded open/close seen satisfied since the last existence update (the actuator reply path): consumed ONCE, into
+    // the view current at the next update (ViewLedger::add_actuation).
+    float pending_actuation_llr = 0.0f;
+    int   place_visit = 0;   // the ledger's visit: frames of different visits are never one view
     // Task 5b D4: the image-geometry channel's evidence pooled by view novelty (door_view_pool.h) — the view being pooled,
     // its mean verdict and what it has contributed to `existence` so far.
     door::ViewPool image_view_pool{};

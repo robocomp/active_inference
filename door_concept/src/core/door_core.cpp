@@ -76,7 +76,7 @@ const TrackedDoor* find_door(const std::vector<TrackedDoor>& doors, std::uint64_
 }
 }  // namespace
 
-DoorCore::DoorCore(const DoorCoreConfig& cfg) : cfg_(cfg)
+DoorCore::DoorCore(const DoorCoreConfig& cfg) : cfg_(cfg), places_(cfg.door.exist_geometry_may_refute)
 {
     // The fit reads the core's views of the input: the mask packet, the low-LiDAR sweep, and the ONE claim set per cycle.
     fit_.set_sources(&masks_, &leaf_sweep_, &claims_);
@@ -219,6 +219,22 @@ DoorCycleOutput DoorCore::step(const DoorCycleInput& in)
     fit_.set_room_is_proto(std::ranges::any_of(in.rooms.rooms, [&](const RoomInfo& r)
                                                { return r.id == world_->room_id() and r.is_proto; }));
     info_ = {};
+    // ★Task 8: the place table's memory, once, from the identity table the adapter loaded at startup; the room's NAME keys
+    //  its rows, and a change of room is a new VISIT (views of different visits are never one view).
+    if (not places_loaded_ and in.identity_load.has_value())
+    {
+        places_loaded_ = true;
+        if (in.identity_load->file_present)
+        {
+            std::istringstream is(in.identity_load->csv_text);
+            places_.load(rc::door::parse_identity_table(is), cfg_.door.tracker_detection_noise_m);
+        }
+    }
+    room_name_.clear();
+    for (const auto& r : in.rooms.rooms)
+        if (r.id == world_->room_id()) room_name_ = r.name;
+    if (world_->room_id() != visit_room_) { visit_room_ = world_->room_id(); ++visit_; }
+    track_episodes(in);
     // ★ FACT_HOLD OF THE LEAF ONLY WHILE THE ROBOT IS STILL AT THE DOORWAY (2026-11-01, user approved). The hold exists because views from
     //   in or right beside the doorway re-judged a just-crossed leaf wrongly (pingpong2/13). It held FOR EVER: warm26's DOOR_0,
     //   crossed in leg 3, kept an unmeasured 69 deg through a hand open and close while the robot stood in front of it, wide
@@ -327,7 +343,10 @@ void DoorCore::associate(const DoorCycleInput& in, DoorCycleOutput& out)
     tp.gate_mahalanobis = cfg.tracker_gate_mahalanobis;
     tp.gate_fallback_m  = cfg.tracker_gate_fallback_m;
     tp.detection_noise_m = cfg.tracker_detection_noise_m;
-    tp.birth_frames     = cfg.tracker_birth_frames;
+    // ★Task 8 (ruling R2): THE TRACKER'S STREAK IS DEGENERATE ON PURPOSE. birth_frames = 1 and each detection's birth_evidence
+    //  is 1 when the door model's verdict on its candidate place says the door exists (L > 0, not removed), else 0: the door
+    //  model decides (spec §3.6, birth by comparison); the tracker only enforces separation and association.
+    tp.birth_frames     = 1.0f;
     // ★Invariant 5: removal is a Bayesian decision on the existence log-odds, NEVER a miss counter. An
     //    armed death counter beside a live existence channel is a SECOND removal authority, and it is the
     //    one that carries no evidence and leaves no attributable record — a phantom analysis cannot tell a
@@ -373,21 +392,7 @@ void DoorCore::associate(const DoorCycleInput& in, DoorCycleOutput& out)
 
     // Detections ← this frame's "door" mask slices (carry the slice index for the assignment).
     dets_.clear();
-    ricoh_fold_.clear();
-    ricoh_looks_.clear(); ricoh_hit_det_.clear();
-    // The bank's sensor model: the 360 detector's hit rate is the one the EXISTENCE channel has LEARNED (per viewpoint, on doors the ZED
-    // confirms; Beta(1,1) prior, same expression as door_existence.cpp), its false-alarm rate the shared clutter probability.
-    RicohBirthBank::Params bank_prm;
-    bank_prm.hit_rate = (ricoh_hits_ + 1.0f) / (ricoh_trials_ + 2.0f);
-    bank_prm.clutter = cfg.exist_clutter_prob;
-    bank_prm.gate_mahalanobis = cfg.tracker_gate_mahalanobis;
-    bank_prm.min_sep_m = cfg.tracker_birth_min_sep_m;
-    bank_prm.tau_s = cfg.ricoh_decorrelation_s;
-    bank_prm.forget_s = cfg.ricoh_forget_s;
-    bank_prm.view_R_m = 0.5f * cfg.door_prior_w_m;
-    const float ricoh_bar = cfg.tracker_birth_frames * RicohBirthBank::llr_hit(bank_prm);
-    // the bank's places are unidentified, so the open-leaf prior stands in for the leaf-state belief an instance would have
-    const float bank_open_scale = rc::door::ricoh_detect_scale(1.0f - cfg.ricoh_birth_p_open, cfg.ricoh_open_detect_rel);   // ⚠ decision boundary, see RicohBirthBank
+    det_w_.clear();
     const auto& pkt = masks_.packet();
 
     // ★BIRTH EVIDENCE — the shared CREATE policy (common/instance_tracker/birth_evidence.h). This agent fed
@@ -501,8 +506,6 @@ void DoorCore::associate(const DoorCycleInput& in, DoorCycleOutput& out)
             // bearing meets (a door lies in a wall), fused with it, and its frames are pooled per viewpoint
             // (ricoh_door_birth.h). A ZED slice is untouched (weight 1, its own position).
             float ricoh_w = 1.0f;
-            std::optional<RicohBirthBank::Look> ricoh_look;   // the bank's input for this slice
-            std::optional<Vec2f> ricoh_fold;       // the view to fold into the pool if this slice ends up UNASSOCIATED
             dv.sensor = sl.source;
             if (sl.source != 0)
             {
@@ -515,25 +518,15 @@ void DoorCore::associate(const DoorCycleInput& in, DoorCycleOutput& out)
                 dv.xy = rr.xy;
                 dv.xy_var = rr.var;                                  // its OWN measurement covariance (gate + candidates)
                 ricoh_w = rr.weight;
-                ricoh_look = RicohBirthBank::Look{rr.xy, rr.var, rr.weight * std::clamp(sl.confidence, 0.0f, 1.0f)};   // the label's own reliability scales the hit
                 if (rr.weight <= 0.0f) ++ctr.no_wall;
                 ctr.w_wall += rr.weight;
                 ctr.agree_shut += rr.agree_shut; ctr.agree_open += rr.agree_open;
-                if (birth_new_obs and ricoh_w > 0.0f)
-                {
-                    ricoh_w *= ricoh_views_.peek(cam_xy_.value(), dv.xy, 0.5f * cfg.door_prior_w_m, cfg.tracker_birth_min_sep_m);
-                    ricoh_fold = dv.xy;
-                }
             }
             dv.birthable = true;
-            // One admissible, reliable observation — never a cycle. See birth_evidence.h.
+            // birth_evidence: set by prepare_candidates below from the door model's verdict on this detection's place (Task 8).
+            // `ev` below (diagnostic counters only) is the old observation weight: confidence x range x admissible x ricoh weight.
             dv.birth_evidence = rc::birth::evidence({sl.confidence, sl.range}, birth_detect,
                                                     birth_new_obs, frame_admissible(sl, ego_, cfg)) * ricoh_w;
-            // ★A PLACE THE BANK HAS RIPENED is credited a full birth worth of evidence by its next detection (the tracker still
-            // decides: min separation, association, claims below). See RicohBirthBank for why the tracker's own streak cannot do this.
-            if (ricoh_look.has_value() and birth_new_obs
-                and ricoh_bank_.ripe_at(ricoh_look->xy, ricoh_look->var, cfg.tracker_gate_mahalanobis, ricoh_bar) != nullptr)
-                dv.birth_evidence = std::max(dv.birth_evidence, cfg.tracker_birth_frames);
             // ⚠size_w deliberately NOT multiplied in — see the note above. Carried only to be logged.
             dv.dbg_size_w = size_w;
 
@@ -562,9 +555,7 @@ void DoorCore::associate(const DoorCycleInput& in, DoorCycleOutput& out)
             ctr.ev += dv.birth_evidence; ctr.ev_max = std::max<double>(ctr.ev_max, dv.birth_evidence);
             if (sl.source == 0) ctr.w_wall += 1.0;
             ctr.w_pool += ricoh_w;
-            if (ricoh_look.has_value() and birth_new_obs)
-            { ricoh_hit_det_.push_back(static_cast<int>(dets_.size())); ricoh_looks_.push_back(*ricoh_look); }
-            if (ricoh_fold.has_value()) ricoh_fold_.push_back({static_cast<int>(dets_.size()), ricoh_fold.value()});
+            det_w_.push_back(std::clamp(sl.confidence, 0.0f, 1.0f) * ricoh_w);   // Task 8: the detection's own reliability
             dets_.push_back(dv);
         }
     // The remembered-door look reads this frame's detections as "seen there" (door_look.h, step_remembered_looks).
@@ -597,36 +588,9 @@ void DoorCore::associate(const DoorCycleInput& in, DoorCycleOutput& out)
         diag("door_dets_log.csv", row.str(), out);
     }
 
+    // ★Task 8: every detection's place is judged by the door model before the tracker sees it (birth_evidence = verdict).
+    prepare_candidates(in, tracks, out);
     res_ = tracker_.update(tracks, dets_);
-    // The ricoh birth bank: this frame is one new observation of every ricoh-seen place (hit if a detection explains it, else a look).
-    if (birth_new_obs and cam_xy_.has_value()
-        and ricoh_fresh(pkt))
-    {
-        std::vector<RicohBirthBank::Look> unassoc;
-        for (std::size_t k = 0; k < ricoh_hit_det_.size(); ++k)
-            if (res_.assignment[static_cast<std::size_t>(ricoh_hit_det_[k])] < 0) unassoc.push_back(ricoh_looks_[k]);
-        std::vector<Vec2f> track_xy;
-        for (const auto& t : tracks) track_xy.push_back(t.xy);
-        const auto poly = world_->room_polygon();
-        const Vec2f cam = cam_xy_.value();
-        ricoh_bank_.update(static_cast<double>(in.t_steady_ns) * 1e-9, cam, unassoc, bank_prm,
-                           [&](const Vec2f& xy)
-                           { return (ricoh_looked_in(pkt, cam, xy) ? 1.0f : 0.0f)   // not looked at ⇒ no absence
-                                    * bank_open_scale   // a place that may be an open leaf is detected less: its absence says less
-                                    * rc::birth::observation_weight({1.0f, (xy - cam).norm()}, birth_detect)
-                                    * los_weight(poly, cam, xy, cfg.ai2_sigma_base_m, cfg.ai2_range_noise_lat_per_m); },
-                           track_xy);
-        for (const int b : res_.births) ricoh_bank_.drop_near(dets_[static_cast<std::size_t>(b)].xy, cfg.tracker_birth_min_sep_m);
-    }
-    // Pool the viewpoint of a ricoh slice only if it is NOT explained by a live door (an associated slice is not a birth look).
-    if (birth_new_obs and cam_xy_.has_value())
-    {
-        for (const auto& [di, tgt] : ricoh_fold_)
-            if (res_.assignment[static_cast<std::size_t>(di)] < 0)
-                ricoh_views_.credit(cam_xy_.value(), tgt, 0.5f * cfg.door_prior_w_m, cfg.tracker_birth_min_sep_m);
-        ricoh_views_.end_frame([&](const Vec2f& tgt) { return ricoh_looked_in(pkt, cam_xy_.value(), tgt); });
-    }
-
     const int n_assigned = static_cast<int>(std::count_if(res_.assignment.begin(), res_.assignment.end(),
                                                           [](int a){ return a >= 0; }));
 
@@ -643,13 +607,9 @@ void DoorCore::associate(const DoorCycleInput& in, DoorCycleOutput& out)
             const auto& c = counters_[k];
             diag("stdout", std::format("[birth-src {}] slices={} door={} no_support={} bearing_only={} no_cam={} wall_w0={} pushed={} ev>0={} "
                                        "sum(wall_w)={:.2f} sum(w_after_pool)={:.2f} sum(ev)={:.3f} max(ev)={:.3f} "
-                                       "sum(agree_shut)={:.2f} sum(agree_open)={:.2f} bank_entries={} bank_maxL={:.2f} ricoh_bar={:.2f} hit_rate={:.3f}\n",
+                                       "sum(agree_shut)={:.2f} sum(agree_open)={:.2f}\n",
                                        k == 0 ? "ZED" : "RICOH", c.slices, c.door, c.no_support, c.bearing_only, c.no_cam, c.no_wall,
-                                       c.pushed, c.pos_ev, c.w_wall, c.w_pool, c.ev, c.ev_max, c.agree_shut, c.agree_open,
-                                       k == 1 ? ricoh_bank_.entries().size() : std::size_t{0},
-                                       k == 1 and not ricoh_bank_.entries().empty()
-                                           ? std::ranges::max(ricoh_bank_.entries(), {}, &RicohBirthBank::Entry::L).L : 0.0f,
-                                       ricoh_bar, bank_prm.hit_rate), out);
+                                       c.pushed, c.pos_ev, c.w_wall, c.w_pool, c.ev, c.ev_max, c.agree_shut, c.agree_open), out);
         }
     if (++dbg_cycles_ % 30 == 0 or not res_.births.empty() or not res_.deaths.empty())
         diag("stdout", std::format("[tracker] instances={} door_dets={} assigned={} unassigned={} births={} deaths={}\n",
@@ -746,7 +706,6 @@ void DoorCore::associate(const DoorCycleInput& in, DoorCycleOutput& out)
 // fitter with the detection XY so the model starts AT the door (not the 0,0 RT-read default).
 void DoorCore::births(const DoorCycleInput& in, DoorCycleOutput& out)
 {
-    (void) in;
     const auto& cfg = cfg_.door;
     const auto& pkt = masks_.packet();
     for (const int d : res_.births)
@@ -941,9 +900,24 @@ void DoorCore::births(const DoorCycleInput& in, DoorCycleOutput& out)
             // initialise the belief AT the detection centroid this cycle — birth, track, and init are now atomic.
             const auto name = world_->adopt_birth(new_id, slice, c);
             out.creates.back().name = name.value_or(std::string{});
+            // ★Task 8: THE BELIEF IS BORN WITH THE DOOR. The candidate's place belief (prior, carried memory, views) becomes the
+            //  newborn's; a candidate seeded from a REMOVED row is a deleted door found again — C_delete's sample (spec §8.2).
+            door_seq_[new_id] = next_door_seq_++;
+            if (const int ci = det_candidate_.size() > static_cast<std::size_t>(d) ? det_candidate_[d] : -1; ci >= 0)
+            {
+                Candidate& cand = candidates_[static_cast<std::size_t>(ci)];
+                for (auto& [sid, st] : world_->fit_states())
+                    if (sid == new_id) { st->belief = cand.belief; st->place_visit = visit_; }
+                if (cand.seeded_from_removed_ms.has_value())
+                    costs_.add(CostEstimator::Kind::DeleteOrdinary,
+                               std::max(1e-3f, static_cast<float>(in.t_wall_ms - *cand.seeded_from_removed_ms) * 1e-3f), "online");
+                // the candidate is the door now: retire it (its index is stale for the rest of this cycle, so only mark it)
+                cand.key = 0;
+            }
             record(K::Birth, new_id, c.x(), c.y(), {}, name.value_or(std::string{}), out);
         }
     }
+    std::erase_if(candidates_, [](const Candidate& c) { return c.key == 0; });   // the born ones (Task 8)
 }
 
 bool point_in_polygon(const std::vector<Vec2f>& poly, const Vec2f& q, float margin_m)
