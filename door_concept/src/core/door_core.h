@@ -243,6 +243,8 @@ public:
         rc::DoorFitState theta;
         PlaceBelief belief;
         std::optional<std::int64_t> seeded_from_removed_ms;   // the removed row it was seeded from (C_delete sample at birth)
+        float width_meas = 0.f, width_sd = 0.f;   // the blob's measured width (m) and its sd (the detection noise, widened by truncation)
+        bool  size_resolved = false;             // false: the support gave no extent - no size estimate, so the size term is 0
         std::string seeded_name;                 // the place row it was seeded from (the revisit sample is taken at birth, per visit)
     };
     [[nodiscard]] const std::vector<Candidate>& candidates() const { return candidates_; }
@@ -285,7 +287,8 @@ private:
     std::optional<Vec2f> cam_xy_;      // the camera's room xy this cycle (the ricoh slices' ray origin)
     // ── Task 8: the existence model ──
     DetectorTable   detectors_ = default_detectors();   // fixed within a session (door_detectors.csv; refit offline)
-    CostEstimator   costs_;            // C_keep / C_delete, running medians (etc/door_costs.csv)
+    CostEstimator   costs_ = CostEstimator::logged_default();   // never equal costs (door_decision.h); replaced by set_costs() from the file
+    // C_keep / C_delete, running medians (etc/door_costs.csv)
     PlaceTable      places_{false};    // one row per door place per room (reset in the ctor from the config)
     std::vector<Candidate> candidates_;
     std::vector<float> det_w_;         // per dets_ index: its reliability (YOLO confidence x the ricoh's wall/variance weight x P(unclaimed by another concept))

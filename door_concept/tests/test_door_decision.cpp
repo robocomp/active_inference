@@ -103,8 +103,27 @@ static void role_from_route_faces()
     CHECK(door_role("door_3", {}, false) == Role::Ordinary);
 }
 
+// A missing (or empty) etc/door_costs.csv falls back to the compiled LOGGED estimate (loud on stderr), never to equal costs.
+static void missing_file_gives_logged_estimate()
+{
+    const auto e = CostEstimator::load_or_default(tmp_path("does_not_exist"));
+    const Costs c = e.costs(300.f);
+    CHECK(c.delete_ordinary_s > c.keep_s);
+    CHECK(c.keep_s == 30.0f and c.delete_ordinary_s == 88.25f);
+    CHECK(decide(0.0f, Role::Ordinary, c).delete_line < 0.0f);              // a door at L = 0 is kept
+    const Costs d = CostEstimator{}.costs(300.f);                           // the empty estimator is the spec's equal reading (line 0) ...
+    CHECK(d.delete_ordinary_s == d.keep_s);                                  // ... which is exactly why it is not a fallback
+    CHECK(CostEstimator::logged_default().n(CostEstimator::Kind::DeleteOrdinary) == 1);
+    // a real file wins
+    const auto p = tmp_path("real");
+    { CostEstimator f; f.add(CostEstimator::Kind::Keep, 12.f, "t"); f.add(CostEstimator::Kind::DeleteOrdinary, 40.f, "t"); f.save(p); }
+    CHECK(CostEstimator::load_or_default(p).costs(300.f).delete_ordinary_s == 40.f);
+    std::filesystem::remove(p);
+}
+
 int main()
 {
+    missing_file_gives_logged_estimate();
     route_door_survives();
     being_crossed_never_removed();
     exists_at_zero();

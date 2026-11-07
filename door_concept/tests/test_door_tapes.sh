@@ -57,7 +57,7 @@ if [[ -f "$TAPES/pingpong1/door_tape/door_inputs.bin" && -f "$TAPES/pingpong2/do
         ../common/contour_edge/contour_edge_project.cpp ../common/contour_edge/contour_depth_check.cpp -lzstd -lopencv_core -lopencv_imgproc \
         -o "$PP_OUT/door_replay" ) || { echo "BUILD FAIL (pingpong)"; exit 2; }
     for t in pingpong1 pingpong2; do
-        "$PP_OUT/door_replay" "$TAPES/$t/door_tape/door_inputs.bin" "$TAPES/$t/door_tape/door_decisions.bin" > "$PP_OUT/$t.txt" 2>&1 &
+        "$PP_OUT/door_replay" "$TAPES/$t/door_tape/door_inputs.bin" "$TAPES/$t/door_tape/door_decisions.bin" --costs "$HERE/etc/door_costs.csv" > "$PP_OUT/$t.txt" 2>&1 &
     done
     wait
     python3 -I - "$PP_OUT" <<'PPEOF' || PP_STATUS=1

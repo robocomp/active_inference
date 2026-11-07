@@ -470,7 +470,7 @@ void SpecificWorker::initialize()
     // defaults / the no-sample prior; the line names n for each.
     {
         core_->set_detectors(rc::door::core::load_detectors("etc/door_detectors.csv"));
-        core_->set_costs(rc::door::core::CostEstimator::load("etc/door_costs.csv"));
+        core_->set_costs(rc::door::core::CostEstimator::load_or_default("etc/door_costs.csv"));
         const auto t = core_->detectors();
         const auto c = core_->costs().costs(cfg_.exist_max_room_s);
         std::print("door_concept: [existence] loaded etc/door_detectors.csv: zed hit {:.3f} fa {:.4f} (n={:.0f}), ricoh hit {:.3f} "

@@ -488,6 +488,7 @@ int main(int argc, char** argv)
     long belief_smoke_runs = 0;
     float recess_prior_std = -2.0f;   // < -1.5: keep the recorded config's value
     bool strip_oracle = false;   // --ricoh-strip-oracle: tapes older than v3 carry no ricoh windows; stand one in (see below)
+    std::string costs_path = "etc/door_costs.csv";   // --costs FILE: C_keep / C_delete (fixed; missing => the compiled LOGGED estimate, loudly)
     bool look_log = false, ablate_hull = false;   // Task E: --look prints the look-vs-approach prices; --ablate-hull-midpoint reproduces the collapse
     bool core_stdout = false;
     for (int i = 3; i < argc; ++i)
@@ -502,6 +503,7 @@ int main(int argc, char** argv)
         else if (a == "--csv" and i + 1 < argc) csv_dir = argv[++i];
         else if (a == "--clock-jitter-ms" and i + 1 < argc) jitter_ms = std::strtod(argv[++i], nullptr);
         else if (a == "--trace" and i + 1 < argc) trace_door = argv[++i];
+        else if (a == "--costs" and i + 1 < argc) costs_path = argv[++i];
         else if (a == "--stdout") core_stdout = true;   // Task 8: echo the core's stdout lines (existence / candidate readouts)
         else if (a == "--recess-prior-std" and i + 1 < argc)
         {   // a SENSITIVITY probe (Task 5b): the leaf-plane depth's prior σ, overriding the recorded config
@@ -546,6 +548,9 @@ int main(int argc, char** argv)
     ReplayWorld world(cfg.door, by_cycle);
     world.mirror_ = mirror;
     DoorCore core(cfg);
+    core.set_costs(rc::door::core::CostEstimator::load_or_default(costs_path));
+    { const auto c = core.costs().costs(cfg.door.exist_max_room_s);
+      std::println("costs: {} -> C_keep {:.2f} s, C_delete(ordinary) {:.2f} s", costs_path, c.keep_s, c.delete_ordinary_s); }
     world.set_fit(&core.fit());
     // A sink that only counts: the fit formats its stdout lines and CSV rows exactly as live (so the timing includes
     // that cost), and the tool writes no file.

@@ -193,6 +193,10 @@ struct Rig
     {
         w.cfg = cfg.door;
         w.core = &core;
+        // These cases exercise the decision's mechanics at C_keep = C_delete (the delete line is exactly L = 0, `default_costs()`); the
+        // agent never runs on equal costs (CostEstimator::logged_default() is the core's own default) - cases that need the real
+        // line set costs themselves.
+        core.set_costs(CostEstimator{});
         core.connect(&w, {.decision = [this](const rc::door::DoorDecision& d)
                           {
                               if (d.kind == static_cast<std::uint16_t>(K::Remove)) { removes.push_back(d); w.events.push_back("REMOVE"); }
@@ -748,6 +752,21 @@ int main()
                    after.changes, before.sum_elapsed_s, after.sum_elapsed_s);
         CHECK(r.removes.size() == 1 and after.changes == before.changes + 1.0 and after.sum_elapsed_s > before.sum_elapsed_s + 59.0);
         CHECK(not pt.sample_revisit("room_7", "door_8", 1, false, kT0, kT0 + 1000));   // the visit's sample is spent: a re-detection adds none
+    }
+
+    // ── BIRTH AND SURVIVAL AGREE (fix round 3): a candidate born at L > 0 stays above its creation line on the first fitted update
+    //    when nothing new was observed (the next frame looks away): the candidate was scored with the size the fit will give it ──
+    for (const float w : {0.80f, 0.90f, 1.00f})
+    {
+        Rig r;
+        r.look(A0, kDoor, {{1.0f, kWallY, w}});
+        CHECK(r.births.size() == 1 and r.door() != nullptr);
+        const float L_birth = r.door() ? r.door()->belief.L() : NAN;
+        r.settle(A0);
+        const float L_fit = r.door() ? r.door()->belief.L() : NAN;
+        std::print("birth_survival_agree: w {:.2f} born L {:+.3f} -> after the first fitted update (nothing new observed) {:+.3f}; removes {}\n",
+                   w, L_birth, L_fit, r.removes.size());
+        CHECK(L_birth > 0.0f and L_fit > 0.0f and r.removes.empty());
     }
 
     // ── C_keep / C_delete are FIXED within a session (fix round 2, ruling): a run of flicker births and removals changes neither,

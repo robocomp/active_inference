@@ -66,6 +66,29 @@ public:
         rows_.push_back({k, seconds, std::string(source)});
     }
 
+    /// ★THE COMPILED DEFAULT is the LOGGED estimate (tools/door_costs_from_logs.py on the exploration tours: C_keep 30 s = the spec's
+    /// fallback reading, C_delete(ordinary) 88.25 s = the median of 7 logged remove->re-found intervals), never equal costs: equal
+    /// costs put the delete line at L = 0 and a freshly fitted door (whose prior is entered at about -0.7) is deleted at once.
+    [[nodiscard]] static CostEstimator logged_default()
+    {
+        CostEstimator e;
+        e.add(Kind::Keep, 30.0f, "compiled_default:fallback_spec_30s");
+        e.add(Kind::DeleteOrdinary, 88.25f, "compiled_default:median_of_7_logged_tours");
+        return e;
+    }
+    /// The file when it can be read; otherwise a LOUD stderr warning and logged_default(). The agent and the replay both go through here.
+    [[nodiscard]] static CostEstimator load_or_default(const std::filesystem::path& p)
+    {
+        if (std::ifstream probe(p); probe)
+        {
+            auto e = load(p);
+            if (e.n(Kind::Keep) + e.n(Kind::DeleteOrdinary) > 0) return e;
+        }
+        std::fprintf(stderr, "[door_decision] WARNING: %s missing or empty - using the compiled LOGGED estimate (C_keep 30 s, C_delete 88.25 s), "
+                             "NOT equal costs. Run tools/door_costs_from_logs.py.\n", p.string().c_str());
+        return logged_default();
+    }
+
     /// delete_route_s = delete_ordinary_s + max_room_s.
     [[nodiscard]] Costs costs(float max_room_s) const
     {
