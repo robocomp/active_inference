@@ -104,7 +104,9 @@ struct DetectorTable { DetectorModel zed, ricoh; };
             return r.ec == std::errc{} and r.ptr == e;
         };
         float v = 0, n = 0;
-        if (c.size() < 4 or not num(c[2], v) or not num(c[3], n)) { ++malformed; continue; }
+        // n: the evidence behind the value, in views (the learner's prior weight; 0 = a compiled default, weight 1). A negative or
+        // non-finite count is not a count: the row is malformed.
+        if (c.size() < 4 or not num(c[2], v) or not num(c[3], n) or not std::isfinite(n) or n < 0.0f) { ++malformed; continue; }
         DetectorModel* m = c[0] == "zed" ? &t.zed : c[0] == "ricoh" ? &t.ricoh : nullptr;
         if (m == nullptr) { ++malformed; continue; }
         if (c[1] == "min_fill") m->env.min_fill = v;

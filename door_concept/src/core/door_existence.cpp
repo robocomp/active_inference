@@ -846,7 +846,7 @@ void DoorCore::update_existence(const DoorCycleInput& in, DoorCycleOutput& out)
                 if (r.q_known)
                     learner_.frame(id, r.camera, static_cast<std::size_t>(r.view_id), r.hit > 0.0f,
                                    r.q / (r.camera == 0 ? T.zed.hit_rate : T.ricoh.hit_rate));
-            learner_.set_alive(id, L > 0.0f);
+            learner_.set_responsibility(id, 1.0 / (1.0 + std::exp(-static_cast<double>(L))));   // EM: r = σ(L), no cutoff
             if (L > 0.0f)   // the geometry channel's μ1, from the doors believed in (one standardised statistic per view)
                 for (std::size_t k = 0; k < inst.belief.ledger.views().size(); ++k)
                     if (const auto& g = inst.belief.ledger.views()[k].geo; g.sum_w > 0 and g.s2 > 0.f)

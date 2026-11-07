@@ -376,8 +376,10 @@ int main()
         for (const float rr : {best_r, best_r - 1.5f, best_r + 1.5f})   // further DISTINCT standpoints (kernel ~17° and ~1.3 m at 4 m)
             for (const float deg : {-20.0f, 20.0f, -60.0f, 60.0f, 0.0f, -40.0f, 40.0f})
                 if (rr != best_r or (deg != 0.0f and deg != -40.0f and deg != 40.0f)) S.push_back(stand(rr, deg));
+        for (const bool cal : {true, false})   // the decision alone (calibrated rates), then with the real online learner (fix round 2)
+        {
         Rig r;
-        r.core.set_detectors(calibrated());   // isolate the decision from the online learner (see calibrated())
+        if (cal) r.core.set_detectors(calibrated());
         r.look(stand(6.0f, -75.0f), kDoor, {{1.0f, kWallY, 0.9f}});
         r.settle(stand(6.0f, -75.0f));
         const float L0 = r.door() ? r.door()->belief.L() : NAN;
@@ -393,12 +395,38 @@ int main()
         }
         std::string ls;
         for (const float e : ell) ls += std::format(" {:+.3f}", e);
-        std::print("phantom_removed_three_views: post-birth L {:+.3f}; {} distinct views, llrs{}; removed at standpoint {} (-1 = not "
-                   "within these {})\n", L0, r.door() ? r.door()->belief.ledger.views().size() : 0, ls, removed_at, S.size());
+        std::print("phantom_removed_three_views [{}]: post-birth L {:+.3f}; {} distinct views, llrs{}; removed at standpoint {} (-1 = not "
+                   "within these {})\n", cal ? "calibrated" : "online learner", L0, r.door() ? r.door()->belief.ledger.views().size() : 0, ls, removed_at, S.size());
         // ★FIX ROUND 1, REPORTED (not forced): from the natural post-birth L the phantom is NOT removed by these views. Its one-frame
         //  fit puts the leaf at ~60° (a flat φ curve), so the closed-panel envelope sees it nearly edge-on (q ≈ 0.1-0.25, ℓ ≈ −0.1 to
         //  −0.3 per view) against +3.4 from its one false hit; the compiled ZED envelope stays until refit from logs (ruling).
         CHECK(removed_at < 0 or removed_at >= 3);   // never before the third view
+        }
+    }
+
+    // ── the hit-rate learner weights a trial by σ(L) (fix round 2): a phantom's repeated misses move the ZED hit rate by exactly
+    //    the EM expectation, (h0·n0 + σ(L)·Σy) / (n0 + σ(L)·Σg) with n0 = 1 (compiled default), and less than unweighted counting would
+    {
+        Rig r;
+        r.look(stand(6.0f, -75.0f), kDoor, {{1.0f, kWallY, 0.9f}});
+        r.settle(stand(6.0f, -75.0f));
+        const std::uint64_t id = r.w.st.empty() ? 0 : r.w.st.begin()->first;
+        for (const float deg : {-40.0f, 0.0f, 40.0f, -20.0f, 20.0f})
+            for (int k = 0; k < 20 and r.door(); ++k) r.look(stand(4.2f, deg), kDoor);
+        CHECK(r.door() != nullptr);
+        if (r.door())
+        {
+            const double L = r.door()->belief.L(), rr = 1.0 / (1.0 + std::exp(-L));
+            const auto [sy, sg] = r.core.detector_learner().place_sums(id, 0);
+            const double h0 = default_detectors().zed.hit_rate;
+            const double expect = (h0 * 1.0 + rr * sy) / (1.0 + rr * sg);
+            const double unweighted = (h0 * 1.0 + sy) / (1.0 + sg);
+            const double h = r.core.detectors().zed.hit_rate;
+            std::print("learner_weighted_by_responsibility: L {:+.3f} (r {:.3f}), sum y {:.3f} sum g {:.3f}: hit rate {:.4f}, expected {:.4f} "
+                       "(moved {:+.4f}; unweighted would move {:+.4f})\n", L, rr, sy, sg, h, expect, h - h0, unweighted - h0);
+            CHECK(std::abs(h - expect) < 1e-5);
+            CHECK(std::abs(h - h0) <= std::abs(unweighted - h0));
+        }
     }
 
     // ── birth respects cross-concept exclusion and frame admissibility (fix round 1, review I-1) ────────────────────────────

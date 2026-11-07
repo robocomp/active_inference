@@ -104,17 +104,18 @@ ExistenceTrace observe_place(PlaceBelief& b, const rc::DoorFitState& theta, cons
 /// blob's measured width (its extent along that wall). With no polygon the blob's own principal direction is the wall.
 [[nodiscard]] rc::DoorFitState typical_door_at(const Vec2f& xy, float width, const std::vector<Vec2f>& polygon);
 
-/// ONLINE DETECTOR LEARNING (spec §8.4): ONE TRIAL PER VIEW, never per frame. A view of camera c is one trial: y = the
-/// fraction of its frames with an associated detection (UNWEIGHTED: the association weight already scales hit_llr, so counting
-/// it here too would count confidence twice — fix round 1), g = its mean front-end factor q / hit_rate (= env · aspect · vis · κ).
-/// The hit rate is the Bernoulli rate through that front end, learned from the views of doors believed in (L > 0):
-///     hit_rate = (h0 · n0 + Σ y) / (n0 + Σ g),       n0 = the loaded model's n_hit_trials + 1 (a compiled default: 1 view);
-/// the false-alarm rate from the views of DOORS later REMOVED (their detections were the detector's false alarms):
-///     false_alarm = (f0 · m0 + Σ y_fa) / (m0 + Σ g_fa),   m0 = the loaded n_fa_trials + 1.
-/// Pending candidates contribute nothing (they are simply not born). Frames whose q is unknown (a ricoh with no model: q → 0⁺) are
-/// not trials. A view's trial is REPLACED as its frames accumulate (the ledger's own rule). Sums are kept incrementally, so
-/// table() is O(1). An estimate outside the detector's domain (0 < false_alarm < hit_rate < 1) is not adopted — a probability
-/// domain, not a gate.
+/// ONLINE DETECTOR LEARNING (spec §8.4): ONE TRIAL PER VIEW, never per frame — an EM step. A view of camera c is one trial: y = the
+/// fraction of its frames with an associated detection (UNWEIGHTED: the association weight already scales hit_llr), g = its mean
+/// front-end factor q / hit_rate (= env · aspect · vis · κ). Whether the trial was a trial of the detector ON A DOOR or on clutter
+/// is not known; its RESPONSIBILITY is the place's existence posterior r = σ(L) (fix round 2, ruling). So each trial counts r into
+/// the hit-rate pool and 1 − r into the false-alarm pool — a miss on a door that probably does not exist says almost nothing about
+/// the hit rate, and nothing is cut off:
+///     hit_rate    = (h0 · n0 + Σ r y) / (n0 + Σ r g),            n0 = the loaded hit_rate row's n   (absent / 0: 1 view)
+///     false_alarm = (f0 · m0 + Σ (1−r) y) / (m0 + Σ (1−r) g),    m0 = the loaded false_alarm row's n (absent / 0: 1 view)
+/// A view's trial is REPLACED as its frames accumulate (the ledger's own rule) and re-weighted whenever r changes; a REMOVED door's
+/// trials are frozen at its last r (it keeps counting, it stops changing); a merged duplicate's are dropped. Pending candidates
+/// contribute nothing. Frames whose q is unknown (a ricoh with no model: q → 0⁺) are no trials. Sums are incremental: table() is
+/// O(1). An estimate outside the detector's domain (0 < false_alarm < hit_rate < 1) is not adopted — a probability domain, not a gate.
 class DetectorLearner
 {
 public:
@@ -124,32 +125,32 @@ public:
     {
         auto& P = places_[place];
         Trial& t = P.trials[{cam, view}];
-        if (P.alive) add(cam, t, -1.0);
+        add(cam, t, P.r, -1.0);
         t.n += 1.0; t.hits += hit ? 1.0 : 0.0; t.sg += g;
-        if (P.alive) add(cam, t, +1.0);
+        add(cam, t, P.r, +1.0);
         dirty_ = true;
     }
-    /// The door's belief is above the creation line (its trials count for the hit rate) or not.
-    void set_alive(std::uint64_t place, bool alive)
+    /// The place's existence responsibility r = σ(L) (re-weights every trial it has).
+    void set_responsibility(std::uint64_t place, double r)
     {
         auto it = places_.find(place);
-        if (it == places_.end() or it->second.alive == alive) { if (it != places_.end()) it->second.alive = alive; return; }
-        for (const auto& [k, t] : it->second.trials) add(k.first, t, alive ? +1.0 : -1.0);
-        it->second.alive = alive;
+        if (it == places_.end() or it->second.r == r) return;
+        for (const auto& [k, t] : it->second.trials) { add(k.first, t, it->second.r, -1.0); add(k.first, t, r, +1.0); }
+        it->second.r = r;
         dirty_ = true;
     }
-    /// The door was REMOVED: every trial it had becomes a false-alarm trial.
-    void retire(std::uint64_t place)
+    /// The door was REMOVED: its trials stay in both pools at its last responsibility, frozen.
+    void retire(std::uint64_t place) { places_.erase(place); }
+    /// The place is gone without a verdict (a merged duplicate): its trials are dropped.
+    void forget(std::uint64_t place)
     {
         auto it = places_.find(place);
         if (it == places_.end()) return;
-        set_alive(place, false);
-        for (const auto& [k, t] : it->second.trials) { fa_[k.first].y += t.y(); fa_[k.first].g += t.g(); }
+        for (const auto& [k, t] : it->second.trials) add(k.first, t, it->second.r, -1.0);
         places_.erase(it);
         dirty_ = true;
     }
-    /// The place is gone without a verdict (a merged duplicate): its trials are dropped.
-    void forget(std::uint64_t place) { set_alive(place, false); places_.erase(place); dirty_ = true; }
+    [[nodiscard]] static double prior_weight(float n) { return n > 0.0f ? static_cast<double>(n) : 1.0; }
     [[nodiscard]] const DetectorTable& table() const
     {
         if (not dirty_) return table_;
@@ -158,21 +159,28 @@ public:
         {
             const DetectorModel& p = c == 0 ? prior_.zed : prior_.ricoh;
             DetectorModel m = p;
-            const double n0 = static_cast<double>(p.n_hit_trials) + 1.0, m0 = static_cast<double>(p.n_fa_trials) + 1.0;
-            m.hit_rate = static_cast<float>((p.hit_rate * n0 + live_[c].y) / (n0 + live_[c].g));
-            m.n_hit_trials = static_cast<float>(static_cast<double>(p.n_hit_trials) + live_[c].g);
+            const double n0 = prior_weight(p.n_hit_trials), m0 = prior_weight(p.n_fa_trials);
+            m.hit_rate = static_cast<float>((p.hit_rate * n0 + hit_[c].y) / (n0 + hit_[c].g));
+            m.n_hit_trials = static_cast<float>(n0 + hit_[c].g);
             m.false_alarm = static_cast<float>((p.false_alarm * m0 + fa_[c].y) / (m0 + fa_[c].g));
-            m.n_fa_trials = static_cast<float>(static_cast<double>(p.n_fa_trials) + fa_[c].g);
+            m.n_fa_trials = static_cast<float>(m0 + fa_[c].g);
             if (detector_in_domain(m)) (c == 0 ? table_.zed : table_.ricoh) = m;
         }
         dirty_ = false;
         return table_;
     }
+    /// Σ y and Σ g of one live place's trials of camera `cam`, unweighted (for tests and the readout).
+    [[nodiscard]] std::pair<double, double> place_sums(std::uint64_t place, int cam) const
+    {
+        double y = 0, g = 0;
+        if (const auto it = places_.find(place); it != places_.end())
+            for (const auto& [k, t] : it->second.trials) if (k.first == cam) { y += t.y(); g += t.g(); }
+        return {y, g};
+    }
     [[nodiscard]] double n_views(int cam) const
     {
         double n = 0;
-        for (const auto& [id, P] : places_)
-            if (P.alive) for (const auto& [k, t] : P.trials) if (k.first == cam) n += 1;
+        for (const auto& [id, P] : places_) for (const auto& [k, t] : P.trials) if (k.first == cam) n += P.r;
         return n;
     }
     [[nodiscard]] std::size_t n_places() const { return places_.size(); }
@@ -183,12 +191,16 @@ private:
         [[nodiscard]] double y() const { return n > 0 ? hits / n : 0.0; }
         [[nodiscard]] double g() const { return n > 0 ? sg / n : 0.0; }
     };
-    struct Place { bool alive = false; std::map<std::pair<int, std::size_t>, Trial> trials; };
+    struct Place { double r = 0.0; std::map<std::pair<int, std::size_t>, Trial> trials; };
     struct Sum { double y = 0.0, g = 0.0; };
-    void add(int cam, const Trial& t, double sgn) { live_[cam].y += sgn * t.y(); live_[cam].g += sgn * t.g(); }
+    void add(int cam, const Trial& t, double r, double sgn)
+    {
+        hit_[cam].y += sgn * r * t.y(); hit_[cam].g += sgn * r * t.g();
+        fa_[cam].y += sgn * (1.0 - r) * t.y(); fa_[cam].g += sgn * (1.0 - r) * t.g();
+    }
     DetectorTable prior_ = default_detectors();
     std::map<std::uint64_t, Place> places_;
-    std::array<Sum, 2> live_{}, fa_{};
+    std::array<Sum, 2> hit_{}, fa_{};
     mutable DetectorTable table_ = default_detectors();
     mutable bool dirty_ = true;
 };
