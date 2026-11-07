@@ -4,13 +4,13 @@
 // It replaces today's ghosts and the existence half of the identity table (those are deleted in Task 10).
 // Header-only, DSR-free. Persisted through door_identity_table.h's row (columns ledger, visit, removed_ms; all optional).
 //
-// match():   minimum Mahalanobis distance with the SUM of both covariances (row + candidate), inside `gate`.
+// match():   minimum SQUARED Mahalanobis distance m2 with the SUM of both covariances (row + candidate), m2 <= gate. `gate` is the tracker's gate_mahalanobis, which is ALWAYS m2 (9.0 = 3 sigma).
 // Hazard:    how fast a remembered place changes. Gamma prior, shape 1, mean 1/600 s^-1 (rate parameter 600 s). Posterior mean
 //            lambda = (1 + changes) / (600 + sum elapsed_s); a revisit that does NOT find the door counts as a change.
 //            ★1/600 is only the PRIOR'S MEAN, inherited from today's kRememberedExistenceHazardPerS; it is not a constant in
 //            use. It is learned from revisits (note_revisit).
 // aged_L():  L_evidence * exp(-lambda * dt): the remembered belief relaxes toward 0 (ignorance). The structural prior is added
-//            by the CALLER. A removed row is not aged: a deletion is a fact until a new candidate contradicts it.
+//            by the CALLER. Every row ages alike, a removed one included (controller ruling R15, spec 3.7): a deletion is evidence, not a fact.
 #pragma once
 #include <Eigen/Dense>
 #include <algorithm>
@@ -29,6 +29,7 @@ struct PlaceRow
 {
     std::string room, name;
     Vec2f xy = Vec2f::Zero(); Eigen::Matrix2f cov = Eigen::Matrix2f::Identity(); float yaw = 0.f, width = 0.f, height = 0.f;
+    float depth = 0.f;                    // the aperture's wall depth, set by the caller from the fit; 0 = unknown
     float L_evidence = 0.f;               // ledger sum + crossing evidence, WITHOUT the structural prior
     ViewLedger ledger; int visit = 0; std::int64_t last_seen_wall_ms = 0;
     std::optional<std::int64_t> removed_wall_ms;   // a deleted phantom: "no door here", kept for ever
@@ -43,7 +44,7 @@ public:
 
     PlaceRow* match(std::string_view room, const Vec2f& xy, const Eigen::Matrix2f& cov, float gate)
     {
-        PlaceRow* best = nullptr; float dbest = gate;
+        PlaceRow* best = nullptr; float dbest = gate;   // squared
         for (auto& r : rows_)
         {
             if (r.room != room) continue;
@@ -52,8 +53,7 @@ public:
             const Vec2f d = xy - r.xy;
             const float m2 = d.dot(S.inverse() * d);
             if (not (m2 >= 0.f)) continue;
-            const float m = std::sqrt(m2);
-            if (m < dbest) { dbest = m; best = &r; }
+            if (m2 <= dbest) { dbest = m2; best = &r; }
         }
         return best;
     }
@@ -68,7 +68,8 @@ public:
     }
 
     /// One revisit of a remembered place after `elapsed_s`: found=false is a change. Updates the shared change hazard.
-    void note_revisit(PlaceRow&, bool found, double elapsed_s)
+    /// The hazard is table-wide, so no row is needed.
+    void note_revisit(bool found, double elapsed_s)
     {
         if (not std::isfinite(elapsed_s) or elapsed_s < 0.0) return;
         if (not found) changes_ += 1.0;
@@ -79,7 +80,6 @@ public:
 
     [[nodiscard]] float aged_L(const PlaceRow& r, std::int64_t now_wall_ms) const
     {
-        if (r.removed_wall_ms.has_value()) return r.L_evidence;
         const double dt = std::max<double>(0.0, double(now_wall_ms - r.last_seen_wall_ms) * 1e-3);
         return float(double(r.L_evidence) * std::exp(-hazard_per_s() * dt));
     }
@@ -94,7 +94,7 @@ public:
             PlaceRow r; r.room = i.room; r.name = i.name; r.xy = i.xy;
             const float sd = i.place_sd.value_or(fallback_sd);
             r.cov = Eigen::Matrix2f::Identity() * sd * sd;
-            if (i.pose) { r.yaw = i.pose->yaw; r.width = i.pose->width; r.height = i.pose->height; }
+            if (i.pose) { r.yaw = i.pose->yaw; r.width = i.pose->width; r.height = i.pose->height; r.depth = i.pose->depth; }
             r.L_evidence = i.exist_logodds.value_or(0.f);
             r.visit = i.visit.value_or(0);
             r.last_seen_wall_ms = i.seen_wall_ms.value_or(0);
@@ -111,7 +111,7 @@ public:
         for (const auto& r : rows_)
         {
             IdentityRow i; i.room = r.room; i.name = r.name; i.xy = r.xy;
-            i.pose = RestorePose{r.yaw, r.width, r.height, 0.2f};   // depth: not modelled here; a positive placeholder keeps the group valid
+            if (r.width > 0.f and r.height > 0.f and r.depth > 0.f) i.pose = RestorePose{r.yaw, r.width, r.height, r.depth};   // never fabricate geometry
             i.exist_logodds = r.L_evidence;
             if (r.last_seen_wall_ms > 0) i.seen_wall_ms = r.last_seen_wall_ms;
             i.place_sd = std::sqrt(std::max(1e-12f, 0.5f * (r.cov(0, 0) + r.cov(1, 1))));

@@ -17,7 +17,7 @@ static int fails = 0;
 static PlaceRow row(const char* name, float x, float y, float L, float sd = 0.05f)
 {
     PlaceRow r; r.room = "room_1"; r.name = name; r.xy = {x, y}; r.cov = Eigen::Matrix2f::Identity() * sd * sd;
-    r.yaw = 0.f; r.width = 0.85f; r.height = 2.05f; r.L_evidence = L; r.visit = 1; r.last_seen_wall_ms = 1'000'000;
+    r.yaw = 0.f; r.width = 0.85f; r.depth = 0.12f; r.height = 2.05f; r.L_evidence = L; r.visit = 1; r.last_seen_wall_ms = 1'000'000;
     return r;
 }
 
@@ -58,7 +58,9 @@ int main()
       T.upsert(r);
       PlaceRow* m = T.match("room_1", {4.02f, 3.99f}, Eigen::Matrix2f::Identity() * 0.01f, 3.f);
       CHECK(m != nullptr);
-      if (m) { CHECK(m->removed_wall_ms.has_value()); CHECK(T.aged_L(*m, m->last_seen_wall_ms + 10'000'000'000LL) == -3.f); }
+      if (m) { CHECK(m->removed_wall_ms.has_value()); CHECK(T.aged_L(*m, m->last_seen_wall_ms) == -3.f);
+        const float e = -3.f * std::exp(-float(T.hazard_per_s()) * 600.f);
+        CHECK(std::fabs(T.aged_L(*m, m->last_seen_wall_ms + 600'000) - e) < 1e-5f); CHECK(e > -3.f); }
       std::ofstream f(tmp); write_identity_table(f, T.to_identity_rows()); f.close();
       PlaceTable U(false); std::ifstream g(tmp); U.load(parse_identity_table(g), 0.05f);
       CHECK(U.rows().size() == 1 and U.rows()[0].removed_wall_ms == std::optional<std::int64_t>(5'000'000));
@@ -75,11 +77,14 @@ int main()
     }
     { // gate_grows_with_cov: 0.8 m off matches with sigma 0.5, not with sigma 0.1
       PlaceTable T(false); T.upsert(row("door_1", 0.f, 0.f, 1.f, 0.01f));
-      CHECK(T.match("room_1", {0.8f, 0.f}, Eigen::Matrix2f::Identity() * 0.25f, 2.f) != nullptr);
-      CHECK(T.match("room_1", {0.8f, 0.f}, Eigen::Matrix2f::Identity() * 0.01f, 2.f) == nullptr);
+      CHECK(T.match("room_1", {0.8f, 0.f}, Eigen::Matrix2f::Identity() * 0.25f, 9.f) != nullptr);
+      CHECK(T.match("room_1", {0.8f, 0.f}, Eigen::Matrix2f::Identity() * 0.01f, 9.f) == nullptr);
+      { PlaceTable Z(false); Z.upsert(row("door_1", 0.f, 0.f, 1.f, 0.f)); const Eigen::Matrix2f c = Eigen::Matrix2f::Identity() * 0.04f;   // sigma 0.2
+        CHECK(Z.match("room_1", {0.5f, 0.f}, c, 9.f) != nullptr);    // 2.5 sigma: m2 = 6.25
+        CHECK(Z.match("room_1", {0.7f, 0.f}, c, 9.f) == nullptr); }  // 3.5 sigma: m2 = 12.25
       // nearest of two wins
       T.upsert(row("door_2", 0.5f, 0.f, 1.f, 0.01f));
-      PlaceRow* m = T.match("room_1", {0.45f, 0.f}, Eigen::Matrix2f::Identity() * 0.25f, 3.f);
+      PlaceRow* m = T.match("room_1", {0.45f, 0.f}, Eigen::Matrix2f::Identity() * 0.25f, 9.f);
       CHECK(m != nullptr and m->name == "door_2");
     }
     { // old_row_loads_with_empty_ledger: a 19-column row from today's format
@@ -112,12 +117,21 @@ int main()
       PlaceTable T(false); PlaceRow& r = T.upsert(row("door_1", 0.f, 0.f, 1.f));
       const double prior = T.hazard_per_s();
       CHECK(std::fabs(prior - 1.0 / 600.0) < 1e-12);
-      for (int i = 0; i < 10; ++i) T.note_revisit(r, true, 100.0);
+      for (int i = 0; i < 10; ++i) T.note_revisit(true, 100.0);
       CHECK(T.hazard_per_s() < prior);
       CHECK(std::fabs(T.hazard_per_s() - 1.0 / 1600.0) < 1e-12);
       PlaceTable U(false); PlaceRow& q = U.upsert(row("door_1", 0.f, 0.f, 1.f));
-      for (int i = 0; i < 10; ++i) U.note_revisit(q, false, 100.0);   // not found counts as a change
+      for (int i = 0; i < 10; ++i) U.note_revisit(false, 100.0);   // not found counts as a change
       CHECK(U.hazard_per_s() > prior);
+    }
+    { // depth: 0 round-trips with no pose; real depth 0.12 round-trips as 0.12
+      PlaceTable T(false); PlaceRow a = row("door_1", 0.f, 0.f, 1.f); a.depth = 0.f; PlaceRow b = row("door_2", 3.f, 0.f, 1.f); b.depth = 0.12f;
+      T.upsert(a); T.upsert(b);
+      const auto ids = T.to_identity_rows();
+      CHECK(not ids[0].pose.has_value()); CHECK(ids[1].pose.has_value() and ids[1].pose->depth == 0.12f);
+      { std::ofstream f(tmp); write_identity_table(f, ids); }
+      PlaceTable U(false); { std::ifstream f(tmp); U.load(parse_identity_table(f), 0.05f); }
+      CHECK(U.rows().size() == 2 and U.rows()[0].depth == 0.f and U.rows()[1].depth == 0.12f);
     }
     std::filesystem::remove(tmp);
     std::printf(fails ? "test_place_table: %d FAILED\n" : "test_place_table: ALL PASS\n", fails);
