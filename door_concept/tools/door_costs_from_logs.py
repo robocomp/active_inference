@@ -20,7 +20,12 @@ Judgement calls (stated, not hidden):
     when the run was stopped, which is the experiment's end, not the agent's: it is skipped (listed, not invented).
   * Fewer than 3 samples of a kind => that kind falls back to the spec's reading (Keep = 30 s, DeleteOrdinary = 30 s),
     written as ONE row whose source says so.
-Output: etc/door_costs.csv  (kind,seconds,source), medians and n printed.
+  --events FILE [FILE...]   the agent's own etc/door_cost_events.csv (kind,t_wall_ms,room,place,x,y,seconds), written live by door_concept:
+                         keep_episode rows are C_keep samples (seconds); a rebirth row is a C_delete sample (seconds from the place's
+                         removal to its re-birth, place key = the removed row); remove rows are listed. Judgement call: every rebirth is
+                         a sample HERE - a flicker (seconds ~ 0) is indistinguishable from "found again" at log time, so the filtering
+                         (e.g. dropping samples shorter than one control cycle) belongs to this offline step, stated when applied.
+Output: etc/door_costs.csv  (kind,seconds,source), medians and n printed. The agent never writes this file.
 """
 import csv, json, re, statistics, sys, pathlib
 
@@ -120,14 +125,38 @@ def delete_samples(d, tour, notes):
     return out
 
 
+def event_samples(path):
+    keep, dele = [], []
+    for row in csv.DictReader(open(path, errors="replace")):
+        try:
+            sec = float(row["seconds"])
+        except (KeyError, ValueError):
+            continue
+        tag = f"{pathlib.Path(path).name}:{row['room']}/{row['place']}@{row['t_wall_ms']}"
+        if row["kind"] == "keep_episode" and sec > 0:
+            keep.append((sec, tag))
+        elif row["kind"] == "rebirth" and sec > 0:
+            dele.append((sec, tag))
+    return keep, dele
+
+
 def main():
     keep, dele, notes = [], [], []
+    if "--events" in sys.argv:
+        for f in sys.argv[sys.argv.index("--events") + 1:]:
+            k, d = event_samples(f)
+            keep += k; dele += d
+        return write_rows(keep, dele, notes)
     for n in range(10, 23):
         d = TOURS / f"explore_tour{n}"
         if not d.is_dir():
             continue
         keep += keep_samples(d, d.name, notes)
         dele += delete_samples(d, d.name, notes)
+    return write_rows(keep, dele, notes)
+
+
+def write_rows(keep, dele, notes):
     rows = []
     for kind, samples in (("keep", keep), ("delete_ordinary", dele)):
         print(f"{kind}: n={len(samples)}", [f"{s:.1f}" for s, _ in samples])

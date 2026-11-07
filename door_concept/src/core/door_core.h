@@ -229,7 +229,8 @@ public:
     /// The per-camera detector model: door_detectors.csv's values, FIXED for the session (fix round 3, ruling).
     [[nodiscard]] const DetectorTable& detectors() const { return detectors_; }
     void set_detectors(const DetectorTable& t) { detectors_ = t; }
-    [[nodiscard]] CostEstimator& costs() { return costs_; }
+    /// C_keep / C_delete are FIXED within a session: set once from etc/door_costs.csv at start (written offline by tools/door_costs_from_logs.py).
+    void set_costs(CostEstimator c) { costs_ = std::move(c); }
     [[nodiscard]] const CostEstimator& costs() const { return costs_; }
     [[nodiscard]] PlaceTable& places() { return places_; }
     /// A pending birth candidate (spec §3.1: the belief lives from the first candidate observation): its θ, belief and room.
@@ -301,7 +302,7 @@ private:
     std::string room_name_;            // this cycle's room name (place rows are keyed by it)
     struct Episode { std::int64_t start_wall_ms = 0; bool crossed = false; std::uint64_t room = 0; };
     std::unordered_map<std::string, Episode> episodes_;   // executing on a door's affordance → C_keep when it ends uncrossed
-    void track_episodes(const DoorCycleInput& in);
+    void track_episodes(const DoorCycleInput& in, DoorCycleOutput& out);
     void prepare_candidates(const DoorCycleInput& in, const std::vector<rc::TrackView>& tracks, DoorCycleOutput& out);
     /// Build the existence frame of this cycle (camera specs, poses, the prepared RGB frame when `use_rgb`) and hand it to f.
     void with_frame(const DoorCycleInput& in, bool zed_ran, bool use_rgb, const std::function<void(const ExistenceFrame&)>& f);

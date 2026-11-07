@@ -250,12 +250,9 @@ void SpecificWorker::request_shutdown()
     // Task 8: persist the decision costs learned this run (graceful exits only; SIGKILL loses them, like the nodes).
     if (core_)
     {
-        core_->costs().save("etc/door_costs.csv");   // the costs are the robot's own experience; the detector rates are NOT written
-                                                     // back (fixed within a session, refit offline from etc/door_views_log.csv)
+        // (The costs and the detector rates are FIXED within a session and are NOT written back: etc/door_costs.csv is written offline
+        //  by tools/door_costs_from_logs.py from etc/door_cost_events.csv, the rates by tools/fit_detector_envelopes.py.)
         save_identities();   // carries the place table's learned change hazard (#hazard line)
-        std::print("door_concept: [existence] saved etc/door_costs.csv (keep n={}, delete n={})\n",
-                   core_->costs().n(rc::door::core::CostEstimator::Kind::Keep),
-                   core_->costs().n(rc::door::core::CostEstimator::Kind::DeleteOrdinary));
     }
 
     // Flush the diagnostics' tails (up to 63 buffered rows each): exit is std::_Exit and this worker is never
@@ -469,11 +466,11 @@ void SpecificWorker::initialize()
     input_snapshot_.enable_for_core(static_cast<std::uint32_t>(agent_id));
     core_ = std::make_unique<rc::door::core::DoorCore>(rc::door::core::DoorCoreConfig{cfg_});
     // Task 8: the existence model's tables — the per-camera detector model (spec §8.4: FIXED for the session, refit offline) and the
-    // decision's costs (§8.2: learned online, saved on a graceful shutdown in request_shutdown). Absent files => the compiled
+    // decision's costs (§8.2: FIXED within a session too, written offline). Absent files => the compiled
     // defaults / the no-sample prior; the line names n for each.
     {
         core_->set_detectors(rc::door::core::load_detectors("etc/door_detectors.csv"));
-        core_->costs() = rc::door::core::CostEstimator::load("etc/door_costs.csv");
+        core_->set_costs(rc::door::core::CostEstimator::load("etc/door_costs.csv"));
         const auto t = core_->detectors();
         const auto c = core_->costs().costs(cfg_.exist_max_room_s);
         std::print("door_concept: [existence] loaded etc/door_detectors.csv: zed hit {:.3f} fa {:.4f} (n={:.0f}), ricoh hit {:.3f} "
@@ -534,6 +531,14 @@ void SpecificWorker::initialize()
                 static std::ofstream ex_csv = []{ std::ofstream f; rc::diag::open_rotating(f, "etc/door_existence_log.csv");
                                                   f << rc::door::core::kExistenceCsvHeader; return f; }();
                 if (ex_csv) { ex_csv << r.line; ex_csv.flush(); }
+            }
+            else if (r.stream == "door_cost_events.csv")
+            {
+                // The offline cost estimate's input (tools/door_costs_from_logs.py --events): removals, re-births at a removed place, and
+                // C_keep episodes, with wall-clock stamps and the place key.
+                static std::ofstream c_csv = []{ std::ofstream f; rc::diag::open_rotating(f, "etc/door_cost_events.csv");
+                                                 f << "kind,t_wall_ms,room,place,x,y,seconds\n"; return f; }();
+                if (c_csv) { c_csv << r.line; c_csv.flush(); }
             }
             else if (r.stream == "door_views_log.csv")
             {

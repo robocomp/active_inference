@@ -240,10 +240,10 @@ void DoorCore::log_view_rows(const std::string& place, const std::vector<ViewRow
     }
 }
 
-// C_keep's samples (spec §8.2): an executing episode on one of a door's affordances that ends without the robot crossing it.
+// C_keep's samples (spec §8.2) - LOGGED to etc/door_cost_events.csv for tools/door_costs_from_logs.py; the costs are FIXED within a session: an executing episode on one of a door's affordances that ends without the robot crossing it.
 // An episode spans the cycles in which ANY of the door's aff_<door>_* affordances is executed; it is crossed when the door is
 // backed by a crossing fact while it lasts, or the room changes under it.
-void DoorCore::track_episodes(const DoorCycleInput& in)
+void DoorCore::track_episodes(const DoorCycleInput& in, DoorCycleOutput& out)
 {
     std::set<std::string> now;
     for (const auto& e : in.executing)
@@ -263,7 +263,8 @@ void DoorCore::track_episodes(const DoorCycleInput& in)
         if (not now.contains(it->first))
         {
             if (not it->second.crossed and in.t_wall_ms > it->second.start_wall_ms)
-                costs_.add(CostEstimator::Kind::Keep, static_cast<float>(in.t_wall_ms - it->second.start_wall_ms) * 1e-3f, "online");
+                diag("door_cost_events.csv", std::format("keep_episode,{},{},{},nan,nan,{}\n", in.t_wall_ms, room_name_, it->first,
+                                                         static_cast<double>(in.t_wall_ms - it->second.start_wall_ms) * 1e-3), out);
             it = episodes_.erase(it);
         }
         else ++it;
@@ -531,6 +532,8 @@ void DoorCore::update_existence(const DoorCycleInput& in, DoorCycleOutput& out)
         if (not inst.place_row_name.empty())
             if (const PlaceRow* row = places_.find(room_name_, inst.place_row_name); row != nullptr)
                 places_.sample_revisit(room_name_, inst.place_row_name, visit_, false, row->sighted_wall_ms, in.t_wall_ms);
+        diag("door_cost_events.csv", std::format("remove,{},{},{},{},{},0\n", in.t_wall_ms, room_name_, inst.node_name,
+                                                 inst.aperture.centre_xy().x(), inst.aperture.centre_xy().y()), out);
         PlaceRow r;
         r.room = room_name_; r.name = inst.node_name; r.xy = inst.aperture.centre_xy();
         const float sd2 = inst.ai2_initialized ? std::max(0.0f, inst.ai2_belief.covariance()(0, 0)) : cfg.tracker_detection_noise_m * cfg.tracker_detection_noise_m;

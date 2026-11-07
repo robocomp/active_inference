@@ -234,7 +234,7 @@ DoorCycleOutput DoorCore::step(const DoorCycleInput& in)
     for (const auto& r : in.rooms.rooms)
         if (r.id == world_->room_id()) room_name_ = r.name;
     if (world_->room_id() != visit_room_) { visit_room_ = world_->room_id(); ++visit_; }
-    track_episodes(in);
+    track_episodes(in, out);
     // ★ FACT_HOLD OF THE LEAF ONLY WHILE THE ROBOT IS STILL AT THE DOORWAY (2026-11-01, user approved). The hold exists because views from
     //   in or right beside the doorway re-judged a just-crossed leaf wrongly (pingpong2/13). It held FOR EVER: warm26's DOOR_0,
     //   crossed in leg 3, kept an unmeasured 69 deg through a hand open and close while the robot stood in front of it, wide
@@ -822,9 +822,12 @@ void DoorCore::births(const DoorCycleInput& in, DoorCycleOutput& out)
                     for (auto& [sid, st] : world_->fit_states())
                         if (sid == new_id) st->place_row_name = cand.seeded_name;
                 }
+                // C_delete's sample ("a deleted door found again") is LOGGED, not learned: the costs are fixed within a session
+                // (etc/door_costs.csv, written offline by tools/door_costs_from_logs.py from etc/door_cost_events.csv).
                 if (cand.seeded_from_removed_ms.has_value())
-                    costs_.add(CostEstimator::Kind::DeleteOrdinary,
-                               std::max(1e-3f, static_cast<float>(in.t_wall_ms - *cand.seeded_from_removed_ms) * 1e-3f), "online");
+                    diag("door_cost_events.csv", std::format("rebirth,{},{},{},{},{},{}\n", in.t_wall_ms, room_name_, cand.seeded_name,
+                                                             cand.xy.x(), cand.xy.y(),
+                                                             static_cast<double>(in.t_wall_ms - *cand.seeded_from_removed_ms) * 1e-3), out);
                 // the candidate is the door now: retire it (its index is stale for the rest of this cycle, so only mark it)
                 cand.key = 0;
             }

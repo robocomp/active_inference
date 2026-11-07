@@ -186,7 +186,7 @@ struct Rig
     ExistWorld w;
     DoorCore core;
     std::vector<rc::door::DoorDecision> removes, births;
-    std::vector<std::string> csv;
+    std::vector<std::string> csv, cost_rows;
     std::uint64_t cycle = 0;
     int frame = 0;
     Rig() : core(cfg)
@@ -198,7 +198,11 @@ struct Rig
                               if (d.kind == static_cast<std::uint16_t>(K::Remove)) { removes.push_back(d); w.events.push_back("REMOVE"); }
                               if (d.kind == static_cast<std::uint16_t>(K::Birth)) births.push_back(d);
                           },
-                          .diag = [this](const DiagRow& d) { if (d.stream == "door_existence_log.csv") csv.push_back(d.line); }});
+                          .diag = [this](const DiagRow& d)
+                          {
+                              if (d.stream == "door_existence_log.csv") csv.push_back(d.line);
+                              if (d.stream == "door_cost_events.csv") cost_rows.push_back(d.line);
+                          }});
     }
     DoorCycleOutput step(DoorCycleInput in) { return core.step(std::move(in)); }
     DoorCycleOutput look(const Vec2f& at, const Vec2f& target, const std::vector<DoorDet>& dets = {}, double hz = 10.0,
@@ -735,13 +739,40 @@ int main()
         pt.upsert(other);
         r.door()->place_row_name = "door_8";
         const auto before = pt.hazard_state();
-        for (int k = 0; k < 3; ++k) r.core.costs().add(CostEstimator::Kind::DeleteOrdinary, 0.1f, "test");   // losing a door is cheap: the line is high
+        CostEstimator cheap;
+        for (int k = 0; k < 3; ++k) cheap.add(CostEstimator::Kind::DeleteOrdinary, 0.1f, "test");   // losing a door is cheap: the line is high
+        r.core.set_costs(cheap);
         for (int k = 0; k < 3 and r.removes.empty(); ++k) r.look(A0, kDoor);
         const auto after = pt.hazard_state();
         std::print("revisit_removed: {} REMOVE(s) -> changes {} -> {}, exposure {:.1f} -> {:.1f} s\n", r.removes.size(), before.changes,
                    after.changes, before.sum_elapsed_s, after.sum_elapsed_s);
         CHECK(r.removes.size() == 1 and after.changes == before.changes + 1.0 and after.sum_elapsed_s > before.sum_elapsed_s + 59.0);
         CHECK(not pt.sample_revisit("room_7", "door_8", 1, false, kT0, kT0 + 1000));   // the visit's sample is spent: a re-detection adds none
+    }
+
+    // ── C_keep / C_delete are FIXED within a session (fix round 2, ruling): a run of flicker births and removals changes neither,
+    //    and the events the offline tool needs are logged (removal, re-birth at the same place with its seconds, place key, stamp). ──
+    {
+        Rig r;
+        CostEstimator fixed;
+        fixed.add(CostEstimator::Kind::Keep, 20.0f, "csv"); fixed.add(CostEstimator::Kind::DeleteOrdinary, 3.0f, "csv");
+        r.core.set_costs(fixed);
+        const Costs c0 = r.core.costs().costs(rc::DoorConfig{}.exist_max_room_s);   // the delete line is +1.9: a door that falls below it after its birth is deleted
+        for (int k = 0; k < 60; ++k)   // a hit view (born), then a few quiet frames (L is below the high line: removed), again and again
+            r.look(stand(4.0f, static_cast<float>(k % 5) * 15.0f - 30.0f), kDoor,
+                   k % 4 == 0 ? std::vector<DoorDet>{{1.0f, kWallY, 0.9f}} : std::vector<DoorDet>{});
+        const Costs c1 = r.core.costs().costs(rc::DoorConfig{}.exist_max_room_s);
+        int rm = 0, rb = 0;
+        for (const auto& l : r.cost_rows) { rm += l.starts_with("remove,") ? 1 : 0; rb += l.starts_with("rebirth,") ? 1 : 0; }
+        std::print("costs_fixed: {} births, {} removes -> events: {} remove, {} rebirth; C_keep {:.1f}->{:.1f}, C_delete {:.1f}->{:.1f}\n",
+                   r.births.size(), r.removes.size(), rm, rb, c0.keep_s, c1.keep_s, c0.delete_ordinary_s, c1.delete_ordinary_s);
+        CHECK(r.births.size() >= 2 and r.removes.size() >= 1);                      // there WAS flicker
+        CHECK(c1.keep_s == c0.keep_s and c1.delete_ordinary_s == c0.delete_ordinary_s and c1.delete_route_s == c0.delete_route_s);
+        CHECK(r.core.costs().n(CostEstimator::Kind::Keep) == 1 and r.core.costs().n(CostEstimator::Kind::DeleteOrdinary) == 1);
+        CHECK(rm == static_cast<int>(r.removes.size()) and rb >= 1);               // every removal and re-birth is logged
+        bool well_formed = true;
+        for (const auto& l : r.cost_rows) well_formed = well_formed and std::ranges::count(l, ',') == 6 and l.ends_with("\n");
+        CHECK(well_formed);
     }
 
     std::print("{}\n", fails == 0 ? "ALL PASS" : std::format("{} FAILURE(S)", fails));
