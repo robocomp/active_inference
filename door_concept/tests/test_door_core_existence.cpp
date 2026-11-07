@@ -730,8 +730,10 @@ int main()
         for (int k = 0; k < 30; ++k) r.look(A0, kDoor, {{1.0f, kWallY, 0.9f}});   // re-detections in the SAME visit
         h = r.core.places().hazard_state();
         CHECK(h.sum_elapsed_s == e0 and h.changes == 0.0);
-        CHECK(not r.core.places().sample_revisit("room_7", "door_9", 1, true, kT0, kT0 + 1000));   // this visit's sample is taken
-        CHECK(r.core.places().sample_revisit("room_7", "door_9", 2, true, kT0, kT0 + 1000));       // a NEW visit gives one
+        const PlaceRow row9 = *r.core.places().find("room_7", "door_9");
+        const std::int64_t later = row9.sighted_wall_ms + 1000;               // the birth moved the sighting to its frame
+        CHECK(not r.core.places().sample_revisit(row9, 1, true, later));   // this visit's sample is taken
+        CHECK(r.core.places().sample_revisit(row9, 2, true, later));       // a NEW visit gives one
     }
     {   // a candidate seeded from a remembered REMOVED place, born: that is a change (the world changed), once
         Rig r;
@@ -739,7 +741,8 @@ int main()
         r.look(A0, kDoor, {{1.0f, kWallY, 0.9f}});
         const auto h = r.core.places().hazard_state();
         std::print("revisit_removed_row_born: births {} -> changes {} exposure {:.2f} s\n", r.births.size(), h.changes, h.sum_elapsed_s);
-        if (not r.births.empty()) CHECK(h.changes == 1.0 and h.sum_elapsed_s > 59.9);
+        CHECK(r.births.size() == 1);                                   // N5: no vacuous guard - the birth must happen
+        CHECK(h.changes == 1.0 and h.sum_elapsed_s > 59.9);
     }
     {   // a remembered door REMOVED in the visit (in view, judged absent): one "not found" sample; the removal's own row does not add
         Rig r;
@@ -760,7 +763,7 @@ int main()
         std::print("revisit_removed: {} REMOVE(s) -> changes {} -> {}, exposure {:.1f} -> {:.1f} s\n", r.removes.size(), before.changes,
                    after.changes, before.sum_elapsed_s, after.sum_elapsed_s);
         CHECK(r.removes.size() == 1 and after.changes == before.changes + 1.0 and after.sum_elapsed_s > before.sum_elapsed_s + 59.0);
-        CHECK(not pt.sample_revisit("room_7", "door_8", 1, false, kT0, kT0 + 1000));   // the visit's sample is spent: a re-detection adds none
+        CHECK(not pt.sample_revisit(other, 1, false, kT0 + 1000));   // the visit's sample is spent: a re-detection adds none
     }
 
     // ── BIRTH AND SURVIVAL AGREE (fix round 3): a candidate born at L > 0 stays above its creation line on the first fitted update
@@ -776,6 +779,24 @@ int main()
         std::print("birth_survival_agree: w {:.2f} born L {:+.3f} -> after the first fitted update (nothing new observed) {:+.3f}; removes {}\n",
                    w, L_birth, L_fit, r.removes.size());
         CHECK(L_birth > 0.0f and L_fit > 0.0f and r.removes.empty());
+    }
+
+    // ── removal_rebirth_same_visit (re-review I2/I3, ruling): a door removed and re-born at the same place IN ONE VISIT is a flicker,
+    //    not a revisit: 0 hazard samples, the learned hazard unchanged (the removal's row was written THIS visit). ──
+    {
+        Rig r;
+        CostEstimator fixed;
+        fixed.add(CostEstimator::Kind::Keep, 20.0f, "csv"); fixed.add(CostEstimator::Kind::DeleteOrdinary, 3.0f, "csv");
+        r.core.set_costs(fixed);   // the delete line is +1.9: the newborn falls below it on its quiet frames
+        const auto h0 = r.core.places().hazard_state();
+        for (int k = 0; k < 24 and (r.births.size() < 2 or r.removes.empty()); ++k)
+            r.look(stand(4.0f, static_cast<float>(k % 5) * 15.0f - 30.0f), kDoor,
+                   k % 4 == 0 ? std::vector<DoorDet>{{1.0f, kWallY, 0.9f}} : std::vector<DoorDet>{});
+        const auto h1 = r.core.places().hazard_state();
+        std::print("removal_rebirth_same_visit: {} births, {} removes -> hazard changes {} -> {}, exposure {:.3f} -> {:.3f} s\n",
+                   r.births.size(), r.removes.size(), h0.changes, h1.changes, h0.sum_elapsed_s, h1.sum_elapsed_s);
+        CHECK(r.births.size() >= 2 and r.removes.size() >= 1);   // there WAS a removal then a re-birth
+        CHECK(h1.changes == h0.changes and h1.sum_elapsed_s == h0.sum_elapsed_s);
     }
 
     // ── C_keep / C_delete are FIXED within a session (fix round 2, ruling): a run of flicker births and removals changes neither,
@@ -799,7 +820,7 @@ int main()
         CHECK(r.core.costs().n(CostEstimator::Kind::Keep) == 1 and r.core.costs().n(CostEstimator::Kind::DeleteOrdinary) == 1);
         CHECK(rm == static_cast<int>(r.removes.size()) and rb >= 1);               // every removal and re-birth is logged
         bool well_formed = true;
-        for (const auto& l : r.cost_rows) well_formed = well_formed and std::ranges::count(l, ',') == 6 and l.ends_with("\n");
+        for (const auto& l : r.cost_rows) well_formed = well_formed and std::ranges::count(l, ',') == 7 and l.ends_with("\n");
         CHECK(well_formed);
     }
 

@@ -20,12 +20,16 @@ Judgement calls (stated, not hidden):
     when the run was stopped, which is the experiment's end, not the agent's: it is skipped (listed, not invented).
   * Fewer than 3 samples of a kind => that kind falls back to the spec's reading (Keep = 30 s, DeleteOrdinary = 30 s),
     written as ONE row whose source says so.
-  --events FILE [FILE...]   the agent's own etc/door_cost_events.csv (kind,t_wall_ms,room,place,x,y,seconds), written live by door_concept:
-                         keep_episode rows are C_keep samples (seconds); a rebirth row is a C_delete sample (seconds from the place's
-                         removal to its re-birth, place key = the removed row); remove rows are listed. Judgement call: every rebirth is
-                         a sample HERE - a flicker (seconds ~ 0) is indistinguishable from "found again" at log time, so the filtering
-                         (e.g. dropping samples shorter than one control cycle) belongs to this offline step, stated when applied.
+  --events FILE [FILE...]   the agent's own etc/door_cost_events.csv (kind,t_wall_ms,room,place,x,y,seconds,door), written live by
+                         door_concept, ADDED to the tour samples (never instead of them): keep_episode rows are C_keep samples (seconds).
+                         ★A C_delete sample is a rebirth whose door (the `door` column, the reborn door's live name) is CROSSED later in the
+                         same file (re-review N3, ruling): the crossing is the only in-data ground truth that the deleted place was a door.
+                         A rebirth never crossed is a flicker or unconfirmed and is NOT a sample (listed). An old file without the `door`
+                         column confirms nothing.
+  --tours DIR             the tour root (default the crossing dir); --out FILE  the output (default etc/door_costs.csv).
 Output: etc/door_costs.csv  (kind,seconds,source), medians and n printed. The agent never writes this file.
+★REFUSAL (ruling "never equal costs", spec §3.6): if the resulting median C_keep >= median C_delete (equal fallbacks included), the tool
+  writes NOTHING, leaves the old file as it was and exits 2. The agent's loader refuses such a file too (door_decision.h).
 """
 import csv, json, re, statistics, sys, pathlib
 
@@ -125,38 +129,57 @@ def delete_samples(d, tour, notes):
     return out
 
 
-def event_samples(path):
-    keep, dele = [], []
-    for row in csv.DictReader(open(path, errors="replace")):
+def event_samples(path, notes):
+    keep, dele, rebirths, crossed = [], [], [], {}
+    rows = list(csv.DictReader(open(path, errors="replace")))
+    for row in rows:
         try:
-            sec = float(row["seconds"])
-        except (KeyError, ValueError):
+            sec, t = float(row["seconds"]), int(row["t_wall_ms"])
+        except (KeyError, ValueError, TypeError):
             continue
+        door = (row.get("door") or "").strip()
         tag = f"{pathlib.Path(path).name}:{row['room']}/{row['place']}@{row['t_wall_ms']}"
         if row["kind"] == "keep_episode" and sec > 0:
             keep.append((sec, tag))
         elif row["kind"] == "rebirth" and sec > 0:
-            dele.append((sec, tag))
+            rebirths.append((t, sec, door, tag))
+        elif row["kind"] == "crossed" and door:
+            crossed.setdefault(door, []).append(t)
+    for t, sec, door, tag in rebirths:
+        if door and any(tc >= t for tc in crossed.get(door, [])):
+            dele.append((sec, f"{tag}:crossed-later {door}"))
+        else:
+            notes.append(f"{tag}: rebirth of {door or '(no door column)'} after {sec:.1f} s never crossed later: not a C_delete sample")
     return keep, dele
+
+
+def arg(name, default):
+    return sys.argv[sys.argv.index(name) + 1] if name in sys.argv else default
 
 
 def main():
     keep, dele, notes = [], [], []
-    if "--events" in sys.argv:
-        for f in sys.argv[sys.argv.index("--events") + 1:]:
-            k, d = event_samples(f)
-            keep += k; dele += d
-        return write_rows(keep, dele, notes)
-    for n in range(10, 23):
-        d = TOURS / f"explore_tour{n}"
+    tours = pathlib.Path(arg("--tours", str(TOURS)))
+    out = pathlib.Path(arg("--out", str(OUT)))
+    for n in range(10, 23):   # the tour samples are always kept (ruling N3)
+        d = tours / f"explore_tour{n}"
         if not d.is_dir():
             continue
         keep += keep_samples(d, d.name, notes)
         dele += delete_samples(d, d.name, notes)
-    return write_rows(keep, dele, notes)
+    if "--events" in sys.argv:
+        files = []
+        for f in sys.argv[sys.argv.index("--events") + 1:]:
+            if f.startswith("--"):
+                break
+            files.append(f)
+        for f in files:
+            k, d = event_samples(f, notes)
+            keep += k; dele += d
+    return write_rows(keep, dele, notes, out)
 
 
-def write_rows(keep, dele, notes):
+def write_rows(keep, dele, notes, out=OUT):
     rows = []
     for kind, samples in (("keep", keep), ("delete_ordinary", dele)):
         print(f"{kind}: n={len(samples)}", [f"{s:.1f}" for s, _ in samples])
@@ -168,13 +191,19 @@ def write_rows(keep, dele, notes):
             rows += [(kind, s, src) for s, src in samples]
     for x in notes:
         print("  note:", x)
-    OUT.parent.mkdir(exist_ok=True)
-    with open(OUT, "w", newline="") as f:
+    med = {k: statistics.median(s for kk, s, _ in rows if kk == k) for k in ("keep", "delete_ordinary")}
+    if not med["delete_ordinary"] > med["keep"]:
+        print(f"REFUSED: median C_keep {med['keep']:.3f} s >= median C_delete {med['delete_ordinary']:.3f} s - deletion must cost more "
+              f"(spec 3.6, never equal costs). {out} left as it was.", file=sys.stderr)
+        return 2
+    out.parent.mkdir(parents=True, exist_ok=True)
+    with open(out, "w", newline="") as f:
         w = csv.writer(f, lineterminator="\n")
         w.writerow(["kind", "seconds", "source"])
         for k, s, src in rows:
             w.writerow([k, f"{s:.3f}", src])
-    print("wrote", OUT)
+    print("wrote", out)
+    return 0
 
 
 if __name__ == "__main__":

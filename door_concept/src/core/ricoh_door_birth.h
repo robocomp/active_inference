@@ -130,11 +130,6 @@ template <class Packet>
     return not pkt.ricoh_windows.empty()
         or std::ranges::any_of(pkt.slices, [](const auto& q) { return q.source != 0; });
 }
-template <class Packet>
-[[nodiscard]] inline bool ricoh_looked_in(const Packet& pkt, const Eigen::Vector2f& O, const Eigen::Vector2f& xy)
-{
-    return ricoh_fresh(pkt) and ricoh_looked(pkt.ricoh_windows, O, xy);
-}
 
 struct RicohRange
 {

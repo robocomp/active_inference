@@ -189,7 +189,7 @@ void read_door_config_fields(DoorConfig& out, GetF&& getf, GetI&& geti, GetS&& g
     out.tracker_merge_overlap    = getf("Tracker.MergeOverlap", 0.20f,
             "merge two instances whose seat footprints overlap ≥ this");
     out.exist_enabled            = getb("Existence.Enabled", true,
-            "Existence.Enabled — use the log-odds belief (else the old prune)");
+            "Existence.Enabled — run the existence update (false: no existence judgement)");
     out.exist_actuation_llr      = getf("Existence.ActuationLlr", 3.0f,
             "Existence.ActuationLlr — log-odds a door gains when it changed state on OUR command (open/close satisfied after "
             "our request): ln(P(change | a real leaf, commanded) / P(a perceived change | a phantom)) ≈ ln(0.9/0.05)");

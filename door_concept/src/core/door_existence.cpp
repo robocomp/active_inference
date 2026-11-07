@@ -252,19 +252,27 @@ void DoorCore::track_episodes(const DoorCycleInput& in, DoorCycleOutput& out)
                 if (const auto k = a.name.rfind('_'); k != std::string::npos and k > 4) now.insert(a.name.substr(4, k - 4));
     const auto room = world_->room_id();
     for (const auto& n : now)
-        episodes_.try_emplace(n, Episode{in.t_wall_ms, false, room});
+        episodes_.try_emplace(n, Episode{in.t_wall_ms, false, room, room_name_});
     for (auto& [name, ep] : episodes_)
     {
         if (ep.room != room) ep.crossed = true;
         for (const auto& [id, st] : world_->fit_states())
-            if (st->node_name == name and std::ranges::contains(in.backed_faces, id)) ep.crossed = true;
+            if (st->node_name == name)
+            {
+                if (std::ranges::contains(in.backed_faces, id)) ep.crossed = true;
+                ep.x = st->aperture.centre_xy().x(); ep.y = st->aperture.centre_xy().y();   // the door's last place while the episode ran
+            }
     }
     for (auto it = episodes_.begin(); it != episodes_.end();)
         if (not now.contains(it->first))
         {
-            if (not it->second.crossed and in.t_wall_ms > it->second.start_wall_ms)
-                diag("door_cost_events.csv", std::format("keep_episode,{},{},{},nan,nan,{}\n", in.t_wall_ms, room_name_, it->first,
-                                                         static_cast<double>(in.t_wall_ms - it->second.start_wall_ms) * 1e-3), out);
+            const Episode& ep = it->second;
+            if (ep.crossed)   // the crossing: the in-data ground truth that the door existed (the tool's C_delete join, kCostEventsHeader)
+                diag("door_cost_events.csv", std::format("crossed,{},{},{},{},{},0,{}\n", in.t_wall_ms, ep.room_name, it->first, ep.x, ep.y,
+                                                         it->first), out);
+            else if (in.t_wall_ms > ep.start_wall_ms)
+                diag("door_cost_events.csv", std::format("keep_episode,{},{},{},nan,nan,{},{}\n", in.t_wall_ms, room_name_, it->first,
+                                                         static_cast<double>(in.t_wall_ms - ep.start_wall_ms) * 1e-3, it->first), out);
             it = episodes_.erase(it);
         }
         else ++it;
@@ -478,8 +486,7 @@ void DoorCore::update_existence(const DoorCycleInput& in, DoorCycleOutput& out)
             if (not inst.place_row_name.empty() and (inst.exist_trace.zed_hit > 0.0f or inst.exist_trace.ric_hit > 0.0f))
                 if (PlaceRow* row = places_.find(room_name_, inst.place_row_name); row != nullptr)
                 {
-                    places_.sample_revisit(room_name_, inst.place_row_name, visit_, not row->removed_wall_ms.has_value(),
-                                           row->sighted_wall_ms, in.t_wall_ms);
+                    places_.sample_revisit(*row, visit_, not row->removed_wall_ms.has_value(), in.t_wall_ms);
                     row->sighted_wall_ms = in.t_wall_ms;
                 }
             if (act != 0.0f and not std::isfinite(inst.exist_trace.act_dl))
@@ -557,9 +564,9 @@ void DoorCore::update_existence(const DoorCycleInput& in, DoorCycleOutput& out)
         // gone: a CHANGE since the row was last sighted - one sample per place per visit (taken BEFORE the removed row replaces it).
         if (not inst.place_row_name.empty())
             if (const PlaceRow* row = places_.find(room_name_, inst.place_row_name); row != nullptr)
-                places_.sample_revisit(room_name_, inst.place_row_name, visit_, false, row->sighted_wall_ms, in.t_wall_ms);
-        diag("door_cost_events.csv", std::format("remove,{},{},{},{},{},0\n", in.t_wall_ms, room_name_, inst.node_name,
-                                                 inst.aperture.centre_xy().x(), inst.aperture.centre_xy().y()), out);
+                places_.sample_revisit(*row, visit_, false, in.t_wall_ms);
+        diag("door_cost_events.csv", std::format("remove,{},{},{},{},{},0,{}\n", in.t_wall_ms, room_name_, inst.node_name,
+                                                 inst.aperture.centre_xy().x(), inst.aperture.centre_xy().y(), inst.node_name), out);
         PlaceRow r;
         r.room = room_name_; r.name = inst.node_name; r.xy = inst.aperture.centre_xy();
         const float sd2 = inst.ai2_initialized ? std::max(0.0f, inst.ai2_belief.covariance()(0, 0)) : cfg.tracker_detection_noise_m * cfg.tracker_detection_noise_m;

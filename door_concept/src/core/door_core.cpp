@@ -228,6 +228,7 @@ DoorCycleOutput DoorCore::step(const DoorCycleInput& in)
         {
             std::istringstream is(in.identity_load->csv_text);
             places_.load(rc::door::parse_identity_table(is), cfg_.door.tracker_detection_noise_m);
+            visit_ = std::max(visit_, places_.max_visit());   // session-scoped visits: this session's first visit follows the table's last
         }
     }
     room_name_.clear();
@@ -817,17 +818,17 @@ void DoorCore::births(const DoorCycleInput& in, DoorCycleOutput& out)
                 if (not cand.seeded_name.empty())
                 {
                     if (PlaceRow* row = places_.find(room_name_, cand.seeded_name); row != nullptr)
-                        places_.sample_revisit(room_name_, cand.seeded_name, visit_, not row->removed_wall_ms.has_value(),
-                                               row->sighted_wall_ms, in.t_wall_ms);
+                        places_.sample_revisit(*row, visit_, not row->removed_wall_ms.has_value(), in.t_wall_ms);
                     for (auto& [sid, st] : world_->fit_states())
                         if (sid == new_id) st->place_row_name = cand.seeded_name;
                 }
                 // C_delete's sample ("a deleted door found again") is LOGGED, not learned: the costs are fixed within a session
                 // (etc/door_costs.csv, written offline by tools/door_costs_from_logs.py from etc/door_cost_events.csv).
                 if (cand.seeded_from_removed_ms.has_value())
-                    diag("door_cost_events.csv", std::format("rebirth,{},{},{},{},{},{}\n", in.t_wall_ms, room_name_, cand.seeded_name,
+                    diag("door_cost_events.csv", std::format("rebirth,{},{},{},{},{},{},{}\n", in.t_wall_ms, room_name_, cand.seeded_name,
                                                              cand.xy.x(), cand.xy.y(),
-                                                             static_cast<double>(in.t_wall_ms - *cand.seeded_from_removed_ms) * 1e-3), out);
+                                                             static_cast<double>(in.t_wall_ms - *cand.seeded_from_removed_ms) * 1e-3,
+                                                             name.value_or(std::string{})), out);
                 // the candidate is the door now: retire it (its index is stale for the rest of this cycle, so only mark it)
                 cand.key = 0;
             }

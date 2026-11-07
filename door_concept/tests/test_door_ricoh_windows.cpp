@@ -53,10 +53,6 @@ int main()
         Pk c{{}, {{0}}};                                       // (c) only a ZED slice / nothing: no fresh ricoh frame
         Pk d{{}, {}};
         CHECK(ricoh_fresh(a) and ricoh_fresh(b) and not ricoh_fresh(c) and not ricoh_fresh(d));
-        const V2 in_w(std::cos(1.0f), std::sin(1.0f)), out_w(std::cos(-2.0f), std::sin(-2.0f));
-        CHECK(ricoh_looked_in(a, cam, in_w) and not ricoh_looked_in(a, cam, out_w));
-        CHECK(ricoh_looked_in(b, cam, in_w) and ricoh_looked_in(b, cam, out_w));            // legacy: unknown => looked
-        CHECK(not ricoh_looked_in(c, cam, in_w) and not ricoh_looked_in(d, cam, out_w));    // nothing fresh => nothing looked
     }
     // ── B2. full circle and three adjacent strips ───────────────────────────────────────────────────────────────
     {

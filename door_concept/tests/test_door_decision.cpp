@@ -121,9 +121,27 @@ static void missing_file_gives_logged_estimate()
     std::filesystem::remove(p);
 }
 
+// re-review N3 (ruling): a file with C_delete <= C_keep, or lacking a kind, is INVALID: the logged estimate, never its costs
+static void invalid_file_gives_logged_estimate()
+{
+    const auto p = tmp_path("invalid");
+    const auto with = [&](float keep, float del, bool has_del = true)
+    {
+        CostEstimator f; f.add(CostEstimator::Kind::Keep, keep, "t");
+        if (has_del) f.add(CostEstimator::Kind::DeleteOrdinary, del, "t");
+        f.save(p);
+        return CostEstimator::load_or_default(p).costs(300.f);
+    };
+    for (const Costs c : {with(30.f, 30.f), with(30.f, 10.f), with(30.f, 0.f, false)})   // equal, inverted, no delete samples
+        CHECK(c.keep_s == 30.0f and c.delete_ordinary_s == 88.25f);
+    CHECK(with(30.f, 30.5f).delete_ordinary_s == 30.5f);                                   // deletion dearer, by any margin: valid
+    std::filesystem::remove(p);
+}
+
 int main()
 {
     missing_file_gives_logged_estimate();
+    invalid_file_gives_logged_estimate();
     route_door_survives();
     being_crossed_never_removed();
     exists_at_zero();

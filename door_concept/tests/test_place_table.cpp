@@ -144,13 +144,23 @@ int main()
     }
     { // one sample per place per visit (sample_revisit); the exposure runs from the last SIGHTING
       PlaceTable T(false);
-      CHECK(T.sample_revisit("room_1", "door_1", 3, true, 1000, 61'000));
-      CHECK(not T.sample_revisit("room_1", "door_1", 3, false, 1000, 70'000));       // same visit: no second sample, found or not
-      CHECK(T.sample_revisit("room_1", "door_1", 4, false, 1000, 121'000));           // a new visit: one more
-      CHECK(T.sample_revisit("room_1", "door_2", 3, true, 1000, 61'000));             // another place: its own sample
-      CHECK(not T.sample_revisit("room_1", "door_3", 3, true, 0, 61'000));            // never sighted: no exposure, no sample
+      const auto at = [](const char* name, int visit, std::int64_t sighted)
+      { PlaceRow r; r.room = "room_1"; r.name = name; r.visit = visit; r.sighted_wall_ms = sighted; return r; };
+      CHECK(T.sample_revisit(at("door_1", 2, 1000), 3, true, 61'000));
+      CHECK(not T.sample_revisit(at("door_1", 2, 1000), 3, false, 70'000));      // same visit: no second sample, found or not
+      CHECK(T.sample_revisit(at("door_1", 2, 1000), 4, false, 121'000));          // a new visit: one more
+      CHECK(T.sample_revisit(at("door_2", 1, 1000), 3, true, 61'000));            // another place: its own sample
+      CHECK(not T.sample_revisit(at("door_3", 1, 0), 3, true, 61'000));           // never sighted: no exposure, no sample
+      CHECK(not T.sample_revisit(at("door_4", 3, 1000), 3, false, 61'000));       // I2: a row written THIS visit is no revisit
+      CHECK(not T.sample_revisit(at("door_5", 5, 1000), 3, false, 61'000));       // nor one from a LATER visit id
       const auto h = T.hazard_state();
       CHECK(h.changes == 1.0 and std::fabs(h.sum_elapsed_s - (60.0 + 120.0 + 60.0)) < 1e-9);
+    }
+    { // session-scoped visits: max_visit() covers the rows and their ledger views
+      PlaceTable T(false);
+      PlaceRow a; a.room = "room_1"; a.name = "door_1"; a.visit = 4; T.upsert(a);
+      PlaceRow b; b.room = "room_1"; b.name = "door_2"; b.xy = {5.f, 5.f}; b.visit = 2; T.upsert(b);
+      CHECK(T.max_visit() == 4);
     }
     { // depth: 0 round-trips with no pose; real depth 0.12 round-trips as 0.12
       PlaceTable T(false); PlaceRow a = row("door_1", 0.f, 0.f, 1.f); a.depth = 0.f; PlaceRow b = row("door_2", 3.f, 0.f, 1.f); b.depth = 0.12f;

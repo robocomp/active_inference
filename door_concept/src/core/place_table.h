@@ -83,13 +83,28 @@ public:
     /// found = the place was matched again in that visit; not found = it was in view and removed in that visit. A place that has
     /// already given its sample this visit gives none (a removal followed by a re-detection is one visit, one sample). The elapsed
     /// exposure runs from the row's last SIGHTING to now_wall_ms. Returns whether a sample was taken.
-    bool sample_revisit(std::string_view room, std::string_view name, int visit, bool found, std::int64_t sighted_wall_ms,
-                        std::int64_t now_wall_ms)
+    /// ★A REVISIT IS OF A PLACE WRITTEN IN AN EARLIER VISIT (re-review I2, ruling): the row's visit must be < `visit` at the moment of
+    ///  sampling. A row written THIS visit (a door removed a moment ago, under its own name) is no revisit: its re-birth is a flicker,
+    ///  not a change. Visit ids are session-scoped (DoorCore starts counting after the loaded table's largest visit, max_visit()), so
+    ///  a row from an earlier session is always earlier.
+    bool sample_revisit(const PlaceRow& row, int visit, bool found, std::int64_t now_wall_ms)
     {
-        if (sighted_wall_ms <= 0 or now_wall_ms <= sighted_wall_ms) return false;
-        if (not sampled_.emplace(std::string(room) + "/" + std::string(name), visit).second) return false;
-        note_revisit(found, double(now_wall_ms - sighted_wall_ms) * 1e-3);
+        if (not (row.visit < visit)) return false;
+        if (row.sighted_wall_ms <= 0 or now_wall_ms <= row.sighted_wall_ms) return false;
+        if (not sampled_.emplace(row.room + "/" + row.name, visit).second) return false;
+        note_revisit(found, double(now_wall_ms - row.sighted_wall_ms) * 1e-3);
         return true;
+    }
+    /// The largest visit id in the table (rows and their ledger views): a new session counts its visits after it.
+    [[nodiscard]] int max_visit() const
+    {
+        int m = 0;
+        for (const auto& r : rows_)
+        {
+            m = std::max(m, r.visit);
+            for (const auto& v : r.ledger.views()) m = std::max(m, static_cast<int>(v.key.visit));
+        }
+        return m;
     }
     [[nodiscard]] PlaceRow* find(std::string_view room, std::string_view name)
     {

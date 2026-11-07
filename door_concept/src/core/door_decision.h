@@ -76,16 +76,27 @@ public:
         e.add(Kind::DeleteOrdinary, 88.25f, "compiled_default:median_of_7_logged_tours");
         return e;
     }
-    /// The file when it can be read; otherwise a LOUD stderr warning and logged_default(). The agent and the replay both go through here.
+    /// The file when it can be read AND is valid; otherwise a LOUD stderr warning and logged_default(). The agent and the replay both
+    /// go through here. ★VALID = both kinds present and C_delete > C_keep (re-review N3, ruling "never equal costs"): deletion is costlier
+    /// than keeping (spec §3.6) - equal costs put the delete line at 0 and remove the dead zone; C_delete < C_keep would put it ABOVE
+    /// the creation line. Such a file is refused as a whole (a wrong cost is not partly right).
     [[nodiscard]] static CostEstimator load_or_default(const std::filesystem::path& p)
     {
         if (std::ifstream probe(p); probe)
         {
             auto e = load(p);
-            if (e.n(Kind::Keep) + e.n(Kind::DeleteOrdinary) > 0) return e;
+            if (e.n(Kind::Keep) > 0 and e.n(Kind::DeleteOrdinary) > 0)
+            {
+                const Costs c = e.costs(0.0f);
+                if (c.delete_ordinary_s > c.keep_s) return e;
+                std::fprintf(stderr, "[door_decision] WARNING: %s is INVALID (C_delete %.2f s <= C_keep %.2f s; deletion must cost more) - "
+                                     "using the compiled LOGGED estimate (C_keep 30 s, C_delete 88.25 s). Re-run tools/door_costs_from_logs.py.\n",
+                             p.string().c_str(), c.delete_ordinary_s, c.keep_s);
+                return logged_default();
+            }
         }
-        std::fprintf(stderr, "[door_decision] WARNING: %s missing or empty - using the compiled LOGGED estimate (C_keep 30 s, C_delete 88.25 s), "
-                             "NOT equal costs. Run tools/door_costs_from_logs.py.\n", p.string().c_str());
+        std::fprintf(stderr, "[door_decision] WARNING: %s missing, empty or lacking a kind - using the compiled LOGGED estimate (C_keep 30 s, "
+                             "C_delete 88.25 s), NOT equal costs. Run tools/door_costs_from_logs.py.\n", p.string().c_str());
         return logged_default();
     }
 

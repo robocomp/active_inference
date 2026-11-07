@@ -535,9 +535,10 @@ void SpecificWorker::initialize()
             else if (r.stream == "door_cost_events.csv")
             {
                 // The offline cost estimate's input (tools/door_costs_from_logs.py --events): removals, re-births at a removed place, and
-                // C_keep episodes, with wall-clock stamps and the place key.
+                // C_keep episodes and crossings, with wall-clock stamps, the place key and the live door's name (rc::door::core::
+                // kCostEventsHeader: a C_delete sample is a re-birth whose door is later CROSSED - the tool joins them on `door`).
                 static std::ofstream c_csv = []{ std::ofstream f; rc::diag::open_rotating(f, "etc/door_cost_events.csv");
-                                                 f << "kind,t_wall_ms,room,place,x,y,seconds\n"; return f; }();
+                                                 f << rc::door::core::kCostEventsHeader; return f; }();
                 if (c_csv) { c_csv << r.line; c_csv.flush(); }
             }
             else if (r.stream == "door_views_log.csv")
