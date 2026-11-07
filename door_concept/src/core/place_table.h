@@ -21,6 +21,7 @@
 #include <string_view>
 #include <vector>
 #include "view_ledger.h"
+#include "place_belief.h"
 #include "../door_identity_table.h"
 
 namespace rc::door::core
@@ -89,20 +90,33 @@ public:
     /// row that does not carry place_sd (caller supplies the tracker's seed sigma).
     void load(const ParsedIdentityTable& t, float fallback_sd)
     {
-        for (const auto& i : t.rows)
-        {
-            PlaceRow r; r.room = i.room; r.name = i.name; r.xy = i.xy;
-            const float sd = i.place_sd.value_or(fallback_sd);
-            r.cov = Eigen::Matrix2f::Identity() * sd * sd;
-            if (i.pose) { r.yaw = i.pose->yaw; r.width = i.pose->width; r.height = i.pose->height; r.depth = i.pose->depth; }
-            r.L_evidence = i.exist_logodds.value_or(0.f);
-            r.visit = i.visit.value_or(0);
-            r.last_seen_wall_ms = i.seen_wall_ms.value_or(0);
-            r.removed_wall_ms = i.removed_ms;
-            if (i.ledger)
-                if (auto L = ViewLedger::parse(*i.ledger, geometry_may_refute_)) r.ledger = std::move(*L);   // corrupt cell: empty ledger
-            upsert(std::move(r));
-        }
+        for (const auto& i : t.rows) upsert(row_of(i, fallback_sd, geometry_may_refute_));
+    }
+
+    /// One identity row as a place row (the restore path reads the same thing: the row IS the belief's memory).
+    [[nodiscard]] static PlaceRow row_of(const IdentityRow& i, float fallback_sd, bool geometry_may_refute)
+    {
+        PlaceRow r; r.room = i.room; r.name = i.name; r.xy = i.xy;
+        const float sd = i.place_sd.value_or(fallback_sd);
+        r.cov = Eigen::Matrix2f::Identity() * sd * sd;
+        if (i.pose) { r.yaw = i.pose->yaw; r.width = i.pose->width; r.height = i.pose->height; r.depth = i.pose->depth; }
+        r.L_evidence = i.exist_logodds.value_or(0.f);
+        r.visit = i.visit.value_or(0);
+        r.last_seen_wall_ms = i.seen_wall_ms.value_or(0);
+        r.removed_wall_ms = i.removed_ms;
+        if (i.ledger)
+            if (auto L = ViewLedger::parse(*i.ledger, geometry_may_refute)) r.ledger = std::move(*L);   // corrupt cell: empty ledger
+        return r;
+    }
+
+    /// A restore (Task 9): the belief comes back from the row. Its ledger is the row's; the evidence term is the row's aged L_evidence
+    /// (hazard Gamma prior, learned from revisits), less the ledger sum that L() adds back. The structural prior re-enters from the room.
+    [[nodiscard]] PlaceBelief restored_belief(const PlaceRow& r, std::int64_t now_wall_ms) const
+    {
+        PlaceBelief b;
+        b.ledger = r.ledger;
+        b.carried = aged_L(r, now_wall_ms) - r.ledger.sum();
+        return b;
     }
 
     [[nodiscard]] std::vector<IdentityRow> to_identity_rows() const
@@ -129,4 +143,16 @@ private:
     std::vector<PlaceRow> rows_;
     double changes_ = 0.0, sum_elapsed_s_ = 0.0;
 };
+
+/// Task 9: the belief of a door CARRIED across a room switch (the `exit` fact). The new room's ledger is empty (views are per room).
+///  - with the source face's row: prior = 0 (the new room's prior is entered by the first update, which REPLACES it), carried = the
+///    face's L_evidence, crossing = crossing_llr;
+///  - without one (the face was never known): prior = the new room's place prior (`new_room_prior`, default none yet), carried = 0.
+[[nodiscard]] inline PlaceBelief carried_belief(const PlaceRow* src, float crossing_llr, const PlacePrior& new_room_prior = {})
+{
+    PlaceBelief b;
+    if (src) b.carried = src->L_evidence; else b.prior = new_room_prior;
+    b.crossing = crossing_llr;
+    return b;
+}
 }  // namespace rc::door::core

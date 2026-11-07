@@ -569,20 +569,9 @@ inline std::vector<std::string> drop_room(std::vector<IdentityRow>& rows, std::s
 ///  door_belief.h); tests/test_door_identity_table.cpp static_asserts it equals the leaf channel's ratio.
 ///  Δt unknown (a 17-column row, or no stamp) ⇒ the memory's age is unknown ⇒ survival 0 ⇒ the birth prior: the row is
 ///  still an identity (name + place), but carries no existence belief.
-inline constexpr double kRememberedExistenceHazardPerS = 1.0 / 600.0;   // BORROWED: kLeafMoveHyperShape / kLeafMoveHyperTimeS
-inline float restore_existence_prior(const IdentityRow& r, float default_L, std::int64_t now_wall_ms)
-{
-    if (not r.exist_logodds.has_value() or not std::isfinite(*r.exist_logodds))
-        return default_L;
-    if (not r.seen_wall_ms.has_value())
-        return default_L;
-    const double dt_s = std::max<double>(0.0, static_cast<double>(now_wall_ms - *r.seen_wall_ms) * 1e-3);
-    const double surv = std::exp(-kRememberedExistenceHazardPerS * dt_s);
-    const double p_mem = 1.0 / (1.0 + std::exp(-static_cast<double>(*r.exist_logodds)));
-    const double p_birth = 1.0 / (1.0 + std::exp(-static_cast<double>(default_L)));
-    const double p = surv * p_mem + (1.0 - surv) * p_birth;
-    return static_cast<float>(std::log(p / (1.0 - p)));
-}
+///  ★Task 9: this constant now serves the LEAF only. The existence of a restored door is aged by PlaceTable::aged_L (a hazard
+///  learned from revisits, Gamma prior); restore_existence_prior and its seed are gone.
+inline constexpr double kLeafRestoreHazardPerS = 1.0 / 600.0;   // BORROWED: kLeafMoveHyperShape / kLeafMoveHyperTimeS
 
 /// THE REMEMBERED LEAF AGES (2026-11-01, warm13: DOOR_2 remembered open at 120 deg from a run 5517 s earlier, restored at its
 /// old σ; the door was shut, P(passable) stayed 1.00 while the robot stared at it, and nothing asked to open it). The angle
@@ -594,7 +583,7 @@ inline float restore_existence_prior(const IdentityRow& r, float default_L, std:
                                                               std::int64_t now_wall_ms, float phi_max)
 {
     const double surv = seen_wall_ms.has_value()
-        ? std::exp(-kRememberedExistenceHazardPerS * std::max<double>(0.0, double(now_wall_ms - *seen_wall_ms) * 1e-3)) : 0.0;
+        ? std::exp(-kLeafRestoreHazardPerS * std::max<double>(0.0, double(now_wall_ms - *seen_wall_ms) * 1e-3)) : 0.0;
     const double pm = std::max(1e-3, double(phi_max));
     const double u_mean = 0.5 * pm, u_m2 = pm * pm / 3.0;   // uniform on [0, pm]: E[phi], E[phi^2]
     const double mean = surv * double(phi) + (1.0 - surv) * u_mean;
@@ -626,8 +615,8 @@ inline bool fitted_this_cycle(bool has_fresh_data, int matched_frames)
 /// have built the instance the moment the node was inserted — BEFORE its RT edge existed — reading its place as (0,0);
 /// the restore must not trust that read (nor skip seeding because the instance "already exists"), it must state it.
 /// `Inst` is rc::DoorInstance (templated so the harness needs no DSR).
-template <class Inst>
-void seed_restored_instance(Inst& inst, const IdentityRow& r, float prior_L, float max_L,
+template <class Inst, class Belief>
+void seed_restored_instance(Inst& inst, const IdentityRow& r, const Belief& restored, float max_L,
                             std::chrono::steady_clock::time_point now)
 {
     auto s = inst.model.state();
@@ -642,9 +631,13 @@ void seed_restored_instance(Inst& inst, const IdentityRow& r, float prior_L, flo
     s.phi = 0.f;
     inst.model.set_state(s);
     inst.existence.set_max(max_L);
-    inst.existence.set(prior_L);
+    inst.existence.set(restored.L_evidence());
     inst.existence_seeded = true;
-    inst.belief.carried = prior_L;   // Task 8: THE belief continues the remembered evidence (aged); the prior re-enters from the room
+    // Task 9: THE belief comes back from the row (PlaceTable::restored_belief): its ledger, and its evidence aged by the learned
+    // change hazard. The structural prior re-enters from the room at the first update.
+    inst.belief.carried = restored.carried;
+    inst.belief.crossing = restored.crossing;
+    inst.belief.ledger = restored.ledger;
     // Task D-C: the removal decision weighs what the data do SINCE this entry (DoorFitState::existence_entry_L), and the
     // door's age carries on from the row's stamp (a restored door not seen this visit keeps aging).
     inst.existence_entry_L = inst.existence.logodds();

@@ -12,6 +12,9 @@
 #include <vector>
 #include "../src/door_identity_table.h"
 #include "../src/door_rt_publish.h"
+#include "../src/core/place_table.h"      // Task 9: carried_belief
+#include "../src/core/door_decision.h"
+#include "../src/door_leaf_visibility.h"
 
 using namespace rc::door;
 static int fails = 0;
@@ -320,6 +323,22 @@ int main()
             const auto ok = frame_discrepancy(*T, *R), bad = frame_discrepancy(rigid_inverse(P_from_K_prior), *R);
             CHECK(ok.d_xy < 0.01f and ok.d_yaw_deg < 0.2f);
             CHECK(bad.d_xy > 1.0f and bad.d_yaw_deg > 179.0f);
+        }
+    }
+    // Task 9: on the `exit` fact the crossed door is born in the new room at once, carrying the face's evidence + the crossing; its
+    // role is BeingCrossed (the exit fact backs it), so no first view can delete it, and L >= the crossing evidence.
+    {
+        namespace core = rc::door::core;
+        const float x = crossing_logodds(0.5f, 0.05f);
+        for (const float L_src : {-2.0f, 0.0f, 1.5f})
+        {
+            core::PlaceRow src; src.L_evidence = std::max(L_src, 0.f);            // a never-believed face is born at no evidence
+            const auto b = core::carried_belief(L_src == 0.f ? nullptr : &src, x);
+            const auto role = core::door_role("door_9", {}, true);
+            CHECK(role == core::Role::BeingCrossed);
+            CHECK(b.L() >= x - 1e-6f and b.L() > 0.f);
+            const auto v = core::decide(b.L(), role, core::Costs{30.f, 30.f, 630.f});
+            CHECK(v.exists and not v.remove);
         }
     }
     std::print("{}\n", fails == 0 ? "ALL PASS" : "FAILED");

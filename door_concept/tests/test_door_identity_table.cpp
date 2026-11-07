@@ -13,8 +13,9 @@
 #include <tuple>
 #include <vector>
 #include "../src/door_identity_table.h"
+#include "../src/core/place_table.h"   // Task 9: a restore reads PlaceTable::aged_L
 #include "../src/door_leaf_channel.h"   // the borrowed hazard's source
-static_assert(rc::door::kRememberedExistenceHazardPerS == rc::door::kLeafMoveHyperShape / rc::door::kLeafMoveHyperTimeS,
+static_assert(rc::door::kLeafRestoreHazardPerS == rc::door::kLeafMoveHyperShape / rc::door::kLeafMoveHyperTimeS,
               "the remembered-existence hazard is the leaf channel's move-hazard hyperprior (door_identity_table.h)");
 #include <chrono>
 #include <optional>
@@ -173,43 +174,39 @@ int main()
         const auto d = plan_restore(table, "room_1", true, live, radius);
         CHECK(d.restore.empty());
     }
-    // 3f. Existence prior: remembered L when written, the stated default otherwise.
+    // 3f. Task 9: the restore seed is gone; the belief comes back from the row (PlaceTable::restored_belief).
     {
-        CHECK(near(restore_existence_prior(table[0], 1.0f, kNowMs), 4.0f, 1e-3f));   // seen just now: the memory itself
-        IdentityRow r = table[0]; r.exist_logodds.reset();
-        CHECK(near(restore_existence_prior(r, 1.0f, kNowMs), 1.0f));
-        r.exist_logodds = std::numeric_limits<float>::quiet_NaN();
-        CHECK(near(restore_existence_prior(r, 1.0f, kNowMs), 1.0f));
+        core::PlaceTable T(false);
+        const auto row = core::PlaceTable::row_of(table[0], 0.1f, false);
+        const auto b = T.restored_belief(row, kNowMs);                       // seen just now: the memory itself
+        CHECK(near(b.L(), 4.0f, 1e-3f));
+        IdentityRow r = table[0]; r.exist_logodds.reset();                  // no remembered L: ignorance (evidence 0)
+        CHECK(near(T.restored_belief(core::PlaceTable::row_of(r, 0.1f, false), kNowMs).L(), 0.0f));
     }
-    // 3g. Task D-C (rtD1i door_5): a remembered belief DECAYS toward the birth prior with the time since the door was last
-    //     seen, at the leaf channel's change hazard h = 1/600 s (P = e^{-hΔt}·P_mem + (1 − e^{-hΔt})·P_birth). door_5 left
-    //     at L = −4 and was restored 132 s later at −4, below the removal bound logit(0.12) = −1.99; now it enters above it.
+    // 3g. A remembered belief relaxes toward ignorance with the time since the door was last seen (the table's hazard, mean 1/600 s).
+    //     The ledger rides along: the evidence term is the aged L less the ledger sum, so L() = aged L whatever the ledger holds.
     {
         IdentityRow r = table[0];
         r.exist_logodds = -4.0f;
         r.seen_wall_ms = kNowMs - 132'000;
-        const float L132 = restore_existence_prior(r, 1.0f, kNowMs);
-        const double s = std::exp(-132.0 / 600.0), pm = 1.0 / (1.0 + std::exp(4.0)), pb = 1.0 / (1.0 + std::exp(-1.0));
-        const double p = s * pm + (1.0 - s) * pb;
-        std::print("remembered L -4 seen 132 s ago -> prior L {:.3f} (closed form {:.3f}); removal bound {:.3f}\n",
-                   L132, std::log(p / (1.0 - p)), std::log(0.12 / 0.88));
-        CHECK(near(L132, static_cast<float>(std::log(p / (1.0 - p))), 1e-4f));
-        CHECK(L132 > std::log(0.12f / 0.88f));
-        // monotone in the age, between the memory (Δt = 0) and the birth prior (Δt → ∞)
-        float prev = restore_existence_prior(r, 1.0f, kNowMs - 132'000);
+        core::PlaceTable T(false);
+        const auto row = core::PlaceTable::row_of(r, 0.1f, false);
+        const float L132 = T.restored_belief(row, kNowMs).L();
+        CHECK(near(L132, -4.0f * float(std::exp(-132.0 / 600.0)), 1e-4f));
+        float prev = T.restored_belief(row, kNowMs - 132'000).L();
         CHECK(near(prev, -4.0f, 1e-3f));
         for (const std::int64_t age_s : {10, 60, 300, 1200, 7200})
         {
-            const float L = restore_existence_prior(r, 1.0f, kNowMs - 132'000 + age_s * 1000);
+            const float L = T.restored_belief(row, kNowMs - 132'000 + age_s * 1000).L();
             CHECK(L > prev);
             prev = L;
         }
-        CHECK(near(prev, 1.0f, 2e-3f));
+        CHECK(std::fabs(prev) < 0.01f);
         // a clock that went backwards (a stamp from the future) is age 0, never a negative age
-        CHECK(near(restore_existence_prior(r, 1.0f, kNowMs - 200'000), -4.0f, 1e-3f));
-        // no stamp (a 17-column row written before the column existed) ⇒ unknown age ⇒ the birth prior
+        CHECK(near(T.restored_belief(row, kNowMs - 200'000).L(), -4.0f, 1e-3f));
+        // no stamp (a 17-column row written before the column existed) => unknown age => no remembered evidence
         r.seen_wall_ms.reset();
-        CHECK(near(restore_existence_prior(r, 1.0f, kNowMs), 1.0f));
+        CHECK(std::fabs(T.restored_belief(core::PlaceTable::row_of(r, 0.1f, false), kNowMs).L()) < 1e-3f);
         // a 17-column row parses (no seen_ms) and an 18-column one carries it; upsert carries the stamp with the belief
         std::stringstream old17;
         old17 << "room,name,ap_x,ap_y,yaw,width,height,depth,exist_logodds,hinge_x,hinge_y,open_x,open_y,hinge_llr,swing_llr,phi,phi_sigma\n"
@@ -245,13 +242,11 @@ int main()
         CHECK(strip_restorable(rt, "room_1") == 1 and not rt[0].place_sd.has_value());
     }
 
-    // 3h. Task D-C review I-1: the row remembers the EVIDENCE (L − the band prior's current term); the restored instance
-    //     starts with that term at 0 and the core adds it once — the full L would count the prior twice per round trip.
+    // 3h. Task 8/9: the row remembers the belief's EVIDENCE (carried + crossing + ledger), never the structural prior.
     {
-        struct E { float L; float logodds() const { return L; } };
-        struct I { E existence; float room_prior_term; };
-        CHECK(near(remembered_logodds(I{{-1.5f}, -2.0f}), 0.5f));   // an off-band door: the prior's −2 is not remembered
-        CHECK(near(remembered_logodds(I{{3.0f}, 0.0f}), 3.0f));     // on the band: unchanged
+        struct I { core::PlaceBelief belief; } i;
+        i.belief.prior.band = -2.0f; i.belief.carried = 0.5f; i.belief.crossing = 1.0f;
+        CHECK(near(remembered_logodds(i), 1.5f));                   // the prior's -2 is not remembered
     }
 
     // ── 4. Stale rows: a FRESH entry of room_1 strips its restore data; a later recall restores only doors seen since ──
@@ -320,11 +315,11 @@ int main()
             float phi_est = 0.f, phi_sigma = 0.f, hinge_llr = 0.f, swing_llr = 0.f;
             std::chrono::steady_clock::time_point phi_last_t{}; bool phi_from_command = true;
             float existence_entry_L = 1.f, existence_since_entry = 7.f; std::int64_t last_detection_wall_ms = 0;
-            std::optional<float> remembered_place_sd;
+            std::optional<float> remembered_place_sd; core::PlaceBelief belief;
         } inst;   // as the node-added path left it: (0,0), unseeded, 0 matched frames
         CHECK(not fitted_this_cycle(false, inst.matched_frames));           // the bug: never fitted ⇒ no approach
         const auto r = full_row("room_1", "door_1", -0.57f, 4.61f);
-        seed_restored_instance(inst, r, restore_existence_prior(r, 1.0f, kNowMs), 4.0f, std::chrono::steady_clock::now());
+        seed_restored_instance(inst, r, core::PlaceTable(false).restored_belief(core::PlaceTable::row_of(r, 0.1f, false), kNowMs), 4.0f, std::chrono::steady_clock::now());
         CHECK(near(inst.model.s.ap_cx, -0.57f) and near(inst.model.s.ap_cy, 4.61f) and near(inst.model.s.cx, -0.57f));
         CHECK(near(inst.model.s.ap_yaw, 3.10f) and near(inst.model.s.w, 0.95f) and near(inst.model.s.h, 2.13f));
         CHECK(inst.existence_seeded and near(inst.existence.L, 4.0f, 1e-3f));
@@ -335,8 +330,8 @@ int main()
         // An identity-only row (no pose) still gets its place; size stays the instance's (template) one.
         IdentityRow id_only; id_only.room = "room_1"; id_only.name = "door_5"; id_only.xy = {2.f, -3.f};
         FakeInst j;
-        seed_restored_instance(j, id_only, restore_existence_prior(id_only, 1.0f, kNowMs), 4.0f, std::chrono::steady_clock::now());
-        CHECK(near(j.model.s.ap_cx, 2.f) and near(j.existence.L, 1.0f) and not j.leaf_side_hint.has_value());
+        seed_restored_instance(j, id_only, core::PlaceTable(false).restored_belief(core::PlaceTable::row_of(id_only, 0.1f, false), kNowMs), 4.0f, std::chrono::steady_clock::now());
+        CHECK(near(j.model.s.ap_cx, 2.f) and near(j.existence.L, 0.0f) and not j.leaf_side_hint.has_value());
     }
 
     // ── 7. tourP9 NAME DRIFT: a duplicate (door_4) on door_1's hole does not rename it; one row per hole ──

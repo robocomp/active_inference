@@ -49,7 +49,7 @@ int main()
         const std::int64_t now = kT0 + 60'000;               // closed a minute after it was last seen open
         const float before = rows[0].leaf->phi;
         bool hit = false;
-        for (const auto& f : others) hit |= apply_actuation_to_face(rows, f, 0.0f, kPhiMax, now, 1.0f, 0.5f);
+        for (const auto& f : others) hit |= apply_actuation_to_face(rows, f, 0.0f, kPhiMax, now, 0.5f);
         CHECK(hit);
         // the restore of door_1 in leg 4 (68 s later): no longer the open leaf the stale row would have restored
         const auto [phi, sd] = restore_leaf_phi(rows[0].leaf->phi, rows[0].leaf->phi_sigma, rows[0].seen_wall_ms, now + 8'000, kPhiMax);
@@ -62,24 +62,23 @@ int main()
         CHECK(rows[1].leaf->phi == 105.f * kDeg);             // the actuated face's own row is untouched (its instance owns it)
         CHECK(rows[0].leaf->hinge_llr == 19.f and rows[0].leaf->swing_llr == 9.f);   // side/hinge are face-relative: not touched
         // existence did not lose a minute of age by being rewritten with a new stamp: aged, not refreshed
-        const double s60 = std::exp(-kRememberedExistenceHazardPerS * 60.0);
-        const double p_exp = s60 / (1.0 + std::exp(-4.0)) + (1.0 - s60) / (1.0 + std::exp(-1.0));
-        CHECK(near(1.0 / (1.0 + std::exp(-rows[0].exist_logodds.value())), p_exp, 1e-4));
+        const double s60 = std::exp(-kLeafRestoreHazardPerS * 60.0);
+        CHECK(near(rows[0].exist_logodds.value(), 4.0 * s60, 1e-4));   // Task 9: aged toward 0 (ignorance), not toward a birth seed
     }
 
     // an OPEN through the other face moves a shut face toward open
     {
         std::vector<IdentityRow> rows{open_row("room_1", "door_1", -0.5f, 4.6f)};
         rows[0].leaf->phi = 0.f;
-        CHECK(apply_actuation_to_face(rows, {"room_1", {-0.45f, 4.65f}}, 100.f * kDeg, kPhiMax, kT0, 1.0f, 0.5f));
+        CHECK(apply_actuation_to_face(rows, {"room_1", {-0.45f, 4.65f}}, 100.f * kDeg, kPhiMax, kT0, 0.5f));
         CHECK(near(rows[0].leaf->phi, kActuationObeyed * 100.f * kDeg, 1e-4));
-        CHECK(not apply_actuation_to_face(rows, {"room_1", {-5.f, 9.f}}, 0.f, kPhiMax, kT0, 1.0f, 0.5f));   // another hole
-        CHECK(not apply_actuation_to_face(rows, {"room_9", {-0.5f, 4.6f}}, 0.f, kPhiMax, kT0, 1.0f, 0.5f)); // another room
+        CHECK(not apply_actuation_to_face(rows, {"room_1", {-5.f, 9.f}}, 0.f, kPhiMax, kT0, 0.5f));   // another hole
+        CHECK(not apply_actuation_to_face(rows, {"room_9", {-0.5f, 4.6f}}, 0.f, kPhiMax, kT0, 0.5f)); // another room
     }
 
     // (b) an unobserved face's leaf relaxes toward the uniform prior at the stated hazard (not held for ever).
     {
-        const double h = kRememberedExistenceHazardPerS;
+        const double h = kLeafRestoreHazardPerS;
         const float phi0 = 105.f * kDeg, sd0 = 3.f * kDeg;
         double prev_mean = 1e9;
         for (const double dt_s : {0.0, 60.0, 600.0, 3600.0, 36000.0})

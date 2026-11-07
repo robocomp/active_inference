@@ -3281,7 +3281,7 @@ bool SpecificWorker::request_door_actuation_impl(rc::DoorInstance& inst, bool op
             for (const auto& other : provider_faces_.others(chosen_id, face_room))
                 if (rc::door::apply_actuation_to_face(identities_, other, inst.phi_cmd_to, cfg_.phi_max_rad,
                                                       static_cast<std::int64_t>(rc::provenance::now_ms()),
-                                                      cfg_.exist_birth_logodds, cfg_.exist_reacquire_radius_m))
+                                                      cfg_.exist_reacquire_radius_m))
                 {
                     changed = true;
                     std::println("door_concept: [phi] {} '{}' of provider door '{}' -> its other face in '{}' told: leaf commanded to "
@@ -4028,8 +4028,10 @@ void SpecificWorker::restore_remembered_doors(std::uint64_t new_room)
     for (const auto& r : d.restore)
     {
         const auto counter_before = next_door_index_;
-        // Task D-C: the remembered belief, decayed toward BirthLogodds by the time since the door was last seen.
-        const float prior_L = rc::door::restore_existence_prior(r, cfg_.exist_birth_logodds, static_cast<std::int64_t>(rc::provenance::now_ms()));
+        // Task 9: the belief comes back from the row (PlaceTable::restored_belief): its ledger, and its evidence aged by the learned change hazard.
+        const auto restored = core_->places().restored_belief(
+            rc::door::core::PlaceTable::row_of(r, cfg_.tracker_detection_noise_m, cfg_.exist_geometry_may_refute),
+            static_cast<std::int64_t>(rc::provenance::now_ms()));
         // the remembered leaf ANGLE ages like the existence (door_identity_table.h restore_leaf_phi; warm13 DOOR_2): the node is
         // created with, and the belief seeded from, the aged angle
         const auto aged_leaf = r.leaf.has_value()
@@ -4062,14 +4064,11 @@ void SpecificWorker::restore_remembered_doors(std::uint64_t new_room)
         if (iit == fitter_->instances().end())
             continue;
         auto& inst = iit->second;
-        // ★THE EXISTENCE PRIOR IS THE MEMORY. Not a fresh birth's prior and not certainty either: the belief the door had
-        //  when the room was left (or, for a row written without one, Existence.BirthLogodds). The channel takes it from
-        //  here — seen ⇒ confirmed, absent where it should be visible (P(detect), wall line of sight) ⇒ removed.
-        //  ⚠ Deliberately NOT the ghost convention (re-acquisition restarts at BirthLogodds): a ghost was REMOVED for
-        //  absence, a restored door was ALIVE when left — see rc::door::restore_existence_prior.
-        // Fitted without a fresh detection (as the carried door is), at the remembered pose and size, with its leaf memory.
-        rc::door::seed_restored_instance(inst, r, prior_L, cfg_.exist_max_logodds, std::chrono::steady_clock::now());
-        // the remembered leaf ANGLE ages like the existence above (door_identity_table.h restore_leaf_phi; warm13 DOOR_2)
+        // ★THE BELIEF IS THE MEMORY (Task 9): not a fresh birth's prior and not certainty either — the stored ledger and the aged evidence
+        //  of the row. The channels take it from here: seen => confirmed, absent where it should be visible (P(detect), wall line of
+        //  sight) => removed. No seed and no hazard constant of its own: the place table's hazard is learned from revisits.
+        rc::door::seed_restored_instance(inst, r, restored, cfg_.exist_max_logodds, std::chrono::steady_clock::now());
+        // the remembered leaf ANGLE (aged above) seeds the belief
         if (r.leaf.has_value() and aged_leaf.has_value())
         {
             const auto [phi0, sd0] = *aged_leaf;
@@ -4080,13 +4079,14 @@ void SpecificWorker::restore_remembered_doors(std::uint64_t new_room)
         }
         log_tracker_event("RESTORE", id, r.xy.x(), r.xy.y(), std::format("remembered in {}", room->name()), n->name());
         std::print("door_concept: [restore] '{}' RESTORED in remembered '{}' at ({:.2f},{:.2f}) yaw={:.2f} w={:.2f} h={:.2f} — "
-                   "existence prior L={:.2f} (P={:.2f}, {}), leaf memory {}\n",
-                   n->name(), room->name(), r.xy.x(), r.xy.y(), r.pose->yaw, r.pose->width, r.pose->height, prior_L,
+                   "restored evidence {:.2f} (P={:.2f}, {}), leaf memory {}\n",
+                   n->name(), room->name(), r.xy.x(), r.xy.y(), r.pose->yaw, r.pose->width, r.pose->height, restored.L_evidence(),
                    inst.belief.p(),
-                   not r.exist_logodds.has_value() ? "default BirthLogodds"
-                   : r.seen_wall_ms.has_value() ? std::format("remembered L={:.2f}, seen {:.0f} s ago, decayed toward BirthLogodds",
-                                                              *r.exist_logodds, 1e-3 * double(static_cast<std::int64_t>(rc::provenance::now_ms()) - *r.seen_wall_ms))
-                                                : std::string("remembered with no age: BirthLogodds"),
+                   not r.exist_logodds.has_value() ? "no remembered L: ignorance"
+                   : r.seen_wall_ms.has_value() ? std::format("remembered L={:.2f}, seen {:.0f} s ago, aged toward 0, {} view(s) kept",
+                                                              *r.exist_logodds, 1e-3 * double(static_cast<std::int64_t>(rc::provenance::now_ms()) - *r.seen_wall_ms),
+                                                              restored.ledger.views().size())
+                                                : std::string("remembered with no age: ignorance"),
                    r.leaf.has_value() ? "yes" : "no");
         // (kept for log readers: the remembered name, or a fresh one when a live node held it — names are opaque)
         std::print("door_concept: [restore] RESTORED as '{}' (remembered '{}')\n", n->name(), r.name);
@@ -4179,7 +4179,10 @@ void SpecificWorker::step_remembered_looks()
         if (it == looks_.end())
         {
             // The prior: what memory says (the row's existence when written; BirthLogodds for an identity-only row).
-            const float L0 = rc::door::restore_existence_prior(r, cfg_.exist_birth_logodds, static_cast<std::int64_t>(rc::provenance::now_ms()));
+            // Task 9: the birth prior plus the remembered evidence, aged by the place table's learned hazard
+            const float L0 = cfg_.exist_birth_logodds + core_->places().aged_L(
+                rc::door::core::PlaceTable::row_of(r, cfg_.tracker_detection_noise_m, cfg_.exist_geometry_may_refute),
+                static_cast<std::int64_t>(rc::provenance::now_ms()));
             it = looks_.emplace(r.name, LookEntry{rc::door::look::Evidence(1.0f / (1.0f + std::exp(-L0)), pol), {}, false}).first;
             it->second.aff.init(G, room_node_id_, "door_look_" + r.name, "door");
             std::print("door_concept: [look] '{}' remembered in '{}' at ({:.2f},{:.2f}) is not in the graph — offering a "
@@ -4283,28 +4286,40 @@ void SpecificWorker::install_carried_door(std::uint64_t new_room, std::uint64_t 
                                    "sigma={:.0f} deg, curve {} pts\n", n->name(), dst.phi_est * 57.2958f,
                                    dst.phi_sigma * 57.2958f, dst.phi_curve.size());
                     }
-            // ★Task D2 — THE BELIEF CROSSES WITH THE DOOR, AND SO DOES THE CROSSING (gold12: door_1 was re-made at BirthLogodds 1.0,
-            //   forgetting its L = +1.83 and the fact that the robot's body had just passed through it, and died 5 s later).
-            //   L = the source's L (BirthLogodds when the source was never seeded: the crossing is evidence independent of it) + the
-            //   crossing as an observation: ln(Existence.CrossPassablePrior / Existence.CrossLeak) nats (door_leaf_visibility.h). The
-            //   door's own door_open_prob is NOT read: the crossing may have raised it (circular). Marked seeded so the existence slice
-            //   does not re-seed it.
+            // ★Task 9 — THE CROSSED DOOR IS BORN IN THE NEW ROOM CARRYING ITS EVIDENCE PLUS THE CROSSING (gold12: door_1 was re-made at
+            //   BirthLogodds 1.0, forgetting its L = +1.83 and the fact that the robot's body had just passed through it, and died 5 s later).
+            //   belief = carried_belief(source face's row, crossing_logodds): carried = the face's L_evidence, crossing = ln(CrossPassablePrior /
+            //   CrossLeak) nats (door_leaf_visibility.h), an EMPTY ledger (views are per room), prior entered by the first update. A face never
+            //   known (no existence_L) carries nothing: the crossing stands alone. The door's own door_open_prob is NOT read (circular). The
+            //   exit fact backs the door (backed_faces), so its role is BeingCrossed and no view can delete it. The row is upserted in the
+            //   new room's place table, so a restore of this room finds it.
             if (adopted_from.has_value())
                 if (auto it = fitter_->instances().find(adopt_mirror); it != fitter_->instances().end())
                 {
                     auto& dst = it->second;
-                    const float L_src = adopted_from->existence_L.value_or(cfg_.exist_birth_logodds);
                     const float dLx = rc::door::crossing_logodds(cfg_.exist_cross_passable_prior, cfg_.exist_cross_leak);
-                    dst.existence.set(L_src + dLx);
-                    // Task 8: THE belief carries the source face's evidence plus the crossing (Task 9 owns this path's final form)
-                    dst.belief.carried = L_src;
-                    dst.belief.crossing = dLx;
+                    rc::door::core::PlaceRow src;
+                    if (adopted_from->existence_L.has_value()) src.L_evidence = *adopted_from->existence_L;
+                    dst.belief = rc::door::core::carried_belief(adopted_from->existence_L.has_value() ? &src : nullptr, dLx);
+                    dst.existence.set(dst.belief.L_evidence());   // retired field, kept compiling until Task 10
                     dst.existence_seeded      = true;
                     dst.existence_entry_L     = dst.existence.logodds();
                     dst.existence_since_entry = 0.0f;
-                    std::print("door_concept: [room] {} keeps its existence across the crossing: L {:.2f}{} + crossing {:.2f} "
-                               "(prior {:.2f}, leak {:.2f}) -> {:.2f}\n", n->name(), L_src,
-                               adopted_from->existence_L.has_value() ? "" : " (birth seed)", dLx, cfg_.exist_cross_passable_prior,
+                    if (core_ and room_n.has_value())
+                    {
+                        const auto& ms = dst.model.state();
+                        rc::door::core::PlaceRow row;
+                        row.room = room_n->name(); row.name = n->name();
+                        row.xy = Eigen::Vector2f(ms.ap_cx, ms.ap_cy);
+                        row.cov = Eigen::Matrix2f::Identity() * cfg_.tracker_detection_noise_m * cfg_.tracker_detection_noise_m;
+                        row.yaw = ms.ap_yaw; row.width = ms.w; row.height = ms.h; row.depth = ms.thickness;
+                        row.L_evidence = dst.belief.L_evidence();
+                        row.last_seen_wall_ms = static_cast<std::int64_t>(rc::provenance::now_ms());
+                        core_->places().upsert(std::move(row));
+                    }
+                    std::print("door_concept: [room] {} is born in this room carrying the crossed face's evidence: carried {:.2f}{} + crossing {:.2f} "
+                               "(prior {:.2f}, leak {:.2f}) -> L {:.2f}\n", n->name(), dst.belief.carried,
+                               adopted_from->existence_L.has_value() ? "" : " (face never known)", dLx, cfg_.exist_cross_passable_prior,
                                cfg_.exist_cross_leak, dst.belief.L());
                 }
         }
