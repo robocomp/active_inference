@@ -3211,6 +3211,65 @@ int run_replay(const char* path)
         return std::make_pair(room, wp);
     }
 
+    // ── CLEAR L- AND U-SHAPED ROOMS (WS_BOXES_STYLE=lu) ─────────────────────────────────────
+    // random_room's carves are at most 1.1 m deep, so it never makes a room whose SHAPE is
+    // non-convex at the scale of the room. Here: one large carve. Even index = L (a corner cut,
+    // 40-55% of each side), odd = U (a bay cut into the middle of one wall, 30-40% of it wide and
+    // 45-60% of the room deep). Waypoints are arm centres, so the start is inside an arm.
+    inline std::optional<std::pair<Poly, std::vector<Eigen::Vector2f>>>
+    lu_room(unsigned seed, bool is_u)
+    {
+        std::mt19937 rng(seed);
+        std::uniform_real_distribution<float> U(0.f, 1.f);
+        const float W = 6.f + 3.f * U(rng), H = 5.f + 3.f * U(rng);
+        rc::boxes::Layout L;
+        rc::boxes::Box shell; shell.lo = {-0.5f * W, -0.5f * H}; shell.hi = {0.5f * W, 0.5f * H};
+        L.boxes.push_back(shell);
+        rc::boxes::Box c; c.positive = false;
+        std::vector<Eigen::Vector2f> wp;
+        if (not is_u)
+        {
+            const float cw = (0.40f + 0.15f * U(rng)) * W, ch = (0.40f + 0.15f * U(rng)) * H;
+            const int corner = static_cast<int>(U(rng) * 4.f) % 4;            // which corner is cut
+            const float sx = (corner & 1) ? 1.f : -1.f, sy = (corner & 2) ? 1.f : -1.f;
+            const Eigen::Vector2f k(sx * 0.5f * W, sy * 0.5f * H), in(k.x() - sx * cw, k.y() - sy * ch);
+            c.lo = k.cwiseMin(in); c.hi = k.cwiseMax(in);
+            // arm A runs along x on the uncut side, arm B along y; the joint is the opposite corner square
+            const float ax = -sx * 0.5f * cw, ay = -sy * 0.5f * ch;            // joint centre (uncut strips cross here)
+            wp = {{(k.x() + in.x()) * 0.5f, ay}, {ax, ay}, {ax, (k.y() + in.y()) * 0.5f}};   // arm A, joint, arm B
+        }
+        else
+        {
+            const int face = static_cast<int>(U(rng) * 4.f) % 4;
+            const bool alongx = (face == 1 or face == 3);                     // bay cut into a y-face
+            const float side = alongx ? W : H, depth = alongx ? H : W;
+            const float bw = (0.30f + 0.10f * U(rng)) * side, bd = (0.45f + 0.15f * U(rng)) * depth;
+            const float off = (U(rng) - 0.5f) * 0.2f * side;                  // bay roughly central
+            if (alongx)
+            {
+                const float y = face == 3 ? 0.5f * H : -0.5f * H, s = face == 3 ? -1.f : 1.f;
+                c.lo = {off - 0.5f * bw, std::min(y, y + s * bd)}; c.hi = {off + 0.5f * bw, std::max(y, y + s * bd)};
+                const float y_arm = y + s * 0.5f * bd, y_base = y + s * 0.5f * (bd + H);
+                const float xl = 0.5f * (-0.5f * W + off - 0.5f * bw), xh = 0.5f * (0.5f * W + off + 0.5f * bw);
+                wp = {{xl, y_arm}, {xl, y_base}, {xh, y_base}, {xh, y_arm}};   // left arm, base, base, right arm
+            }
+            else
+            {
+                const float x = face == 2 ? 0.5f * W : -0.5f * W, s = face == 2 ? -1.f : 1.f;
+                c.lo = {std::min(x, x + s * bd), off - 0.5f * bw}; c.hi = {std::max(x, x + s * bd), off + 0.5f * bw};
+                const float x_arm = x + s * 0.5f * bd, x_base = x + s * 0.5f * (bd + W);
+                const float yl = 0.5f * (-0.5f * H + off - 0.5f * bw), yh = 0.5f * (0.5f * H + off + 0.5f * bw);
+                wp = {{x_arm, yl}, {x_base, yl}, {x_base, yh}, {x_arm, yh}};
+            }
+        }
+        L.boxes.push_back(c);
+        const auto pv = L.polygon();
+        if (pv.size() < 6) return std::nullopt;
+        Poly room; for (const auto& v : pv) room.push_back(v);
+        for (const auto& w : wp) if (not L.inside(w) or point_to_poly(w, room) < 0.6f) return std::nullopt;
+        return std::make_pair(room, wp);
+    }
+
     // ── THE REAL TARGET: layouts/apartamento_layout.svg ──────────────────────────────────────
     // ★ It is not an apartment and it has no corridors. It is ONE LARGE CONCAVE ROOM: an 8.51 x
     // 9.26 m hall, 60.5 m2, 32 vertices, 13 reflex — a big open space with THIN FINS projecting
@@ -3498,8 +3557,11 @@ int main()
         for (int ii = 0; ii < N; ++ii)
         {
             const int i = ilo + ii;
-            const int order = apt ? 32 : olo + (i % nord);
-            const auto gen = apt ? apartamento_room() : random_room(static_cast<unsigned>(1000 + i), order);
+            const bool lu = std::getenv("WS_BOXES_STYLE") and std::string(std::getenv("WS_BOXES_STYLE")) == "lu";
+            const int order = apt ? 32 : lu ? (i % 2 ? 2 : 1) + 1 : olo + (i % nord);   // lu: 2 = L, 3 = U (boxes)
+            const auto gen = apt ? apartamento_room()
+                           : lu  ? lu_room(static_cast<unsigned>(2000 + i), i % 2 == 1)
+                                 : random_room(static_cast<unsigned>(1000 + i), order);
             if (not gen) { std::printf("room %d: no drivable circuit\n", i); continue; }
             int srot = geti("WS_BOXES_START_ROT", 0);
             // WS_NR_LEGAL_START=1: the generator only checks that the tour's waypoints lie inside the room, not that the
@@ -3521,7 +3583,7 @@ int main()
                         r.rot_err_deg, 100.f * r.seen_frac, r.promo_frame, r.edits_adopted, r.frames_out, r.frames_blocked, r.frames,
                         r.stop.c_str(), r.wall_s);
             std::fflush(stdout);
-            if (csv.is_open()) { newroom_csv_row(csv, i, order, r, seed, apt ? "apartamento" : "random", srot, sfrac); csv.flush(); }
+            if (csv.is_open()) { newroom_csv_row(csv, i, order, r, seed, apt ? "apartamento" : lu ? "lu" : "random", srot, sfrac); csv.flush(); }
             // WS_NR_DUMP=<dir>: per-room geometry for figures (true polygon, final outline, trajectory), world frame.
             if (const char* dd = std::getenv("WS_NR_DUMP"))
             {
