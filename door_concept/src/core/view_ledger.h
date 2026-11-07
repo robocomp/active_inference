@@ -2,17 +2,23 @@
 // evidence channel. All frames of a view are ONE trial: the view's log-likelihood ratio is recomputed from its aggregate and
 // REPLACES the view's previous contribution (never added to). Header-only, DSR-free.
 //
-// Absorption rule (no tuned constant): a frame is scored against every existing view of the SAME visit with the kernel
+// Absorption rule: a frame is scored against every existing view of the SAME visit with the kernel
 //   k = exp(-1/2 [ (db/alpha)^2 + (dr/R_eff)^2 ]),  R_eff = hypot(R, spread_m),  alpha = atan(R_eff / d).
-// The best view (largest k) absorbs the frame iff k >= 1 - k, i.e. iff it explains the frame better than a NEW view that would
-// open with weight 1 - k. The 1/2 is not a threshold, it is where the two weights are equal. Same standpoint: k = 1, absorbed
-// whole (a parked stare is one trial). A new standpoint: k ~ 0, a new view. Views of different `visit` never merge.
+// k is P(same view | the two standpoints). Assigning the frame to the more probable hypothesis (k >= 1/2: same view; else a new
+// view) is a MAP decision on a posterior, the same kind as door creation at L > 0. The discontinuity it causes is bounded by one
+// view's llr; a soft split would create a view record per frame. Same standpoint: k = 1 (a parked stare is one trial).
+// Views of different `visit` never merge.
+// Domain: R > 0 and s2 > 0 are required inputs. On violation the frame is ignored: observe() returns npos and every add_* /
+// recompute on an out-of-range index is a no-op, so it contributes exactly 0 (never NaN).
+// add_* leave a view's llr STALE until recompute(v). Actuation accumulates (+=) by design: each satisfied command is one
+// observation. All other channels are aggregates replaced on recompute.
 // The kernel widths are the door's own scale R (half-diagonal), widened by the pose spread: a poorly known pose cannot tell
 // two standpoints apart, so they are one view.
-// Keys are bearing and range of the camera seen FROM the door; differences are rigid-transform invariant.
+// Keys are door-relative: range = |cam - door|, bearing = angle of (cam - door) measured from door_normal. Both survive any
+// change of room frame (rotation + translation) unchanged, so persisted ledgers stay valid after re-registration.
 //
 // Serialisation (one line, classic locale, std::from_chars, no commas/newlines — fits a CSV cell): whitespace-separated tokens
-//   "VL1 <nviews>" then per view, 31 numbers: bearing range visit weight_n actuation_llr llr
+//   "VL1 <nviews>" then per view, 30 numbers: bearing range visit actuation_llr llr
 //   then per Bernoulli channel (Zed, Ricoh): n sum_q sum_hit_w sum_f hit_c ; then geo: n sum_x sum_w mu0 mu1 s2.
 #pragma once
 #include <array>
@@ -40,7 +46,7 @@ struct BernoulliAgg { double n = 0, sum_q = 0, sum_hit_w = 0, sum_f = 0; float h
 struct GaussAgg { double n = 0, sum_x = 0, sum_w = 0; float mu0 = 0, mu1 = 0, s2 = 1; };
 struct View
 {
-    ViewKey key; float weight_n = 0;
+    ViewKey key; 
     std::array<BernoulliAgg, 2> bern;   // Zed, Ricoh
     GaussAgg geo; float actuation_llr = 0; float llr = 0;
 };
@@ -49,11 +55,14 @@ class ViewLedger
 {
 public:
     /// Locate (or open) the view for a frame taken from cam_xy of the door at door_xy; returns its index.
-    std::size_t observe(const Vec2f& cam_xy, const Vec2f& door_xy, float R, float spread_m, int visit)
+    static constexpr std::size_t npos = static_cast<std::size_t>(-1);
+
+    std::size_t observe(const Vec2f& cam_xy, const Vec2f& door_xy, const Vec2f& door_normal, float R, float spread_m, int visit)
     {
+        if (not (R > 0.f) or not std::isfinite(R) or not std::isfinite(spread_m)) return npos;
         const Vec2f d = cam_xy - door_xy;
         const float range = d.norm();
-        const float bearing = std::atan2(d.y(), d.x());
+        const float bearing = std::atan2(door_normal.x() * d.y() - door_normal.y() * d.x(), door_normal.dot(d));
         const float R_eff = std::hypot(R, spread_m);
         const float alpha = std::atan2(R_eff, range);
         std::size_t best = views_.size();
@@ -70,10 +79,9 @@ public:
         }
         if (best < views_.size() and kbest >= 1.f - kbest)
         {
-            views_[best].weight_n += 1.f;
             return best;
         }
-        View v; v.key = {bearing, range, visit}; v.weight_n = 1.f;
+        View v; v.key = {bearing, range, visit};
         views_.push_back(v);
         return views_.size() - 1;
     }
@@ -82,6 +90,7 @@ public:
     /// derived here), hit_w = association weight of a hit (0 for a miss frame).
     void add_bernoulli(std::size_t v, Channel c, float q, const DetectorModel& m, float hit_w)
     {
+        if (v >= views_.size()) return;
         auto& a = views_[v].bern[c == Channel::Ricoh ? 1 : 0];
         a.n += 1; a.sum_q += q; a.sum_hit_w += hit_w; a.sum_f += false_alarm_eff(m, q);
         if (q > 0.f) a.hit_c = hit_llr(q, m, 1.f);
@@ -89,14 +98,16 @@ public:
     /// One geometry frame: statistic x with weight w; hypotheses N(mu0,s2) (absent) vs N(mu1,s2) (present).
     void add_geometry(std::size_t v, float x, float w, float mu0, float mu1, float s2)
     {
+        if (v >= views_.size() or not (s2 > 0.f)) return;
         auto& g = views_[v].geo;
         g.n += 1; g.sum_x += double(w) * x; g.sum_w += w; g.mu0 = mu0; g.mu1 = mu1; g.s2 = s2;
     }
-    void add_actuation(std::size_t v, float llr) { views_[v].actuation_llr += llr; }
+    void add_actuation(std::size_t v, float llr) { if (v < views_.size()) views_[v].actuation_llr += llr; }
 
     /// Recompute view v's llr from its aggregate (replacing the old one). Returns the CHANGE in sum().
     float recompute(std::size_t v, bool geometry_may_refute)
     {
+        if (v >= views_.size()) return 0.f;
         View& w = views_[v];
         float l = w.actuation_llr;
         for (const auto& a : w.bern)
@@ -107,7 +118,7 @@ public:
             l += db * hit + (1.f - db) * miss_llr(qb, fb);
         }
         const auto& g = w.geo;
-        if (g.sum_w > 0 and g.n > 0)
+        if (g.sum_w > 0 and g.n > 0 and g.s2 > 0.f)
         {
             const float xb = float(g.sum_x / g.sum_w), wb = float(g.sum_w / g.n);
             float lg = wb * ((xb - g.mu0) * (xb - g.mu0) - (xb - g.mu1) * (xb - g.mu1)) / (2.f * g.s2);
@@ -127,14 +138,16 @@ public:
         std::string s = std::format("VL1 {}", views_.size());
         for (const auto& v : views_)
         {
-            s += std::format(" {} {} {} {} {} {}", v.key.bearing, v.key.range, v.key.visit, v.weight_n, v.actuation_llr, v.llr);
+            s += std::format(" {} {} {} {} {}", v.key.bearing, v.key.range, v.key.visit, v.actuation_llr, v.llr);
             for (const auto& a : v.bern) s += std::format(" {} {} {} {} {}", a.n, a.sum_q, a.sum_hit_w, a.sum_f, a.hit_c);
             s += std::format(" {} {} {} {} {} {}", v.geo.n, v.geo.sum_x, v.geo.sum_w, v.geo.mu0, v.geo.mu1, v.geo.s2);
         }
         return s;
     }
 
-    static std::optional<ViewLedger> parse(std::string_view str)
+    /// Rejects any non-finite number. The stored llr is NOT trusted: every view is recomputed from its aggregate
+    /// (geometry_may_refute must match the one used by the caller's recompute calls).
+    static std::optional<ViewLedger> parse(std::string_view str, bool geometry_may_refute = false)
     {
         std::size_t pos = 0;
         const auto tok = [&]() -> std::string_view {
@@ -155,13 +168,22 @@ public:
         ViewLedger L;
         for (std::size_t i = 0; i < n; ++i)
         {
-            View v; bool ok = num(v.key.bearing) and num(v.key.range) and num(v.key.visit) and num(v.weight_n)
+            View v; bool ok = num(v.key.bearing) and num(v.key.range) and num(v.key.visit)
                               and num(v.actuation_llr) and num(v.llr);
             for (auto& a : v.bern)
                 ok = ok and num(a.n) and num(a.sum_q) and num(a.sum_hit_w) and num(a.sum_f) and num(a.hit_c);
             ok = ok and num(v.geo.n) and num(v.geo.sum_x) and num(v.geo.sum_w) and num(v.geo.mu0) and num(v.geo.mu1) and num(v.geo.s2);
             if (not ok) return std::nullopt;
+            const auto fin = [](float x) { return std::isfinite(x); };
+            ok = ok and fin(v.key.bearing) and fin(v.key.range) and fin(v.actuation_llr) and fin(v.llr)
+                 and fin(v.geo.mu0) and fin(v.geo.mu1) and fin(v.geo.s2) and std::isfinite(v.geo.n)
+                 and std::isfinite(v.geo.sum_x) and std::isfinite(v.geo.sum_w);
+            for (const auto& a : v.bern)
+                ok = ok and fin(a.hit_c) and std::isfinite(a.n) and std::isfinite(a.sum_q) and std::isfinite(a.sum_hit_w) and std::isfinite(a.sum_f);
+            if (not ok) return std::nullopt;
+            v.llr = 0.f;
             L.views_.push_back(v);
+            L.recompute(L.views_.size() - 1, geometry_may_refute);
         }
         if (not tok().empty()) return std::nullopt;
         return L;
