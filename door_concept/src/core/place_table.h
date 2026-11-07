@@ -17,6 +17,7 @@
 #include <cmath>
 #include <cstdint>
 #include <optional>
+#include <set>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -33,6 +34,7 @@ struct PlaceRow
     float depth = 0.f;                    // the aperture's wall depth, set by the caller from the fit; 0 = unknown
     float L_evidence = 0.f;               // ledger sum + crossing evidence, WITHOUT the structural prior
     ViewLedger ledger; int visit = 0; std::int64_t last_seen_wall_ms = 0;
+    std::int64_t sighted_wall_ms = 0;     // the last SIGHTING (commands move last_seen, not this): the hazard's exposure counts from here
     std::optional<std::int64_t> removed_wall_ms;   // a deleted phantom: "no door here", kept for ever
 };
 
@@ -69,13 +71,34 @@ public:
     }
 
     /// One revisit of a remembered place after `elapsed_s`: found=false is a change. Updates the shared change hazard.
-    /// The hazard is table-wide, so no row is needed.
+    /// The hazard is table-wide, so no row is needed. Callers go through sample_revisit (one sample per place per visit).
     void note_revisit(bool found, double elapsed_s)
     {
         if (not std::isfinite(elapsed_s) or elapsed_s < 0.0) return;
         if (not found) changes_ += 1.0;
         sum_elapsed_s_ += elapsed_s;
     }
+
+    /// ONE SAMPLE PER PLACE PER VISIT (the hazard is learned per visit of a place, never from a re-detection inside one visit):
+    /// found = the place was matched again in that visit; not found = it was in view and removed in that visit. A place that has
+    /// already given its sample this visit gives none (a removal followed by a re-detection is one visit, one sample). The elapsed
+    /// exposure runs from the row's last SIGHTING to now_wall_ms. Returns whether a sample was taken.
+    bool sample_revisit(std::string_view room, std::string_view name, int visit, bool found, std::int64_t sighted_wall_ms,
+                        std::int64_t now_wall_ms)
+    {
+        if (sighted_wall_ms <= 0 or now_wall_ms <= sighted_wall_ms) return false;
+        if (not sampled_.emplace(std::string(room) + "/" + std::string(name), visit).second) return false;
+        note_revisit(found, double(now_wall_ms - sighted_wall_ms) * 1e-3);
+        return true;
+    }
+    [[nodiscard]] PlaceRow* find(std::string_view room, std::string_view name)
+    {
+        const auto it = std::ranges::find_if(rows_, [&](const PlaceRow& r) { return r.room == room and r.name == name; });
+        return it == rows_.end() ? nullptr : &*it;
+    }
+    /// The learned hazard's state (changes, summed exposure in s): persisted with the identity table (`#hazard` line).
+    [[nodiscard]] ParsedIdentityTable::Hazard hazard_state() const { return {changes_, sum_elapsed_s_}; }
+    void set_hazard(const ParsedIdentityTable::Hazard& h) { changes_ = h.changes; sum_elapsed_s_ = h.sum_elapsed_s; }
 
     [[nodiscard]] double hazard_per_s() const { return (kPriorShape + changes_) / (kPriorRateS + sum_elapsed_s_); }
 
@@ -91,6 +114,7 @@ public:
     void load(const ParsedIdentityTable& t, float fallback_sd)
     {
         for (const auto& i : t.rows) upsert(row_of(i, fallback_sd, geometry_may_refute_));
+        if (t.hazard.has_value()) set_hazard(*t.hazard);   // SET, not added: loading twice is the same table
     }
 
     /// One identity row as a place row (the restore path reads the same thing: the row IS the belief's memory).
@@ -104,6 +128,7 @@ public:
         r.visit = i.visit.value_or(0);
         r.last_seen_wall_ms = i.seen_wall_ms.value_or(0);
         r.removed_wall_ms = i.removed_ms;
+        r.sighted_wall_ms = i.sighted_ms.value_or(i.seen_wall_ms.value_or(0));
         if (i.ledger)
             if (auto L = ViewLedger::parse(*i.ledger, geometry_may_refute)) r.ledger = std::move(*L);   // corrupt cell: empty ledger
         return r;
@@ -131,6 +156,7 @@ public:
             i.place_sd = std::sqrt(std::max(1e-12f, 0.5f * (r.cov(0, 0) + r.cov(1, 1))));
             if (not r.ledger.views().empty()) i.ledger = r.ledger.serialise();
             i.visit = r.visit; i.removed_ms = r.removed_wall_ms;
+            if (r.sighted_wall_ms > 0) i.sighted_ms = r.sighted_wall_ms;
             out.push_back(std::move(i));
         }
         return out;
@@ -142,6 +168,7 @@ private:
     bool geometry_may_refute_;
     std::vector<PlaceRow> rows_;
     double changes_ = 0.0, sum_elapsed_s_ = 0.0;
+    std::set<std::pair<std::string, int>> sampled_;   // (room/name, visit) pairs that already gave their revisit sample (this process)
 };
 
 /// Task 9: the belief of a door CARRIED across a room switch (the `exit` fact). The new room's ledger is empty (views are per room).

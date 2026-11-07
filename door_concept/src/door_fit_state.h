@@ -290,9 +290,10 @@ struct DoorFitState
     // A commanded open/close seen satisfied since the last existence update (the actuator reply path): consumed ONCE, into
     // the view current at the next update (ViewLedger::add_actuation).
     float pending_actuation_llr = 0.0f;
-    // A door RESTORED from a remembered row: that row's last-seen wall-clock ms, until the revisit is counted (PlaceTable::note_revisit:
-    // found on its first detection, a change when it is removed). nullopt = not a restored door, or already counted.
-    std::optional<std::int64_t> remembered_seen_ms;
+    // The remembered place row this door descends from (a restored door's own row; a candidate's matched row at its birth). Keys the
+    // place table's revisit sample (PlaceTable::sample_revisit: one per place per visit - found on the first detection / birth,
+    // not found on a removal). Empty = a place never remembered.
+    std::string place_row_name;
     int   place_visit = 0;   // the ledger's visit: frames of different visits are never one view
     int   last_source   = 0;       // MaskSlice::source of the slice that last detected this door (0 = zed, 1 = ricoh)
     float last_detect_w = 1.0f;    // that detection's weight in [0, 1]: a ZED slice 1; a ricoh slice its association likelihood exp(-m2/2) under the door's + its own variance

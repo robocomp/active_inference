@@ -20,7 +20,7 @@
  *     an opened leaf's predicted silhouette goes unlit, e_free spikes and the existence channel removes the
  *     door BECAUSE it opened;
  *   · the room-containment prior keyed on the panel centre, which an outward swing moves by w/2 (0.45 m for
- *     the fitted w = 0.90 observed live) against Existence.RoomMarginM = 0.40 — and that branch bypasses the
+ *     the fitted w = 0.90 observed live) against the old Existence.RoomMarginM = 0.40 (retired) — and that branch bypasses the
  *     sensor channel entirely, so nothing can rescue it.
  * Collapsing the geometry into one function is what stops M1 (phi as a fitted DOF) and M2 (discrete
  * hinge/swing hypotheses) from reintroducing that class of bug.

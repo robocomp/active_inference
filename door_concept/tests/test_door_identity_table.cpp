@@ -313,7 +313,7 @@ int main()
             float phi_est = 0.f, phi_sigma = 0.f, hinge_llr = 0.f, swing_llr = 0.f;
             std::chrono::steady_clock::time_point phi_last_t{}; bool phi_from_command = true;
             std::int64_t last_detection_wall_ms = 0;
-            std::optional<float> remembered_place_sd; std::optional<std::int64_t> remembered_seen_ms; core::PlaceBelief belief;
+            std::optional<float> remembered_place_sd; std::string place_row_name; core::PlaceBelief belief;
         } inst;   // as the node-added path left it: (0,0), unseeded, 0 matched frames
         CHECK(not fitted_this_cycle(false, inst.matched_frames));           // the bug: never fitted ⇒ no approach
         const auto r = full_row("room_1", "door_1", -0.57f, 4.61f);
@@ -323,14 +323,14 @@ int main()
         // the row IS the belief's memory (Task 9): its evidence comes back as `carried`, aged by the learned hazard (0 s here), with
         // the row's ledger; the revisit is noted for the place table (the hazard is learned from it)
         CHECK(near(inst.belief.L_evidence(), 4.0f, 1e-3f));   // no age: the full remembered evidence
-        CHECK(inst.last_detection_wall_ms == kNowMs and inst.remembered_seen_ms.has_value() and *inst.remembered_seen_ms == kNowMs);   // Task D-C
+        CHECK(inst.last_detection_wall_ms == kNowMs and inst.place_row_name == "door_1");   // Task D-C
         CHECK(fitted_this_cycle(false, inst.matched_frames));               // fitted with no fresh mask
         CHECK(inst.seed_wh_from_box and inst.leaf_side_hint.has_value() and not inst.phi_from_command);
         // An identity-only row (no pose) still gets its place; size stays the instance's (template) one.
         IdentityRow id_only; id_only.room = "room_1"; id_only.name = "door_5"; id_only.xy = {2.f, -3.f};
         FakeInst j;
         seed_restored_instance(j, id_only, core::PlaceTable(false).restored_belief(core::PlaceTable::row_of(id_only, 0.1f, false), kNowMs), std::chrono::steady_clock::now());
-        CHECK(near(j.model.s.ap_cx, 2.f) and near(j.belief.L_evidence(), 0.0f) and not j.leaf_side_hint.has_value() and not j.remembered_seen_ms.has_value());
+        CHECK(near(j.model.s.ap_cx, 2.f) and near(j.belief.L_evidence(), 0.0f) and not j.leaf_side_hint.has_value() and j.place_row_name == "door_5");
     }
 
     // ── 6b. THE ROW FORMAT (Task 7/10): ledger, visit and removed_ms survive the file; a REMOVED row is kept ("no door here"), is

@@ -242,6 +242,7 @@ public:
         rc::DoorFitState theta;
         PlaceBelief belief;
         std::optional<std::int64_t> seeded_from_removed_ms;   // the removed row it was seeded from (C_delete sample at birth)
+        std::string seeded_name;                 // the place row it was seeded from (the revisit sample is taken at birth, per visit)
     };
     [[nodiscard]] const std::vector<Candidate>& candidates() const { return candidates_; }
     [[nodiscard]] const EgoMotion& ego() const { return ego_; }

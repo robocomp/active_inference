@@ -23,7 +23,7 @@ DoorConfig load_door_config(const ConfigLoader& cfg)
     // ★RETIRED KEYS ARE REFUSED, NOT IGNORED (docs/superpowers/plans/2026-11-07-door-existence-model.md).
     if (const auto stale = retired_door_keys_present([&](const std::string& k) { return cfg.exists(k); }); not stale.empty())
     {
-        std::print("{}", retired_door_keys_message(stale));
+        std::print(stderr, "{}", retired_door_keys_message(stale));   // a refused start reads on stderr
         std::exit(EXIT_FAILURE);
     }
 

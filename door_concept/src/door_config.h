@@ -435,9 +435,6 @@ struct DoorConfig
     // (the last of which was parsed but never read). Detectability is now measured from the projection itself.
     bool  exist_enabled            = true;   // Existence.Enabled — use the log-odds belief (else the old prune)
     float exist_actuation_llr      =  3.0f;  // Existence.ActuationLlr — log-odds of "it changed state when WE commanded it"
-    // Physical sensor rates for the log-likelihood ratio (rc::exist::SensorModel), NOT gates.
-    float exist_detection_prob     = 0.85f;  // Existence.DetectionProb — P(mask lights a predicted pixel | door present & observable)
-    float exist_clutter_prob       = 0.05f;  // Existence.ClutterProb   — P(mask lights a predicted pixel | no door)
     float exist_occlusion_margin_m = 0.30f;  // Existence.OcclusionMarginM — an occluder must be ≥ this much CLOSER to count
     // Room-containment pose prior: P(a door outside the room walls) ≈ 0. Applies even when the instance is out
     // of view / behind a wall (a localization glitch can birth a door outside; the sensor then can't reach it
@@ -447,19 +444,9 @@ struct DoorConfig
     // far face T beyond it — so "outside the polygon" is the NORMAL place for a real door. The containment
     // prior is now a static log-prior −½(dist-to-band/σ)² (0 on the band, replaced each cycle, never summed),
     // and a leaf sample past the room-side face (a leaf swung OUT, seen through the opening) loses P(detect)
-    // by P(through) (σ below). RoomMarginM / OutOfRoomGain no longer drive the per-door prior (RoomMarginM
-    // still gates births).
+    // by P(through) (σ below). The retired out-of-room gain / margin keys are gone (the prior is the band alone).
     float exist_wall_thickness_m   = 0.20f;  // Existence.WallThicknessM — T, room-side face → far face (m)
     float exist_boundary_sigma_m   = 0.10f;  // Existence.BoundarySigmaM — σ of door registration ⊕ polygon face (m)
-    // ── MINIMUM-HEIGHT prior ───────────────────────────────────────────────────────────────────────
-    // A door is an aperture a person walks THROUGH: P(door | it tops out below ~1.8 m) ≈ 0. Same kind of
-    // categorical prior as RoomPrior above (a fact about what a door IS, not a tuned detectability curve),
-    // and applied the same way: suppress the BIRTH, and draw a strong negative on an instance that is
-    // confidently too short. It MUST be judged on the observed support top, never on the fitted h — the
-    // template anchor pins h at 2.0 m regardless of evidence, so a test on h can never fire. See
-    // DoorInstance::obs_top_z. MinConf guards against acting on a handful of clipped views.
-    bool  exist_min_height_prior = true;     // Existence.MinHeightPrior
-    float exist_min_height_m     = 1.80f;    // Existence.MinHeightM — a door's support must reach this (m)
     bool  exist_geometry_may_refute = false; // Existence.GeometryMayRefute — §8.5: the geometry channel may only RAISE L until benched on ROI tapes
     float exist_max_room_s         = 300.0f; // Existence.MaxRoomS — mirrors controller ExploreTour.MaxRoomS: the longest a room's exploration lasts (s); C_delete(route) = C_delete(ordinary) + this
     // ── Openable door: APERTURE / LEAF decomposition (M0 = structure only) ─────────────────────────

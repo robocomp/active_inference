@@ -29,7 +29,6 @@
 #include "../../../common/contour_edge/contour_edge_check.h"     // rc::edges::PreparedFrame / contour_edge_support
 #include "../../../common/contour_edge/contour_depth_check.h"    // rc::edges::contour_depth_support
 #include "../../../common/detectability/detectability.h"         // rc::detect — the YOLO inverse model (SHARED)
-#include "../../../common/existence_belief/existence_belief.h"   // rc::exist (SHARED)
 
 namespace rc::door::core
 {
@@ -334,10 +333,7 @@ void DoorCore::prepare_candidates(const DoorCycleInput& in, const std::vector<rc
                 c.belief.ledger = row->ledger;
                 c.belief.carried = places_.aged_L(*row, in.t_wall_ms) - row->ledger.sum();
                 c.seeded_from_removed_ms = row->removed_wall_ms;
-                // A REVISIT of a remembered place (the hazard is learned from these): a detection at a place remembered as a door is
-                // "found"; at a place remembered as "no door here" the world has CHANGED.
-                if (row->last_seen_wall_ms > 0)
-                    places_.note_revisit(not row->removed_wall_ms.has_value(), double(in.t_wall_ms - row->last_seen_wall_ms) * 1e-3);
+                c.seeded_name = row->name;   // its revisit sample is taken if it is BORN (door_core.cpp), never from one detection
             }
             candidates_.push_back(std::move(c));
             best = static_cast<int>(candidates_.size() - 1);
@@ -450,13 +446,15 @@ void DoorCore::update_existence(const DoorCycleInput& in, DoorCycleOutput& out)
             if (const auto of = observed_frame_.find(id); of != observed_frame_.end() and of->second == pkt.frame_id)
                 fr_door.zed_ran = fr_door.ricoh_ran = fr_door.ricoh_hits_only = false;
             inst.exist_trace = observe_place(inst.belief, inst, fr_door, visit_, act, &rows);
-            // A door restored from a remembered row is a REVISIT of that place: its first detection finds it again (the learned hazard's
-            // "unchanged" sample); its removal below is the "changed" one. Counted once.
-            if (inst.remembered_seen_ms.has_value() and (inst.exist_trace.zed_hit > 0.0f or inst.exist_trace.ric_hit > 0.0f))
-            {
-                places_.note_revisit(true, double(in.t_wall_ms - *inst.remembered_seen_ms) * 1e-3);
-                inst.remembered_seen_ms.reset();
-            }
+            // A door that descends from a remembered row: its first detection in this visit finds the place again (the learned
+            // hazard's "unchanged" sample; one per place per visit - PlaceTable::sample_revisit). The sighting moves to now.
+            if (not inst.place_row_name.empty() and (inst.exist_trace.zed_hit > 0.0f or inst.exist_trace.ric_hit > 0.0f))
+                if (PlaceRow* row = places_.find(room_name_, inst.place_row_name); row != nullptr)
+                {
+                    places_.sample_revisit(room_name_, inst.place_row_name, visit_, not row->removed_wall_ms.has_value(),
+                                           row->sighted_wall_ms, in.t_wall_ms);
+                    row->sighted_wall_ms = in.t_wall_ms;
+                }
             if (act != 0.0f and not std::isfinite(inst.exist_trace.act_dl))
                 inst.pending_actuation_llr += act;   // no view and no ZED pose this cycle: the evidence waits (fix round 1)
             const float L = inst.belief.L();
@@ -528,18 +526,19 @@ void DoorCore::update_existence(const DoorCycleInput& in, DoorCycleOutput& out)
         const float L = inst.belief.L();
         diag("stdout", std::format("door_concept: [existence] REMOVE id={} {} (L={:.2f} < delete line {:.2f}, role {})\n", id,
                                    inst.node_name, L, inst.exist_trace.delete_line, role_name(inst.role)), out);
+        // The robot is back in this room, the place was in view (the door was judged on views with q > 0) and the remembered door is
+        // gone: a CHANGE since the row was last sighted - one sample per place per visit (taken BEFORE the removed row replaces it).
+        if (not inst.place_row_name.empty())
+            if (const PlaceRow* row = places_.find(room_name_, inst.place_row_name); row != nullptr)
+                places_.sample_revisit(room_name_, inst.place_row_name, visit_, false, row->sighted_wall_ms, in.t_wall_ms);
         PlaceRow r;
         r.room = room_name_; r.name = inst.node_name; r.xy = inst.aperture.centre_xy();
         const float sd2 = inst.ai2_initialized ? std::max(0.0f, inst.ai2_belief.covariance()(0, 0)) : cfg.tracker_detection_noise_m * cfg.tracker_detection_noise_m;
         r.cov = Eigen::Matrix2f::Identity() * sd2;
         r.yaw = inst.aperture.yaw(); r.width = inst.aperture.w; r.height = inst.aperture.h; r.depth = inst.aperture.thickness;
         r.L_evidence = inst.belief.L_evidence(); r.ledger = inst.belief.ledger; r.visit = visit_;
-        r.last_seen_wall_ms = in.t_wall_ms; r.removed_wall_ms = in.t_wall_ms;
+        r.last_seen_wall_ms = in.t_wall_ms; r.sighted_wall_ms = in.t_wall_ms; r.removed_wall_ms = in.t_wall_ms;
         places_.upsert(std::move(r));
-        // The robot is back in this room, the place was in view (the door was judged on views with q > 0) and the remembered door is
-        // gone: a CHANGE since the row was last seen - the learned hazard's other sample.
-        if (inst.remembered_seen_ms.has_value())
-            places_.note_revisit(false, double(in.t_wall_ms - *inst.remembered_seen_ms) * 1e-3);
         observed_frame_.erase(id);
         world_->before_remove(id);
         const auto& s = inst.model.state();

@@ -193,20 +193,12 @@ void read_door_config_fields(DoorConfig& out, GetF&& getf, GetI&& geti, GetS&& g
     out.exist_actuation_llr      = getf("Existence.ActuationLlr", 3.0f,
             "Existence.ActuationLlr — log-odds a door gains when it changed state on OUR command (open/close satisfied after "
             "our request): ln(P(change | a real leaf, commanded) / P(a perceived change | a phantom)) ≈ ln(0.9/0.05)");
-    out.exist_detection_prob     = getf("Existence.DetectionProb", 0.85f,
-            "Existence.DetectionProb — P(mask lights a predicted pixel | door present & observable)");
-    out.exist_clutter_prob       = getf("Existence.ClutterProb", 0.05f,
-            "Existence.ClutterProb — P(mask lights a predicted pixel | no door)");
     out.exist_occlusion_margin_m = getf("Existence.OcclusionMarginM", 0.30f,
             "Existence.OcclusionMarginM — an occluder must be ≥ this much CLOSER to count");
     out.exist_wall_thickness_m   = getf("Existence.WallThicknessM", 0.20f,
             "Existence.WallThicknessM — wall thickness T: an aperture lies in the band [0,T] beyond the room-side polygon face");
     out.exist_boundary_sigma_m   = getf("Existence.BoundarySigmaM", 0.10f,
             "Existence.BoundarySigmaM — σ of the door's registration against the room polygon face (wall-band prior + leaf-beyond weight)");
-    out.exist_min_height_prior   = getb("Existence.MinHeightPrior", true,
-            "Existence.MinHeightPrior");
-    out.exist_min_height_m       = getf("Existence.MinHeightM", 1.80f,
-            "Existence.MinHeightM — a door's support must reach this (m)");
     out.exist_geometry_may_refute = getb("Existence.GeometryMayRefute", false,
             "Existence.GeometryMayRefute — false: the reprojection-agreement channel can only push L up (spec §8.5, until benched)");
     out.exist_max_room_s         = getf("Existence.MaxRoomS", 300.0f,

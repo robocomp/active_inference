@@ -97,6 +97,7 @@ inline bool apply_actuation_to_face(std::vector<IdentityRow>& rows, const FaceRe
         const auto [pn, sn] = leaf_after_actuation(pa, sa, target, q);
         if (r.exist_logodds.has_value() and r.seen_wall_ms.has_value())   // age the evidence to now (toward 0 = ignorance) before the stamp moves
             r.exist_logodds = float(double(*r.exist_logodds) * std::exp(-existence_hazard_per_s * std::max<double>(0.0, double(now_ms - *r.seen_wall_ms) * 1e-3)));
+        if (not r.sighted_ms.has_value()) r.sighted_ms = r.seen_wall_ms;   // the command is no sighting: the hazard's exposure keeps counting from the last one
         r.leaf->phi = pn;
         r.leaf->phi_sigma = sn;
         r.seen_wall_ms = now_ms;

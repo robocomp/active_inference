@@ -71,7 +71,7 @@ struct ExistWorld final : TrackerWorld
     }
     rc::DoorFitState* begin_fit(std::uint64_t id) override
     { const auto it = st.find(id); return it == st.end() ? nullptr : &it->second; }
-    // ── the existence slice's removal: the world's half (live: remember_ghost + teardown, then the graph delete) ──
+    // ── the existence slice's removal: the world's half (live: mark the identity row removed + teardown, then the graph delete) ──
     void before_remove(std::uint64_t id) override { events.push_back("before " + std::to_string(id)); }
     void remove_door(std::uint64_t id, float) override { events.push_back("remove " + std::to_string(id)); st.erase(id); }
 };

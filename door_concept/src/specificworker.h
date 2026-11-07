@@ -258,7 +258,7 @@ private:
     //   · a door detected in the new room is created as a child of the old one and its RT edge is
     //     published in the old room's frame, i.e. wrong by the whole inter-room seam (metres);
     //   · the room-containment prior then loads the OLD polygon, finds every new-room door outside it,
-    //     and removes it at OutOfRoomGain per frame — a path that bypasses the sensor channel entirely,
+    //     and removes it — a path that bypassed the sensor channel entirely (the old per-frame out-of-room gain),
     //     so nothing can rescue it. The visible symptom is doors flickering in and out in the new room,
     //     which looks nothing like a room-tracking bug.
     // (This is the write-once room memo the fleet audit lists as still open in nine agents; this is one.)

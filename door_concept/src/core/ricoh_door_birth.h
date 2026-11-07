@@ -9,7 +9,7 @@
 //      from the wall normal): grazing rays are ill-conditioned and say little.
 //   2. VARIANCE: R0 / (R0 + depth_var), R0 = the fit's own R for a ZED slice at that range (door_fit.cpp).
 // Also here: which wall hits a bearing sees (wall_hit, wall_hypotheses), which strips the 360 detector processed
-// (ricoh_looked: EMPTY windows = unknown = not looked at) and the line-of-sight weight. The ricoh birth BANK (ripening bar) and
+// (ricoh_looked: EMPTY windows = unknown = not looked at). The ricoh birth BANK (ripening bar) and
 // the separate ricoh view pool are GONE (docs/superpowers/plans/2026-11-07-door-existence-model.md): a ricoh frame is a Bernoulli
 // trial in the same view ledger as the ZED's, and a place is born by comparison (L > 0), not by ripening.
 #pragma once
@@ -212,25 +212,6 @@ struct RicohRange
     o.xy = O + dir * r;
     o.var = base_var + (lat_per_m * r) * (lat_per_m * r) + var_r;
     return o;
-}
-
-/// LINE OF SIGHT from the 360 camera to a door's aperture centre, WALLS included: a door lies IN a wall, so the ray meets
-/// the polygon at ~the door's distance; a wall met clearly BEFORE it blocks the view. Continuous: the shortfall in units of
-/// the same wall-range and measurement variances ricoh_range uses. 1 = clear. No polygon / no hit ⇒ 1 (nothing blocks).
-[[nodiscard]] inline float los_weight(const std::vector<Eigen::Vector2f>& poly, const Eigen::Vector2f& O,
-                                      const Eigen::Vector2f& target, float sigma_base_m, float lat_per_m)
-{
-    const Eigen::Vector2f d = target - O;
-    const float dist = d.norm();
-    if (dist < 1e-3f) return 1.0f;
-    const auto h = wall_hit(poly, O, d / dist);
-    if (not h) return 1.0f;
-    const float R0     = sigma_base_m * sigma_base_m + (lat_per_m * dist) * (lat_per_m * dist);
-    const float tanphi = std::sqrt(std::max(0.0f, 1.0f - h->cos_inc * h->cos_inc)) / std::max(h->cos_inc, 1e-3f);
-    const float lever  = lat_per_m * h->r;
-    const float var    = R0 + std::max(lever * lever * tanphi * tanphi, 1e-6f);
-    const float short_by = std::max(0.0f, dist - h->r);
-    return std::exp(-0.5f * short_by * short_by / var);
 }
 
 }  // namespace rc::door::core

@@ -442,59 +442,9 @@ void DoorCore::associate(const DoorCycleInput& in, DoorCycleOutput& out)
             if (sl.support_end <= sl.support_begin) { ++ctr.no_support; continue; }
             if (not sl.has_depth) { ++ctr.bearing_only; continue; }
 
-            // ★A `door` LABEL IS NOT A DOOR-SIZED THING. YOLO-sem sometimes returns a positive door mask
-            // delimiting a much smaller region — a jamb, a panel edge, a fragment of the leaf. It is a
-            // TRUE positive for the class and a false one for the object, and accepting it is worse than
-            // dropping it: assigned to a live door it covers a fraction of the predicted silhouette, so
-            // occ comes out small and free large, and the door is REMOVED on the strength of having been
-            // detected. Observed live 2026-09-09.
-            //
-            // The prior is already here and already strong — DoorModel prior_h 2.00 +-0.08 m — it was
-            // just never used as a test on the observation, only inside the fit.
-            //
-            // ★ONLY THE "TOO SMALL" DIRECTION, and only on an UNTRUNCATED view. A mask clipped by the
-            // image border, or partly occluded, has a height that is a LOWER BOUND, so judging it would
-            // reject the real door exactly when the robot is close enough for it to overflow the frame.
-            // Nothing is rejected for being too LARGE either: that is a merge/clutter question, not a
-            // size one, and the fit already handles it.
-            // ⚠MEASURED, NOT APPLIED. Two attempts at a size prior on the MASK have now been backed out:
-            //   1. `if (h < prior_h - 3*sigma) continue;` — a magic cutoff, against the modelling rule.
-            //   2. the same thing as a Gaussian in the state prior's own sigma — which merely HID the
-            //      cutoff: at sigma 0.08 m a 1.80 m mask scores 0.044 and a 1.60 m mask 0.000, so any
-            //      real door slightly clipped at the floor datum or partly occluded stopped being born
-            //      at all. Observed immediately: births blocked.
-            // The error was using the prior's uncertainty about the DOOR'S TRUE HEIGHT as the noise model
-            // for a MASK'S MEASURED height. They are different quantities: a mask height is noisy and
-            // systematically UNDER-estimates (partial segmentation, occlusion, the floor datum), so its
-            // likelihood is wide and skewed, and I have not measured it.
-            // So: log mask_h, decide the observation model from the distribution, apply nothing until
-            // then. The reported failure — a small positive mask ending up REMOVING the door — also has
-            // no established mechanism yet; a size prior may not even be the right instrument for it.
-            // ★A LIKELIHOOD, NOT A CUTOFF. The first version of this was `if (h < prior_h - 3*sigma)
-            // continue;` — a magic threshold built out of a prior that is already a distribution, which
-            // is precisely the shape this project's modelling rule says not to add. The prior IS the
-            // model; the observation's weight should fall out of it continuously.
-            //
-            // One-sided on purpose: a mask TALLER than the prior is not penalised (that is a merge or
-            // clutter question the fit already owns), and a TRUNCATED mask is not penalised at all,
-            // because a clipped or occluded height is a LOWER BOUND — judging it would discount the real
-            // door exactly when the robot is close enough for it to overflow the frame. So the weight
-            // only expresses "this is too short to be a whole door, seen whole".
-            //
-            // Nothing is rejected. A 0.7 m fragment simply carries a small fraction of an observation's
-            // worth, in the same units as every other factor in birth_evidence (confidence x range x
-            // unclaimed), and a full-height mask carries all of it.
-            float size_w = 1.0f;
-            {
-                const float untrunc = 1.0f - std::clamp(sl.trunc_frac, 0.0f, 1.0f);   // clamp: trunc_frac is a fraction; kept in [0,1] against a producer's out-of-range value, not a gate
-                const float mask_h  = sl.bbox_max.z() - sl.bbox_min.z();
-                if (sl.has_depth and sl.bbox_max.allFinite() and sl.bbox_min.allFinite()
-                    and untrunc > 0.5f and mask_h > 0.0f and mask_h < cfg.door_prior_h_m)
-                {
-                    const float z = (cfg.door_prior_h_m - mask_h) / std::max(1e-3f, cfg.door_prior_h_std);
-                    size_w = std::exp(-0.5f * z * z);
-                }
-            }
+            // (No size test on the raw MASK height - neither a weight nor a gate: spec 3.2 scores size only on the FITTED width/height
+            //  with their posterior sds, in the place prior. A short fragment or a counter is a candidate whose size term is large and
+            //  negative; it is not born because its L stays below 0.)
             rc::DetectionView dv;
             dv.xy = Eigen::Vector2f(sl.centroid.x(), sl.centroid.y());
             dv.slice_index = i;
@@ -528,8 +478,6 @@ void DoorCore::associate(const DoorCycleInput& in, DoorCycleOutput& out)
             // `ev` below (diagnostic counters only) is the old observation weight: confidence x range x admissible x ricoh weight.
             dv.birth_evidence = rc::birth::evidence({sl.confidence, sl.range}, birth_detect,
                                                     birth_new_obs, frame_admissible(sl, ego_, cfg)) * ricoh_w;
-            // ⚠size_w deliberately NOT multiplied in — see the note above. Carried only to be logged.
-            dv.dbg_size_w = size_w;
 
             // ★MUTUAL EXCLUSION — no two objects occupy the same space (SHARED, common/exclusion).
             // A continuous support multiplied into the birth evidence exactly like the others above, so a
@@ -574,7 +522,7 @@ void DoorCore::associate(const DoorCycleInput& in, DoorCycleOutput& out)
     // range. If a cluttered scene collapses to ONE big slice (npts ≫ a clean single door) the extra doors
     // never get born because no separate detection ever arrives — the failure is upstream, not in birth. The
     // adapter writes the rows to etc/door_dets_log.csv (header: cycle,n_door_slices,slice_idx,npts,conf,cx,cy,range,
-    // trunc_frac,motion_var,mask_h,size_w,mask_z0,mask_z1). Formatted through the classic locale, as the old ofstream
+    // trunc_frac,motion_var,mask_h,mask_z0,mask_z1). Formatted through the classic locale, as the old ofstream
     // (global C++ locale "C") did.
     {
         ++dets_csv_rows_;
@@ -589,7 +537,7 @@ void DoorCore::associate(const DoorCycleInput& in, DoorCycleOutput& out)
             row << dets_csv_rows_ << ',' << dets_.size() << ',' << d.slice_index << ',' << n << ',' << sl.confidence
                 << ',' << sl.centroid.x() << ',' << sl.centroid.y() << ',' << sl.range << ','
                 << sl.trunc_frac << ',' << sl.motion_var << ','
-                << (sl.bbox_max.z() - sl.bbox_min.z()) << ',' << d.dbg_size_w << ','
+                << (sl.bbox_max.z() - sl.bbox_min.z()) << ','
                 << sl.bbox_min.z() << ',' << sl.bbox_max.z() << '\n';
         }
         diag("door_dets_log.csv", row.str(), out);
@@ -731,30 +679,6 @@ void DoorCore::births(const DoorCycleInput& in, DoorCycleOutput& out)
         // (No outside-the-room test here any more: the place prior scores an off-wall candidate — spec §3.2 — so a candidate
         //  outside the walls is simply never L > 0; the test only produced thousands of log-only SUPPRESS rows.)
 
-        // MINIMUM-HEIGHT prior at BIRTH: a door is an aperture a person walks THROUGH, so a blob that
-        // demonstrably tops out below MinHeightM is not one — it is a counter, a radiator, a window sill,
-        // a low cabinet. Zero prior mass ⇒ suppress, exactly like the room-containment prior above.
-        //
-        // Judged on the SUPPORT bbox top, never on the fitted h: the template anchor pins h at 2.0 m
-        // regardless of evidence, so by the time an instance exists it always claims to be door-height.
-        // (Live: the phantom at (−4.22,−2.16) reported h ≡ 2.000 for its whole life.)
-        //
-        // "demonstrably" is doing real work — a mask clipped by the image border has an UNOBSERVED top, so
-        // its bbox top is only a lower bound. The real door is routinely clipped, so suppressing on a
-        // truncated view would refuse to ever birth it. Require the view to be substantially untruncated.
-        if (cfg.exist_min_height_prior and pkt.slices[slice].has_depth and pkt.slices[slice].bbox_max.allFinite())
-        {
-            const float top    = pkt.slices[slice].bbox_max.z();
-            const float untrunc = 1.0f - std::clamp(pkt.slices[slice].trunc_frac, 0.0f, 1.0f);   // clamp: trunc_frac is a fraction, kept in [0,1] (domain); the 0.5 test below is the birth prior's, flagged where it is
-            if (untrunc > 0.5f and top < cfg.exist_min_height_m)
-            {
-                diag("stdout", std::format("door_concept: [tracker] BIRTH SUPPRESSED slice={} at ({:.2f},{:.2f}) — support tops "
-                                           "at {:.2f} m < {:.2f} m (untruncated view: it is NOT door-height)\n",
-                                           slice, c.x(), c.y(), top, cfg.exist_min_height_m), out);
-                record(K::Suppress, 0, c.x(), c.y(), std::format("top {:.2f}m", top), {}, out);
-                continue;
-            }
-        }
         // ★AN OPEN LEAF EXPLAINS ITS OWN DETECTION. Once phi is estimated (M1) the model knows where the
         // panel physically is — swung out of the doorway, often near-perpendicular to the robot — and a
         // `door` mask landing there is the SAME door, seen in its new pose. Without this the leaf reads
@@ -887,6 +811,17 @@ void DoorCore::births(const DoorCycleInput& in, DoorCycleOutput& out)
                 Candidate& cand = candidates_[static_cast<std::size_t>(ci)];
                 for (auto& [sid, st] : world_->fit_states())
                     if (sid == new_id) { st->belief = cand.belief; st->place_visit = visit_; }
+                // THE REVISIT SAMPLE of the place this candidate was seeded from, once per place per visit, taken now that the candidate
+                // is BORN (a single unconfirmed detection is no sample): a place remembered as a door that is a door again = unchanged
+                // (found); a place remembered as "no door here" that is a door now = changed.
+                if (not cand.seeded_name.empty())
+                {
+                    if (PlaceRow* row = places_.find(room_name_, cand.seeded_name); row != nullptr)
+                        places_.sample_revisit(room_name_, cand.seeded_name, visit_, not row->removed_wall_ms.has_value(),
+                                               row->sighted_wall_ms, in.t_wall_ms);
+                    for (auto& [sid, st] : world_->fit_states())
+                        if (sid == new_id) st->place_row_name = cand.seeded_name;
+                }
                 if (cand.seeded_from_removed_ms.has_value())
                     costs_.add(CostEstimator::Kind::DeleteOrdinary,
                                std::max(1e-3f, static_cast<float>(in.t_wall_ms - *cand.seeded_from_removed_ms) * 1e-3f), "online");

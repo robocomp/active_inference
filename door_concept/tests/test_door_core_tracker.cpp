@@ -429,23 +429,24 @@ int main()
         FakeWorld w;
         DoorCore core(cfg);
         core.connect(&w);
-        // ★Task 8: OUTSIDE the room a door place pays the wall band (−½(3/σ)²): it is never even a birth to suppress — the door model
-        //  decides (birth by comparison) before births()'s polygon test is reached. A 1.2 m blob IN the wall is a door place the model
-        //  believes (the size prior is scored on the fitted size, never the raw mask), and births()'s min-height rule suppresses it.
+        // Task 10: births() has NO polygon test and NO raw-mask-height gate any more. OUTSIDE the room a door place pays the wall band
+        //  (-1/2 (3/sigma)^2), so it is never born; a 1.2 m blob IN the wall is a place the model scores on its FITTED size only (never
+        //  the raw mask height), so it is not suppressed at birth either - the size term of its fit decides whether it lives. Nothing is
+        //  logged as a SUPPRESS for either.
         const Scene sc{{{Vec2f(-2.0f, 4.99f), 1.2f}, {Vec2f(8.0f, 0.0f), 2.0f}}};
         std::vector<rc::door::DoorDecision> sup;
         for (std::uint64_t c = 1; c <= 8; ++c)
             for (const auto& d : of_kind(core.step(cycle_input(c, static_cast<int>(c), sc)).decisions, K::Suppress))
                 sup.push_back(d);
-        CHECK(not sup.empty());
         bool outside = false, short_blob = false;
         for (const auto& d : sup)
         {
-            outside    |= d.note == "outside room" and d.a == 8.0;
-            short_blob |= d.note == "top 1.20m" and d.a == -2.0;
+            outside    |= d.note == "outside room";
+            short_blob |= d.note.starts_with("top ");
         }
-        CHECK(short_blob and not outside);
-        CHECK(w.created == 0);
+        std::print("suppressions: {} SUPPRESS row(s), {} door(s) created\n", sup.size(), w.created);
+        CHECK(not short_blob and not outside);
+        CHECK(w.created <= 1);   // at most the in-wall blob; the outside one is never born
     }
     {
         // a live door's swept arc explains a detection 0.9 m from its aperture (r = half_w + w + half_t ≈ 1.5 m) —

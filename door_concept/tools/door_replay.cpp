@@ -66,6 +66,7 @@
 
 #include "../src/core/door_core.h"
 #include "../src/door_config_fields.h"
+#include "../src/door_config_retired.h"   // the agent refuses these keys; the replay says so (see main)
 #include "../src/door_identity_table.h"
 #include "../src/door_dof.h"            // the live consumers' DOF table (dashboard, NBV adequacy)
 #include "../src/door_approach_pose.h"  // Task E: the approach offer's price (--look)
@@ -525,6 +526,11 @@ int main(int argc, char** argv)
     const auto hdr = f ? read_header(f, RecordingKind::Input, &version) : std::nullopt;
     if (not hdr.has_value()) { std::println("cannot read the input tape {}", argv[1]); return 2; }
     const EffectiveConfig eff(hdr->config_text);
+    // The agent REFUSES a config that sets a retired key. A tape recorded BEFORE the existence model carries them in its header and
+    // must still replay (the core ignores them), so here the same check is a loud warning, not a refusal.
+    if (const auto stale = rc::retired_door_keys_present([&](const std::string& k) { return eff.find(k) != nullptr; }); not stale.empty())
+        std::print(stderr, "WARNING (tape recorded under the old config; the agent would now refuse it, the replay ignores the keys): {}",
+                   rc::retired_door_keys_message(stale));
     int cfg_errors = 0;
     DoorCoreConfig cfg{config_from(eff, cfg_errors)};
     if (recess_prior_std > -1.5f)

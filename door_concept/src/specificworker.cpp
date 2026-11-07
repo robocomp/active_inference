@@ -252,6 +252,7 @@ void SpecificWorker::request_shutdown()
     {
         core_->costs().save("etc/door_costs.csv");   // the costs are the robot's own experience; the detector rates are NOT written
                                                      // back (fixed within a session, refit offline from etc/door_views_log.csv)
+        save_identities();   // carries the place table's learned change hazard (#hazard line)
         std::print("door_concept: [existence] saved etc/door_costs.csv (keep n={}, delete n={})\n",
                    core_->costs().n(rc::door::core::CostEstimator::Kind::Keep),
                    core_->costs().n(rc::door::core::CostEstimator::Kind::DeleteOrdinary));
@@ -485,7 +486,6 @@ void SpecificWorker::initialize()
     // The DSR-bound side of the fit. Owns the instance map; collaborates with the ingestor + scene graph.
     fitter_ = std::make_unique<rc::DoorFitter>(
         G, inner_eigen_.get(), cfg_, mask_ingestor_.get(), scene_graph_.get(), core_->fit());
-    // (the existence probes' central-image box, Existence.CentralRegionFrac, is read by the DoorCore from the config)
     {
         rc::door::core::DoorCoreSinks sinks;
         sinks.decision = [](const rc::door::DoorDecision& d)
@@ -516,13 +516,13 @@ void SpecificWorker::initialize()
                 {
                     std::ofstream f; rc::diag::open_rotating(f, "etc/door_dets_log.csv");
                     f << "cycle,n_door_slices,slice_idx,npts,conf,cx,cy,range,trunc_frac,motion_var,"
-                         // mask_h: slice height SPAN (m). size_w: candidate weight, UNAPPLIED.
+                         // mask_h: slice height SPAN (m).
                          // ★mask_z0 / mask_z1: the ABSOLUTE height band, which the span alone cannot give. It
                          // decides what a split door means: pieces at 0.0-0.92 and 0.9-2.2 TILE one panel and
                          // should be merged for association; two pieces both starting at 0.0 are competing
                          // claims about the same lower half, which would mean the segmenter can only ever see
                          // the bottom — and then downgrading them is right rather than merging them.
-                         "mask_h,size_w,mask_z0,mask_z1\n";
+                         "mask_h,mask_z0,mask_z1\n";
                     return f;
                 }();
                 if (dcsv) { dcsv << r.line; dcsv.flush(); }
@@ -1807,9 +1807,9 @@ void SpecificWorker::load_identities()
     // The name counter: the persisted one, raised past every remembered name (a file from before the counter).
     next_door_index_ = std::max(next_door_index_, rc::door::next_door_index_floor(parsed));
     std::print("door_concept: [identity] door-name counter: next fresh name door_{}\n", next_door_index_);
-    // The core's place table starts from the same rows: a matched row seeds a candidate's memory, and a REMOVED row ("no door here")
-    // is the prior of any candidate at that place (spec 3.7). The identity table remains the disk format (poses, leaf memory).
-    if (core_) core_->places().load(parsed, cfg_.tracker_detection_noise_m);
+    // The core loads its place table from the same file ONCE, on its first cycle (identity_load); the learned change hazard is set
+    // here too (SET, idempotent) so that a save before that first cycle does not overwrite it with the prior.
+    if (core_ and parsed.hazard.has_value()) core_->places().set_hazard(*parsed.hazard);
     identities_ = std::move(parsed.rows);
     decision_log_.record(rc::door::DoorDecisionKind::IdentityLoad, 0, {}, double(identities_.size()), double(parsed.malformed));
     for (const auto& i : identities_)   // spec 6.6: the table content at load is an explicit event
@@ -1831,7 +1831,8 @@ void SpecificWorker::save_identities() const
     std::ofstream f("etc/door_identities.csv", std::ios::trunc);
     if (not f)
         return;
-    rc::door::write_identity_table(f, identities_, next_door_index_);   // imbues the classic locale: never a comma decimal separator
+    rc::door::write_identity_table(f, identities_, next_door_index_,
+                                   core_ ? std::optional(core_->places().hazard_state()) : std::nullopt);   // imbues the classic locale: never a comma decimal separator
 }
 
 // Upsert BY PLACE WITHIN THE CURRENT ROOM: one hole in this room's walls carries one name. The same name may hold a
@@ -1885,7 +1886,10 @@ SpecificWorker::DoorIdentity SpecificWorker::identity_of(const rc::DoorInstance&
     if (not inst.belief.ledger.views().empty()) row.ledger = inst.belief.ledger.serialise();   // the views it came from (spec §3.7)
     row.visit = inst.place_visit;
     if (inst.last_detection_wall_ms > 0)
-        row.seen_wall_ms = inst.last_detection_wall_ms;   // Task D-C: the remembered belief's age
+    {
+        row.seen_wall_ms = inst.last_detection_wall_ms;
+        row.sighted_ms   = inst.last_detection_wall_ms;   // a SIGHTING (commands move seen_wall_ms, never this)
+    }   // Task D-C: the remembered belief's age
     if (inst.ai2_initialized)
     {
         // Task D-C round 2: how well the PLACE is known — the aperture centre s + w/2 along its wall.
@@ -1912,8 +1916,14 @@ void SpecificWorker::mark_identity_removed(const rc::DoorInstance& inst, std::in
     const auto& s = inst.model.state();
     const Eigen::Vector2f ap(s.ap_cx, s.ap_cy);
     const float same_hole = identity_radius_m() + std::max(0.0f, std::isfinite(s.w) ? s.w : 0.0f);
-    auto it = std::ranges::find_if(identities_, [&](const DoorIdentity& i)
-                                   { return i.room == room and (i.name == inst.node_name or (ap.allFinite() and (i.xy - ap).norm() < same_hole)); });
+    // The door's OWN row (exact name) first; failing that, the NEAREST row on the same hole - never merely the first in table order.
+    auto it = std::ranges::find_if(identities_, [&](const DoorIdentity& i) { return i.room == room and i.name == inst.node_name; });
+    if (it == identities_.end() and ap.allFinite())
+    {
+        float best = same_hole;
+        for (auto j = identities_.begin(); j != identities_.end(); ++j)
+            if (const float d = (j->xy - ap).norm(); j->room == room and d < best) { best = d; it = j; }
+    }
     if (it == identities_.end())
         return;   // never written (a candidate that did not reach a fit): the core's table holds its removed row
     it->exist_logodds = rc::door::remembered_logodds(inst);
@@ -2221,7 +2231,7 @@ void SpecificWorker::step_epistemic(rc::DoorInstance& inst, DSR::Node& node)
                                               0.5f * cfg_.pragmatic.robot_passage_width_m + cfg_.pragmatic.passage_margin_m);
         };
         // The existence question rides in the same gain (nats): high for a door only the 360 has reported, ~0 once the ZED settled it.
-        const rc::ExistenceLook exist_look{inst.belief.p(), cfg_.exist_detection_prob, cfg_.exist_clutter_prob};
+        const rc::ExistenceLook exist_look{inst.belief.p(), core_->detectors().zed.hit_rate, core_->detectors().zed.false_alarm};
         rc::EpistemicProposal prop =
             epistemic_planner_.compute(inst.ai2_belief, cfg_.ai2_range_noise_lat_per_m, cfg_.ai2_sigma_base_m,
                                        rc::nbv::sensor_from_graph(*G, inner_eigen_.get()), obstacles,
@@ -3209,7 +3219,19 @@ bool SpecificWorker::request_door_actuation_impl(rc::DoorInstance& inst, bool op
                                  "{:.2f} rad (obeyed p={:.2f})", open ? "OPEN" : "CLOSE", inst.node_name, chosen_id, other.room,
                                  inst.phi_cmd_to, rc::door::kActuationObeyed);
                 }
-            if (changed) save_identities();
+            if (changed)
+            {
+                // The core's place table follows (one source of L and age for a candidate seeded from it): same aged evidence and
+                // stamp as the identity row. The last SIGHTING is untouched - the command is not one.
+                for (const auto& r : identities_)
+                    if (auto* pr = core_->places().find(r.room, r.name); pr != nullptr and r.seen_wall_ms.has_value()
+                        and pr->last_seen_wall_ms != *r.seen_wall_ms)
+                    {
+                        if (r.exist_logodds.has_value()) pr->L_evidence = *r.exist_logodds;
+                        pr->last_seen_wall_ms = *r.seen_wall_ms;
+                    }
+                save_identities();
+            }
         }
     }
     return true;
@@ -4073,8 +4095,8 @@ void SpecificWorker::step_remembered_looks()
 
     const auto costs = core_->costs().costs(cfg_.exist_max_room_s);   // the same costed deletion line as a live door's
     const rc::door::look::Params prm{.robot_radius_m = 0.5f * cfg_.pragmatic.robot_passage_width_m,
-                                     .clutter_prob   = cfg_.exist_clutter_prob,
-                                     .detection_prob = cfg_.exist_detection_prob,
+                                     .clutter_prob   = core_->detectors().zed.false_alarm,
+                                     .detection_prob = core_->detectors().zed.hit_rate,
                                      .prior_w_m      = cfg_.door_prior_w_m,
                                      .prior_h_m      = cfg_.door_prior_h_m,
                                      .thickness_m    = cfg_.door_thickness_m};

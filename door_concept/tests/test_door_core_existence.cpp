@@ -687,6 +687,63 @@ int main()
         CHECK(same);
     }
 
+    // ── REVISIT SAMPLES (Task 10 fix round 1): one per place per visit, from a place that is BORN / found / removed in that visit,
+    //    never from a single detection and never twice in a visit. The observable is the table's learned hazard (changes, exposure).
+    constexpr std::int64_t kT0 = 1'700'000'000'000 - 60'000;   // the row was last sighted 60 s before the run starts
+    const auto remembered_row = [&](Rig& r, bool removed)
+    {
+        PlaceRow row;
+        row.room = "room_7"; row.name = "door_9"; row.xy = {1.0f, kWallY}; row.cov = Eigen::Matrix2f::Identity() * 0.04f;
+        row.width = 0.9f; row.height = 2.05f; row.depth = 0.05f; row.L_evidence = removed ? -2.0f : 1.0f;
+        row.last_seen_wall_ms = row.sighted_wall_ms = kT0;
+        if (removed) row.removed_wall_ms = kT0;
+        r.core.places().upsert(row);
+    };
+    {   // a candidate seeded from a remembered DOOR, born: ONE "found" sample (60 s exposure); the same visit's later frames add none
+        Rig r;
+        remembered_row(r, false);
+        r.look(A0, kDoor, {{1.0f, kWallY, 0.9f}});
+        CHECK(r.births.size() == 1);
+        auto h = r.core.places().hazard_state();
+        std::print("revisit_found: born -> changes {} exposure {:.2f} s, door '{}' descends from '{}'\n", h.changes, h.sum_elapsed_s,
+                   r.door() ? r.door()->node_name : "?", r.door() ? r.door()->place_row_name : "?");
+        CHECK(h.changes == 0.0 and h.sum_elapsed_s > 59.9 and h.sum_elapsed_s < 60.5);
+        CHECK(r.door() != nullptr and r.door()->place_row_name == "door_9");
+        const double e0 = h.sum_elapsed_s;
+        for (int k = 0; k < 30; ++k) r.look(A0, kDoor, {{1.0f, kWallY, 0.9f}});   // re-detections in the SAME visit
+        h = r.core.places().hazard_state();
+        CHECK(h.sum_elapsed_s == e0 and h.changes == 0.0);
+        CHECK(not r.core.places().sample_revisit("room_7", "door_9", 1, true, kT0, kT0 + 1000));   // this visit's sample is taken
+        CHECK(r.core.places().sample_revisit("room_7", "door_9", 2, true, kT0, kT0 + 1000));       // a NEW visit gives one
+    }
+    {   // a candidate seeded from a remembered REMOVED place, born: that is a change (the world changed), once
+        Rig r;
+        remembered_row(r, true);
+        r.look(A0, kDoor, {{1.0f, kWallY, 0.9f}});
+        const auto h = r.core.places().hazard_state();
+        std::print("revisit_removed_row_born: births {} -> changes {} exposure {:.2f} s\n", r.births.size(), h.changes, h.sum_elapsed_s);
+        if (not r.births.empty()) CHECK(h.changes == 1.0 and h.sum_elapsed_s > 59.9);
+    }
+    {   // a remembered door REMOVED in the visit (in view, judged absent): one "not found" sample; the removal's own row does not add
+        Rig r;
+        remembered_row(r, false);
+        r.look(A0, kDoor, {{1.0f, kWallY, 0.9f}});
+        CHECK(r.door() != nullptr);
+        // the first visit's sample was the birth's (found); a restored door that was NOT sampled yet is the removal case:
+        PlaceTable& pt = r.core.places();
+        PlaceRow other = *pt.find("room_7", "door_9"); other.name = "door_8"; other.xy = {-3.0f, kWallY};
+        pt.upsert(other);
+        r.door()->place_row_name = "door_8";
+        const auto before = pt.hazard_state();
+        for (int k = 0; k < 3; ++k) r.core.costs().add(CostEstimator::Kind::DeleteOrdinary, 0.1f, "test");   // losing a door is cheap: the line is high
+        for (int k = 0; k < 3 and r.removes.empty(); ++k) r.look(A0, kDoor);
+        const auto after = pt.hazard_state();
+        std::print("revisit_removed: {} REMOVE(s) -> changes {} -> {}, exposure {:.1f} -> {:.1f} s\n", r.removes.size(), before.changes,
+                   after.changes, before.sum_elapsed_s, after.sum_elapsed_s);
+        CHECK(r.removes.size() == 1 and after.changes == before.changes + 1.0 and after.sum_elapsed_s > before.sum_elapsed_s + 59.0);
+        CHECK(not pt.sample_revisit("room_7", "door_8", 1, false, kT0, kT0 + 1000));   // the visit's sample is spent: a re-detection adds none
+    }
+
     std::print("{}\n", fails == 0 ? "ALL PASS" : std::format("{} FAILURE(S)", fails));
     return fails == 0 ? 0 : 1;
 }

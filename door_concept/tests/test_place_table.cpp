@@ -124,6 +124,34 @@ int main()
       for (int i = 0; i < 10; ++i) U.note_revisit(false, 100.0);   // not found counts as a change
       CHECK(U.hazard_per_s() > prior);
     }
+    { // the learned hazard PERSISTS: write (#hazard line + sighted_ms column), parse, load into a fresh table -> the same lambda
+      PlaceTable T(false); T.upsert(row("door_1", 0.f, 0.f, 1.f));
+      for (int i = 0; i < 7; ++i) T.note_revisit(true, 1234.5);
+      for (int i = 0; i < 3; ++i) T.note_revisit(false, 321.25);
+      auto rows = T.to_identity_rows(); rows[0].sighted_ms = 987654321;
+      std::stringstream ss; write_identity_table(ss, rows, 5, T.hazard_state());
+      const auto parsed = parse_identity_table(ss);
+      CHECK(parsed.hazard.has_value() and parsed.malformed == 0 and parsed.rows.size() == 1);
+      CHECK(parsed.rows[0].sighted_ms.has_value() and *parsed.rows[0].sighted_ms == 987654321);
+      PlaceTable U(false); U.load(parsed, 0.3f);
+      CHECK(U.hazard_per_s() == T.hazard_per_s());                                   // bit-identical
+      CHECK(U.rows()[0].sighted_wall_ms == 987654321);
+      U.load(parsed, 0.3f); CHECK(U.hazard_per_s() == T.hazard_per_s());              // loading twice is the same table (SET, not add)
+      // an older file (no #hazard line) -> the Gamma prior alone
+      std::stringstream old("room,name,ap_x,ap_y\nroom_1,door_6,0.5,0.5\n");
+      PlaceTable V(false); V.load(parse_identity_table(old), 0.3f);
+      CHECK(std::fabs(V.hazard_per_s() - 1.0 / 600.0) < 1e-12);
+    }
+    { // one sample per place per visit (sample_revisit); the exposure runs from the last SIGHTING
+      PlaceTable T(false);
+      CHECK(T.sample_revisit("room_1", "door_1", 3, true, 1000, 61'000));
+      CHECK(not T.sample_revisit("room_1", "door_1", 3, false, 1000, 70'000));       // same visit: no second sample, found or not
+      CHECK(T.sample_revisit("room_1", "door_1", 4, false, 1000, 121'000));           // a new visit: one more
+      CHECK(T.sample_revisit("room_1", "door_2", 3, true, 1000, 61'000));             // another place: its own sample
+      CHECK(not T.sample_revisit("room_1", "door_3", 3, true, 0, 61'000));            // never sighted: no exposure, no sample
+      const auto h = T.hazard_state();
+      CHECK(h.changes == 1.0 and std::fabs(h.sum_elapsed_s - (60.0 + 120.0 + 60.0)) < 1e-9);
+    }
     { // depth: 0 round-trips with no pose; real depth 0.12 round-trips as 0.12
       PlaceTable T(false); PlaceRow a = row("door_1", 0.f, 0.f, 1.f); a.depth = 0.f; PlaceRow b = row("door_2", 3.f, 0.f, 1.f); b.depth = 0.12f;
       T.upsert(a); T.upsert(b);

@@ -16,6 +16,7 @@
  * writing imbues the classic locale, so the file has decimal POINTS whatever LC_NUMERIC the Qt process runs under.
  */
 #pragma once
+#include <format>
 
 #include <Eigen/Dense>
 
@@ -64,7 +65,7 @@ struct IdentityRow
     std::optional<LeafMemory>  leaf;
     /// Task D-C: wall-clock ms (system clock, epoch) at which the door was last DETECTED — the age of `exist_logodds`.
     /// Absent ⇒ unknown age (a 17-column row): the remembered belief is not trusted beyond its identity (see
-    /// restore_existence_prior).
+    /// PlaceTable::aged_L).
     std::optional<std::int64_t> seen_wall_ms;
     /// Task D-C round 2 (tour3C): the aperture centre's σ along its wall when written (m) — how well the remembered PLACE was
     /// known. Absent ⇒ unknown (a row written before the column existed): the restored belief keeps the birth seed's σ.
@@ -75,15 +76,20 @@ struct IdentityRow
     std::optional<std::string>  ledger;
     std::optional<int>          visit;
     std::optional<std::int64_t> removed_ms;
+    /// Wall-clock ms of the last SIGHTING of the place (a detection). A commanded actuation moves `seen_wall_ms` (the belief is aged
+    /// to the command) but NOT this: the revisit's elapsed time (the hazard's exposure) counts from the last time the place was SEEN.
+    /// Absent (a row of 22 or fewer columns) => `seen_wall_ms`.
+    std::optional<std::int64_t> sighted_ms;
 };
 
 inline constexpr std::string_view kIdentityHeader =
-    "room,name,ap_x,ap_y,yaw,width,height,depth,exist_logodds,hinge_x,hinge_y,open_x,open_y,hinge_llr,swing_llr,phi,phi_sigma,seen_ms,place_sd,ledger,visit,removed_ms";
+    "room,name,ap_x,ap_y,yaw,width,height,depth,exist_logodds,hinge_x,hinge_y,open_x,open_y,hinge_llr,swing_llr,phi,phi_sigma,seen_ms,place_sd,ledger,visit,removed_ms,sighted_ms";
 inline constexpr std::size_t kIdentityColsOld  = 4;
 inline constexpr std::size_t kIdentityCols17   = 17;   ///< 2026-10-20 .. 10-21: no seen_ms column (age unknown)
 inline constexpr std::size_t kIdentityCols18   = 18;   ///< 2026-10-21 .. 10-22: no place_sd column (place precision unknown)
 inline constexpr std::size_t kIdentityCols19   = 19;   ///< up to Task 7: no ledger / visit / removed_ms
-inline constexpr std::size_t kIdentityColsFull = 22;
+inline constexpr std::size_t kIdentityCols22   = 22;   ///< Task 7 .. 10: no sighted_ms column
+inline constexpr std::size_t kIdentityColsFull = 23;
 
 /// A transform read before the room existed resolves to |t| ~ 1e13 m (try35): not a place.
 inline constexpr float kIdentityMaxPlaceM = 1.0e3f;
@@ -94,6 +100,10 @@ struct ParsedIdentityTable
     bool unkeyed_format = false;   ///< the pre-2026-10-13 (name,ap_x,ap_y) table: refused whole
     int  malformed      = 0;       ///< rows dropped (bad arity, non-door name, unparsable or non-finite place)
     std::uint64_t next_door_index = 0;   ///< the persisted name counter (`#next_door,N` line); 0 = absent (older file)
+    /// The place table's learned change hazard (`#hazard,changes,sum_elapsed_s` line): revisits that found the place changed, and the
+    /// total exposure in seconds. Absent (older file) => the Gamma prior alone.
+    struct Hazard { double changes = 0.0, sum_elapsed_s = 0.0; };
+    std::optional<Hazard> hazard;
 };
 
 // ── DOOR NAMES ARE OPAQUE (2026-10-29, door-identity-design part 1) ─────────────────────────────────────────────────
@@ -108,6 +118,7 @@ struct ParsedIdentityTable
 
 /// The counter line appended after the rows: `#next_door,<N>`. A pre-counter reader drops it as one malformed row.
 inline constexpr std::string_view kNextDoorTag = "#next_door";
+inline constexpr std::string_view kHazardTag   = "#hazard";
 
 /// N of a `door_<N>` name (N ≥ 1, digits only); nullopt for anything else.
 inline std::optional<std::uint64_t> door_name_index(std::string_view name)
@@ -167,6 +178,13 @@ inline bool num(std::string_view v, float& out)
     const auto [p, ec] = std::from_chars(v.data(), v.data() + v.size(), out);
     return ec == std::errc{} and p == v.data() + v.size() and std::isfinite(out);
 }
+inline bool num_d(std::string_view v, double& out)
+{
+    while (not v.empty() and (v.back() == '\r' or v.back() == ' ')) v.remove_suffix(1);
+    if (v.empty()) return false;
+    const auto [p, ec] = std::from_chars(v.data(), v.data() + v.size(), out);
+    return ec == std::errc{} and p == v.data() + v.size() and std::isfinite(out);
+}
 inline bool num_i64(std::string_view v, std::int64_t& out)
 {
     while (not v.empty() and (v.back() == '\r' or v.back() == ' ')) v.remove_suffix(1);
@@ -208,9 +226,16 @@ inline ParsedIdentityTable parse_identity_table(std::istream& in)
                 ++out.malformed;
             continue;
         }
+        if (c.size() == 3 and c[0] == kHazardTag)
+        {
+            double ch = 0.0, el = 0.0;
+            if (detail::num_d(c[1], ch) and detail::num_d(c[2], el) and ch >= 0.0 and el >= 0.0) out.hazard = ParsedIdentityTable::Hazard{ch, el};
+            else ++out.malformed;
+            continue;
+        }
         float x = 0.f, y = 0.f;
         if ((c.size() != kIdentityColsOld and c.size() != kIdentityCols17 and c.size() != kIdentityCols18
-             and c.size() != kIdentityCols19 and c.size() != kIdentityColsFull) or c[0].empty()
+             and c.size() != kIdentityCols19 and c.size() != kIdentityCols22 and c.size() != kIdentityColsFull) or c[0].empty()
             or not c[1].starts_with("door_") or not detail::num(c[2], x) or not detail::num(c[3], y)
             or std::hypot(x, y) > kIdentityMaxPlaceM)
         {
@@ -239,11 +264,12 @@ inline ParsedIdentityTable parse_identity_table(std::istream& in)
                 r.seen_wall_ms = t;
             if (float sd = 0.f; c.size() >= kIdentityCols19 and detail::num(c[18], sd) and sd > 0.f)
                 r.place_sd = sd;
-            if (c.size() == kIdentityColsFull)
+            if (c.size() >= kIdentityCols22)
             {
                 if (not c[19].empty()) r.ledger = std::string(c[19]);
                 if (std::int64_t v = 0; detail::num_i64(c[20], v) and v >= 0 and v <= 2147483647) r.visit = static_cast<int>(v);
                 if (std::int64_t t = 0; detail::num_i64(c[21], t) and t > 0) r.removed_ms = t;
+                if (std::int64_t t = 0; c.size() == kIdentityColsFull and detail::num_i64(c[22], t) and t > 0) r.sighted_ms = t;
             }
         }
         out.rows.push_back(std::move(r));
@@ -251,7 +277,8 @@ inline ParsedIdentityTable parse_identity_table(std::istream& in)
     return out;
 }
 
-inline void write_identity_table(std::ostream& f, std::span<const IdentityRow> rows, std::uint64_t next_door_index = 0)
+inline void write_identity_table(std::ostream& f, std::span<const IdentityRow> rows, std::uint64_t next_door_index = 0,
+                                 std::optional<ParsedIdentityTable::Hazard> hazard = std::nullopt)
 {
     f.imbue(std::locale::classic());   // never emit a comma decimal separator
     f << kIdentityHeader << '\n';
@@ -284,9 +311,12 @@ inline void write_identity_table(std::ostream& f, std::span<const IdentityRow> r
         if (i.visit.has_value()) f << *i.visit;
         f << ',';
         if (i.removed_ms.has_value() and *i.removed_ms > 0) f << *i.removed_ms;
+        f << ',';
+        if (i.sighted_ms.has_value() and *i.sighted_ms > 0) f << *i.sighted_ms;
         f << '\n';
     }
     if (next_door_index > 0) f << kNextDoorTag << ',' << next_door_index << '\n';
+    if (hazard.has_value()) f << std::format("{},{},{}\n", kHazardTag, hazard->changes, hazard->sum_elapsed_s);   // shortest round-trip, locale-free
 }
 
 // ── THE RESTORE DECISION ─────────────────────────────────────────────────────────────────────────────────────────
@@ -623,7 +653,7 @@ void seed_restored_instance(Inst& inst, const IdentityRow& r, const Belief& rest
     // Task D-C round 2 (tour3C): the remembered place's precision seeds the belief's along-wall σ (DoorFit's lazy init).
     inst.remembered_place_sd = r.place_sd;
     inst.last_detection_wall_ms = r.seen_wall_ms.value_or(0);
-    if (r.seen_wall_ms.has_value() and *r.seen_wall_ms > 0) inst.remembered_seen_ms = r.seen_wall_ms;   // the revisit is counted by the core
+    inst.place_row_name = r.name;   // the revisit is sampled by the core, per visit, against this row
     inst.matched_frames   = std::max(inst.matched_frames, kFitWithoutFreshDataFrames);
     inst.seed_wh_from_box = true;
     if (r.leaf.has_value())
