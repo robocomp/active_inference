@@ -22,33 +22,43 @@ static ViewGeometry zed_geom(float d, float aspect)   // 1280x720, f=700, door 0
 int main()
 {
     const auto D = default_detectors();
-    { // miss_zero_when_unseen
-        CHECK(miss_llr(0.f, 0.f, 0.7f) == 0.f);
-        CHECK(miss_llr(0.f, 0.05f, 0.f) == 0.f);
-        CHECK(miss_llr(0.3f, 0.05f, 0.f) == std::log(0.7f));
+    { // miss_zero_when_unseen: q == 0 => miss and hit are exactly 0 for any false_alarm
+        for (float fa : {0.f, 0.02f, 0.3f})
+        {
+            DetectorModel m = D.zed; m.false_alarm = fa;
+            CHECK(miss_llr(0.f, false_alarm_eff(m, 0.f)) == 0.f);
+            CHECK(hit_llr(0.f, m, 1.f) == 0.f);
+        }
         ViewGeometry g = zed_geom(3.f, 1.f); g.vis = 0.f;
         const float q = detect_prob(D.zed, g, 1.f);
-        CHECK(q == 0.f);
-        CHECK(miss_llr(q, D.zed.false_alarm, g.vis) == 0.f);
+        CHECK(q == 0.f and miss_llr(q, false_alarm_eff(D.zed, q)) == 0.f and hit_llr(q, D.zed, 1.f) == 0.f);
     }
     { // miss_monotone
         float prev = 1e9f;
-        for (float q = 0.f; q < 0.95f; q += 0.05f) { const float m = miss_llr(q, 0.05f, 1.f); CHECK(m < prev); prev = m; }
+        for (float q = 0.f; q < 0.95f; q += 0.05f) { const float m = miss_llr(q, 0.05f * q / 0.9f); CHECK(m <= prev); prev = m; }
+        CHECK(miss_llr(0.5f, 0.02f) < miss_llr(0.1f, 0.02f));
     }
     { // aspect_70deg_1m_and_6m (spec test 4)
         for (float d : {1.f, 6.f}) for (float asp : {1.f, std::cos(70.f * 3.14159265f / 180.f)})
         {
             const auto g = zed_geom(d, asp);
             const float q = detect_prob(D.zed, g, 1.f);
-            const float h = hit_llr(q, D.zed.false_alarm, g.vis, 1.f), m = miss_llr(q, D.zed.false_alarm, g.vis);
-            std::printf("  zed d=%.0f asp=%.2f q=%.4g hit=%.3f miss=%.3f\n", d, asp, q, h, m);
+            const float h = hit_llr(q, D.zed, 1.f), m = miss_llr(q, false_alarm_eff(D.zed, q));
+            std::printf("  zed d=%.0f asp=%.2f q=%.4g hit=%.3f miss=%.3g\n", d, asp, q, h, m);
             CHECK(std::abs(m) < std::abs(h));
         }
+    }
+    { // overflowing_zed_hit_not_negative
+        const auto g = zed_geom(1.f, 1.f);
+        const float q = detect_prob(D.zed, g, 1.f);
+        const float h = hit_llr(q, D.zed, 1.f), m = miss_llr(q, false_alarm_eff(D.zed, q));
+        std::printf("  zed 1 m: q=%.3g hit=%.4f miss=%.3g\n", q, h, m);
+        CHECK(h >= 0.f and std::abs(m) < 1e-6f);
     }
     { // ricoh_1p4m_defaults_printed (R8: spec's q~0 claim is false; recorded, not forced)
         ViewGeometry g; g.projectable = true; g.vis = 1.f; g.aspect = 1.f; g.fill_h = 0.28145f; g.fill_v = 0.38618f; g.range_m = 1.4f;
         const auto t = load_detectors(DETECTORS_CSV);
-        const float q = detect_prob(t.ricoh, g, 1.f), m = miss_llr(q, t.ricoh.false_alarm, g.vis);
+        const float q = detect_prob(t.ricoh, g, 1.f), m = miss_llr(q, false_alarm_eff(t.ricoh, q));
         std::printf("  ricoh 1.4 m: q=%.4f miss_llr=%.4f\n", q, m);
         CHECK(std::isfinite(q) and std::isfinite(m) and m < 0.f);
     }

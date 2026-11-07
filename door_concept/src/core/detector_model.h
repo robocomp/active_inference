@@ -55,19 +55,26 @@ struct DetectorTable { DetectorModel zed, ricoh; };
     return eh * ev * g.aspect * g.vis * kappa * m.hit_rate;
 }
 
-/// Presence: a * ln(q / (f*vis)); f is the false-alarm rate (the caller's model.false_alarm), vis the view's visibility.
-/// 0 when vis*q == 0. (f*vis == 0 with q > 0 is an unbounded ratio; callers keep false_alarm > 0.)
-[[nodiscard]] inline float hit_llr(float q, float f, float vis, float assoc_w)
+/// The false-alarm rate AT THIS VIEW: a false alarm passes through the detector's own front end exactly as the door does
+/// (envelope, aspect, visibility, kappa), so f_eff = false_alarm * q / hit_rate = false_alarm * env * aspect * vis * kappa.
+/// 0 when q == 0 (a view the detector cannot report from can neither confirm nor refute).
+[[nodiscard]] inline float false_alarm_eff(const DetectorModel& m, float q)
 {
-    if (vis * q == 0.0f)
-        return 0.0f;
-    return assoc_w * std::log(q / (f * vis));
+    return m.hit_rate > 0.0f ? m.false_alarm * q / m.hit_rate : 0.0f;
 }
 
-/// Absence: ln((1 - q) / (1 - f*vis)). Falls as q rises; exactly 0 when q == 0 and f*vis == 0 (an unseen door says nothing).
-[[nodiscard]] inline float miss_llr(float q, float f, float vis)
+/// Presence: a * ln(hit_rate / false_alarm) when q > 0 (q and f_eff share the front end, so it cancels in the ratio q / f_eff);
+/// exactly 0 when q == 0 (nothing was reportable from this view). false_alarm must be > 0.
+[[nodiscard]] inline float hit_llr(float q, const DetectorModel& m, float assoc_w)
 {
-    return std::log((1.0f - q) / (1.0f - f * vis));
+    return q > 0.0f ? assoc_w * std::log(m.hit_rate / m.false_alarm) : 0.0f;
+}
+
+/// Absence: ln((1 - q) / (1 - f_eff)), f_eff = false_alarm_eff(m, q) (or a per-view mean from a ledger). Falls as q rises;
+/// exactly 0 when q == 0.
+[[nodiscard]] inline float miss_llr(float q, float f_eff)
+{
+    return q > 0.0f ? std::log((1.0f - q) / (1.0f - f_eff)) : 0.0f;
 }
 
 // CSV: camera,param,value,n,source — params min_fill,max_fill,soft,hit_rate (n = n_hit_trials),false_alarm.
