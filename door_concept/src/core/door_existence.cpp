@@ -3,6 +3,7 @@
 // with their comments; only the sources of the values and the destinations of the outputs changed (door_existence.h).
 #include "door_existence.h"
 #include "door_core.h"
+#include "door_visibility.h"
 
 #include <algorithm>
 #include <array>
@@ -36,55 +37,8 @@ namespace
 {
 using K = rc::door::DoorDecisionKind;
 
-// Hashed pixel-cell coverage of the current YOLO foreground, split door (occupancy) vs every other label
-// (occluder). A CELL-px cell absorbs mask-boundary jitter and makes membership O(1); the key packs the two
-// cell indices. CELL is a discretization constant (quadrature), not a belief gate — no config key.
-// Used by BOTH the leaf silhouette and the aperture-frame probe, so "what hides a door" is one definition.
-struct MaskCells
-{
-    static constexpr float CELL = 6.0f;
-    std::unordered_set<std::int64_t> door, occluder;
-    [[nodiscard]] static std::int64_t key(float col, float row)
-    {
-        const std::int64_t kx = static_cast<std::int64_t>(std::floor(col / CELL));
-        const std::int64_t ky = static_cast<std::int64_t>(std::floor(row / CELL));
-        return (kx << 32) ^ (ky & 0xffffffffLL);
-    }
-    // A pixel covered by some NON-door mask and by no door mask: a nearer masked object hides it.
-    [[nodiscard]] bool hides(float col, float row) const
-    {
-        const std::int64_t k = key(col, row);
-        return occluder.contains(k) and not door.contains(k);
-    }
-};
+// MaskCells, build_mask_cells and own_wall_edges live in door_visibility.{h,cpp} (shared with door_view).
 
-// ★Task D-C (rtD1i door_5): LINE OF SIGHT AGAINST EVERY WALL BUT THE DOOR'S OWN. rc::occlusion::walls_block's radius form
-// skips any polygon edge closer than 0.30 m to the target as "the target's own wall"; DOOR_0's hinge jamb stands 7 cm from
-// the corner where a PARTITION meets its wall, so both partition faces were skipped and from behind it the door's frame
-// and leaf read VISIBLE and empty — the image channels walked a shut door from +4 to −4 while it was hidden. The own wall
-// is the run of polygon edges the doorway is cut in (door_wall_edges: one definition with the leaf field's background
-// walls); the shared walls_block overload takes them explicitly (review M-4).
-std::vector<std::size_t> own_wall_edges(const rc::DoorFitState& inst, const std::vector<Eigen::Vector2f>& polygon)
-{
-    const auto nz = rc::door::phi_field_nuisance(inst.aperture);
-    return rc::door::door_wall_edges(inst.aperture, polygon, nz.depth_lo, nz.depth_hi);
-}
-
-MaskCells build_mask_cells(const MaskPacket& pkt)
-{
-    MaskCells c;
-    if (not pkt.valid)
-        return c;
-    for (const auto& sl : pkt.slices)
-    {
-        const std::size_t b = std::min<std::size_t>(sl.pixel_begin, pkt.mask_pixels.size());
-        const std::size_t e = std::min<std::size_t>(sl.pixel_end,   pkt.mask_pixels.size());
-        auto& dst = (sl.label == "door") ? c.door : c.occluder;
-        for (std::size_t i = b; i < e; ++i)
-            dst.insert(MaskCells::key(pkt.mask_pixels[i].x(), pkt.mask_pixels[i].y()));
-    }
-    return c;
-}
 }  // namespace
 
 const char* const kExistenceCsvHeader =
@@ -271,57 +225,23 @@ DoorSilhouette compute_silhouette_existence(const ExistenceScene& sc, const rc::
     // Hashed pixel-cell coverage of the current YOLO foreground, split door (occupancy) vs other (occluder).
     // Shared with compute_frame_probe — see MaskCells.
     const MaskCells cells = build_mask_cells(pkt);
-    const auto key = [&cells](float col, float row) { return cells.key(col, row); };
     const auto& door_cells     = cells.door;
-    const auto& occluder_cells = cells.occluder;
 
     const auto& s = inst.model.state();
     const float hw = inst.leaf_pose.half_w;
-    const bool has_poly = sc.polygon.size() >= 3;
 
-    // Camera position (room frame) for the GEOMETRIC occlusion tests below.
-    const Eigen::Vector3f O(static_cast<float>(Mopt->coeff(0, 3)),
-                            static_cast<float>(Mopt->coeff(1, 3)),
-                            static_cast<float>(Mopt->coeff(2, 3)));
-    const Eigen::Vector2f Oxy(O.x(), O.y());
-    const auto own_edges = own_wall_edges(inst, sc.polygon);   // Task D-C: every wall but the door's own occludes
-    const float occ_margin = std::max(0.0f, sc.cfg.exist_occlusion_margin_m);
+    // The visibility rules (frustum, masks, walls, other doors, the leaf beyond the aperture) are door_visibility.cpp's ViewRig —
+    // the SAME classification door_view() uses for any camera; this function keeps only the occupied/free bookkeeping.
+    // (The long comment on the leaf beyond the aperture moved with the code: door_visibility.cpp, ViewRig::ViewRig.)
+    const CameraSpec cam_spec = camera_spec(sc.cam);
+    const CameraView view{cam_spec, Mopt.value(), {}, false};
+    const ViewRig rig(view, sc, inst, cells);
 
-    // ── THE LEAF BEYOND THE APERTURE (door_room_band.h) ─────────────────────────────────────────────────
-    // A leaf swung OUT of the room the camera is in lies in the NEXT room. What reaches the camera of it is
-    // a sliver seen edge-on THROUGH the hole, and the P(detect) below (envelope × obliquity × resolvability
-    // × in-view × central) is a model of a leaf in THIS room — it does not represent that view. Live try34:
-    // the crossed door, carried into room_2 with its leaf at ~95-110° out of room_2, scored free=112-122 of
-    // 120 detectable samples (the part within walls_block's 0.30 m own-wall skip; the rest was already
-    // wall-occluded) on a door that plainly exists. The model has no term for the opening's jambs/casing as
-    // occluders of what lies past the room-side face, so each sample carries weight 1 − P(it lies past that
-    // face), measured from the APERTURE LINE: a sample on it (a shut leaf, the hinge edge) weighs exactly 1,
-    // one a few σ out weighs ~0. A weight, not a skip: occupancy and absence both scale by it, and
-    // so does the visible fraction (det_w), so a door whose whole leaf is beyond is simply not probed by
-    // this channel — the frame channel (compute_frame_probe) is what speaks for it then.
-    const auto band = sc.band;
-    const float delta_ap = has_poly
-                         ? rc::door::signed_boundary_distance(sc.polygon, inst.aperture.centre_xy())
-                         : std::numeric_limits<float>::quiet_NaN();
-    const bool  band_known = std::isfinite(delta_ap);
-    const Eigen::Vector2f n_out = band_known
-        ? rc::door::outward_normal(sc.polygon, inst.aperture.centre_xy(), inst.aperture.across_u(), band)
-        : Eigen::Vector2f::Zero();
-    const float r0 = rc::door::face_offset_from_aperture(delta_ap);
-    const auto room_weight = [&](const Eigen::Vector3f& P) -> float
-    {
-        if (not band_known) return 1.0f;
-        const float a = (Eigen::Vector2f(P.x(), P.y()) - inst.aperture.plane_O()).dot(n_out);   // from the LEAF's line (5b)
-        return 1.0f - rc::door::p_beyond_far_face(a, r0, band.sigma_m);
-    };
-
-    // Classify ONE LEAF-face sample (local x hinge→free edge, z absolute): project it, then vote.
+    // Classify ONE LEAF-face sample (local x hinge→free edge, z absolute): ViewRig::at decides whether the camera sees it;
+    // this tallies it.
     //
-    // ★ The sample comes from door::leaf_point at the instance's CURRENT leaf pose. It used to be spelled
-    // out here as a rectangle in the WALL PLANE, which meant that the moment a door actually opened, its
-    // predicted silhouette landed where the leaf no longer was: every sample came back unlit, e_free
-    // spiked, and the existence channel deleted the door BECAUSE it opened. With phi pinned at 0 (M0) this
-    // yields the identical samples; when phi becomes a fitted DOF in M1 it follows the leaf for free.
+    // ★ The sample comes from door::leaf_point at the instance's CURRENT leaf pose (see ViewRig::at). With phi pinned at 0 (M0)
+    // this yields the wall-plane rectangle; when phi is a fitted DOF it follows the leaf for free.
     std::unordered_set<std::int64_t> covered_cells;   // distinct cells the DETECTABLE silhouette occupies
     double range_sum = 0.0;
     const float central_region_frac = sc.cfg.exist_central_region_frac;
@@ -334,47 +254,12 @@ DoorSilhouette compute_silhouette_existence(const ExistenceScene& sc, const rc::
                               float lx, float lz)
     {
         ++out.n_total;                                                  // one sample of the WHOLE panel
-        const Eigen::Vector3f Ps = door::leaf_point(L, lx, 0.0f, lz);   // face at mid-thickness
-        const Eigen::Vector4d Pr(Ps.x(), Ps.y(), Ps.z(), 1.0);
-        const Eigen::Vector4d Pc = zed_T_room * Pr;
-        const double X = Pc.x(), Y = Pc.y(), Z = Pc.z();
-        if (Y <= 0.20) return;                                          // behind / at the near clip
-        const Eigen::Vector2d uv = camera_project(sc.cam, Eigen::Vector3d(X, Y, Z));
-        const float col = static_cast<float>(uv.x()), row = static_cast<float>(uv.y());
-        if (col < 0.f or col >= W or row < 0.f or row >= Himg) return;  // out of the REAL frustum ⇒ not detectable
-        const std::int64_t k = key(col, row);
-        if (occluder_cells.contains(k) and not door_cells.contains(k))
-        { ++out.n_occluded; return; }                                   // a nearer MASKED object hides it ⇒ no vote
-        // GEOMETRIC occluders, which carry no YOLO mask and so are invisible to the cell test above:
-        // (a) a room WALL crossing this sightline (the robot is around a corner / the door is in another
-        //     room's wall) — the structural case, and the one that would otherwise read as clean absence;
-        // (b) another door instance's panel standing in front of this sample.
-        // Per SAMPLE, not per instance: a partially-hidden door keeps the visible part of its footprint and
-        // votes with it, instead of the old all-or-nothing `continue` that froze a phantom indefinitely.
-        const Eigen::Vector3f Pw(static_cast<float>(Pr.x()), static_cast<float>(Pr.y()), static_cast<float>(Pr.z()));
-        if (rc::occlusion::walls_block(Oxy, {Pw.x(), Pw.y()}, sc.polygon, own_edges))
-        { ++out.n_occluded; return; }
-        {
-            Eigen::Vector3f dc = Pw - O;
-            const float rc_len = dc.norm();
-            if (rc_len > 1e-3f)
-            {
-                dc /= rc_len;
-                for (const auto& [jid, jp] : sc.doors)
-                {
-                    const rc::DoorFitState& jinst = *jp;
-                    if (jid == inst.node_id or not jinst.ai2_initialized) continue;
-                    const auto& js = jinst.model.state();
-                    const Eigen::Vector3f Cj(js.cx, js.cy, js.cz + 0.5f * js.h);
-                    if (rc::occlusion::cone_blocks(O, dc, rc_len, Cj, 0.5f * std::max(js.w, js.thickness),
-                                                   (Cj - O).norm(), occ_margin))
-                    { ++out.n_occluded; return; }
-                }
-            }
-        }
-        const float w_room = room_weight(Pw);                           // 1 − P(seen through the opening)
-        if (not (w_room > 0.0f))
-        { ++out.n_occluded; return; }                                   // wholly through the opening: not this view
+        const SampleView sv = rig.at(L, lx, lz);
+        if (sv.fate == SampleFate::Unseen) return;                      // behind / out of the REAL frustum ⇒ not detectable
+        if (sv.fate == SampleFate::Occluded) { ++out.n_occluded; return; }   // hidden ⇒ no vote
+        const float col = sv.col, row = sv.row, w_room = sv.w_room;
+        const double X = sv.X, Y = sv.Y, Z = sv.Z;
+        const std::int64_t k = sv.key;
         ++out.n_detectable;
         out.det_w += w_room;
         if (extras) covered_cells.insert(k);
@@ -408,7 +293,7 @@ DoorSilhouette compute_silhouette_existence(const ExistenceScene& sc, const rc::
     // Regular grid over the panel face. NX/NZ are numeric SAMPLING RESOLUTION (a quadrature density for the
     // occupancy/detectability counts), not decision thresholds — denser is smoother at linear cost. A door is
     // much taller than wide, so the vertical grid is finer.
-    constexpr int NX = 14, NZ = 30;
+    constexpr int NX = kLeafGridNX, NZ = kLeafGridNZ;
     const auto sweep = [&](const door::LeafPose& L, DoorSilhouette& acc, bool extras)
     {
         for (int ix = 0; ix < NX; ++ix)
