@@ -1,0 +1,9 @@
+kind,seconds,source
+keep,30.000,fallback_spec_30s_n=1<3
+delete_ordinary,5.000,explore_tour13:REMOVE-REACQUIRE door_6 seq39
+delete_ordinary,91.150,explore_tour13:REMOVE-REACQUIRE door_6 seq42
+delete_ordinary,298.450,explore_tour18:REMOVE-REACQUIRE door_4 seq7
+delete_ordinary,72.700,explore_tour18:REMOVE-REACQUIRE door_4 seq14
+delete_ordinary,88.250,explore_tour18:REMOVE-REACQUIRE door_4 seq17
+delete_ordinary,34.450,explore_tour18:REMOVE-REACQUIRE door_4 seq22
+delete_ordinary,946.050,explore_tour18:REMOVE-REACQUIRE door_5 seq8

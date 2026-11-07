@@ -428,6 +428,9 @@ ShortGain      = 1.5     # |ΔL| per frame while confidently too short (matches 
 # the confidence is re-earned. Without this, one flicker cost the live run three node identities for one door.
 ReacquireRadiusM = 0.60  # 0 disables re-acquisition (every return is then a brand-new door)
 GhostMax = 8             # most recent removals kept (a short flicker memory, not a permanent map)
+# Mirrors the controller's ExploreTour.MaxRoomS (controller/etc/config.toml): the longest a room's exploration lasts, in seconds.
+# A door on the route is dearer to delete by exactly that: C_delete(route) = C_delete(ordinary) + MaxRoomS (door_decision.h).
+MaxRoomS = 300
 
 [Ice]
 Warn.Connections = "0"

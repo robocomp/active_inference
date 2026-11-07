@@ -235,6 +235,8 @@ void read_door_config_fields(DoorConfig& out, GetF&& getf, GetI&& geti, GetS&& g
             "Existence.ReacquireRadiusM (0 disables re-acquisition)");
     out.exist_ghost_max          = geti("Existence.GhostMax", 8,
             "Existence.GhostMax — most recent removals retained");
+    out.exist_max_room_s         = getf("Existence.MaxRoomS", 300.0f,
+            "Existence.MaxRoomS — mirrors the controller's ExploreTour.MaxRoomS (s): a route door's delete cost is the ordinary cost plus this");
     // [Openable] — deliberately ABSENT from etc/config.toml (same as [Bearing]): a dormant, opt-in feature
     // whose defaults keep the leaf pinned flush. See the block comment in door_config.h.
     out.openable_enabled     = getb("Openable.Enabled", false,
