@@ -1,7 +1,8 @@
 #!/usr/bin/env -S python3 -I
 """Maximum-likelihood fit of the per-camera detector envelope (rc::detect::DetectorEnvelope: min_fill, max_fill, soft) and hit_rate
-from PER-VIEW rows of etc/door_views_log.csv (Task 8: the agent writes one row each time a frame joins a view, carrying that view's
-aggregate so far; the LAST row of each (door, camera, view_id) is the view's trial, and only it is kept — one trial per view).
+from PER-VIEW rows of etc/door_views_log.csv (Task 8: the agent writes one row each time a frame joins a view, carrying that frame's
+own q / fill / vis / outcome (fix round 1: the four refer to the same frame); the rows of a (door, camera, view_id) are averaged into
+ONE trial per view, its outcome the fraction of its frames with a detection).
 
 Input columns: cycle, door, camera (zed|ricoh), view_id, q, fill_h, fill_v, vis, kappa, hit (0/1 or an associated weight in [0,1]).
 Optional: alive_end (1 = the door ended alive with L>0), crossed (1 = the door was crossed). Rows are kept only for doors that ended
@@ -70,10 +71,20 @@ def main():
     a = ap.parse_args()
     rows = list(csv.DictReader(open(a.log, newline="")))
     cols = rows[0].keys() if rows else []
-    if rows and all(k in cols for k in ("door", "camera", "view_id")):   # one trial per view: its last (aggregate) row
-        last = {}
-        for r in rows: last[(r["door"], r["camera"], r["view_id"])] = r
-        rows = list(last.values())
+    if rows and all(k in cols for k in ("door", "camera", "view_id")):   # one trial per view: the mean of its frames' rows
+        groups = {}
+        for r in rows:
+            if r.get("q", "") in ("nan", "NaN"): continue                 # a ricoh frame with no model: q unknown, not a trial
+            groups.setdefault((r["door"], r["camera"], r["view_id"]), []).append(r)
+        rows = []
+        for (door, cam, vid), g in groups.items():
+            m = {k: sum(float(x[k]) for x in g) / len(g) for k in ("fill_h", "fill_v", "vis", "kappa") }
+            if "aspect" in cols: m["aspect"] = sum(float(x["aspect"]) for x in g) / len(g)
+            m["hit"] = sum(1.0 if float(x["hit"]) > 0 else 0.0 for x in g) / len(g)   # unweighted: the fraction of frames hit
+            for k in ("alive_end", "crossed"):
+                if k in cols: m[k] = g[-1][k]
+            m.update(door=door, camera=cam, view_id=vid)
+            rows.append({k: str(v) for k, v in m.items()})
     have_filter = "alive_end" in cols and "crossed" in cols
     if have_filter:
         rows = [r for r in rows if float(r["alive_end"]) > 0 and float(r["crossed"]) > 0]

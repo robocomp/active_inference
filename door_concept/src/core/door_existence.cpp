@@ -51,8 +51,8 @@ const char* const kExistenceCsvHeader =
     "prior_band,prior_base,prior_size,carried,crossing,ledger,n_views,"
     "zed_dl,ric_dl,geo_dl,act_dl,zed_q,ric_q,zed_hit,ric_hit,kappa,geo_x,geo_mu0,geo_mu1,geo_s\n";
 
-// Ruling R8: the per-view rows tools/fit_detector_envelopes.py reads (its column names, exactly). hit = the view's mean
-// association weight so far; q, fill_h, fill_v, vis, kappa, aspect = this frame's.
+// Ruling R8: the per-view rows tools/fit_detector_envelopes.py reads (its column names, exactly). Every field is
+// THIS frame's (hit = its association weight, 0 = a miss); door = the node name or place_<key> of a pending candidate.
 const char* const kViewsCsvHeader = "cycle,door,camera,view_id,q,fill_h,fill_v,vis,kappa,aspect,hit\n";
 
 // ─── SemanticField: rc::SemanticProbField over the recorded plane ───────────────────────────────────────────────────
@@ -563,7 +563,6 @@ namespace
 {
 std::string fmt_or_dash(float v) { return std::isfinite(v) ? std::format("{:+.2f}", v) : std::string("—"); }
 const char* role_name(Role r) { return r == Role::BeingCrossed ? "crossing" : r == Role::Route ? "route" : "ordinary"; }
-constexpr std::uint64_t kCandidatePlaceBit = std::uint64_t{1} << 63;   // learner keys of candidate places (never a DSR id)
 }  // namespace
 
 std::vector<FrameDetection> DoorCore::frame_detections() const
@@ -571,7 +570,8 @@ std::vector<FrameDetection> DoorCore::frame_detections() const
     std::vector<FrameDetection> v;
     v.reserve(dets_.size());
     for (std::size_t i = 0; i < dets_.size(); ++i)
-        v.push_back({dets_[i].xy, dets_[i].xy_var, dets_[i].sensor, i < det_w_.size() ? det_w_[i] : 1.0f});
+        v.push_back({dets_[i].xy, dets_[i].xy_var, dets_[i].sensor, i < det_w_.size() ? det_w_[i] : 1.0f,
+                     i < det_adm_.size() ? det_adm_[i] != 0 : true});
     return v;
 }
 
@@ -616,18 +616,18 @@ void DoorCore::with_frame(const DoorCycleInput& in, bool zed_ran, bool use_rgb, 
     f(fr);
 }
 
-// One trial per view per camera into the detector learner (spec §8.4): y = the view's mean hit weight, g = its mean front end.
-void DoorCore::count_trials(std::uint64_t place, const PlaceBelief& b, bool alive)
+// The per-frame view rows to etc/door_views_log.csv (one row per camera per frame joining a view; the fit groups them by view).
+void DoorCore::log_view_rows(const std::string& place, const std::vector<ViewRow>& rows, DoorCycleOutput& out)
 {
-    const DetectorTable t = learner_.table();
-    const auto views = b.ledger.views();
-    for (std::size_t v = 0; v < views.size(); ++v)
-        for (int c = 0; c < 2; ++c)
-            if (const auto& a = views[v].bern[c]; a.n > 0)
-            {
-                const float h = c == 0 ? t.zed.hit_rate : t.ricoh.hit_rate;
-                learner_.note(place, c, v, static_cast<float>(a.sum_hit_w / a.n), static_cast<float>(a.sum_q / a.n) / h, alive);
-            }
+    for (const auto& r : rows)
+    {
+        std::ostringstream row;
+        row.imbue(std::locale::classic());
+        row << ex_dbg_ << ',' << place << ',' << (r.camera == 0 ? "zed" : "ricoh") << ',' << r.view_id << ','
+            << (r.q_known ? r.q : std::numeric_limits<float>::quiet_NaN()) << ',' << r.fill_h << ',' << r.fill_v << ',' << r.vis << ','
+            << r.kappa << ',' << r.aspect << ',' << r.hit << '\n';
+        diag("door_views_log.csv", row.str(), out);
+    }
 }
 
 // C_keep's samples (spec §8.2): an executing episode on one of a door's affordances that ends without the robot crossing it.
@@ -749,8 +749,9 @@ void DoorCore::prepare_candidates(const DoorCycleInput& in, const std::vector<rc
             const auto it = self_det.find(c);
             const int self_sensor = it == self_det.end() ? -1 : (dets_[static_cast<std::size_t>(it->second)].sensor != 0 ? 1 : 0);
             const float self_w = it == self_det.end() ? 0.0f : det_w_[static_cast<std::size_t>(it->second)];
-            observe_place(cand.belief, cand.theta, fr, visit_, 0.0f, nullptr, self_sensor, self_w);
-            count_trials(kCandidatePlaceBit | cand.key, cand.belief, false);
+            std::vector<ViewRow> rows;
+            observe_place(cand.belief, cand.theta, fr, visit_, 0.0f, &rows, self_sensor, self_w);
+            log_view_rows(std::format("place_{}", cand.key), rows, out);   // logged (no selection by birth), never learned from
             const Verdict v = decide(cand.belief.L(), Role::Ordinary, costs);
             exists[c] = v.exists ? 1 : 0;
             if (it != self_det.end() and (cand.belief.ledger.views().size() <= 1 or ex_dbg_ % 60 == 0))   // its first views, then 1 in 60
@@ -758,20 +759,9 @@ void DoorCore::prepare_candidates(const DoorCycleInput& in, const std::vector<rc
                                            "size {:+.2f} carried {:+.2f} views {}) -> {}\n", cand.key, cand.xy.x(), cand.xy.y(),
                                            cand.theta.aperture.w, cand.belief.L(), cand.belief.prior.band, cand.belief.prior.base_rate,
                                            cand.belief.prior.size, cand.belief.carried, cand.belief.ledger.views().size(),
-                                           v.exists ? "EXISTS" : v.remove ? "below the delete line" : "pending"), out);
-            if (v.remove and not cand.removed)
-            {
-                // a candidate below the delete line is a place where "no door is here": its row is kept for ever (R15 ages it)
-                PlaceRow r;
-                r.room = cand.room; r.name = std::format("place_{}", cand.key); r.xy = cand.xy;
-                r.cov = Eigen::Matrix2f::Identity() * cand.var; r.yaw = cand.theta.aperture.yaw();
-                r.width = cand.theta.aperture.w; r.height = cand.theta.aperture.h;
-                r.L_evidence = cand.belief.L_evidence(); r.ledger = cand.belief.ledger; r.visit = visit_;
-                r.last_seen_wall_ms = in.t_wall_ms; r.removed_wall_ms = in.t_wall_ms;
-                places_.upsert(std::move(r));
-                learner_.retire(kCandidatePlaceBit | cand.key);
-            }
-            cand.removed = v.remove;
+                                           v.exists ? "EXISTS" : "not born"), out);
+            // ★A pending candidate below the line is simply NOT BORN (fix round 1, review I-3): it has no node to remove, so it
+            //  writes no REMOVED row, books no C_delete and retires no false-alarm trials. Only a removed DOOR does those.
         }
     });
     // ruling R2: the model decides. ONE detection per candidate carries its verdict; the candidate's other detections this frame (the
@@ -813,7 +803,6 @@ void DoorCore::update_existence(const DoorCycleInput& in, DoorCycleOutput& out)
     const Costs costs = costs_.costs(cfg.exist_max_room_s);
     std::vector<std::uint64_t> to_remove;
     std::vector<float> L_before(states.size());
-    std::vector<ViewRow> view_rows;
     with_frame(in, zed_fresh, rgb_fresh, [&](const ExistenceFrame& fr)
     {
         std::vector<int> wall(states.size(), -1);
@@ -840,28 +829,31 @@ void DoorCore::update_existence(const DoorCycleInput& in, DoorCycleOutput& out)
                                              std::sqrt(std::max(0.0f, C(1, 1))), std::sqrt(std::max(0.0f, C(2, 2))), true);
             }
             const float act = std::exchange(inst.pending_actuation_llr, 0.0f);
-            const std::size_t r0 = view_rows.size();
-            inst.exist_trace = observe_place(inst.belief, inst, fr, visit_, act, &view_rows);
+            std::vector<ViewRow> rows;
+            // ★A newborn's belief already holds its birth frame (its candidate observed it): it may not enter twice (fix round 1).
+            ExistenceFrame fr_door = fr;
+            if (const auto of = observed_frame_.find(id); of != observed_frame_.end() and of->second == pkt.frame_id)
+                fr_door.zed_ran = fr_door.ricoh_ran = fr_door.ricoh_hits_only = false;
+            inst.exist_trace = observe_place(inst.belief, inst, fr_door, visit_, act, &rows);
+            if (act != 0.0f and not std::isfinite(inst.exist_trace.act_dl))
+                inst.pending_actuation_llr += act;   // no view and no ZED pose this cycle: the evidence waits (fix round 1)
             const float L = inst.belief.L();
             const Verdict v = decide(L, inst.role, costs);
             inst.exist_trace.delete_line = v.delete_line;
-            count_trials(id, inst.belief, L > 0.0f);
+            // one trial per view (unweighted outcome; frames with an unknown q are no trial), counted while the door is believed
+            const DetectorTable& T = learner_.table();
+            for (const auto& r : rows)
+                if (r.q_known)
+                    learner_.frame(id, r.camera, static_cast<std::size_t>(r.view_id), r.hit > 0.0f,
+                                   r.q / (r.camera == 0 ? T.zed.hit_rate : T.ricoh.hit_rate));
+            learner_.set_alive(id, L > 0.0f);
             if (L > 0.0f)   // the geometry channel's μ1, from the doors believed in (one standardised statistic per view)
                 for (std::size_t k = 0; k < inst.belief.ledger.views().size(); ++k)
                     if (const auto& g = inst.belief.ledger.views()[k].geo; g.sum_w > 0 and g.s2 > 0.f)
                         geo_learner_.note(id, k, (static_cast<float>(g.sum_x / g.sum_w) - g.mu0) / std::sqrt(g.s2));
             if (v.remove)
                 to_remove.push_back(id);
-            for (std::size_t k = r0; k < view_rows.size(); ++k)
-            {
-                const auto& r = view_rows[k];
-                std::ostringstream row;
-                row.imbue(std::locale::classic());
-                row << ex_dbg_ << ',' << inst.node_name << ',' << (r.camera == 0 ? "zed" : "ricoh") << ',' << r.view_id << ','
-                    << r.q << ',' << r.fill_h << ',' << r.fill_v << ',' << r.vis << ',' << r.kappa << ',' << r.aspect << ','
-                    << r.hit << '\n';
-                diag("door_views_log.csv", row.str(), out);
-            }
+            log_view_rows(inst.node_name, rows, out);
         }
     });
 
@@ -935,6 +927,7 @@ void DoorCore::update_existence(const DoorCycleInput& in, DoorCycleOutput& out)
         places_.upsert(std::move(r));
         learner_.retire(id);
         geo_learner_.retire(id);
+        observed_frame_.erase(id);
         world_->before_remove(id);
         const auto& s = inst.model.state();
         record(K::Remove, id, s.cx, s.cy, std::format("logodds {:.2f}", L), inst.node_name, out);

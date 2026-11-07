@@ -15,6 +15,17 @@ namespace rc::door::core
 {
 namespace
 {
+// Is a detection of this camera from an inadmissible frame inside the place's association gate?
+bool inadmissible_near(std::span<const FrameDetection> dets, int sensor, const Vec2f& xy, float var, const rc::DoorConfig& cfg)
+{
+    const float rn2 = cfg.tracker_detection_noise_m * cfg.tracker_detection_noise_m;
+    for (const auto& d : dets)
+        if ((d.sensor != 0) == (sensor != 0) and not d.admissible
+            and (d.xy - xy).squaredNorm() / std::max(1e-9f, var + (d.xy_var >= 0.0f ? d.xy_var : rn2)) <= cfg.tracker_gate_mahalanobis)
+            return true;
+    return false;
+}
+
 float nan() { return std::numeric_limits<float>::quiet_NaN(); }
 
 Vec2f xy_of(const Mat4d& T) { return {static_cast<float>(T(0, 3)), static_cast<float>(T(1, 3))}; }
@@ -35,6 +46,10 @@ CamResult observe_camera(PlaceBelief& b, const rc::DoorFitState& th, const Exist
     const PoseOverlap po = pose_overlap_factor(fr.rt_cov, room_T_cam, door_xy, R);
     r.kappa = po.kappa;
     const float pos_var = th.ai2_initialized ? std::max(0.0f, th.ai2_belief.covariance()(0, 0)) : 0.0f;
+    // ★A frame the fit may not use may not judge the place either (fix round 1, review I-1): a detection of this camera that lands on
+    //  the place from a truncated / motion-smeared frame makes this camera's frame NO TRIAL — neither a hit nor a miss.
+    if (inadmissible_near(fr.dets, sensor, door_xy, pos_var + th.chain_cov_xx, fr.cfg))
+        return r;
     r.hit = sensor == self_sensor ? po.kappa * self_w
                                   : association_weight(fr.dets, sensor, door_xy, pos_var + th.chain_cov_xx, po.kappa, fr.cfg);
     // ★Ruling R4: a 360 frame whose processed strips are unknown looked at NOTHING (no miss), but a detection of THIS door
@@ -93,7 +108,7 @@ float association_weight(std::span<const FrameDetection> dets, int sensor, const
     float best = 0.0f;
     for (const auto& d : dets)
     {
-        if ((d.sensor != 0) != (sensor != 0)) continue;
+        if ((d.sensor != 0) != (sensor != 0) or not d.admissible) continue;
         const float S = std::max(1e-9f, var + (d.xy_var >= 0.0f ? d.xy_var : rn2));
         const float m2 = (d.xy - xy).squaredNorm() / S;
         if (m2 <= cfg.tracker_gate_mahalanobis)   // the tracker's own association gate (squared, 3σ)
@@ -113,9 +128,7 @@ ExistenceTrace observe_place(PlaceBelief& b, const rc::DoorFitState& th, const E
     const auto row = [&](int cam, const CamResult& r)
     {
         if (rows == nullptr or r.v == ViewLedger::npos) return;
-        const auto& a = b.ledger.views()[r.v].bern[cam];
-        rows->push_back({cam, static_cast<int>(r.v), r.q, r.g.fill_h, r.g.fill_v, r.g.vis, r.kappa, r.g.aspect,
-                         a.n > 0 ? static_cast<float>(a.sum_hit_w / a.n) : 0.0f});
+        rows->push_back({cam, static_cast<int>(r.v), r.q, r.g.fill_h, r.g.fill_v, r.g.vis, r.kappa, r.g.aspect, r.hit, true});
     };
     // ── the ZED ──
     if (fr.zed_ran and fr.zed_spec.has_value() and fr.scene.room_T_zed.has_value())
@@ -157,7 +170,8 @@ ExistenceTrace observe_place(PlaceBelief& b, const rc::DoorFitState& th, const E
         const Vec2f door_xy = th.aperture.centre_xy();
         const PoseOverlap po = pose_overlap_factor(fr.rt_cov, fr.room_T_ricoh, door_xy, half_diag(th));
         const float pos_var = th.ai2_initialized ? std::max(0.0f, th.ai2_belief.covariance()(0, 0)) : 0.0f;
-        const float hit = self_sensor == 1 ? po.kappa * self_w
+        const float hit = inadmissible_near(fr.dets, 1, door_xy, pos_var + th.chain_cov_xx, fr.cfg) ? 0.0f
+                        : self_sensor == 1 ? po.kappa * self_w
                                            : association_weight(fr.dets, 1, door_xy, pos_var + th.chain_cov_xx, po.kappa, fr.cfg);
         t.ric_hit = hit;
         if (hit > 0.0f)
@@ -168,6 +182,7 @@ ExistenceTrace observe_place(PlaceBelief& b, const rc::DoorFitState& th, const E
             b.ledger.recompute(v, fr.geometry_may_refute);
             touched.push_back(v);
             t.ric_view = static_cast<int>(v);
+            if (rows) rows->push_back({1, static_cast<int>(v), 0.f, 0.f, 0.f, 0.f, po.kappa, 0.f, hit, false});
         }
         t.ric_dl = b.ledger.sum() - before;
     }
@@ -227,10 +242,13 @@ ExistenceTrace observe_place(PlaceBelief& b, const rc::DoorFitState& th, const E
         if (v == ViewLedger::npos and fr.scene.room_T_zed.has_value())
             v = b.ledger.observe(xy_of(*fr.scene.room_T_zed), th.aperture.centre_xy(), th.aperture.across_u(), half_diag(th),
                                  0.0f, visit);
-        const float before = b.ledger.sum();
-        b.ledger.add_actuation(v, actuation_llr);
-        b.ledger.recompute(v, fr.geometry_may_refute);
-        t.act_dl = b.ledger.sum() - before;
+        if (v != ViewLedger::npos)   // no view and no ZED pose: the evidence stays pending (act_dl NaN tells the caller)
+        {
+            const float before = b.ledger.sum();
+            b.ledger.add_actuation(v, actuation_llr);
+            b.ledger.recompute(v, fr.geometry_may_refute);
+            t.act_dl = b.ledger.sum() - before;
+        }
     }
     (void) sum0;
     return t;

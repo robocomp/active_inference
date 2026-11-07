@@ -237,7 +237,7 @@ public:
 
     // ── Task 8: the existence model's learned / persisted tables (the worker loads them at start, saves them on a graceful
     //    shutdown; a replay keeps the compiled defaults) ──
-    [[nodiscard]] DetectorTable detectors() const { return learner_.table(); }
+    [[nodiscard]] const DetectorTable& detectors() const { return learner_.table(); }
     void set_detectors(const DetectorTable& t) { learner_.set_prior(t); }
     [[nodiscard]] CostEstimator& costs() { return costs_; }
     [[nodiscard]] const CostEstimator& costs() const { return costs_; }
@@ -254,7 +254,6 @@ public:
         rc::DoorFitState theta;
         PlaceBelief belief;
         std::optional<std::int64_t> seeded_from_removed_ms;   // the removed row it was seeded from (C_delete sample at birth)
-        bool removed = false;                    // its row went below the delete line (kept: a later view may revive it)
     };
     [[nodiscard]] const std::vector<Candidate>& candidates() const { return candidates_; }
     [[nodiscard]] const EgoMotion& ego() const { return ego_; }
@@ -301,6 +300,8 @@ private:
     PlaceTable      places_{false};    // one row per door place per room (reset in the ctor from the config)
     std::vector<Candidate> candidates_;
     std::vector<float> det_w_;         // per dets_ index: its reliability (YOLO confidence x the ricoh's wall/variance weight)
+    std::vector<char> det_adm_;        // per dets_ index: frame_admissible (an inadmissible frame is no trial for its place)
+    std::unordered_map<std::uint64_t, int> observed_frame_;   // door → the mask frame its belief already holds (a newborn's birth frame)
     std::vector<int> det_candidate_;   // per dets_ index: the candidate it fed this frame (-1 = none / a live door's)
     std::uint64_t next_candidate_key_ = 0;
     std::unordered_map<std::uint64_t, std::uint64_t> door_seq_;   // order in which doors entered (the per-wall base rate)
@@ -317,7 +318,7 @@ private:
     /// Build the existence frame of this cycle (camera specs, poses, the prepared RGB frame when `use_rgb`) and hand it to f.
     void with_frame(const DoorCycleInput& in, bool zed_ran, bool use_rgb, const std::function<void(const ExistenceFrame&)>& f);
     [[nodiscard]] std::vector<FrameDetection> frame_detections() const;
-    void count_trials(std::uint64_t place, const PlaceBelief& b, bool alive);
+    void log_view_rows(const std::string& place, const std::vector<ViewRow>& rows, DoorCycleOutput& out);
     SourceCounters counters_[2];   // per source (0 ZED, 1 RICOH): where do door slices die on the way to a birth?
     int  dbg_cycles_ = 0;     // the "[tracker] instances=…" print throttle
     int  dets_csv_rows_ = 0;  // etc/door_dets_log.csv's cycle column (one per tracker call)

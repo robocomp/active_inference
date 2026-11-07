@@ -37,7 +37,9 @@ struct FrameDetection
     Vec2f xy = Vec2f::Zero();
     float xy_var = -1.0f;      // < 0 ⇒ the classic detection noise
     int   sensor = 0;          // 0 ZED, else ricoh
-    float w = 1.0f;            // its reliability: YOLO confidence x (ricoh) the wall-agreement / range-variance weight
+    float w = 1.0f;            // its reliability: YOLO confidence x (ricoh) the wall/variance weight x P(unclaimed by another concept)
+    bool admissible = true;    // a frame the fit would refuse (truncated, or moving off-centre: DoorCore::frame_admissible) — a
+                               // detection there may neither confirm nor refute the place it lands on: that camera's frame is no trial
 };
 
 /// What every place shares on one fresh frame.
@@ -62,12 +64,15 @@ struct ExistenceFrame
     std::function<void(const std::vector<cv::Point>&)> note_poly;   // the input recorder: a polygon the geometry channel read
 };
 
-/// The per-view numbers etc/door_views_log.csv carries (tools/fit_detector_envelopes.py reads them).
+/// One frame of one camera joining one view: what etc/door_views_log.csv carries (tools/fit_detector_envelopes.py groups the
+/// rows by (door, camera, view_id) into one trial per view) and what the detector learner counts.
 struct ViewRow
 {
     int camera = 0;            // 0 zed, 1 ricoh
     int view_id = -1;
-    float q = 0.f, fill_h = 0.f, fill_v = 0.f, vis = 0.f, kappa = 0.f, aspect = 0.f, hit = 0.f;   // hit: the view's mean weight
+    float q = 0.f, fill_h = 0.f, fill_v = 0.f, vis = 0.f, kappa = 0.f, aspect = 0.f;   // THIS frame's
+    float hit = 0.f;           // THIS frame's association weight (0 = a miss) — the same frame as q / fill / vis
+    bool q_known = true;       // false: a ricoh frame with no model (q → 0⁺): logged, never a learning trial
 };
 
 /// The leaf face's projected contour + its controls in the ZED (the construction compute_silhouette_existence used, moved
@@ -99,57 +104,93 @@ ExistenceTrace observe_place(PlaceBelief& b, const rc::DoorFitState& theta, cons
 /// blob's measured width (its extent along that wall). With no polygon the blob's own principal direction is the wall.
 [[nodiscard]] rc::DoorFitState typical_door_at(const Vec2f& xy, float width, const std::vector<Vec2f>& polygon);
 
-/// ONLINE DETECTOR LEARNING (spec §8.4): ONE TRIAL PER VIEW, never per frame. A view of camera c contributes its aggregate:
-/// y = its mean hit weight, g = its mean front-end factor q / hit_rate (= env · aspect · vis · κ). The hit rate is the
-/// Bernoulli rate through that front end, learned from the views of doors believed in (L > 0):
+/// ONLINE DETECTOR LEARNING (spec §8.4): ONE TRIAL PER VIEW, never per frame. A view of camera c is one trial: y = the
+/// fraction of its frames with an associated detection (UNWEIGHTED: the association weight already scales hit_llr, so counting
+/// it here too would count confidence twice — fix round 1), g = its mean front-end factor q / hit_rate (= env · aspect · vis · κ).
+/// The hit rate is the Bernoulli rate through that front end, learned from the views of doors believed in (L > 0):
 ///     hit_rate = (h0 · n0 + Σ y) / (n0 + Σ g),       n0 = the loaded model's n_hit_trials + 1 (a compiled default: 1 view);
-/// the false-alarm rate from the views of places whose row was later REMOVED (their hits were the detector's false alarms):
-///     false_alarm = (f0 + Σ y_fa) / (1 + Σ g_fa).
-/// A view's trial is REPLACED as its aggregate grows (the ledger's own rule), so a parked stare stays one trial. The circularity
-/// (records come from doors the same model believes in) is accepted and stated in the spec; the tests guard against drift.
-/// An estimate outside the detector's domain (0 < false_alarm < hit_rate < 1) is not adopted — a probability domain, not a gate.
+/// the false-alarm rate from the views of DOORS later REMOVED (their detections were the detector's false alarms):
+///     false_alarm = (f0 · m0 + Σ y_fa) / (m0 + Σ g_fa),   m0 = the loaded n_fa_trials + 1.
+/// Pending candidates contribute nothing (they are simply not born). Frames whose q is unknown (a ricoh with no model: q → 0⁺) are
+/// not trials. A view's trial is REPLACED as its frames accumulate (the ledger's own rule). Sums are kept incrementally, so
+/// table() is O(1). An estimate outside the detector's domain (0 < false_alarm < hit_rate < 1) is not adopted — a probability
+/// domain, not a gate.
 class DetectorLearner
 {
 public:
-    void set_prior(const DetectorTable& t) { prior_ = t; }
-    /// The view's trial for a door with L > 0 (alive = true) or not (alive = false: kept, not counted for the hit rate).
-    void note(std::uint64_t place, int cam, std::size_t view, float y, float g, bool alive)
-    { trials_[{place, cam, view}] = {y, g, alive}; }
-    /// The place was removed: every trial it ever had becomes a false-alarm trial.
+    void set_prior(const DetectorTable& t) { prior_ = t; dirty_ = true; }
+    /// One frame of camera `cam` joining `view` of door `place`: hit = a detection was associated; g = q / hit_rate.
+    void frame(std::uint64_t place, int cam, std::size_t view, bool hit, float g)
+    {
+        auto& P = places_[place];
+        Trial& t = P.trials[{cam, view}];
+        if (P.alive) add(cam, t, -1.0);
+        t.n += 1.0; t.hits += hit ? 1.0 : 0.0; t.sg += g;
+        if (P.alive) add(cam, t, +1.0);
+        dirty_ = true;
+    }
+    /// The door's belief is above the creation line (its trials count for the hit rate) or not.
+    void set_alive(std::uint64_t place, bool alive)
+    {
+        auto it = places_.find(place);
+        if (it == places_.end() or it->second.alive == alive) { if (it != places_.end()) it->second.alive = alive; return; }
+        for (const auto& [k, t] : it->second.trials) add(k.first, t, alive ? +1.0 : -1.0);
+        it->second.alive = alive;
+        dirty_ = true;
+    }
+    /// The door was REMOVED: every trial it had becomes a false-alarm trial.
     void retire(std::uint64_t place)
     {
-        for (auto it = trials_.begin(); it != trials_.end();)
-            if (std::get<0>(it->first) == place) { fa_[std::get<1>(it->first)].y += it->second.y; fa_[std::get<1>(it->first)].g += it->second.g; it = trials_.erase(it); }
-            else ++it;
+        auto it = places_.find(place);
+        if (it == places_.end()) return;
+        set_alive(place, false);
+        for (const auto& [k, t] : it->second.trials) { fa_[k.first].y += t.y(); fa_[k.first].g += t.g(); }
+        places_.erase(it);
+        dirty_ = true;
     }
-    /// The learned table (falls back per camera to the prior where an estimate leaves the domain).
-    [[nodiscard]] DetectorTable table() const
+    /// The place is gone without a verdict (a merged duplicate): its trials are dropped.
+    void forget(std::uint64_t place) { set_alive(place, false); places_.erase(place); dirty_ = true; }
+    [[nodiscard]] const DetectorTable& table() const
     {
-        DetectorTable t = prior_;
+        if (not dirty_) return table_;
+        table_ = prior_;
         for (int c = 0; c < 2; ++c)
         {
-            double sy = 0.0, sg = 0.0;
-            for (const auto& [k, v] : trials_)
-                if (std::get<1>(k) == c and v.alive) { sy += v.y; sg += v.g; }
             const DetectorModel& p = c == 0 ? prior_.zed : prior_.ricoh;
             DetectorModel m = p;
-            const double n0 = static_cast<double>(p.n_hit_trials) + 1.0;
-            m.hit_rate = static_cast<float>((p.hit_rate * n0 + sy) / (n0 + sg));
-            m.n_hit_trials = static_cast<float>(static_cast<double>(p.n_hit_trials) + sg);
-            m.false_alarm = static_cast<float>((p.false_alarm + fa_[c].y) / (1.0 + fa_[c].g));
-            if (detector_in_domain(m)) (c == 0 ? t.zed : t.ricoh) = m;
+            const double n0 = static_cast<double>(p.n_hit_trials) + 1.0, m0 = static_cast<double>(p.n_fa_trials) + 1.0;
+            m.hit_rate = static_cast<float>((p.hit_rate * n0 + live_[c].y) / (n0 + live_[c].g));
+            m.n_hit_trials = static_cast<float>(static_cast<double>(p.n_hit_trials) + live_[c].g);
+            m.false_alarm = static_cast<float>((p.false_alarm * m0 + fa_[c].y) / (m0 + fa_[c].g));
+            m.n_fa_trials = static_cast<float>(static_cast<double>(p.n_fa_trials) + fa_[c].g);
+            if (detector_in_domain(m)) (c == 0 ? table_.zed : table_.ricoh) = m;
         }
-        return t;
+        dirty_ = false;
+        return table_;
     }
     [[nodiscard]] double n_views(int cam) const
-    { double n = 0; for (const auto& [k, v] : trials_) if (std::get<1>(k) == cam and v.alive) n += 1; return n; }
-    [[nodiscard]] double n_false_alarm_g(int cam) const { return fa_[cam].g; }
+    {
+        double n = 0;
+        for (const auto& [id, P] : places_)
+            if (P.alive) for (const auto& [k, t] : P.trials) if (k.first == cam) n += 1;
+        return n;
+    }
+    [[nodiscard]] std::size_t n_places() const { return places_.size(); }
 private:
-    struct Trial { float y = 0.f, g = 0.f; bool alive = false; };
+    struct Trial
+    {
+        double n = 0, hits = 0, sg = 0;
+        [[nodiscard]] double y() const { return n > 0 ? hits / n : 0.0; }
+        [[nodiscard]] double g() const { return n > 0 ? sg / n : 0.0; }
+    };
+    struct Place { bool alive = false; std::map<std::pair<int, std::size_t>, Trial> trials; };
     struct Sum { double y = 0.0, g = 0.0; };
+    void add(int cam, const Trial& t, double sgn) { live_[cam].y += sgn * t.y(); live_[cam].g += sgn * t.g(); }
     DetectorTable prior_ = default_detectors();
-    std::map<std::tuple<std::uint64_t, int, std::size_t>, Trial> trials_;
-    std::array<Sum, 2> fa_{};
+    std::map<std::uint64_t, Place> places_;
+    std::array<Sum, 2> live_{}, fa_{};
+    mutable DetectorTable table_ = default_detectors();
+    mutable bool dirty_ = true;
 };
 
 /// The geometry channel's present-hypothesis mean, in units of the controls' spread: μ1 = μ0 + d·s. Learned from the views of

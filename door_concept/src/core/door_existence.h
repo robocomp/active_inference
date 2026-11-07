@@ -279,8 +279,8 @@ struct PoseOverlap { float kappa = 1.0f; float spread_m = 0.0f; };
 
 /// The header line of etc/door_existence_log.csv (the adapter writes it once, when it opens the file).
 extern const char* const kExistenceCsvHeader;
-/// The header line of etc/door_views_log.csv: one row per (door, camera, view) each time a frame joins that view — the view's
-/// aggregate so far (the LAST row of a (door, camera, view_id) is the view's trial; tools/fit_detector_envelopes.py keeps it).
+/// The header line of etc/door_views_log.csv: one row per camera per frame that joins a view of a door or a pending candidate
+/// (place_<key>), all fields THIS frame's (q nan = a ricoh with no model); tools/fit_detector_envelopes.py averages a view's rows.
 extern const char* const kViewsCsvHeader;
 
 }  // namespace rc::door::core

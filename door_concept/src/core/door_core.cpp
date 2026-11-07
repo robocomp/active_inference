@@ -330,6 +330,7 @@ void DoorCore::merge(DoorCycleOutput& out)
             record(K::Merge, drop, dropped.state.cx, dropped.state.cy,
                  std::format("into {} overlap {:.2f}", keep, ratio), dropped.name, out);
             out.deletes.push_back({drop, "merge"});
+            learner_.forget(drop);   // Task 8: a merged duplicate's views are not a verdict on the detector
             world_->retire(drop);
         });
 }
@@ -352,7 +353,7 @@ void DoorCore::associate(const DoorCycleInput& in, DoorCycleOutput& out)
     //    one that carries no evidence and leaves no attributable record — a phantom analysis cannot tell a
     //    reasoned removal from a timeout. Tying it to the existence flag makes the two mutually exclusive
     //    by construction, and keeps them A/B-able: turn the channel off and the counter comes back exactly.
-    //    door removes on `existence.should_remove(exist_removal_prob)` (Existence.Enabled, default true).
+    //    door removes on the costed decision over its place belief (decide(belief.L(), role, costs), Task 8; Existence.Enabled).
     tp.death_frames     = std::numeric_limits<int>::max();   // never retire by occlusion:
                                                             // removal is the existence channel's
     tp.birth_min_sep_m  = cfg.tracker_birth_min_sep_m;
@@ -393,6 +394,7 @@ void DoorCore::associate(const DoorCycleInput& in, DoorCycleOutput& out)
     // Detections ← this frame's "door" mask slices (carry the slice index for the assignment).
     dets_.clear();
     det_w_.clear();
+    det_adm_.clear();
     const auto& pkt = masks_.packet();
 
     // ★BIRTH EVIDENCE — the shared CREATE policy (common/instance_tracker/birth_evidence.h). This agent fed
@@ -536,6 +538,7 @@ void DoorCore::associate(const DoorCycleInput& in, DoorCycleOutput& out)
             // vetoed, it is unsupported. Every agent already refused to fit two of its OWN instances to one
             // object; none ever asked what a different concept had claimed, which is how a refrigerator was
             // created on top of door_3 (16 cm apart, same width, same yaw) and then could not die.
+            float unclaimed_w = 1.0f;
             if (not claims_.empty())
             {
                 const rc::exclusion::Claim* who = nullptr;
@@ -546,8 +549,9 @@ void DoorCore::associate(const DoorCycleInput& in, DoorCycleOutput& out)
                     {dv.xy.x(), dv.xy.y(), cfg.door_prior_w_m, 0.10f /*leaf thickness*/, 0.0f}, claims_, &who,
                     0.0f, cfg.door_prior_h_m);
                 dv.birth_evidence *= unclaimed;
+                unclaimed_w = unclaimed;
                 if (unclaimed < 0.99f)
-                    diag("stdout", std::format("[door] birth cand CLAIMED by '{}' ({:.0f}%): birth_ev x{:.2f}\n",
+                    diag("stdout", std::format("[door] detection CLAIMED by '{}' ({:.0f}%): its hit weight x{:.2f}\n",
                                                who ? who->node : "?", 100.0f * (1.0f - unclaimed), unclaimed), out);
             }
             ++ctr.pushed;
@@ -555,7 +559,11 @@ void DoorCore::associate(const DoorCycleInput& in, DoorCycleOutput& out)
             ctr.ev += dv.birth_evidence; ctr.ev_max = std::max<double>(ctr.ev_max, dv.birth_evidence);
             if (sl.source == 0) ctr.w_wall += 1.0;
             ctr.w_pool += ricoh_w;
-            det_w_.push_back(std::clamp(sl.confidence, 0.0f, 1.0f) * ricoh_w);   // Task 8: the detection's own reliability
+            // Task 8: the detection's reliability as the door model's hit weight — confidence x the ricoh's wall/variance weight x
+            // P(unclaimed by another concept's object) (fix round 1: the cross-concept exclusion reaches births again). A frame the
+            // fit would refuse (frame_admissible) is not a trial for the place it lands on (FrameDetection::admissible).
+            det_w_.push_back(std::clamp(sl.confidence, 0.0f, 1.0f) * ricoh_w * unclaimed_w);
+            det_adm_.push_back(frame_admissible(sl, ego_, cfg));
             dets_.push_back(dv);
         }
     // The remembered-door look reads this frame's detections as "seen there" (door_look.h, step_remembered_looks).
@@ -903,6 +911,7 @@ void DoorCore::births(const DoorCycleInput& in, DoorCycleOutput& out)
             // ★Task 8: THE BELIEF IS BORN WITH THE DOOR. The candidate's place belief (prior, carried memory, views) becomes the
             //  newborn's; a candidate seeded from a REMOVED row is a deleted door found again — C_delete's sample (spec §8.2).
             door_seq_[new_id] = next_door_seq_++;
+            observed_frame_[new_id] = masks_.packet().frame_id;   // its candidate already put this frame into the belief
             if (const int ci = det_candidate_.size() > static_cast<std::size_t>(d) ? det_candidate_[d] : -1; ci >= 0)
             {
                 Candidate& cand = candidates_[static_cast<std::size_t>(ci)];

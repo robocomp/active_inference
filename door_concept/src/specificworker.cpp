@@ -477,9 +477,10 @@ void SpecificWorker::initialize()
         core_->costs() = rc::door::core::CostEstimator::load("etc/door_costs.csv");
         const auto t = core_->detectors();
         const auto c = core_->costs().costs(cfg_.exist_max_room_s);
-        std::print("door_concept: [existence] loaded etc/door_detectors.csv: zed hit {:.3f} fa {:.4f} (n={:.0f}), ricoh hit {:.3f} "
-                   "fa {:.4f} (n={:.0f}); etc/door_costs.csv: C_keep {:.1f} s (n={}), C_delete {:.1f} s (n={})\n",
-                   t.zed.hit_rate, t.zed.false_alarm, t.zed.n_hit_trials, t.ricoh.hit_rate, t.ricoh.false_alarm, t.ricoh.n_hit_trials,
+        std::print("door_concept: [existence] loaded etc/door_detectors.csv: zed hit {:.3f} fa {:.4f} (n={:.0f}/{:.0f}), ricoh hit {:.3f} "
+                   "fa {:.4f} (n={:.0f}/{:.0f}); etc/door_costs.csv: C_keep {:.1f} s (n={}), C_delete {:.1f} s (n={})\n",
+                   t.zed.hit_rate, t.zed.false_alarm, t.zed.n_hit_trials, t.zed.n_fa_trials, t.ricoh.hit_rate, t.ricoh.false_alarm, t.ricoh.n_hit_trials,
+                   t.ricoh.n_fa_trials,
                    c.keep_s, core_->costs().n(rc::door::core::CostEstimator::Kind::Keep), c.delete_ordinary_s,
                    core_->costs().n(rc::door::core::CostEstimator::Kind::DeleteOrdinary));
     }
