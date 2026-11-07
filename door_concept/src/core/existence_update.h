@@ -48,6 +48,10 @@ struct ExistenceFrame
     const DetectorTable& det;
     bool zed_ran = false;                        // a fresh mask packet: the ZED detector processed a frame
     bool ricoh_ran = false;                      // a fresh ricoh frame in the packet AND a ricoh model + mount
+    // A fresh ricoh frame with NO ricoh model or mount (a v3/v4 tape, a graph without the node): its detections still count as hits —
+    // a detection proves the door was reportable, and q cancels in a hit's ratio (R9) — but nothing is a miss (q → 0⁺: exactly 0,
+    // Review Focus 4). room_T_ricoh is then the body pose (the best origin known).
+    bool ricoh_hits_only = false;
     std::optional<Mat4d> room_T_ricoh;
     std::optional<CameraSpec> zed_spec, ricoh_spec;
     const rc::edges::PreparedFrame* rgb = nullptr;   // a fresh RGB frame (nullptr ⇒ no geometry this cycle)

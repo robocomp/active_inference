@@ -42,9 +42,76 @@
 set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TAPES="${DOOR_TAPES:-/home/pbustos/robocomp/components/active_inference/room_concept/estimation_scripts/crossing}"
+# ── Task 8 (ruling R6): pingpong1 / pingpong2 (<crossing>/pingpongN/door_tape), the tapes that exist on disk. The door model now
+#    decides births (birth by comparison) and removals (costed), so lifecycle decisions MAY differ from the recorded run; every
+#    difference is listed in PP_ALLOWED with its reason, and the number of doors alive at the end must equal the recorded run's.
+#    SUPPRESS rows are log-only (they create and remove nothing) and are counted, not asserted.
+PP_STATUS=0
+PP_RAN=0
+PP_OUT="$(mktemp -d)"
+if [[ -f "$TAPES/pingpong1/door_tape/door_inputs.bin" && -f "$TAPES/pingpong2/door_tape/door_inputs.bin" ]]; then
+    PP_RAN=1
+    ( cd "$HERE" && g++ -std=c++23 -O2 -w -I/usr/include/eigen3 -I/usr/include/opencv4 tools/door_replay.cpp src/core/door_core.cpp \
+        src/core/door_fit.cpp src/core/door_existence.cpp src/core/existence_update.cpp src/core/door_visibility.cpp src/core/door_cycle_io.cpp \
+        src/door_belief.cpp src/door_model.cpp src/epistemic_planner.cpp src/door_frame_evidence.cpp ../common/contour_edge/contour_edge_check.cpp \
+        ../common/contour_edge/contour_edge_project.cpp ../common/contour_edge/contour_depth_check.cpp -lzstd -lopencv_core -lopencv_imgproc \
+        -o "$PP_OUT/door_replay" ) || { echo "BUILD FAIL (pingpong)"; exit 2; }
+    for t in pingpong1 pingpong2; do
+        "$PP_OUT/door_replay" "$TAPES/$t/door_tape/door_inputs.bin" "$TAPES/$t/door_tape/door_decisions.bin" > "$PP_OUT/$t.txt" 2>&1 &
+    done
+    wait
+    python3 -I - "$PP_OUT" <<'PPEOF' || PP_STATUS=1
+import re, sys
+out = sys.argv[1]
+LIFE = re.compile(r"^\s*(EQUAL|ref|replay)\s+cycle (\d+) t \d+ (BIRTH|REMOVE|MERGE|REACQUIRE|RESTORE|RELEASE) id \d+ '([^']*)' a=(\S+) b=(\S+)")
+SUP = re.compile(r"^\s*(EQUAL|ref|replay)\s+cycle \d+ t \d+ SUPPRESS")
+# (tape, side, kind, cycle, name): why the decision differs from the recorded (old-model) run.
+PP_ALLOWED = {
+    ("pingpong1", "ref", "BIRTH", 29, "door_1"): "birth by comparison: DOOR at (-0.55, 4.56) born at its FIRST good hit view (replay cycle 1), not after the tracker streak",
+    ("pingpong1", "replay", "BIRTH", 1, "door_1"): "the same door_1, 28 cycles earlier, 0.3 mm from the recorded birth",
+    ("pingpong1", "ref", "BIRTH", 721, "door_3"): "birth by comparison: the second room's door born at cycle 652 (69 cycles earlier), 0.14 m from the recorded birth",
+    ("pingpong1", "replay", "BIRTH", 652, "door_3"): "the same door as the recorded door_3 (721)",
+    ("pingpong1", "replay", "BIRTH", 542, "door_2"): "a phantom at (-0.76,-3.80): one model-less ricoh hit view (v3 tape: no ricoh intrinsics) took it over L > 0",
+    ("pingpong1", "replay", "REMOVE", 543, "door_2"): "the phantom's first fit gave an atypical size (size term -8.4 nats): removed the next frame",
+    ("pingpong1", "replay", "REACQUIRE", 623, "door_2"): "the same phantom re-detected 8 s later (the replay world's ghost match keeps its name)",
+    ("pingpong1", "replay", "BIRTH", 623, "door_2"): "the phantom re-born from the place row it left (carried ~0)",
+    ("pingpong1", "replay", "REMOVE", 624, "door_2"): "removed again on its fitted size (-14.2 nats): net zero doors",
+    ("pingpong2", "ref", "BIRTH", 29, "door_1"): "birth by comparison: born at the first good hit view (replay cycle 1), 0.07 mm from the recorded birth",
+    ("pingpong2", "replay", "BIRTH", 1, "door_1"): "the same door_1",
+    ("pingpong2", "ref", "BIRTH", 1392, "door_3"): "birth by comparison: born at cycle 667 from the ricoh hit (725 cycles earlier), 0.07 m from the recorded birth",
+    ("pingpong2", "replay", "BIRTH", 667, "door_2"): "the same door as the recorded door_3 (named door_2 by the replay's counter, as at baseline)",
+}
+fails = []
+for tape in ("pingpong1", "pingpong2"):
+    alive = {"ref": 0, "replay": 0}; sup = {"ref": 0, "replay": 0}; seen = set()
+    for line in open(f"{out}/{tape}.txt"):
+        if SUP.match(line):
+            side = SUP.match(line).group(1); 
+            for s in (("ref", "replay") if side == "EQUAL" else (side,)): sup[s] += 1
+            continue
+        m = LIFE.match(line)
+        if not m: continue
+        side, cyc, kind, name = m.group(1), int(m.group(2)), m.group(3), m.group(4)
+        sides = ("ref", "replay") if side == "EQUAL" else (side,)
+        for s in sides:
+            alive[s] += {"BIRTH": 1, "REMOVE": -1, "MERGE": -1}.get(kind, 0)
+        if side != "EQUAL":
+            why = PP_ALLOWED.get((tape, side, kind, cyc, name))
+            seen.add((tape, side, kind, cyc, name))
+            print(f"{tape}: {side:6s} {kind} {name} @{cyc} — {why or 'NOT ALLOWED'}")
+            if not why: fails.append(f"{tape}: unexplained {side} {kind} {name} @{cyc}")
+    for k, why in PP_ALLOWED.items():
+        if k[0] == tape and k not in seen: fails.append(f"{tape}: the allowed change {k} did not happen")
+    print(f"{tape}: doors alive at the end: recorded {alive['ref']}, replay {alive['replay']}; SUPPRESS rows (log only) {sup['ref']} -> {sup['replay']}")
+    if alive["ref"] != alive["replay"]: fails.append(f"{tape}: door count changed {alive['ref']} -> {alive['replay']}")
+print("PINGPONG FAIL:" if fails else "PINGPONG PASS", fails)
+sys.exit(1 if fails else 0)
+PPEOF
+fi
+rm -rf "$PP_OUT"
 for t in tourR1 tourR2 rtD1i tour3A tour3C; do
     if [[ ! -f "$TAPES/$t/door_inputs.bin" || ! -f "$TAPES/$t/door_decisions.bin" ]]; then
-        echo "SKIPPED: $TAPES/$t tapes not found (set DOOR_TAPES)"; exit 0
+        echo "SKIPPED: $TAPES/$t tapes not found (set DOOR_TAPES)"; exit $PP_STATUS
     fi
 done
 OUT="$(mktemp -d)"

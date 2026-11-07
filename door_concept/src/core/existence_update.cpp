@@ -151,6 +151,26 @@ ExistenceTrace observe_place(PlaceBelief& b, const rc::DoorFitState& th, const E
         }
         t.ric_dl = b.ledger.sum() - before;
     }
+    else if (fr.ricoh_hits_only and fr.room_T_ricoh.has_value())
+    {
+        const float before = b.ledger.sum();
+        const Vec2f door_xy = th.aperture.centre_xy();
+        const PoseOverlap po = pose_overlap_factor(fr.rt_cov, fr.room_T_ricoh, door_xy, half_diag(th));
+        const float pos_var = th.ai2_initialized ? std::max(0.0f, th.ai2_belief.covariance()(0, 0)) : 0.0f;
+        const float hit = self_sensor == 1 ? po.kappa * self_w
+                                           : association_weight(fr.dets, 1, door_xy, pos_var + th.chain_cov_xx, po.kappa, fr.cfg);
+        t.ric_hit = hit;
+        if (hit > 0.0f)
+        {
+            // q unknown but positive: its limit q → 0⁺ (the smallest positive float) keeps the hit's ratio and makes the miss part 0.
+            const std::size_t v = b.ledger.observe(xy_of(*fr.room_T_ricoh), door_xy, th.aperture.across_u(), half_diag(th), po.spread_m, visit);
+            b.ledger.add_bernoulli(v, Channel::Ricoh, std::numeric_limits<float>::min(), fr.det.ricoh, hit);
+            b.ledger.recompute(v, fr.geometry_may_refute);
+            touched.push_back(v);
+            t.ric_view = static_cast<int>(v);
+        }
+        t.ric_dl = b.ledger.sum() - before;
+    }
     // ── geometry: the leaf contour against the same frame's controls (an RGB frame, mask or not) ──
     if (fr.rgb != nullptr and fr.rgb->valid() and fr.scene.room_T_zed.has_value())
     {

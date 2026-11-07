@@ -601,6 +601,11 @@ void DoorCore::with_frame(const DoorCycleInput& in, bool zed_ran, bool use_rgb, 
         fr.ricoh_spec = camera_spec(in.ricoh);
         fr.room_T_ricoh = *in.robot.room_T_body * *in.robot.body_T_ricoh;
     }
+    else if (zed_ran and ricoh_fresh(pkt) and in.robot.room_T_body.has_value())
+    {
+        fr.ricoh_hits_only = true;
+        fr.room_T_ricoh = *in.robot.room_T_body;
+    }
     fr.rgb = rgb_prep.valid() ? &rgb_prep : nullptr;
     fr.rt_cov = in.robot.rt_cov;
     fr.geometry_may_refute = cfg.exist_geometry_may_refute;
@@ -658,7 +663,6 @@ void DoorCore::track_episodes(const DoorCycleInput& in)
 // pending place; each candidate in the room receives this frame like a door does, and its verdict is the birth evidence.
 void DoorCore::prepare_candidates(const DoorCycleInput& in, const std::vector<rc::TrackView>& tracks, DoorCycleOutput& out)
 {
-    (void) out;
     const auto& cfg = cfg_.door;
     det_candidate_.assign(dets_.size(), -1);
     for (auto& d : dets_) d.birth_evidence = 0.0f;
@@ -749,6 +753,12 @@ void DoorCore::prepare_candidates(const DoorCycleInput& in, const std::vector<rc
             count_trials(kCandidatePlaceBit | cand.key, cand.belief, false);
             const Verdict v = decide(cand.belief.L(), Role::Ordinary, costs);
             exists[c] = v.exists ? 1 : 0;
+            if (it != self_det.end() and (cand.belief.ledger.views().size() <= 1 or ex_dbg_ % 60 == 0))   // its first views, then 1 in 60
+                diag("stdout", std::format("door_concept: [candidate] place_{} at ({:.2f},{:.2f}) w={:.2f} L={:+.2f} (band {:+.2f} base {:+.2f} "
+                                           "size {:+.2f} carried {:+.2f} views {}) -> {}\n", cand.key, cand.xy.x(), cand.xy.y(),
+                                           cand.theta.aperture.w, cand.belief.L(), cand.belief.prior.band, cand.belief.prior.base_rate,
+                                           cand.belief.prior.size, cand.belief.carried, cand.belief.ledger.views().size(),
+                                           v.exists ? "EXISTS" : v.remove ? "below the delete line" : "pending"), out);
             if (v.remove and not cand.removed)
             {
                 // a candidate below the delete line is a place where "no door is here": its row is kept for ever (R15 ages it)
@@ -764,9 +774,16 @@ void DoorCore::prepare_candidates(const DoorCycleInput& in, const std::vector<rc
             cand.removed = v.remove;
         }
     });
+    // ruling R2: the model decides. ONE detection per candidate carries its verdict; the candidate's other detections this frame (the
+    // other camera, a split mask) may not seed a second birth of the same place (the tracker's promoted candidates are not in its
+    // same-frame duplicate test), so they are not birthable this frame — they still associate.
     for (std::size_t d = 0; d < dets_.size(); ++d)
         if (const int c = det_candidate_[d]; c >= 0)
-            dets_[d].birth_evidence = exists[static_cast<std::size_t>(c)] ? 1.0f : 0.0f;   // ruling R2: the model decides
+        {
+            const bool own = self_det.at(static_cast<std::size_t>(c)) == static_cast<int>(d);
+            dets_[d].birth_evidence = own and exists[static_cast<std::size_t>(c)] ? 1.0f : 0.0f;
+            if (not own) dets_[d].birthable = false;
+        }
 }
 
 void DoorCore::update_existence(const DoorCycleInput& in, DoorCycleOutput& out)

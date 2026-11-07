@@ -58,6 +58,7 @@
 #include <set>
 #include <print>
 #include <sstream>
+#include <iostream>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -516,6 +517,7 @@ int main(int argc, char** argv)
     float recess_prior_std = -2.0f;   // < -1.5: keep the recorded config's value
     bool strip_oracle = false;   // --ricoh-strip-oracle: tapes older than v3 carry no ricoh windows; stand one in (see below)
     bool look_log = false, ablate_hull = false;   // Task E: --look prints the look-vs-approach prices; --ablate-hull-midpoint reproduces the collapse
+    bool core_stdout = false;
     for (int i = 3; i < argc; ++i)
     {
         const std::string_view a = argv[i];
@@ -528,6 +530,7 @@ int main(int argc, char** argv)
         else if (a == "--csv" and i + 1 < argc) csv_dir = argv[++i];
         else if (a == "--clock-jitter-ms" and i + 1 < argc) jitter_ms = std::strtod(argv[++i], nullptr);
         else if (a == "--trace" and i + 1 < argc) trace_door = argv[++i];
+        else if (a == "--stdout") core_stdout = true;   // Task 8: echo the core's stdout lines (existence / candidate readouts)
         else if (a == "--recess-prior-std" and i + 1 < argc)
         {   // a SENSITIVITY probe (Task 5b): the leaf-plane depth's prior σ, overriding the recorded config
             const std::string_view v = argv[++i];
@@ -590,6 +593,7 @@ int main(int argc, char** argv)
         else if (r.stream == "ai2_log_phi.csv" and phi_csv.is_open()) phi_csv << r.line;
         else if (r.stream == "door_existence_log.csv" and ex_csv.is_open()) ex_csv << r.line;
         else if (r.stream == "door_views_log.csv" and views_csv.is_open()) views_csv << r.line;
+        else if (r.stream == "stdout" and core_stdout) std::cout << r.line;
     }});
 
     // the slices the tool does not rebuild — counted, so a tape that exercised them says so
