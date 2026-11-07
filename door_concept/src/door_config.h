@@ -438,13 +438,10 @@ struct DoorConfig
     // Physical sensor rates for the log-likelihood ratio (rc::exist::SensorModel), NOT gates.
     float exist_detection_prob     = 0.85f;  // Existence.DetectionProb — P(mask lights a predicted pixel | door present & observable)
     float exist_clutter_prob       = 0.05f;  // Existence.ClutterProb   — P(mask lights a predicted pixel | no door)
-    float exist_sensor_sigma_m     = 0.03f;  // Existence.SensorSigmaM  — range/localisation noise σ
     float exist_occlusion_margin_m = 0.30f;  // Existence.OcclusionMarginM — an occluder must be ≥ this much CLOSER to count
     // Room-containment pose prior: P(a door outside the room walls) ≈ 0. Applies even when the instance is out
     // of view / behind a wall (a localization glitch can birth a door outside; the sensor then can't reach it
     // to vacate it). An out-of-room instance draws this STRONG negative log-odds each frame → removed in a few.
-    bool  exist_room_prior         = true;   // Existence.RoomPrior — enforce the room-containment pose prior
-    float exist_room_margin_m      = 0.40f;  // Existence.RoomMarginM — tolerance a door centre may sit OUTSIDE the walls
     // ── THE WALL BAND (door_room_band.h) ──────────────────────────────────────────────────────────────
     // A door's aperture lies IN a wall, i.e. between the room polygon (drawn at the room-side face) and the
     // far face T beyond it — so "outside the polygon" is the NORMAL place for a real door. The containment

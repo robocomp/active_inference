@@ -197,14 +197,8 @@ void read_door_config_fields(DoorConfig& out, GetF&& getf, GetI&& geti, GetS&& g
             "Existence.DetectionProb — P(mask lights a predicted pixel | door present & observable)");
     out.exist_clutter_prob       = getf("Existence.ClutterProb", 0.05f,
             "Existence.ClutterProb — P(mask lights a predicted pixel | no door)");
-    out.exist_sensor_sigma_m     = getf("Existence.SensorSigmaM", 0.03f,
-            "Existence.SensorSigmaM — range/localisation noise σ");
     out.exist_occlusion_margin_m = getf("Existence.OcclusionMarginM", 0.30f,
             "Existence.OcclusionMarginM — an occluder must be ≥ this much CLOSER to count");
-    out.exist_room_prior         = getb("Existence.RoomPrior", true,
-            "Existence.RoomPrior — enforce the room-containment pose prior");
-    out.exist_room_margin_m      = getf("Existence.RoomMarginM", 0.40f,
-            "Existence.RoomMarginM — tolerance a door centre may sit OUTSIDE the walls");
     out.exist_wall_thickness_m   = getf("Existence.WallThicknessM", 0.20f,
             "Existence.WallThicknessM — wall thickness T: an aperture lies in the band [0,T] beyond the room-side polygon face");
     out.exist_boundary_sigma_m   = getf("Existence.BoundarySigmaM", 0.10f,

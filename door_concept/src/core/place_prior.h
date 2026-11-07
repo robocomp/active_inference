@@ -31,13 +31,14 @@ using Vec2f = Eigen::Vector2f;
 struct PlacePriorInput
 {
     const std::vector<Vec2f>& polygon;
-    bool proto;                         ///< proto-room: outline is the measured floor, a frontier, not a wall
+    bool proto;                         ///< proto-room: outline is the measured floor. ONE-SIDED frontier: see place_prior()
     rc::door::RoomBand band;
     Vec2f aperture_xy;
     Vec2f wall_dir;                     ///< unit direction of the wall at the aperture (reserved; width is along it)
     float width, height, width_sd, height_sd;
     bool size_resolved;
     int doors_on_wall_before;
+    float edge_sigma_m = 0.0f;          ///< the proto outline edge's own published uncertainty (m); room_concept publishes none on the room node, so 0
 };
 
 struct PlacePrior
@@ -66,9 +67,14 @@ namespace detail
     const float delta = rc::door::signed_boundary_distance(in.polygon, in.aperture_xy);   // NaN: no polygon ⇒ no prior
     if (std::isfinite(delta))
     {
-        // Proto: an aperture at or beyond the outline (δ ≥ 0) is a frontier, not a wall: pays 0. Inside pays the band.
-        if (not (in.proto and delta >= 0.0f))
-            p.band = rc::door::band_log_prior(delta, in.band);
+        // ONE-SIDED PROTO FRONTIER, no cutoff. delta < 0 (inside the measured floor) pays the band. delta >= 0 pays band_log_prior(delta)
+        // with sigma widened by the outline edge's own uncertainty (hypot; 0 when none is published - the graph carries only
+        // delimiting_polygon_x/y): a door AT the frontier (within the outline's error of the edge) pays about 0, one metres beyond the
+        // measured floor pays as off-wall. For a promoted room the same formula applies with edge_sigma_m = 0.
+        rc::door::RoomBand b = in.band;
+        if (in.proto and delta >= 0.0f)
+            b.sigma_m = std::hypot(b.sigma_m, in.edge_sigma_m);
+        p.band = rc::door::band_log_prior(delta, b);
     }
     if (in.size_resolved)
         p.size = detail::normalised_log_predictive(in.width, 0.85f, 0.12f, in.width_sd)

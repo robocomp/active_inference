@@ -63,12 +63,13 @@ int main()
         const auto msg = rc::retired_door_keys_message(stale);
         CHECK(msg.contains(std::string(k)) and msg.contains("docs/superpowers/plans/2026-11-07-door-existence-model.md"));
     }
-    // all eleven named by the plan are in the table, nothing else is
+    // all fourteen named by the plan are in the table, nothing else is
     for (const char* k : {"Existence.BirthLogodds", "Existence.MaxLogodds", "Existence.RemovalProb", "Existence.RemoveFrames",
                           "Existence.OutOfRoomGain", "Existence.ShortGain", "Existence.MinHeightConf", "Existence.ReacquireRadiusM",
-                          "Existence.GhostMax", "Existence.CentralRegionFrac", "Tracker.BirthFrames"})
+                          "Existence.GhostMax", "Existence.CentralRegionFrac", "Existence.SensorSigmaM", "Existence.RoomPrior",
+                          "Existence.RoomMarginM", "Tracker.BirthFrames"})
         CHECK(std::ranges::contains(rc::kRetiredDoorKeys, std::string_view(k)));
-    CHECK(rc::kRetiredDoorKeys.size() == 11);
+    CHECK(rc::kRetiredDoorKeys.size() == 14);
     // a file with a retired key among live ones lists exactly the retired one(s), in the table's order
     {
         std::istringstream in("[Existence]\nRemoveFrames = 15\nMaxRoomS = 300\nGhostMax = 8\n");

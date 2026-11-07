@@ -354,7 +354,7 @@ RicohBirthMaxVar = 0.005   # max depth_var (m²) for a ricoh birth (only when Ri
 [Existence]
 # RETIRED (the loader REFUSES a file that sets them; docs/superpowers/plans/2026-11-07-door-existence-model.md): BirthLogodds,
 # MaxLogodds, RemovalProb, RemoveFrames, OutOfRoomGain, ShortGain, MinHeightConf, ReacquireRadiusM, GhostMax, CentralRegionFrac,
-# and Tracker.BirthFrames. Existence is one belief decided by the costs (door_decision.h).
+# SensorSigmaM, RoomPrior, RoomMarginM (dead: nothing read them) and Tracker.BirthFrames. Existence is one belief decided by the costs (door_decision.h).
 ActuationLlr = 3.0   # a door that changed state on OUR command (open/close satisfied after our request) exists: ln(0.9/0.05)
 # Existence log-odds on the SHARED rc::exist channel (common/existence_belief/existence_belief.h) — the same
 # one table_concept and chair_concept use. Evidence is the PIXEL-LEVEL silhouette: the fitted panel is
@@ -372,13 +372,10 @@ Enabled = true           # use the log-odds belief for removal (false → fall b
 # Physical sensor rates feeding the log-likelihood ratio — interpretable probabilities, not gains.
 DetectionProb = 0.85     # P(a predicted pixel is lit | the door IS there and observable)
 ClutterProb   = 0.05     # P(a predicted pixel is lit | no door there)
-SensorSigmaM  = 0.03     # range/localisation noise σ (m)
 OcclusionMarginM = 0.30  # a door/geometric occluder must be ≥ this many metres CLOSER to block a sample
 # Room-containment pose prior: P(a door centre outside the room walls) ≈ 0 (the room polygon is a trusted nominal
 # model, never fitted). Suppresses out-of-room BIRTHS and removes an instance a localization glitch put outside —
 # even behind a wall where the sensor can never reach it to vacate. Independent of frustum/occlusion.
-RoomPrior = true         # enforce the room-containment pose prior
-RoomMarginM = 0.40       # tolerance a door centre may sit OUTSIDE the walls (wall-hugging door + centroid noise)
 # THE WALL BAND (door_room_band.h, 2026-10-13). The polygon is the room-side FACE; a door's aperture sits IN the
 # wall, in [0, T] beyond it — the normal place for a real door, not an error. The per-door containment prior is
 # now a static log-prior −½(dist-to-band/σ)², 0 on the band, REPLACED each cycle (OutOfRoomGain no longer used

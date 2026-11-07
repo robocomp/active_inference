@@ -29,15 +29,22 @@ int main()
     // second_door
     CHECK(std::abs(place_prior(input(kRoom, {3, -0.1f}, 0.85f, 1)).base_rate - std::log(0.01f / 0.99f)) < 1e-5f);
     CHECK(std::abs(place_prior(input(kRoom, {3, -0.1f}, 0.85f, 0)).base_rate - first) < 1e-5f);
-    // proto_frontier
+    // proto_frontier: one-sided, no cutoff. Which sign is outside: y = -0.5 is beyond the wall (the promoted room pays there).
     {
-        const auto beyond = place_prior(input(kRoom, {3, -0.5f}, 0.85f, 0, true));
-        CHECK(beyond.band == 0.0f);
         const auto inside_proto = place_prior(input(kRoom, {3, 0.5f}, 0.85f, 0, true));
         const auto inside_prom  = place_prior(input(kRoom, {3, 0.5f}, 0.85f, 0, false));
-        CHECK(inside_proto.band < -1.0f);
+        CHECK(inside_proto.band < -1.0f);                                       // inside the measured floor, off the band: pays
         CHECK(inside_proto.band == inside_prom.band);
-        CHECK(place_prior(input(kRoom, {3, -0.5f}, 0.85f, 0, false)).band < -1.0f);   // promoted pays beyond the band
+        // at the frontier (on the band) a proto door pays ~0
+        CHECK(std::abs(place_prior(input(kRoom, {3, -0.1f}, 0.85f, 0, true)).band) < 1e-6f);
+        // 6.7 m beyond the measured floor pays as off-wall (the same as a promoted room), not 0
+        const auto far_proto = place_prior(input(kRoom, {3, -6.7f}, 0.85f, 0, true));
+        CHECK(far_proto.band < -100.0f and far_proto.band == place_prior(input(kRoom, {3, -6.7f}, 0.85f, 0, false)).band);
+        // a published edge uncertainty widens sigma on the outside only: 0.4 m past the band pays less with sigma 0.5 than without
+        auto in_u = input(kRoom, {3, -0.6f}, 0.85f, 0, true); in_u.edge_sigma_m = 0.5f;
+        CHECK(place_prior(in_u).band > place_prior(input(kRoom, {3, -0.6f}, 0.85f, 0, true)).band);
+        auto in_i = input(kRoom, {3, 0.5f}, 0.85f, 0, true); in_i.edge_sigma_m = 0.5f;
+        CHECK(place_prior(in_i).band == inside_proto.band);                     // the inside is unchanged
     }
     // jogged_wall_is_one_group
     {

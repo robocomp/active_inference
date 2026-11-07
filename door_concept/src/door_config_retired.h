@@ -11,10 +11,11 @@
 
 namespace rc
 {
-inline constexpr std::array<std::string_view, 11> kRetiredDoorKeys{
+inline constexpr std::array<std::string_view, 14> kRetiredDoorKeys{
     "Existence.BirthLogodds", "Existence.MaxLogodds", "Existence.RemovalProb", "Existence.RemoveFrames",
     "Existence.OutOfRoomGain", "Existence.ShortGain", "Existence.MinHeightConf", "Existence.ReacquireRadiusM",
     "Existence.GhostMax", "Existence.CentralRegionFrac",
+    "Existence.SensorSigmaM", "Existence.RoomPrior", "Existence.RoomMarginM",   // dead keys: nothing read them
     "Tracker.BirthFrames"};   // R2: the door core births on ONE good hit view (birth_frames = 1 is set in code)
 
 /// The retired keys `exists` reports present, in the table's order.
