@@ -510,6 +510,9 @@ void fields(Writer& w, const DoorCycleInput& x)
       x.mask_stream_ms_since_last_frame, x.bpearl, x.semantic_state, x.semantic, x.rgb_gray, x.depth,
       x.affordances, x.executing, x.identity_load, x.events, x.actuator_calls);
     if (w.version >= 4) w(x.backed_faces);
+    if (w.version >= 5)
+        w(x.ricoh, x.ricoh.equirect_az_sign, x.ricoh.equirect_az_offset, x.camera.equirect_az_sign,
+          x.camera.equirect_az_offset, x.robot.body_T_ricoh, x.route_faces);
 }
 void fields(Reader& r, DoorCycleInput& x)
 {
@@ -517,6 +520,9 @@ void fields(Reader& r, DoorCycleInput& x)
       x.mask_stream_ms_since_last_frame, x.bpearl, x.semantic_state, x.semantic, x.rgb_gray, x.depth,
       x.affordances, x.executing, x.identity_load, x.events, x.actuator_calls);
     if (r.version >= 4 and r.ok) r(x.backed_faces);
+    if (r.version >= 5 and r.ok)
+        r(x.ricoh, x.ricoh.equirect_az_sign, x.ricoh.equirect_az_offset, x.camera.equirect_az_sign,
+          x.camera.equirect_az_offset, x.robot.body_T_ricoh, x.route_faces);
 }
 void fields(Writer& w, const BpearlSweep& x)
 {
@@ -573,9 +579,10 @@ void fields(Reader& r, ImageFrame& x)
 }
 
 // ─── framing ────────────────────────────────────────────────────────────────────────────────────────────────────
-template <class T> bool write_record(std::ostream& os, const T& x)
+template <class T> bool write_record(std::ostream& os, const T& x, std::uint32_t version = kCycleIoVersion)
 {
     Writer w;
+    w.version = version;
     w.raw(kRecordTag);
     w.raw(std::uint64_t{0});              // length, patched below
     const std::size_t body = w.b.size();
@@ -696,10 +703,14 @@ Vec3f derived_prediction(const Mat4d& T, const Vec3f& c)
 
 bool write_header(std::ostream& os, const DoorRecordingHeader& h, RecordingKind kind)
 {
+    return write_header_as_version(os, h, kind, kCycleIoVersion);
+}
+
+bool write_header_as_version(std::ostream& os, const DoorRecordingHeader& h, RecordingKind kind, std::uint32_t v)
+{
     os.write(magic_of(kind), 4);
-    const std::uint32_t v = kCycleIoVersion;
     os.write(reinterpret_cast<const char*>(&v), sizeof v);
-    return write_record(os, h);
+    return write_record(os, h, v);
 }
 
 std::optional<DoorRecordingHeader> read_header(std::istream& is, RecordingKind kind, std::uint32_t* version)
@@ -713,6 +724,7 @@ std::optional<DoorRecordingHeader> read_header(std::istream& is, RecordingKind k
 }
 
 bool write(std::ostream& os, const DoorCycleInput& x)  { return write_record(os, x); }
+bool write_as_version(std::ostream& os, const DoorCycleInput& x, std::uint32_t v) { return write_record(os, x, v); }
 bool write(std::ostream& os, const DoorCycleOutput& x) { return write_record(os, x); }
 std::optional<DoorCycleInput>  read_input(std::istream& is)  { return read_record<DoorCycleInput>(is); }
 std::optional<DoorCycleInput>  read_input(std::istream& is, std::uint32_t version)

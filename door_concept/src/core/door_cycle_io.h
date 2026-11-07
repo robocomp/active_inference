@@ -85,7 +85,7 @@ using Mat3f = Eigen::Matrix3f;
 using Mat4d = Eigen::Matrix4d;
 using Mat6d = Eigen::Matrix<double, 6, 6>;
 
-inline constexpr std::uint32_t kCycleIoVersion = 4;     // written (v4: DoorCycleInput::backed_faces)
+inline constexpr std::uint32_t kCycleIoVersion = 5;     // written (v4: DoorCycleInput::backed_faces; v5: ricoh camera, body_T_ricoh, route_faces)
 inline constexpr std::uint32_t kCycleIoOldestReadable = 1;   // read (v1: unpacked arrays)
 
 /// DSR ids carry the generating agent's id in their low bits (cortex core/id_generator.h, agent_id_size = 12).
@@ -181,6 +181,7 @@ struct RobotState
     std::optional<Mat4d> room_T_robot, room_T_body, room_T_zed;   // ts = 0
     std::optional<Mat4d> robot_T_zed, body_T_zed;                 // static mounts
     std::optional<Mat4d> root_T_body;                             // recreate_lost_door
+    std::optional<Mat4d> body_T_ricoh;                            // static mount body -> ricoh (v5; nullopt on older tapes)
     std::optional<Mat6d> rt_cov;                                  // robot↔room RT edge covariance (rt_api)
     bool rt_cov_edge_robot_to_room = true;                        // which direction the edge carrying it runs
     std::optional<Twist>     twist;                               // robot_current_{advance,side,angular}_speed
@@ -199,6 +200,7 @@ struct CameraIntrinsics
     std::uint8_t projection_model = 0;            // DSR::CameraAPI::ProjectionModel
     std::optional<int>   cam_rgb_width, cam_rgb_focalx;
     std::optional<float> cam_fov;
+    float equirect_az_sign = 1.f, equirect_az_offset = 0.f;   // cam_equirect_azimuth_sign / _offset (360 cameras; v5 tail)
     bool operator==(const CameraIntrinsics&) const = default;
 };
 
@@ -463,6 +465,8 @@ struct DoorCycleInput
     std::vector<ObjectInfo>   objects;
     RobotState                robot;
     CameraIntrinsics          camera;
+    /// The "ricoh" node's camera model (360). present == false on a v4 tape or a graph without the node. v5.
+    CameraIntrinsics          ricoh;
 
     std::optional<MaskPacket>  masks;              // nullopt = no new frame this cycle
     std::int64_t               mask_stream_ms_since_last_frame = -1;
@@ -478,6 +482,9 @@ struct DoorCycleInput
     /// link 1, room_concept's link 2, our twin link 3) or carrying an ltsm recall (a remembered passage face). No verdict
     /// from views overturns one: its existence and its leaf HOLD. v4 (empty when replaying an older tape).
     std::vector<std::uint64_t>   backed_faces;
+    /// Door NAMES the LTSM remembers as crossed (rc::topo::crossed_doors on the `ltsm_topology` node): a live passage
+    /// face with crossings >= 1. v5 (empty when replaying an older tape).
+    std::vector<std::string>     route_faces;
 
     std::optional<IdentityLoad>  identity_load;    // once, on the first recorded cycle
     std::vector<DoorEvent>       events;           // since the previous cycle, in arrival order
@@ -604,6 +611,11 @@ enum class RecordingKind : std::uint8_t { Input, Output };   // "DCIN" | "DCOU"
 
 /// One record. The writer serialises to a buffer first and issues ONE write, so a record is on disk whole or cut.
 [[nodiscard]] bool write(std::ostream& os, const DoorCycleInput& x);
+/// A record in an OLDER layout (version in [kCycleIoOldestReadable, kCycleIoVersion]); fields newer than `version`
+/// are dropped. For tests of the versioned reader. The header is layout-independent but carries the version.
+[[nodiscard]] bool write_as_version(std::ostream& os, const DoorCycleInput& x, std::uint32_t version);
+[[nodiscard]] bool write_header_as_version(std::ostream& os, const DoorRecordingHeader& h, RecordingKind kind,
+                                           std::uint32_t version);
 [[nodiscard]] bool write(std::ostream& os, const DoorCycleOutput& x);
 /// One record; nullopt at a clean end, on a truncated record, or on a corrupt one (never a half-filled struct).
 /// ⚠READS A RECORD OF THE CURRENT VERSION (v2) ONLY. Handed a v1 file's records it misreads them as Corrupt (the
