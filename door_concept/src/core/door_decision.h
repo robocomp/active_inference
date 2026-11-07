@@ -33,11 +33,14 @@ struct Verdict { bool exists; bool remove; float delete_line; };
 
 /// exists = L > 0; delete_line = -ln(C_delete(role) / keep_s); remove = role != BeingCrossed and L < delete_line.
 /// A door being crossed has no finite delete cost (deleting it under the robot strands the passage): its line is -inf.
+/// When C_delete <= C_keep the line is >= 0 and the two regions overlap (0 < L < line): REMOVE WINS, exists = L > 0 and not remove.
+/// Keeping a phantom then costs more than losing a door, so the costed line governs creation as well as deletion.
 [[nodiscard]] inline Verdict decide(float L, Role role, const Costs& c)
 {
     const float c_del = role == Role::Route ? c.delete_route_s : c.delete_ordinary_s;
     const float line = role == Role::BeingCrossed ? -INFINITY : -std::log(c_del / c.keep_s);
-    return {L > 0.0f, role != Role::BeingCrossed and L < line, line};
+    const bool remove = role != Role::BeingCrossed and L < line;
+    return {L > 0.0f and not remove, remove, line};
 }
 
 /// Crossing outranks the route; a name on the route faces is a Route door; anything else is Ordinary.

@@ -45,6 +45,15 @@ static void exists_at_zero()
     CHECK(not decide(0.f, Role::Ordinary, c).exists);   // exists is L > 0, strictly
 }
 
+static void delete_line_above_zero_removes()
+{
+    const Costs c{100.f, 30.f, 330.f};   // line = -ln(30/100) = +1.2
+    const Verdict o = decide(0.5f, Role::Ordinary, c);
+    CHECK(o.remove and not o.exists);
+    const Verdict b = decide(0.5f, Role::BeingCrossed, c);
+    CHECK(not b.remove and b.exists);
+}
+
 static void median_and_persist()
 {
     std::setlocale(LC_ALL, "");   // the agents run under es_ES; a comma-decimal parse must not corrupt the round trip
@@ -99,6 +108,7 @@ int main()
     route_door_survives();
     being_crossed_never_removed();
     exists_at_zero();
+    delete_line_above_zero_removes();
     median_and_persist();
     malformed_rows_counted();
     empty_estimator_has_no_costs_to_lie_about();
