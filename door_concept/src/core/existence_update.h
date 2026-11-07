@@ -15,8 +15,6 @@
 #include <array>
 #include <cstdint>
 #include <functional>
-#include <map>
-#include <tuple>
 #include <optional>
 #include <span>
 #include <string>
@@ -75,7 +73,7 @@ struct ViewRow
     bool q_known = true;       // false: a ricoh frame with no model (q → 0⁺): logged, never a learning trial
 };
 
-/// The leaf face's projected contour + its controls in the ZED (the construction compute_silhouette_existence used, moved
+/// The leaf face's projected contour + its controls in the ZED (the construction the old silhouette probe used, moved
 /// out so the geometry channel runs with no mask at all). Empty face ⇒ not measurable from here.
 [[nodiscard]] rc::edges::ContourSet leaf_contour(const ExistenceScene& sc, const rc::DoorFitState& inst);
 

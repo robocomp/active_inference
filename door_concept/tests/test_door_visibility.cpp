@@ -1,6 +1,6 @@
 // test_door_visibility.cpp — Task 2 of the door-existence model: door_view(), "should this door be visible in this image, and
 // how big does it project?", for the ZED pinhole AND the ricoh 360. The visibility rules are the silhouette's, moved
-// (src/core/door_visibility.{h,cpp}); compute_silhouette_existence now walks its samples through the same ViewRig.
+// (src/core/door_visibility.{h,cpp}); the old silhouette probe that fed the pre-model absence channel is gone (Task 10).
 //
 // The scene is test_door_core_existence.cpp's: a 10 x 10 m room, a door in the top wall (y = 5) at x = 1, a 1280x720 ZED
 // (f = 700) 1.2 m high looking +y from (1, 0.5).
@@ -11,12 +11,10 @@
 //   ricoh_unknown_windows_no_miss  windows unknown (producer without the field): vis 0, no miss evidence
 //   ricoh_face_on_1p4m           equirect 1920x960, the door at 1.4 m face-on: vis ≈ 1, fill = angular spans / (2π/3, π)
 //   open_leaf_vis_is_marginal    a phi posterior with mass at 0 and 80°: vis is the mass-weighted mean of the single-angle values
-//   silhouette_unchanged         compute_silhouette_existence on this scene returns the numbers it returned BEFORE the move
-//                                (captured from a316097f; -DSIL_ONLY builds the golden-capture part alone, against that tree)
 //
 // Build + run (from door_concept/):
 //   g++ -std=c++23 -O1 -w -I/usr/include/eigen3 -I/usr/include/opencv4 tests/test_door_visibility.cpp \
-//       src/core/door_core.cpp src/core/door_fit.cpp src/core/door_existence.cpp src/core/door_visibility.cpp src/core/existence_update.cpp src/core/door_visibility.cpp \
+//       src/core/door_core.cpp src/core/door_fit.cpp src/core/door_existence.cpp src/core/door_visibility.cpp src/core/existence_update.cpp \
 //       src/core/door_cycle_io.cpp src/door_belief.cpp src/door_model.cpp src/door_frame_evidence.cpp \
 //       ../common/contour_edge/contour_edge_check.cpp ../common/contour_edge/contour_edge_project.cpp \
 //       ../common/contour_edge/contour_depth_check.cpp -lzstd -lopencv_core -lopencv_imgproc \
@@ -111,61 +109,8 @@ struct Scene
     }
 };
 
-static void print_sil(const char* tag, const DoorSilhouette& s)
-{
-    std::print("SIL {} e_occ={:.6f} e_free={:.6f} n_det={} n_tot={} n_occl={} n_central={} det_w={:.6f} n_cells={} marg={} ndm={:.6f}\n",
-               tag, s.e_occ, s.e_free, s.n_detectable, s.n_total, s.n_occluded, s.n_central, s.det_w, s.n_cells,
-               s.phi_marginalised, s.n_det_marg);
-}
-
-static void check_sil(const char* tag, const DoorSilhouette& s, float occ, float free_, int det, int occl, int central, float det_w,
-                      int cells, float ndm)
-{
-    print_sil(tag, s);
-    CHECK(std::abs(s.e_occ - occ) < 1e-3f);
-    CHECK(std::abs(s.e_free - free_) < 1e-3f);
-    CHECK(s.n_detectable == det and s.n_total == 420 and s.n_occluded == occl and s.n_central == central);
-    CHECK(std::abs(s.det_w - det_w) < 1e-3f and s.n_cells == cells);
-    CHECK(std::abs(s.n_det_marg - ndm) < 1e-3f);
-}
-
 int main()
 {
-    // ── silhouette_unchanged: the numbers captured from a316097f (before the move). ──────────────────────────────────
-    {
-        Scene sc;
-        const auto T = std::optional<Mat4d>(pose(1.0, kRobotY, 1.2));
-        sc.set_mask(true, kRobotY, 1.0f);
-        const auto lit = compute_silhouette_existence(sc.scene(T, sc.zed), sc.inst, nullptr);
-        sc.set_mask(false, kRobotY, 1.0f);
-        const auto absent = compute_silhouette_existence(sc.scene(T, sc.zed), sc.inst, nullptr);
-        // marginal over a phi posterior: mass at 0 and 80°
-        sc.set_mask(true, kRobotY, 1.0f);
-        sc.inst.phi_curve = {{0.0f, 0.5f}, {80.0f * std::numbers::pi_v<float> / 180.0f, 0.5f}};
-        const auto marg = compute_silhouette_existence(sc.scene(T, sc.zed), sc.inst, nullptr);
-        sc.set_mask(true, 4.0f, 1.0f);   // oblique/near
-        sc.inst.phi_curve.clear();
-        const auto near = compute_silhouette_existence(sc.scene(std::optional<Mat4d>(pose(1.4, 4.0, 1.2)), sc.zed), sc.inst, nullptr);
-        // behind a partition 2 cm from the jamb, and from its open side
-        Scene sp;
-        sp.polygon = {{-5.f, -5.f}, {5.f, -5.f}, {5.f, 5.f}, {0.48f, 5.f}, {0.48f, 1.5f}, {0.38f, 1.5f}, {0.38f, 5.f}, {-5.f, 5.f}};
-        const auto wall = compute_silhouette_existence(sp.scene(std::optional<Mat4d>(pose(-1.2, kRobotY, 1.2)), sp.zed), sp.inst, nullptr);
-        const auto openside = compute_silhouette_existence(sp.scene(std::optional<Mat4d>(pose(1.6, kRobotY, 1.2)), sp.zed), sp.inst, nullptr);
-        print_sil("wall", wall); print_sil("openside", openside);
-        print_sil("lit", lit); print_sil("absent", absent); print_sil("marg", marg); print_sil("near", near);
-#ifndef SIL_ONLY
-        // captured from a316097f (the tree before the move) with -DSIL_ONLY
-        check_sil("wall",     wall,     0.f,       0.f,       0,   420, 0,   0.f,   0,   0.f);
-        check_sil("openside", openside, 0.f,       420.f,     420, 0,   389, 420.f, 420, 420.f);
-        check_sil("lit",      lit,      287.52f,   132.48f,   420, 0,   389, 420.f, 397, 420.f);
-        check_sil("absent",   absent,   0.f,       420.f,     420, 0,   389, 420.f, 397, 420.f);
-        check_sil("marg",     marg,     402.5f,    17.5f,     420, 0,   389, 420.f, 397, 420.f);
-        check_sil("near",     near,     96.f,      11.f,      107, 0,   48,  107.f, 107, -1.f);
-#endif
-    }
-#ifdef SIL_ONLY
-    return 0;
-#else
     // ── door_view ───────────────────────────────────────────────────────────────────────────────────────────────────
     {   // zed_behind_vis_zero
         Scene sc; sc.open_to(0.0f);   // a SHUT leaf in the aperture
@@ -255,5 +200,5 @@ int main()
     }
     std::print("{}\n", fails == 0 ? "test_door_visibility: ALL PASS" : "test_door_visibility: FAILURES");
     return fails == 0 ? 0 : 1;
-#endif
+
 }

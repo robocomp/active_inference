@@ -79,7 +79,7 @@ rc::edges::ContourSet leaf_contour(const ExistenceScene& sc, const rc::DoorFitSt
     if (not inst.ai2_initialized or not camera_usable(sc.cam) or not sc.room_T_zed.has_value())
         return {};
     const Eigen::Matrix4d zed_T_room = sc.room_T_zed->inverse();
-    // (compute_silhouette_existence's contour block, unchanged: the four leaf-face corners projected with the cycle's pose,
+    // (the old silhouette probe's contour block, unchanged: the four leaf-face corners projected with the cycle's pose,
     //  the controls slid ±1/±1.6 widths along the leaf's OWN plane in 3-D, all-or-nothing when a corner is behind the camera.)
     const auto project = [&](const Eigen::Vector3d& Pr) -> std::optional<rc::edges::ProjectedVertex>
     {
@@ -273,7 +273,7 @@ int wall_of(const Vec2f& xy, const std::vector<Vec2f>& polygon, const std::vecto
     {
         const Vec2f a = polygon[i], ab = polygon[(i + 1) % n] - a;
         const float len2 = ab.squaredNorm();
-        const float u = len2 > 1e-12f ? std::clamp((xy - a).dot(ab) / len2, 0.0f, 1.0f) : 0.0f;
+        const float u = len2 > 1e-12f ? std::clamp((xy - a).dot(ab) / len2, 0.0f, 1.0f) : 0.0f;   // clamp: the parameter of the closest point ON a segment (geometry), not a threshold
         if (const float d = (xy - (a + u * ab)).squaredNorm(); d < best) { best = d; g = groups[i]; }
     }
     return g;
@@ -290,7 +290,7 @@ rc::DoorFitState typical_door_at(const Vec2f& xy, float width, const std::vector
         const Vec2f a = polygon[i], ab = polygon[(i + 1) % n] - a;
         const float len2 = ab.squaredNorm();
         if (len2 < 1e-12f) continue;
-        const float t = std::clamp((xy - a).dot(ab) / len2, 0.0f, 1.0f);
+        const float t = std::clamp((xy - a).dot(ab) / len2, 0.0f, 1.0f);   // clamp: the parameter of the closest point ON a segment (geometry), not a threshold
         if (const float d = (xy - (a + t * ab)).squaredNorm(); d < best) { best = d; u = ab / std::sqrt(len2); }
     }
     rc::DoorFitState th;

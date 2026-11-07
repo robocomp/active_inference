@@ -1,12 +1,11 @@
 // test_door_open_leaf.cpp — Task D2 (gold12): an OPEN leaf is a door. Four things, all on the real DoorCore / helpers:
-//   1. CROSSING CREDIT: a door re-made across a crossing keeps its L and gains ln(CrossPassablePrior/leak) (crossing_logodds), and is
-//      NOT re-seeded at BirthLogodds by the existence slice once it is marked seeded.
+//   1. CROSSING CREDIT: a door re-made across a crossing keeps its evidence and gains ln(CrossPassablePrior/leak) (crossing_logodds).
 //   2. RICOH ABSENCE, OPEN-AWARE: a ricoh-born door whose leaf stands open (phi 90 deg) under hundreds of ricoh 'looked, not
-//      detected' keeps its L (~0 dL); the same door with a shut leaf is removed (the old channel, unchanged).
+//      detected' frames keeps most of its L; the same door with a shut leaf pays more (per view, not per frame).
 //   3. RICOH BIRTH WEIGHT: a slice a leaf-width off the wall gets a non-zero weight under the open-leaf prior (and 0 under a
 //      closed prior, as before); a far-off-wall slice does not; an on-wall slice is unchanged.
 //   4. the leaf-closedness covariate: cos^2 over the posterior (shut 1, 90 deg 0, smooth between).
-// Build + run: see test_door_ricoh_lifecycle.cpp's g++ line with this file in its place.
+// Build + run: see test_door_core_existence.cpp's g++ line with this file in its place.
 #include <charconv>
 #include <clocale>
 #include <cmath>
@@ -42,7 +41,6 @@ struct ExistWorld final : TrackerWorld
         for (auto& [id, s] : st) v.emplace_back(id, &s);
         return v;
     }
-    std::optional<GhostMatch> match_ghost(const Vec2f&) const override { return std::nullopt; }
     std::optional<IdentityMatch> match_identity(const Vec2f&) const override { return std::nullopt; }
     void retire(std::uint64_t id) override { st.erase(id); }
     void set_assigned_mask(std::uint64_t id, int slice) override
@@ -58,8 +56,6 @@ struct ExistWorld final : TrackerWorld
         st.emplace(id, std::move(f));
         return id;
     }
-    void reacquire(std::uint64_t, const GhostMatch&) override {}
-    void forget_ghost(const Vec2f&) override {}
     std::optional<std::string> adopt_birth(std::uint64_t id, int slice, const Vec3f&) override
     {
         const auto it = st.find(id);
@@ -137,29 +133,16 @@ int main()
         CHECK(dl > 2.2f and dl < 2.4f);
         CHECK(rc::door::crossing_logodds(0.01f, 0.05f) == 0.0f);                       // a happened crossing never counts against
         CHECK(rc::door::crossing_logodds(0.2f, 0.05f) < rc::door::crossing_logodds(0.5f, 0.05f));   // from the likelihood ratio, not a constant
+        // The re-made door's belief (Task 9: carried_belief): the source face's evidence plus the crossing, an empty ledger; a face never
+        // known carries nothing, so the new room's prior plus the crossing stands alone. (The full core path is test_carried_door.)
         const float L_src = 1.83f;
-        float Lout[3] = {0, 0, 0};
-        for (int carry = 0; carry < 3; ++carry)   // the re-made door with / without the carried belief (one world each: two doors at one place would merge)
-        {
-            DoorCoreConfig cfg; ExistWorld w; w.cfg = cfg.door; DoorCore core(cfg); w.core = &core; core.connect(&w);
-            rc::DoorFitState inst;
-            rc::DoorState s; s.w = cfg.door.door_prior_w_m; s.h = cfg.door.door_prior_h_m; s.thickness = cfg.door.door_thickness_m;
-            core.fit().init_instance(inst, 1, "door_1", s);
-            if (carry)   // 1: carried L; 2: unseeded source - BirthLogodds + the crossing (specificworker I2)
-            {
-                inst.existence.set((carry == 1 ? L_src : cfg.door.exist_birth_logodds) + dl);
-                inst.existence_seeded = true; inst.existence_entry_L = inst.existence.logodds(); inst.existence_since_entry = 0.0f;
-            }
-            w.st.emplace(1, std::move(inst));
-            core.step(ricoh_cycle(1, viewpoint(1), false));
-            CHECK(w.st.contains(1));
-            Lout[carry] = w.st.contains(1) ? w.st.at(1).existence.logodds() : -99.0f;
-            w.core = nullptr;
-        }
-        std::print("1: re-made door L = {:.2f} (carried), {:.2f} (fresh, re-seeded)\n", Lout[1], Lout[0]);
-        CHECK(std::abs(Lout[1] - std::min(L_src + dl, 4.0f)) < 1e-4f and Lout[1] > Lout[0] + 1.0f);   // kept, not re-seeded at BirthLogodds
-        CHECK(std::abs(Lout[2] - (1.0f + dl)) < 1e-4f and Lout[2] > Lout[0]);   // unseeded source: seed + crossing
-        CHECK(std::abs(Lout[0] - 1.0f) < 1e-4f);                                                      // the old path, for contrast
+        rc::door::core::PlaceRow src; src.L_evidence = L_src;
+        const auto carried = rc::door::core::carried_belief(&src, dl);
+        CHECK(std::abs(carried.L_evidence() - (L_src + dl)) < 1e-5f and carried.ledger.views().empty());
+        rc::door::core::PlacePrior room_prior; room_prior.band = -0.5f;
+        const auto unknown = rc::door::core::carried_belief(nullptr, dl, room_prior);
+        CHECK(std::abs(unknown.L() - (room_prior.total() + dl)) < 1e-5f and unknown.carried == 0.0f);
+        std::print("1: carried L = {:.2f}; never-known face L = {:.2f}\n", carried.L(), unknown.L());
     }
     {   // 3. ricoh birth weight (slice vs the wall at y = 5)
         const std::vector<Vec2f> poly{{-5.f, -5.f}, {5.f, -5.f}, {5.f, 5.f}, {-5.f, 5.f}};
@@ -187,25 +170,30 @@ int main()
                 if (d.kind == static_cast<std::uint16_t>(K::Birth)) ++t.births;
             CHECK(t.births == 1 and w.st.size() == 1);
             Tally t2;
-            L0[open] = w.st.empty() ? 0.0f : w.st.begin()->second.existence.logodds();
+            L0[open] = w.st.empty() ? 0.0f : w.st.begin()->second.belief.L();
             L100[open] = L0[open];
             for (int k = 301; k <= 1500 and not w.st.empty(); ++k)
             {
-                if (k == 401) L100[open] = w.st.begin()->second.existence.logodds();
+                if (k == 401) L100[open] = w.st.begin()->second.belief.L();
                 // the leaf-angle posterior is IDENTIFIED (by the LiDAR in the live agent): shut, or open at 90 deg
                 for (auto& [id, st] : w.st) { st.phi_est = phis[open]; st.phi_curve = {{phis[open], 1.0f}}; }
                 for (const auto& d : core.step(ricoh_cycle(k, viewpoint(k, 3.0f), false)).decisions)
                     if (d.kind == static_cast<std::uint16_t>(K::Remove)) ++t2.removes;
             }
             removes[open] = t2.removes;
-            Lend[open] = w.st.empty() ? -99.0f : w.st.begin()->second.existence.logodds();
+            Lend[open] = w.st.empty() ? -99.0f : w.st.begin()->second.belief.L();
             std::print("2: leaf {}: L {:.2f} -> {:.2f} after 100 absent frames -> {:.2f} at end; removes {}\n", open ? "OPEN (90 deg)" : "SHUT",
                        L0[open], L100[open], Lend[open], removes[open]);
             w.core = nullptr;
         }
-        CHECK(removes[0] == 1);                                  // shut leaf: the old behaviour, removed
-        CHECK(removes[1] == 0);                                  // open leaf: not removed by 1200 'looked, not detected' frames
-        CHECK((L0[1] - L100[1]) < 0.1f * (L0[0] - L100[0]));     // ...and in the same 100 frames lost <10% of what the shut one lost
+        // The new model (Task 10): misses are Bernoulli trials per VIEW (view_ledger.h), so 1200 'looked, not detected' frames from a
+        // circle of standpoints are a handful of views, not 1200 observations - a door seen on 300 frames is not deleted by them,
+        // shut or open. What the leaf angle decides is how much each missed view COSTS: the shut leaf is fully visible from the
+        // ricoh, the open one (edge-on, off the wall) is marginalised away (closedness), so it keeps nearly all of its L.
+        CHECK(Lend[0] < L0[0] - 0.1f);                           // the shut leaf pays for its absences
+        CHECK(removes[0] == 0 and removes[1] == 0);              // ...but a few missed views do not delete a door seen 300 times
+        CHECK((L0[1] - Lend[1]) < 0.5f * (L0[0] - Lend[0]));     // the open leaf loses less than half of what the shut one lost
+        CHECK(Lend[1] > Lend[0]);
     }
     if (fails == 0) std::print("test_door_open_leaf: ALL PASS\n");
     else            std::print("test_door_open_leaf: {} FAILURE(S)\n", fails);

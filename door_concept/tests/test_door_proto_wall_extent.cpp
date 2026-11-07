@@ -69,15 +69,12 @@ struct World final : TrackerWorld
         for (auto& [id, s] : st) v.emplace_back(id, &s);
         return v;
     }
-    std::optional<GhostMatch> match_ghost(const Vec2f&) const override { return std::nullopt; }
     std::optional<IdentityMatch> match_identity(const Vec2f&) const override { return std::nullopt; }
     void retire(std::uint64_t id) override { st.erase(id); }
     void set_assigned_mask(std::uint64_t id, int slice) override
     { if (auto it = st.find(id); it != st.end()) it->second.assigned_mask_idx = slice; }
     void after_association(const TrackerCycleInfo&) override {}
     std::uint64_t create_door(const BirthRequest&) override { return 0; }   // no camera ⇒ no births here
-    void reacquire(std::uint64_t, const GhostMatch&) override {}
-    void forget_ghost(const Vec2f&) override {}
     std::optional<std::string> adopt_birth(std::uint64_t, int, const Vec3f&) override { return std::nullopt; }
     std::vector<std::uint64_t> fit_targets() override
     {

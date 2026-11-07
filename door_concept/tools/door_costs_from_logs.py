@@ -13,7 +13,7 @@ Sources (per tour dir explore_tour<N>/, all wall-clock-stamped except where said
 NOT used: door_inputs.bin and door_decisions.bin (stale copies; the latter carries other door ids and no REMOVE rows).
 
 Judgement calls (stated, not hidden):
-  * "same place" is judged by door_concept's own REACQUIRE (<= ReacquireRadiusM, same hole, same name). A pair is dropped
+  * "same place" is judged by door_concept's own REACQUIRE (within the identity radius, same hole, same name). A pair is dropped
     when a RELEASE row lies between its REMOVE and REACQUIRE: the room frame changed, so the place is not comparable.
   * The k-th "left the graph" of a name is the k-th REMOVE of that name (a tour is dropped when the counts differ).
   * A failed attempt needs a clock at both ends. The end is the NEXT drive decision; a failure on the last drive row ends only

@@ -87,9 +87,9 @@ float SemanticField::at(int u, int v) const noexcept
     if (not valid_ or u < 0 or v < 0 or u >= frame_w_ or v >= frame_h_)
         return -1.0f;
     // Frame pixel → native cell, cell centres, nearest (SemanticProbField::at, unchanged).
-    const int cx = std::clamp(static_cast<int>((static_cast<float>(u) + 0.5f) * pw_
+    const int cx = std::clamp(static_cast<int>((static_cast<float>(u) + 0.5f) * pw_   // clamp: pixel index kept inside the image array (a domain guard), not a threshold
                                                / static_cast<float>(frame_w_)), 0, pw_ - 1);
-    const int cy = std::clamp(static_cast<int>((static_cast<float>(v) + 0.5f) * ph_
+    const int cy = std::clamp(static_cast<int>((static_cast<float>(v) + 0.5f) * ph_   // clamp: pixel index kept inside the image array (a domain guard), not a threshold
                                                / static_cast<float>(frame_h_)), 0, ph_ - 1);
     return plane_[static_cast<std::size_t>(cy) * static_cast<std::size_t>(pw_) + static_cast<std::size_t>(cx)];
 }
@@ -163,395 +163,6 @@ PoseOverlap pose_overlap_factor(const std::optional<Mat6d>& rt_cov, const std::o
 bool camera_usable(const CameraIntrinsics& c)
 {
     return c.present and c.projection_model == 0 /*CameraAPI::ProjectionModel::Pinhole*/ and c.width > 0 and c.height > 0;
-}
-
-// PIXEL-LEVEL silhouette existence evidence — see DoorSilhouette / DoorFitState::existence.
-//
-// Projects the door PANEL FACE (a w×h rectangle in the wall plane) into the ZED and, over the predicted
-// samples, splits into: lit by a "door" mask (occupancy), lit by a non-door mask (occlusion ⇒ excluded from
-// the detectable footprint), or lit by nothing (ABSENCE — the "gone" signal that fires even on a frame where
-// YOLO produced no door mask at all). A sample that does not land inside the real image is NOT detectable, so
-// n_detectable==0 means "the door was never looked at this frame" and rc::exist HOLDs.
-//
-// This is what makes turning the robot around harmless: the old scheme asked a bearing-free range term how
-// detectable the door was and got ≈0.4 for a door squarely BEHIND the camera, then charged absence evidence
-// against it every frame until it died. Here the frustum test is the detectability.
-DoorSilhouette compute_silhouette_existence(const ExistenceScene& sc, const rc::DoorFitState& inst,
-                                            const SemanticField* field)
-{
-    DoorSilhouette out;
-    if (not inst.ai2_initialized)
-        return out;
-    if (not camera_usable(sc.cam))
-        return out;
-    const auto& Mopt = sc.room_T_zed;   // camera→room, the cycle's pose
-    if (not Mopt.has_value())
-        return out;
-    const Eigen::Matrix4d zed_T_room = Mopt.value().inverse();
-
-    const float W    = static_cast<float>(sc.cam.width);
-    const float Himg = static_cast<float>(sc.cam.height);
-    if (W <= 0.f or Himg <= 0.f)
-        return out;
-
-    const auto& pkt = sc.pkt;
-    if (not pkt.valid or pkt.mask_pixels.empty())
-        return out;
-
-    // Hashed pixel-cell coverage of the current YOLO foreground, split door (occupancy) vs other (occluder).
-    // Shared with compute_frame_probe — see MaskCells.
-    const MaskCells cells = build_mask_cells(pkt);
-    const auto& door_cells     = cells.door;
-
-    const auto& s = inst.model.state();
-    const float hw = inst.leaf_pose.half_w;
-
-    // The visibility rules (frustum, masks, walls, other doors, the leaf beyond the aperture) are door_visibility.cpp's ViewRig —
-    // the SAME classification door_view() uses for any camera; this function keeps only the occupied/free bookkeeping.
-    // (The long comment on the leaf beyond the aperture moved with the code: door_visibility.cpp, ViewRig::ViewRig.)
-    const CameraSpec cam_spec = camera_spec(sc.cam);
-    const CameraView view{cam_spec, Mopt.value(), {}, false};
-    const ViewRig rig(view, sc, inst, cells);
-
-    // Classify ONE LEAF-face sample (local x hinge→free edge, z absolute): ViewRig::at decides whether the camera sees it;
-    // this tallies it.
-    //
-    // ★ The sample comes from door::leaf_point at the instance's CURRENT leaf pose (see ViewRig::at). With phi pinned at 0 (M0)
-    // this yields the wall-plane rectangle; when phi is a fitted DOF it follows the leaf for free.
-    std::unordered_set<std::int64_t> covered_cells;   // distinct cells the DETECTABLE silhouette occupies
-    double range_sum = 0.0;
-    const float central_region_frac = sc.cfg.exist_central_region_frac;
-    // ★PARAMETERISED BY THE LEAF POSE, AND BY WHERE IT ACCUMULATES. One pass renders the panel at ONE
-    // opening angle; the caller runs it once per candidate phi and combines. `extras` marks the pass
-    // whose by-products describe the scene for everybody else (centroid, semantic field, covered cells,
-    // range) — those are reported at the modal pose, because they answer "where is it on screen", which
-    // is a statement about one drawing and not something to average over hypotheses.
-    const auto classify = [&](const door::LeafPose& L, DoorSilhouette& out, bool extras,
-                              float lx, float lz)
-    {
-        ++out.n_total;                                                  // one sample of the WHOLE panel
-        const SampleView sv = rig.at(L, lx, lz);
-        if (sv.fate == SampleFate::Unseen) return;                      // behind / out of the REAL frustum ⇒ not detectable
-        if (sv.fate == SampleFate::Occluded) { ++out.n_occluded; return; }   // hidden ⇒ no vote
-        const float col = sv.col, row = sv.row, w_room = sv.w_room;
-        const double X = sv.X, Y = sv.Y, Z = sv.Z;
-        const std::int64_t k = sv.key;
-        ++out.n_detectable;
-        out.det_w += w_room;
-        if (extras) covered_cells.insert(k);
-        const float f = central_region_frac, g = 1.0f - central_region_frac;
-        // Silhouette centroid over ALL detectable samples — the size-invariant input to
-        // central_frac(). Deliberately OUTSIDE the central-box test below: it must describe
-        // where the whole visible object sits, not only the part already inside the box.
-        out.sum_col += col;
-        out.sum_row += row;
-
-        // Sample the graded posterior right here, at a pixel we have just established the camera could
-        // actually see. Doing it in this loop rather than from a bounding box is the point: the contour
-        // is the door's own projected shape, so the statistic is about the door and not about the
-        // rectangle around it.
-        if (extras and field != nullptr and field->valid())
-            if (const float p = field->at(static_cast<int>(col), static_cast<int>(row)); p >= 0.0f)
-            {
-                out.field_sum += p;
-                out.field_max = std::max(out.field_max, p);
-                ++out.field_n;
-            }
-        out.img_w = static_cast<int>(W);
-        out.img_h = static_cast<int>(Himg);
-        if (col > f * W and col < g * W and row > f * Himg and row < g * Himg)
-            ++out.n_central;                                            // the robot is looking AT it
-        if (extras) range_sum += std::sqrt(X * X + Y * Y + Z * Z);
-        if (door_cells.contains(k)) out.e_occ  += w_room;               // still there
-        else                        out.e_free += w_room;               // predicted-but-absent
-    };
-
-    // Regular grid over the panel face. NX/NZ are numeric SAMPLING RESOLUTION (a quadrature density for the
-    // occupancy/detectability counts), not decision thresholds — denser is smoother at linear cost. A door is
-    // much taller than wide, so the vertical grid is finer.
-    constexpr int NX = kLeafGridNX, NZ = kLeafGridNZ;
-    const auto sweep = [&](const door::LeafPose& L, DoorSilhouette& acc, bool extras)
-    {
-        for (int ix = 0; ix < NX; ++ix)
-            for (int iz = 0; iz < NZ; ++iz)
-                classify(L, acc, extras,
-                         (-1.0f + 2.0f * (ix + 0.5f) / NX) * hw, s.cz + s.h * (iz + 0.5f) / NZ);
-    };
-
-    // The modal pass: the leaf where phi_est puts it. This is the drawing — face_px, the centroid, the
-    // semantic-field statistics and the covered cells all come from here, and so does everything the UI
-    // and the logs show.
-    sweep(inst.leaf_pose, out, /*extras=*/true);
-    out.n_cells = static_cast<int>(covered_cells.size());
-
-    // ── ABSENCE IS MARGINALISED OVER phi, NOT CONDITIONED ON ITS ARGMAX ──────────────────────────────
-    // ★WHY. The silhouette is the only channel permitted to remove a door, and until now it rendered the
-    // leaf at a single fitted angle. Measured 2026-09-10 over one approach, the phi likelihood peaks at
-    // 0.007-0.245 — flat — so that angle is chosen from noise; twice on that run the leaf was projected
-    // where the panel was not, occ fell 207 -> 0, free_eff rose 0 -> 33 and L ran +4.00 -> -4.00 in 13
-    // cycles. The door was not gone; the model had merely guessed its hinge angle wrong. Charging a
-    // removal to an unidentified nuisance parameter is the defect, and picking the peak better, or
-    // smoothing it, would not fix it — the information is not there to be extracted.
-    // ★THE FIX IS THE STANDARD ONE: integrate the nuisance out. e_free under P(phi | mask) instead of
-    // e_free at phi-hat. A sample counts as absent to the extent that it is absent at EVERY angle the
-    // data still permits, so a flat curve nearly cancels the absence (the panel is SOMEWHERE, we just
-    // cannot say where) while a sharply-peaked one charges it in full. There is no flatness test and no
-    // angle gate: the sharpness of the curve does the weighting by itself, which is what makes this a
-    // model term and not another threshold.
-    // ★THE WEIGHTS ARE THE POSTERIOR the angle estimate itself is drawn from — image support times the
-    // persistence/command prior — so the absence is marginalised over exactly what this agent believes
-    // about the leaf, and the two consumers of phi cannot disagree. An empty curve means the frame
-    // carried no door mask to score phi against, and then there is nothing to marginalise: the modal
-    // pass stands, which is exactly the old behaviour on exactly the frames where it was never at fault
-    // (with no mask anywhere, every angle is equally unlit and the marginal equals the point estimate).
-    double w_sum = 0.0;
-    for (const auto& [phi, sup] : inst.phi_curve)
-        w_sum += std::max(0.0f, sup);
-    if (inst.phi_curve.size() > 1 and w_sum > 0.0)
-    {
-        double m_occ = 0.0, m_free = 0.0, m_total = 0.0, m_det = 0.0;
-        for (const auto& [phi, sup] : inst.phi_curve)
-        {
-            const double w = std::max(0.0f, sup) / w_sum;
-            if (w <= 0.0) continue;
-            door::LeafState ls = inst.leaf;
-            ls.phi = phi;
-            DoorSilhouette acc;
-            sweep(door::leaf_pose(inst.aperture, ls), acc, /*extras=*/false);
-            m_occ     += w * acc.e_occ;
-            m_free    += w * acc.e_free;
-            m_total   += w * acc.n_total;
-            m_det     += w * acc.det_w;
-        }
-        // Only the ABSENCE/OCCUPANCY evidence is replaced. The modal counts stay as the modal pass left
-        // them, because resolvability() and central_frac() are ratios built from that one rendering.
-        out.e_occ  = static_cast<float>(m_occ);
-        out.e_free = static_cast<float>(m_free);
-        out.n_det_marg   = static_cast<float>(m_det);
-        out.n_total_marg = static_cast<float>(m_total);
-        out.phi_marginalised = true;
-        out.phi_n_hyp = static_cast<int>(inst.phi_curve.size());
-        out.phi_w_max = 0.0f;
-        for (const auto& [phi, sup] : inst.phi_curve)
-            out.phi_w_max = std::max(out.phi_w_max, static_cast<float>(std::max(0.0f, sup) / w_sum));
-    }
-
-    if (out.n_detectable > 0)
-        out.mean_range_m = static_cast<float>(range_sum / out.n_detectable);
-
-    // ★THE LEAF-FACE QUAD, projected with the SAME camera and the SAME transform as every sample above.
-    // This is what the RGB and depth contour checks are scored on, so the thing being defended and the
-    // thing being measured are one contour. Order is a closed loop (bottom-hinge, bottom-free, top-free,
-    // top-hinge) — a polygon whose points are not in loop order produces a bow-tie whose "edges" cross
-    // the object and would score whatever happens to lie under the diagonals.
-    //
-    // ★THE CONSTRUCTION NOW LIVES IN common/contour_edge/contour_edge_project.h, unchanged in behaviour:
-    // the same four corners, the same ±1/±1.6 slide along the leaf's OWN plane in 3-D, the same
-    // all-or-nothing rejection when a corner falls behind the camera. It also returns the per-vertex DEPTH
-    // the projection already computed, which is what the depth channel tests the belief against.
-    {
-        const auto project = [&](const Eigen::Vector3d& Pr) -> std::optional<rc::edges::ProjectedVertex>
-        {
-            const Eigen::Vector4d Pc = zed_T_room * Pr.homogeneous();
-            if (Pc.y() <= 0.20) return std::nullopt;                       // a corner behind the camera
-            const Eigen::Vector2d uv = camera_project(sc.cam, Eigen::Vector3d(Pc.x(), Pc.y(), Pc.z()));
-            if (not std::isfinite(uv.x()) or not std::isfinite(uv.y())) return std::nullopt;
-            rc::edges::ProjectedVertex v;
-            v.px = cv::Point2f(static_cast<float>(uv.x()), static_cast<float>(uv.y()));
-            // The ZED depth plane stores the camera-frame FORWARD coordinate, not the Euclidean norm
-            // (retina deprojects with `py = depth`). Handing back a norm here would read high off-axis
-            // and look exactly like a door believed slightly too far away.
-            v.depth_m = static_cast<float>(Pc.y());
-            return v;
-        };
-        const float half_h = inst.leaf_pose.half_h;
-        const float cz     = inst.leaf_pose.centre_z;
-        const auto corner = [&](float lx, float lz) -> Eigen::Vector3d
-        { return door::leaf_point(inst.leaf_pose, lx, 0.0f, lz).cast<double>(); };
-        const std::array<Eigen::Vector3d, 4> quad{
-            corner(-hw, cz - half_h), corner(hw, cz - half_h),
-            corner( hw, cz + half_h), corner(-hw, cz + half_h)};
-        // Slide direction: the leaf's own +x (hinge → free edge), so a displaced copy stays in the leaf's
-        // plane at any phi. Span is the leaf's full width.
-        const Eigen::Vector3d along = corner(1.0f, cz) - corner(0.0f, cz);
-        out.contour = rc::edges::project_quad(quad, along, 2.0f * hw, project);
-    }
-    if (field != nullptr and field->valid())
-        out.field_bg = field->background_mean();
-    return out;
-}
-
-// ── THE DOORWAY FRAME: the part of a door that does not move ────────────────────────────────────────────
-// Projects the aperture's jambs + lintel and weights each sample by whether the camera could see it. The
-// scoring against the image and the reasoning behind the statistic live in door_frame_evidence.h; this
-// function owns only what needs the scene: the camera, the transform, the masks, the walls, the other doors
-// and the leaf's opening-angle posterior.
-//
-// Visibility per frame point P (a weight, never a skip-the-cycle switch):
-//   · outside the real frustum / behind the near clip                 → 0
-//   · a NON-door mask covers its pixel (a person, a chair in front)   → 0   (same cells as the silhouette)
-//   · a room WALL crosses the sightline (rc::occlusion::walls_block)  → 0   (own wall skipped, as everywhere)
-//   · another door instance stands in front (cone_blocks)             → 0
-//   · OUR OWN LEAF crosses the sightline                              → 1 − P_φ(blocked), marginalised over
-//     the same phi posterior the silhouette's absence is marginalised over, so the two cannot disagree
-//     about where the leaf is. A leaf swung toward the camera hides the jamb behind it; one swung away
-//     (out of this room — the try32 case) hides nothing, and the frame speaks in full.
-rc::door::FrameProbe compute_frame_probe(const ExistenceScene& sc, const rc::DoorFitState& inst, float s_shift)
-{
-    // Task D-C review C1: the probe at the aperture slid by s_shift along its wall (a placement hypothesis); 0 = the belief.
-    door::Aperture ap_shift = inst.aperture;
-    ap_shift.s += s_shift;
-    if (not inst.ai2_initialized)
-        return {};
-    if (not camera_usable(sc.cam))
-        return {};
-    const auto& Mopt = sc.room_T_zed;   // camera→room — the SAME transform the silhouette uses
-    if (not Mopt.has_value())
-        return {};
-    const Eigen::Matrix4d zed_T_room = Mopt.value().inverse();
-    const int W = static_cast<int>(sc.cam.width), H = static_cast<int>(sc.cam.height);
-    if (W <= 0 or H <= 0)
-        return {};
-
-    // No mask packet ⇒ no KNOWN masked occluder: the cells are empty and that factor is 1. The frame is a
-    // geometric probe of the RGB image, so it does not need masks to exist — only to know what hides it.
-    const MaskCells cells = build_mask_cells(sc.pkt);
-
-    const Eigen::Vector3f O(static_cast<float>(Mopt->coeff(0, 3)), static_cast<float>(Mopt->coeff(1, 3)),
-                            static_cast<float>(Mopt->coeff(2, 3)));
-    const Eigen::Vector2f Oxy(O.x(), O.y());
-    const auto own_edges = own_wall_edges(inst, sc.polygon);   // Task D-C: every wall but the door's own occludes
-    const float occ_margin = std::max(0.0f, sc.cfg.exist_occlusion_margin_m);
-
-    // The leaf hypotheses and their weights: the phi posterior when there is one, else the modal pose.
-    std::vector<std::pair<door::LeafPose, float>> leaves;
-    {
-        double w_sum = 0.0;
-        for (const auto& [phi, sup] : inst.phi_curve)
-            w_sum += std::max(0.0f, sup);
-        if (inst.phi_curve.size() > 1 and w_sum > 0.0)
-            for (const auto& [phi, sup] : inst.phi_curve)
-            {
-                const float w = static_cast<float>(std::max(0.0f, sup) / w_sum);
-                if (w <= 0.0f) continue;
-                door::LeafState ls = inst.leaf;
-                ls.phi = phi;
-                leaves.emplace_back(door::leaf_pose(ap_shift, ls), w);
-            }
-        else
-            leaves.emplace_back(s_shift == 0.0f ? inst.leaf_pose : door::leaf_pose(ap_shift, inst.leaf), 1.0f);
-    }
-    const auto own_leaf_clear = [&](const Eigen::Vector3f& P) -> float
-    {
-        float blocked = 0.0f;
-        for (const auto& [L, w] : leaves)
-            if (door::leaf_blocks_sightline(L, O, P))
-                blocked += w;
-        return std::clamp(1.0f - blocked, 0.0f, 1.0f);
-    };
-
-    const auto project = [&](const Eigen::Vector3d& Pr) -> std::optional<rc::edges::ProjectedVertex>
-    {
-        const Eigen::Vector4d Pc = zed_T_room * Pr.homogeneous();
-        if (Pc.y() <= 0.20) return std::nullopt;                       // behind / at the near clip
-        const Eigen::Vector2d uv = camera_project(sc.cam, Eigen::Vector3d(Pc.x(), Pc.y(), Pc.z()));
-        if (not std::isfinite(uv.x()) or not std::isfinite(uv.y())) return std::nullopt;
-        rc::edges::ProjectedVertex v;
-        v.px = cv::Point2f(static_cast<float>(uv.x()), static_cast<float>(uv.y()));
-        v.depth_m = static_cast<float>(Pc.y());                        // ZED depth = forward coordinate
-        return v;
-    };
-
-    // The frame is scored where the belief puts the aperture. (Tried 2026-10-13 and NOT adopted: seating it on
-    // the room polygon's face. With a real casing standing proud of the wall the visible occluding edge is the
-    // casing's front, which is where the fit already puts the aperture — try34's carried door sat 6 cm in front
-    // of room_2's face, a 5 cm proud Webots casing — and the synthetic scene in tests/test_door_frame_evidence.cpp
-    // scored the seated probe WORSE in 3 of 5 views, down to +0.16 from +28 on an oblique view.)
-    const door::Aperture& ap_seen = ap_shift;
-
-    const auto visible = [&](const Eigen::Vector3f& P) -> float
-    {
-        const auto v = project(P.cast<double>());
-        if (not v.has_value()) return 0.0f;
-        if (v->px.x < 0.f or v->px.y < 0.f or v->px.x >= static_cast<float>(W) or v->px.y >= static_cast<float>(H))
-            return 0.0f;
-        if (cells.hides(v->px.x, v->px.y))
-            return 0.0f;
-        if (rc::occlusion::walls_block(Oxy, {P.x(), P.y()}, sc.polygon, own_edges))
-            return 0.0f;
-        Eigen::Vector3f dc = P - O;
-        const float rc_len = dc.norm();
-        if (rc_len > 1e-3f)
-        {
-            dc /= rc_len;
-            for (const auto& [jid, jp] : sc.doors)
-            {
-                const rc::DoorFitState& jinst = *jp;
-                if (jid == inst.node_id or not jinst.ai2_initialized) continue;
-                const auto& js = jinst.model.state();
-                const Eigen::Vector3f Cj(js.cx, js.cy, js.cz + 0.5f * js.h);
-                if (rc::occlusion::cone_blocks(O, dc, rc_len, Cj, 0.5f * std::max(js.w, js.thickness),
-                                               (Cj - O).norm(), occ_margin))
-                    return 0.0f;
-            }
-        }
-        return own_leaf_clear(P);
-    };
-    const float sd_s = inst.ai2_initialized ? std::sqrt(std::max(0.0f, inst.ai2_belief.covariance()(0, 0))) : 0.0f;
-    return rc::door::build_frame_probe(ap_seen, project, visible, own_leaf_clear, W, H, sc.cfg.frame_casing_m,
-                                       sc.cfg.exist_boundary_sigma_m, sd_s);
-}
-
-// P(detect | present) of the APERTURE from this camera: the shared detector envelope (rc::detect) at the doorway's apparent
-// size — the extent a virtual camera with the ZED's intrinsics aimed at the aperture centre would see, f·size/range per axis,
-// the horizontal one foreshortened by the obliquity of the view to the wall. The doorway frame's detectability (Task 15): it
-// does not depend on the leaf, so an open door keeps it; standing in or next to the opening overflows the envelope (→ 0), far
-// away it falls under the min-fill shoulder. 0 without a camera pose or intrinsics.
-float aperture_envelope(const std::optional<Mat4d>& room_T_zed, const CameraIntrinsics& cam, const rc::DoorFitState& inst,
-                        const rc::detect::DetectorEnvelope& env)
-{
-    if (not room_T_zed.has_value() or not camera_usable(cam) or not inst.ai2_initialized)
-        return 0.0f;
-    const auto& ap = inst.aperture;
-    const Eigen::Vector3f C(static_cast<float>(room_T_zed->coeff(0, 3)), static_cast<float>(room_T_zed->coeff(1, 3)),
-                            static_cast<float>(room_T_zed->coeff(2, 3)));
-    const Eigen::Vector2f c2 = ap.centre_xy();
-    const Eigen::Vector3f r = Eigen::Vector3f(c2.x(), c2.y(), ap.centre_z()) - C;
-    const float d = r.norm();
-    if (not std::isfinite(d) or d < 1e-3f)
-        return 0.0f;
-    const Eigen::Vector3f fwd(static_cast<float>(room_T_zed->coeff(0, 1)), static_cast<float>(room_T_zed->coeff(1, 1)),
-                              static_cast<float>(room_T_zed->coeff(2, 1)));   // the ZED's forward axis (+y) in the room
-    if (not (r.dot(fwd) > 0.0f))
-        return 0.0f;   // behind the camera: nothing to frame
-    const Eigen::Vector2f rh(r.x(), r.y());
-    const float oblq = rh.norm() > 1e-6f ? std::abs(rh.normalized().dot(ap.across_u())) : 1.0f;
-    const float fill_h = cam.focal_x * ap.w * oblq / (d * static_cast<float>(cam.width));
-    const float fill_v = cam.focal_y * ap.h / (d * static_cast<float>(cam.height));
-    return rc::detect::p_detect(std::max(fill_h, fill_v), 1.0f, env);
-}
-
-// |cos| of the camera→leaf ray against the LEAF's face normal. 1 = square-on, 0 = grazing. Keyed on the leaf, not
-// the wall, so it stays meaningful once phi is fitted: an open door presents its face at a different angle than its
-// aperture does.
-float door_view_obliquity(const std::optional<Mat4d>& room_T_zed, const rc::DoorFitState& inst)
-{
-    if (not inst.ai2_initialized)
-        return 1.0f;
-    const auto& M = room_T_zed;           // camera→room (the cycle's pose)
-    if (not M.has_value())
-        return 1.0f;                      // no extrinsic → can't judge → don't suppress
-    const Eigen::Vector2f cam(static_cast<float>(M->coeff(0, 3)), static_cast<float>(M->coeff(1, 3)));
-    const Eigen::Vector2f r = inst.leaf_pose.centre_xy - cam;
-    return rc::card::term_leaf_obliquity(r.x(), r.y(), inst.leaf_pose.ey.x(), inst.leaf_pose.ey.y());   // ey = the leaf's face normal
-}
-
-float aperture_band_offset(const std::vector<Eigen::Vector2f>& polygon, const rc::DoorFitState& inst)
-{
-    if (polygon.size() < 3)
-        return std::numeric_limits<float>::quiet_NaN();
-    const auto& ms = inst.model.state();
-    return rc::door::signed_boundary_distance(polygon, Eigen::Vector2f(ms.ap_cx, ms.ap_cy));
 }
 
 // ═══ THE UPDATE (Task 8 of the door-existence model: rewritten, no branch of the old function ported) ═══════════════
@@ -723,6 +334,10 @@ void DoorCore::prepare_candidates(const DoorCycleInput& in, const std::vector<rc
                 c.belief.ledger = row->ledger;
                 c.belief.carried = places_.aged_L(*row, in.t_wall_ms) - row->ledger.sum();
                 c.seeded_from_removed_ms = row->removed_wall_ms;
+                // A REVISIT of a remembered place (the hazard is learned from these): a detection at a place remembered as a door is
+                // "found"; at a place remembered as "no door here" the world has CHANGED.
+                if (row->last_seen_wall_ms > 0)
+                    places_.note_revisit(not row->removed_wall_ms.has_value(), double(in.t_wall_ms - row->last_seen_wall_ms) * 1e-3);
             }
             candidates_.push_back(std::move(c));
             best = static_cast<int>(candidates_.size() - 1);
@@ -835,6 +450,13 @@ void DoorCore::update_existence(const DoorCycleInput& in, DoorCycleOutput& out)
             if (const auto of = observed_frame_.find(id); of != observed_frame_.end() and of->second == pkt.frame_id)
                 fr_door.zed_ran = fr_door.ricoh_ran = fr_door.ricoh_hits_only = false;
             inst.exist_trace = observe_place(inst.belief, inst, fr_door, visit_, act, &rows);
+            // A door restored from a remembered row is a REVISIT of that place: its first detection finds it again (the learned hazard's
+            // "unchanged" sample); its removal below is the "changed" one. Counted once.
+            if (inst.remembered_seen_ms.has_value() and (inst.exist_trace.zed_hit > 0.0f or inst.exist_trace.ric_hit > 0.0f))
+            {
+                places_.note_revisit(true, double(in.t_wall_ms - *inst.remembered_seen_ms) * 1e-3);
+                inst.remembered_seen_ms.reset();
+            }
             if (act != 0.0f and not std::isfinite(inst.exist_trace.act_dl))
                 inst.pending_actuation_llr += act;   // no view and no ZED pose this cycle: the evidence waits (fix round 1)
             const float L = inst.belief.L();
@@ -914,6 +536,10 @@ void DoorCore::update_existence(const DoorCycleInput& in, DoorCycleOutput& out)
         r.L_evidence = inst.belief.L_evidence(); r.ledger = inst.belief.ledger; r.visit = visit_;
         r.last_seen_wall_ms = in.t_wall_ms; r.removed_wall_ms = in.t_wall_ms;
         places_.upsert(std::move(r));
+        // The robot is back in this room, the place was in view (the door was judged on views with q > 0) and the remembered door is
+        // gone: a CHANGE since the row was last seen - the learned hazard's other sample.
+        if (inst.remembered_seen_ms.has_value())
+            places_.note_revisit(false, double(in.t_wall_ms - *inst.remembered_seen_ms) * 1e-3);
         observed_frame_.erase(id);
         world_->before_remove(id);
         const auto& s = inst.model.state();

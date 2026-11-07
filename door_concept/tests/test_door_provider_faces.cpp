@@ -19,6 +19,7 @@ static bool near(double a, double b, double tol) { return std::abs(a - b) <= tol
 static constexpr std::int64_t kT0 = 1'792'612'380'153;
 static constexpr float kPhiMax = 120.f * std::numbers::pi_v<float> / 180.f;
 static constexpr float kDeg = std::numbers::pi_v<float> / 180.f;
+static constexpr double kHaz = 1.0 / 600.0;   // the place table's prior-mean hazard (PlaceTable::hazard_per_s() before any revisit)
 
 static IdentityRow open_row(const char* room, const char* name, float x, float y)
 {
@@ -49,7 +50,7 @@ int main()
         const std::int64_t now = kT0 + 60'000;               // closed a minute after it was last seen open
         const float before = rows[0].leaf->phi;
         bool hit = false;
-        for (const auto& f : others) hit |= apply_actuation_to_face(rows, f, 0.0f, kPhiMax, now, 0.5f);
+        for (const auto& f : others) hit |= apply_actuation_to_face(rows, f, 0.0f, kPhiMax, now, 0.5f, kHaz);
         CHECK(hit);
         // the restore of door_1 in leg 4 (68 s later): no longer the open leaf the stale row would have restored
         const auto [phi, sd] = restore_leaf_phi(rows[0].leaf->phi, rows[0].leaf->phi_sigma, rows[0].seen_wall_ms, now + 8'000, kPhiMax);
@@ -70,10 +71,10 @@ int main()
     {
         std::vector<IdentityRow> rows{open_row("room_1", "door_1", -0.5f, 4.6f)};
         rows[0].leaf->phi = 0.f;
-        CHECK(apply_actuation_to_face(rows, {"room_1", {-0.45f, 4.65f}}, 100.f * kDeg, kPhiMax, kT0, 0.5f));
+        CHECK(apply_actuation_to_face(rows, {"room_1", {-0.45f, 4.65f}}, 100.f * kDeg, kPhiMax, kT0, 0.5f, kHaz));
         CHECK(near(rows[0].leaf->phi, kActuationObeyed * 100.f * kDeg, 1e-4));
-        CHECK(not apply_actuation_to_face(rows, {"room_1", {-5.f, 9.f}}, 0.f, kPhiMax, kT0, 0.5f));   // another hole
-        CHECK(not apply_actuation_to_face(rows, {"room_9", {-0.5f, 4.6f}}, 0.f, kPhiMax, kT0, 0.5f)); // another room
+        CHECK(not apply_actuation_to_face(rows, {"room_1", {-5.f, 9.f}}, 0.f, kPhiMax, kT0, 0.5f, kHaz));   // another hole
+        CHECK(not apply_actuation_to_face(rows, {"room_9", {-0.5f, 4.6f}}, 0.f, kPhiMax, kT0, 0.5f, kHaz)); // another room
     }
 
     // (b) an unobserved face's leaf relaxes toward the uniform prior at the stated hazard (not held for ever).

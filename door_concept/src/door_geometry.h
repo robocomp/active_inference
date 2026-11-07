@@ -16,7 +16,7 @@
  * WHY THIS FILE EXISTS. The panel rectangle used to be re-derived independently in ~10 places, and two
  * separate SDFs disagreed about which one was authoritative. Every one of those sites silently assumed the
  * panel lies in the WALL PLANE. Two of them delete the door outright the moment a leaf swings:
- *   · DoorFitter::compute_silhouette_existence sampled the face at a hardcoded ly = 0 in the wall plane, so
+ *   · the old silhouette probe (gone with the pre-model existence update) sampled the face at a hardcoded ly = 0 in the wall plane, so
  *     an opened leaf's predicted silhouette goes unlit, e_free spikes and the existence channel removes the
  *     door BECAUSE it opened;
  *   · the room-containment prior keyed on the panel centre, which an outward swing moves by w/2 (0.45 m for
@@ -64,7 +64,7 @@ inline float box_sdf(float dx, float dy, float dz)
 // ─── The APERTURE: the static hole in the wall ──────────────────────────────────────────────────
 // Wall frame: near corner O, along-wall unit u, across-wall unit n = (−u.y, u.x). [s, w, h] is exactly the
 // belief's theta. Nothing here moves when the leaf swings — that invariant is what lets the DSR RT edge,
-// resolve_wall, merge, ghost identity and the room-containment prior all key on the aperture.
+// resolve_wall, merge, identity and the room-containment prior all key on the aperture.
 struct Aperture
 {
     Eigen::Vector2f wall_O{0.0f, 0.0f};   // near corner of the wall (room frame, m)

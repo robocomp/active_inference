@@ -54,7 +54,6 @@ struct ExistWorld final : TrackerWorld
         std::ranges::sort(v, {}, &std::pair<std::uint64_t, rc::DoorFitState*>::first);   // a deterministic order
         return v;
     }
-    std::optional<GhostMatch> match_ghost(const Vec2f&) const override { return std::nullopt; }
     std::optional<IdentityMatch> match_identity(const Vec2f&) const override { return std::nullopt; }
     void retire(std::uint64_t id) override { st.erase(id); }
     void set_assigned_mask(std::uint64_t id, int slice) override
@@ -70,8 +69,6 @@ struct ExistWorld final : TrackerWorld
         st.emplace(id, std::move(f));
         return id;
     }
-    void reacquire(std::uint64_t, const GhostMatch&) override {}
-    void forget_ghost(const Vec2f&) override {}
     std::optional<std::string> adopt_birth(std::uint64_t id, int slice, const Vec3f&) override
     {
         const auto it = st.find(id);

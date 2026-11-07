@@ -331,17 +331,6 @@ ActuationMatchMaxM  = 1.0     # ⚠gate on an ACT: nearest advertised door must 
 GateMahalanobis = 9.0     # χ²₂ gate (~3σ) for a mask↔instance match once it has a cov
 GateFallbackM = 0.40     # metric XY gate (m) before an instance has a usable covariance
 DetectionNoiseM = 0.20   # R in the association innovation cov S=P+R²I (≥ centroid-vs-fit offset)
-BirthFrames = 6.6        # ideal OBSERVATIONS of unexplained evidence before spawning a door.
-                         # ★RETUNED 2026-09-09 for the graded semantic model. Every semantic mask used to
-                         # report conf = 1.000 exactly (the ADE20K export emitted an argmax with no scores),
-                         # so this constant was calibrated against evidence worth 1.0 x range_term per look.
-                         # The "-probs" export gives real confidences: measured over 45623 door slices this
-                         # run, median 0.826 (p10 0.676, p90 0.910). Birth evidence is proportional to
-                         # confidence, so 8 became ~33% slower to reach at the p10 end for no modelled
-                         # reason. 8 x 0.826 = 6.6 restores the SAME time-to-birth at the median.
-                         # ⚠This is a rescaling, not a relaxation: a weak mask is still worth less than a
-                         # strong one, which is the point of grading them. It does NOT lower the bar for a
-                         # low-confidence blob — that blob just contributes its own smaller share.
 BirthMinSepM = 0.70      # a birth must be ≥ this (m) from every existing door (anti-duplicate)
 MergeOverlap = 0.20      # collapse two instances whose seat footprints overlap ≥ this fraction of the smaller, keeping the more-observed. 0 disables.
 # Stillbirth prune — a phantom born from association churn starves once the real instance reclaims its
@@ -363,6 +352,9 @@ RicohBirthConf = 0.60      # min YOLO confidence for a ricoh birth (only when Ri
 RicohBirthMaxVar = 0.005   # max depth_var (m²) for a ricoh birth (only when RicohBirthEnabled)
 
 [Existence]
+# RETIRED (the loader REFUSES a file that sets them; docs/superpowers/plans/2026-11-07-door-existence-model.md): BirthLogodds,
+# MaxLogodds, RemovalProb, RemoveFrames, OutOfRoomGain, ShortGain, MinHeightConf, ReacquireRadiusM, GhostMax, CentralRegionFrac,
+# and Tracker.BirthFrames. Existence is one belief decided by the costs (door_decision.h).
 ActuationLlr = 3.0   # a door that changed state on OUR command (open/close satisfied after our request) exists: ln(0.9/0.05)
 # Existence log-odds on the SHARED rc::exist channel (common/existence_belief/existence_belief.h) — the same
 # one table_concept and chair_concept use. Evidence is the PIXEL-LEVEL silhouette: the fitted panel is
@@ -377,26 +369,16 @@ ActuationLlr = 3.0   # a door that changed state on OUR command (open/close sati
 # EvidenceGain / ExpectedSupportC / AdequacyRef / AdequacyCap / CalibAdapt / VacateConfidentFrames /
 # OcclusionCheck / ZedEdgeOffset / ZedRangeFull / ZedRangeRef / ZedClearLosFloor knobs are all gone.
 Enabled = true           # use the log-odds belief for removal (false → fall back to the stillbirth prune)
-BirthLogodds = 1.0       # L seeded at birth (a birth already required BirthFrames of unexplained evidence)
-MaxLogodds = 4.0         # saturation cap: a real door sits here (no door can earn infinite immunity)
-# The ONE decision boundary, stated as the probability it actually is:
-RemovalProb = 0.12       # remove once P(exists) drops below this …
-RemoveFrames = 15        # … and stays below it for this many consecutive EVIDENCE cycles (debounce; counts
-                         # evidence, not wall-clock, so a sensor hiccup can never delete a real door)
 # Physical sensor rates feeding the log-likelihood ratio — interpretable probabilities, not gains.
 DetectionProb = 0.85     # P(a predicted pixel is lit | the door IS there and observable)
 ClutterProb   = 0.05     # P(a predicted pixel is lit | no door there)
 SensorSigmaM  = 0.03     # range/localisation noise σ (m)
-CentralRegionFrac = 0.25 # central image box [f, 1-f]²: absence only counts as removal in proportion to how
-                         # much of the silhouette falls inside it. A door clipping the wide frustum edge is not
-                         # a verifying view — its unexplained absence is epistemic surprise ("go look"), not proof.
 OcclusionMarginM = 0.30  # a door/geometric occluder must be ≥ this many metres CLOSER to block a sample
 # Room-containment pose prior: P(a door centre outside the room walls) ≈ 0 (the room polygon is a trusted nominal
 # model, never fitted). Suppresses out-of-room BIRTHS and removes an instance a localization glitch put outside —
 # even behind a wall where the sensor can never reach it to vacate. Independent of frustum/occlusion.
 RoomPrior = true         # enforce the room-containment pose prior
 RoomMarginM = 0.40       # tolerance a door centre may sit OUTSIDE the walls (wall-hugging door + centroid noise)
-OutOfRoomGain = 1.5      # |ΔL| per frame while outside → removed in a few frames (also debounces a 1-frame glitch)
 # THE WALL BAND (door_room_band.h, 2026-10-13). The polygon is the room-side FACE; a door's aperture sits IN the
 # wall, in [0, T] beyond it — the normal place for a real door, not an error. The per-door containment prior is
 # now a static log-prior −½(dist-to-band/σ)², 0 on the band, REPLACED each cycle (OutOfRoomGain no longer used
@@ -420,14 +402,6 @@ BoundarySigmaM = 0.10    # σ: door registration (RT-cov 6-12 cm) ⊕ published 
 # the robot only ever sees clipped never reaches MinHeightConf and is never judged — silent, not guessing.
 MinHeightPrior = true
 MinHeightM     = 1.80    # a door's support must reach this height (m, room frame; floor = 0)
-MinHeightConf  = 0.30    # untruncated-evidence weight required before the prior may act (0 = first clean view)
-ShortGain      = 1.5     # |ΔL| per frame while confidently too short (matches OutOfRoomGain)
-# Identity RE-ACQUISITION: a removed door leaves a ghost (its name + the belief it converged to). A detection
-# landing within this radius of a ghost is the SAME door coming back — it takes that name and resumes that
-# geometry instead of being born as door_N+1. Existence restarts from BirthLogodds: the shape is remembered,
-# the confidence is re-earned. Without this, one flicker cost the live run three node identities for one door.
-ReacquireRadiusM = 0.60  # 0 disables re-acquisition (every return is then a brand-new door)
-GhostMax = 8             # most recent removals kept (a short flicker memory, not a permanent map)
 # Mirrors the controller's ExploreTour.MaxRoomS (controller/etc/config.toml): the longest a room's exploration lasts, in seconds.
 # A door on the route is dearer to delete by exactly that: C_delete(route) = C_delete(ordinary) + MaxRoomS (door_decision.h).
 MaxRoomS = 300

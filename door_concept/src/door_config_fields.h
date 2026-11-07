@@ -184,41 +184,27 @@ void read_door_config_fields(DoorConfig& out, GetF&& getf, GetI&& geti, GetS&& g
             "metric XY gate (m) before an instance has a usable covariance");
     out.tracker_detection_noise_m = getf("Tracker.DetectionNoiseM", 0.20f,
             "R in the association innovation cov S=P+R²I (≥ centroid-vs-fit offset)");
-    out.tracker_birth_frames     = getf("Tracker.BirthFrames", out.tracker_birth_frames,
-            "IDEAL OBSERVATIONS of unexplained evidence before a birth");
     out.tracker_birth_min_sep_m  = getf("Tracker.BirthMinSepM", 0.70f,
             "a birth must be ≥ this (m) from every existing door (anti-dup)");
     out.tracker_merge_overlap    = getf("Tracker.MergeOverlap", 0.20f,
             "merge two instances whose seat footprints overlap ≥ this");
     out.exist_enabled            = getb("Existence.Enabled", true,
             "Existence.Enabled — use the log-odds belief (else the old prune)");
-    out.exist_birth_logodds      = getf("Existence.BirthLogodds", 1.0f,
-            "Existence.BirthLogodds — L seeded at birth (a birth already needed birth_frames of evidence)");
     out.exist_actuation_llr      = getf("Existence.ActuationLlr", 3.0f,
             "Existence.ActuationLlr — log-odds a door gains when it changed state on OUR command (open/close satisfied after "
             "our request): ln(P(change | a real leaf, commanded) / P(a perceived change | a phantom)) ≈ ln(0.9/0.05)");
-    out.exist_max_logodds        = getf("Existence.MaxLogodds", 4.0f,
-            "Existence.MaxLogodds — saturation cap (a real door can't earn infinite immunity)");
-    out.exist_removal_prob       = getf("Existence.RemovalProb", 0.12f,
-            "Existence.RemovalProb");
-    out.exist_remove_frames      = geti("Existence.RemoveFrames", 15,
-            "Existence.RemoveFrames — consecutive EVIDENCE cycles the decision must hold");
     out.exist_detection_prob     = getf("Existence.DetectionProb", 0.85f,
             "Existence.DetectionProb — P(mask lights a predicted pixel | door present & observable)");
     out.exist_clutter_prob       = getf("Existence.ClutterProb", 0.05f,
             "Existence.ClutterProb — P(mask lights a predicted pixel | no door)");
     out.exist_sensor_sigma_m     = getf("Existence.SensorSigmaM", 0.03f,
             "Existence.SensorSigmaM — range/localisation noise σ");
-    out.exist_central_region_frac = getf("Existence.CentralRegionFrac", 0.25f,
-            "Existence.CentralRegionFrac");
     out.exist_occlusion_margin_m = getf("Existence.OcclusionMarginM", 0.30f,
             "Existence.OcclusionMarginM — an occluder must be ≥ this much CLOSER to count");
     out.exist_room_prior         = getb("Existence.RoomPrior", true,
             "Existence.RoomPrior — enforce the room-containment pose prior");
     out.exist_room_margin_m      = getf("Existence.RoomMarginM", 0.40f,
             "Existence.RoomMarginM — tolerance a door centre may sit OUTSIDE the walls");
-    out.exist_out_of_room_gain   = getf("Existence.OutOfRoomGain", 1.5f,
-            "Existence.OutOfRoomGain — |ΔL| per frame while outside (debounces a 1-frame glitch)");
     out.exist_wall_thickness_m   = getf("Existence.WallThicknessM", 0.20f,
             "Existence.WallThicknessM — wall thickness T: an aperture lies in the band [0,T] beyond the room-side polygon face");
     out.exist_boundary_sigma_m   = getf("Existence.BoundarySigmaM", 0.10f,
@@ -227,14 +213,6 @@ void read_door_config_fields(DoorConfig& out, GetF&& getf, GetI&& geti, GetS&& g
             "Existence.MinHeightPrior");
     out.exist_min_height_m       = getf("Existence.MinHeightM", 1.80f,
             "Existence.MinHeightM — a door's support must reach this (m)");
-    out.exist_min_height_conf    = getf("Existence.MinHeightConf", 0.30f,
-            "Existence.MinHeightConf — untruncated-evidence weight required");
-    out.exist_short_gain         = getf("Existence.ShortGain", 1.5f,
-            "Existence.ShortGain — |ΔL| per frame while confidently short");
-    out.exist_reacquire_radius_m = getf("Existence.ReacquireRadiusM", 0.60f,
-            "Existence.ReacquireRadiusM (0 disables re-acquisition)");
-    out.exist_ghost_max          = geti("Existence.GhostMax", 8,
-            "Existence.GhostMax — most recent removals retained");
     out.exist_geometry_may_refute = getb("Existence.GeometryMayRefute", false,
             "Existence.GeometryMayRefute — false: the reprojection-agreement channel can only push L up (spec §8.5, until benched)");
     out.exist_max_room_s         = getf("Existence.MaxRoomS", 300.0f,

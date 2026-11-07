@@ -1,14 +1,14 @@
 // place_table.h — Task 7 of the door-existence model: the PLACE TABLE. One row per door place per room. The row IS the
 // belief's memory: L without the structural prior (L_evidence), the view ledger, last seen, visit. Rows are NEVER deleted:
 // a removed phantom's row (removed_wall_ms set) means "no door here" and is the prior for any new candidate at that place.
-// It replaces today's ghosts and the existence half of the identity table (those are deleted in Task 10).
+// It replaced the RAM registry of removed doors and the existence half of the identity table (deleted in Task 10).
 // Header-only, DSR-free. Persisted through door_identity_table.h's row (columns ledger, visit, removed_ms; all optional).
 //
 // match():   minimum SQUARED Mahalanobis distance m2 with the SUM of both covariances (row + candidate), m2 <= gate. `gate` is the tracker's gate_mahalanobis, which is ALWAYS m2 (9.0 = 3 sigma).
 // Hazard:    how fast a remembered place changes. Gamma prior, shape 1, mean 1/600 s^-1 (rate parameter 600 s). Posterior mean
 //            lambda = (1 + changes) / (600 + sum elapsed_s); a revisit that does NOT find the door counts as a change.
-//            ★1/600 is only the PRIOR'S MEAN, inherited from today's kRememberedExistenceHazardPerS; it is not a constant in
-//            use. It is learned from revisits (note_revisit).
+//            ★1/600 is only the PRIOR'S MEAN (the old fixed restore hazard, now gone); it is not a constant in use.
+//            It is learned from revisits (note_revisit).
 // aged_L():  L_evidence * exp(-lambda * dt): the remembered belief relaxes toward 0 (ignorance). The structural prior is added
 //            by the CALLER. Every row ages alike, a removed one included (controller ruling R15, spec 3.7): a deletion is evidence, not a fact.
 #pragma once

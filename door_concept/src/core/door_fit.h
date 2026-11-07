@@ -132,7 +132,6 @@ public:
     /// and the cached geometry is seeded from the box (refresh_geometry). Overwrites `inst`.
     void init_instance(rc::DoorFitState& inst, std::uint64_t id, std::string name, rc::DoorState init_state);
     void note_birth(std::uint64_t id, const Eigen::Vector2f& xy) { birth_seeds_[id] = xy; }
-    void note_reacquire(std::uint64_t id, const rc::DoorBelief& belief) { restore_seeds_[id] = belief; }
     void seed_bearing_hypothesis(rc::DoorFitState& inst, const Eigen::Vector2f& robot_xy, float azimuth,
                                  float nominal_range, float along_std, float across_std, float yaw_std);
 
@@ -181,7 +180,6 @@ private:
     std::optional<Eigen::Vector2f> body_xy_;
     std::optional<Eigen::Matrix2f> body_cov_;
     std::unordered_map<std::uint64_t, Eigen::Vector2f> birth_seeds_;    // tracker-provided birth XY (note_birth)
-    std::unordered_map<std::uint64_t, rc::DoorBelief> restore_seeds_;   // re-acquired identity's belief (note_reacquire)
     std::size_t n_explained_away_ = 0;                                  // points dropped (diagnostic)
 };
 

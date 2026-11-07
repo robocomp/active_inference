@@ -467,9 +467,9 @@ void SpecificWorker::initialize()
     // existence probes that still need cortex) builds its instances through it and shares its room polygon.
     input_snapshot_.enable_for_core(static_cast<std::uint32_t>(agent_id));
     core_ = std::make_unique<rc::door::core::DoorCore>(rc::door::core::DoorCoreConfig{cfg_});
-    // Task 8: the existence model's learned tables — the per-camera detector model (spec §8.4) and the decision's costs
-    // (§8.2), loaded here and saved on a graceful shutdown (request_shutdown). Absent files ⇒ the compiled defaults / the
-    // no-sample prior; the line names n for each.
+    // Task 8: the existence model's tables — the per-camera detector model (spec §8.4: FIXED for the session, refit offline) and the
+    // decision's costs (§8.2: learned online, saved on a graceful shutdown in request_shutdown). Absent files => the compiled
+    // defaults / the no-sample prior; the line names n for each.
     {
         core_->set_detectors(rc::door::core::load_detectors("etc/door_detectors.csv"));
         core_->costs() = rc::door::core::CostEstimator::load("etc/door_costs.csv");
@@ -1215,7 +1215,6 @@ void SpecificWorker::refresh_belief_inspector()
             c.s.logodds  = inst.belief.L();
             c.s.p_exists = inst.belief.p();
         }
-        c.s.remove_streak = static_cast<int>(inst.existence_debounce.streak);
         c.s.age_s       = inst.last_belief_touch.time_since_epoch().count() == 0
                         ? -1.0f
                         : std::chrono::duration<float>(now - inst.last_belief_touch).count();
@@ -1284,9 +1283,9 @@ void SpecificWorker::log_detect_probe()
         row.roi_valid     = inst.roi_valid;
         row.obliquity_cos = inst.dbg_obliquity_cos;
         row.trunc_frac    = inst.last_trunc_frac;
-        // door's p_detect is the REAL thing — it has a silhouette channel, so this is the number the
-        // removal actually used, not a stand-in.
-        row.p_detect      = inst.dbg_sil_pdetect;
+        // door's p_detect is the REAL thing: the ZED detector model's q of this frame, the number the existence update used
+        // (NaN = not computed this cycle: no ZED view of the place).
+        row.p_detect      = std::isfinite(inst.exist_trace.zed_q) ? inst.exist_trace.zed_q : 0.0f;
         row.p_exists_prior = inst.belief.p();
         // ★THE LABEL IS PER-CYCLE, and it is not detection_alive. That flag LATCHES (measured on hood:
         // 1 in 9432/9432 rows, still 1 at frames_since_det=6172), so as an outcome it is degenerate and
@@ -1320,10 +1319,7 @@ void SpecificWorker::log_phantom_event(std::string_view event, std::uint64_t id,
     if (inst)
     {
         e.age_cycles    = inst->processed_cycles;
-        e.p_detect      = inst->dbg_sil_pdetect;
-        e.central_frac  = inst->dbg_sil_central;
-        e.in_fov_frac   = (inst->dbg_sil_ntotal > 0)   // ★a FRACTION: the denominator was
-                        ? static_cast<float>(inst->dbg_sil_ndet) / inst->dbg_sil_ntotal : 0.0f;   // already here, unused
+        e.p_detect      = std::isfinite(inst->exist_trace.zed_q) ? inst->exist_trace.zed_q : 0.0f;   // the ZED model's q of the last update
 
         e.exist_logodds = inst->belief.L();
     }
@@ -1556,13 +1552,6 @@ void SpecificWorker::CoreWorld::after_fit(std::uint64_t id, const rc::door::core
     w_.publish_door_cycle(it->second, nit->second, obs, free_energy);
 }
 
-std::optional<rc::door::core::GhostMatch> SpecificWorker::CoreWorld::match_ghost(const Eigen::Vector2f& xy) const
-{
-    const DoorGhost* g = w_.match_ghost(xy);
-    if (g == nullptr) return std::nullopt;
-    return rc::door::core::GhostMatch{g->name, g->xy, g->lived_cycles, static_cast<std::size_t>(g - w_.ghosts_.data())};
-}
-
 std::optional<rc::door::core::IdentityMatch> SpecificWorker::CoreWorld::match_identity(const Eigen::Vector2f& xy) const
 {
     const DoorIdentity* i = w_.match_identity(xy);
@@ -1639,13 +1628,14 @@ void SpecificWorker::CoreWorld::stage_images(rc::door::core::ImageSource& images
                       w_.rgb_ingestor_ ? w_.rgb_ingestor_->stamp_ms() : 0);   // Task 8: one geometry look per RGB frame
 }
 
-// An existence REMOVE, the graph half that ran BEFORE the old REMOVE row: remember the ghost (which forgets the stored
-// identity) and log the affordance withdrawals.
+// An existence REMOVE, the graph half that ran BEFORE the old REMOVE row: keep the place as a REMOVED row of the identity table
+// ("no door here", the prior of any candidate there) and log the affordance withdrawals.
 void SpecificWorker::CoreWorld::before_remove(std::uint64_t id)
 {
     if (const auto it = w_.fitter_->instances().find(id); it != w_.fitter_->instances().end())
     {
-        w_.remember_ghost(it->second);
+        w_.mark_identity_removed(it->second, std::chrono::duration_cast<std::chrono::milliseconds>(
+                                     std::chrono::system_clock::now().time_since_epoch()).count());
         w_.log_instance_teardown(it->second, "existence remove");
     }
 }
@@ -1697,14 +1687,6 @@ std::uint64_t SpecificWorker::CoreWorld::create_door(const rc::door::core::Birth
     }
     return new_id;
 }
-
-void SpecificWorker::CoreWorld::reacquire(std::uint64_t new_id, const rc::door::core::GhostMatch& g)
-{
-    if (g.handle < w_.ghosts_.size())
-        w_.core_->fit().note_reacquire(new_id, w_.ghosts_[g.handle].belief);
-}
-
-void SpecificWorker::CoreWorld::forget_ghost(const Eigen::Vector2f& xy) { w_.forget_ghost(xy); }
 
 std::optional<std::string> SpecificWorker::CoreWorld::adopt_birth(std::uint64_t new_id, int slice,
                                                                   const Eigen::Vector3f& c)
@@ -1786,43 +1768,12 @@ void SpecificWorker::refresh_room_geometry()
                    "(containment prior ACTIVE)\n", n, xmin, xmax, ymin, ymax);
 }
 
-// ─── Identity re-acquisition (ghost registry) ───────────────────────────────────────────────────
-
-// Remember a door about to be deleted, so the same physical door coming back resumes this identity + geometry.
-void SpecificWorker::remember_ghost(const rc::DoorInstance& inst)
-{
-    if (cfg_.exist_reacquire_radius_m <= 0.0f or not inst.ai2_initialized or inst.is_bearing_hypothesis)
-        return;
-    // Keyed on the APERTURE: the identity of a door is its hole in the wall, so a door that flickers out
-    // while its leaf happens to be open must still be re-acquired at the same place.
-    const auto& s = inst.model.state();
-    const Eigen::Vector2f ap(s.ap_cx, s.ap_cy);
-    // A GHOST IS A PLACE, NOT A NAME. Superseding by name was the identity defect: `door_1` died at the north
-    // door, its number was recycled to a different door across the room, and when THAT one died this line
-    // erased the north door's ghost — so the real door, reborn 0.50 m from where it died (well inside
-    // ReacquireRadiusM), had nothing to match and came back as door_3. Only a ghost of the SAME HOLE may be
-    // replaced; that is the one this removal actually supersedes. (Name recycling is now blocked upstream in
-    // create_instance_from_detection, so two ghosts cannot normally share a name either.)
-    std::erase_if(ghosts_, [&](const DoorGhost& g)
-                  { return (g.xy - ap).norm() < cfg_.exist_reacquire_radius_m; });
-    ghosts_.push_back({inst.node_name, ap, inst.ai2_belief, inst.processed_cycles});
-    // ★ ABSENCE FORGETS THE NAME ACROSS RUNS (2026-10-18, user). This runs on a REMOVE, i.e. the existence belief
-    //   was driven down by looks that should have seen the door and did not. The RAM ghost above still lets a
-    //   real door that merely flickered out come back under its name within this run; but writing the name to
-    //   disk made every phantom permanent — the table kept door_2/3/4/6 in room_1 run after run, each reserving
-    //   a name and a place. A door re-acquired from its ghost writes itself back (note_identity at re-birth).
-    forget_identity(inst.node_name, ap, s.w);
-    // Bounded, most-recent-first: this is a short-lived flicker memory, not a permanent map.
-    while (static_cast<int>(ghosts_.size()) > std::max(1, cfg_.exist_ghost_max))
-        ghosts_.erase(ghosts_.begin());
-}
-
 // ─── Identity across runs (etc/door_identities.csv) ─────────────────────────────────────────────
 //
-// Ghosts are RAM: they cannot survive the process, and cleanup_owned_nodes deletes every door node on the
-// way out, so at the next launch nothing in the graph says which door was which. Names then fell out of
+// cleanup_owned_nodes deletes every door node on the way out, so at the next launch nothing in the graph says which
+// door was which. Names then fell out of
 // BIRTH ORDER — the order the robot happens to sweep the room — and the same physical door was door_1 one
-// run and door_2 the next. This table is the persistent half of the same idea as remember_ghost: keyed on
+// run and door_2 the next. This table is the persistent memory of the places: keyed on
 // the APERTURE (the hole in the wall, which is what a door IS), carrying the name and nothing else.
 //
 // Locale: read with std::from_chars, write through the classic locale — CLAUDE.md. These machines run
@@ -1856,6 +1807,9 @@ void SpecificWorker::load_identities()
     // The name counter: the persisted one, raised past every remembered name (a file from before the counter).
     next_door_index_ = std::max(next_door_index_, rc::door::next_door_index_floor(parsed));
     std::print("door_concept: [identity] door-name counter: next fresh name door_{}\n", next_door_index_);
+    // The core's place table starts from the same rows: a matched row seeds a candidate's memory, and a REMOVED row ("no door here")
+    // is the prior of any candidate at that place (spec 3.7). The identity table remains the disk format (poses, leaf memory).
+    if (core_) core_->places().load(parsed, cfg_.tracker_detection_noise_m);
     identities_ = std::move(parsed.rows);
     decision_log_.record(rc::door::DoorDecisionKind::IdentityLoad, 0, {}, double(identities_.size()), double(parsed.malformed));
     for (const auto& i : identities_)   // spec 6.6: the table content at load is an explicit event
@@ -1887,8 +1841,9 @@ void SpecificWorker::note_identity(const std::string& name, const Eigen::Vector2
     DoorIdentity row;
     row.name = name;
     row.xy   = ap;
-    // A birth: the door exists with the birth prior's probability (Existence.BirthLogodds).
-    upsert_identity(std::move(row), width_m, 1.0f / (1.0f + std::exp(-cfg_.exist_birth_logodds)));
+    // A birth writes the NAME and the PLACE only; the door's own belief writes its existence (at shutdown and on removal). The
+    // writer is this hole's door with the probability the creation line (L > 0) puts on it - at least 1/2; 1/2 is the bound.
+    upsert_identity(std::move(row), width_m, 0.5f);
 }
 
 float SpecificWorker::identity_weight(const rc::DoorInstance& inst) const
@@ -1899,8 +1854,6 @@ float SpecificWorker::identity_weight(const rc::DoorInstance& inst) const
 void SpecificWorker::upsert_identity(DoorIdentity row, float width_m, float weight)
 {
     const std::string room = current_room_name();
-    if (cfg_.exist_reacquire_radius_m <= 0.0f)
-        return;
     // ★ ONE DOORWAY, ONE NAME (2026-10-18, user). A row whose centre lies within this opening's width plus the
     //   re-acquire radius describes the SAME hole — the openings overlap once their centres are closer than the
     //   width, and the radius is the place uncertainty this agent already uses for "same door". Matching on the
@@ -1908,7 +1861,7 @@ void SpecificWorker::upsert_identity(DoorIdentity row, float width_m, float weig
     //   on the far jamb, door_5 @ −0.58), and the next run picked whichever was closer: door_5.
     //   ⚠ SUPERSEDED 2026-10-21 (tourP9): the OLDEST name of the hole wins, and the place moves by the writer's P(exists)
     //   — see rc::door::upsert_row. width_m = 0 (a birth, before the width is fitted) keeps the old radius-only test.
-    const float same_hole = cfg_.exist_reacquire_radius_m + std::max(0.0f, std::isfinite(width_m) ? width_m : 0.0f);
+    const float same_hole = identity_radius_m() + std::max(0.0f, std::isfinite(width_m) ? width_m : 0.0f);
     const std::string dec_name = row.name;
     const Eigen::Vector2f dec_xy = row.xy;
     if (rc::door::upsert_row(identities_, room, std::move(row), same_hole, weight))
@@ -1948,37 +1901,43 @@ SpecificWorker::DoorIdentity SpecificWorker::identity_of(const rc::DoorInstance&
     return row;
 }
 
-// The persistent row(s) of a door removed for absence: its name, or any row on the same hole (see note_identity).
-void SpecificWorker::forget_identity(const std::string& name, const Eigen::Vector2f& ap, float width_m)
+// A door removed for absence: its row stays (spec 3.7, rows are NEVER forgotten) and says "no door here" - removed_ms is
+// set, and its evidence is the L the door was removed with. A restore skips it; a candidate at that place starts from it
+// (the core's PlaceTable holds the same row). Written on the hole of the removed door, the oldest name first.
+void SpecificWorker::mark_identity_removed(const rc::DoorInstance& inst, std::int64_t now_wall_ms)
 {
     const std::string room = current_room_name();
-    if (room.empty())
+    if (room.empty() or inst.is_bearing_hypothesis)
         return;
-    const float same_hole = cfg_.exist_reacquire_radius_m + std::max(0.0f, std::isfinite(width_m) ? width_m : 0.0f);
-    const auto n = std::erase_if(identities_, [&](const DoorIdentity& i)
-                                 { return i.room == room and (i.name == name or (ap.allFinite() and (i.xy - ap).norm() < same_hole)); });
-    if (n > 0)
-    {
-        std::print("door_concept: [identity] {} removed for absence — {} remembered row(s) forgotten in {}\n", name, n, room);
-        decision_log_.record(rc::door::DoorDecisionKind::IdentityForget, 0, name, ap.x(), ap.y(), width_m, double(n), room);
-        save_identities();
-    }
+    const auto& s = inst.model.state();
+    const Eigen::Vector2f ap(s.ap_cx, s.ap_cy);
+    const float same_hole = identity_radius_m() + std::max(0.0f, std::isfinite(s.w) ? s.w : 0.0f);
+    auto it = std::ranges::find_if(identities_, [&](const DoorIdentity& i)
+                                   { return i.room == room and (i.name == inst.node_name or (ap.allFinite() and (i.xy - ap).norm() < same_hole)); });
+    if (it == identities_.end())
+        return;   // never written (a candidate that did not reach a fit): the core's table holds its removed row
+    it->exist_logodds = rc::door::remembered_logodds(inst);
+    if (not inst.belief.ledger.views().empty()) it->ledger = inst.belief.ledger.serialise();
+    it->removed_ms = now_wall_ms;
+    std::print("door_concept: [identity] {} removed for absence - its row in {} is kept as a REMOVED place\n", inst.node_name, room);
+    decision_log_.record(rc::door::DoorDecisionKind::IdentityForget, 0, inst.node_name, ap.x(), ap.y(), s.w, 1.0, room);
+    save_identities();
 }
 
 const SpecificWorker::DoorIdentity* SpecificWorker::match_identity(const Eigen::Vector2f& xy) const
 {
     const std::string room = current_room_name();
-    if (cfg_.exist_reacquire_radius_m <= 0.0f or room.empty())
+    if (room.empty())
         return nullptr;
     const DoorIdentity* best = nullptr;
-    float best_d = cfg_.exist_reacquire_radius_m;
+    float best_d = identity_radius_m();
     for (const auto& i : identities_)
         if (i.room != room) continue;
         else if (const float d = (i.xy - xy).norm(); d < best_d) { best_d = d; best = &i; }
     return best;
 }
 
-// Shutdown: the doors still alive have never been remembered (remember_ghost only fires on removal), and
+// Shutdown: the doors still alive have never been remembered (a removal only marks its row), and
 // they are about to be deleted from the graph. Write them down or the next run starts blind.
 void SpecificWorker::remember_live_identities()
 {
@@ -1990,17 +1949,6 @@ void SpecificWorker::remember_live_identities()
             continue;
         upsert_identity(identity_of(inst), inst.model.state().w, identity_weight(inst));
     }
-}
-
-const SpecificWorker::DoorGhost* SpecificWorker::match_ghost(const Eigen::Vector2f& xy) const
-{
-    if (cfg_.exist_reacquire_radius_m <= 0.0f)
-        return nullptr;
-    const DoorGhost* best = nullptr;
-    float best_d = cfg_.exist_reacquire_radius_m;
-    for (const auto& g : ghosts_)
-        if (const float d = (g.xy - xy).norm(); d < best_d) { best_d = d; best = &g; }
-    return best;
 }
 
 // ─── NBV decision monitor (etc/door_nbv_log.csv) ────────────────────────────────────────────────
@@ -2066,35 +2014,8 @@ void SpecificWorker::log_nbv_decision(const rc::DoorInstance& inst, const rc::nb
     }
 }
 
-// Consume the ghost(s) at a place a door has just been re-acquired at. By PLACE, for the same reason
-// remember_ghost supersedes by place: a name can outlive its owner and be worn by a ghost somewhere else
-// entirely, and erasing that one would throw away an identity nobody claimed.
-void SpecificWorker::forget_ghost(const Eigen::Vector2f& xy)
-{
-    std::erase_if(ghosts_, [&](const DoorGhost& g)
-                  { return (g.xy - xy).norm() < cfg_.exist_reacquire_radius_m; });
-}
-
-// Continuous existence belief on the SHARED rc::exist channel (the one table/chair use): fold one sensor
-// frame of pixel-level silhouette evidence into each instance's log-odds L and remove the doors whose
-// predicted silhouette is demonstrably empty. See DoorInstance::existence for the model.
-//
-// The discipline, and what each part of it fixes (live run 2026-07-29, etc/door_existence_log.csv):
-//   OCCUPANCY confirms · ABSENCE removes · OCCLUSION and OUT-OF-FoV **HOLD**.
-//   · HOLD is structural, not a special case: rc::exist HOLDs whenever n_detectable==0, so a door behind the
-//     robot contributes nothing. The old scheme took pd = max(zed_pd, range_detectability) where the second
-//     term had NO bearing test — a door squarely behind the camera scored pd≈0.25–0.47 and was charged
-//     absence every frame until it died (door_1: L 4 → −3.01 over ~180 frames while roi=0), then re-born as
-//     door_3 at the same spot. That whole term is gone.
-//   · Occlusion shrinks the detectable footprint continuously (occluded samples simply do not vote) instead
-//     of the old `continue`, which granted indefinite immunity — door_2 sat frozen at L=2.29 for 1204 frames
-//     because its line of sight happened to be blocked.
-//   · Detectability is now ONE physical covariate, the silhouette's subtended image area (n_cells), which
-//     collapses for a far door AND for an edge-on one. The old separate obliquity ramp returned exactly 0
-//     below cos=0.20, making a grazing phantom permanently unjudgeable.
-// Runs from run_instance_tracker (association already resolved, so assigned_mask_idx is this cycle's).
-// (update_existence_beliefs moved into the DoorCore — src/core/door_existence.cpp, Task 5 of the door-core replay plan.
-//  Its graph half is CoreWorld::before_remove / remove_door below; its frames come from CoreWorld::stage_images.)
+// (The existence update - one belief per door place, decided by the costs - lives in the DoorCore: src/core/door_existence.cpp.
+//  Its graph half is CoreWorld::before_remove / remove_door above; its frames come from CoreWorld::stage_images.)
 
 ///////////////////////////////////////////////////////////////
 // (process_door_node moved: its fit into DoorCore::fit_doors (src/core/door_core.cpp), its graph half into
@@ -3281,7 +3202,7 @@ bool SpecificWorker::request_door_actuation_impl(rc::DoorInstance& inst, bool op
             for (const auto& other : provider_faces_.others(chosen_id, face_room))
                 if (rc::door::apply_actuation_to_face(identities_, other, inst.phi_cmd_to, cfg_.phi_max_rad,
                                                       static_cast<std::int64_t>(rc::provenance::now_ms()),
-                                                      cfg_.exist_reacquire_radius_m))
+                                                      identity_radius_m(), core_->places().hazard_per_s()))
                 {
                     changed = true;
                     std::println("door_concept: [phi] {} '{}' of provider door '{}' -> its other face in '{}' told: leaf commanded to "
@@ -3679,12 +3600,6 @@ void SpecificWorker::release_room(std::uint64_t old_room, std::uint64_t new_room
                        "deleted\n", leaving.size());
     }
 
-    // ★GHOSTS ARE ROOM-LOCAL AND MUST NOT CROSS. A ghost is "a door was removed at this (x,y), let it
-    // take its old name if it comes back there" — in ROOM coordinates. Carried into a different room's
-    // frame, the same (x,y) is a different physical place, and the first door detected near it would
-    // silently inherit another room's identity.
-    ghosts_.clear();
-
     // The identity table is room-keyed since 2026-10-13: the released room's doors were written under ITS name above
     // (before room_node_id_ moves), and the new room's rows are matched only against the new room.
 
@@ -4019,7 +3934,7 @@ void SpecificWorker::restore_remembered_doors(std::uint64_t new_room)
                 l.xy_in_room = T->translation().head<2>().cast<float>();
         live.push_back(std::move(l));
     }
-    const auto d = rc::door::plan_restore(identities_, room->name(), recalled, live, cfg_.exist_reacquire_radius_m);
+    const auto d = rc::door::plan_restore(identities_, room->name(), recalled, live, identity_radius_m());
     for (const auto& k : d.skipped)
         decision_log_.record(rc::door::DoorDecisionKind::RestoreSkip, 0, k.name, double(static_cast<int>(k.reason)), 0, 0, 0, room->name());
     for (const auto& k : d.skipped)
@@ -4067,7 +3982,7 @@ void SpecificWorker::restore_remembered_doors(std::uint64_t new_room)
         // ★THE BELIEF IS THE MEMORY (Task 9): not a fresh birth's prior and not certainty either — the stored ledger and the aged evidence
         //  of the row. The channels take it from here: seen => confirmed, absent where it should be visible (P(detect), wall line of
         //  sight) => removed. No seed and no hazard constant of its own: the place table's hazard is learned from revisits.
-        rc::door::seed_restored_instance(inst, r, restored, cfg_.exist_max_logodds, std::chrono::steady_clock::now());
+        rc::door::seed_restored_instance(inst, r, restored, std::chrono::steady_clock::now());
         // the remembered leaf ANGLE (aged above) seeds the belief
         if (r.leaf.has_value() and aged_leaf.has_value())
         {
@@ -4136,7 +4051,7 @@ void SpecificWorker::step_remembered_looks()
     }
     std::vector<std::string> ruled;
     for (const auto& [nm, e] : looks_) if (e.ruled_out) ruled.push_back(nm);
-    const auto offer = rc::door::look::offer_rows(identities_, room, live, ruled, cfg_.exist_reacquire_radius_m,
+    const auto offer = rc::door::look::offer_rows(identities_, room, live, ruled, identity_radius_m(),
                                                        recalled_room_id_ == room_node_id_);
 
     // Withdraw what is no longer offered: re-born (the common, good ending). Ruled-out entries stay, inert, as the mark.
@@ -4156,10 +4071,7 @@ void SpecificWorker::step_remembered_looks()
     if (offer.empty())
         return;
 
-    rc::exist::RemovalPolicy pol;
-    pol.logodds_max   = cfg_.exist_max_logodds;
-    pol.removal_prob  = cfg_.exist_removal_prob;
-    pol.remove_frames = static_cast<float>(cfg_.exist_remove_frames);
+    const auto costs = core_->costs().costs(cfg_.exist_max_room_s);   // the same costed deletion line as a live door's
     const rc::door::look::Params prm{.robot_radius_m = 0.5f * cfg_.pragmatic.robot_passage_width_m,
                                      .clutter_prob   = cfg_.exist_clutter_prob,
                                      .detection_prob = cfg_.exist_detection_prob,
@@ -4178,12 +4090,12 @@ void SpecificWorker::step_remembered_looks()
         auto it = looks_.find(r.name);
         if (it == looks_.end())
         {
-            // The prior: what memory says (the row's existence when written; BirthLogodds for an identity-only row).
-            // Task 9: the birth prior plus the remembered evidence, aged by the place table's learned hazard
-            const float L0 = cfg_.exist_birth_logodds + core_->places().aged_L(
+            // The prior: what memory says and nothing else - the place belief's remembered evidence, aged by the place table's
+            // learned hazard (an identity-only row remembers nothing: L = 0, ignorance).
+            const float L0 = core_->places().aged_L(
                 rc::door::core::PlaceTable::row_of(r, cfg_.tracker_detection_noise_m, cfg_.exist_geometry_may_refute),
                 static_cast<std::int64_t>(rc::provenance::now_ms()));
-            it = looks_.emplace(r.name, LookEntry{rc::door::look::Evidence(1.0f / (1.0f + std::exp(-L0)), pol), {}, false}).first;
+            it = looks_.emplace(r.name, LookEntry{rc::door::look::Evidence(L0), {}, false}).first;
             it->second.aff.init(G, room_node_id_, "door_look_" + r.name, "door");
             std::print("door_concept: [look] '{}' remembered in '{}' at ({:.2f},{:.2f}) is not in the graph — offering a "
                        "look (prior P(exists)={:.2f})\n", r.name, room, r.xy.x(), r.xy.y(), it->second.ev.p_exists());
@@ -4198,10 +4110,9 @@ void SpecificWorker::step_remembered_looks()
             const Eigen::Vector2f cxy(static_cast<float>(cam->coeff(0, 3)), static_cast<float>(cam->coeff(1, 3)));
             const float cyaw = static_cast<float>(std::atan2(cam->coeff(1, 1), cam->coeff(0, 1)));   // zed +y = forward
             const float pd = rc::door::look::p_detect_from(r, cxy, cyaw, poly, sensor, furniture, gaps, prm);
-            const float same_hole = cfg_.exist_reacquire_radius_m + (r.pose.has_value() ? r.pose->width : 0.0f);
+            const float same_hole = identity_radius_m() + (r.pose.has_value() ? r.pose->width : 0.0f);
             const bool seen = std::ranges::any_of(look_dets_xy_, [&](const Eigen::Vector2f& d) { return (d - r.xy).norm() < same_hole; });
-            if (e.ev.observe(pd, seen, prm.detection_prob, prm.clutter_prob,
-                             rc::door::look::view_of(r, poly, cxy, prm.prior_w_m), pol))
+            if (e.ev.observe(r, poly, cxy, pd, seen, core_->detectors().zed, costs, prm.prior_w_m, prm.prior_h_m))
             {
                 e.ruled_out = true;
                 e.aff.remove();
@@ -4301,10 +4212,6 @@ void SpecificWorker::install_carried_door(std::uint64_t new_room, std::uint64_t 
                     rc::door::core::PlaceRow src;
                     if (adopted_from->existence_L.has_value()) src.L_evidence = *adopted_from->existence_L;
                     dst.belief = rc::door::core::carried_belief(adopted_from->existence_L.has_value() ? &src : nullptr, dLx);
-                    dst.existence.set(dst.belief.L_evidence());   // retired field, kept compiling until Task 10
-                    dst.existence_seeded      = true;
-                    dst.existence_entry_L     = dst.existence.logodds();
-                    dst.existence_since_entry = 0.0f;
                     if (core_ and room_n.has_value())
                     {
                         const auto& ms = dst.model.state();

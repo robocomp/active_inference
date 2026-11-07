@@ -3,6 +3,7 @@
  */
 
 #include "door_config.h"
+#include "door_config_retired.h"  // keys the existence model retired: rejected if present
 #include "door_config_fields.h"   // read_door_config_fields — every key, shared with tools/door_replay
 
 #include "../../common/config_report/config_read.h"   // rc::cfg::Reader (SHARED)
@@ -19,6 +20,12 @@ DoorConfig load_door_config(const ConfigLoader& cfg)
 {
     DoorConfig out;
 
+    // ★RETIRED KEYS ARE REFUSED, NOT IGNORED (docs/superpowers/plans/2026-11-07-door-existence-model.md).
+    if (const auto stale = retired_door_keys_present([&](const std::string& k) { return cfg.exists(k); }); not stale.empty())
+    {
+        std::print("{}", retired_door_keys_message(stale));
+        std::exit(EXIT_FAILURE);
+    }
 
     // The one place this path is written. Relative to the agent's CWD (<agent>/), not to src/ — the same
     // string was right in one place and wrong in the other for a week, and the manifest was inert the whole time.

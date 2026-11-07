@@ -1,11 +1,11 @@
 // door_visibility.h — "should this door be visible in this image, and how big does it project?" for ANY camera the core
 // knows (the ZED pinhole and the ricoh 360). Task 2 of the door-existence model (.superpowers/sdd/2026-11-07-door-existence-model).
 //
-// ★MOVED, NOT REWRITTEN. The sample classification below is compute_silhouette_existence's `classify` lambda (door_existence.cpp
+// ★MOVED, NOT REWRITTEN. The sample classification below is the old silhouette probe's `classify` lambda (door_existence.cpp
 // as of a316097f), line for line: a leaf-face sample is NOT SEEN when it is behind the near clip or outside the image (for a
 // 360 camera: outside every looked window), OCCLUDED when a nearer non-door mask, a wall (the door's own excluded), another
 // door's cone, or the aperture itself (it lies past the room-side face: door_room_band.h) hides it, and VISIBLE otherwise,
-// weighted by 1 − P(beyond the far face). compute_silhouette_existence now walks its samples through ViewRig and keeps only
+// weighted by 1 − P(beyond the far face). the old probe walked its samples through ViewRig and kept only
 // its occupied / free bookkeeping; door_view() walks the same samples to answer the camera-generic question the existence
 // model needs (how visible, how large, from what angle).
 //

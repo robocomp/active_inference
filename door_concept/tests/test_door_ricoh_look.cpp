@@ -2,7 +2,7 @@
 // open, with no 'ricoh-born' rule: the existence mutual information is part of the planner's gain (EpistemicPlanner + ExistenceLook).
 //   NOTE the numbers: the geometric gain of an unfitted 360-born aperture is already ~1.8 nats; existence adds ~0.18 at p=0.73 (its maximum
 //   mutual information is ~0.2), so the look wins by that margin over the same look at a settled door and over the approach offer (<= 1).
-//   1. p_exists after a ricoh birth (BirthLogodds 1 => 0.73): the look's gain is above the same belief with existence settled, and above the
+//   1. p_exists after a ricoh birth (a prior of L = 1 => 0.73): the look's gain is above the same belief with existence settled, and above the
 //      typical approach offer (DoorAffordance.ValueApproach x P(complete)); its viewpoint is frontal (within 15 deg of the wall normal).
 //   2. after a simulated ZED confirmation (p -> 0.99) the existence term, and so the gain, falls back to the geometric one.
 //   3. a phantom: the ZED looks and the door is not there - the SAME existence belief that prices the look drives p below the removal
@@ -101,7 +101,7 @@ int main()
         return std::acos(std::clamp(std::abs(d.dot(ap.across_u())) / std::max(1e-6f, d.norm()), 0.f, 1.f)) * 57.2958f;
     };
 
-    // 1. ricoh-only birth: existence prior is the birth log-odds (Existence.BirthLogodds = 1)
+    // 1. ricoh-only birth: existence prior is a log-odds of 1
     const float p_birth = 1.0f / (1.0f + std::exp(-1.0f));
     const auto geom = planner.compute(b, 0.02f, 0.03f, sensor, {}, room);                // geometry only (existence not in question)
     const auto born = look(p_birth);

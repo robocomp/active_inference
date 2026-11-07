@@ -143,7 +143,7 @@ private:
     void run_tracker_slice();
     void retire_instance(std::uint64_t id);   // shared teardown: affordance + fitter forget + graph delete
 
-    // The DoorCore's TrackerWorld over THIS worker's state: the instances (fitter), ghosts, identities, the room, and
+    // The DoorCore's TrackerWorld over THIS worker's state: the instances (fitter), identities, the room, and
     // the graph writes a birth / merge makes. Nested so it reaches the private members it reads and acts on.
     class CoreWorld final : public rc::door::core::TrackerWorld
     {
@@ -152,14 +152,11 @@ private:
         std::uint64_t room_id() const override;
         std::vector<Eigen::Vector2f> room_polygon() const override;
         std::vector<std::pair<std::uint64_t, rc::DoorFitState*>> fit_states() const override;
-        std::optional<rc::door::core::GhostMatch> match_ghost(const Eigen::Vector2f& xy) const override;
         std::optional<rc::door::core::IdentityMatch> match_identity(const Eigen::Vector2f& xy) const override;
         void retire(std::uint64_t id) override;
         void set_assigned_mask(std::uint64_t id, int slice) override;
         void after_association(const rc::door::core::TrackerCycleInfo& info) override;
         std::uint64_t create_door(const rc::door::core::BirthRequest& r) override;
-        void reacquire(std::uint64_t new_id, const rc::door::core::GhostMatch& g) override;
-        void forget_ghost(const Eigen::Vector2f& xy) override;
         std::optional<std::string> adopt_birth(std::uint64_t id, int slice, const Eigen::Vector3f& centroid) override;
         std::vector<std::uint64_t> fit_targets() override;
         rc::DoorFitState* begin_fit(std::uint64_t id) override;
@@ -206,25 +203,8 @@ private:
     // transform can only be rejected, or (far worse) match some OTHER door within 400 mm and open it.
     bool request_door_actuation(rc::DoorInstance& inst, bool open, const std::string& provider_id,
                                 const std::string& purpose, std::string& why);
-    // ── Identity re-acquisition ───────────────────────────────────────────────
-    // A door that is removed leaves a GHOST: its name and the belief it had converged to. A later detection
-    // landing within Existence.ReacquireRadiusM of a ghost is the SAME physical door coming back, so it takes
-    // that name and resumes that geometry instead of being born as door_N+1 with template priors. Existence
-    // itself restarts from the birth prior — the shape is remembered, the confidence is re-earned.
-    struct DoorGhost
-    {
-        std::string     name;
-        Eigen::Vector2f xy = Eigen::Vector2f::Zero();
-        rc::DoorBelief  belief;
-        int             lived_cycles = 0;
-    };
-    void remember_ghost(const rc::DoorInstance& inst);                 // called just before a node is deleted
-    const DoorGhost* match_ghost(const Eigen::Vector2f& xy) const;     // nearest ghost within the radius, else null
-    void forget_ghost(const Eigen::Vector2f& xy);                      // consume the ghost(s) at a re-acquired place
-    std::vector<DoorGhost> ghosts_;
-
     // ── Identity ACROSS RUNS (etc/door_identities.csv) ────────────────────────────────────────────
-    // A ghost lives in RAM and every owned door node is deleted on shutdown, so at the next launch the
+    // Every owned door node is deleted on shutdown, so at the next launch the
     // numbering restarted from birth ORDER — i.e. from whichever door the robot happened to see first.
     // Live 2026-08-09: door_1/door_2 traded physical doors across a restart, which is exactly what
     // "the affordances are switched" looks like from outside. A door is a hole in a wall and outlives
@@ -252,7 +232,14 @@ private:
     void upsert_identity(DoorIdentity row, float width_m, float weight);
     float identity_weight(const rc::DoorInstance& inst) const;
     DoorIdentity identity_of(const rc::DoorInstance& inst) const;      // a FITTED door's restorable row (current room)
-    void forget_identity(const std::string& name, const Eigen::Vector2f& ap, float width_m);       // a removal for absence
+    /// A door removed for absence stays in the table as a REMOVED row (spec §3.7: rows are never forgotten; "no door here" is the
+    /// prior of any candidate at that place). It is not restored and not looked at.
+    void mark_identity_removed(const rc::DoorInstance& inst, std::int64_t now_wall_ms);
+    /// The radius within which two apertures are the same HOLE: the tracker's own association gate, in metres. A candidate and a
+    /// remembered place are the same place when their squared Mahalanobis distance under the SUM of their covariances (each
+    /// Tracker.DetectionNoiseM^2 I) is within Tracker.GateMahalanobis — PlaceTable::match's rule, as a radius.
+    [[nodiscard]] float identity_radius_m() const
+    { return cfg_.tracker_detection_noise_m * std::sqrt(2.0f * cfg_.tracker_gate_mahalanobis); }
     const DoorIdentity* match_identity(const Eigen::Vector2f& xy) const;
     void remember_live_identities();                                   // shutdown: persist the doors still alive
     // Place the door on the 2-D graph canvas beside its ACTUAL RT parent (a wall_* once resolved, the
@@ -376,7 +363,7 @@ private:
         std::vector<std::pair<float, float>> phi_curve;
         int             matched_frames = 0;
         // ★Task D2: the source instance's existence log-odds, so the door re-made on the far side of the crossing keeps what we
-        // believed about it (a fresh instance was seeded at BirthLogodds and the old L = +1.83 and the crossing were discarded).
+        // believed about it (a fresh instance was seeded with no memory and the old L and the crossing were discarded).
         std::optional<float> existence_L;
         // For a door recreated in a room entered through it (remember_door / release_room): its pose under root
         // (live rooms all hang from root, so root is the one frame two rooms share) and its attributes.

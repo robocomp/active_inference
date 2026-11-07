@@ -423,40 +423,28 @@ struct DoorConfig
     float ricoh_birth_p_open    = 0.20f;      // Birth.RicohOpenPrior — prior P(a ricoh door slice is a leaf standing open off the wall); 0 = wall-agreement only
     float exist_cross_passable_prior = 0.5f;  // Existence.CrossPassablePrior — P(a doorway is passable) before the crossing, uninformative
     float exist_cross_leak      = 0.05f;      // Existence.CrossLeak — P(localisation error alone reports the body through a WALL)
-    float tracker_birth_frames     = 6.6f;    // IDEAL OBSERVATIONS of unexplained evidence before a birth
-                                              // (8 rescaled by the graded model's median conf 0.826 — see config.toml)
     float tracker_birth_min_sep_m  = 0.70f;   // a birth must be ≥ this (m) from every existing door (anti-dup)
     float tracker_merge_overlap    = 0.20f;   // merge two instances whose seat footprints overlap ≥ this
                                               // fraction of the smaller, keeping the more-observed. 0 disables.
     // ── Existence belief (shared rc::exist log-odds channel — the same one table/chair use) ─────────────
-    // Evidence is the PIXEL-LEVEL silhouette (DoorFitter::compute_silhouette_existence): occupancy confirms,
+    // Evidence is the PIXEL-LEVEL silhouette (the old silhouette probe, replaced by the view-ledger model): occupancy confirms,
     // absence removes, occlusion and out-of-frustum HOLD. The parameters below are physical sensor RATES and
     // one decision boundary — not gains, ramps or detectability curves. Removed with the old scheme:
     // RemoveLogodds / EvidenceGain / ExpectedSupportC / AdequacyRef / AdequacyCap / CalibAdapt /
     // VacateConfidentFrames / OcclusionCheck / ZedEdgeOffset / ZedRangeFull / ZedRangeRef / ZedClearLosFloor
     // (the last of which was parsed but never read). Detectability is now measured from the projection itself.
     bool  exist_enabled            = true;   // Existence.Enabled — use the log-odds belief (else the old prune)
-    float exist_birth_logodds      = 1.0f;   // Existence.BirthLogodds — L seeded at birth (a birth already needed birth_frames of evidence)
-    float exist_max_logodds        =  4.0f;  // Existence.MaxLogodds — saturation cap (a real door can't earn infinite immunity)
     float exist_actuation_llr      =  3.0f;  // Existence.ActuationLlr — log-odds of "it changed state when WE commanded it"
-    // The ONE honest decision boundary: remove when P(exists) drops below this. Replaces RemoveLogodds — same
-    // quantity, stated as a probability instead of a log-odds so it reads as the decision it is.
-    float exist_removal_prob       = 0.12f;  // Existence.RemovalProb
-    int   exist_remove_frames      = 15;     // Existence.RemoveFrames — consecutive EVIDENCE cycles the decision must hold
     // Physical sensor rates for the log-likelihood ratio (rc::exist::SensorModel), NOT gates.
     float exist_detection_prob     = 0.85f;  // Existence.DetectionProb — P(mask lights a predicted pixel | door present & observable)
     float exist_clutter_prob       = 0.05f;  // Existence.ClutterProb   — P(mask lights a predicted pixel | no door)
     float exist_sensor_sigma_m     = 0.03f;  // Existence.SensorSigmaM  — range/localisation noise σ
-    // Central-image box [f, 1-f]²: a detectable silhouette sample inside it counts as the robot LOOKING at the
-    // door. A door merely clipping the wide frustum edge is not a verifying view, so its absence barely removes.
-    float exist_central_region_frac = 0.25f; // Existence.CentralRegionFrac
     float exist_occlusion_margin_m = 0.30f;  // Existence.OcclusionMarginM — an occluder must be ≥ this much CLOSER to count
     // Room-containment pose prior: P(a door outside the room walls) ≈ 0. Applies even when the instance is out
     // of view / behind a wall (a localization glitch can birth a door outside; the sensor then can't reach it
     // to vacate it). An out-of-room instance draws this STRONG negative log-odds each frame → removed in a few.
     bool  exist_room_prior         = true;   // Existence.RoomPrior — enforce the room-containment pose prior
     float exist_room_margin_m      = 0.40f;  // Existence.RoomMarginM — tolerance a door centre may sit OUTSIDE the walls
-    float exist_out_of_room_gain   = 1.5f;   // Existence.OutOfRoomGain — |ΔL| per frame while outside (debounces a 1-frame glitch)
     // ── THE WALL BAND (door_room_band.h) ──────────────────────────────────────────────────────────────
     // A door's aperture lies IN a wall, i.e. between the room polygon (drawn at the room-side face) and the
     // far face T beyond it — so "outside the polygon" is the NORMAL place for a real door. The containment
@@ -475,17 +463,6 @@ struct DoorConfig
     // DoorInstance::obs_top_z. MinConf guards against acting on a handful of clipped views.
     bool  exist_min_height_prior = true;     // Existence.MinHeightPrior
     float exist_min_height_m     = 1.80f;    // Existence.MinHeightM — a door's support must reach this (m)
-    float exist_min_height_conf  = 0.30f;    // Existence.MinHeightConf — untruncated-evidence weight required
-                                             // before the prior may act (0 = act on the first clean view)
-    float exist_short_gain       = 1.5f;     // Existence.ShortGain — |ΔL| per frame while confidently short
-    // ── Identity re-acquisition ────────────────────────────────────────────────────────────────────
-    // A removed door is remembered as a GHOST (name + converged belief). A later detection landing within
-    // ReacquireRadiusM of a ghost is the SAME door coming back: it resumes that identity and its accumulated
-    // geometry instead of being re-born as door_N+1. Without this, one flicker cost the live run three node
-    // identities for a single physical door (door_1 → door_3, same 2 cm spot) and every downstream consumer
-    // saw a brand-new object each time.
-    float exist_reacquire_radius_m = 0.60f;  // Existence.ReacquireRadiusM (0 disables re-acquisition)
-    int   exist_ghost_max          = 8;      // Existence.GhostMax — most recent removals retained
     bool  exist_geometry_may_refute = false; // Existence.GeometryMayRefute — §8.5: the geometry channel may only RAISE L until benched on ROI tapes
     float exist_max_room_s         = 300.0f; // Existence.MaxRoomS — mirrors controller ExploreTour.MaxRoomS: the longest a room's exploration lasts (s); C_delete(route) = C_delete(ordinary) + this
     // ── Openable door: APERTURE / LEAF decomposition (M0 = structure only) ─────────────────────────

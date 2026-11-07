@@ -486,7 +486,7 @@ void DoorCore::associate(const DoorCycleInput& in, DoorCycleOutput& out)
             // unclaimed), and a full-height mask carries all of it.
             float size_w = 1.0f;
             {
-                const float untrunc = 1.0f - std::clamp(sl.trunc_frac, 0.0f, 1.0f);
+                const float untrunc = 1.0f - std::clamp(sl.trunc_frac, 0.0f, 1.0f);   // clamp: trunc_frac is a fraction; kept in [0,1] against a producer's out-of-range value, not a gate
                 const float mask_h  = sl.bbox_max.z() - sl.bbox_min.z();
                 if (sl.has_depth and sl.bbox_max.allFinite() and sl.bbox_min.allFinite()
                     and untrunc > 0.5f and mask_h > 0.0f and mask_h < cfg.door_prior_h_m)
@@ -561,7 +561,7 @@ void DoorCore::associate(const DoorCycleInput& in, DoorCycleOutput& out)
             // Task 8: the detection's reliability as the door model's hit weight — confidence x the ricoh's wall/variance weight x
             // P(unclaimed by another concept's object) (fix round 1: the cross-concept exclusion reaches births again). A frame the
             // fit would refuse (frame_admissible) is not a trial for the place it lands on (FrameDetection::admissible).
-            det_w_.push_back(std::clamp(sl.confidence, 0.0f, 1.0f) * ricoh_w * unclaimed_w);
+            det_w_.push_back(std::clamp(sl.confidence, 0.0f, 1.0f) * ricoh_w * unclaimed_w);   // clamp: confidence is a probability; kept in [0,1] (domain), the weight itself is continuous
             det_adm_.push_back(frame_admissible(sl, ego_, cfg));
             dets_.push_back(dv);
         }
@@ -728,17 +728,8 @@ void DoorCore::births(const DoorCycleInput& in, DoorCycleOutput& out)
         // the next detection), and the existence update may have retired doors since the association.
         const std::vector<TrackedDoor> doors = world_->doors();
 
-        // Room-containment pose prior at BIRTH: never spawn a door outside the walls (a mislocalized frame while
-        // the robot is lost drops a detection beyond a wall). Zero prior mass outside the room → suppress.
-        if (const auto poly = world_->room_polygon();
-            cfg.exist_room_prior and poly.size() >= 3
-            and not point_in_polygon(poly, Eigen::Vector2f(c.x(), c.y()), cfg.exist_room_margin_m))
-        {
-            diag("stdout", std::format("door_concept: [tracker] BIRTH SUPPRESSED slice={} at ({:.2f},{:.2f}) — OUTSIDE room\n",
-                                       slice, c.x(), c.y()), out);
-            record(K::Suppress, 0, c.x(), c.y(), "outside room", {}, out);
-            continue;
-        }
+        // (No outside-the-room test here any more: the place prior scores an off-wall candidate — spec §3.2 — so a candidate
+        //  outside the walls is simply never L > 0; the test only produced thousands of log-only SUPPRESS rows.)
 
         // MINIMUM-HEIGHT prior at BIRTH: a door is an aperture a person walks THROUGH, so a blob that
         // demonstrably tops out below MinHeightM is not one — it is a counter, a radiator, a window sill,
@@ -754,7 +745,7 @@ void DoorCore::births(const DoorCycleInput& in, DoorCycleOutput& out)
         if (cfg.exist_min_height_prior and pkt.slices[slice].has_depth and pkt.slices[slice].bbox_max.allFinite())
         {
             const float top    = pkt.slices[slice].bbox_max.z();
-            const float untrunc = 1.0f - std::clamp(pkt.slices[slice].trunc_frac, 0.0f, 1.0f);
+            const float untrunc = 1.0f - std::clamp(pkt.slices[slice].trunc_frac, 0.0f, 1.0f);   // clamp: trunc_frac is a fraction, kept in [0,1] (domain); the 0.5 test below is the birth prior's, flagged where it is
             if (untrunc > 0.5f and top < cfg.exist_min_height_m)
             {
                 diag("stdout", std::format("door_concept: [tracker] BIRTH SUPPRESSED slice={} at ({:.2f},{:.2f}) — support tops "
@@ -846,25 +837,11 @@ void DoorCore::births(const DoorCycleInput& in, DoorCycleOutput& out)
                 continue;
             }
         }
-        // RE-ACQUISITION: is this detection a door that was removed and has come back at the same place? If so
-        // it is not a new object — it takes its old name and resumes the belief it had converged to, instead of
-        // becoming door_N+1 with template priors. (Live run: one real door burned three identities this way.)
-        std::optional<GhostMatch> revive;
+        // A door we have met before keeps its NAME: the persistent identity table returns the name only (geometry and
+        // existence are re-earned from evidence, or carried by the place row the candidate was seeded from — Task 9).
+        // This is what stops door_1/door_2 from trading doors on restart.
         std::string preferred_name;
-        if (auto g = world_->match_ghost(Eigen::Vector2f(c.x(), c.y())); g.has_value())
-        {
-            preferred_name = g->name;
-            diag("stdout", std::format("door_concept: [tracker] RE-ACQUIRE '{}' at ({:.2f},{:.2f}) — {:.2f} m from where it was "
-                                       "removed after {} cycles; resuming its belief\n",
-                                       g->name, c.x(), c.y(), (g->xy - Eigen::Vector2f(c.x(), c.y())).norm(),
-                                       g->lived_cycles), out);
-            revive = std::move(g);
-        }
-        // No ghost from THIS run, but the place may still be a door we have met before. The persistent table
-        // returns the NAME only: geometry has to be re-earned from evidence (a remembered belief would be
-        // asserting a shape nothing in this session has seen), while the identity is a fact about the
-        // apartment, not about the session. This is what stops door_1/door_2 from trading doors on restart.
-        else if (const auto idn = world_->match_identity(Eigen::Vector2f(c.x(), c.y())); idn.has_value())
+        if (const auto idn = world_->match_identity(Eigen::Vector2f(c.x(), c.y())); idn.has_value())
         {
             preferred_name = idn->name;
             diag("stdout", std::format("door_concept: [tracker] IDENTITY '{}' at ({:.2f},{:.2f}) — {:.2f} m from the aperture "
@@ -891,12 +868,6 @@ void DoorCore::births(const DoorCycleInput& in, DoorCycleOutput& out)
                                    Mat4d::Identity(), cfg.door_prior_w_m, cfg.door_thickness_m, cfg.door_prior_h_m,
                                    std::nullopt, std::nullopt, 0, std::format("slice {}", slice)});
             out.creates.back().pose.block<3, 1>(0, 3) = c.cast<double>();
-            if (revive.has_value())
-            {
-                world_->reacquire(new_id, revive.value());
-                record(K::Reacquire, new_id, c.x(), c.y(), preferred_name, preferred_name, out);
-                world_->forget_ghost(Eigen::Vector2f(c.x(), c.y()));   // consumed — the door is alive again
-            }
             // Materialise the DoorInstance NOW, at birth — do not wait for the freshly inserted DSR node
             // to surface in get_nodes_by_type (it is not reliably visible the same cycle). Birth was
             // decoupled across three async steps (create node → ensure_instance when the node appears →
@@ -956,7 +927,7 @@ bool point_in_polygon(const std::vector<Vec2f>& poly, const Vec2f& q, float marg
         const Eigen::Vector2f& a = poly[i];
         const Eigen::Vector2f ab = poly[(i + 1) % n] - a;
         const float len2 = ab.squaredNorm();
-        const float t = (len2 > 1e-8f) ? std::clamp((q - a).dot(ab) / len2, 0.0f, 1.0f) : 0.0f;
+        const float t = (len2 > 1e-8f) ? std::clamp((q - a).dot(ab) / len2, 0.0f, 1.0f) : 0.0f;   // clamp: the parameter of the closest point ON a segment (geometry), not a threshold
         best2 = std::min(best2, (q - (a + t * ab)).squaredNorm());
     }
     return best2 <= margin_m * margin_m;

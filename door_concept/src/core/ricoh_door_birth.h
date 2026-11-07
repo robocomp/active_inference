@@ -1,17 +1,17 @@
-// ricoh_door_birth.h — how much is ONE 360-camera door slice worth toward BIRTHING a door? (door_concept only; pure, Eigen.)
+// ricoh_door_birth.h — what is ONE 360-camera door slice worth, and where is it? (door_concept only; pure, Eigen.)
 //
-// The ricoh slice's range comes from LiDAR reprojected onto the mask, which can land on whatever is behind the door, so a
-// ricoh-only birth at that range is the churn risk: born at a wrong range, killed by absence, reborn. Three continuous
-// terms, none a cutoff, all multiplied into the shared birth evidence (common/instance_tracker/birth_evidence.h):
+// The ricoh slice's range comes from LiDAR reprojected onto the mask, which can land on whatever is behind the door, so its
+// position is not taken at face value. Two continuous terms, none a cutoff, multiplied into the detection's reliability:
 //   1. WALL: a door lies in a wall, so the bearing ray meets the room polygon at r_w. The slice's LiDAR range r_s is
-//      scored against it (Gaussian agreement over their summed variances); no wall along the bearing ⇒ weight 0.
+//      scored against it (Gaussian agreement over their summed variances); no wall along the bearing => weight 0.
 //      The position is the precision-weighted fusion of r_s and r_w, so a LiDAR range that agrees but is noisy is
-//      pulled onto the wall. The wall-range variance is the bearing error lever arm, (σ_b r_w)² tan²φ (φ = incidence
+//      pulled onto the wall. The wall-range variance is the bearing error lever arm, (sigma_b r_w)^2 tan^2(phi) (phi = incidence
 //      from the wall normal): grazing rays are ill-conditioned and say little.
 //   2. VARIANCE: R0 / (R0 + depth_var), R0 = the fit's own R for a ZED slice at that range (door_fit.cpp).
-//   3. VIEWPOINT: frames from one viewpoint are one observation (the same view model as door_view_pool.h: bearing from
-//      the door in units of its angular half-size, range in units of its half-size). A frame is credited 1 − s, s its
-//      similarity to the candidate's pooled viewpoint, so a parked robot's 40 frames are worth one.
+// Also here: which wall hits a bearing sees (wall_hit, wall_hypotheses), which strips the 360 detector processed
+// (ricoh_looked: EMPTY windows = unknown = not looked at) and the line-of-sight weight. The ricoh birth BANK (ripening bar) and
+// the separate ricoh view pool are GONE (docs/superpowers/plans/2026-11-07-door-existence-model.md): a ricoh frame is a Bernoulli
+// trial in the same view ledger as the ZED's, and a place is born by comparison (L > 0), not by ripening.
 #pragma once
 #include <algorithm>
 #include <ranges>
@@ -21,7 +21,6 @@
 #include <utility>
 #include <vector>
 #include <Eigen/Dense>
-#include "../door_view_pool.h"
 
 namespace rc::door::core
 {
@@ -233,205 +232,5 @@ struct RicohRange
     const float short_by = std::max(0.0f, dist - h->r);
     return std::exp(-0.5f * short_by * short_by / var);
 }
-
-/// Term 3: the pooled viewpoints of the ricoh birth candidates (one per door position).
-class RicohViewPool
-{
-public:
-    /// Credit in [0,1] for a frame seen from `cam` of a door at `tgt` (half-size R); folds the view in.
-    /// The credit the frame WOULD get, folding nothing in (the slice may turn out to be associated to a live door).
-    [[nodiscard]] float peek(const Eigen::Vector2f& cam, const Eigen::Vector2f& tgt, float R, float match_m) const
-    {
-        RicohViewPool copy = *this;
-        return copy.credit(cam, tgt, R, match_m);
-    }
-    float credit(const Eigen::Vector2f& cam, const Eigen::Vector2f& tgt, float R, float match_m)
-    {
-        const Eigen::Vector2f dv = cam - tgt;
-        const float d = dv.norm();
-        const float b = std::atan2(dv.y(), dv.x());
-        const float Rr = std::max(R, 1e-3f);
-        View* v = nullptr;
-        for (auto& c : views_) if ((c.tgt - tgt).norm() < match_m) { v = &c; break; }
-        float s = 0.0f;
-        if (v == nullptr)
-        {
-            views_.push_back({tgt, b, d, 1.0f, true});
-            return 1.0f;
-        }
-        const float half = std::max(std::atan2(Rr, std::max(d, 1e-3f)), 1e-3f);
-        const float db = std::remainder(b - v->bearing, 2.0f * std::numbers::pi_v<float>);
-        const float dr = d - v->range;
-        s = std::exp(-std::min((db / half) * (db / half) + (dr / Rr) * (dr / Rr), 60.0f));
-        const float n_old = s * v->n;
-        v->n = n_old + 1.0f;
-        v->bearing += std::remainder(b - v->bearing, 2.0f * std::numbers::pi_v<float>) / v->n;
-        v->range   += (d - v->range) / v->n;
-        v->tgt = tgt;
-        v->seen = true;
-        return 1.0f - s;
-    }
-    /// End of an observation: candidates not seen in it are gone (mirrors the tracker's candidate expiry).
-    /// `looked(tgt)` false for a candidate whose strip was not processed this frame: it is HELD (its view survives), not expired.
-    template <class Looked>
-    void end_frame(Looked&& looked)
-    {
-        std::erase_if(views_, [&](const View& v){ return not v.seen and looked(v.tgt); });
-        for (auto& v : views_) v.seen = false;
-    }
-    void end_frame() { end_frame([](const Eigen::Vector2f&) { return true; }); }
-private:
-    struct View { Eigen::Vector2f tgt; float bearing, range, n; bool seen; };
-    std::vector<View> views_;
-};
-
-/// One door's calibration of the 360 detector's hit rate, POOLED PER VIEWPOINT: the frames of one view are one Bernoulli trial
-/// (door_view_pool.h's view model), whose outcome is the view's detected fraction; a new view is a new trial. add() returns the
-/// (hits, trials) increments to fold into the shared Beta posterior - 100 parked frames add 1 trial in total, K views add K.
-struct RicohHitPool
-{
-    rc::door::ViewPool hit{}, trial{};
-    std::pair<float, float> add(const Eigen::Vector2f& cam, const Eigen::Vector2f& door, float R, bool seen)
-    {
-        const float t = trial.add_logodds(cam, door, R, 1.0f);
-        const float h = hit.add_logodds(cam, door, R, seen ? 1.0f : 0.0f);
-        return {h, t};
-    }
-};
-
-/// The 360 camera's BIRTH EVIDENCE BANK. Why it exists (gold4, 2026-10-23, replay): DOOR_0 was seen by the ricoh 1962 times
-/// from a parked pose and never born, because the tracker's candidate EXPIRES the cycle it gets no detection and the 360 detector
-/// runs on ONE of three panorama strips per frame, so a door is "looked at" a third of the time: the longest streak was 4 hits, each
-/// worth ~0.15 ideal observations against a bar of 6.6. The bank keeps a ricoh-seen place alive across the gaps and settles it by the
-/// Bernoulli LLR the existence channel uses:
-///   hit  : + weight · ln(h / pc)                (weight = ricoh_range's wall/variance weight x the label's confidence)
-///   miss : + ln((1 - q h) / (1 - q pc))          (q = P(detectable from here) x line of sight x LOOKED; q = 0 says NOTHING)
-/// ★FRAMES OF ONE VIEWPOINT ARE NOT INDEPENDENT TRIALS. Every increment (hit or miss) is credited by the same view model as
-/// door_view_pool.h: a frame from a NEW viewpoint (bearing from the door in units of its angular half-size, range in units of its
-/// half-size) counts in full; a frame from a viewpoint already pooled counts only dt / tau, dt the time since that view last
-/// contributed - so a long parked stare accrues ONE effective sample per decorrelation time tau (a few over a minute), never one per
-/// frame. h is the existence channel's LEARNED per-viewpoint ricoh hit rate (Beta(1,1) prior), not a constant.
-/// A place unobserved (q = 0: not looked at, or occluded) relaxes toward the prior (L -> 0) with time constant forget_s and the bank
-/// is size-capped; L <= 0 drops the entry (that is the prior, not a cut).
-/// ⚠ DECISION BOUNDARY: an entry RIPENS at L >= birth_frames x ln(h/pc) = "birth_frames ideal ricoh hits". That is a threshold on a
-/// posterior, the birth counterpart of the existence floor; no model-level term replaces the decision to create an object.
-/// It only RIPENS an entry; the birth itself is still the tracker's (a ripe place's next detection is credited a full birth_frames),
-/// so min-separation, association and exclusion claims still apply.
-class RicohBirthBank
-{
-public:
-    struct View { float bearing = 0.0f, range = 0.0f; double t = 0.0; };
-    struct Entry { Eigen::Vector2f xy; float var; float L; double t_prev; std::vector<View> views; };
-    struct Look { Eigen::Vector2f xy; float var; float weight; };
-    struct Params
-    {
-        float hit_rate = 0.5f, clutter = 0.05f, gate_mahalanobis = 9.0f, min_sep_m = 0.7f;
-        float tau_s = 5.0f, forget_s = 120.0f, view_R_m = 0.45f;
-        std::size_t max_entries = 64, max_views = 16;
-    };
-    /// The ln(h/pc) of one ideal hit (0 when the detector would not tell a door from clutter: then nothing ripens).
-    [[nodiscard]] static float llr_hit(const Params& p)
-    {
-        const float h = std::clamp(p.hit_rate, 1e-3f, 1.0f - 1e-3f), pc = std::clamp(p.clutter, 1e-3f, 1.0f - 1e-3f);
-        return std::max(0.0f, std::log(h / pc));
-    }
-
-    /// One new observation at time `t_s` from `cam`. `hits` are this frame's UNASSOCIATED ricoh door detections; `q_of(xy)` the
-    /// detectability x line of sight x LOOKED of a place from the camera; entries near a live track are dropped.
-    template <class Q>
-    void update(double t_s, const Eigen::Vector2f& cam, const std::vector<Look>& hits, const Params& prm, Q&& q_of,
-                const std::vector<Eigen::Vector2f>& track_xy)
-    {
-        const float h = std::clamp(prm.hit_rate, 1e-3f, 1.0f - 1e-3f), pc = std::clamp(prm.clutter, 1e-3f, 1.0f - 1e-3f);
-        const float lh = llr_hit(prm);
-        std::vector<char> hit_now(entries_.size(), 0);
-        for (const auto& k : hits)
-        {
-            int best = -1; float best_m = prm.gate_mahalanobis;
-            for (std::size_t i = 0; i < entries_.size(); ++i)
-            {
-                const float m = (entries_[i].xy - k.xy).squaredNorm() / std::max(entries_[i].var + k.var, 1e-9f);
-                if (m <= best_m) { best_m = m; best = static_cast<int>(i); }
-            }
-            if (best < 0)
-            {
-                Entry e{k.xy, k.var, 0.0f, t_s, {}};
-                e.L = credit(e, cam, t_s, prm) * k.weight * lh;
-                entries_.push_back(std::move(e));
-                hit_now.push_back(1);
-                continue;
-            }
-            auto& e = entries_[static_cast<std::size_t>(best)];
-            const float wc = 1.0f / std::max(e.var, 1e-9f), wd = 1.0f / std::max(k.var, 1e-9f);
-            e.xy = (e.xy * wc + k.xy * wd) / (wc + wd);
-            e.var = 1.0f / (wc + wd);
-            if (hit_now[static_cast<std::size_t>(best)]) continue;      // two detections of one place in one frame are ONE hit
-            hit_now[static_cast<std::size_t>(best)] = 1;
-            e.L += credit(e, cam, t_s, prm) * k.weight * lh;
-        }
-        for (std::size_t i = 0; i < entries_.size(); ++i)
-        {
-            auto& e = entries_[i];
-            if (not hit_now[i])
-            {
-                const float q = std::clamp(q_of(e.xy), 0.0f, 1.0f);
-                if (q > 0.0f)
-                    e.L += credit(e, cam, t_s, prm) * std::log((1.0f - q * h) / (1.0f - q * pc));
-                else                                                    // not observed: relax toward the prior with time
-                    e.L *= std::exp(-static_cast<float>(std::max(0.0, t_s - e.t_prev)) / std::max(prm.forget_s, 1e-3f));
-            }
-            e.t_prev = t_s;
-        }
-        std::erase_if(entries_, [&](const Entry& e)
-        {
-            if (e.L <= 1e-4f) return true;
-            return std::ranges::any_of(track_xy, [&](const Eigen::Vector2f& t) { return (t - e.xy).norm() < prm.min_sep_m; });
-        });
-        if (entries_.size() > prm.max_entries)
-        {
-            std::ranges::sort(entries_, [](const Entry& a, const Entry& b) { return a.L > b.L; });
-            entries_.resize(prm.max_entries);
-        }
-    }
-    /// The entry a detection at `xy` (variance `var`) belongs to when that place is ripe (L >= bar), else nullptr.
-    [[nodiscard]] const Entry* ripe_at(const Eigen::Vector2f& xy, float var, float gate_mahalanobis, float bar) const
-    {
-        for (const auto& e : entries_)
-            if (e.L >= bar and (e.xy - xy).squaredNorm() / std::max(e.var + var, 1e-9f) <= gate_mahalanobis) return &e;
-        return nullptr;
-    }
-    void drop_near(const Eigen::Vector2f& xy, float r)
-    { std::erase_if(entries_, [&](const Entry& e) { return (e.xy - xy).norm() < r; }); }
-    [[nodiscard]] const std::vector<Entry>& entries() const { return entries_; }
-private:
-    /// Credit in [0,1] for an increment seen from `cam` at time `t`; folds the view in.
-    static float credit(Entry& e, const Eigen::Vector2f& cam, double t, const Params& prm)
-    {
-        const Eigen::Vector2f dv = cam - e.xy;
-        const float d = dv.norm();
-        const float b = std::atan2(dv.y(), dv.x());
-        const float R = std::max(prm.view_R_m, 1e-3f);
-        const float half = std::max(std::atan2(R, std::max(d, 1e-3f)), 1e-3f);
-        View* v = nullptr; float s = 0.0f;
-        for (auto& c : e.views)
-        {
-            const float db = std::remainder(b - c.bearing, 2.0f * std::numbers::pi_v<float>), dr = d - c.range;
-            const float sc = std::exp(-std::min((db / half) * (db / half) + (dr / R) * (dr / R), 60.0f));
-            if (sc > s) { s = sc; v = &c; }
-        }
-        if (v == nullptr || s < 1e-3f)
-        {
-            e.views.push_back({b, d, t});
-            if (e.views.size() > prm.max_views) e.views.erase(e.views.begin());
-            return 1.0f;
-        }
-        const float c_same = static_cast<float>(std::clamp((t - v->t) / std::max(prm.tau_s, 1e-3f), 0.0, 1.0));
-        v->bearing += std::remainder(b - v->bearing, 2.0f * std::numbers::pi_v<float>) * 0.1f;
-        v->range += (d - v->range) * 0.1f;
-        v->t = t;
-        return (1.0f - s) + s * c_same;
-    }
-    std::vector<Entry> entries_;
-};
 
 }  // namespace rc::door::core

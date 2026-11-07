@@ -548,21 +548,6 @@ float DoorFit::run_inference(rc::DoorFitState& inst, const DoorObservation& obse
     // the belief works in the wall frame θ=[s,w,h].
     if (not inst.ai2_initialized)
     {
-        // RE-ACQUISITION first: this node is a door that was removed and has now come back at the same place,
-        // so it resumes the belief it had converged to (state + Σ) rather than cold-starting at the template
-        // priors and re-fitting from scratch. See DoorFit::note_reacquire.
-        if (const auto rs = restore_seeds_.find(inst.node_id); rs != restore_seeds_.end())
-        {
-            inst.ai2_belief = rs->second;
-            inst.ai2_initialized = true;
-            resign_leaf_llrs(inst);   // M-1
-            restore_seeds_.erase(rs);
-            say(std::format("door_concept: [{}] RE-ACQUIRED — resuming converged belief (s={:.2f} w={:.2f} h={:.2f})\n",
-                            inst.node_name, inst.ai2_belief.state().s, inst.ai2_belief.state().w, inst.ai2_belief.state().h));
-        }
-    }
-    if (not inst.ai2_initialized)
-    {
         const auto& m = inst.model.state();
         Eigen::Vector2f centroid_xy(m.cx, m.cy);
         std::vector<Eigen::Vector2f> pts_xy;   // plan-view mask points: each votes for the wall it was seen through
@@ -1092,7 +1077,7 @@ void DoorFit::estimate_phi(rc::DoorFitState& inst)
     // contributed 0.000 over the whole run.
     // ★AND THE MASK WAS A PRECONDITION: with no door pixels every hypothesis was skipped, the curve came
     // out empty, and the LiDAR likelihood below was never consulted. The camera stays what it is good at:
-    // EXISTENCE evidence (compute_silhouette_existence). The leaf angle comes from where rays stop.
+    // EXISTENCE evidence (the geometry channel of existence_update.h). The leaf angle comes from where rays stop.
 
     // ─── THE HINGE BRANCH: free energy over phi alone, against LiDAR points on the leaf ──────────
     // ★THE SAME MINIMISATION THE AGENT ALREADY RUNS, RESTRICTED TO THE ONE ARTICULATED COORDINATE. The

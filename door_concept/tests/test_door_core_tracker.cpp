@@ -49,7 +49,6 @@ struct FakeWorld final : TrackerWorld
     std::uint64_t room_id() const override { return room; }
     std::vector<Vec2f> room_polygon() const override { return polygon; }
     std::vector<TrackedDoor> doors() const override { return live; }
-    std::optional<GhostMatch> match_ghost(const Vec2f&) const override { return std::nullopt; }
     std::optional<IdentityMatch> match_identity(const Vec2f&) const override { return std::nullopt; }
     void retire(std::uint64_t id) override { retired.push_back(id); std::erase_if(live, [&](const auto& d) { return d.id == id; }); }
     void set_assigned_mask(std::uint64_t id, int slice) override
@@ -57,8 +56,6 @@ struct FakeWorld final : TrackerWorld
     void after_association(const TrackerCycleInfo&) override { ++after_assoc; }
     void remove_door(std::uint64_t, float) override {}   // (the existence slice: no fit states here, nothing to remove)
     std::uint64_t create_door(const BirthRequest&) override { if (refuse_create) return 0; ++created; return next_id++; }
-    void reacquire(std::uint64_t, const GhostMatch&) override {}
-    void forget_ghost(const Vec2f&) override {}
     std::optional<std::string> adopt_birth(std::uint64_t id, int slice, const Vec3f& c) override
     {
         // ensure_instance's pre-belief geometry at the birth seed (door_model.h — the agent's own function).

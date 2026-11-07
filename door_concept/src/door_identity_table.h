@@ -99,8 +99,8 @@ struct ParsedIdentityTable
 // ── DOOR NAMES ARE OPAQUE (2026-10-29, door-identity-design part 1) ─────────────────────────────────────────────────
 // A door node's name is `door_<N>` with N drawn from ONE monotonic counter that is persisted with this table and never
 // goes back: a name is never handed to a second door, in this run or a later one. The name records nothing — not birth
-// order, not which hole, not which room: identity across crossings is the PLACE (ghosts, the (room, place) rows), and
-// the passage identity is ltsm's. A door that is a door we already know (a ghost re-acquired, an identity row matched by
+// order, not which hole, not which room: identity across crossings is the PLACE (the (room, place) rows of the place table), and
+// the passage identity is ltsm's. A door that is a door we already know (an identity row matched by
 // place, a restored row, the crossed door carried across) asks for its remembered name; it gets it when no live node
 // holds it, otherwise a fresh counter name — and nothing in door_concept depends on which of the two it got.
 // (Was: the LOWEST free number, reserved names, and three rename paths that re-made a live node under a remembered
@@ -301,7 +301,7 @@ struct LiveDoor
 
 /// Values are logged (RestoreSkip a=); NameLive is RETIRED (2026-10-29: a live name no longer blocks a restore — the
 /// restored door takes a fresh name) and kept only so PlaceLive stays 2.
-enum class SkipReason { NoPose, NameLive, PlaceLive };
+enum class SkipReason { NoPose, NameLive, PlaceLive, Removed };
 
 struct RestoreDecision
 {
@@ -315,7 +315,7 @@ struct RestoreDecision
 ///  · Only when the room IS a recall (`recalled`): a fresh room sharing a name with old rows restores nothing.
 ///  · A row without a pose cannot be recreated (old 4-column / birth row) — skipped, the caller logs it.
 ///  · A door already live is not duplicated: by PLACE — a live door whose aperture lies within the same-hole distance
-///    (reacquire radius + the remembered width, as note_identity uses). NOT by name (2026-10-29): names are opaque, a
+///    (identity radius + the remembered width, as note_identity uses). NOT by name (2026-10-29): names are opaque, a
 ///    row whose name a live node wears is still restored when its hole is free, under a fresh name (allocate_door_name).
 inline RestoreDecision plan_restore(std::span<const IdentityRow> rows, std::string_view room, bool recalled,
                                     std::span<const LiveDoor> live, float reacquire_radius_m)
@@ -325,6 +325,7 @@ inline RestoreDecision plan_restore(std::span<const IdentityRow> rows, std::stri
     for (const auto& r : rows)
     {
         if (r.room != room) continue;
+        if (r.removed_ms.has_value()) { d.skipped.push_back({r.name, SkipReason::Removed}); continue; }   // "no door here", kept as a prior
         if (not r.pose.has_value()) { d.skipped.push_back({r.name, SkipReason::NoPose}); continue; }
         const float same_hole = std::max(0.f, reacquire_radius_m) + std::max(0.f, r.pose->width);
         const bool place_live = std::ranges::any_of(live, [&](const LiveDoor& l)
@@ -361,7 +362,7 @@ inline bool upsert_row(std::vector<IdentityRow>& rows, const std::string& room, 
         rows.push_back(std::move(row));
         return true;
     }
-    const float a = std::isfinite(weight) ? std::clamp(weight, 0.f, 1.f) : 0.f;
+    const float a = std::isfinite(weight) ? std::clamp(weight, 0.f, 1.f) : 0.f;   // clamp: `weight` is a probability, kept in its domain [0,1]; not a decision threshold
     const auto mix = [a](float o, float n) { return o + a * (n - o); };
     const auto mix_angle = [a](float o, float n) { return o + a * std::remainder(n - o, 2.0f * std::numbers::pi_v<float>); };
     IdentityRow& t = *it;
@@ -382,6 +383,9 @@ inline bool upsert_row(std::vector<IdentityRow>& rows, const std::string& room, 
     {
         t.exist_logodds = row.exist_logodds;   // the belief as it is now: it is already a posterior
         t.seen_wall_ms  = row.seen_wall_ms;    // …and its age goes with it (Task D-C)
+        t.ledger        = row.ledger;          // …and the views it came from (L_evidence = their sum + the carried part)
+        t.visit         = row.visit;
+        t.removed_ms    = row.removed_ms;      // a live door writing here ends a removal; the removal itself writes it back
     }
     if (row.leaf.has_value())
     {
@@ -548,29 +552,11 @@ inline std::vector<std::string> drop_room(std::vector<IdentityRow>& rows, std::s
     return names;
 }
 
-/// The existence prior a restored door starts from: the remembered belief when one was written, else `default_L`
-/// (the agent passes Existence.BirthLogodds = 1.0 nats, P = 0.73 — the same moderate prior a fresh birth gets).
-/// ★A DIFFERENT CONVENTION FROM GHOST RE-ACQUISITION, on purpose (controller ruling 2026-10-20). A ghost is a door
-/// REMOVED for absence that a new detection brings back: its shape is remembered but its existence restarts from
-/// BirthLogodds, because the last thing known about it was evidence AGAINST it. A restored door was alive when its room
-/// was left — the last thing known is the belief it then held — so that belief is the prior, not a fresh birth's.
-///
-/// ★Task D-C (rtD1i door_5): A REMEMBERED BELIEF DECAYS TOWARD THE BIRTH PRIOR WITH THE TIME SINCE THE DOOR WAS LAST SEEN.
-///  door_5 came back three times at L = −4 (P 0.02) — already below the removal bound — because one bad visit (a shut door
-///  read as open, then refuted by the image) wrote −4 and the memory held it as a frozen posterior. A memory is evidence
-///  with an AGE: with probability 1 − e^{−h·Δt} the scene the evidence was about has changed since (the door state was
-///  redrawn from the prior), so P = e^{−h·Δt}·P_mem + (1 − e^{−h·Δt})·P_birth — the standard change-point (hazard) mixture,
-///  in probability, not in log-odds.
-///  THE HAZARD'S SOURCE — A BORROWED RATE, stated as such (review I-2): h = kLeafMoveHyperShape / kLeafMoveHyperTimeS =
-///  1/600 s, the leaf channel's move-hazard HYPERPRIOR (door_leaf_channel.h: one uncommanded leaf move per 10-min run
-///  length). It is not a measured rate of change of a door's existence — this agent has no such model. It is borrowed
-///  because the existence channels are conditioned on the leaf (silhouette, contour and frame are rendered at φ), so a
-///  verdict is only as current as the leaf state it was formed under. Kept as a copy here so this header stays pure (no
-///  door_belief.h); tests/test_door_identity_table.cpp static_asserts it equals the leaf channel's ratio.
-///  Δt unknown (a 17-column row, or no stamp) ⇒ the memory's age is unknown ⇒ survival 0 ⇒ the birth prior: the row is
-///  still an identity (name + place), but carries no existence belief.
-///  ★Task 9: this constant now serves the LEAF only. The existence of a restored door is aged by PlaceTable::aged_L (a hazard
-///  learned from revisits, Gamma prior); restore_existence_prior and its seed are gone.
+/// A REMEMBERED LEAF STATE has an AGE. The existence of a restored door is aged by PlaceTable::aged_L (a hazard learned
+/// from revisits, Gamma prior). This constant serves the LEAF only: the leaf channel's move-hazard HYPERPRIOR
+/// (door_leaf_channel.h: one uncommanded leaf move per 10-min run length), kept as a copy here so this header stays pure (no
+/// door_belief.h); tests/test_door_identity_table.cpp static_asserts it equals the leaf channel's ratio. It is a BORROWED rate
+/// and is stated as such: it is not a measured rate of change of a door's existence.
 inline constexpr double kLeafRestoreHazardPerS = 1.0 / 600.0;   // BORROWED: kLeafMoveHyperShape / kLeafMoveHyperTimeS
 
 /// THE REMEMBERED LEAF AGES (2026-11-01, warm13: DOOR_2 remembered open at 120 deg from a run 5517 s earlier, restored at its
@@ -591,10 +577,8 @@ inline constexpr double kLeafRestoreHazardPerS = 1.0 / 600.0;   // BORROWED: kLe
     return {static_cast<float>(mean), static_cast<float>(std::sqrt(std::max(0.0, m2 - mean * mean)))};
 }
 
-/// (Task D-C review I-1) THE EXISTENCE A ROW REMEMBERS IS THE EVIDENCE, NOT THE WALL-BAND PRIOR. The core adds the band's
-/// log-prior to L every cycle as a REPLACED term (DoorFitState::room_prior_term); a restored instance starts with that term
-/// at 0 and the core adds it again, so writing the full L counted the prior twice on every round trip. The row stores
-/// L − room_prior_term; the band term re-enters once, from the restored room's polygon.
+/// THE EXISTENCE A ROW REMEMBERS IS THE EVIDENCE, NOT THE STRUCTURAL PRIOR. The prior is replaced from the place every update
+/// (PlaceBelief), so writing the full L would count it twice on every round trip. The row stores the evidence part.
 template <class Inst>
 [[nodiscard]] float remembered_logodds(const Inst& inst)
 {
@@ -616,7 +600,7 @@ inline bool fitted_this_cycle(bool has_fresh_data, int matched_frames)
 /// the restore must not trust that read (nor skip seeding because the instance "already exists"), it must state it.
 /// `Inst` is rc::DoorInstance (templated so the harness needs no DSR).
 template <class Inst, class Belief>
-void seed_restored_instance(Inst& inst, const IdentityRow& r, const Belief& restored, float max_L,
+void seed_restored_instance(Inst& inst, const IdentityRow& r, const Belief& restored,
                             std::chrono::steady_clock::time_point now)
 {
     auto s = inst.model.state();
@@ -630,21 +614,16 @@ void seed_restored_instance(Inst& inst, const IdentityRow& r, const Belief& rest
     }
     s.phi = 0.f;
     inst.model.set_state(s);
-    inst.existence.set_max(max_L);
-    inst.existence.set(restored.L_evidence());
-    inst.existence_seeded = true;
     // Task 9: THE belief comes back from the row (PlaceTable::restored_belief): its ledger, and its evidence aged by the learned
     // change hazard. The structural prior re-enters from the room at the first update.
     inst.belief.carried = restored.carried;
     inst.belief.crossing = restored.crossing;
     inst.belief.ledger = restored.ledger;
-    // Task D-C: the removal decision weighs what the data do SINCE this entry (DoorFitState::existence_entry_L), and the
-    // door's age carries on from the row's stamp (a restored door not seen this visit keeps aging).
-    inst.existence_entry_L = inst.existence.logodds();
-    inst.existence_since_entry = 0.0f;
+    // The door's age carries on from the row's stamp (a restored door not seen this visit keeps aging).
     // Task D-C round 2 (tour3C): the remembered place's precision seeds the belief's along-wall σ (DoorFit's lazy init).
     inst.remembered_place_sd = r.place_sd;
     inst.last_detection_wall_ms = r.seen_wall_ms.value_or(0);
+    if (r.seen_wall_ms.has_value() and *r.seen_wall_ms > 0) inst.remembered_seen_ms = r.seen_wall_ms;   // the revisit is counted by the core
     inst.matched_frames   = std::max(inst.matched_frames, kFitWithoutFreshDataFrames);
     inst.seed_wh_from_box = true;
     if (r.leaf.has_value())
@@ -666,6 +645,7 @@ inline const char* to_string(SkipReason s)
         case SkipReason::NoPose:    return "no remembered pose (identity-only row)";
         case SkipReason::NameLive:  return "a door of that name is already live (retired reason)";
         case SkipReason::PlaceLive: return "a live door already holds that hole";
+        case SkipReason::Removed:   return "removed for absence (kept as a prior: no door here)";
     }
     return "?";
 }

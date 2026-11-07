@@ -2,10 +2,8 @@
 //   A. a DOORWAY NICHE in the outline: a door whose LiDAR range lands on the wall LINE the niche interrupts is that wall's door, not
 //      a disagreement with the niche's back face (the nearest crossing); without niche awareness it scores ~0.
 //   B. ricoh_looked(): the processed strips' azimuth windows (incl. wrap at +-pi); EMPTY = unknown = looked at.
-//   C. RicohBirthBank: a place seen on a third of the LOOKED frames ripens; the same place with the other frames NOT looked at
-//      ripens at least as fast (an unlooked frame is no absence); a place seen once decays on looked absences and is dropped;
-//      scattered hits never ripen.
-//   D. RicohViewPool::end_frame(looked): a view whose strip was not processed is HELD, not expired.
+//   (C. the ricoh birth BANK and D. the ricoh VIEW POOL are retired with the existence patches: a ricoh frame is a Bernoulli trial
+//   in the view ledger - tests/test_view_ledger.cpp, test_door_visibility.cpp `ricoh_unknown_windows_no_miss`.)
 // Build + run (from door_concept/): g++ -std=c++23 -O1 -I/usr/include/eigen3 tests/test_door_ricoh_windows.cpp -o /tmp/t && /tmp/t
 #include <cmath>
 #include <numbers>
@@ -79,90 +77,6 @@ int main()
             inside += ricoh_looked(one_of_three, cam, V2(std::cos(a), std::sin(a))) ? 1 : 0;
         }
         CHECK(inside == 24);                                                                 // exactly a third of the bearings
-    }
-    // ── C. bank ────────────────────────────────────────────────────────────────────────────────────────────────
-    RicohBirthBank::Params prm;
-    prm.hit_rate = 0.8f; prm.clutter = 0.05f; prm.gate_mahalanobis = 9.0f; prm.min_sep_m = 0.7f; prm.tau_s = 5.0f; prm.forget_s = 120.0f;
-    const float bar = 6.6f * RicohBirthBank::llr_hit(prm);
-    const V2 place(3.0f, 5.0f);
-    const std::vector<V2> no_tracks;
-    const float dt = 0.1f;
-    // seconds until ripe; `hit_every`: a detection every n-th frame (looked frames only when `unlooked_are_looks` is false)
-    const auto run = [&](bool moving, int hit_every, bool unlooked_are_looks, float t_max) -> float
-    {
-        RicohBirthBank b;
-        for (int k = 1; k * dt <= t_max; ++k)
-        {
-            const float t = static_cast<float>(k) * dt;
-            const V2 c = moving ? V2(3.0f + 3.0f * std::cos(0.01f * static_cast<float>(k)), 5.0f - 3.0f * std::sin(0.01f * static_cast<float>(k)) - 1.0f) : V2(0.f, 0.f);
-            const bool seen = (k % hit_every == 0);
-            std::vector<RicohBirthBank::Look> hits;
-            if (seen) hits.push_back({place, 0.01f, 0.5f});
-            b.update(t, c, hits, prm, [&](const V2&) { return (seen or unlooked_are_looks) ? 0.85f : 0.0f; }, no_tracks);
-            if (b.ripe_at(place, 0.01f, prm.gate_mahalanobis, bar)) return t;
-        }
-        return -1.0f;
-    };
-    const float t_parked = run(false, 1, true, 600.f), t_moving = run(true, 1, true, 600.f);
-    const float t_blind = run(false, 3, true, 1200.f), t_aware = run(false, 3, false, 1200.f);
-    std::print("C: time to ripe: parked, every frame a hit {:.1f} s; moving at 0.3 m/s on a 3 m circle {:.1f} s; parked 1-in-3 hits: unlooked frames as misses {:.1f} s, not looked at {:.1f} s\n",
-               t_parked, t_moving, t_blind, t_aware);
-    CHECK(t_parked > 0.0f and t_moving > 0.0f);
-    CHECK(t_parked > 10.0f * dt * 9.0f);                 // NOT ~9 looked hits (1 s): the parked stare is a few effective samples, at tau = 5 s each
-    CHECK(t_moving < t_parked);                          // new viewpoints are worth more than a stare
-    CHECK(t_aware > 0.0f and (t_blind < 0.0f or t_aware <= t_blind));
-    {   // seen once, then looked-at absences from other views: dropped (the prior), never ripe
-        RicohBirthBank b;
-        b.update(0.0, V2(0, 0), {{place, 0.01f, 0.5f}}, prm, [](const V2&) { return 0.85f; }, no_tracks);
-        CHECK(b.entries().size() == 1);
-        for (int k = 1; k <= 60; ++k)
-            b.update(5.0 * k, V2(std::cos(0.7f * static_cast<float>(k)) * 4.0f, 1.0f + std::sin(0.7f * static_cast<float>(k)) * 2.0f), {}, prm, [](const V2&) { return 0.85f; }, no_tracks);
-        CHECK(b.entries().empty());
-    }
-    {   // seen once, then NOT observed: relaxes toward the prior with forget_s, and is eventually dropped; not before
-        RicohBirthBank b;
-        b.update(0.0, V2(0, 0), {{place, 0.01f, 0.5f}}, prm, [](const V2&) { return 0.0f; }, no_tracks);
-        const float L0 = b.entries().front().L;
-        b.update(60.0, V2(0, 0), {}, prm, [](const V2&) { return 0.0f; }, no_tracks);
-        CHECK(b.entries().size() == 1 and b.entries().front().L < L0 and b.entries().front().L > 0.4f * L0);   // exp(-60/120) = 0.61
-        for (int k = 2; k < 400; ++k) b.update(60.0 * k, V2(0, 0), {}, prm, [](const V2&) { return 0.0f; }, no_tracks);
-        CHECK(b.entries().empty());
-    }
-    {   // two detections of one place in ONE frame are one hit
-        RicohBirthBank a, c;
-        a.update(0.0, V2(0, 0), {{place, 0.01f, 0.5f}}, prm, [](const V2&) { return 0.85f; }, no_tracks);
-        c.update(0.0, V2(0, 0), {{place, 0.01f, 0.5f}, {place + V2(0.05f, 0.f), 0.01f, 0.5f}}, prm, [](const V2&) { return 0.85f; }, no_tracks);
-        CHECK(std::abs(a.entries().front().L - c.entries().front().L) < 1e-6f);
-    }
-    {   // scattered hits (a new place each time) never ripen; the bank stays capped
-        RicohBirthBank b;
-        for (int k = 0; k < 600; ++k)
-        {
-            const V2 p(-4.0f + 8.0f * std::fmod(0.618034f * static_cast<float>(k), 1.0f), 5.0f);
-            b.update(0.1 * k, V2(0, 0), {{p, 0.01f, 0.5f}}, prm, [](const V2&) { return 0.85f; }, no_tracks);
-            for (const auto& e : b.entries()) CHECK(e.L < bar);
-            CHECK(b.entries().size() <= prm.max_entries);
-        }
-    }
-    {   // an entry that lands on a live track is dropped
-        RicohBirthBank b;
-        b.update(0.0, V2(0, 0), {{place, 0.01f, 0.5f}}, prm, [](const V2&) { return 0.85f; }, std::vector<V2>{V2(3.1f, 5.0f)});
-        CHECK(b.entries().empty());
-    }
-    {   // a detector that would not tell a door from clutter (learned h <= pc): nothing ripens
-        RicohBirthBank b; auto bad = prm; bad.hit_rate = 0.04f;
-        for (int k = 0; k < 100; ++k) b.update(1.0 * k, V2(std::cos(0.3f * k) * 3, std::sin(0.3f * k) * 3), {{place, 0.01f, 0.5f}}, bad, [](const V2&) { return 0.85f; }, no_tracks);
-        CHECK(b.entries().empty() and RicohBirthBank::llr_hit(bad) == 0.0f);
-    }
-    // ── D. view pool holds an unlooked candidate ─────────────────────────────────────────────────────────────
-    {
-        RicohViewPool vp;
-        const V2 cam2(0, 0), tgt(3, 5);
-        CHECK(vp.credit(cam2, tgt, 0.45f, 0.7f) > 0.99f);
-        vp.end_frame([](const V2&) { return false; });                         // its strip was not processed: held
-        CHECK(vp.peek(cam2, tgt, 0.45f, 0.7f) < 0.01f);                         // still remembered: the same view earns ~nothing
-        vp.end_frame([](const V2&) { return true; });                           // processed, not seen (seen flag was cleared above): expired
-        CHECK(vp.peek(cam2, tgt, 0.45f, 0.7f) > 0.99f);
     }
     if (fails == 0) std::print("test_door_ricoh_windows: ALL PASS\n"); else std::print("test_door_ricoh_windows: {} FAILURE(S)\n", fails);
     return fails == 0 ? 0 : 1;

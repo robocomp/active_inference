@@ -55,7 +55,6 @@ struct FitWorld final : TrackerWorld
         for (auto& [id, s] : st) v.emplace_back(id, &s);
         return v;
     }
-    std::optional<GhostMatch> match_ghost(const Vec2f&) const override { return std::nullopt; }
     std::optional<IdentityMatch> match_identity(const Vec2f&) const override { return std::nullopt; }
     void retire(std::uint64_t id) override { st.erase(id); }
     void set_assigned_mask(std::uint64_t id, int slice) override
@@ -74,8 +73,6 @@ struct FitWorld final : TrackerWorld
         st.emplace(id, std::move(f));
         return id;
     }
-    void reacquire(std::uint64_t, const GhostMatch&) override {}
-    void forget_ghost(const Vec2f&) override {}
     std::optional<std::string> adopt_birth(std::uint64_t id, int slice, const Vec3f&) override
     {
         const auto it = st.find(id);   // ensure_instance: it exists already (create_door) — it takes its birth slice

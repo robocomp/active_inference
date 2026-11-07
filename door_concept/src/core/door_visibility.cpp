@@ -1,4 +1,4 @@
-// door_visibility.cpp — see door_visibility.h. The sample classification is compute_silhouette_existence's, moved.
+// door_visibility.cpp — see door_visibility.h. The sample classification is the old silhouette probe's, moved.
 #include "door_visibility.h"
 #include <algorithm>
 #include <cmath>
@@ -49,7 +49,7 @@ ViewRig::ViewRig(const CameraView& v, const ExistenceScene& sc, const rc::DoorFi
 {
     // ── THE LEAF BEYOND THE APERTURE (door_room_band.h): a sample past the room-side face is seen THROUGH the hole, a view the
     // silhouette model does not represent; each sample carries weight 1 − P(it lies past that face), measured from the
-    // aperture line. See the long comment this was moved from (git: door_existence.cpp, compute_silhouette_existence).
+    // aperture line. See the long comment this was moved from (git history: door_existence.cpp).
     const float delta_ap = has_poly_
                          ? rc::door::signed_boundary_distance(sc.polygon, inst.aperture.centre_xy())
                          : std::numeric_limits<float>::quiet_NaN();

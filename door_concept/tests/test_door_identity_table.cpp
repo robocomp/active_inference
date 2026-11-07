@@ -305,33 +305,60 @@ int main()
     //      process_door_node runs run_inference and the pragmatic affordances (which need a fitted aperture) appear.
     {
         struct FakeModel { State s; const State& state() const { return s; } void set_state(const State& x) { s = x; } };
-        struct FakeExist { float L = 0.f, mx = 4.f; void set_max(float m) { mx = m; } void set(float l) { L = std::clamp(l, -mx, mx); }
-                           float logodds() const { return L; } };
         struct FakeInst
         {
-            FakeModel model; FakeExist existence; bool existence_seeded = false; int matched_frames = 0;
+            FakeModel model; int matched_frames = 0;
             bool seed_wh_from_box = false;
             std::optional<std::pair<Eigen::Vector2f, Eigen::Vector2f>> leaf_side_hint;
             float phi_est = 0.f, phi_sigma = 0.f, hinge_llr = 0.f, swing_llr = 0.f;
             std::chrono::steady_clock::time_point phi_last_t{}; bool phi_from_command = true;
-            float existence_entry_L = 1.f, existence_since_entry = 7.f; std::int64_t last_detection_wall_ms = 0;
-            std::optional<float> remembered_place_sd; core::PlaceBelief belief;
+            std::int64_t last_detection_wall_ms = 0;
+            std::optional<float> remembered_place_sd; std::optional<std::int64_t> remembered_seen_ms; core::PlaceBelief belief;
         } inst;   // as the node-added path left it: (0,0), unseeded, 0 matched frames
         CHECK(not fitted_this_cycle(false, inst.matched_frames));           // the bug: never fitted ⇒ no approach
         const auto r = full_row("room_1", "door_1", -0.57f, 4.61f);
-        seed_restored_instance(inst, r, core::PlaceTable(false).restored_belief(core::PlaceTable::row_of(r, 0.1f, false), kNowMs), 4.0f, std::chrono::steady_clock::now());
+        seed_restored_instance(inst, r, core::PlaceTable(false).restored_belief(core::PlaceTable::row_of(r, 0.1f, false), kNowMs), std::chrono::steady_clock::now());
         CHECK(near(inst.model.s.ap_cx, -0.57f) and near(inst.model.s.ap_cy, 4.61f) and near(inst.model.s.cx, -0.57f));
         CHECK(near(inst.model.s.ap_yaw, 3.10f) and near(inst.model.s.w, 0.95f) and near(inst.model.s.h, 2.13f));
-        CHECK(inst.existence_seeded and near(inst.existence.L, 4.0f, 1e-3f));
-        CHECK(near(inst.existence_entry_L, inst.existence.L) and inst.last_detection_wall_ms == kNowMs);   // Task D-C
-        CHECK(inst.existence_since_entry == 0.f);   // round 2: the evidence since entry starts over at the restore
+        // the row IS the belief's memory (Task 9): its evidence comes back as `carried`, aged by the learned hazard (0 s here), with
+        // the row's ledger; the revisit is noted for the place table (the hazard is learned from it)
+        CHECK(near(inst.belief.L_evidence(), 4.0f, 1e-3f));   // no age: the full remembered evidence
+        CHECK(inst.last_detection_wall_ms == kNowMs and inst.remembered_seen_ms.has_value() and *inst.remembered_seen_ms == kNowMs);   // Task D-C
         CHECK(fitted_this_cycle(false, inst.matched_frames));               // fitted with no fresh mask
         CHECK(inst.seed_wh_from_box and inst.leaf_side_hint.has_value() and not inst.phi_from_command);
         // An identity-only row (no pose) still gets its place; size stays the instance's (template) one.
         IdentityRow id_only; id_only.room = "room_1"; id_only.name = "door_5"; id_only.xy = {2.f, -3.f};
         FakeInst j;
-        seed_restored_instance(j, id_only, core::PlaceTable(false).restored_belief(core::PlaceTable::row_of(id_only, 0.1f, false), kNowMs), 4.0f, std::chrono::steady_clock::now());
-        CHECK(near(j.model.s.ap_cx, 2.f) and near(j.existence.L, 0.0f) and not j.leaf_side_hint.has_value());
+        seed_restored_instance(j, id_only, core::PlaceTable(false).restored_belief(core::PlaceTable::row_of(id_only, 0.1f, false), kNowMs), std::chrono::steady_clock::now());
+        CHECK(near(j.model.s.ap_cx, 2.f) and near(j.belief.L_evidence(), 0.0f) and not j.leaf_side_hint.has_value() and not j.remembered_seen_ms.has_value());
+    }
+
+    // ── 6b. THE ROW FORMAT (Task 7/10): ledger, visit and removed_ms survive the file; a REMOVED row is kept ("no door here"), is
+    //       not restored, is not offered a look, and a live door writing at its hole ends the removal (rows are never forgotten) ──
+    {
+        IdentityRow gone = full_row("room_1", "door_7", 3.0f, 1.0f);
+        gone.exist_logodds = -2.5f; gone.visit = 3; gone.removed_ms = kNowMs - 5000;
+        IdentityRow live_row = full_row("room_1", "door_8", -3.0f, 1.0f);
+        std::stringstream ss; write_identity_table(ss, std::vector<IdentityRow>{gone, live_row}, 9);
+        const auto p = parse_identity_table(ss);
+        CHECK(p.rows.size() == 2 and p.malformed == 0);
+        CHECK(p.rows[0].removed_ms.has_value() and *p.rows[0].removed_ms == kNowMs - 5000 and p.rows[0].visit.value_or(0) == 3);
+        CHECK(not p.rows[1].removed_ms.has_value());
+        const auto d = plan_restore(p.rows, "room_1", true, {}, radius);
+        CHECK(d.restore.size() == 1 and d.restore[0].name == "door_8");
+        bool removed_skipped = false;
+        for (const auto& s : d.skipped) removed_skipped = removed_skipped or (s.name == "door_7" and s.reason == SkipReason::Removed);
+        CHECK(removed_skipped);
+        // an old row (no ledger / visit / removed columns) loads as a plain, never-removed place
+        std::stringstream old("room,name,ap_x,ap_y\nroom_1,door_1,1.0,2.0\n");
+        const auto po = parse_identity_table(old);
+        CHECK(po.rows.size() == 1 and not po.rows[0].removed_ms.has_value() and not po.rows[0].ledger.has_value());
+        // a live door writing at the removed hole (same hole) ends the removal, and brings its evidence and ledger with it
+        std::vector<IdentityRow> t{gone};
+        IdentityRow back = full_row("", "door_7", 3.0f, 1.0f);
+        back.exist_logodds = 2.0f; back.ledger = "VL1 0"; back.visit = 4;
+        CHECK(upsert_row(t, "room_1", back, radius + 0.95f, 1.0f));
+        CHECK(t.size() == 1 and not t[0].removed_ms.has_value() and near(t[0].exist_logodds.value_or(0.f), 2.0f) and t[0].visit.value_or(0) == 4);
     }
 
     // ── 7. tourP9 NAME DRIFT: a duplicate (door_4) on door_1's hole does not rename it; one row per hole ──
