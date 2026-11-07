@@ -745,6 +745,22 @@ int main(int argc, char** argv)
     std::println("removals decided by the core: {}; births without a recorded id: {}; not rebuilt: {} AffExecuting, "
                  "{} AnchorHung, {} ActuatorRequest rows on this tape", world.removed_, world.unmatched_creates_,
                  n_exec, n_anchor, n_act);
+    // ── the doors alive at the END, with their belief (fix round 5: the tape gate counts BELIEVED doors, L > 0, and reports those
+    //    between the delete line and the creation line as unresolved). identity_radius_m is the agent's SpecificWorker::
+    //    identity_radius_m() (the tracker's own association gate as a radius); two apertures are the same hole within it + width.
+    {
+        const auto& dc = cfg.door;
+        std::println("FINAL identity_radius_m={:.4f}", dc.tracker_detection_noise_m * std::sqrt(2.0f * dc.tracker_gate_mahalanobis));
+        const Costs fc = core.costs().costs(dc.exist_max_room_s);
+        for (const auto& [id, st] : world.fit_states())
+        {
+            if (st->is_bearing_hypothesis) continue;   // no depth: no place, no belief (the existence slice skips it too)
+            const Vec2f xy = st->aperture.centre_xy();
+            const float L = st->belief.L();
+            std::println("FINAL door '{}' x={:.4f} y={:.4f} w={:.4f} L={:.4f} delete_line={:.4f}", st->node_name, xy.x(), xy.y(),
+                         st->aperture.w, L, decide(L, st->role, fc).delete_line);
+        }
+    }
     if (not step_ms.empty())
     {
         std::ranges::sort(step_ms);

@@ -44,7 +44,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TAPES="${DOOR_TAPES:-/home/pbustos/robocomp/components/active_inference/room_concept/estimation_scripts/crossing}"
 # ── Task 8 (ruling R6): pingpong1 / pingpong2 (<crossing>/pingpongN/door_tape), the tapes that exist on disk. The door model now
 #    decides births (birth by comparison) and removals (costed), so lifecycle decisions MAY differ from the recorded run; every
-#    difference is listed in PP_ALLOWED with its reason, and the number of doors alive at the end must equal the recorded run's.
+#    difference is listed in PP_ALLOWED with its reason, and no door BELIEVED (L > 0) at the end of the recorded run may be missing; doors between the delete and creation lines are reported as unresolved (spec §3.6, see the gate).
 #    SUPPRESS rows are log-only (they create and remove nothing) and are counted, not asserted.
 PP_STATUS=0
 PP_RAN=0
@@ -61,7 +61,7 @@ if [[ -f "$TAPES/pingpong1/door_tape/door_inputs.bin" && -f "$TAPES/pingpong2/do
     done
     wait
     python3 -I - "$PP_OUT" <<'PPEOF' || PP_STATUS=1
-import re, sys
+import math, re, sys
 out = sys.argv[1]
 LIFE = re.compile(r"^\s*(EQUAL|ref|replay)\s+cycle (\d+) t \d+ (BIRTH|REMOVE|MERGE|REACQUIRE|RESTORE|RELEASE) id \d+ '([^']*)' a=(\S+) b=(\S+)")
 SUP = re.compile(r"^\s*(EQUAL|ref|replay)\s+cycle \d+ t \d+ SUPPRESS")
@@ -69,40 +69,72 @@ SUP = re.compile(r"^\s*(EQUAL|ref|replay)\s+cycle \d+ t \d+ SUPPRESS")
 PP_ALLOWED = {
     ("pingpong1", "ref", "BIRTH", 29, "door_1"): "birth by comparison: DOOR at (-0.55, 4.56) born at its FIRST good hit view (replay cycle 1), not after the tracker streak",
     ("pingpong1", "replay", "BIRTH", 1, "door_1"): "the same door_1, 28 cycles earlier, 0.3 mm from the recorded birth",
-    ("pingpong1", "ref", "BIRTH", 721, "door_3"): "birth by comparison: the second room's door born at cycle 652 (69 cycles earlier), 0.14 m from the recorded birth",
+    ("pingpong1", "ref", "BIRTH", 721, "door_3"): "birth by comparison: the second room's door born at cycle 649 (72 cycles earlier), 0.14 m from the recorded birth",
     ("pingpong1", "replay", "BIRTH", 542, "door_2"): "a phantom at (-0.76,-3.80): one model-less ricoh hit view (v3 tape: no ricoh intrinsics) took it over L > 0",
     ("pingpong1", "replay", "REMOVE", 543, "door_2"): "the phantom's first fit gave an atypical size (size term -8.4 nats): removed the next frame",
-    ("pingpong1", "replay", "BIRTH", 652, "door_4"): "the same door as the recorded door_3 (721); names come from a counter that never reuses one, and the phantom below took door_3",
-    ("pingpong1", "replay", "BIRTH", 623, "door_3"): "the phantom at (-0.50,-3.80) re-detected 8 s after its removal (0.26 m from it): no RAM registry of removed doors any more, so it is a NEW door under a NEW name (the removed row is its prior: carried ~0)",
-    ("pingpong1", "replay", "REMOVE", 624, "door_3"): "removed again on its fitted size (-12.0 nats): net zero doors",
+    ("pingpong1", "replay", "BIRTH", 649, "door_4"): "the same door as the recorded door_3 (721), born 3 cycles earlier than in round 3 (652): timing; names come from a counter that never reuses one",
+    ("pingpong1", "replay", "BIRTH", 572, "door_3"): "phantom pair: the short clutter fragment at (-0.07,-2.49) (support top 1.44 m) born on two hit-less views at L +0.70 (band 0, base -0.41, one size prior)",
+    ("pingpong1", "replay", "REMOVE", 645, "door_3"): "its fit moved it off the wall: band term -292.9, removed: net zero doors, explained by the model's band term",
     ("pingpong2", "ref", "BIRTH", 29, "door_1"): "birth by comparison: born at the first good hit view (replay cycle 1), 0.07 mm from the recorded birth",
     ("pingpong2", "replay", "BIRTH", 1, "door_1"): "the same door_1",
     ("pingpong2", "ref", "BIRTH", 1392, "door_3"): "birth by comparison: born at cycle 667 from the ricoh hit (725 cycles earlier), 0.07 m from the recorded birth",
     ("pingpong2", "replay", "BIRTH", 667, "door_2"): "the same door as the recorded door_3 (named door_2 by the replay's counter, as at baseline)",
 }
+# ★THE COUNT IS OF BELIEVED DOORS (fix round 5, ruling; spec §3.6). A door is believed when L > 0 (P(door) > 1/2) at the end of the
+#  tape. The gate asserts that no door believed at the end of the RECORDED run is missing: the same count, each recorded door matched
+#  by a distinct believed replay door within the identity radius (+ its width: the agent's same-hole rule). A door between the delete
+#  line and the creation line (delete_line <= L <= 0) is UNRESOLVED: the spec resolves it by an epistemic LOOK, which a passive replay
+#  cannot perform (the robot's motion is the tape's). Such doors are reported as "unresolved - worth a look" and do not fail the gate;
+#  their birth rows are listed but are not failures either. Live tours (Task 12) must show them looked at and resolved.
+FINAL_R = re.compile(r"^FINAL identity_radius_m=(\S+)")
+FINAL_D = re.compile(r"^FINAL door '([^']*)' x=(\S+) y=(\S+) w=(\S+) L=(\S+) delete_line=(\S+)")
 fails = []
 for tape in ("pingpong1", "pingpong2"):
-    alive = {"ref": 0, "replay": 0}; sup = {"ref": 0, "replay": 0}; seen = set()
+    sup = {"ref": 0, "replay": 0}; seen = set(); ref_alive = {}; radius = None; final = []; rows = []
     for line in open(f"{out}/{tape}.txt"):
         if SUP.match(line):
-            side = SUP.match(line).group(1); 
+            side = SUP.match(line).group(1);
             for s in (("ref", "replay") if side == "EQUAL" else (side,)): sup[s] += 1
+            continue
+        if (fr := FINAL_R.match(line)): radius = float(fr.group(1)); continue
+        if (fd := FINAL_D.match(line)):
+            final.append((fd.group(1), float(fd.group(2)), float(fd.group(3)), float(fd.group(4)), float(fd.group(5)), float(fd.group(6))))
             continue
         m = LIFE.match(line)
         if not m: continue
         side, cyc, kind, name = m.group(1), int(m.group(2)), m.group(3), m.group(4)
-        sides = ("ref", "replay") if side == "EQUAL" else (side,)
-        for s in sides:
-            alive[s] += {"BIRTH": 1, "REMOVE": -1, "MERGE": -1}.get(kind, 0)
-        if side != "EQUAL":
-            why = PP_ALLOWED.get((tape, side, kind, cyc, name))
-            seen.add((tape, side, kind, cyc, name))
-            print(f"{tape}: {side:6s} {kind} {name} @{cyc} — {why or 'NOT ALLOWED'}")
-            if not why: fails.append(f"{tape}: unexplained {side} {kind} {name} @{cyc}")
+        if side in ("ref", "EQUAL"):
+            if kind == "BIRTH": ref_alive[name] = (float(m.group(5)), float(m.group(6)))
+            elif kind in ("REMOVE", "MERGE"): ref_alive.pop(name, None)
+        if side != "EQUAL": rows.append((side, kind, cyc, name))
+    if radius is None:
+        fails.append(f"{tape}: door_replay printed no FINAL summary"); continue
+    believed = [d for d in final if d[4] > 0.0]
+    unresolved = [d for d in final if d[5] <= d[4] <= 0.0]
+    unresolved_names = {d[0] for d in unresolved}
+    for side, kind, cyc, name in rows:
+        why = PP_ALLOWED.get((tape, side, kind, cyc, name))
+        seen.add((tape, side, kind, cyc, name))
+        if not why and side == "replay" and kind == "BIRTH" and name in unresolved_names:
+            print(f"{tape}: {side:6s} {kind} {name} @{cyc} — UNRESOLVED at the end (listed below; not a failure)")
+            continue
+        print(f"{tape}: {side:6s} {kind} {name} @{cyc} — {why or 'NOT ALLOWED'}")
+        if not why: fails.append(f"{tape}: unexplained {side} {kind} {name} @{cyc}")
     for k, why in PP_ALLOWED.items():
         if k[0] == tape and k not in seen: fails.append(f"{tape}: the allowed change {k} did not happen")
-    print(f"{tape}: doors alive at the end: recorded {alive['ref']}, replay {alive['replay']}; SUPPRESS rows (log only) {sup['ref']} -> {sup['replay']}")
-    if alive["ref"] != alive["replay"]: fails.append(f"{tape}: door count changed {alive['ref']} -> {alive['replay']}")
+    free = list(believed)
+    for rname, (rx, ry) in sorted(ref_alive.items()):
+        cand = [(math.hypot(d[1] - rx, d[2] - ry), d) for d in free if math.hypot(d[1] - rx, d[2] - ry) <= radius + max(0.0, d[3])]
+        if not cand:
+            fails.append(f"{tape}: the recorded door {rname} at ({rx:.2f},{ry:.2f}) has no believed replay door within {radius:.2f} m + width")
+            continue
+        dist, d = min(cand)
+        free.remove(d)
+        print(f"{tape}: recorded {rname} ({rx:.2f},{ry:.2f}) = replay {d[0]} ({d[1]:.2f},{d[2]:.2f}) L {d[4]:+.2f}, {dist:.2f} m")
+    print(f"{tape}: BELIEVED doors at the end (L > 0): recorded {len(ref_alive)}, replay {len(believed)}; SUPPRESS rows (log only) {sup['ref']} -> {sup['replay']}")
+    for d in unresolved:
+        print(f"{tape}: unresolved — worth a look: {d[0]} at ({d[1]:.2f},{d[2]:.2f}) L {d[4]:+.2f} (delete line {d[5]:+.2f}, creation line 0)")
+    if len(believed) != len(ref_alive): fails.append(f"{tape}: believed door count changed {len(ref_alive)} -> {len(believed)}")
 print("PINGPONG FAIL:" if fails else "PINGPONG PASS", fails)
 sys.exit(1 if fails else 0)
 PPEOF
