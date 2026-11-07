@@ -5,6 +5,7 @@
 #include <clocale>
 #include <cmath>
 #include <cstdio>
+#include <unistd.h>
 #include "../src/core/detector_model.h"
 #ifndef DETECTORS_CSV
 #define DETECTORS_CSV "etc/door_detectors.csv"
@@ -67,12 +68,30 @@ int main()
         if (loc == nullptr) std::setlocale(LC_ALL, "");
         std::printf("  locale: %s\n", loc ? loc : "(es_ES unavailable)");
         DetectorTable t = D; t.ricoh.env.min_fill = 0.2345f; t.zed.hit_rate = 0.8125f; t.zed.n_hit_trials = 37.f;
-        const std::filesystem::path p = "/tmp/_det_rt.csv";
+        const std::filesystem::path p = std::filesystem::temp_directory_path() / std::format("det_rt_{}.csv", ::getpid());
         save_detectors(p, t, "test");
         const auto r = load_detectors(p);
         CHECK(r.ricoh.env.min_fill == t.ricoh.env.min_fill and r.zed.hit_rate == t.zed.hit_rate and r.zed.n_hit_trials == 37.f);
         CHECK(r.ricoh.env.max_fill == t.ricoh.env.max_fill and r.ricoh.false_alarm == t.ricoh.false_alarm);
         CHECK(load_detectors("/nonexistent.csv").zed.env.min_fill == D.zed.env.min_fill);
+        std::filesystem::remove(p);
+    }
+    { // loaded_out_of_domain_falls_back + malformed_field_rejected
+        const auto tmp = std::filesystem::temp_directory_path() / std::format("det_dom_{}.csv", ::getpid());
+        const auto write = [&](const char* body) { std::ofstream o(tmp); o << "camera,param,value,n,source\n" << body; };
+        write("zed,false_alarm,0,0,t\nricoh,min_fill,0.3,0,t\n");
+        auto r = load_detectors(tmp);
+        CHECK(r.zed.false_alarm == D.zed.false_alarm and r.zed.hit_rate == D.zed.hit_rate);   // zed reverted
+        CHECK(r.ricoh.env.min_fill == 0.3f);                                                    // ricoh in domain, kept
+        write("ricoh,hit_rate,1,5,t\nzed,soft,0.07,0,t\n");
+        r = load_detectors(tmp);
+        CHECK(r.ricoh.hit_rate == D.ricoh.hit_rate and r.ricoh.n_hit_trials == 0.f and r.zed.env.soft == 0.07f);
+        write("zed,false_alarm,0.5,0,t\nzed,hit_rate,0.4,0,t\n");   // false_alarm >= hit_rate
+        CHECK(load_detectors(tmp).zed.false_alarm == D.zed.false_alarm);
+        write("zed,min_fill,0.1abc,0,t\nzed,max_fill,0.7,0,t\n");
+        r = load_detectors(tmp);
+        CHECK(r.zed.env.min_fill == D.zed.env.min_fill and r.zed.env.max_fill == 0.7f);
+        std::filesystem::remove(tmp);
     }
     std::printf(fails ? "FAILED %d\n" : "ALL PASS\n", fails);
     return fails != 0;

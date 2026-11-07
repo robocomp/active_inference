@@ -1,6 +1,8 @@
 #!/bin/bash
-# Smoke: the fit recovers the fixture's generating zed envelope (min .12, max .55, soft .05, hit .9) within 10%. Run from door_concept/.
-out=$(python3 -I tools/fit_detector_envelopes.py tests/data/detector_fit_fixture.csv --dry-run) || exit 1
+# Smoke: the fit recovers the generated zed envelope (min .12, max .55, soft .05, hit .9) within 10%. Run from door_concept/.
+tmp=$(mktemp --suffix=.csv) || exit 1; trap 'rm -f "$tmp"' EXIT
+python3 -I tests/gen_detector_fit_fixture.py "$tmp" 3000 || exit 1
+out=$(python3 -I tools/fit_detector_envelopes.py "$tmp" --dry-run) || exit 1
 echo "$out"
 python3 -I - "$out" <<'P'
 import re,sys

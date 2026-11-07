@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <charconv>
 #include <cmath>
+#include <cstdio>
 #include <filesystem>
 #include <format>
 #include <fstream>
@@ -78,33 +79,63 @@ struct DetectorTable { DetectorModel zed, ricoh; };
 }
 
 // CSV: camera,param,value,n,source — params min_fill,max_fill,soft,hit_rate (n = n_hit_trials),false_alarm.
+// from_chars must consume the WHOLE field; a malformed row keeps the default for that param and is counted (one warning line).
+// Domain validation (a probability must be a probability, NOT a model threshold): hit_llr divides by false_alarm, f_eff by
+// hit_rate and miss_llr takes log(1 - q), so a loaded camera must satisfy 0 < false_alarm < hit_rate < 1 and a valid envelope;
+// otherwise that camera falls back to its compiled defaults with a warning. kappa is in [0,1] by construction
+// (pose_overlap_factor), so q <= hit_rate < 1 and 1 - q > 0.
+[[nodiscard]] inline bool detector_in_domain(const DetectorModel& m)
+{
+    return m.false_alarm > 0.0f and m.false_alarm < m.hit_rate and m.hit_rate < 1.0f and m.env.valid()
+           and std::isfinite(m.env.min_fill) and std::isfinite(m.env.max_fill) and std::isfinite(m.env.soft)
+           and std::isfinite(m.hit_rate) and std::isfinite(m.false_alarm);
+}
+
 [[nodiscard]] inline DetectorTable load_detectors(const std::filesystem::path& p)
 {
-    DetectorTable t = default_detectors();
+    const DetectorTable defaults = default_detectors();
+    DetectorTable t = defaults;
     std::ifstream f(p);
     if (not f)
         return t;
     std::string line;
     std::getline(f, line);   // header
+    int malformed = 0;
     while (std::getline(f, line))
     {
         std::vector<std::string> c;
         std::size_t s = 0;
         for (std::size_t i = 0; i <= line.size(); ++i)
             if (i == line.size() or line[i] == ',') { c.push_back(line.substr(s, i - s)); s = i + 1; }
-        if (c.size() < 4) continue;
+        if (line.empty()) continue;
         const auto num = [](const std::string& x, float& out) {
-            return std::from_chars(x.data(), x.data() + x.size(), out).ec == std::errc{};
+            const char* e = x.data() + x.size();
+            const auto r = std::from_chars(x.data(), e, out);
+            return r.ec == std::errc{} and r.ptr == e;
         };
         float v = 0, n = 0;
-        if (not num(c[2], v) or not num(c[3], n)) continue;
+        if (c.size() < 4 or not num(c[2], v) or not num(c[3], n)) { ++malformed; continue; }
         DetectorModel* m = c[0] == "zed" ? &t.zed : c[0] == "ricoh" ? &t.ricoh : nullptr;
-        if (m == nullptr) continue;
+        if (m == nullptr) { ++malformed; continue; }
         if (c[1] == "min_fill") m->env.min_fill = v;
         else if (c[1] == "max_fill") m->env.max_fill = v;
         else if (c[1] == "soft") m->env.soft = v;
         else if (c[1] == "hit_rate") { m->hit_rate = v; m->n_hit_trials = n; }
         else if (c[1] == "false_alarm") m->false_alarm = v;
+        else ++malformed;
+    }
+    if (malformed > 0)
+        std::fprintf(stderr, "[detector_model] %s: %d malformed row(s) ignored (defaults kept for those params)\n",
+                     p.string().c_str(), malformed);
+    if (not detector_in_domain(t.zed))
+    {
+        std::fprintf(stderr, "[detector_model] %s: zed out of domain (need 0 < false_alarm < hit_rate < 1): compiled defaults\n", p.string().c_str());
+        t.zed = defaults.zed;
+    }
+    if (not detector_in_domain(t.ricoh))
+    {
+        std::fprintf(stderr, "[detector_model] %s: ricoh out of domain (need 0 < false_alarm < hit_rate < 1): compiled defaults\n", p.string().c_str());
+        t.ricoh = defaults.ricoh;
     }
     return t;
 }
