@@ -69,14 +69,21 @@ struct IdentityRow
     /// Task D-C round 2 (tour3C): the aperture centre's σ along its wall when written (m) — how well the remembered PLACE was
     /// known. Absent ⇒ unknown (a row written before the column existed): the restored belief keeps the birth seed's σ.
     std::optional<float> place_sd;
+    /// Door-existence model (Task 7): the place table's memory. All three are OPTIONAL columns (a row of 19 or fewer
+    /// columns loads with all three absent). `ledger` is ViewLedger::serialise() (one comma-free cell, parsed by the
+    /// place table, not here), `visit` the visit counter, `removed_ms` the wall-clock ms at which the phantom was removed.
+    std::optional<std::string>  ledger;
+    std::optional<int>          visit;
+    std::optional<std::int64_t> removed_ms;
 };
 
 inline constexpr std::string_view kIdentityHeader =
-    "room,name,ap_x,ap_y,yaw,width,height,depth,exist_logodds,hinge_x,hinge_y,open_x,open_y,hinge_llr,swing_llr,phi,phi_sigma,seen_ms,place_sd";
+    "room,name,ap_x,ap_y,yaw,width,height,depth,exist_logodds,hinge_x,hinge_y,open_x,open_y,hinge_llr,swing_llr,phi,phi_sigma,seen_ms,place_sd,ledger,visit,removed_ms";
 inline constexpr std::size_t kIdentityColsOld  = 4;
 inline constexpr std::size_t kIdentityCols17   = 17;   ///< 2026-10-20 .. 10-21: no seen_ms column (age unknown)
 inline constexpr std::size_t kIdentityCols18   = 18;   ///< 2026-10-21 .. 10-22: no place_sd column (place precision unknown)
-inline constexpr std::size_t kIdentityColsFull = 19;
+inline constexpr std::size_t kIdentityCols19   = 19;   ///< up to Task 7: no ledger / visit / removed_ms
+inline constexpr std::size_t kIdentityColsFull = 22;
 
 /// A transform read before the room existed resolves to |t| ~ 1e13 m (try35): not a place.
 inline constexpr float kIdentityMaxPlaceM = 1.0e3f;
@@ -203,7 +210,7 @@ inline ParsedIdentityTable parse_identity_table(std::istream& in)
         }
         float x = 0.f, y = 0.f;
         if ((c.size() != kIdentityColsOld and c.size() != kIdentityCols17 and c.size() != kIdentityCols18
-             and c.size() != kIdentityColsFull) or c[0].empty()
+             and c.size() != kIdentityCols19 and c.size() != kIdentityColsFull) or c[0].empty()
             or not c[1].starts_with("door_") or not detail::num(c[2], x) or not detail::num(c[3], y)
             or std::hypot(x, y) > kIdentityMaxPlaceM)
         {
@@ -230,8 +237,14 @@ inline ParsedIdentityTable parse_identity_table(std::istream& in)
             }
             if (std::int64_t t = 0; c.size() >= kIdentityCols18 and detail::num_i64(c[17], t) and t > 0)
                 r.seen_wall_ms = t;
-            if (float sd = 0.f; c.size() == kIdentityColsFull and detail::num(c[18], sd) and sd > 0.f)
+            if (float sd = 0.f; c.size() >= kIdentityCols19 and detail::num(c[18], sd) and sd > 0.f)
                 r.place_sd = sd;
+            if (c.size() == kIdentityColsFull)
+            {
+                if (not c[19].empty()) r.ledger = std::string(c[19]);
+                if (std::int64_t v = 0; detail::num_i64(c[20], v) and v >= 0 and v <= 2147483647) r.visit = static_cast<int>(v);
+                if (std::int64_t t = 0; detail::num_i64(c[21], t) and t > 0) r.removed_ms = t;
+            }
         }
         out.rows.push_back(std::move(r));
     }
@@ -265,6 +278,12 @@ inline void write_identity_table(std::ostream& f, std::span<const IdentityRow> r
         if (i.seen_wall_ms.has_value() and *i.seen_wall_ms > 0) f << *i.seen_wall_ms;
         f << ',';
         if (i.place_sd.has_value() and std::isfinite(*i.place_sd) and *i.place_sd > 0.f) f << *i.place_sd;
+        f << ',';
+        if (i.ledger.has_value() and i.ledger->find_first_of(",\r\n") == std::string::npos) f << *i.ledger;   // a cell must stay a cell
+        f << ',';
+        if (i.visit.has_value()) f << *i.visit;
+        f << ',';
+        if (i.removed_ms.has_value() and *i.removed_ms > 0) f << *i.removed_ms;
         f << '\n';
     }
     if (next_door_index > 0) f << kNextDoorTag << ',' << next_door_index << '\n';

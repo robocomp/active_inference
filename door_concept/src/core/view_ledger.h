@@ -18,7 +18,7 @@
 // change of room frame (rotation + translation) unchanged, so persisted ledgers stay valid after re-registration.
 //
 // Serialisation (one line, classic locale, std::from_chars, no commas/newlines — fits a CSV cell): whitespace-separated tokens
-//   "VL1 <nviews>" then per view, 30 numbers: bearing range visit actuation_llr llr
+//   "VL1 <nviews>" then per view, 21 numbers: bearing range visit actuation_llr llr
 //   then per Bernoulli channel (Zed, Ricoh): n sum_q sum_hit_w sum_f hit_c ; then geo: n sum_x sum_w mu0 mu1 s2.
 #pragma once
 #include <array>
@@ -147,7 +147,7 @@ public:
 
     /// Rejects any non-finite number. The stored llr is NOT trusted: every view is recomputed from its aggregate
     /// (geometry_may_refute must match the one used by the caller's recompute calls).
-    static std::optional<ViewLedger> parse(std::string_view str, bool geometry_may_refute = false)
+    static std::optional<ViewLedger> parse(std::string_view str, bool geometry_may_refute)
     {
         std::size_t pos = 0;
         const auto tok = [&]() -> std::string_view {

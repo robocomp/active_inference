@@ -59,7 +59,7 @@ int main()
         CHECK(std::fabs(A.views()[i].key.bearing - B.views()[i].key.bearing) < 1e-5f); } }
     { // persisted_keys_survive_reregistration
       ViewLedger L; stare(L, cam_at(0), 5, 0.6f, 0.f); stare(L, cam_at(60), 5, 0.6f, 0.f);
-      auto P = *ViewLedger::parse(L.serialise());
+      auto P = *ViewLedger::parse(L.serialise(), false);
       Eigen::Rotation2Df Rm(1.9f); const Vec2f t(-7.f, 4.f);
       const auto v = P.observe(Rm * cam_at(60) + t, Rm * DOOR + t, Rm * NRM, 1, 0, 0);
       CHECK(P.views().size() == 2 and v == 1); }
@@ -72,12 +72,12 @@ int main()
       CHECK(L.sum() == 0.f and std::isfinite(L.sum())); }
     { // parse rejects non-finite, recomputes a lying llr
       ViewLedger L; stare(L, cam_at(0), 5, 0.6f, 0.f); auto s = L.serialise();
-      CHECK(ViewLedger::parse("VL1 1 0 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 1").has_value());   // control: same layout parses
-      CHECK(not ViewLedger::parse("VL1 1 nan 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 1").has_value());
-      CHECK(not ViewLedger::parse("VL1 1 inf 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 1").has_value());
+      CHECK(ViewLedger::parse("VL1 1 0 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 1", false).has_value());   // control: same layout parses
+      CHECK(not ViewLedger::parse("VL1 1 nan 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 1", false).has_value());
+      CHECK(not ViewLedger::parse("VL1 1 inf 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 1", false).has_value());
       const auto pos = s.find(' ', s.find(' ', s.find(' ', s.find(' ', s.find(' ', 4) + 1) + 1) + 1) + 1);   // after actuation
       (void)pos;
-      auto P = *ViewLedger::parse(s); CHECK(std::fabs(P.sum() - L.sum()) < 1e-6f); }
+      auto P = *ViewLedger::parse(s, false); CHECK(std::fabs(P.sum() - L.sum()) < 1e-6f); }
     { // serialise_roundtrip_es_locale
       std::setlocale(LC_ALL, "es_ES.UTF-8");
       ViewLedger L; stare(L, cam_at(0), 7, 0.6f, 0.3f); stare(L, cam_at(90), 4, 0.35f, 1.f);
@@ -86,11 +86,11 @@ int main()
       CHECK(s.find(',') == std::string::npos and s.find('\n') == std::string::npos);
       const auto P = ViewLedger::parse(s, true);
       CHECK(P.has_value()); CHECK(P->serialise() == s); CHECK(P->views().size() == 2); CHECK(P->sum() == L.sum());
-      CHECK(not ViewLedger::parse("VL1 2 1 2").has_value()); CHECK(not ViewLedger::parse("garbage").has_value());
+      CHECK(not ViewLedger::parse("VL1 2 1 2", false).has_value()); CHECK(not ViewLedger::parse("garbage", false).has_value());
       std::setlocale(LC_ALL, ""); }
     { // revisit_replaces_not_adds
       ViewLedger L; stare(L, cam_at(0), 20, 0.6f, 0.f);
-      auto P = *ViewLedger::parse(L.serialise()); const float s0 = P.sum();
+      auto P = *ViewLedger::parse(L.serialise(), false); const float s0 = P.sum();
       const auto v = P.observe(cam_at(0), DOOR, NRM, 1, 0, 0); P.add_bernoulli(v, Channel::Zed, 0.6f, M, 0.f);
       CHECK(P.views().size() == 1); CHECK(P.sum() == s0);
       P.recompute(v, false); CHECK(std::fabs(P.sum() - s0) < 1e-4f);   // replaced, not added
