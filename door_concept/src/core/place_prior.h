@@ -6,14 +6,18 @@
 //   g++ -std=c++23 -O1 -I/usr/include/eigen3 tests/test_place_prior.cpp -o /tmp/test_place_prior && /tmp/test_place_prior
 //
 // ★The size term is the NORMALISED LOG PREDICTIVE DENSITY of the fitted size under the door prior, per axis (ruling R13),
-//   NOT a KL to the prior. With w ~ N(ŵ, width_sd²) measured and the door prior N(0.85, 0.12²), the predictive variance is
-//   v = 0.12² + width_sd² and the term is  ln N(ŵ; 0.85, v) − ln N(0.85; 0.85, v) = −½ (ŵ − 0.85)² / v  (same for height with
-//   2.05, 0.06²). A KL grows like ln(0.12 / sd) as the fit gets precise, so a WELL-MEASURED TYPICAL door would pay without
-//   bound — a prior that punishes good measurement. The predictive pays exactly 0 at the typical size and more the more
-//   atypical the size is, however precisely it is measured. (A 1.00 m door at sd 0 sits 1.25σ off and pays ≈ 0.78 nats.)
+//   NOT a KL to the prior. With w ~ N(ŵ, width_sd²) measured and the door prior N(μ_w, σ_w²), the predictive variance is
+//   v = σ_w² + width_sd² and the term is  ln N(ŵ; μ_w, v) − ln N(μ_w; μ_w, v) = −½ (ŵ − μ_w)² / v  (same for height). A KL grows
+//   like ln(σ_w / sd) as the fit gets precise, so a WELL-MEASURED TYPICAL door would pay without bound — a prior that punishes good
+//   measurement. The predictive pays exactly 0 at the typical size and more the more atypical the size is, however precisely it
+//   is measured.
+// ★ONE SIZE PRIOR FOR ONE QUANTITY (Task 10 fix round 4, ruling): the door prior (μ_w, σ_w, μ_h, σ_h) is the door FIT's own
+//   prior, Door.PriorWidthM ± Door.PriorWidthStd and Door.PriorHeightM ± Door.PriorHeightStd, passed in as SizePrior. There is
+//   no second, existence-only size constant: two priors for one door size made every real door pay ~−0.75 nats for being the
+//   size the fit holds it at (and scored a ŵ already pulled by the other prior). The spec's typical-real-door value
+//   (0.85 ± 0.12 / 2.05 ± 0.06, spec §3.2) is the recommended Door.* value for the real robot (etc/config.toml).
 //
-// ★CONSTANTS, each flagged (global-constraints): 0.4 / 0.01 are the per-wall base rates (§6); 0.85 ± 0.12 and 2.05 ± 0.06
-//   are the size prior (§6).
+// ★CONSTANTS, each flagged (global-constraints): 0.4 / 0.01 are the per-wall base rates (§6).
 // ★THE ONE GATE, flagged: wall_groups joins edges whose endpoints lie within 2σ of the wall's line. That 2σ is a χ² gate:
 //   two edges are one wall exactly when their offsets are indistinguishable under the face uncertainty σ the band already
 //   carries. It is not a free tuning knob: σ is the band's own.
@@ -27,6 +31,12 @@ namespace rc::door::core
 {
 using Vec2f = Eigen::Vector2f;
 
+/// The door's size prior: the door FIT's own (Door.PriorWidthM/Std, Door.PriorHeightM/Std) - see the header.
+struct SizePrior
+{
+    float w_m, w_sd, h_m, h_sd;
+};
+
 /// polygon is a reference (the room's outline outlives the call; signed_boundary_distance takes a vector).
 struct PlacePriorInput
 {
@@ -38,6 +48,7 @@ struct PlacePriorInput
     float width, height, width_sd, height_sd;
     bool size_resolved;
     int doors_on_wall_before;
+    SizePrior size_prior;               ///< the fit's width/height prior (one prior for one quantity)
     float edge_sigma_m = 0.0f;          ///< the proto outline edge's own published uncertainty (m); room_concept publishes none on the room node, so 0
 };
 
@@ -77,8 +88,8 @@ namespace detail
         p.band = rc::door::band_log_prior(delta, b);
     }
     if (in.size_resolved)
-        p.size = detail::normalised_log_predictive(in.width, 0.85f, 0.12f, in.width_sd)
-               + detail::normalised_log_predictive(in.height, 2.05f, 0.06f, in.height_sd);
+        p.size = detail::normalised_log_predictive(in.width, in.size_prior.w_m, in.size_prior.w_sd, in.width_sd)
+               + detail::normalised_log_predictive(in.height, in.size_prior.h_m, in.size_prior.h_sd, in.height_sd);
     return p;
 }
 

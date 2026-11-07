@@ -324,6 +324,18 @@ AutonomousActuation = true
 ActuationProviderId = ""
 ActuationMatchMaxM  = 1.0     # ⚠gate on an ACT: nearest advertised door must be within this (m); doors here are >= 2.5 m apart
 
+[Door]
+# THE door size prior - ONE prior for one quantity (docs/superpowers/plans/2026-11-07-door-existence-model.md, Task 10 fix round 4).
+# The door fit's width/height template AND the existence size term (core/place_prior.h) both use these four keys; there is no
+# separate existence-only size constant any more.
+# Webots (this config): the values match the simulated doors (piso.wbt Door PROTO `size 0.1 1 2.1`: 1.00 m wide, 2.10 m tall).
+# REAL ROBOT / REAL APARTMENTS: the PI's typical-door prior is width 0.85 +- 0.12 m, height 2.05 +- 0.06 m (spec 2026-11-07 §3.2):
+#   PriorWidthM = 0.85, PriorWidthStd = 0.12, PriorHeightM = 2.05, PriorHeightStd = 0.06
+PriorWidthM    = 1.00   # width prior mean (m)
+PriorWidthStd  = 0.06   # width prior std (m) - strong
+PriorHeightM   = 2.10   # height prior mean (m)
+PriorHeightStd = 0.08   # height prior std (m) - strong
+
 [Tracker]
 # Multi-instance birth/associate/death (shared rc::InstanceTracker) — the only instance-lifecycle path.
 # Masks are associated to instances by a covariance-gated 1-to-1, an unexplained mask spawns a new door,

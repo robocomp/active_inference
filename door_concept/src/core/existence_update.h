@@ -90,17 +90,18 @@ ExistenceTrace observe_place(PlaceBelief& b, const rc::DoorFitState& theta, cons
                              float actuation_llr, std::vector<ViewRow>* rows, int self_sensor = -1, float self_w = 0.f);
 
 /// The structural prior of θ in this room (place_prior.h). `doors_on_wall_before`: how many doors were on θ's wall before it.
-/// The size is scored on the FITTED width/height with their posterior sds (a candidate: the blob's width, the typical height).
+/// The size is scored on the FITTED width/height with their posterior sds (a candidate: what the fit will make of its blob) under
+/// `size`, the door fit's own width/height prior (one size prior for one quantity, place_prior.h).
 [[nodiscard]] PlacePrior prior_of(const rc::DoorFitState& theta, const std::vector<Vec2f>& polygon, bool proto,
                                   const rc::door::RoomBand& band, int doors_on_wall_before, float width_sd, float height_sd,
-                                  bool size_resolved);
+                                  bool size_resolved, const SizePrior& size);
 
 /// The wall group (place_prior.h wall_groups) θ's aperture lies on: the group of the polygon edge nearest to it; -1 = none.
 [[nodiscard]] int wall_of(const Vec2f& xy, const std::vector<Vec2f>& polygon, const std::vector<int>& groups);
 
-/// A pending candidate's θ: the typical door (2.05 m tall, leaf shut) at the blob, along the nearest wall, with the
-/// blob's measured width (its extent along that wall). With no polygon the blob's own principal direction is the wall.
-[[nodiscard]] rc::DoorFitState typical_door_at(const Vec2f& xy, float width, const std::vector<Vec2f>& polygon);
+/// A pending candidate's θ: the typical door (`height` = the fit's height prior, leaf shut) at the blob, along the nearest wall,
+/// with the blob's measured width (its extent along that wall). With no polygon the blob's own principal direction is the wall.
+[[nodiscard]] rc::DoorFitState typical_door_at(const Vec2f& xy, float width, float height, const std::vector<Vec2f>& polygon);
 
 /// ★DETECTOR RATES ARE FIXED WITHIN A SESSION (Task 8 fix round 3, ruling): update_existence and decide use the door_detectors.csv
 /// values unchanged. In-session, a phantom's misses are explained equally by "door absent" and "hit rate low" — not identifiable from

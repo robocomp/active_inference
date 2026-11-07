@@ -11,9 +11,12 @@ static int g_fail = 0;
 // 6 x 4 room, room-side faces; the bottom wall is y = 0, so an aperture in its band sits at y in [-0.2, 0].
 static const std::vector<Vec2f> kRoom{{0, 0}, {6, 0}, {6, 4}, {0, 4}};
 
+// The size prior is passed in (it is the door fit's own, Door.Prior*). These cases use the spec's typical-real-door value.
+static constexpr SizePrior kSize{0.85f, 0.12f, 2.05f, 0.06f};
+
 static PlacePriorInput input(const std::vector<Vec2f>& poly, Vec2f ap, float w, int before = 0, bool proto = false)
 {
-    return PlacePriorInput{poly, proto, rc::door::RoomBand{0.20f, 0.10f}, ap, Vec2f(1, 0), w, 2.05f, 0.0f, 0.0f, true, before};
+    return PlacePriorInput{poly, proto, rc::door::RoomBand{0.20f, 0.10f}, ap, Vec2f(1, 0), w, 2.05f, 0.0f, 0.0f, true, before, kSize};
 }
 
 int main()
@@ -70,6 +73,17 @@ int main()
         in.size_resolved = true;
         CHECK(place_prior(in).size < 0.0f);
         CHECK(std::abs(place_prior(input(kRoom, {3, -0.1f}, 0.85f)).size) < 1e-6f);
+    }
+    // the_size_prior_is_the_one_passed_in (fix round 4: one size prior, the fit's): a door AT the fit's prior mean pays 0 under it,
+    // and the same door pays under a different prior - nothing else in place_prior holds a size
+    {
+        const SizePrior fit{1.00f, 0.06f, 2.10f, 0.08f};   // the Webots Door.Prior* (piso.wbt doors: 1.00 x 2.10)
+        auto in = input(kRoom, {3, -0.1f}, 1.00f);
+        in.height = 2.10f; in.width_sd = 0.03f; in.height_sd = 0.04f;
+        in.size_prior = fit;
+        CHECK(std::abs(place_prior(in).size) < 1e-6f);
+        in.size_prior = kSize;
+        CHECK(place_prior(in).size < -0.5f);
     }
     std::printf(g_fail ? "FAILED\n" : "ALL PASS\n");
     return g_fail != 0;

@@ -255,10 +255,10 @@ ExistenceTrace observe_place(PlaceBelief& b, const rc::DoorFitState& th, const E
 }
 
 PlacePrior prior_of(const rc::DoorFitState& th, const std::vector<Vec2f>& polygon, bool proto, const rc::door::RoomBand& band,
-                    int doors_on_wall_before, float width_sd, float height_sd, bool size_resolved)
+                    int doors_on_wall_before, float width_sd, float height_sd, bool size_resolved, const SizePrior& size)
 {
     const PlacePriorInput in{polygon, proto, band, th.aperture.centre_xy(), th.aperture.wall_u, th.aperture.w, th.aperture.h,
-                             width_sd, height_sd, size_resolved, doors_on_wall_before};
+                             width_sd, height_sd, size_resolved, doors_on_wall_before, size};
     return place_prior(in);
 }
 
@@ -279,7 +279,7 @@ int wall_of(const Vec2f& xy, const std::vector<Vec2f>& polygon, const std::vecto
     return g;
 }
 
-rc::DoorFitState typical_door_at(const Vec2f& xy, float width, const std::vector<Vec2f>& polygon)
+rc::DoorFitState typical_door_at(const Vec2f& xy, float width, float height, const std::vector<Vec2f>& polygon)
 {
     // The wall the blob is on: the nearest polygon edge's direction (no polygon: +x, an unknown wall).
     Vec2f u(1.0f, 0.0f);
@@ -299,7 +299,7 @@ rc::DoorFitState typical_door_at(const Vec2f& xy, float width, const std::vector
     rc::DoorState ms;
     ms.cx = xy.x(); ms.cy = xy.y(); ms.cz = 0.0f;
     ms.yaw = std::atan2(u.y(), u.x());
-    ms.w = width; ms.h = 2.05f; ms.thickness = 0.05f;   // 2.05 m: the size prior's typical height (§6, flagged there)
+    ms.w = width; ms.h = height; ms.thickness = 0.05f;   // height: the fit's height prior (the one size prior, place_prior.h)
     ms.phi = 0.0f;
     const rc::PreBeliefGeometry g = rc::pre_belief_geometry(ms);
     th.leaf_pose = g.leaf_pose; th.leaf = g.leaf; th.aperture = g.aperture;

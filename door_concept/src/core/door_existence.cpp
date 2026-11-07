@@ -275,6 +275,7 @@ void DoorCore::track_episodes(const DoorCycleInput& in, DoorCycleOutput& out)
 void DoorCore::prepare_candidates(const DoorCycleInput& in, const std::vector<rc::TrackView>& tracks, DoorCycleOutput& out)
 {
     const auto& cfg = cfg_.door;
+    const SizePrior size_prior{cfg.door_prior_w_m, cfg.door_prior_w_std, cfg.door_prior_h_m, cfg.door_prior_h_std};   // the FIT's size prior: the only one (place_prior.h)
     det_candidate_.assign(dets_.size(), -1);
     for (auto& d : dets_) d.birth_evidence = 0.0f;
     if (not info_.new_frame)
@@ -315,7 +316,7 @@ void DoorCore::prepare_candidates(const DoorCycleInput& in, const std::vector<rc
         if (best < 0)
         {
             // A new place: the typical door at the blob, with the blob's width along its wall (its support's extent).
-            const rc::DoorFitState probe = typical_door_at(dv.xy, cfg.door_prior_w_m, polygon);
+            const rc::DoorFitState probe = typical_door_at(dv.xy, cfg.door_prior_w_m, cfg.door_prior_h_m, polygon);
             const Vec2f u = probe.aperture.wall_u;
             float lo = std::numeric_limits<float>::max(), hi = std::numeric_limits<float>::lowest();
             for (const auto& p : masks_.support(pkt.slices[static_cast<std::size_t>(dv.slice_index)]))
@@ -326,7 +327,7 @@ void DoorCore::prepare_candidates(const DoorCycleInput& in, const std::vector<rc
             c.room = room_name_;
             c.xy = dv.xy;
             c.var = var;
-            c.theta = typical_door_at(dv.xy, width, polygon);
+            c.theta = typical_door_at(dv.xy, width, cfg.door_prior_h_m, polygon);
             c.width_meas = width;
             c.size_resolved = hi > lo;   // no extent in the support => no size estimate => the size term is 0 (spec: nothing measured pays nothing)
             // a clipped mask's width is a LOWER BOUND: its precision falls with the clipped fraction (continuously, no gate)
@@ -375,7 +376,7 @@ void DoorCore::prepare_candidates(const DoorCycleInput& in, const std::vector<rc
                 th.aperture.h = cfg.door_prior_h_m;
             }
             cand.belief.prior = prior_of(th, polygon, fit_.room_is_proto(), fit_.room_band(),
-                                         wall >= 0 ? doors_on_wall[wall] : 0, w_sd, h_sd, cand.size_resolved);
+                                         wall >= 0 ? doors_on_wall[wall] : 0, w_sd, h_sd, cand.size_resolved, size_prior);
             const auto it = self_det.find(c);
             const int self_sensor = it == self_det.end() ? -1 : (dets_[static_cast<std::size_t>(it->second)].sensor != 0 ? 1 : 0);
             const float self_w = it == self_det.end() ? 0.0f : det_w_[static_cast<std::size_t>(it->second)];
@@ -409,6 +410,7 @@ void DoorCore::prepare_candidates(const DoorCycleInput& in, const std::vector<rc
 void DoorCore::update_existence(const DoorCycleInput& in, DoorCycleOutput& out)
 {
     const auto& cfg = cfg_.door;
+    const SizePrior size_prior{cfg.door_prior_w_m, cfg.door_prior_w_std, cfg.door_prior_h_m, cfg.door_prior_h_std};   // the FIT's size prior: the only one (place_prior.h)
     const auto& pkt = masks_.packet();
     const bool zed_fresh = pkt.valid and static_cast<int>(pkt.frame_id) != exist_last_mask_frame_;
     const bool rgb_fresh = cfg.rgb_contour_check and not images_.rgb().empty() and images_.rgb_generation() != last_rgb_gen_;
@@ -456,7 +458,7 @@ void DoorCore::update_existence(const DoorCycleInput& in, DoorCycleOutput& out)
                         ++before;
                 const auto C = inst.ai2_belief.covariance();
                 inst.belief.prior = prior_of(inst, polygon, fit_.room_is_proto(), fit_.room_band(), before,
-                                             std::sqrt(std::max(0.0f, C(1, 1))), std::sqrt(std::max(0.0f, C(2, 2))), true);
+                                             std::sqrt(std::max(0.0f, C(1, 1))), std::sqrt(std::max(0.0f, C(2, 2))), true, size_prior);
             }
             const float act = std::exchange(inst.pending_actuation_llr, 0.0f);
             std::vector<ViewRow> rows;
