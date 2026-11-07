@@ -244,15 +244,6 @@ struct Bench
     }
 };
 static rc::DoorFitState shut_door(float width = 0.85f) { return typical_door_at({1.0f, kWallY}, width, kRoom); }
-// The compiled detector defaults with the weight of a CALIBRATED detector (n = 1000 views behind each rate): the decision cases
-// below test the costed decision, and with the compiled weight (1 view) the online learner moves the hit rate on the phantom's own
-// misses within a few views (fix round 1, reported) — that circularity is the learner's question, not these cases'.
-static DetectorTable calibrated()
-{
-    DetectorTable t = default_detectors();
-    t.zed.n_hit_trials = t.ricoh.n_hit_trials = t.zed.n_fa_trials = t.ricoh.n_fa_trials = 1000.0f;
-    return t;
-}
 static Costs default_costs() { return CostEstimator{}.costs(rc::DoorConfig{}.exist_max_room_s); }
 
 int main()
@@ -376,10 +367,8 @@ int main()
         for (const float rr : {best_r, best_r - 1.5f, best_r + 1.5f})   // further DISTINCT standpoints (kernel ~17° and ~1.3 m at 4 m)
             for (const float deg : {-20.0f, 20.0f, -60.0f, 60.0f, 0.0f, -40.0f, 40.0f})
                 if (rr != best_r or (deg != 0.0f and deg != -40.0f and deg != 40.0f)) S.push_back(stand(rr, deg));
-        for (const bool cal : {true, false})   // the decision alone (calibrated rates), then with the real online learner (fix round 2)
         {
         Rig r;
-        if (cal) r.core.set_detectors(calibrated());
         r.look(stand(6.0f, -75.0f), kDoor, {{1.0f, kWallY, 0.9f}});
         r.settle(stand(6.0f, -75.0f));
         const float L0 = r.door() ? r.door()->belief.L() : NAN;
@@ -395,38 +384,32 @@ int main()
         }
         std::string ls;
         for (const float e : ell) ls += std::format(" {:+.3f}", e);
-        std::print("phantom_removed_three_views [{}]: post-birth L {:+.3f}; {} distinct views, llrs{}; removed at standpoint {} (-1 = not "
-                   "within these {})\n", cal ? "calibrated" : "online learner", L0, r.door() ? r.door()->belief.ledger.views().size() : 0, ls, removed_at, S.size());
+        std::print("phantom_removed_three_views: post-birth L {:+.3f}; {} distinct views, llrs{}; removed at standpoint {} (-1 = not "
+                   "within these {})\n", L0, r.door() ? r.door()->belief.ledger.views().size() : 0, ls, removed_at, S.size());
         // ★FIX ROUND 1, REPORTED (not forced): from the natural post-birth L the phantom is NOT removed by these views. Its one-frame
         //  fit puts the leaf at ~60° (a flat φ curve), so the closed-panel envelope sees it nearly edge-on (q ≈ 0.1-0.25, ℓ ≈ −0.1 to
         //  −0.3 per view) against +3.4 from its one false hit; the compiled ZED envelope stays until refit from logs (ruling).
-        CHECK(removed_at < 0 or removed_at >= 3);   // never before the third view
+        CHECK(removed_at >= 3);   // removed by the natural process (fixed rates, fix round 3), never before the third view
         }
     }
 
-    // ── the hit-rate learner weights a trial by σ(L) (fix round 2): a phantom's repeated misses move the ZED hit rate by exactly
-    //    the EM expectation, (h0·n0 + σ(L)·Σy) / (n0 + σ(L)·Σg) with n0 = 1 (compiled default), and less than unweighted counting would
+    // ── detector rates stay FIXED within a session (fix round 3, ruling): a phantom's many misses leave them at the CSV values ──
     {
         Rig r;
+        DetectorTable csv = default_detectors();
+        csv.zed.hit_rate = 0.85f; csv.zed.false_alarm = 0.03f; csv.zed.n_hit_trials = 12.0f;   // as loaded from door_detectors.csv
+        r.core.set_detectors(csv);
         r.look(stand(6.0f, -75.0f), kDoor, {{1.0f, kWallY, 0.9f}});
         r.settle(stand(6.0f, -75.0f));
-        const std::uint64_t id = r.w.st.empty() ? 0 : r.w.st.begin()->first;
-        for (const float deg : {-40.0f, 0.0f, 40.0f, -20.0f, 20.0f})
-            for (int k = 0; k < 20 and r.door(); ++k) r.look(stand(4.2f, deg), kDoor);
-        CHECK(r.door() != nullptr);
-        if (r.door())
-        {
-            const double L = r.door()->belief.L(), rr = 1.0 / (1.0 + std::exp(-L));
-            const auto [sy, sg] = r.core.detector_learner().place_sums(id, 0);
-            const double h0 = default_detectors().zed.hit_rate;
-            const double expect = (h0 * 1.0 + rr * sy) / (1.0 + rr * sg);
-            const double unweighted = (h0 * 1.0 + sy) / (1.0 + sg);
-            const double h = r.core.detectors().zed.hit_rate;
-            std::print("learner_weighted_by_responsibility: L {:+.3f} (r {:.3f}), sum y {:.3f} sum g {:.3f}: hit rate {:.4f}, expected {:.4f} "
-                       "(moved {:+.4f}; unweighted would move {:+.4f})\n", L, rr, sy, sg, h, expect, h - h0, unweighted - h0);
-            CHECK(std::abs(h - expect) < 1e-5);
-            CHECK(std::abs(h - h0) <= std::abs(unweighted - h0));
-        }
+        int frames = 0;
+        for (const float rr : {4.2f, 2.7f, 5.7f})
+            for (const float deg : {-60.0f, -40.0f, -20.0f, 0.0f, 20.0f, 40.0f, 60.0f})
+                for (int k = 0; k < 20; ++k, ++frames) r.look(stand(rr, deg), kDoor);
+        const DetectorTable& d = r.core.detectors();
+        std::print("detector_rates_fixed: after {} miss frames on a phantom ({} REMOVE): zed hit {:.3f} fa {:.3f} n {:.0f}; ricoh hit {:.3f}\n",
+                   frames, r.removes.size(), d.zed.hit_rate, d.zed.false_alarm, d.zed.n_hit_trials, d.ricoh.hit_rate);
+        CHECK(d.zed.hit_rate == csv.zed.hit_rate and d.zed.false_alarm == csv.zed.false_alarm and d.zed.n_hit_trials == csv.zed.n_hit_trials);
+        CHECK(d.ricoh.hit_rate == csv.ricoh.hit_rate and d.ricoh.false_alarm == csv.ricoh.false_alarm);
     }
 
     // ── birth respects cross-concept exclusion and frame admissibility (fix round 1, review I-1) ────────────────────────────
@@ -463,16 +446,8 @@ int main()
                    r.core.costs().n(CostEstimator::Kind::DeleteOrdinary));
         CHECK(r.births.empty());
         CHECK(r.core.places().rows().empty());
-        CHECK(d1.zed.false_alarm == d0.zed.false_alarm and d1.ricoh.false_alarm == d0.ricoh.false_alarm);
+        CHECK(d1.zed.false_alarm == d0.zed.false_alarm and d1.ricoh.false_alarm == d0.ricoh.false_alarm);   // (fixed anyway)
         CHECK(r.core.costs().n(CostEstimator::Kind::DeleteOrdinary) == 0);
-        // the false-alarm evidence survives a restart
-        DetectorTable t = default_detectors();
-        t.zed.false_alarm = 0.03f; t.zed.n_fa_trials = 4.5f;
-        const auto path = std::filesystem::temp_directory_path() / "test_door_core_existence_detectors.csv";
-        save_detectors(path, t, "test");
-        const DetectorTable u = load_detectors(path);
-        std::filesystem::remove(path);
-        CHECK(u.zed.n_fa_trials == 4.5f and u.zed.false_alarm == 0.03f);
     }
 
     // ── the birth frame enters the newborn's belief ONCE (fix round 1, review m-9) ──────────────────────────────────────────
@@ -562,7 +537,6 @@ int main()
         const auto run = [&](bool route, int max_views)
         {
             Rig r;
-            r.core.set_detectors(calibrated());   // a decision case: the costs, not the learner (see calibrated())
             r.look(stand(6.0f, -75.0f), kDoor, {{1.0f, kWallY, 0.9f}});
             r.settle(stand(6.0f, -75.0f));
             if (r.door()) r.door()->belief.carried += 0.5f - r.door()->belief.L();   // a door weakly believed in: L = +0.5
@@ -574,8 +548,6 @@ int main()
                     if (route) in.route_faces = {"door_1"};
                     r.step(std::move(in));
                 }
-            std::print("  route run: zed hit_rate learned {:.3f} (n {:.2f}), L end {:+.3f}\n", r.core.detectors().zed.hit_rate,
-                       r.core.detectors().zed.n_hit_trials, r.door() ? r.door()->belief.L() : NAN);
             return std::pair{views, r.removes.size()};
         };
         const auto [n_ord, rm_ord] = run(false, 200);

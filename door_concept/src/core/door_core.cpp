@@ -330,7 +330,6 @@ void DoorCore::merge(DoorCycleOutput& out)
             record(K::Merge, drop, dropped.state.cx, dropped.state.cy,
                  std::format("into {} overlap {:.2f}", keep, ratio), dropped.name, out);
             out.deletes.push_back({drop, "merge"});
-            learner_.forget(drop);   // Task 8: a merged duplicate's views are not a verdict on the detector
             world_->retire(drop);
         });
 }

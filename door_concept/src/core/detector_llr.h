@@ -27,7 +27,6 @@ struct DetectorModel
     float hit_rate = 1.0f;              // P(report | present, ideally framed, face-on)
     float false_alarm = 0.0f;           // P(report | absent), per view at full visibility
     float n_hit_trials = 0.0f;          // evidence behind hit_rate (0 = a compiled default)
-    float n_fa_trials = 0.0f;           // evidence behind false_alarm (Σ front-end factor of removed places' views; 0 = default)
 };
 
 struct DetectorTable { DetectorModel zed, ricoh; };
@@ -68,7 +67,7 @@ struct DetectorTable { DetectorModel zed, ricoh; };
     return q > 0.0f ? std::log((1.0f - q) / (1.0f - f_eff)) : 0.0f;
 }
 
-// CSV: camera,param,value,n,source — params min_fill,max_fill,soft,hit_rate (n = n_hit_trials),false_alarm (n = n_fa_trials).
+// CSV: camera,param,value,n,source — params min_fill,max_fill,soft,hit_rate (n = n_hit_trials),false_alarm.
 // from_chars must consume the WHOLE field; a malformed row keeps the default for that param and is counted (one warning line).
 // Domain validation (a probability must be a probability, NOT a model threshold): hit_llr divides by false_alarm, f_eff by
 // hit_rate and miss_llr takes log(1 - q), so a loaded camera must satisfy 0 < false_alarm < hit_rate < 1 and a valid envelope;
@@ -104,8 +103,8 @@ struct DetectorTable { DetectorModel zed, ricoh; };
             return r.ec == std::errc{} and r.ptr == e;
         };
         float v = 0, n = 0;
-        // n: the evidence behind the value, in views (the learner's prior weight; 0 = a compiled default, weight 1). A negative or
-        // non-finite count is not a count: the row is malformed.
+        // n: the evidence behind the value (views, written by tools/fit_detector_envelopes.py; 0 = a compiled default). A negative
+        // or non-finite count is not a count: the row is malformed.
         if (c.size() < 4 or not num(c[2], v) or not num(c[3], n) or not std::isfinite(n) or n < 0.0f) { ++malformed; continue; }
         DetectorModel* m = c[0] == "zed" ? &t.zed : c[0] == "ricoh" ? &t.ricoh : nullptr;
         if (m == nullptr) { ++malformed; continue; }
@@ -113,7 +112,7 @@ struct DetectorTable { DetectorModel zed, ricoh; };
         else if (c[1] == "max_fill") m->env.max_fill = v;
         else if (c[1] == "soft") m->env.soft = v;
         else if (c[1] == "hit_rate") { m->hit_rate = v; m->n_hit_trials = n; }
-        else if (c[1] == "false_alarm") { m->false_alarm = v; m->n_fa_trials = n; }
+        else if (c[1] == "false_alarm") m->false_alarm = v;
         else ++malformed;
     }
     if (malformed > 0)
@@ -138,9 +137,9 @@ inline void save_detectors(const std::filesystem::path& p, const DetectorTable& 
     f.imbue(std::locale::classic());
     f << "camera,param,value,n,source\n";
     const auto write_cam = [&](const char* cam, const DetectorModel& m) {   // (not "emit": Qt #defines it)
-        f << std::format("{},min_fill,{},0,{}\n{},max_fill,{},0,{}\n{},soft,{},0,{}\n{},hit_rate,{},{},{}\n{},false_alarm,{},{},{}\n",
+        f << std::format("{},min_fill,{},0,{}\n{},max_fill,{},0,{}\n{},soft,{},0,{}\n{},hit_rate,{},{},{}\n{},false_alarm,{},0,{}\n",
                          cam, m.env.min_fill, source, cam, m.env.max_fill, source, cam, m.env.soft, source,
-                         cam, m.hit_rate, m.n_hit_trials, source, cam, m.false_alarm, m.n_fa_trials, source);
+                         cam, m.hit_rate, m.n_hit_trials, source, cam, m.false_alarm, source);
     };
     write_cam("zed", t.zed);
     write_cam("ricoh", t.ricoh);

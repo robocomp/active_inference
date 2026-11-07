@@ -237,13 +237,12 @@ public:
 
     // ── Task 8: the existence model's learned / persisted tables (the worker loads them at start, saves them on a graceful
     //    shutdown; a replay keeps the compiled defaults) ──
-    [[nodiscard]] const DetectorTable& detectors() const { return learner_.table(); }
-    void set_detectors(const DetectorTable& t) { learner_.set_prior(t); }
+    /// The per-camera detector model: door_detectors.csv's values, FIXED for the session (fix round 3, ruling).
+    [[nodiscard]] const DetectorTable& detectors() const { return detectors_; }
+    void set_detectors(const DetectorTable& t) { detectors_ = t; }
     [[nodiscard]] CostEstimator& costs() { return costs_; }
     [[nodiscard]] const CostEstimator& costs() const { return costs_; }
     [[nodiscard]] PlaceTable& places() { return places_; }
-    [[nodiscard]] const DetectorLearner& detector_learner() const { return learner_; }
-    [[nodiscard]] const GeometryLearner& geometry_learner() const { return geo_learner_; }
     /// A pending birth candidate (spec §3.1: the belief lives from the first candidate observation): its θ, belief and room.
     struct Candidate
     {
@@ -294,8 +293,7 @@ private:
     long last_birth_mask_frame_ = -1;
     std::optional<Vec2f> cam_xy_;      // the camera's room xy this cycle (the ricoh slices' ray origin)
     // ── Task 8: the existence model ──
-    DetectorLearner learner_;          // the per-camera detector model, learned online (one trial per view)
-    GeometryLearner geo_learner_;      // the geometry channel's μ1 offset, learned online
+    DetectorTable   detectors_ = default_detectors();   // fixed within a session (door_detectors.csv; refit offline)
     CostEstimator   costs_;            // C_keep / C_delete, running medians (etc/door_costs.csv)
     PlaceTable      places_{false};    // one row per door place per room (reset in the ctor from the config)
     std::vector<Candidate> candidates_;

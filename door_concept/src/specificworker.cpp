@@ -247,14 +247,12 @@ void SpecificWorker::request_shutdown()
 
     cleanup_owned_nodes();
 
-    // Task 8: persist what the existence model learned this run (graceful exits only; SIGKILL loses it, like the nodes).
+    // Task 8: persist the decision costs learned this run (graceful exits only; SIGKILL loses them, like the nodes).
     if (core_)
     {
-        rc::door::core::save_detectors("etc/door_detectors.csv", core_->detectors(), "online");
-        core_->costs().save("etc/door_costs.csv");
-        const auto t = core_->detectors();
-        std::print("door_concept: [existence] saved etc/door_detectors.csv (zed n={:.0f}, ricoh n={:.0f}) and etc/door_costs.csv "
-                   "(keep n={}, delete n={})\n", t.zed.n_hit_trials, t.ricoh.n_hit_trials,
+        core_->costs().save("etc/door_costs.csv");   // the costs are the robot's own experience; the detector rates are NOT written
+                                                     // back (fixed within a session, refit offline from etc/door_views_log.csv)
+        std::print("door_concept: [existence] saved etc/door_costs.csv (keep n={}, delete n={})\n",
                    core_->costs().n(rc::door::core::CostEstimator::Kind::Keep),
                    core_->costs().n(rc::door::core::CostEstimator::Kind::DeleteOrdinary));
     }
@@ -477,10 +475,9 @@ void SpecificWorker::initialize()
         core_->costs() = rc::door::core::CostEstimator::load("etc/door_costs.csv");
         const auto t = core_->detectors();
         const auto c = core_->costs().costs(cfg_.exist_max_room_s);
-        std::print("door_concept: [existence] loaded etc/door_detectors.csv: zed hit {:.3f} fa {:.4f} (n={:.0f}/{:.0f}), ricoh hit {:.3f} "
-                   "fa {:.4f} (n={:.0f}/{:.0f}); etc/door_costs.csv: C_keep {:.1f} s (n={}), C_delete {:.1f} s (n={})\n",
-                   t.zed.hit_rate, t.zed.false_alarm, t.zed.n_hit_trials, t.zed.n_fa_trials, t.ricoh.hit_rate, t.ricoh.false_alarm, t.ricoh.n_hit_trials,
-                   t.ricoh.n_fa_trials,
+        std::print("door_concept: [existence] loaded etc/door_detectors.csv: zed hit {:.3f} fa {:.4f} (n={:.0f}), ricoh hit {:.3f} "
+                   "fa {:.4f} (n={:.0f}), fixed this session; etc/door_costs.csv: C_keep {:.1f} s (n={}), C_delete {:.1f} s (n={})\n",
+                   t.zed.hit_rate, t.zed.false_alarm, t.zed.n_hit_trials, t.ricoh.hit_rate, t.ricoh.false_alarm, t.ricoh.n_hit_trials,
                    c.keep_s, core_->costs().n(rc::door::core::CostEstimator::Kind::Keep), c.delete_ordinary_s,
                    core_->costs().n(rc::door::core::CostEstimator::Kind::DeleteOrdinary));
     }

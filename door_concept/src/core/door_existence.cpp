@@ -590,7 +590,7 @@ void DoorCore::with_frame(const DoorCycleInput& in, bool zed_ran, bool use_rgb, 
     }
     if (sinks_.image_use) sinks_.image_use({rgb_prep.valid(), rgb_prep.frame_ref, false});
     const std::vector<FrameDetection> dets = frame_detections();
-    const DetectorTable det = learner_.table();
+    const DetectorTable& det = detectors_;   // fixed within the session (fix round 3)
     ExistenceFrame fr{scene, cfg, det};
     if (camera_usable(in.camera)) fr.zed_spec = camera_spec(in.camera);
     fr.zed_ran = zed_ran and fr.zed_spec.has_value();
@@ -609,7 +609,7 @@ void DoorCore::with_frame(const DoorCycleInput& in, bool zed_ran, bool use_rgb, 
     fr.rgb = rgb_prep.valid() ? &rgb_prep : nullptr;
     fr.rt_cov = in.robot.rt_cov;
     fr.geometry_may_refute = cfg.exist_geometry_may_refute;
-    fr.geo_mu1_sd = geo_learner_.d();
+    // fr.geo_mu1_sd stays at its starting value (μ1 = μ0 + 2s): fixed within the session like the detector rates (fix round 3)
     fr.dets = dets;
     if (sinks_.image_roi)
         fr.note_poly = [this](const std::vector<cv::Point>& poly) { sinks_.image_roi({poly, {}, 0, true, false}); };
@@ -840,17 +840,6 @@ void DoorCore::update_existence(const DoorCycleInput& in, DoorCycleOutput& out)
             const float L = inst.belief.L();
             const Verdict v = decide(L, inst.role, costs);
             inst.exist_trace.delete_line = v.delete_line;
-            // one trial per view (unweighted outcome; frames with an unknown q are no trial), counted while the door is believed
-            const DetectorTable& T = learner_.table();
-            for (const auto& r : rows)
-                if (r.q_known)
-                    learner_.frame(id, r.camera, static_cast<std::size_t>(r.view_id), r.hit > 0.0f,
-                                   r.q / (r.camera == 0 ? T.zed.hit_rate : T.ricoh.hit_rate));
-            learner_.set_responsibility(id, 1.0 / (1.0 + std::exp(-static_cast<double>(L))));   // EM: r = σ(L), no cutoff
-            if (L > 0.0f)   // the geometry channel's μ1, from the doors believed in (one standardised statistic per view)
-                for (std::size_t k = 0; k < inst.belief.ledger.views().size(); ++k)
-                    if (const auto& g = inst.belief.ledger.views()[k].geo; g.sum_w > 0 and g.s2 > 0.f)
-                        geo_learner_.note(id, k, (static_cast<float>(g.sum_x / g.sum_w) - g.mu0) / std::sqrt(g.s2));
             if (v.remove)
                 to_remove.push_back(id);
             log_view_rows(inst.node_name, rows, out);
@@ -898,12 +887,12 @@ void DoorCore::update_existence(const DoorCycleInput& in, DoorCycleOutput& out)
     }
     if (ex_dbg_ % 600 == 0)
     {
-        const auto T = learner_.table();
+        const auto& T = detectors_;
         const auto c = costs_.costs(cfg.exist_max_room_s);
-        diag("stdout", std::format("door_concept: [existence] model: zed hit={:.3f} fa={:.4f} (n={} views) | ricoh hit={:.3f} fa={:.4f} "
-                                   "(n={} views) | geo mu1=mu0+{:.2f}s (n={}) | C_keep={:.1f}s (n={}) C_delete={:.1f}s (n={})\n",
-                                   T.zed.hit_rate, T.zed.false_alarm, learner_.n_views(0), T.ricoh.hit_rate, T.ricoh.false_alarm,
-                                   learner_.n_views(1), geo_learner_.d(), geo_learner_.n(), c.keep_s,
+        diag("stdout", std::format("door_concept: [existence] model (fixed this session): zed hit={:.3f} fa={:.4f} (n={:.0f}) | ricoh "
+                                   "hit={:.3f} fa={:.4f} (n={:.0f}) | C_keep={:.1f}s (n={}) C_delete={:.1f}s (n={})\n",
+                                   T.zed.hit_rate, T.zed.false_alarm, T.zed.n_hit_trials, T.ricoh.hit_rate, T.ricoh.false_alarm,
+                                   T.ricoh.n_hit_trials, c.keep_s,
                                    costs_.n(CostEstimator::Kind::Keep), c.delete_ordinary_s, costs_.n(CostEstimator::Kind::DeleteOrdinary)), out);
     }
 
@@ -925,8 +914,6 @@ void DoorCore::update_existence(const DoorCycleInput& in, DoorCycleOutput& out)
         r.L_evidence = inst.belief.L_evidence(); r.ledger = inst.belief.ledger; r.visit = visit_;
         r.last_seen_wall_ms = in.t_wall_ms; r.removed_wall_ms = in.t_wall_ms;
         places_.upsert(std::move(r));
-        learner_.retire(id);
-        geo_learner_.retire(id);
         observed_frame_.erase(id);
         world_->before_remove(id);
         const auto& s = inst.model.state();
