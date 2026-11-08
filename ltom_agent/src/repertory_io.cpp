@@ -21,18 +21,6 @@ namespace ltom
 {
 namespace
 {
-const char* end_name(End e)
-{
-    switch (e)
-    {
-        case End::alive: return "alive";
-        case End::death: return "death";
-        case End::owner_exit: return "owner_exit";
-        case End::gap: return "gap";
-    }
-    return "alive";
-}
-
 bool end_from(const QString& s, End& out)
 {
     for (End e : {End::alive, End::death, End::owner_exit, End::gap})

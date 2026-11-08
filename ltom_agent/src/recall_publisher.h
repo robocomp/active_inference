@@ -14,6 +14,7 @@
 #include <span>
 
 #include "../../common/owned_nodes/owned_nodes.h"
+#include "../../common/rt_covariance/rt_covariance.h"
 
 namespace ltom
 {
@@ -28,6 +29,9 @@ inline std::optional<std::uint64_t> recall_room(DSR::DSRGraph& G, std::optional<
     if (room and G.get_edge(*room, *room, "proto").has_value()) return std::nullopt;   // == rc::room::is_proto
     return room;
 }
+
+// A keyframe's pose variances as an RT covariance (z and roll/pitch are the floor prior).
+rc::rtcov::Se3Var keyframe_variances(const Keyframe& k);
 
 class RecallPublisher
 {

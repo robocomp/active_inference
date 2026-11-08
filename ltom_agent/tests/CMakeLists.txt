@@ -44,3 +44,12 @@ target_link_libraries(test_recall_publisher
   ${LIBS} dsr_core dsr_gui dsr_api fastcdr fastdds osgDB OpenThreads Eigen3::Eigen QGLViewer-qt6 Qt6OpenGLWidgets
   ${STATIC_LIBS} ${SPECIFIC_LIBS} ${QT_LIBRARIES} ${Ice_LIBRARIES})
 set_target_properties(test_recall_publisher PROPERTIES CXX_STANDARD 23 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
+
+# The repertory projected onto the memory graph: DSR-linked, private DDS domain 63.
+add_executable(test_memory_graph test_memory_graph.cpp ../src/memory_graph.cpp ../src/recall_publisher.cpp ../src/recall_select.cpp ../src/repertory.cpp)
+target_compile_definitions(test_memory_graph PRIVATE LTOM_ROOT_JSON="${CMAKE_CURRENT_LIST_DIR}/ltom_root.json")
+target_include_directories(test_memory_graph PRIVATE ../../common $ENV{ROBOCOMP}/classes)
+target_link_libraries(test_memory_graph
+  ${LIBS} dsr_core dsr_gui dsr_api fastcdr fastdds osgDB OpenThreads Eigen3::Eigen QGLViewer-qt6 Qt6OpenGLWidgets
+  ${STATIC_LIBS} ${SPECIFIC_LIBS} ${QT_LIBRARIES} ${Ice_LIBRARIES})
+set_target_properties(test_memory_graph PROPERTIES CXX_STANDARD 23 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)

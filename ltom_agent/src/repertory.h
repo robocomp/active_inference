@@ -24,6 +24,18 @@ struct Sighting
 
 enum class End { alive, death, owner_exit, gap };
 
+inline const char* end_name(End e)
+{
+    switch (e)
+    {
+        case End::alive: return "alive";
+        case End::death: return "death";
+        case End::owner_exit: return "owner_exit";
+        case End::gap: return "gap";
+    }
+    return "alive";
+}
+
 struct Life { std::int64_t born_ms = 0, first_seen_ms = 0, last_seen_ms = 0, end_ms = -1; End end = End::alive; };
 struct Keyframe { std::int64_t t_ms = 0, room_key = -1; Pose2 pose; };
 

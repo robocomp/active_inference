@@ -106,10 +106,15 @@ void SpecificWorker::initialize()
     std::print("ltom_agent: initialize()\n");
     GenericWorker::initialize();
 
-    if (not G)
-        qFatal("ltom_agent needs [Agent.dsr] (the live graph, domain 0)");
-    if (Graphs.size() != 1)
-        qFatal("ltom_agent joins ONE graph ([Agent.dsr]); the config declares %zu", Graphs.size());
+    const auto graph_named = [this](const std::string& key) { const auto it = Graphs.find(key); return it == Graphs.end() ? nullptr : it->second; };
+    const auto G_dsr = graph_named("dsr");
+    const auto G_memory = graph_named("ltom");
+    if (not G_dsr or not G_memory)
+        qFatal("ltom_agent needs [Agent.dsr] (the live graph, domain 0) and [Agent.ltom] (the memory graph, domain 5)");
+    if (G.get() != G_dsr.get())
+        qFatal("G does not alias the \"dsr\" graph: the [Agent.*] sub-tables are read in sorted order, \"dsr\" must stay first");
+    if (not G_memory->get_node("root").has_value())
+        qFatal("the memory graph has no \"root\" node: check ltom_root.json and that the agent runs from its component root");
 
     // Heavy payloads are never read here.
     G->set_ignored_attributes<cam_rgb_att, cam_depth_att, laser_X_att, laser_Y_att, laser_Z_att>();
@@ -179,6 +184,8 @@ void SpecificWorker::initialize()
                     : res == ltom::LoadResult::missing ? "no file, starting empty"
                     : res == ltom::LoadResult::blocked ? "BAD FILE NOT MOVED ASIDE, saving disabled" : "UNREADABLE, starting empty";
     std::println("[ltom] repertory {}: {} ({} entries)", params_.repertory_path, how, repertory_->entries().size());
+    memory_graph_ = std::make_unique<ltom::MemoryGraph>(G_memory);
+    memory_graph_->sync(repertory_->entries(), {});     // retained objects show at once, fleet or no fleet
     recall_pub_ = std::make_unique<ltom::RecallPublisher>(G);
     sweep_stale_recalls();   // may run before leaked nodes finish syncing; the first Operating entry sweeps again
     inner_eigen_ = G->get_inner_eigen_api();   // once, on the main thread, after the graph is up
@@ -219,6 +226,8 @@ void SpecificWorker::compute()
     log("reopened", ch.reopened);
     log("died", ch.died);
     log("owner_exit", ch.owner_exited);
+
+    if (memory_graph_) memory_graph_->sync(repertory_->entries(), view.present);
 
     // Recall nodes: the remembered, absent members of the offered classes, in the room the robot is in now.
     if (recall_pub_)

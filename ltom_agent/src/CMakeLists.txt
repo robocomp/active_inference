@@ -17,6 +17,7 @@ LIST(APPEND SOURCES
   ../src/graph_sightings.cpp
   ../src/recall_select.cpp
   ../src/recall_publisher.cpp
+  ../src/memory_graph.cpp
 )
 
 # Headers set
@@ -27,6 +28,7 @@ LIST(APPEND HEADERS
   ../src/graph_sightings.h
   ../src/recall_select.h
   ../src/recall_publisher.h
+  ../src/memory_graph.h
 )
 
 LIST(APPEND LIBS ${LIBS})

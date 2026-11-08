@@ -4,22 +4,17 @@
 #   [Agent.dsr]  the LIVE working graph. domain 0, configFile "" => joins the fleet. Never writes an object node: it puts there
 #                only its presence agent node ("ltom_agent 28") and the ltom_recall_<uid> metaconcept nodes.
 #
-# DDS domain 5 is RESERVED for ltom's future memory graph (a projection of the repertory file, added when its
-# first reader exists: language_agent, step 4). No [Agent.*] table for it now. Never add a table whose FLATTENED
-# key contains "Agent" and has >= 2 dots (getSurNames would build a phantom graph). Every sub-table MUST define
-# tree/graph/2d (setupViewer throws on a missing key).
+#   [Agent.ltom] the MEMORY graph. domain 5, seeded from ltom_root.json: the repertory file projected for the viewer
+#                (root -> room_<key> -> one object node per retained object). Nothing reads it back.
+#
+# Never add a table whose FLATTENED key contains "Agent" and has >= 2 dots unless it is a graph (getSurNames would
+# build a phantom one). Every sub-table MUST define tree/graph/2d (setupViewer throws on a missing key).
 
 [Agent]
 # MUST be unique across the shared graph (CRDT actor id). 28 = ltom_agent, recorded in
 # CONCEPT_AGENT_RECIPE.md section 1 (the source of truth). 27 = self_calibration.
 id   = 28
 name = "ltom_agent"
-# GenericWorker::initialize reads the viewer flags at the FLAT prefix "Agent" when exactly ONE graph exists
-# (prefix "Agent.<name>" only when there are several), so a single-graph agent must define them here as well as
-# in [Agent.dsr]; a missing key THROWS ("Key not found: Agent.tree"). All false => no window.
-tree  = false
-graph = false
-2d    = false
 
 [Agent.dsr]
 configFile = ""
@@ -27,6 +22,14 @@ domain     = 0
 # No viewer: robot_concept already shows the live graph.
 tree       = false
 graph      = false
+2d         = false
+
+[Agent.ltom]
+# Resolved against the process CWD: run this agent from its component root, as the fleet does.
+configFile = "ltom_root.json"
+domain     = 5
+tree       = false
+graph      = true
 2d         = false
 
 [Presence]

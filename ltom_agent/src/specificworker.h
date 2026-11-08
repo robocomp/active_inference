@@ -6,7 +6,7 @@
  * presence coordinator (nothing required), reads its [LTOM] config, computes nothing, and exits cleanly on
  * SIGTERM/SIGINT (never kill -9). Later tasks add the observe / consolidate / persist logic in compute().
  *
- * ONE graph: [Agent.dsr] (G). DDS domain 5 is reserved for the future memory graph; step 2 does not join it.
+ * TWO graphs: [Agent.dsr] (G, the live graph, domain 0) and [Agent.ltom] (the memory graph, domain 5, shown in the viewer).
  */
 
 #ifndef SPECIFICWORKER_H
@@ -18,6 +18,7 @@
 
 #include "repertory.h"
 #include "recall_publisher.h"
+#include "memory_graph.h"
 
 #include <atomic>
 #include <chrono>
@@ -69,6 +70,7 @@ private:
     std::unique_ptr<ltom::Repertory> repertory_;
     std::unique_ptr<DSR::InnerEigenAPI> inner_eigen_;   // created ONCE in initialize(), on the main thread (owns the ts==0 cache)
     std::unique_ptr<ltom::RecallPublisher> recall_pub_;
+    std::unique_ptr<ltom::MemoryGraph> memory_graph_;   // the window onto the repertory (domain 5)
     bool recall_swept_on_operating_ = false;            // the post-sync stale sweep runs once, on the first Operating entry
     void sweep_stale_recalls();
     bool save_blocked_ = false;                         // load could not move a bad file aside: never save over the good copy

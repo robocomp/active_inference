@@ -1,5 +1,4 @@
 #include "recall_publisher.h"
-#include "../../common/rt_covariance/rt_covariance.h"
 
 #include <map>
 #include <print>
@@ -15,13 +14,13 @@ constexpr std::string_view kPrefix = "ltom_recall_";
 constexpr float kVarZ = 1e-4f;
 
 std::string name_of(std::uint64_t uid) { return std::string(kPrefix) + std::to_string(uid); }
+}   // namespace
 
-rc::rtcov::Se3Var variances(const Keyframe& k)
+rc::rtcov::Se3Var keyframe_variances(const Keyframe& k)
 {
     return {static_cast<float>(k.pose.vx), static_cast<float>(k.pose.vy), kVarZ,
             rc::rtcov::kFlatRollPitchVar, rc::rtcov::kFlatRollPitchVar, static_cast<float>(k.pose.vyaw)};
 }
-}   // namespace
 
 RecallPublisher::RecallPublisher(std::shared_ptr<DSR::DSRGraph> G) : G_(std::move(G)), rt_api_(G_->get_rt_api()) {}
 
@@ -53,7 +52,7 @@ void RecallPublisher::write_pose(std::uint64_t room_id, std::uint64_t node_id, c
     float last_trace = 0.0f;
     // Record the pose as written only when the edge exists AND its covariance landed: otherwise the next sync retries.
     if (not G_->get_edge(room_id, node_id, "RT")) { warn_once(name, "RT edge write failed"); return; }
-    if (not rc::rtcov::publish(*G_, room_id, node_id, variances(r.kf), last_trace, true, name))
+    if (not rc::rtcov::publish(*G_, room_id, node_id, keyframe_variances(r.kf), last_trace, true, name))
     {
         warn_once(name, "rt_covariance write failed");
         return;

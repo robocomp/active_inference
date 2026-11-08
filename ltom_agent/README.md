@@ -27,6 +27,13 @@ because its owner agent was gone or Degraded, not a death; an instance still on 
 - Smoke test without touching the live graph: copy the config with `domain = 64` (not committed), plus a seed peer on
   the same domain (the same binary with `configFile = "../robot_concept/shadow.json"`, another id/name).
 
+## Memory window
+
+`ltom_agent` shows what it retains in a graph viewer on its own DSR graph (`[Agent.ltom]`, DDS domain 5, seeded from `ltom_root.json`):
+root, then `room_<key>`, then one `object` node per retained object at its newest keyframe (`room_unknown` if it has none).
+Click a node to inspect it: `object_uid`, `object_subtype`, size, `state` (live or remembered), and `em_record` for its sightings,
+keyframes and lives. The repertory file stays the store of record; the graph is rebuilt from it at start and nothing reads it back.
+
 ## Recall nodes (step 3)
 
 While Operating, each poll `ltom_agent` offers the remembered objects that are missing from the room the robot is in
