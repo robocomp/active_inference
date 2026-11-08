@@ -28,6 +28,8 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+#include "../../common/recall_match/recall_candidates.h"   // ltom recall: resurrect a remembered table at birth
+#include <set>
 #include "../../common/room_resolve/room_resolve.h"   // rc::room::current_room_frame — the room is room_1/room_2/…, never the literal "room"
 
 // ─── Instance lifecycle: merge / tracker / birth ─────────────────────────────────────────────────
@@ -256,10 +258,48 @@ void SpecificWorker::run_instance_tracker()
 
     // BIRTH: spawn an instance from each promoted (persistently-unexplained) detection, seeding the
     // fitter with the detection XY so the model starts AT the table (not the 0,0 RT-read default).
+    // ltom recall candidates, read once per cycle; a candidate taken by a birth leaves the list (take once).
+    std::vector<rc::RecallCand> recall_cands;
+    if (not res.births.empty())
+    {
+        std::set<std::string> live_names;
+        for (const auto& n : G->get_nodes_by_type("object"))
+            if (n.name().starts_with("table_")) live_names.insert(n.name());
+        // Only when the birth parent (latched room) IS the current room ltom publishes under (rc::recall_room).
+        if (const auto room = rc::recall_room(room_node_id_, rc::room::current_room(*G)))
+            recall_cands = rc::recall_candidates(*G, *room, "table", static_cast<std::uint32_t>(G->get_agent_id()),
+                                                 scene_graph_->identity_last(), live_names);
+    }
     for (const int d : res.births)
     {
         const Eigen::Vector3f& c = pkt.slices[dets[d].slice_index].centroid;
-        const auto new_id = scene_graph_->create_instance_from_detection(c, room_node_id_);
+        // RESURRECTION: only chooses which identity the newborn takes (birth stays tracker-only). MAP over
+        // {recalled candidates, new} on position alone; measurement cov = DetectionNoiseM^2 I (the tracker's R).
+        std::optional<rc::Resurrect> resurrect;
+        float resurrect_p = 0.f;
+        if (not recall_cands.empty())
+        {
+            const float area = rc::polygon_area(room_polygon_);
+            rc::recall::Params rp{cfg_.recall_pi_move, cfg_.recall_log_prior_new};
+            if (area > 0.f) rp.room_area_m2 = area;
+            else if (not warned_recall_area_)
+            {
+                warned_recall_area_ = true;
+                std::print(stderr, "table_concept: [recall] no room polygon — using the default room area {} m2\n", rp.room_area_m2);
+            }
+            if (const auto pick = rc::choose_recall(Eigen::Vector2f(c.x(), c.y()), cfg_.tracker_detection_noise_m, recall_cands, rp))
+            {
+                resurrect = pick->who;
+                resurrect_p = pick->p;
+            }
+        }
+        const auto new_id = scene_graph_->create_instance_from_detection(c, room_node_id_, resurrect);
+        if (new_id != 0 and resurrect)
+        {
+            const auto what = std::format("uid={} p={:.3f}", resurrect->uid, resurrect_p);
+            std::print("table_concept: [tracker] RESURRECT table_{} {}\n", resurrect->n, what);
+            log_phantom_event("RESURRECT", new_id, "", c.x(), c.y(), nullptr, what);
+        }
         if (new_id != 0)
         {
             fitter_->note_birth(new_id, Eigen::Vector2f(c.x(), c.y()));

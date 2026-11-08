@@ -27,6 +27,7 @@
 #include "../../common/mask_ingestor/mask_ingestor.h"      // MaskIngestor::MasksPacket
 #include "epistemic_planner.h"  // EpistemicProposal
 #include <optional>
+#include "../../common/recall_match/recall_match.h"   // rc::Resurrect
 #include "../../common/instance_identity/instance_identity.h"   // rc::identity::InstanceCounter
 
 namespace rc {
@@ -45,7 +46,7 @@ public:
     // A resurrection (ltom recall): the newborn takes the remembered chair's number and uid instead of issuing new ones.
     // Last number the persisted counter issued (opens the counter on first use).
     int identity_last();
-    struct Resurrect { int n; std::uint64_t uid; };
+    using Resurrect = rc::Resurrect;
     std::uint64_t create_instance_from_detection(const Eigen::Vector3f& centroid_room,
                                                  std::uint64_t room_node_id,
                                                  std::optional<Resurrect> r = std::nullopt);

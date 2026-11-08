@@ -36,8 +36,17 @@ HoodSceneGraph::HoodSceneGraph(std::shared_ptr<DSR::DSRGraph> graph,
 
 // ─── Node birth ──────────────────────────────────────────────────────────────────────────────────
 
+int HoodSceneGraph::identity_last()
+{
+    if (not identity_)
+        identity_.emplace(rc::identity::InstanceCounter::open("etc/instance_identity.csv",
+                                                              static_cast<std::uint32_t>(G_->get_agent_id())));
+    return identity_->last();
+}
+
 std::uint64_t HoodSceneGraph::create_instance_from_detection(const Eigen::Vector3f& centroid_room,
-                                                              std::uint64_t room_node_id)
+                                                              std::uint64_t room_node_id,
+                                                              std::optional<Resurrect> r)
 {
     auto room_opt = G_->get_node(room_node_id);
     if (not room_opt.has_value())
@@ -60,7 +69,10 @@ std::uint64_t HoodSceneGraph::create_instance_from_detection(const Eigen::Vector
     if (not identity_)
         identity_.emplace(rc::identity::InstanceCounter::open("etc/instance_identity.csv",
                                                               static_cast<std::uint32_t>(G_->get_agent_id())));
-    const int n_issued = identity_->issue(rc::identity::max_suffix(live_names, "hood_"));
+    // Resurrection: the number was issued in the past (<= the persisted `last`), so the counter never issues it again.
+    if (r and r->n > identity_->last())
+        std::print(stderr, "hood_concept: [recall] ⚠ resurrected hood_{} is above the persisted counter ({})\n", r->n, identity_->last());
+    const int n_issued = r ? r->n : identity_->issue(rc::identity::max_suffix(live_names, "hood_"));
     const std::string name = "hood_" + std::to_string(n_issued);
 
     DSR::Node hood_node = DSR::Node::create<object_node_type>(name);
@@ -92,6 +104,8 @@ std::uint64_t HoodSceneGraph::create_instance_from_detection(const Eigen::Vector
     rc::provenance::stamp_creation(*G_, hood_node);   // birth stamp: epoch ms + local ISO-8601
     // Persistent identity (common/instance_identity): written once at birth, never changed, key for ltom/atlas/EM.
     G_->add_or_modify_attrib_local<object_uid_att>(hood_node, rc::identity::make_uid(static_cast<std::uint32_t>(G_->get_agent_id()), n_issued));
+    if (r and rc::identity::make_uid(static_cast<std::uint32_t>(G_->get_agent_id()), n_issued) != r->uid)
+        std::print(stderr, "hood_concept: [recall] ⚠ uid of resurrected hood_{} does not match the recalled uid\n", n_issued);
     const auto id_opt = G_->insert_node(hood_node);
     if (not id_opt.has_value())
         return 0;

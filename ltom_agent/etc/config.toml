@@ -65,6 +65,6 @@ save_period_s   = 30
 repertory_path  = "etc/ltom_repertory.json"
 csv_path        = "etc/ltom_repertory.csv"
 # Object classes in scope (name prefix "<class>_" and an object_uid). Doors are excluded.
-classes         = ["chair", "table", "bottle", "cabinet", "refrigerator"]
+classes         = ["chair", "table", "bottle", "cabinet", "refrigerator", "hood"]
 # Classes whose remembered members that are absent from the graph are offered as recall nodes in the current room.
-recall_classes  = ["chair"]
+recall_classes  = ["chair", "table", "bottle", "cabinet", "refrigerator", "hood"]

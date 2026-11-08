@@ -71,6 +71,24 @@ static void test_posterior_sums_to_one()
     CHECK(d.posterior.size() == 4 and std::abs(s - 1.f) < 1e-5f);
 }
 
+static void test_choose_recall_takes_once()
+{
+    std::vector<rc::RecallCand> cands(2);
+    cands[0].n = 1; cands[0].cand = cand(11, 1.f, 1.f, std::sqrt(0.02f));
+    cands[1].n = 2; cands[1].cand = cand(22, 4.f, 4.f, std::sqrt(0.02f));
+    Params p{0.5f, 0.0f}; p.room_area_m2 = 20.f;
+    const auto a = rc::choose_recall({1.f, 1.f}, 0.35f, cands, p);
+    CHECK(a.has_value() and a->who.uid == 11 and a->who.n == 1 and a->p > 0.5f);
+    CHECK(cands.size() == 1);
+    const auto b = rc::choose_recall({1.f, 1.f}, 0.35f, cands, p);
+    CHECK(not b.has_value() or b->who.uid != 11);
+}
+static void test_choose_recall_empty()
+{
+    std::vector<rc::RecallCand> cands;
+    CHECK(not rc::choose_recall({0.f, 0.f}, 0.35f, cands, Params{}).has_value());
+}
+
 int main()
 {
     test_close_candidate_wins();
@@ -80,6 +98,8 @@ int main()
     test_pi_move_one_never_resurrects();
     test_pi_move_one_never_resurrects_any_area();
     test_posterior_sums_to_one();
+    test_choose_recall_takes_once();
+    test_choose_recall_empty();
     if (failures) return 1;
     std::println("recall_match_test: ok");
     return 0;

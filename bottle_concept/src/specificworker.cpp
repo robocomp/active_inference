@@ -56,6 +56,8 @@
 #include <numbers>
 #include <print>
 #include <sstream>
+#include <set>
+#include "../../common/recall_match/recall_candidates.h"   // ltom recall: resurrect a remembered bottle at birth
 
 #include <QCoreApplication>
 #include <QTimer>
@@ -788,7 +790,16 @@ void SpecificWorker::run_instance_tracker()
     for (const int d : res.births)
     {
         const Eigen::Vector3f& c = pkt.slices[dets[d].slice_index].centroid;
-        const auto new_id = scene_graph_->create_instance_from_detection(c, room_node_id_);
+        // Decide on the ROOM-frame centroid, before the support-surface decision re-parents and transforms it.
+        float resurrect_p = 0.f;
+        const auto resurrect = choose_resurrection(Eigen::Vector2f(c.x(), c.y()), resurrect_p);
+        const auto new_id = scene_graph_->create_instance_from_detection(c, room_node_id_, resurrect);
+        if (new_id != 0 and resurrect)
+        {
+            const auto what = std::format("uid={} p={:.3f}", resurrect->uid, resurrect_p);
+            std::print("bottle_concept: [tracker] RESURRECT bottle_{} {}\n", resurrect->n, what);
+            log_phantom_event("RESURRECT", new_id, "", c.x(), c.y(), nullptr, what);
+        }
         if (new_id != 0)
         {
             fitter_->note_birth(new_id, Eigen::Vector2f(c.x(), c.y()));
@@ -806,6 +817,37 @@ void SpecificWorker::run_instance_tracker()
             log_phantom_event("BIRTH", new_id, "", c.x(), c.y(), nullptr, "");
         }
     }
+}
+
+// ltom recall: only chooses which identity a newborn takes (birth stays tracker-only). MAP over
+// {recalled candidates, new} on position alone; measurement cov = DetectionNoiseM^2 I (the tracker's R).
+// Candidates are gathered afresh per call, so a bottle born a moment ago (live) is excluded.
+std::optional<rc::Resurrect> SpecificWorker::choose_resurrection(const Eigen::Vector2f& xy, float& p_out)
+{
+    // Only when the birth parent (latched room) IS the current room ltom publishes under (rc::recall_room).
+    const auto room = rc::recall_room(room_node_id_, rc::room::current_room(*G));
+    if (not room)
+        return std::nullopt;
+    std::set<std::string> live_names;
+    for (const auto& n : G->get_nodes_by_type("object"))
+        if (n.name().starts_with("bottle_")) live_names.insert(n.name());
+    auto cands = rc::recall_candidates(*G, *room, "bottle", static_cast<std::uint32_t>(G->get_agent_id()),
+                                       scene_graph_->identity_last(), live_names);
+    if (cands.empty())
+        return std::nullopt;
+    const float area = (room_polygon_.size() >= 3 ? rc::polygon_area(room_polygon_) : 0.f);
+    rc::recall::Params rp{cfg_.recall_pi_move, cfg_.recall_log_prior_new};
+    if (area > 0.f) rp.room_area_m2 = area;
+    else if (not warned_recall_area_)
+    {
+        warned_recall_area_ = true;
+        std::print(stderr, "bottle_concept: [recall] no room polygon — using the default room area {} m2\n", rp.room_area_m2);
+    }
+    const auto pick = rc::choose_recall(xy, cfg_.tracker_detection_noise_m, cands, rp);
+    if (not pick)
+        return std::nullopt;
+    p_out = pick->p;
+    return pick->who;
 }
 
 void SpecificWorker::process_bottle_node(const DSR::Node& node)

@@ -25,6 +25,7 @@
 #include "../../common/mask_ingestor/mask_ingestor.h"      // MaskIngestor::MasksPacket
 #include "epistemic_planner.h"  // EpistemicProposal
 #include <optional>
+#include "../../common/recall_match/recall_match.h"   // rc::Resurrect
 #include "../../common/instance_identity/instance_identity.h"   // rc::identity::InstanceCounter
 
 namespace rc {
@@ -40,8 +41,13 @@ public:
     // Birth a brand-new "hood_N" node from an unexplained mask detection (tracker path). Auto-names one
     // past the highest existing hood_N, seeds default geometry from the Tracker.Birth* config, anchors
     // it to the room at the detected room-frame centroid. Returns the new node id (0 on failure).
+    // A resurrection (ltom recall): the newborn takes the remembered hood's number and uid instead of issuing new ones.
+    // Last number the persisted counter issued (opens the counter on first use).
+    int identity_last();
+    using Resurrect = rc::Resurrect;
     std::uint64_t create_instance_from_detection(const Eigen::Vector3f& centroid_room,
-                                                 std::uint64_t room_node_id);
+                                                 std::uint64_t room_node_id,
+                                                 std::optional<Resurrect> r = std::nullopt);
 
     // Publish the instance's fitted model to its DSR node (geometry + FE + mesh + RFE/support-bank) and
     // the room→hood RT edge. persist_* resolves the node by id first; both no-op if the node is gone.

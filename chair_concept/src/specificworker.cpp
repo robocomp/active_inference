@@ -32,7 +32,7 @@
  */
 
 #include "specificworker.h"
-#include "recall_candidates.h"   // ltom recall: resurrect a remembered chair at birth
+#include "../../common/recall_match/recall_candidates.h"   // ltom recall: resurrect a remembered chair at birth
 #include "chair_card.h"   // make_card(): this agent's perception card
 #include "../../common/perception_card/card_io.h"   // write_card_file
 
@@ -788,7 +788,7 @@ void SpecificWorker::run_instance_tracker()
             if (n.name().starts_with("chair_")) live_names.insert(n.name());
         // Only when the birth parent (latched room) IS the current room ltom publishes under (rc::recall_room).
         if (const auto room = rc::recall_room(room_node_id_, rc::room::current_room(*G)))
-            recall_cands = rc::recall_candidates(*G, *room, static_cast<std::uint32_t>(G->get_agent_id()),
+            recall_cands = rc::recall_candidates(*G, *room, "chair", static_cast<std::uint32_t>(G->get_agent_id()),
                                                  scene_graph_->identity_last(), live_names);
     }
     for (const int d : res.births)
@@ -848,13 +848,10 @@ void SpecificWorker::run_instance_tracker()
                 warned_recall_area_ = true;
                 std::print(stderr, "chair_concept: [recall] no room polygon — using the default room area {} m2\n", rp.room_area_m2);
             }
-            const Eigen::Matrix2f R = Eigen::Matrix2f::Identity() * (cfg_.tracker_detection_noise_m * cfg_.tracker_detection_noise_m);
-            const auto dec = rc::recall::decide(Eigen::Vector2f(c.x(), c.y()), R, rc::as_candidates(recall_cands), rp);
-            if (dec.index)
+            if (const auto pick = rc::choose_recall(Eigen::Vector2f(c.x(), c.y()), cfg_.tracker_detection_noise_m, recall_cands, rp))
             {
-                const auto taken = rc::take_candidate(recall_cands, *dec.index);
-                resurrect = rc::ChairSceneGraph::Resurrect{taken.n, taken.cand.uid};
-                resurrect_p = dec.posterior[*dec.index];
+                resurrect = pick->who;
+                resurrect_p = pick->p;
             }
         }
         const auto new_id = scene_graph_->create_instance_from_detection(c, room_node_id_, resurrect);

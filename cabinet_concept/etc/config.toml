@@ -300,6 +300,8 @@ GateFallbackM = 0.50      # metric XY gate (m) before an instance has a usable c
 DetectionNoiseM = 0.35    # det-noise std R added to fit cov in the gate (S=P+R²I): covers the mask-centroid
                           # vs fitted-centre offset of a partially-viewed cabinet (~0.2–0.5 m), else the
                           # overconfident fit rejects its own detection. Cabinets are far apart → safe.
+RecallPiMove = 0.05       # ltom recall: weight of "the remembered cabinet was moved" (a GUESS - cabinets almost never move; learned permanence replaces it in step 4). 1 = location says nothing
+RecallLogPriorNew = 0.0   # ltom recall: log prior of "a NEW cabinet" vs one recalled candidate (0 = equal); the newborn takes a candidate only if it is the strict MAP
 BirthFrames = 8           # frames a mask must stay unexplained before spawning a cabinet
 # FUSED BIRTH (EXPERIMENTAL): residual-grid surprise mass under a detection accelerates its birth. birth_evidence
 # = 1 + Gain·(m/(m+MassRef)) per frame toward BirthFrames; a corroborated detection (high unexplained-occupancy)

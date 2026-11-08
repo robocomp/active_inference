@@ -220,12 +220,12 @@ Derived by reading each agent, not inferred from includes. `—` = not applicabl
 
 | agent | CREATE | UPDATE | admissibility | REMOVE | P(detect) | wall LoS | HISTORY record | OWNERSHIP |
 |---|---|---|---|---|---|---|---|---|
-| table | ✅ | ✅ | ✅ trunc + fixation | ✅ `rc::exist` | ✅ | ✅ shared helper | ✅ | ✅ |
-| chair | ✅ | ✅ | ✅ trunc + confirm_only + fixation | ❌ **hand-rolled** | ✅ shared envelope (`chair_detect.h`: `term_envelope` axes 1 × in_fov × central) | ✅ `walls_block` *(2026-10-31, below)* | ✅ | ✅ *(fixed)* |
-| bottle | ✅ | ✅ | ✅ confirm_only | ⚠️ tracker death only | — | — | ⚠️ unattributable | ✅ |
-| cabinet | ✅ | ✅ | ✅ trunc | ✅ `rc::exist` | ✅ | ✅ shared helper | ✅ | ✅ |
+| table | ✅ resurrects from ltom recall | ✅ | ✅ trunc + fixation | ✅ `rc::exist` | ✅ | ✅ shared helper | ✅ | ✅ |
+| chair | ✅ resurrects from ltom recall | ✅ | ✅ trunc + confirm_only + fixation | ❌ **hand-rolled** | ✅ shared envelope (`chair_detect.h`: `term_envelope` axes 1 × in_fov × central) | ✅ `walls_block` *(2026-10-31, below)* | ✅ | ✅ *(fixed)* |
+| bottle | ✅ resurrects from ltom recall | ✅ | ✅ confirm_only | ⚠️ tracker death only | — | — | ⚠️ unattributable | ✅ |
+| cabinet | ✅ resurrects from ltom recall | ✅ | ✅ trunc | ✅ `rc::exist` | ✅ | ✅ shared helper | ✅ | ✅ |
 | door | ✅ tracker + 2 justified non-tracker creations *(2026-10-20, below)* | ✅ | ✅ trunc + confirm_only | ✅ `rc::exist` | ✅ | ✅ shared helper | ✅ | ✅ *(fixed; + `aff_door_look_*` 2026-10-21, below)* |
-| refrigerator | ✅ | ✅ | ✅ trunc + confirm_only | ✅ `rc::exist` | ✅ | ✅ *(now shared)* | ✅ | ✅ |
+| refrigerator | ✅ resurrects from ltom recall | ✅ | ✅ trunc + confirm_only | ✅ `rc::exist` | ✅ | ✅ *(now shared)* | ✅ | ✅ |
 | residual | ✅ | ✅ | — field model, no per-frame gate | ✅ `rc::exist` | — | — | ⚠️ unattributable | ✅ |
 | human | ❌ | ❌ `belief_stabilizer` | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
 | language_agent *(2026-10-12)* | — no instances | — no belief | — | — | — | — | — | ✅ |
@@ -237,6 +237,8 @@ Derived by reading each agent, not inferred from includes. `—` = not applicabl
 *2026-10-31 (perception cards, Task 9):* chair's wall LoS cell went from `—` to ✅. `ChairFitter::zed_detectability` now delegates to `chair_p_detect` (`chair_concept/src/chair_detect.h`): `term_envelope(roi_fill) × in_fov × central × walls_block(camera, chair, room polygon)`; a chair in another room gets P(detect) 0 and its absence is no longer charged. Retired `Existence.ZedEdgeOffset/ZedRangeFull/ZedRangeRef/ZedClearLosFloor`. Live check pending.
 
 *2026-11-01 (ltom recall, step 3):* chair's CREATE gained **resurrection**: at a tracker birth, `chair_concept/src/recall_candidates.h` reads the `ltom_recall_<uid>` metaconcept nodes ltom offers under the current room (own agent's uid, `chair_<N>` not live) and `rc::recall::decide` (common/recall_match) picks the MAP hypothesis over {recalled candidates, new} on the room-frame centroid alone (measurement cov `DetectionNoiseM^2 I`, `Tracker.RecallPiMove` / `RecallLogPriorNew`). The newborn then takes that candidate's `chair_<N>` and `object_uid` instead of issuing new ones; a candidate is taken once per cycle. Birth stays tracker-only: resurrection only chooses the identity, never creates, delays or suppresses a birth. Logged as `RESURRECT chair_N uid=.. p=..`. Live check pending.
+
+*2026-11-04 (ltom recall, step 4a):* the CREATE cell of table, chair, bottle, cabinet and refrigerator now reads "resurrects from ltom recall", and hood (no row of its own in this audit) does the same: a tracker birth may take the remembered instance's number and uid (`rc::choose_recall`, MAP over {recalled candidates, new}; birth itself stays tracker-only). Cabinet does it on both tracker birth paths (detection and residual-arm seed); `run_kitchen_model()` nodes carry no uid and are left out.
 
 **language_agent** is not a concept agent: it births no instance and holds no belief, so CREATE…HISTORY do not apply
 (`—`, not `❌`). It owns exactly one node, `chat_intention` (type `intention`, has_intention edge from `Shadow`), the

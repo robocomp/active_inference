@@ -38,6 +38,7 @@
 #include "bottle_model.h"        // BottleState
 #include "../../common/mask_ingestor/mask_ingestor.h"   // MaskIngestor::MasksPacket
 #include <optional>
+#include "../../common/recall_match/recall_match.h"   // rc::Resurrect
 #include "../../common/instance_identity/instance_identity.h"   // rc::identity::InstanceCounter
 
 namespace rc {
@@ -74,8 +75,13 @@ public:
 
     // BIRTH (InstanceTracker): create a fresh auto-named "bottle_<N>" node at a detection centroid with
     // the default prior size, parented by the support decision. Returns the new node id (0 on failure).
+    // A resurrection (ltom recall): the newborn takes the remembered bottle's number and uid instead of issuing new ones.
+    // Last number the persisted counter issued (opens the counter on first use).
+    int identity_last();
+    using Resurrect = rc::Resurrect;
     std::uint64_t create_instance_from_detection(const Eigen::Vector3f& centroid_room,
-                                                 std::uint64_t room_node_id);
+                                                 std::uint64_t room_node_id,
+                                                 std::optional<Resurrect> r = std::nullopt);
 
     // Publish the instance's fitted model to its DSR node (geometry attrs + FE + mesh + RFE queue) and
     // RT edge — only when pose/size moved past the dead-band (FE jitter alone never triggers a rewrite).

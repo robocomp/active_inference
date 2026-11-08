@@ -413,6 +413,8 @@ struct TableConfig
     // the YOLO mask CENTROID sits well off the fitted geometric CENTRE under a partial view (~0.2–0.5 m),
     // so R must cover that offset or the overconfident fit (σ ~mm) rejects its own real detection.
     float tracker_detection_noise_m = 0.35f;
+    float recall_pi_move = 0.5f;              // Tracker.RecallPiMove — class prior that a remembered table was MOVED (guess; learned in step 4)
+    float recall_log_prior_new = 0.0f;        // Tracker.RecallLogPriorNew — log prior of "new table" vs one recalled candidate
     int   tracker_birth_frames      = 8;      // frames a mask must stay unexplained before spawning a table
     // FUSED BIRTH (EXPERIMENTAL, off by default): let residual-grid SURPRISE MASS under a detection accelerate its
     // birth. Per frame a detection contributes birth_evidence = 1 + gain·(m/(m+ref)) toward the birth_frames

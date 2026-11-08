@@ -206,6 +206,7 @@ private:
     // rc::nbv::is_reachable imposes no constraint (it refuses to guess), so a viewpoint outside the room
     // reads as reachable and the direction-blind information term cannot break the tie.
     std::vector<Eigen::Vector2f>                            room_polygon_;
+    bool warned_recall_area_ = false;   // log "no room polygon" for the recall area once
     std::unique_ptr<rc::TableExistence>                    existence_; // evidence-based removal (existence log-odds)
 
     // Live belief dashboard — its OWN top-level window (extracted from the DSR graph dock so it shows
