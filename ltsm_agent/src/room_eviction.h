@@ -9,7 +9,7 @@
  *
  *   1. MEASURE THE SEAM.  T(room_new <- room_old), read through the robot while BOTH RT edges
  *      still exist. This window is the only time it is computable, so nothing else happens first.
- *   2. COPY the old room's subtree into the memory graph (nodes, attributes, RT edges).
+ *   2. COPY the old room's structure (floor, walls, doors) into the memory graph (nodes, attributes, RT edges).
  *   3. PLACE the new room in memory, under root like every room (2026-10-12): rooms are siblings, each its own
  *      frame; what relates two rooms is the passage's two door faces (seam_through_passage).
  *   4. WRITE THE DOOR TWICE, once per side, match-linked, with the vocabulary cortex reserved for
@@ -186,8 +186,8 @@ public:
     /// STARTUP. Every room in the working memory that long-term memory does not already hold gets a
     /// room node in memory, with its STRUCTURE: the floor, the walls and every door that exists now,
     /// under the same RT chain as in the live graph so each door keeps its pose in the room's frame.
-    /// Furniture and affordances are NOT copied here -- they are short-lived beliefs, and the
-    /// eviction copies whatever is really there at the fence. Reads the live graph, never writes it.
+    /// Furniture and affordances are never copied into memory: objects belong to ltom_agent.
+    /// Reads the live graph, never writes it.
     ///
     /// Uses the same `r<idx>_` naming as evict(), memoised per live room, so a later eviction of the
     /// same room FILLS these nodes instead of minting a second copy.
@@ -294,17 +294,13 @@ private:
     [[nodiscard]] bool remembered_room(const std::optional<DSR::Node> &live_room) const
     { return live_room.has_value() and remembered(live_room.value()).has_value(); }
 
-    /// Whole = everything under the room (eviction). Structure = floor, walls and doors only, and
-    /// nothing below a door (the startup seed).
-    enum class Scope { Whole, Structure };
-
     /// Copy `live_id`'s subtree under `mem_parent_id`, prefixing every name with `prefix`.
     /// `root_edge_attrs` is what goes on the RT edge into the subtree root (identity for the
     /// first room in memory, the seam for every one after it).
     bool copy_subtree(std::uint64_t live_id, std::uint64_t mem_parent_id,
                       const std::string &prefix, std::uint64_t room_idx,
                       const std::map<std::string, DSR::Attribute> &root_edge_attrs,
-                      IdMap &map, Outcome &out, Scope scope = Scope::Whole);
+                      IdMap &map, Outcome &out);
 
     /// One node's twin in memory: same type, same attributes, name prefixed, parent/level remapped.
     /// An existing twin under a DIFFERENT parent has its old RT edge removed, so the caller's new

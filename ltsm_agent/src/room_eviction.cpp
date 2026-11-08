@@ -273,7 +273,7 @@ std::optional<std::uint64_t> RoomEviction::twin(const DSR::Node &src, std::uint6
 bool RoomEviction::copy_subtree(std::uint64_t live_id, std::uint64_t mem_parent_id,
                                 const std::string &prefix, std::uint64_t room_idx,
                                 const std::map<std::string, DSR::Attribute> &root_edge_attrs,
-                                IdMap &map, Outcome &out, Scope scope)
+                                IdMap &map, Outcome &out)
 {
     struct Item { std::uint64_t live_id, mem_parent; std::map<std::string, DSR::Attribute> edge_attrs; };
     std::deque<Item> q{{live_id, mem_parent_id, root_edge_attrs}};
@@ -300,8 +300,8 @@ bool RoomEviction::copy_subtree(std::uint64_t live_id, std::uint64_t mem_parent_
             if (mem_->insert_or_assign_edge(std::move(edge))) ++out.edges_copied;
         }
 
-        // STRUCTURE stops at a door: what hangs below one (its affordances) is not the room's shape.
-        if (scope == Scope::Structure and is_door(*live_, src.value())) continue;
+        // A door ends the copy: what hangs below one (its affordances) is not the room's shape.
+        if (is_door(*live_, src.value())) continue;
 
         for (const auto &e : DSR::DSRGraph::get_node_edges_by_type(src.value(), "RT"))
         {
@@ -316,8 +316,8 @@ bool RoomEviction::copy_subtree(std::uint64_t live_id, std::uint64_t mem_parent_
             // never room content; see docs/superpowers/plans/2026-11-01-ltom-recall-chair.md.
             if (child->name().starts_with("ltom_recall_"))
                 continue;
-            if (scope == Scope::Structure and child->type() != "floor" and child->type() != "wall"
-                and not is_door(*live_, child.value()))
+            // ★ LTSM HOLDS ROOMS AND PASSAGES ONLY (user 2026-11-08): floor, walls, doors. Objects belong to ltom_agent.
+            if (child->type() != "floor" and child->type() != "wall" and not is_door(*live_, child.value()))
                 continue;
             q.push_back({e.to(), mem_id.value(), e.attrs()});
         }
@@ -688,7 +688,7 @@ Outcome RoomEviction::evict(const Candidate &cand)
     const auto new_room_live = live_->get_node(cand.new_room_id);
     if (not new_room_live.has_value()) { out.reason = "the new room vanished mid-eviction"; return out; }
 
-    // ★ WHOLE SUBTREE, not only a stub: after a PROMOTION the old room is deleted from the live graph
+    // ★ THE ROOM'S STRUCTURE, not only a stub: after a PROMOTION the old room is deleted from the live graph
     // and door_concept retires the entry mirror with its source, so this is the only moment the new
     // room's side of the crossed door can be remembered. For a room with nothing under it yet (the
     // two-room stage) the subtree IS the stub.
@@ -1650,7 +1650,7 @@ SeedOutcome RoomEviction::seed_from_working_memory()
 
         IdMap map;
         Outcome out;
-        if (not copy_subtree(room.id(), parent, prefix, idx, edge, map, out, Scope::Structure))
+        if (not copy_subtree(room.id(), parent, prefix, idx, edge, map, out))
         {
             qWarning() << "[seed] could not write" << QString::fromStdString(room.name())
                        << "into memory:" << QString::fromStdString(out.reason);

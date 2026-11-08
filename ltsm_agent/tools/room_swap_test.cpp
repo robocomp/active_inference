@@ -354,7 +354,7 @@ int main(int argc, char **argv)
         // the adopted room live under K's name (room_concept renames P in place, Task 6; stood in for here by a node named
         // room_3); the robot then leaves it into a new proto
         const auto K = live_node("room", "room_3", robot_id, 0, 0, 0, 3);
-        live_node("object", "extra", K, 1, 1, 0);
+        live_node("object", "door_extra", K, 1, 1, 0);   // a door: ltsm archives structure only (furniture never)
         const auto N = live_node("room", "room_6", robot_id, 2, 2, 0, 6);
         ltsm::Candidate c;
         c.robot_id = robot_id; c.robot_name = "Shadow";
@@ -363,14 +363,14 @@ int main(int argc, char **argv)
         const auto snapK = snapshot_room("r3_room_3");
         const auto out = f.ev.evict(c);
         check(not out.ok and out.reason.starts_with("deferred"), "evict of the recalled room is deferred while Staged");
-        check(snapshot_room("r3_room_3") == snapK and not mem->get_node("r3_extra").has_value(), "nothing was written into the known twin");
+        check(snapshot_room("r3_room_3") == snapK and not mem->get_node("r3_door_extra").has_value(), "nothing was written into the known twin");
         f.sw.on_evict(c);
         check(f.sw.state() == ltsm::RoomSwap::State::Adopted and not f.ev.held("r3_room_3"), "on_evict only releases the hold: still Adopted");
         f.sw.on_evicted(c, false);
         check(f.ev.held("r3_room_3") and f.sw.state() == ltsm::RoomSwap::State::Adopted, "a failed eviction restores the hold");
         f.sw.on_evict(c);
         const auto out2 = f.ev.evict(c);
-        check(out2.ok and mem->get_node("r3_extra").has_value(), "after the release the eviction writes as usual");
+        check(out2.ok and mem->get_node("r3_door_extra").has_value(), "after the release the eviction writes as usual");
         f.sw.on_evicted(c, out2.ok);
         check(f.sw.state() == ltsm::RoomSwap::State::Entering and proposal_nodes() == 0, "a successful eviction closes the window and withdraws the proposal");
     }
@@ -381,7 +381,7 @@ int main(int argc, char **argv)
         Fix f;
         check(f.sw.swap(3, pose_k(), live_P) and accept(f), "swap accepted, proposal accepted");
         const auto K = live_node("room", "room_3", robot_id, 0, 0, 0, 3);       // the adopted room (renamed P stand-in)
-        live_node("object", "extra", K, 1, 1, 0);
+        live_node("object", "door_extra", K, 1, 1, 0);   // a door: ltsm archives structure only (furniture never)
         ltsm::Candidate c;      // promotion of the adopted K: old = L, new = K
         c.robot_id = robot_id; c.robot_name = "Shadow";
         c.old_room_id = live_L; c.old_room_name = "room_2"; c.new_room_id = K; c.new_room_name = "room_3";
@@ -389,7 +389,7 @@ int main(int argc, char **argv)
         const auto snapK = snapshot_room("r3_room_3");
         const auto out = f.ev.evict(c);
         check(out.ok and out.current_flipped, "the promotion into the recalled room goes through (current flips)");
-        check(snapshot_room("r3_room_3") == snapK and not mem->get_node("r3_extra").has_value(), "K's twin is not copied into while staged");
+        check(snapshot_room("r3_room_3") == snapK and not mem->get_node("r3_door_extra").has_value(), "K's twin is not copied into while staged");
         f.sw.on_room_left();
     }
 

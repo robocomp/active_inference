@@ -8,7 +8,9 @@
 #include "../src/seam_fusion.h"
 #include <QCoreApplication>
 #include <cstdio>
+#include <algorithm>
 #include <cstdlib>
+#include <format>
 #include <string>
 
 using namespace ltsm::seam;
@@ -76,6 +78,14 @@ int main(int argc, char **argv)
     }
     if (mode == "garbage" or mode == "sane" or mouth_mode or mode == "reentry" or mode == "reentry-garbage")
         std::printf("  proto self-edge inserted: %d\n", int(live->insert_or_assign_edge(DSR::Edge::create<proto_edge_type>(400, 400))));
+    {   // furniture in BOTH rooms (the old room's table_1 comes with the fixture): ltsm remembers rooms and passages, never objects
+        DSR::Node chair; chair.type("object"); chair.name("chair_1");
+        live->add_or_modify_attrib_local<object_subtype_att>(chair, std::string("chair"));
+        live->add_or_modify_attrib_local<parent_att>(chair, std::uint64_t(400));
+        live->add_or_modify_attrib_local<level_att>(chair, 3);
+        const auto id = live->insert_node(chair).value();
+        put_edge(*live, 400, id, Vec3(1.0, 1.0, 0.0), std::nullopt);
+    }
     ltsm::RoomEviction ev(live, mem);
     const bool reentry = mode == "reentry" or mode == "reentry-garbage";
     // the seam memory already holds for this passage: an OLDER estimate of the sane chain, off by (0.03, -0.02, 0.01)
@@ -129,6 +139,15 @@ int main(int argc, char **argv)
     if (mode == "flagged") c.crossing_born = true;
     const auto out = ev.evict(c);
     check(out.ok, "evict ok (" + out.reason + ")");
+    // ★ LTSM HOLDS ROOMS AND PASSAGES ONLY (user 2026-11-08): objects belong to ltom_agent.
+    {
+        const auto objects = mem->get_nodes_by_type("object");
+        const bool no_furniture = std::ranges::none_of(objects, [](const auto &n) { return n.name().find("table") != std::string::npos or n.name().find("chair") != std::string::npos; });
+        const bool door_kept = std::ranges::any_of(objects, [](const auto &n) { return n.name().find("door_1") != std::string::npos; });
+        check(no_furniture, std::format("no furniture in long-term memory ({} object nodes)", objects.size()));
+        check(door_kept, "the door is still archived");
+        check(not mem->get_nodes_by_type("wall").empty() and not mem->get_nodes_by_type("floor").empty(), "floor and walls are still archived");
+    }
     const Vec3 stored(out.seam.translation().x(), out.seam.translation().y(),
                       std::atan2(out.seam.rotation()(1, 0), out.seam.rotation()(0, 0)));
     std::printf("  stored seam (%+.3f,%+.3f,%+.4f)  aperture truth (%+.3f,%+.3f,%+.4f)\n", stored.x(), stored.y(), stored.z(),

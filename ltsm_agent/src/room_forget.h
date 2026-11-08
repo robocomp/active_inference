@@ -2,7 +2,7 @@
  * room_forget.h — remove one room from long-term memory, leaving the rest coherent.
  *
  * What goes, and why each part must:
- *   - the room and EVERYTHING below it: the RT subtree (floor, walls, doors, furniture copies) and any node whose
+ *   - the room and EVERYTHING below it: the RT subtree (floor, walls, doors) and any node whose
  *     `parent` names a node in it, so nothing is left hanging from a deleted parent;
  *   - every PASSAGE with a face (match edge) in it. A passage is the only thing relating two rooms
  *     (seam_through_passage); with one face gone it relates nothing, and RoomRecall would keep resolving it
