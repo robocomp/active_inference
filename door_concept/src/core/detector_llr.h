@@ -61,11 +61,14 @@ struct SupportModel
     return (1.0 - outlier) * beta + outlier;
 }
 
-/// ℓ_sup(x) = ln p(x | present) − ln p(x | absent). Finite on [0,1] for any model in domain (support_in_domain).
+/// ℓ_sup(x) = min(0, ln p(x | present) − ln p(x | absent)). Finite on [0,1] for any model in domain (support_in_domain).
+/// ★FLAGGED, the one clamp of this channel (Pablo 2026-11-08, clean11): that the fit explains its own points says the FIT converged, not that the thing is a
+/// door: a door-shaped phantom is explained just as well (door_4: +75 nats over 25 views, and 17 failed opens could not remove it). So the channel can only
+/// count against a door. The likelihood ratio's positive side is not a statement about doors; no model-level term replaces this until p(x | door-shaped non-door) exists.
 [[nodiscard]] inline float support_llr(float x, const SupportModel& m)
 {
-    return static_cast<float>(std::log(support_density(x, m.present_a, m.present_b, m.present_outlier))
-                              - std::log(support_density(x, m.absent_a, m.absent_b, m.absent_outlier)));
+    return std::min(0.0f, static_cast<float>(std::log(support_density(x, m.present_a, m.present_b, m.present_outlier))
+                                             - std::log(support_density(x, m.absent_a, m.absent_b, m.absent_outlier))));
 }
 
 /// A probability must be a probability and the densities finite on [0,1] (a, b >= 1): domain, not a model threshold.

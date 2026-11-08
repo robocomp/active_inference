@@ -111,7 +111,7 @@ int main()
         std::printf("  support: max |dl| per dx=0.0005: %.4f; l(0)=%.2f l(0.05)=%.2f l(0.3)=%.2f l(0.5)=%.2f l(0.7)=%.2f l(0.9)=%.2f l(1)=%.2f\n",
                     max_step, support_llr(0.f, m), support_llr(.05f, m), support_llr(.3f, m), support_llr(.5f, m), support_llr(.7f, m), support_llr(.9f, m), support_llr(1.f, m));
         CHECK(max_step < 0.05f);                      // no step anywhere (a jump would show up as one big sample-to-sample change)
-        CHECK(support_llr(0.05f, m) > 0.0f);          // a well-fitted door: a small positive
+        CHECK(support_llr(0.05f, m) == 0.0f);         // a well-fitted fit says nothing about the door: the channel only counts against (clean11)
         CHECK(support_llr(1.0f, m) < -4.0f and support_llr(0.95f, m) < -4.0f);   // a fit explaining nothing of its support: strongly negative
         CHECK(support_llr(1.0000001f, m) == support_llr(1.0f, m));   // the mean of responsibilities rounding past 1 is 1
     }
