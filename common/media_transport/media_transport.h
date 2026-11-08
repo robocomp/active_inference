@@ -27,6 +27,7 @@
 #include "generated/idl/image360_framePubSubTypes.hpp"
 #include "generated/idl/lidar_framePubSubTypes.hpp"
 #include "generated/idl/imu_framePubSubTypes.hpp"
+#include "generated/idl/odom_framePubSubTypes.hpp"
 
 namespace eprosima::fastdds::dds {
 class DomainParticipant;
@@ -86,6 +87,7 @@ inline constexpr const char* IMAGE_FRAME_TYPE_TAG    = "ImageFrame.v2";
 inline constexpr const char* IMAGE360_FRAME_TYPE_TAG = "Image360Frame.v1";
 inline constexpr const char* LIDAR_FRAME_TYPE_TAG    = "LidarFrame.v1";
 inline constexpr const char* IMU_FRAME_TYPE_TAG      = "ImuFrame.v1";
+inline constexpr const char* ODOM_FRAME_TYPE_TAG     = "OdomFrame.v1";
 
 
 struct MediaDescriptor
@@ -166,7 +168,7 @@ namespace detail
 // participant/QoS/loan logic lives here once; the typed wrappers only add the
 // FrameKind selector (which PubSubType to register) and the loan/publish casts.
 // Not thread-safe: drive from a single producer thread.
-enum class FrameKind { Image, Image360, Lidar, Imu };
+enum class FrameKind { Image, Image360, Lidar, Imu, Odom };
 
 class WriterCore
 {
@@ -257,6 +259,21 @@ public:
     ImuFrame* loan() { return static_cast<ImuFrame*>(core_.loan_raw()); }
     bool      publish(ImuFrame* s) { return core_.publish_raw(s); }
     void      discard(ImuFrame* s) { core_.discard_raw(s); }
+    [[nodiscard]] bool data_sharing_active() const { return core_.data_sharing_active(); }
+private:
+    detail::WriterCore core_;
+};
+
+// Wheel odometry of the mobile base (OdomFrame, ~60 bytes). See idl/odom_frame.idl.
+class OdomPublisher
+{
+public:
+    OdomPublisher() = default;
+    bool init(const PublisherConfig& cfg) { return core_.init(cfg, detail::FrameKind::Odom); }
+    void close() { core_.close(); }
+    OdomFrame* loan() { return static_cast<OdomFrame*>(core_.loan_raw()); }
+    bool       publish(OdomFrame* s) { return core_.publish_raw(s); }
+    void       discard(OdomFrame* s) { core_.discard_raw(s); }
     [[nodiscard]] bool data_sharing_active() const { return core_.data_sharing_active(); }
 private:
     detail::WriterCore core_;
@@ -420,6 +437,40 @@ private:
     std::int64_t last_source_ns_ = 0;
 };
 
+// One reader per odometry topic. Same shape as ImuSubscriber, for the OdomFrame type.
+class OdomSubscriber
+{
+public:
+    using FrameCallback = std::function<void(const OdomFrame& frame, std::int64_t recv_ns)>;
+
+    OdomSubscriber() = default;
+    ~OdomSubscriber();
+    OdomSubscriber(const OdomSubscriber&) = delete;
+    OdomSubscriber& operator=(const OdomSubscriber&) = delete;
+
+    bool init(const SubscriberConfig& cfg);
+    void close();
+
+    int poll(const FrameCallback& cb);                          // non-blocking drain
+    int wait_and_poll(const FrameCallback& cb, int timeout_ms); // block-then-drain
+
+    [[nodiscard]] bool data_sharing_active() const { return data_sharing_active_; }
+    // DDS source_timestamp (system_clock epoch ns) of the last DELIVERED sample: when the producer's
+    // write() ran. recv_ns − this = the transport hop; this − stamp_ms·1e6 = capture→publish upstream.
+    [[nodiscard]] std::int64_t last_source_ns() const { return last_source_ns_; }
+
+private:
+    eprosima::fastdds::dds::DomainParticipant* participant_ = nullptr;
+    eprosima::fastdds::dds::Subscriber*        subscriber_  = nullptr;
+    eprosima::fastdds::dds::Topic*             topic_       = nullptr;
+    eprosima::fastdds::dds::DataReader*        reader_      = nullptr;
+    std::uint32_t participant_domain_id_ = 0;
+    bool participant_shm_only_ = true;
+    bool has_participant_ = false;
+    bool data_sharing_active_ = false;
+    std::int64_t last_source_ns_ = 0;
+};
+
 // ── Descriptor-driven subscriber factories ───────────────────────────────────
 // THE single, shared way every agent brings up a media-plane consumer, so the
 // initialization code is identical everywhere (easier maintenance). Each factory:
@@ -554,6 +605,31 @@ make_imu_subscriber_from_graph(Graph& graph, const std::string& node_name,
         return nullptr;
     }
     std::print("[media] IMU subscriber up from '{}' descriptor ('{}'): domain={} topic='{}'\n",
+               node_name, stream_key, cfg->domain_id, cfg->topic_name);
+    return sub;
+}
+
+template <class Graph>
+[[nodiscard]] std::unique_ptr<OdomSubscriber>
+make_odom_subscriber_from_graph(Graph& graph, const std::string& node_name,
+                               const std::string& stream_key = "odom")
+{
+    auto desc = descriptor_from_graph(graph, node_name);
+    auto cfg  = desc.has_value() ? desc->subscriber_config(stream_key) : std::nullopt;
+    if (not cfg.has_value())
+    {
+        std::print(stderr, "[media] no '{}' stream descriptor on node '{}' — odom subscriber not created\n",
+                   stream_key, node_name);
+        return nullptr;
+    }
+    auto sub = std::make_unique<OdomSubscriber>();
+    if (not sub->init(*cfg))
+    {
+        std::print(stderr, "[media] odom subscriber init FAILED (node '{}' topic '{}')\n",
+                   node_name, cfg->topic_name);
+        return nullptr;
+    }
+    std::print("[media] odom subscriber up from '{}' descriptor ('{}'): domain={} topic='{}'\n",
                node_name, stream_key, cfg->domain_id, cfg->topic_name);
     return sub;
 }

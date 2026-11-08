@@ -1,0 +1,48 @@
+// RoboComp active_inference - media transport plane
+// Wheel odometry of the mobile base, one sample per producer cycle (~100 Hz on Shadow).
+//
+// WHY A MEDIA STREAM. Odometry used to reach agents only as robot_current_* attributes on the robot
+// node, written once per FullPose. At the real base's ~100 Hz every sample is a graph write that every
+// agent receives, and at that rate the controller saw odometry-stale stalls of minutes (2026-11-05).
+// Only room_concept's preintegrator needs every sample; everyone else needs the latest value. So the
+// full-rate stream rides here, beside the IMU, and the graph is written at a low rate.
+//
+// Bounded, FINAL, plain (is_plain()==true), unkeyed — same contract as ImuFrame.
+
+module rc { module media {
+
+    // Stream identifier. Shares the constant space with STREAM_ZED_RGB(0)/STREAM_ZED_DEPTH(1)/
+    // STREAM_IMU(2)/STREAM_LIDAR(3).
+    const unsigned long STREAM_ODOM = 4;
+
+    @extensibility(FINAL)
+    struct OdomFrame
+    {
+        // 64-bit members FIRST so the C++ in-memory layout matches the XCDR2 serialized layout.
+        unsigned long long frame_id;      // monotonic, set by producer
+        unsigned long long stamp_ms;      // the instant the sample refers to, WALL epoch milliseconds
+        // Producer's SIMULATION clock in ms, or 0 when the source is a real base. Same contract as
+        // ImuFrame.sim_stamp_ms: 0 doubles as the "not simulated" flag.
+        unsigned long long sim_stamp_ms;
+        unsigned long stream_id;          // NOT @key — FastDDS AUTO data-sharing turns off for keyed types
+
+        // The interval, ms, this sample is the MEAN velocity over (encoders differenced across it).
+        // A consumer integrating the stream integrates each sample across exactly this interval.
+        // On the producer's own clock: sim ms when sim_stamp_ms != 0, wall ms otherwise.
+        float period_ms;
+
+        // Body-frame twist, SI units: m/s and rad/s, per WALL second (what FullPoseEuler adv/side/rot
+        // carry from the Webots bridge). adv = forward, side = lateral with FullPoseEuler.side's
+        // sign, rot = counter-clockwise about +Z. A differential base reports side structurally 0.
+        float adv;
+        float side;
+        float rot;
+
+        // Per-sample variances of the values ACTUALLY sent, (m/s)^2 and (rad/s)^2. Strictly positive,
+        // or exactly -1 when the producer does not know. Never 0: zero reads as infinite confidence.
+        float adv_var;
+        float side_var;
+        float rot_var;
+    };
+
+}; };

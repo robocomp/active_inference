@@ -70,6 +70,7 @@ public:
         std::optional<StreamSpec> image360_stream;// nullopt ⇒ ricoh panorama not published (wide Image360Frame)
         std::optional<StreamSpec> lidar_stream;   // nullopt ⇒ lidar not published
         std::optional<StreamSpec> imu_stream;     // nullopt ⇒ imu not published
+        std::optional<StreamSpec> odom_stream;    // nullopt ⇒ wheel odometry not published
     };
 
     // ── per-payload views (carry no DDS types to the call site) ──────────────
@@ -110,6 +111,16 @@ public:
         float acc_var = -1.f;
     };
 
+    // Wheel odometry, body frame, SI (m/s, rad/s). Same contract as rc::media::OdomFrame.
+    struct OdomFrameView
+    {
+        std::uint64_t stamp_ms = 0;
+        std::uint64_t sim_stamp_ms = 0;     // 0 = real base
+        float period_ms = 0.f;              // interval the sample is the mean over; 0 = unknown
+        float adv = 0.f, side = 0.f, rot = 0.f;
+        float adv_var = -1.f, side_var = -1.f, rot_var = -1.f;   // -1 = producer does not know
+    };
+
     SensorMediaPublisher() = default;
     ~SensorMediaPublisher();
     SensorMediaPublisher(const SensorMediaPublisher&) = delete;
@@ -123,6 +134,7 @@ public:
     [[nodiscard]] bool image360_ready() const noexcept { return image360_.has_value(); }
     [[nodiscard]] bool lidar_ready() const noexcept { return lidar_.has_value(); }
     [[nodiscard]] bool imu_ready() const noexcept { return imu_.has_value(); }
+    [[nodiscard]] bool odom_ready() const noexcept { return odom_.has_value(); }
     [[nodiscard]] bool data_sharing_active() const noexcept;
 
     // NOTE: this class no longer WRITES the descriptor onto the graph. It used to, via
@@ -170,6 +182,8 @@ public:
     bool publish_image360(const ImageFrameView& view);
     bool publish_lidar(const LidarFrameView& view);
     bool publish_imu(const ImuFrameView& view);
+    // Not thread-safe, like every publish_*: the caller serialises (the FullPose Ice callback).
+    bool publish_odom(const OdomFrameView& view);
 
     // Which producer thread's streams to report. Each group is touched by exactly
     // one thread (images=RGBD, lidar=lidar, imu=imu), so per-group reporting stays
@@ -216,6 +230,7 @@ private:
     std::optional<Stream<rc::media::Image360Publisher>>      image360_;
     std::optional<Stream<rc::media::LidarPublisher>>         lidar_;
     std::optional<Stream<rc::media::ImuPublisher>>           imu_;
+    std::optional<Stream<rc::media::OdomPublisher>>          odom_;
 
     std::uint32_t domain_id_          = 0;
     int           history_depth_      = 8;

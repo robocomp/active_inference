@@ -20,4 +20,6 @@ set(AI_COMMON_IDL_SOURCES
   ${AI_COMMON_IDL_DIR}/lidar_frameTypeObjectSupport.cxx
   ${AI_COMMON_IDL_DIR}/imu_framePubSubTypes.cxx
   ${AI_COMMON_IDL_DIR}/imu_frameTypeObjectSupport.cxx
+  ${AI_COMMON_IDL_DIR}/odom_framePubSubTypes.cxx
+  ${AI_COMMON_IDL_DIR}/odom_frameTypeObjectSupport.cxx
 )

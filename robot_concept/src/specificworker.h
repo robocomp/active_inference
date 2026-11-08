@@ -167,6 +167,16 @@ private:
 		std::string MEDIA_RICOH_TOPIC = "rc/ricoh/rgb";
 		std::string MEDIA_LIDAR_TOPIC = "rc/lidar3d/points";
 		std::string MEDIA_IMU_TOPIC   = "rc/imu/data";
+		// Wheel odometry on the media plane (rc/odom/data, OdomFrame). Only room_concept's
+		// preintegrator needs every sample; at ~100 Hz each one as a graph write stalled the controller
+		// (2026-11-05), so the full-rate stream rides here and the graph carries the robot_current_*
+		// attributes at whatever rate FullPose arrives. The descriptor lives on the ROBOT node.
+		//   "auto": adopt an external producer (shadow_bridge_dds, Proxies.MediaPlaneDDS5) as soon as
+		//           it advertises; until then publish each FullPose that arrives over Ice.
+		//   "ice" : always publish from FullPose.   "dds": never publish, an external producer owns it.
+		bool        ENABLE_ODOM       = true;
+		std::string ODOM_SOURCE       = "auto";
+		std::string MEDIA_ODOM_TOPIC  = "rc/odom/data";
 	};
 	Params params;
 
@@ -265,6 +275,12 @@ private:
 	// agent must not publish over it — it subscribes instead, purely to report the observed rate on the
 	// [IMUThread] heartbeat. Negotiated like the others through mediaplanedds4_proxy.
 	std::atomic<bool> bridge_imu_{true};
+	// Same for wheel odometry, through mediaplanedds5_proxy. true ⇒ FullPose_newFullPose publishes
+	// rc/odom/data from the Ice sample; false ⇒ an external producer (the Webots bridge) owns it.
+	std::atomic<bool> bridge_odom_{true};
+	// FullPose arrives on Ice dispatch threads and a media publisher is single-threaded.
+	std::mutex odom_pub_mtx_;
+	std::uint64_t odom_prev_stamp_ms_ = 0;   // under odom_pub_mtx_: the previous sample's own clock
 
 	// Media plane (zero-copy DDS); RGBD pixels leave the DSR graph here.
 	SensorMediaPublisher media_;

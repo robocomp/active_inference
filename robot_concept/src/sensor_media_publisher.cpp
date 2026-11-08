@@ -118,6 +118,25 @@ bool SensorMediaPublisher::init(const Config& cfg)
                      + "=" + QString::fromStdString(cfg.imu_stream->topic);
     }
 
+    if (cfg.odom_stream)
+    {
+        any_stream = true;
+        odom_.emplace();
+        odom_->key       = cfg.odom_stream->key;
+        odom_->topic     = cfg.odom_stream->topic;
+        odom_->stream_id = cfg.odom_stream->stream_id;
+        if (not odom_->pub.init(stream_config(cfg.domain_id, cfg.history_depth, cfg.odom_stream->topic, cfg.data_sharing)))
+        {
+            all_ok = false;
+            qWarning() << "[Media] odom publisher init FAILED topic="
+                       << QString::fromStdString(cfg.odom_stream->topic);
+            odom_.reset();
+        }
+        else
+            summary += " " + QString::fromStdString(cfg.odom_stream->key)
+                     + "=" + QString::fromStdString(cfg.odom_stream->topic);
+    }
+
     if (cfg.image360_stream)
     {
         any_stream = true;
@@ -162,6 +181,8 @@ bool SensorMediaPublisher::data_sharing_active() const noexcept
     if (lidar_ and not lidar_->pub.data_sharing_active())
         return false;
     if (imu_ and not imu_->pub.data_sharing_active())
+        return false;
+    if (odom_ and not odom_->pub.data_sharing_active())
         return false;
     return true;
 }
@@ -233,6 +254,18 @@ rc::media::MediaDescriptor SensorMediaPublisher::make_descriptor(
         {
             desc.type_name = "Image360Frame";
             desc.type_tag  = rc::media::IMAGE360_FRAME_TYPE_TAG;
+        }
+    }
+    if (odom_ and wanted(odom_->key))
+    {
+        desc.streams[odom_->key]      = odom_->topic;
+        desc.stream_types[odom_->key] = "OdomFrame";
+        // The robot node carries ONLY this stream, so stamp the top-level type as well (see the IMU
+        // case above for why a self-contradictory descriptor is avoided).
+        if (desc.streams.size() == 1)
+        {
+            desc.type_name = "OdomFrame";
+            desc.type_tag  = rc::media::ODOM_FRAME_TYPE_TAG;
         }
     }
     return desc;
@@ -391,6 +424,37 @@ bool SensorMediaPublisher::publish_imu(const ImuFrameView& view)
     return false;
 }
 
+bool SensorMediaPublisher::publish_odom(const OdomFrameView& view)
+{
+    if (not odom_)
+        return false;
+    auto& st = *odom_;
+
+    auto* s = st.pub.loan();
+    if (s == nullptr)
+    {
+        ++st.stats.loan_fail;
+        return false;
+    }
+    s->stream_id(st.stream_id);
+    s->frame_id(st.frame_id++);
+    s->stamp_ms(view.stamp_ms);
+    s->sim_stamp_ms(view.sim_stamp_ms);
+    s->period_ms(view.period_ms);
+    s->adv(view.adv);   s->side(view.side);   s->rot(view.rot);
+    s->adv_var(view.adv_var);   s->side_var(view.side_var);   s->rot_var(view.rot_var);
+
+    if (st.pub.publish(s))
+    {
+        ++st.stats.ok;
+        st.stats.bytes += sizeof(rc::media::OdomFrame);
+        st.cum_bytes.fetch_add(sizeof(rc::media::OdomFrame), std::memory_order_relaxed);
+        return true;
+    }
+    ++st.stats.publish_fail;
+    return false;
+}
+
 void SensorMediaPublisher::report_one(const std::string& key, Stats& s)
 {
     // Routine "ok=" heartbeat dropped; warn only when publishing actually fails.
@@ -431,6 +495,7 @@ double SensorMediaPublisher::current_bps(const std::vector<std::string>& keys)
     if (image360_ and wanted(image360_->key)) sum += sample(*image360_);
     if (lidar_ and wanted(lidar_->key))       sum += sample(*lidar_);
     if (imu_ and wanted(imu_->key))           sum += sample(*imu_);
+    if (odom_ and wanted(odom_->key))         sum += sample(*odom_);
     return sum;
 }
 
@@ -488,4 +553,5 @@ void SensorMediaPublisher::shutdown()
     image360_.reset();
     lidar_.reset();
     imu_.reset();
+    odom_.reset();
 }

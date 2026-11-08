@@ -453,6 +453,10 @@ void SpecificWorker::initialize()
 	           "publish the 3-D lidar cloud on the media plane");
 	cfgr.opt("Media.enable_imu", params.ENABLE_IMU,
 	           "publish the imu samples on the media plane");
+	cfgr.opt("Media.odom_topic", params.MEDIA_ODOM_TOPIC,
+	           "media-plane topic carrying the wheel odometry");
+	cfgr.opt("Media.enable_odom", params.ENABLE_ODOM,
+	           "publish/advertise the wheel odometry on the media plane (descriptor on the robot node)");
 	cfgr.opt("Media.data_sharing", params.MEDIA_DATA_SHARING,
 	           "DataSharing topology for true zero-copy loans; advertised in the descriptor so consumers can match it");
 	// Per-sensor source selector ("auto" | "ice" | "dds"), normalized+validated by read_media_source().
@@ -462,14 +466,17 @@ void SpecificWorker::initialize()
 	params.RICOH_SOURCE = read_media_source(configLoader, "Media.ricoh_source");
 	params.LIDAR_SOURCE = read_media_source(configLoader, "Media.lidar_source");
 	params.IMU_SOURCE   = read_media_source(configLoader, "Media.imu_source");
+	params.ODOM_SOURCE  = read_media_source(configLoader, "Media.odom_source");
 	bridge_zed_.store(  params.ZED_SOURCE   != "dds", std::memory_order_relaxed);
 	bridge_ricoh_.store(params.RICOH_SOURCE != "dds", std::memory_order_relaxed);
 	bridge_lidar_.store(params.LIDAR_SOURCE != "dds", std::memory_order_relaxed);
 	bridge_imu_.store(  params.IMU_SOURCE   != "dds", std::memory_order_relaxed);
+	bridge_odom_.store( params.ODOM_SOURCE  != "dds", std::memory_order_relaxed);
 	qInfo() << "[Media] sources: zed =" << QString::fromStdString(params.ZED_SOURCE)
 	        << "| ricoh =" << QString::fromStdString(params.RICOH_SOURCE)
 	        << "| lidar =" << QString::fromStdString(params.LIDAR_SOURCE)
 	        << "| imu =" << QString::fromStdString(params.IMU_SOURCE)
+	        << "| odom =" << QString::fromStdString(params.ODOM_SOURCE)
 	        << "(auto=negotiate, ice=always bridge, dds=always monitor external)";
 
 	qInfo() << "[DSR Upload Rates] rgb=" << params.DSR_RGB_FPS
@@ -669,6 +676,8 @@ void SpecificWorker::initialize()
 			mcfg.lidar_stream  = {{"lidar", params.MEDIA_LIDAR_TOPIC, rc::media::STREAM_LIDAR}};
 		if (params.ENABLE_IMU)
 			mcfg.imu_stream    = {{"imu",   params.MEDIA_IMU_TOPIC,   rc::media::STREAM_IMU}};
+		if (params.ENABLE_ODOM)
+			mcfg.odom_stream   = {{"odom",  params.MEDIA_ODOM_TOPIC,  rc::media::STREAM_ODOM}};
 		media_.init(mcfg);
 		qInfo() << "[Media] stream gates — zed:" << params.ENABLE_ZED << "ricoh:" << params.ENABLE_RICOH
 		        << "lidar:" << params.ENABLE_LIDAR << "imu:" << params.ENABLE_IMU
@@ -686,6 +695,7 @@ void SpecificWorker::initialize()
 		{"ricoh",   {"rgb360"},       params.ENABLE_RICOH},
 		{"helios",  {"lidar"},        params.ENABLE_LIDAR},
 		{"imu",     {"imu"},          params.ENABLE_IMU},
+		{robot_name.c_str(), {"odom"}, params.ENABLE_ODOM},   // odometry has no sensor node: the robot's own
 	};
 	for (const auto& ad : media_ads)
 	{
@@ -1558,7 +1568,7 @@ void SpecificWorker::build_media_groups()
 	};
 
 	media_groups_.clear();
-	media_groups_.reserve(4);
+	media_groups_.reserve(5);
 
 	auto& zed = media_groups_.emplace_back();
 	zed.tag = "ZED"; zed.bridge = &bridge_zed_; zed.source = &params.ZED_SOURCE;
@@ -1584,6 +1594,15 @@ void SpecificWorker::build_media_groups()
 	imu.tag = "IMU"; imu.bridge = &bridge_imu_; imu.source = &params.IMU_SOURCE;
 	imu.enabled = &params.ENABLE_IMU; imu.advertise_node = "imu"; imu.advertise_streams = {"imu"};
 	add_plane(imu, "imu", &mediaplanedds4_proxy);
+
+	// Wheel odometry. The producer is the base: shadow_bridge_dds in simulation (Proxies.MediaPlaneDDS5,
+	// port 11892). The descriptor goes on the ROBOT node, since odometry has no sensor node of its own.
+	// While nobody answers, FullPose_newFullPose publishes each Ice sample, so the real robot (whose
+	// base speaks only Ice) still has the stream, at the base's own rate.
+	auto& odom = media_groups_.emplace_back();
+	odom.tag = "Odom"; odom.bridge = &bridge_odom_; odom.source = &params.ODOM_SOURCE;
+	odom.enabled = &params.ENABLE_ODOM; odom.advertise_node = robot_name; odom.advertise_streams = {"odom"};
+	add_plane(odom, robot_name, &mediaplanedds5_proxy);
 
 	// Resolve each plane's MediaPlaneDDS ICE port from its proxy string ("… -p 12002 …") so the mind
 	// view can fuse the SHM producer node with its mediaplanedds:<port> endpoint. Parsed once here.
@@ -2251,6 +2270,30 @@ void SpecificWorker::FullPoseEstimationPub_newFullPose(RoboCompFullPoseEstimatio
 	// Count the ARRIVAL, before any graph work: this measures the producer's publication rate, so a
 	// sample that finds no robot node still counts as received.
 	fullpose_frames_.fetch_add(1, std::memory_order_relaxed);
+
+	// Fallback producer of rc/odom/data while no external one is adopted (see build_media_groups()).
+	// SI on the wire whatever the base's unit, like the graph attributes below.
+	if (params.ENABLE_ODOM and media_.odom_ready() and bridge_odom_.load(std::memory_order_relaxed))
+	{
+		const std::scoped_lock lock(odom_pub_mtx_);
+		const std::uint64_t own_ms = pose.simulated ? static_cast<std::uint64_t>(pose.simTimestamp)
+		                                            : static_cast<std::uint64_t>(pose.timestamp);
+		const std::uint64_t prev = std::exchange(odom_prev_stamp_ms_, own_ms);
+		const float s2 = odom_linear_scale_ * odom_linear_scale_;
+		const auto lin_var = [s2](float v) { return v >= 0.f ? std::max(v * s2, 1e-12f) : -1.f; };
+		SensorMediaPublisher::OdomFrameView v;
+		v.stamp_ms     = static_cast<std::uint64_t>(pose.timestamp);
+		v.sim_stamp_ms = pose.simulated ? static_cast<std::uint64_t>(pose.simTimestamp) : 0;
+		// The interval since the previous sample on its own clock; 0 (unknown) on the first or after a gap.
+		v.period_ms    = (prev != 0 and own_ms > prev and own_ms - prev < 1000) ? static_cast<float>(own_ms - prev) : 0.f;
+		v.adv  = pose.adv  * odom_linear_scale_;
+		v.side = pose.side * odom_linear_scale_;
+		v.rot  = pose.rot;
+		v.adv_var  = lin_var(pose.velCov.m11);   // forward = body +Y, see the variance note below
+		v.side_var = lin_var(pose.velCov.m00);
+		v.rot_var  = pose.velCov.m55 >= 0.f ? std::max(pose.velCov.m55, 1e-12f) : -1.f;
+		media_.publish_odom(v);
+	}
 
 	// we do not add any noise here. It is up to the users.
 	if (auto pose_node = G->get_node(robot_name); pose_node.has_value())

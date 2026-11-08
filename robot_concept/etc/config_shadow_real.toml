@@ -24,6 +24,7 @@ MediaPlaneDDS1 = "mediaplanedds:tcp -h localhost -p 10099" # ricoh_omni_dds: que
 MediaPlaneDDS2 = "mediaplanedds:tcp -h localhost -p 11890" # lidar3d_dds helios: query its DDS media descriptor
 MediaPlaneDDS3 = "mediaplanedds:tcp -h localhost -p 11889" # lidar3d_dds bpearl: query its DDS media descriptor
 MediaPlaneDDS4 = "mediaplanedds:tcp -h localhost -p 11891" # imu_dds: query its DDS media descriptor
+MediaPlaneDDS5 = "mediaplanedds:tcp -h localhost -p 11892" # wheel odometry (shadow_bridge_dds in sim): query its DDS media descriptor
 
 [Endpoints]
 # Endpoints for subscriptions interfaces
@@ -192,6 +193,14 @@ lidar_source = "auto"   # ★ 2026-08-29: was "dds" here, but the file that was 
 #         imu_dds to the consumers and this agent only notes the observed rate on [IMUThread].
 #   ice : always bridge via Ice RPC.   dds: never bridge; only relay/monitor the imu_dds plane.
 imu_source   = "auto"
+
+# Wheel-odometry source selector (only effective when enable_odom = true): auto | ice | dds.
+#   auto: publish rc/odom/data from each Ice FullPose until a producer advertises on
+#         Proxies.MediaPlaneDDS5 (shadow_bridge_dds, one sample per sim step), then relay its
+#         descriptor to the robot node and stop. ice: always publish from FullPose. dds: never.
+odom_source  = "auto"
+odom_topic   = "rc/odom/data"
+enable_odom  = true
 
 [Lidar]
 # Legacy DSR-graph lidar upload. <0 DISABLES it (default): lidar is published on the zero-copy
