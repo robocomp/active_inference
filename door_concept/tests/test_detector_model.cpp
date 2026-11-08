@@ -6,6 +6,9 @@
 #include <cmath>
 #include <cstdio>
 #include <unistd.h>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
 #include "../src/core/detector_model.h"
 #ifndef DETECTORS_CSV
 #define DETECTORS_CSV "etc/door_detectors.csv"
@@ -92,6 +95,52 @@ int main()
         r = load_detectors(tmp);
         CHECK(r.zed.env.min_fill == D.zed.env.min_fill and r.zed.env.max_fill == 0.7f);
         std::filesystem::remove(tmp);
+    }
+    { // support_llr: monotone, continuous on the closed interval, finite at the ends, signs as the model says (spec: no test on x)
+        const SupportModel m = D.support;
+        float prev = support_llr(0.0f, m), max_step = 0.0f;
+        CHECK(std::isfinite(prev));
+        for (int i = 1; i <= 2000; ++i)
+        {
+            const float l = support_llr(static_cast<float>(i) / 2000.0f, m);
+            CHECK(std::isfinite(l));
+            CHECK(l <= prev + 1e-5f);                 // monotone decreasing in x
+            max_step = std::max(max_step, std::abs(l - prev));
+            prev = l;
+        }
+        std::printf("  support: max |dl| per dx=0.0005: %.4f; l(0)=%.2f l(0.05)=%.2f l(0.3)=%.2f l(0.5)=%.2f l(0.7)=%.2f l(0.9)=%.2f l(1)=%.2f\n",
+                    max_step, support_llr(0.f, m), support_llr(.05f, m), support_llr(.3f, m), support_llr(.5f, m), support_llr(.7f, m), support_llr(.9f, m), support_llr(1.f, m));
+        CHECK(max_step < 0.05f);                      // no step anywhere (a jump would show up as one big sample-to-sample change)
+        CHECK(support_llr(0.05f, m) > 0.0f);          // a well-fitted door: a small positive
+        CHECK(support_llr(1.0f, m) < -4.0f and support_llr(0.95f, m) < -4.0f);   // a fit explaining nothing of its support: strongly negative
+        CHECK(support_llr(1.0000001f, m) == support_llr(1.0f, m));   // the mean of responsibilities rounding past 1 is 1
+    }
+    { // support_rows_roundtrip_and_missing_falls_back_loudly
+        DetectorTable t = D; t.support.present_b = 5.f; t.support.absent_a = 9.f; t.support.present_outlier = 0.01f; t.support.n_trials = 12.f;
+        const auto p = std::filesystem::temp_directory_path() / std::format("det_sup_{}.csv", ::getpid());
+        save_detectors(p, t, "test");
+        auto r = load_detectors(p);
+        CHECK(r.support.present_b == 5.f and r.support.absent_a == 9.f and r.support.present_outlier == 0.01f and r.support.n_trials == 12.f);
+        CHECK(r.support.present_a == t.support.present_a and r.support.absent_b == t.support.absent_b and r.support.absent_outlier == t.support.absent_outlier);
+        const auto tmp = std::filesystem::temp_directory_path() / std::format("det_sup2_{}.csv", ::getpid());
+        const auto err = std::filesystem::temp_directory_path() / std::format("det_sup_err_{}.txt", ::getpid());
+        const auto loud = [&](const char* body) {
+            { std::ofstream o(tmp); o << "camera,param,value,n,source\n" << body; }
+            std::fflush(stderr); int keep = dup(2); std::freopen(err.c_str(), "w", stderr);
+            const auto m = load_detectors(tmp);
+            std::fflush(stderr); dup2(keep, 2); close(keep);
+            std::ifstream e(err); std::string s((std::istreambuf_iterator<char>(e)), {});
+            return std::pair{m.support, s};
+        };
+        { // a missing row: compiled defaults, and it says so
+          const auto [s, msg] = loud("zed,min_fill,0.1,0,t\nsupport,present_b,7,0,t\nsupport,absent_a,5,0,t\n");
+          CHECK(s.present_b == D.support.present_b and s.absent_a == D.support.absent_a);
+          CHECK(msg.find("support rows missing") != std::string::npos); }
+        { // out of domain (outlier 0 would make the term infinite): defaults, loud
+          const auto [s, msg] = loud("support,present_a,1,0,t\nsupport,present_b,4,0,t\nsupport,present_outlier,0,0,t\nsupport,absent_a,12,0,t\nsupport,absent_b,1,0,t\nsupport,absent_outlier,0.8,0,t\n");
+          CHECK(s.present_outlier == D.support.present_outlier);
+          CHECK(msg.find("out of domain") != std::string::npos); }
+        std::filesystem::remove(tmp); std::filesystem::remove(p); std::filesystem::remove(err);
     }
     std::printf(fails ? "FAILED %d\n" : "ALL PASS\n", fails);
     return fails != 0;

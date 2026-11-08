@@ -407,6 +407,86 @@ int main()
         }
     }
 
+    // ── the fit's own support (channel sup): x from the fit, one ℓ per view, no fit no term ──────────────────────────────────
+    {   // a real door, well fitted (x ≈ 0.05), stays believed over the views of a tour; a fit explaining none of its support
+        // (x ≈ 1) goes below the delete line within them (cmp_br3 door_6: birth (3.59,-1.91), fit 2.2 m off, L +5.51)
+        const auto tour = [&](float x, bool with_support)
+        {
+            Rig r;
+            CostEstimator costs;
+            r.core.set_costs(CostEstimator::logged_default());
+            r.look(A0, kDoor, {{1.0f, kWallY, 0.9f}});
+            r.settle(A0);
+            for (const float deg : {-40.0f, 40.0f, 0.0f})
+                for (int k = 0; k < 8; ++k)
+                {
+                    if (with_support and r.door()) r.door()->pending_fit_support = FitSupport{x, 0};
+                    r.look(stand(4.0f, deg), kDoor, {{1.0f, kWallY, 0.9f}});
+                }
+            const float L = r.door() ? r.door()->belief.L() : -99.0f;
+            std::print("support_tour: x={:.2f} support={} -> door {} L={:+.2f} removes={}\n", x, with_support, r.door() ? "alive" : "removed", L, r.removes.size());
+            return std::pair{r.door() != nullptr, L};
+        };
+        const auto [none_alive, none_L] = tour(0.05f, false);
+        const auto [good_alive, good_L] = tour(0.05f, true);
+        const auto [bad_alive, bad_L] = tour(0.99f, true);
+        CHECK(none_alive and good_alive and good_L > 0.0f);   // x ≈ 0.05 leaves a real door believed
+        CHECK(not bad_alive);                                 // x ≈ 1 removes it, by the costed line, within these three views
+    }
+    {   // a door with no fit gets no term: nothing pending, trace NaN, no ledger entry from the channel; pending is consumed once
+        Rig r;
+        r.look(A0, kDoor, {{1.0f, kWallY, 0.9f}});
+        r.settle(A0);
+        CHECK(r.door() != nullptr);
+        if (r.door())
+        {
+            r.door()->pending_fit_support.reset();
+            r.settle(A0);
+            CHECK(not std::isfinite(r.door()->exist_trace.sup_x) and not std::isfinite(r.door()->exist_trace.sup_dl));
+            const std::size_t n_csv = r.csv.size();
+            r.door()->pending_fit_support = FitSupport{0.6f, 0};   // a moderate x: this door survives the term, and we read its trace
+            r.look(stand(4.0f, 50.0f), kDoor);
+            CHECK(r.door() != nullptr);
+            if (r.door() == nullptr) { std::print("support_trace: door removed by x=0.6?\n"); }
+            else
+            {
+            CHECK(std::isfinite(r.door()->exist_trace.sup_x) and std::abs(r.door()->exist_trace.sup_x - 0.6f) < 1e-6f);
+            CHECK(r.door()->exist_trace.sup_dl < 0.0f);
+            CHECK(not r.door()->pending_fit_support.has_value() or r.door()->pending_fit_support->x != 0.6f);   // consumed (the cycle's fit may have set a fresh one)
+            CHECK(r.csv.size() > n_csv);
+            // the columns are in the row: the last two fields of door_existence_log.csv are sup_x, sup_dl
+            const std::string& row = r.csv.back();
+            CHECK(row.substr(row.rfind(',') + 1) != "nan\n");
+            std::print("support_trace: row={}", row);
+            }
+        }
+    }
+    {   // a candidate has no fit: observe_place without support adds no term (the brief: never a default)
+        Bench b;
+        const rc::DoorFitState th = shut_door();
+        PlaceBelief pb;
+        const auto t = b.frame(pb, th, A0, kDoor, true, false, {{{1.0f, kWallY}, -1.0f, 0}}, 0);
+        CHECK(not std::isfinite(t.sup_x) and not std::isfinite(t.sup_dl));
+        CHECK(pb.ledger.views().size() == 1 and pb.ledger.views()[0].sup.n == 0);
+    }
+    {   // a lost pose (κ → 0): the fit's x changes nothing (Review Focus 1)
+        const rc::DoorConfig dc;
+        Bench b;
+        const rc::DoorFitState th = shut_door();
+        Mat6d huge = Mat6d::Identity() * 1e6;
+        PlaceBelief pb;
+        std::vector<FrameDetection> nodets;
+        const Mat4d body = body_pose(A0, kDoor);
+        const std::optional<Mat4d> rtz = body * lift(1.2);
+        const CameraIntrinsics cam = zed_cam();
+        const ExistenceScene scene{b.cfg, rtz, cam, b.pkt, kRoom, rc::door::RoomBand{b.cfg.exist_wall_thickness_m, b.cfg.exist_boundary_sigma_m}, b.doors};
+        ExistenceFrame fr{scene, b.cfg, b.det};
+        fr.rt_cov = huge;
+        const auto t = observe_place(pb, th, fr, 0, 0.0f, nullptr, -1, 0.0f, FitSupport{0.99f, 0});
+        std::print("support_lost_pose: sup_x {} sup_dl {} views {}\n", t.sup_x, t.sup_dl, pb.ledger.views().size());
+        CHECK(std::abs(pb.ledger.sum()) < 0.02f);   // κ for a σ = 1 km pose is ~1e-4: ℓ ≈ 0, no view of weight
+    }
+
     // ── detector rates stay FIXED within a session (fix round 3, ruling): a phantom's many misses leave them at the CSV values ──
     {
         Rig r;

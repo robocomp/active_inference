@@ -256,6 +256,10 @@ struct DoorFitState
     float last_depth_var   = 0.0f;   // σ_range² (m²) of the assigned slice: 0 for a ZED slice, >0 for a ricoh
                                      // LiDAR-depth slice → added to R so ricoh's unreliable depth barely moves the fit
     float last_clutter_frac = 0.0f;  // mean clutter responsibility (fraction of the mask the model can't explain)
+    int   last_slice_sensor = 0;     // 0 ZED, else ricoh: the slice this door's last fresh observation came from
+    // ★THE FIT'S OWN SUPPORT, CONSUMED ONCE by the next existence update (channel `sup`): set only on a cycle whose fit ran on a
+    //  non-empty support (a gated/stale/held cycle leaves it alone) and taken out by update_existence — no fit means no term.
+    std::optional<rc::door::core::FitSupport> pending_fit_support;
     float dbg_obliquity_cos = 1.0f;  // |cos| of camera→door horizontal ray vs backrest normal (1=face-on, →0 grazing)
 
     // Free-energy readout + attention baseline (clutter-inclusive F; TABLE.md §9). dbg_energy HOLDS the last

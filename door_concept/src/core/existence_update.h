@@ -15,6 +15,7 @@
 #include <array>
 #include <cstdint>
 #include <functional>
+#include <limits>
 #include <optional>
 #include <span>
 #include <string>
@@ -71,6 +72,7 @@ struct ViewRow
     float q = 0.f, fill_h = 0.f, fill_v = 0.f, vis = 0.f, kappa = 0.f, aspect = 0.f;   // THIS frame's
     float hit = 0.f;           // THIS frame's association weight (0 = a miss) — the same frame as q / fill / vis
     bool q_known = true;       // false: a ricoh frame with no model (q → 0⁺): logged, never a learning trial
+    float sup_x = std::numeric_limits<float>::quiet_NaN(), sup_l = std::numeric_limits<float>::quiet_NaN();   // camera == 2 (`support`): the fit's x and ℓ_sup(x)
 };
 
 /// The leaf face's projected contour + its controls in the ZED (the construction the old silhouette probe used, moved
@@ -87,7 +89,8 @@ struct ViewRow
 /// self_w its reliability).
 /// Returns the trace (NaN for every channel that did not run) and appends the touched views' rows.
 ExistenceTrace observe_place(PlaceBelief& b, const rc::DoorFitState& theta, const ExistenceFrame& fr, int visit,
-                             float actuation_llr, std::vector<ViewRow>* rows, int self_sensor = -1, float self_w = 0.f);
+                             float actuation_llr, std::vector<ViewRow>* rows, int self_sensor = -1, float self_w = 0.f,
+                             std::optional<FitSupport> support = std::nullopt);
 
 /// The structural prior of θ in this room (place_prior.h). `doors_on_wall_before`: how many doors were on θ's wall before it.
 /// The size is scored on the FITTED width/height with their posterior sds (a candidate: what the fit will make of its blob) under

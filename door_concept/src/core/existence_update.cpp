@@ -118,7 +118,7 @@ float association_weight(std::span<const FrameDetection> dets, int sensor, const
 }
 
 ExistenceTrace observe_place(PlaceBelief& b, const rc::DoorFitState& th, const ExistenceFrame& fr, int visit,
-                             float actuation_llr, std::vector<ViewRow>* rows, int self_sensor, float self_w)
+                             float actuation_llr, std::vector<ViewRow>* rows, int self_sensor, float self_w, std::optional<FitSupport> support)
 {
     ExistenceTrace t;
     std::vector<std::size_t> touched;
@@ -232,6 +232,36 @@ ExistenceTrace observe_place(PlaceBelief& b, const rc::DoorFitState& th, const E
                     touched.push_back(v);
                 }
                 t.geo_dl = b.ledger.sum() - before;
+            }
+        }
+    }
+    // ── the fit's own support (channel sup): x, the clutter share of THIS door's fit, one ℓ per view (view_ledger). A place the
+    //    fit explains none of cannot be the door the support came from. No fit this cycle (std::nullopt): no term, no default. ──
+    if (support.has_value())
+    {
+        const std::optional<Mat4d>& origin = support->sensor != 0 and fr.room_T_ricoh.has_value() ? fr.room_T_ricoh : fr.scene.room_T_zed;
+        if (origin.has_value())
+        {
+            const Vec2f door_xy = th.aperture.centre_xy();
+            const float R = half_diag(th);
+            const PoseOverlap po = pose_overlap_factor(fr.rt_cov, origin, door_xy, R);
+            if (po.kappa > 0.0f)   // no pose overlap: this fit cannot say anything about this place (Review Focus 1), as the other channels
+            {
+                const float before = b.ledger.sum();
+                const std::size_t v = b.ledger.observe(xy_of(*origin), door_xy, th.aperture.across_u(), R, po.spread_m, visit);
+                b.ledger.add_support(v, support->x, po.kappa, fr.det.support);
+                b.ledger.recompute(v, fr.geometry_may_refute);
+                touched.push_back(v);
+                t.sup_x = support->x;
+                t.sup_dl = b.ledger.sum() - before;
+                if (rows)
+                {
+                    ViewRow r;
+                    r.camera = 2; r.view_id = static_cast<int>(v); r.q = std::numeric_limits<float>::quiet_NaN(); r.q_known = false;
+                    r.fill_h = r.fill_v = r.vis = r.aspect = r.hit = std::numeric_limits<float>::quiet_NaN(); r.kappa = po.kappa;
+                    r.sup_x = support->x; r.sup_l = support_llr(support->x, fr.det.support);
+                    rows->push_back(r);
+                }
             }
         }
     }

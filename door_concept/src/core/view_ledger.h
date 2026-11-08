@@ -18,8 +18,10 @@
 // change of room frame (rotation + translation) unchanged, so persisted ledgers stay valid after re-registration.
 //
 // Serialisation (one line, classic locale, std::from_chars, no commas/newlines — fits a CSV cell): whitespace-separated tokens
-//   "VL1 <nviews>" then per view, 21 numbers: bearing range visit actuation_llr llr
-//   then per Bernoulli channel (Zed, Ricoh): n sum_q sum_hit_w sum_f hit_c ; then geo: n sum_x sum_w mu0 mu1 s2.
+//   "VL2 <nviews>" then per view, 30 numbers: bearing range visit actuation_llr llr
+//   then per Bernoulli channel (Zed, Ricoh): n sum_q sum_hit_w sum_f hit_c ; then geo: n sum_x sum_w mu0 mu1 s2;
+//   then the fit-support channel: n sum_x sum_w present_a present_b present_outlier absent_a absent_b absent_outlier.
+//   "VL1" (the same without the support block) still parses, with an empty support channel.
 #pragma once
 #include <array>
 #include <charconv>
@@ -38,7 +40,7 @@
 namespace rc::door::core
 {
 using Vec2f = Eigen::Vector2f;
-enum class Channel : std::uint8_t { Zed, Ricoh, Geometry, Actuation };
+enum class Channel : std::uint8_t { Zed, Ricoh, Geometry, Actuation, Support };
 
 struct ViewKey { float bearing = 0.f; float range = 0.f; int visit = 0; };   // door-relative
 
@@ -46,11 +48,14 @@ struct ViewKey { float bearing = 0.f; float range = 0.f; int visit = 0; };   // 
 /// per-frame effective false-alarm rate f_eff (false_alarm_eff). hit_c = ln(hit_rate/false_alarm) of the camera's model.
 struct BernoulliAgg { double n = 0, sum_q = 0, sum_hit_w = 0, sum_f = 0; float hit_c = 0.f; };
 struct GaussAgg { double n = 0, sum_x = 0, sum_w = 0; float mu0 = 0, mu1 = 0, s2 = 1; };
+/// The fit-support channel's per-view aggregate: the weighted mean of x over the view's frames, scored once (support_llr); the
+/// model it was scored with travels with it (as geo's mu0/mu1/s2 do), so a restored ledger recomputes without the table.
+struct SupportAgg { double n = 0, sum_x = 0, sum_w = 0; SupportModel m; };
 struct View
 {
     ViewKey key; 
     std::array<BernoulliAgg, 2> bern;   // Zed, Ricoh
-    GaussAgg geo; float actuation_llr = 0; float llr = 0;
+    GaussAgg geo; SupportAgg sup; float actuation_llr = 0; float llr = 0;
 };
 
 class ViewLedger
@@ -104,6 +109,13 @@ public:
         auto& g = views_[v].geo;
         g.n += 1; g.sum_x += double(w) * x; g.sum_w += w; g.mu0 = mu0; g.mu1 = mu1; g.s2 = s2;
     }
+    /// One frame of the fit's own support: x = the clutter share of this door's fit this cycle, weight w (the pose overlap κ).
+    void add_support(std::size_t v, float x, float w, const SupportModel& m)
+    {
+        if (v >= views_.size()) return;
+        auto& s = views_[v].sup;
+        s.n += 1; s.sum_x += double(w) * x; s.sum_w += w; s.m = m;
+    }
     void add_actuation(std::size_t v, float llr) { if (v < views_.size()) views_[v].actuation_llr += llr; }
 
     /// Recompute view v's llr from its aggregate (replacing the old one). Returns the CHANGE in sum().
@@ -127,6 +139,8 @@ public:
             if (not geometry_may_refute) lg = std::max(0.f, lg);
             l += lg;
         }
+        if (const auto& s = w.sup; s.n > 0 and s.sum_w > 0)
+            l += float(s.sum_w / s.n) * support_llr(float(s.sum_x / s.sum_w), s.m);   // ONE ℓ per view: the mean x, weighted, scored once
         const float change = l - w.llr;
         w.llr = l;
         return change;
@@ -137,12 +151,14 @@ public:
 
     [[nodiscard]] std::string serialise() const
     {
-        std::string s = std::format("VL1 {}", views_.size());
+        std::string s = std::format("VL2 {}", views_.size());
         for (const auto& v : views_)
         {
             s += std::format(" {} {} {} {} {}", v.key.bearing, v.key.range, v.key.visit, v.actuation_llr, v.llr);
             for (const auto& a : v.bern) s += std::format(" {} {} {} {} {}", a.n, a.sum_q, a.sum_hit_w, a.sum_f, a.hit_c);
             s += std::format(" {} {} {} {} {} {}", v.geo.n, v.geo.sum_x, v.geo.sum_w, v.geo.mu0, v.geo.mu1, v.geo.s2);
+            s += std::format(" {} {} {} {} {} {} {} {} {}", v.sup.n, v.sup.sum_x, v.sup.sum_w, v.sup.m.present_a, v.sup.m.present_b,
+                             v.sup.m.present_outlier, v.sup.m.absent_a, v.sup.m.absent_b, v.sup.m.absent_outlier);
         }
         return s;
     }
@@ -164,7 +180,9 @@ public:
             const auto r = std::from_chars(t.data(), t.data() + t.size(), out);
             return r.ec == std::errc{} and r.ptr == t.data() + t.size();
         };
-        if (tok() != "VL1") return std::nullopt;
+        const auto version = tok();
+        const bool vl1 = version == "VL1";
+        if (not vl1 and version != "VL2") return std::nullopt;
         std::size_t n = 0;
         if (not num(n)) return std::nullopt;
         ViewLedger L;
@@ -175,11 +193,15 @@ public:
             for (auto& a : v.bern)
                 ok = ok and num(a.n) and num(a.sum_q) and num(a.sum_hit_w) and num(a.sum_f) and num(a.hit_c);
             ok = ok and num(v.geo.n) and num(v.geo.sum_x) and num(v.geo.sum_w) and num(v.geo.mu0) and num(v.geo.mu1) and num(v.geo.s2);
+            if (not vl1)   // VL1 predates the support channel: it stays empty
+                ok = ok and num(v.sup.n) and num(v.sup.sum_x) and num(v.sup.sum_w) and num(v.sup.m.present_a) and num(v.sup.m.present_b)
+                     and num(v.sup.m.present_outlier) and num(v.sup.m.absent_a) and num(v.sup.m.absent_b) and num(v.sup.m.absent_outlier);
             if (not ok) return std::nullopt;
             const auto fin = [](float x) { return std::isfinite(x); };
             ok = ok and fin(v.key.bearing) and fin(v.key.range) and fin(v.actuation_llr) and fin(v.llr)
                  and fin(v.geo.mu0) and fin(v.geo.mu1) and fin(v.geo.s2) and std::isfinite(v.geo.n)
-                 and std::isfinite(v.geo.sum_x) and std::isfinite(v.geo.sum_w);
+                 and std::isfinite(v.geo.sum_x) and std::isfinite(v.geo.sum_w) and std::isfinite(v.sup.n) and std::isfinite(v.sup.sum_x)
+                 and std::isfinite(v.sup.sum_w) and support_in_domain(v.sup.m);
             for (const auto& a : v.bern)
                 ok = ok and fin(a.hit_c) and std::isfinite(a.n) and std::isfinite(a.sum_q) and std::isfinite(a.sum_hit_w) and std::isfinite(a.sum_f);
             if (not ok) return std::nullopt;

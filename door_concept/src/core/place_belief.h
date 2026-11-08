@@ -29,6 +29,8 @@ struct PlaceBelief
 
 /// What one existence update did to one place, per channel (spec §3.8). NaN = NOT COMPUTED this cycle (printed `nan` in the
 /// CSV and `—` on stdout, never a stale value). A channel's dl is the change it made to the ledger sum this cycle.
+struct FitSupport { float x = 0.f; int sensor = 0; };   // the fit's clutter share and the camera (0 ZED, else ricoh) it came from
+
 struct ExistenceTrace
 {
     static constexpr float kNan = std::numeric_limits<float>::quiet_NaN();
@@ -37,6 +39,7 @@ struct ExistenceTrace
     float zed_hit = kNan, ric_hit = kNan;      // the association weight of this frame's detection (0 = a miss)
     float kappa = kNan;
     float geo_x = kNan, geo_mu0 = kNan, geo_mu1 = kNan, geo_s = kNan;
+    float sup_x = kNan, sup_dl = kNan;         // the fit's clutter share this cycle and what ℓ_sup changed the ledger by (NaN = no fit)
     int zed_view = -1, ric_view = -1;          // ledger index of the view this frame joined (-1 = none)
     float delete_line = kNan;
 };

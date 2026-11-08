@@ -13,7 +13,7 @@ false_alarm is not identifiable from views of real doors and is kept at the comp
 Usage: python3 -I tools/fit_detector_envelopes.py LOG.csv [--dry-run] [--out etc/door_detectors.csv] [--source TAG]
 Writes the table only without --dry-run.
 """
-import argparse, csv, datetime, sys
+import argparse, csv, datetime, os, sys
 import numpy as np
 
 DEFAULT_FA = {"zed": 0.02, "ricoh": 0.05}
@@ -105,6 +105,9 @@ def main():
     if a.dry_run:
         return 0
     src = a.source or f"fit_detector_envelopes.py {a.log} {datetime.date.today()}"
+    # The fit-support rows (camera `support`) are not fitted here: they are carried over from the file being replaced, so a refit
+    # of the detector rates never silently drops them (the agent warns loudly on a missing row; see detector_llr.h).
+    support_rows = [ln for ln in open(a.out) if ln.startswith("support,")] if os.path.exists(a.out) else []
     with open(a.out, "w", newline="") as o:
         o.write("camera,param,value,n,source\n")
         for cam in ("zed", "ricoh"):
@@ -114,6 +117,7 @@ def main():
             for k, v, nn in (("min_fill", x[0], 0), ("max_fill", x[1], 0), ("soft", x[2], 0), ("hit_rate", x[3], n),
                              ("false_alarm", DEFAULT_FA[cam], 0)):
                 o.write(f"{cam},{k},{float(v):.6g},{nn},{src}\n")
+        o.writelines(support_rows)
     print("wrote", a.out)
     return 0
 

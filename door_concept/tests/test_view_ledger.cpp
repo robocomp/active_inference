@@ -88,6 +88,31 @@ int main()
       CHECK(P.has_value()); CHECK(P->serialise() == s); CHECK(P->views().size() == 2); CHECK(P->sum() == L.sum());
       CHECK(not ViewLedger::parse("VL1 2 1 2", false).has_value()); CHECK(not ViewLedger::parse("garbage", false).has_value());
       std::setlocale(LC_ALL, ""); }
+    { // support_one_llr_per_view: 200 frames of one view of x are ONE ℓ, the mean x scored once; a new view adds another
+      const SupportModel m = default_detectors().support;
+      ViewLedger L;
+      const auto one = [&](float deg, float x, int n) { std::size_t v = 0; for (int i = 0; i < n; ++i) { v = L.observe(cam_at(deg), DOOR, NRM, 1, 0, 0); L.add_support(v, x, 1.f, m); L.recompute(v, false); } };
+      one(0, 0.95f, 200);
+      CHECK(L.views().size() == 1); CHECK(std::fabs(L.sum() - support_llr(0.95f, m)) < 1e-4f);
+      one(0, 0.05f, 200);   // the same view recovers: its ℓ moves continuously with the view's mean x
+      CHECK(L.views().size() == 1); CHECK(std::fabs(L.sum() - support_llr(0.5f, m)) < 1e-3f);
+      one(90, 0.95f, 1);
+      CHECK(L.views().size() == 2); CHECK(std::fabs(L.sum() - support_llr(0.5f, m) - support_llr(0.95f, m)) < 1e-3f); }
+    { // support_weighted_by_kappa: κ scales the view's ℓ; κ = 0 contributes exactly 0 (pose lost, Review Focus 1)
+      const SupportModel m = default_detectors().support;
+      ViewLedger L; auto v = L.observe(cam_at(0), DOOR, NRM, 1, 0, 0);
+      L.add_support(v, 0.95f, 0.f, m); L.recompute(v, false); CHECK(L.sum() == 0.f);
+      L.add_support(v, 0.95f, 0.5f, m); L.recompute(v, false);   // one frame of κ 0 and one of κ 0.5 at the same x
+      CHECK(std::fabs(L.sum() - 0.25f * support_llr(0.95f, m)) < 1e-4f); }
+    { // support_serialise: VL2 round-trips the support channel; a VL1 row (no support block) still loads, its channel empty
+      const SupportModel m = default_detectors().support;
+      ViewLedger L; { auto v = L.observe(cam_at(0), DOOR, NRM, 1, 0, 0); L.add_support(v, 0.95f, 1.f, m); L.recompute(v, false); }
+      const auto s = L.serialise();
+      CHECK(s.starts_with("VL2 ")); CHECK(s.find(',') == std::string::npos);
+      const auto P = ViewLedger::parse(s, false);
+      CHECK(P.has_value()); CHECK(P->serialise() == s); CHECK(std::fabs(P->sum() - L.sum()) < 1e-5f);
+      const auto old = ViewLedger::parse("VL1 1 0 3 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 1", false);
+      CHECK(old.has_value()); CHECK(old->views().size() == 1); CHECK(old->views()[0].sup.n == 0); CHECK(old->sum() == 0.f); }
     { // revisit_replaces_not_adds
       ViewLedger L; stare(L, cam_at(0), 20, 0.6f, 0.f);
       auto P = *ViewLedger::parse(L.serialise(), false); const float s0 = P.sum();

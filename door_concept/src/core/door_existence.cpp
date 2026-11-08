@@ -48,11 +48,11 @@ using K = rc::door::DoorDecisionKind;
 const char* const kExistenceCsvHeader =
     "cycle,node,L,p_exists,cx,cy,role,delete_line,view_id,ric_view_id,"
     "prior_band,prior_base,prior_size,carried,crossing,ledger,n_views,"
-    "zed_dl,ric_dl,geo_dl,act_dl,zed_q,ric_q,zed_hit,ric_hit,kappa,geo_x,geo_mu0,geo_mu1,geo_s\n";
+    "zed_dl,ric_dl,geo_dl,act_dl,zed_q,ric_q,zed_hit,ric_hit,kappa,geo_x,geo_mu0,geo_mu1,geo_s,sup_x,sup_dl\n";
 
 // Ruling R8: the per-view rows tools/fit_detector_envelopes.py reads (its column names, exactly). Every field is
 // THIS frame's (hit = its association weight, 0 = a miss); door = the node name or place_<key> of a pending candidate.
-const char* const kViewsCsvHeader = "cycle,door,camera,view_id,q,fill_h,fill_v,vis,kappa,aspect,hit\n";
+const char* const kViewsCsvHeader = "cycle,door,camera,view_id,q,fill_h,fill_v,vis,kappa,aspect,hit,sup_x,sup_l\n";   // sup_x/sup_l: the fit-support row (camera `support`), nan on the detector rows
 
 // ─── SemanticField: rc::SemanticProbField over the recorded plane ───────────────────────────────────────────────────
 
@@ -233,9 +233,9 @@ void DoorCore::log_view_rows(const std::string& place, const std::vector<ViewRow
     {
         std::ostringstream row;
         row.imbue(std::locale::classic());
-        row << ex_dbg_ << ',' << place << ',' << (r.camera == 0 ? "zed" : "ricoh") << ',' << r.view_id << ','
+        row << ex_dbg_ << ',' << place << ',' << (r.camera == 0 ? "zed" : r.camera == 2 ? "support" : "ricoh") << ',' << r.view_id << ','
             << (r.q_known ? r.q : std::numeric_limits<float>::quiet_NaN()) << ',' << r.fill_h << ',' << r.fill_v << ',' << r.vis << ','
-            << r.kappa << ',' << r.aspect << ',' << r.hit << '\n';
+            << r.kappa << ',' << r.aspect << ',' << r.hit << ',' << r.sup_x << ',' << r.sup_l << '\n';
         diag("door_views_log.csv", row.str(), out);
     }
 }
@@ -480,7 +480,9 @@ void DoorCore::update_existence(const DoorCycleInput& in, DoorCycleOutput& out)
             ExistenceFrame fr_door = fr;
             if (const auto of = observed_frame_.find(id); of != observed_frame_.end() and of->second == pkt.frame_id)
                 fr_door.zed_ran = fr_door.ricoh_ran = fr_door.ricoh_hits_only = false;
-            inst.exist_trace = observe_place(inst.belief, inst, fr_door, visit_, act, &rows);
+            // ★The fit's own support, consumed once: the first fit of a door runs in the same cycle as its birth (after this update) and is
+            //  scored here on the next frame. No fit since the last update → no term (door_fit.cpp sets it only when a fit ran).
+            inst.exist_trace = observe_place(inst.belief, inst, fr_door, visit_, act, &rows, -1, 0.0f, std::exchange(inst.pending_fit_support, std::nullopt));
             // A door that descends from a remembered row: its first detection in this visit finds the place again (the learned
             // hazard's "unchanged" sample; one per place per visit - PlaceTable::sample_revisit). The sighting moves to now.
             if (not inst.place_row_name.empty() and (inst.exist_trace.zed_hit > 0.0f or inst.exist_trace.ric_hit > 0.0f))
@@ -526,18 +528,18 @@ void DoorCore::update_existence(const DoorCycleInput& in, DoorCycleOutput& out)
                << b.prior.band << ',' << b.prior.base_rate << ',' << b.prior.size << ',' << b.carried << ',' << b.crossing << ','
                << b.ledger.sum() << ',' << b.ledger.views().size() << ',' << t.zed_dl << ',' << t.ric_dl << ',' << t.geo_dl << ','
                << t.act_dl << ',' << t.zed_q << ',' << t.ric_q << ',' << t.zed_hit << ',' << t.ric_hit << ',' << t.kappa << ','
-               << t.geo_x << ',' << t.geo_mu0 << ',' << t.geo_mu1 << ',' << t.geo_s << '\n';
+               << t.geo_x << ',' << t.geo_mu0 << ',' << t.geo_mu1 << ',' << t.geo_s << ',' << t.sup_x << ',' << t.sup_dl << '\n';
         diag("door_existence_log.csv", ex_csv.str(), out);
         const bool removing = std::ranges::contains(to_remove, id);
         if (ex_dbg_ % 60 == 0 or removing or std::abs(b.L() - L_before[i]) > 1.0f)
             diag("stdout", std::format("door_concept: [existence] {} L={:+.2f} p={:.2f} role={} delete_line={} | prior band={:+.2f} "
                                        "base={:+.2f} size={:+.2f} carried={:+.2f} cross={:+.2f} | views={} | zed dl={} q={} hit={} "
-                                       "| ric dl={} q={} hit={} | geo dl={} | act dl={} | kappa={}\n",
+                                       "| ric dl={} q={} hit={} | geo dl={} | sup dl={} x={} | act dl={} | kappa={}\n",
                                        inst.node_name, b.L(), b.p(), role_name(inst.role), fmt_or_dash(t.delete_line),
                                        b.prior.band, b.prior.base_rate, b.prior.size, b.carried, b.crossing,
                                        b.ledger.views().size(), fmt_or_dash(t.zed_dl), fmt_or_dash(t.zed_q), fmt_or_dash(t.zed_hit),
                                        fmt_or_dash(t.ric_dl), fmt_or_dash(t.ric_q), fmt_or_dash(t.ric_hit), fmt_or_dash(t.geo_dl),
-                                       fmt_or_dash(t.act_dl), fmt_or_dash(t.kappa)), out);
+                                       fmt_or_dash(t.sup_dl), fmt_or_dash(t.sup_x), fmt_or_dash(t.act_dl), fmt_or_dash(t.kappa)), out);
     }
     if (ex_dbg_ % 600 == 0)
     {

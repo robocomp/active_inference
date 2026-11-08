@@ -409,6 +409,7 @@ DoorObservation DoorFit::observe(rc::DoorFitState& inst)
             inst.last_range       = slice.range;
             inst.last_centroid_radius = slice.centroid_radius;   // image-centredness (moving-update exception)
             inst.last_depth_var   = slice.depth_var;             // 0=ZED, >0=ricoh LiDAR-depth → downweights the fit (added to R)
+            inst.last_slice_sensor = slice.source;
             // MINIMUM-HEIGHT evidence: the top of the observed support (room frame; floor = 0).
             //
             // ★A MASK'S TOP IS A LOWER BOUND ON THE DOOR'S TOP, AND THE ESTIMATOR MUST BE ONE-SIDED.
@@ -869,6 +870,8 @@ float DoorFit::run_inference(rc::DoorFitState& inst, const DoorObservation& obse
         // e.g. the table bleeding into a door mask, which drags the centroid). High + a position jump ⇒
         // contamination the clutter component didn't fully reject.
         inst.last_clutter_frac = inst.ai2_belief.clutter_fraction(frame.points, R);
+        if (not frame.points.empty())   // the existence channel `sup`: x is undefined with no support (no default)
+            inst.pending_fit_support = rc::door::core::FitSupport{inst.last_clutter_frac, inst.last_slice_sensor};
     }
     inst.dbg_energy = energy;   // remember for the next gated/aged cycle to HOLD
     inst.dbg_resid_pts = static_cast<int>(observation.residual_pts.size());   // HELD, see door_fit_state.h
