@@ -5,26 +5,44 @@ Before each session, re-check the thesis lines; the thesis is still moving.
 
 ## Day 1 — The challenge, probability, and free energy (`slides/day1.pdf`, `labs/day1.ipynb`)
 
+Frame numbers are the slide footers (n/36).
+
 | time | block | frames |
 |---|---|---|
-| 0:00–0:15 | The challenge: the video, the cycle, every stage is a belief, toyworld | 1–6 |
-| 0:15–0:50 | The grammar of uncertainty: variables, the joint table, marginalise, condition, product rule, the Gaussian picture and its two forms, chain rule, N! orderings, causal order, the robot's joint, Bayes as the three operations | 7–19 |
-| 0:50–0:55 | Behind a sensory boundary; where exact inference dies (now a short recap: Bayes is already on the board) | 20–21 |
-| 0:55–1:15 | VFE: rearrangement, identity, complexity − accuracy, Kalman worked example (do it on the board), Rényi aside | 22–27 |
-| 1:15–1:30 | Laplace: Σ = H⁻¹, Gauss–Newton, the wall, honesty, Occam | 28–33 |
-| 1:30–1:50 | Action: ∂F/∂a = 0, EFE, three names for one number, where to look, ln 2, travel, time scales | 34–42 |
+| 0:00–0:15 | The challenge: the video, the cycle, every stage is a belief, toyworld | 1–5 |
+| 0:15–0:55 | The grammar of uncertainty: variables, the joint table, marginalise, condition, product rule, the Gaussian picture and its two forms, chain rule, N! orderings, causal order, perception / control / generative, the robot's joint, Bayes as the three operations | 6–19 |
+| 0:55–1:00 | Behind a sensory boundary; where exact inference dies (a short recap: Bayes is already on the board) | 20–21 |
+| 1:00–1:30 | VFE: rearrangement, identity, complexity − accuracy, Kalman worked example (do it on the board), F differentiated twice (belief and action, EFE in one line), Rényi aside | 22–27 |
+| 1:30–1:50 | Laplace: Σ = H⁻¹, Gauss–Newton, the wall, honesty, Occam | 28–32 |
 | — | break | |
-| 2:05–2:15 | What measurement said: explorer equivalence, F ≠ computation, stopping as an epistemic act, inherited errors | 43–47 |
-| 2:15–3:00 | Lab 1: warm-up P1–P4 (~15 min), then exercises 1–7; 8–10 as homework if time runs out | 48–49 |
+| 2:00–2:10 | What measurement said: F ≠ computation, inherited errors | 33–34 |
+| 2:10–3:00 | Lab 1: warm-up P1–P4 (~15 min), then exercises 1–6 | 35–36 |
 
-⚠ The probability block costs ~35 min, taken from the opening, VFE, Laplace, action and the lab.
-The day is now tight; if it overruns, move "What measurement said" to the start of Day 2.
+**Moved to Day 3 (2026-10-17).** Day 1 had 44 frames. The action section (∂F/∂a = 0, EFE, three
+names for one number, where to look, ln 2, travel, time scales) and the two measured results that
+need it (explorer equivalence on 594 layouts; stopping as an epistemic act) now live in
+`slides/day3_efe.tex`, to be `\input` by `day3.tex`. Day 1's lab exercises 7–10 moved with them:
+`labs/src/day3.py` block B0, exercises W1–W4. Day 1 is now perception, plus one frame of action
+(frame 26, added 2026-11-08): F is differentiated with respect to the belief and with respect to the
+action, and G appears in one line with its two terms. It is a pointer; the derivation stays on Day 3.
+
+**Graphics (2026-11-08).** Several frames lost bullets to pictures, so the spoken text now carries
+them: the door table as a mosaic (area = probability, used for the joint, conditioning and the
+product rule), the identity bars, complexity against inaccuracy, the Laplace bowls. The "how this
+course is built" frame no longer lists the thread's four guises (common-mode ceiling, re-centred
+prior, fused precision better than its best member, a metric scoring what the robot never saw): say
+them. The averaging curve on it is a schematic, not data. The previous deck is
+`slides/backup_day1_v35_2026-11-08.{tex,pdf}`.
 
 **Probability block.** Keep the door table (0.27 / 0.03 / 0.14 / 0.56) on the board for the whole
 block: marginals in the margins, the gap column for conditioning, both products for the product
-rule. The causal-order frames carry the argument the rest of the week depends on: every
+rule. Frames 17–18 switch to the week's names S, O, A (action = where the LiDAR points, so
+S→O←A, a collider; a chain S→O→A would be just as sparse reversed and lose the argument). The causal-order frames carry the argument the rest of the week depends on: every
 ordering is exactly equal, so the data cannot choose one; physics chooses. Modularity is the
-argument students remember (swap the sensor and only one causal factor changes). The precision-
+argument students remember (swap the sensor and only one causal factor changes). Frame 17 places
+a plain controller or an RL policy in the picture: it is p(a|o), the anti-causal factor alone. It can
+act well but cannot predict, be surprised, know what it does not know, or survive a sensor swap.
+The precision-
 form table pays off on Day 2 and later: forgetting an old pose is a Schur complement.
 
 **Video.** The user supplies a Webots or real-apartment recording of the full cycle; drop it on
@@ -35,23 +53,23 @@ it is safer to play it from a separate player.
 students that "free energy" is something they already know, and that the variance comes from a
 different term from the mean.
 
-**The key question of the lab** comes at the end of exercise 9: *what does ln 2 assume?* Don't
-let students skip it. The answer (independent errors across looks) is the bridge to Day 2's
-common-mode ceiling and to the thread of the whole course.
-
 **Expected lab numbers** (seed 0; students' numbers differ slightly with other seeds):
-- warm-up: p(O=gap) = 0.41, p(open | gap) = 0.659; p(C | D, O) independent of O (0.95, 0.95),
-  p(D=open | O, C=through) = 0.973 / 0.504; a new sensor changes p(O|C) and p(D|O,C) but not p(C);
+- warm-up: p(O=gap) = 0.41, p(open | gap) = 0.659; P3 (S, O, A collider S→O←A): p(A=towards | S) =
+  0.5 for both S, p(S=open | gap, A) = 0.659 towards / 0.30 away; a new sensor changes all three
+  anti-causal factors p(O), p(A|O), p(S|O,A), and only p(O|S,A) in the causal order;
   Gaussian conditional 2.517 ± 0.186 in both forms;
 - wall fit: α ≈ 89.9° ± 0.12°, d ≈ 4.01 ± 0.01 m, ρ(α, d) ≈ −0.97;
 - honesty: uniform σ ratio ≈ 1.10 / 1.13; incidence σ ≈ 1.02–1.05;
 - Occam: ΔF from +0.1 (s = 0.1°) to +5.2 nats (s = 30°); tilted wall −70 nats;
-- gains: stay 0.693, under the wall 0.70, far west 0.95, behind the table 0.54, east corner 0.59;
-- β switch ≈ 0.07 nats/m; predicted vs realised ΔH for far west: 0.949 vs 0.950.
 
-**Post-thesis claim on a Day 1 slide/answer:** the layout explorer's precision term is inert
-because the map keeps one point per voxel (memory note `efe-objective-misfit-carries-it`).
-Marked as work in progress.
+**Day 3 material that came from Day 1** (block B0 of `labs/day3.ipynb`, frames in
+`slides/day3_efe.tex`). The key question comes at the end of exercise W3: *what does ln 2 assume?*
+Don't let students skip it. The answer (independent errors across looks) links back to Day 2's
+common-mode ceiling and to the thread of the whole course. Expected numbers (seed 0): gains stay
+0.693, under the wall 0.705, far west 0.949, behind the table 0.543, east corner 0.587; β switch ≈
+0.07 nats/m; predicted vs realised ΔH for far west: 0.949 vs 0.951. Post-thesis claim in the W3
+answer: the layout explorer's precision term is inert because the map keeps one point per voxel
+(memory note `efe-objective-misfit-carries-it`), marked as work in progress.
 
 ## Day 2 — Estimating the room, and finding oneself in it (`slides/day2.pdf`, `labs/day2.ipynb`)
 

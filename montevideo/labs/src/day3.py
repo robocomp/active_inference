@@ -418,6 +418,185 @@ for k, h in enumerate(history):
 # calibration action the analysis justifies on this platform is to stop while otherwise idle.
 
 # %% [markdown]
+# ## B0. Warm-up: where to look at one wall
+#
+# Before the grid, the smallest case of choosing a viewpoint: Day 1's north wall, held as a Laplace
+# belief after one scan. The cell below rebuilds that belief exactly as Day 1 left it (90° LiDAR,
+# known pose, ground-truth labels to pick the wall's points, per-beam incidence noise).
+
+# %%
+from toyworld import info_gain
+from toyworld.geometry import point_segment_distance
+
+rng_w = np.random.default_rng(0)
+wall_lidar = Lidar(n_beams=90, fov=np.deg2rad(90), sigma=0.02)
+oracle = Lidar(n_beams=90, fov=np.deg2rad(90), sigma=0.0)
+pose0 = np.array([4.5, 1.0, np.deg2rad(110)])
+NORTH = np.array([[[0.0, 4.0], [6.0, 4.0]]])
+
+
+def wall_points(scan, wall=NORTH, tol=0.15):
+    pts = se2.transform_points(scan.pose, scan.points())
+    bearings = scan.pose[2] + scan.angles[scan.hit]
+    on_wall = (scan.labels[scan.hit] == "wall") & (point_segment_distance(pts, wall)[:, 0] < tol)
+    return pts[on_wall], bearings[on_wall]
+
+
+def residual(pts):
+    return lambda t: np.cos(t[0]) * pts[:, 0] + np.sin(t[0]) * pts[:, 1] - t[1]
+
+
+def jacobian(pts):
+    return lambda t: np.stack([-np.sin(t[0]) * pts[:, 0] + np.cos(t[0]) * pts[:, 1], -np.ones(len(pts))], axis=1)
+
+
+def incidence_sigma(p, bearings, alpha=np.pi / 2):
+    u = np.stack([np.cos(bearings), np.sin(bearings)], axis=1)
+    return 0.02 * np.abs(u @ np.array([np.cos(alpha), np.sin(alpha)]))
+
+
+pts0, bear0 = wall_points(wall_lidar.scan(world, pose0, rng_w))
+wall0 = laplace(residual(pts0), [np.pi / 2, 4.0], incidence_sigma(pts0, bear0), jacobian=jacobian(pts0)).belief
+print(f"Day 1's wall: alpha = {np.degrees(wall0.mu[0]):.3f}° ± {np.degrees(wall0.sd[0]):.3f}°,  d = {wall0.mu[1]:.4f} ± {wall0.sd[1]:.4f} m")
+
+# %% [markdown]
+# ### B0.1 Information gain
+#
+# At decision time the current scan has already happened, so $\partial F / \partial a = 0$.
+# Actions are scored by the free energy they are *expected* to produce. For a Gaussian belief and
+# a linear-Gaussian measurement, the epistemic part of the expected free energy is the expected
+# entropy drop, which equals the mutual information, which equals the D-optimal design criterion:
+#
+# $$ \Delta H(v) = \tfrac12 \ln\frac{|\Lambda + J_v^\top R_v^{-1} J_v|}{|\Lambda|}. $$
+#
+# `info_gain(Lambda, J, R)` computes this. To predict *which* points a viewpoint $v$ would see we
+# cheat: we ray-cast the true world (with zero noise). In B2 below the robot predicts it from its
+# own beliefs instead.
+#
+# **Exercise W1.** Compute $\Delta H$ for each candidate below and rank them. Before running, guess
+# which wins.
+
+# %%
+views = {
+    "stay here":     [4.5, 1.0, np.deg2rad(110)],
+    "under the wall": [3.0, 3.3, np.deg2rad(90)],
+    "far west":      [0.8, 1.0, np.deg2rad(60)],
+    "behind table":  [2.2, 1.4, np.deg2rad(90)],
+    "east corner":   [5.5, 0.5, np.deg2rad(135)],
+}
+
+
+def predicted_gain(belief, view):
+    s = oracle.scan(world, np.asarray(view), rng_w)
+    p, b = wall_points(s)
+    if len(p) == 0:
+        return 0.0, 0
+    # BEGIN SOLUTION
+    J = jacobian(p)(belief.mu)
+    R = np.diag(incidence_sigma(p, b, belief.mu[0]) ** 2)
+    return info_gain(belief.precision, J, R), len(p)
+    # END SOLUTION
+
+
+fig, ax = plt.subplots(figsize=(9, 3.6))
+draw.world(world, ax)
+for name, v in views.items():
+    g, n = predicted_gain(wall0, v)
+    print(f"{name:15s} sees {n:3d} wall points   ΔH = {g:.3f} nats   distance {np.hypot(v[0] - pose0[0], v[1] - pose0[1]):.2f} m")
+    draw.robot(v, ax, color="0.4"); ax.annotate(f"{name}\n{g:.2f}", v[:2], fontsize=7, xytext=(4, -14), textcoords="offset points")
+draw.robot(pose0, ax); ax.set_xlim(-0.5, 6.5); ax.set_ylim(-0.3, 4.4)
+
+# %% [markdown]
+# **Questions.**
+# - "Stay here" gains almost exactly $\ln 2 = 0.693$ nats. Why that number?
+# - "Far west" sees *fewer* points than "under the wall" but gains more. Why?
+
+# %% [markdown] solution
+# *Answers.*
+# - A second identical scan doubles the information matrix: $|2\Lambda| / |\Lambda| = 2^2$ for a
+#   two-parameter belief, so $\Delta H = \tfrac12 \ln 4 = \ln 2$.
+# - The first scan saw the east part of the wall ($x \gtrsim 2$). The west end adds **lever arm**
+#   on the angle: points far from those already seen constrain $\alpha$ in a direction the current
+#   information matrix is weak in. Information depends on where the new data sit relative to what
+#   is already known, not on how many points there are.
+
+# %% [markdown]
+# **Exercise W2 — diminishing returns.** If the robot stays and scans again and again, what is the
+# $k$-th look worth? Compute it with `info_gain` and compare with $\ln\frac{k+1}{k}$.
+
+# %%
+s = oracle.scan(world, pose0, rng_w)
+p, b = wall_points(s)
+J1 = jacobian(p)(wall0.mu)
+R1 = np.diag(incidence_sigma(p, b) ** 2)
+L1 = J1.T @ np.linalg.solve(R1, J1)   # the information in one look
+ks = np.arange(1, 11)
+# BEGIN SOLUTION
+gains = [info_gain(k * L1, J1, R1) for k in ks]
+# END SOLUTION
+plt.figure(figsize=(5, 3))
+plt.plot(ks, gains, "o", label="info_gain")
+plt.plot(ks, np.log((ks + 1) / ks), "-", label=r"$\ln\frac{k+1}{k}$")
+plt.xlabel("look number k"); plt.ylabel("ΔH (nats)"); plt.legend()
+
+# %% [markdown]
+# ### B0.2 Paying for travel in the same currency
+#
+# The expected free energy has a **pragmatic** term too. The simplest one is a preference for not
+# driving far: $G(v) = \beta\,\lVert v - x\rVert - \Delta H(v)$, with $\beta$ in nats per metre.
+#
+# **Exercise W3.** For $\beta \in [0, 0.2]$ nats/m, which candidate minimises $G$? Find the $\beta$
+# at which the robot stops moving and simply scans again.
+
+# %%
+gains = {name: predicted_gain(wall0, v)[0] for name, v in views.items()}
+dists = {name: np.hypot(v[0] - pose0[0], v[1] - pose0[1]) for name, v in views.items()}
+for beta in np.linspace(0, 0.2, 21):
+    # BEGIN SOLUTION
+    G = {name: beta * dists[name] - gains[name] for name in views}
+    best = min(G, key=G.get)
+    # END SOLUTION
+    print(f"beta = {beta:.2f} nats/m  ->  {best}")
+
+# %% [markdown]
+# **Question — the key one of this warm-up.** For any $\beta$ above about 0.07, the robot prefers to
+# stay and re-scan, because a repeat look is "worth" $\ln 2$ nats for free. What does the model
+# *assume* that makes the repeat look so valuable? Would that assumption hold on a real robot?
+
+# %% [markdown] solution
+# *Answer.* The value $\ln 2$ assumes the second scan's errors are **independent** of the first's.
+# On a real robot, both scans share the same pose error, the same sensor-mount error and the same
+# calibration error. Those common-mode errors do not average away, so the second look is worth far
+# less than $\ln 2$. Averaging removes independent error, not shared error. Day 2 put a number on
+# this (the common-mode ceiling). The robot's real layout explorer takes the opposite extreme: its
+# map keeps one point per voxel, so a repeat look adds nothing at all, and its "precision" term
+# turned out to be inert. What carries that explorer is credit for what a viewpoint can *resolve*,
+# not for how often it has been seen (post-thesis result, work in progress).
+
+# %% [markdown]
+# ### B0.3 Go there and look
+#
+# **Exercise W4.** Move to "far west", scan, and update the belief. The update is another Laplace
+# fit, with the current belief as the **prior**. Compare the realised entropy drop with the
+# prediction.
+
+# %%
+view = np.asarray(views["far west"])
+s = wall_lidar.scan(world, view, rng_w)
+p, b = wall_points(s)
+# BEGIN SOLUTION
+fit1 = laplace(residual(p), wall0.mu, incidence_sigma(p, b, wall0.mu[0]), jacobian=jacobian(p), prior=wall0)
+wall1 = fit1.belief
+# END SOLUTION
+print(f"predicted ΔH = {gains['far west']:.3f} nats,  realised ΔH = {wall0.entropy() - wall1.entropy():.3f} nats")
+print(f"alpha sd: {np.degrees(wall0.sd[0]):.4f}° -> {np.degrees(wall1.sd[0]):.4f}°")
+
+# %% [markdown]
+# Prediction and realisation agree because the problem is close to linear. Note *what* agreed:
+# the entropy drop of a Gaussian depends on **where** you look, not on **what** you see, so it can
+# be computed before the robot moves. That is what makes an expected free energy computable.
+
+# %% [markdown]
 # ## B. Where to look next
 #
 # Now the world's turn. The robot keeps an occupancy grid of the living room, 5 cm cells, each

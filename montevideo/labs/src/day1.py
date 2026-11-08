@@ -7,9 +7,9 @@
 # 1. fit a wall to a LiDAR scan as a **Laplace belief**, a Gaussian whose covariance is the inverse
 #    curvature of the free energy;
 # 2. check whether that covariance is *honest*, and fix it when it is not;
-# 3. use the **free energy** to choose between two models of the same wall;
-# 4. choose the robot's **next viewpoint** by the information it is expected to buy, in nats, and
-#    then pay for travel with the same currency.
+# 3. use the **free energy** to choose between two models of the same wall.
+#
+# Choosing *where to look next* is Day 3, once action has its own functional.
 #
 # Today the robot knows its own pose exactly, and we cheat on *which* LiDAR points belong to the
 # wall. Day 2 removes both cheats.
@@ -70,56 +70,65 @@ print("rebuilt from p(D|O) p(O):", np.allclose(p_D_given_O * p_O[None, :], joint
 # %% [markdown]
 # ### Three variables, six orderings, one causal order
 #
-# Add $C$: does the robot get through the doorway? It depends on the door and on nothing the
-# LiDAR saw. The causal model is $p(D)\,p(O \mid D)\,p(C \mid D)$: 1 + 2 + 2 = 5 numbers.
+# Now the names used all week: $S$ the state (is the door open?), $O$ the observation (does the
+# LiDAR see a gap?), $A$ the action (does the robot point its LiDAR towards the door, or away?).
+# The robot cannot see $S$, so its choice of $A$ does not depend on it; the observation depends on
+# both. The causal model is $p(S)\,p(A)\,p(O \mid S, A)$: 1 + 1 + 4 = 6 numbers.
 
 # %%
-p_C_given_D = np.array([[0.95, 0.05],         # row d: p(C = [through, blocked] | D = d)
-                        [0.05, 0.95]])
+p_S = np.array([0.3, 0.7])                    # [open, closed]
+p_A = np.array([0.5, 0.5])                    # [towards the door, away]
+p_O_given_SA = np.array([[[0.9, 0.1],         # [s, a, o]: open,   towards -> p(O = [gap, wall])
+                          [0.5, 0.5]],        #            open,   away
+                         [[0.2, 0.8],         #            closed, towards
+                          [0.5, 0.5]]])       #            closed, away
 
 
-def causal_joint(p_D, p_O_given_D, p_C_given_D):
-    return p_D[:, None, None] * p_O_given_D[:, :, None] * p_C_given_D[:, None, :]   # [d, o, c]
+def causal_joint(p_S, p_A, p_O_given_SA):
+    j = p_S[:, None, None] * p_A[None, :, None] * p_O_given_SA          # [s, a, o]
+    return j.transpose(0, 2, 1)                                          # -> [s, o, a]
 
 
-joint3 = causal_joint(p_D, p_O_given_D, p_C_given_D)
+joint3 = causal_joint(p_S, p_A, p_O_given_SA)
 
 # %% [markdown]
-# **Exercise P3 — read the factors of an anti-causal order off the joint.** From `joint3` alone,
-# compute the three factors of the ordering $p(C)\,p(O \mid C)\,p(D \mid O, C)$, and check that their
-# product is `joint3` again. Then answer two questions numerically:
+# **Exercise P3 — read the factors of an anti-causal order off the joint.** From `joint3` alone
+# (axes `[s, o, a]`), compute the three factors of the ordering $p(O)\,p(A \mid O)\,p(S \mid O, A)$,
+# and check that their product is `joint3` again. Then answer two questions numerically:
 #
-# 1. Does $p(C \mid D, O)$ depend on $O$? Does $p(D \mid O, C)$ depend on $O$?
-# 2. Replace the LiDAR by a worse sensor, `p_O_given_D = [[0.6, 0.4], [0.4, 0.6]]`. Which causal
-#    factors change? Which anti-causal factors change?
+# 1. Does $p(A \mid S)$ depend on $S$? Does $p(S \mid O, A)$ depend on $A$?
+# 2. Replace the LiDAR by a worse sensor, which sees a gap with probability 0.6 / 0.4 when it looks
+#    at an open / closed door. Which causal factors change? Which anti-causal factors change?
 
 # %%
 def anticausal_factors(j):
     # BEGIN SOLUTION
-    p_C = j.sum(axis=(0, 1))
-    p_OC = j.sum(axis=0)                       # [o, c]
-    p_O_given_C = p_OC / p_C[None, :]
-    p_D_given_OC = j / p_OC[None, :, :]
-    return p_C, p_O_given_C, p_D_given_OC
+    p_O = j.sum(axis=(0, 2))
+    p_OA = j.sum(axis=0)                       # [o, a]
+    p_A_given_O = p_OA / p_O[:, None]
+    p_S_given_OA = j / p_OA[None, :, :]
+    return p_O, p_A_given_O, p_S_given_OA
     # END SOLUTION
 
 
-p_C, p_O_given_C, p_D_given_OC = anticausal_factors(joint3)
-print("anti-causal product == joint:", np.allclose(p_C[None, None, :] * p_O_given_C[None] * p_D_given_OC, joint3))
-p_C_given_DO = joint3 / joint3.sum(axis=2, keepdims=True)
-print("p(C=through | D=open, O) for O = gap, wall:", p_C_given_DO[0, :, 0].round(3), " <- O drops out")
-print("p(D=open | O, C=through) for O = gap, wall:", p_D_given_OC[0, :, 0].round(3), " <- O does not")
+p_O3, p_A_given_O, p_S_given_OA = anticausal_factors(joint3)
+print("anti-causal product == joint:", np.allclose(p_O3[None, :, None] * p_A_given_O[None] * p_S_given_OA, joint3))
+p_SA = joint3.sum(axis=1)
+print("p(A=towards | S) for S = open, closed:", (p_SA[:, 0] / p_SA.sum(axis=1)).round(3), " <- S drops out")
+print("p(S=open | O=gap, A) for A = towards, away:", p_S_given_OA[0, 0, :].round(3), " <- A does not")
 
-worse = np.array([[0.6, 0.4], [0.4, 0.6]])
-new = anticausal_factors(causal_joint(p_D, worse, p_C_given_D))
-for name, a, b in zip(["p(C)", "p(O|C)", "p(D|O,C)"], (p_C, p_O_given_C, p_D_given_OC), new):
-    print(f"new sensor changes anti-causal {name:9s}: {not np.allclose(a, b)}")
+worse = p_O_given_SA.copy()
+worse[0, 0], worse[1, 0] = [0.6, 0.4], [0.4, 0.6]
+new = anticausal_factors(causal_joint(p_S, p_A, worse))
+for name, x, y in zip(["p(O)", "p(A|O)", "p(S|O,A)"], (p_O3, p_A_given_O, p_S_given_OA), new):
+    print(f"new sensor changes anti-causal {name:9s}: {not np.allclose(x, y)}")
 
 # %% [markdown] solution
-# In the causal order only $p(O \mid D)$ changes with the sensor: that is the modularity argument.
-# In the anti-causal order $p(C)$ survives (the sensor does not touch the door or the crossing)
-# but $p(O \mid C)$ and $p(D \mid O, C)$ both change, and neither of them is something anyone could
-# write down from physics.
+# In the causal order only $p(O \mid S, A)$ changes with the sensor: that is the modularity
+# argument. In the anti-causal order all three factors change, and none of them is something
+# anyone could write down from physics. Note also *why* $p(S \mid O, A)$ needs $A$: a gap is strong
+# evidence for an open door when the LiDAR looked at it (0.66) and none at all when it looked away
+# (0.30, the prior).
 
 # %% [markdown]
 # **Exercise P4 — the same operations on a Gaussian.** $s$ is the distance to a wall, prior
@@ -366,149 +375,10 @@ print(f"tilted wall: F_free - F_Manhattan = {f_t.free_energy - m_t.free_energy:+
 # of **no thresholds**: the decision falls out of comparing two free energies.
 
 # %% [markdown]
-# ## 4. Where to look next
-#
-# At decision time the current scan has already happened, so $\partial F / \partial a = 0$.
-# Actions are scored by the free energy they are *expected* to produce. For a Gaussian belief and
-# a linear-Gaussian measurement, the epistemic part of the expected free energy is the expected
-# entropy drop, which equals the mutual information, which equals the D-optimal design criterion:
-#
-# $$ \Delta H(v) = \tfrac12 \ln\frac{|\Lambda + J_v^\top R_v^{-1} J_v|}{|\Lambda|}. $$
-#
-# `info_gain(Lambda, J, R)` computes this. To predict *which* points a viewpoint $v$ would see we
-# cheat once more: we ray-cast the true world (with zero noise). On Day 5 the robot will have to
-# predict that from its own beliefs.
-#
-# **Exercise 7.** Compute $\Delta H$ for each candidate below and rank them. Before running, guess
-# which wins.
-
-# %%
-candidates = {
-    "stay here":     [4.5, 1.0, np.deg2rad(110)],
-    "under the wall": [3.0, 3.3, np.deg2rad(90)],
-    "far west":      [0.8, 1.0, np.deg2rad(60)],
-    "behind table":  [2.2, 1.4, np.deg2rad(90)],
-    "east corner":   [5.5, 0.5, np.deg2rad(135)],
-}
-oracle = Lidar(n_beams=90, fov=np.deg2rad(90), sigma=0.0)
-
-
-def predicted_gain(belief, view):
-    s = oracle.scan(world, np.asarray(view), rng)
-    p, b = wall_points(s)
-    if len(p) == 0:
-        return 0.0, 0
-    # BEGIN SOLUTION
-    J = jacobian(p)(belief.mu)
-    R = np.diag(incidence_sigma(p, b, belief.mu[0]) ** 2)
-    return info_gain(belief.precision, J, R), len(p)
-    # END SOLUTION
-
-
-fig, ax = plt.subplots(figsize=(9, 3.6))
-draw.world(world, ax)
-for name, v in candidates.items():
-    g, n = predicted_gain(wall0, v)
-    print(f"{name:15s} sees {n:3d} wall points   ΔH = {g:.3f} nats   distance {np.hypot(v[0] - pose0[0], v[1] - pose0[1]):.2f} m")
-    draw.robot(v, ax, color="0.4"); ax.annotate(f"{name}\n{g:.2f}", v[:2], fontsize=7, xytext=(4, -14), textcoords="offset points")
-draw.robot(pose0, ax); ax.set_xlim(-0.5, 6.5); ax.set_ylim(-0.3, 4.4)
-
-# %% [markdown]
-# **Questions.**
-# - "Stay here" gains almost exactly $\ln 2 = 0.693$ nats. Why that number?
-# - "Far west" sees *fewer* points than "under the wall" but gains more. Why?
-
-# %% [markdown] solution
-# *Answers.*
-# - A second identical scan doubles the information matrix: $|2\Lambda| / |\Lambda| = 2^2$ for a
-#   two-parameter belief, so $\Delta H = \tfrac12 \ln 4 = \ln 2$.
-# - The first scan saw the east part of the wall ($x \gtrsim 2$). The west end adds **lever arm**
-#   on the angle: points far from those already seen constrain $\alpha$ in a direction the current
-#   information matrix is weak in. Information depends on where the new data sit relative to what
-#   is already known, not on how many points there are.
-
-# %% [markdown]
-# **Exercise 8 — diminishing returns.** If the robot stays and scans again and again, what is the
-# $k$-th look worth? Compute it with `info_gain` and compare with $\ln\frac{k+1}{k}$.
-
-# %%
-s = oracle.scan(world, pose0, rng)
-p, b = wall_points(s)
-J1 = jacobian(p)(wall0.mu)
-R1 = np.diag(incidence_sigma(p, b) ** 2)
-L1 = J1.T @ np.linalg.solve(R1, J1)   # the information in one look
-ks = np.arange(1, 11)
-# BEGIN SOLUTION
-gains = [info_gain(k * L1, J1, R1) for k in ks]
-# END SOLUTION
-plt.figure(figsize=(5, 3))
-plt.plot(ks, gains, "o", label="info_gain")
-plt.plot(ks, np.log((ks + 1) / ks), "-", label=r"$\ln\frac{k+1}{k}$")
-plt.xlabel("look number k"); plt.ylabel("ΔH (nats)"); plt.legend()
-
-# %% [markdown]
-# ## 5. Paying for travel in the same currency
-#
-# The expected free energy has a **pragmatic** term too. The simplest one is a preference for not
-# driving far: $G(v) = \beta\,\lVert v - x\rVert - \Delta H(v)$, with $\beta$ in nats per metre.
-#
-# **Exercise 9.** For $\beta \in [0, 0.2]$ nats/m, which candidate minimises $G$? Find the $\beta$
-# at which the robot stops moving and simply scans again.
-
-# %%
-gains = {name: predicted_gain(wall0, v)[0] for name, v in candidates.items()}
-dists = {name: np.hypot(v[0] - pose0[0], v[1] - pose0[1]) for name, v in candidates.items()}
-for beta in np.linspace(0, 0.2, 21):
-    # BEGIN SOLUTION
-    G = {name: beta * dists[name] - gains[name] for name in candidates}
-    best = min(G, key=G.get)
-    # END SOLUTION
-    print(f"beta = {beta:.2f} nats/m  ->  {best}")
-
-# %% [markdown]
-# **Question — the most important one today.** For any $\beta$ above about 0.07, the robot prefers to
-# stay and re-scan, because a repeat look is "worth" $\ln 2$ nats for free. What does the model
-# *assume* that makes the repeat look so valuable? Would that assumption hold on a real robot?
-
-# %% [markdown] solution
-# *Answer.* The value $\ln 2$ assumes the second scan's errors are **independent** of the first's.
-# On a real robot, both scans share the same pose error, the same sensor-mount error and the same
-# calibration error. Those common-mode errors do not average away, so the second look is worth far
-# less than $\ln 2$. Averaging removes independent error, not shared error. Day 2 puts a number on
-# this (the common-mode ceiling). The robot's real layout explorer takes the opposite extreme: its
-# map keeps one point per voxel, so a repeat look adds nothing at all, and its "precision" term
-# turned out to be inert. What carries that explorer is credit for what a viewpoint can *resolve*,
-# not for how often it has been seen (post-thesis result, work in progress).
-
-# %% [markdown]
-# ## 6. Go there and look
-#
-# **Exercise 10.** Move to "far west", scan, and update the belief. The update is another Laplace
-# fit, with the current belief as the **prior**. Compare the realised entropy drop with the
-# prediction.
-
-# %%
-view = np.asarray(candidates["far west"])
-s = lidar.scan(world, view, rng)
-p, b = wall_points(s)
-# BEGIN SOLUTION
-fit1 = laplace(residual(p), wall0.mu, incidence_sigma(p, b, wall0.mu[0]), jacobian=jacobian(p), prior=wall0)
-wall1 = fit1.belief
-# END SOLUTION
-print(f"predicted ΔH = {gains['far west']:.3f} nats,  realised ΔH = {wall0.entropy() - wall1.entropy():.3f} nats")
-print(f"alpha sd: {np.degrees(wall0.sd[0]):.4f}° -> {np.degrees(wall1.sd[0]):.4f}°")
-
-# %% [markdown]
-# Prediction and realisation agree because the problem is close to linear. Note *what* agreed:
-# the entropy drop of a Gaussian depends on **where** you look, not on **what** you see, so it can
-# be computed before the robot moves. That is what makes an expected free energy computable.
-#
 # ## Take-aways
 # - A belief is a mean **and** a covariance. The covariance is the curvature of the free energy,
 #   and it is only as honest as the likelihood.
 # - Model choice is free-energy comparison: complexity against accuracy, in nats, with no
 #   threshold.
-# - Where to look is information gain, in the same nats, so travel can be priced against it with a
-#   single exchange rate.
 # - Tomorrow the robot loses its known pose and its labelled points. The wall becomes four walls,
 #   the pose becomes one more belief, and the walls and the pose must be estimated *together*.

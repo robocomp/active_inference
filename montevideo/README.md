@@ -44,17 +44,19 @@ mathematics, starting from the beginning:
   conditioning and factorisation (the product rule, and Bayes' rule as a consequence of it);
 - the same operations on Gaussians, in covariance and in precision form;
 - the chain rule: a joint of N variables factorises into N factors, in N! equivalent orders, and
-  why we write the causal one (sparse, physical, modular, and it can generate predictions);
+  why we write the causal one (sparse, physical, modular, and it can generate predictions); where
+  a plain controller or a learnt policy, p(a|o), sits in that picture;
 - generative models, variational inference and the evidence lower bound;
 - free energy as complexity minus accuracy;
+- free energy differentiated with respect to the belief and with respect to the action, and a first
+  look at expected free energy, with its pragmatic and epistemic terms;
 - perception as inference under a model rather than reconstruction from data;
 - the Laplace approximation, which gives Gaussian beliefs whose covariance is the inverse
-  curvature, the form everything later takes;
-- why action needs a second functional: expected free energy, its pragmatic and epistemic terms,
-  and the identity of information gain, mutual information and D-optimal design.
+  curvature, the form everything later takes.
 
-*Lab:* a warm-up on a door/LiDAR probability table and a Gaussian; then meet the toy world. Fit a wall from a LiDAR scan as a Laplace belief, and choose the next
-viewpoint by the information it is expected to buy.
+*Lab:* a warm-up on a door/LiDAR probability table and a Gaussian; then meet the toy world, fit a
+wall from a LiDAR scan as a Laplace belief, test whether its covariance is honest, and choose
+between two models of it by free energy.
 
 ### Day 2 — Estimating the room, and finding oneself in it
 - The room layout as a belief with two regimes: acquiring an unknown room, and operating in a
@@ -68,8 +70,10 @@ viewpoint by the information it is expected to buy.
 *Lab:* estimate the toy room's walls and the robot's pose together. Meet the room's symmetry, and
 watch a thousand points with a shared offset refuse to shrink the uncertainty.
 
-### Day 3 — The body is a belief too
-The robot turns the same objective on itself:
+### Day 3 — Acting to know: the body and the room
+Why action needs a second functional: expected free energy, its pragmatic and epistemic terms, and
+the identity of information gain, mutual information and D-optimal design; where to look next,
+and travel priced in the same nats. Then the robot turns the same objective on itself:
 - calibration as inference;
 - the gauges no data can fix;
 - which motions make which parameters observable (parked, straight, turning in place);
@@ -79,7 +83,8 @@ The robot turns the same objective on itself:
 
 *Lab:* the toy robot has a hidden wheel-scale error and gyro bias. Recover them from the
 localiser's corrections, and check the recovery against the identity
-recovery = 1 − (σ_post/σ_prior)².
+recovery = 1 − (σ_post/σ_prior)². Then choose viewpoints by expected information: first on one
+wall, then with an occupancy-grid explorer that knows when to stop.
 
 ### Day 4 — Concepts fill the room
 - A distributed working memory as a shared graph, and the decomposition of one global free energy

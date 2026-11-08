@@ -5,6 +5,23 @@
 \subtitle{Day 1 --- The challenge, probability, and free energy}
 \date{Monday 30 November}
 
+% --- the door table drawn as areas: width x height = probability ---------------------------------
+% \mosaicbyO{gap,open}{gap,closed}{wall,open}{wall,closed}: columns first, p(O) then p(D|O).
+\newcommand{\mosaicbyO}[4]{%
+  \fill[#1, draw=white, very thick] (0,0.82) rectangle (1.312,2.4);
+  \fill[#2, draw=white, very thick] (0,0) rectangle (1.312,0.82);
+  \fill[#3, draw=white, very thick] (1.312,2.278) rectangle (3.2,2.4);
+  \fill[#4, draw=white, very thick] (1.312,0) rectangle (3.2,2.278);}
+% \mosaicbyD: the same table, rows first, p(D) then p(O|D).
+\newcommand{\mosaicbyD}[4]{%
+  \fill[#1, draw=white, very thick] (0,1.68) rectangle (2.88,2.4);
+  \fill[#2, draw=white, very thick] (0,0) rectangle (0.64,1.68);
+  \fill[#3, draw=white, very thick] (2.88,1.68) rectangle (3.2,2.4);
+  \fill[#4, draw=white, very thick] (0.64,0) rectangle (3.2,1.68);}
+% \minidag: S -> O <- A, as small circles. Argument: tikz options for the picture.
+\tikzset{mv/.style={draw, circle, inner sep=0pt, minimum size=0.62cm, fill=cool!12, font=\scriptsize},
+         ma/.style={-{Stealth}, thick}}
+
 \begin{document}
 
 \maketitle
@@ -96,14 +113,16 @@
         Averaging removes \alert{independent} error.\\
         It does not remove \alert{shared} error.
       \end{block}
-      \small
-      You will meet it as:
-      \begin{itemize}
-        \item the common-mode ceiling;
-        \item a prior re-centred on its own estimate;
-        \item a fused precision better than its best member;
-        \item a metric that scores what the robot never saw.
-      \end{itemize}
+      \centering
+      \begin{tikzpicture}[x=0.17cm, y=2.5cm]
+        \draw[-{Stealth}, muted] (0,0) -- (33,0) node[below left, font=\scriptsize, text=black] {measurements averaged};
+        \draw[-{Stealth}, muted] (0,0) -- (0,1.08) node[above, font=\scriptsize, text=black] {error left};
+        \draw[accent, densely dashed] (0,0.36) -- (32,0.36);
+        \draw[cool, very thick, domain=1:32, samples=60] plot (\x, {1/sqrt(\x)});
+        \draw[accent, very thick, domain=1:32, samples=60] plot (\x, {sqrt(0.87/\x + 0.13)});
+        \node[font=\scriptsize, text=black, above left] at (32,0.42) {shared: a floor};
+        \node[font=\scriptsize, text=black, above] at (24,0.02) {independent: $\to 0$};
+      \end{tikzpicture}
     \end{column}
   \end{columns}
 \end{frame}
@@ -131,17 +150,26 @@
       continuous ones.
     \end{column}
     \begin{column}{0.46\textwidth}
+      \centering
+      \begin{tikzpicture}[lab/.style={font=\scriptsize}]
+        \draw[very thick, muted] (0,0) rectangle (4.6,3.0);
+        \coordinate (r) at (1.5,1.1);
+        \foreach \px/\py in {4.6/2.1, 4.6/0.4, 3.0/3.0, 0.7/3.0, 0/1.8, 2.6/0} {
+          \draw[cool!50] (r) -- (\px,\py);
+          \fill[cool] (\px,\py) circle (1.6pt);
+        }
+        \fill[muted!40, draw=black] (r) circle (6pt);
+        \draw[-{Stealth}, very thick, good] (r) -- ++(40:1.05) node[right, lab, text=black] {$v_{\text{adv}}$};
+        \draw[-{Stealth}, very thick, good] (r) -- ++(130:0.8) node[left, lab, text=black] {$v_{\text{side}}$};
+        \draw[-{Stealth}, very thick, good] ($(r)+(-65:0.42)$) arc (-65:20:0.42);
+        \node[lab, right] at ($(r)+(-30:0.42)$) {$\omega$};
+        \node[lab, below left, fill=white, inner sep=1pt, xshift=-5pt] at (r) {$x,y,\theta$};
+        \draw[{Stealth}-{Stealth}, muted] (0,-0.2) -- node[below, lab, text=black] {$w$} (4.6,-0.2);
+        \draw[{Stealth}-{Stealth}, muted] (4.8,0) -- node[right, lab, text=black] {$d$} (4.8,3.0);
+        \node[lab, cool, above] at (3.75,3.0) {$o$: returns $p_1\ldots p_N$};
+      \end{tikzpicture}\\[0.2em]
       \small
-      \[
-        s = \begin{bmatrix} x\\ y\\ \theta\\ w\\ d \end{bmatrix}\!
-        \begin{array}{l}\text{robot pose}\\[0.2em] \text{room width, depth}\end{array}
-      \]
-      \[
-        o = \begin{bmatrix} p_1\\ \vdots\\ p_N \end{bmatrix}\! \text{ LiDAR returns}
-        \quad
-        a = \begin{bmatrix} v_{\text{adv}}\\ v_{\text{side}}\\ \omega \end{bmatrix}\! \text{ command}
-      \]
-      The whole problem is one object:
+      {\color{muted}$s$: pose and room}\quad {\color{cool}$o$: scan}\quad {\color{good}$a$: command}
       \[ p(s, o, a) \]
     \end{column}
   \end{columns}
@@ -164,13 +192,17 @@
       {\small the four numbers add up to 1}
     \end{column}
     \begin{column}{0.52\textwidth}
-      \begin{itemize}
-        \item The \textbf{joint} $p(D, O)$ gives the probability of every combination at once.
-        \item Every question you can ask about $D$ and $O$ is a calculation on this table, with
-              only \alert{three operations}: summing, slicing, and multiplying back.
-        \item Everything this week, including free energy, is these three operations, done on
-              tables too large to write down.
-      \end{itemize}
+      \centering
+      \begin{tikzpicture}[scale=0.95, lab/.style={font=\scriptsize}]
+        \mosaicbyO{accent!30}{muted!25}{accent!30}{muted!25}
+        \node[lab] at (0.656,1.61) {0.27}; \node[lab] at (0.656,0.41) {0.14};
+        \node[lab] at (2.256,1.14) {0.56}; \node[lab, right] at (3.2,2.34) {0.03};
+        \node[lab, above] at (0.656,2.4) {gap}; \node[lab, above] at (2.256,2.4) {wall};
+        \node[lab, left] at (0,1.61) {open}; \node[lab, left] at (0,0.41) {closed};
+      \end{tikzpicture}\\[0.4em]
+      \raggedright
+      The same \textbf{joint} $p(D,O)$, drawn so that \emph{area is probability}. Everything this
+      week is \alert{three operations} on it: summing, slicing, and multiplying back.
     \end{column}
   \end{columns}
 \end{frame}
@@ -218,13 +250,21 @@
     \end{column}
     \begin{column}{0.48\textwidth}
       \[ p(s\given o) = \frac{p(s, o)}{p(o)} \]
-      \begin{itemize}\small
-        \item Observing $O=\text{gap}$ throws away the column that did not happen. What remains
-              no longer sums to 1, so divide by its total, the marginal $p(o)$.
-        \item Before looking, the door was open with probability $0.30$; after seeing a gap,
-              $0.66$. \alert{Conditioning is how evidence enters a belief.}
-        \item Seeing a wall instead: $0.03/0.59 = 0.05$.
-      \end{itemize}
+      \centering
+      \begin{tikzpicture}[scale=0.72, lab/.style={font=\scriptsize}]
+        \mosaicbyO{accent!30}{muted!25}{muted!8}{muted!8}
+        \node[lab] at (0.656,1.61) {0.27}; \node[lab] at (0.656,0.41) {0.14};
+        \node[lab, muted, align=center] at (2.256,1.14) {did not\\happen};
+        \draw[-{Stealth}, thick] (3.35,1.2) -- node[above, lab, align=center] {$\div\,0.41$} (4.65,1.2);
+        \begin{scope}[shift={(4.8,0)}]
+          \fill[accent!30, draw=white, very thick] (0,0.82) rectangle (1.9,2.4);
+          \fill[muted!25, draw=white, very thick] (0,0) rectangle (1.9,0.82);
+          \node[lab] at (0.95,1.61) {0.66}; \node[lab] at (0.95,0.41) {0.34};
+        \end{scope}
+      \end{tikzpicture}\\[0.5em]
+      \raggedright\small
+      Before looking, open with probability $0.30$; after a gap, $0.66$; after a wall,
+      $0.03/0.59 = 0.05$. \alert{Conditioning is how evidence enters a belief.}
     \end{column}
   \end{columns}
 \end{frame}
@@ -237,15 +277,23 @@
   \]
   \vspace{-0.3em}
   \begin{columns}[T]
-    \begin{column}{0.5\textwidth}
-      Check it on the table:
-      \begin{itemize}\small
-        \item $p(\text{gap}\given\text{open})\,p(\text{open}) = 0.9 \times 0.30 = 0.27$
-        \item $p(\text{open}\given\text{gap})\,p(\text{gap}) = 0.66 \times 0.41 = 0.27$
-      \end{itemize}
-      Both products rebuild the same cell of the joint.
+    \begin{column}{0.62\textwidth}
+      \centering
+      \begin{tikzpicture}[scale=0.72, lab/.style={font=\scriptsize}]
+        \mosaicbyD{accent!30}{muted!25}{muted!25}{muted!25}
+        \node[lab] at (1.44,2.04) {$0.27$};
+        \draw[|-|, thick] (0,2.55) -- node[above, lab] {$p(\text{gap}\given\text{open})=0.9$} (2.88,2.55);
+        \draw[|-|, thick] (-0.15,1.68) -- node[left, lab, align=right] {$p(\text{open})$\\$=0.30$} (-0.15,2.4);
+        \begin{scope}[shift={(5.7,0)}]
+          \mosaicbyO{accent!30}{muted!25}{muted!25}{muted!25}
+          \node[lab] at (0.656,1.61) {$0.27$};
+          \draw[|-|, thick] (0,-0.15) -- node[below, lab] {$p(\text{gap})=0.41$} (1.312,-0.15);
+          \draw[|-|, thick] (-0.15,0.82) -- node[left, lab, align=right] {$p(\text{open}\given\text{gap})$\\$=0.66$} (-0.15,2.4);
+        \end{scope}
+      \end{tikzpicture}\\[0.3em]
+      \small Two different rectangles, the same area: the same cell of the joint.
     \end{column}
-    \begin{column}{0.46\textwidth}
+    \begin{column}{0.36\textwidth}
       Set the two factorisations equal and divide by $p(o)$:
       \[ p(s\given o) = \frac{p(o\given s)\,p(s)}{p(o)} \]
       \alert{Bayes' rule is not an extra axiom.} It is the product rule written twice.
@@ -320,18 +368,20 @@
 \end{frame}
 
 \begin{frame}{One joint, $N!$ factorisations}
-  Add a third variable, $C$: does the robot get through the doorway?
+  From now on the names we use all week: $S$ the \textbf{state} (is the door open?),
+  $O$ the \textbf{observation} (does the LiDAR see a gap?), $A$ the \textbf{action} (does the
+  robot turn its LiDAR towards the door, or away?).
   \vspace{0.3em}
   \begin{columns}[c]
     \begin{column}{0.5\textwidth}
       \small
       \begin{align*}
-        p(D,O,C) &= p(D)\,p(O\given D)\,p(C\given D,O)\\
-                 &= p(D)\,p(C\given D)\,p(O\given D,C)\\
-                 &= p(O)\,p(D\given O)\,p(C\given D,O)\\
-                 &= p(O)\,p(C\given O)\,p(D\given O,C)\\
-                 &= p(C)\,p(D\given C)\,p(O\given D,C)\\
-                 &= p(C)\,p(O\given C)\,p(D\given O,C)
+        p(S,O,A) &= p(S)\,p(O\given S)\,p(A\given S,O)\\
+                 &= p(S)\,p(A\given S)\,p(O\given S,A)\\
+                 &= p(O)\,p(S\given O)\,p(A\given S,O)\\
+                 &= p(O)\,p(A\given O)\,p(S\given O,A)\\
+                 &= p(A)\,p(S\given A)\,p(O\given S,A)\\
+                 &= p(A)\,p(O\given A)\,p(S\given O,A)
       \end{align*}
     \end{column}
     \begin{column}{0.46\textwidth}
@@ -351,34 +401,34 @@
   \begin{columns}[T]
     \begin{column}{0.5\textwidth}
       \textbf{Causal order}: causes before effects.
-      \[ p(D)\,p(O\given D)\,p(C\given D, O) \]
-      Once you know whether the door is open, what the LiDAR saw changes nothing about
-      getting through:
-      \[ p(C\given D, O) = p(C\given D) \]
+      \[ p(S)\,p(A\given S)\,p(O\given S, A) \]
+      The robot cannot see whether the door is open, so where it points its LiDAR does not
+      depend on it; what it observes depends on both:
+      \[ p(A\given S) = p(A) \]
       \centering
       \begin{tikzpicture}[v/.style={draw, circle, minimum size=0.8cm, fill=cool!12}, every node/.style={font=\small}]
-        \node[v] (d) {$D$};
-        \node[v, below left=0.6cm and 0.6cm of d] (o) {$O$};
-        \node[v, below right=0.6cm and 0.6cm of d] (c) {$C$};
-        \draw[-{Stealth}, thick] (d) -- (o);
-        \draw[-{Stealth}, thick] (d) -- (c);
+        \node[v] (o) {$O$};
+        \node[v, above left=0.6cm and 0.6cm of o] (s) {$S$};
+        \node[v, above right=0.6cm and 0.6cm of o] (a) {$A$};
+        \draw[-{Stealth}, thick] (s) -- (o);
+        \draw[-{Stealth}, thick] (a) -- (o);
       \end{tikzpicture}
     \end{column}
     \begin{column}{0.48\textwidth}
       \textbf{Anti-causal order}: effects first.
-      \[ p(C)\,p(O\given C)\,p(D\given O, C) \]
-      $O$ and $C$ are linked through the door, so nothing simplifies. Every factor keeps all
-      its arguments.
+      \[ p(O)\,p(A\given O)\,p(S\given O, A) \]
+      Once $O$ is known, $S$ and $A$ are linked through it (a gap means little if the LiDAR
+      looked away), so nothing simplifies. Every factor keeps all its arguments.
 
-      \vspace{0.8em}
+      \vspace{0.6em}
       \footnotesize
       Numbers needed to specify it (binary variables):\\[0.3em]
       \begin{tabular}{@{}l r@{}}
         \toprule
-        any order, nothing dropped      & $2^3 - 1 = 7$ \\
-        causal, using $C \perp O \given D$ & $1 + 2 + 2 = 5$ \\
+        any order, nothing dropped         & $2^3 - 1 = 7$ \\
+        causal, using $A \perp S$          & $1 + 1 + 4 = 6$ \\
         \midrule
-        $N$ variables, any order        & $2^N - 1$ \\
+        $N$ variables, any order           & $2^N - 1$ \\
         $N$ variables, $\le k$ causes each & $\le N\,2^k$ \\
         \bottomrule
       \end{tabular}
@@ -387,26 +437,95 @@
 \end{frame}
 
 \begin{frame}{Why the causal order wins}
-  \begin{enumerate}
-    \item \textbf{Sparse.} Each variable depends on a few direct causes, not on everything
-          before it. The arrows you leave out are the independences you know.
-    \item \textbf{Each factor is a piece of physics.} $p(O\given D)$ is a sensor model and
-          $p(s_t\given s_{t-1}, a_t)$ a motion model; you can write them down. Nobody can write
-          down $p(O)$, the distribution of every possible LiDAR scan.
-    \item \textbf{Modular.} Replace the LiDAR with a camera and only $p(O\given D)$ changes.
-          In the anti-causal order, $p(O\given C)$ and $p(D\given O, C)$ both change.
-    \item \textbf{It runs forwards.} Sampling the factors in order \emph{generates} data: the
-          model can predict what it will see if it acts. Action needs exactly that.
-  \end{enumerate}
-  \vspace{0.3em}
+  \small
   \begin{columns}[T]
     \begin{column}{0.48\textwidth}
-      \small \textbf{discriminative}: $p(o)\,p(s\given o)$\\ from an image, guess the state (a classifier).
+      \textbf{1. Sparse.} The arrows you leave out are the independences you know.\\[0.3em]
+      \centering
+      \begin{tikzpicture}
+        \node[mv] (s) at (0,0.9) {$S$}; \node[mv] (a) at (3.2,0.9) {$A$}; \node[mv] (o) at (1.6,0) {$O$};
+        \draw[ma] (s) -- (o); \draw[ma] (a) -- (o);
+        \draw[accent, densely dashed] (s) -- node[above, font=\scriptsize, text=accent] {no arrow: $A\perp S$} (a);
+      \end{tikzpicture}
+
+      \vspace{0.9em}
+      \raggedright
+      \textbf{3. Modular.} Swap the LiDAR for a camera and see what must be re-learnt:\\[0.5em]
+      \centering
+      \setlength{\fboxsep}{2pt}
+      \renewcommand{\arraystretch}{1.5}
+      \begin{tabular}{@{}r l@{}}
+        causal & $p(S)\;p(A)\;\colorbox{accent!30}{$p(O\given S,A)$}$ \\
+        anti-causal & \colorbox{accent!30}{$p(O)$}\;\colorbox{accent!30}{$p(A\given O)$}\;\colorbox{accent!30}{$p(S\given O,A)$} \\
+      \end{tabular}
     \end{column}
     \begin{column}{0.48\textwidth}
-      \small \textbf{generative}: $p(s)\,p(o\given s)$\\ from a state, produce the observation (what we build).
+      \textbf{2. Each factor is physics.} Nobody can write down $p(O)$, every possible scan.\\[0.3em]
+      \centering
+      \begin{tikzpicture}
+        \node[mv] (s0) at (0,0.9) {$s_{t-1}$}; \node[mv] (s1) at (2.6,0.9) {$s_t$}; \node[mv, fill=cool!30] (o) at (2.6,0) {$o_t$};
+        \draw[ma] (s0) -- node[above, font=\scriptsize] {motion model} (s1);
+        \draw[ma] (s1) -- node[left, font=\scriptsize] {sensor model} (o);
+      \end{tikzpicture}
+
+      \vspace{0.9em}
+      \raggedright
+      \textbf{4. It runs forwards.} Sampling in order predicts what acting would show:\\[0.3em]
+      \centering
+      \begin{tikzpicture}
+        \node[mv] (s) at (0,0.75) {$S$}; \node[mv, fill=good!25] (a) at (0,0) {$A$}; \node[mv, fill=cool!30] (o) at (2.4,0.375) {$\hat O$};
+        \draw[ma] (s) -- (o); \draw[ma] (a) -- (o);
+        \node[font=\scriptsize, right=2pt of o, align=left] {what I would\\see if I did it};
+      \end{tikzpicture}
     \end{column}
   \end{columns}
+\end{frame}
+
+\begin{frame}{Three things you can build from one joint}
+  \begin{columns}[T]
+    \begin{column}{0.31\textwidth}
+      \begin{block}{Perception only}
+        \centering $p(s\given o)$\\[0.3em]
+        \begin{tikzpicture}
+          \node[mv, fill=cool!30] (o) at (0,0) {$O$}; \node[mv] (s) at (1.8,0) {$S$};
+          \draw[ma] (o) -- (s);
+        \end{tikzpicture}\\[0.2em]
+        \raggedright\scriptsize A classifier, a detector.
+      \end{block}
+    \end{column}
+    \begin{column}{0.31\textwidth}
+      \begin{block}{Control only}
+        \centering $p(a\given o)$\\[0.3em]
+        \begin{tikzpicture}
+          \node[mv, fill=cool!30] (o) at (0,0) {$O$}; \node[mv, fill=good!25] (a) at (1.8,0) {$A$};
+          \draw[ma] (o) -- (a);
+        \end{tikzpicture}\\[0.2em]
+        \raggedright\scriptsize PID, a hand-written controller, a learnt policy: the factor
+        $p(A\given O)$ of the anti-causal order, on its own.
+      \end{block}
+    \end{column}
+    \begin{column}{0.31\textwidth}
+      \begin{exampleblock}{The generative model}
+        \centering $p(s)\,p(a)\,p(o\given s, a)$\\[0.3em]
+        \begin{tikzpicture}
+          \node[mv] (s) at (0,0) {$S$}; \node[mv, fill=cool!30] (o) at (1.1,0) {$O$}; \node[mv, fill=good!25] (a) at (2.2,0) {$A$};
+          \draw[ma] (s) -- (o); \draw[ma] (a) -- (o);
+        \end{tikzpicture}\\[0.2em]
+        \raggedright\scriptsize Explains, predicts, and chooses by inference. This is what we build.
+      \end{exampleblock}
+    \end{column}
+  \end{columns}
+  \vspace{0.5em}
+  \centering\footnotesize
+  \begin{tabular}{@{}l c c c c c@{}}
+    \toprule
+     & acts, in the world & says what it & notices it & knows what it & survives a \\
+     & it was tuned in & expects to see & is surprised & does not know & sensor swap \\
+    \midrule
+    controller, policy $p(a\given o)$ & $\checkmark$ & $\times$ & $\times$ & $\times$ & $\times$ \\
+    \alert{the joint}                 & $\checkmark$ & $\checkmark$ & $\checkmark$ & $\checkmark$ & $\checkmark$ \\
+    \bottomrule
+  \end{tabular}
 \end{frame}
 
 \begin{frame}{The robot's joint, in causal order}
@@ -442,25 +561,17 @@
 \end{frame}
 
 \begin{frame}{Bayes' rule is the three operations in a row}
+  \vspace{-0.6em}
   \[
     \underbrace{p(s\given o)}_{\text{posterior}}
     \;=\;
     \frac{\overbrace{p(o\given s)}^{\text{likelihood}}\;\overbrace{p(s)}^{\text{prior}}}
          {\underbrace{p(o)}_{\text{evidence}}}
   \]
-  \begin{tabular}{@{}l l l@{}}
-    \toprule
-    operation & where & what it asks \\
-    \midrule
-    factorise, causally & numerator   & how would a robot at $s$ see this room? what did it expect? \\
-    condition on $o$    & left side   & where is the robot, now that this scan has arrived? \\
-    marginalise $s$     & denominator & how likely was this scan, averaged over every $s$? \\
-    \bottomrule
-  \end{tabular}
+  \centering
+  \includegraphics[width=0.92\textwidth]{d1_bayes_ops.pdf}
 
-  \vspace{0.8em}
-  \lesson{The first two are cheap. The third is where exact inference dies,\\and the rest of
-  today is about how not to compute it.}
+  \lesson{The shaded area is where exact inference dies; the rest of today is how not to compute it.}
 \end{frame}
 
 % =================================================================================================
@@ -535,23 +646,31 @@
 
 \begin{frame}{The identity the framework rests on}
   \[ \boxed{\; F[q,o] = \KL{q(s)}{p(s\given o)} - \ln p(o) \;} \]
-  \begin{columns}[T]
-    \begin{column}{0.48\textwidth}
-      \begin{block}{Reading 1: same minimiser}
-        $\ln p(o)$ does not depend on $q$. Minimising the computable $F$ minimises the
-        uncomputable divergence.
-      \end{block}
+  \begin{columns}[c]
+    \begin{column}{0.46\textwidth}
+      \centering
+      \begin{tikzpicture}[x=1cm, y=1cm, lab/.style={font=\scriptsize}]
+        \foreach \x/\k/\t in {0/1.5/start, 1.5/0.7/iterating, 3/0.08/converged} {
+          \fill[muted!30, draw=white, very thick] (\x,0) rectangle (\x+1,1.5);
+          \fill[accent!40, draw=white, very thick] (\x,1.5) rectangle (\x+1,1.5+\k);
+          \node[lab, below] at (\x+0.5,0) {\t};
+        }
+        \draw[densely dashed] (-0.2,1.5) -- (4.2,1.5);
+        \node[lab] at (0.5,0.75) {$-\ln p(o)$};
+        \node[lab] at (0.5,2.25) {$\mathrm{KL}$};
+        \node[lab, above] at (0.5,3.0) {$F$};
+        \node[lab, text=muted] at (2,-0.75) {dashed: no belief can move it};
+      \end{tikzpicture}
     \end{column}
-    \begin{column}{0.48\textwidth}
-      \begin{block}{Reading 2: a bound on surprise}
-        $\mathrm{KL}\ge 0$, so $F \ge -\ln p(o)$. Lowering $F$ makes the belief better \emph{and}
-        the data less surprising under the agent's own model.
-      \end{block}
+    \begin{column}{0.5\textwidth}
+      \small
+      \textbf{Same minimiser.} Only the $\mathrm{KL}$ slab can shrink, so lowering the computable $F$
+      lowers the uncomputable divergence.\\[0.5em]
+      \textbf{A bound on surprise.} $\mathrm{KL}\ge 0$, so the bar never falls below the dashed line:
+      $F \ge -\ln p(o)$.\\[0.5em]
+      If you know machine learning: $-F$ is the \textbf{ELBO}.
     \end{column}
   \end{columns}
-  \vspace{0.8em}
-  If you know machine learning: $-F$ is the \textbf{ELBO}. Maximising the ELBO and minimising free
-  energy are the same operation.
   \src{active\_inference.tex l.252--268}
 \end{frame}
 
@@ -560,14 +679,19 @@
     F[q,o] = \underbrace{\KL{q(s)}{p(s)}}_{\text{complexity}}
              \;-\; \underbrace{\E_q\!\left[\ln p(o\given s)\right]}_{\text{accuracy}}
   \]
-  \begin{itemize}
-    \item \textbf{Accuracy} rewards beliefs under which the data are likely. On its own, it would
-          adopt any explanation that fits the current scan.
-    \item \textbf{Complexity} charges for the distance travelled from the prior: Occam's razor,
-          written as a divergence.
-    \item Free energy picks the belief that buys the most accuracy for the least departure from
-          what was already believed.
-  \end{itemize}
+  \begin{columns}[c]
+    \begin{column}{0.44\textwidth}
+      \centering
+      \includegraphics[width=\textwidth]{d1_complexity.pdf}
+    \end{column}
+    \begin{column}{0.52\textwidth}
+      \small
+      \textbf{Accuracy} alone would adopt any explanation that fits the current scan.\\[0.5em]
+      \textbf{Complexity} charges for the distance travelled from the prior: Occam's razor,
+      written as a divergence.\\[0.5em]
+      The belief settles where the two slopes cancel.
+    \end{column}
+  \end{columns}
   \lesson{One trade, stated once, in nats, for every quantity the agent believes.}
   \src{active\_inference.tex l.288--308}
 \end{frame}
@@ -599,6 +723,42 @@
   $-\tfrac12\ln\Sigma$. Regularised least squares is the same trade with a flat prior.
 \end{frame}
 
+\begin{frame}{One quantity, differentiated twice}
+  \centering
+  \begin{tikzpicture}[box/.style={draw, rounded corners=3pt, very thick, align=center, minimum height=0.8cm, font=\small},
+                      arr/.style={-{Stealth[length=2.5mm]}, very thick}]
+    \node[box, draw=cool, fill=cool!8, minimum width=3.1cm] (ag) at (0,0) {belief $q(s)$, mean $\mu$\\[-0.1em]$F[q,o]$};
+    \node[box, draw=muted, fill=muted!12, minimum width=2.6cm] (w) at (7.2,0) {the world\\[-0.1em](hidden)};
+    \draw[muted, densely dashed] (3.6,-0.75) -- (3.6,0.75) node[above, font=\scriptsize, text=muted] {sensory boundary};
+    \draw[arr, cool] ([yshift=0.2cm]w.west) -- node[above, font=\small, pos=0.25] {$o$} ([yshift=0.2cm]ag.east);
+    \draw[arr, good] ([yshift=-0.2cm]ag.east) -- node[below, font=\small, pos=0.25] {$a$} ([yshift=-0.2cm]w.west);
+  \end{tikzpicture}
+
+  \begin{columns}[T]
+    \begin{column}{0.46\textwidth}
+      \centering
+      \textbf{Perception}: fit the belief to the data
+      \[ \dot\mu = -\frac{\partial F}{\partial\mu} \]
+    \end{column}
+    \begin{column}{0.5\textwidth}
+      \centering
+      \textbf{Action}: fit the data to the belief
+      \[ \dot a = -\frac{\partial F}{\partial a}
+                = -\frac{\partial F}{\partial o}\,\frac{\partial o}{\partial a} \]
+    \end{column}
+  \end{columns}
+  \pause
+  \raggedright\small
+  $\partial o/\partial a$ is the causal model running forwards, and a scan already in the buffer
+  cannot be changed. So a decision scores the observations it \emph{would} bring:
+  \[
+    G(a) = \E_{q(o,s\given a)}\big[F\big] \;\approx\;
+    \underbrace{-\,I(s;o\given a)}_{\text{epistemic: what I would learn}}
+    \;\underbrace{-\,\E_{q(o\given a)}\ln p(o)}_{\text{pragmatic: what I want to see}}
+  \]
+  \src{active\_inference.tex l.335--427; derived in full later in the week}
+\end{frame}
+
 \begin{frame}{A choice, marked as a choice}
   \begin{itemize}
     \item Closeness was measured with $\mathrm{KL}$. Nothing forced that: it is the $\alpha\to1$
@@ -624,14 +784,20 @@
     F \approx -\ln p(o,\mu) + \tfrac12\operatorname{tr}(\Hess\Sigma) - \tfrac12\ln|\Sigma| - \tfrac n2\ln(2\pi e),
     \qquad \Hess = -\nabla^2_s \ln p(o,s)\big|_{\mu}
   \]
-  \begin{itemize}
-    \item The \textbf{mean} moves to the mode of the joint: a nonlinear least-squares problem
-          (Gauss--Newton).
-    \item The \textbf{covariance} is pulled two ways: the curvature term shrinks it, the entropy
-          term widens it. Setting $\partial F/\partial\Sigma=0$:
-  \end{itemize}
-  \[ \boxed{\;\Sigma = \Hess^{-1}\;} \]
-  \lesson{The uncertainty comes as a by-product of fitting, at no extra modelling cost.}
+  \begin{columns}[c]
+    \begin{column}{0.37\textwidth}
+      \centering
+      \includegraphics[width=\textwidth]{d1_laplace.pdf}
+    \end{column}
+    \begin{column}{0.59\textwidth}
+      \small
+      The \textbf{mean} moves to the bottom of the bowl: nonlinear least squares.\\[0.3em]
+      The \textbf{covariance} is pulled two ways, curvature against entropy;
+      $\partial F/\partial\Sigma=0$ balances them.\\[0.2em]
+      {\scriptsize dashed: the parabola Laplace sees; thin: the exact density.}
+    \end{column}
+  \end{columns}
+  \lesson{$\boxed{\;\Sigma = \Hess^{-1}\;}$\quad The uncertainty comes as a by-product of fitting, at no extra modelling cost.}
   \src{active\_inference.tex l.310--333}
 \end{frame}
 
@@ -717,181 +883,8 @@
 \end{frame}
 
 % =================================================================================================
-\section{Why action needs a second functional}
-% =================================================================================================
-
-\begin{frame}{Perception is easy to state. Action is not.}
-  \textbf{Perception.} $o_t$ is fixed, so only $q$ can move:
-  \[ q^\ast = \argmin_q F[q,o_t] \]
-  That is approximate Bayesian inference, and nothing else.
-
-  \pause
-  \vspace{0.6em}
-  \textbf{Action.} At decision time $o_t$ is a number in a buffer. No action can change it:
-  \[ \frac{\partial F[q,o_t]}{\partial a} = 0 \]
-  An agent descending the instantaneous free energy finds a \alert{flat landscape} in every
-  direction.
-
-  \pause
-  \vspace{0.6em}
-  What action \emph{can} change is the free energy of observations not yet received:
-  \[ a^\ast = \argmin_a \E_{q(o_{t+1},s_{t+1}\given a)}\big[F[q,o_{t+1}]\big] \]
-  This is not a new principle. It changes what is held fixed and what is averaged over.
-  \src{active\_inference.tex l.335--369}
-\end{frame}
-
-\begin{frame}{Expected free energy}
-  For a policy $\pi$ (a sequence of actions), with the predicted states and observations
-  $\tilde s,\tilde o$:
-  \[ G(\pi) = \E_{q(\tilde s,\tilde o\given\pi)}\big[\ln q(\tilde s\given\pi) - \ln p(\tilde o,\tilde s)\big] \]
-  Goals enter as a \textbf{prior over preferred outcomes} $p(\tilde o)$. There is no separate
-  reward channel. Then, exactly:
-  \[
-    G(\pi) = \E\Big[
-      \underbrace{\ln q(\tilde s\given\pi) - \ln q(\tilde s\given\tilde o,\pi)}_{\text{epistemic}}
-      \;\underbrace{-\ln p(\tilde o)}_{\text{pragmatic}}
-      + \underbrace{\ln q(\tilde s\given\tilde o,\pi)-\ln p(\tilde s\given\tilde o)}_{\to 0 \text{ if inference stays good}}
-    \Big]
-  \]
-  \src{active\_inference.tex l.371--412}
-\end{frame}
-
-\begin{frame}{Two terms, one currency}
-  \begin{columns}[T]
-    \begin{column}{0.48\textwidth}
-      \begin{block}{Epistemic value}
-        $=-I(\tilde s;\tilde o\given\pi)$: minus the mutual information between future states and
-        future observations.\\[0.3em]
-        Largest when what you would see depends strongly on what is true. Curiosity is a
-        \emph{term of the objective}, not a heuristic bolted on.
-      \end{block}
-    \end{column}
-    \begin{column}{0.48\textwidth}
-      \begin{block}{Pragmatic value}
-        $=-\E\ln p(\tilde o)$: how improbable the predicted outcomes are under the agent's
-        preferences.\\[0.3em]
-        This is goal-seeking: the part a classical cost function would have captured.
-      \end{block}
-    \end{column}
-  \end{columns}
-  \vspace{0.6em}
-  Both are in \textbf{nats}, and they were derived together. The exploration/exploitation balance is
-  set by the algebra, not by a mixing coefficient. It moves by itself as the beliefs sharpen.
-  \src{active\_inference.tex l.414--427}
-\end{frame}
-
-\begin{frame}{For Gaussian beliefs, three names for one number}
-  Prior precision $\Lambda$, a measurement with Jacobian $J$ and noise $R$:
-  \[
-    \underbrace{H[q]-\E H[q\given o]}_{\text{expected entropy drop}}
-    = \underbrace{I(s;o)}_{\text{mutual information}}
-    = \underbrace{\tfrac12\ln\frac{|\Lambda + J^\top R^{-1}J|}{|\Lambda|}}_{\text{D-optimal design}}
-  \]
-  \begin{itemize}
-    \item The epistemic term of active inference, the information gain of active sensing, and
-          the D-criterion of experiment design are \alert{the same quantity}.
-    \item It depends on \emph{where} you look ($J$), not on \emph{what} you will see. So it can be
-          computed before moving.
-  \end{itemize}
-  \src{appendix\_math.tex l.742--779, l.1236--1287}
-\end{frame}
-
-\begin{frame}{Where to look next}
-  \begin{columns}[c]
-    \begin{column}{0.58\textwidth}
-      \includegraphics[width=\textwidth]{d1_candidates.pdf}
-    \end{column}
-    \begin{column}{0.4\textwidth}
-      \small
-      The robot (red) has seen the east part of the north wall. Five candidate viewpoints:
-      \begin{itemize}
-        \item ``far west'' sees the \emph{fewest} new points except one, yet gains the
-              \emph{most}: it adds lever arm where the current information is weak;
-        \item ``stay'' gains exactly $\ln 2$. Why?
-      \end{itemize}
-    \end{column}
-  \end{columns}
-\end{frame}
-
-\begin{frame}{Diminishing returns, and a warning}
-  \begin{columns}[c]
-    \begin{column}{0.45\textwidth}
-      \includegraphics[width=\textwidth]{d1_diminishing.pdf}
-    \end{column}
-    \begin{column}{0.53\textwidth}
-      \small
-      The $k$-th identical look gives $|\,(k{+}1)\Lambda_1| / |\,k\Lambda_1|=((k{+}1)/k)^2$ for
-      two parameters, so
-      \[ \Delta H_k = \ln\frac{k+1}{k}. \]
-      \pause
-      \alert{But this assumes each look's errors are independent.} On a robot, repeated looks
-      share the pose error, the mount error and the calibration error, and those do not average
-      away.\\[0.4em]
-      Tomorrow we put a number on how little a repeat look is really worth.
-    \end{column}
-  \end{columns}
-\end{frame}
-
-\begin{frame}{Pricing travel in the same currency}
-  The simplest two-term expected free energy, the one that drives the robot's viewpoint selection:
-  \[
-    G(v) = \underbrace{\beta\,\lVert v - x\rVert}_{\text{cost of travel}}
-         - \underbrace{\Delta H(v)}_{\text{information gain}}
-  \]
-  \begin{itemize}
-    \item $\beta$ is an \emph{exchange rate}, in nats per metre, not a tuning knob between two
-          incommensurable objectives.
-    \item In the lab: above $\beta\approx0.07$ nats/m the robot stays put and scans again,
-          because the (overvalued) $\ln 2$ is free.
-    \item The full version sums agent-owned terms over a horizon. That is Day 5.
-  \end{itemize}
-  \src{introduction.tex l.244--253; action.tex}
-\end{frame}
-
-\begin{frame}{One objective across time scales}
-  The gradient of a $T$-step expected free energy with respect to the current command splits as
-  \[
-    \nabla_{u_t} G_T(\pi)
-      = \underbrace{\nabla_{u_t} G_{t+1}(u_t)}_{\text{what a reactive controller computes}}
-      + \underbrace{\sum_{\tau=t+2}^{t+T}\nabla_{u_t} G_\tau(\pi)}_{\text{what planning adds}}
-  \]
-  \begin{itemize}
-    \item Reactive control is the leading term of planning. They are not two systems.
-    \item The relatives you know (planning-as-inference, MPC, MPPI) sit on this line. They differ in
-          how many terms they keep and how they estimate them.
-  \end{itemize}
-  \src{active\_inference.tex l.431--510, l.557--579}
-\end{frame}
-
-% =================================================================================================
 \section{What measurement said}
 % =================================================================================================
-
-\begin{frame}{Is the derived objective better than a good heuristic?}
-  The room explorer, written in nats with no free weights, against the hand-tuned scorer it
-  replaced. Both were run over the \textbf{same 594 real room layouts}, paired.
-  \vspace{0.3em}
-  \begin{center}\small
-  \begin{tabular}{@{}l r r r@{}}
-    \toprule
-     & IoU mean & IoU median & Hausdorff median \\
-    \midrule
-    hand-tuned scorer & 0.9794 & 0.9880 & 0.038 m \\
-    derived objective & 0.9806 & 0.9870 & 0.069 m \\
-    \midrule
-    paired difference & \multicolumn{3}{l}{$+0.0013\pm0.0030$; better / worse / tied $=238/298/58$, sign test $p=0.011$} \\
-    \bottomrule
-  \end{tabular}
-  \end{center}
-  \begin{itemize}\small
-    \item It wins the mean and loses the count. Five rescued rooms carry the whole mean; without
-          them the difference is $-0.00085$.
-    \item The verdict is \alert{equivalence}, and the case for the derived form rests on its having
-          no free parameters, not on performance.
-  \end{itemize}
-  \small On Day 5 we will see that even this IoU was not measuring what we thought it was.
-  \src{experiments.tex l.1404--1446}
-\end{frame}
 
 \begin{frame}{Free energy is not computation}
   \begin{measured}{a better model does not save arithmetic}
@@ -910,33 +903,22 @@
   \src{active\_inference.tex l.835--848}
 \end{frame}
 
-\begin{frame}{Doing nothing can be an epistemic act}
-  \begin{measured}{gyro bias, two legs of the same tour}
-    The share of the bias posterior that came from data rather than from the prior: about
-    \textbf{half} on one leg, \textbf{almost all} on the other. The only difference was that the
-    robot happened to stand still for a few minutes.
-  \end{measured}
-  \begin{itemize}
-    \item The bias regresses on elapsed time alone, so the action that teaches it is the one that
-          only spends time: \alert{stopping}.
-    \item The body is instrumented by everything the robot does, because every action passes
-          through it. The world is sampled only where the robot looks.
-    \item Hence: epistemic actions for rooms and objects, almost none for the body (Day 3).
-  \end{itemize}
-  \src{active\_inference.tex l.850--880, l.952--968}
-\end{frame}
-
 \begin{frame}{A factor inherits the errors of what it is estimated through}
   \begin{columns}[T]
     \begin{column}{0.52\textwidth}
-      \begin{itemize}
-        \item The body is learnt from the localiser's corrections, which are fitted against the
-              room. So a wrong map is charged to the wheels.
-        \item \alert{A robot in a room whose map is wrong will conclude that its wheels are
-              wrong.}
-        \item And it gets \emph{quieter}, not louder: once the body has absorbed the map's
-              distortion, the two agree. The state is internally consistent and externally wrong.
-      \end{itemize}
+      \centering
+      \begin{tikzpicture}[box/.style={draw, rounded corners=3pt, thick, align=center, font=\footnotesize, minimum width=2.1cm, minimum height=0.8cm},
+                          arr/.style={-{Stealth}, thick}]
+        \node[box, draw=accent, fill=accent!12] (map) at (0,0) {wrong map};
+        \node[box, fill=muted!12] (loc) at (3.4,0) {localiser's\\corrections};
+        \node[box, draw=accent, fill=accent!12] (body) at (3.4,-1.75) {wheels\\``learnt'' wrong};
+        \node[box, draw=good, fill=good!10] (ok) at (0,-1.75) {map and body\\agree};
+        \draw[arr] (map) -- node[above, font=\scriptsize] {fitted to} (loc);
+        \draw[arr] (loc) -- node[right, font=\scriptsize] {charged to} (body);
+        \draw[arr] (body) -- node[above, font=\scriptsize] {absorbs it} (ok);
+      \end{tikzpicture}\\[0.5em]
+      \raggedright\small
+      It gets \emph{quieter}, not louder: \alert{internally consistent, externally wrong.}
     \end{column}
     \begin{column}{0.45\textwidth}
       \begin{measured}{an omitted parameter}
@@ -954,20 +936,19 @@
 \section{Lab}
 % =================================================================================================
 
-\begin{frame}{Lab 1: a wall as a belief, and where to look next}
-  \texttt{labs/day1.ipynb}, about 75 minutes. Today the robot knows its pose and we cheat on which
+\begin{frame}{Lab 1: probability by hand, then a wall as a belief}
+  \texttt{labs/day1.ipynb}, about 50 minutes. Today the robot knows its pose and we cheat on which
   points are the wall's.
   \begin{enumerate}\small
+    \item \textbf{Warm-up}: the door table by hand (marginalise, condition, both factorisations);
+          read an anti-causal order off a joint; condition a Gaussian in both forms.
     \item Write the wall's residual and Jacobian; fit it with \texttt{laplace}.
     \item \textbf{Honesty test}: 500 scans; predicted vs empirical $\sigma$. Find the 10\% and fix
           the likelihood.
     \item \textbf{Model choice}: Manhattan vs free, by $\Delta F$. Then tilt the wall.
-    \item \textbf{Where to look}: $\Delta H$ for five viewpoints. Guess first, then compute.
-    \item \textbf{Diminishing returns}: the $k$-th look against $\ln\frac{k+1}{k}$.
-    \item \textbf{Price travel}: $G=\beta d-\Delta H$. Find the $\beta$ at which the robot stops
-          moving. Then answer the day's key question: what does $\ln 2$ assume?
-    \item Go and look: predicted vs realised entropy drop.
   \end{enumerate}
+  \vspace{0.4em}
+  \small Where to look next waits for Day 3, when $G$ is derived in full.
 \end{frame}
 
 \begin{frame}{Tomorrow}

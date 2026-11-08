@@ -136,4 +136,63 @@ axr.fill_betweenx(g, npdf(g, mu_s, S[1, 1]), color="#2E8B57", alpha=0.25)
 axr.text(0.05, 0.55, r"marginal" "\n" r"$p(o)$", fontsize=8, transform=axr.transAxes); axr.axis("off")
 fig.savefig(OUT / "d1_gaussian_ops.pdf", bbox_inches="tight"); plt.close(fig)
 print(f"gaussian ops: posterior s | o=2.6 = {post_m:.3f} +- {np.sqrt(post_v):.3f}")
+
+COOL, ACCENT, GOOD, MUTED = "#2E6DB4", "#C0392B", "#2E8B57", "#7A7A7A"
+
+# 7. Bayes as the three operations, same numbers as block 6. One shared y-scale, so the last step
+#    visibly IS a division by the evidence.
+s = np.linspace(0.8, 3.4, 600)
+prior, like = npdf(s, mu_s, sd_s ** 2), npdf(o_star, s, sd_o ** 2)
+product = prior * like
+evidence = product.sum() * (s[1] - s[0])
+assert np.isclose(evidence, npdf(o_star, mu_s, S[1, 1]), atol=1e-3)
+posterior = product / evidence
+fig, axes = plt.subplots(1, 3, figsize=(7.4, 1.85), sharex=True, sharey=True)
+titles = ["factorise: what was expected?", "marginalise: how likely is it?", "condition: where now?"]
+for a, t in zip(axes, titles):
+    a.set_title(t, fontsize=9, loc="left"); a.set_xlabel(r"$s$ (m)"); a.set_yticks([]); a.spines["left"].set_visible(False)
+axes[0].fill_between(s, prior, color=COOL, alpha=0.3); axes[0].plot(s, like, color=GOOD, lw=2, ls="--")
+axes[0].text(1.0, 0.95, r"prior $p(s)$", fontsize=9); axes[0].text(1.62, 1.75, r"$p(o\mid s)$", fontsize=9)
+axes[1].fill_between(s, product, color=ACCENT, alpha=0.35); axes[1].plot(s, product, color=ACCENT, lw=1.5)
+axes[1].text(0.95, 1.05, f"shaded area\n$= p(o) = {evidence:.2f}$", fontsize=9)
+axes[2].fill_between(s, posterior, color=ACCENT, alpha=0.35); axes[2].plot(s, posterior, color=ACCENT, lw=2)
+axes[2].text(0.95, 1.2, f"divide by {evidence:.2f}:\n${post_m:.2f}\\pm{np.sqrt(post_v):.2f}$ m", fontsize=9)
+fig.tight_layout(w_pad=0.6); fig.savefig(OUT / "d1_bayes_ops.pdf"); plt.close(fig)
+print(f"bayes ops: evidence p(o=2.6) = {evidence:.3f}")
+
+# 8. complexity against inaccuracy along the belief's mean (the Kalman example, r = 0.2^2).
+m, p_, y, r = mu_s, sd_s ** 2, o_star, sd_o ** 2
+Sig = 1 / (1 / p_ + 1 / r)
+mus = np.linspace(1.9, 2.85, 400)
+complexity = 0.5 * ((Sig + (mus - m) ** 2) / p_ - 1 + np.log(p_ / Sig))
+inaccuracy = ((y - mus) ** 2 + Sig) / (2 * r)                     # -E_q ln p(o|s), constant dropped
+F = complexity + inaccuracy
+mu_star = (m / p_ + y / r) / (1 / p_ + 1 / r)
+assert abs(mus[np.argmin(F)] - mu_star) < 0.01
+fig, ax = plt.subplots(figsize=(3.7, 1.9))
+ax.plot(mus, complexity, color=COOL, lw=2, ls="--"); ax.plot(mus, inaccuracy, color=GOOD, lw=2, ls=":")
+ax.plot(mus, F, color=ACCENT, lw=2.5)
+ax.axvline(mu_star, color=MUTED, lw=0.8)
+ax.plot(mu_star, F.min(), "o", color=ACCENT, ms=8, mec="white", mew=1.5, zorder=5)
+ax.text(mu_star - 0.02, 5.4, f"belief {mu_star:.2f}", ha="right", fontsize=9, color="0.25")
+ax.text(1.93, 1.3, "complexity", fontsize=10); ax.annotate("inaccuracy", xy=(2.11, ((y - 2.11) ** 2 + Sig) / (2 * r)), xytext=(1.93, 2.3), fontsize=10, arrowprops=dict(arrowstyle="-", color="0.4", lw=0.8)); ax.text(2.29, 3.4, r"$F$", fontsize=12)
+ax.set_xlim(1.9, 2.85); ax.set_ylim(0, 6)
+ax.set_xlabel(r"belief mean $\mu$ (prior 2.0, reading 2.6)", fontsize=10); ax.set_ylabel("nats + const", fontsize=10)
+fig.tight_layout(); fig.savefig(OUT / "d1_complexity.pdf"); plt.close(fig)
+
+# 9. Laplace: curvature of the bowl at the mode sets the width of the belief.
+x = np.linspace(-1.6, 1.6, 500)
+fig, axes = plt.subplots(2, 2, figsize=(4.0, 2.2), sharex=True, gridspec_kw={"height_ratios": (1.2, 1)})
+for j, (k, name) in enumerate(((14.0, "sharp bowl"), (2.0, "flat bowl"))):
+    U = k * (x ** 2 / 2 - 0.12 * x ** 3 + 0.05 * x ** 4)
+    exact = np.exp(-U); exact /= exact.sum() * (x[1] - x[0])
+    top, bot = axes[0, j], axes[1, j]
+    top.plot(x, U, color=MUTED, lw=2); top.plot(x, k * x ** 2 / 2, color=ACCENT, lw=1.5, ls="--")
+    top.set_ylim(0, 4); top.set_title(f"{name}, $\\mathcal{{H}}={k:.0f}$", fontsize=10, loc="left"); top.set_yticks([])
+    bot.fill_between(x, npdf(x, 0, 1 / k), color=ACCENT, alpha=0.35); bot.plot(x, exact, color="0.25", lw=1)
+    bot.set_ylim(0, 1.7); bot.set_yticks([]); bot.set_xlabel(r"$s-\mu$")
+    bot.text(0.98, 0.72, f"$\\Sigma = {1 / k:.2f}$", transform=bot.transAxes, ha="right", fontsize=9)
+axes[0, 0].set_ylabel(r"$-\ln p(o,s)$", fontsize=9); axes[1, 0].set_ylabel(r"$q(s)$", fontsize=9)
+fig.tight_layout(h_pad=0.4); fig.savefig(OUT / "d1_laplace.pdf"); plt.close(fig)
+
 print("day 1 figures written")
