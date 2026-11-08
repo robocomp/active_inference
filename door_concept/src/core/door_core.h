@@ -310,7 +310,7 @@ private:
     bool places_loaded_ = false;
     std::string room_name_;            // this cycle's room name (place rows are keyed by it)
     struct Episode { std::int64_t start_wall_ms = 0; bool crossed = false; std::uint64_t room = 0; std::string room_name;
-                     float x = std::numeric_limits<float>::quiet_NaN(), y = std::numeric_limits<float>::quiet_NaN(); };
+                     float x = std::numeric_limits<float>::quiet_NaN(), y = std::numeric_limits<float>::quiet_NaN(); bool crossing = false; };
     std::unordered_map<std::string, Episode> episodes_;   // executing on a door's affordance → C_keep when it ends uncrossed
     void track_episodes(const DoorCycleInput& in, DoorCycleOutput& out);
     void prepare_candidates(const DoorCycleInput& in, const std::vector<rc::TrackView>& tracks, DoorCycleOutput& out);

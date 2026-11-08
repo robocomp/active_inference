@@ -213,9 +213,10 @@ class Evidence
 {
 public:
     /// remembered_L = the row's aged L_evidence, remembered_physical its physical part (PlaceBelief::remember): vision saturates across the memory.
-    explicit Evidence(float remembered_L, float remembered_physical = 0.f, float lookalike = rc::door::core::kLookalikeProbDefault)
+    explicit Evidence(float remembered_L, float remembered_physical = 0.f, float lookalike = rc::door::core::kLookalikeProbDefault, bool crossed = false)
     {
         b_.lookalike = lookalike;
+        b_.crossed = crossed;
         b_.remember(remembered_L, remembered_physical);
     }
     /// One mask frame of the ZED seen from `cam`. `detected_here` = a door detection landed on this hole. True ⇒ ruled out.
@@ -235,7 +236,7 @@ public:
             b_.ledger.add_bernoulli(v, rc::door::core::Channel::Zed, q, zed, detected_here ? 1.f : 0.f);
             b_.ledger.recompute(v, false);
         }
-        return rc::door::core::decide(b_.L(), rc::door::core::Role::Ordinary, costs).remove;
+        return rc::door::core::decide(b_.L(), b_.crossed ? rc::door::core::Role::BeingCrossed : rc::door::core::Role::Ordinary, costs).remove;   // a crossed place is never ruled out
     }
     float p_exists()   const { return b_.p(); }
     float logodds()    const { return b_.L(); }

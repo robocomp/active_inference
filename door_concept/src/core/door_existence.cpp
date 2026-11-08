@@ -245,21 +245,27 @@ void DoorCore::log_view_rows(const std::string& place, const std::vector<ViewRow
 // backed by a crossing fact while it lasts, or the room changes under it.
 void DoorCore::track_episodes(const DoorCycleInput& in, DoorCycleOutput& out)
 {
-    std::set<std::string> now;
+    std::set<std::string> now, crossing;
     for (const auto& e : in.executing)
         for (const auto& a : in.affordances)
             if (a.node_id == e.to and a.name.starts_with("aff_door_"))
-                if (const auto k = a.name.rfind('_'); k != std::string::npos and k > 4) now.insert(a.name.substr(4, k - 4));
+                if (const auto k = a.name.rfind('_'); k != std::string::npos and k > 4)
+                {
+                    now.insert(a.name.substr(4, k - 4));
+                    if (a.name.ends_with("_cross")) crossing.insert(a.name.substr(4, k - 4));
+                }
     const auto room = world_->room_id();
     for (const auto& n : now)
         episodes_.try_emplace(n, Episode{in.t_wall_ms, false, room, room_name_});
     for (auto& [name, ep] : episodes_)
     {
+        ep.crossing = ep.crossing or crossing.contains(name);
         if (ep.room != room) ep.crossed = true;
         for (const auto& [id, st] : world_->fit_states())
             if (st->node_name == name)
             {
                 if (std::ranges::contains(in.backed_faces, id)) ep.crossed = true;
+                if (ep.crossing and ep.room != room) st->belief.crossed = true;   // the room changed under the door's own cross: proof (place_belief.h), tape or live
                 ep.x = st->aperture.centre_xy().x(); ep.y = st->aperture.centre_xy().y();   // the door's last place while the episode ran
             }
     }
@@ -455,7 +461,7 @@ void DoorCore::update_existence(const DoorCycleInput& in, DoorCycleOutput& out)
             inst.exist_trace = {};
             L_before[i] = inst.belief.L();
             if (inst.is_bearing_hypothesis) continue;   // no depth: no place to judge
-            inst.role = door_role(inst.node_name, in.route_faces, being_crossed.contains(inst.node_name) or inst.fact_backed);
+            inst.role = door_role(inst.node_name, in.route_faces, being_crossed.contains(inst.node_name) or inst.fact_backed or inst.belief.crossed);   // a crossed door: no delete line, ever
             // the structural prior, REPLACED (never accumulated); a newborn not yet fitted keeps its candidate's
             if (inst.ai2_initialized)
             {
@@ -574,7 +580,7 @@ void DoorCore::update_existence(const DoorCycleInput& in, DoorCycleOutput& out)
         const float sd2 = inst.ai2_initialized ? std::max(0.0f, inst.ai2_belief.covariance()(0, 0)) : cfg.tracker_detection_noise_m * cfg.tracker_detection_noise_m;
         r.cov = Eigen::Matrix2f::Identity() * sd2;
         r.yaw = inst.aperture.yaw(); r.width = inst.aperture.w; r.height = inst.aperture.h; r.depth = inst.aperture.thickness;
-        r.L_evidence = inst.belief.L_evidence(); r.physical = float(inst.belief.Sp()); r.ledger = inst.belief.ledger; r.visit = visit_;
+        r.L_evidence = inst.belief.L_evidence(); r.physical = float(inst.belief.Sp()); r.crossed = inst.belief.crossed; r.ledger = inst.belief.ledger; r.visit = visit_;
         r.last_seen_wall_ms = in.t_wall_ms; r.sighted_wall_ms = in.t_wall_ms; r.removed_wall_ms = in.t_wall_ms;
         places_.upsert(std::move(r));
         observed_frame_.erase(id);

@@ -368,7 +368,7 @@ RicohBirthMaxVar = 0.005   # max depth_var (m²) for a ricoh birth (only when Ri
 # MaxLogodds, RemovalProb, RemoveFrames, OutOfRoomGain, ShortGain, MinHeightConf, ReacquireRadiusM, GhostMax, CentralRegionFrac,
 # SensorSigmaM, RoomPrior, RoomMarginM (dead: nothing read them), DetectionProb, ClutterProb (the detector table's hit_rate / false_alarm), MinHeightPrior, MinHeightM (a raw-mask-height gate; size is scored on the fitted size) and Tracker.BirthFrames. Existence is one belief decided by the costs (door_decision.h).
 ActuationLlr = 3.0   # a door that changed state on OUR command (open/close satisfied after our request) exists: ln(0.9/0.05)
-LookalikeProb = 0.05   # lambda: P(door-shaped non-door | not a door, the detectors would fire). Vision alone saturates at -ln(lambda) (+3.0) above the priors (spec 3.1b, 2026-11-08). Learn offline, like the detector rates
+LookalikeProb = 0.002   # pi_K: per-wall prior of a door-shaped thing that is not a door, independent of the door base rate. Vision saturates near ln(pi_D/pi_K): +5.3 first door, +1.6 further (spec 3.1b, 2026-11-08). Learn offline, like the detector rates
 # THE EXISTENCE MODEL (docs/superpowers/plans/2026-11-07-door-existence-model.md). Each door PLACE carries ONE belief, L = the
 # structural prior (place_prior.h: the wall band, the per-wall base rate, the size term) + the view ledger (view_ledger.h: one entry
 # per DISTINCT view, its llr from the detector rates and the door's visibility from that view: ZED, ricoh and geometry channels) +

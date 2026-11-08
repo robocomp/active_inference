@@ -284,7 +284,7 @@ int main()
         std::print("birth_by_comparison: 3 m candidate (size term {:.2f}) born after {} hit views\n", pb.prior.size, n);
         CHECK(not born_after_one);
         CHECK(not born and n == 200);                                        // 200 hit views: the saturation holds it under the size prior (it was born after enough with the old unbounded sum)
-        CHECK(pb.L() < pb.prior.total() - std::log(0.05f) + 0.05f);
+        CHECK(pb.L() < pb.prior.total() - float(std::log(lookalike_lambda(pb.lookalike, pb.prior.base_rate))) + 0.05f);
     }
     {   // off any wall: a door detection in the middle of the room is never born, however long it is seen
         Rig r;
@@ -307,11 +307,9 @@ int main()
             ++views;
             r.look(stand(3.0f, deg, 2.5f), d2, {{2.5f, kWallY, 0.9f}});
         }
-        std::print("birth_by_comparison: second door on the wall after {} views: {} births (not after one: {})\n", views, r.births.size(), not after_one);
-        // ⚑KNOWN CONSEQUENCE, flagged to the PI (2026-11-08, spec §3.1b): base rate 0.01 = −4.6 nats; vision alone saturates at +3.0, so a second door on a wall can NOT be born
-        //  from vision alone (L tops out near −1.6; the old unbounded sum got there in 4 views). A second door needs a physical test (actuation or crossing) to be created. The PI decides whether that base rate or lambda should change.
+        std::print("birth_by_comparison: second door on the wall born after {} views (not after one: {})\n", views, not after_one);
         CHECK(not after_one);
-        CHECK(r.births.size() == 1);
+        CHECK(r.births.size() == 2);   // vision saturates near ln(0.01/0.002) = +1.6 for a further door: enough to be born (Pablo 2026-11-08, spec §3.1b)
     }
 
     // ── unseen_door_unchanged (spec test 2): behind the camera, around a wall, overflowing the ZED at 0.5 m — both cameras ─
@@ -616,11 +614,9 @@ int main()
         const std::size_t v0 = pb.ledger.views().size();
         for (int k = 0; k < 600; ++k)   // 60 s at 10 Hz; the ZED looks away
             b.frame(pb, th, stand(1.4f, 0.0f), {1.0f, -5.0f}, false, true, {}, 2);
-        const float one = pb.ledger.views().back().llr;
-        std::print("ricoh_near_view_counts_once: 600 ricoh frames at 1.4 m -> {} view(s), dSc {:+.4f}, that view's miss llr {:+.4f}\n",
-                   pb.ledger.views().size() - v0, float(pb.Sc()) - L0, one);
-        CHECK(pb.ledger.views().size() == v0 + 1);
-        CHECK(std::abs((float(pb.Sc()) - L0) - one) < 1e-5f and one < 0.0f);
+        std::print("ricoh_near_view_counts_once: 600 ricoh frames at 1.4 m -> {} new view(s), dSc {:+.4f}\n", pb.ledger.views().size() - v0, float(pb.Sc()) - L0);
+        CHECK(pb.ledger.views().size() == v0);              // ★the ricoh's missed frames are no trial at all (Pablo 2026-11-08): no view, no evidence
+        CHECK(float(pb.Sc()) == L0);
         for (const float deg : {-50.0f, 50.0f})
             for (int k = 0; k < 600; ++k) b.frame(pb, th, stand(1.4f, deg), {1.0f, -5.0f}, false, true, {}, 2);
         const Verdict v = decide(pb.L(), Role::Route, default_costs());
@@ -680,6 +676,30 @@ int main()
         CHECK(L_min < 0.0f);   // below the creation line and the ordinary delete line: only the role keeps it
         CHECK(r.removes.empty());
         CHECK(r.door() and r.door()->role == Role::BeingCrossed);
+    }
+
+    // ── crossed_door_has_no_delete_line (Pablo 2026-11-08): a crossing fact is proof, latched: even after the fact goes away and with L very low, no REMOVE ──
+    {
+        Rig r;
+        r.look(stand(6.0f, -75.0f), kDoor, {{1.0f, kWallY, 0.9f}});
+        CHECK(r.door() != nullptr);
+        r.settle(stand(6.0f, -75.0f));
+        CHECK(r.door() and not r.door()->belief.crossed);
+        if (r.door())
+        {
+            const auto id = r.door()->node_id;
+            auto in = input(++r.cycle, ++r.frame, stand(6.0f, -75.0f), kDoor, {});
+            in.backed_faces = {id};                                // the exit fact, one cycle only
+            r.step(std::move(in));
+            CHECK(r.door() and r.door()->belief.crossed);
+        }
+        if (r.door()) r.door()->belief.carried = -100.0f;          // the band of a swap (clean1 door_9), and more: no line can catch it
+        for (int v = 0; v < 12 and r.door(); ++v)
+            for (int k = 0; k < 5; ++k)
+                r.step(input(++r.cycle, ++r.frame, stand(v % 2 ? 4.0f : 2.5f, -60.0f + 15.0f * static_cast<float>(v % 9)), kDoor, {}));
+        CHECK(r.door() != nullptr);
+        CHECK(r.removes.empty());
+        CHECK(r.door() and r.door()->role == Role::BeingCrossed and std::isinf(r.door()->exist_trace.delete_line));
     }
 
     // ── relocalising_robot_moves_nothing (Review Focus 1): σ_xy = 3 m, heading uniform — every view's llr < 0.05 ─────────

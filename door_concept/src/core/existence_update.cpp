@@ -34,7 +34,7 @@ Vec2f xy_of(const Mat4d& T) { return {static_cast<float>(T(0, 3)), static_cast<f
 float half_diag(const rc::DoorFitState& t) { return 0.5f * std::hypot(t.aperture.w, t.aperture.h); }
 
 // One camera's Bernoulli channel for one frame. Returns the view index (npos when the camera has no pixel of θ).
-struct CamResult { std::size_t v = ViewLedger::npos; float q = 0.f, hit = 0.f, kappa = 0.f; ViewGeometry g; };
+struct CamResult { std::size_t v = ViewLedger::npos, log_view = ViewLedger::npos; float q = 0.f, hit = 0.f, kappa = 0.f; ViewGeometry g; };
 
 CamResult observe_camera(PlaceBelief& b, const rc::DoorFitState& th, const ExistenceFrame& fr, const CameraSpec& spec,
                          const Mat4d& room_T_cam, std::span<const Vec2f> windows, bool windows_known, Channel ch,
@@ -68,6 +68,11 @@ CamResult observe_camera(PlaceBelief& b, const rc::DoorFitState& th, const Exist
     r.q = detect_prob(m, r.g, po.kappa);
     if (not (r.q > 0.0f) and not (r.hit > 0.0f))
         return r;   // nothing reportable and nothing reported: no trial, no view (unseen is not evidence)
+    if (ch == Channel::Ricoh and not (r.hit > 0.0f))   // ★RICOH IS HITS ONLY: a frame with no detection touches no view. Logged only, against the view it would have joined, for the offline detector fit
+    {
+        r.log_view = b.ledger.find_view(xy_of(room_T_cam), door_xy, th.aperture.across_u(), R, po.spread_m, visit);
+        return r;
+    }
     r.v = b.ledger.observe(xy_of(room_T_cam), door_xy, th.aperture.across_u(), R, po.spread_m, visit);
     b.ledger.add_bernoulli(r.v, ch, r.q, m, r.hit);
     return r;
@@ -163,6 +168,8 @@ ExistenceTrace observe_place(PlaceBelief& b, const rc::DoorFitState& th, const E
             t.ric_view = static_cast<int>(r.v);
             row(1, r);
         }
+        else if (rows != nullptr and r.q > 0.0f and not (r.hit > 0.0f))   // a miss frame: no belief change, one log row (view_id -1: no view yet)
+            rows->push_back({1, r.log_view == ViewLedger::npos ? -1 : static_cast<int>(r.log_view), r.q, r.g.fill_h, r.g.fill_v, r.g.vis, r.kappa, r.g.aspect, r.hit, true});
         t.ric_dl = b.ledger.sum() - before;
     }
     else if (fr.ricoh_hits_only and fr.room_T_ricoh.has_value())

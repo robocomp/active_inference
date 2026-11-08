@@ -1890,6 +1890,7 @@ SpecificWorker::DoorIdentity SpecificWorker::identity_of(const rc::DoorInstance&
         row.pose = rc::door::RestorePose{s.ap_yaw, s.w, s.h, s.thickness};
     row.exist_logodds = rc::door::remembered_logodds(inst);   // review I-1 / Task 8: the evidence, without the structural prior
     row.exist_physical = rc::door::remembered_physical(inst);
+    if (inst.belief.crossed) row.crossed = true;
     if (not inst.belief.ledger.views().empty()) row.ledger = inst.belief.ledger.serialise();   // the views it came from (spec §3.7)
     row.visit = inst.place_visit;
     if (inst.last_detection_wall_ms > 0)
@@ -1935,6 +1936,7 @@ void SpecificWorker::mark_identity_removed(const rc::DoorInstance& inst, std::in
         return;   // never written (a candidate that did not reach a fit): the core's table holds its removed row
     it->exist_logodds = rc::door::remembered_logodds(inst);
     it->exist_physical = rc::door::remembered_physical(inst);
+    if (inst.belief.crossed) it->crossed = true;
     if (not inst.belief.ledger.views().empty()) it->ledger = inst.belief.ledger.serialise();
     it->removed_ms = now_wall_ms;
     std::print("door_concept: [identity] {} removed for absence - its row in {} is kept as a REMOVED place\n", inst.node_name, room);
@@ -4142,7 +4144,7 @@ void SpecificWorker::step_remembered_looks()
             const auto remembered = core_->places().restored_belief(
                 rc::door::core::PlaceTable::row_of(r, cfg_.tracker_detection_noise_m, cfg_.exist_geometry_may_refute, cfg_.exist_lookalike_prob),
                 static_cast<std::int64_t>(rc::provenance::now_ms()));
-            it = looks_.emplace(r.name, LookEntry{rc::door::look::Evidence(remembered.L_evidence(), float(remembered.Sp()), cfg_.exist_lookalike_prob), {}, false}).first;
+            it = looks_.emplace(r.name, LookEntry{rc::door::look::Evidence(remembered.L_evidence(), float(remembered.Sp()), cfg_.exist_lookalike_prob, remembered.crossed), {}, false}).first;
             it->second.aff.init(G, room_node_id_, "door_look_" + r.name, "door");
             std::print("door_concept: [look] '{}' remembered in '{}' at ({:.2f},{:.2f}) is not in the graph — offering a "
                        "look (prior P(exists)={:.2f})\n", r.name, room, r.xy.x(), r.xy.y(), it->second.ev.p_exists());
@@ -4269,6 +4271,7 @@ void SpecificWorker::install_carried_door(std::uint64_t new_room, std::uint64_t 
                         row.yaw = ms.ap_yaw; row.width = ms.w; row.height = ms.h; row.depth = ms.thickness;
                         row.L_evidence = dst.belief.L_evidence();
                         row.physical = float(dst.belief.Sp());
+                        row.crossed = dst.belief.crossed;
                         row.last_seen_wall_ms = static_cast<std::int64_t>(rc::provenance::now_ms());
                         core_->places().upsert(std::move(row));
                     }

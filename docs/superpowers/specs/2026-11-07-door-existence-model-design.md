@@ -66,26 +66,27 @@ owned by one object that lives from the first candidate observation to the last 
 
 ### 3.1b A door-shaped thing that is not a door (2026-11-08)
 **(PI, 2026-11-08)** A place has three hypotheses: D (a door), N (nothing door-like) and K (something door-shaped that
-is not a door: a wardrobe, a painted panel). The detectors fire on D and on K alike; only a physical test separates them.
-Let Sc be the perceptual evidence of the place (per-view zed + ricoh + geometry + support, over the ledger, plus the
-perceptual part carried from memory), Sp the physical evidence (actuation, crossing and the carried physical part), and
-lambda = P(K | not a door, the detectors would fire), a sensor-model constant, `Existence.LookalikeProb`, default 0.05,
-to learn offline like the detector rates. Then
+is not a door: a wardrobe, a painted panel). The detectors fire on D and on K alike; only a physical test separates them. Each has
+its own prior on the place: pi_D is the per-wall door base rate (0.4 first door, 0.01 further), pi_K the per-wall look-alike rate
+(`Existence.LookalikeProb`, default 0.002, to learn offline like the detector rates), pi_N = 1 - pi_D - pi_K.
+Let Sc be the perceptual evidence of the place (per-view zed + ricoh + geometry + support, over the ledger, plus the perceptual part
+carried from memory) and Sp the physical evidence (actuation, crossing, the carried physical part). Then
 
-  L = priors + carried + Sc + Sp − ln((1 − lambda) + lambda · exp(Sc))
+  L = ln(pi_D) - ln(pi_N + pi_K · exp(Sc)) + Sc + Sp + band + size + carried
 
-computed in one function (`PlaceBelief`), for candidates and born doors alike. For Sc ≫ 0, L tends to
-priors + Sp − ln(lambda): vision saturates near +3.0 (ln 20), so 25 agreeing views of one object are one object. A saturated phantom
-crosses the delete line in two failed opens. A real door not yet opened stays believed; one that opens or is crossed rises above the
-saturation. For Sc < 0 the last term is ≈ −ln(1 − lambda): absence evidence is as before (within 0.06 nats at 0.05).
+computed in one function (`PlaceBelief`), for candidates and born doors alike. Vision alone saturates near ln(pi_D / pi_K): +5.3 for a
+first door, +1.6 for a further door, so a further door is still born from vision and 25 agreeing views of one object are one object.
+A saturated first-door phantom crosses the delete line within three failed opens. For Sc < 0 absence evidence is as before.
 
-Memory keeps the split: a stored row carries L_evidence and its physical part. Restoring (revisit or room change) puts the physical
-part outside the term and returns the perceptual part to the Sc scale (the formula's inverse), inside it, so new views add under the
-same bound and a door restored from memory cannot climb above it on vision alone. A row written before this model holds the old
-unbounded sum, which is on the Sc scale; it is saturated once on load.
+- **A crossing is proof.** P(crossed | not a door) = 0, so it is not one more likelihood ratio. A place with a crossing fact or crossing
+  evidence, on either face (the door crossed and its entry mirror, through a recognition swap and a restore from memory), never gets a
+  delete verdict and has no delete line, whatever its band, size or views.
+- **The ricoh contributes hits only.** A ricoh frame without a detection adds nothing to any view. ZED absence is unchanged.
 
-⚑ Consequence to decide (2026-11-08): the per-wall base rate of a second door is ln(0.01/0.99) = −4.6, more than vision's +3.0 can
-overcome: a second door on a wall can no longer be born from vision alone (its L saturates near −1.6); it needs a physical test.
+Memory keeps the split: a stored row carries L_evidence, its physical part and the crossing proof. Restoring puts the physical part
+outside the term and returns the perceptual part to the Sc scale (the formula's inverse), inside it, so new views add under the same
+bound and a door restored from memory cannot climb above it on vision alone. A row written before this model holds the old unbounded
+sum, which is on the Sc scale; it is saturated once on load.
 
 ### 3.2 Prior (entered once, replaced not accumulated)
 - Doors are in walls: the existing wall-band prior `band_log_prior`, with σ carrying the wall's own uncertainty.

@@ -283,6 +283,7 @@ public:
         f.belief.lookalike = old.belief.lookalike;
         f.belief.remember(old.belief.L_evidence(), float(old.belief.Sp()));
         f.belief.crossing = rc::door::crossing_logodds(cfg_.exist_cross_passable_prior, cfg_.exist_cross_leak);
+        f.belief.crossed = f.belief.crossing > 0.f;   // as carried_belief does live: the crossing is proof
         live_.insert_or_assign(id, std::move(f));
         std::println("MIRROR cycle {} '{}' source w {:.3f} -> mirror at (0,0.02) in the new room; robot {:.2f} {:.2f}", cycle_, old.node_name, m.w, rb.x(), rb.y());
     }

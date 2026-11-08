@@ -34,6 +34,7 @@ struct PlaceRow
     float depth = 0.f;                    // the aperture's wall depth, set by the caller from the fit; 0 = unknown
     float L_evidence = 0.f;               // PlaceBelief::L_evidence(): everything but the structural prior
     float physical = 0.f;                 // PlaceBelief::Sp(): the physical part of L_evidence (what a memory keeps outside vision's saturation, place_belief.h)
+    bool crossed = false;                 // proof, for ever: a crossed place has no delete line (place_belief.h)
     ViewLedger ledger; int visit = 0; std::int64_t last_seen_wall_ms = 0;
     std::int64_t sighted_wall_ms = 0;     // the last SIGHTING (commands move last_seen, not this): the hazard's exposure counts from here
     std::optional<std::int64_t> removed_wall_ms;   // a deleted phantom: "no door here", kept for ever
@@ -147,6 +148,7 @@ public:
         r.visit = i.visit.value_or(0);
         r.last_seen_wall_ms = i.seen_wall_ms.value_or(0);
         r.removed_wall_ms = i.removed_ms;
+        r.crossed = i.crossed.value_or(false);
         r.sighted_wall_ms = i.sighted_ms.value_or(i.seen_wall_ms.value_or(0));
         if (i.ledger)
             if (auto L = ViewLedger::parse(*i.ledger, geometry_may_refute)) r.ledger = std::move(*L);   // corrupt cell: empty ledger
@@ -156,7 +158,7 @@ public:
         {
             r.physical = r.ledger.physical_sum();
             if (i.exist_logodds.has_value())
-                r.L_evidence = r.physical + float(saturated_vision(double(*i.exist_logodds) - r.physical, lookalike));
+                r.L_evidence = r.physical + float(saturated_vision(double(*i.exist_logodds) - r.physical, lookalike_lambda(lookalike, 0.0)));   // (the room's base rate is not known here)
         }
         return r;
     }
@@ -169,6 +171,7 @@ public:
         const double g = age_factor(r, now_wall_ms);
         b.ledger = r.ledger;
         b.lookalike = lookalike_;
+        b.crossed = r.crossed;
         b.remember(float(double(r.L_evidence) * g), float(double(r.physical) * g));
     }
     [[nodiscard]] PlaceBelief restored_belief(const PlaceRow& r, std::int64_t now_wall_ms) const
@@ -187,6 +190,7 @@ public:
             if (r.width > 0.f and r.height > 0.f and r.depth > 0.f) i.pose = RestorePose{r.yaw, r.width, r.height, r.depth};   // never fabricate geometry
             i.exist_logodds = r.L_evidence;
             i.exist_physical = r.physical;
+            if (r.crossed) i.crossed = true;
             if (r.last_seen_wall_ms > 0) i.seen_wall_ms = r.last_seen_wall_ms;
             i.place_sd = std::sqrt(std::max(1e-12f, 0.5f * (r.cov(0, 0) + r.cov(1, 1))));
             if (not r.ledger.views().empty()) i.ledger = r.ledger.serialise();
@@ -217,6 +221,7 @@ private:
     PlaceBelief b;
     b.lookalike = lookalike;
     if (src) b.remember(src->L_evidence, src->physical); else b.prior = new_room_prior;
+    b.crossed = (src != nullptr and src->crossed) or crossing_llr > 0.f;   // the robot's body just went through it: proof (place_belief.h)
     b.crossing = crossing_llr;
     return b;
 }

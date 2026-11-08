@@ -249,6 +249,7 @@ DoorCycleOutput DoorCore::step(const DoorCycleInput& in)
         if (crossed and cam_xy_.has_value())
             at_doorway = (*cam_xy_ - inst->aperture.centre_xy()).norm() < inst->aperture.w + kBodyReachM;
         inst->fact_backed = crossed;                       // EXISTENCE: a crossed door is not removed for being out of view
+        if (crossed) inst->belief.crossed = true;          // ...and the crossing is proof, for ever (place_belief.h)
         inst->fact_hold_leaf = crossed and at_doorway;     // LEAF + POSE frozen only while the robot is at the doorway
     }
 

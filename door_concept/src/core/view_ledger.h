@@ -33,6 +33,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <vector>
 #include <Eigen/Dense>
 #include "detector_llr.h"
@@ -68,37 +69,24 @@ public:
     std::size_t observe(const Vec2f& cam_xy, const Vec2f& door_xy, const Vec2f& door_normal, float R, float spread_m, int visit)
     {
         if (not (R > 0.f) or not std::isfinite(R) or not std::isfinite(spread_m)) return npos;
-        const Vec2f d = cam_xy - door_xy;
-        const float range = d.norm();
-        const float bearing = std::atan2(door_normal.x() * d.y() - door_normal.y() * d.x(), door_normal.dot(d));
-        const float R_eff = std::hypot(R, spread_m);
-        const float alpha = std::atan2(R_eff, range);
-        std::size_t best = views_.size();
-        float kbest = -1.f;
-        for (std::size_t i = 0; i < views_.size(); ++i)
-        {
-            if (views_[i].key.visit != visit) continue;
-            float db = std::fmod(bearing - views_[i].key.bearing, 2.f * std::numbers::pi_v<float>);
-            if (db > std::numbers::pi_v<float>) db -= 2.f * std::numbers::pi_v<float>;
-            if (db < -std::numbers::pi_v<float>) db += 2.f * std::numbers::pi_v<float>;
-            const float dr = range - views_[i].key.range;
-            const float k = std::exp(-0.5f * ((db / alpha) * (db / alpha) + (dr / R_eff) * (dr / R_eff)));
-            if (k > kbest) { kbest = k; best = i; }
-        }
-        if (best < views_.size() and kbest >= 1.f - kbest)
-        {
-            return best;
-        }
+        const auto [best, bearing, range] = locate(cam_xy, door_xy, door_normal, R, spread_m, visit);
+        if (best != npos) return best;
         View v; v.key = {bearing, range, visit};
         views_.push_back(v);
         return views_.size() - 1;
     }
-
+    /// The view a frame WOULD join (npos: none yet), without opening one: the ricoh's missed frames are logged against it, not observed.
+    [[nodiscard]] std::size_t find_view(const Vec2f& cam_xy, const Vec2f& door_xy, const Vec2f& door_normal, float R, float spread_m, int visit) const
+    {
+        if (not (R > 0.f) or not std::isfinite(R) or not std::isfinite(spread_m)) return npos;
+        return std::get<0>(locate(cam_xy, door_xy, door_normal, R, spread_m, visit));
+    }
     /// One frame of a camera channel (Zed or Ricoh): q = detect_prob, m = that camera's model (f_eff and the hit constant are
     /// derived here), hit_w = association weight of a hit (0 for a miss frame).
     void add_bernoulli(std::size_t v, Channel c, float q, const DetectorModel& m, float hit_w)
     {
         if (v >= views_.size()) return;
+        if (c == Channel::Ricoh and not (hit_w > 0.f)) return;   // ★RICOH IS HITS ONLY (Pablo 2026-11-08): a frame without a detection is no trial
         auto& a = views_[v].bern[c == Channel::Ricoh ? 1 : 0];
         a.n += 1; a.sum_q += q; a.sum_hit_w += hit_w; a.sum_f += false_alarm_eff(m, q);
         if (q > 0.f) a.hit_c = hit_llr(q, m, 1.f);
@@ -125,12 +113,14 @@ public:
         if (v >= views_.size()) return 0.f;
         View& w = views_[v];
         float l = 0.f;                          // the perceptual channels; actuation joins it at the end, kept apart (place_belief.h)
-        for (const auto& a : w.bern)
+        for (std::size_t i = 0; i < w.bern.size(); ++i)
         {
+            const auto& a = w.bern[i];
             if (a.n <= 0) continue;
             const float qb = float(a.sum_q / a.n), fb = float(a.sum_f / a.n), db = float(a.sum_hit_w / a.n);
             const float hit = qb > 0.f ? a.hit_c : 0.f;
-            l += db * hit + (1.f - db) * miss_llr(qb, fb);
+            l += db * hit;
+            if (i == 0) l += (1.f - db) * miss_llr(qb, fb);   // the ZED alone counts misses: the ricoh contributes hits only (a persisted VL1/VL2 ricoh aggregate keeps only its hit part too)
         }
         const auto& g = w.geo;
         if (g.sum_w > 0 and g.n > 0 and g.s2 > 0.f)
@@ -222,6 +212,29 @@ public:
     }
 
 private:
+    /// The existing view a frame at this standpoint belongs to (the kernel in the header), and the frame's door-relative key.
+    [[nodiscard]] std::tuple<std::size_t, float, float> locate(const Vec2f& cam_xy, const Vec2f& door_xy, const Vec2f& door_normal, float R, float spread_m, int visit) const
+    {
+        const Vec2f d = cam_xy - door_xy;
+        const float range = d.norm();
+        const float bearing = std::atan2(door_normal.x() * d.y() - door_normal.y() * d.x(), door_normal.dot(d));
+        const float R_eff = std::hypot(R, spread_m);
+        const float alpha = std::atan2(R_eff, range);
+        std::size_t best = views_.size();
+        float kbest = -1.f;
+        for (std::size_t i = 0; i < views_.size(); ++i)
+        {
+            if (views_[i].key.visit != visit) continue;
+            float db = std::fmod(bearing - views_[i].key.bearing, 2.f * std::numbers::pi_v<float>);
+            if (db > std::numbers::pi_v<float>) db -= 2.f * std::numbers::pi_v<float>;
+            if (db < -std::numbers::pi_v<float>) db += 2.f * std::numbers::pi_v<float>;
+            const float dr = range - views_[i].key.range;
+            const float k = std::exp(-0.5f * ((db / alpha) * (db / alpha) + (dr / R_eff) * (dr / R_eff)));
+            if (k > kbest) { kbest = k; best = i; }
+        }
+        return {best < views_.size() and kbest >= 1.f - kbest ? best : npos, bearing, range};
+    }
+
     std::vector<View> views_;
 };
 }  // namespace rc::door::core

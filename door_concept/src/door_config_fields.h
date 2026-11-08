@@ -190,9 +190,9 @@ void read_door_config_fields(DoorConfig& out, GetF&& getf, GetI&& geti, GetS&& g
             "merge two instances whose seat footprints overlap ≥ this");
     out.exist_enabled            = getb("Existence.Enabled", true,
             "Existence.Enabled — run the existence update (false: no existence judgement)");
-    out.exist_lookalike_prob     = getf("Existence.LookalikeProb", 0.05f,
-            "Existence.LookalikeProb — lambda = P(something door-shaped that is not a door | not a door, the detectors would fire), in (0,1). Vision alone "
-            "saturates the belief at -ln(lambda) above the priors: 25 agreeing views of one object are one object. Sensor-model constant, learn offline like the detector rates");
+    out.exist_lookalike_prob     = getf("Existence.LookalikeProb", 0.002f,
+            "Existence.LookalikeProb — pi_K, the per-wall prior of a door-shaped thing that is not a door, independent of the door's base rate. Vision saturates "
+            "near ln(pi_D / pi_K) above the band/size terms (+5.3 first door, +1.6 further): 25 agreeing views of one object are one object. Sensor-model constant, learn offline like the detector rates");
     out.exist_actuation_llr      = getf("Existence.ActuationLlr", 3.0f,
             "Existence.ActuationLlr — log-odds a door gains when it changed state on OUR command (open/close satisfied after "
             "our request): ln(P(change | a real leaf, commanded) / P(a perceived change | a phantom)) ≈ ln(0.9/0.05)");
