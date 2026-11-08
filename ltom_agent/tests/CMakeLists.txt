@@ -53,3 +53,12 @@ target_link_libraries(test_memory_graph
   ${LIBS} dsr_core dsr_gui dsr_api fastcdr fastdds osgDB OpenThreads Eigen3::Eigen QGLViewer-qt6 Qt6OpenGLWidgets
   ${STATIC_LIBS} ${SPECIFIC_LIBS} ${QT_LIBRARIES} ${Ice_LIBRARIES})
 set_target_properties(test_memory_graph PROPERTIES CXX_STANDARD 23 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
+
+# A left-drag pans the viewer on a quiet graph: the real GraphViewer, offscreen.
+add_executable(test_graph_pan test_graph_pan.cpp)
+target_compile_definitions(test_graph_pan PRIVATE LTOM_ROOT_JSON="${CMAKE_CURRENT_LIST_DIR}/ltom_root.json")
+target_include_directories(test_graph_pan PRIVATE ../../common $ENV{ROBOCOMP}/classes)
+target_link_libraries(test_graph_pan
+  ${LIBS} dsr_core dsr_gui dsr_api fastcdr fastdds osgDB OpenThreads Eigen3::Eigen QGLViewer-qt6 Qt6OpenGLWidgets
+  ${STATIC_LIBS} ${SPECIFIC_LIBS} ${QT_LIBRARIES} ${Ice_LIBRARIES})
+set_target_properties(test_graph_pan PROPERTIES CXX_STANDARD 23 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)

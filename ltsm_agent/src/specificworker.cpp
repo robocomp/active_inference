@@ -30,6 +30,7 @@
 #include <QSettings>
 #include <QWheelEvent>
 #include <dsr/gui/viewers/graph_viewer/graph_viewer.h>
+#include "../../common/viewers/graph_pan.h"
 
 namespace
 {
@@ -1184,6 +1185,7 @@ void SpecificWorker::setup_memory_layout()
     if (it == graph_viewers.end()) return;
     auto *gv = graph_view_of(it->second);
     if (gv == nullptr) return;
+    rc::viewers::keep_pannable(gv);
 
     for (const auto &n : G_ltsm->get_nodes()) memory_known_ids_.insert(n.id());
 

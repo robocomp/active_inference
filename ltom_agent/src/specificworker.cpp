@@ -1,6 +1,7 @@
 /** SpecificWorker -- ltom_agent. See specificworker.h. */
 
 #include "specificworker.h"
+#include "../../common/viewers/graph_pan.h"
 
 #include "../../common/config_report/config_read.h"   // rc::cfg::Reader (SHARED)
 #include "graph_sightings.h"
@@ -105,6 +106,9 @@ void SpecificWorker::initialize()
     std::setvbuf(stdout, nullptr, _IOLBF, 0);
     std::print("ltom_agent: initialize()\n");
     GenericWorker::initialize();
+    if (const auto v = graph_viewers.find("ltom"); v != graph_viewers.end() and v->second)
+        if (auto* gv = qobject_cast<DSR::GraphViewer*>(v->second->get_widget(DSR::DSRViewer::view::graph)))
+            rc::viewers::keep_pannable(gv);
 
     const auto graph_named = [this](const std::string& key) { const auto it = Graphs.find(key); return it == Graphs.end() ? nullptr : it->second; };
     const auto G_dsr = graph_named("dsr");
