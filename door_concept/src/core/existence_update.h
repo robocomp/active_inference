@@ -85,6 +85,16 @@ struct ViewRow
 [[nodiscard]] float association_weight(std::span<const FrameDetection> dets, int sensor, const Vec2f& xy, float var,
                                        float kappa, const rc::DoorConfig& cfg);
 
+/// One `open` claim's evidence for the door's existence (clean5: 18 attempts at a phantom and L never moved). `requested`: our open request went out for
+/// this claim. `no_door_here`: the request could not go out because nothing that can be opened is at this place. `satisfied`: the door was SEEN open.
+/// An attempt the body never got to make (the claim ended unreachable with no request) says nothing about the door. One likelihood ratio, both ways.
+[[nodiscard]] inline float open_attempt_llr(bool requested, bool no_door_here, bool satisfied, float llr)
+{
+    if (requested and satisfied) return llr;
+    if (not satisfied and (requested or no_door_here)) return -llr;
+    return 0.0f;
+}
+
 /// One frame into one place. `self_sensor` ≥ 0 forces the hit weight of that sensor to κ · self_w (a candidate's own detection,
 /// self_w its reliability).
 /// Returns the trace (NaN for every channel that did not run) and appends the touched views' rows.

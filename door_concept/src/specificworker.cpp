@@ -2944,6 +2944,18 @@ void SpecificWorker::step_pragmatic_affordances(rc::DoorInstance& inst)
         std::print("door_concept: [open] {} finished, outcome = {} (P(passable) is now {:.2f}{})\n",
                    inst.node_name, rc::affordance::to_string(inst.aff_open.outcome()),
                    st.p_open, st.p_open_known ? "" : ", unmeasured");
+        // ★ A DOOR WE TRIED TO OPEN AND THAT DID NOT OPEN (clean5: door_4, a phantom, 18 attempts, L +4.45 throughout, the tour never left the room).
+        //   The satisfied case is the likelihood ratio above; its complement is the same ratio against. A claim with no request made says nothing.
+        if (const float l = rc::door::core::open_attempt_llr(inst.open_actuated, inst.open_request_no_door,
+                                                             inst.aff_open.outcome() == rc::affordance::Outcome::Satisfied, cfg_.exist_actuation_llr);
+            l < 0.0f)
+        {
+            inst.pending_actuation_llr += l;
+            std::print("door_concept: [existence] {} did not open on our attempt ({}) — P(exists) {:.2f}, {:.2f} nats at the next update\n",
+                       inst.node_name, inst.open_actuated ? "request sent, never seen open" : "nothing that opens is at this place",
+                       inst.belief.p(), l);
+        }
+        inst.open_request_no_door = false;
         actuation_evidence("open", inst.open_actuated, inst.aff_open);
     }
 
@@ -3117,6 +3129,7 @@ bool SpecificWorker::request_door_actuation_impl(rc::DoorInstance& inst, bool op
                                   "door [{}]", m->id, m->dist_m, inst.node_name, ours_world.x(), ours_world.y(),
                                   cfg_.pragmatic.actuation_match_max_m, tf_source);
                 std::println("door_concept: [actuator] REFUSED locally: {}", why);
+                if (open) inst.open_request_no_door = true;
                 return false;
             }
             chosen_id = m->id;

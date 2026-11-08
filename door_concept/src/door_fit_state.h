@@ -406,6 +406,7 @@ struct DoorFitState
     int  actuation_requests = 0;      // how many times we have asked, this door, this run
     bool open_claim_unserved = false; // an `open` claim landed and no request has been sent for it yet
     bool close_claim_unserved = false; // the same for `close`
+    bool open_request_no_door = false;   // the current claim's open request could not go out: nothing that opens is at this place
     bool open_actuated = false;   // OUR open request went out for the current claim (its satisfied end is existence evidence)
     bool close_actuated = false;  // the same for `close`
     bool close_wait_logged = false;    // "the close request waits for clearance" said once per claim
