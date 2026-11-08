@@ -512,6 +512,13 @@ enum class FollowKind { NoInformation, Same, First, Change };
 
 struct AdoptionPlan { bool restore = false; bool drop_old = false; bool reseat = false; };
 
+/// A CROSSING WITHDRAWN (clean16, 2026-11-09). The room P is adopted IN PLACE as the very room the crossed door was carried from: recognition has concluded the robot
+/// never left. `adopted_name` = the name P wears now, `carried_from` = the room the door crossed in (the carried door's source room). The door must go.
+[[nodiscard]] inline bool crossing_withdrawn(std::string_view adopted_name, std::string_view carried_from)
+{
+    return not carried_from.empty() and adopted_name == carried_from;
+}
+
 /// Every name THIS agent has held beliefs under, per room node id. The frame change P -> K applies to beliefs formed under a
 /// name other than K, whichever of {rename, "accepted"} arrives first (room_concept renames FIRST and writes "accepted"
 /// LAST, so the rename is normally seen a cycle earlier). First sight already named K ⇒ no other name ⇒ nothing to move.

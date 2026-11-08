@@ -62,7 +62,28 @@ struct PlaceBelief
     float carried_sc = 0.f;            // perceptual evidence remembered from views no longer in the ledger, on the Sc scale (remember())
     ViewLedger ledger;
     float lookalike = kLookalikeProbDefault;   // pi_K (Existence.LookalikeProb): stamped by observe_place from the config every frame
-    bool crossed = false;              // proof: the robot's body went through this place (the header): no delete line, ever
+    bool crossed = false;              // proof: the robot's body went through this place AND the crossing STOOD (the header): no delete line, ever
+    // ★THE PROOF WAITS FOR THE CONFIRMATION (clean16, 2026-11-09): a phantom door whose plane the body crossed latched `crossed` and could never be deleted.
+    //  The body going through is `crossing_pending`: the door keeps its protection from deletion while the crossing is open, and the proof is final when the
+    //  room switch stood (confirm_crossing, door_concept's worker: the entered room established, or left by another crossing). A crossing recognition
+    //  WITHDRAWS (the robot never left) is the opposite proof (refute_crossing).
+    bool crossing_pending = false;
+
+    /// The body went through this place: pending, unless the proof already stands.
+    void note_crossing() { if (not crossed) crossing_pending = true; }
+    /// The room switch stood: the pending crossing is proof. No-op without a pending crossing.
+    void confirm_crossing() { if (crossing_pending) crossed = true; crossing_pending = false; }
+    /// Deleting this door would strand a crossing: pending or proven.
+    [[nodiscard]] bool crossing_protected() const { return crossed or crossing_pending; }
+    /// THE CROSSING DID NOT HAPPEN: the body went through this plane and found no doorway, P(that | a door here) = 0, the mirror of "a crossing is proof".
+    /// The crossing evidence goes, and the place is held to the structural prior: the physical term cancels anything vision can add (saturated_vision < −ln λ), so
+    /// no fresh look at the look-alike can rebuild the door. λ is the model's own look-alike share: nothing else is tuned.
+    void refute_crossing()
+    {
+        crossed = false;
+        crossing_pending = false;
+        crossing = float(std::log(lambda()));
+    }
 
     [[nodiscard]] double lambda() const { return lookalike_lambda(lookalike, prior.base_rate); }
 

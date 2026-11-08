@@ -386,6 +386,14 @@ private:
     std::unordered_map<std::uint64_t /*proto room id*/, EntryMirror> entry_mirrors_;
     std::unordered_set<std::uint64_t> held_doors_;   ///< door nodes of a room left behind that is still live (release_room)
     std::uint64_t carry_pending_room_ = 0;   ///< room entered while the crossed door was still HELD: carry it when it is lost
+    /// THE LAST CROSSING WHOSE PROOF IS OPEN (clean16): the carried door, the room it hangs in, and the door/room it was carried from. Closed by a confirmation
+    /// (the entered room stood) or by a withdrawal (that room was adopted as the one left).
+    struct CarriedCrossing { std::uint64_t door_id = 0, room_id = 0; std::string source_name, source_room; };
+    std::optional<CarriedCrossing> carried_crossing_;
+    std::string entered_from_name_;          ///< the room left at the last room switch (release_room), named while it still can be
+    void step_crossing_proof();              ///< each cycle in the followed room: a crossing stands once the room is established
+    void confirm_carried_crossing();         ///< the proof is final: the carried door and the source row of the room left
+    void withdraw_carried_crossing();        ///< the crossing did not happen: the door goes, the source place is refuted
     void install_carried_door(std::uint64_t new_room, std::uint64_t adopt_mirror, const std::optional<EntryMirror>& adopted_from);
     void step_entry_mirrors();
 

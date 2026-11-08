@@ -3324,6 +3324,7 @@ void SpecificWorker::step_room_following()
     if (room_node_id_ == *current)
     {
         step_adoption();          // a rename of THIS room (same id) is followed here, never released
+        step_crossing_proof();    // a crossing whose room has stood becomes proof (after the adoption: a withdrawal must be seen first)
         step_pending_restore();   // a recalled room's doors, once its polygon is loaded
         fitter_->seed_leaf_from_recalls();   // a recall_* child that appeared after the door was restored
         // The crossed door was HELD at the switch and has been deleted with its room since: carry it across now.
@@ -3467,13 +3468,13 @@ void SpecificWorker::step_entry_mirrors()
             // from it and archives the room left only once it exists.
             if (rc::exit_fact::write_twin(*G, id, best->id()))
                 std::print("door_concept: [exit] link 3: {} is the twin of {} (entered '{}')\n", id, best->name(), room.name());
+            else
+                std::print("door_concept: [exit] could not write link 3 ({} -> {})\n", id, best->name());
             // The node-added path may have built a tracker instance at insert, BEFORE the twin edge made it a mirror
             // (rc::room::is_proto_mirror); the tracker then merged it into its source, one hole by place (pingpong6 leg 2:
             // 566 s of mirrors merged away). A mirror is not a belief: drop it. release_room adopts it as this room's door.
             if (fitter_->instances().contains(id))
                 fitter_->forget_node(id);
-            else
-                std::print("door_concept: [exit] could not write link 3 ({} -> {})\n", id, best->name());
         }
     }
 
@@ -3530,6 +3531,8 @@ void SpecificWorker::reap_archived_rooms()
 
 void SpecificWorker::release_room(std::uint64_t old_room, std::uint64_t new_room)
 {
+    if (carried_crossing_ and carried_crossing_->room_id == old_room)
+        confirm_carried_crossing();                // the robot left the room this crossing led into: by a crossing of its own, a withdrawal is a rename, not a release
     // `current` may move in the same cycle room_concept wrote link 2: make the entry face now, while room_node_id_ still
     // names the room left (step_entry_mirrors skips the followed room), so it is adopted below rather than guessed.
     step_entry_mirrors();
@@ -3611,6 +3614,7 @@ void SpecificWorker::release_room(std::uint64_t old_room, std::uint64_t new_room
     // (No rename of the adopted mirror, 2026-10-29: door names are opaque — the mirror keeps the name it was born with.)
     remember_live_identities();   // the room we are leaving, under ITS name: room_node_id_ has not moved yet
     const std::string left_room_name = current_room_name();   // cached: the left room may already be deleted
+    entered_from_name_ = left_room_name;       // the carried door's source room, if a door is carried below
     if (fitter_)
     {
         std::vector<std::uint64_t> leaving;
@@ -3755,6 +3759,8 @@ void SpecificWorker::step_adoption()
                "doors and merging the live ones by place\n", room_node_id_, others.empty() ? name : others.front(), name);
     if (K_from_P.has_value())
         reseat_doors_after_adoption(room_node_id_, *K_from_P);   // BEFORE the restore: the merge by place reads re-seated positions
+    if (carried_crossing_ and carried_crossing_->room_id == room_node_id_ and rc::door::crossing_withdrawn(name, carried_crossing_->source_room))
+        withdraw_carried_crossing();                              // BEFORE the restore: the crossed door must not come back from its row
     for (const auto& old : others)               // the provisional names are dead: their rows are deleted, not stripped
     {
         for (const auto& nm : rc::door::drop_room(identities_, old))
@@ -3762,6 +3768,69 @@ void SpecificWorker::step_adoption()
         save_identities();
     }
     enter_room_memory(room_node_id_, false, {});
+}
+
+// A crossing whose proof is open stands once its room does: the entered room is established (not proto) and is not being adopted back as the room left
+// (the rename comes before the proto edge goes and before "accepted": without the name test a withdrawal in flight would latch the proof a cycle early).
+void SpecificWorker::step_crossing_proof()
+{
+    if (not carried_crossing_ or carried_crossing_->room_id != room_node_id_) return;
+    if (rc::room::is_proto(*G, room_node_id_)) return;
+    const auto room = G->get_node(room_node_id_);
+    if (not room.has_value() or rc::door::crossing_withdrawn(room->name(), carried_crossing_->source_room)) return;
+    confirm_carried_crossing();
+}
+
+void SpecificWorker::confirm_carried_crossing()
+{
+    const auto c = *std::exchange(carried_crossing_, std::nullopt);
+    if (const auto it = fitter_->instances().find(c.door_id); it != fitter_->instances().end())
+        it->second.belief.confirm_crossing();
+    // the proof also belongs to the face of the room left (the row of the door the robot actually came through)
+    const auto row = std::ranges::find_if(identities_, [&](const DoorIdentity& i) { return i.room == c.source_room and i.name == c.source_name; });
+    if (row != identities_.end()) { row->crossed = true; save_identities(); }
+    if (core_)
+        if (auto* p = core_->places().find(c.source_room, c.source_name); p != nullptr) p->crossed = true;
+    std::print("door_concept: [crossing] the crossing of {} ('{}') stood: the proof is final\n", c.source_name, c.source_room);
+}
+
+void SpecificWorker::withdraw_carried_crossing()
+{
+    const auto c = *std::exchange(carried_crossing_, std::nullopt);
+    const auto now = static_cast<std::int64_t>(rc::provenance::now_ms());
+    std::print("door_concept: [crossing] WITHDRAWN: the crossing of {} ('{}') did not happen: the door is refuted and removed\n", c.source_name, c.source_room);
+    if (const auto it = fitter_->instances().find(c.door_id); it != fitter_->instances().end())
+    {
+        it->second.belief.refute_crossing();
+        const auto& b = it->second.belief;
+        // the place the robot came through, in the room it never left: "no door here", and a look-alike cannot rebuild it (a candidate here starts from this row)
+        if (const auto row = std::ranges::find_if(identities_, [&](const DoorIdentity& i) { return i.room == c.source_room and i.name == c.source_name; });
+            row != identities_.end())
+        {
+            row->exist_logodds = b.L_evidence();
+            row->exist_physical = float(b.Sp());
+            row->crossed.reset();
+            row->removed_ms = now;
+            save_identities();
+        }
+        if (core_)
+        {
+            const auto& ms = it->second.model.state();
+            rc::door::core::PlaceRow pr;
+            pr.room = c.source_room; pr.name = c.source_name;
+            pr.xy = Eigen::Vector2f(ms.ap_cx, ms.ap_cy);
+            pr.cov = Eigen::Matrix2f::Identity() * cfg_.tracker_detection_noise_m * cfg_.tracker_detection_noise_m;
+            pr.yaw = ms.ap_yaw; pr.width = ms.w; pr.height = ms.h; pr.depth = ms.thickness;
+            pr.L_evidence = b.L_evidence();
+            pr.physical = float(b.Sp());
+            pr.crossed = false;
+            pr.last_seen_wall_ms = now;
+            pr.removed_wall_ms = now;
+            core_->places().upsert(std::move(pr));
+        }
+    }
+    decision_log_.record(rc::door::DoorDecisionKind::IdentityForget, 0, c.source_name, 0, 0, 0, 2.0, c.source_room);   // c=2: a withdrawn crossing
+    retire_instance(c.door_id);                                  // the affordances, then the door node
 }
 
 // The robot-paired T(K<-P) (Task 19) as a CROSS-CHECK of the accepted one (Task 20): once K's first robot block is read,
@@ -4261,6 +4330,7 @@ void SpecificWorker::install_carried_door(std::uint64_t new_room, std::uint64_t 
                     rc::door::core::PlaceRow src;
                     if (adopted_from->existence_L.has_value()) { src.L_evidence = *adopted_from->existence_L; src.physical = adopted_from->existence_physical; }
                     dst.belief = rc::door::core::carried_belief(adopted_from->existence_L.has_value() ? &src : nullptr, dLx, {}, cfg_.exist_lookalike_prob);
+                    carried_crossing_ = CarriedCrossing{.door_id = adopt_mirror, .room_id = new_room, .source_name = adopted_from->name, .source_room = entered_from_name_};
                     if (core_ and room_n.has_value())
                     {
                         const auto& ms = dst.model.state();

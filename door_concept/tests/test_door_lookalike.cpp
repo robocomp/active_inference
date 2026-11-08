@@ -146,7 +146,7 @@ int main()
         CHECK_NEAR(PlaceTable::row_of(i, 0.1f, false).L_evidence, -3.0f, 1e-3);
     }
     {   // CROSSED = PROOF: a band of −100 and any number of misses never gives a delete verdict, on both faces, across a carry, a swap and a restore
-        const auto verdict = [](const PlaceBelief& b) { return decide(b.L(), door_role("d", {}, b.crossed), kCosts); };
+        const auto verdict = [](const PlaceBelief& b) { return decide(b.L(), door_role("d", {}, b.crossing_protected()), kCosts); };
         PlaceBelief face; face.crossed = true; PlacePrior pr; pr.band = -100.f; pr.base_rate = std::log(0.4f / 0.6f); face.prior = pr;
         hit_views(face.ledger, 25);
         CHECK(not verdict(face).remove); CHECK(std::isinf(verdict(face).delete_line));
@@ -155,8 +155,8 @@ int main()
         // the entry mirror in the new room (carried_belief, the swap's path too): the crossing is the proof
         PlaceRow src; src.L_evidence = 1.0f;
         PlaceBelief mirror = carried_belief(&src, 2.3f); mirror.prior.band = -88.f;
-        CHECK(mirror.crossed); CHECK(not verdict(mirror).remove);
-        CHECK(carried_belief(nullptr, 2.3f).crossed);
+        CHECK(not mirror.crossed); CHECK(mirror.crossing_pending); CHECK(not verdict(mirror).remove);   // clean16: the proof waits for the confirmation
+        CHECK(carried_belief(nullptr, 2.3f).crossing_pending); CHECK(not carried_belief(nullptr, 2.3f).crossed);
         // a source already crossed stays crossed (a recognition swap re-carries it)
         PlaceRow src2; src2.crossed = true; CHECK(carried_belief(&src2, 0.f).crossed);
         // restored from memory: the row keeps the proof, through the identity table's columns too
@@ -169,6 +169,31 @@ int main()
         const auto p = rc::door::parse_identity_table(f);
         CHECK(p.rows.size() == 1 and p.rows[0].crossed.value_or(false));
         CHECK(PlaceTable::row_of(p.rows[0], 0.1f, false).crossed);
+        {   // clean16: the proof is final only once the crossing is CONFIRMED (the room switch stood)
+            PlaceBelief b = carried_belief(nullptr, 2.3f);
+            CHECK(not b.crossed and b.crossing_pending);            // not final before confirmation: a phantom cannot latch it
+            CHECK(not verdict(b).remove);                           // but the door being crossed is protected
+            b.confirm_crossing();
+            CHECK(b.crossed and not b.crossing_pending);            // final after
+            PlaceBelief none; none.confirm_crossing();
+            CHECK(not none.crossed);                                 // nothing pending, nothing latched
+        }
+        {   // a withdrawn crossing removes the door: the phantom had vision saturated and the crossing on top, L high
+            PlaceBelief ph = carried_belief(&src, 2.3f);
+            PlacePrior first; first.base_rate = std::log(0.4f / 0.6f);
+            ph.prior = first;
+            hit_views(ph.ledger, 25);                                // a door-shaped thing, seen well: vision saturated
+            CHECK(ph.L() > 3.f);
+            ph.refute_crossing();
+            CHECK(not ph.crossing_protected());
+            CHECK(ph.L() < 0.f);                                     // below the creation line, whatever vision said
+            CHECK(not verdict(ph).exists);
+            hit_views(ph.ledger, 25);                                // and no amount of further looking at the look-alike rebuilds it
+            CHECK(ph.L() < first.total() + 1e-3f);
+            CHECK(rc::door::crossing_withdrawn("room_1", "room_1"));
+            CHECK(not rc::door::crossing_withdrawn("room_2", "room_1"));
+            CHECK(not rc::door::crossing_withdrawn("room_1", ""));
+        }
         // and a place never crossed is still deleted by the same band
         PlaceBelief plain; plain.prior.band = -100.f; CHECK(verdict(plain).remove);
     }

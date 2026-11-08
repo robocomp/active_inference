@@ -265,7 +265,7 @@ void DoorCore::track_episodes(const DoorCycleInput& in, DoorCycleOutput& out)
             if (st->node_name == name)
             {
                 if (std::ranges::contains(in.backed_faces, id)) ep.crossed = true;
-                if (ep.crossing and ep.room != room) st->belief.crossed = true;   // the room changed under the door's own cross: proof (place_belief.h), tape or live
+                if (ep.crossing and ep.room != room) st->belief.note_crossing();   // the room changed under the door's own cross: pending proof (place_belief.h), tape or live
                 ep.x = st->aperture.centre_xy().x(); ep.y = st->aperture.centre_xy().y();   // the door's last place while the episode ran
             }
     }
@@ -461,7 +461,7 @@ void DoorCore::update_existence(const DoorCycleInput& in, DoorCycleOutput& out)
             inst.exist_trace = {};
             L_before[i] = inst.belief.L();
             if (inst.is_bearing_hypothesis) continue;   // no depth: no place to judge
-            inst.role = door_role(inst.node_name, in.route_faces, being_crossed.contains(inst.node_name) or inst.fact_backed or inst.belief.crossed);   // a crossed door: no delete line, ever
+            inst.role = door_role(inst.node_name, in.route_faces, being_crossed.contains(inst.node_name) or inst.fact_backed or inst.belief.crossing_protected());   // a crossed or crossing door: no delete line
             // the structural prior, REPLACED (never accumulated); a newborn not yet fitted keeps its candidate's
             if (inst.ai2_initialized)
             {

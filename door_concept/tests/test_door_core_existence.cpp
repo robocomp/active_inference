@@ -691,7 +691,7 @@ int main()
             auto in = input(++r.cycle, ++r.frame, stand(6.0f, -75.0f), kDoor, {});
             in.backed_faces = {id};                                // the exit fact, one cycle only
             r.step(std::move(in));
-            CHECK(r.door() and r.door()->belief.crossed);
+            CHECK(r.door() and r.door()->belief.crossing_protected() and not r.door()->belief.crossed);   // clean16: pending, not yet proof
         }
         if (r.door()) r.door()->belief.carried = -100.0f;          // the band of a swap (clean1 door_9), and more: no line can catch it
         for (int v = 0; v < 12 and r.door(); ++v)

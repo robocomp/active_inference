@@ -221,7 +221,8 @@ private:
     PlaceBelief b;
     b.lookalike = lookalike;
     if (src) b.remember(src->L_evidence, src->physical); else b.prior = new_room_prior;
-    b.crossed = (src != nullptr and src->crossed) or crossing_llr > 0.f;   // the robot's body just went through it: proof (place_belief.h)
+    b.crossed = src != nullptr and src->crossed;     // a proof already standing is carried; this crossing's waits for the confirmation (place_belief.h)
+    if (crossing_llr > 0.f) b.note_crossing();
     b.crossing = crossing_llr;
     return b;
 }
