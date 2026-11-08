@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include "../../common/thumbs/thumb_select.h"
 #include <chrono>
 #include "../../common/exclusion/exclusion.h"        // rc::exclusion::Seniority (SHARED)
 #include <cstdint>
@@ -95,6 +96,7 @@ struct ChairInstance
     // the real elapsed time (measurement-age → covariance); mirrors table_concept.
     std::chrono::steady_clock::time_point last_belief_touch{};
     float chain_cov_xx = 0.0f, chain_cov_yy = 0.0f, chain_cov_yaw = 0.0f;  // localization/chain cov (m²,rad²)
+    rc::thumbs::ThumbSet thumbs;      // the best view from each viewing angle, published for ltom
     int  assigned_mask_idx  = -1;     // tracker's gated mask-slice assignment (-1 = use greedy nearest)
     // ── Existence belief (continuous log-odds; supersedes the wall-clock stillbirth prune) ──────────
     // L = log P(exists)/P(¬exists). Integrated once per SENSOR frame while the instance is in the camera

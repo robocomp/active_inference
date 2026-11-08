@@ -5,6 +5,8 @@
 // These pull in oneTBB (tbb/profiling.h). Include them BEFORE any header that activates Qt's `emit`
 // keyword macro (dsr_api.h via graph_publisher.h, and <QtGlobal>), otherwise the empty `emit` macro
 // mangles TBB's profiling.h and it fails to compile.
+#include "../../common/thumbs/thumb_crop.h"
+#include "../../common/thumbs/thumb_wire.h"
 #include "yolo_processor.h"   // SegDetection
 #include "../../common/room_resolve/room_resolve.h"   // rc::room::current_room (proto-aware, deterministic)
 #include "yolo_human.h"       // rc::human_pose::PoseDetection, BODY18_FROM_COCO
@@ -450,6 +452,14 @@ void GraphPublisher::upload_masks(const RGBDData& rgbd, const Mat::RTMat& room_T
     hover->src_size = cv::Size(rgbd.width, rgbd.height);
     const bool whitelist_active = not params_.YOLO_ACCEPTED_LABELS.empty();
 
+    // Small crops of this frame's slices, keyed by slice index. On their OWN node, without mask_frame_id (rc::masks::
+    // find_mask_nodes would take it for a mask node), so the mask node every consumer reads stays the size it was.
+    const auto thumbs_now = std::chrono::steady_clock::now();
+    const bool want_thumbs = params_.THUMBS_PERIOD_MS > 0 and not rgbd.bgr.empty()
+                             and thumbs_now - last_thumbs_ >= std::chrono::milliseconds(params_.THUMBS_PERIOD_MS);
+    rc::thumbs::ThumbFrame thumbs;
+    thumbs.frame = sensing_frame;
+
     if (rgbd.depth.empty() || rgbd.width <= 0 || rgbd.height <= 0 || rgbd.focal_x <= 0.f || rgbd.focal_y <= 0.f)
     {
         zed_hover_ = hover;   // no masks this frame
@@ -761,6 +771,9 @@ void GraphPublisher::upload_masks(const RGBDData& rgbd, const Mat::RTMat& room_T
             info.support_points = static_cast<int>(mask_points.size());
             hover->masks.push_back(std::move(info));
         }
+        if (want_thumbs)
+            if (auto jpeg = rc::thumbs::crop_thumbnail(rgbd.bgr, min_x, min_y, max_x, max_y, params_.THUMBS_MAX_SIDE, params_.THUMBS_JPEG_QUALITY); not jpeg.empty())
+                thumbs.thumbs.push_back({.key = label_ids.size(), .jpeg = std::move(jpeg)});
         label_ids.push_back(static_cast<float>(det.class_id));
         confidences.push_back(det.confidence);
         has_depth_flags.push_back(1.0f);   // zed slice: carries 3D support points
@@ -908,6 +921,14 @@ void GraphPublisher::upload_masks(const RGBDData& rgbd, const Mat::RTMat& room_T
     zed_hover_ = hover;
     write_mask_node(*G_, params_, masks_node, out);
     G_->update_node(std::move(masks_node));
+
+    if (want_thumbs and ensure_node("thumbs_zed", "Plum", thumbs_ready_, /*relayout=*/false, "zed"))
+        if (auto node = G_->get_node("thumbs_zed"); node.has_value())
+        {
+            G_->add_or_modify_attrib_local<compressed_data_att>(*node, rc::thumbs::encode(thumbs));
+            G_->update_node(std::move(*node));
+            last_thumbs_ = thumbs_now;
+        }
 
     // Remember this zed pose for the next frame's twist finite-difference (only with a valid capture stamp).
     if (params_.MASK_MOTION_ENABLED and frame_ts_ms > 0)
@@ -1211,6 +1232,7 @@ void GraphPublisher::cleanup_semantic_grid_nodes()
         G_->delete_node(node.id());
     }
     masks_ready_    = false;
+    thumbs_ready_   = false;
     masks_ricoh_ready_ = false;
     skeleton_ready_ = false;
 }

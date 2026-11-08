@@ -1,6 +1,7 @@
 // Live-graph reader: object instances -> Sightings, plus the concept agents currently present.
 // Read-only; main thread (it uses the caller's InnerEigenAPI at ts 0, whose cache the main thread owns).
 #pragma once
+#include "../../common/thumbs/thumb_wire.h"
 #include "repertory.h"
 
 #include <dsr/api/dsr_api.h>
@@ -14,7 +15,8 @@
 namespace ltom
 {
 struct GraphView { std::vector<Sighting> alive; std::set<std::uint32_t> owners_present;
-                 std::set<std::uint64_t> present; };   // present: every in-scope uid on the graph, resolvable or not
+                 std::set<std::uint64_t> present;
+                 std::vector<rc::thumbs::Thumb> thumbs; };   // present: every in-scope uid on the graph, resolvable or not
 
 // ltsm_agent's room_index() rule: the room_id attribute, else the trailing digits of the name. nullopt = no key.
 std::optional<std::int64_t> room_key_of(DSR::DSRGraph& G, const DSR::Node& room);

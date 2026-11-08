@@ -111,6 +111,7 @@ public:
         // thing is still there, not a licence to move it — and may raise a proto-object to go and look at.
         // Defaults to zed so a producer predating the field reads back exactly as before.
         MaskSource source = MaskSource::zed;
+        int node_index = -1;   // this slice's position on its own mask node, as the producer wrote it
         bool  is_zed()   const { return source == MaskSource::zed; }
         bool  is_ricoh() const { return source == MaskSource::ricoh; }
         // The one predicate a fit/birth path should ask. Named for the RULE, not for the sensor, so a third

@@ -32,7 +32,7 @@ because its owner agent was gone or Degraded, not a death; an instance still on 
 `ltom_agent` shows what it retains in a graph viewer on its own DSR graph (`[Agent.ltom]`, DDS domain 5, seeded from `ltom_root.json`):
 root, then `room_<key>`, then one `object` node per retained object at its newest keyframe (`room_unknown` if it has none).
 Click a node to inspect it: `object_uid`, `object_subtype`, size, `state` (live or remembered), and `em_record` for its sightings,
-keyframes and lives. The repertory file stays the store of record; the graph is rebuilt from it at start and nothing reads it back.
+keyframes and lives. "View data" opens the object's retained views, the best per viewing-angle bin (retina cuts the crops, the owning agent picks them). The repertory file stays the store of record; the graph is rebuilt from it at start and nothing reads it back.
 
 ## Recall nodes (step 3)
 

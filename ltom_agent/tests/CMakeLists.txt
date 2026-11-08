@@ -62,3 +62,9 @@ target_link_libraries(test_graph_pan
   ${LIBS} dsr_core dsr_gui dsr_api fastcdr fastdds osgDB OpenThreads Eigen3::Eigen QGLViewer-qt6 Qt6OpenGLWidgets
   ${STATIC_LIBS} ${SPECIFIC_LIBS} ${QT_LIBRARIES} ${Ice_LIBRARIES})
 set_target_properties(test_graph_pan PROPERTIES CXX_STANDARD 23 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
+
+# What "View data" shows for a retained object: real widgets, offscreen.
+add_executable(test_thumbnail_view test_thumbnail_view.cpp ../src/thumbnail_view.cpp)
+target_include_directories(test_thumbnail_view PRIVATE ../../common $ENV{ROBOCOMP}/classes)
+target_link_libraries(test_thumbnail_view ${QT_LIBRARIES})
+set_target_properties(test_thumbnail_view PROPERTIES CXX_STANDARD 23 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)

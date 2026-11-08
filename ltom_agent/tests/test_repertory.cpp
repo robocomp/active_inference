@@ -161,8 +161,31 @@ static void test_yaw_wrap_no_keyframe()
 }
 static void test_owner_of() { CHECK(owner_of((20ull << 40) | 7) == 20); }
 
+static void test_a_bin_keeps_the_best_thumbnail_across_lives()
+{
+    Repertory r(3000);
+    Entry e; e.uid = 77; e.cls = "chair"; e.name = "chair_7";
+    r.insert_loaded(e);
+    r.clear_dirty();
+    r.merge_thumb(77, 2, 10.f, {1});
+    CHECK(r.dirty());
+    CHECK(r.entries().at(77).thumbs.at(2).jpeg == std::vector<std::uint8_t>{1});
+    r.clear_dirty();
+    r.merge_thumb(77, 2, 5.f, {2});     // a new life starts from nothing: its first view must not replace a better one
+    CHECK(not r.dirty());
+    CHECK(r.entries().at(77).thumbs.at(2).jpeg == std::vector<std::uint8_t>{1});
+    r.merge_thumb(77, 2, 20.f, {3});
+    r.merge_thumb(77, 6, 1.f, {4});
+    CHECK(r.dirty());
+    CHECK(r.entries().at(77).thumbs.size() == 2 and r.entries().at(77).thumbs.at(2).score == 20.f);
+    r.clear_dirty();
+    r.merge_thumb(999, 0, 50.f, {5});   // not yet in the memory: nothing to attach it to
+    CHECK(not r.dirty());
+}
+
 int main()
 {
+    test_a_bin_keeps_the_best_thumbnail_across_lives();
     test_new_uid_creates_entry_and_keyframe();
     test_resighting_counts_without_keyframe_when_still();
     test_moved_object_keyframes();

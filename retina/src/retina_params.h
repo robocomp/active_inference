@@ -88,6 +88,9 @@ struct RetinaParams
     // honest instead of collapsing it like 1/sqrt(N). Bigger cells ⇒ fewer, more-independent samples and
     // heavier boundary erosion; smaller ⇒ more samples that are more correlated. MaskColor.cell_px
     int         MASK_COLOR_CELL_PX    = 8;       // MaskColor.cell_px
+    int         THUMBS_PERIOD_MS      = 500;     // Thumbnails.period_ms: how often crops go out; 0 = off
+    int         THUMBS_MAX_SIDE       = 96;      // Thumbnails.max_side (px)
+    int         THUMBS_JPEG_QUALITY   = 80;      // Thumbnails.jpeg_quality
 
     // Extrapolate the robot pose to the camera CAPTURE stamp using the body-frame velocity on the
     // robot→room RT edge. DSR's InterpolatedRT clamps to the newest block (poses lag the camera by

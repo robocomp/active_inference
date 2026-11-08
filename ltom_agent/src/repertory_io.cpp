@@ -61,6 +61,16 @@ QJsonObject to_json(const Entry& e)
         kfs.append(j);
     }
     o["keyframes"] = kfs;
+    QJsonArray thumbs;
+    for (const auto& [bin, t] : e.thumbs)
+    {
+        QJsonObject j;
+        j["bin"] = bin;
+        j["score"] = static_cast<double>(t.score);
+        j["jpeg"] = QString::fromLatin1(QByteArray(reinterpret_cast<const char*>(t.jpeg.data()), static_cast<qsizetype>(t.jpeg.size())).toBase64());
+        thumbs.append(j);
+    }
+    o["thumbs"] = thumbs;
     return o;
 }
 
@@ -102,6 +112,12 @@ bool from_json(const QJsonObject& o, Entry& e)
         k.pose = Pose2{j["x"].toDouble(), j["y"].toDouble(), j["yaw"].toDouble(),
                        j["vx"].toDouble(), j["vy"].toDouble(), j["vyaw"].toDouble()};
         e.keyframes.push_back(k);
+    }
+    for (const QJsonValue& v : o["thumbs"].toArray())   // absent in files written before thumbnails existed
+    {
+        const QJsonObject j = v.toObject();
+        const QByteArray raw = QByteArray::fromBase64(j["jpeg"].toString().toLatin1());
+        e.thumbs[j["bin"].toInt()] = {static_cast<float>(j["score"].toDouble()), std::vector<std::uint8_t>(raw.begin(), raw.end())};
     }
     return true;
 }
