@@ -32,7 +32,8 @@ struct PlaceRow
     std::string room, name;
     Vec2f xy = Vec2f::Zero(); Eigen::Matrix2f cov = Eigen::Matrix2f::Identity(); float yaw = 0.f, width = 0.f, height = 0.f;
     float depth = 0.f;                    // the aperture's wall depth, set by the caller from the fit; 0 = unknown
-    float L_evidence = 0.f;               // ledger sum + crossing evidence, WITHOUT the structural prior
+    float L_evidence = 0.f;               // PlaceBelief::L_evidence(): everything but the structural prior
+    float physical = 0.f;                 // PlaceBelief::Sp(): the physical part of L_evidence (what a memory keeps outside vision's saturation, place_belief.h)
     ViewLedger ledger; int visit = 0; std::int64_t last_seen_wall_ms = 0;
     std::int64_t sighted_wall_ms = 0;     // the last SIGHTING (commands move last_seen, not this): the hazard's exposure counts from here
     std::optional<std::int64_t> removed_wall_ms;   // a deleted phantom: "no door here", kept for ever
@@ -41,7 +42,7 @@ struct PlaceRow
 class PlaceTable
 {
 public:
-    explicit PlaceTable(bool geometry_may_refute) : geometry_may_refute_(geometry_may_refute) {}
+    explicit PlaceTable(bool geometry_may_refute, float lookalike = kLookalikeProbDefault) : geometry_may_refute_(geometry_may_refute), lookalike_(lookalike) {}
 
     [[nodiscard]] std::span<const PlaceRow> rows() const { return rows_; }
 
@@ -117,23 +118,26 @@ public:
 
     [[nodiscard]] double hazard_per_s() const { return (kPriorShape + changes_) / (kPriorRateS + sum_elapsed_s_); }
 
-    [[nodiscard]] float aged_L(const PlaceRow& r, std::int64_t now_wall_ms) const
+    [[nodiscard]] double age_factor(const PlaceRow& r, std::int64_t now_wall_ms) const
     {
         const double dt = std::max<double>(0.0, double(now_wall_ms - r.last_seen_wall_ms) * 1e-3);
-        return float(double(r.L_evidence) * std::exp(-hazard_per_s() * dt));
+        return std::exp(-hazard_per_s() * dt);
     }
+    [[nodiscard]] float aged_L(const PlaceRow& r, std::int64_t now_wall_ms) const { return float(double(r.L_evidence) * age_factor(r, now_wall_ms)); }
 
     /// Load rows from a parsed identity table. Rows without a pose cannot be places (no size) and are skipped.
     /// Old rows (no ledger column) get an empty ledger and exist_logodds as L. `fallback_sd`: the place's sigma (m) for a
     /// row that does not carry place_sd (caller supplies the tracker's seed sigma).
     void load(const ParsedIdentityTable& t, float fallback_sd)
     {
-        for (const auto& i : t.rows) upsert(row_of(i, fallback_sd, geometry_may_refute_));
+        for (const auto& i : t.rows) upsert(row_of(i, fallback_sd, geometry_may_refute_, lookalike_));
         if (t.hazard.has_value()) set_hazard(*t.hazard);   // SET, not added: loading twice is the same table
     }
 
     /// One identity row as a place row (the restore path reads the same thing: the row IS the belief's memory).
-    [[nodiscard]] static PlaceRow row_of(const IdentityRow& i, float fallback_sd, bool geometry_may_refute)
+    /// ★A row without `exist_physical` (written before the look-alike model, 2026-11-08): its exist_logodds is the OLD unbounded sum, which is on the Sc
+    /// scale, not on the saturated one: it is saturated once here (L_evidence = its ledger's physical part + saturated rest). A phantom remembered at +89 comes back near the bound.
+    [[nodiscard]] static PlaceRow row_of(const IdentityRow& i, float fallback_sd, bool geometry_may_refute, float lookalike = kLookalikeProbDefault)
     {
         PlaceRow r; r.room = i.room; r.name = i.name; r.xy = i.xy;
         const float sd = i.place_sd.value_or(fallback_sd);
@@ -146,16 +150,31 @@ public:
         r.sighted_wall_ms = i.sighted_ms.value_or(i.seen_wall_ms.value_or(0));
         if (i.ledger)
             if (auto L = ViewLedger::parse(*i.ledger, geometry_may_refute)) r.ledger = std::move(*L);   // corrupt cell: empty ledger
+        if (i.exist_physical.has_value())
+            r.physical = *i.exist_physical;
+        else
+        {
+            r.physical = r.ledger.physical_sum();
+            if (i.exist_logodds.has_value())
+                r.L_evidence = r.physical + float(saturated_vision(double(*i.exist_logodds) - r.physical, lookalike));
+        }
         return r;
     }
 
     /// A restore (Task 9): the belief comes back from the row. Its ledger is the row's; the evidence term is the row's aged L_evidence
-    /// (hazard Gamma prior, learned from revisits), less the ledger sum that L() adds back. The structural prior re-enters from the room.
+    /// (hazard Gamma prior, learned from revisits), split into its physical and perceptual parts and entered so that L_evidence() equals it (PlaceBelief::remember:
+    /// the ledger's views stay inside the saturation, so a revisit's new views cannot lift it above the bound). The structural prior re-enters from the room.
+    void restore_into(PlaceBelief& b, const PlaceRow& r, std::int64_t now_wall_ms) const
+    {
+        const double g = age_factor(r, now_wall_ms);
+        b.ledger = r.ledger;
+        b.lookalike = lookalike_;
+        b.remember(float(double(r.L_evidence) * g), float(double(r.physical) * g));
+    }
     [[nodiscard]] PlaceBelief restored_belief(const PlaceRow& r, std::int64_t now_wall_ms) const
     {
         PlaceBelief b;
-        b.ledger = r.ledger;
-        b.carried = aged_L(r, now_wall_ms) - r.ledger.sum();
+        restore_into(b, r, now_wall_ms);
         return b;
     }
 
@@ -167,6 +186,7 @@ public:
             IdentityRow i; i.room = r.room; i.name = r.name; i.xy = r.xy;
             if (r.width > 0.f and r.height > 0.f and r.depth > 0.f) i.pose = RestorePose{r.yaw, r.width, r.height, r.depth};   // never fabricate geometry
             i.exist_logodds = r.L_evidence;
+            i.exist_physical = r.physical;
             if (r.last_seen_wall_ms > 0) i.seen_wall_ms = r.last_seen_wall_ms;
             i.place_sd = std::sqrt(std::max(1e-12f, 0.5f * (r.cov(0, 0) + r.cov(1, 1))));
             if (not r.ledger.views().empty()) i.ledger = r.ledger.serialise();
@@ -181,6 +201,7 @@ private:
     // Gamma(shape 1, rate 600 s) prior on the change hazard: mean 1/600 s^-1 (see the header comment).
     static constexpr double kPriorShape = 1.0, kPriorRateS = 600.0;
     bool geometry_may_refute_;
+    float lookalike_;
     std::vector<PlaceRow> rows_;
     double changes_ = 0.0, sum_elapsed_s_ = 0.0;
     std::set<std::pair<std::string, int>> sampled_;   // (room/name, visit) pairs that already gave their revisit sample (this process)
@@ -190,10 +211,12 @@ private:
 ///  - with the source face's row: prior = 0 (the new room's prior is entered by the first update, which REPLACES it), carried = the
 ///    face's L_evidence, crossing = crossing_llr;
 ///  - without one (the face was never known): prior = the new room's place prior (`new_room_prior`, default none yet), carried = 0.
-[[nodiscard]] inline PlaceBelief carried_belief(const PlaceRow* src, float crossing_llr, const PlacePrior& new_room_prior = {})
+[[nodiscard]] inline PlaceBelief carried_belief(const PlaceRow* src, float crossing_llr, const PlacePrior& new_room_prior = {},
+                                                float lookalike = kLookalikeProbDefault)
 {
     PlaceBelief b;
-    if (src) b.carried = src->L_evidence; else b.prior = new_room_prior;
+    b.lookalike = lookalike;
+    if (src) b.remember(src->L_evidence, src->physical); else b.prior = new_room_prior;
     b.crossing = crossing_llr;
     return b;
 }

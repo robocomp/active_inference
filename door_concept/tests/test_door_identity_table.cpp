@@ -34,6 +34,7 @@ static IdentityRow full_row(std::string room, std::string name, float x, float y
     r.room = std::move(room); r.name = std::move(name); r.xy = {x, y};
     r.pose = RestorePose{3.10f, 0.95f, 2.13f, 0.05f};
     r.exist_logodds = 4.0f;
+    r.exist_physical = 0.f;   // a row of the current format (the look-alike model's split, spec §3.1b): no re-saturation of the stored L
     r.leaf = LeafMemory{{-0.09f, 4.61f}, {0.0f, -1.0f}, 19.7f, 9.3f, 0.031f, 0.12f};
     r.seen_wall_ms = kNowMs;   // seen just now
     return r;
@@ -188,6 +189,7 @@ int main()
     {
         IdentityRow r = table[0];
         r.exist_logodds = -4.0f;
+        r.exist_physical = 0.f;
         r.seen_wall_ms = kNowMs - 132'000;
         core::PlaceTable T(false);
         const auto row = core::PlaceTable::row_of(r, 0.1f, false);

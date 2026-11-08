@@ -24,7 +24,7 @@ int main()
         std::print("carried: L {:.3f} = carried {:.2f} + crossing {:.3f}\n", b.L(), b.carried, b.crossing);
         CHECK(near(b.L(), 1.5f + x));
         CHECK(b.L() > 0.f);
-        CHECK(b.prior.total() == 0.f and b.ledger.views().empty() and b.carried == 1.5f and b.crossing == x);
+        CHECK(b.prior.total() == 0.f and b.ledger.views().empty() and b.crossing == x and b.carried == 0.f and near(b.L_evidence(), 1.5f + x));   // (the 1.5 is perceptual: it is carried inside vision's saturation, carried_sc, not as `carried`; spec §3.1b)
         // the source's ledger is NOT copied: views are per room
         PlaceRow withled = src; withled.ledger = ViewLedger{};
         CHECK(carried_belief(&withled, x).ledger.views().empty());

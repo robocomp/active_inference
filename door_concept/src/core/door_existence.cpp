@@ -41,14 +41,14 @@ using K = rc::door::DoorDecisionKind;
 }  // namespace
 
 // ★Task 8 (spec §3.8): ONE ROW PER DOOR PER FRESH FRAME, every channel's contribution THIS cycle; `nan` = not computed this
-// cycle (never a stale value). L = prior_band + prior_base + prior_size + carried + crossing + ledger. zed_dl / ric_dl / geo_dl /
+// cycle (never a stale value). L = prior_band + prior_base + prior_size + carried + crossing + (physical part of ledger) + vision (spec §3.1b; Sc, Sp and the saturation term are its last columns). zed_dl / ric_dl / geo_dl /
 // act_dl: what each channel changed the ledger sum by this cycle; view_id / ric_view_id: the ledger record the frame joined;
 // zed_q / ric_q: P(detector reports the door from this view); zed_hit / ric_hit: this frame's association weight (0 = a miss);
 // geo_x / geo_mu0 / geo_mu1 / geo_s: the contour statistic, the controls' mean, the present-hypothesis mean and the controls' sd.
 const char* const kExistenceCsvHeader =
     "cycle,node,L,p_exists,cx,cy,role,delete_line,view_id,ric_view_id,"
     "prior_band,prior_base,prior_size,carried,crossing,ledger,n_views,"
-    "zed_dl,ric_dl,geo_dl,act_dl,zed_q,ric_q,zed_hit,ric_hit,kappa,geo_x,geo_mu0,geo_mu1,geo_s,sup_x,sup_dl\n";
+    "zed_dl,ric_dl,geo_dl,act_dl,zed_q,ric_q,zed_hit,ric_hit,kappa,geo_x,geo_mu0,geo_mu1,geo_s,sup_x,sup_dl,Sc,Sp,sat_term\n";
 
 // Ruling R8: the per-view rows tools/fit_detector_envelopes.py reads (its column names, exactly). Every field is
 // THIS frame's (hit = its association weight, 0 = a miss); door = the node name or place_<key> of a pending candidate.
@@ -345,8 +345,7 @@ void DoorCore::prepare_candidates(const DoorCycleInput& in, const std::vector<rc
             //  ledger, aged by the change hazard; a REMOVED row ("no door here") pushes it down by exactly its aged L.
             if (const PlaceRow* row = places_.match(room_name_, dv.xy, Eigen::Matrix2f::Identity() * var, cfg.tracker_gate_mahalanobis))
             {
-                c.belief.ledger = row->ledger;
-                c.belief.carried = places_.aged_L(*row, in.t_wall_ms) - row->ledger.sum();
+                places_.restore_into(c.belief, *row, in.t_wall_ms);
                 c.seeded_from_removed_ms = row->removed_wall_ms;
                 c.seeded_name = row->name;   // its revisit sample is taken if it is BORN (door_core.cpp), never from one detection
             }
@@ -528,15 +527,16 @@ void DoorCore::update_existence(const DoorCycleInput& in, DoorCycleOutput& out)
                << b.prior.band << ',' << b.prior.base_rate << ',' << b.prior.size << ',' << b.carried << ',' << b.crossing << ','
                << b.ledger.sum() << ',' << b.ledger.views().size() << ',' << t.zed_dl << ',' << t.ric_dl << ',' << t.geo_dl << ','
                << t.act_dl << ',' << t.zed_q << ',' << t.ric_q << ',' << t.zed_hit << ',' << t.ric_hit << ',' << t.kappa << ','
-               << t.geo_x << ',' << t.geo_mu0 << ',' << t.geo_mu1 << ',' << t.geo_s << ',' << t.sup_x << ',' << t.sup_dl << '\n';
+               << t.geo_x << ',' << t.geo_mu0 << ',' << t.geo_mu1 << ',' << t.geo_s << ',' << t.sup_x << ',' << t.sup_dl << ','
+               << b.Sc() << ',' << b.Sp() << ',' << b.saturation_term() << '\n';
         diag("door_existence_log.csv", ex_csv.str(), out);
         const bool removing = std::ranges::contains(to_remove, id);
         if (ex_dbg_ % 60 == 0 or removing or std::abs(b.L() - L_before[i]) > 1.0f)
             diag("stdout", std::format("door_concept: [existence] {} L={:+.2f} p={:.2f} role={} delete_line={} | prior band={:+.2f} "
-                                       "base={:+.2f} size={:+.2f} carried={:+.2f} cross={:+.2f} | views={} | zed dl={} q={} hit={} "
+                                       "base={:+.2f} size={:+.2f} carried={:+.2f} cross={:+.2f} Sc={:+.2f} Sp={:+.2f} term={:+.2f} | views={} | zed dl={} q={} hit={} "
                                        "| ric dl={} q={} hit={} | geo dl={} | sup dl={} x={} | act dl={} | kappa={}\n",
                                        inst.node_name, b.L(), b.p(), role_name(inst.role), fmt_or_dash(t.delete_line),
-                                       b.prior.band, b.prior.base_rate, b.prior.size, b.carried, b.crossing,
+                                       b.prior.band, b.prior.base_rate, b.prior.size, b.carried, b.crossing, b.Sc(), b.Sp(), b.saturation_term(),
                                        b.ledger.views().size(), fmt_or_dash(t.zed_dl), fmt_or_dash(t.zed_q), fmt_or_dash(t.zed_hit),
                                        fmt_or_dash(t.ric_dl), fmt_or_dash(t.ric_q), fmt_or_dash(t.ric_hit), fmt_or_dash(t.geo_dl),
                                        fmt_or_dash(t.sup_dl), fmt_or_dash(t.sup_x), fmt_or_dash(t.act_dl), fmt_or_dash(t.kappa)), out);
@@ -574,7 +574,7 @@ void DoorCore::update_existence(const DoorCycleInput& in, DoorCycleOutput& out)
         const float sd2 = inst.ai2_initialized ? std::max(0.0f, inst.ai2_belief.covariance()(0, 0)) : cfg.tracker_detection_noise_m * cfg.tracker_detection_noise_m;
         r.cov = Eigen::Matrix2f::Identity() * sd2;
         r.yaw = inst.aperture.yaw(); r.width = inst.aperture.w; r.height = inst.aperture.h; r.depth = inst.aperture.thickness;
-        r.L_evidence = inst.belief.L_evidence(); r.ledger = inst.belief.ledger; r.visit = visit_;
+        r.L_evidence = inst.belief.L_evidence(); r.physical = float(inst.belief.Sp()); r.ledger = inst.belief.ledger; r.visit = visit_;
         r.last_seen_wall_ms = in.t_wall_ms; r.sighted_wall_ms = in.t_wall_ms; r.removed_wall_ms = in.t_wall_ms;
         places_.upsert(std::move(r));
         observed_frame_.erase(id);

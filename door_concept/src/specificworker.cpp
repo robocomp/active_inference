@@ -1889,6 +1889,7 @@ SpecificWorker::DoorIdentity SpecificWorker::identity_of(const rc::DoorInstance&
     if (std::isfinite(s.ap_yaw) and s.w > 0.0f and s.h > 0.0f and s.thickness > 0.0f)
         row.pose = rc::door::RestorePose{s.ap_yaw, s.w, s.h, s.thickness};
     row.exist_logodds = rc::door::remembered_logodds(inst);   // review I-1 / Task 8: the evidence, without the structural prior
+    row.exist_physical = rc::door::remembered_physical(inst);
     if (not inst.belief.ledger.views().empty()) row.ledger = inst.belief.ledger.serialise();   // the views it came from (spec §3.7)
     row.visit = inst.place_visit;
     if (inst.last_detection_wall_ms > 0)
@@ -1933,6 +1934,7 @@ void SpecificWorker::mark_identity_removed(const rc::DoorInstance& inst, std::in
     if (it == identities_.end())
         return;   // never written (a candidate that did not reach a fit): the core's table holds its removed row
     it->exist_logodds = rc::door::remembered_logodds(inst);
+    it->exist_physical = rc::door::remembered_physical(inst);
     if (not inst.belief.ledger.views().empty()) it->ledger = inst.belief.ledger.serialise();
     it->removed_ms = now_wall_ms;
     std::print("door_concept: [identity] {} removed for absence - its row in {} is kept as a REMOVED place\n", inst.node_name, room);
@@ -3247,6 +3249,7 @@ bool SpecificWorker::request_door_actuation_impl(rc::DoorInstance& inst, bool op
                         and pr->last_seen_wall_ms != *r.seen_wall_ms)
                     {
                         if (r.exist_logodds.has_value()) pr->L_evidence = *r.exist_logodds;
+                        if (r.exist_physical.has_value()) pr->physical = *r.exist_physical;
                         pr->last_seen_wall_ms = *r.seen_wall_ms;
                     }
                 save_identities();
@@ -3453,7 +3456,10 @@ void SpecificWorker::step_entry_mirrors()
                     em.matched_frames = si.matched_frames;
                 }
             if (src_it != fitter_->instances().end())
+            {
                 em.existence_L = src_it->second.belief.L_evidence();   // Task 8: the evidence the face carries (no prior)
+                em.existence_physical = float(src_it->second.belief.Sp());
+            }
             entry_mirrors_[room.id()] = std::move(em);
             // Link 3: `exit` NEW_FACE -> OLD_FACE — the mirror is the far side of the face crossed. ltsm pairs the passage
             // from it and archives the room left only once it exists.
@@ -3475,7 +3481,7 @@ void SpecificWorker::step_entry_mirrors()
     // (Task D2: the source's existence L is refreshed here too, while the source lives — ltsm deletes it with its room.)
     for (auto& [room_id, mir] : entry_mirrors_)
         if (const auto si = fitter_->instances().find(mir.source_id); si != fitter_->instances().end())
-            mir.existence_L = si->second.belief.L_evidence();
+            { mir.existence_L = si->second.belief.L_evidence(); mir.existence_physical = float(si->second.belief.Sp()); }
     for (const auto& [room_id, mir] : entry_mirrors_)
     {
         const auto src = G->get_node(mir.source_id);
@@ -3986,7 +3992,7 @@ void SpecificWorker::restore_remembered_doors(std::uint64_t new_room)
         const auto counter_before = next_door_index_;
         // Task 9: the belief comes back from the row (PlaceTable::restored_belief): its ledger, and its evidence aged by the learned change hazard.
         const auto restored = core_->places().restored_belief(
-            rc::door::core::PlaceTable::row_of(r, cfg_.tracker_detection_noise_m, cfg_.exist_geometry_may_refute),
+            rc::door::core::PlaceTable::row_of(r, cfg_.tracker_detection_noise_m, cfg_.exist_geometry_may_refute, cfg_.exist_lookalike_prob),
             static_cast<std::int64_t>(rc::provenance::now_ms()));
         // the remembered leaf ANGLE ages like the existence (door_identity_table.h restore_leaf_phi; warm13 DOOR_2): the node is
         // created with, and the belief seeded from, the aged angle
@@ -4133,10 +4139,10 @@ void SpecificWorker::step_remembered_looks()
         {
             // The prior: what memory says and nothing else - the place belief's remembered evidence, aged by the place table's
             // learned hazard (an identity-only row remembers nothing: L = 0, ignorance).
-            const float L0 = core_->places().aged_L(
-                rc::door::core::PlaceTable::row_of(r, cfg_.tracker_detection_noise_m, cfg_.exist_geometry_may_refute),
+            const auto remembered = core_->places().restored_belief(
+                rc::door::core::PlaceTable::row_of(r, cfg_.tracker_detection_noise_m, cfg_.exist_geometry_may_refute, cfg_.exist_lookalike_prob),
                 static_cast<std::int64_t>(rc::provenance::now_ms()));
-            it = looks_.emplace(r.name, LookEntry{rc::door::look::Evidence(L0), {}, false}).first;
+            it = looks_.emplace(r.name, LookEntry{rc::door::look::Evidence(remembered.L_evidence(), float(remembered.Sp()), cfg_.exist_lookalike_prob), {}, false}).first;
             it->second.aff.init(G, room_node_id_, "door_look_" + r.name, "door");
             std::print("door_concept: [look] '{}' remembered in '{}' at ({:.2f},{:.2f}) is not in the graph — offering a "
                        "look (prior P(exists)={:.2f})\n", r.name, room, r.xy.x(), r.xy.y(), it->second.ev.p_exists());
@@ -4251,8 +4257,8 @@ void SpecificWorker::install_carried_door(std::uint64_t new_room, std::uint64_t 
                     auto& dst = it->second;
                     const float dLx = rc::door::crossing_logodds(cfg_.exist_cross_passable_prior, cfg_.exist_cross_leak);
                     rc::door::core::PlaceRow src;
-                    if (adopted_from->existence_L.has_value()) src.L_evidence = *adopted_from->existence_L;
-                    dst.belief = rc::door::core::carried_belief(adopted_from->existence_L.has_value() ? &src : nullptr, dLx);
+                    if (adopted_from->existence_L.has_value()) { src.L_evidence = *adopted_from->existence_L; src.physical = adopted_from->existence_physical; }
+                    dst.belief = rc::door::core::carried_belief(adopted_from->existence_L.has_value() ? &src : nullptr, dLx, {}, cfg_.exist_lookalike_prob);
                     if (core_ and room_n.has_value())
                     {
                         const auto& ms = dst.model.state();
@@ -4262,11 +4268,12 @@ void SpecificWorker::install_carried_door(std::uint64_t new_room, std::uint64_t 
                         row.cov = Eigen::Matrix2f::Identity() * cfg_.tracker_detection_noise_m * cfg_.tracker_detection_noise_m;
                         row.yaw = ms.ap_yaw; row.width = ms.w; row.height = ms.h; row.depth = ms.thickness;
                         row.L_evidence = dst.belief.L_evidence();
+                        row.physical = float(dst.belief.Sp());
                         row.last_seen_wall_ms = static_cast<std::int64_t>(rc::provenance::now_ms());
                         core_->places().upsert(std::move(row));
                     }
                     std::print("door_concept: [room] {} is born in this room carrying the crossed face's evidence: carried {:.2f}{} + crossing {:.2f} "
-                               "(prior {:.2f}, leak {:.2f}) -> L {:.2f}\n", n->name(), dst.belief.carried,
+                               "(prior {:.2f}, leak {:.2f}) -> L {:.2f}\n", n->name(), dst.belief.L_evidence() - dst.belief.crossing,
                                adopted_from->existence_L.has_value() ? "" : " (face never known)", dLx, cfg_.exist_cross_passable_prior,
                                cfg_.exist_cross_leak, dst.belief.L());
                 }
@@ -4547,6 +4554,7 @@ void SpecificWorker::remember_door(const rc::DoorInstance& inst)
     em.phi_curve      = inst.phi_curve;
     em.matched_frames = inst.matched_frames;
     em.existence_L = inst.belief.L_evidence();   // Task 8
+    em.existence_physical = float(inst.belief.Sp());
     em.T_root_door    = Eigen::Affine3d(Tw->matrix());
     em.width  = G->get_attrib_by_name<width_m_att>(node.value()).value_or(cfg_.door_prior_w_m);
     em.depth  = G->get_attrib_by_name<depth_m_att>(node.value()).value_or(cfg_.door_thickness_m);

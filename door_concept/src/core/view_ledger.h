@@ -56,6 +56,7 @@ struct View
     ViewKey key; 
     std::array<BernoulliAgg, 2> bern;   // Zed, Ricoh
     GaussAgg geo; SupportAgg sup; float actuation_llr = 0; float llr = 0;
+    float llr_percept = 0;   // the perceptual part of llr (recomputed with it; llr - llr_percept = the physical part)
 };
 
 class ViewLedger
@@ -123,7 +124,7 @@ public:
     {
         if (v >= views_.size()) return 0.f;
         View& w = views_[v];
-        float l = w.actuation_llr;
+        float l = 0.f;                          // the perceptual channels; actuation joins it at the end, kept apart (place_belief.h)
         for (const auto& a : w.bern)
         {
             if (a.n <= 0) continue;
@@ -141,12 +142,19 @@ public:
         }
         if (const auto& s = w.sup; s.n > 0 and s.sum_w > 0)
             l += float(s.sum_w / s.n) * support_llr(float(s.sum_x / s.sum_w), s.m);   // ONE ℓ per view: the mean x, weighted, scored once
+        w.llr_percept = l;
+        l += w.actuation_llr;
         const float change = l - w.llr;
         w.llr = l;
         return change;
     }
 
+    /// Every channel's sum: what the per-channel dl's of the trace are differences of. The belief does NOT add this (place_belief.h).
     [[nodiscard]] float sum() const { float s = 0.f; for (const auto& v : views_) s += v.llr; return s; }
+    /// Sc: zed + ricoh + geometry + support. Evidence that a door-SHAPED thing is here: it does not separate a door from a look-alike.
+    [[nodiscard]] float perceptual_sum() const { float s = 0.f; for (const auto& v : views_) s += v.llr_percept; return s; }
+    /// The physical part of the ledger: actuation (opened on command / failed attempts). Only a physical test separates a door from a look-alike.
+    [[nodiscard]] float physical_sum() const { float s = 0.f; for (const auto& v : views_) s += v.llr - v.llr_percept; return s; }
     [[nodiscard]] std::span<const View> views() const { return views_; }
 
     [[nodiscard]] std::string serialise() const

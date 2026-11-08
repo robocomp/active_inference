@@ -434,6 +434,7 @@ struct DoorConfig
     // VacateConfidentFrames / OcclusionCheck / ZedEdgeOffset / ZedRangeFull / ZedRangeRef / ZedClearLosFloor
     // (the last of which was parsed but never read). Detectability is now measured from the projection itself.
     bool  exist_enabled            = true;   // Existence.Enabled — use the log-odds belief (else the old prune)
+    float exist_lookalike_prob     =  0.05f;  // Existence.LookalikeProb — lambda, P(door-shaped non-door | not a door, the detectors would fire); ⚑sensor-model constant, learn offline
     float exist_actuation_llr      =  3.0f;  // Existence.ActuationLlr — log-odds of "it changed state when WE commanded it"
     float exist_occlusion_margin_m = 0.30f;  // Existence.OcclusionMarginM — an occluder must be ≥ this much CLOSER to count
     // Room-containment pose prior: P(a door outside the room walls) ≈ 0. Applies even when the instance is out

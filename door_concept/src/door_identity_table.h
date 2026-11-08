@@ -80,16 +80,20 @@ struct IdentityRow
     /// to the command) but NOT this: the revisit's elapsed time (the hazard's exposure) counts from the last time the place was SEEN.
     /// Absent (a row of 22 or fewer columns) => `seen_wall_ms`.
     std::optional<std::int64_t> sighted_ms;
+    /// The part of exist_logodds that is PHYSICAL evidence (actuation, crossing): what stays outside vision's saturation on a restore (place_belief.h).
+    /// Absent (a row of 23 or fewer columns, written before the look-alike model): PlaceTable::row_of saturates its L once.
+    std::optional<float> exist_physical;
 };
 
 inline constexpr std::string_view kIdentityHeader =
-    "room,name,ap_x,ap_y,yaw,width,height,depth,exist_logodds,hinge_x,hinge_y,open_x,open_y,hinge_llr,swing_llr,phi,phi_sigma,seen_ms,place_sd,ledger,visit,removed_ms,sighted_ms";
+    "room,name,ap_x,ap_y,yaw,width,height,depth,exist_logodds,hinge_x,hinge_y,open_x,open_y,hinge_llr,swing_llr,phi,phi_sigma,seen_ms,place_sd,ledger,visit,removed_ms,sighted_ms,exist_physical";
 inline constexpr std::size_t kIdentityColsOld  = 4;
 inline constexpr std::size_t kIdentityCols17   = 17;   ///< 2026-10-20 .. 10-21: no seen_ms column (age unknown)
 inline constexpr std::size_t kIdentityCols18   = 18;   ///< 2026-10-21 .. 10-22: no place_sd column (place precision unknown)
 inline constexpr std::size_t kIdentityCols19   = 19;   ///< up to Task 7: no ledger / visit / removed_ms
 inline constexpr std::size_t kIdentityCols22   = 22;   ///< Task 7 .. 10: no sighted_ms column
-inline constexpr std::size_t kIdentityColsFull = 23;
+inline constexpr std::size_t kIdentityCols23   = 23;   ///< Task 10 .. look-alike model: no exist_physical column
+inline constexpr std::size_t kIdentityColsFull = 24;
 
 /// A transform read before the room existed resolves to |t| ~ 1e13 m (try35): not a place.
 inline constexpr float kIdentityMaxPlaceM = 1.0e3f;
@@ -235,7 +239,8 @@ inline ParsedIdentityTable parse_identity_table(std::istream& in)
         }
         float x = 0.f, y = 0.f;
         if ((c.size() != kIdentityColsOld and c.size() != kIdentityCols17 and c.size() != kIdentityCols18
-             and c.size() != kIdentityCols19 and c.size() != kIdentityCols22 and c.size() != kIdentityColsFull) or c[0].empty()
+             and c.size() != kIdentityCols19 and c.size() != kIdentityCols22 and c.size() != kIdentityCols23
+             and c.size() != kIdentityColsFull) or c[0].empty()
             or not c[1].starts_with("door_") or not detail::num(c[2], x) or not detail::num(c[3], y)
             or std::hypot(x, y) > kIdentityMaxPlaceM)
         {
@@ -269,7 +274,8 @@ inline ParsedIdentityTable parse_identity_table(std::istream& in)
                 if (not c[19].empty()) r.ledger = std::string(c[19]);
                 if (std::int64_t v = 0; detail::num_i64(c[20], v) and v >= 0 and v <= 2147483647) r.visit = static_cast<int>(v);
                 if (std::int64_t t = 0; detail::num_i64(c[21], t) and t > 0) r.removed_ms = t;
-                if (std::int64_t t = 0; c.size() == kIdentityColsFull and detail::num_i64(c[22], t) and t > 0) r.sighted_ms = t;
+                if (std::int64_t t = 0; c.size() >= kIdentityCols23 and detail::num_i64(c[22], t) and t > 0) r.sighted_ms = t;
+                if (float p = 0.f; c.size() >= kIdentityColsFull and detail::num(c[23], p) and std::isfinite(p)) r.exist_physical = p;
             }
         }
         out.rows.push_back(std::move(r));
@@ -313,6 +319,8 @@ inline void write_identity_table(std::ostream& f, std::span<const IdentityRow> r
         if (i.removed_ms.has_value() and *i.removed_ms > 0) f << *i.removed_ms;
         f << ',';
         if (i.sighted_ms.has_value() and *i.sighted_ms > 0) f << *i.sighted_ms;
+        f << ',';
+        if (i.exist_physical.has_value() and std::isfinite(*i.exist_physical)) f << *i.exist_physical;
         f << '\n';
     }
     if (next_door_index > 0) f << kNextDoorTag << ',' << next_door_index << '\n';
@@ -412,6 +420,7 @@ inline bool upsert_row(std::vector<IdentityRow>& rows, const std::string& room, 
     if (row.exist_logodds.has_value())
     {
         t.exist_logodds = row.exist_logodds;   // the belief as it is now: it is already a posterior
+        t.exist_physical = row.exist_physical;
         t.seen_wall_ms  = row.seen_wall_ms;    // …and its age goes with it (Task D-C)
         t.ledger        = row.ledger;          // …and the views it came from (L_evidence = their sum + the carried part)
         t.visit         = row.visit;
@@ -454,6 +463,7 @@ inline int strip_restorable(std::vector<IdentityRow>& rows, std::string_view roo
             r.pose.reset();
             r.leaf.reset();
             r.exist_logodds.reset();
+            r.exist_physical.reset();
             r.seen_wall_ms.reset();
             r.place_sd.reset();
             ++n;
@@ -615,6 +625,10 @@ template <class Inst>
     return inst.belief.L_evidence();   // Task 8: the place belief's evidence part (spec §3.7: the row is the belief)
 }
 
+/// The part of remembered_logodds that is physical evidence (PlaceBelief::Sp): stored alongside so a restore does not saturate it (place_belief.h).
+template <class Inst>
+[[nodiscard]] float remembered_physical(const Inst& inst) { return float(inst.belief.Sp()); }
+
 /// A door with fewer matched frames than this and no fresh detection is not fitted this cycle (process_door_node). A door
 /// that is KNOWN without being seen now — the crossed door carried across, a door restored from memory — is given this
 /// many so it is fitted (its belief initialised from its node), which is also what lets the existence channel judge it
@@ -647,8 +661,10 @@ void seed_restored_instance(Inst& inst, const IdentityRow& r, const Belief& rest
     // Task 9: THE belief comes back from the row (PlaceTable::restored_belief): its ledger, and its evidence aged by the learned
     // change hazard. The structural prior re-enters from the room at the first update.
     inst.belief.carried = restored.carried;
+    inst.belief.carried_sc = restored.carried_sc;
     inst.belief.crossing = restored.crossing;
     inst.belief.ledger = restored.ledger;
+    inst.belief.lookalike = restored.lookalike;
     // The door's age carries on from the row's stamp (a restored door not seen this visit keeps aging).
     // Task D-C round 2 (tour3C): the remembered place's precision seeds the belief's along-wall σ (DoorFit's lazy init).
     inst.remembered_place_sd = r.place_sd;

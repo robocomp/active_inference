@@ -267,7 +267,7 @@ int main()
         CHECK(r.births.size() == 1);
         CHECK(r.door() != nullptr and r.door()->belief.L() > 0.0f);
     }
-    {   // a 3 m candidate: not after one, born after enough (separate passes: views of different visits never merge)
+    {   // a 3 m candidate (size term −45 nats): vision saturates at −ln(lambda) (spec §3.1b), so no number of views creates it — only a physical test could (separate passes: views of different visits never merge)
         Bench b;
         const rc::DoorFitState th = typical_door_at({1.0f, kWallY}, 3.0f, rc::DoorConfig{}.door_prior_h_m, kRoom);
         PlaceBelief pb;
@@ -283,7 +283,8 @@ int main()
         }
         std::print("birth_by_comparison: 3 m candidate (size term {:.2f}) born after {} hit views\n", pb.prior.size, n);
         CHECK(not born_after_one);
-        CHECK(born and n > 1);
+        CHECK(not born and n == 200);                                        // 200 hit views: the saturation holds it under the size prior (it was born after enough with the old unbounded sum)
+        CHECK(pb.L() < pb.prior.total() - std::log(0.05f) + 0.05f);
     }
     {   // off any wall: a door detection in the middle of the room is never born, however long it is seen
         Rig r;
@@ -306,9 +307,11 @@ int main()
             ++views;
             r.look(stand(3.0f, deg, 2.5f), d2, {{2.5f, kWallY, 0.9f}});
         }
-        std::print("birth_by_comparison: second door on the wall born after {} views (not after one: {})\n", views, not after_one);
+        std::print("birth_by_comparison: second door on the wall after {} views: {} births (not after one: {})\n", views, r.births.size(), not after_one);
+        // ⚑KNOWN CONSEQUENCE, flagged to the PI (2026-11-08, spec §3.1b): base rate 0.01 = −4.6 nats; vision alone saturates at +3.0, so a second door on a wall can NOT be born
+        //  from vision alone (L tops out near −1.6; the old unbounded sum got there in 4 views). A second door needs a physical test (actuation or crossing) to be created. The PI decides whether that base rate or lambda should change.
         CHECK(not after_one);
-        CHECK(r.births.size() == 2);
+        CHECK(r.births.size() == 1);
     }
 
     // ── unseen_door_unchanged (spec test 2): behind the camera, around a wall, overflowing the ZED at 0.5 m — both cameras ─
@@ -565,11 +568,11 @@ int main()
         if (r.door())
         {
             r.door()->belief.carried += 10.0f;   // far from any line: this case is about counting, not deciding
-            const float L0 = r.door()->belief.L();
+            const float L0 = float(r.door()->belief.Sc());   // the view counts into Sc (the belief's L is saturated, spec §3.1b)
             const std::size_t v0 = r.door()->belief.ledger.views().size();
             for (int k = 0; k < 600; ++k) r.look(stand(4.0f, 10.0f), kDoor, {}, 20.0);
             const auto& views = r.door()->belief.ledger.views();
-            const float dL = r.door()->belief.L() - L0;
+            const float dL = float(r.door()->belief.Sc()) - L0;
             std::print("parked_stare_one_view: 600 frames at 20 Hz -> {} new view(s), dL {:.6f}, that view's llr {:.6f}\n",
                        views.size() - v0, dL, views.back().llr);
             CHECK(views.size() == v0 + 1);
@@ -609,15 +612,15 @@ int main()
         pb.prior = prior_of(th, kRoom, false, {0.2f, 0.1f}, 0, 0.05f, 0.03f, true, fit_size_prior(), 0.0f);
         b.frame(pb, th, A0, kDoor, true, false, {{{1.0f, kWallY}, -1.0f, 0}}, 1);   // the door was confirmed once by the ZED
         b.pkt.ricoh_windows = {Vec2f(0.0f, 2.0f * std::numbers::pi_v<float>)};    // every strip processed
-        const float L0 = pb.L();
+        const float L0 = float(pb.Sc());   // (Sc: the views' own sum; the belief's L is saturated, spec §3.1b)
         const std::size_t v0 = pb.ledger.views().size();
         for (int k = 0; k < 600; ++k)   // 60 s at 10 Hz; the ZED looks away
             b.frame(pb, th, stand(1.4f, 0.0f), {1.0f, -5.0f}, false, true, {}, 2);
         const float one = pb.ledger.views().back().llr;
-        std::print("ricoh_near_view_counts_once: 600 ricoh frames at 1.4 m -> {} view(s), dL {:+.4f}, that view's miss llr {:+.4f}\n",
-                   pb.ledger.views().size() - v0, pb.L() - L0, one);
+        std::print("ricoh_near_view_counts_once: 600 ricoh frames at 1.4 m -> {} view(s), dSc {:+.4f}, that view's miss llr {:+.4f}\n",
+                   pb.ledger.views().size() - v0, float(pb.Sc()) - L0, one);
         CHECK(pb.ledger.views().size() == v0 + 1);
-        CHECK(std::abs((pb.L() - L0) - one) < 1e-5f and one < 0.0f);
+        CHECK(std::abs((float(pb.Sc()) - L0) - one) < 1e-5f and one < 0.0f);
         for (const float deg : {-50.0f, 50.0f})
             for (int k = 0; k < 600; ++k) b.frame(pb, th, stand(1.4f, deg), {1.0f, -5.0f}, false, true, {}, 2);
         const Verdict v = decide(pb.L(), Role::Route, default_costs());
@@ -633,7 +636,7 @@ int main()
             Rig r;
             r.look(stand(6.0f, -75.0f), kDoor, {{1.0f, kWallY, 0.9f}});
             r.settle(stand(6.0f, -75.0f));
-            if (r.door()) r.door()->belief.carried += 0.5f - r.door()->belief.L();   // a door weakly believed in: L = +0.5
+            if (r.door()) { auto& b = r.door()->belief; b.carried_sc += 0.5f - float(b.Sc()); b.carried += 0.5f - b.L(); }   // a door weakly believed in: Sc = +0.5 and L = +0.5 (the misses below must reach the belief, spec §3.1b)
             int views = 0;
             for (int v = 0; v < max_views and r.removes.empty(); ++v, ++views)
                 for (int k = 0; k < 5; ++k)
@@ -658,7 +661,7 @@ int main()
         r.look(stand(6.0f, -75.0f), kDoor, {{1.0f, kWallY, 0.9f}});
         CHECK(r.door() != nullptr);
         r.settle(stand(6.0f, -75.0f));
-        if (r.door()) r.door()->belief.carried += 0.3f - r.door()->belief.L();   // L = +0.3: the views below cross every line
+        if (r.door()) { auto& b = r.door()->belief; b.carried_sc += 0.3f - float(b.Sc()); b.carried += 0.3f - b.L(); }   // Sc = +0.3 and L = +0.3: the views below cross every line
         const std::size_t v0 = r.door() ? r.door()->belief.ledger.views().size() : 0;
         float L_min = 1e9f;
         for (int v = 0; v < 30 and r.door(); ++v)

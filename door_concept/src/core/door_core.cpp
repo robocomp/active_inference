@@ -76,7 +76,7 @@ const TrackedDoor* find_door(const std::vector<TrackedDoor>& doors, std::uint64_
 }
 }  // namespace
 
-DoorCore::DoorCore(const DoorCoreConfig& cfg) : cfg_(cfg), places_(cfg.door.exist_geometry_may_refute)
+DoorCore::DoorCore(const DoorCoreConfig& cfg) : cfg_(cfg), places_(cfg.door.exist_geometry_may_refute, cfg.door.exist_lookalike_prob)
 {
     // The fit reads the core's views of the input: the mask packet, the low-LiDAR sweep, and the ONE claim set per cycle.
     fit_.set_sources(&masks_, &leaf_sweep_, &claims_);

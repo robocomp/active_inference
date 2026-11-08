@@ -365,6 +365,7 @@ private:
         // ★Task D2: the source instance's existence log-odds, so the door re-made on the far side of the crossing keeps what we
         // believed about it (a fresh instance was seeded with no memory and the old L and the crossing were discarded).
         std::optional<float> existence_L;
+        float existence_physical = 0.f;   // the physical part of existence_L (PlaceBelief::Sp): stays outside vision's saturation
         // For a door recreated in a room entered through it (remember_door / release_room): its pose under root
         // (live rooms all hang from root, so root is the one frame two rooms share) and its attributes.
         Eigen::Affine3d T_root_door = Eigen::Affine3d::Identity();

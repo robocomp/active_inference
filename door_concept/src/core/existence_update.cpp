@@ -123,6 +123,7 @@ ExistenceTrace observe_place(PlaceBelief& b, const rc::DoorFitState& th, const E
     ExistenceTrace t;
     std::vector<std::size_t> touched;
     const float sum0 = b.ledger.sum();
+    b.lookalike = fr.cfg.exist_lookalike_prob;   // (the sensor-model constant travels with the belief so L() needs no argument)
     float zed_view_kappa = 0.0f, zed_vis = 0.0f;
     std::size_t zed_v = ViewLedger::npos;
     const auto row = [&](int cam, const CamResult& r)

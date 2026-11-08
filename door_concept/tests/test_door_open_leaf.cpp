@@ -170,18 +170,18 @@ int main()
                 if (d.kind == static_cast<std::uint16_t>(K::Birth)) ++t.births;
             CHECK(t.births == 1 and w.st.size() == 1);
             Tally t2;
-            L0[open] = w.st.empty() ? 0.0f : w.st.begin()->second.belief.L();
+            L0[open] = w.st.empty() ? 0.0f : float(w.st.begin()->second.belief.Sc());   // Sc, the perceptual sum: L itself is saturated at −ln(lambda) above the priors (spec §3.1b) and moves only once Sc has come down to a few nats
             L100[open] = L0[open];
             for (int k = 301; k <= 1500 and not w.st.empty(); ++k)
             {
-                if (k == 401) L100[open] = w.st.begin()->second.belief.L();
+                if (k == 401) L100[open] = float(w.st.begin()->second.belief.Sc());
                 // the leaf-angle posterior is IDENTIFIED (by the LiDAR in the live agent): shut, or open at 90 deg
                 for (auto& [id, st] : w.st) { st.phi_est = phis[open]; st.phi_curve = {{phis[open], 1.0f}}; }
                 for (const auto& d : core.step(ricoh_cycle(k, viewpoint(k, 3.0f), false)).decisions)
                     if (d.kind == static_cast<std::uint16_t>(K::Remove)) ++t2.removes;
             }
             removes[open] = t2.removes;
-            Lend[open] = w.st.empty() ? -99.0f : w.st.begin()->second.belief.L();
+            Lend[open] = w.st.empty() ? -99.0f : float(w.st.begin()->second.belief.Sc());
             std::print("2: leaf {}: L {:.2f} -> {:.2f} after 100 absent frames -> {:.2f} at end; removes {}\n", open ? "OPEN (90 deg)" : "SHUT",
                        L0[open], L100[open], Lend[open], removes[open]);
             w.core = nullptr;

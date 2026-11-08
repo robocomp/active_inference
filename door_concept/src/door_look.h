@@ -212,7 +212,12 @@ inline std::vector<IdentityRow> offer_rows(std::span<const IdentityRow> rows, st
 class Evidence
 {
 public:
-    explicit Evidence(float remembered_L) { b_.carried = remembered_L; }
+    /// remembered_L = the row's aged L_evidence, remembered_physical its physical part (PlaceBelief::remember): vision saturates across the memory.
+    explicit Evidence(float remembered_L, float remembered_physical = 0.f, float lookalike = rc::door::core::kLookalikeProbDefault)
+    {
+        b_.lookalike = lookalike;
+        b_.remember(remembered_L, remembered_physical);
+    }
     /// One mask frame of the ZED seen from `cam`. `detected_here` = a door detection landed on this hole. True ⇒ ruled out.
     bool observe(const IdentityRow& r, std::span<const Eigen::Vector2f> poly, const Eigen::Vector2f& cam, float p_detect,
                  bool detected_here, const rc::door::core::DetectorModel& zed, const rc::door::core::Costs& costs,

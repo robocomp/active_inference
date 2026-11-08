@@ -64,6 +64,29 @@ here" and H0 "wall or clutter here". One running log-odds:
 
 owned by one object that lives from the first candidate observation to the last memory row (§3.7).
 
+### 3.1b A door-shaped thing that is not a door (2026-11-08)
+**(PI, 2026-11-08)** A place has three hypotheses: D (a door), N (nothing door-like) and K (something door-shaped that
+is not a door: a wardrobe, a painted panel). The detectors fire on D and on K alike; only a physical test separates them.
+Let Sc be the perceptual evidence of the place (per-view zed + ricoh + geometry + support, over the ledger, plus the
+perceptual part carried from memory), Sp the physical evidence (actuation, crossing and the carried physical part), and
+lambda = P(K | not a door, the detectors would fire), a sensor-model constant, `Existence.LookalikeProb`, default 0.05,
+to learn offline like the detector rates. Then
+
+  L = priors + carried + Sc + Sp − ln((1 − lambda) + lambda · exp(Sc))
+
+computed in one function (`PlaceBelief`), for candidates and born doors alike. For Sc ≫ 0, L tends to
+priors + Sp − ln(lambda): vision saturates near +3.0 (ln 20), so 25 agreeing views of one object are one object. A saturated phantom
+crosses the delete line in two failed opens. A real door not yet opened stays believed; one that opens or is crossed rises above the
+saturation. For Sc < 0 the last term is ≈ −ln(1 − lambda): absence evidence is as before (within 0.06 nats at 0.05).
+
+Memory keeps the split: a stored row carries L_evidence and its physical part. Restoring (revisit or room change) puts the physical
+part outside the term and returns the perceptual part to the Sc scale (the formula's inverse), inside it, so new views add under the
+same bound and a door restored from memory cannot climb above it on vision alone. A row written before this model holds the old
+unbounded sum, which is on the Sc scale; it is saturated once on load.
+
+⚑ Consequence to decide (2026-11-08): the per-wall base rate of a second door is ln(0.01/0.99) = −4.6, more than vision's +3.0 can
+overcome: a second door on a wall can no longer be born from vision alone (its L saturates near −1.6); it needs a physical test.
+
 ### 3.2 Prior (entered once, replaced not accumulated)
 - Doors are in walls: the existing wall-band prior `band_log_prior`, with σ carrying the wall's own uncertainty.
   A proto-room's provisional outline must be treated as a frontier, not a wall (to be defined in the plan; see the 11-05 spec).

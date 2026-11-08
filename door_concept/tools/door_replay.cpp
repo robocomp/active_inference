@@ -280,7 +280,8 @@ public:
 
         // Task 8: THE belief — the source face's evidence plus the crossing (Task 9 rebuilds this path)
         f.belief = {};
-        f.belief.carried = old.belief.L_evidence();
+        f.belief.lookalike = old.belief.lookalike;
+        f.belief.remember(old.belief.L_evidence(), float(old.belief.Sp()));
         f.belief.crossing = rc::door::crossing_logodds(cfg_.exist_cross_passable_prior, cfg_.exist_cross_leak);
         live_.insert_or_assign(id, std::move(f));
         std::println("MIRROR cycle {} '{}' source w {:.3f} -> mirror at (0,0.02) in the new room; robot {:.2f} {:.2f}", cycle_, old.node_name, m.w, rb.x(), rb.y());
@@ -757,8 +758,8 @@ int main(int argc, char** argv)
             if (st->is_bearing_hypothesis) continue;   // no depth: no place, no belief (the existence slice skips it too)
             const Vec2f xy = st->aperture.centre_xy();
             const float L = st->belief.L();
-            std::println("FINAL door '{}' x={:.4f} y={:.4f} w={:.4f} L={:.4f} delete_line={:.4f}", st->node_name, xy.x(), xy.y(),
-                         st->aperture.w, L, decide(L, st->role, fc).delete_line);
+            std::println("FINAL door '{}' x={:.4f} y={:.4f} w={:.4f} L={:.4f} delete_line={:.4f} Sc={:.3f} Sp={:.3f} term={:.3f} prior={:.3f}", st->node_name, xy.x(), xy.y(),
+                         st->aperture.w, L, decide(L, st->role, fc).delete_line, st->belief.Sc(), st->belief.Sp(), st->belief.saturation_term(), st->belief.prior.total());
         }
     }
     if (not step_ms.empty())
