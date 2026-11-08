@@ -69,28 +69,32 @@ different term from the mean.
 | time | block | frames |
 |---|---|---|
 | 0:00–0:15 | Who holds the belief; CORTEX, the whole picture (name the four colours and stop: the rest of the day is its centre circle); modules against a shared graph | 1–3 |
-| 0:15–0:30 | The shared graph: RT edges, structural / non-structural, replicas, media plane, five memories | 4–8 |
-| 0:30–1:10 | One free energy, many owners: one big belief, what to report, cutting it into pieces, F_i as a balance, the toy scene and its price, a mean is half a belief, two failures | 9–17 |
-| 1:10–1:35 | Concept agents: definition, residual + Jacobian, what is published, residual_concept, the contract, the federation | 18–23 |
-| 1:35–2:00 | No thresholds: gate against precision, the toy, bounded outliers, the gate that survives, the rule | 24–28 |
+| 0:15–0:30 | The shared graph: RT edges, structural / non-structural, replicas, media plane, five memories, including eventual consistency (frames 7–8), DDS domains and shared memory (frames 9–10) | 4–11 |
+| 0:30–1:10 | One free energy, many owners: one big belief, what to report, cutting it into pieces, F_i as a balance, the toy scene and its price, a mean is half a belief, two failures | 12–20 |
+| 1:10–1:35 | Concept agents: definition, residual + Jacobian, what is published, residual_concept, the contract, the federation | 21–26 |
+| 1:35–2:00 | No thresholds: gate against precision, the toy, bounded outliers, the gate that survives, the rule | 27–31 |
 | 2:00–2:15 | break | |
-| 2:15–4:00 | Lab 2 | 29–30 |
+| 2:15–4:00 | Lab 2 | 32–33 |
 
 **CORTEX in action (the unnumbered full-screen slide after frame 2).** In pympress, click on it once to start; it loops (44.5 s), and the presenter window has the controls. pympress cannot autostart beamer's `\movie`. In another viewer the slide shows a still. It is a schematic: the order is illustrative, and the slide says so; on the robot everything runs at once. Point at the last line: every path went through the centre. The course copy of the drawing (`figures/cortex_overview.png`) has the thesis figure's `Root` node painted out, to match frame 4.
 
+**Eventual consistency (frames 7–8).** Walk frame 7 one agent at a time, from the left. The surprise to land: agent 2's write is simply lost, and nothing reports it; hence one owner per node. Students will ask why an arbitrary id may decide: frame 8 answers it. The id is arbitrary and so is the winner; what matters is that every copy applies the same ranking, so they agree. Swap the ids and they all agree on the other value. Agreement is what the CRDT promises; which value is right is what ownership is for. The rule shown is cortex's default CRDT mode (`core/crdt/delta_crdt.h`, `join_replace_conflict`): a change that has seen another replaces it, and otherwise the lower writer id wins. It is idealised: a comment in that file records that the causal test (`dotin`) carries a known workaround. The optional LWW mode, same-host only, orders by (timestamp, agent id), which is what the thesis sentence at `cortex.tex` l.257 describes.
+
+**Shared memory (frame 10).** 85 GB/s is the whole DDR5 bus; one core copies well below that, so 33 µs is a lower bound. The driver still writes the frame once into the slot, so zero copy is about not paying again per reader, not about avoiding the first write. A story if time allows: for months the plane was silently NOT zero-copy, because FastDDS turns data-sharing off for keyed types and only logs it at INFO. Removing one `@key` took the bench from 494 µs at 1.4% CPU to 186 µs at 0.8% (memory note `zero-copy-was-never-on-keyed-types`, commit 48543c5; post-thesis). The configuration said on, and nothing measured it.
+
 **The main line is plain on purpose (2026-11-08).** The form admits cognitive-science students. The joint in full, the seven assumptions, the factorised q and the matrix C are backup frames after "Tomorrow", outside the frame count: show them if someone asks.
 
-**Say it, don't read it.** Frame 11 is the argument of the day: every boundary between processes is a
+**Say it, don't read it.** Frame 14 is the argument of the day: every boundary between processes is a
 conditional-independence assumption, and whatever crosses it is what survived a marginalisation.
 
-**Frame 14 is the surprise.** Ask before showing it whether the agents' standard deviations are right.
+**Frame 17 is the surprise.** Ask before showing it whether the agents' standard deviations are right.
 Most say no. Each marginal is exact; only the correlation is lost. Relations between objects are what
 the factorisation cannot hold.
 
-**Frame 15: the price does not fall with more data.** Students expect it to. It is the information the
+**Frame 18: the price does not fall with more data.** Students expect it to. It is the information the
 objects carry about each other, and no number of frames creates a place to keep it.
 
-**The rule is not "never a gate".** Frame 27 proves one must stay, and frame 28 names the three that do
+**The rule is not "never a gate".** Frame 30 proves one must stay, and frame 31 names the three that do
 exist and their verdicts: admissibility justified, birth due to be replaced, the peer grace period a
 recorded debt. Say explicitly that the thesis has not finished this.
 

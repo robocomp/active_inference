@@ -21,6 +21,14 @@
 \newcommand{\robot}[2]{\fill[muted!45, draw=black] (#1) circle (5pt);
   \draw[-{Stealth[length=1.6mm]}, thick] (#1) -- ++(#2:0.42);}
 
+% \letter{x,y}{colour}{value}{sender}: a change arriving at a copy, drawn as an envelope.
+\newcommand{\letter}[4]{
+  \fill[#2!18, draw=#2, thick] ($(#1)+(-0.62,-0.42)$) rectangle ($(#1)+(0.62,0.42)$);
+  \draw[#2, thick] ($(#1)+(-0.62,0.42)$) -- (#1) -- ($(#1)+(0.62,0.42)$);
+  \node[font=\footnotesize\bfseries] at ($(#1)+(0,-0.16)$) {#3};
+  \node[font=\scriptsize, above=1pt] at ($(#1)+(0,0.42)$) {from #4};
+}
+
 \begin{document}
 
 \maketitle
@@ -226,26 +234,172 @@
   \src{cortex.tex l.255--272}
 \end{frame}
 
-\begin{frame}{Sensor data travels beside the graph}
+\begin{frame}{Copies may disagree for a moment, and then they agree}
+  \centering
+  \begin{tikzpicture}[x=1cm, y=1.05cm,
+      v/.style={draw, rounded corners=2pt, fill=white, font=\scriptsize, inner sep=2.5pt, minimum width=0.72cm},
+      w/.style={v, draw=accent, very thick, fill=accent!15},
+      msg/.style={-{Stealth[length=2mm]}, thick, color=cool},
+      msg2/.style={-{Stealth[length=2mm]}, thick, color=good, densely dashed}]
+    \fill[accent!8] (2.4,-0.42) rectangle (8.25,2.75);
+    \fill[good!12] (8.25,-0.42) rectangle (11.4,2.75);
+    \node[lab, text=accent] at (5.15,2.95) {the copies disagree};
+    \node[lab, text=good!70!black] at (9.8,2.95) {all equal};
+    \foreach \y/\n in {2/agent 1, 1/agent 2, 0/agent 3} {
+      \draw[-{Stealth}, muted, thick] (1.5,\y) -- (11.4,\y);
+      \node[lab, left, font=\footnotesize] at (1.5,\y) {\n};
+    }
+    % the two writes, made without seeing each other
+    \draw[msg] (2.75,2) -- (7.0,1);
+    \draw[msg] (2.75,2) -- (8.25,0);
+    \draw[msg2] (3.3,1) -- (5.9,2);
+    \draw[msg2] (3.3,1) -- (5.0,0);
+    % values held by each copy
+    \node[v] at (1.95,2) {1.0}; \node[w] at (2.75,2) {2.0}; \node[v] at (5.9,2) {2.0}; \node[v] at (9.8,2) {2.0};
+    \node[v] at (1.95,1) {1.0}; \node[w] at (3.3,1) {2.4}; \node[v] at (7.0,1) {2.0}; \node[v] at (9.8,1) {2.0};
+    \node[v] at (1.95,0) {1.0}; \node[v] at (5.0,0) {2.4}; \node[v] at (8.25,0) {2.0}; \node[v] at (9.8,0) {2.0};
+    \node[lab, align=center] at (2.75,2.42) {writes $2.0$}; \node[lab, align=center] at (5.9,2.42) {keeps $2.0$};
+    \node[lab, align=center] at (2.42,0.44) {writes $2.4$, before receiving\\agent 1's change};
+  \end{tikzpicture}
+
+  \vspace{0.5em}
+  \small Nobody waited, and nobody locked. For a while agent 3 believes $2.4$.
+  \alert{``Eventually consistent'' means only that, once the messages have arrived, every copy holds
+  the same value.}
+  \src{cortex.tex l.255--272}
+\end{frame}
+
+\begin{frame}{Same letters, any order, same result}
   \begin{columns}[c]
-    \begin{column}{0.54\textwidth}
+    \begin{column}{0.62\textwidth}
       \centering
-      \begin{tikzpicture}
-        \node[ag, minimum width=1.6cm] (s) at (0,0) {robot\_concept};
-        \node[ag, minimum width=1.6cm] (r) at (5.2,0) {retina, agents};
-        \draw[flow, cool, line width=2.4pt] (s.20) -- node[above, lab, text=black, align=center] {media plane, zero-copy\\$2.8$ MB frame: $0.19$ ms} (r.160);
-        \draw[flow, muted, densely dashed] (s.-20) -- node[below, lab, text=black, align=center] {graph: a descriptor,\\poses, beliefs, heartbeats} (r.200);
-      \end{tikzpicture}
+      \begin{tikzpicture}[x=1cm, y=1cm,
+          disp/.style={draw, very thick, rounded corners=3pt, fill=white, minimum width=1.05cm, minimum height=0.8cm, font=\normalsize\bfseries},
+          final/.style={disp, draw=good, fill=good!20},
+          stp/.style={-{Stealth[length=2mm]}, thick, color=muted}]
+        \node[lab, anchor=west, font=\footnotesize\bfseries] at (-0.55,2.72) {One copy receives agent 2's letter first};
+        \node[disp] (a0) at (0,1.65) {1.0};
+        \letter{1.75,1.65}{good}{2.4}{agent 2}
+        \node[disp] (a1) at (3.5,1.65) {2.4};
+        \letter{5.25,1.65}{cool}{2.0}{agent 1}
+        \node[final] (a2) at (7,1.65) {2.0};
+        \draw[stp] (a0) -- (1.1,1.65); \draw[stp] (2.4,1.65) -- (a1);
+        \draw[stp] (a1) -- (4.6,1.65); \draw[stp] (5.9,1.65) -- (a2);
+        \node[lab, text=cool!80!black] at (5.25,0.98) {1 outranks 2: it replaces};
+
+        \node[lab, anchor=west, font=\footnotesize\bfseries] at (-0.55,0.35) {Another copy receives agent 1's letter first};
+        \node[disp] (b0) at (0,-0.72) {1.0};
+        \letter{1.75,-0.72}{cool}{2.0}{agent 1}
+        \node[disp] (b1) at (3.5,-0.72) {2.0};
+        \letter{5.25,-0.72}{good}{2.4}{agent 2}
+        \draw[accent, line width=2pt] (4.7,-1.1) -- (5.8,-0.34);
+        \draw[accent, line width=2pt] (4.7,-0.34) -- (5.8,-1.1);
+        \node[final] (b2) at (7,-0.72) {2.0};
+        \draw[stp] (b0) -- (1.1,-0.72); \draw[stp] (2.4,-0.72) -- (b1);
+        \draw[stp] (b1) -- (4.6,-0.72); \draw[stp] (5.9,-0.72) -- (b2);
+        \node[lab, text=accent] at (5.25,-1.39) {2 does not outrank 1: dropped};
+      \end{tikzpicture}\\[0.5em]
+      \small\raggedright Each wrote before receiving the other's change, so a fixed rule decides, the same in
+      every copy: \textbf{the lower id wins}. A writer that had already received the other's change
+      simply replaces it.
     \end{column}
-    \begin{column}{0.44\textwidth}
-      \small
-      The graph is replicated to every peer. Images written into it starve the channel, and the
-      first symptom is not slow images but \alert{a missed heartbeat: an agent declared dead because
-      a camera was busy.}\\[0.5em]
-      A failure in one layer that surfaces in another.
+    \begin{column}{0.34\textwidth}
+      \small\textbf{But the ids are arbitrary!}\\[0.4em]
+      \centering
+      \begin{tikzpicture}[c/.style={draw, thick, rounded corners=2pt, fill=white, minimum width=0.72cm, minimum height=0.5cm, font=\scriptsize\bfseries}]
+        \node[lab, anchor=east] at (-0.55,0.75) {ids as given};
+        \node[lab, anchor=east] at (-0.55,0) {ids swapped};
+        \foreach \x in {0,0.85,1.7} {
+          \node[c, draw=good, fill=good!20] at (\x,0.75) {2.0};
+          \node[c, draw=good, fill=good!20] at (\x,0) {2.4};
+        }
+        \node[lab] at (0.85,1.22) {three copies};
+      \end{tikzpicture}\\[0.5em]
+      \raggedright\footnotesize
+      The id picks \emph{who} wins, never \emph{whether} the copies agree: every copy ranks the same
+      two letters the same way.\\[0.4em]
+      \alert{The rule buys agreement, not the better value.}\\[0.4em]
+      One of the two writes is always lost. That is why \textbf{each node has a single owner}:
+      with one writer, there is nothing to collide with.
     \end{column}
   \end{columns}
-  \src{cortex.tex l.375--381, l.432--435}
+  \src{cortex.tex l.255--272; cortex, core/crdt/delta\_crdt.h}
+\end{frame}
+
+\begin{frame}{Sensor data travels beside the graph}
+  \begin{columns}[c]
+    \begin{column}{0.56\textwidth}
+      \centering
+      \begin{tikzpicture}[lane/.style={rounded corners=4pt, minimum width=7.2cm, minimum height=1.32cm}]
+        \node[lane, fill=cool!12] at (0,0.8) {};
+        \node[lane, fill=muted!14] at (0,-0.8) {};
+        \node[lab, anchor=north west, font=\scriptsize\bfseries, text=cool] at (-3.5,1.42) {DDS domain 7: the media plane};
+        \node[lab, anchor=north west, font=\scriptsize\bfseries, text=black!70] at (-3.5,-0.18) {DDS domain 0: the graph};
+        \node[ag, minimum width=1.5cm] (s1) at (-2.5,0.62) {driver};
+        \node[ag, minimum width=1.5cm] (r1) at (2.5,0.62) {agents};
+        \draw[flow, cool, line width=2.4pt] (s1) -- node[above, lab, text=black] {pixels, point clouds} node[below, lab, text=black] {best effort, newest only} (r1);
+        \node[ag, minimum width=1.5cm] (s2) at (-2.5,-1.0) {agent};
+        \node[ag, minimum width=1.5cm] (r2) at (2.5,-1.0) {agents};
+        \draw[link, line width=1pt] (s2) -- node[above, lab, text=black] {beliefs, heartbeats} node[below, lab, text=black] {reliable, reaches everyone} (r2);
+      \end{tikzpicture}
+    \end{column}
+    \begin{column}{0.4\textwidth}
+      \small
+      A \textbf{DDS domain} is a private channel: processes in different domains never discover
+      each other.\\[0.5em]
+      Images written into the graph starve it, and the first symptom is \alert{a missed heartbeat:
+      an agent declared dead because a camera was busy.}\\[0.5em]
+      The graph holds a sensor's \emph{existence}, and where to find its stream.
+    \end{column}
+  \end{columns}
+  \src{cortex.tex l.375--381, l.386--402, l.410--415}
+\end{frame}
+
+\begin{frame}{On one computer: pass the place, not the image}
+  \begin{columns}[c]
+    \begin{column}{0.5\textwidth}
+      \centering
+      \begin{tikzpicture}[buf/.style={draw, thick, fill=accent!25, minimum width=0.85cm, minimum height=0.5cm, font=\scriptsize},
+                          who/.style={ag, minimum width=1cm, minimum height=0.46cm}]
+        \node[lab, font=\scriptsize\bfseries] at (-3.1,1.85) {copying};
+        \node[who] (p) at (-3.2,1.05) {driver};
+        \foreach \y/\n in {1.7/a, 1.05/b, 0.4/c} {
+          \node[buf] (b\n) at (-0.9,\y) {copy};
+          \node[who] (r\n) at (0.9,\y) {agent};
+          \draw[flow, muted] (p.east) -- (b\n.west); \draw[flow, muted] (b\n) -- (r\n);
+        }
+        \draw[densely dashed, muted] (-3.9,0.0) -- (1.6,0.0);
+        \node[lab, font=\scriptsize\bfseries] at (-2.9,-0.3) {zero copy};
+        \node[who] (p2) at (-3.2,-1.05) {driver};
+        \node[draw, thick, fill=good!20, minimum width=1.3cm, minimum height=0.95cm, font=\scriptsize, align=center] (m) at (-0.9,-1.05) {one slot in\\shared memory};
+        \draw[flow] (p2) -- (m); \node[lab, above=1pt] at (m.north) {written once};
+        \foreach \y in {-0.4,-1.05,-1.7} {
+          \node[who] (q) at (0.9,\y) {agent};
+          \draw[flow, muted] (q.west) -- (m.east);
+        }
+      \end{tikzpicture}\\[0.3em]
+      \footnotesize Readers look at the same bytes in place. The cost does not grow with readers.
+    \end{column}
+    \begin{column}{0.46\textwidth}
+      \centering
+      \begin{tikzpicture}[x=1.05cm, y=0.62cm]
+        \node[lab, font=\scriptsize\bfseries] at (2.9,4.05) {moving one 2.8 MB frame (log scale)};
+        \foreach \y/\v/\c/\l/\tm in {
+            3/1.52/good/{DDR5, 85 GB/s}/33 \textmu s at best,
+            2/2.28/cool/{measured, zero copy}/0.19 ms,
+            1/3.35/muted/{10 Gb Ethernet}/2.2 ms,
+            0/4.35/muted/{1 Gb Ethernet}/22 ms} {
+          \node[lab, anchor=east] at (2.3,\y+0.31) {\l};
+          \fill[\c!45] (2.35,\y) rectangle (2.35+\v*0.42,\y+0.62);
+          \node[lab, anchor=west] at (2.37+\v*0.42,\y+0.31) {\tm};
+        }
+      \end{tikzpicture}\\[0.5em]
+      \raggedright\small
+      DDR5 typically moves 80--90 GB/s. Two cameras at 30 Hz are only about $0.2\,$GB/s.
+      \alert{Most of the 0.19 ms is not moving bytes.}
+    \end{column}
+  \end{columns}
+  \src{cortex.tex l.400--406, l.432--435; arithmetic: 2.8 MB at each rate}
 \end{frame}
 
 \begin{frame}{Five memories, separated by timescale}
