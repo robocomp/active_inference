@@ -383,13 +383,9 @@ void SpecificWorker::compute()
     for (auto& a : retired_approaches_) a.remove();
     retired_approaches_.clear();
 
-    // Refresh room node id if not yet found
-    if (room_node_id_ == 0)
-    {
-        const auto room = rc::room::current_room(*G);
-        if (not room.has_value()) return;
-        room_node_id_ = *room;
-    }
+    // The room this agent works in follows the robot, every cycle. No room known yet: wait.
+    room_node_id_ = rc::room::follow_current_room(room_node_id_, rc::room::current_room(*G));
+    if (room_node_id_ == 0) return;
 
     // Controller-owned affordance flags (claim / completion / epistemic_pending). Polled here rather than
     // pushed by update_node_attr_signal — see the connect block in initialize().
@@ -412,7 +408,12 @@ void SpecificWorker::compute()
     const auto chair_nodes = G->get_nodes_by_type("object");
     for (const auto& node : chair_nodes)
         if (node.name().starts_with("chair"))
-            process_chair_node(node);
+        {
+            if (rc::room::left_behind(G->get_attrib_by_name<parent_att>(node), room_node_id_))
+                drop_left_behind(node);
+            else
+                process_chair_node(node);
+        }
 
     // Overall compute()-cycle rate: counts every cycle, prints "Epoch time = …ms. Fps = N" once a
     // second (FPSCounter::print is throttled and self-counting).
@@ -1046,6 +1047,22 @@ void SpecificWorker::update_existence_beliefs()
         fitter_->forget_node(id);
         G->delete_node(id);
     });
+}
+
+///////////////////////////////////////////////////////////////
+// The robot left this chair's room: every belief here is about the current room, and fitting it in this frame would corrupt
+// the pose ltom remembers. ltom keeps it (any end of a life is recallable) and offers it back when the robot returns.
+void SpecificWorker::drop_left_behind(const DSR::Node& node)
+{
+    const auto id = node.id();
+    if (auto it = fitter_->instances().find(id); it != fitter_->instances().end())
+    {
+        it->second.affordance.remove();
+        it->second.approach.remove();
+        fitter_->forget_node(id);
+    }
+    std::print("chair_concept: [room] '{}' left behind in another room, dropped\n", node.name());
+    G->delete_node(id);
 }
 
 ///////////////////////////////////////////////////////////////

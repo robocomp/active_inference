@@ -106,4 +106,18 @@ inline std::optional<std::uint64_t> resolve_physical_room(std::span<const RoomFa
     return n_live == 1 ? live : identity;
 }
 
+/// ★THE ROOM AN AGENT WORKS IN follows the robot: the room resolved this cycle, or, when nobody has said (nullopt, never a
+/// release), the one it already held. Latching it instead parents new objects to the room just left (ltom_chair1, 2026-11-08).
+inline std::uint64_t follow_current_room(std::uint64_t held, std::optional<std::uint64_t> current)
+{
+    return current.value_or(held);
+}
+
+/// An object whose `parent` names a room other than the one the agent works in was left behind by the robot: its pose is
+/// not in this room's frame and nothing here can observe it. An object with no `parent`, or an agent with no room yet, says nothing.
+inline bool left_behind(std::optional<std::uint64_t> object_room, std::uint64_t working_room)
+{
+    return object_room.has_value() and working_room != 0 and *object_room != working_room;
+}
+
 }   // namespace rc::room

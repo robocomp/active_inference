@@ -111,6 +111,7 @@ private:
 
     // ── Orchestration + post-fit steps ────────────────────────────────────────
     void load_config(const ConfigLoader& cfg);
+    void drop_left_behind(const DSR::Node& node);
     void process_chair_node(const DSR::Node& node);
     // Read the level-2 arrangement prior off the incoming `group_member` edge (ring_metaconcept is
     // the sole writer) and hand it to the belief. Inert when absent / kappa<=0 / stale.

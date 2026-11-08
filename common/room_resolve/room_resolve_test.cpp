@@ -108,6 +108,21 @@ int main()
     expect("physical: nothing known -> nothing",
            resolve_physical_room(std::vector<RoomFact>{}, std::nullopt), std::nullopt);
 
+    // ── an agent's working room follows the robot (2026-11-08, ltom_chair1: new chairs parented to the room just left) ──
+    using rc::room::follow_current_room;
+    expect("follow: the robot crossed -> the new room", follow_current_room(7, 9), 9);
+    expect("follow: the same room -> unchanged", follow_current_room(7, 7), 7);
+    expect("follow: nobody has told me -> keep it, nullopt is never a release", follow_current_room(7, std::nullopt), 7);
+    expect("follow: first room known -> it", follow_current_room(0, 7), 7);
+
+    using rc::room::left_behind;
+    const auto yes_no = [](bool b) { return std::optional<std::uint64_t>{b ? 1 : 0}; };
+    expect("left behind: under the room the agent works in -> no", yes_no(left_behind(7, 7)), 0);
+    expect("left behind: under another room -> yes", yes_no(left_behind(7, 9)), 1);
+    expect("left behind: under a room since deleted -> yes", yes_no(left_behind(5, 9)), 1);
+    expect("left behind: no parent attribute -> no, nothing says it is elsewhere", yes_no(left_behind(std::nullopt, 9)), 0);
+    expect("left behind: working room unknown -> no", yes_no(left_behind(7, 0)), 0);
+
     std::printf("%s: %d failure(s)\n", fails == 0 ? "ALL PASS" : "FAILED", fails);
     return fails == 0 ? 0 : 1;
 }
