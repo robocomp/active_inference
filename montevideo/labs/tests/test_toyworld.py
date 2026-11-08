@@ -160,7 +160,11 @@ def test_grid_update_and_expected_gain():
     scan = Lidar(sigma=0.0).scan(world, np.array([3.0, 1.0, 0.0]), np.random.default_rng(0))
     grid.update(scan)
     assert grid.p[grid.mask(np.array([[2.9, 0.9], [3.1, 0.9], [3.1, 1.1], [2.9, 1.1]]))].max() < 0.2  # free at the robot
-    assert grid.p[0, 20] > 0.8                    # the west wall, at y = 1 m, returned beams
+    # every cell where a beam ended on the west wall is occupied (beams are 1° apart, 5.2 cm at 3 m,
+    # so the 5 cm wall cells between two beams legitimately stay unknown)
+    west = scan.points() + [3.0, 1.0]
+    ends = np.floor(west[np.abs(west[:, 0]) < 1e-9, 1] / grid.res).astype(int)
+    assert len(ends) > 10 and grid.p[0, ends].min() > 0.8
     assert grid.entropy(inside) < inside.sum() * np.log(2)
 
 

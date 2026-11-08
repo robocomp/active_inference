@@ -1,8 +1,8 @@
 # A robot that acts to know
 
-**Active inference in a working cognitive architecture.** Fifteen hours over five days,
-Montevideo, 30 November – 4 December. Each day is a three-hour session, with about 1 h 30 of
-theory, a break, and about 1 h 15 of hands-on lab.
+**Active inference in a working cognitive architecture.** Twenty hours over five days,
+Montevideo, 30 November – 4 December, 9:00–13:00. Each day is a four-hour session, half theory and
+half hands-on lab.
 
 ## The course
 
@@ -22,9 +22,9 @@ apartment. It must:
 4. find the door and cross it;
 5. estimate the new room, and remember how the two connect.
 
-It is a large problem, but it can be understood as a whole. The course takes it in five steps, one
-stage a day. Each day's lab adds that stage to a small two-dimensional version of the problem
-written in Python, and by Friday participants run the complete cycle on their own laptops.
+It is a large problem, but it can be understood as a whole. The course builds the tools first, then
+the machine that runs them, then follows beliefs through time and into action. Each day's lab works on
+a small two-dimensional version of the problem, written in Python.
 
 Theory stays in the foreground. Each session grounds it in code, and in the measurements that
 revealed when the equations were wrong. Some of the most instructive results are recent and not
@@ -58,62 +58,62 @@ mathematics, starting from the beginning:
 wall from a LiDAR scan as a Laplace belief, test whether its covariance is honest, and choose
 between two models of it by free energy.
 
-### Day 2 — Estimating the room, and finding oneself in it
-- The room layout as a belief with two regimes: acquiring an unknown room, and operating in a
-  known one.
-- An inlier band derived from the model rather than chosen.
-- The price of a shape in nats.
-- Localisation as one more belief, with the room's geometry supplying the likelihood.
-- Symmetry as a discrete search.
-- What changes when errors are shared rather than independent: the common-mode ceiling.
+### Day 2 — The CORTEX architecture: one belief, many owners
+- A distributed working memory held as a shared graph: geometry and meaning on the same edges, no
+  messages between agents, and what a replicated store obliges everyone to assume.
+- One global free energy divided among processes: each boundary is a conditional-independence
+  assumption, and it has a price in nats.
+- Concept agents: each holds a belief over one class of object, publishes what only it can compute,
+  and answers to a common contract.
+- The methodological commitment of the course, no thresholds: a gate is what a model looks like before
+  the modelling has been done, and its replacement is almost always a precision. And the one case
+  where it is not.
 
-*Lab:* estimate the toy room's walls and the robot's pose together. Meet the room's symmetry, and
-watch a thousand points with a shared offset refuse to shrink the uncertainty.
+*Lab:* agents that coordinate only through a graph with an ownership contract; what happens when the
+published covariance is ignored; when the sum of the agents' objectives is the global one and what the
+difference costs; a range gate against a precision; a bias that no precision can bound.
 
-### Day 3 — Acting to know: the body and the room
-Why action needs a second functional: expected free energy, its pragmatic and epistemic terms, and
-the identity of information gain, mutual information and D-optimal design; where to look next,
-and travel priced in the same nats. Then the robot turns the same objective on itself:
-- calibration as inference;
-- the gauges no data can fix;
-- which motions make which parameters observable (parked, straight, turning in place);
-- drift, and why a prior must never be re-centred on its own running estimate;
-- standing still as an observation;
-- why ordinary driving makes a dedicated calibration manoeuvre unnecessary.
+### Day 3 — Belief in time
+Where beliefs come from and how they end:
+- birth as a comparison between two models rather than a count of detections, for objects and, as
+  description length, for the room itself;
+- absence as evidence, weighted by the probability of having detected the object, with walls in the
+  line of sight; occlusion holds, and only a miss where the object would have been seen removes it;
+- forgetting as inferred volatility rather than a constant process noise.
 
-*Lab:* the toy robot has a hidden wheel-scale error and gyro bias. Recover them from the
-localiser's corrections, and check the recovery against the identity
-recovery = 1 − (σ_post/σ_prior)². Then choose viewpoints by expected information: first on one
-wall, then with an occupancy-grid explorer that knows when to stop.
+Then what a belief stands on:
+- localisation as one more belief, with the room's geometry supplying the likelihood, and symmetry as a
+  discrete search;
+- data association, and a mask as a qualified likelihood;
+- what changes when errors are shared rather than independent: the common-mode ceiling.
 
-### Day 4 — Concepts fill the room
-- A distributed working memory as a shared graph, and the decomposition of one global free energy
-  into terms owned by separate processes.
-- Concept agents: each holds a belief about one class of object, publishes what only it can
-  compute, and answers to a common contract.
-- Where beliefs come from and how they end: birth as model comparison rather than counting,
-  absence as evidence rather than a missed detection, forgetting as inferred volatility.
-- The methodological commitment that gives the course its spine — no thresholds: a gate is what a
-  model looks like before the modelling has been done, and the right replacement is almost always
-  a precision.
+*Lab:* an object is born by a free-energy comparison, removed by evidence of absence and held when it
+is occluded; a constant process noise is replaced by an inferred one. Then estimate the toy room's
+walls and localise in it, meet the room's symmetry, and watch a thousand points with a shared offset
+refuse to shrink the uncertainty.
 
-*Lab:* object agents write beliefs into the toy graph. An object is born by a free-energy
-comparison, removed by evidence of absence, and held — not removed — when it is merely occluded.
+### Day 4 — Action
+Why action needs a second functional: expected free energy, its pragmatic and epistemic terms, and the identity
+of information gain, mutual information and D-optimal design.
+- Affordances as published, priced offers: what an object can do for the robot's uncertainty, measured in nats.
+- Selection by expected free energy, with hand-offs that follow from the values rather than from a rule.
+- The next best view as optimal experiment design, and the trap of predicting through what is already known.
+- Control: routes as optimisation, path tracking as pole assignment, and why a well-posed geometry lets the
+  follower do without an obstacle term.
+- The robot turns the same objective on itself: calibration as inference, the gauges no data can fix, which
+  motions make which parameters observable, drift and why a prior must never be re-centred on its own running
+  estimate, and standing still as an observation.
 
-### Day 5 — Acting to know, and how to tell whether it worked
-- Affordances as published, priced offers: what an object can do for the robot's uncertainty,
-  measured in nats.
-- Selection by expected free energy.
-- The door as an offer, and the new room as the next problem.
-- A spatial memory that records how rooms connect (the open end of the challenge).
+*Lab:* choose viewpoints by expected information; let agents publish priced offers on the toy graph and watch
+the controller hand over between them; explore a room with an occupancy grid that knows when to stop; follow a
+route with a double pole and deform it around an obstacle; recover a hidden wheel-scale error and gyro bias from
+the localiser's corrections.
 
-Then the harder half: how such a system is evaluated when no recorded dataset can answer the
-question; why comparison must set policy against policy inside one closed loop; and the case
-studies in which a benchmark scored code the robot never ran, a planner never drove its own plan,
-and a metric rewarded extrapolation over observation.
-
-*Lab:* close the loop. An explorer finishes room 1, selects the door, crosses, estimates room 2,
-and stores both. Then grade the run two ways and watch one of the metrics lie.
+### Day 5 — Structure, evidence and honesty (to be confirmed)
+Relations between objects as latent variables, and the double counting that appears whenever an
+estimate is returned to those who produced it. Then how such a system is evaluated when no recorded
+dataset can answer the question: policy against policy in one closed loop, and an honest balance of
+which mechanisms earned their place, nulls included.
 
 ## Throughout
 
@@ -123,6 +123,10 @@ The emphasis falls on active inference as an engineering discipline rather than 
 
 Participants should leave able to read the literature critically, and to judge which of it a real
 system can carry.
+
+## Assessment
+
+An individual final project, compulsory.
 
 ## Prerequisites
 

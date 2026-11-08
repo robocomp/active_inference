@@ -1,5 +1,5 @@
 # %% [markdown]
-# # Day 1 — A wall as a belief, and where to look next
+# # Day 1 — A wall as a belief
 #
 # **The challenge, stage 0.** Before the robot can estimate a room, it must be able to hold a belief
 # about one wall. After a warm-up on the three operations of probability, you will:
@@ -9,10 +9,10 @@
 # 2. check whether that covariance is *honest*, and fix it when it is not;
 # 3. use the **free energy** to choose between two models of the same wall.
 #
-# Choosing *where to look next* is Day 3, once action has its own functional.
+# Choosing *where to look next* is Day 4, once action has its own functional.
 #
 # Today the robot knows its own pose exactly, and we cheat on *which* LiDAR points belong to the
-# wall. Day 2 removes both cheats.
+# wall. Day 3 removes both cheats.
 
 # %%
 import sys
@@ -307,7 +307,7 @@ print("incidence sigma: empirical sd", emp.round(5), "  predicted sd", pred.roun
 
 # %% [markdown]
 # **Lesson.** A Laplace covariance is exactly as honest as the likelihood you wrote. Here the wrong
-# likelihood made the belief *under*-confident. That costs little. Day 2 has a wrong likelihood
+# likelihood made the belief *under*-confident. That costs little. Day 3 has a wrong likelihood
 # that makes it badly *over*-confident, which costs a great deal. The real robot's localiser
 # weights each LiDAR return by the incidence $|\hat r^\top \hat n|$ for exactly this reason.
 #

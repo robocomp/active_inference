@@ -2,7 +2,7 @@
 
 The robot executes velocity commands. It reports what its encoders and gyro measured.
 Those reports carry systematic errors the robot does not know about: a wheel-scale factor, a
-gyro scale factor and a gyro bias. Day 3 is about inferring them.
+gyro scale factor and a gyro bias. Day 4 is about inferring them.
 """
 from dataclasses import dataclass
 
@@ -87,5 +87,5 @@ def predict(belief, odo, sigma_v=0.005, sigma_w=0.003):
 
 
 def hidden_body():
-    """The body Day 3 has to discover. Do not read this cell before the lab!"""
+    """The body Day 4 has to discover. Do not read this cell before the lab!"""
     return Body(wheel_scale=1.04, gyro_scale=1.03, gyro_bias=0.012)

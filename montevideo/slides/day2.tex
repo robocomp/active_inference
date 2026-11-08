@@ -2,433 +2,830 @@
 \input{preamble}
 
 \title{A robot that acts to know}
-\subtitle{Day 2 --- Estimating the room, and finding oneself in it}
+\subtitle{Day 2 --- The CORTEX architecture: one belief, many owners}
 \date{Tuesday 1 December}
+
+\tikzset{
+  ag/.style={draw=cool, thick, rounded corners=3pt, fill=cool!10, align=center, font=\scriptsize,
+             minimum height=0.62cm, inner sep=3pt},
+  mem/.style={draw=black, very thick, circle, fill=muted!15, align=center, font=\footnotesize, inner sep=2pt},
+  link/.style={{Stealth[length=2mm]}-{Stealth[length=2mm]}, thick, color=muted},
+  flow/.style={-{Stealth[length=2.5mm]}, thick},
+  nd/.style={draw, rounded corners=2pt, fill=white, font=\scriptsize, inner sep=3pt},
+  lab/.style={font=\scriptsize},
+}
 
 \begin{document}
 
 \maketitle
 
-\begin{frame}{Where we are}
+% =================================================================================================
+\section{Who holds the belief?}
+% =================================================================================================
+
+\begin{frame}{What yesterday's equation did not say}
+  \begin{columns}[c]
+    \begin{column}{0.46\textwidth}
+      \centering
+      \begin{tikzpicture}
+        \node[draw=accent, very thick, rounded corners=4pt, fill=accent!10, minimum width=4.6cm,
+              minimum height=1.25cm, align=center, font=\small] (q) at (0,1.75)
+              {$q(\text{room},\ \text{pose},\ \text{every object})$\\[-0.1em]one belief, one $F$};
+        \node[font=\Large, muted] at (0,0.75) {$\downarrow$ ?};
+        \foreach \x/\n in {-1.9/room, -0.65/table, 0.65/chair, 1.9/door} {
+          \node[ag, minimum width=1.1cm] at (\x,-0.05) {\n};
+        }
+        \foreach \x/\n in {-1.9/retina, -0.65/bottle, 0.65/fridge, 1.9/control} {
+          \node[ag, minimum width=1.1cm] at (\x,-0.85) {\n};
+        }
+      \end{tikzpicture}
+    \end{column}
+    \begin{column}{0.5\textwidth}
+      A dozen processes, sensors at 30 Hz, a robot in motion.
+      \vspace{0.6em}
+      \begin{itemize}
+        \item \textbf{Where} is the objective computed?
+        \item \textbf{Who} holds the beliefs?
+        \item What happens when they must \textbf{agree} on what the world contains?
+      \end{itemize}
+      \vspace{0.4em}
+      The answer is an architecture, \textbf{CORTEX}, and today's claim is that it is
+      \alert{a factorisation of $q$}.
+    \end{column}
+  \end{columns}
+  \src{cortex.tex l.107--109, l.377--378}
+\end{frame}
+
+\begin{frame}{CORTEX}
   \begin{columns}[c]
     \begin{column}{0.5\textwidth}
-      \centering\cyclemap{1}
+      \centering
+      \includegraphics[height=0.84\textheight]{cortex_overview.png}
     \end{column}
-    \begin{column}{0.48\textwidth}
-      Yesterday the robot knew its pose, and we told it which points were the wall's.\\[0.6em]
-      Today it knows neither:
-      \begin{itemize}
-        \item which points belong to which wall: \textbf{association};
-        \item how many walls there are: \textbf{structure};
-        \item where it is in the room it is building: \textbf{localisation}.
-      \end{itemize}
-      And every one of these is coupled to the others.
+    \begin{column}{0.46\textwidth}
+      \small
+      A cognitive architecture for autonomous robots: \alert{memories} as graphs, and
+      \alert{agents} attached to them.\\[0.7em]
+      \renewcommand{\arraystretch}{1.3}
+      \begin{tabular}{@{}l l@{}}
+        \textcolor[HTML]{0B2F5C}{$\blacksquare$} & concept agents: one class, one belief \\
+        \textcolor[HTML]{1B9BDD}{$\blacksquare$} & agents that manage the memories \\
+        \textcolor[HTML]{8B0000}{$\blacksquare$} & agents that reach the body \\
+        \textcolor[HTML]{6A00FF}{$\blacksquare$} & RoboComp components \\
+      \end{tabular}\\[0.7em]
+      At the centre, the \textbf{working memory}: the current state, as one distributed graph.
+      Today lives there.
     \end{column}
   \end{columns}
+  \src{cortex.tex l.110--113, l.154--170}
+\end{frame}
+
+\begin{frame}{Modules that talk, or agents that share}
+  \centering
+  \begin{tikzpicture}
+    \begin{scope}[shift={(-4,0)}]
+      \node[ag, minimum width=1.5cm] (a) at (-1.25,1.0) {perception};
+      \node[ag, minimum width=1.5cm] (b) at (1.25,1.0)  {planning};
+      \node[ag, minimum width=1.5cm] (c) at (-1.25,-1.0) {control};
+      \node[ag, minimum width=1.5cm] (d) at (1.25,-1.0) {dialogue};
+      \foreach \u/\v in {a/b,a/c,a/d,b/c,b/d,c/d} \draw[link] (\u) -- (\v);
+      \node[align=center, font=\small] at (0,-1.95) {$n(n-1)/2$ interfaces};
+    \end{scope}
+    \draw[densely dashed, muted] (-0.65,-2.3) -- (-0.65,1.9);
+    \begin{scope}[shift={(3.2,0)}]
+      \node[mem, minimum size=1.5cm] (w) at (0,0) {the\\graph};
+      \node[ag] (r) at (0,1.5)      {room\_concept};
+      \node[ag] (t) at (-2.5,0.75)   {table\_concept};
+      \node[ag] (e) at (2.5,0.75)   {retina};
+      \node[ag] (f) at (-2.5,-0.75)  {controller};
+      \node[ag] (h) at (2.5,-0.75)  {episodic};
+      \foreach \v in {r,t,e,f,h} \draw[link] (\v) -- (w);
+      \node[align=center, font=\small] at (0,-1.95) {$n$ connections};
+    \end{scope}
+  \end{tikzpicture}
+
+  \vspace{0.5em}
+  \small There are no agent-to-agent messages. The count is the least of it:
+  \alert{there is one place that answers ``what does the robot currently believe?''}
+  \src{cortex.tex l.345--360}
 \end{frame}
 
 % =================================================================================================
-\section{Two regimes}
+\section{The shared graph}
 % =================================================================================================
 
-\begin{frame}{The room is either a variable or a constant}
+\begin{frame}{The working memory: geometry and meaning on the same edges}
+  \begin{columns}[c]
+    \begin{column}{0.56\textwidth}
+      \centering
+      \begin{tikzpicture}[level distance=0.95cm, edge from parent/.style={draw, thick, muted, -{Stealth[length=2mm]}},
+                          level 1/.style={sibling distance=4.1cm}, level 2/.style={sibling distance=1.45cm}]
+        \node[nd, fill=muted!20] {root}
+          child { node[nd, fill=good!15] {robot}
+            child { node[nd] {body}
+              child { node[nd, fill=cool!15] {lidar} } }
+            child { node[nd] {zed} } }
+          child { node[nd, fill=accent!12] {room}
+            child { node[nd] {wall$_k$} }
+            child { node[nd, fill=cool!15] {table$_1$} }
+            child { node[nd, fill=cool!15] {chair$_1$} } };
+      \end{tikzpicture}
+
+      \vspace{0.5em}
+      \footnotesize An \texttt{RT} edge: rigid transform, timestamp, \textbf{covariance}.
+    \end{column}
+    \begin{column}{0.42\textwidth}
+      \small
+      Nodes: a type, a name, typed attributes.\\[0.5em]
+      Every pose in the system is obtained by \alert{naming two frames} and asking the graph
+      to resolve the chain at a given instant:
+      \[ {}^{\text{lidar}}T_{\text{table}}(t) \]
+    \end{column}
+  \end{columns}
+  \src{cortex.tex l.231--246}
+\end{frame}
+
+\begin{frame}{Two kinds of change, two kinds of belief revision}
   \begin{columns}[T]
     \begin{column}{0.48\textwidth}
-      \begin{block}{Acquisition: the room is a variable}
-        \small
-        \begin{itemize}
-          \item Walls $(\alpha_w,d_w)$ are unknowns, and so is their \emph{number}.
-          \item Two poses that see one wall are coupled through it, so the graph has
-                \textbf{cycles}.
-          \item This is SLAM-like: poses and walls are solved together, and the solve
-                \emph{terminates}.
-        \end{itemize}
-      \end{block}
+      \centering
+      \textbf{Non-structural}: something known has moved\\[0.5em]
+      \begin{tikzpicture}
+        \node[nd] (r) at (0,1) {room}; \node[nd] (t) at (0,0) {table};
+        \draw[flow, muted] (r) -- (t);
+        \node[nd] (r2) at (3,1) {room}; \node[nd, fill=accent!25] (t2) at (3,0) {table};
+        \draw[flow, muted] (r2) -- (t2);
+        \draw[flow] (0.7,0.5) -- node[above, lab, align=center] {$\mu$, $\Sigma$ update} (2.3,0.5);
+      \end{tikzpicture}
     \end{column}
     \begin{column}{0.48\textwidth}
-      \begin{block}{Operating: the room is a constant}
-        \small
-        \begin{itemize}
-          \item The polygon is given; only the pose is estimated.
-          \item The factors are unary, so the graph is a \textbf{chain}: the information matrix is
-                banded and the solve is linear in the window length.
-          \item The published covariance is over the pose alone.
-        \end{itemize}
-      \end{block}
+      \centering
+      \textbf{Structural}: the world contains something new\\[0.5em]
+      \begin{tikzpicture}
+        \node[nd] (r) at (0,1) {room}; \node[nd] (t) at (0,0) {table};
+        \draw[flow, muted] (r) -- (t);
+        \node[nd] (r2) at (3,1) {room}; \node[nd] (t2) at (2.6,0) {table};
+        \node[nd, fill=accent!25] (c2) at (3.6,0) {chair};
+        \draw[flow, muted] (r2) -- (t2); \draw[flow, accent] (r2) -- (c2);
+        \draw[flow] (0.7,0.5) -- node[above, lab] {birth} (2.0,0.5);
+      \end{tikzpicture}
     \end{column}
   \end{columns}
-  \vspace{0.5em}
+  \vspace{1em}
+
+  Different agents watch for different ones. Within one structure, a belief is revised by data;
+  when the divergence is severe and persistent, the structure itself has to change.
+  \src{cortex.tex l.248--253, l.659--671}
+\end{frame}
+
+\begin{frame}{Held everywhere at once}
+  \begin{columns}[c]
+    \begin{column}{0.5\textwidth}
+      \centering
+      \begin{tikzpicture}
+        \foreach \a/\n/\l in {90/A/room, 210/B/table, 330/C/retina} {
+          \node[mem, minimum size=1.2cm, font=\scriptsize, align=center] (\n) at (\a:1.75) {copy\\of $G$};
+          \node[lab, font=\scriptsize\bfseries, text=cool] at (\a:2.85) {\l};
+        }
+        \draw[flow, accent] (A) to[bend left=12] node[right, lab, text=black] {$\delta$} (C);
+        \draw[flow, accent] (A) to[bend right=12] node[left, lab, text=black] {$\delta$} (B);
+        \draw[link] (B) -- (C);
+      \end{tikzpicture}
+    \end{column}
+    \begin{column}{0.48\textwidth}
+      Each agent holds the whole graph and publishes \textbf{deltas}. CRDT merges need no lock.
+      \vspace{0.5em}
+      \begin{itemize}\small
+        \item Merges are keyed on the writer: \alert{two agents with one id are one actor}, and
+              the result is a corrupted replica, not a conflict.
+        \item Consistency is \textbf{eventual}: your view may briefly lag mine. Nothing may assume
+              a global snapshot.
+      \end{itemize}
+    \end{column}
+  \end{columns}
+  \src{cortex.tex l.255--272}
+\end{frame}
+
+\begin{frame}{Sensor data travels beside the graph}
+  \begin{columns}[c]
+    \begin{column}{0.54\textwidth}
+      \centering
+      \begin{tikzpicture}
+        \node[ag, minimum width=1.6cm] (s) at (0,0) {robot\_concept};
+        \node[ag, minimum width=1.6cm] (r) at (5.2,0) {retina, agents};
+        \draw[flow, cool, line width=2.4pt] (s.20) -- node[above, lab, text=black, align=center] {media plane, zero-copy\\$2.8$ MB frame: $0.19$ ms} (r.160);
+        \draw[flow, muted, densely dashed] (s.-20) -- node[below, lab, text=black, align=center] {graph: a descriptor,\\poses, beliefs, heartbeats} (r.200);
+      \end{tikzpicture}
+    \end{column}
+    \begin{column}{0.44\textwidth}
+      \small
+      The graph is replicated to every peer. Images written into it starve the channel, and the
+      first symptom is not slow images but \alert{a missed heartbeat: an agent declared dead because
+      a camera was busy.}\\[0.5em]
+      A failure in one layer that surfaces in another.
+    \end{column}
+  \end{columns}
+  \src{cortex.tex l.375--381, l.432--435}
+\end{frame}
+
+\begin{frame}{Five memories, separated by timescale}
   \centering
-  acquisition $\xrightarrow{\ \text{the polygon, exactly Manhattan}\ }$ operating
-  \qquad
-  operating $\xrightarrow{\ \text{the calibrated body}\ }$ acquisition
-  \src{layout\_acquisition.tex l.131--174}
+  \begin{tikzpicture}[x=1cm, y=1cm, box/.style={draw=cool, thick, rounded corners=3pt, align=center, font=\scriptsize, fill=cool!10, inner sep=3pt, minimum height=0.95cm}]
+    \draw[-{Stealth}, very thick, muted] (-0.1,0) -- (12.6,0) node[lab, text=black, pos=0.5, below=17pt] {how long it lasts};
+    \foreach \x/\t in {1.1/now, 4/this deployment, 7/across missions, 10.6/lifetime} {
+      \draw[muted, thick] (\x,0.08) -- (\x,-0.08); \node[lab, below=3pt] at (\x,0) {\t};
+    }
+    \node[box, draw=accent, fill=accent!12, minimum width=2.1cm] at (1.1,1) {\textbf{Working}\\the graph of now};
+    \node[box, minimum width=2.4cm] at (4,1) {\textbf{Episodic}\\what it undertook,\\what came of it};
+    \node[box, minimum width=2.4cm] at (7,1) {\textbf{Long-term spatial}\\places and doors};
+    \node[box, minimum width=2.0cm] at (9.6,1) {\textbf{Semantic}\\categories};
+    \node[box, minimum width=2.0cm] at (11.7,1) {\textbf{Procedural}\\missions};
+  \end{tikzpicture}
+
+  \vspace{0.8em}
+  \small Each is a distributed graph on the same substrate, with an agent that manages it.
+  The week lives almost entirely in the red box.
+  \src{cortex.tex l.519--537}
 \end{frame}
 
-\begin{frame}{Why split them? Because they change at different rates}
-  \begin{itemize}
-    \item A room changes when someone moves a wall: over years. A pose changes on every cycle.
-    \item Estimating both jointly at frame rate, for ever, tracks a near-constant at great
-          expense. It is the same category error as promoting a calibration constant to a state.
-    \item So: \textbf{estimate jointly while the room is in question, then stop}, and hand over a
-          \emph{settled} belief.
+% =================================================================================================
+\section{One free energy, many owners}
+% =================================================================================================
+
+\begin{frame}{The whole scene, written in causal order}
+  \centering
+  \begin{tikzpicture}[fac/.style={rounded corners=2pt, align=center, font=\footnotesize, inner sep=4pt, minimum height=1cm, draw=white, very thick}]
+    \node[fac, fill=cool!25, minimum width=1.55cm]   (a) at (0,0)    {$P(\ell)\,P(\theta|\ell)$};
+    \node[fac, fill=good!25, minimum width=4.6cm]    (b) at (3.4,0)  {$P(\mathcal R)\,P(X)\,P(\Phi|X)\,P(L|X,\mathcal R,\theta)$};
+    \node[fac, fill=muted!30, minimum width=1.9cm]   (c) at (6.95,0) {$P(M|\theta,\ell,X)$};
+    \node[fac, fill=accent!25, minimum width=1.9cm]  (d) at (9.2,0)  {$P(Z|\theta,M,X)$};
+    \node[lab, align=center, above=2pt of a] {objects exist\\and have shape};
+    \node[lab, align=center, above=2pt of b] {the room has walls, the robot moves,\\wheels report it, LiDAR hits all of it};
+    \node[lab, align=center, above=2pt of c] {what is visible\\from where};
+    \node[lab, align=center, above=2pt of d] {surfaces\\become masks};
+    \node[lab, below=3pt of a, text=cool]    {\textbf{object agents}};
+    \node[lab, below=3pt of b, text=good]    {\textbf{room\_concept}};
+    \node[lab, below=3pt of c, text=muted]   {\textbf{the matching}};
+    \node[lab, below=3pt of d, text=accent]  {\textbf{where they meet}};
+  \end{tikzpicture}
+
+  \vspace{1em}
+  \begin{itemize}\small
+    \item Objects and pose are independent \emph{a priori}: objects do not know where the robot is.
+    \item Once data arrive they are coupled twice: through the masks, and through the LiDAR sweep,
+          which hits the fridge as well as the wall behind it.
   \end{itemize}
-  \pause
-  \begin{alertblock}{The price}
-    The operating regime cannot detect that the polygon it was given is wrong. The graph has no loop,
-    so there is no loop closure: a systematic map error is absorbed into the poses while the
-    reported covariance stays confident.
-  \end{alertblock}
-  You will measure this price in the lab.
-  \src{layout\_acquisition.tex l.178--208}
+  \src{concept\_agents.tex l.255--293}
+\end{frame}
+
+\begin{frame}{Three ways of treating an unknown}
+  \centering
+  \begin{tikzpicture}[row/.style={rounded corners=3pt, minimum width=7.6cm, minimum height=1.05cm, align=left, font=\small, inner sep=5pt}]
+    \node[row, fill=cool!15] (m) at (0,1.5) {\textbf{maximised}\quad $\theta,\ell$\\[-0.1em]\footnotesize the answer: published, with covariance};
+    \node[row, fill=good!15] (n) at (0,0.2) {\textbf{marginalised}\quad $X,\mathcal R$\\[-0.1em]\footnotesize needed to explain the data, never reported};
+    \node[row, fill=accent!15] (h) at (0,-1.1) {\textbf{collapsed}\quad $M$\\[-0.1em]\footnotesize replaced by its mode: no principled defence};
+    \draw[-{Stealth[length=3mm]}, very thick, accent] (n.east) to[bend right=70] node[right, align=left, font=\footnotesize, text=black] {a SLAM system\\moves $X$ up\\here} (m.east);
+  \end{tikzpicture}
+
+  \vspace{0.6em}
+  \small That one reassignment separates this factorisation from a monolithic one.
+  \src{concept\_agents.tex l.395--420}
+\end{frame}
+
+\begin{frame}{From the exact posterior to what actually runs}
+  \centering
+  \begin{tikzpicture}[blk/.style={draw, rounded corners=3pt, thick, align=center, font=\footnotesize, minimum width=2.7cm, minimum height=1cm, fill=white},
+                      res/.style={blk, draw=muted, densely dashed, fill=muted!8}]
+    \node[blk] (a) at (0,1.5)  {objects};
+    \node[blk] (b) at (3.2,1.5)  {localisation};
+    \node[blk] (c) at (6.4,1.5)  {matching};
+    \node[blk] (d) at (9.6,1.5)  {masks};
+    \node[res] (ra) at (0,-0.7) {\textbf{untouched}\\class priors};
+    \node[res] (rb) at (3.2,-0.7) {\textbf{a covariance}\\$\Sigma_\delta^t$, nothing else};
+    \node[res] (rc) at (6.4,-0.7) {\textbf{a delta}\\$\mathbf 1[M=\hat M]$};
+    \node[res] (rd) at (9.6,-0.7) {\textbf{a product of integrals}\\$\prod_c\prod_i\prod_t\int\cdots$};
+    \draw[flow] (a) -- (ra);
+    \draw[flow] (b) -- node[right, lab] {A1} (rb);
+    \draw[flow] (c) -- node[right, lab] {A3} (rc);
+    \draw[flow] (d) -- node[right, lab, align=left] {A2, A4, A5,\\A6, A7} (rd);
+  \end{tikzpicture}
+
+  \vspace{0.7em}
+  \small Seven assumptions, stated one at a time, each with its justification and its cost:
+  \begin{center}\scriptsize
+    A1 objects as landmarks\ \ $\cdot$\ \ A2 pose error integrates per frame\ \ $\cdot$\ \ A3 hard matching\ \ $\cdot$\ \
+    A4 classes apart\ \ $\cdot$\ \ A5 instances apart\ \ $\cdot$\ \ A6 geometry / existence\ \ $\cdot$\ \ A7 Markov time
+  \end{center}
+  \src{concept\_agents.tex l.568--613, l.626--1019}
+\end{frame}
+
+\begin{frame}{One process per factor}
+  \[
+    q(\theta,\ell,M,X,\mathcal R) =
+    \underbrace{q(X,\mathcal R)}_{\text{foreign}}\;
+    \underbrace{\mathbf 1[M=\hat M]}_{\text{degenerate}}\;
+    \prod_{c}\prod_{i}
+    \underbrace{q(\theta_i)}_{\N(\mu_i,\Sigma_i)}\;
+    \underbrace{q(\ell_i)}_{\text{log-odds}}
+  \]
+  \centering
+  \vspace{0.2em}
+  \begin{tikzpicture}
+    \node[nd, fill=good!20, minimum width=2.3cm, minimum height=0.7cm] (x) at (0,0) {room\_concept};
+    \foreach \x/\c/\i in {3.2/table/1, 5.0/table/2, 6.8/chair/1, 8.6/bottle/1} {
+      \node[nd, fill=cool!15, minimum height=0.7cm, minimum width=1.5cm] at (\x,0) {\c$_{\i}$};
+    }
+    \draw[thick, muted] (2.4,-0.55) -- (9.4,-0.55);
+    \node[lab] at (5.9,-0.8) {a boundary between factors is a conditional-independence assumption};
+  \end{tikzpicture}
+
+  \vspace{0.4em}
+  \lesson{Each quantity that crosses a boundary is what survived a marginalisation.}
+  \src{concept\_agents.tex l.114--123, l.447--455}
+\end{frame}
+
+\begin{frame}{What each agent minimises}
+  \[
+    F_i = \underbrace{\E_q\!\big[-\ln P(\bar Z_i\given\theta_i,\hat X)\big]}_{\text{accuracy: all the data enter here}}
+    + \underbrace{\KL{q(\theta_i)}{P(\theta_i\given\ell_i)}}_{\text{complexity: distance from the class prior}}
+  \]
+  \vspace{-0.2em}
+  \begin{columns}[c]
+    \begin{column}{0.6\textwidth}
+      \centering
+      \begin{tikzpicture}[x=0.32cm, y=1cm, b/.style={draw=white, very thick, align=center, font=\scriptsize, minimum height=0.8cm}]
+        \node[b, fill=cool!25, minimum width=2.2cm] at (3.5,0) {complexity};
+        \node[b, fill=accent!25, minimum width=3.1cm] at (12.3,0) {accuracy};
+        \node[b, fill=good!25, minimum width=2.0cm] at (20.9,0) {localisation};
+        \node[b, fill=muted!8, minimum width=0.6cm] at (25.5,0) {$0$};
+        \node[lab, align=center] at (7.6,-0.75) {moved by the agent};
+        \node[lab, align=center] at (20.9,-0.75) {held fixed\\(the anchor cut)};
+        \node[lab, align=center] at (25.5,-0.75) {matching\\inert};
+      \end{tikzpicture}
+    \end{column}
+    \begin{column}{0.36\textwidth}
+      \small
+      Summed over instances within a class, \alert{never across classes}. The localiser and the
+      agents do not exchange in both directions.
+    \end{column}
+  \end{columns}
+  \src{concept\_agents.tex l.468--516}
+\end{frame}
+
+\begin{frame}{The smallest scene that shows the price}
+  \begin{columns}[c]
+    \begin{column}{0.54\textwidth}
+      \small
+      $n$ objects, all seen in each frame. The frame's pose error $\delta_t$ is common to all of them:
+      \[ z_{it} = \theta_i + \delta_t + \varepsilon_{it} \]
+      Integrate $\delta_t$ and the frame's noise has covariance
+      \[ C = r\,I + s^2\,\mathbf 1\mathbf 1^\top . \]
+      \begin{itemize}\small
+        \item $s^2=0$: the sum of the agents' $F_i$ \alert{is} the global $F$, for any belief.
+        \item $s^2>0$: the division is an assumption.
+      \end{itemize}
+    \end{column}
+    \begin{column}{0.42\textwidth}
+      \centering
+      \begin{tikzpicture}[x=0.72cm, y=0.72cm]
+        \foreach \i in {0,1,2,3} \foreach \j in {0,1,2,3} {
+          \pgfmathsetmacro{\v}{ifthenelse(\i==\j, 95, 45)}
+          \fill[cool!\v, draw=white, thick] (\i,-\j) rectangle ++(1,1);
+        }
+        \node[above, lab] at (2,1.05) {$C$: the $n$ sightings of one frame};
+        \node[lab, text=white, font=\scriptsize\bfseries] at (0.5,0.5) {$r{+}s^2$};
+        \node[lab, font=\scriptsize\bfseries] at (2.5,0.5) {$s^2$};
+      \end{tikzpicture}
+    \end{column}
+  \end{columns}
+  \src{lab 2, part C; the shared offset: concept\_agents.tex l.64--70}
+\end{frame}
+
+\begin{frame}{Each belief is right. The relation between them is wrong.}
+  \begin{columns}[c]
+    \begin{column}{0.52\textwidth}
+      \centering
+      \begin{tikzpicture}[x=1cm, y=1.1cm]
+        \draw[-{Stealth}, muted] (0,0) -- (0,4.1) node[right, lab, text=black] {sd (cm)};
+        \draw[muted] (0,0) -- (6.2,0);
+        \fill[cool!45] (0.5,0) rectangle (1.3,2.50);
+        \fill[accent!45] (1.4,0) rectangle (2.2,2.50);
+        \fill[cool!45] (3.6,0) rectangle (4.4,1.58);
+        \fill[accent!45] (4.5,0) rectangle (5.3,3.54);
+        \node[lab, above] at (0.9,2.5) {2.50}; \node[lab, above] at (1.8,2.5) {2.50};
+        \node[lab, above] at (4.0,1.58) {1.58}; \node[lab, above] at (4.9,3.54) {3.54};
+        \node[lab, below=2pt] at (1.35,0) {one object, $\theta_0$};
+        \node[lab, below=2pt] at (4.45,0) {the relation, $\theta_0-\theta_1$};
+        \fill[cool!45] (1.6,3.9) rectangle ++(0.25,0.14); \node[lab, right] at (1.85,3.97) {exact};
+        \fill[accent!45] (2.9,3.9) rectangle ++(0.25,0.14); \node[lab, right] at (3.15,3.97) {agents};
+      \end{tikzpicture}
+    \end{column}
+    \begin{column}{0.44\textwidth}
+      \small
+      The shared error cancels in a difference. So the robot knows how far the bottle is from the
+      table far better than it knows where either is.\\[0.6em]
+      Two independent beliefs on a graph cannot say that. \alert{The price is paid in
+      relations.}
+    \end{column}
+  \end{columns}
+  \src{lab 2, exercise C2 ($r=(5\,\text{cm})^2$, $s^2=(10\,\text{cm})^2$, 20 frames, 3 objects)}
+\end{frame}
+
+\begin{frame}{The price of a boundary, in nats}
+  \begin{columns}[c]
+    \begin{column}{0.5\textwidth}
+      \includegraphics[width=\textwidth]{d2_price.pdf}
+    \end{column}
+    \begin{column}{0.46\textwidth}
+      \small
+      The cost of $q=\prod_i q(\theta_i)$ against the exact posterior:
+      \[ \KL{q}{p(\theta\given z)} = F[q] - F_{\text{exact}} \]
+      \begin{itemize}
+        \item grows with shared error and with the number of objects;
+        \item \alert{does not fall with more data}: $2.56$ nats at 10, 40 and 160 frames.
+      \end{itemize}
+      Data sharpen each factor. They cannot restore a correlation the family has no place to hold.
+    \end{column}
+  \end{columns}
+  \src{lab 2, exercise C3}
+\end{frame}
+
+\begin{frame}{A mean is half a belief}
+  \begin{columns}[c]
+    \begin{column}{0.52\textwidth}
+      \centering
+      \begin{tikzpicture}
+        \node[ag, draw=good, fill=good!12, minimum width=2cm, minimum height=1cm] (l) at (0,0) {room\_concept};
+        \node[ag, minimum width=2cm, minimum height=1cm] (o) at (5,0) {table\_concept};
+        \draw[flow, good, line width=1.4pt] (l) -- node[above, font=\small, text=black] {$\hat X,\ \Sigma_X$} (o);
+        \draw[densely dashed, muted] (2.5,-0.62) -- (2.5,0.75);
+        \node[lab, text=muted, above] at (2.5,0.75) {the boundary};
+        \draw[muted] (0.7,-1.95) -- (5.2,-1.95);
+        \fill[good!45] (0.9,-1.95) rectangle (1.9,-1.776);
+        \fill[accent!45] (3.2,-1.95) rectangle (4.2,-1.059);
+        \node[lab, above] at (1.4,-1.776) {$1.09$};
+        \node[lab, above] at (3.7,-1.059) {$5.57$};
+        \node[lab, left] at (0.7,-1.5) {mean NEES};
+        \node[lab, below=1pt] at (1.4,-1.95) {uses $\Sigma_X$};
+        \node[lab, below=1pt] at (3.7,-1.95) {ignores it};
+      \end{tikzpicture}
+    \end{column}
+    \begin{column}{0.44\textwidth}
+      \small
+      An agent placing sightings with the published pose, and reading the edge's covariance, is
+      honest: mean NEES $\approx 1$.\\[0.5em]
+      Taking the pose as truth, it is over-confident by $(r+s^2)/r = 5$.\\[0.5em]
+      \alert{The covariance travels with the mean}, so any process can use the estimate as
+      evidence and not as ground truth.
+    \end{column}
+  \end{columns}
+  \src{lab 2, exercise B2; concept\_agents.tex l.90--95}
+\end{frame}
+
+\begin{frame}{The architecture carries its failures on its face}
+  \begin{columns}[T]
+    \begin{column}{0.5\textwidth}
+      \textbf{Pooling eight frames} (violates A2)\\[0.4em]
+      \centering
+      \begin{tikzpicture}[x=3.6cm, y=0.55cm]
+        \fill[good!45] (0,1.5) rectangle (0.669,2.1); \node[lab, right] at (0.669,1.8) {0.669 m};
+        \fill[accent!45] (0,0.5) rectangle (0.915,1.1); \node[lab, right] at (0.915,0.8) {0.915 m};
+        \node[lab, above right] at (0,2.05) {one frame, $\sigma_H=0.300$};
+        \node[lab, below right] at (0,0.5) {pooled, $\sigma_H=0.190$};
+      \end{tikzpicture}\\[0.5em]
+      \raggedright\small
+      Each frame brings its own offset, the fit has nowhere to put eight of them, so they land in
+      the shape. \alert{More confident about a worse answer.}
+    \end{column}
+    \begin{column}{0.46\textwidth}
+      \textbf{A cabinet labelled fridge} (cost of A4)\\[0.4em]
+      \centering
+      \begin{tikzpicture}
+        \node[ag] (f) at (0,0) {refrigerator\\agent};
+        \node[ag, draw=muted, fill=muted!10] (c) at (3.3,0) {cabinet\\agent};
+        \node[nd, fill=accent!20] (m) at (0,1.15) {the mask};
+        \draw[flow] (m) -- (f);
+        \draw[flow, muted, densely dashed] (m) -- node[above right, lab, text=muted] {never sees it} (c);
+      \end{tikzpicture}\\[0.5em]
+      \raggedright\small
+      The comparison that would settle it, how well each class explains the same pixels, is never
+      made.
+    \end{column}
+  \end{columns}
+  \src{concept\_agents.tex l.73--85; agents\_life\_cycle.tex l.808--809}
 \end{frame}
 
 % =================================================================================================
-\section{Acquiring the room}
+\section{Concept agents}
 % =================================================================================================
 
-\begin{frame}{What is estimated}
-  \footnotesize
-  \begin{tabular}{@{}l p{0.42\textwidth} p{0.38\textwidth}@{}}
+\begin{frame}{A concept agent is neither a detector nor a service}
+  \centering
+  \begin{tikzpicture}[st/.style={draw, rounded corners=3pt, thick, align=center, font=\footnotesize, minimum height=1.2cm, inner sep=4pt}]
+    \node[st, fill=muted!12, minimum width=2.2cm] (m) at (0,0) {a stream of\\fragments\\[-0.1em]{\scriptsize masks, sparse, partial}};
+    \node[st, draw=cool, fill=cool!12, minimum width=3.2cm] (a) at (4.4,0) {one class, one agent\\holds a posterior\\over its instances};
+    \node[st, fill=white, minimum width=2.6cm] (n) at (9,0) {node \texttt{table\_1}\\$\mu,\ \Sigma,\ \ell$};
+    \draw[flow] (m) -- (a);
+    \draw[flow] (a) -- node[above, lab] {publishes} (n);
+    \draw[flow, muted] (n.south) to[bend left=30] node[below, lab, text=black] {its own belief is the prior of the next cycle} (a.south);
+  \end{tikzpicture}
+
+  \vspace{1.6em}
+  \small \textsf{table\_concept} does not detect tables. No fragment is an object:
+  \alert{the object is a construct the agent maintains across fragments.}
+  \src{concept\_agents.tex l.90--95, l.163--167}
+\end{frame}
+
+\begin{frame}{An agent writes two things}
+  \begin{columns}[c]
+    \begin{column}{0.54\textwidth}
+      \centering
+      \begin{tikzpicture}[lay/.style={draw=white, very thick, align=center, font=\scriptsize, minimum width=5.8cm, minimum height=0.56cm}]
+        \node[lay, fill=accent!35, font=\footnotesize\bfseries] at (0,3.1) {a residual and its Jacobian};
+        \node[lay, fill=cool!30] at (0,2.5) {\texttt{ai\_belief}: Gauss--Newton, offset marginalised, covariance};
+        \node[lay, fill=cool!22] at (0,1.94) {\texttt{instance\_tracker}: match, create, remove};
+        \node[lay, fill=cool!16] at (0,1.38) {\texttt{existence\_belief}: log-odds};
+        \node[lay, fill=cool!12] at (0,0.82) {\texttt{occlusion}: line of sight, walls included};
+        \node[lay, fill=cool!8] at (0,0.26) {\texttt{affordance\_protocol}, \texttt{mask\_ingestor}, \ldots};
+        \node[lab, left, align=right] at (-2.95,3.1) {the agent};
+        \node[lab, left, align=right] at (-2.95,1.4) {shared,\\written once};
+      \end{tikzpicture}
+    \end{column}
+    \begin{column}{0.42\textwidth}
+      \small
+      All the Bayesian mathematics lives in the engine, once.\\[0.5em]
+      This is why a roster entry can be half a page: \textsf{bottle} needs little,
+      \textsf{table} and \textsf{refrigerator} fill the template, and that is a fact about the
+      objects.
+    \end{column}
+  \end{columns}
+  \src{concept\_agents.tex l.534--537, l.136--138, l.1196--1203}
+\end{frame}
+
+\begin{frame}{Each publishes what only it can compute}
+  \centering
+  \small
+  \renewcommand{\arraystretch}{1.25}
+  \begin{tabular}{@{}l l l@{}}
     \toprule
-    quantity & what it is & why it is carried \\
+    published on the graph & computed by & read by \\
     \midrule
-    $\mathcal O$ & cyclic list of wall identifiers & it \emph{is} the topology; changing it
-      changes the dimension of everything else \\
-    $\alpha_w, d_w$ & each wall's line, $n(\alpha_w)^\top p = d_w$ & what the LiDAR constrains directly \\
-    $\Lambda_w$ & each wall's $2\times2$ information & values the next look (Day 5) \\
-    $[s_{\min},s_{\max}]_w$ & observed extent & a wall is a segment, not a line \\
-    $e_w[i]$ & existence log-odds per 25 cm & a wall can be too \emph{long}, not just misplaced \\
-    $k_w$, $\theta_0$ & Manhattan class, room direction & prefer right angles without forbidding others \\
-    $X_t$ & five-pose window & walls are variables, so the poses must be solved with them \\
+    pose $\hat X$ and $\Sigma_X$            & room\_concept       & every object agent \\
+    geometry $\mu_i,\Sigma_i$, in the room's frame & one object agent & residual, controller \\
+    existence, as log-odds                  & one object agent    & anyone asking if it is real \\
+    affordances: what it offers, priced     & one object agent    & the controller \\
+    occupied and \emph{not explained}       & residual\_concept   & planner, other agents' births \\
     \bottomrule
   \end{tabular}
-  \vspace{0.6em}
 
-  \normalsize The state is both \textbf{discrete} ($\mathcal O$, the number of walls) and
-  \textbf{continuous} ($\alpha,d$). No number of Gauss--Newton steps changes a discrete
-  variable, so a change of shape must be \emph{priced}.
-  \src{layout\_acquisition.tex l.271--327}
+  \vspace{0.8em}
+  Conventions shared by all: geometry in the room's frame, on the RT edge; the covariance
+  alongside; the class as an attribute; each agent recognises its own nodes by name.
+  \src{concept\_agents.tex l.1209--1216, l.1533--1544}
 \end{frame}
 
-\begin{frame}{Whose frame? A gauge, and why it matters}
-  \begin{itemize}
-    \item With no map there is no world frame. The robot's frame at $t=0$ becomes the map frame.
-    \item That is a \textbf{gauge}: a convention no measurement could ever fix, because the data
-          would be identical in any other frame.
-    \item The room's dominant direction $\theta_0$ is found by a \textbf{quadrupled-angle vote}:
-          \[ \theta_0 = \tfrac14\arg\sum_i e^{4i\varphi_i}, \]
-          which maps all four Manhattan normals onto one angle, so the vote needs no association.
-  \end{itemize}
-  \begin{measured}{a frame is part of an estimator's output \wip}
-    A fitted room with area 23.88 m$^2$ against 24.00 true, but aspect ratio 1.344 against 1.500.
-    The fit was fine; the \emph{frame} was wrong, because it was taken from the first scan. The
-    cure: vote the gauge over all frames.
-  \end{measured}
-\end{frame}
-
-\begin{frame}{Which points belong to a wall? A band that is derived, not chosen}
-  \begin{columns}[c]
-    \begin{column}{0.52\textwidth}
-      \small
-      Clutter is uniform over the area $A$. A wall concentrates its points in a strip $L$ long and
-      about $\sigma$ wide:
-      \[
-        \frac{p_\text{wall}}{p_\text{clutter}} = \frac{A}{L\sqrt{2\pi}\,\sigma}\,e^{-r^2/2\sigma^2}
-      \]
-      \vspace{-0.6em}
-      \begin{itemize}
-        \item Inlier iff ratio $>1$: $r^2 < 2\sigma^2\ln\frac{A}{L\sqrt{2\pi}\sigma}$, about
-              $3\sigma$.
-        \item Each point brings $\ln(\text{ratio})$ \textbf{nats}.
-        \item The band \textbf{narrows as $L$ grows}: a long wall is a more expensive explanation.
-      \end{itemize}
-    \end{column}
-    \begin{column}{0.45\textwidth}
-      \includegraphics[width=\textwidth]{d2_band.pdf}
-    \end{column}
-  \end{columns}
-  \lesson{A tuned threshold gives the band. The derivation gives the band \emph{and} the currency.}
-  \src{layout\_acquisition.tex l.563--600}
-\end{frame}
-
-\begin{frame}{One scan, four walls}
-  \begin{columns}[c]
-    \begin{column}{0.45\textwidth}
-      \includegraphics[width=\textwidth]{d2_room.pdf}
-    \end{column}
-    \begin{column}{0.52\textwidth}
-      \small In the lab:
-      \begin{enumerate}
-        \item vote $\theta_0$ from local normals;
-        \item initialise each class's $d$ from a median;
-        \item refine each wall by a Laplace fit in which every point carries its
-              \textbf{responsibility} $w=\rho/(1+\rho)$, entering with $\sigma/\sqrt{w}$;
-        \item intersect the walls in cyclic order.
-      \end{enumerate}
-      The table, the bottle and the beams through the door are \emph{explained away as clutter}.
-      Nobody wrote an \texttt{if}.
-    \end{column}
-  \end{columns}
-\end{frame}
-
-\begin{frame}{The price of a shape}
-  A polygon with more sides always fits better. What stops the estimator adding them?\\[0.4em]
-  \textbf{Minimum description length.} To transmit one edge, say its Manhattan direction and its
-  offset at the sensor's resolution:
-  \[
-    L_\text{edge} = \ln 4 + \ln\frac{2R}{c} = 1.386 + 5.298 = 7.29\nats
-    \qquad (R=10\text{ m},\ c=8\text{ cm}).
-  \]
-  \begin{itemize}
-    \item An oblique edge names its angle instead of its class: a surcharge of $5.7$ nats. Manhattan
-          is \emph{preferred}, not imposed.
-    \item The old design had a hand-tuned 15 nats for a two-edge change. The derivation gives
-          $14.6$. It does not refine the constant; it \alert{explains} it.
-    \item The price depends on the instrument ($R$, $c$), not on the room. That is where it
-          belongs.
-  \end{itemize}
-  \src{layout\_acquisition.tex l.702--738}
-\end{frame}
-
-\begin{frame}{But the table pays the price, too}
-  \begin{itemize}
-    \item In the lab, the table's south face earns about \textbf{80 nats} as a candidate wall,
-          against a price of 7.6. Face evidence alone would make the table part of the room.
-    \item What tells a table face from a wall is \textbf{free space}: beams pass beside and beyond
-          it and hit the real wall behind it.
-    \item Hence two evidence channels, kept apart: face evidence, and a free/occupied grid. A
-          single-number grid once marked 38 of 42 cells of a 13 cm wall as free.
-  \end{itemize}
-  \begin{measured}{the layout is a box cover of free space \wip}
-    Constructing the room from swept free space beat fitting a hull and repairing it on 8 of 9
-    test rooms (worst case 0.872 $\to$ 0.940 IoU). Free space must be charged both ways: area
-    claimed but never swept, \emph{and} area swept but not claimed.
-  \end{measured}
-  \src{layout\_acquisition.tex l.329--415}
-\end{frame}
-
-% =================================================================================================
-\section{Localisation is one more belief}
-% =================================================================================================
-
-\begin{frame}{The observation model: no rendering}
-  For a scan $\{p_i\}$ in robot coordinates and a candidate pose $X=(R(\phi),t)$:
-  \[
-    d_i(X) = \operatorname{dist}\big(R(\phi)p_i + t,\ \text{polygon}\big),
-    \qquad
-    \mathcal L_\text{obs} = \frac{1}{2\sigma^2}\cdot\frac1N\sum_i w_i\,\mathrm{Huber}(d_i)
-  \]
-  \begin{itemize}
-    \item The residual \emph{is} the prediction error: no expected scan is rendered. Its Jacobian is
-          the gradient of the distance field.
-    \item $w_i^\text{range}\propto r_i^\alpha$: far returns have more leverage on heading.
-          $w_i^\text{inc}=|\hat r_i\cdot\hat n_i|^\beta$: Day 1's incidence lesson.
-    \item Note the $\frac1N$. The term is a \textbf{mean}, so its precision does not grow with
-          scan density. Keep that in mind until the end of the day.
-  \end{itemize}
-  \src{room\_concept.tex l.241--310}
-\end{frame}
-
-\begin{frame}{What the residual floor is made of}
-  Park the robot. The mean wall distance of each new scan hovers near \textbf{87 mm}, and never
-  reaches zero.
-  \begin{itemize}
-    \item The fluctuation is white, and follows $N^{-1/2}$: measured ratio $1.41$ against a
-          predicted $\sqrt{405/200}=1.42$.
-    \item Solved backwards, that gives a per-point scatter of $\approx 37$ mm, which accounts for
-          $0.798\times 37\approx 30$ mm of the floor.
-    \item The other $\approx 57$ mm is \textbf{map mismatch}: the room is not exactly the polygon.
-  \end{itemize}
-  \lesson{Two-thirds of the floor is an error every return shares. More returns cannot remove it.}
-  \src{room\_concept.tex l.385--425}
-\end{frame}
-
-\begin{frame}{Predict honestly: no constant process noise}
-  Between scans the pose is propagated by odometry:
-  \[
-    \Sigma_{t+1} = F\,\Sigma_t F^\top + G\,\mathrm{diag}(\sigma_v^2,\sigma_\omega^2)\,G^\top
-  \]
-  \begin{itemize}
-    \item $F,G$: Jacobians of the motion with respect to the pose and to the measured $(v,\omega)$.
-    \item The covariance grows because of what the encoders and gyro cannot tell, \emph{not} by
-          adding a constant $Q$ every cycle.
-    \item In the lab, dead reckoning with this model is calibrated: normalised errors have
-          standard deviations of $1.13, 0.99, 1.07$, against 1 if honest.
-  \end{itemize}
-  A constant $Q$ is a modelling decision dressed as a tuning knob. On Day 4 we will meet the
-  pathology it causes in object beliefs.
-\end{frame}
-
-\begin{frame}{Localising against the room you just built}
-  \begin{columns}[c]
-    \begin{column}{0.5\textwidth}
-      \includegraphics[width=\textwidth]{d2_track.pdf}
-    \end{column}
-    \begin{column}{0.48\textwidth}
-      \includegraphics[width=\textwidth]{d2_nees.pdf}
-      \small
-      A wall \textbf{1.5 cm} out of place makes the localiser confidently wrong: NEES 90 where 3 is
-      honest.
-    \end{column}
-  \end{columns}
-  \lesson{In the operating regime the polygon is a constant, so its error is shared by every scan,
-          for ever.}
-\end{frame}
-
-\begin{frame}{Symmetry: where descent cannot help}
-  \begin{columns}[c]
-    \begin{column}{0.45\textwidth}
-      \includegraphics[width=\textwidth]{d2_symmetry.pdf}
-    \end{column}
-    \begin{column}{0.53\textwidth}
-      \small
-      \begin{itemize}
-        \item A rectangle looks the same after a half-turn. The same scan fits both poses with
-              \emph{identical} free energy.
-        \item No downhill path joins them. They are \textbf{separate hypotheses}, so the agent
-              must enumerate them and choose: a coarse search over the room's symmetries, then local
-              refinement.
-        \item This is one of the few places where a threshold is right: \emph{a threshold is
-              defensible exactly when the alternative cannot be expressed as a covariance.}
-        \item What breaks the tie must be evidence the room does not contain: the motion prior, or
-              an asymmetric landmark (the thesis uses the fridge).
-      \end{itemize}
-    \end{column}
-  \end{columns}
-  \src{room\_concept.tex l.1867--1927}
-\end{frame}
-
-% =================================================================================================
-\section{Shared error}
-% =================================================================================================
-
-\begin{frame}{The common-mode ceiling}
-  $N$ residuals $r = r_0 + J_z\delta + \varepsilon$ that share one offset $\delta\sim\N(0,\Sigma_\delta)$
-  (a pose error), plus independent noise $\varepsilon\sim\N(0,\sigma^2 I)$. Marginalise $\delta$:
-  \[
-    \mathcal I = J_z^\top\big(\sigma^2 I + J_z\Sigma_\delta J_z^\top\big)^{-1}J_z
-    \;\overset{\text{Woodbury}}{=}\;
-    \big(\sigma^2(J_z^\top J_z)^{-1} + \Sigma_\delta\big)^{-1}
-    \;\xrightarrow[N\to\infty]{}\; \Sigma_\delta^{-1}
-  \]
-  \begin{itemize}
-    \item A denser mask eventually stops helping. The ceiling is set by the \emph{pose} error, not
-          by the pixel count.
-    \item The joint information on (object, offset) has rank 6, not 12: the data cannot tell a
-          displaced object from a displaced robot. Only the ceiling is computable.
-  \end{itemize}
-  \src{concept\_agents.tex l.1047--1090}
-\end{frame}
-
-\begin{frame}{The ceiling, measured in the toy}
+\begin{frame}{\textsf{residual\_concept}: the null hypothesis}
   \begin{columns}[c]
     \begin{column}{0.48\textwidth}
-      \includegraphics[width=\textwidth]{d2_ceiling.pdf}
+      \centering
+      \begin{tikzpicture}[x=1.15cm, y=2.1cm]
+        \draw[-{Stealth}, muted] (-2.4,0) -- (2.7,0) node[below left, lab, text=black] {sdf to the object};
+        \draw[-{Stealth}, muted] (0,0) -- (0,1.12) node[right, lab, text=black] {P(explained)};
+        \draw[cool, very thick] (-2.3,1) -- (-1,1) -- plot[domain=-1:1, samples=60] (\x, {1/(1+exp(\x*8))}) -- (2.3,0);
+        \draw[accent, very thick, densely dashed, domain=-2.3:2.3, samples=80] plot (\x, {1/(1+exp(\x*1.5))});
+        \node[lab, align=left] at (1.45,0.62) {dashed: far, uncertain,\\a loose claim};
+        \node[lab, align=right] at (-1.3,0.32) {solid: near, well\\seen, a tight claim};
+      \end{tikzpicture}
     \end{column}
-    \begin{column}{0.5\textwidth}
+    \begin{column}{0.48\textwidth}
       \small
-      The robot maps the table's face from a \emph{dead-reckoned} pose, before it has a room to
-      localise against: exactly the situation while a room is still being estimated.
-      \begin{itemize}
-        \item Treating points as independent claims under 1 mm at $N=32$.
-        \item The real error stalls near 7 mm.
-        \item Woodbury predicts it to within about 10\% at every $N$.
-      \end{itemize}
+      A field of what no other agent explains: the safety layer. Nothing has to \emph{recognise}
+      an object for the robot to avoid it.
+      \[ P(\text{cell explained}) = \Psi\!\left(-\,\frac{\mathrm{sdf}}{\sigma_{\text{tot}}}\right) \]
+      $\sigma_{\text{tot}}$ uses the object's \emph{own published covariance}. No cutoff anywhere,
+      and possible only because the others publish covariances.
     \end{column}
   \end{columns}
-  \lesson{Averaging removes independent error. It does not remove shared error.}
+  \src{concept\_agents.tex l.1497--1538}
 \end{frame}
 
-\begin{frame}{Case study: association dies by a common-mode latch \wip}
+\begin{frame}{Answering to a common contract}
+  \begin{columns}[c]
+    \begin{column}{0.5\textwidth}
+      \centering
+      \begin{tikzpicture}[st/.style={draw=cool, thick, rounded corners=3pt, fill=cool!10, font=\footnotesize\bfseries, minimum width=1.75cm, minimum height=0.68cm}]
+        \node[st] (a) at (90:1.75) {CREATE};
+        \node[st] (b) at (18:2.25) {UPDATE};
+        \node[st] (c) at (-54:1.95) {REMOVE};
+        \node[st] (d) at (-126:1.95) {HISTORY};
+        \node[st] (e) at (162:2.25) {OWNERSHIP};
+        \draw[flow, muted] (a) to[bend left=15] (b); \draw[flow, muted] (b) to[bend left=15] (c);
+        \draw[flow, muted] (c) to[bend left=15] (d); \draw[flow, muted] (d) to[bend left=15] (e);
+        \draw[flow, muted] (e) to[bend left=15] (a);
+      \end{tikzpicture}
+    \end{column}
+    \begin{column}{0.46\textwidth}
+      \small
+      These are not an administrative layer: they are what an integrator of noisy fragments has to
+      do in order to integrate at all.\\[0.5em]
+      A stage stated in a contract is a stage a new agent cannot forget.\\[0.5em]
+      \textbf{Tomorrow:} where beliefs come from and how they end.
+    \end{column}
+  \end{columns}
+  \src{concept\_agents.tex l.169--180; CONCEPT\_AGENT\_LIFECYCLE.md l.7--13}
+\end{frame}
+
+\begin{frame}{The factorisation is only true while its owners are alive}
+  \begin{columns}[c]
+    \begin{column}{0.52\textwidth}
+      \centering
+      \begin{tikzpicture}[st/.style={draw, thick, rounded corners=8pt, minimum width=1.8cm, minimum height=0.8cm, font=\footnotesize}]
+        \node[st, fill=muted!12] (w) at (0,0) {waiting};
+        \node[st, fill=good!15] (o) at (3.7,0) {operating};
+        \node[st, fill=accent!15] (d) at (1.85,-1.8) {degraded};
+        \draw[flow] (w) to[bend left=15] node[above, lab, align=center] {required peers\\ready} (o);
+        \draw[flow] (o) to[bend left=15] node[below, lab] {a peer is lost} (w);
+        \draw[flow, muted] (o) -- (d); \draw[flow, muted] (w) -- (d);
+      \end{tikzpicture}\\[0.6em]
+      \footnotesize Specified in \textsc{tla}$^+$ and model-checked: 8 safety and 4 liveness
+      properties, no counterexample.
+    \end{column}
+    \begin{column}{0.44\textwidth}
+      \small
+      A node left behind by a dead process is \alert{a factor nothing is minimising}. It looks
+      like any other data.\\[0.5em]
+      A peer that is present is \emph{running}, which is not the same as \emph{able to serve}.
+      Heartbeats are ordinary graph nodes.
+    \end{column}
+  \end{columns}
+  \src{cortex.tex l.732--741, l.757--775, l.780--785}
+\end{frame}
+
+% =================================================================================================
+\section{No thresholds}
+% =================================================================================================
+
+\begin{frame}{A gate is what a model looks like before the modelling is done}
+  \centering
+  \begin{tikzpicture}[x=0.75cm, y=1cm]
+    \foreach \X/\ttl/\lbl in {0/range/{ignore beyond 5 m}, 5.8/motion/{not while moving}, 11.6/orientation/{do not rotate if the view is poor}} {
+      \begin{scope}[shift={(\X,0)}]
+        \draw[muted] (0,0) -- (4.6,0); \draw[muted] (0,0) -- (0,1.2);
+        \draw[accent, very thick, densely dashed] (0,1) -- (2.4,1) -- (2.4,0) -- (4.5,0);
+        \draw[cool, very thick, domain=0:4.5, samples=40] plot (\x, {1/(1+(\x/2.2)^2)});
+        \node[lab, above] at (2.3,1.2) {\textbf{\ttl}};
+        \node[lab, text=accent, align=center, below] at (2.3,-0.05) {\lbl};
+      \end{scope}
+    }
+  \end{tikzpicture}
+
+  \vspace{0.5em}
+  \small {\color{cool}solid}: the precision a frame actually has, as the covariate grows\\[0.6em]
+  \begin{tabular}{@{}l l@{}}
+    \toprule
+    a distant view loses orientation information & common-mode covariance grows with range \\
+    correlated points stop shrinking $\sigma$    & the offset is marginalised in closed form \\
+    ego-motion down-weights a mask               & a motion variance is added to the observation \\
+    \bottomrule
+  \end{tabular}
+  \src{concept\_agents.tex l.552--562}
+\end{frame}
+
+\begin{frame}{A gate is a parameter the scene can invalidate}
+  \begin{columns}[c]
+    \begin{column}{0.5\textwidth}
+      \includegraphics[width=\textwidth]{d2_gate.pdf}
+    \end{column}
+    \begin{column}{0.46\textwidth}
+      \small
+      A robot passes an object, $\sigma$ growing with range.
+      \vspace{0.3em}
+
+      \renewcommand{\arraystretch}{1.2}
+      \begin{tabular}{@{}l r r@{}}
+        \toprule
+        & near & far \\
+        \midrule
+        best gate    & 2.0 m & 8.0 m \\
+        rmse there   & 1.01 cm & 4.79 cm \\
+        precision    & 0.86 cm & 4.22 cm \\
+        \bottomrule
+      \end{tabular}
+
+      \vspace{0.5em}
+      The gate tuned on the near pass admits nothing on the far one: \alert{3 m} of error.
+      The precision has no knob.
+    \end{column}
+  \end{columns}
+  \src{lab 2, part D}
+\end{frame}
+
+\begin{frame}{An outlier costs a bounded amount, and nobody rejects it}
+  \begin{columns}[c]
+    \begin{column}{0.5\textwidth}
+      \centering
+      \begin{tikzpicture}[x=0.8cm, y=0.8cm]
+        \draw[-{Stealth}, muted] (-3.6,0) -- (3.9,0) node[below left, lab, text=black] {residual};
+        \draw[-{Stealth}, muted] (0,0) -- (0,4.1) node[right, lab, text=black] {cost};
+        \draw[muted, thick, domain=-2.8:2.8, samples=50] plot (\x, {0.5*\x*\x});
+        \draw[cool, very thick, domain=-3.5:3.5, samples=120] plot (\x, {-ln(0.92*exp(-0.5*\x*\x)+0.08*exp(-1.1))});
+        \draw[accent, very thick, densely dashed] (-3.5,0) -- (-2.2,0) -- (-2.2,2.42);
+        \draw[accent, very thick, densely dashed] (3.5,0) -- (2.2,0) -- (2.2,2.42);
+        \node[lab, text=muted] at (1.35,3.7) {least squares};
+        \node[lab, text=accent, align=center] at (-3.0,0.55) {rejection:\\a cliff};
+        \node[lab, align=center] at (3.25,2.7) {mixture};
+      \end{tikzpicture}
+    \end{column}
+    \begin{column}{0.46\textwidth}
+      \small
+      Each mask point is explained by the object's surface, by uniform clutter, or by a known
+      wall.
+      \[ -\ln\!\big(\pi_s\, p_s + \pi_c\, p_c + \pi_w\, p_w\big) \]
+      A point that fits nothing costs a finite amount and stops pulling. The bound is a
+      \emph{modelled probability}, not a rejection threshold.
+    \end{column}
+  \end{columns}
+  \src{concept\_agents.tex l.518--524}
+\end{frame}
+
+\begin{frame}{The gate that survives}
+  \begin{columns}[c]
+    \begin{column}{0.5\textwidth}
+      \includegraphics[width=\textwidth]{d2_bias.pdf}
+    \end{column}
+    \begin{column}{0.46\textwidth}
+      \small
+      A run of frames sharing one bias $b$:
+      \[ \Delta\mu_n = \frac{n\alpha\Lambda}{\Lambda_0+n\alpha\Lambda}\;b \;\xrightarrow[n\to\infty]{}\; b \]
+      Attenuating by $\alpha$ changes the rate, never the limit. Only $\alpha = 0$ bounds it.\\[0.4em]
+      A variance is the right answer for errors that average. \alert{This one has no coordinate
+      in the model.}
+    \end{column}
+  \end{columns}
+  \src{agents\_life\_cycle.tex l.783--791; lab 2, part E}
+\end{frame}
+
+\begin{frame}{The rule is: declare it, justify it, or remove it}
   \begin{columns}[T]
     \begin{column}{0.5\textwidth}
-      \small One frame of a real recording, four walls still associating:\\[0.3em]
-      \footnotesize
-      \begin{tabular}{@{}c r r r@{}}
+      \renewcommand{\arraystretch}{1.35}
+      \small
+      \begin{tabular}{@{}p{0.38\linewidth} p{0.56\linewidth}@{}}
         \toprule
-        seg & $\chi^2$ & $\Delta\phi$ & gate $\sigma_\phi$ \\
+        threshold & verdict \\
         \midrule
-        0 & 1.03 & $-5.85^\circ$ & $6.78^\circ$ \\
-        1 & 1.02 & $-5.76^\circ$ & $6.34^\circ$ \\
-        2 & 1.20 & $-5.79^\circ$ & $6.01^\circ$ \\
-        3 & 1.06 & $-5.77^\circ$ & $6.67^\circ$ \\
+        admissibility & \textbf{should} be one: the continuous alternative provably cannot bound the bias \\
+        birth         & \textbf{should not}: a streak standing in for nats; first to change \\
+        peer grace period & works, and is a \textbf{debt}: liveness is a belief too \\
         \bottomrule
       \end{tabular}
     \end{column}
-    \begin{column}{0.48\textwidth}
-      \small
-      \begin{itemize}
-        \item The \emph{same} $-5.8^\circ$ on every wall is one \textbf{heading} error, not four
-              wall errors.
-        \item Each wall is gated independently against an error they all share. When the common
-              error crosses $\approx 6^\circ$, they all fail \alert{in the same frame}.
-        \item With nothing associated, nothing is left to correct the pose: 100\% $\to$ 0\%,
-              permanently.
-      \end{itemize}
+    \begin{column}{0.46\textwidth}
+      \begin{measured}{a covariate must not be circular}
+        \small The chair's obliquity, computed from the belief's own yaw, read
+        $\cos = 0.001$ and froze a yaw that was about $45^\circ$ wrong: a wrong estimate declared its
+        own error unobservable.
+      \end{measured}
     \end{column}
   \end{columns}
-  \vspace{0.4em}
-  \small Parked runs never accumulate 6°, which is why ``a parked run looks perfect and the first
-  tour kills it''.
-  \src{post-thesis note, 2026-09-18}
-\end{frame}
-
-\begin{frame}{Case study: the pose must not lean on a room still being built \wip}
-  While the room was being estimated, the pose was registered against the \emph{provisional}
-  layout. Layout errors dragged the pose; the dragged pose corrupted the layout.
-  \vspace{0.3em}
-  \begin{center}\small
-  \begin{tabular}{@{}l r r r@{}}
-    \toprule
-    pose error (median, vs ground truth) & run A & run B (20 min) & run C (wheel slip) \\
-    \midrule
-    registered to the provisional layout & 0.22 m & 3.13 m & 1.55 m \\
-    odometry alone                        & 0.08 m & 0.20 m & 1.77 m \\
-    plain scan-to-map SLAM                & 0.010 m & 0.013 m & 0.031 m \\
-    \bottomrule
-  \end{tabular}
-  \end{center}
-  \begin{itemize}\small
-    \item The fix: take the pose from plain SLAM, and build the layout \emph{from} the aligned map.
-    \item Live in simulation: pose median 6 mm; layout IoU 0.896 at 20 s and 0.956 at 60 s.
-    \item Registering to the provisional layout was \emph{worse than odometry alone}: a factor
-          inherits the errors of whatever it is estimated through (Day 1).
-  \end{itemize}
-  \src{post-thesis note, 2026-10-09}
+  \src{agents\_life\_cycle.tex l.1276--1282; cortex.tex l.796--804; CONCEPT\_AGENT\_LIFECYCLE.md l.75--79}
 \end{frame}
 
 % =================================================================================================
 \section{Lab}
 % =================================================================================================
 
-\begin{frame}{Lab 2: the room, the pose, and the ceiling}
-  \texttt{labs/day2.ipynb}, about 75 minutes. No labels, no known pose.
+\begin{frame}{Lab 2: agents on a shared graph}
+  \texttt{labs/day2.ipynb}, about two hours.
   \begin{enumerate}\small
-    \item[A.] \textbf{Acquire}: the 4$\theta$ vote; the derived band; four walls by
-              responsibility-weighted Laplace fits; the polygon and its IoU. MDL: does the table pay
-              the price?
-    \item[B.] \textbf{Localise}: the pose residual; drive the route; NEES against the true room, the
-              estimated room, and a room with one wall 1.5 cm out.
-    \item[C.] \textbf{Symmetry}: $F$ at the true pose and at its half-turn. What breaks the tie?
-    \item[D.] \textbf{Ceiling}: map the table face from a dead-reckoned pose; actual error vs
-              independent vs Woodbury.
+    \item \textbf{The graph}: an ownership contract, and a sweep for the nodes of dead processes.
+    \item \textbf{Agents that only read and write}: an object agent that reads the robot's belief
+          from the edge. Then remove the covariance and measure the NEES.
+    \item \textbf{One $F$, many owners}: when the sum of $F_i$ is the global $F$; the marginal
+          against the relation; the price of the boundary in nats.
+    \item \textbf{No thresholds}: a range gate against a precision, on two passes.
+    \item \textbf{The gate that survives}: a bias no precision can bound.
   \end{enumerate}
 \end{frame}
 
 \begin{frame}{Tomorrow}
   \begin{columns}[c]
     \begin{column}{0.55\textwidth}
-      Today the robot's odometry was honest. Tomorrow it is not: its wheels over-report by a few
-      per cent and its gyro drifts. Nobody tells it so.\\[0.5em]
-      It will discover its own body from the corrections the room supplies, learn which motions
-      reveal which parameters, and find that standing still is sometimes the most informative
-      thing it can do.
+      Today the agents and the graph were given. Tomorrow the beliefs on it have a life:
+      \begin{itemize}
+        \item birth as model comparison, not counting;
+        \item absence as evidence, not a missed detection;
+        \item forgetting as inferred volatility.
+      \end{itemize}
+      And the room and the robot's pose become beliefs like any other.
     \end{column}
-    \begin{column}{0.42\textwidth}
+    \begin{column}{0.4\textwidth}
       \begin{block}{Reading for Day 3}\small
-        Thesis chapter \emph{Self-Calibration of the Robot's Body}: ``What the body is'', ``What no
-        data can determine'', ``What each motion makes observable''.
+        Thesis chapters:
+        \begin{itemize}
+          \item \emph{The Life Cycle of a Concept Agent};
+          \item \emph{The Room Concept Agent and Robot Localisation}.
+        \end{itemize}
       \end{block}
     \end{column}
   \end{columns}

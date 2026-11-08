@@ -59,12 +59,12 @@
     \draw[arr] (obj)  to[bend left=15] (door);
     \draw[arr] (door) to[bend left=15] (mem);
     \draw[arr] (mem)  to[bend left=15] (room);
-    \node[day, above=1pt of room] {Day 2};
-    \node[day, right=1pt of loc]  {Days 2--3};
-    \node[day, below=1pt of obj]  {Day 4};
-    \node[day, below=1pt of door] {Day 5};
+    \node[day, above=1pt of room] {Day 3};
+    \node[day, right=1pt of loc]  {Days 3--4};
+    \node[day, below=1pt of obj]  {Days 2--3};
+    \node[day, below=1pt of door] {Day 4};
     \node[day, left=1pt of mem]   {Day 5};
-    \node[align=center, font=\small] at (0,0) {Day 1:\\the currency\\all of it is paid in};
+    \node[align=center, font=\small] at (0,0) {Day 1: the currency\\Day 2: the machine\\that pays it};
   \end{tikzpicture}
 \end{frame}
 
@@ -74,11 +74,11 @@
     \toprule
     stage & what is unknown (latent) & what supplies the evidence & day \\
     \midrule
-    estimate the room   & walls, corners, the polygon            & LiDAR returns                     & 2 \\
-    localise            & the robot's pose in that room          & LiDAR against the believed room   & 2 \\
-    learn the body      & wheel scale, gyro bias, sensor mounts  & the localiser's corrections       & 3 \\
-    concepts            & which objects exist, where, what shape & camera masks, LiDAR               & 4 \\
-    door                & where it is, whether it is open        & the room's boundary, free space   & 5 \\
+    estimate the room   & walls, corners, the polygon            & LiDAR returns                     & 3 \\
+    localise            & the robot's pose in that room          & LiDAR against the believed room   & 3 \\
+    learn the body      & wheel scale, gyro bias, sensor mounts  & the localiser's corrections       & 4 \\
+    concepts            & which objects exist, where, what shape & camera masks, LiDAR               & 2--3 \\
+    door                & where it is, whether it is open        & the room's boundary, free space   & 4 \\
     new room + memory   & a second polygon; how rooms connect    & all of the above, again           & 5 \\
     \bottomrule
   \end{tabular}
@@ -556,8 +556,8 @@
   \]
   \small
   $(3T+1)!$ orderings are available, and we write one: each factor touches at most three
-  variables and is a piece of physics. This is the \textbf{generative model}; on Day 2 it becomes
-  the factor graph the robot actually solves.
+  variables and is a piece of physics. This is the \textbf{generative model}; tomorrow we divide it
+  among the processes that actually compute it.
 \end{frame}
 
 \begin{frame}{Bayes' rule is the three operations in a row}
@@ -948,29 +948,27 @@
     \item \textbf{Model choice}: Manhattan vs free, by $\Delta F$. Then tilt the wall.
   \end{enumerate}
   \vspace{0.4em}
-  \small Where to look next waits for Day 3, when $G$ is derived in full.
+  \small Where to look next waits for Day 4, when $G$ is derived in full.
 \end{frame}
 
 \begin{frame}{Tomorrow}
   \begin{columns}[c]
     \begin{column}{0.55\textwidth}
-      The robot loses both of today's cheats:
+      Today there was one robot, one belief and one $F$. A real robot runs a dozen processes:
       \begin{itemize}
-        \item it no longer knows its pose;
-        \item it no longer knows which points belong to which wall.
+        \item where does the belief live, and who holds it?
+        \item how is one free energy divided among processes that never talk to each other?
       \end{itemize}
-      One wall becomes a room, the pose becomes one more belief, and the two must be estimated
-      \emph{together}.\\[0.5em]
-      And we measure the common-mode ceiling: how little a thousand points can teach when they
-      share one error.
+      And the commitment that runs through the rest of the week:
+      \alert{a gate is what a model looks like before the modelling has been done.}
     \end{column}
     \begin{column}{0.4\textwidth}
       \begin{block}{Reading for Day 2}\small
         Thesis chapters:
         \begin{itemize}
-          \item \emph{Estimating the Layout of an Unknown Room}, \S\S 1--5;
-          \item \emph{The Room Concept Agent}, \S\S ``What is estimated'' and ``The observation
-                model''.
+          \item \emph{The CORTEX Architecture}, \S\S ``The working memory as a distributed graph'',
+                ``Active Inference in CORTEX'';
+          \item \emph{Concept Agents}, up to ``A design rule that follows from the bound''.
         \end{itemize}
       \end{block}
     \end{column}

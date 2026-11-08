@@ -1,4 +1,4 @@
-DAYS := $(wildcard day*.tex)
+DAYS := $(filter-out %_efe.tex,$(wildcard day*.tex))
 PDFS := $(DAYS:.tex=.pdf)
 
 all: $(PDFS)

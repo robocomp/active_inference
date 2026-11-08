@@ -1,6 +1,6 @@
 """A log-odds occupancy grid, and the information a look from a viewpoint is expected to buy.
 
-Day 3 builds the explorer on it; Day 5 reuses it to finish room 1 and map room 2.
+Day 4 builds the explorer on it.
 """
 import numpy as np
 
