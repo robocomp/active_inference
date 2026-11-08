@@ -70,23 +70,27 @@ different term from the mean.
 |---|---|---|
 | 0:00–0:15 | Who holds the belief; CORTEX, the whole picture (name the four colours and stop: the rest of the day is its centre circle); modules against a shared graph | 1–3 |
 | 0:15–0:30 | The shared graph: RT edges, structural / non-structural, replicas, media plane, five memories | 4–8 |
-| 0:30–1:10 | One free energy, many owners: the joint, three treatments, seven assumptions, one process per factor, F_i, the toy scene and its price, a mean is half a belief, two failures | 9–18 |
-| 1:10–1:35 | Concept agents: definition, residual + Jacobian, what is published, residual_concept, the contract, the federation | 19–24 |
-| 1:35–2:00 | No thresholds: gate against precision, the toy, bounded outliers, the gate that survives, the rule | 25–29 |
+| 0:30–1:10 | One free energy, many owners: one big belief, what to report, cutting it into pieces, F_i as a balance, the toy scene and its price, a mean is half a belief, two failures | 9–17 |
+| 1:10–1:35 | Concept agents: definition, residual + Jacobian, what is published, residual_concept, the contract, the federation | 18–23 |
+| 1:35–2:00 | No thresholds: gate against precision, the toy, bounded outliers, the gate that survives, the rule | 24–28 |
 | 2:00–2:15 | break | |
-| 2:15–4:00 | Lab 2 | 30–31 |
+| 2:15–4:00 | Lab 2 | 29–30 |
 
-**Say it, don't read it.** Frame 12 is the argument of the day: every boundary between processes is a
+**CORTEX in action (the unnumbered full-screen slide after frame 2).** In pympress, click on it once to start; it loops (44.5 s), and the presenter window has the controls. pympress cannot autostart beamer's `\movie`. In another viewer the slide shows a still. It is a schematic: the order is illustrative, and the slide says so; on the robot everything runs at once. Point at the last line: every path went through the centre. The course copy of the drawing (`figures/cortex_overview.png`) has the thesis figure's `Root` node painted out, to match frame 4.
+
+**The main line is plain on purpose (2026-11-08).** The form admits cognitive-science students. The joint in full, the seven assumptions, the factorised q and the matrix C are backup frames after "Tomorrow", outside the frame count: show them if someone asks.
+
+**Say it, don't read it.** Frame 11 is the argument of the day: every boundary between processes is a
 conditional-independence assumption, and whatever crosses it is what survived a marginalisation.
 
-**Frame 15 is the surprise.** Ask before showing it whether the agents' standard deviations are right.
+**Frame 14 is the surprise.** Ask before showing it whether the agents' standard deviations are right.
 Most say no. Each marginal is exact; only the correlation is lost. Relations between objects are what
 the factorisation cannot hold.
 
-**Frame 16: the price does not fall with more data.** Students expect it to. It is the information the
+**Frame 15: the price does not fall with more data.** Students expect it to. It is the information the
 objects carry about each other, and no number of frames creates a place to keep it.
 
-**The rule is not "never a gate".** Frame 28 proves one must stay, and frame 29 names the three that do
+**The rule is not "never a gate".** Frame 27 proves one must stay, and frame 28 names the three that do
 exist and their verdicts: admissibility justified, birth due to be replaced, the peer grace period a
 recorded debt. Say explicitly that the thesis has not finished this.
 

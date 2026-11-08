@@ -26,9 +26,9 @@ for n, p in g["PRICES"].items():
     r, p = g["RATIOS"], np.asarray(p)
     m = r <= 10.0
     ax.semilogx(r[m], p[m], color=c, ls=ls, lw=2.2)
-    ax.text(r[m][-1] * 0.82, p[m][-1] + 0.6, f"{n} objects", ha="right", fontsize=10)
+    ax.text(r[m][-1] * 1.15, p[m][-1], f"{n} objects", ha="left", va="center", fontsize=10)
 ax.set_xlabel(r"shared error / independent error, $s^2/r$"); ax.set_ylabel("price of the boundary (nats)")
-ax.set_ylim(bottom=0)
+ax.set_ylim(bottom=0); ax.set_xlim(right=130)
 fig.tight_layout(); fig.savefig(HERE / "d2_price.pdf"); plt.close(fig)
 
 # 2. gate against precision, on two passes
