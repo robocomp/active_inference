@@ -110,20 +110,22 @@ recorded debt. Say explicitly that the thesis has not finished this.
 
 ## Day 3 — Belief in time (`slides/day3.pdf`, `labs/day3.ipynb`)
 
-Frame numbers are the slide footers (n/29).
+Frame numbers are the slide footers (n/27).
 
 | time | block | frames |
 |---|---|---|
 | 0:00–0:05 | Yesterday: who holds a belief; the life of an instance | 1–2 |
 | 0:05–0:25 | How a belief begins: ΔF, the toy streak, what the robot computes instead | 3–5 |
-| 0:25–0:45 | The room is the first belief born: description length, two regimes, free space, the derived band, promotion | 6–10 |
-| 0:45–1:05 | How a belief ends: three verdicts, walls in the visibility factor, the weight after the ceiling, four rules | 11–14 |
-| 1:05–1:25 | How a belief fades: constant Q, the floor, inferred volatility, the toy | 15–18 |
-| 1:25–1:40 | Localisation: the room supplies the likelihood, the floor, NEES, symmetry | 19–22 |
-| 1:40–1:50 | Whose evidence: association, the qualified likelihood | 23–24 |
-| 1:50–2:00 | Shared error: ceiling (on the board), the toy, the latch | 25–27 |
+| 0:25–0:45 | The room is the first belief born: description length, two regimes, free space, free space | 6–8 |
+| 0:45–1:05 | How a belief ends: three verdicts, walls in the visibility factor, the weight after the ceiling, four rules | 9–12 |
+| 1:05–1:25 | How a belief fades: constant Q, the floor, inferred volatility, the toy | 13–16 |
+| 1:25–1:40 | Localisation: the room supplies the likelihood, the floor, NEES, symmetry | 17–20 |
+| 1:40–1:50 | Whose evidence: association, the qualified likelihood | 21–22 |
+| 1:50–2:00 | Shared error: ceiling (on the board), the toy, the latch | 23–25 |
 | — | break (10 min) | |
-| 2:10–4:00 | Lab 3 | 28–29 |
+| 2:10–4:00 | Lab 3 | 26–27 |
+
+**The main line is plain on purpose (2026-11-08).** As on Day 2, each formal frame (ΔF, the room's F(m), the derived band, promotion, the floor, ζ, the likelihood, the residual-floor arithmetic, association, Woodbury) is kept whole as a backup frame after "Tomorrow", outside the frame count.
 
 **The order follows the form.** The birth of objects and the birth of the room are the same equation
 (F = inaccuracy + complexity, with complexity κ|V| for the room). Say so at frame 6: students should
@@ -142,22 +144,22 @@ structure instead.
 
 **The volatility update differs from the thesis on purpose.** `agents_life_cycle.tex` l.1093–1097 writes
 `½ e^{−ζ} d − k/2` with `d = δθᵀΣ⁻¹δθ`. As written that does not balance: d is already dimensionless, so
-e^{−ζ}d is of order 1/Q. The lab and frame 17 use the normalised surprise of the innovation, d = ν²/S,
+e^{−ζ}d is of order 1/Q. The lab and backup frame "A constant becomes an inferred quantity" use the normalised surprise of the innovation, d = ν²/S,
 saturated as a Student-t so that one spurious frame moves ζ by a bounded amount, and subtract its
 expectation under a calibrated model (0.786 for ν₀ = 4). With the unbounded surprise, one 40 cm
 spurious mask raises ζ by about 18 in a single step, so the gain goes to nearly 1 on the next frame and
 the accumulated belief is lost. The thesis marks this
-construction as design only, and frame 17 says so.
+construction as design only, and frame 15 says so.
 
-**Frame 12 is the one to tell as a story**: the same bug in three agents, each copy consistent with
-itself. **Do the floor on the board** (frame 16): the fixed-point equation takes two lines, and "elapsed
+**Frame 10 is the one to tell as a story**: the same bug in three agents, each copy consistent with
+itself. **Do the floor on the board** (frame 14; the algebra is on a backup frame): the fixed-point equation takes two lines, and "elapsed
 time does not appear" lands harder when they have just seen it vanish.
 
 **The association case study is post-thesis** (memory note `association-dies-by-common-mode-latch`,
 2026-09-18), on the earlier wall-landmark estimator. Keep it as a story about shared error, not as a
 claim about the current pipeline.
 
-**Numbers in frame 10 are simulation only.** The pipeline has not run on the physical robot. Re-check
+**Numbers in the backup frame on promotion are simulation only.** The pipeline has not run on the physical robot. Re-check
 l.1173–1177 and l.1455–1462 before the session; the thesis is still moving.
 
 **Lab order.** Parts A–C (life of a belief) come first so they cannot be squeezed out; D–G are the

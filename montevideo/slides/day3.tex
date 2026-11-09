@@ -11,6 +11,8 @@
          arr/.style={-{Stealth}, thick},
          obj/.style={draw, circle, thick, inner sep=0pt, minimum size=0.55cm, font=\scriptsize}}
 
+\usepackage{appendixnumberbeamer}
+
 \begin{document}
 
 \maketitle
@@ -21,7 +23,7 @@
       \centering
       \begin{tikzpicture}
         \node[draw, circle, very thick, fill=muted!12, minimum size=1.7cm, align=center, font=\small] (g) at (0,0) {the\\graph};
-        \foreach \a/\n/\s in {90/room/{$q(\mathcal R)$}, 330/table/{$q(\theta_i)$}, 210/localiser/{$q(X)$}} {
+        \foreach \a/\n/\s in {90/room/{what shape?}, 330/table/{what shape?}, 210/localiser/{where am I?}} {
           \node[bx, draw=cool, fill=cool!8] (\n) at (\a:2.3) {\n\\[-0.1em]\s};
           \draw[{Stealth}-{Stealth}, thick, muted] (\n) -- (g);
         }
@@ -46,7 +48,7 @@
   \begin{tikzpicture}
     \node[bx, draw=muted, densely dashed, minimum width=2.5cm] (p) at (0,0) {\textbf{pending}\\no node, no belief};
     \node[bx, draw=cool, fill=cool!10, minimum width=2.5cm] (l) at (4.4,0) {\textbf{live}\\on the graph};
-    \node[bx, draw=cool, fill=cool!4, minimum width=2.5cm] (f) at (4.4,-2.1) {\textbf{frozen}\\mean held, $\Sigma$ grows};
+    \node[bx, draw=cool, fill=cool!4, minimum width=2.5cm] (f) at (4.4,-2.1) {\textbf{frozen}\\held, less and less sure};
     \node[bx, draw=accent, fill=accent!10, minimum width=2.5cm] (d) at (8.8,0) {\textbf{dead}\\owner removes the node};
     \draw[arr] (p) -- node[above, lab] {evidence} node[below, lab] {matures} (l);
     \draw[arr] (l) -- node[above, lab] {absence} node[below, lab] {where visible} (d);
@@ -66,26 +68,32 @@
 % =================================================================================================
 
 \begin{frame}{Birth is a comparison between two worlds}
-  \[
-    \Delta F = F^{(n+1)}-F^{(n)} =
-    \underbrace{\E_q[-\ln p(\bar Z\given\theta_{1:n+1})]-\E_q[-\ln p(\bar Z\given\theta_{1:n})]}_{\text{accuracy gained by explaining those points}}
-    + \underbrace{\KL{q(\theta_{n+1})}{p(\theta_{n+1}\given\ell)}}_{\text{complexity paid for the new object}}
-  \]
   \centering
-  \begin{tikzpicture}[x=0.55cm, y=0.55cm]
-    \draw[very thick] (0,0) -- (11,0);
-    \fill[muted] (5.5,0) -- (5.2,-0.5) -- (5.8,-0.5) -- cycle;
-    \fill[cool!45, draw=white, very thick] (1,0.05) rectangle (4.6,1.1);
-    \node[lab] at (2.8,0.58) {explains $\bar Z$ better};
-    \fill[accent!40, draw=white, very thick] (6.4,0.05) rectangle (8.2,1.1);
-    \node[lab] at (7.3,0.58) {new object};
-    \node[lab] at (5.5,-1.0) {born exactly when the left side outweighs the right: $\Delta F<0$};
+  \begin{tikzpicture}
+    \foreach \x/\ttl in {0/{world A: nothing new here}, 6.1/{world B: one more object}} {
+      \begin{scope}[shift={(\x,0)}]
+        \draw[muted, rounded corners=2pt] (0,0) rectangle (4.6,1.7);
+        \node[lab, above, font=\footnotesize\bfseries] at (2.3,1.7) {\ttl};
+        \foreach \p/\q in {1.5/0.55, 1.75/0.95, 2.05/0.6, 2.3/1.05, 2.6/0.7, 2.85/1.0} \fill[accent] (\p,\q) circle (2pt);
+      \end{scope}
+    }
+    \node[lab, align=center] at (2.3,0.25) {these points are unexplained};
+    \draw[cool, very thick, fill=cool!15, fill opacity=0.6] (7.4,0.4) rectangle (9.15,1.25);
+    \node[lab, align=center] at (8.4,0.15) {explained, by a new object};
+    \begin{scope}[shift={(5.3,-1.45)}, x=0.55cm, y=0.55cm]
+      \draw[very thick] (-5.5,0) -- (5.5,0);
+      \fill[muted] (0,0) -- (-0.3,-0.5) -- (0.3,-0.5) -- cycle;
+      \fill[cool!45, draw=white, very thick] (-4.5,0.05) rectangle (-0.9,1.1);
+      \node[lab] at (-2.7,0.58) {what it explains};
+      \fill[accent!40, draw=white, very thick] (0.9,0.05) rectangle (2.9,1.1);
+      \node[lab] at (1.9,0.58) {its cost};
+    \end{scope}
   \end{tikzpicture}
 
-  \vspace{0.3em}
-  \small
-  Two models of \emph{different order}, one currency. The complexity is not a penalty added for
-  regularisation: it is the same term every live instance already pays.
+  \vspace{0.6em}
+  \small The object is born exactly when what it explains outweighs what it costs, both in
+  nats.\\[0.2em]
+  \alert{The cost is not a penalty added on top}: every live object already pays it.
   \src{agents\_life\_cycle.tex l.594--622}
 \end{frame}
 
@@ -117,50 +125,46 @@
 
 \begin{frame}{What the robot actually computes: a threshold that should not be one}
   \centering
-  \begin{tikzpicture}[node distance=0.25cm]
+  \begin{tikzpicture}
     \foreach \t/\x in {confidence/0, range/2.05, admissible/4.1, shape/6.15, in the room/8.2, surprise/10.25}
       \node[bx, draw=muted, minimum width=1.6cm, minimum height=0.6cm] at (\x,0) {\t};
     \foreach \x in {1.025,3.075,5.125,7.175,9.225} \node[font=\small] at (\x,0) {$\times$};
-    \node[bx, draw=accent, fill=accent!10, minimum width=4.8cm] (s) at (5.1,-1.5) {a weighted \textbf{streak} against a number of frames};
-    \draw[arr, muted] (5.1,-0.35) -- (s);
+    \draw[arr, muted] (5.1,-0.35) -- (5.1,-0.85);
+    \node[bx, draw=accent, fill=accent!10, minimum width=4.8cm] at (5.1,-1.2) {a weighted \textbf{streak} of frames};
+    \node[bx, draw=cool, fill=cool!10, minimum width=2.7cm, minimum height=0.9cm] (b) at (2.3,-2.65) {\textbf{birth}\\counted in frames};
+    \node[bx, draw=accent, fill=accent!10, minimum width=2.7cm, minimum height=0.9cm] (d) at (7.9,-2.65) {\textbf{death}\\counted in evidence};
+    \node[font=\Large, text=accent] at (5.1,-2.65) {$\neq$};
   \end{tikzpicture}
 
   \vspace{0.6em}
-  \begin{itemize}\small
-    \item Every factor stands in for one term of $\Delta F$. As a decomposition it is reasonable.
-    \item It loses the \textbf{units}: birth can be traded against nothing else in the model.
-    \item Birth and death are decided in \textbf{different currencies}, so a whole subsystem exists
-          to undo births that should not have happened.
-    \item The proper comparison is within reach; what is missing is plumbing, not theory.
-  \end{itemize}
+  \small Each factor is sensible, but the units are gone: birth can be traded against nothing else,
+  so \alert{a whole subsystem exists to undo births that should not have happened}. The proper
+  comparison is within reach; what is missing is plumbing, not theory.
   \src{agents\_life\_cycle.tex l.629--706, l.1276--1282}
 \end{frame}
 
 \begin{frame}{The room is the first belief born}
   \begin{columns}[c]
-    \begin{column}{0.58\textwidth}
-      \small
-      \[
-        F(m) = \underbrace{\E_q[-\ln p(o\given X,\theta_m,m)]}_{\text{inaccuracy}}
-             + \underbrace{\kappa\,|V|}_{\text{complexity}},
-        \quad \kappa=\ln\frac{L}{\sigma}
-      \]
-      \small
-      The number of walls is unknown, so the room is a choice of \emph{structure} $m$, priced like
-      a birth. One coordinate to $\sigma=3$ cm in a room 10 m across costs
+    \begin{column}{0.54\textwidth}
+      How many walls? Nobody knows, so the room's shape is itself a choice, and
+      \alert{each corner has a price}.\\[0.7em]
+      \small One corner placed to 3 cm, in a room 10 m across:
       \[ \ln(10/0.03)\approx 5.8\nats. \]
-      Minimum description length and minimum free energy are, here, one rule.
+      The same trade as a birth: a corner is kept only if the evidence pays for it. The shortest
+      description of the room and the lowest free energy are, here, one rule.
     \end{column}
-    \begin{column}{0.38\textwidth}
+    \begin{column}{0.42\textwidth}
       \centering
-      \begin{tikzpicture}[scale=0.62]
+      \begin{tikzpicture}[scale=0.62, coin/.style={fill=accent!70, draw=white, thick}]
         \draw[very thick, cool] (0,0) rectangle (4,2.4);
-        \node[lab, above] at (2,2.4) {4 vertices};
+        \foreach \p in {(0,0),(4,0),(4,2.4),(0,2.4)} \fill[coin] \p circle (4pt);
+        \node[lab, above] at (2,2.5) {4 corners};
         \begin{scope}[shift={(0,-3.3)}]
           \draw[very thick, accent] (0,0) -- (4,0) -- (4,1.6) -- (3,1.6) -- (3,2.4) -- (0,2.4) -- cycle;
           \fill[muted!30] (3.05,1.65) rectangle (4,2.4);
-          \node[lab, above] at (2,2.4) {6 vertices: a cabinet};
-          \node[lab, below, align=center] at (2,0) {pays if its cells are\\worth more than its corners};
+          \foreach \p in {(0,0),(4,0),(4,1.6),(3,1.6),(3,2.4),(0,2.4)} \fill[coin] \p circle (4pt);
+          \node[lab, above] at (1.6,2.5) {6 corners: a cabinet?};
+          \node[lab, below, align=center] at (2,-0.05) {only if its evidence pays\\for two more corners};
         \end{scope}
       \end{tikzpicture}
     \end{column}
@@ -177,7 +181,7 @@
     \node[bx, draw=cool, fill=cool!10, minimum width=1.5cm] (o) at (4.8,0) {outline};
     \draw[arr] (m) -- (x);
     \draw[arr] (x) -- (o);
-    \draw[arr, accent, densely dashed] (o.south) -- ++(0,-0.45) -| node[pos=0.25, below, lab, text=accent] {zero precision: this message is never sent} (x.south);
+    \draw[arr, accent, densely dashed] (o.south) -- ++(0,-0.45) -| node[pos=0.25, below, lab, text=accent] {the outline never corrects the pose} (x.south);
     \draw[muted, densely dashed] (6.25,-1.5) -- (6.25,1.5);
     \node[font=\small\bfseries] at (9.3,1.25) {operating: the room is a constant};
     \node[bx, draw=cool, fill=cool!10, minimum width=1.5cm] (r) at (7.6,0) {polygon};
@@ -187,12 +191,9 @@
   \end{tikzpicture}
 
   \vspace{0.5em}
-  \begin{itemize}\small
-    \item A wrong wall would drag the pose, and the dragged pose would confirm the wrong wall.
-    \item One factorised belief, two settings of precision. A room is a slow parameter; a pose is
-          a fast state.
-    \item The price: a constant cannot be doubted by the localiser that leans on it.
-  \end{itemize}
+  \small A wrong wall would drag the pose, and the dragged pose would confirm the wrong wall, so
+  \alert{the loop is never closed}. The price: a constant cannot be doubted by the localiser that
+  leans on it.
   \src{layout\_acquisition.tex l.162--199}
 \end{frame}
 
@@ -203,69 +204,23 @@
     \end{column}
     \begin{column}{0.55\textwidth}
       \small
-      In the lab, the table's south face earns \textbf{82 nats} as a candidate wall, against a price
-      of 7.6. Evidence for a surface cannot keep furniture out of the room.\\[0.5em]
-      The grid therefore keeps two counts per 5 cm cell:
-      \[ \text{matter}(c)\iff h_c>n_c \]
-      with $h_c$ the beams that stop in the cell and $n_c$ those that pass through it. Only the
-      second count can say that a cell is \emph{empty}.\\[0.5em]
-      Free floor beyond an edge is evidence against that edge.
+      The table's south face earns \textbf{82 nats} as a candidate wall, against a price of 7.6.
+      Evidence for a surface cannot keep furniture out of the room.\\[0.5em]
+      \centering
+      \begin{tikzpicture}[x=0.62cm, y=0.62cm]
+        \foreach \y/\s in {1.4/2.5, 0/5.5} \foreach \i in {0,...,5} \draw[muted!60] (\i,\y) rectangle ++(1,0.9);
+        \fill[accent!45] (3,1.4) rectangle ++(1,0.9);
+        \draw[-{Stealth}, thick, cool] (-0.9,1.85) -- (3.3,1.85);
+        \draw[-{Stealth}, thick, cool] (-0.9,0.45) -- (6.6,0.45);
+        \node[lab, anchor=west] at (6.1,1.85) {it stops: matter};
+        \node[lab, anchor=north] at (3,-0.05) {it passes through: these cells are \emph{empty}};
+      \end{tikzpicture}\\[0.5em]
+      \raggedright
+      Only a beam that passes can say a cell is empty. Free floor beyond an edge is evidence against
+      that edge.
     \end{column}
   \end{columns}
   \src{lab 3, exercise 11; layout\_acquisition.tex l.507--526}
-\end{frame}
-
-\begin{frame}{A band that is derived, not chosen}
-  \begin{columns}[c]
-    \begin{column}{0.52\textwidth}
-      \small
-      Clutter is uniform over $A$. A wall puts its points in a strip $L$ long, $\sigma$ wide:
-      \[
-        \frac{p_\text{wall}}{p_\text{clutter}} = \frac{A}{L\sqrt{2\pi}\,\sigma}\,e^{-r^2/2\sigma^2}
-      \]
-      \vspace{-0.6em}
-      \begin{itemize}
-        \item Inlier iff the ratio exceeds 1: about $3\sigma$.
-        \item Each point brings $\ln(\text{ratio})$ \textbf{nats}.
-        \item The band \textbf{narrows as $L$ grows}: a long wall is a more expensive explanation.
-      \end{itemize}
-    \end{column}
-    \begin{column}{0.45\textwidth}
-      \includegraphics[width=\textwidth]{d3_band.pdf}
-    \end{column}
-  \end{columns}
-  \lesson{A tuned threshold gives the band. The derivation gives the band \emph{and} the currency.}
-  \src{lab 3, exercise 8; the same mixture, per cell: layout\_acquisition.tex l.1049--1055}
-\end{frame}
-
-\begin{frame}{Promotion: the outline with the shortest description}
-  \begin{columns}[c]
-    \begin{column}{0.44\textwidth}
-      \centering
-      \begin{tikzpicture}[x=1cm, y=1cm]
-        \foreach \y/\l/\c/\t in {2.1/3.1/muted!45/{drawn 1 min ago}, 1.2/2.2/cool!60/{cabinets' side}, 0.3/3.6/muted!45/{drawn last}} {
-          \fill[\c, draw=white, very thick] (0,\y-0.27) rectangle (\l,\y+0.27);
-          \node[lab, anchor=west] at (0.07,\y) {\t};
-        }
-        \draw[muted, -{Stealth}] (0,-0.1) -- (4.1,-0.1) node[below left, lab, text=black] {description length (nats)};
-        \node[lab, anchor=west, text=cool] at (2.3,1.2) {adopted};
-      \end{tikzpicture}\\
-      {\scriptsize schematic}
-    \end{column}
-    \begin{column}{0.53\textwidth}
-      \small
-      The outline moves between wall and furniture as the robot drives, so ``the latest one'' would
-      make the room depend on when exploration stopped. Up to 60 recent outlines are kept and
-      scored on \emph{all} the evidence.
-      \begin{itemize}
-        \item In 7 of 10 apartment runs (earlier build) the winner was not the last drawn.
-        \item From the kitchen-corner start: overlap 0.968 at promotion, 0.983 refined.
-        \item Ten generated rooms: median 0.994.
-      \end{itemize}
-      {\scriptsize All in simulation; the pipeline has not run on the physical robot.}
-    \end{column}
-  \end{columns}
-  \src{layout\_acquisition.tex l.1036--1046, l.1173--1177, l.1455--1462}
 \end{frame}
 
 % =================================================================================================
@@ -292,8 +247,8 @@
 
   \vspace{0.8em}
   \small
-  The whole stage lies between the middle panel and the right one. Existence is one log-odds $L$
-  per instance, clamped to $\pm L_{\max}$, so it stays finite and recoverable.
+  The whole stage lies between the middle panel and the right one. Existence is one running number,
+  evidence for and against simply adds to it, and it never reaches certainty, so it can always recover.
   \src{agents\_life\_cycle.tex l.887--919}
 \end{frame}
 
@@ -313,10 +268,8 @@
     \end{column}
     \begin{column}{0.47\textwidth}
       \small
-      \[
-        P(M\given\theta,\ell,X)\ \longrightarrow\ P(M\given\theta,\ell,X,\alert{\mathcal R})
-      \]
-      A wall is not a detector class, so without the room polygon every wall is transparent.\\[0.5em]
+      A detector has no class called ``wall'', so without the room's outline \alert{every wall is
+      transparent}. Line of sight must include the room.\\[0.5em]
       \begin{measured}{the same defect, three agents}
         Refrigerator, then door, then table and cabinet. Each copy was consistent with itself, so
         no per-agent test could find it.
@@ -326,28 +279,39 @@
   \src{agents\_life\_cycle.tex l.921--951; CONCEPT\_AGENT\_LIFECYCLE.md l.7--11}
 \end{frame}
 
-\begin{frame}{Weight absence by $P(\text{detect})$, on the correct side of the ceiling}
+\begin{frame}{Weight absence by how visible it was, after the bucket}
   \centering
-  \begin{tikzpicture}
-    \tikzset{st/.style={bx, minimum width=2.3cm, minimum height=0.65cm}}
-    \node[anchor=east, font=\small] at (-1.5,0) {wrong};
-    \node[st] (a1) at (0,0) {count of beams};
-    \node[st, draw=cool, fill=cool!10] (a2) at (3.1,0) {$\times\,P(\text{detect})$};
-    \node[st, draw=accent, fill=accent!10] (a3) at (6.2,0) {saturate at $\ell_\text{occ}$};
-    \node[font=\small] (a4) at (9.2,0) {drop $=\mathbf{0.40}$};
-    \draw[arr] (a1) -- (a2); \draw[arr] (a2) -- (a3); \draw[arr] (a3) -- (a4);
-    \node[anchor=east, font=\small] at (-1.5,-1.3) {right};
-    \node[st] (b1) at (0,-1.3) {count of beams};
-    \node[st, draw=accent, fill=accent!10] (b2) at (3.1,-1.3) {saturate at $\ell_\text{occ}$};
-    \node[st, draw=cool, fill=cool!10] (b3) at (6.2,-1.3) {$\times\,P(\text{detect})$};
-    \node[font=\small] (b4) at (9.2,-1.3) {drop $=\mathbf{0.008}$};
-    \draw[arr] (b1) -- (b2); \draw[arr] (b2) -- (b3); \draw[arr] (b3) -- (b4);
+  \begin{tikzpicture}[tap/.style={draw=accent, very thick, circle, fill=accent!12, inner sep=1.5pt, font=\scriptsize\bfseries},
+                      pour/.style={-{Stealth[length=2mm]}, thick, color=cool},
+                      bucket/.style={very thick, draw=black!70}]
+    % top: the tap before the bucket
+    \node[anchor=east, font=\small\bfseries] at (-0.5,1.5) {wrong};
+    \foreach \y in {1.1,1.5,1.9} \draw[pour] (0,\y) -- (1.15,1.5);
+    \node[tap] (t1) at (1.55,1.5) {$\times 0.02$};
+    \draw[pour] (t1) -- (3.35,1.5);
+    \fill[cool!45] (3.4,0.95) rectangle (5.0,2.0);
+    \draw[bucket] (3.4,2.05) -- (3.4,0.95) -- (5.0,0.95) -- (5.0,2.05);
+    \node[lab] at (4.2,1.48) {still full};
+    \draw[pour, line width=2pt] (5.05,1.5) -- (7.2,1.5);
+    \node[font=\normalsize\bfseries, anchor=west] at (7.3,1.5) {drop $=0.40$};
+    % bottom: the tap after the bucket
+    \node[anchor=east, font=\small\bfseries] at (-0.5,-0.3) {right};
+    \foreach \y in {-0.7,-0.3,0.1} \draw[pour] (0,\y) -- (1.3,-0.3);
+    \fill[cool!45] (1.35,-0.85) rectangle (2.95,0.2);
+    \draw[bucket] (1.35,0.25) -- (1.35,-0.85) -- (2.95,-0.85) -- (2.95,0.25);
+    \node[lab] at (2.15,-0.32) {full};
+    \draw[pour] (3.0,-0.3) -- (5.0,-0.3);
+    \node[tap] (t2) at (5.5,-0.3) {$\times 0.02$};
+    \draw[pour, line width=0.5pt] (t2) -- (7.2,-0.3);
+    \node[font=\normalsize\bfseries, anchor=west] at (7.3,-0.3) {drop $=0.008$};
+    \node[lab, align=center] at (0.55,2.35) {many beams};
+    \node[lab, align=center] at (4.2,2.35) {a frame can say only so much};
   \end{tikzpicture}
 
-  \vspace{0.6em}
+  \vspace{0.4em}
   {\small A view in which a present object would be only 2\% resolvable.}
 
-  \lesson{A modulation applied upstream of a saturation is invisible: the saturation absorbs it.}
+  \lesson{Turned down before the bucket, the tap does nothing: the bucket fills anyway.}
   \src{agents\_life\_cycle.tex l.953--973; numbers: lab 3, exercise 4}
 \end{frame}
 
@@ -389,61 +353,70 @@
     \end{column}
     \begin{column}{0.5\textwidth}
       \small
-      $\Sigma\leftarrow\Sigma+Q$, every frame, seen or not, with $Q=(0.005\text{ m})^2$.
+      Every frame, seen or not, a fixed amount of doubt is added.
       \begin{itemize}
-        \item A converged table ($\sigma_w\approx 3$ cm) loses half its precision in
-              \textbf{3.6 s}.
+        \item A table known to 3 cm loses half its precision in \textbf{3.6 s}.
         \item It is back at the prior after about \textbf{5.9 minutes}, whether it was tracked for
               thirty seconds or for three hours.
       \end{itemize}
       \begin{measured}{a real table, 1320 blind cycles}
-        Predicted $\sigma_w = 0.184$ m; logged $0.170$ m. The next sparse mask re-cut the table.
+        Predicted error 0.184 m; logged 0.170 m. The next sparse mask re-cut the table.
       \end{measured}
     \end{column}
   \end{columns}
   \src{agents\_life\_cycle.tex l.1007--1043}
 \end{frame}
 
-\begin{frame}{Observed, precision stops at a floor}
-  One predict plus one update, $\Sigma^{-1}\leftarrow\Sigma^{-1}+i$, with $y$ the predicted precision and
-  $\varrho=Q$:
-  \[
-    \frac1y=\frac1{y+i}+\varrho
-    \quad\Longrightarrow\quad
-    \boxed{\;\sigma_\text{steady}\approx(\varrho/i)^{1/4}\;}
-  \]
-  \begin{itemize}
-    \item \alert{Elapsed time does not appear.} Evidence is discarded at the rate it is acquired:
-          three hours of observation leave the belief where thirty seconds did.
-    \item Lab: formula 10.0 mm, simulated 9.4 mm.
-    \item Clamping $\Sigma$ caps the first problem and does nothing about this one.
-  \end{itemize}
+\begin{frame}{Even when it is watched, precision stops at a floor}
+  \begin{columns}[c]
+    \begin{column}{0.52\textwidth}
+      \centering
+      \begin{tikzpicture}[x=0.55cm, y=2.0cm]
+        \draw[-{Stealth}, muted] (0,0) -- (11,0) node[below left, lab, text=black] {time watched};
+        \draw[-{Stealth}, muted] (0,0) -- (0,1.25) node[right, lab, text=black] {how unsure};
+        \draw[muted, densely dashed, thick, domain=0.75:10.5, samples=50] plot (\x, {0.9/sqrt(\x)});
+        \draw[cool, very thick, domain=0.75:10.5, samples=50] plot (\x, {sqrt(0.16 + 0.75/\x)});
+        \draw[accent, densely dashed] (0,0.4) -- (10.5,0.4);
+        \node[lab, text=accent, anchor=north west] at (0.2,0.39) {the floor};
+        \node[lab, anchor=west] at (5.4,0.1) {what we might hope for};
+        \fill[cool] (2.2,0.74) circle (2pt);
+        \fill[cool] (10.3,0.48) circle (2pt);
+      \end{tikzpicture}
+    \end{column}
+    \begin{column}{0.44\textwidth}
+      \small
+      The doubt added each frame is balanced by what that frame teaches, and the belief stops
+      improving.\\[0.5em]
+      \alert{Elapsed time does not appear.} Three hours of observation leave the belief where
+      thirty seconds did.\\[0.5em]
+      Lab: 10.0 mm predicted, 9.4 mm simulated.
+    \end{column}
+  \end{columns}
   \lesson{Nothing an agent learns extends how long it stays resistant.}
   \src{agents\_life\_cycle.tex l.1045--1082; lab 3, exercise 5}
 \end{frame}
 
-\begin{frame}{A constant becomes an inferred quantity}
-  Each instance carries a log-volatility, $Q=e^{\zeta}$, driven by its own surprise:
-  \[
-    \zeta \leftarrow \zeta + \eta\Big(
-      \underbrace{\tfrac12\,\tilde d-\tfrac12\E[\tilde d\,]}_{\text{surprise seen minus expected}}
-      - \underbrace{\frac{\zeta-\zeta_0}{\sigma_\zeta^2}}_{\text{hyperprior pull-back}}\Big)
-  \]
-  \begin{columns}[T]
-    \begin{column}{0.5\textwidth}
-      \small
-      \begin{itemize}
-        \item Consistent views: $\zeta$ falls, memory lengthens, precision accumulates.
-        \item A sustained surprise: $\zeta$ rises and the model adapts. Stiffness is never a lock.
-      \end{itemize}
-    \end{column}
-    \begin{column}{0.46\textwidth}
-      \small
-      In the lab $\tilde d$ is the saturating (Student-$t$) surprise of the innovation: one
-      outrageous frame moves $\zeta$ by a bounded amount.\\[0.3em]
-      \alert{Design only: no agent runs this yet.}
-    \end{column}
-  \end{columns}
+\begin{frame}{The forgetting rate becomes something the object infers}
+  \centering
+  \begin{tikzpicture}[needle/.style={-{Stealth[length=2.5mm]}, very thick, color=accent}]
+    \foreach \x/\ang/\ttl/\txt in {0/150/{views keep agreeing}/{it forgets more slowly,\\precision accumulates}, 6.7/35/{a sustained surprise}/{it forgets faster\\and adapts}} {
+      \begin{scope}[shift={(\x,0)}]
+        \draw[muted, line width=5pt] (180:1.25) arc (180:0:1.25);
+        \draw[needle] (0,0) -- (\ang:1.1);
+        \fill[black!60] (0,0) circle (3pt);
+        \node[lab] at (-1.55,-0.15) {slow};
+        \node[lab] at (1.55,-0.15) {fast};
+        \node[font=\footnotesize\bfseries, above] at (0,1.45) {\ttl};
+        \node[lab, align=center, below] at (0,-0.35) {\txt};
+      \end{scope}
+    }
+  \end{tikzpicture}
+
+  \vspace{0.7em}
+  \small Each object turns its own dial, by how surprised it has been against how surprised it
+  expected to be. One outrageous frame moves it only a bounded amount, and a gentle pull keeps it
+  from sticking: \textbf{stiff, but never locked}.\\[0.4em]
+  \alert{Design only: no agent runs this yet.}
   \src{agents\_life\_cycle.tex l.1085--1125 (form of the update); lab 3, exercise 5}
 \end{frame}
 
@@ -480,32 +453,29 @@
 
 \begin{frame}{The room supplies the likelihood}
   \begin{columns}[c]
-    \begin{column}{0.58\textwidth}
-      \small
-      For a scan $\{p_i\}$ and a candidate pose $X$:
-      \[
-        d_i(X)=\operatorname{dist}\big(R(\phi)p_i+t,\ \mathcal R\big)
-      \]
-      \[
-        \mathcal L_\text{obs}=\frac{1}{2\sigma^2}\cdot\frac1N\sum_i w_i\,\mathrm{Huber}(d_i)
-      \]
-      \begin{itemize}
-        \item The residual \emph{is} the prediction error: no expected scan is rendered.
-        \item Note the $\frac1N$: the precision does not grow with scan density.
-        \item Range and incidence weights are precisions on a covariate, not gates.
-      \end{itemize}
-    \end{column}
-    \begin{column}{0.4\textwidth}
+    \begin{column}{0.46\textwidth}
       \centering
-      \begin{tikzpicture}[scale=0.75]
+      \begin{tikzpicture}[scale=1.05]
         \draw[very thick, muted] (0,0) rectangle (4.6,3);
         \fill[black!55] (1.6,1.2) circle (0.14);
         \foreach \px/\py/\qx/\qy in {4.36/2.2/4.6/2.2, 4.25/0.55/4.6/0.55, 2.9/2.75/2.9/3, 0.8/2.8/0.8/3} {
+          \draw[cool!40] (1.6,1.2) -- (\px,\py);
           \fill[cool] (\px,\py) circle (2pt);
           \draw[accent, thick, -{Stealth[length=1.5mm]}] (\px,\py) -- (\qx,\qy);
         }
-        \node[lab, align=center] at (2.3,-0.42) {each return is pulled onto its nearest wall};
+        \node[lab, align=center] at (2.3,-0.3) {each return is pulled onto its nearest wall};
       \end{tikzpicture}
+    \end{column}
+    \begin{column}{0.5\textwidth}
+      Where would I have to stand for this scan to land on these walls?
+      \vspace{0.5em}
+      \begin{itemize}\small
+        \item The distance from each return to its wall \alert{is} the prediction error. No expected
+              scan is ever drawn.
+        \item More points in a scan do not make the belief more certain: their errors are not
+              independent.
+        \item Range and incidence weigh each point: precisions, not gates.
+      \end{itemize}
     \end{column}
   \end{columns}
   \src{room\_concept.tex l.243--307}
@@ -524,13 +494,10 @@
       \end{tikzpicture}
     \end{column}
     \begin{column}{0.6\textwidth}
-      Park the robot. The mean wall distance of each scan hovers near 87 mm and never reaches zero.
-      \begin{itemize}\small
-        \item Its fluctuation is white: $N^{-1/2}$, measured ratio $1.41$ against a predicted
-              $\sqrt{405/200}=1.42$.
-        \item That fixes the per-point scatter at $\approx 37$ mm, which explains
-              $0.798\times 37\approx 30$ mm.
-      \end{itemize}
+      Park the robot. The average distance from its scan to the walls sits near 87 mm and never
+      reaches zero.\\[0.5em]
+      \small About 30 mm is sensor noise. The other 57 mm is where the map does not match the
+      world, and it is the same on every scan.
     \end{column}
   \end{columns}
   \lesson{Two-thirds of the floor is an error every return shares. More returns cannot remove it.}
@@ -577,7 +544,7 @@
 \section{Whose evidence is it?}
 % =================================================================================================
 
-\begin{frame}{Association: the factor the free energy cannot see}
+\begin{frame}{Association: the mistake the free energy cannot see}
   \begin{columns}[c]
     \begin{column}{0.46\textwidth}
       \centering
@@ -589,44 +556,40 @@
         \fill[accent] (0.85,0.55) circle (2.5pt);
         \fill[accent] (3.0,0.05) circle (2.5pt);
         \fill[accent] (1.9,-0.75) circle (2.5pt);
-        \node[lab, right, text=accent] at (1.95,-0.75) {opens a candidate};
+        \node[lab, right, text=accent] at (1.95,-0.75) {starts a new candidate};
       \end{tikzpicture}\\[0.4em]
-      {\small a poorly known instance accepts detections from further away}
+      {\small a poorly known object accepts detections from further away}
     \end{column}
-    \begin{column}{0.51\textwidth}
+    \begin{column}{0.5\textwidth}
       \small
-      \[
-        P(M\given X,Z,\Phi)\approx\mathbf 1[M=\hat M],\quad
-        S=\Sigma^{xy}_{\theta_i}+\sigma_\text{det}^2 I
-      \]
-      Squared Mahalanobis distance at most 9, assigned greedily, lowest cost first.\\[0.5em]
-      A distribution on one value has no entropy and no expectation: the matching is free, in the
-      literal sense that $F$ cannot see it. \alert{A wrong match is invisible to the quantity that
-      would have registered it.}\\[0.5em]
+      Each detection goes to the object it most likely belongs to: one best guess, closest first.\\[0.5em]
+      A guess has no uncertainty to pay for, so it adds nothing to $F$.
+      \alert{A wrong match is invisible to the quantity that would have registered it.}\\[0.5em]
       The repair comes later and from elsewhere: merging, and the existence belief.
     \end{column}
   \end{columns}
   \src{concept\_agents.tex l.483--486, l.859--889}
 \end{frame}
 
-\begin{frame}{A mask is a qualified likelihood}
+\begin{frame}{A mask arrives with a label saying how far to trust it}
   \centering
-  \begin{tikzpicture}
-    \node[bx, draw=cool, fill=cool!8, text width=4.6cm, align=left] (m) at (0,0) {\textbf{the mask supplies}\\
-      class label and score\\3-D support points\\a \emph{variance}: blur and jitter\\a \emph{bias}: known timing offset};
-    \node[bx, draw=good, fill=good!8, text width=4.6cm, align=left] (a) at (7.4,0) {\textbf{the agent supplies}\\
-      the prior\\accumulation over time\\identity across frames\\the decision that it exists};
-    \draw[arr, very thick] (m) -- node[above, lab] {content and} node[below, lab] {precision} (a);
+  \begin{tikzpicture}[tag/.style={draw, rounded corners=2pt, font=\scriptsize, inner sep=3pt, fill=white, anchor=west}]
+    \draw[thick, fill=muted!10, rounded corners=2pt] (0,0) rectangle (3.4,2.3);
+    \fill[cool!40, draw=cool, thick, rounded corners=6pt] (0.9,0.55) -- (2.5,0.5) -- (2.7,1.5) -- (1.7,1.85) -- (0.8,1.4) -- cycle;
+    \node[lab] at (1.7,-0.2) {what the camera delivers};
+    \foreach \y/\c/\t in {2.05/cool/{it says: a table, 0.9}, 1.4/good/{3-D points on its surface}, 0.75/accent/{blurred by this much: a variance}, 0.1/accent/{late by this much: a bias}} {
+      \node[tag, draw=\c] (n) at (4.3,\y) {\t};
+      \draw[muted] (3.45,1.15) -- (n.west);
+    }
+    \node[bx, draw=good, fill=good!10, minimum width=2.7cm, minimum height=1.6cm] (a) at (10.7,1.1) {\textbf{the agent}\\decides what\\that means};
+    \draw[arr, very thick] (8.75,1.1) -- (a.west);
   \end{tikzpicture}
 
   \vspace{0.7em}
-  \begin{itemize}\small
-    \item The producer reports the physics of capture; the consumer decides what that does to
-          its belief. The hub gates nothing.
-    \item Variance and bias are published separately because they are different:
-          \alert{symmetric error downweights, biased error gates.}
-    \item The qualification is a prior on the \emph{channel}, not on the world.
-  \end{itemize}
+  \small The producer reports the physics of the capture and gates nothing; the agent decides what
+  that does to its belief.\\[0.3em]
+  Variance and bias are different things, and they are reported apart:
+  \alert{an error that averages lowers the weight; an error that does not stops the update.}
   \src{phylogenetic\_perception.tex l.347--408}
 \end{frame}
 
@@ -635,20 +598,29 @@
 % =================================================================================================
 
 \begin{frame}{The common-mode ceiling}
-  $N$ residuals that share one offset $\delta\sim\N(0,\Sigma_\delta)$, a pose error, plus independent
-  noise. Marginalise $\delta$:
-  \[
-    \mathcal I = J_z^\top\big(\sigma^2 I + J_z\Sigma_\delta J_z^\top\big)^{-1}J_z
-    \;\overset{\text{Woodbury}}{=}\;
-    \big(\sigma^2(J_z^\top J_z)^{-1} + \Sigma_\delta\big)^{-1}
-    \;\xrightarrow[N\to\infty]{}\; \Sigma_\delta^{-1}
-  \]
-  \begin{itemize}
-    \item A denser mask eventually stops helping. The ceiling is set by the \emph{pose} error, not
-          by the pixel count.
-    \item The joint information on (object, offset) has rank 6, not 12: the data cannot tell a
-          displaced object from a displaced robot.
-  \end{itemize}
+  \begin{columns}[c]
+    \begin{column}{0.52\textwidth}
+      \centering
+      \begin{tikzpicture}
+        \draw[very thick, muted] (0,0) -- (5,0);
+        \node[lab, below] at (1.1,0) {the true surface};
+        \foreach \x/\e in {0.3/.04,0.65/-.05,1.0/.06,1.35/-.03,1.7/.05,2.05/-.06,2.4/.03,2.75/-.04,3.1/.06,3.45/-.05,3.8/.04,4.15/-.03,4.5/.05} {
+          \fill[cool] (\x,\e) circle (1.5pt);
+          \fill[accent] (\x+0.25,0.75+\e) circle (1.5pt);
+        }
+        \draw[-{Stealth[length=2.5mm]}, very thick, accent] (1.0,0.1) -- (1.25,0.65);
+        \draw[-{Stealth[length=2.5mm]}, very thick, accent] (3.45,0.1) -- (3.7,0.65);
+        \node[lab, text=accent, above] at (2.5,1.05) {one pose error moves them all together};
+      \end{tikzpicture}
+    \end{column}
+    \begin{column}{0.44\textwidth}
+      \small
+      The same arrow as yesterday, now on a thousand points.\\[0.5em]
+      Averaging points removes their small independent jitter. It cannot touch the arrow.\\[0.5em]
+      \alert{A denser mask eventually stops helping}: the limit is set by the robot's pose, not by
+      the number of pixels. And the data cannot tell a displaced object from a displaced robot.
+    \end{column}
+  \end{columns}
   \src{concept\_agents.tex l.1048--1090}
 \end{frame}
 
@@ -672,33 +644,32 @@
 \end{frame}
 
 \begin{frame}{Case study: association dies by a common-mode latch \wip}
-  \begin{columns}[T]
-    \begin{column}{0.5\textwidth}
-      \small One frame of a real recording, on an earlier estimator:\\[0.3em]
-      \footnotesize
-      \begin{tabular}{@{}c r r r@{}}
-        \toprule
-        seg & $\chi^2$ & $\Delta\phi$ & gate $\sigma_\phi$ \\
-        \midrule
-        0 & 1.03 & $-5.85^\circ$ & $6.78^\circ$ \\
-        1 & 1.02 & $-5.76^\circ$ & $6.34^\circ$ \\
-        2 & 1.20 & $-5.79^\circ$ & $6.01^\circ$ \\
-        3 & 1.06 & $-5.77^\circ$ & $6.67^\circ$ \\
-        \bottomrule
-      \end{tabular}
+  \begin{columns}[c]
+    \begin{column}{0.54\textwidth}
+      \centering
+      \begin{tikzpicture}[x=0.56cm, y=0.62cm]
+        \foreach \y/\w/\l in {3/6.78/wall 0, 2/6.34/wall 1, 1/6.01/wall 2, 0/6.67/wall 3} {
+          \fill[good!30] (0,\y) rectangle (\w,\y+0.62);
+          \node[lab, anchor=east] at (-0.1,\y+0.31) {\l};
+          \node[lab, anchor=west] at (\w+0.1,\y+0.31) {$\pm\w^\circ$};
+        }
+        \draw[accent, very thick] (5.8,-0.25) -- (5.8,3.85);
+        \node[lab, text=accent, above, align=center] at (5.8,3.85) {the same $5.8^\circ$ error, on every wall};
+        \draw[muted] (0,-0.25) -- (0,3.85);
+        \node[lab, below] at (3,-0.28) {each wall's tolerance, from one frame};
+      \end{tikzpicture}
     \end{column}
-    \begin{column}{0.48\textwidth}
+    \begin{column}{0.42\textwidth}
       \small
-      The \emph{same} $-5.8^\circ$ on every wall is one \textbf{heading} error, not four wall
-      errors.\\[0.5em]
-      Each wall is gated independently against an error they all share. When it crosses
-      $\approx 6^\circ$ they all fail \alert{in the same frame}, nothing is left to correct the
-      pose, and association goes from 100\% to 0\% for ever.
+      This is one \textbf{heading} error, not four wall errors, yet each wall is tested on its own
+      against it.\\[0.5em]
+      When it crosses about $6^\circ$, they all fail \alert{in the same frame}. Nothing is left to
+      correct the pose, and association goes from 100\% to 0\% for ever.
     \end{column}
   \end{columns}
-  \vspace{0.4em}
-  \small ``A parked run looks perfect and the first tour kills it.''
-  \src{post-thesis note, 2026-09-18}
+  \vspace{0.5em}
+  \centering\small ``A parked run looks perfect and the first tour kills it.''
+  \src{an earlier estimator; post-thesis note, 2026-09-18}
 \end{frame}
 
 % =================================================================================================
@@ -756,6 +727,269 @@
       \end{block}
     \end{column}
   \end{columns}
+\end{frame}
+
+\appendix
+
+\begin{frame}{Backup: Birth is a comparison between two worlds}
+  \[
+    \Delta F = F^{(n+1)}-F^{(n)} =
+    \underbrace{\E_q[-\ln p(\bar Z\given\theta_{1:n+1})]-\E_q[-\ln p(\bar Z\given\theta_{1:n})]}_{\text{accuracy gained by explaining those points}}
+    + \underbrace{\KL{q(\theta_{n+1})}{p(\theta_{n+1}\given\ell)}}_{\text{complexity paid for the new object}}
+  \]
+  \centering
+  \begin{tikzpicture}[x=0.55cm, y=0.55cm]
+    \draw[very thick] (0,0) -- (11,0);
+    \fill[muted] (5.5,0) -- (5.2,-0.5) -- (5.8,-0.5) -- cycle;
+    \fill[cool!45, draw=white, very thick] (1,0.05) rectangle (4.6,1.1);
+    \node[lab] at (2.8,0.58) {explains $\bar Z$ better};
+    \fill[accent!40, draw=white, very thick] (6.4,0.05) rectangle (8.2,1.1);
+    \node[lab] at (7.3,0.58) {new object};
+    \node[lab] at (5.5,-1.0) {born exactly when the left side outweighs the right: $\Delta F<0$};
+  \end{tikzpicture}
+
+  \vspace{0.3em}
+  \small
+  Two models of \emph{different order}, one currency. The complexity is not a penalty added for
+  regularisation: it is the same term every live instance already pays.
+  \src{agents\_life\_cycle.tex l.594--622}
+\end{frame}
+
+\begin{frame}{Backup: The room is the first belief born}
+  \begin{columns}[c]
+    \begin{column}{0.58\textwidth}
+      \small
+      \[
+        F(m) = \underbrace{\E_q[-\ln p(o\given X,\theta_m,m)]}_{\text{inaccuracy}}
+             + \underbrace{\kappa\,|V|}_{\text{complexity}},
+        \quad \kappa=\ln\frac{L}{\sigma}
+      \]
+      \small
+      The number of walls is unknown, so the room is a choice of \emph{structure} $m$, priced like
+      a birth. One coordinate to $\sigma=3$ cm in a room 10 m across costs
+      \[ \ln(10/0.03)\approx 5.8\nats. \]
+      Minimum description length and minimum free energy are, here, one rule.
+    \end{column}
+    \begin{column}{0.38\textwidth}
+      \centering
+      \begin{tikzpicture}[scale=0.62]
+        \draw[very thick, cool] (0,0) rectangle (4,2.4);
+        \node[lab, above] at (2,2.4) {4 vertices};
+        \begin{scope}[shift={(0,-3.3)}]
+          \draw[very thick, accent] (0,0) -- (4,0) -- (4,1.6) -- (3,1.6) -- (3,2.4) -- (0,2.4) -- cycle;
+          \fill[muted!30] (3.05,1.65) rectangle (4,2.4);
+          \node[lab, above] at (2,2.4) {6 vertices: a cabinet};
+          \node[lab, below, align=center] at (2,0) {pays if its cells are\\worth more than its corners};
+        \end{scope}
+      \end{tikzpicture}
+    \end{column}
+  \end{columns}
+  \src{layout\_acquisition.tex l.56--66, l.128--146}
+\end{frame}
+
+\begin{frame}{Backup: A band that is derived, not chosen}
+  \begin{columns}[c]
+    \begin{column}{0.52\textwidth}
+      \small
+      Clutter is uniform over $A$. A wall puts its points in a strip $L$ long, $\sigma$ wide:
+      \[
+        \frac{p_\text{wall}}{p_\text{clutter}} = \frac{A}{L\sqrt{2\pi}\,\sigma}\,e^{-r^2/2\sigma^2}
+      \]
+      \vspace{-0.6em}
+      \begin{itemize}
+        \item Inlier iff the ratio exceeds 1: about $3\sigma$.
+        \item Each point brings $\ln(\text{ratio})$ \textbf{nats}.
+        \item The band \textbf{narrows as $L$ grows}: a long wall is a more expensive explanation.
+      \end{itemize}
+    \end{column}
+    \begin{column}{0.45\textwidth}
+      \includegraphics[width=\textwidth]{d3_band.pdf}
+    \end{column}
+  \end{columns}
+  \lesson{A tuned threshold gives the band. The derivation gives the band \emph{and} the currency.}
+  \src{lab 3, exercise 8; the same mixture, per cell: layout\_acquisition.tex l.1049--1055}
+\end{frame}
+
+\begin{frame}{Backup: Promotion: the outline with the shortest description}
+  \begin{columns}[c]
+    \begin{column}{0.44\textwidth}
+      \centering
+      \begin{tikzpicture}[x=1cm, y=1cm]
+        \foreach \y/\l/\c/\t in {2.1/3.1/muted!45/{drawn 1 min ago}, 1.2/2.2/cool!60/{cabinets' side}, 0.3/3.6/muted!45/{drawn last}} {
+          \fill[\c, draw=white, very thick] (0,\y-0.27) rectangle (\l,\y+0.27);
+          \node[lab, anchor=west] at (0.07,\y) {\t};
+        }
+        \draw[muted, -{Stealth}] (0,-0.1) -- (4.1,-0.1) node[below left, lab, text=black] {description length (nats)};
+        \node[lab, anchor=west, text=cool] at (2.3,1.2) {adopted};
+      \end{tikzpicture}\\
+      {\scriptsize schematic}
+    \end{column}
+    \begin{column}{0.53\textwidth}
+      \small
+      The outline moves between wall and furniture as the robot drives, so ``the latest one'' would
+      make the room depend on when exploration stopped. Up to 60 recent outlines are kept and
+      scored on \emph{all} the evidence.
+      \begin{itemize}
+        \item In 7 of 10 apartment runs (earlier build) the winner was not the last drawn.
+        \item From the kitchen-corner start: overlap 0.968 at promotion, 0.983 refined.
+        \item Ten generated rooms: median 0.994.
+      \end{itemize}
+      {\scriptsize All in simulation; the pipeline has not run on the physical robot.}
+    \end{column}
+  \end{columns}
+  \src{layout\_acquisition.tex l.1036--1046, l.1173--1177, l.1455--1462}
+\end{frame}
+
+\begin{frame}{Backup: Observed, precision stops at a floor}
+  One predict plus one update, $\Sigma^{-1}\leftarrow\Sigma^{-1}+i$, with $y$ the predicted precision and
+  $\varrho=Q$:
+  \[
+    \frac1y=\frac1{y+i}+\varrho
+    \quad\Longrightarrow\quad
+    \boxed{\;\sigma_\text{steady}\approx(\varrho/i)^{1/4}\;}
+  \]
+  \begin{itemize}
+    \item \alert{Elapsed time does not appear.} Evidence is discarded at the rate it is acquired:
+          three hours of observation leave the belief where thirty seconds did.
+    \item Lab: formula 10.0 mm, simulated 9.4 mm.
+    \item Clamping $\Sigma$ caps the first problem and does nothing about this one.
+  \end{itemize}
+  \lesson{Nothing an agent learns extends how long it stays resistant.}
+  \src{agents\_life\_cycle.tex l.1045--1082; lab 3, exercise 5}
+\end{frame}
+
+\begin{frame}{Backup: A constant becomes an inferred quantity}
+  Each instance carries a log-volatility, $Q=e^{\zeta}$, driven by its own surprise:
+  \[
+    \zeta \leftarrow \zeta + \eta\Big(
+      \underbrace{\tfrac12\,\tilde d-\tfrac12\E[\tilde d\,]}_{\text{surprise seen minus expected}}
+      - \underbrace{\frac{\zeta-\zeta_0}{\sigma_\zeta^2}}_{\text{hyperprior pull-back}}\Big)
+  \]
+  \begin{columns}[T]
+    \begin{column}{0.5\textwidth}
+      \small
+      \begin{itemize}
+        \item Consistent views: $\zeta$ falls, memory lengthens, precision accumulates.
+        \item A sustained surprise: $\zeta$ rises and the model adapts. Stiffness is never a lock.
+      \end{itemize}
+    \end{column}
+    \begin{column}{0.46\textwidth}
+      \small
+      In the lab $\tilde d$ is the saturating (Student-$t$) surprise of the innovation: one
+      outrageous frame moves $\zeta$ by a bounded amount.\\[0.3em]
+      \alert{Design only: no agent runs this yet.}
+    \end{column}
+  \end{columns}
+  \src{agents\_life\_cycle.tex l.1085--1125 (form of the update); lab 3, exercise 5}
+\end{frame}
+
+\begin{frame}{Backup: The room supplies the likelihood}
+  \begin{columns}[c]
+    \begin{column}{0.58\textwidth}
+      \small
+      For a scan $\{p_i\}$ and a candidate pose $X$:
+      \[
+        d_i(X)=\operatorname{dist}\big(R(\phi)p_i+t,\ \mathcal R\big)
+      \]
+      \[
+        \mathcal L_\text{obs}=\frac{1}{2\sigma^2}\cdot\frac1N\sum_i w_i\,\mathrm{Huber}(d_i)
+      \]
+      \begin{itemize}
+        \item The residual \emph{is} the prediction error: no expected scan is rendered.
+        \item Note the $\frac1N$: the precision does not grow with scan density.
+        \item Range and incidence weights are precisions on a covariate, not gates.
+      \end{itemize}
+    \end{column}
+    \begin{column}{0.4\textwidth}
+      \centering
+      \begin{tikzpicture}[scale=0.75]
+        \draw[very thick, muted] (0,0) rectangle (4.6,3);
+        \fill[black!55] (1.6,1.2) circle (0.14);
+        \foreach \px/\py/\qx/\qy in {4.36/2.2/4.6/2.2, 4.25/0.55/4.6/0.55, 2.9/2.75/2.9/3, 0.8/2.8/0.8/3} {
+          \fill[cool] (\px,\py) circle (2pt);
+          \draw[accent, thick, -{Stealth[length=1.5mm]}] (\px,\py) -- (\qx,\qy);
+        }
+        \node[lab, align=center] at (2.3,-0.42) {each return is pulled onto its nearest wall};
+      \end{tikzpicture}
+    \end{column}
+  \end{columns}
+  \src{room\_concept.tex l.243--307}
+\end{frame}
+
+\begin{frame}{Backup: What the residual floor is made of}
+  \begin{columns}[c]
+    \begin{column}{0.36\textwidth}
+      \centering
+      \begin{tikzpicture}[y=0.042cm, x=1cm]
+        \fill[cool!45, draw=white, very thick] (0,0) rectangle (1.3,30);
+        \fill[accent!40, draw=white, very thick] (0,30) rectangle (1.3,87);
+        \node[lab, align=center] at (0.65,15) {noise\\30 mm};
+        \node[lab, align=center] at (0.65,58) {map\\mismatch\\57 mm};
+        \node[lab, above] at (0.65,87) {floor: 87 mm};
+      \end{tikzpicture}
+    \end{column}
+    \begin{column}{0.6\textwidth}
+      Park the robot. The mean wall distance of each scan hovers near 87 mm and never reaches zero.
+      \begin{itemize}\small
+        \item Its fluctuation is white: $N^{-1/2}$, measured ratio $1.41$ against a predicted
+              $\sqrt{405/200}=1.42$.
+        \item That fixes the per-point scatter at $\approx 37$ mm, which explains
+              $0.798\times 37\approx 30$ mm.
+      \end{itemize}
+    \end{column}
+  \end{columns}
+  \lesson{Two-thirds of the floor is an error every return shares. More returns cannot remove it.}
+  \src{room\_concept.tex l.386--426}
+\end{frame}
+
+\begin{frame}{Backup: Association: the factor the free energy cannot see}
+  \begin{columns}[c]
+    \begin{column}{0.46\textwidth}
+      \centering
+      \begin{tikzpicture}
+        \draw[cool, thick, fill=cool!10, rotate around={25:(0,0)}] (0,0) ellipse (1.25 and 0.65);
+        \fill[cool] (0,0) circle (2pt); \node[lab, below] at (0,-0.05) {poorly known};
+        \draw[cool, thick, fill=cool!10] (2.9,0.15) ellipse (0.45 and 0.4);
+        \fill[cool] (2.9,0.15) circle (2pt); \node[lab, above] at (2.9,0.55) {precise};
+        \fill[accent] (0.85,0.55) circle (2.5pt);
+        \fill[accent] (3.0,0.05) circle (2.5pt);
+        \fill[accent] (1.9,-0.75) circle (2.5pt);
+        \node[lab, right, text=accent] at (1.95,-0.75) {opens a candidate};
+      \end{tikzpicture}\\[0.4em]
+      {\small a poorly known instance accepts detections from further away}
+    \end{column}
+    \begin{column}{0.51\textwidth}
+      \small
+      \[
+        P(M\given X,Z,\Phi)\approx\mathbf 1[M=\hat M],\quad
+        S=\Sigma^{xy}_{\theta_i}+\sigma_\text{det}^2 I
+      \]
+      Squared Mahalanobis distance at most 9, assigned greedily, lowest cost first.\\[0.5em]
+      A distribution on one value has no entropy and no expectation: the matching is free, in the
+      literal sense that $F$ cannot see it. \alert{A wrong match is invisible to the quantity that
+      would have registered it.}\\[0.5em]
+      The repair comes later and from elsewhere: merging, and the existence belief.
+    \end{column}
+  \end{columns}
+  \src{concept\_agents.tex l.483--486, l.859--889}
+\end{frame}
+
+\begin{frame}{Backup: The common-mode ceiling}
+  $N$ residuals that share one offset $\delta\sim\N(0,\Sigma_\delta)$, a pose error, plus independent
+  noise. Marginalise $\delta$:
+  \[
+    \mathcal I = J_z^\top\big(\sigma^2 I + J_z\Sigma_\delta J_z^\top\big)^{-1}J_z
+    \;\overset{\text{Woodbury}}{=}\;
+    \big(\sigma^2(J_z^\top J_z)^{-1} + \Sigma_\delta\big)^{-1}
+    \;\xrightarrow[N\to\infty]{}\; \Sigma_\delta^{-1}
+  \]
+  \begin{itemize}
+    \item A denser mask eventually stops helping. The ceiling is set by the \emph{pose} error, not
+          by the pixel count.
+    \item The joint information on (object, offset) has rank 6, not 12: the data cannot tell a
+          displaced object from a displaced robot.
+  \end{itemize}
+  \src{concept\_agents.tex l.1048--1090}
 \end{frame}
 
 \end{document}
