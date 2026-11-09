@@ -107,7 +107,7 @@ def main():
     src = a.source or f"fit_detector_envelopes.py {a.log} {datetime.date.today()}"
     # The fit-support rows (camera `support`) are not fitted here: they are carried over from the file being replaced, so a refit
     # of the detector rates never silently drops them (the agent warns loudly on a missing row; see detector_llr.h).
-    support_rows = [ln for ln in open(a.out) if ln.startswith("support,")] if os.path.exists(a.out) else []
+    support_rows = [ln for ln in open(a.out) if ln.startswith(("support,", "confidence,"))] if os.path.exists(a.out) else []
     with open(a.out, "w", newline="") as o:
         o.write("camera,param,value,n,source\n")
         for cam in ("zed", "ricoh"):

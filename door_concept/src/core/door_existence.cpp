@@ -220,6 +220,7 @@ void DoorCore::with_frame(const DoorCycleInput& in, bool zed_ran, bool use_rgb, 
     fr.rt_cov = in.robot.rt_cov;
     fr.geometry_may_refute = cfg.exist_geometry_may_refute;
     // fr.geo_mu1_sd stays at its starting value (μ1 = μ0 + 2s): fixed within the session like the detector rates (fix round 3)
+    fr.rotation_w = rotation_reliability(ego_.ang_radps, cfg.ai2_ang_lever_m, cfg.ai2_motion_ref_mps);
     fr.dets = dets;
     if (sinks_.image_roi)
         fr.note_poly = [this](const std::vector<cv::Point>& poly) { sinks_.image_roi({poly, {}, 0, true, false}); };
@@ -313,6 +314,20 @@ void DoorCore::prepare_candidates(const DoorCycleInput& in, const std::vector<rc
     std::erase_if(candidates_, [&](const Candidate& c) { return c.room == room_name_ and gated(c.xy, c.var); });
     const auto& pkt = masks_.packet();
     const auto& polygon = fit_.room_polygon();
+    // The typical door at the place, with the width of this frame's blob along its wall (its support's extent).
+    const auto measure_candidate_width = [&](Candidate& c, const MaskSlice& slice)
+    {
+        const Vec2f u = typical_door_at(c.xy, cfg.door_prior_w_m, cfg.door_prior_h_m, polygon).aperture.wall_u;
+        float lo = std::numeric_limits<float>::max(), hi = std::numeric_limits<float>::lowest();
+        for (const auto& p : masks_.support(slice))
+        { const float a = Vec2f(p.x(), p.y()).dot(u); lo = std::min(lo, a); hi = std::max(hi, a); }
+        c.size_resolved = hi > lo;   // no extent in the support => no size estimate => the size term is 0 (spec: nothing measured pays nothing)
+        c.width_meas = c.size_resolved ? hi - lo : cfg.door_prior_w_m;
+        c.theta = typical_door_at(c.xy, c.width_meas, cfg.door_prior_h_m, polygon);
+        // a clipped mask's width is a LOWER BOUND: its precision falls with the clipped fraction (continuously, no gate)
+        const float untrunc = std::max(1e-3f, 1.0f - slice.trunc_frac);   // clamp-free domain guard: avoids /0 at full truncation
+        c.width_sd = cfg.tracker_detection_noise_m / std::sqrt(untrunc);
+    };
     const float rn2 = cfg.tracker_detection_noise_m * cfg.tracker_detection_noise_m;
     std::unordered_map<std::size_t, int> self_det;   // candidate index → the detection that is its own this frame
     for (std::size_t d = 0; d < dets_.size(); ++d)
@@ -329,24 +344,12 @@ void DoorCore::prepare_candidates(const DoorCycleInput& in, const std::vector<rc
         }
         if (best < 0)
         {
-            // A new place: the typical door at the blob, with the blob's width along its wall (its support's extent).
-            const rc::DoorFitState probe = typical_door_at(dv.xy, cfg.door_prior_w_m, cfg.door_prior_h_m, polygon);
-            const Vec2f u = probe.aperture.wall_u;
-            float lo = std::numeric_limits<float>::max(), hi = std::numeric_limits<float>::lowest();
-            for (const auto& p : masks_.support(pkt.slices[static_cast<std::size_t>(dv.slice_index)]))
-            { const float a = Vec2f(p.x(), p.y()).dot(u); lo = std::min(lo, a); hi = std::max(hi, a); }
-            const float width = hi > lo ? hi - lo : cfg.door_prior_w_m;
+            // A new place. Its width is measured below, with every later frame's.
             Candidate c;
             c.key = ++next_candidate_key_;
             c.room = room_name_;
             c.xy = dv.xy;
             c.var = var;
-            c.theta = typical_door_at(dv.xy, width, cfg.door_prior_h_m, polygon);
-            c.width_meas = width;
-            c.size_resolved = hi > lo;   // no extent in the support => no size estimate => the size term is 0 (spec: nothing measured pays nothing)
-            // a clipped mask's width is a LOWER BOUND: its precision falls with the clipped fraction (continuously, no gate)
-            const float untrunc = std::max(1e-3f, 1.0f - pkt.slices[static_cast<std::size_t>(dv.slice_index)].trunc_frac);   // clamp-free domain guard: avoids /0 at full truncation
-            c.width_sd = cfg.tracker_detection_noise_m / std::sqrt(untrunc);
             // ★The memory of this place is the candidate's starting evidence (spec §3.7/§8.3): a matched row continues its
             //  ledger, aged by the change hazard; a REMOVED row ("no door here") pushes it down by exactly its aged L.
             if (const PlaceRow* row = places_.match(room_name_, dv.xy, Eigen::Matrix2f::Identity() * var, cfg.tracker_gate_mahalanobis))
@@ -358,6 +361,10 @@ void DoorCore::prepare_candidates(const DoorCycleInput& in, const std::vector<rc
             candidates_.push_back(std::move(c));
             best = static_cast<int>(candidates_.size() - 1);
         }
+        // ★THE SIZE TERM IS THIS FRAME'S, as the band term is (replaced, never accumulated): one narrow glimpse of a door half hidden must not
+        //  hold it back for the candidate's life. A candidate's first detection of the frame measures it.
+        if (not self_det.contains(static_cast<std::size_t>(best)))
+            measure_candidate_width(candidates_[static_cast<std::size_t>(best)], pkt.slices[static_cast<std::size_t>(dv.slice_index)]);
         det_candidate_[d] = best;
         self_det.try_emplace(static_cast<std::size_t>(best), static_cast<int>(d));
     }
@@ -375,19 +382,12 @@ void DoorCore::prepare_candidates(const DoorCycleInput& in, const std::vector<rc
             Candidate& cand = candidates_[c];
             if (cand.room != room_name_) continue;
             const int wall = wall_of(cand.theta.aperture.centre_xy(), polygon, groups);
-            // ★BIRTH AND SURVIVAL SCORE THE SAME SIZE (spec 3.6). The fitted door's width is its measurement pulled by the FIT's own width
-            //  prior (Door.PriorWidthM +- Door.PriorWidthStd, a strong one) and its height is that prior's; the candidate is scored on what
-            //  the fit will make of it with nothing new observed: the Gaussian product of the blob's width (with its sd) and the fit's
-            //  prior, and the fit's height prior. Without a size estimate (no extent in the support) the size term is 0.
-            rc::DoorFitState th = cand.theta;
-            float w_sd = cand.width_sd, h_sd = cfg.door_prior_h_std;
-            if (cand.size_resolved)
-            {
-                const float pm = 1.0f / (cand.width_sd * cand.width_sd), pp = 1.0f / (cfg.door_prior_w_std * cfg.door_prior_w_std);
-                th.aperture.w = (cand.width_meas * pm + cfg.door_prior_w_m * pp) / (pm + pp);
-                w_sd = std::sqrt(1.0f / (pm + pp));
-                th.aperture.h = cfg.door_prior_h_m;
-            }
+            // ★THE MEASUREMENT PAYS THE SIZE TERM (2026-11-09, clean19-21): a candidate has a measured width and no fit, so its size evidence is
+            //  N(measured; prior mean, prior var + measurement var). Scoring the measurement after the prior had pulled it counted the prior
+            //  twice and cancelled the evidence: 0.36 m became 0.95 m and paid -0.20 nats, against -4.7. cand.theta holds the measured width
+            //  and the prior's height (which then pays 0). Without a size estimate (no extent in the support) the size term is 0.
+            const rc::DoorFitState& th = cand.theta;
+            const float w_sd = cand.width_sd, h_sd = cfg.door_prior_h_std;
             cand.belief.prior = prior_of(th, polygon, fit_.room_is_proto(), fit_.room_band(),
                                          wall >= 0 ? doors_on_wall[wall] : 0, w_sd, h_sd, cand.size_resolved, size_prior,
                                          std::sqrt(cand.var));   // no fit yet: the detection's own place sd (isotropic, so along the normal too)

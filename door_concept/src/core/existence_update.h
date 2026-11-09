@@ -59,6 +59,7 @@ struct ExistenceFrame
     std::optional<Mat6d> rt_cov;
     bool geometry_may_refute = false;            // Existence.GeometryMayRefute (§8.5: false until benched)
     float geo_mu1_sd = 2.0f;                     // μ1 = μ0 + geo_mu1_sd · s (★STARTING VALUE, fixed in-session; refit offline)
+    float rotation_w = 1.0f;                     // what a frame taken at this camera turn rate can say (rotation_reliability): joins kappa, for hits and misses alike
     std::span<const FrameDetection> dets;        // this frame's door detections (association weights)
     std::function<void(const std::vector<cv::Point>&)> note_poly;   // the input recorder: a polygon the geometry channel read
 };

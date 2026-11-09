@@ -511,7 +511,7 @@ void DoorCore::associate(const DoorCycleInput& in, DoorCycleOutput& out)
             // Task 8: the detection's reliability as the door model's hit weight — confidence x the ricoh's wall/variance weight x
             // P(unclaimed by another concept's object) (fix round 1: the cross-concept exclusion reaches births again). A frame the
             // fit would refuse (frame_admissible) is not a trial for the place it lands on (FrameDetection::admissible).
-            det_w_.push_back(std::clamp(sl.confidence, 0.0f, 1.0f) * ricoh_w * unclaimed_w);   // clamp: confidence is a probability; kept in [0,1] (domain), the weight itself is continuous
+            det_w_.push_back(confidence_reliability(sl.confidence, detectors_.confidence) * ricoh_w * unclaimed_w);   // P(genuine | score), not the raw score: a borderline mask is worth almost nothing (detector_llr.h)
             det_adm_.push_back(frame_admissible(sl, ego_, cfg));
             dets_.push_back(dv);
         }

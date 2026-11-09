@@ -77,7 +77,37 @@ struct SupportModel
            and m.present_outlier > 0.0f and m.present_outlier < 1.0f and m.absent_outlier > 0.0f and m.absent_outlier < 1.0f;
 }
 
-struct DetectorTable { DetectorModel zed, ricoh; SupportModel support; };
+// ═══ HOW MUCH A MASK IS WORTH ══════════════════════════════════════════════════════════════════════════
+// The detector's score is not a probability that a door is there. P(this report is a genuine door | score c) under two score
+// populations with one shared spread (so the ratio is monotone in c): c ~ N(present_mu, sigma^2) for doors, N(absent_mu, sigma^2) for
+// look-alikes, equal priors (the place's prior is in L already). A borderline mask is worth almost nothing and is then read as the
+// detector not having reported the door.
+// ★SENSOR-MODEL CONSTANTS, flagged (same standing as hit_rate/false_alarm; door_detectors.csv, camera `confidence`): the score of the
+// mask at each of the 24 door births of clean19-21, real doors (crossed) 0.53-0.83, mean 0.66, phantoms 0.28-0.67, mean 0.46, pooled sd
+// 0.098. Fitted in simulation on the tours it was measured on: refit on fresh tours and on the real robot's detector.
+struct ConfidenceModel { float present_mu = 0.66f, absent_mu = 0.46f, sigma = 0.098f, n_trials = 24.0f; };
+
+[[nodiscard]] inline float confidence_reliability(float confidence, const ConfidenceModel& m)
+{
+    const float slope = (m.present_mu - m.absent_mu) / (m.sigma * m.sigma);
+    return 1.0f / (1.0f + std::exp(-slope * (confidence - 0.5f * (m.present_mu + m.absent_mu))));
+}
+
+[[nodiscard]] inline bool confidence_in_domain(const ConfidenceModel& m)
+{
+    return std::isfinite(m.present_mu) and std::isfinite(m.absent_mu) and std::isfinite(m.sigma) and m.present_mu > m.absent_mu and m.sigma > 0.0f;
+}
+
+/// How much a frame taken while the camera turns can say: the mask and the pose it is read with are misaligned by the turn, as a pose
+/// spread misaligns them (the same place in the likelihood as kappa). 1 at rest, falling continuously. `lever_m` and `ref_mps` are the
+/// fit's own motion constants (AI2AngLeverM, AI2MotionRefMps): the tangential speed of a door that far away against the speed at which a frame stops being usable.
+[[nodiscard]] inline float rotation_reliability(float ang_radps, float lever_m, float ref_mps)
+{
+    const float x = lever_m * ang_radps / ref_mps;
+    return 1.0f / (1.0f + x * x);
+}
+
+struct DetectorTable { DetectorModel zed, ricoh; SupportModel support; ConfidenceModel confidence; };
 
 // SENSOR-MODEL CONSTANTS (refit from data). ZED: today's aperture_envelope shoulders (DoorModel.Detect{Min,Max}Fill/Soft),
 // hit 0.9 / clutter 0.02 are placeholders for the ZED (no ZED hit-rate was ever measured per view).
@@ -166,6 +196,14 @@ struct DetectorTable { DetectorModel zed, ricoh; SupportModel support; };
             if (not found) ++malformed;
             continue;
         }
+        if (c[0] == "confidence")
+        {
+            if (c[1] == "present_mu") { t.confidence.present_mu = v; t.confidence.n_trials = n; }
+            else if (c[1] == "absent_mu") t.confidence.absent_mu = v;
+            else if (c[1] == "sigma") t.confidence.sigma = v;
+            else ++malformed;
+            continue;
+        }
         DetectorModel* m = c[0] == "zed" ? &t.zed : c[0] == "ricoh" ? &t.ricoh : nullptr;
         if (m == nullptr) { ++malformed; continue; }
         if (c[1] == "min_fill") m->env.min_fill = v;
@@ -187,6 +225,11 @@ struct DetectorTable { DetectorModel zed, ricoh; SupportModel support; };
     {
         std::fprintf(stderr, "[detector_model] %s: ricoh out of domain (need 0 < false_alarm < hit_rate < 1): compiled defaults\n", p.string().c_str());
         t.ricoh = defaults.ricoh;
+    }
+    if (not confidence_in_domain(t.confidence))
+    {
+        std::fprintf(stderr, "[detector_model] %s: confidence out of domain (need present_mu > absent_mu, sigma > 0): compiled defaults\n", p.string().c_str());
+        t.confidence = defaults.confidence;
     }
     if (support_seen != 0b111111 or not support_in_domain(t.support))
     {
@@ -214,5 +257,8 @@ inline void save_detectors(const std::filesystem::path& p, const DetectorTable& 
                      "support,absent_a,{},{},{}\nsupport,absent_b,{},{},{}\nsupport,absent_outlier,{},{},{}\n",
                      s.present_a, s.n_trials, source, s.present_b, s.n_trials, source, s.present_outlier, s.n_trials, source,
                      s.absent_a, s.n_trials, source, s.absent_b, s.n_trials, source, s.absent_outlier, s.n_trials, source);
+    const auto& k = t.confidence;
+    f << std::format("confidence,present_mu,{},{},{}\nconfidence,absent_mu,{},{},{}\nconfidence,sigma,{},{},{}\n",
+                     k.present_mu, k.n_trials, source, k.absent_mu, k.n_trials, source, k.sigma, k.n_trials, source);
 }
 }  // namespace rc::door::core

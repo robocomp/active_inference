@@ -116,7 +116,7 @@ static CameraIntrinsics ricoh_cam()
     CameraIntrinsics c; c.present = true; c.width = 3840; c.height = 1920; c.projection_model = 1; return c;
 }
 
-struct DoorDet { float x = 1.0f, y = kWallY, w = 1.0f; };
+struct DoorDet { float x = 1.0f, y = kWallY, w = 1.0f, conf = 0.9f; };
 
 // One cycle: the robot at `at` looking at `target`, these ZED door detections (an empty list = a frame with no door mask: a
 // small plant in the corner, so the packet is a real frame).
@@ -149,7 +149,7 @@ static DoorCycleInput input(std::uint64_t cycle, int frame, const Vec2f& at, con
                 p.support_points.emplace_back(d.x - 0.5f * d.w + d.w * static_cast<float>(i) / 20.0f, d.y + jitter, 0.1f * static_cast<float>(j));
             }
         s.support_end = p.support_points.size();
-        s.label = "door"; s.class_id = 1000.f; s.confidence = 0.9f;
+        s.label = "door"; s.class_id = 1000.f; s.confidence = d.conf;
         s.centroid = {d.x, d.y, 1.05f}; s.bbox_min = {d.x - 0.5f * d.w, d.y - 0.01f, 0.0f}; s.bbox_max = {d.x + 0.5f * d.w, d.y + 0.01f, 2.1f};
         s.trunc_frac = 0.0f; s.range = (Vec2f(d.x, d.y) - at).norm(); s.centroid_radius = 0.1f; s.source = 0; s.has_depth = true;
         // the mask's pixels: the projected box (a pinhole, the cycle's pose)
@@ -186,10 +186,12 @@ struct Rig
     ExistWorld w;
     DoorCore core;
     std::vector<rc::door::DoorDecision> removes, births;
+    // These cases jump between standpoints from one cycle to the next: a teleport is not a turn, so turning is priced only where a case asks.
+    static DoorCoreConfig config(bool turns) { DoorCoreConfig c; if (not turns) c.door.ai2_ang_lever_m = 0.0f; return c; }
     std::vector<std::string> csv, cost_rows;
     std::uint64_t cycle = 0;
     int frame = 0;
-    Rig() : core(cfg)
+    explicit Rig(bool turns = false) : cfg(config(turns)), core(cfg)
     {
         w.cfg = cfg.door;
         w.core = &core;
@@ -266,6 +268,49 @@ int main()
                    r.door() ? r.door()->belief.L() : NAN);
         CHECK(r.births.size() == 1);
         CHECK(r.door() != nullptr and r.door()->belief.L() > 0.0f);
+    }
+    // ── the_blob_pays_its_measured_width (2026-11-09, clean19-21): the measurement is scored against the prior, not the measurement after
+    //    that prior has pulled it (0.36 m pulled to 0.95 m paid -0.20 nats; five phantoms measuring 0.23-0.41 m were born on it)
+    {
+        Rig r;
+        r.look(A0, kDoor, {{1.0f, kWallY, 0.36f}});
+        std::print("narrow blob: 0.36 m candidate after one hit view -> {} birth(s), size term {:.2f}\n", r.births.size(),
+                   r.core.candidates().empty() ? NAN : r.core.candidates().front().belief.prior.size);
+        CHECK(r.births.empty());
+        CHECK(not r.core.candidates().empty() and r.core.candidates().front().belief.prior.size < -3.0f);
+    }
+    // ── a_later_view_measures_the_width_again: one narrow glimpse must not hold a real door back; the size term is this frame's, as the band's
+    {
+        Rig r;
+        r.look(A0, kDoor, {{1.0f, kWallY, 0.36f}});
+        CHECK(r.births.empty());
+        r.look(A0, kDoor, {{1.0f, kWallY, 1.00f}});
+        std::print("narrow then full: {} birth(s)\n", r.births.size());
+        CHECK(r.births.size() == 1);
+    }
+    // ── a_borderline_mask_is_not_a_door (2026-11-09, clean19-21: real doors were born from masks of 0.53-0.83, 11 of 14 phantoms below 0.53)
+    {
+        const ConfidenceModel m = default_detectors().confidence;
+        CHECK(confidence_reliability(0.47f, m) < 0.2f);
+        CHECK(confidence_reliability(0.75f, m) > 0.9f);
+        Rig r;
+        r.look(A0, kDoor, {{1.0f, kWallY, 1.0f, 0.47f}});
+        std::print("borderline mask: conf 0.47 -> {} birth(s)\n", r.births.size());
+        CHECK(r.births.empty());
+    }
+    // ── a_rotating_frame_says_little: the same confident mask, from a camera turning at about 2.5 rad/s, then at rest
+    {
+        const Vec2f aside = kDoor + Vec2f(1.0f, 0.0f);
+        Rig still(true), turning(true);
+        still.look(A0, kDoor);
+        still.look(A0, kDoor, {{}});
+        turning.look(A0, aside);
+        turning.look(A0, kDoor, {{}});
+        std::print("rotation: still -> {} birth(s), turning -> {} birth(s)\n", still.births.size(), turning.births.size());
+        CHECK(still.births.size() == 1);
+        CHECK(turning.births.empty());
+        CHECK(rotation_reliability(0.0f, 2.0f, 0.6f) == 1.0f);
+        CHECK(rotation_reliability(0.5f, 2.0f, 0.6f) < 0.3f);
     }
     {   // a 3 m candidate (size term −45 nats): vision saturates at −ln(lambda) (spec §3.1b), so no number of views creates it — only a physical test could (separate passes: views of different visits never merge)
         Bench b;
@@ -894,7 +939,7 @@ int main()
         const auto h0 = r.core.places().hazard_state();
         for (int k = 0; k < 24 and (r.births.size() < 2 or r.removes.empty()); ++k)
             r.look(stand(4.0f, static_cast<float>(k % 5) * 15.0f - 30.0f), kDoor,
-                   k % 4 == 0 ? std::vector<DoorDet>{{1.0f, kWallY, 0.9f}} : std::vector<DoorDet>{});
+                   k % 4 == 0 ? std::vector<DoorDet>{{1.0f, kWallY, 0.9f, 0.667f}} : std::vector<DoorDet>{});   // conf 0.667: reliability 0.9, the weak hit this flicker needs
         const auto h1 = r.core.places().hazard_state();
         std::print("removal_rebirth_same_visit: {} births, {} removes -> hazard changes {} -> {}, exposure {:.3f} -> {:.3f} s\n",
                    r.births.size(), r.removes.size(), h0.changes, h1.changes, h0.sum_elapsed_s, h1.sum_elapsed_s);
@@ -912,7 +957,7 @@ int main()
         const Costs c0 = r.core.costs().costs(rc::DoorConfig{}.exist_max_room_s);   // the delete line is +1.9: a door that falls below it after its birth is deleted
         for (int k = 0; k < 60; ++k)   // a hit view (born), then a few quiet frames (L is below the high line: removed), again and again
             r.look(stand(4.0f, static_cast<float>(k % 5) * 15.0f - 30.0f), kDoor,
-                   k % 4 == 0 ? std::vector<DoorDet>{{1.0f, kWallY, 0.9f}} : std::vector<DoorDet>{});
+                   k % 4 == 0 ? std::vector<DoorDet>{{1.0f, kWallY, 0.9f, 0.667f}} : std::vector<DoorDet>{});   // conf 0.667: reliability 0.9, the weak hit this flicker needs
         const Costs c1 = r.core.costs().costs(rc::DoorConfig{}.exist_max_room_s);
         int rm = 0, rb = 0;
         for (const auto& l : r.cost_rows) { rm += l.starts_with("remove,") ? 1 : 0; rb += l.starts_with("rebirth,") ? 1 : 0; }

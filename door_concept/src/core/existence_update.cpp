@@ -44,14 +44,15 @@ CamResult observe_camera(PlaceBelief& b, const rc::DoorFitState& th, const Exist
     const Vec2f door_xy = th.aperture.centre_xy();
     const float R = half_diag(th);
     const PoseOverlap po = pose_overlap_factor(fr.rt_cov, room_T_cam, door_xy, R);
-    r.kappa = po.kappa;
+    const float kappa = po.kappa * fr.rotation_w;
+    r.kappa = kappa;
     const float pos_var = th.ai2_initialized ? std::max(0.0f, th.ai2_belief.covariance()(0, 0)) : 0.0f;
     // ★A frame the fit may not use may not judge the place either (fix round 1, review I-1): a detection of this camera that lands on
     //  the place from a truncated / motion-smeared frame makes this camera's frame NO TRIAL — neither a hit nor a miss.
     if (inadmissible_near(fr.dets, sensor, door_xy, pos_var + th.chain_cov_xx, fr.cfg))
         return r;
-    r.hit = sensor == self_sensor ? po.kappa * self_w
-                                  : association_weight(fr.dets, sensor, door_xy, pos_var + th.chain_cov_xx, po.kappa, fr.cfg);
+    r.hit = sensor == self_sensor ? kappa * self_w
+                                  : association_weight(fr.dets, sensor, door_xy, pos_var + th.chain_cov_xx, kappa, fr.cfg);
     // ★Ruling R4: a 360 frame whose processed strips are unknown looked at NOTHING (no miss), but a detection of THIS door
     //  proves the look at its bearing: a window spanning the door's own angular extent from the camera.
     std::array<Vec2f, 1> hit_window{};
@@ -65,7 +66,7 @@ CamResult observe_camera(PlaceBelief& b, const rc::DoorFitState& th, const Exist
     }
     const CameraView view{spec, room_T_cam, windows, windows_known};
     r.g = door_view(view, fr.scene, th);
-    r.q = detect_prob(m, r.g, po.kappa);
+    r.q = detect_prob(m, r.g, kappa);
     if (not (r.q > 0.0f) and not (r.hit > 0.0f))
         return r;   // nothing reportable and nothing reported: no trial, no view (unseen is not evidence)
     if (ch == Channel::Ricoh and not (r.hit > 0.0f))   // ★RICOH IS HITS ONLY: a frame with no detection touches no view. Logged only, against the view it would have joined, for the offline detector fit
@@ -178,9 +179,10 @@ ExistenceTrace observe_place(PlaceBelief& b, const rc::DoorFitState& th, const E
         const Vec2f door_xy = th.aperture.centre_xy();
         const PoseOverlap po = pose_overlap_factor(fr.rt_cov, fr.room_T_ricoh, door_xy, half_diag(th));
         const float pos_var = th.ai2_initialized ? std::max(0.0f, th.ai2_belief.covariance()(0, 0)) : 0.0f;
+        const float kappa = po.kappa * fr.rotation_w;
         const float hit = inadmissible_near(fr.dets, 1, door_xy, pos_var + th.chain_cov_xx, fr.cfg) ? 0.0f
-                        : self_sensor == 1 ? po.kappa * self_w
-                                           : association_weight(fr.dets, 1, door_xy, pos_var + th.chain_cov_xx, po.kappa, fr.cfg);
+                        : self_sensor == 1 ? kappa * self_w
+                                           : association_weight(fr.dets, 1, door_xy, pos_var + th.chain_cov_xx, kappa, fr.cfg);
         t.ric_hit = hit;
         if (hit > 0.0f)
         {
