@@ -223,10 +223,30 @@ static void test_a_file_without_thumbnails_still_loads()
     CHECK(got.entries().at(kSmall).thumbs.empty());
 }
 
+// A thumbnail's bin number only means a direction under the binning it was stored with.
+static void test_thumbnails_from_another_binning_are_dropped()
+{
+    const fs::path f = fresh_dir() / "r.json";
+    Repertory src(3000);
+    Entry e; e.uid = kBig; e.cls = "chair"; e.name = "chair_1";
+    e.thumbs[3] = Thumbnail{12.5f, {0, 255, 7, 128}};
+    src.insert_loaded(e);
+    CHECK(save_repertory(f, src));
+    std::string text = read_file(f);
+    const auto at = text.find("\"of_bins\"");
+    CHECK(at != std::string::npos);
+    if (at != std::string::npos) text.replace(at, std::string("\"of_bins\"").size(), "\"unrelated\"");
+    write_file(f, text);
+    Repertory got(3000);
+    CHECK(load_repertory(f, got) == LoadResult::loaded);
+    CHECK(got.entries().at(kBig).thumbs.empty());
+}
+
 int main()
 {
     test_thumbnails_survive_a_round_trip();
     test_a_file_without_thumbnails_still_loads();
+    test_thumbnails_from_another_binning_are_dropped();
     if (not std::setlocale(LC_ALL, "es_ES.UTF-8")) std::setlocale(LC_ALL, "");
     test_round_trip_preserves_entries();
     test_load_closes_open_lives_as_gap();

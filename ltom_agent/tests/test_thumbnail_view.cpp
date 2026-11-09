@@ -5,7 +5,9 @@
 #include <QBuffer>
 #include <QImage>
 #include <QLabel>
+#include <QMouseEvent>
 
+#include <cstdlib>
 #include <print>
 
 static int failures = 0;
@@ -33,6 +35,71 @@ static bool says(QWidget* w, const QString& text)
     return false;
 }
 
+static QLabel* picture_of(QWidget* w, int bin)
+{
+    for (auto* l : w->findChildren<QLabel*>()) if (l->property("bin").isValid() and l->property("bin").toInt() == bin) return l;
+    return nullptr;
+}
+// Where a view sits on the rose, relative to the rose's centre (screen axes: +x right, +y down).
+static QPoint offset_of(QLabel* l) { return l->geometry().center() - l->parentWidget()->rect().center(); }
+static void click(QWidget* w)
+{
+    const QPointF at(5, 5);
+    QMouseEvent press(QEvent::MouseButtonPress, at, w->mapToGlobal(at), Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+    QApplication::sendEvent(w, &press);
+}
+
+static void each_view_sits_at_its_direction()
+{
+    ltom::Entry e;
+    e.name = "chair_9";
+    e.thumbs[6]  = {10.f, jpeg_of(96, 60)};     //   0..30 deg: front, to the left
+    e.thumbs[5]  = {10.f, jpeg_of(96, 60)};     // -30..0  deg: front, to the right
+    e.thumbs[11] = {10.f, jpeg_of(96, 60)};     // 150..180: behind, to the left
+    e.thumbs[0]  = {10.f, jpeg_of(96, 60)};     // -180..-150: behind, to the right
+    e.thumbs[9]  = {10.f, jpeg_of(96, 60)};     //  90..120: left side
+    auto* v = ltom::make_thumbnail_view(e, nullptr);
+    const auto at = [&](int bin) { return offset_of(picture_of(v, bin)); };
+    CHECK(picture_of(v, 6) and picture_of(v, 5) and picture_of(v, 11) and picture_of(v, 0) and picture_of(v, 9));
+    CHECK(at(6).x() < 0 and at(6).y() < 0);
+    CHECK(at(5).x() > 0 and at(5).y() < 0);
+    CHECK(at(11).x() < 0 and at(11).y() > 0);
+    CHECK(at(0).x() > 0 and at(0).y() > 0);
+    CHECK(at(9).x() < 0 and std::abs(at(9).y()) < std::abs(at(9).x()));
+    delete v;
+}
+
+static void no_two_directions_overlap()
+{
+    ltom::Entry e;
+    e.name = "chair_9";
+    for (int b = 0; b < 12; ++b) e.thumbs[b] = {10.f, jpeg_of(96, 96)};
+    auto* v = ltom::make_thumbnail_view(e, nullptr);
+    CHECK(shown_images(v) == 12);
+    for (int a = 0; a < 12; ++a)
+        for (int b = a + 1; b < 12; ++b)
+            CHECK(not picture_of(v, a)->geometry().intersects(picture_of(v, b)->geometry()));
+    delete v;
+}
+
+static void clicking_a_view_gives_its_numbers()
+{
+    ltom::Entry e;
+    e.name = "chair_9";
+    e.thumbs[6] = {2310.f, jpeg_of(96, 60)};
+    e.thumbs[9] = {640.f, jpeg_of(96, 60)};
+    auto* v = ltom::make_thumbnail_view(e, nullptr);
+    CHECK(not says(v, "2310"));
+    click(picture_of(v, 6));
+    CHECK(says(v, "0° to 30°"));
+    CHECK(says(v, "2310"));
+    click(picture_of(v, 9));
+    CHECK(says(v, "90° to 120°"));
+    CHECK(says(v, "640"));
+    CHECK(not says(v, "2310"));
+    delete v;
+}
+
 int main(int argc, char** argv)
 {
     qputenv("QT_QPA_PLATFORM", "offscreen");
@@ -56,6 +123,10 @@ int main(int argc, char** argv)
     CHECK(says(empty, "No thumbnails"));
 
     delete full; delete damaged; delete empty;
+    each_view_sits_at_its_direction();
+    no_two_directions_overlap();
+    clicking_a_view_gives_its_numbers();
+
     std::println("{}", failures == 0 ? "ALL PASS" : "FAILED");
     return failures == 0 ? 0 : 1;
 }

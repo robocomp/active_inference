@@ -78,6 +78,24 @@ static void the_viewing_angle_picks_the_bin()
     }
 }
 
+static void the_bins_are_the_atlas_bins()
+{
+    constexpr int n = kViewBins;
+    const float pi = std::numbers::pi_v<float>;
+    const float d = 0.05f;
+    CHECK(n == 12);
+    CHECK(view_bin(std::cos(d), std::sin(d), 0.f, 0.f, 0.f, n) == 6);      // just left of the front
+    CHECK(view_bin(std::cos(d), -std::sin(d), 0.f, 0.f, 0.f, n) == 5);     // just right of it
+    CHECK(view_bin(-std::cos(d), std::sin(d), 0.f, 0.f, 0.f, n) == 11);    // just short of behind, on the left
+    CHECK(view_bin(-std::cos(d), -std::sin(d), 0.f, 0.f, 0.f, n) == 0);    // and on the right
+    for (int b = 0; b < n; ++b)
+    {
+        const float a = bin_centre_rad(b, n);
+        CHECK(std::abs(a - (-pi + (static_cast<float>(b) + .5f) * 2.f * pi / static_cast<float>(n))) < 1e-5f);
+        CHECK(view_bin(std::cos(a), std::sin(a), 0.f, 0.f, 0.f, n) == b);
+    }
+}
+
 static void a_bin_keeps_its_best_view()
 {
     ThumbSet s;
@@ -98,6 +116,7 @@ int main()
     crop_is_small_jpeg_of_the_box();
     crop_survives_the_image_border_and_nonsense();
     the_viewing_angle_picks_the_bin();
+    the_bins_are_the_atlas_bins();
     a_bin_keeps_its_best_view();
     std::printf("%s: %d failure(s)\n", fails == 0 ? "ALL PASS" : "FAILED", fails);
     return fails == 0 ? 0 : 1;
