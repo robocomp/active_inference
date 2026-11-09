@@ -58,13 +58,15 @@ mathematics, starting from the beginning:
 wall from a LiDAR scan as a Laplace belief, test whether its covariance is honest, and choose
 between two models of it by free energy.
 
-### Day 2 — The CORTEX architecture: one belief, many owners
+### Day 2 — The CORTEX architecture: concepts and memories
+- Concepts as the fabric of the architecture: one agent per kind of thing, a concept's dimensions
+  (geometry, aspect, life cycle, function), the class held by the agent and the instances on the graph.
 - A distributed working memory held as a shared graph: geometry and meaning on the same edges, no
   messages between agents, and what a replicated store obliges everyone to assume.
+- The memories as the same concepts kept for longer: episodic, long-term spatial, long-term object;
+  and what is still to build, including amortisation.
 - One global free energy divided among processes: each boundary is a conditional-independence
   assumption, and it has a price in nats.
-- Concept agents: each holds a belief over one class of object, publishes what only it can compute,
-  and answers to a common contract.
 - The methodological commitment of the course, no thresholds: a gate is what a model looks like before
   the modelling has been done, and its replacement is almost always a precision. And the one case
   where it is not.

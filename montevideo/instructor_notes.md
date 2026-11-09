@@ -64,37 +64,48 @@ different term from the mean.
 - honesty: uniform σ ratio ≈ 1.10 / 1.13; incidence σ ≈ 1.02–1.05;
 - Occam: ΔF from +0.1 (s = 0.1°) to +5.2 nats (s = 30°); tilted wall −70 nats;
 
-## Day 2 — The CORTEX architecture: one belief, many owners (`slides/day2.pdf`, `labs/day2.ipynb`)
+## Day 2 — The CORTEX architecture: concepts and memories (`slides/day2.pdf`, `labs/day2.ipynb`)
 
 | time | block | frames |
 |---|---|---|
 | 0:00–0:15 | Who holds the belief; CORTEX, the whole picture (name the four colours and stop: the rest of the day is its centre circle); modules against a shared graph | 1–3 |
-| 0:15–0:30 | The shared graph: RT edges, structural / non-structural, replicas, media plane, five memories, including eventual consistency (frames 7–8), DDS domains and shared memory (frames 9–10) | 4–11 |
-| 0:30–1:10 | One free energy, many owners: one big belief, what to report, cutting it into pieces, F_i as a balance, the toy scene and its price, a mean is half a belief, two failures | 12–20 |
-| 1:10–1:35 | Concept agents: definition, residual + Jacobian, what is published, residual_concept, the contract, the federation | 21–26 |
-| 1:35–2:00 | No thresholds: gate against precision, the toy, bounded outliers, the gate that survives, the rule | 27–31 |
+| 0:15–0:30 | Concepts, the fabric of CORTEX: what a concept agent is, one chair across four dimensions, the class in the agent against the instances on the graph | 4–6 |
+| 0:30–0:50 | The shared graph: the small graph then the real one, structural / non-structural, replicas, eventual consistency (frames 11–12), DDS domains and shared memory (frames 13–14) | 7–14 |
+| 0:50–1:10 | Memories as concepts kept for longer: timescales, episodic, long-term spatial, long-term object, amortisation | 15–19 |
+| 1:10–1:45 | One free energy, many owners: one big belief, what to report, cutting it into pieces, F_i as a balance, the toy scene and its price, a mean is half a belief, two failures | 20–28 |
+| 1:45–2:00 | No thresholds: gate against precision, the toy, the gate that survives | 29–31 |
 | 2:00–2:15 | break | |
 | 2:15–4:00 | Lab 2 | 32–33 |
 
-**CORTEX in action (the unnumbered full-screen slide after frame 2).** In pympress, click on it once to start; it loops (44.5 s), and the presenter window has the controls. pympress cannot autostart beamer's `\movie`. In another viewer the slide shows a still. It is a schematic: the order is illustrative, and the slide says so; on the robot everything runs at once. Point at the last line: every path went through the centre. The course copy of the drawing (`figures/cortex_overview.png`) has the thesis figure's `Root` node painted out, to match frame 4.
+**CORTEX in action (the unnumbered full-screen slide after frame 2).** In pympress, click on it once to start; it loops (44.5 s), and the presenter window has the controls. pympress cannot autostart beamer's `\movie`. In another viewer the slide shows a still. It is a schematic: the order is illustrative, and the slide says so; on the robot everything runs at once. Point at the last line: every path went through the centre. The course copy of the drawing (`figures/cortex_overview.png`) has the thesis figure's `Root` node painted out, to match frame 7. **Both the figure and the movie still show semantic and procedural memory as if they ran**, and the movie's step 5 says semantic memory checks a new object. Frame 2 says the two are not built; say it aloud over the movie.
 
-**Eventual consistency (frames 7–8).** Walk frame 7 one agent at a time, from the left. The surprise to land: agent 2's write is simply lost, and nothing reports it; hence one owner per node. Students will ask why an arbitrary id may decide: frame 8 answers it. The id is arbitrary and so is the winner; what matters is that every copy applies the same ranking, so they agree. Swap the ids and they all agree on the other value. Agreement is what the CRDT promises; which value is right is what ownership is for. The rule shown is cortex's default CRDT mode (`core/crdt/delta_crdt.h`, `join_replace_conflict`): a change that has seen another replaces it, and otherwise the lower writer id wins. It is idealised: a comment in that file records that the causal test (`dotin`) carries a known workaround. The optional LWW mode, same-host only, orders by (timestamp, agent id), which is what the thesis sentence at `cortex.tex` l.257 describes.
+**Eventual consistency (frames 11–12).** Walk frame 11 one agent at a time, from the left. The surprise to land: agent 2's write is simply lost, and nothing reports it; hence one owner per node. Students will ask why an arbitrary id may decide: frame 12 answers it. The id is arbitrary and so is the winner; what matters is that every copy applies the same ranking, so they agree. Swap the ids and they all agree on the other value. Agreement is what the CRDT promises; which value is right is what ownership is for. The rule shown is cortex's default CRDT mode (`core/crdt/delta_crdt.h`, `join_replace_conflict`): a change that has seen another replaces it, and otherwise the lower writer id wins. It is idealised: a comment in that file records that the causal test (`dotin`) carries a known workaround. The optional LWW mode, same-host only, orders by (timestamp, agent id), which is what the thesis sentence at `cortex.tex` l.257 describes.
 
-**Shared memory (frame 10).** 85 GB/s is the whole DDR5 bus; one core copies well below that, so 33 µs is a lower bound. The driver still writes the frame once into the slot, so zero copy is about not paying again per reader, not about avoiding the first write. A story if time allows: for months the plane was silently NOT zero-copy, because FastDDS turns data-sharing off for keyed types and only logs it at INFO. Removing one `@key` took the bench from 494 µs at 1.4% CPU to 186 µs at 0.8% (memory note `zero-copy-was-never-on-keyed-types`, commit 48543c5; post-thesis). The configuration said on, and nothing measured it.
+**Shared memory (frame 14).** 85 GB/s is the whole DDR5 bus; one core copies well below that, so 33 µs is a lower bound. The driver still writes the frame once into the slot, so zero copy is about not paying again per reader, not about avoiding the first write. A story if time allows: for months the plane was silently NOT zero-copy, because FastDDS turns data-sharing off for keyed types and only logs it at INFO. Removing one `@key` took the bench from 494 µs at 1.4% CPU to 186 µs at 0.8% (memory note `zero-copy-was-never-on-keyed-types`, commit 48543c5; post-thesis). The configuration said on, and nothing measured it.
+
+**Concepts first (2026-11-09).** Frame 5 is the map of the next three days: geometry, life cycle and aspect tomorrow, function on Day 4. The four dimensions are the course's framing; the thesis does not name them. Frame 6 is Day 1 again: the class is the prior, an instance the posterior. For a chair the belief is pose only and the shape is the class template; a table's shape is fitted.
+
+**The graph from a run (frame 8).** The bottom layer is the simulator's apartment, not a belief. The `root` at the top of this picture is the viewer's World layer; frame 7 starts from the robot.
+
+**Memories (frames 15–19): say what is not built.** Working, episodic and long-term spatial run. Long-term object memory (LTOM) is work in progress and is not in the thesis. Semantic and procedural are not built, although `cortex.tex` l.519–537 and l.549–570 describe them in the present tense; that text also says the spatial memory holds objects, which stopped being true with a2baaebe. There is no semantic memory beyond LTOM, which is per-instance today, and classes stay inside the concept agents.
+
+**What not to claim about LTOM (state on 2026-11-09, re-check before the course).** It only offers: in `ltom_chair2` the chair was absent about 35 s after re-entry, until detected. Recall uses position only, so a moved chair is not established (offline atlas replay re-identified one 15/53 = 28%). Only chairs have done this live. Renaming, learned permanence and relations are designed, not built. The atlas exists only in `chair_concept` in shadow mode, and thumbnails are on a branch.
+
+**Amortisation (frame 19) is a plan.** Missions run and their results are kept; nothing generalises from them yet.
 
 **The main line is plain on purpose (2026-11-08).** The form admits cognitive-science students. The joint in full, the seven assumptions, the factorised q and the matrix C are backup frames after "Tomorrow", outside the frame count: show them if someone asks.
 
-**Say it, don't read it.** Frame 14 is the argument of the day: every boundary between processes is a
+**Say it, don't read it.** Frame 22 is the argument of the day: every boundary between processes is a
 conditional-independence assumption, and whatever crosses it is what survived a marginalisation.
 
-**Frame 17 is the surprise.** Ask before showing it whether the agents' standard deviations are right.
+**Frame 25 is the surprise.** Ask before showing it whether the agents' standard deviations are right.
 Most say no. Each marginal is exact; only the correlation is lost. Relations between objects are what
 the factorisation cannot hold.
 
-**Frame 18: the price does not fall with more data.** Students expect it to. It is the information the
+**Frame 26: the price does not fall with more data.** Students expect it to. It is the information the
 objects carry about each other, and no number of frames creates a place to keep it.
 
-**The rule is not "never a gate".** Frame 30 proves one must stay, and frame 31 names the three that do
+**The rule is not "never a gate".** Frame 31 proves one must stay, and the backup frame "The rule is" names the three that do
 exist and their verdicts: admissibility justified, birth due to be replaced, the peer grace period a
 recorded debt. Say explicitly that the thesis has not finished this.
 
