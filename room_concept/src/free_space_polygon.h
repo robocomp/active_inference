@@ -133,6 +133,18 @@ inline std::size_t drop_outlines_containing(std::vector<std::vector<Eigen::Vecto
                          { return gaussian_mass_in_polygon(mean, cov, poly) > 0.5f; });
 }
 
+/// A crossing's exclusion update: the outline of the room just left joins the outlines already excluded and THEN the
+/// contradiction is tested over all of them, the just-left one included (clean16, room_4: the robot stood 0.5 m inside the outline of
+/// the room it had "left", the door being a phantom; the identity exemption left the raster no floor to ever call its own, and the
+/// robot parked for 16 minutes). The MAP test is the same as drop_outlines_containing's: no new threshold, no decree by identity.
+inline std::size_t exclude_left_room(std::vector<std::vector<Eigen::Vector2f>>& polys, std::vector<Eigen::Vector2f> just_left,
+                                     const Eigen::Vector2f& mean, const Eigen::Matrix2f& cov)
+{
+    if (just_left.size() >= 3)
+        polys.push_back(std::move(just_left));
+    return drop_outlines_containing(polys, mean, cov);
+}
+
 /// True when no two non-adjacent edges of the closed ring touch or cross.
 inline bool is_simple(const std::vector<Eigen::Vector2f>& p)
 {

@@ -29,7 +29,7 @@ def proto_events(run):
         ev = r.get("event", "")
         if ev.startswith("startup_born") or "crossing_born" in ev:
             rooms.append({"born": (int(r["ts_ms"]) - t0) / 1000.0, "promoted": None, "promoted_ms": None,
-                          "area": None, "how": "crossing" if "crossing_born" in ev else "start"})
+                          "area": None, "how": "crossing" if "crossing_born" in ev else "start", "door": r.get("door", "")})
         elif ev == "promoted" and rooms and rooms[-1]["promoted"] is None:
             rooms[-1].update(promoted=(int(r["ts_ms"]) - t0) / 1000.0, promoted_ms=int(r["ts_ms"]),
                              area=float(r["fs_area"]) if r.get("fs_area") not in (None, "", "nan") else None)
@@ -69,6 +69,37 @@ def learnt_polygons(run):
     return out
 
 
+def room_names(run, rooms):
+    """The estimated name of each room of `rooms` (birth order): 'start' for the start room (its SVG carries no room_ prefix),
+    and for a crossing-born room the name ltsm_agent promoted through the door it was born by ([promotion] PROMOTING <room>
+    ... crossed door <door> ...). Never by list position: SVGs may be missing (an older run kept only the newest 3), and
+    index pairing grades each one against another room. A door name may be recycled and a crossing into a RECALLED room
+    is promoted as well, so every crossing of proto_room.csv consumes its promotion in order. A room never promoted has
+    no name."""
+    path = os.path.join(run, "logs", "ltsm_agent.log")
+    promos = re.findall(r"\[promotion\] PROMOTING (room_\d+) .*? crossed door (\S+) ",
+                        open(path, errors="replace").read()) if os.path.exists(path) else []
+    pos = 0                                        # the next promotion not yet consumed (crossings and promotions are in order)
+    by_row = {}                                    # proto_room.csv row index of a crossing -> the name promoted for it
+    rows = list(csv.DictReader(open(os.path.join(run, "proto_room.csv"))))
+    for n, r in enumerate(rows):
+        if "born" not in r.get("event", "") or r["event"].startswith("startup_born"):
+            continue
+        j = next((k for k in range(pos, len(promos)) if promos[k][1] == r.get("door", "")), None)
+        if j is not None:
+            by_row[n] = promos[j][0]
+            pos = j + 1
+    crossing_born_rows = [n for n, r in enumerate(rows) if "crossing_born" in r.get("event", "")]
+    names, c = [], 0
+    for i, r in enumerate(rooms):
+        if r["how"] == "start":
+            names.append("start")
+            continue
+        names.append(by_row.get(crossing_born_rows[c], f"#{i}") if c < len(crossing_born_rows) else f"#{i}")
+        c += 1
+    return names
+
+
 def point_in(poly, x, y):
     inside, n = False, len(poly)
     for i in range(n):
@@ -89,11 +120,11 @@ def main(run):
         gt, gt_err = {}, str(e)
     else:
         gt_err = ""
-    # estimated room names in birth order: the start room is room_1; crossing-born rooms take the names their SVGs carry
-    names = ["start"] + sorted([n for n in learnt if n != "start"], key=lambda s: int(s.split("_")[1]))
+    # estimated room names, by the name ltsm_agent gave each room (never by list position); the start room is room_1
+    names = room_names(run, rooms)
     lines, table = [], []
     for i, r in enumerate(rooms):
-        est = names[i] if i < len(names) else f"#{i}"
+        est = names[i]
         pos = gt_at(run, r["promoted_ms"])
         truth, iou = None, "n/a"
         if pos is not None:
@@ -103,6 +134,8 @@ def main(run):
         if truth is not None and est in learnt:
             sc = wbt_rooms.align_and_score(gt[truth]["poly"], learnt[est])
             iou = f"{sc['iou']:.3f}"
+        elif truth is not None:
+            iou = f"n/a (no SVG for {est} in this run)"
         elif truth is None:
             iou = "n/a (no GT polygon contains the robot at promotion" + (" — start room" if r["how"] == "start" else "") + ")"
         leaves = [d for d in drive if (d["room"] == ("room_1" if est == "start" else est))]

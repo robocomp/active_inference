@@ -22,8 +22,32 @@ void check(bool ok, int line, const char* what)
 #define CHECK(x) check((x), __LINE__, #x)
 }
 
+
+void outline_order_excludes_just_left_only_when_robot_outside()
+{
+    using Poly = std::vector<Eigen::Vector2f>;
+    const Poly L{{-3.f, -3.f}, {3.f, -3.f}, {3.f, 3.f}, {-3.f, 3.f}}, other{{5.f, -3.f}, {9.f, -3.f}, {9.f, 3.f}, {5.f, 3.f}};
+    const Eigen::Matrix2f S = Eigen::Matrix2f::Identity() * 0.0064f;   // sigma 8 cm, the pose covariance rearm_after_crossing uses
+    {   // clean16: the robot 0.5 m INSIDE the outline just left: it is the room the robot is still in, not "another room"
+        std::vector<Poly> ex = {other};
+        const auto n = rc::freespace::exclude_left_room(ex, L, Eigen::Vector2f(2.5f, 0.f), S);
+        check(n == 1 and ex.size() == 1 and ex[0] == other, __LINE__, "robot inside the room just left: its outline is not excluded");
+    }
+    {   // a normal crossing: the robot 0.5 m OUTSIDE the outline just left: excluded as ever
+        std::vector<Poly> ex = {other};
+        const auto n = rc::freespace::exclude_left_room(ex, L, Eigen::Vector2f(3.5f, 0.f), S);
+        check(n == 0 and ex.size() == 2 and ex[1] == L, __LINE__, "robot outside the room just left: its outline is excluded");
+    }
+    {   // the earlier-outline rule is unchanged: an earlier outline holding the robot is dropped, the just-left stays out
+        std::vector<Poly> ex = {other};
+        const auto n = rc::freespace::exclude_left_room(ex, L, Eigen::Vector2f(7.f, 0.f), S);
+        check(n == 1 and ex.size() == 1 and ex[0] == L, __LINE__, "an earlier outline holding the robot is dropped as before");
+    }
+}
+
 int main()
 {
+    outline_order_excludes_just_left_only_when_robot_outside();
     std::setlocale(LC_ALL, "");
     using V = Eigen::Vector2f;
     // the room left (x < 0) with a spike poking 2.6 m into the new room (x > 0) along y = 0, 0.3 m wide

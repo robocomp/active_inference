@@ -24,7 +24,7 @@ int main(int argc, char **argv)
         rc::DoorAperture ap; ap.a = R * Vector2f(-0.5f, 3); ap.b = R * Vector2f(0.5f, 3); ap.p_open = 1.f; ap.sigma_along = 0.03f;
         const auto c = rc::crossing::evaluate(ap, outline, R * Vector2f(0.2f, 3.8f), Eigen::Matrix2f::Identity() * 4e-4f, 0.25f);
         DSR::Node proto = DSR::Node::create<room_node_type>("room_mouth_test_" + std::to_string(int(yaw * 10)));
-        rc::crossing::write_mouth(*G, proto, c, ap.sigma_along, 0.06f, 7777);
+        rc::crossing::write_mouth(*G, proto, c, ap.sigma_along, 0.06f, 7777, Eigen::Affine2f::Identity());
         const auto id = G->insert_node(proto);
         check(id.has_value(), "proto node inserted");
         const auto n = G->get_node(id.value()).value();
@@ -40,6 +40,51 @@ int main(int argc, char **argv)
         check(cv->get().size() == 36 and cv->get()[0] > 0.f and cv->get()[35] > 0.f, "6x6 covariance stated");
         check(f.value() == 7777, "frame room id recorded");
     }
+    // ── THE OLD ROOM IS NOT THE FIRST ROOM (clean6 frame report §3): its published frame is a rigid transform away from the
+    //    internal frame the crossing is computed in, so the mouth, stated "in the old room's frame" and read by ltsm as
+    //    T(old <- new), must be composed with T_pub_int of the OLD room. A case where the old code's seam is metres wrong.
+    {
+        const Eigen::Rotation2Df Ry(1.2f);
+        Eigen::Affine2f T_old_pub_int = Eigen::Affine2f::Identity();
+        T_old_pub_int.linear() = Ry.toRotationMatrix();
+        T_old_pub_int.translation() = Vector2f(3.1f, -5.2f);
+        std::vector<Vector2f> outline;
+        const Vector2f corners[4] = {{-3, -2}, {3, -2}, {3, 3}, {-3, 3}};
+        for (int i = 0; i < 4; ++i) for (int j = 0; j < 8; ++j) outline.push_back(corners[i] + (corners[(i + 1) % 4] - corners[i]) * (j / 8.f));
+        rc::DoorAperture ap; ap.a = Vector2f(-0.5f, 3); ap.b = Vector2f(0.5f, 3); ap.p_open = 1.f; ap.sigma_along = 0.03f;
+        const auto c = rc::crossing::evaluate(ap, outline, Vector2f(0.2f, 3.8f), Eigen::Matrix2f::Identity() * 4e-4f, 0.25f);
+        DSR::Node proto = DSR::Node::create<room_node_type>("room_mouth_test_second");
+        rc::crossing::write_mouth(*G, proto, c, ap.sigma_along, 0.06f, 7777, T_old_pub_int);
+        const auto id = G->insert_node(proto);
+        check(id.has_value(), "proto node inserted (old room is not the first room)");
+        const auto n = G->get_node(id.value()).value();
+        const auto t = G->get_attrib_by_name<rt_translation_att>(n), r = G->get_attrib_by_name<rt_rotation_euler_xyz_att>(n);
+        const auto cv = G->get_attrib_by_name<rt_covariance_att>(n);
+        check(t.has_value() and r.has_value() and cv.has_value(), "mouth attributes present (old room is not the first room)");
+        if (t and r and cv)
+        {
+            const Eigen::Affine2f Tp = rc::crossing::proto_frame(c);                    // the proto frame in the INTERNAL frame
+            const Eigen::Affine2f expected = T_old_pub_int * Tp;                       // the proto frame in the old room's published frame
+            Eigen::Affine2f mouth = Eigen::Affine2f::Identity();
+            mouth.linear() = Eigen::Rotation2Df(r->get()[2]).toRotationMatrix();
+            mouth.translation() = Vector2f(t->get()[0], t->get()[1]);
+            check((mouth.translation() - expected.translation()).norm() < 1e-4f and (mouth.linear() - expected.linear()).cwiseAbs().maxCoeff() < 1e-4f,
+                  "mouth = T_pub_int(old) * proto frame");
+            // the seam ltsm derives: T(new <- old) = inverse(mouth). The truth, and what the old (internal-frame) mouth gave.
+            const Eigen::Affine2f seam_truth = expected.inverse(), seam_old_code = Tp.inverse();
+            const float err_seam = (mouth.inverse().translation() - seam_truth.translation()).norm();
+            const float err_old = (seam_old_code.translation() - seam_truth.translation()).norm();
+            check(err_seam < 1e-3f, ("the seam read as inverse(mouth) is the true T(new<-old) (err " + std::to_string(err_seam) + " m)").c_str());
+            check(err_old > 1.f, ("this case discriminates: the internal-frame mouth is off by " + std::to_string(err_old) + " m").c_str());
+            // covariance: the xy block rotated with the frame, yaw variance unchanged
+            const auto mi = rc::crossing::mouth_of(c, ap.sigma_along, 0.06f);
+            Eigen::Matrix2f Cin; Cin << mi.cov[0], mi.cov[1], mi.cov[6], mi.cov[7];
+            const Eigen::Matrix2f Cex = T_old_pub_int.linear() * Cin * T_old_pub_int.linear().transpose();
+            check(std::abs(cv->get()[0] - Cex(0, 0)) < 1e-5f and std::abs(cv->get()[1] - Cex(0, 1)) < 1e-5f and std::abs(cv->get()[7] - Cex(1, 1)) < 1e-5f, "xy covariance rotated with the frame");
+            check(std::abs(cv->get()[35] - mi.cov[35]) < 1e-7f, "yaw variance unchanged by a constant rotation");
+        }
+    }
+
     std::printf("%s (%d failures)\n", failures ? "FAILED" : "PASSED", failures);
     std::fflush(stdout);
     std::_Exit(failures ? 1 : 0);

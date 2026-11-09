@@ -168,12 +168,11 @@ void proto_exclusion_section()
     const auto d_out = rc::freespace::drop_outlines_containing(a2, {3.05f, 0.f}, S);
     check("5 cm inside the edge: dropped; 5 cm outside: kept", d_in == 1 and d_out == 0 and a2.size() == 1,
           std::to_string(d_in) + "/" + std::to_string(d_out));
-    // The room JUST LEFT is pushed after the drop (room_scene_graph.cpp rearm_after_crossing), so it is never a
-    // candidate even with the robot deep inside its outline: only the earlier entries go through the drop.
+    // The room JUST LEFT goes through the same test since clean16 (rc::freespace::exclude_left_room, tools/exclusion_sliver_test.cpp):
+    // with the robot deep inside its outline it is this room, not another, and is dropped.
     std::vector<Poly> earlier = {other};
-    rc::freespace::drop_outlines_containing(earlier, robot, S);
-    earlier.push_back(L);   // the entry pushed for this crossing
-    check("the just-left entry survives with the robot inside it", earlier.size() == 2 and earlier.back() == L, std::to_string(earlier.size()));
+    rc::freespace::exclude_left_room(earlier, L, robot, S);
+    check("the just-left outline is dropped when the robot stands inside it", earlier.size() == 1 and earlier.back() == other, std::to_string(earlier.size()));
 }
 
 /// ── late_recall (Task 9) ────────────────────────────────────────────────────────────────────────────────────

@@ -1167,14 +1167,14 @@ void RoomSceneGraph::step_proto_room_impl(const rc::RoomConcept::UpdateResult& r
     // ★ THE MOUTH POSE (Task M, 2026-10-23): this proto's frame IS the mouth of the opening it was born through, and
     //   only this agent knows that pose exactly (and its covariance, from door_concept's aperture sigma). It is
     //   published on the proto room node itself with the existing pose attributes -- translation [x y 0], rotation
-    //   [0 0 yaw], 6x6 covariance -- expressed in the OLD room's frame (the room that owns the crossed aperture,
-    //   frozen from here on). Not an RT edge: rooms hang off the robot, and a room-to-room RT edge would close a
+    //   [0 0 yaw], 6x6 covariance -- expressed in the OLD room's PUBLISHED frame (the room that owns the crossed aperture,
+    //   frozen from here on: `best` is INTERNAL, write_mouth composes it with T_pub_int_, still the old room's here, 2026-11-08). Not an RT edge: rooms hang off the robot, and a room-to-room RT edge would close a
     //   loop in the tree every transform query walks. A node attribute survives promotion (which removes only the
     //   proto self-edge), so ltsm still finds it at eviction and can set T(new<-old) = inverse(mouth) with no
     //   door-recess nuisance. No covariance is written when door_concept stated no sigma.
     // (node-level overload of the RT attribute names, sources of the covariance, frame room: see proto_mouth.h)
     rc::crossing::write_mouth(*G_, proto, best, best_ap->sigma_along, room_concept_->params.wall_map.publish_corner_sigma,
-                              static_cast<std::uint64_t>(dsr_room_id_));
+                              static_cast<std::uint64_t>(dsr_room_id_), T_pub_int_);
     G_->add_or_modify_attrib_local<parent_att>(proto, dsr_robot_id_);
     rc::provenance::stamp_creation(*G_, proto);
     const auto id = G_->insert_node(proto);
@@ -1745,15 +1745,18 @@ void RoomSceneGraph::rearm_after_crossing(std::uint64_t new_room_id, const std::
     // FLAGGED (geometric contradiction, MAP of inside vs outside): an EARLIER left outline that holds most of the robot's
     // position posterior is not a different room — rooms do not overlap, and the robot is standing in it. Excluded, it
     // blinded the raster to the floor under the robot (a parked robot adds no free space => no polygon => 'NO WORLD'
-    // for ever; recog_try2, room_2 re-entered from its other side). Done BEFORE the push below: the room just left is
-    // a known OTHER room by identity (it is the one the crossing came out of) and is never a candidate.
-    if (have_last_int_pose_)
-        if (const auto n = rc::freespace::drop_outlines_containing(left_polys_int_, last_int_pose_.translation(),
-                                                                   last_int_cov_.topLeftCorner<2, 2>()); n > 0)
-            qWarning() << "[room][startup-proto] dropped" << n << "earlier left-room outline(s) from the exclusion: most of the"
+    // for ever; recog_try2, room_2 re-entered from its other side). THE ROOM JUST LEFT IS TESTED TOO (clean16, 2026-11-09): the
+    // robot 0.5 m inside the outline it "left" through a phantom door. Excluded by identity, it left the raster no floor to call
+    // its own, for ever. The same MAP test as above, no threshold: exclude_left_room pushes it first.
+    if (auto poly = room_concept_->nominal_room_polygon(); have_last_int_pose_)
+    {
+        if (const auto n = rc::freespace::exclude_left_room(left_polys_int_, std::move(poly), last_int_pose_.translation(),
+                                                            last_int_cov_.topLeftCorner<2, 2>()); n > 0)
+            qWarning() << "[room][startup-proto] dropped" << n << "left-room outline(s) from the exclusion: most of the"
                        << "pose posterior at (" << last_int_pose_.translation().x() << "," << last_int_pose_.translation().y()
                        << ") lies inside them, so they are this room, not another";
-    if (auto poly = room_concept_->nominal_room_polygon(); poly.size() >= 3)
+    }
+    else if (poly.size() >= 3)
         left_polys_int_.push_back(std::move(poly));
     // This agent's intentions (afford_room, afford_calib) are ONE node each and move with the agent's room: the
     // affordance manager re-hangs them from the new room on its next publish (parent + has_intention), but never
