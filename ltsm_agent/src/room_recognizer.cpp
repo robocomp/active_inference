@@ -193,6 +193,7 @@ void RoomRecognizer::end_episode()
     metric_filt_ms_ = 0;
     L_id_ = 0;
     ep_L_mem_.clear();
+    ep_L_rid_ = 0;
     start_.clear();
     path_.clear();
     fresh_.reset();
@@ -413,6 +414,7 @@ RoomRecognizer::Step RoomRecognizer::step_impl()
     std::string L_mem;
     std::optional<Measured> robot_in_P;
     std::optional<ChainPose> fresh;
+    bool fresh_flipped = false;                        // the two faces of the crossed door were the same hole turned by pi (log only)
     std::optional<std::uint64_t> P_rid;
 
     // ── 1. WHICH PHASE. The episode spans the promotion: it lives while the current room is L (before), the provisional
@@ -512,14 +514,36 @@ RoomRecognizer::Step RoomRecognizer::step_impl()
     // examined). RoomEviction::remembered_hole is the one resolver every consumer uses: D's centre inside a remembered
     // face's aperture in L's twin (half the door width: a point inside a segment, a membership test, not a tuning
     // constant); the name is the fallback only when D's pose in L is unresolvable.
-    const bool known_door = ev_.remembered_hole(D.value()).has_value();
-    if (known_door) return ineligible(out, P->name(), std::format("the crossed door {} is already a passage in memory", D->name()));
+    // A KNOWN door no longer ends the question by itself (cmp_br2, 2026-11-08: room_5 entered through door_5, whose far side
+    // is r1_room_1, was never examined). What tells the two cases apart is what the provisional room IS, read from the graph
+    // and not from a timer or a guess: room_concept, when it creates the room behind a door from the recall hanging under it,
+    // gives it the recalled room's room_id (room_scene_graph.cpp: `k = recall->room_index`) and otherwise a fresh id no
+    // remembered room carries. So: P's room_id == the room_id of the room on the passage's far face => the recall was USED,
+    // the room is the one memory predicts, nothing to audit (user decision 2026-10-23, unchanged). Any other P is a room
+    // nobody recognised, and the known passage is the strongest metric evidence there is: the normal episode runs (its own
+    // chain in memory already places the far room behind that door; room_concept's verdict stays the check against the LiDAR).
+    const auto hole = ev_.remembered_hole(D.value());
+    if (hole.has_value())
+    {
+        const auto P_room_id = live_->get_attrib_by_name<room_id_att>(P.value());
+        const auto near_room = owning_room(*mem_, hole->face);
+        const bool recalled = P_room_id.has_value() and std::ranges::any_of(
+            DSR::DSRGraph::get_node_edges_by_type(hole->passage, "match"), [&](const auto &e) {
+                if (e.to() == hole->face.id()) return false;
+                const auto f = mem_->get_node(e.to());
+                const auto r = f.has_value() ? owning_room(*mem_, f.value()) : std::nullopt;
+                return r.has_value() and not (near_room.has_value() and r->id() == near_room->id())
+                       and mem_->get_attrib_by_name<room_id_att>(r.value()) == P_room_id; });
+        if (recalled) return ineligible(out, P->name(), std::format("the crossed door {} is a passage in memory and its recall brought this room", D->name()));
+    }
     if (prov_id_ != P->id())
     {
         end_episode();
         prov_id_ = P->id();
         L_id_ = L->id();
         ep_L_mem_ = L_mem;
+        ep_L_rid_ = 0;
+        if (const auto Lm = mem_->get_node(L_mem); Lm.has_value()) ep_L_rid_ = mem_->get_attrib_by_name<room_id_att>(Lm.value()).value_or(Lm->id());
         promoted_ = false;
         metric_filt_ms_ = cycle_ms_;                   // the filter's clock starts with the episode
         // the path taken: the passage that brought the robot into L (from its previous room), else L itself is the reference
@@ -527,6 +551,9 @@ RoomRecognizer::Step RoomRecognizer::step_impl()
         start_ = L_mem;
         if (not prev_passage_.empty() and not prev_mem_.empty()) { path_ = {prev_passage_}; start_ = prev_mem_; }
         qInfo().noquote() << QString::fromStdString(std::format("[recog] episode begins: provisional {} behind {} (metric filter starts neutral)", P->name(), L->name()));
+        if (hole.has_value())
+            qInfo().noquote() << QString::fromStdString(std::format("[recog] {} is a known door ({}, face {}) and no recall brought {}: recognition runs",
+                                                                    D->name(), hole->passage.name(), hole->face.name(), P->name()));
     }
     P_rid = live_->get_attrib_by_name<room_id_att>(P.value());
 
@@ -566,7 +593,10 @@ RoomRecognizer::Step RoomRecognizer::step_impl()
                 const Eigen::Vector2d o = fL.pose.head<2>();
                 const Eigen::Vector2d n(-std::sin(fL.pose.z()), std::cos(fL.pose.z()));
                 if (n.dot(c_L.value() - o) * n.dot(r_in_L - o) > 0.0)
+                {
                     seam_LP = seam::compose_cov(seam::compose_cov(fL, Measured{Vec3(0.0, 0.0, M_PI), Mat3::Zero()}), inv_fP);
+                    fresh_flipped = true;
+                }
             }
             fresh = ChainPose{seam_LP.pose, seam_LP.cov};
         }
@@ -578,11 +608,14 @@ RoomRecognizer::Step RoomRecognizer::step_impl()
     ChainPose robot_prov;
     if (robot_in_P.has_value()) robot_prov = {robot_in_P->pose, robot_in_P->cov};
     auto q = build_metric_query(*mem_, path_, start_, robot_in_P.has_value() ? fresh : std::nullopt, robot_prov);
+    q.fresh_ok = fresh.has_value();
+    q.fresh_flipped = fresh_flipped;
 
-    // Candidates: archived rooms that are not staged (build_metric_query already drops them), not L (the crossing rules it
-    // out), and not P's own twin if memory holds one. Sorted by room_id: the order retina's evidence is keyed to.
-    std::erase_if(q.rooms, [&](const KnownRoomMetric &k) {
-        return k.mem_room == L_mem or (P_rid.has_value() and k.room_id == P_rid.value()); });
+    // Candidates: archived rooms that are not staged (build_metric_query already drops them) and not P's own twin if memory
+    // holds one. L IS A HYPOTHESIS (clean16, 2026-11-09): a crossing is an estimate, not a fact. The robot may still be in the
+    // room it "left", and L competes for that on the evidence already computed for every room. A commit to L means THE
+    // CROSSING DID NOT HAPPEN (Step::withdraw_crossing). Sorted by room_id: the order retina's evidence is keyed to.
+    std::erase_if(q.rooms, [&](const KnownRoomMetric &k) { return P_rid.has_value() and k.room_id == P_rid.value(); });
     std::ranges::sort(q.rooms, {}, &KnownRoomMetric::room_id);
     if (q.rooms.empty()) return abort_episode(out);
 
@@ -741,12 +774,18 @@ RoomRecognizer::Step RoomRecognizer::step_impl()
     }
     else if (not skip_decision)
     {
-        const auto next = rc::recog::commit_step(commit_, since, since);
+        auto next = rc::recog::commit_step(commit_, since, since);
+        // A commit to L can only be executed as the ADOPTION of a PROMOTED P (RoomSwap case B: P's identity and L's archive
+        // both exist then; while L is live, P could not take its name). So it waits for the promotion: not a timer, the
+        // structural order of the transaction. The hypothesis keeps its posterior and keeps competing.
+        const bool to_L = next.state == rc::recog::Commit::State::Committed and next.room >= 0 and next.room < int(ids_.size()) and ids_[next.room] == ep_L_rid_;
+        if (commit_.state == rc::recog::Commit::State::Entering and to_L and not promoted_) next = {rc::recog::Commit::State::Entering, -1};
         if (commit_.state == rc::recog::Commit::State::Entering and next.state == rc::recog::Commit::State::Committed)
         {
             out.act = Step::Act::Swap;
             out.room_index = next.room;
             out.room_id = ids_[next.room];
+            out.withdraw_crossing = to_L;
             out.pose_in_k = post_entry_[next.room].pose_in_k;
             rebase();
             qInfo().noquote() << QString::fromStdString(std::format("[recog] SWAP requested: room_id {} (posterior {:.3f}; metric log_inside {:.2f}, appearance loglr {:.2f}{}, new: metric log_new {:.2f})",

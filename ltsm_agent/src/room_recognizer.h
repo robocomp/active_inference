@@ -8,8 +8,10 @@
  *     proto-room, or the hand-over case promotion_evidence also accepts: the robot->L edge retired while robot->P is
  *     live). L may itself be the promoted room of the previous episode (fresh -> fresh crossings);
  *   - P carries an entry mirror of a door of L (door_concept: a door node whose parent is P);
- *   - that crossed door has NO passage in memory (a door crossed before is a known passage; recall is trusted there,
- *     user decision 2026-10-23: no audit of known passages).
+ *   - that crossed door has NO passage in memory, OR it has one and P was not brought in by its recall: P's room_id is not
+ *     the room_id of the room on the passage's far face (a recall that fired hands P the recalled room_id; a fresh room gets a
+ *     new one). A recalled room is trusted, user decision 2026-10-23: no audit of known passages. A fresh room through a known
+ *     door is examined by the normal episode (2026-11-08, cmp_br2: a known passage must not switch recognition off).
  * It is BEGUN only while these hold (it then spans P's promotion, see below); it stops, and its `recognition` node is
  * removed, when P is lost before promotion, at the fence, or when a newer provisional room appears.
  *
@@ -24,7 +26,9 @@
  *                promoted). A state, read again each cycle; the decision uses its change since the last state change.
  *   appearance   retina's `place_evidence` node (recog_loglr / recog_mix / recog_mix_n, cumulative and already temporally
  *                discounted), absent today (metric-first) => AppearanceEvidence::available = false.
- * Candidates = the memory rooms that are not staged and are not L (the crossing rules L out structurally); they are sorted
+ * Candidates = the memory rooms that are not staged, L INCLUDED (clean16, 2026-11-09: a crossing is an estimate; the robot may
+ * still be in the room it "left"). A commit to L means the crossing did not happen (Step::withdraw_crossing, room_swap.h). It
+ * waits for P's promotion (L's archive and P's identity exist only then: RoomSwap's case B). Sorted
  * by room_id so the order retina sees in `recog_room_ids` is stable.
  *
  * STAGED COMMIT (rc::recog::commit_step). Every decision uses the evidence gathered SINCE THE LAST STATE CHANGE (episode
@@ -79,6 +83,7 @@ public:
         int           room_index = -1;      ///< index into the candidates (recog_room_ids order)
         std::uint64_t room_id = 0;
         rc::recog::PoseMix pose_in_k;       ///< the robot in that room's frame, as the joint posterior holds it
+        bool withdraw_crossing = false;     ///< Swap to L, the room just left: the crossing did not happen (RoomSwap withdraws P)
         /// An EXECUTED (held) swap's episode ended this cycle (the fence, or a newer provisional room): the undo window is
         /// closed. The caller closes RoomSwap's window from this (on_room_left), BEFORE executing `act`, which may already
         /// belong to the next episode. One-shot: reported on exactly one Step.
@@ -139,6 +144,7 @@ private:
     std::int64_t metric_filt_ms_ = 0;                  ///< time of the last filter update, or of the episode start before the first (0 = no episode)
     std::uint64_t L_id_ = 0;                    ///< the live room the robot came from
     std::string ep_L_mem_;                      ///< its memory name
+    std::uint64_t ep_L_rid_ = 0;                ///< its room_id in memory: a commit to it withdraws the crossing
     std::string start_;                         ///< path start room (memory) and the passages crossed to L
     std::vector<std::string> path_;
     std::optional<ChainPose> fresh_;            ///< the fresh seam T(L <- P), cached while measurable (L is gone after promotion)

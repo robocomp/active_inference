@@ -51,6 +51,12 @@ bool is_descendant(DSR::DSRGraph &mem, std::uint64_t node_id, const std::string 
 std::optional<Mat::RTMat> seam_through_passage(DSR::DSRGraph &mem, const std::string &passage,
                                                const std::string &room_to, const std::string &room_from);
 
+/// Whether `passage`'s two faces, as composed by seam_through_passage, were found to be the same hole turned by pi (door
+/// faces orient from the room that fits them). nullopt when the passage has no face in each room. For logging: the seam
+/// itself already applies the turn.
+std::optional<bool> seam_flipped_through_passage(DSR::DSRGraph &mem, const std::string &passage,
+                                                 const std::string &room_to, const std::string &room_from);
+
 /// A memory room flagged `object_subtype "staged"`: a draft held by RoomSwap (the undo snapshot of a provisional room's
 /// twin), never a candidate, never recalled, never part of a passage consumers read.
 bool is_staged_room(DSR::DSRGraph &g, const DSR::Node &room);

@@ -202,6 +202,25 @@ static bool accept(Fix &f)
     return f.sw.step() == ltsm::RoomSwap::Event::Accepted;
 }
 
+/// room_concept's accepted verdict as Task 20 writes it: the accepted T(P <- K) = the prior on the edge, and the fit's covariance.
+static void accept_with_fit(Fix &f)
+{
+    auto n = live->get_node("proposal_room_3");
+    if (not n) return;
+    const auto par = live->get_attrib_by_name<parent_att>(n.value()).value_or(0);
+    const auto e = live->get_edge(par, n->id(), "RT");
+    const auto m = e.has_value() ? live->get_rt_api()->get_edge_RT_as_rtmat(e.value()) : std::nullopt;
+    if (not m.has_value()) return;
+    std::vector<float> cov(36, 0.f);
+    cov[0] = 0.04f; cov[7] = 0.04f; cov[35] = 0.01f;
+    live->add_or_modify_attrib_local<rt_translation_att>(n.value(), std::vector<float>{(float)m->translation().x(), (float)m->translation().y(), 0.f});
+    live->add_or_modify_attrib_local<rt_rotation_euler_xyz_att>(n.value(), std::vector<float>{0.f, 0.f, (float)std::atan2(m->linear()(1, 0), m->linear()(0, 0))});
+    live->add_or_modify_attrib_local<rt_covariance_att>(n.value(), std::move(cov));
+    live->add_or_modify_attrib_local<state_att>(n.value(), std::string("accepted"));
+    live->update_node(n.value());
+    f.sw.step();
+}
+
 static Mat::RTMat se2(double x, double y, double th)
 {
     Mat::RTMat T = Mat::RTMat::Identity();
@@ -322,6 +341,57 @@ int main(int argc, char **argv)
         check(mem_rooms() == 2, "memory: exactly the known rooms (K, L)");
         check(proposal_nodes() == 0 and f.sw.state() == ltsm::RoomSwap::State::Entering, "left: proposal withdrawn, state Entering");
         check(not f.ev.held("r3_room_3"), "the archive is released");
+    }
+
+    std::printf("withdrawn_crossing_removes_the_false_room\n");
+    {   // clean16: L is the room P is adopted as. No new room stays in memory or in the graph, L intact, the false passage gone.
+        reset(); build_memory(true); build_live(true);
+        Fix f;
+        const auto accept_L = [&] {
+            auto n = live->get_node("proposal_room_2");
+            if (not n) return false;
+            const auto par = live->get_attrib_by_name<parent_att>(n.value()).value_or(0);
+            const auto e = live->get_edge(par, n->id(), "RT");
+            const auto m = e.has_value() ? live->get_rt_api()->get_edge_RT_as_rtmat(e.value()) : std::nullopt;
+            if (not m.has_value()) return false;
+            std::vector<float> cov(36, 0.f); cov[0] = 0.04f; cov[7] = 0.04f; cov[35] = 0.01f;
+            live->add_or_modify_attrib_local<rt_translation_att>(n.value(), std::vector<float>{(float)m->translation().x(), (float)m->translation().y(), 0.f});
+            live->add_or_modify_attrib_local<rt_rotation_euler_xyz_att>(n.value(), std::vector<float>{0.f, 0.f, (float)std::atan2(m->linear()(1, 0), m->linear()(0, 0))});
+            live->add_or_modify_attrib_local<rt_covariance_att>(n.value(), std::move(cov));
+            live->add_or_modify_attrib_local<state_att>(n.value(), std::string("accepted"));
+            live->update_node(n.value());
+            return f.sw.step() == ltsm::RoomSwap::Event::Accepted; };
+        check(f.sw.swap(2, pose_k(), live_P, true), "swap to L posted (the withdrawal is a proposal like any swap)");
+        check(live->get_node("proposal_room_2").has_value(), "the proposal for L hangs under P");
+        check(accept_L(), "room_concept accepts (its fit is the verdict)");
+        check(mem_rooms() == 2, "no new room stays in memory (K and L only)");
+        check(not mem->get_node("r4_room_4").has_value() and not mem->get_node("r4_door_9").has_value(), "P's twin and its face are gone");
+        check(not mem->get_node("passage_5").has_value(), "the false passage L<->P is gone");
+        check(not mem->get_node("r2_door_3").has_value(), "L's face of it is gone: no door in L stays behind the false crossing");
+        check(mem->get_node("r2_room_2").has_value(), "L is intact, not archived away");
+        check(not any_name_contains("r2_door_x") and passage_count() == 0, "nothing was carried: no passage written");
+        check(f.sw.state() == ltsm::RoomSwap::State::Adopted and f.ev.held("r2_room_2"), "L is held until the robot leaves it, as any adopted room");
+        f.sw.on_room_left("room_2");
+        check(f.sw.state() == ltsm::RoomSwap::State::Entering and not f.ev.held("r2_room_2"), "left: window closed");
+    }
+    {   // a passage holding a face of a THIRD room is a real hole memory knew: only P's face of it goes
+        reset(); build_memory(true); build_live(true);
+        Fix f;
+        // passage_5 joins L and P's twin; a known room K's face of the same hole makes it a real, known passage
+        const auto k = mem->get_node("r3_room_3").value();
+        const auto fK = mem_node("object", "r3_door_6", k.id(), 3, 0, 0, std::nullopt, {}, "door");
+        mem->insert_or_assign_edge(DSR::Edge::create<match_edge_type>(mem->get_node("passage_5")->id(), fK));
+        check(f.sw.swap(2, pose_k(), live_P, true), "withdrawal of a known door");
+        auto n = live->get_node("proposal_room_2").value();
+        std::vector<float> cov(36, 0.f); cov[0] = 0.04f; cov[7] = 0.04f; cov[35] = 0.01f;
+        live->add_or_modify_attrib_local<rt_translation_att>(n, std::vector<float>{0.f, 0.f, 0.f});
+        live->add_or_modify_attrib_local<rt_rotation_euler_xyz_att>(n, std::vector<float>{0.f, 0.f, 0.f});
+        live->add_or_modify_attrib_local<rt_covariance_att>(n, std::move(cov));
+        live->add_or_modify_attrib_local<state_att>(n, std::string("accepted"));
+        live->update_node(n);
+        check(f.sw.step() == ltsm::RoomSwap::Event::Accepted, "accepted");
+        check(mem->get_node("passage_5").has_value() and mem->get_node("r2_door_3").has_value(), "a passage to a third room is a real hole: it and L's face stay");
+        check(not mem->get_node("r4_door_9").has_value(), "P's face goes (with the twin)");
     }
 
     std::printf("wrong_commit_undone_without_corrupting_known_room\n");
@@ -734,6 +804,54 @@ int main(int argc, char **argv)
         check(printed, "the swap-time association line is printed from the live face");
         check(passage_count() == 0 and not any_name_contains("r2_door_3"), "and nothing was written to memory");
         (void) before;
+    }
+
+    std::printf("swap_through_a_known_door_keeps_the_passage\n");
+    {   // (c) L's crossed door is ALREADY a passage to K: the carry-over must recognise it (one passage, its two faces, no new face)
+        reset(); build_memory(false); build_live(false);
+        passage("passage_7", mem->get_node("r2_door_3")->id(), mem->get_node("r3_door_5")->id());
+        Fix f;
+        check(f.sw.swap(3, pose_k(), live_P), "swap accepted");
+        accept_with_fit(f);
+        check(f.sw.state() == ltsm::RoomSwap::State::Adopted, "accepted: Adopted");
+        const auto m = DSR::DSRGraph::get_node_edges_by_type(only_passage().value(), "match");
+        const auto has = [&](const char *n) { const auto d = mem->get_node(n); return d.has_value() and std::ranges::any_of(m, [&](const auto &e) { return e.to() == d->id(); }); };
+        check(passage_count() == 1 and m.size() == 2 and has("r2_door_3") and has("r3_door_5"), "one passage with its original two faces");
+        check(not any_name_contains("r3_door_3"), "no new face written for the known hole");
+        f.sw.on_room_left("room_3");
+        check(passage_count() == 1 and DSR::DSRGraph::get_node_edges_by_type(only_passage().value(), "match").size() == 2, "leaving K: still one passage, two faces");
+    }
+    {   // (c) a recognised room that is NOT the passage's far side: the known passage is not rewritten, and no third face is written
+        reset(); build_memory(false); build_live(false);
+        const auto r9 = mem_node("room", "r9_room_9", 0, 0, 0, 0, 9, {0.f, 4.f, 0.f, 4.f});
+        const auto f9 = mem_node("object", "r9_door_1", r9, 1, 0, 0, std::nullopt, {}, "door");
+        passage("passage_7", mem->get_node("r2_door_3")->id(), f9);
+        Fix f;
+        check(f.sw.swap(3, pose_k(), live_P), "swap accepted");
+        accept_with_fit(f);
+        const auto m = DSR::DSRGraph::get_node_edges_by_type(only_passage().value(), "match");
+        const auto has = [&](const char *n) { const auto d = mem->get_node(n); return d.has_value() and std::ranges::any_of(m, [&](const auto &e) { return e.to() == d->id(); }); };
+        check(passage_count() == 1 and m.size() == 2 and has("r2_door_3") and has("r9_door_1"), "the passage keeps its own two rooms (r2, r9), no face of K added");
+        check(not any_name_contains("r3_door_3"), "no new face of K for that hole");
+        f.sw.on_room_left("room_3");
+    }
+
+    std::printf("recall_goes_to_the_door_nearest_its_face\n");
+    {   // (door_13, cmp_br2) two live doors at one face: one RT edge, one parent, the nearer door; and it follows the door when the other leaves
+        reset(); build_memory(true); build_live(true);
+        Fix f;
+        const auto near_id = live_node("object", "door_5", live_P, 1.05, 0.0, 1, std::nullopt, "door");   // door_5: the restored door, nearest the face r4_door_9
+        f.recall.step();
+        auto rc2 = live->get_node("recall_room_2");
+        check(rc2.has_value() and live->get_attrib_by_name<parent_att>(rc2.value()).value_or(0) == live_M, "door_9, exactly at the face, wins the recall over the farther door_5");
+        check(not live->get_edge(near_id, rc2->id(), "RT").has_value(), "and door_5 has no RT edge to it");
+        // door_9 (the mirror) moves away (door_concept re-seats it elsewhere): door_5 is now the only door at the face
+        put_edge(*live, live_P, live_M, 3.0, 3.0, 1.0);
+        f.recall.step();
+        rc2 = live->get_node("recall_room_2");
+        check(rc2.has_value() and live->get_attrib_by_name<parent_att>(rc2.value()).value_or(0) == near_id, "the recall MOVES to door_5");
+        check(rc2.has_value() and live->get_edge(near_id, rc2->id(), "RT").has_value(), "with its RT edge from door_5");
+        check(rc2.has_value() and not live->get_edge(live_M, rc2->id(), "RT").has_value(), "and the stale RT edge from door_9 is gone");
     }
 
     std::printf("%s (%d failures)\n", failures ? "FAILED" : "all ok", failures);

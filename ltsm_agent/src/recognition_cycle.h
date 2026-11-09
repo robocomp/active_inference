@@ -38,7 +38,7 @@ inline RoomRecognizer::Step recognition_cycle(RoomRecognizer &rec, RoomSwap *swa
     }
     if (rq.act == RoomRecognizer::Step::Act::Swap)
     {
-        if (swap->swap(rq.room_id, rq.pose_in_k, rec.provisional_id()))
+        if (swap->swap(rq.room_id, rq.pose_in_k, rec.provisional_id(), rq.withdraw_crossing))
         {
             rec.on_swap_executed(rq.room_id);
             if (not rec.swapped())

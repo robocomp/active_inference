@@ -2,9 +2,14 @@
 
 #include "seam_fusion.h"
 
+#include <QDebug>
+#include <QString>
+
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <deque>
+#include <format>
 #include <limits>
 #include <map>
 #include <optional>
@@ -220,6 +225,28 @@ double region_log_mass(double q, double dist)
     const double m = std::max(lq, x);                                                    // log(q + e^x), safe from underflow
     return m + std::log(std::exp(lq - m) + std::exp(x - m));
 }
+
+/// A log throttle, not a model term (flagged): the metric expert runs at the recogniser's 1 Hz for the length of an episode;
+/// one block every 5 s keeps a tour's log readable and still shows the episode's first frames, since the time since the
+/// previous block has long passed when an episode starts.
+bool metric_log_due()
+{
+    static constexpr auto kPeriod = std::chrono::seconds(5);
+    static std::chrono::steady_clock::time_point last{};
+    const auto now = std::chrono::steady_clock::now();
+    if (now - last < kPeriod) return false;
+    last = now;
+    return true;
+}
+
+/// Records that `passage` was used by a chain and whether its faces were turned by pi. Once per passage.
+void note_seam(DSR::DSRGraph &g, std::vector<SeamLogEntry> &seam_log, const std::string &passage, const std::string &to,
+               const std::string &from)
+{
+    if (std::ranges::find(seam_log, passage, &SeamLogEntry::passage) != seam_log.end()) return;
+    if (const auto f = seam_flipped_through_passage(g, passage, to, from); f.has_value())
+        seam_log.push_back({passage, f.value()});
+}
 }   // namespace
 
 //////////////////////////////////////////////////////////////////////////////////////////////////
@@ -247,6 +274,7 @@ MetricQuery build_metric_query(DSR::DSRGraph &mem, const std::vector<std::string
             const auto s = seam_cov(mem, pn, here, next);
             if (not s.has_value()) { ok = false; break; }
             acc = seam::compose_cov(acc, s.value());
+            note_seam(mem, q.seam_log, pn, here, next);
             here = next;
         }
         if (ok and seam_last_to_provisional.has_value())
@@ -275,6 +303,7 @@ MetricQuery build_metric_query(DSR::DSRGraph &mem, const std::vector<std::string
             const auto s = seam_cov(mem, p.name, j, m);
             if (not s.has_value()) continue;
             placed[m] = seam::compose_cov(placed.at(j), s.value());
+            note_seam(mem, q.seam_log, p.name, j, m);
             frontier.push_back(m);
         }
     }
@@ -303,13 +332,34 @@ std::vector<rc::recog::MetricEvidence> metric_evidence(const MetricQuery &q, flo
 {
     std::vector<rc::recog::MetricEvidence> out(q.rooms.size());
     log_new_out = 0.f;
+    // ── THE LOG THAT LETS A RECOGNITION FAILURE EXPLAIN ITSELF (2026-11-08, clean6: a -660 for the true room could not be
+    //    traced). No behaviour change: per block, the robot in the reference room with its covariance, every passage's
+    //    pi flip, and per candidate its chain, the distance to its outline and the evidence that came of it.
+    const bool log_this = metric_log_due();
+    if (log_this)
+    {
+        std::string flips;
+        for (const auto &s : q.seam_log) flips += std::format(" {}:{}", s.passage, s.flipped ? "turned" : "same");
+        const auto &C = q.robot_in_ref.cov;
+        qInfo().noquote() << QString::fromStdString(std::format(
+            "[recog][metric] ref {} robot_ok={} robot_in_ref ({:+.3f},{:+.3f},{:+.3f}) cov [xx {:.4g} xy {:.4g} xt {:.4g} yy {:.4g} yt {:.4g} tt {:.4g}] fresh_ok={} fresh_flipped={} passages:{}",
+            q.reference_room, q.robot_ok, q.robot_in_ref.pose.x(), q.robot_in_ref.pose.y(), q.robot_in_ref.pose.z(), C(0, 0), C(0, 1),
+            C(0, 2), C(1, 1), C(1, 2), C(2, 2), q.fresh_ok, q.fresh_flipped, flips.empty() ? std::string(" -") : flips));
+    }
     if (not q.robot_ok) return out;
 
     double log_new = 0.0;
     for (std::size_t k = 0; k < q.rooms.size(); ++k)
     {
         const auto &r = q.rooms[k];
-        if (not r.chain_ok or r.polygon_in_ref.size() < 3) continue;
+        if (not r.chain_ok or r.polygon_in_ref.size() < 3)
+        {
+            if (log_this)
+                qInfo().noquote() << QString::fromStdString(std::format(
+                    "[recog][metric]   {} id {}: no evidence (chain_ok={}, {} polygon vertices)", r.mem_room, r.room_id, r.chain_ok,
+                    r.polygon_in_ref.size()));
+            continue;
+        }
         Eigen::Matrix3d S = q.robot_in_ref.cov + r.cov_T;
         S = 0.5 * (S + S.transpose());
         const Gauss2 g(q.robot_in_ref.pose.head<2>(), S.topLeftCorner<2, 2>());
@@ -329,6 +379,13 @@ std::vector<rc::recog::MetricEvidence> metric_evidence(const MetricQuery &q, flo
         out[k].log_inside = float(region_log_mass(in, d));
         out[k].available = true;
         log_new += region_log_mass(outside, d);   // log(1 - P_inside_k) under THIS room's own S
+        if (log_this)
+        {
+            const double th = std::atan2(r.T_ref_k.linear()(1, 0), r.T_ref_k.linear()(0, 0));
+            qInfo().noquote() << QString::fromStdString(std::format(
+                "[recog][metric]   {} id {}: T_ref_k ({:+.3f},{:+.3f},{:+.3f}) area {:.1f} d {:.2f} P_in {:.4g} log_inside {:+.2f}",
+                r.mem_room, r.room_id, r.T_ref_k.translation().x(), r.T_ref_k.translation().y(), th, r.area, d, in, out[k].log_inside));
+        }
     }
     log_new_out = float(log_new);
     return out;

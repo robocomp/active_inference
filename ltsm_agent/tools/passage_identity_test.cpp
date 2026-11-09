@@ -270,6 +270,50 @@ int main(int argc, char **argv)
         check(rc::topo::crossed_doors(after).contains("door_17"), "door_17 counts as crossed (no re-crossing)");
     }
 
+    std::printf("[known_far] promotion through a known hole whose far side is a THIRD room keeps the passage as it is\n");
+    {   // cmp_br2 eviction #5: passage_0 (r1_door_3 <-> r2_door_5) was given a third face r5_door_14 when room_5 (really room_1, not yet
+        // recognised) was promoted over room_2 through door_5.
+        auto live = graph("pid_live_g", "etc/stage_two_rooms.json");
+        auto mem = graph("pid_mem_g", "ltsm_root.json");
+        const auto [T, T1] = stage_crossing(*live, "door_1");
+        const auto root = mem->get_node("root")->id();
+        auto room = [&](const std::string &name, std::uint64_t rid) {
+            DSR::Node t; t.type("room"); t.name(name);
+            mem->add_or_modify_attrib_local<room_id_att>(t, rid);
+            mem->add_or_modify_attrib_local<parent_att>(t, root);
+            const auto id = mem->insert_node(t).value();
+            put_rt(*mem, root, id, 0, 0, 0);
+            return id; };
+        const auto r0 = room("r0_room_0", 0), r9 = room("r9_room_9", 9);
+        const auto f0 = add_door(*mem, "r0_door_1", r0, T);
+        const auto f9 = add_door(*mem, "r9_door_9", r9, T1);
+        DSR::Node p; p.type("metaconcept"); p.name("passage_0");
+        mem->add_or_modify_attrib_local<object_subtype_att>(p, std::string("passage"));
+        const auto pid = mem->insert_node(p).value();
+        mem->insert_or_assign_edge(DSR::Edge::create<match_edge_type>(pid, f0));
+        mem->insert_or_assign_edge(DSR::Edge::create<match_edge_type>(pid, f9));
+        ltsm::RoomEviction ev(live, mem);
+        ltsm::Candidate cand;
+        cand.robot_id = 200; cand.robot_name = live->get_node(200)->name();
+        cand.old_room_id = 300; cand.old_room_name = "room_0";
+        cand.new_room_id = 400; cand.new_room_name = "room_1";
+        cand.promote = true; cand.remove_old = true;
+        cand.old_door_id = live->get_node("door_1")->id();
+        cand.new_door_id = live->get_node("door_5")->id();
+        cand.crossing_born = true;
+        const auto c = ev.evict(cand);
+        check(c.ok, "evict ok (" + c.reason + ")");
+        const auto m = DSR::DSRGraph::get_node_edges_by_type(mem->get_node("passage_0").value(), "match");
+        bool f0_in = false, f9_in = false;
+        for (const auto &e : m) { f0_in = f0_in or e.to() == f0; f9_in = f9_in or e.to() == f9; }
+        check(m.size() == 2 and f0_in and f9_in, "passage_0 keeps exactly its two faces (r0_door_1, r9_door_9), no third face (" + std::to_string(m.size()) + ")");
+        check(c.mem_door_new.empty(), "no far face is claimed for the room being recognised (mem_door_new empty): " + c.mem_door_new);
+        const auto twin_door = mem->get_node("r1_door_5");
+        check(twin_door.has_value() and DSR::DSRGraph::get_node_edges_by_type(mem->get_node("passage_0").value(), "match").size() == 2,
+              "the entry mirror is archived as a plain door of the new room's twin, not linked into the passage");
+        check(not c.mem_door_new_derived, "and no derived face was written");
+    }
+
     std::printf("%s (%d failures)\n", failures ? "FAILED" : "PASSED", failures);
     std::fflush(stdout);
     std::_Exit(failures ? 1 : 0);

@@ -45,6 +45,12 @@
  * on every step() while Adopted (idempotent), so the way back is known while the robot is still in K (try28). KNOWN GAP:
  * carry_ is in memory, not persisted.
  *
+ * WITHDRAWN CROSSING (clean16, 2026-11-09). The recogniser's commit to L, the room just left, means the crossing did not happen.
+ * It is a swap to K = L on the case B path (P promoted, L archived; Step::withdraw_crossing): the proposal, room_concept's fit
+ * and its verdict are the same. Accepted: there is NO carry-over (the crossed door joins L to nothing), the passage the eviction
+ * wrote between L and P and L's face of it are removed (a false passage must not survive in memory), and P's twin is dropped as
+ * in any case B commit. P's live node becomes L in place; L's archive is the room again, unchanged by the episode.
+ *
  * Late recalls (recall_late) are no longer posted by the swap; sweep_stale still removes any a crashed older build left.
  */
 #include "room_eviction.h"
@@ -69,7 +75,8 @@ public:
 
     /// Execute a Swap request: post the proposal and stage memory. `provisional_live_id` = the provisional room
     /// (RoomRecognizer::provisional_id()); 0 = look for a proto hung from the robot. True when the proposal stands.
-    bool swap(std::uint64_t known_room_id, const rc::recog::PoseMix &pose_in_k, std::uint64_t provisional_live_id = 0);
+    /// `withdraw_crossing`: K is the room just left: the crossing did not happen (see WITHDRAWN CROSSING above).
+    bool swap(std::uint64_t known_room_id, const rc::recog::PoseMix &pose_in_k, std::uint64_t provisional_live_id = 0, bool withdraw_crossing = false);
     /// Back to "just entering" before a verdict: withdraw the proposal, unstage. True when a pending swap stood.
     bool undo();
     /// The robot left the recognised room (`room` = its live or memory name; empty = whichever is staged; ignored when it
@@ -114,6 +121,7 @@ private:
     std::optional<std::uint64_t> prov_rid_;       ///< P's room_id at swap time
     std::optional<std::uint64_t> rt_at_swap_;     ///< the robot's live RT room at swap time (RF4: only a change AWAY from it counts)
     bool promoted_case_ = false;                  ///< case B (the provisional room had a memory twin)
+    bool withdraw_ = false;                       ///< this proposal withdraws the crossing: K is the room just left
     std::string prov_twin_;                       ///< case B: the staged twin's memory name
     std::string prov_twin_subtype_;               ///< its object_subtype before staging (restored by undo)
 
@@ -121,6 +129,7 @@ private:
     void retry_carries();                         ///< write the carry-overs still deferred (idempotent; a no-op when none)
     void abandon(std::string_view why);           ///< no verdict will be acted on: withdraw, unstage, release
     void clear();
+    void drop_withdrawn_passages(const std::string &twin);   ///< a withdrawn crossing: the false passage L-P and L's face of it
     [[nodiscard]] bool names_known(const std::string &room) const;
 
     /// A crossed door, taken at swap time: the previous room's memory name and face, the seam T(K <- previous room) and the

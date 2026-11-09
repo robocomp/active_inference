@@ -53,12 +53,18 @@ struct KnownRoomMetric
     double area = 0.0;
 };
 
+/// One passage the metric chains went through, and whether its two faces were the same hole turned by pi (logging only).
+struct SeamLogEntry { std::string passage; bool flipped = false; };
+
 struct MetricQuery
 {
     std::string reference_room;
     bool        robot_ok = false;         ///< every passage of the path resolved to a seam
     ChainPose   robot_in_ref;             ///< the robot via the path ACTUALLY taken + odometry since the last seam
     std::vector<KnownRoomMetric> rooms;
+    std::vector<SeamLogEntry>    seam_log;        ///< the passages used by the chains, for the [recog][metric] log only
+    bool                         fresh_ok = false;      ///< the fresh seam T(L <- provisional) was measured (log only)
+    bool                         fresh_flipped = false; ///< ...and its two faces turned out to be turned by pi (log only)
 };
 
 /// `path_passages`: the passages the robot crossed, oldest first, ending at the last KNOWN room L (all in memory).

@@ -125,10 +125,24 @@ int RoomRecall::remove_all()
 
 int RoomRecall::step()
 {
-    std::unordered_set<std::uint64_t> wanted;   // door ids that should carry a recall this cycle
+    std::unordered_set<std::uint64_t> wanted;          // door ids that should carry a recall this cycle
+    std::unordered_set<std::uint64_t> wanted_recalls;  // recall nodes some door still claims (see the retirement below)
     auto mie = mem_->get_inner_eigen_api();
 
-    for (const auto &door : live_->get_nodes_by_type("object"))
+    // ONE DOOR PER FACE: two live doors can resolve to the same memory face (cmp_br2: just after an adoption room_concept has the
+    // room in K's frame while door_13, an entry mirror door_concept re-seats a beat later, still stands at its provisional
+    // (0.00,0.03), 0.11 m from r2_door_5 at (0.10,0.09), so door_13 took recall_room_1). The face's recall goes to the door
+    // nearest the face: an argmin, no door is excluded by distance.
+    std::unordered_map<std::uint64_t, std::pair<double, std::uint64_t>> nearest;   // face id -> (distance, door id)
+    const auto doors = live_->get_nodes_by_type("object");
+    for (const auto &door : doors)
+        if (is_door(*live_, door))
+            if (const auto hole = ev_.remembered_hole(door, /*staged_twin_ok=*/true); hole.has_value())
+                if (const auto [it, added] = nearest.try_emplace(hole->face.id(), hole->distance, door.id());
+                    not added and hole->distance < it->second.first)
+                    it->second = {hole->distance, door.id()};
+
+    for (const auto &door : doors)
     {
         if (not is_door(*live_, door)) continue;
         const auto room = room_of(*live_, door);
@@ -141,6 +155,7 @@ int RoomRecall::step()
         // directly comparable; the name is consulted only when the door's pose in its room does not resolve.
         const auto hole = ev_.remembered_hole(door, /*staged_twin_ok=*/true);   // F3: see the face_room test below
         if (not hole.has_value()) continue;
+        if (nearest.at(hole->face.id()).second != door.id()) continue;     // a nearer door holds this face
         const auto &face = hole->face;
 
         // The passage's OTHER face: one in a DIFFERENT room. A passage written before 2026-10-18 can carry two faces of
@@ -180,6 +195,7 @@ int RoomRecall::step()
         wanted.insert(door.id());
         const std::string rname = "recall_" + name;
         auto node = live_->get_node(rname);
+        if (node.has_value()) wanted_recalls.insert(node->id());
         // a LATE recall (RoomSwap) owns its name: step() never refreshes, re-parents or retires it
         if (node.has_value() and live_->get_attrib_by_name<recall_late_att>(node.value()).value_or(false)) continue;
         const bool fresh = not node.has_value();
@@ -191,6 +207,14 @@ int RoomRecall::step()
             node = n;
         }
         live_->add_or_modify_attrib_local<object_subtype_att>(node.value(), std::string("room_recall"));
+        // RE-PARENTED: the RT edge from the old door goes with the parent (as in post_late); a stale one would keep naming the
+        // recall under a door that no longer owns it (the controller and door_concept read recalls off a door's RT children).
+        if (const auto old_parent = live_->get_attrib_by_name<parent_att>(node.value());
+            not fresh and old_parent.has_value() and old_parent.value() != door.id())
+        {
+            live_->delete_edge(old_parent.value(), node->id(), "RT");
+            qInfo().noquote() << QString::fromStdString(std::format("[recall] {} moves to {} (the door nearest its face)", rname, door.name()));
+        }
         live_->add_or_modify_attrib_local<parent_att>(node.value(), door.id());
         live_->add_or_modify_attrib_local<level_att>(node.value(), live_->get_node_level(door).value_or(0) + 1);
         live_->add_or_modify_attrib_local<room_id_att>(node.value(),
@@ -219,6 +243,7 @@ int RoomRecall::step()
             const auto ins = live_->insert_node(node.value());
             if (not ins.has_value()) continue;
             id = ins.value();
+            wanted_recalls.insert(id);
             const Eigen::Matrix4d M = T.value().matrix();
             qInfo().noquote() << QString::fromStdString(std::format(
                 "[recall] {} posted under {}: behind it lies remembered {} (passage face {} ↔ {}); RT door<-room = "
@@ -237,6 +262,8 @@ int RoomRecall::step()
     for (auto it = owned_.begin(); it != owned_.end();)
     {
         if (wanted.contains(it->first)) { ++it; continue; }
+        // The door no longer holds it, but another door does (the recall moved): only the stale ownership goes, not the node.
+        if (wanted_recalls.contains(it->second)) { it = owned_.erase(it); continue; }
         if (const auto n = live_->get_node(it->second); n.has_value())
         {
             qInfo().noquote() << QString::fromStdString(std::format("[recall] {} retired", n->name()));
