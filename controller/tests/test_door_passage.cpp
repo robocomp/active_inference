@@ -958,6 +958,29 @@ int main()
         out = p.update(*G, nullptr, "room_2");
         CHECK(p.view().step == Step::Done and not p.view().failed);
     }
+    {   // WENT THROUGH, NO ROOM SWITCH (clean16, phantom door): after THROUGH the room comes back to the room the cross began in, under
+        //   its name but another node id (the provisional room adopted as the room left): the passage ends FAILED, it does not wait
+        auto G = make_graph(71);
+        DoorPassage p;
+        p.set_clock(clock);
+        p.set_use_route(true);
+        p.note_room_id(1); p.note_archived_room_id(1);
+        { DSR::Node d = DSR::Node::create<door_node_type>("door_w"); G->insert_node(d); }
+        p.start("door_w", Step::Cross);
+        offered(*G, "aff_door_w_approach"); target(*G, "aff_door_w_approach", 2.f, 1.6f, down);
+        offered(*G, "aff_door_w_cross");    target(*G, "aff_door_w_cross", 2.f, -0.8f, down);
+        auto out = p.update(*G, nullptr, "room_1");
+        p.note_route(out.route->key, RR::Arrived);
+        out = p.update(*G, nullptr, "room_1");
+        CHECK(out.exit.has_value());                               // the fact is written: through
+        p.note_room_id(2);                                         // room_concept switched to the provisional room...
+        out = p.update(*G, nullptr, "room_2");
+        CHECK(p.view().step == Step::Cross);
+        p.note_room_id(2); p.note_archived_room_id(2);             // ...ltsm archived; recognition adopted it as the room left
+        out = p.update(*G, nullptr, "room_1");                     // same id, name back to room_1
+        CHECK(p.view().step == Step::Done and p.view().failed);
+        CHECK(p.view().last_outcome == "crossing_withdrawn");
+    }
     {   // no recall under the door: the fact predicts a NEW room (0)
         auto G = make_graph(65);
         DoorPassage p;

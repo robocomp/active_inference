@@ -13,6 +13,8 @@
 #include <map>
 #include <optional>
 #include <set>
+#include <span>
+#include <algorithm>
 #include <string>
 #include <vector>
 
@@ -49,6 +51,17 @@ struct Decision
     bool is_return = false;
 };
 
+/// Recognition's posterior over [known rooms..., new] (ltsm_agent room_recognizer.cpp, `new` last): is a remembered room its best explanation?
+/// A comparison between hypotheses, not a level. Before any candidates exist (fewer than 2 entries) there is nothing to lean on.
+[[nodiscard]] inline bool recognition_leans_known(std::span<const float> posterior)
+{
+    if (posterior.size() < 2) return false;
+    return *std::ranges::max_element(posterior.first(posterior.size() - 1)) >= posterior.back();
+}
+
+/// Is this door believed (P > 1/2)? A door with no published belief (an older door agent, a door restored this cycle) is taken as believed.
+[[nodiscard]] inline bool door_believed(std::optional<float> p_exists) { return not p_exists.has_value() or p_exists.value() >= 0.5f; }
+
 class Drive
 {
 public:
@@ -74,6 +87,13 @@ public:
         if (entry.has_value() and failed.contains(*entry)) return {.cause = Cause::Stuck, .door = std::nullopt, .is_return = false};
         if (entry.has_value()) return {.cause = Cause::Return, .door = *entry, .is_return = true};
         return {.cause = Cause::Done, .door = std::nullopt, .is_return = false};
+    }
+
+    /// The room's clock has not run out (a room not entered yet has not started it).
+    [[nodiscard]] bool within_room_time(const std::string& room, double now_s) const
+    {
+        const auto it = entered_s_.find(room);
+        return it == entered_s_.end() or now_s - it->second <= max_room_s_;
     }
 
     /// A Return is a conclusion drawn from the doors KNOWN when it was decided; a door found while the robot is still in the
@@ -102,6 +122,19 @@ public:
 
     /// The drive itself crossed `door` (its run memory; the graph's crossing fact / the LTSM may name other faces).
     void note_crossed(const std::string& door) { crossed_.insert(door); }
+
+    /// A crossing that recognition withdrew (clean16): `door` of `from_room` was gone through, `into_room` turned out to be `from_room`. The
+    /// crossing did not happen: the room the robot is in is `from_room`, the false room leaves no trace, the door is failed there.
+    void note_crossing_withdrawn(const std::string& door, const std::string& entry_face, const std::string& into_room, const std::string& from_room)
+    {
+        crossed_.erase(door);
+        crossed_.erase(entry_face);
+        entry_.erase(into_room);
+        entered_s_.erase(into_room);
+        failed_.erase(into_room);
+        failed_[from_room].insert(door);
+        current_ = from_room;
+    }
 
     /// The passage through `door` failed in the room the robot is in.
     void note_failed(const std::string& door) { failed_[current_.value_or(start_room_.value_or(""))].insert(door); }

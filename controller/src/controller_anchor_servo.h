@@ -114,6 +114,24 @@ struct ReAimGoal { Eigen::Vector2f p_robot = Eigen::Vector2f::Zero(); float yaw_
     return {.p_robot = -g.e * g.a, .yaw_robot = g.heading_err};
 }
 
+// IS THE BODY AT THE VANTAGE (clean3 2026-11-08, tour21): the hand-over from the route to the doorway law asks whether the body is
+// at least as close to the door as the VANTAGE THE ROUTE DROVE TO. It compared with door_concept's live approach standpoint, which
+// moves after the route is built (1.43 m -> 0.58 m): the route held at its vantage waiting for the cross while the gate
+// waited for the body to come closer, and neither could change. One vantage, the route's own.
+[[nodiscard]] inline bool passage_at_vantage(const Eigen::Vector2f& robot, const Eigen::Vector2f& door_centre,
+                                             const Eigen::Vector2f& vantage, float arrival_tol)
+{
+    return (robot - door_centre).norm() <= (vantage - door_centre).norm() + arrival_tol;
+}
+
+// HAS THE ROUTE REACHED ITS VANTAGE (clean8 2026-11-08): distance to the door is not "in front of it". Driving along the corridor to R2 the body passed
+// 1.26 m from door_2 THROUGH THE CORRIDOR WALL, the distance test said "at the vantage", the doorway law took over, saw no opening and held it there.
+// The vantage is a point ON THE ROUTE, so being at it is the route's own progress. A route with no vantage (the body already stands in the doorway) is there.
+[[nodiscard]] inline bool route_reached_vantage(int goal_index, int vantage_goals, bool route_has_no_vantage)
+{
+    return route_has_no_vantage or goal_index >= vantage_goals;
+}
+
 // Loop time constants (s). Control-loop gains, not decision thresholds. Chosen on the differential base, where the
 // heading must turn toward d and back while e closes: the lateral loop must be slow against the rate-limited turn
 // (w_max = 1 rad/s) or the robot arrives on the line still pointing across it and overshoots. On a kinematic

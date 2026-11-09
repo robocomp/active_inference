@@ -465,6 +465,13 @@ private:
     std::optional<rc::policy::DoorwayRisk> policy_held_jambs_;
     std::string policy_held_room_;
     bool policy_held_active_ = false;
+    // clean18: the leaf of the door last crossed (room frame of policy_passed_leaf_room_), a known obstacle for the PLANNER until
+    // the next crossing replaces it or the room frame changes. Unlike the held doorway it does not end when the body walks out of
+    // the leaf's reach: the next route is planned from out there, on a residual map the room switch has just emptied.
+    rc::policy::DoorLeaf policy_passed_leaf_;
+    std::string policy_passed_leaf_room_;
+    std::string policy_passed_leaf_logged_;
+    rc::policy::ClearingNoRoute policy_door_route_no_route_;          // clean18: a door route with no field route fails, as a clearing does
     // ...and what sync_world_state did with it this cycle: the planner keeps every cell at the price all hypotheses agree on,
     // and this holds each hypothesis's excess, so EVERY policy field this cycle adds door_leaf_density over it (policy_tick
     // extra_fn). Null = no leaf held.
@@ -1231,6 +1238,9 @@ private:
         return chain_end_.has_value() ? chain_end_->s : (params_ != nullptr ? params_->anchor_cross_standoff_m : 2.0f);
     }
     void update_chain_end(const ControllerPlanningStep &step);
+    std::optional<Eigen::Vector2f> door_route_vantage_;   // the point the route's vantage goal IS, for door_route_key_ (set when the route is built)
+    bool door_route_no_vantage_ = false;                  // the route was built with no vantage: the body already stands in the doorway
+    std::optional<bool> at_vantage_logged_;               // last logged value of the hand-over gate, to log only its changes
     float door_vantage_s_ = 0.f;                    // arc length of the vantage V along the door route
     bool build_door_route(const ControllerRobotPose &robot_pose, std::uint64_t now_ms, float tol_xy);
     bool drive_door_route(const ControllerPlanningStep &step, rc::TrajectoryController &path_controller,

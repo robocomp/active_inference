@@ -935,6 +935,17 @@ private:
         if (appr.has_value()) route_approach_ = *appr;   // the last published vantage (the open-wait keeps using it)
         if (cross.has_value()) route_cross_ = *cross;
 
+        // ── THE CROSSING WAS WITHDRAWN (clean16): the room this cycle wears the name of the room the cross began in under ANOTHER
+        //    node id: the provisional room adopted in place as the room left (recognition's "the crossing did not happen"). The body
+        //    went through a plane, no room switch stood: the passage ends FAILED, nothing more to wait for.
+        if (step_ == Step::Cross and exited_ and room_id_ != 0 and room_id_ != cross_id_ and room_frame == cross_room_)
+        {
+            finish();
+            failed_ = true;
+            last_outcome_ = "crossing_withdrawn";
+            route_event(out, std::format("[door-route] {}: through, but the room switch was withdrawn (still in {}) — passage FAILED", door_, cross_room_));
+            return out;
+        }
         // ── DONE: the crossing fact was written, room_concept switched the room and ltsm archived the room left
         if (step_ == Step::Cross and exited_ and room_id_ != 0 and room_id_ != cross_id_ and archived_id_ == room_id_
             and (not servo_ or drive_in_done_))   // v4 step 3: and the servo has driven in as far as it will

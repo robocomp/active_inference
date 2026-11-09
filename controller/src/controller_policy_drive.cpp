@@ -847,6 +847,8 @@ void ControllerSession::drive_with_policy(const ControllerRobotPose &robot_pose,
                 policy_held_jambs_ = risk;
                 policy_held_leaf_ = policy_leaf_;
                 policy_held_room_ = current_room_name_;
+                policy_passed_leaf_ = policy_leaf_;
+                policy_passed_leaf_room_ = current_room_name_;
                 corridor = [risk](const Eigen::Vector2f &p) { return rc::policy::in_doorway_risk_corridor(risk, p); };
                 // Live fix 2 ruling 2: the measured opening (at least the body's width) is evidence the body fits there — no
                 // trap may block it; the bare body's full width = its lateral support both sides
@@ -915,8 +917,19 @@ void ControllerSession::drive_with_policy(const ControllerRobotPose &robot_pose,
     //        does, the base HOLDS at the vantage — a shut door never gets a through goal.
     if (door_route_leg_.has_value())
     {
+        // ★ clean18: a route point whose field goes infinite under a map update held the robot for 13 minutes: F1 folds no evidence
+        //   at T = inf, and this branch returned before the no-route clock. "No route" is the same observation here as for every
+        //   other goal (policy_tick_gate.h ClearingNoRoute, kNoRouteReportMs reused), and it ends in the route's failure path.
+        const auto no_route_outlasted = [&](const auto &tick)
+        {
+            using O = rc::policy::NoRouteObs;
+            const O obs = not tick.field_evaluated ? O::NotEvaluated : std::isfinite(tick.field_m) ? O::Finite : O::Infinite;
+            return policy_door_route_no_route_.on_tick(now, obs, tick.verdict == PolicyVerdict::Unreachable, tick.stuck, policy_unreach_latch_);
+        };
+        const std::string no_route_why = std::format("the local policy has no route to it for {:.1f} s", rc::policy::kNoRouteReportMs * 1e-3);
         if (not door_route_active_)
         {
+            policy_door_route_no_route_.reset();
             stop_here(rc::why::Cause::NoRoute, std::format("door route for '{}': not built", door_route_leg_->door));
             return;
         }
@@ -926,13 +939,15 @@ void ControllerSession::drive_with_policy(const ControllerRobotPose &robot_pose,
             const auto goal = rc::policy::place_goal(door_reaim_goal_->first, door_reaim_goal_->second, gp.tol_xy, gp.tol_yaw);
             const std::string who = std::format("door re-aim {}", door_route_leg_->door);
             const auto tick = policy_tick(goal, who, cpose, obstacle_tracker, motion_commander, now);
-            if (tick.verdict == PolicyVerdict::Unreachable)
+            const bool no_route = no_route_outlasted(tick);
+            if (tick.verdict == PolicyVerdict::Unreachable or no_route)
             {
                 // final review I1: an axis point the body cannot reach is the route's failure, reported as the route branch does
-                std::println("[door-route] {}: {} cannot be reached ({}) — the route is blocked", door_route_leg_->door, who, tick.why);
+                const std::string why = tick.verdict == PolicyVerdict::Unreachable ? tick.why : no_route_why;
+                std::println("[door-route] {}: {} cannot be reached ({}) — the route is blocked", door_route_leg_->door, who, why);
                 door_route_active_ = false;
                 door_route_failed_ms_ = now;
-                door_passage_.note_route(door_route_leg_->key, rc::DoorPassage::RouteReport::Failed, tick.why);
+                door_passage_.note_route(door_route_leg_->key, rc::DoorPassage::RouteReport::Failed, why);
                 policy_reset();
                 stop_here(rc::why::Cause::NoRoute, std::format("door re-aim for '{}': blocked", door_route_leg_->door));
             }
@@ -940,6 +955,7 @@ void ControllerSession::drive_with_policy(const ControllerRobotPose &robot_pose,
         }
         if (door_route_leg_->through and door_route_goal_index_ >= door_route_vantage_goals_)
         {
+            policy_door_route_no_route_.reset();
             policy_reset();
             stop_here(rc::why::Cause::PolicyHold, std::format("door route for '{}': at the vantage — waiting for the cross precondition", door_route_leg_->door));
             return;
@@ -949,12 +965,14 @@ void ControllerSession::drive_with_policy(const ControllerRobotPose &robot_pose,
         {
             const std::string who = std::format("door route {} pt {}/{}", door_route_leg_->door, st.index + 1, door_route_goals_.size());
             const auto tick = policy_tick(*st.goal, who, cpose, obstacle_tracker, motion_commander, now);
-            if (tick.verdict == PolicyVerdict::Unreachable)
+            const bool no_route = no_route_outlasted(tick);
+            if (tick.verdict == PolicyVerdict::Unreachable or no_route)
             {
-                std::println("[door-route] {}: {} cannot be reached ({}) — the route is blocked", door_route_leg_->door, who, tick.why);
+                const std::string why = tick.verdict == PolicyVerdict::Unreachable ? tick.why : no_route_why;
+                std::println("[door-route] {}: {} cannot be reached ({}) — the route is blocked", door_route_leg_->door, who, why);
                 door_route_active_ = false;
                 door_route_failed_ms_ = now;
-                door_passage_.note_route(door_route_leg_->key, rc::DoorPassage::RouteReport::Failed, tick.why);
+                door_passage_.note_route(door_route_leg_->key, rc::DoorPassage::RouteReport::Failed, why);
                 policy_reset();
                 stop_here(rc::why::Cause::NoRoute, std::format("door route for '{}': blocked", door_route_leg_->door));
                 return;

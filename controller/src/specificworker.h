@@ -239,6 +239,8 @@ private:
 	std::optional<rc::explore::Drive> explore_drive_;
 	std::ofstream explore_csv_;
 	std::string explore_in_flight_;            ///< the door whose passage the drive started ("" = none)
+	struct ExploreLastCross { std::string door, entry, from_room, into_room; std::uint64_t into_id = 0; };
+	std::optional<ExploreLastCross> explore_last_cross_;   ///< the last crossing, until the robot leaves it (a withdrawn crossing renames the room: service_explore_tour)
 	std::string explore_mirror_;               ///< the in-flight door's entry mirror, captured while the old face still lives
 	std::string explore_from_room_;            ///< the room the in-flight passage started in (a room change = it crossed)
 	bool explore_in_flight_return_ = false;    ///< the in-flight passage is a Return (a door found later may supersede it)

@@ -21,6 +21,28 @@ DoorCand found(std::string d, double dist) { return {.door = std::move(d), .foun
 
 int main()
 {
+    {   // clean13: the room's identity is open while a remembered room is the best explanation
+        using rc::explore::recognition_leans_known;
+        const std::vector<float> known{0.1f, 0.8f, 0.1f}, fresh{0.0f, 0.0f, 1.0f}, tie{0.33f, 0.33f, 0.33f}, none{1.0f};
+        if (not recognition_leans_known(known) or recognition_leans_known(fresh) or not recognition_leans_known(tie) or recognition_leans_known(none))
+        { std::println("FAIL recognition_leans_known"); return 1; }
+        if (not rc::explore::door_believed(std::nullopt) or rc::explore::door_believed(0.31f) or not rc::explore::door_believed(0.5f))
+        { std::println("FAIL door_believed"); return 1; }
+        rc::explore::Drive d(300.0);
+        if (not d.within_room_time("r", 0.0)) { std::println("FAIL within_room_time unknown room"); return 1; }
+    }
+
+    {   // withdrawn crossing (clean16): back in the room left; the door is failed there, the false entry forgotten, the drive goes on
+        Drive d(300.0);
+        d.step("room_1", true, {found("door_9", 1.0), found("door_3", 5.0)}, false, 0.0);
+        d.note_crossed("door_9");
+        d.note_entered("room_4", "door_11", 10.0);
+        d.note_crossing_withdrawn("door_9", "door_11", "room_4", "room_1");
+        check(not d.entry_door("room_4").has_value(), "the false room has no entry door any more");
+        const auto s = d.step("room_1", true, {found("door_3", 5.0), found("door_9", 1.0)}, false, 20.0);
+        check(s.door == std::optional<std::string>("door_3"), "the phantom is failed there: the next door is the nearest other one, no wait for a room");
+        check(d.step("room_1", true, {found("door_9", 1.0)}, false, 21.0).cause == Cause::Done, "and the door stays failed this visit");
+    }
     {   // waits_while_unpromoted
         Drive d(300.0);
         check(d.step("room_1", false, {found("door_1", 2.0)}, false, 0.0).cause == Cause::None, "t0: nothing");

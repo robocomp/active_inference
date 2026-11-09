@@ -553,9 +553,27 @@ bool ControllerSession::sync_world_state(std::uint64_t timestamp_ms,
         policy_leaf_evidence_ = std::move(ev);
     }
     else policy_leaf_mass_logged_ = -1.f;
+    // clean18: the door the robot has just come through is a known obstacle for the planner, in the room frame it was taken in.
+    // Not during a cross: there the opening is the goal, and the leaf's hypotheses are priced by its own model above.
+    const bool passed_leaf_known = policy_enabled() and not anchor_cross_.has_value() and not policy_passed_leaf_.empty()
+                                   and policy_passed_leaf_room_ == current_room_name_;
+    ControllerPolygons polygons_with_leaf;
+    if (passed_leaf_known)
+    {
+        polygons_with_leaf = obstacle_tracker.obstacle_polygons();
+        for (auto &poly : rc::policy::door_leaf_polygons(policy_passed_leaf_, grid_planner_.cell_size()))
+            polygons_with_leaf.push_back(std::move(poly));
+        if (policy_passed_leaf_logged_ != current_room_name_)
+        {
+            std::println("[policy] the leaf of the door just crossed ({} hypotheses) is a known obstacle for the planner in '{}'",
+                         policy_passed_leaf_.hyps.size(), current_room_name_);
+            policy_passed_leaf_logged_ = current_room_name_;
+        }
+    }
+    const ControllerPolygons &planner_polygons = passed_leaf_known ? std::as_const(polygons_with_leaf) : obstacle_tracker.obstacle_polygons();
     {
     RC_STAGE("session.grid_set_world");
-    grid_planner_.set_world(room_polygon_, obstacle_tracker.obstacle_polygons(),
+    grid_planner_.set_world(room_polygon_, planner_polygons,
                             {.centres = obstacle_tracker.residual_cells(),
                              .cell_size_m = obstacle_tracker.residual_cell_size_m(),
                              .risk_nats = residual_risk,
@@ -3465,6 +3483,8 @@ bool ControllerSession::build_door_route(const ControllerRobotPose &robot_pose, 
 {
     const auto &leg = *door_route_leg_;
     door_route_key_ = leg.key;
+    door_route_vantage_.reset();   // this leg's route is not built yet
+    at_vantage_logged_.reset();
     door_route_build_ms_ = now_ms;
     door_route_active_ = false;
     const rc::door_route::Target appr{leg.approach, leg.approach_yaw};
@@ -3575,6 +3595,8 @@ bool ControllerSession::build_door_route(const ControllerRobotPose &robot_pose, 
     // The policy's Place goals: the curve's points every 2·tol_xy of arc (consecutive arrival discs touch, never overlap),
     // the last one with the leg's final heading (facing the door at P_pre; the travel direction at P_post).
     door_route_goals_.clear();
+    door_route_vantage_ = door_route_.spline().position_at(door_vantage_s_);
+    door_route_no_vantage_ = plan.pre_omitted;
     const float L = door_route_.length();
     const float ds = std::max(2.f * tol_xy, grid_planner_.cell_size());
     // up to the vantage: the approach target (the last of them faces the door); past it, a through leg's cross goals
@@ -3721,9 +3743,22 @@ bool ControllerSession::drive_door_route(const ControllerPlanningStep &step, rc:
     //   unused. The planned route drives until the body is at least as close to the door as the vantage (its arrival
     //   tolerance included); from there the servo takes the hole.
     // (no room-frame door centre known: nothing to gate on — the anchor alone, as before)
-    const bool at_vantage = not passage_door_centre_.has_value()
-                            or (step.robot_pose.pos - *passage_door_centre_).norm()
-                                   <= (leg.approach - *passage_door_centre_).norm() + path_controller.goal_threshold();
+    // Once this leg has a route, being at the vantage is the route's own progress. Before it exists (or if it could not be built), door_concept's approach
+    // standpoint is all there is, as a distance.
+    const bool leg_has_route = door_route_key_ == leg.key and door_route_vantage_.has_value();
+    const Eigen::Vector2f vantage = leg_has_route ? *door_route_vantage_ : leg.approach;
+    const bool at_vantage = leg_has_route
+                            ? rc::route_reached_vantage(door_route_goal_index_, door_route_vantage_goals_, door_route_no_vantage_)
+                            : (not passage_door_centre_.has_value()
+                               or rc::passage_at_vantage(step.robot_pose.pos, *passage_door_centre_, vantage, path_controller.goal_threshold()));
+    if (passage_door_centre_.has_value() and at_vantage_logged_ != at_vantage)
+    {
+        at_vantage_logged_ = at_vantage;
+        std::println("[door-route] {}: at_vantage {} ({}): goal {}/{}, body {:.2f} m from the door, vantage {:.2f} m, door_concept's approach {:.2f} m",
+                     leg.door, at_vantage, leg_has_route ? "route" : "distance", door_route_goal_index_, door_route_vantage_goals_,
+                     (step.robot_pose.pos - *passage_door_centre_).norm(), (vantage - *passage_door_centre_).norm(),
+                     (leg.approach - *passage_door_centre_).norm());
+    }
     // Once engaged on this crossing the servo keeps going on the anchor LATCHED for it even after door_concept withdraws
     // the cross (it does as the body passes the plane): pingpong18 leg 4 stopped 1.1 m in, 0.2 m short of the cross
     // target, the crossing fact never written, because this block needed the affordance node.
@@ -4229,6 +4264,7 @@ void ControllerSession::reset_anchor_cross_state()
     anchor_uncovered_logged_stamp_ = 0;
     anchor_clearing_released_ = false;               // Task 3f (c): a given-up clearing belongs to its claim
     policy_clearing_no_route_.reset();
+    policy_door_route_no_route_.reset();
     switch_sigma_r_ = -1.f;                          // Task 3f r1 (M-8): latched at this claim's own switch
 }
 

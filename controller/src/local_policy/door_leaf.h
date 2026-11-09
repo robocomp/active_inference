@@ -136,6 +136,21 @@ inline double log_phi(double z)
     return false;
 }
 
+// ★ clean18 (a route built 1 s after a room switch ended 25 cm from the open leaf the robot had just passed, because residual's
+//   evidence had just been cleared): THE LEAF AS THE PLANNER SEES IT. One rectangle per hypothesis, hinge to free edge. Its half
+//   width is the leaf's own, or half a planner cell when that is thinner, so that the rectangle always rasterises.
+[[nodiscard]] inline std::vector<std::vector<Eigen::Vector2f>> door_leaf_polygons(const DoorLeaf& leaf, float cell_m)
+{
+    std::vector<std::vector<Eigen::Vector2f>> out;
+    out.reserve(leaf.hyps.size());
+    for (const auto& h : leaf.hyps)
+    {
+        const Eigen::Vector2f side = std::max(h.half_thick, 0.5f * cell_m) * h.normal();
+        out.push_back({h.hinge - side, h.tip() - side, h.tip() + side, h.hinge + side});
+    }
+    return out;
+}
+
 struct DoorLeafEvidence
 {
     DoorLeaf leaf;

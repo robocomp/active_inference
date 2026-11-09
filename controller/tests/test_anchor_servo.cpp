@@ -751,8 +751,29 @@ static void cross_progress_semantics()
     CHECK(rc::cross_progress(badP, standoff, gate) == rc::CrossProgress::Going);
 }
 
+// clean3 / tour21: the route's vantage is 1.43 m out, door_concept's live standpoint has moved to 0.58 m, the body stands at 1.31 m.
+void test_at_vantage_uses_the_routes_vantage()
+{
+    const Eigen::Vector2f door(0.04f, 0.08f), robot(0.05f, 1.39f), route_vantage(0.03f, 1.51f), live_approach(0.04f, 0.66f);
+    const float tol = 0.25f;
+    CHECK(rc::passage_at_vantage(robot, door, route_vantage, tol));         // at the point the route drove to
+    CHECK(not rc::passage_at_vantage(robot, door, live_approach, tol));     // the old comparison: the deadlock
+    CHECK(not rc::passage_at_vantage(Eigen::Vector2f(0.05f, 5.0f), door, route_vantage, tol));  // pingpong17: 5 m out is not at the vantage
+}
+
+// clean8: door_2 is 1.26 m away through the corridor wall, the route is at goal 2 of 12 and its vantage is goal 7.
+void test_route_reached_vantage()
+{
+    CHECK(not rc::route_reached_vantage(1, 7, false));   // close by distance, not at the vantage on the route
+    CHECK(not rc::route_reached_vantage(6, 7, false));   // driving to the vantage goal itself
+    CHECK(rc::route_reached_vantage(7, 7, false));       // the vantage goal is done
+    CHECK(rc::route_reached_vantage(0, 1, true));        // no vantage: the body already stands in the doorway
+}
+
 int main()
 {
+    test_route_reached_vantage();
+    test_at_vantage_uses_the_routes_vantage();
     centred_goes_straight();
     offset_slides_sideways();
     rotated_anchor_turns_and_slides();
