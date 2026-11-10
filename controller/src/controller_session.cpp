@@ -3536,6 +3536,12 @@ bool ControllerSession::build_door_route(const ControllerRobotPose &robot_pose, 
         door_passage_.note_route(leg.key, rc::DoorPassage::RouteReport::Arrived);
         return true;
     }
+    if (rc::door_route::approach_already_done(plan, robot_pose.pos, tol_xy))
+    {
+        std::println("[door-route] {}: the robot is already at the vantage: the approach is done", leg.door);
+        door_passage_.note_route(leg.key, rc::DoorPassage::RouteReport::Arrived);
+        return true;
+    }
     if (not plan.has_axis)
         std::println("[door-route] {}: no aperture centre in this frame — driving door_concept's targets as published", leg.door);
     last_plan_failure_.clear();

@@ -32,6 +32,41 @@ int main()
         if (not d.within_room_time("r", 0.0)) { std::println("FAIL within_room_time unknown room"); return 1; }
     }
 
+    {   // clean23: an undecided candidate is unfinished business. Return and Done wait for it, bounded by MaxRoomS; a found door does not
+        using rc::explore::doors_settled;
+        check(doors_settled(std::nullopt, 7), "no statement does not hold the drive");
+        check(doors_settled(rc::explore::DoorQuestions{7, "settled"}, 7), "settled in this room");
+        check(not doors_settled(rc::explore::DoorQuestions{7, "open"}, 7), "open in this room");
+        check(not doors_settled(rc::explore::DoorQuestions{5, "settled"}, 7), "a statement about another room is no answer");
+        Drive done(300.0);
+        check(done.step("room_1", true, {}, false, 0.0, 0, false).cause == Cause::None, "Done waits on an open room");
+        check(done.step("room_1", true, {}, false, 10.0, 0, true).cause == Cause::Done, "Done once settled");
+        Drive bounded(300.0);
+        bounded.step("room_1", true, {}, false, 0.0, 0, false);
+        check(bounded.step("room_1", true, {}, false, 301.0, 0, false).cause == Cause::Done, "MaxRoomS bounds the wait");
+        Drive ret(300.0);
+        ret.step("room_1", true, {}, false, 0.0);
+        ret.note_entered("room_2", "door_2", 1.0);
+        check(ret.step("room_2", true, {}, false, 2.0, 0, false).cause == Cause::None, "Return waits on an open room");
+        check(ret.step("room_2", true, {}, false, 3.0, 0, true).cause == Cause::Return, "Return once settled");
+        Drive go(300.0);
+        check(go.step("room_1", true, {found("door_1", 1.0)}, false, 0.0, 0, false).door == std::optional<std::string>("door_1"), "a found door is not held");
+    }
+
+    {   // clean28: a door just born is not offered yet. A believed door with no approach is unfinished; a disbelieved one is nothing
+        Drive d(300.0);
+        const DoorCand fresh{.door = "door_1", .found = false, .crossed = false, .dist_m = 2.5};
+        check(d.step("room_1", true, {fresh}, false, 0.0).cause == Cause::None, "Done waits for a door not offered yet");
+        check(d.step("room_1", true, {fresh}, false, 301.0).cause == Cause::Done, "MaxRoomS bounds that wait");
+        Drive no(300.0);
+        const DoorCand ghost{.door = "door_2", .found = false, .crossed = false, .dist_m = 2.5, .believed = false};
+        check(no.step("room_1", true, {ghost}, false, 0.0).cause == Cause::Done, "a disbelieved door does not hold the drive");
+        Drive off(300.0);
+        off.step("room_1", true, {found("door_1", 1.0)}, false, 0.0);
+        off.note_failed("door_1");
+        check(off.step("room_1", true, {fresh}, false, 1.0).cause == Cause::Done, "a door that failed this visit does not hold the drive");
+    }
+
     {   // withdrawn crossing (clean16): back in the room left; the door is failed there, the false entry forgotten, the drive goes on
         Drive d(300.0);
         d.step("room_1", true, {found("door_9", 1.0), found("door_3", 5.0)}, false, 0.0);

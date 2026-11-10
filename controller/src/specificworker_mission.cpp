@@ -909,7 +909,8 @@ std::vector<rc::explore::DoorCand> SpecificWorker::explore_doors(const std::stri
 	std::vector<rc::explore::DoorCand> doors;
 	for (const auto &f : door_facts())
 		doors.push_back({.door = f.name, .found = G->get_node("aff_" + f.name + "_approach").has_value(),
-		                 .crossed = f.crossed or remembered.contains(f.name), .dist_m = f.dist});
+		                 .crossed = f.crossed or remembered.contains(f.name), .dist_m = f.dist,
+		                 .believed = [&] { const auto n = G->get_node(f.name); return n.has_value() and rc::explore::door_believed(G->get_attrib_by_name<obj_exist_prob_att>(n.value())); }()});
 	return doors;
 }
 
@@ -1075,8 +1076,12 @@ void SpecificWorker::service_explore_tour()
 	// the drive's inputs
 	const auto doors = explore_doors(topo_json);
 	const bool promoted = not rc::room::is_proto(*G, gs.room_id);
+	std::optional<rc::explore::DoorQuestions> questions;
+	if (const auto q = G->get_node("door_questions"); q.has_value())
+		questions = rc::explore::DoorQuestions{.room_id = G->get_attrib_by_name<parent_att>(q.value()).value_or(0),
+		                                       .state = G->get_attrib_by_name<state_att>(q.value()).value_or(std::string{})};
 	const auto d = explore_drive_->step(gs.room_name, promoted, doors, passage.active() or not explore_in_flight_.empty(), now_s,
-	                                    rc::topo::remembered_uncrossed(topo_json, gs.room_name));
+	                                    rc::topo::remembered_uncrossed(topo_json, gs.room_name), rc::explore::doors_settled(questions, gs.room_id));
 	if (d.cause == rc::explore::Cause::None) return;
 	// the record (one row per decision) + one line
 	std::string cands;

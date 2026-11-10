@@ -47,7 +47,8 @@
 #include "../../common/affordance_manager/affordance_manager.h"
 #include "calib_channel.h"           // rc::calib::CalibChannel (the afford_calib producer)
 #include "free_space_polygon.h"      // rc::freespace (the start-up proto-room's extent)
-#include "layout_refiner.h"          // rc::refine (the given room refined on the shadow SLAM's evidence)
+#include "layout_refiner.h"
+#include "doorway_necks.h"          // rc::refine (the given room refined on the shadow SLAM's evidence)
 #include "learnt_layout.h"           // rc::learnt (the accepted room kept as a dated SVG, MapMode = "last")
 #include "layout_explorer.h"         // rc::layout (the live layout explorer → afford_room while proto)
 #include "room_explored.h"           // rc::explored — P(room explored), room_explored_p
@@ -370,6 +371,10 @@ private:
                                         const rc::layout::ExplorerParams& ep, const rc::layout::Admissible& standable,
                                         const rc::layout::Admissible& deferred);
     std::vector<Eigen::Vector2f> refine_contested_;   ///< published frame: cells a look would decide (explorer gain)
+    /// Openings an outline was cut at (published frame): door hypotheses, published on `room_doorways`; the refiner may not grow through them.
+    std::vector<rc::refine::Doorway> unfound_openings_;
+    void cut_unfound_doorways(std::vector<Eigen::Vector2f>& polygon_pub);   ///< doorway_necks.h, on this room's evidence
+    void publish_doorway_hypotheses();
     std::ofstream refine_csv_;                        ///< tmp/layout_refine.csv — one row per evaluation
     std::ofstream refine_in_bin_;                     ///< tmp/refine_input.bin — the refiner's exact inputs, one frame per evaluation (offline replay)
     std::int64_t  sweep_last_ms_ = 0;

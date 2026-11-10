@@ -9,6 +9,7 @@
 //   the start room, which has no entry door); in the start room with nothing left: Done.
 // A door whose passage failed is skipped for the rest of that visit (re-entering the room clears it).
 #include <cmath>
+#include <cstdint>
 #include <limits>
 #include <map>
 #include <optional>
@@ -26,6 +27,7 @@ struct DoorCand
     bool found = false;     ///< door_concept offers aff_<door>_approach
     bool crossed = false;   ///< a crossing fact names it, or the LTSM holds a passage through it with crossings >= 1
     double dist_m = std::numeric_limits<double>::infinity();
+    bool believed = true;   ///< P(exists) >= 1/2 (door_believed)
 };
 
 enum class Cause { None, Promoted, MaxTime, Return, Done, Stuck };
@@ -62,6 +64,16 @@ struct Decision
 /// Is this door believed (P > 1/2)? A door with no published belief (an older door agent, a door restored this cycle) is taken as believed.
 [[nodiscard]] inline bool door_believed(std::optional<float> p_exists) { return not p_exists.has_value() or p_exists.value() >= 0.5f; }
 
+/// door_concept's statement (node `door_questions`): the room it speaks about and "open" | "settled".
+struct DoorQuestions { std::uint64_t room_id = 0; std::string state; };
+
+/// Has door_concept no open question about this room? A statement about another room is no answer (promotion and re-entry race it);
+/// no statement at all (an older door agent) does not hold the drive. Spec 2026-11-09-undecided-candidate-look.
+[[nodiscard]] inline bool doors_settled(const std::optional<DoorQuestions>& q, std::uint64_t room_id)
+{
+    return not q.has_value() or (q->room_id == room_id and q->state == "settled");
+}
+
 class Drive
 {
 public:
@@ -71,7 +83,7 @@ public:
     // re-entered room shows only the face it was entered by at first — final review C1). While there is one, and the room's
     // clock has not run out, the drive waits: the room's looks re-find it. No new limit: MaxRoomS bounds the wait.
     Decision step(const std::string& room, bool promoted, const std::vector<DoorCand>& doors, bool passage_active, double now_s,
-                  int remembered_uncrossed = 0)
+                  int remembered_uncrossed = 0, bool doors_are_settled = true)
     {
         if (not start_room_.has_value()) start_room_ = room;
         if (not entered_s_.contains(room)) entered_s_[room] = now_s;
@@ -82,7 +94,11 @@ public:
         const auto& failed = failed_[room];
         if (const DoorCand* best = best_door(room, doors); best != nullptr)
             return {.cause = promoted ? Cause::Promoted : Cause::MaxTime, .door = best->door, .is_return = false};
-        if (remembered_uncrossed > 0 and not timed_out) return {};
+        // a believed door whose approach is not offered yet is a door about to be found (clean28: born, Done, offered 0.3 s later)
+        const bool door_coming = std::ranges::any_of(doors, [&](const DoorCand& d)
+                                 { return d.believed and not d.found and not d.crossed and not crossed_.contains(d.door)
+                                          and d.door != entry.value_or("") and not failed.contains(d.door); });
+        if ((remembered_uncrossed > 0 or not doors_are_settled or door_coming) and not timed_out) return {};   // an open door question: leaving for good waits, MaxRoomS bounds it
         // a Return that already failed is not retried (final review C2): the drive stops and says so
         if (entry.has_value() and failed.contains(*entry)) return {.cause = Cause::Stuck, .door = std::nullopt, .is_return = false};
         if (entry.has_value()) return {.cause = Cause::Return, .door = *entry, .is_return = true};

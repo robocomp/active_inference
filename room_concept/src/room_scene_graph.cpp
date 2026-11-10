@@ -1474,6 +1474,7 @@ void RoomSceneGraph::forget_room(const char* why)
     published_polygon_verts_ = 0;
     startup_proto_ = startup_promoted_ = false;
     layout_pool_.clear();
+    unfound_openings_.clear();   // the hypotheses belong to the room they were cut in
     left_rooms_.clear();
     left_polys_int_.clear();
     layout_finished_ = false;
@@ -1911,6 +1912,7 @@ void RoomSceneGraph::arm_startup_proto(std::uint64_t room_id, const Eigen::Affin
     recalled_visit_    = false;
     explored_.reset();          // a re-entry restores its memory (note_recall_memory) after this
     layout_pool_.clear();
+    unfound_openings_.clear();   // the hypotheses belong to the room they were cut in
     layout_finished_   = false;
     cam_cover_.reset();          // a new room: its boundary has been shown to no camera yet (camera_coverage.h)
     camera_finished_    = false;
@@ -2163,12 +2165,72 @@ void RoomSceneGraph::adopt_most_probable_layout()
     room_concept_->set_map_layout(std::move(lay_int));
 }
 
+void RoomSceneGraph::cut_unfound_doorways(std::vector<Eigen::Vector2f>& polygon_pub)
+{
+    if (not free_space_.has_value()) return;
+    std::vector<Eigen::Vector2f> surf, fr; std::vector<float> cs, cf;
+    free_space_->evidence_cells(surf, fr, &cs, &cf);
+    auto R = rc::refine::explain_openings(refiner_, polygon_pub, surf, fr, cs, cf);
+    if (R.openings.empty()) return;
+    for (const auto& o : R.openings)
+    {
+        qInfo().noquote() << QString::fromStdString(std::format("[room][doorway] {:.1f} m2 beyond the neck ({:.2f},{:.2f})-({:.2f},{:.2f}), {:.2f} m wide, "
+                                                                "is explained by a door ({:+.1f} nats): the outline is cut there and the door hypothesised",
+                                                                o.cut_area, o.a.x(), o.a.y(), o.b.x(), o.b.y(), (o.a - o.b).norm(), o.score));
+        unfound_openings_.push_back({.a = o.a, .b = o.b, .depth = 3.f * refiner_.params().cell});
+    }
+    polygon_pub = std::move(R.polygon);
+    publish_doorway_hypotheses();
+}
+
+// One node, `room_doorways` (metaconcept, subtype doorway_hypotheses): parent = the room, delimiting_polygon_x/y = the openings' end points
+// a0 b0 a1 b1 ... in the room frame. door_concept owns whatever door is born from one.
+void RoomSceneGraph::publish_doorway_hypotheses()
+{
+    if (dsr_room_id_ == 0) return;
+    std::vector<float> xs, ys;
+    for (const auto& o : unfound_openings_) { xs.push_back(o.a.x()); ys.push_back(o.a.y()); xs.push_back(o.b.x()); ys.push_back(o.b.y()); }
+    auto node = G_->get_node("room_doorways");
+    if (node.has_value())
+    {
+        G_->add_or_modify_attrib_local<parent_att>(node.value(), dsr_room_id_);
+        G_->add_or_modify_attrib_local<delimiting_polygon_x_att>(node.value(), std::move(xs));
+        G_->add_or_modify_attrib_local<delimiting_polygon_y_att>(node.value(), std::move(ys));
+        G_->update_node(node.value());
+        return;
+    }
+    DSR::Node n;
+    n.type("metaconcept");
+    n.name("room_doorways");
+    G_->add_or_modify_attrib_local<object_subtype_att>(n, std::string("doorway_hypotheses"));
+    G_->add_or_modify_attrib_local<parent_att>(n, dsr_room_id_);
+    G_->add_or_modify_attrib_local<level_att>(n, 4);
+    G_->add_or_modify_attrib_local<pos_x_att>(n, 420.f);
+    G_->add_or_modify_attrib_local<pos_y_att>(n, 240.f);
+    G_->add_or_modify_attrib_local<delimiting_polygon_x_att>(n, std::move(xs));
+    G_->add_or_modify_attrib_local<delimiting_polygon_y_att>(n, std::move(ys));
+    G_->insert_node(n);
+}
+
 void RoomSceneGraph::promote_startup_proto(std::string& reason, bool recalled)
 {
     // The re-anchor that came with map_ready was absorbed at the top of this update, so the learnt polygon
     // maps into the frozen frame here without a jump.
     if (room_concept_->plain_slam_driving())
         adopt_most_probable_layout();
+    if (room_concept_->plain_slam_driving() and not recalled)
+    {   // an unfound doorway is a hypothesis, not an extension of the room (doorway_necks.h, clean26)
+        auto cut = published_polygon();
+        const auto before = cut.size();
+        cut_unfound_doorways(cut);
+        if (cut.size() != before)
+        {
+            const Eigen::Affine2f T_int_pub = T_pub_int_.inverse();
+            std::vector<Eigen::Vector2f> lay_int; lay_int.reserve(cut.size());
+            for (const auto& v : cut) lay_int.push_back(T_int_pub * v);
+            room_concept_->set_map_layout(std::move(lay_int));
+        }
+    }
     const auto poly_pub = published_polygon();
     if (poly_pub.size() < 3) { reason = "map_ready_but_no_polygon"; return; }
     auto rn = G_->get_node(dsr_room_id_);
@@ -4590,7 +4652,8 @@ void RoomSceneGraph::step_layout_refiner(const rc::RoomConcept::UpdateResult& re
     std::vector<rc::refine::Doorway> doorways;
     for (const auto& d : room_concept_->door_apertures())
         doorways.push_back({.a = T_pub_int_ * d.a, .b = T_pub_int_ * d.b, .depth = d.half_depth});
-    const auto R = refiner_.propose(poly_pub, surf, fr, cs, cf, doorways);
+    doorways.insert(doorways.end(), unfound_openings_.begin(), unfound_openings_.end());   // a hypothesised doorway is where the room ends too
+    auto R = refiner_.propose(poly_pub, surf, fr, cs, cf, doorways);
     refine_contested_ = R.contested;
     if (not refine_csv_.is_open())
     {
