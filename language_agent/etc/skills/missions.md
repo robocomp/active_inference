@@ -25,6 +25,7 @@ Any step: retry=N, on_fail=skip|abort.
 Predicates: explored(ROOM)>=p, in_room(ROOM), door_open(DOOR)<p.
 bind=NAME works on cross only (never on open); it names the room you arrive in; use it later as $NAME (the room may not exist yet).
 Rooms the robot remembers but cannot see: the STATE line `ways from here` gives each room's legs in order; write them as cross steps exactly as given, in that order, each with retry=2; after them that room may be named (explore room_7).
+An object the STATE line `remembered objects` lists is not on the map: to go to it, cross into its room if the robot is elsewhere (the `ways from here` legs), then go_to its pose with on_fail=skip, then approach it with on_fail=skip, then report whether it is there. The go_to ends early if the object is seen at that spot; the approach is skipped if it is gone. Never use standoff_m here. Never say in the mission that the object is there.
 Way back: cross the same door again with expect=ROOM_YOU_CAME_FROM, one cross per door, in reverse order. To end on the very spot you started from, put `anchor start` first and go_to anchor:start AFTER crossing back (go_to only drives inside the room where its anchor was taken).
 
 ```
@@ -62,6 +63,14 @@ mission "visit the rooms behind door_1 and door_0, report each, return"
   report "what is in the second room"
   cross door_0 expect=room_1 retry=2
   go_to anchor:home
+```
+An object remembered in another room, with the STATE lines `ways from here (each leg in order): room_2 = cross door_1 expect=room_2` and `remembered objects, NOT seen now (each may have moved): chair_39 in room_2 at pose:room_2(-2.49, -0.66)`:
+```
+mission "go to where chair_39 was last seen"
+  cross door_1 expect=room_2 retry=2
+  go_to pose:room_2(-2.49, -0.66) on_fail=skip
+  approach chair_39 on_fail=skip
+  report "whether chair_39 is still here"
 ```
 A remembered room two rooms away, with the robot in room_5 and the STATE line `ways from here (each leg in order): room_7 = cross door_4 expect=room_6, cross passage:passage_3@room_6 expect=room_7`:
 ```

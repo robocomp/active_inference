@@ -8,6 +8,8 @@ using namespace rc::chat;
 
 namespace
 {
+Remembered undated_room_only() { return {.objects = {{.name = "chair_1", .subtype = "chair"}}, .now_ms = 1}; }
+
 ObjectFact obj(std::uint64_t id, std::string name, std::string sub, bool here, double dist, double bearing,
                std::string room = "room_1")
 {
@@ -60,6 +62,77 @@ int main()
     assert(f.starts_with("8 objects")); ++checks;
     f = answer_find_objects(all, "silla", "room_1");
     assert(f.starts_with("3 chairs")); ++checks;
+
+    // Long-term memory: what the tools add about objects that are NOT on the live graph right now.
+    {
+        constexpr std::int64_t now = 1'800'000'000'000;
+        const Remembered mem{.objects = {
+            {.name = "chair_34", .subtype = "chair", .room = "room_1", .last_seen_ms = now - 25 * 60'000},
+            {.name = "table_9", .subtype = "table", .room = "", .last_seen_ms = now - 3 * 3'600'000},
+            {.name = "chair_35", .subtype = "chair", .room = "room_3", .last_seen_ms = now - 30'000}},
+            .now_ms = now};
+        const auto contains = [](const std::string& s, std::string_view p) { return s.find(p) != std::string::npos; };
+
+        // find_objects: the current room as before, then what is remembered, most recent first, marked as not perceived.
+        auto r = answer_find_objects(all, "chair", "room_1", mem);
+        assert(contains(r, "perceived in room_1")); ++checks;
+        assert(contains(r, "NOT perceived now")); ++checks;
+        assert(contains(r, "chair_34 (last seen in room_1, 25 min ago)")); ++checks;
+        assert(contains(r, "chair_35 (last seen in room_3, less than a minute ago)")); ++checks;
+        assert(r.find("chair_35") < r.find("chair_34")); ++checks;
+        assert(not contains(r, "table_9")); ++checks;
+
+        // A class with nothing live: still the honest "not perceived" sentence, then the memory.
+        r = answer_find_objects({}, "table", "room_2", mem);
+        assert(contains(r, "No table perceived")); ++checks;
+        assert(contains(r, "table_9 (last seen in an unknown room, 3 h ago)")); ++checks;
+
+        // No memory joined, or none of that class: exactly the old answer.
+        assert(answer_find_objects(all, "chair", "room_1", Remembered{}) == answer_find_objects(all, "chair", "room_1")); ++checks;
+        assert(answer_find_objects({}, "sofa", "room_2", mem) == answer_find_objects({}, "sofa", "room_2")); ++checks;
+
+        // where_is by name: only memory knows it, and it never claims the object is there now.
+        r = answer_where_is({}, "chair_34", "room_2", mem);
+        assert(contains(r, "chair_34 (last seen in room_1, 25 min ago)")); ++checks;
+        assert(contains(r, "NOT perceived now")); ++checks;
+        assert(not contains(r, "is not perceived. The robot has not seen it")); ++checks;
+
+        // where_is by name: the live object wins over a remembered one of the same name.
+        std::vector<ObjectFact> live_named{{.id = 1, .name = "chair_34", .subtype = "chair", .room = "room_2"}};
+        r = answer_where_is(live_named, "chair_34", "room_1", mem);
+        assert(contains(r, "in room_2")); ++checks;
+        assert(not contains(r, "last seen")); ++checks;
+
+        // where_is by class: every live one, then the remembered ones.
+        r = answer_where_is({}, "chair", "room_2", mem);
+        assert(contains(r, "chair_34 (last seen")); ++checks;
+        assert(contains(r, "chair_35 (last seen")); ++checks;
+        assert(not contains(r, "table_9")); ++checks;
+
+        // Neither live nor remembered: the old sentence.
+        assert(answer_where_is({}, "sofa", "room_2", mem) == answer_where_is({}, "sofa", "room_2")); ++checks;
+
+        // The planner's line: where to drive, only for objects whose room is known, marked as a memory.
+        const Remembered places{.objects = {
+            {.name = "chair_39", .subtype = "chair", .room = "room_2", .last_seen_ms = now, .x = 1.2, .y = -0.5},
+            {.name = "table_9", .subtype = "table", .room = "", .last_seen_ms = now}},
+            .now_ms = now};
+        const auto line = remembered_places_line(places);
+        assert(contains(line, "chair_39 in room_2 at pose:room_2(1.20, -0.50)")); ++checks;
+        assert(contains(line, "NOT seen now")); ++checks;
+        assert(not contains(line, "table_9")); ++checks;
+        assert(remembered_places_line(Remembered{}).empty()); ++checks;
+        assert(is_remembered(places, "chair_39")); ++checks;
+        assert(not is_remembered(places, "chair_40")); ++checks;
+        assert(remembered_places_line(undated_room_only()).empty()); ++checks;
+
+        // The age in words, and a stamp that is missing or in the future.
+        assert(age_words(90 * 60'000) == "1 h ago"); ++checks;
+        assert(age_words(3 * 86'400'000LL) == "3 days ago"); ++checks;
+        assert(age_words(-5) == "less than a minute ago"); ++checks;
+        const Remembered undated{.objects = {{.name = "chair_1", .subtype = "chair", .room = "room_1"}}, .now_ms = now};
+        assert(contains(answer_where_is({}, "chair_1", "room_2", undated), "chair_1 (last seen in room_1, time unknown)")); ++checks;
+    }
 
     auto w = answer_where_is(all, "fridge", "room_1");
     assert(w.find("refrigerator_1 — in room_2") != std::string::npos); ++checks;

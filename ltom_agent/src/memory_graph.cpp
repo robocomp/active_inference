@@ -99,6 +99,8 @@ void MemoryGraph::show(const Entry& e, std::uint64_t room_id, const std::string&
         G_->add_or_modify_attrib_local<parent_att>(n, room_id);
         G_->add_or_modify_attrib_local<level_att>(n, 2);
         G_->add_or_modify_attrib_local<state_att>(n, state);
+        if (not e.lives.empty())
+            G_->add_or_modify_attrib_local<timestamp_alivetime_att>(n, static_cast<std::uint64_t>(e.lives.back().last_seen_ms));
         G_->add_or_modify_attrib_local<em_record_att>(n, history);
         if (not node or moved_room)
         {

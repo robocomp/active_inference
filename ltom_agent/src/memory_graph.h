@@ -1,6 +1,8 @@
 // The window onto the long-term object memory: the repertory projected onto ltom's own DSR graph (DDS domain 5), shown in
 // the standard graph viewer. root -> room_<key> -> one `object` node per retained object, at its newest keyframe.
-// The repertory file stays the store of record; nothing reads this graph back. Main thread only.
+// The repertory file stays the store of record: ltom_agent never reads this graph back. language_agent reads it (read-only)
+// to say where a remembered object was last seen: state "live" or "remembered", timestamp_alivetime = last seen (epoch ms).
+// Main thread only.
 #pragma once
 #include "repertory.h"
 

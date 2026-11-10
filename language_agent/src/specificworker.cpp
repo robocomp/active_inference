@@ -49,8 +49,16 @@ SpecificWorker::SpecificWorker(const ConfigLoader& configLoader, TuplePrx tprx, 
     int period = 0;
     rc::cfg::Reader(configLoader, "language_agent").req("Period.Compute", period,
             "GRAFCET step period (ms) for every state of this agent's state machine");
-    em_domain_ = rc::cfg::Reader(configLoader, "language_agent").i("EM.domain", 4,
+    em_.peer = "episodic_agent";
+    em_.tag = "EM";
+    em_.domain = rc::cfg::Reader(configLoader, "language_agent").i("EM.domain", 4,
             "DDS domain of episodic_agent's memory graph; joined read-only while episodic_agent is present");
+    em_.hand_to_session = [this](std::shared_ptr<DSR::DSRGraph> g) { session_->set_em_graph(std::move(g)); };
+    ltom_.peer = "ltom_agent";
+    ltom_.tag = "LTOM";
+    ltom_.domain = rc::cfg::Reader(configLoader, "language_agent").i("LTOM.domain", 5,
+            "DDS domain of ltom_agent's memory graph; joined read-only while ltom_agent is present");
+    ltom_.hand_to_session = [this](std::shared_ptr<DSR::DSRGraph> g) { session_->set_ltom_graph(std::move(g)); };
 
     states["Waiting"] = std::make_unique<GRAFCETStep>("Waiting", period,
         std::bind(&SpecificWorker::waiting_loop, this), std::bind(&SpecificWorker::waiting_enter, this));
@@ -91,7 +99,8 @@ void SpecificWorker::request_shutdown()
         return;
     save_window_settings();
     session_.reset();          // cancels the request in flight, closes the log, destroys the window
-    em_G_.reset();             // leave domain 4 (nothing of ours lives there)
+    em_.graph.reset();         // leave the memory domains (nothing of ours lives there)
+    ltom_.graph.reset();
     cleanup_owned_nodes();     // chat_intention + our agent node, through the shared coordinator ([Owns])
 }
 
@@ -246,7 +255,8 @@ void SpecificWorker::initialize()
 
     // NO update_node/update_edge signal connects (CLAUDE.md): the session polls on the main thread.
     session_ = std::make_unique<rc::chat::ChatSession>(G, session_cfg_);
-    session_->set_em_graph(em_G_);   // nullptr until episodic_agent is seen (join_em)
+    session_->set_em_graph(em_.graph);       // nullptr until its owner is seen (sync_memory)
+    session_->set_ltom_graph(ltom_.graph);
     session_->sweep_stale();   // a crashed run's chat_intention, before ours is born
     session_->start();
 
@@ -260,7 +270,8 @@ void SpecificWorker::compute()
 {
     // Everything runs on the session's QTimers (main thread); the GRAFCET loop only keeps the presence protocol —
     // and notices episodic_agent's node vanishing or being replaced (no presence hook fires after a stale period).
-    sync_em(false);
+    sync_memory(em_, false);
+    sync_memory(ltom_, false);
 }
 
 void SpecificWorker::emergency() { std::print("language_agent: emergency()\n"); }

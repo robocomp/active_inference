@@ -5,7 +5,7 @@
 #                only its presence agent node ("ltom_agent 28") and the ltom_recall_<uid> metaconcept nodes.
 #
 #   [Agent.ltom] the MEMORY graph. domain 5, seeded from ltom_root.json: the repertory file projected for the viewer
-#                (root -> room_<key> -> one object node per retained object). Nothing reads it back.
+#                (root -> room_<key> -> one object node per retained object). language_agent reads it, read-only.
 #
 # Never add a table whose FLATTENED key contains "Agent" and has >= 2 dots unless it is a graph (getSurNames would
 # build a phantom one). Every sub-table MUST define tree/graph/2d (setupViewer throws on a missing key).

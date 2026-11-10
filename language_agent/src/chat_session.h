@@ -149,6 +149,7 @@ public:
     void sweep_stale() { intention_.sweep_stale(); }
     /// episodic_agent's domain-4 graph (joined by SpecificWorker while it is present); nullptr = not joined.
     void set_em_graph(std::shared_ptr<DSR::DSRGraph> em) { em_G_ = std::move(em); }
+    void set_ltom_graph(std::shared_ptr<DSR::DSRGraph> ltom) { ltom_G_ = std::move(ltom); }
 
 private:
     // ── the three entry points from the window ──
@@ -250,6 +251,9 @@ private:
     std::optional<float> robot_height_m_;
     std::string body_note_;
     std::shared_ptr<DSR::DSRGraph> em_G_;   ///< episodic memory (domain 4), nullptr = not joined
+    std::shared_ptr<DSR::DSRGraph> ltom_G_; ///< long-term object memory (domain 5), nullptr = not joined
+    /// What ltom remembers of objects that are not on the live graph now; empty when it is not joined.
+    Remembered remembered_now() const;
     SessionConfig cfg_;
     std::unique_ptr<DSR::InnerEigenAPI> inner_;
     WorldDigest digest_builder_;

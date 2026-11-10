@@ -20,7 +20,7 @@ graph = false
 # ★required_agent_names is ABSENT on purpose, not `= []`: the RoboComp ConfigLoader throws on an empty array
 # (viewer3d/scene_graph_viewer learned this); absent reads as the empty default.
 # episodic_agent: while it is present, its memory graph (domain [EM].domain) is joined for the memory tools.
-optional_agent_names = ["controller", "room_concept", "episodic_agent"]
+optional_agent_names = ["controller", "room_concept", "episodic_agent", "ltom_agent"]
 config_dir = "etc"
 monitor_period_ms = 500
 heartbeat_timeout_ms = 3000
@@ -36,8 +36,13 @@ nodes = ["language_agent 25", "chat_intention"]
 # Episodic memory (episodic_agent, id 26): its graph on this DDS domain is joined READ-ONLY and LAZILY — only while
 # episodic_agent is present on the live graph, dropped when it goes and re-joined when it returns (or restarts).
 # Deliberately NOT an [Agent.em] sub-table: the generated code joins those at startup, and a join with no peer
-# aborts the process after ~15 s (specificworker.h). 0 live, 2 ltsm memory, 4 episodic memory, 7 media plane.
+# aborts the process after ~15 s (specificworker.h). 0 live, 2 ltsm memory, 4 episodic memory, 5 object memory, 7 media plane.
 domain = 4
+
+[LTOM]
+# Long-term object memory (ltom_agent, id 28): joined exactly like [EM], while ltom_agent is present. find_objects and
+# where_is use it to say where an object that left the live graph was last seen.
+domain = 5
 
 [Period]
 Compute = 250

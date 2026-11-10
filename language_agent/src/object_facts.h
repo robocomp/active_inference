@@ -18,6 +18,10 @@
  *
  * Only the CURRENT room is perceived: objects hanging from another room node are not listed in the digest (the
  * where_is tool still says which room they belong to).
+ *
+ * LONG-TERM MEMORY (ltom_agent, domain 5): an object that left the live graph is no longer in any of the above. The
+ * query tools add what ltom remembers (Remembered, filled by ltom_query_dsr.h), always worded as "last seen", because
+ * a memory says where the object WAS.
  */
 
 #include <algorithm>
@@ -48,6 +52,32 @@ struct ObjectFact
     std::string shape{};                 ///< obj_shape ("round" | "square" for a table top), "" = not stated
     std::optional<float> shape_prob{};   ///< obj_shape_prob: P(shape), 0.5 = undecided
 };
+
+/// An object ltom_agent remembers and that is NOT on the live graph right now.
+struct RememberedObject
+{
+    std::string name;
+    std::string subtype;
+    std::string room;                 ///< the room of its newest keyframe ("" = unknown)
+    std::int64_t last_seen_ms = 0;    ///< epoch ms; 0 = not recorded
+    double x = 0, y = 0;              ///< where it was, in `room`'s frame (m)
+};
+
+struct Remembered
+{
+    std::vector<RememberedObject> objects;
+    std::int64_t now_ms = 0;          ///< epoch ms the ages are counted from
+};
+
+/// How long ago, as a person would say it. Only the choice of unit: nothing is decided from it.
+inline std::string age_words(std::int64_t age_ms)
+{
+    const std::int64_t minutes = age_ms / 60'000, hours = minutes / 60, days = hours / 24;
+    if (minutes < 1) return "less than a minute ago";
+    if (hours < 1) return std::format("{} min ago", minutes);
+    if (days < 2) return std::format("{} h ago", hours);
+    return std::format("{} days ago", days);
+}
 
 /// Body frame: x right, y FORWARD. Bearing 0 = straight ahead, + = to the left. (Doors use the same words.)
 inline std::string bearing_words(double deg)
@@ -149,10 +179,55 @@ inline std::string normalize_subtype(std::string w)
     return w;
 }
 
-/// find_objects(subtype?) — the current room's objects of that class (all classes when empty), nearest first.
+/// "chair_34 (last seen in room_1, 25 min ago)"
+inline std::string remembered_line(const RememberedObject& o, std::int64_t now_ms)
+{
+    return std::format("{} (last seen in {}, {})", o.name, o.room.empty() ? std::string("an unknown room") : o.room,
+                       o.last_seen_ms > 0 ? age_words(now_ms - o.last_seen_ms) : std::string("time unknown"));
+}
+
+/// The tools' paragraph about remembered objects, most recently seen first; "" when there are none.
+inline std::string remembered_block(std::vector<RememberedObject> hit, std::int64_t now_ms)
+{
+    if (hit.empty()) return {};
+    std::ranges::sort(hit, [](const RememberedObject& a, const RememberedObject& b)
+    { return a.last_seen_ms != b.last_seen_ms ? a.last_seen_ms > b.last_seen_ms : a.name < b.name; });
+    std::string s = "Remembered, NOT perceived now (it may have moved):\n";
+    for (const auto& o : hit) s += "- " + remembered_line(o, now_ms) + "\n";
+    return s;
+}
+
+/// The remembered objects of a normalized class (all of them when empty).
+inline std::vector<RememberedObject> remembered_of(const Remembered& mem, const std::string& want)
+{
+    std::vector<RememberedObject> hit;
+    for (const auto& o : mem.objects)
+        if (want.empty() or o.subtype == want) hit.push_back(o);
+    return hit;
+}
+
+/// The PLANNER's line (plan_mission): where a remembered object was, in the form a go_to step takes. Only the planner
+/// gets numbers; the chat speaks of rooms. Empty when no remembered object has a known room.
+inline std::string remembered_places_line(const Remembered& mem)
+{
+    std::string o;
+    for (const auto& r : mem.objects)
+        if (not r.room.empty())
+            o += std::format("{}{} in {} at pose:{}({:.2f}, {:.2f})", o.empty() ? "" : "; ", r.name, r.room, r.room, r.x, r.y);
+    return o.empty() ? o : "remembered objects, NOT seen now (each may have moved): " + o;
+}
+
+/// A mission may name a remembered object: it is on the live graph again once the robot sees it there.
+inline bool is_remembered(const Remembered& mem, std::string_view name)
+{
+    return std::ranges::any_of(mem.objects, [&](const RememberedObject& o) { return o.name == name; });
+}
+
+/// find_objects(subtype?) — the current room's objects of that class (all classes when empty), nearest first, then
+/// what the long-term memory holds of that class elsewhere.
 /// An unknown or absent class is an empty list with a sentence the model can repeat, never an error.
 inline std::string answer_find_objects(std::vector<ObjectFact> all, const std::string& subtype_raw,
-                                       const std::string& room)
+                                       const std::string& room, const Remembered& mem = {})
 {
     const std::string want = normalize_subtype(subtype_raw);
     std::vector<ObjectFact> hit;
@@ -160,18 +235,21 @@ inline std::string answer_find_objects(std::vector<ObjectFact> all, const std::s
         if (o.in_current_room and (want.empty() or o.subtype == want)) hit.push_back(std::move(o));
     sort_by_distance(hit);
     const std::string what = want.empty() ? std::string("object") : want;
+    const std::string memory = remembered_block(remembered_of(mem, want), mem.now_ms);
     if (hit.empty())
         return std::format("No {} perceived in the current room ({}). This does not mean there is none: it may be "
-                           "unseen, or the agent that recognises it may not be running.",
-                           what, room.empty() ? std::string("unknown") : room);
+                           "unseen, or the agent that recognises it may not be running.{}",
+                           what, room.empty() ? std::string("unknown") : room, memory.empty() ? "" : "\n" + memory);
     std::string s = std::format("{} {}{} perceived in {}:\n", hit.size(), what, hit.size() == 1 ? "" : "s",
                                 room.empty() ? std::string("the current room") : room);
     for (const auto& o : hit) s += "- " + object_line(o) + "\n";
-    return s;
+    return s + memory;
 }
 
-/// where_is(name) — by exact node name, else by class (every object of it, any room, nearest first).
-inline std::string answer_where_is(std::vector<ObjectFact> all, const std::string& name_raw, const std::string& room)
+/// where_is(name) — by exact node name, else by class (every object of it, any room, nearest first). What is on the
+/// live graph comes first; the long-term memory only adds what is not.
+inline std::string answer_where_is(std::vector<ObjectFact> all, const std::string& name_raw, const std::string& room,
+                                   const Remembered& mem = {})
 {
     std::string name = name_raw;
     std::ranges::transform(name, name.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
@@ -185,10 +263,14 @@ inline std::string answer_where_is(std::vector<ObjectFact> all, const std::strin
     };
     for (const auto& o : all)
         if (o.name == name) return describe(o);
+    for (const auto& o : mem.objects)
+        if (o.name == name) return remembered_block({o}, mem.now_ms);
     const std::string want = normalize_subtype(name);
     std::vector<ObjectFact> hit;
     for (auto& o : all)
         if (not want.empty() and o.subtype == want) hit.push_back(std::move(o));
+    const std::string memory = want.empty() ? std::string{} : remembered_block(remembered_of(mem, want), mem.now_ms);
+    if (hit.empty() and not memory.empty()) return memory;
     if (hit.empty())
         return std::format("'{}' is not perceived. The robot has not seen it, or the agent that recognises it is not "
                            "running; that does not mean it is not there.", name_raw);
@@ -196,7 +278,7 @@ inline std::string answer_where_is(std::vector<ObjectFact> all, const std::strin
     sort_by_distance(hit);
     std::string s;
     for (const auto& o : hit) s += "- " + describe(o) + "\n";
-    return s;
+    return s + memory;
 }
 
 /// Births and removals between two snapshots of the current room's objects (by node id). A change of room is not a

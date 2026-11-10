@@ -2,6 +2,7 @@
 #include "verbatim_reply.h"
 #include "history_trim.h"
 
+#include <chrono>
 #include <charconv>
 #include <csignal>
 #include <expected>
@@ -22,6 +23,7 @@
 #include <QRegularExpression>
 
 #include "../../common/episodic/em_query_dsr.h"            // rc::em::load_store
+#include "ltom_query_dsr.h"                                 // load_remembered
 #include "../../common/graph_provenance/creation_stamp.h"   // rc::provenance::now_ms
 #include "../../common/room_resolve/room_resolve.h"
 #include <opencv2/imgcodecs.hpp>
@@ -493,7 +495,8 @@ const QString kInterfaceRules = QStringLiteral(
     "'A bit more' / 'more' REPEATS the last move/turn in the STATE with the SAME signs (after a backward move, "
     "distance_m stays negative).\n"
     "- Objects: you know only the OBJECTS lines of the STATE (current room) and the read-only tools find_objects and "
-    "where_is. If none of a kind is listed say \"I have not perceived any\", never \"there is none\".\n"
+    "where_is. If none of a kind is listed say \"I have not perceived any\", never \"there is none\". What those tools "
+    "list as remembered you are NOT perceiving now: say \"I last saw it in room_1, 25 min ago\", never that it is there.\n"
     "- look(camera) shows you the current picture of a camera: 'front' (default, what is ahead) or '360' (all around, "
     "a panorama whose centre is straight ahead and whose left and right edges are behind you). The STATE has NO "
     "appearance: when the person asks what you see, to look, or about colours, materials or what something looks "
@@ -629,7 +632,8 @@ QJsonArray ChatSession::tools_json() const
         {}));
     tools.append(tool_def("where_is",
         "Where is an object: give its name (e.g. chair_1) or its class (e.g. refrigerator). Returns its room and, if it "
-        "is in the current room, its distance and bearing; or that it has not been perceived. Read-only.",
+        "is in the current room, its distance and bearing; for one not perceived now, where and when it was last seen, "
+        "if it is remembered; or that it has not been perceived. Read-only.",
         QJsonObject{{"name", QJsonObject{{"type", "string"}, {"description", "an object name or class"}}}},
         QJsonArray{"name"}));
     tools.append(tool_def("known_rooms",
@@ -1112,9 +1116,11 @@ QString ChatSession::answer_query(const QString& name, const QJsonObject& args)
     }
     else if (QString m = answer_memory(name, args); not m.isEmpty()) out = std::move(m);
     else if (name == "find_objects")
-        out = q(answer_find_objects(digest_.objects, args.value("subtype").toString().toStdString(), digest_.facts.room));
+        out = q(answer_find_objects(digest_.objects, args.value("subtype").toString().toStdString(), digest_.facts.room,
+                                    remembered_now()));
     else if (name == "where_is")
-        out = q(answer_where_is(digest_.objects, args.value("name").toString().toStdString(), digest_.facts.room));
+        out = q(answer_where_is(digest_.objects, args.value("name").toString().toStdString(), digest_.facts.room,
+                                remembered_now()));
     else if (name == "known_rooms" or name == "route_to")
     {
         const auto topo = remembered_topology();
@@ -1439,6 +1445,13 @@ std::optional<rc::chat::Topology> ChatSession::remembered_topology() const
     return std::move(t.value());
 }
 
+rc::chat::Remembered ChatSession::remembered_now() const
+{
+    if (not ltom_G_) return {};
+    const auto now = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch());
+    return rc::chat::load_remembered(*ltom_G_, now.count());
+}
+
 std::optional<rc::em::Store> ChatSession::em_store() const
 {
     if (not em_G_) return std::nullopt;
@@ -1588,6 +1601,7 @@ bool ChatSession::name_exists(std::string_view name) const
 {
     if (G_ and G_->get_node(std::string(name)).has_value()) return true;
     // a remembered room (named after the legs that lead into it) or a passage of the long-term memory (topology.h)
+    if (rc::chat::is_remembered(remembered_now(), name)) return true;
     if (const auto topo = remembered_topology(); topo.has_value()) return rc::chat::remembered_name(*topo, name);
     return false;
 }
@@ -1715,6 +1729,8 @@ QString ChatSession::planner_state() const
     //   the STATE's "(call route_to …)" is dropped from its copy (planner_state_text, final review I6).
     std::string ways;
     if (const auto topo = remembered_topology(); topo.has_value()) ways = rc::chat::ways_line(*topo, digest_.facts.room);
+    if (const auto places = rc::chat::remembered_places_line(remembered_now()); not places.empty())
+        ways += (ways.empty() ? "" : "\n") + places;
     return q(rc::chat::planner_state_text(state_message().toStdString(), ways));
 }
 

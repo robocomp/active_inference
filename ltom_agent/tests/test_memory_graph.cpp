@@ -1,5 +1,6 @@
 // Offline test of src/memory_graph.h: the repertory projected onto a standalone DSR graph (private DDS domain 63). No fleet, no viewer.
 #include "../src/memory_graph.h"
+#include "../../language_agent/src/ltom_query_dsr.h"   // the reader on the other side of this graph
 
 #include <cmath>
 #include <memory>
@@ -102,6 +103,30 @@ void test_live_or_only_remembered_follows_the_live_graph()
     CHECK(f.G->get_attrib_by_name<state_att>(*f.G->get_node("chair_2")) == std::string("live"));
 }
 
+// The contract with language_agent: what this graph holds is what its reader gets back.
+void test_language_agent_reads_only_what_is_absent_with_room_and_time()
+{
+    Fixture f;
+    Entries es;
+    add(es, chair(1, 1, 1.0, 1.0));
+    add(es, chair(2, 2, 2.0, 2.0));
+    auto no_keyframe = chair(3, 1, 0.0, 0.0);
+    no_keyframe.keyframes.clear();
+    add(es, std::move(no_keyframe));
+    f.mem.sync(es, {uid_of(1)});
+
+    const auto mem = rc::chat::load_remembered(*f.G, 20000);
+    CHECK(mem.now_ms == 20000);
+    CHECK(mem.objects.size() == 2);
+    const auto find = [&](const char* name) { return std::ranges::find(mem.objects, name, &rc::chat::RememberedObject::name); };
+    CHECK(find("chair_1") == mem.objects.end());
+    const auto two = find("chair_2");
+    CHECK(two != mem.objects.end() and two->subtype == "chair" and two->room == "room_2" and two->last_seen_ms == 9900);
+    CHECK(two != mem.objects.end() and std::abs(two->x - 2.0) < 1e-3 and std::abs(two->y - 2.0) < 1e-3);
+    const auto three = find("chair_3");
+    CHECK(three != mem.objects.end() and three->room.empty());
+}
+
 void test_sync_is_repeatable_and_follows_the_newest_keyframe()
 {
     Fixture f;
@@ -152,6 +177,7 @@ int main()
     test_objects_hang_under_their_remembered_room();
     test_a_click_on_an_object_shows_what_is_retained();
     test_live_or_only_remembered_follows_the_live_graph();
+    test_language_agent_reads_only_what_is_absent_with_room_and_time();
     test_sync_is_repeatable_and_follows_the_newest_keyframe();
     test_an_object_last_seen_in_another_room_moves_there();
     test_every_retained_object_is_shown_even_with_no_known_room();
