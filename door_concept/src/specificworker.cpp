@@ -1428,6 +1428,9 @@ void SpecificWorker::compute()
     for (const auto& [door_id, inst] : fitter_->instances())
         remember_door(inst);
     step_remembered_looks();
+    step_doorway_hypotheses();
+    step_wall_hypotheses();
+    step_candidate_looks();
     // The passage door hung from the robot while its approach/cross executes — AFTER the pragmatic step, so the
     // claims it reads were polled this cycle (specificworker_anchor.cpp).
     step_passage_anchor();
@@ -2337,11 +2340,13 @@ rc::door::InteractionState SpecificWorker::compute_interaction_state(const rc::D
     st.sigma_w_post  = std::sqrt(std::max(0.0f, inst.ai2_belief.covariance()(1, 1)));
     st.sigma_w_model = std::sqrt(std::max(0.0f, inst.ai2_belief.model_error_var().second));
     st.phi_curve_n   = static_cast<int>(inst.phi_curve_log.size());
-    if (const auto l0 = rc::door::passable_logit(inst.phi_curve_log, ap.w, needed, 0.0f); l0.has_value()) st.p_open_logit_w0 = *l0;
+    // The opening the LiDAR measured this cycle (door_opening_edges.h): the body fits through what the beams crossed, whatever the leaf model reads.
+    const float p_opening_seen = rc::door::measured_passable(inst.opening_runs, needed);
+    if (const auto l0 = rc::door::passable_logit(inst.phi_curve_log, ap.w, needed, 0.0f); l0.has_value()) st.p_open_logit_w0 = rc::door::fuse_measured_opening(*l0, p_opening_seen);
     if (const auto l = rc::door::passable_logit(inst.phi_curve_log, ap.w, needed, sigma_w_rep); l.has_value())
     {
-        st.p_open_logit = *l;
-        st.p_open = static_cast<float>(rc::door::sigmoid(*l));
+        st.p_open_logit = rc::door::fuse_measured_opening(*l, p_opening_seen);
+        st.p_open = static_cast<float>(rc::door::sigmoid(st.p_open_logit));
         st.p_open_known = true;
         st.p_open_from_curve = true;
     }
@@ -2503,6 +2508,8 @@ rc::door::InteractionState SpecificWorker::compute_interaction_state(const rc::D
         // body half-width + the passage margin's half: the same body the passability uses; the gap's σ is the range's own
         st.p_corridor_clear = rc::door::prob_corridor_clear(cb, robot, Eigen::Vector2f(thr.x, thr.y),
                                                             0.5f * needed, sigma);
+        // a measured span is a corridor the beams themselves crossed: the same evidence, the same OR
+        st.p_corridor_clear = 1.0f - (1.0f - st.p_corridor_clear) * (1.0f - rc::door::measured_passable(inst.opening_runs, needed));
         st.corr_lateral_m = (robot - ap.centre_xy()).dot(ap.wall_u);
         st.corr_hinge_llr = cb.hinge_llr; st.corr_swing_llr = cb.swing_llr;
         // ★ "AT THE DOOR" FOR A CROSS IS FACING THE OPENING, NOT THE ACTUATION BAND (2026-11-01, user: "the prob of going
@@ -4264,6 +4271,228 @@ void SpecificWorker::step_remembered_looks()
                        "(p_detect {:.2f}, visible {:.2f})\n", r.name, plan.pos.x(), plan.pos.y(), plan.yaw, plan.eig,
                        plan.p_detect, plan.visible_frac);
     }
+}
+
+// ─── AN UNDECIDED CANDIDATE IS UNFINISHED BUSINESS (spec 2026-11-09-undecided-candidate-look) ───────────────────────
+
+void SpecificWorker::step_candidate_looks()
+{
+    if (not G or not fitter_ or room_node_id_ == 0)
+        return;
+    const auto withdraw = [&](std::uint64_t key, CandidateLook& e, const char* why)
+    {
+        if (e.aff.node_id() != 0)
+        {
+            e.aff.remove();
+            std::print("door_concept: [look] aff_door_look_place_{} withdrawn — {}\n", key, why);
+        }
+    };
+    if (room_node_id_ != candidate_looks_room_)
+    {
+        for (auto& [key, e] : candidate_looks_) withdraw(key, e, "the robot is in another room now");
+        candidate_looks_.clear();
+        candidate_looks_room_ = room_node_id_;
+    }
+    const std::string room = current_room_name();
+    // The core has not taken this room up yet: nothing is known about its candidates, so the question is open.
+    if (room.empty() or core_->room_name() != room)
+    {
+        publish_door_questions(true);
+        return;
+    }
+    const auto sensor = rc::nbv::sensor_from_graph(*G, inner_eigen_.get());
+    const bool can_plan = fitter_->has_room_polygon() and sensor.complete() and not core_->room_is_proto();
+    const rc::door::look::Params prm{.robot_radius_m = 0.5f * cfg_.pragmatic.robot_passage_width_m,
+                                     .clutter_prob   = core_->detectors().zed.false_alarm,
+                                     .detection_prob = core_->detectors().zed.hit_rate,
+                                     .prior_w_m      = cfg_.door_prior_w_m,
+                                     .prior_h_m      = cfg_.door_prior_h_m,
+                                     .thickness_m    = cfg_.door_thickness_m};
+    std::vector<rc::nbv::WallGap> gaps;
+    for (const auto& [id, inst] : fitter_->instances())
+        if (const auto& s = inst.model.state(); inst.ai2_initialized and not inst.is_bearing_hypothesis)
+            gaps.push_back({Eigen::Vector2f(s.ap_cx, s.ap_cy), 0.5f * s.w});
+    const auto furniture = can_plan ? rc::nbv::collect_graph_obstacles(*G, inner_eigen_.get(), 0) : std::vector<rc::nbv::Obstacle>{};
+
+    // ★A provisional room with no known door is open before its places exist: the drive reads the promotion and this statement separately.
+    const bool no_door = std::ranges::none_of(fitter_->instances(), [](const auto& kv) { return not kv.second.is_bearing_hypothesis; });
+    bool any_open = core_->room_is_proto() and no_door;
+    // The nearest wall place not yet exhausted is the one looked at; it keeps the look until it is answered.
+    const auto wall_open = [&](const auto& c)
+    {
+        if (c.room != room or not c.wall_seed or not core_->candidate_is_open(c)) return false;
+        const auto it = candidate_looks_.find(c.key);
+        return it == candidate_looks_.end() or not it->second.exhausted;
+    };
+    if (std::ranges::none_of(core_->candidates(), [&](const auto& c) { return c.key == wall_look_key_ and wall_open(c); }))
+    {
+        wall_look_key_ = 0;
+        if (const auto cam = fitter_->camera_in_room(); cam.has_value())
+        {
+            const Eigen::Vector2f at(static_cast<float>(cam->coeff(0, 3)), static_cast<float>(cam->coeff(1, 3)));
+            float best = std::numeric_limits<float>::max();
+            for (const auto& c : core_->candidates())
+                if (wall_open(c) and (c.xy - at).norm() < best) { best = (c.xy - at).norm(); wall_look_key_ = c.key; }
+        }
+    }
+    std::set<std::uint64_t> asking;
+    for (const auto& c : core_->candidates())
+    {
+        if (c.room != room or not core_->candidate_is_open(c))
+            continue;
+        if (not can_plan)     // a provisional room, or no camera model yet: the question stands, no look is offered
+        {
+            any_open = true;
+            continue;
+        }
+        const auto [it, fresh] = candidate_looks_.try_emplace(c.key);
+        auto& e = it->second;
+        if (fresh)
+            e.aff.init(G, room_node_id_, std::format("door_look_place_{}", c.key), "door");
+        if (const auto aid = e.aff.node_id(); aid != 0)
+            e.aff.on_node_modified(aid);
+        using S = rc::ObjectAffordance::State;
+        if (e.aff.state() == S::executing)      // the controller holds it: the site stands until the claim ends
+        {
+            asking.insert(c.key);
+            any_open = true;
+            e.aff.hold_offered();
+            continue;
+        }
+        if ((e.aff.state() == S::satisfied or e.aff.state() == S::aborted) and e.site.has_value())
+        {   // arrived or handed back: this site is spent, whichever it was
+            core_->mark_candidate_site_tried(c, e.tried, Eigen::Vector2f(e.site->x_m, e.site->y_m));
+            e.site.reset();
+        }
+        const auto adds_a_view = [&](const Eigen::Vector2f& q) { return core_->candidate_view_is_new(c, q) and core_->candidate_site_untried(c, e.tried, q); };
+        if (e.site.has_value() and not adds_a_view(Eigen::Vector2f(e.site->x_m, e.site->y_m)))
+            e.site.reset();                     // it got the view on the way, or the ledger moved
+        if (not e.site.has_value())
+        {
+            rc::door::IdentityRow r;
+            r.room = room; r.name = std::format("place_{}", c.key); r.xy = c.xy;
+            const std::function<bool(const Eigen::Vector2f&)> admissible = adds_a_view;
+            const auto plan = rc::door::look::plan(r, core_->candidate_question_p(c), fitter_->room_polygon(), sensor, furniture, gaps, prm, &admissible);
+            if (not plan.valid)                 // no standpoint adds a view: this candidate has told everything it can
+            {
+                withdraw(c.key, e, "no standpoint adds a view");
+                if (not std::exchange(e.exhausted, true))
+                    std::print("door_concept: [look] place_{} at ({:.2f},{:.2f}) stays not born: {} view(s), L={:+.2f}, no standpoint adds a view\n",
+                               c.key, c.xy.x(), c.xy.y(), c.belief.ledger.views().size(), c.belief.L());
+                asking.insert(c.key);           // keeps its entry, so the tried sites are remembered
+                continue;
+            }
+            rc::AffordanceTarget tgt;
+            tgt.x_m = plan.pos.x(); tgt.y_m = plan.pos.y(); tgt.yaw_rad = plan.yaw;
+            tgt.gain = plan.eig; tgt.valid = true;
+            tgt.standoff_min_m = plan.band_near_m; tgt.standoff_max_m = plan.band_far_m;
+            tgt.framing_fill = rc::nbv::framing_fill(sensor);
+            e.site = tgt;
+            std::print("door_concept: [look] aff_door_look_place_{} OFFERED at ({:.2f},{:.2f}) yaw={:.2f} for the place ({:.2f},{:.2f}) — "
+                       "L={:+.2f}, {} view(s), EIG {:.3f} nats (p_detect {:.2f}, visible {:.2f})\n", c.key, plan.pos.x(), plan.pos.y(), plan.yaw,
+                       c.xy.x(), c.xy.y(), c.belief.L(), c.belief.ledger.views().size(), plan.eig, plan.p_detect, plan.visible_frac);
+        }
+        if (c.wall_seed and c.key != wall_look_key_)
+        {   // only the place being looked at holds a node (a room's walls are many places: one affordance at a time keeps the graph quiet)
+            if (e.aff.node_id() != 0) e.aff.remove();
+            asking.insert(c.key);
+            any_open = true;
+            continue;
+        }
+        e.aff.update(*e.site);
+        e.exhausted = false;
+        asking.insert(c.key);
+        any_open = true;
+    }
+    for (auto it = candidate_looks_.begin(); it != candidate_looks_.end();)
+    {
+        if (asking.contains(it->first)) { ++it; continue; }
+        withdraw(it->first, it->second, "the question is answered (born or refused)");
+        it = candidate_looks_.erase(it);
+    }
+    publish_door_questions(any_open);
+}
+
+// A promoted room with no known door is unfinished: the robot got here, and a room with no way out is very unlikely. Each wall is asked,
+// a place per door width; the existing belief answers: a good mask makes the door, an empty view closes the place, MaxRoomS bounds it.
+void SpecificWorker::step_wall_hypotheses()
+{
+    if (not G or not fitter_ or room_node_id_ == 0) return;
+    const std::string room = current_room_name();
+    if (room.empty() or core_->room_name() != room or core_->room_is_proto() or not fitter_->has_room_polygon()) return;
+    if (std::ranges::any_of(fitter_->instances(), [](const auto& kv) { return not kv.second.is_bearing_hypothesis; }))
+    {
+        core_->retire_wall_seeds(room);
+        wall_seeded_room_ = 0;   // the questions are answered only while a door stands: if it is removed (clean31: the only door,
+                                 // real DOOR_2, deleted by one sliver mask) the walls are open questions again, not a finished room
+        return;
+    }
+    if (wall_seeded_room_ == room_node_id_) return;
+    wall_seeded_room_ = room_node_id_;
+    const auto& poly = fitter_->room_polygon();
+    int seeded = 0;
+    for (std::size_t i = 0, j = poly.size() - 1; i < poly.size(); j = i++)
+    {
+        const Eigen::Vector2f e = poly[i] - poly[j];
+        const int n = static_cast<int>(e.norm() / cfg_.door_prior_w_m);
+        for (int k = 0; k < n; ++k)
+            seeded += core_->hypothesise_place(room, poly[j] + e * ((static_cast<float>(k) + 0.5f) / static_cast<float>(n)), true) ? 1 : 0;
+    }
+    std::print("door_concept: [look] '{}' is promoted with no known door: {} place(s) along its walls are open questions\n", room, seeded);
+}
+
+void SpecificWorker::step_doorway_hypotheses()
+{
+    if (not G or room_node_id_ == 0) return;
+    if (room_node_id_ != doorway_seeded_room_) { doorway_seeded_.clear(); doorway_seeded_room_ = room_node_id_; }
+    const auto n = G->get_node("room_doorways");
+    if (not n.has_value() or G->get_attrib_by_name<parent_att>(n.value()).value_or(0) != room_node_id_) return;
+    const auto xs = G->get_attrib_by_name<delimiting_polygon_x_att>(n.value());
+    const auto ys = G->get_attrib_by_name<delimiting_polygon_y_att>(n.value());
+    if (not xs.has_value() or not ys.has_value() or xs->get().size() != ys->get().size()) return;
+    const std::string room = current_room_name();
+    for (std::size_t i = 0; i + 1 < xs->get().size(); i += 2)
+    {
+        const Eigen::Vector2f m(0.5f * (xs->get()[i] + xs->get()[i + 1]), 0.5f * (ys->get()[i] + ys->get()[i + 1]));
+        const std::pair<int, int> key{static_cast<int>(std::lround(m.x() * 10.f)), static_cast<int>(std::lround(m.y() * 10.f))};
+        if (not doorway_seeded_.contains(key) and core_->hypothesise_place(room, m))
+        {
+            doorway_seeded_.insert(key);
+            std::print("door_concept: [look] the outline of '{}' hypothesises a door at ({:.2f},{:.2f})\n", room, m.x(), m.y());
+        }
+    }
+}
+
+void SpecificWorker::publish_door_questions(bool open)
+{
+    const std::string state = open ? "open" : "settled";
+    if (door_questions_room_ == room_node_id_ and door_questions_state_ == state and G->get_node("door_questions").has_value())
+        return;
+    auto node = G->get_node("door_questions");
+    if (not node.has_value())
+    {
+        DSR::Node n;
+        n.type("metaconcept");
+        n.name("door_questions");
+        G->add_or_modify_attrib_local<object_subtype_att>(n, std::string("door_questions"));
+        G->add_or_modify_attrib_local<state_att>(n, state);
+        G->add_or_modify_attrib_local<parent_att>(n, room_node_id_);
+        G->add_or_modify_attrib_local<level_att>(n, 4);
+        G->add_or_modify_attrib_local<pos_x_att>(n, 360.f);
+        G->add_or_modify_attrib_local<pos_y_att>(n, 240.f);
+        if (not G->insert_node(n).has_value())
+            return;
+    }
+    else
+    {
+        G->add_or_modify_attrib_local<state_att>(node.value(), state);
+        G->add_or_modify_attrib_local<parent_att>(node.value(), room_node_id_);
+        if (not G->update_node(node.value()))
+            return;
+    }
+    door_questions_room_ = room_node_id_;
+    door_questions_state_ = state;
+    std::print("door_concept: [look] door questions of room node {}: {}\n", room_node_id_, state);
 }
 
 // The door carried across a room switch becomes the new room's door: its instance rebuilt against the room we are in,

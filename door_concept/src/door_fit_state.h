@@ -127,6 +127,7 @@ struct DoorFitState
     // wall does not register (door_fit.cpp). dbg_reg above is this cycle's, for the logs.
     door::WallRegistration wall_reg;
     door::AlongWallResult  dbg_along;
+    std::vector<door::OpeningRun> opening_runs;   // this cycle's through-spans (door_opening_edges.h); empty = no measurement
     // Task 11: log P(the belief's hinge) / P(the other jamb) — the hinge as a static hidden variable, learned from the
     // LiDAR while the leaf is open (rc::door::phi_hinge_marginal). 0 = no evidence yet; carried across a room switch.
     float hinge_llr    = 0.0f;

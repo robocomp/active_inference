@@ -871,7 +871,8 @@ float DoorFit::run_inference(rc::DoorFitState& inst, const DoorObservation& obse
         // contamination the clutter component didn't fully reject.
         inst.last_clutter_frac = inst.ai2_belief.clutter_fraction(frame.points, R);
         if (not frame.points.empty())   // the existence channel `sup`: x is undefined with no support (no default)
-            inst.pending_fit_support = rc::door::core::FitSupport{inst.last_clutter_frac, inst.last_slice_sensor};
+            inst.pending_fit_support = rc::door::core::FitSupport{inst.last_clutter_frac, inst.last_slice_sensor,
+                                                                  rc::door::aperture_coverage(inst.ai2_belief.aperture(), frame.points)};
     }
     inst.dbg_energy = energy;   // remember for the next gated/aged cycle to HOLD
     inst.dbg_resid_pts = static_cast<int>(observation.residual_pts.size());   // HELD, see door_fit_state.h
@@ -1350,10 +1351,12 @@ void DoorFit::estimate_phi(rc::DoorFitState& inst)
     // posterior just formed, and fused with the scan's along-wall registration offset b as a persistent state.
     // σ0² = the pose chain's along-wall variance + the static range term — the common mode the mask frames carry.
     inst.dbg_along = {};
+    inst.opening_runs.clear();
     if (inst.ai2_initialized and leaf_pts and not leaf_pts->empty())
     {
         const auto ap = inst.ai2_belief.aperture();
         const auto runs = rc::door::measure_openings(ap, reg_sweep.origin, reg_sweep.pts);
+        inst.opening_runs = rc::door::measure_openings(ap, reg_sweep.origin, reg_sweep.pts, ap.w);   // "clear": past the leaf's reach
         const Eigen::Vector2f u = ap.wall_u;
         const float chain_s = u.x() * u.x() * inst.chain_cov_xx + 2.0f * u.x() * u.y() * inst.chain_cov_xy
                             + u.y() * u.y() * inst.chain_cov_yy;

@@ -391,6 +391,7 @@ void DoorCore::prepare_candidates(const DoorCycleInput& in, const std::vector<rc
             cand.belief.prior = prior_of(th, polygon, fit_.room_is_proto(), fit_.room_band(),
                                          wall >= 0 ? doors_on_wall[wall] : 0, w_sd, h_sd, cand.size_resolved, size_prior,
                                          std::sqrt(cand.var));   // no fit yet: the detection's own place sd (isotropic, so along the normal too)
+            if (cand.size_resolved) cand.best_size = std::max(cand.best_size, cand.belief.prior.size);
             const auto it = self_det.find(c);
             const int self_sensor = it == self_det.end() ? -1 : (dets_[static_cast<std::size_t>(it->second)].sensor != 0 ? 1 : 0);
             const float self_w = it == self_det.end() ? 0.0f : det_w_[static_cast<std::size_t>(it->second)];
@@ -419,6 +420,70 @@ void DoorCore::prepare_candidates(const DoorCycleInput& in, const std::vector<rc
             dets_[d].birth_evidence = own and exists[static_cast<std::size_t>(c)] ? 1.0f : 0.0f;
             if (not own) dets_[d].birthable = false;
         }
+}
+
+namespace
+{
+float candidate_R(const DoorCore::Candidate& c) { return 0.5f * std::hypot(c.theta.aperture.w, c.theta.aperture.h); }
+}
+
+void DoorCore::retire_wall_seeds(const std::string& room)
+{
+    std::erase_if(candidates_, [&](const Candidate& c) { return c.room == room and c.wall_seed; });
+}
+
+bool DoorCore::hypothesise_place(const std::string& room, const Vec2f& xy, bool wall_seed)
+{
+    if (room != room_name_) return false;
+    const auto& cfg = cfg_.door;
+    const float var = cfg.tracker_detection_noise_m * cfg.tracker_detection_noise_m;
+    for (const auto& c : candidates_)
+        if (c.room == room and (c.xy - xy).squaredNorm() / std::max(1e-9f, c.var + var) <= cfg.tracker_gate_mahalanobis) return true;   // already a question
+    Candidate c;
+    c.key = ++next_candidate_key_;
+    c.room = room;
+    c.xy = xy;
+    c.var = var;
+    c.width_meas = cfg.door_prior_w_m;
+    c.wall_seed = wall_seed;
+    c.size_resolved = false;   // nothing measured with the door's own detector yet: the size term is 0
+    c.width_sd = cfg.tracker_detection_noise_m;
+    c.theta = typical_door_at(xy, cfg.door_prior_w_m, cfg.door_prior_h_m, fit_.room_polygon());
+    candidates_.push_back(std::move(c));
+    return true;
+}
+
+static float question_L(const DoorCore::Candidate& c)
+{
+    return c.belief.L() - c.belief.prior.size + std::max(c.best_size, c.belief.prior.size);
+}
+
+bool DoorCore::candidate_is_open(const Candidate& c) const
+{
+    // ★The question is judged on the widest the blob ever looked (clean25): the size term is this frame's, and one clipped mask of width 0 sank
+    //  L to -11.9, read as "refused", and ended the tour. A mask's width is a lower bound under occlusion, so a narrow frame says nothing against
+    //  a place that once looked door-sized; a place that only ever looks narrow keeps its low best term and is refused.
+    return not decide(question_L(c), Role::Ordinary, costs_.costs(cfg_.door.exist_max_room_s)).remove;
+}
+
+float DoorCore::candidate_question_p(const Candidate& c) const
+{
+    return 1.0f / (1.0f + std::exp(-question_L(c)));
+}
+
+bool DoorCore::candidate_view_is_new(const Candidate& c, const Vec2f& standpoint) const
+{
+    return c.belief.ledger.find_view(standpoint, c.theta.aperture.centre_xy(), c.theta.aperture.across_u(), candidate_R(c), 0.0f, visit_) == ViewLedger::npos;
+}
+
+bool DoorCore::candidate_site_untried(const Candidate& c, const ViewLedger& tried, const Vec2f& site) const
+{
+    return tried.find_view(site, c.theta.aperture.centre_xy(), c.theta.aperture.across_u(), candidate_R(c), 0.0f, visit_) == ViewLedger::npos;
+}
+
+void DoorCore::mark_candidate_site_tried(const Candidate& c, ViewLedger& tried, const Vec2f& site) const
+{
+    tried.observe(site, c.theta.aperture.centre_xy(), c.theta.aperture.across_u(), candidate_R(c), 0.0f, visit_);
 }
 
 void DoorCore::update_existence(const DoorCycleInput& in, DoorCycleOutput& out)
@@ -540,12 +605,12 @@ void DoorCore::update_existence(const DoorCycleInput& in, DoorCycleOutput& out)
         if (ex_dbg_ % 60 == 0 or removing or std::abs(b.L() - L_before[i]) > 1.0f)
             diag("stdout", std::format("door_concept: [existence] {} L={:+.2f} p={:.2f} role={} delete_line={} | prior band={:+.2f} "
                                        "base={:+.2f} size={:+.2f} carried={:+.2f} cross={:+.2f} Sc={:+.2f} Sp={:+.2f} term={:+.2f} | views={} | zed dl={} q={} hit={} "
-                                       "| ric dl={} q={} hit={} | geo dl={} | sup dl={} x={} | act dl={} | kappa={}\n",
+                                       "| ric dl={} q={} hit={} | geo dl={} | sup dl={} x={} c={} | act dl={} | kappa={}\n",
                                        inst.node_name, b.L(), b.p(), role_name(inst.role), fmt_or_dash(t.delete_line),
                                        b.prior.band, b.prior.base_rate, b.prior.size, b.carried, b.crossing, b.Sc(), b.Sp(), b.saturation_term(),
                                        b.ledger.views().size(), fmt_or_dash(t.zed_dl), fmt_or_dash(t.zed_q), fmt_or_dash(t.zed_hit),
                                        fmt_or_dash(t.ric_dl), fmt_or_dash(t.ric_q), fmt_or_dash(t.ric_hit), fmt_or_dash(t.geo_dl),
-                                       fmt_or_dash(t.sup_dl), fmt_or_dash(t.sup_x), fmt_or_dash(t.act_dl), fmt_or_dash(t.kappa)), out);
+                                       fmt_or_dash(t.sup_dl), fmt_or_dash(t.sup_x), fmt_or_dash(t.sup_c), fmt_or_dash(t.act_dl), fmt_or_dash(t.kappa)), out);
     }
     if (ex_dbg_ % 600 == 0)
     {

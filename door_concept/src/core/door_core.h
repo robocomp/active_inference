@@ -251,9 +251,27 @@ public:
         std::optional<std::int64_t> seeded_from_removed_ms;   // the removed row it was seeded from (C_delete sample at birth)
         float width_meas = 0.f, width_sd = 0.f;   // the blob's measured width (m) and its sd (the detection noise, widened by truncation)
         bool  size_resolved = false;             // false: the support gave no extent - no size estimate, so the size term is 0
+        float best_size = std::numeric_limits<float>::lowest();   // the best size term any frame gave: a clipped blob only understates the width (clean25)
+        bool wall_seed = false;                  // seeded along a wall of a room with no known door (no detection needed; spec 2026-11-09)
         std::string seeded_name;                 // the place row it was seeded from (the revisit sample is taken at birth, per visit)
     };
     [[nodiscard]] const std::vector<Candidate>& candidates() const { return candidates_; }
+    /// An undecided candidate is an open question while the costed decision has not refused it (spec 2026-11-09-undecided-candidate-look).
+    [[nodiscard]] bool candidate_is_open(const Candidate& c) const;
+    /// Would a frame from `standpoint` be a new view of the candidate, by the ledger's own absorption rule? (spread 0: the standpoint is a plan)
+    [[nodiscard]] bool candidate_view_is_new(const Candidate& c, const Vec2f& standpoint) const;
+    /// The same rule over the sites already tried: `tried` holds one view per site the controller finished or handed back.
+    [[nodiscard]] bool candidate_site_untried(const Candidate& c, const ViewLedger& tried, const Vec2f& site) const;
+    void mark_candidate_site_tried(const Candidate& c, ViewLedger& tried, const Vec2f& site) const;
+    /// A door hypothesised at `xy` by the room's outline (room_concept, doorway_necks.h): a pending candidate with no detection yet, no size evidence.
+    /// False while the core has not taken this room up yet (ask again). Not on the input tape: a replay does not see these.
+    bool hypothesise_place(const std::string& room, const Vec2f& xy, bool wall_seed = false);
+    /// A door is known in this room: the places seeded along its walls have no more to ask.
+    void retire_wall_seeds(const std::string& room);
+    /// P(a door) as the question is judged (the widest the blob ever looked): what a look at it is worth.
+    [[nodiscard]] float candidate_question_p(const Candidate& c) const;
+    [[nodiscard]] bool room_is_proto() const { return fit_.room_is_proto(); }
+    [[nodiscard]] const std::string& room_name() const { return room_name_; }
     [[nodiscard]] const EgoMotion& ego() const { return ego_; }
     [[nodiscard]] const MaskSource& masks() const { return masks_; }
     [[nodiscard]] const std::vector<rc::exclusion::Claim>& claims() const { return claims_; }

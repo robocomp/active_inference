@@ -313,6 +313,28 @@ private:
     std::vector<Eigen::Vector2f> look_dets_xy_;   ///< this mask frame's door detections (room frame), for "seen there"
     bool look_new_frame_ = false;                 ///< a NEW mask frame arrived this cycle (evidence per observation)
     void step_remembered_looks();
+    // ── AN UNDECIDED CANDIDATE IS UNFINISHED BUSINESS (spec 2026-11-09-undecided-candidate-look) ──────────────────
+    // Each open candidate of a promoted room gets a look (`aff_door_look_place_<key>`) at a standpoint that adds a view; the node
+    // `door_questions` states whether the current room still has an open question (the exploration drive holds Return and Done on it).
+    struct CandidateLook
+    {
+        rc::ObjectAffordance             aff;
+        rc::door::core::ViewLedger       tried;              // one view per site finished or handed back
+        std::optional<rc::AffordanceTarget> site;            // the standing offer; re-planned only when it no longer adds a view
+        bool                             exhausted = false;  // no standpoint adds a view (logged once)
+    };
+    std::map<std::uint64_t, CandidateLook> candidate_looks_;   // by Candidate::key
+    std::uint64_t candidate_looks_room_ = 0;
+    std::uint64_t door_questions_room_ = 0;
+    std::string   door_questions_state_;
+    void step_candidate_looks();
+    void step_wall_hypotheses();                            // a promoted room with no known door: its walls are the question (clean27)
+    std::uint64_t wall_seeded_room_ = 0;
+    std::uint64_t wall_look_key_ = 0;                       // the one wall place being looked at (one node at a time: rates)
+    void step_doorway_hypotheses();                         // room_concept's `room_doorways` become pending candidates
+    std::set<std::pair<int, int>> doorway_seeded_;          // the openings already taken up in this room (10 cm grid)
+    std::uint64_t doorway_seeded_room_ = 0;
+    void publish_door_questions(bool open);
     void drop_looks(const char* why);
     std::uint64_t pending_restore_room_ = 0;
     std::uint64_t recalled_room_id_ = 0;   ///< the room entered by an ltsm recall / accepted proposal (remembered looks only there)

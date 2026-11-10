@@ -21,6 +21,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <functional>
 #include <numbers>
 #include <optional>
 #include <span>
@@ -82,7 +83,8 @@ inline std::optional<Eigen::Vector2f> along_wall(const IdentityRow& r, std::span
 /// The look plan for one remembered door. `other_gaps` = the other doorways (their walls are open too);
 /// `extra` = furniture obstacles. Refuses (invalid) on an incomplete camera model or no feasible standpoint.
 inline Plan plan(const IdentityRow& r, float p_exists, std::span<const Eigen::Vector2f> poly, const rc::nbv::Sensor& sensor,
-                 std::span<const rc::nbv::Obstacle> extra, std::span<const rc::nbv::WallGap> other_gaps, const Params& prm)
+                 std::span<const rc::nbv::Obstacle> extra, std::span<const rc::nbv::WallGap> other_gaps, const Params& prm,
+                 const std::function<bool(const Eigen::Vector2f&)>* admissible = nullptr)   // nullptr: every standpoint may be used
 {
     Plan best;
     if (not sensor.complete() or poly.size() < 3 or not r.xy.allFinite())
@@ -125,6 +127,8 @@ inline Plan plan(const IdentityRow& r, float p_exists, std::span<const Eigen::Ve
         {
             const Eigen::Vector2f pos = r.xy + d * dir;
             if (not polygon_contains(pos, poly) or rc::nbv::detail::distance_to_boundary(pos, poly) < prm.robot_radius_m)
+                continue;
+            if (admissible != nullptr and not (*admissible)(pos))   // a standpoint that adds no trial buys nothing (spec 2026-11-09)
                 continue;
             const Eigen::Vector2f to = r.xy - pos;
             const float yaw = std::atan2(to.y(), to.x());

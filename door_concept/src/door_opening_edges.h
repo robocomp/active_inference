@@ -302,8 +302,24 @@ struct OpeningRun
 // it stopped short (something in front of the wall — a leaf on the robot's side, a person). The tolerance is
 // select_doorway_rays' own (3·0.05 + T/2). Runs of through-bins (unknown bins bridged) bounded by blocked bins on BOTH
 // sides are the openings; an empty or one-sided result is no measurement.
+/// ★THE OPENING, MEASURED (clean30, 2026-11-09: "there cannot be a lidar passing through and a closed leaf"). P(the body fits | the through-spans): the widest span,
+/// N(width, var_left + var_right), is at least `needed_m`. No span is no measurement: 0, and the leaf model stands alone. This reads the doorway directly, so it needs
+/// neither the hinge, nor the swing, nor the leaf angle; those can only ever be inferred from it.
+[[nodiscard]] inline float measured_passable(const std::vector<OpeningRun>& runs, float needed_m);
+/// P(passable) from the leaf model OR the measured span: either alone suffices. In log-odds, finite on a collapsed curve. p_measured = 0 returns the model unchanged.
+[[nodiscard]] inline double fuse_measured_opening(double model_logit, float p_measured)
+{
+    if (not (p_measured > 0.0f)) return model_logit;
+    const double log_not_model = -std::log1p(std::exp(model_logit));   // log(1 - sigmoid(model_logit))
+    const double log_not_seen = std::log1p(-std::min(static_cast<double>(p_measured), 1.0 - 1e-12));
+    const double log_not = log_not_model + log_not_seen;
+    return std::log(-std::expm1(log_not)) - log_not;
+}
+
+// through_beyond_m: how far past the line a return must lie to count as THROUGH (0: the tolerance above, for placing the aperture). To say the way is CLEAR it must be past
+// the leaf's reach (the aperture's width): a return short of that may be a leaf on the far side, which a beam stops on just after the line. Between the two a bin is unknown.
 [[nodiscard]] inline std::vector<OpeningRun> measure_openings(const Aperture& ap, const Eigen::Vector3f& origin,
-                                                              const std::vector<Eigen::Vector3f>& pts)
+                                                              const std::vector<Eigen::Vector3f>& pts, float through_beyond_m = 0.0f)
 {
     std::vector<OpeningRun> out;
     const Eigen::Vector2f u = ap.wall_u, n = ap.across_u(), O = ap.wall_O, o = origin.head<2>();
@@ -333,8 +349,8 @@ struct OpeningRun
         const float a = u.dot(X.head<2>() - O);
         const int b = static_cast<int>(std::floor((a - a_lo) / kEdgeBinM));
         if (b < 0 or b >= nb) continue;
-        if (beyond > tol) ++nT[static_cast<std::size_t>(b)];
-        else              ++nB[static_cast<std::size_t>(b)];
+        if (beyond > std::max(tol, through_beyond_m)) ++nT[static_cast<std::size_t>(b)];
+        else if (beyond <= tol)                       ++nB[static_cast<std::size_t>(b)];
     }
     const auto centre = [&](int b) { return a_lo + (static_cast<float>(b) + 0.5f) * kEdgeBinM; };
     // Along the wall a ray's crossing is exact in angle; what is unresolved is the gap between the last blocked and the
@@ -506,6 +522,40 @@ struct RegisteredSweep
     out.pts = pts;
     out.origin = apply_registration(out.reg, ap, origin, out.pts);
     return out;
+}
+
+
+inline float measured_passable(const std::vector<OpeningRun>& runs, float needed_m)
+{
+    float best = 0.0f;
+    for (const auto& r : runs)
+    {
+        const float width = r.a_right - r.a_left, var = std::max(1e-6f, r.var_left + r.var_right);
+        best = std::max(best, 0.5f * std::erfc(-(width - needed_m) / std::sqrt(2.0f * var)));
+    }
+    return best;
+}
+
+// ═══ HOW MUCH OF THE OPENING A MASK SAMPLES (the weight of the fit-support trial, channel `sup`) ═══════════════════════════════
+// The support statistic x (the share of the mask's points the fit cannot explain) speaks about the part of the door the mask
+// covers, not about the whole door. A 0.16 m sliver on the jamb of a 1.0 m door is a trial of 16 % of it: clean31 deleted the
+// real DOOR_2 (fit 0.23 m from it) on one such sliver, x = 1.00 scored as a full trial, −7.3 nats. The coverage is the share of
+// the aperture's along-wall cells (the registration's own resolution, kRegSigmaRM, so no new constant) holding at least one
+// support point: the LENGTH of opening observed, not the number of returns (the same rule as register_to_wall's support).
+// Points outside [0, w] along the wall are the wall's or the jamb's, so they sample none of the opening. In [0,1]; 0 with no points.
+[[nodiscard]] inline float aperture_coverage(const Aperture& ap, const std::vector<Eigen::Vector3f>& pts)
+{
+    if (not (ap.w > 0.0f) or pts.empty()) return 0.0f;
+    const int nc = std::max(1, static_cast<int>(std::ceil(ap.w / kRegSigmaRM)));
+    std::vector<std::uint8_t> occ(static_cast<std::size_t>(nc), 0);
+    const Eigen::Vector2f u = ap.wall_u, O = ap.wall_O;
+    for (const auto& p : pts)
+    {
+        const float a = u.dot(p.head<2>() - O) - ap.s;   // along the opening from its near edge
+        if (not std::isfinite(a) or a < 0.0f or a >= ap.w) continue;   // the domain [0, w): the opening itself
+        occ[static_cast<std::size_t>(std::min(nc - 1, static_cast<int>(a / ap.w * static_cast<float>(nc))))] = 1;
+    }
+    return static_cast<float>(std::ranges::count(occ, std::uint8_t{1})) / static_cast<float>(nc);
 }
 
 }  // namespace rc::door

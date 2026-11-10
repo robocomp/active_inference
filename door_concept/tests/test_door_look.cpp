@@ -10,6 +10,7 @@
 #include <numbers>
 #include <print>
 #include <vector>
+#include <functional>
 #include "../src/door_look.h"
 
 using namespace rc::door;
@@ -31,6 +32,17 @@ int main()
     d1.pose = RestorePose{static_cast<float>(std::numbers::pi / 2), 0.95f, 2.1f, 0.05f};        // full row
     IdentityRow other; other.room = "room_2"; other.name = "door_3"; other.xy = {1.f, 1.f};
     const std::vector<IdentityRow> rows{d2, d1, other};
+
+    // ── 0. A look must add a view: a refused standpoint is not chosen, and with every standpoint refused there is no look ──
+    {
+        const auto free_plan = look::plan(d2, 0.5f, room, zed, {}, {}, prm);
+        CHECK(free_plan.valid);
+        const std::function<bool(const Eigen::Vector2f&)> not_that = [&](const Eigen::Vector2f& q) { return (q - free_plan.pos).norm() > 1e-3f; };
+        const auto other = look::plan(d2, 0.5f, room, zed, {}, {}, prm, &not_that);
+        CHECK(other.valid and (other.pos - free_plan.pos).norm() > 1e-3f);
+        const std::function<bool(const Eigen::Vector2f&)> none = [](const Eigen::Vector2f&) { return false; };
+        CHECK(not look::plan(d2, 0.5f, room, zed, {}, {}, prm, &none).valid);
+    }
 
     // ── 1. The plan: a standpoint inside the room that SEES the remembered aperture, valued by EIG(existence) ──
     {

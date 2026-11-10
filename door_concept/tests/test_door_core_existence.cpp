@@ -27,6 +27,7 @@
 #include "../src/core/door_core.h"
 #include "../src/core/door_existence.h"
 #include "../src/core/existence_update.h"
+#include "../src/door_opening_edges.h"
 #include "../../common/contour_edge/contour_edge_check.h"
 
 using namespace rc::door::core;
@@ -533,6 +534,45 @@ int main()
         CHECK(std::abs(pb.ledger.sum()) < 0.02f);   // κ for a σ = 1 km pose is ~1e-4: ℓ ≈ 0, no view of weight
     }
 
+    {   // clean31 (real DOOR_2, fit 0.23 m from it): ONE new view whose only support row is a 0.16 m sliver on the jamb, x = 1.00.
+        // The trial is worth the share of the opening the mask sampled: the sliver moves the ledger by about 16 % of a full mask's ℓ.
+        const auto one_view = [&](float coverage)
+        {
+            Bench b;
+            const rc::DoorFitState th = shut_door();
+            PlaceBelief pb;
+            const Mat4d body = body_pose(A0, kDoor);
+            const std::optional<Mat4d> rtz = body * lift(1.2);
+            const CameraIntrinsics cam = zed_cam();
+            const ExistenceScene scene{b.cfg, rtz, cam, b.pkt, kRoom, rc::door::RoomBand{b.cfg.exist_wall_thickness_m, b.cfg.exist_boundary_sigma_m}, b.doors};
+            ExistenceFrame fr{scene, b.cfg, b.det};
+            const auto t = observe_place(pb, th, fr, 0, 0.0f, nullptr, -1, 0.0f, FitSupport{0.999999f, 0, coverage});
+            std::print("support_coverage: c={:.2f} sup_dl {:+.2f} sup_c {:.2f}\n", coverage, t.sup_dl, t.sup_c);
+            return t.sup_dl;
+        };
+        const float full = one_view(1.0f), sliver = one_view(0.16f), none = one_view(0.0f);
+        CHECK(full < -5.0f);                                          // a full mask the fit explains none of: a strong "absent"
+        CHECK(std::abs(sliver - 0.16f * full) < 0.02f * std::abs(full));   // a sliver is a sixth of that trial
+        CHECK(1.10f + sliver > -1.08f);   // clean31: door_1 stood at L = +1.10; the sliver leaves it above the delete line (it was -6.64)
+        CHECK(std::abs(none) < 1e-6f);                                // a mask entirely off the opening says nothing about it
+    }
+    {   // aperture_coverage: the length of the opening sampled, not the count of returns; wall/jamb points beyond [0, w] add nothing
+        rc::door::Aperture ap; ap.wall_O = {0.0f, 0.0f}; ap.wall_u = {1.0f, 0.0f}; ap.s = 2.0f; ap.w = 1.0f;
+        std::vector<Eigen::Vector3f> full, sliver, wall, dense;
+        for (int i = 0; i < 200; ++i) full.emplace_back(2.0f + 0.005f * i, 0.0f, 1.0f);
+        for (int i = 0; i < 40; ++i) sliver.emplace_back(2.84f + 0.004f * i, 0.0f, 1.0f);       // 0.16 m at the far jamb
+        for (int i = 0; i < 40; ++i) wall.emplace_back(3.05f + 0.01f * i, 0.0f, 1.0f);          // beside the opening
+        for (int i = 0; i < 4000; ++i) dense.emplace_back(2.84f + 0.00004f * i, 0.0f, 1.0f);    // the same 0.16 m, 100x the returns
+        const float cf = rc::door::aperture_coverage(ap, full), cs = rc::door::aperture_coverage(ap, sliver);
+        const float cw = rc::door::aperture_coverage(ap, wall), cd = rc::door::aperture_coverage(ap, dense);
+        std::print("aperture_coverage: full {:.2f} sliver {:.2f} wall {:.2f} dense {:.2f}\n", cf, cs, cw, cd);
+        CHECK(cf > 0.95f);
+        CHECK(std::abs(cs - 0.16f) < 0.035f);   // one cell (kRegSigmaRM) either way
+        CHECK(cw == 0.0f);
+        CHECK(std::abs(cd - cs) < 0.035f);
+        CHECK(rc::door::aperture_coverage(ap, {}) == 0.0f);
+    }
+
     // ── detector rates stay FIXED within a session (fix round 3, ruling): a phantom's many misses leave them at the CSV values ──
     {
         Rig r;
@@ -938,7 +978,7 @@ int main()
         r.core.set_costs(fixed);   // the delete line is +1.9: the newborn falls below it on its quiet frames
         const auto h0 = r.core.places().hazard_state();
         for (int k = 0; k < 24 and (r.births.size() < 2 or r.removes.empty()); ++k)
-            r.look(stand(4.0f, static_cast<float>(k % 5) * 15.0f - 30.0f), kDoor,
+            r.look(stand(3.0f + 0.25f * static_cast<float>(k / 5), static_cast<float>(k % 5) * 15.0f - 30.0f), kDoor,
                    k % 4 == 0 ? std::vector<DoorDet>{{1.0f, kWallY, 0.9f, 0.667f}} : std::vector<DoorDet>{});   // conf 0.667: reliability 0.9, the weak hit this flicker needs
         const auto h1 = r.core.places().hazard_state();
         std::print("removal_rebirth_same_visit: {} births, {} removes -> hazard changes {} -> {}, exposure {:.3f} -> {:.3f} s\n",
@@ -956,7 +996,7 @@ int main()
         r.core.set_costs(fixed);
         const Costs c0 = r.core.costs().costs(rc::DoorConfig{}.exist_max_room_s);   // the delete line is +1.9: a door that falls below it after its birth is deleted
         for (int k = 0; k < 60; ++k)   // a hit view (born), then a few quiet frames (L is below the high line: removed), again and again
-            r.look(stand(4.0f, static_cast<float>(k % 5) * 15.0f - 30.0f), kDoor,
+            r.look(stand(3.0f + 0.25f * static_cast<float>(k / 5), static_cast<float>(k % 5) * 15.0f - 30.0f), kDoor,
                    k % 4 == 0 ? std::vector<DoorDet>{{1.0f, kWallY, 0.9f, 0.667f}} : std::vector<DoorDet>{});   // conf 0.667: reliability 0.9, the weak hit this flicker needs
         const Costs c1 = r.core.costs().costs(rc::DoorConfig{}.exist_max_room_s);
         int rm = 0, rb = 0;
@@ -970,6 +1010,73 @@ int main()
         bool well_formed = true;
         for (const auto& l : r.cost_rows) well_formed = well_formed and std::ranges::count(l, ',') == 7 and l.ends_with("\n");
         CHECK(well_formed);
+    }
+
+    // ── clean25: one clipped mask does not answer the question. A blob's width is a lower bound, so the widest it ever looked decides ──
+    {
+        Rig r;
+        CostEstimator costs;
+        costs.add(CostEstimator::Kind::Keep, 20.0f, "csv"); costs.add(CostEstimator::Kind::DeleteOrdinary, 30.0f, "csv");
+        r.core.set_costs(costs);
+        for (int k = 0; k < 8; ++k) r.look(stand(3.0f, 0.0f), kDoor, {{1.0f, kWallY, 1.0f, 0.46f}});
+        r.look(stand(3.0f, 0.0f), kDoor, {{1.0f, kWallY, 0.08f, 0.46f}});   // the frame's size term sinks L far below the line
+        CHECK(r.core.candidates().size() == 1);
+        if (r.core.candidates().size() == 1)
+        {
+            const auto& c = r.core.candidates().front();
+            std::print("clipped frame: L={:+.2f}, size {:+.2f}, best {:+.2f}\n", c.belief.L(), c.belief.prior.size, c.best_size);
+            CHECK(c.belief.L() < -2.0f);
+            CHECK(r.core.candidate_is_open(c));
+            CHECK(r.core.candidate_question_p(c) > 0.3f);     // what a look is worth is judged the same way as the question
+        }
+        Rig narrow;
+        narrow.core.set_costs(costs);
+        for (int k = 0; k < 8; ++k) narrow.look(stand(3.0f, 0.0f), kDoor, {{1.0f, kWallY, 0.12f, 0.46f}});   // never wider: it is not a door-sized thing
+        CHECK(narrow.core.candidates().size() == 1);
+        if (narrow.core.candidates().size() == 1) CHECK(not narrow.core.candidate_is_open(narrow.core.candidates().front()));
+    }
+
+    // ── a promoted room with no door: places along its walls are open questions, retired once a door is known (clean27, 2026-11-09) ──
+    {
+        Rig r;
+        r.look(stand(3.0f, 0.0f), kDoor);
+        const std::string room = r.core.room_name();
+        CHECK(r.core.hypothesise_place(room, Vec2f(-2.0f, 5.0f), true));
+        CHECK(r.core.hypothesise_place(room, Vec2f(-2.05f, 5.0f), true));     // the same place: one question
+        CHECK(r.core.hypothesise_place(room, Vec2f(4.0f, 5.0f)));             // not a wall seed
+        CHECK(not r.core.hypothesise_place("another_room", Vec2f(0.0f, 5.0f)));
+        CHECK(r.core.candidates().size() == 2);
+        if (r.core.candidates().size() == 2) CHECK(r.core.candidate_is_open(r.core.candidates().front()));
+        r.core.retire_wall_seeds(room);
+        CHECK(r.core.candidates().size() == 1 and not r.core.candidates().front().wall_seed);
+    }
+
+    // ── an undecided candidate is an open question, and only a new standpoint can answer it (clean23, 2026-11-09) ──
+    {
+        Rig r;
+        CostEstimator costs;
+        costs.add(CostEstimator::Kind::Keep, 20.0f, "csv"); costs.add(CostEstimator::Kind::DeleteOrdinary, 30.0f, "csv");   // delete line -ln(1.5) = -0.41: between the open L and the refused L of this case
+        r.core.set_costs(costs);
+        for (int k = 0; k < 8; ++k) r.look(stand(3.0f, 0.0f), kDoor, {{1.0f, kWallY, 1.0f, 0.46f}});   // one view of a borderline mask: not born, not refused
+        CHECK(r.births.empty());
+        CHECK(r.core.candidates().size() == 1);
+        if (r.core.candidates().size() == 1)
+        {
+            const auto& c = r.core.candidates().front();
+            std::print("open question: L={:+.2f}, views {}\n", c.belief.L(), c.belief.ledger.views().size());
+            CHECK(r.core.candidate_is_open(c));
+            CHECK(not r.core.candidate_view_is_new(c, stand(3.0f, 0.0f)));    // the view it already has
+            CHECK(r.core.candidate_view_is_new(c, stand(3.0f, 60.0f)));       // another bearing is another trial
+        }
+        // an empty view of the place, and more of them: the costed line refuses it, the question is closed
+        for (int v = 0; v < 6; ++v)
+            for (int k = 0; k < 6; ++k) r.look(stand(2.5f + 0.3f * static_cast<float>(v), -60.0f + 24.0f * static_cast<float>(v)), kDoor);
+        CHECK(r.births.empty());
+        if (r.core.candidates().size() == 1)
+        {
+            std::print("refused: L={:+.2f}\n", r.core.candidates().front().belief.L());
+            CHECK(not r.core.candidate_is_open(r.core.candidates().front()));
+        }
     }
 
     std::print("{}\n", fails == 0 ? "ALL PASS" : std::format("{} FAILURE(S)", fails));

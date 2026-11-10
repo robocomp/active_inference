@@ -200,6 +200,10 @@ static void step_new(Tracker& t, rc::DoorBelief& b, const V3& o, const std::vect
     }
     b.set_leaf_phi(t.phi_est);
     t.p = rc::door::passable_prob(post.curve, b.aperture().w, NEEDED).value_or(-1.0f);
+    {   // the opening measured by the beams, as DoorFitter and SpecificWorker combine it (door_opening_edges.h)
+        const auto seen = rc::door::measured_passable(rc::door::measure_openings(b.aperture(), rs.origin, rs.pts, b.aperture().w), NEEDED);
+        if (t.p >= 0.0f) t.p = 1.0f - (1.0f - t.p) * (1.0f - seen);
+    }
 }
 
 // The OLD channel, reproduced verbatim for the before/after comparison: ±6 cm slide, summed likelihood,
@@ -525,6 +529,33 @@ int main()
             check(p_tail > 0.8f, std::format("the open door reads passable at the standpoint (min P {:.3f} > 0.8): cross offered, open not", p_tail));
             check(std::abs(t.phi_est - 1.5708f) < 0.1745f, std::format("phi {:.0f} deg within 90 +- 10", t.phi_est * 57.3f));
         }
+    }
+
+    // ── (i) clean30: at the mouth, beams through the opening cannot coexist with a closed leaf ─────────────────────────
+    // The robot stands 0.4 m before the plane of a door open 90 deg on ITS side, the belief carried at 5 deg. Beams fly a metre and more past where that leaf would be.
+    std::print("\n(i) clean30_beams_through_the_opening: leaf 90 deg on the robot's side, seen from 0.4 m, belief carried at 5 deg\n");
+    {
+        Scene sc; sc.phi = 1.5708f; sc.swing = +1.0f;
+        auto b = make_belief(0.0f, +1.0f);
+        Tracker t; t.phi_est = 0.087f; t.phi_sigma = 0.02f; t.first = false; t.marg_swing = true;
+        b.set_leaf_phi(t.phi_est);
+        std::vector<float> p;
+        for (int f = 0; f < 30; ++f)
+        {
+            const V3 o(0.50f + 0.02f * std::sin(0.3f * f), 0.42f, 0.67f);
+            step_new(t, b, o, scan(sc, o, rng, 0.5f));
+            p.push_back(t.p);
+        }
+        std::print("  final P(passable) {:.3f}, phi {:.0f} deg, first frames {:.2f} {:.2f} {:.2f}\n", t.p, t.phi_est * 57.3f, p[0], p[1], p[2]);
+        check(p.back() > 0.8f, std::format("the beams through the opening refute the closed leaf: P(passable) {:.3f} > 0.8", p.back()));
+    }
+    {   // the same stance at a SHUT door: no beam passes, so nothing refutes the closed leaf
+        Scene sc; sc.phi = 0.0f; sc.swing = +1.0f;
+        auto b = make_belief(0.0f, +1.0f);
+        Tracker t; t.marg_swing = true;
+        for (int f = 0; f < 30; ++f) { const V3 o(0.50f, 0.42f, 0.67f); step_new(t, b, o, scan(sc, o, rng, 0.5f)); }
+        std::print("  shut door at the same stance: P(passable) {:.3f}\n", t.p);
+        check(t.p < 0.2f, std::format("a shut door stays shut at the mouth: P(passable) {:.3f} < 0.2", t.p));
     }
 
     std::print("\n{}\n", g_fail == 0 ? "ALL PASS" : std::format("{} FAILED", g_fail));
