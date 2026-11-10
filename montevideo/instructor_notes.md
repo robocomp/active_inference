@@ -77,7 +77,7 @@ different term from the mean.
 | 2:00–2:15 | break | |
 | 2:15–4:00 | Lab 2 | 32–33 |
 
-**CORTEX in action (the unnumbered full-screen slide after frame 2).** In pympress, click on it once to start; it loops (44.5 s), and the presenter window has the controls. pympress cannot autostart beamer's `\movie`. In another viewer the slide shows a still. It is a schematic: the order is illustrative, and the slide says so; on the robot everything runs at once. Point at the last line: every path went through the centre. The course copy of the drawing (`figures/cortex_overview.png`) has the thesis figure's `Root` node painted out, to match frame 7. **Both the figure and the movie still show semantic and procedural memory as if they ran**, and the movie's step 5 says semantic memory checks a new object. Frame 2 says the two are not built; say it aloud over the movie.
+**CORTEX in action (the unnumbered full-screen slide after frame 2).** In pympress, click on it once to start; it loops (40.5 s), and the presenter window has the controls. pympress cannot autostart beamer's `\movie`. In another viewer the slide shows a still. It is a schematic: the order is illustrative, and the slide says so; on the robot everything runs at once. Point at the last line: every path went through the centre. The course copy of the drawing (`figures/cortex_overview.png`) has the thesis figure's `Root` node painted out, to match frame 7. The movie's route never goes through semantic or procedural memory (re-rendered 2026-11-09), but the drawing behind it still shows both circles, as the figure on frame 2 does. Frame 2 says they are not built.
 
 **Eventual consistency (frames 11–12).** Walk frame 11 one agent at a time, from the left. The surprise to land: agent 2's write is simply lost, and nothing reports it; hence one owner per node. Students will ask why an arbitrary id may decide: frame 12 answers it. The id is arbitrary and so is the winner; what matters is that every copy applies the same ranking, so they agree. Swap the ids and they all agree on the other value. Agreement is what the CRDT promises; which value is right is what ownership is for. The rule shown is cortex's default CRDT mode (`core/crdt/delta_crdt.h`, `join_replace_conflict`): a change that has seen another replaces it, and otherwise the lower writer id wins. It is idealised: a comment in that file records that the causal test (`dotin`) carries a known workaround. The optional LWW mode, same-host only, orders by (timestamp, agent id), which is what the thesis sentence at `cortex.tex` l.257 describes.
 
@@ -119,28 +119,31 @@ recorded debt. Say explicitly that the thesis has not finished this.
   precision 4.22 cm; the near pass's gate on the far pass: 300 cm;
 - biased frames: at n = 2000 the displacement is 3.00 / 3.00 / 2.99 / 0 cm for α = 1 / 0.3 / 0.05 / 0.
 
-## Day 3 — Belief in time (`slides/day3.pdf`, `labs/day3.ipynb`)
+## Day 3 — Concepts: geometry, life cycle, aspect (`slides/day3.pdf`, `labs/day3.ipynb`)
 
-Frame numbers are the slide footers (n/27).
+Frame numbers are the slide footers (n/33).
 
 | time | block | frames |
 |---|---|---|
-| 0:00–0:05 | Yesterday: who holds a belief; the life of an instance | 1–2 |
-| 0:05–0:25 | How a belief begins: ΔF, the toy streak, what the robot computes instead | 3–5 |
-| 0:25–0:45 | The room is the first belief born: description length, two regimes, free space, free space | 6–8 |
-| 0:45–1:05 | How a belief ends: three verdicts, walls in the visibility factor, the weight after the ceiling, four rules | 9–12 |
-| 1:05–1:25 | How a belief fades: constant Q, the floor, inferred volatility, the toy | 13–16 |
-| 1:25–1:40 | Localisation: the room supplies the likelihood, the floor, NEES, symmetry | 17–20 |
-| 1:40–1:50 | Whose evidence: association, the qualified likelihood | 21–22 |
-| 1:50–2:00 | Shared error: ceiling (on the board), the toy, the latch | 23–25 |
+| 0:00–0:05 | Yesterday: a concept has dimensions, today three of them | 1 |
+| 0:05–0:25 | What a concept agent is: two things it writes, what it publishes, the residual, the contract, owners alive | 2–6 |
+| 0:25–0:40 | Geometry: the room is the first belief born, two regimes, free space | 7–9 |
+| 0:40–0:50 | Geometry: localising, NEES against the room, symmetry | 10–12 |
+| 0:50–1:00 | Geometry: association, shared error (on the board), the toy | 13–15 |
+| 1:00–1:15 | Life cycle: the life of an instance, ΔF, the toy streak, what the robot computes | 16–19 |
+| 1:15–1:30 | Life cycle: three verdicts, walls in the visibility factor, the weight after the ceiling, four rules | 20–23 |
+| 1:30–1:40 | Life cycle: constant Q, inferred volatility, the toy | 24–26 |
+| 1:40–2:00 | Aspect: class and instance, imagining, views per direction, second sight, toy and robot | 27–31 |
 | — | break (10 min) | |
-| 2:10–4:00 | Lab 3 | 26–27 |
+| 2:10–4:00 | Lab 3 | 32–33 |
+
+The deck was reordered on 2026-11-09 to the course's dimensions. Moved out of the main line, kept as backup frames: the mask's label, the association latch case study, and the two plain frames on the floor (precision floor and residual floor).
 
 **The main line is plain on purpose (2026-11-08).** As on Day 2, each formal frame (ΔF, the room's F(m), the derived band, promotion, the floor, ζ, the likelihood, the residual-floor arithmetic, association, Woodbury) is kept whole as a backup frame after "Tomorrow", outside the frame count.
 
-**The order follows the form.** The birth of objects and the birth of the room are the same equation
-(F = inaccuracy + complexity, with complexity κ|V| for the room). Say so at frame 6: students should
-feel the room section as a second instance of frame 3, not a new subject.
+**The room comes before births.** The birth of objects and the birth of the room are the same equation
+(F = inaccuracy + complexity, with complexity κ|V| for the room). Frame 7 announces the trade and frame 17
+pays it off: students should feel a birth as the room's corner over again, not a new subject.
 
 **The room section was rewritten on 2026-11-08 against the current chapter.** The layout chapter was
 rewritten on 2026-10-11 around plain scan-to-map SLAM → Manhattan outline → promotion by description
@@ -150,7 +153,7 @@ is deliberately simpler than the robot. Say that the robot does not do this any 
 
 **Withdrawn on purpose.** The old case study comparing pose error against the provisional layout
 (0.22 / 3.13 / 1.55 m) is gone. The thesis keeps those numbers out because the build carried an open
-association defect (comment at the head of `layout_acquisition.tex`). Frame 7 makes the argument from
+association defect (comment at the head of `layout_acquisition.tex`). Frame 8 makes the argument from
 structure instead.
 
 **The volatility update differs from the thesis on purpose.** `agents_life_cycle.tex` l.1093–1097 writes
@@ -160,23 +163,32 @@ saturated as a Student-t so that one spurious frame moves ζ by a bounded amount
 expectation under a calibrated model (0.786 for ν₀ = 4). With the unbounded surprise, one 40 cm
 spurious mask raises ζ by about 18 in a single step, so the gain goes to nearly 1 on the next frame and
 the accumulated belief is lost. The thesis marks this
-construction as design only, and frame 15 says so.
+construction as design only, and frame 25 says so.
 
-**Frame 10 is the one to tell as a story**: the same bug in three agents, each copy consistent with
-itself. **Do the floor on the board** (frame 14; the algebra is on a backup frame): the fixed-point equation takes two lines, and "elapsed
+**Frame 21 is the one to tell as a story**: the same bug in three agents, each copy consistent with
+itself. **If you have time, do the floor on the board** (between frames 24 and 25; picture and algebra are on backup frames): the fixed-point equation takes two lines, and "elapsed
 time does not appear" lands harder when they have just seen it vanish.
 
-**The association case study is post-thesis** (memory note `association-dies-by-common-mode-latch`,
+**The association case study (now a backup frame) is post-thesis** (memory note `association-dies-by-common-mode-latch`,
 2026-09-18), on the earlier wall-landmark estimator. Keep it as a story about shared error, not as a
 claim about the current pipeline.
+
+**Aspect (frames 27–31) is the part most likely to change before December.** The thesis barely covers it; the sources are the code and the runs. Re-check the status on frames 29 and 31 the week before: what is merged, what runs, which classes.
+
+**Say the limits of frame 31 plainly.** The robot's acting recall is position only: the appearance term is zero in `common/recall_match/recall_match.h`, so the "+ look" columns are the toy, not the robot. π = 0.5 is a guess. Chairs only, in simulation (`ltom_chair2`, `rose_chair3`), and there is no recording of a chair coming back. The offline replay (15 of 53) was reported by the session building LTOM; it is not a thesis number.
+
+**Frame 28 is honest about what imagining is.** `imagine_view` samples the hand-written card: shape and size, no colour, nothing learned. Your phrase for the class-level look ("what the language agent draws when asked how do you imagine a chair") is what students will remember; do not let it suggest the robot has learned what chairs look like.
+
+**The toy's lesson that travels (frame 31, exercise 19):** at twice the assumed scatter, the look discards 58% of the chairs that never moved. It is the Day 2 lesson again: evidence with the wrong variance does harm. It is also the reason views are kept per direction.
 
 **Numbers in the backup frame on promotion are simulation only.** The pipeline has not run on the physical robot. Re-check
 l.1173–1177 and l.1455–1462 before the session; the thesis is still moving.
 
-**Lab order.** Parts A–C (life of a belief) come first so they cannot be squeezed out; D–G are the
-former Day 2 lab, renumbered (exercises 1–9 became 7–15). If time is short: A, B, C, E, G.
+**Lab order.** The lab keeps its own order, which is not the deck's. Part I (aspect, exercises 16–19, about 25 min) is new and independent of the rest; expected output is in the solution notebook. Parts A–C (life of a belief) come first so they cannot be squeezed out; D–G are the
+former Day 2 lab, renumbered (exercises 1–9 became 7–15). If time is short: A, B, E, G, I.
 
 **Expected lab numbers** (seed 0):
+- second sight (Part I), % correct, nearest / position / position + look: different looks: stayed 98.4 / 98.4 / 100.0, moved 32.8 / 6.4 / 100.0, new 0.0 / 80.8 / 99.7; one model of chair: stayed 98.6 / 98.6 / 98.6, moved 32.6 / 5.9 / 32.6, new 0.0 / 80.2 / 0.1. View noise ×1, 1.5, 2, 3 (stayed): 100.0, 91.0, 41.9, 1.9;
 - birth: ΔF after 1..10 detections: sharp 2.9 → −57.5; distant 3.0 → −14.6; reflections 3.0 → +57.8.
   Over 300 runs: 2 sharp views: streak 0%, ΔF<0 98%; 10 reflections: streak 94%, ΔF<0 0%;
 - absence: a 2%-resolvable view drops L by 0.0079 (saturate, then weight) or 0.4000 (weight the count);

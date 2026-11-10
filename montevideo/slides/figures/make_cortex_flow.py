@@ -37,11 +37,10 @@ BOX = dict(
     video=(362, 1215, 478, 1297), fusion=(615, 1218, 731, 1297), imu2=(782, 1218, 898, 1297),
     perceptive=(487, 902, 663, 1032), self=(700, 902, 886, 1032), body=(968, 902, 1136, 1032),
     table=(948, 43, 1140, 150), room=(730, 63, 885, 143), cup=(1170, 265, 1362, 372),
-    ep_agent=(494, 64, 649, 128), mission=(415, 526, 570, 605), sem_agent=(465, 722, 640, 852),
+    ep_agent=(494, 64, 649, 128),
     ltsm_agent=(1166, 801, 1299, 931), base=(1171, 1220, 1345, 1307), motors=(1197, 1383, 1320, 1448),
 )
-CIRCLE = dict(wm=(843, 540, 218), episodic=(525, 328, 138), procedural=(205, 300, 190),
-              semantic=(220, 722, 197), ltsm=(1222, 570, 152))
+CIRCLE = dict(wm=(843, 540, 218), episodic=(525, 328, 138), ltsm=(1222, 570, 152))
 NODE = dict(robot=(810, 638), lidar=(810, 465), camera=(742, 492), table=(947, 550), afford=(947, 457),
             cup=(1000, 640))
 
@@ -59,10 +58,6 @@ R = dict(
     room_wm=[(812, 145), (828, 325), CENTRE],
     cup_wm=[(1170, 345), (1025, 425), NODE["cup"]],
     wm_cup=[CENTRE, (1025, 425), (1170, 345)],
-    wm_sem=[CENTRE, (680, 680), (632, 720)],
-    sem_mem=[(465, 770), (415, 765)],
-    proc_mis=[(330, 440), (420, 528)],
-    mis_wm=[(570, 562), (628, 558), CENTRE],
     table_aff=[(1010, 150), (925, 340), NODE["afford"]],
     wm_body=[NODE["afford"], (935, 735), (1025, 900)],
     body_base=[(1092, 1032), (1092, 1125), (1258, 1125), (1258, 1220)],
@@ -85,10 +80,8 @@ STEPS = [
      ["table", "room"], [("wm_table", BELIEF, 0.0, 0.8), ("wm_room", BELIEF, 0.15, 0.9)], []),
     ("They revise their beliefs", "The table's numbers change. The structure does not.",
      ["table", "room"], [("table_wm", BELIEF, 0.0, 0.75), ("room_wm", BELIEF, 0.15, 0.85)], [("table", 0.72)]),
-    ("Something new is born", "A cup node appears: a structural change. Semantic memory checks it makes sense.",
-     ["cup", "sem_agent", "semantic"], [("cup_wm", BELIEF, 0.0, 0.42), ("wm_sem", BELIEF, 0.48, 0.8), ("sem_mem", BELIEF, 0.8, 0.98)], [("cup", 0.42)]),
-    ("A mission is supplied", "Procedural memory holds what the robot can do, as chains of actions.",
-     ["procedural", "mission"], [("proc_mis", ACT, 0.0, 0.4), ("mis_wm", ACT, 0.4, 0.9)], []),
+    ("Something new is born", "A cup node appears: a structural change. Every agent can now see it.",
+     ["cup"], [("cup_wm", BELIEF, 0.0, 0.6)], [("cup", 0.6)]),
     ("An object makes an offer", "The table publishes what looking at it is worth, in nats.",
      ["table"], [("table_aff", ACT, 0.0, 0.8)], [("afford", 0.78)]),
     ("The controller decides", "It compares the offers by expected free energy, and moves.",
@@ -228,7 +221,7 @@ def render(t):
         return x + x0, y
 
     # the cup node exists from its birth onwards
-    t_birth = STEP_S * (4 + 0.42)
+    t_birth = STEP_S * (4 + 0.6)
     if t >= t_birth:
         d = ImageDraw.Draw(frame)
         a, b = px(*P(*NODE["table"])), px(*P(*NODE["cup"]))
@@ -270,12 +263,12 @@ def render(t):
 
 if "--stills" in sys.argv:
     out = Path(sys.argv[sys.argv.index("--stills") + 1])
-    for i, t in enumerate((1.5, 5.0, 9.5, 18.6, 21.5, 26.5, 30.0, 34.0, 38.5, 42.5)):
+    for i, t in enumerate((1.5, 5.0, 9.5, 14.0, 18.6, 22.5, 26.0, 30.0, 34.0, 38.5)):
         render(t).save(out / f"still_{i:02d}.png")
     sys.exit(0)
 
 (HERE.parent / "media").mkdir(exist_ok=True)
-render(STEP_S * 4 + 0.6 * STEP_S).save(HERE / "cortex_flow_poster.png")
+render(STEP_S * 4 + 0.8 * STEP_S).save(HERE / "cortex_flow_poster.png")
 ff = subprocess.Popen(["ffmpeg", "-y", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{W}x{H}", "-r", str(FPS),
                        "-i", "-", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "24", "-preset", "medium",
                        "-movflags", "+faststart", str(HERE.parent / "media" / "cortex_flow.mp4")], stdin=subprocess.PIPE)

@@ -75,24 +75,24 @@ between two models of it by free energy.
 published covariance is ignored; when the sum of the agents' objectives is the global one and what the
 difference costs; a range gate against a precision; a bias that no precision can bound.
 
-### Day 3 — Belief in time
-Where beliefs come from and how they end:
-- birth as a comparison between two models rather than a count of detections, for objects and, as
-  description length, for the room itself;
-- absence as evidence, weighted by the probability of having detected the object, with walls in the
-  line of sight; occlusion holds, and only a miss where the object would have been seen removes it;
-- forgetting as inferred volatility rather than a constant process noise.
-
-Then what a belief stands on:
-- localisation as one more belief, with the room's geometry supplying the likelihood, and symmetry as a
-  discrete search;
-- data association, and a mask as a qualified likelihood;
-- what changes when errors are shared rather than independent: the common-mode ceiling.
+### Day 3 — Concepts: geometry, life cycle, aspect
+What a concept agent is: a residual and a Jacobian on a shared engine, what it publishes, a common contract.
+Then three of a concept's dimensions:
+- Geometry: the room as the first belief born, with description length as its price; localisation as one
+  more belief, with symmetry as a discrete search; data association; and what changes when errors are
+  shared rather than independent, the common-mode ceiling.
+- Life cycle: birth as a comparison between two models rather than a count of detections; absence as
+  evidence, weighted by the probability of having detected the object, with walls in the line of sight;
+  forgetting as inferred volatility rather than a constant process noise.
+- Aspect: what a chair looks like at two levels, the class that can be imagined and the instance that
+  can be recognised; a second sight as a comparison in which "new" is one of the candidates.
+  Work in progress, marked as such.
 
 *Lab:* an object is born by a free-energy comparison, removed by evidence of absence and held when it
 is occluded; a constant process noise is replaced by an inferred one. Then estimate the toy room's
 walls and localise in it, meet the room's symmetry, and watch a thousand points with a shared offset
-refuse to shrink the uncertainty.
+refuse to shrink the uncertainty. Finally, decide whether a chair is one you remember or a new one,
+by position and by look, and see what a wrong variance does.
 
 ### Day 4 — Action
 Why action needs a second functional: expected free energy, its pragmatic and epistemic terms, and the identity

@@ -1,15 +1,15 @@
 # %% [markdown]
-# # Day 3 — Belief in time
+# # Day 3 — Concepts: geometry, life cycle, aspect
 #
 # Yesterday's agents each own a belief on the shared graph. Today we follow one belief through its
-# life, and then look at what it stands on.
+# life, look at what it stands on, and ask how the robot knows a thing it has seen before.
 #
-# **How a belief begins and ends.**
+# **Life cycle: how a belief begins and ends.**
 # - **A. Birth.** An object is born by comparing two worlds in nats, not by counting detections.
 # - **B. Absence.** A miss removes an object only where the object would have been seen.
 # - **C. Forgetting.** Replace a constant process noise by an inferred volatility.
 #
-# **What a belief stands on.**
+# **Geometry: what a belief stands on.**
 # - **D. The room.** Find the room's walls in a scan, with no labels and no map.
 # - **E. The pose.** Drive, and keep a calibrated belief about where you are.
 # - **F. Symmetry.** Find the place where gradient descent cannot help.
@@ -18,7 +18,11 @@
 # The thesis calls D the **acquisition** regime, where the room is a variable, and E the
 # **operating** regime, where the room is a constant. Part H says why the split matters.
 #
-# About two hours. Parts A to C are independent of D to G; if time runs short, do A, B, C, E and G.
+# **Aspect: a second sight.**
+# - **I.** Is this the chair I saw, or a new one? Position against appearance.
+#
+# About two hours. Parts A to C, D to G and I are independent of each other; if time runs short, do
+# A, B, E, G and I.
 
 # %%
 import sys
@@ -871,3 +875,129 @@ for N, a, n_, w_ in zip(Ns, rms, naive, wood):
 # outline depends on the pose, and never feeds back into it.
 # Exercise 13 is the small version of that lesson: **a factor inherits the errors of whatever it is
 # estimated through.**
+
+# %% [markdown]
+# ## I. Aspect: is this the chair I saw?
+#
+# The robot left a room with three chairs in it, and has come back. A chair is detected. Long-term
+# memory holds what it knew about the three, and the question is the same kind of question as a
+# birth: which of several worlds explains this detection in fewer nats? The worlds are *it is
+# chair 0*, *chair 1*, *chair 2*, or **it is a chair I have never met**. "New" has to be on the
+# list, or every detection is forced onto some remembered chair.
+#
+# **Where it is.** A remembered chair either stayed where it was, or was moved and could be anywhere
+# in the room, with probability $\pi$. A new chair could be anywhere:
+#
+# $$ p(x\mid k) = (1-\pi)\,\mathcal N(x;\mu_k, 2\sigma_p^2 I) + \frac{\pi}{A},
+#    \qquad p(x\mid\text{new}) = \frac1A. $$
+#
+# The covariance is $2\sigma_p^2$ because both the memory and the new detection carry the position
+# error $\sigma_p$. This is the form the robot uses, in `common/recall_match/recall_match.h`.
+#
+# **What it looks like.** A view is summarised as a vector $a$ of 16 numbers. Chairs differ: each
+# has its own look $m$, drawn from the class, $m\sim\mathcal N(c,\tau^2 I)$. A view of a chair
+# scatters around its look, $a\sim\mathcal N(m,\sigma_a^2 I)$. So the instance and the class make
+# different predictions, and their ratio is the evidence:
+#
+# $$ r_k = \ln\mathcal N(a; m_k,\sigma_a^2 I) - \ln\mathcal N(a; c,(\tau^2+\sigma_a^2) I). $$
+#
+# The score of chair $k$ is $\ln p(x\mid k) + r_k$, the score of "new" is $\ln(1/A)$, and the highest
+# wins. A candidate must be strictly better than "new"; a tie goes to "new". This toy is cleaner than
+# the robot: its look vectors are made up, and the robot's acting recall today uses **position only**.
+#
+# **Exercise 16.** Write `log_location` and `decide`. **Exercise 17.** Write `log_app_ratio`.
+
+# %%
+ROOM_W, ROOM_H, ROOM_A = 6.0, 4.0, 24.0
+DIM, TAU, SIG_A, SIG_P, PI_MOVE = 16, 1.0, 0.5, 0.15, 0.5
+CLASS_LOOK = np.zeros(DIM)
+LOW, HIGH = np.array([0.5, 0.5]), np.array([ROOM_W - 0.5, ROOM_H - 0.5])
+
+
+def log_gauss_iso(x, mu, var):
+    return -0.5 * (np.sum((x - mu) ** 2) / var + len(x) * np.log(2 * np.pi * var))
+
+
+def log_location(x, mu):
+    """ln p(x | k): stayed near mu, or moved and uniform over the room."""
+    # BEGIN SOLUTION
+    stayed = np.log(1 - PI_MOVE) + log_gauss_iso(x, mu, 2 * SIG_P ** 2)
+    moved = np.log(PI_MOVE) - np.log(ROOM_A)
+    return np.logaddexp(stayed, moved)
+    # END SOLUTION
+
+
+def log_app_ratio(a, m):
+    """r_k: nats by which this chair's look explains the view better than the class does."""
+    # BEGIN SOLUTION
+    return log_gauss_iso(a, m, SIG_A ** 2) - log_gauss_iso(a, CLASS_LOOK, TAU ** 2 + SIG_A ** 2)
+    # END SOLUTION
+
+
+def decide(x, a, mus, looks, use_look=True, allow_new=True):
+    """Index of the winning chair, or len(mus) for 'new'."""
+    # BEGIN SOLUTION
+    score = np.array([log_location(x, mu) + (log_app_ratio(a, m) if use_look else 0.0) for mu, m in zip(mus, looks)])
+    best = int(np.argmax(score))
+    if not allow_new or score[best] > -np.log(ROOM_A):
+        return best
+    return len(mus)
+    # END SOLUTION
+
+
+# %% [markdown]
+# **Exercise 18.** Run the table below and predict each number before you read it. There are three
+# situations (the chair stayed, the chair was moved, the chair is new), two kinds of room (every
+# chair looks different, or all three are the same model) and three rules (always take the nearest
+# candidate; position only; position and look).
+
+# %%
+def trial(r_, case, twins, use_look, allow_new, inflate=1.0):
+    mus = r_.uniform(LOW, HIGH, (3, 2))
+    looks = (np.tile(CLASS_LOOK + TAU * r_.standard_normal(DIM), (3, 1)) if twins
+             else CLASS_LOOK + TAU * r_.standard_normal((3, DIM)))
+    k = int(r_.integers(3))
+    if case == "new":
+        where, look, truth = r_.uniform(LOW, HIGH), (looks[0] if twins else CLASS_LOOK + TAU * r_.standard_normal(DIM)), 3
+    else:
+        where, look, truth = (mus[k] if case == "stayed" else r_.uniform(LOW, HIGH)), looks[k], k
+    x = where + SIG_P * r_.standard_normal(2)
+    a = look + inflate * SIG_A * r_.standard_normal(DIM)         # inflate: this view is noisier than the model assumes
+    return decide(x, a, mus, looks, use_look, allow_new) == truth
+
+
+def rate(case, twins, use_look, allow_new, inflate=1.0, n=4000):
+    r_ = np.random.default_rng(0)
+    return np.mean([trial(r_, case, twins, use_look, allow_new, inflate) for _ in range(n)])
+
+
+for twins in (False, True):
+    print("three chairs of the same model" if twins else "three chairs that look different")
+    for case in ("stayed", "moved", "new"):
+        print(f"  {case:7s} nearest {rate(case, twins, False, False):5.1%}   position {rate(case, twins, False, True):5.1%}"
+              f"   position + look {rate(case, twins, True, True):5.1%}")
+
+# %% [markdown]
+# Read the table against the equations. On position alone, a chair that was moved scores
+# $\ln(\pi/A)$ and "new" scores $\ln(1/A)$, so with $\pi<1$ it **cannot** win unless it happens to land
+# near a remembered place: it is born again under a new name. A new chair set down near a remembered
+# place takes that chair's identity. Only the look can tell those apart, and only if chairs differ:
+# three chairs of one model give it nothing to work with, and a new chair of that model is confidently
+# mistaken for an old one.
+#
+# **Exercise 19.** A chair seen from the other side does not look like the view in memory. Model that
+# crudely: the true scatter of the view is `inflate` times what the model assumes. Run `inflate` from
+# 1 to 3, in the room where the chairs look different, and compare with the position-only row above.
+
+# %%
+for f in (1.0, 1.5, 2.0, 3.0):
+    print(f"view noise x{f:.1f}:  stayed {rate('stayed', False, True, True, f):5.1%}   moved {rate('moved', False, True, True, f):5.1%}"
+          f"   new {rate('new', False, True, True, f):5.1%}")
+
+# %% [markdown]
+# **Lesson.** Evidence that is too sure of itself vetoes the right answer. At twice the assumed scatter
+# the look throws away chairs that never moved, and position alone would have kept them. This is why
+# an instance's look has to be stored **per viewing direction**, compared only with views from a
+# similar direction, and given an honest variance before it is allowed to count. The class and the
+# instance are both in the ratio $r_k$: the instance predicts the view, and the class is what a
+# stranger would have looked like.
