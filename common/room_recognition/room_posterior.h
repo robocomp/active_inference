@@ -160,6 +160,27 @@ inline float discounted_loglr(std::span<const float> frame_llr, float dt_s, floa
     return float(s * double(n_eff_per_s) * double(dt_s) / double(frame_llr.size()));
 }
 
+// A METRIC FRAME SPEAKS ABOUT P ONLY WHEN THE ROBOT STANDS IN P. The metric expert reads "where is the robot, seen from
+// room k" as "is the provisional room P the remembered k". That holds only if the robot is in P: the episode begins
+// during the approach, with the robot still in the room it is leaving (clean32: the first frames, taken before the
+// crossing, said "the robot is inside r1_room_1" — true, it had not left it — and were scored as "P is room_1": log_new
+// -37, posterior 1.000, the crossing withdrawn). With probability 1 - pi_in (pi_in = P(robot in P), the promotion's
+// Phi((s - r_body)/sigma_s)) the frame is not about P and its likelihood is the same under every hypothesis; the region
+// log-masses here are log-probabilities, so that common value is 1 (log 0). The frame's log-evidence is therefore
+//     log((1 - pi_in) + pi_in * exp(x))
+// x itself at pi_in = 1, 0 at pi_in = 0, continuous between: no gate on the crossing. Non-finite x passes through
+// (an unavailable expert is omitted upstream, not weighted); pi_in outside [0,1] is clamped to its domain.
+inline float presence_weighted(float x, double pi_in)
+{
+    if (not std::isfinite(x)) return x;
+    const double p = std::clamp(std::isfinite(pi_in) ? pi_in : 0.0, 0.0, 1.0);   // domain of a probability
+    if (p <= 0.0) return 0.f;
+    if (p >= 1.0) return x;
+    const double a = std::log1p(-p), b = std::log(p) + double(x);                 // log(1 - p), log(p e^x)
+    const double m = std::max(a, b);
+    return float(m + std::log(std::exp(a - m) + std::exp(b - m)));
+}
+
 struct Commit { enum class State { Entering, Committed } state; int room; };
 
 namespace detail

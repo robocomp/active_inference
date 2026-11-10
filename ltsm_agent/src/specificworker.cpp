@@ -590,16 +590,7 @@ void SpecificWorker::finish_eviction(const ltsm::Outcome &out, const ltsm::Candi
 //////////////////////////////////////////////////////////////////////////////////////////////////
 // Promotion
 //////////////////////////////////////////////////////////////////////////////////////////////////
-std::optional<double> SpecificWorker::body_radius() const
-{
-    if (const auto body = G_dsr->get_node("body"); body.has_value())
-    {
-        const auto w = G_dsr->get_attrib_by_name<width_m_att>(body.value());
-        const auto d = G_dsr->get_attrib_by_name<depth_m_att>(body.value());
-        if (w.has_value() and d.has_value()) return 0.5 * std::max(w.value(), d.value());
-    }
-    return std::nullopt;
-}
+std::optional<double> SpecificWorker::body_radius() const { return ltsm::robot_body_radius(*G_dsr); }
 
 bool SpecificWorker::step_promotion()
 {

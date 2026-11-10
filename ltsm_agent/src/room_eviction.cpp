@@ -1505,6 +1505,17 @@ int RoomEviction::remove_live_room(std::uint64_t room_id)
 //////////////////////////////////////////////////////////////////////////////////////////////////
 // Promotion evidence
 //////////////////////////////////////////////////////////////////////////////////////////////////
+std::optional<double> robot_body_radius(DSR::DSRGraph &live)
+{
+    if (const auto body = live.get_node("body"); body.has_value())
+    {
+        const auto w = live.get_attrib_by_name<width_m_att>(body.value());
+        const auto d = live.get_attrib_by_name<depth_m_att>(body.value());
+        if (w.has_value() and d.has_value()) return 0.5 * std::max(w.value(), d.value());
+    }
+    return std::nullopt;
+}
+
 std::vector<PromotionReading> RoomEviction::promotion_evidence(double body_radius) const
 {
     std::vector<PromotionReading> out;

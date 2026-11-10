@@ -651,6 +651,20 @@ RoomRecognizer::Step RoomRecognizer::step_impl()
     // ── 3. EVIDENCE ──────────────────────────────────────────────────────────────────────────────────────────────────
     float log_new = 0.f;
     auto metric = metric_evidence(q, log_new);
+    // ── 3-. A FRAME SPEAKS ABOUT P ONLY WHEN THE ROBOT STANDS IN P (rc::recog::presence_weighted). The episode begins during
+    //        the approach; clean32's first frames, the robot still in room_1, said "inside r1_room_1" and withdrew a real
+    //        crossing. pi_in = P(robot in P): 1 once P is the current room (room_concept's switch, the fact promotion
+    //        follows); before that the promotion's own reading Phi((s - r_body)/sigma_s); no reading (no pose covariance,
+    //        no body) is no evidence the robot is in P: 0. Applied per frame, before the filter.
+    double pi_in = promoted_ ? 1.0 : 0.0;
+    if (not promoted_)
+        if (const auto r_body = robot_body_radius(*live_); r_body.has_value())
+            for (const auto &r : ev_.promotion_evidence(r_body.value()))
+                if (r.valid and r.proto_id == prov_id_) { pi_in = r.p_inside; break; }
+    for (auto &m : metric)
+        if (m.available) m.log_inside = rc::recog::presence_weighted(m.log_inside, pi_in);
+    log_new = rc::recog::presence_weighted(log_new, pi_in);
+    pi_in_ = pi_in;
     // ── 3a. The metric evidence is a FIT OF THE ROOM ESTIMATE AS IT STANDS — one frame of a correlated sequence, not
     //        independent news. Believed frame by frame, a single transient fit of a half-built layout flipped the posterior
     //        from 1e-6 to 0.84 after eleven frames that all said "new" (recog_try30: room_3 swapped for room_2 while the
@@ -788,11 +802,11 @@ RoomRecognizer::Step RoomRecognizer::step_impl()
             out.withdraw_crossing = to_L;
             out.pose_in_k = post_entry_[next.room].pose_in_k;
             rebase();
-            qInfo().noquote() << QString::fromStdString(std::format("[recog] SWAP requested: room_id {} (posterior {:.3f}; metric log_inside {:.2f}, appearance loglr {:.2f}{}, new: metric log_new {:.2f})",
+            qInfo().noquote() << QString::fromStdString(std::format("[recog] SWAP requested: room_id {} (posterior {:.3f}; metric log_inside {:.2f}, appearance loglr {:.2f}{}, new: metric log_new {:.2f}; P(robot in P) {:.3f})",
                                                                     out.room_id, std::exp(post_entry_[next.room].log_post),
                                                                     metric[next.room].available ? metric[next.room].log_inside : 0.f,
                                                                     app[next.room].available ? app[next.room].loglr : 0.f,
-                                                                    app[next.room].available ? "" : " (unavailable)", log_new));
+                                                                    app[next.room].available ? "" : " (unavailable)", log_new, pi_in_));
         }
         else if (commit_.state == rc::recog::Commit::State::Committed and next.state == rc::recog::Commit::State::Entering)
         {

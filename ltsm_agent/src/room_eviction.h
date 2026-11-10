@@ -126,6 +126,9 @@ struct Candidate
     return robot_room.has_value() and robot_room != current_edge_room;
 }
 
+/// The robot body's half extent (max of width, depth) from the live `body` node: the r_body of the promotion reading.
+[[nodiscard]] std::optional<double> robot_body_radius(DSR::DSRGraph &live);
+
 struct PromotionReading
 {
     std::uint64_t proto_id = 0;

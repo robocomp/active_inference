@@ -129,6 +129,7 @@ public:
 private:
     std::shared_ptr<DSR::DSRGraph> live_, mem_;
     const RoomEviction &ev_;
+    double pi_in_ = 0.0;   ///< P(robot in P) of the last frame (presence_weighted), for the log
 
     // ── the crossing history: the memory passage the robot used to enter the current room ──
     std::string cur_mem_;                       ///< memory name of the current room, "" when unknown
