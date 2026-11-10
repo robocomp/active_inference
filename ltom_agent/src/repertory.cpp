@@ -99,6 +99,16 @@ void Repertory::close_open_lives_as_gap()
     pending_.clear();
 }
 
+void Repertory::merge_thumb(std::uint64_t uid, int bin, float score, std::vector<std::uint8_t> jpeg)
+{
+    const auto entry = entries_.find(uid);
+    if (entry == entries_.end() or jpeg.empty()) return;
+    const auto old = entry->second.thumbs.find(bin);
+    if (old != entry->second.thumbs.end() and old->second.score >= score) return;
+    entry->second.thumbs[bin] = {score, std::move(jpeg)};
+    dirty_ = true;
+}
+
 void Repertory::insert_loaded(Entry e)
 {
     const auto uid = e.uid;

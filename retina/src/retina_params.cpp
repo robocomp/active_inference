@@ -222,6 +222,9 @@ RetinaParams load_retina_params(const ConfigLoader& configLoader)
             "Diagnostic: append per-mask motion-corruption rows to etc/mask_motion_log.csv (verify dot_d≈0 when static, spikes on pan)");
     cfgr.opt("MaskColor.enabled", params.MASK_COLOR_ENABLED,
             "MaskColor.enabled");
+    cfgr.opt("Thumbnails.period_ms", params.THUMBS_PERIOD_MS, "Thumbnails.period_ms");
+    cfgr.opt("Thumbnails.max_side", params.THUMBS_MAX_SIDE, "Thumbnails.max_side");
+    cfgr.opt("Thumbnails.jpeg_quality", params.THUMBS_JPEG_QUALITY, "Thumbnails.jpeg_quality");
     cfgr.opt("MaskColor.cell_px", params.MASK_COLOR_CELL_PX,
             "MaskColor.cell_px");
     cfgr.opt("MaskMotion.pose_extrapolate", params.MASK_POSE_EXTRAPOLATE,

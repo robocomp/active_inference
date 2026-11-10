@@ -38,6 +38,7 @@ inline const char* end_name(End e)
 
 struct Life { std::int64_t born_ms = 0, first_seen_ms = 0, last_seen_ms = 0, end_ms = -1; End end = End::alive; };
 struct Keyframe { std::int64_t t_ms = 0, room_key = -1; Pose2 pose; };
+struct Thumbnail { float score = 0.f; std::vector<std::uint8_t> jpeg; };
 
 struct Entry
 {
@@ -47,6 +48,7 @@ struct Entry
     std::int64_t n_sightings = 0;
     std::vector<Life> lives;
     std::vector<Keyframe> keyframes;
+    std::map<int, Thumbnail> thumbs;   // viewing-angle bin -> the best view of the object from there
 };
 
 struct Changes { std::vector<std::uint64_t> born, reopened, died, owner_exited; };
@@ -69,6 +71,7 @@ public:
     void close_open_lives_as_gap();     // at load: every alive life -> End::gap, end_ms = last_seen_ms
     const std::map<std::uint64_t, Entry>& entries() const { return entries_; }
     void insert_loaded(Entry e);        // the loader's door; marks nothing dirty
+    void merge_thumb(std::uint64_t uid, int bin, float score, std::vector<std::uint8_t> jpeg);   // keeps the better view; a uid not in memory is ignored
     bool dirty() const { return dirty_; }
     void clear_dirty() { dirty_ = false; }
 

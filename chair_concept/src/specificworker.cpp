@@ -37,6 +37,7 @@
 #include "../../common/perception_card/card_io.h"   // write_card_file
 
 #include "../../common/config_report/config_read.h"   // rc::cfg::Reader (SHARED)
+#include "../../common/thumbs/thumb_wire.h"
 #include "../../common/room_resolve/room_resolve.h"   // rc::room::current_room (proto-aware, deterministic)
 
 #include "../../common/diag_log/rotating_csv.h"   // keep the previous run instead of wiping it
@@ -403,6 +404,7 @@ void SpecificWorker::compute()
     if (rgb_ingestor_)   rgb_ingestor_->pump();
     if (depth_ingestor_) depth_ingestor_->pump();
     run_instance_tracker();   // data-driven birth/associate/death + merge (the only instance-lifecycle path)
+    update_thumbnails();      // keep the best crop retina offered for each chair, per viewing angle
 
     // Chairs are generic `object` nodes named "chair_*" (schema migration); filter by name prefix.
     const auto chair_nodes = G->get_nodes_by_type("object");
@@ -1063,6 +1065,64 @@ void SpecificWorker::drop_left_behind(const DSR::Node& node)
     }
     std::print("chair_concept: [room] '{}' left behind in another room, dropped\n", node.name());
     G->delete_node(id);
+}
+
+///////////////////////////////////////////////////////////////
+// Retina cuts crops at a low rate on "thumbs_zed". Each chair keeps the best one per viewing angle; no image work here.
+void SpecificWorker::update_thumbnails()
+{
+    const auto node = G->get_node("thumbs_zed");
+    const auto bytes = node ? G->get_attrib_by_name<compressed_data_att>(*node) : std::nullopt;
+    auto frame = bytes ? rc::thumbs::decode(bytes->get()) : std::nullopt;
+    const auto& pkt = mask_ingestor_->packet();
+    if (frame and frame->frame != last_thumb_frame_ and frame->frame == static_cast<std::uint64_t>(pkt.frame_id))
+    {
+        last_thumb_frame_ = frame->frame;
+        const auto camera = inner_eigen_->transform(rc::room::current_room_frame(*G), Eigen::Vector3d::Zero(), "zed");
+        if (camera)
+            for (auto& [id, inst] : fitter_->instances())
+            {
+                if (inst.assigned_mask_idx < 0 or inst.assigned_mask_idx >= static_cast<int>(pkt.slices.size())) continue;
+                const auto& slice = pkt.slices[inst.assigned_mask_idx];
+                if (not slice.is_zed()) continue;
+                const auto crop = std::ranges::find(frame->thumbs, static_cast<std::uint64_t>(slice.node_index), &rc::thumbs::Thumb::key);
+                if (crop == frame->thumbs.end()) continue;
+                const auto& s = inst.model.state();
+                const int bin = rc::thumbs::view_bin(static_cast<float>(camera->x()), static_cast<float>(camera->y()), s.cx, s.cy, s.yaw, rc::thumbs::kViewBins);
+                const float visible = static_cast<float>(slice.pixel_end - slice.pixel_begin) * (1.f - slice.trunc_frac);
+                thumbs_dirty_ = inst.thumbs.offer(bin, visible, crop->jpeg) or thumbs_dirty_;
+            }
+    }
+    static constexpr auto kPublishPeriod = std::chrono::seconds(1);   // machine guard: ltom polls at 2 Hz
+    const auto now = std::chrono::steady_clock::now();
+    if (not thumbs_dirty_ or now - last_thumb_publish_ < kPublishPeriod) return;
+    rc::thumbs::ThumbFrame out;
+    for (const auto& [id, inst] : fitter_->instances())
+    {
+        const auto chair = G->get_node(id);
+        const auto uid = chair ? G->get_attrib_by_name<object_uid_att>(*chair) : std::nullopt;
+        if (not uid) continue;
+        for (const auto& [bin, view] : inst.thumbs.bins())
+            out.thumbs.push_back({.key = *uid, .bin = bin, .score = view.score, .jpeg = view.jpeg});
+    }
+    const auto agent = G->get_node(std::format("{} {}", agent_name, agent_id));
+    auto published = G->get_node("chair_thumbs");
+    const bool fresh = not published.has_value();
+    DSR::Node n = fresh ? DSR::Node::create<metaconcept_node_type>("chair_thumbs") : *published;
+    G->add_or_modify_attrib_local<compressed_data_att>(n, rc::thumbs::encode(out));
+    if (fresh)
+    {
+        if (not agent) return;
+        G->add_or_modify_attrib_local<parent_att>(n, agent->id());
+        G->add_or_modify_attrib_local<level_att>(n, G->get_attrib_by_name<level_att>(*agent).value_or(1) + 1);
+        const auto new_id = G->insert_node(n);
+        if (not new_id) return;
+        G->insert_or_assign_edge(DSR::Edge::create<has_edge_type>(agent->id(), *new_id));
+    }
+    else
+        G->update_node(n);
+    thumbs_dirty_ = false;
+    last_thumb_publish_ = now;
 }
 
 ///////////////////////////////////////////////////////////////

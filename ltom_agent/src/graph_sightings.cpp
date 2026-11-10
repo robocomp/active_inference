@@ -1,3 +1,4 @@
+#include <iterator>
 #include "graph_sightings.h"
 #include "room_resolve/room_resolve.h"
 
@@ -79,6 +80,12 @@ GraphView read_graph(DSR::DSRGraph& G, DSR::InnerEigenAPI& ie, std::span<const s
             and std::from_chars(a.name().data() + sp + 1, a.name().data() + a.name().size(), id).ec == std::errc{})
             out.owners_present.insert(id);
     }
+
+    for (const auto& cls : classes)     // each owner's best views of its live objects, keyed by object_uid
+        if (const auto n = G.get_node(cls + "_thumbs"))
+            if (const auto bytes = G.get_attrib_by_name<compressed_data_att>(*n))
+                if (auto frame = rc::thumbs::decode(bytes->get()))
+                    std::ranges::move(frame->thumbs, std::back_inserter(out.thumbs));
 
     auto objects = G.get_nodes_by_type("object");
     std::ranges::sort(objects, {}, [](const DSR::Node& n) { return n.id(); });   // "first" is by node id

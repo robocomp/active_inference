@@ -18,6 +18,7 @@ LIST(APPEND SOURCES
   ../src/recall_select.cpp
   ../src/recall_publisher.cpp
   ../src/memory_graph.cpp
+  ../src/thumbnail_view.cpp
 )
 
 # Headers set
@@ -29,6 +30,7 @@ LIST(APPEND HEADERS
   ../src/recall_select.h
   ../src/recall_publisher.h
   ../src/memory_graph.h
+  ../src/thumbnail_view.h
 )
 
 LIST(APPEND LIBS ${LIBS})

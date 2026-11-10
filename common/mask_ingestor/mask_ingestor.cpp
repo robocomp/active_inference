@@ -423,6 +423,7 @@ MaskIngestor::NodeResult MaskIngestor::ingest_node(const rc::masks::MaskNodeRef&
             slice.bbox_min = fetch_vec3(bbox_min_flat, bbox_min_count);
             slice.bbox_max = fetch_vec3(bbox_max_flat, bbox_max_count);
         }
+        slice.node_index = i;
         packet.slices.push_back(slice);
     }
     return NodeResult::ok;

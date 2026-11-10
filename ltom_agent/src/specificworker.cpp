@@ -1,6 +1,11 @@
 /** SpecificWorker -- ltom_agent. See specificworker.h. */
 
 #include "specificworker.h"
+#include "../../common/viewers/graph_pan.h"
+#include "thumbnail_view.h"
+
+#include <QDialog>
+#include <QVBoxLayout>
 
 #include "../../common/config_report/config_read.h"   // rc::cfg::Reader (SHARED)
 #include "graph_sightings.h"
@@ -105,6 +110,13 @@ void SpecificWorker::initialize()
     std::setvbuf(stdout, nullptr, _IOLBF, 0);
     std::print("ltom_agent: initialize()\n");
     GenericWorker::initialize();
+    if (const auto v = graph_viewers.find("ltom"); v != graph_viewers.end() and v->second)
+        if (auto* gv = qobject_cast<DSR::GraphViewer*>(v->second->get_widget(DSR::DSRViewer::view::graph)))
+        {
+            rc::viewers::keep_pannable(gv);
+            connect(gv, &DSR::GraphViewer::view_data_signal, this,
+                    [this](std::uint64_t id, const std::string&) { show_thumbnails(id); }, Qt::QueuedConnection);
+        }
 
     const auto graph_named = [this](const std::string& key) { const auto it = Graphs.find(key); return it == Graphs.end() ? nullptr : it->second; };
     const auto G_dsr = graph_named("dsr");
@@ -184,6 +196,7 @@ void SpecificWorker::initialize()
                     : res == ltom::LoadResult::missing ? "no file, starting empty"
                     : res == ltom::LoadResult::blocked ? "BAD FILE NOT MOVED ASIDE, saving disabled" : "UNREADABLE, starting empty";
     std::println("[ltom] repertory {}: {} ({} entries)", params_.repertory_path, how, repertory_->entries().size());
+    G_memory_ = G_memory;
     memory_graph_ = std::make_unique<ltom::MemoryGraph>(G_memory);
     memory_graph_->sync(repertory_->entries(), {});     // retained objects show at once, fleet or no fleet
     recall_pub_ = std::make_unique<ltom::RecallPublisher>(G);
@@ -227,6 +240,7 @@ void SpecificWorker::compute()
     log("died", ch.died);
     log("owner_exit", ch.owner_exited);
 
+    for (auto& t : view.thumbs) repertory_->merge_thumb(t.key, t.bin, t.score, std::move(t.jpeg));
     if (memory_graph_) memory_graph_->sync(repertory_->entries(), view.present);
 
     // Recall nodes: the remembered, absent members of the offered classes, in the room the robot is in now.
@@ -243,6 +257,23 @@ void SpecificWorker::compute()
 
     if (repertory_->dirty() and std::chrono::steady_clock::now() - last_save_ >= std::chrono::seconds(params_.save_period_s))
         save_now("period");
+}
+
+// "View data" on a node of the memory window: the object's retained views.
+void SpecificWorker::show_thumbnails(std::uint64_t id)
+{
+    if (shutting_down_ or not G_memory_ or not repertory_) return;
+    const auto node = G_memory_->get_node(id);
+    if (not node or node->type() != "object") return;
+    const auto entry = std::ranges::find_if(repertory_->entries(), [&](const auto& kv) { return kv.second.name == node->name(); });
+    if (entry == repertory_->entries().end()) return;
+    if (thumbnail_popup_) thumbnail_popup_->close();
+    const auto window = windows.find("ltom");
+    thumbnail_popup_ = new QDialog(window != windows.end() ? window->second.get() : nullptr);
+    thumbnail_popup_->setAttribute(Qt::WA_DeleteOnClose);
+    thumbnail_popup_->setWindowTitle(QString::fromStdString(node->name()));
+    (new QVBoxLayout(thumbnail_popup_))->addWidget(ltom::make_thumbnail_view(entry->second, thumbnail_popup_));
+    thumbnail_popup_->show();
 }
 
 // A crashed or SIGKILLed previous run leaves its recall nodes behind (CLAUDE.md "Startup stale-sweep").

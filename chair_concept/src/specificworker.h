@@ -112,6 +112,10 @@ private:
     // ── Orchestration + post-fit steps ────────────────────────────────────────
     void load_config(const ConfigLoader& cfg);
     void drop_left_behind(const DSR::Node& node);
+    void update_thumbnails();
+    std::uint64_t last_thumb_frame_ = 0;
+    bool thumbs_dirty_ = false;
+    std::chrono::steady_clock::time_point last_thumb_publish_{};
     void process_chair_node(const DSR::Node& node);
     // Read the level-2 arrangement prior off the incoming `group_member` edge (ring_metaconcept is
     // the sole writer) and hand it to the belief. Inert when absent / kappa<=0 / stale.

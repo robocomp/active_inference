@@ -14,6 +14,7 @@
 
 #pragma once
 
+#include <chrono>
 #include <cstdint>
 #include <fstream>
 #include <functional>
@@ -146,6 +147,8 @@ private:
     rc::MaskHoverSnapshotPtr zed_hover_, ricoh_hover_;
 
     bool          masks_ready_    = false;
+    bool          thumbs_ready_   = false;
+    std::chrono::steady_clock::time_point last_thumbs_{};   // crops go out at Thumbnails.period_ms, not with every mask frame
     bool          masks_ricoh_ready_ = false;
     std::uint64_t masks_ricoh_publish_seq_ = 0;
     bool          skeleton_ready_ = false;

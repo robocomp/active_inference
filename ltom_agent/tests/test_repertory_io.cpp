@@ -193,8 +193,60 @@ static void test_failed_move_aside_blocks_saving()
     CHECK(fs::exists(f) and fs::exists(fs::path(f).concat(".prev")));   // nothing was lost or rotated
 }
 
+static void test_thumbnails_survive_a_round_trip()
+{
+    const fs::path f = fresh_dir() / "r.json";
+    Repertory src(3000);
+    Entry e; e.uid = kBig; e.cls = "chair"; e.name = "chair_1";
+    e.thumbs[3] = Thumbnail{12.5f, {0, 255, 7, 128}};
+    src.insert_loaded(e);
+    CHECK(save_repertory(f, src));
+    Repertory got(3000);
+    CHECK(load_repertory(f, got) == LoadResult::loaded);
+    const auto& t = got.entries().at(kBig).thumbs;
+    CHECK(t.size() == 1 and t.at(3).score == 12.5f and t.at(3).jpeg == (std::vector<std::uint8_t>{0, 255, 7, 128}));
+}
+
+static void test_a_file_without_thumbnails_still_loads()
+{
+    const fs::path f = fresh_dir() / "r.json";
+    Repertory src(3000);
+    Entry e; e.uid = kSmall; e.cls = "chair"; e.name = "chair_2";
+    src.insert_loaded(e);
+    CHECK(save_repertory(f, src));
+    std::string text = read_file(f);
+    const auto at = text.find("\"thumbs\"");
+    CHECK(at != std::string::npos);
+    if (at != std::string::npos) { const auto end = text.find(']', at); text.erase(at, end - at + 1); const auto comma = text.rfind(',', at); if (text.find_first_not_of(" \n", at) != std::string::npos and text[text.find_first_not_of(" \n", at)] == '}') text.erase(comma, 1); else { const auto c2 = text.find(',', at); text.erase(c2, 1); } write_file(f, text); }
+    Repertory got(3000);
+    CHECK(load_repertory(f, got) == LoadResult::loaded);
+    CHECK(got.entries().at(kSmall).thumbs.empty());
+}
+
+// A thumbnail's bin number only means a direction under the binning it was stored with.
+static void test_thumbnails_from_another_binning_are_dropped()
+{
+    const fs::path f = fresh_dir() / "r.json";
+    Repertory src(3000);
+    Entry e; e.uid = kBig; e.cls = "chair"; e.name = "chair_1";
+    e.thumbs[3] = Thumbnail{12.5f, {0, 255, 7, 128}};
+    src.insert_loaded(e);
+    CHECK(save_repertory(f, src));
+    std::string text = read_file(f);
+    const auto at = text.find("\"of_bins\"");
+    CHECK(at != std::string::npos);
+    if (at != std::string::npos) text.replace(at, std::string("\"of_bins\"").size(), "\"unrelated\"");
+    write_file(f, text);
+    Repertory got(3000);
+    CHECK(load_repertory(f, got) == LoadResult::loaded);
+    CHECK(got.entries().at(kBig).thumbs.empty());
+}
+
 int main()
 {
+    test_thumbnails_survive_a_round_trip();
+    test_a_file_without_thumbnails_still_loads();
+    test_thumbnails_from_another_binning_are_dropped();
     if (not std::setlocale(LC_ALL, "es_ES.UTF-8")) std::setlocale(LC_ALL, "");
     test_round_trip_preserves_entries();
     test_load_closes_open_lives_as_gap();
