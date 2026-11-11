@@ -462,6 +462,7 @@ private:
     bool published_target_admissible(const ControllerTargetInfo &t) const;
     std::uint64_t policy_no_anchor_since_ms_ = 0;                // Live fix 4: a cross claim waiting for its anchor
     rc::policy::StaleAnchorWait policy_stale_wait_;              // Live fix 4: facing a never-published anchor
+    rc::policy::StaleAnchorWait mouth_wait_;                     // clean50: placed at the vantage, no mouth seen (bounded hold)
     // ★ Task 3b (rtD1c leg 5): the leaf door_concept models, in the room frame of `policy_leaf_room_`, held by the policy's cross
     //   (drive_with_policy) — sync_world_state re-prices residual's SOFT cells by it before set_world (door_leaf.h
     //   explain_residual_by_leaf; hard cells stay occupied), so the leaf's smear stops counting as unexplained belief.

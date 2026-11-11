@@ -102,7 +102,16 @@ enum class VantageAction { Servo, HoldNoMouth, ReAim, RouteDrives };
                                                   bool within, bool facing, bool route_arrived, bool anchor_fresh)
 {
     if (servo_engaged or (open_belief and open_seen and near_side and within and facing)) return VantageAction::Servo;
-    if (not open_seen or not open_belief) return VantageAction::HoldNoMouth;
+    // ★ HOLD ONLY WHERE A MOUTH COULD BE SEEN (clean50, 2026-11-11): the robot held 8m47s at the vantage "no mouth seen", 0.56 m
+    //   off the opening's axis (of ±0.44) and 117 deg off-heading — from there no view through the door was possible, and the
+    //   hold forbade the move that would have made one. Waiting is worth something only once the body is placed in front of the
+    //   opening (near side, within it, facing it); off-axis the robot re-aims on the anchor first, as it does when a mouth is seen.
+    if (not open_seen or not open_belief)
+    {
+        if (near_side and within and facing) return VantageAction::HoldNoMouth;
+        if (near_side and route_arrived and anchor_fresh) return VantageAction::ReAim;
+        return VantageAction::RouteDrives;
+    }
     if (near_side and route_arrived and anchor_fresh and (not within or not facing)) return VantageAction::ReAim;
     return VantageAction::RouteDrives;
 }

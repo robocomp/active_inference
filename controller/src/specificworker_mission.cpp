@@ -905,7 +905,23 @@ std::string SpecificWorker::entry_mirror_of(const std::string &crossed)
 
 std::vector<rc::explore::DoorCand> SpecificWorker::explore_doors(const std::string &topo_json)
 {
-	const std::set<std::string> remembered = rc::topo::crossed_doors(topo_json);
+	std::set<std::string> remembered = rc::topo::crossed_doors(topo_json);
+	// ★ A DOOR IS CROSSED BY ITS PASSAGE, NOT BY ITS NAME (clean52, 2026-11-11): re-entering the bathroom left TWO live door nodes on
+	//   one opening — door_3 (restored by name from door_concept's identity table) and door_5 (the face made for the doorway just
+	//   crossed). ltsm matched door_5 to passage_1 (crossed) at 228 s, but the topology names ONE live door per passage (door_3), so
+	//   door_5 read uncrossed: the drive crossed DOOR_0 four times (88, 227, 551, 892 s) and the tour took 1078 s. Every live door
+	//   joined by a `match` edge to a live passage node the LTSM remembers as crossed is that crossed passage.
+	if (const auto topo = rc::topo::decode_topology(topo_json); topo.has_value())
+		for (const auto &tp : topo->passages)
+		{
+			if (tp.crossings < 1) continue;
+			const auto pn = G->get_node(tp.id);
+			if (not pn.has_value()) continue;
+			for (const auto &e : DSR::DSRGraph::get_node_edges_by_type(pn.value(), "match"))
+				for (const auto id : {e.from(), e.to()})
+					if (id != pn->id())
+						if (const auto d = G->get_node(id); d.has_value()) remembered.insert(d->name());
+		}
 	std::vector<rc::explore::DoorCand> doors;
 	for (const auto &f : door_facts())
 		doors.push_back({.door = f.name, .found = G->get_node("aff_" + f.name + "_approach").has_value(),

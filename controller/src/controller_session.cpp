@@ -3863,8 +3863,9 @@ bool ControllerSession::drive_door_route(const ControllerPlanningStep &step, rc:
                 // ★ door-passable spec step 2 (warm61): the route ARRIVED at the vantage but the opening is off-axis or misfaced —
                 //   re-aim on the perceived opening instead of holding (rc::vantage_action / reaim_on_anchor).
                 const bool route_arrived = door_route_goal_index_ >= door_route_vantage_goals_;
-                if (rc::vantage_action(door_passage_.servo(), open_belief, open_seen, near_side, within, facing, route_arrived,
-                                       anchor_cross_->fresh) == rc::VantageAction::ReAim)
+                const auto vact = rc::vantage_action(door_passage_.servo(), open_belief, open_seen, near_side, within, facing, route_arrived,
+                                                     anchor_cross_->fresh);
+                if (vact == rc::VantageAction::ReAim)
                 {
                     const ControllerRobotPose &rp = tracker_pose_.has_value() ? *tracker_pose_ : step.robot_pose;
                     const auto ra = rc::reaim_on_anchor(g);
@@ -3877,7 +3878,7 @@ bool ControllerSession::drive_door_route(const ControllerPlanningStep &step, rc:
                                           p_open, open_belief ? "" : " ✗", open_seen ? "yes" : "no ✗", g.s, near_side ? "" : " ✗",
                                           g.e, 0.5f * anchor_cross_->width_m, within ? "" : " ✗", g.heading_err * 57.2958f,
                                           facing ? "" : " ✗");
-                anchor_cross_last_mouth_missing_ = not front_of_open and (not open_seen or not open_belief);
+                anchor_cross_last_mouth_missing_ = vact == rc::VantageAction::HoldNoMouth;   // placed, and still no mouth
                 if (not front_of_open) anchor_cross_.reset();   // execute() must not run the servo on it
             }
             // ★ NO MOUTH, NO CROSSING (user 2026-11-01: "you can't throw the robot into a closed door — there has to be a mouth to go
@@ -3896,8 +3897,23 @@ bool ControllerSession::drive_door_route(const ControllerPlanningStep &step, rc:
                     std::println("[door-route] {}: at the vantage, NO MOUTH seen through the door ({}) — holding here, not driving "
                                  "into it", leg.door, why_not);
                 }
+                // ★ THE HOLD IS BOUNDED BY WHAT IT CAN STILL LEARN (clean50; Fable 2026-11-11 "a passage can wait forever"): placed in
+                //   front of the opening, the 360° LiDAR has the view this pose can give within one plan duration; after that, waiting
+                //   here adds nothing (a parked pose is one view). The same rule — and span — as the never-published anchor (Live fix 4
+                //   ruling 4): hand the cross back and let the passage reposition, so door_concept's belief gets a NEW view.
+                const double now_s = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+                if (mouth_wait_.on_tick(true, now_s, 2.0 * (params_ != nullptr ? params_->policy_horizon_s : 1.0)))
+                {
+                    std::println("[door-route] {}: no mouth seen from a placed vantage for a plan duration — handing the cross back "
+                                 "to reposition", leg.door);
+                    cross_hand_back("no mouth seen through the door from a placed vantage for a plan duration", /*timed_out=*/false,
+                                    motion_commander);
+                    door_passage_.reposition("no mouth seen from here");
+                    mouth_wait_.reset();
+                }
                 return true;
             }
+            mouth_wait_.reset();
             if (door_reaim_goal_.has_value())
             {
                 cross_status_ = "re-aiming on the perceived opening: " + why_not;
@@ -5621,6 +5637,12 @@ void ControllerSession::hold_approach_commitment(ControllerPlanningStep &step, s
     }
     step.target.room_pos = approach_commit_->room_pos;
     step.target.yaw_rad  = approach_commit_->yaw_rad;
+    // ★ONE TARGET (clean34, 2026-11-10). The caller captured last_raw_target_pos_ = the NEW offer before this hold ran, and
+    //  the policy's place branch drives to that "published" pose (goal_target_pos), while consume_goal_reached judges the
+    //  arrival against step.target — the HELD pose. The robot drove to epoch 2, stopped 0.24 m from it, and every arrival
+    //  was rejected as 0.85 m from epoch 1: 290 s parked, the producer waiting on a completion nobody would send. While we
+    //  hold, what the producer published FOR THE EPOCH WE EXECUTE is the committed pose, so that is the raw target too.
+    last_raw_target_pos_ = approach_commit_->room_pos;
     // Rate-limited: the producer re-offers continuously and one line per cycle would bury the run.
     if (timestamp_ms - approach_commit_log_ms_ >= 3000)
     {

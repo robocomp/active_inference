@@ -101,6 +101,7 @@ public:
         close_only_ = false;
         seen_executing_ = false;
         attempts_ = 0;
+        open_unoffered_ = 0; open_since_ms_ = 0;
         cross_room_.clear();
         just_started_ = true;
         look_chosen_ = false;
@@ -1043,10 +1044,41 @@ private:
                 ++route_epoch_;
             }
         }
+        if (step_ != Step::Open) open_since_ms_ = 0;
         if (step_ == Step::Open)
         {
             const State so = state_of(G, name_of(Step::Open));
             if (so == State::Executing) seen_executing_ = true;
+            // ★ A WAIT FOR AN `open` NOBODY OFFERS IS BOUNDED (clean51, 2026-11-11: 28m36s at the vantage, "aff_door_3_open is not in
+            //   the graph"; Fable: "a passage can wait forever"). The same span `close` already uses when its step is not offered
+            //   (close_wait_ms_): past it, the door's owner has had its chance to offer the step from this view, so the passage changes
+            //   the view (back to the approach); the second time it ends FAILED (kMaxRouteFailures, the passage's existing two
+            //   strikes) and the drive decides again — no new constant.
+            if (so == State::Offered or so == State::Executing or open_now) open_since_ms_ = 0;
+            else
+            {
+                if (open_since_ms_ == 0) open_since_ms_ = now_ms();
+                if (now_ms() - open_since_ms_ >= close_wait_ms_)
+                {
+                    open_since_ms_ = 0;
+                    if (++open_unoffered_ >= kMaxRouteFailures)
+                    {
+                        finish();
+                        failed_ = true;
+                        last_outcome_ = "open_not_offered";
+                        route_event(out, std::format("[door-route] {}: {} not offered within {:.1f} s again — passage FAILED "
+                                                     "(open_not_offered)", door_, name_of(Step::Open), double(close_wait_ms_) / 1000.0));
+                        return out;
+                    }
+                    route_event(out, std::format("[door-route] {}: {} not offered within {:.1f} s — back to {} to change the viewpoint",
+                                                 door_, name_of(Step::Open), double(close_wait_ms_) / 1000.0, name_of(Step::Approach)));
+                    step_ = Step::Approach;
+                    reapproach_ = true;
+                    seen_executing_ = false;
+                    ++route_epoch_;
+                    return out;
+                }
+            }
             const auto on = G.get_node(name_of(Step::Open));
             const bool open_satisfied = seen_executing_ and so == State::Completed and on.has_value()
                                         and rc::affordance::read_outcome(*on) == rc::affordance::Outcome::Satisfied;
@@ -1369,6 +1401,8 @@ private:
     bool finished_ = false;           ///< reached Done since the last take_finished()
     std::uint64_t close_wait_ms_ = 5000;
     std::uint64_t close_since_ms_ = 0;
+    std::uint64_t open_since_ms_ = 0;   ///< when the passage last began waiting on an `open` that is not on offer (0 = not waiting)
+    int           open_unoffered_ = 0;  ///< such waits that ran out this passage (kMaxRouteFailures ends it)
     std::function<std::uint64_t()> clock_;
     Step step_ = Step::Idle;
     Step stop_after_ = Step::Cross;

@@ -55,9 +55,15 @@ int main()
         CHECK(std::abs(g.a.dot(goal.p_robot - A)) < 1e-5f);          // on the normal line through the opening
         CHECK(std::abs(g.n.dot(goal.p_robot - A) - g.s) < 1e-5f);    // at the same progress s
     }
-    // no_mouth_still_holds
-    CHECK(rc::vantage_action(false, true, false, true, false, true, true, true) == VantageAction::HoldNoMouth);
-    CHECK(rc::vantage_action(false, false, true, true, false, true, true, true) == VantageAction::HoldNoMouth);
+    // no_mouth_holds_only_when_placed (clean50, 2026-11-11): placed in front of the opening (near side, within, facing) the
+    // robot holds for the mouth; off-axis or misfaced it re-aims first — holding where no view through the door is possible
+    // waited 8m47s for a mouth that could not appear
+    CHECK(rc::vantage_action(false, true, false, true, true, true, true, true) == VantageAction::HoldNoMouth);
+    CHECK(rc::vantage_action(false, false, true, true, true, true, true, true) == VantageAction::HoldNoMouth);
+    CHECK(rc::vantage_action(false, true, false, true, false, true, true, true) == VantageAction::ReAim);    // off-axis: re-aim
+    CHECK(rc::vantage_action(false, true, false, true, false, false, true, true) == VantageAction::ReAim);   // clean50: e -0.56, 117 deg
+    CHECK(rc::vantage_action(false, true, false, true, true, false, true, true) == VantageAction::ReAim);    // misfaced: re-aim
+    CHECK(rc::vantage_action(false, true, false, true, false, true, true, false) == VantageAction::RouteDrives);   // stale anchor: no re-aim
     // past_plane_never_reaims
     CHECK(rc::vantage_action(false, true, true, false, false, true, true, true) == VantageAction::RouteDrives);
     // engaged_servo_wins
