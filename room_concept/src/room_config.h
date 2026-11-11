@@ -290,6 +290,14 @@ struct RoomConfig
     // Gap beyond which the clamp is skipped entirely (stream restart, agent stall, relocalization after
     // a long silence). Clamping across a long gap would slew the pose in at v_max for many frames.
     float POSE_CLAMP_MAX_DT_S          = 0.5f;    // s
+    // IMU-rate predicted ticks (PosePublisher::publish_predicted_tick) WRITING the room->robot RT edge.
+    // OFF by default (owner 2026-11-11): the pose on the graph is the ~20 Hz corrections only. A tick only
+    // carries the last correction forward along its cached twist, and every block the correction writes
+    // already stores that twist, so a reader asking cortex for TimeQuery::Extrapolated gets the same
+    // propagation (plus a covariance that grows with dt, which the tick does not report). Writing ticks
+    // costs 5x the edge traffic and shrinks the HISTORY_SIZE=25 ring from ~1.25 s to ~250 ms of history.
+    // The tick still runs and logs its prediction (pose_trace.csv type 1) either way; only the write is gated.
+    bool  PREDICTED_TICKS_WRITE_RT     = false;
 
     // ---- Execution-stall watchdog (RoomSceneGraph::break_execution_stall) ----
     // While the controller holds the afford_room execution claim the planner is idle by design, so

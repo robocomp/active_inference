@@ -29,6 +29,7 @@
 #include <limits>
 #include <mutex>
 #include <optional>
+#include <array>
 #include <print>
 #include <memory>
 #include <vector>
@@ -141,6 +142,10 @@ public:
                                     const Eigen::Matrix3f& covariance,
                                     std::uint64_t timestamp_ms);
 
+    /// The IMU history (and its sim clock map) each correction is carried forward with to the newest sample — the
+    /// second block of the correction's RT rewrite. Wired once in initialize(), before the localiser starts.
+    void set_imu_source(ImuBuffer* imu, const SimClockMap* sim_clock) { imu_buffer_ = imu; sim_clock_ = sim_clock; }
+
     [[nodiscard]] bool  room_node_created() const noexcept { return room_node_created_; }
     /// The room is still the start-up PROTO-room (born, not yet promoted) — the UI says ESTIMATING. Read from
     /// the main thread; the two flags are written on the localiser thread (a stale read only delays the label).
@@ -185,13 +190,16 @@ private:
     // `child_override` = 0 writes robot→(this agent's room). Non-zero writes robot→that node instead, with
     // `robot_pose`/`covariance` already expressed in ITS frame — used for the proto-room, whose frame is a
     // fixed transform of the room's, so the same inversion / Jacobian / twist-adjoint code applies unchanged.
-    // `supersede_later` = this is a CORRECTION: any ring block stamped after `timestamp_ms` is a prediction made from
-    // the previous correction, and is rewritten (RT_API::rewrite_edge_RT_since) as re-propagated from this one.
+    // `rewrite_since` = this is the NEWEST CORRECTION: it is written through RT_API::rewrite_edge_RT_since, which drops
+    // every ring block stamped >= `timestamp_ms`, together with `carried` when given — the correction re-integrated to
+    // the newest IMU sample (rc::publish::predict_to_newest_imu), (wall stamp, pose in the SAME frame as `robot_pose`).
+    // Both blocks go through the same frame maps, inversion, covariance Jacobian and twist adjoint, in ONE publish.
     void write_robot_room_rt(const Eigen::Affine2f& robot_pose,
                              const Eigen::Matrix3f& covariance,
                              std::uint64_t timestamp_ms,
                              std::uint64_t child_override = 0,
-                             bool supersede_later = false);
+                             bool rewrite_since = false,
+                             std::optional<std::pair<std::uint64_t, Eigen::Affine2f>> carried = std::nullopt);
 
     // ── PROTO-ROOM: space the room does not explain, entered through one of its open doors ───────────
     // Born once, on the controller's crossing fact (exit_fact.h link 1) naming one of this room's doors. A `room` node `room_<k>` with a
@@ -641,8 +649,14 @@ private:
     float last_side_ = 0.f;
     float last_rot_  = 0.f;
     // Stamp of the last CORRECTION written to the robot RT. A correction older than it must not rewrite the tail: what
-    // follows it in the ring is then a newer correction, not a prediction (write_robot_room_rt, supersede_later).
+    // follows it in the ring is then a newer correction, not a prediction (write_robot_room_rt, rewrite_since).
     std::uint64_t last_correction_ts_ = 0;
+    std::array<int, 4> carry_diag_{};   ///< diagnostic: carried / no sim map / no IMU after t_c / gyro not covering
+    std::int64_t carry_diag_t_ms_ = 0; double carry_diag_lead_ms_ = 0.0;
+    // The IMU history and the sim<-wall clock map the second block of every correction is integrated from
+    // (dsr_update_pose → rc::publish::predict_to_newest_imu). Owned by SpecificWorker; null = correction alone.
+    ImuBuffer*         imu_buffer_ = nullptr;
+    const SimClockMap* sim_clock_  = nullptr;
 
     // Table-landmark tracking CSV (tmp/sdf_localizer/table_landmark_<ts>.csv): one row per detected table
     // per refresh, logging its ROOM-frame coord (stable if localization is consistent) + ROBOT-frame

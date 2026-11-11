@@ -174,6 +174,8 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
             "rad/s — fallback; capability supersedes it");
     reader.opt<float, double>("RoomConcept.PoseClampMaxDt", p.POSE_CLAMP_MAX_DT_S,
             "s");
+    reader.opt<bool>("RoomConcept.PredictedTicks", p.PREDICTED_TICKS_WRITE_RT,
+            "IMU-rate predicted poses also WRITE the room->robot RT edge (default false: corrections only, readers use TimeQuery::Extrapolated)");
     reader.opt<bool>("RoomConcept.PreserveBootstrapRoom", p.PRESERVE_BOOTSTRAP_ROOM,
             "Static-room mode: ADOPT a pre-seeded room/table from the bootstrap graph instead of deleting+recreating it, and do NOT write room pose / robot->room");
     reader.opt<float, double>("RoomConcept.RobotVelCovAdv", p.ROBOT_VEL_COV_ADV,

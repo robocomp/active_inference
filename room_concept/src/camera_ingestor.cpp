@@ -103,7 +103,7 @@ bool CameraIngestor::bind_extrinsic(const std::string& robot_frame)
         return false;
     }
     const auto cam_T_robot = inner_->get_transformation_matrix(
-        camera_node_, robot_frame_, 0, "RT", DSR::RT_API::TimeQuery::Nearest);
+        camera_node_, robot_frame_, 0, "RT", DSR::RT_API::TimeQuery::Interpolated);
     if (not cam_T_robot.has_value())          // ALWAYS check the optional (CLAUDE.md)
     {
         qWarning() << "[imgedge] RT chain" << QString::fromStdString(camera_node_) << "<-"
@@ -130,7 +130,7 @@ bool CameraIngestor::refresh_graph_extrinsic()
 {
     if (not inner_ or robot_frame_.empty() or not extrinsic_ok_) return false;
     const auto T = inner_->get_transformation_matrix(camera_node_, robot_frame_, 0, "RT",
-                                                     DSR::RT_API::TimeQuery::Nearest);
+                                                     DSR::RT_API::TimeQuery::Interpolated);
     if (not T.has_value()) return false;                       // chain momentarily unresolvable: keep the last
     const Eigen::Matrix4d M = T.value().matrix();
     if (M == graph_cam_T_robot_) return false;                 // bit-identical: nothing was committed

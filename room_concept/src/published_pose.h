@@ -8,6 +8,7 @@
 #pragma once
 
 #include "update_result.h"
+#include "gyro_integral.h"
 
 #include <Eigen/Dense>
 #include <algorithm>
@@ -135,8 +136,8 @@ inline Clamp clamp_correction(const Eigen::Affine2f& prev, const std::optional<E
 
 /// The PREDICTED pose PosePublisher::publish_predicted_tick writes: `base` (the last correction) carried `dt_s` forward by the
 /// body twist cached at that correction (adv = +Y forward, side = +X lateral, rot = yaw rate), through the SE(2) exponential
-/// map (left Jacobian V, so v*dt becomes the CHORD of the arc swept). One function for the tick AND for the re-propagated
-/// tail below, so a rewritten prediction is bit-for-bit what the tick would have written from the same base.
+/// map (left Jacobian V, so v*dt becomes the CHORD of the arc swept). One function for the tick AND, piece by piece
+/// along the integrated gyro heading, for predict_to_newest_imu below (the correction's second RT block).
 /// ★ It is a RIGHT composition with a body increment, so it commutes with any rigid change of the room frame on the left
 ///   (T_pub_int_, the proto-room's T_proto_room): propagating a pose already mapped into a published frame is the same as
 ///   mapping the propagated internal pose. write_robot_room_rt relies on that.
@@ -159,22 +160,58 @@ inline Eigen::Affine2f propagate_twist(const Eigen::Affine2f& base, float adv, f
     return out;
 }
 
-/// ── A LATE CORRECTION SUPERSEDES THE PREDICTIONS STAMPED AFTER IT ───────────────────────────────────────────────────────
-/// The correction for t_c lands ~40 ms late, after 5-6 IMU-rate predictions stamped t > t_c — made from the PREVIOUS
-/// correction — are already in the RT ring. Left there, a reader interpolating anywhere in (t_c, newest] mixes the new
-/// posterior with predictions from the old one. Given the ring's stamps, this returns every stamp after t_c (oldest first)
-/// with the pose the predictor WOULD have written had it known the correction: the same propagate_twist from `corrected`.
-/// The caller writes these with the correction through RT_API::rewrite_edge_RT_since, in one publish.
-/// Stamp 0 is an empty ring slot (cortex's convention) and is never a sample.
-inline std::vector<std::pair<std::uint64_t, Eigen::Affine2f>>
-superseded_tail(const std::vector<std::uint64_t>& ring_stamps, std::uint64_t t_c, const Eigen::Affine2f& corrected,
-                float adv, float side, float rot)
+/// ── EVERY CORRECTION IS WRITTEN AS TWO BLOCKS: ITSELF, AND ITSELF CARRIED TO THE NEWEST IMU SAMPLE ─────────────────
+/// (owner, 2026-11-11). The correction for t_c lands ~40 ms after t_c; by then the IMU has samples up to t_imu > t_c.
+/// write_robot_room_rt hands RT_API::rewrite_edge_RT_since {(t_c, corrected), (t_imu, this)}, which drops every block
+/// stamped >= t_c, so a reader's newest block is never older than the last IMU sample at the time of the write, and no
+/// prediction made from an older correction survives after t_c. (This replaces the old superseded_tail, which
+/// re-propagated every IMU-rate tick stamped after t_c by the cached twist: ticks no longer write the edge by default.)
+///
+/// "Carried" = RE-INTEGRATED over the IMU samples in (t_c, t_imu]:
+///   heading — the gyro, through the SAME integral as the motion prior (rc::imu::for_each_gyro_step, the body of
+///             OdomSources::imu_dtheta) and the same calibration (dpsi = k_g * raw - b_g * dt; k_g/b_g are the
+///             values the motion prior applied this frame, 1/0 when not acting);
+///   translation — the correction's cached body twist (adv = +Y forward, side = +X lateral), composed piece by piece
+///             along that heading with propagate_twist, each piece's rate being its own gyro increment / its length.
+/// Clocks: `use_sim_clock` says the history's stamps are the producer's SIM clock (Webots), and then t_c_key is t_c
+/// mapped onto it (SimClockMap::to_sim, as integrate_odometry_over_window does). The gyro increments are taken on
+/// that clock; the twist is per WALL second (it was divided by the wall gap between lidar stamps), so each piece's
+/// translation uses its length scaled by wall/key over the whole interval. On the real robot both clocks are wall and
+/// the ratio is exactly 1. The block is STAMPED with the newest sample's WALL stamp, the corrections' clock.
+/// Returns nullopt — and the caller writes the correction alone — when there is no sample newer than t_c on both
+/// clocks, or the history does not bracket (t_c, t_imu] (the integral refuses partial coverage).
+struct ImuCarried
 {
-    std::vector<std::pair<std::uint64_t, Eigen::Affine2f>> tail;
-    for (const auto ts : ring_stamps)
-        if (ts != 0 and ts > t_c)
-            tail.emplace_back(ts, propagate_twist(corrected, adv, side, rot, static_cast<float>(ts - t_c) * 1e-3f));
-    std::ranges::sort(tail, {}, [](const auto& p) { return p.first; });
-    return tail;
+    std::uint64_t   ts_ms = 0;   ///< WALL stamp of the newest IMU sample
+    Eigen::Affine2f pose  = Eigen::Affine2f::Identity();
+    double          dtheta = 0.0;   ///< calibrated heading increment integrated over (t_c, t_imu], rad
+};
+inline std::optional<ImuCarried>
+predict_to_newest_imu(const Eigen::Affine2f& corrected, std::int64_t t_c_wall, std::int64_t t_c_key,
+                      const std::vector<ImuReading>& imu, bool use_sim_clock,
+                      float adv, float side, float k_g, float b_g)
+{
+    if (imu.size() < 2) return std::nullopt;
+    const auto stamp = [use_sim_clock](const ImuReading& s) { return use_sim_clock ? s.integration_ts_ms() : s.effective_ts_ms(); };
+    const ImuReading& newest = imu.back();
+    const std::int64_t t_imu_wall = newest.effective_ts_ms();
+    const std::int64_t t_imu_key  = stamp(newest);
+    if (t_imu_wall <= t_c_wall or t_imu_key <= t_c_key) return std::nullopt;
+    const double wall_per_key = static_cast<double>(t_imu_wall - t_c_wall) / static_cast<double>(t_imu_key - t_c_key);
+
+    ImuCarried out;
+    out.ts_ms = static_cast<std::uint64_t>(t_imu_wall);
+    out.pose  = corrected;
+    const bool ok = rc::imu::for_each_gyro_step(imu, stamp, t_c_key, t_imu_key,
+        [&](std::int64_t s, std::int64_t e, double dth_raw)
+        {
+            const double dt_key  = static_cast<double>(e - s) * 1e-3;
+            const double dth     = dth_raw * k_g - b_g * dt_key;
+            const double dt_wall = dt_key * wall_per_key;
+            out.dtheta += dth;
+            out.pose = propagate_twist(out.pose, adv, side, static_cast<float>(dth / dt_wall), static_cast<float>(dt_wall));
+        });
+    if (not ok) return std::nullopt;
+    return out;
 }
 }   // namespace rc::publish

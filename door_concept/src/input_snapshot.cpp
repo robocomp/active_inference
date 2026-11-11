@@ -31,7 +31,7 @@ std::int64_t steady_ns()
 }
 
 std::optional<Mat4d> tf(DSR::InnerEigenAPI* inner, const std::string& dst, const std::string& src, std::uint64_t ts = 0,
-                        DSR::RT_API::TimeQuery q = DSR::RT_API::TimeQuery::Nearest)
+                        DSR::RT_API::TimeQuery q = DSR::RT_API::TimeQuery::Interpolated)   // owner 2026-11-11: pose edges interpolate
 {
     if (inner == nullptr or dst.empty() or src.empty()) return std::nullopt;
     const auto T = ts == 0 ? inner->get_transformation_matrix(dst, src, 0)

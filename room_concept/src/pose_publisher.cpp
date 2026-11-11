@@ -497,9 +497,8 @@ void PosePublisher::publish_predicted_tick(std::int64_t imu_ts_ms)
     // reference for this exact composition, 2026-08-04) -- the left Jacobian V turns v*dt into the
     // CHORD of the arc actually swept instead of cutting the corner. +Y forward = adv (last_pub_adv_),
     // +X lateral = side (last_pub_side_); see the frame note in room_scene_graph.cpp.
-    // ★ rc::publish::propagate_twist, SHARED with the late-correction rewrite (write_robot_room_rt): when a
-    //   correction lands after ticks stamped later than it, those ticks are re-propagated from it by this
-    //   same function, so the rewritten tail is exactly what this tick would have written from that base.
+    // ★ rc::publish::propagate_twist, SHARED with the correction's second RT block (predict_to_newest_imu), which
+    //   composes it piecewise along the integrated gyro heading instead of the cached constant rate.
     const Eigen::Affine2f predicted = rc::publish::propagate_twist(
         last_published_pose_.value(), last_pub_adv_, last_pub_side_, last_pub_rot_, dt_s);
 
@@ -507,9 +506,15 @@ void PosePublisher::publish_predicted_tick(std::int64_t imu_ts_ms)
     // reading this between two real corrections currently sees the same sigma the last real one
     // reported, not an inflated one reflecting the extra dead-reckoned distance since. Revisit if a
     // consumer needs "how much am I trusting this specific sample" rather than just the freshest pose.
-    if (scene_graph_ == nullptr) return;
-    scene_graph_->dsr_publish_predicted_pose(predicted, last_published_cov_,
-                                             static_cast<std::uint64_t>(imu_ts_ms));
+    // Gated (RoomConcept.PredictedTicks, default false): the graph carries the corrections only and
+    // readers extrapolate along the stored twist (TimeQuery::Extrapolated) -- see
+    // RoomConfig::PREDICTED_TICKS_WRITE_RT. The prediction is still logged below.
+    if (params.PREDICTED_TICKS_WRITE_RT)
+    {
+        if (scene_graph_ == nullptr) return;
+        scene_graph_->dsr_publish_predicted_pose(predicted, last_published_cov_,
+                                                 static_cast<std::uint64_t>(imu_ts_ms));
+    }
     log_pose_trace(/*type=predicted*/1, imu_ts_ms, predicted, 0.f);
 }
 

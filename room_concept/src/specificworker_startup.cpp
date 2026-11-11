@@ -283,6 +283,10 @@ void SpecificWorker::initialize()
     // Process-local: rt_api_ is this worker's own instance (DSRGraph::get_rt_api() is a factory,
     // never shared -- see dsr_api.h), and this agent is the sole writer of the robot<->room RT edge,
     // so this is the only place that needs it.
+    // 2026-11-11: with the IMU-rate ticks off (RoomConcept.PredictedTicks = false), the edge is written only at the
+    // ~20 Hz corrections, TWO blocks each (the correction, and it re-integrated to the newest IMU sample — see
+    // RoomSceneGraph::dsr_update_pose); a block after t_c is replaced by the next correction's rewrite only if it is
+    // stamped >= that t_c, so the ring keeps ~2 blocks per correction: 25 slots ≈ 12 corrections ≈ 0.6 s of history.
     rt_api_->HISTORY_SIZE = 25;
     // One InnerEigenAPI, owned by this thread. See the member's comment for why a per-thread instance
     // is the wrong answer even though the cache is now locked.
@@ -298,6 +302,8 @@ void SpecificWorker::initialize()
     // ground-truth rows, and stable_frames_ stuck at 0/30 for ever with all three of its terms
     // passing. The guard that made a null non-fatal is what turned a crash into that silence.
     pose_pub_->set_scene_graph(scene_graph_.get());
+    // Every correction is written with a second block: itself re-integrated over the IMU to the newest sample.
+    scene_graph_->set_imu_source(&imu_buffer_, &sim_clock_);
     lidar_ingestor_ = std::make_unique<rc::LidarIngestor>(G, room_concept_, params);
     phase("ingestors");
     // No source switch any more: the producer no longer writes the imu_* attributes, so a "dsr"

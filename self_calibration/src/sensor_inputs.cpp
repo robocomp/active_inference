@@ -153,7 +153,7 @@ std::optional<Eigen::Affine3f> SensorInputs::body_from_sensor(const std::string&
     if (stamp_ms <= 0)
         stamp_ms = wall_ms();   // never ts==0: that is the cached path
     const auto T = inner_->get_transformation_matrix("body", sensor, static_cast<std::uint64_t>(stamp_ms), "RT",
-                                                     DSR::RT_API::TimeQuery::Nearest);
+                                                     DSR::RT_API::TimeQuery::Interpolated);
     if (not T.has_value())
         return std::nullopt;
     return Eigen::Affine3f(Eigen::Matrix4f(T->matrix().cast<float>()));
@@ -166,7 +166,7 @@ std::optional<Eigen::Affine3f> SensorInputs::robot_from_sensor(const std::string
     if (stamp_ms <= 0)
         stamp_ms = wall_ms();   // never ts==0: that is the cached path
     const auto T = inner_->get_transformation_matrix(robot_name_, sensor, static_cast<std::uint64_t>(stamp_ms), "RT",
-                                                     DSR::RT_API::TimeQuery::Nearest);
+                                                     DSR::RT_API::TimeQuery::Interpolated);
     if (not T.has_value())
         return std::nullopt;
     return Eigen::Affine3f(Eigen::Matrix4f(T->matrix().cast<float>()));

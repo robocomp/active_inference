@@ -9,6 +9,7 @@
 #include <set>
 #include "room_gn_solver.h"
 #include "room_obs_weights.h"
+#include "gyro_integral.h"
 #include "room_gn_solver.h"
 #include "image_edge_accumulate.h"
 #include "image_edge_ops.h"
@@ -137,30 +138,14 @@ namespace rc
 
         bool imu_dtheta(std::int64_t seg_start, std::int64_t seg_end, float &dtheta_out) const
         {
-            if (imu_history == nullptr or imu_history->size() < 2) return false;
-            if (imu_stamp(imu_history->front()) > seg_start or imu_stamp(imu_history->back()) < seg_end)
-                return false;
+            // The integral itself lives in gyro_integral.h (rc::imu::for_each_gyro_step), shared with the
+            // published prediction; this sums its pieces. Same arithmetic, same refusals as before.
+            if (imu_history == nullptr) return false;
             double acc = 0.0;
-            bool any = false;
-            for (size_t k = 0; k + 1 < imu_history->size(); ++k)
-            {
-                const std::int64_t a = imu_stamp((*imu_history)[k]);
-                const std::int64_t b = imu_stamp((*imu_history)[k + 1]);
-                if (b <= a) continue;
-                const std::int64_t s = std::max(a, seg_start);
-                const std::int64_t e = std::min(b, seg_end);
-                if (e <= s) continue;
-                // Trapezoid across the sample pair, so a rate ramping through the segment is not
-                // biased by holding the leading sample flat.
-                const double w0 = (*imu_history)[k].gyro_z, w1 = (*imu_history)[k + 1].gyro_z;
-                const double span = static_cast<double>(b - a);
-                const double f0 = static_cast<double>(s - a) / span;
-                const double f1 = static_cast<double>(e - a) / span;
-                const double wm = 0.5 * ((w0 + (w1 - w0) * f0) + (w0 + (w1 - w0) * f1));
-                acc += wm * static_cast<double>(e - s) * 0.001;
-                any = true;
-            }
-            if (not any) return false;
+            if (not rc::imu::for_each_gyro_step(*imu_history, [this](const ImuReading &s) { return imu_stamp(s); },
+                                                seg_start, seg_end,
+                                                [&acc](std::int64_t, std::int64_t, double dth) { acc += dth; }))
+                return false;
             dtheta_out = static_cast<float>(acc);
             return true;
         }
