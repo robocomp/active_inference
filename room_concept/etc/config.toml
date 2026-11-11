@@ -546,11 +546,13 @@ PoseClampEnabled       = true
 PoseClampVMax          = 0.7    # m/s
 PoseClampWMax          = 0.8    # rad/s
 PoseClampMaxDt         = 0.5    # s; longer gap => skip the clamp (stream restart / long silence)
-# IMU-rate predicted ticks write the room->robot RT edge too. false: the graph carries the ~20 Hz
-# corrections only; each block stores its twist, so readers propagate with TimeQuery::Extrapolated
-# (same model as the tick, and its covariance grows with dt). true: ~100 Hz writes, 5x the edge
-# traffic, and the 25-slot ring then spans ~250 ms instead of ~1.25 s. See RoomConfig::PREDICTED_TICKS_WRITE_RT.
+# IMU-rate predicted ticks write the room->robot RT edge too. false (mode a): the graph carries the ~20 Hz
+# corrections, each with its tail re-integrated to the newest IMU sample. true (mode b): ~100 Hz writes, 5x the
+# edge traffic, and the 25-slot ring then spans ~250 ms instead of ~1.25 s. See RoomConfig::PREDICTED_TICKS_WRITE_RT.
 PredictedTicks         = false
+RtRewriteTail          = true   # each correction rewrites the ring from its stamp: itself + spread + re-integrated tail (needs cortex rewrite_edge_RT_since)
+RtSpreadCorrection     = true   # spread the correction's jump over the blocks written since the previous correction
+OdomLagMs              = 0      # odometry lag in the pose propagator: discarded (worse on Shadow); the code default is 32
 
 # ── Gauss-Newton / Levenberg-Marquardt (room_gn_solver.h) ─────────────────────
 # The only pose backend: analytic Jacobians, a 15x15 normal-equation system per frame (t_update median

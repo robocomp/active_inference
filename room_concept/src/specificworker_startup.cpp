@@ -302,8 +302,6 @@ void SpecificWorker::initialize()
     // ground-truth rows, and stable_frames_ stuck at 0/30 for ever with all three of its terms
     // passing. The guard that made a null non-fatal is what turned a crash into that silence.
     pose_pub_->set_scene_graph(scene_graph_.get());
-    // Every correction is written with a second block: itself re-integrated over the IMU to the newest sample.
-    scene_graph_->set_imu_source(&imu_buffer_, &sim_clock_);
     lidar_ingestor_ = std::make_unique<rc::LidarIngestor>(G, room_concept_, params);
     phase("ingestors");
     // No source switch any more: the producer no longer writes the imu_* attributes, so a "dsr"
@@ -313,7 +311,10 @@ void SpecificWorker::initialize()
     // FIX 2026-09-04: publish a predicted pose on every IMU sample -- see publish_predicted_tick().
     // Runs on the imu-ingest thread; the callback itself takes publish_mutex_ before touching anything
     // shared with maybe_publish_corrected_pose().
-    imu_ingestor_->set_on_new_sample([this](std::int64_t imu_ts_ms) { pose_pub_->publish_predicted_tick(imu_ts_ms); });
+    // The tick also feeds the gyro to the publisher's pose propagator (pose_propagator.h), which every correction's
+    // re-integrated tail is built from — so it runs whether or not ticks write the edge (RoomConcept.PredictedTicks).
+    imu_ingestor_->set_on_new_sample([this](std::int64_t imu_ts_ms, float gyro_z)
+                                     { pose_pub_->publish_predicted_tick(imu_ts_ms, gyro_z); });
     // The RGB channels configure themselves — the 56 lines that stood here are CalibChannels::configure().
     calib_->configure();
 

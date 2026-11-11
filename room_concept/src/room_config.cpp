@@ -176,6 +176,10 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
             "s");
     reader.opt<bool>("RoomConcept.PredictedTicks", p.PREDICTED_TICKS_WRITE_RT,
             "IMU-rate predicted poses also WRITE the room->robot RT edge (default false: corrections only, readers use TimeQuery::Extrapolated)");
+    reader.opt<bool>("RoomConcept.RtRewriteTail", p.RT_REWRITE_TAIL,
+            "each correction rewrites the RT ring from its stamp: itself + the re-integrated tail, one publish");
+    reader.opt<bool>("RoomConcept.RtSpreadCorrection", p.RT_SPREAD_CORRECTION,
+            "spread the correction's jump over the blocks written since the previous correction");
     reader.opt<bool>("RoomConcept.PreserveBootstrapRoom", p.PRESERVE_BOOTSTRAP_ROOM,
             "Static-room mode: ADOPT a pre-seeded room/table from the bootstrap graph instead of deleting+recreating it, and do NOT write room pose / robot->room");
     reader.opt<float, double>("RoomConcept.RobotVelCovAdv", p.ROBOT_VEL_COV_ADV,
@@ -555,6 +559,8 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
             "rad/s");
     reader.opt<float, double>("RoomConcept.ZuptWheelLinEps", room_concept.params.zupt_wheel_lin_eps,
             "m/s (adv, side)");
+    reader.opt<float, double>("RoomConcept.OdomLagMs", room_concept.params.odom_lag_ms,
+            "ms subtracted from each wheel sample's stamp by the pose propagator (pose_propagator.h)");
 
     // ── Preintegrated motion covariance — see Params::motion_preintegration, se2_preintegration.h ──
     // The densities are DERIVED from the legacy constants just loaded, not hard-coded, so the two

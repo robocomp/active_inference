@@ -117,8 +117,23 @@ public:
     // counter follows via reset in restart_after_closure's path.
     std::size_t closures_seen_ = 0;
 
+    /// One block a correction writes besides itself (pose_propagator.h plan_correction): room<-robot in the estimator's
+    /// INTERNAL frame (the frame of res.robot_pose), its covariance there, and the body twist at that instant.
+    struct RtTail
+    {
+        Eigen::Affine2f pose;
+        Eigen::Matrix3f covariance;
+        std::uint64_t   timestamp_ms;
+        float           adv, side, rot;
+    };
+    /// `tail` non-null ⇒ the NEWEST correction rewrites the ring from its earliest block (RT_API::rewrite_edge_RT_since):
+    /// the correction and every `tail` block (spread ones before t_c, re-integrated ones after), in ONE publish.
     void update(const rc::RoomConcept::UpdateResult& res, float adv, float side, float rot,
-                bool write_rt = true);
+                bool write_rt = true, const std::vector<RtTail>* tail = nullptr);
+    /// What the last update() did to the robot RT edge: written at all, and written as a rewrite with the tail (then
+    /// the ring from the earliest tail/correction stamp on holds exactly those blocks). Localiser thread.
+    struct PoseWrite { bool written = false; bool rewrote = false; };
+    [[nodiscard]] PoseWrite last_pose_write() const noexcept { return last_pose_write_; }
 
     // Tick the affordance manager (execution monitoring); call periodically.
     void monitor_affordance();
@@ -138,13 +153,10 @@ public:
 
     // High-rate predicted pose between lidar corrections (dead-reckoned room←robot estimate + grown
     // cov + forward validity stamp). Writes ONLY the robot↔room RT edge — no room creation/affordance.
-    void dsr_publish_predicted_pose(const Eigen::Affine2f& robot_pose,
+    /// adv/side/rot = the body twist AT that instant, stored in the block's twist slots. True = written.
+    bool dsr_publish_predicted_pose(const Eigen::Affine2f& robot_pose,
                                     const Eigen::Matrix3f& covariance,
-                                    std::uint64_t timestamp_ms);
-
-    /// The IMU history (and its sim clock map) each correction is carried forward with to the newest sample — the
-    /// second block of the correction's RT rewrite. Wired once in initialize(), before the localiser starts.
-    void set_imu_source(ImuBuffer* imu, const SimClockMap* sim_clock) { imu_buffer_ = imu; sim_clock_ = sim_clock; }
+                                    std::uint64_t timestamp_ms, float adv, float side, float rot);
 
     [[nodiscard]] bool  room_node_created() const noexcept { return room_node_created_; }
     /// The room is still the start-up PROTO-room (born, not yet promoted) — the UI says ESTIMATING. Read from
@@ -186,20 +198,19 @@ public:
     { std::scoped_lock lk(pinned_mutex_); return latest_pinned_; }
 
 private:
-    void dsr_update_pose(const rc::RoomConcept::UpdateResult& res);
+    void dsr_update_pose(const rc::RoomConcept::UpdateResult& res, const std::vector<RtTail>* tail = nullptr);
     // `child_override` = 0 writes robot→(this agent's room). Non-zero writes robot→that node instead, with
     // `robot_pose`/`covariance` already expressed in ITS frame — used for the proto-room, whose frame is a
     // fixed transform of the room's, so the same inversion / Jacobian / twist-adjoint code applies unchanged.
-    // `rewrite_since` = this is the NEWEST CORRECTION: it is written through RT_API::rewrite_edge_RT_since, which drops
-    // every ring block stamped >= `timestamp_ms`, together with `carried` when given — the correction re-integrated to
-    // the newest IMU sample (rc::publish::predict_to_newest_imu), (wall stamp, pose in the SAME frame as `robot_pose`).
-    // Both blocks go through the same frame maps, inversion, covariance Jacobian and twist adjoint, in ONE publish.
-    void write_robot_room_rt(const Eigen::Affine2f& robot_pose,
+    // `tail` non-null = this is the NEWEST CORRECTION: written through RT_API::rewrite_edge_RT_since together with every
+    // `tail` block (same frame as `robot_pose`), which drops every ring block stamped >= the earliest of them. All go
+    // through the same frame maps, inversion, covariance Jacobian and twist adjoint, in ONE publish. Null = plain insert.
+    // Returns true when the edge was written.
+    bool write_robot_room_rt(const Eigen::Affine2f& robot_pose,
                              const Eigen::Matrix3f& covariance,
                              std::uint64_t timestamp_ms,
                              std::uint64_t child_override = 0,
-                             bool rewrite_since = false,
-                             std::optional<std::pair<std::uint64_t, Eigen::Affine2f>> carried = std::nullopt);
+                             const std::vector<RtTail>* tail = nullptr);
 
     // ── PROTO-ROOM: space the room does not explain, entered through one of its open doors ───────────
     // Born once, on the controller's crossing fact (exit_fact.h link 1) naming one of this room's doors. A `room` node `room_<k>` with a
@@ -649,14 +660,9 @@ private:
     float last_side_ = 0.f;
     float last_rot_  = 0.f;
     // Stamp of the last CORRECTION written to the robot RT. A correction older than it must not rewrite the tail: what
-    // follows it in the ring is then a newer correction, not a prediction (write_robot_room_rt, rewrite_since).
+    // follows it in the ring is then a newer correction, not a prediction (dsr_update_pose).
     std::uint64_t last_correction_ts_ = 0;
-    std::array<int, 4> carry_diag_{};   ///< diagnostic: carried / no sim map / no IMU after t_c / gyro not covering
-    std::int64_t carry_diag_t_ms_ = 0; double carry_diag_lead_ms_ = 0.0;
-    // The IMU history and the sim<-wall clock map the second block of every correction is integrated from
-    // (dsr_update_pose → rc::publish::predict_to_newest_imu). Owned by SpecificWorker; null = correction alone.
-    ImuBuffer*         imu_buffer_ = nullptr;
-    const SimClockMap* sim_clock_  = nullptr;
+    PoseWrite     last_pose_write_;   ///< see last_pose_write()
 
     // Table-landmark tracking CSV (tmp/sdf_localizer/table_landmark_<ts>.csv): one row per detected table
     // per refresh, logging its ROOM-frame coord (stable if localization is consistent) + ROBOT-frame

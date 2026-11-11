@@ -16,6 +16,7 @@
 #include "se2_preintegration.h"
 #include "motion_calibration.h"
 #include "surprise.h"
+#include "pose_propagator.h"
 
 namespace rc::loc
 {
@@ -131,6 +132,9 @@ namespace rc::loc
         /// its previous value -- which a bare value cannot be distinguished from convergence.
         int   calib_informed = 0;
         int   calib_applied = 0;        ///< bitmask: parameter i is correcting the odometry (informed AND allowed)
+        /// The motion calibration the prior APPLIED (MotionCalibration's acting accessors, nominal where not acting) —
+        /// what PosePublisher's propagator integrates with between this correction and the next (pose_propagator.h).
+        rc::PropagatorCalib applied_motion;
         float calib_condition = 0.f;    ///< of the CORRELATION-normalised information matrix
         float calib_sigma_yaw = 0.f, calib_sigma_k_v = 0.f, calib_sigma_k_w = 0.f;
         float calib_sigma_b_omega = 0.f;   ///< never leave this at 0: a displayed 0 reads as certainty

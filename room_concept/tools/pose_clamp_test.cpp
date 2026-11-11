@@ -2,11 +2,13 @@
 // warm21 (2026-11-01) clamp #36..: the estimate held at (4.122, 6.353) but the frame's prediction was the DEFAULT (0,0,0);
 // the "measured motion" pred - prev_est = -(the whole pose) went through unbounded and re-based the published pose by about
 // (-4.1, -6.3) every frame — (0.03,0.04), (-4.07,-6.27), (-8.16,-12.58) … (-268,-458) — covariance 290+ m, controller blind.
-// + rc::publish::propagate_twist / predict_to_newest_imu: every correction's second RT block, the correction re-integrated
-//   over the IMU to the newest sample (2026-11-11).
+// + rc::PosePropagator / plan_correction / record_rewrite (src/pose_propagator.h): the pose between corrections and the
+//   blocks every correction writes with itself — spread over (t_k, t_c), re-integrated tail after t_c (2026-11-11).
 // Build + run (from room_concept/):
 //   g++ -std=c++23 -O1 -I/usr/include/eigen3 -Isrc tools/pose_clamp_test.cpp -o /tmp/pose_clamp_test && /tmp/pose_clamp_test
 #include "../src/published_pose.h"
+#include "../src/pose_propagator.h"
+#include <clocale>
 #include <cmath>
 #include <cstdio>
 #include <map>
@@ -16,6 +18,7 @@ static void check(bool ok, const char* what) { if (not ok) ++failures; std::prin
 
 int main()
 {
+    std::setlocale(LC_ALL, "");   // CLAUDE.md: the agent runs under es_ES; so does the test
     const float dt = 0.05f, max_xy = 1.f * dt, max_th = 2.f * dt;   // the agent's limits: 1 m/s, 2 rad/s
     std::printf("warm21 runaway: a default (0,0,0) prediction must not move the published pose\n");
     {
@@ -39,98 +42,124 @@ int main()
         const auto cl = rc::publish::clamp_correction(p0, Eigen::Vector3f(1.f, 1.f, 0.f), n1, Eigen::Vector3f(1.03f, 1.f, 0.f), max_xy, max_th);
         check(not cl.fired and std::abs(cl.pose.translation().x() - 1.03f) < 1e-5f, "a 3 cm step with a matching prediction passes unclamped");
     }
-    std::printf("propagate_twist == the predictor's original inline exp map (refactor regression)\n");
+    using rc::PosePropagator;
+    const rc::PropagatorParams pp{.odom_lag_ms = 0};   // the toml's OdomLagMs = 0
+    const auto wrap = [](double a) { return std::remainder(a, 2.0 * M_PI); };
+    std::printf("propagator: gyro trapezoid with the applied k_w, b_w (ramp => exact)\n");
     {
-        const auto legacy = [](const Eigen::Affine2f& base, float adv, float side, float rot, float dt_s)
-        {   // publish_predicted_tick before 2026-11-11, verbatim
-            const float base_th = std::atan2(base.linear()(1, 0), base.linear()(0, 0));
-            const float phi = rot * dt_s, vx = side * dt_s, vy = adv * dt_s;
-            float dx = vx, dy = vy;
-            if (std::abs(phi) > 1e-6f) { const float s = std::sin(phi), c = std::cos(phi);
-                dx = (s * vx - (1.f - c) * vy) / phi; dy = ((1.f - c) * vx + s * vy) / phi; }
-            Eigen::Affine2f p = Eigen::Affine2f::Identity();
-            p.linear() = Eigen::Rotation2Df(base_th + phi).toRotationMatrix();
-            p.translation() = base.translation() + base.linear() * Eigen::Vector2f(dx, dy);
-            return p;
-        };
-        const Eigen::Affine2f b = Eigen::Translation2f(2.f, -1.f) * Eigen::Rotation2Df(0.7f);
+        PosePropagator P(pp);
+        const double w0 = 0.6, ramp = 0.3;   // rad/s, rad/s^2
+        for (std::int64_t t = 1000; t <= 1200; t += 8) P.add_imu(t, static_cast<float>(w0 + ramp * (t - 1000) * 1e-3));
+        P.add_odometry(990, 0.f, 0.f, 0.5f);   // the wheels say turning: no ZUPT
+        const rc::PropagatorCalib cal{.k_w = 1.02f, .b_w = 0.003f, .k_ww = 0.9f};
+        P.reset(1003, 0.f, 0.f, 0.2f, cal);    // between two samples: the clip is exercised
+        const auto s1 = P.at(1197);
+        const double T0 = 0.003, T1 = 0.197;
+        const double want = (w0 * (T1 - T0) + 0.5 * ramp * (T1 * T1 - T0 * T0)) * 1.02 - 0.003 * (T1 - T0);
+        std::printf("  dth %.7f, analytic %.7f\n", s1->th - 0.2f, want);
+        check(s1 and std::abs(wrap(s1->th - 0.2 - want)) < 2e-6, "heading = k_w * integral(gyro) - b_w * dt");
+    }
+    std::printf("propagator: translation = wheels along the mid heading (k_v, k_lat, yaw_offset)\n");
+    {
+        PosePropagator P(pp);
+        const float w = 0.8f, v = 0.4f;
+        for (std::int64_t t = 0; t <= 1000; t += 8) P.add_imu(t, w);
+        P.add_odometry(0, v / 1.05f, 0.f, w);   // k_v = 1.05 restores v
+        P.reset(0, 1.f, 2.f, 0.3f, {.k_v = 1.05f});
+        const auto s1 = P.at(500);
+        // Exact arc for a +Y-forward body: heading th, velocity (-v sin th, v cos th).
+        const double th0 = 0.3, th1 = th0 + w * 0.5;
+        const double x = 1.0 + v / w * (std::cos(th1) - std::cos(th0)), y = 2.0 + v / w * (std::sin(th1) - std::sin(th0));
+        const double err = std::hypot(s1->x - x, s1->y - y);
+        std::printf("  (%.5f, %.5f) vs arc (%.5f, %.5f): %.3f mm\n", s1->x, s1->y, x, y, err * 1e3);
+        check(err < 1e-4, "on the arc within 0.1 mm over 0.5 s at 0.8 rad/s");
+        PosePropagator Q(pp);
+        for (std::int64_t t = 0; t <= 1000; t += 8) Q.add_imu(t, 0.f);
+        Q.add_odometry(0, 0.f, 0.3f, 0.01f);   // pure strafe, with a mount yaw offset
+        Q.reset(0, 0.f, 0.f, 0.f, {.k_lat = 1.f, .yaw_offset = 0.1f});
+        const auto q = Q.at(1000);
+        check(std::abs(q->x - 0.3f * std::cos(0.1f)) < 1e-5f and std::abs(q->y - 0.3f * std::sin(0.1f)) < 1e-5f,
+              "lateral (+X) travel rotated by yaw_offset");
+    }
+    std::printf("propagator: ZUPT — wheels stopped, a biased gyro does not turn the pose\n");
+    {
+        PosePropagator P(pp);
+        for (std::int64_t t = 0; t <= 2000; t += 8) P.add_imu(t, 0.01f);
+        P.add_odometry(0, 0.f, 0.f, 0.f);
+        P.reset(0, 0.f, 0.f, 1.f, {});
+        check(std::abs(P.at(1900)->th - 1.f) < 1e-7f, "stopped: heading held");
+        P.add_odometry(1950, 0.f, 0.f, 0.3f);   // moving again: the gyro is back
+        const auto s2 = P.at(2000);
+        check(std::abs(s2->th - 1.f - 0.01f * 0.05f) < 1e-6f, "moving: the gyro integrates from the first moving sample");
+    }
+    std::printf("propagator: reset integrates to the newest IMU sample\n");
+    {
+        PosePropagator P(pp);
+        for (std::int64_t t = 0; t <= 96; t += 8) P.add_imu(t, 0.5f);
+        P.add_odometry(0, 0.2f, 0.f, 0.5f);
+        P.reset(51, 0.f, 0.f, 0.f, {});
+        check(P.latest() and P.latest()->t_ms == 96 and std::abs(P.latest()->th - 0.5f * 0.045f) < 1e-6f, "latest() is at 96 ms, 45 ms of gyro");
+        P.reset(120, 0.f, 0.f, 0.f, {});
+        check(P.latest()->t_ms == 120, "no newer sample: latest() is the correction itself");
+    }
+    // A run: gyro 0.6 rad/s every 8 ms, wheels 0.4 m/s forward. Corrections C1 at 1004 and C2 at 1052, each landing
+    // 4 ms after its stamp (Webots) — the IMU is fed up to the landing time before the plan.
+    const auto feed = [](PosePropagator& P, std::int64_t& t_imu, std::int64_t until)
+    { for (; t_imu <= until; t_imu += 8) P.add_imu(t_imu, 0.6f); };
+    std::printf("mode (a): ticks are not written — the tail is the newest-IMU block, the spread moves the previous tail\n");
+    {
+        PosePropagator P(pp); std::deque<std::int64_t> written; std::int64_t t_imu = 800;
+        P.add_odometry(800, 0.4f, 0.f, 0.6f);
+        feed(P, t_imu, 1008);
+        const PosePropagator::Pose C1{1004, 1.f, 1.f, 0.5f};
+        auto plan1 = rc::plan_correction(P, written, C1, {}, true, 500);
+        check(plan1.spread.empty() and plan1.tail.size() == 1 and plan1.tail[0].t_ms == 1008, "C1: no base yet, tail = one block at the newest sample");
+        rc::record_rewrite(written, C1.t_ms, plan1);
+        // independent prediction of C1's tail block, made now, before anything else is fed
+        PosePropagator R1(pp); { std::int64_t ti = 800; R1.add_odometry(800, 0.4f, 0.f, 0.6f); feed(R1, ti, 1056); R1.reset(1004, 1.f, 1.f, 0.5f, {}); }
+        feed(P, t_imu, 1056);
+        const auto pred_c2 = R1.at(1052); const auto pred_t = R1.at(1008);
+        const PosePropagator::Pose C2{1052, pred_c2->x + 0.012f, pred_c2->y - 0.006f, pred_c2->th + 0.004f};   // the jump
+        auto plan2 = rc::plan_correction(P, written, C2, {}, true, 500);
+        check(plan2.tail.size() == 1 and plan2.tail[0].t_ms == 1056, "C2: tail = ONE block, the newest IMU sample");
+        check(plan2.spread.size() == 1 and plan2.spread[0].t_ms == 1008, "C2: spread = C1's tail block, the only written block in (t_k, t_c)");
+        if (plan2.spread.size() == 1)
+        {
+            const float a = (1008.f - 1004.f) / (1052.f - 1004.f);
+            const auto& s = plan2.spread[0];
+            check(std::abs(s.x - (pred_t->x + a * 0.012f)) < 1e-5f and std::abs(s.y - (pred_t->y - a * 0.006f)) < 1e-5f
+                  and std::abs(s.th - (pred_t->th + a * 0.004f)) < 1e-6f, "spread block = prediction + alpha * Delta, alpha = (t - t_k)/(t_c - t_k)");
+        }
+        rc::record_rewrite(written, C2.t_ms, plan2);
+        check(written == std::deque<std::int64_t>{1008, 1056}, "the edge's non-correction blocks: C1's (spread) tail, C2's tail");
+        // relocalisation: may_spread = false
+        feed(P, t_imu, 1104);
+        const PosePropagator::Pose C3{1100, 5.f, 5.f, 2.f};
+        auto plan3 = rc::plan_correction(P, written, C3, {}, false, 500);
+        check(plan3.spread.empty() and plan3.tail.size() == 1, "relocalisation: no spread, the tail still written");
+        rc::record_rewrite(written, C3.t_ms, plan3);
+        check(written == std::deque<std::int64_t>{1008, 1056, 1104}, "nothing before t_c rewritten without a spread");
+    }
+    std::printf("mode (b): every written tick after t_c is re-integrated from the correction\n");
+    {
+        PosePropagator P(pp); std::deque<std::int64_t> written; std::int64_t t_imu = 800;
+        P.add_odometry(800, 0.4f, 0.f, 0.6f);
+        feed(P, t_imu, 1000);
+        P.reset(1000, 0.f, 0.f, 0.f, {});
+        for (; t_imu <= 1096; t_imu += 8) { P.add_imu(t_imu, 0.6f); P.at(t_imu); written.push_back(t_imu); }   // ticks written
+        const PosePropagator::Pose C{1050, 0.03f, 0.03f, 0.05f};
+        auto plan = rc::plan_correction(P, written, C, {}, true, 500);
+        std::size_t n_after = 0, n_between = 0;
+        for (const auto t : written) { n_after += t > 1050; n_between += t > 1000 and t < 1050; }
+        check(plan.tail.size() == n_after and plan.spread.size() == n_between, "tail = the ticks after t_c, spread = the ticks in (t_k, t_c)");
+        PosePropagator R(pp); { std::int64_t ti = 800; R.add_odometry(800, 0.4f, 0.f, 0.6f); feed(R, ti, 1096); R.reset(1050, 0.03f, 0.03f, 0.05f, {}); }
         float worst = 0.f;
-        for (const float rot : {0.f, 0.8f, -1.9f})
-            for (const float dt : {0.f, 0.008f, 0.048f, 0.2f})
-                worst = std::max(worst, (rc::publish::propagate_twist(b, 0.5f, 0.05f, rot, dt).matrix()
-                                         - legacy(b, 0.5f, 0.05f, rot, dt).matrix()).cwiseAbs().maxCoeff());
-        check(worst == 0.f, "bit-identical on 12 (rot, dt) cases");
-    }
-    std::printf("every correction = TWO blocks: itself + itself re-integrated over the IMU to the newest sample\n");
-    {
-        // Webots-like clocks: the buffer key is SIM ms from 0; the wall stamp runs 6% faster (sim behind real time).
-        const std::int64_t wall0 = 1'793'641'522'000;
-        const double wall_per_sim = 1.06;
-        const auto wall_of = [&](std::int64_t sim) { return wall0 + static_cast<std::int64_t>(std::llround(sim * wall_per_sim)); };
-        const auto sim_of  = [&](std::int64_t wall) { return static_cast<std::int64_t>(std::llround((wall - wall0) / wall_per_sim)); };
-        // Gyro ramping linearly 0.6 -> ~0.9 rad/s, sampled every 8 sim-ms: the trapezoid is exact for a ramp.
-        const double w0 = 0.6, ramp = 0.3;   // rad/s, rad/s^2 (on the sim clock)
-        std::vector<rc::ImuReading> imu;
-        for (std::int64_t sim = 1000; sim <= 2048; sim += 8)
-        {
-            rc::ImuReading r;
-            r.gyro_z = static_cast<float>(w0 + ramp * (sim - 1000) * 1e-3);
-            r.sim_ts_ms = sim; r.simulated = true; r.source_ts_ms = wall_of(sim);
-            imu.push_back(r);
-        }
-        // The ring before the correction: an old correction B0 and its carried block, plus a STALE prediction after t_c.
-        const Eigen::Affine2f B0 = Eigen::Translation2f(1.f, 2.f) * Eigen::Rotation2Df(0.3f);
-        const std::uint64_t t_c = static_cast<std::uint64_t>(wall_of(2003));   // between two samples: the clip is exercised
-        std::map<std::uint64_t, Eigen::Affine2f> ring{{t_c - 50, B0}, {t_c - 10, B0}, {t_c + 20, B0}};
-        const Eigen::Affine2f C = Eigen::Translation2f(1.03f, 2.01f) * Eigen::Rotation2Df(0.344f);
-        const float adv = 0.45f, side = 0.01f, k_g = 1.02f, b_g = 0.003f;
-        const std::int64_t t_c_key = sim_of(static_cast<std::int64_t>(t_c));
-        const auto c = rc::publish::predict_to_newest_imu(C, static_cast<std::int64_t>(t_c), t_c_key, imu, true, adv, side, k_g, b_g);
-        check(c.has_value(), "a correction with newer IMU samples is carried");
-        if (c.has_value())
-        {
-            check(c->ts_ms == static_cast<std::uint64_t>(imu.back().source_ts_ms), "block 2 is stamped with the newest sample's WALL stamp");
-            // Independent: integral of the ramp over (t_c_key, 2048] on the sim clock, calibrated.
-            const double T0 = (t_c_key - 1000) * 1e-3, T1 = (2048 - 1000) * 1e-3;
-            const double raw = w0 * (T1 - T0) + 0.5 * ramp * (T1 * T1 - T0 * T0);
-            const double want = raw * k_g - b_g * (T1 - T0);
-            const float yaw_c = std::atan2(C.linear()(1, 0), C.linear()(0, 0));
-            const float yaw_p = std::atan2(c->pose.linear()(1, 0), c->pose.linear()(0, 0));
-            std::printf("  dyaw: carried %.6f rad, analytic integrated gyro %.6f rad\n", std::remainder(yaw_p - yaw_c, 2.0 * M_PI), want);
-            check(std::abs(std::remainder(yaw_p - yaw_c - want, 2.0 * M_PI)) < 1e-5, "block 2's yaw = the correction's + the integrated (calibrated) gyro");
-            // Translation runs on WALL time with the cached twist: ~|v| * (t_imu - t_c)_wall.
-            const float d = (c->pose.translation() - C.translation()).norm();
-            const float want_d = std::hypot(adv, side) * static_cast<float>(c->ts_ms - t_c) * 1e-3f;
-            std::printf("  translation %.5f m, |v| * wall gap %.5f m\n", d, want_d);
-            check(std::abs(d - want_d) < 2e-4f, "translation = cached twist over the WALL gap (chord, within 0.2 mm)");
-            // cortex's rewrite_edge_RT_since contract: drop every block >= t_c, write the two.
-            std::erase_if(ring, [&](const auto& kv) { return kv.first >= t_c; });
-            ring[t_c] = C;
-            ring[c->ts_ms] = c->pose;
-            check(ring.size() == 4 and ring.contains(t_c - 50) and ring.contains(t_c - 10)
-                  and ring.at(t_c - 50).isApprox(B0) and not ring.contains(t_c + 20),
-                  "the past is untouched, the stale prediction after t_c is gone, two blocks added");
-        }
-        // No IMU sample newer than the correction (the newest is at sim 2048): the correction goes alone.
-        const std::uint64_t t_late = static_cast<std::uint64_t>(wall_of(2060));
-        check(not rc::publish::predict_to_newest_imu(C, static_cast<std::int64_t>(t_late), sim_of(static_cast<std::int64_t>(t_late)),
-                                                     imu, true, adv, side, k_g, b_g).has_value(),
-              "a correction with no newer IMU sample gives ONE block");
-        // History not reaching back to t_c: refused (partial coverage under-rotates), the correction goes alone.
-        const std::vector<rc::ImuReading> short_imu(imu.end() - 3, imu.end());
-        check(not rc::publish::predict_to_newest_imu(C, static_cast<std::int64_t>(t_c), t_c_key, short_imu, true, adv, side, k_g, b_g).has_value(),
-              "an IMU history that does not bracket (t_c, t_imu] is refused");
-    }
-    std::printf("real robot (one clock), constant gyro: the piecewise carry == propagate_twist in one step\n");
-    {
-        std::vector<rc::ImuReading> imu;
-        for (std::int64_t t = 5000; t <= 5100; t += 10)
-        { rc::ImuReading r; r.gyro_z = 0.8f; r.source_ts_ms = t; imu.push_back(r); }
-        const Eigen::Affine2f C = Eigen::Translation2f(-0.7f, 2.7f) * Eigen::Rotation2Df(2.2f);
-        const auto c = rc::publish::predict_to_newest_imu(C, 5043, 5043, imu, false, 0.4f, -0.02f, 1.f, 0.f);
-        const auto one = rc::publish::propagate_twist(C, 0.4f, -0.02f, 0.8f, 0.057f);
-        check(c.has_value() and c->ts_ms == 5100 and (c->pose.matrix() - one.matrix()).cwiseAbs().maxCoeff() < 1e-5f,
-              "constant twist: composing the 7 pieces equals one exp-map step");
+        for (const auto& s : plan.tail) { const auto r = R.at(s.t_ms); worst = std::max({worst, std::abs(s.x - r->x), std::abs(s.y - r->y), std::abs(s.th - r->th)}); }
+        check(worst < 1e-6f and plan.tail.back().t_ms == 1096, "each re-integrated tick == the correction propagated to it; the last is the newest");
+        // the spread at t -> t_c reaches the correction, at t -> t_k stays at the old prediction: no step at either end
+        check(plan.spread.front().t_ms == 1008 and plan.spread.back().t_ms == 1048, "spread spans the ticks strictly inside (t_k, t_c)");
+        rc::record_rewrite(written, C.t_ms, plan);
+        check(written.size() == n_between + n_after and std::ranges::is_sorted(written), "ticks keep their stamps, ascending");
     }
     std::printf(failures == 0 ? "all ok (0 failures)\n" : "FAILED (%d failures)\n", failures);
     return failures == 0 ? 0 : 1;

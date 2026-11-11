@@ -3,10 +3,9 @@
  *    This file is part of RoboComp — see room_scene_graph.h.
  */
 // THE GYRO HEADING INTEGRAL, ONE IMPLEMENTATION. Extracted 2026-11-11 from RoomConcept::OdomSources::imu_dtheta
-// (room_concept_odometry_window.cpp), which now calls it, so the motion prior and the published prediction
-// (rc::publish::predict_to_newest_imu, the second block of every correction's RT rewrite) integrate the gyro the
-// same way: trapezoid across each sample pair, clipped to the segment, refused unless the history brackets the
-// WHOLE segment (a partial integral silently under-rotates).
+// (room_concept_odometry_window.cpp), which calls it: trapezoid across each sample pair, clipped to the segment,
+// refused unless the history brackets the WHOLE segment (a partial integral silently under-rotates). The published
+// pose between corrections integrates the same trapezoid in rc::PosePropagator (pose_propagator.h), on the wall clock.
 #pragma once
 
 #include "common_types.h"

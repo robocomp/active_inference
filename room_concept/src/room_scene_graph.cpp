@@ -11,7 +11,6 @@
 #include <ranges>
 #include "entry_reloc.h"
 #include "room_scene_graph.h"
-#include "published_pose.h"                                   // rc::publish::predict_to_newest_imu (the correction's 2nd block)
 #include "status_reporter.h"
 #include "wall_sync.h"                                       // rc::walls::plan_wall_sync (rule 1)
 #include "door_crossing.h"                                   // rc::crossing (proto-room evidence)
@@ -191,8 +190,9 @@ void RoomSceneGraph::on_controller_lost()
 
 ///////////////////////////////////////////////////////////////////////////////
 void RoomSceneGraph::update(const rc::RoomConcept::UpdateResult& res, float adv, float side, float rot,
-                           bool write_rt)
+                           bool write_rt, const std::vector<RtTail>* tail)
 {
+    last_pose_write_ = {};
     last_adv_  = adv;
     last_side_ = side;
     last_rot_  = rot;
@@ -418,7 +418,7 @@ void RoomSceneGraph::update(const rc::RoomConcept::UpdateResult& res, float adv,
                 if (G_->update_node(rn.value())) published_is_lost_ = lost;
             }
         if (write_rt)
-            dsr_update_pose(res);   // robot->room RT (skipped when the odometry publisher owns it)
+            dsr_update_pose(res, tail);   // robot->room RT (skipped when the odometry publisher owns it)
         if (params_->PUBLISH_AFFORDANCE)
             dsr_update_affordance(res); // publish epistemic target affordance (off ⇒ room never competes)
         // ★NOT GATED ON PUBLISH_AFFORDANCE, and not gated on CalibPivotEnabled either. The PASSIVE
@@ -462,94 +462,58 @@ void RoomSceneGraph::dsr_publish_body_calibration(const rc::RoomConcept::UpdateR
 
 ///////////////////////////////////////////////////////////////////////////////
 
-void RoomSceneGraph::dsr_update_pose(const rc::RoomConcept::UpdateResult& res)
+void RoomSceneGraph::dsr_update_pose(const rc::RoomConcept::UpdateResult& res, const std::vector<RtTail>* tail)
 {
-    // EVERY CORRECTION IS WRITTEN AS TWO BLOCKS through RT_API::rewrite_edge_RT_since (owner, 2026-11-11): (t_c, the
-    // correction) and (t_imu, the correction RE-INTEGRATED over the IMU samples in (t_c, t_imu]), t_imu the newest
-    // sample's wall stamp — rc::publish::predict_to_newest_imu, whose comment has the model. The rewrite drops every
-    // block stamped >= t_c, so no prediction made from an older correction survives after it. No IMU sample newer
-    // than t_c (or no coverage) ⇒ the correction alone, through the same call.
-    // ORDER GUARD: only the NEWEST correction rewrites; an out-of-order older one is a plain insert, or it would drop a
-    // newer correction from the ring.
+    // The NEWEST correction rewrites the ring from its earliest block — itself, the spread blocks before it and the
+    // re-integrated tail after it, built by PosePublisher (pose_propagator.h plan_correction) — in ONE publish
+    // (RT_API::rewrite_edge_RT_since), so a reader never sees a prediction made from the previous correction after t_c,
+    // nor a correction half-written. ORDER GUARD: an out-of-order (older) correction is a plain insert, or it would drop
+    // a newer correction from the ring; so is a correction without a tail (RoomConcept.RtRewriteTail = false).
     const auto t_c = static_cast<std::uint64_t>(res.timestamp_ms);
     const bool newest_correction = t_c > last_correction_ts_;
     last_correction_ts_ = std::max(last_correction_ts_, t_c);
-
-    std::optional<std::pair<std::uint64_t, Eigen::Affine2f>> carried;
-    if (newest_correction and imu_buffer_ != nullptr)
-    {
-        const auto imu = imu_buffer_->get_snapshot<0>();
-        if (imu.size() >= 2)
-        {
-            // The buffer is keyed on the producer's clock (sim in Webots): t_c is mapped onto it exactly as
-            // integrate_odometry_over_window maps its lidar bounds. Simulated with no valid map yet ⇒ the two clocks
-            // cannot be related, so the correction goes alone rather than integrating over a wrong interval.
-            const bool simulated     = imu.back().simulated;
-            const bool use_sim_clock = simulated and sim_clock_ != nullptr and sim_clock_->valid();
-            if (not simulated or use_sim_clock)
-            {
-                const auto t_c_wall = static_cast<std::int64_t>(t_c);
-                const std::int64_t t_c_key = use_sim_clock ? sim_clock_->to_sim(t_c_wall) : t_c_wall;
-                // The gyro calibration the motion prior applied this frame (MotionCalibration::omega_scale/_bias:
-                // the value when acting, nominal otherwise) — same dpsi = k_g * raw - b_g * dt as the prior.
-                const auto acting = [&res](int p) { return (res.calib_applied & (1 << p)) != 0; };
-                const float k_g = acting(rc::calib::P_K_OMEGA) ? 1.f + res.calib_value[rc::calib::P_K_OMEGA] : 1.f;
-                const float b_g = acting(rc::calib::P_B_OMEGA) ? res.calib_value[rc::calib::P_B_OMEGA] : 0.f;
-                if (const auto c = rc::publish::predict_to_newest_imu(res.robot_pose, t_c_wall, t_c_key, imu, use_sim_clock,
-                                                                      last_adv_, last_side_, k_g, b_g);
-                    c.has_value())
-                    carried.emplace(c->ts_ms, c->pose);
-                else if (imu.back().effective_ts_ms() <= t_c_wall) ++carry_diag_[2];   // no IMU sample newer than t_c
-                else ++carry_diag_[3];                                                 // the gyro history does not cover (t_c, t_imu]
-                carry_diag_lead_ms_ = double(imu.back().effective_ts_ms()) - double(t_c_wall);
-            }
-            else ++carry_diag_[1];   // simulated, sim clock map not valid
-        }
-    }
-    if (carried.has_value()) ++carry_diag_[0];
-    // DIAGNOSTIC (2026-11-11): why the second block is or is not written, every 10 s
-    if (const auto now_ms = QDateTime::currentMSecsSinceEpoch(); now_ms - carry_diag_t_ms_ > 10000)
-    {
-        std::println("[pose] two-block write over the last {:.0f} s: carried {} | no sim map {} | no IMU after t_c {} | gyro not covering {} | "
-                     "last newest-IMU minus t_c {:.0f} ms", (now_ms - carry_diag_t_ms_) * 1e-3, carry_diag_[0], carry_diag_[1], carry_diag_[2],
-                     carry_diag_[3], carry_diag_lead_ms_);
-        carry_diag_ = {}; carry_diag_t_ms_ = now_ms;
-    }
-    write_robot_room_rt(res.robot_pose, res.covariance, t_c, 0, newest_correction, carried);
+    const std::vector<RtTail>* rewrite = newest_correction ? tail : nullptr;
+    last_pose_write_.written = write_robot_room_rt(res.robot_pose, res.covariance, t_c, 0, rewrite);
+    last_pose_write_.rewrote = last_pose_write_.written and rewrite != nullptr;
 }
 
 // High-rate predicted pose (dead-reckoned between lidar corrections): same RT edge, same frame/cov
-// conversion as a corrected pose — only the source and the (grown) covariance + validity stamp differ.
-void RoomSceneGraph::dsr_publish_predicted_pose(const Eigen::Affine2f& robot_pose,
+// conversion as a corrected pose — only the source, the validity stamp and the twist at that instant differ.
+bool RoomSceneGraph::dsr_publish_predicted_pose(const Eigen::Affine2f& robot_pose,
                                                 const Eigen::Matrix3f& covariance,
-                                                std::uint64_t timestamp_ms)
+                                                std::uint64_t timestamp_ms, float adv, float side, float rot)
 {
-    write_robot_room_rt(robot_pose, covariance, timestamp_ms);
+    last_adv_ = adv; last_side_ = side; last_rot_ = rot;
+    return write_robot_room_rt(robot_pose, covariance, timestamp_ms);
 }
 
 // Shared writer for the robot↔room RT edge. `robot_pose`/`covariance` are the room←robot estimate
 // (room frame); when the room is a child of the robot we invert to robot→room (pose AND cov Jacobian)
 // before the timestamped ring-buffer write. Called by both the corrected and predicted paths.
-void RoomSceneGraph::write_robot_room_rt(const Eigen::Affine2f& robot_pose_int,
+bool RoomSceneGraph::write_robot_room_rt(const Eigen::Affine2f& robot_pose_int,
                                          const Eigen::Matrix3f& covariance_int,
                                          std::uint64_t timestamp_ms,
                                          std::uint64_t child_override,
-                                         bool rewrite_since,
-                                         std::optional<std::pair<std::uint64_t, Eigen::Affine2f>> carried)
+                                         const std::vector<RtTail>* tail_int)
 {
-    if (!G_ || !rt_api_) return;
+    if (!G_ || !rt_api_) return false;
     // `robot_pose_int`/`covariance_int` are in the estimator's INTERNAL frame for child_override == 0, and
     // already in the child's frame otherwise. The two names below are what gets WRITTEN.
     Eigen::Affine2f robot_pose = robot_pose_int;
     Eigen::Matrix3f covariance = covariance_int;
-    // The carried block (if any) is in the same frame as robot_pose and goes through every map below with it. Both
-    // maps are LEFT compositions and the carry is a RIGHT one (propagate_twist), so mapping it is the same as carrying
-    // the mapped correction.
-    const auto carried_int = carried;
-    const auto map_carried = [](const auto& c, const Eigen::Affine2f& T)
+    // The tail blocks (if any) are in the same frame as robot_pose and go through every map below with it. Both maps
+    // are LEFT compositions and the propagation is a RIGHT one (a body increment), so mapping a propagated pose is the
+    // same as propagating the mapped correction; the twist is body-frame and does not change.
+    const auto map_tail = [](const std::vector<RtTail>& in, const Eigen::Affine2f& T, const Eigen::Matrix3f& A)
     {
-        return c.has_value() ? std::optional(std::pair{c->first, Eigen::Affine2f(T * c->second)}) : std::nullopt;
+        std::vector<RtTail> out;
+        out.reserve(in.size());
+        for (const auto& b : in)
+            out.push_back({T * b.pose, A * b.covariance * A.transpose(), b.timestamp_ms, b.adv, b.side, b.rot});
+        return out;
     };
+    std::vector<RtTail> tail_mapped;
+    const std::vector<RtTail>* tail = tail_int;
 
     // ── SAFETY BARRIER: never publish a non-finite pose to the graph ─────────────────────────────
     // This RT edge is what every other agent — including the controller that drives the wheels —
@@ -580,14 +544,14 @@ void RoomSceneGraph::write_robot_room_rt(const Eigen::Affine2f& robot_pose_int,
                             << "publishing no pose at all rather than one in a frame nobody can name."
                             << "proto_id=" << proto_room_id_;
             }
-            return;
+            return false;
         }
         const Eigen::Affine2f T_proto_room = T_room_proto_.inverse();
         Eigen::Matrix3f A = Eigen::Matrix3f::Identity();
         A.topLeftCorner<2, 2>() = T_proto_room.linear();
-        write_robot_room_rt(T_proto_room * robot_pose, A * covariance * A.transpose(), timestamp_ms,
-                            proto_room_id_, rewrite_since, map_carried(carried, T_proto_room));
-        return;
+        if (tail_int != nullptr) tail_mapped = map_tail(*tail_int, T_proto_room, A);
+        return write_robot_room_rt(T_proto_room * robot_pose, A * covariance * A.transpose(), timestamp_ms,
+                                   proto_room_id_, tail_int != nullptr ? &tail_mapped : nullptr);
     }
 
     // ── THE START-UP PROTO'S FRAME IS FROZEN AT THE ROBOT'S INITIAL POSE ─────────────────────────────
@@ -601,7 +565,7 @@ void RoomSceneGraph::write_robot_room_rt(const Eigen::Affine2f& robot_pose_int,
         A.topLeftCorner<2, 2>() = T_pub_int_.linear();
         robot_pose = T_pub_int_ * robot_pose_int;
         covariance = A * covariance_int * A.transpose();
-        carried    = map_carried(carried_int, T_pub_int_);
+        if (tail_int != nullptr) { tail_mapped = map_tail(*tail_int, T_pub_int_, A); tail = &tail_mapped; }
     }
 
     const bool pose_finite = robot_pose.matrix().allFinite() and covariance.allFinite();
@@ -612,7 +576,7 @@ void RoomSceneGraph::write_robot_room_rt(const Eigen::Affine2f& robot_pose_int,
             qCritical() << "[SAFETY] refusing to publish NON-FINITE robot RT (pose_finite="
                         << robot_pose.matrix().allFinite() << "cov_finite=" << covariance.allFinite()
                         << ") — keeping the last good edge; localizer is diverged, count=" << nan_rt_k;
-        return;
+        return false;
     }
 
     const auto describe_node = [this](uint64_t id) -> QString
@@ -663,13 +627,13 @@ void RoomSceneGraph::write_robot_room_rt(const Eigen::Affine2f& robot_pose_int,
     {
         qWarning() << "dsr_update_pose called before the room node exists — this agent no longer has a"
                    << "pre-room publication mode; skipping rather than writing to root->robot.";
-        return;
+        return false;
     }
     const uint64_t parent_id = dsr_robot_id_;
     const uint64_t child_id  = child_override != 0 ? child_override : dsr_room_id_;
 
     auto parent_opt = G_->get_node(parent_id);
-    if (!parent_opt.has_value()) return;
+    if (!parent_opt.has_value()) return false;
 
     if (!G_->get_node(child_id).has_value())
     {
@@ -680,15 +644,17 @@ void RoomSceneGraph::write_robot_room_rt(const Eigen::Affine2f& robot_pose_int,
         log_cached_ids("destination node missing", child_id);
         if (room_node_created_ && child_id == dsr_room_id_)
             forget_room("destination node missing");
-        return;
+        return false;
     }
 
     // ── ONE RING BLOCK PER POSE ──────────────────────────────────────────────────────────────────
     // Everything below that depends on the pose — the robot->room inversion, the covariance Jacobian, the
     // twist adjoint (its lever arm is the pose's translation) — is one function of the pose, because a
-    // CORRECTION writes two blocks: itself and itself carried to the newest IMU sample (rewrite_since, at the
-    // write below). Both go through this same code. `pose` is room<-robot in the WRITTEN frame.
-    const auto rt_block_of = [&](const Eigen::Affine2f& pose) -> DSR::RT_API::RTBlock
+    // CORRECTION writes several blocks: itself, the spread blocks before it and the re-integrated tail after it (the
+    // rewrite below). All go through this same code. `pose`/`cov` are room<-robot in the WRITTEN frame; adv/side/rot
+    // the body twist at that block's instant.
+    const auto rt_block_of = [&](const Eigen::Affine2f& pose, const Eigen::Matrix3f& cov,
+                                 float adv, float side, float rot) -> DSR::RT_API::RTBlock
     {
         const Eigen::Matrix2f R = pose.linear();
         const Eigen::Vector2f t = pose.translation();
@@ -707,8 +673,8 @@ void RoomSceneGraph::write_robot_room_rt(const Eigen::Affine2f& robot_pose_int,
 
         // ── Covariance (SE2 3×3 packed into 6×6 flat row-major) ───────────────
         Eigen::Matrix3f cov_se2 = Eigen::Matrix3f::Identity();
-        if (covariance.rows() >= 3 && covariance.cols() >= 3)
-            cov_se2 = covariance.topLeftCorner<3, 3>();
+        if (cov.rows() >= 3 && cov.cols() >= 3)
+            cov_se2 = cov.topLeftCorner<3, 3>();
 
         if (room_node_created_)
         {
@@ -832,13 +798,13 @@ void RoomSceneGraph::write_robot_room_rt(const Eigen::Affine2f& robot_pose_int,
         // the velocity uncertainty is no longer the body-fixed diagonal it is in the robot's own frame,
         // because how fast the room appears to move depends on where the robot is standing in it. That
         // is a true consequence of the room being the child, not an approximation.
-        const Eigen::Vector2f v_body{last_side_, last_adv_};          // axis order: x lateral, y forward
+        const Eigen::Vector2f v_body{side, adv};          // axis order: x lateral, y forward
         Eigen::Matrix3f adjoint = Eigen::Matrix3f::Identity();
         adjoint.topLeftCorner<2, 2>() = R;
         adjoint(0, 2) =  t.y();
         adjoint(1, 2) = -t.x();
-        const Eigen::Vector2f v_child = -(R * v_body + last_rot_ * Eigen::Vector2f{t.y(), -t.x()});
-        const float           w_child = -last_rot_;
+        const Eigen::Vector2f v_child = -(R * v_body + rot * Eigen::Vector2f{t.y(), -t.x()});
+        const float           w_child = -rot;
         const Eigen::Matrix3f child_vel_cov = adjoint * body_vel_cov * adjoint.transpose();
 
         // Pack the SE(2) block into the 6x6 row-major SE(3) layout [x, y, z, rx, ry, rz]: rows/cols
@@ -915,28 +881,29 @@ void RoomSceneGraph::write_robot_room_rt(const Eigen::Affine2f& robot_pose_int,
     // failure: an extrapolation worse than not extrapolating.
     // ★BOTH PAIRS ARE WRITTEN during the migration. The legacy attributes below still feed the four
     // consumers that have not moved to the ring yet; they go once those do.
-    // ── THE NEWEST CORRECTION REWRITES THE RING FROM ITS STAMP: ITSELF + ITSELF CARRIED TO THE NEWEST IMU SAMPLE ──
-    // A correction for t_c lands ~40 ms late. RT_API::rewrite_edge_RT_since drops every block stamped >= t_c and
-    // writes {(t_c, correction), (t_imu, carried)} in ONE publish, so a reader never sees a prediction made from the
-    // previous correction after t_c (measured 2026-10-26: 0.12 deg p90 of step between the two while turning
-    // > 0.7 rad/s; see cortex dsr_rt_api.h) and the newest block is as recent as the IMU. `carried` is the correction
-    // re-integrated over the IMU (dsr_update_pose → rc::publish::predict_to_newest_imu); its covariance is the
-    // correction's, NOT grown with t_imu - t_c — cortex's Extrapolated read already grows a walked block's covariance
-    // by the stored twist covariance, and growing it here would need a noise density this writer does not own.
-    // Its twist is the same cached twist (last_adv_/_side_/_rot_, via rt_block_of).
-    // On an edge with no ring yet the call degrades to insert_or_assign_edge_RT per block (cortex contract).
-    // An out-of-order (not newest) correction, or a predicted write (RoomConcept.PredictedTicks), is the plain insert.
+    // ── THE NEWEST CORRECTION REWRITES THE RING FROM ITS EARLIEST BLOCK, IN ONE PUBLISH ──────────────────────────────
+    // A correction for t_c lands after t_c (~43 ms on Shadow, ~4 ms in Webots). RT_API::rewrite_edge_RT_since drops
+    // every block stamped >= the earliest it is given and writes {(t_c, correction)} + `tail`: the spread blocks in
+    // (t_k, t_c) moved by their share of the jump, and the blocks after t_c re-integrated from the correction up to the
+    // newest IMU sample (PosePublisher, pose_propagator.h). So a reader never sees a prediction made from the previous
+    // correction after t_c (measured 2026-10-26: 0.12 deg p90 of step while turning > 0.7 rad/s; see cortex
+    // dsr_rt_api.h), never a step at t_c, and never the ring half rewritten. Tail covariances are the correction's, NOT
+    // grown with t - t_c: cortex's Extrapolated read already grows a walked block's covariance by the stored twist
+    // covariance, and growing it here would need a noise density this writer does not own. Each tail block carries
+    // its own twist. On an edge with no ring yet the call degrades to insert_or_assign_edge_RT per block (cortex).
+    // An out-of-order correction, RtRewriteTail = false, or a predicted tick (RoomConcept.PredictedTicks) is the plain insert.
     try
     {
-        if (not rewrite_since)
-            rt_api_->insert_or_assign_edge_RT(parent_opt.value(), child_id, rt_block_of(robot_pose), timestamp_ms);
+        if (tail == nullptr)
+            rt_api_->insert_or_assign_edge_RT(parent_opt.value(), child_id,
+                                              rt_block_of(robot_pose, covariance, last_adv_, last_side_, last_rot_), timestamp_ms);
         else
         {
             std::vector<std::pair<std::uint64_t, DSR::RT_API::RTBlock>> blocks;
-            blocks.reserve(2);
-            blocks.emplace_back(timestamp_ms, rt_block_of(robot_pose));
-            if (carried.has_value() and carried->first > timestamp_ms)
-                blocks.emplace_back(carried->first, rt_block_of(carried->second));
+            blocks.reserve(1 + tail->size());
+            blocks.emplace_back(timestamp_ms, rt_block_of(robot_pose, covariance, last_adv_, last_side_, last_rot_));
+            for (const auto& b : *tail)
+                blocks.emplace_back(b.timestamp_ms, rt_block_of(b.pose, b.covariance, b.adv, b.side, b.rot));
             rt_api_->rewrite_edge_RT_since(parent_opt.value(), child_id, std::move(blocks));
         }
     }
@@ -946,7 +913,7 @@ void RoomSceneGraph::write_robot_room_rt(const Eigen::Affine2f& robot_pose_int,
         log_cached_ids("insert_or_assign_edge_RT failed", child_id);
         if (room_node_created_ && child_id == dsr_room_id_)
             forget_room("insert_or_assign_edge_RT failed");
-        return;
+        return false;
     }
 
     // ── THE PROTO-ROOM RIDES ON THE SAME POSE ─────────────────────────────────────────────────────
@@ -966,12 +933,14 @@ void RoomSceneGraph::write_robot_room_rt(const Eigen::Affine2f& robot_pose_int,
             const Eigen::Affine2f T_proto_room = T_room_proto_.inverse();
             Eigen::Matrix3f A = Eigen::Matrix3f::Identity();
             A.topLeftCorner<2, 2>() = T_proto_room.linear();
-            // From the INTERNAL pose: T_room_proto_ is the crossing proto in the internal frame.
+            // From the INTERNAL pose: T_room_proto_ is the crossing proto in the internal frame. Same blocks, same publish shape.
+            std::vector<RtTail> tail_proto;
+            if (tail_int != nullptr) tail_proto = map_tail(*tail_int, T_proto_room, A);
             write_robot_room_rt(T_proto_room * robot_pose_int, A * covariance_int * A.transpose(), timestamp_ms,
-                                proto_room_id_, rewrite_since, map_carried(carried_int, T_proto_room));   // same two blocks
+                                proto_room_id_, tail_int != nullptr ? &tail_proto : nullptr);
         }
     }
-
+    return true;
 }
 
 ///////////////////////////////////////////////////////////////////////////////

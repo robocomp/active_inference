@@ -68,7 +68,8 @@ public:
     /// between the lidar-paced corrected ones without polling. The callback must be cheap and must do
     /// its own locking against anything it shares with other threads -- it runs inline in the ingest
     /// loop, so a slow or blocking callback delays every subsequent IMU sample's delivery.
-    void set_on_new_sample(std::function<void(std::int64_t)> cb) { on_new_sample_ = std::move(cb); }
+    /// Arguments: (wall stamp, gyro_z rad/s raw).
+    void set_on_new_sample(std::function<void(std::int64_t, float)> cb) { on_new_sample_ = std::move(cb); }
 
 private:
     void loop();
@@ -90,6 +91,6 @@ private:
     std::int64_t            last_key_ms_    = 0;
     std::int64_t            last_try_ms_    = 0;
     std::atomic<std::uint64_t> served_{0};
-    std::function<void(std::int64_t)> on_new_sample_;
+    std::function<void(std::int64_t, float)> on_new_sample_;
 };
 } // namespace rc
