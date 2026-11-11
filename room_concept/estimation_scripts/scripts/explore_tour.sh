@@ -3,8 +3,9 @@
 # memory, no scripted legs. The controller's exploration drive (`explore_tour on`, controller/src/exploration_drive.h) explores
 # each room until it is promoted (or ExploreTour.MaxRoomS), crosses the nearest found, uncrossed door, else returns through
 # the room's first entry door; it ends with "[explore-tour] DONE". Config restored on exit; memory archived, never deleted.
-# usage: explore_tour.sh <run_name>      env RUN_LIMIT_S (3600), WT (rt-build)
+# usage: explore_tour.sh <run_name>      env RUN_LIMIT_S (3600), WT (rt-build), START ("x y theta", world)
 RUN=${1:?run name}
+T_START=$(date +%s)   # for the run's own layout snapshots (below)
 S=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 LOCK=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/ai_fleet_tour.lock
 if [ -s $LOCK ] && ps -p $(cat $LOCK) >/dev/null 2>&1; then echo "tour lock held by $(cat $LOCK)"; exit 3; fi
@@ -36,7 +37,8 @@ rm -f ../etc/last_robot_pose.txt ../etc/room_name_hwm.txt $B/ltsm_agent/etc/ltsm
 rm -rf $B/retina/etc/place_maps/
 for d in DOOR_0 DOOR_1 DOOR_2; do python3 scripts/door.py close $d; done
 sleep 3
-NORUN=1 bash scripts/run_crossing.sh crossing/$RUN -5.33 3.66 0.58 >/dev/null 2>&1
+# START="x y theta" (world): the start pose; default room_1's (-5.33 3.66 0.58). Used before: room_2 -6.54 11.46 -2.78, room_3 0.03 9.88 2.65
+NORUN=1 bash scripts/run_crossing.sh crossing/$RUN ${START:--5.33 3.66 0.58} >/dev/null 2>&1
 sleep 25
 now_ms() { date +%s%3N; }
 nl() { wc -l < $L/$1.log 2>/dev/null || echo 0; }
@@ -51,10 +53,16 @@ RUN_LIMIT_S=${RUN_LIMIT_S:-3600}
 echo run > $B/controller/remote_cmd.txt; sleep 2
 echo "explore_tour on" > $B/controller/remote_cmd.txt
 t0=$(date +%s); result="RUN LIMIT ($RUN_LIMIT_S s)"
+# COMPLETION = EVERY DOOR CROSSED (owner 2026-11-11: "a more fair demonstration of layout estimation and exploration"),
+# judged on the ground-truth track (doors_crossed.py). The drive's own DONE / STUCK before that is an INCOMPLETE tour.
 while (( $(date +%s) - t0 < RUN_LIMIT_S )); do
-  if grep -a -q "\[explore-tour\] DONE" $L/controller.log; then result="DONE in $(( $(date +%s)-t0 )) s"; break; fi
+  dc=$(python3 -I $S/doors_crossed.py crossing/$RUN/gt_pose.tsv 2>/dev/null)
+  case "$dc" in 3/3*) result="ALL DOORS CROSSED in $(( $(date +%s)-t0 )) s ($dc)"; break;; esac
+  if end=$(grep -a -o "\[explore-tour\] \(DONE\|STUCK\)" $L/controller.log | tail -1) && [ -n "$end" ]; then
+    result="INCOMPLETE: the drive ended (${end#\[explore-tour\] }) after $(( $(date +%s)-t0 )) s with doors crossed $dc"; break; fi
   sleep 5
 done
+[[ "$result" == RUN* ]] && result="$result — doors crossed $(python3 -I $S/doors_crossed.py crossing/$RUN/gt_pose.tsv 2>/dev/null)"
 echo "explore_tour: $result" | tee crossing/$RUN/result.txt
 echo "explore_tour off" > $B/controller/remote_cmd.txt; sleep 2
 # the drive's CSV from THIS run only (final review M2: the main checkout keeps an older one)
@@ -63,5 +71,12 @@ if [ -n "$CSV" ] && [ "$CSV" -nt crossing/$RUN/legs.txt -o "$(stat -c %Y $CSV)" 
 else echo "WARN: no exploration_drive.csv written by this run (newest: ${CSV:-none})"; fi
 python3 scripts/tp.py get > crossing/$RUN/end_pose.txt 2>&1
 bash scripts/run_crossing.sh crossing/$RUN collect >/dev/null 2>&1
+# LAYOUT SNAPSHOTS FOR THE PAPER'S MOSAIC (owner 2026-11-11): every LTSM generation of THIS run (memory + its global layout,
+# written at each promotion / eviction) and every layout SVG written during it, kept in the run itself — the next tour
+# archives ltsm_history under ITS OWN name, so without this a run's progress lives in another run's archive.
+cp -r $B/ltsm_agent/etc/ltsm_history crossing/$RUN/ltsm_history 2>/dev/null
+mkdir -p crossing/$RUN/layout_svgs
+find $B/layouts/learnt -name '*.svg' -newermt "@$T_START" -exec cp {} crossing/$RUN/layout_svgs/ \; 2>/dev/null
+echo "layout snapshots: $(ls crossing/$RUN/ltsm_history 2>/dev/null | grep -c _layout.json) LTSM generation(s), $(ls crossing/$RUN/layout_svgs | wc -l) SVG(s)"
 python3 $S/grade_explore_tour.py crossing/$RUN
 echo "done: crossing/$RUN"
