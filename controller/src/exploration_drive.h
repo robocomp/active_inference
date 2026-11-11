@@ -99,6 +99,12 @@ public:
                                  { return d.believed and not d.found and not d.crossed and not crossed_.contains(d.door)
                                           and d.door != entry.value_or("") and not failed.contains(d.door); });
         if ((remembered_uncrossed > 0 or not doors_are_settled or door_coming) and not timed_out) return {};   // an open door question: leaving for good waits, MaxRoomS bounds it
+        // ★ THE START ROOM WITH NO DOOR AT ALL is not evidence of a house with one room (clean43, 2026-11-11: the robot started in
+        //   room_2, a small room whose shape converged — promoted — before it moved; every door was shut at the start and none was
+        //   born yet; the drive read "no uncrossed door anywhere" and ended the tour DONE 5 s in). Every other room has at least the
+        //   door it was entered by; the start room has none until one is found. So no door known there is an open door question,
+        //   bounded by the same MaxRoomS — the room's own exploration goes on and finds its doors.
+        if (not entry.has_value() and doors.empty() and not timed_out) return {};
         // a Return that already failed is not retried (final review C2): the drive stops and says so
         if (entry.has_value() and failed.contains(*entry)) return {.cause = Cause::Stuck, .door = std::nullopt, .is_return = false};
         if (entry.has_value()) return {.cause = Cause::Return, .door = *entry, .is_return = true};
@@ -162,7 +168,10 @@ public:
     }
 
 private:
-    /// The nearest door of `room` that is found, not crossed, not the room's entry and not failed this visit (nullptr = none).
+    /// The nearest door of `room` that is found, believed, not crossed, not the room's entry and not failed this visit (nullptr = none).
+    /// ★ BELIEVED is read HERE, each decision, not frozen into `failed_` (clean46, 2026-11-11: door_7 = DOOR_0 dipped to P 0.41 for a
+    ///   few seconds, was marked failed for the visit, recovered to 0.97 and was never taken again — the tour ended DONE at 2/3 doors).
+    ///   A door below 1/2 is skipped while it stays there, and comes back when its belief does.
     [[nodiscard]] const DoorCand* best_door(const std::string& room, const std::vector<DoorCand>& doors)
     {
         const auto entry = entry_door(room);
@@ -170,7 +179,7 @@ private:
         const DoorCand* best = nullptr;
         for (const auto& d : doors)
         {
-            if (not d.found or d.crossed or crossed_.contains(d.door) or (entry.has_value() and d.door == *entry) or failed.contains(d.door)) continue;
+            if (not d.found or not d.believed or d.crossed or crossed_.contains(d.door) or (entry.has_value() and d.door == *entry) or failed.contains(d.door)) continue;
             if (best == nullptr or d.dist_m < best->dist_m) best = &d;
         }
         return best;

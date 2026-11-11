@@ -8281,6 +8281,24 @@ void ControllerSession::count_dwell_mask_hits()
 {
     if (not graph_ or dwell_feedback_node_ == 0 or dwell_goal_.empty())
         return;
+    // ★ A FRONT-CAMERA LOOK, COUNTED BY THE PRODUCER (2026-11-11, owner; objects session): when the contract asks for
+    //   `chair_front_seen`, the chair agent stamps `chair_front_seen_frame` = the mask frame of its last ZED win. Each DISTINCT
+    //   advance is one separate front look at THIS chair — no reliance on which of the two of us saw frame N first. The old
+    //   pacing below judged every front-camera frame by `chair_detection_alive`, which the 360° panorama keeps alive and which
+    //   latches for 40 cycles: chat_e2e8 counted 53 "looks" with the chair behind the robot.
+    if (std::ranges::any_of(dwell_goal_, [](const rc::affordance::GoalClause &c) { return c.attr == "chair_front_seen"; }))
+    {
+        const auto feedback = graph_->get_node(dwell_feedback_node_);
+        if (not feedback.has_value()) return;
+        const auto seen_frame = graph_->get_attrib_by_name<chair_front_seen_frame_att>(feedback.value());
+        if (seen_frame.has_value() and seen_frame.value() >= 0 and seen_frame.value() != dwell_last_mask_frame_)
+        {
+            const bool first = dwell_last_mask_frame_ < 0;   // the frame already standing when the dwell began is not a new look
+            dwell_last_mask_frame_ = seen_frame.value();
+            if (not first) ++dwell_mask_hits_;
+        }
+        return;
+    }
     // PACED BY THE PRODUCER'S FRAME COUNTER, JUDGED BY THE CONTRACT'S OWN PREDICATE.
     // The counter supplies the rhythm — one look per published camera frame, so the number means
     // "separate looks that confirmed it" and not "control cycles that ran while one frame sat there"
@@ -8804,7 +8822,7 @@ void ControllerSession::finalize_reached(rc::AffordanceManager &affordance_manag
     // contract grows an explicit one, this is the single line that moves to it.
     const bool contract_wants_detection =
         std::ranges::any_of(active_contract_.goal, [](const rc::affordance::GoalClause &c)
-                            { return c.attr.find("detection") != std::string::npos; });
+                            { return c.attr.find("detection") != std::string::npos or c.attr.ends_with("_front_seen"); });
     // A door-passage step chains straight into the next one: nothing is being acquired by a mask, and the dwell
     // was 3 s of standing in front of (or inside) a doorway per step (live try16).
     const bool door_step = last_target_info_.has_value()

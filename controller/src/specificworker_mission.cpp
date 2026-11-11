@@ -973,9 +973,12 @@ void SpecificWorker::service_explore_tour()
 		}
 		else
 		{
-			explore_drive_->note_failed(gone);
+			// ★ DISBELIEF IS A STATE, NOT A VERDICT (clean46): a door below 1/2 ends this passage but is NOT failed for the visit —
+			//   the drive's best_door skips it while P(exists) < 1/2 and takes it again if the belief recovers. A vanished node is gone.
+			if (not in_flight_disbelieved) explore_drive_->note_failed(gone);
 			session_.mission().set_mode(rc::DriveMode::AffordancesOnly);
-			std::println("[explore-tour] '{}' {} — failed", gone, in_flight_disbelieved ? "is no longer believed to be a door" : "vanished before the crossing and no live door stands for its passage");
+			std::println("[explore-tour] '{}' {}", gone, in_flight_disbelieved ? "is no longer believed to be a door (P < 1/2) — passage ended; the drive takes it again if its belief recovers"
+			                                                                    : "vanished before the crossing and no live door stands for its passage — failed");
 		}
 	}
 	// a door found AFTER a Return was decided supersedes it while the Return has not committed to its doorway (explore_tour11:

@@ -40,7 +40,8 @@ int main()
         check(not doors_settled(rc::explore::DoorQuestions{5, "settled"}, 7), "a statement about another room is no answer");
         Drive done(300.0);
         check(done.step("room_1", true, {}, false, 0.0, 0, false).cause == Cause::None, "Done waits on an open room");
-        check(done.step("room_1", true, {}, false, 10.0, 0, true).cause == Cause::Done, "Done once settled");
+        check(done.step("room_1", true, {}, false, 10.0, 0, true).cause == Cause::None, "a start room with NO door at all is still an open question (clean43)");
+        check(done.step("room_1", true, {}, false, 301.0, 0, true).cause == Cause::Done, "...bounded by MaxRoomS");
         Drive bounded(300.0);
         bounded.step("room_1", true, {}, false, 0.0, 0, false);
         check(bounded.step("room_1", true, {}, false, 301.0, 0, false).cause == Cause::Done, "MaxRoomS bounds the wait");
@@ -51,6 +52,17 @@ int main()
         check(ret.step("room_2", true, {}, false, 3.0, 0, true).cause == Cause::Return, "Return once settled");
         Drive go(300.0);
         check(go.step("room_1", true, {found("door_1", 1.0)}, false, 0.0, 0, false).door == std::optional<std::string>("door_1"), "a found door is not held");
+    }
+
+    {   // clean46: a found door that dips below 1/2 is skipped while it stays there and is taken again when its belief recovers
+        Drive d(300.0);
+        d.step("room_1", true, {found("door_0", 1.0)}, false, 0.0);
+        d.note_entered("room_3", "door_6", 10.0);
+        DoorCand dip = found("door_7", 2.8); dip.believed = false;
+        const auto during = d.step("room_3", true, {found("door_6", 4.0), dip}, false, 11.0);
+        check(during.door != std::optional<std::string>{"door_7"}, "a disbelieved found door is not chosen");
+        const auto after = d.step("room_3", true, {found("door_6", 4.0), found("door_7", 2.8)}, false, 12.0);
+        check(after.cause == Cause::Promoted and after.door == std::optional<std::string>{"door_7"}, "the same door is chosen again once believed");
     }
 
     {   // clean28: a door just born is not offered yet. A believed door with no approach is unfinished; a disbelieved one is nothing
@@ -105,7 +117,12 @@ int main()
     }
     {   // start_room_nothing_left_is_done
         Drive d(300.0);
-        check(d.step("room_1", true, {}, false, 0.0).cause == Cause::Done, "start_room_nothing_left_is_done");
+        // clean43: a start room with NO door known at all is an open question (the robot has not looked yet), MaxRoomS bounds it
+        check(d.step("room_1", true, {}, false, 0.0).cause == Cause::None, "start room, no door at all: not Done yet");
+        check(d.step("room_1", true, {}, false, 301.0).cause == Cause::Done, "start room, no door at all: Done after MaxRoomS");
+        Drive d2(300.0);
+        const DoorCand crossed{.door = "door_1", .found = true, .crossed = true, .dist_m = 1.0};
+        check(d2.step("room_1", true, {crossed}, false, 0.0).cause == Cause::Done, "start_room_nothing_left_is_done (its doors all crossed)");
     }
     {   // dfs_return_uses_first_entry_door
         Drive d(300.0);
@@ -133,7 +150,8 @@ int main()
         (void)d.step("room_1", true, {}, true, 0.0);
         d.note_entered("room_1", "door_0", 50.0);   // the ring R1->R2->R3->R1 re-enters the start room
         check(not d.entry_door("room_1").has_value(), "start_room_never_gets_entry_door");
-        check(d.step("room_1", true, {}, false, 60.0).cause == Cause::Done, "start room, nothing left: Done");
+        const DoorCand came_in{.door = "door_0", .found = true, .crossed = true, .dist_m = 0.5};   // the door the ring re-entered by
+        check(d.step("room_1", true, {came_in}, false, 60.0).cause == Cause::Done, "start room, nothing left: Done");
     }
     {   // reentered_face_is_crossed (explore_tour1: back in the START room through the mirror door_4 of door_3, the drive
         // chose door_4 — the doorway it had just come through — and the passage held 7.5 min before failing)
