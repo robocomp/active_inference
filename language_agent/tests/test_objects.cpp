@@ -125,6 +125,11 @@ int main()
         assert(is_remembered(places, "chair_39")); ++checks;
         assert(not is_remembered(places, "chair_40")); ++checks;
         assert(remembered_places_line(undated_room_only()).empty()); ++checks;
+        // in the robot's own room the line also gives the turn that faces it (computed in code: no model trigonometry)
+        Remembered turned = places;
+        turned.objects[0].turn_deg = 145;
+        assert(contains(remembered_places_line(turned),
+                        "chair_39 in room_2 at pose:room_2(1.20, -0.50), from here: move turn_deg=145deg")); ++checks;
 
         // The age in words, and a stamp that is missing or in the future.
         assert(age_words(90 * 60'000) == "1 h ago"); ++checks;
@@ -132,6 +137,17 @@ int main()
         assert(age_words(-5) == "less than a minute ago"); ++checks;
         const Remembered undated{.objects = {{.name = "chair_1", .subtype = "chair", .room = "room_1"}}, .now_ms = now};
         assert(contains(answer_where_is({}, "chair_1", "room_2", undated), "chair_1 (last seen in room_1, time unknown)")); ++checks;
+
+        // from_memory: set when the answer carries remembered objects, so the chat says it AS IT IS (live 2026-11-10:
+        // gemma4 reworded the block, moved chair_39 to room_1 and dropped "it may have moved").
+        bool fm = false;
+        (void)answer_where_is({}, "chair_34", "room_2", mem, &fm); assert(fm); ++checks;              // by name, memory only
+        fm = false; (void)answer_where_is({}, "chair", "room_2", mem, &fm); assert(fm); ++checks;     // by class, memory only
+        fm = true; (void)answer_where_is(live_named, "chair_34", "room_1", mem, &fm); assert(not fm); ++checks;   // live wins
+        fm = true; (void)answer_where_is({}, "sofa", "room_2", mem, &fm); assert(not fm); ++checks;   // nothing at all
+        fm = false; (void)answer_find_objects({}, "chair", "room_2", mem, &fm); assert(fm); ++checks;
+        fm = true; (void)answer_find_objects({}, "sofa", "room_2", mem, &fm); assert(not fm); ++checks;
+        fm = true; (void)answer_find_objects(all, "chair", "room_1", Remembered{}, &fm); assert(not fm); ++checks;
     }
 
     auto w = answer_where_is(all, "fridge", "room_1");

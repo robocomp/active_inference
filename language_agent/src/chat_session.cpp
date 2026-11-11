@@ -427,6 +427,14 @@ void ChatSession::on_user_text(const QString& text)
         show_request(*show, text);
         return;
     }
+    // 1e. "go to chair_34" for an object only the long-term memory has: the skill's recipe, built here and shown as a
+    //     card (remembered_goto.h). Left to the models it failed both ways live (2026-11-10).
+    if (const auto name = rc::chat::go_to_object_name(text.toStdString()); name.has_value())
+        if (remembered_goto_card(*name, text))
+        {
+            log_.write("fast_path", QJsonObject{{"kind", "remembered_goto"}, {"name", q(*name)}});
+            return;
+        }
     // 2. already in the controller's grammar.
     if (const auto call = parse_direct(t); call.has_value())
     {
@@ -1115,12 +1123,18 @@ QString ChatSession::answer_query(const QString& name, const QJsonObject& args)
         out = it != skills_.end() ? q(it->body) : QStringLiteral("REJECTED: no skill '%1'").arg(q(want));
     }
     else if (QString m = answer_memory(name, args); not m.isEmpty()) out = std::move(m);
-    else if (name == "find_objects")
-        out = q(answer_find_objects(digest_.objects, args.value("subtype").toString().toStdString(), digest_.facts.room,
-                                    remembered_now()));
-    else if (name == "where_is")
-        out = q(answer_where_is(digest_.objects, args.value("name").toString().toStdString(), digest_.facts.room,
-                                remembered_now()));
+    else if (name == "find_objects" or name == "where_is")
+    {
+        // An answer that carries remembered objects is said AS IT IS: its rooms, ages and "it may have moved" are the
+        // point, and the model's rewording lost them (live 2026-11-10). The tool sets the mark; nothing reads the text.
+        bool from_memory = false;
+        out = name == "find_objects"
+            ? q(answer_find_objects(digest_.objects, args.value("subtype").toString().toStdString(), digest_.facts.room,
+                                    remembered_now(), &from_memory))
+            : q(answer_where_is(digest_.objects, args.value("name").toString().toStdString(), digest_.facts.room,
+                                remembered_now(), &from_memory));
+        if (from_memory) out = said_as_is(std::move(out));
+    }
     else if (name == "known_rooms" or name == "route_to")
     {
         const auto topo = remembered_topology();
@@ -1449,7 +1463,20 @@ rc::chat::Remembered ChatSession::remembered_now() const
 {
     if (not ltom_G_) return {};
     const auto now = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch());
-    return rc::chat::load_remembered(*ltom_G_, now.count());
+    auto mem = rc::chat::load_remembered(*ltom_G_, now.count());
+    // In the robot's own room: the turn that faces each remembered object, computed here so no model does trigonometry
+    // (the card's recipe and the planner's STATE line both use it). The room frame -> robot frame (`body`, the frame
+    // world_digest's bearings use); a missing transform just leaves the turn unknown (the recipe then drives instead).
+    const std::string& room = digest_.facts.room;
+    if (inner_ and not room.empty())
+        if (const auto T = inner_->get_transformation_matrix("body", room); T.has_value())
+            for (auto& o : mem.objects)
+                if (o.room == room)
+                {
+                    const Eigen::Vector3d p = *T * Eigen::Vector3d(o.x, o.y, 0.0);
+                    o.turn_deg = rc::chat::turn_to_face_deg(p.x(), p.y());
+                }
+    return mem;
 }
 
 std::optional<rc::em::Store> ChatSession::em_store() const
@@ -1606,6 +1633,57 @@ bool ChatSession::name_exists(std::string_view name) const
     return false;
 }
 
+std::optional<rc::chat::RememberedPlace> ChatSession::remembered_place(std::string_view name) const
+{
+    if (G_ and G_->get_node(std::string(name)).has_value()) return std::nullopt;   // live: it offers its own approach
+    for (const auto& o : remembered_now().objects)
+        if (o.name == name and not o.room.empty())
+            return rc::chat::RememberedPlace{.pose = {.room = o.room, .x = o.x, .y = o.y},
+                                             .view_steps = rc::chat::view_steps(o, cfg_.look_wait_s)};
+    return std::nullopt;
+}
+
+bool ChatSession::remembered_goto_card(const std::string& name, const QString& text)
+{
+    if (G_ and G_->get_node(name).has_value()) return false;   // live: the planner's ordinary approach
+    const auto mem = remembered_now();
+    const auto it = std::ranges::find(mem.objects, name, &rc::chat::RememberedObject::name);
+    if (it == mem.objects.end() or it->room.empty()) return false;
+    std::vector<std::string> legs;
+    if (it->room != digest_.facts.room)
+    {
+        const auto topo = remembered_topology();
+        if (topo.has_value()) legs = rc::chat::legs_to(*topo, digest_.facts.room, it->room);
+        if (legs.empty()) return false;   // no known way into its room: the model explains, or asks
+    }
+    const std::string mission_text = rc::chat::remembered_goto_text(*it, legs, cfg_.look_wait_s);
+    // held to the planner's own check: a recipe that does not pass is a bug here, logged, and the model takes over
+    auto m = check_planned(mission_text, [this](std::string_view n) { return name_exists(n); },
+                           [this](std::string_view n) { return remembered_place(n); });
+    if (not m.has_value())
+    {
+        log_.write("remembered_goto_refused", QJsonObject{{"name", q(name)}, {"text", q(mission_text)}, {"error", q(m.error())}});
+        return false;
+    }
+    m->request = text.toStdString();
+    pending_mission_ = MissionCard{.mission = *m, .serial = ++card_serial_, .turn = user_turn_};
+    const std::string shown = rc::mission::print_text(*m);
+    log_.write("mission_card", QJsonObject{{"card", static_cast<qint64>(card_serial_)}, {"text", q(shown)},
+                                           {"origin", "remembered_goto"}});
+    const QString reply = QStringLiteral("I last saw %1 in %2, %3; it may have moved, so I will go and look. "
+                                         "Say yes to start.")
+                              .arg(q(name), q(it->room),
+                                   q(it->last_seen_ms > 0 ? rc::chat::age_words(mem.now_ms - it->last_seen_ms)
+                                                          : std::string("at a time I do not know")));
+    window_->append_card(text, q(shown).trimmed());
+    window_->begin_assistant();
+    window_->append_token(reply);
+    window_->end_assistant();
+    push_history({{"role", "user"}, {"content", text}});
+    push_history({{"role", "assistant"}, {"content", reply}});
+    return true;
+}
+
 QString ChatSession::queue_planner(const QJsonObject& args)
 {
     const QString request = args.value("request").toString().trimmed();
@@ -1640,8 +1718,9 @@ void ChatSession::run_planner()
         finish_planner(QStringLiteral("REJECTED: the mission skills are not loaded (etc/skills/missions.md)"));
         return;
     }
+    const QString state = planner_state();
     QJsonArray msgs{QJsonObject{{"role", "system"}, {"content", skills}},
-                    QJsonObject{{"role", "system"}, {"content", planner_state()}},
+                    QJsonObject{{"role", "system"}, {"content", state}},
                     QJsonObject{{"role", "user"}, {"content", q(planner_request(planner_->request_text.toStdString(),
                                                                                 planner_->request.toStdString(),
                                                                                 planner_->from_wake))}}};
@@ -1650,7 +1729,10 @@ void ChatSession::run_planner()
     const QString model = cfg_.llm.planner_model.isEmpty() ? cfg_.llm.model : cfg_.llm.planner_model;
     log_.write("planner_request", QJsonObject{{"model", model}, {"request", planner_->request},
                                               {"said", planner_->from_wake ? QString{} : planner_->request_text},
-                                              {"fixes", planner_->fixes}});
+                                              {"fixes", planner_->fixes},
+                                              // what the planner was told: a plan is judged against this, not a guess
+                                              // (live 2026-11-10 the log could not show whether it had the poses)
+                                              {"state", state}});
     const bool ok = llm_.chat(msgs, {}, OllamaClient::Callbacks{
         .on_token = [this](const QString& tok) { if (planner_.has_value()) planner_->reply += tok; },
         .on_tool_calls = {},
@@ -1687,7 +1769,8 @@ void ChatSession::on_planned(const QString& reply)
         finish_planner(QStringLiteral("ASK: ") + q(*question));
         return;
     }
-    auto m = check_planned(text, [this](std::string_view n) { return name_exists(n); });
+    auto m = check_planned(text, [this](std::string_view n) { return name_exists(n); },
+                           [this](std::string_view n) { return remembered_place(n); });
     if (not m.has_value())
     {
         log_.write("planner_refused", QJsonObject{{"error", q(m.error())}, {"fixes", planner_->fixes}});
@@ -2412,7 +2495,8 @@ void ChatSession::on_mission_progress(rc::mission::Progress now)
         if (room != digest_.facts.room)   // the first visit of a proto-room: `current` still names the room left
             for (auto& o : objects) o.in_current_room = not room.empty() and o.room == room;
         const std::string seen = answer_find_objects(std::move(objects), "", room);
-        for (const auto& topic : topics) queue("report", report_wake(topic, room, seen));
+        const auto skipped = skipped_steps(now, mission_ir_);   // a skipped go_to must not become "I have arrived"
+        for (const auto& topic : topics) queue("report", report_wake(topic, room, seen, skipped));
     }
     if (now.status.starts_with("failed|") and not before.status.starts_with("failed|"))
         if (const auto note = failure_wake(now, mission_ir_); note.has_value())

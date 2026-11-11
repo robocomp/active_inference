@@ -61,6 +61,9 @@ struct RememberedObject
     std::string room;                 ///< the room of its newest keyframe ("" = unknown)
     std::int64_t last_seen_ms = 0;    ///< epoch ms; 0 = not recorded
     double x = 0, y = 0;              ///< where it was, in `room`'s frame (m)
+    /// The turn that faces it from the robot now (deg, + = left, world_digest's bearing convention); only when it was in
+    /// the robot's CURRENT room and the transform was known. Filled by ChatSession, not by the memory reader.
+    std::optional<double> turn_deg{};
 };
 
 struct Remembered
@@ -213,7 +216,10 @@ inline std::string remembered_places_line(const Remembered& mem)
     std::string o;
     for (const auto& r : mem.objects)
         if (not r.room.empty())
+        {
             o += std::format("{}{} in {} at pose:{}({:.2f}, {:.2f})", o.empty() ? "" : "; ", r.name, r.room, r.room, r.x, r.y);
+            if (r.turn_deg.has_value()) o += std::format(", from here: move turn_deg={:.0f}deg", *r.turn_deg);
+        }
     return o.empty() ? o : "remembered objects, NOT seen now (each may have moved): " + o;
 }
 
@@ -226,8 +232,10 @@ inline bool is_remembered(const Remembered& mem, std::string_view name)
 /// find_objects(subtype?) — the current room's objects of that class (all classes when empty), nearest first, then
 /// what the long-term memory holds of that class elsewhere.
 /// An unknown or absent class is an empty list with a sentence the model can repeat, never an error.
+/// `from_memory` (optional) is set when the answer carries remembered objects: the chat then says it as it is, because
+/// a model's rewording lost the rooms and the "it may have moved" (live 2026-11-10).
 inline std::string answer_find_objects(std::vector<ObjectFact> all, const std::string& subtype_raw,
-                                       const std::string& room, const Remembered& mem = {})
+                                       const std::string& room, const Remembered& mem = {}, bool* from_memory = nullptr)
 {
     const std::string want = normalize_subtype(subtype_raw);
     std::vector<ObjectFact> hit;
@@ -236,6 +244,7 @@ inline std::string answer_find_objects(std::vector<ObjectFact> all, const std::s
     sort_by_distance(hit);
     const std::string what = want.empty() ? std::string("object") : want;
     const std::string memory = remembered_block(remembered_of(mem, want), mem.now_ms);
+    if (from_memory) *from_memory = not memory.empty();
     if (hit.empty())
         return std::format("No {} perceived in the current room ({}). This does not mean there is none: it may be "
                            "unseen, or the agent that recognises it may not be running.{}",
@@ -247,10 +256,11 @@ inline std::string answer_find_objects(std::vector<ObjectFact> all, const std::s
 }
 
 /// where_is(name) — by exact node name, else by class (every object of it, any room, nearest first). What is on the
-/// live graph comes first; the long-term memory only adds what is not.
+/// live graph comes first; the long-term memory only adds what is not. `from_memory`: as in answer_find_objects.
 inline std::string answer_where_is(std::vector<ObjectFact> all, const std::string& name_raw, const std::string& room,
-                                   const Remembered& mem = {})
+                                   const Remembered& mem = {}, bool* from_memory = nullptr)
 {
+    if (from_memory) *from_memory = false;
     std::string name = name_raw;
     std::ranges::transform(name, name.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
     while (not name.empty() and name.back() == ' ') name.pop_back();
@@ -264,12 +274,17 @@ inline std::string answer_where_is(std::vector<ObjectFact> all, const std::strin
     for (const auto& o : all)
         if (o.name == name) return describe(o);
     for (const auto& o : mem.objects)
-        if (o.name == name) return remembered_block({o}, mem.now_ms);
+        if (o.name == name)
+        {
+            if (from_memory) *from_memory = true;
+            return remembered_block({o}, mem.now_ms);
+        }
     const std::string want = normalize_subtype(name);
     std::vector<ObjectFact> hit;
     for (auto& o : all)
         if (not want.empty() and o.subtype == want) hit.push_back(std::move(o));
     const std::string memory = want.empty() ? std::string{} : remembered_block(remembered_of(mem, want), mem.now_ms);
+    if (from_memory) *from_memory = not memory.empty();
     if (hit.empty() and not memory.empty()) return memory;
     if (hit.empty())
         return std::format("'{}' is not perceived. The robot has not seen it, or the agent that recognises it is not "

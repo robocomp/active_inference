@@ -77,6 +77,7 @@
 #include <dsr/api/dsr_inner_eigen_api.h>
 
 #include "skills.h"
+#include "remembered_goto.h"
 #include "verbatim_reply.h"
 #include "camera_grabber.h"
 #include "canvas_commands.h"
@@ -114,6 +115,9 @@ struct SessionConfig
     double robot_radius_m = 0.35;      ///< approach_object: half the body width (0.70 m)
     double approach_clearance_m = 0.30;   ///< approach_object: free space kept between the body and the object
     int objects_nearest = 6;
+    /// Going to a remembered object in the robot's room: after turning to it, how long to wait for the tracker to see it
+    /// again before the approach (remembered_goto.h view_steps). ★ A fixed time until `wait until=seen(NODE)` exists.
+    double look_wait_s = 2.0;
     int object_change_period_ms = 2000;
     int look_max_side = 1280;          ///< look(): front frame shrunk to this longest side (px); see image_prep.h
     int look_max_side_360 = 1280;      ///< look(): the same for the 2:1 panorama
@@ -206,6 +210,11 @@ private:
     /// After a tool round of the model: re-ask to fix a failed draw, or one follow-up when it said nothing / saw a picture.
     void after_tool_round(bool had_words, bool image);
     [[nodiscard]] bool name_exists(std::string_view name) const;   ///< a node of the live graph or a remembered passage
+    /// An object ltom remembers and the live graph does NOT have now: its last pose and the steps that bring it into view.
+    [[nodiscard]] std::optional<rc::chat::RememberedPlace> remembered_place(std::string_view name) const;
+    /// "go to <name>" for a remembered object: the recipe built in code (remembered_goto.h) and shown as a card.
+    /// False when `name` is not such an object or its room cannot be reached from here (the model then reads the words).
+    bool remembered_goto_card(const std::string& name, const QString& text);
     /// approach_object: pick the object, put a standpoint short of it, send a one-step go_to mission (approach.h).
     QString do_approach(const QJsonObject& args);
     /// go_around_object: a loop of go_to stops around an object, back to the start (approach.h go_around_mission).
@@ -287,6 +296,9 @@ private:
     rc::chat::VerbatimReply verbatim_;   ///< refusals of this tool round: the reply is these texts, not a model paraphrase
     int round_calls_ = 0;                ///< tool calls of the current round (all_refused compares against it)
     QString refusal(QString text) { verbatim_.add(text.toStdString()); return text; }   ///< a tool's refusal site
+    /// An answer about REMEMBERED objects: said as it is, like a refusal (live 2026-11-10: the model's rewording moved
+    /// chair_39 to another room and dropped "it may have moved").
+    QString said_as_is(QString text) { verbatim_.add(text.toStdString()); return text; }
     QTimer canvas_timer_;
     QByteArray look_jpeg_;   ///< set by do_look(), attached to that call's role:"tool" message
     QObject ctx_;
