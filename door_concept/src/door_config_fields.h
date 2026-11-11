@@ -205,7 +205,11 @@ void read_door_config_fields(DoorConfig& out, GetF&& getf, GetI&& geti, GetS&& g
     out.exist_geometry_may_refute = getb("Existence.GeometryMayRefute", false,
             "Existence.GeometryMayRefute — false: the reprojection-agreement channel can only push L up (spec §8.5, until benched)");
     out.exist_max_room_s         = getf("Existence.MaxRoomS", 300.0f,
-            "Existence.MaxRoomS — mirrors the controller's ExploreTour.MaxRoomS (s): a route door's delete cost is the ordinary cost plus this");
+            "Existence.MaxRoomS — mirrors the controller's ExploreTour.MaxRoomS (s): a route door's delete cost is the ordinary cost plus this; also C_miss, the price of a door left undiscovered");
+    out.exist_look_speed_mps     = getf("Existence.LookSpeedMps", 0.50f,
+            "Existence.LookSpeedMps — mirrors the controller's nominal advance speed (m/s): a look's travel time is the straight line over this");
+    out.exist_look_dwell_s       = getf("Existence.LookDwellS", 3.0f,
+            "Existence.LookDwellS — mirrors the controller's post-arrival dwell (s): a look's cost once at its standpoint");
     // [Openable] — deliberately ABSENT from etc/config.toml (same as [Bearing]): a dormant, opt-in feature
     // whose defaults keep the leaf pinned flush. See the block comment in door_config.h.
     out.openable_enabled     = getb("Openable.Enabled", false,

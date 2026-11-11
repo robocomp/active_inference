@@ -556,6 +556,64 @@ int main()
         CHECK(1.10f + sliver > -1.08f);   // clean31: door_1 stood at L = +1.10; the sliver leaves it above the delete line (it was -6.64)
         CHECK(std::abs(none) < 1e-6f);                                // a mask entirely off the opening says nothing about it
     }
+    {   // clean35 (real DOOR_2, born at its opening; a ONE-viewpoint hinge flip then slid the fit 0.6-0.8 m onto plain wall,
+        // sigma_s 0.42 m): a support row scored on a window that may not be on the opening is a MIXTURE — with probability q
+        // (aperture_overlap) it looked at the opening, otherwise at wall that a door and no door predict alike.
+        const auto one_view = [&](float overlap)
+        {
+            Bench b;
+            const rc::DoorFitState th = shut_door();
+            PlaceBelief pb;
+            const Mat4d body = body_pose(A0, kDoor);
+            const std::optional<Mat4d> rtz = body * lift(1.2);
+            const CameraIntrinsics cam = zed_cam();
+            const ExistenceScene scene{b.cfg, rtz, cam, b.pkt, kRoom, rc::door::RoomBand{b.cfg.exist_wall_thickness_m, b.cfg.exist_boundary_sigma_m}, b.doors};
+            ExistenceFrame fr{scene, b.cfg, b.det};
+            const auto t = observe_place(pb, th, fr, 0, 0.0f, nullptr, -1, 0.0f, FitSupport{0.999999f, 0, 1.0f, overlap});
+            std::print("support_overlap: q={:.2f} sup_dl {:+.2f} sup_q {:.2f}\n", overlap, t.sup_dl, t.sup_q);
+            return t.sup_dl;
+        };
+        const float settled = one_view(1.0f), q = rc::door::aperture_overlap(0.95f, 0.42f), loose = one_view(q), lost = one_view(0.0f);
+        std::print("aperture_overlap(0.95, 0.42) = {:.3f}\n", q);
+        CHECK(settled < -5.0f);                                   // a settled fit: the full trial, as before
+        CHECK(std::abs(loose - std::log1p(-q) - std::log(1.0 + q / (1.0 - q) * std::exp(settled))) < 1e-3f);   // the mixture
+        CHECK(loose >= std::log1p(-q) - 1e-4f);                   // bounded by P(the window was on wall)
+        CHECK(0.17f + loose > -1.08f);                            // clean35: door_2 stood at L = +0.17; it was removed at -1.15
+        CHECK(std::abs(lost) < 1e-6f);                            // a window certainly off the opening says nothing about it
+    }
+    {   // aperture_overlap: E[(w - |d|)+]/w for d ~ N(0, sigma_s)
+        CHECK(rc::door::aperture_overlap(1.0f, 0.0f) == 1.0f);
+        CHECK(rc::door::aperture_overlap(0.0f, 0.1f) == 0.0f);
+        CHECK(std::abs(rc::door::aperture_overlap(0.95f, 0.42f) - 0.65f) < 0.01f);   // the clean35 fit (hand: 0.650)
+        CHECK(rc::door::aperture_overlap(1.0f, 0.01f) > 0.99f);
+        CHECK(rc::door::aperture_overlap(1.0f, 100.0f) < 0.01f);
+        CHECK(rc::door::aperture_overlap(1.0f, 0.2f) > rc::door::aperture_overlap(1.0f, 0.4f));
+        // Monte-Carlo agreement at one point
+        double acc = 0; std::uint32_t s = 12345;
+        for (int i = 0; i < 200000; ++i)
+        {
+            s = s * 1664525u + 1013904223u; const double u1 = (s + 0.5) / 4294967296.0;
+            s = s * 1664525u + 1013904223u; const double u2 = (s + 0.5) / 4294967296.0;
+            const double d = 0.3 * std::sqrt(-2.0 * std::log(u1)) * std::cos(2.0 * M_PI * u2);
+            acc += std::max(0.0, 0.8 - std::abs(d)) / 0.8;
+        }
+        CHECK(std::abs(rc::door::aperture_overlap(0.8f, 0.3f) - acc / 200000.0) < 0.005);
+    }
+    {   // the ledger's overlap persists (VL3); a VL2 record reads every frame as q = 1
+        ViewLedger L;
+        const std::size_t v = L.observe(Eigen::Vector2f(0.0f, -2.0f), Eigen::Vector2f(0.0f, 0.0f), Eigen::Vector2f(0.0f, 1.0f), 0.5f, 0.0f, 0);
+        L.add_support(v, 0.9f, 1.0f, SupportModel{}, 0.5f);
+        L.recompute(v, true);
+        const auto s3 = L.serialise();
+        const auto back = ViewLedger::parse(s3, true);
+        CHECK(s3.starts_with("VL3"));
+        CHECK(back.has_value() and std::abs(back->sum() - L.sum()) < 1e-5f);
+        std::string s2 = s3; s2.replace(0, 3, "VL2"); s2 = s2.substr(0, s2.rfind(' '));   // drop sum_q: the old format
+        const auto old = ViewLedger::parse(s2, true);
+        ViewLedger full; const std::size_t vf = full.observe(Eigen::Vector2f(0.0f, -2.0f), Eigen::Vector2f(0.0f, 0.0f), Eigen::Vector2f(0.0f, 1.0f), 0.5f, 0.0f, 0);
+        full.add_support(vf, 0.9f, 1.0f, SupportModel{}, 1.0f); full.recompute(vf, true);
+        CHECK(old.has_value() and std::abs(old->sum() - full.sum()) < 1e-5f);
+    }
     {   // aperture_coverage: the length of the opening sampled, not the count of returns; wall/jamb points beyond [0, w] add nothing
         rc::door::Aperture ap; ap.wall_O = {0.0f, 0.0f}; ap.wall_u = {1.0f, 0.0f}; ap.s = 2.0f; ap.w = 1.0f;
         std::vector<Eigen::Vector3f> full, sliver, wall, dense;

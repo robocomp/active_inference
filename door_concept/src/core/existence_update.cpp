@@ -260,11 +260,12 @@ ExistenceTrace observe_place(PlaceBelief& b, const rc::DoorFitState& th, const E
                 const float before = b.ledger.sum();
                 const std::size_t v = b.ledger.observe(xy_of(*origin), door_xy, th.aperture.across_u(), R, po.spread_m, visit);
                 // the trial is worth the share of the opening the mask sampled (aperture_coverage): a sliver on the jamb says little
-                b.ledger.add_support(v, support->x, po.kappa * std::clamp(support->coverage, 0.0f, 1.0f), fr.det.support);   // clamp: domain of a share
+                b.ledger.add_support(v, support->x, po.kappa * std::clamp(support->coverage, 0.0f, 1.0f), fr.det.support, support->overlap);   // clamp: domain of a share
                 b.ledger.recompute(v, fr.geometry_may_refute);
                 touched.push_back(v);
                 t.sup_x = support->x;
                 t.sup_c = support->coverage;
+                t.sup_q = support->overlap;
                 t.sup_dl = b.ledger.sum() - before;
                 if (rows)
                 {

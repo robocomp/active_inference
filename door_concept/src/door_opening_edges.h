@@ -543,6 +543,23 @@ inline float measured_passable(const std::vector<OpeningRun>& runs, float needed
 // the aperture's along-wall cells (the registration's own resolution, kRegSigmaRM, so no new constant) holding at least one
 // support point: the LENGTH of opening observed, not the number of returns (the same rule as register_to_wall's support).
 // Points outside [0, w] along the wall are the wall's or the jamb's, so they sample none of the opening. In [0,1]; 0 with no points.
+/// The expected share of an opening of width w that a window of the same width, placed at the opening's ESTIMATE, actually
+/// covers, when the estimate's along-wall offset is N(0, sigma_s):  E[(w - |d|)+] / w
+///     = (2 / w) [ w (Phi(a) - 1/2) - sigma_s (phi(0) - phi(a)) ],   a = w / sigma_s.
+/// 1 for a settled opening (sigma_s -> 0), -> 0 when the position is unknown on the scale of the opening. It is the probability
+/// that a frame scored on the fit's window looked at the opening and not at the wall beside it (view_ledger.h add_support).
+[[nodiscard]] inline float aperture_overlap(float w, float sigma_s)
+{
+    if (not (w > 0.0f) or not std::isfinite(w)) return 0.0f;
+    if (not (sigma_s > 0.0f)) return 1.0f;
+    if (not std::isfinite(sigma_s)) return 0.0f;
+    const double a = double(w) / double(sigma_s);
+    const double Phi = 0.5 * std::erfc(-a / std::sqrt(2.0));
+    const double phi0 = 1.0 / std::sqrt(2.0 * M_PI), phia = phi0 * std::exp(-0.5 * a * a);
+    const double e = 2.0 * (double(w) * (Phi - 0.5) - double(sigma_s) * (phi0 - phia)) / double(w);
+    return static_cast<float>(std::clamp(e, 0.0, 1.0));
+}
+
 [[nodiscard]] inline float aperture_coverage(const Aperture& ap, const std::vector<Eigen::Vector3f>& pts)
 {
     if (not (ap.w > 0.0f) or pts.empty()) return 0.0f;

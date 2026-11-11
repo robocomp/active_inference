@@ -115,7 +115,7 @@ struct PlaceBelief
 
 /// What one existence update did to one place, per channel (spec §3.8). NaN = NOT COMPUTED this cycle (printed `nan` in the
 /// CSV and `—` on stdout, never a stale value). A channel's dl is the change it made to the ledger sum this cycle.
-struct FitSupport { float x = 0.f; int sensor = 0; float coverage = 1.f; };   // the fit's clutter share, the camera (0 ZED, else ricoh) it came from,
+struct FitSupport { float x = 0.f; int sensor = 0; float coverage = 1.f; float overlap = 1.f; };   // the fit's clutter share, the camera (0 ZED, else ricoh) it came from,
                                                                               // and the share of the opening the mask samples (rc::door::aperture_coverage)
 
 struct ExistenceTrace
@@ -126,7 +126,7 @@ struct ExistenceTrace
     float zed_hit = kNan, ric_hit = kNan;      // the association weight of this frame's detection (0 = a miss)
     float kappa = kNan;
     float geo_x = kNan, geo_mu0 = kNan, geo_mu1 = kNan, geo_s = kNan;
-    float sup_x = kNan, sup_dl = kNan, sup_c = kNan;   // sup_c: the mask's coverage of the opening (the trial's weight with κ)
+    float sup_x = kNan, sup_dl = kNan, sup_c = kNan, sup_q = kNan;   // sup_c: the mask's coverage of the opening (the trial's weight with κ); sup_q: P(the window was on the opening)
             // the fit's clutter share this cycle and what ℓ_sup changed the ledger by (NaN = no fit)
     int zed_view = -1, ric_view = -1;          // ledger index of the view this frame joined (-1 = none)
     float delete_line = kNan;

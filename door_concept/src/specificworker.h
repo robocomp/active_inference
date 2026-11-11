@@ -321,14 +321,18 @@ private:
         rc::ObjectAffordance             aff;
         rc::door::core::ViewLedger       tried;              // one view per site finished or handed back
         std::optional<rc::AffordanceTarget> site;            // the standing offer; re-planned only when it no longer adds a view
+        float                            p_detect = 0.f;     // the site's envelope × visibility (look::plan), for the look's price
         bool                             exhausted = false;  // no standpoint adds a view (logged once)
     };
+    // THE ROOM'S DOOR BELIEF (room-door-belief spec Part A, core/room_door_count.h): logged when it changes
+    double        room_p_more_logged_ = -1.0;
+    bool          room_open_logged_ = false;
     std::map<std::uint64_t, CandidateLook> candidate_looks_;   // by Candidate::key
     std::uint64_t candidate_looks_room_ = 0;
     std::uint64_t door_questions_room_ = 0;
     std::string   door_questions_state_;
     void step_candidate_looks();
-    void step_wall_hypotheses();                            // a promoted room with no known door: its walls are the question (clean27)
+    void step_wall_hypotheses();                            // a promoted room's walls are its door slots (room-door-belief spec §3.3)
     std::uint64_t wall_seeded_room_ = 0;
     std::uint64_t wall_look_key_ = 0;                       // the one wall place being looked at (one node at a time: rates)
     void step_doorway_hypotheses();                         // room_concept's `room_doorways` become pending candidates

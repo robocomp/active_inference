@@ -48,7 +48,7 @@ using K = rc::door::DoorDecisionKind;
 const char* const kExistenceCsvHeader =
     "cycle,node,L,p_exists,cx,cy,role,delete_line,view_id,ric_view_id,"
     "prior_band,prior_base,prior_size,carried,crossing,ledger,n_views,"
-    "zed_dl,ric_dl,geo_dl,act_dl,zed_q,ric_q,zed_hit,ric_hit,kappa,geo_x,geo_mu0,geo_mu1,geo_s,sup_x,sup_dl,Sc,Sp,sat_term\n";
+    "zed_dl,ric_dl,geo_dl,act_dl,zed_q,ric_q,zed_hit,ric_hit,kappa,geo_x,geo_mu0,geo_mu1,geo_s,sup_x,sup_dl,Sc,Sp,sat_term,sup_c,sup_q\n";
 
 // Ruling R8: the per-view rows tools/fit_detector_envelopes.py reads (its column names, exactly). Every field is
 // THIS frame's (hit = its association weight, 0 = a miss); door = the node name or place_<key> of a pending candidate.
@@ -599,18 +599,18 @@ void DoorCore::update_existence(const DoorCycleInput& in, DoorCycleOutput& out)
                << b.ledger.sum() << ',' << b.ledger.views().size() << ',' << t.zed_dl << ',' << t.ric_dl << ',' << t.geo_dl << ','
                << t.act_dl << ',' << t.zed_q << ',' << t.ric_q << ',' << t.zed_hit << ',' << t.ric_hit << ',' << t.kappa << ','
                << t.geo_x << ',' << t.geo_mu0 << ',' << t.geo_mu1 << ',' << t.geo_s << ',' << t.sup_x << ',' << t.sup_dl << ','
-               << b.Sc() << ',' << b.Sp() << ',' << b.saturation_term() << '\n';
+               << b.Sc() << ',' << b.Sp() << ',' << b.saturation_term() << ',' << t.sup_c << ',' << t.sup_q << '\n';
         diag("door_existence_log.csv", ex_csv.str(), out);
         const bool removing = std::ranges::contains(to_remove, id);
         if (ex_dbg_ % 60 == 0 or removing or std::abs(b.L() - L_before[i]) > 1.0f)
             diag("stdout", std::format("door_concept: [existence] {} L={:+.2f} p={:.2f} role={} delete_line={} | prior band={:+.2f} "
                                        "base={:+.2f} size={:+.2f} carried={:+.2f} cross={:+.2f} Sc={:+.2f} Sp={:+.2f} term={:+.2f} | views={} | zed dl={} q={} hit={} "
-                                       "| ric dl={} q={} hit={} | geo dl={} | sup dl={} x={} c={} | act dl={} | kappa={}\n",
+                                       "| ric dl={} q={} hit={} | geo dl={} | sup dl={} x={} c={} on={} | act dl={} | kappa={}\n",
                                        inst.node_name, b.L(), b.p(), role_name(inst.role), fmt_or_dash(t.delete_line),
                                        b.prior.band, b.prior.base_rate, b.prior.size, b.carried, b.crossing, b.Sc(), b.Sp(), b.saturation_term(),
                                        b.ledger.views().size(), fmt_or_dash(t.zed_dl), fmt_or_dash(t.zed_q), fmt_or_dash(t.zed_hit),
                                        fmt_or_dash(t.ric_dl), fmt_or_dash(t.ric_q), fmt_or_dash(t.ric_hit), fmt_or_dash(t.geo_dl),
-                                       fmt_or_dash(t.sup_dl), fmt_or_dash(t.sup_x), fmt_or_dash(t.sup_c), fmt_or_dash(t.act_dl), fmt_or_dash(t.kappa)), out);
+                                       fmt_or_dash(t.sup_dl), fmt_or_dash(t.sup_x), fmt_or_dash(t.sup_c), fmt_or_dash(t.sup_q), fmt_or_dash(t.act_dl), fmt_or_dash(t.kappa)), out);
     }
     if (ex_dbg_ % 600 == 0)
     {

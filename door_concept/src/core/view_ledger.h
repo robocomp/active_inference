@@ -21,8 +21,10 @@
 //   "VL2 <nviews>" then per view, 30 numbers: bearing range visit actuation_llr llr
 //   then per Bernoulli channel (Zed, Ricoh): n sum_q sum_hit_w sum_f hit_c ; then geo: n sum_x sum_w mu0 mu1 s2;
 //   then the fit-support channel: n sum_x sum_w present_a present_b present_outlier absent_a absent_b absent_outlier.
-//   "VL1" (the same without the support block) still parses, with an empty support channel.
+//   "VL3" appends the support channel's sum_q (the summed overlap q of its frames, see add_support) after that block.
+//   "VL1" (the same without the support block) still parses, with an empty support channel; VL1/VL2 read as q = 1.
 #pragma once
+#include <algorithm>
 #include <array>
 #include <charconv>
 #include <cmath>
@@ -51,7 +53,7 @@ struct BernoulliAgg { double n = 0, sum_q = 0, sum_hit_w = 0, sum_f = 0; float h
 struct GaussAgg { double n = 0, sum_x = 0, sum_w = 0; float mu0 = 0, mu1 = 0, s2 = 1; };
 /// The fit-support channel's per-view aggregate: the weighted mean of x over the view's frames, scored once (support_llr); the
 /// model it was scored with travels with it (as geo's mu0/mu1/s2 do), so a restored ledger recomputes without the table.
-struct SupportAgg { double n = 0, sum_x = 0, sum_w = 0; SupportModel m; };
+struct SupportAgg { double n = 0, sum_x = 0, sum_w = 0, sum_q = 0; SupportModel m; };
 struct View
 {
     ViewKey key; 
@@ -99,11 +101,16 @@ public:
         g.n += 1; g.sum_x += double(w) * x; g.sum_w += w; g.mu0 = mu0; g.mu1 = mu1; g.s2 = s2;
     }
     /// One frame of the fit's own support: x = the clutter share of this door's fit this cycle, weight w (the pose overlap κ).
-    void add_support(std::size_t v, float x, float w, const SupportModel& m)
+    /// q = P(the window the fit scored lies on the opening it stands for): the expected overlap of the fit's aperture with the
+    /// true one given the aperture's along-wall uncertainty (door_opening_edges.h aperture_overlap). With probability 1 - q the
+    /// frame looked at wall beside the opening, which a door and no door predict alike: the view's support term is the mixture
+    /// log((1 - q) + q e^l) — l itself at q = 1, nothing at q = 0, continuous between (clean35, 2026-11-10: a one-viewpoint hinge
+    /// flip moved a real door's fit 0.6-0.8 m onto plain wall, sigma_s 0.42 m, and ONE support row there deleted it).
+    void add_support(std::size_t v, float x, float w, const SupportModel& m, float q = 1.f)
     {
         if (v >= views_.size()) return;
         auto& s = views_[v].sup;
-        s.n += 1; s.sum_x += double(w) * x; s.sum_w += w; s.m = m;
+        s.n += 1; s.sum_x += double(w) * x; s.sum_w += w; s.sum_q += std::clamp(std::isfinite(q) ? q : 0.f, 0.f, 1.f); s.m = m;   // clamp: domain of a probability
     }
     void add_actuation(std::size_t v, float llr) { if (v < views_.size()) views_[v].actuation_llr += llr; }
 
@@ -131,7 +138,16 @@ public:
             l += lg;
         }
         if (const auto& s = w.sup; s.n > 0 and s.sum_w > 0)
-            l += float(s.sum_w / s.n) * support_llr(float(s.sum_x / s.sum_w), s.m);   // ONE ℓ per view: the mean x, weighted, scored once
+        {   // ONE ℓ per view: the mean x, weighted, scored once — then marginalised over whether the window was on the opening
+            const double ls = double(s.sum_w / s.n) * double(support_llr(float(s.sum_x / s.sum_w), s.m));
+            const double q = std::clamp(s.sum_q / s.n, 0.0, 1.0);
+            if (q >= 1.0) l += float(ls);
+            else if (q > 0.0)
+            {
+                const double a = std::log1p(-q), b = std::log(q) + ls, mx = std::max(a, b);
+                l += float(mx + std::log(std::exp(a - mx) + std::exp(b - mx)));
+            }
+        }
         w.llr_percept = l;
         l += w.actuation_llr;
         const float change = l - w.llr;
@@ -149,7 +165,7 @@ public:
 
     [[nodiscard]] std::string serialise() const
     {
-        std::string s = std::format("VL2 {}", views_.size());
+        std::string s = std::format("VL3 {}", views_.size());
         for (const auto& v : views_)
         {
             s += std::format(" {} {} {} {} {}", v.key.bearing, v.key.range, v.key.visit, v.actuation_llr, v.llr);
@@ -157,6 +173,7 @@ public:
             s += std::format(" {} {} {} {} {} {}", v.geo.n, v.geo.sum_x, v.geo.sum_w, v.geo.mu0, v.geo.mu1, v.geo.s2);
             s += std::format(" {} {} {} {} {} {} {} {} {}", v.sup.n, v.sup.sum_x, v.sup.sum_w, v.sup.m.present_a, v.sup.m.present_b,
                              v.sup.m.present_outlier, v.sup.m.absent_a, v.sup.m.absent_b, v.sup.m.absent_outlier);
+            s += std::format(" {}", v.sup.sum_q);
         }
         return s;
     }
@@ -179,8 +196,8 @@ public:
             return r.ec == std::errc{} and r.ptr == t.data() + t.size();
         };
         const auto version = tok();
-        const bool vl1 = version == "VL1";
-        if (not vl1 and version != "VL2") return std::nullopt;
+        const bool vl1 = version == "VL1", vl3 = version == "VL3";
+        if (not vl1 and not vl3 and version != "VL2") return std::nullopt;
         std::size_t n = 0;
         if (not num(n)) return std::nullopt;
         ViewLedger L;
@@ -194,12 +211,14 @@ public:
             if (not vl1)   // VL1 predates the support channel: it stays empty
                 ok = ok and num(v.sup.n) and num(v.sup.sum_x) and num(v.sup.sum_w) and num(v.sup.m.present_a) and num(v.sup.m.present_b)
                      and num(v.sup.m.present_outlier) and num(v.sup.m.absent_a) and num(v.sup.m.absent_b) and num(v.sup.m.absent_outlier);
+            if (vl3) ok = ok and num(v.sup.sum_q);
+            else     v.sup.sum_q = v.sup.n;    // before the overlap existed every frame counted in full: q = 1
             if (not ok) return std::nullopt;
             const auto fin = [](float x) { return std::isfinite(x); };
             ok = ok and fin(v.key.bearing) and fin(v.key.range) and fin(v.actuation_llr) and fin(v.llr)
                  and fin(v.geo.mu0) and fin(v.geo.mu1) and fin(v.geo.s2) and std::isfinite(v.geo.n)
                  and std::isfinite(v.geo.sum_x) and std::isfinite(v.geo.sum_w) and std::isfinite(v.sup.n) and std::isfinite(v.sup.sum_x)
-                 and std::isfinite(v.sup.sum_w) and support_in_domain(v.sup.m);
+                 and std::isfinite(v.sup.sum_w) and std::isfinite(v.sup.sum_q) and support_in_domain(v.sup.m);
             for (const auto& a : v.bern)
                 ok = ok and fin(a.hit_c) and std::isfinite(a.n) and std::isfinite(a.sum_q) and std::isfinite(a.sum_hit_w) and std::isfinite(a.sum_f);
             if (not ok) return std::nullopt;

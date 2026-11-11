@@ -34,6 +34,7 @@
 #include "../../common/room_transition/startup_recall.h"   // warm start
 #include "door_close_clear.h"   // close: P(clear of the leaf's swing)
 #include "door_leaf_memory.h"   // the leaf side as a remembered probability; the side-weighted swept arc
+#include "core/room_door_count.h"   // a room has doors: the room-level door posterior (room-door-belief spec Part A)
 #include "specificworker.h"
 
 #include "../../common/config_report/config_read.h"   // rc::cfg::Reader (SHARED)
@@ -1659,6 +1660,12 @@ void SpecificWorker::CoreWorld::remove_door(std::uint64_t id, float L)
         w_.log_phantom_event("DEATH", id, it->second.node_name,
                              it->second.model.state().cx, it->second.model.state().cy, &it->second,
                              std::format("L {:.2f}", L));
+        // ★THE QUESTION REOPENS BEFORE THE DOOR GOES (clean35, 2026-11-10). A door removed for absence leaves where this room's
+        //  doors are an open question again (step_wall_hypotheses re-seeds the walls later this cycle), but the node deletion
+        //  reaches the graph first: the controller read "no door, questions settled" in between and ended the tour, a cycle
+        //  before door_2 was re-born where it had been. Published here, the graph never shows the room doorless and settled;
+        //  step_candidate_looks settles it again at the end of the cycle if another door still stands.
+        w_.publish_door_questions(true);
         it->second.affordance.remove();
         it->second.aff_approach.remove();   // and the three pragmatic siblings — see retire_instance
         it->second.aff_open.remove();
@@ -4317,28 +4324,58 @@ void SpecificWorker::step_candidate_looks()
     // ★A provisional room with no known door is open before its places exist: the drive reads the promotion and this statement separately.
     const bool no_door = std::ranges::none_of(fitter_->instances(), [](const auto& kv) { return not kv.second.is_bearing_hypothesis; });
     bool any_open = core_->room_is_proto() and no_door;
-    // The nearest wall place not yet exhausted is the one looked at; it keeps the look until it is answered.
-    const auto wall_open = [&](const auto& c)
-    {
-        if (c.room != room or not c.wall_seed or not core_->candidate_is_open(c)) return false;
-        const auto it = candidate_looks_.find(c.key);
-        return it == candidate_looks_.end() or not it->second.exhausted;
-    };
-    if (std::ranges::none_of(core_->candidates(), [&](const auto& c) { return c.key == wall_look_key_ and wall_open(c); }))
-    {
-        wall_look_key_ = 0;
-        if (const auto cam = fitter_->camera_in_room(); cam.has_value())
+
+    // ── THE ROOM'S DOOR BELIEF (room-door-belief spec Part A, core/room_door_count.h) ─────────────────────────────────
+    // Slots: the room's born doors and its candidates. A wall seed within half a door width of a born door or of another
+    // candidate gives its slot to it — the same location, seen; half a door width is the slot's own size (the seeds are
+    // one door width apart), not a tuning. Each slot's odds are its own evidence with the per-wall base rate taken out:
+    // the room's door-count prior replaces it (spec §3.1).
+    const float half_slot = 0.5f * cfg_.door_prior_w_m;
+    std::vector<Eigen::Vector2f> door_xy;
+    std::vector<rc::door::core::DoorCountPlace> door_slots;
+    for (const auto& [id, inst] : fitter_->instances())
+        if (not inst.is_bearing_hypothesis)
         {
-            const Eigen::Vector2f at(static_cast<float>(cam->coeff(0, 3)), static_cast<float>(cam->coeff(1, 3)));
-            float best = std::numeric_limits<float>::max();
-            for (const auto& c : core_->candidates())
-                if (wall_open(c) and (c.xy - at).norm() < best) { best = (c.xy - at).norm(); wall_look_key_ = c.key; }
+            const auto& s = inst.model.state();
+            door_xy.emplace_back(s.ap_cx, s.ap_cy);
+            door_slots.push_back({inst.belief.L() - inst.belief.prior.base_rate, 1.0f});   // Part A: a born door is found, f = 1
         }
-    }
-    std::set<std::uint64_t> asking;
+    const std::size_t n_doors = door_slots.size();
+    const auto taken = [&](const rc::door::core::DoorCore::Candidate& c)
+    {
+        if (not c.wall_seed) return false;
+        if (std::ranges::any_of(door_xy, [&](const Eigen::Vector2f& d) { return (c.xy - d).norm() < half_slot; })) return true;
+        return std::ranges::any_of(core_->candidates(), [&](const auto& o)
+                                   { return o.room == room and not o.wall_seed and (c.xy - o.xy).norm() < half_slot; });
+    };
+    std::map<std::uint64_t, std::size_t> slot_of;   // candidate key -> its slot
     for (const auto& c : core_->candidates())
     {
-        if (c.room != room or not core_->candidate_is_open(c))
+        if (c.room != room or taken(c)) continue;
+        const double p = std::clamp(double(core_->candidate_question_p(c)), 0.0, 1.0);   // the question's P (widest blob, clean25)
+        slot_of[c.key] = door_slots.size();
+        door_slots.push_back({static_cast<float>(std::log(p) - std::log1p(-p)) - c.belief.prior.base_rate, 0.0f});
+    }
+    // ★FLAGGED (spec §6.3): the initial count prior, geometric on n >= 1 with mean 2, P(N = 0) = 0 (§6.1); the support is
+    //  capped at 8 doors (a home's room), or the slot count if smaller. Replaced by memory's counts once ltsm publishes them.
+    const int n_max = std::min<int>(8, static_cast<int>(door_slots.size()));
+    const auto post = rc::door::core::room_door_posterior(door_slots, rc::door::core::geometric_count_prior(2.0, std::max(1, n_max)));
+
+    // THE PRICE OF A LOOK (spec §3.4): VOI = C_miss · P(this look finds a door the drive cannot act on yet), in seconds, against
+    // its time: the straight line from the camera over the controller's nominal speed (a lower bound) plus its dwell.
+    const double c_miss = cfg_.exist_max_room_s;
+    const double hit = core_->detectors().zed.hit_rate;
+    std::optional<Eigen::Vector2f> at;
+    if (const auto cam = fitter_->camera_in_room(); cam.has_value())
+        at = Eigen::Vector2f(static_cast<float>(cam->coeff(0, 3)), static_cast<float>(cam->coeff(1, 3)));
+    struct Priced { std::uint64_t key; double voi, cost; bool wall; };
+    std::vector<Priced> priced;
+    std::set<std::uint64_t> asking;
+
+    for (const auto& c : core_->candidates())
+    {
+        const auto si = slot_of.find(c.key);
+        if (c.room != room or si == slot_of.end())
             continue;
         if (not can_plan)     // a provisional room, or no camera model yet: the question stands, no look is offered
         {
@@ -4352,9 +4389,9 @@ void SpecificWorker::step_candidate_looks()
         if (const auto aid = e.aff.node_id(); aid != 0)
             e.aff.on_node_modified(aid);
         using S = rc::ObjectAffordance::State;
+        asking.insert(c.key);   // keeps its entry (the tried sites are remembered) whatever the price says
         if (e.aff.state() == S::executing)      // the controller holds it: the site stands until the claim ends
         {
-            asking.insert(c.key);
             any_open = true;
             e.aff.hold_offered();
             continue;
@@ -4372,14 +4409,14 @@ void SpecificWorker::step_candidate_looks()
             rc::door::IdentityRow r;
             r.room = room; r.name = std::format("place_{}", c.key); r.xy = c.xy;
             const std::function<bool(const Eigen::Vector2f&)> admissible = adds_a_view;
-            const auto plan = rc::door::look::plan(r, core_->candidate_question_p(c), fitter_->room_polygon(), sensor, furniture, gaps, prm, &admissible);
+            // the standpoint: p_detect · EIG(p) is maximised by the same standpoint whatever p is (EIG(p) is one number per place)
+            const auto plan = rc::door::look::plan(r, static_cast<float>(post.marg[si->second]), fitter_->room_polygon(), sensor, furniture, gaps, prm, &admissible);
             if (not plan.valid)                 // no standpoint adds a view: this candidate has told everything it can
             {
-                withdraw(c.key, e, "no standpoint adds a view");
+                if (e.aff.node_id() != 0) withdraw(c.key, e, "no standpoint adds a view");
                 if (not std::exchange(e.exhausted, true))
                     std::print("door_concept: [look] place_{} at ({:.2f},{:.2f}) stays not born: {} view(s), L={:+.2f}, no standpoint adds a view\n",
                                c.key, c.xy.x(), c.xy.y(), c.belief.ledger.views().size(), c.belief.L());
-                asking.insert(c.key);           // keeps its entry, so the tried sites are remembered
                 continue;
             }
             rc::AffordanceTarget tgt;
@@ -4388,20 +4425,38 @@ void SpecificWorker::step_candidate_looks()
             tgt.standoff_min_m = plan.band_near_m; tgt.standoff_max_m = plan.band_far_m;
             tgt.framing_fill = rc::nbv::framing_fill(sensor);
             e.site = tgt;
-            std::print("door_concept: [look] aff_door_look_place_{} OFFERED at ({:.2f},{:.2f}) yaw={:.2f} for the place ({:.2f},{:.2f}) — "
-                       "L={:+.2f}, {} view(s), EIG {:.3f} nats (p_detect {:.2f}, visible {:.2f})\n", c.key, plan.pos.x(), plan.pos.y(), plan.yaw,
-                       c.xy.x(), c.xy.y(), c.belief.L(), c.belief.ledger.views().size(), plan.eig, plan.p_detect, plan.visible_frac);
+            e.p_detect = plan.p_detect;
+            e.exhausted = false;
         }
-        if (c.wall_seed and c.key != wall_look_key_)
-        {   // only the place being looked at holds a node (a room's walls are many places: one affordance at a time keeps the graph quiet)
+        const double voi = rc::door::core::look_value_s(c_miss, post.marg[si->second], door_slots[si->second].found, hit, e.p_detect);
+        const double dist = at.has_value() ? double((Eigen::Vector2f(e.site->x_m, e.site->y_m) - *at).norm()) : 0.0;
+        priced.push_back({c.key, voi, dist / std::max(1e-3, double(cfg_.exist_look_speed_mps)) + double(cfg_.exist_look_dwell_s), c.wall_seed});
+    }
+
+    // A look is offered iff it pays (VOI > its time). Among the wall slots only the best-paying one holds a node: a room's walls are
+    // many places, one affordance at a time keeps the graph quiet.
+    std::optional<std::uint64_t> best_wall;
+    double best_wall_margin = 0.0;
+    for (const auto& q : priced)
+        if (q.wall and q.voi - q.cost > best_wall_margin) { best_wall_margin = q.voi - q.cost; best_wall = q.key; }
+    wall_look_key_ = best_wall.value_or(0);
+    const Priced* best = nullptr;
+    for (const auto& q : priced)
+    {
+        auto& e = candidate_looks_.at(q.key);
+        const bool pays = q.voi > q.cost;
+        if (pays and (best == nullptr or q.voi - q.cost > best->voi - best->cost)) best = &q;
+        if (not pays or (q.wall and q.key != wall_look_key_))
+        {
             if (e.aff.node_id() != 0) e.aff.remove();
-            asking.insert(c.key);
-            any_open = true;
+            any_open = any_open or pays;
             continue;
         }
+        if (e.aff.node_id() == 0)
+            std::print("door_concept: [look] aff_door_look_place_{} OFFERED at ({:.2f},{:.2f}) yaw={:.2f} — P(door) {:.2f} in the room's belief, "
+                       "worth {:.0f} s against {:.0f} s (p_detect {:.2f})\n", q.key, e.site->x_m, e.site->y_m, e.site->yaw_rad,
+                       post.marg[slot_of.at(q.key)], q.voi, q.cost, e.p_detect);
         e.aff.update(*e.site);
-        e.exhausted = false;
-        asking.insert(c.key);
         any_open = true;
     }
     for (auto it = candidate_looks_.begin(); it != candidate_looks_.end();)
@@ -4409,6 +4464,15 @@ void SpecificWorker::step_candidate_looks()
         if (asking.contains(it->first)) { ++it; continue; }
         withdraw(it->first, it->second, "the question is answered (born or refused)");
         it = candidate_looks_.erase(it);
+    }
+    if (std::abs(post.p_more - room_p_more_logged_) > 0.05 or any_open != room_open_logged_)   // ★log cadence only, decides nothing
+    {
+        room_p_more_logged_ = post.p_more;
+        room_open_logged_ = any_open;
+        std::print("door_concept: [room-doors] '{}': P(a door not found yet) {:.3f} over {} slot(s) ({} door(s) found); best look {} — questions {}\n",
+                   room, post.p_more, door_slots.size(), n_doors,
+                   best != nullptr ? std::format("place_{} worth {:.0f} s against {:.0f} s", best->key, best->voi, best->cost) : std::string("none pays"),
+                   any_open ? "open" : "settled");
     }
     publish_door_questions(any_open);
 }
@@ -4420,13 +4484,10 @@ void SpecificWorker::step_wall_hypotheses()
     if (not G or not fitter_ or room_node_id_ == 0) return;
     const std::string room = current_room_name();
     if (room.empty() or core_->room_name() != room or core_->room_is_proto() or not fitter_->has_room_polygon()) return;
-    if (std::ranges::any_of(fitter_->instances(), [](const auto& kv) { return not kv.second.is_bearing_hypothesis; }))
-    {
-        core_->retire_wall_seeds(room);
-        wall_seeded_room_ = 0;   // the questions are answered only while a door stands: if it is removed (clean31: the only door,
-                                 // real DOOR_2, deleted by one sliver mask) the walls are open questions again, not a finished room
-        return;
-    }
+    // ★THE WALLS ARE THE SLOTS (room-door-belief spec §3.3). The room's door-count posterior needs ONE fixed set of the
+    //  locations a door could be, so the seeds are made once per promoted room and KEPT while a door stands: a found door
+    //  takes the slot it stands in (step_candidate_looks), and the others are where a second door is looked for. (They used
+    //  to be retired as soon as any door existed, and re-seeded when it was removed — clean31.)
     if (wall_seeded_room_ == room_node_id_) return;
     wall_seeded_room_ = room_node_id_;
     const auto& poly = fitter_->room_polygon();
@@ -4438,7 +4499,7 @@ void SpecificWorker::step_wall_hypotheses()
         for (int k = 0; k < n; ++k)
             seeded += core_->hypothesise_place(room, poly[j] + e * ((static_cast<float>(k) + 0.5f) / static_cast<float>(n)), true) ? 1 : 0;
     }
-    std::print("door_concept: [look] '{}' is promoted with no known door: {} place(s) along its walls are open questions\n", room, seeded);
+    std::print("door_concept: [look] '{}' is promoted: {} place(s) along its walls are its door slots\n", room, seeded);
 }
 
 void SpecificWorker::step_doorway_hypotheses()

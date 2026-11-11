@@ -450,6 +450,9 @@ struct DoorConfig
     float exist_boundary_sigma_m   = 0.10f;  // Existence.BoundarySigmaM — σ of door registration ⊕ polygon face (m)
     bool  exist_geometry_may_refute = false; // Existence.GeometryMayRefute — §8.5: the geometry channel may only RAISE L until benched on ROI tapes
     float exist_max_room_s         = 300.0f; // Existence.MaxRoomS — mirrors controller ExploreTour.MaxRoomS: the longest a room's exploration lasts (s); C_delete(route) = C_delete(ordinary) + this
+                                             //   and C_miss, the price of a door left undiscovered (room-door-belief spec §3.4)
+    float exist_look_speed_mps     = 0.50f;  // Existence.LookSpeedMps — mirrors the controller's nominal advance speed: a look's travel time = straight line / this (a lower bound: the error leans to looking)
+    float exist_look_dwell_s       = 3.0f;   // Existence.LookDwellS — mirrors the controller's post-arrival DWELL (s): what a look costs once there
     // ── Openable door: APERTURE / LEAF decomposition (M0 = structure only) ─────────────────────────
     // A door is an APERTURE (a static hole in a wall) plus a LEAF (a rigid panel hinged on one of its
     // vertical edges) — see door_geometry.h. M0 introduces the decomposition with phi PINNED at 0, so the
