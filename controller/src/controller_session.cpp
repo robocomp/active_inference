@@ -3755,7 +3755,7 @@ bool ControllerSession::drive_door_route(const ControllerPlanningStep &step, rc:
         if (const auto seen = perceived_door(leg.door, step.robot_pose); seen.has_value())
         {
             const std::string room = leg.key.substr(leg.key.rfind('|') + 1);
-            if (door_route_latch_room_ != room) { door_route_latch_room_ = room; door_route_n0_key_.clear(); door_route_through_key_.clear(); door_route_last_s_body_ = -1e9f; }
+            if (door_route_latch_room_ != room) { door_route_latch_room_ = room; door_route_n0_key_.clear(); door_route_through_key_.clear(); door_route_opening_key_.clear(); door_route_last_s_body_ = -1e9f; }
             const std::string latch = leg.door + "|" + room;
             const float half_w = std::max(approach_body_.support_radius(0.f, Eigen::Vector2f(1.f, 0.f)),
                                           approach_body_.support_radius(0.f, Eigen::Vector2f(-1.f, 0.f)));
@@ -3780,12 +3780,22 @@ bool ControllerSession::drive_door_route(const ControllerPlanningStep &step, rc:
             // THROUGH held back until the body was 1.3 m in (e4c6067c), room_concept stayed in the old room's frame for ~5 s
             // and stored what it saw of the next room as the old room's floor (room_2: 22-28 m2 through pingpong13, then
             // 41/67/44/38/32 m2; pingpong29 leg 2: +3075 free cells with the body past the line before the switch).
-            const bool through_now = s_body > r_body;
+            // ★ THROUGH THE OPENING, NOT ACROSS ITS LINE (2026-11-11, clean40/clean41: 2/2 exploration tours ended STUCK). s alone
+            //   is a half-plane test: the bathroom is L-shaped, the line through its door to room_2 runs through the bathroom's
+            //   own lower leg, and a robot starting back from there was on the far side of the line 2.5 m along the wall from the
+            //   door — THROUGH fired, room_concept switched rooms, ltsm withdrew the crossing, the tour stopped. Crossing the
+            //   opening SEGMENT: the body was seen IN the opening (its centre within the opening's width while the body straddles
+            //   the plane) before it is wholly past it. No new constant: the opening's own width and the body's radius.
+            const float e_side = (cpose.pos - seen->gap.centre).dot(Eigen::Vector2f(-n.y(), n.x()));
+            // (an opening of unknown width — 0 — cannot bound e: the plane test as before, rather than never reporting a crossing)
+            if (std::abs(s_body) < r_body and (seen->gap.width <= 0.f or std::abs(e_side) <= 0.5f * seen->gap.width))
+                door_route_opening_key_ = latch;
+            const bool through_now = s_body > r_body and door_route_opening_key_ == latch;
             if (door_route_through_key_ != latch and through_now)
             {
                 door_route_through_key_ = latch;
-                std::println("[door-route] {}: the body is {} past {} (s {:.2f} m; body radius {:.2f} m) — THROUGH", leg.door,
-                             "wholly", seen->name, s_body, r_body);
+                std::println("[door-route] {}: the body is {} past {} (s {:.2f} m; e {:+.2f} m of the opening's ±{:.2f}; body radius {:.2f} m) — THROUGH",
+                             leg.door, "wholly", seen->name, s_body, e_side, 0.5f * seen->gap.width, r_body);
                 door_passage_.note_route(leg.key, rc::DoorPassage::RouteReport::Arrived);
             }
         }

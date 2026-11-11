@@ -1273,6 +1273,7 @@ private:
     std::uint64_t door_route_build_ms_ = 0;                         // last build attempt
     Eigen::Vector2f door_route_n0_{0.f, 1.f};                      // the perceived opening's through-normal, latched per leg (near side)
     std::string door_route_n0_key_, door_route_through_key_;       // door|room it was latched for / already reported THROUGH
+    std::string door_route_opening_key_;                           // door|room whose OPENING the body was seen in (THROUGH needs it)
     std::string door_route_latch_room_;                            // the room the latch belongs to (a change resets it)
     bool door_route_body_in_opening_ = false;                      // some part of the body is in the perceived opening
     float door_route_last_s_body_ = -1e9f;    ///< the body's s past the perceived opening, last measured (drive_door_route)
