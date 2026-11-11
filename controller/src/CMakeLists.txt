@@ -33,6 +33,9 @@ LIST(APPEND SOURCES
   ../src/local_policy/contact.cpp
   ../src/local_policy/cost_to_go.cpp
   ../src/local_policy/navigator.cpp
+  # the chain's model-based monitors (shared with tests/test_policy_scenarios.cpp), logging-only hook
+  ../src/chain_monitor/chain_monitor.cpp
+  ../src/controller_chain_monitor.cpp
   ../src/controller_world_model.cpp
   # This robot's body, from the mesh the graph names — see controller_robot_body.h.
   ../src/controller_robot_body.cpp

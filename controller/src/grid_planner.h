@@ -137,6 +137,7 @@ public:
         offsets_legacy_.clear();
         offsets_margin_ = -1.f;
         dist_valid_ = false;
+        free_memo_.clear();
         rebuild_offsets();
     }
 
@@ -405,7 +406,14 @@ private:
     // Cached distance field, in metres, one entry per cell. Mutable because it is a memoised view of occ_:
     // asking for a distance does not change the planner's world, it only realises part of it.
     mutable std::vector<float> dist_;
+    mutable std::vector<float> dist2_cells_;   // the same EDT in squared cells (exact integers), for cell_free's shortcut
     mutable bool dist_valid_ = false;
+    // Memo of cell_free per (cell, heading): 0 not yet asked, 1 free, 2 blocked. A pure cache of occ_ x offsets_, cleared
+    // wherever either changes (set_world past its skip, read_grid, set_footprint, rebuild_offsets). A* asks the same
+    // (cell, heading) from every neighbour and every re-plan in the same world; each answer walks the whole footprint
+    // (~80 cells). Measured (controller/tests mock, a detour that searches the whole apartment): plan() 66-120 ms.
+    // Not thread-safe, like dist_: one planner per thread.
+    mutable std::vector<std::uint8_t> free_memo_;
     float xmin_ = 0, ymin_ = 0, cell_ = 0.1f;
     int   w_ = 0, h_ = 0;
     std::size_t world_hash_ = 0;
@@ -417,6 +425,8 @@ private:
     // (orientation_census / pose_free_legacy) instead of asserted. Delete with them.
     std::vector<std::vector<Eigen::Vector2i>> offsets_legacy_;
     float offsets_cell_ = 0.f, offsets_margin_ = -1.f;
+    int   offsets_reach2_cells_ = 0; // farthest footprint cell centre over all headings, SQUARED CELLS (rebuild_offsets)
+    int   offsets_reach_cells_ = 0;  // widest per-axis footprint offset over all headings, cells
     std::vector<std::vector<Eigen::Vector2f>> passages_;   // set_passages
     bool room_mask_usable_ = true;  // false ⇒ the room polygon was discarded (see set_world)
     int last_obstacle_count_ = 0;   // polygons in the last set_world — for the failure report

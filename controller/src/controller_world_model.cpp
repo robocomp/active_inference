@@ -121,21 +121,24 @@ std::optional<std::vector<Eigen::Vector2f>> ControllerWorldModel::read_room_poly
 }
 
 std::optional<ControllerRobotPose> ControllerWorldModel::pose_from_rt(
-    std::initializer_list<std::uint64_t> instants) const
+    std::initializer_list<std::uint64_t> instants, bool walk_past_end) const
 {
     if (!inner_eigen_api_ || !graph_state_.ready() || !params_)
         return std::nullopt;
 
-    const auto time_query = params_->interpolate_rt ? DSR::RT_API::TimeQuery::Interpolated
-                                                    : DSR::RT_API::TimeQuery::Nearest;
-    const bool interpolated = params_->interpolate_rt;
+    // walk_past_end: Extrapolated — inside the ring it interpolates exactly as Interpolated; PAST its newest block it walks
+    // that block along its own stored twist (cortex, capped at the ring span) instead of returning it unchanged.
+    const auto time_query = not params_->interpolate_rt ? DSR::RT_API::TimeQuery::Nearest
+                          : walk_past_end              ? DSR::RT_API::TimeQuery::Extrapolated
+                                                       : DSR::RT_API::TimeQuery::Interpolated;
+    const int mode = static_cast<int>(time_query);
     for (const std::uint64_t ts : instants)
     {
         if (ts != 0)
         {
             std::lock_guard lock(pose_memo_mutex_);
             for (const auto &m : pose_memo_)
-                if (m.ts == ts and m.interpolated == interpolated)
+                if (m.ts == ts and m.mode == mode)
                     return m.pose;
         }
         const auto room_T_robot = inner_eigen_api_->get_transformation_matrix(graph_state_.room_name,
@@ -149,7 +152,7 @@ std::optional<ControllerRobotPose> ControllerWorldModel::pose_from_rt(
         if (ts != 0)
         {
             std::lock_guard lock(pose_memo_mutex_);
-            pose_memo_[pose_memo_next_] = {ts, interpolated, pose};
+            pose_memo_[pose_memo_next_] = {ts, mode, pose};
             pose_memo_next_ = (pose_memo_next_ + 1) % pose_memo_.size();
         }
         return pose;
@@ -163,7 +166,12 @@ std::optional<ControllerRobotPose> ControllerWorldModel::read_robot_pose_in_room
     std::uint64_t timestamp_ms,
     const std::optional<std::uint64_t> &last_lidar_timestamp_ms) const
 {
-    return pose_from_rt({last_lidar_timestamp_ms.value_or(timestamp_ms), timestamp_ms, 0});
+    // ★ WALKED PAST THE RING'S END, like the cloud (2026-11-11). The scan's own correction lands in the ring ~4 ms after the
+    //   scan, so a cycle that runs first reads PAST the newest block; Interpolated then returned the PREVIOUS correction
+    //   unchanged — the same pose two cycles running in 15-16 % of moving cycles (Webots chain6/7), while the cloud (registered
+    //   Extrapolated, controller_obstacle_tracker) was walked to the scan stamp: robot and obstacles ~v x 56 ms apart. Now both
+    //   take the newest block along its measured twist. Inside the ring nothing changes (Extrapolated interpolates there).
+    return pose_from_rt({last_lidar_timestamp_ms.value_or(timestamp_ms), timestamp_ms, 0}, /*walk_past_end=*/true);
 }
 
 // FRESHEST — see the header for why the control law wants this one and nothing else does. Asking for a

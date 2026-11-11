@@ -570,7 +570,20 @@ bool ControllerSession::sync_world_state(std::uint64_t timestamp_ms,
             policy_passed_leaf_logged_ = current_room_name_;
         }
     }
-    const ControllerPolygons &planner_polygons = passed_leaf_known ? std::as_const(polygons_with_leaf) : obstacle_tracker.obstacle_polygons();
+    // PORT STEP 3 (2026-11-11): while the CHAIN drives, the controller-local marks (unmapped obstacles the chain's window found,
+    // with their belief; controller_chain_monitor.cpp) are obstacles for the planner — and, being in its world, they also
+    // count as "explained" for the next unmapped test, so a mark is never drawn twice. Not while the planner was told the
+    // marks leave no route to the current target (chain_marks_off_: plan on the map alone until the marks change; WAIT = step 4).
+    chain_marks_in_world_ = chain_marks_drive() and not chain_marks_off_ and not chain_marks_.empty()
+                            and chain_marks_room_ == current_room_name_;
+    ControllerPolygons polygons_with_marks;
+    if (chain_marks_in_world_)
+    {
+        polygons_with_marks = passed_leaf_known ? polygons_with_leaf : obstacle_tracker.obstacle_polygons();
+        for (auto &poly : chain_marks_.polygons(grid_planner_.params.cell_size_m)) polygons_with_marks.push_back(std::move(poly));
+    }
+    const ControllerPolygons &planner_polygons = chain_marks_in_world_ ? std::as_const(polygons_with_marks)
+                                               : passed_leaf_known ? std::as_const(polygons_with_leaf) : obstacle_tracker.obstacle_polygons();
     {
     RC_STAGE("session.grid_set_world");
     grid_planner_.set_world(room_polygon_, planner_polygons,
@@ -2396,6 +2409,7 @@ ControllerPolygon ControllerSession::smooth_plan(const ControllerPolygon &poly, 
                          params_->route_smoothing_m, &opt))
         return poly;   // smoothing is an improvement, never a precondition: fall back to the polyline
     plan_spline_valid_ = true;
+    ++plan_spline_gen_;   // a NEW curve in the same object: consumers holding &plan_spline_ cannot see the change by address
     return replace_samples ? spline.samples() : poly;
 }
 
@@ -3235,6 +3249,7 @@ bool ControllerSession::ensure_current_plan(const ControllerPlanningStep &step,
     {
         reset_stuck_state();   // a fresh target = fresh navigation; don't inherit a stale stuck clock
         returns_backoff_failed_ = false;
+        chain_marks_off_ = false;   // a new target is planned with the marks again (port step 3)
     }
 
     // ── CONTINUOUS ROUTE ──
@@ -4004,6 +4019,22 @@ bool ControllerSession::drive_point_target(const ControllerPlanningStep &step,
         short_path_since_ms_ = 0;
         return true;
     }
+    // PORT STEP 3: a mark near the route cleared last cycle (step_chain_monitor). The route is still safe — an obstacle went
+    // away — so it is replaced only if the planner, on this cycle's world without that mark, finds a SHORTER one.
+    if (chain_clear_check_)
+    {
+        chain_clear_check_ = false;
+        if (not band_cross_active and not step.target_changed and current_plan_.has_value() and plan_spline_valid_ and chain_have_s_
+            and driven_curve().owner == DriveOwner::PointPlan)
+            if (const auto cand = grid_planner_.plan(step.plan_origin, step.target.room_pos);
+                cand.has_value() and rc::chain::shorter_route(*cand, plan_spline_.length() - chain_s_prog_, grid_planner_.params.cell_size_m))
+            {
+                std::println("[chain] a cleared mark opens a shorter route to '{}' ({:.2f} m < {:.2f} m left): re-plan",
+                             step.target.node_name, rc::chain::polyline_length(*cand), plan_spline_.length() - chain_s_prog_);
+                current_plan_.reset();
+                plan_spline_valid_ = false;
+            }
+    }
     if (not band_cross_active and (step.target_changed || !current_plan_.has_value()))
     {
         // FOOTPRINT PLANNER. The robot's real shape is tested against the grid; obstacles are NOT inflated.
@@ -4017,6 +4048,17 @@ bool ControllerSession::drive_point_target(const ControllerPlanningStep &step,
             // either way — a C1 polyline steps it at every turning point regardless of who asked.
             plan.room_path = smooth_plan(plan.room_path);
             current_plan_ = std::move(plan);
+        }
+        else if (chain_marks_in_world_)
+        {
+            // PORT STEP 3: the chain's MARKS leave no route to this target. WAIT for them to clear is step 4 (not built); until
+            // then the target is planned on the map alone, as before the marks existed — the marks must not invent a dead end.
+            // Not a route failure of the target itself, so the repair stage is not told.
+            current_plan_.reset();
+            plan_spline_valid_ = false;
+            chain_marks_off_ = true;
+            std::println("[chain] no route to '{}' with {} marks: planning on the map alone (WAIT is step 4)",
+                         step.target.node_name, chain_marks_.marks.size());
         }
         else
         {
@@ -6976,8 +7018,19 @@ bool ControllerSession::consume_goal_reached(bool goal_reached, const Controller
                 return true;
             }
         }
+        // ★ A Reach WITH a goal that did not ask for stillness is judged HERE, at arrival (language-agent chat_e2e3, 2026-11-11:
+        //   `approach chair_34` arrived inside the goal tolerances and was reported Timeout — finalize_reached reads
+        //   last_look_succeeded_, which only the servo/orient paths ever write). The contract's own predicate against its
+        //   feedback node, now: Satisfied if it holds, Timeout (honestly) if it does not. An empty goal stays "arriving IS the goal".
+        if (not active_contract_.goal.empty())
+        {
+            const std::uint64_t fb = active_contract_.feedback_node_id != 0
+                                         ? active_contract_.feedback_node_id
+                                         : (last_target_info_.has_value() ? last_target_info_->parent_node_id : 0);
+            last_look_succeeded_ = goal_met(fb);
+        }
         qInfo() << "[affordance]" << (last_target_info_.has_value() ? last_target_info_->node_name.c_str() : "?")
-                << "reached -> REACH (consume immediately)";
+                << "reached -> REACH (consume immediately)" << (active_contract_.goal.empty() ? "" : last_look_succeeded_ ? "| goal holds" : "| goal does NOT hold");
         audit_standpoint("arrival-end", time_source(),
                          last_raw_target_pos_.value_or(robot_pose.pos.head<2>().cast<float>()),
                          last_target_info_.has_value() ? last_target_info_->room_pos
@@ -7277,6 +7330,16 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
     // Everything else in this function keeps `robot_pose`, the scan-aligned one.
     const auto &control_pose = tracker_pose_.has_value() ? *tracker_pose_ : robot_pose;
     const auto control_output = path_controller.compute(control_pose.as_transform());
+    // the chain's monitors: judge and log (port step 2); step 3: a plan-first verdict (or a cleared mark the route went around)
+    // re-plans on map + marks — the plan is dropped and the next cycle routes again. The base is NOT stopped: this cycle's
+    // command still follows the old curve, which the window judged safe up to the failing stretch beyond the tracker's reach.
+    if (step_chain_monitor(robot_pose, control_output, obstacle_tracker, path_controller))
+    {
+        current_plan_.reset();
+        plan_spline_valid_ = false;
+        route_repair_pending_ = true;
+        std::println("[chain] re-plan on map + {} marks (plan-first)", chain_marks_.marks.size());
+    }
     // Surface what the ARRIVAL test is waiting on, every cycle, before any of the branches below can return
     // early — otherwise the readout would freeze exactly in the states worth watching (aligning, blocked).
     // The affordance program, rebuilt from state that already exists. Runs EVERY cycle an affordance is

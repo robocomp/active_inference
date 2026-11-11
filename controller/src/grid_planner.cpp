@@ -43,6 +43,7 @@ void GridPlanner::rebuild_offsets()
         and std::abs(offsets_margin_ - params.safety_margin_m) < 1e-6f)
         return;
     footprint.set_safety_margin(params.safety_margin_m);
+    free_memo_.clear();   // the coverage changes: every cached cell_free answer is stale
     offsets_.assign(kHeadings, {});
     offsets_legacy_.assign(kHeadings, {});
     for (int h = 0; h < kHeadings; ++h)
@@ -68,6 +69,16 @@ void GridPlanner::rebuild_offsets()
     }
     offsets_cell_ = cell_;
     offsets_margin_ = params.safety_margin_m;
+    // the footprint's reach over every heading: its farthest covered cell (centre distance, metres) and its widest
+    // per-axis offset (cells). cell_free uses them for an EXACT shortcut: a cell farther from every occupied cell than
+    // the reach, with the whole footprint inside the grid, is free at every heading.
+    offsets_reach2_cells_ = 0; offsets_reach_cells_ = 0;
+    for (const auto& oh : offsets_)
+        for (const auto& o : oh)
+        {
+            offsets_reach2_cells_ = std::max(offsets_reach2_cells_, o.x() * o.x() + o.y() * o.y());
+            offsets_reach_cells_ = std::max({offsets_reach_cells_, std::abs(o.x()), std::abs(o.y())});
+        }
 }
 
 bool GridPlanner::cell_free_legacy(int ix, int iy, int h) const
@@ -144,6 +155,7 @@ void GridPlanner::set_world(const std::vector<Eigen::Vector2f>& room_polygon,
         world_key_ = k;
     }
     dist_valid_ = false;          // the world changed; any cached distance field describes the old one
+    free_memo_.clear();           // ...and so does every cached cell_free answer
     risk_.clear();
     residual_soft_in_ = residual_hard_in_ = 0;
     live_only_.clear();
@@ -407,7 +419,7 @@ void GridPlanner::write_grid(std::ostream& os) const
 
 bool GridPlanner::read_grid(std::istream& is)
 {
-    w_ = h_ = 0; occ_.clear(); live_only_.clear(); dist_.clear(); dist_valid_ = false; risk_.clear(); world_key_ = 0;
+    w_ = h_ = 0; occ_.clear(); live_only_.clear(); dist_.clear(); dist_valid_ = false; risk_.clear(); world_key_ = 0; free_memo_.clear();
     std::string tok;
     while (is >> tok and tok != "grid") is.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
     if (tok != "grid") return false;
@@ -525,6 +537,7 @@ void GridPlanner::build_distance_field() const
     dist_.resize(n);
     for (std::size_t i = 0; i < n; ++i)
         dist_[i] = (g[i] >= kInf) ? 1e6f : std::sqrt(g[i]) * cell_;   // cells -> metres
+    dist2_cells_ = std::move(g);   // the squared distances in CELLS: integer-valued floats, exact (cell_free's shortcut)
     dist_valid_ = true;
 }
 
@@ -574,7 +587,26 @@ bool GridPlanner::cell_free_in(const std::vector<std::vector<Eigen::Vector2i>>& 
     return true;
 }
 
-bool GridPlanner::cell_free(int ix, int iy, int h) const { return cell_free_in(offsets_, ix, iy, h); }
+bool GridPlanner::cell_free(int ix, int iy, int h) const
+{
+    if (not in_bounds(ix, iy) or h < 0 or h >= kHeadings or offsets_.size() != kHeadings) return cell_free_in(offsets_, ix, iy, h);
+    const std::size_t n = static_cast<std::size_t>(w_) * static_cast<std::size_t>(h_) * kHeadings;
+    if (free_memo_.size() != n) free_memo_.assign(n, 0);
+    auto& m = free_memo_[static_cast<std::size_t>(idx(ix, iy)) * kHeadings + static_cast<std::size_t>(h)];
+    if (m == 0)
+    {
+        // exact shortcut (see rebuild_offsets): the nearest occupied cell is beyond the footprint's reach, and the footprint
+        // is wholly inside the grid -> no covered cell is occupied or off the map, at any heading. Equal to the walk below.
+        const int r = offsets_reach_cells_;
+        // compared in squared CELLS (integers, exact in float) — not metres, where a sqrt/hypot ulp at exact equality could
+        // call free a cell whose nearest occupied cell sits exactly at the reach (Fable round 2)
+        const bool far = dist_valid_ and dist2_cells_.size() == static_cast<std::size_t>(w_) * static_cast<std::size_t>(h_)
+                         and dist2_cells_[static_cast<std::size_t>(idx(ix, iy))] > static_cast<float>(offsets_reach2_cells_)
+                         and ix - r >= 0 and iy - r >= 0 and ix + r < w_ and iy + r < h_;
+        m = (far or cell_free_in(offsets_, ix, iy, h)) ? 1 : 2;
+    }
+    return m == 1;
+}
 
 bool GridPlanner::cell_free_at(const Eigen::Vector2f& pos_room, int heading_index) const
 {
@@ -900,6 +932,38 @@ std::optional<std::vector<Eigen::Vector2f>> GridPlanner::plan(const Eigen::Vecto
     const float clearance_w = std::max(0.f, params.clearance_weight);
     const float clearance_d = std::max(0.01f, params.clearance_pref_m);
     if (clearance_w > 0.f) build_distance_field();
+    // ── REACHABILITY FIRST (exact, cheap) ─────────────────────────────────────────────────────────────
+    // A move from ANY heading at a cell to (n, d) needs only cell_free(n, d), d = the move's direction. So the cells
+    // the lattice reaches are exactly those a flood fill reaches with that rule — one pass over cells instead of over
+    // (cell, heading) states with a priority queue. When the goal is not among them, A* would exhaust the whole
+    // lattice to say so (measured, controller/tests mock: 130-270 ms per "no route" plan while a person blocked the
+    // only doorway). Same verdict, same failure class; A* runs unchanged when the goal is reachable.
+    {
+        std::vector<std::uint8_t> reach(static_cast<std::size_t>(n_cells), 0);
+        std::vector<int> stack{idx(sx, sy)};
+        reach[static_cast<std::size_t>(idx(sx, sy))] = 1;
+        bool goal_reached = (sx == gx and sy == gy);
+        while (not stack.empty() and not goal_reached)
+        {
+            const int c = stack.back(); stack.pop_back();
+            const int cx = c % w_, cy = c / w_;
+            for (int d = 0; d < kHeadings; ++d)
+            {
+                const int nx = cx + DX[d], ny = cy + DY[d];
+                if (not in_bounds(nx, ny) or reach[static_cast<std::size_t>(idx(nx, ny))] or not cell_free(nx, ny, d)) continue;
+                reach[static_cast<std::size_t>(idx(nx, ny))] = 1;
+                if (nx == gx and ny == gy) { goal_reached = true; break; }
+                stack.push_back(idx(nx, ny));
+            }
+        }
+        if (not goal_reached)
+        {
+            last_failure_ = std::format("no route: the goal is not connected to the start (flood fill over {} cells){}",
+                                        static_cast<long>(std::count(reach.begin(), reach.end(), std::uint8_t{1})),
+                                        start_in_collision ? " [start was NOT footprint-feasible; escape was used]" : "");
+            return std::nullopt;
+        }
+    }
     // The soft residual layer (set_world): charged per step, never blocking. Skipped entirely when the
     // world carries none, so the common case pays nothing for the footprint sum.
     const float risk_w = std::max(0.f, params.residual_risk_weight);

@@ -41,6 +41,7 @@
 #include "local_policy/field_extent.h"     // Task 3f (b): the field over extent ∪ goals; unseen cells at the prior
 #include "local_policy/cross_through.h"    // Task 3f (a): `through` as a posterior past the room switch
 #include "local_policy/unseen_contact.h"
+#include "chain_monitor/chain_monitor.h"   // the chain's monitors (shared with the 2-D mock)
 
 class ControllerSession
 {
@@ -874,6 +875,31 @@ private:
     std::string   reach_unreachable_name_;
     bool          route_dropped_ = false;      ///< an Unreachable was just reported: stop and drop the old route
     std::ofstream plan_track_csv_;             ///< plan_track.csv: per-cycle plan geometry + tracking errors
+    // ── THE CHAIN'S MONITORS (port step 2 logging, 2026-11-11; step 3: marks + plan-first while the CHAIN drives;
+    //    controller_chain_monitor.cpp). Returns true when the chain asks for a re-plan this cycle (step 3 only).
+    bool step_chain_monitor(const ControllerRobotPose &robot_pose, const rc::ControlOutput &out,
+                            ControllerObstacleTracker &obstacle_tracker, const rc::TrajectoryController &path_controller);
+    /// step 3 in force: the chain drives (policy off), the monitors are on and their marks are allowed to act
+    [[nodiscard]] bool chain_marks_drive() const
+    { return params_ != nullptr and params_->chain_monitor_enabled and params_->chain_marks_drive and not policy_enabled(); }
+    std::ofstream chain_csv_;                  ///< chain_monitor.csv
+    rc::chain::MarkSet chain_marks_;           ///< controller-local marks (room frame of chain_marks_room_)
+    std::string chain_marks_room_;             ///< the room whose frame the marks are in (a room switch drops them)
+    bool chain_marks_in_world_ = false;        ///< this cycle's planner world holds the marks (sync_world_state)
+    bool chain_clear_check_ = false;            ///< a mark near the route cleared: next cycle, re-plan only if the route gets SHORTER
+    bool chain_marks_off_ = false;             ///< no route WITH the marks to the current target: plan it on the map alone (WAIT = step 4)
+    rc::chain::ProgressMonitor chain_progress_;
+    float chain_s_prog_ = 0.f, chain_last_t_s_ = 0.f;
+    bool chain_have_s_ = false;
+    std::uint64_t chain_last_gen_ = 0; int chain_last_owner_ = -1;
+    Eigen::Vector2f chain_last_mark_at_{1e9f, 1e9f};
+    double chain_xt_w2_ = 0.0, chain_yaw_w2_ = 0.0, chain_xt_m_ = 0.0;   ///< sum x^2 ds, sum dyaw^2 ds, sum ds (driven along the route)
+    // the marks' relocalisation carry: odometry integrated from odo_v_/odo_w_, and last cycle's (believed, odometry) poses
+    rc::policy::Pose2 chain_odom_{Eigen::Vector2f::Zero(), 0.f}, chain_prev_odom_{Eigen::Vector2f::Zero(), 0.f},
+                      chain_prev_bel_{Eigen::Vector2f::Zero(), 0.f};
+    bool chain_have_prev_ = false;
+    double chain_prev_pose_stamp_ms_ = 0.0;   ///< the believed pose's own stamp last cycle (now - pose age)
+    std::uint64_t chain_prev_odo_stamp_ms_ = 0; double chain_odo_period_s_ = 0.0, chain_odo_period_n_ = 0.0;   ///< odometry sample period (running mean)
     /// A Reach standpoint (exploration: where exactly does not matter) the body cannot take — occupied, or wedged
     /// on the way in. Flag it; report_unreachable_if_no_route() tells the producer, which picks another.
     bool flag_reach_unreachable(std::string why)
@@ -1345,6 +1371,7 @@ private:
     // local elastic band can deform it every cycle instead of it being a one-shot fit.
     rc::RouteSpline plan_spline_;
     bool  plan_spline_valid_ = false;
+    std::uint64_t plan_spline_gen_ = 0;   // bumped on every new fit of plan_spline_ (the object is reused in place)
     float plan_progress_s_ = 0.f;      // robot's arc length along plan_spline_, forward-only
     rc::RouteFollower route_;
 public:

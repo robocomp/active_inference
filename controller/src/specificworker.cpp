@@ -1121,6 +1121,14 @@ void SpecificWorker::load_params()
 	cfgr.opt("Policy.Enabled", params.policy_enabled,
          "Task 8: the local look-ahead policy drives every motion; the old chain (escape, backoff, caps, band, tracker, servo) is OFF");
 	cfgr.opt_cast<double>("Policy.RiskEps", params.policy_risk_eps, "acceptable P(contact) per Drive decision");
+	cfgr.opt("ChainMonitor.Enabled", params.chain_monitor_enabled, "the chain's monitors judge + log (chain_monitor.csv); they never act");
+	cfgr.opt_cast<double>("ChainMonitor.SigmaTrack", params.chain_sigma_track, "prior lateral tracking sigma (m) for the window test");
+	cfgr.opt_cast<double>("ChainMonitor.MapSigma", params.chain_map_sigma, "the map's own position sigma (m) in the unmapped test");
+	cfgr.opt("ChainMonitor.MarksDrive", params.chain_marks_drive, "step 3: marks enter the planner + plan-first re-plans while the chain drives");
+	cfgr.opt_cast<double>("ChainMonitor.SigmaTrackPriorM", params.chain_sigma_track_prior_m, "metres of driving the prior sigma_track is worth");
+	cfgr.opt_cast<double>("ChainMonitor.SigmaTrackYaw", params.chain_sigma_track_yaw, "prior heading-tracking sigma (rad)");
+	cfgr.opt("ChainMonitor.MarksCarry", params.chain_marks_carry, "carry the marks on a detected relocalisation step (off: no live noise model yet)");
+	cfgr.opt_cast<double>("ChainMonitor.SlipSigma", params.chain_slip_sigma, "odometry slip per metre/radian for the marks' relocalisation carry");
 	cfgr.opt_cast<double>("Policy.ReleaseRiskMax", params.policy_release_risk_max, "a Release only below this P(contact)");
 	cfgr.opt_cast<double>("Policy.ProgressScaleM", params.policy_progress_scale_m, "metres of progress worth one nat over one horizon");
 	cfgr.opt_cast<double>("Policy.HorizonS", params.policy_horizon_s, "candidate hold time (s) before the brake tail");

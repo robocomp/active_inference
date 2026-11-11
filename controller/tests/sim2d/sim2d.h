@@ -38,7 +38,7 @@ constexpr float kPi = std::numbers::pi_v<float>;
 
 inline float wrap(float a) { while (a > kPi) a -= 2.f * kPi; while (a <= -kPi) a += 2.f * kPi; return a; }
 
-struct Box { float x0, y0, x1, y1; bool in_map = true; };
+struct Box { float x0, y0, x1, y1; bool in_map = true; bool in_world = true; };   // in_world false: a map ghost (the map has it, the world not)
 struct Segment { V2 a, b; bool in_map = true; };
 
 struct World
@@ -52,7 +52,7 @@ struct World
         float best = std::numeric_limits<float>::infinity();
         for (const auto& b : boxes)
         {
-            if (map_only and not b.in_map) continue;
+            if ((map_only and not b.in_map) or (not map_only and not b.in_world)) continue;
             const float dx = std::max({b.x0 - p.x(), 0.f, p.x() - b.x1}), dy = std::max({b.y0 - p.y(), 0.f, p.y() - b.y1});
             best = std::min(best, std::hypot(dx, dy));
         }
@@ -72,6 +72,7 @@ struct World
         float best = max_r;
         for (const auto& bx : boxes)
         {
+            if (not bx.in_world) continue;
             float t0 = 0.f, t1 = best;
             bool hit = true;
             for (int ax = 0; ax < 2 and hit; ++ax)
@@ -108,6 +109,7 @@ struct World
         };
         for (const auto& b : boxes)
         {
+            if (not b.in_world) continue;
             const V2 p00(b.x0, b.y0), p10(b.x1, b.y0), p11(b.x1, b.y1), p01(b.x0, b.y1);
             line(p00, p10); line(p10, p11); line(p11, p01); line(p01, p00);
         }
@@ -213,6 +215,10 @@ struct Base
     float latency_s = 0.06f, jitter_s = 0.f, deadband_scale = 1.f, slip_sigma = 0.f;
     std::mt19937* rng = nullptr;
     float v = 0.f, w = 0.f;        // actual
+    // ★ Identified plant (tools/tracker_sim.cpp: delay 0.20 s, tau 0.21-0.24 s, DC gain 0.89): a first-order lag of time
+    //   constant tau_s and a DC gain AFTER the ramps. Off by default (tau_s 0, gain 1: the old plant, bit for bit).
+    float tau_s = 0.f, gain = 1.f;
+    float rv = 0.f, rw = 0.f;      // the ramped (pre-lag) state, used only when the lag or the gain is on
     float cmd_v = 0.f, cmd_w = 0.f; // the command currently in effect at the wheels
     struct Cmd { float t, v, w; };
     std::deque<Cmd> queue;
@@ -249,6 +255,9 @@ struct Base
         const float tw = std::abs(cmd_w) < deadband_scale * lim.w_min_eff ? 0.f : std::clamp(cmd_w, -lim.w_max, lim.w_max);
         // ★ Live fix 2 ruling 1: the plant is a DIFFERENTIAL base — its two wheels ramp at a_lin / d_lin each (the same
         //   coupling as rc::policy::rollout); L = track_m, else the axle the limits imply (2 a_lin / a_rot).
+        const bool lag = tau_s > 0.f or gain != 1.f;
+        float& v = lag ? rv : this->v;
+        float& w = lag ? rw : this->w;
         const float L = lim.track_m > 0.f ? lim.track_m : (lim.a_lin > 0.f and lim.a_rot > 0.f ? 2.f * lim.a_lin / lim.a_rot : 0.f);
         if (L > 0.f)
         {
@@ -261,6 +270,12 @@ struct Base
         {
             v = ramp(v, tv, lim.a_lin, lim.d_lin, dt);
             w = ramp(w, tw, lim.a_rot, lim.d_rot, dt);
+        }
+        if (lag)
+        {
+            const float k = tau_s > 0.f ? 1.f - std::exp(-dt / tau_s) : 1.f;
+            this->v += (gain * rv - this->v) * k;
+            this->w += (gain * rw - this->w) * k;
         }
     }
 };
