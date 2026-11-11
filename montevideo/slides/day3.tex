@@ -587,78 +587,74 @@
   \src{layout\_acquisition.tex l.1033--1075 (eq.\ la-mdl), l.56--66}
 \end{frame}
 
-\begin{frame}{Step 5, continued: the price of a corner}
+\begin{frame}{Step 5, continued: why a corner costs 5.8 nats}
   \begin{columns}[c]
     \begin{column}{0.6\textwidth}
-      \alert{Why does a corner cost 5.8 nats?}\\[0.3em]
       \centering
       \begin{tikzpicture}[x=0.5cm, y=1cm]
-        \draw[->, muted] (0,0) -- (10.5,0) node[right, lab] {$x$};
-        \fill[cool!25, draw=cool] (0,0) rectangle (10,0.25);
-        \node[lab, text=cool, anchor=west] at (0,0.42) {prior: anywhere in $L=10$ m};
-        \fill[accent!50, draw=accent] (7.6,0) rectangle (7.85,1.3);
-        \node[lab, text=accent, anchor=east] at (7.5,1.05) {belief: to $\sigma=3$ cm (not to scale)};
-        \node[lab, below] at (0,0) {0}; \node[lab, below] at (10,0) {10 m};
-      \end{tikzpicture}\\[0.2em]
-      \raggedright\small
-      The price of one coordinate is the complexity term (Day 1), the KL divergence between the two uniforms $\mathcal U$:
-      \[
-        \KL{\mathcal U_\sigma}{\mathcal U_L} = \int_\sigma \tfrac1\sigma \ln\frac{1/\sigma}{1/L}\,dx
-        = \ln\frac{L}{\sigma} = \ln\frac{10}{0.03} \approx 5.8\nats
-      \]
-      \vspace{-0.6em}\par
-      \footnotesize Choosing one of 333 slots. In a right-angled room each new corner adds one new
-      coordinate, so a corner costs 5.8 nats, and it is kept only if the evidence pays for it: the
-      trade an object will face at birth.
+        \foreach \i in {0,...,39} \draw[cool!60, fill=cool!15] (\i*0.25,0) rectangle ++(0.25,0.35);
+        \fill[accent] (7.5,0) rectangle ++(0.25,0.35);
+        \draw[<->, muted] (0,-0.25) -- (10,-0.25);
+        \node[lab, below] at (5,-0.25) {the wall can be anywhere in $L = 10$ m};
+        \draw[->, accent, thick] (7.62,0.95) -- (7.62,0.42);
+        \node[lab, text=accent, above] at (7.62,0.9) {the scans say: \emph{here}, to $\sigma = 3$ cm};
+      \end{tikzpicture}\\[0.8em]
+      \raggedright
+      \begin{tabular}{@{}l@{\;\;}l@{}}
+        slots:              & $L/\sigma = 10\,\text{m} / 3\,\text{cm} \approx 333$ \\[0.2em]
+        prior of this slot: & $1/333$ \\[0.2em]
+        its cost:           & $-\ln(1/333) = \ln 333 \approx \alert{5.8\nats}$
+      \end{tabular}\\[0.8em]
+      \small With right angles a corner shares its $x$ with one neighbour and its $y$ with the other:
+      $V$ corners need only $V$ numbers (right). So each corner costs one slot, 5.8 nats.
     \end{column}
     \begin{column}{0.36\textwidth}
       \centering
-      \begin{tikzpicture}[scale=0.62, coin/.style={fill=accent!70, draw=white, thick}]
+      \begin{tikzpicture}[scale=0.56, coin/.style={fill=accent!70, draw=white, thick}]
         \draw[very thick, cool] (0,0) rectangle (4,2.4);
         \foreach \p in {(0,0),(4,0),(4,2.4),(0,2.4)} \fill[coin] \p circle (4pt);
-        \node[lab, above] at (2,2.5) {4 corners};
-        \begin{scope}[shift={(0,-3.3)}]
+        \node[lab, above] at (2,2.5) {4 corners, 4 numbers};
+        \foreach \x/\n in {0/1,4/2} \node[lab, text=cool, below] at (\x,-0.1) {$x_\n$};
+        \foreach \y/\n in {0/1,2.4/2} \node[lab, text=cool, left] at (-0.1,\y) {$y_\n$};
+        \begin{scope}[shift={(0,-4.0)}]
           \draw[very thick, accent] (0,0) -- (4,0) -- (4,1.6) -- (3,1.6) -- (3,2.4) -- (0,2.4) -- cycle;
           \fill[muted!30] (3.05,1.65) rectangle (4,2.4);
           \foreach \p in {(0,0),(4,0),(4,1.6),(3,1.6),(3,2.4),(0,2.4)} \fill[coin] \p circle (4pt);
-          \node[lab, above] at (1.6,2.5) {6 corners: a cabinet?};
-          \node[lab, below, align=center] at (2,-0.05) {only if its evidence pays\\for two more corners};
+          \node[lab, above] at (1.6,2.5) {6 corners, 6 numbers: a cabinet?};
+          \foreach \x/\n in {0/1,3/2,4/3} \node[lab, text=accent, below] at (\x,-0.1) {$x_\n$};
+          \foreach \y/\n in {0/1,1.6/2,2.4/3} \node[lab, text=accent, left] at (-0.1,\y) {$y_\n$};
+          \node[lab, below, align=center] at (2,-0.6) {$+2$ corners, $+2$ numbers\\$= +11.6$ nats: kept only if\\the misfit drops by more};
         \end{scope}
       \end{tikzpicture}
     \end{column}
   \end{columns}
+  \vfill
+  {\footnotesize This is Day 1's complexity term: the KL from prior (10 m) to belief (3 cm) is $\ln(L/\sigma)$.\par}
   \src{layout\_acquisition.tex l.56--66, l.128--146}
 \end{frame}
 
 
-\begin{frame}{The room supplies the likelihood}
-  \begin{columns}[c]
-    \begin{column}{0.46\textwidth}
-      \centering
-      \begin{tikzpicture}[scale=1.05]
-        \draw[very thick, muted] (0,0) rectangle (4.6,3);
-        \fill[black!55] (1.6,1.2) circle (0.14);
-        \foreach \px/\py/\qx/\qy in {4.36/2.2/4.6/2.2, 4.25/0.55/4.6/0.55, 2.9/2.75/2.9/3, 0.8/2.8/0.8/3} {
-          \draw[cool!40] (1.6,1.2) -- (\px,\py);
-          \fill[cool] (\px,\py) circle (2pt);
-          \draw[accent, thick, -{Stealth[length=1.5mm]}] (\px,\py) -- (\qx,\qy);
-        }
-        \node[lab, align=center] at (2.3,-0.3) {each return is pulled onto its nearest wall};
-      \end{tikzpicture}
-    \end{column}
-    \begin{column}{0.5\textwidth}
-      Where would I have to stand for this scan to land on these walls?
-      \vspace{0.5em}
-      \begin{itemize}\small
-        \item The distance from each return to its wall \alert{is} the prediction error. No expected
-              scan is ever drawn.
-        \item More points in a scan do not make the belief more certain: their errors are not
-              independent.
-        \item Range and incidence weigh each point: precisions, not gates.
-      \end{itemize}
-    \end{column}
-  \end{columns}
-  \src{room\_concept.tex l.243--307}
+\begin{frame}{The room supplies the likelihood: a distance field}
+  \centering
+  \begin{tikzpicture}[mstep/.style={->, very thick, draw=muted, shorten <=3pt, shorten >=3pt}]
+    \node[inner sep=0] (a) at (0,0)   {\includegraphics[width=4.2cm]{figures/d3_sdf_a.pdf}};
+    \node[inner sep=0] (b) at (6.2,0) {\includegraphics[width=4.2cm]{figures/d3_sdf_b.pdf}};
+    \draw[mstep] (a.east) -- node[above, lab] {place a scan} (b.west);
+    \node[lab, anchor=north, align=center, text width=4.8cm] at ([yshift=-3pt]a.south)
+      {\textbf{1. Once per room}: at every point $p$, $d(p)$ = distance to the nearest wall
+       (white lines: 25, 50, 75 cm)};
+    \node[lab, anchor=north, align=center, text width=4.8cm] at ([yshift=-3pt]b.south)
+      {\textbf{2. Every scan}: put its returns where pose $X$ says; each one reads
+       $d_n(X)=d(\text{return } n \text{ placed at } X)$};
+  \end{tikzpicture}\\[0.2em]
+  \raggedright\small
+  \begin{itemize}
+    \item $d_n(X)$ \alert{is} the prediction error: a return should sit on a wall, $d=0$.
+          No expected scan is ever drawn.
+    \item The slope of $d$ (red arrows) says which way to move each return: it gives the gradient for free.
+  \end{itemize}
+  {\footnotesize The code calls it \texttt{sdf}, \emph{signed distance function}; on a polygon it is unsigned, just the distance.\par}
+  \src{room\_concept.tex l.232--290; figures/make\_d3\_sdf.py}
 \end{frame}
 
 \begin{frame}{Localising: Kalman's structure, but optimised}
@@ -693,6 +689,115 @@
   \vspace{0.6em}
   \centering\alert{Prior from motion, likelihood from the sensor: optimised, not linearised once.}
   \src{room\_concept.tex l.243--300, l.1601--1640; Day 1, the Kalman update as free energy}
+\end{frame}
+
+\begin{frame}{Walls are not enough: corners say which is which}
+  \begin{columns}[c]
+    \begin{column}{0.48\textwidth}
+      \centering
+      \begin{tikzpicture}[scale=0.48]
+        \draw[very thick, muted] (0,0) rectangle (6,4);
+        \fill[cool] (2,1.3) -- ++(0.45,0.2) -- ++(-0.2,-0.4) -- cycle;
+        \fill[accent] (4,2.7) -- ++(-0.45,-0.2) -- ++(0.2,0.4) -- cycle;
+        \node[lab, align=center] at (3,-0.7) {a rectangle turned $180^\circ$ is the same rectangle:\\
+              \textcolor{cool}{here} and \textcolor{accent}{there} fit the walls equally well};
+      \end{tikzpicture}\\[0.3em]
+      \begin{tikzpicture}[scale=0.48]
+        \draw[very thick, muted] (0,0) -- (5,0) -- (5,3.2);
+        \foreach \x/\y in {1.0/0.08, 1.7/-0.06, 2.5/0.1, 3.2/-0.04, 3.9/0.07, 4.95/0.9, 5.08/1.6, 4.93/2.3, 5.06/2.9}
+          \fill[cool] (\x,\y) circle (2.5pt);
+        \draw[cool, thick] (0.6,0.03) -- (5.6,0.03); \draw[cool, thick] (5.0,-0.5) -- (5.0,3.4);
+        \draw[accent, very thick] (5.0,0.03) circle (6pt);
+        \node[lab, text=accent, anchor=north west] at (5.15,-0.1) {$z$};
+        \node[lab, text=muted, anchor=south east] at (4.9,3.0) {model walls};
+        \node[lab, align=center] at (2.6,-1.4) {fit a line to each wall's returns (\textcolor{cool}{blue});\\
+              where they cross: \textcolor{accent}{a corner seen}, $z$};
+      \end{tikzpicture}
+    \end{column}
+    \begin{column}{0.48\textwidth}
+      \small
+      The distance field only asks ``is each return on \emph{some} wall?''. When the room has
+      symmetries, several poses say yes.\\[0.6em]
+      A \textbf{corner} is different: it is \emph{one} corner of the outline.\\[0.3em]
+      \begin{itemize}
+        \item seen at $z$ (in the robot's frame);
+        \item predicted at $\hat z$: where corner $c$ of the room would appear from pose $X$;
+        \item its error $z-\hat z$ is the only one that tells two symmetric poses apart.
+      \end{itemize}
+      \vspace{0.3em}
+      \footnotesize The price: deciding \emph{which} model corner was seen. A wrong match is this agent's
+      typical failure.
+    \end{column}
+  \end{columns}
+  \src{room\_concept.tex l.1791--1840}
+\end{frame}
+
+\begin{frame}{A short history, not one pose: the window as a graph}
+  \centering
+  \begin{tikzpicture}[x=1.9cm,
+      pose/.style={circle, draw=black!75, very thick, minimum size=9mm, inner sep=0, font=\small, fill=white},
+      fac/.style={rectangle, fill=black!70, minimum size=2.2mm, inner sep=0},
+      ed/.style={draw=black!55, thick}]
+    \foreach \i in {0,...,4} \node[pose] (x\i) at (\i,0) {$X_{\i}$};
+    \foreach \i/\j in {0/1,1/2,2/3,3/4} {\node[fac, fill=good!70!black] (m\i) at (\i+0.5,0) {}; \draw[ed] (x\i) -- (m\i) -- (x\j);}
+    \node[fac, fill=cool] (o4) at (4,0.9) {}; \draw[ed] (x4) -- (o4);
+    \foreach \i in {0,...,4} {\node[fac, fill=accent] (c\i) at (\i,-1.1) {}; \draw[ed] (x\i) -- (c\i);}
+    \node[fac, fill=muted] (b) at (-0.75,0) {}; \draw[ed] (b) -- (x0);
+    \node[lab, text=cool, anchor=south east] at (4.1,1.0) {\textbf{walls}: only the newest scan on the distance field, $d_n(X_4)$};
+    \node[lab, text=good!70!black, anchor=south] at (1.5,0.35) {\textbf{wheels}: $X_k - X_{k-1}$ vs.\ odometry};
+    \node[lab, text=accent, anchor=north, align=center] at (2,-1.35) {\textbf{corners}: $z-\hat z$, kept for every pose in the window};
+    \node[lab, text=muted, anchor=north, align=center] at (-0.75,-0.3) {\textbf{boundary}:\\what dropped\\poses knew};
+  \end{tikzpicture}\\[0.2em]
+  \raggedright\small
+  Circles are the unknowns (the last 5 poses), squares are $-\ln$ of one factor each. $F$ is their sum, minimised all together:
+  \[
+    F(X_0,\dots,X_4)=\textcolor{muted}{\text{boundary}}+\textcolor{cool}{\text{walls}}+\textcolor{good!70!black}{\text{wheels}}+\textcolor{accent}{\text{corners}}
+  \]
+  {\footnotesize Scans are heavy and used once; corners are a few numbers, so the window keeps them: the short history.
+  The oldest pose leaves on the left; what it knew is squeezed into the boundary prior. Past corners still count: the wheels carry them to $X_4$. No loop is needed, because the room is given.\par}
+  \src{room\_concept.tex l.1601--1720 (eq.\ rc-window); \texttt{RoomConcept.WindowSize} = 5}
+\end{frame}
+
+\begin{frame}{The boundary prior: what a leaving pose leaves behind}
+  \centering
+  \begin{tikzpicture}[x=1.4cm,
+      pose/.style={circle, draw=black!75, very thick, minimum size=8mm, inner sep=0, font=\small, fill=white},
+      gone/.style={pose, draw=black!30, text=black!40, dashed},
+      fac/.style={rectangle, minimum size=2.2mm, inner sep=0},
+      ed/.style={draw=black!55, thick}]
+    % before
+    \node[lab, anchor=west] at (-0.6,1.0) {\textbf{1.} the oldest pose must go};
+    \node[pose] (xo) at (0,0) {$X_{\text{old}}$}; \node[pose] (x0) at (1.2,0) {$X_0$}; \node[pose] (x1) at (2.4,0) {$X_1$};
+    \node[font=\small] at (3.1,0) {$\cdots$};
+    \node[fac, fill=good!70!black] (m) at (0.6,0) {}; \draw[ed] (xo) -- (m) -- (x0);
+    \node[fac, fill=good!70!black] (m1) at (1.8,0) {}; \draw[ed] (x0) -- (m1) -- (x1);
+    \node[fac, fill=accent] (c) at (0,-0.75) {}; \draw[ed] (xo) -- (c);
+    \node[lab, text=accent, anchor=north] at (0,-0.9) {its corner};
+    \node[lab, text=good!70!black, anchor=south] at (0.6,0.35) {wheels};
+    % arrow
+    \draw[->, very thick, muted] (3.5,0) -- node[above, lab] {marginalise} node[below, lab] {(Day 1)} (4.6,0);
+    % after
+    \begin{scope}[shift={(5.3,0)}]
+      \node[lab, anchor=west] at (-0.6,1.0) {\textbf{2.} one Gaussian on $X_0$ keeps what it knew};
+      \node[gone] (go) at (0,0) {$X_{\text{old}}$};
+      \node[fac, fill=muted, minimum size=3mm] (b) at (0.6,0) {}; \node[pose] (y0) at (1.2,0) {$X_0$}; \draw[ed] (b) -- (y0);
+      \node[pose] (y1) at (2.4,0) {$X_1$}; \node[fac, fill=good!70!black] (n1) at (1.8,0) {}; \draw[ed] (y0) -- (n1) -- (y1);
+      \node[font=\small] at (3.1,0) {$\cdots$};
+      \node[lab, text=muted, anchor=north] at (0.6,-0.4) {boundary prior};
+    \end{scope}
+  \end{tikzpicture}\\[-0.2em]
+  \raggedright\small
+  \[
+    \text{boundary}(X_0)=\tfrac12\,\frac{(X_0-\mu_b)^2}{\sigma_b^2},
+    \qquad
+    \sigma_b^2=\underbrace{\sigma_{\text{corner}}^2}_{\substack{\text{how well the corner}\\\text{fixed } X_{\text{old}}}}+\underbrace{\sigma_{\text{wheels}}^2}_{\substack{\text{how well the wheels}\\\text{carried it to } X_0}}
+  \]
+  \vspace{-0.3em}
+  $\mu_b$: where the dropped pose put $X_0$. Uncertainties add: a fix passed along the wheels arrives a little blurred.\\[0.4em]
+  \alert{Two cautions}, both against believing yourself: at least two poses stay (a prior built from the
+  pose it constrains confirms itself and drifts), and a pose that fitted the walls badly leaves no confident prior.\\[0.3em]
+  {\footnotesize One coordinate shown; on the robot $x$, $y$, heading together, and $\sigma_b^2$ is a $3\times3$ matrix.\par}
+  \src{room\_concept.tex l.1756--1779}
 \end{frame}
 
 \begin{frame}{Localising against the room you just built}
@@ -738,7 +843,7 @@
 
   \small
   A mask says ``chair'', not \emph{which} chair: each one is handed to an instance, or starts a new
-  one. What instance $i$ was handed is its data $\bar Z_i$, and \alert{the handing is one best guess} (frame 26).
+  one. What instance $i$ was handed is its data $\bar Z_i$, and \alert{the handing is one best guess} (frame 29).
   \src{retina, \texttt{yoloe-26x-seg-household}, on a simulated frame; phylogenetic\_perception.tex l.347--408}
 \end{frame}
 
@@ -805,7 +910,7 @@
       \textbf{Mixture.} The chair is a seat, a backrest and four legs. A point is either on the chair
       or clutter, $\rho=-\ln(\text{chair}+\text{clutter})$, so a stray point costs a bounded amount.\\[0.3em]
       \textbf{Precision.} $\sigma_n$ grows with range. One error is shared by all the points of a
-      frame, the robot's own pose error, and it is counted once (frame 27).\\[0.3em]
+      frame, the robot's own pose error, and it is counted once (frame 30).\\[0.3em]
       \textbf{Reprojection.} The reverse path: the believed silhouette, projected into the image with its
       predicted depth, is checked against the edges there. \alert{On the robot it feeds existence, not the fit.}
     \end{column}
