@@ -14,6 +14,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <array>
+#include <utility>
 
 namespace rc
 {
@@ -371,6 +373,101 @@ void Viewer2D::draw_doors(const std::vector<DoorView> &doors)
         t->setZValue(11);
         door_items_.push_back(t);
     }
+}
+
+// The object-approach options: one arrow per side (tail = stand-off position, head along the forward heading), the chosen /
+// executing one thick and labelled with how far it stands from the object (centre and footprint edge) and how far its
+// heading is off the bearing to the object centre. A dotted line from the chosen stand-off to the centre makes a heading
+// that does not point at the object visible at a glance. Display only.
+void Viewer2D::draw_approach(const std::optional<ApproachView> &v)
+{
+    for (auto *item : approach_items_)
+        if (item != nullptr) { agv_->scene.removeItem(item); delete item; }
+    approach_items_.clear();
+    if (not v.has_value()) return;
+    constexpr float kArrowM = 0.40f, kHeadM = 0.10f;
+    constexpr float kRadToDeg = 57.29578f;
+    const QColor opt_c(90, 110, 200), chosen_c(230, 60, 20), exec_c(200, 0, 160), obj_c(120, 120, 120), work_c(20, 150, 20);
+    auto keep = [&](QGraphicsItem *item, double z) { item->setZValue(z); approach_items_.push_back(item); };
+    auto line = [&](const Eigen::Vector2f &p, const Eigen::Vector2f &q, const QPen &pen, double z = 13)
+    { keep(agv_->scene.addLine(p.x(), p.y(), q.x(), q.y(), pen), z); };
+    auto arrow = [&](const Eigen::Vector2f &p, float yaw, const QPen &pen, double z)
+    {
+        const Eigen::Vector2f f(std::cos(yaw), std::sin(yaw)), n(-f.y(), f.x());
+        const Eigen::Vector2f tip = p + kArrowM * f;
+        line(p, tip, pen, z);
+        line(tip, tip - kHeadM * f + 0.6f * kHeadM * n, pen, z);
+        line(tip, tip - kHeadM * f - 0.6f * kHeadM * n, pen, z);
+        const double r = 0.035;
+        keep(agv_->scene.addEllipse(p.x() - r, p.y() - r, 2 * r, 2 * r, QPen(pen.color(), 0.01), QBrush(pen.color())), z);
+    };
+    auto text = [&](const QString &t, const Eigen::Vector2f &at, const QColor &c)
+    {
+        auto *item = agv_->scene.addSimpleText(t);
+        item->setBrush(QBrush(c));
+        item->setFlag(QGraphicsItem::ItemIgnoresTransformations, true);
+        item->setPos(at.x(), at.y());
+        keep(item, 14);
+    };
+
+    // the object: footprint (width along its local x, depth along its local y) and centre
+    const Eigen::Vector2f ox(std::cos(v->obj_yaw), std::sin(v->obj_yaw)), oy(-ox.y(), ox.x());
+    const Eigen::Vector2f half(0.5f * v->obj_width_m, 0.5f * v->obj_depth_m);
+    const bool has_box = v->obj_centre.has_value() and half.x() > 0.f and half.y() > 0.f;
+    if (v->obj_centre.has_value())
+    {
+        const Eigen::Vector2f c = *v->obj_centre;
+        if (has_box)
+        {
+            QPolygonF poly;
+            for (const auto &[sx, sy] : std::array<std::pair<float, float>, 5>{{{-1.f, -1.f}, {1.f, -1.f}, {1.f, 1.f}, {-1.f, 1.f}, {-1.f, -1.f}}})
+            {
+                const Eigen::Vector2f q = c + sx * half.x() * ox + sy * half.y() * oy;
+                poly << QPointF(q.x(), q.y());
+            }
+            QColor fill = obj_c; fill.setAlpha(40);
+            keep(agv_->scene.addPolygon(poly, QPen(obj_c, 0.02, Qt::DashLine), QBrush(fill)), 13);
+        }
+        line(c - Eigen::Vector2f(0.06f, 0.f), c + Eigen::Vector2f(0.06f, 0.f), QPen(obj_c, 0.02));
+        line(c - Eigen::Vector2f(0.f, 0.06f), c + Eigen::Vector2f(0.f, 0.06f), QPen(obj_c, 0.02));
+    }
+
+    for (const auto &o : v->options)
+    {
+        const bool hi = o.chosen or o.executing;
+        const QColor col = o.executing ? exec_c : (o.chosen ? chosen_c : opt_c);
+        arrow(o.p, o.yaw, QPen(col, hi ? 0.05 : 0.025, Qt::SolidLine, Qt::RoundCap), hi ? 15 : 13);
+        QString t = QString::fromStdString(o.name);
+        if (hi and v->obj_centre.has_value())
+        {
+            const Eigen::Vector2f to_c = *v->obj_centre - o.p;
+            const float d = to_c.norm();
+            t += QString(" d=%1m").arg(d, 0, 'f', 2);
+            if (has_box and d > 1e-4f)
+            {
+                // the gap to the footprint's edge along the line to the centre (the box's support in that direction)
+                const Eigen::Vector2f u = -to_c / d;
+                const float sup = half.x() * std::abs(u.dot(ox)) + half.y() * std::abs(u.dot(oy));
+                t += QString(" gap=%1m").arg(d - sup, 0, 'f', 2);
+            }
+            if (d > 1e-4f)
+            {
+                const float bearing = std::atan2(to_c.y(), to_c.x());
+                const float err = std::atan2(std::sin(o.yaw - bearing), std::cos(o.yaw - bearing));
+                t += QString(" hdg%1%2deg").arg(err >= 0.f ? "+" : "").arg(int(std::lround(err * kRadToDeg)));
+            }
+            line(o.p, *v->obj_centre, QPen(col, 0.015, Qt::DotLine));
+        }
+        if (o.executing) t += " [exec]";
+        text(t, o.p + Eigen::Vector2f(0.05f, -0.05f), col);
+    }
+    if (v->working_target.has_value())
+    {
+        const Eigen::Vector3f &w = *v->working_target;
+        arrow(w.head<2>(), w.z(), QPen(work_c, 0.02, Qt::DashLine, Qt::RoundCap), 16);
+    }
+    if (not v->options.empty())
+        text(QString::fromStdString(v->node), v->options.front().p + Eigen::Vector2f(0.05f, 0.25f), opt_c);
 }
 
 // The anchor: the opening as a green segment between the jambs, each jamb a short dark-red bar ALONG the normal (the

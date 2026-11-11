@@ -157,17 +157,14 @@ ControllerSession::PolicyTick ControllerSession::policy_tick(const rc::policy::G
         return out;
     }
     if (not grid_planner_.has_world()) { hold("no planner map yet — no cost-to-go"); return out; }
-    // ★ C9 (spec 2026-11-02): the CONTROL PERIOD is measured here, every cycle, between the policy's own ticks (a gap beyond the
-    //   gate's longest legitimate interval restarts the measure). It enters the rollouts below as part of the latency (the command
+    // ★ C9 (spec 2026-11-02): the CONTROL PERIOD (measured per control cycle in sync_world_state — see below). It enters the rollouts below as part of the latency (the command
     //   decided now stays in force one period beyond the data it was decided on), so a slower loop is more cautious THROUGH the
     //   contact probability itself. Below Policy.MinControlHz the policy does not drive at all.
-    {
-        const double dt = policy_period_prev_s_ > 0.0 ? now_s - policy_period_prev_s_ : -1.0;
-        policy_period_prev_s_ = now_s;
-        if (dt > 0.0 and dt <= rc::policy::PolicyTickGate::kMaxTickGapS)
-            policy_period_s_ = policy_period_s_ > 0.f ? 0.8f * policy_period_s_ + 0.2f * static_cast<float>(dt) : static_cast<float>(dt);
-        else policy_period_s_ = 0.f;
-    }
+    // ★ MEASURED ON THE CONTROL LOOP, not between the policy's own ticks (2026-11-11, warm67 leg 3): during a door passage
+    //   the cycles alternate between the policy and the passage's waits / refused steps, those ~180 ms gaps between POLICY
+    //   ticks entered the period as if the loop were slow, read "5.6 Hz below the minimum 10 Hz", and the policy held the
+    //   robot pinned at the door frame while the loop ran at 19 Hz. The period is now measured once per control cycle in
+    //   sync_world_state (policy_period_s_), which is what the latency term also wants.
     if (prm.policy_min_control_hz > 0.f and policy_period_s_ > 1.f / prm.policy_min_control_hz)
     {
         const std::string why = std::format("control rate {:.1f} Hz below the minimum {:.1f} Hz — holding", 1.f / policy_period_s_,

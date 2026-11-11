@@ -132,6 +132,9 @@ public:
     void set_anchor_overlay(const std::optional<AnchorView> &a);
     /// Every door of the room as believed (aperture + leaf), ROOM frame; thread-safe staging. Empty clears.
     void set_door_views(std::vector<rc::Viewer2D::DoorView> v);
+    /// The active object-approach affordance's options (one arrow per side, the chosen one highlighted), ROOM frame;
+    /// thread-safe staging. nullopt clears.
+    void set_approach_view(std::optional<rc::Viewer2D::ApproachView> v);
     // Stage the Orient bearing overlay for the 2D view (thread-safe; applied in present()).
     // Pass visible=false whenever the running affordance is not an Orient, so a finished turn cannot
     // leave a ray pointing at a bearing nobody is asking for any more.
@@ -277,6 +280,8 @@ private:
         rc::ControllerStatusSnapshot controller_status;   // set_controller_status
         std::vector<std::vector<Eigen::Vector2f>> door_passages;
         std::vector<rc::Viewer2D::DoorView> door_views;   // set_door_views
+        std::optional<rc::Viewer2D::ApproachView> approach;   // set_approach_view
+        bool approach_pending = false;
         std::optional<AnchorView> anchor;   // set_anchor_overlay: robot frame; drawn through robot_pose
     };
 

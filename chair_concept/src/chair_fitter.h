@@ -44,6 +44,10 @@ namespace rc {
 class ChairFitter
 {
 public:
+    // Where the chair is SEEN best: the distance at which its projected box fills the ZED image at the detector envelope's
+    // best fill (P(detect) peak) — the pinhole inversion of this fitter's own fill = max(width/W, height/H). nullopt until the
+    // camera intrinsics are bound. Used as the approach's minimum stand-off (common/pragmatic_affordance).
+    [[nodiscard]] std::optional<float> best_view_distance(float width_m, float height_m) const;
     // The other concepts' standing claims on space (common/exclusion). Set once per cycle by the
     // worker, alongside the existence channel's copy, so the FIT and the EXISTENCE belief judge the
     // same geometry. Null ⇒ the rule is inert and the fitter behaves exactly as before.

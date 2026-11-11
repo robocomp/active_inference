@@ -215,6 +215,13 @@ void ControllerDisplay::set_door_views(std::vector<rc::Viewer2D::DoorView> v)
     snapshot_.door_views = std::move(v);
 }
 
+void ControllerDisplay::set_approach_view(std::optional<rc::Viewer2D::ApproachView> v)
+{
+    std::lock_guard<std::mutex> lock(snapshot_mutex_);
+    snapshot_.approach = std::move(v);
+    snapshot_.approach_pending = true;
+}
+
 void ControllerDisplay::set_door_passage(const rc::DoorPassageStatus &view,
                                          const std::vector<std::vector<Eigen::Vector2f>> &passages)
 {
@@ -530,6 +537,7 @@ void ControllerDisplay::present()
         snapshot_.selected_affordance_text_pending = false;
         snapshot_.clear_trajectory_pending = false;
         snapshot_.mission_list_pending = false;
+        snapshot_.approach_pending = false;
     }
 
     if (!custom_widget_)
@@ -747,6 +755,7 @@ void ControllerDisplay::present()
     viewer_2d_->draw_room_polygon(snap.room_polygon);
     viewer_2d_->draw_passages(snap.door_passages);
     viewer_2d_->draw_doors(snap.door_views);
+    if (snap.approach_pending) viewer_2d_->draw_approach(snap.approach);   // staged ~5 Hz; redrawn only when restaged
     // The anchor lives in the ROBOT frame; it is placed through the same pose the robot icon is drawn at.
     {
         std::optional<rc::Viewer2D::AnchorOverlay> ov;

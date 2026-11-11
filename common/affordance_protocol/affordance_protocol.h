@@ -447,7 +447,17 @@ inline Contract read_contract(const DSR::Node& node, std::string_view parent_typ
     if (const auto ita = attrs.find("aff_goal_attrs"), itv = attrs.find("aff_goal_values");
         ita != attrs.end() && itv != attrs.end())
     {
-        if (auto names_s = detail::attr_string(ita->second))
+        if (auto names_s = detail::attr_string(ita->second); names_s and names_s->empty() and itv->second.float_vec().empty())
+        {
+            // ★ AN EXPLICITLY WRITTEN EMPTY GOAL IS A STATEMENT (2026-11-11): the producer says its completion has NO predicate
+            //   (a Reach: arriving; an Orient: the bearing — affordance_goal_parse.h). It replaces the type default. Read as "not
+            //   present", the chair's default (chair_detection_alive) completed the chair approach's Orient at once on a detection
+            //   still alive from the drive, and the robot ended 142 deg off the chair (chat_e2e8). Every other producer writes either
+            //   explicit clauses or sits on a type with no default goal, so this changes the chair approach only.
+            c.goal.clear();
+            c.pre.clear();
+        }
+        else if (auto names_s = detail::attr_string(ita->second))
         {
             const auto names = detail::split(*names_s, kClauseDelim);
             std::vector<std::string> ops;

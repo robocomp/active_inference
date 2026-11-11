@@ -429,7 +429,7 @@ private:
     std::deque<rc::policy::SentCommand> policy_sent_;            // send history (s, steady) for the commands in force
     std::optional<rc::policy::Pose2> policy_odom_;               // odometry pose: integrated wheel speeds, never relocalised
     rc::policy::RoomFrameGuard policy_frame_;                    // Live fix 2: a room-frame change resets the policy
-    float policy_period_s_ = 0.f;                                // C9: the measured control period (EMA over the policy's own ticks); 0 = not yet
+    float policy_period_s_ = 0.f;                                // C9: the measured control period (EMA over control cycles, sync_world_state); 0 = not yet
     double policy_period_prev_s_ = -1.0;
     rc::policy::PolicyTickGate policy_gate_;                     // review I1 / fix 2.1: holds and gaps interrupt the plan
     float odo_v_ = 0.f, odo_w_ = 0.f;                            // robot_current_advance / angular speed (CCW+), this cycle
@@ -1373,6 +1373,7 @@ private:
     // update_display re-checks its age against kAnchorStaleMs, so a cycle that returns early never shows a stale one.
     std::optional<AnchorCrossReading> anchor_drawn_;
     std::uint64_t door_views_last_ms_ = 0;   // throttle of the canvas's believed-door drawing (door_leaf_geometry.h)
+    std::uint64_t approach_view_last_ms_ = 0;   // throttle of the canvas's approach-options drawing (controller_approach_view.h)
     // ── Task 18: THE DOORWAY AS THE LIDAR MEASURES IT (doorway_gap.h) ──────────────────────────────────────────────────
     // From the first cycle the through-span of the anchor's wall is SEEN, the cross steers on it (re-measured every cycle;
     // carried by the robot's own motion — room-frame pose deltas within one room — while it is not seen). The anchor stays

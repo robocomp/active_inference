@@ -10,6 +10,7 @@
 #include "../../common/affordance_manager/affordance_room_scope.h"   // Task 4: explore room_X scopes the contest
 #include "near_field_clearance.h"        // Task 6: [Route] NearFieldClearance — the band's structured near field
 #include "door_leaf_geometry.h"      // the canvas draws every door as aperture + believed leaf
+#include "controller_approach_view.h"   // the canvas draws an object-approach's options (one arrow per side)
 #include "door_route.h"                 // the door route's waypoints (controller_door_passage.h ROUTE MODE)
 #include "band_cross.h"                 // Task 6 fix round 1: [Route] BandDrivesCross's route through the opening
 #include "local_policy/contact.h"       // Task 6: denoise_returns, the policy's surface model
@@ -126,6 +127,16 @@ bool ControllerSession::sync_world_state(std::uint64_t timestamp_ms,
                                          ControllerMotionCommander &motion_commander,
                                          ControllerDisplay &display)
 {
+    // C9 — THE CONTROL PERIOD, measured here once per control cycle (EMA; a gap beyond the tick gate's longest legitimate
+    // interval restarts it). The policy reads it for its minimum-rate hold and its rollouts' latency (controller_policy_drive.cpp).
+    {
+        const double now_s = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+        const double dt = policy_period_prev_s_ > 0.0 ? now_s - policy_period_prev_s_ : -1.0;
+        policy_period_prev_s_ = now_s;
+        if (dt > 0.0 and dt <= rc::policy::PolicyTickGate::kMaxTickGapS)
+            policy_period_s_ = policy_period_s_ > 0.f ? 0.8f * policy_period_s_ + 0.2f * static_cast<float>(dt) : static_cast<float>(dt);
+        else policy_period_s_ = 0.f;
+    }
     // End-to-end perception latency, sampled once per cycle where the world model is in scope. Measured
     // against the RT edge's own validity stamp (the lidar scan behind the pose), so it spans capture ->
     // room_concept -> DSR -> this read. -1 when the edge carries no stamp history.
@@ -251,6 +262,22 @@ bool ControllerSession::sync_world_state(std::uint64_t timestamp_ms,
                 views.push_back(std::move(v));
             }
         display.set_door_views(std::move(views));
+    }
+
+    // ── THE ACTIVE OBJECT-APPROACH'S OPTIONS ON THE CANVAS (controller_approach_view.h): one arrow per side the object
+    //    offers, the chosen / executing one highlighted, the object's footprint, and our own working target. The node is
+    //    the one an `approach` order requires, else the affordance being driven. Display only; ~5 Hz.
+    if (graph_ != nullptr and timestamp_ms - approach_view_last_ms_ >= 200)
+    {
+        approach_view_last_ms_ = timestamp_ms;
+        const bool driving = last_target_info_.has_value() and last_target_info_->from_affordance;
+        const std::string node = not approach_required_.empty() ? approach_required_
+                               : driving ? last_target_info_->node_name : std::string{};
+        std::optional<Eigen::Vector3f> working;
+        if (driving and last_target_info_->node_name == node)
+            working = Eigen::Vector3f(last_target_info_->room_pos.x(), last_target_info_->room_pos.y(), last_target_info_->yaw_rad);
+        display.set_approach_view(rc::approach_view::read(*graph_, world_model.inner_eigen(), world_model.graph_state().room_name,
+                                                          node, approach_option_, working));
     }
 
     // ── DOOR PASSAGE (controller_door_passage.h): which affordance may be selected, and the corridor through the
