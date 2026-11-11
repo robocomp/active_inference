@@ -1120,6 +1120,8 @@ void SpecificWorker::load_params()
          "absolute pose error as an OU process: correlation time (s) — tools/pose_error_stats.py");
 	cfgr.opt("Policy.Enabled", params.policy_enabled,
          "Task 8: the local look-ahead policy drives every motion; the old chain (escape, backoff, caps, band, tracker, servo) is OFF");
+	cfgr.opt("Policy.HybridChain", params.policy_hybrid_chain,
+         "port step 5: with Policy.Enabled, a plain PLACE is driven by the spline chain; the policy takes the stretches the chain's window hands it (episodes) and every door passage / orient / lock-on as before");
 	cfgr.opt_cast<double>("Policy.RiskEps", params.policy_risk_eps, "acceptable P(contact) per Drive decision");
 	cfgr.opt("ChainMonitor.Enabled", params.chain_monitor_enabled, "the chain's monitors judge + log (chain_monitor.csv); they never act");
 	cfgr.opt_cast<double>("ChainMonitor.SigmaTrack", params.chain_sigma_track, "prior lateral tracking sigma (m) for the window test");
@@ -1542,6 +1544,29 @@ void SpecificWorker::update_custom_widget(const std::optional<RobotPose> &robot_
 	                      obstacle_tracker_.display_obstacle_polygons(),
 	                      obstacle_tracker_.temporary_obstacle_rfe_points(),
 	                      params.max_lidar_draw_points);
+	// The status column's state (controller_status_snapshot.h): the session's copy plus what only the worker holds.
+	// Control thread; member copies only — the words are composed on the GUI thread at the panel's own rate.
+	auto st = session_.status_snapshot(robot_pose, current_time_ms());
+	const auto lc = motion_commander_.last_command();
+	st.armed = motion_commander_.output_enabled();
+	st.cmd_stop = not lc.nonzero();
+	st.cmd_adv = lc.adv_mps;
+	st.cmd_rot = lc.rot_rps;
+	st.cmd_site = lc.fn.empty() ? std::string{} : rc::why::site_of(lc.fn, lc.line);
+	st.lidar_age_ms = lidar_ever_received_
+	    ? std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - last_lidar_rx_).count() : -1.f;
+	st.relative_motion_active = relative_motion_.active();
+	if (st.relative_motion_active)
+	{
+		const auto rv = relative_motion_.view();
+		st.relative_motion_progress = rv.last_event.empty() ? rv.current : rv.current + ", " + rv.last_event;
+	}
+	if (interpreter_.state() == rc::mission::Interpreter::State::Running)
+	{
+		const std::string prog = interpreter_.progress();
+		st.mission_step = prog.substr(0, prog.find('|'));
+	}
+	display_.set_controller_status(st);
 }
 
 void SpecificWorker::execute_plan(const RobotPose &robot_pose)
@@ -2428,7 +2453,7 @@ bool SpecificWorker::step_relative_motion(std::uint64_t now_ms)
 		{
 			const float yaw = rc::policy::to_policy_pose({g->pos, g->theta}).yaw;   // the ONE conversion (goal_adapter.h)
 			const auto &rp = relative_motion_.params;
-			const auto spec = g->turn ? rc::policy::heading_goal(g->pos, yaw, rp.yaw_tol_rad)
+			const auto spec = g->turn ? rc::policy::heading_goal(g->pos, yaw, rp.yaw_tol_rad, rp.pos_tol_m)   /* a turn HOLDS its position (fix A) */
 			                          : rc::policy::place_goal(g->pos, yaw, rp.pos_tol_m, rp.yaw_tol_rad);
 			const auto rv = relative_motion_.view();
 			const auto tick = session_.policy_tick(spec, std::format("move #{}", rv.id), *pose, obstacle_tracker_, motion_commander_, now_ms);

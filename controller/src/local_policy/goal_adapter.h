@@ -129,10 +129,15 @@ inline GoalSpec reaim_place_goal(const ControllerRobotPose& r, const Eigen::Vect
 // ★ CONTRACT: a Heading goal's p IS its hold position (`here`) — decide() charges displacement from it as negative progress
 //   and, in a Release, picks the end pose closest to it (local_policy.cpp, Live fix 1). It always carries a yaw: a
 //   Heading goal WITHOUT one reads p as the point to face (local_policy.h), which this helper never builds.
-inline GoalSpec heading_goal(const Eigen::Vector2f& here, float yaw, float tol_yaw)
+// ★ Fix A (turn-arc, 2026-11-11): hold_sigma_m is the hold's PRECISION — the policy credits an end pose as arrived only to
+//   the degree P_arr = exp(-|dp|^2 / (2 hold_sigma_m^2)) that it is at the hold (local_policy.cpp p_arrived), so a turn is
+//   not executed as a forward arc that lands the yaw elsewhere. The caller states it: a move order its segment tolerance
+//   (RelativeMotion pos_tol_m), orient / lock-on their adapter's tol_xy. The default is Goal's own tol_xy default (0.25 m),
+//   kept only so un-migrated call sites compile — pass the caller's value.
+inline GoalSpec heading_goal(const Eigen::Vector2f& here, float yaw, float tol_yaw, float hold_sigma_m = Goal{}.tol_xy)
 {
     GoalSpec s;
-    s.goal = Goal{.kind = Goal::Kind::Heading, .p = here, .yaw = yaw, .tol_yaw = tol_yaw};
+    s.goal = Goal{.kind = Goal::Kind::Heading, .p = here, .yaw = yaw, .tol_xy = hold_sigma_m, .tol_yaw = tol_yaw};
     s.points = {here};
     return s;
 }
@@ -253,7 +258,7 @@ inline std::optional<GoalSpec> goal_for_target(const ControllerTargetInfo& t, co
                                                   : p.tol_xy;
                 return place_goal(t.room_pos, t.yaw_rad, tol, p.tol_yaw);
             }
-            return heading_goal(robot.pos, t.yaw_rad, p.tol_yaw);
+            return heading_goal(robot.pos, t.yaw_rad, p.tol_yaw, p.tol_xy);
         case GoalMode::Place:
         {
             // Task O (I2): with the affordance's probability known, arriving within tol_xy is not completing — the tolerance shrinks
@@ -269,7 +274,7 @@ inline std::optional<GoalSpec> goal_for_target(const ControllerTargetInfo& t, co
 // was computed toward the object (atan2 object - standpoint, build_planning_step), so it is the heading to hold.
 inline GoalSpec lockon_heading_goal(const ControllerTargetInfo& t, const ControllerRobotPose& robot, const GoalAdapterParams& p)
 {
-    return heading_goal(robot.pos, t.yaw_rad, p.tol_yaw);
+    return heading_goal(robot.pos, t.yaw_rad, p.tol_yaw, p.tol_xy);
 }
 
 // ★ A CONTINUOUS ROUTE THROUGH THE POLICY (Task 8 ruling 1): the tour's waypoints (authored order, `laps` times) are

@@ -413,6 +413,10 @@ struct ControllerParams
     // PORT STEP 3 (2026-11-11): while the CHAIN drives (Policy.Enabled = false), the controller-local marks enter the planner's
     // world and a plan-first verdict re-plans; the window's sigma_track is the posterior over the measured cross-track error.
     bool  chain_marks_drive = true;
+    // PORT STEP 5 (2026-11-11): the HYBRID. With Policy.Enabled a plain Place goal is driven by the spline chain (planner,
+    // spline, PLAIN tracker, the monitors above); the policy drives only what the chain hands it (episodes) and, as without
+    // the hybrid, door passages, orient, lock-on, move orders and continuous missions. Off = the policy drives everything.
+    bool  policy_hybrid_chain = false;
     float chain_sigma_track_prior_m = 5.f;    // ★FLAGGED: the prior sigma_track is worth this many metres of measured driving
     float chain_sigma_track_yaw = 0.05f;      // ★FLAGGED prior heading-tracking sigma (rad), the mock's; measured like the lateral one
     // ★ OFF until it has a live noise model (2026-11-11, chain3-8): the mock's step test (bel vs integrated odometry beyond

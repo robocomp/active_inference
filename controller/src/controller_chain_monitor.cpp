@@ -16,11 +16,11 @@
 #include "local_policy/contact.h"
 #include "local_policy/goal_adapter.h"
 
-bool ControllerSession::step_chain_monitor(const ControllerRobotPose &robot_pose, const rc::ControlOutput &out,
+ControllerSession::ChainAction ControllerSession::step_chain_monitor(const ControllerRobotPose &robot_pose, const rc::ControlOutput &out,
                                            ControllerObstacleTracker &obstacle_tracker,
                                            const rc::TrajectoryController &path_controller)
 {
-    if (params_ == nullptr or not params_->chain_monitor_enabled) return false;
+    if (params_ == nullptr or not params_->chain_monitor_enabled) return ChainAction::None;
     const auto t_start = std::chrono::steady_clock::now();
     const DrivenCurve curve = driven_curve();
     const std::uint64_t now_ms = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -97,7 +97,7 @@ bool ControllerSession::step_chain_monitor(const ControllerRobotPose &robot_pose
     {
         chain_progress_.clear();
         chain_have_s_ = false;
-        return false;
+        return ChainAction::None;
     }
     const rc::RouteSpline &spline = *curve.spline;
     const float sigma_loc = policy_pose_xy_std_;   // room_concept's published pose xy std (0 = none: sigma_map carries it)
@@ -135,28 +135,10 @@ bool ControllerSession::step_chain_monitor(const ControllerRobotPose &robot_pose
     const float sigma_track_yaw = float(y0);
     const float yaw_rms = chain_xt_m_ > 0.0 ? float(std::sqrt(chain_yaw_w2_ / chain_xt_m_)) : -1.f;
 
-    // the live returns: the contact band, room frame (the same cloud the policy reads)
-    std::vector<rc::policy::Return> returns;
-    std::vector<std::pair<float, float>> bearing_range;
-    if (auto *buf = obstacle_tracker.contact_buffer(); buf != nullptr)
-    {
-        const auto [cloud_opt] = buf->read_last();
-        if (cloud_opt.has_value())
-        {
-            const auto &[xs, ys, zs] = cloud_opt.value();
-            const std::size_t n = std::min(xs.size(), ys.size());
-            const float reach = 4.0f + body.circumscribed_radius() + 6.f * sigma_r;   // the window's span
-            for (std::size_t i = 0; i < n; ++i)
-            {
-                const Eigen::Vector2f q(xs[i], ys[i]);
-                if (not q.allFinite()) continue;
-                const Eigen::Vector2f r = q - bel.p;
-                bearing_range.emplace_back(std::atan2(r.y(), r.x()), r.norm());
-                if (r.squaredNorm() <= reach * reach) returns.push_back({.p = q, .sigma = sigma_r, .p_exist = 1.f});
-            }
-        }
-    }
-    const auto cells = rc::policy::denoise_returns(returns);
+    // the live returns and this sweep's look of the marks' belief (chain_observe, controller_chain_hybrid.cpp)
+    chain_sigma_track_now_ = sigma_track;
+    const ChainObs obs = chain_observe(bel, obstacle_tracker);
+    const auto &cells = obs.cells;
     const rc::chain::UnmappedTest unmapped{&grid_planner_, k_eps, sigma_r, params_->chain_map_sigma};
     int n_unmapped_2m = 0;
     for (const auto &c : cells)
@@ -167,7 +149,7 @@ bool ControllerSession::step_chain_monitor(const ControllerRobotPose &robot_pose
     const float reach_m = std::abs(odo_v_) * path_controller.params.plain_T_lag + 0.5f * path_controller.params.plain_W
                         + body.circumscribed_radius();
     const float s_bad = rc::chain::window_s_bad(win, s_prog);
-    int verdict = 0; float pass_blocked = -1.f; std::size_t added = 0; bool replan = false;
+    int verdict = 0; float pass_blocked = -1.f; std::size_t added = 0; bool replan = false; const char *handoff = nullptr;
     if (win.first_bad >= 0)
     {
         if (s_bad - s_prog > reach_m) verdict = 1;
@@ -190,21 +172,19 @@ bool ControllerSession::step_chain_monitor(const ControllerRobotPose &robot_pose
                 for (const auto &c : cells) if (unmapped(c.p, sigma_loc) and chain_marks_.add(c.p, cell)) ++added;
                 replan = chain_marks_drive();
             }
+            // ★ STEP 5: tight but passable (4), or a plan-first that did not help (the last re-plan was within a body radius): the
+            //   stretch is the POLICY's — an episode (the mock's start_episode "window")
+            else handoff = "window";
         }
     }
-    // (b) the shadow marks' belief, on this sweep
-    std::size_t cleared = 0;
-    if (not chain_marks_.marks.empty() and not bearing_range.empty())
+    // (b) the marks' belief looked on this sweep in chain_observe; a cleared mark re-plans only if it could have shaped the
+    // route: within the planner's own clearance reach of it (the body plus the clearance preference the A* cost prices). Live
+    // chain2 cleared ~1 mark/s — re-planning on every one would stop-start the robot for nothing. And even then only for a
+    // SHORTER route (drive_point_target, next cycle, once the planner's world has lost the cleared mark: rc::chain::shorter_route).
+    const std::size_t cleared = obs.cleared;
     {
-        const auto look = chain_marks_.observe(bel.p, bearing_range, cell, body.circumscribed_radius(), risk_eps,
-                                               2.f * body.circumscribed_radius());
-        cleared = look.cleared;
-        // a cleared mark re-plans only if it could have shaped the route: within the planner's own clearance reach of it
-        // (the body plus the clearance preference the A* cost prices). Live chain2 cleared ~1 mark/s — re-planning on every
-        // one would stop-start the robot for nothing. And even then only for a SHORTER route (drive_point_target, next cycle,
-        // once the planner's world has lost the cleared mark: rc::chain::shorter_route).
         const float shaped = body.circumscribed_radius() + grid_planner_.params.clearance_pref_m;
-        for (const auto &c : look.cleared_at)
+        for (const auto &c : obs.cleared_at)
             if ((c - spline.position_at(spline.project(c, s_prog, spline.length()))).norm() <= shaped)
             { chain_clear_check_ = chain_marks_drive(); chain_last_mark_at_ = Eigen::Vector2f(1e9f, 1e9f); break; }
     }
@@ -220,6 +200,7 @@ bool ControllerSession::step_chain_monitor(const ControllerRobotPose &robot_pose
     if (last_target_info_.has_value())
     { mi.goal_applies = true; mi.goal_dist = (last_target_info_->room_pos - robot_pose.pos).norm(); mi.goal_tol = path_controller.goal_threshold(); }
     const auto mv = chain_progress_.judge(mi);
+    if (mv.fail and handoff == nullptr) handoff = "stall";   // ★ STEP 5: the chain's own progress prediction failed
     chain_progress_.record(now_s, out.adv, s_prog, out.rot);   // adv: the tracker's forward command (its own frame)
 
     const float cost_ms = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - t_start).count();
@@ -236,5 +217,16 @@ bool ControllerSession::step_chain_monitor(const ControllerRobotPose &robot_pose
                    << chain_odom_.yaw << ',' << dt_pose << ',' << chain_odo_period_s_ << '\n';
         chain_csv_.flush();
     }
-    return replan;
+    chain_last_verdict_ = verdict; chain_last_ahead_m_ = win.first_bad >= 0 ? s_bad - s_prog : 0.f; chain_last_stall_ = mv.fail;
+    chain_last_monitor_ms_ = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                 std::chrono::steady_clock::now().time_since_epoch()).count());
+    if (replan) return ChainAction::Replan;
+    if (handoff != nullptr and chain_hybrid_on())
+    {
+        chain_ep_request_ = handoff;
+        chain_ep_first_bad_ = std::string_view(handoff) == "window" ? std::max(0, win.first_bad) : 0;
+        chain_progress_.clear();
+        return ChainAction::Episode;
+    }
+    return ChainAction::None;
 }

@@ -42,6 +42,7 @@
 #include "local_policy/cross_through.h"    // Task 3f (a): `through` as a posterior past the room switch
 #include "local_policy/unseen_contact.h"
 #include "chain_monitor/chain_monitor.h"   // the chain's monitors (shared with the 2-D mock)
+#include "controller_status_snapshot.h"    // status_snapshot(): the status column's read-only copy
 
 class ControllerSession
 {
@@ -153,6 +154,10 @@ public:
                         const ControllerObstacleVisuals &obstacle_polys,
                         const ControllerPolygons &obstacle_rfe_points,
                         int max_lidar_draw_points) const;
+    /// What the controller is doing, as plain values for the window's status column (controller_status_snapshot.cpp).
+    /// Read-only copy, control thread; the GUI turns it into words at its own rate.
+    [[nodiscard]] rc::ControllerStatusSnapshot status_snapshot(const std::optional<ControllerRobotPose> &robot_pose,
+                                                               std::uint64_t now_ms) const;
 
     void execute_plan(const ControllerRobotPose &robot_pose,
                       rc::TrajectoryController &path_controller,
@@ -381,7 +386,9 @@ private:
                           std::source_location floc = std::source_location::current());
 
     // ── Task 8: the policy drive (controller_policy_drive.cpp) ─────────────────────────────────────────────────────────
-    void drive_with_policy(const ControllerRobotPose &robot_pose, rc::TrajectoryController &path_controller,
+    // returns true when the HYBRID's chain drives this cycle (a plain Place, chain route installed, no episode / wait): the caller
+    // then runs the chain's tracker path; false = the policy (or a hold) owned the cycle
+    bool drive_with_policy(const ControllerRobotPose &robot_pose, rc::TrajectoryController &path_controller,
                            ControllerObstacleTracker &obstacle_tracker, ControllerMotionCommander &motion_commander,
                            ControllerDisplay &display, rc::AffordanceManager &affordance_manager, const TimeSource &time_source);
     // The ARRIVAL protocol of a point target (servo → lock-on, already-there, approach-only retry, REACH), extracted from
@@ -877,8 +884,44 @@ private:
     std::ofstream plan_track_csv_;             ///< plan_track.csv: per-cycle plan geometry + tracking errors
     // ── THE CHAIN'S MONITORS (port step 2 logging, 2026-11-11; step 3: marks + plan-first while the CHAIN drives;
     //    controller_chain_monitor.cpp). Returns true when the chain asks for a re-plan this cycle (step 3 only).
-    bool step_chain_monitor(const ControllerRobotPose &robot_pose, const rc::ControlOutput &out,
-                            ControllerObstacleTracker &obstacle_tracker, const rc::TrajectoryController &path_controller);
+    enum class ChainAction { None, Replan, Episode };
+    ChainAction step_chain_monitor(const ControllerRobotPose &robot_pose, const rc::ControlOutput &out,
+                                   ControllerObstacleTracker &obstacle_tracker, const rc::TrajectoryController &path_controller);
+    // the live returns (contact band, room frame, the window's span) and ONE look of the marks' belief on this sweep; run by the
+    // monitor while the chain tracks, and by the hybrid while an episode or a WAIT owns the base (controller_chain_hybrid.cpp)
+    struct ChainObs { std::vector<rc::policy::Return> cells; std::size_t cleared = 0; std::vector<Eigen::Vector2f> cleared_at; };
+    ChainObs chain_observe(const rc::policy::Pose2 &bel, ControllerObstacleTracker &obstacle_tracker);
+    float chain_sigma_track_now_ = 0.10f;      ///< this cycle's sigma_track posterior (the monitor's)
+    // the monitor's last verdict, for the status panel: 0 clear, 1 problem seen beyond reach, 2 unmapped cause, 3 impassable,
+    // 4 hand-off; its distance ahead (m, route arc), the progress monitor's last judgement, and when (steady ms)
+    int chain_last_verdict_ = -1; float chain_last_ahead_m_ = 0.f; bool chain_last_stall_ = false; std::uint64_t chain_last_monitor_ms_ = 0;
+    // ── PORT STEP 4 — WAIT: no route on map + marks, one on the map alone -> stopped and watching until a mark clears
+    bool chain_wait_ = false;
+    // ── PORT STEP 5 — THE HYBRID (Policy.HybridChain; controller_chain_hybrid.cpp) ──
+    [[nodiscard]] bool chain_hybrid_on() const
+    { return params_ != nullptr and params_->policy_hybrid_chain and params_->chain_monitor_enabled and policy_enabled(); }
+    bool chain_hybrid_place_ = false;          ///< drive_with_policy reached its PLACE branch last cycle (the chain plans for it)
+    struct ChainEpisode
+    {
+        bool active = false, final = false;    ///< final: the episode's goal is the target itself (its Arrived completes it)
+        Eigen::Vector2f sub = Eigen::Vector2f::Zero();
+        float s_end = 0.f;                     ///< arc length where the handed-over stretch ends
+        double next_pass_s = 0.0;              ///< next passability evaluation (twice a second)
+        std::shared_ptr<std::vector<char>> corr; Eigen::Vector2f corr_origin = Eigen::Vector2f::Zero(); float corr_cell = 0.05f; int corr_w = 0, corr_h = 0;
+        std::string why;
+    };
+    ChainEpisode chain_ep_;
+    ControllerPolygons chain_ep_marks_;     ///< the marks' squares as the planner had them when the episode began (frozen during it)
+    const char *chain_ep_request_ = nullptr;   ///< a hand-off asked for this cycle (why), served by the PLACE branch next
+    int chain_ep_first_bad_ = 0;
+    Eigen::Vector2f chain_last_replan_at_{1e9f, 1e9f};
+    void chain_start_episode(const rc::policy::Pose2 &bel, const std::vector<rc::policy::Return> &cells, int first_bad, const char *why);
+    // one cycle of an episode; true = it owned the cycle
+    bool chain_drive_episode(const rc::policy::GoalSpec &final_spec, const std::string &who, const ControllerRobotPose &robot_pose,
+                             const ControllerRobotPose &cpose, rc::TrajectoryController &path_controller,
+                             ControllerObstacleTracker &obstacle_tracker, ControllerMotionCommander &motion_commander,
+                             ControllerDisplay &display, rc::AffordanceManager &affordance_manager, const TimeSource &time_source);
+    void chain_episode_failed(const rc::policy::Pose2 &bel, const std::vector<rc::policy::Return> &cells, float s0, float s1, const char *why);
     /// step 3 in force: the chain drives (policy off), the monitors are on and their marks are allowed to act
     [[nodiscard]] bool chain_marks_drive() const
     { return params_ != nullptr and params_->chain_monitor_enabled and params_->chain_marks_drive and not policy_enabled(); }

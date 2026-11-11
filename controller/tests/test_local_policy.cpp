@@ -288,6 +288,42 @@ int main()
         std::printf("  heading open: end displacement %.4f m\n", (ee.p - o.in.pose.p).norm());
         CHECK("heading_goal_open_space_turns_in_place", std::fabs(e.v) < 0.05f and (ee.p - o.in.pose.p).norm() < 0.05f);
     }
+    { // ★ FIX A (turn-arc, 2026-11-11): a HEADING goal's preferred state is a POSE — its hold p at the yaw. Before the fix the
+      // continuability credited ANY end pose in the yaw band as arrived (k = N), so a forward arc whose differential brake tail
+      // rotates ~24 deg further reached the band where a pure turn just short of it read as a trap: 13 of these 93 decisions
+      // translated with the LIVE limits (live: a 126 deg turn drove 0.17 m into a chair). The hold precision is the caller's
+      // (heading_goal hold_sigma_m; a move order passes RelativeMotion pos_tol_m = 0.03).
+        BaseLimits b; b.v_max = 0.6f; b.w_max = 1.0f; b.a_lin = 0.5f; b.d_lin = 0.5f; b.track_m = 0.518f;
+        b.a_rot = b.a_lin / (0.5f * b.track_m); b.d_rot = b.d_lin / (0.5f * b.track_m); b.v_min_eff = 0.04f; b.w_min_eff = 0.10f;
+        auto bd = rc::RobotFootprint::shadow(); bd.set_safety_margin(0.03f);
+        std::vector<Return> ret;   // a 6 x 6 m room: open space around the robot
+        for (float t = -3.f; t <= 3.f; t += 0.05f)
+        { ret.push_back({{t, -3.f}, 0.01f, 1.f}); ret.push_back({{t, 3.f}, 0.01f, 1.f}); ret.push_back({{-3.f, t}, 0.01f, 1.f}); ret.push_back({{3.f, t}, 0.01f, 1.f}); }
+        const PolicyParams pp;
+        auto turn = [&](float err_deg, float w_now)
+        {
+            Goal g{.kind = Goal::Kind::Heading, .p = V(0.f, 0.f), .yaw = err_deg * kPi / 180.f, .tol_xy = 0.03f, .tol_yaw = 0.035f};
+            PolicyInput in; in.pose = {V(0.f, 0.f), 0.f}; in.w_now = w_now; in.sigma_rel_xy = 0.011f; in.sigma_rel_yaw = 0.013f;
+            in.returns = ret; in.body = &bd; in.base = b; in.goal = &g; in.latency_s = 0.11f;
+            return decide(in, pp);
+        };
+        const auto d = turn(78.f, 0.5f); print("heading_hold_78deg", d);
+        CHECK("heading hold: a 78 deg turn at w_now 0.5 is a pure turn (v == 0)", d.mode == Decision::Mode::Drive and d.v == 0.f and d.w > 0.f);
+        int translating = 0, total = 0;
+        for (float wn : {0.f, 0.5f, 1.0f})
+            for (float e = 10.f; e <= 130.f; e += 4.f)
+            {
+                const auto x = turn(e, wn); ++total;
+                if (std::abs(x.v) >= b.v_min_eff) { ++translating; std::printf("  translates: w_now %.1f err %5.1f -> %s v %+.2f w %+.2f\n", wn, e, mode_name(x.mode), x.v, x.w); }
+            }
+        std::printf("  heading hold: %d / %d decisions translate (13 / 93 before Fix A)\n", translating, total);
+        CHECK("heading hold: no decision over err [10,130] deg x w_now {0,0.5,1} translates", translating == 0);
+        // the hold is the caller's precision: the yaw-only arrival (goal_reached) is unchanged — a pose in the yaw band 0.2 m
+        // off the hold is still Arrived (a Release may have pushed it there; a Heading goal has no field to drive back with)
+        Goal g{.kind = Goal::Kind::Heading, .p = V(0.f, 0.f), .yaw = 0.f, .tol_xy = 0.03f, .tol_yaw = 0.035f};
+        PolicyInput in; in.pose = {V(0.2f, 0.f), 0.01f}; in.returns = ret; in.body = &bd; in.base = b; in.goal = &g;
+        CHECK("heading hold: goal_reached stays yaw-only", goal_reached(in));
+    }
     { // heading_release_holds_position (Live fix 1, tourP1: an orient goal's Release "back up straight" 0.26 m took the robot
       // out of door_2's reach band). A HEADING goal near a door frame where the in-place turn is risky: among the releases
       // that gain continuability, the one whose end pose is CLOSEST to the hold position — not "back up straight".

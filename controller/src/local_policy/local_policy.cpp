@@ -100,6 +100,27 @@ bool arrived(const PolicyInput& in, const Pose2& at)
     return xy and (not g.yaw or std::abs(wrap(*g.yaw - at.yaw)) <= g.tol_yaw);
 }
 
+// ★ FIX A (turn-arc, 2026-11-11, owner ruling): the probability that `at` IS the goal's preferred state — what the
+//   continuability credits as "nothing left to continue". For Place/Doorway it is arrived() (0 or 1, unchanged: a Place
+//   with a yaw already requires its position). A HEADING goal WITH a yaw prefers a POSE — the hold p at the yaw — so
+//   besides the yaw band it carries the hold's own precision as a Gaussian preference over the position,
+//     P_arr = 1[yaw in tol_yaw] * exp(-|at.p - p|^2 / (2 tol_xy^2)),   tol_xy = sigma_hold (the CALLER's, heading_goal)
+//   (normalised to its mode: 1 at the hold, e^-1/2 one sigma off). Before it, arrived() read the yaw only, so ANY end pose
+//   inside the yaw band got full credit wherever it was, and a forward arc whose differential brake tail rotates ~24 deg
+//   further reached the band where a pure turn just short of it read as a trap (13 of 93 live-limit turn decisions
+//   translated; live: a 126 deg turn drove 0.17 m into a chair). A Heading goal without a yaw reads p as the point to
+//   FACE, not a hold: no position term. goal_reached() stays YAW-ONLY on purpose (a Release may push the robot off the
+//   hold, and a Heading goal has no field to drive back with).
+float p_arrived(const PolicyInput& in, const Pose2& at)
+{
+    if (not arrived(in, at)) return 0.f;
+    const Goal& g = *in.goal;
+    if (g.kind != Goal::Kind::Heading or not g.yaw) return 1.f;
+    const float d2 = (at.p - g.p).squaredNorm(), s2 = g.tol_xy * g.tol_xy;
+    if (d2 <= 0.f) return 1.f;
+    return s2 > 0.f ? std::exp(-d2 / (2.f * s2)) : 0.f;   // a zero precision scale = the exact hold only
+}
+
 // prog = ONE-step progress (start -> end); prog2 = TWO-step progress (round-4 ruling): the best of the end itself and every
 // ELIGIBLE coarse continuation from it, measured from the decision's start.
 // rate = best progress RATE (m/s, round 5): max(prog / dur, max over eligible continuations of
@@ -302,14 +323,18 @@ std::vector<std::pair<float, float>> coarse_set(const PolicyInput& in, const Pol
 
 // The coarse continuation ROLLOUTS from a pose at rest, computed once per end pose and cached (round 4: they feed both
 // the continuability count and the second step of the two-step progress, and the Drive bound below).
-struct Conts { std::vector<std::vector<Pose2>> sw; std::vector<std::pair<float, float>> cmd; bool arrived = false, done = false; int n = 0; };
+// p_arr (Fix A): P(from is the goal's preferred state) when it is strictly between 0 and 1 (a Heading pose in the yaw
+// band but off its hold) — the continuations are rolled out then, and eval_conts credits the EXPECTED count.
+struct Conts { std::vector<std::vector<Pose2>> sw; std::vector<std::pair<float, float>> cmd; bool arrived = false, done = false; int n = 0;
+               float p_arr = 0.f; };
 Conts make_conts(const PolicyInput& in, const PolicyParams& p, const Pose2& from)
 {
     Conts c; c.done = true;
     const auto set = coarse_set(in, p);
     c.n = int(set.size());
     if (in.body == nullptr or in.goal == nullptr or (in.goal->kind != Goal::Kind::Heading and in.field == nullptr)) return c;
-    if (arrived(in, from)) { c.arrived = true; return c; }
+    c.p_arr = p_arrived(in, from);
+    if (c.p_arr >= 1.f) { c.arrived = true; return c; }
     for (const auto& [v, w] : set) { c.sw.push_back(rollout(from, 0.f, 0.f, v, w, p.horizon_s, in.base, p.dt)); c.cmd.emplace_back(v, w); }
     return c;
 }
@@ -365,7 +390,10 @@ float eval_conts(const PolicyInput& in, const PolicyParams& p, const Pose2& from
     if (best_prog) *best_prog = bp;
     if (best_prog_raw) *best_prog_raw = bpr;
     if (best_rate) *best_rate = br;
-    return std::log((float(k) + 1.f) / (float(c.n) + 2.f));
+    // Fix A: the EXPECTED count over "arrived" (k = N, nothing left to continue) and "not arrived" (the counted k), then the
+    // same Laplace estimate — p_arr = 0 is the count itself, p_arr -> 1 tends continuously to the arrived credit
+    const float k_exp = c.p_arr * float(c.n) + (1.f - c.p_arr) * float(k);
+    return std::log((k_exp + 1.f) / (float(c.n) + 2.f));
 }
 float log_p_continuable_cells(const PolicyInput& in, const PolicyParams& p, const Pose2& from)
 { return eval_conts(in, p, from, make_conts(in, p, from)); }

@@ -326,6 +326,12 @@ void ControllerDisplay::set_motion_verdict(const rc::why::View &v)
     snapshot_.motion_verdict = v;
 }
 
+void ControllerDisplay::set_controller_status(const rc::ControllerStatusSnapshot &st)
+{
+    std::lock_guard<std::mutex> lock(snapshot_mutex_);
+    snapshot_.controller_status = st;
+}
+
 void ControllerDisplay::set_session_totals(float metres, float seconds)
 {
     std::lock_guard<std::mutex> lock(snapshot_mutex_);
@@ -489,71 +495,27 @@ QString ControllerDisplay::verdict_colour(const rc::why::View &v)
     return QStringLiteral("#7f8c8d");
 }
 
-QString ControllerDisplay::compose_status(const DisplaySnapshot &snap)
+QString ControllerDisplay::compose_status(const DisplaySnapshot &snap, std::uint64_t now_ms) const
 {
-    std::vector<std::string> parts;
-    // WHY the robot is (not) moving (motion_verdict.h) heads the column: the binding cause, since-when, and its detail.
-    // It was a chip of its own in the toolbar, elided to the toolbar's width; here it wraps and is read in full.
-    if (const auto &v = snap.motion_verdict; v.valid)
-    {
-        parts.push_back(std::format("{} {} · {}", v.driving ? "▶ MOVING" : "■ STOPPED", rc::why::cause_name(v.cause),
-                                    rc::why::format_duration(v.duration_ms)));
-        parts.push_back(v.detail);
-        parts.emplace_back();   // blank line between the verdict and the rest
-    }
-    const auto &mv = snap.mission_view;
-    const auto mode = rc::from_index(mv.mode_index);
-    parts.push_back(not mv.driving ? (mv.paused ? "PAUSED" : "STOPPED") : "RUN");
-    parts.emplace_back(rc::to_string(mode));
-    // The mission readout only when it says something the mode does not: a run, a recording, or a clicked target.
-    if (mv.running or mv.recording or mode == rc::DriveMode::Target) parts.push_back(mv.status);
-
-    // Door passage (approach → open → cross), once one has been started.
-    if (const auto &dp = snap.door_passage_view; not dp.door.empty() and dp.step != "idle")
-    {
-        std::string s = "passage " + dp.door + ": ";
-        if (dp.step == "done") s += "done";
-        else
-        {
-            for (const char c : dp.step) s += static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
-            if (not dp.step_state.empty()) s += " (" + dp.step_state + ")";
-            if (dp.attempts > 0) s += std::format(" x{} failed", dp.attempts);
-        }
-        parts.push_back(std::move(s));
-        if (not dp.cross.empty()) parts.push_back("cross: " + dp.cross);
-    }
-
-    // The affordance being executed and its stage (lock-on phase / pipeline stage), or the dwell after it.
-    if (const auto &a = snap.affordance; a.active)
-    {
-        std::string s = "aff " + a.affordance;
-        if (not a.phase.empty()) s += " [" + a.phase + "]";
-        s += a.timeout_s > 0.f ? std::format(" {:.0f}/{:.0f} s", a.elapsed_s, a.timeout_s)
-                               : std::format(" {:.0f} s", a.elapsed_s);
-        parts.push_back(std::move(s));
-    }
-    else if (a.dwell_left_s > 0.f)
-        parts.push_back(std::format("dwell after {} {:.1f} s", a.affordance, a.dwell_left_s));
-    else if (a.phase.starts_with("idle"))
-        parts.push_back("aff: " + a.phase);
-    else if (not a.affordance.empty() and not a.phase.empty())
-        parts.push_back("last aff " + a.affordance + ": " + a.phase);
-
-    if (snap.goal_dist_m.has_value())
-        parts.push_back(std::format("goal {:.2f} m{}", *snap.goal_dist_m, snap.goal_aligning ? " aligning" : ""));
-    // What is stopping it.
-    if (snap.stuck_active) parts.emplace_back("STUCK — recovery manoeuvre");
-    if (snap.lidar_stalled) parts.push_back(std::format("LIDAR STALLED {:.1f} s", snap.lidar_stall_s));
-    if (not snap.hold_reason.empty()) parts.push_back("hold: " + snap.hold_reason);
-
-    std::string line;
-    for (const auto &p : parts)
-    {
-        if (p.empty() and (line.empty() or line.ends_with('\n'))) continue;
-        if (not line.empty()) line += '\n';   // one item per line in the status column
-        line += p;
-    }
-    return QString::fromStdString(line);
+    // Everything below was already staged for some widget of this window or by the control thread's status snapshot, so
+    // the column can never disagree with the rest of the window; the words are rc::status_text's (controller_status_text.cpp).
+    rc::status_text::Inputs in;
+    in.ctl = snap.controller_status;
+    in.verdict = snap.motion_verdict;
+    in.mission = snap.mission_view;
+    in.door = snap.door_passage_view;
+    in.affordance = snap.affordance;
+    in.goal_dist_m = snap.goal_dist_m;
+    in.goal_yaw_err_rad = snap.goal_yaw_err_rad;
+    in.goal_aligning = snap.goal_aligning;
+    in.stuck_active = snap.stuck_active;
+    in.lidar_stalled = snap.lidar_stalled;
+    in.lidar_stall_s = snap.lidar_stall_s;
+    in.hold_reason = snap.hold_reason;
+    in.control_hz = control_hz_.load(std::memory_order_relaxed);
+    in.control_worst_ms = control_worst_ms_.load(std::memory_order_relaxed);
+    in.lidar_hz = lidar_hz_.load(std::memory_order_relaxed);
+    return QString::fromStdString(rc::status_text::compose(in, status_events_, now_ms));
 }
 
 void ControllerDisplay::present()
@@ -597,7 +559,19 @@ void ControllerDisplay::present()
     custom_widget_->set_stuck_active(snap.stuck_active);   // widget dedups same-state calls
     custom_widget_->set_goal_distance(snap.goal_dist_m, snap.goal_yaw_err_rad, snap.goal_aligning);
     custom_widget_->set_session(snap.session_distance_m, snap.session_elapsed_s);
-    if (status_line_) status_line_->apply(compose_status(snap), verdict_colour(snap.motion_verdict));
+    if (status_line_)
+    {
+        // Events are looked for every frame (a hand-over may last one cycle); the words are composed 4x a second — ages
+        // and speeds change every frame, and re-setting the text at 30 Hz would only flicker and cost the GUI thread.
+        const auto now_ms = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count());
+        status_events_.observe(snap.controller_status, now_ms);
+        if (now_ms - status_text_ms_ >= 250)
+        {
+            status_text_ms_ = now_ms;
+            status_line_->apply(compose_status(snap, now_ms), verdict_colour(snap.motion_verdict));
+        }
+    }
     if (mission_panel_)
     {
         if (snap.mission_list_pending)

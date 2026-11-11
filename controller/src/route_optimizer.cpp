@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <numbers>
 #include <cstdint>
 #include <cstdio>
 #include <limits>
@@ -357,6 +358,32 @@ void assemble(const std::vector<Eigen::Vector2f> &ctrl,
                     for (int k = 0; k < 4; ++k) tan += B1[k] * pad[s + k];
                     if (tan.squaredNorm() > 1e-12f)
                         target = std::max(0.05f, cfg.support_radius(std::atan2(tan.y(), tan.x()), -g) + cfg.safety_margin);
+                }
+                if (cfg.clearance_risk)
+                {
+                    // r = sc sqrt(-log Phi(gap/sigma)); dr/dd = sc/(2 sqrt q) dq/dgap dgap/dd, dq/dgap = -phi(z)/(Phi(z) sigma)
+                    const float x   = d - (safe_only ? std::max(0.f, target - cfg.safety_margin) : 0.f);
+                    const float e   = std::max(1e-3f, cfg.barrier_eps_m);
+                    const float rt  = std::sqrt(x * x + 4.f * e * e);
+                    const float gap = 0.5f * (x + rt);
+                    const double sg = std::max(1e-3f, cfg.clear_sigma_m);
+                    const double z  = double(gap) / sg;
+                    const double Phi = 0.5 * std::erfc(-z / std::numbers::sqrt2);
+                    const double q   = -std::log1p(-0.5 * std::erfc(z / std::numbers::sqrt2));   // -log Phi, accurate as Phi -> 1
+                    if (not (q > 1e-300)) { ++row; continue; }                                    // underflow: no risk, no gradient
+                    const double phi = std::exp(-0.5 * z * z) / std::sqrt(2.0 * std::numbers::pi);
+                    out.r(row) = float(sc * std::sqrt(q));
+                    const double dq = -phi / (Phi * sg);
+                    const float dr = float(sc / (2.0 * std::sqrt(q)) * dq * 0.5 * (1.0 + x / rt));   // d r / d d
+                    for (int k = 0; k < 4; ++k)
+                    {
+                        const int v = var_of(pad_to_ctrl(s + k, M), lo, hi);
+                        if (v < 0) continue;
+                        out.J(row, v)     += dr * g.x() * B[k];
+                        out.J(row, v + 1) += dr * g.y() * B[k];
+                    }
+                    ++row;
+                    continue;
                 }
                 if (barrier)
                 {

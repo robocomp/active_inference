@@ -104,6 +104,8 @@ struct Options
     float v0 = 0.f, w0 = 0.f;
     // F1 scenario (a): the live base's measured wheel deceleration (Policy.WheelDecelMps2 0.5) for plant AND policy; 0 = limits()
     float d_lin = 0.f;
+    // Fix A (turn-arc 2026-11-11): the LIVE base limits for plant AND policy (v_max > 0 = these, instead of limits())
+    BaseLimits lim{};
     // F4 DIAGNOSTIC (NOT the brief's configuration): NO_JAMBS=1 drops the measured jambs from a Doorway's field (A/B)
     bool no_jambs = std::getenv("NO_JAMBS") != nullptr;
     // Task 3b: residual's cells as the controller's planner holds them (centres, nats; +inf = HARD: a live return, occupied),
@@ -184,6 +186,9 @@ struct ScenarioResult
     // APARTMENT STRESS: reverse travel where the TRUE bare-hull clearance is >= 0.5 m (open space: should be ~0), and the
     // largest RETREAT — how far the true pose's distance-to-go (on the still goal's first field) rose above its best
     float open_reverse_m = 0.f, max_retreat_m = 0.f;
+    // Fix A: the TRUE centre's largest distance from goal.p (a Heading goal's HOLD) and the base's velocity at the end (a goal
+    // sequence hands the next goal a turning base)
+    float max_from_goal_p_m = 0.f, end_v = 0.f, end_w = 0.f;
     // THE CHAIN: the true centre's distance from the route it follows, while the chain drives (for sigma_track); HYBRID: how
     // many times the chain handed a stretch to the policy, and why
     double xtrack_sum2 = 0.0; long xtrack_n = 0;
@@ -963,7 +968,8 @@ static ScenarioResult run_chain(const World& world, Pose2 start, Goal goal, floa
                 cfg.distance = [&tc, Rt, p0 = bel.p](const V2& p) { const V2 r = Rt * (p - p0); return tc.clearance_at(r.x(), r.y()); };
                 cfg.distance_gradient = [&tc, R, Rt, p0 = bel.p](const V2& p) { const V2 r = Rt * (p - p0); return V2(R * tc.clearance_gradient_at(r.x(), r.y())); };
                 cfg.freeze_before = fb; cfg.freeze_after = fa;
-                cfg.iterations = 4; cfg.w_clear = 0.5f; cfg.verbose = false;   // BandIterations 4, BandClearanceWeight 0.5
+                cfg.iterations = 4; cfg.w_clear = 2.0f; cfg.verbose = false;   // BandIterations 4, BandClearanceWeight 2.0 (risk form)
+                cfg.clearance_risk = true; cfg.clear_sigma_m = kSigmaTrack;   // as the session's band: contact risk, measured sigma
                 for (std::size_t i = std::max<std::size_t>(1, fb); i + 1 < M and i < fa; ++i)
                 { cfg.anchors.push_back((P[i - 1] + 4.f * P[i] + P[i + 1]) / 6.f); cfg.anchor_s.push_back(static_cast<float>(i) * h); }
                 cfg.sigma_a = 0.03f;                                             // BandProximalSigmaM
@@ -1075,6 +1081,7 @@ static ScenarioResult run_scenario(const World& world, Pose2 start, Goal goal, f
     const auto& B = body();
     sim2d::ContactTester contact(world, B);
     sim2d::Base base; base.lim = limits(); base.latency_s = 0.06f; plant_from_env(base);
+    if (opt.lim.v_max > 0.f) base.lim = opt.lim;
     if (opt.d_lin > 0.f) base.lim.d_lin = opt.d_lin;
     base.rng = &rng; base.jitter_s = kLatencyJitterS; base.slip_sigma = kSlipSigma;
     base.deadband_scale = std::uniform_real_distribution<float>(1.f - kDeadbandSpread, 1.f + kDeadbandSpread)(rng);
@@ -1307,6 +1314,7 @@ static ScenarioResult run_scenario(const World& world, Pose2 start, Goal goal, f
         // ★ D3: the command IN EFFECT at the wheels and the measured velocity at the tick's start
         // ★ review fix round 3: the commands IN FORCE per sub-interval (the latency queue), not the latest one
         unseen.update(std::span<const UnseenContact::CmdSeg>(in_force), v_meas, w_meas, ds, dyaw, odom, base.lim, B, 0.005f);
+        res.max_from_goal_p_m = std::max(res.max_from_goal_p_m, (truth.p - goal.p).norm());
         res.path_m += (truth.p - before.p).norm();
         if (const float fr = ref_field.at(truth.p); std::isfinite(fr)) { ref_best = std::min(ref_best, fr); res.max_retreat_m = std::max(res.max_retreat_m, fr - ref_best); }
 
@@ -1326,6 +1334,7 @@ static ScenarioResult run_scenario(const World& world, Pose2 start, Goal goal, f
     res.time_s = t;
     res.end = truth;
     res.failed_predictions = nav.failed_predictions();
+    res.end_v = base.v; res.end_w = base.w;
     if (res.why.empty()) res.why = "time limit";
     return res;
 }
@@ -1392,7 +1401,7 @@ static const Bounds kOpenGrid{-3.2f, -3.2f, 3.2f, 3.2f};
 struct Summary { int max_failed = 0; std::vector<float> step_ms; std::size_t returns_max = 0; float goal_truth_clear = 1e9f; double build_ms = 0.0; int builds = 0; int n = 0, reached = 0, unreachable = 0, stuck = 0, contacts = 0, rel_contacts = 0, max_releases = 0, total_releases = 0;
                  int hand_backs = 0, stuck_ticks = 0, min_backups = 1 << 30; std::vector<float> tverdict_after_no_escape;
                  bool traj_ok = true; int total_traps = 0, total_stops = 0, stuck_moving = 0; std::vector<float> tunreach, tstuck; float max_np = 0.f, max_path_ratio = 0.f, min_clear = 1e9f; std::vector<float> tgoal;
-                 float max_open_reverse = 0.f, max_retreat = 0.f; double xtrack_sum2 = 0.0; long xtrack_n = 0; int handoffs = 0, handoff_window = 0, handoff_stall = 0, replans = 0, waits = 0, wait_exits = 0, max_waits = 0; };
+                 float max_open_reverse = 0.f, max_retreat = 0.f, max_from_goal_p = 0.f; double xtrack_sum2 = 0.0; long xtrack_n = 0; int handoffs = 0, handoff_window = 0, handoff_stall = 0, replans = 0, waits = 0, wait_exits = 0, max_waits = 0; };
 
 static Summary run_seeds(const std::string& name, const std::function<ScenarioResult(unsigned)>& fn)
 {
@@ -1422,6 +1431,7 @@ static Summary run_seeds(const std::string& name, const std::function<ScenarioRe
         S.step_ms.insert(S.step_ms.end(), r.step_ms.begin(), r.step_ms.end()); S.returns_max = std::max(S.returns_max, r.returns_max);
         S.build_ms += r.build_ms; S.builds += r.builds; S.goal_truth_clear = std::min(S.goal_truth_clear, r.goal_truth_clear);
         S.max_open_reverse = std::max(S.max_open_reverse, r.open_reverse_m); S.max_retreat = std::max(S.max_retreat, r.max_retreat_m);
+        S.max_from_goal_p = std::max(S.max_from_goal_p, r.max_from_goal_p_m);
         S.xtrack_sum2 += r.xtrack_sum2; S.xtrack_n += r.xtrack_n; S.handoffs += r.handoffs; S.handoff_window += r.handoff_window; S.handoff_stall += r.handoff_stall; S.replans += r.replans;
         S.waits += r.waits; S.wait_exits += r.wait_exits; S.max_waits = std::max(S.max_waits, r.waits);
         std::printf("   %4d %7d %7d %5d %5d(%d) %8d %7.2f %5.2f %4.2f %6.1f %+9.3f %6d  %s\n", s, int(r.reached), int(r.unreachable), int(r.stuck),
@@ -1903,6 +1913,47 @@ int main()
         const auto S2 = run_seeds("place goal with a final turn (1 m, then face 120 deg)", [&](unsigned seed) { return run_scenario(w, Pose2{V2(0.f, 0.f), 0.f}, gp, 20.f, seed, o); });
         CHECK("place + final turn: contacts == 0", S2.contacts == 0);
         CHECK("place + final turn: completes on every seed, never handed back", S2.reached == S2.n and S2.unreachable == 0);
+    }
+    // ---- turn_126_holds_position (Fix A, turn-arc 2026-11-11): a move order "turn 126" as the controller runs it — RelativeMotion's
+    //      quarter-mark goal sequence (policy_goal: the 90 deg mark while more than a quarter remains, then the final 126 deg), every
+    //      goal a HEADING goal holding the step's start position with RelativeMotion's pos_tol_m (0.03 m) as the hold's precision,
+    //      tol_yaw = its yaw_tol_rad (0.035), with the LIVE base limits (v_max 0.6, w_max 1.0, a_lin = d_lin 0.5, track 0.518,
+    //      deadband 0.04 / 0.10). Before the fix the continuability credited any end pose inside the yaw band as arrived, and a
+    //      forward arc reached the band (live: 0.17 m into a chair, the mission failed). Open world, and a chair 0.4 m ahead.
+    //      Oracles: completes every seed, never handed back, no contacts, the true centre never further from the hold than its
+    //      precision plus the plant's 5 % slip of it.
+    if (want("turn_126_holds_position"))
+    {
+        BaseLimits live; live.v_max = 0.6f; live.w_max = 1.0f; live.a_lin = 0.5f; live.d_lin = 0.5f; live.track_m = 0.518f;
+        live.a_rot = live.a_lin / (0.5f * live.track_m); live.d_rot = live.d_lin / (0.5f * live.track_m); live.v_min_eff = 0.04f; live.w_min_eff = 0.10f;
+        constexpr float kHold = 0.03f, kTolYaw = 0.035f;   // RelativeMotion::Params pos_tol_m, yaw_tol_rad
+        const float bound = kHold * (1.f + kSlipSigma);
+        World chair = open_world();
+        chair.boxes.push_back({0.40f, -0.20f, 0.85f, 0.25f});   // a chair: its near face 0.4 m ahead of the centre (0.17 m past the nose)
+        for (const auto& [wname, w] : {std::pair<const char*, const World*>{"open", nullptr}, {"chair 0.4 m ahead", &chair}})
+        {
+            const World world = w ? *w : open_world();
+            Options o{.grid = kOpenGrid, .jumps = {}, .trace_name = "turn_126_holds_position"};
+            o.lim = live;
+            const auto S = run_seeds(std::format("turn 126 deg, quarter marks, hold 0.03 m ({})", wname), [&](unsigned seed)
+            {
+                const V2 hold(0.f, 0.f);
+                const Goal q1{.kind = Goal::Kind::Heading, .p = hold, .yaw = 90.f * kDeg, .tol_xy = kHold, .tol_yaw = kTolYaw};
+                auto r = run_scenario(world, Pose2{hold, 0.f}, q1, 20.f, seed, o);
+                if (not r.reached or r.unreachable) return r;
+                Options o2 = o; o2.v0 = r.end_v; o2.w0 = r.end_w;   // the next goal is handed the base still turning
+                const Goal q2{.kind = Goal::Kind::Heading, .p = hold, .yaw = 126.f * kDeg, .tol_xy = kHold, .tol_yaw = kTolYaw};
+                auto r2 = run_scenario(world, r.end, q2, 20.f, seed + 1000u, o2);
+                r2.contacts += r.contacts; r2.release_contacts += r.release_contacts; r2.time_s += r.time_s; r2.path_m += r.path_m;
+                r2.max_from_goal_p_m = std::max({r2.max_from_goal_p_m, r.max_from_goal_p_m, (r.end.p - hold).norm()});
+                return r2;
+            });
+            const float worst = S.max_from_goal_p;
+            std::printf("   largest distance of the true centre from the hold: %.4f m (bound %.4f)\n", worst, bound);
+            CHECK(std::format("turn 126 ({}): completes every seed, never handed back", wname).c_str(), S.reached == S.n and S.unreachable == 0 and S.hand_backs == 0);
+            CHECK(std::format("turn 126 ({}): contacts == 0", wname).c_str(), S.contacts == 0);
+            CHECK(std::format("turn 126 ({}): the centre stays within the hold precision (+ slip)", wname).c_str(), worst <= bound);
+        }
     }
     // ---- realign_doorway (F1 fix round 1, I3): DOOR_1 with a 0.80 m clear gap (casings at +-0.40), the robot 0.25 m east of the
     //      gap centre, 0.75 m before room_2's wall face, yawed 70 deg off the normal toward the east wall: it must back up and

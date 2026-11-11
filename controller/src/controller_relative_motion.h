@@ -149,7 +149,7 @@ public:
         float k_rot = 1.5f;              ///< 1/s on the heading error
         float min_adv_mps = 0.04f;       ///< CONTROL constant: below this the base does not creep
         float min_rot_rps = 0.10f;       ///< CONTROL constant: idem for the pivot
-        float pos_tol_m = 0.03f;         ///< CONTROL constant: terminal tolerance of a segment
+        float pos_tol_m = 0.03f;         ///< CONTROL constant: terminal tolerance of a segment; also a turn's hold precision (policy heading_goal)
         float yaw_tol_rad = 0.035f;      ///< CONTROL constant: terminal tolerance of a pivot (2°)
         float sample_m = 0.05f;          ///< footprint test spacing along a segment (≈ 2 grid cells)
         float sweep_rad = 0.15f;         ///< footprint test spacing over a pivot

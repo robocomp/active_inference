@@ -179,7 +179,10 @@ std::optional<ControllerRobotPose> ControllerWorldModel::read_robot_pose_in_room
 std::optional<ControllerRobotPose> ControllerWorldModel::read_robot_pose_latest(
     std::uint64_t timestamp_ms) const
 {
-    return pose_from_rt({timestamp_ms, 0});
+    // ★ WALKED, as the scan-aligned read (owner 2026-11-11: room_concept writes the pose at ~20 Hz, corrections only — its
+    //   IMU-rate predicted ticks are off). "Now" lies past the newest block by up to a correction period; Extrapolated walks
+    //   that block along its own stored twist (what the tick used to write), Interpolated would return it 0-50 ms stale.
+    return pose_from_rt({timestamp_ms, 0}, /*walk_past_end=*/true);
 }
 
 std::optional<Eigen::Vector2f> ControllerWorldModel::read_node_room_xy(std::uint64_t node_id,
@@ -266,13 +269,14 @@ std::optional<ControllerPoseUncertainty> ControllerWorldModel::read_pose_uncerta
     // So a pose from one moment was being paired with a confidence from another. Nothing complains:
     // both are well-formed, and the mismatch shows up only as a speed limiter reacting to the wrong
     // uncertainty, which looks like tuning.
-    // ★SAME INSTANT AND SAME MODE AS THE POSE READ. interpolate_rt picks Interpolated exactly as
-    // pose_from_rt does, so the two answers come from the same place in the ring.
-    // ★NOT Extrapolated, deliberately. Cortex will widen a covariance to account for a pose it walked
-    // forward, but the pose here is NOT walked -- it is interpolated inside the ring. Asking for the
-    // widened version would attach the cost of a prediction that never happened.
+    // ★SAME INSTANT AND SAME MODE AS THE POSE READ. (Until 2026-11-11 that was Interpolated, and this said "NOT
+    // Extrapolated, deliberately": the pose was interpolated inside a ring the IMU-rate ticks kept ahead of now. They are
+    // off now, the pose IS walked, and the widened covariance is the honest one.)
+    // ★ 2026-11-11: the pose these numbers throttle is now WALKED past the ring's end (read_robot_pose_latest, Extrapolated —
+    //   the 20 Hz ring no longer holds IMU-rate predictions), so its covariance is the walked one: cortex grows it with the
+    //   extrapolation interval. Same instant, same mode, as the rule above says.
     const auto time_query = (params_ != nullptr and params_->interpolate_rt)
-                            ? DSR::RT_API::TimeQuery::Interpolated
+                            ? DSR::RT_API::TimeQuery::Extrapolated
                             : DSR::RT_API::TimeQuery::Nearest;
     const auto cov = rt_api_->get_edge_RT_covariance(rt_edge.value(), timestamp_ms, time_query);
     if (not cov.has_value())

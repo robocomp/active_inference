@@ -574,13 +574,19 @@ bool ControllerSession::sync_world_state(std::uint64_t timestamp_ms,
     // with their belief; controller_chain_monitor.cpp) are obstacles for the planner — and, being in its world, they also
     // count as "explained" for the next unmapped test, so a mark is never drawn twice. Not while the planner was told the
     // marks leave no route to the current target (chain_marks_off_: plan on the map alone until the marks change; WAIT = step 4).
-    chain_marks_in_world_ = chain_marks_drive() and not chain_marks_off_ and not chain_marks_.empty()
-                            and chain_marks_room_ == current_room_name_;
+    // ★ FROZEN WHILE THE POLICY DRIVES AN EPISODE (live hybrid1, 2026-11-11): every mark the belief cleared changed the planner's
+    //   world, and the policy rebuilt its cost-to-go on each change — 165 ms a tick at a shut door, the controller fell from 19
+    //   to 9 Hz. During an episode the planner world keeps the marks as they were when it began (the policy's field is built
+    //   once); the belief goes on observing, and its changes reach the planner when the chain takes over again.
+    const bool frozen = chain_ep_.active;
+    chain_marks_in_world_ = chain_marks_drive() and not chain_marks_off_ and chain_marks_room_ == current_room_name_
+                            and (frozen ? not chain_ep_marks_.empty() : not chain_marks_.empty());
     ControllerPolygons polygons_with_marks;
     if (chain_marks_in_world_)
     {
         polygons_with_marks = passed_leaf_known ? polygons_with_leaf : obstacle_tracker.obstacle_polygons();
-        for (auto &poly : chain_marks_.polygons(grid_planner_.params.cell_size_m)) polygons_with_marks.push_back(std::move(poly));
+        if (frozen) polygons_with_marks.insert(polygons_with_marks.end(), chain_ep_marks_.begin(), chain_ep_marks_.end());
+        else for (auto &poly : chain_marks_.polygons(grid_planner_.params.cell_size_m)) polygons_with_marks.push_back(std::move(poly));
     }
     const ControllerPolygons &planner_polygons = chain_marks_in_world_ ? std::as_const(polygons_with_marks)
                                                : passed_leaf_known ? std::as_const(polygons_with_leaf) : obstacle_tracker.obstacle_polygons();
@@ -3250,6 +3256,9 @@ bool ControllerSession::ensure_current_plan(const ControllerPlanningStep &step,
         reset_stuck_state();   // a fresh target = fresh navigation; don't inherit a stale stuck clock
         returns_backoff_failed_ = false;
         chain_marks_off_ = false;   // a new target is planned with the marks again (port step 3)
+        chain_wait_ = false;        // ...and neither a WAIT nor an episode carries over to it (steps 4, 5)
+        chain_ep_ = {};
+        chain_ep_request_ = nullptr;
     }
 
     // ── CONTINUOUS ROUTE ──
@@ -4006,7 +4015,9 @@ bool ControllerSession::drive_point_target(const ControllerPlanningStep &step,
     //   no-route clock (M4): drive_with_policy runs the policy whenever the cost-to-go at the robot is finite, and "no route"
     //   — with its 5-s Unreachable clock — means the FIELD at the robot is non-finite. A start pose the footprint planner
     //   refuses (the bare hull near a wall, inside the margin) therefore still drives.
-    if (policy_enabled())
+    // PORT STEP 5: in the HYBRID a plain Place (drive_with_policy's PLACE branch, last cycle) is planned the CHAIN's way below:
+    // smoothed, fitted to plan_spline_, with the marks and the WAIT.
+    if (policy_enabled() and not (chain_hybrid_on() and chain_hybrid_place_))
     {
         if (step.target_changed or not current_plan_.has_value())
         {
@@ -4018,6 +4029,22 @@ bool ControllerSession::drive_point_target(const ControllerPlanningStep &step,
         }
         short_path_since_ms_ = 0;
         return true;
+    }
+    // ── PORT STEP 4 — WAIT. The way is blocked by what the map does not have (no route on map + marks, one on the map alone):
+    //    stopped and watching, never "unreachable" — a mark that clears (chain_observe) ends the wait and the planner tries the
+    //    marks again. ★FLAGGED: no give-up time here; how long a mission waits is the caller's (its contract's timeout).
+    if (chain_wait_)
+    {
+        if (step.target_changed) chain_wait_ = false;
+        else
+        {
+            current_plan_.reset();
+            plan_spline_valid_ = false;
+            no_route_since_ms_ = 0;   // waiting is not a planner failure: the no-route clock does not run
+            note_hold(std::format("WAIT: the way to '{}' is blocked by what the map does not have ({} marks) — watching",
+                                  step.target.node_name, chain_marks_.marks.size()));
+            return false;
+        }
     }
     // PORT STEP 3: a mark near the route cleared last cycle (step_chain_monitor). The route is still safe — an obstacle went
     // away — so it is replaced only if the planner, on this cycle's world without that mark, finds a SHORTER one.
@@ -4040,7 +4067,19 @@ bool ControllerSession::drive_point_target(const ControllerPlanningStep &step,
         // FOOTPRINT PLANNER. The robot's real shape is tested against the grid; obstacles are NOT inflated.
         // Falls back to nothing — if this cannot find a route, the HOLD branch below reports precisely why.
         mission_.note_replan();   // counted whether or not it succeeds — a failed replan is the worse one
-        if (const auto route = grid_planner_.plan(step.plan_origin, step.target.room_pos); route.has_value())
+        const auto route = grid_planner_.plan(step.plan_origin, step.target.room_pos);
+        // PORT STEP 4: the marks left no route last cycle (chain_marks_off_) and the MAP alone routes: what blocks is not the map
+        // — WAIT (stopped, watching) instead of driving the map's route into the marked obstacle
+        if (route.has_value() and chain_marks_off_ and chain_marks_drive())
+        {
+            chain_wait_ = true;
+            chain_marks_off_ = false;   // the marks are back in the world; a clear ends the wait (chain_observe)
+            current_plan_.reset();
+            plan_spline_valid_ = false;
+            std::println("[chain] WAIT: no route to '{}' with {} marks, one on the map alone — stopped, watching the marks",
+                         step.target.node_name, chain_marks_.marks.size());
+        }
+        else if (route.has_value())
         {
             ControllerPathPlan plan{.room_path = *route};
             // Smooth it the same way a mission route is smoothed. A click target should not get a
@@ -4057,7 +4096,7 @@ bool ControllerSession::drive_point_target(const ControllerPlanningStep &step,
             current_plan_.reset();
             plan_spline_valid_ = false;
             chain_marks_off_ = true;
-            std::println("[chain] no route to '{}' with {} marks: planning on the map alone (WAIT is step 4)",
+            std::println("[chain] no route to '{}' with {} marks: is there one on the map alone? (WAIT if so)",
                          step.target.node_name, chain_marks_.marks.size());
         }
         else
@@ -6629,6 +6668,12 @@ void ControllerSession::step_route_band(const DrivenCurve &curve,
         // 2026-10-10 (user): the band's obstacle repulsion deformed the stretches between waypoints too
         // much. Its OWN clearance weight, so the one-shot smoothing above (w_clear = 1.0) is unchanged.
         cfg.w_clear = params_->band_clearance_weight;
+        // ★ CLEARANCE AS CONTACT RISK (2026-11-11, owner: the spline shivered in free space). The band re-solves every cycle on
+        //   the LIVE field; the barrier's 1/gap^2 pulled toward the medial axis at any range, so every change in the cloud moved
+        //   the curve. -log P(no contact) under the tracker's own lateral error is ~0 a few sigma clear: free space no longer
+        //   pushes. sigma = the chain's measured tracking sigma (posterior) with the pose's.
+        cfg.clearance_risk = true;
+        cfg.clear_sigma_m = std::hypot(chain_sigma_track_now_, policy_pose_xy_std_);
         cfg.verbose = false;          // this runs at control rate; per-cycle logging is noise
         if (kBandProximalSigmaM > 0.f)
         {
@@ -7118,10 +7163,14 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
     //    protocol halves they carried (arrival, the cross's completion, the lock-on / orient predicates) are shared.
     if (policy_enabled())   // C1: the policy drives the WHOLE door passage too (approach, hold at the vantage, cross)
     {
-        drive_with_policy(robot_pose, path_controller, obstacle_tracker, motion_commander, display, affordance_manager,
-                          time_source);
-        refresh_view_only();
-        return;
+        // PORT STEP 5: the HYBRID's chain drives a plain Place — drive_with_policy says so and the tracker path below runs
+        const bool chain_drives = drive_with_policy(robot_pose, path_controller, obstacle_tracker, motion_commander, display,
+                                                    affordance_manager, time_source);
+        if (not chain_drives)
+        {
+            refresh_view_only();
+            return;
+        }
     }
 
     // An escape maneuver (physical-stuck recovery) owns the base until it finishes backing
@@ -7153,6 +7202,8 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
 
     if (!current_plan_.has_value())
     {
+        // PORT STEP 4: a WAIT with the chain alone driving still watches its marks (a clear ends it)
+        if (chain_wait_) chain_observe(rc::policy::to_policy_pose(robot_pose), obstacle_tracker);
         display.clear_robot_trajectory();
         clear_tracking_state();
         path_controller.stop();
@@ -7333,12 +7384,21 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
     // the chain's monitors: judge and log (port step 2); step 3: a plan-first verdict (or a cleared mark the route went around)
     // re-plans on map + marks — the plan is dropped and the next cycle routes again. The base is NOT stopped: this cycle's
     // command still follows the old curve, which the window judged safe up to the failing stretch beyond the tracker's reach.
-    if (step_chain_monitor(robot_pose, control_output, obstacle_tracker, path_controller))
+    // step 5 (hybrid): a hand-off verdict (the window fails within reach, tight but passable) or a stalled progress monitor asks
+    // for a policy EPISODE — the base holds this cycle and drive_with_policy's PLACE branch starts it next cycle.
+    if (const auto act = step_chain_monitor(robot_pose, control_output, obstacle_tracker, path_controller); act == ChainAction::Replan)
     {
         current_plan_.reset();
         plan_spline_valid_ = false;
         route_repair_pending_ = true;
         std::println("[chain] re-plan on map + {} marks (plan-first)", chain_marks_.marks.size());
+    }
+    else if (act == ChainAction::Episode)
+    {
+        note_why(rc::why::Cause::PolicyHold, std::format("hand-off to the policy ({})", chain_ep_request_ ? chain_ep_request_ : "?"));
+        note_no_command(); motion_commander.stop_robot();
+        refresh_view_only();
+        return;
     }
     // Surface what the ARRIVAL test is waiting on, every cycle, before any of the branches below can return
     // early — otherwise the readout would freeze exactly in the states worth watching (aligning, blocked).
@@ -7786,6 +7846,13 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
         }
     }
 
+    if (control_output.path_blocked and chain_hybrid_on())
+    {   // the chain's own confirmed blockage = "the chain cannot drive this stretch": the policy judges it on the LiDAR
+        chain_ep_request_ = "blocked"; chain_ep_first_bad_ = 0;
+        note_no_command(); motion_commander.stop_robot();
+        refresh_view_only();
+        return;
+    }
     if (control_output.path_blocked)
     {
         clear_tracking_state();
@@ -7818,6 +7885,13 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
             ? (last_target_info_->room_pos - robot_pose.pos.head<2>().cast<float>()).norm()
             : std::numeric_limits<float>::infinity();
 
+    if (not path_controller.is_active() and chain_hybrid_on())
+    {   // PORT STEP 5: the tracker stopped short of the standpoint — the policy finishes the approach (the target itself)
+        chain_ep_request_ = "finish"; chain_ep_first_bad_ = 0;
+        note_no_command(); motion_commander.stop_robot();
+        refresh_view_only();
+        return;
+    }
     if (!path_controller.is_active())
     {
         // ── THE PATH ENDED SHORT OF THE STANDPOINT (2026-10-09) ─────────────────────────────────────────────
@@ -8000,6 +8074,8 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
                          robot_pose.pos, robot_pose.theta, rot_rps, time_source(),
                          /*spin_is_not_a_wedge=*/false, /*returns_hold=*/returns_hold))
         {
+            // PORT STEP 5: in the hybrid a spin that nets nothing is the policy's stretch, not the escape reflex's
+            if (chain_hybrid_on()) { chain_ep_request_ = "spin"; chain_ep_first_bad_ = 0; note_no_command(); motion_commander.stop_robot(); return; }
             begin_escape(robot_pose, obstacle_tracker, path_controller, time_source());
             step_escape(robot_pose, path_controller, obstacle_tracker, motion_commander, time_source());
             return;
@@ -8034,6 +8110,8 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
                      robot_pose.pos, robot_pose.theta, rot_rps, time_source(),
                      /*spin_is_not_a_wedge=*/false, /*returns_hold=*/returns_hold))
     {
+        // PORT STEP 5: in the hybrid a wedge is the policy's stretch (its Release), not the escape reflex's
+        if (chain_hybrid_on()) { chain_ep_request_ = "wedge"; chain_ep_first_bad_ = 0; note_no_command(); motion_commander.stop_robot(); return; }
         begin_escape(robot_pose, obstacle_tracker, path_controller, time_source());
         step_escape(robot_pose, path_controller, obstacle_tracker, motion_commander, time_source());
         return;
