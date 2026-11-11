@@ -55,6 +55,7 @@
 #include "room_explored.h"           // rc::explored — P(room explored), room_explored_p
 #include "camera_coverage.h"         // rc::camcov — the boundary as the CAMERAS have seen it (Task 12)
 #include "proposal_adoption.h"         // rc::proposal — ltsm's recognition proposal: admit, adopt in place, answer
+#include "entry_reloc.h"   // rc::entry::PoseReference (entry relocalisation value)
 
 namespace rc
 {
@@ -413,6 +414,7 @@ private:
     /// CENTROID until the robot reaches it, then the planners resume (dsr_update_entry_relocalisation).
     bool entry_reloc_ = false;
     std::optional<Eigen::Vector2f> entry_reloc_target_pub_;
+    rc::entry::PoseReference entry_pose_ref_;   ///< what the localiser typically attains in a room (entry_reloc.h)
     float         layout_yaw_  = 0.f;               ///< internal frame
     float         layout_gain_ = 0.f;
     std::int64_t  layout_plan_ms_ = 0;

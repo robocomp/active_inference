@@ -1841,6 +1841,7 @@ void RoomSceneGraph::rearm_after_crossing(std::uint64_t new_room_id, const std::
     affordance_manager_.release_execution_claim(G_);
     // the first afford_room in a NEW room entered: its centre (dsr_update_entry_relocalisation). Not in a room ltsm RECALLED
     // (user 2026-11-01: "if the room is known, recalled from ltsm, do not activate room affordances").
+    entry_pose_ref_.close_room();   // the room left is the reference for "the pose is as good as typical"
     entry_reloc_ = not recall.has_value();
     entry_reloc_target_pub_.reset();
     // the relocalisation ends on ITS claim's answer (entry_reloc.h): drop any completion still pending from the room left behind
@@ -3269,11 +3270,17 @@ bool RoomSceneGraph::dsr_update_entry_relocalisation(const rc::RoomConcept::Upda
     // The consumer's answer ends it too (entry_reloc.h; explore_spike1: the centre was handed back and never reached). The
     // completion event is one-shot and the layout explorer is locked out while this runs, so it is consumed here.
     const bool claim_completed = affordance_manager_.consume_completion_event();
-    if (not rc::entry::still_relocalising(at_centre, claim_completed))
+    const float det = res.covariance.determinant();
+    const float gain = entry_pose_ref_.gain(det > 0.f ? std::log(det) : std::numeric_limits<float>::quiet_NaN());
+    if (not rc::entry::still_relocalising(at_centre, claim_completed, gain))
     {
         entry_reloc_ = false;
         entry_reloc_target_pub_.reset();
-        if (at_centre)
+        if (not at_centre and not claim_completed)
+            rc::status::print("[entry-reloc] '{}': the pose is already as good as this localiser typically gets in a room (ln det {:.2f} "
+                              "vs median {:.2f}): nothing to relocalise — the room's planners take afford_room over\n", room_node_name(),
+                              det > 0.f ? std::log(det) : 0.f, entry_pose_ref_.reference.value_or(0.f));
+        else if (at_centre)
             rc::status::print("[entry-reloc] '{}': at the centre — the room's planners take afford_room over\n", room_node_name());
         else
             rc::status::print("[entry-reloc] '{}': the centre was completed by the consumer (outcome={}) {:.2f} m away — the room's "
@@ -3282,7 +3289,7 @@ bool RoomSceneGraph::dsr_update_entry_relocalisation(const rc::RoomConcept::Upda
         return false;
     }
     const float yaw = std::atan2(t.y() - robot_pub.y(), t.x() - robot_pub.x());   // the arrival heading: LiDAR sees all round
-    affordance_manager_.publish_target(G_, dsr_room_id_, t.x(), t.y(), yaw, /*gain=*/1.0f,
+    affordance_manager_.publish_target(G_, dsr_room_id_, t.x(), t.y(), yaw, /*gain=*/gain,
                                        [this]() { trigger_layout_(); }, [this]() { trigger_layout_(); });
     return true;
 }
@@ -3299,6 +3306,7 @@ void RoomSceneGraph::dsr_update_affordance(const rc::RoomConcept::UpdateResult& 
     // (and a partly remembered room until the explorer is `finished` — room_explored.h; P(explored) from each plan)
     observe_camera_cover(res);   // what the ZED is offered of the boundary this frame (camera_coverage.h, Task 12)
     if (dsr_update_entry_relocalisation(res)) return;   // just crossed: the room's centre first (user 2026-11-01)
+    if (const float det = res.covariance.determinant(); det > 0.f) entry_pose_ref_.add(std::log(det));   // steady state only
     if (layout_explorer_owns_room()) { dsr_update_layout_affordance(res); publish_plan_explored(); return; }
     publish_explored(explored_.settled(room_node_name()));   // nothing left for the explorer: p = 1 (room_explored.h)
     if (!epistemic_) return;
