@@ -126,6 +126,30 @@ namespace ltsm::seam
         return compose_cov(inverse_cov(e_new), e_old);
     }
 
+    /// THE TWO FACES OF ONE HOLE MAY BE TURNED BY π (door_concept orients a door's frame from the room that fits it).
+    /// Which seam T(L <- P) is the true one is decided by THE ROBOT, not by an outline: the robot stands in both rooms'
+    /// frames at once, so of the two seams fL·inv_fP and fL·[π]·inv_fP the true one maps its pose in P onto its pose in L.
+    /// The two hypotheses are compared by the likelihood of the measured robot_in_L under each mapped pose (full SE(2),
+    /// yaw wrapped, covariances summed): an argmax between two models, no tolerance. True = the turned seam explains it.
+    /// (clean33, 2026-11-10: the old test compared the robot with L's outline VERTEX MEAN; a degenerate outline's tail put
+    /// that mean beyond the door, the correct seam was turned, the robot mirrored into room_1 and the crossing withdrawn.)
+    inline bool turned_seam_fits(const Measured& fL, const Measured& inv_fP, const Measured& robot_in_P, const Measured& robot_in_L)
+    {
+        const auto loglik = [&](const Measured& seam)
+        {
+            const Measured r = compose_cov(seam, robot_in_P);
+            Vec3 d = robot_in_L.pose - r.pose; d.z() = wrap(d.z());
+            Mat3 S = r.cov + robot_in_L.cov;
+            const Eigen::LDLT<Mat3> ldlt(S);
+            if (ldlt.info() != Eigen::Success or not (ldlt.vectorD().array() > 0.0).all())
+                return -0.5 * d.squaredNorm();                              // no stated precision: plain distance
+            return -0.5 * (d.dot(ldlt.solve(d)) + ldlt.vectorD().array().log().sum());
+        };
+        const Measured plain = compose_cov(fL, inv_fP);
+        const Measured turned = compose_cov(compose_cov(fL, Measured{Vec3(0.0, 0.0, M_PI), Mat3::Zero()}), inv_fP);
+        return loglik(turned) > loglik(plain);
+    }
+
     struct Fused
     {
         Vec3   pose = Vec3::Zero();

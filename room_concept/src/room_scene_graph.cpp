@@ -2199,10 +2199,10 @@ void RoomSceneGraph::adopt_most_probable_layout()
     if (not free_space_.has_value() or layout_pool_.size() < 2) return;
     const auto latest = published_polygon();
     if (latest.size() < 4) return;
-    std::vector<Eigen::Vector2f> surf, fr; std::vector<float> cs, cf;
-    free_space_->evidence_cells(surf, fr, &cs, &cf);
+    std::vector<Eigen::Vector2f> surf, fr, fo; std::vector<float> cs, cf;
+    free_space_->evidence_cells(surf, fr, &cs, &cf, &fo);
     const std::vector<std::vector<Eigen::Vector2f>> cands(layout_pool_.begin(), layout_pool_.end());
-    const auto dl = refiner_.description_lengths(cands, latest, surf, fr, cs, cf);
+    const auto dl = refiner_.description_lengths(cands, latest, surf, fr, cs, cf, fo);
     const auto best = static_cast<std::size_t>(std::ranges::distance(dl.begin(), std::ranges::min_element(dl)));
     const float dl_latest = dl.back();   // the pool's back is the outline published last (see step_startup_proto)
     {
@@ -2229,9 +2229,9 @@ void RoomSceneGraph::adopt_most_probable_layout()
 void RoomSceneGraph::cut_unfound_doorways(std::vector<Eigen::Vector2f>& polygon_pub)
 {
     if (not free_space_.has_value()) return;
-    std::vector<Eigen::Vector2f> surf, fr; std::vector<float> cs, cf;
-    free_space_->evidence_cells(surf, fr, &cs, &cf);
-    auto R = rc::refine::explain_openings(refiner_, polygon_pub, surf, fr, cs, cf);
+    std::vector<Eigen::Vector2f> surf, fr, fo; std::vector<float> cs, cf;
+    free_space_->evidence_cells(surf, fr, &cs, &cf, &fo);
+    auto R = rc::refine::explain_openings(refiner_, polygon_pub, surf, fr, cs, cf, {}, fo);
     if (R.openings.empty()) return;
     for (const auto& o : R.openings)
     {
@@ -4701,8 +4701,8 @@ void RoomSceneGraph::step_layout_refiner(const rc::RoomConcept::UpdateResult& re
     //   searched itself 6 m away. Evidence still accumulates (it costs nothing and is the record a later survey
     //   would start from); the remembered outline is just not edited on this visit.
     if (recalled_visit_) return;
-    std::vector<Eigen::Vector2f> surf, fr; std::vector<float> cs, cf;
-    free_space_->evidence_cells(surf, fr, &cs, &cf);
+    std::vector<Eigen::Vector2f> surf, fr, fo; std::vector<float> cs, cf;
+    free_space_->evidence_cells(surf, fr, &cs, &cf, &fo);
     const auto poly_pub = published_polygon();
     if (poly_pub.size() < 4) return;
     {   // the refiner's EXACT inputs, so a refinement can be replayed offline without re-deriving the evidence
@@ -4718,13 +4718,19 @@ void RoomSceneGraph::step_layout_refiner(const rc::RoomConcept::UpdateResult& re
         put(static_cast<std::int64_t>(res.timestamp_ms));
         put_pts(poly_pub, nullptr); put_pts(surf, &cs); put_pts(fr, &cf);
         refine_in_bin_.flush();
+        // the free cells' mean beam origins, aligned with `fr`, in a SIDE tape (the main tape's readers stay valid)
+        if (not refine_origin_bin_.is_open()) refine_origin_bin_.open("tmp/refine_free_origin.bin", std::ios::binary | std::ios::trunc);
+        const auto put_o = [&](const auto& v) { refine_origin_bin_.write(reinterpret_cast<const char*>(&v), sizeof(v)); };
+        put_o(static_cast<std::int64_t>(res.timestamp_ms)); put_o(static_cast<std::uint32_t>(fo.size()));
+        for (const auto& o : fo) { put_o(o.x()); put_o(o.y()); }
+        refine_origin_bin_.flush();
     }
     // the room's doorways (published frame): an outline never grows through one (layout_refiner.h, grows_through_doorway)
     std::vector<rc::refine::Doorway> doorways;
     for (const auto& d : room_concept_->door_apertures())
         doorways.push_back({.a = T_pub_int_ * d.a, .b = T_pub_int_ * d.b, .depth = d.half_depth});
     doorways.insert(doorways.end(), unfound_openings_.begin(), unfound_openings_.end());   // a hypothesised doorway is where the room ends too
-    auto R = refiner_.propose(poly_pub, surf, fr, cs, cf, doorways);
+    auto R = refiner_.propose(poly_pub, surf, fr, cs, cf, doorways, fo);
     refine_contested_ = R.contested;
     if (not refine_csv_.is_open())
     {

@@ -216,7 +216,7 @@ public:
                 // matter under the robot is not matter: the passes outvote whatever ended here
                 frees_[idx(i, j)] = static_cast<std::uint16_t>(std::max<int>(frees_[idx(i, j)], hits_[idx(i, j)]));
                 if (low_.size() == st_.size()) low_[idx(i, j)] = 0;
-                set_free(i, j);
+                set_free(i, j, centre);
             }
     }
 
@@ -689,12 +689,17 @@ public:
     /// q the per-beam reliability ESTIMATED from the well-observed cells (the minority vote share) — not a constant.
     /// Measured live: 2512 of 3692 cells with >= 2 hits were refuted by their own passes (ceiling arcs, furniture
     /// ghosts); those cut the region and fed the SLAM distance field.
+    /// `origin_free` (optional, aligned with `free`): the MEAN origin of the beams that passed through each free cell —
+    /// where it was seen from. The refiner needs it to know which part of an outline a beam crossed to reach a cell
+    /// (layout_refiner.h, "one observation per crossing"). A cell never passed by a beam reports its own centre.
     void evidence_cells(std::vector<Eigen::Vector2f>& surface, std::vector<Eigen::Vector2f>& free,
-                        std::vector<float>* conf_surface = nullptr, std::vector<float>* conf_free = nullptr) const
+                        std::vector<float>* conf_surface = nullptr, std::vector<float>* conf_free = nullptr,
+                        std::vector<Eigen::Vector2f>* origin_free = nullptr) const
     {
         surface.clear(); free.clear();
         if (conf_surface) conf_surface->clear();
         if (conf_free) conf_free->clear();
+        if (origin_free) origin_free->clear();
         if (not ready() or hits_.size() != frees_.size()) return;
         // per-beam reliability q: 1 - mean minority share over cells with >= 10 observations
         double minority = 0; long nwell = 0;
@@ -717,6 +722,8 @@ public:
             {
                 free.emplace_back(x0_ + (i + 0.5f) * p_.cell, y0_ + (j + 0.5f) * p_.cell);
                 if (conf_free) conf_free->push_back(1.f - p);
+                if (origin_free)
+                    origin_free->push_back(on_.size() == st_.size() and on_[k] > 0 ? Eigen::Vector2f(ox_[k], oy_[k]) : free.back());
             }
         }
     }
@@ -765,6 +772,9 @@ private:
                                                 // surface's position to sub-cell precision (layout_refiner.h). A
                                                 // cell CENTRE is biased by up to cell/2 from the wall face; offline that
                                                 // bias moved every refined wall 2-3 cm and cost 2.3 cm of pose (walhit).
+    std::vector<float> ox_, oy_;                // running MEAN of the ORIGINS of the beams that passed through the cell
+    std::vector<std::uint32_t> on_;             // (where it was seen from), with its own count: add_footprint raises
+                                                // frees_ in a jump, so frees_ is not the number of origins averaged.
     std::vector<std::vector<Eigen::Vector2f>> excl_polys_;   // set_exclusion: other rooms' outlines (this frame)
     std::vector<std::uint8_t> excl_;                         // their raster (1 = another room's cell)
     long  n_free_ = 0;
@@ -840,6 +850,9 @@ private:
         frees_.assign(st_.size(), 0);
         mx_.assign(st_.size(), 0.f);
         my_.assign(st_.size(), 0.f);
+        ox_.assign(st_.size(), 0.f);
+        oy_.assign(st_.size(), 0.f);
+        on_.assign(st_.size(), 0u);
         if (not excl_polys_.empty()) rasterise_exclusion();
     }
 
@@ -868,6 +881,17 @@ private:
         auto& f = frees_[idx(i, j)];
         if (f < std::numeric_limits<std::uint16_t>::max()) ++f;
         restate(i, j);
+    }
+    /// A beam from `o` PASSED through cell (i, j): count it and fold `o` into the cell's running mean origin.
+    void set_free(int i, int j, const Eigen::Vector2f& o)
+    {
+        set_free(i, j);
+        if (on_.size() != st_.size()) return;
+        const auto k = idx(i, j);
+        if (on_[k] == std::numeric_limits<std::uint32_t>::max()) return;
+        const float n = static_cast<float>(++on_[k]);
+        ox_[k] += (o.x() - ox_[k]) / n;
+        oy_[k] += (o.y() - oy_[k]) / n;
     }
     void set_matter(int i, int j)
     {
@@ -921,7 +945,7 @@ private:
             }
             if (not in(i, j))
                 return;                         // left the raster: nothing beyond is recorded, no matter mark
-            set_free(i, j);
+            set_free(i, j, a);
             if (tmx < tmy) { tmx += tdx; i += sx; }
             else           { tmy += tdy; j += sy; }
         }

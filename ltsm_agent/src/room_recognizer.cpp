@@ -83,9 +83,18 @@ std::optional<Eigen::Vector2d> centroid_of(DSR::DSRGraph &g, const DSR::Node &ro
     const auto px = g.get_attrib_by_name<delimiting_polygon_x_att>(room);
     const auto py = g.get_attrib_by_name<delimiting_polygon_y_att>(room);
     if (not px.has_value() or not py.has_value() or px->get().empty() or px->get().size() != py->get().size()) return std::nullopt;
-    Eigen::Vector2d c = Eigen::Vector2d::Zero();
-    for (const auto &[x, y] : std::views::zip(px->get(), py->get())) c += Eigen::Vector2d(x, y);
-    return c / static_cast<double>(px->get().size());
+    // the AREA centroid (shoelace): a thin tail of many vertices weighs its area, not its vertex count (clean33's 24-vertex
+    // outline put the vertex mean past the door wall). A ring with no area falls back to the vertex mean.
+    const auto &X = px->get(), &Y = py->get();
+    const std::size_t n = X.size();
+    double a2 = 0.0, cx = 0.0, cy = 0.0, mx = 0.0, my = 0.0;
+    for (std::size_t i = 0; i < n; ++i)
+    {
+        const double x0 = X[i], y0 = Y[i], x1 = X[(i + 1) % n], y1 = Y[(i + 1) % n], cr = x0 * y1 - x1 * y0;
+        a2 += cr; cx += (x0 + x1) * cr; cy += (y0 + y1) * cr; mx += x0; my += y0;
+    }
+    if (a2 == 0.0) return Eigen::Vector2d(mx / double(n), my / double(n));
+    return Eigen::Vector2d(cx / (3.0 * a2), cy / (3.0 * a2));
 }
 
 /// T(room <- node) with its covariance, composed from the LIVE RT edges along `node`'s parent chain up to `room_id`
@@ -579,14 +588,28 @@ RoomRecognizer::Step RoomRecognizer::step_impl()
             Measured seam_LP = seam::compose_cov(fL, inv_fP);
 
             // The two faces are ONE hole, possibly TURNED by pi (door_concept orients a door's frame from the room that fits
-            // it, so the mirror seen from P is the same doorway rotated half a turn). The provisional room lies on the
-            // far side of the hole from L, and the robot is in it by definition: if the seam lands the robot on L's side
-            // of the face, the turned face is the one. A side test, not a tolerance; the same rule seam_through_passage
-            // applies with the two outlines' centroids. L's side is read from its LIVE outline (the twin's may be the
-            // promotion-time stub), the twin's when the live room publishes none.
-            auto c_L = centroid_of(*live_, L.value());
-            if (not c_L.has_value())
-                if (const auto mem_L = mem_->get_node(L_mem); mem_L.has_value()) c_L = centroid_of(*mem_, mem_L.value());
+            // it, so the mirror seen from P is the same doorway rotated half a turn). THE ROBOT DECIDES (clean33,
+            // 2026-11-10): it hangs from L and from P at once, so the true seam is the one that maps its pose in P onto its
+            // pose in L (seam::turned_seam_fits, a likelihood argmax between the two). L's outline is not consulted: a
+            // degenerate outline's vertex mean once lay past the door and turned a correct seam. Only when the robot's
+            // edge to L is unreadable does the old side test run, against L's AREA centroid (live outline, else the twin's).
+            std::optional<Measured> robot_in_L;
+            if (const auto le = live_->get_edge(robot->id(), L->id(), "RT"); le.has_value()) robot_in_L = read_robot_in(le.value());
+            std::optional<Eigen::Vector2d> c_L;
+            if (robot_in_L.has_value())
+            {
+                if (seam::turned_seam_fits(fL, inv_fP, robot_in_P.value(), robot_in_L.value()))
+                {
+                    seam_LP = seam::compose_cov(seam::compose_cov(fL, Measured{Vec3(0.0, 0.0, M_PI), Mat3::Zero()}), inv_fP);
+                    fresh_flipped = true;
+                }
+            }
+            else
+            {
+                c_L = centroid_of(*live_, L.value());
+                if (not c_L.has_value())
+                    if (const auto mem_L = mem_->get_node(L_mem); mem_L.has_value()) c_L = centroid_of(*mem_, mem_L.value());
+            }
             if (c_L.has_value())
             {
                 const Eigen::Vector2d r_in_L = seam_LP.pose.head<2>() + seam::rot(seam_LP.pose.z()) * robot_in_P->pose.head<2>();

@@ -95,7 +95,8 @@ using Poly = std::vector<Eigen::Vector2f>;
 [[nodiscard]] inline NeckResult explain_openings(const LayoutRefiner& refiner, const std::vector<Eigen::Vector2f>& outline,
                                                  const std::vector<Eigen::Vector2f>& surf, const std::vector<Eigen::Vector2f>& free,
                                                  const std::vector<float>& conf_surf, const std::vector<float>& conf_free,
-                                                 const NeckParams& np = {})
+                                                 const NeckParams& np = {},
+                                                 const std::vector<Eigen::Vector2f>& origin_free = {})
 {
     using detail::Poly;
     NeckResult out{.polygon = outline, .openings = {}};
@@ -136,12 +137,17 @@ using Poly = std::vector<Eigen::Vector2f>;
                     if (in(cut, q)) return true;
                     return detail::dist_to_boundary(cut, q) < cell_margin and not in(kept, q) and detail::dist_to_boundary(kept, q) > cell_margin;
                 };
-                Poly S, F; std::vector<float> cs, cf;
+                Poly S, F, FO; std::vector<float> cs, cf;
                 for (std::size_t k = 0; k < surf.size(); ++k)
                     if (not beyond(surf[k])) { S.push_back(surf[k]); if (conf_surf.size() == surf.size()) cs.push_back(conf_surf[k]); }
                 for (std::size_t k = 0; k < free.size(); ++k)
-                    if (not beyond(free[k])) { F.push_back(free[k]); if (conf_free.size() == free.size()) cf.push_back(conf_free[k]); }
-                const auto dl = refiner.description_lengths({P, kept}, kept, S, F, cs, cf);
+                    if (not beyond(free[k]))
+                    {
+                        F.push_back(free[k]);
+                        if (conf_free.size() == free.size()) cf.push_back(conf_free[k]);
+                        if (origin_free.size() == free.size()) FO.push_back(origin_free[k]);
+                    }
+                const auto dl = refiner.description_lengths({P, kept}, kept, S, F, cs, cf, FO);
                 const float dw = w - np.door_width_m;
                 const float score = dl[0] - dl[1] + std::log(np.p_door)
                                     - 0.5f * dw * dw / (np.door_width_sd * np.door_width_sd + cell * cell);

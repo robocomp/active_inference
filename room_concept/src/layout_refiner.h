@@ -12,6 +12,14 @@
 //              (the distance-to-boundary density of a uniform point in the room — no range constant);
 //              free cell d_out beyond the boundary: (1-eps) Phi(-d_out / sigma) + eps  (a beam through a modelled
 //              wall IS an outlier return: one eps, not two). sigma and eps are fitted by EM under the CURRENT polygon;
+//              ★ ONE OBSERVATION PER CROSSING (2026-11-10, clean33): the free cells outside a polygon are scored per
+//              5 cm of the polygon's boundary their beams crossed — the mean of their terms counts once — not once per
+//              cell. A beam through a wall says "the wall is open HERE"; the cells it then sweeps behind the wall all
+//              repeat that one fact. Per cell, a 2 cm slit at a shut door's jamb let ~1350 cells of the next room
+//              outweigh 20 vertices (kappa ~5.7 each) and room_1 annexed it. The crossing is found on the segment from
+//              the cell's mean beam origin (FreeSpacePolygon::evidence_cells `origin_free`) to the cell: its first exit
+//              through the polygon. A cell with no origin, or whose segment never leaves the polygon (seen from outside
+//              it), keeps its own term, as before.
 //              each cell is weighted w = cell / ell, ell the residual correlation length along the walls (fitted
 //              from the residual autocorrelation) — adjacent cells of one wall are not independent observations.
 //   criterion  adopt edit e iff   dNLL + kappa * d|V| + ln(n_edges) < 0,   kappa = ln(L / sigma):
@@ -99,9 +107,10 @@ public:
                                  const std::vector<Eigen::Vector2f>& free,
                                  const std::vector<float>& conf_surf = {},
                                  const std::vector<float>& conf_free = {},
-                                 const std::vector<Doorway>& doorways = {})
+                                 const std::vector<Doorway>& doorways = {},
+                                 const std::vector<Eigen::Vector2f>& origin_free = {})
     {
-        last_ = propose_impl(poly, surf, free, conf_surf, conf_free, doorways);
+        last_ = propose_impl(poly, surf, free, conf_surf, conf_free, doorways, origin_free);
         return last_;
     }
     [[nodiscard]] const Result& last() const { return last_; }
@@ -115,7 +124,8 @@ public:
                                                          const std::vector<Eigen::Vector2f>& surf,
                                                          const std::vector<Eigen::Vector2f>& free,
                                                          const std::vector<float>& conf_surf = {},
-                                                         const std::vector<float>& conf_free = {}) const
+                                                         const std::vector<float>& conf_free = {},
+                                                         const std::vector<Eigen::Vector2f>& origin_free = {}) const
     {
         std::vector<float> dl(cands.size(), std::numeric_limits<float>::infinity());
         if (ref.size() < 4 or surf.size() < 20) return dl;
@@ -126,8 +136,9 @@ public:
             return snap_axes(V);
         };
         const auto S = rot(surf, -th), Fr = rot(free, -th);
+        const auto OF = origin_free.size() == free.size() ? rot(origin_free, -th) : std::vector<Eigen::Vector2f>{};
         Scorer sc(S, Fr, p_, conf_surf.size() == S.size() ? conf_surf : std::vector<float>(S.size(), 1.f),
-                  conf_free.size() == Fr.size() ? conf_free : std::vector<float>(Fr.size(), 1.f));
+                  conf_free.size() == Fr.size() ? conf_free : std::vector<float>(Fr.size(), 1.f), OF);
         sc.fit(norm(ref));
         for (std::size_t i = 0; i < cands.size(); ++i)
             if (cands[i].size() >= 4)
@@ -148,7 +159,8 @@ private:
                                       const std::vector<Eigen::Vector2f>& free,
                                       const std::vector<float>& conf_surf,
                                       const std::vector<float>& conf_free,
-                                      const std::vector<Doorway>& doorways) const
+                                      const std::vector<Doorway>& doorways,
+                                      const std::vector<Eigen::Vector2f>& origin_free) const
     {
         Result R;
         if (poly.size() < 4 or surf.size() < 20) { R.polygon = poly; return R; }
@@ -156,10 +168,11 @@ private:
         auto V = rot(poly, -th); if (freespace::signed_area(V) < 0.f) std::ranges::reverse(V);
         V = snap_axes(V);
         const auto S = rot(surf, -th), Fr = rot(free, -th);
+        const auto OF = origin_free.size() == free.size() ? rot(origin_free, -th) : std::vector<Eigen::Vector2f>{};
         std::vector<Doorway> D;
         for (const auto& d : doorways) { const auto ab = rot({d.a, d.b}, -th); D.push_back({ab[0], ab[1], d.depth}); }
         Scorer sc(S, Fr, p_, conf_surf.size() == S.size() ? conf_surf : std::vector<float>(S.size(), 1.f),
-                  conf_free.size() == Fr.size() ? conf_free : std::vector<float>(Fr.size(), 1.f));
+                  conf_free.size() == Fr.size() ? conf_free : std::vector<float>(Fr.size(), 1.f), OF);
         sc.fit(V);
         R.sigma = sc.sigma; R.eps = sc.eps; R.ell = sc.ell; R.kappa = sc.kappa; R.w = sc.w;
         R.nll_before = sc.nll(V);
@@ -293,10 +306,34 @@ private:
     {
         const std::vector<Eigen::Vector2f>& S; const std::vector<Eigen::Vector2f>& Fr; Params p;
         std::vector<float> CS, CF;   ///< per-cell class posteriors (the accumulated-evidence weights)
+        std::vector<Eigen::Vector2f> OF;   ///< per free cell, the mean origin of its beams (empty = unknown: per cell)
         float sigma, eps = 0.3f, ell, w = 1.f, kappa = 0.f, L = 1.f;
         Scorer(const std::vector<Eigen::Vector2f>& s, const std::vector<Eigen::Vector2f>& f, Params pp,
-               std::vector<float> cs, std::vector<float> cf)
-            : S(s), Fr(f), p(pp), CS(std::move(cs)), CF(std::move(cf)), sigma(pp.sigma0), ell(pp.cell) {}
+               std::vector<float> cs, std::vector<float> cf, std::vector<Eigen::Vector2f> of = {})
+            : S(s), Fr(f), p(pp), CS(std::move(cs)), CF(std::move(cf)),
+              OF(of.size() == f.size() ? std::move(of) : std::vector<Eigen::Vector2f>{}), sigma(pp.sigma0), ell(pp.cell) {}
+
+        /// Where the segment o -> q first LEAVES the ring with edges E (outward crossing, smallest t in (0, 1]): the
+        /// edge and the index of the `cell`-long piece of it crossed. nullopt when the segment never leaves the ring.
+        static std::optional<std::pair<int, int>> first_exit(const Eigen::Vector2f& o, const Eigen::Vector2f& q,
+                                                             const std::vector<Edge>& E, float cell)
+        {
+            const Eigen::Vector2f d = q - o;
+            float best_t = std::numeric_limits<float>::infinity(); std::optional<std::pair<int, int>> out;
+            for (std::size_t m = 0; m < E.size(); ++m)
+            {
+                const auto& e = E[m];
+                const float dn = e.h ? d.y() : d.x();                      // along the edge's normal axis
+                if (not (dn * e.sgn > 0.f)) continue;                      // not moving outward through this edge
+                const float t = (e.v - (e.h ? o.y() : o.x())) / dn;
+                if (not (t > 0.f and t <= 1.f) or t >= best_t) continue;
+                const float along = e.h ? o.x() + t * d.x() : o.y() + t * d.y();
+                if (along < e.lo or along > e.hi) continue;
+                best_t = t;
+                out = std::pair{static_cast<int>(m), static_cast<int>(std::floor((along - e.lo) / cell))};
+            }
+            return out;
+        }
 
         static float log_norm(float d, float sig) { return -0.5f * (d / sig) * (d / sig) - std::log(sig * 2.5066283f); }
         static float log_phi_tail(float x)   // log Phi(-x), x >= 0
@@ -369,11 +406,24 @@ private:
                 const auto n = nearest(S[i], E);
                 acc -= CS[i] * lse(std::log(1 - eps) + log_norm(n.d, sigma), std::log(eps) + lo);
             }
+            // free cells outside V: one observation per crossing (header) — the mean term of the cells behind it
+            std::vector<std::pair<std::int64_t, double>> through;   // (crossing key, term)
             for (std::size_t i = 0; i < Fr.size(); ++i)
             {
                 if (freespace::point_in_polygon(Fr[i], V)) continue;
                 const auto n = nearest(Fr[i], E);
-                acc -= CF[i] * lse(std::log(1 - eps) + log_phi_tail(n.d / sigma), std::log(eps));
+                const double term = -CF[i] * lse(std::log(1 - eps) + log_phi_tail(n.d / sigma), std::log(eps));
+                const auto x = OF.empty() ? std::nullopt : first_exit(OF[i], Fr[i], E, p.cell);
+                if (x) through.emplace_back(std::int64_t(x->first) * (std::int64_t(1) << 32) + x->second, term);
+                else   acc += term;
+            }
+            std::ranges::sort(through, {}, &std::pair<std::int64_t, double>::first);
+            for (std::size_t a = 0; a < through.size();)
+            {
+                std::size_t b = a; double s = 0.0;
+                for (; b < through.size() and through[b].first == through[a].first; ++b) s += through[b].second;
+                acc += s / double(b - a);
+                a = b;
             }
             return static_cast<float>(w * acc);
         }

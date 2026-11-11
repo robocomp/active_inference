@@ -399,6 +399,7 @@ private:
     void cut_unfound_doorways(std::vector<Eigen::Vector2f>& polygon_pub);   ///< doorway_necks.h, on this room's evidence
     void publish_doorway_hypotheses();
     std::ofstream refine_csv_;                        ///< tmp/layout_refine.csv — one row per evaluation
+    std::ofstream refine_origin_bin_;                 ///< tmp/refine_free_origin.bin — per refine frame, the free cells' mean beam origins
     std::ofstream refine_in_bin_;                     ///< tmp/refine_input.bin — the refiner's exact inputs, one frame per evaluation (offline replay)
     std::int64_t  sweep_last_ms_ = 0;
     Eigen::Vector2f lidar_origin_{0.f, 0.f};   ///< robot frame
