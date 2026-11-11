@@ -492,28 +492,16 @@ void PosePublisher::publish_predicted_tick(std::int64_t imu_ts_ms)
     if (dt_s <= 0.f || dt_s > params.POSE_CLAMP_MAX_DT_S)
         return;
 
-    const Eigen::Affine2f& base = last_published_pose_.value();
-    const float base_th = std::atan2(base.linear()(1, 0), base.linear()(0, 0));
-    const float phi = last_pub_rot_ * dt_s;
-
     // Body-frame twist -> SE(2) chord. Same exponential map as
     // controller_obstacle_tracker.cpp::twist_delta() (this codebase's original, verified-correct
     // reference for this exact composition, 2026-08-04) -- the left Jacobian V turns v*dt into the
     // CHORD of the arc actually swept instead of cutting the corner. +Y forward = adv (last_pub_adv_),
     // +X lateral = side (last_pub_side_); see the frame note in room_scene_graph.cpp.
-    const float vx = last_pub_side_ * dt_s;
-    const float vy = last_pub_adv_  * dt_s;
-    float dx = vx, dy = vy;
-    if (std::abs(phi) > 1e-6f)
-    {
-        const float s = std::sin(phi), c = std::cos(phi);
-        dx = (s * vx - (1.f - c) * vy) / phi;
-        dy = ((1.f - c) * vx + s * vy) / phi;
-    }
-
-    Eigen::Affine2f predicted = Eigen::Affine2f::Identity();
-    predicted.linear()      = Eigen::Rotation2Df(base_th + phi).toRotationMatrix();
-    predicted.translation() = base.translation() + base.linear() * Eigen::Vector2f(dx, dy);
+    // ★ rc::publish::propagate_twist, SHARED with the late-correction rewrite (write_robot_room_rt): when a
+    //   correction lands after ticks stamped later than it, those ticks are re-propagated from it by this
+    //   same function, so the rewritten tail is exactly what this tick would have written from that base.
+    const Eigen::Affine2f predicted = rc::publish::propagate_twist(
+        last_published_pose_.value(), last_pub_adv_, last_pub_side_, last_pub_rot_, dt_s);
 
     // last_published_cov_ reused as-is (not grown with dt_s) -- a known simplification. A consumer
     // reading this between two real corrections currently sees the same sigma the last real one

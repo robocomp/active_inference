@@ -11,6 +11,7 @@
 #include <ranges>
 #include "entry_reloc.h"
 #include "room_scene_graph.h"
+#include "published_pose.h"                                   // rc::publish::superseded_tail (late-correction rewrite)
 #include "status_reporter.h"
 #include "wall_sync.h"                                       // rc::walls::plan_wall_sync (rule 1)
 #include "door_crossing.h"                                   // rc::crossing (proto-room evidence)
@@ -463,7 +464,12 @@ void RoomSceneGraph::dsr_publish_body_calibration(const rc::RoomConcept::UpdateR
 
 void RoomSceneGraph::dsr_update_pose(const rc::RoomConcept::UpdateResult& res)
 {
-    write_robot_room_rt(res.robot_pose, res.covariance, static_cast<std::uint64_t>(res.timestamp_ms));
+    // A CORRECTION supersedes the predictions stamped after it (write_robot_room_rt, supersede_later) — but only when it
+    // is the newest correction: an out-of-order older one would otherwise overwrite a newer correction with a prediction.
+    const auto t_c = static_cast<std::uint64_t>(res.timestamp_ms);
+    const bool newest_correction = t_c > last_correction_ts_;
+    last_correction_ts_ = std::max(last_correction_ts_, t_c);
+    write_robot_room_rt(res.robot_pose, res.covariance, t_c, 0, newest_correction);
 }
 
 // High-rate predicted pose (dead-reckoned between lidar corrections): same RT edge, same frame/cov
@@ -481,7 +487,8 @@ void RoomSceneGraph::dsr_publish_predicted_pose(const Eigen::Affine2f& robot_pos
 void RoomSceneGraph::write_robot_room_rt(const Eigen::Affine2f& robot_pose_int,
                                          const Eigen::Matrix3f& covariance_int,
                                          std::uint64_t timestamp_ms,
-                                         std::uint64_t child_override)
+                                         std::uint64_t child_override,
+                                         bool supersede_later)
 {
     if (!G_ || !rt_api_) return;
     // `robot_pose_int`/`covariance_int` are in the estimator's INTERNAL frame for child_override == 0, and
@@ -524,7 +531,7 @@ void RoomSceneGraph::write_robot_room_rt(const Eigen::Affine2f& robot_pose_int,
         Eigen::Matrix3f A = Eigen::Matrix3f::Identity();
         A.topLeftCorner<2, 2>() = T_proto_room.linear();
         write_robot_room_rt(T_proto_room * robot_pose, A * covariance * A.transpose(), timestamp_ms,
-                            proto_room_id_);
+                            proto_room_id_, supersede_later);   // the proto edge holds the same stale predictions
         return;
     }
 
@@ -593,14 +600,6 @@ void RoomSceneGraph::write_robot_room_rt(const Eigen::Affine2f& robot_pose_int,
         forget_room("cached room node missing");
     }
 
-    const Eigen::Matrix2f R = robot_pose.linear();
-    const Eigen::Vector2f t = robot_pose.translation();
-    const float theta_room_to_robot = std::atan2(R(1, 0), R(0, 0));
-
-    // Convert room->robot estimate into robot->room when the room is a child of the robot.
-    const Eigen::Vector2f t_robot_to_room = -(R.transpose() * t);
-    const float theta_robot_to_room = -theta_room_to_robot;
-
     // robot->room, unconditionally. The pre-room alternative (root->robot) is gone — see the note at
     // the caller. Guarded rather than assumed: reaching here without a room node is now a defect, not
     // a mode, so it says so instead of silently writing to the dummy world frame.
@@ -628,156 +627,182 @@ void RoomSceneGraph::write_robot_room_rt(const Eigen::Affine2f& robot_pose_int,
         return;
     }
 
-    // Always the robot->room form now: this function is only reached once the room node exists (the
-    // pre-room caller above is gone), so the ternaries that used to select the root<-robot quantity
-    // were dead and, worse, documented a mode this agent no longer has.
-    const float x     = t_robot_to_room.x();
-    const float y     = t_robot_to_room.y();
-    const float theta = theta_robot_to_room;
-
-    // ── Covariance (SE2 3×3 packed into 6×6 flat row-major) ───────────────
-    Eigen::Matrix3f cov_se2 = Eigen::Matrix3f::Identity();
-    if (covariance.rows() >= 3 && covariance.cols() >= 3)
-        cov_se2 = covariance.topLeftCorner<3, 3>();
-
-    if (room_node_created_)
+    // ── ONE RING BLOCK PER POSE ──────────────────────────────────────────────────────────────────
+    // Everything below that depends on the pose — the robot->room inversion, the covariance Jacobian, the
+    // twist adjoint (its lever arm is the pose's translation) — is one function of the pose, because a
+    // CORRECTION writes several blocks: itself and the predictions after it re-propagated from it
+    // (supersede_later, at the write below). Every block goes through this same code, so the rewritten
+    // predictions cannot drift from what a tick writes. `pose` is room<-robot in the WRITTEN frame.
+    const auto rt_block_of = [&](const Eigen::Affine2f& pose) -> DSR::RT_API::RTBlock
     {
-        const float c = std::cos(theta_room_to_robot);
-        const float s = std::sin(theta_room_to_robot);
-        Eigen::Matrix3f J = Eigen::Matrix3f::Zero();
-        J(0, 0) = -c;  J(0, 1) = -s;  J(0, 2) =  s * t.x() - c * t.y();
-        J(1, 0) =  s;  J(1, 1) = -c;  J(1, 2) =  c * t.x() + s * t.y();
-        J(2, 2) = -1.f;
-        cov_se2 = J * cov_se2 * J.transpose();
-    }
+        const Eigen::Matrix2f R = pose.linear();
+        const Eigen::Vector2f t = pose.translation();
+        const float theta_room_to_robot = std::atan2(R(1, 0), R(0, 0));
 
-    // ── SE(2) -> SE3 SLOTS, AND THE MAPPING IS THE WHOLE POINT ───────────────────────────────────
-    // rt_covariance is a 6x6 ROW-MAJOR **SE3** covariance ordered [x, y, z, rx, ry, rz]
-    // (RT_COVARIANCE_BLOCK_SIZE = 36 in cortex's dsr_rt_api.cpp). This used to write the SE(2) 3x3
-    // into the top-left 3x3, i.e. treat the block as a PADDED 3x3 — which puts the heading variance
-    // at (2,2), the slot that means var_Z, and leaves yaw at (5,5) permanently ZERO.
-    //
-    // ★ MEASURED CONSEQUENCE, 2026-08-16. The controller reads yaw from (5,5) — its own comment
-    // records fixing that from (2,2) precisely because "the rotation throttle was being driven by the
-    // robot's HEIGHT uncertainty". So it now reads a slot this agent never wrote: over two complete
-    // tours, 20817 moving samples, `pose_theta_std_rad` in the controller's profile.csv is
-    // IDENTICALLY 0.0000 — median, p75, p90, p95 and max alike. Its rotation throttle has been inert,
-    // and anything else consuming yaw uncertainty from this edge has been reading a zero.
-    // ★ Note how it arose: the consumer was corrected to cortex's convention and the producer was not,
-    // so a one-sided fix turned an accidentally-consistent pair into a silently-broken one. Before it,
-    // both used (2,2) and the wrong slot cancelled out.
-    //
-    // Index map: SE(2) (x, y, theta) -> SE3 (x, y, yaw) = rows/cols 0, 1, 5. Cross terms come along,
-    // so the xy<->theta correlation the preintegrated motion model produces survives the transport
-    // instead of being dropped on the floor.
-    static constexpr int se3_of_se2[3] = {0, 1, 5};
-    std::vector<float> cov_flat(36, 0.f);
-    for (int r = 0; r < 3; ++r)
-        for (int c = 0; c < 3; ++c)
-            cov_flat[se3_of_se2[r] * 6 + se3_of_se2[c]] = cov_se2(r, c);
+        // Convert room->robot estimate into robot->room when the room is a child of the robot.
+        const Eigen::Vector2f t_robot_to_room = -(R.transpose() * t);
+        const float theta_robot_to_room = -theta_room_to_robot;
 
-    // ── Body-frame twist, written BEFORE the RT block ───────────────────────
-    // Consumers read velocity DIRECTLY from here instead of differentiating the pose (which is what
-    // produced correction-induced velocity spikes). Layout: rt_translation_velocity = [adv, side, 0],
-    // rt_rotation_euler_xyz_velocity = [0,0,rot]; last_adv_/side_/rot_ are the measured odometry set
-    // in update(). Covariance is a config diagonal.
-    //
-    // ★★ THAT IS ARRAY ORDER, NOT FRAME AXES. This comment used to read "[adv(fwd,+x), side(lat,+y)]"
-    // and the parentheticals were WRONG: the robot body frame these rates live in is **+Y FORWARD,
-    // +X lateral**. A consumer composing them into a transform must therefore put `adv` on the frame's
-    // y axis and `side` on its x. Getting that backwards rotates the predicted displacement by 90°, so
-    // it lands √2·|motion| from the truth — WORSE than assuming the robot never moved, which is how it
-    // was found (controller twist compensation, 2026-08-04). Measured on 421 logged forward-driving
-    // cycles, predicting the next pose from the true body twist: adv→x p50 25.86 mm, adv→y p50 0.07 mm.
-    // The same frame is stated by the controller's safety-gate integrator (`x += adv*sin(th);
-    // y += adv*cos(th)`) and by its carrot bearing being atan2(x, y) rather than atan2(y, x).
-    //
-    // ★ ORDER IS LOAD-BEARING. This used to run AFTER insert_or_assign_edge_RT, as a get_edge →
-    // add attributes → insert_or_assign_edge(copy) write-back. That copy is a snapshot of the edge
-    // INCLUDING its rt_timestamps / rt_head_index ring buffer, so assigning it back re-publishes the
-    // ring state as of the fetch — the edge-level form of the write-back hazard already documented on
-    // nodes. The write site's own comment records that an earlier version of this froze the position
-    // outright and was patched by re-fetching; re-fetching narrows the window but does not close it.
-    //
-    // Measured symptom: room_concept publishes at ~19.6 Hz (pose_trace inter-publish p50 51 ms, 3.3%
-    // over 100 ms, 0% over 200 ms) while the controller observes the RT stamp advancing at only 9.0 Hz
-    // (p50 100 ms, 47% over 100 ms, 10% over 200 ms) — a factor of 2.2, i.e. about every second update
-    // invisible. Writing the twist FIRST and letting the timestamped RT write land LAST means the
-    // ring-buffer advance is the final word on this edge for this frame and nothing can write over it.
-    // 6x6 row-major SE3 [x,y,z,rx,ry,rz]. Yaw-rate variance belongs at (5,5) = [35], not at [14] =
-    // var_Z; the old comment claimed it matched the pose covariance and it did — both were wrong in
-    // the same way, which is exactly what made the pair look self-consistent.
-    // ★NOW RING-PACKED BY THE RT WRITE BELOW, not written raw here. It used to be a FLAT 36 written
-    // through this same round trip, which meant it had no slot: RT_API::get_edge_RT_covariance fell
-    // back to block 0 for every timestamp, so the velocity covariance was the same number whatever
-    // instant you asked about. Passing it in the RTBlock lands it in the slot its twist belongs to.
-    // ★THE VARIANCES GO ON THE AXES THE TWIST USES, NOT IN THE ORDER THEY ARE NAMED. twist_linear
-    // below is written {last_side_, last_adv_, 0} -- AXIS order, because this body frame is +Y
-    // FORWARD -- so the ADVANCE variance belongs at (1,1) = [7] and the LATERAL one at (0,0) = [0].
-    // This block had them the other way round: array order in a covariance that sits beside an
-    // axis-order twist, the same 90-degree mismatch that cost three consumers a wrong prediction.
-    // ★IT WAS INVISIBLE, AND ONLY BY COINCIDENCE: ADV and SIDE are both 0.0025 in the defaults, and
-    // swapping two equal numbers changes nothing. The day either becomes speed-dependent -- which is
-    // the whole point of not publishing a constant process noise (CONCEPT_AGENT_LIFECYCLE.md 4.1),
-    // and a differential-drive base has far less lateral velocity uncertainty than forward -- the
-    // bug would have appeared as a mysterious rotation of the uncertainty ellipse. Fixed first, on
-    // purpose, so that change cannot be the thing that reveals it.
-    Eigen::Matrix3f body_vel_cov = Eigen::Matrix3f::Zero();
-    if (params_)
-    {
-        body_vel_cov(0, 0) = params_->ROBOT_VEL_COV_SIDE;   // var of the LATERAL rate
-        body_vel_cov(1, 1) = params_->ROBOT_VEL_COV_ADV;    // var of the ADVANCE rate (+Y forward)
-        body_vel_cov(2, 2) = params_->ROBOT_VEL_COV_ROT;    // var of the yaw rate
-    }
+        // Always the robot->room form now: this function is only reached once the room node exists (the
+        // pre-room caller above is gone), so the ternaries that used to select the root<-robot quantity
+        // were dead and, worse, documented a mode this agent no longer has.
+        const float x     = t_robot_to_room.x();
+        const float y     = t_robot_to_room.y();
+        const float theta = theta_robot_to_room;
 
-    // ── THE TWIST BELONGS TO THE CHILD, AND ON THIS EDGE THE CHILD IS THE ROOM ──────────────────
-    // ★MEASURED DEFECT, 2026-09-10. This edge is anchored parent=ROBOT, child=ROOM (the room hangs
-    // off the robot because the robot is the RT root), so the stored matrix is T_robot<-room. The RT
-    // API's contract is that twist_linear/twist_angular describe the CHILD's motion in the CHILD's
-    // own axes, because TimeQuery::Extrapolated walks the stored matrix by RIGHT-composing them:
-    // T <- T * exp(xi*dt). We were writing the ROBOT's body twist -- the PARENT's -- so cortex
-    // right-composed the wrong quantity onto the wrong frame.
-    // ★IT WAS WORSE THAN NOT EXTRAPOLATING AT ALL, which is the same signature as the adv->x bug
-    // this ring was built to end. Driving a synthetic robot on a known arc (phi0 0.6 rad, omega
-    // 0.4 rad/s, V 0.5 m/s) through cortex's own code, position error against ground truth:
-    //        dt      as written      contract-correct      clamped (no walk)
-    //      20 ms      14.90 mm            0.00 mm             12.12 mm
-    //      60 ms      45.08 mm            0.00 mm             36.36 mm
-    //     100 ms      75.77 mm            0.00 mm             60.60 mm
-    // The control closing to 0.00 is what says cortex is right and the producer was wrong.
-    // ★THE CONVERSION IS THE SE(2) ADJOINT, and the lever-arm term is the half that is easy to miss:
-    // xi_child = -Ad_{T_room<-robot}(v_b, w), and Ad_(R,t)(v, w) = (R*v + w*(t_y, -t_x), w). The
-    // rotation alone is not enough -- a robot turning in place at a distance t from the room origin
-    // makes the room sweep an arc about it, and that is the w*(t_y,-t_x) term.
-    // ★★AND THE SAME ARM RETURNS IN THE SECOND MOMENT, which is worth knowing because meeting one
-    // makes the other obvious. Here it moves the MEAN: a yaw rate becomes a linear velocity on the
-    // child edge, measured at 2.27 m/s in the ring against 0.24 m/s of body speed. In
-    // get_edge_RT_covariance under TimeQuery::Extrapolated it moves the COVARIANCE by the identical
-    // geometry: yaw-rate UNCERTAINTY becomes position uncertainty at range, so the widening there is
-    // almost all in x and doubles with a doubling of range. See the measured table on that
-    // declaration in cortex's dsr_rt_api.h. Two moments, one arm -- which is the argument that the
-    // direction an RT edge is anchored is geometric and measurable, not bookkeeping.
-    // ★AND THE COVARIANCE TAKES THE SAME MAP, Ad * Sigma * Ad^T. The sign drops out (it is a
-    // quadratic form) but the rotation and lever arm do not, and the result is DENSE: on this edge
-    // the velocity uncertainty is no longer the body-fixed diagonal it is in the robot's own frame,
-    // because how fast the room appears to move depends on where the robot is standing in it. That
-    // is a true consequence of the room being the child, not an approximation.
-    const Eigen::Vector2f v_body{last_side_, last_adv_};          // axis order: x lateral, y forward
-    Eigen::Matrix3f adjoint = Eigen::Matrix3f::Identity();
-    adjoint.topLeftCorner<2, 2>() = R;
-    adjoint(0, 2) =  t.y();
-    adjoint(1, 2) = -t.x();
-    const Eigen::Vector2f v_child = -(R * v_body + last_rot_ * Eigen::Vector2f{t.y(), -t.x()});
-    const float           w_child = -last_rot_;
-    const Eigen::Matrix3f child_vel_cov = adjoint * body_vel_cov * adjoint.transpose();
+        // ── Covariance (SE2 3×3 packed into 6×6 flat row-major) ───────────────
+        Eigen::Matrix3f cov_se2 = Eigen::Matrix3f::Identity();
+        if (covariance.rows() >= 3 && covariance.cols() >= 3)
+            cov_se2 = covariance.topLeftCorner<3, 3>();
 
-    // Pack the SE(2) block into the 6x6 row-major SE(3) layout [x, y, z, rx, ry, rz]: rows/cols
-    // 0, 1, 5. Cross terms come along -- the adjoint produced them and they are the whole point.
-    static constexpr int se3_of_se2_vel[3] = {0, 1, 5};
-    std::vector<float> vel_cov(36, 0.f);
-    for (int r = 0; r < 3; ++r)
-        for (int c = 0; c < 3; ++c)
-            vel_cov[se3_of_se2_vel[r] * 6 + se3_of_se2_vel[c]] = child_vel_cov(r, c);
+        if (room_node_created_)
+        {
+            const float c = std::cos(theta_room_to_robot);
+            const float s = std::sin(theta_room_to_robot);
+            Eigen::Matrix3f J = Eigen::Matrix3f::Zero();
+            J(0, 0) = -c;  J(0, 1) = -s;  J(0, 2) =  s * t.x() - c * t.y();
+            J(1, 0) =  s;  J(1, 1) = -c;  J(1, 2) =  c * t.x() + s * t.y();
+            J(2, 2) = -1.f;
+            cov_se2 = J * cov_se2 * J.transpose();
+        }
+
+        // ── SE(2) -> SE3 SLOTS, AND THE MAPPING IS THE WHOLE POINT ───────────────────────────────────
+        // rt_covariance is a 6x6 ROW-MAJOR **SE3** covariance ordered [x, y, z, rx, ry, rz]
+        // (RT_COVARIANCE_BLOCK_SIZE = 36 in cortex's dsr_rt_api.cpp). This used to write the SE(2) 3x3
+        // into the top-left 3x3, i.e. treat the block as a PADDED 3x3 — which puts the heading variance
+        // at (2,2), the slot that means var_Z, and leaves yaw at (5,5) permanently ZERO.
+        //
+        // ★ MEASURED CONSEQUENCE, 2026-08-16. The controller reads yaw from (5,5) — its own comment
+        // records fixing that from (2,2) precisely because "the rotation throttle was being driven by the
+        // robot's HEIGHT uncertainty". So it now reads a slot this agent never wrote: over two complete
+        // tours, 20817 moving samples, `pose_theta_std_rad` in the controller's profile.csv is
+        // IDENTICALLY 0.0000 — median, p75, p90, p95 and max alike. Its rotation throttle has been inert,
+        // and anything else consuming yaw uncertainty from this edge has been reading a zero.
+        // ★ Note how it arose: the consumer was corrected to cortex's convention and the producer was not,
+        // so a one-sided fix turned an accidentally-consistent pair into a silently-broken one. Before it,
+        // both used (2,2) and the wrong slot cancelled out.
+        //
+        // Index map: SE(2) (x, y, theta) -> SE3 (x, y, yaw) = rows/cols 0, 1, 5. Cross terms come along,
+        // so the xy<->theta correlation the preintegrated motion model produces survives the transport
+        // instead of being dropped on the floor.
+        static constexpr int se3_of_se2[3] = {0, 1, 5};
+        std::vector<float> cov_flat(36, 0.f);
+        for (int r = 0; r < 3; ++r)
+            for (int c = 0; c < 3; ++c)
+                cov_flat[se3_of_se2[r] * 6 + se3_of_se2[c]] = cov_se2(r, c);
+
+        // ── Body-frame twist, written BEFORE the RT block ───────────────────────
+        // Consumers read velocity DIRECTLY from here instead of differentiating the pose (which is what
+        // produced correction-induced velocity spikes). Layout: rt_translation_velocity = [adv, side, 0],
+        // rt_rotation_euler_xyz_velocity = [0,0,rot]; last_adv_/side_/rot_ are the measured odometry set
+        // in update(). Covariance is a config diagonal.
+        //
+        // ★★ THAT IS ARRAY ORDER, NOT FRAME AXES. This comment used to read "[adv(fwd,+x), side(lat,+y)]"
+        // and the parentheticals were WRONG: the robot body frame these rates live in is **+Y FORWARD,
+        // +X lateral**. A consumer composing them into a transform must therefore put `adv` on the frame's
+        // y axis and `side` on its x. Getting that backwards rotates the predicted displacement by 90°, so
+        // it lands √2·|motion| from the truth — WORSE than assuming the robot never moved, which is how it
+        // was found (controller twist compensation, 2026-08-04). Measured on 421 logged forward-driving
+        // cycles, predicting the next pose from the true body twist: adv→x p50 25.86 mm, adv→y p50 0.07 mm.
+        // The same frame is stated by the controller's safety-gate integrator (`x += adv*sin(th);
+        // y += adv*cos(th)`) and by its carrot bearing being atan2(x, y) rather than atan2(y, x).
+        //
+        // ★ ORDER IS LOAD-BEARING. This used to run AFTER insert_or_assign_edge_RT, as a get_edge →
+        // add attributes → insert_or_assign_edge(copy) write-back. That copy is a snapshot of the edge
+        // INCLUDING its rt_timestamps / rt_head_index ring buffer, so assigning it back re-publishes the
+        // ring state as of the fetch — the edge-level form of the write-back hazard already documented on
+        // nodes. The write site's own comment records that an earlier version of this froze the position
+        // outright and was patched by re-fetching; re-fetching narrows the window but does not close it.
+        //
+        // Measured symptom: room_concept publishes at ~19.6 Hz (pose_trace inter-publish p50 51 ms, 3.3%
+        // over 100 ms, 0% over 200 ms) while the controller observes the RT stamp advancing at only 9.0 Hz
+        // (p50 100 ms, 47% over 100 ms, 10% over 200 ms) — a factor of 2.2, i.e. about every second update
+        // invisible. Writing the twist FIRST and letting the timestamped RT write land LAST means the
+        // ring-buffer advance is the final word on this edge for this frame and nothing can write over it.
+        // 6x6 row-major SE3 [x,y,z,rx,ry,rz]. Yaw-rate variance belongs at (5,5) = [35], not at [14] =
+        // var_Z; the old comment claimed it matched the pose covariance and it did — both were wrong in
+        // the same way, which is exactly what made the pair look self-consistent.
+        // ★NOW RING-PACKED BY THE RT WRITE BELOW, not written raw here. It used to be a FLAT 36 written
+        // through this same round trip, which meant it had no slot: RT_API::get_edge_RT_covariance fell
+        // back to block 0 for every timestamp, so the velocity covariance was the same number whatever
+        // instant you asked about. Passing it in the RTBlock lands it in the slot its twist belongs to.
+        // ★THE VARIANCES GO ON THE AXES THE TWIST USES, NOT IN THE ORDER THEY ARE NAMED. twist_linear
+        // below is written {last_side_, last_adv_, 0} -- AXIS order, because this body frame is +Y
+        // FORWARD -- so the ADVANCE variance belongs at (1,1) = [7] and the LATERAL one at (0,0) = [0].
+        // This block had them the other way round: array order in a covariance that sits beside an
+        // axis-order twist, the same 90-degree mismatch that cost three consumers a wrong prediction.
+        // ★IT WAS INVISIBLE, AND ONLY BY COINCIDENCE: ADV and SIDE are both 0.0025 in the defaults, and
+        // swapping two equal numbers changes nothing. The day either becomes speed-dependent -- which is
+        // the whole point of not publishing a constant process noise (CONCEPT_AGENT_LIFECYCLE.md 4.1),
+        // and a differential-drive base has far less lateral velocity uncertainty than forward -- the
+        // bug would have appeared as a mysterious rotation of the uncertainty ellipse. Fixed first, on
+        // purpose, so that change cannot be the thing that reveals it.
+        Eigen::Matrix3f body_vel_cov = Eigen::Matrix3f::Zero();
+        if (params_)
+        {
+            body_vel_cov(0, 0) = params_->ROBOT_VEL_COV_SIDE;   // var of the LATERAL rate
+            body_vel_cov(1, 1) = params_->ROBOT_VEL_COV_ADV;    // var of the ADVANCE rate (+Y forward)
+            body_vel_cov(2, 2) = params_->ROBOT_VEL_COV_ROT;    // var of the yaw rate
+        }
+
+        // ── THE TWIST BELONGS TO THE CHILD, AND ON THIS EDGE THE CHILD IS THE ROOM ──────────────────
+        // ★MEASURED DEFECT, 2026-09-10. This edge is anchored parent=ROBOT, child=ROOM (the room hangs
+        // off the robot because the robot is the RT root), so the stored matrix is T_robot<-room. The RT
+        // API's contract is that twist_linear/twist_angular describe the CHILD's motion in the CHILD's
+        // own axes, because TimeQuery::Extrapolated walks the stored matrix by RIGHT-composing them:
+        // T <- T * exp(xi*dt). We were writing the ROBOT's body twist -- the PARENT's -- so cortex
+        // right-composed the wrong quantity onto the wrong frame.
+        // ★IT WAS WORSE THAN NOT EXTRAPOLATING AT ALL, which is the same signature as the adv->x bug
+        // this ring was built to end. Driving a synthetic robot on a known arc (phi0 0.6 rad, omega
+        // 0.4 rad/s, V 0.5 m/s) through cortex's own code, position error against ground truth:
+        //        dt      as written      contract-correct      clamped (no walk)
+        //      20 ms      14.90 mm            0.00 mm             12.12 mm
+        //      60 ms      45.08 mm            0.00 mm             36.36 mm
+        //     100 ms      75.77 mm            0.00 mm             60.60 mm
+        // The control closing to 0.00 is what says cortex is right and the producer was wrong.
+        // ★THE CONVERSION IS THE SE(2) ADJOINT, and the lever-arm term is the half that is easy to miss:
+        // xi_child = -Ad_{T_room<-robot}(v_b, w), and Ad_(R,t)(v, w) = (R*v + w*(t_y, -t_x), w). The
+        // rotation alone is not enough -- a robot turning in place at a distance t from the room origin
+        // makes the room sweep an arc about it, and that is the w*(t_y,-t_x) term.
+        // ★★AND THE SAME ARM RETURNS IN THE SECOND MOMENT, which is worth knowing because meeting one
+        // makes the other obvious. Here it moves the MEAN: a yaw rate becomes a linear velocity on the
+        // child edge, measured at 2.27 m/s in the ring against 0.24 m/s of body speed. In
+        // get_edge_RT_covariance under TimeQuery::Extrapolated it moves the COVARIANCE by the identical
+        // geometry: yaw-rate UNCERTAINTY becomes position uncertainty at range, so the widening there is
+        // almost all in x and doubles with a doubling of range. See the measured table on that
+        // declaration in cortex's dsr_rt_api.h. Two moments, one arm -- which is the argument that the
+        // direction an RT edge is anchored is geometric and measurable, not bookkeeping.
+        // ★AND THE COVARIANCE TAKES THE SAME MAP, Ad * Sigma * Ad^T. The sign drops out (it is a
+        // quadratic form) but the rotation and lever arm do not, and the result is DENSE: on this edge
+        // the velocity uncertainty is no longer the body-fixed diagonal it is in the robot's own frame,
+        // because how fast the room appears to move depends on where the robot is standing in it. That
+        // is a true consequence of the room being the child, not an approximation.
+        const Eigen::Vector2f v_body{last_side_, last_adv_};          // axis order: x lateral, y forward
+        Eigen::Matrix3f adjoint = Eigen::Matrix3f::Identity();
+        adjoint.topLeftCorner<2, 2>() = R;
+        adjoint(0, 2) =  t.y();
+        adjoint(1, 2) = -t.x();
+        const Eigen::Vector2f v_child = -(R * v_body + last_rot_ * Eigen::Vector2f{t.y(), -t.x()});
+        const float           w_child = -last_rot_;
+        const Eigen::Matrix3f child_vel_cov = adjoint * body_vel_cov * adjoint.transpose();
+
+        // Pack the SE(2) block into the 6x6 row-major SE(3) layout [x, y, z, rx, ry, rz]: rows/cols
+        // 0, 1, 5. Cross terms come along -- the adjoint produced them and they are the whole point.
+        static constexpr int se3_of_se2_vel[3] = {0, 1, 5};
+        std::vector<float> vel_cov(36, 0.f);
+        for (int r = 0; r < 3; ++r)
+            for (int c = 0; c < 3; ++c)
+                vel_cov[se3_of_se2_vel[r] * 6 + se3_of_se2_vel[c]] = child_vel_cov(r, c);
+
+        return DSR::RT_API::RTBlock{
+            .translation     = {x, y, 0.f},
+            .rotation_euler  = {0.f, 0.f, theta},
+            .covariance      = cov_flat,
+            // The CHILD's motion in CHILD axes -- the adjoint above, NOT the robot's body twist. See the note there.
+            .twist_linear    = std::vector<float>{v_child.x(), v_child.y(), 0.f},
+            .twist_angular   = std::vector<float>{0.f, 0.f, w_child},
+            .twist_covariance = vel_cov};
+    };
 
     // ── LEGACY TWIST ATTRIBUTES, FOR THE CONSUMERS THAT HAVE NOT MIGRATED ────────────────────
     // ★DEPRECATED. rt_twist_linear / rt_twist_angular in the ring below supersede these; they are
@@ -835,19 +860,42 @@ void RoomSceneGraph::write_robot_room_rt(const Eigen::Affine2f& robot_pose_int,
     // failure: an extrapolation worse than not extrapolating.
     // ★BOTH PAIRS ARE WRITTEN during the migration. The legacy attributes below still feed the four
     // consumers that have not moved to the ring yet; they go once those do.
+    // ── A LATE CORRECTION REWRITES THE PREDICTIONS STAMPED AFTER IT ────────────────────────────────
+    // A correction for t_c lands ~40 ms late: by then the IMU-rate ticks (PosePublisher::publish_predicted_tick)
+    // have put 5-6 predictions stamped t > t_c into this ring, each extrapolated from the PREVIOUS correction.
+    // insert_or_assign_edge_RT would slot t_c in and keep them, so a reader interpolating in (t_c, newest] mixes
+    // the new posterior with predictions from the old one (measured 2026-10-26: 0.12 deg p90 of step between
+    // them turning > 0.7 rad/s; see cortex dsr_rt_api.h, rewrite_edge_RT_since). Only this producer knows they
+    // are superseded, so it rewrites them: EVERY such stamp is re-propagated from this correction by the tick's
+    // own map (rc::publish::propagate_twist) with the twist update() just cached — exactly what the tick would
+    // have written had the correction been on time — and the correction plus that tail go out in ONE publish.
+    // ★ Full re-propagation, not newest-only: the predictor holds no IMU history, only (last correction, cached
+    //   twist), so each tick is a closed-form function of its stamp and every intermediate one is reproducible.
+    // ★ Propagating the pose in the WRITTEN frame is valid because propagate_twist right-composes a body
+    //   increment, which commutes with the left frame maps (T_pub_int_, T_proto_room) applied above.
+    // ★ No race with the tick: both writers run under PosePublisher::publish_mutex_ (the correction for the whole
+    //   of maybe_publish_corrected_pose, the tick for compute+write), and the tick's base is replaced inside the
+    //   same hold. A tick computed from the pre-correction base therefore cannot land after this rewrite.
+    // No later stamp in the ring (or a predicted write) ⇒ the plain append, unchanged.
+    std::vector<std::pair<std::uint64_t, Eigen::Affine2f>> tail;
+    if (supersede_later)
+        if (const auto edge = G_->get_edge(parent_opt.value().id(), child_id, "RT"); edge.has_value())
+            if (const auto stamps = G_->get_attrib_by_name<rt_timestamps_att>(edge.value()); stamps.has_value())
+                tail = rc::publish::superseded_tail(stamps->get(), timestamp_ms, robot_pose,
+                                                    last_adv_, last_side_, last_rot_);
     try
     {
-        rt_api_->insert_or_assign_edge_RT(parent_opt.value(), child_id,
-                                          DSR::RT_API::RTBlock{
-                                              .translation     = {x, y, 0.f},
-                                              .rotation_euler  = {0.f, 0.f, theta},
-                                              .covariance      = cov_flat,
-                                              // The CHILD's motion in CHILD axes -- the adjoint above,
-                                              // NOT the robot's body twist. See the note there.
-                                              .twist_linear    = std::vector<float>{v_child.x(), v_child.y(), 0.f},
-                                              .twist_angular   = std::vector<float>{0.f, 0.f, w_child},
-                                              .twist_covariance = vel_cov},
-                                          timestamp_ms);
+        if (tail.empty())
+            rt_api_->insert_or_assign_edge_RT(parent_opt.value(), child_id, rt_block_of(robot_pose), timestamp_ms);
+        else
+        {
+            std::vector<std::pair<std::uint64_t, DSR::RT_API::RTBlock>> blocks;
+            blocks.reserve(tail.size() + 1);
+            blocks.emplace_back(timestamp_ms, rt_block_of(robot_pose));
+            for (const auto& [ts, pose] : tail)
+                blocks.emplace_back(ts, rt_block_of(pose));   // same covariance as the tick (last_published_cov_ = this one)
+            rt_api_->rewrite_edge_RT_since(parent_opt.value(), child_id, std::move(blocks));
+        }
     }
     catch (const std::exception &error)
     {
@@ -877,7 +925,7 @@ void RoomSceneGraph::write_robot_room_rt(const Eigen::Affine2f& robot_pose_int,
             A.topLeftCorner<2, 2>() = T_proto_room.linear();
             // From the INTERNAL pose: T_room_proto_ is the crossing proto in the internal frame.
             write_robot_room_rt(T_proto_room * robot_pose_int, A * covariance_int * A.transpose(), timestamp_ms,
-                                proto_room_id_);
+                                proto_room_id_, supersede_later);   // same ticks were written there: same rewrite
         }
     }
 

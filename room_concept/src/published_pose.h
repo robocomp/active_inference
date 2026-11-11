@@ -14,6 +14,8 @@
 #include <cmath>
 #include <cstdint>
 #include <optional>
+#include <utility>
+#include <vector>
 
 namespace rc::publish
 {
@@ -129,5 +131,50 @@ inline Clamp clamp_correction(const Eigen::Affine2f& prev, const std::optional<E
         out.fired = true;
     }
     return out;
+}
+
+/// The PREDICTED pose PosePublisher::publish_predicted_tick writes: `base` (the last correction) carried `dt_s` forward by the
+/// body twist cached at that correction (adv = +Y forward, side = +X lateral, rot = yaw rate), through the SE(2) exponential
+/// map (left Jacobian V, so v*dt becomes the CHORD of the arc swept). One function for the tick AND for the re-propagated
+/// tail below, so a rewritten prediction is bit-for-bit what the tick would have written from the same base.
+/// ★ It is a RIGHT composition with a body increment, so it commutes with any rigid change of the room frame on the left
+///   (T_pub_int_, the proto-room's T_proto_room): propagating a pose already mapped into a published frame is the same as
+///   mapping the propagated internal pose. write_robot_room_rt relies on that.
+inline Eigen::Affine2f propagate_twist(const Eigen::Affine2f& base, float adv, float side, float rot, float dt_s)
+{
+    const float base_th = std::atan2(base.linear()(1, 0), base.linear()(0, 0));
+    const float phi = rot * dt_s;
+    const float vx = side * dt_s;
+    const float vy = adv  * dt_s;
+    float dx = vx, dy = vy;
+    if (std::abs(phi) > 1e-6f)   // the limit phi -> 0 of the expressions below is (vx, vy): a removable singularity, not a gate
+    {
+        const float s = std::sin(phi), c = std::cos(phi);
+        dx = (s * vx - (1.f - c) * vy) / phi;
+        dy = ((1.f - c) * vx + s * vy) / phi;
+    }
+    Eigen::Affine2f out = Eigen::Affine2f::Identity();
+    out.linear()      = Eigen::Rotation2Df(base_th + phi).toRotationMatrix();
+    out.translation() = base.translation() + base.linear() * Eigen::Vector2f(dx, dy);
+    return out;
+}
+
+/// ── A LATE CORRECTION SUPERSEDES THE PREDICTIONS STAMPED AFTER IT ───────────────────────────────────────────────────────
+/// The correction for t_c lands ~40 ms late, after 5-6 IMU-rate predictions stamped t > t_c — made from the PREVIOUS
+/// correction — are already in the RT ring. Left there, a reader interpolating anywhere in (t_c, newest] mixes the new
+/// posterior with predictions from the old one. Given the ring's stamps, this returns every stamp after t_c (oldest first)
+/// with the pose the predictor WOULD have written had it known the correction: the same propagate_twist from `corrected`.
+/// The caller writes these with the correction through RT_API::rewrite_edge_RT_since, in one publish.
+/// Stamp 0 is an empty ring slot (cortex's convention) and is never a sample.
+inline std::vector<std::pair<std::uint64_t, Eigen::Affine2f>>
+superseded_tail(const std::vector<std::uint64_t>& ring_stamps, std::uint64_t t_c, const Eigen::Affine2f& corrected,
+                float adv, float side, float rot)
+{
+    std::vector<std::pair<std::uint64_t, Eigen::Affine2f>> tail;
+    for (const auto ts : ring_stamps)
+        if (ts != 0 and ts > t_c)
+            tail.emplace_back(ts, propagate_twist(corrected, adv, side, rot, static_cast<float>(ts - t_c) * 1e-3f));
+    std::ranges::sort(tail, {}, [](const auto& p) { return p.first; });
+    return tail;
 }
 }   // namespace rc::publish

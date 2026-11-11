@@ -185,10 +185,13 @@ private:
     // `child_override` = 0 writes robot→(this agent's room). Non-zero writes robot→that node instead, with
     // `robot_pose`/`covariance` already expressed in ITS frame — used for the proto-room, whose frame is a
     // fixed transform of the room's, so the same inversion / Jacobian / twist-adjoint code applies unchanged.
+    // `supersede_later` = this is a CORRECTION: any ring block stamped after `timestamp_ms` is a prediction made from
+    // the previous correction, and is rewritten (RT_API::rewrite_edge_RT_since) as re-propagated from this one.
     void write_robot_room_rt(const Eigen::Affine2f& robot_pose,
                              const Eigen::Matrix3f& covariance,
                              std::uint64_t timestamp_ms,
-                             std::uint64_t child_override = 0);
+                             std::uint64_t child_override = 0,
+                             bool supersede_later = false);
 
     // ── PROTO-ROOM: space the room does not explain, entered through one of its open doors ───────────
     // Born once, on the controller's crossing fact (exit_fact.h link 1) naming one of this room's doors. A `room` node `room_<k>` with a
@@ -637,6 +640,9 @@ private:
     float last_adv_  = 0.f;
     float last_side_ = 0.f;
     float last_rot_  = 0.f;
+    // Stamp of the last CORRECTION written to the robot RT. A correction older than it must not rewrite the tail: what
+    // follows it in the ring is then a newer correction, not a prediction (write_robot_room_rt, supersede_later).
+    std::uint64_t last_correction_ts_ = 0;
 
     // Table-landmark tracking CSV (tmp/sdf_localizer/table_landmark_<ts>.csv): one row per detected table
     // per refresh, logging its ROOM-frame coord (stable if localization is consistent) + ROBOT-frame
