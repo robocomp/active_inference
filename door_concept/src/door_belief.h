@@ -244,7 +244,7 @@ public:
 
     // ── Geometry read-back for the fitter write-back / scene-graph publish ──────────
     // NOTE: center_xy()/yaw() describe the APERTURE — the static hole in the wall. They are what the DSR RT
-    // edge, resolve_wall, merge, ghost identity and the room-containment prior key on, precisely because
+    // edge, resolve_wall, merge, identity and the room-containment prior key on, precisely because
     // they cannot be dragged by a swinging leaf. For the LEAF's current pose use leaf_pose() below.
     float width()     const { return state_.w; }
     float height()    const { return state_.h; }

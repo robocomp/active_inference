@@ -4,7 +4,7 @@
 // ★WHAT IS IN IT NOW (Task 4 of .superpowers/sdd/2026-10-21-door-core-replay): the TRACKER slice — merge of duplicate
 // instances, the shared InstanceTracker's birth/association bookkeeping, the evidence association (Pass 1 / Pass 2),
 // and the birth decision with its four suppressions (outside the room, not door-height, explained by a live door's
-// swept arc or aperture, claimed by a live door) and re-acquisition by ghost or stored identity. Moved, not rewritten:
+// swept arc or aperture, claimed by a live door) and the name a stored identity restores. Moved, not rewritten:
 // specificworker.cpp's run_instance_tracker / merge_overlapping_instances, plus the two pieces of DoorFitter the
 // birth rule leans on (frame_admissible and the ego-motion it reads; point_in_room).
 //
@@ -13,11 +13,11 @@
 // ones the tracker associates with on the next cycle: step() produces each door's belief from the input alone.
 // ★AND EXISTENCE (Task 5): once per NEW mask frame, each door's existence belief from the silhouette, the image
 // geometry, P(detect) and the two priors; the Existence decision rows; the shared removal decision and its REMOVE rows
-// (door_existence.h). The removal's graph half (ghost, identity, affordances, node) stays the world's: before_remove /
+// (door_existence.h). The removal's graph half (identity, affordances, node) stays the world's: before_remove /
 // remove_door.
 // ★WHAT IS NOT IN IT YET, AND HOW IT GETS IN. Identity / room following / carry / restore / look
 // (Task 6), affordances and the anchor (Task 7). The tracker and the fit read the state those slices own (which room,
-// the room polygon, ghosts, identities) and act on it (retire a merged door, hand a slice to a door, create and adopt a
+// the room polygon, identities) and act on it (retire a merged door, hand a slice to a door, create and adopt a
 // newborn, publish a fitted door). They do both ONLY through TrackerWorld below: live, SpecificWorker implements it over
 // its DSR-bound instances; in the replay tool, a world rebuilt from the recorded decision log does. ★THE INSTANCES' FIT
 // STATE (rc::DoorFitState) is still STORED by the world (live: DoorFitter::instances_, whose rc::DoorInstance derives
@@ -39,6 +39,7 @@
 #pragma once
 #include <cstdint>
 #include <functional>
+#include <limits>
 #include <optional>
 #include <span>
 #include <string>
@@ -51,6 +52,9 @@
 #include "sensing.h"
 #include "door_fit.h"
 #include "door_existence.h"   // the existence slice (Task 5): probes, SemanticField, ImageSource
+#include "existence_update.h" // Task 8: one frame of evidence into one place belief
+#include "door_decision.h"    // Task 8: the costed decision, the role, the cost estimator
+#include "place_table.h"      // Task 8: the place table (the row is the belief)
 #include "../door_config.h"   // rc::DoorConfig (plain struct)
 #include "../door_model.h"    // rc::DoorState
 #include "../door_belief.h"   // rc::DoorBelief (association_nll)
@@ -60,6 +64,11 @@
 
 namespace rc::door::core
 {
+/// etc/door_cost_events.csv (tools/door_costs_from_logs.py --events). kind: remove | rebirth (seconds since the removal of the place
+/// it was seeded from, place = that removed row) | keep_episode (seconds) | crossed (the robot crossed this door). door = the LIVE door's
+/// name; a C_delete sample is a rebirth whose door is later crossed (re-review N3 ruling: the crossing is the only in-data ground truth).
+inline constexpr const char* kCostEventsHeader = "kind,t_wall_ms,room,place,x,y,seconds,door\n";
+
 
 // ═══ THE WORLD THE TRACKER SLICE READS AND ACTS ON (state owned by slices not yet in the core) ════════════════════
 
@@ -81,15 +90,6 @@ struct TrackedDoor
     int   assigned_mask_idx = -1;
 };
 
-/// A removed door remembered in RAM (SpecificWorker::DoorGhost) — what re-acquisition needs to know about it.
-struct GhostMatch
-{
-    std::string name;
-    Vec2f xy = Vec2f::Zero();
-    int   lived_cycles = 0;
-    std::size_t handle = 0;   // the world's own reference to it (reacquire() resumes ITS belief)
-};
-
 /// A stored identity row (etc/door_identities.csv) matched by place in the current room.
 struct IdentityMatch
 {
@@ -102,7 +102,7 @@ struct BirthRequest
 {
     Vec3f centroid = Vec3f::Zero();        // room frame
     std::uint64_t room_id = 0;
-    std::string preferred_name;            // a ghost's or an identity's name; empty = a fresh counter name
+    std::string preferred_name;            // an identity's name; empty = a fresh counter name
     int slice = -1;
 };
 
@@ -124,7 +124,7 @@ class TrackerWorld
 {
 public:
     virtual ~TrackerWorld() = default;
-    // ── read: room following (Task 6), the fit, ghosts + identities (Tasks 5/6) ──
+    // ── read: room following (Task 6), the fit, identities (Tasks 5/6) ──
     [[nodiscard]] virtual std::uint64_t room_id() const = 0;
     /// The room-containment prior's polygon (empty = none loaded: no prior). The core hands it to its fit each cycle.
     [[nodiscard]] virtual std::vector<Vec2f> room_polygon() const = 0;
@@ -134,7 +134,6 @@ public:
     /// The live instances as the tracker sees them — by default tracked_view() of fit_states(). (A tracker-only test
     /// world may override this instead and hold no fit state.)
     [[nodiscard]] virtual std::vector<TrackedDoor> doors() const;
-    [[nodiscard]] virtual std::optional<GhostMatch> match_ghost(const Vec2f& xy) const = 0;
     [[nodiscard]] virtual std::optional<IdentityMatch> match_identity(const Vec2f& xy) const = 0;
     // ── act ──
     virtual void retire(std::uint64_t id) = 0;                           // a merged duplicate: affordances + fit + node
@@ -146,8 +145,6 @@ public:
     /// the instance (modify_node_slot runs synchronously inside it → ensure_instance, pre-belief box at (0, 0), no seed);
     /// a world that replays the agent must do the same (tools/door_replay.cpp).
     virtual std::uint64_t create_door(const BirthRequest& r) = 0;
-    virtual void reacquire(std::uint64_t new_id, const GhostMatch& g) = 0;   // resume the ghost's belief
-    virtual void forget_ghost(const Vec2f& xy) = 0;                        // consume the ghost(s) at that place
     /// Materialise the newborn's instance NOW, hand it its birth slice, note its identity; its name, or nullopt if the
     /// node could not be read back (no instance this cycle). Live it runs DoorFitter::ensure_instance, which builds the
     /// fit state through DoorCore::fit().init_instance (the birth seed the core noted places it).
@@ -167,7 +164,7 @@ public:
     /// applied the tape's recorded patches (observe_media).
     virtual void stage_images(ImageSource&) {}
     /// An existence REMOVE is about to be decided for this door (its REMOVE decision follows this call): the world's
-    /// half that ran BEFORE the old REMOVE row — live, remember_ghost (and the stored identity it forgets) and the
+    /// half that ran BEFORE the old REMOVE row — live, the stored identity it forgets and the
     /// affordance-withdrawal decision rows.
     virtual void before_remove(std::uint64_t /*id*/) {}
     /// Remove the door (after its REMOVE decision; also for an id the core no longer holds): live, the phantom DEATH
@@ -223,7 +220,7 @@ public:
     /// and the births, where the old code ran it) and the fit (Task 4b). Requires connect().
     DoorCycleOutput step(const DoorCycleInput& in);
 
-    /// The fit: its per-door functions are called by the world too (ensure_instance → init_instance, note_reacquire),
+    /// The fit: its per-door functions are called by the world too (ensure_instance → init_instance),
     /// and the adapter's DoorFitter shares its room polygon.
     [[nodiscard]] DoorFit& fit() { return fit_; }
     /// The cycle's clock and camera, for fit calls the adapter makes OUTSIDE step() in the same cycle (a restore or a
@@ -231,6 +228,50 @@ public:
     void set_cycle_views(const DoorCycleInput& in);
 
     [[nodiscard]] const TrackerCycleInfo& tracker_info() const { return info_; }
+
+    // ── Task 8: the existence model's tables. The detector rates are loaded at start and FIXED for the session (refit offline from the
+    //    per-view logs); only the costs (C_keep / C_delete) are learned online and saved on a graceful shutdown; a replay
+    //    keeps the compiled defaults) ──
+    /// The per-camera detector model: door_detectors.csv's values, FIXED for the session (fix round 3, ruling).
+    [[nodiscard]] const DetectorTable& detectors() const { return detectors_; }
+    void set_detectors(const DetectorTable& t) { detectors_ = t; }
+    /// C_keep / C_delete are FIXED within a session: set once from etc/door_costs.csv at start (written offline by tools/door_costs_from_logs.py).
+    void set_costs(CostEstimator c) { costs_ = std::move(c); }
+    [[nodiscard]] const CostEstimator& costs() const { return costs_; }
+    [[nodiscard]] PlaceTable& places() { return places_; }
+    /// A pending birth candidate (spec §3.1: the belief lives from the first candidate observation): its θ, belief and room.
+    struct Candidate
+    {
+        std::uint64_t key = 0;
+        std::string room;
+        Vec2f xy = Vec2f::Zero();
+        float var = 0.f;                         // its place variance (the detection's)
+        rc::DoorFitState theta;
+        PlaceBelief belief;
+        std::optional<std::int64_t> seeded_from_removed_ms;   // the removed row it was seeded from (C_delete sample at birth)
+        float width_meas = 0.f, width_sd = 0.f;   // the blob's measured width (m) and its sd (the detection noise, widened by truncation)
+        bool  size_resolved = false;             // false: the support gave no extent - no size estimate, so the size term is 0
+        float best_size = std::numeric_limits<float>::lowest();   // the best size term any frame gave: a clipped blob only understates the width (clean25)
+        bool wall_seed = false;                  // seeded along a wall of a room with no known door (no detection needed; spec 2026-11-09)
+        std::string seeded_name;                 // the place row it was seeded from (the revisit sample is taken at birth, per visit)
+    };
+    [[nodiscard]] const std::vector<Candidate>& candidates() const { return candidates_; }
+    /// An undecided candidate is an open question while the costed decision has not refused it (spec 2026-11-09-undecided-candidate-look).
+    [[nodiscard]] bool candidate_is_open(const Candidate& c) const;
+    /// Would a frame from `standpoint` be a new view of the candidate, by the ledger's own absorption rule? (spread 0: the standpoint is a plan)
+    [[nodiscard]] bool candidate_view_is_new(const Candidate& c, const Vec2f& standpoint) const;
+    /// The same rule over the sites already tried: `tried` holds one view per site the controller finished or handed back.
+    [[nodiscard]] bool candidate_site_untried(const Candidate& c, const ViewLedger& tried, const Vec2f& site) const;
+    void mark_candidate_site_tried(const Candidate& c, ViewLedger& tried, const Vec2f& site) const;
+    /// A door hypothesised at `xy` by the room's outline (room_concept, doorway_necks.h): a pending candidate with no detection yet, no size evidence.
+    /// False while the core has not taken this room up yet (ask again). Not on the input tape: a replay does not see these.
+    bool hypothesise_place(const std::string& room, const Vec2f& xy, bool wall_seed = false);
+    /// A door is known in this room: the places seeded along its walls have no more to ask.
+    void retire_wall_seeds(const std::string& room);
+    /// P(a door) as the question is judged (the widest the blob ever looked): what a look at it is worth.
+    [[nodiscard]] float candidate_question_p(const Candidate& c) const;
+    [[nodiscard]] bool room_is_proto() const { return fit_.room_is_proto(); }
+    [[nodiscard]] const std::string& room_name() const { return room_name_; }
     [[nodiscard]] const EgoMotion& ego() const { return ego_; }
     [[nodiscard]] const MaskSource& masks() const { return masks_; }
     [[nodiscard]] const std::vector<rc::exclusion::Claim>& claims() const { return claims_; }
@@ -268,24 +309,40 @@ private:
     rc::InstanceTracker tracker_;
     long last_birth_mask_frame_ = -1;
     std::optional<Vec2f> cam_xy_;      // the camera's room xy this cycle (the ricoh slices' ray origin)
-    RicohViewPool ricoh_views_;
-    std::vector<std::pair<int, Vec2f>> ricoh_fold_;   // (detection index, door xy) of this frame's ricoh slices        // pooled viewpoints of the ricoh birth candidates
-    RicohBirthBank ricoh_bank_;
-    std::vector<RicohBirthBank::Look> ricoh_looks_;   // this frame's ricoh door detections (bank input), index = det index below
-    std::vector<int> ricoh_hit_det_;
+    // ── Task 8: the existence model ──
+    DetectorTable   detectors_ = default_detectors();   // fixed within a session (door_detectors.csv; refit offline)
+    CostEstimator   costs_ = CostEstimator::logged_default();   // never equal costs (door_decision.h); replaced by set_costs() from the file
+    // C_keep / C_delete, running medians (etc/door_costs.csv)
+    PlaceTable      places_{false};    // one row per door place per room (reset in the ctor from the config)
+    std::vector<Candidate> candidates_;
+    std::vector<float> det_w_;         // per dets_ index: its reliability (YOLO confidence x the ricoh's wall/variance weight x P(unclaimed by another concept))
+    std::vector<char> det_adm_;        // per dets_ index: frame_admissible (an inadmissible frame is no trial for its place)
+    std::unordered_map<std::uint64_t, int> observed_frame_;   // door → the mask frame its belief already holds (a newborn's birth frame)
+    std::vector<int> det_candidate_;   // per dets_ index: the candidate it fed this frame (-1 = none / a live door's)
+    std::uint64_t next_candidate_key_ = 0;
+    std::unordered_map<std::uint64_t, std::uint64_t> door_seq_;   // order in which doors entered (the per-wall base rate)
+    std::uint64_t next_door_seq_ = 0;
+    std::uint64_t visit_room_ = 0;     // the room the current visit is in
+    int visit_ = 0;                    // the ledger's visit counter: a new room entry is a new visit
+    std::uint64_t last_rgb_gen_ = 0;   // the RGB generation the last existence update scored
+    bool places_loaded_ = false;
+    std::string room_name_;            // this cycle's room name (place rows are keyed by it)
+    struct Episode { std::int64_t start_wall_ms = 0; bool crossed = false; std::uint64_t room = 0; std::string room_name;
+                     float x = std::numeric_limits<float>::quiet_NaN(), y = std::numeric_limits<float>::quiet_NaN(); bool crossing = false; };
+    std::unordered_map<std::string, Episode> episodes_;   // executing on a door's affordance → C_keep when it ends uncrossed
+    void track_episodes(const DoorCycleInput& in, DoorCycleOutput& out);
+    void prepare_candidates(const DoorCycleInput& in, const std::vector<rc::TrackView>& tracks, DoorCycleOutput& out);
+    /// Build the existence frame of this cycle (camera specs, poses, the prepared RGB frame when `use_rgb`) and hand it to f.
+    void with_frame(const DoorCycleInput& in, bool zed_ran, bool use_rgb, const std::function<void(const ExistenceFrame&)>& f);
+    [[nodiscard]] std::vector<FrameDetection> frame_detections() const;
+    void log_view_rows(const std::string& place, const std::vector<ViewRow>& rows, DoorCycleOutput& out);
     SourceCounters counters_[2];   // per source (0 ZED, 1 RICOH): where do door slices die on the way to a birth?
     int  dbg_cycles_ = 0;     // the "[tracker] instances=…" print throttle
     int  dets_csv_rows_ = 0;  // etc/door_dets_log.csv's cycle column (one per tracker call)
     std::uint64_t create_seq_ = 0;
     // the existence slice's own state (were exist_last_mask_frame_ and three function statics in SpecificWorker)
     int  exist_last_mask_frame_ = -1;   // integrate once per NEW mask frame
-    // The 360 camera's LEARNED hit rate on doors the ZED confirms (Beta(1,1) prior): P(ricoh detects | door there, ricoh ran).
-    // Calibrated online - the same detection model births and removals use - instead of an asserted constant.
-    float ricoh_hits_ = 0.0f, ricoh_trials_ = 0.0f;   // …on SHUT leaves (each trial weighted by the leaf's closedness)
-    float ricoh_open_hits_ = 0.0f, ricoh_open_trials_ = 0.0f;   // …and on OPEN ones (weighted by 1 - closedness; door_leaf_visibility.h)
-    bool exist_warned_ = false;         // the "no mask_pixels_xy" warning, once
     int  ex_dbg_ = 0;                   // the readout's throttle counter (= the existence CSV's cycle column)
-    std::unordered_map<std::uint64_t, float> last_L_;   // last L per door (forces a readout row on |ΔL| > 1)
 
     // this cycle
     std::vector<rc::DetectionView> dets_;

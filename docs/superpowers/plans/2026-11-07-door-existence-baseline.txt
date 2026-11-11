@@ -1,0 +1,59 @@
+# door_concept baseline at d5af2ac2 (branch feat/door-existence), LANG=es_ES.UTF-8, 2026-11-07
+# format: test | result | detail.  'k/n checks' is not printed by these tests (only test_door_leaf_memory prints a count).
+test_decision_log | PASS | 
+test_door_absence_detectability | PASS | 
+test_door_anchor_leaf_plane | PASS | 
+test_door_approach_pose | PASS | 
+test_door_body_evidence | PASS | 
+test_door_body_wire | PASS | 
+test_door_close_clear | PASS | 
+test_door_core_existence | PASS | 
+test_door_core_fit | PASS | 
+test_door_core_tracker | PASS | 
+test_door_cross_exec | PASS | 
+test_door_cycle_io | PASS | 
+test_door_epistemic_belief | PASS | 
+test_door_existence_moving_phantom | PASS | 
+test_door_frame_evidence | PASS | PASS] a phantom born mid-room is removed by the band prior
+test_door_hull_midpoint | PASS | 
+test_door_identity_table | PASS | 
+test_door_leaf_evidence | PASS | 
+test_door_leaf_memory | PASS | 46 checks
+test_door_leaf_recess | PASS | 
+test_door_look | PASS | 
+test_door_look_site | PASS | 
+test_door_look_vs_approach | PASS | 
+test_door_mask_association | PASS | 
+test_door_phi_partition | PASS | 
+test_door_phi_sides | PASS | 
+test_door_phi_stability | PASS | 
+test_door_proto_wall_extent | PASS | 
+test_door_provider_faces | PASS | 
+test_door_reach_view | PASS | 
+test_door_room_swap | PASS | 
+test_door_rt_publish | PASS | 
+test_door_rt_reseat | PASS | 
+test_door_slide | PASS | 
+test_door_standpoint | PASS | 
+test_door_swing_stability | PASS | 
+test_door_view_pool | PASS | 
+test_door_width_error_diag | PASS | 
+test_input_recorder | PASS | 
+test_door_along_wall_extent | PASS | header line is "Build:"-prefixed (my extractor missed it); rebuilt by hand with its line
+test_door_leaf_freespace | PASS | same as above
+test_door_ricoh_windows | PASS | same as above
+test_door_ricoh_look | PASS | same as above
+test_door_open_leaf | PASS | header says "see test_door_ricoh_lifecycle's g++ line" -> core_existence source list used
+test_door_ricoh_lifecycle | PASS | header says "see test_door_core_existence's g++ line" -> its source list used
+test_door_anchor_open | PASS | needs Q=/usr/include/x86_64-linux-gnu/qt5 exported
+test_door_anchor_update | PASS | needs Q exported
+
+test_door_tapes.sh | SKIPPED | exit 0: door_inputs.bin absent for tourR1, tourR2, rtD1i, tour3A, tour3C under /home/pbustos/robocomp/components/active_inference/room_concept/estimation_scripts/crossing (only door_decisions.bin present)
+
+# tour18 replay (explore_tour18 door_inputs.bin / door_decisions.bin, current code), full trace in .superpowers/sdd/2026-11-07-door-existence-model/tour18-baseline-replay.txt (uncommitted)
+# The tape holds only door_1 (3333 trace rows) and door_2 (1970); NO door_4 / door_5 exist in it.
+REMOVE decisions: reference 0, replay 0
+reference (live run) tracker decisions: 3   replay: 3
+REMOVE  EQUAL: 0 decision(s) compared, 0 mismatch(es)
+REMOVE rows for door_4 / door_5: none (replay has 0 REMOVE decisions; reference also 0)
+# For contrast, the live run's door_events.csv in that dir has REMOVE rows (ids 2868...), door_4 REACQUIRE/REMOVE at seq 12-22 and door_5 REACQUIRE at seq 33; ids do not match the tape's (2764...), so the tape looks stale vs. the events.

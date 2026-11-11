@@ -409,6 +409,7 @@ DoorObservation DoorFit::observe(rc::DoorFitState& inst)
             inst.last_range       = slice.range;
             inst.last_centroid_radius = slice.centroid_radius;   // image-centredness (moving-update exception)
             inst.last_depth_var   = slice.depth_var;             // 0=ZED, >0=ricoh LiDAR-depth → downweights the fit (added to R)
+            inst.last_slice_sensor = slice.source;
             // MINIMUM-HEIGHT evidence: the top of the observed support (room frame; floor = 0).
             //
             // ★A MASK'S TOP IS A LOWER BOUND ON THE DOOR'S TOP, AND THE ESTIMATOR MUST BE ONE-SIDED.
@@ -546,21 +547,6 @@ float DoorFit::run_inference(rc::DoorFitState& inst, const DoorObservation& obse
     // Lazy belief init: associate the door to the room-polygon wall it was seen through (fixes yaw / lateral / floor),
     // then seed the along-wall offset s from the mask centroid. w,h start at their strong template priors;
     // the belief works in the wall frame θ=[s,w,h].
-    if (not inst.ai2_initialized)
-    {
-        // RE-ACQUISITION first: this node is a door that was removed and has now come back at the same place,
-        // so it resumes the belief it had converged to (state + Σ) rather than cold-starting at the template
-        // priors and re-fitting from scratch. See DoorFit::note_reacquire.
-        if (const auto rs = restore_seeds_.find(inst.node_id); rs != restore_seeds_.end())
-        {
-            inst.ai2_belief = rs->second;
-            inst.ai2_initialized = true;
-            resign_leaf_llrs(inst);   // M-1
-            restore_seeds_.erase(rs);
-            say(std::format("door_concept: [{}] RE-ACQUIRED — resuming converged belief (s={:.2f} w={:.2f} h={:.2f})\n",
-                            inst.node_name, inst.ai2_belief.state().s, inst.ai2_belief.state().w, inst.ai2_belief.state().h));
-        }
-    }
     if (not inst.ai2_initialized)
     {
         const auto& m = inst.model.state();
@@ -884,6 +870,11 @@ float DoorFit::run_inference(rc::DoorFitState& inst, const DoorObservation& obse
         // e.g. the table bleeding into a door mask, which drags the centroid). High + a position jump ⇒
         // contamination the clutter component didn't fully reject.
         inst.last_clutter_frac = inst.ai2_belief.clutter_fraction(frame.points, R);
+        if (not frame.points.empty())   // the existence channel `sup`: x is undefined with no support (no default)
+            inst.pending_fit_support = rc::door::core::FitSupport{inst.last_clutter_frac, inst.last_slice_sensor,
+                                                                  rc::door::aperture_coverage(inst.ai2_belief.aperture(), frame.points),
+                                                                  rc::door::aperture_overlap(inst.ai2_belief.aperture().w,
+                                                                      std::sqrt(std::max(0.0f, inst.ai2_belief.covariance()(0, 0))))};
     }
     inst.dbg_energy = energy;   // remember for the next gated/aged cycle to HOLD
     inst.dbg_resid_pts = static_cast<int>(observation.residual_pts.size());   // HELD, see door_fit_state.h
@@ -1092,7 +1083,7 @@ void DoorFit::estimate_phi(rc::DoorFitState& inst)
     // contributed 0.000 over the whole run.
     // ★AND THE MASK WAS A PRECONDITION: with no door pixels every hypothesis was skipped, the curve came
     // out empty, and the LiDAR likelihood below was never consulted. The camera stays what it is good at:
-    // EXISTENCE evidence (compute_silhouette_existence). The leaf angle comes from where rays stop.
+    // EXISTENCE evidence (the geometry channel of existence_update.h). The leaf angle comes from where rays stop.
 
     // ─── THE HINGE BRANCH: free energy over phi alone, against LiDAR points on the leaf ──────────
     // ★THE SAME MINIMISATION THE AGENT ALREADY RUNS, RESTRICTED TO THE ONE ARTICULATED COORDINATE. The
@@ -1362,10 +1353,12 @@ void DoorFit::estimate_phi(rc::DoorFitState& inst)
     // posterior just formed, and fused with the scan's along-wall registration offset b as a persistent state.
     // σ0² = the pose chain's along-wall variance + the static range term — the common mode the mask frames carry.
     inst.dbg_along = {};
+    inst.opening_runs.clear();
     if (inst.ai2_initialized and leaf_pts and not leaf_pts->empty())
     {
         const auto ap = inst.ai2_belief.aperture();
         const auto runs = rc::door::measure_openings(ap, reg_sweep.origin, reg_sweep.pts);
+        inst.opening_runs = rc::door::measure_openings(ap, reg_sweep.origin, reg_sweep.pts, ap.w);   // "clear": past the leaf's reach
         const Eigen::Vector2f u = ap.wall_u;
         const float chain_s = u.x() * u.x() * inst.chain_cov_xx + 2.0f * u.x() * u.y() * inst.chain_cov_xy
                             + u.y() * u.y() * inst.chain_cov_yy;

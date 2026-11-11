@@ -208,7 +208,7 @@ AnchorLog = true            # etc/anchor_log.csv: one row per cycle while an anc
 #                        predicate = door_crossing_progress, signed against the side held at claim time.
 # ★The model is in src/door_pragmatics.h and the protocol in common/pragmatic_affordance — read the first
 #  before changing anything here: none of these preconditions is a threshold, and the two Prob keys below
-#  are a Bayesian decision on a probability (same shape as Existence.RemovalProb), not a cutoff on a
+#  are a Bayesian decision on a probability (a probability band, not a cutoff), not a cutoff on a
 #  distance or an angle.
 Enabled = true
 
@@ -324,6 +324,18 @@ AutonomousActuation = true
 ActuationProviderId = ""
 ActuationMatchMaxM  = 1.0     # ⚠gate on an ACT: nearest advertised door must be within this (m); doors here are >= 2.5 m apart
 
+[Door]
+# THE door size prior - ONE prior for one quantity (docs/superpowers/plans/2026-11-07-door-existence-model.md, Task 10 fix round 4).
+# The door fit's width/height template AND the existence size term (core/place_prior.h) both use these four keys; there is no
+# separate existence-only size constant any more.
+# Webots (this config): the values match the simulated doors (piso.wbt Door PROTO `size 0.1 1 2.1`: 1.00 m wide, 2.10 m tall).
+# REAL ROBOT / REAL APARTMENTS: the PI's typical-door prior is width 0.85 +- 0.12 m, height 2.05 +- 0.06 m (spec 2026-11-07 §3.2):
+#   PriorWidthM = 0.85, PriorWidthStd = 0.12, PriorHeightM = 2.05, PriorHeightStd = 0.06
+PriorWidthM    = 1.00   # width prior mean (m)
+PriorWidthStd  = 0.06   # width prior std (m) - strong
+PriorHeightM   = 2.10   # height prior mean (m)
+PriorHeightStd = 0.08   # height prior std (m) - strong
+
 [Tracker]
 # Multi-instance birth/associate/death (shared rc::InstanceTracker) — the only instance-lifecycle path.
 # Masks are associated to instances by a covariance-gated 1-to-1, an unexplained mask spawns a new door,
@@ -331,17 +343,6 @@ ActuationMatchMaxM  = 1.0     # ⚠gate on an ACT: nearest advertised door must 
 GateMahalanobis = 9.0     # χ²₂ gate (~3σ) for a mask↔instance match once it has a cov
 GateFallbackM = 0.40     # metric XY gate (m) before an instance has a usable covariance
 DetectionNoiseM = 0.20   # R in the association innovation cov S=P+R²I (≥ centroid-vs-fit offset)
-BirthFrames = 6.6        # ideal OBSERVATIONS of unexplained evidence before spawning a door.
-                         # ★RETUNED 2026-09-09 for the graded semantic model. Every semantic mask used to
-                         # report conf = 1.000 exactly (the ADE20K export emitted an argmax with no scores),
-                         # so this constant was calibrated against evidence worth 1.0 x range_term per look.
-                         # The "-probs" export gives real confidences: measured over 45623 door slices this
-                         # run, median 0.826 (p10 0.676, p90 0.910). Birth evidence is proportional to
-                         # confidence, so 8 became ~33% slower to reach at the p10 end for no modelled
-                         # reason. 8 x 0.826 = 6.6 restores the SAME time-to-birth at the median.
-                         # ⚠This is a rescaling, not a relaxation: a weak mask is still worth less than a
-                         # strong one, which is the point of grading them. It does NOT lower the bar for a
-                         # low-confidence blob — that blob just contributes its own smaller share.
 BirthMinSepM = 0.70      # a birth must be ≥ this (m) from every existing door (anti-duplicate)
 MergeOverlap = 0.20      # collapse two instances whose seat footprints overlap ≥ this fraction of the smaller, keeping the more-observed. 0 disables.
 # Stillbirth prune — a phantom born from association churn starves once the real instance reclaims its
@@ -363,71 +364,29 @@ RicohBirthConf = 0.60      # min YOLO confidence for a ricoh birth (only when Ri
 RicohBirthMaxVar = 0.005   # max depth_var (m²) for a ricoh birth (only when RicohBirthEnabled)
 
 [Existence]
+# RETIRED (the loader REFUSES a file that sets them; docs/superpowers/plans/2026-11-07-door-existence-model.md): BirthLogodds,
+# MaxLogodds, RemovalProb, RemoveFrames, OutOfRoomGain, ShortGain, MinHeightConf, ReacquireRadiusM, GhostMax, CentralRegionFrac,
+# SensorSigmaM, RoomPrior, RoomMarginM (dead: nothing read them), DetectionProb, ClutterProb (the detector table's hit_rate / false_alarm), MinHeightPrior, MinHeightM (a raw-mask-height gate; size is scored on the fitted size) and Tracker.BirthFrames. Existence is one belief decided by the costs (door_decision.h).
 ActuationLlr = 3.0   # a door that changed state on OUR command (open/close satisfied after our request) exists: ln(0.9/0.05)
-# Existence log-odds on the SHARED rc::exist channel (common/existence_belief/existence_belief.h) — the same
-# one table_concept and chair_concept use. Evidence is the PIXEL-LEVEL silhouette: the fitted panel is
-# projected into the ZED and every predicted sample votes
-#   lit by a "door" mask   → OCCUPANCY (confirms)
-#   lit by a NON-door mask → OCCLUDED  (excluded from the detectable footprint — no vote)
-#   lit by nothing         → ABSENCE   (removes; fires even on a frame with no door mask at all)
-#   outside the image      → NOT DETECTABLE
-# and n_detectable == 0 ⇒ HOLD. That last line is the whole point: "never looked at" is not "looked at and
-# empty", so turning the robot around can no longer delete a door. Detectability is MEASURED from the
-# projection (subtended area × visible fraction × how centrally the robot is looking), which is why the old
-# EvidenceGain / ExpectedSupportC / AdequacyRef / AdequacyCap / CalibAdapt / VacateConfidentFrames /
-# OcclusionCheck / ZedEdgeOffset / ZedRangeFull / ZedRangeRef / ZedClearLosFloor knobs are all gone.
-Enabled = true           # use the log-odds belief for removal (false → fall back to the stillbirth prune)
-BirthLogodds = 1.0       # L seeded at birth (a birth already required BirthFrames of unexplained evidence)
-MaxLogodds = 4.0         # saturation cap: a real door sits here (no door can earn infinite immunity)
-# The ONE decision boundary, stated as the probability it actually is:
-RemovalProb = 0.12       # remove once P(exists) drops below this …
-RemoveFrames = 15        # … and stays below it for this many consecutive EVIDENCE cycles (debounce; counts
-                         # evidence, not wall-clock, so a sensor hiccup can never delete a real door)
-# Physical sensor rates feeding the log-likelihood ratio — interpretable probabilities, not gains.
-DetectionProb = 0.85     # P(a predicted pixel is lit | the door IS there and observable)
-ClutterProb   = 0.05     # P(a predicted pixel is lit | no door there)
-SensorSigmaM  = 0.03     # range/localisation noise σ (m)
-CentralRegionFrac = 0.25 # central image box [f, 1-f]²: absence only counts as removal in proportion to how
-                         # much of the silhouette falls inside it. A door clipping the wide frustum edge is not
-                         # a verifying view — its unexplained absence is epistemic surprise ("go look"), not proof.
-OcclusionMarginM = 0.30  # a door/geometric occluder must be ≥ this many metres CLOSER to block a sample
-# Room-containment pose prior: P(a door centre outside the room walls) ≈ 0 (the room polygon is a trusted nominal
-# model, never fitted). Suppresses out-of-room BIRTHS and removes an instance a localization glitch put outside —
-# even behind a wall where the sensor can never reach it to vacate. Independent of frustum/occlusion.
-RoomPrior = true         # enforce the room-containment pose prior
-RoomMarginM = 0.40       # tolerance a door centre may sit OUTSIDE the walls (wall-hugging door + centroid noise)
-OutOfRoomGain = 1.5      # |ΔL| per frame while outside → removed in a few frames (also debounces a 1-frame glitch)
-# THE WALL BAND (door_room_band.h, 2026-10-13). The polygon is the room-side FACE; a door's aperture sits IN the
-# wall, in [0, T] beyond it — the normal place for a real door, not an error. The per-door containment prior is
-# now a static log-prior −½(dist-to-band/σ)², 0 on the band, REPLACED each cycle (OutOfRoomGain no longer used
-# by it; RoomMarginM still gates births). A leaf sample past the room-side face (a leaf swung OUT, seen THROUGH the
-# opening; live try34: free=112-122 on a door that exists) is a view the silhouette model does not represent:
-# weight 1 − P(through), measured from the aperture line (a shut leaf is never "through").
+LookalikeProb = 0.002   # pi_K: per-wall prior of a door-shaped thing that is not a door, independent of the door base rate. Vision saturates near ln(pi_D/pi_K): +5.3 first door, +1.6 further (spec 3.1b, 2026-11-08). Learn offline, like the detector rates
+# THE EXISTENCE MODEL (docs/superpowers/plans/2026-11-07-door-existence-model.md). Each door PLACE carries ONE belief, L = the
+# structural prior (place_prior.h: the wall band, the per-wall base rate, the size term) + the view ledger (view_ledger.h: one entry
+# per DISTINCT view, its llr from the detector rates and the door's visibility from that view: ZED, ricoh and geometry channels) +
+# the carried memory of the place (place_table.h, aged by the learned hazard). Birth is by comparison (a candidate place is born
+# when L > 0); deletion is costed (door_decision.h: removed below the delete line -ln(C_delete/C_keep), etc/door_costs.csv).
+# A place never in view adds no view, so it neither confirms nor removes ("never looked at" is not "looked at and empty").
+Enabled = true           # run the existence update (door_core.cpp update_existence); false = no existence judgement at all
+OcclusionMarginM = 0.30  # a door/geometric occluder must be >= this many metres CLOSER to block a sample (door_visibility.cpp)
+# THE WALL BAND (door_room_band.h). The polygon is the room-side FACE; a door's aperture sits IN the wall, in [0, T] beyond it,
+# the normal place for a real door, not an error. The band term of the structural prior is -1/2 (dist-to-band)^2 / (sigma^2 +
+# sigma_ap^2), 0 on the band, REPLACED each cycle (never accumulated): it scores an off-wall candidate or door; there is no
+# out-of-room birth test and nothing is suppressed for being outside. A leaf sample past the room-side face (a leaf swung OUT,
+# seen THROUGH the opening) is weighted 1 - P(through), measured from the aperture line (a shut leaf is never "through").
 WallThicknessM = 0.20    # T: Webots walls 0.11 m; room_concept measured a 0.19-0.20 m recess
 BoundarySigmaM = 0.10    # σ: door registration (RT-cov 6-12 cm) ⊕ published corner σ 0.06; also the frame's depth window
-# MINIMUM-HEIGHT prior. A door is an aperture a person walks THROUGH, so P(door | it tops out below ~1.8 m)
-# ≈ 0 — a counter, a radiator, a window sill or a low cabinet segmented as "door" is not one. Same kind of
-# categorical prior as RoomPrior (a fact about what a door IS, not a tuned detectability curve), applied the
-# same way: suppress the BIRTH, and draw a strong negative on a live instance that is confidently too short.
-#
-# Judged on the observed SUPPORT top, NEVER on the fitted h. The template anchor (PriorHeightStd 0.08 ⇒
-# precision 156 per frame vs the 8.2 per-frame cap) pins h at 2.00 m whatever the data says, so a phantom fed
-# by a low blob still reports a confident 2.00 m — a test on h can never fire. Measured live: the real door's
-# h moved 2.000 → 2.063, the phantom's never left 2.000.
-#
-# Truncation is the guard that keeps this from deleting real doors: a mask clipped by the image border has an
-# UNOBSERVED top, so its bbox top is only a lower bound. Evidence is weighted by (1 − trunc_frac), so a door
-# the robot only ever sees clipped never reaches MinHeightConf and is never judged — silent, not guessing.
-MinHeightPrior = true
-MinHeightM     = 1.80    # a door's support must reach this height (m, room frame; floor = 0)
-MinHeightConf  = 0.30    # untruncated-evidence weight required before the prior may act (0 = first clean view)
-ShortGain      = 1.5     # |ΔL| per frame while confidently too short (matches OutOfRoomGain)
-# Identity RE-ACQUISITION: a removed door leaves a ghost (its name + the belief it converged to). A detection
-# landing within this radius of a ghost is the SAME door coming back — it takes that name and resumes that
-# geometry instead of being born as door_N+1. Existence restarts from BirthLogodds: the shape is remembered,
-# the confidence is re-earned. Without this, one flicker cost the live run three node identities for one door.
-ReacquireRadiusM = 0.60  # 0 disables re-acquisition (every return is then a brand-new door)
-GhostMax = 8             # most recent removals kept (a short flicker memory, not a permanent map)
+# Mirrors the controller's ExploreTour.MaxRoomS (controller/etc/config.toml): the longest a room's exploration lasts, in seconds.
+# A door on the route is dearer to delete by exactly that: C_delete(route) = C_delete(ordinary) + MaxRoomS (door_decision.h).
+MaxRoomS = 300
 
 [Ice]
 Warn.Connections = "0"

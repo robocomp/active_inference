@@ -81,10 +81,12 @@ private:
 
 /// Tell the remembered row of `face` that its physical leaf was commanded to `target` (open: the commanded angle, close: 0).
 /// The row's leaf is aged to `now_ms` first, then mixed with the command; the stamp moves to now so the restore does not age it
-/// twice, and the existence belief — which shares the stamp — is aged to now with the same hazard so it loses nothing.
+/// twice, and the existence belief — which shares the stamp — is aged to now with the PLACE TABLE's hazard (PlaceTable::hazard_per_s,
+/// learned from revisits: `existence_hazard_per_s`) so it loses nothing. The leaf keeps its own (leaf-channel) hazard.
 /// Returns whether a row with a leaf memory on that hole was found and updated.
 inline bool apply_actuation_to_face(std::vector<IdentityRow>& rows, const FaceRef& face, float target, float phi_max,
-                                    std::int64_t now_ms, float birth_logodds, float reacquire_radius_m, double q = kActuationObeyed)
+                                    std::int64_t now_ms, float reacquire_radius_m, double existence_hazard_per_s,
+                                    double q = kActuationObeyed)
 {
     bool any = false;
     for (auto& r : rows)
@@ -93,8 +95,13 @@ inline bool apply_actuation_to_face(std::vector<IdentityRow>& rows, const FaceRe
         if (r.room != face.room or not r.leaf.has_value() or (r.xy - face.xy).norm() >= same_hole) continue;
         const auto [pa, sa] = restore_leaf_phi(r.leaf->phi, r.leaf->phi_sigma, r.seen_wall_ms, now_ms, phi_max);
         const auto [pn, sn] = leaf_after_actuation(pa, sa, target, q);
-        if (r.exist_logodds.has_value())
-            r.exist_logodds = restore_existence_prior(r, birth_logodds, now_ms);
+        if (r.exist_logodds.has_value() and r.seen_wall_ms.has_value())   // age the evidence to now (toward 0 = ignorance) before the stamp moves
+        {
+            const double gamma = std::exp(-existence_hazard_per_s * std::max<double>(0.0, double(now_ms - *r.seen_wall_ms) * 1e-3));
+            r.exist_logodds = float(double(*r.exist_logodds) * gamma);
+            if (r.exist_physical.has_value()) r.exist_physical = float(double(*r.exist_physical) * gamma);
+        }
+        if (not r.sighted_ms.has_value()) r.sighted_ms = r.seen_wall_ms;   // the command is no sighting: the hazard's exposure keeps counting from the last one
         r.leaf->phi = pn;
         r.leaf->phi_sigma = sn;
         r.seen_wall_ms = now_ms;

@@ -30,7 +30,7 @@ namespace rc {
 //                    tracker's association centre and the point-ownership gate — all of which want the
 //                    thing the sensor actually sees.
 //   · ap_*         → the APERTURE, the static hole in the wall. Used by the DSR RT edge, resolve_wall,
-//                    the merge footprint, ghost identity and the room-containment prior — all of which
+//                    the merge footprint, identity and the room-containment prior — all of which
 //                    must NOT be dragged by a swinging leaf.
 // With phi pinned at 0 (M0) the two coincide exactly, so every consumer is unchanged.
 struct DoorState

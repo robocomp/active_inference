@@ -224,7 +224,7 @@ Derived by reading each agent, not inferred from includes. `—` = not applicabl
 | chair | ✅ | ✅ | ✅ trunc + confirm_only + fixation | ❌ **hand-rolled** | ✅ shared envelope (`chair_detect.h`: `term_envelope` axes 1 × in_fov × central) | ✅ `walls_block` *(2026-10-31, below)* | ✅ | ✅ *(fixed)* |
 | bottle | ✅ | ✅ | ✅ confirm_only | ⚠️ tracker death only | — | — | ⚠️ unattributable | ✅ |
 | cabinet | ✅ | ✅ | ✅ trunc | ✅ `rc::exist` | ✅ | ✅ shared helper | ✅ | ✅ |
-| door | ✅ tracker + 2 justified non-tracker creations *(2026-10-20, below)* | ✅ | ✅ trunc + confirm_only | ✅ `rc::exist` | ✅ | ✅ shared helper | ✅ | ✅ *(fixed; + `aff_door_look_*` 2026-10-21, below)* |
+| door | ✅ birth by comparison (L > 0 on the door model; tracker enforces separation + association) + 2 justified non-tracker creations *(2026-11-07, below)* | ✅ | ✅ one trial per VIEW (view ledger), κ-weighted | ⚠️ costed deletion on the door's own belief, **not** `rc::exist` *(2026-11-07, below)* | ✅ | ✅ shared helper | ✅ | ✅ *(fixed; + `aff_door_look_*` 2026-10-21, below)* |
 | refrigerator | ✅ | ✅ | ✅ trunc + confirm_only | ✅ `rc::exist` | ✅ | ✅ *(now shared)* | ✅ | ✅ |
 | residual | ✅ | ✅ | — field model, no per-frame gate | ✅ `rc::exist` | — | — | ⚠️ unattributable | ✅ |
 | human | ❌ | ❌ `belief_stabilizer` | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
@@ -279,27 +279,40 @@ identity). It owns its agent node `ltom_agent 28` plus the `ltom_recall_<uid>` m
 shared coordinator on SIGTERM (verified on isolated domain 64: `[Graph] node 'ltom_agent 28' deleted`). It connects no DSR signal (polls on the
 main thread while Operating) and keeps its repertory in a file; a node disappearing while its owner is gone or Degraded is "owner exit", never death, and an instance still on the graph but not resolvable this poll (room deleted, no covariance, ...) is HELD, never counted as gone.
 
-**door_concept CREATE exceptions (2026-10-20).** Birth stays tracker-only for every door *first seen*. Two creations do
-not go through the tracker, and neither is a birth in §1's sense — both RESTORE a door that some earlier evidence
-already birthed, as a prior the existence channel then judges like any other door:
+**door_concept CREATE (amended 2026-11-07, docs/superpowers/specs/2026-11-07-door-existence-model-design.md).** Birth is BY
+COMPARISON, not by a streak: a door place has ONE belief `L = structural prior + carried evidence + crossing evidence + Σ views`
+(`core/place_belief.h`), a pending candidate (a detection no live door explains) receives every frame through the same
+likelihoods a live door does (`core/existence_update.h`), and the place is born when `L > 0` — one good hit view can do it,
+a 3 m "door" or a candidate off any wall cannot (the place prior, `core/place_prior.h`: wall band, size 0.85 ± 0.12 x
+2.05 ± 0.06, first door on a wall 0.4, each further one 0.01). The TRACKER still enforces what it always did: separation
+(`Tracker.BirthMinSepM`), association, the claims of other concepts, the swept-arc explanation; `Tracker.BirthFrames` and the
+birth bank's ripening are gone (the config loader REFUSES the retired keys: `door_config_retired.h`). **Deletion is costed:**
+`L < −ln(C_delete / C_keep)` (`core/door_decision.h`; the costs are the robot's own experience in seconds, learned online and
+kept in `etc/door_costs.csv`), never for a door being crossed, with no debounce, streak, timer or clamp. A removed place keeps
+its row ("no door here", `removed_ms`) and is the prior of any candidate there — rows are never forgotten; the RAM ghost
+registry and `forget_identity` are gone. Two creations do not go through the tracker, and neither is a birth in §1's sense:
+both RESTORE a door that some earlier evidence already birthed, as a belief the model then judges like any other door:
 1. **The carried door** (`release_room` / `recreate_lost_door` / `install_carried_door`, and the late carry in
    `step_room_following`): the doorway the robot has just crossed, recreated (or its proto-room entry mirror adopted)
-   in the room entered. The robot's body went through the aperture, so the door's existence was established by the
-   crossing itself; from the new side an open door is the one thing the tracker cannot re-detect.
+   in the room entered **through the carried path**: `carried_belief(source face's row, crossing_logodds)` — the face's
+   evidence, plus `ln(CrossPassablePrior / CrossLeak)` for the body having passed through the aperture, an EMPTY ledger (views
+   are per room), the new room's prior entered by the first update; role `BeingCrossed`, so no view can delete it. The robot's
+   body went through the aperture, so the door's existence was established by the crossing itself; from the new side an open
+   door is the one thing the tracker cannot re-detect.
 2. **Restored remembered doors** (`restore_remembered_doors`, `door_concept/src/door_identity_table.h`): on entering a
    room that is a RECALL — ltsm_agent announced it with a `recall_<room>` node (object_subtype `room_recall`) since
-   the previous room switch — every door of that room in `etc/door_identities.csv` that has a remembered pose is
-   recreated at its remembered room-frame pose, size and leaf memory, unless a door of that name or on that hole is
-   already live (the carried door is never duplicated). Its existence starts from the REMEMBERED log-odds (or
-   `Existence.BirthLogodds` = 1.0 nats, P = 0.73, for a row written without one); seen ⇒ confirmed, absent where it
-   should be visible (P(detect), wall line of sight) ⇒ removed and its identity row forgotten. *(2026-10-22, D-C
-   round 2)* Its PLACEMENT prior is the memory's too: σ_s² = the row's `place_sd` (the aperture centre's σ when written)
-   ⊕ `Existence.BoundarySigmaM`, not the birth seed's 0.6 m — at the seed's width the LiDAR's along-wall channel took
-   an opening past the wall's end for the door's (tour3C) — and a door restored at the −4 clamp is still condemnable:
-   its removal reads the evidence since entry UNCLAMPED (`DoorFitState::existence_since_entry`). A fresh room never
-   restores anything, whatever its name. Justification: the doors were birthed by evidence on an earlier visit and
-   memory holds them; re-requiring a sighting made `cross door_1` fail in tourP2 because the 60 s exploration did not
-   look at that wall. Rows of the older 4-column table carry no pose and are skipped with a log line.
+   the previous room switch — every door of that room in `etc/door_identities.csv` that has a remembered pose and is not a
+   REMOVED row is recreated at its remembered room-frame pose, size and leaf memory, unless a door on that hole is already
+   live (the carried door is never duplicated). Its belief IS the row's (`PlaceTable::restored_belief`): the stored view
+   ledger and the evidence aged by the change hazard the place table LEARNS from revisits (`note_revisit`: a remembered door
+   found again is "unchanged", one removed on a revisit is a change; Gamma prior, mean 1/600 s^-1) — not a fresh birth's prior
+   and not certainty. Seen ⇒ confirmed, absent where it should be visible (detect_prob, wall line of sight) ⇒ deleted by the
+   costed line, its row kept as REMOVED. *(2026-10-22, D-C round 2)* Its PLACEMENT prior is the memory's too: σ_s² = the
+   row's `place_sd` ⊕ `Existence.BoundarySigmaM`, not the birth seed's 0.6 m. A fresh room never restores anything, whatever
+   its name. Justification: the doors were birthed by evidence on an earlier visit and memory holds them; re-requiring a
+   sighting made `cross door_1` fail in tourP2 because the 60 s exploration did not look at that wall. Rows of the older
+   4-column table carry no pose and are skipped with a log line; rows without the ledger / visit / removed columns load with an
+   empty ledger and the row's L kept.
 
 **door_concept OWNERSHIP addition (2026-10-21): the look-at-a-remembered-door affordance.** For each identity row of
 the current room whose door is NOT instantiated (identity-only or full), door_concept owns one epistemic affordance
@@ -347,16 +360,17 @@ The HISTORY column above tracks §4.2 recording only, which is the part that mus
 4. **Chair and door still write the legacy 5-column `<obj>_events.csv`** alongside the new
    `<obj>_phantom_events.csv`. Harmless (different files) but redundant — fold `log_tracker_event` into the
    shared writer once the baseline confirms the new schema captures everything wanted.
-5. **door_concept: a phantom the detector fires on in EVERY frame is not removed while it stays in view** *(Task D-C,
-   2026-10-22)*. §3 makes predicted-visible-but-ABSENT the only removal evidence, and since D-C fix round 1 a cycle
-   advances the removal debounce only by the look the silhouette actually charged as absence (round 2: continuously,
-   P(detect) × the absent share of the reached samples, `door_existence.cpp`). A YOLO phantom detected on every frame
-   lights its own silhouette, so its looks charge little or no absence; the image-geometry channels (leaf contour,
-   depth, doorway frame) can still pull L below the bound, but the debounce advances only by P(detect) × the absent share
-   free/(occ + free) — partially at most, not at all on a fully lit frame — and the door is reported **stalled**
-   (`rc::exist::stall_note`) instead of removed. It goes when the detector stops firing on it (another
-   view) or by the wall-band prior. Accepted, deliberately: removing a door the detector IS detecting on image geometry
-   alone is exactly what removed the REAL DOOR_0 at rtD1i cycle 614 (D-C review C1).
+5. **door_concept's existence is its own model, not `rc::exist`** *(2026-11-07)*. The ⚠️ in the conformance row: the shared
+   `rc::exist` channel (a HOLD-on-undetectable removal debounce over one silhouette) was replaced for the door by a generative
+   model — one belief per place, one Bernoulli trial per VIEW per camera (hit/miss from `detect_prob`, which is 0 for a view
+   that could not have reported the door, so unseen is never evidence), geometry and actuation as further channels in the same
+   view record, and a costed decision. It keeps every §3 invariant (occupancy confirms, absence removes, occlusion/out-of-view
+   HOLD, absence weighted by P(detect) with walls in the line of sight, no constant process noise) as properties of the model
+   instead of a module, so a phantom the detector fires on in every frame is removed by distinct views at good fill (spec §5
+   test 3) rather than reported "stalled". Justification for not using the shared module: its debounce is a streak (a timer in
+   disguise) and its single silhouette cannot express the two cameras' different detectors; table/cabinet/refrigerator/residual
+   still use it. `core/door_visibility.*` and `core/detector_llr.h` are the pieces another concept could take if it gets a
+   second camera.
 
 ### 6.1 Object-kind axes (2026-10-18, DRAFT — classification only, nothing refactored yet)
 

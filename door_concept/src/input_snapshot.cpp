@@ -16,6 +16,7 @@
 #include "../../common/rt_twist/rt_twist.h"
 #include "../../common/interaction_anchor/interaction_anchor.h"
 #include "../../common/room_transition/exit_fact.h"
+#include "../../common/ltsm_topology/topology_decode.h"
 #include "door_semantic_field.h"
 
 namespace rc::door
@@ -313,6 +314,7 @@ void InputSnapshot::begin_cycle(DSR::DSRGraph& G, DSR::InnerEigenAPI* inner, DSR
         B.robot_T_zed  = tf(inner, rn.name(), "zed");
         B.body_T_zed   = tf(inner, "body", "zed");
         B.root_T_body  = tf(inner, root_name, "body");
+        B.body_T_ricoh = tf(inner, "body", "ricoh");
         if (rt != nullptr and R.graph_current_room.has_value())
         {
             if (const auto e = G.get_edge(rn.id(), *R.graph_current_room, "RT"); e.has_value())
@@ -353,6 +355,46 @@ void InputSnapshot::begin_cycle(DSR::DSRGraph& G, DSR::InnerEigenAPI* inner, DSR
         if (const auto v = G.get_attrib_by_name<cam_rgb_focalx_att>(zed.value()); v.has_value()) C.cam_rgb_focalx = v.value();
         if (const auto v = G.get_attrib_by_name<cam_fov_att>(zed.value()); v.has_value())        C.cam_fov = v.value();
     }
+
+    // ── ricoh (360): the same attributes CameraAPI reads, by type-attributed getters (CameraAPI qFatals on a node
+    //    without them; the snapshot must not). Model choice mirrors the CameraAPI ctor: cam_fov >= 5.5 is a panorama,
+    //    "cylindrical" selects the tan-elevation one, anything else lat-long. ──────────────────────────────────────
+    if (const auto rn = G.get_node("ricoh"); rn.has_value())
+    {
+        auto& C = cur_.ricoh;
+        const auto w = G.get_attrib_by_name<cam_rgb_width_att>(rn.value());
+        const auto h = G.get_attrib_by_name<cam_rgb_height_att>(rn.value());
+        if (w.has_value() and h.has_value())
+        {
+            C.present = true;
+            C.width = static_cast<std::uint32_t>(w.value()); C.height = static_cast<std::uint32_t>(h.value());
+            if (const auto v = G.get_attrib_by_name<cam_fov_att>(rn.value()); v.has_value()) C.cam_fov = v.value();
+            if (C.cam_fov.has_value() and *C.cam_fov >= 5.5f)
+            {
+                C.projection_model = 1;   // Equirectangular
+                if (const auto p = G.get_attrib_by_name<cam_projection_att>(rn.value());
+                    p.has_value() and p.value().get() == "cylindrical")
+                    C.projection_model = 2;
+                if (const auto v = G.get_attrib_by_name<cam_equirect_azimuth_sign_att>(rn.value()); v.has_value())
+                    C.equirect_az_sign = v.value();
+                if (const auto v = G.get_attrib_by_name<cam_equirect_azimuth_offset_att>(rn.value()); v.has_value())
+                    C.equirect_az_offset = v.value();
+            }
+            else
+            {
+                C.projection_model = 0;   // Pinhole: focal is mandatory in CameraAPI
+                const auto fx = G.get_attrib_by_name<cam_rgb_focalx_att>(rn.value());
+                const auto fy = G.get_attrib_by_name<cam_rgb_focaly_att>(rn.value());
+                if (fx.has_value() and fy.has_value()) { C.focal_x = fx.value(); C.focal_y = fy.value(); }
+                else C.present = false;
+            }
+        }
+    }
+
+    // ── route faces: the doors the LTSM remembers as crossed (live passage face with crossings >= 1) ─────────────
+    if (const auto t = G.get_node("ltsm_topology"); t.has_value())
+        if (const auto j = G.get_attrib_by_name<ltsm_topology_att>(t.value()); j.has_value())
+            for (const auto& name : rc::topo::crossed_doors(j.value())) cur_.route_faces.push_back(name);
 
     // A refresh BETWEEN cycles (the presence pump) may have changed the packet the top of compute() reads.
     if (masks != nullptr) capture_masks(G, inner, rt, *masks);

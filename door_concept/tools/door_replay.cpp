@@ -16,8 +16,8 @@
 // log — the run's own record of what they decided — instead of re-deciding it:
 //   · room (Task 6): IdentityLoad.initial_room, then each RoomSwitch row; the containment polygon latched from the
 //     recorded rooms[] the way refresh_room_geometry latches it (replaced when ≥ 3 vertices, cleared on a switch);
-//   · (removals are the CORE's since Task 5: the world only remembers the ghost and forgets the stored identity the way
-//     remember_ghost / forget_identity do — before_remove — and drops the door — remove_door);
+//   · (removals are the CORE's since Task 5: the world only marks the stored identity row removed the way
+//     mark_identity_removed does — before_remove — and drops the door — remove_door);
 //   · identities (Task 6): the IdentityLoad csv parsed with the agent's parser, then every IdentityUpsert / Forget row
 //     re-applied with the agent's own upsert_row / forget rule at the point of the cycle the old code made it;
 //   · the affordance / anchor / actuation slices (Task 7): NOT rebuilt — a door's hinge_question_live, anchor φ curve
@@ -31,7 +31,7 @@
 //
 // Build + run (from door_concept/):
 //   g++ -std=c++23 -O2 -I/usr/include/eigen3 -I/usr/include/opencv4 tools/door_replay.cpp src/core/door_core.cpp \
-//       src/core/door_fit.cpp src/core/door_existence.cpp src/core/door_cycle_io.cpp src/door_belief.cpp src/door_model.cpp src/epistemic_planner.cpp \
+//       src/core/door_fit.cpp src/core/door_existence.cpp src/core/existence_update.cpp src/core/door_visibility.cpp src/core/door_cycle_io.cpp src/door_belief.cpp src/door_model.cpp src/epistemic_planner.cpp \
 //       src/door_frame_evidence.cpp ../common/contour_edge/contour_edge_check.cpp \
 //       ../common/contour_edge/contour_edge_project.cpp ../common/contour_edge/contour_depth_check.cpp \
 //       -lzstd -lopencv_core -lopencv_imgproc -o /tmp/door_replay
@@ -58,6 +58,7 @@
 #include <set>
 #include <print>
 #include <sstream>
+#include <iostream>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -65,6 +66,7 @@
 
 #include "../src/core/door_core.h"
 #include "../src/door_config_fields.h"
+#include "../src/door_config_retired.h"   // the agent refuses these keys; the replay says so (see main)
 #include "../src/door_identity_table.h"
 #include "../src/door_dof.h"            // the live consumers' DOF table (dashboard, NBV adequacy)
 #include "../src/door_approach_pose.h"  // Task E: the approach offer's price (--look)
@@ -276,14 +278,12 @@ public:
             { const float ph = 0.0f + i * (2.0944f / 24.0f); f.phi_curve.emplace_back(ph, std::exp(-0.5f * std::pow((ph - f.phi_est) / 0.035f, 2.0f))); }
         }
 
-        if (old.existence_seeded)   // install_carried_door (Task D2): the source's L plus the crossing as an observation
-        {
-            f.existence.set(old.existence.logodds()
-                            + rc::door::crossing_logodds(cfg_.exist_cross_passable_prior, cfg_.exist_cross_leak));
-            f.existence_seeded = true;
-            f.existence_entry_L = f.existence.logodds();
-            f.existence_since_entry = 0.0f;
-        }
+        // Task 8: THE belief — the source face's evidence plus the crossing (Task 9 rebuilds this path)
+        f.belief = {};
+        f.belief.lookalike = old.belief.lookalike;
+        f.belief.remember(old.belief.L_evidence(), float(old.belief.Sp()));
+        f.belief.crossing = rc::door::crossing_logodds(cfg_.exist_cross_passable_prior, cfg_.exist_cross_leak);
+        f.belief.crossed = f.belief.crossing > 0.f;   // as carried_belief does live: the crossing is proof
         live_.insert_or_assign(id, std::move(f));
         std::println("MIRROR cycle {} '{}' source w {:.3f} -> mirror at (0,0.02) in the new room; robot {:.2f} {:.2f}", cycle_, old.node_name, m.w, rb.x(), rb.y());
     }
@@ -317,21 +317,11 @@ public:
     }
     rc::DoorFitState* begin_fit(std::uint64_t id) override
     { const auto it = live_.find(id); return it == live_.end() ? nullptr : &it->second; }
-    std::optional<GhostMatch> match_ghost(const Vec2f& xy) const override
-    {
-        if (cfg_.exist_reacquire_radius_m <= 0.0f) return std::nullopt;
-        const Ghost* best = nullptr;
-        float best_d = cfg_.exist_reacquire_radius_m;
-        for (const auto& g : ghosts_)
-            if (const float d = (g.xy - xy).norm(); d < best_d) { best_d = d; best = &g; }
-        if (best == nullptr) return std::nullopt;
-        return GhostMatch{best->name, best->xy, best->lived, static_cast<std::size_t>(best - ghosts_.data())};
-    }
     std::optional<IdentityMatch> match_identity(const Vec2f& xy) const override
     {
-        if (cfg_.exist_reacquire_radius_m <= 0.0f or room_name_.empty()) return std::nullopt;
+        if (room_name_.empty()) return std::nullopt;
         const rc::door::IdentityRow* best = nullptr;
-        float best_d = cfg_.exist_reacquire_radius_m;
+        float best_d = radius_m();
         for (const auto& i : identities_)
             if (i.room != room_name_) continue;
             else if (const float d = (i.xy - xy).norm(); d < best_d) { best_d = d; best = &i; }
@@ -348,7 +338,7 @@ public:
     void before_remove(std::uint64_t id) override
     {
         if (const auto it = live_.find(id); it != live_.end())
-            remember_ghost(it->second);   // ...which also forgets the stored identity (forget_identity)
+            mark_removed(it->second);   // the row stays, marked removed (SpecificWorker::mark_identity_removed)
     }
     void remove_door(std::uint64_t id, float) override
     {
@@ -388,9 +378,6 @@ public:
         live_.insert_or_assign(id, std::move(f));
         return id;
     }
-    void reacquire(std::uint64_t, const GhostMatch&) override {}   // the ghost's BELIEF is not kept (none on these tapes)
-    void forget_ghost(const Vec2f& xy) override
-    { std::erase_if(ghosts_, [&](const Ghost& g) { return (g.xy - xy).norm() < cfg_.exist_reacquire_radius_m; }); }
     std::optional<std::string> adopt_birth(std::uint64_t id, int slice, const Vec3f&) override
     {
         // ensure_instance: the instance already exists (create_door above, as the synchronous slot made it live), so it
@@ -413,8 +400,6 @@ public:
     [[nodiscard]] std::size_t n_identities() const { return identities_.size(); }
 
 private:
-    struct Ghost { std::string name; Vec2f xy; int lived = 0; };
-
     template <class F> void for_rows(F&& f) { if (rows_ != nullptr) for (const auto& d : *rows_) f(d); }
     bool birth_named(const std::string& name)
     {
@@ -441,26 +426,21 @@ private:
         row.name = d.name;
         row.xy = Vec2f(static_cast<float>(d.a), static_cast<float>(d.b));
         const float width_m = static_cast<float>(d.c);
-        const float same_hole = cfg_.exist_reacquire_radius_m + std::max(0.0f, std::isfinite(width_m) ? width_m : 0.0f);
+        const float same_hole = radius_m() + std::max(0.0f, std::isfinite(width_m) ? width_m : 0.0f);
         (void) rc::door::upsert_row(identities_, d.note, std::move(row), same_hole, static_cast<float>(d.d));
     }
-    void remember_ghost(const rc::DoorFitState& d)
+    // The same hole radius the worker uses (SpecificWorker::identity_radius_m): the tracker's own association gate, in metres.
+    [[nodiscard]] float radius_m() const { return cfg_.tracker_detection_noise_m * std::sqrt(2.0f * cfg_.tracker_gate_mahalanobis); }
+    void mark_removed(const rc::DoorFitState& d)
     {
-        // SpecificWorker::remember_ghost — keyed on the fitted aperture
-        if (cfg_.exist_reacquire_radius_m <= 0.0f or not d.ai2_initialized or d.is_bearing_hypothesis) return;
+        // SpecificWorker::mark_identity_removed — the row on the removed door's hole keeps its place and is marked removed
+        if (room_name_.empty() or d.is_bearing_hypothesis) return;
         const Vec2f ap(d.model.state().ap_cx, d.model.state().ap_cy);
-        std::erase_if(ghosts_, [&](const Ghost& g) { return (g.xy - ap).norm() < cfg_.exist_reacquire_radius_m; });
-        ghosts_.push_back({d.node_name, ap, 0});
-        // SpecificWorker::forget_identity(name, aperture, width): ABSENCE FORGETS THE NAME ACROSS RUNS — every stored row
-        // of this room with this name or within the same hole (the rule the IdentityForget rows record).
-        if (not room_name_.empty())
-        {
-            const float width_m = d.model.state().w;
-            const float same_hole = cfg_.exist_reacquire_radius_m + std::max(0.0f, std::isfinite(width_m) ? width_m : 0.0f);
-            std::erase_if(identities_, [&](const rc::door::IdentityRow& i)
-                          { return i.room == room_name_ and (i.name == d.node_name or (ap.allFinite() and (i.xy - ap).norm() < same_hole)); });
-        }
-        while (static_cast<int>(ghosts_.size()) > std::max(1, cfg_.exist_ghost_max)) ghosts_.erase(ghosts_.begin());
+        const float width_m = d.model.state().w;
+        const float same_hole = radius_m() + std::max(0.0f, std::isfinite(width_m) ? width_m : 0.0f);
+        const auto it = std::ranges::find_if(identities_, [&](const rc::door::IdentityRow& i)
+                        { return i.room == room_name_ and (i.name == d.node_name or (ap.allFinite() and (i.xy - ap).norm() < same_hole)); });
+        if (it != identities_.end()) it->removed_ms = 1;
     }
 
     const rc::DoorConfig& cfg_;
@@ -472,7 +452,6 @@ private:
     std::vector<Vec2f> polygon_;
     mutable std::unordered_map<std::uint64_t, rc::DoorFitState> live_;
     DoorFit* fit_ = nullptr;
-    std::vector<Ghost> ghosts_;
     std::vector<rc::door::IdentityRow> identities_;
     std::set<const DoorDecision*> used_births_;
     std::vector<std::string> births_named_;
@@ -511,7 +490,9 @@ int main(int argc, char** argv)
     long belief_smoke_runs = 0;
     float recess_prior_std = -2.0f;   // < -1.5: keep the recorded config's value
     bool strip_oracle = false;   // --ricoh-strip-oracle: tapes older than v3 carry no ricoh windows; stand one in (see below)
+    std::string costs_path = "etc/door_costs.csv";   // --costs FILE: C_keep / C_delete (fixed; missing => the compiled LOGGED estimate, loudly)
     bool look_log = false, ablate_hull = false;   // Task E: --look prints the look-vs-approach prices; --ablate-hull-midpoint reproduces the collapse
+    bool core_stdout = false;
     for (int i = 3; i < argc; ++i)
     {
         const std::string_view a = argv[i];
@@ -524,6 +505,8 @@ int main(int argc, char** argv)
         else if (a == "--csv" and i + 1 < argc) csv_dir = argv[++i];
         else if (a == "--clock-jitter-ms" and i + 1 < argc) jitter_ms = std::strtod(argv[++i], nullptr);
         else if (a == "--trace" and i + 1 < argc) trace_door = argv[++i];
+        else if (a == "--costs" and i + 1 < argc) costs_path = argv[++i];
+        else if (a == "--stdout") core_stdout = true;   // Task 8: echo the core's stdout lines (existence / candidate readouts)
         else if (a == "--recess-prior-std" and i + 1 < argc)
         {   // a SENSITIVITY probe (Task 5b): the leaf-plane depth's prior σ, overriding the recorded config
             const std::string_view v = argv[++i];
@@ -547,6 +530,11 @@ int main(int argc, char** argv)
     const auto hdr = f ? read_header(f, RecordingKind::Input, &version) : std::nullopt;
     if (not hdr.has_value()) { std::println("cannot read the input tape {}", argv[1]); return 2; }
     const EffectiveConfig eff(hdr->config_text);
+    // The agent REFUSES a config that sets a retired key. A tape recorded BEFORE the existence model carries them in its header and
+    // must still replay (the core ignores them), so here the same check is a loud warning, not a refusal.
+    if (const auto stale = rc::retired_door_keys_present([&](const std::string& k) { return eff.find(k) != nullptr; }); not stale.empty())
+        std::print(stderr, "WARNING (tape recorded under the old config; the agent would now refuse it, the replay ignores the keys): {}",
+                   rc::retired_door_keys_message(stale));
     int cfg_errors = 0;
     DoorCoreConfig cfg{config_from(eff, cfg_errors)};
     if (recess_prior_std > -1.5f)
@@ -562,17 +550,22 @@ int main(int argc, char** argv)
     ReplayWorld world(cfg.door, by_cycle);
     world.mirror_ = mirror;
     DoorCore core(cfg);
+    core.set_costs(rc::door::core::CostEstimator::load_or_default(costs_path));
+    { const auto c = core.costs().costs(cfg.door.exist_max_room_s);
+      std::println("costs: {} -> C_keep {:.2f} s, C_delete(ordinary) {:.2f} s", costs_path, c.keep_s, c.delete_ordinary_s); }
     world.set_fit(&core.fit());
     // A sink that only counts: the fit formats its stdout lines and CSV rows exactly as live (so the timing includes
     // that cost), and the tool writes no file.
     long diag_rows = 0;
     // --csv DIR: the fit's two logs and the existence log, as the live agent writes them (diff them against its own)
-    std::ofstream ai2_csv, phi_csv, ex_csv;
+    std::ofstream ai2_csv, phi_csv, ex_csv, views_csv;
     if (not csv_dir.empty())
     {
         ai2_csv.open(csv_dir + "/ai2_log.csv");
         phi_csv.open(csv_dir + "/ai2_log_phi.csv");
         ex_csv.open(csv_dir + "/door_existence_log.csv");
+        views_csv.open(csv_dir + "/door_views_log.csv");
+        views_csv << kViewsCsvHeader;
         ai2_csv << kAi2CsvHeader;
         phi_csv << kPhiCsvHeader;
         ex_csv << kExistenceCsvHeader;
@@ -583,6 +576,8 @@ int main(int argc, char** argv)
         if (r.stream == "ai2_log.csv" and ai2_csv.is_open()) ai2_csv << r.line;
         else if (r.stream == "ai2_log_phi.csv" and phi_csv.is_open()) phi_csv << r.line;
         else if (r.stream == "door_existence_log.csv" and ex_csv.is_open()) ex_csv << r.line;
+        else if (r.stream == "door_views_log.csv" and views_csv.is_open()) views_csv << r.line;
+        else if (r.stream == "stdout" and core_stdout) std::cout << r.line;
     }});
 
     // the slices the tool does not rebuild — counted, so a tape that exercised them says so
@@ -725,14 +720,13 @@ int main(int argc, char** argv)
                             mask_px = sl.pixel_end - sl.pixel_begin;
                         }
                         std::println("TRACE {} cycle {} L {:+.2f} | s {:.3f} w {:.3f} h {:.3f} d {:+.3f}±{:.3f} phi {:.3f}±{:.3f} | "
-                                     "since_det {} mask {} px {} | sil occ {:.1f} free {:.1f} free_eff {:.2f} p_det {:.3f} | edge dL {:+.2f} "
-                                     "frame exc {:+.2f} (true {:.1f} ctrl {:.1f}) | robot {:.3f} {:.3f} | kappa {:.3f} | leaf c {:+.3f} {:+.3f} "
+                                     "since_det {} mask {} px {} | zed q {:.3f} dL {:+.2f} geo dL {:+.2f} | "
+                                     "robot {:.3f} {:.3f} | kappa {:.3f} | leaf c {:+.3f} {:+.3f} "
                                      "| ap {:+.3f} {:+.3f} yaw {:+.3f}",
-                                     st->node_name, in->cycle, st->existence.logodds(), b.s, b.w, b.h, b.d, st->ai2_belief.recess_sd(),
+                                     st->node_name, in->cycle, st->belief.L(), b.s, b.w, b.h, b.d, st->ai2_belief.recess_sd(),
                                      st->phi_est, st->phi_sigma, st->frames_since_detection, st->assigned_mask_idx, mask_px,
-                                     st->dbg_sil_occ, st->dbg_sil_free, st->dbg_sil_free_eff, st->dbg_sil_pdetect,
-                                     st->dbg_edge_delta, st->dbg_frame_excess, st->dbg_frame_true, st->dbg_frame_ctrl,
-                                     in->robot.room_T_body ? (*in->robot.room_T_body)(0, 3) : 0.0, in->robot.room_T_body ? (*in->robot.room_T_body)(1, 3) : 0.0, st->dbg_pose_kappa,
+                                     st->exist_trace.zed_q, st->exist_trace.zed_dl, st->exist_trace.geo_dl,
+                                     in->robot.room_T_body ? (*in->robot.room_T_body)(0, 3) : 0.0, in->robot.room_T_body ? (*in->robot.room_T_body)(1, 3) : 0.0, st->exist_trace.kappa,
                                      st->model.state().cx, st->model.state().cy, st->model.state().ap_cx,
                                      st->model.state().ap_cy, st->model.state().ap_yaw);
                     }
@@ -753,6 +747,22 @@ int main(int argc, char** argv)
     std::println("removals decided by the core: {}; births without a recorded id: {}; not rebuilt: {} AffExecuting, "
                  "{} AnchorHung, {} ActuatorRequest rows on this tape", world.removed_, world.unmatched_creates_,
                  n_exec, n_anchor, n_act);
+    // ── the doors alive at the END, with their belief (fix round 5: the tape gate counts BELIEVED doors, L > 0, and reports those
+    //    between the delete line and the creation line as unresolved). identity_radius_m is the agent's SpecificWorker::
+    //    identity_radius_m() (the tracker's own association gate as a radius); two apertures are the same hole within it + width.
+    {
+        const auto& dc = cfg.door;
+        std::println("FINAL identity_radius_m={:.4f}", dc.tracker_detection_noise_m * std::sqrt(2.0f * dc.tracker_gate_mahalanobis));
+        const Costs fc = core.costs().costs(dc.exist_max_room_s);
+        for (const auto& [id, st] : world.fit_states())
+        {
+            if (st->is_bearing_hypothesis) continue;   // no depth: no place, no belief (the existence slice skips it too)
+            const Vec2f xy = st->aperture.centre_xy();
+            const float L = st->belief.L();
+            std::println("FINAL door '{}' x={:.4f} y={:.4f} w={:.4f} L={:.4f} delete_line={:.4f} Sc={:.3f} Sp={:.3f} term={:.3f} prior={:.3f}", st->node_name, xy.x(), xy.y(),
+                         st->aperture.w, L, decide(L, st->role, fc).delete_line, st->belief.Sc(), st->belief.Sp(), st->belief.saturation_term(), st->belief.prior.total());
+        }
+    }
     if (not step_ms.empty())
     {
         std::ranges::sort(step_ms);

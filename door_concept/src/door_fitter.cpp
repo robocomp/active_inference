@@ -200,9 +200,6 @@ std::optional<Eigen::Matrix4d> DoorFitter::room_T_zed_matrix(std::uint64_t pose_
     return to_mat4(rtb.value()) * to_mat4(btz.value());
 }
 
-// (compute_silhouette_existence, compute_frame_probe, door_view_obliquity and aperture_band_offset moved into the
-//  DSR-free DoorCore — src/core/door_existence.cpp, Task 5 — where they project with the cycle's snapshot camera.)
-
 bool DoorFitter::point_in_room(const Eigen::Vector2f& q, float margin_m) const
 {
     // ONE rule for the containment prior: the DoorCore's birth test and this one (core/door_core.cpp).

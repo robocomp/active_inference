@@ -61,7 +61,7 @@ public:
     // instance in the current room, and a second fitted instance would count the same door twice (the
     // overlap merge would retire one of them). So the proto-room gets a MIRROR: a plain `object` node
     // `door_N` (object_subtype "door", parent = the proto-room) with no fitter instance, no affordances,
-    // no ghost and no identity row. Its RT edge proto→mirror is `T_proto_source`, resolved once and never
+    // no remembered removal and no identity row. Its RT edge proto→mirror is `T_proto_source`, resolved once and never
     // rewritten — the proto-room's gauge is frozen, so the door's pose in it is a constant.
     // Returns the new node id (0 on failure). The mirror asks for its source's name (live ⇒ a fresh counter name);
     // `next_door_index` as for create_instance_from_detection.

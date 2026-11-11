@@ -31,7 +31,7 @@
  * so what crosses the wire is P(d <= R) under the pose and aperture covariance. At d == R it is 0.5 by
  * construction, which is the honest answer, and the offer/withdraw decision is then a Bayesian decision on
  * that probability with a Schmitt band (rc::pragmatic::PragmaticAffordance::Policy) — the same shape as
- * Existence.RemovalProb, not a new kind of knob.
+ * the existence decision's costed line, not a new kind of knob.
  *
  * ★`door_crossing_progress` IS SIGNED AGAINST THE SIDE HELD WHEN THE CLAIM WAS MADE. "Crossed" is not a
  * position, it is a CHANGE of side, so no static predicate on a coordinate can express it. The side the
