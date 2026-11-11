@@ -9,7 +9,7 @@ Frame numbers are the slide footers (n/36).
 
 | time | block | frames |
 |---|---|---|
-| 0:00–0:15 | The challenge: the video, the cycle, every stage is a belief, toyworld | 1–5 |
+| 0:00–0:16 | The idea in 46 s (unnumbered slide after the title); the challenge: the video, the cycle, every stage is a belief, toyworld | 1–5 |
 | 0:15–0:55 | The grammar of uncertainty: variables, the joint table, marginalise, condition, product rule, the Gaussian picture and its two forms, chain rule, N! orderings, causal order, perception / control / generative, the robot's joint, Bayes as the three operations | 6–19 |
 | 0:55–1:00 | Behind a sensory boundary; where exact inference dies (a short recap: Bayes is already on the board) | 20–21 |
 | 1:00–1:30 | VFE: rearrangement, identity, complexity − accuracy, Kalman worked example (do it on the board), F differentiated twice (belief and action, EFE in one line), Rényi aside | 22–27 |
@@ -17,6 +17,8 @@ Frame numbers are the slide footers (n/36).
 | — | break | |
 | 2:00–2:10 | What measurement said: F ≠ computation, inherited errors | 33–34 |
 | 2:10–4:00 | Lab 1: warm-up P1–P4 (~15 min), then exercises 1–6 (about 50 min of material: **an hour is spare, see below**) | 35–36 |
+
+**The opening video (unnumbered full-screen slide after the title, `media/InferenciaActiva.mp4`, 46 s).** A robot in an orchard loses sight of a person behind leaves: it predicts, compares, feels the surprise, and has two ways out, change what it believes or move to see. Click once in pympress to start; it loops. Its captions are in **Spanish**: read the four steps aloud in English (believe, predict, compare, correct or act). Point at the second way out, acting to resolve doubt: that is the title of the course and the subject of Day 4. It is an illustration, as its corner label says, not a run of the robot.
 
 **Moved to Day 4 (2026-10-17).** Day 1 had 44 frames. The action section (∂F/∂a = 0, EFE, three
 names for one number, where to look, ln 2, travel, time scales) and the two measured results that

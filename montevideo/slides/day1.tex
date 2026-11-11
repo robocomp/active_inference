@@ -1,5 +1,6 @@
 \documentclass[10pt, aspectratio=169]{beamer}
 \input{preamble}
+\usepackage{multimedia}
 
 \title{A robot that acts to know}
 \subtitle{Day 1 --- The challenge, probability, and free energy}
@@ -25,6 +26,13 @@
 \begin{document}
 
 \maketitle
+
+% The idea in 46 s (Spanish captions): click once in pympress to start; it loops.
+\begin{frame}[plain,noframenumbering]
+  \begin{tikzpicture}[remember picture, overlay]
+    \node[inner sep=0pt, at=(current page.center)] {\movie[width=\paperwidth, height=\paperheight, loop, showcontrols=false]{\includegraphics[width=\paperwidth]{inferencia_activa_poster.png}}{media/InferenciaActiva.mp4}};
+  \end{tikzpicture}
+\end{frame}
 
 % =================================================================================================
 \section{The challenge}
