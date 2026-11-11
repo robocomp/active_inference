@@ -9,6 +9,8 @@
 
 #include "../door_geometry.h"
 #include "../door_model.h"
+#include "../door_phi_posterior.h"   // door_wall_extent: the wall segment that carries the aperture (the extent prior)
+#include <tuple>
 #include "../../../common/contour_edge/contour_edge_project.h"
 
 namespace rc::door::core
@@ -298,10 +300,21 @@ ExistenceTrace observe_place(PlaceBelief& b, const rc::DoorFitState& th, const E
 }
 
 PlacePrior prior_of(const rc::DoorFitState& th, const std::vector<Vec2f>& polygon, bool proto, const rc::door::RoomBand& band,
-                    int doors_on_wall_before, float width_sd, float height_sd, bool size_resolved, const SizePrior& size, float aperture_sd)
+                    int doors_on_wall_before, float width_sd, float height_sd, bool size_resolved, const SizePrior& size, float aperture_sd,
+                    float jamb_sd_lo, float jamb_sd_hi)
 {
-    const PlacePriorInput in{polygon, proto, band, th.aperture.centre_xy(), th.aperture.wall_u, th.aperture.w, th.aperture.h,
-                             width_sd, height_sd, size_resolved, doors_on_wall_before, size, aperture_sd};
+    PlacePriorInput in{polygon, proto, band, th.aperture.centre_xy(), th.aperture.wall_u, th.aperture.w, th.aperture.h,
+                       width_sd, height_sd, size_resolved, doors_on_wall_before, size, aperture_sd};
+    // The wall that carries θ (the fit's own definition, door_wall_extent) — a proto outline is a frontier: no wall end is known.
+    if (not proto and polygon.size() >= 3)
+    {
+        const rc::DoorBelief::FieldNuisance depth_band{};
+        std::tie(in.wall_support.lo, in.wall_support.hi) = rc::door::door_carrying_wall(th.aperture, polygon, depth_band.depth_lo, depth_band.depth_hi);
+        in.wall_support.sigma = band.sigma_m;
+        in.along_s = th.aperture.s;
+        in.jamb_sd_lo = jamb_sd_lo;
+        in.jamb_sd_hi = jamb_sd_hi;
+    }
     return place_prior(in);
 }
 

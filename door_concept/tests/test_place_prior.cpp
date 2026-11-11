@@ -104,6 +104,29 @@ int main()
         CHECK(at(-0.6f, 0.5f, true) > at(-0.6f, 0.0f, true));
         CHECK(at(0.3f, 0.5f, true) == at(0.3f, 0.5f, false));                                // the inside of a proto room is unchanged
     }
+    // ★THE APERTURE INSIDE ITS WALL (2026-11-11, clean50 door_3): the extent term. The bottom wall runs [0, 6] along u (σ 0.10);
+    //  a 1.0 m door starting at s. Mid-wall pays 0 (and total() is the old sum); the door_3 placement (near jamb 0.17 m past the
+    //  wall's end) pays; the TRUE door_3 (5 cm of wall beside its post) pays almost nothing; a fit that knows its jamb only to
+    //  0.30 m pays less for the same overhang (the marginal); no wall known (inactive) ⇒ 0, whatever the overhang.
+    {
+        const auto ext = [&](float s, float sd, bool known = true)
+        {
+            PlacePriorInput in = input(kRoom, {s + 0.5f, -0.1f}, 1.0f);
+            if (known) in.wall_support = rc::door::WallSupport{0.0f, 6.0f, 0.10f};
+            in.along_s = s; in.jamb_sd_lo = in.jamb_sd_hi = sd;
+            return place_prior(in);
+        };
+        const auto mid = ext(2.5f, 0.05f), over = ext(-0.17f, 0.04f), truth = ext(0.05f, 0.04f), loose = ext(-0.17f, 0.30f);
+        std::printf("extent: mid-wall %+.4f, door_3 fit (jamb 0.17 m past the end) %+.3f, door_3 truth %+.3f, same overhang at σ 0.30 %+.3f\n",
+                    mid.extent, over.extent, truth.extent, loose.extent);
+        CHECK(std::abs(mid.extent) < 1e-4f);
+        CHECK(std::abs(mid.total() - (mid.band + mid.base_rate + mid.size)) < 1e-4f);
+        CHECK(over.extent < -2.0f);
+        CHECK(truth.extent > -0.5f);
+        CHECK(loose.extent > over.extent);
+        CHECK(ext(-3.0f, 0.04f, false).extent == 0.0f);
+        CHECK(ext(-3.0f, 0.04f).extent < -100.0f);   // a door metres past the end of its wall: impossible
+    }
     std::printf(g_fail ? "FAILED\n" : "ALL PASS\n");
     return g_fail != 0;
 }

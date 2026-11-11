@@ -16,6 +16,7 @@
 #include <unordered_set>
 #include <utility>
 
+#include "../door_standpoint.h"                          // polygon_contains: the doorway mask seen THROUGH (sightline_exit)
 #include "../door_leaf_visibility.h"                     // leaf_closedness / ricoh_detect_scale (Task D2)
 #include "../../../common/instance_tracker/birth_evidence.h"   // rc::birth::evidence (SHARED)
 #include "../../../common/track/merge_sweep.h"                 // rc::track::merge_overlapping_sweep (SHARED, no Qt)
@@ -26,6 +27,35 @@ namespace rc::door::core
 {
 namespace
 {
+// ★A DOORWAY'S MASK IS SEEN THROUGH IT (2026-11-11, clean51 door_3). The "door" mask labels the doorway; where the leaf is open
+//  its depth points are whatever the camera sees THROUGH the opening — the next room's far wall, metres beyond the wall that
+//  holds the door. The fit already reads the mask that way (associate_wall: the wall the sightline LEAVES the room through
+//  holds the door), so door_3 was seated on room_2's wall (y ≈ 0.22) while its detections — the mask centroids — stayed
+//  2.2 m beyond it, on the bathroom's far wall (y ≈ −2.0). The tracker gates on the centroid, so not one later mask of
+//  door_3 associated with it: matched_frames stayed 1 (< kFitWithoutFreshDataFrames), the fit never ran again, the leaf
+//  angle never left its prior, and neither `open` nor `cross` was offered for 28 min. (clean50 survived on 5 lucky frames.)
+//  The detection model now says the same thing the fit says: a centroid BEYOND the room's walls was seen through the wall
+//  its sightline leaves by, so the detection is placed where that sightline leaves the room. A centroid inside the room is
+//  untouched; a proto room's outline is a frontier (no wall: nothing to have been seen through), so it is untouched too.
+std::optional<Vec2f> sightline_exit(const Vec2f& cam, const Vec2f& p, const std::vector<Vec2f>& poly)
+{
+    if (poly.size() < 3 or not rc::door::polygon_contains(cam, poly) or rc::door::polygon_contains(p, poly))
+        return std::nullopt;
+    const auto cross = [](const Vec2f& a, const Vec2f& b) { return a.x() * b.y() - a.y() * b.x(); };
+    const Vec2f d = p - cam;
+    float best_t = std::numeric_limits<float>::max();
+    for (std::size_t i = 0; i < poly.size(); ++i)
+    {
+        const Vec2f a = poly[i], ab = poly[(i + 1) % poly.size()] - a;
+        const float rxs = cross(d, ab);
+        if (std::abs(rxs) < 1e-12f) continue;   // parallel: never a crossing
+        const float t = cross(a - cam, ab) / rxs, u = cross(a - cam, d) / rxs;
+        if (t > 0.0f and t <= 1.0f and u >= 0.0f and u <= 1.0f) best_t = std::min(best_t, t);
+    }
+    if (best_t > 1.0f) return std::nullopt;
+    return Vec2f(cam + best_t * d);
+}
+
 using K = rc::door::DoorDecisionKind;
 
 // ─── Footprint geometry: the plane maths is SHARED (common/footprint) ────────────────────────────
@@ -475,6 +505,9 @@ void DoorCore::associate(const DoorCycleInput& in, DoorCycleOutput& out)
                 ctr.w_wall += rr.weight;
                 ctr.agree_shut += rr.agree_shut; ctr.agree_open += rr.agree_open;
             }
+            else if (cam_xy_.has_value() and not fit_.room_is_proto())
+                if (const auto q = sightline_exit(*cam_xy_, dv.xy, world_->room_polygon()); q.has_value())
+                    dv.xy = *q;   // seen THROUGH the doorway: the door is where the sightline leaves the room (see sightline_exit)
             dv.birthable = true;
             // birth_evidence: set by prepare_candidates below from the door model's verdict on this detection's place (Task 8).
             // `ev` below (diagnostic counters only) is the old observation weight: confidence x range x admissible x ricoh weight.

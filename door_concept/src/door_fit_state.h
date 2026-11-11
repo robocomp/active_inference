@@ -127,6 +127,7 @@ struct DoorFitState
     // wall does not register (door_fit.cpp). dbg_reg above is this cycle's, for the logs.
     door::WallRegistration wall_reg;
     door::AlongWallResult  dbg_along;
+    float dbg_wall_support = 0.0f;   // log P(s, w | its wall) at the fit's mean this cycle (door_wall_support.h); 0 = none / deep inside
     std::vector<door::OpeningRun> opening_runs;   // this cycle's through-spans (door_opening_edges.h); empty = no measurement
     // Task 11: log P(the belief's hinge) / P(the other jamb) — the hinge as a static hidden variable, learned from the
     // LiDAR while the leaf is open (rc::door::phi_hinge_marginal). 0 = no evidence yet; carried across a room switch.
@@ -367,6 +368,12 @@ struct DoorFitState
     std::optional<Eigen::Vector2f> bearing_view_cam;
     float bearing_view_credit = 0.0f;   // novelty already credited since that anchor view (0..1)
     float dbg_view_credit = 1.0f;       // the last mask frame's credit (DoorFrame::weight) — diagnostics
+    // 2026-11-11 (clean50 door_3): the SAME rule for the low LiDAR's along-wall span (along_wall_update). A parked robot re-reads
+    // the same through-span every sweep; fused as N independent looks its slack ambiguity (slack²/12, ±0.29 m for a sliver)
+    // collapsed σ_s 0.60 → 0.036 m in ~60 sweeps from one standpoint. The sweep origin of the last credited view, and its credit.
+    std::optional<Eigen::Vector2f> along_view_cam;
+    float along_view_credit = 0.0f;
+    float dbg_along_credit = 1.0f;
     // Last GEOMETRY published to the graph (dims + mesh). Gates the per-cycle mesh/dim rewrite so a
     // settled door stops jittering the retina mesh. Mirrors bottle_concept's last_pub_* publish gate.
     float last_pub_cx  = std::numeric_limits<float>::max();

@@ -25,6 +25,33 @@ namespace rc::door::core
 {
 namespace
 {
+// ★ONE VIEW, ONE OBSERVATION (Task D-C round 2; door_view_pool.h's similarity): the credit of a look from `cam` at the aperture —
+// its NOVELTY 1 − sim against the last credited view (bearing from the door in units of its angular half-size, range in units
+// of its half-diagonal), less what was already credited since that anchor view, so a slow drift adds up to one observation per
+// door-size of motion and a still sensor adds nothing. Once the view is wholly new the anchor moves there. Shared by the mask
+// frame (bearing_view_*) and the low LiDAR's along-wall span (along_view_*).
+float credit_view(std::optional<Eigen::Vector2f>& anchor, float& credited, const Eigen::Vector2f& cam, const rc::door::Aperture& ap)
+{
+    const Eigen::Vector2f dc = ap.centre_xy();
+    const float Rd = std::max(1e-3f, 0.5f * std::hypot(ap.w, ap.h));
+    float novelty = 1.0f;
+    if (anchor.has_value())
+    {
+        const Eigen::Vector2f v0 = *anchor - dc, v1 = cam - dc;
+        const float d1 = std::max(1e-3f, v1.norm());
+        const float half = std::max(std::atan2(Rd, d1), 1e-3f);
+        const float db = std::remainder(std::atan2(v1.y(), v1.x()) - std::atan2(v0.y(), v0.x()), 2.0f * std::numbers::pi_v<float>);
+        const float dr = d1 - v0.norm();
+        novelty = 1.0f - std::exp(-std::min((db / half) * (db / half) + (dr / Rd) * (dr / Rd), 60.0f));
+    }
+    const float credit = std::max(0.0f, novelty - credited);
+    if (not anchor.has_value() or novelty >= 1.0f - 1e-3f)
+    { anchor = cam; credited = 0.0f; }
+    else
+        credited = std::max(credited, novelty);
+    return credit;
+}
+
 // Fix round 1 (M-1): the hinge / swing log-odds are relative to the belief's leaf; a (re-)created belief may hang it the other
 // way, and then the same evidence reads with the opposite sign.
 void resign_leaf_llrs(rc::DoorFitState& inst)
@@ -217,6 +244,22 @@ void DoorFit::refresh_geometry(rc::DoorFitState& inst)
     // phi — so the angle has to be estimated before anything reads it, or the whole cycle runs on last
     // cycle's door.
     estimate_phi(inst);
+
+    // ★THE APERTURE LIES INSIDE ITS WALL (2026-11-11, clean50 door_3 — door_wall_support.h): the wall segment that carries the
+    //  doorway, from the room outline (door_carrying_wall: along_wall_update's extent, when the door's centre lies on it), with the
+    //  outline's σ (Existence.BoundarySigmaM), enters the fit as a static factor REPLACED each cycle. A proto room's outline is a
+    //  free-space frontier, not walls: no evidence of where a wall ends, so no support (the old factor is taken out).
+    if (inst.ai2_initialized)
+    {
+        rc::door::WallSupport ws;
+        if (has_room_polygon() and not room_is_proto_)
+        {
+            const rc::DoorBelief::FieldNuisance band{};   // the doorway plane's depth band: the one own-wall definition
+            std::tie(ws.lo, ws.hi) = rc::door::door_carrying_wall(inst.ai2_belief.aperture(), room_polygon_, band.depth_lo, band.depth_hi);
+            ws.sigma = cfg_.exist_boundary_sigma_m;
+        }
+        inst.dbg_wall_support = inst.ai2_belief.apply_wall_support(ws, &inst.along_wall.b, &inst.along_wall.Pb, &inst.along_wall.c);
+    }
 
     rc::DoorState ms = inst.model.state();
     if (inst.ai2_initialized)
@@ -731,26 +774,7 @@ float DoorFit::run_inference(rc::DoorFitState& inst, const DoorObservation& obse
         if (room_T_zed_.has_value())
         {
             view_cam = Eigen::Vector2f(static_cast<float>(room_T_zed_->coeff(0, 3)), static_cast<float>(room_T_zed_->coeff(1, 3)));
-            const Eigen::Vector2f dc = inst.aperture.centre_xy();
-            const float Rd = std::max(1e-3f, 0.5f * std::hypot(inst.aperture.w, inst.aperture.h));
-            float novelty = 1.0f;
-            if (inst.bearing_view_cam.has_value())
-            {
-                const Eigen::Vector2f v0 = *inst.bearing_view_cam - dc, v1 = *view_cam - dc;
-                const float d1 = std::max(1e-3f, v1.norm());
-                const float half = std::max(std::atan2(Rd, d1), 1e-3f);
-                const float db = std::remainder(std::atan2(v1.y(), v1.x()) - std::atan2(v0.y(), v0.x()), 2.0f * std::numbers::pi_v<float>);
-                const float dr = d1 - v0.norm();
-                novelty = 1.0f - std::exp(-std::min((db / half) * (db / half) + (dr / Rd) * (dr / Rd), 60.0f));
-            }
-            // Credit only the novelty not yet credited since the anchor view (as door_view_pool.h's `counted`), so a slow
-            // drift adds up to one observation per door-size of motion instead of vanishing frame by frame; once the view
-            // is wholly new the anchor moves there.
-            credit = std::max(0.0f, novelty - inst.bearing_view_credit);
-            if (not inst.bearing_view_cam.has_value() or novelty >= 1.0f - 1e-3f)
-            { inst.bearing_view_cam = view_cam; inst.bearing_view_credit = 0.0f; }
-            else
-                inst.bearing_view_credit = std::max(inst.bearing_view_credit, novelty);
+            credit = credit_view(inst.bearing_view_cam, inst.bearing_view_credit, *view_cam, inst.aperture);
         }
         inst.dbg_view_credit = credit;
         rc::DoorFrame frame;
@@ -1380,9 +1404,14 @@ void DoorFit::estimate_phi(rc::DoorFitState& inst)
         float wall_lo = std::numeric_limits<float>::quiet_NaN(), wall_hi = wall_lo;
         if (has_room_polygon() and not room_is_proto_)
             std::tie(wall_lo, wall_hi) = rc::door::door_wall_extent(ap, room_polygon_, nz.depth_lo, nz.depth_hi);
+        // ★ONE VIEW, ONE OBSERVATION for the span too (2026-11-11, clean50 door_3): the sweep from a parked base is the same
+        //  span, with the same slack, every sweep — credited by the novelty of the sensor's standpoint (credit_view), as the
+        //  mask frame is. A span seen only from the standpoint already credited moves nothing.
+        //  A sweep that measured no span looked at no span: it consumes no credit.
+        inst.dbg_along_credit = runs.empty() ? 0.0f : credit_view(inst.along_view_cam, inst.along_view_credit, reg_sweep.origin.head<2>(), ap);
         inst.dbg_along = rc::door::along_wall_update(inst.ai2_belief, inst.along_wall, runs, reg_sweep.reg,
                                                      rc::door::clear_fraction(post.curve), chain_s + rl * rl, range, dt_aw,
-                                                     wall_lo, wall_hi, cfg_.exist_boundary_sigma_m);
+                                                     wall_lo, wall_hi, cfg_.exist_boundary_sigma_m, inst.dbg_along_credit);
     }
     log_phi_csv(inst, rays, lr.frame_loglik, lr.prior_mean, lr.prior_sigma, post.mean, post.sigma, post.measured);
     // phi_support was the camera mask overlap at the claimed angle; -1 = "the camera does not score phi".

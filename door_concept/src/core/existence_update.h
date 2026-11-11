@@ -106,10 +106,13 @@ ExistenceTrace observe_place(PlaceBelief& b, const rc::DoorFitState& theta, cons
 /// The structural prior of θ in this room (place_prior.h). `doors_on_wall_before`: how many doors were on θ's wall before it.
 /// The size is scored on the FITTED width/height with their posterior sds (a candidate: what the fit will make of its blob) under
 /// `size`, the door fit's own width/height prior (one size prior for one quantity, place_prior.h). `aperture_sd`: the sd of θ's
-/// aperture position along the wall normal (the band term is the marginal over it, place_prior.h).
+/// aperture position along the wall normal (the band term is the marginal over it, place_prior.h). `jamb_sd_lo` / `jamb_sd_hi`: the
+/// sds of θ's two jambs ALONG the wall — the extent term (the aperture inside its wall segment, door_wall_support.h) is the
+/// marginal over them; the segment is door_wall_extent's on a promoted outline, none on a proto frontier.
 [[nodiscard]] PlacePrior prior_of(const rc::DoorFitState& theta, const std::vector<Vec2f>& polygon, bool proto,
                                   const rc::door::RoomBand& band, int doors_on_wall_before, float width_sd, float height_sd,
-                                  bool size_resolved, const SizePrior& size, float aperture_sd);
+                                  bool size_resolved, const SizePrior& size, float aperture_sd,
+                                  float jamb_sd_lo = 0.0f, float jamb_sd_hi = 0.0f);
 
 /// The wall group (place_prior.h wall_groups) θ's aperture lies on: the group of the polygon edge nearest to it; -1 = none.
 [[nodiscard]] int wall_of(const Vec2f& xy, const std::vector<Vec2f>& polygon, const std::vector<int>& groups);

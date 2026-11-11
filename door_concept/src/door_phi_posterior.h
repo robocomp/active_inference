@@ -231,6 +231,22 @@ inline std::pair<float, float> door_wall_extent(const Aperture& ap, const std::v
     return c < runs.front().first ? runs.front() : runs.back();
 }
 
+// ─── THE WALL THAT CARRIES THE DOORWAY, FOR ITS SUPPORT PRIOR (2026-11-11, door_wall_support.h) ──────────────────────────
+// door_wall_extent's run — but only when it CARRIES the doorway: the aperture's centre lies on it (or in the gap between the
+// two runs it merged). door_wall_extent's last resort, "a centre beyond every run takes the nearest", names a run the door
+// does not lie on (a door frame authored on an earlier polygon and tilted against this one leaves its own wall's edges out
+// of band, and the nearest in-band piece can be metres away — clean50's association term read Φ ≈ 1e-13 there); a prior
+// built on it would drag the door onto it. A wall that does not carry the door says nothing about where the door ends: NaN.
+inline std::pair<float, float> door_carrying_wall(const Aperture& ap, const std::vector<Eigen::Vector2f>& polygon,
+                                                  float depth_lo, float depth_hi)
+{
+    constexpr float kNaN = std::numeric_limits<float>::quiet_NaN();
+    const auto [lo, hi] = door_wall_extent(ap, polygon, depth_lo, depth_hi);
+    const float c = ap.s + 0.5f * ap.w;
+    if (not (std::isfinite(lo) and std::isfinite(hi)) or c < lo or c > hi) return {kNaN, kNaN};
+    return {lo, hi};
+}
+
 // ─── THE φ GRID, ONE DEFINITION (Task 11 fix round 1) ─────────────────────────────────────────────────────────────────
 // DoorFitter::estimate_phi and the passage anchor's φ curve (door_anchor_open.h) must score the same hypotheses: the
 // range [0, max(0.1, phi_max)] and the step count derived from the declared resolution, as estimate_phi always did.

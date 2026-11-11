@@ -35,6 +35,7 @@
 #include "../../common/ai_belief/recursive_laplace.h"
 #include "../../common/ai_belief/lidar_ray_factor.h"   // rc::LidarRays + lidar_ray_cost
 #include "door_geometry.h"      // rc::door:: Aperture / LeafState / LeafPose — the single geometry source
+#include "door_wall_support.h"  // rc::door::WallSupport — the aperture lies inside its wall (apply_wall_support)
 
 namespace rc
 {
@@ -230,6 +231,7 @@ public:
     {
         Sigma_.row(0).setZero(); Sigma_.col(0).setZero();
         Sigma_(0, 0) = std::max(1e-8f, sd * sd);
+        sup_L_.setZero(); sup_eta_.setZero();   // the placement prior was reset: no wall-support factor is in Σ any more
     }
     void set_params(const DoorBeliefParams& p) { params_ = p; }
     // Author the wall frame this door is anchored to (the fitter calls this each cycle from the associated
@@ -322,6 +324,103 @@ public:
         Sigma_ = An.topLeftCorner<N, N>();
         c = An.block<N, 1>(0, N);
         Pb = std::max(0.f, An(N, N));
+    }
+
+    // ★THE APERTURE LIES INSIDE ITS WALL (2026-11-11, clean50 door_3; door_wall_support.h has the model). A STATIC prior factor
+    // P(s, w | wall) ∝ Φ((s − a)/σ)·Φ((b − s − w)/σ), carried as a Laplace factor and REPLACED each call, never accumulated (a
+    // prior entered per cycle is a fake sensor): the factor entered last time is taken out of the posterior in information form
+    // (Λ −= H_old, η −= η_old — exact for every additive update since, which all of this belief's updates are), the new one is
+    // put in at the joint MAP (Newton on a log-concave objective), and what was put in is banked for the next call. An inactive
+    // support (no polygon, a proto room's frontier) only takes the old factor out. When the along-wall registration offset b is
+    // carried (Pb > 0), the replacement runs on the augmented [s, w, h, d, b] so b and its cross-covariance c move with s.
+    // A door deep inside its wall gets a factor ≈ 0 (log Φ → 0): its mean and Σ are unchanged to float round-off.
+    // Returns the support's log value at the new mean (diagnostic).
+    float apply_wall_support(const rc::door::WallSupport& ws, float* bias = nullptr, float* Pb = nullptr,
+                             Eigen::Matrix<float, 4, 1>* c = nullptr)
+    {
+        using MX = Eigen::MatrixXd;
+        using VX = Eigen::VectorXd;
+        const bool had = not sup_L_.isZero(0.0) or not sup_eta_.isZero(0.0);
+        if (not ws.active() and not had)
+            return 0.0f;   // nothing entered, nothing to enter: the belief is untouched, bit for bit
+        const bool aug = bias != nullptr and Pb != nullptr and c != nullptr and *Pb > 0.f;
+        const int n = aug ? N + 1 : N;
+        MX A = MX::Zero(n, n);
+        A.topLeftCorner(N, N) = Sigma_.cast<double>();
+        VX x(n);
+        x.head(N) = state_.vec().cast<double>();
+        if (aug)
+        {
+            A.block(0, N, N, 1) = c->cast<double>();
+            A.block(N, 0, 1, N) = c->transpose().cast<double>();
+            A(N, N) = *Pb;
+            x(N) = *bias;
+        }
+        Eigen::LLT<MX> llA(A);
+        if (llA.info() != Eigen::Success)
+            return 0.0f;   // Σ not a covariance (a numerical domain guard): leave the belief as it is
+        MX Lam = llA.solve(MX::Identity(n, n));
+        VX eta = Lam * x;
+        // take the old factor out (the data-only posterior)
+        MX Lam_d = Lam;
+        VX eta_d = eta;
+        Lam_d.topLeftCorner(N, N) -= sup_L_;
+        eta_d.head(N) -= sup_eta_;
+        Eigen::LLT<MX> llD(Lam_d);
+        if (llD.info() != Eigen::Success)
+        {   // the old factor is no longer separable from the data (round-off after many updates): treat it as absorbed
+            Lam_d = Lam; eta_d = eta; llD.compute(Lam_d);
+        }
+        const VX m_d = llD.solve(eta_d);
+        // the new factor at the joint MAP of  −½ (x − m_d)ᵀ Λ_d (x − m_d) + f(s, w)
+        VX xm = m_d;
+        const auto objective = [&](const VX& v)
+        {
+            const VX d = v - m_d;
+            return -0.5 * d.dot(Lam_d * d) + rc::door::eval_wall_support(v(0), v(1), ws).f;
+        };
+        for (int it = 0; it < 40 and ws.active(); ++it)
+        {
+            const auto e = rc::door::eval_wall_support(xm(0), xm(1), ws);
+            VX g = -(Lam_d * (xm - m_d));
+            g(0) += e.gs; g(1) += e.gw;
+            MX H = Lam_d;
+            H(0, 0) += e.hss; H(0, 1) += e.hsw; H(1, 0) += e.hsw; H(1, 1) += e.hww;
+            VX step = H.llt().solve(g);
+            if (not step.allFinite()) break;
+            // backtracking on the (concave) objective: Newton's full step can overshoot where log Φ bends
+            const double f0 = objective(xm);
+            double t = 1.0;
+            while (t > 1e-6 and objective(xm + t * step) < f0) t *= 0.5;
+            xm += t * step;
+            if (t * step.norm() < 1e-10) break;
+        }
+        const auto e = rc::door::eval_wall_support(xm(0), xm(1), ws);
+        Eigen::Matrix4d Hf = Eigen::Matrix4d::Zero();
+        if (ws.active()) { Hf(0, 0) = e.hss; Hf(0, 1) = Hf(1, 0) = e.hsw; Hf(1, 1) = e.hww; }
+        MX Lam_p = Lam_d;
+        Lam_p.topLeftCorner(N, N) += Hf;
+        Eigen::LLT<MX> llP(Lam_p);
+        if (llP.info() != Eigen::Success)
+            return 0.0f;
+        MX Ap = llP.solve(MX::Identity(n, n));
+        Ap = 0.5 * (Ap + Ap.transpose());
+        if (not Ap.allFinite() or not xm.allFinite())
+            return 0.0f;
+        const VX eta_f = Lam_p * xm - eta_d;   // the factor's information vector (its b entry is 0 at the MAP)
+        sup_L_ = Hf;
+        if (ws.active()) sup_eta_ = eta_f.head(N); else sup_eta_.setZero();
+        DoorBeliefState st = DoorBeliefState::from_vec(xm.head(N).cast<float>());
+        apply_constraints(st);
+        state_ = st;
+        Sigma_ = Ap.topLeftCorner(N, N).cast<float>();
+        if (aug)
+        {
+            *c = Ap.block(0, N, N, 1).cast<float>();
+            *Pb = static_cast<float>(std::max(0.0, Ap(N, N)));
+            *bias = static_cast<float>(xm(N));
+        }
+        return static_cast<float>(e.f);
     }
 
     // ★try96: THE MASK SEES THE SAME REGISTRATION OFFSET. Camera and LiDAR are registered to the room by ONE pose, so a mask
@@ -711,6 +810,9 @@ private:
     DoorBeliefParams           params_;
     Eigen::Matrix<float, 4, 4> Sigma_ = Eigen::Matrix<float, 4, 4>::Identity();
     Eigen::Matrix<float, 4, 1> prior_mean_ = Eigen::Matrix<float, 4, 1>::Zero();
+    // The wall-support factor currently inside Σ / the mean, in information form (apply_wall_support replaces it).
+    Eigen::Matrix4d sup_L_   = Eigen::Matrix4d::Zero();
+    Eigen::Vector4d sup_eta_ = Eigen::Vector4d::Zero();
 };
 
 }  // namespace rc

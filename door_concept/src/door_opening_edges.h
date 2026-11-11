@@ -431,7 +431,8 @@ struct AlongWallResult
 inline AlongWallResult along_wall_update(rc::DoorBelief& belief, AlongWallState& st, const std::vector<OpeningRun>& runs,
                                          const WallRegistration& reg, float p_detect, float sigma0_sq, float range_m,
                                          float dt_s, float wall_lo = std::numeric_limits<float>::quiet_NaN(),
-                                         float wall_hi = std::numeric_limits<float>::quiet_NaN(), float wall_sigma = 0.f)
+                                         float wall_hi = std::numeric_limits<float>::quiet_NaN(), float wall_sigma = 0.f,
+                                         float view_credit = 1.f)
 {
     AlongWallResult res;
     res.n_runs = static_cast<int>(runs.size());
@@ -498,9 +499,13 @@ inline AlongWallResult along_wall_update(rc::DoorBelief& belief, AlongWallState&
     const float denom = clutter * (1.f - res.p_detect) + sum_e;
     res.beta = denom > 0.f ? best_e / denom : 0.f;
     res.z = best_z; res.R = best_R; res.S = best_S; res.nu = best_z - (s + st.b);
-    if (res.beta > 0.f)
+    // ★`view_credit` (2026-11-11): the novelty of the sweep's standpoint (DoorFit's credit_view) — one view, one observation. The
+    //  span's information is scaled by it (R / credit), so a span re-read from a parked base is fused once, not once per sweep
+    //  (clean50 door_3: R = 0.082 m² — a 1-bin sliver's slack²/12 — fused ~60 times from one standpoint collapsed σ_s to 0.036 m).
+    //  0 ⇒ nothing fused (the association is still computed, for the log). 1 (default) ⇒ the old update, exactly.
+    if (res.beta > 0.f and view_credit > 0.f)
     {
-        belief.fuse_along_wall(res.nu, best_R, res.beta, st.b, st.Pb, st.c);
+        belief.fuse_along_wall(res.nu, view_credit < 1.f ? best_R / view_credit : best_R, res.beta, st.b, st.Pb, st.c);
         res.updated = true;
     }
     return res;

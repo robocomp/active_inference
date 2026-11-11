@@ -28,6 +28,7 @@
 //   carries. It is not a free tuning knob: σ is the band's own.
 #pragma once
 #include "../door_room_band.h"
+#include "../door_wall_support.h"   // the aperture lies inside its wall (PlacePrior::extent)
 #include <Eigen/Dense>
 #include <cmath>
 #include <vector>
@@ -56,12 +57,18 @@ struct PlacePriorInput
     SizePrior size_prior;               ///< the fit's width/height prior (one prior for one quantity)
     float aperture_sd_m;                ///< sd of the aperture's position ALONG THE WALL NORMAL (m): the fit's, or a candidate's detection's
     float edge_sigma_m = 0.0f;          ///< the proto outline edge's own published uncertainty (m); room_concept publishes none on the room node, so 0
+    /// The wall segment that carries the aperture (door_wall_support.h; inactive = unknown: no polygon, a proto frontier) and the
+    /// sds of the aperture's two jambs ALONG the wall (the fit's, or a candidate's detection's): the extent term is the marginal over them.
+    rc::door::WallSupport wall_support{};
+    float along_s = 0.0f;               ///< the aperture's near jamb along the wall (same frame as wall_support)
+    float jamb_sd_lo = 0.0f, jamb_sd_hi = 0.0f;
 };
 
 struct PlacePrior
 {
     float band = 0, base_rate = 0, size = 0;
-    [[nodiscard]] float total() const { return band + base_rate + size; }
+    float extent = 0;   ///< log P(the aperture lies inside its wall segment) — door_wall_support.h; 0 deep inside / unknown wall
+    [[nodiscard]] float total() const { return band + base_rate + size + extent; }
 };
 
 namespace detail
@@ -95,6 +102,10 @@ namespace detail
             b.sigma_m = std::hypot(b.sigma_m, in.edge_sigma_m);
         p.band = rc::door::band_log_prior(delta, b);
     }
+    // ★THE APERTURE LIES INSIDE ITS WALL (2026-11-11, clean50 door_3): a door whose jamb overhangs the end of the wall that
+    //  carries it is improbable in proportion to the overhang, under the outline's σ ⊕ the jamb's own sd. Replaced with the
+    //  rest of the prior, never accumulated.
+    p.extent = rc::door::wall_support_log_marginal(in.along_s, in.width, in.wall_support, in.jamb_sd_lo, in.jamb_sd_hi);
     if (in.size_resolved)
         p.size = detail::normalised_log_predictive(in.width, in.size_prior.w_m, in.size_prior.w_sd, in.width_sd)
                + detail::normalised_log_predictive(in.height, in.size_prior.h_m, in.size_prior.h_sd, in.height_sd);

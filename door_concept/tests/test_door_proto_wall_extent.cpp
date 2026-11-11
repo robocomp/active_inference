@@ -16,8 +16,8 @@
 // hole (0, 0) in a polygon whose mouth edge is (−0.33, 0)→(0.27, 0), and a low-LiDAR sweep from (0, 0.4) — inside the
 // room, in the doorway as the robot was — whose rays go THROUGH the hole for x ∈ [−0.27, 0.25] and in two 2 cm slivers
 // either side of it (pingpong1's spans at the mirror's first cycle), and stop on the wall line everywhere else.
-//   (a) RED reproduction: the same polygon read as WALLS (is_proto = false) slides the aperture > 0.15 m toward +x
-//       (+0.25 m here; +0.28 m live).
+//   (a) the same polygon read as WALLS (is_proto = false): it used to slide the aperture > 0.15 m toward +x (+0.25 m here;
+//       +0.28 m live); since 2026-11-11 the parked sweep is ONE observation (view credit), so it stays within 5 cm.
 //   (b) the fix: as a PROTO room the aperture stays within 5 cm of the hole.
 //   (c) a room whose wall runs through the doorway (the room_1 case): the flag moves nothing (< 1 cm) — the term only ever
 //       mattered where the polygon's edge at the door is a frontier.
@@ -169,10 +169,14 @@ int main()
     std::setlocale(LC_ALL, "");   // as the agent runs (Qt): the core must not parse anything through the C locale
     constexpr int N = 40;
 
-    // (a) the proto ring read as WALLS — the defect
+    // (a) the proto ring read as WALLS. Until 2026-11-11 this reproduced the defect (+0.25 m): the parked robot's identical sweep
+    //     was fused 40 times, and the Φ factors' preference compounded each time. The along-wall span is now credited by the
+    //     sweep standpoint's novelty (one view, one observation — door_fit.cpp credit_view), so 40 sweeps from one place are ONE
+    //     observation and even the misread ring cannot slide the mirror off the hole. The proto rule (b) stays the reason the
+    //     term is absent there; this case now guards that the repeated sweep cannot compound.
     const Result walls = run(false, kProtoRing, N);
     std::print("(a) ring read as walls : aperture ({:+.3f}, {:+.3f}) σ_s {:.3f}\n", walls.ap_x, walls.ap_y, walls.s_sd);
-    CHECK(std::isfinite(walls.ap_x) and walls.ap_x > 0.15f);
+    CHECK(std::isfinite(walls.ap_x) and std::abs(walls.ap_x) < 0.05f);
 
     // (b) the same ring as what it is: a provisional room's free-space frontier
     const Result proto = run(true, kProtoRing, N);

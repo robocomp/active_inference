@@ -1137,6 +1137,26 @@ int main()
         }
     }
 
+    // ── a_door_at_the_end_of_a_wall (2026-11-11, clean50 door_3): the existence prior carries the extent term (place_prior.h), the
+    //    wall from the fit's own definition (door_carrying_wall). The top wall ends at x = −5: a 1.0 m door centred at −4.70 has its
+    //    west jamb 0.20 m past the end and pays; the same door at −4.45 (5 cm of wall beside its post) barely pays; mid-wall pays
+    //    nothing; a proto outline (a frontier, no wall end known) pays nothing; and the term is REPLACED with the prior (total()).
+    {
+        const auto prior_at = [&](float x, bool proto)
+        {
+            const rc::DoorFitState th = typical_door_at({x, kWallY}, 1.0f, rc::DoorConfig{}.door_prior_h_m, kRoom);
+            return prior_of(th, kRoom, proto, {0.2f, 0.1f}, 0, 0.05f, 0.03f, true, fit_size_prior(), 0.0f, 0.05f, 0.05f);
+        };
+        const auto over = prior_at(-4.70f, false), truth = prior_at(-4.45f, false), mid = prior_at(1.0f, false), front = prior_at(-4.70f, true);
+        std::print("door at the end of a wall: extent over {:+.3f} truth {:+.3f} mid-wall {:+.4f} proto {:+.3f}\n",
+                   over.extent, truth.extent, mid.extent, front.extent);
+        CHECK(over.extent < -1.5f);
+        CHECK(truth.extent > -0.5f and truth.extent < 0.0f);
+        CHECK(std::abs(mid.extent) < 1e-4f);
+        CHECK(front.extent == 0.0f);
+        CHECK(std::abs(over.total() - (over.band + over.base_rate + over.size + over.extent)) < 1e-5f);
+    }
+
     std::print("{}\n", fails == 0 ? "ALL PASS" : std::format("{} FAILURE(S)", fails));
     return fails == 0 ? 0 : 1;
 }
