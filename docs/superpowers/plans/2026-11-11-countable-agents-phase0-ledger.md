@@ -35,7 +35,13 @@ Unmodified agents in the worktree, `systemd-run --user --scope` (MemoryHigh 40G 
 
 ## Findings (Task 2)
 
-(none yet)
+- chair_39 was born in run rose_chair3 (2026-11-09) 2.8 s after the leg room_1 -> room_2, at room_2 (-2.49,-0.66) = world ~(-6.87,4.02): a genuine ROOM_1 chair seen back through the open door. Later lives are LTOM recalls of the same uid, not new births.
+- No INACTIVE / no-polygon line preceded the birth (grep count 0 in both logs); the gate is never inactive after startup because the fitter keeps the previous room's polygon when the new room has none (refresh_room_geometry returns early).
+- Two causes remain unsplit by the logs: (c1) stale room_1 polygon kept after the room switch (room_1 bbox x[-4.25,4.25] y[-4.63,4.63] numerically contains the point), or (b/c2) room_2's own recalled/proto outline contained it. Polygon values are not logged anywhere.
+- Hypothesis (a) of spec G2 (prior INACTIVE, no outline) is not supported.
+- To settle it live: log outline bbox + room id on change and the inside verdict at each birth.
+
+Owner 11-11: continue; WAIT rule stands; cause to be pinned live (outline bbox + room id logged on change, inside verdict logged at birth — Task 4).
 
 ## Behaviour differences
 
