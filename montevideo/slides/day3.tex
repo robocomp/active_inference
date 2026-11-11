@@ -749,55 +749,13 @@
     \node[lab, text=muted, anchor=north, align=center] at (-0.75,-0.3) {\textbf{boundary}:\\what dropped\\poses knew};
   \end{tikzpicture}\\[0.2em]
   \raggedright\small
-  Circles are the unknowns (the last 5 poses), squares are $-\ln$ of one factor each. $F$ is their sum, minimised all together:
+  Circles are the unknowns (5 poses, a new one each 10 cm or $9^\circ$), squares are $-\ln$ of one factor each. $F$ is their sum, minimised all together:
   \[
     F(X_0,\dots,X_4)=\textcolor{muted}{\text{boundary}}+\textcolor{cool}{\text{walls}}+\textcolor{good!70!black}{\text{wheels}}+\textcolor{accent}{\text{corners}}
   \]
-  {\footnotesize Scans are heavy and used once; corners are a few numbers, so the window keeps them: the short history.
+  {\footnotesize A scan counts while its pose is the newest (and once more as it leaves); corners count at every pose: the short history.
   The oldest pose leaves on the left; what it knew is squeezed into the boundary prior. Past corners still count: the wheels carry them to $X_4$. No loop is needed, because the room is given.\par}
   \src{room\_concept.tex l.1601--1720 (eq.\ rc-window); \texttt{RoomConcept.WindowSize} = 5}
-\end{frame}
-
-\begin{frame}{The boundary prior: what a leaving pose leaves behind}
-  \centering
-  \begin{tikzpicture}[x=1.4cm,
-      pose/.style={circle, draw=black!75, very thick, minimum size=8mm, inner sep=0, font=\small, fill=white},
-      gone/.style={pose, draw=black!30, text=black!40, dashed},
-      fac/.style={rectangle, minimum size=2.2mm, inner sep=0},
-      ed/.style={draw=black!55, thick}]
-    % before
-    \node[lab, anchor=west] at (-0.6,1.0) {\textbf{1.} the oldest pose must go};
-    \node[pose] (xo) at (0,0) {$X_{\text{old}}$}; \node[pose] (x0) at (1.2,0) {$X_0$}; \node[pose] (x1) at (2.4,0) {$X_1$};
-    \node[font=\small] at (3.1,0) {$\cdots$};
-    \node[fac, fill=good!70!black] (m) at (0.6,0) {}; \draw[ed] (xo) -- (m) -- (x0);
-    \node[fac, fill=good!70!black] (m1) at (1.8,0) {}; \draw[ed] (x0) -- (m1) -- (x1);
-    \node[fac, fill=accent] (c) at (0,-0.75) {}; \draw[ed] (xo) -- (c);
-    \node[lab, text=accent, anchor=north] at (0,-0.9) {its corner};
-    \node[lab, text=good!70!black, anchor=south] at (0.6,0.35) {wheels};
-    % arrow
-    \draw[->, very thick, muted] (3.5,0) -- node[above, lab] {marginalise} node[below, lab] {(Day 1)} (4.6,0);
-    % after
-    \begin{scope}[shift={(5.3,0)}]
-      \node[lab, anchor=west] at (-0.6,1.0) {\textbf{2.} one Gaussian on $X_0$ keeps what it knew};
-      \node[gone] (go) at (0,0) {$X_{\text{old}}$};
-      \node[fac, fill=muted, minimum size=3mm] (b) at (0.6,0) {}; \node[pose] (y0) at (1.2,0) {$X_0$}; \draw[ed] (b) -- (y0);
-      \node[pose] (y1) at (2.4,0) {$X_1$}; \node[fac, fill=good!70!black] (n1) at (1.8,0) {}; \draw[ed] (y0) -- (n1) -- (y1);
-      \node[font=\small] at (3.1,0) {$\cdots$};
-      \node[lab, text=muted, anchor=north] at (0.6,-0.4) {boundary prior};
-    \end{scope}
-  \end{tikzpicture}\\[-0.2em]
-  \raggedright\small
-  \[
-    \text{boundary}(X_0)=\tfrac12\,\frac{(X_0-\mu_b)^2}{\sigma_b^2},
-    \qquad
-    \sigma_b^2=\underbrace{\sigma_{\text{corner}}^2}_{\substack{\text{how well the corner}\\\text{fixed } X_{\text{old}}}}+\underbrace{\sigma_{\text{wheels}}^2}_{\substack{\text{how well the wheels}\\\text{carried it to } X_0}}
-  \]
-  \vspace{-0.3em}
-  $\mu_b$: where the dropped pose put $X_0$. Uncertainties add: a fix passed along the wheels arrives a little blurred.\\[0.4em]
-  \alert{Two cautions}, both against believing yourself: at least two poses stay (a prior built from the
-  pose it constrains confirms itself and drifts), and a pose that fitted the walls badly leaves no confident prior.\\[0.3em]
-  {\footnotesize One coordinate shown; on the robot $x$, $y$, heading together, and $\sigma_b^2$ is a $3\times3$ matrix.\par}
-  \src{room\_concept.tex l.1756--1779}
 \end{frame}
 
 \begin{frame}{Localising against the room you just built}
@@ -843,7 +801,7 @@
 
   \small
   A mask says ``chair'', not \emph{which} chair: each one is handed to an instance, or starts a new
-  one. What instance $i$ was handed is its data $\bar Z_i$, and \alert{the handing is one best guess} (frame 29).
+  one. What instance $i$ was handed is its data $\bar Z_i$, and \alert{the handing is one best guess} (frame 28).
   \src{retina, \texttt{yoloe-26x-seg-household}, on a simulated frame; phylogenetic\_perception.tex l.347--408}
 \end{frame}
 
@@ -910,7 +868,7 @@
       \textbf{Mixture.} The chair is a seat, a backrest and four legs. A point is either on the chair
       or clutter, $\rho=-\ln(\text{chair}+\text{clutter})$, so a stray point costs a bounded amount.\\[0.3em]
       \textbf{Precision.} $\sigma_n$ grows with range. One error is shared by all the points of a
-      frame, the robot's own pose error, and it is counted once (frame 30).\\[0.3em]
+      frame, the robot's own pose error, and it is counted once (frame 29).\\[0.3em]
       \textbf{Reprojection.} The reverse path: the believed silhouette, projected into the image with its
       predicted depth, is checked against the edges there. \alert{On the robot it feeds existence, not the fit.}
     \end{column}
