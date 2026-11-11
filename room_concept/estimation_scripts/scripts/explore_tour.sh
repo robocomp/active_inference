@@ -63,6 +63,20 @@ while (( $(date +%s) - t0 < RUN_LIMIT_S )); do
   sleep 5
 done
 [[ "$result" == RUN* ]] && result="$result — doors crossed $(python3 -I $S/doors_crossed.py crossing/$RUN/gt_pose.tsv 2>/dev/null)"
+# THE LAST CROSSING IS A RE-ENTRY (2026-11-11): every door crossed means the robot has just walked back into a room it has
+# seen. Recognition needs that room's evidence; stopping at the crossing cut it off (clean47: no verdict; clean48: proposed,
+# never answered). So the tour ends when the room the robot is in is SETTLED — recognised (ltsm's swap ACCEPTED, or WITHDRAWN = "a new room")
+# or promoted as a new room — bounded by the drive's own room limit, ExploreTour.MaxRoomS (300 s): no new constant.
+if [[ "$result" == ALL* ]]; then
+  MAXROOM=$(grep -m1 -E "^MaxRoomS" $WT/controller/etc/config.toml 2>/dev/null | grep -oE "[0-9.]+" | head -1); MAXROOM=${MAXROOM%.*}; MAXROOM=${MAXROOM:-300}
+  n_lt=$(wc -l < $L/ltsm_agent.log); n_ct=$(wc -l < $L/controller.log); t1=$(date +%s); settled="not settled within MaxRoomS ($MAXROOM s)"
+  while (( $(date +%s) - t1 < MAXROOM )); do
+    if s1=$(tail -n +$n_lt $L/ltsm_agent.log | grep -a -o -m1 "\[swap\] \(ACCEPTED: [^;]*\|WITHDRAWN: [^;]*\)") && [ -n "$s1" ]; then settled="recognition: ${s1:0:120}"; break; fi
+    if s2=$(tail -n +$n_ct $L/controller.log | grep -a -o -m1 "\[explore-tour\] room_[0-9]*: \(promoted\|max-time\)[^—]*") && [ -n "$s2" ]; then settled="promoted as a new room: ${s2:0:120}"; break; fi
+    sleep 2
+  done
+  result="$result; re-entered room $settled after $(( $(date +%s) - t1 )) s"
+fi
 echo "explore_tour: $result" | tee crossing/$RUN/result.txt
 echo "explore_tour off" > $B/controller/remote_cmd.txt; sleep 2
 # the drive's CSV from THIS run only (final review M2: the main checkout keeps an older one)

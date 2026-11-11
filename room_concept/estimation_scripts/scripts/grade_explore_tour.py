@@ -122,6 +122,14 @@ def main(run):
         gt_err = ""
     # estimated room names, by the name ltsm_agent gave each room (never by list position); the start room is room_1
     names = room_names(run, rooms)
+    # a room RECOGNISED as a remembered one is not promoted again: it is restored from memory (ltsm's swap ACCEPTED)
+    recognised = {}
+    try:
+        for ln in open(os.path.join(run, "logs", "ltsm_agent.log"), errors="replace"):
+            m = re.search(r"\[swap\] ACCEPTED: (room_\d+) adopted as (\S+?);", ln)
+            if m: recognised[m.group(1)] = m.group(2)
+    except OSError:
+        pass
     lines, table = [], []
     for i, r in enumerate(rooms):
         est = names[i]
@@ -142,10 +150,14 @@ def main(run):
         causes = ",".join(f"{d['cause']}->{d['door'] or '-'}" for d in leaves) or "-"
         found = sorted({c.split(":")[0] for d in leaves for c in d["candidates"].split(";") if c and c.split(":")[1] == "1"})
         row = {"room": "room_1" if est == "start" else est, "how": r["how"], "born_s": r["born"], "promoted_s": r["promoted"],
-               "area_m2": r["area"], "truth": truth or "-", "iou": iou, "decisions": causes, "doors_found": " ".join(found)}
+               "area_m2": r["area"], "truth": truth or "-", "iou": iou, "decisions": causes, "doors_found": " ".join(found),
+               "recognised_as": recognised.get(est, "")}
+        if r["promoted"] is None and est in recognised:
+            iou = f"— recognised as {recognised[est]} (restored from memory, not re-estimated)"
+            row["iou"] = iou
         table.append(row)
         lines.append(f"{row['room']:7} {r['how']:8} born {r['born']:7.1f} s  promoted "
-                     f"{('%.1f s' % r['promoted']) if r['promoted'] is not None else 'NEVER':>9}  area "
+                     f"{('%.1f s' % r['promoted']) if r['promoted'] is not None else ('RECOGNISED' if est in recognised else 'NEVER'):>9}  area "
                      f"{('%.1f' % r['area']) if r['area'] else '-':>5} m2  truth {row['truth']:7} IoU {iou}\n"
                      f"        decisions: {causes}\n        doors found: {row['doors_found'] or '-'}")
     max_time = sum(1 for d in drive if d["cause"] == "max-time")
