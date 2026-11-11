@@ -263,8 +263,11 @@ inline Contract default_contract_for(std::string_view object_type)
         // Chair: verify YOLO is firing on this chair before completing. No ROI binding (the chair
         // publishes no projected-ROI yet) → the controller's distance-sweep finds a stand-off where
         // the detection holds; the goal then confirms it. Parent (chair node) publishes the attrs.
+        // chair_front_seen, NOT chair_detection_alive: the latter latches ~40 chair cycles after the last
+        // mask, so it confirmed "looks" at a chair already behind the robot (chat_e2e8). front_seen is the
+        // front camera's verdict on the newest mask frame. (objects session, branch fix/chair-front-seen)
         return Contract::servo()
-            .until("chair_detection_alive",      GE, 0.5f)
+            .until("chair_front_seen",           GE, 0.5f)
             .and_ ("chair_detection_confidence", GE, 0.20f)
             .still(0.12f, 0.20f)
             .stable(1).timeout_s(20).on_fail(Consume);

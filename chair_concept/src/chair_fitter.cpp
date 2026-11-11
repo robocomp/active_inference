@@ -223,6 +223,15 @@ ChairFitter::ChairObservation ChairFitter::observe(ChairInstance& inst, const DS
         if (const auto& sl = masks_packet.slices;
             inst.assigned_mask_idx >= 0 and inst.assigned_mask_idx < static_cast<int>(sl.size()))
             selected_mask = sl[inst.assigned_mask_idx];
+        // Front-camera sighting: decided ONCE per new mask frame (this block can re-enter on the same frame
+        // when a slice had no support points), never latched across frames.
+        if (masks_packet.frame_id != inst.front_checked_frame)
+        {
+            inst.front_checked_frame = masks_packet.frame_id;
+            inst.front_seen = selected_mask.has_value() and selected_mask->is_zed();
+            if (inst.front_seen)
+                inst.front_seen_frame = masks_packet.frame_id;
+        }
         if (selected_mask.has_value())
         {
             const auto& slice = selected_mask.value();

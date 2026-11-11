@@ -177,6 +177,13 @@ struct ChairInstance
     int   frames_since_detection = 100000;   // cycles since last fresh chair mask (0 = just detected)
     float last_mask_confidence   = 0.0f;      // YOLO confidence of the last chair detection
     bool  detection_alive        = false;     // frames_since_detection < threshold
+    // FRONT-camera sighting, per processed MASK FRAME (not per cycle, and not latched): did the newest mask
+    // frame give this chair a ZED slice? detection_alive above latches for DetectionAliveMaxFrames, so a
+    // controller dwell judged on it counted "looks" for seconds after the chair left the view (chat_e2e8:
+    // 53/5 hits with chair_34 142° off-axis). Published as chair_front_seen / chair_front_seen_frame.
+    bool  front_seen             = false;
+    int   front_seen_frame       = -1;        // mask_frame_id of the last ZED win (-1 never)
+    int   front_checked_frame    = -1;        // last mask frame front_seen was evaluated on
 
     // Predicted in-image chair ROI from projecting the current model through the camera extrinsic.
     // Normalised so the controller is resolution-agnostic: drive offset→0 (centre the chair in the
