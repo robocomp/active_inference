@@ -109,6 +109,55 @@ float DoorBelief::clutter_fraction(const std::vector<Eigen::Vector3f>& pts, floa
     return static_cast<float>(c / static_cast<double>(pts.size()));
 }
 
+float DoorBelief::clutter_fraction_leaf_marginal(const std::vector<Eigen::Vector3f>& pts, float R,
+                                                 std::span<const std::pair<float, float>> phi_curve) const
+{
+    if (pts.empty()) return 0.0f;
+    double wsum = 0.0;
+    for (const auto& [phi, w] : phi_curve)
+        if (std::isfinite(phi) and std::isfinite(w) and w > 0.0f) wsum += w;
+    if (not (wsum > 0.0)) return clutter_fraction(pts, R);
+    // The surface likelihood of one leaf angle, hinge-marginalised exactly as mixture_unnorm does at the believed angle.
+    const float eps     = std::clamp(params_.clutter_frac, 0.0f, 0.99f);
+    const float pi_surf = 1.0f - eps;
+    const float inv2R   = 0.5f / std::max(1e-9f, R);
+    const float cs      = params_.clutter_scale_m;
+    const float u_clut  = eps * std::exp(-cs * cs * inv2R);
+    const door::Aperture ap = aperture_at(state_);
+    door::LeafState other = params_.leaf;
+    other.hinge = other.hinge == door::HingeSide::Near ? door::HingeSide::Far : door::HingeSide::Near;
+    struct Pose { door::LeafPose a, b; double w; };
+    std::vector<Pose> poses;
+    poses.reserve(phi_curve.size());
+    for (const auto& [phi, w] : phi_curve)
+    {
+        if (not (std::isfinite(phi) and std::isfinite(w) and w > 0.0f)) continue;
+        door::LeafState la = params_.leaf, lb = other;
+        la.phi = lb.phi = phi;
+        poses.push_back({door::leaf_pose(ap, la), door::leaf_pose(ap, lb), double(w) / wsum});
+    }
+    double c = 0.0;
+    for (const auto& p : pts)
+    {
+        double u_surf = 0.0;
+        for (const auto& q : poses)
+        {
+            const float da = door::leaf_sdf(q.a, p);
+            double us = double(p_hinge_) * std::exp(-da * da * inv2R);
+            if (p_hinge_ < 1.f)
+            {
+                const float db = door::leaf_sdf(q.b, p);
+                us += double(1.f - p_hinge_) * std::exp(-db * db * inv2R);
+            }
+            u_surf += q.w * us;
+        }
+        u_surf *= pi_surf;
+        const double sum = u_surf + u_clut;
+        c += sum > 0.0 ? u_clut / sum : 1.0;
+    }
+    return static_cast<float>(c / static_cast<double>(pts.size()));
+}
+
 // ─── Jacobian (central finite difference over the 3 DOFs [s,w,h]) ────────────────
 Eigen::Matrix<float, 4, 1> DoorBelief::sdf_jacobian(const Eigen::Vector3f& p, const DoorBeliefState& s, int prim) const
 {

@@ -27,6 +27,7 @@
 #include <utility>
 #include <cmath>
 #include <istream>
+#include <limits>
 #include <locale>
 #include <numbers>
 #include <optional>
@@ -392,13 +393,30 @@ inline RestoreDecision plan_restore(std::span<const IdentityRow> rows, std::stri
 ///  memory; tourP9's look then aimed 0.2–0.4 m off the hole. The writer is THIS hole's door with probability `weight`
 ///  (its P(exists)); otherwise the memory stands — so the remembered place moves to the posterior mean
 ///  xy + weight·(xy_new − xy). A credible door updates its row fully, a dying one barely moves it.
+/// ★A HOLE IS CUT IN ONE WALL (2026-11-12, chat_e2e13): `same_hole_yaw_rad` = the gate's reach in the apertures' yaw difference
+///  (mod π: a door seen from its other side is the same hole), joined with the place in ONE elliptical gate
+///  (|Δxy| / same_hole_m)² + (δ / same_hole_yaw_rad)² < 1. Without it a door on the PERPENDICULAR wall 0.7 m from a corner —
+///  door_24, framed in room_1's partition — was "the same hole" as DOOR_0 (door_22, removed a minute before) at shutdown:
+///  door_22's row took the partition pose (yaw −3.11 → +1.59) and lost its removal, so the next session would restore DOOR_0
+///  in the partition. A row without a pose (a birth) has no yaw: the place alone decides, as before. Default ∞ = place only.
 inline bool upsert_row(std::vector<IdentityRow>& rows, const std::string& room, IdentityRow row, float same_hole_m,
-                       float weight = 1.0f)
+                       float weight = 1.0f, float same_hole_yaw_rad = std::numeric_limits<float>::infinity())
 {
     if (room.empty() or not row.name.starts_with("door_") or not row.xy.allFinite() or row.xy.norm() > kIdentityMaxPlaceM)
         return false;
     const auto same = [&](const IdentityRow& i, const Eigen::Vector2f& at, const std::string& nm)
-    { return i.room == room and (i.name == nm or (i.xy - at).norm() < same_hole_m); };
+    {
+        if (i.room != room) return false;
+        if (i.name == nm) return true;
+        const float dp = (i.xy - at).norm() / same_hole_m;
+        float dy = 0.0f;
+        if (i.pose.has_value() and row.pose.has_value() and std::isfinite(same_hole_yaw_rad) and same_hole_yaw_rad > 0.0f)
+        {
+            const float d = std::remainder(i.pose->yaw - row.pose->yaw, std::numbers::pi_v<float>);   // mod π: either face
+            dy = std::isfinite(d) ? d / same_hole_yaw_rad : 0.0f;
+        }
+        return dp * dp + dy * dy < 1.0f;
+    };
     auto it = std::ranges::find_if(rows, [&](const IdentityRow& i) { return same(i, row.xy, row.name); });
     if (it == rows.end())
     {

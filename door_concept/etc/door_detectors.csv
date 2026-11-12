@@ -1,6 +1,6 @@
 camera,param,value,n,source
 zed,min_fill,0.1,0,compiled_defaults
-zed,max_fill,0.6,0,compiled_defaults
+zed,max_fill,1.5,0,views_fill_2026-11-12
 zed,soft,0.06,0,compiled_defaults
 zed,hit_rate,0.9,0,compiled_defaults
 zed,false_alarm,0.02,0,compiled_defaults

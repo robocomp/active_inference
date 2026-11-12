@@ -118,7 +118,10 @@ struct DetectorTable { DetectorModel zed, ricoh; SupportModel support; Confidenc
 [[nodiscard]] inline DetectorTable default_detectors()
 {
     DetectorTable t;
-    t.zed   = {{0.10f, 0.60f, 0.06f}, 0.9f, 0.02f, 0.0f};
+    // ZED max_fill 0.6 -> 1.5 (2026-11-12, chat_e2e13 door_views_log, real doors door_1/place_16/17/19/20/21): frames with fill_v in
+    // [0.6,1.0) hit 99.98% (49065 frames, 7 views), [1.0,1.5) 89%, >=1.5 96%. The 0.6 shoulder said a door filling the frame is
+    // undetectable, so a phantom stared at from 2 m got q 0.0004 and its misses were no evidence (door_24 lived at p 0.86).
+    t.zed   = {{0.10f, 1.50f, 0.06f}, 0.9f, 0.02f, 0.0f};
     t.ricoh = {{0.216f, 1.5f, 0.06f}, 0.5f, 0.05f, 0.0f};
     return t;
 }

@@ -7,6 +7,7 @@
 #include <clocale>
 #include <cstdint>
 #include <cmath>
+#include <numbers>
 #include <print>
 #include <sstream>
 #include <string>
@@ -389,6 +390,38 @@ int main()
         // A credible door (P ≈ 1) moves it fully.
         CHECK(upsert_row(t, "room_1", full_row("", "door_2", 0.60f, 2.54f), radius + 0.84f, 0.98f));
         CHECK(std::abs(t[0].xy.x() - 0.599f) < 0.01f);
+    }
+    // ── 8b. chat_e2e13 (2026-11-12): A HOLE IS CUT IN ONE WALL. door_22 (DOOR_0, y ≈ 2.5 wall, yaw −3.11) was removed; door_24,
+    //        framed in the PERPENDICULAR partition 0.7 m away (yaw +1.59), wrote its row at shutdown. The place-only gate
+    //        (radius 0.85 + width 1.0) took it for door_22's hole: door_22's row moved into the partition and lost its removal.
+    //        Yaw reach = BoundarySigmaM / (w/2) · √(2·gate) = 0.1 / 0.5 · √18 (specificworker.cpp upsert_identity).
+    {
+        const float reach = 0.1f / 0.5f * std::sqrt(18.0f), hole = 0.8485f + 1.0f;
+        auto d22 = full_row("room_1", "door_22", 0.605f, 2.488f);
+        d22.pose->yaw = -3.111f;
+        d22.removed_ms = kNowMs;
+        std::vector<IdentityRow> t{d22};
+        auto d24 = full_row("", "door_24", -0.0018f, 2.1543f);
+        d24.pose->yaw = 1.5907f;
+        CHECK(upsert_row(t, "room_1", d24, hole, 0.98f, reach));
+        CHECK(t.size() == 2);                                                        // two walls, two holes
+        CHECK(t[0].name == "door_22" and std::abs(t[0].xy.x() - 0.605f) < 1e-4f);   // door_22's memory untouched…
+        CHECK(t[0].removed_ms.has_value() and std::abs(t[0].pose->yaw + 3.111f) < 1e-4f);   // …removal and pose kept
+        // The place-only gate (no yaw reach) reproduces the live merge.
+        std::vector<IdentityRow> old{d22};
+        CHECK(upsert_row(old, "room_1", d24, hole, 0.98f));
+        CHECK(old.size() == 1 and old[0].name == "door_22" and not old[0].removed_ms.has_value());
+        // The same wall: a re-detection 0.4 m along it, its yaw a few degrees off — and from the OTHER face (yaw + π) — is
+        // still the same hole.
+        std::vector<IdentityRow> s{d22};
+        auto again = full_row("", "door_30", 0.20f, 2.50f);
+        again.pose->yaw = -3.111f + 0.05f;
+        CHECK(upsert_row(s, "room_1", again, hole, 0.98f, reach));
+        CHECK(s.size() == 1 and s[0].name == "door_22");
+        auto flipped = full_row("", "door_31", 0.60f, 2.52f);
+        flipped.pose->yaw = -3.111f + std::numbers::pi_v<float> - 0.03f;
+        CHECK(upsert_row(s, "room_1", flipped, hole, 0.98f, reach));
+        CHECK(s.size() == 1 and s[0].name == "door_22");
     }
 
     // ── 9. (a) OPAQUE NAMES FROM ONE MONOTONIC COUNTER: fresh names strictly increase across births, deaths and restores,

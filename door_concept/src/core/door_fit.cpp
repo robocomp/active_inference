@@ -358,7 +358,7 @@ DoorFit::WallFrame DoorFit::associate_wall(std::span<const Eigen::Vector2f> pts_
     WallFrame w;
     // A doorway recess no deeper than the wall belongs to the wall (door_standpoint.h, wall_run_of_edge).
     if (const auto r = door::associate_wall(room_polygon_, pts_xy, cam_xy, room_band().wall_thickness_m); r.ok)
-    { w.O = r.O; w.u = r.u; w.len = r.len; w.ok = true; }
+    { w.O = r.O; w.u = r.u; w.len = r.len; w.ok = true; w.seen_at = r.seen_at; }
     return w;
 }
 
@@ -751,7 +751,13 @@ float DoorFit::run_inference(rc::DoorFitState& inst, const DoorObservation& obse
         if (wf.ok)
         {
             p.wall_O = wf.O; p.wall_u = wf.u; p.wall_len = wf.len;
-            s0.s = (centroid_xy - wf.O).dot(wf.u) - 0.5f * s0.w;   // not clamped to the run: see apply_constraints
+            // ★WHERE ALONG THE WALL: where the mask's sightlines MEET it (associate_wall's seen_at), not the perpendicular foot of
+            //  the points' centroid. The two agree for a leaf on the wall; for depth that is not on the wall — the next room
+            //  seen through the opening, or an occluder in front of the door — the foot of the perpendicular is off by
+            //  (depth off the wall) × tan(view obliquity), while the ray meets the wall where the door was seen (chat_e2e13
+            //  door_24: centroid 2.8 m short of its wall). No camera / no sightline: the centroid, as before.
+            const Eigen::Vector2f place = wf.seen_at.value_or(centroid_xy);
+            s0.s = (place - wf.O).dot(wf.u) - 0.5f * s0.w;   // not clamped to the run: see apply_constraints
             s0.d = p.recess_prior_m;   // 0: see DoorBeliefParams::recess_prior_m
         }
         else
@@ -1021,8 +1027,15 @@ float DoorFit::run_inference(rc::DoorFitState& inst, const DoorObservation& obse
         // e.g. the table bleeding into a door mask, which drags the centroid). High + a position jump ⇒
         // contamination the clutter component didn't fully reject.
         inst.last_clutter_frac = inst.ai2_belief.clutter_fraction(frame.points, R);
+        // ★THE EXISTENCE CHANNEL SCORES THE PLACE, NOT THE LEAF'S POINT ESTIMATE (2026-11-12, chat_e2e13 door_22): `sup`'s x is the
+        //  share of the support no door AT THIS PLACE explains, so the leaf angle — a nuisance of that question — is marginalised over
+        //  its posterior (this cycle's phi_curve, estimate_phi ran first). door_22, restored closed DOOR_0, carried phi 81° σ 25°
+        //  from LiDAR alone; its first mask in 25 min lay on the closed leaf plane, x = 1.00 at the 81° point estimate, and that one
+        //  frame removed the real door (sup dl −1.95). The fit's own clutter share (last_clutter_frac, logged) keeps its meaning:
+        //  how well THIS state explains the mask.
         if (not frame.points.empty())   // the existence channel `sup`: x is undefined with no support (no default)
-            inst.pending_fit_support = rc::door::core::FitSupport{inst.last_clutter_frac, inst.last_slice_sensor,
+            inst.pending_fit_support = rc::door::core::FitSupport{inst.ai2_belief.clutter_fraction_leaf_marginal(frame.points, R, inst.phi_curve),
+                                                                  inst.last_slice_sensor,
                                                                   rc::door::aperture_coverage(inst.ai2_belief.aperture(), frame.points),
                                                                   rc::door::aperture_overlap(inst.ai2_belief.aperture().w,
                                                                       std::sqrt(std::max(0.0f, inst.ai2_belief.covariance()(0, 0))))};

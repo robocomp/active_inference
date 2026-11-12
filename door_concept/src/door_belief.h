@@ -29,6 +29,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <span>
 #include <vector>
 #include <Eigen/Dense>
 
@@ -748,6 +749,15 @@ public:
     float mean_energy(const std::vector<Eigen::Vector3f>& pts, const DoorBeliefState& s, float R) const;
     // Mean clutter responsibility over the frame's points (diagnostic; off-model / contamination fraction).
     float clutter_fraction(const std::vector<Eigen::Vector3f>& pts, float R) const;
+    // The same share with the LEAF ANGLE MARGINALISED over `phi_curve` (phi rad, unnormalised posterior weight — the
+    // DoorFitState::phi_curve estimate_phi leaves): a point is the door's when a leaf at SOME believed angle explains it, each
+    // angle at its posterior weight (hinge marginal as clutter_fraction). The question existence asks of a fit is whether a
+    // door at this place explains its support, and the leaf's angle is a nuisance of that question: conditioning on the
+    // point estimate of a 25° wide posterior turned an angle error into an existence verdict (chat_e2e13 door_22, the
+    // existence channel `sup`, door_existence.cpp). A sharp posterior reduces to clutter_fraction at its mode; an empty or
+    // weightless curve IS clutter_fraction (no other angle is believed).
+    float clutter_fraction_leaf_marginal(const std::vector<Eigen::Vector3f>& pts, float R,
+                                         std::span<const std::pair<float, float>> phi_curve) const;
 
     // The wall fixes yaw, so there is no discrete-orientation ambiguity to report: the reported covariance
     // IS the 3×3 posterior Σ over [s,w,h]. Kept as a named accessor so publish/log call sites read cleanly.

@@ -148,7 +148,8 @@ public:
     [[nodiscard]] float ego_lin_mps() const   { return ego_lin_mps_; }
     [[nodiscard]] float ego_ang_radps() const { return ego_ang_radps_; }
 
-    struct WallFrame { bool ok = false; Eigen::Vector2f O{0.0f, 0.0f}, u{1.0f, 0.0f}; float len = 0.0f; };
+    struct WallFrame { bool ok = false; Eigen::Vector2f O{0.0f, 0.0f}, u{1.0f, 0.0f}; float len = 0.0f;
+                      std::optional<Eigen::Vector2f> seen_at; };   // seen_at: door_standpoint.h WallRun::seen_at
     [[nodiscard]] WallFrame associate_wall(std::span<const Eigen::Vector2f> pts_xy,
                                            const std::optional<Eigen::Vector2f>& cam_xy) const;
 

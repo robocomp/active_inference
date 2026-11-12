@@ -1881,7 +1881,11 @@ void SpecificWorker::upsert_identity(DoorIdentity row, float width_m, float weig
     const float same_hole = identity_radius_m() + std::max(0.0f, std::isfinite(width_m) ? width_m : 0.0f);
     const std::string dec_name = row.name;
     const Eigen::Vector2f dec_xy = row.xy;
-    if (rc::door::upsert_row(identities_, room, std::move(row), same_hole, weight))
+    // The yaw reach of the same gate (door_identity_table.h): a jamb on its wall's line is placed to the outline's σ
+    // (Existence.BoundarySigmaM), so an aperture of half-width w/2 is turned by at most σ/(w/2) rad — at the gate's χ² reach.
+    const float half_w = 0.5f * (std::isfinite(width_m) and width_m > 0.0f ? width_m : cfg_.door_prior_w_m);
+    const float same_hole_yaw = cfg_.exist_boundary_sigma_m / half_w * std::sqrt(2.0f * cfg_.tracker_gate_mahalanobis);
+    if (rc::door::upsert_row(identities_, room, std::move(row), same_hole, weight, same_hole_yaw))
     {
         decision_log_.record(rc::door::DoorDecisionKind::IdentityUpsert, 0, dec_name, dec_xy.x(), dec_xy.y(), width_m, weight, room);
         save_identities();
