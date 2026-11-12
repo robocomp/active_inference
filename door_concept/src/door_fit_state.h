@@ -128,6 +128,15 @@ struct DoorFitState
     door::WallRegistration wall_reg;
     door::AlongWallResult  dbg_along;
     float dbg_wall_support = 0.0f;   // log P(s, w | its wall) at the fit's mean this cycle (door_wall_support.h); 0 = none / deep inside
+    // 2026-11-12 (clean58 door_3): the aperture's plane on its carrying wall's line (door_fit.cpp refresh_geometry). -1 = never
+    // evaluated, 0 = no wall carries the door (no term), 1 = carried. The rest is this cycle's move and the line's σ, for the logs.
+    int   wall_line_carried = -1;
+    bool  framed_in_proto = false;
+    std::vector<Eigen::Vector2f> proto_evidence_pts;          // the points that frame came from (plan, room frame), sampled
+    std::optional<Eigen::Vector2f> proto_evidence_cam;        // and the camera they were seen from   // the frame was authored in a provisional room (from evidence): re-associated at promotion
+    float dbg_birth_yaw_sd = 0.0f;   // a frame authored in a provisional room from the door's own evidence: its yaw σ (rad); 0 = not
+    float dbg_wall_line_off = 0.0f, dbg_wall_line_rot = 0.0f;         // the move onto the line: across (m), turn (rad)
+    float dbg_wall_line_sd_off = 0.0f, dbg_wall_line_sd_yaw = 0.0f;   // the line's σ: across (m), direction (rad)
     std::vector<door::OpeningRun> opening_runs;   // this cycle's through-spans (door_opening_edges.h); empty = no measurement
     // Task 11: log P(the belief's hinge) / P(the other jamb) — the hinge as a static hidden variable, learned from the
     // LiDAR while the leaf is open (rc::door::phi_hinge_marginal). 0 = no evidence yet; carried across a room switch.

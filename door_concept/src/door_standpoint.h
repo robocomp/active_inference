@@ -40,6 +40,7 @@
 #include <cmath>
 #include <cstddef>
 #include <limits>
+#include <numbers>
 #include <optional>
 #include <span>
 #include <vector>
@@ -281,6 +282,78 @@ inline WallRun associate_wall_remembered(std::span<const Eigen::Vector2f> poly, 
         if (cost < best_cost) { best_cost = cost; best = i; }
     }
     return best < n ? wall_run_of_edge(poly, best, recess_m) : WallRun{};
+}
+
+// ─── A DOOR'S FRAME FROM ITS OWN EVIDENCE (2026-11-12, clean58 door_3) ─────────────────────────────────────────────────────
+// In a PROVISIONAL room the outline is a free-space frontier, not walls, so it says nothing about where a doorway's wall runs:
+// clean58's door_3 was framed on the frontier across an unseen alcove's mouth (perpendicular to its real wall) and its centre was
+// projected 2.33 m along that frontier. Here the frame is the detection's: centre = the detection's centre; orientation from the
+// points' DEPTH GRADIENT across the view. In plan, v = the sightline (camera → centre), l = its perpendicular; a planar surface
+// whose along direction is l + k·v puts each point at depth b = k·a for lateral a. k is the least-squares slope, its variance
+// σ_res²/Σa² (the residual σ from the same points); yaw σ = σ_k/(1 + k²) (dψ/dk). No usable lateral spread (one point, or
+// no camera) ⇒ the best a single detection gives: the door faces the camera (u = l) with σ_ψ = π/2·(1/√3) — a uniform yaw
+// over a half-turn, i.e. no orientation information. A remembered pose (no points) carries its own yaw (`yaw_known`).
+// across_u() is turned toward `room_side` (the camera / robot: the room is where the robot stands), the convention
+// associate_wall keeps (normal INTO the room). Pure geometry, no threshold.
+struct EvidenceFrame
+{
+    Eigen::Vector2f O{0.0f, 0.0f}, u{1.0f, 0.0f};   // O = the detection's centre (the door's centre lies on the frame's line at s + w/2 = 0)
+    float yaw_sd = 0.0f;                            // the orientation's σ (rad)
+};
+inline EvidenceFrame frame_from_evidence(std::span<const Eigen::Vector2f> pts, const Eigen::Vector2f& centre,
+                                         const std::optional<Eigen::Vector2f>& cam, const std::optional<Eigen::Vector2f>& room_side,
+                                         std::optional<float> yaw_known)
+{
+    constexpr float kHalfTurnUniformSd = std::numbers::pi_v<float> / std::numbers::sqrt3_v<float> / 2.0f;   // sd of U(−π/2, π/2)
+    EvidenceFrame f;
+    f.O = centre;
+    Eigen::Vector2f v(1.0f, 0.0f);
+    bool have_view = false;
+    if (cam.has_value())
+        if (const Eigen::Vector2f d = centre - *cam; d.norm() > 0.0f) { v = d.normalized(); have_view = true; }
+    const Eigen::Vector2f l(-v.y(), v.x());
+    if (yaw_known.has_value() and std::isfinite(*yaw_known))
+    {
+        f.u = {std::cos(*yaw_known), std::sin(*yaw_known)};
+        f.yaw_sd = 0.0f;   // the caller's memory carries its own σ (IdentityRow::place_sd); the yaw is taken as remembered
+    }
+    else
+    {
+        double saa = 0.0, sab = 0.0;
+        std::size_t n = 0;
+        if (have_view)
+            for (const auto& p : pts)
+            {
+                const Eigen::Vector2f q = p - centre;
+                const double a = l.dot(q), b = v.dot(q);
+                saa += a * a; sab += a * b; ++n;
+            }
+        if (n >= 3 and saa > 0.0)
+        {
+            const double k = sab / saa;
+            double sr = 0.0;
+            for (const auto& p : pts)
+            {
+                const Eigen::Vector2f q = p - centre;
+                const double r = v.dot(q) - k * l.dot(q);
+                sr += r * r;
+            }
+            const double sk = std::sqrt(sr / static_cast<double>(n - 2) / saa);
+            f.u = (l + static_cast<float>(k) * v).normalized();
+            f.yaw_sd = std::min(kHalfTurnUniformSd, static_cast<float>(sk / (1.0 + k * k)));   // never wider than knowing nothing
+        }
+        else
+        {
+            f.u = l;
+            f.yaw_sd = kHalfTurnUniformSd;
+        }
+    }
+    if (room_side.has_value())
+    {
+        const Eigen::Vector2f nrm(-f.u.y(), f.u.x());
+        if (nrm.dot(*room_side - centre) < 0.0f) f.u = -f.u;
+    }
+    return f;
 }
 
 // ─── the poses ───────────────────────────────────────────────────────────────────────────────────

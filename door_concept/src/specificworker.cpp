@@ -3947,6 +3947,8 @@ void SpecificWorker::reseat_doors_after_adoption(std::uint64_t room_id, const rc
         s.ap_cx = ap.cx; s.ap_cy = ap.cy; s.ap_yaw = ap.yaw;
         inst.model.set_state(s);
         const auto& bp = inst.ai2_belief.params();
+        for (auto& q : inst.proto_evidence_pts) q = rc::door::rigid_apply(K_from_P, q);   // kept for re-association at promotion
+        if (inst.proto_evidence_cam.has_value()) inst.proto_evidence_cam = rc::door::rigid_apply(K_from_P, *inst.proto_evidence_cam);
         inst.ai2_belief.set_wall(rc::door::rigid_apply(K_from_P, bp.wall_O),
                                  Eigen::Rotation2Df(K_from_P.yaw) * bp.wall_u, bp.wall_len);
         // The belief's covariance is over [s, w, h, d] (along/across the wall): wall-relative, so a rigid frame change does not

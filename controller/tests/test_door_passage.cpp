@@ -995,6 +995,97 @@ int main()
         out = p.update(*G, nullptr, "room_1");
         CHECK(out.exit.has_value() and out.exit->predicted_room_id == 0);
     }
+    // ══ clean58 (2026-11-12): A CROSS NOBODY OFFERS IS A BOUNDED WAIT. The robot reached the vantage of door_3 (P(passable) 0.54 read
+    //    open while approach was on offer), entered `cross`, and door_concept never published aff_door_3_cross; then the approach was
+    //    withdrawn too: 26+ min "STOPPED WAITING". Now: hand back after one span (Mission.DoorCloseOfferWaitS), FAIL after the second.
+    for (const bool approach_stays : {false, true})
+    {
+        auto G = make_graph(approach_stays ? 81 : 80);
+        DoorPassage p;
+        p.set_clock(clock);
+        p.set_use_route(true);
+        p.set_close_wait_ms(5000);
+        p.note_room_id(1);
+        p.note_robot(Eigen::Vector2f(2.f, 1.6f), 0.25f);         // standing at the vantage throughout: no new view
+        {
+            DSR::Node d = DSR::Node::create<door_node_type>("door_p");
+            G->add_or_modify_attrib_local<door_open_prob_att>(d, 0.54f);
+            G->insert_node(d);
+        }
+        p.start("door_p", Step::Cross);
+        offered(*G, "aff_door_p_approach");
+        target(*G, "aff_door_p_approach", 2.f, 1.6f, down);
+        auto out = p.update(*G, nullptr, "room_1");
+        CHECK(out.route.has_value() and not out.route->through);
+        p.note_route(out.route->key, RR::Arrived);
+        out = p.update(*G, nullptr, "room_1");                    // at the vantage, the door reads open: on to the cross…
+        CHECK(p.view().step == Step::Cross and not out.route.has_value());   // …waiting for a target nobody publishes (with the
+                                                                             //   approach on offer the withdrawn-cross rule then flips it
+                                                                             //   back and forth without moving the robot: still a wait)
+        if (not approach_stays) G->delete_node("aff_door_p_approach");   // clean58: approach withdrawn too, NONE ELIGIBLE
+        const std::uint64_t t0 = now;
+        int handbacks = 0;
+        bool failed = false, early = false;
+        std::string fail_event, handback_event;
+        // drive the cycles at 50 ms as the session does, reporting "already at the vantage" for every approach leg it is handed
+        while (now - t0 <= 2 * 5000 + 100 and not failed)
+        {
+            now += 50;
+            if (out.route.has_value() and not out.route->through) p.note_route(out.route->key, RR::Arrived);
+            out = p.update(*G, nullptr, "room_1");
+            if (out.event.has_value() and out.event->find("handing back") != std::string::npos) { ++handbacks; handback_event = *out.event; }
+            if (p.view().failed) { failed = true; fail_event = p.view().last_event; }
+            if (handbacks == 0 and now - t0 < 5000 - 100 and (not p.active() or p.view().failed)) early = true;   // no early verdict
+        }
+        CHECK(not early);
+        CHECK(handbacks == 1);                                     // one hand-back to the approach…
+        CHECK(failed and p.view().step == Step::Done);             // …then FAILED, within two spans
+        CHECK(now - t0 <= 2 * 5000 + 100);
+        CHECK(p.view().last_outcome.ends_with("_not_offered"));
+        CHECK(handback_event.find("for a new view") != std::string::npos);
+        CHECK(fail_event.find("FAILED") != std::string::npos and fail_event.find("next action") != std::string::npos);
+        CHECK(not out.route.has_value() and out.required.empty());
+        CHECK(p.take_finished());
+        std::println("  clean58 ({}): {} — {}", approach_stays ? "approach stays offered" : "approach withdrawn", p.view().last_outcome, fail_event);
+    }
+    {   // the bound is a wait, not a deadline: a cross OFFERED within the span ends the wait, and a re-approach that takes the robot to a
+        //   NEW VIEW (farther than the approach's arrival tolerance) starts it afresh — neither is a strike
+        auto G = make_graph(82);
+        DoorPassage p;
+        p.set_clock(clock);
+        p.set_use_route(true);
+        p.set_close_wait_ms(5000);
+        p.note_room_id(1);
+        p.note_robot(Eigen::Vector2f(2.f, 1.6f), 0.25f);
+        { DSR::Node d = DSR::Node::create<door_node_type>("door_q"); G->add_or_modify_attrib_local<door_open_prob_att>(d, 0.9f); G->insert_node(d); }
+        p.start("door_q", Step::Cross);
+        offered(*G, "aff_door_q_approach"); target(*G, "aff_door_q_approach", 2.f, 1.6f, down);
+        auto out = p.update(*G, nullptr, "room_1");
+        p.note_route(out.route->key, RR::Arrived);
+        out = p.update(*G, nullptr, "room_1");
+        G->delete_node("aff_door_q_approach");
+        for (int i = 0; i < 80; ++i) { now += 50; out = p.update(*G, nullptr, "room_1"); }   // 4 s waiting on the cross target
+        CHECK(p.view().step == Step::Cross and not p.view().failed);
+        CHECK(p.view().offer_bound.find("bounded") != std::string::npos);   // the [why] line says the wait is bounded
+        p.note_robot(Eigen::Vector2f(2.5f, 1.6f), 0.25f);                    // a new view: 0.5 m from where the wait began
+        bool handed_back = false;
+        for (int i = 0; i < 80; ++i)                                          // 4 s more: 8 s in all, past one span
+        {
+            now += 50;
+            out = p.update(*G, nullptr, "room_1");
+            if (out.event.has_value() and out.event->find("handing back") != std::string::npos) handed_back = true;
+        }
+        CHECK(not handed_back and p.view().step == Step::Cross);
+        offered(*G, "aff_door_q_cross"); target(*G, "aff_door_q_cross", 2.f, -0.8f, down);
+        for (int i = 0; i < 120; ++i)                                         // 6 s with the cross on offer: no wait at all
+        {
+            now += 50;
+            out = p.update(*G, nullptr, "room_1");
+            if (out.event.has_value() and out.event->find("handing back") != std::string::npos) handed_back = true;
+        }
+        CHECK(not handed_back and p.view().step == Step::Cross and p.view().offer_bound.empty());
+        CHECK(out.route.has_value() and out.route->through);
+    }
     {   // BLOCKED TWICE: the first failure rebuilds (a new key, no attempt charged), the second ends it cross_unreachable
         auto G = make_graph(62);
         DoorPassage p;

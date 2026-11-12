@@ -243,6 +243,35 @@ public:
         params_.wall_u = (n > 1e-6f) ? (u / n).eval() : Eigen::Vector2f(1.0f, 0.0f);
         params_.wall_len = std::max(0.0f, len);
     }
+    // ★THE APERTURE'S PLANE ON ITS WALL'S LINE (2026-11-12, clean58 door_3; door_fit.cpp refresh_geometry has the model). The
+    // frame is moved onto the line through O_line along u_line (u_line within ±π/2 of wall_u: the caller picks the sign): the
+    // centre goes to its foot on the line, the frame turns about it, and s is kept (the centre's along position is unchanged, so
+    // the along-wall support factor, the registration offset and Σ stay in the coordinates they were built in).
+    // THE LEAF'S DEPTH d IS RE-EXPRESSED, NOT CARRIED: d's prior N(0, recess_prior_std²) is a statement RELATIVE TO THE WALL LINE,
+    // the rest of what Σ knows about d came from data and is ABSOLUTE. Moving the line by `off` (the centre's across distance)
+    // therefore shifts only the data's part: d ← d − off·(1 − Σ_dd/σ_r²) — exact for d's Gaussian marginal (the data mean moves
+    // by −off in the new coordinates, the prior does not). A d known only from its prior stays at 0 on the new line; a d pinned by
+    // many frames keeps the leaf where it was seen. The data's share 1 − Σ_dd/σ_r² is floored at 0 where ageing (inflate_for_age)
+    // has widened Σ_dd past the prior: a numerical domain guard (negative information), not a model cutoff.
+    // Returns {off, rotation applied (rad)}.
+    std::pair<float, float> reframe_onto_line(const Eigen::Vector2f& O_line, const Eigen::Vector2f& u_line)
+    {
+        const float un = u_line.norm();
+        if (not (un > 1e-6f)) return {0.0f, 0.0f};
+        const Eigen::Vector2f u = u_line / un;
+        const Eigen::Vector2f nrm(-u.y(), u.x());
+        const Eigen::Vector2f c = center_xy();
+        const float off = nrm.dot(c - O_line);
+        const float rot = std::atan2(params_.wall_u.x() * u.y() - params_.wall_u.y() * u.x(), params_.wall_u.dot(u));
+        const Eigen::Vector2f c_new = c - off * nrm;
+        params_.wall_u = u;
+        params_.wall_O = c_new - (state_.s + 0.5f * state_.w) * u;
+        const float sr2 = std::max(1e-8f, params_.recess_prior_std * params_.recess_prior_std);
+        // the data's share of d (its marginal; s, w, h are along-wall quantities the move does not touch, so they are kept)
+        const float data_share = std::max(0.0f, 1.0f - Sigma_(3, 3) / sr2);   // domain guard (see above)
+        state_.d -= off * data_share;
+        return {off, rot};
+    }
 
     // ── Geometry read-back for the fitter write-back / scene-graph publish ──────────
     // NOTE: center_xy()/yaw() describe the APERTURE — the static hole in the wall. They are what the DSR RT

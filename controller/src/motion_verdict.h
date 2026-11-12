@@ -435,6 +435,7 @@ struct PassageFacts
     std::string door_now;       ///< the door's precondition numbers now ("" = door node gone)
     std::string producer = "door_concept";
     std::string waiting_on;     ///< what the passage itself is doing about it (the session's cross_status_; "" = nothing)
+    std::string offer_bound;    ///< the passage's bounded offer wait in words (DoorPassage::View::offer_bound; "" = none)
 };
 
 /// The passage's note for this cycle, or nullopt when the passage is not what holds the robot (idle, or its step is
@@ -472,6 +473,7 @@ struct PassageFacts
     }
     else
         d += "; passage falls back once an earlier step is on offer (none is)";
+    if (not f.offer_bound.empty()) d += "; " + f.offer_bound;
     return Note{Cause::PassageWaiting, std::move(d), site_of(loc)};
 }
 

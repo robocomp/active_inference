@@ -69,7 +69,9 @@ done
 # or promoted as a new room — bounded by the drive's own room limit, ExploreTour.MaxRoomS (300 s): no new constant.
 if [[ "$result" == ALL* ]]; then
   MAXROOM=$(grep -m1 -E "^MaxRoomS" $WT/controller/etc/config.toml 2>/dev/null | grep -oE "[0-9.]+" | head -1); MAXROOM=${MAXROOM%.*}; MAXROOM=${MAXROOM:-300}
-  n_lt=$(wc -l < $L/ltsm_agent.log); n_ct=$(wc -l < $L/controller.log); t1=$(date +%s); settled="not settled within MaxRoomS ($MAXROOM s)"
+  # search ltsm from the start of the LAST recognition episode, not from this moment: recognition can be ACCEPTED before the
+  # ground-truth crossing test fires (clean57: accepted, reported "not settled").
+  n_lt=$(grep -n "\[recog\] episode begins" $L/ltsm_agent.log | tail -1 | cut -d: -f1); n_lt=${n_lt:-$(wc -l < $L/ltsm_agent.log)}; n_ct=$(wc -l < $L/controller.log); t1=$(date +%s); settled="not settled within MaxRoomS ($MAXROOM s)"
   while (( $(date +%s) - t1 < MAXROOM )); do
     if s1=$(tail -n +$n_lt $L/ltsm_agent.log | grep -a -o -m1 "\[swap\] \(ACCEPTED: [^;]*\|WITHDRAWN: [^;]*\)") && [ -n "$s1" ]; then settled="recognition: ${s1:0:120}"; break; fi
     if s2=$(tail -n +$n_ct $L/controller.log | grep -a -o -m1 "\[explore-tour\] room_[0-9]*: \(promoted\|max-time\)[^—]*") && [ -n "$s2" ]; then settled="promoted as a new room: ${s2:0:120}"; break; fi

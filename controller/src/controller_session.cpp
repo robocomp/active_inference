@@ -759,7 +759,7 @@ void ControllerSession::observe_door_passage_why(std::uint64_t now_ms)
     const rc::why::PassageFacts f{.door = v.door, .step = rc::DoorPassage::step_name(v.step), .required = v.required,
                                   .state = v.step_state, .reached_door = v.reached_door, .opened = v.opened,
                                   .clearing = v.clearing, .attempts = v.attempts, .last_outcome = v.last_outcome,
-                                  .door_now = door_now, .waiting_on = cross_status_};
+                                  .door_now = door_now, .waiting_on = cross_status_, .offer_bound = v.offer_bound};
     if (auto note = rc::why::passage_note(f, why_aff_memory_, now_ms); note.has_value())
         why_.add(std::move(*note));
 }

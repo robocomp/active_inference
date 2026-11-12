@@ -101,7 +101,7 @@ public:
         close_only_ = false;
         seen_executing_ = false;
         attempts_ = 0;
-        open_unoffered_ = 0; open_since_ms_ = 0;
+        unoffered_ = 0; offer_since_ms_ = 0; offer_wait_step_ = Step::Idle; offer_from_.reset();
         cross_room_.clear();
         just_started_ = true;
         look_chosen_ = false;
@@ -157,6 +157,14 @@ public:
         return st == State::Offered or st == State::Executing;
     }
     [[nodiscard]] static std::string look_name(const std::string& door) { return "aff_door_look_" + door; }
+    /// Does door_concept offer (or execute) `door`'s `open` or `cross` now? The exploration drive's evidence that a failed passage
+    /// may now go (exploration_drive.h DoorEvidence::step_offered).
+    [[nodiscard]] static bool open_or_cross_on_offer(DSR::DSRGraph& G, const std::string& door)
+    {
+        for (const char* s : {"_open", "_cross"})
+            if (const State st = state_of(G, "aff_" + door + s); st == State::Offered or st == State::Executing) return true;
+        return false;
+    }
     /// True once when the passage reaches Done (not on stop()): the caller hands the base back if then_affordances.
     [[nodiscard]] bool take_finished()
     {
@@ -928,7 +936,83 @@ private:
         return open_now ? cross_ok : on(Step::Open);
     }
     /// ROUTE MODE (header). Under m_.
+    /// ROUTE MODE's cycle, then the bounded offer wait (bound_offer_wait) judged on the state the cycle left.
     Out update_route(DSR::DSRGraph& G, const std::string& room_frame, Out out)
+    {
+        out = update_route_cycle(G, room_frame, std::move(out));
+        bound_offer_wait(G, out);
+        return out;
+    }
+    /// ★ A WAIT ON AN OFFER NOBODY MAKES IS BOUNDED — for EVERY step of the route, not only `open` (clean51: 28m36s on an `open`
+    ///   nobody offered, bounded by c0e6d000; clean58, 2026-11-12: 26+ min at the vantage of the phantom door_3, "aff_door_3_cross
+    ///   is not in the graph", the cross step waiting for a target door_concept never published, the approach withdrawn, nothing
+    ///   eligible; owner: "the robot should do something if it is not allowed to cross").
+    ///   WAITING = the step has nothing to drive because door_concept does not offer it: `open` not on offer and the door not read
+    ///   open; `cross`, before the body is in the opening or through, not on offer or with no published target; `approach` with no
+    ///   target ever published. A RE-APPROACH from the door (reapproach_: the withdrawn-cross rule or a hand-back) is part of the same
+    ///   wait — the withdrawn-cross rule can flip cross -> approach -> "already at the vantage" -> cross every cycle while neither step
+    ///   moves the robot, and that is a wait too. The wait ends when the step waited on is offered (or the door reads open, for
+    ///   `open`), and starts afresh when the robot stands at a NEW VIEW: farther than the approach's own arrival tolerance (note_robot)
+    ///   from where it began — a pose the approach would call another place.
+    ///   SPAN: the one `close` already uses for its unoffered step (close_wait_ms_, Mission.DoorCloseOfferWaitS): past it, door_concept
+    ///   has had its chance to offer the step from this view. The first time the passage HANDS BACK to the approach (a new route leg)
+    ///   to change the viewpoint; the second time (kMaxRouteFailures, the passage's existing two strikes, one count for every step)
+    ///   it ends FAILED with outcome "<step>_not_offered" and the exploration drive chooses what the robot does next. No new constant.
+    void bound_offer_wait(DSR::DSRGraph& G, Out& out)   // under m_
+    {
+        const auto on = [&](Step s) { const State st = state_of(G, name_of(s)); return st == State::Offered or st == State::Executing; };
+        std::optional<Step> waiting;
+        if (step_ == Step::Open and not on(Step::Open) and not door_reads_open(G)) waiting = Step::Open;
+        else if (step_ == Step::Cross and not exited_ and not in_opening_ and not clearing_ and (not on(Step::Cross) or not route_cross_.has_value()))
+            waiting = Step::Cross;
+        else if (step_ == Step::Approach and not route_approach_.has_value()) waiting = Step::Approach;
+        else if (step_ == Step::Approach and reapproach_ and offer_since_ms_ != 0 and not on(offer_wait_step_)) waiting = offer_wait_step_;
+        if (not waiting.has_value())
+        {
+            offer_since_ms_ = 0;
+            offer_wait_step_ = Step::Idle;
+            return;
+        }
+        const bool new_view = offer_from_.has_value() and robot_.has_value() and (*robot_ - *offer_from_).norm() > arrival_tol_;
+        if (offer_since_ms_ == 0 or new_view) { start_offer_wait(*waiting); return; }
+        offer_wait_step_ = *waiting;   // the step it is on now (the clock runs on: one wait at this door from this view)
+        if (now_ms() - offer_since_ms_ < close_wait_ms_) return;
+        const Step step = offer_wait_step_;
+        start_offer_wait(step);        // the hand-back's own wait begins now, from here
+        const double span_s = double(close_wait_ms_) / 1000.0;
+        out.route.reset();
+        out.passages.clear();
+        out.exempt.clear();
+        if (state_of(G, name_of(Step::Open)) == State::Executing) preempted_ = true;   // the caller releases a claim on `open`
+        if (++unoffered_ >= kMaxRouteFailures)
+        {
+            finish();
+            failed_ = true;
+            last_outcome_ = std::string(step_name(step)) + "_not_offered";
+            out.required.clear();
+            route_event(out, std::format("[door-route] {}: {} not offered within {:.1f} s again (wait {} of {}) — passage FAILED ({}); "
+                                         "the exploration drive chooses the next action (another door, a look, the room, or the "
+                                         "way back) and does not retake {} without new evidence about it", door_, name_of(step),
+                                         span_s, unoffered_, kMaxRouteFailures, last_outcome_, door_));
+            return;
+        }
+        route_event(out, std::format("[door-route] {}: {} not offered within {:.1f} s (wait {} of {}) — handing back: back to {} for a "
+                                     "new view; a second such wait ends the passage", door_, name_of(step), span_s, unoffered_,
+                                     kMaxRouteFailures, name_of(Step::Approach)));
+        step_ = Step::Approach;
+        reapproach_ = true;
+        seen_executing_ = false;
+        open_was_on_ = false;
+        ++route_epoch_;
+        out.required = name_of(Step::Approach) + kRouteSuffix;
+    }
+    void start_offer_wait(Step s)   // under m_
+    {
+        offer_since_ms_ = now_ms();
+        offer_wait_step_ = s;
+        offer_from_ = robot_;
+    }
+    Out update_route_cycle(DSR::DSRGraph& G, const std::string& room_frame, Out out)
     {
         const bool open_now = door_reads_open(G);
         const auto appr = target_of(G, Step::Approach);
@@ -992,6 +1076,9 @@ private:
             {
                 route_event(out, std::format("[door-route] {}: {} withdrawn and {} offered, the body not in the opening — back to "
                                              "the vantage", door_, name_of(Step::Cross), name_of(Step::Approach)));
+                // the re-approach waits on `cross` being offered again: one bounded wait (bound_offer_wait), even when the robot is
+                // already at the vantage and this rule and the arrival flip cross <-> approach every cycle without moving it
+                if (offer_since_ms_ == 0) start_offer_wait(Step::Cross);
                 step_ = Step::Approach;
                 reapproach_ = true;
                 seen_executing_ = false;
@@ -1044,41 +1131,11 @@ private:
                 ++route_epoch_;
             }
         }
-        if (step_ != Step::Open) open_since_ms_ = 0;
         if (step_ == Step::Open)
         {
             const State so = state_of(G, name_of(Step::Open));
             if (so == State::Executing) seen_executing_ = true;
-            // ★ A WAIT FOR AN `open` NOBODY OFFERS IS BOUNDED (clean51, 2026-11-11: 28m36s at the vantage, "aff_door_3_open is not in
-            //   the graph"; Fable: "a passage can wait forever"). The same span `close` already uses when its step is not offered
-            //   (close_wait_ms_): past it, the door's owner has had its chance to offer the step from this view, so the passage changes
-            //   the view (back to the approach); the second time it ends FAILED (kMaxRouteFailures, the passage's existing two
-            //   strikes) and the drive decides again — no new constant.
-            if (so == State::Offered or so == State::Executing or open_now) open_since_ms_ = 0;
-            else
-            {
-                if (open_since_ms_ == 0) open_since_ms_ = now_ms();
-                if (now_ms() - open_since_ms_ >= close_wait_ms_)
-                {
-                    open_since_ms_ = 0;
-                    if (++open_unoffered_ >= kMaxRouteFailures)
-                    {
-                        finish();
-                        failed_ = true;
-                        last_outcome_ = "open_not_offered";
-                        route_event(out, std::format("[door-route] {}: {} not offered within {:.1f} s again — passage FAILED "
-                                                     "(open_not_offered)", door_, name_of(Step::Open), double(close_wait_ms_) / 1000.0));
-                        return out;
-                    }
-                    route_event(out, std::format("[door-route] {}: {} not offered within {:.1f} s — back to {} to change the viewpoint",
-                                                 door_, name_of(Step::Open), double(close_wait_ms_) / 1000.0, name_of(Step::Approach)));
-                    step_ = Step::Approach;
-                    reapproach_ = true;
-                    seen_executing_ = false;
-                    ++route_epoch_;
-                    return out;
-                }
-            }
+            // (the wait for an `open` nobody offers is bounded after the cycle: bound_offer_wait, the same rule for every step)
             const auto on = G.get_node(name_of(Step::Open));
             const bool open_satisfied = seen_executing_ and so == State::Completed and on.has_value()
                                         and rc::affordance::read_outcome(*on) == rc::affordance::Outcome::Satisfied;
@@ -1163,6 +1220,7 @@ private:
         }
         if (not route_approach_.has_value() or (through and not route_cross_.has_value()))
         {
+            // ★ clean58: 26+ min here at the phantom door_3 — this wait is bounded after the cycle (bound_offer_wait)
             const std::string what = route_approach_.has_value() ? name_of(Step::Cross) : name_of(Step::Approach);
             if (route_wait_logged_ != what)
             {
@@ -1277,6 +1335,7 @@ public:
         bool reached_door = false;       ///< no fallback to earlier steps (update(): "…but NOT once the robot has reached")
         bool opened = false;             ///< `open` succeeded: a re-offered `open` is the flicker, ignored
         bool clearing = false;           ///< crossing on past the room switch, on the anchor
+        std::string offer_bound;         ///< the bounded offer wait in words ("" = not waiting on an offer; bound_offer_wait)
     };
     [[nodiscard]] View view() const
     {
@@ -1285,7 +1344,14 @@ public:
         return {.door = door_, .step = step_, .step_state = step_state_, .attempts = attempts_, .last_event = last_event_,
                 .last_outcome = last_outcome_, .then_affordances = then_affordances_, .failed = failed_,
                 .required = live ? name_of(step_) : std::string{}, .reached_door = reached_door_, .opened = opened_,
-                .clearing = clearing_ and step_ == Step::Cross};
+                .clearing = clearing_ and step_ == Step::Cross,
+                .offer_bound = live and offer_since_ms_ != 0
+                                   ? std::format("bounded: unoffered for {:.1f} of {:.1f} s (wait {} of {}), then {}",
+                                                 double(now_ms() - offer_since_ms_) / 1000.0, double(close_wait_ms_) / 1000.0,
+                                                 unoffered_ + 1, kMaxRouteFailures,
+                                                 unoffered_ + 1 < kMaxRouteFailures ? "back to the approach for a new view"
+                                                                                     : "the passage FAILS and the drive chooses again")
+                                   : std::string{}};
     }
     [[nodiscard]] static const char* step_name(Step s)
     {
@@ -1401,8 +1467,12 @@ private:
     bool finished_ = false;           ///< reached Done since the last take_finished()
     std::uint64_t close_wait_ms_ = 5000;
     std::uint64_t close_since_ms_ = 0;
-    std::uint64_t open_since_ms_ = 0;   ///< when the passage last began waiting on an `open` that is not on offer (0 = not waiting)
-    int           open_unoffered_ = 0;  ///< such waits that ran out this passage (kMaxRouteFailures ends it)
+    // ★ THE BOUNDED OFFER WAIT (bound_offer_wait): one clock for whichever step stands waiting on door_concept's offer, one
+    //   strike count for the whole passage.
+    std::uint64_t offer_since_ms_ = 0;          ///< when the current wait on an unoffered step began (0 = not waiting)
+    Step          offer_wait_step_ = Step::Idle;///< the step that wait is for (another step = another wait)
+    std::optional<Eigen::Vector2f> offer_from_; ///< where the robot stood when that wait began (a new view restarts it)
+    int           unoffered_ = 0;               ///< waits that ran out this passage (kMaxRouteFailures ends it)
     std::function<std::uint64_t()> clock_;
     Step step_ = Step::Idle;
     Step stop_after_ = Step::Cross;

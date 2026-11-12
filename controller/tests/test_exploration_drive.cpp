@@ -206,6 +206,52 @@ int main()
         check(not d.reconsider_return("room_3", {found("door_5", 2.0), found("door_7", 1.0)}).has_value(),
               "late door: a crossed door never supersedes");
     }
+    {   // clean58 (2026-11-12): a passage FAILED because door_concept never offered door_3's cross. The drive must DO something else —
+        //   another door, else the way back — and must not take door_3 again until there is NEW EVIDENCE about it (a model event).
+        using rc::explore::DoorEvidence;
+        Drive d(300.0);
+        (void)d.step("room_1", true, {}, true, 0.0);
+        d.note_entered("room_2", "door_2", 10.0);
+        const DoorEvidence at_failure{.node_id = 33, .exists_map = true, .step_offered = false};
+        auto door3 = found("door_3", 0.6); door3.evidence = at_failure;   // the nearest
+        auto door4 = found("door_4", 3.0); door4.evidence = {.node_id = 44};
+        const auto first = d.step("room_2", true, {door3, door4}, false, 20.0);
+        check(first.door == std::optional<std::string>{"door_3"}, "clean58: the nearest door is taken first");
+        d.note_failed("door_3", at_failure);                               // ... and its passage fails (cross_not_offered)
+        const auto next = d.step("room_2", true, {door3, door4}, false, 21.0);
+        check(next.cause == Cause::Promoted and next.door == std::optional<std::string>{"door_4"},
+              "clean58: after the failure the drive picks ANOTHER door, not the failed one");
+        for (double t = 22.0; t < 400.0; t += 0.2)                          // the same evidence, for as long as it stays the same
+            if (d.step("room_2", true, {door3}, false, t).door == std::optional<std::string>{"door_3"})
+            { check(false, "clean58: the failed door is NEVER re-picked without new evidence (no loop)"); break; }
+        const auto back = d.step("room_2", true, {door3}, false, 30.0);
+        check(back.cause == Cause::Return and back.door == std::optional<std::string>{"door_2"} and back.is_return,
+              "clean58: no other door -> the way back through the entry door, not a stand");
+        check(d.take_retried().empty(), "no retry without new evidence");
+        auto offered_now = door3; offered_now.evidence.step_offered = true;   // door_concept now offers its open/cross
+        const auto retry = d.step("room_2", true, {offered_now}, false, 31.0);
+        check(retry.door == std::optional<std::string>{"door_3"}, "new evidence (door_concept offers its step): the door may be retried");
+        const auto retried = d.take_retried();
+        check(retried.size() == 1 and retried.front() == "door_3", "the retry is reported once");
+        d.note_failed("door_3", offered_now.evidence);                     // fails again: the new evidence is recorded anew
+        check(d.step("room_2", true, {offered_now}, false, 32.0).door != std::optional<std::string>{"door_3"},
+              "a second failure under that evidence skips it again");
+        auto reborn = door3; reborn.evidence.node_id = 99;                  // door_concept re-born door_3 (a new hypothesis)
+        check(d.step("room_2", true, {reborn}, false, 33.0).door == std::optional<std::string>{"door_3"}, "a re-born door may be retried");
+    }
+    {   // a failed WAY BACK is Stuck (no loop), and new evidence about the entry door lifts it — the drive does not stop for ever
+        using rc::explore::DoorEvidence;
+        Drive d(300.0);
+        (void)d.step("room_1", true, {}, true, 0.0);
+        d.note_entered("room_2", "door_2", 1.0);
+        auto entry = found("door_2", 1.0); entry.evidence = {.node_id = 22};
+        check(d.step("room_2", true, {entry}, false, 2.0).cause == Cause::Return, "returns through the entry door");
+        d.note_failed("door_2", entry.evidence);
+        check(d.step("room_2", true, {entry}, false, 3.0).cause == Cause::Stuck, "a failed way back with no new evidence: Stuck");
+        auto entry_new = entry; entry_new.evidence.step_offered = true;
+        const auto r = d.step("room_2", true, {entry_new}, false, 4.0);
+        check(r.cause == Cause::Return and r.door == std::optional<std::string>{"door_2"}, "new evidence about the entry door: the way back again");
+    }
     check(std::string(rc::explore::to_string(Cause::Stuck)) == "stuck", "to_string stuck");
     check(std::string(rc::explore::to_string(Cause::MaxTime)) == "max-time", "to_string");
     std::println("{}/{} checks passed", checks - fails, checks);

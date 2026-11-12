@@ -240,6 +240,62 @@ rc::DoorModelParams DoorFit::make_model_params() const
 // per-cycle write-back — the only three places a door's shape can change.
 void DoorFit::refresh_geometry(rc::DoorFitState& inst)
 {
+    // ★THE APERTURE'S PLANE IS ITS WALL'S LINE (2026-11-12, clean58 door_3). Owner: "doors have to be aligned with walls".
+    //  clean58: door_3 (the bathroom's DOOR_0) was born while the bathroom was provisional, and its wall frame was authored on the
+    //  proto outline's FRONTIER edge across the mouth of the unseen west alcove — perpendicular to the south wall the doorway is cut
+    //  in. Nothing re-authored it after promotion (the frame was set once, in run_inference), so the published door stood across the
+    //  wall: centre 4 cm from the wall line, yaw 89° off it, half in the room and half out.
+    //  THE MODEL. The aperture is a hole IN its wall, so its plane offset e (across) and yaw ψ ARE the carrying wall's line. In this
+    //  belief nothing else observes them: the masks and the LiDAR observe the LEAF, whose depth from the wall line is the DOF d (prior
+    //  σ_r² = T²/12 + σ_b², where σ_b, the outline's registration, is this line's σ). The wall line enters as a Gaussian factor on
+    //  (e, ψ): N(e; line, σ_e²), σ_e = Existence.BoundarySigmaM (the outline's positional σ, the σ the along-wall support and the wall
+    //  band read); N(ψ; line's direction mod π, σ_ψ²), σ_ψ = √2·σ_e / L — the direction of a line through two corners L apart, each
+    //  placed to σ_e. Because the data-only information on (e, ψ) is zero, the posterior IS that factor: its mean is the line, which
+    //  is where the frame is put (DoorBelief::reframe_onto_line), and d is re-expressed so the leaf's DATA stays where it was seen
+    //  while d's prior (relative to the wall) follows the line. The factor is REPLACED each cycle, never accumulated — the frame is
+    //  recomputed from THIS cycle's outline, so it follows room_concept when it moves a wall. ψ is mod π (u is taken within ±π/2 of
+    //  the frame's, so either face works and the hinge/swing labels keep their meaning).
+    //  WHICH WALL: rc::door::door_carrying_run — the existing in-band rule (the field's own-wall depth band, the run carrying the centre,
+    //  no nearest-wall fallback) asked from each wall's side, so a frame skewed off its wall (door_3) can still find it. No wall
+    //  carries the door ⇒ no term (the frame stays as it is), logged on the change. A PROTO room's outline is a frontier, not walls:
+    //  no term — a proto-born door gets it on the first cycle after promotion. The along-wall support (below) and the existence
+    //  prior (existence_update.cpp prior_of) read door_carrying_wall, built on the same door_carrying_run: one definition.
+    //  ⚑ σ_ψ and σ_e do not move the mean (the factor is the whole posterior); they are logged, and they become weights the moment
+    //  anything else observes the aperture's plane.
+    if (inst.ai2_initialized and not inst.is_bearing_hypothesis)
+    {
+        const rc::DoorBelief::FieldNuisance band{};
+        const rc::door::CarryingWall cw = (has_room_polygon() and not room_is_proto_)
+            ? rc::door::door_carrying_run(inst.ai2_belief.aperture(), room_polygon_, band.depth_lo, band.depth_hi)
+            : rc::door::CarryingWall{};
+        const int carried = cw.ok ? 1 : 0;
+        if (cw.ok)
+        {
+            const auto [off, rot] = inst.ai2_belief.reframe_onto_line(cw.O, cw.u);
+            inst.dbg_wall_line_off = off;
+            inst.dbg_wall_line_rot = rot;
+            inst.dbg_wall_line_sd_off = cfg_.exist_boundary_sigma_m;
+            inst.dbg_wall_line_sd_yaw = cw.edge_len > 0.0f ? std::numbers::sqrt2_v<float> * cfg_.exist_boundary_sigma_m / cw.edge_len
+                                                           : std::numeric_limits<float>::infinity();
+            if (inst.wall_line_carried != 1 or std::abs(off) > inst.dbg_wall_line_sd_off or std::abs(rot) > inst.dbg_wall_line_sd_yaw)
+                say(std::format("door_concept: [wall-line] {} on its wall's line: moved {:+.3f} m across, turned {:+.1f} deg "
+                                "(line σ {:.3f} m, {:.2f} deg; run [{:.2f}, {:.2f}] m)\n", inst.node_name, -off,
+                                rot * 180.0f / std::numbers::pi_v<float>, inst.dbg_wall_line_sd_off,
+                                inst.dbg_wall_line_sd_yaw * 180.0f / std::numbers::pi_v<float>, cw.lo, cw.hi));
+        }
+        else
+        {
+            inst.dbg_wall_line_off = inst.dbg_wall_line_rot = 0.0f;
+            inst.dbg_wall_line_sd_off = inst.dbg_wall_line_sd_yaw = 0.0f;
+            if (inst.wall_line_carried != 0)
+                say(std::format("door_concept: [wall-line] {}: no wall carries it ({}) — no wall-line term, its plane stays as fitted\n",
+                                inst.node_name, not has_room_polygon() ? "no room outline"
+                                                : room_is_proto_ ? "the room is provisional: its outline is a frontier"
+                                                : "its centre is in no wall's band"));
+        }
+        inst.wall_line_carried = carried;
+    }
+
     // ★PHI FIRST. Every projection below is built from the leaf pose, and the leaf pose is a function of
     // phi — so the angle has to be estimated before anything reads it, or the whole cycle runs on last
     // cycle's door.
@@ -587,6 +643,26 @@ float DoorFit::run_inference(rc::DoorFitState& inst, const DoorObservation& obse
 {
     const int npts = static_cast<int>(observation.candidate_pts.size() + observation.residual_pts.size());
 
+    // ★A FRAME AUTHORED IN A PROVISIONAL ROOM IS PROVISIONAL (2026-11-12, clean58 door_3 / clean51 door_3): it came from the door's
+    //  own evidence (frame_from_evidence below), and for a doorway seen THROUGH (the depth under the mask is the next room's far
+    //  wall) that evidence places the centre beyond the wall by the depth of the room behind it. Once the room is promoted its
+    //  outline IS walls, and the first mask that arrives associates the door exactly as a door born in a promoted room
+    //  (associate_wall: each point votes for the wall its sightline leaves the room by) — the belief is re-seeded from it, with this
+    //  cycle's mask when there is one, else with the points and camera it was framed from (kept for exactly this: after promotion a
+    //  seen-through door's masks are read at the wall, its centre is beyond it, and nothing would associate). The leaf's
+    //  articulation (hinge, swing) is carried over, relabelled if the new wall direction is reversed.
+    std::optional<door::LeafState> carried_leaf;
+    std::optional<Eigen::Vector2f> carried_u;
+    if (inst.ai2_initialized and inst.framed_in_proto and not room_is_proto_ and has_room_polygon()
+        and (npts > 0 or not inst.proto_evidence_pts.empty()) and not inst.is_bearing_hypothesis)
+    {
+        carried_leaf = inst.ai2_belief.params().leaf;
+        carried_u = inst.ai2_belief.params().wall_u;
+        inst.ai2_initialized = false;
+        say(std::format("door_concept: [{}] the room is promoted: re-associating the door framed in the provisional room to its wall "
+                        "from {}\n", inst.node_name, npts > 0 ? "this mask's sightlines" : "the sightlines it was framed from"));
+    }
+
     // Lazy belief init: associate the door to the room-polygon wall it was seen through (fixes yaw / lateral / floor),
     // then seed the along-wall offset s from the mask centroid. w,h start at their strong template priors;
     // the belief works in the wall frame θ=[s,w,h].
@@ -617,6 +693,15 @@ float DoorFit::run_inference(rc::DoorFitState& inst, const DoorObservation& obse
         std::optional<Eigen::Vector2f> cam_xy;
         if (room_T_zed_.has_value() and npts > 0)
             cam_xy = Eigen::Vector2f(static_cast<float>(room_T_zed_->coeff(0, 3)), static_cast<float>(room_T_zed_->coeff(1, 3)));
+        const bool from_kept_evidence = carried_leaf.has_value() and npts == 0 and not inst.proto_evidence_pts.empty();
+        if (from_kept_evidence)
+        {   // re-association at promotion with no mask this cycle: the points the provisional frame came from, seen from where they were
+            pts_xy = inst.proto_evidence_pts;
+            cam_xy = inst.proto_evidence_cam;
+            Eigen::Vector2f sum = Eigen::Vector2f::Zero();
+            for (const auto& q : pts_xy) sum += q;
+            centroid_xy = sum / static_cast<float>(pts_xy.size());
+        }
         rc::DoorBeliefParams p = make_belief_params();
         rc::DoorBeliefState s0;
         s0.w = inst.seed_wh_from_box ? m.w : cfg_.door_prior_w_m;
@@ -624,11 +709,45 @@ float DoorFit::run_inference(rc::DoorFitState& inst, const DoorObservation& obse
         inst.seed_wh_from_box = false;
         // Wall association: the belief's centre = O + (s + w/2)·u, so seed s so the panel centre lands on the
         // detection centroid. Off the wall (no polygon) → keep the identity frame and s = along-x of centroid.
-        WallFrame wf = associate_wall(pts_xy, cam_xy);
-        if (npts == 0 and std::isfinite(m.ap_yaw))   // review M-1: a remembered door's pose (place AND yaw) picks its wall
-            if (const auto r = door::associate_wall_remembered(room_polygon_, centroid_xy, m.ap_yaw, 0.5f * s0.w,
-                                                               room_band().wall_thickness_m); r.ok)
-            { wf.O = r.O; wf.u = r.u; wf.len = r.len; wf.ok = true; }
+        WallFrame wf;
+        if (room_is_proto_)
+        {
+            // ★A PROVISIONAL ROOM'S OUTLINE IS A FRONTIER, NOT WALLS (2026-11-12, clean58 door_3): associate_wall framed door_3 on the
+            //  frontier across the unseen alcove's mouth — perpendicular to the wall its doorway is cut in — and the line below then
+            //  projected the detection 2.33 m along it. The frame and the centre come from the door's OWN evidence instead
+            //  (door::frame_from_evidence: the detection's centre, the orientation from the points' depth gradient, or facing the
+            //  camera with a uniform yaw when the detection carries none; a remembered pose keeps its yaw). After promotion the
+            //  wall-line factor (refresh_geometry) puts the plane on the wall that carries it.
+            std::optional<Eigen::Vector2f> room_side;
+            if (room_T_zed_.has_value())
+                room_side = Eigen::Vector2f(static_cast<float>(room_T_zed_->coeff(0, 3)), static_cast<float>(room_T_zed_->coeff(1, 3)));
+            const auto ef = door::frame_from_evidence(pts_xy, centroid_xy, cam_xy.has_value() ? cam_xy : room_side, room_side,
+                                                      npts == 0 and std::isfinite(m.ap_yaw) ? std::optional<float>(m.ap_yaw) : std::nullopt);
+            wf.O = ef.O; wf.u = ef.u; wf.len = 0.0f; wf.ok = true;
+            inst.dbg_birth_yaw_sd = ef.yaw_sd;
+            // kept for the re-association at promotion (above): a stride sample of the points (the vote is a count, so a uniform
+            // sample keeps its proportions) and the camera they were seen from; none when they were not seen (a remembered door)
+            inst.proto_evidence_pts.clear();
+            inst.proto_evidence_cam.reset();
+            if (npts > 0)
+            {
+                const std::size_t stride = std::max<std::size_t>(1, pts_xy.size() / 64);
+                for (std::size_t i = 0; i < pts_xy.size(); i += stride) inst.proto_evidence_pts.push_back(pts_xy[i]);
+                inst.proto_evidence_cam = cam_xy;
+            }
+            say(std::format("door_concept: [{}] framed in a PROVISIONAL room from its own evidence: centre ({:.2f},{:.2f}) yaw {:.1f} deg "
+                            "σ {:.1f} deg ({} point(s)) — no outline edge (a frontier is no wall)\n", inst.node_name, centroid_xy.x(),
+                            centroid_xy.y(), std::atan2(ef.u.y(), ef.u.x()) * 180.0f / std::numbers::pi_v<float>,
+                            ef.yaw_sd * 180.0f / std::numbers::pi_v<float>, npts));
+        }
+        else
+        {
+            wf = associate_wall(pts_xy, cam_xy);
+            if (npts == 0 and not from_kept_evidence and std::isfinite(m.ap_yaw))   // review M-1: a remembered door's pose (place AND yaw) picks its wall
+                if (const auto r = door::associate_wall_remembered(room_polygon_, centroid_xy, m.ap_yaw, 0.5f * s0.w,
+                                                                   room_band().wall_thickness_m); r.ok)
+                { wf.O = r.O; wf.u = r.u; wf.len = r.len; wf.ok = true; }
+        }
         if (wf.ok)
         {
             p.wall_O = wf.O; p.wall_u = wf.u; p.wall_len = wf.len;
@@ -677,6 +796,14 @@ float DoorFit::run_inference(rc::DoorFitState& inst, const DoorObservation& obse
             inst.leaf_memory_from_recall = false;
             inst.leaf_graph_seeded = true;
         }
+        if (carried_leaf.has_value())
+        {   // the hinge is named along wall_u: a reversed wall direction swaps Near and Far; the swing is relative to across_u, which
+            // both frames point INTO the room, so it keeps its sign
+            p.leaf = *carried_leaf;
+            if (carried_u.has_value() and carried_u->dot(p.wall_u) < 0.0f)
+                p.leaf.hinge = p.leaf.hinge == door::HingeSide::Near ? door::HingeSide::Far : door::HingeSide::Near;
+        }
+        inst.framed_in_proto = room_is_proto_;
         inst.ai2_belief = rc::DoorBelief(s0, p);
         // ★Task D-C round 2 (tour3C): A REMEMBERED PLACE IS NOT A BIRTH SEED. A door restored from memory came back with the
         //  birth seed's σ_s = Door.PriorAlongWallStd 0.6 m although its place had been fitted to a few cm before the room was
