@@ -36,19 +36,25 @@ ax.axhline(3, color="0.6", lw=0.8, ls="--"); ax.text(15, 3.05, "3σ", color="0.4
 ax.set_xlabel("wall length L (m)"); ax.set_ylabel("band half-width (σ)")
 fig.tight_layout(); fig.savefig(HERE / "d3_band.pdf"); plt.close(fig)
 
-# 3. the localisation track
-fig, ax = plt.subplots(figsize=(5.4, 3.9))
+# 3. confidently wrong: the error across the east wall, against the band the localiser claims (±2σ),
+#    true room vs the east wall moved 1.5 cm. Same route, same seed: only the map differs.
 tr = g["true_room"]
-ax.fill(*np.vstack([tr, tr[:1]]).T, fc="0.95", ec="0.2")
-truths, beliefs = g["truths"], g["beliefs"]
-ax.plot(truths[:, 0], truths[:, 1], "k-", lw=1, label="truth")
-mus = np.array([b.mu for b in beliefs])
-ax.plot(mus[:, 0], mus[:, 1], ".", color="crimson", ms=3, label="belief")
-for b in beliefs[::5]:
-    draw.covariance(b.mu, b.Sigma * 400, ax)
-ax.set_aspect("equal"); ax.legend(frameon=False, fontsize=9, loc="lower right")
-ax.set_title("2σ ellipses, ×20", fontsize=10)
-fig.tight_layout(); fig.savefig(HERE / "d3_track.pdf"); plt.close(fig)
+n_e = np.array([np.cos(-0.3), np.sin(-0.3)])                  # the east wall's normal (as the lab moves it)
+fig, axes = plt.subplots(2, 1, figsize=(5.0, 3.6), sharex=True, sharey=True)
+for ax, poly, name, col in ((axes[0], g["true_room"], "true room", "0.35"),
+                            (axes[1], g["bad_room"], "east wall moved 1.5 cm", "crimson")):
+    T, B = g["drive"](poly, 1)
+    e = np.array([(t[:2] - b.mu[:2]) @ n_e for t, b in zip(T, B)]) * 1000
+    s = np.array([np.sqrt(n_e @ b.Sigma[:2, :2] @ n_e) for b in B]) * 1000
+    k = np.arange(len(e))
+    ax.fill_between(k, -2 * s, 2 * s, color="royalblue", alpha=0.25, lw=0)
+    ax.plot(k, e, color=col, lw=1.6)
+    ax.axhline(0, color="k", lw=0.6)
+    ax.set_title(name, loc="left", fontsize=10, color=col, pad=2)
+    ax.set_ylabel("error (mm)", fontsize=9)
+axes[0].text(0.99, 0.06, "blue band: what it claims, ±2σ", transform=axes[0].transAxes, va="bottom", ha="right", fontsize=9, color="royalblue")
+axes[1].set_xlabel("step along the route", fontsize=9)
+fig.tight_layout(h_pad=0.3); fig.savefig(HERE / "d3_track.pdf"); plt.close(fig)
 
 # 4. NEES for three maps (recomputed: the notebook only prints it)
 scores = []

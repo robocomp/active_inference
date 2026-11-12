@@ -760,12 +760,13 @@
 
 \begin{frame}{Localising against the room you just built}
   \begin{columns}[c]
-    \begin{column}{0.4\textwidth}
+    \begin{column}{0.54\textwidth}
       \includegraphics[width=\textwidth]{d3_track.pdf}
     \end{column}
     \begin{column}{0.42\textwidth}
-      \includegraphics[width=0.85\textwidth]{d3_nees.pdf}
-      \small
+      \centering\includegraphics[width=0.9\textwidth]{d3_nees.pdf}\par\vspace{0.3em}
+      \raggedright\small
+      Same route, same scans: only the map differs.
       A wall \textbf{1.5 cm} out of place makes the localiser confidently wrong.\\[0.2em]
       \scriptsize NEES: squared error $\div$ claimed variance, summed over $x$, $y$, heading.
       Honest: 3. Here: 90.
@@ -794,7 +795,7 @@
           \textcolor{cool}{dots: the chair};\\ \textcolor{accent}{crosses: spill onto floor, wall}};
     % what travels with every mask
     \node[mtag=2.9cm, draw=cool]   at (-0.3,-2.6) {\textbf{label + score}\\a guess: table 0.75,\\or desk 0.55};
-    \node[mtag=2.9cm, draw=good]   at (2.9,-2.6)  {\textbf{points}\\each with its own $\sigma_n$,\\growing with range};
+    \node[mtag=2.9cm, draw=good]   at (2.9,-2.6)  {\textbf{points}\\one $\sigma$ per frame, wider\\far, moving, off-centre};
     \node[mtag=2.9cm, draw=accent] at (6.1,-2.6)  {\textbf{variance}\\blur and jitter, zero mean:\\it averages out};
     \node[mtag=3.3cm, draw=accent] at (9.6,-2.6)  {\textbf{bias}\\the camera turned: all points\\shift one way, and it does\\not average out};
   \end{tikzpicture}
@@ -812,14 +813,14 @@
   (frame 11): posterior $\propto$ prior $\times$ likelihood, and $F$ is its $-\ln$:
   \[
     F(\theta) \;=\; \underbrace{\tfrac12\,(\theta-\bar\theta)^{\!\top}\bar P^{-1}(\theta-\bar\theta)}_{\text{prior: where I believed the chair was}}
-    \;+\; \underbrace{\textstyle\sum_n \rho\big(d_n(\theta)/\sigma_n\big)}_{\text{likelihood: every mask point onto the chair}}
+    \;+\; \underbrace{\textstyle\sum_n \rho\big(d_n(\theta)/\sigma\big)}_{\text{likelihood: every mask point onto the chair}}
   \]
   {\footnotesize\makebox[\linewidth][c]{%
   \begin{tabular}{@{}l@{\ \ }l@{\qquad}l@{\ \ }l@{}}
     $\theta$ & the chair's pose: $x$, $y$, heading &
     $d_n(\theta)$ & mask point $n$'s distance to the chair\\[2pt]
     $\bar\theta,\ \bar P$ & last belief, covariance; widened when unseen &
-    $\sigma_n$ & point $n$'s noise; grows with range
+    $\sigma$ & the frame's noise, shared by its points
   \end{tabular}}\par}
   \vspace{0.3em}
   {\footnotesize $\rho(u)=-\ln p(u)$: a point's cost at $u$ standard deviations. A Gaussian gives
@@ -867,13 +868,14 @@
       $0$ on it, $+$ outside, $-$ inside.\\[0.3em]
       \textbf{Mixture.} The chair is a seat, a backrest and four legs. A point is either on the chair
       or clutter, $\rho=-\ln(\text{chair}+\text{clutter})$, so a stray point costs a bounded amount.\\[0.3em]
-      \textbf{Precision.} $\sigma_n$ grows with range. One error is shared by all the points of a
-      frame, the robot's own pose error, and it is counted once (frame 29).\\[0.3em]
+      \textbf{Precision.} One $\sigma$ per frame (blur, depth, range, off-centre), plus one error
+      \emph{shared} by all its points, counted once (frame 29): the robot's pose, wider far away or
+      moving. No gate: a poor view counts, for little.\\[0.3em]
       \textbf{Reprojection.} The reverse path: the believed silhouette, projected into the image with its
       predicted depth, is checked against the edges there. \alert{On the robot it feeds existence, not the fit.}
     \end{column}
   \end{columns}
-  \src{concept\_agents.tex l.516--523; chair\_concept/src/chair\_fitter.cpp, chair\_contour.h}
+  \src{concept\_agents.tex l.516--523; chair\_concept/src/chair\_fitter.cpp (R and common mode), chair\_contour.h}
 \end{frame}
 
 
@@ -895,13 +897,14 @@
     \end{column}
     \begin{column}{0.5\textwidth}
       \small
-      Each detection goes to the object it most likely belongs to: one best guess, closest first.\\[0.5em]
-      A guess has no uncertainty to pay for, so it adds nothing to $F$.
+      An object may claim only detections inside its own uncertainty (the ellipse). Then each mask goes
+      to the object whose shape explains it best: lowest $-\ln p$ first, one each.\\[0.5em]
+      That is still one best guess: it has no uncertainty to pay for, so it adds nothing to $F$.
       \alert{A wrong match is invisible to the quantity that would have registered it.}\\[0.5em]
       The repair comes later and from elsewhere: merging, and the existence belief.
     \end{column}
   \end{columns}
-  \src{concept\_agents.tex l.483--486, l.859--889}
+  \src{concept\_agents.tex l.483--486, l.859--889; chair\_concept/src/specificworker.cpp (gate, then lowest mixture NLL)}
 \end{frame}
 
 \begin{frame}{The common-mode ceiling}
@@ -924,8 +927,8 @@
       \small
       The same arrow as yesterday, now on a thousand points.\\[0.5em]
       Averaging points removes their small independent jitter. It cannot touch the arrow.\\[0.5em]
-      \alert{A denser mask eventually stops helping}: the limit is set by the robot's pose, not by
-      the number of pixels. And the data cannot tell a displaced object from a displaced robot.
+      \alert{A denser mask eventually stops helping}: the limit is set by the shared error (the robot's
+      pose, the range, the motion), not by the number of pixels. And the data cannot tell a displaced object from a displaced robot.
     \end{column}
   \end{columns}
   \src{concept\_agents.tex l.1048--1090}
@@ -971,19 +974,19 @@
     \end{column}
     \begin{column}{0.53\textwidth}
       \small
-      Estimated like the chair, a prior and a likelihood minimised, but \alert{articulated}: two
-      parts, and one of them moves.\\[0.4em]
-      \begin{itemize}\small
-        \item \textbf{The opening}: where along its wall, how wide, how high; from the door masks.
-        \item \textbf{The leaf}: its angle $\varphi$, from the lower laser. Someone may move it while
-              the robot is away, so a remembered angle loses weight with time.
-        \item Which way it swings decides where the robot may stand to open it.
+      Estimated like the chair, but \alert{articulated}: two parts, and one of them moves.\\[0.3em]
+      \begin{itemize}\footnotesize
+        \item \textbf{The opening}: where along its wall, how wide, how high; from the door masks and
+              the gap the LiDAR sees through.
+        \item \textbf{The leaf}: its angle $\varphi$, from the lower laser. \alert{Held, not diffused}: an
+              unpushed door does not move. How often someone pushes it is itself inferred (life cycle, next).
+        \item Hinge side and swing side are beliefs too; they decide where the robot may stand.
       \end{itemize}
-      \vspace{0.3em}
+      \vspace{0.2em}
       A door also joins two rooms: crossing it changes which room the robot is in. We stop here.
     \end{column}
   \end{columns}
-  \src{crossing.tex l.307--338 (the door as an estimate)}
+  \src{crossing.tex l.307--338; door\_concept: door\_leaf\_channel.h (held leaf, inferred push rate), door\_opening\_edges.h}
 \end{frame}
 
 % =================================================================================================
