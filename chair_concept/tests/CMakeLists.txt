@@ -55,3 +55,10 @@ target_link_libraries(recall_candidates_test
   ${LIBS} dsr_core dsr_gui dsr_api fastcdr fastdds osgDB OpenThreads Eigen3::Eigen QGLViewer-qt6 Qt6OpenGLWidgets
   ${STATIC_LIBS} ${SPECIFIC_LIBS} ${QT_LIBRARIES} ${Ice_LIBRARIES})
 set_target_properties(recall_candidates_test PROPERTIES CXX_STANDARD 23 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
+
+# Phase 0 review focus 4: a birth candidate keeps its evidence while births are held (no room outline). Run: ./chair_tracker_defer_test
+add_executable(chair_tracker_defer_test chair_tracker_defer_test.cpp)
+target_include_directories(chair_tracker_defer_test PRIVATE ../../common)
+target_compile_options(chair_tracker_defer_test PRIVATE -O2)
+target_link_libraries(chair_tracker_defer_test PRIVATE Eigen3::Eigen)
+add_test(NAME chair_tracker_defer_test COMMAND chair_tracker_defer_test)

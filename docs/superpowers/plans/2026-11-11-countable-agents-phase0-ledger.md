@@ -45,7 +45,24 @@ Owner 11-11: continue; WAIT rule stands; cause to be pinned live (outline bbox +
 
 ## Behaviour differences
 
-(none yet)
+### Task 4 — chair_concept
+
+1. **Births are held while the working room has no usable outline** (was: admitted; worse, judged against the PREVIOUS
+   room's polygon, which `refresh_room_geometry` kept on a room switch — the stale-polygon cause c1 of chair_39).
+   Mechanism: `InstanceTracker::update(..., hold_births)` — candidates keep maturing and keep their evidence; the
+   first detection after the outline arrives is born at once. Pinned by `chair_tracker_defer_test`. Only when
+   `Existence.RoomPrior` is on (default), as before.
+2. **The fitter's room polygon is cleared when the working room has none** (was: kept the previous room's). Side
+   effects, all of which already guard on `has_room_polygon()`: no out-of-room existence term, no wall line-of-sight in
+   P(detect), the NBV gets no reachable region, and recall uses the default room area — all for the interval until the
+   outline arrives.
+3. **New logs:** (room id, outline verts + bbox) on every change; every birth logs its inside/OUTSIDE verdict with the
+   room id; `births HELD` / `births released` per WAIT episode. These pin the chair_39 cause live (owner 11-11).
+4. Unchanged: Admit/Suppress wherever an outline exists (same rule — inside or within `Existence.RoomMarginM` of the
+   boundary — now `rc::room::birth_verdict`); the left-behind drop (now `rc::room::drop_left_behind`, same teardown,
+   same log text); the existence term value (`out_of_room_logodds(false, gain) = -gain`).
+5. Shared tracker change: `hold_births` defaults to false, so the other five agents are byte-for-byte unchanged until
+   their own tasks pass it.
 
 ## Rulings
 

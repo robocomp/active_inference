@@ -39,6 +39,8 @@
 #include "../../common/config_report/config_read.h"   // rc::cfg::Reader (SHARED)
 #include "../../common/thumbs/thumb_wire.h"
 #include "../../common/room_resolve/room_resolve.h"   // rc::room::current_room (proto-aware, deterministic)
+#include "../../common/room_resolve/room_follow.h"        // rc::room::read_outline / drop_left_behind
+#include "../../common/room_resolve/room_containment.h"   // rc::room::birth_verdict / out_of_room_logodds
 
 #include "../../common/diag_log/rotating_csv.h"   // keep the previous run instead of wiping it
 
@@ -406,16 +408,21 @@ void SpecificWorker::compute()
     run_instance_tracker();   // data-driven birth/associate/death + merge (the only instance-lifecycle path)
     update_thumbnails();      // keep the best crop retina offered for each chair, per viewing angle
 
-    // Chairs are generic `object` nodes named "chair_*" (schema migration); filter by name prefix.
-    const auto chair_nodes = G->get_nodes_by_type("object");
-    for (const auto& node : chair_nodes)
-        if (node.name().starts_with("chair"))
+    // The robot left a chair's room: every belief here is about the current room, and fitting it in this frame would
+    // corrupt the pose ltom remembers. ltom keeps it (any end of a life is recallable) and offers it back on return.
+    rc::room::drop_left_behind(*G, "chair", room_node_id_, [this](std::uint64_t id)
+    {
+        if (auto it = fitter_->instances().find(id); it != fitter_->instances().end())
         {
-            if (rc::room::left_behind(G->get_attrib_by_name<parent_att>(node), room_node_id_))
-                drop_left_behind(node);
-            else
-                process_chair_node(node);
+            it->second.affordance.remove();
+            it->second.approach.remove();
+            fitter_->forget_node(id);
         }
+    });
+    // Chairs are generic `object` nodes named "chair_*" (schema migration); filter by name prefix.
+    for (const auto& node : G->get_nodes_by_type("object"))
+        if (node.name().starts_with("chair"))
+            process_chair_node(node);
 
     // Overall compute()-cycle rate: counts every cycle, prints "Epoch time = …ms. Fps = N" once a
     // second (FPSCounter::print is throttled and self-counting).
@@ -676,7 +683,18 @@ void SpecificWorker::run_instance_tracker()
         }
     }
 
-    const auto res = tracker_.update(tracks, dets);
+    // WAIT: no usable outline for the working room ⇒ hold births (candidates keep their evidence, see
+    // InstanceTracker::update). Containment off ⇒ no hold, as before.
+    const bool hold = cfg_.exist_room_prior and not fitter_->has_room_polygon();
+    if (hold and not births_held_)
+    {
+        std::print("chair_concept: [tracker] births HELD — room {} has no outline yet\n", room_node_id_);
+        log_tracker_event("SUPPRESS", 0, 0.f, 0.f, "defer: no outline");
+    }
+    else if (not hold and births_held_)
+        std::print("chair_concept: [tracker] births released — room {} outline arrived\n", room_node_id_);
+    births_held_ = hold;
+    const auto res = tracker_.update(tracks, dets, hold);
 
     static int dbg = 0;
     const int n_assigned = static_cast<int>(std::count_if(res.assignment.begin(), res.assignment.end(),
@@ -803,16 +821,22 @@ void SpecificWorker::run_instance_tracker()
         // birth from a merged/contaminated mask at all) is §2, still to come.
         const Eigen::Vector3f& c = pkt.slices[slice].centroid;
 
-        // Room-containment pose prior at BIRTH: never spawn a chair outside the walls (a mislocalized frame while
-        // the robot is lost drops a detection beyond a wall). Zero prior mass outside the room → suppress.
-        if (cfg_.exist_room_prior and fitter_->has_room_polygon()
-            and not fitter_->point_in_room(Eigen::Vector2f(c.x(), c.y()), cfg_.exist_room_margin_m))
+        // Room-containment pose prior at BIRTH (shared rule, rc::room::birth_verdict): never spawn a chair outside
+        // the walls (a mislocalized frame, or a chair seen through a door, belongs to another room). The tolerance
+        // is the chair's footprint margin. Defer cannot normally reach here (births are held without an outline).
+        if (cfg_.exist_room_prior)
         {
-            if (cfg_.chair_log_period_frames > 0)
-                std::print("chair_concept: [tracker] BIRTH SUPPRESSED slice={} at ({:.2f},{:.2f}) — OUTSIDE room\n",
-                           slice, c.x(), c.y());
-            log_tracker_event("SUPPRESS", 0, c.x(), c.y(), "outside room");
-            continue;
+            const auto verdict = rc::room::birth_verdict(fitter_->room_polygon(), Eigen::Vector2f(c.x(), c.y()),
+                                                         cfg_.exist_room_margin_m);
+            const std::string_view vname = verdict == rc::room::BirthVerdict::Admit ? "inside"
+                                         : verdict == rc::room::BirthVerdict::Suppress ? "OUTSIDE" : "no outline";
+            std::print("chair_concept: [tracker] birth at ({:.2f},{:.2f}) room {} — {}\n", c.x(), c.y(), room_node_id_, vname);
+            if (verdict != rc::room::BirthVerdict::Admit)
+            {
+                log_tracker_event("SUPPRESS", 0, c.x(), c.y(),
+                                  verdict == rc::room::BirthVerdict::Suppress ? "outside room" : "defer: no outline");
+                continue;
+            }
         }
         {
             std::uint64_t claimer = 0;
@@ -934,54 +958,38 @@ void SpecificWorker::run_instance_tracker()
 }
 
 // Load the room's delimiting polygon (a trusted NOMINAL model authored by room_concept, never fitted) into the
-// fitter so it can impose the room-containment pose prior. Mirrors cabinet_concept::refresh_room_geometry.
+// fitter so it can impose the room-containment pose prior. Shared reader (common/room_resolve/room_follow.h).
+// ★The outline is ALWAYS the working room's own: when that room has none yet, the fitter's polygon is CLEARED, so
+// births WAIT (rc::room::birth_verdict → Defer) instead of being judged against the previous room's polygon (the
+// stale-polygon cause of chair_39, Phase 0 ledger Task 2).
 void SpecificWorker::refresh_room_geometry()
 {
-    static int miss = 0;                          // throttle the "polygon still missing" diagnostic
     if (not G or room_node_id_ == 0) return;
-    auto room = G->get_node(room_node_id_);
-    if (not room.has_value())
-    {
-        // Latched room id went stale (room_concept recreated the room on relocalization). Re-resolve so the
-        // containment prior recovers instead of silently reading a dead node forever.
-        const auto room_opt = rc::room::current_room(*G);
-        if (not room_opt.has_value()) { room_node_id_ = 0; return; }
-        room_node_id_ = *room_opt;
-        room = G->get_node(room_node_id_);
-        if (not room.has_value()) return;
-    }
-    const auto px = G->get_attrib_by_name<delimiting_polygon_x_att>(room.value());
-    const auto py = G->get_attrib_by_name<delimiting_polygon_y_att>(room.value());
-    if (not px.has_value() or not py.has_value())
-    {
-        if (++miss == 1)   // once
-            std::print("chair_concept: [room-prior] room node {} has NO delimiting_polygon attribute yet "
-                       "(containment prior INACTIVE — out-of-room chairs cannot be removed)\n", room_node_id_);
-        return;
-    }
-    const auto& xs = px->get(); const auto& ys = py->get();
-    const std::size_t n = std::min(xs.size(), ys.size());
-    if (n < 3)
-    {
-        if (++miss == 1)   // once
-            std::print("chair_concept: [room-prior] delimiting_polygon present but degenerate (n={})\n", n);
-        return;
-    }
-    std::vector<Eigen::Vector2f> poly; poly.reserve(n);
-    Eigen::Vector2f centroid = Eigen::Vector2f::Zero();
+    auto poly = rc::room::read_outline(*G, room_node_id_);
+    if (not rc::room::outline_usable(poly)) poly.clear();
+    // Log every CHANGE of (room, outline): room id, vertex count and bbox — the evidence that pins the chair_39 cause.
     float xmin = 1e9f, xmax = -1e9f, ymin = 1e9f, ymax = -1e9f;
-    for (std::size_t i = 0; i < n; ++i)
+    Eigen::Vector2f centroid = Eigen::Vector2f::Zero();
+    for (const auto& v : poly)
     {
-        poly.emplace_back(xs[i], ys[i]); centroid += poly.back();
-        xmin = std::min(xmin, xs[i]); xmax = std::max(xmax, xs[i]);
-        ymin = std::min(ymin, ys[i]); ymax = std::max(ymax, ys[i]);
+        centroid += v;
+        xmin = std::min(xmin, v.x()); xmax = std::max(xmax, v.x());
+        ymin = std::min(ymin, v.y()); ymax = std::max(ymax, v.y());
     }
-    centroid /= static_cast<float>(n);
-    const bool first = not fitter_->has_room_polygon();
+    if (not poly.empty()) centroid /= static_cast<float>(poly.size());
+    const std::array<float, 4> bbox{xmin, xmax, ymin, ymax};
+    if (room_node_id_ != outline_room_ or poly.size() != outline_n_ or bbox != outline_bbox_)
+    {
+        if (poly.empty())
+            std::print("chair_concept: [room-prior] room {} has NO usable outline — births WAIT\n", room_node_id_);
+        else
+            std::print("chair_concept: [room-prior] room {} outline {} verts, x∈[{:.2f},{:.2f}] y∈[{:.2f},{:.2f}]\n",
+                       room_node_id_, poly.size(), xmin, xmax, ymin, ymax);
+        outline_room_ = room_node_id_;
+        outline_n_    = poly.size();
+        outline_bbox_ = bbox;
+    }
     fitter_->set_room_geometry(centroid, std::move(poly));
-    if (first)
-        std::print("chair_concept: [room-prior] room polygon LOADED — {} verts, x∈[{:.2f},{:.2f}] y∈[{:.2f},{:.2f}] "
-                   "(containment prior ACTIVE)\n", n, xmin, xmax, ymin, ymax);
 }
 
 // Continuous existence belief: fold one sensor frame of evidence into each instance's log-odds L and remove
@@ -1049,22 +1057,6 @@ void SpecificWorker::update_existence_beliefs()
         fitter_->forget_node(id);
         G->delete_node(id);
     });
-}
-
-///////////////////////////////////////////////////////////////
-// The robot left this chair's room: every belief here is about the current room, and fitting it in this frame would corrupt
-// the pose ltom remembers. ltom keeps it (any end of a life is recallable) and offers it back when the robot returns.
-void SpecificWorker::drop_left_behind(const DSR::Node& node)
-{
-    const auto id = node.id();
-    if (auto it = fitter_->instances().find(id); it != fitter_->instances().end())
-    {
-        it->second.affordance.remove();
-        it->second.approach.remove();
-        fitter_->forget_node(id);
-    }
-    std::print("chair_concept: [room] '{}' left behind in another room, dropped\n", node.name());
-    G->delete_node(id);
 }
 
 ///////////////////////////////////////////////////////////////
