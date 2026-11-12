@@ -858,6 +858,7 @@ private:
    std::uint64_t   rv_next_id_ = 1;
    std::uint64_t   rv_submits_ = 0;                         ///< proposals handed to the worker (diagnostic, selftest)
    std::uint64_t   rv_swaps_ = 0;                           ///< incumbent swaps so far (diagnostic, selftest)
+   bool            rv_swap_held_logged_ = false;            ///< one log line per judged recognition whose rival swap is held
    std::vector<float> rv_timing_us_;                         ///< hot-path time per step (selftest, rv_timing_on_)
    bool            rv_timing_on_ = false;
    std::atomic<float> p_rival_pub_{0.f};

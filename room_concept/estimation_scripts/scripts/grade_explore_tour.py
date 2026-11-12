@@ -9,8 +9,8 @@ rigid alignment (wbt_rooms.align_and_score). The ground-truth room is chosen by 
 true position at promotion), not by name: true_room.py and wbt_rooms.py name the room behind DOOR_1 differently.
 wbt_rooms.py has polygons for all three rooms (room_1, the big 60.9 m2 room, since 2026-11-11). A room is n/a only when
 no polygon contains the robot's true position at promotion, or the run saved no outline (SVG) for that room.
-The alignment is started from the estimate pre-rotated by 0, 90, 180 and 270 degrees and the best IoU is kept:
-align_and_score's 1-degree coarse search from a single start can lock onto a 180-degree-turned fit (2026-11-12).
+The alignment is GLOBAL (global_align): area-centroid centred, a 2-degree rotation scan, then rotation+translation
+hill-climbs from the 6 best local maxima. wbt_rooms.align_and_score alone can lock onto a wrong (e.g. 90-degree) fit.
 """
 import csv, glob, json, os, re, sys
 
@@ -18,6 +18,60 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 # wbt_rooms.py (Webots ground-truth polygons) lives untracked in the main checkout's scripts dir: look there too
 sys.path.append("/home/pbustos/robocomp/components/active_inference/room_concept/estimation_scripts/scripts")
+
+
+def _area_centroid(P):
+    import numpy as np
+    x, y = P[:, 0], P[:, 1]
+    xn, yn = np.roll(x, -1), np.roll(y, -1)
+    c = x * yn - xn * y
+    a = c.sum() / 2.0
+    if abs(a) < 1e-12:
+        return P.mean(0)
+    return np.array([((x + xn) * c).sum(), ((y + yn) * c).sum()]) / (6.0 * a)
+
+
+def global_align(truth, est, n_starts=6):
+    """Rigid alignment of a learnt outline to a GT polygon, maximising IoU — GLOBALLY.
+
+    wbt_rooms.align_and_score (2026-11-12 diagnosis, clean55): its 1-degree coarse scan runs at ZERO translation about the
+    VERTEX mean, which door bumps and spikes drag off the room's centre, then only hill-climbs from the single best
+    rotation. A 0.15 m vertex edit flipped clean55's big room to a 90-degree fit: IoU 0.733 for an outline that scores
+    0.828 placed right. Pre-rotating the estimate (last night's "four seeds") cannot help: the scan already covers 360.
+    Here: centre on AREA centroids (shoelace), scan rotation every 2 degrees, then hill-climb rotation AND translation from
+    each of the n_starts best LOCAL maxima of the scan (circularly), keep the best. n_starts is a search budget of the
+    grader, not a model parameter."""
+    import math
+    import numpy as np
+    import wbt_rooms
+    T = np.asarray(truth, float); E = np.asarray(est, float)
+    cT, cE = _area_centroid(T), _area_centroid(E)
+
+    def place(th, t):
+        c, s = math.cos(th), math.sin(th)
+        return (E - cE) @ np.array([[c, -s], [s, c]]).T + cT + t
+
+    ths = np.radians(np.arange(0, 360, 2.0))
+    sc = np.array([wbt_rooms.iou(T, place(th, np.zeros(2)), 0.05) for th in ths])
+    n = len(sc)
+    peaks = [i for i in range(n) if sc[i] >= sc[(i - 1) % n] and sc[i] >= sc[(i + 1) % n]]
+    peaks = sorted(peaks, key=lambda i: -sc[i])[:n_starts] or [int(sc.argmax())]
+    best = None
+    for i in peaks:
+        th, t = ths[i], np.zeros(2)
+        cur = wbt_rooms.iou(T, place(th, t), 0.01)
+        step_t, step_r = 0.2, math.radians(2)
+        while step_t > 0.002:
+            improved = False
+            for cand in ((th + step_r, t), (th - step_r, t)) + tuple((th, t + np.array(d) * step_t) for d in ((1, 0), (-1, 0), (0, 1), (0, -1))):
+                v = wbt_rooms.iou(T, place(*cand), 0.01)
+                if v > cur:
+                    cur, (th, t), improved = v, cand, True
+            if not improved:
+                step_t *= 0.5; step_r *= 0.5
+        if best is None or cur > best["iou"]:
+            best = dict(iou=cur, theta_deg=math.degrees(th), t=t, aligned=place(th, t))
+    return best
 
 
 def proto_events(run):
@@ -143,14 +197,7 @@ def main(run):
                 if point_in([tuple(p) for p in g["poly"]], *pos):
                     truth = gname
         if truth is not None and est in learnt:
-            # ★ FOUR SEEDS (2026-11-12): align_and_score's 1-degree coarse search can lock onto a 180-degree-turned alignment
-            #   and under-score a correct outline; the outline's frame is arbitrary, so seed it at 0/90/180/270 and keep the best.
-            import math as _m
-            import numpy as _np
-            _P = _np.asarray(learnt[est], float)
-            sc = max((wbt_rooms.align_and_score(gt[truth]["poly"], _P @ _np.array([[_m.cos(a), -_m.sin(a)], [_m.sin(a), _m.cos(a)]]).T)
-                      for a in (0.0, _m.pi / 2, _m.pi, 1.5 * _m.pi)), key=lambda r: r["iou"])
-            iou = f"{sc['iou']:.3f}"
+            iou = f"{global_align(gt[truth]['poly'], learnt[est])['iou']:.3f}"
         elif truth is not None:
             iou = f"n/a (no SVG for {est} in this run)"
         elif truth is None:

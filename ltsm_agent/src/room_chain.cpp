@@ -184,7 +184,7 @@ double signed_area(const std::vector<Eigen::Vector2d> &poly)
     return 0.5 * a2;
 }
 
-/// Per edge of `room`'s outline (vertex i -> i+1, the outline as stored), P(that edge is a SEEN wall): the obj_exist_prob
+/// Per edge of `room`'s outline (vertex i -> i+1, the outline as stored), P(that edge is a REAL wall): the obj_exist_prob
 /// of the remembered wall node on it. Walls are matched to edges by MUTUAL nearest segment (the walls are built from the
 /// outline's edges, room_concept sync_walls_to_polygon, so a match is exact; an edge no wall claims, e.g. a zero-length one,
 /// stays unstated). Unstated = 1, the attribute's documented safe reading.
@@ -214,6 +214,42 @@ std::vector<double> edge_support_of(DSR::DSRGraph &g, const DSR::Node &room, con
                 s[i] = std::clamp(double(p.value()), 0.0, 1.0);   // a probability's domain, not a gate
     }
     return s;
+}
+
+/// Per edge of `room`'s outline: does it hold one of the room's remembered doors? Each door (an `object` of subtype door
+/// anywhere under the room) goes to the edge nearest its centre in the room's frame — no distance cutoff, so a door the
+/// outline drew a few centimetres off its wall still marks that wall.
+std::vector<bool> edge_doors_of(DSR::DSRGraph &g, const DSR::Node &room, const std::vector<Eigen::Vector2d> &poly)
+{
+    std::vector<bool> out(poly.size(), false);
+    if (poly.size() < 3) return out;
+    auto ie = g.get_inner_eigen_api();
+    for (const auto &d : g.get_nodes_by_type("object"))
+    {
+        if (g.get_attrib_by_name<object_subtype_att>(d).value_or(std::string{}) != "door") continue;
+        if (not is_descendant(g, d.id(), room.name())) continue;
+        const auto T = ie->get_transformation_matrix(room.name(), d.name());
+        if (not T.has_value()) continue;
+        const Eigen::Vector2d c(T->translation().x(), T->translation().y());
+        std::size_t best = 0;
+        double best_d2 = std::numeric_limits<double>::infinity();
+        for (std::size_t i = 0; i < poly.size(); ++i)
+        {
+            const Eigen::Vector2d a = poly[i], ab = poly[(i + 1) % poly.size()] - a;
+            const double len2 = ab.squaredNorm();
+            const double t = len2 > 0.0 ? std::clamp((c - a).dot(ab) / len2, 0.0, 1.0) : 0.0;
+            if (const double d2 = (a + t * ab - c).squaredNorm(); d2 < best_d2) { best_d2 = d2; best = i; }
+        }
+        out[best] = true;
+    }
+    return out;
+}
+
+/// The support the extent uses: a door edge is a boundary (1), else P(real wall), unstated = 1.
+double support_of(const KnownRoomMetric &r, std::size_t e)
+{
+    if (e < r.edge_door.size() and r.edge_door[e]) return 1.0;
+    return e < r.edge_support.size() ? r.edge_support[e] : 1.0;
 }
 
 // Gauss-Hermite (probabilists', weights sum to 1), n points, by Golub-Welsch.
@@ -377,6 +413,7 @@ MetricQuery build_metric_query(DSR::DSRGraph &mem, const std::vector<std::string
             const auto poly = polygon_of(mem, n);
             for (const auto &v : poly) k.polygon_in_ref.push_back(k.T_ref_k * v);
             k.edge_support = edge_support_of(mem, n, poly);
+            k.edge_door = edge_doors_of(mem, n, poly);
             k.area = shoelace_area(k.polygon_in_ref);
         }
         q.rooms.push_back(std::move(k));
@@ -392,7 +429,7 @@ double soft_inside(const MetricQuery &q, std::size_t ki, const Eigen::Vector2d &
     const std::size_t n = poly.size();
     if (n < 3) return 0.0;
     if (inside(poly, x)) return 1.0;
-    const auto support = [](const KnownRoomMetric &r, std::size_t e) { return e < r.edge_support.size() ? r.edge_support[e] : 1.0; };
+    const auto support = [](const KnownRoomMetric &r, std::size_t e) { return support_of(r, e); };
     // FLAGGED model choice: how far an UNSEEN boundary may still run is set by the room's own scale, sqrt(area). An open
     // edge of a 56 m2 room lets it continue by metres; of a 4 m2 closet, by two.
     const double L = std::sqrt(std::max(k.area, 0.0));
@@ -406,8 +443,8 @@ double soft_inside(const MetricQuery &q, std::size_t ki, const Eigen::Vector2d &
         const double len2 = ab.squaredNorm();
         const double t = len2 > 0.0 ? std::clamp((x - a).dot(ab) / len2, 0.0, 1.0) : 0.0;
         const Eigen::Vector2d foot = a + t * ab;
-        // The extension grows OUT of e and cannot pass a SEEN wall on its way to x: every wall the straight way crosses lets
-        // it through with 1 - P(that wall was seen). k's own other edges (the adjacent ones share e's ends) and the edges
+        // The extension grows OUT of e and cannot pass a REAL wall on its way to x: every wall the straight way crosses lets
+        // it through with 1 - P(that wall is real); a door edge (support 1) lets nothing through. k's own other edges (the adjacent ones share e's ends) and the edges
         // of every other placed room alike: the bath's seen partition stops the big room's unseen corridor at the bath.
         double pass = 1.0;
         for (std::size_t f = 0; f < n; ++f)
@@ -490,8 +527,8 @@ std::vector<rc::recog::MetricEvidence> metric_evidence(const MetricQuery &q, flo
             const double th = std::atan2(r.T_ref_k.linear()(1, 0), r.T_ref_k.linear()(0, 0));
             // the outline's unseen boundary: metres of edge weighted by 1 - P(seen wall)
             double open_m = 0.0;
-            for (std::size_t e = 0; e < r.polygon_in_ref.size() and e < r.edge_support.size(); ++e)
-                open_m += (1.0 - r.edge_support[e]) * (r.polygon_in_ref[(e + 1) % r.polygon_in_ref.size()] - r.polygon_in_ref[e]).norm();
+            for (std::size_t e = 0; e < r.polygon_in_ref.size(); ++e)
+                open_m += (1.0 - support_of(r, e)) * (r.polygon_in_ref[(e + 1) % r.polygon_in_ref.size()] - r.polygon_in_ref[e]).norm();
             qInfo().noquote() << QString::fromStdString(std::format(
                 "[recog][metric]   {} id {}: T_ref_k ({:+.3f},{:+.3f},{:+.3f}) area {:.1f} open_edge {:.2f} m d {:.2f} P_in {:.4g} log_inside {:+.2f}",
                 r.mem_room, r.room_id, r.T_ref_k.translation().x(), r.T_ref_k.translation().y(), th, r.area, open_m, d, in, out[k].log_inside));

@@ -31,8 +31,15 @@
  * indicator: 1 inside the remembered outline; beyond it, the room may continue past each EDGE by a depth whose law
  * depends on whether that edge is a wall actually seen:
  *     P(k reaches x through edge e) = s_e exp(-delta_e / lambda_wall) + (1 - s_e) exp(-delta_e / L_k)
- *   s_e         P(edge e is a seen wall) = obj_exist_prob of the remembered wall node on that edge (absent = 1, the
- *               attribute's documented safe reading: the outline is then exactly as trusted as before).
+ *   s_e         P(edge e is a REAL wall) = obj_exist_prob of the remembered wall node on that edge (absent = 1, the
+ *               attribute's documented safe reading: the outline is then exactly as trusted as before). room_concept
+ *               writes it as a likelihood ratio of "a wall stands here" vs "the outline closed across empty space" from
+ *               its free-space raster (room_concept/src/wall_support.h); an edge nobody observed reads its prior 1/2,
+ *               not 0 (2026-11-12: "fraction seen" read 0.04 on an edge only ever viewed edge-on, clean55, and 0.26 on the
+ *               bath partition, clean56 — each let the room run metres into the next room).
+ *               An edge that holds one of k's remembered DOORS has s_e = 1 (2026-11-12): beyond a door lies the passage's
+ *               other room, never more of k. It neither extends k nor lets another room's extension through. A door is
+ *               assigned to the edge nearest its centre (no distance cutoff: every door belongs to some edge).
  *   lambda_wall the outline's own placement scale at a seen wall (3 cm, flagged in room_chain.cpp).
  *   L_k         sqrt(area_k): the room's own scale is the prior on how far an UNSEEN boundary may still run (flagged).
  *   delta_e     distance from x to edge e, counted only when x lies on e's OUTWARD side. The extension grows out of e and
@@ -66,6 +73,8 @@ struct KnownRoomMetric
     std::vector<Eigen::Vector2d> polygon_in_ref;
     /// P(edge i = polygon_in_ref[i] -> [i+1] is a SEEN wall), one per edge. Empty (or shorter) = not stated = 1.
     std::vector<double> edge_support;
+    /// true = edge i holds one of this room's remembered doors (a boundary for the extent: support 1). Empty = none.
+    std::vector<bool> edge_door;
     double area = 0.0;
 };
 

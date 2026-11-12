@@ -13,6 +13,7 @@
 #include "room_scene_graph.h"
 #include <numeric>
 #include "status_reporter.h"
+#include "wall_support.h"                                    // rc::walls::wall_real_prob (obj_exist_prob of walls)
 #include "wall_sync.h"                                       // rc::walls::plan_wall_sync (rule 1)
 #include "door_crossing.h"                                   // rc::crossing (proto-room evidence)
 #include "proto_mouth.h"                                      // rc::crossing::write_mouth (the proto birth)
@@ -4350,23 +4351,42 @@ void RoomSceneGraph::sync_walls_to_polygon(const std::vector<Eigen::Vector2f>& p
     trigger_layout_();
 }
 
-// ── P(THIS WALL WAS SEEN) → obj_exist_prob on the wall node (2026-11-12, D2 for ltsm's per-edge extent) ───────────────
-// A wall of the outline is either where LiDAR returns stopped or an edge the outline closed across space it never saw
-// (clean53: the phantom walls closing the DOOR_1 arm). The evidence is the free-space raster's OCCUPIED cells with their
-// occupancy posterior. Along the wall, one sample per raster cell; at each, the best of the occupied cells whose
-// projection falls in that sample's cell: posterior x exp(-across^2 / 2 sigma^2), sigma the refiner's fitted wall noise
-// (its prior sigma0 before the first fit). P(seen) = the mean over the wall. No threshold: a wall half seen reads ~0.5.
-// Skipped on a recalled visit — the raster restarts at the crossing, so most of a remembered room reads unseen while
+// ── P(THIS WALL IS REAL) → obj_exist_prob on the wall node (2026-11-12, for ltsm's per-edge extent) ───────────────────
+// A wall of the outline is either a wall or an edge the outline closed across space that holds none (clean53: the phantom
+// walls closing the DOOR_1 arm). Model: rc::walls::wall_real_prob (wall_support.h) — per one-cell stretch, where the run
+// of free cells that reaches the wall ENDS, scored "wall here" against "closed across empty space" with the refiner's own
+// fitted sigma / eps / ell and R_eff = A / P; never-observed stretches contribute nothing (occlusion is not absence) and an
+// unobserved wall reads the prior 1/2. It replaced the mean "seen" fraction along the wall, which read 0.7-0.9 on real
+// walls with furniture in front and ~0 on an edge only ever viewed edge-on (clean55/56 false recognitions).
+// Not published before the refiner's first fit (no sigma / eps / ell yet): the attribute stays as it was.
+// Skipped on a recalled visit — the raster restarts at the crossing, so most of a remembered room reads unobserved while
 // the remembered value (carried by ltsm with the node) is the better one.
 void RoomSceneGraph::publish_wall_seen_prob()
 {
     if (not G_ or not free_space_.has_value() or recalled_visit_ or dsr_room_id_ == 0) return;
     const auto room = G_->get_node(dsr_room_id_);
     if (not room.has_value()) return;
+    const auto& fit = refiner_.last();
+    if (not (fit.sigma > 0.f) or not (fit.eps > 0.f) or not (fit.ell > 0.f)) return;
+    const auto poly = published_polygon();
+    if (poly.size() < 3) return;
+    float a2 = 0.f, perim = 0.f;
+    for (std::size_t i = 0; i < poly.size(); ++i)
+    {
+        const auto& p = poly[i]; const auto& q = poly[(i + 1) % poly.size()];
+        a2 += p.x() * q.y() - q.x() * p.y();
+        perim += (q - p).norm();
+    }
+    if (not (perim > 0.f)) return;
+    // the walls follow the outline's edge order (rc::walls::edge_pose: yaw = direction p_i -> p_i+1), so the outward
+    // normal is the right of the wall's direction on a CCW outline, the left on a CW one
+    const float orient = a2 >= 0.f ? 1.f : -1.f;
     std::vector<Eigen::Vector2f> surf, fr; std::vector<float> cs, cf;
     free_space_->evidence_cells(surf, fr, &cs, &cf);
-    const float cell = free_space_->params().cell;
-    const float sigma = refiner_.last().sigma > 0.f ? refiner_.last().sigma : refiner_.params().sigma0;
+    const rc::walls::EvidenceRaster raster(surf, cs, fr, cf, free_space_->params().cell);
+    rc::walls::SupportParams P;
+    P.cell = free_space_->params().cell; P.sigma = fit.sigma; P.eps = fit.eps; P.ell = fit.ell;
+    P.r_eff = 0.5f * std::abs(a2) / perim;
     for (auto w : own_wall_nodes(wall_naming(room->name())))
     {
         const auto par = G_->get_attrib_by_name<parent_att>(w).value_or(dsr_room_id_);
@@ -4377,18 +4397,8 @@ void RoomSceneGraph::publish_wall_seen_prob()
         const float len = G_->get_attrib_by_name<width_m_att>(w).value_or(0.f);
         if (not tr.has_value() or tr->get().size() < 2 or not rot.has_value() or rot->get().size() < 3 or len <= 0.f) continue;
         const Eigen::Vector2f mid(tr->get()[0], tr->get()[1]), u(std::cos(rot->get()[2]), std::sin(rot->get()[2]));
-        const int n = std::max(1, static_cast<int>(std::ceil(len / cell)));
-        std::vector<float> best(static_cast<std::size_t>(n), 0.f);
-        for (std::size_t i = 0; i < surf.size(); ++i)
-        {
-            const Eigen::Vector2f d = surf[i] - mid;
-            const float along = d.dot(u) + 0.5f * len, across = d.x() * u.y() - d.y() * u.x();
-            if (along < 0.f or along >= len) continue;
-            const auto k = static_cast<std::size_t>(std::min(n - 1, static_cast<int>(along / len * static_cast<float>(n))));
-            const float conf = i < cs.size() ? cs[i] : 1.f;
-            best[k] = std::max(best[k], conf * std::exp(-0.5f * across * across / (sigma * sigma)));
-        }
-        const float p = std::accumulate(best.begin(), best.end(), 0.f) / static_cast<float>(n);
+        const Eigen::Vector2f out = orient * Eigen::Vector2f(u.y(), -u.x());
+        const float p = rc::walls::wall_real_prob(mid - 0.5f * len * u, mid + 0.5f * len * u, out, raster, P);
         if (const auto old = G_->get_attrib_by_name<obj_exist_prob_att>(w); old.has_value() and old.value() == p) continue;
         G_->add_or_modify_attrib_local<obj_exist_prob_att>(w, p);
         G_->update_node(w);

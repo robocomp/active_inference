@@ -213,6 +213,9 @@ int main(int argc, char **argv)
         std::printf("  r3 edge_support:"); for (const double v : s) std::printf(" %.2f", v); std::printf("\n");
         check(s.size() == 4 and s[0] == 1.0 and s[1] == 1.0 and std::abs(s[2]) < 1e-9 and std::abs(s[3] - 0.7) < 1e-6,
               "support = the matched wall's obj_exist_prob; unstated = 1");
+        // r3 holds one door face, f1_r3_room_3 at W (0,2): on its outline's edge 0, (-2,2) -> (6,2)
+        const auto &dr = q.rooms[i3].edge_door;
+        check(dr.size() == 4 and dr[0] and not dr[1] and not dr[2] and not dr[3], "edge_door: the face of passage_1 marks r3's edge 0 only");
         const int i1 = index_of(q, "r1_room_1");
         check(i1 >= 0 and q.rooms[i1].edge_support.size() == 4
               and std::ranges::all_of(q.rooms[i1].edge_support, [](double v) { return v == 1.0; }), "a room with no walls: every edge 1");
@@ -283,7 +286,21 @@ int main(int argc, char **argv)
             q.rooms.push_back(make_room("r1_room_1", 1, T1, r1_local, Cseam1));
             q.rooms.push_back(make_room("r2_room_2", 2, T2, r2_local, Mat3::Zero()));
             q.rooms.push_back(make_room("r3_room_3", 3, T3, r3_local, Cseam3));
-            if (r3_corridor_unseen) { q.rooms[2].edge_support.assign(r3_local.size(), 1.0); q.rooms[2].edge_support[0] = q.rooms[2].edge_support[1] = q.rooms[2].edge_support[2] = 0.0; }
+            if (r3_corridor_unseen)
+            {
+                // P(real wall) per edge, computed by room_concept's model (wall_support.h) from clean53's own raster
+                // (refine_input.bin frames 12 / 26 / 54, room_concept/tools/wall_support_test). The corridor's two phantoms
+                // read 0.061 / 0.001; edge 2 is MIXED (2.2 m of the big room's real south wall + the 0.95 m corridor mouth)
+                // and reads 1.0 as a whole; r1's edge 2, seen only edge-on, reads ~ its prior.
+                q.rooms[2].edge_support = {0.061, 0.001, 1.000, 1.000, 0.561, 0.998, 0.456, 0.973, 1.000, 0.706, 0.924,
+                                           0.004, 0.491, 1.000, 0.993, 0.904, 1.000, 0.996, 0.621, 1.000, 1.000, 1.000};
+                q.rooms[0].edge_support = {1.0, 1.0, 0.603, 0.778, 0.971, 1.0, 1.0, 1.0};
+                // the snapshot's doors, each on the edge nearest it: r1_door_9 (DOOR_1, seen not crossed) e5, r1_door_1 e6;
+                // r2_door_2 e2, r2_door_3 e5; r3_door_4 e20
+                q.rooms[0].edge_door.assign(r1_local.size(), false); q.rooms[0].edge_door[5] = q.rooms[0].edge_door[6] = true;
+                q.rooms[1].edge_door.assign(r2_local.size(), false); q.rooms[1].edge_door[2] = q.rooms[1].edge_door[5] = true;
+                q.rooms[2].edge_door.assign(r3_local.size(), false); q.rooms[2].edge_door[20] = true;
+            }
             return q; };
         Mat3 Crob;
         Crob << 0.03512, -0.01847, -0.003853,  -0.01847, 0.06232, 0.003148,  -0.003853, 0.003148, 0.001003;
@@ -303,7 +320,7 @@ int main(int argc, char **argv)
                   "every edge seen: r2 ~ -4.04, r3 ~ -6.22 as logged (the replay is the episode)");
             check(ev[1].log_inside > ev[2].log_inside, "...and, as live, the bath outscores r3");
         }
-        std::printf("clean53_unseen_corridor_edges_recognise_r3\n");
+        std::printf("clean53_computed_supports_recognise_r3\n");
         {
             float log_new = 0.f;
             const auto ev = run(scene(robot, Crob, true), log_new);
@@ -346,6 +363,70 @@ int main(int argc, char **argv)
             std::printf("  U room: 0.5 m into the notch past its unseen floor %.3f; behind the right arm's seen top wall %.3g\n", in_notch, behind_arm);
             check(in_notch > 0.5, "the notch beyond an unseen edge is plausibly the room");
             check(behind_arm < 1e-6, "behind a seen wall: the unseen edge cannot reach through the room's own wall");
+        }
+    }
+
+    // ── A DOOR EDGE IS A BOUNDARY (2026-11-12): beyond a remembered door lies the passage's other room ──────────────────
+    std::printf("door_edge_is_a_boundary\n");
+    {
+        ltsm::MetricQuery qd;
+        qd.rooms.resize(2);
+        auto &k = qd.rooms[0];
+        k.chain_ok = true; k.polygon_in_ref = {{0, 0}, {4, 0}, {4, 4}, {0, 4}}; k.area = 16.0;
+        k.edge_support = {1.0, 1.0, 1.0, 0.0};          // edge x=0 never seen as a wall...
+        const double open_before = ltsm::soft_inside(qd, 0, {-0.5, 2.0});
+        k.edge_door = {false, false, false, true};      // ...but it holds one of k's doors
+        const double open_after = ltsm::soft_inside(qd, 0, {-0.5, 2.0});
+        // another room whose unseen edge faces k's door edge from the far side: its extension must stop there too
+        auto &o = qd.rooms[1];
+        o.chain_ok = true; o.polygon_in_ref = {{-4, 0}, {-2, 0}, {-2, 4}, {-4, 4}}; o.area = 8.0;
+        o.edge_support = {1.0, 0.0, 1.0, 1.0};          // its edge x=-2 unseen
+        const double through_door = ltsm::soft_inside(qd, 1, {1.0, 2.0});   // inside k, reached from o through k's door edge
+        std::printf("  0.5 m past an unseen edge %.3f; past the same edge holding a door %.3g; o reaching into k through k's door edge %.3g\n",
+                    open_before, open_after, through_door);
+        check(open_before > 0.8, "unseen edge: the room plausibly continues");
+        check(open_after < 1e-6, "door edge: it does not");
+        check(through_door < 1e-6, "a door edge blocks another room's extension like a seen wall");
+    }
+
+    // ── clean56 (2026-11-12): the robot started in the big room (r1_room_1, 59.7 m2) and crossed DOOR_0 into the bath; the
+    //    metric expert read the bath as INSIDE the big room (P_in 0.94, log_inside -0.06; posterior 0.565 -> proposed and
+    //    ACCEPTED). Outline + walls + doors = ltsm_20261112_093110_768.json (the memory after the eviction, which the
+    //    proposal at l.267 was computed on: replayed posterior 0.566 vs 0.565 logged); robot from ltsm_agent.log l.252.
+    {
+        const std::vector<Eigen::Vector2d> big{{4.0123, 4.0025}, {2.5479, 5.0023}, {1.8446, 3.9749}, {1.3904, 3.1748}, {-0.6447, 4.5642}, {-2.9410, 1.2007}, {-2.9604, 1.2139}, {-3.9459, -0.2295}, {-3.7241, -0.3810}, {-4.3647, -1.3194}, {-1.8185, -3.0577}, {-1.4081, -2.4566}, {-0.8813, -2.8163}, {0.0218, -1.4936}, {0.1593, -1.5874}, {-0.7495, -2.9185}, {0.0177, -3.4423}, {-0.4051, -4.0616}, {2.2443, -5.8704}, {2.8033, -5.0515}, {2.6030, -4.9147}, {2.7447, -4.7071}, {3.0100, -4.8882}, {6.3269, -0.0298}, {2.8704, 2.3300}};
+        auto scene56 = [&](bool new_model) {
+            ltsm::MetricQuery q;
+            q.reference_room = "r1_room_1"; q.robot_ok = true;
+            Mat3 C;
+            C << 0.004379, -0.002253, -0.0002195,  -0.002253, 0.00256, 9.508e-05,  -0.0002195, 9.508e-05, 0.0004129;
+            q.robot_in_ref = {Vec3(3.652, 2.514, -0.487), C};
+            ltsm::KnownRoomMetric k;
+            k.room_id = 1; k.mem_room = "r1_room_1"; k.chain_ok = true; k.polygon_in_ref = big; k.area = 59.7;
+            if (new_model)
+            {   // room_concept's P(real wall) from clean56's own raster (refine_input.bin frame 3) + the doors on edges 0, 23
+                k.edge_support = {0.9999, 0.9687, 0.0360, 1.0000, 1.0000, 1.0000, 0.9999, 0.8399, 0.4276, 1.0000, 0.9630, 0.9746,
+                                  0.0009, 0.3591, 0.9695, 0.9961, 0.5586, 1.0000, 0.9904, 0.6135, 0.8473, 0.8599, 1.0000, 1.0000, 0.9713};
+                k.edge_door.assign(big.size(), false); k.edge_door[0] = k.edge_door[23] = true;
+            }
+            else   // the remembered walls' "fraction seen" as live (matched to edges by edge_support_of)
+                k.edge_support = {0.7867, 0.0400, 0.0223, 0.8769, 0.8997, 1.0000, 0.9031, 0.6575, 0.2278, 0.7618, 0.1182, 0.8584,
+                                  0.0000, 0.2037, 0.7399, 0.9037, 0.0335, 0.8533, 0.7069, 0.2000, 0.9213, 0.6010, 0.6861, 0.8425, 0.2562};
+            q.rooms.push_back(k);
+            return q; };
+        std::printf("clean56_old_supports_reproduce_the_false_recognition\n");
+        {
+            float log_new = 0.f;
+            const auto ev = ltsm::metric_evidence(scene56(false), log_new);
+            std::printf("    r1 %+.2f new %+.2f\n", ev[0].log_inside, log_new);
+            check(std::abs(ev[0].log_inside - (-0.21f)) < 0.05f and ev[0].log_inside > log_new, "as live: the bath reads inside the big room (-0.21, as the recog_extent_replay of the live memory)");
+        }
+        std::printf("clean56_bath_is_not_the_big_room\n");
+        {
+            float log_new = 0.f;
+            const auto ev = ltsm::metric_evidence(scene56(true), log_new);
+            std::printf("    r1 %+.2f new %+.2f\n", ev[0].log_inside, log_new);
+            check(ev[0].log_inside < log_new - 2.0f, "the bath is NEW by > 2 nats");
         }
     }
 
