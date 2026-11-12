@@ -7,7 +7,10 @@ Per estimated room: born (s), promoted (s), how the robot left it (exploration_d
 Webots ground truth has a polygon for the room the robot was truly in at promotion — the IoU of the learnt outline after a
 rigid alignment (wbt_rooms.align_and_score). The ground-truth room is chosen by PLACE (the polygon containing the robot's
 true position at promotion), not by name: true_room.py and wbt_rooms.py name the room behind DOOR_1 differently.
-wbt_rooms.py has no polygon for the start room (room_1 is closed by a mesh partition): its IoU is reported as n/a.
+wbt_rooms.py has polygons for all three rooms (room_1, the big 60.9 m2 room, since 2026-11-11). A room is n/a only when
+no polygon contains the robot's true position at promotion, or the run saved no outline (SVG) for that room.
+The alignment is started from the estimate pre-rotated by 0, 90, 180 and 270 degrees and the best IoU is kept:
+align_and_score's 1-degree coarse search from a single start can lock onto a 180-degree-turned fit (2026-11-12).
 """
 import csv, glob, json, os, re, sys
 
@@ -140,7 +143,13 @@ def main(run):
                 if point_in([tuple(p) for p in g["poly"]], *pos):
                     truth = gname
         if truth is not None and est in learnt:
-            sc = wbt_rooms.align_and_score(gt[truth]["poly"], learnt[est])
+            # ★ FOUR SEEDS (2026-11-12): align_and_score's 1-degree coarse search can lock onto a 180-degree-turned alignment
+            #   and under-score a correct outline; the outline's frame is arbitrary, so seed it at 0/90/180/270 and keep the best.
+            import math as _m
+            import numpy as _np
+            _P = _np.asarray(learnt[est], float)
+            sc = max((wbt_rooms.align_and_score(gt[truth]["poly"], _P @ _np.array([[_m.cos(a), -_m.sin(a)], [_m.sin(a), _m.cos(a)]]).T)
+                      for a in (0.0, _m.pi / 2, _m.pi, 1.5 * _m.pi)), key=lambda r: r["iou"])
             iou = f"{sc['iou']:.3f}"
         elif truth is not None:
             iou = f"n/a (no SVG for {est} in this run)"

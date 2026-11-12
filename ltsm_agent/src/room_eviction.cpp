@@ -1059,10 +1059,7 @@ std::optional<DSR::Node> live_passage_of(DSR::DSRGraph &live, std::uint64_t door
     return {};
 }
 
-namespace
-{
 // A wall's segment in its floor's frame (= the room's: floor->room is the identity), from the parent->wall RT edge and width_m.
-struct WallSeg { std::uint64_t id; std::string name; Eigen::Vector2d a, b; };
 std::optional<WallSeg> wall_segment(DSR::DSRGraph &g, const DSR::Node &w, std::uint64_t parent_id)
 {
     const auto e = g.get_edge(parent_id, w.id(), "RT");
@@ -1091,6 +1088,9 @@ std::vector<WallSeg> walls_under(DSR::DSRGraph &g, const DSR::Node &floor)
             if (const auto sg = wall_segment(g, w.value(), floor.id()); sg.has_value()) out.push_back(sg.value());
     return out;
 }
+
+namespace
+{
 std::optional<DSR::Node> live_floor_of(DSR::DSRGraph &g, std::uint64_t room_id)
 {
     const auto room = g.get_node(room_id);

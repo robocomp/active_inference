@@ -11,6 +11,7 @@
 #include <ranges>
 #include "entry_reloc.h"
 #include "room_scene_graph.h"
+#include <numeric>
 #include "status_reporter.h"
 #include "wall_sync.h"                                       // rc::walls::plan_wall_sync (rule 1)
 #include "door_crossing.h"                                   // rc::crossing (proto-room evidence)
@@ -1534,6 +1535,8 @@ void RoomSceneGraph::forget_room(const char* why)
     published_polygon_verts_ = 0;
     startup_proto_ = startup_promoted_ = false;
     layout_pool_.clear();
+    pool_regions_.clear();
+    fs_scans_ = fs_outline_scans_ = layout_finished_scans_ = 0;
     unfound_openings_.clear();   // the hypotheses belong to the room they were cut in
     left_rooms_.clear();
     left_polys_int_.clear();
@@ -1973,6 +1976,8 @@ void RoomSceneGraph::arm_startup_proto(std::uint64_t room_id, const Eigen::Affin
     recalled_visit_    = false;
     explored_.reset();          // a re-entry restores its memory (note_recall_memory) after this
     layout_pool_.clear();
+    pool_regions_.clear();
+    fs_scans_ = fs_outline_scans_ = layout_finished_scans_ = 0;
     unfound_openings_.clear();   // the hypotheses belong to the room they were cut in
     layout_finished_   = false;
     cam_cover_.reset();          // a new room: its boundary has been shown to no camera yet (camera_coverage.h)
@@ -2026,7 +2031,14 @@ void RoomSceneGraph::step_startup_proto(const rc::RoomConcept::UpdateResult& res
     // pose stays plain SLAM's afterwards — so promotion needs that layout, not the wall map's map_ready.
     const bool layout_ready = room_concept_->plain_slam_driving() ? room_concept_->has_map_layout()
                                                                    : room_concept_->map_ready();
-    if (layout_ready and layout_finished_)
+    // ★ ...AND THE OUTLINE PROMOTION ADOPTS IS DRAWN FROM THE EVIDENCE THAT SAID "FINISHED" (2026-11-12, clean52). The
+    //   explorer judges `finished` on the raster as it stands at its plan (the newest scan); the pool's newest outline is
+    //   from the last publish, up to STARTUP_PROTO_PUBLISH_MS older. clean52: the scan that showed the dead-end arm to
+    //   DOOR_1 zeroed the gain, and promotion picked from outlines drawn before that scan — the arm was never in the
+    //   pool. One stamp comparison, no threshold: until an outline drawn at or after the verdict's scan exists, the
+    //   survey keeps accumulating and publishing (at most one publish period), then promotes on what it saw.
+    const bool outline_current = not room_concept_->plain_slam_driving() or fs_outline_scans_ >= layout_finished_scans_;
+    if (layout_ready and layout_finished_ and outline_current)
     {
         promote_startup_proto(reason);
         return;
@@ -2045,6 +2057,7 @@ void RoomSceneGraph::step_startup_proto(const rc::RoomConcept::UpdateResult& res
         if (p.allFinite())
             ends.push_back(pose_pub * p.head<2>());
     free_space_->add_scan(pose_pub * lidar_origin_, ends);
+    ++fs_scans_;
     // the robot's own footprint is confirmed free — see FreeSpacePolygon::add_footprint. Radius = circumscribed
     // body radius PLUS the erosion the ring is cut back by: with the body alone (0.33 m) the eroded ring still
     // left the robot outside (0.05 m beyond the edge, as live); with + erode it sits ~0.2 m inside (scratch test
@@ -2075,6 +2088,8 @@ void RoomSceneGraph::step_startup_proto(const rc::RoomConcept::UpdateResult& res
     // With plain SLAM owning the pose, the raster is a well-aligned occupancy map, and its Manhattan outline snapped
     // onto the measured walls IS the layout (offline vs Webots truth: IoU 0.957 on two live recordings). It replaces
     // the wall map's polygon, which on this apartment froze at its first-frame seed box. Fallback: the raw ring.
+    if (room_concept_->plain_slam_driving())
+        fs_outline_scans_ = fs_scans_;   // the outline below is drawn from the raster as of this scan (drawn or not)
     if (room_concept_->plain_slam_driving())
         if (auto lay = free_space_->manhattan_layout(pose_pub.translation(), 0.18f);   // 18 cm: offline 26-28 verts, IoU .954-.966 (12 cm kept 30-42 verts of small steps)
             lay.size() >= 4 and rc::freespace::point_in_polygon(pose_pub.translation(), lay))
@@ -2196,15 +2211,22 @@ void RoomSceneGraph::stamp_low_obstacles()
 // furniture fronts (IoU .871) while the outline of t=0 and of several later publishes had them on the walls.
 void RoomSceneGraph::adopt_most_probable_layout()
 {
-    if (not free_space_.has_value() or layout_pool_.size() < 2) return;
+    if (not free_space_.has_value() or layout_pool_.empty()) return;
     const auto latest = published_polygon();
     if (latest.size() < 4) return;
     std::vector<Eigen::Vector2f> surf, fr, fo; std::vector<float> cs, cf;
     free_space_->evidence_cells(surf, fr, &cs, &cf, &fo);
     const std::vector<std::vector<Eigen::Vector2f>> cands(layout_pool_.begin(), layout_pool_.end());
+    // the room's doorways (published frame): an adopted region never grows through one, as in the refiner
+    std::vector<rc::refine::Doorway> doorways;
+    for (const auto& d : room_concept_->door_apertures())
+        doorways.push_back({.a = T_pub_int_ * d.a, .b = T_pub_int_ * d.b, .depth = d.half_depth});
+    // ★ EDIT BY EDIT (layout_refiner.h adopt_from_pool, 2026-11-12): the whole-outline winner is only the start; every
+    //   region another outline drew differently is judged on its own description length.
     const auto dl = refiner_.description_lengths(cands, latest, surf, fr, cs, cf, fo);
+    const auto R = refiner_.adopt_from_pool(cands, latest, surf, fr, cs, cf, fo, doorways);
+    pool_regions_ = R.regions;
     const auto best = static_cast<std::size_t>(std::ranges::distance(dl.begin(), std::ranges::min_element(dl)));
-    const float dl_latest = dl.back();   // the pool's back is the outline published last (see step_startup_proto)
     {
         std::ofstream f("tmp/promotion_select.csv", std::ios::out | std::ios::trunc);
         f.imbue(std::locale::classic());
@@ -2215,14 +2237,19 @@ void RoomSceneGraph::adopt_most_probable_layout()
             for (const auto& v : cands[i]) f << v.x() << ',' << v.y() << ' ';
             f << '\n';
         }
+        for (const auto& e : R.edits) f << "# edit;" << e.kind << ";area_m2=" << e.value << ";gain=" << e.gain << '\n';
+        f << "# adopted;";
+        for (const auto& v : R.polygon) f << v.x() << ',' << v.y() << ' ';
+        f << '\n';
     }
-    qInfo().noquote() << QString("[room][startup-proto] promotion chooses outline %1 of %2 by description length: "
-                                 "%3 nats vs %4 for the latest (%5 verts)")
-                         .arg(best).arg(cands.size()).arg(dl[best], 0, 'f', 1).arg(dl_latest, 0, 'f', 1).arg(cands[best].size());
-    if (best + 1 == cands.size() or not std::isfinite(dl[best])) return;
+    qInfo().noquote() << QString("[room][startup-proto] promotion: whole-outline winner %1 of %2 (%3 nats, %4 verts), then "
+                                 "%5 pool region edit(s) -> %6 verts, %7 m2; %8 near-miss region(s) kept for the refiner")
+                         .arg(best).arg(cands.size()).arg(dl[best], 0, 'f', 1).arg(cands[best].size()).arg(R.edits.size())
+                         .arg(R.polygon.size()).arg(std::abs(rc::freespace::signed_area(R.polygon)), 0, 'f', 2).arg(R.regions.size());
+    if (R.polygon.size() < 4 or R.polygon == latest) return;
     const Eigen::Affine2f T_int_pub = T_pub_int_.inverse();
-    std::vector<Eigen::Vector2f> lay_int; lay_int.reserve(cands[best].size());
-    for (const auto& v : cands[best]) lay_int.push_back(T_int_pub * v);
+    std::vector<Eigen::Vector2f> lay_int; lay_int.reserve(R.polygon.size());
+    for (const auto& v : R.polygon) lay_int.push_back(T_int_pub * v);
     room_concept_->set_map_layout(std::move(lay_int));
 }
 
@@ -2319,6 +2346,7 @@ void RoomSceneGraph::promote_startup_proto(std::string& reason, bool recalled)
     // SLAM pose by step_layout_refiner — the same poses it was built at while plain SLAM drove.
     refine_last_ms_ = steady_ms();
     dsr_create_wall_nodes();   // in the PUBLISHED frame (published_polygon)
+    publish_wall_seen_prob();
     // HAND-BACK to the pose-information planner, seeded with the promoted polygon in the frame it plans in
     // (internal). It was seeded only at room creation before, which the start-up path never reaches.
     if (epistemic_ != nullptr)
@@ -2645,7 +2673,10 @@ void RoomSceneGraph::dsr_update_layout_affordance(const rc::RoomConcept::UpdateR
             or (layout_visits_ > 0
                 and (room_concept_->plain_slam_driving() ? room_concept_->has_map_layout() : room_concept_->map_ready())
                 and (layout_last_plan_.why == "no_gain" or layout_last_plan_.why == "unreachable")))
+        {
+            if (not layout_finished_) layout_finished_scans_ = fs_scans_;   // the raster this verdict was judged on
             layout_finished_ = true;
+        }
         layout_plan_ms_ = now;
         const auto prev = layout_target_;
         if (layout_last_plan_.ok)
@@ -4319,6 +4350,51 @@ void RoomSceneGraph::sync_walls_to_polygon(const std::vector<Eigen::Vector2f>& p
     trigger_layout_();
 }
 
+// ── P(THIS WALL WAS SEEN) → obj_exist_prob on the wall node (2026-11-12, D2 for ltsm's per-edge extent) ───────────────
+// A wall of the outline is either where LiDAR returns stopped or an edge the outline closed across space it never saw
+// (clean53: the phantom walls closing the DOOR_1 arm). The evidence is the free-space raster's OCCUPIED cells with their
+// occupancy posterior. Along the wall, one sample per raster cell; at each, the best of the occupied cells whose
+// projection falls in that sample's cell: posterior x exp(-across^2 / 2 sigma^2), sigma the refiner's fitted wall noise
+// (its prior sigma0 before the first fit). P(seen) = the mean over the wall. No threshold: a wall half seen reads ~0.5.
+// Skipped on a recalled visit — the raster restarts at the crossing, so most of a remembered room reads unseen while
+// the remembered value (carried by ltsm with the node) is the better one.
+void RoomSceneGraph::publish_wall_seen_prob()
+{
+    if (not G_ or not free_space_.has_value() or recalled_visit_ or dsr_room_id_ == 0) return;
+    const auto room = G_->get_node(dsr_room_id_);
+    if (not room.has_value()) return;
+    std::vector<Eigen::Vector2f> surf, fr; std::vector<float> cs, cf;
+    free_space_->evidence_cells(surf, fr, &cs, &cf);
+    const float cell = free_space_->params().cell;
+    const float sigma = refiner_.last().sigma > 0.f ? refiner_.last().sigma : refiner_.params().sigma0;
+    for (auto w : own_wall_nodes(wall_naming(room->name())))
+    {
+        const auto par = G_->get_attrib_by_name<parent_att>(w).value_or(dsr_room_id_);
+        const auto e = G_->get_edge(par, w.id(), "RT");
+        if (not e.has_value()) continue;
+        const auto tr  = G_->get_attrib_by_name<rt_translation_att>(e.value());
+        const auto rot = G_->get_attrib_by_name<rt_rotation_euler_xyz_att>(e.value());
+        const float len = G_->get_attrib_by_name<width_m_att>(w).value_or(0.f);
+        if (not tr.has_value() or tr->get().size() < 2 or not rot.has_value() or rot->get().size() < 3 or len <= 0.f) continue;
+        const Eigen::Vector2f mid(tr->get()[0], tr->get()[1]), u(std::cos(rot->get()[2]), std::sin(rot->get()[2]));
+        const int n = std::max(1, static_cast<int>(std::ceil(len / cell)));
+        std::vector<float> best(static_cast<std::size_t>(n), 0.f);
+        for (std::size_t i = 0; i < surf.size(); ++i)
+        {
+            const Eigen::Vector2f d = surf[i] - mid;
+            const float along = d.dot(u) + 0.5f * len, across = d.x() * u.y() - d.y() * u.x();
+            if (along < 0.f or along >= len) continue;
+            const auto k = static_cast<std::size_t>(std::min(n - 1, static_cast<int>(along / len * static_cast<float>(n))));
+            const float conf = i < cs.size() ? cs[i] : 1.f;
+            best[k] = std::max(best[k], conf * std::exp(-0.5f * across * across / (sigma * sigma)));
+        }
+        const float p = std::accumulate(best.begin(), best.end(), 0.f) / static_cast<float>(n);
+        if (const auto old = G_->get_attrib_by_name<obj_exist_prob_att>(w); old.has_value() and old.value() == p) continue;
+        G_->add_or_modify_attrib_local<obj_exist_prob_att>(w, p);
+        G_->update_node(w);
+    }
+}
+
 ///////////////////////////////////////////////////////////////////////////////
 void RoomSceneGraph::dsr_create_wall_nodes()
 {
@@ -4730,7 +4806,7 @@ void RoomSceneGraph::step_layout_refiner(const rc::RoomConcept::UpdateResult& re
     for (const auto& d : room_concept_->door_apertures())
         doorways.push_back({.a = T_pub_int_ * d.a, .b = T_pub_int_ * d.b, .depth = d.half_depth});
     doorways.insert(doorways.end(), unfound_openings_.begin(), unfound_openings_.end());   // a hypothesised doorway is where the room ends too
-    auto R = refiner_.propose(poly_pub, surf, fr, cs, cf, doorways, fo);
+    auto R = refiner_.propose(poly_pub, surf, fr, cs, cf, doorways, fo, pool_regions_);
     refine_contested_ = R.contested;
     if (not refine_csv_.is_open())
     {
@@ -4742,7 +4818,7 @@ void RoomSceneGraph::step_layout_refiner(const rc::RoomConcept::UpdateResult& re
                 << ',' << R.kappa << ',' << R.nll_before << ',' << R.nll_after << ',' << R.edits.size() << ',' << R.polygon.size()
                 << ',' << R.contested.size() << ',' << room_concept_->slam_disagreement() << '\n';
     refine_csv_.flush();   // one row per evaluation (every few seconds): flush so the file is readable live
-    if (R.edits.empty()) return;
+    if (R.edits.empty()) { publish_wall_seen_prob(); return; }   // the evidence grew: P(seen) of the walls with it
     for (const auto& e : R.edits)
     {   // extend/notch carry a CELL COUNT (a rectangle, no edge); the others an offset in metres along edge `e.edge`
         const bool area = (e.kind == "extend" or e.kind == "notch");
@@ -4768,6 +4844,7 @@ void RoomSceneGraph::step_layout_refiner(const rc::RoomConcept::UpdateResult& re
         fs_published_ = R.polygon; published_polygon_verts_ = R.polygon.size();
         save_learnt_layout(R.polygon, "refined");
         sync_walls_to_polygon(R.polygon);   // rule 1: the walls (and the doors on them) follow the refined outline
+        publish_wall_seen_prob();
     }
 }
 

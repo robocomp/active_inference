@@ -77,6 +77,14 @@ std::uint64_t next_passage_index(DSR::DSRGraph &live, DSR::DSRGraph *mem);
 /// The LIVE passage (metaconcept, subtype "passage") holding a `match` edge to this live door, if any.
 std::optional<DSR::Node> live_passage_of(DSR::DSRGraph &live, std::uint64_t door_id);
 
+/// A wall's segment in its floor's frame (= the room's: floor->room is the identity): the parent->wall RT edge + width_m.
+struct WallSeg { std::uint64_t id; std::string name; Eigen::Vector2d a, b; };
+std::optional<WallSeg> wall_segment(DSR::DSRGraph &g, const DSR::Node &w, std::uint64_t parent_id);
+/// Endpoint distance between two segments, either orientation (a wall has no preferred direction).
+double seg_cost(const WallSeg &x, const WallSeg &y);
+/// The walls hanging from `floor` in g, with their segments.
+std::vector<WallSeg> walls_under(DSR::DSRGraph &g, const DSR::Node &floor);
+
 /// A hole memory already knows: the passage and the remembered face of it.
 struct RememberedHole
 {

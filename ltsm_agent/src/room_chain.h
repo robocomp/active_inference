@@ -26,6 +26,20 @@
  * Mass inside an outline = deterministic Gauss-Hermite quadrature (9x9) over the (x, y) Gaussian. The mass the rule cannot
  * resolve (an outline further than ~4.5 sigma) is added as exp(-(d^2 + r_max^2)/2), d the Mahalanobis distance to the
  * outline's edge: smooth and monotone in d, never -inf, no switch (see region_mass).
+ *
+ * THE OUTLINE IS NOT THE ROOM'S EXACT EXTENT (2026-11-12, clean52/53). The quadrature integrates P(x in k), not an
+ * indicator: 1 inside the remembered outline; beyond it, the room may continue past each EDGE by a depth whose law
+ * depends on whether that edge is a wall actually seen:
+ *     P(k reaches x through edge e) = s_e exp(-delta_e / lambda_wall) + (1 - s_e) exp(-delta_e / L_k)
+ *   s_e         P(edge e is a seen wall) = obj_exist_prob of the remembered wall node on that edge (absent = 1, the
+ *               attribute's documented safe reading: the outline is then exactly as trusted as before).
+ *   lambda_wall the outline's own placement scale at a seen wall (3 cm, flagged in room_chain.cpp).
+ *   L_k         sqrt(area_k): the room's own scale is the prior on how far an UNSEEN boundary may still run (flagged).
+ *   delta_e     distance from x to edge e, counted only when x lies on e's OUTWARD side. The extension grows out of e and
+ *               passes each wall the straight way from e to x crosses (k's other edges, and every other placed room's) with
+ *               1 - P(that wall seen): an unseen corridor of the big room does not run through the bath's seen partition.
+ * Edges extend independently: P(x in k) = 1 - prod_e (1 - P(k reaches x through e)). A robot just behind a SEEN wall is
+ * still outside (centimetres); a robot 0.8 m past an edge nobody saw a wall on is plausibly still in k.
  */
 #include "room_eviction.h"
 #include "../../common/room_recognition/room_posterior.h"
@@ -50,8 +64,14 @@ struct KnownRoomMetric
     Eigen::Affine2d T_ref_k = Eigen::Affine2d::Identity();   ///< room k in the reference room, from k's OWN chain
     Eigen::Matrix3d cov_T   = Eigen::Matrix3d::Zero();
     std::vector<Eigen::Vector2d> polygon_in_ref;
+    /// P(edge i = polygon_in_ref[i] -> [i+1] is a SEEN wall), one per edge. Empty (or shorter) = not stated = 1.
+    std::vector<double> edge_support;
     double area = 0.0;
 };
+
+struct MetricQuery;
+/// P(x in q.rooms[k]) under the soft extent above, for one point in the reference frame. Exposed for tests.
+double soft_inside(const MetricQuery &q, std::size_t k, const Eigen::Vector2d &x);
 
 /// One passage the metric chains went through, and whether its two faces were the same hole turned by pi (logging only).
 struct SeamLogEntry { std::string passage; bool flipped = false; };

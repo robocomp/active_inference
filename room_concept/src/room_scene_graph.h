@@ -311,6 +311,13 @@ private:
     std::atomic<float> readiness_stable_{0.f}, readiness_explore_{0.f};
     std::deque<std::pair<std::int64_t, std::vector<Eigen::Vector2f>>> ring_hist_;   // (stamp, published outline)
     std::deque<std::vector<Eigen::Vector2f>> layout_pool_;   ///< distinct map layouts (published frame) promotion chooses among
+    /// ★ ONE EVIDENCE CLOCK FOR THE EXPLORER AND THE OUTLINE (2026-11-12, clean52): scans added to free_space_ so far,
+    /// that count when the newest pool outline was drawn, and that count when the explorer latched `finished`. Promotion
+    /// waits until the pool holds an outline drawn from a raster at least as new as the one that said "finished".
+    std::uint64_t fs_scans_ = 0, fs_outline_scans_ = 0, layout_finished_scans_ = 0;
+    /// Promotion's near-miss pool regions (LayoutRefiner::adopt_from_pool), published frame: re-judged by every later
+    /// refinement as the evidence grows.
+    std::vector<rc::refine::Region> pool_regions_;
     long low_batches_stamped_ = 0, low_batches_too_old_ = 0;   // diagnostics: furniture layer intake
     int  rej_ring_ = 0, rej_furniture_ = 0, rej_refused_ = 0;  // diagnostics: explorer rejections, per plan   ///< explorer standpoints COMPLETED in this proto (promotion precondition)             ///< batches newer than the last pose
     void stamp_low_obstacles();
@@ -398,6 +405,10 @@ private:
     std::vector<rc::refine::Doorway> unfound_openings_;
     void cut_unfound_doorways(std::vector<Eigen::Vector2f>& polygon_pub);   ///< doorway_necks.h, on this room's evidence
     void publish_doorway_hypotheses();
+    /// obj_exist_prob on each of this room's walls = P(this wall was seen): the mean, along the wall at the raster's cell,
+    /// of the best occupied-cell evidence at that point (occupancy posterior x N(across; 0, sigma_fit)). ltsm reads it
+    /// to tell a wall the LiDAR returned from an edge the outline merely closed (2026-11-12, D2).
+    void publish_wall_seen_prob();
     std::ofstream refine_csv_;                        ///< tmp/layout_refine.csv — one row per evaluation
     std::ofstream refine_origin_bin_;                 ///< tmp/refine_free_origin.bin — per refine frame, the free cells' mean beam origins
     std::ofstream refine_in_bin_;                     ///< tmp/refine_input.bin — the refiner's exact inputs, one frame per evaluation (offline replay)

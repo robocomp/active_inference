@@ -161,6 +161,61 @@ bool inside(const std::vector<Eigen::Vector2d> &poly, const Eigen::Vector2d &x)
     return in;
 }
 
+/// FLAGGED model constant: the outline's own placement scale at a wall it SAW. Beyond a seen wall, membership decays over
+/// this length. 3 cm is the module's per-face door-pose prior (face_prior), the same scan placing the same wall; corner
+/// errors measured against ground truth are flat at ~2 cm (memory: published-layout-sigma-needs-a-floor). The chain's own
+/// uncertainty is NOT in here: it is the Gaussian the quadrature already integrates.
+constexpr double kSeenWallLambdaM = 0.03;
+
+double cross2(const Eigen::Vector2d &a, const Eigen::Vector2d &b) { return a.x() * b.y() - a.y() * b.x(); }
+
+/// Proper crossing of segments pq and ab (strict: touching at an endpoint is not a crossing).
+bool segments_cross(const Eigen::Vector2d &p, const Eigen::Vector2d &q, const Eigen::Vector2d &a, const Eigen::Vector2d &b)
+{
+    const double d1 = cross2(q - p, a - p), d2 = cross2(q - p, b - p);
+    const double d3 = cross2(b - a, p - a), d4 = cross2(b - a, q - a);
+    return ((d1 > 0.0 and d2 < 0.0) or (d1 < 0.0 and d2 > 0.0)) and ((d3 > 0.0 and d4 < 0.0) or (d3 < 0.0 and d4 > 0.0));
+}
+
+double signed_area(const std::vector<Eigen::Vector2d> &poly)
+{
+    double a2 = 0.0;
+    for (std::size_t i = 0; i < poly.size(); ++i) a2 += cross2(poly[i], poly[(i + 1) % poly.size()]);
+    return 0.5 * a2;
+}
+
+/// Per edge of `room`'s outline (vertex i -> i+1, the outline as stored), P(that edge is a SEEN wall): the obj_exist_prob
+/// of the remembered wall node on it. Walls are matched to edges by MUTUAL nearest segment (the walls are built from the
+/// outline's edges, room_concept sync_walls_to_polygon, so a match is exact; an edge no wall claims, e.g. a zero-length one,
+/// stays unstated). Unstated = 1, the attribute's documented safe reading.
+std::vector<double> edge_support_of(DSR::DSRGraph &g, const DSR::Node &room, const std::vector<Eigen::Vector2d> &poly)
+{
+    std::vector<double> s(poly.size(), 1.0);
+    if (poly.size() < 3) return s;
+    std::optional<DSR::Node> floor;
+    for (const auto &e : DSR::DSRGraph::get_node_edges_by_type(room, "RT"))
+        if (const auto f = g.get_node(e.to()); f.has_value() and f->type() == "floor") { floor = f; break; }
+    if (not floor.has_value()) return s;
+    const auto walls = walls_under(g, floor.value());
+    if (walls.empty()) return s;
+    std::vector<WallSeg> edges;
+    for (std::size_t i = 0; i < poly.size(); ++i) edges.push_back(WallSeg{0, {}, poly[i], poly[(i + 1) % poly.size()]});
+    const auto nearest = [](const WallSeg &x, const std::vector<WallSeg> &ys) {
+        std::size_t best = 0;
+        for (std::size_t j = 1; j < ys.size(); ++j)
+            if (seg_cost(x, ys[j]) < seg_cost(x, ys[best])) best = j;
+        return best; };
+    for (std::size_t i = 0; i < edges.size(); ++i)
+    {
+        const std::size_t w = nearest(edges[i], walls);
+        if (nearest(walls[w], edges) != i) continue;
+        if (const auto wn = g.get_node(walls[w].id); wn.has_value())
+            if (const auto p = g.get_attrib_by_name<obj_exist_prob_att>(wn.value()); p.has_value())
+                s[i] = std::clamp(double(p.value()), 0.0, 1.0);   // a probability's domain, not a gate
+    }
+    return s;
+}
+
 // Gauss-Hermite (probabilists', weights sum to 1), n points, by Golub-Welsch.
 struct Rule { std::vector<double> x, w; };
 const Rule &hermite()
@@ -319,12 +374,59 @@ MetricQuery build_metric_query(DSR::DSRGraph &mem, const std::vector<std::string
             k.chain_ok = true;
             k.T_ref_k = affine_of(it->second.pose);
             k.cov_T = it->second.cov;
-            for (const auto &v : polygon_of(mem, n)) k.polygon_in_ref.push_back(k.T_ref_k * v);
+            const auto poly = polygon_of(mem, n);
+            for (const auto &v : poly) k.polygon_in_ref.push_back(k.T_ref_k * v);
+            k.edge_support = edge_support_of(mem, n, poly);
             k.area = shoelace_area(k.polygon_in_ref);
         }
         q.rooms.push_back(std::move(k));
     }
     return q;
+}
+
+//////////////////////////////////////////////////////////////////////////////////////////////////
+double soft_inside(const MetricQuery &q, std::size_t ki, const Eigen::Vector2d &x)
+{
+    const auto &k = q.rooms[ki];
+    const auto &poly = k.polygon_in_ref;
+    const std::size_t n = poly.size();
+    if (n < 3) return 0.0;
+    if (inside(poly, x)) return 1.0;
+    const auto support = [](const KnownRoomMetric &r, std::size_t e) { return e < r.edge_support.size() ? r.edge_support[e] : 1.0; };
+    // FLAGGED model choice: how far an UNSEEN boundary may still run is set by the room's own scale, sqrt(area). An open
+    // edge of a 56 m2 room lets it continue by metres; of a 4 m2 closet, by two.
+    const double L = std::sqrt(std::max(k.area, 0.0));
+    const double orient = signed_area(poly) >= 0.0 ? 1.0 : -1.0;     // outward = right of a CCW edge
+    double p_out = 1.0;
+    for (std::size_t e = 0; e < n; ++e)
+    {
+        const Eigen::Vector2d &a = poly[e], &b = poly[(e + 1) % n];
+        const Eigen::Vector2d ab = b - a;
+        if (orient * cross2(ab, x - a) >= 0.0) continue;               // x is not beyond this edge
+        const double len2 = ab.squaredNorm();
+        const double t = len2 > 0.0 ? std::clamp((x - a).dot(ab) / len2, 0.0, 1.0) : 0.0;
+        const Eigen::Vector2d foot = a + t * ab;
+        // The extension grows OUT of e and cannot pass a SEEN wall on its way to x: every wall the straight way crosses lets
+        // it through with 1 - P(that wall was seen). k's own other edges (the adjacent ones share e's ends) and the edges
+        // of every other placed room alike: the bath's seen partition stops the big room's unseen corridor at the bath.
+        double pass = 1.0;
+        for (std::size_t f = 0; f < n; ++f)
+            if (f != e and f != (e + 1) % n and f != (e + n - 1) % n and segments_cross(x, foot, poly[f], poly[(f + 1) % n]))
+                pass *= 1.0 - support(k, f);
+        for (std::size_t j = 0; j < q.rooms.size(); ++j)
+        {
+            const auto &o = q.rooms[j];
+            if (j == ki or not o.chain_ok or o.polygon_in_ref.size() < 3) continue;
+            const std::size_t m = o.polygon_in_ref.size();
+            for (std::size_t g = 0; g < m; ++g)
+                if (segments_cross(x, foot, o.polygon_in_ref[g], o.polygon_in_ref[(g + 1) % m])) pass *= 1.0 - support(o, g);
+        }
+        const double delta = (x - foot).norm();
+        const double s = support(k, e);
+        const double reach = s * std::exp(-delta / kSeenWallLambdaM) + (1.0 - s) * (L > 0.0 ? std::exp(-delta / L) : 0.0);
+        p_out *= 1.0 - pass * reach;
+    }
+    return 1.0 - p_out;
 }
 
 //////////////////////////////////////////////////////////////////////////////////////////////////
@@ -365,7 +467,11 @@ std::vector<rc::recog::MetricEvidence> metric_evidence(const MetricQuery &q, flo
         const Gauss2 g(q.robot_in_ref.pose.head<2>(), S.topLeftCorner<2, 2>());
         double in = 0.0, outside = 0.0;
         for (const auto &[x, w] : g.nodes)
-            (inside(r.polygon_in_ref, x) ? in : outside) += w;
+        {
+            const double p = soft_inside(q, k, x);      // P(x in k): the outline's soft extent, not an indicator
+            in += w * p;
+            outside += w * (1.0 - p);
+        }
         const double d = g.dist_to(r.polygon_in_ref);
 
         // pose in k: the robot expressed in k's frame (the two chains are treated as independent: conservative)
@@ -382,9 +488,13 @@ std::vector<rc::recog::MetricEvidence> metric_evidence(const MetricQuery &q, flo
         if (log_this)
         {
             const double th = std::atan2(r.T_ref_k.linear()(1, 0), r.T_ref_k.linear()(0, 0));
+            // the outline's unseen boundary: metres of edge weighted by 1 - P(seen wall)
+            double open_m = 0.0;
+            for (std::size_t e = 0; e < r.polygon_in_ref.size() and e < r.edge_support.size(); ++e)
+                open_m += (1.0 - r.edge_support[e]) * (r.polygon_in_ref[(e + 1) % r.polygon_in_ref.size()] - r.polygon_in_ref[e]).norm();
             qInfo().noquote() << QString::fromStdString(std::format(
-                "[recog][metric]   {} id {}: T_ref_k ({:+.3f},{:+.3f},{:+.3f}) area {:.1f} d {:.2f} P_in {:.4g} log_inside {:+.2f}",
-                r.mem_room, r.room_id, r.T_ref_k.translation().x(), r.T_ref_k.translation().y(), th, r.area, d, in, out[k].log_inside));
+                "[recog][metric]   {} id {}: T_ref_k ({:+.3f},{:+.3f},{:+.3f}) area {:.1f} open_edge {:.2f} m d {:.2f} P_in {:.4g} log_inside {:+.2f}",
+                r.mem_room, r.room_id, r.T_ref_k.translation().x(), r.T_ref_k.translation().y(), th, r.area, open_m, d, in, out[k].log_inside));
         }
     }
     log_new_out = float(log_new);
