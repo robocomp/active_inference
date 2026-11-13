@@ -178,8 +178,14 @@ Digest WorldDigest::build(DSR::InnerEigenAPI& inner, bool controller_present, co
                 line += std::format(", P(open)={:.2f}", p.value());
             else line += ", P(open)=unknown";
         }
-        line += std::format(", affordances: approach={} open={} cross={}", aff_state(G, "aff_" + door + "_approach"),
-                            aff_state(G, "aff_" + door + "_open"), aff_state(G, "aff_" + door + "_cross"));
+        const std::string a_app = aff_state(G, "aff_" + door + "_approach"), a_open = aff_state(G, "aff_" + door + "_open"),
+                          a_cross = aff_state(G, "aff_" + door + "_cross");
+        line += std::format(", affordances: approach={} open={} cross={}", a_app, a_open, a_cross);
+        // chat_e2e19: a door restored from memory and not seen yet offers only its approach (door_concept keeps open and
+        // cross × P(exists) until it is seen), and the planner read open=absent as "cannot pass" and went round through
+        // another room. `cross` of it still works: the passage starts with the approach, which sees the door.
+        if (a_app == "offered" and a_open == "absent" and a_cross == "absent")
+            line += " (not seen yet: `cross` it anyway, it approaches first; open and cross are offered once it is seen)";
         for (const auto& [rd, rr] : recalls)
             if (rd == door) line += ", behind it: remembered " + rr;
         if (d.facts.nearest_door.has_value() and *d.facts.nearest_door == door) line += " [nearest]";

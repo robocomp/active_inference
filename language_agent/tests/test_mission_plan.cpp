@@ -262,6 +262,27 @@ int main()
         }
     }
 
+    // ── chat_e2e19: `cross door_1 bind=a; cross door_1 expect=room_1; cross room_3` from room_1 — door_1 was LIVE at the
+    //    card, but step 2 runs in room_2, where door_1 is not in the graph. A door step after any cross is stale. ─────
+    {
+        auto m = parse_planned("mission\n  cross door_1 retry=2 bind=a\n  cross door_1 expect=room_1 retry=2\n"
+                               "  cross room_3 expect=room_3 retry=2\n");
+        CHECK(m.has_value());
+        if (m.has_value())
+        {
+            CHECK(rc::chat::doors_to_rooms(m->steps, {"door_1", "door_22"}) == 1);
+            const std::string out = rc::mission::print_text(*m);
+            CHECK(out.contains("cross door_1 retry=2 bind=a"));             // first step, live: kept
+            CHECK(out.contains("cross room_1 expect=room_1"));             // after a cross: the room it leads to
+        }
+        auto k = parse_planned("mission\n  open door_22\n  cross door_22 expect=room_3\n  report \"done\"\n");
+        CHECK(k.has_value());
+        if (k.has_value())
+        {   // open + cross of a live door before any cross: untouched
+            CHECK(rc::chat::doors_to_rooms(k->steps, {"door_1", "door_22"}) == 0);
+        }
+    }
+
     // ── the wakes' text ──────────────────────────────────────────────────────────────────────────────────────────
     {
         const std::string r = report_wake("objects here", "room_2", "2 objects perceived in room_2:\n- chair_1\n");
