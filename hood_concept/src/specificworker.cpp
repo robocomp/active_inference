@@ -374,7 +374,7 @@ void SpecificWorker::refresh_room_geometry()
     if (room_node_id_ != outline_room_ or poly.size() != outline_n_)
     {
         if (poly.empty())
-            std::print("hood_concept: [room] room {} has NO usable outline — births WAIT\n", room_node_id_);
+            std::print("hood_concept: [room] room {} has NO usable outline (none yet, or still a proto) — births WAIT\n", room_node_id_);
         else
             std::print("hood_concept: [room] room {} outline {} verts, x∈[{:.2f},{:.2f}] y∈[{:.2f},{:.2f}]\n",
                        room_node_id_, poly.size(), xmin, xmax, ymin, ymax);

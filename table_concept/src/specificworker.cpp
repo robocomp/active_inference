@@ -399,7 +399,7 @@ void SpecificWorker::refresh_room_geometry()
     {
         if (not room_polygon_.empty() or outline_missing_room_ != room_node_id_)
         {
-            std::print("table_concept: [room] room {} has NO usable outline — births WAIT\n", room_node_id_);
+            std::print("table_concept: [room] room {} has NO usable outline (none yet, or still a proto) — births WAIT\n", room_node_id_);
             room_polygon_.clear();
             fitter_->set_room_polygon({});
             outline_missing_room_ = room_node_id_;

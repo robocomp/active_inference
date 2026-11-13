@@ -228,7 +228,7 @@ void SpecificWorker::run_instance_tracker()
     const bool hold = not rc::room::outline_usable(room_polygon_);
     if (hold != births_held_)
         std::print("table_concept: [tracker] births {} — room {} {}\n", hold ? "HELD" : "released", room_node_id_,
-                   hold ? "has no outline yet" : "outline arrived");
+                   hold ? "has no outline yet (or is still a proto)" : "outline arrived");
     births_held_ = hold;
     const auto res = tracker_.update(tracks, dets, hold);
 

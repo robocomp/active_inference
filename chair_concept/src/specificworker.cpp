@@ -688,7 +688,7 @@ void SpecificWorker::run_instance_tracker()
     const bool hold = cfg_.exist_room_prior and not fitter_->has_room_polygon();
     if (hold and not births_held_)
     {
-        std::print("chair_concept: [tracker] births HELD — room {} has no outline yet\n", room_node_id_);
+        std::print("chair_concept: [tracker] births HELD — room {} has no outline yet (or is still a proto)\n", room_node_id_);
         log_tracker_event("SUPPRESS", 0, 0.f, 0.f, "defer: no outline");
     }
     else if (not hold and births_held_)
@@ -981,7 +981,7 @@ void SpecificWorker::refresh_room_geometry()
     if (room_node_id_ != outline_room_ or poly.size() != outline_n_ or bbox != outline_bbox_)
     {
         if (poly.empty())
-            std::print("chair_concept: [room-prior] room {} has NO usable outline — births WAIT\n", room_node_id_);
+            std::print("chair_concept: [room-prior] room {} has NO usable outline (none yet, or still a proto) — births WAIT\n", room_node_id_);
         else
             std::print("chair_concept: [room-prior] room {} outline {} verts, x∈[{:.2f},{:.2f}] y∈[{:.2f},{:.2f}]\n",
                        room_node_id_, poly.size(), xmin, xmax, ymin, ymax);

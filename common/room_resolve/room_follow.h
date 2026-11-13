@@ -19,16 +19,24 @@
 #include <Eigen/Core>
 #include <dsr/api/dsr_api.h>
 
+#include "room_resolve.h"        // rc::room::is_proto
 #include "room_resolve_rule.h"
 
 namespace rc::room
 {
 
-/// delimiting_polygon_x/y of `room_id` as points; empty when the node or either attribute is absent, or lengths differ.
+/// delimiting_polygon_x/y of `room_id` as points; empty when the node or either attribute is absent, or lengths differ,
+/// or the room is still a PROTO-room.
+/// ★A PROTO-ROOM'S OUTLINE IS NOT THE ROOM (owner 2026-11-13: "concept agents should refrain until a room is stabilized").
+/// A proto (room_concept's provisional room, `proto` self-edge) is what the robot has seen of a space so far: its
+/// outline grows while it is explored, and it is promoted — the edge removed, the node id kept — once its identity is
+/// settled (ltsm_agent then points `current` at it). Judging containment against it treated a partial outline as the
+/// walls: live 2026-11-13 (phase0_live1) a real table was refused ~40 times and hood_1 was removed by the out-of-room
+/// term. So a proto reads as NO outline: births WAIT and the out-of-room term is silent until promotion.
 inline std::vector<Eigen::Vector2f> read_outline(DSR::DSRGraph& G, std::uint64_t room_id)
 {
     const auto room = G.get_node(room_id);
-    if (not room.has_value())
+    if (not room.has_value() or is_proto(G, room_id))
         return {};
     const auto px = G.get_attrib_by_name<delimiting_polygon_x_att>(room.value());
     const auto py = G.get_attrib_by_name<delimiting_polygon_y_att>(room.value());

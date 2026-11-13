@@ -58,7 +58,9 @@ Owner 11-11: continue; WAIT rule stands; cause to be pinned live (outline bbox +
    outline arrives.
 3. **New logs:** (room id, outline verts + bbox) on every change; every birth logs its inside/OUTSIDE verdict with the
    room id; `births HELD` / `births released` per WAIT episode. These pin the chair_39 cause live (owner 11-11).
-4. Unchanged: Admit/Suppress wherever an outline exists (same rule — inside or within `Existence.RoomMarginM` of the
+4. (2026-11-13, owner) **A proto-room reads as NO outline** (`rc::room::read_outline`), so births WAIT and the out-of-room
+   term is silent until room_concept promotes the room — see Rulings 4. Applies to all six agents through the shared reader.
+5. Unchanged: Admit/Suppress wherever an outline exists (same rule — inside or within `Existence.RoomMarginM` of the
    boundary — now `rc::room::birth_verdict`); the left-behind drop (now `rc::room::drop_left_behind`, same teardown,
    same log text); the existence term value (`out_of_room_logodds(false, gain) = -gain`).
 5. Shared tracker change: `hold_births` defaults to false, so the other five agents are byte-for-byte unchanged until
@@ -281,3 +283,9 @@ Owner 2026-11-13, on the Task 14 questions:
    and the harness assumed vfov 55°).
 3. **Table moves to the expectation form** `p·min(raw, gap)` (= the core's useful_fraction), as its own commit after
    Task 15, with the A/B listing every changed state.
+4. **(owner 2026-11-13, after phase0_live1) Concept agents refrain until the room is stabilised.** A proto-room's outline is
+   what has been seen so far, not the walls. `rc::room::read_outline` returns no outline for a room carrying the `proto`
+   self-edge, so births WAIT (tracker hold, evidence kept) and the out-of-room existence term is silent until promotion. No σ,
+   no new attribute, no threshold: the structural fact room_concept already publishes. Side effects while the room is a proto:
+   no wall line-of-sight in P(detect), no NBV reachable region, default recall area. Left-behind drops are unaffected.
+   Expected live: the estimate-mode start room births nothing until it is promoted (~60 s in clean76).

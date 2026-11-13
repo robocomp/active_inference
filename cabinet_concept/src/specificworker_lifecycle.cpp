@@ -65,7 +65,7 @@ void SpecificWorker::refresh_room_geometry()
     if (room_node_id_ != outline_room_ or poly.size() != outline_n_)
     {
         if (poly.empty())
-            std::print("cabinet_concept: [room] room {} has NO usable outline — births WAIT\n", room_node_id_);
+            std::print("cabinet_concept: [room] room {} has NO usable outline (none yet, or still a proto) — births WAIT\n", room_node_id_);
         else
             std::print("cabinet_concept: [room] room {} outline {} verts, x∈[{:.2f},{:.2f}] y∈[{:.2f},{:.2f}]\n",
                        room_node_id_, poly.size(), xmin, xmax, ymin, ymax);
@@ -1034,7 +1034,7 @@ void SpecificWorker::run_instance_tracker()
     const bool hold = not fitter_->has_room_polygon();
     if (hold != births_held_)
         std::print("cabinet_concept: [tracker] births {} — room {} {}\n", hold ? "HELD" : "released", room_node_id_,
-                   hold ? "has no outline yet" : "outline arrived");
+                   hold ? "has no outline yet (or is still a proto)" : "outline arrived");
     births_held_ = hold;
     const auto res = tracker_.update(tracks, dets, hold);
 
