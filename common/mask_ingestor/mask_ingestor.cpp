@@ -224,6 +224,7 @@ MaskIngestor::NodeResult MaskIngestor::ingest_node(const rc::masks::MaskNodeRef&
     const VecOpt color_rgb_opt   = G_->get_attrib_by_name<mask_color_rgb_att>(masks_node);
     const VecOpt color_var_opt   = G_->get_attrib_by_name<mask_color_var_att>(masks_node);
     const VecOpt color_neff_opt  = G_->get_attrib_by_name<mask_color_neff_att>(masks_node);
+    const VecOpt color_lum_opt   = G_->get_attrib_by_name<mask_color_lum_att>(masks_node);   // absent = older retina
     const auto   cam_twist_opt   = G_->get_attrib_by_name<mask_cam_twist_att>(masks_node);
     const auto   frame_dt_opt    = G_->get_attrib_by_name<mask_frame_dt_s_att>(masks_node);
     const VecOpt points_cam_opt  = G_->get_attrib_by_name<mask_support_points_cam_att>(masks_node);
@@ -252,6 +253,7 @@ MaskIngestor::NodeResult MaskIngestor::ingest_node(const rc::masks::MaskNodeRef&
     const auto& color_rgb_v       = vref(color_rgb_opt);
     const auto& color_var_v       = vref(color_var_opt);
     const auto& color_neff_v      = vref(color_neff_opt);
+    const auto& color_lum_v       = vref(color_lum_opt);
     const auto& source_flat       = vref(points_cam_opt);   // CAMERA-frame points: the only 3-D array published
 
     const std::size_t support_count = source_flat.size() / 3;
@@ -392,6 +394,8 @@ MaskIngestor::NodeResult MaskIngestor::ingest_node(const rc::masks::MaskNodeRef&
             };
             slice.color_chroma = fetch3(color_rgb_v);
             slice.color_var    = fetch3(color_var_v);
+            const Eigen::Vector3f lum = fetch3(color_lum_v);   // (lum, var, n); zeros = no brightness information
+            slice.color_lum = lum[0]; slice.color_lum_var = lum[1]; slice.color_lum_n = lum[2];
         }
         slice.support_begin = clamped_begin;
         slice.support_end = clamped_end;

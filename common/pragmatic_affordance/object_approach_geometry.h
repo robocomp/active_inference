@@ -8,9 +8,13 @@
  *
  *   · h(d): the footprint box's SUPPORT FUNCTION, the exact centre-to-edge distance along d. The half diagonal (what
  *     chat used) is right only towards a corner and stands too far off every face.
- *   · clearance: half the robot body diagonal (0.46 × 0.65 m → 0.398 m). An affordance ends with a facing rotation
- *     in place, run with no obstacle check (controller config §GoalFacingYawEnabled), so the standpoint must leave
- *     the body's swept circle free. NOTHING ELSE IS ADDED: the controller's ComfortStandoff is an MPPI comfort cost,
+ *   · clearance: half the robot body diagonal (0.46 × 0.65 m → 0.398 m). The approach ends with a facing rotation in
+ *     place (an ORIENT contract since 2026-11-11 — as a REACH the controller arrived on position alone and never
+ *     turned: commit 2f27fe12 made Reach purely positional), so the standpoint must leave the body's swept circle free.
+ *   · min_standoff_m (2026-11-11, owner: "it should stop a little further back and face the chair"): the producer's
+ *     own SENSING distance — chair_concept passes where its detector's P(detect) peaks (the pinhole inversion of its
+ *     best fill, ChairFitter::best_view_distance). D = max(the clearance rule, it): two physical requirements, the
+ *     body must be able to turn AND the object must be seen; 0 = clearance only (every other caller, unchanged). NOTHING ELSE IS ADDED: the controller's ComfortStandoff is an MPPI comfort cost,
  *     and stacking it is the 0.95 m mistake controller_types.h records. A person's clearance is social instead.
  *   · σ(d): the object's position spread along d plus the robot's own; k = 2 (~95 %), the figure residual_concept
  *     (PublishExtentSigmaK) and the controller's σ-padding use.
@@ -51,6 +55,7 @@ struct StandCfg
 {
     float clearance_m = 0.398f;   ///< half the robot body diagonal (see the header); a person's social distance
     float sigma_k     = 2.0f;
+    float min_standoff_m = 0.0f;  ///< the producer's sensing distance (centre to centre); 0 = the clearance rule alone
 };
 
 struct Pose
@@ -63,7 +68,8 @@ struct Pose
                                      const Eigen::Matrix2f& obj_cov, float robot_sigma_m, const StandCfg& cfg)
 {
     const Vec2  d = dir.normalized();
-    const float D = support(half_extent, yaw, d) + cfg.clearance_m + cfg.sigma_k * sigma_along(obj_cov, d, robot_sigma_m);
+    const float D = std::max(cfg.min_standoff_m,
+                             support(half_extent, yaw, d) + cfg.clearance_m + cfg.sigma_k * sigma_along(obj_cov, d, robot_sigma_m));
     const Vec2  s = centre + D * d;
     return {s.x(), s.y(), std::atan2(-d.y(), -d.x())};
 }

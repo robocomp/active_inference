@@ -70,6 +70,20 @@ static void test_reads_own_chair_recalls(Fixture& f)
     CHECK(c[0].cand.cov(0, 1) == 0.f);
 }
 
+// 2026-11-11: the owner's last existence belief, as ltom carries it on the recall node, becomes the candidate's prior.
+static void test_existence_prior_read(Fixture& f)
+{
+    f.recall(f.room, uid_of(kMe, 3), 1.5f, -2.0f, 0.02f);
+    f.recall(f.room, uid_of(kMe, 4), 0.5f, -1.0f, 0.02f);
+    auto n = *f.G->get_node("ltom_recall_" + std::to_string(uid_of(kMe, 3)));
+    f.G->add_or_modify_attrib_local<obj_exist_prob_att>(n, 0.06f);
+    f.G->update_node(n);
+    const auto c = rc::recall_candidates(*f.G, f.room, "chair", kMe, 100, {});
+    CHECK(c.size() == 2);
+    for (const auto& k : c)
+        if (k.n == 3) CHECK(std::abs(k.cand.log_prior - std::log(0.06f)) < 1e-5f);
+        else CHECK(k.cand.log_prior == 0.f);   // not stated: position alone, as before
+}
 static void test_live_name_excluded(Fixture& f)
 {
     f.recall(f.room, uid_of(kMe, 3), 1.f, 1.f, 0.02f);
@@ -167,6 +181,7 @@ int main()
         std::println("{} {}", failures == before ? "ok  " : "FAIL", name);
     };
     run("test_reads_own_chair_recalls", test_reads_own_chair_recalls);
+    run("test_existence_prior_read", test_existence_prior_read);
     run("test_live_name_excluded", test_live_name_excluded);
     run("test_other_agent_uid_excluded", test_other_agent_uid_excluded);
     run("test_candidate_above_counter_excluded", test_candidate_above_counter_excluded);

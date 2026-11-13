@@ -175,6 +175,7 @@ struct ChairConfig
     int   ai2_gn_iters           = 4;
     float ai2_extent_std         = 0.05f;   // extent-observation noise (m) for the coverage/extent likelihood
     std::string ai2_csv_path     = "";
+    std::string colour_csv_path  = "";   // per-update colour trace (common/appearance_belief/colour_trace.h)
 
     // Upload the chair pose covariance onto the room→chair RT edge (rt_covariance_att, 6×6 SE3), built
     // from the belief's full Σ over [cx,cy,cz,yaw,...]: x←cx, y←cy, z←cz, yaw←ψ; roll/pitch are

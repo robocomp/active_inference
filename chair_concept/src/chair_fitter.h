@@ -35,6 +35,7 @@
 
 #include "chair_config.h"        // rc::ChairConfig
 #include "chair_instance.h"      // rc::ChairInstance, ChairState
+#include "../../common/appearance_belief/colour_trace.h"   // rc::appearance::ColourSample + the trace row
 #include "chair_model.h"         // ChairModel / ChairModelParams
 #include "../../common/mask_ingestor/mask_ingestor.h"
 #include "chair_scene_graph.h"
@@ -44,6 +45,10 @@ namespace rc {
 class ChairFitter
 {
 public:
+    // Where the chair is SEEN best: the distance at which its projected box fills the ZED image at the detector envelope's
+    // best fill (P(detect) peak) — the pinhole inversion of this fitter's own fill = max(width/W, height/H). nullopt until the
+    // camera intrinsics are bound. Used as the approach's minimum stand-off (common/pragmatic_affordance).
+    [[nodiscard]] std::optional<float> best_view_distance(float width_m, float height_m) const;
     // The other concepts' standing claims on space (common/exclusion). Set once per cycle by the
     // worker, alongside the existence channel's copy, so the FIT and the EXISTENCE belief judge the
     // same geometry. Null ⇒ the rule is inert and the fitter behaves exactly as before.
@@ -173,6 +178,8 @@ private:
 
     // Append one AI2 belief row (state + Σ diag + range/motion) to cfg_.ai2_csv_path. No-op if empty.
     void log_ai2_csv(const ChairInstance& inst, int npts, float R, bool gated, float energy);
+    // Append one colour-trace row (slice colour in, belief + top-3 names out) to cfg_.colour_csv_path. No-op if empty.
+    void log_colour_csv(const ChairInstance& inst, const rc::appearance::ColourSample& in, std::uint64_t t_ms);
 
     std::shared_ptr<DSR::DSRGraph> G_;
     DSR::InnerEigenAPI*            inner_eigen_ = nullptr;
@@ -197,6 +204,7 @@ private:
     bool            have_prev_cam_ = false;
     std::chrono::steady_clock::time_point prev_cam_tp_{};
     std::ofstream                  ai2_csv_;            // per-cycle AI2 belief log (optional)
+    std::ofstream                  colour_csv_;         // per-update colour trace (optional)
 };
 
 }  // namespace rc

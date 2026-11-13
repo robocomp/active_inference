@@ -20,7 +20,10 @@
 namespace rc::recall
 {
 
-struct Candidate { std::uint64_t uid; Eigen::Vector2f mu; Eigen::Matrix2f cov; };
+// log_prior: log P(the remembered object existed), as its owner last published it (obj_exist_prob on the recall
+// node, 2026-11-11). 0 = not stated: the candidate is weighed by position alone, as before. A memory of a phantom
+// (removed at P 0.06) thereby needs far stronger positional evidence to be resurrected than a believed one.
+struct Candidate { std::uint64_t uid; Eigen::Vector2f mu; Eigen::Matrix2f cov; float log_prior = 0.f; };
 struct Params    { float pi_move = 0.5f; float log_prior_new = 0.f; float room_area_m2 = 20.f; };
 struct Decision  { std::optional<std::size_t> index; std::vector<float> posterior; };   // posterior: candidates..., new
 
@@ -31,7 +34,7 @@ inline Decision decide(const Eigen::Vector2f& x, const Eigen::Matrix2f& meas_cov
     std::vector<rc::atlas::ReidCandidate> atlas_cands;
     atlas_cands.reserve(cands.size());
     for (const auto& c : cands)
-        atlas_cands.push_back({0.f, rc::atlas::location_log_lik(x, c.mu, c.cov + meas_cov, p.pi_move, p.room_area_m2), 0.f});
+        atlas_cands.push_back({0.f, rc::atlas::location_log_lik(x, c.mu, c.cov + meas_cov, p.pi_move, p.room_area_m2), c.log_prior});
 
     // "new" is uniform over the room. Written as log(1/A), the very expression the candidate mixture reduces to
     // when pi_move = 1, so the two terms are bit-identical there (no float-rounding lead on uninformative evidence).

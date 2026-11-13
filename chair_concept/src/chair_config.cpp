@@ -186,6 +186,8 @@ ChairConfig load_chair_config(const ConfigLoader& cfg)
             "extent-observation noise (m) for the coverage/extent likelihood");
     out.ai2_csv_path             = gets("ChairModel.AI2CsvPath", "",
             "per-cycle AI2 log (state + Σ diag + range/motion); empty disables");
+    out.colour_csv_path          = gets("ChairModel.ColourCsvPath", "",
+            "per-update colour log (slice colour in, belief + top-3 names out); empty disables");
 
     out.rt_cov_upload                 = getb("ChairConcept.RtCovUpload", true,
             "Upload the chair pose covariance onto the room→chair RT edge (rt_covariance_att, 6×6 SE3), built from the belief's full Σ over [cx,cy,cz,yaw,...]:…");
