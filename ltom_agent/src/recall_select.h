@@ -4,7 +4,7 @@
 
 namespace ltom
 {
-struct Recall { std::uint64_t uid = 0; std::string cls; Keyframe kf; };
+struct Recall { std::uint64_t uid = 0; std::string cls; Keyframe kf; std::optional<float> exist_prob; };   // exist_prob: the entry's
 
 // An entry is recalled when its class is listed, its last life is not alive (death, owner_exit and gap all mean
 // "not on the graph now"), its uid is not on the graph (`present`), and its MOST RECENT keyframe is in `room_key`

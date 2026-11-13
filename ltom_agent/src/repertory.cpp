@@ -64,6 +64,8 @@ Changes Repertory::observe(std::span<const Sighting> alive, const std::set<std::
             ch.born.push_back(s.uid);
         }
         e.cls = s.cls; e.name = s.name; e.w = s.w; e.d = s.d; e.h = s.h;
+        if (not s.color_name.empty()) { e.color_name = s.color_name; e.color_prob = s.color_prob; }   // unmeasured keeps it
+        if (s.exist_prob.has_value()) e.exist_prob = s.exist_prob;   // not stated this time keeps the last statement
         ++e.n_sightings;
         e.lives.back().last_seen_ms = now_ms;
         if (wants_keyframe(e, s)) e.keyframes.push_back(Keyframe{now_ms, s.room_key, s.pose});

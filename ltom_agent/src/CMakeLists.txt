@@ -14,6 +14,8 @@ LIST(APPEND SOURCES
   ../src/specificworker_presence.cpp
   ../src/repertory.cpp
   ../src/repertory_io.cpp
+  ../src/human.cpp
+  ../src/human_graph.cpp
   ../src/graph_sightings.cpp
   ../src/recall_select.cpp
   ../src/recall_publisher.cpp

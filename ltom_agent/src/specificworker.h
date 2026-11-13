@@ -19,6 +19,8 @@
 #include "repertory.h"
 #include "recall_publisher.h"
 #include "memory_graph.h"
+#include "human.h"
+#include "human_graph.h"
 
 #include <QDialog>
 #include <QPointer>
@@ -69,12 +71,17 @@ private:
     Params params_;
 
     // -- observe / consolidate / persist (Tasks 2-4) --
-    void save_now(const char* why);
+    bool save_now(const char* why);   ///< false when blocked or the write failed
     std::unique_ptr<ltom::Repertory> repertory_;
     std::unique_ptr<DSR::InnerEigenAPI> inner_eigen_;   // created ONCE in initialize(), on the main thread (owns the ts==0 cache)
     std::unique_ptr<ltom::RecallPublisher> recall_pub_;
     std::unique_ptr<ltom::MemoryGraph> memory_graph_;   // the window onto the repertory (domain 5)
     std::shared_ptr<DSR::DSRGraph> G_memory_;
+    // The human at the chat (spec 2026-11-11-human-model): kept in the repertory file, shown as human_1 on G_memory_.
+    ltom::HumanBook book_;
+    std::optional<ltom::Answer> last_answer_;            // LTOM's answer to the chat's last claim
+    std::uint64_t logged_claim_stamp_ = 0;               // the claim already logged (the chat leaves it up until answered)
+    std::unique_ptr<ltom::HumanGraph> human_graph_;
     QPointer<QDialog> thumbnail_popup_;
     void show_thumbnails(std::uint64_t id);
     bool recall_swept_on_operating_ = false;            // the post-sync stale sweep runs once, on the first Operating entry

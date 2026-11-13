@@ -7,6 +7,9 @@
 #include <clocale>
 #include <cmath>
 #include <cstdio>
+#include <fstream>
+#include <sstream>
+#include <unistd.h>
 #include <limits>
 #include <memory>
 #include <print>
@@ -71,7 +74,8 @@ struct Fixture
         G->add_or_modify_attrib_local<room_id_att>(r, std::uint64_t{1});
         room = add_node(*G, r, root);
         add_rt(*G, root, room, {0.f, 0.f, 0.f}, 0.f, 0.01f);
-        add_object(*G, "chair_3", room, kUid3, {1.f, 2.f, 0.f}, 0.5f, 0.01f);
+        const auto c3 = add_object(*G, "chair_3", room, kUid3, {1.f, 2.f, 0.f}, 0.5f, 0.01f);
+        { auto n = *G->get_node(c3); G->add_or_modify_attrib_local<obj_exist_prob_att>(n, 0.8f); G->update_node(n); }
         table = add_object(*G, "table_1", room, (std::uint64_t{21} << 40) | 1, {3.f, 1.f, 0.f}, 0.5f, 0.02f);
         add_object(*G, "bottle_2", table, (std::uint64_t{22} << 40) | 2, {0.2f, 0.f, 0.7f}, 0.f, 0.03f);
         add_object(*G, "door_1", room, (std::uint64_t{23} << 40) | 1, {0.f, 0.f, 0.f}, 0.f, 0.01f);
@@ -99,6 +103,7 @@ static void test_reads_chair_pose_and_sizes(Fixture& f)
     CHECK(std::abs(s->pose.vx - 0.01) < 1e-6 and std::abs(s->pose.vy - 0.01) < 1e-6 and std::abs(s->pose.vyaw - 0.01) < 1e-6);
     CHECK(s->w == 0.5f and s->d == 0.4f and s->h == 1.f);
     CHECK(s->born_ms == 1700000000123);
+    CHECK(s->exist_prob == 0.8f);
 }
 static void test_bottle_on_table_resolves_room(Fixture& f)
 {
@@ -114,10 +119,21 @@ static void test_bottle_on_table_resolves_room(Fixture& f)
 }
 static void test_door_and_proto_skipped(Fixture& f)
 {
+    // stderr captured: an object skipped because its room is provisional must SAY so (2026-11-11: a chair in a
+    // proto-room during a from-scratch tour looked like "LTOM does not see it", with nothing in the terminal).
+    const std::string path = std::string(std::getenv("TMPDIR") ? std::getenv("TMPDIR") : "/tmp") + "/ltom_held_stderr.txt";
+    std::fflush(stderr);
+    const int saved = dup(2);
+    std::FILE* cap = std::fopen(path.c_str(), "w");
+    dup2(fileno(cap), 2);
     const auto v = f.read();
+    std::fflush(stderr);
+    dup2(saved, 2); close(saved); std::fclose(cap);
+    std::stringstream log; log << std::ifstream(path).rdbuf();
     CHECK(find(v, "door_1") == nullptr);
     CHECK(find(v, "chair_9") == nullptr);
     CHECK(v.alive.size() == 3);
+    CHECK(log.str().find("chair_9") != std::string::npos and log.str().find("provisional") != std::string::npos);
 }
 static void test_missing_uid_skipped(Fixture& f)
 {
@@ -192,9 +208,9 @@ int main()
         fn(f);
         std::println("{} {}", failures == before ? "ok  " : "FAIL", name);
     };
+    run("test_door_and_proto_skipped", test_door_and_proto_skipped);   // FIRST: the held line is logged once per object
     run("test_reads_chair_pose_and_sizes", test_reads_chair_pose_and_sizes);
     run("test_bottle_on_table_resolves_room", test_bottle_on_table_resolves_room);
-    run("test_door_and_proto_skipped", test_door_and_proto_skipped);
     run("test_missing_uid_skipped", test_missing_uid_skipped);
     run("test_owners_present_parsed", test_owners_present_parsed);
     run("test_nonfinite_pose_skipped", test_nonfinite_pose_skipped);

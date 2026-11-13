@@ -13,6 +13,7 @@
 #include <cmath>
 #include <fstream>
 #include <locale>
+#include <optional>
 #include <print>
 #include <system_error>
 
@@ -38,6 +39,12 @@ QJsonObject to_json(const Entry& e)
     o["w"] = static_cast<double>(e.w);
     o["d"] = static_cast<double>(e.d);
     o["h"] = static_cast<double>(e.h);
+    if (not e.color_name.empty())
+    {
+        o["color_name"] = QString::fromStdString(e.color_name);
+        o["color_prob"] = static_cast<double>(e.color_prob);
+    }
+    if (e.exist_prob.has_value()) o["exist_prob"] = static_cast<double>(*e.exist_prob);   // absent = never stated
     o["n_sightings"] = static_cast<double>(e.n_sightings);
     QJsonArray lives;
     for (const Life& l : e.lives)
@@ -85,6 +92,67 @@ bool parse_uid(const QString& s, std::uint64_t& out)
     return ec == std::errc{} and p == last and first != last;
 }
 
+QJsonObject said_json(const Said& s)
+{
+    QJsonObject j;
+    j["t_ms"] = static_cast<double>(s.t_ms);           // epoch ms < 2^53: exact in a double
+    j["words"] = QString::fromStdString(s.words);
+    return j;
+}
+Said said_from(const QJsonObject& j)
+{
+    return Said{static_cast<std::int64_t>(j["t_ms"].toDouble()), j["words"].toString().toStdString()};
+}
+QJsonObject to_json(const Human& h)
+{
+    QJsonObject o;
+    o["id"] = QString::fromStdString(h.id);
+    o["role"] = QString::fromStdString(h.role);
+    QJsonArray names;
+    for (const NameRecord& n : h.names)
+    {
+        QJsonObject j = said_json(n.said);
+        j["value"] = QString::fromStdString(n.value);
+        names.append(j);
+    }
+    o["names"] = names;
+    QJsonArray things;
+    for (const Ownership& t : h.things)
+    {
+        QJsonObject j = said_json(t.said);
+        j["object_uid"] = QString::number(t.object_uid);
+        j["cls"] = QString::fromStdString(t.cls);
+        j["name_when_said"] = QString::fromStdString(t.name_when_said);
+        if (t.retracted) j["retracted"] = said_json(*t.retracted);
+        things.append(j);
+    }
+    o["things"] = things;
+    return o;
+}
+
+bool from_json(const QJsonObject& o, Human& h)
+{
+    h.id = o["id"].toString("human_1").toStdString();
+    h.role = o["role"].toString("developer").toStdString();
+    for (const QJsonValue& v : o["names"].toArray())
+    {
+        const QJsonObject j = v.toObject();
+        h.names.push_back(NameRecord{j["value"].toString().toStdString(), said_from(j)});
+    }
+    for (const QJsonValue& v : o["things"].toArray())
+    {
+        const QJsonObject j = v.toObject();
+        Ownership t;
+        if (not parse_uid(j["object_uid"].toString(), t.object_uid)) return false;
+        t.cls = j["cls"].toString().toStdString();
+        t.name_when_said = j["name_when_said"].toString().toStdString();
+        t.said = said_from(j);
+        if (j.contains("retracted")) t.retracted = said_from(j["retracted"].toObject());
+        h.things.push_back(std::move(t));
+    }
+    return true;
+}
+
 bool from_json(const QJsonObject& o, Entry& e)
 {
     if (not parse_uid(o["uid"].toString(), e.uid)) return false;
@@ -93,6 +161,9 @@ bool from_json(const QJsonObject& o, Entry& e)
     e.w = static_cast<float>(o["w"].toDouble());
     e.d = static_cast<float>(o["d"].toDouble());
     e.h = static_cast<float>(o["h"].toDouble());
+    e.color_name = o["color_name"].toString().toStdString();   // absent (older file) = never measured
+    e.color_prob = static_cast<float>(o["color_prob"].toDouble());
+    if (o.contains("exist_prob")) e.exist_prob = static_cast<float>(o["exist_prob"].toDouble());   // older file: never stated
     e.n_sightings = static_cast<std::int64_t>(o["n_sightings"].toDouble());
     for (const QJsonValue& v : o["lives"].toArray())
     {
@@ -126,7 +197,7 @@ bool from_json(const QJsonObject& o, Entry& e)
 }
 
 // Parses one file into a scratch list; nothing is inserted unless the whole file is good.
-bool try_parse(const fs::path& file, std::vector<Entry>& out)
+bool try_parse(const fs::path& file, std::vector<Entry>& out, std::optional<Human>& human)
 {
     std::ifstream f(file, std::ios::binary);
     if (not f) return false;
@@ -142,6 +213,14 @@ bool try_parse(const fs::path& file, std::vector<Entry>& out)
         if (not from_json(v.toObject(), e)) return false;
         out.push_back(std::move(e));
     }
+    // ONE human today; the list is there so more can come later. Absent (older file) = no human known yet.
+    const QJsonArray humans = root["humans"].toArray();
+    if (not humans.isEmpty())
+    {
+        Human h;
+        if (not from_json(humans.first().toObject(), h)) return false;
+        human = std::move(h);
+    }
     return true;
 }
 
@@ -153,7 +232,9 @@ std::string fmt_double(double v)
 }
 }
 
-LoadResult load_repertory(const fs::path& file, Repertory& into)
+LoadResult load_repertory(const fs::path& file, Repertory& into) { return load_repertory(file, into, nullptr); }
+
+LoadResult load_repertory(const fs::path& file, Repertory& into, HumanBook* human_out)
 {
     std::error_code ec;
     fs::path prev = file; prev += ".prev";
@@ -178,13 +259,17 @@ LoadResult load_repertory(const fs::path& file, Repertory& into)
     };
 
     std::vector<Entry> got;
-    if (have_main and try_parse(file, got))
+    std::optional<Human> human;
+    auto take_human = [&] { if (human_out and human) human_out->set(std::move(*human)); };
+    if (have_main and try_parse(file, got, human))
     {
         for (Entry& e : got) into.insert_loaded(std::move(e));
+        take_human();
         return LoadResult::loaded;
     }
     got.clear();
-    if (have_prev and try_parse(prev, got))
+    human.reset();
+    if (have_prev and try_parse(prev, got, human))
     {
         std::println(stderr, "⚠ ltom: {} unreadable or missing, falling back to {}", file.string(), prev.string());
         if (have_main)
@@ -193,6 +278,7 @@ LoadResult load_repertory(const fs::path& file, Repertory& into)
             if (not blocked) std::println(stderr, "⚠ ltom: bad main moved aside to {}", bad.string());
         }
         for (Entry& e : got) into.insert_loaded(std::move(e));
+        take_human();
         return blocked ? LoadResult::blocked : LoadResult::loaded_prev;
     }
     for (const fs::path* p : std::array<const fs::path*, 2>{&file, &prev})
@@ -205,13 +291,16 @@ LoadResult load_repertory(const fs::path& file, Repertory& into)
     return blocked ? LoadResult::blocked : LoadResult::unreadable;
 }
 
-bool save_repertory(const fs::path& file, const Repertory& r)
+bool save_repertory(const fs::path& file, const Repertory& r) { return save_repertory(file, r, nullptr); }
+
+bool save_repertory(const fs::path& file, const Repertory& r, const HumanBook* human)
 {
     QJsonArray entries;
     for (const auto& [uid, e] : r.entries()) entries.append(to_json(e));
     QJsonObject root;
     root["version"] = 1;
     root["entries"] = entries;
+    if (human) root["humans"] = QJsonArray{to_json(human->human())};
     const QByteArray bytes = QJsonDocument(root).toJson(QJsonDocument::Indented);
 
     fs::path tmp = file; tmp += ".tmp";

@@ -25,6 +25,9 @@ static void test_dead_chair_in_room_recalled()
     auto r = make({ent(5, "chair", End::owner_exit, {kf(10, 1, 2.0)})});
     auto v = select_recalls(r, 1, {}, chairs);
     CHECK(v.size() == 1); CHECK(v[0].uid == 5); CHECK(v[0].cls == "chair"); CHECK(v[0].kf.pose.x == 2.0);
+    CHECK(not v[0].exist_prob.has_value());
+    auto e = ent(5, "chair", End::death, {kf(10, 1, 2.0)}); e.exist_prob = 0.06f;
+    CHECK(select_recalls(make({e}), 1, {}, chairs).at(0).exist_prob == 0.06f);   // the owner's last belief goes with it
 }
 static void test_other_room_not_recalled()
 {

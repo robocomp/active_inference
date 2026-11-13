@@ -63,6 +63,14 @@ struct Fixture
 std::string rname(std::uint64_t uid) { return "ltom_recall_" + std::to_string(uid); }
 }   // namespace
 
+static void test_existence_on_the_recall(Fixture& f)
+{
+    auto r = recall(kUid3, 1.5, -2.0, 0.5);
+    r.exist_prob = 0.06f;
+    f.pub->sync(f.room1, std::vector<ltom::Recall>{r});
+    const auto n = f.node(rname(kUid3));
+    CHECK(n.has_value() and f.G->get_attrib_by_name<obj_exist_prob_att>(*n) == 0.06f);
+}
 static void test_inserts_under_room(Fixture& f)
 {
     const std::vector<ltom::Recall> want{recall(kUid3, 1.5, -2.0, 0.5)};
@@ -74,6 +82,7 @@ static void test_inserts_under_room(Fixture& f)
     CHECK(f.G->get_attrib_by_name<object_uid_att>(*n).value_or(0) == kUid3);
     CHECK(f.G->get_attrib_by_name<object_subtype_att>(*n).value_or("") == "chair");
     CHECK(not f.G->get_attrib_by_name<width_m_att>(*n).has_value());
+    CHECK(not f.G->get_attrib_by_name<obj_exist_prob_att>(*n).has_value());   // not stated: absent, never a made-up 1
     CHECK(f.G->get_attrib_by_name<parent_att>(*n).value_or(0) == f.room1);
     const auto e = f.G->get_edge(f.room1, n->id(), "RT");
     CHECK(e.has_value());
@@ -207,6 +216,7 @@ int main()
         fn(f);
         std::println("{} {}", failures == before ? "ok  " : "FAIL", name);
     };
+    run("test_existence_on_the_recall", test_existence_on_the_recall);
     run("test_inserts_under_room", test_inserts_under_room);
     run("test_moves_when_keyframe_changes", test_moves_when_keyframe_changes);
     run("test_removed_when_alive", test_removed_when_alive);
