@@ -240,6 +240,8 @@ private:
     // this rc::nbv::is_reachable imposes no constraint (it refuses to guess on an empty polygon).
     std::vector<Eigen::Vector2f> room_polygon_;
     void refresh_room_polygon();
+    uint64_t                     outline_room_ = 0;      // last room whose outline state was logged
+    bool                         births_held_ = false;   // WAIT episode (no outline) — logged on change
 
     // Collaborators (constructed in initialize(), after G + the DSR APIs are ready). Declared in
     // dependency order — the fitter holds raw pointers to the three above it, so it is destroyed first.

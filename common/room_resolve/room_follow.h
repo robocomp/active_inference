@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <optional>
 #include <print>
 #include <string_view>
 #include <vector>
@@ -44,6 +45,25 @@ inline std::vector<Eigen::Vector2f> read_outline(DSR::DSRGraph& G, std::uint64_t
     return out;
 }
 
+/// The ROOM an object's `parent` places it in. A parent may be a supporting object rather than the room (a bottle's
+/// parent is the table it stands on), so walk `parent` up until a `room` node. A parent that no longer exists (a room
+/// recreated with a new id, or a supporting table dropped as left behind) is returned as-is: it names no live room,
+/// so `left_behind` holds and the object is dropped, never fitted in a dead frame. nullopt ⇔ no parent at all.
+inline std::optional<std::uint64_t> room_of(DSR::DSRGraph& G, std::optional<std::uint64_t> parent)
+{
+    for (int depth = 0; parent.has_value() and depth < 8; ++depth)   // 8 = a cycle guard, not a tuning value
+    {
+        const auto node = G.get_node(*parent);
+        if (not node.has_value() or node->type() == "room")
+            return parent;
+        const auto up = G.get_attrib_by_name<parent_att>(node.value());
+        if (not up.has_value())
+            return parent;
+        parent = *up;
+    }
+    return parent;
+}
+
 /// Delete every `object` node named `name_prefix*` that was left behind in a room other than `working_frame`.
 /// `forget(node_id)` lets the agent tear down its own per-node state first. Returns how many were dropped.
 template <class Forget>
@@ -54,7 +74,7 @@ int drop_left_behind(DSR::DSRGraph& G, std::string_view name_prefix, std::uint64
     {
         if (not node.name().starts_with(name_prefix))
             continue;
-        if (not left_behind(G.get_attrib_by_name<parent_att>(node), working_frame))
+        if (not left_behind(room_of(G, G.get_attrib_by_name<parent_att>(node)), working_frame))
             continue;
         const auto id = node.id();
         forget(id);

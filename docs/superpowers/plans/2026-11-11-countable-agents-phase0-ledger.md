@@ -82,6 +82,24 @@ Owner 11-11: continue; WAIT rule stands; cause to be pinned live (outline bbox +
    `update_and_remove` returns early when no channel has a fresh frame.
 6. Logs: (room, outline bbox) on change, each birth's inside/OUTSIDE verdict with the room id, HELD/released.
 
+### Task 6 — bottle_concept (+ shared `room_of`)
+
+0. **Shared helper change, found here:** a bottle's `parent` is the table it stands on, not the room, so the Task 3
+   `drop_left_behind` would have dropped EVERY bottle on a table. `rc::room::room_of` (room_follow.h) now walks
+   `parent` up to the `room` node before `left_behind` is asked. For chair/table (parent = room) nothing changes. A
+   parent that no longer exists is returned as-is ⇒ left behind ⇒ dropped (review focus 2). A bottle whose table was
+   dropped as left behind therefore drops too, the next cycle.
+1. **The room now follows the robot** (was: latched at the first room).
+2. **Bottles left behind in another room are dropped** (teardown = affordance + fitter forget) and recalled by LTOM.
+3. **Out-of-room births suppressed** (was: none); tolerance = `prior_radius` (0.035 m).
+4. **Births held while the working room has no usable outline** (was: admitted). The polygon is now the working
+   room's own and is cleared when it has none (was: kept the previous room's).
+5. **No out-of-room existence term — skipped as the plan says.** Why: a bottle's position is set by its support surface
+   (a table that is itself containment-checked) and its birth is checked; an out-of-room bottle after birth would need its
+   table to have left the room first, which the left-behind drop already handles. Open for the owner if wanted.
+6. Pre-existing, not Phase 0: `bottle_concept/tests/test_bottle_fit.cpp` does not compile on main either (uses
+   `BottleState`/`BottleModel` without `rc::`); untouched. `bottle_card_test` and `test_bottle_contour` pass.
+
 ## Rulings
 
 (none yet)
