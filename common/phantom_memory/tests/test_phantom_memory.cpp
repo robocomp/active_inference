@@ -9,6 +9,7 @@
 #include <cmath>
 #include <cstdio>
 #include <filesystem>
+#include <map>
 #include <fstream>
 #include <print>
 
@@ -38,6 +39,9 @@ void round_trip_under_comma_locale()
     m.rows = {{1, -4.8f, 0.93f, 1.5707963f, 1.00258f, 3.0f, 0.0237f, 1'794'526'950'123},
               {3, 0.260417f, -9.2e-05f, -0.125f, 0.9f, 2.1f, 0.08f, 1'794'526'951'000},
               {3, 1e7f, -3.4e-3f, 0.f, 0.f, 0.f, 0.f, 0}};
+    m.rows[0].exist_logodds = -3.25f; m.rows[0].exist_physical = -0.125f; m.rows[0].seen_ms = 1'794'526'940'000;
+    m.rows[0].ledger = "VL3 1 0.5 2.25 3 -0.0001 1.5e-05";   // spaces and decimal points, no comma
+    m.rows[1].exist_logodds = 0.260417f;                       // only L present: the other cells are empty
     check(m.save(p), "save ok");
     check(not std::filesystem::exists(p.string() + ".tmp"), "no .tmp left behind (atomic rename)");
     {   // the file itself has points, never commas
@@ -52,6 +56,8 @@ void round_trip_under_comma_locale()
         {
             const auto &a = m.rows[i], &b = l->rows[i];
             check(a.room_id == b.room_id and a.removed_ms == b.removed_ms, "ids and ms exact");
+            check(a.exist_logodds == b.exist_logodds and a.exist_physical == b.exist_physical and a.seen_ms == b.seen_ms and a.ledger == b.ledger,
+                  "evidence columns round trip exactly (-3.25, 0.260417, absent stays absent, ledger cell)");
             check(std::abs(a.x - b.x) < 1e-6f and std::abs(a.y - b.y) < 1e-6f and std::abs(a.yaw - b.yaw) < 1e-6f
                   and std::abs(a.width - b.width) < 1e-6f and std::abs(a.height - b.height) < 1e-6f
                   and std::abs(a.height_sd - b.height_sd) < 1e-6f, "floats equal to 1e-6 (0.260417 must not read as 0)");
@@ -60,6 +66,13 @@ void round_trip_under_comma_locale()
         std::ofstream f(kDir / "bad.csv");
         f << "room_id,x,y,yaw,width,height,height_sd,removed_ms\n1,0.5,0.5,0,1,2,0.1,5\nnot,a,row\n2,1,1,0,1,2,0.1,7\n3,1,1,0\n";
     }
+    {   // the 8-column form (a file written before the evidence columns): read as "absent"
+        std::ofstream f(kDir / "old8.csv");
+        f << "room_id,x,y,yaw,width,height,height_sd,removed_ms\n1,0.5,0.25,0,1,2,0.1,5\n";
+    }
+    const auto o8 = Memory::load(kDir / "old8.csv");
+    check(o8.has_value() and o8->rows.size() == 1 and not o8->rows[0].exist_logodds and not o8->rows[0].seen_ms and o8->rows[0].ledger.empty()
+          and o8->rows[0].x == 0.5f and o8->rows[0].y == 0.25f, "8-column file: evidence absent");
     const auto b = Memory::load(kDir / "bad.csv");
     check(b.has_value() and b->rows.size() == 2 and b->rows[1].room_id == 2, "bad rows skipped");
 }
@@ -71,7 +84,55 @@ void forgotten_room_rows_dropped()
     const std::uint64_t keep[] = {1, 3};
     check(m.forget_except(keep) == 1, "one row dropped");
     check(m.rows.size() == 3 and m.of_room(2).empty() and m.of_room(3).size() == 2, "room 2 gone, rooms 1 and 3 kept");
-    check(m.forget_except(std::span<const std::uint64_t>{}) == 3 and m.rows.empty(), "empty list forgets all");
+    check(m.forget_except(std::span<const std::uint64_t>{}) == 3 and m.rows.empty(), "forget_except with an empty list forgets all (the primitive)");
+}
+
+// An EMPTY room_ids array is LTSM's memory "not loaded yet" (a transient), never a ruling: the bridge's forget() keeps everything.
+void empty_room_list_forgets_nothing()
+{
+    Memory m;
+    m.rows = {{1, 0, 0, 0, 1, 2, .1f, 1}, {2, 0, 0, 0, 1, 2, .1f, 1}, {3, 0, 0, 0, 1, 2, .1f, 1}};
+    const std::map<std::string, std::uint64_t> entered{{"room_1", 1}};
+    check(rc::door::phantom_bridge::forget(m, std::span<const std::uint64_t>{}, entered) == 0 and m.rows.size() == 3,
+          "empty room_ids: nothing forgotten (rooms 2 and 3 not yet entered)");
+    const std::uint64_t ids[] = {3};
+    check(rc::door::phantom_bridge::forget(m, ids, entered) == 1 and m.of_room(2).empty() and m.of_room(1).size() == 1 and m.of_room(3).size() == 1,
+          "a real list forgets room 2 only; the room entered this run (1) stays though LTSM has not archived it");
+}
+
+// A removed place refuted by VISION (a normal-height door, L = -3 when removed) must seed a new candidate exactly as the same row loaded from
+// the identity CSV does: the phantom file carries the place's own evidence (L, Sp, last sighting, ledger).
+void vision_refuted_phantom_seeds_like_the_csv_row()
+{
+    using namespace rc::door;
+    using namespace rc::door::core;
+    constexpr std::int64_t kRemoved = 1'794'526'950'000, kNow = kRemoved + 120'000;
+    IdentityRow ir;
+    ir.room = "room_1"; ir.name = "door_4"; ir.xy = {2.5f, -1.25f};
+    ir.pose = RestorePose{0.3f, 0.95f, 2.1f, 0.12f};
+    ir.exist_logodds = -3.0f; ir.exist_physical = -0.5f; ir.seen_wall_ms = kRemoved - 5'000; ir.removed_ms = kRemoved;
+    ParsedIdentityTable parsed; parsed.rows = {ir};
+    PlaceTable csv(false);
+    csv.load(parsed, 0.1f);
+    const PlaceRow* a = csv.match("room_1", Vec2f(2.5f, -1.25f), Eigen::Matrix2f::Identity() * 0.04f, 9.0f);
+    check(a != nullptr and a->removed_wall_ms.has_value(), "CSV path: the removed row matches");
+    // the phantom path: the table's removed rows -> file (round trip under the comma locale) -> a fresh table
+    Memory m;
+    m.set_room(7, phantom_bridge::removed_rows(csv, 7, "room_1"));
+    check(m.save(kDir / "vr.csv"), "save");
+    const auto l = Memory::load(kDir / "vr.csv");
+    PlaceTable ph(false);
+    check(l.has_value() and phantom_bridge::inject(ph, *l, 7, "room_1", 0.1f) == 1, "injected");
+    const PlaceRow* b = ph.match("room_1", Vec2f(2.5f, -1.25f), Eigen::Matrix2f::Identity() * 0.04f, 9.0f);
+    check(b != nullptr and b->removed_wall_ms.has_value(), "phantom path: the removed row matches");
+    if (a and b)
+    {
+        const auto ca = csv.restored_belief(*a, kNow), cb = ph.restored_belief(*b, kNow);
+        std::println("birth prior, CSV path L_evidence {:+.5f}, phantom path {:+.5f}", ca.L_evidence(), cb.L_evidence());
+        check(ca.L_evidence() < -1.0f, "the vision-refuted row pushes the candidate down (not neutral)");
+        check(std::abs(ca.L_evidence() - cb.L_evidence()) < 1e-5f and std::abs(ca.Sp() - cb.Sp()) < 1e-5, "same birth prior as the CSV row");
+        check(std::abs(csv.aged_L(*a, kNow) - ph.aged_L(*b, kNow)) < 1e-5f, "same aged L");
+    }
 }
 
 void missing_file_is_empty()
@@ -131,6 +192,8 @@ int main()
     std::filesystem::remove_all(kDir);
     round_trip_under_comma_locale();
     forgotten_room_rows_dropped();
+    empty_room_list_forgets_nothing();
+    vision_refuted_phantom_seeds_like_the_csv_row();
     missing_file_is_empty();
     glass_partition_not_reborn();
     std::println("{} checks, {} failure(s)", checks, failures);

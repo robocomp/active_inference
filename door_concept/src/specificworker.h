@@ -361,7 +361,8 @@ private:
     rc::phantom::Memory phantom_file_;
     std::map<std::string, std::uint64_t> phantom_rooms_;          // rooms entered this run: live name -> LTSM room_id
     std::optional<std::vector<std::uint64_t>> ltsm_room_ids_;     // LTSM's room list, once a topology was received
-    std::optional<std::size_t> phantom_sig_;
+    std::string phantom_topology_json_;                           // the last ltsm_topology string parsed
+    std::optional<std::size_t> phantom_table_sig_;
     void load_phantoms();
     void enter_phantom_room(std::uint64_t room_node, const std::string& room_name);
     void drop_phantom_room(const std::string& room_name);

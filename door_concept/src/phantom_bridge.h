@@ -25,14 +25,18 @@ inline int inject(core::PlaceTable& table, const rc::phantom::Memory& mem, std::
         const bool have = std::ranges::any_of(table.rows(), [&](const core::PlaceRow& r)
                                               { return r.room == room_name and r.removed_wall_ms.has_value() and r.xy.x() == p.x and r.xy.y() == p.y; });
         if (have) { ++idx; continue; }
-        core::PlaceRow r;
-        r.room = room_name;
-        r.name = "phantom_" + std::to_string(room_id) + "_" + std::to_string(idx++);
-        r.xy = {p.x, p.y};
-        r.cov = Eigen::Matrix2f::Identity() * place_sd * place_sd;
-        r.yaw = p.yaw; r.width = p.width; r.height = p.height; r.height_sd = p.height_sd;
-        r.last_seen_wall_ms = r.sighted_wall_ms = p.removed_ms;
-        r.removed_wall_ms = p.removed_ms;
+        // The same row a CSV removed row becomes (PlaceTable::row_of), so restore_into ages its L, Sp and ledger through the learned hazard alike.
+        IdentityRow i;
+        i.room = room_name;
+        i.name = "phantom_" + std::to_string(room_id) + "_" + std::to_string(idx++);
+        i.xy = {p.x, p.y};
+        i.pose = RestorePose{p.yaw, p.width, p.height, 0.f};
+        i.exist_logodds = p.exist_logodds; i.exist_physical = p.exist_physical;
+        i.seen_wall_ms = p.seen_ms.value_or(p.removed_ms);
+        i.removed_ms = p.removed_ms;
+        if (not p.ledger.empty()) i.ledger = p.ledger;
+        core::PlaceRow r = core::PlaceTable::row_of(i, place_sd, table.geometry_may_refute(), table.lookalike());
+        r.height_sd = p.height_sd;
         table.upsert(std::move(r));
         ++added;
     }
@@ -45,8 +49,24 @@ inline int inject(core::PlaceTable& table, const rc::phantom::Memory& mem, std::
     std::vector<rc::phantom::Row> out;
     for (const auto& r : table.rows())
         if (r.room == room_name and r.removed_wall_ms.has_value())
-            out.push_back({room_id, r.xy.x(), r.xy.y(), r.yaw, r.width, r.height, r.height_sd, *r.removed_wall_ms});
+        {
+            rc::phantom::Row p{room_id, r.xy.x(), r.xy.y(), r.yaw, r.width, r.height, r.height_sd, *r.removed_wall_ms};
+            p.exist_logodds = r.L_evidence; p.exist_physical = r.physical;
+            if (r.last_seen_wall_ms > 0) p.seen_ms = r.last_seen_wall_ms;
+            if (not r.ledger.views().empty()) p.ledger = r.ledger.serialise();
+            out.push_back(std::move(p));
+        }
     return out;
+}
+
+/// Rows of rooms LTSM no longer remembers go; rooms entered this run are live and stay. An EMPTY list is "LTSM's memory is not loaded yet"
+/// (a transient), never a ruling: it forgets nothing. Returns the number dropped.
+inline int forget(rc::phantom::Memory& m, std::span<const std::uint64_t> ltsm_ids, const std::map<std::string, std::uint64_t>& entered)
+{
+    if (ltsm_ids.empty()) return 0;
+    std::vector<std::uint64_t> keep(ltsm_ids.begin(), ltsm_ids.end());
+    for (const auto& [name, id] : entered) keep.push_back(id);
+    return m.forget_except(keep);
 }
 
 /// The memory to save: the file's rows of rooms NOT entered this run are kept as they are; every entered room (name -> room_id) is

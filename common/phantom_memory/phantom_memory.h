@@ -4,7 +4,9 @@
 // live name, which a recognition swap renames). The memory scales the birth evidence of a new candidate at the place; it never vetoes.
 // Header-only, no DSR, no Qt. Numbers: written with std::to_chars through the classic locale, read with std::from_chars ONLY (the
 // machines run LANG=es_ES.UTF-8, where strtof stops at the '.').
-// File: header `room_id,x,y,yaw,width,height,height_sd,removed_ms`; a malformed row is skipped; saved atomically (tmp + rename).
+// File: `room_id,x,y,yaw,width,height,height_sd,removed_ms,exist_logodds,exist_physical,seen_ms,ledger`; the last four are the refuted
+// place's own evidence (what a CSV removed row holds; an 8-column file is read as "absent"; the ledger is one comma-free cell).
+// A malformed row is skipped; saved atomically (tmp + rename).
 #pragma once
 #include <algorithm>
 #include <charconv>
@@ -16,6 +18,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <system_error>
 #include <vector>
 
@@ -26,12 +29,16 @@ struct Row
     std::uint64_t room_id = 0;
     float x = 0.f, y = 0.f, yaw = 0.f, width = 0.f, height = 0.f, height_sd = 0.f;
     std::int64_t removed_ms = 0;
+    std::optional<float> exist_logodds, exist_physical;   // the evidence the place was removed with (PlaceRow::L_evidence, ::physical)
+    std::optional<std::int64_t> seen_ms;                  // its last sighting (PlaceRow::last_seen_wall_ms): the age of that evidence
+    std::string ledger;                                   // ViewLedger::serialise(); empty = none
     bool operator==(const Row&) const = default;
 };
 
 namespace detail
 {
-inline constexpr std::string_view kHeader = "room_id,x,y,yaw,width,height,height_sd,removed_ms";
+inline constexpr std::string_view kHeader8 = "room_id,x,y,yaw,width,height,height_sd,removed_ms";
+inline constexpr std::string_view kHeader = "room_id,x,y,yaw,width,height,height_sd,removed_ms,exist_logodds,exist_physical,seen_ms,ledger";
 
 template <class T>
 [[nodiscard]] inline bool parse(std::string_view s, T& out)
@@ -42,21 +49,34 @@ template <class T>
 
 [[nodiscard]] inline std::optional<Row> parse_row(std::string_view line)
 {
-    std::string_view f[8];
+    std::string_view f[12];
     std::size_t n = 0;
-    while (n < 8)
+    while (true)
     {
         const auto c = line.find(',');
+        if (n == 12) return std::nullopt;   // a thirteenth column: not our file
         f[n++] = line.substr(0, c);
         if (c == std::string_view::npos) break;
         line.remove_prefix(c + 1);
-        if (n == 8 and not line.empty()) return std::nullopt;   // a ninth column: not our file
     }
-    if (n != 8) return std::nullopt;
+    if (n != 8 and n != 12) return std::nullopt;
     Row r;
     if (not (parse(f[0], r.room_id) and parse(f[1], r.x) and parse(f[2], r.y) and parse(f[3], r.yaw) and parse(f[4], r.width)
              and parse(f[5], r.height) and parse(f[6], r.height_sd) and parse(f[7], r.removed_ms)))
         return std::nullopt;
+    if (n == 12)
+    {
+        const auto opt = [&](std::string_view s, auto& dst) -> bool   // empty = absent; garbage = a bad row
+        {
+            if (s.empty()) return true;
+            std::remove_reference_t<decltype(*dst)> v{};
+            if (not parse(s, v)) return false;
+            dst = v;
+            return true;
+        };
+        if (not (opt(f[8], r.exist_logodds) and opt(f[9], r.exist_physical) and opt(f[10], r.seen_ms))) return std::nullopt;
+        r.ledger = std::string(f[11]);
+    }
     return r;
 }
 }   // namespace detail
@@ -79,7 +99,7 @@ struct Memory
         {
             if (not line.empty() and line.back() == '\r') line.pop_back();
             if (line.empty()) continue;
-            if (first) { first = false; if (line == detail::kHeader) continue; }
+            if (first) { first = false; if (line == detail::kHeader or line == detail::kHeader8) continue; }
             if (const auto r = detail::parse_row(line); r.has_value()) m.rows.push_back(*r);
         }
         return m;
@@ -102,9 +122,15 @@ struct Memory
                 const auto put = [&](auto v) { o = std::to_chars(o, end, v).ptr; };
                 const auto comma = [&] { *o++ = ','; };
                 put(r.room_id); comma(); put(r.x); comma(); put(r.y); comma(); put(r.yaw); comma(); put(r.width); comma();
-                put(r.height); comma(); put(r.height_sd); comma(); put(r.removed_ms);
+                put(r.height); comma(); put(r.height_sd); comma(); put(r.removed_ms); comma();
+                if (r.exist_logodds) put(*r.exist_logodds);
+                comma();
+                if (r.exist_physical) put(*r.exist_physical);
+                comma();
+                if (r.seen_ms) put(*r.seen_ms);
+                comma();
                 f.write(buf, o - buf);
-                f << '\n';
+                f << r.ledger << '\n';
             }
             f.flush();
             if (not f) return false;

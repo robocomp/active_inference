@@ -47,6 +47,8 @@ public:
     explicit PlaceTable(bool geometry_may_refute, float lookalike = kLookalikeProbDefault) : geometry_may_refute_(geometry_may_refute), lookalike_(lookalike) {}
 
     [[nodiscard]] std::span<const PlaceRow> rows() const { return rows_; }
+    [[nodiscard]] bool geometry_may_refute() const { return geometry_may_refute_; }
+    [[nodiscard]] float lookalike() const { return lookalike_; }
 
     PlaceRow* match(std::string_view room, const Vec2f& xy, const Eigen::Matrix2f& cov, float gate)
     {

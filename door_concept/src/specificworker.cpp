@@ -4088,36 +4088,40 @@ void SpecificWorker::drop_phantom_room(const std::string& room_name)
     if (it == phantom_rooms_.end()) return;
     phantom_file_.set_room(it->second, {});
     phantom_rooms_.erase(it);
-    phantom_sig_.reset();
+    phantom_table_sig_.reset();
 }
 
 void SpecificWorker::step_phantom_save()
 {
     if (not cfg_.restore_from_ltsm or not core_ or not G) return;
-    const auto merged = rc::door::phantom_bridge::merged(core_->places(), phantom_file_, phantom_rooms_);
-    // LTSM's room list, once a topology has been received: rows of a room it no longer remembers are forgotten (nothing before that).
-    auto ids = ltsm_room_ids_;
+    // Cheap guards first: the table's removed set (a signature over its rows) and LTSM's topology string. Only a change in either parses
+    // the JSON or builds the Memory.
+    std::size_t tsig = phantom_rooms_.size();
+    for (const auto& r : core_->places().rows())
+        if (r.removed_wall_ms.has_value())
+            tsig = tsig * 1000003u ^ (std::hash<std::int64_t>{}(*r.removed_wall_ms) + std::hash<float>{}(r.xy.x()) + std::hash<float>{}(r.xy.y())
+                                      + std::hash<float>{}(r.L_evidence) + std::hash<std::string>{}(r.room));
+    bool topo_changed = false;
     if (const auto t = G->get_node("ltsm_topology"); t.has_value())
         if (const auto j = G->get_attrib_by_name<ltsm_topology_att>(t.value()); j.has_value())
-            if (const auto topo = rc::topo::decode_topology(j.value()); topo.has_value() and topo->room_ids.has_value())
-                ids = topo->room_ids;
-    ltsm_room_ids_ = ids;
-    auto out = merged;
+            if (const std::string& js = j.value(); js != phantom_topology_json_)
+            {
+                phantom_topology_json_ = js;
+                if (const auto topo = rc::topo::decode_topology(js); topo.has_value() and topo->room_ids.has_value())
+                    ltsm_room_ids_ = topo->room_ids;
+                topo_changed = true;
+            }
+    if (not topo_changed and phantom_table_sig_ == tsig) return;
+    phantom_table_sig_ = tsig;
+    auto out = rc::door::phantom_bridge::merged(core_->places(), phantom_file_, phantom_rooms_);
+    // LTSM's room list, once a topology was received: rows of a room it no longer remembers are forgotten (an empty list is "not loaded
+    // yet", a room entered this run is live: see phantom_bridge::forget).
     int forgot = 0;
-    if (ids.has_value())   // a room entered this run is live: LTSM may not have archived it yet, so it is not forgotten
-    {
-        auto keep = *ids;
-        for (const auto& [name, id] : phantom_rooms_) keep.push_back(id);
-        forgot = out.forget_except(keep);
-    }
-    // write on change only: a signature of the content
-    std::size_t sig = out.rows.size();
-    for (const auto& r : out.rows)
-        sig = sig * 1000003u ^ (std::hash<std::int64_t>{}(r.removed_ms) + std::hash<std::uint64_t>{}(r.room_id) + std::hash<float>{}(r.x) + std::hash<float>{}(r.y));
-    if (phantom_sig_ == sig) return;
+    if (ltsm_room_ids_.has_value()) forgot = rc::door::phantom_bridge::forget(out, *ltsm_room_ids_, phantom_rooms_);
+    if (out.rows == phantom_file_.rows and not forgot) return;
     phantom_file_ = std::move(out);
-    if (phantom_file_.save("etc/door_phantom_memory.csv"))
-        phantom_sig_ = sig;
+    if (not phantom_file_.save("etc/door_phantom_memory.csv"))
+        std::print("door_concept: [phantom] could not write etc/door_phantom_memory.csv\n");
     if (forgot > 0)
         std::print("door_concept: [phantom] {} row(s) of rooms LTSM no longer remembers forgotten\n", forgot);
 }
