@@ -46,6 +46,7 @@ public:
     };
 
     explicit ChatWindow(Callbacks cb, QWidget* parent = nullptr);
+    ~ChatWindow() override;
 
     void append_user(const QString& text);
     void begin_assistant();
@@ -73,6 +74,7 @@ public:
     void closeEvent(QCloseEvent* e) override;
 
 private:
+    void save_state();   ///< geometry + canvas state to QSettings; on close, on aboutToQuit and in the destructor
     bool restored_with_canvas_ = false;   ///< the saved geometry was taken with the canvas open
     void append_html(const QString& html);
     void send_clicked();

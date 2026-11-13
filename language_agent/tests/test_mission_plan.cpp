@@ -240,6 +240,28 @@ int main()
         }
     }
 
+    // ── doors_to_rooms (chat_e2e15): "go to room 1 through room 3" from room_2 planned `cross door_3; cross door_24
+    //    expect=room_1`; door_24 was room_3's door name in an EARLIER run (door nodes are re-made on every entry), so
+    //    step 2 failed "door 'door_24' is not in the graph". A door that is not live in the current room, with an
+    //    expect=ROOM, becomes `cross ROOM` (the door that leads there); an `open` of the same door follows it. ──────
+    {
+        auto m = parse_planned("mission\n  cross door_3 retry=2\n  open door_24\n  cross door_24 expect=room_1 retry=2\n"
+                               "  repeat 2\n    cross door_9 expect=room_2\n"   // nested, not live: rewritten
+                               "  cross door_7\n");                              // not live, no expect: left (refused as before)
+        CHECK(m.has_value());
+        if (m.has_value())
+        {
+            const std::vector<std::string> live{"door_3", "door_25"};
+            CHECK(rc::chat::doors_to_rooms(m->steps, live) == 3);
+            const std::string out = rc::mission::print_text(*m);
+            CHECK(out.contains("cross door_3 retry=2"));                       // live here: kept
+            CHECK(out.contains("open room_1"));
+            CHECK(out.contains("cross room_1 expect=room_1"));
+            CHECK(out.contains("cross room_2 expect=room_2"));
+            CHECK(out.contains("cross door_7"));
+        }
+    }
+
     // ── the wakes' text ──────────────────────────────────────────────────────────────────────────────────────────
     {
         const std::string r = report_wake("objects here", "room_2", "2 objects perceived in room_2:\n- chair_1\n");
@@ -303,6 +325,12 @@ int main()
         CHECK(not mission_refused_note("in_progress", "-", "t").has_value());
         CHECK(not mission_refused_note("completed", "", "t").has_value());
         CHECK(mission_refused_note("failed", "-", "t").has_value());   // no reason given still says something
+        // a mission that RAN and failed, read after it ended: its bt step is "-" too, but its state names the failing step
+        // (chat_e2e15: "failed at step 2" and then "REFUSED before its first step" for the same mission)
+        CHECK(not mission_refused_note("failed|2|door 'door_24' is not in the graph", "-", "t").has_value());
+        CHECK(not mission_refused_note("failed|1|approach_not_offered", "-", "t").has_value());
+        CHECK(not mission_refused_note("failed|2.1|unreachable", "-", "t").has_value());
+        CHECK(mission_refused_note("failed|unknown door 'door_9'", "-", "t").has_value());
     }
 
     // ── mission_control_action: the fast path only where it means something ─────────────────────────────────────
@@ -483,6 +511,13 @@ int main()
         CHECK(claims_mission("I have started the mission to cross door_24. I am currently turning to face it."));
         CHECK(claims_mission("I will plan a mission to cross door_24 for you."));
         CHECK(claims_mission("I have not started the mission yet. I am waiting for your confirmation to begin the plan."));
+        // chat_e2e15: "I will approach door_21 first" with no call — any promised or ongoing ACTION counts
+        CHECK(claims_mission("I understand. I will approach door_21 first so that it offers a crossing path."));
+        CHECK(claims_mission("I am now going to room_2."));
+        CHECK(claims_mission("I'll cross door_3 now."));
+        CHECK(claims_mission("I am turning to face it."));
+        CHECK(not claims_mission("I cannot approach door_21 because it does not offer an approach path."));
+        CHECK(not claims_mission("door_21 is 4.2 m away to my right."));
         CHECK(not claims_mission("Your name is Pablo."));
         CHECK(not claims_mission("I see a white table with a green bottle on it."));
         CHECK(not claims_mission("The mission \"cross door_22\" failed: the door is shut."));   // a report, not a claim
