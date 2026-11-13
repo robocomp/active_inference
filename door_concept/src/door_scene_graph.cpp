@@ -575,4 +575,9 @@ void DoorSceneGraph::write_interaction_state(DSR::Node& node, const rc::door::In
     G_->add_or_modify_attrib_local<door_leaf_hinge_plus_prob_att> (node, st.leaf_hinge_plus_prob);
 }
 
+void DoorSceneGraph::write_memory_state(DSR::Node& node, const rc::door::memnote::NoteAttrs& note)
+{
+    rc::door::memnote::write_memory_attrs(*G_, node, note);
+}
+
 }  // namespace rc

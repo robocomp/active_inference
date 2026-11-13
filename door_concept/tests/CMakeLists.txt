@@ -20,3 +20,12 @@ target_include_directories(test_door_memory_note PRIVATE ../src)
 target_compile_options(test_door_memory_note PRIVATE -O1)
 target_link_libraries(test_door_memory_note PRIVATE Eigen3::Eigen)
 add_test(NAME door_memory_note COMMAND test_door_memory_note)
+
+# Door memory on the node: write_memory_attrs read back from a standalone DSRGraph (private DDS domain). Run: ./test_door_memory_graph
+find_package(Qt6 COMPONENTS Core REQUIRED)
+add_executable(test_door_memory_graph test_door_memory_graph.cpp)
+target_include_directories(test_door_memory_graph PRIVATE ../src)
+target_compile_definitions(test_door_memory_graph PRIVATE SHADOW_JSON="${CMAKE_CURRENT_LIST_DIR}/../../robot_concept/shadow.json")
+target_compile_options(test_door_memory_graph PRIVATE -O0)
+target_link_libraries(test_door_memory_graph PRIVATE Eigen3::Eigen Qt6::Core dsr_api dsr_core fastcdr fastdds)
+add_test(NAME door_memory_graph COMMAND test_door_memory_graph)

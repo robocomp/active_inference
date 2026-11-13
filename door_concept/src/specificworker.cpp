@@ -2640,6 +2640,10 @@ void SpecificWorker::step_pragmatic_affordances(rc::DoorInstance& inst)
                                or (passage_anchor_.has_value()
                                    and (passage_anchor_->door_id == inst.node_id or passage_anchor_->door_name == inst.node_name));
     scene_graph_->write_interaction_state(node_opt.value(), st);
+    // The existence memory rides the same update_node: what the CSV row holds, on the node, so ltsm archives it with the room.
+    if (inst.ai2_initialized and not inst.is_bearing_hypothesis)
+        scene_graph_->write_memory_state(node_opt.value(),
+            rc::door::memnote::note_of(identity_of(inst), std::sqrt(std::max(0.0f, inst.ai2_belief.covariance()(2, 2)))));
     G->update_node(node_opt.value());
 
     // The public assertion about this doorway, decided on the SAME measurement the offers below use.
