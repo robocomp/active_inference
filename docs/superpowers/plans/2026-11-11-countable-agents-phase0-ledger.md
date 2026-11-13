@@ -100,6 +100,20 @@ Owner 11-11: continue; WAIT rule stands; cause to be pinned live (outline bbox +
 6. Pre-existing, not Phase 0: `bottle_concept/tests/test_bottle_fit.cpp` does not compile on main either (uses
    `BottleState`/`BottleModel` without `rc::`); untouched. `bottle_card_test` and `test_bottle_contour` pass.
 
+### Task 7 — hood_concept
+
+1. **The room now follows the robot** (was: latched at the first room).
+2. **Hoods left behind in another room are dropped** (affordance + fitter forget) and recalled by LTOM.
+3. **Out-of-room births suppressed** (was: none). WALL-MOUNTED (review focus 1): tolerance = prior depth / 2
+   (`AI2PriorDepthM`, else `AI2PriorFootprintM` = 0.60 ⇒ 0.30 m), so a hood whose centre sits just outside the wall line is
+   ADMITTED. Checked after the burst take, so a refused candidate's banked cloud is released.
+4. **Births held while the working room has no usable outline** (was: admitted).
+5. **Outline needs ≥ 3 vertices** (was: hood accepted n ≥ 2 for the wall-flush factor). A 2-vertex outline is now
+   treated as none (spec: degenerate ⇒ WAIT). Rooms publish ≥ 4, so this only matters for a malformed outline. The
+   polygon is cleared when the working room has none (was: kept the previous room's).
+6. **New existence term: out-of-room** (was: none), `HoodModel.ExistenceOutOfRoomGain = 1.5`, tolerance = belief depth / 2,
+   per evidence cycle at p_detect = 1, skipping the sensor channels that cycle.
+
 ## Rulings
 
 (none yet)
