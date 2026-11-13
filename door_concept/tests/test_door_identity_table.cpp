@@ -315,10 +315,11 @@ int main()
             std::optional<std::pair<Eigen::Vector2f, Eigen::Vector2f>> leaf_side_hint;
             float phi_est = 0.f, phi_sigma = 0.f, hinge_llr = 0.f, swing_llr = 0.f;
             std::chrono::steady_clock::time_point phi_last_t{}; bool phi_from_command = true;
-            std::int64_t last_detection_wall_ms = 0;
+            std::int64_t last_detection_wall_ms = 0, restored_detection_wall_ms = -1;
             std::optional<float> remembered_place_sd; std::string place_row_name; core::PlaceBelief belief;
         } inst;   // as the node-added path left it: (0,0), unseeded, 0 matched frames
         CHECK(not fitted_this_cycle(false, inst.matched_frames));           // the bug: never fitted ⇒ no approach
+        CHECK(not restored_unseen(inst));                                    // not restored: an ordinary door
         const auto r = full_row("room_1", "door_1", -0.57f, 4.61f);
         seed_restored_instance(inst, r, core::PlaceTable(false).restored_belief(core::PlaceTable::row_of(r, 0.1f, false), kNowMs), std::chrono::steady_clock::now());
         CHECK(near(inst.model.s.ap_cx, -0.57f) and near(inst.model.s.ap_cy, 4.61f) and near(inst.model.s.cx, -0.57f));
@@ -329,6 +330,10 @@ int main()
         CHECK(inst.last_detection_wall_ms == kNowMs and inst.place_row_name == "door_1");   // Task D-C
         CHECK(fitted_this_cycle(false, inst.matched_frames));               // fitted with no fresh mask
         CHECK(inst.seed_wh_from_box and inst.leaf_side_hint.has_value() and not inst.phi_from_command);
+        // chat_e2e15: a restored door not seen since offers its APPROACH without × P(exists) (going there settles it)
+        CHECK(restored_unseen(inst));
+        inst.last_detection_wall_ms = kNowMs + 1000;                          // a fresh detection
+        CHECK(not restored_unseen(inst));                                    // seen ⇒ an ordinary door again
         // An identity-only row (no pose) still gets its place; size stays the instance's (template) one.
         IdentityRow id_only; id_only.room = "room_1"; id_only.name = "door_5"; id_only.xy = {2.f, -3.f};
         FakeInst j;

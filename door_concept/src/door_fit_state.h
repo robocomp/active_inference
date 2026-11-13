@@ -319,6 +319,8 @@ struct DoorFitState
     // Task D-C: wall-clock ms (the cycle's t_wall_ms) of the last fresh detection; restored from the identity row's
     // seen_ms. Written to the row so a remembered belief carries its age (the place row). 0 = never.
     std::int64_t last_detection_wall_ms = 0;
+    // last_detection_wall_ms as the RESTORE left it; -1 = not restored (door_identity_table.h restored_unseen()).
+    std::int64_t restored_detection_wall_ms = -1;
     // SHARED mutual exclusion (common/exclusion): was another concept's object already standing
     // here when this instance was BORN? Resolved once, at creation. A junior instance stops
     // counting its senior's returns as evidence that IT exists. See exclusion.h.
