@@ -1,0 +1,58 @@
+% Shared setup for every day of the course.
+\usetheme[progressbar=frametitle, numbering=fraction, block=fill]{metropolis}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage{amsmath, amssymb, bm, booktabs, graphicx, xcolor, colortbl}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta, positioning, calc, shapes.geometric}
+
+\graphicspath{{figures/}}
+
+% --- colours -------------------------------------------------------------------------------------
+\definecolor{accent}{HTML}{C0392B}
+\definecolor{cool}{HTML}{2E6DB4}
+\definecolor{muted}{HTML}{7A7A7A}
+\definecolor{good}{HTML}{2E8B57}
+\setbeamercolor{alerted text}{fg=accent}
+\setbeamercolor{example text}{fg=cool}
+
+% --- notation (follows the thesis' notation chapter) ---------------------------------------------
+\newcommand{\given}{\,|\,}
+\newcommand{\E}{\mathbb{E}}
+\newcommand{\KL}[2]{D_{\mathrm{KL}}\!\left[#1\,\middle\|\,#2\right]}
+\newcommand{\N}{\mathcal{N}}
+\newcommand{\Hess}{\mathcal{H}}
+\newcommand{\nats}{\,\text{nats}}
+\DeclareMathOperator*{\argmin}{arg\,min}
+
+% --- course devices ------------------------------------------------------------------------------
+% \src{...}: where a claim or number comes from (thesis file and line, or a post-thesis note).
+\newcommand{\src}[1]{\par\vfill\hfill{\scriptsize\color{muted}source: #1}}
+% \wip: marks a post-thesis result.
+\newcommand{\wip}{{\scriptsize\color{white}\colorbox{accent}{\,work in progress\,}}}
+% \lesson{...}: the one sentence a frame exists to say.
+\newcommand{\lesson}[1]{\begin{alertblock}{}\centering #1\end{alertblock}}
+% a measurement story
+\newenvironment{measured}[1]{\begin{exampleblock}{Measured: #1}}{\end{exampleblock}}
+
+\author{Course built on the doctoral thesis of No\'e Zapata}
+\institute{Montevideo, 30 November -- 4 December 2026}
+
+% \cyclemap{n}: the course's five-stage cycle, stage n highlighted (1 room ... 5 memory).
+\newcommand{\cyclemap}[1]{%
+  \begin{tikzpicture}[
+      st/.style={draw=muted, thick, rounded corners=3pt, fill=white, align=center,
+                 minimum width=2.5cm, minimum height=0.8cm, font=\scriptsize, text=muted},
+      on/.style={draw=accent, very thick, fill=accent!10, text=black, font=\scriptsize\bfseries},
+      arr/.style={-{Stealth[length=2mm]}, thick, color=muted},
+      s1/.style={}, s2/.style={}, s3/.style={}, s4/.style={}, s5/.style={}, s#1/.style={on}]
+    \node[st, s1] (c1) at (90:1.9)   {estimate the room};
+    \node[st, s2] (c2) at (18:2.6)   {localise; learn\\the body};
+    \node[st, s3] (c3) at (-54:2.2)  {concepts fill\\the room};
+    \node[st, s4] (c4) at (-126:2.2) {cross the door};
+    \node[st, s5] (c5) at (162:2.6)  {new room;\\memory};
+    \draw[arr] (c1) to[bend left=15] (c2); \draw[arr] (c2) to[bend left=15] (c3);
+    \draw[arr] (c3) to[bend left=15] (c4); \draw[arr] (c4) to[bend left=15] (c5);
+    \draw[arr] (c5) to[bend left=15] (c1);
+  \end{tikzpicture}}

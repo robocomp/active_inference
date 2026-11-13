@@ -1,0 +1,12 @@
+__pycache__/
+.pytest_cache/
+.ipynb_checkpoints/
+.venv/
+slides/*.aux
+slides/*.log
+slides/*.nav
+slides/*.out
+slides/*.snm
+slides/*.toc
+slides/*.vrb
+slides/figures/.day*
