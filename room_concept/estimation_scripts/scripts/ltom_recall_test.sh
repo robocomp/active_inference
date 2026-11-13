@@ -14,13 +14,27 @@ B=/home/pbustos/robocomp/components/active_inference; E=$B/room_concept/estimati
 FIX=$(readlink -f "${2:-$E/crossing/fixtures/three_rooms_door0}")
 export LOOK_S=${3:-45}
 REP=$B/ltom_agent/etc/ltom_repertory.json
+# ★A STALE ltom_agent DESTROYS THE OWNER'S MEMORY (2026-11-13): main's bin/ltom_agent predated the human model, and on its
+# graceful stop it rewrote the repertory WITHOUT the "humans" section — the owner's name and chair were lost. Refuse a binary
+# older than any of its sources; rebuild with `make -C ltom_agent/build -j8` (the ltom owner: test main's binary).
+newest=$(find $B/ltom_agent/src $B/ltom_agent/CMakeLists.txt -newer $B/ltom_agent/bin/ltom_agent -type f 2>/dev/null | head -1)
+[ -n "$newest" ] && { echo "ltom_agent binary is OLDER than $newest — rebuild it first"; exit 1; }
 cd $E; mkdir -p crossing/$NAME
+# The memory as it was before the test: archived, kept in the run dir, and PUT BACK at the end (the test's objects do not stay).
+[ -f $REP ] && cp $REP crossing/$NAME/repertory_before.json
+mkdir -p crossing/ltom_archive; [ -f $REP ] && cp $REP crossing/ltom_archive/ltom_repertory_before_${NAME}_$(date +%Y%m%d_%H%M%S).json
+trap '[ -f crossing/$NAME/repertory_before.json ] && cp crossing/$NAME/repertory_before.json $REP && echo "ltom repertory restored to its pre-test state"' EXIT
 for pass in ${PASSES:-1 2}; do
   RUN=${NAME}_p$pass
   if [ $pass = 1 ]; then
-    if [ -f $REP ]; then mkdir -p crossing/ltom_archive; cp $REP crossing/ltom_archive/ltom_repertory_before_${NAME}_$(date +%Y%m%d_%H%M%S).json; fi
-    rm -f $REP $B/ltom_agent/etc/ltom_repertory.csv
-    echo "pass 1 (store): ltom repertory EMPTY"
+    # EMPTY of OBJECTS, but the "humans" array is KEPT (the ltom owner: the owner's name and owned things must survive).
+    python3 -I - "$REP" crossing/$NAME/repertory_before.json <<'PY'
+import json, os, sys
+before = json.load(open(sys.argv[2])) if os.path.exists(sys.argv[2]) else {}
+json.dump({"entries": [], "humans": before.get("humans", []), "version": before.get("version", 1)}, open(sys.argv[1], "w"))
+PY
+    rm -f $B/ltom_agent/etc/ltom_repertory.csv
+    echo "pass 1 (store): ltom repertory EMPTY of objects, humans kept"
   else
     [ -f crossing/$NAME/repertory_after_p1.json ] || { echo "pass $pass: no pass-1 repertory — run pass 1 first"; exit 1; }
     cp crossing/$NAME/repertory_after_p1.json $REP

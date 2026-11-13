@@ -24,7 +24,10 @@ case "${1:-}" in
       if [ -x "$WT/$a/bin/$a" ]; then exe=$WT/$a/bin/$a; cfg=$WT/$a/etc/config.toml; src=$WT
       elif [ -x "$B/$a/bin/$a" ]; then exe=$B/$a/bin/$a; cfg=$B/$a/etc/config.toml; src=$B; fi
       if [ -z "$exe" ]; then echo "$a: NO BINARY (not in $WT/$a/bin nor $B/$a/bin) — skipped"; continue; fi
-      (cd $B/$a && DISPLAY=:0 setsid nohup stdbuf -oL -eL $exe $cfg > $OUT/logs/$a.log 2>&1 < /dev/null &)
+      # Every line is prefixed with wall-clock seconds (ms), so recall / birth TIMING can be read off the logs (ltom_agent
+      # prints no time of its own). perl, not `ts` (moreutils is not installed). SIGTERM goes to the agent (pkill -x); perl
+      # ends on its EOF.
+      (cd $B/$a && DISPLAY=:0 setsid nohup bash -c "stdbuf -oL -eL $exe $cfg 2>&1 | perl -MTime::HiRes=time -ne 'BEGIN{\$|=1} printf \"%.3f %s\", time, \$_' > $OUT/logs/$a.log" < /dev/null > /dev/null 2>&1 &)
       printf '%s\t%s\t%s\n' $a $exe "$(git -C $src rev-parse --short HEAD 2>/dev/null)" >> $OUT/agents.txt
       sleep 2
     done

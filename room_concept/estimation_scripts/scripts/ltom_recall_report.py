@@ -61,6 +61,72 @@ def main():
     print(f"recall rate: {recalled_uids}/{tot_stored} stored objects came back with their pass-1 uid")
     if not os.path.isdir(logs):
         print(f"(no pass-2 logs at {logs})")
+    ltom_checks(root, name)
+
+
+def load(path):
+    return json.load(open(path)) if os.path.exists(path) else None
+
+LINE_T = re.compile(r"^(\d+\.\d+) ")
+OFFER = re.compile(r"\[ltom\] recall offered ltom_recall_(\d+) \((\w+)\) in room (\S+)")
+WITHDRAW = re.compile(r"\[ltom\] recall withdrawn ltom_recall_(\d+)")
+BORN = re.compile(r"\[ltom\] born (\S+) uid=(\d+)")
+GONE = re.compile(r"\[ltom\] (?:died|owner_exit) (\S+) uid=(\d+)")
+
+def ltom_checks(root, name):
+    """The ltom owner's checks (chat session, 2026-11-13): (a) humans unchanged, (b) owned things keep their object,
+    (c) recall offered/withdrawn per room with timing, (d) two live nodes on one uid."""
+    reps = {k: load(os.path.join(root, f"repertory_{k}.json")) for k in ("before", "after_p1", "after_p2")}
+    print("\n(a) humans unchanged across the passes:")
+    base = (reps["before"] or {}).get("humans")
+    for k in ("after_p1", "after_p2"):
+        h = (reps[k] or {}).get("humans") if reps[k] else None
+        print(f"    {k}: {'MISSING FILE' if reps[k] is None else ('identical' if h == base else 'CHANGED')}")
+    print("(b) owned things — the object's uid is still in memory, and was resurrected in pass 2:")
+    p2_res = set()
+    logs2 = os.path.join(os.path.dirname(root.rstrip("/")), f"{name}_p2", "logs")
+    for f in (os.listdir(logs2) if os.path.isdir(logs2) else []):
+        if f.endswith("_concept.log"):
+            for line in open(os.path.join(logs2, f), errors="replace"):
+                m = RESURRECT.search(line)
+                if m: p2_res.add(m.group(3))
+    stored2 = {e["uid"] for e in ((reps["after_p2"] or {}).get("entries", []))}
+    for hm in (base or []):
+        for t in hm.get("things", []):
+            u = t.get("object_uid")
+            print(f"    {hm.get('id')} owns {t.get('name_when_said')} uid={u}: in memory after p2: {u in stored2}; "
+                  f"resurrected in p2: {u in p2_res}; still listed after p2: "
+                  f"{any(x.get('object_uid') == u for h2 in ((reps['after_p2'] or {}).get('humans') or []) for x in h2.get('things', []))}")
+    print("    (the live `owns` EDGE in the LTOM graph is not in any file: check it in the viewer while pass 2 runs)")
+    for p in ("p1", "p2"):
+        log = os.path.join(os.path.dirname(root.rstrip("/")), f"{name}_{p}", "logs", "ltom_agent.log")
+        if not os.path.exists(log):
+            print(f"(c,d) {p}: no ltom_agent log"); continue
+        t0 = None; offers = defaultdict(list); withdrawn = defaultdict(list); room_of = {}
+        live = {}; dups = []
+        for line in open(log, errors="replace"):
+            mt = LINE_T.match(line); t = float(mt.group(1)) if mt else None
+            if t is not None and t0 is None: t0 = t
+            rel = (t - t0) if (t is not None and t0 is not None) else float("nan")
+            if m := OFFER.search(line):
+                offers[m.group(3)].append(rel); room_of[m.group(1)] = m.group(3)
+            elif m := WITHDRAW.search(line):
+                withdrawn[room_of.get(m.group(1), "?")].append(rel)
+            elif m := BORN.search(line):
+                uid = m.group(2)
+                if uid in live and live[uid] != m.group(1):
+                    dups.append((rel, uid, live[uid], m.group(1)))
+                live[uid] = m.group(1)
+            elif m := GONE.search(line):
+                if live.get(m.group(2)) == m.group(1): live.pop(m.group(2))
+        print(f"(c) {p} recall nodes per room (seconds from ltom start):")
+        for room in sorted(set(offers) | set(withdrawn)):
+            o, w = offers.get(room, []), withdrawn.get(room, [])
+            span = lambda v: (lambda f: f"{min(f):.0f}-{max(f):.0f} s" if f else "- (no timestamps)")([x for x in v if x == x])
+            print(f"    {room:10} offered {len(o):3} ({span(o)})  withdrawn {len(w):3} ({span(w)})")
+        print(f"(d) {p} duplicates (a uid born again while its first node is live): {len(dups)}")
+        for rel, uid, a, b in dups[:10]:
+            print(f"    t={rel:.0f} s uid={uid}: {a} still live when {b} was born")
 
 if __name__ == "__main__":
     main()
