@@ -84,6 +84,13 @@ bool ImuIngestor::pump()
         // imu_dtheta() brackets these samples against are on the sim clock when the source is
         // simulated; keying on wall time would compare two clocks and take coverage to zero.
         const std::int64_t key = r.integration_ts_ms();
+        // The predicted tick is stamped on the WALL clock, the clock the corrections it extends are
+        // stamped on (lidar sweep stamps, epoch ms). The buffer stays keyed on the integration clock
+        // above; only the tick's stamp differs. Real robot: simulated==false, so integration_ts_ms()
+        // IS effective_ts_ms() and nothing changes. Sim: handing the tick the SIM key made it compare
+        // sim-since-start against an epoch stamp, so it never published (pose_trace had no type-1 rows).
+        const std::int64_t tick_ts_ms = r.effective_ts_ms();
+        const float        gyro_z     = r.gyro_z;
         if (key <= 0 or key == last_key_ms_)
             return;                                   // kept until "no longer needed" is measured
         last_key_ms_ = key;
@@ -96,7 +103,7 @@ bool ImuIngestor::pump()
         // FIX 2026-09-04: on THIS thread (imu-ingest), after the sample is safely in the buffer. Must
         // stay cheap -- see the warning on set_on_new_sample().
         if (on_new_sample_)
-            on_new_sample_(key);
+            on_new_sample_(tick_ts_ms, gyro_z);
     }, /*timeout_ms=*/20);
 
     return n > 0;

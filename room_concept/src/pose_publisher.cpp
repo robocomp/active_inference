@@ -4,6 +4,7 @@
 #include "../../common/status_stream/status_sink.h"   // rc::status::Line (routed)
 
 #include "pose_publisher.h"
+#include "pose_propagator.h"
 #include "published_pose.h"
 
 #include "room_concept.h"
@@ -243,10 +244,11 @@ bool PosePublisher::maybe_publish_corrected_pose()
     // viewer, but we never touch the graph.
     if (shutting_down_.load() || params.PRESERVE_BOOTSTRAP_ROOM)
         return false;
+    const std::int64_t enter_ms = QDateTime::currentMSecsSinceEpoch();   // etc/publish_timing.csv
 
     // FIX 2026-09-04: held for the rest of this function. Shared with publish_predicted_tick(), which
-    // runs on the imu-ingest thread and reads last_published_pose_/last_pub_adv_/_side_/_rot_/
-    // last_published_cov_ -- all written below -- and calls into the same scene_graph_.
+    // runs on the imu-ingest thread and reads last_published_pose_/_ts_ms_/last_published_cov_ and
+    // written_ticks_ -- all written below -- and calls into the same scene_graph_.
     std::lock_guard<std::mutex> publish_lock(publish_mutex_);
 
     // NOT const: get_last_result() returns a by-value copy, and the kinematic clamp below rewrites
@@ -435,15 +437,65 @@ bool PosePublisher::maybe_publish_corrected_pose()
         }
         return false;
     }
-    scene_graph_->update(*loc_res, pub_adv, pub_side, pub_rot);
+    // ── CORRECTION + SPREAD + TAIL, ONE PUBLISH (pose_propagator.h plan_correction) ─────────────────────────────────
+    // All in the estimator's internal frame, the frame of loc_res->robot_pose (post-clamp: what update() writes);
+    // write_robot_room_rt maps every block with the correction. The SPREAD needs the old base and the correction in
+    // ONE frame, so it is off across a relocalisation and across a re-anchor of the internal frame since the last
+    // correction (the pending re-anchor changed) — then the jump is not motion, and the old base cannot be differenced.
+    std::vector<RoomSceneGraph::RtTail> blocks;
+    std::size_t n_spread = 0, n_tail = 0;
+    rc::CorrectionPlan plan;
+    const std::int64_t t_c = loc_res->timestamp_ms;
+    {
+        Eigen::Affine2f ra;
+        const bool has_ra = room_concept_.peek_pending_reanchor(ra);
+        const std::optional<Eigen::Matrix3f> ra_now = has_ra ? std::optional(ra.matrix()) : std::nullopt;
+        const bool frame_moved = reanchor_seen_ and ra_now != reanchor_after_last_;
+        const Eigen::Affine2f& p = loc_res->robot_pose;
+        const rc::PosePropagator::Pose c{t_c, p.translation().x(), p.translation().y(),
+                                         std::atan2(p.linear()(1, 0), p.linear()(0, 0))};
+        std::lock_guard<std::mutex> lock(propagator_mutex_);
+        propagator_.set_params({.odom_lag_ms  = static_cast<std::int64_t>(room_concept_.params.odom_lag_ms),
+                                .zupt         = room_concept_.params.zupt_enabled,
+                                .zupt_rot_eps = room_concept_.params.zupt_wheel_rot_eps,
+                                .zupt_lin_eps = room_concept_.params.zupt_wheel_lin_eps});
+        plan = rc::plan_correction(propagator_, written_ticks_, c, loc_res->applied_motion,
+                                   params.RT_SPREAD_CORRECTION and not relocalised and not frame_moved,
+                                   static_cast<std::int64_t>(params.POSE_CLAMP_MAX_DT_S * 1000.f));
+        n_spread = plan.spread.size(); n_tail = plan.tail.size();
+        // Each block carries the twist now — the propagator's calibrated body rates at its newest samples.
+        const float v_f = propagator_.v_forward(), v_l = propagator_.v_lateral(), w = propagator_.omega();
+        const auto to_block = [&](const rc::PosePropagator::Pose& s_)
+        {
+            Eigen::Affine2f pose = Eigen::Affine2f::Identity();
+            pose.linear()      = Eigen::Rotation2Df(s_.th).toRotationMatrix();
+            pose.translation() = Eigen::Vector2f(s_.x, s_.y);
+            return RoomSceneGraph::RtTail{pose, loc_res->covariance, static_cast<std::uint64_t>(s_.t_ms), v_f, v_l, w};
+        };
+        if (params.RT_REWRITE_TAIL)
+        {
+            blocks.reserve(n_spread + n_tail);
+            for (const auto& s_ : plan.spread) blocks.push_back(to_block(s_));
+            for (const auto& s_ : plan.tail)   blocks.push_back(to_block(s_));
+        }
+    }
+    // Rewrite whenever RtRewriteTail is on, even with no block besides the correction: the ring after t_c then holds
+    // nothing made from the previous correction. Off: a plain insert (only the propagator's ticks remain, mode b).
+    scene_graph_->update(*loc_res, pub_adv, pub_side, pub_rot, /*write_rt=*/true,
+                         params.RT_REWRITE_TAIL ? &blocks : nullptr);
+    {
+        Eigen::Affine2f ra;
+        reanchor_after_last_ = room_concept_.peek_pending_reanchor(ra) ? std::optional(ra.matrix()) : std::nullopt;
+        reanchor_seen_ = true;
+    }
+    if (scene_graph_->last_pose_write().rewrote)   // the edge from the earliest block on is exactly what was written
+    {
+        rc::record_rewrite(written_ticks_, t_c, plan);
+        if (not plan.tail.empty())
+            log_pose_trace(/*type=re-propagated after a correction*/2, plan.tail.back().t_ms, blocks.back().pose, 0.f);
+    }
     last_published_pose_ = loc_res->robot_pose;
-    // Cache for publish_predicted_tick(): the twist and covariance an IMU-rate tick should extrapolate
-    // with/report until the NEXT real publish replaces them. covariance is loc_res->covariance
-    // (post-clamp, same one every other consumer of this publish sees -- see the note above on
-    // note_published_covariance).
-    last_pub_adv_       = pub_adv;
-    last_pub_side_      = pub_side;
-    last_pub_rot_        = pub_rot;
+    // Reported (not grown) by an IMU-rate tick until the next correction replaces it.
     last_published_cov_ = loc_res->covariance;
     // Anchor for the NEXT frame's measured-motion difference: the localiser's own estimate for this
     // frame, which is the base its next prediction is built on. Taken pre-clamp, so the difference
@@ -459,70 +511,78 @@ bool PosePublisher::maybe_publish_corrected_pose()
     log_pose_trace(/*type=corrected*/0, loc_res->timestamp_ms,
                    loc_res->robot_pose, loc_res->innovation_norm);
     if (on_corrected_) on_corrected_(*loc_res);
+
+    // §4.6 diagnostic: one row per published correction. enter-valid = how late the correction lands; n_tail/n_spread =
+    // the blocks written with it (Webots mode a: ~4 ms late, so n_tail ~1 and n_spread ~0-1).
+    if (not publish_timing_open_attempted_)
+    {
+        publish_timing_open_attempted_ = true;
+        publish_timing_.open("etc/publish_timing.csv", std::ios::out | std::ios::trunc);
+        if (publish_timing_.is_open())
+        {
+            publish_timing_.imbue(std::locale::classic());
+            publish_timing_ << "enter_ms,exit_ms,valid_ts_ms,n_spread,n_tail\n";
+        }
+    }
+    if (publish_timing_.is_open())
+    {
+        publish_timing_ << enter_ms << ',' << QDateTime::currentMSecsSinceEpoch() << ',' << t_c << ','
+                        << n_spread << ',' << n_tail << '\n';
+        publish_timing_.flush();
+    }
     return true;
 }
 
-// FIX 2026-09-04: called from ImuIngestor's ingest thread, once per accepted IMU sample (~100 Hz on
-// this robot, see imu_ingestor.cpp), so the graph is never more than one IMU period behind instead of
-// waiting on the next lidar-paced correction (~20 Hz). Publishes a DEAD-RECKONED pose only -- it never
-// touches last_published_pose_/_ts_ms_/_est_ (those anchor the kinematic clamp and the NEXT real
-// prediction's measured-motion difference, and must only ever move on a real SDF-validated result) --
-// so every tick extrapolates from the SAME last real publish with a growing dt, rather than compounding
-// error by extrapolating from the previous tick's own guess.
+// Called from ImuIngestor's ingest thread once per accepted IMU sample (~100-125 Hz), with its WALL stamp. Always feeds
+// the propagator (also before the first correction: the next correction's tail is integrated from these samples). The
+// prediction is the propagator's pose — gyro heading, wheel translation, the applied calibration, from the last
+// correction (pose_propagator.h) — never compounded from a previous tick's guess. It only WRITES the edge with
+// RoomConcept.PredictedTicks (mode b); otherwise it is logged (pose_trace.csv type 1) and the graph keeps ~20 Hz.
 //
 // Deliberately narrow: calls dsr_publish_predicted_pose() (-> write_robot_room_rt(), the same
 // NaN-guarded, ring-buffer-safe writer maybe_publish_corrected_pose() uses), NOT scene_graph_->update().
 // update() also drives dsr_update_calibration()/dsr_update_affordance() -- CSV writers and DSR node
 // churn sized for ~20 Hz -- which must stay on the real, lidar-paced path only.
-void PosePublisher::publish_predicted_tick(std::int64_t imu_ts_ms)
+void PosePublisher::publish_predicted_tick(std::int64_t imu_ts_ms, float gyro_z)
 {
     if (shutting_down_.load() || params.PRESERVE_BOOTSTRAP_ROOM || !scene_graph_)
         return;
 
     std::lock_guard<std::mutex> publish_lock(publish_mutex_);
+    std::lock_guard<std::mutex> lock(propagator_mutex_);
+    propagator_.add_imu(imu_ts_ms, gyro_z);
 
     if (!last_published_pose_.has_value() || last_published_ts_ms_ <= 0 || imu_ts_ms <= last_published_ts_ms_)
         return;   // nothing real published yet, or this sample predates it
 
     const float dt_s = static_cast<float>(imu_ts_ms - last_published_ts_ms_) * 1e-3f;
-    // Reuses POSE_CLAMP_MAX_DT_S rather than a new config key: same question ("how long a gap is
-    // guessing still better than silence for"), same answer. Past it, a stalled lidar feed means the
-    // cached twist is itself stale, and ticking anyway would run the extrapolation away unbounded at
-    // ~100 Hz -- worse than just not publishing until a real correction arrives.
+    // POSE_CLAMP_MAX_DT_S: same question ("how long a gap is guessing still better than silence for"), same answer.
     if (dt_s <= 0.f || dt_s > params.POSE_CLAMP_MAX_DT_S)
         return;
-
-    const Eigen::Affine2f& base = last_published_pose_.value();
-    const float base_th = std::atan2(base.linear()(1, 0), base.linear()(0, 0));
-    const float phi = last_pub_rot_ * dt_s;
-
-    // Body-frame twist -> SE(2) chord. Same exponential map as
-    // controller_obstacle_tracker.cpp::twist_delta() (this codebase's original, verified-correct
-    // reference for this exact composition, 2026-08-04) -- the left Jacobian V turns v*dt into the
-    // CHORD of the arc actually swept instead of cutting the corner. +Y forward = adv (last_pub_adv_),
-    // +X lateral = side (last_pub_side_); see the frame note in room_scene_graph.cpp.
-    const float vx = last_pub_side_ * dt_s;
-    const float vy = last_pub_adv_  * dt_s;
-    float dx = vx, dy = vy;
-    if (std::abs(phi) > 1e-6f)
-    {
-        const float s = std::sin(phi), c = std::cos(phi);
-        dx = (s * vx - (1.f - c) * vy) / phi;
-        dy = ((1.f - c) * vx + s * vy) / phi;
-    }
-
+    const auto s = propagator_.at(imu_ts_ms);
+    if (not s)
+        return;
     Eigen::Affine2f predicted = Eigen::Affine2f::Identity();
-    predicted.linear()      = Eigen::Rotation2Df(base_th + phi).toRotationMatrix();
-    predicted.translation() = base.translation() + base.linear() * Eigen::Vector2f(dx, dy);
+    predicted.linear()      = Eigen::Rotation2Df(s->th).toRotationMatrix();
+    predicted.translation() = Eigen::Vector2f(s->x, s->y);
 
-    // last_published_cov_ reused as-is (not grown with dt_s) -- a known simplification. A consumer
-    // reading this between two real corrections currently sees the same sigma the last real one
-    // reported, not an inflated one reflecting the extra dead-reckoned distance since. Revisit if a
-    // consumer needs "how much am I trusting this specific sample" rather than just the freshest pose.
-    if (scene_graph_ == nullptr) return;
-    scene_graph_->dsr_publish_predicted_pose(predicted, last_published_cov_,
-                                             static_cast<std::uint64_t>(imu_ts_ms));
+    // last_published_cov_ reused as-is (not grown with dt_s): cortex's Extrapolated read grows a block's covariance by
+    // its stored twist covariance, and growing it here would need a noise density this writer does not own.
+    if (params.PREDICTED_TICKS_WRITE_RT
+        and scene_graph_->dsr_publish_predicted_pose(predicted, last_published_cov_, static_cast<std::uint64_t>(imu_ts_ms),
+                                                     propagator_.v_forward(), propagator_.v_lateral(), propagator_.omega()))
+    {
+        written_ticks_.push_back(imu_ts_ms);
+        while (written_ticks_.size() > 1 and written_ticks_.front() < imu_ts_ms - 1000)
+            written_ticks_.pop_front();
+    }
     log_pose_trace(/*type=predicted*/1, imu_ts_ms, predicted, 0.f);
+}
+
+void PosePublisher::add_odometry(std::int64_t ts_ms, float adv, float side, float rot)
+{
+    std::lock_guard<std::mutex> lock(propagator_mutex_);
+    propagator_.add_odometry(ts_ms, adv, side, rot);
 }
 
 // Localiser pose beside the Webots supervisor pose, one row per published correction.

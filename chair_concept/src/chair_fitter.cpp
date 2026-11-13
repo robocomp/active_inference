@@ -223,6 +223,15 @@ ChairFitter::ChairObservation ChairFitter::observe(ChairInstance& inst, const DS
         if (const auto& sl = masks_packet.slices;
             inst.assigned_mask_idx >= 0 and inst.assigned_mask_idx < static_cast<int>(sl.size()))
             selected_mask = sl[inst.assigned_mask_idx];
+        // Front-camera sighting: decided ONCE per new mask frame (this block can re-enter on the same frame
+        // when a slice had no support points), never latched across frames.
+        if (masks_packet.frame_id != inst.front_checked_frame)
+        {
+            inst.front_checked_frame = masks_packet.frame_id;
+            inst.front_seen = selected_mask.has_value() and selected_mask->is_zed();
+            if (inst.front_seen)
+                inst.front_seen_frame = masks_packet.frame_id;
+        }
         if (selected_mask.has_value())
         {
             const auto& slice = selected_mask.value();
@@ -1062,6 +1071,17 @@ ChairModelParams ChairFitter::make_model_params() const
     p.sigma_obs = cfg_.sigma_obs;
     p.chair     = cfg_.prior;
     return p;
+}
+
+std::optional<float> ChairFitter::best_view_distance(float width_m, float height_m) const
+{
+    if (not camera_api_) return std::nullopt;
+    const float fx = camera_api_->get_focal_x(), fy = camera_api_->get_focal_y();
+    const float W = static_cast<float>(camera_api_->get_width()), H = static_cast<float>(camera_api_->get_height());
+    if (fx <= 0.f or fy <= 0.f or W <= 0.f or H <= 0.f or width_m <= 0.f or height_m <= 0.f) return std::nullopt;
+    const float f_best = rc::detect::best_fill(rc::detect::DetectorEnvelope{cfg_.detect_min_fill, cfg_.detect_max_fill, cfg_.detect_soft});
+    if (f_best <= 0.f) return std::nullopt;
+    return std::max(fx * width_m / (f_best * W), fy * height_m / (f_best * H));
 }
 
 }  // namespace rc

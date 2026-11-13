@@ -13,7 +13,7 @@
 static const rc::owned::Spec kOwned{
     .agent = "door_concept",
     .name_prefix = "door",
-    .node_types = {"object", "door"},
+    .node_types = {"object", "door", "metaconcept"},
     .legacy_parent_types = {"door"},
 };
 

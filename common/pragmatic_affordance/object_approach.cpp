@@ -65,7 +65,12 @@ void ObjectApproach::update(const ApproachInputs& in, const ApproachCfg& cfg)
     {
         if (not executing) options_ = compute_options(in, cfg);   // frozen under a claim
         offer.p        = options_.empty() ? 0.0f : 1.0f;
-        offer.contract = rc::affordance::Contract::reach();
+        // ORIENT, not Reach (2026-11-11): the controller drives to the stand as a Place WITH this yaw, then turns in place to
+        // face the object (step_orient); an empty-predicate Orient completes when the bearing is reached. As a Reach it was
+        // consumed on arrival with no turn (controller wants_final_facing: Servo/Orient only), and live chat_e2e6 stopped with
+        // chair_34 68 deg off the camera axis, facing chair_35. ★FLAGGED: 30 s — the bound runs from the step's ENTRY and
+        // covers the drive too (the default 10 s would expire on the way).
+        offer.contract = rc::affordance::Contract::orient().stable(1).timeout_s(30);
         if (options_.empty())
             offer.why = "no side of it fits in the room with room to turn";
         else

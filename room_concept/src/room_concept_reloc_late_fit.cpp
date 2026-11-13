@@ -63,6 +63,7 @@ namespace rc
                 commit_relocalised_pose(at_now, fit.mode.cov);
                 committing_own_fit_ = false;
                 late_forced_done_ = true;
+                late_fit_committed_this_frame_ = true;
                 clear_rival_belief();   // the pose moved: the rivals / in-flight proposals were priced against the old one
                 ++rt_.searches;
                 qInfo().noquote() << QString("[reloc] late recall: multi-scan fit of %1 keyframes -> (%2, %3, %4 deg), sd (%5 m, %6 deg), median |SDF| %7 m")

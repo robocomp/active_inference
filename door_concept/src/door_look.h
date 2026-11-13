@@ -21,6 +21,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <functional>
 #include <numbers>
 #include <optional>
 #include <span>
@@ -33,9 +34,10 @@
 #include "door_existence_info.h"
 #include "door_identity_table.h"
 #include "door_standpoint.h"
-#include "door_leaf_channel.h"   // ViewBearings / view_bearings / ViewpointLedger — the viewpoint, shared
 #include "../../common/nbv/viewpoint_score.h"
-#include "../../common/existence_belief/existence_belief.h"
+#include "core/door_decision.h"   // decide, Costs, Role
+#include "core/detector_llr.h"    // DetectorModel
+#include "core/place_belief.h"    // PlaceBelief (the one belief of a door place)
 
 namespace rc::door::look
 {
@@ -81,7 +83,8 @@ inline std::optional<Eigen::Vector2f> along_wall(const IdentityRow& r, std::span
 /// The look plan for one remembered door. `other_gaps` = the other doorways (their walls are open too);
 /// `extra` = furniture obstacles. Refuses (invalid) on an incomplete camera model or no feasible standpoint.
 inline Plan plan(const IdentityRow& r, float p_exists, std::span<const Eigen::Vector2f> poly, const rc::nbv::Sensor& sensor,
-                 std::span<const rc::nbv::Obstacle> extra, std::span<const rc::nbv::WallGap> other_gaps, const Params& prm)
+                 std::span<const rc::nbv::Obstacle> extra, std::span<const rc::nbv::WallGap> other_gaps, const Params& prm,
+                 const std::function<bool(const Eigen::Vector2f&)>* admissible = nullptr)   // nullptr: every standpoint may be used
 {
     Plan best;
     if (not sensor.complete() or poly.size() < 3 or not r.xy.allFinite())
@@ -124,6 +127,8 @@ inline Plan plan(const IdentityRow& r, float p_exists, std::span<const Eigen::Ve
         {
             const Eigen::Vector2f pos = r.xy + d * dir;
             if (not polygon_contains(pos, poly) or rc::nbv::detail::distance_to_boundary(pos, poly) < prm.robot_radius_m)
+                continue;
+            if (admissible != nullptr and not (*admissible)(pos))   // a standpoint that adds no trial buys nothing (spec 2026-11-09)
                 continue;
             const Eigen::Vector2f to = r.xy - pos;
             const float yaw = std::atan2(to.y(), to.x());
@@ -175,7 +180,7 @@ inline float p_detect_from(const IdentityRow& r, const Eigen::Vector2f& cam, flo
 }
 
 /// Which of `room`'s remembered doors to offer a look at: not live (by name, or a live door on the same hole —
-/// reacquire radius + remembered width), and not ruled out this visit. Only in a room that IS the remembered one
+/// identity radius + remembered width), not removed, and not ruled out this visit. Only in a room that IS the remembered one
 /// (`room_recalled`: entered by an ltsm recall or an accepted proposal): a room entered fresh may share the name, but the
 /// rows' places are in another frame (recog_proto10), so nothing is offered there.
 inline std::vector<IdentityRow> offer_rows(std::span<const IdentityRow> rows, std::string_view room,
@@ -187,6 +192,7 @@ inline std::vector<IdentityRow> offer_rows(std::span<const IdentityRow> rows, st
     for (const auto& r : rows)
     {
         if (r.room != room) continue;
+        if (r.removed_ms.has_value()) continue;   // a place already decided "no door here": nothing to look for
         if (std::ranges::find(ruled_out, r.name) != ruled_out.end()) continue;
         const float same_hole = std::max(0.f, reacquire_radius_m) + (r.pose.has_value() ? std::max(0.f, r.pose->width) : 0.f);
         const bool is_live = std::ranges::any_of(live, [&](const LiveDoor& l)
@@ -200,75 +206,48 @@ inline std::vector<IdentityRow> offer_rows(std::span<const IdentityRow> rows, st
     return out;
 }
 
-/// The viewpoint a camera at `cam` has on the remembered aperture: its bearing from EACH jamb, in the door's own frame —
-/// the leaf channel's viewpoint (door_leaf_channel.h, try102), so "the same viewpoint" means the same thing in both.
-inline ViewBearings view_of(const IdentityRow& r, std::span<const Eigen::Vector2f> poly, const Eigen::Vector2f& cam,
-                            float prior_w_m = 0.90f)
-{
-    Aperture ap;
-    const Eigen::Vector2f u = along_wall(r, poly).value_or(Eigen::Vector2f(1.f, 0.f));
-    ap.wall_u = u;
-    ap.w = r.pose.has_value() ? r.pose->width : prior_w_m;
-    ap.wall_O = r.xy - 0.5f * ap.w * u;
-    ap.s = 0.f;
-    return view_bearings(ap, cam);
-}
-
-/// A viewpoint is the jamb bearings within the leaf channel's viewpoint radius: the φ grid's step (5°), the model's
-/// own resolution (door_leaf_channel.h, kViewpointRad).
-inline constexpr double kLookViewpointRad = 5.0 * std::numbers::pi / 180.0;
-
 /// The existence belief of ONE remembered-but-absent door, fed from the views the robot actually has of its place.
-/// ★POOLED PER VIEWPOINT (tourP9, 2026-10-21). door_2 was ruled out (P 0.018) from ONE standpoint 2.8 m away at
-///  p_detect 0.41 by many frames of non-detection treated as independent — a real, closed door. Frames from the same
-///  viewpoint share everything that decides whether the detector fires there (the framing, the lighting, the occluder,
-///  the detector's own blind spot for that aspect): they are copies of ONE look. So a viewpoint contributes the MEAN of
-///  its frames' evidence (each frame p_detect · log-ratio, the rc::exist weighting), i.e. one look's worth, bounded however
-///  many frames it sends; a revisit re-uses its record; only NEW viewpoints add evidence — the leaf channel's rule (term 2,
-///  commit 6f267858) in its simplest form. The removal decision is the shared rc::exist::decide_removal.
-///  A look that could not have seen the door (p_detect 0: behind, occluded, out of range) HOLDS.
+/// It is the SAME model as a live door's (spec §3: one belief, one ledger, one decision): L = the remembered evidence
+/// (the place row's aged L, no other prior) + the view ledger; each frame is a Bernoulli trial of the ZED detector with
+/// q = hit_rate · p_detect (p_detect: envelope × visibility of THIS standpoint, nbv::score) and the false-alarm rate that
+/// passes through the same front end (detector_llr.h); a view that could not see the place (q = 0) holds. The ledger pools
+/// the frames of one viewpoint into ONE trial (view_ledger.h), so a parked stare is one look. Ruled out = the costed
+/// deletion line of door_decision.h on L (no debounce, no streak): the look has no role, it is an Ordinary place.
 class Evidence
 {
 public:
-    Evidence(float p_prior, const rc::exist::RemovalPolicy& pol)
+    /// remembered_L = the row's aged L_evidence, remembered_physical its physical part (PlaceBelief::remember): vision saturates across the memory.
+    explicit Evidence(float remembered_L, float remembered_physical = 0.f, float lookalike = rc::door::core::kLookalikeProbDefault, bool crossed = false)
     {
-        rc::exist::arm(b_, pol);
-        const float p = std::clamp(p_prior, 1e-4f, 1.f - 1e-4f);
-        L0_ = std::log(p / (1.f - p));
-        b_.set(L0_);
+        b_.lookalike = lookalike;
+        b_.crossed = crossed;
+        b_.remember(remembered_L, remembered_physical);
     }
-    /// One mask frame seen from viewpoint `at`. `detected_here` = a door detection landed on this hole. True ⇒ ruled out.
-    bool observe(float p_detect, bool detected_here, float p_hit, float p_false, const ViewBearings& at,
-                 const rc::exist::RemovalPolicy& pol)
+    /// One mask frame of the ZED seen from `cam`. `detected_here` = a door detection landed on this hole. True ⇒ ruled out.
+    bool observe(const IdentityRow& r, std::span<const Eigen::Vector2f> poly, const Eigen::Vector2f& cam, float p_detect,
+                 bool detected_here, const rc::door::core::DetectorModel& zed, const rc::door::core::Costs& costs,
+                 float prior_w_m, float prior_h_m)
     {
-        rc::exist::arm(b_, pol);
-        const float pd = std::isfinite(p_detect) ? std::clamp(p_detect, 0.f, 1.f) : 0.f;
-        if (pd > 0.f)
+        // p_detect is a probability by construction; a non-finite or out-of-range value is "could not look", not a datum.
+        const float pd = std::isfinite(p_detect) ? p_detect : 0.f;   // (nbv::score already returns it in [0, 1])
+        const float q = zed.hit_rate * pd;
+        if (q > 0.f)
         {
-            const float ph = std::clamp(p_hit, 1e-3f, 1.f - 1e-3f), pf = std::clamp(p_false, 1e-3f, 1.f - 1e-3f);
-            const double llr = detected_here ? std::log(ph / pf) : std::log((1.f - ph) / (1.f - pf));
-            ledger_.advance(at, kLookViewpointRad);
-            if (pool_.size() < ledger_.views.size()) pool_.resize(ledger_.views.size());
-            auto& v = pool_[std::size_t(ledger_.current)];
-            v.sum += double(pd) * llr;
-            v.n   += 1;
-            double L = L0_;
-            for (const auto& q : pool_) if (q.n > 0) L += q.sum / q.n;
-            b_.set(static_cast<float>(L));
+            const Eigen::Vector2f u = along_wall(r, poly).value_or(Eigen::Vector2f(1.f, 0.f));
+            const float w = r.pose.has_value() ? r.pose->width : prior_w_m, h = r.pose.has_value() ? r.pose->height : prior_h_m;
+            const float R = 0.5f * std::hypot(w, h);   // the door's own scale: the view kernel's width (view_ledger.h)
+            const auto v = b_.ledger.observe(cam, r.xy, Eigen::Vector2f(-u.y(), u.x()), R, 0.f, 0);
+            b_.ledger.add_bernoulli(v, rc::door::core::Channel::Zed, q, zed, detected_here ? 1.f : 0.f);
+            b_.ledger.recompute(v, false);
         }
-        return rc::exist::decide_removal(b_, deb_, pol, pd).remove;
+        return rc::door::core::decide(b_.L(), b_.crossed ? rc::door::core::Role::BeingCrossed : rc::door::core::Role::Ordinary, costs).remove;   // a crossed place is never ruled out
     }
-    float p_exists()   const { return b_.p_exists(); }
-    float logodds()    const { return b_.logodds(); }
-    int   viewpoints() const { return static_cast<int>(ledger_.views.size()); }
+    float p_exists()   const { return b_.p(); }
+    float logodds()    const { return b_.L(); }
+    int   viewpoints() const { return static_cast<int>(b_.ledger.views().size()); }
 
 private:
-    struct Pool { double sum = 0.0; int n = 0; };
-    float L0_ = 0.f;
-    rc::exist::ExistenceBelief b_{};
-    rc::exist::RemovalDebounce deb_{};
-    ViewpointLedger ledger_;
-    std::vector<Pool> pool_;
+    rc::door::core::PlaceBelief b_{};
 };
 
 }   // namespace rc::door::look

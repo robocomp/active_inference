@@ -412,7 +412,7 @@ static ReplayOut replay(const syn::Scene& sc, const Aperture& bel, float phi, bo
                         bool use_beyond = true, bool use_frame = true, bool use_sil = true, bool verbose = false)
 {
     rc::exist::SensorModel sm;
-    rc::exist::RemovalPolicy pol;   // door_concept: MaxLogodds 4, RemovalProb 0.12, RemoveFrames 15
+    rc::exist::RemovalPolicy pol;   // the OLD door_concept parameters (all retired): max 4, removal prob 0.12, 15 frames
     rc::exist::ExistenceBelief B(L0, pol.logodds_max);
     rc::exist::RemovalDebounce deb;
     const auto poly = syn::room_poly();

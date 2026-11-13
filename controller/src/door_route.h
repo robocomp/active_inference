@@ -119,6 +119,15 @@ struct Plan
     std::string why;                          ///< non-empty on failure
 };
 
+/// An approach leg whose every waypoint is already inside the robot's arrival disc has no route to drive: the approach is done. It is
+/// reported as the route's arrival, as an approach from the doorway is, and never handed to RouteFollower, which cannot fit a curve to
+/// zero length (rose_chair1 door_24: at its vantage, 0.00 m refused twice, cross_unreachable). `arrival_tol_m` is the controller's own goal disc.
+[[nodiscard]] inline bool approach_already_done(const Plan& p, const Eigen::Vector2f& robot, float arrival_tol_m)
+{
+    return not p.through and p.why.empty() and not p.waypoints.empty()
+           and std::ranges::all_of(p.waypoints, [&](const Eigen::Vector2f& w) { return (w - robot).norm() <= arrival_tol_m; });
+}
+
 struct Params
 {
     float body_reach_m = 0.33f;   ///< nearest P_pre may come to the aperture plane (the body's reach toward the door)

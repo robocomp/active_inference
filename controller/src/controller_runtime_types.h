@@ -406,6 +406,25 @@ struct ControllerParams
     // Task 8 ([Policy], config.toml carries the provenance): the local policy drives the base; the old chain is OFF.
     bool  policy_enabled = false;               // default OFF in code: the config turns it on
     float policy_risk_eps = 0.01f;
+    // [ChainMonitor] (port step 2, 2026-11-11): the chain's monitors judge and LOG (chain_monitor.csv), never act
+    bool  chain_monitor_enabled = true;
+    float chain_sigma_track = 0.10f;   // ★FLAGGED prior: the robot measured 0.086 / 0.153 m (tools/tracker_sim); the log measures it
+    float chain_map_sigma = 0.02f;     // ★FLAGGED: the map's own position sigma (room_concept's layout sigma floor ~2 cm)
+    // PORT STEP 3 (2026-11-11): while the CHAIN drives (Policy.Enabled = false), the controller-local marks enter the planner's
+    // world and a plan-first verdict re-plans; the window's sigma_track is the posterior over the measured cross-track error.
+    bool  chain_marks_drive = true;
+    // PORT STEP 5 (2026-11-11): the HYBRID. With Policy.Enabled a plain Place goal is driven by the spline chain (planner,
+    // spline, PLAIN tracker, the monitors above); the policy drives only what the chain hands it (episodes) and, as without
+    // the hybrid, door passages, orient, lock-on, move orders and continuous missions. Off = the policy drives everything.
+    bool  policy_hybrid_chain = false;
+    float chain_sigma_track_prior_m = 5.f;    // ★FLAGGED: the prior sigma_track is worth this many metres of measured driving
+    float chain_sigma_track_yaw = 0.05f;      // ★FLAGGED prior heading-tracking sigma (rad), the mock's; measured like the lateral one
+    // ★ OFF until it has a live noise model (2026-11-11, chain3-8): the mock's step test (bel vs integrated odometry beyond
+    //   k_eps slip sigma) cannot be fed live — the scan-aligned pose's true stamp is not observable here (it clamps to the RT
+    //   edge's newest block 15 % of cycles; estimated stamps alternate 0 / 0.1 s), so 'relocalisations' fired 100-200 times in
+    //   2 min with NONE real and dragged every mark. A misplaced mark is still cleared by its own belief once seen through.
+    bool  chain_marks_carry = false;
+    float chain_slip_sigma = 0.05f;           // ★FLAGGED: odometry slip per metre/radian (the mock's), for the marks' relocalisation carry
     float policy_release_risk_max = 0.5f;
     float policy_progress_scale_m = 0.10f;
     float policy_horizon_s = 1.0f;

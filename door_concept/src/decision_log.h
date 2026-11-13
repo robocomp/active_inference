@@ -60,7 +60,7 @@ enum class DoorDecisionKind : std::uint16_t
     IdentityLoad,
     // a remembered row lost its restorable data on a FRESH entry: name, note=room
     IdentityStrip,
-    // plan_restore skipped a remembered row: name; a = SkipReason (0 NoPose, 1 NameLive [retired], 2 PlaceLive); note=room
+    // plan_restore skipped a remembered row: name; a = SkipReason (0 NoPose, 1 NameLive [retired], 2 PlaceLive, 3 Removed); note=room
     RestoreSkip,
     // RETIRED 2026-10-29 (no longer emitted: door names are opaque, a restored door may take a fresh name and nobody
     // cares). Kept so the kinds after it keep their values. Was: id=node, name=row name, note=assigned name

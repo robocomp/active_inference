@@ -118,7 +118,7 @@ RoomSwap::Event RoomSwap::step()
     return Event::None;
 }
 
-bool RoomSwap::swap(std::uint64_t known_room_id, const rc::recog::PoseMix &pose_in_k, std::uint64_t provisional_live_id)
+bool RoomSwap::swap(std::uint64_t known_room_id, const rc::recog::PoseMix &pose_in_k, std::uint64_t provisional_live_id, bool withdraw_crossing)
 {
     if (state_ == State::Staged) return known_id_ == known_room_id;      // already proposed for this room: idempotent
     if (state_ == State::Adopted) return false;                          // the robot is still in an adopted room
@@ -266,6 +266,7 @@ bool RoomSwap::swap(std::uint64_t known_room_id, const rc::recog::PoseMix &pose_
                                seam_cov_through_robot(K_from_robot, S_robot, Mat::RTMat(twin_from_K.value() * T.value()))});
         }
 
+    if (withdraw_crossing) carries.clear();        // no crossing happened: nothing to carry into K (K IS the previous room)
     // Every seam is T(K <- robot) . T(robot <- prev): keep the robot-side half, so the ACCEPTED verdict can rebuild the seam
     // from room_concept's T(P <- K) and the FIT's covariance (commit) instead of this prior mode's.
     for (auto &k : carries) k.robot_from_prev = Mat::RTMat(robot_from_K * k.known_from_prev);
@@ -299,6 +300,7 @@ bool RoomSwap::swap(std::uint64_t known_room_id, const rc::recog::PoseMix &pose_
     prov_rid_ = live_->get_attrib_by_name<room_id_att>(P.value());
     rt_at_swap_ = rc::room::robot_rt_room(*live_);
     promoted_case_ = twin.has_value();
+    withdraw_ = withdraw_crossing;
     prov_twin_ = twin.has_value() ? twin->name() : std::string{};
     prov_twin_subtype_ = prior_subtype;
     qInfo().noquote() << QString::fromStdString(std::format("[swap] PROPOSED: {} is {} (case {}); memory staged, nothing written until room_concept's verdict",
@@ -311,7 +313,7 @@ void RoomSwap::clear()
     state_ = State::Entering;
     carry_.clear();
     known_mem_.clear(); prov_twin_.clear(); prov_twin_subtype_.clear(); prov_name_.clear();
-    known_id_ = 0; prov_id_ = 0; prov_rid_.reset(); rt_at_swap_.reset(); promoted_case_ = false;
+    known_id_ = 0; prov_id_ = 0; prov_rid_.reset(); rt_at_swap_.reset(); promoted_case_ = false; withdraw_ = false;
 }
 
 bool RoomSwap::names_known(const std::string &room) const
@@ -338,6 +340,30 @@ void RoomSwap::retry_carries()
         if (ok)
             qInfo().noquote() << QString::fromStdString(std::format("[swap] deferred carry-over of {} into {} written (the previous room is archived now)", k.prev_face, known_mem_));
         return ok; });
+}
+
+void RoomSwap::drop_withdrawn_passages(const std::string &twin)
+{
+    // Every passage that joins only K and P's twin was written by the eviction this crossing caused: a passage to a room that
+    // does not exist. It goes, with K's face of it. A passage holding a face of any third room is a real hole memory already
+    // knew (a known door the robot did not actually pass): it stays, and P's face goes with the twin.
+    for (const auto &pn : mem_->get_nodes_by_type("metaconcept"))
+    {
+        if (subtype_of(*mem_, pn) != "passage") continue;
+        bool in_twin = false, only_K_and_twin = true;
+        std::vector<std::uint64_t> K_faces;
+        for (const auto &e : DSR::DSRGraph::get_node_edges_by_type(pn, "match"))
+        {
+            if (is_descendant(*mem_, e.to(), twin)) in_twin = true;
+            else if (is_descendant(*mem_, e.to(), known_mem_)) K_faces.push_back(e.to());
+            else only_K_and_twin = false;
+        }
+        if (not in_twin or not only_K_and_twin) continue;
+        for (const auto f : K_faces) mem_->delete_node(f);
+        qInfo().noquote() << QString::fromStdString(std::format("[swap] withdrawn crossing: passage {} and {} face(s) of {} removed from memory",
+                                                                pn.name(), K_faces.size(), known_mem_));
+        mem_->delete_node(pn.id());
+    }
 }
 
 void RoomSwap::commit()
@@ -380,8 +406,11 @@ void RoomSwap::commit()
     if (twin.empty() and prov_rid_.has_value())
         if (const auto t = mem_->get_node(std::format("r{}_{}", prov_rid_.value(), prov_name_)); t.has_value() and t->name() != known_mem_)
             twin = t->name();
+    if (withdraw_ and not twin.empty()) drop_withdrawn_passages(twin);
     if (not twin.empty()) drop_subtree(twin);
     state_ = State::Adopted;
+    if (withdraw_)
+        qInfo().noquote() << QString::fromStdString(std::format("[swap] CROSSING WITHDRAWN: the robot never left {}; {} removed", known_mem_, prov_name_));
     qInfo().noquote() << QString::fromStdString(std::format("[swap] ACCEPTED: {} adopted as {}; {}; K held until the robot leaves it",
             prov_name_, known_mem_, twin.empty() ? std::string("no twin to drop") : "twin " + twin + " dropped"));
 }
@@ -466,6 +495,30 @@ bool RoomSwap::carry_over(const std::string &prev_room_face, std::uint64_t known
 
     const auto it = std::ranges::find(carry_, prev_room_face, &Carry::prev_face);
     if (it == carry_.end()) return false;                                          // no seam for it: nothing is invented
+    // A passage is one hole between TWO rooms. This one already joins the previous room to a room that is not K, so K cannot be
+    // written onto it (cmp_br2: a third face made the layout mark the seam WRONG). The face of the provisional room's own twin does
+    // not count (case B: that face IS what K's replaces at the verdict). Memory's two faces stand and the conflict is left to the
+    // map: nothing to write, so nothing to retry.
+    const std::string own_twin = prov_rid_.has_value() ? std::format("r{}_{}", prov_rid_.value(), prov_name_) : std::string{};
+    const auto room_of_face = [&](std::uint64_t id) -> std::optional<DSR::Node> {
+        auto cur = mem_->get_node(id);
+        for (int depth = 0; cur.has_value() and depth < 16; ++depth)
+        {
+            if (cur->type() == "room") return cur;
+            const auto par = mem_->get_attrib_by_name<parent_att>(cur.value());
+            if (not par.has_value() or par.value() == cur->id()) break;
+            cur = mem_->get_node(par.value());
+        }
+        return std::nullopt; };
+    if (pass.has_value() and std::ranges::any_of(DSR::DSRGraph::get_node_edges_by_type(pass.value(), "match"), [&](const auto &e) {
+            const auto r = room_of_face(e.to());
+            return e.to() != prev->id() and r.has_value() and r->name() != it->prev_room and r->name() != K->name()
+                   and r->name() != own_twin and not is_staged_room(*mem_, r.value()); }))
+    {
+        qWarning().noquote() << QString::fromStdString(std::format("[swap] crossed door {}: {} already joins it to another room; {} is NOT written onto that passage",
+                                                                   prev_room_face, pass->name(), K->name()));
+        return true;
+    }
     auto ie = mem_->get_inner_eigen_api();
     const auto F = live_only ? live_->get_inner_eigen_api()->get_transformation_matrix(it->live_room, it->base)
                              : ie->get_transformation_matrix(it->prev_room, prev_room_face);     // the previous room's face, in its own frame

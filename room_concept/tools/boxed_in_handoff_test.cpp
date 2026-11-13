@@ -49,6 +49,22 @@ int main()
     CHECK(not rc::layout::boxed_in_handoff(again, 1));
     CHECK(not again.ok);
 
+    // explore_tour14: room_4 promoted 170 ms after its birth (1.8 m2, IoU 0.084). Its first plan had NO admissible
+    // standpoint (candidates=0: the one free spot lay in a refused area) and read "finished" — nothing evaluated taken
+    // for nothing left to learn. With no standpoint judged the plan carries no verdict about the room.
+    {
+        rc::layout::FeasibleGrid g2(room, ep.cell, ep.clearance);
+        const rc::layout::Admissible none = [](const V&) { return false; };
+        auto blind = rc::layout::plan_coverage(g2, robot, ep, none, [](const V&) { return 0.f; }, 0.5f, {});
+        CHECK(blind.evaluated == 0);
+        CHECK(not blind.finished);                     // no standpoint judged => no "finished"
+        CHECK(blind.why == "no_feasible");
+        // control: a room genuinely surveyed (every standpoint judged, none reveals anything) still finishes
+        auto done = rc::layout::plan_coverage(g2, robot, ep, {}, [](const V&) { return 0.f; }, 0.5f, {});
+        CHECK(done.evaluated > 0);
+        CHECK(done.finished and done.why == "finished");
+    }
+
     std::println("boxed_in_handoff_test: {}/{} checks passed", checks - failures, checks);
     return failures == 0 ? 0 : 1;
 }

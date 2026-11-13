@@ -538,7 +538,7 @@ std::vector<CameraVisualizer::ObjectBox> CameraVisualizer::get_dsr_object_boxes(
                 continue;
 
             const auto room_T_object = inner_eigen_api_->get_transformation_matrix(
-                room_frame_name(), node.name(), rt_timestamp, "RT", DSR::RT_API::TimeQuery::Nearest);
+                room_frame_name(), node.name(), rt_timestamp, "RT", DSR::RT_API::TimeQuery::Interpolated);
             if (!room_T_object.has_value())
                 continue;
 
@@ -619,7 +619,7 @@ std::vector<CameraVisualizer::WallQuad> CameraVisualizer::get_dsr_wall_quads(std
             continue;
 
         const auto room_T_wall = inner_eigen_api_->get_transformation_matrix(
-            room_frame_name(), node.name(), rt_timestamp, "RT", DSR::RT_API::TimeQuery::Nearest);
+            room_frame_name(), node.name(), rt_timestamp, "RT", DSR::RT_API::TimeQuery::Interpolated);
         if (!room_T_wall.has_value())
             continue;
 
@@ -699,7 +699,7 @@ std::optional<Eigen::Affine3d> CameraVisualizer::predicted_camera_from_room(std:
             room_frame_name(), robot_name, frame_ts, "RT", DSR::RT_API::TimeQuery::Interpolated);
     rt_probe.note(rt_info, graph_);
     const auto robot_T_zed = inner_eigen_api_->get_transformation_matrix(
-        robot_name, camera_node_name_, 0, "RT", DSR::RT_API::TimeQuery::Nearest);
+        robot_name, camera_node_name_, 0, "RT", DSR::RT_API::TimeQuery::Interpolated);
     if (!room_T_robot.has_value() || !robot_T_zed.has_value())
         return std::nullopt;
 

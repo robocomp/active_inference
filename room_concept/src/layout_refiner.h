@@ -12,6 +12,24 @@
 //              (the distance-to-boundary density of a uniform point in the room — no range constant);
 //              free cell d_out beyond the boundary: (1-eps) Phi(-d_out / sigma) + eps  (a beam through a modelled
 //              wall IS an outlier return: one eps, not two). sigma and eps are fitted by EM under the CURRENT polygon;
+//              ★ ONE OBSERVATION PER CROSSING (2026-11-10, clean33): the free cells outside a polygon are scored per
+//              5 cm of the polygon's boundary their beams crossed — the mean of their terms counts once — not once per
+//              cell. A beam through a wall says "the wall is open HERE"; the cells it then sweeps behind the wall all
+//              repeat that one fact. Per cell, a 2 cm slit at a shut door's jamb let ~1350 cells of the next room
+//              outweigh 20 vertices (kappa ~5.7 each) and room_1 annexed it. The crossing is found on the segment from
+//              the cell's mean beam origin (FreeSpacePolygon::evidence_cells `origin_free`) to the cell: its first exit
+//              through the polygon. A cell with no origin, or whose segment never leaves the polygon (seen from outside
+//              it), keeps its own term, as before.
+//              ★ ...ONE PER RESOLVABLE BEAM THROUGH THE CROSSING (2026-11-12, clean52/53). Counted per 5 cm piece, the
+//              number of observations depended on WHERE the hypothesis put the wall, not on the evidence: beams from a
+//              standpoint 0.65 m from a modelled wall fan through only ~5 pieces of it, so 1189 free cells of a real 4.7 m2
+//              arm counted 5 observations (0.8 nats) when the arm was left out — and the same beams, once the arm was
+//              taken in, crossed its FAR wall over many more pieces, so including the arm made the free term WORSE
+//              (+11.8 nats). A model whose observation count moves with the hypothesis prefers walls close to the sensor.
+//              Now the cells behind one piece are split into the beams the evidence itself can tell apart: directions
+//              from their origin binned at the angle ONE CELL subtends at the deepest cell behind that piece (beams closer
+//              than that land in the same cells and are not distinguishable in the raster). A slit's fan stays a handful
+//              of beams (refine_crossing_test: slit still rejected); a wide mouth seen from close counts its whole fan.
 //              each cell is weighted w = cell / ell, ell the residual correlation length along the walls (fitted
 //              from the residual autocorrelation) — adjacent cells of one wall are not independent observations.
 //   criterion  adopt edit e iff   dNLL + kappa * d|V| + ln(n_edges) < 0,   kappa = ln(L / sigma):
@@ -48,6 +66,8 @@
 #include <ranges>
 #include <string>
 #include <vector>
+#include <atomic>
+#include <thread>
 
 namespace rc::refine
 {
@@ -68,6 +88,21 @@ struct Edit
     float gain = 0.f;   ///< dNLL + kappa d|V| + ln n  (negative = adopted)
 };
 
+/// A known doorway of the room, map frame: its opening a..b and how far a return from its leaf may lie off that line.
+struct Doorway
+{
+    Eigen::Vector2f a{0.f, 0.f}, b{0.f, 0.f};
+    float depth = 0.f;   ///< m — DoorAperture::half_depth (LiDAR noise + half the door depth)
+};
+
+/// A region another outline of the map drew differently: added to (add) or cut from the room as ONE edit. Kept from
+/// promotion when it was a near miss (adopt_from_pool), so the refiner re-judges it as evidence arrives.
+struct Region
+{
+    std::vector<Eigen::Vector2f> ring;   ///< map frame
+    bool add = true;
+};
+
 struct Result
 {
     std::vector<Eigen::Vector2f> polygon;   ///< map frame, CCW
@@ -78,6 +113,9 @@ struct Result
     /// best REJECTED candidates — where a look would decide. The epistemic planner weights standpoints by how many
     /// of these are visible (the "testing behaviour").
     std::vector<Eigen::Vector2f> contested;
+    /// adopt_from_pool only: the pool regions that did not pay yet but came within one vertex (gain < kappa) — the
+    /// same near-miss rule that makes cells contested. Hand them to propose() so later evidence can decide them.
+    std::vector<Region> regions;
 };
 
 class LayoutRefiner
@@ -91,9 +129,12 @@ public:
                                  const std::vector<Eigen::Vector2f>& surf,
                                  const std::vector<Eigen::Vector2f>& free,
                                  const std::vector<float>& conf_surf = {},
-                                 const std::vector<float>& conf_free = {})
+                                 const std::vector<float>& conf_free = {},
+                                 const std::vector<Doorway>& doorways = {},
+                                 const std::vector<Eigen::Vector2f>& origin_free = {},
+                                 const std::vector<Region>& regions = {})
     {
-        last_ = propose_impl(poly, surf, free, conf_surf, conf_free);
+        last_ = propose_impl(poly, surf, free, conf_surf, conf_free, doorways, origin_free, regions);
         return last_;
     }
     [[nodiscard]] const Result& last() const { return last_; }
@@ -107,7 +148,8 @@ public:
                                                          const std::vector<Eigen::Vector2f>& surf,
                                                          const std::vector<Eigen::Vector2f>& free,
                                                          const std::vector<float>& conf_surf = {},
-                                                         const std::vector<float>& conf_free = {}) const
+                                                         const std::vector<float>& conf_free = {},
+                                                         const std::vector<Eigen::Vector2f>& origin_free = {}) const
     {
         std::vector<float> dl(cands.size(), std::numeric_limits<float>::infinity());
         if (ref.size() < 4 or surf.size() < 20) return dl;
@@ -118,8 +160,9 @@ public:
             return snap_axes(V);
         };
         const auto S = rot(surf, -th), Fr = rot(free, -th);
+        const auto OF = origin_free.size() == free.size() ? rot(origin_free, -th) : std::vector<Eigen::Vector2f>{};
         Scorer sc(S, Fr, p_, conf_surf.size() == S.size() ? conf_surf : std::vector<float>(S.size(), 1.f),
-                  conf_free.size() == Fr.size() ? conf_free : std::vector<float>(Fr.size(), 1.f));
+                  conf_free.size() == Fr.size() ? conf_free : std::vector<float>(Fr.size(), 1.f), OF);
         sc.fit(norm(ref));
         for (std::size_t i = 0; i < cands.size(); ++i)
             if (cands[i].size() >= 4)
@@ -129,9 +172,179 @@ public:
             }
         return dl;
     }
+
+    /// ★ PROMOTION JUDGES THE POOL EDIT BY EDIT, NOT OUTLINE BY OUTLINE (2026-11-12, clean53). Choosing among WHOLE
+    /// outlines charged a real feature for every unrelated defect drawn with it: the outlines that had the dead-end arm to
+    /// DOOR_1 (4.7 m2, -35 nats of wall evidence) also carried two incidental vertices and other crossings elsewhere, and
+    /// lost by ~6 nats to an arm-less one. Here the whole-outline winner (description_lengths) is only the START; every
+    /// region where another outline of the pool differs from it (each connected piece of C \ V and of V \ C) is then
+    /// proposed as ONE edit and judged by exactly the criterion propose() judges its own edits by:
+    ///   dNLL + kappa d|V| + ln n < 0,
+    /// greedily, best first, until none pays. The pool is a candidate GENERATOR (what the map has drawn), never a vote.
+    /// Same nuisances as description_lengths (fitted once on `ref`). Edits that grow through a known doorway are excluded,
+    /// as in propose(). Result.edits: kind "pool_add" / "pool_cut", value = the piece's area (m2).
+    [[nodiscard]] Result adopt_from_pool(const std::vector<std::vector<Eigen::Vector2f>>& pool,
+                                         const std::vector<Eigen::Vector2f>& ref,
+                                         const std::vector<Eigen::Vector2f>& surf,
+                                         const std::vector<Eigen::Vector2f>& free,
+                                         const std::vector<float>& conf_surf = {},
+                                         const std::vector<float>& conf_free = {},
+                                         const std::vector<Eigen::Vector2f>& origin_free = {},
+                                         const std::vector<Doorway>& doorways = {}) const
+    {
+        Result R;
+        if (ref.size() < 4 or surf.size() < 20 or pool.empty()) { R.polygon = ref; return R; }
+        const float th = dominant_theta(ref);
+        auto norm = [&](const std::vector<Eigen::Vector2f>& P)
+        {
+            auto V = rot(P, -th); if (freespace::signed_area(V) < 0.f) std::ranges::reverse(V);
+            return snap_axes(V);
+        };
+        const auto S = rot(surf, -th), Fr = rot(free, -th);
+        const auto OF = origin_free.size() == free.size() ? rot(origin_free, -th) : std::vector<Eigen::Vector2f>{};
+        std::vector<Doorway> D;
+        for (const auto& d : doorways) { const auto ab = rot({d.a, d.b}, -th); D.push_back({ab[0], ab[1], d.depth}); }
+        Scorer sc(S, Fr, p_, conf_surf.size() == S.size() ? conf_surf : std::vector<float>(S.size(), 1.f),
+                  conf_free.size() == Fr.size() ? conf_free : std::vector<float>(Fr.size(), 1.f), OF);
+        sc.fit(norm(ref));
+        R.sigma = sc.sigma; R.eps = sc.eps; R.ell = sc.ell; R.kappa = sc.kappa; R.w = sc.w;
+        std::vector<std::vector<Eigen::Vector2f>> C;
+        for (const auto& P : pool) if (P.size() >= 4) if (auto Q = norm(P); std::ranges::find(C, Q) == C.end()) C.push_back(std::move(Q));
+        if (C.empty()) { R.polygon = ref; return R; }
+        // the start: the whole-outline winner
+        std::vector<Eigen::Vector2f> V; float F0 = std::numeric_limits<float>::infinity();
+        for (const auto& Q : C)
+            if (const float dl = sc.nll(Q) + sc.kappa * float(Q.size()); dl < F0) { F0 = dl; V = Q; }
+        F0 = sc.nll(V);
+        R.nll_before = F0;
+        for (int round = 0; round < p_.max_rounds; ++round)
+        {
+            std::vector<std::pair<Edit, std::vector<Eigen::Vector2f>>> cands;
+            std::vector<std::pair<std::vector<Eigen::Vector2f>, bool>> near_pieces;   // aligned with cands (room axes)
+            for (const auto& Q : C)
+                for (const bool add : {true, false})
+                    for (auto& piece : pieces(add ? Q : V, add ? V : Q))
+                        if (auto Vq = region_edit(V, piece, add); Vq and not grows_through_doorway(V, *Vq, D)
+                            and std::ranges::none_of(cands, [&](const auto& c) { return c.second == *Vq; }))
+                        {
+                            cands.push_back({{add ? "pool_add" : "pool_cut", -1, std::abs(freespace::signed_area(piece)), 0.f}, std::move(*Vq)});
+                            near_pieces.emplace_back(std::move(piece), add);
+                        }
+            const auto gains = edit_gains(sc, cands, F0, V.size());
+            std::optional<std::size_t> best; float best_gain = 0.f;
+            for (std::size_t i = 0; i < cands.size(); ++i)
+                if (gains[i] < best_gain) { best_gain = gains[i]; best = i; }
+            if (not best)
+            {   // nothing pays: the near misses (within one vertex, propose()'s contested rule) are kept, best first —
+                // ★k_rect of them, a CPU budget (flagged): each is one more candidate in every later refinement round
+                std::vector<std::size_t> order(cands.size());
+                std::iota(order.begin(), order.end(), std::size_t{0});
+                std::ranges::sort(order, {}, [&](std::size_t i) { return gains[i]; });
+                std::vector<Eigen::Vector2f> cells;
+                for (const auto i : order | std::views::take(static_cast<std::size_t>(p_.k_rect)))
+                    if (gains[i] < sc.kappa)
+                    {
+                        R.regions.push_back({rot(near_pieces[i].first, th), near_pieces[i].second});
+                        sc.changed_cells(V, cands[i].second, cells);
+                    }
+                R.contested = rot(cells, th);
+                break;
+            }
+            auto [e, Vq] = std::move(cands[*best]);
+            e.gain = best_gain; R.edits.push_back(e);
+            V = std::move(Vq); F0 = sc.nll(V);
+        }
+        R.nll_after = F0;
+        R.polygon = rot(V, th);
+        return R;
+    }
     [[nodiscard]] const Params& params() const { return p_; }
 
 private:
+    /// The criterion of every edit, dNLL + kappa d|V| + ln n, for all candidates. Scorer::nll is const and reads only,
+    /// so the candidates are scored on a few threads (★CPU budget, flagged: at most 8; promotion scores ~600 pool
+    /// regions per round at ~0.8 ms each, which serially stalled the update for ~2 s).
+    template <class Sc>
+    static std::vector<float> edit_gains(const Sc& sc, const std::vector<std::pair<Edit, std::vector<Eigen::Vector2f>>>& cands,
+                                         float F0, std::size_t n_verts)
+    {
+        std::vector<float> g(cands.size());
+        const auto one = [&](std::size_t i)
+        {
+            const auto& Vq = cands[i].second;
+            g[i] = sc.nll(Vq) - F0 + sc.kappa * float(int(Vq.size()) - int(n_verts)) + std::log(float(n_verts));
+        };
+        const unsigned nt = std::min<unsigned>({8u, std::max(1u, std::thread::hardware_concurrency()),
+                                                static_cast<unsigned>((cands.size() + 15) / 16)});
+        if (nt <= 1) { for (std::size_t i = 0; i < cands.size(); ++i) one(i); return g; }
+        std::atomic<std::size_t> next{0};
+        {
+            std::vector<std::jthread> workers;
+            for (unsigned t = 0; t < nt; ++t)
+                workers.emplace_back([&] { for (std::size_t i; (i = next.fetch_add(1)) < cands.size();) one(i); });
+        }   // joined
+        return g;
+    }
+    /// The connected pieces of A \ B (each an outer ring; a piece with a hole is not a region a room can gain or lose).
+    static std::vector<std::vector<Eigen::Vector2f>> pieces(const std::vector<Eigen::Vector2f>& A, const std::vector<Eigen::Vector2f>& B)
+    {
+        namespace bg = boost::geometry;
+        const auto to_b = [](const std::vector<Eigen::Vector2f>& P)
+        {
+            BPoly out;
+            for (const auto& v : P) bg::append(out.outer(), BPt(v.x(), v.y()));
+            bg::append(out.outer(), BPt(P.front().x(), P.front().y()));
+            bg::correct(out);
+            return out;
+        };
+        bg::model::multi_polygon<BPoly> diff;
+        bg::difference(to_b(A), to_b(B), diff);
+        std::vector<std::vector<Eigen::Vector2f>> out;
+        for (const auto& p : diff)
+        {
+            if (not p.inners().empty()) continue;
+            std::vector<Eigen::Vector2f> ring;
+            for (std::size_t k = 0; k + 1 < p.outer().size(); ++k)
+                ring.emplace_back(static_cast<float>(p.outer()[k].x()), static_cast<float>(p.outer()[k].y()));
+            if (ring.size() >= 3) out.push_back(std::move(ring));
+        }
+        return out;
+    }
+    /// V ∪ piece (add) or V \ piece (cut), on the vector polygons: one room, no hole, simple — else no edit.
+    static std::optional<std::vector<Eigen::Vector2f>> region_edit(const std::vector<Eigen::Vector2f>& V,
+                                                                   const std::vector<Eigen::Vector2f>& piece, bool add)
+    {
+        namespace bg = boost::geometry;
+        BPoly P, B;
+        for (const auto& v : V) bg::append(P.outer(), BPt(v.x(), v.y()));
+        bg::append(P.outer(), BPt(V.front().x(), V.front().y()));
+        bg::correct(P);
+        for (const auto& v : piece) bg::append(B.outer(), BPt(v.x(), v.y()));
+        bg::append(B.outer(), BPt(piece.front().x(), piece.front().y()));
+        bg::correct(B);
+        return ring_of(P, B, add);
+    }
+    static std::optional<std::vector<Eigen::Vector2f>> ring_of(const auto& P, const auto& B, bool add)
+    {
+        namespace bg = boost::geometry;
+        bg::model::multi_polygon<BPoly> out;
+        if (add) bg::union_(P, B, out); else bg::difference(P, B, out);
+        if (out.size() != 1 or not out.front().inners().empty()) return std::nullopt;   // split or holed: not a room
+        std::vector<Eigen::Vector2f> ring;
+        const auto& o = out.front().outer();
+        for (std::size_t k = 0; k + 1 < o.size(); ++k)   // drop the closing point
+        {
+            const Eigen::Vector2f q(static_cast<float>(o[k].x()), static_cast<float>(o[k].y()));
+            if (ring.empty() or (q - ring.back()).squaredNorm() > 0.f) ring.push_back(q);
+        }
+        while (ring.size() > 1 and (ring.front() - ring.back()).squaredNorm() == 0.f) ring.pop_back();
+        ring = freespace::FreeSpacePolygon::merge_collinear(ring);
+        if (ring.size() < 4) return std::nullopt;
+        if (freespace::signed_area(ring) < 0.f) std::ranges::reverse(ring);
+        if (not freespace::is_simple(ring)) return std::nullopt;
+        return ring;
+    }
+
     Params p_;
     Result last_;
 
@@ -139,7 +352,10 @@ private:
                                       const std::vector<Eigen::Vector2f>& surf,
                                       const std::vector<Eigen::Vector2f>& free,
                                       const std::vector<float>& conf_surf,
-                                      const std::vector<float>& conf_free) const
+                                      const std::vector<float>& conf_free,
+                                      const std::vector<Doorway>& doorways,
+                                      const std::vector<Eigen::Vector2f>& origin_free,
+                                      const std::vector<Region>& regions = {}) const
     {
         Result R;
         if (poly.size() < 4 or surf.size() < 20) { R.polygon = poly; return R; }
@@ -147,8 +363,11 @@ private:
         auto V = rot(poly, -th); if (freespace::signed_area(V) < 0.f) std::ranges::reverse(V);
         V = snap_axes(V);
         const auto S = rot(surf, -th), Fr = rot(free, -th);
+        const auto OF = origin_free.size() == free.size() ? rot(origin_free, -th) : std::vector<Eigen::Vector2f>{};
+        std::vector<Doorway> D;
+        for (const auto& d : doorways) { const auto ab = rot({d.a, d.b}, -th); D.push_back({ab[0], ab[1], d.depth}); }
         Scorer sc(S, Fr, p_, conf_surf.size() == S.size() ? conf_surf : std::vector<float>(S.size(), 1.f),
-                  conf_free.size() == Fr.size() ? conf_free : std::vector<float>(Fr.size(), 1.f));
+                  conf_free.size() == Fr.size() ? conf_free : std::vector<float>(Fr.size(), 1.f), OF);
         sc.fit(V);
         R.sigma = sc.sigma; R.eps = sc.eps; R.ell = sc.ell; R.kappa = sc.kappa; R.w = sc.w;
         R.nll_before = sc.nll(V);
@@ -157,15 +376,15 @@ private:
         for (int round = 0; round < p_.max_rounds; ++round)
         {
             auto cands = candidates(V, sc);
+            for (const auto& g : regions)   // the pool's near misses (adopt_from_pool), re-judged on today's evidence
+                if (auto Vq = region_edit(V, rot(g.ring, -th), g.add))
+                    cands.push_back({{g.add ? "pool_add" : "pool_cut", -1, std::abs(freespace::signed_area(g.ring)), 0.f}, std::move(*Vq)});
+            std::erase_if(cands, [&](const auto& c) { return grows_through_doorway(V, c.second, D); });
             if (cands.empty()) break;
+            const auto gains = edit_gains(sc, cands, F0, V.size());
             std::optional<std::size_t> best; float best_gain = 0.f;
-            std::vector<float> gains(cands.size());
             for (std::size_t i = 0; i < cands.size(); ++i)
-            {
-                const auto& [e, Vq] = cands[i];
-                gains[i] = sc.nll(Vq) - F0 + sc.kappa * float(int(Vq.size()) - int(V.size())) + std::log(float(V.size()));
                 if (gains[i] < best_gain) { best_gain = gains[i]; best = i; }
-            }
             if (not best)
             {   // nothing pays: the contested cells are those of the near-miss candidates (gain within one vertex)
                 for (std::size_t i = 0; i < cands.size(); ++i)
@@ -180,6 +399,37 @@ private:
         R.polygon = rot(V, th);
         R.contested = rot(best_rejected_cells, th);
         return R;
+    }
+
+    // ── A DOORWAY IS WHERE A ROOM ENDS (explore_tour15) ──────────────────────────────────────────────────────
+    // Free cells seen through an opening are the next room's floor. The per-beam door filter keeps them out of the
+    // evidence only while the door is believed OPEN; live, door_concept held DOOR_0 shut (p_open 0.01) while it stood
+    // open, and the refiner adopted a 0.3 x 2.6 m 'extend' through it — which, excluded from the next room's map,
+    // then blinded that room. The opening's GEOMETRY is known whatever the leaf's state, so the outline is held to it:
+    // an edit that newly covers the line just past the door's own depth (one cell beyond, the raster's resolution)
+    // across the opening has grown through it. The room's side of the line is the side the current outline is on;
+    // when the outline is on both or neither (it does not end at this doorway) the doorway says nothing.
+    [[nodiscard]] bool grows_through_doorway(const std::vector<Eigen::Vector2f>& V, const std::vector<Eigen::Vector2f>& Vq,
+                                             const std::vector<Doorway>& D) const
+    {
+        for (const auto& d : D)
+        {
+            const Eigen::Vector2f m = 0.5f * (d.a + d.b), ab = d.b - d.a;
+            const float half = 0.5f * ab.norm();
+            if (half < p_.cell) continue;
+            const Eigen::Vector2f t = ab / (2.f * half);
+            Eigen::Vector2f n(-t.y(), t.x());
+            const float past = d.depth + p_.cell;
+            const bool in_plus = freespace::point_in_polygon(m + n * past, V), in_minus = freespace::point_in_polygon(m - n * past, V);
+            if (in_plus == in_minus) continue;
+            if (in_plus) n = -n;                       // n points OUT of the room
+            for (float u = -half; u <= half; u += p_.cell)
+            {
+                const Eigen::Vector2f q = m + t * u + n * past;
+                if (freespace::point_in_polygon(q, Vq) and not freespace::point_in_polygon(q, V)) return true;
+            }
+        }
+        return false;
     }
 
     // ── geometry ───────────────────────────────────────────────────────────────────────────────────────────
@@ -250,10 +500,34 @@ private:
     {
         const std::vector<Eigen::Vector2f>& S; const std::vector<Eigen::Vector2f>& Fr; Params p;
         std::vector<float> CS, CF;   ///< per-cell class posteriors (the accumulated-evidence weights)
+        std::vector<Eigen::Vector2f> OF;   ///< per free cell, the mean origin of its beams (empty = unknown: per cell)
         float sigma, eps = 0.3f, ell, w = 1.f, kappa = 0.f, L = 1.f;
         Scorer(const std::vector<Eigen::Vector2f>& s, const std::vector<Eigen::Vector2f>& f, Params pp,
-               std::vector<float> cs, std::vector<float> cf)
-            : S(s), Fr(f), p(pp), CS(std::move(cs)), CF(std::move(cf)), sigma(pp.sigma0), ell(pp.cell) {}
+               std::vector<float> cs, std::vector<float> cf, std::vector<Eigen::Vector2f> of = {})
+            : S(s), Fr(f), p(pp), CS(std::move(cs)), CF(std::move(cf)),
+              OF(of.size() == f.size() ? std::move(of) : std::vector<Eigen::Vector2f>{}), sigma(pp.sigma0), ell(pp.cell) {}
+
+        /// Where the segment o -> q first LEAVES the ring with edges E (outward crossing, smallest t in (0, 1]): the
+        /// edge and the index of the `cell`-long piece of it crossed. nullopt when the segment never leaves the ring.
+        static std::optional<std::pair<int, int>> first_exit(const Eigen::Vector2f& o, const Eigen::Vector2f& q,
+                                                             const std::vector<Edge>& E, float cell)
+        {
+            const Eigen::Vector2f d = q - o;
+            float best_t = std::numeric_limits<float>::infinity(); std::optional<std::pair<int, int>> out;
+            for (std::size_t m = 0; m < E.size(); ++m)
+            {
+                const auto& e = E[m];
+                const float dn = e.h ? d.y() : d.x();                      // along the edge's normal axis
+                if (not (dn * e.sgn > 0.f)) continue;                      // not moving outward through this edge
+                const float t = (e.v - (e.h ? o.y() : o.x())) / dn;
+                if (not (t > 0.f and t <= 1.f) or t >= best_t) continue;
+                const float along = e.h ? o.x() + t * d.x() : o.y() + t * d.y();
+                if (along < e.lo or along > e.hi) continue;
+                best_t = t;
+                out = std::pair{static_cast<int>(m), static_cast<int>(std::floor((along - e.lo) / cell))};
+            }
+            return out;
+        }
 
         static float log_norm(float d, float sig) { return -0.5f * (d / sig) * (d / sig) - std::log(sig * 2.5066283f); }
         static float log_phi_tail(float x)   // log Phi(-x), x >= 0
@@ -326,11 +600,42 @@ private:
                 const auto n = nearest(S[i], E);
                 acc -= CS[i] * lse(std::log(1 - eps) + log_norm(n.d, sigma), std::log(eps) + lo);
             }
+            // free cells outside V: one observation per RESOLVABLE BEAM through a crossing (header) — the mean term of the
+            // cells of that beam behind it
+            struct Through { std::int64_t key; double term; float alpha, r; };
+            std::vector<Through> through;
             for (std::size_t i = 0; i < Fr.size(); ++i)
             {
                 if (freespace::point_in_polygon(Fr[i], V)) continue;
                 const auto n = nearest(Fr[i], E);
-                acc -= CF[i] * lse(std::log(1 - eps) + log_phi_tail(n.d / sigma), std::log(eps));
+                const double term = -CF[i] * lse(std::log(1 - eps) + log_phi_tail(n.d / sigma), std::log(eps));
+                const auto x = OF.empty() ? std::nullopt : first_exit(OF[i], Fr[i], E, p.cell);
+                if (x)
+                {
+                    const Eigen::Vector2f d = Fr[i] - OF[i];
+                    through.push_back({std::int64_t(x->first) * (std::int64_t(1) << 32) + x->second, term, std::atan2(d.y(), d.x()), d.norm()});
+                }
+                else acc += term;
+            }
+            std::ranges::sort(through, {}, &Through::key);
+            std::vector<std::pair<std::int64_t, double>> beams;   // (direction bin, term) of one crossing
+            for (std::size_t a = 0; a < through.size();)
+            {
+                std::size_t b = a; float r_far = 0.f;
+                for (; b < through.size() and through[b].key == through[a].key; ++b) r_far = std::max(r_far, through[b].r);
+                const float delta = p.cell / std::max(r_far, p.cell);   // the angle one cell subtends at the deepest cell
+                beams.clear();
+                for (std::size_t k = a; k < b; ++k)
+                    beams.emplace_back(static_cast<std::int64_t>(std::floor(through[k].alpha / delta)), through[k].term);
+                std::ranges::sort(beams, {}, &std::pair<std::int64_t, double>::first);
+                for (std::size_t u = 0; u < beams.size();)
+                {
+                    std::size_t v = u; double s = 0.0;
+                    for (; v < beams.size() and beams[v].first == beams[u].first; ++v) s += beams[v].second;
+                    acc += s / double(v - u);
+                    u = v;
+                }
+                a = b;
             }
             return static_cast<float>(w * acc);
         }
@@ -347,11 +652,17 @@ private:
     };
 
     // ── raster: only for the contested masks (which cells are swept-free outside / never-swept inside) ────────────
+    // ★ THE RASTER SPANS THE EVIDENCE, NOT THE POLYGON (2026-11-12, clean53). It was the polygon's box + 0.5 m, so a
+    //   swept-free arm reaching 2 m past the outline was proposed only as its first 0.5 m: a box ending mid-floor, which
+    //   explains none of the arm's far walls and leaves its far free cells outside — every such slice cost more than its
+    //   vertices (+23..+25 nats) and the 4.7 m2 dead-end arm to DOOR_1 was never on the table in 25 s of refinement.
+    //   The extent is where candidates may come from; whether one is taken is still the scorer's decision.
     struct Raster { float u0, v0; int W, H; std::vector<std::uint8_t> m; };
-    Raster rasterize(const std::vector<Eigen::Vector2f>& V, float pad) const
+    Raster rasterize(const std::vector<Eigen::Vector2f>& V, float pad, const std::vector<Eigen::Vector2f>& evidence = {}) const
     {
         float x0 = 1e9f, x1 = -1e9f, y0 = 1e9f, y1 = -1e9f;
         for (const auto& v : V) { x0 = std::min(x0, v.x()); x1 = std::max(x1, v.x()); y0 = std::min(y0, v.y()); y1 = std::max(y1, v.y()); }
+        for (const auto& v : evidence) { x0 = std::min(x0, v.x()); x1 = std::max(x1, v.x()); y0 = std::min(y0, v.y()); y1 = std::max(y1, v.y()); }
         Raster r; r.u0 = x0 - pad; r.v0 = y0 - pad;
         r.W = static_cast<int>((x1 - x0 + 2 * pad) / p_.cell) + 2; r.H = static_cast<int>((y1 - y0 + 2 * pad) / p_.cell) + 2;
         r.m.assign(static_cast<std::size_t>(r.W) * r.H, 0);
@@ -379,22 +690,7 @@ private:
         for (const auto& [x, y] : std::array<std::array<float, 2>, 5>{{{a0, b0}, {a1, b0}, {a1, b1}, {a0, b1}, {a0, b0}}})
             bg::append(B.outer(), BPt(x, y));
         bg::correct(B);
-        bg::model::multi_polygon<BPoly> out;
-        if (add) bg::union_(P, B, out); else bg::difference(P, B, out);
-        if (out.size() != 1 or not out.front().inners().empty()) return std::nullopt;   // split or holed: not a room
-        std::vector<Eigen::Vector2f> ring;
-        const auto& o = out.front().outer();
-        for (std::size_t k = 0; k + 1 < o.size(); ++k)   // drop the closing point
-        {
-            const Eigen::Vector2f q(static_cast<float>(o[k].x()), static_cast<float>(o[k].y()));
-            if (ring.empty() or (q - ring.back()).squaredNorm() > 0.f) ring.push_back(q);
-        }
-        while (ring.size() > 1 and (ring.front() - ring.back()).squaredNorm() == 0.f) ring.pop_back();
-        ring = freespace::FreeSpacePolygon::merge_collinear(ring);
-        if (ring.size() < 4) return std::nullopt;
-        if (freespace::signed_area(ring) < 0.f) std::ranges::reverse(ring);
-        if (not freespace::is_simple(ring)) return std::nullopt;
-        return ring;
+        return ring_of(P, B, add);
     }
     /// A contested rectangle comes from the 5 cm mask and stops a cell short of the walls (cells within sigma of an
     /// edge are excluded by construction). Close that representation gap: a box side within sigma + one cell of a
@@ -545,7 +841,7 @@ private:
         }
         // contested masks in the room axes: EXT = free & outside & beyond sigma; UNS = inside & not free & beyond sigma
         {
-            auto r = rasterize(V, p_.reach + 2 * p_.cell);
+            auto r = rasterize(V, p_.reach + 2 * p_.cell, sc.Fr);
             std::vector<std::uint8_t> freem(r.m.size(), 0), ext(r.m.size(), 0), uns(r.m.size(), 0);
             auto at = [&](const Eigen::Vector2f& q, int& i, int& j)
             { i = static_cast<int>(std::floor((q.x() - r.u0) / p_.cell)); j = static_cast<int>(std::floor((q.y() - r.v0) / p_.cell)); return i >= 0 and j >= 0 and i < r.W and j < r.H; };

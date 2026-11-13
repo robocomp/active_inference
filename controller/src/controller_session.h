@@ -41,6 +41,8 @@
 #include "local_policy/field_extent.h"     // Task 3f (b): the field over extent ∪ goals; unseen cells at the prior
 #include "local_policy/cross_through.h"    // Task 3f (a): `through` as a posterior past the room switch
 #include "local_policy/unseen_contact.h"
+#include "chain_monitor/chain_monitor.h"   // the chain's monitors (shared with the 2-D mock)
+#include "controller_status_snapshot.h"    // status_snapshot(): the status column's read-only copy
 
 class ControllerSession
 {
@@ -152,6 +154,10 @@ public:
                         const ControllerObstacleVisuals &obstacle_polys,
                         const ControllerPolygons &obstacle_rfe_points,
                         int max_lidar_draw_points) const;
+    /// What the controller is doing, as plain values for the window's status column (controller_status_snapshot.cpp).
+    /// Read-only copy, control thread; the GUI turns it into words at its own rate.
+    [[nodiscard]] rc::ControllerStatusSnapshot status_snapshot(const std::optional<ControllerRobotPose> &robot_pose,
+                                                               std::uint64_t now_ms) const;
 
     void execute_plan(const ControllerRobotPose &robot_pose,
                       rc::TrajectoryController &path_controller,
@@ -380,7 +386,9 @@ private:
                           std::source_location floc = std::source_location::current());
 
     // ── Task 8: the policy drive (controller_policy_drive.cpp) ─────────────────────────────────────────────────────────
-    void drive_with_policy(const ControllerRobotPose &robot_pose, rc::TrajectoryController &path_controller,
+    // returns true when the HYBRID's chain drives this cycle (a plain Place, chain route installed, no episode / wait): the caller
+    // then runs the chain's tracker path; false = the policy (or a hold) owned the cycle
+    bool drive_with_policy(const ControllerRobotPose &robot_pose, rc::TrajectoryController &path_controller,
                            ControllerObstacleTracker &obstacle_tracker, ControllerMotionCommander &motion_commander,
                            ControllerDisplay &display, rc::AffordanceManager &affordance_manager, const TimeSource &time_source);
     // The ARRIVAL protocol of a point target (servo → lock-on, already-there, approach-only retry, REACH), extracted from
@@ -421,7 +429,7 @@ private:
     std::deque<rc::policy::SentCommand> policy_sent_;            // send history (s, steady) for the commands in force
     std::optional<rc::policy::Pose2> policy_odom_;               // odometry pose: integrated wheel speeds, never relocalised
     rc::policy::RoomFrameGuard policy_frame_;                    // Live fix 2: a room-frame change resets the policy
-    float policy_period_s_ = 0.f;                                // C9: the measured control period (EMA over the policy's own ticks); 0 = not yet
+    float policy_period_s_ = 0.f;                                // C9: the measured control period (EMA over control cycles, sync_world_state); 0 = not yet
     double policy_period_prev_s_ = -1.0;
     rc::policy::PolicyTickGate policy_gate_;                     // review I1 / fix 2.1: holds and gaps interrupt the plan
     float odo_v_ = 0.f, odo_w_ = 0.f;                            // robot_current_advance / angular speed (CCW+), this cycle
@@ -454,6 +462,7 @@ private:
     bool published_target_admissible(const ControllerTargetInfo &t) const;
     std::uint64_t policy_no_anchor_since_ms_ = 0;                // Live fix 4: a cross claim waiting for its anchor
     rc::policy::StaleAnchorWait policy_stale_wait_;              // Live fix 4: facing a never-published anchor
+    rc::policy::StaleAnchorWait mouth_wait_;                     // clean50: placed at the vantage, no mouth seen (bounded hold)
     // ★ Task 3b (rtD1c leg 5): the leaf door_concept models, in the room frame of `policy_leaf_room_`, held by the policy's cross
     //   (drive_with_policy) — sync_world_state re-prices residual's SOFT cells by it before set_world (door_leaf.h
     //   explain_residual_by_leaf; hard cells stay occupied), so the leaf's smear stops counting as unexplained belief.
@@ -465,6 +474,13 @@ private:
     std::optional<rc::policy::DoorwayRisk> policy_held_jambs_;
     std::string policy_held_room_;
     bool policy_held_active_ = false;
+    // clean18: the leaf of the door last crossed (room frame of policy_passed_leaf_room_), a known obstacle for the PLANNER until
+    // the next crossing replaces it or the room frame changes. Unlike the held doorway it does not end when the body walks out of
+    // the leaf's reach: the next route is planned from out there, on a residual map the room switch has just emptied.
+    rc::policy::DoorLeaf policy_passed_leaf_;
+    std::string policy_passed_leaf_room_;
+    std::string policy_passed_leaf_logged_;
+    rc::policy::ClearingNoRoute policy_door_route_no_route_;          // clean18: a door route with no field route fails, as a clearing does
     // ...and what sync_world_state did with it this cycle: the planner keeps every cell at the price all hypotheses agree on,
     // and this holds each hypothesis's excess, so EVERY policy field this cycle adds door_leaf_density over it (policy_tick
     // extra_fn). Null = no leaf held.
@@ -867,6 +883,67 @@ private:
     std::string   reach_unreachable_name_;
     bool          route_dropped_ = false;      ///< an Unreachable was just reported: stop and drop the old route
     std::ofstream plan_track_csv_;             ///< plan_track.csv: per-cycle plan geometry + tracking errors
+    // ── THE CHAIN'S MONITORS (port step 2 logging, 2026-11-11; step 3: marks + plan-first while the CHAIN drives;
+    //    controller_chain_monitor.cpp). Returns true when the chain asks for a re-plan this cycle (step 3 only).
+    enum class ChainAction { None, Replan, Episode };
+    ChainAction step_chain_monitor(const ControllerRobotPose &robot_pose, const rc::ControlOutput &out,
+                                   ControllerObstacleTracker &obstacle_tracker, const rc::TrajectoryController &path_controller);
+    // the live returns (contact band, room frame, the window's span) and ONE look of the marks' belief on this sweep; run by the
+    // monitor while the chain tracks, and by the hybrid while an episode or a WAIT owns the base (controller_chain_hybrid.cpp)
+    struct ChainObs { std::vector<rc::policy::Return> cells; std::size_t cleared = 0; std::vector<Eigen::Vector2f> cleared_at; };
+    ChainObs chain_observe(const rc::policy::Pose2 &bel, ControllerObstacleTracker &obstacle_tracker);
+    float chain_sigma_track_now_ = 0.10f;      ///< this cycle's sigma_track posterior (the monitor's)
+    // the monitor's last verdict, for the status panel: 0 clear, 1 problem seen beyond reach, 2 unmapped cause, 3 impassable,
+    // 4 hand-off; its distance ahead (m, route arc), the progress monitor's last judgement, and when (steady ms)
+    int chain_last_verdict_ = -1; float chain_last_ahead_m_ = 0.f; bool chain_last_stall_ = false; std::uint64_t chain_last_monitor_ms_ = 0;
+    // ── PORT STEP 4 — WAIT: no route on map + marks, one on the map alone -> stopped and watching until a mark clears
+    bool chain_wait_ = false;
+    // ── PORT STEP 5 — THE HYBRID (Policy.HybridChain; controller_chain_hybrid.cpp) ──
+    [[nodiscard]] bool chain_hybrid_on() const
+    { return params_ != nullptr and params_->policy_hybrid_chain and params_->chain_monitor_enabled and policy_enabled(); }
+    bool chain_hybrid_place_ = false;          ///< drive_with_policy reached its PLACE branch last cycle (the chain plans for it)
+    struct ChainEpisode
+    {
+        bool active = false, final = false;    ///< final: the episode's goal is the target itself (its Arrived completes it)
+        Eigen::Vector2f sub = Eigen::Vector2f::Zero();
+        float s_end = 0.f;                     ///< arc length where the handed-over stretch ends
+        double next_pass_s = 0.0;              ///< next passability evaluation (twice a second)
+        std::shared_ptr<std::vector<char>> corr; Eigen::Vector2f corr_origin = Eigen::Vector2f::Zero(); float corr_cell = 0.05f; int corr_w = 0, corr_h = 0;
+        std::string why;
+    };
+    ChainEpisode chain_ep_;
+    ControllerPolygons chain_ep_marks_;     ///< the marks' squares as the planner had them when the episode began (frozen during it)
+    const char *chain_ep_request_ = nullptr;   ///< a hand-off asked for this cycle (why), served by the PLACE branch next
+    int chain_ep_first_bad_ = 0;
+    Eigen::Vector2f chain_last_replan_at_{1e9f, 1e9f};
+    void chain_start_episode(const rc::policy::Pose2 &bel, const std::vector<rc::policy::Return> &cells, int first_bad, const char *why);
+    // one cycle of an episode; true = it owned the cycle
+    bool chain_drive_episode(const rc::policy::GoalSpec &final_spec, const std::string &who, const ControllerRobotPose &robot_pose,
+                             const ControllerRobotPose &cpose, rc::TrajectoryController &path_controller,
+                             ControllerObstacleTracker &obstacle_tracker, ControllerMotionCommander &motion_commander,
+                             ControllerDisplay &display, rc::AffordanceManager &affordance_manager, const TimeSource &time_source);
+    void chain_episode_failed(const rc::policy::Pose2 &bel, const std::vector<rc::policy::Return> &cells, float s0, float s1, const char *why);
+    /// step 3 in force: the chain drives (policy off), the monitors are on and their marks are allowed to act
+    [[nodiscard]] bool chain_marks_drive() const
+    { return params_ != nullptr and params_->chain_monitor_enabled and params_->chain_marks_drive and not policy_enabled(); }
+    std::ofstream chain_csv_;                  ///< chain_monitor.csv
+    rc::chain::MarkSet chain_marks_;           ///< controller-local marks (room frame of chain_marks_room_)
+    std::string chain_marks_room_;             ///< the room whose frame the marks are in (a room switch drops them)
+    bool chain_marks_in_world_ = false;        ///< this cycle's planner world holds the marks (sync_world_state)
+    bool chain_clear_check_ = false;            ///< a mark near the route cleared: next cycle, re-plan only if the route gets SHORTER
+    bool chain_marks_off_ = false;             ///< no route WITH the marks to the current target: plan it on the map alone (WAIT = step 4)
+    rc::chain::ProgressMonitor chain_progress_;
+    float chain_s_prog_ = 0.f, chain_last_t_s_ = 0.f;
+    bool chain_have_s_ = false;
+    std::uint64_t chain_last_gen_ = 0; int chain_last_owner_ = -1;
+    Eigen::Vector2f chain_last_mark_at_{1e9f, 1e9f};
+    double chain_xt_w2_ = 0.0, chain_yaw_w2_ = 0.0, chain_xt_m_ = 0.0;   ///< sum x^2 ds, sum dyaw^2 ds, sum ds (driven along the route)
+    // the marks' relocalisation carry: odometry integrated from odo_v_/odo_w_, and last cycle's (believed, odometry) poses
+    rc::policy::Pose2 chain_odom_{Eigen::Vector2f::Zero(), 0.f}, chain_prev_odom_{Eigen::Vector2f::Zero(), 0.f},
+                      chain_prev_bel_{Eigen::Vector2f::Zero(), 0.f};
+    bool chain_have_prev_ = false;
+    double chain_prev_pose_stamp_ms_ = 0.0;   ///< the believed pose's own stamp last cycle (now - pose age)
+    std::uint64_t chain_prev_odo_stamp_ms_ = 0; double chain_odo_period_s_ = 0.0, chain_odo_period_n_ = 0.0;   ///< odometry sample period (running mean)
     /// A Reach standpoint (exploration: where exactly does not matter) the body cannot take — occupied, or wedged
     /// on the way in. Flag it; report_unreachable_if_no_route() tells the producer, which picks another.
     bool flag_reach_unreachable(std::string why)
@@ -1197,6 +1274,7 @@ private:
     std::uint64_t door_route_build_ms_ = 0;                         // last build attempt
     Eigen::Vector2f door_route_n0_{0.f, 1.f};                      // the perceived opening's through-normal, latched per leg (near side)
     std::string door_route_n0_key_, door_route_through_key_;       // door|room it was latched for / already reported THROUGH
+    std::string door_route_opening_key_;                           // door|room whose OPENING the body was seen in (THROUGH needs it)
     std::string door_route_latch_room_;                            // the room the latch belongs to (a change resets it)
     bool door_route_body_in_opening_ = false;                      // some part of the body is in the perceived opening
     float door_route_last_s_body_ = -1e9f;    ///< the body's s past the perceived opening, last measured (drive_door_route)
@@ -1231,6 +1309,9 @@ private:
         return chain_end_.has_value() ? chain_end_->s : (params_ != nullptr ? params_->anchor_cross_standoff_m : 2.0f);
     }
     void update_chain_end(const ControllerPlanningStep &step);
+    std::optional<Eigen::Vector2f> door_route_vantage_;   // the point the route's vantage goal IS, for door_route_key_ (set when the route is built)
+    bool door_route_no_vantage_ = false;                  // the route was built with no vantage: the body already stands in the doorway
+    std::optional<bool> at_vantage_logged_;               // last logged value of the hand-over gate, to log only its changes
     float door_vantage_s_ = 0.f;                    // arc length of the vantage V along the door route
     bool build_door_route(const ControllerRobotPose &robot_pose, std::uint64_t now_ms, float tol_xy);
     bool drive_door_route(const ControllerPlanningStep &step, rc::TrajectoryController &path_controller,
@@ -1294,6 +1375,7 @@ private:
     // update_display re-checks its age against kAnchorStaleMs, so a cycle that returns early never shows a stale one.
     std::optional<AnchorCrossReading> anchor_drawn_;
     std::uint64_t door_views_last_ms_ = 0;   // throttle of the canvas's believed-door drawing (door_leaf_geometry.h)
+    std::uint64_t approach_view_last_ms_ = 0;   // throttle of the canvas's approach-options drawing (controller_approach_view.h)
     // ── Task 18: THE DOORWAY AS THE LIDAR MEASURES IT (doorway_gap.h) ──────────────────────────────────────────────────
     // From the first cycle the through-span of the anchor's wall is SEEN, the cross steers on it (re-measured every cycle;
     // carried by the robot's own motion — room-frame pose deltas within one room — while it is not seen). The anchor stays
@@ -1335,6 +1417,7 @@ private:
     // local elastic band can deform it every cycle instead of it being a one-shot fit.
     rc::RouteSpline plan_spline_;
     bool  plan_spline_valid_ = false;
+    std::uint64_t plan_spline_gen_ = 0;   // bumped on every new fit of plan_spline_ (the object is reused in place)
     float plan_progress_s_ = 0.f;      // robot's arc length along plan_spline_, forward-only
     rc::RouteFollower route_;
 public:

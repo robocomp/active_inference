@@ -1,0 +1,17 @@
+camera,param,value,n,source
+zed,min_fill,0.1,0,compiled_defaults
+zed,max_fill,1.5,0,views_fill_2026-11-12
+zed,soft,0.06,0,compiled_defaults
+zed,hit_rate,0.9,0,compiled_defaults
+zed,false_alarm,0.02,0,compiled_defaults
+ricoh,min_fill,0.216,0,compiled_defaults
+ricoh,max_fill,1.5,0,compiled_defaults
+ricoh,soft,0.06,0,compiled_defaults
+ricoh,hit_rate,0.5,0,compiled_defaults
+ricoh,false_alarm,0.05,0,compiled_defaults
+support,present_a,1,0,compiled_defaults
+support,present_b,4,0,compiled_defaults
+support,present_outlier,0.002,0,compiled_defaults
+support,absent_a,12,0,compiled_defaults
+support,absent_b,1,0,compiled_defaults
+support,absent_outlier,0.8,0,compiled_defaults

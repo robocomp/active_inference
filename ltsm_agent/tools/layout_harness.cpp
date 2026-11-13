@@ -9,6 +9,9 @@
 #include <cstdlib>
 #include <cstdio>
 #include <numbers>
+#include <fstream>
+#include <locale>
+#include <ranges>
 
 namespace
 {
@@ -69,6 +72,42 @@ int main(int argc, char **argv)
             std::printf("  %-12s seam_ok %d  loop %d  faces with cov %d  seam d2 %8.2f  P(right) %.4f  closure tree %.3f m -> MAP %.3f m\n",
                         p.name.c_str(), p.seam_ok, p.loop, p.stated_faces, p.seam_d2, p.p_inlier, tree.passages[k].closure_m,
                         p.closure_m);
+        // LAYOUT_DUMP=<path>: the tree (before) and MAP (after) outlines + door faces as JSON, for figures.
+        if (const char *dump = std::getenv("LAYOUT_DUMP"); dump != nullptr)
+        {
+            std::ofstream js(dump);
+            js.imbue(std::locale::classic());
+            const auto poly = [&js](const std::vector<Eigen::Vector2d> &o)
+            {
+                js << '[';
+                for (const auto &[k, p] : std::views::enumerate(o)) js << (k ? "," : "") << '[' << p.x() << ',' << p.y() << ']';
+                js << ']';
+            };
+            const auto pose = [&js](const Mat::RTMat &T)
+            { js << '[' << T.translation().x() << ',' << T.translation().y() << ',' << yaw_of(T) << ']'; };
+            js << "{\"energy_before\":{\"total\":" << c.before.total() << ",\"seam\":" << c.before.seam << ",\"manhattan\":"
+               << c.before.manhattan << ",\"overlap\":" << c.before.overlap << ",\"wall\":" << c.before.wall
+               << ",\"adjacency\":" << c.before.adjacency << "},\"energy_after\":{\"total\":" << c.after.total()
+               << ",\"seam\":" << c.after.seam << ",\"manhattan\":" << c.after.manhattan << ",\"overlap\":" << c.after.overlap
+               << ",\"wall\":" << c.after.wall << ",\"adjacency\":" << c.after.adjacency << "},\"iterations\":" << c.iterations
+               << ",\"rooms\":[";
+            for (const auto &[i, r] : std::views::enumerate(map.rooms))
+            {
+                js << (i ? "," : "") << "{\"name\":\"" << r.name << "\",\"before_pose\":";
+                pose(r.world_raw);
+                js << ",\"after_pose\":";
+                pose(r.world);
+                js << ",\"before\":";
+                poly(r.outline_raw);
+                js << ",\"after\":";
+                poly(r.outline);
+                js << '}';
+            }
+            js << "],\"doors\":[";
+            for (const auto &[i, d] : std::views::enumerate(map.doors))
+                js << (i ? "," : "") << "[[" << d.a.x() << ',' << d.a.y() << "],[" << d.b.x() << ',' << d.b.y() << "]]";
+            js << "]}\n";
+        }
         // Cached: the same structure must NOT re-solve.
         cache.fresh = false;
         const int solves = cache.solves;

@@ -28,13 +28,12 @@
 
 #include "../../common/exclusion/claims.h"        // rc::exclusion::Seniority (SHARED, pure)
 #include "door_model.h"        // DoorModel / DoorState
-#include "core/ricoh_door_birth.h"   // RicohHitPool (pure, Eigen only)
 #include "door_identity_table.h"   // kFitWithoutFreshDataFrames
 #include "door_belief.h"       // rc::DoorBelief (AI2 recursive-Laplace belief)
 #include "door_opening_edges.h" // rc::door::AlongWallState — the scan's registration offset (try96)
-#include "door_view_pool.h"     // rc::door::ViewPool — the image channel pooled by view novelty (Task 5b, D4)
 #include "door_leaf_channel.h"  // rc::door::LeafChannel — hinge / swing / φ per viewpoint (try102)
-#include "../../common/existence_belief/existence_belief.h"   // rc::exist::ExistenceBelief (shared w/ table/chair)
+#include "core/place_belief.h"   // rc::door::core::PlaceBelief — THE existence belief (Task 8)
+#include "core/door_decision.h"  // rc::door::core::Role
 
 namespace rc {
 
@@ -63,7 +62,7 @@ struct DoorFitState
 
     // ── Cached geometry, authored ONLY by DoorFitter::refresh_geometry ──────────────────────────────
     // The one place every consumer reads the door's shape from. `aperture` is the static hole in the wall
-    // (what the DSR RT edge, wall association, merge, ghost identity and the room prior key on); `leaf` is
+    // (what the DSR RT edge, wall association, merge, identity and the room prior key on); `leaf` is
     // its articulation; `leaf_pose` is where the panel physically is right now. With phi pinned at 0 (M0)
     // leaf_pose is exactly the aperture rectangle, so nothing observable changes. See door_geometry.h for
     // why this is centralised — two independent SDFs and ~10 scattered cos/sin(yaw) rectangles used to
@@ -85,13 +84,6 @@ struct DoorFitState
     float phi_cmd_rate = 0.0f;    // rad/s the provider advertised; 0 ⇒ no swing model, jump to target
     std::chrono::steady_clock::time_point phi_cmd_t0{};
     bool  phi_cmd_active = false; // a commanded swing is in flight (or just finished and unconfirmed)
-    // Provenance of the silhouette occ/free split, copied from DoorSilhouette for the log: was the
-    // absence marginalised over the opening angle, and how concentrated that posterior was. w_max near
-    // 1/n_hyp means the frame did not identify phi at all and the absence was averaged away almost
-    // entirely — which is the intended behaviour, and must be visible as such rather than inferred.
-    bool  dbg_phi_marg  = false;
-    int   dbg_phi_nhyp  = 0;
-    float dbg_phi_wmax  = 0.0f;
     // When phi was last estimated, so the persistence prior's width is the swing the leaf could
     // ACTUALLY have made in the elapsed time rather than a per-cycle constant. Zero = never.
     std::chrono::steady_clock::time_point phi_last_t{};
@@ -135,6 +127,17 @@ struct DoorFitState
     // wall does not register (door_fit.cpp). dbg_reg above is this cycle's, for the logs.
     door::WallRegistration wall_reg;
     door::AlongWallResult  dbg_along;
+    float dbg_wall_support = 0.0f;   // log P(s, w | its wall) at the fit's mean this cycle (door_wall_support.h); 0 = none / deep inside
+    // 2026-11-12 (clean58 door_3): the aperture's plane on its carrying wall's line (door_fit.cpp refresh_geometry). -1 = never
+    // evaluated, 0 = no wall carries the door (no term), 1 = carried. The rest is this cycle's move and the line's σ, for the logs.
+    int   wall_line_carried = -1;
+    bool  framed_in_proto = false;
+    std::vector<Eigen::Vector2f> proto_evidence_pts;          // the points that frame came from (plan, room frame), sampled
+    std::optional<Eigen::Vector2f> proto_evidence_cam;        // and the camera they were seen from   // the frame was authored in a provisional room (from evidence): re-associated at promotion
+    float dbg_birth_yaw_sd = 0.0f;   // a frame authored in a provisional room from the door's own evidence: its yaw σ (rad); 0 = not
+    float dbg_wall_line_off = 0.0f, dbg_wall_line_rot = 0.0f;         // the move onto the line: across (m), turn (rad)
+    float dbg_wall_line_sd_off = 0.0f, dbg_wall_line_sd_yaw = 0.0f;   // the line's σ: across (m), direction (rad)
+    std::vector<door::OpeningRun> opening_runs;   // this cycle's through-spans (door_opening_edges.h); empty = no measurement
     // Task 11: log P(the belief's hinge) / P(the other jamb) — the hinge as a static hidden variable, learned from the
     // LiDAR while the leaf is open (rc::door::phi_hinge_marginal). 0 = no evidence yet; carried across a room switch.
     float hinge_llr    = 0.0f;
@@ -264,6 +267,10 @@ struct DoorFitState
     float last_depth_var   = 0.0f;   // σ_range² (m²) of the assigned slice: 0 for a ZED slice, >0 for a ricoh
                                      // LiDAR-depth slice → added to R so ricoh's unreliable depth barely moves the fit
     float last_clutter_frac = 0.0f;  // mean clutter responsibility (fraction of the mask the model can't explain)
+    int   last_slice_sensor = 0;     // 0 ZED, else ricoh: the slice this door's last fresh observation came from
+    // ★THE FIT'S OWN SUPPORT, CONSUMED ONCE by the next existence update (channel `sup`): set only on a cycle whose fit ran on a
+    //  non-empty support (a gated/stale/held cycle leaves it alone) and taken out by update_existence — no fit means no term.
+    std::optional<rc::door::core::FitSupport> pending_fit_support;
     float dbg_obliquity_cos = 1.0f;  // |cos| of camera→door horizontal ray vs backrest normal (1=face-on, →0 grazing)
 
     // Free-energy readout + attention baseline (clutter-inclusive F; TABLE.md §9). dbg_energy HOLDS the last
@@ -289,108 +296,38 @@ struct DoorFitState
     float chain_cov_xx = 0.0f, chain_cov_yy = 0.0f, chain_cov_yaw = 0.0f;  // localization/chain cov (m²,rad²)
     float chain_cov_xy = 0.0f;   // Task D-C round 2: its xy cross term, so a projection on ANY direction is exact
     int  assigned_mask_idx  = -1;     // tracker's gated mask-slice assignment (-1 = use greedy nearest)
-    // ── Existence belief (shared rc::exist channel — same one table/chair use) ──────────────────────
-    // L = log P(exists)/P(¬exists), integrated per SENSOR frame from the PIXEL-LEVEL silhouette evidence
-    // (DoorFitter::compute_silhouette_existence): the model's panel silhouette is projected into the ZED and
-    // each predicted sample votes
-    //   lit by a "door" mask   ⇒ OCCUPANCY (still there),
-    //   lit by a NON-door mask ⇒ OCCLUDED  ⇒ excluded from the detectable footprint (no vote),
-    //   lit by nothing         ⇒ ABSENCE   (predicted-but-not-there — the "gone" signal, which fires even on a
-    //                                       frame where YOLO produced no door mask at all).
-    // The decisive property, and the reason this replaced the old pd·conf·obliquity scheme: a sample OUTSIDE
-    // the real camera frustum is not detectable, so a door behind the robot yields n_detectable==0 ⇒ rc::exist
-    // HOLDs. "Not looked at" is structurally distinct from "looked at and empty" — the old scheme charged
-    // absence evidence through a bearing-free range term and deleted a real door whenever the robot turned
-    // around. Occlusion is likewise a continuous shrinkage of the detectable footprint, never an indefinite
-    // freeze. Removal is a Bayesian decision on P(exists) (should_remove), debounced over consecutive
-    // EVIDENCE cycles — no age immunity, and no removal from a view that could not have resolved the door.
-    rc::exist::ExistenceBelief existence{};
-    // Task 5b D4: the image-geometry channel's evidence pooled by view novelty (door_view_pool.h) — the view being pooled,
-    // its mean verdict and what it has contributed to `existence` so far.
-    door::ViewPool image_view_pool{};
-    // Task 5b item 4: the silhouette's evidence pooled by the same view model (door_view_pool.h add_logodds).
-    door::ViewPool silhouette_view_pool{};
-    // Task Q: the 360 camera's own existence channel (door_existence.cpp): its evidence pooled by the SAME view model, and the
-    // last detection's source + weight (a ricoh detection is worth its variance/wall-agreement weight, a ZED one 1).
-    door::ViewPool ricoh_view_pool{};
-    door::core::RicohHitPool ricoh_hit_pool{};   // hit-rate calibration trials pooled per viewpoint (core/ricoh_door_birth.h)
+    // ── Existence belief ──────────────────────────────────────────────────────────────────────────────
+    // ★Task 8: THE existence belief of this door place — prior + carried + crossing + view ledger (core/place_belief.h).
+    // Birth, survival, deletion, the affordances, the look and the memory row all read belief.L(); P(door) = σ(L).
+    door::core::PlaceBelief belief{};
+    door::core::Role role = door::core::Role::Ordinary;   // this cycle's role (route / being crossed), for the decision and the log
+    door::core::ExistenceTrace exist_trace{};             // what the last existence update did, per channel (NaN = not computed)
+    // A commanded open/close seen satisfied since the last existence update (the actuator reply path): consumed ONCE, into
+    // the view current at the next update (ViewLedger::add_actuation).
+    float pending_actuation_llr = 0.0f;
+    // The remembered place row this door descends from (a restored door's own row; a candidate's matched row at its birth). Keys the
+    // place table's revisit sample (PlaceTable::sample_revisit: one per place per visit - found on the first detection / birth,
+    // not found on a removal). Empty = a place never remembered.
+    std::string place_row_name;
+    int   place_visit = 0;   // the ledger's visit: frames of different visits are never one view
     int   last_source   = 0;       // MaskSlice::source of the slice that last detected this door (0 = zed, 1 = ricoh)
     float last_detect_w = 1.0f;    // that detection's weight in [0, 1]: a ZED slice 1; a ricoh slice its association likelihood exp(-m2/2) under the door's + its own variance
-    bool existence_seeded = false;            // false until seeded with cfg.exist_birth_logodds on first visit
-    // Task D-C: the log-odds the belief ENTERED with (birth seed, adoption or restore). Removal is decided on what the data
-    // did since entry, not on the prior the door entered with (DoorCore::update_existence): a door restored below the
-    // removal bound must be pushed further down by data before it can be condemned.
-    float existence_entry_L = 1.0f;
-    // ★Task D-C round 2: THE EVIDENCE SINCE ENTRY, UNCLAMPED. The removal decision of a door that entered below the bound
-    // reads L_bound + (evidence since entry); differencing the published L (L − L_entry) loses whatever the ±L_max clamp
-    // swallowed — a door RESTORED at the −4 floor could then never move below its entry, i.e. never be condemned however
-    // long it was looked at and found absent. Each channel's increment is added here as it MEANT it (ExistenceBelief::
-    // last_increment), the band prior's change as replaced; reset with existence_entry_L. Capped ABOVE at L_max − L_bound
-    // (review I1: banked confirmation must not make a later absence unrepayable); unclamped below.
-    float existence_since_entry = 0.0f;
     // Task D-C round 2 (tour3C): a door RESTORED from memory — the σ its remembered place had along the wall when the row was
     // written (IdentityRow::place_sd). The lazy belief init seeds σ_s² = place_sd² + σ_b² (σ_b the room polygon's own
     // registration, Existence.BoundarySigmaM) instead of the birth seed's Door.PriorAlongWallStd 0.6 m, then clears it.
     std::optional<float> remembered_place_sd;
     // Task D-C: wall-clock ms (the cycle's t_wall_ms) of the last fresh detection; restored from the identity row's
-    // seen_ms. Written to the row so a remembered belief carries its age (restore_existence_prior). 0 = never.
+    // seen_ms. Written to the row so a remembered belief carries its age (the place row). 0 = never.
     std::int64_t last_detection_wall_ms = 0;
-    // Accumulated LOOKS (Σ p_detect) whose decision says "remove" — NOT a count of cycles. A cycle in which
-    // the door could not have been resolved (p_detect → 0) correctly leaves L untouched, and must leave the
-    // debounce untouched too, or the door is condemned by evidence gathered once and executed later while
-    // the robot looks elsewhere. Float for the same reason table/bottle use one: partial looks partially count.
-    // Debounce state, SHARED (rc::exist::RemovalDebounce): the streak in ideal observations plus the
-
     // SHARED mutual exclusion (common/exclusion): was another concept's object already standing
     // here when this instance was BORN? Resolved once, at creation. A junior instance stops
     // counting its senior's returns as evidence that IT exists. See exclusion.h.
     rc::exclusion::Seniority exclusion;
-    // consecutive-starved count that makes a condemned-but-unexecutable instance visible instead of frozen.
-    rc::exist::RemovalDebounce existence_debounce;
-    // The robot is crossing this door (the consumer's `executing` edge names its cross): the existence belief HOLDS — no
-    // evidence, no prior update, no removal — until the edge goes (core/door_existence.cpp). Kept to log the transitions.
-    bool existence_held_crossing = false;
     // BACKED by a crossing (DoorCycleInput::backed_faces, set by DoorCore::step every cycle): the robot's body went through
     // this hole, an observation of passability far more precise than any view from the doorway. Its existence and its
     // leaf HOLD (spec 2026-10-29 Rev 3, FACT_HOLD; pingpong2: the face just crossed was re-judged shut).
     bool fact_backed = false;
     bool fact_hold_leaf = false;   // backed AND the robot still at the doorway: leaf + pose frozen (door_core.cpp, 2026-11-01)
-    // Silhouette diagnostics (last evidence cycle) — the columns of etc/door_existence_log.csv.
-    float dbg_sil_occ = 0.0f, dbg_sil_free = 0.0f, dbg_sil_free_eff = 0.0f;
-    int   dbg_sil_ndet = 0, dbg_sil_ntotal = 0, dbg_sil_noccl = 0, dbg_sil_ncells = 0;
-    float dbg_sil_pdetect = 0.0f, dbg_sil_central = 0.0f, dbg_sil_resolv = 0.0f;
-    // Contour check against retina's graded posterior (see specificworker.cpp). Logged so the channel
-    // can be audited from outside: dbg_field_n == 0 means the field was unavailable and this cycle behaved
-    // exactly as it did before the channel existed — which is a different fact from "no support found".
-    float dbg_field_support = 0.5f;   // 0.5 = the contour is no more door-like than the rest of the frame
-    // RGB contour check (common/contour_edge): support = across-boundary gradient on the believed
-    // contour vs the same shape displaced along the wall. 0.5 = indistinguishable from a displaced copy.
-    // ★dbg_edge_n == 0 means NOT MEASURED (no frame, contour behind the camera) — not "no support".
-    float dbg_edge_support = 0.5f;
-    float dbg_edge_true = 0.0f, dbg_edge_ctrl = 0.0f;
-    int   dbg_edge_n = 0;
-    float dbg_edge_delta = 0.0f;   // log-odds this channel contributed this cycle (signed)
-    float dbg_img_look_w = -1.0f;      // Task 15: the image geometry's last look, in looks (max of its halves' P(detect); −1 none)
-    float dbg_p_env_aperture = 0.0f;   // Task 15: the detector envelope at the aperture's apparent size (the frame's detectability)
-    // ── the doorway-FRAME channel (door_frame_evidence.h). dbg_frame_n == 0 ⇒ NOT MEASURED. ──
-    float dbg_frame_excess = 0.0f, dbg_frame_true = 0.0f, dbg_frame_ctrl = 0.0f;
-    float dbg_frame_depth = 0.0f, dbg_frame_vis = 0.0f;
-    int   dbg_frame_n = 0, dbg_frame_ndepth = 0;
-    // ── the WALL-BAND containment prior (door_room_band.h) ──
-    // The static log-prior term currently folded into `existence`. It is REPLACED each cycle (the old value
-    // taken out, the new one put in), never summed: the door's position relative to the wall is one fact, not
-    // a fresh observation every frame. 0 on the band.
-    float room_prior_term = 0.0f;
-    float dbg_band_delta = 0.0f;   // signed offset of the aperture centre from the polygon (> 0 outside); NaN = no polygon
-    float dbg_band_p     = 1.0f;   // π(δ) = exp(room_prior_term)
-    float dbg_pose_kappa = 1.0f;   // Task D-C: the pose-uncertainty overlap κ the image channels were weighted by this frame
-    float dbg_ricoh_dL = 0.0f, dbg_ricoh_p = 0.0f, dbg_ricoh_pdet = 0.0f, dbg_ricoh_hit = 0.0f, dbg_ricoh_closed = 1.0f;   // the ricoh absence channel (existence CSV ric_*)
-    float dbg_p_env      = 0.0f;   // detector-envelope factor of p_detect (from roi_fill), for the existence CSV
-    float dbg_edge_excess = 0.0f;  // (s_true - s_ctrl) / frame mean gradient — THE evidence quantity
-    int   dbg_edge_nctl = 0;       // control placements that survived; 0 ⇒ nothing to compare against,
-                                   // which happens at close range as the controls fall off-frame
-    float dbg_field_mean = 0.0f, dbg_field_bg = 0.0f;
-    int   dbg_field_n = 0;
     // The fit's own admissibility verdict for the last processed frame (truncated mask, or the robot moving
     // with the mask off-centre ⇒ predict-only). Read by the existence channel: a frame that may not MOVE the
     // geometry may not DESTROY the door either. See specificworker.cpp's absence term.
@@ -440,6 +377,12 @@ struct DoorFitState
     std::optional<Eigen::Vector2f> bearing_view_cam;
     float bearing_view_credit = 0.0f;   // novelty already credited since that anchor view (0..1)
     float dbg_view_credit = 1.0f;       // the last mask frame's credit (DoorFrame::weight) — diagnostics
+    // 2026-11-11 (clean50 door_3): the SAME rule for the low LiDAR's along-wall span (along_wall_update). A parked robot re-reads
+    // the same through-span every sweep; fused as N independent looks its slack ambiguity (slack²/12, ±0.29 m for a sliver)
+    // collapsed σ_s 0.60 → 0.036 m in ~60 sweeps from one standpoint. The sweep origin of the last credited view, and its credit.
+    std::optional<Eigen::Vector2f> along_view_cam;
+    float along_view_credit = 0.0f;
+    float dbg_along_credit = 1.0f;
     // Last GEOMETRY published to the graph (dims + mesh). Gates the per-cycle mesh/dim rewrite so a
     // settled door stops jittering the retina mesh. Mirrors bottle_concept's last_pub_* publish gate.
     float last_pub_cx  = std::numeric_limits<float>::max();
@@ -480,6 +423,7 @@ struct DoorFitState
     int  actuation_requests = 0;      // how many times we have asked, this door, this run
     bool open_claim_unserved = false; // an `open` claim landed and no request has been sent for it yet
     bool close_claim_unserved = false; // the same for `close`
+    bool open_request_no_door = false;   // the current claim's open request could not go out: nothing that opens is at this place
     bool open_actuated = false;   // OUR open request went out for the current claim (its satisfied end is existence evidence)
     bool close_actuated = false;  // the same for `close`
     bool close_wait_logged = false;    // "the close request waits for clearance" said once per claim

@@ -40,6 +40,7 @@
 #include <cmath>
 #include <cstddef>
 #include <limits>
+#include <numbers>
 #include <optional>
 #include <span>
 #include <vector>
@@ -104,8 +105,11 @@ inline std::size_t nearest_edge(const Eigen::Vector2f& q, std::span<const Eigen:
 }
 
 // The FIRST polygon edge the segment cam→target crosses (smallest fraction along it), if any.
+// `unbounded` = the RAY from cam through target (any fraction > 0): the first wall the line of sight meets, whether before the
+// target (a point seen beyond a wall: through an opening) or after it (a point in front of every wall). `t_out` = that fraction.
 inline std::optional<std::size_t> first_crossed_edge(const Eigen::Vector2f& cam, const Eigen::Vector2f& target,
-                                                     std::span<const Eigen::Vector2f> poly)
+                                                     std::span<const Eigen::Vector2f> poly, bool unbounded = false,
+                                                     float* t_out = nullptr)
 {
     const auto cross = [](const Eigen::Vector2f& p, const Eigen::Vector2f& q) { return p.x() * q.y() - p.y() * q.x(); };
     const Eigen::Vector2f d = target - cam;
@@ -120,8 +124,9 @@ inline std::optional<std::size_t> first_crossed_edge(const Eigen::Vector2f& cam,
         if (std::abs(rxs) < 1e-12f) continue;              // parallel: never a crossing
         const float t = cross(a - cam, ab) / rxs;          // fraction along cam→target
         const float u = cross(a - cam, d)  / rxs;          // fraction along the edge
-        if (t > 0.0f and t <= 1.0f and u >= 0.0f and u <= 1.0f and t < best_t) { best_t = t; best = i; }
+        if (t > 0.0f and (unbounded or t <= 1.0f) and u >= 0.0f and u <= 1.0f and t < best_t) { best_t = t; best = i; }
     }
+    if (t_out != nullptr and best.has_value()) *t_out = best_t;
     return best;
 }
 
@@ -138,6 +143,9 @@ struct WallRun
     Eigen::Vector2f O{0.0f, 0.0f}, u{1.0f, 0.0f};
     float len = 0.0f;
     std::size_t lo = 0, hi = 0;   // first and last polygon edge of the run
+    // associate_wall only: where the voters' sightlines meet this wall (their mean) — the place along it the door was SEEN at.
+    // Unset without a camera (no sightline: the caller places the door by its points).
+    std::optional<Eigen::Vector2f> seen_at;
 };
 
 // ★ A DOORWAY NOTCH DOES NOT END THE WALL (2026-10-18). A learnt room outline follows the scan into the doorway, so
@@ -223,9 +231,16 @@ inline WallRun wall_run_of_edge(std::span<const Eigen::Vector2f> poly, std::size
 
 // ─── which wall holds the door ───────────────────────────────────────────────────────────────────
 
-// Each observed door point votes for one logical wall: the wall the sightline camera→point LEAVES the room
-// through (the light from that point entered the room through the door's aperture), or — when the point is
-// in front of every wall (no crossing) — the wall nearest to it. The wall with the most votes holds the door.
+// Each observed door point votes for one logical wall: the FIRST wall the line of sight camera→point meets. A door
+// mask's pixel is the door seen along that ray, and its depth is one of three things: the leaf / frame itself (≈ on the
+// wall), the next room seen THROUGH the opening (beyond the wall: the ray left the room through the door's aperture), or
+// an OCCLUDER in front of the door (short of every wall: the door is further along the same ray). In all three the door
+// is in the first wall the ray meets — before the point in the first case and the second, AFTER it in the third.
+// ★ 2026-11-12 (chat_e2e13 door_24): the third case used to vote for the wall NEAREST the point. door_1's mask, its
+//  depth on an occluder 2.2 m out (0.75 m of mask at z 0.92-1.67), centred 2.8 m short of door_1's wall, was nearest to
+//  room_1's partition (0.6 m to the side) and became a door IN THE PARTITION, on blank wall, 1.2 m from any opening.
+//  The ray through that point meets the top wall beside door_1, which is where its light came from.
+// The wall with the most votes holds the door; `seen_at` = the mean of its voters' ray–wall crossings.
 // No camera, or a camera that is not inside this room (wrong room frame / standing in the doorway), cannot
 // say which edge a sightline leaves through, so then every point votes for its nearest wall. With a single
 // point and no camera this is exactly the old nearest-edge rule.
@@ -238,22 +253,34 @@ inline WallRun associate_wall(std::span<const Eigen::Vector2f> poly, std::span<c
     const bool use_sight = cam.has_value() and polygon_contains(*cam, poly);
     std::vector<std::size_t> run_of(n, n);   // edge → its run's first edge, computed lazily
     std::vector<double> votes(n, 0.0);
+    std::vector<Eigen::Vector2f> seen_sum(n, Eigen::Vector2f::Zero());   // per run: summed ray–wall crossings of its voters
+    std::vector<int> seen_n(n, 0);
     for (const auto& p : pts)
     {
         std::optional<std::size_t> e;
+        float t = 0.0f;
         if (use_sight)
-            e = first_crossed_edge(*cam, p, poly);
+            e = first_crossed_edge(*cam, p, poly, /*unbounded=*/true, &t);
+        const bool seen = e.has_value();
         if (not e.has_value())
             if (const std::size_t ne = nearest_edge(p, poly); ne < n) e = ne;
         if (not e.has_value()) continue;
         if (run_of[*e] == n)
             if (const WallRun r = wall_run_of_edge(poly, *e, recess_m); r.ok) run_of[*e] = r.lo;
-        if (run_of[*e] < n) votes[run_of[*e]] += 1.0;
+        if (run_of[*e] < n)
+        {
+            votes[run_of[*e]] += 1.0;
+            if (seen) { seen_sum[run_of[*e]] += *cam + t * (p - *cam); ++seen_n[run_of[*e]]; }
+        }
     }
     const auto it = std::ranges::max_element(votes);
     if (*it <= 0.0)
         return {};
-    return wall_run_of_edge(poly, static_cast<std::size_t>(std::distance(votes.begin(), it)), recess_m);
+    const auto win = static_cast<std::size_t>(std::distance(votes.begin(), it));
+    WallRun w = wall_run_of_edge(poly, win, recess_m);
+    if (w.ok and seen_n[win] > 0)
+        w.seen_at = seen_sum[win] / static_cast<float>(seen_n[win]);
+    return w;
 }
 
 // ★Task D-C review M-1: A REMEMBERED DOOR (no mask points: restored from memory, or carried across) is associated with the
@@ -281,6 +308,78 @@ inline WallRun associate_wall_remembered(std::span<const Eigen::Vector2f> poly, 
         if (cost < best_cost) { best_cost = cost; best = i; }
     }
     return best < n ? wall_run_of_edge(poly, best, recess_m) : WallRun{};
+}
+
+// ─── A DOOR'S FRAME FROM ITS OWN EVIDENCE (2026-11-12, clean58 door_3) ─────────────────────────────────────────────────────
+// In a PROVISIONAL room the outline is a free-space frontier, not walls, so it says nothing about where a doorway's wall runs:
+// clean58's door_3 was framed on the frontier across an unseen alcove's mouth (perpendicular to its real wall) and its centre was
+// projected 2.33 m along that frontier. Here the frame is the detection's: centre = the detection's centre; orientation from the
+// points' DEPTH GRADIENT across the view. In plan, v = the sightline (camera → centre), l = its perpendicular; a planar surface
+// whose along direction is l + k·v puts each point at depth b = k·a for lateral a. k is the least-squares slope, its variance
+// σ_res²/Σa² (the residual σ from the same points); yaw σ = σ_k/(1 + k²) (dψ/dk). No usable lateral spread (one point, or
+// no camera) ⇒ the best a single detection gives: the door faces the camera (u = l) with σ_ψ = π/2·(1/√3) — a uniform yaw
+// over a half-turn, i.e. no orientation information. A remembered pose (no points) carries its own yaw (`yaw_known`).
+// across_u() is turned toward `room_side` (the camera / robot: the room is where the robot stands), the convention
+// associate_wall keeps (normal INTO the room). Pure geometry, no threshold.
+struct EvidenceFrame
+{
+    Eigen::Vector2f O{0.0f, 0.0f}, u{1.0f, 0.0f};   // O = the detection's centre (the door's centre lies on the frame's line at s + w/2 = 0)
+    float yaw_sd = 0.0f;                            // the orientation's σ (rad)
+};
+inline EvidenceFrame frame_from_evidence(std::span<const Eigen::Vector2f> pts, const Eigen::Vector2f& centre,
+                                         const std::optional<Eigen::Vector2f>& cam, const std::optional<Eigen::Vector2f>& room_side,
+                                         std::optional<float> yaw_known)
+{
+    constexpr float kHalfTurnUniformSd = std::numbers::pi_v<float> / std::numbers::sqrt3_v<float> / 2.0f;   // sd of U(−π/2, π/2)
+    EvidenceFrame f;
+    f.O = centre;
+    Eigen::Vector2f v(1.0f, 0.0f);
+    bool have_view = false;
+    if (cam.has_value())
+        if (const Eigen::Vector2f d = centre - *cam; d.norm() > 0.0f) { v = d.normalized(); have_view = true; }
+    const Eigen::Vector2f l(-v.y(), v.x());
+    if (yaw_known.has_value() and std::isfinite(*yaw_known))
+    {
+        f.u = {std::cos(*yaw_known), std::sin(*yaw_known)};
+        f.yaw_sd = 0.0f;   // the caller's memory carries its own σ (IdentityRow::place_sd); the yaw is taken as remembered
+    }
+    else
+    {
+        double saa = 0.0, sab = 0.0;
+        std::size_t n = 0;
+        if (have_view)
+            for (const auto& p : pts)
+            {
+                const Eigen::Vector2f q = p - centre;
+                const double a = l.dot(q), b = v.dot(q);
+                saa += a * a; sab += a * b; ++n;
+            }
+        if (n >= 3 and saa > 0.0)
+        {
+            const double k = sab / saa;
+            double sr = 0.0;
+            for (const auto& p : pts)
+            {
+                const Eigen::Vector2f q = p - centre;
+                const double r = v.dot(q) - k * l.dot(q);
+                sr += r * r;
+            }
+            const double sk = std::sqrt(sr / static_cast<double>(n - 2) / saa);
+            f.u = (l + static_cast<float>(k) * v).normalized();
+            f.yaw_sd = std::min(kHalfTurnUniformSd, static_cast<float>(sk / (1.0 + k * k)));   // never wider than knowing nothing
+        }
+        else
+        {
+            f.u = l;
+            f.yaw_sd = kHalfTurnUniformSd;
+        }
+    }
+    if (room_side.has_value())
+    {
+        const Eigen::Vector2f nrm(-f.u.y(), f.u.x());
+        if (nrm.dot(*room_side - centre) < 0.0f) f.u = -f.u;
+    }
+    return f;
 }
 
 // ─── the poses ───────────────────────────────────────────────────────────────────────────────────

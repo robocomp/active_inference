@@ -261,6 +261,8 @@ bool DoorSceneGraph::persist_door_belief(DoorInstance& inst, std::uint64_t node_
 void DoorSceneGraph::step_write_model(DoorInstance& inst, DSR::Node& node,
                                        std::uint64_t room_id, float free_energy)
 {
+    // P(this is a door), for whoever acts on the door: a crossing is proof, and the door under the robot is protected (a crossed place has no delete line).
+    G_->add_or_modify_attrib_local<obj_exist_prob_att>(node, inst.belief.crossed or inst.role == door::core::Role::BeingCrossed ? 1.0f : inst.belief.p());
     const auto& s = inst.model.state();
 
     // Publish gate: only (re)write the geometry + mesh when the fitted dims/pose moved beyond a few

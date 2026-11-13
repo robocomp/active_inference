@@ -51,6 +51,12 @@ bool is_descendant(DSR::DSRGraph &mem, std::uint64_t node_id, const std::string 
 std::optional<Mat::RTMat> seam_through_passage(DSR::DSRGraph &mem, const std::string &passage,
                                                const std::string &room_to, const std::string &room_from);
 
+/// Whether `passage`'s two faces, as composed by seam_through_passage, were found to be the same hole turned by pi (door
+/// faces orient from the room that fits them). nullopt when the passage has no face in each room. For logging: the seam
+/// itself already applies the turn.
+std::optional<bool> seam_flipped_through_passage(DSR::DSRGraph &mem, const std::string &passage,
+                                                 const std::string &room_to, const std::string &room_from);
+
 /// A memory room flagged `object_subtype "staged"`: a draft held by RoomSwap (the undo snapshot of a provisional room's
 /// twin), never a candidate, never recalled, never part of a passage consumers read.
 bool is_staged_room(DSR::DSRGraph &g, const DSR::Node &room);
@@ -70,6 +76,14 @@ std::uint64_t next_passage_index(DSR::DSRGraph &live, DSR::DSRGraph *mem);
 
 /// The LIVE passage (metaconcept, subtype "passage") holding a `match` edge to this live door, if any.
 std::optional<DSR::Node> live_passage_of(DSR::DSRGraph &live, std::uint64_t door_id);
+
+/// A wall's segment in its floor's frame (= the room's: floor->room is the identity): the parent->wall RT edge + width_m.
+struct WallSeg { std::uint64_t id; std::string name; Eigen::Vector2d a, b; };
+std::optional<WallSeg> wall_segment(DSR::DSRGraph &g, const DSR::Node &w, std::uint64_t parent_id);
+/// Endpoint distance between two segments, either orientation (a wall has no preferred direction).
+double seg_cost(const WallSeg &x, const WallSeg &y);
+/// The walls hanging from `floor` in g, with their segments.
+std::vector<WallSeg> walls_under(DSR::DSRGraph &g, const DSR::Node &floor);
 
 /// A hole memory already knows: the passage and the remembered face of it.
 struct RememberedHole
@@ -119,6 +133,9 @@ struct Candidate
 {
     return robot_room.has_value() and robot_room != current_edge_room;
 }
+
+/// The robot body's half extent (max of width, depth) from the live `body` node: the r_body of the promotion reading.
+[[nodiscard]] std::optional<double> robot_body_radius(DSR::DSRGraph &live);
 
 struct PromotionReading
 {

@@ -51,6 +51,14 @@ namespace rc
                                                  c.lidar.second, p.x(), p.y(), std::remainder(p.z(), 2.f * float(M_PI)));
         model_->prev_cov = current_covariance;
         r.lidar_scan = std::move(c.res.lidar_scan);
+        // ── PLAIN SLAM KEEPS MOVING WITH THE BODY (explore_tour16) ──────────────────────────────────────────────────
+        // Its scan is frozen with the room's (update_observe_walls never runs here), but the body is not: a crossing
+        // that does not end in a room switch (the door read shut and the passage backed off) returns to a SLAM pose as
+        // old as the link. Live: link 0 held 14 s on the way to a return door, the SLAM resumed 1.25 m / 0.73 rad off,
+        // and the refiner drew a rotated copy of room_2 and adopted it (+11 m2). The prediction step only (ScanSlam::step
+        // with no points = odometry); the first scan after the crossing registers from there. A switch re-seeds anyway.
+        if ((plain_slam_driving() or map_layout_adopted_) and not plain_slam_seed_)
+            (void)plain_slam_.step(rec_odom_delta_, {});
         record_slam_shadow(r);
         return r;
     }

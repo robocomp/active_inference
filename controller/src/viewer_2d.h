@@ -83,6 +83,22 @@ class Viewer2D : public QObject
         std::vector<DoorLeafHyp> leaves;           // side_known: the believed hypotheses (Sum p = 1); else the 4 candidates
     };
     void draw_doors(const std::vector<DoorView> &doors);
+    // An OBJECT-APPROACH affordance's options (common/pragmatic_affordance/object_approach.cpp), ROOM frame: one arrow per
+    // side the object offers (stand-off pose; yaw = the FORWARD heading, +x = 0, CCW — the producer's convention, so the
+    // arrow is laid at the raw yaw), the chosen / executing one highlighted, the object's footprint + centre when known,
+    // and the controller's OWN working target (after its in-cell repair / re-aim) as a thin dashed arrow, so a heading the
+    // controller changed shows against the one the object proposed. nullopt clears.
+    struct ApproachOptionView { std::string name; Eigen::Vector2f p = Eigen::Vector2f::Zero(); float yaw = 0.f;
+                                bool chosen = false; bool executing = false; };
+    struct ApproachView
+    {
+        std::string node;                                  // aff_<object>_approach
+        std::vector<ApproachOptionView> options;
+        std::optional<Eigen::Vector2f> obj_centre;         // the parent object's centre, room frame
+        float obj_yaw = 0.f, obj_width_m = 0.f, obj_depth_m = 0.f;   // footprint: width along its local x, depth along y
+        std::optional<Eigen::Vector3f> working_target;     // the controller's step target (x, y, yaw), when it drives this node
+    };
+    void draw_approach(const std::optional<ApproachView> &v);
     void set_lidar_buffer(LidarPointBuffer *buffer);
     void set_lidar_visible(bool visible);
     void set_lidar_draw_correction(const Eigen::Affine2f &correction) { lidar_draw_correction_ = correction; }
@@ -180,6 +196,7 @@ private:
     std::vector<QGraphicsPolygonItem *> passage_items_;   // draw_passages
     std::vector<QGraphicsItem *> door_items_;              // draw_doors
     std::vector<QGraphicsItem *> anchor_items_;            // draw_anchor (lines, dots, the servo's text)
+    std::vector<QGraphicsItem *> approach_items_;          // draw_approach (arrows, footprint, labels)
     LidarPointBuffer *lidar_buffer_ = nullptr;
     Eigen::Affine2f lidar_draw_correction_ = Eigen::Affine2f::Identity();   // overlay dead-reckoning (room→room)
     bool lidar_visible_ = true;

@@ -182,12 +182,14 @@ void SpecificWorker::modify_node_attrs_slot(std::uint64_t id, const std::vector<
                                                  << last_cmd_rot_ << ',' << last_cmd_ts_ms_ << '\n';
                                 odom_sample_log_.flush();   // 50 lines/s; a lost tail costs more
                             }
+                            // The pose propagator between corrections (pose_propagator.h) takes the WALL stamp, the
+                            // clock of the IMU tick and of the LiDAR-stamped corrections — not integration_ts_ms()
+                            // (the SIM clock in Webots): one clock in the propagator. Equal on the real robot.
+                            pose_pub_->add_odometry(odom.effective_ts_ms(), odom.adv, odom.side, odom.rot);
                             odometry_buffer_.put<0>(std::move(odom), static_cast<std::uint64_t>(odom.recv_ts_ms));
                             last_robot_current_speed_timestamp_ = source_ts;
-                            // Straight to the publisher, which is the only reader: a prediction
-                            // extrapolates the twist cached at the last correction, so a copy kept
-                            // here and never forwarded would silently make every predicted pose
-                            // extrapolate a ZERO twist.
+                            // Straight to the publisher: the raw twist is the correction's twist fallback
+                            // when there is no previous publish to difference against.
                             pose_pub_->set_robot_speed(adv_value.value(), side_value.value(),
                                                        rot_value.value());
                         }

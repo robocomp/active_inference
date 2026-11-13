@@ -16,15 +16,15 @@
 // hole (0, 0) in a polygon whose mouth edge is (−0.33, 0)→(0.27, 0), and a low-LiDAR sweep from (0, 0.4) — inside the
 // room, in the doorway as the robot was — whose rays go THROUGH the hole for x ∈ [−0.27, 0.25] and in two 2 cm slivers
 // either side of it (pingpong1's spans at the mirror's first cycle), and stop on the wall line everywhere else.
-//   (a) RED reproduction: the same polygon read as WALLS (is_proto = false) slides the aperture > 0.15 m toward +x
-//       (+0.25 m here; +0.28 m live).
+//   (a) the same polygon read as WALLS (is_proto = false): it used to slide the aperture > 0.15 m toward +x (+0.25 m here;
+//       +0.28 m live); since 2026-11-11 the parked sweep is ONE observation (view credit), so it stays within 5 cm.
 //   (b) the fix: as a PROTO room the aperture stays within 5 cm of the hole.
 //   (c) a room whose wall runs through the doorway (the room_1 case): the flag moves nothing (< 1 cm) — the term only ever
 //       mattered where the polygon's edge at the door is a frontier.
 //
 // Build + run (from door_concept/):
 //   g++ -std=c++23 -O1 -I/usr/include/eigen3 -I/usr/include/opencv4 tests/test_door_proto_wall_extent.cpp \
-//       src/core/door_core.cpp src/core/door_fit.cpp src/core/door_existence.cpp src/core/door_cycle_io.cpp \
+//       src/core/door_core.cpp src/core/door_fit.cpp src/core/door_existence.cpp src/core/door_visibility.cpp src/core/existence_update.cpp src/core/door_cycle_io.cpp \
 //       src/door_belief.cpp src/door_model.cpp src/door_frame_evidence.cpp ../common/contour_edge/contour_edge_check.cpp \
 //       ../common/contour_edge/contour_edge_project.cpp ../common/contour_edge/contour_depth_check.cpp \
 //       -lzstd -lopencv_core -lopencv_imgproc -o /tmp/test_door_proto_wall_extent && /tmp/test_door_proto_wall_extent
@@ -69,15 +69,12 @@ struct World final : TrackerWorld
         for (auto& [id, s] : st) v.emplace_back(id, &s);
         return v;
     }
-    std::optional<GhostMatch> match_ghost(const Vec2f&) const override { return std::nullopt; }
     std::optional<IdentityMatch> match_identity(const Vec2f&) const override { return std::nullopt; }
     void retire(std::uint64_t id) override { st.erase(id); }
     void set_assigned_mask(std::uint64_t id, int slice) override
     { if (auto it = st.find(id); it != st.end()) it->second.assigned_mask_idx = slice; }
     void after_association(const TrackerCycleInfo&) override {}
     std::uint64_t create_door(const BirthRequest&) override { return 0; }   // no camera ⇒ no births here
-    void reacquire(std::uint64_t, const GhostMatch&) override {}
-    void forget_ghost(const Vec2f&) override {}
     std::optional<std::string> adopt_birth(std::uint64_t, int, const Vec3f&) override { return std::nullopt; }
     std::vector<std::uint64_t> fit_targets() override
     {
@@ -172,10 +169,14 @@ int main()
     std::setlocale(LC_ALL, "");   // as the agent runs (Qt): the core must not parse anything through the C locale
     constexpr int N = 40;
 
-    // (a) the proto ring read as WALLS — the defect
+    // (a) the proto ring read as WALLS. Until 2026-11-11 this reproduced the defect (+0.25 m): the parked robot's identical sweep
+    //     was fused 40 times, and the Φ factors' preference compounded each time. The along-wall span is now credited by the
+    //     sweep standpoint's novelty (one view, one observation — door_fit.cpp credit_view), so 40 sweeps from one place are ONE
+    //     observation and even the misread ring cannot slide the mirror off the hole. The proto rule (b) stays the reason the
+    //     term is absent there; this case now guards that the repeated sweep cannot compound.
     const Result walls = run(false, kProtoRing, N);
     std::print("(a) ring read as walls : aperture ({:+.3f}, {:+.3f}) σ_s {:.3f}\n", walls.ap_x, walls.ap_y, walls.s_sd);
-    CHECK(std::isfinite(walls.ap_x) and walls.ap_x > 0.15f);
+    CHECK(std::isfinite(walls.ap_x) and std::abs(walls.ap_x) < 0.05f);
 
     // (b) the same ring as what it is: a provisional room's free-space frontier
     const Result proto = run(true, kProtoRing, N);

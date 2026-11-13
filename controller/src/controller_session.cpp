@@ -10,6 +10,7 @@
 #include "../../common/affordance_manager/affordance_room_scope.h"   // Task 4: explore room_X scopes the contest
 #include "near_field_clearance.h"        // Task 6: [Route] NearFieldClearance — the band's structured near field
 #include "door_leaf_geometry.h"      // the canvas draws every door as aperture + believed leaf
+#include "controller_approach_view.h"   // the canvas draws an object-approach's options (one arrow per side)
 #include "door_route.h"                 // the door route's waypoints (controller_door_passage.h ROUTE MODE)
 #include "band_cross.h"                 // Task 6 fix round 1: [Route] BandDrivesCross's route through the opening
 #include "local_policy/contact.h"       // Task 6: denoise_returns, the policy's surface model
@@ -126,6 +127,16 @@ bool ControllerSession::sync_world_state(std::uint64_t timestamp_ms,
                                          ControllerMotionCommander &motion_commander,
                                          ControllerDisplay &display)
 {
+    // C9 — THE CONTROL PERIOD, measured here once per control cycle (EMA; a gap beyond the tick gate's longest legitimate
+    // interval restarts it). The policy reads it for its minimum-rate hold and its rollouts' latency (controller_policy_drive.cpp).
+    {
+        const double now_s = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+        const double dt = policy_period_prev_s_ > 0.0 ? now_s - policy_period_prev_s_ : -1.0;
+        policy_period_prev_s_ = now_s;
+        if (dt > 0.0 and dt <= rc::policy::PolicyTickGate::kMaxTickGapS)
+            policy_period_s_ = policy_period_s_ > 0.f ? 0.8f * policy_period_s_ + 0.2f * static_cast<float>(dt) : static_cast<float>(dt);
+        else policy_period_s_ = 0.f;
+    }
     // End-to-end perception latency, sampled once per cycle where the world model is in scope. Measured
     // against the RT edge's own validity stamp (the lidar scan behind the pose), so it spans capture ->
     // room_concept -> DSR -> this read. -1 when the edge carries no stamp history.
@@ -251,6 +262,22 @@ bool ControllerSession::sync_world_state(std::uint64_t timestamp_ms,
                 views.push_back(std::move(v));
             }
         display.set_door_views(std::move(views));
+    }
+
+    // ── THE ACTIVE OBJECT-APPROACH'S OPTIONS ON THE CANVAS (controller_approach_view.h): one arrow per side the object
+    //    offers, the chosen / executing one highlighted, the object's footprint, and our own working target. The node is
+    //    the one an `approach` order requires, else the affordance being driven. Display only; ~5 Hz.
+    if (graph_ != nullptr and timestamp_ms - approach_view_last_ms_ >= 200)
+    {
+        approach_view_last_ms_ = timestamp_ms;
+        const bool driving = last_target_info_.has_value() and last_target_info_->from_affordance;
+        const std::string node = not approach_required_.empty() ? approach_required_
+                               : driving ? last_target_info_->node_name : std::string{};
+        std::optional<Eigen::Vector3f> working;
+        if (driving and last_target_info_->node_name == node)
+            working = Eigen::Vector3f(last_target_info_->room_pos.x(), last_target_info_->room_pos.y(), last_target_info_->yaw_rad);
+        display.set_approach_view(rc::approach_view::read(*graph_, world_model.inner_eigen(), world_model.graph_state().room_name,
+                                                          node, approach_option_, working));
     }
 
     // ── DOOR PASSAGE (controller_door_passage.h): which affordance may be selected, and the corridor through the
@@ -553,9 +580,46 @@ bool ControllerSession::sync_world_state(std::uint64_t timestamp_ms,
         policy_leaf_evidence_ = std::move(ev);
     }
     else policy_leaf_mass_logged_ = -1.f;
+    // clean18: the door the robot has just come through is a known obstacle for the planner, in the room frame it was taken in.
+    // Not during a cross: there the opening is the goal, and the leaf's hypotheses are priced by its own model above.
+    const bool passed_leaf_known = policy_enabled() and not anchor_cross_.has_value() and not policy_passed_leaf_.empty()
+                                   and policy_passed_leaf_room_ == current_room_name_;
+    ControllerPolygons polygons_with_leaf;
+    if (passed_leaf_known)
+    {
+        polygons_with_leaf = obstacle_tracker.obstacle_polygons();
+        for (auto &poly : rc::policy::door_leaf_polygons(policy_passed_leaf_, grid_planner_.cell_size()))
+            polygons_with_leaf.push_back(std::move(poly));
+        if (policy_passed_leaf_logged_ != current_room_name_)
+        {
+            std::println("[policy] the leaf of the door just crossed ({} hypotheses) is a known obstacle for the planner in '{}'",
+                         policy_passed_leaf_.hyps.size(), current_room_name_);
+            policy_passed_leaf_logged_ = current_room_name_;
+        }
+    }
+    // PORT STEP 3 (2026-11-11): while the CHAIN drives, the controller-local marks (unmapped obstacles the chain's window found,
+    // with their belief; controller_chain_monitor.cpp) are obstacles for the planner — and, being in its world, they also
+    // count as "explained" for the next unmapped test, so a mark is never drawn twice. Not while the planner was told the
+    // marks leave no route to the current target (chain_marks_off_: plan on the map alone until the marks change; WAIT = step 4).
+    // ★ FROZEN WHILE THE POLICY DRIVES AN EPISODE (live hybrid1, 2026-11-11): every mark the belief cleared changed the planner's
+    //   world, and the policy rebuilt its cost-to-go on each change — 165 ms a tick at a shut door, the controller fell from 19
+    //   to 9 Hz. During an episode the planner world keeps the marks as they were when it began (the policy's field is built
+    //   once); the belief goes on observing, and its changes reach the planner when the chain takes over again.
+    const bool frozen = chain_ep_.active;
+    chain_marks_in_world_ = chain_marks_drive() and not chain_marks_off_ and chain_marks_room_ == current_room_name_
+                            and (frozen ? not chain_ep_marks_.empty() : not chain_marks_.empty());
+    ControllerPolygons polygons_with_marks;
+    if (chain_marks_in_world_)
+    {
+        polygons_with_marks = passed_leaf_known ? polygons_with_leaf : obstacle_tracker.obstacle_polygons();
+        if (frozen) polygons_with_marks.insert(polygons_with_marks.end(), chain_ep_marks_.begin(), chain_ep_marks_.end());
+        else for (auto &poly : chain_marks_.polygons(grid_planner_.params.cell_size_m)) polygons_with_marks.push_back(std::move(poly));
+    }
+    const ControllerPolygons &planner_polygons = chain_marks_in_world_ ? std::as_const(polygons_with_marks)
+                                               : passed_leaf_known ? std::as_const(polygons_with_leaf) : obstacle_tracker.obstacle_polygons();
     {
     RC_STAGE("session.grid_set_world");
-    grid_planner_.set_world(room_polygon_, obstacle_tracker.obstacle_polygons(),
+    grid_planner_.set_world(room_polygon_, planner_polygons,
                             {.centres = obstacle_tracker.residual_cells(),
                              .cell_size_m = obstacle_tracker.residual_cell_size_m(),
                              .risk_nats = residual_risk,
@@ -695,7 +759,7 @@ void ControllerSession::observe_door_passage_why(std::uint64_t now_ms)
     const rc::why::PassageFacts f{.door = v.door, .step = rc::DoorPassage::step_name(v.step), .required = v.required,
                                   .state = v.step_state, .reached_door = v.reached_door, .opened = v.opened,
                                   .clearing = v.clearing, .attempts = v.attempts, .last_outcome = v.last_outcome,
-                                  .door_now = door_now, .waiting_on = cross_status_};
+                                  .door_now = door_now, .waiting_on = cross_status_, .offer_bound = v.offer_bound};
     if (auto note = rc::why::passage_note(f, why_aff_memory_, now_ms); note.has_value())
         why_.add(std::move(*note));
 }
@@ -2378,6 +2442,7 @@ ControllerPolygon ControllerSession::smooth_plan(const ControllerPolygon &poly, 
                          params_->route_smoothing_m, &opt))
         return poly;   // smoothing is an improvement, never a precondition: fall back to the polyline
     plan_spline_valid_ = true;
+    ++plan_spline_gen_;   // a NEW curve in the same object: consumers holding &plan_spline_ cannot see the change by address
     return replace_samples ? spline.samples() : poly;
 }
 
@@ -3217,6 +3282,10 @@ bool ControllerSession::ensure_current_plan(const ControllerPlanningStep &step,
     {
         reset_stuck_state();   // a fresh target = fresh navigation; don't inherit a stale stuck clock
         returns_backoff_failed_ = false;
+        chain_marks_off_ = false;   // a new target is planned with the marks again (port step 3)
+        chain_wait_ = false;        // ...and neither a WAIT nor an episode carries over to it (steps 4, 5)
+        chain_ep_ = {};
+        chain_ep_request_ = nullptr;
     }
 
     // ── CONTINUOUS ROUTE ──
@@ -3465,6 +3534,8 @@ bool ControllerSession::build_door_route(const ControllerRobotPose &robot_pose, 
 {
     const auto &leg = *door_route_leg_;
     door_route_key_ = leg.key;
+    door_route_vantage_.reset();   // this leg's route is not built yet
+    at_vantage_logged_.reset();
     door_route_build_ms_ = now_ms;
     door_route_active_ = false;
     const rc::door_route::Target appr{leg.approach, leg.approach_yaw};
@@ -3513,6 +3584,12 @@ bool ControllerSession::build_door_route(const ControllerRobotPose &robot_pose, 
         // done. Reported as the route's arrival, so the passage goes on to `open` / `cross` as from the vantage itself.
         std::println("[door-route] {}: the robot stands in the doorway, nearer the hole than any vantage — the approach is done",
                      leg.door);
+        door_passage_.note_route(leg.key, rc::DoorPassage::RouteReport::Arrived);
+        return true;
+    }
+    if (rc::door_route::approach_already_done(plan, robot_pose.pos, tol_xy))
+    {
+        std::println("[door-route] {}: the robot is already at the vantage: the approach is done", leg.door);
         door_passage_.note_route(leg.key, rc::DoorPassage::RouteReport::Arrived);
         return true;
     }
@@ -3575,6 +3652,8 @@ bool ControllerSession::build_door_route(const ControllerRobotPose &robot_pose, 
     // The policy's Place goals: the curve's points every 2·tol_xy of arc (consecutive arrival discs touch, never overlap),
     // the last one with the leg's final heading (facing the door at P_pre; the travel direction at P_post).
     door_route_goals_.clear();
+    door_route_vantage_ = door_route_.spline().position_at(door_vantage_s_);
+    door_route_no_vantage_ = plan.pre_omitted;
     const float L = door_route_.length();
     const float ds = std::max(2.f * tol_xy, grid_planner_.cell_size());
     // up to the vantage: the approach target (the last of them faces the door); past it, a through leg's cross goals
@@ -3676,7 +3755,7 @@ bool ControllerSession::drive_door_route(const ControllerPlanningStep &step, rc:
         if (const auto seen = perceived_door(leg.door, step.robot_pose); seen.has_value())
         {
             const std::string room = leg.key.substr(leg.key.rfind('|') + 1);
-            if (door_route_latch_room_ != room) { door_route_latch_room_ = room; door_route_n0_key_.clear(); door_route_through_key_.clear(); door_route_last_s_body_ = -1e9f; }
+            if (door_route_latch_room_ != room) { door_route_latch_room_ = room; door_route_n0_key_.clear(); door_route_through_key_.clear(); door_route_opening_key_.clear(); door_route_last_s_body_ = -1e9f; }
             const std::string latch = leg.door + "|" + room;
             const float half_w = std::max(approach_body_.support_radius(0.f, Eigen::Vector2f(1.f, 0.f)),
                                           approach_body_.support_radius(0.f, Eigen::Vector2f(-1.f, 0.f)));
@@ -3701,12 +3780,22 @@ bool ControllerSession::drive_door_route(const ControllerPlanningStep &step, rc:
             // THROUGH held back until the body was 1.3 m in (e4c6067c), room_concept stayed in the old room's frame for ~5 s
             // and stored what it saw of the next room as the old room's floor (room_2: 22-28 m2 through pingpong13, then
             // 41/67/44/38/32 m2; pingpong29 leg 2: +3075 free cells with the body past the line before the switch).
-            const bool through_now = s_body > r_body;
+            // ★ THROUGH THE OPENING, NOT ACROSS ITS LINE (2026-11-11, clean40/clean41: 2/2 exploration tours ended STUCK). s alone
+            //   is a half-plane test: the bathroom is L-shaped, the line through its door to room_2 runs through the bathroom's
+            //   own lower leg, and a robot starting back from there was on the far side of the line 2.5 m along the wall from the
+            //   door — THROUGH fired, room_concept switched rooms, ltsm withdrew the crossing, the tour stopped. Crossing the
+            //   opening SEGMENT: the body was seen IN the opening (its centre within the opening's width while the body straddles
+            //   the plane) before it is wholly past it. No new constant: the opening's own width and the body's radius.
+            const float e_side = (cpose.pos - seen->gap.centre).dot(Eigen::Vector2f(-n.y(), n.x()));
+            // (an opening of unknown width — 0 — cannot bound e: the plane test as before, rather than never reporting a crossing)
+            if (std::abs(s_body) < r_body and (seen->gap.width <= 0.f or std::abs(e_side) <= 0.5f * seen->gap.width))
+                door_route_opening_key_ = latch;
+            const bool through_now = s_body > r_body and door_route_opening_key_ == latch;
             if (door_route_through_key_ != latch and through_now)
             {
                 door_route_through_key_ = latch;
-                std::println("[door-route] {}: the body is {} past {} (s {:.2f} m; body radius {:.2f} m) — THROUGH", leg.door,
-                             "wholly", seen->name, s_body, r_body);
+                std::println("[door-route] {}: the body is {} past {} (s {:.2f} m; e {:+.2f} m of the opening's ±{:.2f}; body radius {:.2f} m) — THROUGH",
+                             leg.door, "wholly", seen->name, s_body, e_side, 0.5f * seen->gap.width, r_body);
                 door_passage_.note_route(leg.key, rc::DoorPassage::RouteReport::Arrived);
             }
         }
@@ -3721,9 +3810,22 @@ bool ControllerSession::drive_door_route(const ControllerPlanningStep &step, rc:
     //   unused. The planned route drives until the body is at least as close to the door as the vantage (its arrival
     //   tolerance included); from there the servo takes the hole.
     // (no room-frame door centre known: nothing to gate on — the anchor alone, as before)
-    const bool at_vantage = not passage_door_centre_.has_value()
-                            or (step.robot_pose.pos - *passage_door_centre_).norm()
-                                   <= (leg.approach - *passage_door_centre_).norm() + path_controller.goal_threshold();
+    // Once this leg has a route, being at the vantage is the route's own progress. Before it exists (or if it could not be built), door_concept's approach
+    // standpoint is all there is, as a distance.
+    const bool leg_has_route = door_route_key_ == leg.key and door_route_vantage_.has_value();
+    const Eigen::Vector2f vantage = leg_has_route ? *door_route_vantage_ : leg.approach;
+    const bool at_vantage = leg_has_route
+                            ? rc::route_reached_vantage(door_route_goal_index_, door_route_vantage_goals_, door_route_no_vantage_)
+                            : (not passage_door_centre_.has_value()
+                               or rc::passage_at_vantage(step.robot_pose.pos, *passage_door_centre_, vantage, path_controller.goal_threshold()));
+    if (passage_door_centre_.has_value() and at_vantage_logged_ != at_vantage)
+    {
+        at_vantage_logged_ = at_vantage;
+        std::println("[door-route] {}: at_vantage {} ({}): goal {}/{}, body {:.2f} m from the door, vantage {:.2f} m, door_concept's approach {:.2f} m",
+                     leg.door, at_vantage, leg_has_route ? "route" : "distance", door_route_goal_index_, door_route_vantage_goals_,
+                     (step.robot_pose.pos - *passage_door_centre_).norm(), (vantage - *passage_door_centre_).norm(),
+                     (leg.approach - *passage_door_centre_).norm());
+    }
     // Once engaged on this crossing the servo keeps going on the anchor LATCHED for it even after door_concept withdraws
     // the cross (it does as the body passes the plane): pingpong18 leg 4 stopped 1.1 m in, 0.2 m short of the cross
     // target, the crossing fact never written, because this block needed the affordance node.
@@ -3761,8 +3863,9 @@ bool ControllerSession::drive_door_route(const ControllerPlanningStep &step, rc:
                 // ★ door-passable spec step 2 (warm61): the route ARRIVED at the vantage but the opening is off-axis or misfaced —
                 //   re-aim on the perceived opening instead of holding (rc::vantage_action / reaim_on_anchor).
                 const bool route_arrived = door_route_goal_index_ >= door_route_vantage_goals_;
-                if (rc::vantage_action(door_passage_.servo(), open_belief, open_seen, near_side, within, facing, route_arrived,
-                                       anchor_cross_->fresh) == rc::VantageAction::ReAim)
+                const auto vact = rc::vantage_action(door_passage_.servo(), open_belief, open_seen, near_side, within, facing, route_arrived,
+                                                     anchor_cross_->fresh);
+                if (vact == rc::VantageAction::ReAim)
                 {
                     const ControllerRobotPose &rp = tracker_pose_.has_value() ? *tracker_pose_ : step.robot_pose;
                     const auto ra = rc::reaim_on_anchor(g);
@@ -3775,7 +3878,7 @@ bool ControllerSession::drive_door_route(const ControllerPlanningStep &step, rc:
                                           p_open, open_belief ? "" : " ✗", open_seen ? "yes" : "no ✗", g.s, near_side ? "" : " ✗",
                                           g.e, 0.5f * anchor_cross_->width_m, within ? "" : " ✗", g.heading_err * 57.2958f,
                                           facing ? "" : " ✗");
-                anchor_cross_last_mouth_missing_ = not front_of_open and (not open_seen or not open_belief);
+                anchor_cross_last_mouth_missing_ = vact == rc::VantageAction::HoldNoMouth;   // placed, and still no mouth
                 if (not front_of_open) anchor_cross_.reset();   // execute() must not run the servo on it
             }
             // ★ NO MOUTH, NO CROSSING (user 2026-11-01: "you can't throw the robot into a closed door — there has to be a mouth to go
@@ -3794,8 +3897,23 @@ bool ControllerSession::drive_door_route(const ControllerPlanningStep &step, rc:
                     std::println("[door-route] {}: at the vantage, NO MOUTH seen through the door ({}) — holding here, not driving "
                                  "into it", leg.door, why_not);
                 }
+                // ★ THE HOLD IS BOUNDED BY WHAT IT CAN STILL LEARN (clean50; Fable 2026-11-11 "a passage can wait forever"): placed in
+                //   front of the opening, the 360° LiDAR has the view this pose can give within one plan duration; after that, waiting
+                //   here adds nothing (a parked pose is one view). The same rule — and span — as the never-published anchor (Live fix 4
+                //   ruling 4): hand the cross back and let the passage reposition, so door_concept's belief gets a NEW view.
+                const double now_s = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+                if (mouth_wait_.on_tick(true, now_s, 2.0 * (params_ != nullptr ? params_->policy_horizon_s : 1.0)))
+                {
+                    std::println("[door-route] {}: no mouth seen from a placed vantage for a plan duration — handing the cross back "
+                                 "to reposition", leg.door);
+                    cross_hand_back("no mouth seen through the door from a placed vantage for a plan duration", /*timed_out=*/false,
+                                    motion_commander);
+                    door_passage_.reposition("no mouth seen from here");
+                    mouth_wait_.reset();
+                }
                 return true;
             }
+            mouth_wait_.reset();
             if (door_reaim_goal_.has_value())
             {
                 cross_status_ = "re-aiming on the perceived opening: " + why_not;
@@ -3950,7 +4068,9 @@ bool ControllerSession::drive_point_target(const ControllerPlanningStep &step,
     //   no-route clock (M4): drive_with_policy runs the policy whenever the cost-to-go at the robot is finite, and "no route"
     //   — with its 5-s Unreachable clock — means the FIELD at the robot is non-finite. A start pose the footprint planner
     //   refuses (the bare hull near a wall, inside the margin) therefore still drives.
-    if (policy_enabled())
+    // PORT STEP 5: in the HYBRID a plain Place (drive_with_policy's PLACE branch, last cycle) is planned the CHAIN's way below:
+    // smoothed, fitted to plan_spline_, with the marks and the WAIT.
+    if (policy_enabled() and not (chain_hybrid_on() and chain_hybrid_place_))
     {
         if (step.target_changed or not current_plan_.has_value())
         {
@@ -3963,12 +4083,56 @@ bool ControllerSession::drive_point_target(const ControllerPlanningStep &step,
         short_path_since_ms_ = 0;
         return true;
     }
+    // ── PORT STEP 4 — WAIT. The way is blocked by what the map does not have (no route on map + marks, one on the map alone):
+    //    stopped and watching, never "unreachable" — a mark that clears (chain_observe) ends the wait and the planner tries the
+    //    marks again. ★FLAGGED: no give-up time here; how long a mission waits is the caller's (its contract's timeout).
+    if (chain_wait_)
+    {
+        if (step.target_changed) chain_wait_ = false;
+        else
+        {
+            current_plan_.reset();
+            plan_spline_valid_ = false;
+            no_route_since_ms_ = 0;   // waiting is not a planner failure: the no-route clock does not run
+            note_hold(std::format("WAIT: the way to '{}' is blocked by what the map does not have ({} marks) — watching",
+                                  step.target.node_name, chain_marks_.marks.size()));
+            return false;
+        }
+    }
+    // PORT STEP 3: a mark near the route cleared last cycle (step_chain_monitor). The route is still safe — an obstacle went
+    // away — so it is replaced only if the planner, on this cycle's world without that mark, finds a SHORTER one.
+    if (chain_clear_check_)
+    {
+        chain_clear_check_ = false;
+        if (not band_cross_active and not step.target_changed and current_plan_.has_value() and plan_spline_valid_ and chain_have_s_
+            and driven_curve().owner == DriveOwner::PointPlan)
+            if (const auto cand = grid_planner_.plan(step.plan_origin, step.target.room_pos);
+                cand.has_value() and rc::chain::shorter_route(*cand, plan_spline_.length() - chain_s_prog_, grid_planner_.params.cell_size_m))
+            {
+                std::println("[chain] a cleared mark opens a shorter route to '{}' ({:.2f} m < {:.2f} m left): re-plan",
+                             step.target.node_name, rc::chain::polyline_length(*cand), plan_spline_.length() - chain_s_prog_);
+                current_plan_.reset();
+                plan_spline_valid_ = false;
+            }
+    }
     if (not band_cross_active and (step.target_changed || !current_plan_.has_value()))
     {
         // FOOTPRINT PLANNER. The robot's real shape is tested against the grid; obstacles are NOT inflated.
         // Falls back to nothing — if this cannot find a route, the HOLD branch below reports precisely why.
         mission_.note_replan();   // counted whether or not it succeeds — a failed replan is the worse one
-        if (const auto route = grid_planner_.plan(step.plan_origin, step.target.room_pos); route.has_value())
+        const auto route = grid_planner_.plan(step.plan_origin, step.target.room_pos);
+        // PORT STEP 4: the marks left no route last cycle (chain_marks_off_) and the MAP alone routes: what blocks is not the map
+        // — WAIT (stopped, watching) instead of driving the map's route into the marked obstacle
+        if (route.has_value() and chain_marks_off_ and chain_marks_drive())
+        {
+            chain_wait_ = true;
+            chain_marks_off_ = false;   // the marks are back in the world; a clear ends the wait (chain_observe)
+            current_plan_.reset();
+            plan_spline_valid_ = false;
+            std::println("[chain] WAIT: no route to '{}' with {} marks, one on the map alone — stopped, watching the marks",
+                         step.target.node_name, chain_marks_.marks.size());
+        }
+        else if (route.has_value())
         {
             ControllerPathPlan plan{.room_path = *route};
             // Smooth it the same way a mission route is smoothed. A click target should not get a
@@ -3976,6 +4140,17 @@ bool ControllerSession::drive_point_target(const ControllerPlanningStep &step,
             // either way — a C1 polyline steps it at every turning point regardless of who asked.
             plan.room_path = smooth_plan(plan.room_path);
             current_plan_ = std::move(plan);
+        }
+        else if (chain_marks_in_world_)
+        {
+            // PORT STEP 3: the chain's MARKS leave no route to this target. WAIT for them to clear is step 4 (not built); until
+            // then the target is planned on the map alone, as before the marks existed — the marks must not invent a dead end.
+            // Not a route failure of the target itself, so the repair stage is not told.
+            current_plan_.reset();
+            plan_spline_valid_ = false;
+            chain_marks_off_ = true;
+            std::println("[chain] no route to '{}' with {} marks: is there one on the map alone? (WAIT if so)",
+                         step.target.node_name, chain_marks_.marks.size());
         }
         else
         {
@@ -4229,6 +4404,7 @@ void ControllerSession::reset_anchor_cross_state()
     anchor_uncovered_logged_stamp_ = 0;
     anchor_clearing_released_ = false;               // Task 3f (c): a given-up clearing belongs to its claim
     policy_clearing_no_route_.reset();
+    policy_door_route_no_route_.reset();
     switch_sigma_r_ = -1.f;                          // Task 3f r1 (M-8): latched at this claim's own switch
 }
 
@@ -5461,6 +5637,12 @@ void ControllerSession::hold_approach_commitment(ControllerPlanningStep &step, s
     }
     step.target.room_pos = approach_commit_->room_pos;
     step.target.yaw_rad  = approach_commit_->yaw_rad;
+    // ★ONE TARGET (clean34, 2026-11-10). The caller captured last_raw_target_pos_ = the NEW offer before this hold ran, and
+    //  the policy's place branch drives to that "published" pose (goal_target_pos), while consume_goal_reached judges the
+    //  arrival against step.target — the HELD pose. The robot drove to epoch 2, stopped 0.24 m from it, and every arrival
+    //  was rejected as 0.85 m from epoch 1: 290 s parked, the producer waiting on a completion nobody would send. While we
+    //  hold, what the producer published FOR THE EPOCH WE EXECUTE is the committed pose, so that is the raw target too.
+    last_raw_target_pos_ = approach_commit_->room_pos;
     // Rate-limited: the producer re-offers continuously and one line per cycle would bury the run.
     if (timestamp_ms - approach_commit_log_ms_ >= 3000)
     {
@@ -6545,6 +6727,12 @@ void ControllerSession::step_route_band(const DrivenCurve &curve,
         // 2026-10-10 (user): the band's obstacle repulsion deformed the stretches between waypoints too
         // much. Its OWN clearance weight, so the one-shot smoothing above (w_clear = 1.0) is unchanged.
         cfg.w_clear = params_->band_clearance_weight;
+        // ★ CLEARANCE AS CONTACT RISK (2026-11-11, owner: the spline shivered in free space). The band re-solves every cycle on
+        //   the LIVE field; the barrier's 1/gap^2 pulled toward the medial axis at any range, so every change in the cloud moved
+        //   the curve. -log P(no contact) under the tracker's own lateral error is ~0 a few sigma clear: free space no longer
+        //   pushes. sigma = the chain's measured tracking sigma (posterior) with the pose's.
+        cfg.clearance_risk = true;
+        cfg.clear_sigma_m = std::hypot(chain_sigma_track_now_, policy_pose_xy_std_);
         cfg.verbose = false;          // this runs at control rate; per-cycle logging is noise
         if (kBandProximalSigmaM > 0.f)
         {
@@ -6934,8 +7122,19 @@ bool ControllerSession::consume_goal_reached(bool goal_reached, const Controller
                 return true;
             }
         }
+        // ★ A Reach WITH a goal that did not ask for stillness is judged HERE, at arrival (language-agent chat_e2e3, 2026-11-11:
+        //   `approach chair_34` arrived inside the goal tolerances and was reported Timeout — finalize_reached reads
+        //   last_look_succeeded_, which only the servo/orient paths ever write). The contract's own predicate against its
+        //   feedback node, now: Satisfied if it holds, Timeout (honestly) if it does not. An empty goal stays "arriving IS the goal".
+        if (not active_contract_.goal.empty())
+        {
+            const std::uint64_t fb = active_contract_.feedback_node_id != 0
+                                         ? active_contract_.feedback_node_id
+                                         : (last_target_info_.has_value() ? last_target_info_->parent_node_id : 0);
+            last_look_succeeded_ = goal_met(fb);
+        }
         qInfo() << "[affordance]" << (last_target_info_.has_value() ? last_target_info_->node_name.c_str() : "?")
-                << "reached -> REACH (consume immediately)";
+                << "reached -> REACH (consume immediately)" << (active_contract_.goal.empty() ? "" : last_look_succeeded_ ? "| goal holds" : "| goal does NOT hold");
         audit_standpoint("arrival-end", time_source(),
                          last_raw_target_pos_.value_or(robot_pose.pos.head<2>().cast<float>()),
                          last_target_info_.has_value() ? last_target_info_->room_pos
@@ -7023,10 +7222,14 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
     //    protocol halves they carried (arrival, the cross's completion, the lock-on / orient predicates) are shared.
     if (policy_enabled())   // C1: the policy drives the WHOLE door passage too (approach, hold at the vantage, cross)
     {
-        drive_with_policy(robot_pose, path_controller, obstacle_tracker, motion_commander, display, affordance_manager,
-                          time_source);
-        refresh_view_only();
-        return;
+        // PORT STEP 5: the HYBRID's chain drives a plain Place — drive_with_policy says so and the tracker path below runs
+        const bool chain_drives = drive_with_policy(robot_pose, path_controller, obstacle_tracker, motion_commander, display,
+                                                    affordance_manager, time_source);
+        if (not chain_drives)
+        {
+            refresh_view_only();
+            return;
+        }
     }
 
     // An escape maneuver (physical-stuck recovery) owns the base until it finishes backing
@@ -7058,6 +7261,8 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
 
     if (!current_plan_.has_value())
     {
+        // PORT STEP 4: a WAIT with the chain alone driving still watches its marks (a clear ends it)
+        if (chain_wait_) chain_observe(rc::policy::to_policy_pose(robot_pose), obstacle_tracker);
         display.clear_robot_trajectory();
         clear_tracking_state();
         path_controller.stop();
@@ -7235,6 +7440,25 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
     // Everything else in this function keeps `robot_pose`, the scan-aligned one.
     const auto &control_pose = tracker_pose_.has_value() ? *tracker_pose_ : robot_pose;
     const auto control_output = path_controller.compute(control_pose.as_transform());
+    // the chain's monitors: judge and log (port step 2); step 3: a plan-first verdict (or a cleared mark the route went around)
+    // re-plans on map + marks — the plan is dropped and the next cycle routes again. The base is NOT stopped: this cycle's
+    // command still follows the old curve, which the window judged safe up to the failing stretch beyond the tracker's reach.
+    // step 5 (hybrid): a hand-off verdict (the window fails within reach, tight but passable) or a stalled progress monitor asks
+    // for a policy EPISODE — the base holds this cycle and drive_with_policy's PLACE branch starts it next cycle.
+    if (const auto act = step_chain_monitor(robot_pose, control_output, obstacle_tracker, path_controller); act == ChainAction::Replan)
+    {
+        current_plan_.reset();
+        plan_spline_valid_ = false;
+        route_repair_pending_ = true;
+        std::println("[chain] re-plan on map + {} marks (plan-first)", chain_marks_.marks.size());
+    }
+    else if (act == ChainAction::Episode)
+    {
+        note_why(rc::why::Cause::PolicyHold, std::format("hand-off to the policy ({})", chain_ep_request_ ? chain_ep_request_ : "?"));
+        note_no_command(); motion_commander.stop_robot();
+        refresh_view_only();
+        return;
+    }
     // Surface what the ARRIVAL test is waiting on, every cycle, before any of the branches below can return
     // early — otherwise the readout would freeze exactly in the states worth watching (aligning, blocked).
     // The affordance program, rebuilt from state that already exists. Runs EVERY cycle an affordance is
@@ -7681,6 +7905,13 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
         }
     }
 
+    if (control_output.path_blocked and chain_hybrid_on())
+    {   // the chain's own confirmed blockage = "the chain cannot drive this stretch": the policy judges it on the LiDAR
+        chain_ep_request_ = "blocked"; chain_ep_first_bad_ = 0;
+        note_no_command(); motion_commander.stop_robot();
+        refresh_view_only();
+        return;
+    }
     if (control_output.path_blocked)
     {
         clear_tracking_state();
@@ -7713,6 +7944,13 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
             ? (last_target_info_->room_pos - robot_pose.pos.head<2>().cast<float>()).norm()
             : std::numeric_limits<float>::infinity();
 
+    if (not path_controller.is_active() and chain_hybrid_on())
+    {   // PORT STEP 5: the tracker stopped short of the standpoint — the policy finishes the approach (the target itself)
+        chain_ep_request_ = "finish"; chain_ep_first_bad_ = 0;
+        note_no_command(); motion_commander.stop_robot();
+        refresh_view_only();
+        return;
+    }
     if (!path_controller.is_active())
     {
         // ── THE PATH ENDED SHORT OF THE STANDPOINT (2026-10-09) ─────────────────────────────────────────────
@@ -7895,6 +8133,8 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
                          robot_pose.pos, robot_pose.theta, rot_rps, time_source(),
                          /*spin_is_not_a_wedge=*/false, /*returns_hold=*/returns_hold))
         {
+            // PORT STEP 5: in the hybrid a spin that nets nothing is the policy's stretch, not the escape reflex's
+            if (chain_hybrid_on()) { chain_ep_request_ = "spin"; chain_ep_first_bad_ = 0; note_no_command(); motion_commander.stop_robot(); return; }
             begin_escape(robot_pose, obstacle_tracker, path_controller, time_source());
             step_escape(robot_pose, path_controller, obstacle_tracker, motion_commander, time_source());
             return;
@@ -7929,6 +8169,8 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
                      robot_pose.pos, robot_pose.theta, rot_rps, time_source(),
                      /*spin_is_not_a_wedge=*/false, /*returns_hold=*/returns_hold))
     {
+        // PORT STEP 5: in the hybrid a wedge is the policy's stretch (its Release), not the escape reflex's
+        if (chain_hybrid_on()) { chain_ep_request_ = "wedge"; chain_ep_first_bad_ = 0; note_no_command(); motion_commander.stop_robot(); return; }
         begin_escape(robot_pose, obstacle_tracker, path_controller, time_source());
         step_escape(robot_pose, path_controller, obstacle_tracker, motion_commander, time_source());
         return;
@@ -8061,6 +8303,24 @@ void ControllerSession::count_dwell_mask_hits()
 {
     if (not graph_ or dwell_feedback_node_ == 0 or dwell_goal_.empty())
         return;
+    // ★ A FRONT-CAMERA LOOK, COUNTED BY THE PRODUCER (2026-11-11, owner; objects session): when the contract asks for
+    //   `chair_front_seen`, the chair agent stamps `chair_front_seen_frame` = the mask frame of its last ZED win. Each DISTINCT
+    //   advance is one separate front look at THIS chair — no reliance on which of the two of us saw frame N first. The old
+    //   pacing below judged every front-camera frame by `chair_detection_alive`, which the 360° panorama keeps alive and which
+    //   latches for 40 cycles: chat_e2e8 counted 53 "looks" with the chair behind the robot.
+    if (std::ranges::any_of(dwell_goal_, [](const rc::affordance::GoalClause &c) { return c.attr == "chair_front_seen"; }))
+    {
+        const auto feedback = graph_->get_node(dwell_feedback_node_);
+        if (not feedback.has_value()) return;
+        const auto seen_frame = graph_->get_attrib_by_name<chair_front_seen_frame_att>(feedback.value());
+        if (seen_frame.has_value() and seen_frame.value() >= 0 and seen_frame.value() != dwell_last_mask_frame_)
+        {
+            const bool first = dwell_last_mask_frame_ < 0;   // the frame already standing when the dwell began is not a new look
+            dwell_last_mask_frame_ = seen_frame.value();
+            if (not first) ++dwell_mask_hits_;
+        }
+        return;
+    }
     // PACED BY THE PRODUCER'S FRAME COUNTER, JUDGED BY THE CONTRACT'S OWN PREDICATE.
     // The counter supplies the rhythm — one look per published camera frame, so the number means
     // "separate looks that confirmed it" and not "control cycles that ran while one frame sat there"
@@ -8584,7 +8844,7 @@ void ControllerSession::finalize_reached(rc::AffordanceManager &affordance_manag
     // contract grows an explicit one, this is the single line that moves to it.
     const bool contract_wants_detection =
         std::ranges::any_of(active_contract_.goal, [](const rc::affordance::GoalClause &c)
-                            { return c.attr.find("detection") != std::string::npos; });
+                            { return c.attr.find("detection") != std::string::npos or c.attr.ends_with("_front_seen"); });
     // A door-passage step chains straight into the next one: nothing is being acquired by a mask, and the dwell
     // was 3 s of standing in front of (or inside) a doorway per step (live try16).
     const bool door_step = last_target_info_.has_value()

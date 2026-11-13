@@ -153,6 +153,36 @@ static void prior_sensitivity()
     }
 }
 
+// clean32: the episode began during the approach. Frames with the robot still in room_1 (pi_in ~ 0) say "inside r1_room_1"
+// (log_inside 0, log_new -37); they must leave the posterior at the prior. Frames after the crossing (pi_in = 1, the robot
+// past the aperture: log_inside -264, log_new 0) decide "new". The weighting is x itself at 1, 0 at 0, monotone between.
+static void frames_before_the_crossing_say_nothing()
+{
+    std::printf("frames_before_the_crossing_say_nothing\n");
+    CHECK(presence_weighted(-37.f, 0.0) == 0.f);
+    CHECK(presence_weighted(-37.f, 1.0) == -37.f);
+    CHECK_NEAR(presence_weighted(-37.f, 0.5), std::log(0.5), 1e-4);               // half the time not in P: log(1/2 + tiny)
+    CHECK_NEAR(presence_weighted(2.f, 0.25), std::log(0.75 + 0.25 * std::exp(2.0)), 1e-5);
+    CHECK(presence_weighted(-5.f, 0.2) > presence_weighted(-5.f, 0.8));            // more presence, more of the frame's say
+    CHECK(std::isnan(presence_weighted(std::nanf(""), 0.5)));
+    CHECK(presence_weighted(-3.f, 7.0) == -3.f and presence_weighted(-3.f, -1.0) == 0.f);   // domain clamp
+
+    std::vector<float> area{25.4f};
+    const auto mp = one(1.93f, -1.57f, 1.92f, 0.05f, 0.02f);
+    // the approach: robot in room_1, P(robot in P) from the body still behind the aperture
+    for (const double pi_in : {1e-12, 1e-6, 1e-3})
+    {
+        std::vector<MetricEvidence> m{M(mp, presence_weighted(0.f, pi_in))};
+        const auto h = posterior(m, std::vector<AppearanceEvidence>{AppearanceEvidence{}}, area, presence_weighted(-37.12f, pi_in));
+        std::printf("  approach pi_in %.0e: P(room_1) %.4f P(new) %.4f\n", pi_in, p_of(h, 0), p_of(h, 1));
+        CHECK(p_of(h, 0) < 0.51);                                                  // not "P is room_1" (it was 1.000)
+    }
+    // through the door: the robot in P says "not inside room_1"
+    std::vector<MetricEvidence> m{M(mp, presence_weighted(-263.93f, 1.0))};
+    const auto h = posterior(m, std::vector<AppearanceEvidence>{AppearanceEvidence{}}, area, presence_weighted(0.f, 1.0));
+    CHECK(p_of(h, 1) > 0.999);
+}
+
 int main()
 {
     no_evidence_equals_prior();
@@ -164,6 +194,7 @@ int main()
     correlated_frames_not_overconfident();
     undo_uses_only_post_commit_evidence();
     prior_sensitivity();
+    frames_before_the_crossing_say_nothing();
     std::printf(g_fail == 0 ? "room_posterior_test: ALL PASSED\n" : "room_posterior_test: %d FAILED\n", g_fail);
     return g_fail == 0 ? 0 : 1;
 }

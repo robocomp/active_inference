@@ -11,7 +11,9 @@
 #include <ranges>
 #include "entry_reloc.h"
 #include "room_scene_graph.h"
+#include <numeric>
 #include "status_reporter.h"
+#include "wall_support.h"                                    // rc::walls::wall_real_prob (obj_exist_prob of walls)
 #include "wall_sync.h"                                       // rc::walls::plan_wall_sync (rule 1)
 #include "door_crossing.h"                                   // rc::crossing (proto-room evidence)
 #include "proto_mouth.h"                                      // rc::crossing::write_mouth (the proto birth)
@@ -190,8 +192,9 @@ void RoomSceneGraph::on_controller_lost()
 
 ///////////////////////////////////////////////////////////////////////////////
 void RoomSceneGraph::update(const rc::RoomConcept::UpdateResult& res, float adv, float side, float rot,
-                           bool write_rt)
+                           bool write_rt, const std::vector<RtTail>* tail)
 {
+    last_pose_write_ = {};
     last_adv_  = adv;
     last_side_ = side;
     last_rot_  = rot;
@@ -417,7 +420,7 @@ void RoomSceneGraph::update(const rc::RoomConcept::UpdateResult& res, float adv,
                 if (G_->update_node(rn.value())) published_is_lost_ = lost;
             }
         if (write_rt)
-            dsr_update_pose(res);   // robot->room RT (skipped when the odometry publisher owns it)
+            dsr_update_pose(res, tail);   // robot->room RT (skipped when the odometry publisher owns it)
         if (params_->PUBLISH_AFFORDANCE)
             dsr_update_affordance(res); // publish epistemic target affordance (off ⇒ room never competes)
         // ★NOT GATED ON PUBLISH_AFFORDANCE, and not gated on CalibPivotEnabled either. The PASSIVE
@@ -461,33 +464,58 @@ void RoomSceneGraph::dsr_publish_body_calibration(const rc::RoomConcept::UpdateR
 
 ///////////////////////////////////////////////////////////////////////////////
 
-void RoomSceneGraph::dsr_update_pose(const rc::RoomConcept::UpdateResult& res)
+void RoomSceneGraph::dsr_update_pose(const rc::RoomConcept::UpdateResult& res, const std::vector<RtTail>* tail)
 {
-    write_robot_room_rt(res.robot_pose, res.covariance, static_cast<std::uint64_t>(res.timestamp_ms));
+    // The NEWEST correction rewrites the ring from its earliest block — itself, the spread blocks before it and the
+    // re-integrated tail after it, built by PosePublisher (pose_propagator.h plan_correction) — in ONE publish
+    // (RT_API::rewrite_edge_RT_since), so a reader never sees a prediction made from the previous correction after t_c,
+    // nor a correction half-written. ORDER GUARD: an out-of-order (older) correction is a plain insert, or it would drop
+    // a newer correction from the ring; so is a correction without a tail (RoomConcept.RtRewriteTail = false).
+    const auto t_c = static_cast<std::uint64_t>(res.timestamp_ms);
+    const bool newest_correction = t_c > last_correction_ts_;
+    last_correction_ts_ = std::max(last_correction_ts_, t_c);
+    const std::vector<RtTail>* rewrite = newest_correction ? tail : nullptr;
+    last_pose_write_.written = write_robot_room_rt(res.robot_pose, res.covariance, t_c, 0, rewrite);
+    last_pose_write_.rewrote = last_pose_write_.written and rewrite != nullptr;
 }
 
 // High-rate predicted pose (dead-reckoned between lidar corrections): same RT edge, same frame/cov
-// conversion as a corrected pose — only the source and the (grown) covariance + validity stamp differ.
-void RoomSceneGraph::dsr_publish_predicted_pose(const Eigen::Affine2f& robot_pose,
+// conversion as a corrected pose — only the source, the validity stamp and the twist at that instant differ.
+bool RoomSceneGraph::dsr_publish_predicted_pose(const Eigen::Affine2f& robot_pose,
                                                 const Eigen::Matrix3f& covariance,
-                                                std::uint64_t timestamp_ms)
+                                                std::uint64_t timestamp_ms, float adv, float side, float rot)
 {
-    write_robot_room_rt(robot_pose, covariance, timestamp_ms);
+    last_adv_ = adv; last_side_ = side; last_rot_ = rot;
+    return write_robot_room_rt(robot_pose, covariance, timestamp_ms);
 }
 
 // Shared writer for the robot↔room RT edge. `robot_pose`/`covariance` are the room←robot estimate
 // (room frame); when the room is a child of the robot we invert to robot→room (pose AND cov Jacobian)
 // before the timestamped ring-buffer write. Called by both the corrected and predicted paths.
-void RoomSceneGraph::write_robot_room_rt(const Eigen::Affine2f& robot_pose_int,
+bool RoomSceneGraph::write_robot_room_rt(const Eigen::Affine2f& robot_pose_int,
                                          const Eigen::Matrix3f& covariance_int,
                                          std::uint64_t timestamp_ms,
-                                         std::uint64_t child_override)
+                                         std::uint64_t child_override,
+                                         const std::vector<RtTail>* tail_int)
 {
-    if (!G_ || !rt_api_) return;
+    if (!G_ || !rt_api_) return false;
     // `robot_pose_int`/`covariance_int` are in the estimator's INTERNAL frame for child_override == 0, and
     // already in the child's frame otherwise. The two names below are what gets WRITTEN.
     Eigen::Affine2f robot_pose = robot_pose_int;
     Eigen::Matrix3f covariance = covariance_int;
+    // The tail blocks (if any) are in the same frame as robot_pose and go through every map below with it. Both maps
+    // are LEFT compositions and the propagation is a RIGHT one (a body increment), so mapping a propagated pose is the
+    // same as propagating the mapped correction; the twist is body-frame and does not change.
+    const auto map_tail = [](const std::vector<RtTail>& in, const Eigen::Affine2f& T, const Eigen::Matrix3f& A)
+    {
+        std::vector<RtTail> out;
+        out.reserve(in.size());
+        for (const auto& b : in)
+            out.push_back({T * b.pose, A * b.covariance * A.transpose(), b.timestamp_ms, b.adv, b.side, b.rot});
+        return out;
+    };
+    std::vector<RtTail> tail_mapped;
+    const std::vector<RtTail>* tail = tail_int;
 
     // ── SAFETY BARRIER: never publish a non-finite pose to the graph ─────────────────────────────
     // This RT edge is what every other agent — including the controller that drives the wheels —
@@ -518,14 +546,14 @@ void RoomSceneGraph::write_robot_room_rt(const Eigen::Affine2f& robot_pose_int,
                             << "publishing no pose at all rather than one in a frame nobody can name."
                             << "proto_id=" << proto_room_id_;
             }
-            return;
+            return false;
         }
         const Eigen::Affine2f T_proto_room = T_room_proto_.inverse();
         Eigen::Matrix3f A = Eigen::Matrix3f::Identity();
         A.topLeftCorner<2, 2>() = T_proto_room.linear();
-        write_robot_room_rt(T_proto_room * robot_pose, A * covariance * A.transpose(), timestamp_ms,
-                            proto_room_id_);
-        return;
+        if (tail_int != nullptr) tail_mapped = map_tail(*tail_int, T_proto_room, A);
+        return write_robot_room_rt(T_proto_room * robot_pose, A * covariance * A.transpose(), timestamp_ms,
+                                   proto_room_id_, tail_int != nullptr ? &tail_mapped : nullptr);
     }
 
     // ── THE START-UP PROTO'S FRAME IS FROZEN AT THE ROBOT'S INITIAL POSE ─────────────────────────────
@@ -539,6 +567,7 @@ void RoomSceneGraph::write_robot_room_rt(const Eigen::Affine2f& robot_pose_int,
         A.topLeftCorner<2, 2>() = T_pub_int_.linear();
         robot_pose = T_pub_int_ * robot_pose_int;
         covariance = A * covariance_int * A.transpose();
+        if (tail_int != nullptr) { tail_mapped = map_tail(*tail_int, T_pub_int_, A); tail = &tail_mapped; }
     }
 
     const bool pose_finite = robot_pose.matrix().allFinite() and covariance.allFinite();
@@ -549,7 +578,7 @@ void RoomSceneGraph::write_robot_room_rt(const Eigen::Affine2f& robot_pose_int,
             qCritical() << "[SAFETY] refusing to publish NON-FINITE robot RT (pose_finite="
                         << robot_pose.matrix().allFinite() << "cov_finite=" << covariance.allFinite()
                         << ") — keeping the last good edge; localizer is diverged, count=" << nan_rt_k;
-        return;
+        return false;
     }
 
     const auto describe_node = [this](uint64_t id) -> QString
@@ -593,14 +622,6 @@ void RoomSceneGraph::write_robot_room_rt(const Eigen::Affine2f& robot_pose_int,
         forget_room("cached room node missing");
     }
 
-    const Eigen::Matrix2f R = robot_pose.linear();
-    const Eigen::Vector2f t = robot_pose.translation();
-    const float theta_room_to_robot = std::atan2(R(1, 0), R(0, 0));
-
-    // Convert room->robot estimate into robot->room when the room is a child of the robot.
-    const Eigen::Vector2f t_robot_to_room = -(R.transpose() * t);
-    const float theta_robot_to_room = -theta_room_to_robot;
-
     // robot->room, unconditionally. The pre-room alternative (root->robot) is gone — see the note at
     // the caller. Guarded rather than assumed: reaching here without a room node is now a defect, not
     // a mode, so it says so instead of silently writing to the dummy world frame.
@@ -608,13 +629,13 @@ void RoomSceneGraph::write_robot_room_rt(const Eigen::Affine2f& robot_pose_int,
     {
         qWarning() << "dsr_update_pose called before the room node exists — this agent no longer has a"
                    << "pre-room publication mode; skipping rather than writing to root->robot.";
-        return;
+        return false;
     }
     const uint64_t parent_id = dsr_robot_id_;
     const uint64_t child_id  = child_override != 0 ? child_override : dsr_room_id_;
 
     auto parent_opt = G_->get_node(parent_id);
-    if (!parent_opt.has_value()) return;
+    if (!parent_opt.has_value()) return false;
 
     if (!G_->get_node(child_id).has_value())
     {
@@ -625,159 +646,186 @@ void RoomSceneGraph::write_robot_room_rt(const Eigen::Affine2f& robot_pose_int,
         log_cached_ids("destination node missing", child_id);
         if (room_node_created_ && child_id == dsr_room_id_)
             forget_room("destination node missing");
-        return;
+        return false;
     }
 
-    // Always the robot->room form now: this function is only reached once the room node exists (the
-    // pre-room caller above is gone), so the ternaries that used to select the root<-robot quantity
-    // were dead and, worse, documented a mode this agent no longer has.
-    const float x     = t_robot_to_room.x();
-    const float y     = t_robot_to_room.y();
-    const float theta = theta_robot_to_room;
-
-    // ── Covariance (SE2 3×3 packed into 6×6 flat row-major) ───────────────
-    Eigen::Matrix3f cov_se2 = Eigen::Matrix3f::Identity();
-    if (covariance.rows() >= 3 && covariance.cols() >= 3)
-        cov_se2 = covariance.topLeftCorner<3, 3>();
-
-    if (room_node_created_)
+    // ── ONE RING BLOCK PER POSE ──────────────────────────────────────────────────────────────────
+    // Everything below that depends on the pose — the robot->room inversion, the covariance Jacobian, the
+    // twist adjoint (its lever arm is the pose's translation) — is one function of the pose, because a
+    // CORRECTION writes several blocks: itself, the spread blocks before it and the re-integrated tail after it (the
+    // rewrite below). All go through this same code. `pose`/`cov` are room<-robot in the WRITTEN frame; adv/side/rot
+    // the body twist at that block's instant.
+    const auto rt_block_of = [&](const Eigen::Affine2f& pose, const Eigen::Matrix3f& cov,
+                                 float adv, float side, float rot) -> DSR::RT_API::RTBlock
     {
-        const float c = std::cos(theta_room_to_robot);
-        const float s = std::sin(theta_room_to_robot);
-        Eigen::Matrix3f J = Eigen::Matrix3f::Zero();
-        J(0, 0) = -c;  J(0, 1) = -s;  J(0, 2) =  s * t.x() - c * t.y();
-        J(1, 0) =  s;  J(1, 1) = -c;  J(1, 2) =  c * t.x() + s * t.y();
-        J(2, 2) = -1.f;
-        cov_se2 = J * cov_se2 * J.transpose();
-    }
+        const Eigen::Matrix2f R = pose.linear();
+        const Eigen::Vector2f t = pose.translation();
+        const float theta_room_to_robot = std::atan2(R(1, 0), R(0, 0));
 
-    // ── SE(2) -> SE3 SLOTS, AND THE MAPPING IS THE WHOLE POINT ───────────────────────────────────
-    // rt_covariance is a 6x6 ROW-MAJOR **SE3** covariance ordered [x, y, z, rx, ry, rz]
-    // (RT_COVARIANCE_BLOCK_SIZE = 36 in cortex's dsr_rt_api.cpp). This used to write the SE(2) 3x3
-    // into the top-left 3x3, i.e. treat the block as a PADDED 3x3 — which puts the heading variance
-    // at (2,2), the slot that means var_Z, and leaves yaw at (5,5) permanently ZERO.
-    //
-    // ★ MEASURED CONSEQUENCE, 2026-08-16. The controller reads yaw from (5,5) — its own comment
-    // records fixing that from (2,2) precisely because "the rotation throttle was being driven by the
-    // robot's HEIGHT uncertainty". So it now reads a slot this agent never wrote: over two complete
-    // tours, 20817 moving samples, `pose_theta_std_rad` in the controller's profile.csv is
-    // IDENTICALLY 0.0000 — median, p75, p90, p95 and max alike. Its rotation throttle has been inert,
-    // and anything else consuming yaw uncertainty from this edge has been reading a zero.
-    // ★ Note how it arose: the consumer was corrected to cortex's convention and the producer was not,
-    // so a one-sided fix turned an accidentally-consistent pair into a silently-broken one. Before it,
-    // both used (2,2) and the wrong slot cancelled out.
-    //
-    // Index map: SE(2) (x, y, theta) -> SE3 (x, y, yaw) = rows/cols 0, 1, 5. Cross terms come along,
-    // so the xy<->theta correlation the preintegrated motion model produces survives the transport
-    // instead of being dropped on the floor.
-    static constexpr int se3_of_se2[3] = {0, 1, 5};
-    std::vector<float> cov_flat(36, 0.f);
-    for (int r = 0; r < 3; ++r)
-        for (int c = 0; c < 3; ++c)
-            cov_flat[se3_of_se2[r] * 6 + se3_of_se2[c]] = cov_se2(r, c);
+        // Convert room->robot estimate into robot->room when the room is a child of the robot.
+        const Eigen::Vector2f t_robot_to_room = -(R.transpose() * t);
+        const float theta_robot_to_room = -theta_room_to_robot;
 
-    // ── Body-frame twist, written BEFORE the RT block ───────────────────────
-    // Consumers read velocity DIRECTLY from here instead of differentiating the pose (which is what
-    // produced correction-induced velocity spikes). Layout: rt_translation_velocity = [adv, side, 0],
-    // rt_rotation_euler_xyz_velocity = [0,0,rot]; last_adv_/side_/rot_ are the measured odometry set
-    // in update(). Covariance is a config diagonal.
-    //
-    // ★★ THAT IS ARRAY ORDER, NOT FRAME AXES. This comment used to read "[adv(fwd,+x), side(lat,+y)]"
-    // and the parentheticals were WRONG: the robot body frame these rates live in is **+Y FORWARD,
-    // +X lateral**. A consumer composing them into a transform must therefore put `adv` on the frame's
-    // y axis and `side` on its x. Getting that backwards rotates the predicted displacement by 90°, so
-    // it lands √2·|motion| from the truth — WORSE than assuming the robot never moved, which is how it
-    // was found (controller twist compensation, 2026-08-04). Measured on 421 logged forward-driving
-    // cycles, predicting the next pose from the true body twist: adv→x p50 25.86 mm, adv→y p50 0.07 mm.
-    // The same frame is stated by the controller's safety-gate integrator (`x += adv*sin(th);
-    // y += adv*cos(th)`) and by its carrot bearing being atan2(x, y) rather than atan2(y, x).
-    //
-    // ★ ORDER IS LOAD-BEARING. This used to run AFTER insert_or_assign_edge_RT, as a get_edge →
-    // add attributes → insert_or_assign_edge(copy) write-back. That copy is a snapshot of the edge
-    // INCLUDING its rt_timestamps / rt_head_index ring buffer, so assigning it back re-publishes the
-    // ring state as of the fetch — the edge-level form of the write-back hazard already documented on
-    // nodes. The write site's own comment records that an earlier version of this froze the position
-    // outright and was patched by re-fetching; re-fetching narrows the window but does not close it.
-    //
-    // Measured symptom: room_concept publishes at ~19.6 Hz (pose_trace inter-publish p50 51 ms, 3.3%
-    // over 100 ms, 0% over 200 ms) while the controller observes the RT stamp advancing at only 9.0 Hz
-    // (p50 100 ms, 47% over 100 ms, 10% over 200 ms) — a factor of 2.2, i.e. about every second update
-    // invisible. Writing the twist FIRST and letting the timestamped RT write land LAST means the
-    // ring-buffer advance is the final word on this edge for this frame and nothing can write over it.
-    // 6x6 row-major SE3 [x,y,z,rx,ry,rz]. Yaw-rate variance belongs at (5,5) = [35], not at [14] =
-    // var_Z; the old comment claimed it matched the pose covariance and it did — both were wrong in
-    // the same way, which is exactly what made the pair look self-consistent.
-    // ★NOW RING-PACKED BY THE RT WRITE BELOW, not written raw here. It used to be a FLAT 36 written
-    // through this same round trip, which meant it had no slot: RT_API::get_edge_RT_covariance fell
-    // back to block 0 for every timestamp, so the velocity covariance was the same number whatever
-    // instant you asked about. Passing it in the RTBlock lands it in the slot its twist belongs to.
-    // ★THE VARIANCES GO ON THE AXES THE TWIST USES, NOT IN THE ORDER THEY ARE NAMED. twist_linear
-    // below is written {last_side_, last_adv_, 0} -- AXIS order, because this body frame is +Y
-    // FORWARD -- so the ADVANCE variance belongs at (1,1) = [7] and the LATERAL one at (0,0) = [0].
-    // This block had them the other way round: array order in a covariance that sits beside an
-    // axis-order twist, the same 90-degree mismatch that cost three consumers a wrong prediction.
-    // ★IT WAS INVISIBLE, AND ONLY BY COINCIDENCE: ADV and SIDE are both 0.0025 in the defaults, and
-    // swapping two equal numbers changes nothing. The day either becomes speed-dependent -- which is
-    // the whole point of not publishing a constant process noise (CONCEPT_AGENT_LIFECYCLE.md 4.1),
-    // and a differential-drive base has far less lateral velocity uncertainty than forward -- the
-    // bug would have appeared as a mysterious rotation of the uncertainty ellipse. Fixed first, on
-    // purpose, so that change cannot be the thing that reveals it.
-    Eigen::Matrix3f body_vel_cov = Eigen::Matrix3f::Zero();
-    if (params_)
-    {
-        body_vel_cov(0, 0) = params_->ROBOT_VEL_COV_SIDE;   // var of the LATERAL rate
-        body_vel_cov(1, 1) = params_->ROBOT_VEL_COV_ADV;    // var of the ADVANCE rate (+Y forward)
-        body_vel_cov(2, 2) = params_->ROBOT_VEL_COV_ROT;    // var of the yaw rate
-    }
+        // Always the robot->room form now: this function is only reached once the room node exists (the
+        // pre-room caller above is gone), so the ternaries that used to select the root<-robot quantity
+        // were dead and, worse, documented a mode this agent no longer has.
+        const float x     = t_robot_to_room.x();
+        const float y     = t_robot_to_room.y();
+        const float theta = theta_robot_to_room;
 
-    // ── THE TWIST BELONGS TO THE CHILD, AND ON THIS EDGE THE CHILD IS THE ROOM ──────────────────
-    // ★MEASURED DEFECT, 2026-09-10. This edge is anchored parent=ROBOT, child=ROOM (the room hangs
-    // off the robot because the robot is the RT root), so the stored matrix is T_robot<-room. The RT
-    // API's contract is that twist_linear/twist_angular describe the CHILD's motion in the CHILD's
-    // own axes, because TimeQuery::Extrapolated walks the stored matrix by RIGHT-composing them:
-    // T <- T * exp(xi*dt). We were writing the ROBOT's body twist -- the PARENT's -- so cortex
-    // right-composed the wrong quantity onto the wrong frame.
-    // ★IT WAS WORSE THAN NOT EXTRAPOLATING AT ALL, which is the same signature as the adv->x bug
-    // this ring was built to end. Driving a synthetic robot on a known arc (phi0 0.6 rad, omega
-    // 0.4 rad/s, V 0.5 m/s) through cortex's own code, position error against ground truth:
-    //        dt      as written      contract-correct      clamped (no walk)
-    //      20 ms      14.90 mm            0.00 mm             12.12 mm
-    //      60 ms      45.08 mm            0.00 mm             36.36 mm
-    //     100 ms      75.77 mm            0.00 mm             60.60 mm
-    // The control closing to 0.00 is what says cortex is right and the producer was wrong.
-    // ★THE CONVERSION IS THE SE(2) ADJOINT, and the lever-arm term is the half that is easy to miss:
-    // xi_child = -Ad_{T_room<-robot}(v_b, w), and Ad_(R,t)(v, w) = (R*v + w*(t_y, -t_x), w). The
-    // rotation alone is not enough -- a robot turning in place at a distance t from the room origin
-    // makes the room sweep an arc about it, and that is the w*(t_y,-t_x) term.
-    // ★★AND THE SAME ARM RETURNS IN THE SECOND MOMENT, which is worth knowing because meeting one
-    // makes the other obvious. Here it moves the MEAN: a yaw rate becomes a linear velocity on the
-    // child edge, measured at 2.27 m/s in the ring against 0.24 m/s of body speed. In
-    // get_edge_RT_covariance under TimeQuery::Extrapolated it moves the COVARIANCE by the identical
-    // geometry: yaw-rate UNCERTAINTY becomes position uncertainty at range, so the widening there is
-    // almost all in x and doubles with a doubling of range. See the measured table on that
-    // declaration in cortex's dsr_rt_api.h. Two moments, one arm -- which is the argument that the
-    // direction an RT edge is anchored is geometric and measurable, not bookkeeping.
-    // ★AND THE COVARIANCE TAKES THE SAME MAP, Ad * Sigma * Ad^T. The sign drops out (it is a
-    // quadratic form) but the rotation and lever arm do not, and the result is DENSE: on this edge
-    // the velocity uncertainty is no longer the body-fixed diagonal it is in the robot's own frame,
-    // because how fast the room appears to move depends on where the robot is standing in it. That
-    // is a true consequence of the room being the child, not an approximation.
-    const Eigen::Vector2f v_body{last_side_, last_adv_};          // axis order: x lateral, y forward
-    Eigen::Matrix3f adjoint = Eigen::Matrix3f::Identity();
-    adjoint.topLeftCorner<2, 2>() = R;
-    adjoint(0, 2) =  t.y();
-    adjoint(1, 2) = -t.x();
-    const Eigen::Vector2f v_child = -(R * v_body + last_rot_ * Eigen::Vector2f{t.y(), -t.x()});
-    const float           w_child = -last_rot_;
-    const Eigen::Matrix3f child_vel_cov = adjoint * body_vel_cov * adjoint.transpose();
+        // ── Covariance (SE2 3×3 packed into 6×6 flat row-major) ───────────────
+        Eigen::Matrix3f cov_se2 = Eigen::Matrix3f::Identity();
+        if (cov.rows() >= 3 && cov.cols() >= 3)
+            cov_se2 = cov.topLeftCorner<3, 3>();
 
-    // Pack the SE(2) block into the 6x6 row-major SE(3) layout [x, y, z, rx, ry, rz]: rows/cols
-    // 0, 1, 5. Cross terms come along -- the adjoint produced them and they are the whole point.
-    static constexpr int se3_of_se2_vel[3] = {0, 1, 5};
-    std::vector<float> vel_cov(36, 0.f);
-    for (int r = 0; r < 3; ++r)
-        for (int c = 0; c < 3; ++c)
-            vel_cov[se3_of_se2_vel[r] * 6 + se3_of_se2_vel[c]] = child_vel_cov(r, c);
+        if (room_node_created_)
+        {
+            const float c = std::cos(theta_room_to_robot);
+            const float s = std::sin(theta_room_to_robot);
+            Eigen::Matrix3f J = Eigen::Matrix3f::Zero();
+            J(0, 0) = -c;  J(0, 1) = -s;  J(0, 2) =  s * t.x() - c * t.y();
+            J(1, 0) =  s;  J(1, 1) = -c;  J(1, 2) =  c * t.x() + s * t.y();
+            J(2, 2) = -1.f;
+            cov_se2 = J * cov_se2 * J.transpose();
+        }
+
+        // ── SE(2) -> SE3 SLOTS, AND THE MAPPING IS THE WHOLE POINT ───────────────────────────────────
+        // rt_covariance is a 6x6 ROW-MAJOR **SE3** covariance ordered [x, y, z, rx, ry, rz]
+        // (RT_COVARIANCE_BLOCK_SIZE = 36 in cortex's dsr_rt_api.cpp). This used to write the SE(2) 3x3
+        // into the top-left 3x3, i.e. treat the block as a PADDED 3x3 — which puts the heading variance
+        // at (2,2), the slot that means var_Z, and leaves yaw at (5,5) permanently ZERO.
+        //
+        // ★ MEASURED CONSEQUENCE, 2026-08-16. The controller reads yaw from (5,5) — its own comment
+        // records fixing that from (2,2) precisely because "the rotation throttle was being driven by the
+        // robot's HEIGHT uncertainty". So it now reads a slot this agent never wrote: over two complete
+        // tours, 20817 moving samples, `pose_theta_std_rad` in the controller's profile.csv is
+        // IDENTICALLY 0.0000 — median, p75, p90, p95 and max alike. Its rotation throttle has been inert,
+        // and anything else consuming yaw uncertainty from this edge has been reading a zero.
+        // ★ Note how it arose: the consumer was corrected to cortex's convention and the producer was not,
+        // so a one-sided fix turned an accidentally-consistent pair into a silently-broken one. Before it,
+        // both used (2,2) and the wrong slot cancelled out.
+        //
+        // Index map: SE(2) (x, y, theta) -> SE3 (x, y, yaw) = rows/cols 0, 1, 5. Cross terms come along,
+        // so the xy<->theta correlation the preintegrated motion model produces survives the transport
+        // instead of being dropped on the floor.
+        static constexpr int se3_of_se2[3] = {0, 1, 5};
+        std::vector<float> cov_flat(36, 0.f);
+        for (int r = 0; r < 3; ++r)
+            for (int c = 0; c < 3; ++c)
+                cov_flat[se3_of_se2[r] * 6 + se3_of_se2[c]] = cov_se2(r, c);
+
+        // ── Body-frame twist, written BEFORE the RT block ───────────────────────
+        // Consumers read velocity DIRECTLY from here instead of differentiating the pose (which is what
+        // produced correction-induced velocity spikes). Layout: rt_translation_velocity = [adv, side, 0],
+        // rt_rotation_euler_xyz_velocity = [0,0,rot]; last_adv_/side_/rot_ are the measured odometry set
+        // in update(). Covariance is a config diagonal.
+        //
+        // ★★ THAT IS ARRAY ORDER, NOT FRAME AXES. This comment used to read "[adv(fwd,+x), side(lat,+y)]"
+        // and the parentheticals were WRONG: the robot body frame these rates live in is **+Y FORWARD,
+        // +X lateral**. A consumer composing them into a transform must therefore put `adv` on the frame's
+        // y axis and `side` on its x. Getting that backwards rotates the predicted displacement by 90°, so
+        // it lands √2·|motion| from the truth — WORSE than assuming the robot never moved, which is how it
+        // was found (controller twist compensation, 2026-08-04). Measured on 421 logged forward-driving
+        // cycles, predicting the next pose from the true body twist: adv→x p50 25.86 mm, adv→y p50 0.07 mm.
+        // The same frame is stated by the controller's safety-gate integrator (`x += adv*sin(th);
+        // y += adv*cos(th)`) and by its carrot bearing being atan2(x, y) rather than atan2(y, x).
+        //
+        // ★ ORDER IS LOAD-BEARING. This used to run AFTER insert_or_assign_edge_RT, as a get_edge →
+        // add attributes → insert_or_assign_edge(copy) write-back. That copy is a snapshot of the edge
+        // INCLUDING its rt_timestamps / rt_head_index ring buffer, so assigning it back re-publishes the
+        // ring state as of the fetch — the edge-level form of the write-back hazard already documented on
+        // nodes. The write site's own comment records that an earlier version of this froze the position
+        // outright and was patched by re-fetching; re-fetching narrows the window but does not close it.
+        //
+        // Measured symptom: room_concept publishes at ~19.6 Hz (pose_trace inter-publish p50 51 ms, 3.3%
+        // over 100 ms, 0% over 200 ms) while the controller observes the RT stamp advancing at only 9.0 Hz
+        // (p50 100 ms, 47% over 100 ms, 10% over 200 ms) — a factor of 2.2, i.e. about every second update
+        // invisible. Writing the twist FIRST and letting the timestamped RT write land LAST means the
+        // ring-buffer advance is the final word on this edge for this frame and nothing can write over it.
+        // 6x6 row-major SE3 [x,y,z,rx,ry,rz]. Yaw-rate variance belongs at (5,5) = [35], not at [14] =
+        // var_Z; the old comment claimed it matched the pose covariance and it did — both were wrong in
+        // the same way, which is exactly what made the pair look self-consistent.
+        // ★NOW RING-PACKED BY THE RT WRITE BELOW, not written raw here. It used to be a FLAT 36 written
+        // through this same round trip, which meant it had no slot: RT_API::get_edge_RT_covariance fell
+        // back to block 0 for every timestamp, so the velocity covariance was the same number whatever
+        // instant you asked about. Passing it in the RTBlock lands it in the slot its twist belongs to.
+        // ★THE VARIANCES GO ON THE AXES THE TWIST USES, NOT IN THE ORDER THEY ARE NAMED. twist_linear
+        // below is written {last_side_, last_adv_, 0} -- AXIS order, because this body frame is +Y
+        // FORWARD -- so the ADVANCE variance belongs at (1,1) = [7] and the LATERAL one at (0,0) = [0].
+        // This block had them the other way round: array order in a covariance that sits beside an
+        // axis-order twist, the same 90-degree mismatch that cost three consumers a wrong prediction.
+        // ★IT WAS INVISIBLE, AND ONLY BY COINCIDENCE: ADV and SIDE are both 0.0025 in the defaults, and
+        // swapping two equal numbers changes nothing. The day either becomes speed-dependent -- which is
+        // the whole point of not publishing a constant process noise (CONCEPT_AGENT_LIFECYCLE.md 4.1),
+        // and a differential-drive base has far less lateral velocity uncertainty than forward -- the
+        // bug would have appeared as a mysterious rotation of the uncertainty ellipse. Fixed first, on
+        // purpose, so that change cannot be the thing that reveals it.
+        Eigen::Matrix3f body_vel_cov = Eigen::Matrix3f::Zero();
+        if (params_)
+        {
+            body_vel_cov(0, 0) = params_->ROBOT_VEL_COV_SIDE;   // var of the LATERAL rate
+            body_vel_cov(1, 1) = params_->ROBOT_VEL_COV_ADV;    // var of the ADVANCE rate (+Y forward)
+            body_vel_cov(2, 2) = params_->ROBOT_VEL_COV_ROT;    // var of the yaw rate
+        }
+
+        // ── THE TWIST BELONGS TO THE CHILD, AND ON THIS EDGE THE CHILD IS THE ROOM ──────────────────
+        // ★MEASURED DEFECT, 2026-09-10. This edge is anchored parent=ROBOT, child=ROOM (the room hangs
+        // off the robot because the robot is the RT root), so the stored matrix is T_robot<-room. The RT
+        // API's contract is that twist_linear/twist_angular describe the CHILD's motion in the CHILD's
+        // own axes, because TimeQuery::Extrapolated walks the stored matrix by RIGHT-composing them:
+        // T <- T * exp(xi*dt). We were writing the ROBOT's body twist -- the PARENT's -- so cortex
+        // right-composed the wrong quantity onto the wrong frame.
+        // ★IT WAS WORSE THAN NOT EXTRAPOLATING AT ALL, which is the same signature as the adv->x bug
+        // this ring was built to end. Driving a synthetic robot on a known arc (phi0 0.6 rad, omega
+        // 0.4 rad/s, V 0.5 m/s) through cortex's own code, position error against ground truth:
+        //        dt      as written      contract-correct      clamped (no walk)
+        //      20 ms      14.90 mm            0.00 mm             12.12 mm
+        //      60 ms      45.08 mm            0.00 mm             36.36 mm
+        //     100 ms      75.77 mm            0.00 mm             60.60 mm
+        // The control closing to 0.00 is what says cortex is right and the producer was wrong.
+        // ★THE CONVERSION IS THE SE(2) ADJOINT, and the lever-arm term is the half that is easy to miss:
+        // xi_child = -Ad_{T_room<-robot}(v_b, w), and Ad_(R,t)(v, w) = (R*v + w*(t_y, -t_x), w). The
+        // rotation alone is not enough -- a robot turning in place at a distance t from the room origin
+        // makes the room sweep an arc about it, and that is the w*(t_y,-t_x) term.
+        // ★★AND THE SAME ARM RETURNS IN THE SECOND MOMENT, which is worth knowing because meeting one
+        // makes the other obvious. Here it moves the MEAN: a yaw rate becomes a linear velocity on the
+        // child edge, measured at 2.27 m/s in the ring against 0.24 m/s of body speed. In
+        // get_edge_RT_covariance under TimeQuery::Extrapolated it moves the COVARIANCE by the identical
+        // geometry: yaw-rate UNCERTAINTY becomes position uncertainty at range, so the widening there is
+        // almost all in x and doubles with a doubling of range. See the measured table on that
+        // declaration in cortex's dsr_rt_api.h. Two moments, one arm -- which is the argument that the
+        // direction an RT edge is anchored is geometric and measurable, not bookkeeping.
+        // ★AND THE COVARIANCE TAKES THE SAME MAP, Ad * Sigma * Ad^T. The sign drops out (it is a
+        // quadratic form) but the rotation and lever arm do not, and the result is DENSE: on this edge
+        // the velocity uncertainty is no longer the body-fixed diagonal it is in the robot's own frame,
+        // because how fast the room appears to move depends on where the robot is standing in it. That
+        // is a true consequence of the room being the child, not an approximation.
+        const Eigen::Vector2f v_body{side, adv};          // axis order: x lateral, y forward
+        Eigen::Matrix3f adjoint = Eigen::Matrix3f::Identity();
+        adjoint.topLeftCorner<2, 2>() = R;
+        adjoint(0, 2) =  t.y();
+        adjoint(1, 2) = -t.x();
+        const Eigen::Vector2f v_child = -(R * v_body + rot * Eigen::Vector2f{t.y(), -t.x()});
+        const float           w_child = -rot;
+        const Eigen::Matrix3f child_vel_cov = adjoint * body_vel_cov * adjoint.transpose();
+
+        // Pack the SE(2) block into the 6x6 row-major SE(3) layout [x, y, z, rx, ry, rz]: rows/cols
+        // 0, 1, 5. Cross terms come along -- the adjoint produced them and they are the whole point.
+        static constexpr int se3_of_se2_vel[3] = {0, 1, 5};
+        std::vector<float> vel_cov(36, 0.f);
+        for (int r = 0; r < 3; ++r)
+            for (int c = 0; c < 3; ++c)
+                vel_cov[se3_of_se2_vel[r] * 6 + se3_of_se2_vel[c]] = child_vel_cov(r, c);
+
+        return DSR::RT_API::RTBlock{
+            .translation     = {x, y, 0.f},
+            .rotation_euler  = {0.f, 0.f, theta},
+            .covariance      = cov_flat,
+            // The CHILD's motion in CHILD axes -- the adjoint above, NOT the robot's body twist. See the note there.
+            .twist_linear    = std::vector<float>{v_child.x(), v_child.y(), 0.f},
+            .twist_angular   = std::vector<float>{0.f, 0.f, w_child},
+            .twist_covariance = vel_cov};
+    };
 
     // ── LEGACY TWIST ATTRIBUTES, FOR THE CONSUMERS THAT HAVE NOT MIGRATED ────────────────────
     // ★DEPRECATED. rt_twist_linear / rt_twist_angular in the ring below supersede these; they are
@@ -835,19 +883,31 @@ void RoomSceneGraph::write_robot_room_rt(const Eigen::Affine2f& robot_pose_int,
     // failure: an extrapolation worse than not extrapolating.
     // ★BOTH PAIRS ARE WRITTEN during the migration. The legacy attributes below still feed the four
     // consumers that have not moved to the ring yet; they go once those do.
+    // ── THE NEWEST CORRECTION REWRITES THE RING FROM ITS EARLIEST BLOCK, IN ONE PUBLISH ──────────────────────────────
+    // A correction for t_c lands after t_c (~43 ms on Shadow, ~4 ms in Webots). RT_API::rewrite_edge_RT_since drops
+    // every block stamped >= the earliest it is given and writes {(t_c, correction)} + `tail`: the spread blocks in
+    // (t_k, t_c) moved by their share of the jump, and the blocks after t_c re-integrated from the correction up to the
+    // newest IMU sample (PosePublisher, pose_propagator.h). So a reader never sees a prediction made from the previous
+    // correction after t_c (measured 2026-10-26: 0.12 deg p90 of step while turning > 0.7 rad/s; see cortex
+    // dsr_rt_api.h), never a step at t_c, and never the ring half rewritten. Tail covariances are the correction's, NOT
+    // grown with t - t_c: cortex's Extrapolated read already grows a walked block's covariance by the stored twist
+    // covariance, and growing it here would need a noise density this writer does not own. Each tail block carries
+    // its own twist. On an edge with no ring yet the call degrades to insert_or_assign_edge_RT per block (cortex).
+    // An out-of-order correction, RtRewriteTail = false, or a predicted tick (RoomConcept.PredictedTicks) is the plain insert.
     try
     {
-        rt_api_->insert_or_assign_edge_RT(parent_opt.value(), child_id,
-                                          DSR::RT_API::RTBlock{
-                                              .translation     = {x, y, 0.f},
-                                              .rotation_euler  = {0.f, 0.f, theta},
-                                              .covariance      = cov_flat,
-                                              // The CHILD's motion in CHILD axes -- the adjoint above,
-                                              // NOT the robot's body twist. See the note there.
-                                              .twist_linear    = std::vector<float>{v_child.x(), v_child.y(), 0.f},
-                                              .twist_angular   = std::vector<float>{0.f, 0.f, w_child},
-                                              .twist_covariance = vel_cov},
-                                          timestamp_ms);
+        if (tail == nullptr)
+            rt_api_->insert_or_assign_edge_RT(parent_opt.value(), child_id,
+                                              rt_block_of(robot_pose, covariance, last_adv_, last_side_, last_rot_), timestamp_ms);
+        else
+        {
+            std::vector<std::pair<std::uint64_t, DSR::RT_API::RTBlock>> blocks;
+            blocks.reserve(1 + tail->size());
+            blocks.emplace_back(timestamp_ms, rt_block_of(robot_pose, covariance, last_adv_, last_side_, last_rot_));
+            for (const auto& b : *tail)
+                blocks.emplace_back(b.timestamp_ms, rt_block_of(b.pose, b.covariance, b.adv, b.side, b.rot));
+            rt_api_->rewrite_edge_RT_since(parent_opt.value(), child_id, std::move(blocks));
+        }
     }
     catch (const std::exception &error)
     {
@@ -855,7 +915,7 @@ void RoomSceneGraph::write_robot_room_rt(const Eigen::Affine2f& robot_pose_int,
         log_cached_ids("insert_or_assign_edge_RT failed", child_id);
         if (room_node_created_ && child_id == dsr_room_id_)
             forget_room("insert_or_assign_edge_RT failed");
-        return;
+        return false;
     }
 
     // ── THE PROTO-ROOM RIDES ON THE SAME POSE ─────────────────────────────────────────────────────
@@ -875,12 +935,14 @@ void RoomSceneGraph::write_robot_room_rt(const Eigen::Affine2f& robot_pose_int,
             const Eigen::Affine2f T_proto_room = T_room_proto_.inverse();
             Eigen::Matrix3f A = Eigen::Matrix3f::Identity();
             A.topLeftCorner<2, 2>() = T_proto_room.linear();
-            // From the INTERNAL pose: T_room_proto_ is the crossing proto in the internal frame.
+            // From the INTERNAL pose: T_room_proto_ is the crossing proto in the internal frame. Same blocks, same publish shape.
+            std::vector<RtTail> tail_proto;
+            if (tail_int != nullptr) tail_proto = map_tail(*tail_int, T_proto_room, A);
             write_robot_room_rt(T_proto_room * robot_pose_int, A * covariance_int * A.transpose(), timestamp_ms,
-                                proto_room_id_);
+                                proto_room_id_, tail_int != nullptr ? &tail_proto : nullptr);
         }
     }
-
+    return true;
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -1167,14 +1229,14 @@ void RoomSceneGraph::step_proto_room_impl(const rc::RoomConcept::UpdateResult& r
     // ★ THE MOUTH POSE (Task M, 2026-10-23): this proto's frame IS the mouth of the opening it was born through, and
     //   only this agent knows that pose exactly (and its covariance, from door_concept's aperture sigma). It is
     //   published on the proto room node itself with the existing pose attributes -- translation [x y 0], rotation
-    //   [0 0 yaw], 6x6 covariance -- expressed in the OLD room's frame (the room that owns the crossed aperture,
-    //   frozen from here on). Not an RT edge: rooms hang off the robot, and a room-to-room RT edge would close a
+    //   [0 0 yaw], 6x6 covariance -- expressed in the OLD room's PUBLISHED frame (the room that owns the crossed aperture,
+    //   frozen from here on: `best` is INTERNAL, write_mouth composes it with T_pub_int_, still the old room's here, 2026-11-08). Not an RT edge: rooms hang off the robot, and a room-to-room RT edge would close a
     //   loop in the tree every transform query walks. A node attribute survives promotion (which removes only the
     //   proto self-edge), so ltsm still finds it at eviction and can set T(new<-old) = inverse(mouth) with no
     //   door-recess nuisance. No covariance is written when door_concept stated no sigma.
     // (node-level overload of the RT attribute names, sources of the covariance, frame room: see proto_mouth.h)
     rc::crossing::write_mouth(*G_, proto, best, best_ap->sigma_along, room_concept_->params.wall_map.publish_corner_sigma,
-                              static_cast<std::uint64_t>(dsr_room_id_));
+                              static_cast<std::uint64_t>(dsr_room_id_), T_pub_int_);
     G_->add_or_modify_attrib_local<parent_att>(proto, dsr_robot_id_);
     rc::provenance::stamp_creation(*G_, proto);
     const auto id = G_->insert_node(proto);
@@ -1474,6 +1536,9 @@ void RoomSceneGraph::forget_room(const char* why)
     published_polygon_verts_ = 0;
     startup_proto_ = startup_promoted_ = false;
     layout_pool_.clear();
+    pool_regions_.clear();
+    fs_scans_ = fs_outline_scans_ = layout_finished_scans_ = 0;
+    unfound_openings_.clear();   // the hypotheses belong to the room they were cut in
     left_rooms_.clear();
     left_polys_int_.clear();
     layout_finished_ = false;
@@ -1745,15 +1810,18 @@ void RoomSceneGraph::rearm_after_crossing(std::uint64_t new_room_id, const std::
     // FLAGGED (geometric contradiction, MAP of inside vs outside): an EARLIER left outline that holds most of the robot's
     // position posterior is not a different room — rooms do not overlap, and the robot is standing in it. Excluded, it
     // blinded the raster to the floor under the robot (a parked robot adds no free space => no polygon => 'NO WORLD'
-    // for ever; recog_try2, room_2 re-entered from its other side). Done BEFORE the push below: the room just left is
-    // a known OTHER room by identity (it is the one the crossing came out of) and is never a candidate.
-    if (have_last_int_pose_)
-        if (const auto n = rc::freespace::drop_outlines_containing(left_polys_int_, last_int_pose_.translation(),
-                                                                   last_int_cov_.topLeftCorner<2, 2>()); n > 0)
-            qWarning() << "[room][startup-proto] dropped" << n << "earlier left-room outline(s) from the exclusion: most of the"
+    // for ever; recog_try2, room_2 re-entered from its other side). THE ROOM JUST LEFT IS TESTED TOO (clean16, 2026-11-09): the
+    // robot 0.5 m inside the outline it "left" through a phantom door. Excluded by identity, it left the raster no floor to call
+    // its own, for ever. The same MAP test as above, no threshold: exclude_left_room pushes it first.
+    if (auto poly = room_concept_->nominal_room_polygon(); have_last_int_pose_)
+    {
+        if (const auto n = rc::freespace::exclude_left_room(left_polys_int_, std::move(poly), last_int_pose_.translation(),
+                                                            last_int_cov_.topLeftCorner<2, 2>()); n > 0)
+            qWarning() << "[room][startup-proto] dropped" << n << "left-room outline(s) from the exclusion: most of the"
                        << "pose posterior at (" << last_int_pose_.translation().x() << "," << last_int_pose_.translation().y()
                        << ") lies inside them, so they are this room, not another";
-    if (auto poly = room_concept_->nominal_room_polygon(); poly.size() >= 3)
+    }
+    else if (poly.size() >= 3)
         left_polys_int_.push_back(std::move(poly));
     // This agent's intentions (afford_room, afford_calib) are ONE node each and move with the agent's room: the
     // affordance manager re-hangs them from the new room on its next publish (parent + has_intention), but never
@@ -1777,6 +1845,7 @@ void RoomSceneGraph::rearm_after_crossing(std::uint64_t new_room_id, const std::
     affordance_manager_.release_execution_claim(G_);
     // the first afford_room in a NEW room entered: its centre (dsr_update_entry_relocalisation). Not in a room ltsm RECALLED
     // (user 2026-11-01: "if the room is known, recalled from ltsm, do not activate room affordances").
+    entry_pose_ref_.close_room();   // the room left is the reference for "the pose is as good as typical"
     entry_reloc_ = not recall.has_value();
     entry_reloc_target_pub_.reset();
     // the relocalisation ends on ITS claim's answer (entry_reloc.h): drop any completion still pending from the room left behind
@@ -1908,6 +1977,9 @@ void RoomSceneGraph::arm_startup_proto(std::uint64_t room_id, const Eigen::Affin
     recalled_visit_    = false;
     explored_.reset();          // a re-entry restores its memory (note_recall_memory) after this
     layout_pool_.clear();
+    pool_regions_.clear();
+    fs_scans_ = fs_outline_scans_ = layout_finished_scans_ = 0;
+    unfound_openings_.clear();   // the hypotheses belong to the room they were cut in
     layout_finished_   = false;
     cam_cover_.reset();          // a new room: its boundary has been shown to no camera yet (camera_coverage.h)
     camera_finished_    = false;
@@ -1960,7 +2032,14 @@ void RoomSceneGraph::step_startup_proto(const rc::RoomConcept::UpdateResult& res
     // pose stays plain SLAM's afterwards — so promotion needs that layout, not the wall map's map_ready.
     const bool layout_ready = room_concept_->plain_slam_driving() ? room_concept_->has_map_layout()
                                                                    : room_concept_->map_ready();
-    if (layout_ready and layout_finished_)
+    // ★ ...AND THE OUTLINE PROMOTION ADOPTS IS DRAWN FROM THE EVIDENCE THAT SAID "FINISHED" (2026-11-12, clean52). The
+    //   explorer judges `finished` on the raster as it stands at its plan (the newest scan); the pool's newest outline is
+    //   from the last publish, up to STARTUP_PROTO_PUBLISH_MS older. clean52: the scan that showed the dead-end arm to
+    //   DOOR_1 zeroed the gain, and promotion picked from outlines drawn before that scan — the arm was never in the
+    //   pool. One stamp comparison, no threshold: until an outline drawn at or after the verdict's scan exists, the
+    //   survey keeps accumulating and publishing (at most one publish period), then promotes on what it saw.
+    const bool outline_current = not room_concept_->plain_slam_driving() or fs_outline_scans_ >= layout_finished_scans_;
+    if (layout_ready and layout_finished_ and outline_current)
     {
         promote_startup_proto(reason);
         return;
@@ -1979,6 +2058,7 @@ void RoomSceneGraph::step_startup_proto(const rc::RoomConcept::UpdateResult& res
         if (p.allFinite())
             ends.push_back(pose_pub * p.head<2>());
     free_space_->add_scan(pose_pub * lidar_origin_, ends);
+    ++fs_scans_;
     // the robot's own footprint is confirmed free — see FreeSpacePolygon::add_footprint. Radius = circumscribed
     // body radius PLUS the erosion the ring is cut back by: with the body alone (0.33 m) the eroded ring still
     // left the robot outside (0.05 m beyond the edge, as live); with + erode it sits ~0.2 m inside (scratch test
@@ -2009,6 +2089,8 @@ void RoomSceneGraph::step_startup_proto(const rc::RoomConcept::UpdateResult& res
     // With plain SLAM owning the pose, the raster is a well-aligned occupancy map, and its Manhattan outline snapped
     // onto the measured walls IS the layout (offline vs Webots truth: IoU 0.957 on two live recordings). It replaces
     // the wall map's polygon, which on this apartment froze at its first-frame seed box. Fallback: the raw ring.
+    if (room_concept_->plain_slam_driving())
+        fs_outline_scans_ = fs_scans_;   // the outline below is drawn from the raster as of this scan (drawn or not)
     if (room_concept_->plain_slam_driving())
         if (auto lay = free_space_->manhattan_layout(pose_pub.translation(), 0.18f);   // 18 cm: offline 26-28 verts, IoU .954-.966 (12 cm kept 30-42 verts of small steps)
             lay.size() >= 4 and rc::freespace::point_in_polygon(pose_pub.translation(), lay))
@@ -2130,15 +2212,22 @@ void RoomSceneGraph::stamp_low_obstacles()
 // furniture fronts (IoU .871) while the outline of t=0 and of several later publishes had them on the walls.
 void RoomSceneGraph::adopt_most_probable_layout()
 {
-    if (not free_space_.has_value() or layout_pool_.size() < 2) return;
+    if (not free_space_.has_value() or layout_pool_.empty()) return;
     const auto latest = published_polygon();
     if (latest.size() < 4) return;
-    std::vector<Eigen::Vector2f> surf, fr; std::vector<float> cs, cf;
-    free_space_->evidence_cells(surf, fr, &cs, &cf);
+    std::vector<Eigen::Vector2f> surf, fr, fo; std::vector<float> cs, cf;
+    free_space_->evidence_cells(surf, fr, &cs, &cf, &fo);
     const std::vector<std::vector<Eigen::Vector2f>> cands(layout_pool_.begin(), layout_pool_.end());
-    const auto dl = refiner_.description_lengths(cands, latest, surf, fr, cs, cf);
+    // the room's doorways (published frame): an adopted region never grows through one, as in the refiner
+    std::vector<rc::refine::Doorway> doorways;
+    for (const auto& d : room_concept_->door_apertures())
+        doorways.push_back({.a = T_pub_int_ * d.a, .b = T_pub_int_ * d.b, .depth = d.half_depth});
+    // ★ EDIT BY EDIT (layout_refiner.h adopt_from_pool, 2026-11-12): the whole-outline winner is only the start; every
+    //   region another outline drew differently is judged on its own description length.
+    const auto dl = refiner_.description_lengths(cands, latest, surf, fr, cs, cf, fo);
+    const auto R = refiner_.adopt_from_pool(cands, latest, surf, fr, cs, cf, fo, doorways);
+    pool_regions_ = R.regions;
     const auto best = static_cast<std::size_t>(std::ranges::distance(dl.begin(), std::ranges::min_element(dl)));
-    const float dl_latest = dl.back();   // the pool's back is the outline published last (see step_startup_proto)
     {
         std::ofstream f("tmp/promotion_select.csv", std::ios::out | std::ios::trunc);
         f.imbue(std::locale::classic());
@@ -2149,15 +2238,67 @@ void RoomSceneGraph::adopt_most_probable_layout()
             for (const auto& v : cands[i]) f << v.x() << ',' << v.y() << ' ';
             f << '\n';
         }
+        for (const auto& e : R.edits) f << "# edit;" << e.kind << ";area_m2=" << e.value << ";gain=" << e.gain << '\n';
+        f << "# adopted;";
+        for (const auto& v : R.polygon) f << v.x() << ',' << v.y() << ' ';
+        f << '\n';
     }
-    qInfo().noquote() << QString("[room][startup-proto] promotion chooses outline %1 of %2 by description length: "
-                                 "%3 nats vs %4 for the latest (%5 verts)")
-                         .arg(best).arg(cands.size()).arg(dl[best], 0, 'f', 1).arg(dl_latest, 0, 'f', 1).arg(cands[best].size());
-    if (best + 1 == cands.size() or not std::isfinite(dl[best])) return;
+    qInfo().noquote() << QString("[room][startup-proto] promotion: whole-outline winner %1 of %2 (%3 nats, %4 verts), then "
+                                 "%5 pool region edit(s) -> %6 verts, %7 m2; %8 near-miss region(s) kept for the refiner")
+                         .arg(best).arg(cands.size()).arg(dl[best], 0, 'f', 1).arg(cands[best].size()).arg(R.edits.size())
+                         .arg(R.polygon.size()).arg(std::abs(rc::freespace::signed_area(R.polygon)), 0, 'f', 2).arg(R.regions.size());
+    if (R.polygon.size() < 4 or R.polygon == latest) return;
     const Eigen::Affine2f T_int_pub = T_pub_int_.inverse();
-    std::vector<Eigen::Vector2f> lay_int; lay_int.reserve(cands[best].size());
-    for (const auto& v : cands[best]) lay_int.push_back(T_int_pub * v);
+    std::vector<Eigen::Vector2f> lay_int; lay_int.reserve(R.polygon.size());
+    for (const auto& v : R.polygon) lay_int.push_back(T_int_pub * v);
     room_concept_->set_map_layout(std::move(lay_int));
+}
+
+void RoomSceneGraph::cut_unfound_doorways(std::vector<Eigen::Vector2f>& polygon_pub)
+{
+    if (not free_space_.has_value()) return;
+    std::vector<Eigen::Vector2f> surf, fr, fo; std::vector<float> cs, cf;
+    free_space_->evidence_cells(surf, fr, &cs, &cf, &fo);
+    auto R = rc::refine::explain_openings(refiner_, polygon_pub, surf, fr, cs, cf, {}, fo);
+    if (R.openings.empty()) return;
+    for (const auto& o : R.openings)
+    {
+        qInfo().noquote() << QString::fromStdString(std::format("[room][doorway] {:.1f} m2 beyond the neck ({:.2f},{:.2f})-({:.2f},{:.2f}), {:.2f} m wide, "
+                                                                "is explained by a door ({:+.1f} nats): the outline is cut there and the door hypothesised",
+                                                                o.cut_area, o.a.x(), o.a.y(), o.b.x(), o.b.y(), (o.a - o.b).norm(), o.score));
+        unfound_openings_.push_back({.a = o.a, .b = o.b, .depth = 3.f * refiner_.params().cell});
+    }
+    polygon_pub = std::move(R.polygon);
+    publish_doorway_hypotheses();
+}
+
+// One node, `room_doorways` (metaconcept, subtype doorway_hypotheses): parent = the room, delimiting_polygon_x/y = the openings' end points
+// a0 b0 a1 b1 ... in the room frame. door_concept owns whatever door is born from one.
+void RoomSceneGraph::publish_doorway_hypotheses()
+{
+    if (dsr_room_id_ == 0) return;
+    std::vector<float> xs, ys;
+    for (const auto& o : unfound_openings_) { xs.push_back(o.a.x()); ys.push_back(o.a.y()); xs.push_back(o.b.x()); ys.push_back(o.b.y()); }
+    auto node = G_->get_node("room_doorways");
+    if (node.has_value())
+    {
+        G_->add_or_modify_attrib_local<parent_att>(node.value(), dsr_room_id_);
+        G_->add_or_modify_attrib_local<delimiting_polygon_x_att>(node.value(), std::move(xs));
+        G_->add_or_modify_attrib_local<delimiting_polygon_y_att>(node.value(), std::move(ys));
+        G_->update_node(node.value());
+        return;
+    }
+    DSR::Node n;
+    n.type("metaconcept");
+    n.name("room_doorways");
+    G_->add_or_modify_attrib_local<object_subtype_att>(n, std::string("doorway_hypotheses"));
+    G_->add_or_modify_attrib_local<parent_att>(n, dsr_room_id_);
+    G_->add_or_modify_attrib_local<level_att>(n, 4);
+    G_->add_or_modify_attrib_local<pos_x_att>(n, 420.f);
+    G_->add_or_modify_attrib_local<pos_y_att>(n, 240.f);
+    G_->add_or_modify_attrib_local<delimiting_polygon_x_att>(n, std::move(xs));
+    G_->add_or_modify_attrib_local<delimiting_polygon_y_att>(n, std::move(ys));
+    G_->insert_node(n);
 }
 
 void RoomSceneGraph::promote_startup_proto(std::string& reason, bool recalled)
@@ -2166,6 +2307,19 @@ void RoomSceneGraph::promote_startup_proto(std::string& reason, bool recalled)
     // maps into the frozen frame here without a jump.
     if (room_concept_->plain_slam_driving())
         adopt_most_probable_layout();
+    if (room_concept_->plain_slam_driving() and not recalled)
+    {   // an unfound doorway is a hypothesis, not an extension of the room (doorway_necks.h, clean26)
+        auto cut = published_polygon();
+        const auto before = cut.size();
+        cut_unfound_doorways(cut);
+        if (cut.size() != before)
+        {
+            const Eigen::Affine2f T_int_pub = T_pub_int_.inverse();
+            std::vector<Eigen::Vector2f> lay_int; lay_int.reserve(cut.size());
+            for (const auto& v : cut) lay_int.push_back(T_int_pub * v);
+            room_concept_->set_map_layout(std::move(lay_int));
+        }
+    }
     const auto poly_pub = published_polygon();
     if (poly_pub.size() < 3) { reason = "map_ready_but_no_polygon"; return; }
     auto rn = G_->get_node(dsr_room_id_);
@@ -2193,6 +2347,7 @@ void RoomSceneGraph::promote_startup_proto(std::string& reason, bool recalled)
     // SLAM pose by step_layout_refiner — the same poses it was built at while plain SLAM drove.
     refine_last_ms_ = steady_ms();
     dsr_create_wall_nodes();   // in the PUBLISHED frame (published_polygon)
+    publish_wall_seen_prob();
     // HAND-BACK to the pose-information planner, seeded with the promoted polygon in the frame it plans in
     // (internal). It was seeded only at room creation before, which the start-up path never reaches.
     if (epistemic_ != nullptr)
@@ -2519,7 +2674,10 @@ void RoomSceneGraph::dsr_update_layout_affordance(const rc::RoomConcept::UpdateR
             or (layout_visits_ > 0
                 and (room_concept_->plain_slam_driving() ? room_concept_->has_map_layout() : room_concept_->map_ready())
                 and (layout_last_plan_.why == "no_gain" or layout_last_plan_.why == "unreachable")))
+        {
+            if (not layout_finished_) layout_finished_scans_ = fs_scans_;   // the raster this verdict was judged on
             layout_finished_ = true;
+        }
         layout_plan_ms_ = now;
         const auto prev = layout_target_;
         if (layout_last_plan_.ok)
@@ -3144,11 +3302,17 @@ bool RoomSceneGraph::dsr_update_entry_relocalisation(const rc::RoomConcept::Upda
     // The consumer's answer ends it too (entry_reloc.h; explore_spike1: the centre was handed back and never reached). The
     // completion event is one-shot and the layout explorer is locked out while this runs, so it is consumed here.
     const bool claim_completed = affordance_manager_.consume_completion_event();
-    if (not rc::entry::still_relocalising(at_centre, claim_completed))
+    const float det = res.covariance.determinant();
+    const float gain = entry_pose_ref_.gain(det > 0.f ? std::log(det) : std::numeric_limits<float>::quiet_NaN());
+    if (not rc::entry::still_relocalising(at_centre, claim_completed, gain))
     {
         entry_reloc_ = false;
         entry_reloc_target_pub_.reset();
-        if (at_centre)
+        if (not at_centre and not claim_completed)
+            rc::status::print("[entry-reloc] '{}': the pose is already as good as this localiser typically gets in a room (ln det {:.2f} "
+                              "vs median {:.2f}): nothing to relocalise — the room's planners take afford_room over\n", room_node_name(),
+                              det > 0.f ? std::log(det) : 0.f, entry_pose_ref_.reference.value_or(0.f));
+        else if (at_centre)
             rc::status::print("[entry-reloc] '{}': at the centre — the room's planners take afford_room over\n", room_node_name());
         else
             rc::status::print("[entry-reloc] '{}': the centre was completed by the consumer (outcome={}) {:.2f} m away — the room's "
@@ -3157,7 +3321,7 @@ bool RoomSceneGraph::dsr_update_entry_relocalisation(const rc::RoomConcept::Upda
         return false;
     }
     const float yaw = std::atan2(t.y() - robot_pub.y(), t.x() - robot_pub.x());   // the arrival heading: LiDAR sees all round
-    affordance_manager_.publish_target(G_, dsr_room_id_, t.x(), t.y(), yaw, /*gain=*/1.0f,
+    affordance_manager_.publish_target(G_, dsr_room_id_, t.x(), t.y(), yaw, /*gain=*/gain,
                                        [this]() { trigger_layout_(); }, [this]() { trigger_layout_(); });
     return true;
 }
@@ -3174,6 +3338,7 @@ void RoomSceneGraph::dsr_update_affordance(const rc::RoomConcept::UpdateResult& 
     // (and a partly remembered room until the explorer is `finished` — room_explored.h; P(explored) from each plan)
     observe_camera_cover(res);   // what the ZED is offered of the boundary this frame (camera_coverage.h, Task 12)
     if (dsr_update_entry_relocalisation(res)) return;   // just crossed: the room's centre first (user 2026-11-01)
+    if (const float det = res.covariance.determinant(); det > 0.f) entry_pose_ref_.add(std::log(det));   // steady state only
     if (layout_explorer_owns_room()) { dsr_update_layout_affordance(res); publish_plan_explored(); return; }
     publish_explored(explored_.settled(room_node_name()));   // nothing left for the explorer: p = 1 (room_explored.h)
     if (!epistemic_) return;
@@ -4084,8 +4249,11 @@ std::optional<std::uint64_t> RoomSceneGraph::insert_wall_node(DSR::Node& parent,
     }
     // The pose is unchanged by the re-parenting: floor->room is the identity, so (mid, yaw)
     // still reads in ROOM coordinates, which is what every consumer of a wall quad assumes.
-    rt_api_->insert_or_assign_edge_RT(parent, wall_id.value(),
-                                      {mid.x(), mid.y(), params_->room_height * 0.5f}, {0.f, 0.f, yaw});
+    // A wall's pose is a PARAMETER re-estimated by the layout, not a time series: cortex's static writer (one block, no stamps,
+    // rt_static) answers every timestamped query Exactly. The timed writer gave it a ring stamped "now", so every query at a
+    // capture stamp through a wall reported a clamp it had not earned (cortex 3345b8b, dsr_rt_api.h insert_or_assign_edge_RT_static).
+    rt_api_->insert_or_assign_edge_RT_static(parent, wall_id.value(),
+                                             {mid.x(), mid.y(), params_->room_height * 0.5f}, {0.f, 0.f, yaw});
     return wall_id;
 }
 
@@ -4160,8 +4328,8 @@ void RoomSceneGraph::sync_walls_to_polygon(const std::vector<Eigen::Vector2f>& p
             G_->add_or_modify_attrib_local<width_m_att>(wn.value(), e.length);
             G_->update_node(wn.value());
         }
-        rt_api_->insert_or_assign_edge_RT(floor.value(), w.id(),
-                                          {e.mid.x(), e.mid.y(), params_->room_height * 0.5f}, {0.f, 0.f, e.yaw});
+        rt_api_->insert_or_assign_edge_RT_static(floor.value(), w.id(),   // a parameter, not a time series (see make_wall)
+                                                 {e.mid.x(), e.mid.y(), params_->room_height * 0.5f}, {0.f, 0.f, e.yaw});
         if (par != floor->id())
             G_->delete_edge(par, w.id(), "RT");
         ++moved;
@@ -4181,6 +4349,60 @@ void RoomSceneGraph::sync_walls_to_polygon(const std::vector<Eigen::Vector2f>& p
                          .arg(QString::fromStdString(room->name())).arg(poly.size()).arg(moved)
                          .arg(kept_for_children).arg(deleted).arg(created);
     trigger_layout_();
+}
+
+// ── P(THIS WALL IS REAL) → obj_exist_prob on the wall node (2026-11-12, for ltsm's per-edge extent) ───────────────────
+// A wall of the outline is either a wall or an edge the outline closed across space that holds none (clean53: the phantom
+// walls closing the DOOR_1 arm). Model: rc::walls::wall_real_prob (wall_support.h) — per one-cell stretch, where the run
+// of free cells that reaches the wall ENDS, scored "wall here" against "closed across empty space" with the refiner's own
+// fitted sigma / eps / ell and R_eff = A / P; never-observed stretches contribute nothing (occlusion is not absence) and an
+// unobserved wall reads the prior 1/2. It replaced the mean "seen" fraction along the wall, which read 0.7-0.9 on real
+// walls with furniture in front and ~0 on an edge only ever viewed edge-on (clean55/56 false recognitions).
+// Not published before the refiner's first fit (no sigma / eps / ell yet): the attribute stays as it was.
+// Skipped on a recalled visit — the raster restarts at the crossing, so most of a remembered room reads unobserved while
+// the remembered value (carried by ltsm with the node) is the better one.
+void RoomSceneGraph::publish_wall_seen_prob()
+{
+    if (not G_ or not free_space_.has_value() or recalled_visit_ or dsr_room_id_ == 0) return;
+    const auto room = G_->get_node(dsr_room_id_);
+    if (not room.has_value()) return;
+    const auto& fit = refiner_.last();
+    if (not (fit.sigma > 0.f) or not (fit.eps > 0.f) or not (fit.ell > 0.f)) return;
+    const auto poly = published_polygon();
+    if (poly.size() < 3) return;
+    float a2 = 0.f, perim = 0.f;
+    for (std::size_t i = 0; i < poly.size(); ++i)
+    {
+        const auto& p = poly[i]; const auto& q = poly[(i + 1) % poly.size()];
+        a2 += p.x() * q.y() - q.x() * p.y();
+        perim += (q - p).norm();
+    }
+    if (not (perim > 0.f)) return;
+    // the walls follow the outline's edge order (rc::walls::edge_pose: yaw = direction p_i -> p_i+1), so the outward
+    // normal is the right of the wall's direction on a CCW outline, the left on a CW one
+    const float orient = a2 >= 0.f ? 1.f : -1.f;
+    std::vector<Eigen::Vector2f> surf, fr; std::vector<float> cs, cf;
+    free_space_->evidence_cells(surf, fr, &cs, &cf);
+    const rc::walls::EvidenceRaster raster(surf, cs, fr, cf, free_space_->params().cell);
+    rc::walls::SupportParams P;
+    P.cell = free_space_->params().cell; P.sigma = fit.sigma; P.eps = fit.eps; P.ell = fit.ell;
+    P.r_eff = 0.5f * std::abs(a2) / perim;
+    for (auto w : own_wall_nodes(wall_naming(room->name())))
+    {
+        const auto par = G_->get_attrib_by_name<parent_att>(w).value_or(dsr_room_id_);
+        const auto e = G_->get_edge(par, w.id(), "RT");
+        if (not e.has_value()) continue;
+        const auto tr  = G_->get_attrib_by_name<rt_translation_att>(e.value());
+        const auto rot = G_->get_attrib_by_name<rt_rotation_euler_xyz_att>(e.value());
+        const float len = G_->get_attrib_by_name<width_m_att>(w).value_or(0.f);
+        if (not tr.has_value() or tr->get().size() < 2 or not rot.has_value() or rot->get().size() < 3 or len <= 0.f) continue;
+        const Eigen::Vector2f mid(tr->get()[0], tr->get()[1]), u(std::cos(rot->get()[2]), std::sin(rot->get()[2]));
+        const Eigen::Vector2f out = orient * Eigen::Vector2f(u.y(), -u.x());
+        const float p = rc::walls::wall_real_prob(mid - 0.5f * len * u, mid + 0.5f * len * u, out, raster, P);
+        if (const auto old = G_->get_attrib_by_name<obj_exist_prob_att>(w); old.has_value() and old.value() == p) continue;
+        G_->add_or_modify_attrib_local<obj_exist_prob_att>(w, p);
+        G_->update_node(w);
+    }
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -4565,8 +4787,8 @@ void RoomSceneGraph::step_layout_refiner(const rc::RoomConcept::UpdateResult& re
     //   searched itself 6 m away. Evidence still accumulates (it costs nothing and is the record a later survey
     //   would start from); the remembered outline is just not edited on this visit.
     if (recalled_visit_) return;
-    std::vector<Eigen::Vector2f> surf, fr; std::vector<float> cs, cf;
-    free_space_->evidence_cells(surf, fr, &cs, &cf);
+    std::vector<Eigen::Vector2f> surf, fr, fo; std::vector<float> cs, cf;
+    free_space_->evidence_cells(surf, fr, &cs, &cf, &fo);
     const auto poly_pub = published_polygon();
     if (poly_pub.size() < 4) return;
     {   // the refiner's EXACT inputs, so a refinement can be replayed offline without re-deriving the evidence
@@ -4582,8 +4804,19 @@ void RoomSceneGraph::step_layout_refiner(const rc::RoomConcept::UpdateResult& re
         put(static_cast<std::int64_t>(res.timestamp_ms));
         put_pts(poly_pub, nullptr); put_pts(surf, &cs); put_pts(fr, &cf);
         refine_in_bin_.flush();
+        // the free cells' mean beam origins, aligned with `fr`, in a SIDE tape (the main tape's readers stay valid)
+        if (not refine_origin_bin_.is_open()) refine_origin_bin_.open("tmp/refine_free_origin.bin", std::ios::binary | std::ios::trunc);
+        const auto put_o = [&](const auto& v) { refine_origin_bin_.write(reinterpret_cast<const char*>(&v), sizeof(v)); };
+        put_o(static_cast<std::int64_t>(res.timestamp_ms)); put_o(static_cast<std::uint32_t>(fo.size()));
+        for (const auto& o : fo) { put_o(o.x()); put_o(o.y()); }
+        refine_origin_bin_.flush();
     }
-    const auto R = refiner_.propose(poly_pub, surf, fr, cs, cf);
+    // the room's doorways (published frame): an outline never grows through one (layout_refiner.h, grows_through_doorway)
+    std::vector<rc::refine::Doorway> doorways;
+    for (const auto& d : room_concept_->door_apertures())
+        doorways.push_back({.a = T_pub_int_ * d.a, .b = T_pub_int_ * d.b, .depth = d.half_depth});
+    doorways.insert(doorways.end(), unfound_openings_.begin(), unfound_openings_.end());   // a hypothesised doorway is where the room ends too
+    auto R = refiner_.propose(poly_pub, surf, fr, cs, cf, doorways, fo, pool_regions_);
     refine_contested_ = R.contested;
     if (not refine_csv_.is_open())
     {
@@ -4595,7 +4828,7 @@ void RoomSceneGraph::step_layout_refiner(const rc::RoomConcept::UpdateResult& re
                 << ',' << R.kappa << ',' << R.nll_before << ',' << R.nll_after << ',' << R.edits.size() << ',' << R.polygon.size()
                 << ',' << R.contested.size() << ',' << room_concept_->slam_disagreement() << '\n';
     refine_csv_.flush();   // one row per evaluation (every few seconds): flush so the file is readable live
-    if (R.edits.empty()) return;
+    if (R.edits.empty()) { publish_wall_seen_prob(); return; }   // the evidence grew: P(seen) of the walls with it
     for (const auto& e : R.edits)
     {   // extend/notch carry a CELL COUNT (a rectangle, no edge); the others an offset in metres along edge `e.edge`
         const bool area = (e.kind == "extend" or e.kind == "notch");
@@ -4621,6 +4854,7 @@ void RoomSceneGraph::step_layout_refiner(const rc::RoomConcept::UpdateResult& re
         fs_published_ = R.polygon; published_polygon_verts_ = R.polygon.size();
         save_learnt_layout(R.polygon, "refined");
         sync_walls_to_polygon(R.polygon);   // rule 1: the walls (and the doors on them) follow the refined outline
+        publish_wall_seen_prob();
     }
 }
 

@@ -8,6 +8,8 @@
 //   two_holes  memory holds a passage for a DIFFERENT hole of the same room: the live crossing gets a fresh number
 #include "../src/room_eviction.h"
 #include "../src/passage_live.h"
+#include "../src/topology_publish.h"
+#include "../../common/ltsm_topology/topology_decode.h"
 #include <QCoreApplication>
 #include <cmath>
 #include <cstdio>
@@ -241,6 +243,75 @@ int main(int argc, char **argv)
         pl.step();
         check(pl.owned().size() == 1, "still one passage (" + std::to_string(pl.owned().size()) + ")");
         check(not pl.passage_of(d6).has_value(), "door_6 has no passage: it stays a NEW door for `cross new`");
+    }
+
+    std::printf("[live_door] the summary's live door of a passage whose face was re-made under another name\n");
+    {   // explore_tour13: memory knew the hole as r1_door_2, door_concept re-made it as door_4 ('passage_0 match door_3 <->
+        // door_4') — the summary looked for a live 'door_2', found none, and never named door_4: the controller could not
+        // resolve the entry face, crossed the same doorway again, and its final Return asked for a name that was gone.
+        auto live = graph("pid_live_f", "etc/stage_two_rooms.json");
+        auto mem = graph("pid_mem_f", "ltsm_root.json");
+        const auto [T, T1] = stage_crossing(*live, "door_17");   // room_0 current; its door is door_17
+        remember_hole(*mem, "passage_7", "r0_door_3", T, "r1_door_9", T1);
+        if (auto p = mem->get_node("passage_7"); p.has_value())
+        { mem->add_or_modify_attrib_local<passage_crossings_att>(p.value(), 1); mem->update_node(p.value()); }
+        const auto before = ltsm::build_topology_json(*mem, *live);
+        check(before.find("\"live_door\"") == std::string::npos, "no live passage yet: no live door (never a guess)");
+        DSR::Node lp; lp.type("metaconcept"); lp.name("passage_7");
+        live->add_or_modify_attrib_local<object_subtype_att>(lp, std::string("passage"));
+        const auto lpid = live->insert_node(lp).value();
+        live->insert_or_assign_edge(DSR::Edge::create<match_edge_type>(lpid, live->get_node("door_17")->id()));
+        live->insert_or_assign_edge(DSR::Edge::create<match_edge_type>(lpid, live->get_node("door_5")->id()));
+        const auto after = ltsm::build_topology_json(*mem, *live);
+        check(after.find("\"live_door\":\"door_17\"") != std::string::npos,
+              "the live passage's door in the CURRENT room names it: door_17 (not the proto's door_5): " + after);
+        check(rc::topo::live_door_for(after, "door_9") == std::optional<std::string>("door_17"),
+              "live_door_for(the far face's name) = door_17 — the entry face after a return");
+        check(rc::topo::crossed_doors(after).contains("door_17"), "door_17 counts as crossed (no re-crossing)");
+    }
+
+    std::printf("[known_far] promotion through a known hole whose far side is a THIRD room keeps the passage as it is\n");
+    {   // cmp_br2 eviction #5: passage_0 (r1_door_3 <-> r2_door_5) was given a third face r5_door_14 when room_5 (really room_1, not yet
+        // recognised) was promoted over room_2 through door_5.
+        auto live = graph("pid_live_g", "etc/stage_two_rooms.json");
+        auto mem = graph("pid_mem_g", "ltsm_root.json");
+        const auto [T, T1] = stage_crossing(*live, "door_1");
+        const auto root = mem->get_node("root")->id();
+        auto room = [&](const std::string &name, std::uint64_t rid) {
+            DSR::Node t; t.type("room"); t.name(name);
+            mem->add_or_modify_attrib_local<room_id_att>(t, rid);
+            mem->add_or_modify_attrib_local<parent_att>(t, root);
+            const auto id = mem->insert_node(t).value();
+            put_rt(*mem, root, id, 0, 0, 0);
+            return id; };
+        const auto r0 = room("r0_room_0", 0), r9 = room("r9_room_9", 9);
+        const auto f0 = add_door(*mem, "r0_door_1", r0, T);
+        const auto f9 = add_door(*mem, "r9_door_9", r9, T1);
+        DSR::Node p; p.type("metaconcept"); p.name("passage_0");
+        mem->add_or_modify_attrib_local<object_subtype_att>(p, std::string("passage"));
+        const auto pid = mem->insert_node(p).value();
+        mem->insert_or_assign_edge(DSR::Edge::create<match_edge_type>(pid, f0));
+        mem->insert_or_assign_edge(DSR::Edge::create<match_edge_type>(pid, f9));
+        ltsm::RoomEviction ev(live, mem);
+        ltsm::Candidate cand;
+        cand.robot_id = 200; cand.robot_name = live->get_node(200)->name();
+        cand.old_room_id = 300; cand.old_room_name = "room_0";
+        cand.new_room_id = 400; cand.new_room_name = "room_1";
+        cand.promote = true; cand.remove_old = true;
+        cand.old_door_id = live->get_node("door_1")->id();
+        cand.new_door_id = live->get_node("door_5")->id();
+        cand.crossing_born = true;
+        const auto c = ev.evict(cand);
+        check(c.ok, "evict ok (" + c.reason + ")");
+        const auto m = DSR::DSRGraph::get_node_edges_by_type(mem->get_node("passage_0").value(), "match");
+        bool f0_in = false, f9_in = false;
+        for (const auto &e : m) { f0_in = f0_in or e.to() == f0; f9_in = f9_in or e.to() == f9; }
+        check(m.size() == 2 and f0_in and f9_in, "passage_0 keeps exactly its two faces (r0_door_1, r9_door_9), no third face (" + std::to_string(m.size()) + ")");
+        check(c.mem_door_new.empty(), "no far face is claimed for the room being recognised (mem_door_new empty): " + c.mem_door_new);
+        const auto twin_door = mem->get_node("r1_door_5");
+        check(twin_door.has_value() and DSR::DSRGraph::get_node_edges_by_type(mem->get_node("passage_0").value(), "match").size() == 2,
+              "the entry mirror is archived as a plain door of the new room's twin, not linked into the passage");
+        check(not c.mem_door_new_derived, "and no derived face was written");
     }
 
     std::printf("%s (%d failures)\n", failures ? "FAILED" : "PASSED", failures);

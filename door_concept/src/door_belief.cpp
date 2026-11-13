@@ -109,6 +109,55 @@ float DoorBelief::clutter_fraction(const std::vector<Eigen::Vector3f>& pts, floa
     return static_cast<float>(c / static_cast<double>(pts.size()));
 }
 
+float DoorBelief::clutter_fraction_leaf_marginal(const std::vector<Eigen::Vector3f>& pts, float R,
+                                                 std::span<const std::pair<float, float>> phi_curve) const
+{
+    if (pts.empty()) return 0.0f;
+    double wsum = 0.0;
+    for (const auto& [phi, w] : phi_curve)
+        if (std::isfinite(phi) and std::isfinite(w) and w > 0.0f) wsum += w;
+    if (not (wsum > 0.0)) return clutter_fraction(pts, R);
+    // The surface likelihood of one leaf angle, hinge-marginalised exactly as mixture_unnorm does at the believed angle.
+    const float eps     = std::clamp(params_.clutter_frac, 0.0f, 0.99f);
+    const float pi_surf = 1.0f - eps;
+    const float inv2R   = 0.5f / std::max(1e-9f, R);
+    const float cs      = params_.clutter_scale_m;
+    const float u_clut  = eps * std::exp(-cs * cs * inv2R);
+    const door::Aperture ap = aperture_at(state_);
+    door::LeafState other = params_.leaf;
+    other.hinge = other.hinge == door::HingeSide::Near ? door::HingeSide::Far : door::HingeSide::Near;
+    struct Pose { door::LeafPose a, b; double w; };
+    std::vector<Pose> poses;
+    poses.reserve(phi_curve.size());
+    for (const auto& [phi, w] : phi_curve)
+    {
+        if (not (std::isfinite(phi) and std::isfinite(w) and w > 0.0f)) continue;
+        door::LeafState la = params_.leaf, lb = other;
+        la.phi = lb.phi = phi;
+        poses.push_back({door::leaf_pose(ap, la), door::leaf_pose(ap, lb), double(w) / wsum});
+    }
+    double c = 0.0;
+    for (const auto& p : pts)
+    {
+        double u_surf = 0.0;
+        for (const auto& q : poses)
+        {
+            const float da = door::leaf_sdf(q.a, p);
+            double us = double(p_hinge_) * std::exp(-da * da * inv2R);
+            if (p_hinge_ < 1.f)
+            {
+                const float db = door::leaf_sdf(q.b, p);
+                us += double(1.f - p_hinge_) * std::exp(-db * db * inv2R);
+            }
+            u_surf += q.w * us;
+        }
+        u_surf *= pi_surf;
+        const double sum = u_surf + u_clut;
+        c += sum > 0.0 ? u_clut / sum : 1.0;
+    }
+    return static_cast<float>(c / static_cast<double>(pts.size()));
+}
+
 // ─── Jacobian (central finite difference over the 3 DOFs [s,w,h]) ────────────────
 Eigen::Matrix<float, 4, 1> DoorBelief::sdf_jacobian(const Eigen::Vector3f& p, const DoorBeliefState& s, int prim) const
 {
@@ -283,9 +332,24 @@ void DoorBelief::accumulate_extra(const DoorBeliefState& s, const DoorFrame& fra
         //  ZED depth leaves open) without letting one mask's segmentation of the door's WIDTH — which varies frame to frame
         //  (tourR2 door_2: w 0.93 ↔ 1.08 at σ_w 0.015 when each side was a factor) — pass for a measurement of w. One
         //  censored side ⇒ no midpoint ⇒ no factor this frame.
+        // ★ THE MASK IS THIS DOOR'S ONLY AS FAR AS ITS POINTS ARE (explore_tour8, 2026-11-06): a mask of 313 points at 5.68 m,
+        //   clutter=100% (another doorway, seen through the one just crossed), moved door_3's aperture 0.8 m off its wall
+        //   through this factor at full precision; the wall-band prior fell to 0.01 and existence REMOVED the door. The frame's
+        //   points carry their clutter responsibility; the mask they came from is the same observation, so its sides are
+        //   believed with the same expected association — the mean non-clutter responsibility of the frame's points at this
+        //   state (an EM weight on the mask's mixture component, not a gate). No points: nothing says the mask is foreign (1).
+        float assoc = 1.0f;
+        if (ok and not frame.points.empty())
+        {
+            double acc = 0.0;
+            for (std::size_t i = 0; i < frame.points.size(); ++i)
+                acc += 1.0 - double(responsibilities(frame.points[i], s, i < frame.R.size() ? frame.R[i] : sigma2())[2]);
+            assoc = float(acc / double(frame.points.size()));
+        }
+        last_mask_assoc_ = assoc;
         if (ok)
         {
-            const float iv = 1.0f / std::max(1e-6f, 0.5f * mb.var + mb.var_common);
+            const float iv = assoc / std::max(1e-6f, 0.5f * mb.var + mb.var_common);
             const float r = 0.5f * (lo0 + hi0) - 0.5f * (mb.lo + mb.hi);
             Id.noalias() += iv * (J * J.transpose());
             bd.noalias() += -iv * J * r;

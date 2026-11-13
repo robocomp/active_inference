@@ -231,6 +231,99 @@ inline std::pair<float, float> door_wall_extent(const Aperture& ap, const std::v
     return c < runs.front().first ? runs.front() : runs.back();
 }
 
+// ─── THE WALL THAT CARRIES THE DOORWAY, FOR ITS SUPPORT PRIOR (2026-11-11, door_wall_support.h) ──────────────────────────
+// door_wall_extent's run — but only when it CARRIES the doorway: the aperture's centre lies on it (or in the gap between the
+// two runs it merged). door_wall_extent's last resort, "a centre beyond every run takes the nearest", names a run the door
+// does not lie on (a door frame authored on an earlier polygon and tilted against this one leaves its own wall's edges out
+// of band, and the nearest in-band piece can be metres away — clean50's association term read Φ ≈ 1e-13 there); a prior
+// built on it would drag the door onto it. A wall that does not carry the door says nothing about where the door ends: NaN.
+// (2026-11-12) This is the test IN THE APERTURE'S OWN PLANE: the polygon edges in band of the plane the aperture is drawn on.
+// door_carrying_run below asks it once per candidate wall; door_carrying_wall (the one definition the fit and the existence prior
+// share) is built on that.
+inline std::pair<float, float> door_carrying_wall_in_plane(const Aperture& ap, const std::vector<Eigen::Vector2f>& polygon,
+                                                           float depth_lo, float depth_hi)
+{
+    constexpr float kNaN = std::numeric_limits<float>::quiet_NaN();
+    const auto [lo, hi] = door_wall_extent(ap, polygon, depth_lo, depth_hi);
+    const float c = ap.s + 0.5f * ap.w;
+    if (not (std::isfinite(lo) and std::isfinite(hi)) or c < lo or c > hi) return {kNaN, kNaN};
+    return {lo, hi};
+}
+
+// ─── WHICH WALL CARRIES THE DOORWAY, WHATEVER PLANE THE APERTURE IS DRAWN ON (2026-11-12, clean58 door_3) ────────────────
+// door_carrying_wall_in_plane asks for polygon edges in band of the APERTURE's plane. A door whose plane was authored on a
+// different line than its wall — clean58 door_3: its frame was a proto room's FRONTIER edge, perpendicular to the bathroom's south
+// wall, and its centre ended 4 cm from that wall — can never see its wall that way: every wall vertex is metres off its plane.
+// The same in-band rule, asked from each WALL's side: a polygon edge carries the doorway when the aperture's centre lies in that
+// edge's band [depth_lo, depth_hi] (the field's own-wall depth band, the band door_carrying_wall_in_plane applies to vertices) and,
+// with the aperture redrawn in that edge's line, door_carrying_wall_in_plane finds a run carrying the centre (same runs, same merge
+// of a notch's short sides, same "gap between two runs"). No nearest-wall fallback: an edge whose band misses the centre is not a
+// candidate at any distance, and none ⇒ !ok. Among the candidates the one the aperture is moved LEAST to lie in: its jambs'
+// displacement |offset| + (w/2)|sin skew| (geometry, metres; at a corner two runs can both hold the centre in band).
+// u is chosen within ±π/2 of the aperture's own wall_u (a line has no direction; the minimal rotation keeps the hinge/swing labels,
+// which are relative to wall_u, meaning what they meant).
+struct CarryingWall
+{
+    bool ok = false;
+    Eigen::Vector2f O{0.0f, 0.0f}, u{1.0f, 0.0f};   // the wall line: a point on it (the edge's start) and its unit direction
+    float lo = std::numeric_limits<float>::quiet_NaN();   // the carrying run along u from O (m)
+    float hi = std::numeric_limits<float>::quiet_NaN();
+    float offset = 0.0f;   // across_u(line) · (centre − O): the aperture centre's distance from the line, + = on the room side
+    float skew   = 0.0f;   // the aperture's yaw minus the line's, in (−π/2, π/2] (rad)
+    float edge_len = 0.0f; // the polygon edge that gave the line: its two corners fix its direction (door_fit.cpp, σ_ψ)
+};
+inline CarryingWall door_carrying_run(const Aperture& ap, const std::vector<Eigen::Vector2f>& polygon, float depth_lo, float depth_hi)
+{
+    CarryingWall best;
+    const std::size_t n = polygon.size();
+    if (n < 3) return best;
+    const Eigen::Vector2f c = ap.centre_xy();
+    float best_move = std::numeric_limits<float>::infinity();
+    for (std::size_t i = 0; i < n; ++i)
+    {
+        const Eigen::Vector2f& a = polygon[i];
+        const Eigen::Vector2f ab = polygon[(i + 1) % n] - a;
+        const float len = ab.norm();
+        if (not (len > 0.0f)) continue;   // a repeated vertex has no direction (domain guard)
+        Eigen::Vector2f u = ab / len;
+        if (u.dot(ap.wall_u) < 0.0f) u = -u;
+        Aperture cand = ap;
+        cand.wall_u = u;
+        const Eigen::Vector2f nrm = cand.across_u();
+        const float off = nrm.dot(c - a);
+        if (not (off >= depth_lo and off <= depth_hi)) continue;   // the centre is not in this wall's band
+        // the aperture turned into this wall's direction ABOUT ITS CENTRE (its plane through c, as door_carrying_wall_in_plane
+        // always drew it): along coordinates from the foot of a on that plane, which project on the wall line at a itself
+        cand.wall_O = a + off * nrm;
+        cand.s = u.dot(c - a) - 0.5f * ap.w;
+        const auto [lo, hi] = door_carrying_wall_in_plane(cand, polygon, depth_lo, depth_hi);
+        if (not (std::isfinite(lo) and std::isfinite(hi))) continue;
+        const float skew = std::atan2(u.x() * ap.wall_u.y() - u.y() * ap.wall_u.x(), u.dot(ap.wall_u));
+        const float move = std::abs(off) + 0.5f * ap.w * std::abs(std::sin(skew));
+        if (move < best_move)
+        {
+            best_move = move;
+            best = CarryingWall{true, a, u, lo, hi, off, skew, len};
+        }
+    }
+    return best;
+}
+
+// The along-wall extent [a, b] of the wall that carries the doorway, in the APERTURE's along coordinate (m from ap.wall_O along
+// ap.wall_u) — the support prior's ends (door_wall_support.h) for the fit AND the existence prior: ONE definition. NaN, NaN when
+// no wall carries it. For an aperture lying in its wall's line this is door_carrying_wall_in_plane's run exactly; for a skewed one
+// it is the run's ends projected on the aperture's axis (the fit moves the aperture onto the line first: door_fit.cpp).
+inline std::pair<float, float> door_carrying_wall(const Aperture& ap, const std::vector<Eigen::Vector2f>& polygon,
+                                                  float depth_lo, float depth_hi)
+{
+    constexpr float kNaN = std::numeric_limits<float>::quiet_NaN();
+    const CarryingWall cw = door_carrying_run(ap, polygon, depth_lo, depth_hi);
+    if (not cw.ok) return {kNaN, kNaN};
+    const float ta = ap.wall_u.dot(cw.O + cw.lo * cw.u - ap.wall_O);
+    const float tb = ap.wall_u.dot(cw.O + cw.hi * cw.u - ap.wall_O);
+    return {std::min(ta, tb), std::max(ta, tb)};
+}
+
 // ─── THE φ GRID, ONE DEFINITION (Task 11 fix round 1) ─────────────────────────────────────────────────────────────────
 // DoorFitter::estimate_phi and the passage anchor's φ curve (door_anchor_open.h) must score the same hypotheses: the
 // range [0, max(0.1, phi_max)] and the step count derived from the declared resolution, as estimate_phi always did.

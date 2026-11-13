@@ -12,6 +12,7 @@
 #include "../src/local_policy/field_extent.h"
 #include "../src/local_policy/policy_tick_gate.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <limits>
@@ -199,6 +200,23 @@ int main()
         for (int i = 0; i < 2000; ++i, t += 50)   // a finite field now and then: the clock restarts
             any = c3.on_tick(t, i % 50 == 49 ? NoRouteObs::Finite : NoRouteObs::Infinite, false, false, latch) or any;
         CHECK("finite_field_resets_the_clock", not any);
+    }
+
+    // clean18: the leaf of the door just crossed is a known obstacle for the PLANNER (a route built while residual is still empty)
+    {
+        LeafHypothesis h;
+        h.hinge = V(1.f, 2.f); h.dir = V(0.f, 1.f); h.length = 0.9f; h.half_thick = 0.02f; h.p = 0.7f;
+        LeafHypothesis h2 = h; h2.dir = V(1.f, 0.f); h2.p = 0.3f;
+        DoorLeaf one; one.hyps.push_back(h);
+        DoorLeaf two; two.hyps = {h, h2};
+        CHECK("leaf_polygons_empty_leaf", door_leaf_polygons(DoorLeaf{}, 0.05f).empty());
+        const auto poly = door_leaf_polygons(one, 0.05f);
+        CHECK("leaf_polygons_one_rectangle", poly.size() == 1 and poly.front().size() == 4);
+        float x0 = 1e9f, x1 = -1e9f, y0 = 1e9f, y1 = -1e9f;
+        for (const V& q : poly.front()) { x0 = std::min(x0, q.x()); x1 = std::max(x1, q.x()); y0 = std::min(y0, q.y()); y1 = std::max(y1, q.y()); }
+        CHECK("leaf_polygons_span_hinge_to_tip", std::abs(y0 - 2.f) < 1e-4f and std::abs(y1 - 2.9f) < 1e-4f);
+        CHECK("leaf_polygons_at_least_one_cell_wide", x1 - x0 >= 0.05f - 1e-4f);
+        CHECK("leaf_polygons_every_hypothesis", door_leaf_polygons(two, 0.05f).size() == 2);
     }
 
     std::printf("%s (%d failures)\n", fails == 0 ? "ALL PASS" : "FAILURES", fails);

@@ -86,6 +86,12 @@ int main()
         CHECK(p->steps.at(2).id == "2.1" and p->steps.at(2).state == SS::Running and p->steps.at(2).attempt == 1);
         CHECK(p->steps.at(3).state == SS::Pending);
 
+        CHECK(p->steps.at(2).note.empty() and p->steps.at(2).after.empty());   // a new iteration: attempt 1, no past failure
+        h.leaf["2.1"] = {.state = LeafState::Running, .detail = "waiting for the door"};
+        in.tick(1250);
+        const auto w = decode_progress(encode_progress(in, "remote"));
+        CHECK(w->steps.at(2).note == "waiting for the door");
+
         in.cancel("stopped_by_user", 1300);
         const auto q = decode_progress(encode_progress(in, "remote"));
         CHECK(q->status == "aborted|stopped_by_user" and q->t1 == 1300);

@@ -174,6 +174,16 @@ static DoorCycleInput rnd_input(Rng& r)
     c.focal_x = r.f(); c.focal_y = r.f(); c.projection_model = static_cast<std::uint8_t>(r.upto(2));
     c.cam_rgb_width = r.opt<int>([&] { return r.i32(); }); c.cam_rgb_focalx = r.opt<int>([&] { return r.i32(); });
     c.cam_fov = r.opt<float>([&] { return r.f(); });
+    c.equirect_az_sign = r.f(); c.equirect_az_offset = r.f();
+    {
+        auto& q = in.ricoh;
+        q.present = r.coin(); q.width = static_cast<std::uint32_t>(r.u64()); q.height = static_cast<std::uint32_t>(r.u64());
+        q.focal_x = r.f(); q.focal_y = r.f(); q.projection_model = static_cast<std::uint8_t>(r.upto(2));
+        q.cam_fov = r.opt<float>([&] { return r.f(); });
+        q.equirect_az_sign = r.f(); q.equirect_az_offset = r.f();
+    }
+    in.robot.body_T_ricoh = r.opt<Mat4d>([&] { return r.m4(); });
+    in.route_faces = r.vec(4, [&] { return r.str(); });
     in.masks = r.opt<MaskPacket>([&] {
         MaskPacket p; p.valid = r.coin(); p.frame_id = r.i32(); p.timestamp_ms = r.u64();
         p.slices = r.vec(4, [&] { return rnd_slice(r); });
@@ -439,6 +449,41 @@ int main()
     // ── 3c. ownership: created_by reads the creator from the low 12 bits of a DSR id ───────────────────────────────
     CHECK(created_by((std::uint64_t{777} << 12) | 21u, 21u));
     CHECK(not created_by((std::uint64_t{777} << 12) | 22u, 21u));
+
+    // ── 3c'. v4 tape reads with the ricoh absent (v5 fields default) ──────────────────────────────────────────────
+    {
+        Rng r(4004);
+        const DoorCycleInput full = rnd_input(r);
+        std::stringstream ss(std::ios::in | std::ios::out | std::ios::binary);
+        CHECK(write_header_as_version(ss, DoorRecordingHeader{.agent_id = 21, .note = "v4"}, RecordingKind::Input, 4));
+        CHECK(write_as_version(ss, full, 4));
+        std::uint32_t v = 0;
+        const auto h = read_header(ss, RecordingKind::Input, &v);
+        CHECK(h.has_value() and v == 4);
+        const auto in = read_input(ss, v);
+        CHECK(in.has_value());
+        if (in)
+        {
+            CHECK(not in->ricoh.present);
+            CHECK(not in->robot.body_T_ricoh.has_value());
+            CHECK(in->route_faces.empty());
+            CHECK(in->backed_faces == full.backed_faces and in->cycle == full.cycle);
+        }
+    }
+    // ── 3c''. v5 round trip with every new field set ──────────────────────────────────────────────────────────────
+    {
+        DoorCycleInput a;
+        a.cycle = 9;
+        a.ricoh.present = true; a.ricoh.width = 1920; a.ricoh.height = 960; a.ricoh.projection_model = 1;
+        a.ricoh.cam_fov = 6.28f; a.ricoh.equirect_az_sign = -1.f; a.ricoh.equirect_az_offset = 0.25f;
+        a.camera.equirect_az_sign = -1.f; a.camera.equirect_az_offset = 0.5f;
+        a.robot.body_T_ricoh = Mat4d::Identity();
+        a.route_faces = {"door_3", "door_17"};
+        std::stringstream ss(std::ios::in | std::ios::out | std::ios::binary);
+        CHECK(write(ss, a));
+        const auto b = read_input(ss);
+        CHECK(b.has_value() and *b == a);
+    }
 
     // ── 3d. v2 PACKING: the prediction paths, the pixel modes, the unchanged (nullopt) path, sizes ──────────────────
     {

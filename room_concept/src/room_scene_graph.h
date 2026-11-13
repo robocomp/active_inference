@@ -29,6 +29,7 @@
 #include <limits>
 #include <mutex>
 #include <optional>
+#include <array>
 #include <print>
 #include <memory>
 #include <vector>
@@ -47,12 +48,14 @@
 #include "../../common/affordance_manager/affordance_manager.h"
 #include "calib_channel.h"           // rc::calib::CalibChannel (the afford_calib producer)
 #include "free_space_polygon.h"      // rc::freespace (the start-up proto-room's extent)
-#include "layout_refiner.h"          // rc::refine (the given room refined on the shadow SLAM's evidence)
+#include "layout_refiner.h"
+#include "doorway_necks.h"          // rc::refine (the given room refined on the shadow SLAM's evidence)
 #include "learnt_layout.h"           // rc::learnt (the accepted room kept as a dated SVG, MapMode = "last")
 #include "layout_explorer.h"         // rc::layout (the live layout explorer → afford_room while proto)
 #include "room_explored.h"           // rc::explored — P(room explored), room_explored_p
 #include "camera_coverage.h"         // rc::camcov — the boundary as the CAMERAS have seen it (Task 12)
 #include "proposal_adoption.h"         // rc::proposal — ltsm's recognition proposal: admit, adopt in place, answer
+#include "entry_reloc.h"   // rc::entry::PoseReference (entry relocalisation value)
 
 namespace rc
 {
@@ -115,8 +118,23 @@ public:
     // counter follows via reset in restart_after_closure's path.
     std::size_t closures_seen_ = 0;
 
+    /// One block a correction writes besides itself (pose_propagator.h plan_correction): room<-robot in the estimator's
+    /// INTERNAL frame (the frame of res.robot_pose), its covariance there, and the body twist at that instant.
+    struct RtTail
+    {
+        Eigen::Affine2f pose;
+        Eigen::Matrix3f covariance;
+        std::uint64_t   timestamp_ms;
+        float           adv, side, rot;
+    };
+    /// `tail` non-null ⇒ the NEWEST correction rewrites the ring from its earliest block (RT_API::rewrite_edge_RT_since):
+    /// the correction and every `tail` block (spread ones before t_c, re-integrated ones after), in ONE publish.
     void update(const rc::RoomConcept::UpdateResult& res, float adv, float side, float rot,
-                bool write_rt = true);
+                bool write_rt = true, const std::vector<RtTail>* tail = nullptr);
+    /// What the last update() did to the robot RT edge: written at all, and written as a rewrite with the tail (then
+    /// the ring from the earliest tail/correction stamp on holds exactly those blocks). Localiser thread.
+    struct PoseWrite { bool written = false; bool rewrote = false; };
+    [[nodiscard]] PoseWrite last_pose_write() const noexcept { return last_pose_write_; }
 
     // Tick the affordance manager (execution monitoring); call periodically.
     void monitor_affordance();
@@ -136,9 +154,10 @@ public:
 
     // High-rate predicted pose between lidar corrections (dead-reckoned room←robot estimate + grown
     // cov + forward validity stamp). Writes ONLY the robot↔room RT edge — no room creation/affordance.
-    void dsr_publish_predicted_pose(const Eigen::Affine2f& robot_pose,
+    /// adv/side/rot = the body twist AT that instant, stored in the block's twist slots. True = written.
+    bool dsr_publish_predicted_pose(const Eigen::Affine2f& robot_pose,
                                     const Eigen::Matrix3f& covariance,
-                                    std::uint64_t timestamp_ms);
+                                    std::uint64_t timestamp_ms, float adv, float side, float rot);
 
     [[nodiscard]] bool  room_node_created() const noexcept { return room_node_created_; }
     /// The room is still the start-up PROTO-room (born, not yet promoted) — the UI says ESTIMATING. Read from
@@ -180,14 +199,19 @@ public:
     { std::scoped_lock lk(pinned_mutex_); return latest_pinned_; }
 
 private:
-    void dsr_update_pose(const rc::RoomConcept::UpdateResult& res);
+    void dsr_update_pose(const rc::RoomConcept::UpdateResult& res, const std::vector<RtTail>* tail = nullptr);
     // `child_override` = 0 writes robot→(this agent's room). Non-zero writes robot→that node instead, with
     // `robot_pose`/`covariance` already expressed in ITS frame — used for the proto-room, whose frame is a
     // fixed transform of the room's, so the same inversion / Jacobian / twist-adjoint code applies unchanged.
-    void write_robot_room_rt(const Eigen::Affine2f& robot_pose,
+    // `tail` non-null = this is the NEWEST CORRECTION: written through RT_API::rewrite_edge_RT_since together with every
+    // `tail` block (same frame as `robot_pose`), which drops every ring block stamped >= the earliest of them. All go
+    // through the same frame maps, inversion, covariance Jacobian and twist adjoint, in ONE publish. Null = plain insert.
+    // Returns true when the edge was written.
+    bool write_robot_room_rt(const Eigen::Affine2f& robot_pose,
                              const Eigen::Matrix3f& covariance,
                              std::uint64_t timestamp_ms,
-                             std::uint64_t child_override = 0);
+                             std::uint64_t child_override = 0,
+                             const std::vector<RtTail>* tail = nullptr);
 
     // ── PROTO-ROOM: space the room does not explain, entered through one of its open doors ───────────
     // Born once, on the controller's crossing fact (exit_fact.h link 1) naming one of this room's doors. A `room` node `room_<k>` with a
@@ -287,6 +311,13 @@ private:
     std::atomic<float> readiness_stable_{0.f}, readiness_explore_{0.f};
     std::deque<std::pair<std::int64_t, std::vector<Eigen::Vector2f>>> ring_hist_;   // (stamp, published outline)
     std::deque<std::vector<Eigen::Vector2f>> layout_pool_;   ///< distinct map layouts (published frame) promotion chooses among
+    /// ★ ONE EVIDENCE CLOCK FOR THE EXPLORER AND THE OUTLINE (2026-11-12, clean52): scans added to free_space_ so far,
+    /// that count when the newest pool outline was drawn, and that count when the explorer latched `finished`. Promotion
+    /// waits until the pool holds an outline drawn from a raster at least as new as the one that said "finished".
+    std::uint64_t fs_scans_ = 0, fs_outline_scans_ = 0, layout_finished_scans_ = 0;
+    /// Promotion's near-miss pool regions (LayoutRefiner::adopt_from_pool), published frame: re-judged by every later
+    /// refinement as the evidence grows.
+    std::vector<rc::refine::Region> pool_regions_;
     long low_batches_stamped_ = 0, low_batches_too_old_ = 0;   // diagnostics: furniture layer intake
     int  rej_ring_ = 0, rej_furniture_ = 0, rej_refused_ = 0;  // diagnostics: explorer rejections, per plan   ///< explorer standpoints COMPLETED in this proto (promotion precondition)             ///< batches newer than the last pose
     void stamp_low_obstacles();
@@ -370,7 +401,16 @@ private:
                                         const rc::layout::ExplorerParams& ep, const rc::layout::Admissible& standable,
                                         const rc::layout::Admissible& deferred);
     std::vector<Eigen::Vector2f> refine_contested_;   ///< published frame: cells a look would decide (explorer gain)
+    /// Openings an outline was cut at (published frame): door hypotheses, published on `room_doorways`; the refiner may not grow through them.
+    std::vector<rc::refine::Doorway> unfound_openings_;
+    void cut_unfound_doorways(std::vector<Eigen::Vector2f>& polygon_pub);   ///< doorway_necks.h, on this room's evidence
+    void publish_doorway_hypotheses();
+    /// obj_exist_prob on each of this room's walls = P(this wall was seen): the mean, along the wall at the raster's cell,
+    /// of the best occupied-cell evidence at that point (occupancy posterior x N(across; 0, sigma_fit)). ltsm reads it
+    /// to tell a wall the LiDAR returned from an edge the outline merely closed (2026-11-12, D2).
+    void publish_wall_seen_prob();
     std::ofstream refine_csv_;                        ///< tmp/layout_refine.csv — one row per evaluation
+    std::ofstream refine_origin_bin_;                 ///< tmp/refine_free_origin.bin — per refine frame, the free cells' mean beam origins
     std::ofstream refine_in_bin_;                     ///< tmp/refine_input.bin — the refiner's exact inputs, one frame per evaluation (offline replay)
     std::int64_t  sweep_last_ms_ = 0;
     Eigen::Vector2f lidar_origin_{0.f, 0.f};   ///< robot frame
@@ -386,6 +426,7 @@ private:
     /// CENTROID until the robot reaches it, then the planners resume (dsr_update_entry_relocalisation).
     bool entry_reloc_ = false;
     std::optional<Eigen::Vector2f> entry_reloc_target_pub_;
+    rc::entry::PoseReference entry_pose_ref_;   ///< what the localiser typically attains in a room (entry_reloc.h)
     float         layout_yaw_  = 0.f;               ///< internal frame
     float         layout_gain_ = 0.f;
     std::int64_t  layout_plan_ms_ = 0;
@@ -632,6 +673,10 @@ private:
     float last_adv_  = 0.f;
     float last_side_ = 0.f;
     float last_rot_  = 0.f;
+    // Stamp of the last CORRECTION written to the robot RT. A correction older than it must not rewrite the tail: what
+    // follows it in the ring is then a newer correction, not a prediction (dsr_update_pose).
+    std::uint64_t last_correction_ts_ = 0;
+    PoseWrite     last_pose_write_;   ///< see last_pose_write()
 
     // Table-landmark tracking CSV (tmp/sdf_localizer/table_landmark_<ts>.csv): one row per detected table
     // per refresh, logging its ROOM-frame coord (stable if localization is consistent) + ROBOT-frame

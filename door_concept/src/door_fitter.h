@@ -52,9 +52,6 @@
 
 namespace rc {
 
-// (DoorSilhouette and the existence probes — compute_silhouette_existence, compute_frame_probe, door_view_obliquity,
-//  aperture_band_offset — moved into the DSR-free DoorCore: src/core/door_existence.h, Task 5.)
-
 class DoorFitter
 {
 public:

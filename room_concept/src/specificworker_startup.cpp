@@ -283,6 +283,10 @@ void SpecificWorker::initialize()
     // Process-local: rt_api_ is this worker's own instance (DSRGraph::get_rt_api() is a factory,
     // never shared -- see dsr_api.h), and this agent is the sole writer of the robot<->room RT edge,
     // so this is the only place that needs it.
+    // 2026-11-11: with the IMU-rate ticks off (RoomConcept.PredictedTicks = false), the edge is written only at the
+    // ~20 Hz corrections, TWO blocks each (the correction, and it re-integrated to the newest IMU sample — see
+    // RoomSceneGraph::dsr_update_pose); a block after t_c is replaced by the next correction's rewrite only if it is
+    // stamped >= that t_c, so the ring keeps ~2 blocks per correction: 25 slots ≈ 12 corrections ≈ 0.6 s of history.
     rt_api_->HISTORY_SIZE = 25;
     // One InnerEigenAPI, owned by this thread. See the member's comment for why a per-thread instance
     // is the wrong answer even though the cache is now locked.
@@ -307,7 +311,10 @@ void SpecificWorker::initialize()
     // FIX 2026-09-04: publish a predicted pose on every IMU sample -- see publish_predicted_tick().
     // Runs on the imu-ingest thread; the callback itself takes publish_mutex_ before touching anything
     // shared with maybe_publish_corrected_pose().
-    imu_ingestor_->set_on_new_sample([this](std::int64_t imu_ts_ms) { pose_pub_->publish_predicted_tick(imu_ts_ms); });
+    // The tick also feeds the gyro to the publisher's pose propagator (pose_propagator.h), which every correction's
+    // re-integrated tail is built from — so it runs whether or not ticks write the edge (RoomConcept.PredictedTicks).
+    imu_ingestor_->set_on_new_sample([this](std::int64_t imu_ts_ms, float gyro_z)
+                                     { pose_pub_->publish_predicted_tick(imu_ts_ms, gyro_z); });
     // The RGB channels configure themselves — the 56 lines that stood here are CalibChannels::configure().
     calib_->configure();
 

@@ -100,6 +100,13 @@ struct RouteOptimizerConfig
     //         is felt, never switches anything off. barrier_eps_m: the smoothing length of the positive-gap map,
     //         one EDT cell — keeps a sample inside the body finite and differentiable.
     bool  clearance_barrier = true;
+    // ── CLEARANCE AS CONTACT RISK (2026-11-11, owner: "the spline is shivering — reduce the influence of the gradients when the
+    //    path is in free space") ─ true ⇒ E_clear = -log P(no contact) = -log Phi(gap / clear_sigma_m), gap = smooth(d - r_body):
+    //    the tracker's lateral error ~ N(0, clear_sigma^2) eats the gap. Several sigma clear of everything a sample costs ~0 and
+    //    is NOT pushed (the barrier's 1/gap^2 pulled toward the medial axis at any range, and the band re-solving it on the live
+    //    field every cycle made the curve shiver); inside the body it grows linearly like the deficit. clear_sigma_m is then the
+    //    MEASURED tracking sigma (the chain's posterior) with the pose's, not a stated scale. Takes precedence over the barrier.
+    bool  clearance_risk = false;
     float clear_sigma_m = 0.20f;
     float barrier_eps_m = 0.02f;
     float rho       = 0.49f;   // curvature normaliser, v_max^2 / a_lat_max

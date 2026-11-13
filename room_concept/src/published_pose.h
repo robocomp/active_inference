@@ -14,6 +14,8 @@
 #include <cmath>
 #include <cstdint>
 #include <optional>
+#include <utility>
+#include <vector>
 
 namespace rc::publish
 {
@@ -130,4 +132,5 @@ inline Clamp clamp_correction(const Eigen::Affine2f& prev, const std::optional<E
     }
     return out;
 }
+
 }   // namespace rc::publish

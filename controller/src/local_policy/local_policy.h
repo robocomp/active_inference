@@ -17,6 +17,8 @@ namespace rc::policy
 //   Doorway: the CALLER builds the field with goal points past the gap; decide() treats it like Place (field
 //            decrease) and calls it arrived when the field at the pose is within tol_xy of zero.
 //   Heading: face `yaw` (or, if unset, face the point p). No field is needed.
+//            With a yaw, p is the HOLD position and tol_xy its precision (sigma, m): the continuability credits an end pose
+//            as arrived with P = exp(-|dp|^2 / (2 tol_xy^2)) inside the yaw band (Fix A); goal_reached() stays yaw-only.
 struct Goal { enum class Kind { Place, Doorway, Heading } kind; Eigen::Vector2f p{0,0};
               std::optional<float> yaw; Eigen::Vector2f normal{0,1}; float width = 0.f;
               float tol_xy = 0.25f, tol_yaw = 0.06f; };

@@ -16,6 +16,7 @@
 #include <unordered_set>
 #include <utility>
 
+#include "../door_standpoint.h"                          // polygon_contains: the doorway mask seen THROUGH (sightline_exit)
 #include "../door_leaf_visibility.h"                     // leaf_closedness / ricoh_detect_scale (Task D2)
 #include "../../../common/instance_tracker/birth_evidence.h"   // rc::birth::evidence (SHARED)
 #include "../../../common/track/merge_sweep.h"                 // rc::track::merge_overlapping_sweep (SHARED, no Qt)
@@ -26,6 +27,35 @@ namespace rc::door::core
 {
 namespace
 {
+// ★A DOORWAY'S MASK IS SEEN THROUGH IT (2026-11-11, clean51 door_3). The "door" mask labels the doorway; where the leaf is open
+//  its depth points are whatever the camera sees THROUGH the opening — the next room's far wall, metres beyond the wall that
+//  holds the door. The fit already reads the mask that way (associate_wall: the wall the sightline LEAVES the room through
+//  holds the door), so door_3 was seated on room_2's wall (y ≈ 0.22) while its detections — the mask centroids — stayed
+//  2.2 m beyond it, on the bathroom's far wall (y ≈ −2.0). The tracker gates on the centroid, so not one later mask of
+//  door_3 associated with it: matched_frames stayed 1 (< kFitWithoutFreshDataFrames), the fit never ran again, the leaf
+//  angle never left its prior, and neither `open` nor `cross` was offered for 28 min. (clean50 survived on 5 lucky frames.)
+//  The detection model now says the same thing the fit says: a centroid BEYOND the room's walls was seen through the wall
+//  its sightline leaves by, so the detection is placed where that sightline leaves the room. A centroid inside the room is
+//  untouched; a proto room's outline is a frontier (no wall: nothing to have been seen through), so it is untouched too.
+std::optional<Vec2f> sightline_exit(const Vec2f& cam, const Vec2f& p, const std::vector<Vec2f>& poly)
+{
+    if (poly.size() < 3 or not rc::door::polygon_contains(cam, poly) or rc::door::polygon_contains(p, poly))
+        return std::nullopt;
+    const auto cross = [](const Vec2f& a, const Vec2f& b) { return a.x() * b.y() - a.y() * b.x(); };
+    const Vec2f d = p - cam;
+    float best_t = std::numeric_limits<float>::max();
+    for (std::size_t i = 0; i < poly.size(); ++i)
+    {
+        const Vec2f a = poly[i], ab = poly[(i + 1) % poly.size()] - a;
+        const float rxs = cross(d, ab);
+        if (std::abs(rxs) < 1e-12f) continue;   // parallel: never a crossing
+        const float t = cross(a - cam, ab) / rxs, u = cross(a - cam, d) / rxs;
+        if (t > 0.0f and t <= 1.0f and u >= 0.0f and u <= 1.0f) best_t = std::min(best_t, t);
+    }
+    if (best_t > 1.0f) return std::nullopt;
+    return Vec2f(cam + best_t * d);
+}
+
 using K = rc::door::DoorDecisionKind;
 
 // ─── Footprint geometry: the plane maths is SHARED (common/footprint) ────────────────────────────
@@ -76,7 +106,7 @@ const TrackedDoor* find_door(const std::vector<TrackedDoor>& doors, std::uint64_
 }
 }  // namespace
 
-DoorCore::DoorCore(const DoorCoreConfig& cfg) : cfg_(cfg)
+DoorCore::DoorCore(const DoorCoreConfig& cfg) : cfg_(cfg), places_(cfg.door.exist_geometry_may_refute, cfg.door.exist_lookalike_prob)
 {
     // The fit reads the core's views of the input: the mask packet, the low-LiDAR sweep, and the ONE claim set per cycle.
     fit_.set_sources(&masks_, &leaf_sweep_, &claims_);
@@ -219,6 +249,23 @@ DoorCycleOutput DoorCore::step(const DoorCycleInput& in)
     fit_.set_room_is_proto(std::ranges::any_of(in.rooms.rooms, [&](const RoomInfo& r)
                                                { return r.id == world_->room_id() and r.is_proto; }));
     info_ = {};
+    // ★Task 8: the place table's memory, once, from the identity table the adapter loaded at startup; the room's NAME keys
+    //  its rows, and a change of room is a new VISIT (views of different visits are never one view).
+    if (not places_loaded_ and in.identity_load.has_value())
+    {
+        places_loaded_ = true;
+        if (in.identity_load->file_present)
+        {
+            std::istringstream is(in.identity_load->csv_text);
+            places_.load(rc::door::parse_identity_table(is), cfg_.door.tracker_detection_noise_m);
+            visit_ = std::max(visit_, places_.max_visit());   // session-scoped visits: this session's first visit follows the table's last
+        }
+    }
+    room_name_.clear();
+    for (const auto& r : in.rooms.rooms)
+        if (r.id == world_->room_id()) room_name_ = r.name;
+    if (world_->room_id() != visit_room_) { visit_room_ = world_->room_id(); ++visit_; }
+    track_episodes(in, out);
     // ★ FACT_HOLD OF THE LEAF ONLY WHILE THE ROBOT IS STILL AT THE DOORWAY (2026-11-01, user approved). The hold exists because views from
     //   in or right beside the doorway re-judged a just-crossed leaf wrongly (pingpong2/13). It held FOR EVER: warm26's DOOR_0,
     //   crossed in leg 3, kept an unmeasured 69 deg through a hand open and close while the robot stood in front of it, wide
@@ -232,6 +279,7 @@ DoorCycleOutput DoorCore::step(const DoorCycleInput& in)
         if (crossed and cam_xy_.has_value())
             at_doorway = (*cam_xy_ - inst->aperture.centre_xy()).norm() < inst->aperture.w + kBodyReachM;
         inst->fact_backed = crossed;                       // EXISTENCE: a crossed door is not removed for being out of view
+        if (crossed) inst->belief.note_crossing();         // ...pending until the room switch stands (place_belief.h)
         inst->fact_hold_leaf = crossed and at_doorway;     // LEAF + POSE frozen only while the robot is at the doorway
     }
 
@@ -327,13 +375,16 @@ void DoorCore::associate(const DoorCycleInput& in, DoorCycleOutput& out)
     tp.gate_mahalanobis = cfg.tracker_gate_mahalanobis;
     tp.gate_fallback_m  = cfg.tracker_gate_fallback_m;
     tp.detection_noise_m = cfg.tracker_detection_noise_m;
-    tp.birth_frames     = cfg.tracker_birth_frames;
+    // ★Task 8 (ruling R2): THE TRACKER'S STREAK IS DEGENERATE ON PURPOSE. birth_frames = 1 and each detection's birth_evidence
+    //  is 1 when the door model's verdict on its candidate place says the door exists (L > 0, not removed), else 0: the door
+    //  model decides (spec §3.6, birth by comparison); the tracker only enforces separation and association.
+    tp.birth_frames     = 1.0f;
     // ★Invariant 5: removal is a Bayesian decision on the existence log-odds, NEVER a miss counter. An
     //    armed death counter beside a live existence channel is a SECOND removal authority, and it is the
     //    one that carries no evidence and leaves no attributable record — a phantom analysis cannot tell a
     //    reasoned removal from a timeout. Tying it to the existence flag makes the two mutually exclusive
     //    by construction, and keeps them A/B-able: turn the channel off and the counter comes back exactly.
-    //    door removes on `existence.should_remove(exist_removal_prob)` (Existence.Enabled, default true).
+    //    door removes on the costed decision over its place belief (decide(belief.L(), role, costs), Task 8; Existence.Enabled).
     tp.death_frames     = std::numeric_limits<int>::max();   // never retire by occlusion:
                                                             // removal is the existence channel's
     tp.birth_min_sep_m  = cfg.tracker_birth_min_sep_m;
@@ -373,21 +424,8 @@ void DoorCore::associate(const DoorCycleInput& in, DoorCycleOutput& out)
 
     // Detections ← this frame's "door" mask slices (carry the slice index for the assignment).
     dets_.clear();
-    ricoh_fold_.clear();
-    ricoh_looks_.clear(); ricoh_hit_det_.clear();
-    // The bank's sensor model: the 360 detector's hit rate is the one the EXISTENCE channel has LEARNED (per viewpoint, on doors the ZED
-    // confirms; Beta(1,1) prior, same expression as door_existence.cpp), its false-alarm rate the shared clutter probability.
-    RicohBirthBank::Params bank_prm;
-    bank_prm.hit_rate = (ricoh_hits_ + 1.0f) / (ricoh_trials_ + 2.0f);
-    bank_prm.clutter = cfg.exist_clutter_prob;
-    bank_prm.gate_mahalanobis = cfg.tracker_gate_mahalanobis;
-    bank_prm.min_sep_m = cfg.tracker_birth_min_sep_m;
-    bank_prm.tau_s = cfg.ricoh_decorrelation_s;
-    bank_prm.forget_s = cfg.ricoh_forget_s;
-    bank_prm.view_R_m = 0.5f * cfg.door_prior_w_m;
-    const float ricoh_bar = cfg.tracker_birth_frames * RicohBirthBank::llr_hit(bank_prm);
-    // the bank's places are unidentified, so the open-leaf prior stands in for the leaf-state belief an instance would have
-    const float bank_open_scale = rc::door::ricoh_detect_scale(1.0f - cfg.ricoh_birth_p_open, cfg.ricoh_open_detect_rel);   // ⚠ decision boundary, see RicohBirthBank
+    det_w_.clear();
+    det_adm_.clear();
     const auto& pkt = masks_.packet();
 
     // ★BIRTH EVIDENCE — the shared CREATE policy (common/instance_tracker/birth_evidence.h). This agent fed
@@ -436,59 +474,9 @@ void DoorCore::associate(const DoorCycleInput& in, DoorCycleOutput& out)
             if (sl.support_end <= sl.support_begin) { ++ctr.no_support; continue; }
             if (not sl.has_depth) { ++ctr.bearing_only; continue; }
 
-            // ★A `door` LABEL IS NOT A DOOR-SIZED THING. YOLO-sem sometimes returns a positive door mask
-            // delimiting a much smaller region — a jamb, a panel edge, a fragment of the leaf. It is a
-            // TRUE positive for the class and a false one for the object, and accepting it is worse than
-            // dropping it: assigned to a live door it covers a fraction of the predicted silhouette, so
-            // occ comes out small and free large, and the door is REMOVED on the strength of having been
-            // detected. Observed live 2026-09-09.
-            //
-            // The prior is already here and already strong — DoorModel prior_h 2.00 +-0.08 m — it was
-            // just never used as a test on the observation, only inside the fit.
-            //
-            // ★ONLY THE "TOO SMALL" DIRECTION, and only on an UNTRUNCATED view. A mask clipped by the
-            // image border, or partly occluded, has a height that is a LOWER BOUND, so judging it would
-            // reject the real door exactly when the robot is close enough for it to overflow the frame.
-            // Nothing is rejected for being too LARGE either: that is a merge/clutter question, not a
-            // size one, and the fit already handles it.
-            // ⚠MEASURED, NOT APPLIED. Two attempts at a size prior on the MASK have now been backed out:
-            //   1. `if (h < prior_h - 3*sigma) continue;` — a magic cutoff, against the modelling rule.
-            //   2. the same thing as a Gaussian in the state prior's own sigma — which merely HID the
-            //      cutoff: at sigma 0.08 m a 1.80 m mask scores 0.044 and a 1.60 m mask 0.000, so any
-            //      real door slightly clipped at the floor datum or partly occluded stopped being born
-            //      at all. Observed immediately: births blocked.
-            // The error was using the prior's uncertainty about the DOOR'S TRUE HEIGHT as the noise model
-            // for a MASK'S MEASURED height. They are different quantities: a mask height is noisy and
-            // systematically UNDER-estimates (partial segmentation, occlusion, the floor datum), so its
-            // likelihood is wide and skewed, and I have not measured it.
-            // So: log mask_h, decide the observation model from the distribution, apply nothing until
-            // then. The reported failure — a small positive mask ending up REMOVING the door — also has
-            // no established mechanism yet; a size prior may not even be the right instrument for it.
-            // ★A LIKELIHOOD, NOT A CUTOFF. The first version of this was `if (h < prior_h - 3*sigma)
-            // continue;` — a magic threshold built out of a prior that is already a distribution, which
-            // is precisely the shape this project's modelling rule says not to add. The prior IS the
-            // model; the observation's weight should fall out of it continuously.
-            //
-            // One-sided on purpose: a mask TALLER than the prior is not penalised (that is a merge or
-            // clutter question the fit already owns), and a TRUNCATED mask is not penalised at all,
-            // because a clipped or occluded height is a LOWER BOUND — judging it would discount the real
-            // door exactly when the robot is close enough for it to overflow the frame. So the weight
-            // only expresses "this is too short to be a whole door, seen whole".
-            //
-            // Nothing is rejected. A 0.7 m fragment simply carries a small fraction of an observation's
-            // worth, in the same units as every other factor in birth_evidence (confidence x range x
-            // unclaimed), and a full-height mask carries all of it.
-            float size_w = 1.0f;
-            {
-                const float untrunc = 1.0f - std::clamp(sl.trunc_frac, 0.0f, 1.0f);
-                const float mask_h  = sl.bbox_max.z() - sl.bbox_min.z();
-                if (sl.has_depth and sl.bbox_max.allFinite() and sl.bbox_min.allFinite()
-                    and untrunc > 0.5f and mask_h > 0.0f and mask_h < cfg.door_prior_h_m)
-                {
-                    const float z = (cfg.door_prior_h_m - mask_h) / std::max(1e-3f, cfg.door_prior_h_std);
-                    size_w = std::exp(-0.5f * z * z);
-                }
-            }
+            // (No size test on the raw MASK height - neither a weight nor a gate: spec 3.2 scores size only on the FITTED width/height
+            //  with their posterior sds, in the place prior. A short fragment or a counter is a candidate whose size term is large and
+            //  negative; it is not born because its L stays below 0.)
             rc::DetectionView dv;
             dv.xy = Eigen::Vector2f(sl.centroid.x(), sl.centroid.y());
             dv.slice_index = i;
@@ -501,8 +489,6 @@ void DoorCore::associate(const DoorCycleInput& in, DoorCycleOutput& out)
             // bearing meets (a door lies in a wall), fused with it, and its frames are pooled per viewpoint
             // (ricoh_door_birth.h). A ZED slice is untouched (weight 1, its own position).
             float ricoh_w = 1.0f;
-            std::optional<RicohBirthBank::Look> ricoh_look;   // the bank's input for this slice
-            std::optional<Vec2f> ricoh_fold;       // the view to fold into the pool if this slice ends up UNASSOCIATED
             dv.sensor = sl.source;
             if (sl.source != 0)
             {
@@ -515,27 +501,18 @@ void DoorCore::associate(const DoorCycleInput& in, DoorCycleOutput& out)
                 dv.xy = rr.xy;
                 dv.xy_var = rr.var;                                  // its OWN measurement covariance (gate + candidates)
                 ricoh_w = rr.weight;
-                ricoh_look = RicohBirthBank::Look{rr.xy, rr.var, rr.weight * std::clamp(sl.confidence, 0.0f, 1.0f)};   // the label's own reliability scales the hit
                 if (rr.weight <= 0.0f) ++ctr.no_wall;
                 ctr.w_wall += rr.weight;
                 ctr.agree_shut += rr.agree_shut; ctr.agree_open += rr.agree_open;
-                if (birth_new_obs and ricoh_w > 0.0f)
-                {
-                    ricoh_w *= ricoh_views_.peek(cam_xy_.value(), dv.xy, 0.5f * cfg.door_prior_w_m, cfg.tracker_birth_min_sep_m);
-                    ricoh_fold = dv.xy;
-                }
             }
+            else if (cam_xy_.has_value() and not fit_.room_is_proto())
+                if (const auto q = sightline_exit(*cam_xy_, dv.xy, world_->room_polygon()); q.has_value())
+                    dv.xy = *q;   // seen THROUGH the doorway: the door is where the sightline leaves the room (see sightline_exit)
             dv.birthable = true;
-            // One admissible, reliable observation — never a cycle. See birth_evidence.h.
+            // birth_evidence: set by prepare_candidates below from the door model's verdict on this detection's place (Task 8).
+            // `ev` below (diagnostic counters only) is the old observation weight: confidence x range x admissible x ricoh weight.
             dv.birth_evidence = rc::birth::evidence({sl.confidence, sl.range}, birth_detect,
                                                     birth_new_obs, frame_admissible(sl, ego_, cfg)) * ricoh_w;
-            // ★A PLACE THE BANK HAS RIPENED is credited a full birth worth of evidence by its next detection (the tracker still
-            // decides: min separation, association, claims below). See RicohBirthBank for why the tracker's own streak cannot do this.
-            if (ricoh_look.has_value() and birth_new_obs
-                and ricoh_bank_.ripe_at(ricoh_look->xy, ricoh_look->var, cfg.tracker_gate_mahalanobis, ricoh_bar) != nullptr)
-                dv.birth_evidence = std::max(dv.birth_evidence, cfg.tracker_birth_frames);
-            // ⚠size_w deliberately NOT multiplied in — see the note above. Carried only to be logged.
-            dv.dbg_size_w = size_w;
 
             // ★MUTUAL EXCLUSION — no two objects occupy the same space (SHARED, common/exclusion).
             // A continuous support multiplied into the birth evidence exactly like the others above, so a
@@ -543,6 +520,7 @@ void DoorCore::associate(const DoorCycleInput& in, DoorCycleOutput& out)
             // vetoed, it is unsupported. Every agent already refused to fit two of its OWN instances to one
             // object; none ever asked what a different concept had claimed, which is how a refrigerator was
             // created on top of door_3 (16 cm apart, same width, same yaw) and then could not die.
+            float unclaimed_w = 1.0f;
             if (not claims_.empty())
             {
                 const rc::exclusion::Claim* who = nullptr;
@@ -553,8 +531,9 @@ void DoorCore::associate(const DoorCycleInput& in, DoorCycleOutput& out)
                     {dv.xy.x(), dv.xy.y(), cfg.door_prior_w_m, 0.10f /*leaf thickness*/, 0.0f}, claims_, &who,
                     0.0f, cfg.door_prior_h_m);
                 dv.birth_evidence *= unclaimed;
+                unclaimed_w = unclaimed;
                 if (unclaimed < 0.99f)
-                    diag("stdout", std::format("[door] birth cand CLAIMED by '{}' ({:.0f}%): birth_ev x{:.2f}\n",
+                    diag("stdout", std::format("[door] detection CLAIMED by '{}' ({:.0f}%): its hit weight x{:.2f}\n",
                                                who ? who->node : "?", 100.0f * (1.0f - unclaimed), unclaimed), out);
             }
             ++ctr.pushed;
@@ -562,9 +541,11 @@ void DoorCore::associate(const DoorCycleInput& in, DoorCycleOutput& out)
             ctr.ev += dv.birth_evidence; ctr.ev_max = std::max<double>(ctr.ev_max, dv.birth_evidence);
             if (sl.source == 0) ctr.w_wall += 1.0;
             ctr.w_pool += ricoh_w;
-            if (ricoh_look.has_value() and birth_new_obs)
-            { ricoh_hit_det_.push_back(static_cast<int>(dets_.size())); ricoh_looks_.push_back(*ricoh_look); }
-            if (ricoh_fold.has_value()) ricoh_fold_.push_back({static_cast<int>(dets_.size()), ricoh_fold.value()});
+            // Task 8: the detection's reliability as the door model's hit weight — confidence x the ricoh's wall/variance weight x
+            // P(unclaimed by another concept's object) (fix round 1: the cross-concept exclusion reaches births again). A frame the
+            // fit would refuse (frame_admissible) is not a trial for the place it lands on (FrameDetection::admissible).
+            det_w_.push_back(confidence_reliability(sl.confidence, detectors_.confidence) * ricoh_w * unclaimed_w);   // P(genuine | score), not the raw score: a borderline mask is worth almost nothing (detector_llr.h)
+            det_adm_.push_back(frame_admissible(sl, ego_, cfg));
             dets_.push_back(dv);
         }
     // The remembered-door look reads this frame's detections as "seen there" (door_look.h, step_remembered_looks).
@@ -576,7 +557,7 @@ void DoorCore::associate(const DoorCycleInput& in, DoorCycleOutput& out)
     // range. If a cluttered scene collapses to ONE big slice (npts ≫ a clean single door) the extra doors
     // never get born because no separate detection ever arrives — the failure is upstream, not in birth. The
     // adapter writes the rows to etc/door_dets_log.csv (header: cycle,n_door_slices,slice_idx,npts,conf,cx,cy,range,
-    // trunc_frac,motion_var,mask_h,size_w,mask_z0,mask_z1). Formatted through the classic locale, as the old ofstream
+    // trunc_frac,motion_var,mask_h,mask_z0,mask_z1). Formatted through the classic locale, as the old ofstream
     // (global C++ locale "C") did.
     {
         ++dets_csv_rows_;
@@ -591,42 +572,15 @@ void DoorCore::associate(const DoorCycleInput& in, DoorCycleOutput& out)
             row << dets_csv_rows_ << ',' << dets_.size() << ',' << d.slice_index << ',' << n << ',' << sl.confidence
                 << ',' << sl.centroid.x() << ',' << sl.centroid.y() << ',' << sl.range << ','
                 << sl.trunc_frac << ',' << sl.motion_var << ','
-                << (sl.bbox_max.z() - sl.bbox_min.z()) << ',' << d.dbg_size_w << ','
+                << (sl.bbox_max.z() - sl.bbox_min.z()) << ','
                 << sl.bbox_min.z() << ',' << sl.bbox_max.z() << '\n';
         }
         diag("door_dets_log.csv", row.str(), out);
     }
 
+    // ★Task 8: every detection's place is judged by the door model before the tracker sees it (birth_evidence = verdict).
+    prepare_candidates(in, tracks, out);
     res_ = tracker_.update(tracks, dets_);
-    // The ricoh birth bank: this frame is one new observation of every ricoh-seen place (hit if a detection explains it, else a look).
-    if (birth_new_obs and cam_xy_.has_value()
-        and ricoh_fresh(pkt))
-    {
-        std::vector<RicohBirthBank::Look> unassoc;
-        for (std::size_t k = 0; k < ricoh_hit_det_.size(); ++k)
-            if (res_.assignment[static_cast<std::size_t>(ricoh_hit_det_[k])] < 0) unassoc.push_back(ricoh_looks_[k]);
-        std::vector<Vec2f> track_xy;
-        for (const auto& t : tracks) track_xy.push_back(t.xy);
-        const auto poly = world_->room_polygon();
-        const Vec2f cam = cam_xy_.value();
-        ricoh_bank_.update(static_cast<double>(in.t_steady_ns) * 1e-9, cam, unassoc, bank_prm,
-                           [&](const Vec2f& xy)
-                           { return (ricoh_looked_in(pkt, cam, xy) ? 1.0f : 0.0f)   // not looked at ⇒ no absence
-                                    * bank_open_scale   // a place that may be an open leaf is detected less: its absence says less
-                                    * rc::birth::observation_weight({1.0f, (xy - cam).norm()}, birth_detect)
-                                    * los_weight(poly, cam, xy, cfg.ai2_sigma_base_m, cfg.ai2_range_noise_lat_per_m); },
-                           track_xy);
-        for (const int b : res_.births) ricoh_bank_.drop_near(dets_[static_cast<std::size_t>(b)].xy, cfg.tracker_birth_min_sep_m);
-    }
-    // Pool the viewpoint of a ricoh slice only if it is NOT explained by a live door (an associated slice is not a birth look).
-    if (birth_new_obs and cam_xy_.has_value())
-    {
-        for (const auto& [di, tgt] : ricoh_fold_)
-            if (res_.assignment[static_cast<std::size_t>(di)] < 0)
-                ricoh_views_.credit(cam_xy_.value(), tgt, 0.5f * cfg.door_prior_w_m, cfg.tracker_birth_min_sep_m);
-        ricoh_views_.end_frame([&](const Vec2f& tgt) { return ricoh_looked_in(pkt, cam_xy_.value(), tgt); });
-    }
-
     const int n_assigned = static_cast<int>(std::count_if(res_.assignment.begin(), res_.assignment.end(),
                                                           [](int a){ return a >= 0; }));
 
@@ -643,13 +597,9 @@ void DoorCore::associate(const DoorCycleInput& in, DoorCycleOutput& out)
             const auto& c = counters_[k];
             diag("stdout", std::format("[birth-src {}] slices={} door={} no_support={} bearing_only={} no_cam={} wall_w0={} pushed={} ev>0={} "
                                        "sum(wall_w)={:.2f} sum(w_after_pool)={:.2f} sum(ev)={:.3f} max(ev)={:.3f} "
-                                       "sum(agree_shut)={:.2f} sum(agree_open)={:.2f} bank_entries={} bank_maxL={:.2f} ricoh_bar={:.2f} hit_rate={:.3f}\n",
+                                       "sum(agree_shut)={:.2f} sum(agree_open)={:.2f}\n",
                                        k == 0 ? "ZED" : "RICOH", c.slices, c.door, c.no_support, c.bearing_only, c.no_cam, c.no_wall,
-                                       c.pushed, c.pos_ev, c.w_wall, c.w_pool, c.ev, c.ev_max, c.agree_shut, c.agree_open,
-                                       k == 1 ? ricoh_bank_.entries().size() : std::size_t{0},
-                                       k == 1 and not ricoh_bank_.entries().empty()
-                                           ? std::ranges::max(ricoh_bank_.entries(), {}, &RicohBirthBank::Entry::L).L : 0.0f,
-                                       ricoh_bar, bank_prm.hit_rate), out);
+                                       c.pushed, c.pos_ev, c.w_wall, c.w_pool, c.ev, c.ev_max, c.agree_shut, c.agree_open), out);
         }
     if (++dbg_cycles_ % 30 == 0 or not res_.births.empty() or not res_.deaths.empty())
         diag("stdout", std::format("[tracker] instances={} door_dets={} assigned={} unassigned={} births={} deaths={}\n",
@@ -746,7 +696,6 @@ void DoorCore::associate(const DoorCycleInput& in, DoorCycleOutput& out)
 // fitter with the detection XY so the model starts AT the door (not the 0,0 RT-read default).
 void DoorCore::births(const DoorCycleInput& in, DoorCycleOutput& out)
 {
-    (void) in;
     const auto& cfg = cfg_.door;
     const auto& pkt = masks_.packet();
     for (const int d : res_.births)
@@ -762,42 +711,9 @@ void DoorCore::births(const DoorCycleInput& in, DoorCycleOutput& out)
         // the next detection), and the existence update may have retired doors since the association.
         const std::vector<TrackedDoor> doors = world_->doors();
 
-        // Room-containment pose prior at BIRTH: never spawn a door outside the walls (a mislocalized frame while
-        // the robot is lost drops a detection beyond a wall). Zero prior mass outside the room → suppress.
-        if (const auto poly = world_->room_polygon();
-            cfg.exist_room_prior and poly.size() >= 3
-            and not point_in_polygon(poly, Eigen::Vector2f(c.x(), c.y()), cfg.exist_room_margin_m))
-        {
-            diag("stdout", std::format("door_concept: [tracker] BIRTH SUPPRESSED slice={} at ({:.2f},{:.2f}) — OUTSIDE room\n",
-                                       slice, c.x(), c.y()), out);
-            record(K::Suppress, 0, c.x(), c.y(), "outside room", {}, out);
-            continue;
-        }
+        // (No outside-the-room test here any more: the place prior scores an off-wall candidate — spec §3.2 — so a candidate
+        //  outside the walls is simply never L > 0; the test only produced thousands of log-only SUPPRESS rows.)
 
-        // MINIMUM-HEIGHT prior at BIRTH: a door is an aperture a person walks THROUGH, so a blob that
-        // demonstrably tops out below MinHeightM is not one — it is a counter, a radiator, a window sill,
-        // a low cabinet. Zero prior mass ⇒ suppress, exactly like the room-containment prior above.
-        //
-        // Judged on the SUPPORT bbox top, never on the fitted h: the template anchor pins h at 2.0 m
-        // regardless of evidence, so by the time an instance exists it always claims to be door-height.
-        // (Live: the phantom at (−4.22,−2.16) reported h ≡ 2.000 for its whole life.)
-        //
-        // "demonstrably" is doing real work — a mask clipped by the image border has an UNOBSERVED top, so
-        // its bbox top is only a lower bound. The real door is routinely clipped, so suppressing on a
-        // truncated view would refuse to ever birth it. Require the view to be substantially untruncated.
-        if (cfg.exist_min_height_prior and pkt.slices[slice].has_depth and pkt.slices[slice].bbox_max.allFinite())
-        {
-            const float top    = pkt.slices[slice].bbox_max.z();
-            const float untrunc = 1.0f - std::clamp(pkt.slices[slice].trunc_frac, 0.0f, 1.0f);
-            if (untrunc > 0.5f and top < cfg.exist_min_height_m)
-            {
-                diag("stdout", std::format("door_concept: [tracker] BIRTH SUPPRESSED slice={} at ({:.2f},{:.2f}) — support tops "
-                                           "at {:.2f} m < {:.2f} m (untruncated view: it is NOT door-height)\n",
-                                           slice, c.x(), c.y(), top, cfg.exist_min_height_m), out);
-                record(K::Suppress, 0, c.x(), c.y(), std::format("top {:.2f}m", top), {}, out);
-                continue;
-            }
-        }
         // ★AN OPEN LEAF EXPLAINS ITS OWN DETECTION. Once phi is estimated (M1) the model knows where the
         // panel physically is — swung out of the doorway, often near-perpendicular to the robot — and a
         // `door` mask landing there is the SAME door, seen in its new pose. Without this the leaf reads
@@ -880,25 +796,11 @@ void DoorCore::births(const DoorCycleInput& in, DoorCycleOutput& out)
                 continue;
             }
         }
-        // RE-ACQUISITION: is this detection a door that was removed and has come back at the same place? If so
-        // it is not a new object — it takes its old name and resumes the belief it had converged to, instead of
-        // becoming door_N+1 with template priors. (Live run: one real door burned three identities this way.)
-        std::optional<GhostMatch> revive;
+        // A door we have met before keeps its NAME: the persistent identity table returns the name only (geometry and
+        // existence are re-earned from evidence, or carried by the place row the candidate was seeded from — Task 9).
+        // This is what stops door_1/door_2 from trading doors on restart.
         std::string preferred_name;
-        if (auto g = world_->match_ghost(Eigen::Vector2f(c.x(), c.y())); g.has_value())
-        {
-            preferred_name = g->name;
-            diag("stdout", std::format("door_concept: [tracker] RE-ACQUIRE '{}' at ({:.2f},{:.2f}) — {:.2f} m from where it was "
-                                       "removed after {} cycles; resuming its belief\n",
-                                       g->name, c.x(), c.y(), (g->xy - Eigen::Vector2f(c.x(), c.y())).norm(),
-                                       g->lived_cycles), out);
-            revive = std::move(g);
-        }
-        // No ghost from THIS run, but the place may still be a door we have met before. The persistent table
-        // returns the NAME only: geometry has to be re-earned from evidence (a remembered belief would be
-        // asserting a shape nothing in this session has seen), while the identity is a fact about the
-        // apartment, not about the session. This is what stops door_1/door_2 from trading doors on restart.
-        else if (const auto idn = world_->match_identity(Eigen::Vector2f(c.x(), c.y())); idn.has_value())
+        if (const auto idn = world_->match_identity(Eigen::Vector2f(c.x(), c.y())); idn.has_value())
         {
             preferred_name = idn->name;
             diag("stdout", std::format("door_concept: [tracker] IDENTITY '{}' at ({:.2f},{:.2f}) — {:.2f} m from the aperture "
@@ -925,12 +827,6 @@ void DoorCore::births(const DoorCycleInput& in, DoorCycleOutput& out)
                                    Mat4d::Identity(), cfg.door_prior_w_m, cfg.door_thickness_m, cfg.door_prior_h_m,
                                    std::nullopt, std::nullopt, 0, std::format("slice {}", slice)});
             out.creates.back().pose.block<3, 1>(0, 3) = c.cast<double>();
-            if (revive.has_value())
-            {
-                world_->reacquire(new_id, revive.value());
-                record(K::Reacquire, new_id, c.x(), c.y(), preferred_name, preferred_name, out);
-                world_->forget_ghost(Eigen::Vector2f(c.x(), c.y()));   // consumed — the door is alive again
-            }
             // Materialise the DoorInstance NOW, at birth — do not wait for the freshly inserted DSR node
             // to surface in get_nodes_by_type (it is not reliably visible the same cycle). Birth was
             // decoupled across three async steps (create node → ensure_instance when the node appears →
@@ -941,9 +837,39 @@ void DoorCore::births(const DoorCycleInput& in, DoorCycleOutput& out)
             // initialise the belief AT the detection centroid this cycle — birth, track, and init are now atomic.
             const auto name = world_->adopt_birth(new_id, slice, c);
             out.creates.back().name = name.value_or(std::string{});
+            // ★Task 8: THE BELIEF IS BORN WITH THE DOOR. The candidate's place belief (prior, carried memory, views) becomes the
+            //  newborn's; a candidate seeded from a REMOVED row is a deleted door found again — C_delete's sample (spec §8.2).
+            door_seq_[new_id] = next_door_seq_++;
+            observed_frame_[new_id] = masks_.packet().frame_id;   // its candidate already put this frame into the belief
+            if (const int ci = det_candidate_.size() > static_cast<std::size_t>(d) ? det_candidate_[d] : -1; ci >= 0)
+            {
+                Candidate& cand = candidates_[static_cast<std::size_t>(ci)];
+                for (auto& [sid, st] : world_->fit_states())
+                    if (sid == new_id) { st->belief = cand.belief; st->place_visit = visit_; }
+                // THE REVISIT SAMPLE of the place this candidate was seeded from, once per place per visit, taken now that the candidate
+                // is BORN (a single unconfirmed detection is no sample): a place remembered as a door that is a door again = unchanged
+                // (found); a place remembered as "no door here" that is a door now = changed.
+                if (not cand.seeded_name.empty())
+                {
+                    if (PlaceRow* row = places_.find(room_name_, cand.seeded_name); row != nullptr)
+                        places_.sample_revisit(*row, visit_, not row->removed_wall_ms.has_value(), in.t_wall_ms);
+                    for (auto& [sid, st] : world_->fit_states())
+                        if (sid == new_id) st->place_row_name = cand.seeded_name;
+                }
+                // C_delete's sample ("a deleted door found again") is LOGGED, not learned: the costs are fixed within a session
+                // (etc/door_costs.csv, written offline by tools/door_costs_from_logs.py from etc/door_cost_events.csv).
+                if (cand.seeded_from_removed_ms.has_value())
+                    diag("door_cost_events.csv", std::format("rebirth,{},{},{},{},{},{},{}\n", in.t_wall_ms, room_name_, cand.seeded_name,
+                                                             cand.xy.x(), cand.xy.y(),
+                                                             static_cast<double>(in.t_wall_ms - *cand.seeded_from_removed_ms) * 1e-3,
+                                                             name.value_or(std::string{})), out);
+                // the candidate is the door now: retire it (its index is stale for the rest of this cycle, so only mark it)
+                cand.key = 0;
+            }
             record(K::Birth, new_id, c.x(), c.y(), {}, name.value_or(std::string{}), out);
         }
     }
+    std::erase_if(candidates_, [](const Candidate& c) { return c.key == 0; });   // the born ones (Task 8)
 }
 
 bool point_in_polygon(const std::vector<Vec2f>& poly, const Vec2f& q, float margin_m)
@@ -974,7 +900,7 @@ bool point_in_polygon(const std::vector<Vec2f>& poly, const Vec2f& q, float marg
         const Eigen::Vector2f& a = poly[i];
         const Eigen::Vector2f ab = poly[(i + 1) % n] - a;
         const float len2 = ab.squaredNorm();
-        const float t = (len2 > 1e-8f) ? std::clamp((q - a).dot(ab) / len2, 0.0f, 1.0f) : 0.0f;
+        const float t = (len2 > 1e-8f) ? std::clamp((q - a).dot(ab) / len2, 0.0f, 1.0f) : 0.0f;   // clamp: the parameter of the closest point ON a segment (geometry), not a threshold
         best2 = std::min(best2, (q - (a + t * ab)).squaredNorm());
     }
     return best2 <= margin_m * margin_m;

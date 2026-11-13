@@ -54,7 +54,7 @@ public:
         setWordWrapMode(QTextOption::WrapAtWordBoundaryOrAnywhere);
         setLineWrapMode(QPlainTextEdit::WidgetWidth);
         setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-        setFixedWidth(230);
+        setFixedWidth(270);   // 230 → 270 (2026-11-11): the column now carries the full status block in sentences
         setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Expanding);
         setToolTip(QStringLiteral("What the controller is doing now"));
         QFont f = font();   // a bit smaller than the window's (user 2026-10-31): the column carries the "cross:" line too

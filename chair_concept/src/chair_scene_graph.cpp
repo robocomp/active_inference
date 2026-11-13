@@ -195,6 +195,10 @@ void ChairSceneGraph::step_write_model(ChairInstance& inst, DSR::Node& node,
     G_->add_or_modify_attrib_local<chair_detection_alive_att>(node, inst.detection_alive);
     G_->add_or_modify_attrib_local<chair_detection_confidence_att>(node, inst.last_mask_confidence);
     G_->add_or_modify_attrib_local<chair_frames_since_detection_att>(node, inst.frames_since_detection);
+    //  - chair_front_seen / _frame: did the FRONT camera see it on the newest mask frame (not latched), and on
+    //    which mask_frame_id it last did — the controller's orient/dwell "did the robot look at it".
+    G_->add_or_modify_attrib_local<chair_front_seen_att>(node, inst.front_seen);
+    G_->add_or_modify_attrib_local<chair_front_seen_frame_att>(node, inst.front_seen_frame);
 
     // Inferred albedo tint for the display mesh (DISPLAY ONLY — see common/appearance_belief). Published
     // as CHROMATICITY, pre-scaled by the belief's confidence toward neutral grey, so the colour fades IN

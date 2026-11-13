@@ -22,7 +22,7 @@
  *      once and stays there (removal then needs the usual debounce, advanced by 1 − π); a door on the band
  *      pays nothing, ever.
  *
- *  (2) THE LEAF BEYOND THE APERTURE (door_fitter.cpp, compute_silhouette_existence). A leaf swung OUT of
+ *  (2) THE LEAF BEYOND THE APERTURE (the old silhouette probe; now core/door_visibility.cpp). A leaf swung OUT of
  *      the robot's room is seen, if at all, THROUGH the opening: past the room-side face, behind the jambs
  *      and the casing, edge-on. The silhouette model's P(detect) is a model of a leaf in the room the camera
  *      is in or flush in its own aperture plane; it has no term for the opening's edges as occluders, so a

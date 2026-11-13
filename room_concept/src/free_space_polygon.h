@@ -133,6 +133,18 @@ inline std::size_t drop_outlines_containing(std::vector<std::vector<Eigen::Vecto
                          { return gaussian_mass_in_polygon(mean, cov, poly) > 0.5f; });
 }
 
+/// A crossing's exclusion update: the outline of the room just left joins the outlines already excluded and THEN the
+/// contradiction is tested over all of them, the just-left one included (clean16, room_4: the robot stood 0.5 m inside the outline of
+/// the room it had "left", the door being a phantom; the identity exemption left the raster no floor to ever call its own, and the
+/// robot parked for 16 minutes). The MAP test is the same as drop_outlines_containing's: no new threshold, no decree by identity.
+inline std::size_t exclude_left_room(std::vector<std::vector<Eigen::Vector2f>>& polys, std::vector<Eigen::Vector2f> just_left,
+                                     const Eigen::Vector2f& mean, const Eigen::Matrix2f& cov)
+{
+    if (just_left.size() >= 3)
+        polys.push_back(std::move(just_left));
+    return drop_outlines_containing(polys, mean, cov);
+}
+
 /// True when no two non-adjacent edges of the closed ring touch or cross.
 inline bool is_simple(const std::vector<Eigen::Vector2f>& p)
 {
@@ -204,7 +216,7 @@ public:
                 // matter under the robot is not matter: the passes outvote whatever ended here
                 frees_[idx(i, j)] = static_cast<std::uint16_t>(std::max<int>(frees_[idx(i, j)], hits_[idx(i, j)]));
                 if (low_.size() == st_.size()) low_[idx(i, j)] = 0;
-                set_free(i, j);
+                set_free(i, j, centre);
             }
     }
 
@@ -677,12 +689,17 @@ public:
     /// q the per-beam reliability ESTIMATED from the well-observed cells (the minority vote share) — not a constant.
     /// Measured live: 2512 of 3692 cells with >= 2 hits were refuted by their own passes (ceiling arcs, furniture
     /// ghosts); those cut the region and fed the SLAM distance field.
+    /// `origin_free` (optional, aligned with `free`): the MEAN origin of the beams that passed through each free cell —
+    /// where it was seen from. The refiner needs it to know which part of an outline a beam crossed to reach a cell
+    /// (layout_refiner.h, "one observation per crossing"). A cell never passed by a beam reports its own centre.
     void evidence_cells(std::vector<Eigen::Vector2f>& surface, std::vector<Eigen::Vector2f>& free,
-                        std::vector<float>* conf_surface = nullptr, std::vector<float>* conf_free = nullptr) const
+                        std::vector<float>* conf_surface = nullptr, std::vector<float>* conf_free = nullptr,
+                        std::vector<Eigen::Vector2f>* origin_free = nullptr) const
     {
         surface.clear(); free.clear();
         if (conf_surface) conf_surface->clear();
         if (conf_free) conf_free->clear();
+        if (origin_free) origin_free->clear();
         if (not ready() or hits_.size() != frees_.size()) return;
         // per-beam reliability q: 1 - mean minority share over cells with >= 10 observations
         double minority = 0; long nwell = 0;
@@ -705,6 +722,8 @@ public:
             {
                 free.emplace_back(x0_ + (i + 0.5f) * p_.cell, y0_ + (j + 0.5f) * p_.cell);
                 if (conf_free) conf_free->push_back(1.f - p);
+                if (origin_free)
+                    origin_free->push_back(on_.size() == st_.size() and on_[k] > 0 ? Eigen::Vector2f(ox_[k], oy_[k]) : free.back());
             }
         }
     }
@@ -753,6 +772,9 @@ private:
                                                 // surface's position to sub-cell precision (layout_refiner.h). A
                                                 // cell CENTRE is biased by up to cell/2 from the wall face; offline that
                                                 // bias moved every refined wall 2-3 cm and cost 2.3 cm of pose (walhit).
+    std::vector<float> ox_, oy_;                // running MEAN of the ORIGINS of the beams that passed through the cell
+    std::vector<std::uint32_t> on_;             // (where it was seen from), with its own count: add_footprint raises
+                                                // frees_ in a jump, so frees_ is not the number of origins averaged.
     std::vector<std::vector<Eigen::Vector2f>> excl_polys_;   // set_exclusion: other rooms' outlines (this frame)
     std::vector<std::uint8_t> excl_;                         // their raster (1 = another room's cell)
     long  n_free_ = 0;
@@ -768,9 +790,16 @@ private:
     }
 
     [[nodiscard]] bool excluded(int i, int j) const { return not excl_.empty() and excl_[idx(i, j)] != 0; }
+    // ── THE EXCLUSION IS THE OUTLINE OPENED BY THE BODY RADIUS (explore_tour15) ──────────────────────────────────────
+    // A room left behind is space the robot could stand in; a part of its outline narrower than the body (2 x erode_m,
+    // the same radius this room's own ring is eroded by) is not. Live, room_1's refined outline carried a 0.3 m spike
+    // through a doorway into the next room; excluded as-is it stopped every beam crossing it and room_2 saw a 1.6 m2
+    // pocket for 18 minutes. Opening = erode then dilate by erode_m: slivers vanish, the rest of the outline is kept.
     void rasterise_exclusion()
     {
         excl_.assign(st_.size(), 0);
+        std::vector<std::uint8_t> mask(st_.size(), 0);
+        int bi0 = n_, bj0 = n_, bi1 = -1, bj1 = -1;
         for (const auto& poly : excl_polys_)
         {
             if (poly.size() < 3) continue;
@@ -782,13 +811,33 @@ private:
                 for (int i = std::max(0, i0); i <= std::min(n_ - 1, i1); ++i)
                     if (point_in_polygon(Eigen::Vector2f(x0_ + (i + 0.5f) * p_.cell, y0_ + (j + 0.5f) * p_.cell), poly))
                     {
-                        const auto k = idx(i, j);
-                        excl_[k] = 1;
-                        if (st_[k] == 1) --n_free_;
-                        st_[k] = 2;                        // stops coverage rays; never unknown, never free
-                        hits_[k] = frees_[k] = 0;          // and no evidence: the refiner sees no surface here
+                        mask[idx(i, j)] = 1;
+                        bi0 = std::min(bi0, i); bj0 = std::min(bj0, j); bi1 = std::max(bi1, i); bj1 = std::max(bj1, j);
                     }
         }
+        if (bi1 < 0) return;
+        // the opening, on the mask's bounding box padded by one cell (beyond the raster counts as not excluded)
+        const int i0 = bi0 - 1, j0 = bj0 - 1, W = bi1 - bi0 + 3, H = bj1 - bj0 + 3;
+        const float r2 = (p_.erode_m / p_.cell) * (p_.erode_m / p_.cell);
+        const auto at = [&](int i, int j) { return static_cast<std::size_t>(j) * W + i; };
+        std::vector<float> d2(static_cast<std::size_t>(W) * H);
+        for (int j = 0; j < H; ++j)
+            for (int i = 0; i < W; ++i)
+                d2[at(i, j)] = in(i0 + i, j0 + j) and mask[idx(i0 + i, j0 + j)] ? kInf : 0.f;
+        edt_2d(d2, W, H);                                         // to the nearest cell OUTSIDE the outline
+        for (auto& v : d2) v = v > r2 ? 0.f : kInf;               // eroded core = the seeds of the dilation
+        edt_2d(d2, W, H);                                         // to the nearest core cell
+        for (int j = 0; j < H; ++j)
+            for (int i = 0; i < W; ++i)
+            {
+                const int gi = i0 + i, gj = j0 + j;
+                if (not in(gi, gj) or not mask[idx(gi, gj)] or d2[at(i, j)] > r2) continue;
+                const auto k = idx(gi, gj);
+                excl_[k] = 1;
+                if (st_[k] == 1) --n_free_;
+                st_[k] = 2;                        // stops coverage rays; never unknown, never free
+                hits_[k] = frees_[k] = 0;          // and no evidence: the refiner sees no surface here
+            }
     }
 
     void init(const Eigen::Vector2f& origin)
@@ -801,6 +850,9 @@ private:
         frees_.assign(st_.size(), 0);
         mx_.assign(st_.size(), 0.f);
         my_.assign(st_.size(), 0.f);
+        ox_.assign(st_.size(), 0.f);
+        oy_.assign(st_.size(), 0.f);
+        on_.assign(st_.size(), 0u);
         if (not excl_polys_.empty()) rasterise_exclusion();
     }
 
@@ -829,6 +881,17 @@ private:
         auto& f = frees_[idx(i, j)];
         if (f < std::numeric_limits<std::uint16_t>::max()) ++f;
         restate(i, j);
+    }
+    /// A beam from `o` PASSED through cell (i, j): count it and fold `o` into the cell's running mean origin.
+    void set_free(int i, int j, const Eigen::Vector2f& o)
+    {
+        set_free(i, j);
+        if (on_.size() != st_.size()) return;
+        const auto k = idx(i, j);
+        if (on_[k] == std::numeric_limits<std::uint32_t>::max()) return;
+        const float n = static_cast<float>(++on_[k]);
+        ox_[k] += (o.x() - ox_[k]) / n;
+        oy_[k] += (o.y() - oy_[k]) / n;
     }
     void set_matter(int i, int j)
     {
@@ -882,7 +945,7 @@ private:
             }
             if (not in(i, j))
                 return;                         // left the raster: nothing beyond is recorded, no matter mark
-            set_free(i, j);
+            set_free(i, j, a);
             if (tmx < tmy) { tmx += tdx; i += sx; }
             else           { tmy += tdy; j += sy; }
         }

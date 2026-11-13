@@ -406,6 +406,10 @@ Plan plan_coverage(const FeasibleGrid& grid, const Eigen::Vector2f& robot, const
     //   none of the 4 saw anything, and the room was promoted with a third of the apartment mapped (IoU 0.363).
     //   A refusal is temporary; the promotion it triggered was not.
     if (cands.empty() and out.deferred_with_gain > 0) { out.why = "deferred"; return out; }
+    // ★ ...and nothing EVALUATED is no verdict at all (explore_tour14: room_4's first plan, 132 ms after its birth, had
+    //   no admissible standpoint — candidates 0 — and read "finished"; the room was promoted at 1.8 m2, IoU 0.084).
+    //   "Nothing left to learn" needs at least one standpoint judged to reveal nothing.
+    if (cands.empty() and out.evaluated == 0) { out.why = "no_feasible"; return out; }
     if (cands.empty()) { out.finished = true; out.why = "finished"; return out; }
     // rank by gain per straight-line metre, then cost the best few by their REAL route
     std::ranges::sort(cands, [&](const auto& a, const auto& b)

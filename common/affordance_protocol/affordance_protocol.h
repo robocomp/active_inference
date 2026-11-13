@@ -263,8 +263,11 @@ inline Contract default_contract_for(std::string_view object_type)
         // Chair: verify YOLO is firing on this chair before completing. No ROI binding (the chair
         // publishes no projected-ROI yet) → the controller's distance-sweep finds a stand-off where
         // the detection holds; the goal then confirms it. Parent (chair node) publishes the attrs.
+        // chair_front_seen, NOT chair_detection_alive: the latter latches ~40 chair cycles after the last
+        // mask, so it confirmed "looks" at a chair already behind the robot (chat_e2e8). front_seen is the
+        // front camera's verdict on the newest mask frame. (objects session, branch fix/chair-front-seen)
         return Contract::servo()
-            .until("chair_detection_alive",      GE, 0.5f)
+            .until("chair_front_seen",           GE, 0.5f)
             .and_ ("chair_detection_confidence", GE, 0.20f)
             .still(0.12f, 0.20f)
             .stable(1).timeout_s(20).on_fail(Consume);
@@ -447,7 +450,17 @@ inline Contract read_contract(const DSR::Node& node, std::string_view parent_typ
     if (const auto ita = attrs.find("aff_goal_attrs"), itv = attrs.find("aff_goal_values");
         ita != attrs.end() && itv != attrs.end())
     {
-        if (auto names_s = detail::attr_string(ita->second))
+        if (auto names_s = detail::attr_string(ita->second); names_s and names_s->empty() and itv->second.float_vec().empty())
+        {
+            // ★ AN EXPLICITLY WRITTEN EMPTY GOAL IS A STATEMENT (2026-11-11): the producer says its completion has NO predicate
+            //   (a Reach: arriving; an Orient: the bearing — affordance_goal_parse.h). It replaces the type default. Read as "not
+            //   present", the chair's default (chair_detection_alive) completed the chair approach's Orient at once on a detection
+            //   still alive from the drive, and the robot ended 142 deg off the chair (chat_e2e8). Every other producer writes either
+            //   explicit clauses or sits on a type with no default goal, so this changes the chair approach only.
+            c.goal.clear();
+            c.pre.clear();
+        }
+        else if (auto names_s = detail::attr_string(ita->second))
         {
             const auto names = detail::split(*names_s, kClauseDelim);
             std::vector<std::string> ops;

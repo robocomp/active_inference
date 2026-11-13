@@ -175,6 +175,23 @@ int main()
         // the nearest offset wins: with the wall at x = 1.8, the first free x is 2.1 (0.1 m off the axis)
         CHECK(std::abs(pl.pre.x() - 2.1f) < 0.051f);
     }
+    // 7. an approach leg already at its vantage (rose_chair1 door_24: one waypoint of 0.00 m, RouteFollower refused it twice, cross_unreachable): the approach is done
+    {
+        const Eigen::Vector2f robot(1.0f, 2.0f);
+        rc::door_route::Plan at;
+        at.waypoints = {robot + Eigen::Vector2f(0.01f, 0.0f)};
+        CHECK(rc::door_route::approach_already_done(at, robot, 0.05f));
+        rc::door_route::Plan far = at;
+        far.waypoints = {robot + Eigen::Vector2f(0.50f, 0.0f)};
+        CHECK(not rc::door_route::approach_already_done(far, robot, 0.05f));      // there is a route to drive
+        rc::door_route::Plan through = at;
+        through.through = true;
+        CHECK(not rc::door_route::approach_already_done(through, robot, 0.05f));  // a through leg still has the door to cross
+        rc::door_route::Plan failed = at;
+        failed.why = "no free pose";
+        CHECK(not rc::door_route::approach_already_done(failed, robot, 0.05f));   // a plan that failed is not an arrival
+        CHECK(not rc::door_route::approach_already_done(rc::door_route::Plan{}, robot, 0.05f));
+    }
     std::println("test_door_route: {} checks, {} failures", checks, failures);
     return failures == 0 ? 0 : 1;
 }

@@ -250,6 +250,29 @@ int main()
         CHECK(in.status() == "failed|1|unreachable");
         CHECK(h.count("start 1:cross") == 2);   // the first try + 1 retry, no more
     }
+    // ── why a step waits, and what the last attempt failed with, reach the progress (chat 2026-11-12: `cross room_3`
+    //    explored room_1 for minutes and the person was told only "started" / "attempt 2/3") ──────────────────────
+    {
+        FakeHost h;
+        Interpreter in(h);
+        in.start(parse("mission\n  cross door_27 retry=2\n"), 0);
+        in.tick(0);
+        CHECK(in.steps()[0].note.empty() and in.steps()[0].after.empty());
+        h.leaf["1"] = {.state = LeafState::Running, .detail = "no door I know of in room_1 leads to room_3 yet"};
+        in.tick(10);
+        CHECK(in.steps()[0].note == "no door I know of in room_1 leads to room_3 yet");
+        CHECK(in.progress().find("waiting: no door I know of in room_1 leads to room_3 yet") != std::string::npos);
+        h.fail("1", "door_unresolved");
+        in.tick(20);   // attempt 2: the note is gone (a new attempt), the reason for the retry stays
+        CHECK(in.steps()[0].attempt == 2 and in.steps()[0].note.empty() and in.steps()[0].after == "door_unresolved");
+        CHECK(in.progress().find("attempt 2/3 after door_unresolved") != std::string::npos);
+        h.leaf["1"] = {.state = LeafState::Running, .detail = "a|b"};
+        in.tick(30);
+        CHECK(in.progress().find("a|b") == std::string::npos);   // a '|' would break the bt_state fields
+        h.done("1");
+        in.tick(40);
+        CHECK(in.steps()[0].note.empty());
+    }
     {
         FakeHost h;
         Interpreter in(h);

@@ -290,6 +290,19 @@ struct RoomConfig
     // Gap beyond which the clamp is skipped entirely (stream restart, agent stall, relocalization after
     // a long silence). Clamping across a long gap would slew the pose in at v_max for many frames.
     float POSE_CLAMP_MAX_DT_S          = 0.5f;    // s
+    // IMU-rate predicted ticks (PosePublisher::publish_predicted_tick) WRITING the room->robot RT edge.
+    // OFF by default (owner 2026-11-11, "mode a"): the graph carries the ~20 Hz corrections, each written with its tail
+    // re-integrated to the newest IMU sample (RT_REWRITE_TAIL). On ("mode b"): every IMU sample's propagated pose is
+    // written too (pose_propagator.h) and each correction re-integrates all of them after t_c — 5x the edge traffic,
+    // and the HISTORY_SIZE=25 ring then spans ~250 ms instead of ~1.25 s. The tick logs its prediction
+    // (pose_trace.csv type 1) either way; only the write is gated.
+    bool  PREDICTED_TICKS_WRITE_RT     = false;
+    // Every correction REWRITES the ring from its stamp in one publish (RT_API::rewrite_edge_RT_since): itself, the
+    // re-integrated tail after it (the written ticks after t_c in mode b, the newest IMU sample always) and, with
+    // RT_SPREAD_CORRECTION, the blocks written in (t_k, t_c) moved by alpha * jump (pose_propagator.h plan_correction).
+    // false: the correction is a plain insert and whatever was written after t_c stays.
+    bool  RT_REWRITE_TAIL              = true;    // RoomConcept.RtRewriteTail
+    bool  RT_SPREAD_CORRECTION         = true;    // RoomConcept.RtSpreadCorrection
 
     // ---- Execution-stall watchdog (RoomSceneGraph::break_execution_stall) ----
     // While the controller holds the afford_room execution claim the planner is idle by design, so

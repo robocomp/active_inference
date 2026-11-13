@@ -279,7 +279,9 @@ LeafStatus SpecificWorker::MissionHost::poll(const rc::mission::Step &leaf)
 		const auto door = w_.resolve_door(*leaf.ref("door"));
 		switch (relation_hold_.check(door.has_value() ? std::optional<std::string>(*door) : std::nullopt, hold_clock_ms()))
 		{
-			case rc::RelationHold::Verdict::Waiting: return {};
+			// Waiting: say why (the person sees it once in the chat, and the model reads it in the mission line).
+			case rc::RelationHold::Verdict::Waiting:
+				return {.detail = rc::relation_wait_note(*leaf.ref("door"), w_.world_model_.graph_state().room_name, op != "close")};
 			case rc::RelationHold::Verdict::TimedOut: return {.state = LeafState::Failed, .detail = "door_unresolved"};
 			case rc::RelationHold::Verdict::Ready:
 				if (auto refused = start_now(leaf); refused.has_value()) return {.state = LeafState::Failed, .detail = *refused};
@@ -880,6 +882,8 @@ void SpecificWorker::set_explore_tour(bool on)
 	}
 	explore_drive_.emplace(params.explore_max_room_s);
 	explore_in_flight_.clear();
+	explore_after_failure_.clear();
+	explore_stuck_room_.clear();
 	explore_csv_.open("etc/exploration_drive.csv", std::ios::trunc);
 	explore_csv_.imbue(std::locale::classic());
 	explore_csv_ << "t_ms,room,promoted,cause,door,is_return,candidates\n";
@@ -903,6 +907,45 @@ std::string SpecificWorker::entry_mirror_of(const std::string &crossed)
 	return {};
 }
 
+std::vector<rc::explore::DoorCand> SpecificWorker::explore_doors(const std::string &topo_json)
+{
+	std::set<std::string> remembered = rc::topo::crossed_doors(topo_json);
+	// ★ A DOOR IS CROSSED BY ITS PASSAGE, NOT BY ITS NAME (clean52, 2026-11-11): re-entering the bathroom left TWO live door nodes on
+	//   one opening — door_3 (restored by name from door_concept's identity table) and door_5 (the face made for the doorway just
+	//   crossed). ltsm matched door_5 to passage_1 (crossed) at 228 s, but the topology names ONE live door per passage (door_3), so
+	//   door_5 read uncrossed: the drive crossed DOOR_0 four times (88, 227, 551, 892 s) and the tour took 1078 s. Every live door
+	//   joined by a `match` edge to a live passage node the LTSM remembers as crossed is that crossed passage.
+	if (const auto topo = rc::topo::decode_topology(topo_json); topo.has_value())
+		for (const auto &tp : topo->passages)
+		{
+			if (tp.crossings < 1) continue;
+			const auto pn = G->get_node(tp.id);
+			if (not pn.has_value()) continue;
+			for (const auto &e : DSR::DSRGraph::get_node_edges_by_type(pn.value(), "match"))
+				for (const auto id : {e.from(), e.to()})
+					if (id != pn->id())
+						if (const auto d = G->get_node(id); d.has_value()) remembered.insert(d->name());
+		}
+	std::vector<rc::explore::DoorCand> doors;
+	for (const auto &f : door_facts())
+	{
+		const bool believed = [&] { const auto n = G->get_node(f.name); return n.has_value() and rc::explore::door_believed(G->get_attrib_by_name<obj_exist_prob_att>(n.value())); }();
+		doors.push_back({.door = f.name, .found = G->get_node("aff_" + f.name + "_approach").has_value(),
+		                 .crossed = f.crossed or remembered.contains(f.name), .dist_m = f.dist, .believed = believed,
+		                 .evidence = explore_evidence(f.name)});
+	}
+	return doors;
+}
+
+rc::explore::DoorEvidence SpecificWorker::explore_evidence(const std::string &door)
+{
+	// exploration_drive.h DoorEvidence: the door's DISCRETE belief — a failed door is retried only once this changes (clean58)
+	const auto n = G->get_node(door);
+	return {.node_id = n.has_value() ? n->id() : 0,
+	        .exists_map = n.has_value() and rc::explore::door_believed(G->get_attrib_by_name<obj_exist_prob_att>(n.value())),
+	        .step_offered = rc::DoorPassage::open_or_cross_on_offer(*G, door)};
+}
+
 void SpecificWorker::service_explore_tour()
 {
 	if (not explore_drive_.has_value() or G == nullptr) return;
@@ -917,9 +960,84 @@ void SpecificWorker::service_explore_tour()
 	std::string topo_json;
 	if (const auto t = G->get_node("ltsm_topology"); t.has_value())
 		if (const auto j = G->get_attrib_by_name<ltsm_topology_att>(t.value()); j.has_value()) topo_json = j.value();
+	// A CROSSING WITHDRAWN (clean16, 2026-11-09): the room this cycle is the room the last crossing went into (same id) under the name of the
+	// room it came from: recognition concluded the robot never left. The door is failed there, the false room forgotten, and the drive
+	// goes on: nothing here waits for a room or a polygon.
+	if (explore_last_cross_.has_value())
+	{
+		if (gs.room_id != explore_last_cross_->into_id) explore_last_cross_.reset();
+		else if (gs.room_name == explore_last_cross_->from_room and explore_last_cross_->from_room != explore_last_cross_->into_room)
+		{
+			const auto c = *std::exchange(explore_last_cross_, std::nullopt);
+			explore_drive_->note_crossing_withdrawn(c.door, c.entry, c.into_room, c.from_room);
+			explore_pending_crossed_.clear();
+			if (explore_in_flight_ == c.door) { passage.stop(); explore_in_flight_.clear(); explore_mirror_.clear(); }
+			session_.mission().set_mode(rc::DriveMode::AffordancesOnly);
+			std::println("[explore-tour] the crossing through '{}' was withdrawn: still in '{}', door failed, the drive goes on", c.door, c.from_room);
+		}
+	}
 	// the passage the drive started: crossed (into a new room), failed, or abandoned
 	if (not explore_in_flight_.empty() and explore_mirror_.empty())
 		explore_mirror_ = entry_mirror_of(explore_in_flight_);   // while the old face still lives (final review I2)
+	// the in-flight door's node VANISHED before the crossing (explore_tour8: door_concept's existence removed door_3 under a
+	// misassociated mask; the passage then waited for ever for affordances of a node that no longer existed). A door that
+	// is gone cannot be crossed: retarget the passage to the live door now standing for the same passage, else end it as a
+	// failure so the drive decides again (a failed Return ends in a logged Stuck, never a loop).
+	// ... or when the door is still there but no longer believed (clean14: phantom door_3 disproved by failed opens to P 0.31, its `open` withdrawn, the passage waiting for ever)
+	const auto in_flight_node = explore_in_flight_.empty() ? std::nullopt : G->get_node(explore_in_flight_);
+	const bool in_flight_disbelieved = in_flight_node.has_value()
+	                                   and not rc::explore::door_believed(G->get_attrib_by_name<obj_exist_prob_att>(in_flight_node.value()));
+	if (not explore_in_flight_.empty() and gs.room_name == explore_from_room_ and (not in_flight_node.has_value() or in_flight_disbelieved))
+	{
+		std::string topo_now;
+		if (const auto t = G->get_node("ltsm_topology"); t.has_value())
+			if (const auto j = G->get_attrib_by_name<ltsm_topology_att>(t.value()); j.has_value()) topo_now = j.value();
+		const auto live = rc::topo::live_door_for(topo_now, explore_in_flight_);
+		const std::string gone = explore_in_flight_;
+		passage.stop();
+		explore_in_flight_.clear();
+		explore_mirror_.clear();
+		if (not in_flight_disbelieved and live.has_value() and G->get_node(*live).has_value()
+		    and start_door_passage(*live, rc::DoorPassage::Step::Cross, "explore", /*then_affordances=*/true).accepted)
+		{
+			explore_in_flight_ = *live;
+			std::println("[explore-tour] '{}' vanished before the crossing — retargeted to its passage's live door '{}'", gone, *live);
+		}
+		else
+		{
+			// ★ DISBELIEF IS A STATE, NOT A VERDICT (clean46): a door below 1/2 ends this passage but is NOT failed for the visit —
+			//   the drive's best_door skips it while P(exists) < 1/2 and takes it again if the belief recovers. A vanished node is gone.
+			if (not in_flight_disbelieved) { explore_drive_->note_failed(gone, explore_evidence(gone)); explore_after_failure_ = gone; }
+			session_.mission().set_mode(rc::DriveMode::AffordancesOnly);
+			std::println("[explore-tour] '{}' {}", gone, in_flight_disbelieved ? "is no longer believed to be a door (P < 1/2) — passage ended; the drive takes it again if its belief recovers"
+			                                                                    : "vanished before the crossing and no live door stands for its passage — failed");
+		}
+	}
+	// a door found AFTER a Return was decided supersedes it while the Return has not committed to its doorway (explore_tour11:
+	// room_3 promoted, the drive returned 0.2 s later, DOOR_0 born 2.6 s after that while the robot drove to the entry door)
+	if (not explore_in_flight_.empty() and explore_in_flight_return_ and gs.room_name == explore_from_room_)
+		if (const auto st = passage.view().step; st == rc::DoorPassage::Step::Look or st == rc::DoorPassage::Step::Approach)
+			if (const auto late = explore_drive_->reconsider_return(gs.room_name, explore_doors(topo_json)); late.has_value())
+			{
+				const std::string was = explore_in_flight_;
+				passage.stop();
+				explore_in_flight_.clear();
+				explore_mirror_.clear();
+				explore_in_flight_return_ = false;
+				if (start_door_passage(*late->door, rc::DoorPassage::Step::Cross, "explore", /*then_affordances=*/true).accepted)
+				{
+					explore_in_flight_ = *late->door;
+					std::println("[explore-tour] {}: '{}' found after the return through '{}' was decided — it supersedes the return",
+					             gs.room_name, *late->door, was);
+				}
+				else
+				{
+					explore_drive_->note_failed(*late->door, explore_evidence(*late->door));
+					session_.mission().set_mode(rc::DriveMode::AffordancesOnly);
+					std::println("[explore-tour] {}: '{}' found after the return was decided, but its passage was refused — the drive decides again",
+					             gs.room_name, *late->door);
+				}
+			}
 	if (not explore_in_flight_.empty())
 	{
 		const auto v = passage.view();
@@ -936,14 +1054,19 @@ void SpecificWorker::service_explore_tour()
 				if (entry == explore_in_flight_) entry.clear();   // the door just crossed is never its own entry face
 				if (entry.empty()) { explore_pending_crossed_ = explore_in_flight_; explore_pending_room_ = gs.room_name; explore_pending_since_s_ = now_s; }
 				explore_drive_->note_entered(gs.room_name, entry, now_s);
+				if (gs.room_name != explore_from_room_)   // a crossing into a room with another name: if recognition concludes the name was false, it is withdrawn (above)
+					explore_last_cross_ = ExploreLastCross{.door = explore_in_flight_, .entry = entry, .from_room = explore_from_room_, .into_room = gs.room_name, .into_id = gs.room_id};
 				std::println("[explore-tour] entered '{}' through '{}' (entry door '{}')", gs.room_name, explore_in_flight_,
 				             entry.empty() ? "not resolved yet — no guess" : entry);
 			}
 			else
 			{
-				explore_drive_->note_failed(explore_in_flight_);
-				std::println("[explore-tour] the passage through '{}' did not cross ({}) — skipped for this visit", explore_in_flight_,
+				explore_drive_->note_failed(explore_in_flight_, explore_evidence(explore_in_flight_));
+				std::println("[explore-tour] the passage through '{}' did not cross ({}) — skipped until new evidence about it (re-born, "
+				             "its existence MAP flips, or door_concept offers its open/cross); the base goes back to the affordances "
+				             "(room exploration + door looks) and the drive chooses the next action", explore_in_flight_,
 				             v.last_outcome.empty() ? "abandoned" : v.last_outcome);
+				explore_after_failure_ = explore_in_flight_;
 			}
 			explore_in_flight_.clear();
 			explore_mirror_.clear();
@@ -971,22 +1094,58 @@ void SpecificWorker::service_explore_tour()
 	// under the provisional name room_3 while ltsm proposed it was room_1) — no decision until the verdict
 	// Only while it is PENDING: ltsm keeps an accepted proposal node until the robot leaves the room (explore_tour7 held for
 	// 12 min after "ACCEPTED: room_4 adopted as r2_room_2"); room_concept writes state accepted | rejected (room_proposal.h).
+	bool proposal_settled = false;
 	for (const auto &n : G->get_nodes_by_type("metaconcept"))
-		if (G->get_attrib_by_name<object_subtype_att>(n).value_or(std::string{}) == "room_proposal"
-		    and G->get_attrib_by_name<state_att>(n).value_or(std::string("pending")) == "pending")
-			return;
+		if (G->get_attrib_by_name<object_subtype_att>(n).value_or(std::string{}) == "room_proposal")
+		{
+			if (G->get_attrib_by_name<state_att>(n).value_or(std::string("pending")) == "pending") return;
+			proposal_settled = true;
+		}
+	// ... and BEFORE there is a proposal (clean13): back in R1, still the provisional room_5, the drive decided a Return 1 s before ltsm proposed room_1, and the
+	// robot left R1 for the bedroom while the graph said R1. While recognition's best explanation of this room is a remembered room, the room's identity is
+	// open: no decision. A room recognition says is new is not held. Bounded by the same flagged room limit.
+	if (not proposal_settled and explore_drive_->within_room_time(gs.room_name, now_s))
+		if (const auto rec = G->get_node("recognition"); rec.has_value())
+			if (const auto post = G->get_attrib_by_name<recog_posterior_att>(rec.value());
+			    post.has_value() and rc::explore::recognition_leans_known(post->get()))
+				return;
 	// the operator's and missions' orders come first (final review I1): no decision while either holds the base
 	if (interpreter_.state() == rc::mission::Interpreter::State::Running or session_.approach_order().active()) return;
 	// the drive's inputs
-	const std::set<std::string> remembered = rc::topo::crossed_doors(topo_json);
-	std::vector<rc::explore::DoorCand> doors;
-	for (const auto &f : door_facts())
-		doors.push_back({.door = f.name, .found = G->get_node("aff_" + f.name + "_approach").has_value(),
-		                 .crossed = f.crossed or remembered.contains(f.name), .dist_m = f.dist});
+	const auto doors = explore_doors(topo_json);
 	const bool promoted = not rc::room::is_proto(*G, gs.room_id);
+	std::optional<rc::explore::DoorQuestions> questions;
+	if (const auto q = G->get_node("door_questions"); q.has_value())
+		questions = rc::explore::DoorQuestions{.room_id = G->get_attrib_by_name<parent_att>(q.value()).value_or(0),
+		                                       .state = G->get_attrib_by_name<state_att>(q.value()).value_or(std::string{})};
 	const auto d = explore_drive_->step(gs.room_name, promoted, doors, passage.active() or not explore_in_flight_.empty(), now_s,
-	                                    rc::topo::remembered_uncrossed(topo_json, gs.room_name));
+	                                    rc::topo::remembered_uncrossed(topo_json, gs.room_name), rc::explore::doors_settled(questions, gs.room_id));
+	for (const auto &r : explore_drive_->take_retried())
+		std::println("[explore-tour] {}: NEW EVIDENCE about '{}' (re-born, its existence MAP flipped, or door_concept now offers its "
+		             "open/cross) — its failed passage no longer excludes it", gs.room_name, r);
+	// ★ AFTER A FAILED PASSAGE, SAY WHAT THE ROBOT DOES NEXT (clean58: owner "we cannot leave the robot stuck as a dumbfounded staring at
+	//   a phantom door"). A decision with a door is logged below; no decision means the drive is holding its leave for an open question
+	//   (a door coming, an undecided candidate, a remembered door unseen) — the base is with the affordances meanwhile: afford_room and
+	//   door_concept's looks (aff_door_look_place_<key>) compete, so the robot keeps exploring the room.
+	if (not explore_after_failure_.empty() and not passage.active())
+	{
+		const std::string failed = std::exchange(explore_after_failure_, std::string{});
+		if (d.cause == rc::explore::Cause::None)
+			std::println("[explore-tour] {}: after '{}' failed — NEXT: explore the room (afford_room + door looks compete in "
+			             "AffordancesOnly) while the drive's open question stands: {}; then another door or the way back",
+			             gs.room_name, failed, not promoted ? "the room is not promoted yet"
+			                                   : not rc::explore::doors_settled(questions, gs.room_id) ? "door_concept has an undecided candidate (door_questions open)"
+			                                                                                           : "a door coming or a remembered door unseen");
+		else
+			std::println("[explore-tour] {}: after '{}' failed — NEXT: {} {}", gs.room_name, failed, rc::explore::to_string(d.cause),
+			             d.door.has_value() ? (d.is_return ? "the way back through '" + *d.door + "'" : "cross '" + *d.door + "'")
+			                                : std::string("(no door)"));
+	}
+	if (d.cause != rc::explore::Cause::Stuck) explore_stuck_room_.clear();
 	if (d.cause == rc::explore::Cause::None) return;
+	// STUCK is a state the drive waits out, not an end (clean58): logged once per room, the drive stays on, the base stays with the
+	// affordances (the room's exploration and door looks), and new evidence about the failed way back lifts it (DoorEvidence).
+	if (d.cause == rc::explore::Cause::Stuck and explore_stuck_room_ == gs.room_name) return;
 	// the record (one row per decision) + one line
 	std::string cands;
 	for (const auto &c : doors)
@@ -998,8 +1157,11 @@ void SpecificWorker::service_explore_tour()
 	std::println("[explore-tour] {}: {} -> {}", gs.room_name, rc::explore::to_string(d.cause), d.door.value_or("-"));
 	if (d.cause == rc::explore::Cause::Stuck)
 	{
-		std::println("[explore-tour] STUCK in '{}': the way back failed and nothing else is left — the drive stops", gs.room_name);
-		set_explore_tour(false);
+		std::println("[explore-tour] STUCK in '{}': the way back failed and no other door is open to the drive — it does NOT stop: the "
+		             "base stays with the affordances (room exploration + door looks) and the drive decides again on new evidence "
+		             "about a failed door", gs.room_name);
+		explore_stuck_room_ = gs.room_name;
+		session_.mission().set_mode(rc::DriveMode::AffordancesOnly);
 		return;
 	}
 	if (d.cause == rc::explore::Cause::Done)
@@ -1019,7 +1181,11 @@ void SpecificWorker::service_explore_tour()
 				door = *live;
 			}
 		const auto r = start_door_passage(door, rc::DoorPassage::Step::Cross, "explore", /*then_affordances=*/true);
-		if (r.accepted) { explore_in_flight_ = door; explore_from_room_ = gs.room_name; explore_pending_crossed_.clear(); }
-		else explore_drive_->note_failed(*d.door);
+		if (r.accepted) { explore_in_flight_ = door; explore_from_room_ = gs.room_name; explore_pending_crossed_.clear(); explore_in_flight_return_ = d.is_return; }
+		else
+		{
+			explore_drive_->note_failed(*d.door, explore_evidence(*d.door));
+			explore_after_failure_ = *d.door;
+		}
 	}
 }

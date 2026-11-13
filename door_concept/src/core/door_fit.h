@@ -79,7 +79,9 @@ inline constexpr std::string_view kAi2CsvHeader =
     "phi_ninf,phi_beta,phi_lat,"
     "recess,std_recess,"
     // door-passable spec step 0 (2026-11-05): the width model error's inputs (DoorBelief::last_width_error)
-    "we_r_w,we_r_w_jambs,we_J_w,we_R_w,we_var_model_w,we_var_post_w\n";   // Task 5b: the leaf plane's depth beyond the wall line (DoorBeliefState::d) and its σ
+    "we_r_w,we_r_w_jambs,we_J_w,we_R_w,we_var_model_w,we_var_post_w,"
+    // explore_tour8: the share of the mask frame's points the door model explains — the mask-sides factor's weight
+    "mask_assoc\n";   // Task 5b: the leaf plane's depth beyond the wall line (DoorBeliefState::d) and its σ
 inline constexpr std::string_view kPhiCsvHeader =
     // ★try96: s per cycle (it was logged only on the rare mask frames, so the slide had no trace) and the along-wall
     //   channel. loglik stays the LAST column (a ;-separated list), so the new ones go in front of it, by name.
@@ -130,7 +132,6 @@ public:
     /// and the cached geometry is seeded from the box (refresh_geometry). Overwrites `inst`.
     void init_instance(rc::DoorFitState& inst, std::uint64_t id, std::string name, rc::DoorState init_state);
     void note_birth(std::uint64_t id, const Eigen::Vector2f& xy) { birth_seeds_[id] = xy; }
-    void note_reacquire(std::uint64_t id, const rc::DoorBelief& belief) { restore_seeds_[id] = belief; }
     void seed_bearing_hypothesis(rc::DoorFitState& inst, const Eigen::Vector2f& robot_xy, float azimuth,
                                  float nominal_range, float along_std, float across_std, float yaw_std);
 
@@ -147,11 +148,13 @@ public:
     [[nodiscard]] float ego_lin_mps() const   { return ego_lin_mps_; }
     [[nodiscard]] float ego_ang_radps() const { return ego_ang_radps_; }
 
-    struct WallFrame { bool ok = false; Eigen::Vector2f O{0.0f, 0.0f}, u{1.0f, 0.0f}; float len = 0.0f; };
+    struct WallFrame { bool ok = false; Eigen::Vector2f O{0.0f, 0.0f}, u{1.0f, 0.0f}; float len = 0.0f;
+                      std::optional<Eigen::Vector2f> seen_at; };   // seen_at: door_standpoint.h WallRun::seen_at
     [[nodiscard]] WallFrame associate_wall(std::span<const Eigen::Vector2f> pts_xy,
                                            const std::optional<Eigen::Vector2f>& cam_xy) const;
 
 private:
+    bool phi_done_this_cycle_ = false;   // run_inference stepped estimate_phi before the mask update; refresh_geometry must not repeat it
     [[nodiscard]] rc::DoorBeliefParams make_belief_params() const;
     [[nodiscard]] rc::DoorModelParams  make_model_params() const;
     void compute_projected_roi(rc::DoorFitState& inst);
@@ -179,7 +182,6 @@ private:
     std::optional<Eigen::Vector2f> body_xy_;
     std::optional<Eigen::Matrix2f> body_cov_;
     std::unordered_map<std::uint64_t, Eigen::Vector2f> birth_seeds_;    // tracker-provided birth XY (note_birth)
-    std::unordered_map<std::uint64_t, rc::DoorBelief> restore_seeds_;   // re-acquired identity's belief (note_reacquire)
     std::size_t n_explained_away_ = 0;                                  // points dropped (diagnostic)
 };
 

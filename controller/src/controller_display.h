@@ -20,6 +20,8 @@
 #include "controller_mission_panel.h"
 #include "controller_affordance_panel.h"
 #include "controller_status_line.h"
+#include "controller_status_snapshot.h"
+#include "controller_status_text.h"
 #include "motion_verdict.h"
 #include "controller_camera_masks.h"
 #include "custom_widget.h"
@@ -104,6 +106,9 @@ public:
     void set_hold_reason(const std::string &why);
     // WHY IS THE ROBOT NOT MOVING (motion_verdict.h): the toolbar's permanent chip. Thread-safe (a copy into the snapshot).
     void set_motion_verdict(const rc::why::View &v);
+    // The controller's state as plain values for the status column (ControllerSession::status_snapshot + worker fields).
+    // Thread-safe staging (a copy into the snapshot); turned into words on the GUI thread in present().
+    void set_controller_status(const rc::ControllerStatusSnapshot &s);
     // Push the live arrival state to the toolbar readout. Called every cycle; the widget dedups.
     void set_goal_distance(std::optional<float> dist_m, std::optional<float> yaw_err_rad, bool aligning);
     void set_session_totals(float metres, float seconds);   // top row: metres and time since startup
@@ -127,6 +132,9 @@ public:
     void set_anchor_overlay(const std::optional<AnchorView> &a);
     /// Every door of the room as believed (aperture + leaf), ROOM frame; thread-safe staging. Empty clears.
     void set_door_views(std::vector<rc::Viewer2D::DoorView> v);
+    /// The active object-approach affordance's options (one arrow per side, the chosen one highlighted), ROOM frame;
+    /// thread-safe staging. nullopt clears.
+    void set_approach_view(std::optional<rc::Viewer2D::ApproachView> v);
     // Stage the Orient bearing overlay for the 2D view (thread-safe; applied in present()).
     // Pass visible=false whenever the running affordance is not an Orient, so a finished turn cannot
     // leave a ray pointing at a bearing nobody is asking for any more.
@@ -269,14 +277,19 @@ private:
         rc::DoorPassageStatus door_passage_view;
         std::string hold_reason;   // set_hold_reason; "" = planning normally
         rc::why::View motion_verdict;   // set_motion_verdict
+        rc::ControllerStatusSnapshot controller_status;   // set_controller_status
         std::vector<std::vector<Eigen::Vector2f>> door_passages;
         std::vector<rc::Viewer2D::DoorView> door_views;   // set_door_views
+        std::optional<rc::Viewer2D::ApproachView> approach;   // set_approach_view
+        bool approach_pending = false;
         std::optional<AnchorView> anchor;   // set_anchor_overlay: robot frame; drawn through robot_pose
     };
 
     void restore_window_geometry();
-    // GUI thread: the one-line summary for status_line_, composed from the snapshot present() just took.
-    static QString compose_status(const DisplaySnapshot &snap);
+    // GUI thread: the status column's text, composed from the snapshot present() just took (controller_status_text.h).
+    QString compose_status(const DisplaySnapshot &snap, std::uint64_t now_ms) const;
+    rc::status_text::StatusEvents status_events_;   // GUI thread: recent happenings, from consecutive snapshots
+    std::uint64_t status_text_ms_ = 0;               // GUI thread: when the column's text was last composed
     static QString verdict_colour(const rc::why::View &v);
 
     std::unique_ptr<Custom_widget> custom_widget_;

@@ -99,6 +99,13 @@ namespace rc
         view_prev_pose_ = pose0;
         view_prev_pose_valid_ = true;
         rv_novelty_acc_ += w;
+        // ★ THE LATE RECALL'S VERDICT READS NORMAL TRACKING AFTER ITS FIRST FIT (restored 2026-11-06; lost in af46a885 with the
+        //   legacy lost-belief code that held the only per-scan call). Without it the verdict had ONE observation — the
+        //   multi-scan fit — and a recognition whose fit alone did not cross ±ln 19 stayed Pending for ever (explore_tour9:
+        //   the re-entered start room judged for minutes, the exploration drive holding on it). Each scan's misfit, weighted by
+        //   how new this view is (w above): a parked robot's repeated scans are one observation, not many.
+        if (late_pending_.load(std::memory_order_acquire) and late_forced_done_ and not std::exchange(late_fit_committed_this_frame_, false))
+            accumulate_late_evidence(std::max(res.sdf_mse, res.pred_sdf_median), w);
 
         // ── carry: every rival (and the pending proposal) moves with the ROBOT'S ODOMETRY increment since the last step ──
         // The motion prior's increment (global frame, what update()'s predict step added), rotated into the body frame of the
@@ -441,7 +448,21 @@ namespace rc
         // ── 3. a winner becomes the incumbent: the tracker is reset to its pose, the old incumbent becomes a rival ──
         Eigen::Vector3f pose_pub = pose0;
         Eigen::Matrix3f cov_pub = cov0;
-        if (const auto wi = rivals_.winner())
+        // ★ NO SWAP WHILE A RECOGNITION IS JUDGED (2026-11-12, clean56). The hypothesis under test is "P is K AT ltsm's
+        //   T(P<-K)": it fixes the robot's pose in K up to the chain's covariance (cm). A rival metres away is a DIFFERENT
+        //   hypothesis ("P is K, the chain is wrong by metres"), whose prior ltsm itself puts at ~e^-10, not this one's
+        //   support. Letting it win made the test "does P fit ANYWHERE in K": clean56 relocalised the bath 1.4 -> 5.3 ->
+        //   7.2 -> 9.9 m across the big room until a corner explained it, the verdict then scored those fits as "K explains
+        //   the scans" and ACCEPTED with a 7.9 m / 88 deg correction. Held, the verdict scores the scans at the pose the
+        //   recognition predicted (the multi-scan fit already searches within the prior's covariance), and a room that does
+        //   not fit THERE is rejected by its own misfit. The rivals keep their odds; they compete again once the fit ends.
+        const bool judging = hypothesis_fit_active();
+        if (const auto wi = rivals_.winner(); wi and judging and not std::exchange(rv_swap_held_logged_, true))
+            qInfo().noquote() << QString("[reloc/rivals] a rival out-explains the incumbent (lambda %1) while a recognition is "
+                                         "judged: held — the hypothesis fixes the pose at ltsm's prior")
+                                     .arg(rivals_.rivals().at(*wi).lambda, 0, 'f', 1);
+        if (not judging) rv_swap_held_logged_ = false;
+        if (const auto wi = judging ? std::optional<std::size_t>{} : rivals_.winner())
         {
             RivalPrior pr = prior_now();
             const rc::rivals::Rival won0 = rivals_.rivals().at(*wi);

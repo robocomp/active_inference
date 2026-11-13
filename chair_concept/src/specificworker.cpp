@@ -1305,7 +1305,14 @@ void SpecificWorker::step_approach(rc::ChairInstance& inst)
         in.robot_pos_sigma_m = std::sqrt(std::max({0.0f, inst.chain_cov_xx, inst.chain_cov_yy}));
         if (fitter_->has_room_polygon()) in.room_polygon = fitter_->room_polygon();
     }
-    inst.approach.update(in, rc::pragmatic::ApproachCfg{});
+    // the approach stands where the chair is SEEN best (owner 2026-11-11: it stopped too close to see it), or farther if the
+    // body needs the room to turn (object_approach_geometry.h)
+    rc::pragmatic::ApproachCfg acfg;
+    {
+        const auto &st = inst.model.state();
+        if (const auto dv = fitter_->best_view_distance(st.seat_w, st.seat_h + st.back_h); dv.has_value()) acfg.stand.min_standoff_m = *dv;
+    }
+    inst.approach.update(in, acfg);
 }
 
 // ─── Initialisation helpers ──────────────────────────────────────────────────

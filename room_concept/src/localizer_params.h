@@ -289,6 +289,10 @@ namespace rc::loc
         bool  zupt_enabled       = true;
         float zupt_wheel_rot_eps = 0.002f;             // rad/s
         float zupt_wheel_lin_eps = 0.001f;             // m/s (adv, side)
+        // Odometry delivery lag the pose PROPAGATOR (pose_propagator.h, between corrections) subtracts from each wheel
+        // sample's stamp. Code default 32 (Shadow spec); the toml sets 0 — compensating it in the prior made the
+        // optimiser worse on Shadow. The motion prior's window does not use it.
+        float odom_lag_ms        = 32.f;               // ms, RoomConcept.OdomLagMs
         float rotation_position_coupling = 0.15f;      // meters of position uncertainty per radian of rotation
         float rotation_noise_base = 0.01f;             // Base rotation std when no commanded motion
         // Fallback diagonal for the slot motion covariance, used ONLY when no odometry prior is valid.

@@ -862,7 +862,21 @@ Outcome RoomEviction::evict(const Candidate &cand)
 
                     // THE SECOND FACE: the new room's own door node for the same hole (the entry mirror,
                     // copied with the new room's subtree above). Two `match` edges into one passage.
-                    if (const auto nf = new_map.find(cand.new_door_id); cand.new_door_id != 0 and nf != new_map.end())
+                    // ★ A KNOWN HOLE KEEPS ITS TWO ROOMS (cmp_br2, 2026-11-08: eviction #5 made passage_0 three-faced, r1_door_3,
+                    //   r2_door_5 AND r5_door_14, and the layout marked its seam WRONG). When the passage already holds a face in
+                    //   a THIRD room, the hole is known to lead there, and the room just entered is either that room under a
+                    //   provisional name (the recognition episode is still judging it) or a fact the map cannot state as a fourth
+                    //   room behind one hole. Its entry mirror stays a plain, passage-less door of its own twin; the passage is
+                    //   not rewritten. Structural: a face in neither of the two rooms of this crossing.
+                    const bool known_elsewhere = std::ranges::any_of(
+                        DSR::DSRGraph::get_node_edges_by_type(mem_->get_node(doorway_id).value(), "match"), [&](const auto &e) {
+                            return not is_descendant(e.to(), old_prefix + cand.old_room_name)
+                                   and not is_descendant(e.to(), new_prefix + cand.new_room_name); });
+                    if (known_elsewhere)
+                        qInfo().noquote() << QString::fromStdString(std::format(
+                            "[eviction] {} is a known passage to a third room: {}'s face of it is NOT added (it stays two-faced, the room is still being recognised)",
+                            out.mem_doorway, cand.new_room_name));
+                    if (const auto nf = new_map.find(cand.new_door_id); not known_elsewhere and cand.new_door_id != 0 and nf != new_map.end())
                     {
                         auto m2 = DSR::Edge::create<match_edge_type>(doorway_id, nf->second);
                         mem_->insert_or_assign_edge(std::move(m2));
@@ -909,7 +923,7 @@ Outcome RoomEviction::evict(const Candidate &cand)
                     //   Named <door>_entry: door_concept only mints door_N, so it can never collide with a real face,
                     //   and when the new room is itself evicted through this hole, the "same hole under a new name"
                     //   rule above deletes it in favour of door_concept's own face.
-                    if (out.mem_door_new.empty() and not new_held)
+                    if (out.mem_door_new.empty() and not new_held and not known_elsewhere)
                         if (const auto nroom = mem_->get_node(out.mem_new_room_id); nroom.has_value())
                         {
                             // The derived face of THIS passage only: a namesake held by another passage is another hole
@@ -1045,10 +1059,7 @@ std::optional<DSR::Node> live_passage_of(DSR::DSRGraph &live, std::uint64_t door
     return {};
 }
 
-namespace
-{
 // A wall's segment in its floor's frame (= the room's: floor->room is the identity), from the parent->wall RT edge and width_m.
-struct WallSeg { std::uint64_t id; std::string name; Eigen::Vector2d a, b; };
 std::optional<WallSeg> wall_segment(DSR::DSRGraph &g, const DSR::Node &w, std::uint64_t parent_id)
 {
     const auto e = g.get_edge(parent_id, w.id(), "RT");
@@ -1077,6 +1088,9 @@ std::vector<WallSeg> walls_under(DSR::DSRGraph &g, const DSR::Node &floor)
             if (const auto sg = wall_segment(g, w.value(), floor.id()); sg.has_value()) out.push_back(sg.value());
     return out;
 }
+
+namespace
+{
 std::optional<DSR::Node> live_floor_of(DSR::DSRGraph &g, std::uint64_t room_id)
 {
     const auto room = g.get_node(room_id);
@@ -1386,6 +1400,14 @@ std::optional<Mat::RTMat> seam_through_passage(DSR::DSRGraph &mem, const std::st
     return r->seam;
 }
 
+std::optional<bool> seam_flipped_through_passage(DSR::DSRGraph &mem, const std::string &passage,
+                                                 const std::string &room_to, const std::string &room_from)
+{
+    const auto r = resolve_seam(mem, passage, room_to, room_from);
+    if (not r.has_value()) return std::nullopt;
+    return r->flipped;
+}
+
 std::optional<ltsm::seam::Measured> seam_measured_through_passage(DSR::DSRGraph &mem, const std::string &passage,
                                                                   const std::string &room_to, const std::string &room_from,
                                                                   int &stated_faces)
@@ -1483,6 +1505,17 @@ int RoomEviction::remove_live_room(std::uint64_t room_id)
 //////////////////////////////////////////////////////////////////////////////////////////////////
 // Promotion evidence
 //////////////////////////////////////////////////////////////////////////////////////////////////
+std::optional<double> robot_body_radius(DSR::DSRGraph &live)
+{
+    if (const auto body = live.get_node("body"); body.has_value())
+    {
+        const auto w = live.get_attrib_by_name<width_m_att>(body.value());
+        const auto d = live.get_attrib_by_name<depth_m_att>(body.value());
+        if (w.has_value() and d.has_value()) return 0.5 * std::max(w.value(), d.value());
+    }
+    return std::nullopt;
+}
+
 std::vector<PromotionReading> RoomEviction::promotion_evidence(double body_radius) const
 {
     std::vector<PromotionReading> out;

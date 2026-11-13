@@ -143,7 +143,7 @@ private:
     void run_tracker_slice();
     void retire_instance(std::uint64_t id);   // shared teardown: affordance + fitter forget + graph delete
 
-    // The DoorCore's TrackerWorld over THIS worker's state: the instances (fitter), ghosts, identities, the room, and
+    // The DoorCore's TrackerWorld over THIS worker's state: the instances (fitter), identities, the room, and
     // the graph writes a birth / merge makes. Nested so it reaches the private members it reads and acts on.
     class CoreWorld final : public rc::door::core::TrackerWorld
     {
@@ -152,14 +152,11 @@ private:
         std::uint64_t room_id() const override;
         std::vector<Eigen::Vector2f> room_polygon() const override;
         std::vector<std::pair<std::uint64_t, rc::DoorFitState*>> fit_states() const override;
-        std::optional<rc::door::core::GhostMatch> match_ghost(const Eigen::Vector2f& xy) const override;
         std::optional<rc::door::core::IdentityMatch> match_identity(const Eigen::Vector2f& xy) const override;
         void retire(std::uint64_t id) override;
         void set_assigned_mask(std::uint64_t id, int slice) override;
         void after_association(const rc::door::core::TrackerCycleInfo& info) override;
         std::uint64_t create_door(const rc::door::core::BirthRequest& r) override;
-        void reacquire(std::uint64_t new_id, const rc::door::core::GhostMatch& g) override;
-        void forget_ghost(const Eigen::Vector2f& xy) override;
         std::optional<std::string> adopt_birth(std::uint64_t id, int slice, const Eigen::Vector3f& centroid) override;
         std::vector<std::uint64_t> fit_targets() override;
         rc::DoorFitState* begin_fit(std::uint64_t id) override;
@@ -206,25 +203,8 @@ private:
     // transform can only be rejected, or (far worse) match some OTHER door within 400 mm and open it.
     bool request_door_actuation(rc::DoorInstance& inst, bool open, const std::string& provider_id,
                                 const std::string& purpose, std::string& why);
-    // ── Identity re-acquisition ───────────────────────────────────────────────
-    // A door that is removed leaves a GHOST: its name and the belief it had converged to. A later detection
-    // landing within Existence.ReacquireRadiusM of a ghost is the SAME physical door coming back, so it takes
-    // that name and resumes that geometry instead of being born as door_N+1 with template priors. Existence
-    // itself restarts from the birth prior — the shape is remembered, the confidence is re-earned.
-    struct DoorGhost
-    {
-        std::string     name;
-        Eigen::Vector2f xy = Eigen::Vector2f::Zero();
-        rc::DoorBelief  belief;
-        int             lived_cycles = 0;
-    };
-    void remember_ghost(const rc::DoorInstance& inst);                 // called just before a node is deleted
-    const DoorGhost* match_ghost(const Eigen::Vector2f& xy) const;     // nearest ghost within the radius, else null
-    void forget_ghost(const Eigen::Vector2f& xy);                      // consume the ghost(s) at a re-acquired place
-    std::vector<DoorGhost> ghosts_;
-
     // ── Identity ACROSS RUNS (etc/door_identities.csv) ────────────────────────────────────────────
-    // A ghost lives in RAM and every owned door node is deleted on shutdown, so at the next launch the
+    // Every owned door node is deleted on shutdown, so at the next launch the
     // numbering restarted from birth ORDER — i.e. from whichever door the robot happened to see first.
     // Live 2026-08-09: door_1/door_2 traded physical doors across a restart, which is exactly what
     // "the affordances are switched" looks like from outside. A door is a hole in a wall and outlives
@@ -252,7 +232,14 @@ private:
     void upsert_identity(DoorIdentity row, float width_m, float weight);
     float identity_weight(const rc::DoorInstance& inst) const;
     DoorIdentity identity_of(const rc::DoorInstance& inst) const;      // a FITTED door's restorable row (current room)
-    void forget_identity(const std::string& name, const Eigen::Vector2f& ap, float width_m);       // a removal for absence
+    /// A door removed for absence stays in the table as a REMOVED row (spec §3.7: rows are never forgotten; "no door here" is the
+    /// prior of any candidate at that place). It is not restored and not looked at.
+    void mark_identity_removed(const rc::DoorInstance& inst, std::int64_t now_wall_ms);
+    /// The radius within which two apertures are the same HOLE: the tracker's own association gate, in metres. A candidate and a
+    /// remembered place are the same place when their squared Mahalanobis distance under the SUM of their covariances (each
+    /// Tracker.DetectionNoiseM^2 I) is within Tracker.GateMahalanobis — PlaceTable::match's rule, as a radius.
+    [[nodiscard]] float identity_radius_m() const
+    { return cfg_.tracker_detection_noise_m * std::sqrt(2.0f * cfg_.tracker_gate_mahalanobis); }
     const DoorIdentity* match_identity(const Eigen::Vector2f& xy) const;
     void remember_live_identities();                                   // shutdown: persist the doors still alive
     // Place the door on the 2-D graph canvas beside its ACTUAL RT parent (a wall_* once resolved, the
@@ -271,7 +258,7 @@ private:
     //   · a door detected in the new room is created as a child of the old one and its RT edge is
     //     published in the old room's frame, i.e. wrong by the whole inter-room seam (metres);
     //   · the room-containment prior then loads the OLD polygon, finds every new-room door outside it,
-    //     and removes it at OutOfRoomGain per frame — a path that bypasses the sensor channel entirely,
+    //     and removes it — a path that bypassed the sensor channel entirely (the old per-frame out-of-room gain),
     //     so nothing can rescue it. The visible symptom is doors flickering in and out in the new room,
     //     which looks nothing like a room-tracking bug.
     // (This is the write-once room memo the fleet audit lists as still open in nine agents; this is one.)
@@ -326,6 +313,32 @@ private:
     std::vector<Eigen::Vector2f> look_dets_xy_;   ///< this mask frame's door detections (room frame), for "seen there"
     bool look_new_frame_ = false;                 ///< a NEW mask frame arrived this cycle (evidence per observation)
     void step_remembered_looks();
+    // ── AN UNDECIDED CANDIDATE IS UNFINISHED BUSINESS (spec 2026-11-09-undecided-candidate-look) ──────────────────
+    // Each open candidate of a promoted room gets a look (`aff_door_look_place_<key>`) at a standpoint that adds a view; the node
+    // `door_questions` states whether the current room still has an open question (the exploration drive holds Return and Done on it).
+    struct CandidateLook
+    {
+        rc::ObjectAffordance             aff;
+        rc::door::core::ViewLedger       tried;              // one view per site finished or handed back
+        std::optional<rc::AffordanceTarget> site;            // the standing offer; re-planned only when it no longer adds a view
+        float                            p_detect = 0.f;     // the site's envelope × visibility (look::plan), for the look's price
+        bool                             exhausted = false;  // no standpoint adds a view (logged once)
+    };
+    // THE ROOM'S DOOR BELIEF (room-door-belief spec Part A, core/room_door_count.h): logged when it changes
+    double        room_p_more_logged_ = -1.0;
+    bool          room_open_logged_ = false;
+    std::map<std::uint64_t, CandidateLook> candidate_looks_;   // by Candidate::key
+    std::uint64_t candidate_looks_room_ = 0;
+    std::uint64_t door_questions_room_ = 0;
+    std::string   door_questions_state_;
+    void step_candidate_looks();
+    void step_wall_hypotheses();                            // a promoted room's walls are its door slots (room-door-belief spec §3.3)
+    std::uint64_t wall_seeded_room_ = 0;
+    std::uint64_t wall_look_key_ = 0;                       // the one wall place being looked at (one node at a time: rates)
+    void step_doorway_hypotheses();                         // room_concept's `room_doorways` become pending candidates
+    std::set<std::pair<int, int>> doorway_seeded_;          // the openings already taken up in this room (10 cm grid)
+    std::uint64_t doorway_seeded_room_ = 0;
+    void publish_door_questions(bool open);
     void drop_looks(const char* why);
     std::uint64_t pending_restore_room_ = 0;
     std::uint64_t recalled_room_id_ = 0;   ///< the room entered by an ltsm recall / accepted proposal (remembered looks only there)
@@ -376,8 +389,9 @@ private:
         std::vector<std::pair<float, float>> phi_curve;
         int             matched_frames = 0;
         // ★Task D2: the source instance's existence log-odds, so the door re-made on the far side of the crossing keeps what we
-        // believed about it (a fresh instance was seeded at BirthLogodds and the old L = +1.83 and the crossing were discarded).
+        // believed about it (a fresh instance was seeded with no memory and the old L and the crossing were discarded).
         std::optional<float> existence_L;
+        float existence_physical = 0.f;   // the physical part of existence_L (PlaceBelief::Sp): stays outside vision's saturation
         // For a door recreated in a room entered through it (remember_door / release_room): its pose under root
         // (live rooms all hang from root, so root is the one frame two rooms share) and its attributes.
         Eigen::Affine3d T_root_door = Eigen::Affine3d::Identity();
@@ -398,6 +412,14 @@ private:
     std::unordered_map<std::uint64_t /*proto room id*/, EntryMirror> entry_mirrors_;
     std::unordered_set<std::uint64_t> held_doors_;   ///< door nodes of a room left behind that is still live (release_room)
     std::uint64_t carry_pending_room_ = 0;   ///< room entered while the crossed door was still HELD: carry it when it is lost
+    /// THE LAST CROSSING WHOSE PROOF IS OPEN (clean16): the carried door, the room it hangs in, and the door/room it was carried from. Closed by a confirmation
+    /// (the entered room stood) or by a withdrawal (that room was adopted as the one left).
+    struct CarriedCrossing { std::uint64_t door_id = 0, room_id = 0; std::string source_name, source_room; };
+    std::optional<CarriedCrossing> carried_crossing_;
+    std::string entered_from_name_;          ///< the room left at the last room switch (release_room), named while it still can be
+    void step_crossing_proof();              ///< each cycle in the followed room: a crossing stands once the room is established
+    void confirm_carried_crossing();         ///< the proof is final: the carried door and the source row of the room left
+    void withdraw_carried_crossing();        ///< the crossing did not happen: the door goes, the source place is refuted
     void install_carried_door(std::uint64_t new_room, std::uint64_t adopt_mirror, const std::optional<EntryMirror>& adopted_from);
     void step_entry_mirrors();
 

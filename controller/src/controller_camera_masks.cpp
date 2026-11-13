@@ -179,8 +179,10 @@ bool ControllerCameraMasks::draw_target_pose(QPainter &p, const std::string &obj
     // the chain, and dereferencing that is the documented crash mode.
     // INTERPOLATED, not the API's default Nearest (user 2026-11-01): the capture stamp falls between two localiser writes, and the
     // nearest one is up to half a publish period away — at turning speed a visible heading error in both marks.
+    // ★ EXTRAPOLATED (2026-11-11): identical to Interpolated inside the ring; past its newest block (room_concept writes the pose at
+    //   ~20 Hz, corrections only) it walks that block along its twist instead of clamping to it.
     const auto room_T_robot = inner_->get_transformation_matrix(room_name_, robot_name_, stamp_ms, "RT",
-                                                                DSR::RT_API::TimeQuery::Interpolated);
+                                                                DSR::RT_API::TimeQuery::Extrapolated);
     if (not room_T_robot.has_value())
     {
         note = QStringLiteral("no %1←%2 RT at the capture stamp")

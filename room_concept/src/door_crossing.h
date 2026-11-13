@@ -165,7 +165,8 @@ namespace rc::crossing
     /// ★ THE MOUTH POSE (2026-10-23, Task M): the proto frame's pose in the OLD room's frame, as the numbers the DSR
     /// carries on the proto room node (rt_translation [x y 0], rt_rotation_euler_xyz [0 0 yaw], rt_covariance 6x6
     /// row-major over [x y z rx ry rz]; a NODE-level overload of the RT attribute names) so ltsm's seam
-    /// T(new<-old) = inverse(mouth) needs no door node and no recess constant. The pose IS proto_frame(c).
+    /// T(new<-old) = inverse(mouth) needs no door node and no recess constant. The pose IS proto_frame(c) in the INTERNAL
+    /// frame `c` is expressed in; the publisher (write_mouth) composes it into the old room's PUBLISHED frame (mouth_in_frame).
     /// Covariance, in the old room's frame, with the two sources named:
     ///   · ALONG the aperture (tangent): `sigma_tangent` = door_concept's position σ of the door (ap.sigma_along), the
     ///     uncertainty of where the opening lies along the wall; the caller passes the layout bar when door_concept
@@ -202,6 +203,29 @@ namespace rc::crossing
             m.cov[5 * 6 + 5] = 2.f * sigma_normal * sigma_normal / (c.span_w * c.span_w);
         }
         return m;
+    }
+
+    /// The mouth moved into another frame: `T_out_in` maps the frame the mouth was computed in to the frame it is stated in.
+    /// Pose composed; the xy covariance block rotates with the frame, the yaw variance is unchanged by a constant rotation.
+    inline Mouth mouth_in_frame(const Mouth& m, const Eigen::Affine2f& T_out_in)
+    {
+        Eigen::Affine2f pose_in = Eigen::Affine2f::Identity();
+        pose_in.linear() = Eigen::Rotation2Df(m.yaw).toRotationMatrix();
+        pose_in.translation() = Eigen::Vector2f(m.x, m.y);
+        const Eigen::Affine2f pose_out = T_out_in * pose_in;
+        Mouth out = m;
+        out.x   = pose_out.translation().x();
+        out.y   = pose_out.translation().y();
+        out.yaw = std::atan2(pose_out.linear()(1, 0), pose_out.linear()(0, 0));
+        if (m.has_cov)
+        {
+            const Eigen::Matrix2f R = T_out_in.linear();
+            Eigen::Matrix2f C;
+            C << m.cov[0], m.cov[1], m.cov[6], m.cov[7];
+            const Eigen::Matrix2f Cr = R * C * R.transpose();
+            out.cov[0] = Cr(0, 0); out.cov[1] = Cr(0, 1); out.cov[6] = Cr(1, 0); out.cov[7] = Cr(1, 1);
+        }
+        return out;
     }
 
     // ── DIAGNOSTIC CSV: tmp/crossing.csv ────────────────────────────────────────────────────────

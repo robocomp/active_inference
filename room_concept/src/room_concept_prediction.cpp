@@ -128,6 +128,10 @@ namespace rc
         res.calib_applied = 0;
         for (int i = 0; i < rc::calib::P_COUNT; ++i)
             if (motion_calib_.acting(i)) res.calib_applied |= 1 << i;
+        res.applied_motion = {.k_w = motion_calib_.omega_scale(), .b_w = motion_calib_.omega_bias(),
+                              .k_v = motion_calib_.forward_scale(), .k_lat = motion_calib_.lateral_scale(),
+                              .yaw_offset = motion_calib_.yaw_offset(), .dk_wheel = motion_calib_.wheel_mismatch(),
+                              .k_ww = motion_calib_.wheel_omega_scale()};
         res.calib_carried = motion_calib_.carried();
         res.calib_dropped = motion_calib_.dropped();
     }

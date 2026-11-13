@@ -1,7 +1,7 @@
 // Task C fix round 1: the body-in-aperture evidence at the WIRE level — DoorFit::estimate_phi itself, not only the LeafChannel —
 // and the touching-a-shut-leaf case (centre ~0.25 m in front of the leaf: no evidence).
 //   g++ -std=c++23 -O1 -I/usr/include/eigen3 -I/usr/include/opencv4 tests/test_door_body_wire.cpp src/core/door_core.cpp src/core/door_fit.cpp \
-//     src/core/door_existence.cpp src/core/door_cycle_io.cpp src/door_belief.cpp src/door_model.cpp src/epistemic_planner.cpp \
+//     src/core/door_existence.cpp src/core/door_visibility.cpp src/core/existence_update.cpp src/core/door_cycle_io.cpp src/door_belief.cpp src/door_model.cpp src/epistemic_planner.cpp \
 //     src/door_frame_evidence.cpp ../common/contour_edge/contour_edge_check.cpp ../common/contour_edge/contour_edge_project.cpp \
 //     ../common/contour_edge/contour_depth_check.cpp -lzstd -lopencv_core -lopencv_imgproc -o /tmp/tdbw && /tmp/tdbw
 #include <cmath>
