@@ -55,6 +55,21 @@ int main()
         CHECK(not G.get_attrib_by_name<door_view_ledger_att>(*r).has_value());
         CHECK(not G.get_attrib_by_name<door_visit_att>(*r).has_value());
     }
+    {   // write on change: a second identical note carries nothing; one changed field carries only that field
+        NoteAttrs a;
+        a.exist_evidence = 1.f; a.place_sd = 0.1f; a.ledger = std::string("L1"); a.visit = 2;
+        NoteAttrs last;
+        const auto d1 = changed_since(a, nullptr);
+        CHECK(any_change(d1) and d1.ledger.has_value());
+        apply_changes(last, d1);
+        CHECK(not any_change(changed_since(a, &last)));
+        NoteAttrs b = a; b.exist_evidence = 1.5f; b.ledger.reset();   // ledger not re-serialised: absent, not "cleared"
+        const auto d2 = changed_since(b, &last);
+        CHECK(any_change(d2) and d2.exist_evidence.value_or(0) == 1.5f and not d2.place_sd and not d2.ledger and not d2.visit);
+        apply_changes(last, d2);
+        CHECK(last.ledger.value_or("") == "L1" and last.exist_evidence.value_or(0) == 1.5f);
+        CHECK(not any_change(changed_since(b, &last)));
+    }
     std::printf(failures == 0 ? "OK\n" : "%d FAILURES\n", failures);
     return failures == 0 ? 0 : 1;
 }

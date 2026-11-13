@@ -25,6 +25,36 @@ inline void write_memory_attrs(DSR::DSRGraph& G, DSR::Node& node, const NoteAttr
     if (a.height_sd)      G.add_or_modify_attrib_local<door_height_sd_att>(node, *a.height_sd);
     if (a.phi_sd)         G.add_or_modify_attrib_local<door_phi_sd_att>(node, *a.phi_sd);
     if (a.ledger)         G.add_or_modify_attrib_local<door_view_ledger_att>(node, std::string(*a.ledger));
-    if (a.visit)                   G.add_or_modify_attrib_local<door_visit_att>(node, *a.visit);
+    if (a.visit)          G.add_or_modify_attrib_local<door_visit_att>(node, *a.visit);
+}
+
+/// The fields of `now` that differ from what this door last had written (`last` null = the first write: all of them), as a NoteAttrs
+/// carrying only those (the rest absent, so write_memory_attrs skips them). A field absent in `now` is never written.
+[[nodiscard]] inline NoteAttrs changed_since(const NoteAttrs& now, const NoteAttrs* last)
+{
+    NoteAttrs d;
+    d.xy = now.xy; d.yaw = now.yaw; d.width = now.width; d.height = now.height; d.depth = now.depth;
+    const auto diff = [&](auto NoteAttrs::* m) { if ((now.*m).has_value() and not (last and (last->*m) == (now.*m))) d.*m = now.*m; };
+    diff(&NoteAttrs::exist_evidence); diff(&NoteAttrs::exist_physical); diff(&NoteAttrs::place_sd); diff(&NoteAttrs::height_sd);
+    diff(&NoteAttrs::phi_sd); diff(&NoteAttrs::crossed); diff(&NoteAttrs::seen_ms); diff(&NoteAttrs::sighted_ms);
+    diff(&NoteAttrs::ledger); diff(&NoteAttrs::visit);
+    return d;
+}
+
+/// Fold the fields `d` carries into `last` (what the node now holds).
+inline void apply_changes(NoteAttrs& last, const NoteAttrs& d)
+{
+    last.xy = d.xy; last.yaw = d.yaw; last.width = d.width; last.height = d.height; last.depth = d.depth;
+    const auto put = [&](auto NoteAttrs::* m) { if ((d.*m).has_value()) last.*m = d.*m; };
+    put(&NoteAttrs::exist_evidence); put(&NoteAttrs::exist_physical); put(&NoteAttrs::place_sd); put(&NoteAttrs::height_sd);
+    put(&NoteAttrs::phi_sd); put(&NoteAttrs::crossed); put(&NoteAttrs::seen_ms); put(&NoteAttrs::sighted_ms);
+    put(&NoteAttrs::ledger); put(&NoteAttrs::visit);
+}
+
+/// True when `d` (from changed_since) carries any evidence field to write.
+[[nodiscard]] inline bool any_change(const NoteAttrs& d)
+{
+    return d.exist_evidence or d.exist_physical or d.place_sd or d.height_sd or d.phi_sd or d.crossed or d.seen_ms or d.sighted_ms
+           or d.ledger or d.visit;
 }
 }  // namespace rc::door::memnote

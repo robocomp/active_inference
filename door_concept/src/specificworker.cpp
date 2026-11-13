@@ -1477,6 +1477,7 @@ void SpecificWorker::retire_instance(std::uint64_t id)
         it->second.aff_cross.remove();
         it->second.aff_close.remove();
     }
+    memory_published_.erase(id);
     fitter_->forget_node(id);
     G->delete_node(id);
 }
@@ -1894,7 +1895,7 @@ void SpecificWorker::upsert_identity(DoorIdentity row, float width_m, float weig
 
 // What a FITTED door leaves behind to be restored from: its aperture pose and size (room frame), its existence belief,
 // and its leaf memory — the same quantities the crossed door carries across (EntryMirror), here in the room frame.
-SpecificWorker::DoorIdentity SpecificWorker::identity_of(const rc::DoorInstance& inst) const
+SpecificWorker::DoorIdentity SpecificWorker::identity_of(const rc::DoorInstance& inst, bool with_ledger) const
 {
     const auto& s = inst.model.state();
     DoorIdentity row;
@@ -1905,7 +1906,7 @@ SpecificWorker::DoorIdentity SpecificWorker::identity_of(const rc::DoorInstance&
     row.exist_logodds = rc::door::remembered_logodds(inst);   // review I-1 / Task 8: the evidence, without the structural prior
     row.exist_physical = rc::door::remembered_physical(inst);
     if (inst.belief.crossed) row.crossed = true;
-    if (not inst.belief.ledger.views().empty()) row.ledger = inst.belief.ledger.serialise();   // the views it came from (spec §3.7)
+    if (with_ledger and not inst.belief.ledger.views().empty()) row.ledger = inst.belief.ledger.serialise();   // the views it came from (spec §3.7)
     row.visit = inst.place_visit;
     if (inst.last_detection_wall_ms > 0)
     {
@@ -2640,10 +2641,24 @@ void SpecificWorker::step_pragmatic_affordances(rc::DoorInstance& inst)
                                or (passage_anchor_.has_value()
                                    and (passage_anchor_->door_id == inst.node_id or passage_anchor_->door_name == inst.node_name));
     scene_graph_->write_interaction_state(node_opt.value(), st);
-    // The existence memory rides the same update_node: what the CSV row holds, on the node, so ltsm archives it with the room.
+    // The existence memory rides the same update_node, and only what CHANGED: the ledger string (O(views) formats, KBs on the wire)
+    // is rebuilt only when ViewLedger::version() / its view count moved since the last write.
     if (inst.ai2_initialized and not inst.is_bearing_hypothesis)
-        scene_graph_->write_memory_state(node_opt.value(),
-            rc::door::memnote::note_of(identity_of(inst), std::sqrt(std::max(0.0f, inst.ai2_belief.covariance()(2, 2)))));
+    {
+        auto& pub = memory_published_[inst.node_id];
+        const auto& led = inst.belief.ledger;
+        const bool ledger_moved = not pub.has_ledger_sig or pub.ledger_version != led.version() or pub.ledger_views != led.views().size();
+        // covariance()(2, 2) is the height: theta = [s, w, h, d]
+        auto now = rc::door::memnote::note_of(identity_of(inst, ledger_moved),
+                                              std::sqrt(std::max(0.0f, inst.ai2_belief.covariance()(2, 2))));
+        const auto d = rc::door::memnote::changed_since(now, pub.has_ledger_sig ? &pub.last : nullptr);
+        if (rc::door::memnote::any_change(d))
+        {
+            scene_graph_->write_memory_state(node_opt.value(), d);
+            rc::door::memnote::apply_changes(pub.last, d);
+        }
+        pub.ledger_version = led.version(); pub.ledger_views = led.views().size(); pub.has_ledger_sig = true;
+    }
     G->update_node(node_opt.value());
 
     // The public assertion about this doorway, decided on the SAME measurement the offers below use.
@@ -4872,6 +4887,7 @@ void SpecificWorker::del_node_slot(std::uint64_t id)
         //  (or its name is cached), so the row lands under the right room.
         if (it->second.ai2_initialized and not it->second.is_bearing_hypothesis)
             upsert_identity(identity_of(it->second), it->second.model.state().w, identity_weight(it->second));
+        memory_published_.erase(id);
         fitter_->instances().erase(it);
         if (const auto m = door_memo_.find(id); m != door_memo_.end())
         {

@@ -75,6 +75,7 @@ public:
         if (best != npos) return best;
         View v; v.key = {bearing, range, visit};
         views_.push_back(v);
+        ++version_;
         return views_.size() - 1;
     }
     /// The view a frame WOULD join (npos: none yet), without opening one: the ricoh's missed frames are logged against it, not observed.
@@ -89,6 +90,7 @@ public:
     {
         if (v >= views_.size()) return;
         if (c == Channel::Ricoh and not (hit_w > 0.f)) return;   // ★RICOH IS HITS ONLY (Pablo 2026-11-08): a frame without a detection is no trial
+        ++version_;
         auto& a = views_[v].bern[c == Channel::Ricoh ? 1 : 0];
         a.n += 1; a.sum_q += q; a.sum_hit_w += hit_w; a.sum_f += false_alarm_eff(m, q);
         if (q > 0.f) a.hit_c = hit_llr(q, m, 1.f);
@@ -97,6 +99,7 @@ public:
     void add_geometry(std::size_t v, float x, float w, float mu0, float mu1, float s2)
     {
         if (v >= views_.size() or not (s2 > 0.f)) return;
+        ++version_;
         auto& g = views_[v].geo;
         g.n += 1; g.sum_x += double(w) * x; g.sum_w += w; g.mu0 = mu0; g.mu1 = mu1; g.s2 = s2;
     }
@@ -109,16 +112,18 @@ public:
     void add_support(std::size_t v, float x, float w, const SupportModel& m, float q = 1.f)
     {
         if (v >= views_.size()) return;
+        ++version_;
         auto& s = views_[v].sup;
         s.n += 1; s.sum_x += double(w) * x; s.sum_w += w; s.sum_q += std::clamp(std::isfinite(q) ? q : 0.f, 0.f, 1.f); s.m = m;   // clamp: domain of a probability
     }
-    void add_actuation(std::size_t v, float llr) { if (v < views_.size()) views_[v].actuation_llr += llr; }
+    void add_actuation(std::size_t v, float llr) { if (v < views_.size()) { views_[v].actuation_llr += llr; ++version_; } }
 
     /// Recompute view v's llr from its aggregate (replacing the old one). Returns the CHANGE in sum().
     float recompute(std::size_t v, bool geometry_may_refute)
     {
         if (v >= views_.size()) return 0.f;
         View& w = views_[v];
+        ++version_;
         float l = 0.f;                          // the perceptual channels; actuation joins it at the end, kept apart (place_belief.h)
         for (std::size_t i = 0; i < w.bern.size(); ++i)
         {
@@ -162,6 +167,8 @@ public:
     /// The physical part of the ledger: actuation (opened on command / failed attempts). Only a physical test separates a door from a look-alike.
     [[nodiscard]] float physical_sum() const { float s = 0.f; for (const auto& v : views_) s += v.llr - v.llr_percept; return s; }
     [[nodiscard]] std::span<const View> views() const { return views_; }
+    /// Bumped on every mutation: a cheap signature, so a caller serialises (O(views) formats) only when the ledger changed.
+    [[nodiscard]] std::uint64_t version() const { return version_; }
 
     [[nodiscard]] std::string serialise() const
     {
@@ -255,5 +262,6 @@ private:
     }
 
     std::vector<View> views_;
+    std::uint64_t version_ = 0;
 };
 }  // namespace rc::door::core

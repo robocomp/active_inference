@@ -231,7 +231,7 @@ private:
     // note_identity with the full row (pose, existence, leaf); `weight` = P(the writer is this hole's door), its P(exists)
     void upsert_identity(DoorIdentity row, float width_m, float weight);
     float identity_weight(const rc::DoorInstance& inst) const;
-    DoorIdentity identity_of(const rc::DoorInstance& inst) const;      // a FITTED door's restorable row (current room)
+    DoorIdentity identity_of(const rc::DoorInstance& inst, bool with_ledger = true) const;      // a FITTED door's restorable row (current room)
     /// A door removed for absence stays in the table as a REMOVED row (spec §3.7: rows are never forgotten; "no door here" is the
     /// prior of any candidate at that place). It is not restored and not looked at.
     void mark_identity_removed(const rc::DoorInstance& inst, std::int64_t now_wall_ms);
@@ -406,6 +406,10 @@ private:
     // Every fitted door's memo, refreshed each cycle; a door deleted with its room moves to lost_doors_ until the
     // next room switch, which recreates the one the robot just went through when nothing else carried it across.
     std::unordered_map<std::uint64_t, EntryMirror> door_memo_;
+    /// What each door node's memory attributes last held (door node id -> fields + the ledger signature they were serialised at):
+    /// the per-cycle publish writes only what changed, and serialises the ledger only when its version moved.
+    struct MemoryPublished { rc::door::memnote::NoteAttrs last; std::uint64_t ledger_version = 0; std::size_t ledger_views = 0; bool has_ledger_sig = false; };
+    std::unordered_map<std::uint64_t, MemoryPublished> memory_published_;
     std::vector<EntryMirror> lost_doors_;
     void remember_door(const rc::DoorInstance& inst);
     std::optional<std::pair<std::uint64_t, EntryMirror>> recreate_lost_door(std::uint64_t new_room);

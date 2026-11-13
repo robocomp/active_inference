@@ -29,3 +29,9 @@ target_compile_definitions(test_door_memory_graph PRIVATE SHADOW_JSON="${CMAKE_C
 target_compile_options(test_door_memory_graph PRIVATE -O0)
 target_link_libraries(test_door_memory_graph PRIVATE Eigen3::Eigen Qt6::Core dsr_api dsr_core fastcdr fastdds)
 add_test(NAME door_memory_graph COMMAND test_door_memory_graph)
+
+# Timing only (prints us/cycle): the per-cycle memory publish, serialise-always vs write-on-change. Run: ./bench_door_memory_publish
+add_executable(bench_door_memory_publish bench_door_memory_publish.cpp)
+target_include_directories(bench_door_memory_publish PRIVATE ../src ../src/core ../../common ../../common/media_transport)
+target_compile_options(bench_door_memory_publish PRIVATE -O2)
+target_link_libraries(bench_door_memory_publish PRIVATE Eigen3::Eigen Qt6::Core dsr_api dsr_core fastcdr fastdds)
