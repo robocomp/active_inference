@@ -135,14 +135,12 @@ EpistemicProposal EpistemicPlanner::compute(const RefrigeratorBelief& belief, fl
     // Rᵢ = σ_base² + (lat_rate·d)² — range-aware, so the same face is worth less from further away. rc::nbv
     // calls this at each face's own stand-off, so the trade "further ⇒ detectable but less informative" is
     // resolved with the real numbers on both sides instead of one shared range.
-    const Eigen::Matrix<float, 6, 6> I6 = Eigen::Matrix<float, 6, 6>::Identity();
     const auto raw_gain = [&](int face_idx, float standoff) -> float
     {
         const float Ri = sigma_base * sigma_base + (lat_rate * standoff) * (lat_rate * standoff);
         const Eigen::Matrix<float, 6, 6> dI =
             belief.predicted_information(sample_face_surface(s, face_idx), Ri).topLeftCorner<6, 6>();
-        const float det = (I6 + S * dI).determinant();
-        return std::max(0.0f, 0.5f * std::log(std::max(1e-9f, det)));   // single-view D-optimal info (nats)
+        return std::max(0.0f, rc::nbv::d_optimal_gain<6>(S, dI));   // single-view D-optimal info (nats)
     };
 
     // ★The room polygon is what kills the through-the-wall faces. A refrigerator is wall-anchored, so its back
@@ -151,17 +149,14 @@ EpistemicProposal EpistemicPlanner::compute(const RefrigeratorBelief& belief, fl
     // pose and such a face can win outright; nothing downstream refuses it either, because an unroutable goal
     // is REPAIRED, not rejected. Passing it turns "the target is behind the wall" into "that face is not a
     // viewpoint", which is a feasibility fact, not a preference.
-    const rc::nbv::Plan plan = rc::nbv::plan_faces(target, sensor, kRobotRadiusM, obstacles, raw_gain,
-                                                   room_polygon);
-    if (not plan.valid)
-        return {};
-    // ★NO USABLE FACE ⇒ REFUSE, never publish the hint. `plan.best_pos` is then the raw argmax, which for a
-    // wall-anchored box is a pose behind the wall. Publishing it hands the controller an unroutable standpoint,
-    // and the controller REPAIRS rather than rejects: nearest_reachable is measured from the robot, so the goal
-    // snaps to the nearest occupiable cell — the floor right at the fridge. An invalid proposal makes the caller
-    // hold_offered() instead, which is the honest answer: "no viewpoint from here". (door_concept already does
-    // this; the refrigerator did not, so the refusal path did not exist on this side.)
-    if (not plan.any_usable)
+    // The shared core (common/nbv/countable_planner.h): plan_faces, REFUSE on no usable face (the raw argmax would
+    // stand in the wall and the controller would repair it to the floor at the object), scale the winner by the
+    // useful fraction of its raw information (adequacy gap to Σ*), refuse a non-finite result.
+    const rc::nbv::CountableInputs in{sensor, kRobotRadiusM, obstacles, room_polygon};
+    const auto useful = [&](float raw)
+    { return rc::nbv::useful_fraction(kRefrigeratorDofs, [&](std::size_t j) { return S(j, j); }, raw); };
+    const auto res = rc::nbv::plan_countable(target, in, raw_gain, useful);
+    if (res.refused_no_usable_face)
     {
         static int shouted = 0;
         if (shouted++ < 5)
@@ -169,20 +164,13 @@ EpistemicProposal EpistemicPlanner::compute(const RefrigeratorBelief& belief, fl
                        "outside the room. REFUSING (the raw argmax would stand in the wall).\n");
         return {};
     }
-
+    if (not res.proposal.valid)
+        return {};
+    const rc::nbv::Plan& plan = res.plan;
     const int   bi        = plan.best_face;
     const float best_raw  = plan.face_raw_gains[bi];
-    // SCALAR affordance value (epistemic_gain): the winning face's EXPECTED info (already P(detect)-weighted,
-    // and 0 if the pose stands inside another object) BOUNDED by the adequacy gap to Σ*, so it → 0 as the belief
-    // reaches the consumer's precision — a threshold-free "done" AND the cross-affordance EFE currency.
-    // Information beyond Σ* is worthless to the consumer, so an adequate refrigerator stops attracting.
-    // The bound applies to the USEFUL fraction of the raw information; the detection weighting rides along
-    // untouched, which is what makes the old p_observable=1.0 stub finally a real number.
-    const float useful_frac = (best_raw > 1e-9f) ? std::min(best_raw, adequacy_gap) / best_raw : 0.0f;
-    const float best_gain   = plan.face_gains[bi] * useful_frac;
+    const float best_gain = res.proposal.epistemic_gain;
 
-    // Verification readout (throttled): the chosen face should be perpendicular to Σ's dominant
-    // uncertainty direction — e.g. dom-unc = h ⇒ a ±y face wins. Confirms the NBV attacks the worst DOF.
     static int dbg = 0;
     if (++dbg % 30 == 0)
     {
@@ -216,7 +204,8 @@ EpistemicProposal EpistemicPlanner::compute(const RefrigeratorBelief& belief, fl
                    plan.face_p_detect[0], plan.face_p_detect[1], plan.face_p_detect[2], plan.face_p_detect[3]);
     }
 
-    EpistemicProposal proposal{plan.best_pos.x(), plan.best_pos.y(), plan.best_yaw, best_gain, true};
+    EpistemicProposal proposal{res.proposal.epistemic_target_x_m, res.proposal.epistemic_target_y_m,
+                               res.proposal.epistemic_target_yaw_rad, best_gain, true};
     // Object-relative viewpoint constraint (authoritative): publish ALL four faces with their EXPECTED per-face
     // gains (the ranking — P(detect)-weighted so an undetectable face cannot out-bid travel cost, and NOT
     // adequacy-clamped, else they tie) + the winning face's stand-off band + the framing the servo must drive

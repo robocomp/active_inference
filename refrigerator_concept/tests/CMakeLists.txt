@@ -13,3 +13,10 @@ target_compile_definitions(refrigerator_card_test PRIVATE AGENT_DIR="${CMAKE_CUR
 target_compile_options(refrigerator_card_test PRIVATE -O2)
 target_link_libraries(refrigerator_card_test PRIVATE Eigen3::Eigen)   # the I4 end-to-end case runs the evaluator
 add_test(NAME refrigerator_card_test COMMAND refrigerator_card_test)
+
+# Phase 0 Task 13: the planner on the shared core (common/nbv/countable_planner.h) vs a verbatim pre-task copy.
+# Run: LANG=es_ES.UTF-8 ./planner_ab_test
+add_executable(planner_ab_test planner_ab_test.cpp legacy_epistemic_planner.cpp ../src/epistemic_planner.cpp ../src/refrigerator_belief.cpp)
+target_include_directories(planner_ab_test PRIVATE . ../src ../../common ../../common/media_transport)
+target_compile_options(planner_ab_test PRIVATE -O2)
+target_link_libraries(planner_ab_test PRIVATE Eigen3::Eigen)

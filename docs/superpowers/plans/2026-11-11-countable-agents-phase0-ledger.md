@@ -164,6 +164,15 @@ identical (pose, gain, face_gains, standoff band, framing, chosen_*, vfov, σ*).
    changed; unifying is a behaviour change and a modelling choice (cap the EXPECTED information at what is still
    wanted, vs. discount it by the useful fraction of the RAW information), so it is not made here.
 
+### Task 13 — refrigerator planner on the shared core
+
+**No behaviour difference:** `planner_ab_test` (the table harness adapted: tall 0.7×0.65 box, no discrete mode call),
+21 states, 20 valid, every controller-read field identical. Refrigerator already used chair's useful-fraction form,
+without the `any_sigma_star` guard; it publishes σ* on every DOF, so the core's guard is inert and the number is the
+same. Keeps its own `EpistemicProposal` (object-relative fields), like table. Its early "incomplete sensor model" log is
+kept (plan_faces refuses the same case silently). Harness note: the near-wall room is 9 m deep because a 1.7 m box's
+stand-off does not fit in the 4 m room the table harness used (all three refused there, by both planners).
+
 ## Rulings
 
 (none yet)
