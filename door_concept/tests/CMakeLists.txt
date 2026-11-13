@@ -13,3 +13,10 @@ target_compile_definitions(door_card_test PRIVATE AGENT_DIR="${CMAKE_CURRENT_LIS
 target_compile_options(door_card_test PRIVATE -O2)
 target_link_libraries(door_card_test PRIVATE Eigen3::Eigen)
 add_test(NAME door_card_test COMMAND door_card_test)
+
+# Door memory codec: IdentityRow <-> door-node attributes; header-only, no Qt/DSR. Run: ./test_door_memory_note
+add_executable(test_door_memory_note test_door_memory_note.cpp)
+target_include_directories(test_door_memory_note PRIVATE ../src)
+target_compile_options(test_door_memory_note PRIVATE -O1)
+target_link_libraries(test_door_memory_note PRIVATE Eigen3::Eigen)
+add_test(NAME door_memory_note COMMAND test_door_memory_note)
