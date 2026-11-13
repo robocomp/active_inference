@@ -221,6 +221,55 @@ relative drop, −30%); the other 2 are identical (p = 1 or the gap does not bin
 framing, chosen_* and σ* are identical on every state; the harness enforces "gain only, never higher" for listed states.
 Live effect: a table whose best face has a low P(detect) bids a little less for a visit.
 
+## Task 17 — live validation (2026-11-13)
+
+Two runs, Webots claimed from room-concept-d7 / chat and released after. Fleet = rt-build (room, controller, door,
+residual, ltsm) + retina; object agents chair, table, hood, refrigerator, cabinet from this worktree + main `ltom_agent`.
+Logs: `room_concept/estimation_scripts/crossing/{phase0_live1,phase0_warm1}/logs/` (main checkout).
+- **phase0_live1** — `explore_tour.sh`, Estimate mode, empty memory: room_1 → room_2 → room_3 → room_1 re-entered through a
+  second door (room_4 adopted as room_1 by recognition). DONE in 306 s.
+- **phase0_warm1** — `warm_start_tour.sh` with fixture `three_rooms_door0` (owner: load the stored layouts): room_1 → room_2 →
+  room_3 → room_2 → room_1, 4/4 legs. Object agents started late (the legs ran 30/19/20/36 s), so room_1 had little time.
+
+**Bottle NOT run:** it SIGSEGVs at load, in `libIceStorm.so.37` static init (`IceMX::TopicMetrics::ice_factory`), before
+`main`. The main checkout's bottle binary (built 11-10) crashes identically ⇒ environment, not Phase 0. Bottle is unvalidated live.
+
+(a) **Left-behind + recall: HOLDS.** live1: `chair_49` and `refrigerator_1` dropped on leaving room_1; on return
+`RESURRECT chair_49` (same uid 21990232555569, p .74) and `RESURRECT refrigerator_1` (uid 24189255811073, p .98). warm1:
+`chair_50` dropped twice and resurrected with the same uid both times. ⚠ `hood_1` (live1) was killed by the NEW out-of-room
+existence term (`[existence] OUTSIDE room at (-1.42,2.27) L=-4.00`) while room_1's Estimate-mode outline was still partial,
+then dropped; it was not recalled (no later hood birth). See finding 2.
+
+(b) **The chair_39 premise was WRONG — the births are correct.** Both runs re-born the chair at room_2 frame ≈(−2.5,−0.6)
+(`chair_50`) — the chair_39 spot. Ground truth (`wbt_rooms.rooms()`, Webots walls): `chair(3)` at world (−7.43, 8.51) lies INSIDE
+the room behind DOOR_1 (our room_2, the L room; wbt_rooms calls it room_3) — in the L's arm, x∈[−8.39,…] y∈[7.20,…]; it is in
+no ground-truth room_1. The stored room_2 layout (fixture) has that arm: (−3.57,−2.06)…(−1.6,−1.14) in room_2's frame, and
+the point is inside it. Task 2's "a room_1 chair seen through the door" came from the tour scripts' `side_of` rule (below the
+DOOR_1 line ⇒ room_1), which is wrong for the arm. No room_1 object was born in room_2 in either run.
+
+(c) **Not exercised at a crossing:** room_2 had an outline the moment it became the working room in both runs (a proto
+outline in Estimate mode, the stored layout in warm mode), so no crossing ever deferred. `births HELD` did fire when a room node
+lost its outline (live1 re-entry swap; both runs at shutdown) — `released` was not observed before the runs ended.
+
+(d) **Rates:** hood / refrigerator / cabinet median 11 Hz, p10 10 Hz (Compute period 100 ms ⇒ nominal 10); room_concept 20 Hz;
+retina 39–40 Hz; controller median 18.1–18.3 Hz, p10 17.1 (the provisional baseline line read 19.1–19.5). chair and table print
+no rate line in this config ⇒ unmeasured. The Task 1 unmodified-agent baseline was never run, so "no worse than baseline"
+is not established for the object agents.
+
+### Findings for the owner (live)
+
+1. **Estimate-mode outlines are partial, and the new containment treats them as the room.** live1: the re-entered room_1
+   (a proto) suppressed a real table at (−1.9,−1.9) ~40 times (`OUTSIDE — suppressed`, every maturation), and the out-of-room
+   existence term killed `hood_1` against room_1's growing outline. With stored layouts (warm1) neither happened. A proto /
+   still-growing outline is uncertain, and the rule uses it as exact. Model-level fix (not a gate): give the outline an
+   uncertainty (room_concept's own boundary σ, large for a proto) and make Suppress / out-of-room a PROBABILITY of being
+   outside under it, so a partial outline barely acts. Not done.
+2. **Log spam:** the "(room, outline) changed" line fires on every vertex-count change, many per second in Estimate mode.
+3. Kitchen cabinet run grows into the fridge (owner, live) — queued separately (memory: cabinet free space).
+
+**Phase 0 is NOT done by its own definition:** (a) holds; (b) holds trivially (its premise was wrong); (c) not exercised;
+(d) partly measured; bottle not run. Not merged.
+
 ## Rulings
 
 Owner 2026-11-13, on the Task 14 questions:
