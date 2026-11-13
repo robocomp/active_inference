@@ -212,6 +212,15 @@ camera-on-bottle) — 18 valid, all identical.
 adequacy gap — it never applies `useful_fraction`, so a well-resolved bottle keeps bidding p·raw. Every other agent with
 a σ* bounds it. Applying it is a behaviour change (bottle's bid falls to 0 once adequate).
 
+### Table gain formula (owner ruling 3, after Task 15)
+
+Table's scalar gain is now `p·min(raw, gap)` (the core's `useful_fraction`), replacing `min(p·raw, gap)`. **Behaviour
+difference, gain only:** in `planner_ab_test`, 18 of 20 valid states change; every one is LOWER (fresh priors 16.1 → 14.9;
+after 1 update 12.1 → 11.0 and 2.10 → 2.03; converged 0.476 → 0.459; small square table 0.997 → 0.693, the largest
+relative drop, −30%); the other 2 are identical (p = 1 or the gap does not bind). Poses, face gains, stand-off band,
+framing, chosen_* and σ* are identical on every state; the harness enforces "gain only, never higher" for listed states.
+Live effect: a table whose best face has a low P(detect) bids a little less for a visit.
+
 ## Rulings
 
 Owner 2026-11-13, on the Task 14 questions:

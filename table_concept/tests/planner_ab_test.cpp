@@ -1,4 +1,4 @@
-// planner_ab_test — Phase 0 Task 12: table's EpistemicPlanner on the shared core (rc::nbv::plan_countable) vs a
+// planner_ab_test — Phase 0 Task 12 (+ the owner's gain-formula change, 2026-11-13): table's EpistemicPlanner on the shared core (rc::nbv::plan_countable) vs a
 // VERBATIM pre-task copy (tests/legacy_epistemic_planner.*, namespace rc::legacy). ≥ 20 belief states through
 // TableBelief's own API; every field the controller reads is compared. A difference FAILS unless listed in
 // kExpectedDifferences with a reason. Run: LANG=es_ES.UTF-8 ./planner_ab_test
@@ -19,7 +19,14 @@ namespace
 {
 struct Case { std::string name; TableBelief belief; std::vector<nbv::Obstacle> obstacles; std::vector<Eigen::Vector2f> room; };
 
-const std::vector<std::pair<int, const char*>> kExpectedDifferences = {};
+// Owner 2026-11-13: table's gain moves from min(p·raw, gap) to p·min(raw, gap). Only epistemic_gain may differ, and it
+// can only FALL (p ≤ 1 ⇒ p·min(raw, gap) ≤ min(p·raw, gap)); equal where p = 1 or the gap does not bind. The check
+// below enforces exactly that for listed states.
+constexpr const char* kExpectation = "gain p*min(raw,gap) replaces min(p*raw,gap) (owner 2026-11-13): gain only, never higher";
+const std::vector<std::pair<int, const char*>> kExpectedDifferences = {
+    {0, kExpectation}, {1, kExpectation}, {2, kExpectation}, {3, kExpectation}, {4, kExpectation}, {5, kExpectation},
+    {6, kExpectation}, {7, kExpectation}, {8, kExpectation}, {9, kExpectation}, {10, kExpectation}, {11, kExpectation},
+    {12, kExpectation}, {13, kExpectation}, {15, kExpectation}, {16, kExpectation}, {17, kExpectation}, {18, kExpectation}};
 
 std::vector<Eigen::Vector2f> rect(float x0, float x1, float y0, float y1) { return {{x0, y0}, {x1, y0}, {x1, y1}, {x0, y1}}; }
 
@@ -144,6 +151,20 @@ int main()
         valid += a.valid ? 1 : 0;
         const char* reason = nullptr;
         for (const auto& [k, why] : kExpectedDifferences) if (k == i) reason = why;
+        if (reason != nullptr and not same)
+        {   // the listed difference is the GAIN only, and it never rises
+            auto b2 = b; b2.epistemic_gain = a.epistemic_gain;
+            bool rest = a.valid == b2.valid and b.epistemic_gain <= a.epistemic_gain * (1.0f + 1e-6f)
+                and near(a.epistemic_target_x_m, b2.epistemic_target_x_m, 1e-4f) and near(a.epistemic_target_y_m, b2.epistemic_target_y_m, 1e-4f)
+                and near(a.epistemic_target_yaw_rad, b2.epistemic_target_yaw_rad, 1e-4f)
+                and near(a.standoff_min_m, b2.standoff_min_m, 1e-5f) and near(a.standoff_max_m, b2.standoff_max_m, 1e-5f)
+                and near(a.framing_fill, b2.framing_fill, 1e-6f) and near(a.chosen_standoff_m, b2.chosen_standoff_m, 1e-5f)
+                and near(a.chosen_p_detect, b2.chosen_p_detect, 1e-6f) and near(a.chosen_fill, b2.chosen_fill, 1e-6f)
+                and near(a.sensor_vfov_rad, b2.sensor_vfov_rad, 1e-7f);
+            for (int k = 0; k < 4; ++k) rest = rest and near(a.face_gains[k], b2.face_gains[k], 1e-5f * std::max(1.0f, std::abs(a.face_gains[k])));
+            for (int k = 0; k < 6; ++k) rest = rest and a.sigma_star[k] == b2.sigma_star[k];
+            if (not rest) reason = nullptr;   // something other than a lower gain ⇒ a real, unlisted difference
+        }
         std::printf("  [%2d] %-40s %s%s\n", i, c.name.c_str(), same ? "same" : (reason ? "EXPECTED: " : "DIFF"), reason ? reason : "");
         if (not same)
             std::printf("       legacy v=%d (%.4f,%.4f,%.4f) g=%.6f | new v=%d (%.4f,%.4f,%.4f) g=%.6f\n",

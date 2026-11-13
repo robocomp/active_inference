@@ -114,10 +114,15 @@ EpistemicProposal EpistemicPlanner::compute(const TableBelief& belief, float lat
 
     // The shared core (common/nbv/countable_planner.h): plan_faces, REFUSE on no usable face (the raw argmax would
     // stand in the wall and the controller would repair it to the floor at the object), refuse a non-finite result.
-    // `useful` = 1: table bounds its gain by the adequacy gap BELOW, as min(expected, gap) — not the core's
-    // useful_fraction form (chair's). The two formulas differ; which one is right is an OPEN owner question (ledger).
+    // SCALAR affordance value (epistemic_gain) = the EXPECTED information still worth having: a look yields `raw` nats
+    // with probability p (a detection) or nothing, and only the part up to the adequacy gap to Σ* is useful, so its
+    // value is p·min(raw, gap) — the core's useful_fraction. It → 0 as the belief reaches the consumer's precision (a
+    // threshold-free "done" and the cross-affordance EFE currency). Owner 2026-11-13: replaces min(p·raw, gap), which
+    // capped the expectation AFTER averaging and so over-valued a risky look (p=.5, raw=10, gap=1 → 1 instead of .5).
     const rc::nbv::CountableInputs in{sensor, robot_radius_m_, obstacles, room_polygon};
-    const auto res = rc::nbv::plan_countable(target, in, raw_gain_of, [](float) { return 1.0f; });
+    const auto useful = [&](float raw)
+    { return rc::nbv::useful_fraction(kTableDofs, [&](std::size_t j) { return S(j, j); }, raw); };
+    const auto res = rc::nbv::plan_countable(target, in, raw_gain_of, useful);
     if (res.refused_no_usable_face)
     {
         static int shouted = 0;
@@ -130,15 +135,9 @@ EpistemicProposal EpistemicPlanner::compute(const TableBelief& belief, float lat
         return {};
     const rc::nbv::Plan& plan = res.plan;
     const int   best_idx = plan.best_face;
-    const float best_raw = res.proposal.epistemic_gain;   // DETECTION-WEIGHTED — the honest expected value
+    const float best_raw  = plan.face_gains[best_idx];      // DETECTION-WEIGHTED, before the adequacy bound (logged)
+    const float best_gain = res.proposal.epistemic_gain;    // p·min(raw, gap)
 
-    // SCALAR affordance value (epistemic_gain): the winning face's info BOUNDED by the adequacy gap to Σ*, so
-    // it → 0 as the belief reaches the consumer's precision — a threshold-free "done" AND the cross-affordance
-    // EFE currency. Information beyond Σ* is worthless to the consumer, so an adequate table stops attracting.
-    // The old `p_observable = 1.0` placeholder ("the standoff is a framed viewpoint by construction") is gone:
-    // P(detect) is now REAL and already folded into best_raw by plan_faces, so a table we cannot actually get
-    // a mask of publishes a near-zero gain and stops bidding for travel.
-    const float best_gain = std::min(best_raw, adequacy_gap);
 
     // Verification readout (throttled): the chosen face should be perpendicular to Σ's dominant
     // uncertainty direction — e.g. dom-unc = h ⇒ a ±y face wins. Confirms the NBV attacks the worst DOF.
