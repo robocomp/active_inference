@@ -628,7 +628,7 @@ QJsonArray ChatSession::tools_json() const
         "Read-only.",
         QJsonObject{{"subtype", QJsonObject{{"type", "string"},
                                             {"description", "a class to filter by, in English singular (chair, table, "
-                                                            "bottle, cabinet, refrigerator, hood, person); empty = all"}}}},
+                                                            "bottle, cabinet, refrigerator, hood, nightstand, bed, toilet, person); empty = all"}}}},
         {}));
     tools.append(tool_def("where_is",
         "Where is an object: give its name (e.g. chair_1) or its class (e.g. refrigerator). Returns its room and, if it "

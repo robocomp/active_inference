@@ -227,6 +227,9 @@ Derived by reading each agent, not inferred from includes. `—` = not applicabl
 | door | ✅ tracker + 2 justified non-tracker creations *(2026-10-20, below)* | ✅ | ✅ trunc + confirm_only | ✅ `rc::exist` | ✅ | ✅ shared helper | ✅ | ✅ *(fixed; + `aff_door_look_*` 2026-10-21, below)* | — not audited (Phase 0: countable only) | — |
 | refrigerator | ✅ resurrects from ltom recall | ✅ | ✅ trunc + confirm_only | ✅ `rc::exist` | ✅ | ✅ *(now shared)* | ✅ | ✅ | ✅ | ✅ birth + existence |
 | hood *(2026-11-13, Phase 0)* | ✅ resurrects from ltom recall | ✅ | ✅ trunc + confirm_only + fixation | ✅ `rc::exist` | ✅ | ✅ shared helper | ✅ | ⚠️ `[Owns]` says `hood_concept 21`, `[Agent].id` is 17 (on main HEAD; an uncommitted fix to 17 sits in the main checkout) | ✅ | ✅ birth (wall-mounted: tolerance = depth/2) + existence |
+| nightstand *(2026-11-14, scaffold of refrigerator)* | ✅ resurrects from ltom recall | ✅ | ✅ trunc + confirm_only | ✅ `rc::exist` | ✅ (fleet-prior envelope, uncalibrated) | ✅ shared helper | ✅ | ✅ `[Owns]` = `nightstand_concept 29` | ✅ | ✅ birth (tolerance = ½·max(width, depth)) + existence |
+| bed *(2026-11-14, scaffold of refrigerator)* | ✅ resurrects from ltom recall | ✅ | ✅ trunc + confirm_only | ✅ `rc::exist` | ✅ (fleet-prior envelope, uncalibrated) | ✅ shared helper | ✅ | ✅ `[Owns]` = `bed_concept 30` | ✅ | ✅ birth (tolerance = ½·max(width, depth)) + existence |
+| toilet *(2026-11-14, scaffold of refrigerator)* | ✅ resurrects from ltom recall | ✅ | ✅ trunc + confirm_only | ✅ `rc::exist` | ✅ (fleet-prior envelope, uncalibrated) | ✅ shared helper | ✅ | ✅ `[Owns]` = `toilet_concept 31` | ✅ | ✅ birth (tolerance = ½·max(width, depth)) + existence |
 | residual | ✅ | ✅ | — field model, no per-frame gate | ✅ `rc::exist` | — | — | ⚠️ unattributable | ✅ | — | — |
 | human | ❌ | ❌ `belief_stabilizer` | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | — | — |
 | language_agent *(2026-10-12)* | — no instances | — no belief | — | — | — | — | — | ✅ | — | — |
@@ -416,6 +419,9 @@ Current agents (read from code 2026-10-18; ⚠ = mismatch between the kind and h
 | table | count | rigid | passive | shape subtype is a count-like attribute |
 | hood | count | rigid | passive | wall-mounted: count with a support parent |
 | refrigerator | count | ⚠ rigid | passive | the door is only a *facing mode* (`resolve_front`); no door angle. Becomes articulated when the door is a joint |
+| nightstand | count | ⚠ rigid | passive | drawers are only a *facing mode* (the inherited door-seam cue); no drawer joint |
+| bed | count | rigid | passive | headboard against the wall; facing from the clearance prior only |
+| toilet | count | rigid | passive | tank against the wall; lid/seat not modelled |
 | door | count | articulated (φ) | passive | the only agent with a joint posterior (`door_phi_posterior.h`); the phantom-door / "open door = missing wall" issue is the §6.1 visibility-given-joint rule |
 | cabinet | **mass** (along the wall) | ⚠ rigid | passive | `cabinet_kitchen.h` already models runs as cells (`cell_mass`), and churn went to 0 after the kitchen-of-runs fix: the agent *discovered* it is mass. Drawers/doors are absent |
 | residual | ⚠ count | rigid | passive | unexplained occupancy is closer to *stuff*, but it is born as box units |

@@ -284,6 +284,21 @@ inline Contract default_contract_for(std::string_view object_type)
             .still  (0.10f, 0.15f)
             .stable(1).timeout_s(25).on_fail(Consume);
     }
+    if (object_type == "nightstand" or object_type == "bed" or object_type == "toilet")
+    {
+        // Bedroom / bathroom furniture (2026-11-14), scaffolded from refrigerator_concept: the same box-with-a-front
+        // agent, the same table_roi_* / table_detection_* channel its scene graph inherited, so the same lock-on.
+        // UNTUNED: the 0.45 fill is the fridge's; a 2.1 m bed reaches it from much further away than a 0.5 m
+        // nightstand, which is the right direction (stand back for a big object) but has not been watched live.
+        return Contract::servo()
+            .center ("table_roi_offset")
+            .advance("table_roi_fill", 0.45f)
+            .valid  ("table_roi_valid")
+            .until  ("table_detection_alive",      GE, 0.5f)
+            .and_   ("table_detection_confidence", GE, 0.20f)
+            .still  (0.10f, 0.15f)
+            .stable(1).timeout_s(25).on_fail(Consume);
+    }
     if (object_type == "hood")
     {
         // Hood (ADE20K "hood" — the extractor over a hob). Wall-mounted and HIGH: ~1.5-2 m, well above the

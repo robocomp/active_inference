@@ -10,7 +10,7 @@
 # which commit each one ran, so a run can be traced back to the code.
 B=/home/pbustos/robocomp/components/active_inference
 WT=${WT:-/home/pbustos/robocomp/components/active_inference.worktrees/phase0}
-CONCEPT_AGENTS=${CONCEPT_AGENTS:-"chair_concept table_concept bottle_concept hood_concept refrigerator_concept cabinet_concept"}
+CONCEPT_AGENTS=${CONCEPT_AGENTS:-"chair_concept table_concept bottle_concept hood_concept refrigerator_concept cabinet_concept nightstand_concept bed_concept toilet_concept"}
 ALL="$CONCEPT_AGENTS"; [ -n "$LTOM" ] && ALL="$ALL ltom_agent"
 comm_of() { echo "${1:0:15}"; }   # the kernel's process name is the first 15 characters (pgrep/pkill -x match it)
 

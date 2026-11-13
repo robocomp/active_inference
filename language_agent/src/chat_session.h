@@ -126,7 +126,8 @@ struct SessionConfig
     // agent_control (fleet_control.h): the agents the chat may start / stop, each as <fleet_dir>/<agent>/bin/<agent>
     std::string fleet_dir = "..";
     std::string fleet_agents = "room_concept,residual_concept,retina,door_concept,table_concept,chair_concept,"
-                               "bottle_concept,cabinet_concept,hood_concept,human_concept,refrigerator_concept,controller,"
+                               "bottle_concept,cabinet_concept,hood_concept,human_concept,refrigerator_concept,nightstand_concept,"
+                               "bed_concept,toilet_concept,controller,"
                                "ltsm_agent,episodic_agent";
     std::string fleet_confirm = "controller,retina";
     std::string fleet_lock;               ///< "" ⇒ $XDG_RUNTIME_DIR/ai_fleet_tour.lock (the tour scripts hold it)
