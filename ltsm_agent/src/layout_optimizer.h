@@ -102,6 +102,7 @@ struct Result
 {
     std::vector<Vec3> pose;                 ///< T(map <- room), per room
     std::vector<Mat3> cov;                  ///< Laplace covariance per room (zero for the fixed room)
+    std::vector<std::vector<Mat3>> cross;   ///< cross[i][j] = cov(X_i, X_j), i != j (zero on the diagonal and for a fixed room)
     std::vector<double> p_manhattan;        ///< P(room square to ψ | optimum); −1 where the room has no outline
     std::vector<double> seam_d2;            ///< Mahalanobis² of each seam at the optimum
     std::vector<double> seam_p_inlier;      ///< P(seam right | optimum); 1 for a seam with no outlier component

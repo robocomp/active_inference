@@ -311,6 +311,14 @@ void SpecificWorker::initialize()
                 "recognise which known room the provisional room behind a fresh door is (posterior + staged commit requests)"))
         {
             recognizer_ = std::make_unique<ltsm::RoomRecognizer>(G_dsr, G_ltsm, *evictor);
+            // Candidates are placed by the MAP layout when one is solved (owner 2026-11-12). It is solved by the Topology
+            // dock (1 s refresh, re-solved on a structure change); without the dock or with Layout.optimize off the
+            // recognizer keeps the seam chains and says so in its log.
+            recognizer_->set_layout_source([this]() -> const ltsm::topo::LayoutCache *
+            {
+                if (topology_view_ == nullptr or not topology_view_->optimising()) return nullptr;
+                return &topology_view_->layout();
+            });
             if (const int n = recognizer_->sweep_stale(); n > 0)
                 qInfo() << "[recog] swept" << n << "stale recognition/place_evidence node(s) from a previous run";
             swap_ = std::make_unique<ltsm::RoomSwap>(G_dsr, G_ltsm, *evictor);

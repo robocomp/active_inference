@@ -5,6 +5,7 @@
 #include "../../common/room_transition/exit_fact.h"   // link 4: write_archived
 #include "room_eviction.h"
 #include "seam_fusion.h"
+#include "face_prior.h"
 
 #include "../../common/room_resolve/room_resolve.h"   // rc::room::is_proto
 #include "../../common/interaction_anchor/interaction_anchor.h"   // rc::interaction::is_anchor
@@ -1397,16 +1398,14 @@ std::optional<ltsm::seam::Measured> seam_measured_through_passage(DSR::DSRGraph 
     const auto ft = mem.get_node(r->face_to), ff = mem.get_node(r->face_from);
     if (not ft.has_value() or not ff.has_value()) return std::nullopt;
     // Each face's pose in its room with the covariance its RT chain states. A face whose OWN edge states none (a derived
-    // face, or one door_concept wrote without) is as accurate as a remembered seam: the flagged kRemembered sigmas.
+    // face, or one door_concept wrote without) gets face_prior.h's covariance, oriented along its wall in the room frame.
     const auto face = [&](std::uint64_t room_id, const DSR::Node &f) -> std::optional<ltsm::seam::Measured>
     {
         bool leaf = false;
         auto m = pose_in_room(mem, room_id, f, leaf);
         if (not m.has_value()) return std::nullopt;
         if (leaf) ++stated_faces;
-        else m->cov.diagonal() += ltsm::seam::Vec3(kRememberedSigmaXY * kRememberedSigmaXY,
-                                                   kRememberedSigmaXY * kRememberedSigmaXY,
-                                                   kRememberedSigmaYaw * kRememberedSigmaYaw);
+        else m->cov += ltsm::seam::unstated_face_cov(m->pose.z());
         return m;
     };
     const auto m_to = face(rt->id(), ft.value()), m_from = face(rf->id(), ff.value());

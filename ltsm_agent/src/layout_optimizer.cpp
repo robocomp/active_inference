@@ -588,6 +588,12 @@ Result solve_from(const std::vector<Room> &rooms, const std::vector<Seam> &seams
         const Eigen::MatrixXd S = H.completeOrthogonalDecomposition().pseudoInverse();
         for (std::size_t i = 0; i < n; ++i)
             if (col[i] >= 0) res.cov[i] = S.block<3, 3>(col[i], col[i]);
+        // The CROSS blocks too: two rooms placed by one solve are correlated (they share seams), so the pose of one in
+        // the other needs cov(Xi, Xj), not only the two marginals (room_chain: T(L <- k) for recognition).
+        res.cross.assign(n, std::vector<Mat3>(n, Mat3::Zero()));
+        for (std::size_t i = 0; i < n; ++i)
+            for (std::size_t j = 0; j < n; ++j)
+                if (i != j and col[i] >= 0 and col[j] >= 0) res.cross[i][j] = S.block<3, 3>(col[i], col[j]);
     }
 
     // ── Reports ───────────────────────────────────────────────────────────────────────────────

@@ -14,10 +14,15 @@
  * The crossed door has NO passage (that is when this runs), so the path chain ends with a FRESH seam from that door's
  * two faces, passed in; the OWN chains use only passages already in memory, so they never assume the answer.
  *
- * Covariances: a seam carries the covariance of its two door faces (the RT edge of each, when stated), else a prior of
- * ignorance (sigma 3 cm / 0.01 rad per face, the door-pose covariance the repo's seam tests already use). Memory stores
- * none today (cortex drops rt_covariance on JSON load), so the prior is what is normally read. Not a gate: a
- * covariance that enters the Gaussian whose mass inside the outline is the evidence.
+ * Covariances: a seam carries the covariance of its two door faces (the RT edge of each, when stated, rotated from the
+ * wall's frame into the room's), else face_prior.h's (the population of stated faces: 0.145 m along the wall, 0.020 m
+ * across, 1 deg). cortex restores rt_covariance on JSON load since 2026-11-12. Not a gate: a covariance that enters the
+ * Gaussian whose mass inside the outline is the evidence.
+ *
+ * WITH THE MAP LAYOUT (owner 2026-11-12; `layout` non-null and solved for L this run): the reference room becomes L,
+ * the robot in L is the fresh seam + odometry, and every room k is T(L <- k) from the layout with the joint covariance
+ * of L and k. The layout already uses every passage, loops included, so the "two chains" check above is subsumed by
+ * the posterior; rooms the layout does not hold fall back to the seam BFS.
  *
  * log_new = sum_k log(1 - P_inside_k), each P_inside_k under its own S = robot cov + cov_T(k). Treating the
  * room placements as independent is an approximation (they share seams); it is exact for disjoint, independently
@@ -28,6 +33,7 @@
  * outline's edge: smooth and monotone in d, never -inf, no switch (see region_mass).
  */
 #include "room_eviction.h"
+#include "topology_layout.h"
 #include "../../common/room_recognition/room_posterior.h"
 
 #include <Eigen/Dense>
@@ -56,6 +62,7 @@ struct KnownRoomMetric
 struct MetricQuery
 {
     std::string reference_room;
+    bool        from_layout = false;      ///< rooms placed by the MAP layout, referenced to L (else seam chains from the start)
     bool        robot_ok = false;         ///< every passage of the path resolved to a seam
     ChainPose   robot_in_ref;             ///< the robot via the path ACTUALLY taken + odometry since the last seam
     std::vector<KnownRoomMetric> rooms;
@@ -69,7 +76,7 @@ struct MetricQuery
 /// `robot_in_provisional`: the live robot pose in the PROVISIONAL room's frame (+ odometry covariance).
 MetricQuery build_metric_query(DSR::DSRGraph &mem, const std::vector<std::string> &path_passages,
                                const std::string &path_start_room, const std::optional<ChainPose> &seam_last_to_provisional,
-                               const ChainPose &robot_in_provisional);
+                               const ChainPose &robot_in_provisional, const topo::LayoutCache *layout = nullptr);
 
 /// One entry per `q.rooms` (same order). `log_new_out` = log of the mass outside every known outline (0 when the
 /// robot chain is unavailable: an unavailable expert is omitted, not zeroed).

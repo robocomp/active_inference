@@ -1,5 +1,6 @@
 #include "room_recognizer.h"
 
+#include "face_prior.h"
 #include "seam_fusion.h"
 #include "../../common/room_resolve/room_resolve.h"   // rc::room::is_proto, current_edge_room
 
@@ -31,14 +32,7 @@ using seam::Vec3;
 constexpr const char *kRecognition = "recognition";
 constexpr const char *kEvidence    = "place_evidence";
 
-// Door-pose covariance prior per FACE: the value room_chain.cpp and seam_evict_test use (3 cm, 0.01 rad). Memory stores no
-// covariance today, and a mirror whose edge states none reads as zeros; the prior is what a face that says nothing gets.
-Mat3 face_prior()
-{
-    Mat3 C = Mat3::Zero();
-    C.diagonal() << 0.03 * 0.03, 0.03 * 0.03, 0.01 * 0.01;
-    return C;
-}
+// A face that states no covariance (a mirror whose edge reads as zeros) gets face_prior.h's, in the frame its pose is in.
 
 Vec3 se2_of(const Mat::RTMat &T)
 {
@@ -107,7 +101,8 @@ std::optional<Measured> pose_in_room(DSR::DSRGraph &g, std::uint64_t room_id, co
         if (not e.has_value()) return std::nullopt;
         const auto T = rt->get_edge_RT_as_rtmat(e.value());
         if (not T.has_value()) return std::nullopt;
-        const Mat3 C = cov3_of(g, e.value()).value_or(depth == 0 ? face_prior() : Mat3::Zero());
+        const Vec3 edge_pose = se2_of(T.value());   // T(parent <- cur): the face's yaw in the parent's frame at depth 0
+        const Mat3 C = cov3_of(g, e.value()).value_or(depth == 0 ? seam::unstated_face_cov(edge_pose.z()) : Mat3::Zero());
         acc = seam::compose_cov(Measured{se2_of(T.value()), C}, acc);      // T(parent <- node) = T(parent <- cur) . T(cur <- node)
         const auto pn = g.get_node(p.value());
         if (not pn.has_value()) return std::nullopt;
@@ -527,6 +522,7 @@ RoomRecognizer::Step RoomRecognizer::step_impl()
         start_ = L_mem;
         if (not prev_passage_.empty() and not prev_mem_.empty()) { path_ = {prev_passage_}; start_ = prev_mem_; }
         qInfo().noquote() << QString::fromStdString(std::format("[recog] episode begins: provisional {} behind {} (metric filter starts neutral)", P->name(), L->name()));
+        logged_from_layout_.reset();
     }
     P_rid = live_->get_attrib_by_name<room_id_att>(P.value());
 
@@ -544,7 +540,7 @@ RoomRecognizer::Step RoomRecognizer::step_impl()
         auto fP_live = pose_in_room(*live_, P->id(), M.value());
         if (not fP_live.has_value())
             if (const auto TP = ie->get_transformation_matrix(P->name(), M->name()); TP.has_value())
-                fP_live = Measured{se2_of(TP.value()), face_prior()};
+                fP_live = Measured{se2_of(TP.value()), seam::unstated_face_cov(se2_of(TP.value()).z())};
         if (fL_live.has_value() and fP_live.has_value())
         {
             const Measured fL = fL_live.value();
@@ -577,7 +573,16 @@ RoomRecognizer::Step RoomRecognizer::step_impl()
 
     ChainPose robot_prov;
     if (robot_in_P.has_value()) robot_prov = {robot_in_P->pose, robot_in_P->cov};
-    auto q = build_metric_query(*mem_, path_, start_, robot_in_P.has_value() ? fresh : std::nullopt, robot_prov);
+    const topo::LayoutCache *layout = layout_source_ ? layout_source_() : nullptr;
+    auto q = build_metric_query(*mem_, path_, start_, robot_in_P.has_value() ? fresh : std::nullopt, robot_prov, layout);
+    if (logged_from_layout_ != q.from_layout)
+    {
+        logged_from_layout_ = q.from_layout;
+        qInfo().noquote() << QString::fromStdString(q.from_layout
+            ? std::format("[recog] candidates placed by the MAP layout (solve #{}), referenced to {}", layout->solves, q.reference_room)
+            : std::format("[recog] candidates placed by seam chains from {} ({})", q.reference_room,
+                          layout == nullptr ? "no layout" : "layout does not hold the current room yet"));
+    }
 
     // Candidates: archived rooms that are not staged (build_metric_query already drops them), not L (the crossing rules it
     // out), and not P's own twin if memory holds one. Sorted by room_id: the order retina's evidence is keyed to.

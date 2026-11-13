@@ -121,9 +121,16 @@ public:
     [[nodiscard]] const std::vector<rc::recog::Hypothesis> &posterior() const { return post_entry_; }
     [[nodiscard]] const std::vector<std::uint64_t> &candidates() const { return ids_; }
 
+    /// Where the MAP layout of memory comes from (room_chain.h: candidate rooms placed by it). Returns null when there is
+    /// none (no Topology dock, Layout.optimize off): the seam chains are used, as before.
+    using LayoutSource = std::function<const topo::LayoutCache *()>;
+    void set_layout_source(LayoutSource s) { layout_source_ = std::move(s); }
+
 private:
     std::shared_ptr<DSR::DSRGraph> live_, mem_;
     const RoomEviction &ev_;
+    LayoutSource layout_source_;
+    std::optional<bool> logged_from_layout_;    ///< the placement mode last logged this episode (logged on change only)
 
     // ── the crossing history: the memory passage the robot used to enter the current room ──
     std::string cur_mem_;                       ///< memory name of the current room, "" when unknown

@@ -3,6 +3,7 @@
  */
 #include "topology_layout.h"
 #include "room_eviction.h"   // ltsm::is_door, ltsm::seam_through_passage
+#include "face_prior.h"
 
 #include <algorithm>
 #include <chrono>
@@ -276,9 +277,26 @@ Map build(DSR::DSRGraph &mem, const std::string &anchor,
                     else
                     {
                         // The faces composed but their chains did not (no parent_att path): the mean is still the
-                        // graph's, the covariance the remembered-seam one (room_eviction.cpp kRemembered*).
+                        // graph's, the covariance that of two UNSTATED faces (face_prior.h) at the doors' own poses,
+                        // propagated through the same composition as a measured seam.
                         s.z = se2(seam_ab[k].value());
-                        s.cov = layout::Vec3(0.1 * 0.1, 0.1 * 0.1, 0.03 * 0.03).asDiagonal();
+                        const auto face_pose = [&](std::size_t d)
+                        {
+                            const Eigen::Vector2d x = doors[d].b - doors[d].a;
+                            return seam::Vec3(doors[d].centre.x(), doors[d].centre.y(), std::atan2(x.y(), x.x()));
+                        };
+                        if (p.door_a.has_value() and p.door_b.has_value())
+                        {
+                            const auto fa = face_pose(*p.door_a), fb = face_pose(*p.door_b);
+                            s.cov = seam::compose_cov({fa, seam::unstated_face_cov(fa.z())},
+                                                      seam::inverse_cov({fb, seam::unstated_face_cov(fb.z())})).cov;
+                        }
+                        else
+                        {   // no door geometry: two faces with their wall axis averaged over every direction
+                            const double v = 0.5 * (seam::kFaceSigmaAlong * seam::kFaceSigmaAlong
+                                                    + seam::kFaceSigmaNormal * seam::kFaceSigmaNormal);
+                            s.cov = 2.0 * seam::Vec3(v, v, seam::kFaceSigmaYaw * seam::kFaceSigmaYaw).asDiagonal();
+                        }
                     }
                     if (p.door_a.has_value()) s.aperture_a = std::array{doors[*p.door_a].a, doors[*p.door_a].b};
                     if (p.door_b.has_value()) s.aperture_b = std::array{doors[*p.door_b].a, doors[*p.door_b].b};
@@ -299,7 +317,13 @@ Map build(DSR::DSRGraph &mem, const std::string &anchor,
                     next.pose[map.rooms[gi].name] = res.pose[li];
                     next.cov[map.rooms[gi].name] = res.cov[li];
                     next.p_manhattan[map.rooms[gi].name] = res.p_manhattan[li];
+                    next.component[map.rooms[gi].name] = c;
                 }
+                if (res.cross.size() == members.size())
+                    for (const auto &[li, gi] : std::views::enumerate(members))
+                        for (const auto &[lj, gj] : std::views::enumerate(members))
+                            if (li != lj)
+                                next.cross[{map.rooms[gi].name, map.rooms[gj].name}] = res.cross[li][lj];
                 for (const auto &[si, k] : std::views::enumerate(ls_passage))
                 {
                     next.seam_d2[map.passages[k].name] = res.seam_d2[si];
@@ -405,6 +429,41 @@ Map build(DSR::DSRGraph &mem, const std::string &anchor,
             p.closure_m = (map.doors[*p.door_a].centre - map.doors[*p.door_b].centre).norm();
     }
     return map;
+}
+
+std::optional<Relative> map_relative(const LayoutCache &cache, const std::string &a, const std::string &b)
+{
+    const auto ca = cache.component.find(a), cb = cache.component.find(b);
+    if (ca == cache.component.end() or cb == cache.component.end() or ca->second != cb->second) return std::nullopt;
+    const auto pa = cache.pose.find(a), pb = cache.pose.find(b);
+    if (pa == cache.pose.end() or pb == cache.pose.end()) return std::nullopt;
+    const layout::Vec3 &Xa = pa->second, &Xb = pb->second;
+    Relative r;
+    if (a == b) return r;
+    // T(a <- b) = Xa^-1 Xb:  t = R(-θa)(tb - ta),  θ = θb - θa.
+    const Eigen::Vector2d d = Xb.head<2>() - Xa.head<2>();
+    r.pose << seam::rot(-Xa.z()) * d, seam::wrap(Xb.z() - Xa.z());
+    // Jacobian w.r.t. (Xa, Xb). ∂t/∂θa = -R'(-θa)·d, R'(φ) = [[-sin φ, -cos φ], [cos φ, -sin φ]].
+    const double s = std::sin(-Xa.z()), c = std::cos(-Xa.z());
+    Eigen::Matrix2d dR;  dR << -s, -c, c, -s;
+    Eigen::Matrix<double, 3, 6> J = Eigen::Matrix<double, 3, 6>::Zero();
+    J.block<2, 2>(0, 0) = -seam::rot(-Xa.z());
+    J.block<2, 1>(0, 2) = -dR * d;
+    J(2, 2) = -1.0;
+    J.block<2, 2>(0, 3) = seam::rot(-Xa.z());
+    J(2, 5) = 1.0;
+    Eigen::Matrix<double, 6, 6> S = Eigen::Matrix<double, 6, 6>::Zero();
+    const auto marg = [&](const std::string &n) { const auto it = cache.cov.find(n); return it == cache.cov.end() ? layout::Mat3::Zero().eval() : it->second; };
+    S.topLeftCorner<3, 3>() = marg(a);
+    S.bottomRightCorner<3, 3>() = marg(b);
+    if (const auto it = cache.cross.find({a, b}); it != cache.cross.end())
+    {
+        S.topRightCorner<3, 3>() = it->second;
+        S.bottomLeftCorner<3, 3>() = it->second.transpose();
+    }
+    r.cov = J * S * J.transpose();
+    r.cov = 0.5 * (r.cov + r.cov.transpose());
+    return r;
 }
 
 }   // namespace ltsm::topo

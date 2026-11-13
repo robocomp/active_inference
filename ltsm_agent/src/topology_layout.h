@@ -74,6 +74,10 @@ struct LayoutCache
     std::map<std::string, layout::Vec3> pose;         ///< room → T(map <- room), before component packing; also the
                                                       ///< initial guess of the next solve (seeded from disk at start-up)
     std::map<std::string, layout::Mat3> cov;
+    /// Filled by a solve THIS run only (a warm start from disk has neither, so map_relative() falls back): which
+    /// component each room was solved in, and cov(X_a, X_b) for every ordered pair of rooms of one component.
+    std::map<std::string, int> component;
+    std::map<std::pair<std::string, std::string>, layout::Mat3> cross;
     std::map<std::string, double> p_manhattan;
     std::map<std::string, double> seam_d2;            ///< passage → Mahalanobis² at the optimum
     std::map<std::string, double> seam_p_inlier;      ///< passage → P(seam right | optimum)
@@ -107,5 +111,11 @@ struct Map
 Map build(DSR::DSRGraph &mem, const std::string &anchor = "room_1",
           const std::map<std::string, std::vector<Eigen::Vector2d>> &live_outlines = {},
           LayoutCache *cache = nullptr, const layout::Model &model = {});
+
+/// T(a <- b) from the MAP layout, (x, y, yaw) with its first-order covariance from the JOINT posterior of the two rooms
+/// (both marginals and their cross block: one solve placed both, so they are correlated). Memory room names.
+/// nullopt unless both rooms were solved THIS run in the same component.
+struct Relative { layout::Vec3 pose = layout::Vec3::Zero(); layout::Mat3 cov = layout::Mat3::Zero(); };
+std::optional<Relative> map_relative(const LayoutCache &cache, const std::string &a, const std::string &b);
 
 }   // namespace ltsm::topo

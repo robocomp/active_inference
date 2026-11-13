@@ -1,5 +1,6 @@
 #include "room_chain.h"
 
+#include "face_prior.h"
 #include "seam_fusion.h"
 
 #include <algorithm>
@@ -17,14 +18,6 @@ namespace
 using seam::Mat3;
 using seam::Measured;
 using seam::Vec3;
-
-// Door-pose covariance prior per FACE (the value seam_evict_test already uses for a door node): 3 cm, 0.01 rad.
-Mat3 face_prior()
-{
-    Mat3 C = Mat3::Zero();
-    C.diagonal() << 0.03 * 0.03, 0.03 * 0.03, 0.01 * 0.01;
-    return C;
-}
 
 Vec3 se2_of(const Mat::RTMat &T)
 {
@@ -88,7 +81,8 @@ std::optional<Measured> face_in(DSR::DSRGraph &g, const std::string &passage, co
         if (not f.has_value() or not is_descendant(g, f->id(), room)) continue;
         const auto T = ie->get_transformation_matrix(room, f->name());
         if (not T.has_value()) continue;
-        Mat3 C = face_prior();
+        const Vec3 pose = se2_of(T.value());
+        Mat3 C = seam::unstated_face_cov(pose.z());   // face_prior.h: the population of stated faces, in the room frame
         if (const auto par = g.get_attrib_by_name<parent_att>(f.value()); par.has_value())
             if (const auto edge = g.get_edge(par.value(), f->id(), "RT"); edge.has_value())
                 if (const auto C6 = g.get_rt_api()->get_edge_RT_covariance(edge.value()); C6.has_value())
@@ -97,10 +91,15 @@ std::optional<Measured> face_in(DSR::DSRGraph &g, const std::string &passage, co
                     Mat3 S;
                     for (int i = 0; i < 3; ++i)
                         for (int j = 0; j < 3; ++j) S(i, j) = (*C6)(slot[i], slot[j]);
-                    // an edge that exists but states nothing reads as all zeros: that is "unstated", keep the prior
-                    if (S.cwiseAbs().maxCoeff() > 0.0) C = S;
+                    // an edge that exists but states nothing reads as all zeros: that is "unstated", keep the prior.
+                    // ★ The stated block is in the PARENT's frame (the wall), not the room's (2026-11-12: it was used
+                    //   unrotated, so a door on a -110 deg wall had its along-wall sigma on the room's x). The parent's
+                    //   yaw in the room = the face's yaw in the room minus the edge's own yaw.
+                    if (S.cwiseAbs().maxCoeff() > 0.0)
+                        if (const auto Te = g.get_rt_api()->get_edge_RT_as_rtmat(edge.value()); Te.has_value())
+                            C = seam::rotate_cov(S, pose.z() - se2_of(Te.value()).z());
                 }
-        return Measured{se2_of(T.value()), C};
+        return Measured{pose, C};
     }
     return std::nullopt;
 }
@@ -225,7 +224,7 @@ double region_log_mass(double q, double dist)
 //////////////////////////////////////////////////////////////////////////////////////////////////
 MetricQuery build_metric_query(DSR::DSRGraph &mem, const std::vector<std::string> &path_passages,
                                const std::string &path_start_room, const std::optional<ChainPose> &seam_last_to_provisional,
-                               const ChainPose &robot_in_provisional)
+                               const ChainPose &robot_in_provisional, const topo::LayoutCache *layout)
 {
     MetricQuery q;
     q.reference_room = path_start_room;
@@ -235,21 +234,50 @@ MetricQuery build_metric_query(DSR::DSRGraph &mem, const std::vector<std::string
     const auto passages = all_passages(mem);
 
     // ── the PATH chain ─────────────────────────────────────────────────────────────────────────
+    Measured acc{Vec3::Zero(), Mat3::Zero()};
+    std::string here = path_start_room;      // ends as L, the last KNOWN room on the path
+    bool path_ok = true;
+    for (const auto &pn : path_passages)
     {
-        Measured acc{Vec3::Zero(), Mat3::Zero()};
-        std::string here = path_start_room;
-        bool ok = true;
-        for (const auto &pn : path_passages)
+        const auto it = std::ranges::find(passages, pn, &PassageEnds::name);
+        if (it == passages.end() or (it->room_a != here and it->room_b != here)) { path_ok = false; break; }
+        const std::string next = it->room_a == here ? it->room_b : it->room_a;
+        const auto s = seam_cov(mem, pn, here, next);
+        if (not s.has_value()) { path_ok = false; break; }
+        acc = seam::compose_cov(acc, s.value());
+        here = next;
+    }
+
+    // ── THE MAP LAYOUT, when it covers L (owner decision 2026-11-12) ────────────────────────────────────────────────
+    //    The layout is the posterior over every room's pose given EVERY passage in memory (loops included) and the
+    //    building priors, so it places room k better than any one chain of seams. Referenced to L: the robot in L is the
+    //    fresh seam and odometry only (nothing from memory), and room k in L is T(L <- k) from the layout with the JOINT
+    //    covariance of L and k. The two sides then share nothing, so the evidence's independence is exact rather than the
+    //    "conservative" approximation the two-chain form needed. Rooms the layout does not hold (not solved this run, or
+    //    a passage newer than the last solve) are placed by the chain BFS from the layout-placed rooms.
+    std::map<std::string, Measured> placed;       // room -> T(ref <- room)
+    std::deque<std::string> frontier;
+    if (layout != nullptr and path_ok and topo::map_relative(*layout, here, here).has_value())
+    {
+        q.reference_room = here;
+        q.from_layout = true;
+        for (const auto &n : mem.get_nodes_by_type("room"))
+            if (const auto r = topo::map_relative(*layout, here, n.name()); r.has_value())
+            {
+                placed[n.name()] = Measured{r->pose, r->cov};
+                frontier.push_back(n.name());
+            }
+        if (seam_last_to_provisional.has_value())
         {
-            const auto it = std::ranges::find(passages, pn, &PassageEnds::name);
-            if (it == passages.end() or (it->room_a != here and it->room_b != here)) { ok = false; break; }
-            const std::string next = it->room_a == here ? it->room_b : it->room_a;
-            const auto s = seam_cov(mem, pn, here, next);
-            if (not s.has_value()) { ok = false; break; }
-            acc = seam::compose_cov(acc, s.value());
-            here = next;
+            const auto r = seam::compose_cov(Measured{seam_last_to_provisional->pose, seam_last_to_provisional->cov},
+                                             Measured{robot_in_provisional.pose, robot_in_provisional.cov});
+            q.robot_in_ref = {r.pose, r.cov};
+            q.robot_ok = true;
         }
-        if (ok and seam_last_to_provisional.has_value())
+    }
+    else
+    {
+        if (path_ok and seam_last_to_provisional.has_value())
         {
             // the crossed door has no passage: its seam is the fresh one measured from its two faces
             acc = seam::compose_cov(acc, Measured{seam_last_to_provisional->pose, seam_last_to_provisional->cov});
@@ -257,12 +285,11 @@ MetricQuery build_metric_query(DSR::DSRGraph &mem, const std::vector<std::string
             q.robot_in_ref = {r.pose, r.cov};
             q.robot_ok = true;
         }
+        placed[path_start_room] = Measured{Vec3::Zero(), Mat3::Zero()};
+        frontier.push_back(path_start_room);
     }
 
     // ── each room's OWN chain: BFS over the passages in memory (the crossed door is none of them) ──
-    std::map<std::string, Measured> placed;       // room -> T(ref <- room)
-    placed[path_start_room] = Measured{Vec3::Zero(), Mat3::Zero()};
-    std::deque<std::string> frontier{path_start_room};
     while (not frontier.empty())
     {
         const std::string j = frontier.front(); frontier.pop_front();
