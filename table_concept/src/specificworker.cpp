@@ -35,6 +35,8 @@
 
 #include "../../common/config_report/config_read.h"   // rc::cfg::Reader (SHARED)
 #include "../../common/room_resolve/room_resolve.h"   // rc::room::current_room (proto-aware, deterministic)
+#include "../../common/room_resolve/room_follow.h"        // rc::room::read_outline / drop_left_behind
+#include "../../common/room_resolve/room_containment.h"   // rc::room::outline_usable
 
 #include "../../common/diag_log/rotating_csv.h"   // keep the previous run instead of wiping it
 
@@ -388,23 +390,34 @@ void SpecificWorker::refresh_room_geometry()
     // allocations per call, ~10×/s, under the graph's shared_mutex where it contends with the FastDDS reader
     // threads. All to re-read six floats that cannot have changed.
     // Re-arms when the room node id changes, which is the only way a different polygon can appear.
+    // ★The polygon is ALWAYS the working room's own (shared reader, common/room_resolve/room_follow.h). On a room
+    // change the previous room's polygon is dropped at once, so births WAIT (InstanceTracker hold) instead of being
+    // judged against the room just left. Until the new room publishes an outline this re-reads each cycle.
     if (polygon_room_id_ == room_node_id_) return;
-    const auto room = G->get_node(room_node_id_);
-    if (not room.has_value()) return;
-    const auto px = G->get_attrib_by_name<delimiting_polygon_x_att>(room.value());
-    const auto py = G->get_attrib_by_name<delimiting_polygon_y_att>(room.value());
-    if (not px.has_value() or not py.has_value()) return;
-    const auto& xs = px->get(); const auto& ys = py->get();
-    const std::size_t n = std::min(xs.size(), ys.size());
-    if (n < 3) return;                       // degenerate ⇒ leave the test inactive rather than half-armed
-    std::vector<Eigen::Vector2f> poly;
-    poly.reserve(n);
-    for (std::size_t i = 0; i < n; ++i)
-        poly.emplace_back(xs[i], ys[i]);
-    room_polygon_ = poly;                       // keep a copy for the NBV's reachability test
+    auto poly = rc::room::read_outline(*G, room_node_id_);
+    if (not rc::room::outline_usable(poly))
+    {
+        if (not room_polygon_.empty() or outline_missing_room_ != room_node_id_)
+        {
+            std::print("table_concept: [room] room {} has NO usable outline — births WAIT\n", room_node_id_);
+            room_polygon_.clear();
+            fitter_->set_room_polygon({});
+            outline_missing_room_ = room_node_id_;
+        }
+        return;
+    }
+    float xmin = 1e9f, xmax = -1e9f, ymin = 1e9f, ymax = -1e9f;
+    for (const auto& v : poly)
+    {
+        xmin = std::min(xmin, v.x()); xmax = std::max(xmax, v.x());
+        ymin = std::min(ymin, v.y()); ymax = std::max(ymax, v.y());
+    }
+    const std::size_t n = poly.size();
+    room_polygon_ = poly;                       // keep a copy for the NBV's reachability test + containment
     fitter_->set_room_polygon(std::move(poly));
     polygon_room_id_ = room_node_id_;   // latched; re-reads only if the room node is replaced
-    std::print("table_concept: [room] wall polygon loaded ({} verts) — silhouette line-of-sight ARMED\n", n);
+    std::print("table_concept: [room] room {} outline {} verts, x∈[{:.2f},{:.2f}] y∈[{:.2f},{:.2f}] — line-of-sight ARMED\n",
+               room_node_id_, n, xmin, xmax, ymin, ymax);
 }
 
 // SHADOW-MODE birth/death recorder — CONCEPT_AGENT_LIFECYCLE.md §4.2, theory in MODEL_HISTORY.md §4.
@@ -449,18 +462,15 @@ void SpecificWorker::compute()
     // the existence occupancy discount. Main thread — collect_graph_obstacles uses ts==0 (CLAUDE.md).
     if (G) foreign_claims_ = rc::exclusion::foreign_claims(*G, inner_eigen_.get(), "table");
     if (existence_) existence_->set_foreign_claims(&foreign_claims_);
+    if (existence_) existence_->set_room_polygon(&room_polygon_);   // out-of-room existence term
     if (fitter_) fitter_->set_foreign_claims(&foreign_claims_);   // the FIT judges the same geometry
 
     if (not G or not rt_api_)
         return;
 
-    // Refresh room node id if not yet found (see refresh_room_geometry below for the walls)
-    if (room_node_id_ == 0)
-    {
-        const auto room = rc::room::current_room(*G);
-        if (not room.has_value()) return;
-        room_node_id_ = *room;
-    }
+    // The room this agent works in follows the robot, every cycle (was: latched at the first room). No room yet: wait.
+    room_node_id_ = rc::room::follow_current_room(room_node_id_, rc::room::current_room(*G));
+    if (room_node_id_ == 0) return;
 
     refresh_room_geometry();   // room walls → the silhouette line-of-sight test (see below)
 
@@ -504,8 +514,15 @@ void SpecificWorker::compute()
     if (rgb_ingestor_)   rgb_ingestor_->pump();
     if (depth_ingestor_) depth_ingestor_->pump();
 
-    const auto table_nodes = G->get_nodes_by_type("object");
-    for (const auto& node : table_nodes)
+    // The robot left a table's room: fitting it in this frame would corrupt the pose ltom remembers. ltom keeps it
+    // and offers it back on return. Same teardown as retire_instance, minus the delete (the helper deletes).
+    rc::room::drop_left_behind(*G, "table", room_node_id_, [this](std::uint64_t id)
+    {
+        if (auto it = fitter_->instances().find(id); it != fitter_->instances().end())
+            it->second.affordance.remove();
+        fitter_->forget_node(id);
+    });
+    for (const auto& node : G->get_nodes_by_type("object"))
         if (node.name().starts_with("table"))
             process_table_node(node);
 

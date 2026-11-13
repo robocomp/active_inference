@@ -64,6 +64,24 @@ Owner 11-11: continue; WAIT rule stands; cause to be pinned live (outline bbox +
 5. Shared tracker change: `hold_births` defaults to false, so the other five agents are byte-for-byte unchanged until
    their own tasks pass it.
 
+### Task 5 — table_concept
+
+1. **The room now follows the robot** (was: latched at the first room for the whole run; tables born after a crossing
+   were parented to the room just left). Uses `rc::room::follow_current_room` at the top of `compute()`.
+2. **Tables left behind in another room are dropped** (`rc::room::drop_left_behind`, teardown = affordance + fitter
+   forget) and recalled by LTOM on return (was: never dropped — kept and fitted in the wrong frame).
+3. **Out-of-room births are suppressed** (was: none). Tolerance = half the birth footprint's short side
+   (`0.5·min(Tracker.BirthWidthM, Tracker.BirthDepthM)` = 0.30 m), a physical dimension.
+4. **Births are held while the working room has no usable outline** (was: admitted). The polygon is dropped on a room
+   change and re-read each cycle until the new room publishes one (was: kept the old room's until the id changed, then
+   retried). While empty: no wall line-of-sight in the silhouette test, no NBV reachable region, default recall area.
+5. **New existence term: out-of-room** (was: none). A belief centre outside the outline by more than half its short side
+   draws `-ExistenceOutOfRoomGain` (1.5, chair's value) per EVIDENCE cycle at p_detect = 1, and skips the sensor
+   channels that cycle — as chair. Key is `TableModel.ExistenceOutOfRoomGain`, not the plan's `Existence.OutOfRoomGain`:
+   table keeps all existence keys under `[TableModel]`. It runs only on evidence cycles because
+   `update_and_remove` returns early when no channel has a fresh frame.
+6. Logs: (room, outline bbox) on change, each birth's inside/OUTSIDE verdict with the room id, HELD/released.
+
 ## Rulings
 
 (none yet)

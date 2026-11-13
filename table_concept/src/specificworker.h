@@ -206,6 +206,8 @@ private:
     // rc::nbv::is_reachable imposes no constraint (it refuses to guess), so a viewpoint outside the room
     // reads as reachable and the direction-blind information term cannot break the tie.
     std::vector<Eigen::Vector2f>                            room_polygon_;
+    std::uint64_t                                           outline_missing_room_ = 0;   // last room logged as having no outline
+    bool                                                    births_held_ = false;        // WAIT episode (no outline) — logged on change
     bool warned_recall_area_ = false;   // log "no room polygon" for the recall area once
     std::unique_ptr<rc::TableExistence>                    existence_; // evidence-based removal (existence log-odds)
 
