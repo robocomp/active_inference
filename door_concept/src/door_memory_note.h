@@ -95,15 +95,16 @@ inline std::optional<std::int64_t> ms_of(const std::optional<std::uint64_t>& v)
     r.sighted_ms = detail::ms_of(a.sighted_ms);
     r.ledger = a.ledger;
     r.visit = a.visit;
-    if (a.leaf_into_room_prob.has_value() or a.leaf_hinge_plus_prob.has_value())
+    // as the CSV reader: a leaf only when every leaf column is present (no 0 / 0.5 fallbacks)
+    if (a.leaf_into_room_prob.has_value() and a.leaf_hinge_plus_prob.has_value() and a.phi.has_value() and a.phi_sd.has_value())
     {
-        const auto sw = leafmem::swing_from_into_room(a.leaf_into_room_prob.value_or(0.5f));
-        const auto hg = leafmem::hinge_from_plus(a.leaf_hinge_plus_prob.value_or(0.5f), /*plus_is_far=*/true);
+        const auto sw = leafmem::swing_from_into_room(*a.leaf_into_room_prob);
+        const auto hg = leafmem::hinge_from_plus(*a.leaf_hinge_plus_prob, /*plus_is_far=*/true);
         LeafMemory L;
         L.hinge_xy = a.xy + (hg.far ? 1.0f : -1.0f) * 0.5f * a.width * detail::axis_x(a.yaw);
         L.open_dir = sw.swing * detail::axis_n(a.yaw);
         L.hinge_llr = hg.llr;  L.swing_llr = sw.llr;
-        L.phi = a.phi.value_or(0.f);  L.phi_sigma = a.phi_sd.value_or(0.f);
+        L.phi = *a.phi;  L.phi_sigma = *a.phi_sd;
         r.leaf = L;
     }
     return r;

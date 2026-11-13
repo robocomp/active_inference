@@ -84,6 +84,22 @@ int main()
         check(not b.exist_logodds and not b.exist_physical and not b.crossed and not b.leaf, "row: no belief, no leaf");
     }
 
+    // a note missing any ONE of the four leaf attributes restores no leaf; height_sd is carried
+    {
+        const auto n0 = mn::note_of(make_row(0.3f, true, 1.0f, 1.0f, 1.0f), 0.03f);
+        check(n0.height_sd == 0.03f, "note_of carries height_sd");
+        check(mn::row_of(n0, "r", "d").leaf.has_value(), "all four present -> leaf");
+        for (int k = 0; k < 4; ++k)
+        {
+            auto n = n0;
+            if (k == 0) n.leaf_into_room_prob.reset();
+            if (k == 1) n.leaf_hinge_plus_prob.reset();
+            if (k == 2) n.phi.reset();
+            if (k == 3) n.phi_sd.reset();
+            check(not mn::row_of(n, "r", "d").leaf.has_value(), "missing one leaf attribute -> no leaf");
+        }
+    }
+
     // memnote.removed_never_encoded
     {
         auto r = make_row(0.3f, true, 1.0f, 1.0f, 1.0f);
