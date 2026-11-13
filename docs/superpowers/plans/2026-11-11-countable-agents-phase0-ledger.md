@@ -120,6 +120,17 @@ Same structure as hood (hood was cloned from it); same six differences as Task 7
 birth = `0.5 · AI2PriorFootprintM` (0.30 m; the agent has no separate depth prior), existence = half the belief's short
 side `0.5·min(w,h)`. Key `RefrigeratorModel.ExistenceOutOfRoomGain = 1.5`. Outline now needs ≥ 3 vertices (was ≥ 2).
 
+### Task 9 — cabinet_concept
+
+Same six differences as Task 7 (room follows; left-behind drop; containment; WAIT; outline ≥ 3 vertices, was ≥ 2;
+out-of-room existence term `CabinetModel.ExistenceOutOfRoomGain = 1.5`), plus:
+- **Both birth paths are checked.** Tracker births: tolerance = `0.5·min(Tracker.BirthWidthM, BirthDepthM)`.
+  Residual-born runs (L-corner arms): tolerance = `0.5·min(seed.L, BirthDepthM)`; no outline ⇒ return with the
+  debounce INTACT (WAIT keeps the evidence); outside ⇒ the debounce is reset.
+- Existence tolerance = half the run's short side `0.5·min(L, d)`.
+- Cabinet nodes are `object` type (CLAUDE.md's "`box` nodes" note is stale), so the shared drop helper finds them.
+- `tests/kitchen_selftest.cpp` is not a CMake target anywhere (pre-existing); only `cabinet_card_test` runs, and passes.
+
 ## Rulings
 
 (none yet)

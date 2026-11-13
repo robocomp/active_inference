@@ -34,6 +34,8 @@
 #include "../../common/recall_match/recall_candidates.h"   // ltom recall: resurrect a remembered cabinet at birth
 #include "../../common/graph_provenance/creation_stamp.h"   // rc::provenance::stamp_creation
 #include "../../common/room_resolve/room_resolve.h"   // rc::room::current_room_frame — the room is room_1/room_2/…, never the literal "room"
+#include "../../common/room_resolve/room_follow.h"        // rc::room::read_outline
+#include "../../common/room_resolve/room_containment.h"   // rc::room::birth_verdict / outline_usable
 
 // ─── Room geometry (wall-flush factor + C2v yaw reference) ───────────────────────────────────────
 
@@ -47,24 +49,29 @@
 void SpecificWorker::refresh_room_geometry()
 {
     if (not G or room_node_id_ == 0) return;
-    const auto room = G->get_node(room_node_id_);
-    if (not room.has_value()) return;
-    const auto px = G->get_attrib_by_name<delimiting_polygon_x_att>(room.value());
-    const auto py = G->get_attrib_by_name<delimiting_polygon_y_att>(room.value());
-    if (not px.has_value() or not py.has_value()) return;
-    const auto& xs = px->get(); const auto& ys = py->get();
-    const std::size_t n = std::min(xs.size(), ys.size());
-    if (n < 2) return;
-
-    std::vector<Eigen::Vector2f> poly;
-    poly.reserve(n);
+    // The WORKING room's outline (shared reader). ★Always that room's own: cleared when it has none, so births WAIT
+    // instead of using the room just left (and the wall factor goes inert, the documented unknown-room fallback).
+    auto poly = rc::room::read_outline(*G, room_node_id_);
+    if (not rc::room::outline_usable(poly)) poly.clear();
     Eigen::Vector2f centroid = Eigen::Vector2f::Zero();
-    for (std::size_t i = 0; i < n; ++i)
+    float xmin = 1e9f, xmax = -1e9f, ymin = 1e9f, ymax = -1e9f;
+    for (const auto& v : poly)
     {
-        poly.emplace_back(xs[i], ys[i]);
-        centroid += poly.back();
+        centroid += v;
+        xmin = std::min(xmin, v.x()); xmax = std::max(xmax, v.x());
+        ymin = std::min(ymin, v.y()); ymax = std::max(ymax, v.y());
     }
-    centroid /= static_cast<float>(n);
+    if (not poly.empty()) centroid /= static_cast<float>(poly.size());
+    if (room_node_id_ != outline_room_ or poly.size() != outline_n_)
+    {
+        if (poly.empty())
+            std::print("cabinet_concept: [room] room {} has NO usable outline — births WAIT\n", room_node_id_);
+        else
+            std::print("cabinet_concept: [room] room {} outline {} verts, x∈[{:.2f},{:.2f}] y∈[{:.2f},{:.2f}]\n",
+                       room_node_id_, poly.size(), xmin, xmax, ymin, ymax);
+        outline_room_ = room_node_id_;
+        outline_n_    = poly.size();
+    }
     fitter_->set_room_geometry(centroid, std::move(poly));
 }
 
@@ -1023,7 +1030,13 @@ void SpecificWorker::run_instance_tracker()
     last_cabinet_dets_xy_.clear();
     for (const auto& d : dets) last_cabinet_dets_xy_.push_back(d.xy);
 
-    const auto res = tracker_.update(tracks, dets);
+    // WAIT: no usable outline for the working room ⇒ hold births (candidates keep their evidence; InstanceTracker).
+    const bool hold = not fitter_->has_room_polygon();
+    if (hold != births_held_)
+        std::print("cabinet_concept: [tracker] births {} — room {} {}\n", hold ? "HELD" : "released", room_node_id_,
+                   hold ? "has no outline yet" : "outline arrived");
+    births_held_ = hold;
+    const auto res = tracker_.update(tracks, dets, hold);
 
     // Diagnostic (throttled, plus on any birth/death): reveals "1 slice" (upstream) vs "N slices, no birth".
     static int dbg = 0;
@@ -1115,6 +1128,16 @@ void SpecificWorker::run_instance_tracker()
     for (const int d : res.births)
     {
         const Eigen::Vector3f& c = pkt.slices[dets[d].slice_index].centroid;
+        // Room containment at BIRTH (shared rule). A cabinet run stands against a wall: tolerance = half the birth
+        // footprint's short side (a physical dimension).
+        {
+            const float tol = 0.5f * std::min(cfg_.tracker_birth_width_m, cfg_.tracker_birth_depth_m);
+            const auto verdict = rc::room::birth_verdict(fitter_->room_polygon(), Eigen::Vector2f(c.x(), c.y()), tol);
+            std::print("cabinet_concept: [tracker] birth at ({:.2f},{:.2f}) room {} — {}\n", c.x(), c.y(), room_node_id_,
+                       verdict == rc::room::BirthVerdict::Admit ? "inside"
+                     : verdict == rc::room::BirthVerdict::Suppress ? "OUTSIDE — suppressed" : "no outline — deferred");
+            if (verdict != rc::room::BirthVerdict::Admit) continue;
+        }
         float resurrect_p = 0.f;
         const auto resurrect = choose_resurrection(Eigen::Vector2f(c.x(), c.y()), resurrect_p);
         const auto new_id = scene_graph_->create_instance_from_detection(c, room_node_id_, resurrect);
@@ -1330,6 +1353,22 @@ void SpecificWorker::birth_from_residual()
     residual_cand_seed_ = cand.seed;
     if (residual_cand_hits_ < cfg_.residual_birth_frames)
         return;
+
+    // Room containment (shared rule) for the residual-born run too. No outline ⇒ WAIT: return with the debounce
+    // intact, so the arm is born the cycle the outline arrives. Outside ⇒ this arm belongs to another room: drop it.
+    {
+        const float tol = 0.5f * std::min(cand.seed.L, cfg_.tracker_birth_depth_m);
+        const auto verdict = rc::room::birth_verdict(fitter_->room_polygon(), xy, tol);
+        if (verdict == rc::room::BirthVerdict::Defer)
+            return;
+        if (verdict == rc::room::BirthVerdict::Suppress)
+        {
+            std::print("cabinet_concept: [residual-birth] at ({:.2f},{:.2f}) room {} — OUTSIDE, suppressed\n",
+                       xy.x(), xy.y(), room_node_id_);
+            residual_cand_active_ = false; residual_cand_hits_ = 0;
+            return;
+        }
+    }
 
     // Mature → birth. The full seed (via note_birth_seed) makes ensure_instance/lazy-init commit the box
     // to this arm; run_instance_tracker's footprint-claim then feeds it from the shared slice.
