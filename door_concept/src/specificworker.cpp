@@ -34,6 +34,7 @@
 #include "../../common/room_transition/startup_recall.h"   // warm start
 #include "door_close_clear.h"   // close: P(clear of the leaf's swing)
 #include "door_leaf_memory.h"   // the leaf side as a remembered probability; the side-weighted swept arc
+#include "door_note_reader.h"   // remembered_door notes (DoorConcept.RestoreFromLtsm)
 #include "core/room_door_count.h"   // a room has doors: the room-level door posterior (room-door-belief spec Part A)
 #include "specificworker.h"
 
@@ -4048,6 +4049,11 @@ void SpecificWorker::enter_room_memory(std::uint64_t room_id, bool first_resolut
 
 void SpecificWorker::step_pending_restore()
 {
+    if (cfg_.restore_from_ltsm)   // one source per run: the notes ltsm posts, not the CSV (DoorConcept.RestoreFromLtsm)
+    {
+        step_restore_from_notes();
+        return;
+    }
     if (pending_restore_room_ == 0 or pending_restore_room_ != room_node_id_ or not fitter_)
         return;
     if (not fitter_->has_room_polygon())
@@ -4062,11 +4068,47 @@ void SpecificWorker::step_pending_restore()
 
 void SpecificWorker::restore_remembered_doors(std::uint64_t new_room)
 {
-    if (not G or not fitter_ or not scene_graph_)
+    (void)restore_rows(new_room, identities_);
+}
+
+// The notes ltsm posts for the CURRENT room (remembered_door, door_note_reader.h), every cycle once the outline is loaded: a late
+// note restores the cycle it lands. A note restored, or skipped because a live door already holds its place, is marked adopted
+// (ltsm deletes it); door_concept never deletes one. A note that could not be recreated stays unadopted and is tried again.
+void SpecificWorker::step_restore_from_notes()
+{
+    if (not G or not fitter_ or room_node_id_ == 0)
         return;
-    const auto room = G->get_node(new_room);
+    if (pending_restore_room_ == room_node_id_)
+        pending_restore_room_ = 0;   // the CSV path is not used with the flag on
+    if (not fitter_->has_room_polygon())
+    {
+        refresh_room_geometry();
+        if (not fitter_->has_room_polygon())
+            return;   // the recalled outline has not reached us yet: wait (the door's belief must find its wall)
+    }
+    const auto notes = rc::door::memnote::read_notes(*G, room_node_id_);
+    if (notes.empty())
+        return;
+    const auto room = G->get_node(room_node_id_);
     if (not room.has_value())
         return;
+    const auto rows = rc::door::memnote::rows_of_notes(notes, room->name());
+    const auto handled = restore_rows(room_node_id_, rows);
+    for (const auto& n : notes)
+        if (std::ranges::find(handled, rc::door::memnote::face_live_name(n.name)) != handled.end())
+            rc::door::memnote::mark_adopted(*G, n.id);
+}
+
+/// The restore loop over `rows` (the CSV's identities_ or the notes' rows). Returns the names of the rows handled: restored (its
+/// node exists) or skipped because a live door holds the place.
+std::vector<std::string> SpecificWorker::restore_rows(std::uint64_t new_room, std::span<const rc::door::IdentityRow> rows)
+{
+    std::vector<std::string> handled;
+    if (not G or not fitter_ or not scene_graph_)
+        return handled;
+    const auto room = G->get_node(new_room);
+    if (not room.has_value())
+        return handled;
     const bool recalled = true;   // only reached through enter_room_memory's recall branch
 
     // Every door node live in the graph, with its aperture in the ENTERED room's frame when that resolves (ts==0 on the
@@ -4100,11 +4142,14 @@ void SpecificWorker::restore_remembered_doors(std::uint64_t new_room)
                 l.xy_in_room = T->translation().head<2>().cast<float>();
         live.push_back(std::move(l));
     }
-    const auto d = rc::door::plan_restore(identities_, room->name(), recalled, live, identity_radius_m());
+    const auto d = rc::door::plan_restore(rows, room->name(), recalled, live, identity_radius_m());
     for (const auto& k : d.skipped)
         decision_log_.record(rc::door::DoorDecisionKind::RestoreSkip, 0, k.name, double(static_cast<int>(k.reason)), 0, 0, 0, room->name());
     for (const auto& k : d.skipped)
         std::print("door_concept: [restore] '{}' in '{}' NOT restored: {}\n", k.name, room->name(), rc::door::to_string(k.reason));
+    for (const auto& k : d.skipped)
+        if (k.reason == rc::door::SkipReason::PlaceLive)
+            handled.push_back(k.name);
 
     for (const auto& r : d.restore)
     {
@@ -4131,6 +4176,7 @@ void SpecificWorker::restore_remembered_doors(std::uint64_t new_room)
             std::print("door_concept: [restore] '{}' could not be recreated in '{}' (insert failed)\n", r.name, room->name());
             continue;
         }
+        handled.push_back(r.name);
         const auto n = G->get_node(id);
         if (not n.has_value())
             continue;
@@ -4172,6 +4218,7 @@ void SpecificWorker::restore_remembered_doors(std::uint64_t new_room)
         // (kept for log readers: the remembered name, or a fresh one when a live node held it — names are opaque)
         std::print("door_concept: [restore] RESTORED as '{}' (remembered '{}')\n", n->name(), r.name);
     }
+    return handled;
 }
 
 // ─── LOOK AT A REMEMBERED DOOR (door_look.h) ─────────────────────────────────────────────────────────────────────

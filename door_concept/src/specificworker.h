@@ -358,6 +358,8 @@ private:
     void enter_room_memory(std::uint64_t room_id, bool first_resolution, const std::string& left_room = {});   // decide recall/fresh; strip or arm the restore
     void step_pending_restore();
     void restore_remembered_doors(std::uint64_t new_room);
+    void step_restore_from_notes();
+    std::vector<std::string> restore_rows(std::uint64_t new_room, std::span<const rc::door::IdentityRow> rows);
 
     // ── ENTRY MIRRORS: the door a PROTO-ROOM was entered through ───────────────────────────────────
     // room_concept births a proto-room (a `room` with a `proto` self-edge) when the robot crosses a door into

@@ -35,3 +35,11 @@ add_executable(bench_door_memory_publish bench_door_memory_publish.cpp)
 target_include_directories(bench_door_memory_publish PRIVATE ../src ../src/core ../../common ../../common/media_transport)
 target_compile_options(bench_door_memory_publish PRIVATE -O2)
 target_link_libraries(bench_door_memory_publish PRIVATE Eigen3::Eigen Qt6::Core dsr_api dsr_core fastcdr fastdds)
+
+# Restore from ltsm notes: note rows vs CSV rows through plan_restore/restored_belief, and read_notes on a standalone DSRGraph. Run: ./test_door_restore_from_notes
+add_executable(test_door_restore_from_notes test_door_restore_from_notes.cpp)
+target_include_directories(test_door_restore_from_notes PRIVATE ../src ../src/core ../../common)
+target_compile_definitions(test_door_restore_from_notes PRIVATE SHADOW_JSON="${CMAKE_CURRENT_LIST_DIR}/../../robot_concept/shadow.json")
+target_compile_options(test_door_restore_from_notes PRIVATE -O0 -w)
+target_link_libraries(test_door_restore_from_notes PRIVATE Eigen3::Eigen Qt6::Core dsr_api dsr_core fastcdr fastdds)
+add_test(NAME door_restore_from_notes COMMAND test_door_restore_from_notes)
