@@ -119,21 +119,33 @@ def tools():
           ["distance_m", "turn_deg"]),
         t("approach_object", "Drive to an object of the CURRENT room and stop in front of it, facing it: the object "
           "itself says where to stand and from which sides it can be approached (the STATE lists them); the controller "
-          "plans the path around obstacles. Give its name (chair_1) or its class (table: the nearest one), and "
+          "plans the path around obstacles. Give its name (chair_1) or its class (table: the nearest one) or, for theirs, \"my chair\", and "
           "optionally the side in the person's own words. Starts at once.",
           {"object": {"type": "string", "description": "an object name or class"},
            "side": {"type": "string", "description": "ONLY when the person names a side: the side to approach from, as they said it "
                                                      "(right, the far side, behind it, por la izquierda) or a side name "
                                                      "from the STATE; empty = the object's default"}}, ["object"]),
+        t("human_claim", "Only when the person STATES a fact about themselves: their NAME (\"my name is Pablo\", \"call "
+          "me Pablo\", \"me llamo Pablo\": call it, do not just greet them), or that an object IS or is NOT theirs (\"that's "
+          "my chair\", \"chair_1 is mine\", \"that is not my chair\"). It stores nothing itself: it shows them a question "
+          "and keeps the fact only if they answer yes. NEVER for a request that USES what is theirs: \"go to my chair\" is "
+          "approach_object with object \"my chair\", \"where is my chair?\" is where_is. Not for naming an object (\"call "
+          "it the reading chair\").",
+          {"kind": {"type": "string", "enum": ["name", "owns", "disowns"],
+                    "description": "name: they tell their name; owns: an object is theirs; disowns: an object is not theirs"},
+           "object": {"type": "string", "description": "for owns/disowns: the object as they said it: a name from the "
+                      "STATE (chair_1), \"that\" / \"this\" (what the camera shows), \"that chair\", or \"my chair\""},
+           "name": {"type": "string", "description": "for kind name: their name, as they said it"}}, ["kind"]),
         t("go_around_object", "Drive a full loop around an object of the CURRENT room, stopping on each side facing "
           "it, and end back where the loop began; sides the robot cannot reach (against a wall) are skipped. Give its "
-          "name or class, and optionally the direction the person says. Starts at once. To stop at ONE side use "
+          "name or class, and optionally the direction the person says. Starts at once. "
+          "It already ends where it set off, so \"go around X and come back\" is THIS tool alone, not a mission. To stop at ONE side use "
           "approach_object.",
           {"object": {"type": "string", "description": "an object name or class"},
            "direction": {"type": "string", "description": "ONLY when the person says one: left or right (por la "
                                                           "izquierda / derecha); empty = left"}}, ["object"]),
         t("plan_mission", "Plan a MISSION: any request with more than one step, a condition or a return (cross a door and explore "
-          "the next room, do this then that, come back). Pass the request in your own words with the names from the "
+          "the next room, do this then that, come back; but NOT going around an object and back: go_around_object already returns). Pass the request in your own words with the names from the "
           "STATE; the plan is shown to the person and starts only when they say yes. For ONE action use its own "
           "tool (cross_door, approach_object, go_around_object, move_relative).",
           {"request": {"type": "string", "description": "what the person asked for, every step, with the names from "
@@ -142,7 +154,7 @@ def tools():
           "distance, bearing and size. Read-only.",
           {"subtype": {"type": "string", "description": "a class to filter by, in English singular (chair, table, "
                                                         "bottle, cabinet, refrigerator, hood, person); empty = all"}}, []),
-        t("where_is", "Where is an object: give its name (e.g. chair_1) or its class (e.g. refrigerator). Returns its "
+        t("where_is", "Where is an object: give its name (e.g. chair_1) or its class (e.g. refrigerator), or \"my chair\" for the person's own. Returns its "
           "room and, if it is in the current room, its distance and bearing; or that it has not been perceived. "
           "Read-only.", {"name": {"type": "string", "description": "an object name or class"}}, ["name"]),
         t("known_rooms", "The rooms the robot remembers (long-term memory), which are live now, and the passages "
@@ -681,6 +693,12 @@ CASES = [
      and "right" in str(a.get("direction", "")).lower()),
     ("da una vuelta alrededor de la mesa (es)", [], "none", "da una vuelta alrededor de la mesa",
      lambda n, a, c: n == "go_around_object" and re.search("table|mesa", str(a.get("object", "")).lower()) is not None),
+    # live 2026-11-11 (chat_e2e10): "and back where you are" sent it to plan_mission, whose planner has no loop and
+    # wrote "approach table_6" (tables offer no approach): the loop already ends where it began
+    ("go around the table and back where you are", [], "none", "go around the table and back where you are",
+     lambda n, a, c: n == "go_around_object" and "table" in str(a.get("object", "")).lower()),
+    ("go around the table and come back", [], "none", "go around the table and come back",
+     lambda n, a, c: n == "go_around_object" and "table" in str(a.get("object", "")).lower()),
     ("go to the far side of the chair (one side, not a loop)", [], "none", "go to the far side of the chair",
      lambda n, a, c: n == "approach_object"),
     ("open door 1", [], "none", "open door 1",
@@ -778,6 +796,20 @@ CASES = [
      or (n == "episodes" and str(a.get("target", "")) == "door_0")),
     ("details of an episode", [], "none", "tell me more about episode 20261017-3",
      lambda n, a, c: n == "episode" and str(a.get("id", "")) == "20261017-3"),
+    # the human at the chat (spec 2026-11-11-human-model): claims go to human_claim (shown as a read-back, stored only
+    # after a yes); using "my chair" is a normal tool call with "my chair" as the object; a given name is NOT a claim.
+    ("that's my chair", [], "none", "that's my chair",
+     lambda n, a, c: n == "human_claim" and str(a.get("kind", "")) == "owns" and re.search(r"that|chair", str(a.get("object", "")).lower()) is not None),
+    ("my name is Pablo", [], "none", "my name is Pablo",
+     lambda n, a, c: n == "human_claim" and str(a.get("kind", "")) == "name" and str(a.get("name", "")).strip() == "Pablo"),
+    ("not my chair", [], "none", "that is not my chair",
+     lambda n, a, c: n == "human_claim" and str(a.get("kind", "")) == "disowns"),
+    ("go to my chair", [], "none", "go to my chair",
+     lambda n, a, c: n == "approach_object" and "my chair" in str(a.get("object", "")).lower()),
+    ("where is my chair", [], "none", "where is my chair?",
+     lambda n, a, c: n == "where_is" and "my chair" in str(a.get("name", "")).lower()),
+    ("reading chair is not a claim", [], "none", "call it the reading chair",
+     lambda n, a, c: n != "human_claim"),
 ]
 
 

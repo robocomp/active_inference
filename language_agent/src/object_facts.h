@@ -33,7 +33,10 @@
 #include <optional>
 #include <set>
 #include <string>
+#include <string_view>
 #include <vector>
+
+#include "../../common/appearance_belief/colour_terms.h"   // the palette's names (one list)
 
 namespace rc::chat
 {
@@ -51,6 +54,10 @@ struct ObjectFact
     std::string approach_sides{};        ///< its approach affordance's sides with labels as seen now (approach.h sides_line)
     std::string shape{};                 ///< obj_shape ("round" | "square" for a table top), "" = not stated
     std::optional<float> shape_prob{};   ///< obj_shape_prob: P(shape), 0.5 = undecided
+    std::string color_name{};            ///< color_name: the owner's measured colour name, "" = not measured
+    float color_prob = 0.f;              ///< color_prob: its posterior probability
+    std::uint64_t uid = 0;               ///< object_uid (LTOM's stable id); 0 = not published
+    std::string owner{};                 ///< ", Pablo's" | ", yours" | "" — set by mark_owned()
 };
 
 /// An object ltom_agent remembers and that is NOT on the live graph right now.
@@ -64,7 +71,40 @@ struct RememberedObject
     /// The turn that faces it from the robot now (deg, + = left, world_digest's bearing convention); only when it was in
     /// the robot's CURRENT room and the transform was known. Filled by ChatSession, not by the memory reader.
     std::optional<double> turn_deg{};
+    std::string color_name{};         ///< as measured when it was last seen; "" = never measured
+    float color_prob = 0.f;
+    /// Its agent's LAST P(it exists) (obj_exist_prob on ltom's memory node): a removed phantom ends low, a chair whose
+    /// agent stopped ends high. nullopt = not stated. Said in the line so the model weighs the memory by it.
+    std::optional<float> exist_prob{};
+    std::uint64_t uid = 0;            ///< object_uid on ltom's memory node; 0 = not stated
+    std::string owner{};              ///< ", Pablo's" | ", yours" | "" — set by mark_owned()
 };
+
+/// The human at the chat, as ltom_agent's memory graph shows them (human_1, spec 2026-11-11-human-model). ONE human.
+struct HumanFacts
+{
+    std::optional<std::string> name{};            ///< current name; nullopt = never told
+    std::string role{};                           ///< "developer"
+    std::set<std::uint64_t> owned_uids{};         ///< object_uids they own (retracted links are not here)
+    std::optional<std::uint64_t> answer_stamp{};  ///< the stamp of the last claim LTOM answered
+    std::string answer{};                         ///< "recorded" | "rejected: <reason>"
+};
+
+/// ", Pablo's" (", yours" when no name is known) for an object the human owns; "" otherwise. Said after the colour.
+inline std::string owner_words(std::uint64_t uid, const HumanFacts& h)
+{
+    if (uid == 0 or not h.owned_uids.contains(uid)) return {};
+    return h.name.has_value() ? std::format(", {}'s", *h.name) : std::string(", yours");
+}
+
+/// Fills `owner` on every fact (live or remembered) from the human's links.
+template <typename Facts> void mark_owned(Facts& v, const HumanFacts& h)
+{
+    for (auto& o : v) o.owner = owner_words(o.uid, h);
+}
+
+/// The human node on ltom's memory graph (human_1) is the person at the chat, never a perceived object.
+inline bool is_human_node(std::string_view name) { return name.starts_with("human_"); }
 
 struct Remembered
 {
@@ -106,7 +146,37 @@ inline std::string motion_line(float advance_mps, float side_mps, float angular_
                        advance_mps < 0 ? "backward" : "forward", std::abs(advance_mps), std::abs(side_mps), turn);
 }
 
-/// "table_1 (table) 2.1 m, +35 deg ahead-left, 1.20x0.70x0.75 m, square top (p 0.93)"
+/// ", magenta (p 0.93)" — a MEASURED colour name (common/appearance_belief/colour_name.h) — or ", colour not measured",
+/// so the model never fills the gap with a guess (live 2026-11-10: it called two magenta chairs yellow, then black).
+inline std::string colour_words(const std::string& name, float prob)
+{
+    return name.empty() ? std::string(", colour not measured") : std::format(", {} (p {:.2f})", name, prob);
+}
+
+/// A colour word at the start of what was asked ("the magenta chair", "gray chairs") split from the rest. `colour` is
+/// "" when the first word names no palette term. "gray" is "grey".
+struct ColourAsked { std::string colour, rest; };
+inline ColourAsked split_colour(std::string w)
+{
+    std::ranges::transform(w, w.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    while (not w.empty() and w.front() == ' ') w.erase(w.begin());
+    if (w.starts_with("the ")) w = w.substr(4);
+    const auto sp = w.find(' ');
+    if (sp == std::string::npos) return {{}, w};
+    std::string first = w.substr(0, sp);
+    if (first == "gray") first = "grey";
+    if (rc::appearance::find_term(first) == nullptr) return {{}, w};
+    return {first, w.substr(sp + 1)};
+}
+
+/// Whether an object can be the one of colour `want`: it was measured that colour, or its colour was not measured
+/// (it may be it — said so in its line). A different MEASURED name excludes it.
+inline bool colour_may_be(const std::string& measured, const std::string& want)
+{
+    return want.empty() or measured.empty() or measured == want;
+}
+
+/// "table_1 (table) 2.1 m, +35 deg ahead-left, 1.20x0.70x0.75 m, square top (p 0.93), colour not measured"
 inline std::string object_line(const ObjectFact& o, bool with_subtype = true)
 {
     std::string s = o.name;
@@ -122,7 +192,7 @@ inline std::string object_line(const ObjectFact& o, bool with_subtype = true)
         s += ", " + o.shape + (o.subtype == "table" ? " top" : " shape");
         if (o.shape_prob.has_value()) s += std::format(" (p {:.2f})", *o.shape_prob);
     }
-    return s;
+    return s + colour_words(o.color_name, o.color_prob) + o.owner;
 }
 
 /// Nearest first; objects without a position last, by name.
@@ -141,7 +211,7 @@ inline std::string objects_section(std::vector<ObjectFact> all, int n_nearest, i
 {
     std::vector<ObjectFact> here;
     for (auto& o : all)
-        if (o.in_current_room) here.push_back(std::move(o));
+        if (o.in_current_room and not is_human_node(o.name)) here.push_back(std::move(o));
     sort_by_distance(here);
     std::map<std::string, int> counts;
     for (const auto& o : here) ++counts[o.subtype];
@@ -182,11 +252,13 @@ inline std::string normalize_subtype(std::string w)
     return w;
 }
 
-/// "chair_34 (last seen in room_1, 25 min ago)"
+/// "chair_34 (last seen in room_1, 25 min ago), magenta (p 0.90), p 0.98 that it was real"
 inline std::string remembered_line(const RememberedObject& o, std::int64_t now_ms)
 {
-    return std::format("{} (last seen in {}, {})", o.name, o.room.empty() ? std::string("an unknown room") : o.room,
-                       o.last_seen_ms > 0 ? age_words(now_ms - o.last_seen_ms) : std::string("time unknown"));
+    return std::format("{} (last seen in {}, {}){}", o.name, o.room.empty() ? std::string("an unknown room") : o.room,
+                       o.last_seen_ms > 0 ? age_words(now_ms - o.last_seen_ms) : std::string("time unknown"),
+                       colour_words(o.color_name, o.color_prob) + o.owner)
+           + (o.exist_prob.has_value() ? std::format(", p {:.2f} that it was real", *o.exist_prob) : std::string{});
 }
 
 /// The tools' paragraph about remembered objects, most recently seen first; "" when there are none.
@@ -200,12 +272,14 @@ inline std::string remembered_block(std::vector<RememberedObject> hit, std::int6
     return s;
 }
 
-/// The remembered objects of a normalized class (all of them when empty).
-inline std::vector<RememberedObject> remembered_of(const Remembered& mem, const std::string& want)
+/// The remembered objects of a normalized class (all of them when empty) that may be of colour `colour` ("" = any).
+inline std::vector<RememberedObject> remembered_of(const Remembered& mem, const std::string& want,
+                                                   const std::string& colour = {})
 {
     std::vector<RememberedObject> hit;
     for (const auto& o : mem.objects)
-        if (want.empty() or o.subtype == want) hit.push_back(o);
+        if (not is_human_node(o.name) and (want.empty() or o.subtype == want) and colour_may_be(o.color_name, colour))
+            hit.push_back(o);
     return hit;
 }
 
@@ -237,13 +311,16 @@ inline bool is_remembered(const Remembered& mem, std::string_view name)
 inline std::string answer_find_objects(std::vector<ObjectFact> all, const std::string& subtype_raw,
                                        const std::string& room, const Remembered& mem = {}, bool* from_memory = nullptr)
 {
-    const std::string want = normalize_subtype(subtype_raw);
+    const auto [colour, rest] = split_colour(subtype_raw);
+    const std::string want = normalize_subtype(rest);
     std::vector<ObjectFact> hit;
     for (auto& o : all)
-        if (o.in_current_room and (want.empty() or o.subtype == want)) hit.push_back(std::move(o));
+        if (o.in_current_room and not is_human_node(o.name) and (want.empty() or o.subtype == want)
+            and colour_may_be(o.color_name, colour))
+            hit.push_back(std::move(o));
     sort_by_distance(hit);
-    const std::string what = want.empty() ? std::string("object") : want;
-    const std::string memory = remembered_block(remembered_of(mem, want), mem.now_ms);
+    const std::string what = (colour.empty() ? std::string{} : colour + " ") + (want.empty() ? std::string("object") : want);
+    const std::string memory = remembered_block(remembered_of(mem, want, colour), mem.now_ms);
     if (from_memory) *from_memory = not memory.empty();
     if (hit.empty())
         return std::format("No {} perceived in the current room ({}). This does not mean there is none: it may be "
@@ -261,16 +338,15 @@ inline std::string answer_where_is(std::vector<ObjectFact> all, const std::strin
                                    const Remembered& mem = {}, bool* from_memory = nullptr)
 {
     if (from_memory) *from_memory = false;
-    std::string name = name_raw;
-    std::ranges::transform(name, name.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    auto [colour, name] = split_colour(name_raw);   // "the yellow chair": a class with a colour, never a node name
     while (not name.empty() and name.back() == ' ') name.pop_back();
-    if (name.starts_with("the ")) name = name.substr(4);
     const auto describe = [&](const ObjectFact& o)
     {
         if (o.in_current_room) return object_line(o) + std::format(" — in the current room ({})", room);
         return o.name + (o.room.empty() ? std::string(" — room unknown")
                                         : " — in " + o.room + ", not the room the robot is in (not perceived from here)");
     };
+    std::erase_if(all, [](const ObjectFact& o) { return is_human_node(o.name); });
     for (const auto& o : all)
         if (o.name == name) return describe(o);
     for (const auto& o : mem.objects)
@@ -282,8 +358,8 @@ inline std::string answer_where_is(std::vector<ObjectFact> all, const std::strin
     const std::string want = normalize_subtype(name);
     std::vector<ObjectFact> hit;
     for (auto& o : all)
-        if (not want.empty() and o.subtype == want) hit.push_back(std::move(o));
-    const std::string memory = want.empty() ? std::string{} : remembered_block(remembered_of(mem, want), mem.now_ms);
+        if (not want.empty() and o.subtype == want and colour_may_be(o.color_name, colour)) hit.push_back(std::move(o));
+    const std::string memory = want.empty() ? std::string{} : remembered_block(remembered_of(mem, want, colour), mem.now_ms);
     if (from_memory) *from_memory = not memory.empty();
     if (hit.empty() and not memory.empty()) return memory;
     if (hit.empty())

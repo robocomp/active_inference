@@ -49,7 +49,7 @@ WorldDigest::WorldDigest(std::shared_ptr<DSR::DSRGraph> G, std::string robot_fra
     : G_(std::move(G)), robot_frame_(std::move(robot_frame)), objects_nearest_(objects_nearest) {}
 
 Digest WorldDigest::build(DSR::InnerEigenAPI& inner, bool controller_present, const IntentionStatus& intention,
-                          const std::optional<std::string>& today) const
+                          const std::optional<std::string>& today, const HumanFacts& human) const
 {
     Digest d;
     auto& G = *G_;
@@ -220,6 +220,12 @@ Digest WorldDigest::build(DSR::InnerEigenAPI& inner, bool controller_present, co
             if (const auto v = G.get_attrib_by_name<width_m_att>(n); v.has_value()) o.width_m = v.value();
             if (const auto v = G.get_attrib_by_name<depth_m_att>(n); v.has_value()) o.depth_m = v.value();
             if (const auto v = G.get_attrib_by_name<height_m_att>(n); v.has_value()) o.height_m = v.value();
+            if (const auto c = G.get_attrib_by_name<color_name_att>(n); c.has_value())   // absent = not measured
+            {
+                o.color_name = c.value();
+                o.color_prob = G.get_attrib_by_name<color_prob_att>(n).value_or(0.f);
+            }
+            o.uid = G.get_attrib_by_name<object_uid_att>(n).value_or(0);   // LTOM's stable id: what a person can own
             // Its approach affordance's sides (approach.h), labelled as seen from the robot now — in the robot's frame,
             // where the robot is the origin: the room-frame standpoints are brought into it.
             if (o.in_current_room)
@@ -257,6 +263,7 @@ Digest WorldDigest::build(DSR::InnerEigenAPI& inner, bool controller_present, co
     if (room_id != 0)
         for (const auto& n : G.get_nodes_by_type("obstacle"))
             if (rc::world::room_of(G, n.id()) == room_id) ++d.n_obstacles;
+    mark_owned(d.objects, human);
     s += objects_section(d.objects, objects_nearest_, d.n_obstacles);
 
     // ── the chat's own command ──

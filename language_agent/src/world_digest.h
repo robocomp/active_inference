@@ -58,8 +58,9 @@ public:
     WorldDigest(std::shared_ptr<DSR::DSRGraph> G, std::string robot_frame = "body", int objects_nearest = 6);
     /// Build the digest now. `inner` must be the main thread's instance (CLAUDE.md: ts==0 cache ownership).
     /// `today` (already "today: …") is appended as the last line when present.
+    /// `human` (ltom's human_1) marks the objects they own in the object lines ("…, Pablo's").
     Digest build(DSR::InnerEigenAPI& inner, bool controller_present, const IntentionStatus& intention,
-                 const std::optional<std::string>& today = std::nullopt) const;
+                 const std::optional<std::string>& today = std::nullopt, const HumanFacts& human = {}) const;
 
 private:
     std::shared_ptr<DSR::DSRGraph> G_;

@@ -78,6 +78,7 @@
 
 #include "skills.h"
 #include "remembered_goto.h"
+#include "passage_refs.h"
 #include "verbatim_reply.h"
 #include "camera_grabber.h"
 #include "canvas_commands.h"
@@ -89,6 +90,8 @@
 #include "fleet_control.h"
 #include "../../common/episodic/em_answers.h"
 #include "intention_node.h"
+#include "human_claim.h"
+#include "human_refs.h"
 #include "mission_plan.h"
 #include "mission_watch.h"
 #include "system_reader.h"
@@ -217,6 +220,14 @@ private:
     bool remembered_goto_card(const std::string& name, const QString& text);
     /// approach_object: pick the object, put a standpoint short of it, send a one-step go_to mission (approach.h).
     QString do_approach(const QJsonObject& args);
+    // ── the human at the chat (spec 2026-11-11-human-model) ──
+    QString do_human_claim(const QJsonObject& args);   ///< resolves, shows a read-back card; never stores
+    void check_claim_answer();                         ///< LTOM's answer to the posted claim, or its absence
+    /// "my chair" / "mine" in an object argument → the one owned object's name; an error sentence when there is none
+    /// or more than one (the caller refuses with it, and the model asks). nullopt when the words do not say "my".
+    std::optional<std::expected<RefCandidate, std::string>> resolve_mine(const std::string& what) const;
+    std::vector<std::string> recent_object_names() const;   ///< object names in the last turns, newest first
+    double front_half_fov_deg() const;                       ///< the front camera's half field of view (intrinsics)
     /// go_around_object: a loop of go_to stops around an object, back to the start (approach.h go_around_mission).
     QString do_go_around(const QJsonObject& args);
     /// sim_door: the door's world pose through the sim witness → tools/sim_door.py, async; told by on_sim_door_done.
@@ -234,7 +245,8 @@ private:
     void tick_status();
     /// A new controller_mission snapshot: its progress lines, and the wakes of a chat mission.
     void on_mission_progress(rc::mission::Progress now);
-    void drain_wakes();   ///< the oldest robot event to the model, if it is idle
+    void rewrite_passages(rc::mission::Mission& m);   ///< before a card: passage refs into remembered rooms → room refs
+    void drain_wakes();   ///< a held person message, else the oldest robot event, to the model if it is idle
     /// The room the robot is physically in: the one its pose is published in (live robot RT), else the current room.
     [[nodiscard]] std::string physical_room() const;
     [[nodiscard]] std::string sent_title() const;   ///< the title of the mission JSON last sent ('the mission' if none)
@@ -276,6 +288,7 @@ private:
     WakeQueue wakes_;                          ///< robot events waiting for the model
     std::string fix_key_;                      ///< "m<serial>" of the failed mission whose wake was delivered last
     std::uint64_t fix_turn_ = 0;               ///< user_turn_ at that delivery (fix_still_open)
+    HeldMessages held_;                        ///< the person typed while the model was busy: answered next
     bool wake_turn_ = false;                   ///< the model's current turn answers a robot event, not the person
     OllamaClient llm_;
     std::unique_ptr<ChatWindow> window_;
@@ -371,6 +384,26 @@ private:
         std::uint64_t turn = 0;     ///< user_turn_ when it was shown: card_still_valid
     };
     std::optional<MissionCard> pending_mission_;
+    HumanFacts human_;                 ///< ltom's human_1, refreshed every digest tick (empty when ltom is absent)
+    struct ClaimCard                   ///< a read-back shown to the person, waiting for their yes
+    {
+        HumanClaim claim;
+        std::string readback;
+        std::string object_name;       ///< "" for a name claim
+        std::uint64_t serial = 0;      ///< shares card_serial_ with mission cards: the newer card takes a yes
+        std::uint64_t turn = 0;        ///< user_turn_ when shown: card_still_valid
+    };
+    std::optional<ClaimCard> pending_claim_;
+    struct PostedClaim                 ///< said yes to and posted on chat_intention, waiting for LTOM's answer
+    {
+        HumanClaim claim;
+        std::string readback;
+        std::string object_name;
+        std::uint64_t stamp = 0;
+        std::int64_t posted_ms = 0;
+    };
+    std::optional<PostedClaim> posted_claim_;
+    std::optional<std::string> last_approach_target_;   ///< the last object approach_object was sent to ("that")
     std::uint64_t card_serial_ = 0;
 };
 

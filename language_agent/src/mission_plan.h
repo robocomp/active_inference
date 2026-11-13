@@ -307,10 +307,15 @@ inline std::string paused_at(const rc::mission::Progress& p)
         if (v.state == SS::Running and was == SS::Running and old and v.attempt > old->attempt)
         {
             const int max = step ? step->on_fail.retries : v.attempt - 1;
-            out.push_back(std::format("⟳ retry {}/{} {}", v.attempt - 1, max, label));
+            out.push_back(std::format("⟳ retry {}/{} {}{}", v.attempt - 1, max, label,
+                                      v.after.empty() ? "" : " (the last try: " + v.after + ")"));
         }
         else if (v.state == SS::Running and was != SS::Running)
             out.push_back(std::format("→ {}/{} {}", top_index(v.id), total, label));
+        // Why a running step WAITS (the controller's words): told when it changes, not when the wait ends — the step
+        // goes on, and its own ✓/✗/⟳ line follows (chat 2026-11-12: minutes of exploring with no reason given).
+        if (v.state == SS::Running and not v.note.empty() and (not old or old->note != v.note))
+            out.push_back(std::format("… {} waits: {}", label, v.note));
         if (v.state == SS::Satisfied and was != SS::Satisfied)
             out.push_back(std::format("✓ {} ({:.0f} s)", label, v.t1 < v.t0 ? 0.0 : double(v.t1 - v.t0) / 1000.0));
         else if (v.state == SS::Failed and was != SS::Failed)
@@ -417,6 +422,34 @@ private:
     std::deque<std::pair<std::string, std::string>> q_;
     std::string last_fixes_;
 };
+
+/// The person's messages typed while the model was busy (chat_e2e11: "close the door" arrived 4 s into a mission
+/// close-out and was thrown away with "Still answering"). Held in the order typed, never dropped.
+struct HeldMessages
+{
+    void hold(std::string text) { q_.push_back(std::move(text)); }
+    [[nodiscard]] bool empty() const { return q_.empty(); }
+    [[nodiscard]] std::size_t size() const { return q_.size(); }
+    void clear() { q_.clear(); }   ///< a new conversation
+    [[nodiscard]] std::optional<std::string> pop() { if (q_.empty()) return std::nullopt; auto t = std::move(q_.front()); q_.pop_front(); return t; }
+
+private:
+    std::deque<std::string> q_;
+};
+
+/// What the idle model answers next: a held message from the person first, then the oldest robot event.
+struct IdleTurn
+{
+    bool from_person = false;
+    std::string text;
+};
+[[nodiscard]] inline std::optional<IdleTurn> next_idle_turn(HeldMessages& held, WakeQueue& wakes, bool busy)
+{
+    if (busy) return std::nullopt;
+    if (auto t = held.pop()) return IdleTurn{true, std::move(*t)};
+    if (auto n = wakes.pop_if_idle(false)) return IdleTurn{false, std::move(*n)};
+    return std::nullopt;
+}
 
 /// A wake goes to the model as a user-role message that says it is NOT the person speaking.
 [[nodiscard]] inline std::string wake_message(std::string_view note)

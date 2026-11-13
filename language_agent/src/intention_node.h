@@ -7,6 +7,8 @@
  *   node  timestamp_agent    epoch ms of the command; a new stamp IS a new command                     [language_agent]
  *   edge  state, bt_state    how it is going: in_progress → completed|aborted|failed|<reason>          [controller]
  *   edge  timestamp_agent    which command that report is about                                        [controller]
+ *   node  human_claim_*      a claim about the human at the chat, posted ONLY after the person's yes, removed when
+ *                            ltom_agent's answer (on its human_1 node, same stamp) is seen (spec 2026-11-11-human-model)
  *
  * ★ ONE WRITER PER OBJECT (controller/src/chat_inbox.h has the why): cortex's LWW update_node re-versions every
  *   attribute of the writer's local copy, so two agents writing different attributes of ONE node can silently drop
@@ -26,6 +28,7 @@
 #include <dsr/api/dsr_api.h>
 
 #include "world_digest.h"   // IntentionStatus
+#include "human_claim.h"
 
 namespace rc::chat
 {
@@ -44,6 +47,10 @@ public:
     bool ensure();
     /// Write a new command (+ stamp). Returns the stamp, or nullopt if the node is unavailable.
     std::optional<std::uint64_t> send(const std::string& command);
+    /// Post a claim for ltom_agent (human_claim_* attributes). Returns its stamp, or nullopt if the node is unavailable.
+    std::optional<std::uint64_t> post_claim(const HumanClaim& c);
+    /// Remove the claim's attributes (on seeing LTOM's answer, or when it does not answer).
+    void clear_claim();
     /// The node's current command and the controller's report on it (from the edge).
     [[nodiscard]] IntentionStatus read() const;
     [[nodiscard]] std::uint64_t id() const { return id_; }

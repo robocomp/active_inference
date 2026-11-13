@@ -1,0 +1,9 @@
+total 40
+drwxrwxr-x  2 pbustos pbustos  4096 nov 11 14:02 .
+drwx------ 54 pbustos pbustos 12288 nov 11 20:40 ..
+lrwxrwxrwx  1 pbustos pbustos    80 nov 11 14:02 controller -> /home/pbustos/robocomp/components/active_inference.worktrees/rt-build/controller
+lrwxrwxrwx  1 pbustos pbustos    82 nov 11 14:02 door_concept -> /home/pbustos/robocomp/components/active_inference.worktrees/rt-build/door_concept
+lrwxrwxrwx  1 pbustos pbustos    61 nov 11 14:02 ltsm_agent -> /home/pbustos/robocomp/components/active_inference/ltsm_agent
+lrwxrwxrwx  1 pbustos pbustos    86 nov 11 14:02 residual_concept -> /home/pbustos/robocomp/components/active_inference.worktrees/rt-build/residual_concept
+lrwxrwxrwx  1 pbustos pbustos    81 nov 11 14:02 retina -> /home/pbustos/robocomp/components/active_inference.worktrees/object-colour/retina
+lrwxrwxrwx  1 pbustos pbustos    82 nov 11 14:02 room_concept -> /home/pbustos/robocomp/components/active_inference.worktrees/rt-build/room_concept

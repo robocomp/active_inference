@@ -1,6 +1,7 @@
 // mission_plan.h: parse/validate for the planner, name check, progress lines, reports.
 #include "../src/mission_plan.h"
 #include "../src/remembered_goto.h"
+#include "../src/passage_refs.h"
 
 #include <clocale>
 #include <print>
@@ -104,6 +105,19 @@ int main()
         Progress r2 = r1;
         r2.steps[0].attempt = 2;
         CHECK(progress_lines(r1, r2, *mr) == std::vector<std::string>{"⟳ retry 1/2 1:cross door_1"});
+        // the reason for the retry and why a step waits are told (chat 2026-11-12: minutes of exploring, no reason)
+        Progress r3 = r2;
+        r3.steps[0].after = "door_unresolved";
+        CHECK(progress_lines(r1, r3, *mr) == std::vector<std::string>{"⟳ retry 1/2 1:cross door_1 (the last try: door_unresolved)"});
+        Progress w1 = r1;
+        w1.steps[0].note = "no door I know of in room_1 leads to room_3 yet";
+        CHECK(progress_lines(r1, w1, *mr) ==
+              std::vector<std::string>{"… 1:cross door_1 waits: no door I know of in room_1 leads to room_3 yet"});
+        CHECK(progress_lines(w1, w1, *mr).empty());                  // told once, not every snapshot
+        CHECK(progress_lines(w1, r1, *mr).empty());                  // the wait ending is not news (the step goes on)
+        Progress w0 = snap("in_progress", {view("1", "cross", SS::Pending)});
+        CHECK(progress_lines(w0, w1, *mr) == (std::vector<std::string>{"→ 1/1 1:cross door_1",
+                                                                       "… 1:cross door_1 waits: no door I know of in room_1 leads to room_3 yet"}));
     }
     {
         Progress back = snap("in_progress", {view("1", "cross", SS::Satisfied, 5000, 1000)});
@@ -177,6 +191,53 @@ int main()
         CHECK(w.pop_if_idle(false) == "b" and w.last_fixes().empty());
         CHECK(w.pop_if_idle(false) == "c" and w.last_fixes() == "m7");   // the failure it came from
         CHECK(wake_message("x") == "(robot event, not the person) x");
+    }
+
+    // ── HeldMessages: the person typed while the model was busy (chat_e2e11: "close the door" arrived 4 s into the
+    //    mission close-out and was thrown away). Held, never dropped, and answered BEFORE any robot event. ─────────
+    {
+        HeldMessages held;
+        WakeQueue w;
+        w.push("mission completed");
+        held.hold("close the door");
+        CHECK(not next_idle_turn(held, w, true).has_value());   // busy: both wait
+        const auto t1 = next_idle_turn(held, w, false);
+        CHECK(t1.has_value() and t1->from_person and t1->text == "close the door");   // the person outranks the wake
+        const auto t2 = next_idle_turn(held, w, false);
+        CHECK(t2.has_value() and not t2->from_person and t2->text == "mission completed");
+        CHECK(not next_idle_turn(held, w, false).has_value());
+        held.hold("a");
+        held.hold("b");
+        CHECK(held.size() == 2);
+        CHECK(next_idle_turn(held, w, false)->text == "a");   // in the order typed
+        held.clear();
+        CHECK(held.empty());
+    }
+
+    // ── passages_to_rooms (chat_e2e11): "go to my chair" from room_2 was refused passage_unresolved — the controller
+    //    resolves passage:ID@ROOM only through ltsm's LIVE passage node (alive only while the room beyond is proto).
+    //    A passage into a REMEMBERED room becomes `cross <that room>`; the model still writes passages (it copies
+    //    them 10/10, and `cross room_3` only 4/10). ─────────────────────────────────────────────────────────────────
+    {
+        rc::topo::Topology t;
+        t.rooms = {{"room_1", false}, {"room_2", true}, {"room_3", false}};
+        rc::topo::TopoPassageInfo p0; p0.id = "passage_0"; p0.room_a = "room_1"; p0.room_b = "room_2";
+        rc::topo::TopoPassageInfo p1; p1.id = "passage_1"; p1.room_a = "room_2"; p1.room_b = "room_3";
+        t.passages = {p0, p1};
+        auto m = parse_planned("mission\n  cross passage:passage_0@room_2 expect=room_1\n"
+                               "  repeat 2\n    cross passage:passage_1@room_2 expect=room_3\n"   // nested: rewritten too
+                               "  cross passage:passage_1@room_1 expect=room_3\n"   // room_1 is not an end of passage_1
+                               "  cross passage:passage_9@room_2 expect=room_1\n");               // unknown: left as is
+        CHECK(m.has_value());
+        if (m.has_value())
+        {
+            CHECK(rc::chat::passages_to_rooms(m->steps, t) == 2);
+            const std::string out = rc::mission::print_text(*m);
+            CHECK(out.contains("cross room_1 expect=room_1"));
+            CHECK(out.contains("cross room_3 expect=room_3"));
+            CHECK(out.contains("passage:passage_1@room_1"));   // passage_1 does not touch room_1: not rewritten
+            CHECK(out.contains("passage:passage_9@room_2"));
+        }
     }
 
     // ── the wakes' text ──────────────────────────────────────────────────────────────────────────────────────────
