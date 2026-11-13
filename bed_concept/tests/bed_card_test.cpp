@@ -36,8 +36,8 @@ int main(int argc, char**)
     CHECK(near(p.q_return, 0.85f));
     CHECK(p.terms.size() == 2 and p.terms[0].name == "envelope" and p.terms[1].name == "central");
     CHECK(near(p.terms[0].params.at("axes"), 1.0f));
-    CHECK(near(c.geometry.w, 1.75f) and near(c.geometry.d, 2.10f) and near(c.geometry.h, 0.80f));
-    CHECK(near(c.geometry.z0, 0.0f) and near(c.geometry.z1, 0.80f));
+    CHECK(near(c.geometry.w, 1.75f) and near(c.geometry.d, 2.10f) and near(c.geometry.h, 0.65f));
+    CHECK(near(c.geometry.z0, 0.0f) and near(c.geometry.z1, 0.65f));
     CHECK(c.calibration == "prior" and c.calibration_date.empty());
     // Level 1 = bed_projection.cpp's own-wall skip (rc::kBedOwnWallSkipM) against LINE walls.
     CHECK(c.walls and near(c.walls->own_wall_skip_m, 0.70f) and near(c.walls->own_wall_skip_m, kBedOwnWallSkipM));

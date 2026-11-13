@@ -13,3 +13,10 @@ target_compile_definitions(bed_card_test PRIVATE AGENT_DIR="${CMAKE_CURRENT_LIST
 target_compile_options(bed_card_test PRIVATE -O2)
 target_link_libraries(bed_card_test PRIVATE Eigen3::Eigen)   # the I4 end-to-end case runs the evaluator
 add_test(NAME bed_card_test COMMAND bed_card_test)
+
+# The bed's compound SDF: box ∪ headboard panel (2026-11-14). Run: ./headboard_sdf_test
+add_executable(headboard_sdf_test headboard_sdf_test.cpp ../src/bed_belief.cpp)
+target_include_directories(headboard_sdf_test PRIVATE ../src ../../common ../../common/media_transport)
+target_compile_options(headboard_sdf_test PRIVATE -O2)
+target_link_libraries(headboard_sdf_test PRIVATE Eigen3::Eigen)
+add_test(NAME headboard_sdf_test COMMAND headboard_sdf_test)

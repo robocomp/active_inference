@@ -95,7 +95,14 @@ float BedModel::sdf_point_at(const Eigen::Vector3f& p, const BedState& s) const
     const float dy = std::abs(local_y) - half_h;
     const float dz = std::abs(local_z - half_H) - half_H;
 
-    return box_sdf(dx, dy, dz);
+    const float d_box = box_sdf(dx, dy, dz);
+    if (params_.headboard_h_m <= 0.0f) return d_box;
+    // Headboard panel on the back face (+Y local), full width, floor to headboard_h_m (see BedBeliefParams).
+    const float t   = std::min(params_.headboard_t_m, h);
+    const float yc  = half_h - 0.5f * t;
+    const float hz  = 0.5f * params_.headboard_h_m;
+    const float d_hb = box_sdf(dx, std::abs(local_y - yc) - 0.5f * t, std::abs(local_z - hz) - hz);
+    return std::min(d_box, d_hb);
 }
 
 float BedModel::sdf_point(const Eigen::Vector3f& p) const

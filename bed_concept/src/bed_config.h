@@ -79,6 +79,8 @@ struct BedConfig
     // the height std is broad (weak/data-driven). Split BedBeliefParams' prior_footprint_* / prior_height_*.
     float ai2_prior_footprint_m   = 0.60f;   // mean of the w & h(depth) prior (m)
     float ai2_prior_footprint_std = 0.08f;   // TIGHT → strong footprint prior (m)
+    float ai2_headboard_h_m       = -1.0f;   // headboard panel top (m); <=0 = no headboard (plain box)
+    float ai2_headboard_t_m       = 0.10f;   // headboard panel thickness (m)
     float ai2_prior_depth_m       = -1.0f;   // depth (local Y) mean (m); ≤0 = same as the footprint (square)
     float ai2_prior_height_m      = 1.90f;   // mean of the H (vertical) static anchor (m) — a standard tall bed
     float ai2_prior_height_std    = 0.30f;   // anchor std (m); stops the box top floating above the cloud

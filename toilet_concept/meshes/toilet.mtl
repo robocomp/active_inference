@@ -1,5 +1,18 @@
-newmtl toilet
-Kd 0.93 0.93 0.95
+newmtl porcelain
 Ka 0.05 0.05 0.05
+Kd 0.95 0.95 0.96
 d 1.0
 illum 1
+
+newmtl seat
+Ka 0.05 0.05 0.05
+Kd 0.88 0.88 0.90
+d 1.0
+illum 1
+
+newmtl button
+Ka 0.05 0.05 0.05
+Kd 0.75 0.75 0.78
+d 1.0
+illum 1
+

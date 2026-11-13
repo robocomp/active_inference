@@ -46,6 +46,9 @@ struct BedModelParams
     // Top/leg split band: a point no more than (TOP_THICKNESS + sigma_obs) below the top face is
     // attributed to the top slab (rather than a leg) by the compound SDF.
     float sigma_obs = 0.05f;
+    // Headboard panel (same template as BedBeliefParams): its points are ON the bed's surface, not residual.
+    float headboard_h_m = -1.0f;   // <=0 = no headboard
+    float headboard_t_m = 0.10f;
 };
 
 // ─── BedModel ──────────────────────────────────────────────────────────────

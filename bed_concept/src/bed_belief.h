@@ -127,6 +127,13 @@ struct BedBeliefParams
     // (observed: H→2.37 for a 1.9 m mask). A firm TWO-SIDED anchor pins H to the observed robust cloud top
     // (frame.z_top_obs, the p97 top which sits BELOW the junk tail; the tail is separately faded via per-point R in
     // the fitter). Data still sets the LOWER bound (front points force H ≥ real top). Inert when z_top_obs < 0. 0 = OFF.
+    // HEADBOARD (2026-11-14, owner: fit this Webots bed, headboard NOT the box top). A fixed-template panel on the
+    // BACK face (local +Y; the front is −Y), full width, thickness headboard_t_m, from the floor to headboard_h_m.
+    // It is part of the SAME primitive (SDF = min(box, panel)), so a headboard point is explained by the bed and
+    // pulls the pose (and, being at one end, the 180° front/back mode) but never the mattress height H. Not a DOF:
+    // the template is the manifest's. headboard_h_m <= 0 = a plain box (the refrigerator parent's model).
+    float headboard_h_m = -1.0f;
+    float headboard_t_m = 0.10f;
     float top_no_float_precision = 10000.0f; // 1/m² firm two-sided anchor pinning H → observed robust cloud top
     float top_no_float_margin_m  = 0.02f;   // upward allowance (m) added to the observed top as the anchor target
 
@@ -342,7 +349,9 @@ public:
     // ── Generative-model hooks (called by the engine; also used as the SDF API) ─
     float sdf_box(const Eigen::Vector3f& p, const BedBeliefState& s) const;
     float sdf_prim(const Eigen::Vector3f& p, const BedBeliefState& s, int prim) const;   // prim == 0
-    float sdf_compound(const Eigen::Vector3f& p, const BedBeliefState& s) const { return sdf_box(p, s); }
+    float sdf_headboard(const Eigen::Vector3f& p, const BedBeliefState& s) const;   // +inf when no headboard
+    float sdf_compound(const Eigen::Vector3f& p, const BedBeliefState& s) const
+    { return std::min(sdf_box(p, s), sdf_headboard(p, s)); }
     Eigen::Matrix<float, 6, 1> sdf_jacobian(const Eigen::Vector3f& p, const BedBeliefState& s, int prim) const;
     // Soft responsibilities: [box, clutter, wall] (sum = 1) at measurement variance R. The engine reads only
     // index 0 (n_prims()==1); the rest exist so the marginal likelihood is honest about what else explains a point.

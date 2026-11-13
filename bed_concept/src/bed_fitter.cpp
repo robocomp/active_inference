@@ -651,6 +651,8 @@ float BedFitter::run_inference(BedInstance& inst, const BedObservation& observat
         p.prior_footprint_m   = cfg_.ai2_prior_footprint_m;
         p.prior_footprint_std = cfg_.ai2_prior_footprint_std;
         p.prior_depth_m       = cfg_.ai2_prior_depth_m;
+        p.headboard_h_m       = cfg_.ai2_headboard_h_m;
+        p.headboard_t_m       = cfg_.ai2_headboard_t_m;
         p.prior_height_m      = cfg_.ai2_prior_height_m;
         p.prior_height_std    = cfg_.ai2_prior_height_std;
         p.depth_unobs_precision = cfg_.ai2_depth_unobs_precision;
@@ -824,7 +826,12 @@ float BedFitter::run_inference(BedInstance& inst, const BedObservation& observat
         if (not frame.points.empty())
         {
             std::vector<float> zt; zt.reserve(frame.points.size());
-            for (const auto& p : frame.points) zt.push_back(p.z());
+            // ★Only points the BOX explains better than the headboard: the p97 of a cloud that includes a 1.25 m
+            // headboard IS the headboard, and the firm top anchor would pin the mattress height there.
+            const auto& sb = inst.ai2_belief.state();
+            for (const auto& p : frame.points)
+                if (inst.ai2_belief.sdf_box(p, sb) <= inst.ai2_belief.sdf_headboard(p, sb)) zt.push_back(p.z());
+            if (zt.empty()) for (const auto& p : frame.points) zt.push_back(p.z());
             const std::size_t kt = static_cast<std::size_t>(0.97f * (zt.size() - 1));
             std::nth_element(zt.begin(), zt.begin() + kt, zt.end());
             frame.z_top_obs = zt[kt];
@@ -837,7 +844,9 @@ float BedFitter::run_inference(BedInstance& inst, const BedObservation& observat
                 for (std::size_t i = 0; i < frame.points.size(); ++i)
                 {
                     const float above = frame.points[i].z() - frame.z_top_obs;
-                    if (above > 0.0f)
+                    // a headboard point is not over-segmentation: the headboard explains it, keep its precision
+                    if (above > 0.0f and inst.ai2_belief.sdf_box(frame.points[i], sb)
+                                         <= inst.ai2_belief.sdf_headboard(frame.points[i], sb))
                     {
                         const float s = cfg_.ai2_top_overseg_sigma_per_m * above;
                         frame.R[i] += s * s;
@@ -1186,6 +1195,8 @@ void BedFitter::log_ai2_csv(const BedInstance& inst, int npts, float R, bool gat
 BedModelParams BedFitter::make_model_params() const
 {
     BedModelParams p;
+    p.headboard_h_m = cfg_.ai2_headboard_h_m;
+    p.headboard_t_m = cfg_.ai2_headboard_t_m;
     p.sigma_obs = cfg_.sigma_obs;   // top/leg SDF split band for the candidate/residual classification
     return p;
 }

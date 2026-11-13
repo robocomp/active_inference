@@ -47,9 +47,23 @@ float BedBelief::sdf_box(const Eigen::Vector3f& p, const BedBeliefState& s) cons
     return box_sdf(std::abs(lx) - 0.5f * s.w, std::abs(ly) - 0.5f * s.h, std::abs(p.z() - half_H) - half_H);
 }
 
+// The headboard panel: local x ∈ [−w/2, w/2], y ∈ [h/2 − t, h/2] (the back, +Y), z ∈ [0, headboard_h_m].
+float BedBelief::sdf_headboard(const Eigen::Vector3f& p, const BedBeliefState& s) const
+{
+    if (params_.headboard_h_m <= 0.0f) return std::numeric_limits<float>::infinity();
+    const float c = std::cos(-s.yaw), sn = std::sin(-s.yaw);
+    const float px = p.x() - s.cx, py = p.y() - s.cy;
+    const float lx = px * c - py * sn;
+    const float ly = px * sn + py * c;
+    const float t  = std::min(params_.headboard_t_m, s.h);
+    const float yc = 0.5f * s.h - 0.5f * t;
+    const float hz = 0.5f * params_.headboard_h_m;
+    return box_sdf(std::abs(lx) - 0.5f * s.w, std::abs(ly - yc) - 0.5f * t, std::abs(p.z() - hz) - hz);
+}
+
 float BedBelief::sdf_prim(const Eigen::Vector3f& p, const BedBeliefState& s, int) const
 {
-    return sdf_box(p, s);   // prim == 0 (the only primitive)
+    return sdf_compound(p, s);   // prim == 0: box ∪ headboard, ONE primitive (the engine's mixture is unchanged)
 }
 
 // ─── Mixture responsibilities ────────────────────────────────────────────────────────────────────
@@ -73,7 +87,7 @@ float BedBelief::mixture_unnormalized(const Eigen::Vector3f& p, const BedBeliefS
     const float eps    = std::clamp(params_.clutter_frac, 0.0f, 0.99f);
     const float pw     = wall_component_frac();
     const float inv2R  = 0.5f / std::max(1e-9f, R);
-    const float d      = sdf_box(p, s);
+    const float d      = sdf_compound(p, s);
     u[0] = (1.0f - eps - pw) * std::exp(-d * d * inv2R);
     const float cs = params_.clutter_scale_m;
     u[1] = eps * std::exp(-cs * cs * inv2R);

@@ -83,8 +83,10 @@ AI2PriorSizeStd = 0.30      # (legacy; the size prior is now split into footprin
 AI2PriorFootprintM = 1.75   # bed (Webots threerooms-piso); was 0.60 — mean of the w & h(depth) prior (m)
 AI2PriorFootprintStd = 0.2   # bed (Webots threerooms-piso); was 0.08 — TIGHT → strong footprint prior (m); λ = 1/std²
 AI2PriorDepthM = 2.1   # bed (Webots threerooms-piso): depth (local Y, front-to-back) mean; the footprint mean above is the width
-AI2PriorHeightM = 0.8   # bed (Webots threerooms-piso); was 1.90 — mean of the H (vertical) STATIC anchor (m) — a standard tall bed
-AI2PriorHeightStd = 0.3   # bed (Webots threerooms-piso); was 0.30 — anchor std (m); λ = 1/std² stops the box TOP floating above the cloud (points on a side face never pull H down). Data still sets the LOWER bound (H ≥ cloud-top)
+HeadboardHeightM = 1.25   # bed (Bed.proto frame mesh top 1.255): a fixed panel on the BACK face; its points belong to the bed but never set H
+HeadboardThickM = 0.10    # bed (Bed.proto headboard bounding box 0.10 thick)
+AI2PriorHeightM = 0.65   # bed: mattress 0.61 + blanket to 0.72 (Bed.proto meshes); the HEADBOARD is not the top — see below
+AI2PriorHeightStd = 0.10   # bed: tight — the box is the mattress layer, and the headboard is modelled separately
 # DEPTH-OBSERVABILITY prior (front-only-view depth-collapse fix): depth (h) is identifiable only when the cloud spans
 # the depth extent (front AND back seen). A front-only view is a thin ly-slab; its many points still drag depth to the
 # 0.10 clamp (the size common-mode caps σ, not the mean). Extra depth precision applied ∝ (1 − observed_depth_extent /

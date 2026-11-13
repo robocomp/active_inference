@@ -21,8 +21,8 @@ opens          = "front"            # the foot; the headboard rests against the 
 
 [model.geometry]
 support   = "floor_anchored"
-z_top_m   = 0.80
-extent_m  = 0.80
+z_top_m   = 0.65
+extent_m  = 0.65
 from      = "measured"
 why       = "Webots threerooms-piso: Bed.proto (R2025a) bounding boxes: 2.1 long x 1.75 wide, mattress top 0.65, headboard 1.25, footboard 0.83"
 
@@ -37,9 +37,17 @@ why  = "measured on the Webots model. Plan is NOT square: mean_m is the width (l
 [prior.height]
 kind = "gaussian"
 dims = ["H"]
-mean_m = 0.80
-std_m = 0.30
-why  = "the mask's robust top (the tallest part the detector covers), measured on the Webots model"
+mean_m = 0.65
+std_m = 0.10
+why  = "the MATTRESS layer (mattress 0.61, blanket to 0.72 on the Bed.proto meshes). The headboard is NOT the top: owner 2026-11-14"
+
+[prior.headboard]
+kind = "fixed_template"
+face = "back"
+height_m = 1.25
+thickness_m = 0.10
+from = "measured"
+why  = "Bed.proto frame mesh top 1.255, headboard bounding box 0.10 thick. Part of the bed's SDF (min(box, panel)): its points pull the pose and the front/back mode but never H, and the robust top is taken from the points the box explains"
 
 [prior.depth_observability]
 kind = "conditional_precision"
