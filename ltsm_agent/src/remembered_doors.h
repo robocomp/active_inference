@@ -18,6 +18,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <string>
 #include <unordered_set>
 
 namespace ltsm
@@ -32,10 +33,15 @@ public:
     /// Delete every remembered_door note in the live graph (startup sweep and graceful exit).
     int remove_all();
 
+    /// How many times a note was rewritten (update_node) so far: a cycle with nothing new must not add to it.
+    [[nodiscard]] int updates() const { return updates_; }
+
 private:
     int retire_where_parent_is_not(std::uint64_t room_id);   ///< deletes notes not hanging from room_id; room_id 0 = all
     std::shared_ptr<DSR::DSRGraph> live_, mem_;
     std::unordered_set<std::uint64_t> adopted_;   ///< memory face ids door_concept has restored this stay
+    std::unordered_set<std::string> failed_insert_;   ///< note names whose insert failed (logged once)
+    int updates_ = 0;
     std::uint64_t current_ = 0;                   ///< the live room the notes belong to
 };
 }   // namespace ltsm

@@ -11,6 +11,7 @@
 #include <format>
 #include <map>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 namespace ltsm
@@ -29,6 +30,23 @@ bool is_note(DSR::DSRGraph &g, const DSR::Node &n)
 bool is_face(const DSR::Node &n)
 {
     return n.type() == "object" and RoomRecall::live_name_of(n.name()).starts_with("door_");
+}
+
+/// Whether `face` hangs, through any chain of parents (wall, floor, ...), from `ancestor`. The walk ends with the chain
+/// itself: at the ancestor, at a root, or at a node already seen (a cycle).
+bool descends_from(DSR::DSRGraph &g, const DSR::Node &face, std::uint64_t ancestor)
+{
+    std::unordered_set<std::uint64_t> seen{face.id()};
+    auto p = g.get_attrib_by_name<parent_att>(face);
+    while (p.has_value() and p.value() != 0)
+    {
+        if (p.value() == ancestor) return true;
+        if (not seen.insert(p.value()).second) return false;
+        const auto up = g.get_node(p.value());
+        if (not up.has_value()) return false;
+        p = g.get_attrib_by_name<parent_att>(up.value());
+    }
+    return false;
 }
 }   // namespace
 
@@ -79,12 +97,16 @@ int RememberedDoors::step()
         return 0;
     }
 
+    auto mie = mem_->get_inner_eigen_api();   // created here, on the thread that owns it
     const int level = live_->get_node_level(room.value()).value_or(0) + 1;
     for (const auto &face : mem_->get_nodes_by_type("object"))
     {
-        if (not is_face(face) or mem_->get_attrib_by_name<parent_att>(face).value_or(0) != twin->id()) continue;
+        if (not is_face(face) or not descends_from(*mem_, face, twin->id())) continue;
         if (adopted_.contains(face.id())) continue;
 
+        // The note's pose is the face's pose IN THE ROOM's frame, T(room <- face): the face hangs from a wall (or the room) in memory.
+        const auto pose = mie->get_transformation_matrix(twin->name(), face.name());
+        if (not pose.has_value()) continue;
         const std::string name = "remembered_" + RoomRecall::live_name_of(face.name());
         auto note = live_->get_node(name);
         if (note.has_value() and live_->get_attrib_by_name<door_adopted_att>(note.value()).value_or(false))
@@ -99,6 +121,7 @@ int RememberedDoors::step()
         attrs.erase(parent_str.data());
         attrs.erase(level_str.data());
         attrs.erase(collapsed_str.data());
+        attrs.erase(object_subtype_str.data());   // the note's own subtype is set below; copying "door" would rewrite it every cycle
         attrs.erase(door_adopted_str.data());   // the adoption flag belongs to the note alone
 
         const bool fresh = not note.has_value();
@@ -132,19 +155,26 @@ int RememberedDoors::step()
         if (fresh)
         {
             const auto ins = live_->insert_node(note.value());
-            if (not ins.has_value()) continue;
+            if (not ins.has_value())
+            {
+                if (failed_insert_.insert(name).second)
+                    qWarning().noquote() << QString::fromStdString(std::format("[remembered] insert_node({}) failed", name));
+                continue;
+            }
+            failed_insert_.erase(name);
             id = ins.value();
             qInfo().noquote() << QString::fromStdString(std::format("[remembered] {} posted under {}", name, room->name()));
         }
         else if (changed)
-            live_->update_node(note.value());
-
-        if (const auto e = mem_->get_edge(twin->id(), face.id(), "RT"); e.has_value())
         {
-            const auto old = live_->get_edge(current_, id, "RT");
-            if (not old.has_value() or not(old->attrs() == e->attrs()))
-                live_->insert_or_assign_edge(DSR::Edge::create<RT_edge_type>(current_, id, e->attrs()));
+            live_->update_node(note.value());
+            ++updates_;
         }
+
+        const auto rt = RoomEviction::rt_attributes(pose.value());
+        const auto old = live_->get_edge(current_, id, "RT");
+        if (not old.has_value() or not(old->attrs() == rt))
+            live_->insert_or_assign_edge(DSR::Edge::create<RT_edge_type>(current_, id, rt));
     }
 
     int n = 0;

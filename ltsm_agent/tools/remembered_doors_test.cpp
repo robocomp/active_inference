@@ -65,8 +65,12 @@ static void build(bool staged = false)
     set_current(live_room);
     mem_twin = mem_node("room", "r3_room_3", 0, 0, 0, 0, 3, staged ? "staged" : nullptr);
     mem_node("object", "r3_door_5", mem_twin, 2, 0, 0.5, std::nullopt, "door", 0.9f);
-    mem_node("object", "r3_door_6", mem_twin, 4, 1, 1.0, std::nullopt, "door", 0.8f);
-    mem_node("object", "r3_door_7", mem_twin, 0, 3, 1.5, std::nullopt, "door", 0.7f);
+    // the REAL shape: the door hangs from its wall (wall-local pose), the wall from the room; door_7 via a floor as well
+    const auto wall = mem_node("wall", "r3_wall_0", mem_twin, 3, 2, 0.6);
+    mem_node("object", "r3_door_6", wall, 1.5, 0.2, 0.3, std::nullopt, "door", 0.8f);
+    const auto fl = mem_node("floor", "r3_floor", mem_twin, 0, 0, 0);
+    const auto wall2 = mem_node("wall", "r3_wall_1", fl, -1, 4, -0.4);
+    mem_node("object", "r3_door_7", wall2, 0.5, 0.1, 1.2, std::nullopt, "door", 0.7f);
 }
 
 static int notes()
@@ -98,10 +102,27 @@ int main(int argc, char **argv)
             check(live->get_attrib_by_name<parent_att>(n.value()).value_or(0) == live_room, "parent = live room");
             check(live->get_attrib_by_name<room_id_att>(n.value()).value_or(0) == 3, "room_id = 3");
             const auto e = live->get_edge(live_room, n->id(), "RT");
-            const auto m = mem->get_edge(mem_twin, mem->get_node("r3_door_5").value().id(), "RT");
-            check(e.has_value() and m.has_value() and e->attrs() == m->attrs(), "RT == the face's RT");
+            check(e.has_value(), "RT edge room -> note");
         }
-        check(rd.step() == 3, "idempotent");
+        // composed pose T(room <- face), by hand: yaw about z, x_room = R(yaw) p + t
+        const auto pose_of = [&](const char *name, double tx, double ty, double th, double fx, double fy, double fth)
+        {
+            const double x = tx + std::cos(th) * fx - std::sin(th) * fy, y = ty + std::sin(th) * fx + std::cos(th) * fy;
+            const auto note = live->get_node(name);
+            const auto T = live->get_inner_eigen_api()->get_transformation_matrix("room_3", name);
+            check(note.has_value() and T.has_value(), std::string(name) + ": pose resolvable");
+            if (not T.has_value()) return;
+            const double yaw = std::atan2(T->rotation()(1, 0), T->rotation()(0, 0));
+            check(std::fabs(T->translation().x() - x) < 1e-5 and std::fabs(T->translation().y() - y) < 1e-5
+                  and std::fabs(std::remainder(yaw - (th + fth), 2 * M_PI)) < 1e-5,
+                  std::string(name) + ": note pose in the room == composed wall*face pose");
+        };
+        pose_of("remembered_door_5", 0, 0, 0, 2, 0, 0.5);
+        pose_of("remembered_door_6", 3, 2, 0.6, 1.5, 0.2, 0.3);
+        pose_of("remembered_door_7", -1, 4, -0.4, 0.5, 0.1, 1.2);
+
+        const int u = rd.updates();
+        check(rd.step() == 3 and rd.updates() == u, "idempotent: a second step rewrites no note (no update_node)");
         check(rd.remove_all() == 3 and notes() == 0, "remove_all sweeps them");
     }
     std::printf("staged_twin_posts_nothing\n");
