@@ -466,7 +466,8 @@ struct IdleTurn
            and std::ranges::all_of(tool_names, [](const std::string& n) { return n == "plan_mission"; });
 }
 
-/// The reply tells the person a mission was (or will be) planned or started. ⚠ A phrase list, English only: the claim
+/// The reply tells the person a mission was (or will be) planned or started, or that an action (approach, go, cross,
+/// move, turn) is promised or under way. ⚠ A phrase list, English only: the claim
 /// is in the model's free words and there is no structured signal to read instead; a miss only leaves things as they
 /// were before this check (the person sees no card), a false hit costs one extra model turn.
 [[nodiscard]] inline bool claims_mission(std::string_view reply)
@@ -476,7 +477,12 @@ struct IdleTurn
     static constexpr std::string_view kClaims[] = {
         "say yes", "your yes", "your confirmation", "i have planned", "i've planned", "planned a mission",
         "planned the mission", "i have started", "i've started", "started the mission", "mission has started",
-        "i will plan", "i'll plan", "i am planning", "i'm planning"};
+        "i will plan", "i'll plan", "i am planning", "i'm planning",
+        // any action promised or under way (chat_e2e15: "I will approach door_21 first" with no call)
+        "i will approach", "i'll approach", "i am approaching", "i'm approaching", "i am now approaching",
+        "i will go ", "i'll go ", "i am going to", "i'm going to", "i am now going", "i am heading", "i'm heading",
+        "i will cross", "i'll cross", "i am crossing", "i'm crossing", "i will move", "i'll move", "i am moving",
+        "i'm moving", "i will turn", "i'll turn", "i am turning", "i'm turning", "i am currently turning"};
     return std::ranges::any_of(kClaims, [&](std::string_view c) { return low.find(c) != std::string::npos; });
 }
 
@@ -616,6 +622,17 @@ inline constexpr std::string_view kWakeRefusal =
 {
     if (not state.starts_with("failed") or bt_step != "-") return std::nullopt;
     const auto bar = state.find('|');
+    // Interpreter::status() of a mission that ran and failed is "failed|<step id>|<outcome>"; read after it ENDED its bt
+    // step is "-" as well, so the step id is what tells it apart from a refusal (chat_e2e15: told twice, once wrongly).
+    if (bar != std::string_view::npos)
+    {
+        const std::string_view rest = state.substr(bar + 1);
+        const auto bar2 = rest.find('|');
+        const std::string_view id = rest.substr(0, bar2);
+        const bool step_id = bar2 != std::string_view::npos and not id.empty()
+                             and std::ranges::all_of(id, [](char c) { return std::isdigit(static_cast<unsigned char>(c)) or c == '.'; });
+        if (step_id) return std::nullopt;
+    }
     const std::string why = bar == std::string_view::npos ? std::string("no reason given") : std::string(state.substr(bar + 1));
     return std::format("The controller REFUSED the mission \"{}\" before its first step: {}. Nothing ran and the robot did "
                        "not move. Tell the person in one sentence; a fix is a new plan_mission, only if they want one.",

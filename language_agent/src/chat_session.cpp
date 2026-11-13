@@ -1157,14 +1157,14 @@ void ChatSession::check_claimed_mission(const QString& content)
         claim_repaired_ = true;
         log_.write("mission_claim_repair", QJsonObject{{"said", content}});
         push_history({{"role", "tool"}, {"tool_name", "mission_check"},
-                      {"content", "No plan_mission was called and no mission card is shown: nothing was planned and nothing "
-                                  "will move. If the person wants this mission, call plan_mission now; otherwise tell "
-                                  "them plainly that no mission was planned."}});
+                      {"content", "No tool was called and no mission card is shown: nothing was planned or sent, and the "
+                                  "robot will not move. If the person wants it, call the tool now (plan_mission for a "
+                                  "mission, or the action tool); otherwise tell them plainly that nothing was done."}});
         ask_model(false);
         return;
     }
     log_.write("mission_claim_corrected", QJsonObject{{"said", content}});
-    window_->append_system(QStringLiteral("(no mission was planned, so nothing will move; please ask again)"));
+    window_->append_system(QStringLiteral("(nothing was planned or sent, so the robot will not move; please ask again)"));
 }
 
 void ChatSession::after_tool_round(bool had_words, bool image)
@@ -2783,6 +2783,8 @@ void ChatSession::on_mission_progress(rc::mission::Progress now)
 // passage refs into remembered rooms → room refs, the form the controller can resolve after an eviction (passage_refs.h)
 void ChatSession::rewrite_passages(rc::mission::Mission& m)
 {
+    if (const int n = rc::chat::doors_to_rooms(m.steps, digest_.facts.doors); n > 0)
+        log_.write("doors_to_rooms", QJsonObject{{"n", n}});
     const auto topo = remembered_topology();
     if (not topo.has_value()) return;
     if (const int n = rc::chat::passages_to_rooms(m.steps, *topo); n > 0)

@@ -6,6 +6,9 @@
 #include <QShortcut>
 
 #include <QCloseEvent>
+#include <QCoreApplication>
+#include <QGuiApplication>
+#include <QScreen>
 #include <QHBoxLayout>
 #include <QScrollBar>
 #include <QSettings>
@@ -79,9 +82,35 @@ ChatWindow::ChatWindow(Callbacks cb, QWidget* parent) : QWidget(parent), cb_(std
     {
         restoreGeometry(g);
         restored_with_canvas_ = settings.value(QStringLiteral("chat_window/canvas_open"), false).toBool();
+        // a saved position on a monitor that is gone: back to the default size, centred on the primary screen
+        const bool on_screen = std::ranges::any_of(QGuiApplication::screens(),
+            [this](const QScreen* sc) { return sc->availableGeometry().intersects(frameGeometry()); });
+        if (not on_screen)
+        {
+            restored_with_canvas_ = false;
+            resize(640, 560);
+            if (const auto* sc = QGuiApplication::primaryScreen())
+                move(sc->availableGeometry().center() - rect().center());
+        }
     }
     else
         resize(640, 560);
+    // SIGTERM → QCoreApplication::quit() never delivers closeEvent to a window that is still open: save on the way out.
+    QObject::connect(QCoreApplication::instance(), &QCoreApplication::aboutToQuit, this, [this]() { save_state(); });
+}
+
+ChatWindow::~ChatWindow() { save_state(); }
+
+void ChatWindow::save_state()
+{
+    // isVisibleTo: a closed (hidden) window still has its canvas "open"; isVisible() would say no and clobber the flag
+    const bool open = canvas_->isVisibleTo(this);
+    QSettings settings(QStringLiteral("RoboComp"), QStringLiteral("language_agent"));
+    if (open) settings.setValue(QStringLiteral("chat_window/canvas_width"), canvas_->width());
+    settings.setValue(QStringLiteral("chat_window/canvas_open"), open);
+    settings.setValue(QStringLiteral("chat_window/geometry"), saveGeometry());
+    settings.setValue(QStringLiteral("chat_window/splitter"), split_->saveState());
+    settings.sync();
 }
 
 void ChatWindow::closeEvent(QCloseEvent* e)
@@ -89,10 +118,7 @@ void ChatWindow::closeEvent(QCloseEvent* e)
     // The geometry is saved AS SEEN, with whether the canvas was in it: the first show_canvas() of the next run then
     // fits the canvas inside instead of widening. Hiding the canvas here first did not work: the shrink reaches the
     // window manager after saveGeometry(), so the window grew by one canvas on every run.
-    QSettings settings(QStringLiteral("RoboComp"), QStringLiteral("language_agent"));
-    if (canvas_->isVisible()) settings.setValue(QStringLiteral("chat_window/canvas_width"), canvas_->width());
-    settings.setValue(QStringLiteral("chat_window/canvas_open"), canvas_->isVisible());
-    settings.setValue(QStringLiteral("chat_window/geometry"), saveGeometry());
+    save_state();
     QWidget::closeEvent(e);
 }
 
