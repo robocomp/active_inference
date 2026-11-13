@@ -101,7 +101,8 @@ GraphView read_graph(DSR::DSRGraph& G, DSR::InnerEigenAPI& ie, std::span<const s
 
         const auto room = room_of(G, n);
         if (not room) { out.present.insert(uid.value()); log_held_once(uid.value(), n.name(), "no room ancestor"); continue; }
-        if (rc::room::is_proto(G, room->id())) { out.present.insert(uid.value()); continue; }   // out of scope by design, but still there
+        if (rc::room::is_proto(G, room->id()))   // out of scope by design (a provisional room cannot anchor a memory), but still there
+        { out.present.insert(uid.value()); log_held_once(uid.value(), n.name(), "its room is still provisional"); continue; }
         const auto key = room_key_of(G, *room);
 
         Sighting s;
@@ -112,7 +113,14 @@ GraphView read_graph(DSR::DSRGraph& G, DSR::InnerEigenAPI& ie, std::span<const s
         s.w = G.get_attrib_by_name<width_m_att>(n).value_or(0.f);
         s.d = G.get_attrib_by_name<depth_m_att>(n).value_or(0.f);
         s.h = G.get_attrib_by_name<height_m_att>(n).value_or(0.f);
+        if (const auto cn = G.get_attrib_by_name<color_name_att>(n); cn.has_value())   // absent = not measured yet
+        {
+            s.color_name = cn.value();
+            s.color_prob = G.get_attrib_by_name<color_prob_att>(n).value_or(0.f);
+        }
         s.born_ms = static_cast<std::int64_t>(G.get_attrib_by_name<timestamp_creation_att>(n).value_or(0));
+        if (const auto pe = G.get_attrib_by_name<obj_exist_prob_att>(n); pe.has_value() and std::isfinite(pe.value()))
+            s.exist_prob = pe.value();   // absent = the owner does not state it
 
         out.present.insert(s.uid);                               // on the graph from here on, resolvable or not
         const auto T = ie.get_transformation_matrix(room->name(), n.name());

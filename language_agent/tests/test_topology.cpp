@@ -119,6 +119,11 @@ int main()
         assert(remembered_name(t, "room_3") and remembered_name(t, "p1"));
         assert(not remembered_name(t, "door_1"));    // a live door seen from memory is not a name of the memory
         assert(not remembered_name(t, "room_7") and not remembered_name(Topology{}, "room_1"));
+        // one room's legs, as mission steps (ways_line is made of these; the go-to-a-remembered-object card uses them)
+        assert((legs_to(t, "room_1", "room_3") ==
+                std::vector<std::string>{"cross door_1 expect=room_2", "cross passage:p1@room_2 expect=room_3"}));
+        assert(legs_to(t, "room_1", "room_1").empty());   // already there
+        assert(legs_to(t, "room_1", "room_9").empty());   // no known route
         assert(ways_line(t, "room_9").empty());           // nothing reachable from an island
         assert(ways_line(Topology{}, "room_1").empty());
         const auto line = remembered_rooms_line(t, "room_1");

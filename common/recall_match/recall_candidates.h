@@ -12,6 +12,8 @@
 #include <cstdint>
 #include <print>
 #include <set>
+#include <algorithm>
+#include <cmath>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -59,6 +61,10 @@ inline std::vector<RecallCand> recall_candidates(DSR::DSRGraph& G, std::uint64_t
         rc.cand.cov = Eigen::Matrix2f::Zero();
         rc.cand.cov(0, 0) = c[0];
         rc.cand.cov(1, 1) = c[7];
+        // The owner's last existence belief, as ltom carried it (2026-11-11): the candidate's prior. Absent = not
+        // stated, which stays log 1 (position alone), never read as "believed absent".
+        if (const auto pe = G.get_attrib_by_name<obj_exist_prob_att>(node); pe.has_value() and std::isfinite(pe.value()))
+            rc.cand.log_prior = std::log(std::clamp(pe.value(), 0.f, 1.f));
         out.push_back(rc);
     }
     return out;

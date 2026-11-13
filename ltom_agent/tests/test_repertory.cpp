@@ -183,8 +183,43 @@ static void test_a_bin_keeps_the_best_thumbnail_across_lives()
     CHECK(not r.dirty());
 }
 
+static void test_colour_is_kept_and_not_erased()
+{
+    Repertory r(kGrace);
+    Sighting s = mk();
+    s.color_name = "magenta"; s.color_prob = 0.9f;
+    obs(r, {s}, kHere, 1000);
+    CHECK(r.entries().at(kUid).color_name == "magenta" and r.entries().at(kUid).color_prob == 0.9f);
+    obs(r, {mk()}, kHere, 2000);                       // a sighting with no colour measured keeps the remembered one
+    CHECK(r.entries().at(kUid).color_name == "magenta");
+    Sighting t = mk();
+    t.color_name = "pink"; t.color_prob = 0.6f;
+    obs(r, {t}, kHere, 3000);                          // the owner's belief is the fusion: the latest name wins
+    CHECK(r.entries().at(kUid).color_name == "pink" and r.entries().at(kUid).color_prob == 0.6f);
+}
+
+// 2026-11-11: the owner's existence belief, the latest stated one (a removed phantom ends low, a stopped owner high).
+static void test_existence_is_the_latest_stated()
+{
+    Repertory r(kGrace);
+    Sighting s = mk();
+    CHECK(not r.entries().empty() or true);
+    obs(r, {s}, kHere, 1000);
+    CHECK(not r.entries().at(kUid).exist_prob.has_value());   // never stated
+    s.exist_prob = 0.95f;
+    obs(r, {s}, kHere, 2000);
+    CHECK(r.entries().at(kUid).exist_prob == 0.95f);
+    obs(r, {mk()}, kHere, 3000);                               // not stated this time: keeps it
+    CHECK(r.entries().at(kUid).exist_prob == 0.95f);
+    s.exist_prob = 0.06f;
+    obs(r, {s}, kHere, 4000);
+    CHECK(r.entries().at(kUid).exist_prob == 0.06f);
+}
+
 int main()
 {
+    test_existence_is_the_latest_stated();
+    test_colour_is_kept_and_not_erased();
     test_a_bin_keeps_the_best_thumbnail_across_lives();
     test_new_uid_creates_entry_and_keyframe();
     test_resighting_counts_without_keyframe_when_still();

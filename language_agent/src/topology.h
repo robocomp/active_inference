@@ -211,6 +211,25 @@ inline bool remembered_name(const Topology& t, std::string_view name)
         or std::ranges::any_of(t.passages, [&](const auto& p) { return p.id == name; });
 }
 
+/// The legs from `current` into `room`, in order, as mission steps: "cross door_1 expect=room_2", then
+/// "cross passage:p1@room_2 expect=room_3" (the first by its live door when it has one). Empty when `room` is `current`
+/// or no route is known. ways_line is made of these; the card for going to a remembered object uses them directly.
+inline std::vector<std::string> legs_to(const Topology& t, std::string_view current, std::string_view room)
+{
+    std::vector<std::string> legs;
+    if (room == current) return legs;
+    std::string at(current);
+    for (const auto& id : route(t, current, room))
+    {
+        const auto it = std::ranges::find(t.passages, id, &TopoPassageInfo::id);
+        const std::string next = topo_other_room(*it, at);
+        const std::string ref = (legs.empty() and it->live_door) ? *it->live_door : "passage:" + id + "@" + at;
+        legs.push_back(std::format("cross {} expect={}", ref, next));
+        at = next;
+    }
+    return legs;
+}
+
 // The PLANNER's STATE line (plan_mission; not the chat's): for every remembered room reachable from `current`, the
 // legs in order as mission steps — the first by its live door when it has one (a door of the current room), every
 // later one as passage:ID@ROOM, ROOM being the room that leg starts in. Empty when no room is reachable.
@@ -221,18 +240,11 @@ inline std::string ways_line(const Topology& t, std::string_view current)
     for (const auto& r : t.rooms)
     {
         if (r.name == current) continue;
-        const auto ids = route(t, current, r.name);
-        if (ids.empty()) continue;
-        std::string legs, at(current);
-        for (const auto& id : ids)
-        {
-            const auto it = std::ranges::find(t.passages, id, &TopoPassageInfo::id);
-            const std::string next = topo_other_room(*it, at);
-            const std::string ref = (legs.empty() and it->live_door) ? *it->live_door : "passage:" + id + "@" + at;
-            legs += std::format("{}cross {} expect={}", legs.empty() ? "" : ", ", ref, next);
-            at = next;
-        }
-        o += std::format("{}{} = {}", o.empty() ? "" : "; ", r.name, legs);
+        const auto legs = legs_to(t, current, r.name);
+        if (legs.empty()) continue;
+        std::string joined;
+        for (const auto& l : legs) joined += (joined.empty() ? "" : ", ") + l;
+        o += std::format("{}{} = {}", o.empty() ? "" : "; ", r.name, joined);
     }
     return o.empty() ? o : "ways from here (each leg in order): " + o;
 }

@@ -70,6 +70,8 @@ void RecallPublisher::insert(std::uint64_t room_id, const Recall& r)
     G_->add_or_modify_attrib_local<object_subtype_att>(n, r.cls);
     G_->add_or_modify_attrib_local<parent_att>(n, room_id);
     G_->add_or_modify_attrib_local<level_att>(n, G_->get_attrib_by_name<level_att>(*room).value_or(1) + 1);
+    // The owner's last P(exists): the resurrecting agent takes it as this candidate's prior (recall_match.h).
+    if (r.exist_prob.has_value()) G_->add_or_modify_attrib_local<obj_exist_prob_att>(n, *r.exist_prob);
     const auto id = G_->insert_node(n);
     if (not id) { warn_once(name, "insert_node failed"); return; }
     write_pose(room_id, *id, name, r);

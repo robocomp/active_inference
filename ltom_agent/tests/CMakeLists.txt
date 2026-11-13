@@ -11,9 +11,12 @@ find_package(Qt6 REQUIRED COMPONENTS Core)
 add_executable(test_repertory test_repertory.cpp ../src/repertory.cpp)
 set_target_properties(test_repertory PROPERTIES CXX_STANDARD 23 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
 
-add_executable(test_repertory_io test_repertory_io.cpp ../src/repertory_io.cpp ../src/repertory.cpp)
+add_executable(test_repertory_io test_repertory_io.cpp ../src/repertory_io.cpp ../src/repertory.cpp ../src/human.cpp)
 set_target_properties(test_repertory_io PROPERTIES CXX_STANDARD 23 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
 target_link_libraries(test_repertory_io PRIVATE Qt6::Core)
+
+add_executable(test_human test_human.cpp ../src/human.cpp ../src/repertory.cpp)
+set_target_properties(test_human PROPERTIES CXX_STANDARD 23 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
 
 # DSR-linked: the live-graph reader on a private DDS domain (63), modelled on episodic_agent/tests/CMakeLists.txt.
 if ("$ENV{ROBOCOMP}" STREQUAL "")
@@ -53,6 +56,15 @@ target_link_libraries(test_memory_graph
   ${LIBS} dsr_core dsr_gui dsr_api fastcdr fastdds osgDB OpenThreads Eigen3::Eigen QGLViewer-qt6 Qt6OpenGLWidgets
   ${STATIC_LIBS} ${SPECIFIC_LIBS} ${QT_LIBRARIES} ${Ice_LIBRARIES})
 set_target_properties(test_memory_graph PROPERTIES CXX_STANDARD 23 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
+
+# The human at the chat on the memory graph + the chat's claim: DSR-linked, private DDS domain 63.
+add_executable(test_human_graph test_human_graph.cpp ../src/human_graph.cpp ../src/human.cpp ../src/memory_graph.cpp ../src/recall_publisher.cpp ../src/recall_select.cpp ../src/repertory.cpp)
+target_compile_definitions(test_human_graph PRIVATE LTOM_ROOT_JSON="${CMAKE_CURRENT_LIST_DIR}/ltom_root.json")
+target_include_directories(test_human_graph PRIVATE ../../common $ENV{ROBOCOMP}/classes)
+target_link_libraries(test_human_graph
+  ${LIBS} dsr_core dsr_gui dsr_api fastcdr fastdds osgDB OpenThreads Eigen3::Eigen QGLViewer-qt6 Qt6OpenGLWidgets
+  ${STATIC_LIBS} ${SPECIFIC_LIBS} ${QT_LIBRARIES} ${Ice_LIBRARIES})
+set_target_properties(test_human_graph PROPERTIES CXX_STANDARD 23 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
 
 # A left-drag pans the viewer on a quiet graph: the real GraphViewer, offscreen.
 add_executable(test_graph_pan test_graph_pan.cpp)

@@ -153,6 +153,9 @@ public:
         Eigen::Vector3f color_chroma = Eigen::Vector3f::Zero();
         Eigen::Vector3f color_var    = Eigen::Vector3f::Zero();
         float           color_neff   = 0.0f;
+        // Brightness (retina mask_color_lum, 2026-11-11): (R+G+B)/(3*255), its between-cell variance and its own cell
+        // count. Only for colour NAMES (common/appearance_belief/colour_name.h). n 0 = no information.
+        float           color_lum = 0.0f, color_lum_var = 0.0f, color_lum_n = 0.0f;
     };
 
     // One ingested masks frame: every slice plus the shared support-point and raw-pixel arrays they index into.

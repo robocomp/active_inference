@@ -9,6 +9,7 @@
 #include <format>
 #include <filesystem>
 #include <cmath>
+#include <numbers>
 #include <print>
 #include <random>
 #include <ranges>
@@ -130,6 +131,7 @@ void ChatSession::start()
             pending_mission_.reset();
             fix_key_.clear();            // a failure's fix, and the robot events still queued, belong to the
             wakes_.clear();              // conversation that was cleared: never delivered into the new one
+            held_.clear();
             llm_.cancel();
             window_->set_busy(false);
             history_.clear();
@@ -310,8 +312,10 @@ void ChatSession::tick_digest()
     cameras_.discover();   // self-throttled; subscribers appear once the camera nodes + descriptors exist
     cameras_.refresh(Camera::front);   // keeps the measured frame rates current for sensors() (camera_grabber.h)
     cameras_.refresh(Camera::pano);
-    digest_ = digest_builder_.build(*inner_, controller_present_, intention_.read(), today_digest_line(em_store()));
+    human_ = ltom_G_ ? rc::chat::load_human(*ltom_G_) : HumanFacts{};
+    digest_ = digest_builder_.build(*inner_, controller_present_, intention_.read(), today_digest_line(em_store()), human_);
     track_object_changes();
+    check_claim_answer();
 }
 
 // Births/removals of the current room's objects. Two baselines: the window's (flushed at most every
@@ -351,6 +355,7 @@ void ChatSession::on_user_text(const QString& text)
     log_.write("user", QJsonObject{{"text", text}});
     ++user_turn_;
     last_user_text_ = text;
+    const bool wake_in_flight = wake_turn_;   // restored if this message is held: the robot event's turn goes on
     wake_turn_ = false;
     // ★ The person spoke while a plan was being written: the plan is for a conversation that has moved on. Resolved
     //   FIRST, so its tool result lands right after its call in the history (a call and its results are never split
@@ -369,6 +374,31 @@ void ChatSession::on_user_text(const QString& text)
             window_->append_system(QStringLiteral("(the planned mission was not started)"));
             card.reset();
         }
+    }
+    // A claim card (human_claim) lives for one message too, and binds ONLY a plain yes. With a mission card also
+    // waiting, the NEWER card takes the yes and the other is dropped: never both (spec 2026-11-11-human-model).
+    std::optional<ClaimCard> claim = std::exchange(pending_claim_, std::nullopt);
+    const auto drop_claim = [&](const char* why)
+    {
+        log_.write("claim_card_dropped", QJsonObject{{"card", static_cast<qint64>(claim->serial)}, {"why", why}});
+        window_->append_system(QStringLiteral("(nothing was stored)"));
+        claim.reset();
+    };
+    if (claim.has_value())
+    {
+        const bool fleet_yes = fleet_confirmations_.pending().has_value() and fleet::is_yes(text.toStdString());
+        if (not card_still_valid(claim->turn, user_turn_) or not fleet::is_yes(text.toStdString()) or fleet_yes)
+            drop_claim("not a yes");
+    }
+    if (claim.has_value() and card.has_value())
+    {
+        if (newer_card_takes_the_yes(card->serial, claim->serial) == YesGoesTo::claim)
+        {
+            log_.write("mission_card_dropped", QJsonObject{{"card", static_cast<qint64>(card->serial)}, {"why", "a newer claim card took the yes"}});
+            window_->append_system(QStringLiteral("(the planned mission was not started)"));
+            card.reset();
+        }
+        else drop_claim("a newer mission card took the yes");
     }
     tick_digest();   // decide on the freshest facts
     draw_repairs_ = 0;
@@ -404,6 +434,27 @@ void ChatSession::on_user_text(const QString& text)
                                                              : result}});
         return;
     }
+    // 1f. a plain yes to a claim card: posted here for ltom_agent, never by the model (anti-goal: nothing about the person
+    //     is stored without their yes). LTOM's answer is told when it comes (check_claim_answer).
+    if (claim.has_value())
+    {
+        if (posted_claim_.has_value()) intention_.clear_claim();   // one claim at a time: the newer one replaces it
+        posted_claim_.reset();
+        const auto stamp = intention_.post_claim(claim->claim);
+        log_.write("fast_path", QJsonObject{{"kind", "claim_yes"}, {"card", static_cast<qint64>(claim->serial)},
+                                            {"claim", q(claim->claim.kind)}, {"posted", stamp.has_value()}});
+        if (stamp.has_value())
+            posted_claim_ = PostedClaim{.claim = claim->claim, .readback = claim->readback, .object_name = claim->object_name,
+                                        .stamp = *stamp, .posted_ms = static_cast<std::int64_t>(rc::provenance::now_ms())};
+        const QString reply = stamp.has_value() ? QStringLiteral("Keeping it in my long-term memory…")
+                                                : QStringLiteral("I could not write it to the graph; nothing was stored.");
+        window_->begin_assistant();
+        window_->append_token(reply);
+        window_->end_assistant();
+        push_history({{"role", "user"}, {"content", text}});
+        push_history({{"role", "assistant"}, {"content", reply}});
+        return;
+    }
     // 1c. a plain yes to a mission card: sent here, never by the model (anti-goal: a mission without the person's yes).
     if (card.has_value())
     {
@@ -427,6 +478,23 @@ void ChatSession::on_user_text(const QString& text)
         show_request(*show, text);
         return;
     }
+    // 1e. "go to chair_34" for an object only the long-term memory has: the skill's recipe, built here and shown as a
+    //     card (remembered_goto.h). Left to the models it failed both ways live (2026-11-10).
+    if (const auto name = rc::chat::go_to_object_name(text.toStdString()); name.has_value())
+        if (remembered_goto_card(*name, text))
+        {
+            log_.write("fast_path", QJsonObject{{"kind", "remembered_goto"}, {"name", q(*name)}});
+            return;
+        }
+    // 1g. "go to my chair" for an owned object only the long-term memory has: the same card as 1e.
+    if (const auto mine = rc::chat::go_to_mine(text.toStdString()); mine.has_value())
+        if (const auto r = resolve_mine(*mine); r.has_value() and r->has_value())
+            if (const auto goto_name = rc::chat::mine_goto_name(**r, digest_.objects);
+                goto_name.has_value() and remembered_goto_card(*goto_name, text))
+            {
+                log_.write("fast_path", QJsonObject{{"kind", "remembered_goto"}, {"name", q(*goto_name)}, {"via", q(*mine)}});
+                return;
+            }
     // 2. already in the controller's grammar.
     if (const auto call = parse_direct(t); call.has_value())
     {
@@ -440,9 +508,14 @@ void ChatSession::on_user_text(const QString& text)
         return;
     }
     // 3. the model.
-    if (llm_.busy())
+    // ★ Busy (the person's previous message, or a robot event's turn): HOLD it, never drop it. drain_wakes answers
+    //   it as soon as the model is free, before any robot event.
+    if (llm_.busy() or planner_.has_value() or not held_.empty())
     {
-        window_->append_system("Still answering the previous message — wait, or press Esc.");
+        held_.hold(text.toStdString());
+        wake_turn_ = wake_in_flight;
+        log_.write("user_held", QJsonObject{{"text", text}, {"queued", static_cast<qint64>(held_.size())}});
+        window_->append_system(QStringLiteral("(answering this as soon as the current reply ends)"));
         return;
     }
     if (not ollama_ok_) ping_llm();
@@ -497,6 +570,11 @@ const QString kInterfaceRules = QStringLiteral(
     "- Objects: you know only the OBJECTS lines of the STATE (current room) and the read-only tools find_objects and "
     "where_is. If none of a kind is listed say \"I have not perceived any\", never \"there is none\". What those tools "
     "list as remembered you are NOT perceiving now: say \"I last saw it in room_1, 25 min ago\", never that it is there.\n"
+    "- The person at the chat: when they tell their name (\"my name is Pablo\": call human_claim, do not only greet them), or say an object is or is not theirs (\"that's my chair\", "
+    "\"chair_1 is mine\", \"that is not my chair\"), call human_claim. It only shows them a question; it is kept only if "
+    "they answer yes, so never say it is stored. To USE what is theirs (\"go to my chair\", \"where is my chair?\") "
+    "pass \"my chair\" as the object to the ordinary tool. Naming an object (\"call it the reading chair\") is NOT a "
+    "claim. Objects the STATE marks with their name (\"Pablo's\") or \"yours\" are theirs.\n"
     "- look(camera) shows you the current picture of a camera: 'front' (default, what is ahead) or '360' (all around, "
     "a panorama whose centre is straight ahead and whose left and right edges are behind you). The STATE has NO "
     "appearance: when the person asks what you see, to look, or about colours, materials or what something looks "
@@ -597,18 +675,34 @@ QJsonArray ChatSession::tools_json() const
     tools.append(tool_def("approach_object",
         "Drive to an object of the CURRENT room and stop in front of it, facing it: the object itself says where to "
         "stand and from which sides it can be approached (the STATE lists them); the controller plans the path around "
-        "obstacles. Give its name (chair_1) or its class (table: the nearest one), and optionally the side in the "
-        "person's own words. Starts at once.",
+        "obstacles. Give its name (chair_1) or its class (table: the nearest one) or, for theirs, \"my chair\", and "
+        "optionally the side in the person's own words. Starts at once.",
         QJsonObject{{"object", QJsonObject{{"type", "string"}, {"description", "an object name or class"}}},
                     {"side", QJsonObject{{"type", "string"},
                                          {"description", "ONLY when the person names a side: the side to approach from, as they said it "
                                                          "(right, the far side, behind it, por la izquierda) or a side "
                                                          "name from the STATE; empty = the object's default"}}}},
         QJsonArray{"object"}));
+    tools.append(tool_def("human_claim",
+        "Only when the person STATES a fact about themselves: their NAME (\"my name is Pablo\", \"call me Pablo\", \"me "
+        "llamo Pablo\": call it, do not just greet them), or that an object IS or is NOT theirs (\"that's my chair\", "
+        "\"chair_1 is mine\", \"that is not my chair\"). It stores nothing itself: it shows them a question and keeps the "
+        "fact only if they answer yes. NEVER for a request that USES what is theirs: \"go to my chair\" is approach_object "
+        "with object \"my chair\", \"where is my chair?\" is where_is. Not for naming an object (\"call it the reading chair\").",
+        QJsonObject{{"kind", QJsonObject{{"type", "string"}, {"enum", QJsonArray{"name", "owns", "disowns"}},
+                                         {"description", "name: they tell their name; owns: an object is theirs; disowns: "
+                                                         "an object is not theirs"}}},
+                    {"object", QJsonObject{{"type", "string"},
+                                           {"description", "for owns/disowns: the object as they said it: a name from the "
+                                                           "STATE (chair_1), \"that\" / \"this\" (what the camera shows), "
+                                                           "\"that chair\", or \"my chair\""}}},
+                    {"name", QJsonObject{{"type", "string"}, {"description", "for kind name: their name, as they said it"}}}},
+        QJsonArray{"kind"}));
     tools.append(tool_def("go_around_object",
         "Drive a full loop around an object of the CURRENT room, stopping on each side facing it, and end back where "
         "the loop began; sides the robot cannot reach (against a wall) are skipped. Give its name or class, and "
-        "optionally the direction the person says. Starts at once. To stop at ONE side use approach_object.",
+        "optionally the direction the person says. Starts at once. "
+          "It already ends where it set off, so \"go around X and come back\" is THIS tool alone, not a mission. To stop at ONE side use approach_object.",
         QJsonObject{{"object", QJsonObject{{"type", "string"}, {"description", "an object name or class"}}},
                     {"direction", QJsonObject{{"type", "string"},
                                               {"description", "ONLY when the person says one: left or right (por la "
@@ -616,7 +710,7 @@ QJsonArray ChatSession::tools_json() const
         QJsonArray{"object"}));
     tools.append(tool_def("plan_mission",
         "Plan a MISSION: any request with more than one step, a condition or a return (cross a door and explore the "
-        "next room, do this then that, come back). Pass the request in your own words with the names from the STATE; "
+        "next room, do this then that, come back; but NOT going around an object and back: go_around_object already returns). Pass the request in your own words with the names from the STATE; "
         "the plan is shown to the person and starts only when they say yes. For ONE action use its own tool "
         "(cross_door, approach_object, go_around_object, move_relative).",
         QJsonObject{{"request", QJsonObject{{"type", "string"},
@@ -624,17 +718,21 @@ QJsonArray ChatSession::tools_json() const
                                                             "from the STATE (door_1, room_2, chair_1)"}}}},
         QJsonArray{"request"}));
     tools.append(tool_def("find_objects",
-        "List the objects the robot has perceived in the CURRENT room, nearest first, with distance, bearing and size. "
-        "Read-only.",
+        "List the objects the robot has perceived in the CURRENT room, nearest first, with distance, bearing, size and "
+        "MEASURED colour (a name with its probability, or 'colour not measured'). Read-only.",
         QJsonObject{{"subtype", QJsonObject{{"type", "string"},
                                             {"description", "a class to filter by, in English singular (chair, table, "
-                                                            "bottle, cabinet, refrigerator, hood, person); empty = all"}}}},
+                                                            "bottle, cabinet, refrigerator, hood, person), optionally "
+                                                            "after a colour word (magenta chair); empty = all"}}}},
         {}));
     tools.append(tool_def("where_is",
-        "Where is an object: give its name (e.g. chair_1) or its class (e.g. refrigerator). Returns its room and, if it "
-        "is in the current room, its distance and bearing; for one not perceived now, where and when it was last seen, "
-        "if it is remembered; or that it has not been perceived. Read-only.",
-        QJsonObject{{"name", QJsonObject{{"type", "string"}, {"description", "an object name or class"}}}},
+        "Where is an object: give its name (e.g. chair_1) or its class (e.g. refrigerator), optionally with a colour "
+        "(e.g. yellow chair), or \"my chair\" for the person's own. Returns its room and, if it is in the current room, its distance, bearing and measured "
+        "colour; for one not perceived now, where and when it was last seen, if it is remembered; or that it has not "
+        "been perceived. A colour keeps the objects measured that colour AND those whose colour was not measured. "
+        "Read-only.",
+        QJsonObject{{"name", QJsonObject{{"type", "string"}, {"description", "an object name or class, optionally "
+                                                                             "after a colour word"}}}},
         QJsonArray{"name"}));
     tools.append(tool_def("known_rooms",
         "The rooms the robot remembers (long-term memory), which are live now, and the passages (doorways) joining them: "
@@ -913,6 +1011,8 @@ void ChatSession::ask_model(bool followup, bool offer_tools)
         if (const auto line = rc::chat::remembered_rooms_line(*topo, digest_.facts.room); not line.empty())
             state_extra_ += q(line) + "\n";
     state_extra_ += q(alive_line(system_.agents())) + "\n";   // the names from the graph, so none are made up
+    if (human_.name.has_value())   // ltom's human_1: the one person at the chat (spec 2026-11-11-human-model)
+        state_extra_ += QStringLiteral("You are talking to %1 (%2).\n").arg(q(*human_.name), q(human_.role.empty() ? std::string("developer") : human_.role));
     state_extra_ += QStringLiteral("last move/turn sent from this chat: ") +
                     (last_relative_.empty() ? QStringLiteral("none") : q(explain_relative_command(last_relative_))) + "\n";
     // ★ A follow-up carries the SAME tools as the turn before it. ollama reuses the processed prompt only up to the first
@@ -951,7 +1051,10 @@ void ChatSession::ask_model(bool followup, bool offer_tools)
         {
             window_->end_assistant();
             window_->set_busy(false);
-            if (turn_.carries_image) strip_images(history_);   // an image lives for the one request that used it
+            // An image lives for the one request that used it; the words said with it in view stay on its tool message
+            // (look_messages.h), since words after a tool result are not kept as an assistant turn (below).
+            if (turn_.carries_image)
+                strip_images(history_, turn_.tool_calls.isEmpty() ? strip_think(turn_.content) : QString());
             log_.write("response", QJsonObject{{"content", turn_.content}, {"tool_calls", turn_.tool_calls},
                                                {"eval_count", static_cast<qint64>(st.eval_count)}, {"prompt_eval_count", static_cast<qint64>(st.prompt_eval_count)},
                                                {"first_token_ms", st.first_token_ms}, {"wall_ms", st.wall_ms},
@@ -1104,6 +1207,7 @@ QString ChatSession::answer_query(const QString& name, const QJsonObject& args)
         return QStringLiteral("OK: the canvas is closed.");
     }
     if (name == "approach_object") return do_approach(args);
+    if (name == "human_claim") return do_human_claim(args);
     if (name == "agent_control") return do_agent_control(args);
     if (name == "go_around_object") return do_go_around(args);
     if (name == "sim_door") return do_sim_door(args);
@@ -1115,12 +1219,27 @@ QString ChatSession::answer_query(const QString& name, const QJsonObject& args)
         out = it != skills_.end() ? q(it->body) : QStringLiteral("REJECTED: no skill '%1'").arg(q(want));
     }
     else if (QString m = answer_memory(name, args); not m.isEmpty()) out = std::move(m);
-    else if (name == "find_objects")
-        out = q(answer_find_objects(digest_.objects, args.value("subtype").toString().toStdString(), digest_.facts.room,
-                                    remembered_now()));
-    else if (name == "where_is")
-        out = q(answer_where_is(digest_.objects, args.value("name").toString().toStdString(), digest_.facts.room,
-                                remembered_now()));
+    else if (name == "find_objects" or name == "where_is")
+    {
+        // An answer that carries remembered objects is said AS IT IS: its rooms, ages and "it may have moved" are the
+        // point, and the model's rewording lost them (live 2026-11-10). The tool sets the mark; nothing reads the text.
+        bool from_memory = false;
+        const std::string asked = args.value(name == "find_objects" ? "subtype" : "name").toString().toStdString();
+        if (const auto cls = rc::chat::my_class(asked); cls.has_value())
+        {
+            // "my chair(s)": every owned object of the class, each found by its uid (live, else remembered).
+            out = q(rc::chat::answer_where_mine(*cls, human_, digest_.objects, remembered_now(), digest_.facts.room, &from_memory));
+            if (from_memory) out = said_as_is(std::move(out));
+            log_.write("tool_mine", QJsonObject{{"tool", name}, {"asked", q(asked)}});
+        }
+        else
+        out = name == "find_objects"
+            ? q(answer_find_objects(digest_.objects, args.value("subtype").toString().toStdString(), digest_.facts.room,
+                                    remembered_now(), &from_memory))
+            : q(answer_where_is(digest_.objects, args.value("name").toString().toStdString(), digest_.facts.room,
+                                remembered_now(), &from_memory));
+        if (from_memory) out = said_as_is(std::move(out));
+    }
     else if (name == "known_rooms" or name == "route_to")
     {
         const auto topo = remembered_topology();
@@ -1449,7 +1568,21 @@ rc::chat::Remembered ChatSession::remembered_now() const
 {
     if (not ltom_G_) return {};
     const auto now = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch());
-    return rc::chat::load_remembered(*ltom_G_, now.count());
+    auto mem = rc::chat::load_remembered(*ltom_G_, now.count());
+    mark_owned(mem.objects, human_);
+    // In the robot's own room: the turn that faces each remembered object, computed here so no model does trigonometry
+    // (the card's recipe and the planner's STATE line both use it). The room frame -> robot frame (`body`, the frame
+    // world_digest's bearings use); a missing transform just leaves the turn unknown (the recipe then drives instead).
+    const std::string& room = digest_.facts.room;
+    if (inner_ and not room.empty())
+        if (const auto T = inner_->get_transformation_matrix("body", room); T.has_value())
+            for (auto& o : mem.objects)
+                if (o.room == room)
+                {
+                    const Eigen::Vector3d p = *T * Eigen::Vector3d(o.x, o.y, 0.0);
+                    o.turn_deg = rc::chat::turn_to_face_deg(p.x(), p.y());
+                }
+    return mem;
 }
 
 std::optional<rc::em::Store> ChatSession::em_store() const
@@ -1486,7 +1619,7 @@ QString ChatSession::answer_memory(const QString& name, const QJsonObject& args)
 
 QString ChatSession::do_approach(const QJsonObject& args)
 {
-    const std::string what = args.value("object").toString().trimmed().toStdString();
+    std::string what = args.value("object").toString().trimmed().toStdString();
     const std::string room = digest_.facts.room;
     const auto refuse = [&](const std::string& why)
     {
@@ -1496,8 +1629,16 @@ QString ChatSession::do_approach(const QJsonObject& args)
     };
     if (not digest_.facts.controller_present) return refuse("the controller is not running, so the robot cannot move");
     if (room.empty()) return refuse("the current room is not known yet");
+    if (const auto mine = resolve_mine(what); mine.has_value())
+    {
+        if (not mine->has_value()) return refuse(mine->error());
+        const auto target = rc::chat::mine_live_target(**mine, digest_.objects);   // by uid: names are re-issued
+        if (not target.has_value()) return refuse(target.error());
+        what = *target;
+    }
     const auto o = pick_object(digest_.objects, what);
     if (not o.has_value()) return refuse(o.error());
+    last_approach_target_ = o->name;
     // Both in the room frame: the object's options and the go_to pose are room poses. Optionals checked (CLAUDE.md).
     const auto To = inner_->get_transformation_matrix(room, o->name);
     const auto Tr = inner_->get_transformation_matrix(room, "body");
@@ -1545,9 +1686,124 @@ QString ChatSession::do_approach(const QJsonObject& args)
         .arg(q(o->name)).arg(footprint_radius(*o) + standoff, 0, 'f', 2);
 }
 
+// ── the human at the chat (spec 2026-11-11-human-model) ─────────────────────────────────────────────────────────
+double ChatSession::front_half_fov_deg() const
+{
+    // The person sees through the front camera (the chat's camera view): its half field of view from the intrinsics.
+    // Unreadable ⇒ 0: "that" then rests only on what was named and on the last approach target.
+    const auto z = G_ ? G_->get_node("zed") : std::nullopt;
+    if (not z.has_value()) return 0.0;
+    const auto w = G_->get_attrib_by_name<cam_rgb_width_att>(*z);
+    const auto fx = G_->get_attrib_by_name<cam_rgb_focalx_att>(*z);
+    if (not w or not fx or *w <= 0 or *fx <= 0) return 0.0;
+    return std::atan(static_cast<double>(*w) / (2.0 * static_cast<double>(*fx))) * 180.0 / std::numbers::pi;
+}
+
+std::vector<std::string> ChatSession::recent_object_names() const
+{
+    // The object names said in the last two exchanges (user + assistant), newest first, each once.
+    std::vector<std::string> out;
+    int seen = 0;
+    for (auto it = history_.rbegin(); it != history_.rend() and seen < 4; ++it)
+    {
+        const QString role = it->value("role").toString();
+        if (role != "user" and role != "assistant") continue;
+        ++seen;
+        const std::string content = it->value("content").toString().toStdString();
+        for (const auto& o : digest_.objects)
+            if (content.contains(o.name) and std::ranges::find(out, o.name) == out.end()) out.push_back(o.name);
+    }
+    return out;
+}
+
+std::optional<std::expected<RefCandidate, std::string>> ChatSession::resolve_mine(const std::string& what) const
+{
+    const auto cls = rc::chat::my_class(what);
+    if (not cls.has_value()) return std::nullopt;
+    return rc::chat::resolve_one_mine(*cls, human_, digest_.objects, remembered_now().objects);
+}
+
+QString ChatSession::do_human_claim(const QJsonObject& args)
+{
+    std::string kind = args.value("kind").toString().trimmed().toLower().toStdString();
+    const std::string object = args.value("object").toString().trimmed().toStdString();
+    const std::string name = args.value("name").toString().trimmed().toStdString();
+    const auto refuse = [&](const std::string& why)
+    {
+        log_.write("human_claim", QJsonObject{{"kind", q(kind)}, {"object", q(object)}, {"ok", false}, {"reason", q(why)}});
+        return QStringLiteral("REJECTED: ") + q(why);
+    };
+    if (not ltom_G_) return refuse("my long-term memory (ltom_agent) is not joined, so nothing about the person can be kept");
+    if (rc::chat::second_claim_this_turn(pending_claim_ ? std::optional(pending_claim_->turn) : std::nullopt, user_turn_))
+        return refuse("one claim at a time: a question is already shown to the person; ask about this one after they answer it");
+    HumanClaim claim{.kind = kind, .words = last_user_text_.toStdString()};
+    std::string object_name, described;
+    if (kind == "name")
+    {
+        if (name.empty()) return refuse("no name was given");
+        claim.value = name;
+    }
+    else if (kind == "owns" or kind == "disowns")
+    {
+        const auto cands = rc::chat::claim_candidates(kind, object, human_, digest_.objects, remembered_now().objects,
+                                                      recent_object_names(), last_approach_target_, front_half_fov_deg());
+        if (cands.empty()) return refuse("I cannot tell which object they mean: nothing I perceive or remember fits '" + object + "'");
+        if (cands.size() > 1)
+        {
+            std::vector<std::string> d;
+            for (const auto& c : cands) d.push_back(c.words);
+            log_.write("human_claim", QJsonObject{{"kind", q(kind)}, {"object", q(object)}, {"ok", false}, {"ask", static_cast<int>(cands.size())}});
+            return QStringLiteral("ASK the person, in these words: ") + q(rc::chat::which_question(d)) +
+                   QStringLiteral(" Nothing is stored; call human_claim again with the name they choose.");
+        }
+        if (cands.front().uid == 0)
+            return refuse(cands.front().name + " has no long-term memory id (its agent does not publish one), so it cannot be linked to them");
+        claim.uid = cands.front().uid;
+        object_name = cands.front().name;
+        described = cands.front().words;
+    }
+    else return refuse("kind must be name, owns or disowns");
+    const std::string readback = rc::chat::claim_readback(claim, described);
+    pending_claim_ = ClaimCard{.claim = claim, .readback = readback, .object_name = object_name, .serial = ++card_serial_,
+                               .turn = user_turn_};
+    log_.write("claim_card", QJsonObject{{"card", static_cast<qint64>(card_serial_)}, {"kind", q(kind)}, {"text", q(readback)},
+                                         {"uid", QString::number(claim.uid)}});
+    window_->append_card(last_user_text_, q(readback));
+    return QStringLiteral("SHOWN to the person as a question: \"%1\" Nothing is stored unless they answer yes. Ask them "
+                          "to answer yes or no; do NOT say it is stored or remembered.").arg(q(readback));
+}
+
+void ChatSession::check_claim_answer()
+{
+    if (not posted_claim_.has_value()) return;
+    const auto say = [this](const std::string& text)
+    {
+        window_->begin_assistant();
+        window_->append_token(q(text));
+        window_->end_assistant();
+        if (not llm_.busy()) push_history({{"role", "assistant"}, {"content", q(text)}});
+    };
+    const auto now = static_cast<std::int64_t>(rc::provenance::now_ms());
+    if (human_.answer_stamp == posted_claim_->stamp)
+    {
+        const bool ok = human_.answer == "recorded";
+        log_.write("claim_answer", QJsonObject{{"stamp", static_cast<qint64>(posted_claim_->stamp)}, {"answer", q(human_.answer)}});
+        say(ok ? rc::chat::claim_recorded_words(posted_claim_->claim, posted_claim_->object_name)
+               : "I could not keep it: " + (human_.answer.starts_with("rejected: ") ? human_.answer.substr(10) : human_.answer) + ".");
+    }
+    else if (rc::chat::claim_answer_overdue(posted_claim_->posted_ms, now))
+    {
+        log_.write("claim_answer", QJsonObject{{"stamp", static_cast<qint64>(posted_claim_->stamp)}, {"answer", "none (timeout)"}});
+        say("My long-term memory (ltom_agent) is not answering; nothing was stored.");
+    }
+    else return;
+    intention_.clear_claim();
+    posted_claim_.reset();
+}
+
 QString ChatSession::do_go_around(const QJsonObject& args)
 {
-    const std::string what = args.value("object").toString().trimmed().toStdString();
+    std::string what = args.value("object").toString().trimmed().toStdString();
     const std::string room = digest_.facts.room;
     const auto refuse = [&](const std::string& why)
     {
@@ -1557,6 +1813,13 @@ QString ChatSession::do_go_around(const QJsonObject& args)
     };
     if (not digest_.facts.controller_present) return refuse("the controller is not running, so the robot cannot move");
     if (room.empty()) return refuse("the current room is not known yet");
+    if (const auto mine = resolve_mine(what); mine.has_value())
+    {
+        if (not mine->has_value()) return refuse(mine->error());
+        const auto target = rc::chat::mine_live_target(**mine, digest_.objects);
+        if (not target.has_value()) return refuse(target.error());
+        what = *target;
+    }
     const auto o = pick_object(digest_.objects, what);
     if (not o.has_value()) return refuse(o.error());
     const auto left = parse_around_direction(args.value("direction").toString().toStdString());
@@ -1606,6 +1869,58 @@ bool ChatSession::name_exists(std::string_view name) const
     return false;
 }
 
+std::optional<rc::chat::RememberedPlace> ChatSession::remembered_place(std::string_view name) const
+{
+    if (G_ and G_->get_node(std::string(name)).has_value()) return std::nullopt;   // live: it offers its own approach
+    for (const auto& o : remembered_now().objects)
+        if (o.name == name and not o.room.empty())
+            return rc::chat::RememberedPlace{.pose = {.room = o.room, .x = o.x, .y = o.y},
+                                             .view_steps = rc::chat::view_steps(o, cfg_.look_wait_s)};
+    return std::nullopt;
+}
+
+bool ChatSession::remembered_goto_card(const std::string& name, const QString& text)
+{
+    if (G_ and G_->get_node(name).has_value()) return false;   // live: the planner's ordinary approach
+    const auto mem = remembered_now();
+    const auto it = std::ranges::find(mem.objects, name, &rc::chat::RememberedObject::name);
+    if (it == mem.objects.end() or it->room.empty()) return false;
+    std::vector<std::string> legs;
+    if (it->room != digest_.facts.room)
+    {
+        const auto topo = remembered_topology();
+        if (topo.has_value()) legs = rc::chat::legs_to(*topo, digest_.facts.room, it->room);
+        if (legs.empty()) return false;   // no known way into its room: the model explains, or asks
+    }
+    const std::string mission_text = rc::chat::remembered_goto_text(*it, legs, cfg_.look_wait_s);
+    // held to the planner's own check: a recipe that does not pass is a bug here, logged, and the model takes over
+    auto m = check_planned(mission_text, [this](std::string_view n) { return name_exists(n); },
+                           [this](std::string_view n) { return remembered_place(n); });
+    if (not m.has_value())
+    {
+        log_.write("remembered_goto_refused", QJsonObject{{"name", q(name)}, {"text", q(mission_text)}, {"error", q(m.error())}});
+        return false;
+    }
+    m->request = text.toStdString();
+    rewrite_passages(*m);
+    pending_mission_ = MissionCard{.mission = *m, .serial = ++card_serial_, .turn = user_turn_};
+    const std::string shown = rc::mission::print_text(*m);
+    log_.write("mission_card", QJsonObject{{"card", static_cast<qint64>(card_serial_)}, {"text", q(shown)},
+                                           {"origin", "remembered_goto"}});
+    const QString reply = QStringLiteral("I last saw %1 in %2, %3; it may have moved, so I will go and look. "
+                                         "Say yes to start.")
+                              .arg(q(name), q(it->room),
+                                   q(it->last_seen_ms > 0 ? rc::chat::age_words(mem.now_ms - it->last_seen_ms)
+                                                          : std::string("at a time I do not know")));
+    window_->append_card(text, q(shown).trimmed());
+    window_->begin_assistant();
+    window_->append_token(reply);
+    window_->end_assistant();
+    push_history({{"role", "user"}, {"content", text}});
+    push_history({{"role", "assistant"}, {"content", reply}});
+    return true;
+}
+
 QString ChatSession::queue_planner(const QJsonObject& args)
 {
     const QString request = args.value("request").toString().trimmed();
@@ -1640,8 +1955,9 @@ void ChatSession::run_planner()
         finish_planner(QStringLiteral("REJECTED: the mission skills are not loaded (etc/skills/missions.md)"));
         return;
     }
+    const QString state = planner_state();
     QJsonArray msgs{QJsonObject{{"role", "system"}, {"content", skills}},
-                    QJsonObject{{"role", "system"}, {"content", planner_state()}},
+                    QJsonObject{{"role", "system"}, {"content", state}},
                     QJsonObject{{"role", "user"}, {"content", q(planner_request(planner_->request_text.toStdString(),
                                                                                 planner_->request.toStdString(),
                                                                                 planner_->from_wake))}}};
@@ -1650,7 +1966,10 @@ void ChatSession::run_planner()
     const QString model = cfg_.llm.planner_model.isEmpty() ? cfg_.llm.model : cfg_.llm.planner_model;
     log_.write("planner_request", QJsonObject{{"model", model}, {"request", planner_->request},
                                               {"said", planner_->from_wake ? QString{} : planner_->request_text},
-                                              {"fixes", planner_->fixes}});
+                                              {"fixes", planner_->fixes},
+                                              // what the planner was told: a plan is judged against this, not a guess
+                                              // (live 2026-11-10 the log could not show whether it had the poses)
+                                              {"state", state}});
     const bool ok = llm_.chat(msgs, {}, OllamaClient::Callbacks{
         .on_token = [this](const QString& tok) { if (planner_.has_value()) planner_->reply += tok; },
         .on_tool_calls = {},
@@ -1687,7 +2006,8 @@ void ChatSession::on_planned(const QString& reply)
         finish_planner(QStringLiteral("ASK: ") + q(*question));
         return;
     }
-    auto m = check_planned(text, [this](std::string_view n) { return name_exists(n); });
+    auto m = check_planned(text, [this](std::string_view n) { return name_exists(n); },
+                           [this](std::string_view n) { return remembered_place(n); });
     if (not m.has_value())
     {
         log_.write("planner_refused", QJsonObject{{"error", q(m.error())}, {"fixes", planner_->fixes}});
@@ -1714,6 +2034,7 @@ void ChatSession::on_planned(const QString& reply)
         log_.write("mission_card_replaced", QJsonObject{{"card", static_cast<qint64>(pending_mission_->serial)}});
         window_->append_system(QStringLiteral("(replaced the previous plan)"));
     }
+    rewrite_passages(*m);
     pending_mission_ = MissionCard{.mission = *m, .serial = ++card_serial_, .turn = user_turn_};
     // ★ The card shows the mission AS IT WILL RUN (printed back from the checked IR), never the model's raw reply.
     const std::string shown = rc::mission::print_text(*m);
@@ -2412,7 +2733,8 @@ void ChatSession::on_mission_progress(rc::mission::Progress now)
         if (room != digest_.facts.room)   // the first visit of a proto-room: `current` still names the room left
             for (auto& o : objects) o.in_current_room = not room.empty() and o.room == room;
         const std::string seen = answer_find_objects(std::move(objects), "", room);
-        for (const auto& topic : topics) queue("report", report_wake(topic, room, seen));
+        const auto skipped = skipped_steps(now, mission_ir_);   // a skipped go_to must not become "I have arrived"
+        for (const auto& topic : topics) queue("report", report_wake(topic, room, seen, skipped));
     }
     if (now.status.starts_with("failed|") and not before.status.starts_with("failed|"))
         if (const auto note = failure_wake(now, mission_ir_); note.has_value())
@@ -2420,12 +2742,33 @@ void ChatSession::on_mission_progress(rc::mission::Progress now)
     if (now.status == "completed" and before.status != "completed") queue("summary", summary_wake(now, mission_ir_));
 }
 
+// passage refs into remembered rooms → room refs, the form the controller can resolve after an eviction (passage_refs.h)
+void ChatSession::rewrite_passages(rc::mission::Mission& m)
+{
+    const auto topo = remembered_topology();
+    if (not topo.has_value()) return;
+    if (const int n = rc::chat::passages_to_rooms(m.steps, *topo); n > 0)
+        log_.write("passages_to_rooms", QJsonObject{{"n", n}});
+}
+
 void ChatSession::drain_wakes()
 {
     // ★ Never while a model request or a planner job is in flight: a wake is not the person speaking, so it must not
     //   resolve a plan (on_user_text's rule) nor interleave with a tool round.
-    const auto note = wakes_.pop_if_idle(llm_.busy() or planner_.has_value());
-    if (not note.has_value()) return;
+    auto turn = next_idle_turn(held_, wakes_, llm_.busy() or planner_.has_value());
+    if (not turn.has_value()) return;
+    if (turn->from_person)
+    {
+        log_.write("user_unheld", QJsonObject{{"text", q(turn->text)}});
+        wake_turn_ = false;
+        draw_repairs_ = 0;
+        lost_answers_ = 0;
+        if (not ollama_ok_) ping_llm();
+        push_history({{"role", "user"}, {"content", q(turn->text)}});
+        ask_model(false);
+        return;
+    }
+    const std::optional<std::string> note = std::move(turn->text);
     if (not wakes_.last_fixes().empty())
     {
         fix_key_ = wakes_.last_fixes();

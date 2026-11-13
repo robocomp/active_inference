@@ -43,6 +43,10 @@ domain = 4
 # Long-term object memory (ltom_agent, id 28): joined exactly like [EM], while ltom_agent is present. find_objects and
 # where_is use it to say where an object that left the live graph was last seen.
 domain = 5
+# "go to <remembered object>" in the robot's room turns to it, then WAITS this long for chair_concept & co. to see it
+# again before the approach. Derived, not tuned: BirthFrames = 8 masks at the ZED YOLO rate (~20 Hz, 2026-11-10) is
+# 0.4-0.8 s once in view; x2.5 for the turn to settle. ★ TEMPORARY: replaced by `wait until=seen(NODE)` (agreed 11-10).
+look_wait_s = 2.0
 
 [Period]
 Compute = 250

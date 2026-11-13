@@ -83,6 +83,27 @@ static void test_choose_recall_takes_once()
     const auto b = rc::choose_recall({1.f, 1.f}, 0.35f, cands, p);
     CHECK(not b.has_value() or b->who.uid != 11);
 }
+// 2026-11-11: a memory is worth what its owner last believed of the object. Each candidate's prior is log P(exists)
+// as the owner last published it; a phantom (removed at P 0.06) must not be resurrected where a believed one would be.
+static Candidate cand_p(std::uint64_t uid, float x, float y, float p_exist)
+{
+    Candidate c = cand(uid, x, y);
+    c.log_prior = std::log(p_exist);
+    return c;
+}
+static void test_existence_weights_the_prior()
+{
+    // equidistant: the one its owner believed in wins
+    const std::vector<Candidate> two{cand_p(7, 0.f, 0.f, 0.06f), cand_p(8, 0.4f, 0.f, 0.98f)};
+    const auto d = decide({0.2f, 0.f}, kMeas, two, Params{});
+    CHECK(d.index.has_value() and *d.index == 1);
+    // a candidate believed in wins at 0.3 m; the same place remembered as a near-certain phantom loses to "new"
+    const auto x = Eigen::Vector2f(1.3f, 1.f);
+    CHECK(decide(x, kMeas, std::vector<Candidate>{cand_p(7, 1.f, 1.f, 0.98f)}, Params{}).index.has_value());
+    CHECK(not decide(x, kMeas, std::vector<Candidate>{cand_p(7, 1.f, 1.f, 1e-3f)}, Params{}).index.has_value());
+    // not stated (log_prior 0, the default) = today's behaviour
+    CHECK(decide(x, kMeas, std::vector<Candidate>{cand(7, 1.f, 1.f)}, Params{}).index.has_value());
+}
 static void test_choose_recall_empty()
 {
     std::vector<rc::RecallCand> cands;
@@ -100,6 +121,7 @@ int main()
     test_posterior_sums_to_one();
     test_choose_recall_takes_once();
     test_choose_recall_empty();
+    test_existence_weights_the_prior();
     if (failures) return 1;
     std::println("recall_match_test: ok");
     return 0;

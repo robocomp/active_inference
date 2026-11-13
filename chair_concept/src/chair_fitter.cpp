@@ -249,7 +249,12 @@ ChairFitter::ChairObservation ChairFitter::observe(ChairInstance& inst, const DS
             // ever see it). Sidecar belief whose only consumer is the mesh tint sent to the retina.
             // color_neff==0 (every ricoh slice) is a no-op inside update(), so this is safe to call
             // unconditionally on whatever slice won.
-            inst.appearance.update(slice.color_chroma, slice.color_var, slice.color_neff);
+            // Both channels in one call: a frame whose mask is not this chair (wall, table) is weighed down by its
+            // probability of being it, so one stray frame cannot rename the chair (appearance_belief.h observe()).
+            inst.appearance.observe(slice.color_chroma, slice.color_var, slice.color_neff,
+                                    slice.color_lum, slice.color_lum_var, slice.color_lum_n);
+            log_colour_csv(inst, {slice.color_chroma, slice.color_var, slice.color_neff, slice.color_lum,
+                                  slice.color_lum_var, slice.color_lum_n, slice.range}, masks_packet.timestamp_ms);
             const std::size_t begin = std::min(slice.support_begin, masks_packet.support_points.size());
             const std::size_t end = std::min(slice.support_end, masks_packet.support_points.size());
 
@@ -652,6 +657,20 @@ void ChairFitter::log_ai2_csv(const ChairInstance& inst, int npts, float R, bool
              << p_mode_max << ','
              << inst.ai2_belief.max_view_spent() << '\n';
     ai2_csv_.flush();
+}
+
+void ChairFitter::log_colour_csv(const ChairInstance& inst, const rc::appearance::ColourSample& in, std::uint64_t t_ms)
+{
+    if (cfg_.colour_csv_path.empty())
+        return;
+    if (not colour_csv_.is_open())
+    {
+        rc::diag::open_rotating(colour_csv_, cfg_.colour_csv_path);
+        if (not colour_csv_.is_open()) { cfg_.colour_csv_path.clear(); return; }
+        rc::appearance::write_colour_trace_header(colour_csv_);
+    }
+    rc::appearance::write_colour_trace_row(colour_csv_, t_ms, inst.node_name, in, inst.appearance);
+    colour_csv_.flush();
 }
 
 // ─── RGB-mask ROI projection (active-perception aid) ──────────────────────────
@@ -1085,3 +1104,14 @@ std::optional<float> ChairFitter::best_view_distance(float width_m, float height
 }
 
 }  // namespace rc
+
+std::optional<float> rc::ChairFitter::best_view_distance(float width_m, float height_m) const
+{
+    if (not camera_api_) return std::nullopt;
+    const float fx = camera_api_->get_focal_x(), fy = camera_api_->get_focal_y();
+    const float W = static_cast<float>(camera_api_->get_width()), H = static_cast<float>(camera_api_->get_height());
+    if (fx <= 0.f or fy <= 0.f or W <= 0.f or H <= 0.f or width_m <= 0.f or height_m <= 0.f) return std::nullopt;
+    const float f_best = rc::detect::best_fill(rc::detect::DetectorEnvelope{cfg_.detect_min_fill, cfg_.detect_max_fill, cfg_.detect_soft});
+    if (f_best <= 0.f) return std::nullopt;
+    return std::max(fx * width_m / (f_best * W), fy * height_m / (f_best * H));
+}

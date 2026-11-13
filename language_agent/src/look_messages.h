@@ -15,6 +15,10 @@
  * IMAGES LIVE FOR ONE TURN. After the request that carried it, every image is replaced by a short text placeholder
  * (strip_images), so a few look() calls cannot fill the 8k context with pictures nobody refers to any more; the
  * model keeps its own words about the image in the history. Logs never receive the base64 (redact_images).
+ *   ★Those words go ON THE TOOL MESSAGE (strip_images' `seen`), not as an assistant message: words said after a tool
+ *   result are not kept as assistant turns (the 8b replays them as the next answer, chat_session.cpp on_done), so
+ *   without this the description vanished with the picture and the next turn denied it (chat 2026-11-12: "a green
+ *   bottle on the table", then "I do not see a bottle in the image").
  */
 
 #include <deque>
@@ -53,15 +57,20 @@ namespace rc::chat
 
 [[nodiscard]] inline bool has_image(const QJsonObject& m) { return m.contains("images"); }
 
-/// Replace every image in the history by a text placeholder. Returns how many were dropped.
-inline int strip_images(std::deque<QJsonObject>& history)
+/// Replace every image in the history by a text placeholder. `seen`: what the model said with the picture in front of
+/// it (empty: nothing said), kept on the placeholder so the next turn still knows what was in the picture.
+/// Returns how many were dropped.
+inline int strip_images(std::deque<QJsonObject>& history, const QString& seen = {})
 {
     int n = 0;
+    const QString said = seen.trimmed();
+    const QString note = said.isEmpty() ? QStringLiteral(" (the image is no longer attached)")
+                                        : QStringLiteral(" (the image is no longer attached; what you saw in it: %1)").arg(said);
     for (auto& m : history)
         if (has_image(m))
         {
             m.remove("images");
-            m.insert("content", m.value("content").toString() + QStringLiteral(" (the image is no longer attached)"));
+            m.insert("content", m.value("content").toString() + note);
             ++n;
         }
     return n;

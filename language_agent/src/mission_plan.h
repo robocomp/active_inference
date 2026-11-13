@@ -124,6 +124,60 @@ inline std::optional<std::string> unknown_in(const std::vector<Step>& list,
     return std::nullopt;
 }
 
+}   // namespace mission_plan_detail
+
+/// An object only the long-term memory has: its last pose, and the steps that bring it into view from here (built in
+/// code by remembered_goto.h view_steps: turn to it and wait in the robot's own room, else go_to its pose).
+struct RememberedPlace
+{
+    rc::mission::Pose pose;
+    std::vector<std::string> view_steps;
+};
+/// nullopt for anything that is not an object only the long-term memory has.
+using RememberedLookup = std::function<std::optional<RememberedPlace>(std::string_view)>;
+
+namespace mission_plan_detail
+{
+/// What the run has done so far that can bring a remembered object into view: go_to poses (by room), a turn, a wait.
+struct ViewSoFar
+{
+    std::vector<std::string> go_to_rooms;
+    bool turned = false;   ///< a `move` with turn_deg
+    bool waited = false;   ///< a `wait` AFTER that turn (the tracker needs frames of it to bring it back)
+};
+
+/// The first `approach` of a REMEMBERED object (one the live graph does not have: it offers no approach until it is seen
+/// again) not reached the way the missions skill says: brought into view earlier in the run order — a `go_to pose:` in
+/// its room, or a turn then a wait — and on_fail=skip so a chair that has gone does not abort the mission. The error
+/// names the exact lines to write. `seen` accumulates in run order (a body runs where it stands).
+inline std::optional<std::string> remembered_unreached(const std::vector<Step>& list, const RememberedLookup& remembered,
+                                                       ViewSoFar& seen)
+{
+    for (const auto& s : list)
+    {
+        if (s.op == "go_to")
+            if (const auto r = s.ref("to"); r.has_value() and r->kind == Ref::Kind::Pose) seen.go_to_rooms.push_back(r->pose.room);
+        if (s.op == "move" and s.has("turn_deg")) { seen.turned = true; seen.waited = false; }
+        if (s.op == "wait" and seen.turned) seen.waited = true;
+        if (s.op == "approach")
+            if (const auto r = s.ref("object"); r.has_value() and r->kind == Ref::Kind::Node)
+                if (const auto p = remembered(r->name); p.has_value())
+                {
+                    const bool in_view = std::ranges::contains(seen.go_to_rooms, p->pose.room) or seen.waited;
+                    if (not in_view or s.on_fail.kind != rc::mission::OnFail::Kind::Skip)
+                    {
+                        std::string lines;
+                        for (const auto& v : p->view_steps) lines += (lines.empty() ? "`" : "`, then `") + v;
+                        return std::format("'{0}' is remembered, NOT perceived now, so it offers no approach until it is "
+                                           "seen again: put {1}` before it and write `approach {0} on_fail=skip`",
+                                           r->name, lines.empty() ? std::string("`go_to its pose") : lines);
+                    }
+                }
+        if (auto e = remembered_unreached(s.steps, remembered, seen)) return e;
+    }
+    return std::nullopt;
+}
+
 inline const rc::mission::Interpreter::StepView* view_of(const rc::mission::Progress& p, std::string_view id)
 {
     const auto it = std::ranges::find(p.steps, id, &rc::mission::Interpreter::StepView::id);
@@ -200,16 +254,24 @@ inline std::string paused_at(const rc::mission::Progress& p)
     return a == std::string_view::npos ? std::string{} : std::string(q.substr(a));
 }
 
-/// A planner reply → the mission language_agent may put on a card: fence stripped, parsed, validated, every name known.
-/// The error is ONE line the planner can act on (it is sent back to it to fix).
+/// A planner reply → the mission language_agent may put on a card: fence stripped, parsed, validated, every name known,
+/// and every remembered object reached the missions skill's way (`remembered`, when given: see remembered_unreached).
+/// The error is ONE line the planner can act on (it is sent back to it to fix). Live 2026-11-10: the planner wrote a
+/// bare `approach chair_34` for a remembered chair; the controller refused it before anything moved.
 [[nodiscard]] inline std::expected<rc::mission::Mission, std::string> check_planned(
-    std::string_view reply, const std::function<bool(std::string_view)>& exists)
+    std::string_view reply, const std::function<bool(std::string_view)>& exists, const RememberedLookup& remembered = {})
 {
     auto m = parse_planned(strip_fence(reply));
     if (not m.has_value()) return m;
     if (const auto bad = unknown_name(*m, exists); bad.has_value())
         return std::unexpected(std::format("unknown name '{}': there is no such door, room or object in the live map now "
                                            "(a room not yet reached is named with cross ... bind=NAME, then $NAME)", *bad));
+    if (remembered)
+    {
+        mission_plan_detail::ViewSoFar seen;
+        if (auto e = mission_plan_detail::remembered_unreached(m->steps, remembered, seen); e.has_value())
+            return std::unexpected(std::move(*e));
+    }
     return m;
 }
 
@@ -245,10 +307,15 @@ inline std::string paused_at(const rc::mission::Progress& p)
         if (v.state == SS::Running and was == SS::Running and old and v.attempt > old->attempt)
         {
             const int max = step ? step->on_fail.retries : v.attempt - 1;
-            out.push_back(std::format("⟳ retry {}/{} {}", v.attempt - 1, max, label));
+            out.push_back(std::format("⟳ retry {}/{} {}{}", v.attempt - 1, max, label,
+                                      v.after.empty() ? "" : " (the last try: " + v.after + ")"));
         }
         else if (v.state == SS::Running and was != SS::Running)
             out.push_back(std::format("→ {}/{} {}", top_index(v.id), total, label));
+        // Why a running step WAITS (the controller's words): told when it changes, not when the wait ends — the step
+        // goes on, and its own ✓/✗/⟳ line follows (chat 2026-11-12: minutes of exploring with no reason given).
+        if (v.state == SS::Running and not v.note.empty() and (not old or old->note != v.note))
+            out.push_back(std::format("… {} waits: {}", label, v.note));
         if (v.state == SS::Satisfied and was != SS::Satisfied)
             out.push_back(std::format("✓ {} ({:.0f} s)", label, v.t1 < v.t0 ? 0.0 : double(v.t1 - v.t0) / 1000.0));
         else if (v.state == SS::Failed and was != SS::Failed)
@@ -356,6 +423,34 @@ private:
     std::string last_fixes_;
 };
 
+/// The person's messages typed while the model was busy (chat_e2e11: "close the door" arrived 4 s into a mission
+/// close-out and was thrown away with "Still answering"). Held in the order typed, never dropped.
+struct HeldMessages
+{
+    void hold(std::string text) { q_.push_back(std::move(text)); }
+    [[nodiscard]] bool empty() const { return q_.empty(); }
+    [[nodiscard]] std::size_t size() const { return q_.size(); }
+    void clear() { q_.clear(); }   ///< a new conversation
+    [[nodiscard]] std::optional<std::string> pop() { if (q_.empty()) return std::nullopt; auto t = std::move(q_.front()); q_.pop_front(); return t; }
+
+private:
+    std::deque<std::string> q_;
+};
+
+/// What the idle model answers next: a held message from the person first, then the oldest robot event.
+struct IdleTurn
+{
+    bool from_person = false;
+    std::string text;
+};
+[[nodiscard]] inline std::optional<IdleTurn> next_idle_turn(HeldMessages& held, WakeQueue& wakes, bool busy)
+{
+    if (busy) return std::nullopt;
+    if (auto t = held.pop()) return IdleTurn{true, std::move(*t)};
+    if (auto n = wakes.pop_if_idle(false)) return IdleTurn{false, std::move(*n)};
+    return std::nullopt;
+}
+
 /// A wake goes to the model as a user-role message that says it is NOT the person speaking.
 [[nodiscard]] inline std::string wake_message(std::string_view note)
 {
@@ -364,12 +459,21 @@ private:
 
 /// The `report` step ran: its topic and the room's objects AT THAT INSTANT (the robot keeps moving while the model
 /// writes, so the answer is about the snapshot, never about the STATE of the reply's time; spec §5.3).
-[[nodiscard]] inline std::string report_wake(std::string_view topic, std::string_view room, std::string_view objects)
+/// `skipped`: the steps skipped BEFORE it (skipped_steps), named so the model does not say they happened (chat_e2e2:
+/// the go_to was skipped for no_route and the model said "I have arrived at the location where I last saw chair_34").
+[[nodiscard]] inline std::string report_wake(std::string_view topic, std::string_view room, std::string_view objects,
+                                             const std::vector<std::string>& skipped = {})
 {
+    std::string before;
+    for (const auto& k : skipped) before += (before.empty() ? "" : "; ") + k;
     return std::format("The mission reached its report step: \"{}\". When it ran the robot was in {}, and this is what "
-                       "find_objects answered then:\n{}\nTell the person about it now, from this snapshot only (the robot "
+                       "find_objects answered then:\n{}\n{}Tell the person about it now, from this snapshot only (the robot "
                        "may have moved on since: the STATE is no longer about that room). The mission goes on by itself.",
-                       topic, room.empty() ? std::string_view("an unknown room") : room, objects);
+                       topic, room.empty() ? std::string_view("an unknown room") : room, objects,
+                       before.empty() ? std::string{}
+                                      : std::format("Before it, these steps were SKIPPED and did not happen: {}. Do not say "
+                                                    "the robot reached a place or did anything those steps were for.\n",
+                                                    before));
 }
 
 /// The top-level steps not done (neither satisfied nor skipped), by their line names, in mission order.

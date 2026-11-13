@@ -96,6 +96,13 @@ void MemoryGraph::show(const Entry& e, std::uint64_t room_id, const std::string&
         G_->add_or_modify_attrib_local<width_m_att>(n, e.w);
         G_->add_or_modify_attrib_local<depth_m_att>(n, e.d);
         G_->add_or_modify_attrib_local<height_m_att>(n, e.h);
+        if (not e.color_name.empty())
+        {
+            G_->add_or_modify_attrib_local<color_name_att>(n, e.color_name);
+            G_->add_or_modify_attrib_local<color_prob_att>(n, e.color_prob);
+        }
+        if (e.exist_prob.has_value())   // the owner's last P(exists): what this memory is worth (absent = not stated)
+            G_->add_or_modify_attrib_local<obj_exist_prob_att>(n, *e.exist_prob);
         G_->add_or_modify_attrib_local<parent_att>(n, room_id);
         G_->add_or_modify_attrib_local<level_att>(n, 2);
         G_->add_or_modify_attrib_local<state_att>(n, state);

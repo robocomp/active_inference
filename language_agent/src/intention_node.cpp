@@ -82,6 +82,35 @@ std::optional<std::uint64_t> IntentionNode::send(const std::string& command)
     return stamp;
 }
 
+std::optional<std::uint64_t> IntentionNode::post_claim(const HumanClaim& c)
+{
+    if (not ensure()) return std::nullopt;
+    auto node = G_->get_node(id_);
+    if (not node.has_value()) return std::nullopt;
+    const std::uint64_t stamp = rc::provenance::now_ms();
+    G_->add_or_modify_attrib_local<human_claim_kind_att>(node.value(), c.kind);
+    G_->add_or_modify_attrib_local<human_claim_value_att>(node.value(), c.value);
+    G_->add_or_modify_attrib_local<human_claim_uid_att>(node.value(), c.uid);
+    G_->add_or_modify_attrib_local<human_claim_words_att>(node.value(), c.words);
+    G_->add_or_modify_attrib_local<human_claim_stamp_att>(node.value(), stamp);
+    if (not G_->update_node(node.value())) return std::nullopt;
+    return stamp;
+}
+
+void IntentionNode::clear_claim()
+{
+    if (id_ == 0) return;
+    auto node = G_->get_node(id_);
+    if (not node.has_value()) return;
+    bool any = false;
+    any |= G_->remove_attrib_local<human_claim_kind_att>(node.value());
+    any |= G_->remove_attrib_local<human_claim_value_att>(node.value());
+    any |= G_->remove_attrib_local<human_claim_uid_att>(node.value());
+    any |= G_->remove_attrib_local<human_claim_words_att>(node.value());
+    any |= G_->remove_attrib_local<human_claim_stamp_att>(node.value());
+    if (any) G_->update_node(node.value());
+}
+
 IntentionStatus IntentionNode::read() const
 {
     IntentionStatus s;

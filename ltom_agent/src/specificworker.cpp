@@ -79,7 +79,7 @@ void SpecificWorker::request_shutdown()
 {
     if (shutting_down_.exchange(true))
         return;
-    if (repertory_ and repertory_->dirty()) save_now("exit");   // persist BEFORE the node cleanup / graph reset (nothing changed: keep .prev a real older generation)
+    if (repertory_ and (repertory_->dirty() or book_.dirty())) save_now("exit");   // persist BEFORE the node cleanup / graph reset (nothing changed: keep .prev a real older generation)
     cleanup_owned_nodes();     // our presence agent node on the live graph, through the shared coordinator ([Owns])
 }
 
@@ -187,7 +187,7 @@ void SpecificWorker::initialize()
                  params_.repertory_path);
 
     repertory_ = std::make_unique<ltom::Repertory>(params_.owner_grace_ms);
-    const auto res = ltom::load_repertory(params_.repertory_path, *repertory_);
+    const auto res = ltom::load_repertory(params_.repertory_path, *repertory_, &book_);
     repertory_->close_open_lives_as_gap();   // our own downtime is a gap, never a death
     save_blocked_ = res == ltom::LoadResult::blocked;
     if (save_blocked_)
@@ -196,9 +196,12 @@ void SpecificWorker::initialize()
                     : res == ltom::LoadResult::missing ? "no file, starting empty"
                     : res == ltom::LoadResult::blocked ? "BAD FILE NOT MOVED ASIDE, saving disabled" : "UNREADABLE, starting empty";
     std::println("[ltom] repertory {}: {} ({} entries)", params_.repertory_path, how, repertory_->entries().size());
+    std::println("[ltom] human at the chat: {}, {} thing(s) owned", book_.name().value_or("name not known"), book_.owned().size());
     G_memory_ = G_memory;
     memory_graph_ = std::make_unique<ltom::MemoryGraph>(G_memory);
     memory_graph_->sync(repertory_->entries(), {});     // retained objects show at once, fleet or no fleet
+    human_graph_ = std::make_unique<ltom::HumanGraph>(G_memory);
+    human_graph_->sync(book_, std::nullopt);
     recall_pub_ = std::make_unique<ltom::RecallPublisher>(G);
     sweep_stale_recalls();   // may run before leaked nodes finish syncing; the first Operating entry sweeps again
     inner_eigen_ = G->get_inner_eigen_api();   // once, on the main thread, after the graph is up
@@ -208,13 +211,14 @@ void SpecificWorker::initialize()
     rc::cfg::Reader(configLoader, "ltom_agent").publish("etc/config_effective.csv");
 }
 
-void SpecificWorker::save_now(const char* why)
+bool SpecificWorker::save_now(const char* why)
 {
-    if (not repertory_ or save_blocked_) return;
-    const bool ok = ltom::save_repertory(params_.repertory_path, *repertory_) and ltom::write_csv(params_.csv_path, *repertory_);
-    if (ok) repertory_->clear_dirty();
+    if (not repertory_ or save_blocked_) return false;
+    const bool ok = ltom::save_repertory(params_.repertory_path, *repertory_, &book_) and ltom::write_csv(params_.csv_path, *repertory_);
+    if (ok) { repertory_->clear_dirty(); book_.clear_dirty(); }
     last_save_ = std::chrono::steady_clock::now();
     std::println("[ltom] saved ({}): {} entries{}", why, repertory_->entries().size(), ok ? "" : " -- WRITE FAILED");
+    return ok;
 }
 
 void SpecificWorker::compute()
@@ -243,6 +247,20 @@ void SpecificWorker::compute()
     for (auto& t : view.thumbs) repertory_->merge_thumb(t.key, t.bin, t.score, std::move(t.jpeg));
     if (memory_graph_) memory_graph_->sync(repertory_->entries(), view.present);
 
+    // The human at the chat: the chat posts a claim only after the person's yes; LTOM records it and answers.
+    // A claim stays up until the chat sees the answer, so it is read every cycle: applied and answered ONCE per stamp.
+    // "recorded" is answered only after the file was written (an unsaved fact would be gone at the next restart);
+    // a failed write is retried at the save period, not every cycle.
+    if (const auto claim = ltom::read_claim(*G); claim.has_value() and claim->stamp != logged_claim_stamp_)
+    {
+        logged_claim_stamp_ = claim->stamp;
+        const auto applied = book_.apply(*claim, *repertory_, now_ms);
+        const bool saved = not book_.dirty() or save_now("human");
+        last_answer_ = ltom::answer_after_save(applied, saved);
+        std::println("[ltom] human claim {} -> {}", ltom::claim_kind_name(claim->kind), last_answer_->text);
+    }
+    if (human_graph_) human_graph_->sync(book_, last_answer_);
+
     // Recall nodes: the remembered, absent members of the offered classes, in the room the robot is in now.
     if (recall_pub_)
     {
@@ -255,7 +273,7 @@ void SpecificWorker::compute()
             recall_pub_->sync(std::nullopt, {});
     }
 
-    if (repertory_->dirty() and std::chrono::steady_clock::now() - last_save_ >= std::chrono::seconds(params_.save_period_s))
+    if ((repertory_->dirty() or book_.dirty()) and std::chrono::steady_clock::now() - last_save_ >= std::chrono::seconds(params_.save_period_s))
         save_now("period");
 }
 

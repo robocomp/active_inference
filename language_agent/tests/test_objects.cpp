@@ -48,7 +48,7 @@ int main()
     assert(objects_section({}, 6, 0).find(": none") != std::string::npos); ++checks;
     // an object that offers its approach: its sides, labelled as seen from here (approach.h sides_line)
     assert(object_line(ObjectFact{.name = "chair_1", .subtype = "chair", .approach_sides = "front (its own front; far side as seen from here)"})
-               .ends_with(", approach sides: front (its own front; far side as seen from here)")); ++checks;
+               .contains(", approach sides: front (its own front; far side as seen from here), colour not measured")); ++checks;
     assert(object_line(ObjectFact{.name = "chair_2", .subtype = "chair"}).find("approach") == std::string::npos); ++checks;
 
     auto f = answer_find_objects(all, "chairs", "room_1");
@@ -125,6 +125,11 @@ int main()
         assert(is_remembered(places, "chair_39")); ++checks;
         assert(not is_remembered(places, "chair_40")); ++checks;
         assert(remembered_places_line(undated_room_only()).empty()); ++checks;
+        // in the robot's own room the line also gives the turn that faces it (computed in code: no model trigonometry)
+        Remembered turned = places;
+        turned.objects[0].turn_deg = 145;
+        assert(contains(remembered_places_line(turned),
+                        "chair_39 in room_2 at pose:room_2(1.20, -0.50), from here: move turn_deg=145deg")); ++checks;
 
         // The age in words, and a stamp that is missing or in the future.
         assert(age_words(90 * 60'000) == "1 h ago"); ++checks;
@@ -132,12 +137,23 @@ int main()
         assert(age_words(-5) == "less than a minute ago"); ++checks;
         const Remembered undated{.objects = {{.name = "chair_1", .subtype = "chair", .room = "room_1"}}, .now_ms = now};
         assert(contains(answer_where_is({}, "chair_1", "room_2", undated), "chair_1 (last seen in room_1, time unknown)")); ++checks;
+
+        // from_memory: set when the answer carries remembered objects, so the chat says it AS IT IS (live 2026-11-10:
+        // gemma4 reworded the block, moved chair_39 to room_1 and dropped "it may have moved").
+        bool fm = false;
+        (void)answer_where_is({}, "chair_34", "room_2", mem, &fm); assert(fm); ++checks;              // by name, memory only
+        fm = false; (void)answer_where_is({}, "chair", "room_2", mem, &fm); assert(fm); ++checks;     // by class, memory only
+        fm = true; (void)answer_where_is(live_named, "chair_34", "room_1", mem, &fm); assert(not fm); ++checks;   // live wins
+        fm = true; (void)answer_where_is({}, "sofa", "room_2", mem, &fm); assert(not fm); ++checks;   // nothing at all
+        fm = false; (void)answer_find_objects({}, "chair", "room_2", mem, &fm); assert(fm); ++checks;
+        fm = true; (void)answer_find_objects({}, "sofa", "room_2", mem, &fm); assert(not fm); ++checks;
+        fm = true; (void)answer_find_objects(all, "chair", "room_1", Remembered{}, &fm); assert(not fm); ++checks;
     }
 
     auto w = answer_where_is(all, "fridge", "room_1");
     assert(w.find("refrigerator_1 — in room_2") != std::string::npos); ++checks;
     w = answer_where_is(all, "chair_2", "room_1");
-    assert(w.find("chair_2 3.4 m, -100 deg to the right — in the current room") != std::string::npos); ++checks;
+    assert(w.find("chair_2 3.4 m, -100 deg to the right, colour not measured — in the current room") != std::string::npos); ++checks;
     w = answer_where_is(all, "the table", "room_1");
     assert(w.find("table_1 2.8 m") != std::string::npos); ++checks;
     w = answer_where_is(all, "sofa", "room_1");
@@ -164,6 +180,63 @@ int main()
         assert(motion_line(-0.30f, 0.05f, -0.5f, 40) ==
                "robot motion now (odometry, 40 ms old): backward 0.30 m/s, sideways 0.05 m/s, turning right 29 deg/s"); ++checks;
         assert(motion_line(0.f, 0.f, 0.f, 3000).find("3000 ms old") != std::string::npos); ++checks;   // stale: said, not hidden
+    }
+    // ── colour (2026-11-11): a measured NAME with its probability, "not measured" otherwise; colour words filter ──
+    {
+        const auto contains = [](const std::string& h, std::string_view n) { return h.find(n) != std::string::npos; };
+        ObjectFact m = obj(10, "chair_34", "chair", true, 1.6, 0);
+        m.color_name = "magenta"; m.color_prob = 0.93f;
+        ObjectFact u = obj(11, "chair_35", "chair", true, 2.5, 20);              // never measured
+        ObjectFact y = obj(12, "chair_36", "chair", true, 3.0, -30);
+        y.color_name = "yellow"; y.color_prob = 0.8f;
+        assert(contains(object_line(m), ", magenta (p 0.93)")); ++checks;
+        assert(contains(object_line(u), ", colour not measured")); ++checks;
+        // find_objects("magenta chair"): the magenta one, and the unmeasured one (it may be it), never the yellow one
+        auto r = answer_find_objects({m, u, y}, "magenta chair", "room_1");
+        assert(contains(r, "chair_34") and contains(r, "chair_35") and not contains(r, "chair_36")); ++checks;
+        r = answer_find_objects({m, y}, "pink chairs", "room_1");
+        assert(contains(r, "No pink chair perceived")); ++checks;
+        r = answer_where_is({m, u, y}, "the yellow chair", "room_1");
+        assert(contains(r, "chair_36") and contains(r, "chair_35") and not contains(r, "chair_34")); ++checks;
+        r = answer_where_is({m, u, y}, "gray chair", "room_1");             // "gray" is "grey"
+        assert(contains(r, "chair_35") and not contains(r, "chair_34") and not contains(r, "chair_36")); ++checks;
+        // remembered objects carry it too, and the same filter applies
+        RememberedObject rm{.name = "chair_40", .subtype = "chair", .room = "room_2", .last_seen_ms = 1};
+        rm.color_name = "magenta"; rm.color_prob = 0.9f;
+        RememberedObject ry{.name = "chair_41", .subtype = "chair", .room = "room_2", .last_seen_ms = 1};
+        ry.color_name = "yellow"; ry.color_prob = 0.7f;
+        assert(contains(remembered_line(rm, 2), ", magenta (p 0.90)")); ++checks;
+        // 2026-11-11: what the memory is worth, the owner's last P(exists); said only when stated
+        assert(not contains(remembered_line(rm, 2), "real")); ++checks;
+        RememberedObject rp = rm; rp.exist_prob = 0.06f;
+        assert(contains(remembered_line(rp, 2), "p 0.06 that it was real")); ++checks;
+        const Remembered mem2{.objects = {rm, ry}, .now_ms = 2};
+        r = answer_find_objects({}, "magenta chair", "room_1", mem2);
+        assert(contains(r, "chair_40") and not contains(r, "chair_41")); ++checks;
+        // a colour word alone is not a class: unchanged behaviour for plain classes
+        assert(answer_find_objects({m, u, y}, "chair", "room_1").find("chair_36") != std::string::npos); ++checks;
+    }
+    // ── the human at the chat (spec 2026-11-11-human-model): ownership after the colour; human_1 never listed ──
+    {
+        HumanFacts named{.name = "Pablo", .role = "developer", .owned_uids = {34}};
+        HumanFacts anon{.role = "developer", .owned_uids = {34}};
+        assert(owner_words(34, named) == ", Pablo's"); ++checks;
+        assert(owner_words(34, anon) == ", yours"); ++checks;
+        assert(owner_words(35, named) == ""); ++checks;
+        assert(owner_words(0, named) == ""); ++checks;                                   // uid unknown: never owned
+        std::vector<ObjectFact> mine{ObjectFact{.name = "chair_34", .subtype = "chair", .color_name = "magenta", .color_prob = 0.69f, .uid = 34},
+                                     ObjectFact{.name = "chair_35", .subtype = "chair", .uid = 35}};
+        mark_owned(mine, named);
+        assert(object_line(mine[0]).contains("magenta (p 0.69), Pablo's")); ++checks;
+        assert(not object_line(mine[1]).contains("Pablo")); ++checks;
+        std::vector<RememberedObject> rem{RememberedObject{.name = "chair_34", .subtype = "chair", .room = "room_1", .uid = 34}};
+        mark_owned(rem, anon);
+        assert(remembered_line(rem[0], 1).contains("colour not measured, yours")); ++checks;
+        std::vector<ObjectFact> with_human{obj(1, "chair_1", "chair", true, 2.0, 0), obj(2, "human_1", "person", true, 1.0, 0)};
+        assert(not answer_find_objects(with_human, "", "room_1").contains("human_1")); ++checks;
+        assert(not answer_find_objects(with_human, "person", "room_1").contains("human_1")); ++checks;
+        assert(not objects_section(with_human, 6, 0).contains("human_1")); ++checks;
+        assert(answer_where_is(with_human, "human_1", "room_1").contains("not perceived")); ++checks;
     }
     std::println("test_objects: {} checks passed", checks);
     return 0;

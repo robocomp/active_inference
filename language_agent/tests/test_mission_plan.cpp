@@ -1,5 +1,7 @@
 // mission_plan.h: parse/validate for the planner, name check, progress lines, reports.
 #include "../src/mission_plan.h"
+#include "../src/remembered_goto.h"
+#include "../src/passage_refs.h"
 
 #include <clocale>
 #include <print>
@@ -103,6 +105,19 @@ int main()
         Progress r2 = r1;
         r2.steps[0].attempt = 2;
         CHECK(progress_lines(r1, r2, *mr) == std::vector<std::string>{"⟳ retry 1/2 1:cross door_1"});
+        // the reason for the retry and why a step waits are told (chat 2026-11-12: minutes of exploring, no reason)
+        Progress r3 = r2;
+        r3.steps[0].after = "door_unresolved";
+        CHECK(progress_lines(r1, r3, *mr) == std::vector<std::string>{"⟳ retry 1/2 1:cross door_1 (the last try: door_unresolved)"});
+        Progress w1 = r1;
+        w1.steps[0].note = "no door I know of in room_1 leads to room_3 yet";
+        CHECK(progress_lines(r1, w1, *mr) ==
+              std::vector<std::string>{"… 1:cross door_1 waits: no door I know of in room_1 leads to room_3 yet"});
+        CHECK(progress_lines(w1, w1, *mr).empty());                  // told once, not every snapshot
+        CHECK(progress_lines(w1, r1, *mr).empty());                  // the wait ending is not news (the step goes on)
+        Progress w0 = snap("in_progress", {view("1", "cross", SS::Pending)});
+        CHECK(progress_lines(w0, w1, *mr) == (std::vector<std::string>{"→ 1/1 1:cross door_1",
+                                                                       "… 1:cross door_1 waits: no door I know of in room_1 leads to room_3 yet"}));
     }
     {
         Progress back = snap("in_progress", {view("1", "cross", SS::Satisfied, 5000, 1000)});
@@ -176,6 +191,53 @@ int main()
         CHECK(w.pop_if_idle(false) == "b" and w.last_fixes().empty());
         CHECK(w.pop_if_idle(false) == "c" and w.last_fixes() == "m7");   // the failure it came from
         CHECK(wake_message("x") == "(robot event, not the person) x");
+    }
+
+    // ── HeldMessages: the person typed while the model was busy (chat_e2e11: "close the door" arrived 4 s into the
+    //    mission close-out and was thrown away). Held, never dropped, and answered BEFORE any robot event. ─────────
+    {
+        HeldMessages held;
+        WakeQueue w;
+        w.push("mission completed");
+        held.hold("close the door");
+        CHECK(not next_idle_turn(held, w, true).has_value());   // busy: both wait
+        const auto t1 = next_idle_turn(held, w, false);
+        CHECK(t1.has_value() and t1->from_person and t1->text == "close the door");   // the person outranks the wake
+        const auto t2 = next_idle_turn(held, w, false);
+        CHECK(t2.has_value() and not t2->from_person and t2->text == "mission completed");
+        CHECK(not next_idle_turn(held, w, false).has_value());
+        held.hold("a");
+        held.hold("b");
+        CHECK(held.size() == 2);
+        CHECK(next_idle_turn(held, w, false)->text == "a");   // in the order typed
+        held.clear();
+        CHECK(held.empty());
+    }
+
+    // ── passages_to_rooms (chat_e2e11): "go to my chair" from room_2 was refused passage_unresolved — the controller
+    //    resolves passage:ID@ROOM only through ltsm's LIVE passage node (alive only while the room beyond is proto).
+    //    A passage into a REMEMBERED room becomes `cross <that room>`; the model still writes passages (it copies
+    //    them 10/10, and `cross room_3` only 4/10). ─────────────────────────────────────────────────────────────────
+    {
+        rc::topo::Topology t;
+        t.rooms = {{"room_1", false}, {"room_2", true}, {"room_3", false}};
+        rc::topo::TopoPassageInfo p0; p0.id = "passage_0"; p0.room_a = "room_1"; p0.room_b = "room_2";
+        rc::topo::TopoPassageInfo p1; p1.id = "passage_1"; p1.room_a = "room_2"; p1.room_b = "room_3";
+        t.passages = {p0, p1};
+        auto m = parse_planned("mission\n  cross passage:passage_0@room_2 expect=room_1\n"
+                               "  repeat 2\n    cross passage:passage_1@room_2 expect=room_3\n"   // nested: rewritten too
+                               "  cross passage:passage_1@room_1 expect=room_3\n"   // room_1 is not an end of passage_1
+                               "  cross passage:passage_9@room_2 expect=room_1\n");               // unknown: left as is
+        CHECK(m.has_value());
+        if (m.has_value())
+        {
+            CHECK(rc::chat::passages_to_rooms(m->steps, t) == 2);
+            const std::string out = rc::mission::print_text(*m);
+            CHECK(out.contains("cross room_1 expect=room_1"));
+            CHECK(out.contains("cross room_3 expect=room_3"));
+            CHECK(out.contains("passage:passage_1@room_1"));   // passage_1 does not touch room_1: not rewritten
+            CHECK(out.contains("passage:passage_9@room_2"));
+        }
     }
 
     // ── the wakes' text ──────────────────────────────────────────────────────────────────────────────────────────
@@ -289,6 +351,121 @@ int main()
         // the person's ANSWER to the planner's ask: the words lead, the chat's request says what they answer
         CHECK(planner_request("door_1", "cross the door, report the objects, come back", false) ==
               "door_1\n\n(the chat's request: \"cross the door, report the objects, come back\")");
+    }
+
+    // ── check_planned: an object that is only REMEMBERED (live 2026-11-10: the planner wrote a bare `approach chair_34`
+    //    and the controller refused it — a remembered object offers no approach until it is seen again). The lookup
+    //    gives its last pose and the exact steps that bring it into view; the error IS the fix. ─────────────────────
+    {
+        const auto names = [](std::string_view n) { return n == "door_1" or n == "room_1" or n == "room_2" or n == "chair_34"
+                                                           or n == "chair_39"; };
+        // chair_34 is in the robot's room, behind it: TURN to it and wait (chat_e2e2: a go_to onto its centre had no route
+        // and the policy backed up 2 m); chair_39 is in another room: drive there
+        const auto remembered = [](std::string_view n) -> std::optional<RememberedPlace>
+        {
+            if (n == "chair_34") return RememberedPlace{.pose = {.room = "room_1", .x = -1.72, .y = -1.34},
+                                                        .view_steps = {"move turn_deg=145deg", "wait s=3s"}};
+            if (n == "chair_39") return RememberedPlace{.pose = {.room = "room_2", .x = -2.49, .y = -0.66},
+                                                        .view_steps = {"go_to pose:room_2(-2.49, -0.66) on_fail=skip"}};
+            return std::nullopt;
+        };
+        const auto bare = check_planned("mission \"g\"\n  approach chair_34\n", names, remembered);
+        CHECK(not bare.has_value());
+        CHECK(not bare.has_value() and bare.error().contains("move turn_deg=145deg"));
+        CHECK(not bare.has_value() and bare.error().contains("wait s=3s"));
+        CHECK(not bare.has_value() and bare.error().contains("approach chair_34 on_fail=skip"));
+        const auto far = check_planned("mission \"g\"\n  approach chair_39\n", names, remembered);
+        CHECK(not far.has_value() and far.error().contains("go_to pose:room_2(-2.49, -0.66) on_fail=skip"));
+        // turned and waited: in view; turned without waiting: the tracker has had no time to see it
+        CHECK(check_planned("mission\n  move turn_deg=145deg\n  wait s=3s\n  approach chair_34 on_fail=skip\n", names,
+                            remembered).has_value());
+        CHECK(not check_planned("mission\n  move turn_deg=145deg\n  approach chair_34 on_fail=skip\n", names,
+                                remembered).has_value());
+        // a go_to in its room also brings it into view
+        CHECK(check_planned("mission\n  cross door_1 expect=room_2 retry=2\n  go_to pose:room_2(-2.49, -0.66) on_fail=skip\n"
+                            "  approach chair_39 on_fail=skip\n  report \"whether chair_39 is still here\"\n", names,
+                            remembered).has_value());
+        // in view, but the approach would abort the mission when the chair has gone
+        CHECK(not check_planned("mission\n  go_to pose:room_2(-2.49, -0.66) on_fail=skip\n  approach chair_39\n", names,
+                                remembered).has_value());
+        // a go_to AFTER the approach does not count; a go_to into another room does not either
+        CHECK(not check_planned("mission\n  approach chair_39 on_fail=skip\n  go_to pose:room_2(-2.49, -0.66)\n", names,
+                                remembered).has_value());
+        CHECK(not check_planned("mission\n  go_to pose:room_1(0.5, 0.5) on_fail=skip\n  approach chair_39 on_fail=skip\n",
+                                names, remembered).has_value());
+        CHECK(not check_planned("mission\n  repeat 2\n    approach chair_34\n", names, remembered).has_value());   // in a body
+        // a LIVE object (no remembered place) is approached as before; and without the lookup nothing changes
+        const auto live = [](std::string_view) -> std::optional<RememberedPlace> { return std::nullopt; };
+        CHECK(check_planned("mission\n  approach chair_34\n", names, live).has_value());
+        CHECK(check_planned("mission\n  approach chair_34\n", names).has_value());
+    }
+
+    // ── go_to_object_name: "go to <name>" in the person's words → the name; anything else → nullopt ────────────────
+    {
+        CHECK(go_to_object_name("go to chair_34") == "chair_34");
+        CHECK(go_to_object_name("Go to chair_34.") == "chair_34");
+        CHECK(go_to_object_name("go back to the chair_34") == "chair_34");
+        CHECK(go_to_object_name("go to where chair_34 was last seen") == "chair_34");
+        CHECK(go_to_object_name("go to where chair_34 was") == "chair_34");
+        CHECK(go_to_object_name("ve a chair_34") == "chair_34");
+        CHECK(go_to_object_name("vuelve donde estaba chair_34") == "chair_34");
+        CHECK(not go_to_object_name("go to the kitchen and look for a chair").has_value());   // more than a name
+        CHECK(not go_to_object_name("where is chair_34").has_value());
+        CHECK(not go_to_object_name("go to").has_value());
+    }
+
+    // ── turn_to_face_deg: the robot-frame bearing (world_digest's convention: y ahead, x right, + = to the left) ────
+    {
+        CHECK(turn_to_face_deg(0.0, 2.0) == 0);       // ahead
+        CHECK(turn_to_face_deg(-1.0, 0.0) == 90);     // to the left
+        CHECK(turn_to_face_deg(1.0, 0.0) == -90);     // to the right
+        CHECK(turn_to_face_deg(0.0, -1.0) == 180);    // behind: one way round, never -180
+        CHECK(turn_to_face_deg(0.6, -1.6) == -159);   // behind-right
+    }
+
+    // ── view_steps / remembered_goto_text: the recipe, built in code; it passes the same check a planner's does ────
+    {
+        rc::chat::RememberedObject here{.name = "chair_34", .subtype = "chair", .room = "room_1", .x = -1.72, .y = -1.34};
+        here.turn_deg = 145;
+        CHECK((view_steps(here, 3.0) == std::vector<std::string>{"move turn_deg=145deg", "wait s=3s"}));
+        const std::string t = remembered_goto_text(here, {}, 3.0);
+        CHECK(t == "mission \"go to where chair_34 was last seen\"\n"
+                   "  move turn_deg=145deg\n"
+                   "  wait s=3s\n"
+                   "  approach chair_34 on_fail=skip\n"
+                   "  report \"whether chair_34 is still here\"\n");
+        const auto names = [](std::string_view n) { return n == "door_1" or n == "room_1" or n == "room_2" or n == "chair_34"
+                                                           or n == "chair_39"; };
+        const auto place_of = [&](const rc::chat::RememberedObject& o)
+        { return RememberedPlace{.pose = {.room = o.room, .x = o.x, .y = o.y}, .view_steps = view_steps(o, 3.0)}; };
+        rc::chat::RememberedObject far{.name = "chair_39", .subtype = "chair", .room = "room_2", .x = -2.49, .y = -0.66};
+        const auto remembered = [&](std::string_view n) -> std::optional<RememberedPlace>
+        {
+            if (n == "chair_34") return place_of(here);
+            if (n == "chair_39") return place_of(far);
+            return std::nullopt;
+        };
+        CHECK(check_planned(t, names, remembered).has_value());
+        // in another room (no turn from here): the legs first, each with retry=2, then go_to its last pose
+        CHECK((view_steps(far, 3.0) == std::vector<std::string>{"go_to pose:room_2(-2.49, -0.66) on_fail=skip"}));
+        const std::string f = remembered_goto_text(far, {"cross door_1 expect=room_2"}, 3.0);
+        CHECK(f == "mission \"go to where chair_39 was last seen\"\n"
+                   "  cross door_1 expect=room_2 retry=2\n"
+                   "  go_to pose:room_2(-2.49, -0.66) on_fail=skip\n"
+                   "  approach chair_39 on_fail=skip\n"
+                   "  report \"whether chair_39 is still here\"\n");
+        CHECK(check_planned(f, names, remembered).has_value());
+    }
+
+    // ── report_wake: the steps SKIPPED before the report are named (chat_e2e2: the go_to was skipped and the model said
+    //    "I have arrived at the location where I last saw chair_34") ─────────────────────────────────────────────────
+    {
+        const std::string none = report_wake("whether chair_34 is still here", "room_1", "No object perceived");
+        CHECK(not none.contains("SKIPPED"));
+        const std::string r = report_wake("whether chair_34 is still here", "room_1", "No object perceived",
+                                          {"1:go_to pose:room_1(-1.71, -2.61, 0, 0) (no_route)"});
+        CHECK(r.contains("SKIPPED") and r.contains("1:go_to pose:room_1(-1.71, -2.61, 0, 0) (no_route)"));
+        CHECK(r.contains("did not happen"));
     }
 
     std::println("test_mission_plan: {} checks passed{}", checks - failures, failures ? " — FAILURES" : "");

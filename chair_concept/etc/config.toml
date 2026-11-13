@@ -56,6 +56,7 @@ MasksStallTimeoutMs = 3000   # 0 = disable the stall gate
 # ── AI2 recursive-Laplace belief (mirrors table_concept). ──
 SigmaObs = 0.05                  # compound-SDF band for the candidate/residual split in observe()
 SdfThresholdForStorage = 0.08    # on-surface membership for the candidate/residual split
+ColourCsvPath = "etc/colour_trace.csv"   # per-update colour log: slice colour in, belief + top-3 names out; empty disables
 AI2CsvPath = "etc/ai2_log.csv"   # per-cycle AI2 log (state + Σ diag + range/motion); empty disables
 AI2SigmaBaseM = 0.03
 AI2ClutterFrac = 0.10

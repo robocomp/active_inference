@@ -1,6 +1,7 @@
 // Repertory: pure model of the long-term object memory (no DSR, no Qt).
 // Entries are keyed by object_uid; each has lives (born..end), pose keyframes and the last sizes seen.
 #pragma once
+#include <optional>
 #include <cstdint>
 #include <map>
 #include <set>
@@ -20,6 +21,9 @@ struct Sighting
     Pose2 pose;
     float w = 0, d = 0, h = 0;
     std::int64_t born_ms = 0;
+    std::string color_name;   // the owner's colour name (color_name attr); "" = not measured
+    float color_prob = 0;
+    std::optional<float> exist_prob;   // the owner's P(exists) (obj_exist_prob); nullopt = not stated
 };
 
 enum class End { alive, death, owner_exit, gap };
@@ -45,6 +49,11 @@ struct Entry
     std::uint64_t uid = 0;
     std::string cls, name;
     float w = 0, d = 0, h = 0;
+    std::string color_name;   // latest measured name ("" = never measured); the owner's belief is already the fusion
+    float color_prob = 0;
+    // The owner's LAST stated P(exists): what the memory is worth (2026-11-11). A removed phantom ends low, an
+    // object whose owner stopped ends high. nullopt = never stated (older file, or an owner that does not publish it).
+    std::optional<float> exist_prob;
     std::int64_t n_sightings = 0;
     std::vector<Life> lives;
     std::vector<Keyframe> keyframes;

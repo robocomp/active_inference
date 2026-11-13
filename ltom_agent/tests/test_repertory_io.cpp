@@ -1,5 +1,6 @@
 // Offline test of src/repertory_io.h (JSON store of record + CSV view). Runs under the es_ES locale the agents use.
 #include "../src/repertory_io.h"
+#include "../src/human.h"
 
 #include <clocale>
 #include <cstdio>
@@ -39,6 +40,8 @@ static Repertory make_repertory()
     Repertory r(3000);
     Entry a;
     a.uid = kBig; a.cls = "chair"; a.name = "chair_1"; a.w = 0.5f; a.d = 0.45f; a.h = 1.25f; a.n_sightings = 42;
+    a.color_name = "magenta"; a.color_prob = 0.875f;
+    a.exist_prob = 0.0625f;
     a.lives = {Life{100, 200, 300, 400, End::death}, Life{500, 600, 700, 800, End::owner_exit},
                Life{900, 1000, 1100, 1100, End::gap}, Life{1200, 1300, 1400, -1, End::alive}};
     a.keyframes = {Keyframe{250, 1, Pose2{1.25, 2.5, 0.3, 0.0009, 0.0016, 0.01}},
@@ -72,6 +75,10 @@ static void test_round_trip_preserves_entries()
     CHECK(a.keyframes[0].pose.vx == 0.0009 and a.keyframes[0].pose.vy == 0.0016 and a.keyframes[0].pose.vyaw == 0.01);
     CHECK(a.keyframes[1].pose.x == -0.75 and a.keyframes[1].room_key == 2);
     CHECK(got.entries().at(kSmall).cls == "table");
+    CHECK(a.color_name == "magenta" and a.color_prob == 0.875f);
+    CHECK(got.entries().at(kSmall).color_name.empty());   // never measured stays unknown
+    CHECK(a.exist_prob == 0.0625f);
+    CHECK(not got.entries().at(kSmall).exist_prob.has_value());   // never stated stays unknown
     CHECK(not got.dirty());
 }
 
@@ -242,6 +249,78 @@ static void test_thumbnails_from_another_binning_are_dropped()
     CHECK(got.entries().at(kBig).thumbs.empty());
 }
 
+static HumanBook make_book(const Repertory& r)
+{
+    HumanBook b;
+    b.apply(Claim{ClaimKind::name, "Pablo", 0, "my name is Pablo", 1}, r, 1794420000000);
+    b.apply(Claim{ClaimKind::name, "Paul", 0, "call me \"Paul\", please", 2}, r, 1794420000500);
+    b.apply(Claim{ClaimKind::owns, "", kBig, "that's my chair", 3}, r, 1794420100000);
+    b.apply(Claim{ClaimKind::owns, "", kSmall, "chair_2 is mine", 4}, r, 1794420200000);
+    b.apply(Claim{ClaimKind::disowns, "", kSmall, "that is not my chair", 5}, r, 1794420300000);
+    return b;
+}
+static bool same_said(const Said& a, const Said& b) { return a.t_ms == b.t_ms and a.words == b.words; }
+static void test_human_round_trip()
+{
+    const fs::path f = fresh_dir() / "rep.json";
+    const Repertory r = make_repertory();
+    const HumanBook b = make_book(r);
+    CHECK(b.human().things.size() == 2 and b.human().names.size() == 2);
+    CHECK(save_repertory(f, r, &b));
+    Repertory r2(3000);
+    HumanBook b2;
+    CHECK(load_repertory(f, r2, &b2) == LoadResult::loaded);
+    const Human& h = b.human();
+    const Human& h2 = b2.human();
+    CHECK(h2.id == h.id and h2.role == h.role);
+    CHECK(h2.names.size() == h.names.size());
+    for (std::size_t i = 0; i < std::min(h.names.size(), h2.names.size()); ++i)
+        CHECK(h2.names[i].value == h.names[i].value and same_said(h2.names[i].said, h.names[i].said));
+    CHECK(h2.things.size() == h.things.size());
+    for (std::size_t i = 0; i < std::min(h.things.size(), h2.things.size()); ++i)
+    {
+        const auto& o = h.things[i]; const auto& o2 = h2.things[i];
+        CHECK(o2.object_uid == o.object_uid and o2.cls == o.cls and o2.name_when_said == o.name_when_said);
+        CHECK(same_said(o2.said, o.said));
+        CHECK(o2.retracted.has_value() == o.retracted.has_value());
+        if (o.retracted and o2.retracted) CHECK(same_said(*o2.retracted, *o.retracted));
+    }
+    CHECK(not h2.things.empty() and h2.things[0].object_uid == kBig);
+    CHECK(b2.name() == std::optional<std::string>("Paul"));
+    CHECK(not b2.dirty());
+}
+static void test_file_without_humans_loads()
+{
+    const fs::path f = fresh_dir() / "rep.json";
+    const Repertory r = make_repertory();
+    CHECK(save_repertory(f, r));                       // today's shape: no "humans" section
+    CHECK(read_file(f).find("humans") == std::string::npos);
+    Repertory r2(3000);
+    HumanBook b2;
+    CHECK(load_repertory(f, r2, &b2) == LoadResult::loaded);
+    CHECK(not b2.name().has_value());
+    CHECK(b2.human().things.empty());
+    CHECK(r2.entries().size() == r.entries().size());
+}
+static void test_save_keeps_entries_with_humans()
+{
+    const fs::path f = fresh_dir() / "rep.json";
+    const Repertory r = make_repertory();
+    const HumanBook b = make_book(r);
+    CHECK(save_repertory(f, r, &b));
+    Repertory r2(3000);
+    CHECK(load_repertory(f, r2) == LoadResult::loaded);   // an old reader ignores the section
+    CHECK(r2.entries().size() == r.entries().size());
+    // an empty human book is saved too, and loads back as no human
+    HumanBook empty;
+    CHECK(save_repertory(f, r, &empty));
+    Repertory r3(3000);
+    HumanBook b3;
+    CHECK(load_repertory(f, r3, &b3) == LoadResult::loaded);
+    CHECK(r3.entries().size() == r.entries().size());
+    CHECK(not b3.name().has_value() and b3.human().things.empty());
+}
+
 int main()
 {
     test_thumbnails_survive_a_round_trip();
@@ -257,6 +336,9 @@ int main()
     test_failed_move_aside_blocks_saving();
     test_csv_has_points_not_commas();
     test_csv_row_count_and_header();
+    test_human_round_trip();
+    test_file_without_humans_loads();
+    test_save_keeps_entries_with_humans();
     if (failures == 0) std::println("test_repertory_io: ok");
     return failures == 0 ? 0 : 1;
 }

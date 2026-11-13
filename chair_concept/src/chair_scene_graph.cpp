@@ -5,6 +5,7 @@
 #include "chair_scene_graph.h"
 
 #include "../../common/rt_covariance/rt_covariance.h"   // rc::rtcov::publish (SHARED)
+#include "../../common/appearance_belief/colour_name.h"   // rc::appearance::name_colour
 
 #include <algorithm>
 #include <cmath>
@@ -214,6 +215,21 @@ void ChairSceneGraph::step_write_model(ChairInstance& inst, DSR::Node& node,
         G_->add_or_modify_attrib_local<mesh_color_rgb_att>(node,
             std::vector<float>{tint.x(), tint.y(), tint.z()});
     }
+    // Colour NAME (2026-11-11): the most probable of a fixed palette given the appearance belief, and its
+    // probability — what the chat says ("magenta, p 0.93"). Absent until something was measured. Reads the belief
+    // only; nothing geometric depends on it (appearance_belief.h's containment rule).
+    if (const auto cn = rc::appearance::name_colour(inst.appearance); not cn.name.empty())
+    {
+        G_->add_or_modify_attrib_local<color_name_att>(node, cn.name);
+        G_->add_or_modify_attrib_local<color_prob_att>(node, cn.prob);
+    }
+
+    // P(this chair is really there), from the existence channel's log-odds (2026-11-11). ltom keeps the last value it
+    // reads as what the memory is worth: a removed phantom ends low, a chair whose agent stopped ends high, and a
+    // recalled candidate's prior is this number (recall_match.h). NaN until the channel is seeded: not published then,
+    // so a consumer reads "not stated", never a made-up 0.5.
+    if (std::isfinite(inst.exist_logodds))
+        G_->add_or_modify_attrib_local<obj_exist_prob_att>(node, 1.0f / (1.0f + std::exp(-inst.exist_logodds)));
 
     G_->update_node(node);
 

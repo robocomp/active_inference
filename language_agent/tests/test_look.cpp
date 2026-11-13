@@ -78,6 +78,16 @@ int main()
     assert(not has_image(hist.back()) and hist.back().value("content").toString().contains("no longer attached")); ++checks;
     assert(strip_images(hist) == 0); ++checks;                                      // idempotent
 
+    // ── what the model said about the picture stays on its tool message (chat 2026-11-12: it saw a green bottle,
+    //    the description was a follow-up (not kept), the image was stripped, and next turn it denied any bottle) ──
+    std::deque<QJsonObject> h2{msgs[1].toObject(), msgs[2].toObject(), m};
+    assert(strip_images(h2, QStringLiteral("A white table with a green bottle on it.")) == 1); ++checks;
+    const QString kept = h2.back().value("content").toString();
+    assert(not has_image(h2.back()) and kept.contains("no longer attached") and kept.contains("green bottle")); ++checks;
+    assert(h2.size() == 3); ++checks;                                               // no extra assistant message
+    std::deque<QJsonObject> h3{m};
+    assert(strip_images(h3, QString()) == 1 and not h3.back().value("content").toString().contains("you saw")); ++checks;
+
     std::println("test_look: {} checks passed", checks);
     return 0;
 }

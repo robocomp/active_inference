@@ -41,6 +41,16 @@ struct Fixture
     int count_objects() { return static_cast<int>(G->get_nodes_by_type("object").size()); }
 };
 
+void test_existence_on_the_memory_node()
+{
+    Fixture f;
+    Entries es;
+    auto a = chair(1, 1, -1.5, -2.5); a.exist_prob = 0.06f; add(es, a);
+    add(es, chair(2, 1, 2.0, 0.5));
+    f.mem.sync(es, {});
+    CHECK(f.G->get_attrib_by_name<obj_exist_prob_att>(*f.G->get_node("chair_1")) == 0.06f);
+    CHECK(not f.G->get_attrib_by_name<obj_exist_prob_att>(*f.G->get_node("chair_2")).has_value());
+}
 void test_objects_hang_under_their_remembered_room()
 {
     Fixture f;
@@ -174,6 +184,7 @@ void test_every_retained_object_is_shown_even_with_no_known_room()
 
 int main()
 {
+    test_existence_on_the_memory_node();
     test_objects_hang_under_their_remembered_room();
     test_a_click_on_an_object_shows_what_is_retained();
     test_live_or_only_remembered_follows_the_live_graph();

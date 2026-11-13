@@ -2,6 +2,8 @@
 // shows that text as the robot's reply instead of asking the model to word it. Live 2026-11-02: imagine_view said "I do not
 // know which room I am in, so I cannot imagine it here." and the model's follow-up invented "I do not have a way to imagine
 // things". The mark is set by the tool at its refusal site (never found by matching English in the result).
+// Also an answer about REMEMBERED objects (where_is / find_objects with long-term memory, ChatSession::said_as_is): live
+// 2026-11-10 the model's follow-up moved chair_39 to another room and dropped "it may have moved".
 #pragma once
 
 #include <optional>
