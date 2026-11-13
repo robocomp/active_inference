@@ -35,6 +35,8 @@
 
 #include "../../common/config_report/config_read.h"   // rc::cfg::Reader (SHARED)
 #include "../../common/room_resolve/room_resolve.h"   // rc::room::current_room (proto-aware, deterministic)
+#include "../../common/room_resolve/room_follow.h"        // rc::room::read_outline / drop_left_behind
+#include "../../common/room_resolve/room_containment.h"   // rc::room::outline_usable
 
 #include "../../common/diag_log/rotating_csv.h"   // keep the previous run instead of wiping it
 
@@ -345,27 +347,32 @@ void SpecificWorker::initialize()
 
 // ─── Main compute loop ───────────────────────────────────────────────────────────────────────────
 
+// The WORKING room's outline (shared reader) → the fitter (wall-flush factor, wall line-of-sight) and the birth rule.
+// ★Always that room's own: cleared when it has none, so births WAIT instead of using the room just left.
 void SpecificWorker::refresh_room_geometry()
 {
     if (not G or room_node_id_ == 0) return;
-    const auto room = G->get_node(room_node_id_);
-    if (not room.has_value()) return;
-    const auto px = G->get_attrib_by_name<delimiting_polygon_x_att>(room.value());
-    const auto py = G->get_attrib_by_name<delimiting_polygon_y_att>(room.value());
-    if (not px.has_value() or not py.has_value()) return;
-    const auto& xs = px->get(); const auto& ys = py->get();
-    const std::size_t n = std::min(xs.size(), ys.size());
-    if (n < 2) return;
-
-    std::vector<Eigen::Vector2f> poly;
-    poly.reserve(n);
+    auto poly = rc::room::read_outline(*G, room_node_id_);
+    if (not rc::room::outline_usable(poly)) poly.clear();
     Eigen::Vector2f centroid = Eigen::Vector2f::Zero();
-    for (std::size_t i = 0; i < n; ++i)
+    float xmin = 1e9f, xmax = -1e9f, ymin = 1e9f, ymax = -1e9f;
+    for (const auto& v : poly)
     {
-        poly.emplace_back(xs[i], ys[i]);
-        centroid += poly.back();
+        centroid += v;
+        xmin = std::min(xmin, v.x()); xmax = std::max(xmax, v.x());
+        ymin = std::min(ymin, v.y()); ymax = std::max(ymax, v.y());
     }
-    centroid /= static_cast<float>(n);
+    if (not poly.empty()) centroid /= static_cast<float>(poly.size());
+    if (room_node_id_ != outline_room_ or poly.size() != outline_n_)
+    {
+        if (poly.empty())
+            std::print("refrigerator_concept: [room] room {} has NO usable outline — births WAIT\n", room_node_id_);
+        else
+            std::print("refrigerator_concept: [room] room {} outline {} verts, x∈[{:.2f},{:.2f}] y∈[{:.2f},{:.2f}]\n",
+                       room_node_id_, poly.size(), xmin, xmax, ymin, ymax);
+        outline_room_ = room_node_id_;
+        outline_n_    = poly.size();
+    }
     fitter_->set_room_geometry(centroid, std::move(poly));
 }
 
@@ -402,13 +409,9 @@ void SpecificWorker::compute()
     if (not G or not rt_api_)
         return;
 
-    // Refresh room node id if not yet found
-    if (room_node_id_ == 0)
-    {
-        const auto room = rc::room::current_room(*G);
-        if (not room.has_value()) return;
-        room_node_id_ = *room;
-    }
+    // The room this agent works in follows the robot, every cycle (was: latched at the first room). No room yet: wait.
+    room_node_id_ = rc::room::follow_current_room(room_node_id_, rc::room::current_room(*G));
+    if (room_node_id_ == 0) return;
 
     // Push the room polygon + interior centroid into the fitter (wall-flush factor). Cheap; room_concept refines it.
     refresh_room_geometry();
@@ -476,6 +479,13 @@ void SpecificWorker::compute()
     fitter_->update_ego_motion();
 
     // Generic DSR type "object"; the class filter is the "refrigerator_" name prefix + object_subtype attr.
+    // The robot left a refrigerator's room: fitting it here would corrupt the pose ltom remembers; ltom offers it back.
+    rc::room::drop_left_behind(*G, "refrigerator", room_node_id_, [this](std::uint64_t id)
+    {
+        if (auto it = fitter_->instances().find(id); it != fitter_->instances().end())
+            it->second.affordance.remove();
+        fitter_->forget_node(id);
+    });
     const auto object_nodes = G->get_nodes_by_type("object");
     for (const auto& node : object_nodes)
         if (node.name().starts_with("refrigerator"))

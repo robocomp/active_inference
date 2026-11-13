@@ -122,6 +122,9 @@ private:
     // Push the room geometry (wall polygon + interior centroid) into the fitter each cycle for the wall-flush
     // factor (a fridge's back face rests against a room wall). Cheap read of the room node's delimiting polygon.
     void refresh_room_geometry();
+    uint64_t    outline_room_ = 0;      // last (room, outline size) logged — log on change
+    std::size_t outline_n_    = 0;
+    bool        births_held_  = false;  // WAIT episode (no outline) — logged on change
     void process_refrigerator_node(const DSR::Node& node);
     void publish_refrigerator_cycle(rc::RefrigeratorInstance& inst,
                              const DSR::Node& node,

@@ -114,6 +114,12 @@ Owner 11-11: continue; WAIT rule stands; cause to be pinned live (outline bbox +
 6. **New existence term: out-of-room** (was: none), `HoodModel.ExistenceOutOfRoomGain = 1.5`, tolerance = belief depth / 2,
    per evidence cycle at p_detect = 1, skipping the sensor channels that cycle.
 
+### Task 8 — refrigerator_concept
+
+Same structure as hood (hood was cloned from it); same six differences as Task 7, with these tolerances:
+birth = `0.5 · AI2PriorFootprintM` (0.30 m; the agent has no separate depth prior), existence = half the belief's short
+side `0.5·min(w,h)`. Key `RefrigeratorModel.ExistenceOutOfRoomGain = 1.5`. Outline now needs ≥ 3 vertices (was ≥ 2).
+
 ## Rulings
 
 (none yet)

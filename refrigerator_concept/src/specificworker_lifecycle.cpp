@@ -30,6 +30,7 @@
 #include "../../common/recall_match/recall_candidates.h"   // ltom recall: resurrect a remembered refrigerator at birth
 #include <set>
 #include "../../common/room_resolve/room_resolve.h"   // rc::room::current_room_frame — the room is room_1/room_2/…, never the literal "room"
+#include "../../common/room_resolve/room_containment.h"   // rc::room::birth_verdict
 
 // ─── Instance lifecycle: merge / tracker / birth ─────────────────────────────────────────────────
 
@@ -284,7 +285,13 @@ void SpecificWorker::run_instance_tracker()
     last_refrigerator_dets_xy_.clear();
     for (const auto& d : dets) last_refrigerator_dets_xy_.push_back(d.xy);
 
-    const auto res = tracker_.update(tracks, dets);
+    // WAIT: no usable outline for the working room ⇒ hold births (candidates keep their evidence; InstanceTracker).
+    const bool hold = not fitter_->has_room_polygon();
+    if (hold != births_held_)
+        std::print("refrigerator_concept: [tracker] births {} — room {} {}\n", hold ? "HELD" : "released", room_node_id_,
+                   hold ? "has no outline yet" : "outline arrived");
+    births_held_ = hold;
+    const auto res = tracker_.update(tracks, dets, hold);
 
     // ── BIRTH FRAGMENT: bank this observation's cloud against the candidate it fed ────────────────────
     // Runs BEFORE the birth loop below, so a candidate promoted this cycle has the promoting frame in its
@@ -372,6 +379,17 @@ void SpecificWorker::run_instance_tracker()
                            burst->span_ms(), cfg_.birth_frag_delta_ms);
                 burst.reset();
             }
+        }
+
+        // Room containment at BIRTH (shared rule). A refrigerator stands against a wall: tolerance = half its prior
+        // footprint (a physical dimension). After the burst take, so a refused candidate's banked cloud is released.
+        {
+            const auto verdict = rc::room::birth_verdict(fitter_->room_polygon(), Eigen::Vector2f(c.x(), c.y()),
+                                                         0.5f * cfg_.ai2_prior_footprint_m);
+            std::print("refrigerator_concept: [tracker] birth at ({:.2f},{:.2f}) room {} — {}\n", c.x(), c.y(), room_node_id_,
+                       verdict == rc::room::BirthVerdict::Admit ? "inside"
+                     : verdict == rc::room::BirthVerdict::Suppress ? "OUTSIDE — suppressed" : "no outline — deferred");
+            if (verdict != rc::room::BirthVerdict::Admit) continue;
         }
 
         // ADMISSION on the whole burst. The same plausibility already applied per-frame as an evidence
