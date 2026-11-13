@@ -50,7 +50,9 @@ enum class LeafState { Running, Succeeded, Failed };
 struct LeafStatus
 {
     LeafState state = LeafState::Running;
-    std::string detail{};   ///< Failed: the outcome word (unreachable, door_wont_open, …)
+    std::string detail{};   ///< Failed: the outcome word (unreachable, door_wont_open, …). Running: why the step is
+                            ///< WAITING, in words for the person ("no door I know of in room_1 leads to room_3 yet");
+                            ///< "" = it is making progress. Shown in progress() and the snapshot (StepView::note).
 };
 
 /// What the interpreter needs from the robot. Leaves are the non-instant ops (cross, open, go_to, explore, wait, move);
@@ -93,6 +95,8 @@ public:
         std::uint64_t t0 = 0, t1 = 0;   ///< first start · end (ms, the caller's clock)
         int attempt = 0;                ///< 1 = the first try
         int iteration = 0;              ///< repeat: iterations finished
+        std::string note;               ///< running and waiting: why (LeafStatus::detail); "" otherwise
+        std::string after;              ///< a retry: the outcome the previous attempt failed with; "" on attempt 1
     };
 
     /// One step attempt (or one repeat iteration) starting (state Running) or ending (its final state), for the
@@ -238,7 +242,8 @@ public:
         const Run& leaf = *path.back();
         std::vector<std::string> notes;
         if (leaf.step->on_fail.kind == OnFail::Kind::Retry)
-            notes.push_back(std::format("attempt {}/{}", leaf.attempt, leaf.step->on_fail.retries + 1));
+            notes.push_back(std::format("attempt {}/{}{}", leaf.attempt, leaf.step->on_fail.retries + 1,
+                                        leaf.last_failure.empty() ? "" : " after " + leaf.last_failure));
         for (const Run* r : path | std::views::reverse)
             if (r->step->op == "repeat")
             {
@@ -246,6 +251,7 @@ public:
                 notes.push_back(times.has_value() ? std::format("iteration {}/{}", r->iteration + 1, *times)
                                                   : std::format("iteration {}", r->iteration + 1));
             }
+        if (not leaf.note.empty()) notes.push_back("waiting: " + leaf.note);
         std::string joined;
         for (const auto& n : notes) joined += (joined.empty() ? " (" : ", ") + n;
         if (not joined.empty()) joined += ")";
@@ -261,7 +267,8 @@ public:
             for (const auto& k : r.kids)
             {
                 out.push_back({.id = k.step->id, .op = k.step->op, .state = k.state, .outcome = k.outcome, .t0 = k.t0,
-                               .t1 = k.t1, .attempt = k.attempt, .iteration = k.iteration});
+                               .t1 = k.t1, .attempt = k.attempt, .iteration = k.iteration, .note = k.note,
+                               .after = k.last_failure});
                 self(k);
             }
         };
@@ -299,6 +306,8 @@ private:
         std::size_t cur = 0;
         std::uint64_t iteration_tick = 0;
         bool started = false;   ///< leaf: the host has it
+        std::string note{};          ///< leaf, running: why it waits (LeafStatus::detail; '|' replaced, bt_state is '|'-split)
+        std::string last_failure{};  ///< the outcome the previous attempt failed with (kept across a retry's reset)
         Step resolved{};        ///< leaf: what the host was given
         std::vector<Run> kids{};
     };
@@ -360,6 +369,8 @@ private:
         r.attempt = r.iteration = 0;
         r.cur = 0;
         r.started = false;
+        r.note.clear();
+        r.last_failure.clear();
         for (auto& k : r.kids) reset(k);
     }
 
@@ -433,9 +444,11 @@ private:
             close(r, now);   // this attempt ends Failed; the next one opens in advance()
             const int attempt = r.attempt;
             const std::uint64_t t0 = r.t0;
+            std::string why = r.outcome;
             reset(r);
             r.attempt = attempt;
             r.t0 = t0;
+            r.last_failure = std::move(why);
             advance(r, now);   // bounded: each pass spends an attempt
             return;
         }
@@ -541,6 +554,8 @@ private:
             return finish_leaf(r, now, "budget");
         }
         const LeafStatus st = host_.poll(r.resolved);
+        r.note = st.state == LeafState::Running ? st.detail : std::string{};
+        std::ranges::replace(r.note, '|', '/');
         if (st.state == LeafState::Failed) return fail(r, now, st.detail.empty() ? "failed" : st.detail, s.id);
         if (st.state == LeafState::Succeeded)
         {
