@@ -212,6 +212,9 @@ private:
     [[nodiscard]] QString planner_state() const;   ///< state_message() + the `ways from here` line (planner only)
     /// After a tool round of the model: re-ask to fix a failed draw, or one follow-up when it said nothing / saw a picture.
     void after_tool_round(bool had_words, bool image);
+    /// The words just shown claim a mission (planned / starts on yes / started) that has no card and sent nothing:
+    /// ask the model once more, then say so plainly (mission_plan.h check_mission_claim).
+    void check_claimed_mission(const QString& content);
     [[nodiscard]] bool name_exists(std::string_view name) const;   ///< a node of the live graph or a remembered passage
     /// An object ltom remembers and the live graph does NOT have now: its last pose and the steps that bring it into view.
     [[nodiscard]] std::optional<rc::chat::RememberedPlace> remembered_place(std::string_view name) const;
@@ -305,6 +308,10 @@ private:
     bool canvas_savable_ = false;
     int draw_repairs_ = 0;          ///< model re-asks after a failed draw, this user message (cap kMaxDrawRepairs)
     int lost_answers_ = 0;          ///< model answers this user message that came back empty (one is re-asked)
+    // A mission is never claimed without a card or a sent command (mission_plan.h check_mission_claim); per person turn:
+    bool followup_plan_taken_ = false;   ///< a follow-up's plan_mission ran (followup_plan_runs: at most once)
+    bool claim_repaired_ = false;        ///< the model was asked once more after claiming a mission it did not plan
+    bool sent_this_turn_ = false;        ///< a command reached the controller since the person's message
     bool draw_failed_ = false;      ///< a draw in the current tool round failed
     rc::chat::VerbatimReply verbatim_;   ///< refusals of this tool round: the reply is these texts, not a model paraphrase
     int round_calls_ = 0;                ///< tool calls of the current round (all_refused compares against it)

@@ -403,6 +403,7 @@ void ChatSession::on_user_text(const QString& text)
     tick_digest();   // decide on the freshest facts
     draw_repairs_ = 0;
     lost_answers_ = 0;
+    followup_plan_taken_ = claim_repaired_ = sent_this_turn_ = false;
 
     // 1. stop — at once, without the model, whatever else is going on.
     if (is_stop(t))
@@ -1069,6 +1070,7 @@ void ChatSession::ask_model(bool followup, bool offer_tools)
                 if (not content.isEmpty())
                 {
                     if (not turn_.followup) push_history({{"role", "assistant"}, {"content", content}});
+                    if (not wake_turn_) check_claimed_mission(content);
                 }
                 // Tokens came but neither words nor a call: ollama dropped a tool call it could not parse (a draw script
                 // with 'Today\'s' in it is not JSON, eval 2026-10-19). Ask once more; then say so instead of silence.
@@ -1080,9 +1082,22 @@ void ChatSession::ask_model(bool followup, bool offer_tools)
             // Its words are shown; with none, ask once more without the tools, as before (a cache miss, rare).
             if (turn_.followup)
             {
-                log_.write("followup_call_dropped", QJsonObject{{"tool_calls", turn_.tool_calls}});
-                if (content.isEmpty() and turn_.offer_tools) ask_model(true, false);
-                return;
+                std::vector<std::string> names;
+                for (const auto& c : turn_.tool_calls)
+                    names.push_back(c.toObject().value("function").toObject().value("name").toString().toStdString());
+                // plan_mission only PROPOSES a card (the person still says yes): it runs, once per message (chat_e2e14:
+                // dropped here while the model said "It will start when you say yes" — no card existed).
+                if (followup_plan_runs(names, pending_mission_.has_value() or planner_.has_value(), followup_plan_taken_))
+                {
+                    followup_plan_taken_ = true;
+                    log_.write("followup_plan_taken", QJsonObject{{"tool_calls", turn_.tool_calls}});
+                }
+                else
+                {
+                    log_.write("followup_call_dropped", QJsonObject{{"tool_calls", turn_.tool_calls}});
+                    if (content.isEmpty() and turn_.offer_tools) ask_model(true, false);
+                    return;
+                }
             }
             push_history({{"role", "assistant"}, {"content", content}, {"tool_calls", turn_.tool_calls}});
             draw_failed_ = false;
@@ -1128,6 +1143,28 @@ void ChatSession::ask_model(bool followup, bool offer_tools)
     });
     if (not ok) { window_->append_system("The model is busy."); return; }
     window_->set_busy(true);
+}
+
+void ChatSession::check_claimed_mission(const QString& content)
+{
+    const auto verdict = check_mission_claim(content.toStdString(), pending_mission_.has_value() or planner_.has_value(),
+                                             sent_this_turn_, claim_repaired_);
+    if (verdict == MissionClaim::Fine) return;
+    if (verdict == MissionClaim::Repair)
+    {
+        // Once: the model is told what is true and gets the tools back (chat_e2e13: "I have started the mission to cross
+        // door_24" with nothing sent; the person's "yes" then had no card to answer).
+        claim_repaired_ = true;
+        log_.write("mission_claim_repair", QJsonObject{{"said", content}});
+        push_history({{"role", "tool"}, {"tool_name", "mission_check"},
+                      {"content", "No plan_mission was called and no mission card is shown: nothing was planned and nothing "
+                                  "will move. If the person wants this mission, call plan_mission now; otherwise tell "
+                                  "them plainly that no mission was planned."}});
+        ask_model(false);
+        return;
+    }
+    log_.write("mission_claim_corrected", QJsonObject{{"said", content}});
+    window_->append_system(QStringLiteral("(no mission was planned, so nothing will move; please ask again)"));
 }
 
 void ChatSession::after_tool_round(bool had_words, bool image)
@@ -2600,6 +2637,7 @@ bool ChatSession::send_command(const std::string& command, const char* origin)
     }
     sent_command_ = command;
     sent_stamp_ = *stamp;
+    sent_this_turn_ = true;
     if (command.starts_with("move ") or command.starts_with("turn ")) last_relative_ = command;
     seen_state_ = "waiting";
     seen_step_.clear();
@@ -2763,6 +2801,7 @@ void ChatSession::drain_wakes()
         wake_turn_ = false;
         draw_repairs_ = 0;
         lost_answers_ = 0;
+        followup_plan_taken_ = claim_repaired_ = sent_this_turn_ = false;
         if (not ollama_ok_) ping_llm();
         push_history({{"role", "user"}, {"content", q(turn->text)}});
         ask_model(false);

@@ -451,6 +451,47 @@ struct IdleTurn
     return std::nullopt;
 }
 
+// ── A mission is never claimed without a card or a sent command (chat_e2e13/14, 2026-11-12/13) ─────────────────────────
+// With a long history the 8–12b model says "I will plan a mission…", "It will start when you say yes" or even "I have
+// started the mission to cross door_24" without calling plan_mission, or calls it in a follow-up (where calls are
+// dropped): the person says yes to a card that does not exist and the robot never moves.
+
+/// A follow-up asked for plan_mission: it only PROPOSES (a card the person must still say yes to), so the reason
+/// follow-up calls are dropped ("a second command the person never gave") does not hold. Runs when the call is
+/// plan_mission alone, no card or plan is already there, and none ran this way since the person's message.
+[[nodiscard]] inline bool followup_plan_runs(const std::vector<std::string>& tool_names, bool card_or_plan_exists,
+                                             bool taken_this_turn)
+{
+    return not tool_names.empty() and not card_or_plan_exists and not taken_this_turn
+           and std::ranges::all_of(tool_names, [](const std::string& n) { return n == "plan_mission"; });
+}
+
+/// The reply tells the person a mission was (or will be) planned or started. ⚠ A phrase list, English only: the claim
+/// is in the model's free words and there is no structured signal to read instead; a miss only leaves things as they
+/// were before this check (the person sees no card), a false hit costs one extra model turn.
+[[nodiscard]] inline bool claims_mission(std::string_view reply)
+{
+    std::string low(reply);
+    std::ranges::transform(low, low.begin(), [](unsigned char c) { return char(std::tolower(c)); });
+    static constexpr std::string_view kClaims[] = {
+        "say yes", "your yes", "your confirmation", "i have planned", "i've planned", "planned a mission",
+        "planned the mission", "i have started", "i've started", "started the mission", "mission has started",
+        "i will plan", "i'll plan", "i am planning", "i'm planning"};
+    return std::ranges::any_of(kClaims, [&](std::string_view c) { return low.find(c) != std::string::npos; });
+}
+
+enum class MissionClaim { Fine, Repair, Correct };
+
+/// What to do with a reply: Fine (no claim, or a card is shown / a command was sent this turn: the words are true),
+/// Repair (ask the model once more: call plan_mission or say none was planned), Correct (already repaired: tell the
+/// person plainly that nothing was planned and nothing will move).
+[[nodiscard]] inline MissionClaim check_mission_claim(std::string_view reply, bool card_shown, bool sent_this_turn,
+                                                      bool repaired)
+{
+    if (card_shown or sent_this_turn or not claims_mission(reply)) return MissionClaim::Fine;
+    return repaired ? MissionClaim::Correct : MissionClaim::Repair;
+}
+
 /// A wake goes to the model as a user-role message that says it is NOT the person speaking.
 [[nodiscard]] inline std::string wake_message(std::string_view note)
 {

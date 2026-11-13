@@ -468,6 +468,34 @@ int main()
         CHECK(r.contains("did not happen"));
     }
 
+    // ── A: a mission is never claimed without a card or a sent command (chat_e2e13/14: "It will start when you say
+    //    yes" with no card; "I have started the mission to cross door_24" with nothing sent) ─────────────────────────
+    {
+        using V = std::vector<std::string>;
+        CHECK(followup_plan_runs(V{"plan_mission"}, false, false));
+        CHECK(not followup_plan_runs(V{"plan_mission"}, true, false));          // a card (or a plan) is already there
+        CHECK(not followup_plan_runs(V{"plan_mission"}, false, true));          // once per message
+        CHECK(not followup_plan_runs(V{"plan_mission", "go_to"}, false, false)); // anything else in it: dropped as before
+        CHECK(not followup_plan_runs(V{"move_relative"}, false, false));
+        CHECK(not followup_plan_runs(V{}, false, false));
+
+        CHECK(claims_mission("I have planned a mission to go to room_3 by crossing passage_2. It will start when you say yes."));
+        CHECK(claims_mission("I have started the mission to cross door_24. I am currently turning to face it."));
+        CHECK(claims_mission("I will plan a mission to cross door_24 for you."));
+        CHECK(claims_mission("I have not started the mission yet. I am waiting for your confirmation to begin the plan."));
+        CHECK(not claims_mission("Your name is Pablo."));
+        CHECK(not claims_mission("I see a white table with a green bottle on it."));
+        CHECK(not claims_mission("The mission \"cross door_22\" failed: the door is shut."));   // a report, not a claim
+
+        using MC = MissionClaim;
+        const std::string lie = "It will start when you say yes.";
+        CHECK(check_mission_claim(lie, false, false, false) == MC::Repair);
+        CHECK(check_mission_claim(lie, false, false, true) == MC::Correct);   // repaired once already: say it plainly
+        CHECK(check_mission_claim(lie, true, false, false) == MC::Fine);      // a card is shown: the words are true
+        CHECK(check_mission_claim(lie, false, true, false) == MC::Fine);      // a command was sent this turn
+        CHECK(check_mission_claim("Hello Pablo!", false, false, false) == MC::Fine);
+    }
+
     std::println("test_mission_plan: {} checks passed{}", checks - failures, failures ? " — FAILURES" : "");
     return failures ? 1 : 0;
 }
