@@ -6,7 +6,9 @@
  *   mission_progress       {"serial":3, "source":"remote", "title":…, "status":"in_progress", "t0":…, "t1":0,
  *                           "line":"<Interpreter::progress()>",
  *                           "steps":[{"id":"2.1","op":"cross","state":"running","outcome":"","attempt":1,
- *                                     "iteration":0,"t0":…,"t1":0}, …]}          — a snapshot, pre-order
+ *                                     "iteration":0,"t0":…,"t1":0,"note":"","after":""}, …]}   — a snapshot, pre-order
+ *     note: why a running step is WAITING, in words for the person (Interpreter LeafStatus::detail); after: on a retry,
+ *     the outcome the previous attempt failed with. Both "" otherwise; a reader older than them ignores them.
  *
  * The snapshot is what chat's plan view animates (it already holds the IR, from current_intention, and matches steps
  * by id). What EM records is the controller's journal (common/episodic/em_journal.h), not this.
@@ -103,7 +105,9 @@ inline std::expected<Interpreter::StepState, std::string> state(const QJsonValue
                                  {"attempt", v.attempt},
                                  {"iteration", v.iteration},
                                  {"t0", double(v.t0)},
-                                 {"t1", double(v.t1)}});
+                                 {"t1", double(v.t1)},
+                                 {"note", q(v.note)},
+                                 {"after", q(v.after)}});
     const auto [t0, t1] = in.span();
     const bool idle = in.state() == Interpreter::State::Idle;
     return compact(QJsonObject{{"serial", double(in.serial())},
@@ -136,7 +140,7 @@ inline std::expected<Interpreter::StepState, std::string> state(const QJsonValue
         if (not st.has_value()) return std::unexpected(st.error());
         p.steps.push_back({.id = s(k["id"]), .op = s(k["op"]), .state = *st, .outcome = s(k["outcome"]),
                            .t0 = ms(k["t0"]), .t1 = ms(k["t1"]), .attempt = k["attempt"].toInt(),
-                           .iteration = k["iteration"].toInt()});
+                           .iteration = k["iteration"].toInt(), .note = s(k["note"]), .after = s(k["after"])});
     }
     return p;
 }

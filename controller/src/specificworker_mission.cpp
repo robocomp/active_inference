@@ -279,7 +279,9 @@ LeafStatus SpecificWorker::MissionHost::poll(const rc::mission::Step &leaf)
 		const auto door = w_.resolve_door(*leaf.ref("door"));
 		switch (relation_hold_.check(door.has_value() ? std::optional<std::string>(*door) : std::nullopt, hold_clock_ms()))
 		{
-			case rc::RelationHold::Verdict::Waiting: return {};
+			// Waiting: say why (the person sees it once in the chat, and the model reads it in the mission line).
+			case rc::RelationHold::Verdict::Waiting:
+				return {.detail = rc::relation_wait_note(*leaf.ref("door"), w_.world_model_.graph_state().room_name, op != "close")};
 			case rc::RelationHold::Verdict::TimedOut: return {.state = LeafState::Failed, .detail = "door_unresolved"};
 			case rc::RelationHold::Verdict::Ready:
 				if (auto refused = start_now(leaf); refused.has_value()) return {.state = LeafState::Failed, .detail = *refused};

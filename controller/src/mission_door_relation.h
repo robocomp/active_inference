@@ -75,6 +75,22 @@ enum class DoorRelationKind { None, Room, New };
     return best != nullptr ? std::optional<std::string>(best->name) : std::nullopt;
 }
 
+/// Why a step held on a relation waits, in words for the person: it rides on the mission progress (LeafStatus::detail →
+/// the snapshot's step `note`) and the chat shows it once (chat 2026-11-12: `cross room_3` explored room_1 for minutes
+/// and the person was told only "started"). `here` = the current room ("" = not known); `exploring` = the robot explores
+/// meanwhile (cross/open) rather than holding (close). "" for a ref that is not a relation.
+[[nodiscard]] inline std::string relation_wait_note(const mission::Ref &r, std::string_view here, bool exploring)
+{
+    const auto kind = relation_of(r);
+    if (kind == DoorRelationKind::None) return {};
+    const std::string room = here.empty() ? std::string("this room") : std::string(here);
+    const std::string room2 = here.empty() ? std::string("the room") : std::string(here);
+    const std::string what = kind == DoorRelationKind::New ? "no unexplored door found in " + room + " yet"
+                                                           : "no door I know of in " + room + " leads to " + r.name + " yet";
+    if (not exploring) return what + "; holding here";
+    return what + "; exploring " + room2 + (kind == DoorRelationKind::New ? " to find one" : " to find it");
+}
+
 enum class RoomEvent { None, Renamed, Changed };
 
 /// The room the robot is in, tracked by node id. The id says WHICH room; the name is owned by room_concept and can change

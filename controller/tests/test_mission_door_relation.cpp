@@ -162,6 +162,14 @@ int main()
     h.hold(cross, 0);
     CHECK(h.check(std::nullopt, 10'000) == RelationHold::Verdict::TimedOut);
 
+    // ── why a held step waits, in words for the person (chat 2026-11-12: `cross room_3` explored for minutes, unexplained) ──
+    CHECK(relation_wait_note(node("room_3"), "room_1", true) ==
+          "no door I know of in room_1 leads to room_3 yet; exploring room_1 to find it");
+    CHECK(relation_wait_note(node("new"), "room_2", true) == "no unexplored door found in room_2 yet; exploring room_2 to find one");
+    CHECK(relation_wait_note(node("room_1"), "room_2", false) == "no door I know of in room_2 leads to room_1 yet; holding here");
+    CHECK(relation_wait_note(node("room_3"), "", true) == "no door I know of in this room leads to room_3 yet; exploring the room to find it");
+    CHECK(relation_wait_note(node("door_4"), "room_1", true).empty());   // a door by name never holds
+
     std::println("{}", failures == 0 ? "ALL PASS" : "FAILURES");
     return failures == 0 ? 0 : 1;
 }
