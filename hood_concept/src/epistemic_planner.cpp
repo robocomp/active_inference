@@ -157,11 +157,14 @@ EpistemicProposal EpistemicPlanner::compute(const HoodBelief& belief, float lat_
     // is REPAIRED, not rejected. Passing it turns "the target is behind the wall" into "that face is not a
     // viewpoint", which is a feasibility fact, not a preference.
     // The shared core (common/nbv/countable_planner.h): plan_faces, REFUSE on no usable face (the raw argmax would
-    // stand in the wall and the controller would repair it to the floor at the object), scale the winner by the
-    // useful fraction of its raw information (adequacy gap to Σ*), refuse a non-finite result.
+    // stand in the wall and the controller would repair it to the floor at the object), refuse a non-finite result.
+    // ★NO CONSUMER ⇒ NO EPISTEMIC BID (owner 2026-11-13). hood publishes no σ* (hood_dof.h), so useful = 0: the pose
+    // and per-face ranking are still planned and published, but the scalar gain is 0. The guarded useful_fraction
+    // would make it UNBOUNDED (5–15 nats, never falling to 0) and out-bid every agent whose gain is gap-bounded.
+    // This keeps the pre-Phase-0 value (which was 0 by an unguarded gap). What an object with no consumer should
+    // bid is an open question, to settle before the mirror agent (also wall-mounted, also no consumer).
     const rc::nbv::CountableInputs in{sensor, kRobotRadiusM, obstacles, room_polygon};
-    const auto useful = [&](float raw)
-    { return rc::nbv::useful_fraction(kHoodDofs, [&](std::size_t j) { return S(j, j); }, raw); };
+    const auto useful = [](float) { return 0.0f; };
     const auto res = rc::nbv::plan_countable(target, in, raw_gain, useful);
     if (res.refused_no_usable_face)
     {

@@ -20,16 +20,8 @@ namespace
 {
 struct Case { std::string name; HoodBelief belief; std::vector<nbv::Obstacle> obstacles; std::vector<Eigen::Vector2f> room; };
 
-// ★EVERY valid state differs in epistemic_gain ONLY, and for one reason: hood publishes NO σ* (kHoodDofs all -1), and
-// the pre-task planner applied the adequacy-gap bound WITHOUT the any_sigma_star guard ⇒ gap 0 ⇒ gain ≡ 0, so a hood
-// never bid for a viewpoint visit. The core applies the guard (hood_dof.h states that intent) ⇒ unbounded gain. For
-// these states the harness still requires every OTHER field identical and the legacy gain to be exactly 0.
-constexpr const char* kGainGuard = "legacy gain 0 (unguarded adequacy gap, no sigma*); new = unbounded (guarded) — owner ruling";
-const std::vector<std::pair<int, const char*>> kExpectedDifferences = {
-    {0, kGainGuard}, {1, kGainGuard}, {2, kGainGuard}, {3, kGainGuard}, {4, kGainGuard}, {5, kGainGuard},
-    {6, kGainGuard}, {7, kGainGuard}, {8, kGainGuard}, {9, kGainGuard}, {10, kGainGuard}, {11, kGainGuard},
-    {12, kGainGuard}, {13, kGainGuard}, {14, kGainGuard}, {15, kGainGuard}, {16, kGainGuard}, {17, kGainGuard},
-    {18, kGainGuard}, {19, kGainGuard}, {20, kGainGuard}, {21, kGainGuard}, {22, kGainGuard}};
+// Empty: hood passes useful = 0 (no consumer ⇒ no bid), which reproduces the pre-task gain of 0 exactly.
+const std::vector<std::pair<int, const char*>> kExpectedDifferences = {};
 constexpr float kExtent = 0.50f;   // the hood's vertical extent (HoodConcept default)
 
 std::vector<Eigen::Vector2f> rect(float x0, float x1, float y0, float y1) { return {{x0, y0}, {x1, y0}, {x1, y1}, {x0, y1}}; }
@@ -165,18 +157,6 @@ int main()
         valid += a.valid ? 1 : 0;
         const char* reason = nullptr;
         for (const auto& [k, why] : kExpectedDifferences) if (k == i) reason = why;
-        if (reason != nullptr and not same)
-        {   // the listed difference is the GAIN only: re-compare with the new gain substituted, and legacy gain == 0
-            auto b2 = b; b2.epistemic_gain = a.epistemic_gain;
-            bool rest = a.valid == b2.valid and a.epistemic_gain == 0.0f and b.epistemic_gain > 0.0f
-                and near(a.epistemic_target_x_m, b2.epistemic_target_x_m, 1e-4f) and near(a.epistemic_target_y_m, b2.epistemic_target_y_m, 1e-4f)
-                and near(a.epistemic_target_yaw_rad, b2.epistemic_target_yaw_rad, 1e-4f)
-                and near(a.standoff_min_m, b2.standoff_min_m, 1e-5f) and near(a.standoff_max_m, b2.standoff_max_m, 1e-5f)
-                and near(a.framing_fill, b2.framing_fill, 1e-6f) and near(a.chosen_standoff_m, b2.chosen_standoff_m, 1e-5f)
-                and near(a.chosen_p_detect, b2.chosen_p_detect, 1e-6f) and near(a.sensor_vfov_rad, b2.sensor_vfov_rad, 1e-7f);
-            for (int k = 0; k < 4; ++k) rest = rest and near(a.face_gains[k], b2.face_gains[k], 1e-5f * std::max(1.0f, std::abs(a.face_gains[k])));
-            if (not rest) reason = nullptr;   // something OTHER than the gain changed ⇒ a real, unlisted difference
-        }
         std::printf("  [%2d] %-40s %s%s\n", i, c.name.c_str(), same ? "same" : (reason ? "EXPECTED: " : "DIFF"), reason ? reason : "");
         if (not same)
             std::printf("       legacy v=%d (%.4f,%.4f,%.4f) g=%.6f | new v=%d (%.4f,%.4f,%.4f) g=%.6f\n",

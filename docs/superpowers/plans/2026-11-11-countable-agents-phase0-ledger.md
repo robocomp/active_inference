@@ -158,7 +158,7 @@ orbit; near a wall ×3; chair off the +x face ×2; wall + obstacle; boxed in) �
 identical (pose, gain, face_gains, standoff band, framing, chosen_*, vfov, σ*). Two deviations from the plan text:
 1. **Table keeps its own `EpistemicProposal` struct** (not `using = CountableProposal`): it carries the object-relative
    constraint the controller reads (face_gains, standoff band, framing, chosen_*, σ*). The core's pose/gain fill it.
-2. **⚠ OPEN FOR THE OWNER — two adequacy bounds exist.** Table caps the expected gain at the gap:
+2. **(RULED: table moves to the expectation form) — two adequacy bounds exist.** Table caps the expected gain at the gap:
    `min(p·raw, gap)`. Chair's `useful_fraction` (now the core's) scales it: `p·raw · min(raw, gap)/raw`. They agree only
    when p = 1 or the gap does not bind. Table passes `useful = 1` and keeps its own `min` after the core, so nothing
    changed; unifying is a behaviour change and a modelling choice (cap the EXPECTED information at what is still
@@ -179,7 +179,7 @@ stand-off does not fit in the 4 m room the table harness used (all three refused
 hoods flush against a wall), 23 valid. Poses, face gains, stand-off band, framing and chosen_* are identical on every
 state. **One behaviour difference, on every valid state: `epistemic_gain`.**
 
-**Q1 — the hood's epistemic gain was ALWAYS 0 before this task (latent defect, now fixed by the core).** hood publishes no
+**Q1 (RULED: keep 0, see Rulings) — the hood's epistemic gain was ALWAYS 0 before this task (latent defect, now fixed by the core).** hood publishes no
 σ* (`kHoodDofs` all -1, deliberately: no consumer has a demand). The old planner bounded the gain by the adequacy gap
 WITHOUT chair's `any_sigma_star` guard; with no σ* the gap is an empty sum = 0, so gain = p·raw · min(raw, 0)/raw = 0
 on every state — a hood never bid for a viewpoint visit. `hood_dof.h` says -1 was meant to be read by
@@ -189,7 +189,7 @@ harness), like chair. Live consequence: hoods will now attract epistemic visits 
 still requires every other field identical and the legacy gain exactly 0). **Owner: keep the fix, or keep hood at 0
 (e.g. pass `useful = 0` until a consumer states a σ*)?**
 
-**Q2 — G3: the model does NOT stand further back for a hood than for a chair-sized target.** Same wall spot, same
+**Q2 (RULED: accepted) — G3: the model does NOT stand further back for a hood than for a chair-sized target.** Same wall spot, same
 sensor (hfov 70°, vfov 55°, camera 1.2 m), constant raw gain: hood → face −y, stand-off 1.55 m, 1.80 m from centre,
 0° off the wall normal; chair-sized (0.6×0.52, floor to 1.25 m) → face −y, stand-off 2.61 m, 2.87 m, 0°. Both are
 square-on; the hood is viewed CLOSER. Why: the vertical framing binds on the object's span relative to the camera
@@ -200,4 +200,12 @@ was added. Same before and after the move (the pose is identical).
 
 ## Rulings
 
-(none yet)
+Owner 2026-11-13, on the Task 14 questions:
+1. **Hood gain → 0 for Phase 0.** hood passes `useful = 0` ("no consumer ⇒ no epistemic bid"); the core keeps the
+   `any_sigma_star` guard. `planner_ab_test` is back to strict identity (no expected differences). What an object with
+   no consumer should bid is OPEN — settle before the mirror agent.
+2. **G3 accepted:** the hood is viewed closer than a chair-sized target because of vertical framing. Task 17 adds a
+   live check that hood masks are actually obtained from the proposed viewpoint (25° vs 27.5° half-vfov is near the edge,
+   and the harness assumed vfov 55°).
+3. **Table moves to the expectation form** `p·min(raw, gap)` (= the core's useful_fraction), as its own commit after
+   Task 15, with the A/B listing every changed state.
