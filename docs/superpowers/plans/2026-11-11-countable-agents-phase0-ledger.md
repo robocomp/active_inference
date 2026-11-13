@@ -173,6 +173,31 @@ same. Keeps its own `EpistemicProposal` (object-relative fields), like table. It
 kept (plan_faces refuses the same case silently). Harness note: the near-wall room is 9 m deep because a 1.7 m box's
 stand-off does not fit in the 4 m room the table harness used (all three refused there, by both planners).
 
+### Task 14 — hood planner on the shared core — ⚠ STOPPED FOR THE OWNER (spec G3), two questions
+
+`planner_ab_test`: 24 states (the refrigerator set as a HANGING box, H = 2.05 m, extent 0.50 m, plus 3 wall-mounted
+hoods flush against a wall), 23 valid. Poses, face gains, stand-off band, framing and chosen_* are identical on every
+state. **One behaviour difference, on every valid state: `epistemic_gain`.**
+
+**Q1 — the hood's epistemic gain was ALWAYS 0 before this task (latent defect, now fixed by the core).** hood publishes no
+σ* (`kHoodDofs` all -1, deliberately: no consumer has a demand). The old planner bounded the gain by the adequacy gap
+WITHOUT chair's `any_sigma_star` guard; with no σ* the gap is an empty sum = 0, so gain = p·raw · min(raw, 0)/raw = 0
+on every state — a hood never bid for a viewpoint visit. `hood_dof.h` says -1 was meant to be read by
+`any_sigma_star()`, so the guarded form is the stated intent. With the core: gain = p·raw, UNBOUNDED (5–15 nats in the
+harness), like chair. Live consequence: hoods will now attract epistemic visits and, with no σ*, never stop attracting
+(chair's comment calls that coherent: no demand ⇒ "adequate" is undefined). Listed in `kExpectedDifferences` (harness
+still requires every other field identical and the legacy gain exactly 0). **Owner: keep the fix, or keep hood at 0
+(e.g. pass `useful = 0` until a consumer states a σ*)?**
+
+**Q2 — G3: the model does NOT stand further back for a hood than for a chair-sized target.** Same wall spot, same
+sensor (hfov 70°, vfov 55°, camera 1.2 m), constant raw gain: hood → face −y, stand-off 1.55 m, 1.80 m from centre,
+0° off the wall normal; chair-sized (0.6×0.52, floor to 1.25 m) → face −y, stand-off 2.61 m, 2.87 m, 0°. Both are
+square-on; the hood is viewed CLOSER. Why: the vertical framing binds on the object's span relative to the camera
+height. The chair's bottom is the floor, 1.2 m below the camera (34° below the axis at 1.8 m, outside the 27.5°
+half-vfov), so it must back off; the hood spans only 0.35–0.85 m ABOVE the camera (11°–25° at 1.8 m), already inside
+the frame. All three wall-mounted proposals lie inside the room on the room side of the wall (asserted). No constant
+was added. Same before and after the move (the pose is identical).
+
 ## Rulings
 
 (none yet)
