@@ -138,6 +138,18 @@ No agent uses it yet (Tasks 11–15). One deviation from the plan's test list: `
 and `std::max(0, NaN)` is 0. The core's non-finite guard is reached by a NaN from `useful()` (e.g. a NaN variance in
 the adequacy gap); the test pins that, plus "a NaN raw gain never bids > 0". `plan_faces` is unchanged.
 
+### Task 11 — chair planner on the shared core
+
+`EpistemicProposal` is now `rc::nbv::CountableProposal`; `compute()` keeps its signature, its Target, its raw gain
+(continuous D-optimal via `d_optimal_gain<3>` + discrete mode-entropy × view-novelty) and its log line, and calls
+`plan_countable` with `useful_fraction(kChairDofs, …)`. **No behaviour difference:** `planner_ab_test` compares it
+with a verbatim pre-task copy (`tests/legacy_epistemic_planner.*`) on 22 belief states (fresh priors at 4 yaws;
+1/5/30 updates from 2 bearings; mode-ambiguous ×2; one bearing exhausted; 2 bearing-only seeds; 3 near a wall;
+2 with a table off the +x face; wall + obstacle; boxed in) — 21 valid proposals, all identical (|Δ| < 1e-4,
+gain within 1e-5 relative); the boxed-in state is refused by both. `kExpectedDifferences` is empty.
+One cosmetic difference: the throttled `[epistemic-NBV]` log line now prints only for a finite proposal (it printed
+before the finite check).
+
 ## Rulings
 
 (none yet)

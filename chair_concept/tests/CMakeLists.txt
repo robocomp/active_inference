@@ -62,3 +62,13 @@ target_include_directories(chair_tracker_defer_test PRIVATE ../../common)
 target_compile_options(chair_tracker_defer_test PRIVATE -O2)
 target_link_libraries(chair_tracker_defer_test PRIVATE Eigen3::Eigen)
 add_test(NAME chair_tracker_defer_test COMMAND chair_tracker_defer_test)
+
+# Phase 0 Task 11: the planner on the shared core (common/nbv/countable_planner.h) vs a verbatim pre-task copy.
+# Run: LANG=es_ES.UTF-8 ./planner_ab_test
+add_executable(planner_ab_test planner_ab_test.cpp legacy_epistemic_planner.cpp ../src/epistemic_planner.cpp
+               ../src/chair_belief.cpp ../src/chair_model.cpp)
+target_include_directories(planner_ab_test PRIVATE . ../src ../../common ../../common/media_transport)
+target_compile_definitions(planner_ab_test PRIVATE AGENT_DIR="${CMAKE_CURRENT_LIST_DIR}/..")
+target_compile_options(planner_ab_test PRIVATE -O2)
+target_link_libraries(planner_ab_test PRIVATE Eigen3::Eigen)
+add_test(NAME planner_ab_test COMMAND planner_ab_test)
