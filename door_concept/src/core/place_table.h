@@ -32,7 +32,8 @@ struct PlaceRow
     std::string room, name;
     Vec2f xy = Vec2f::Zero(); Eigen::Matrix2f cov = Eigen::Matrix2f::Identity(); float yaw = 0.f, width = 0.f, height = 0.f;
     float depth = 0.f;                    // the aperture's wall depth, set by the caller from the fit; 0 = unknown
-    float L_evidence = 0.f;               // PlaceBelief::L_evidence(): everything but the structural prior
+    float height_sd = 0.f;                // the fit's posterior sd of `height` (m); 0 = unknown (a row loaded from the CSV, which has no column for it)
+    float L_evidence = 0.f;             // PlaceBelief::L_evidence(): everything but the structural prior
     float physical = 0.f;                 // PlaceBelief::Sp(): the physical part of L_evidence (what a memory keeps outside vision's saturation, place_belief.h)
     bool crossed = false;                 // proof, for ever: a crossed place has no delete line (place_belief.h)
     ViewLedger ledger; int visit = 0; std::int64_t last_seen_wall_ms = 0;
@@ -125,6 +126,26 @@ public:
         return std::exp(-hazard_per_s() * dt);
     }
     [[nodiscard]] float aged_L(const PlaceRow& r, std::int64_t now_wall_ms) const { return float(double(r.L_evidence) * age_factor(r, now_wall_ms)); }
+
+    /// ★THE HEIGHT A PLACE WAS MEASURED AT IS PART OF ITS MEMORY (2026-11-13, clean60 door_7). A pending candidate measures its blob's
+    ///  WIDTH but no height (door_existence.cpp prepare_candidates: its height is the prior's, so the height half of the size term is 0),
+    ///  while a born door's fit measures both. A door refuted by its HEIGHT — clean60's GlassBay pane, fitted 1.00 x 2.62 m (σ_h 0.024 m)
+    ///  under a 2.10 ± 0.08 m prior: size −19.7 against vision +1.5 — is removed, and the row keeps only L_evidence, which EXCLUDES the size
+    ///  term (it is part of the structural prior). So the removed row said "door-shaped" (+), the next candidate at the place — still unable
+    ///  to see the height — was born again, refuted again: 18 births and removals in a row, each one a node, an affordance and a target the
+    ///  controller chased. The measured height is evidence about the OBJECT at the place, so the memory supplies it as the candidate's height
+    ///  measurement: {height, sd}, with the precision aged by the same change hazard that ages the row's L (sd / √age_factor), so a stale
+    ///  memory fades to no information instead of refuting for ever. `unknown_sd`: the sd for a row that carries none (a loaded row).
+    ///  nullopt: no height remembered, or a memory aged to nothing (sd → ∞: the term is 0 — the limit, not a cutoff).
+    struct RememberedHeight { float height = 0.f, sd = 0.f; };
+    [[nodiscard]] std::optional<RememberedHeight> remembered_height(const PlaceRow& r, std::int64_t now_wall_ms, float unknown_sd) const
+    {
+        if (not (std::isfinite(r.height) and r.height > 0.f)) return std::nullopt;
+        const double g = age_factor(r, now_wall_ms);
+        if (not (g > 0.0)) return std::nullopt;
+        const float sd = r.height_sd > 0.f ? r.height_sd : unknown_sd;
+        return RememberedHeight{r.height, float(double(sd) / std::sqrt(g))};
+    }
 
     /// Load rows from a parsed identity table. Rows without a pose cannot be places (no size) and are skipped.
     /// Old rows (no ledger column) get an empty ledger and exist_logodds as L. `fallback_sd`: the place's sigma (m) for a

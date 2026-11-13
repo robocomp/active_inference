@@ -128,8 +128,24 @@ int main()
         const auto gb = door_view({cam, Tb, {}, false}, sc.scene(Tb, sc.zed), sc.inst);
         const auto go = door_view({cam, To, {}, false}, sc.scene(To, sc.zed), sc.inst);
         std::print("zed_around_wall: behind the partition vis={} ; open side vis={}\n", gb.vis, go.vis);
-        CHECK(gb.vis == 0.0f);
+        CHECK(gb.vis < 0.05f);   // ★ continuous wall weight (clean61): ~0 behind a real wall, not exactly 0
         CHECK(go.vis > 0.5f);
+    }
+    {   // ★ clean61 2026-11-13: an outline edge 0.48 m inside the real wall must not score the door invisible while the room is
+        // provisional (σ proto-sized), yet a door behind a real wall in a PROMOTED room (small σ) stays hidden.
+        Scene sc; sc.open_to(0.0f);
+        sc.polygon = {{-5.f, -5.f}, {5.f, -5.f}, {5.f, 4.52f}, {-5.f, 4.52f}};   // the top edge 0.48 m short of the wall y = 5
+        const CameraSpec cam = camera_spec(sc.zed);
+        const auto T = pose(1.0, kRobotY, 1.2);
+        auto scn = sc.scene(T, sc.zed);
+        scn.band.sigma_m = 0.10f;   // promoted
+        const auto g_prom = door_view({cam, T, {}, false}, scn, sc.inst);
+        scn.band.sigma_m = 0.50f;   // proto
+        const auto g_proto = door_view({cam, T, {}, false}, scn, sc.inst);
+        std::print("outside_outline: promoted vis={:.4f} proto vis={:.4f}\n", g_prom.vis, g_proto.vis);
+        CHECK(g_prom.vis < 0.01f);
+        CHECK(g_proto.vis > 0.05f);
+        CHECK(g_proto.vis > 10.0f * g_prom.vis);
     }
     {   // zed_overflow_fill
         Scene sc; sc.open_to(0.0f);

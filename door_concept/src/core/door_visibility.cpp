@@ -36,6 +36,32 @@ std::vector<std::size_t> own_wall_edges(const rc::DoorFitState& inst, const std:
     return rc::door::door_wall_edges(inst.aperture, polygon, nz.depth_lo, nz.depth_hi);
 }
 
+float wall_pass_weight(const Eigen::Vector2f& cam, const Eigen::Vector2f& target,
+                       const std::vector<Eigen::Vector2f>& polygon, const std::vector<std::size_t>& excluded, float sigma)
+{
+    const std::size_t np = polygon.size();
+    if (np < 3) return 1.0f;
+    const auto cross = [](const Eigen::Vector2f& p, const Eigen::Vector2f& q) { return p.x() * q.y() - p.y() * q.x(); };
+    const Eigen::Vector2f d = target - cam;
+    const float s = std::max(sigma, 1e-3f);   // same family / floor as rc::door::p_beyond_far_face
+    float w = 1.0f;
+    for (std::size_t i = 0; i < np; ++i)
+    {
+        if (std::ranges::find(excluded, i) != excluded.end()) continue;
+        const Eigen::Vector2f a = polygon[i];
+        const Eigen::Vector2f ab = polygon[(i + 1) % np] - a;
+        const float rxs = cross(d, ab);
+        if (std::abs(rxs) < 1e-9f) continue;
+        const float t = cross(a - cam, ab) / rxs;
+        const float u = cross(a - cam, d) / rxs;
+        if (not (t > 1e-3f and t < 1.0f - 1e-3f and u > 0.0f and u < 1.0f)) continue;
+        const float len = ab.norm();
+        const float beyond = std::abs(cross(ab, target - a)) / std::max(len, 1e-6f);
+        w *= 1.0f - rc::door::std_normal_cdf(beyond / s);
+    }
+    return w;
+}
+
 ViewRig::ViewRig(const CameraView& v, const ExistenceScene& sc, const rc::DoorFitState& inst, const MaskCells& cells)
     : v_(v), sc_(sc), inst_(inst), cells_(cells),
       cam_T_room_(v.room_T_cam.inverse()),
@@ -89,7 +115,12 @@ SampleView ViewRig::at(const door::LeafPose& L, float lx, float lz) const
     { sv.fate = SampleFate::Occluded; return sv; }                  // a nearer MASKED object hides it
     // GEOMETRIC occluders, which carry no YOLO mask: (a) a room WALL crossing this sightline (own wall skipped), (b) another
     // door instance's panel standing in front of this sample. Per SAMPLE, not per instance.
-    if (rc::occlusion::walls_block(Oxy_, {Pw.x(), Pw.y()}, sc_.polygon, own_edges_))
+    // ★ clean61 2026-11-13: the Boolean walls_block scored DOOR_0 invisible (vis=0, ~1500 detected frames, never born): the
+    // provisional room's outline was still growing, a non-own frontier edge sat ~0.5 m inside the real wall and blocked every
+    // sightline. An edge is a real wall in front of the sample with probability Φ(d/σ), d = how far the sample lies beyond the
+    // edge line, σ = the room band's σ (large while proto, small once promoted ⇒ reduces to the old Boolean).
+    const float w_wall = wall_pass_weight(Oxy_, Eigen::Vector2f(Pw.x(), Pw.y()), sc_.polygon, own_edges_, sc_.band.sigma_m);
+    if (not (w_wall > 0.0f))
     { sv.fate = SampleFate::Occluded; return sv; }
     {
         Eigen::Vector3f dc = Pw - O_;
@@ -115,6 +146,7 @@ SampleView ViewRig::at(const door::LeafPose& L, float lx, float lz) const
         const float a = (Eigen::Vector2f(Pw.x(), Pw.y()) - inst_.aperture.plane_O()).dot(n_out_);   // from the LEAF's line (5b)
         w_room = 1.0f - rc::door::p_beyond_far_face(a, r0_, sc_.band.sigma_m);
     }
+    w_room *= w_wall;
     sv.w_room = w_room;
     sv.fate = (w_room > 0.0f) ? SampleFate::Visible : SampleFate::Occluded;   // wholly through the opening: not this view
     return sv;

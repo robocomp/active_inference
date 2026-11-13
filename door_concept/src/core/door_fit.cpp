@@ -299,7 +299,8 @@ void DoorFit::refresh_geometry(rc::DoorFitState& inst)
     // ★PHI FIRST. Every projection below is built from the leaf pose, and the leaf pose is a function of
     // phi — so the angle has to be estimated before anything reads it, or the whole cycle runs on last
     // cycle's door.
-    estimate_phi(inst);
+    if (phi_done_this_cycle_) phi_done_this_cycle_ = false;   // ★ run_inference already stepped the leaf channel THIS cycle (below)
+    else estimate_phi(inst);
 
     // ★THE APERTURE LIES INSIDE ITS WALL (2026-11-11, clean50 door_3 — door_wall_support.h): the wall segment that carries the
     //  doorway, from the room outline (door_carrying_wall: along_wall_update's extent, when the door's centre lies on it), with the
@@ -988,6 +989,18 @@ float DoorFit::run_inference(rc::DoorFitState& inst, const DoorObservation& obse
         // when the leaf started moving — the one time it most needed to hold still.
         // Task 15: the mask is explained under the HINGE MARGINAL — the leaf from the believed jamb with P = σ(hinge_llr), and
         // from the other — so a wrong hinge cannot slide the aperture a width to make its leaf fit (try75 leg 1).
+        // ★ clean60 2026-11-13 (door_3 s 0.23→0.42 m in ONE mask frame, +0.2 m from truth, after 10 s unobserved): this update
+        //   used to weight the mask's s-evidence with the hinge P and φ σ left by the PREVIOUS cycle's leaf channel, then the same
+        //   frame's leaf evidence (−2.8 nats) flipped the hinge — the frame that changes the hinge belief did not weigh its own
+        //   evidence with it. The leaf channel (LiDAR only, no dependence on this mask) now steps FIRST, on the aperture as
+        //   believed before this frame, so P(hinge) and σ_φ handed below are the posterior AFTER this frame's leaf evidence
+        //   (phi_sigma is the four-filter mixture's width, not the MAP's). The marginalisation over the two jambs is the
+        //   belief's own (p_hinge_ weights both leaf primitives). A first frame (aperture just authored) keeps the old order.
+        if (inst.matched_frames > 0 and not inst.is_bearing_hypothesis)
+        {
+            estimate_phi(inst);
+            phi_done_this_cycle_ = true;
+        }
         inst.ai2_belief.set_hinge_prob(1.0f / (1.0f + std::exp(-inst.hinge_llr)));
         inst.ai2_belief.set_leaf_phi_sigma(inst.phi_sigma);   // …and under the leaf ANGLE's own uncertainty
         if (credit <= 0.0f)

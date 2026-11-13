@@ -387,11 +387,22 @@ void DoorCore::prepare_candidates(const DoorCycleInput& in, const std::vector<rc
             //  twice and cancelled the evidence: 0.36 m became 0.95 m and paid -0.20 nats, against -4.7. cand.theta holds the measured width
             //  and the prior's height (which then pays 0). Without a size estimate (no extent in the support) the size term is 0.
             const rc::DoorFitState& th = cand.theta;
-            const float w_sd = cand.width_sd, h_sd = cfg.door_prior_h_std;
+            float h_sd = cfg.door_prior_h_std;
+            // ★THE PLACE'S REMEMBERED HEIGHT IS THE CANDIDATE'S HEIGHT MEASUREMENT (2026-11-13, clean60 door_7; place_table.h
+            //  remembered_height): the blob gives no height, so the place it was seeded from supplies the one its door's fit measured,
+            //  aged by the change hazard. A place remembered door-tall pays ~0; a place refuted by its height (the GlassBay pane, 2.62 m)
+            //  pays that refutation here instead of being born to be removed again. No row, no height: θ's (the prior's: 0).
+            float h_meas = std::numeric_limits<float>::quiet_NaN();
+            if (not cand.seeded_name.empty())
+                if (const PlaceRow* row = places_.find(room_name_, cand.seeded_name); row != nullptr)
+                    if (const auto mh = places_.remembered_height(*row, in.t_wall_ms, cfg.door_prior_h_std); mh.has_value())
+                    { h_meas = mh->height; h_sd = mh->sd; }
+            const float w_sd = cand.width_sd;
             cand.belief.prior = prior_of(th, polygon, fit_.room_is_proto(), fit_.room_band(),
                                          wall >= 0 ? doors_on_wall[wall] : 0, w_sd, h_sd, cand.size_resolved, size_prior,
                                          std::sqrt(cand.var),    // no fit yet: the detection's own place sd (isotropic, so along the normal too)
-                                         std::sqrt(cand.var), std::sqrt(cand.var));   // …and along the wall, at both jambs
+                                         std::sqrt(cand.var), std::sqrt(cand.var),   // …and along the wall, at both jambs
+                                         h_meas);
             if (cand.size_resolved) cand.best_size = std::max(cand.best_size, cand.belief.prior.size);
             const auto it = self_det.find(c);
             const int self_sensor = it == self_det.end() ? -1 : (dets_[static_cast<std::size_t>(it->second)].sensor != 0 ? 1 : 0);
@@ -648,6 +659,7 @@ void DoorCore::update_existence(const DoorCycleInput& in, DoorCycleOutput& out)
         const float sd2 = inst.ai2_initialized ? std::max(0.0f, inst.ai2_belief.covariance()(0, 0)) : cfg.tracker_detection_noise_m * cfg.tracker_detection_noise_m;
         r.cov = Eigen::Matrix2f::Identity() * sd2;
         r.yaw = inst.aperture.yaw(); r.width = inst.aperture.w; r.height = inst.aperture.h; r.depth = inst.aperture.thickness;
+        if (inst.ai2_initialized) r.height_sd = std::sqrt(std::max(0.0f, inst.ai2_belief.covariance()(2, 2)));   // θ = [s, w, h, d]: what a candidate here re-reads (remembered_height)
         r.L_evidence = inst.belief.L_evidence(); r.physical = float(inst.belief.Sp()); r.crossed = inst.belief.crossed; r.ledger = inst.belief.ledger; r.visit = visit_;
         r.last_seen_wall_ms = in.t_wall_ms; r.sighted_wall_ms = in.t_wall_ms; r.removed_wall_ms = in.t_wall_ms;
         places_.upsert(std::move(r));

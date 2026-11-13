@@ -1011,6 +1011,31 @@ int main()
         CHECK(r.removes.size() == 1 and after.changes == before.changes + 1.0 and after.sum_elapsed_s > before.sum_elapsed_s + 59.0);
         CHECK(not pt.sample_revisit(other, 1, false, kT0 + 1000));   // the visit's sample is spent: a re-detection adds none
     }
+    // ── a_place_refuted_by_its_height_is_not_reborn (2026-11-13, clean60 door_7, the GlassBay pane): a born door fitted 1.00 x 2.62 m
+    //    (σ_h 0.024) was removed by its size term, its row keeping vision's +L (the size term is not in L_evidence); the next candidate,
+    //    which measures no height, was born again — 18 times. The row's remembered height is the candidate's height measurement.
+    for (const bool tall : {true, false})
+    {
+        Rig r;
+        PlaceRow row;
+        row.room = "room_7"; row.name = "door_7"; row.xy = {1.0f, kWallY}; row.cov = Eigen::Matrix2f::Identity() * 0.04f;
+        row.width = 1.00f; row.height = tall ? 2.62f : 2.10f; row.height_sd = 0.024f; row.depth = 0.05f;
+        row.L_evidence = 1.5f;                                   // clean60: zed +0.88, sup +0.66 — vision said door-shaped
+        row.last_seen_wall_ms = row.sighted_wall_ms = kT0; row.removed_wall_ms = kT0;
+        r.core.places().upsert(row);
+        r.look(A0, kDoor, {{1.0f, kWallY, 1.00f}});
+        const float size = r.core.candidates().empty() ? NAN : r.core.candidates().front().belief.prior.size;
+        std::print("height_refuted_place ({}): births {}, candidate size term {:+.2f}\n", tall ? "2.62 m" : "2.10 m", r.births.size(),
+                   r.births.empty() ? size : 0.0f);
+        if (tall)
+        {
+            CHECK(r.births.empty());
+            CHECK(not r.core.candidates().empty() and size < -9.0f);   // ≈ −19.4 × age factor (60 s at the 1/600 s prior hazard)
+            CHECK(not r.core.candidates().empty() and not r.core.candidate_is_open(r.core.candidates().front()));   // not a question to chase
+        }
+        else
+            CHECK(r.births.size() == 1);                         // a door-tall remembered place is born as before
+    }
 
     // ── BIRTH AND SURVIVAL AGREE (fix round 3): a candidate born at L > 0 stays above its creation line on the first fitted update
     //    when nothing new was observed (the next frame looks away): the candidate was scored with the size the fit will give it ──

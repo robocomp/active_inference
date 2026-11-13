@@ -108,11 +108,14 @@ ExistenceTrace observe_place(PlaceBelief& b, const rc::DoorFitState& theta, cons
 /// `size`, the door fit's own width/height prior (one size prior for one quantity, place_prior.h). `aperture_sd`: the sd of θ's
 /// aperture position along the wall normal (the band term is the marginal over it, place_prior.h). `jamb_sd_lo` / `jamb_sd_hi`: the
 /// sds of θ's two jambs ALONG the wall — the extent term (the aperture inside its wall segment, door_wall_support.h) is the
-/// marginal over them; the segment is door_wall_extent's on a promoted outline, none on a proto frontier.
+/// marginal over them; the segment is door_wall_extent's on a promoted outline, none on a proto frontier. `height_meas`: the height
+/// the size term scores (with `height_sd`) when finite, else θ's — a candidate measures none and takes its place's remembered one
+/// (PlaceTable::remembered_height).
 [[nodiscard]] PlacePrior prior_of(const rc::DoorFitState& theta, const std::vector<Vec2f>& polygon, bool proto,
                                   const rc::door::RoomBand& band, int doors_on_wall_before, float width_sd, float height_sd,
                                   bool size_resolved, const SizePrior& size, float aperture_sd,
-                                  float jamb_sd_lo = 0.0f, float jamb_sd_hi = 0.0f);
+                                  float jamb_sd_lo = 0.0f, float jamb_sd_hi = 0.0f,
+                                  float height_meas = std::numeric_limits<float>::quiet_NaN());
 
 /// The wall group (place_prior.h wall_groups) θ's aperture lies on: the group of the polygon edge nearest to it; -1 = none.
 [[nodiscard]] int wall_of(const Vec2f& xy, const std::vector<Vec2f>& polygon, const std::vector<int>& groups);

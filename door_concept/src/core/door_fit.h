@@ -154,6 +154,7 @@ public:
                                            const std::optional<Eigen::Vector2f>& cam_xy) const;
 
 private:
+    bool phi_done_this_cycle_ = false;   // run_inference stepped estimate_phi before the mask update; refresh_geometry must not repeat it
     [[nodiscard]] rc::DoorBeliefParams make_belief_params() const;
     [[nodiscard]] rc::DoorModelParams  make_model_params() const;
     void compute_projected_roi(rc::DoorFitState& inst);

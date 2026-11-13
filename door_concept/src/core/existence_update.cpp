@@ -301,9 +301,10 @@ ExistenceTrace observe_place(PlaceBelief& b, const rc::DoorFitState& th, const E
 
 PlacePrior prior_of(const rc::DoorFitState& th, const std::vector<Vec2f>& polygon, bool proto, const rc::door::RoomBand& band,
                     int doors_on_wall_before, float width_sd, float height_sd, bool size_resolved, const SizePrior& size, float aperture_sd,
-                    float jamb_sd_lo, float jamb_sd_hi)
+                    float jamb_sd_lo, float jamb_sd_hi, float height_meas)
 {
-    PlacePriorInput in{polygon, proto, band, th.aperture.centre_xy(), th.aperture.wall_u, th.aperture.w, th.aperture.h,
+    PlacePriorInput in{polygon, proto, band, th.aperture.centre_xy(), th.aperture.wall_u, th.aperture.w,
+                       std::isfinite(height_meas) ? height_meas : th.aperture.h,
                        width_sd, height_sd, size_resolved, doors_on_wall_before, size, aperture_sd};
     // The wall that carries θ (the fit's own definition, door_wall_extent) — a proto outline is a frontier: no wall end is known.
     if (not proto and polygon.size() >= 3)

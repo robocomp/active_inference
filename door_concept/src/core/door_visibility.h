@@ -53,6 +53,11 @@ enum class MaskScope : std::uint8_t { All, RicohOnly };
 /// Task D-C: the run of polygon edges the doorway is cut in (every OTHER wall occludes).
 [[nodiscard]] std::vector<std::size_t> own_wall_edges(const rc::DoorFitState& inst, const std::vector<Eigen::Vector2f>& polygon);
 
+/// P(no non-excluded polygon edge stands between `cam` and `target`) = Π(1 − Φ(d_i/σ)) over the edges the sightline crosses,
+/// d_i = the target's distance beyond edge i. σ = the room band's σ. A promoted room (small σ) ⇒ the old Boolean walls_block.
+[[nodiscard]] float wall_pass_weight(const Eigen::Vector2f& cam, const Eigen::Vector2f& target,
+                                     const std::vector<Eigen::Vector2f>& polygon, const std::vector<std::size_t>& excluded, float sigma);
+
 /// One camera looking at the room. `room_T_cam`: camera→room, Y forward / Z up (CameraAPI's frame).
 struct CameraView
 {
