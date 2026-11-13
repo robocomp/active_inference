@@ -55,6 +55,9 @@ sleep 3
 REC=$(cd $S/../../.. && pwd)/graph_recorder/bin/graph_recorder; mkdir -p crossing/$1
 [ -x $REC ] && { setsid $REC crossing/$1/graph_trace.csv > crossing/$1/graph_recorder.log 2>&1 < /dev/null & REC_PID=$!; }
 NORUN=1 bash $S/run_crossing.sh crossing/$1 -5.33 3.66 0.58 >/dev/null 2>&1
+# ON_FLEET_UP="<command>" (2026-11-13, LTOM recall test): run once the fleet is up, before the start-up wait — e.g. start
+# the concept agents + ltom_agent (concept_agents.sh). Off by default.
+[ -n "$ON_FLEET_UP" ] && { echo "on fleet up: $ON_FLEET_UP"; bash -c "$ON_FLEET_UP"; }
 room_now() { grep -a "current room changed" $L/controller.log | tail -1 | awk '{print $NF}'; }
 nl() { wc -l < $L/$1.log 2>/dev/null || echo 0; }
 now_ms() { date +%s%3N; }
@@ -115,6 +118,12 @@ run_leg() {   # label cross_arg [close_arg]   (sets r: the crossing; c: the clos
     sleep 0.5
   done; }
 # `cross new` only needs a door to APPEAR: when the controller reports door_unresolved, one explore, then the leg again (bounded)
+look_round() {   # label — `explore <room the robot is in> budget_s=$LOOK_S`, waits for it to end (bounded)
+  local rn; rn=$(room_now); [ -z "$rn" ] && rn=room_1
+  echo run > $B/controller/remote_cmd.txt; sleep 0.7
+  printf 'mission "lookround%s"\n  explore %s budget_s=%ss\n' "$1" "$rn" "$LOOK_S" > $B/controller/remote_cmd.txt
+  for i in $(seq 1 $(( (LOOK_S + 60) / 2 ))); do grep -a -q -E "mission 'lookround$1': (co|failed|aborted)" $L/controller.log && break; sleep 2; done
+  echo "  look round $rn: $(grep -a -o -E "mission 'lookround$1': [a-z]+[^\"]{0,60}" $L/controller.log | tail -1)"; }
 explore_once() {
   echo run > $B/controller/remote_cmd.txt; sleep 0.7
   printf 'mission "look%s"\n  explore %s budget_s=90s\n' "$1" "$(room_now)" > $B/controller/remote_cmd.txt
@@ -165,6 +174,9 @@ for leg in $(seq 1 $n_legs); do
   # DOOR TO DOOR (user 2026-11-01): the gate only before the first leg; after a crossing the next leg's mission goes out at
   # once (its `open` waits for the next door's affordances by itself). The 2 s loc trace still records every leg.
   [ $leg -eq 1 ] && { loc_gate "before leg $leg" 30 || { echo "leg $leg NOT STARTED: localisation not good enough"; break; }; }
+  # LOOK_S=<seconds> (2026-11-13, LTOM recall test): before each leg, a bounded look round the room the robot is in, so the
+  # concept agents SEE its objects (the legs alone take ~20-35 s door to door). Off by default.
+  [ -n "$LOOK_S" ] && look_round "$leg"
   T0=$(now_ms); ts=$(date +%s)
   run_leg $leg $a ${BEHIND[$((leg-1))]}; n=0
   # the next door AS SOON AS IT EXISTS: a door named by relation (room_X) that is not resolvable yet (its recall not posted)
@@ -194,6 +206,7 @@ for leg in $(seq 1 $n_legs); do
   [ $st = OK ] || break
 done
 echo "=== $ok/$n_legs legs"
+[ -n "$LOOK_S" ] && look_round end   # the room the tour ended in is looked at too
 grep -a "\[room\].*room_3\|new room.*room_" $L/room_concept.log | head -3
 echo stop > $B/controller/remote_cmd.txt
 for d in DOOR_1 DOOR_0 DOOR_2; do python3 $S/door.py open $d; done
