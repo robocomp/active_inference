@@ -131,6 +131,13 @@ out-of-room existence term `CabinetModel.ExistenceOutOfRoomGain = 1.5`), plus:
 - Cabinet nodes are `object` type (CLAUDE.md's "`box` nodes" note is stale), so the shared drop helper finds them.
 - `tests/kitchen_selftest.cpp` is not a CMake target anywhere (pre-existing); only `cabinet_card_test` runs, and passes.
 
+### Task 10 — shared countable planner core (`common/nbv/countable_planner.h`)
+
+No agent uses it yet (Tasks 11–15). One deviation from the plan's test list: `non_finite_gain_refused` as written
+(a raw gain returning NaN) cannot produce a non-finite proposal, because `plan_faces` scores `p_detect·max(0, raw)`
+and `std::max(0, NaN)` is 0. The core's non-finite guard is reached by a NaN from `useful()` (e.g. a NaN variance in
+the adequacy gap); the test pins that, plus "a NaN raw gain never bids > 0". `plan_faces` is unchanged.
+
 ## Rulings
 
 (none yet)
