@@ -1,0 +1,154 @@
+#include "remembered_doors.h"
+#include "room_eviction.h"
+#include "room_recall.h"
+#include "../../common/room_resolve/room_resolve.h"
+
+#include <dsr/core/types/type_checking/dsr_attr_name.h>
+
+#include <QDebug>
+#include <QString>
+
+#include <format>
+#include <map>
+#include <string>
+#include <vector>
+
+namespace ltsm
+{
+namespace
+{
+constexpr const char *kSubtype = "remembered_door";
+
+bool is_note(DSR::DSRGraph &g, const DSR::Node &n)
+{
+    return n.type() == "metaconcept" and n.name().starts_with("remembered_")
+           and g.get_attrib_by_name<object_subtype_att>(n).value_or(std::string{}) == kSubtype;
+}
+
+/// A memory door face is an `object` named r<k>_door_*.
+bool is_face(const DSR::Node &n)
+{
+    return n.type() == "object" and RoomRecall::live_name_of(n.name()).starts_with("door_");
+}
+}   // namespace
+
+RememberedDoors::RememberedDoors(std::shared_ptr<DSR::DSRGraph> live, std::shared_ptr<DSR::DSRGraph> memory)
+    : live_(std::move(live)), mem_(std::move(memory)) {}
+
+int RememberedDoors::remove_all()
+{
+    int n = 0;
+    for (const auto &node : live_->get_nodes_by_type("metaconcept"))
+        if (is_note(*live_, node) and live_->delete_node(node.id())) ++n;
+    return n;
+}
+
+int RememberedDoors::retire_where_parent_is_not(std::uint64_t room_id)
+{
+    int n = 0;
+    for (const auto &node : live_->get_nodes_by_type("metaconcept"))
+        if (is_note(*live_, node) and live_->get_attrib_by_name<parent_att>(node).value_or(0) != room_id
+            and live_->delete_node(node.id())) ++n;
+    return n;
+}
+
+int RememberedDoors::step()
+{
+    const auto cur = rc::room::current_room(*live_);
+    if (not cur.has_value())
+    {
+        retire_where_parent_is_not(0);
+        current_ = 0;
+        adopted_.clear();
+        return 0;
+    }
+    if (cur.value() != current_)
+    {
+        current_ = cur.value();
+        adopted_.clear();
+    }
+    retire_where_parent_is_not(current_);
+
+    const auto room = live_->get_node(current_);
+    if (not room.has_value()) return 0;
+    const auto rid = live_->get_attrib_by_name<room_id_att>(room.value());
+    const auto twin = rid.has_value() ? mem_->get_node(std::format("r{}_{}", rid.value(), room->name())) : std::nullopt;
+    if (not twin.has_value() or is_staged_room(*mem_, twin.value()))
+    {
+        retire_where_parent_is_not(0);
+        return 0;
+    }
+
+    const int level = live_->get_node_level(room.value()).value_or(0) + 1;
+    for (const auto &face : mem_->get_nodes_by_type("object"))
+    {
+        if (not is_face(face) or mem_->get_attrib_by_name<parent_att>(face).value_or(0) != twin->id()) continue;
+        if (adopted_.contains(face.id())) continue;
+
+        const std::string name = "remembered_" + RoomRecall::live_name_of(face.name());
+        auto note = live_->get_node(name);
+        if (note.has_value() and live_->get_attrib_by_name<door_adopted_att>(note.value()).value_or(false))
+        {
+            live_->delete_node(note->id());
+            adopted_.insert(face.id());
+            continue;
+        }
+
+        // The face's attributes come over as RoomEviction::twin took them in, minus what is the face's place in ITS tree.
+        auto attrs = face.attrs();
+        attrs.erase(parent_str.data());
+        attrs.erase(level_str.data());
+        attrs.erase(collapsed_str.data());
+        attrs.erase(door_adopted_str.data());   // the adoption flag belongs to the note alone
+
+        const bool fresh = not note.has_value();
+        if (fresh)
+        {
+            DSR::Node n;
+            n.type("metaconcept");
+            n.name(name);
+            note = n;
+        }
+        bool changed = fresh;
+        for (const auto &[k, v] : attrs)
+        {
+            const auto it = note->attrs().find(k);
+            if (it == note->attrs().end() or not(it->second == v)) { note->attrs()[k] = v; changed = true; }
+        }
+        const auto set = [&](auto tag, auto value)
+        {
+            using A = decltype(tag);
+            const auto old = live_->get_attrib_by_name<A>(note.value());
+            if (old.has_value() and old.value() == value) return;
+            live_->add_or_modify_attrib_local<A>(note.value(), value);
+            changed = true;
+        };
+        set(object_subtype_att{}, std::string(kSubtype));
+        set(parent_att{}, current_);
+        set(level_att{}, level);
+        set(room_id_att{}, rid.value());
+
+        std::uint64_t id = note->id();
+        if (fresh)
+        {
+            const auto ins = live_->insert_node(note.value());
+            if (not ins.has_value()) continue;
+            id = ins.value();
+            qInfo().noquote() << QString::fromStdString(std::format("[remembered] {} posted under {}", name, room->name()));
+        }
+        else if (changed)
+            live_->update_node(note.value());
+
+        if (const auto e = mem_->get_edge(twin->id(), face.id(), "RT"); e.has_value())
+        {
+            const auto old = live_->get_edge(current_, id, "RT");
+            if (not old.has_value() or not(old->attrs() == e->attrs()))
+                live_->insert_or_assign_edge(DSR::Edge::create<RT_edge_type>(current_, id, e->attrs()));
+        }
+    }
+
+    int n = 0;
+    for (const auto &node : live_->get_nodes_by_type("metaconcept")) if (is_note(*live_, node)) ++n;
+    return n;
+}
+}   // namespace ltsm

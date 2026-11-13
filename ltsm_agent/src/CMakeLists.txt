@@ -6,6 +6,7 @@ LIST(APPEND SOURCES
   ../src/passage_harvest.cpp
   ../src/passage_live.cpp
   ../src/room_recall.cpp
+  ../src/remembered_doors.cpp
   ../src/topology_layout.cpp
   ../src/layout_optimizer.cpp
   ../src/layout_sidecar.cpp
@@ -26,6 +27,7 @@ LIST(APPEND HEADERS
   ../src/passage_harvest.h
   ../src/passage_live.h
   ../src/room_recall.h
+  ../src/remembered_doors.h
   ../src/topology_layout.h
   ../src/layout_optimizer.h
   ../src/layout_sidecar.h
