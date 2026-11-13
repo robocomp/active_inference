@@ -2697,8 +2697,16 @@ void SpecificWorker::step_pragmatic_affordances(rc::DoorInstance& inst)
         // The offer's probability: the share of the band's serviceability the hand-backs have left — the best score now
         // over the best score with no hand-back remembered. 1 with no hand-back (as before), → 0 as the band is used up.
         // ★ A DOOR THAT DOES NOT EXIST AFFORDS NOTHING (user 2026-10-31, pingpong27: the robot drove at a phantom door_1 on
-        //   the other wall, existence p 0.05, while its offers stood): every offer of this door carries P(exists).
-        o.p   = rc::door::approach_offer_prob(choice, free_choice) * inst.belief.p();
+        //   the other wall, existence p 0.05, while its offers stood): open and cross carry P(exists) in their offer.
+        // ★ EXCEPT A DOOR RESTORED FROM MEMORY AND NOT SEEN SINCE (2026-11-13, chat_e2e15): its approach carries P(exists)
+        //   in its VALUE, not its offer — going to the standpoint is the act that SETTLES whether it exists
+        //   (CONCEPT_AGENT_LIFECYCLE.md, "Restored remembered doors": re-requiring a sighting made `cross door_1` fail in
+        //   tourP2). door_21, restored from a 12-day-old row aged to P 0.30, offered neither an approach (below the offer
+        //   line) nor a look (it is live), so `cross door_21` failed approach_not_offered 3/3 and the robot never went to
+        //   see it. Seen ⇒ restored_unseen() ends and the door is an ordinary one; not seen from the standpoint ⇒ absence
+        //   evidence (P(detect), wall line of sight) retires it. Its cross/open keep × P(exists): never crossed unseen.
+        const bool settle_by_going = rc::door::restored_unseen(inst);
+        o.p   = rc::door::approach_offer_prob(choice, free_choice) * (settle_by_going ? 1.0f : inst.belief.p());
         o.x_m = pose.x; o.y_m = pose.y; o.yaw_rad = pose.yaw;
         inst.approach_offered_xy = {pose.x, pose.y};
         inst.approach_offered_valid = true;
@@ -2723,7 +2731,7 @@ void SpecificWorker::step_pragmatic_affordances(rc::DoorInstance& inst)
         // selected only when a passage names them) — and in a passage it would let the door's epistemic look (a few tenths of
         // a nat) out-bid an approach that is about to complete. The value is the goal's, not the distance's; the controller
         // charges distance itself (G = λ·dist − value, the selector's own score).
-        o.value    = pg.value_approach * choice.p_complete_live;
+        o.value    = pg.value_approach * choice.p_complete_live * (settle_by_going ? inst.belief.p() : 1.0f);   // P(exists) once
         o.contract = rc::door::approach_contract(pg);
         o.why      = std::format("P(complete at arrival σ {:.2f}) {:.2f}; P(served)={:.2f} = P(complete) {:.2f} × P(inside) {:.2f} × P(not refused) {:.2f} at standoff {:.2f} "
                                  "lateral {:+.2f} ({} hand-back(s) remembered); robot P(reach)={:.2f} = P(open) {:.2f} mix of "
@@ -2733,7 +2741,8 @@ void SpecificWorker::step_pragmatic_affordances(rc::DoorInstance& inst)
                                  st.p_reach, st.p_open_known ? st.p_open : 0.0f, st.p_band, o.value, st.robot_range_m,
                                  st.safe_standoff_m, std::max(pg.actuation_reach_m, st.safe_standoff_m + 0.30f),
                                  st.range_sigma_m, inst.aperture.w);
-        o.why += std::format(" × P(exists) {:.2f}", inst.belief.p());
+        o.why += std::format(" × P(exists) {:.2f}{}", inst.belief.p(),
+                             settle_by_going ? " in the VALUE (restored, unseen: going there settles it)" : "");
         o.why += passable_parts(st);
         inst.aff_approach.update(o);
         log_affordance_transitions(inst, "approach", inst.aff_approach);

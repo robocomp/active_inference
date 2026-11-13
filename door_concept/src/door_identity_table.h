@@ -676,6 +676,16 @@ inline bool fitted_this_cycle(bool has_fresh_data, int matched_frames)
 /// have built the instance the moment the node was inserted — BEFORE its RT edge existed — reading its place as (0,0);
 /// the restore must not trust that read (nor skip seeding because the instance "already exists"), it must state it.
 /// `Inst` is rc::DoorInstance (templated so the harness needs no DSR).
+/// A door RESTORED from memory and not detected since (its last detection is still the row's). Its approach is offered
+/// without × P(exists): driving to the standpoint is what settles whether it exists (chat_e2e15: door_21 restored at
+/// P 0.30 got neither an approach nor a look, and `cross door_21` failed approach_not_offered 3/3). Every other door,
+/// a fresh phantom included (pingpong27), keeps its approach × P(exists).
+template <class Inst>
+[[nodiscard]] bool restored_unseen(const Inst& inst)
+{
+    return inst.restored_detection_wall_ms >= 0 and inst.last_detection_wall_ms == inst.restored_detection_wall_ms;
+}
+
 template <class Inst, class Belief>
 void seed_restored_instance(Inst& inst, const IdentityRow& r, const Belief& restored,
                             std::chrono::steady_clock::time_point now)
@@ -703,6 +713,7 @@ void seed_restored_instance(Inst& inst, const IdentityRow& r, const Belief& rest
     // Task D-C round 2 (tour3C): the remembered place's precision seeds the belief's along-wall σ (DoorFit's lazy init).
     inst.remembered_place_sd = r.place_sd;
     inst.last_detection_wall_ms = r.seen_wall_ms.value_or(0);
+    inst.restored_detection_wall_ms = inst.last_detection_wall_ms;   // restored_unseen(): until a fresh detection moves it
     inst.place_row_name = r.name;   // the revisit is sampled by the core, per visit, against this row
     inst.matched_frames   = std::max(inst.matched_frames, kFitWithoutFreshDataFrames);
     inst.seed_wh_from_box = true;
