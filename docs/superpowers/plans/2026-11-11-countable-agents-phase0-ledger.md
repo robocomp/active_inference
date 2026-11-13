@@ -150,6 +150,20 @@ gain within 1e-5 relative); the boxed-in state is refused by both. `kExpectedDif
 One cosmetic difference: the throttled `[epistemic-NBV]` log line now prints only for a finite proposal (it printed
 before the finite check).
 
+### Task 12 — table planner on the shared core
+
+**No behaviour difference:** `table_concept/tests/planner_ab_test` vs a verbatim pre-task copy, 21 belief states
+(fresh ×4; 1/5/30 updates ×2 bearings; near-square mode-ambiguous ×2; long table one bearing ×40; small square wide
+orbit; near a wall ×3; chair off the +x face ×2; wall + obstacle; boxed in) — 20 valid, every controller-read field
+identical (pose, gain, face_gains, standoff band, framing, chosen_*, vfov, σ*). Two deviations from the plan text:
+1. **Table keeps its own `EpistemicProposal` struct** (not `using = CountableProposal`): it carries the object-relative
+   constraint the controller reads (face_gains, standoff band, framing, chosen_*, σ*). The core's pose/gain fill it.
+2. **⚠ OPEN FOR THE OWNER — two adequacy bounds exist.** Table caps the expected gain at the gap:
+   `min(p·raw, gap)`. Chair's `useful_fraction` (now the core's) scales it: `p·raw · min(raw, gap)/raw`. They agree only
+   when p = 1 or the gap does not bind. Table passes `useful = 1` and keeps its own `min` after the core, so nothing
+   changed; unifying is a behaviour change and a modelling choice (cap the EXPECTED information at what is still
+   wanted, vs. discount it by the useful fraction of the RAW information), so it is not made here.
+
 ## Rulings
 
 (none yet)

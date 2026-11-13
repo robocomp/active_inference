@@ -105,24 +105,20 @@ EpistemicProposal EpistemicPlanner::compute(const TableBelief& belief, float lat
     // Not adequacy-clamped: each face's single-view info typically EXCEEDS the remaining gap, so clamping made
     // all four tie (the degenerate ranked-set that erased the controller's basis to prefer one face). The
     // adequacy bound belongs on the SCALAR value below.
-    const Eigen::Matrix<float, 6, 6> I6 = Eigen::Matrix<float, 6, 6>::Identity();
     const auto raw_gain_of = [&](int i, float standoff)
     {
         const float Ri = sigma_base * sigma_base + (lat_rate * standoff) * (lat_rate * standoff);
         const Eigen::Matrix<float, 6, 6> dI = belief.predicted_information(sample_face_surface(s, i), Ri).topLeftCorner<6, 6>();
-        const float det = (I6 + S * dI).determinant();
-        return std::max(0.0f, 0.5f * std::log(std::max(1e-9f, det)));
+        return std::max(0.0f, rc::nbv::d_optimal_gain<6>(S, dI));
     };
 
-    const rc::nbv::Plan plan = rc::nbv::plan_faces(target, sensor, robot_radius_m_, obstacles, raw_gain_of,
-                                                   room_polygon);
-    if (not plan.valid)
-        return {};
-    // ★NO USABLE FACE ⇒ REFUSE, never publish the hint. plan.best_pos is then the raw argmax, which for a
-    // wall-adjacent object is a pose behind the wall. The controller REPAIRS rather than rejects an
-    // unroutable standpoint — nearest_reachable is measured from the robot, so the goal snaps to the floor
-    // right at the object. An invalid proposal makes the caller hold instead: "no viewpoint from here".
-    if (not plan.any_usable)
+    // The shared core (common/nbv/countable_planner.h): plan_faces, REFUSE on no usable face (the raw argmax would
+    // stand in the wall and the controller would repair it to the floor at the object), refuse a non-finite result.
+    // `useful` = 1: table bounds its gain by the adequacy gap BELOW, as min(expected, gap) — not the core's
+    // useful_fraction form (chair's). The two formulas differ; which one is right is an OPEN owner question (ledger).
+    const rc::nbv::CountableInputs in{sensor, robot_radius_m_, obstacles, room_polygon};
+    const auto res = rc::nbv::plan_countable(target, in, raw_gain_of, [](float) { return 1.0f; });
+    if (res.refused_no_usable_face)
     {
         static int shouted = 0;
         if (shouted++ < 5)
@@ -130,11 +126,11 @@ EpistemicProposal EpistemicPlanner::compute(const TableBelief& belief, float lat
                        "outside the room. REFUSING (the raw argmax would stand in the wall).\n");
         return {};
     }
-
-    const int   best_idx = plan.best_face;
-    const float best_raw = plan.face_gains[best_idx];   // DETECTION-WEIGHTED — the honest expected value
-    if (not std::isfinite(best_raw))
+    if (not res.proposal.valid)
         return {};
+    const rc::nbv::Plan& plan = res.plan;
+    const int   best_idx = plan.best_face;
+    const float best_raw = res.proposal.epistemic_gain;   // DETECTION-WEIGHTED — the honest expected value
 
     // SCALAR affordance value (epistemic_gain): the winning face's info BOUNDED by the adequacy gap to Σ*, so
     // it → 0 as the belief reaches the consumer's precision — a threshold-free "done" AND the cross-affordance
@@ -174,7 +170,8 @@ EpistemicProposal EpistemicPlanner::compute(const TableBelief& belief, float lat
                    plan.face_p_detect[0], plan.face_p_detect[1], plan.face_p_detect[2], plan.face_p_detect[3]);
     }
 
-    EpistemicProposal proposal{plan.best_pos.x(), plan.best_pos.y(), plan.best_yaw, best_gain, true};
+    EpistemicProposal proposal{res.proposal.epistemic_target_x_m, res.proposal.epistemic_target_y_m,
+                               res.proposal.epistemic_target_yaw_rad, best_gain, true};
     // Object-relative viewpoint constraint (authoritative): publish ALL four faces with their DETECTION-
     // WEIGHTED per-face gains (the ranking — NOT adequacy-clamped, else they tie) + the stand-off band +
     // framing + Σ*, so the controller picks the best FEASIBLE face itself. Publishing the weighted gains is
