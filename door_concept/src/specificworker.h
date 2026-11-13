@@ -67,6 +67,7 @@
 #include "decision_log.h"          // rc::door::DoorDecisionLog (binary decision log, default off)
 #include "input_snapshot.h"        // rc::door::InputSnapshot (DoorCycleInput recording, default off)
 #include <map>
+#include "../../common/phantom_memory/phantom_memory.h"
 #include "../../common/dashboard/belief_inspector.h"
 #include "../../common/dashboard/belief_strip.h"
 #include "../../common/dashboard/evidence_monitor.h"
@@ -356,6 +357,15 @@ private:
     std::set<std::pair<std::uint64_t, std::string>> adoption_handled_;
     rc::door::RoomNameHistory room_names_;
     void enter_room_memory(std::uint64_t room_id, bool first_resolution, const std::string& left_room = {});   // decide recall/fresh; strip or arm the restore
+    // private phantom memory (see specificworker.cpp "private phantom memory")
+    rc::phantom::Memory phantom_file_;
+    std::map<std::string, std::uint64_t> phantom_rooms_;          // rooms entered this run: live name -> LTSM room_id
+    std::optional<std::vector<std::uint64_t>> ltsm_room_ids_;     // LTSM's room list, once a topology was received
+    std::optional<std::size_t> phantom_sig_;
+    void load_phantoms();
+    void enter_phantom_room(std::uint64_t room_node, const std::string& room_name);
+    void drop_phantom_room(const std::string& room_name);
+    void step_phantom_save();
     void step_pending_restore();
     void restore_remembered_doors(std::uint64_t new_room);
     void step_restore_from_notes();

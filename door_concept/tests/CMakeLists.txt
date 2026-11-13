@@ -43,3 +43,11 @@ target_compile_definitions(test_door_restore_from_notes PRIVATE SHADOW_JSON="${C
 target_compile_options(test_door_restore_from_notes PRIVATE -O0 -w)
 target_link_libraries(test_door_restore_from_notes PRIVATE Eigen3::Eigen Qt6::Core dsr_api dsr_core fastcdr fastdds)
 add_test(NAME door_restore_from_notes COMMAND test_door_restore_from_notes)
+
+# Private phantom memory: file round trip under a comma locale, forgetting, and the glass partition not reborn from an injected removed row.
+# The source lives with the module. Run: ./test_phantom_memory
+add_executable(test_phantom_memory ../../common/phantom_memory/tests/test_phantom_memory.cpp)
+target_include_directories(test_phantom_memory PRIVATE ../src ../src/core ../../common)
+target_compile_options(test_phantom_memory PRIVATE -O1 -w)
+target_link_libraries(test_phantom_memory PRIVATE Eigen3::Eigen)
+add_test(NAME phantom_memory COMMAND test_phantom_memory)

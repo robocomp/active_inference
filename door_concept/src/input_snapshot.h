@@ -77,7 +77,8 @@ public:
     void on_owned_swept(const std::string& why, std::vector<std::uint64_t> removed);
     /// The startup load: raw text of both files as initialize() reads them, and the room it then enters.
     void on_identity_load(const std::string& identity_path, const std::string& registration_path,
-                          std::optional<std::uint64_t> initial_room, const std::string& initial_room_name);
+                          std::optional<std::uint64_t> initial_room, const std::string& initial_room_name,
+                          bool without_removed = false);   // without_removed: the core's refuted places come from the private phantom file instead
     /// door_concept's own code is running: deletions it causes are self-requested (input_latch.h). RAII, nests.
     [[nodiscard]] InputLatch::SelfScope self_scope() { return InputLatch::SelfScope{latch_}; }
     /// One call through the actuator port (in a cycle → that cycle; from a Qt callback → the next one).

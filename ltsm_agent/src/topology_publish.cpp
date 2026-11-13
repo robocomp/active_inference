@@ -37,6 +37,11 @@ std::string build_topology_json(DSR::DSRGraph& memory, DSR::DSRGraph& live)
         rooms.push_back({.name = name, .live = live.get_node(name).has_value()});
     }
     std::ranges::sort(rooms, {}, &rc::ltsm::TopoRoom::name);
+    std::vector<std::uint64_t> room_ids;   // every memory room's id (a repeated live name still has its own)
+    for (const auto& r : memory.get_nodes_by_type("room"))
+        if (const auto k = memory.get_attrib_by_name<room_id_att>(r); k.has_value()) room_ids.push_back(k.value());
+    std::ranges::sort(room_ids);
+    room_ids.erase(std::unique(room_ids.begin(), room_ids.end()), room_ids.end());
 
     // The robot's CURRENT room (live name): only a face in it may name the live door -- with a proto-room live, the
     // far end of a passage is also "live" but its door is not the one the robot stands at.
@@ -85,7 +90,7 @@ std::string build_topology_json(DSR::DSRGraph& memory, DSR::DSRGraph& live)
         if (faces == 2) passages.push_back(std::move(p));   // a passage with one face joins nothing
     }
     std::ranges::sort(passages, {}, &rc::ltsm::TopoPassage::id);
-    return rc::ltsm::encode_topology(rooms, passages);
+    return rc::ltsm::encode_topology(rooms, passages, room_ids);
 }
 
 bool TopologyPublisher::refresh()

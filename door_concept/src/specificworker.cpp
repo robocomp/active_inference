@@ -34,6 +34,8 @@
 #include "../../common/room_transition/startup_recall.h"   // warm start
 #include "door_close_clear.h"   // close: P(clear of the leaf's swing)
 #include "door_leaf_memory.h"   // the leaf side as a remembered probability; the side-weighted swept arc
+#include "phantom_bridge.h"   // private phantom memory
+#include "../../common/ltsm_topology/topology_decode.h"
 #include "door_note_reader.h"   // remembered_door notes (DoorConcept.RestoreFromLtsm)
 #include "core/room_door_count.h"   // a room has doors: the room-level door posterior (room-door-belief spec Part A)
 #include "specificworker.h"
@@ -255,6 +257,7 @@ void SpecificWorker::request_shutdown()
         // (The costs and the detector rates are FIXED within a session and are NOT written back: etc/door_costs.csv is written offline
         //  by tools/door_costs_from_logs.py from etc/door_cost_events.csv, the rates by tools/fit_detector_envelopes.py.)
         save_identities();   // carries the place table's learned change hazard (#hazard line)
+        step_phantom_save();
     }
 
     // Flush the diagnostics' tails (up to 63 buffered rows each): exit is std::_Exit and this worker is never
@@ -659,7 +662,7 @@ void SpecificWorker::initialize()
     // Input recording (spec §6.6): the identity table + learned registration exactly as loaded, and the room entered.
     input_snapshot_.on_identity_load("etc/door_identities.csv", "etc/door_world_registration.csv",
         room_node_id_ != 0 ? std::optional<std::uint64_t>{room_node_id_} : std::nullopt,
-        room_node_id_ != 0 ? rc::room::name_of(*G, room_node_id_) : std::string{});
+        room_node_id_ != 0 ? rc::room::name_of(*G, room_node_id_) : std::string{}, cfg_.restore_from_ltsm);
     door_registration_.load("etc/door_world_registration.csv");   // solved per request, per room
 
     // The camera's REAL geometry, read once (intrinsics and the zed mount are both static). BOTH FoVs: a door
@@ -678,6 +681,7 @@ void SpecificWorker::initialize()
     // Which door is which — remembered from earlier runs. Without this the numbering falls out of the order
     // the robot happens to sweep the room, so the same door was door_1 one run and door_2 the next.
     load_identities();
+    load_phantoms();
     latch_recall_names();   // a warm start's start-up recall may already be there (an agent restart mid-run)
     if (room_node_id_ != 0)
         enter_room_memory(room_node_id_, true);   // the first room is a fresh entry: older runs' poses can't come back
@@ -3373,6 +3377,7 @@ void SpecificWorker::step_room_following()
         step_adoption();          // a rename of THIS room (same id) is followed here, never released
         step_crossing_proof();    // a crossing whose room has stood becomes proof (after the adoption: a withdrawal must be seen first)
         step_pending_restore();   // a recalled room's doors, once its polygon is loaded
+        step_phantom_save();      // refuted places changed -> the private phantom file
         fitter_->seed_leaf_from_recalls();   // a recall_* child that appeared after the door was restored
         // The crossed door was HELD at the switch and has been deleted with its room since: carry it across now.
         if (carry_pending_room_ == room_node_id_ and not lost_doors_.empty())
@@ -4012,6 +4017,9 @@ void SpecificWorker::enter_room_memory(std::uint64_t room_id, bool first_resolut
     if (not room.has_value())
         return;
     if (plan.drop_left)
+        drop_phantom_room(left_room);   // its frame dies with the provisional room
+    enter_phantom_room(room_id, room->name());
+    if (plan.drop_left)
     {
         // RECOGNITION SWAP: the provisional room is dead and its name is never reused: rows deleted, not stripped.
         for (const auto& nm : rc::door::drop_room(identities_, left_room))
@@ -4045,6 +4053,73 @@ void SpecificWorker::enter_room_memory(std::uint64_t room_id, bool first_resolut
     else
         std::print("door_concept: [restore] '{}' entered FRESH ({}) — nothing restored; its doors are earned from evidence\n",
                    room->name(), first_resolution ? "first room resolved" : "no ltsm recall announced it");
+}
+
+// ── private phantom memory (common/phantom_memory), DoorConcept.RestoreFromLtsm only ─────────────────────────────────────────────────
+// Refuted places are facts about this agent's sensor: a private file keyed by LTSM room_id, in the room's own frame. The place table keys
+// rows by room NAME, so on entry the room's room_id (room_concept sets it) is paired with its name and the file's rows are injected as
+// removed rows; on save every entered room's removed rows are written under its room_id.
+void SpecificWorker::load_phantoms()
+{
+    if (not cfg_.restore_from_ltsm) return;
+    if (auto m = rc::phantom::Memory::load("etc/door_phantom_memory.csv"); m.has_value())
+        phantom_file_ = std::move(*m);
+    else
+        std::print("door_concept: [phantom] etc/door_phantom_memory.csv unreadable - starting empty\n");
+    std::print("door_concept: [phantom] {} refuted place(s) remembered\n", phantom_file_.rows.size());
+}
+
+void SpecificWorker::enter_phantom_room(std::uint64_t room_node, const std::string& room_name)
+{
+    if (not cfg_.restore_from_ltsm or not core_) return;
+    const auto room = G->get_node(room_node);
+    if (not room.has_value()) return;
+    const auto rid = G->get_attrib_by_name<room_id_att>(room.value());
+    if (not rid.has_value()) return;   // no LTSM identity yet: nothing to key by
+    phantom_rooms_[room_name] = rid.value();
+    if (const int n = rc::door::phantom_bridge::inject(core_->places(), phantom_file_, rid.value(), room_name, cfg_.tracker_detection_noise_m); n > 0)
+        std::print("door_concept: [phantom] '{}' (room_id {}): {} refuted place(s) injected\n", room_name, rid.value(), n);
+}
+
+void SpecificWorker::drop_phantom_room(const std::string& room_name)
+{
+    if (not cfg_.restore_from_ltsm) return;
+    const auto it = phantom_rooms_.find(room_name);
+    if (it == phantom_rooms_.end()) return;
+    phantom_file_.set_room(it->second, {});
+    phantom_rooms_.erase(it);
+    phantom_sig_.reset();
+}
+
+void SpecificWorker::step_phantom_save()
+{
+    if (not cfg_.restore_from_ltsm or not core_ or not G) return;
+    const auto merged = rc::door::phantom_bridge::merged(core_->places(), phantom_file_, phantom_rooms_);
+    // LTSM's room list, once a topology has been received: rows of a room it no longer remembers are forgotten (nothing before that).
+    auto ids = ltsm_room_ids_;
+    if (const auto t = G->get_node("ltsm_topology"); t.has_value())
+        if (const auto j = G->get_attrib_by_name<ltsm_topology_att>(t.value()); j.has_value())
+            if (const auto topo = rc::topo::decode_topology(j.value()); topo.has_value() and topo->room_ids.has_value())
+                ids = topo->room_ids;
+    ltsm_room_ids_ = ids;
+    auto out = merged;
+    int forgot = 0;
+    if (ids.has_value())   // a room entered this run is live: LTSM may not have archived it yet, so it is not forgotten
+    {
+        auto keep = *ids;
+        for (const auto& [name, id] : phantom_rooms_) keep.push_back(id);
+        forgot = out.forget_except(keep);
+    }
+    // write on change only: a signature of the content
+    std::size_t sig = out.rows.size();
+    for (const auto& r : out.rows)
+        sig = sig * 1000003u ^ (std::hash<std::int64_t>{}(r.removed_ms) + std::hash<std::uint64_t>{}(r.room_id) + std::hash<float>{}(r.x) + std::hash<float>{}(r.y));
+    if (phantom_sig_ == sig) return;
+    phantom_file_ = std::move(out);
+    if (phantom_file_.save("etc/door_phantom_memory.csv"))
+        phantom_sig_ = sig;
+    if (forgot > 0)
+        std::print("door_concept: [phantom] {} row(s) of rooms LTSM no longer remembers forgotten\n", forgot);
 }
 
 void SpecificWorker::step_pending_restore()
