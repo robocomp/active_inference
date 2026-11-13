@@ -198,6 +198,20 @@ half-vfov), so it must back off; the hood spans only 0.35–0.85 m ABOVE the cam
 the frame. All three wall-mounted proposals lie inside the room on the room side of the wall (asserted). No constant
 was added. Same before and after the move (the pose is identical).
 
+### Task 15 — bottle planner: shared type + formula, NOT plan_countable
+
+**Deviation from the plan:** bottle does not go through `plan_countable`. Its planner is not a four-face plan: it places
+ONE viewpoint on the far side of the bottle from the camera (the hidden arc of a rotation-symmetric cylinder) and scores
+that single candidate with `rc::nbv::score`. Routing it through `plan_faces` would replace that algorithm with a
+different one (four faces of the bounding square), i.e. a behaviour change, not a refactor. It takes what is genuinely
+shared: `EpistemicProposal = rc::nbv::CountableProposal` and `rc::nbv::d_optimal_gain<5>`. **No behaviour difference:**
+`planner_ab_test`, 21 states (fresh ×4 cameras; 1/5/30 updates ×2 cameras; close / far / short-look / one bearing ×40;
+far side behind a chair ×2; on its table; far side toward a wall, beyond the wall (refused), near a wall; degenerate
+camera-on-bottle) — 18 valid, all identical.
+**⚠ For the owner, not changed:** bottle declares σ* on cx, cy, cz, r (h: none) but its gain is NOT bounded by the
+adequacy gap — it never applies `useful_fraction`, so a well-resolved bottle keeps bidding p·raw. Every other agent with
+a σ* bounds it. Applying it is a behaviour change (bottle's bid falls to 0 once adequate).
+
 ## Rulings
 
 Owner 2026-11-13, on the Task 14 questions:
