@@ -129,7 +129,15 @@ CountableConfig load_countable_config(const ConfigLoader& cfg)
             "TIGHT → strong footprint prior (m)");
     // The back panel (a bed's headboard) is a CLASS fact: it comes from the manifest's [prior.headboard], absent
     // for classes without one (nightstand, toilet) = a plain box. No config key.
-    if (const auto bp = rc::manifest::load_back_panel(manifest_path))
+    bool manifest_opened = false;
+    const auto bp = rc::manifest::load_back_panel(manifest_path, &manifest_opened);
+    if (not manifest_opened)
+    {
+        std::print(stderr, "{}: ★ the class manifest {} cannot be opened — refusing to start (a missing manifest "
+                           "would silently turn the bed into a plain box)\n", out.agent_name, manifest_path);
+        std::exit(EXIT_FAILURE);
+    }
+    if (bp)
     {
         out.ai2_headboard_h_m = bp->height_m;
         out.ai2_headboard_t_m = bp->thickness_m;

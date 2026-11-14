@@ -39,10 +39,17 @@ inline std::optional<float> parse_float(std::string_view v)
 
 // Read [prior.headboard]. nullopt = no panel declared (block absent, quietly) or an INVALID declaration (printed
 // loudly: any kind other than "fixed_template", any face other than "back", a missing or non-numeric size).
-inline std::optional<BackPanel> load_back_panel(const std::string& path)
+// `opened` (optional out-param) tells "the manifest could not be opened" (false, and an error naming the path is
+// printed) apart from "opened, no panel declared" (true): a missing manifest must not silently become a plain box.
+inline std::optional<BackPanel> load_back_panel(const std::string& path, bool* opened = nullptr)
 {
     std::ifstream f(path);
-    if (not f) return std::nullopt;
+    if (opened) *opened = static_cast<bool>(f);
+    if (not f)
+    {
+        std::print("[manifest] ★★CANNOT OPEN {} — the back panel cannot be read (the path is relative to the agent's CWD)\n", path);
+        return std::nullopt;
+    }
     std::string line, block, kind, face, hs, ts;
     bool seen = false;
     while (std::getline(f, line))

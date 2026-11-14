@@ -34,7 +34,11 @@ int main()
     if (bed) { CHECK(bed->height_m == 1.25f); CHECK(bed->thickness_m == 0.10f); }
     CHECK(not rc::manifest::load_back_panel(mf("nightstand")).has_value());
     CHECK(not rc::manifest::load_back_panel(mf("toilet")).has_value());
-    CHECK(not rc::manifest::load_back_panel(mf("no_such_class")).has_value());
+    bool opened = false;
+    CHECK(not rc::manifest::load_back_panel(mf("no_such_class"), &opened).has_value());
+    CHECK(not opened);                                   // an open failure ...
+    CHECK(not rc::manifest::load_back_panel(mf("nightstand"), &opened).has_value());
+    CHECK(opened);                                       // ... is not the same as "no block"
 
     const rc::CountableBeliefState s{0.0f, 0.0f, 0.6f, 0.5f, 0.5f, 0.3f};
     std::mt19937 rng(20261114); std::uniform_real_distribution<float> U(-1.5f, 1.5f), Uz(-1.0f, 1.0f);

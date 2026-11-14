@@ -36,7 +36,8 @@ static CountableBeliefState run(bool priors, float& yaw_deg, float& back_gap, fl
     }
     const auto s = b.state();
     float y = std::fmod(s.yaw * 57.29578f, 90.0f); if (y > 45) y -= 90; if (y < -45) y += 90;
-    yaw_deg = y; yaw_full = std::remainder(s.yaw, 6.2831853f) * 57.29578f;   // 0 = front to the room back_gap = -(b.back_centre(s).y());               // distance of the back face from the wall (+ = in front of it)
+    yaw_deg = y; yaw_full = std::remainder(s.yaw, 6.2831853f) * 57.29578f;   // 0 = front to the room
+    back_gap = -(b.back_centre(s).y());               // distance of the back face from the wall (+ = in front of it)
     std::printf("%s: cx=%.3f cy=%.3f yaw=%.1f° (mod 90 → %.1f°) w=%.3f h=%.3f H=%.3f back gap=%.3f m\n",
                 priors ? "WITH priors   " : "WITHOUT priors", s.cx, s.cy, s.yaw * 57.29578f, y, s.w, s.h, s.H, back_gap);
     return s;
