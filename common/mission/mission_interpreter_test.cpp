@@ -41,6 +41,7 @@ struct FakeHost final : Host
     std::optional<Pose> where = Pose{.room = "room_1", .x = 1, .y = 2, .yaw = 0.5, .sigma_xy = 0.1};
     std::optional<std::string> room = "room_1";    // the room the robot is in now
     std::vector<std::string> evaled;               // pred_text of every predicate eval() saw
+    std::int64_t wall = 0;                         // wall_ms(): the clock `wait at=` reads
 
     std::optional<std::string> start(const Step& s) override
     {
@@ -59,6 +60,7 @@ struct FakeHost final : Host
     void say(const std::string& text) override { log.push_back("say " + text); }
     void halt() override { log.push_back("halt"); }
     std::optional<Pose> pose() override { return where; }
+    std::int64_t wall_ms() override { return wall; }
     std::optional<std::string> current_room() override { return room; }
     void on_bind(const std::string& name, const std::string& r) override { log.push_back("bind " + name + "=" + r); }
     std::optional<double> eval(const Pred& p) override
@@ -381,6 +383,48 @@ int main()
         in.start(parse("mission\n  explore room_2 until=explored(room_2)>=0.9 budget_s=30s\n"), 0);
         in.tick(0);
         CHECK(in.state() == S::Completed and h.count("start 1:explore") == 0);
+    }
+
+    // ── wait at= (tense spec 2026-11-14 §1): ends at a WALL-clock time, says how long is left; a past time ends at once ──
+    {
+        const std::string at = "2026-11-14T18:00:00+01:00";   // = 17:00:00Z
+        const std::int64_t t_at = *parse_iso(at);
+        FakeHost h;
+        h.wall = t_at - 42 * 60'000;
+        Interpreter in(h);
+        CHECK(not in.start(parse("mission\n  wait at=\"" + at + "\"\n  say \"go\"\n"), 0).has_value());
+        in.tick(0);
+        CHECK(h.count("start 1:wait") == 1 and in.state() == S::Running);
+        CHECK(in.steps()[0].note == "until 18:00 (in 42 min)");
+        h.wall = t_at - 1;
+        in.tick(600'000);                 // the steady clock is not what it reads
+        CHECK(in.state() == S::Running and in.steps()[0].note == "until 18:00 (in 1 min)");
+        h.wall = t_at;
+        in.tick(600'010);
+        CHECK(in.state() == S::Completed and h.count("say go") == 1 and h.count("cancel 1:wait") == 1);
+    }
+    {
+        FakeHost h;
+        h.wall = *parse_iso("2026-11-14T19:00:00+01:00");   // already past
+        Interpreter in(h);
+        in.start(parse("mission\n  wait at=\"2026-11-14T18:00:00+01:00\"\n"), 0);
+        in.tick(0);
+        CHECK(in.state() == S::Completed);
+    }
+    {
+        FakeHost h;
+        h.wall = *parse_iso("2026-11-14T08:00:00+01:00");
+        h.belief["door_open(door_1)"] = 0.9;                 // until still ends it early
+        Interpreter in(h);
+        in.start(parse("mission\n  wait at=\"2026-11-14T18:00:00+01:00\" until=door_open(door_1)>=0.8\n"), 0);
+        in.tick(0);
+        CHECK(in.state() == S::Completed);
+        FakeHost h2;
+        h2.wall = *parse_iso("2026-11-14T08:00:00+01:00");
+        Interpreter in2(h2);
+        in2.start(parse("mission\n  wait at=\"2026-11-15T09:30:00+01:00\"\n"), 0);
+        in2.tick(0);
+        CHECK(in2.steps()[0].note == "until 09:30 on 2026-11-15 (in 26 h)");
     }
 
     // ── wait: s elapses, or until holds (a `<` boundary too), or the person says resume ────────────────────────────

@@ -97,6 +97,7 @@
 #include "system_reader.h"
 #include "ollama_client.h"
 #include "topology.h"
+#include "whereabouts.h"
 #include "world_digest.h"
 
 namespace rc::chat
@@ -185,6 +186,8 @@ private:
     QString answer_query(const QString& name, const QJsonObject& args);
     /// ltsm_agent's published memory summary (node ltsm_topology); nullopt when absent or unreadable.
     std::optional<rc::chat::Topology> remembered_topology() const;
+    /// where_was(ago_min | at): where the robot was then (whereabouts.h; tense spec 2026-11-14 §3).
+    [[nodiscard]] QString answer_where_was(const QJsonObject& args) const;
     /// look(camera?) → the tool-result text; on success the JPEG is left in look_jpeg_ for the tool message.
     QString do_look(const QJsonObject& args);
     /// show(name, args?, live?) / draw(script, title, live?) → the tool-result text; the picture goes to the canvas.
@@ -282,6 +285,7 @@ private:
     std::unique_ptr<DSR::InnerEigenAPI> inner_;
     WorldDigest digest_builder_;
     Digest digest_;
+    rc::chat::Whereabouts whereabouts_;   ///< where the robot has been since this chat started (fed by tick_digest)
     IntentionNode intention_;
     MissionWatch mission_watch_;   ///< the controller's controller_mission node → the plan window
     rc::mission::Progress mission_progress_;   ///< its last progress (the STATE's "controller mission now" line)

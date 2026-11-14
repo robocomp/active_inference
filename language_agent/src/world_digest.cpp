@@ -86,6 +86,10 @@ Digest WorldDigest::build(DSR::InnerEigenAPI& inner, bool controller_present, co
             const double yaw = std::atan2(M(1, 0), M(0, 0)) * kRad2Deg;
             s += std::format("robot pose in {}: x={:.2f} m, y={:.2f} m, yaw={:.0f} deg\n", room_name,
                              T->translation().x(), T->translation().y(), yaw);
+            d.has_pose = true;
+            d.pose_x = T->translation().x();
+            d.pose_y = T->translation().y();
+            d.pose_yaw_deg = yaw;
         }
         else s += "robot pose: unknown (no transform room -> robot)\n";
     }
