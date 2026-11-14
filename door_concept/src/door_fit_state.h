@@ -274,6 +274,10 @@ struct DoorFitState
     // ★THE LiDAR OPENING (one-model, spec §3.3), consumed once like the support: the fit's registered sweep read through this door's aperture span
     //  (opening_view_llr); set only on a cycle that had a sweep and under Existence.OneModel.
     std::optional<rc::door::core::LidarOpening> pending_lidar;
+    /// The OTHER live doors' spans on this door's wall, in room coordinates (centre, half width) with their last-cycle existence r: a bin one of them holds is its evidence,
+    /// not this door's (per-bin freedom Π(1 − r_j), as the candidates and hypotheses get it). Set by the core before the fit (final review 5); one-model only.
+    struct LidarClaimW { Eigen::Vector2f centre = Eigen::Vector2f::Zero(); float half_w = 0.f, r = 0.f; };
+    std::vector<LidarClaimW> lidar_claims;
     // ★A LEAF-BORN DOOR starts AT the aperture and leaf state of the hypothesis that bore it (spec §3.6: the frame wall, the owner's requirement), consumed once by
     //  the first belief init instead of reading the aperture off the leaf mask's plane.
     std::optional<std::pair<rc::door::Aperture, rc::door::LeafState>> birth_aperture;

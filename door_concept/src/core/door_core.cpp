@@ -308,6 +308,25 @@ DoorCycleOutput DoorCore::step(const DoorCycleInput& in)
 // slice this very cycle), each door published right after its own fit (after_fit), the Phi rows after the loop.
 void DoorCore::fit_doors(DoorCycleOutput& out)
 {
+    if (cfg_.door.exist_one_model)
+    {   // ★per-bin freedom for a LIVE door's LiDAR opening (final review 5): the OTHER live doors' spans on its wall hold their bins (last cycle's r), as for candidates
+        const auto& polygon = fit_.room_polygon();
+        const auto& groups = groups_cached();
+        const auto states = world_->fit_states();
+        std::vector<int> wall(states.size(), -1);
+        for (std::size_t i = 0; i < states.size(); ++i)
+            if (not states[i].second->is_bearing_hypothesis and last_p_door_.contains(states[i].first))
+                wall[i] = wall_of(states[i].second->aperture.centre_xy(), polygon, groups);
+        for (std::size_t i = 0; i < states.size(); ++i)
+        {
+            auto& mine = states[i].second->lidar_claims;
+            mine.clear();
+            if (wall[i] < 0) continue;
+            for (std::size_t j = 0; j < states.size(); ++j)
+                if (j != i and wall[j] == wall[i])
+                    mine.push_back({states[j].second->aperture.centre_xy(), 0.5f * states[j].second->aperture.w, last_p_door_.at(states[j].first)});
+        }
+    }
     for (const auto id : world_->fit_targets())
     {
         rc::DoorFitState* inst = world_->begin_fit(id);

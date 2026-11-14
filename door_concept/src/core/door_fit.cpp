@@ -1511,6 +1511,17 @@ void DoorFit::estimate_phi(rc::DoorFitState& inst)
     lin.cmd_sigma = sigma_phi;
     lin.phi_min = PHI_MIN; lin.phi_max = PHI_MAX; lin.nstep = NSTEP;
     lin.view_rad = cfg_.phi_step_rad;
+    // ★ONE-MODEL: A SWEEP IS SCORED UNDER THE BELIEF THAT PRECEDES IT (final review 4). The existence term of this sweep's opening is a predictive
+    //  likelihood, so P(open) is the door's four-branch share E[1 - cos phi] BEFORE this sweep's returns formed the posterior (the same quantity the
+    //  camera's p_D reads, DoorBelief::leaf_p_open), the birth prior when no leaf belief exists yet. Scoring it under the posterior it just made
+    //  was positive feedback: the through bins first opened phi, then earned a higher P(through | door).
+    double cf_pre = std::numeric_limits<double>::quiet_NaN();
+    if (cfg_.exist_one_model)
+    {
+        if (inst.ai2_initialized) cf_pre = inst.ai2_belief.leaf_p_open(inst.leaf_channel, cfg_.phi_max_rad);
+        if (not std::isfinite(cf_pre)) cf_pre = cfg_.ricoh_birth_p_open;   // the one open prior the agent has, as observe_place's camera
+        cf_pre = std::clamp(cf_pre, 0.0, 1.0);   // clamp: domain of a share
+    }
     const auto lr = rc::door::leaf_channel_step(inst.leaf_channel, inst.ai2_belief, inst.hinge_llr, inst.swing_llr,
                                                 inst.phi_est, inst.phi_sigma, lin);
     inst.hinge_llr_ref = inst.ai2_belief.params().leaf.hinge;
@@ -1561,8 +1572,19 @@ void DoorFit::estimate_phi(rc::DoorFitState& inst)
         //  door's leaf posterior as P(open), for the next existence update (channel `lid`). An open door the ZED cannot see still shows its
         //  opening here; a phantom's span reads wall. One term per sweep; the ledger makes it one trial per view.
         if (cfg_.exist_one_model)
-            inst.pending_lidar = rc::door::core::LidarOpening{rc::door::opening_view_llr(ap, reg_sweep, lidar_through_open_, lidar_through_wall_, inst.phi_curve),
+        {
+            const std::pair<float, float> pre{std::acos(static_cast<float>(1.0 - cf_pre)), 1.0f};   // the one-point curve whose clear fraction is cf_pre
+            // the other live doors' spans in THIS aperture's along-wall coordinate (the aperture moved in this cycle's inference: converted here)
+            std::vector<rc::door::OpeningClaim> claims;
+            for (const auto& c : inst.lidar_claims)
+            {
+                const float a = (c.centre - ap.wall_O).dot(ap.wall_u);
+                claims.push_back({a - c.half_w, a + c.half_w, c.r});
+            }
+            inst.pending_lidar = rc::door::core::LidarOpening{rc::door::opening_view_llr(ap, reg_sweep, lidar_through_open_, lidar_through_wall_,
+                                                                                         std::span<const std::pair<float, float>>(&pre, 1), claims),
                                                                 reg_sweep.origin.head<2>()};
+        }
         const Eigen::Vector2f u = ap.wall_u;
         const float chain_s = u.x() * u.x() * inst.chain_cov_xx + 2.0f * u.x() * u.y() * inst.chain_cov_xy
                             + u.y() * u.y() * inst.chain_cov_yy;

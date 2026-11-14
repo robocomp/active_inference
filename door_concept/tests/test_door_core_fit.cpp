@@ -292,6 +292,43 @@ int main()
         w.core = nullptr;
     }
 
+    // ── 8. ONE-MODEL: A SWEEP IS SCORED UNDER THE BELIEF THAT PRECEDES IT (final review 4). The first sweep through the doorway forms the leaf posterior
+    //      (an open leaf) in estimate_phi; its existence term must be priced with the prior it arrived to (the birth prior of P(open)), not with the
+    //      posterior its own through bins just made (positive feedback). The term the door holds is compared with the same sweep read under both curves.
+    {
+        DoorCoreConfig cfg; cfg.door.exist_one_model = true;
+        FitWorld w; w.cfg = cfg.door;
+        DoorCore core(cfg);
+        w.core = &core;
+        core.connect(&w, {.decision = {}, .diag = {}});
+        bool checked = false;
+        for (int c = 1; c <= 40 and not checked; ++c)
+        {
+            const DoorCycleInput in = cycle_input(static_cast<std::uint64_t>(c), c, Leaf::Open);
+            core.step(in);
+            for (auto& [id, f] : w.st)
+            {
+                if (not f.ai2_initialized or not f.pending_lidar.has_value() or not in.bpearl.has_value()) continue;
+                const rc::door::Aperture ap = f.ai2_belief.aperture();
+                rc::door::RegisteredSweep rs; rs.origin = in.bpearl->origin_room; rs.pts = in.bpearl->pts_room;
+                const auto term = [&](double cf)
+                {
+                    const std::pair<float, float> pt{std::acos(static_cast<float>(1.0 - cf)), 1.0f};
+                    return rc::door::opening_view_llr(ap, rs, 0.75f, 0.01f, std::span<const std::pair<float, float>>(&pt, 1));
+                };
+                const float cf_post = rc::door::clear_fraction(f.phi_curve);
+                const float under_prior = term(cfg.door.ricoh_birth_p_open), under_post = term(cf_post);
+                std::print("one-model sweep term, cycle {}: held {:+.4f}; the same sweep under the PRIOR (P(open) {:.2f}) {:+.4f}, under the posterior it formed (E[1-cos phi] {:.2f}) {:+.4f}\n",
+                           c, f.pending_lidar->llr, cfg.door.ricoh_birth_p_open, under_prior, cf_post, under_post);
+                if (std::abs(under_prior - under_post) < 0.02f) { checked = false; continue; }   // this cycle's two readings coincide: the case says nothing, wait for one that differs
+                CHECK(std::abs(f.pending_lidar->llr - under_prior) < std::abs(f.pending_lidar->llr - under_post));
+                checked = true;
+            }
+        }
+        CHECK(checked);
+        w.core = nullptr;
+    }
+
     // ── 3. determinism: the fit reads time only from the input ──────────────────────────────────────────────────────
     {
         const Run a = run(Leaf::Shut, 30);

@@ -1511,6 +1511,7 @@ int main()
                    crossed_always ? "stays" : "LOST", r.births.size(), mirror_late ? "YES" : "no");
         CHECK(crossed_always);
         CHECK(not mirror_late);
+        CHECK(crossed != 0 and r.w.st.contains(crossed) and r.w.st.at(crossed).role == Role::BeingCrossed);   // the crossed door held the BeingCrossed role (no delete line) throughout
     }
     //    one_hole_two_labels: a live door and a pending candidate 0.25 m apart are ONE hole under two labels, not two doors: the "another
     //    door on this wall" cost is charged by how DISTINCT the other place is: a door 0.25 m away costs about half the second-door cost
@@ -1791,6 +1792,48 @@ int main()
         (void)c0; (void)b;
         CHECK(whole > 0.0f);
         CHECK(shared < 0.0f);
+    }
+    {   // live_doors_share_the_opening (final review 5): two BORN labels at one open hole each used to add the whole opening to their own ledger every view
+        // (the strongest channel, ~6 nats a bin; the tracker births one label per hole, so the second is a copy of the first under another id: a mirror that
+        // escaped). Now each holds the bins the other's span holds (Π(1 − r)): the pair's LiDAR credit over the same views is compared with one door's alone.
+        const auto credit = [&](bool pair, std::vector<double>* each)
+        {
+            Rig r(false, true);
+            r.core.set_costs(CostEstimator::logged_default());
+            const rc::door::Aperture ap0 = typical_door_at({1.0f, kWallY}, 0.85f, 2.05f, kRoom).aperture;
+            for (int v = 0; v < 8; ++v) r.look(stand(4.0f, 0.0f, 1.0f), {1.0f, kWallY + 0.01f}, {{1.0f, kWallY, 0.85f}});
+            if (r.w.st.size() != 1) return std::pair{-99.0, 0};
+            std::vector<std::uint64_t> ids{r.w.st.begin()->first};
+            if (pair)
+            {
+                rc::DoorFitState dup = r.w.st.begin()->second;
+                dup.node_name = "door_dup";
+                r.w.st.emplace(5000, std::move(dup));
+                ids.push_back(5000);
+            }
+            const auto lid_credit = [&](std::uint64_t id) { double c = 0.0; for (const auto& v : r.w.st.at(id).belief.ledger.views()) if (v.lid.n > 0) c += v.lid.sum / v.lid.n; return c; };
+            std::vector<double> c0; for (const auto id : ids) c0.push_back(lid_credit(id));
+            for (int v = 0; v < 40; ++v)
+            {
+                const Vec2f at{1.0f + 0.6f * std::cos(0.7f * float(v)), 1.0f + 0.4f * std::sin(0.5f * float(v))};
+                r.step(input(++r.cycle, ++r.frame, at, {1.0f, 0.0f}, {}, 10.0, std::nullopt, {}, make_sweep(ap0, at, ap0.s + 0.05f, ap0.s + ap0.w - 0.05f)));
+            }
+            double total = 0.0;
+            if (each) each->clear();
+            for (std::size_t k = 0; k < ids.size(); ++k)
+            {
+                const double d = r.w.st.contains(ids[k]) ? lid_credit(ids[k]) - c0[k] : 0.0;
+                total += d; if (each) each->push_back(d);
+            }
+            return std::pair{total, int(r.w.st.size())};
+        };
+        std::vector<double> each;
+        const auto [one, n1] = credit(false, nullptr);
+        const auto [two, n2] = credit(true, &each);
+        std::print("live_doors_share_the_opening: LiDAR credit over 40 sweeps: one door {:+.2f} nats; two labels {:+.2f} nats in total ({:+.2f}, {:+.2f}), {} doors alive\n",
+                   one, two, each.size() > 0 ? each[0] : 0.0, each.size() > 1 ? each[1] : 0.0, n2);
+        CHECK(n1 == 1 and one > 0.0);
+        CHECK(n2 >= 1 and two < 1.5 * one);   // not 2x: the pair shares one opening
     }
     {   // shut_door_lidar_neutral: a shut, born door (leaf belief: shut) whose span reads wall is no evidence either way over 30 views
         const std::vector<Vec2f> from{{1.0f, 1.0f}, {2.5f, 0.5f}, {-0.5f, 1.5f}, {3.5f, 2.0f}, {0.0f, -1.0f}, {2.0f, 2.5f}};

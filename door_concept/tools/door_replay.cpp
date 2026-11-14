@@ -302,6 +302,7 @@ public:
     }
 
     std::uint64_t room_id() const override { return room_; }
+    [[nodiscard]] const std::string& room_name() const { return room_name_; }
     std::vector<Vec2f> room_polygon() const override { return polygon_; }
     std::vector<std::pair<std::uint64_t, rc::DoorFitState*>> fit_states() const override
     {
@@ -497,6 +498,7 @@ int main(int argc, char** argv)
     std::string costs_path = "etc/door_costs.csv";   // --costs FILE: C_keep / C_delete (fixed; missing => the compiled LOGGED estimate, loudly)
     bool look_log = false, ablate_hull = false;   // Task E: --look prints the look-vs-approach prices; --ablate-hull-midpoint reproduces the collapse
     bool core_stdout = false;
+    bool seed_walls = true;   // --no-seeds: do not replay the agent's wall seeding (step_wall_hypotheses) under Existence.OneModel
     std::map<std::string, rc::door::hlook::LookCache> hl_caches;   // --hlook: per question, as the agent keeps them
     std::vector<double> hl_cold_ms, hl_warm_ms;                    // best_look time on a table miss / on a reuse
     std::uint64_t hl_from = 1, hl_to = 0;   // --hlook FROM TO: print the hypothesis look's questions and best poses on those cycles (hl_to < hl_from: off)
@@ -513,7 +515,7 @@ int main(int argc, char** argv)
         else if (a == "--ricoh-strip-oracle") strip_oracle = true;
         else if (a == "--ablate-hull-midpoint") ablate_hull = true;
         else if (a == "--csv" and i + 1 < argc) csv_dir = argv[++i];
-        else if (a == "--clock-jitter-ms" and i + 1 < argc) jitter_ms = std::strtod(argv[++i], nullptr);
+        else if (a == "--clock-jitter-ms" and i + 1 < argc) { const std::string_view v = argv[++i]; std::from_chars(v.data(), v.data() + v.size(), jitter_ms); }   // from_chars: locale-independent (main activates the es_ES locale, where strtod stops at the point)
         else if (a == "--trace" and i + 1 < argc) trace_door = argv[++i];
         else if (a == "--costs" and i + 1 < argc) costs_path = argv[++i];
         else if (a == "--set" and i + 1 < argc)
@@ -524,6 +526,7 @@ int main(int argc, char** argv)
             overrides.emplace_back(std::string(kv.substr(0, eq)), std::string(kv.substr(eq + 1)));
         }
         else if (a == "--detectors" and i + 1 < argc) detectors_path = argv[++i];
+        else if (a == "--no-seeds") seed_walls = false;
         else if (a == "--stdout") core_stdout = true;   // Task 8: echo the core's stdout lines (existence / candidate readouts)
         else if (a == "--recess-prior-std" and i + 1 < argc)
         {   // a SENSITIVITY probe (Task 5b): the leaf-plane depth's prior σ, overriding the recorded config
@@ -626,6 +629,8 @@ int main(int argc, char** argv)
     std::vector<DoorDecision> got, got_phi, got_exist, got_remove;
     std::uint64_t n = 0, first = 0, last = 0;
     int stepped = 0, media_only = 0;
+    std::uint64_t seeded_room = 0;   // the room whose walls were seeded last (SpecificWorker::wall_seeded_room_)
+    int n_seeds = 0, n_seed_rooms = 0;
     double step_ms_sum = 0.0, step_ms_max = 0.0, copy_ms_sum = 0.0;
     std::vector<double> step_ms;
     while (true)
@@ -678,6 +683,25 @@ int main(int argc, char** argv)
             const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
             step_ms_sum += ms; step_ms_max = std::max(step_ms_max, ms); step_ms.push_back(ms);
             ++stepped;
+            // ★THE AGENT-SIDE PRODUCER THE CORE REACTS TO: a promoted room's walls are its door slots (SpecificWorker::step_wall_hypotheses,
+            // one place per door width along every wall, once per room entry, after the cycle's step). Not on the tape, so rebuilt from the
+            // room-promotion input the tape does carry (the room's outline and its proto flag). Only under the one-model flag, as the agent.
+            // NOT replayed: the outline doorways (`room_doorways` node, not on the tape) and the restore of door notes from LTSM (the notes
+            // are graph attributes the tape does not hold; the identity rows it does hold are not the notes' ledgers).
+            if (seed_walls and cfg.door.exist_one_model and world.room_id() != seeded_room and world.room_polygon().size() >= 3
+                and not core.room_is_proto() and not world.room_name().empty() and core.room_name() == world.room_name())
+            {
+                seeded_room = world.room_id();
+                ++n_seed_rooms;
+                const auto& poly = world.room_polygon();
+                for (std::size_t i = 0, j = poly.size() - 1; i < poly.size(); j = i++)
+                {
+                    const Eigen::Vector2f e = poly[i] - poly[j];
+                    const int k_n = static_cast<int>(e.norm() / cfg.door.door_prior_w_m);
+                    for (int k = 0; k < k_n; ++k)
+                        n_seeds += core.hypothesise_place(world.room_name(), poly[j] + e * ((static_cast<float>(k) + 0.5f) / static_cast<float>(k_n)), true) ? 1 : 0;
+                }
+            }
             for (const auto& d : out.decisions)
             {
                 if (is_tracker_kind(d.kind)) got.push_back(d);
@@ -842,6 +866,7 @@ int main(int argc, char** argv)
         world.end_cycle();
     }
     std::println("replayed {} records (cycles {}..{}): stepped {}, media-only {}", n, first, last, stepped, media_only);
+    if (cfg.door.exist_one_model) std::println("wall seeds: {} place(s) seeded in {} room entr{} ({})", n_seeds, n_seed_rooms, n_seed_rooms == 1 ? "y" : "ies", seed_walls ? "as the agent's step_wall_hypotheses" : "OFF: --no-seeds");
     std::println("live-only belief consumers (NBV planner, DOF table, reported Σ) ran {} times, clean (checksum {:.4g})",
                  belief_smoke_runs, belief_smoke_sum);
     for (int k = 0; k < 2; ++k)
