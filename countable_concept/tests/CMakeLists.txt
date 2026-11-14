@@ -16,3 +16,18 @@ target_compile_options(headboard_sdf_test PRIVATE -O2)
 target_link_libraries(headboard_sdf_test PRIVATE Eigen3::Eigen)
 add_test(NAME headboard_sdf_test COMMAND headboard_sdf_test)
 
+
+# The back panel comes from the class manifest ([prior.headboard]); textual reader, no Qt. Run: LANG=es_ES.UTF-8 ./back_panel_test
+add_executable(back_panel_test back_panel_test.cpp ../src/countable_belief.cpp)
+target_include_directories(back_panel_test PRIVATE ../src ../../common ../../common/concept_manifest ../../common/media_transport)
+target_compile_definitions(back_panel_test PRIVATE MANIFEST_DIR="${CMAKE_CURRENT_LIST_DIR}/../../common/concept_manifest")
+target_compile_options(back_panel_test PRIVATE -O2)
+target_link_libraries(back_panel_test PRIVATE Eigen3::Eigen)
+add_test(NAME back_panel_test COMMAND back_panel_test)
+
+# Furniture priors (owner 2026-11-14), moved from nightstand_concept/tests; built with nightstand's parameters (no back panel).
+add_executable(furniture_prior_test furniture_prior_test.cpp ../src/countable_belief.cpp)
+target_include_directories(furniture_prior_test PRIVATE ../src ../../common ../../common/media_transport)
+target_compile_options(furniture_prior_test PRIVATE -O2)
+target_link_libraries(furniture_prior_test PRIVATE Eigen3::Eigen)
+add_test(NAME furniture_prior_test COMMAND furniture_prior_test)

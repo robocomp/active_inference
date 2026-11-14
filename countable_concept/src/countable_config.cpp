@@ -127,9 +127,14 @@ CountableConfig load_countable_config(const ConfigLoader& cfg)
             "mean of the w & h(depth) prior (m)");
     out.ai2_prior_footprint_std = getf("Model.AI2PriorFootprintStd", 0.08f,
             "TIGHT → strong footprint prior (m)");
-    out.ai2_headboard_h_m       = getf("Model.HeadboardHeightM", -1.0f,
-            "headboard panel top (m) on the back face; <=0 = a plain box");
-    out.ai2_headboard_t_m       = getf("Model.HeadboardThickM", 0.10f, "headboard panel thickness (m)");
+    // The back panel (a bed's headboard) is a CLASS fact: it comes from the manifest's [prior.headboard], absent
+    // for classes without one (nightstand, toilet) = a plain box. No config key.
+    if (const auto bp = rc::manifest::load_back_panel(manifest_path))
+    {
+        out.ai2_headboard_h_m = bp->height_m;
+        out.ai2_headboard_t_m = bp->thickness_m;
+        std::print("[manifest] {} back panel: height {:.2f} m, thickness {:.2f} m\n", out.concept_class, bp->height_m, bp->thickness_m);
+    }
     out.ai2_wall_flush_prior    = getf("Model.WallFlushPrior", 0.0f,
             "class probability that the object stands against a wall (furniture prior); 0 = never assumed");
     out.ai2_room_axis_std_deg   = getf("Model.RoomAxisStdDeg", 0.0f,
