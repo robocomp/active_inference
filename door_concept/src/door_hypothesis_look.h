@@ -31,6 +31,8 @@
 #include <bit>
 #include <cmath>
 #include <cstdint>
+#include <functional>
+#include <format>
 #include <limits>
 #include <map>
 #include <numbers>
@@ -404,7 +406,7 @@ namespace detail
 }
 
 /// The EIG of every pose (exact within the budget, sampled beyond it).
-[[nodiscard]] inline std::vector<double> eigs(const Question& q, std::span<const Pose> poses, const Model& m, LookCache* cache)
+[[nodiscard]] inline std::vector<double> eigs(const Question& q, std::span<const Pose> poses, const Model& m, LookCache* cache, double* budget_cells = nullptr)
 {
     std::vector<double> out(poses.size(), 0.0);
     const auto w = weights_of(q);
@@ -414,7 +416,9 @@ namespace detail
             if (std::ranges::none_of(distinct, [&](const Aperture* d) { return same_aperture(*d, a); })) distinct.push_back(&a);
     std::size_t Z = 1;
     for (std::size_t s = 0; s < distinct.size(); ++s) Z *= 4;
-    const bool exact = static_cast<double>(poses.size()) * static_cast<double>(q.hyps.size()) * static_cast<double>(Z) <= kTableBudgetCells;
+    const double cells = static_cast<double>(poses.size()) * static_cast<double>(q.hyps.size()) * static_cast<double>(Z);
+    const bool exact = cells <= (budget_cells != nullptr ? *budget_cells : kTableBudgetCells);
+    if (exact and budget_cells != nullptr) *budget_cells -= cells;   // the cycle's budget is shared by every question (final review, minor 21): held tables count whether reused or rebuilt
     if (cache != nullptr) cache->sampled = not exact;
     if (not exact)
     {
@@ -470,13 +474,14 @@ namespace detail
 /// With a `standing` pose (the one last published, if it is still among `poses`) it is HELD: the result moves only when another pose's EIG, under
 /// the current weights, exceeds the standing pose's EIG under the same weights; `Best::eig_nats` is then the standing pose's.
 /// With a `cache` the exact tables are reused while the question's geometry is unchanged (see LookCache).
+/// `budget_cells` (nullptr = kTableBudgetCells for this question alone): the cycle's remaining table budget, shared by all questions, spent by those held exactly.
 [[nodiscard]] inline Best best_look(const Question& question, std::span<const Pose> poses, const Model& m, LookCache* cache = nullptr,
-                                    const Pose* standing = nullptr)
+                                    const Pose* standing = nullptr, double* budget_cells = nullptr)
 {
     Best best;
     const Question q = live_part(question);
     if (q.hyps.empty() or poses.empty()) return best;
-    const auto e = detail::eigs(q, poses, m, cache);
+    const auto e = detail::eigs(q, poses, m, cache, budget_cells);
     std::optional<std::size_t> hold;
     if (standing != nullptr)
         for (std::size_t i = 0; i < poses.size(); ++i)
@@ -499,6 +504,7 @@ struct Alt { Aperture aperture; LeafState leaf; double dlogw = 0.0; };
 struct Member
 {
     std::string name;            // the door's node name / "place_<key>"
+    std::string key_name;        // the question's IDENTITY when it differs from the name: a door born from a candidate keeps "place_<key>" (final review 8); empty = the name
     Aperture aperture;
     LeafState leaf;
     double L = 0.0;              // existence log-odds
@@ -577,35 +583,118 @@ template <class Undecided>
         if (group.size() == 1 and not leafy)
         {
             const Member& m = members[group[0]];
-            out.push_back(place_question("q_" + m.name, m, 1.0 / (1.0 + std::exp(-m.L))));
+            out.push_back(place_question("q_" + (m.key_name.empty() ? m.name : m.key_name), m, 1.0 / (1.0 + std::exp(-m.L))));
             continue;
         }
         Question q;
-        std::string first = members[group[0]].name;
-        for (std::size_t i : group) first = std::min(first, members[i].name);
-        q.key = "c_" + first;
-        q.hyps.push_back({{}, {}, 1.0});   // the null: none of them is the door
-        for (std::size_t i : group)
+        // ★A CLUSTER'S IDENTITY IS WHERE IT IS, not who is in it (final review 8): its reference aperture, the members' own aperture least along (x, then y), rounded to half its
+        //  own width (the slot's own size, as everywhere here). A member joining or leaving does not rename the question unless it moves the reference.
         {
-            const Member& m = members[i];
-            q.hyps.push_back(single_hyp(m, std::exp(std::clamp(m.L, -30.0, 30.0))));   // clamp: exp's own range
+            const Aperture* ref = &members[group[0]].aperture;
+            for (std::size_t i : group)
+            {
+                const Eigen::Vector2f a = members[i].aperture.centre_xy(), b = ref->centre_xy();
+                if (a.x() < b.x() or (a.x() == b.x() and a.y() < b.y())) ref = &members[i].aperture;
+            }
+            const float sg = std::max(1e-3f, 0.5f * ref->w);
+            q.key = std::format("c_{}_{}", std::lround(ref->centre_xy().x() / sg), std::lround(ref->centre_xy().y() / sg));
         }
+        // ★THE JOINT HYPOTHESES OVER SUBSETS (final review 7). The cluster's members are independent doors: each is absent (weight 1), present at its own aperture (e^{L_i}),
+        //  or, for a leaf-born member, present at one of its leaf's other frame-wall apertures (e^{L_i + dlogw}). A hypothesis is one choice per member, its weight the
+        //  product, so two real doors that both exist are ONE hypothesis ({A, B}), which a look can confirm: the question SETTLES. (The earlier "at most one of them" made
+        //  two doors sharing a mask a question no data could settle: "both exist" was not a hypothesis.) A hole holds ONE door: a choice that puts two members in one hole
+        //  is not a hypothesis (two labels of one place stay exclusive). Hypotheses are enumerated depth-first, pruned where the partial product is already below
+        //  kWeightFloor (every hypothesis it could still complete is, so the 2^n subsets cost only the ones above the floor).
+        struct Opt { Aperture ap; LeafState lf; double w; bool none; };
+        std::vector<std::vector<Opt>> opts;
+        std::vector<std::vector<double>> prob;   // each member's option probabilities (they sum to 1): the pruning bound
         for (std::size_t i : group)
         {
             const Member& m = members[i];
+            std::vector<Opt> o{{{}, {}, 1.0, true}, {m.aperture, m.leaf, std::exp(std::clamp(m.L, -30.0, 30.0)), false}};   // clamp: exp's own range
             for (const auto& a : m.alts)
             {
-                // the same hole as a hypothesis already in: half a door width is the slot's own size (the seeds are one door width apart), not a tuning
-                const bool dup = std::ranges::any_of(q.hyps, [&](const Hyp& h)
-                {
-                    return not h.apertures.empty() and (h.apertures[0].centre_xy() - a.aperture.centre_xy()).norm() < 0.5f * std::min(h.apertures[0].w, a.aperture.w);
-                });
-                if (dup) continue;
-                q.hyps.push_back({{a.aperture}, {a.leaf}, std::exp(std::clamp(m.L + a.dlogw, -30.0, 30.0))});
+                // the same hole as an option already in: half a door width is the slot's own size (the seeds are one door width apart), not a tuning
+                const bool dup = std::ranges::any_of(o, [&](const Opt& x)
+                { return not x.none and (x.ap.centre_xy() - a.aperture.centre_xy()).norm() < 0.5f * std::min(x.ap.w, a.aperture.w); });
+                if (not dup) o.push_back({a.aperture, a.leaf, std::exp(std::clamp(m.L + a.dlogw, -30.0, 30.0)), false});   // clamp: exp's own range
             }
+            double z = 0.0;
+            for (const auto& x : o) z += x.w;
+            std::vector<double> pr;
+            for (const auto& x : o) pr.push_back(x.w / z);
+            opts.push_back(std::move(o));
+            prob.push_back(std::move(pr));
         }
+        std::vector<const Opt*> pick(opts.size(), nullptr);
+        const auto same_hole = [](const Aperture& a, const Aperture& b)
+        { return (a.centre_xy() - b.centre_xy()).norm() < 0.5f * std::min(a.w, b.w); };
+        const auto emit = [&]
+        {
+            Hyp h; h.w = 1.0;
+            for (const Opt* x : pick) { h.w *= x->w; if (not x->none) { h.apertures.push_back(x->ap); h.leaves.push_back(x->lf); } }
+            q.hyps.push_back(std::move(h));
+        };
+        const auto walk = [&](auto&& self, std::size_t k, double partial) -> void
+        {
+            if (k == opts.size()) { emit(); return; }
+            for (std::size_t c = 0; c < opts[k].size(); ++c)
+            {
+                const double pp = partial * prob[k][c];
+                if (pp < kWeightFloor) continue;   // every completion weighs less than the floor too
+                const Opt& x = opts[k][c];
+                if (not x.none and std::ranges::any_of(std::span<const Opt* const>(pick.data(), k), [&](const Opt* y) { return y != nullptr and not y->none and same_hole(x.ap, y->ap); })) continue;   // a hole holds one door
+                pick[k] = &x;
+                self(self, k + 1, pp);
+            }
+            pick[k] = nullptr;
+        };
+        walk(walk, 0, 1.0);
+        if (q.hyps.empty()) q.hyps.push_back({{}, {}, 1.0});   // every choice below the floor (a very large cluster): the null alone
         out.push_back(std::move(q));
     }
+    return out;
+}
+
+
+// ═══ WHICH LOOK ENTRY A QUESTION CONTINUES (final review 8) ═══════════════════════════════════════════════════════════════════════
+// A question's key can change while the question is the same (a candidate born as a door, a pair forming or dropping). The entries the agent keeps (the
+// affordance node, the ledger of sites already tried) must follow the question, not its key: a question continues the entry with ITS key, else the nearest
+// entry whose reference aperture stands within half the narrower of the two widths (the slot's own size), each entry continued by one question at most.
+// Returns, per asked question, the key of the entry it continues (its own key when none).
+[[nodiscard]] inline std::vector<std::string> resolve_keys(std::span<const std::pair<std::string, Aperture>> existing,
+                                                           std::span<const std::pair<std::string, Aperture>> asked)
+{
+    std::vector<std::string> out(asked.size());
+    std::vector<bool> taken(existing.size(), false), done(asked.size(), false);
+    for (std::size_t a = 0; a < asked.size(); ++a)
+        for (std::size_t e = 0; e < existing.size(); ++e)
+            if (not taken[e] and existing[e].first == asked[a].first) { out[a] = existing[e].first; taken[e] = true; done[a] = true; break; }
+    for (std::size_t a = 0; a < asked.size(); ++a)
+    {
+        if (done[a]) continue;
+        std::size_t best = existing.size();
+        float bd = std::numeric_limits<float>::max();
+        for (std::size_t e = 0; e < existing.size(); ++e)
+        {
+            if (taken[e]) continue;
+            const float d = (existing[e].second.centre_xy() - asked[a].second.centre_xy()).norm();
+            if (d < 0.5f * std::min(existing[e].second.w, asked[a].second.w) and d < bd) { bd = d; best = e; }
+        }
+        if (best < existing.size()) { out[a] = existing[best].first; taken[best] = true; }
+        else out[a] = asked[a].first;
+    }
+    return out;
+}
+
+/// The entries to withdraw this cycle: those no question continues, EXCEPT one the controller is driving to (`executing`): it is held until the claim ends and
+/// withdrawn after (a node removed under the controller loses the target and the same site is offered again).
+[[nodiscard]] inline std::vector<std::string> to_withdraw(std::span<const std::string> existing_keys, std::span<const std::string> continued,
+                                                          const std::function<bool(const std::string&)>& executing)
+{
+    std::vector<std::string> out;
+    for (const auto& k : existing_keys)
+        if (std::ranges::find(continued, k) == continued.end() and not executing(k)) out.push_back(k);
     return out;
 }
 

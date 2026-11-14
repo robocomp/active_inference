@@ -774,7 +774,13 @@ void DoorCore::births(const DoorCycleInput& in, DoorCycleOutput& out)
         // birth from a merged/contaminated mask at all) is §2, still to come.
         // seed at the detection's position (a ricoh slice: wall-fused; a ZED slice: its centroid, unchanged)
         // one-model: a side-on leaf bears its door in the FRAME WALL (spec §3.6): the newborn is placed at the winning hypothesis' aperture, not at the mask
-        const Vec2f birth_xy = cfg.exist_one_model ? place_xy(static_cast<std::size_t>(d)) : dets_[d].xy;
+        // ★A LEAF-BORN CANDIDATE IS BORN AS ITSELF (final review 12): its own theta (the frame-wall aperture and leaf pose of the hypothesis that bore it) seeds the door, not
+        //  this birth frame's mode: the frame may read face-on (the aperture mode wins the mask) and the door would then be seeded at the mask and fit from the leaf plane.
+        const int cand_idx = static_cast<std::size_t>(d) < det_candidate_.size() ? det_candidate_[static_cast<std::size_t>(d)] : -1;
+        const Candidate* leaf_cand = cfg.exist_one_model and cand_idx >= 0 and static_cast<std::size_t>(cand_idx) < candidates_.size()
+                                     and candidates_[static_cast<std::size_t>(cand_idx)].leaf_born ? &candidates_[static_cast<std::size_t>(cand_idx)] : nullptr;
+        const Vec2f birth_xy = leaf_cand != nullptr ? Vec2f(leaf_cand->theta.aperture.centre_xy())
+                             : cfg.exist_one_model ? place_xy(static_cast<std::size_t>(d)) : dets_[d].xy;
         const Eigen::Vector3f c(birth_xy.x(), birth_xy.y(), pkt.slices[slice].centroid.z());
         // ★Re-read every birth: an earlier birth this cycle is already an instance (a newborn's swept arc can explain
         // the next detection), and the existence update may have retired doors since the association.
@@ -909,7 +915,12 @@ void DoorCore::births(const DoorCycleInput& in, DoorCycleOutput& out)
             // registers it as a track immediately and hands it its birth slice so observe()/run_inference
             // initialise the belief AT the detection centroid this cycle — birth, track, and init are now atomic.
             const auto name = world_->adopt_birth(new_id, slice, c);
-            if (cfg.exist_one_model and static_cast<std::size_t>(d) < mask_leaf_.size() and mask_leaf_[static_cast<std::size_t>(d)].has_value())
+            if (leaf_cand != nullptr)
+            {
+                for (auto& [sid, st] : world_->fit_states())
+                    if (sid == new_id) st->birth_aperture = std::pair{leaf_cand->theta.aperture, leaf_cand->theta.leaf};
+            }
+            else if (cfg.exist_one_model and static_cast<std::size_t>(d) < mask_leaf_.size() and mask_leaf_[static_cast<std::size_t>(d)].has_value())
                 for (auto& [sid, st] : world_->fit_states())
                     if (sid == new_id) st->birth_aperture = std::pair{mask_leaf_[static_cast<std::size_t>(d)]->aperture, mask_leaf_[static_cast<std::size_t>(d)]->leaf};
             out.creates.back().name = name.value_or(std::string{});
@@ -928,6 +939,7 @@ void DoorCore::births(const DoorCycleInput& in, DoorCycleOutput& out)
                 {
                     last_p_cand_.erase(cand.key);
                     last_p_door_[new_id] = cand.belief.p();
+                    door_origin_[new_id] = cand.key;   // the question the candidate was keeps its identity as the door (hypothesis look, final review 8)
                 }
                 // THE REVISIT SAMPLE of the place this candidate was seeded from, once per place per visit, taken now that the candidate
                 // is BORN (a single unconfirmed detection is no sample): a place remembered as a door that is a door again = unchanged

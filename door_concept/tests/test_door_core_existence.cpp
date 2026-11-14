@@ -1870,6 +1870,30 @@ int main()
         ViewLedger plain; plain.observe({0.f, 0.f}, {1.f, 0.f}, {1.f, 0.f}, 1.f, 0.f, 0);
         CHECK(plain.serialise().starts_with("VL3 "));
     }
+    {   // leaf_born_is_born_as_itself (final review 12): a candidate born from a side-on leaf is seeded at ITS hypothesis' frame-wall aperture and leaf pose even when the BIRTH
+        // frame reads face-on (the aperture mode wins that mask): the same run as above with the birth frame's leaf mask replaced by a face-on blob at the leaf's own
+        // place (0.42 m from the aperture the hypothesis stands at) is still born on the hypothesis' aperture, not at the blob.
+        const LeafDet leaf{{2.0f, kWallY}, {2.0f, 4.14f}};
+        const auto hyps = rc::door::apertures_from_leaf(leaf.a, leaf.b, 2.1f, kRoom, wall_groups(kRoom, 0.1f), SizePrior{0.85f, 0.12f, 2.05f, 0.06f}, rc::door::RoomBand{0.2f, 0.1f});
+        const auto best = std::ranges::max_element(hyps, [&](const auto& a, const auto& b2) { return a.aperture.centre_xy().x() < b2.aperture.centre_xy().x(); });
+        const rc::door::Aperture ap = best->aperture;
+        const Vec2f at{2.0f, 1.0f};
+        // a leaf-born candidate stands (made from an earlier leaf frame: its theta is the hypothesis' frame-wall aperture and leaf pose); the birth frame reads FACE-ON
+        // at the leaf's own place with the opening seen: the candidate is born on that frame.
+        Rig r(false, true);
+        r.look(at, {2.0f, 4.5f}, {});   // takes the room up
+        DoorCore::Candidate c;
+        c.key = ++r.core.next_candidate_key_; c.room = r.core.room_name(); c.xy = ap.centre_xy(); c.var = 0.04f;
+        c.theta = typical_door_at(c.xy, 0.85f, 2.05f, kRoom); c.theta.aperture = ap; c.theta.leaf = best->leaf;
+        c.width_meas = 0.85f; c.width_sd = 0.1f; c.size_resolved = true; c.leaf_born = true;
+        r.core.candidates_.push_back(std::move(c));
+        for (int i = 0; i < 3 and r.births.empty(); ++i)
+            r.step(input(++r.cycle, ++r.frame, at, {2.0f, 4.5f}, {{2.0f, kWallY, 0.9f}}, 10.0, std::nullopt, {}, make_sweep(ap, {at.x(), at.y() + 0.05f * float(i)}, ap.s + 0.05f, ap.s + ap.w - 0.05f)));
+        std::print("leaf_born_is_born_as_itself: born on the face-on frame: {} at x {:.3f} (the candidate's hypothesis aperture x {:.3f}; the blob stands at x 2.000)\n",
+                   r.births.size(), r.births.empty() ? NAN : static_cast<float>(r.births.front().a), ap.centre_xy().x());
+        CHECK(not r.births.empty());
+        if (not r.births.empty()) CHECK(std::abs(r.births.front().a - ap.centre_xy().x()) < 0.2f);
+    }
     {   // leaf_born_candidate_pays_its_measured_length (final review 6): a 0.4 m side-on leaf mask pays the size term on the MEASURED length 0.4 (against its own sd),
         // not on the length fused with the typical width (0.5 m: ~4 nats of free support). It needs at least the evidence a 0.4 m face-on candidate needs.
         Rig leaf(false, true), face(false, true);

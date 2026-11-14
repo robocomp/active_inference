@@ -159,7 +159,9 @@ int main()
         const std::array<std::pair<std::string, std::string>, 1> edge{{{"place_7", "door_0"}}};
         const auto qs = questions_from(ms, edge, open9);
         CHECK(qs.size() == 2);
-        CHECK(std::ranges::any_of(qs, [](const Question& q) { return q.key == "c_door_0" and q.hyps.size() == 3; }));   // null + the two
+        // the cluster's identity is its reference aperture (the member least along x, rounded to half its width), not a member's name; its hypotheses are the
+        // SUBSETS of the members at distinct holes: none, A, B, A and B (final review 7)
+        CHECK(std::ranges::any_of(qs, [](const Question& q) { return q.key.starts_with("c_") and q.key.find("door") == std::string::npos and q.hyps.size() == 4; }));
         CHECK(std::ranges::any_of(qs, [](const Question& q) { return q.key == "q_door_9" and q.hyps.size() == 2; }));
         const auto none = questions_from(ms, {}, open9);   // no mask ever tied them: nothing but the open one
         CHECK(none.size() == 1 and none[0].key == "q_door_9");
@@ -285,6 +287,81 @@ int main()
         std::printf("bench 20 m2 / 4 hypotheses / %zu poses: cold %.2f ms, warm (tables reused) %.2f ms, same best %d eig %.4f\n", poses.size(), cold, warm,
                     int(b0.pose.xy == b1.pose.xy and cache.hit), b0.eig_nats);
         CHECK(cache.hit and b0.eig_nats == b1.eig_nats);
+    }
+
+    // final review 7: two DECIDED doors that share a mask are independent doors: "both exist" is a hypothesis, so the question settles as their evidence grows
+    // (the earlier "at most one of them" kept a ln 2 question standing for the rest of the visit, a hypothesis no look could confirm)
+    {
+        const auto pair_of = [](double L)
+        {
+            Member A; A.name = "door_0"; A.aperture = bottom(1.0f); A.leaf = LeafState{}; A.L = L;
+            Member B; B.name = "door_1"; B.aperture = bottom(3.0f); B.leaf = LeafState{}; B.L = L;
+            return std::vector<Member>{A, B};
+        };
+        const std::array<std::pair<std::string, std::string>, 1> edge{{{"door_0", "door_1"}}};
+        const auto all = [](const Member&) { return true; };
+        const auto m5 = pair_of(5.0), m8 = pair_of(8.0);
+        const auto q5 = questions_from(m5, edge, all), q8 = questions_from(m8, edge, all);
+        CHECK(q5.size() == 1 and q8.size() == 1);
+        if (q5.size() == 1 and q8.size() == 1)
+        {
+            const auto w5 = weights_of(q5[0]);
+            const auto both = std::ranges::max_element(w5);
+            CHECK(q5[0].hyps[static_cast<std::size_t>(both - w5.begin())].apertures.size() == 2);   // the heaviest hypothesis is "both exist"
+            const Model m = model_of(no_furniture, true);
+            const auto poses = room_poses(kRoom, no_furniture, R);
+            const Best b5 = best_look(q5[0], poses, m), b8 = best_look(q8[0], poses, m);
+            std::printf("two decided doors sharing a mask: L=5 -> %zu live hypotheses, best EIG %.4f nats (settled %d); L=8 -> settled %d, best EIG %.5f nats\n",
+                        live_part(q5[0]).hyps.size(), b5.eig_nats, int(settled(q5[0])), int(settled(q8[0])), b8.eig_nats);
+            CHECK(b5.eig_nats < 0.1);          // far below ln 2 = 0.69, the standing question of the exclusive reading
+            CHECK(settled(q8[0]) and b8.eig_nats < 0.01);
+        }
+        // two labels at ONE hole stay exclusive (a hole holds one door): no hypothesis puts both in
+        Member A; A.name = "door_0"; A.aperture = bottom(1.0f); A.leaf = LeafState{}; A.L = 1.0;
+        Member B; B.name = "place_3"; B.aperture = bottom(1.05f); B.leaf = LeafState{}; B.L = 1.0;
+        const std::array<Member, 2> hole{A, B};
+        const std::array<std::pair<std::string, std::string>, 1> e2{{{"door_0", "place_3"}}};
+        const auto qh = questions_from(hole, e2, all);
+        CHECK(qh.size() == 1 and std::ranges::none_of(qh[0].hyps, [](const Hyp& h) { return h.apertures.size() == 2; }) and qh[0].hyps.size() == 3);
+    }
+    // final review 8: question identity. A candidate born as a door keeps its key; a cluster is keyed by where it is, not who is in it; entries follow questions
+    {
+        Member c; c.name = "place_5"; c.aperture = bottom(1.0f); c.leaf = LeafState{}; c.L = 0.2;
+        Member d = c; d.name = "door_7"; d.key_name = "place_5";   // the candidate became a door
+        const auto open = [](const Member&) { return true; };
+        const auto k0 = questions_from(std::array<Member, 1>{c}, {}, open), k1 = questions_from(std::array<Member, 1>{d}, {}, open);
+        CHECK(k0.size() == 1 and k1.size() == 1 and k0[0].key == k1[0].key and k0[0].key == "q_place_5");
+        Member a; a.name = "door_2"; a.aperture = bottom(1.0f); a.leaf = LeafState{}; a.L = 0.2;
+        Member b; b.name = "door_5"; b.aperture = bottom(3.0f); b.leaf = LeafState{}; b.L = 0.4;
+        Member lighter; lighter.name = "door_1"; lighter.aperture = bottom(3.0f); lighter.leaf = LeafState{}; lighter.L = 0.1;   // a lighter-named member joins (same hole as b)
+        const std::array<std::pair<std::string, std::string>, 1> eab{{{"door_2", "door_5"}}};
+        const std::array<std::pair<std::string, std::string>, 2> eabl{{{"door_2", "door_5"}, {"door_5", "door_1"}}};
+        const auto q1 = questions_from(std::array<Member, 2>{a, b}, eab, open), q2 = questions_from(std::array<Member, 3>{a, b, lighter}, eabl, open);
+        CHECK(q1.size() == 1 and q2.size() == 1 and q1[0].key == q2[0].key);
+        // entries follow questions: an exact key first, else the nearest reference within half the narrower width, each entry once
+        const std::vector<std::pair<std::string, Aperture>> existing{{"q_place_5", bottom(1.0f)}, {"c_x", bottom(3.0f)}};
+        const std::vector<std::pair<std::string, Aperture>> asked{{"q_door_7", bottom(1.1f)}, {"c_y", bottom(3.05f)}, {"q_new", bottom(2.0f)}};
+        const auto ek = resolve_keys(existing, asked);
+        CHECK(ek.size() == 3 and ek[0] == "q_place_5" and ek[1] == "c_x" and ek[2] == "q_new");
+        // never remove a node the controller is driving to: held while the claim runs, withdrawn after
+        const std::vector<std::string> keys{"q_place_5", "c_x", "gone"}, continued{"q_place_5"};
+        const auto w1 = to_withdraw(keys, continued, [](const std::string& k) { return k == "c_x"; });   // c_x is executing
+        const auto w2 = to_withdraw(keys, continued, [](const std::string&) { return false; });          // the claim ended
+        CHECK(w1.size() == 1 and w1[0] == "gone" and w2.size() == 2 and w2[0] == "c_x");
+    }
+    // minor 21: ONE table budget per cycle across questions: a second question that no longer fits is sampled, nothing held
+    {
+        const Model m = model_of(no_furniture, true);
+        const auto poses = room_poses(kRoom, no_furniture, R);
+        Question q{"b1", {}};
+        q.hyps.push_back({{}, {}, 0.5}); q.hyps.push_back({{bottom(1.0f)}, {LeafState{}}, 0.5});
+        Question q2 = q; q2.key = "b2";
+        double budget = static_cast<double>(poses.size()) * 2.0 * 4.0 * 1.5;   // room for ONE of the two questions' exact tables
+        LookCache c1, c2;
+        (void)best_look(q, poses, m, &c1, nullptr, &budget);
+        (void)best_look(q2, poses, m, &c2, nullptr, &budget);
+        std::printf("one budget across questions: first sampled %d, second sampled %d\n", int(c1.sampled), int(c2.sampled));
+        CHECK(not c1.sampled and c2.sampled and c2.tab.empty());
     }
 
     if (g_fail == 0) std::printf("ALL PASS\n");

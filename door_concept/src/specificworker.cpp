@@ -4682,6 +4682,7 @@ void SpecificWorker::step_candidate_looks()
             if (inst.is_bearing_hypothesis or not inst.ai2_initialized) continue;
             rc::door::hlook::Member m;
             m.name = inst.node_name; m.aperture = inst.aperture; m.leaf = inst.leaf; m.L = inst.belief.L();
+            if (const auto origin = core_->door_origin(id); origin != 0) m.key_name = std::format("place_{}", origin);   // the question the candidate was carries on under its identity
             m.restored_unseen = rc::door::restored_unseen(inst);
             hl_members.push_back(std::move(m));
         }
@@ -4791,22 +4792,41 @@ bool SpecificWorker::step_hypothesis_looks(std::span<const rc::door::hlook::Memb
     const float radius = 0.5f * cfg_.pragmatic.robot_passage_width_m;
     const hl::Model model{sensor, polygon, furniture, core_->detectors().zed, core_->detectors().lidar, std::max(1e-3f, cfg_.door_thickness_m), radius};
     const auto poses = hl::room_poses(polygon, furniture, radius);
+    // ★WHICH ENTRY EACH QUESTION CONTINUES (final review 8): a question's key can change while the question is the same (a candidate born as a door, a pair
+    //  forming or dropping), and the entry (the affordance node, the sites already tried) follows the question: its own key, else the entry whose reference
+    //  aperture stands at the same slot. Entries stay under the key they were made with.
+    const auto reference_of = [](const hl::Question& q) -> std::optional<rc::door::Aperture>
+    {
+        const auto heaviest = std::ranges::max_element(q.hyps, {}, [](const hl::Hyp& h) { return h.apertures.empty() ? -1.0 : h.w; });
+        if (heaviest != q.hyps.end() and not heaviest->apertures.empty()) return heaviest->apertures[0];
+        return std::nullopt;
+    };
+    std::vector<std::pair<std::string, rc::door::Aperture>> existing, asked;
+    std::vector<const hl::Question*> open_qs;
+    for (const auto& [k, e] : hyp_looks_) existing.emplace_back(k, e.ref);
     for (const auto& q : questions)
     {
         if (hl::settled(q)) continue;
+        open_qs.push_back(&q);
+        asked.emplace_back(q.key, reference_of(q).value_or(rc::door::Aperture{}));
+    }
+    const std::vector<std::string> entry_key = hl::resolve_keys(existing, asked);
+    double table_budget = hl::kTableBudgetCells;   // ONE budget for the cycle, shared by every question (a per-question one left the total uncapped)
+    for (std::size_t qi = 0; qi < open_qs.size(); ++qi)
+    {
+        const auto& q = *open_qs[qi];
         standing = true;
-        const auto [it, fresh] = hyp_looks_.try_emplace(q.key);
+        const auto [it, fresh] = hyp_looks_.try_emplace(entry_key[qi]);
         auto& e = it->second;
         if (fresh)
             e.aff.init(G, room_node_id_, "door_look_q_" + q.key, "door");
         if (const auto aid = e.aff.node_id(); aid != 0)
             e.aff.on_node_modified(aid);
-        asking.insert(q.key);
+        asking.insert(entry_key[qi]);
         using S = rc::ObjectAffordance::State;
         if (e.aff.state() == S::executing) { e.aff.hold_offered(); continue; }   // the controller holds it: the pose stands until the claim ends
         // the first aperture of the heaviest hypothesis is the ledger's reference for "is this a new view"
-        const auto heaviest = std::ranges::max_element(q.hyps, {}, [](const hl::Hyp& h) { return h.apertures.empty() ? -1.0 : h.w; });
-        if (heaviest != q.hyps.end() and not heaviest->apertures.empty()) e.ref = heaviest->apertures[0];
+        if (const auto ref = reference_of(q); ref.has_value()) e.ref = *ref;
         const auto view_r = [&] { return 0.5f * std::hypot(e.ref.w, e.ref.h); };
         if ((e.aff.state() == S::satisfied or e.aff.state() == S::aborted) and e.site.has_value())
         {   // arrived or handed back: this site is spent, whichever it was
@@ -4820,7 +4840,7 @@ bool SpecificWorker::step_hypothesis_looks(std::span<const rc::door::hlook::Memb
         const auto t0 = std::chrono::steady_clock::now();
         // the pose last published is HELD while it is among the admissible ones: it moves only to a pose with a larger EIG under the current weights
         const hl::Pose held{e.site.has_value() ? Eigen::Vector2f(e.site->x_m, e.site->y_m) : Eigen::Vector2f::Zero(), e.site.has_value() ? e.site->yaw_rad : 0.f};
-        const hl::Best best = hl::best_look(q, admissible, model, &e.cache, e.site.has_value() ? &held : nullptr);
+        const hl::Best best = hl::best_look(q, admissible, model, &e.cache, e.site.has_value() ? &held : nullptr, &table_budget);
         const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
         hyp_look_ms_sum_ += ms; hyp_look_ms_max_ = std::max(hyp_look_ms_max_, ms); hyp_look_hits_ += e.cache.hit ? 1 : 0;
         if (++hyp_look_n_ % 100 == 0)   // ★log cadence only, decides nothing
@@ -4847,12 +4867,17 @@ bool SpecificWorker::step_hypothesis_looks(std::span<const rc::door::hlook::Memb
                        q.key, best.pose.xy.x(), best.pose.xy.y(), best.pose.yaw, best.eig_nats, q.hyps.size());
         }
     }
-    for (auto it = hyp_looks_.begin(); it != hyp_looks_.end();)
+    // ★NEVER REMOVE A NODE THE CONTROLLER IS DRIVING TO (final review 8): an entry no question continues is held while its claim runs and withdrawn after
+    std::vector<std::string> all_keys, kept(asking.begin(), asking.end());
+    for (const auto& [k, e] : hyp_looks_) all_keys.push_back(k);
+    const std::function<bool(const std::string&)> is_executing = [&](const std::string& k) { return hyp_looks_.at(k).aff.state() == rc::ObjectAffordance::State::executing; };
+    for (const auto& k : hl::to_withdraw(all_keys, kept, is_executing))
     {
-        if (asking.contains(it->first)) { ++it; continue; }
-        withdraw(it->first, it->second, "the question is settled");
-        it = hyp_looks_.erase(it);
+        withdraw(k, hyp_looks_.at(k), "the question is settled");
+        hyp_looks_.erase(k);
     }
+    for (const auto& k : all_keys)
+        if (not asking.contains(k) and hyp_looks_.contains(k)) hyp_looks_.at(k).aff.hold_offered();   // executing and unasked: held until the claim ends
     return standing;
 }
 

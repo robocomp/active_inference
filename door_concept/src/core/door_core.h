@@ -275,6 +275,8 @@ public:
         float base_open = std::numeric_limits<float>::quiet_NaN();
     };
     [[nodiscard]] const std::vector<Candidate>& candidates() const { return candidates_; }
+    /// The candidate key a door was born from (0: none): a question about the candidate carries on, under the same identity, as the question about the door.
+    [[nodiscard]] std::uint64_t door_origin(std::uint64_t door_id) const { const auto it = door_origin_.find(door_id); return it != door_origin_.end() ? it->second : 0; }
     /// ONE-MODEL (S10, restore): does a LIVE door of the room the notes belong to already carry the responsibility for a remembered place at
     /// `xy` (position variance `var`)? The CALLER supplies the room's outline, band and proto flag and the ids of the doors living in it
     /// (a door being crossed into it included: descends from the room node): the core takes its own outline up only at its next step, so at
@@ -386,6 +388,7 @@ private:
     // PREVIOUS update_existence, so nothing depends on birth order. Rebuilt at the end of each update_existence (stale keys vanish).
     // Doors are keyed by door id; candidates by Candidate::key (the two key spaces never mix: two maps).
     std::unordered_map<std::uint64_t, float> last_p_door_, last_p_cand_;
+    std::unordered_map<std::uint64_t, std::uint64_t> door_origin_;   // door id -> the key of the candidate it was born from
     WallRates rates_{};   // seeds only; Task 4 sets them (set_wall_rates) from the remembered rooms
     /// The previous cycle's p of every other live door and candidate on `wall` (not `self_door` / `self_cand`), for wall_base_rate.
     [[nodiscard]] std::vector<float> other_p_on_wall(int wall, const std::vector<Vec2f>& polygon, const std::vector<int>& groups,
