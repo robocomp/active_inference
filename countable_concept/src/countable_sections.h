@@ -12,10 +12,11 @@
 
 #include <ConfigLoader/ConfigLoader.h>
 
+#include "countable_config_error.h"   // rc::CountableConfigError
+
 #include <algorithm>
-#include <cstdlib>
 #include <optional>
-#include <print>
+#include <format>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -38,14 +39,11 @@ inline std::optional<std::string> pre_countable_section(const ConfigLoader& cfg)
     return *std::ranges::min_element(found);
 }
 
-// Print and exit non-zero when the config still uses a pre-countable section.
+// Throw rc::CountableConfigError (main prints it and exits non-zero) when the config still uses a pre-countable section.
 inline void refuse_pre_countable_config(const ConfigLoader& cfg)
 {
     if (const auto sec = pre_countable_section(cfg))
-    {
-        std::print(stderr, "config uses pre-countable section [{}] — see countable_concept/KEYMAP.md\n", *sec);
-        std::exit(EXIT_FAILURE);
-    }
+        throw CountableConfigError(std::format("config uses pre-countable section [{}] — see countable_concept/KEYMAP.md\n", *sec));
 }
 
 }  // namespace rc

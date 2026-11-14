@@ -5,8 +5,10 @@
 #                                       ltom_agent saves its repertory only on a graceful stop)
 #   concept_agents.sh status            which are running
 # THE LIST is $CONCEPT_AGENTS — a NEW concept agent (or countable class: folder + bin link, see CONCEPT_AGENT_RECIPE.md) is one word added to the default below.
-# Binary: $WT/<agent>/bin/<agent> when present (default WT = the phase0 worktree), else the main checkout's. Every agent runs
-# from the MAIN agent directory (its data files live there), line-buffered. <out_dir>/agents.txt records which binary and
+# Binary: $WT/<agent>/bin/<agent> when present (default WT = the phase0 worktree), else the main checkout's; a SYMLINK there
+# (a countable class) pins the agent to the worktree — a dangling one is reported and skipped, never replaced by main's.
+# Every agent runs from the agent directory of the checkout its binary came from ($src/<agent>: etc/ and the manifest path
+# ../common/concept_manifest are relative to it), line-buffered. <out_dir>/agents.txt records which binary and
 # which commit each one ran, and the link target (readlink -f) the link path resolves to, so a run can be traced back to the code.
 B=/home/pbustos/robocomp/components/active_inference
 # ★CONCEPT_WT, not WT (2026-11-14): the tour scripts EXPORT WT (= the fleet's rt-build worktree), which silently
@@ -23,16 +25,20 @@ case "${1:-}" in
     for a in $ALL; do
       if pgrep -x "$(comm_of $a)" > /dev/null; then echo "$a: already running"; continue; fi
       exe=""; cfg=""; src=""
-      if [ -x "$WT/$a/bin/$a" ]; then exe=$WT/$a/bin/$a; cfg=$WT/$a/etc/config.toml; src=$WT
-      elif [ -x "$B/$a/bin/$a" ]; then exe=$B/$a/bin/$a; cfg=$B/$a/etc/config.toml; src=$B; fi
       # countable classes (nightstand, bed, toilet): bin/<a> is a SYMLINK to countable_concept/bin/countable_concept. Execute the LINK
-      # path (never its target) so comm = <a> and pgrep -x stays per class; a dangling link means countable_concept is not built.
-      if [ -z "$exe" ]; then
-        for r in $WT $B; do
-          if [ -L "$r/$a/bin/$a" ] && [ ! -e "$r/$a/bin/$a" ]; then echo "$a: link target missing — build countable_concept"; exe=missing; break; fi
-        done
-        [ "$exe" = missing ] && continue
-      fi
+      # path (never its target) so comm = <a> and pgrep -x stays per class. A link in a checkout decides for that checkout: a
+      # dangling worktree link means countable_concept is not built THERE, and falling back to main's binary would silently run
+      # other code against the worktree's class folders — so it is reported and skipped.
+      for r in $WT $B; do
+        l=$r/$a/bin/$a
+        if [ -L "$l" ]; then
+          if [ -e "$l" ] && [ -x "$l" ]; then exe=$l; cfg=$r/$a/etc/config.toml; src=$r
+          elif [ ! -e "$l" ]; then echo "$a: link target missing — build countable_concept ($l -> $(readlink "$l"))"; exe=missing
+          else echo "$a: link target not executable ($l -> $(readlink -f "$l")) — skipped"; exe=missing; fi
+          break
+        elif [ -x "$l" ]; then exe=$l; cfg=$r/$a/etc/config.toml; src=$r; break; fi
+      done
+      [ "$exe" = missing ] && continue
       if [ -z "$exe" ]; then echo "$a: NO BINARY (not in $WT/$a/bin nor $B/$a/bin) — skipped"; continue; fi
       # Every line is prefixed with wall-clock seconds (ms), so recall / birth TIMING can be read off the logs (ltom_agent
       # prints no time of its own). perl, not `ts` (moreutils is not installed). SIGTERM goes to the agent (pkill -x); perl

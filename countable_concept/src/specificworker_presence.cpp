@@ -25,7 +25,7 @@ static rc::owned::Spec owned_spec(const rc::CountableConfig& c)
 {
     return rc::owned::Spec{
         .agent = c.agent_name,
-        .name_prefix = c.concept_class,
+        .name_prefix = c.concept_class + "_",   // "bed_", never "bed": a future bedroom_* / aff_bedroom* is not ours
         .node_types = {"object"},
         .legacy_parent_types = {},
     };
@@ -132,7 +132,7 @@ void SpecificWorker::cleanup_owned_nodes()
 
 
 // Remove every "affordance" node this agent owns, including stale ones left by a crashed previous run.
-// SHARED (common/owned_nodes): the deterministic "aff_countable*" name test — orphan-safe, it still
+// SHARED (common/owned_nodes): the deterministic "aff_<cls>_*" name test — orphan-safe, it still
 // fires after the parent node is gone — OR the parent lookup. Main-thread only (graph access).
 void SpecificWorker::remove_stale_affordance_nodes()
 {

@@ -481,7 +481,7 @@ void SpecificWorker::compute()
 
     // Generic DSR type "object"; the class filter is the "countable_" name prefix + object_subtype attr.
     // The robot left a bed's room: fitting it here would corrupt the pose ltom remembers; ltom offers it back.
-    rc::room::drop_left_behind(*G, cfg_.concept_class, room_node_id_, [this](std::uint64_t id)
+    rc::room::drop_left_behind(*G, cfg_.concept_class + "_", room_node_id_, [this](std::uint64_t id)
     {
         if (auto it = fitter_->instances().find(id); it != fitter_->instances().end())
             it->second.affordance.remove();
@@ -489,7 +489,7 @@ void SpecificWorker::compute()
     });
     const auto object_nodes = G->get_nodes_by_type("object");
     for (const auto& node : object_nodes)
-        if (node.name().starts_with(cfg_.concept_class))
+        if (node.name().starts_with(cfg_.concept_class + "_"))   // "bed_": a bedroom_* node is not a bed
             process_countable_node(node);
 
     // Ricoh 360 = peripheral attention: associate ricoh detections to beds BY DIRECTION (after the ZED fits,

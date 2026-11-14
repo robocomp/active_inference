@@ -52,3 +52,9 @@ target_include_directories(furniture_prior_test PRIVATE ../src ../../common ../.
 target_compile_options(furniture_prior_test PRIVATE -O2)
 target_link_libraries(furniture_prior_test PRIVATE Eigen3::Eigen)
 add_test(NAME furniture_prior_test COMMAND furniture_prior_test)
+
+# Display assets by class-folder convention: nightstand publishes its basecolor texture, bed/toilet none. Run: ./assets_test
+add_executable(assets_test assets_test.cpp)
+target_include_directories(assets_test PRIVATE ../src)
+target_compile_definitions(assets_test PRIVATE REPO_DIR="${CMAKE_CURRENT_LIST_DIR}/../..")
+add_test(NAME assets_test COMMAND assets_test)

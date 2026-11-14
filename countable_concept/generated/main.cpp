@@ -76,6 +76,8 @@
 
 #include "genericworker.h"
 #include "../src/specificworker.h"
+#include "../src/countable_config_error.h"   // rc::CountableConfigError
+#include <cstdio>
 
 
 
@@ -153,7 +155,20 @@ int countable_concept::run(int argc, char* argv[])
 
 
 	tprx = std::tuple<>();
-	SpecificWorker *worker = new SpecificWorker(this->configLoader, tprx, startup_check_flag);
+	// A bad config (missing [Agent] name / [Concept] Class, a pre-countable section, an unusable class manifest) throws
+	// rc::CountableConfigError from SpecificWorker's constructor, after GenericWorker joined the DSR graph. Catching it
+	// here unwinds the half-built worker (members, then ~GenericWorker and its graph) instead of std::exit() skipping
+	// every destructor; the process still exits non-zero with the same message.
+	SpecificWorker *worker = nullptr;
+	try
+	{
+		worker = new SpecificWorker(this->configLoader, tprx, startup_check_flag);
+	}
+	catch (const rc::CountableConfigError& e)
+	{
+		std::fputs(e.what(), stderr);
+		return EXIT_FAILURE;
+	}
 	QObject::connect(worker, SIGNAL(kill()), &a, SLOT(quit()));
 
 	try

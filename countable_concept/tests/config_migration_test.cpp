@@ -7,10 +7,12 @@
 //     migrated config with the SAME value text (trimmed, trailing `# comment` stripped; nothing is reparsed, so 0.10
 //     vs 0.1 cannot even arise). Keys outside the renamed sections keep their name. The migrated config holds no key
 //     that did not come from an old one, except the new required `[Concept] Class = "<obj>"`.
-//     Excluded: <Cls>Model.HeadboardHeightM / HeadboardThickM (bed only) — the reader stopped reading them in Task 3;
-//     the headboard is the manifest's [prior.headboard], asserted here to be exactly 1.25 / 0.10.
+//     Excluded: <Cls>Model.HeadboardHeightM / HeadboardThickM (bed only) — the reader stopped reading them in Task 3
+//     and they were deleted from the migrated config, so they must be ABSENT there; the headboard is the manifest's
+//     [prior.headboard], asserted here to be exactly 1.25 / 0.10.
 //  2. rc::pre_countable_section on a ConfigLoader that loaded a temporary config with [BedModel] names it, and
-//     rc::refuse_pre_countable_config exits non-zero with the KEYMAP pointer (run in a forked child).
+//     rc::refuse_pre_countable_config throws rc::CountableConfigError carrying the KEYMAP pointer; a forked child
+//     handles it exactly as generated/main.cpp does (print what(), exit non-zero), and the parent checks both.
 //
 // Run under the agent locale:  LANG=es_ES.UTF-8 ./config_migration_test
 #include "countable_sections.h"
@@ -20,6 +22,7 @@
 #include <clocale>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <map>
@@ -135,7 +138,11 @@ void check_class(const std::string& obj, const std::map<std::string, std::string
         if (const auto it = km.find(ok); it != km.end()) { nk = it->second; ++renamed; }
         CHECK(not (ok.starts_with(word + "Model.") or ok.starts_with(word + "Concept.")) or km.contains(ok));
         produced.insert(nk);
-        if (excluded.contains(ok)) continue;
+        if (excluded.contains(ok))
+        {
+            if (new_v.contains(nk)) { std::printf("  %s: %s is still in the config (the manifest holds it)\n", obj.c_str(), nk.c_str()); ++bad; }
+            continue;
+        }
         const auto it = new_v.find(nk);
         if (it == new_v.end()) { std::printf("  %s: %s -> %s MISSING\n", obj.c_str(), ok.c_str(), nk.c_str()); ++bad; continue; }
         if (it->second != ov)
@@ -168,7 +175,8 @@ ConfigLoader load_text(const std::string& text)
     return cfg;
 }
 
-// Run refuse_pre_countable_config in a child; return {exit status, what it wrote to stderr}.
+// Run refuse_pre_countable_config in a child that handles rc::CountableConfigError the way generated/main.cpp does
+// (print what() to stderr, exit non-zero); return {exit status, what it wrote to stderr}.
 std::pair<int, std::string> refuse_in_child(const ConfigLoader& cfg)
 {
     int fd[2];
@@ -178,7 +186,8 @@ std::pair<int, std::string> refuse_in_child(const ConfigLoader& cfg)
     if (pid == 0)
     {
         ::close(fd[0]); ::dup2(fd[1], 2);
-        rc::refuse_pre_countable_config(cfg);
+        try { rc::refuse_pre_countable_config(cfg); }
+        catch (const rc::CountableConfigError& e) { std::fputs(e.what(), stderr); std::fflush(stderr); std::_Exit(EXIT_FAILURE); }
         std::_Exit(0);
     }
     ::close(fd[1]);

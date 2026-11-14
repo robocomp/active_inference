@@ -7,12 +7,14 @@
 
 #include "countable_config.h"
 #include "countable_sections.h"   // rc::refuse_pre_countable_config
+#include "countable_config_error.h"   // rc::CountableConfigError — every refusal below throws it (main exits non-zero)
 
 #include "../../common/config_report/config_read.h"   // rc::cfg::Reader (SHARED)
 
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
+#include <format>
 #include <print>
 
 #include "../../common/concept_manifest/concept_manifest.h"   // rc::manifest (SHARED)
@@ -37,8 +39,7 @@ CountableConfig load_countable_config(const ConfigLoader& cfg)
     catch (...) {}
     if (out.agent_name.empty())
     {
-        std::print(stderr, "countable_concept: ★ config has no [Agent] name — cannot start\n");
-        std::exit(EXIT_FAILURE);
+        throw CountableConfigError("countable_concept: ★ config has no [Agent] name — cannot start\n");
     }
     // ConfigLoader::get has no default overload; TOML numeric floats are stored as double.
     // Every read below registers its key, its CODE DEFAULT and a one-line description,
@@ -50,9 +51,8 @@ CountableConfig load_countable_config(const ConfigLoader& cfg)
             "REQUIRED object class (YOLO label, node-name prefix, object_subtype, manifest name), e.g. \"bed\"");
     if (out.concept_class.empty())
     {
-        std::print(stderr, "{}: ★ [Concept] Class is missing or empty — countable_concept needs the object class "
-                           "(e.g. Class = \"bed\") and has no default. Refusing to start.\n", out.agent_name);
-        std::exit(EXIT_FAILURE);
+        throw CountableConfigError(std::format("{}: ★ [Concept] Class is missing or empty — countable_concept needs the object class "
+                           "(e.g. Class = \"bed\") and has no default. Refusing to start.\n", out.agent_name));
     }
 
     // The one place this path is written. It is relative to the agent's CWD (<agent>/), not to src/.
@@ -63,8 +63,9 @@ CountableConfig load_countable_config(const ConfigLoader& cfg)
     // that week, several of them DECLARED as inherited, in writing, in this very file. The declaration is
     // now the enforcement — see rc::manifest::provenance_ok. Refusing to start is the whole point: a comment
     // cannot fail a build, and everything that only warned was fixed around rather than fixed.
-    if (not rc::manifest::provenance_ok(manifest_path, out.concept_class))
-        std::exit(EXIT_FAILURE);
+    if (not rc::manifest::provenance_ok(manifest_path, out.concept_class))   // it has printed why
+        throw CountableConfigError(std::format("{}: ★ the class manifest {} fails its provenance check — refusing to start\n",
+                                               out.agent_name, manifest_path));
 
     const auto getf = [&](std::string_view k, float def, std::string_view what,
                           rc::cfg::Opts o = {}) { return reader.f(k, def, what, o); };
@@ -138,9 +139,8 @@ CountableConfig load_countable_config(const ConfigLoader& cfg)
     const auto bp = rc::manifest::load_back_panel(manifest_path, &manifest_opened);
     if (not manifest_opened)
     {
-        std::print(stderr, "{}: ★ the class manifest {} cannot be opened — refusing to start (a missing manifest "
-                           "would silently turn the bed into a plain box)\n", out.agent_name, manifest_path);
-        std::exit(EXIT_FAILURE);
+        throw CountableConfigError(std::format("{}: ★ the class manifest {} cannot be opened — refusing to start (a missing manifest "
+                           "would silently turn the bed into a plain box)\n", out.agent_name, manifest_path));
     }
     if (bp)
     {

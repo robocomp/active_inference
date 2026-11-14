@@ -22,6 +22,7 @@
 #include <QDebug>
 
 #include "countable_model.h"   // rc::CountableModel statics (TOP_THICKNESS, LEG_RADIUS)
+#include "countable_assets.h"  // rc::countable_mesh_path / countable_texture_path (class-folder conventions)
 #include "../../common/object_anchor/object_anchor_contract.h"
 #include "../../common/graph_provenance/creation_stamp.h"   // rc::provenance::stamp_creation
 
@@ -79,8 +80,11 @@ std::uint64_t CountableSceneGraph::create_instance_from_detection(const Eigen::V
     G_->add_or_modify_attrib_local<object_subtype_att>(countable_node, cfg_.concept_class);
     // Display asset for the retina 3D viewer (relative to its meshes/ root). The agent owns its
     // appearance; the viewer loads & scales this to the fitted box (see cortex mesh_path contract).
-    G_->add_or_modify_attrib_local<mesh_path_att>(countable_node, cfg_.concept_class + "_concept/meshes/" + cfg_.concept_class + ".obj");
-    // No texture: bed.obj is procedural, coloured by bed.mtl (as hood_concept does).
+    G_->add_or_modify_attrib_local<mesh_path_att>(countable_node, rc::countable_mesh_path(cfg_.concept_class));
+    // Texture by convention (countable_assets.h): published only when the class folder ships <cls>_basecolor.jpg
+    // (nightstand); bed and toilet are coloured by their .mtl, so they publish none.
+    if (const auto tex = rc::countable_texture_path(cfg_.concept_class))
+        G_->add_or_modify_attrib_local<mesh_texture_path_att>(countable_node, *tex);
     G_->add_or_modify_attrib_local<width_m_att> (countable_node, cfg_.tracker_birth_width_m);
     G_->add_or_modify_attrib_local<depth_m_att> (countable_node, cfg_.tracker_birth_depth_m);
     G_->add_or_modify_attrib_local<height_m_att>(countable_node, cfg_.tracker_birth_height_m);
