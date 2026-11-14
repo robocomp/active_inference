@@ -912,6 +912,9 @@ float DoorFit::run_inference(rc::DoorFitState& inst, const DoorObservation& obse
             view_cam = Eigen::Vector2f(static_cast<float>(room_T_zed_->coeff(0, 3)), static_cast<float>(room_T_zed_->coeff(1, 3)));
             credit = credit_view(inst.bearing_view_cam, inst.bearing_view_credit, *view_cam, inst.aperture);
         }
+        // ONE-MODEL: this door explains only mask_rho of the mask (door_mask_causes.h); the rest belongs to another door, a new one or
+        // clutter, so the support sample's weight is its share (a mask two doors share counts once in total, not twice)
+        if (cfg_.exist_one_model) credit *= std::clamp(inst.mask_rho, 0.0f, 1.0f);   // clamp: ρ is a probability (domain, not a threshold)
         inst.dbg_view_credit = credit;
         rc::DoorFrame frame;
         frame.points.reserve(static_cast<std::size_t>(npts));
@@ -1048,8 +1051,15 @@ float DoorFit::run_inference(rc::DoorFitState& inst, const DoorObservation& obse
         //  from LiDAR alone; its first mask in 25 min lay on the closed leaf plane, x = 1.00 at the 81° point estimate, and that one
         //  frame removed the real door (sup dl −1.95). The fit's own clutter share (last_clutter_frac, logged) keeps its meaning:
         //  how well THIS state explains the mask.
+        // ONE-MODEL: x under ALL FOUR hinge × swing hypotheses of the leaf channel (DoorBelief::leaf_mixture); the single-swing marginal
+        // calls a leaf seen side-on on the swing side the belief gave 0.1 all clutter (chat_e2e18). Not initialised yet: the old marginal.
+        float one_model_x = std::numeric_limits<float>::quiet_NaN();
+        if (cfg_.exist_one_model and not frame.points.empty())
+            one_model_x = inst.ai2_belief.clutter_fraction_leaf_marginal(frame.points, R, inst.leaf_channel, cfg_.phi_max_rad);
+        if (not std::isfinite(one_model_x) and not frame.points.empty())
+            one_model_x = inst.ai2_belief.clutter_fraction_leaf_marginal(frame.points, R, inst.phi_curve);
         if (not frame.points.empty())   // the existence channel `sup`: x is undefined with no support (no default)
-            inst.pending_fit_support = rc::door::core::FitSupport{inst.ai2_belief.clutter_fraction_leaf_marginal(frame.points, R, inst.phi_curve),
+            inst.pending_fit_support = rc::door::core::FitSupport{one_model_x,
                                                                   inst.last_slice_sensor,
                                                                   rc::door::aperture_coverage(inst.ai2_belief.aperture(), frame.points),
                                                                   rc::door::aperture_overlap(inst.ai2_belief.aperture().w,

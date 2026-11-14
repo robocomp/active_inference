@@ -1588,6 +1588,12 @@ void SpecificWorker::CoreWorld::set_assigned_mask(std::uint64_t id, int slice)
         it->second.assigned_mask_idx = slice;
 }
 
+void SpecificWorker::CoreWorld::set_mask_responsibility(std::uint64_t id, float rho)
+{
+    if (auto it = w_.fitter_->instances().find(id); it != w_.fitter_->instances().end())
+        it->second.mask_rho = rho;
+}
+
 // What ran between the association and the births in the old run_instance_tracker — kept in place, in order.
 void SpecificWorker::CoreWorld::after_association(const rc::door::core::TrackerCycleInfo& info)
 {

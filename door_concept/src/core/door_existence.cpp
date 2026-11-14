@@ -213,6 +213,121 @@ std::vector<FrameDetection> DoorCore::frame_detections() const
     return v;
 }
 
+// ═══ ONE-MODEL: the four causes of every detection (spec §3.2; door_mask_causes.h) ═══════════════════════════════════════
+// The log of the probability that a door is BORN at `xy`: the place prior of the typical door there (band, extent, per-wall base
+// rate charged by the live doors' last-cycle p; size unresolved = 0). Candidates are not counted: they ARE the new-door hypothesis.
+double DoorCore::log_birth(const Vec2f& xy, float sd) const
+{
+    const auto& cfg = cfg_.door;
+    const auto& polygon = fit_.room_polygon();
+    const auto groups = wall_groups(polygon, fit_.room_band().sigma_m);
+    const rc::DoorFitState th = typical_door_at(xy, cfg.door_prior_w_m, cfg.door_prior_h_m, polygon);
+    const int wall = wall_of(th.aperture.centre_xy(), polygon, groups);
+    std::vector<float> r_others;   // the live doors only: a candidate IS the new-door hypothesis, not another door
+    if (wall >= 0)
+        for (const auto& [id, st] : world_->fit_states())
+            if (not st->is_bearing_hypothesis)
+                if (const auto it = last_p_door_.find(id); it != last_p_door_.end() and wall_of(st->aperture.centre_xy(), polygon, groups) == wall)
+                    r_others.push_back(it->second);
+    const PlacePrior pp = prior_of(th, polygon, fit_.room_is_proto(), fit_.room_band(), 0, cfg.tracker_detection_noise_m, cfg.door_prior_h_std, false,
+                                   existence_size_prior(cfg), sd, sd, sd, std::numeric_limits<float>::quiet_NaN(), &rates_, r_others);
+    return -std::log1p(std::exp(-static_cast<double>(pp.total())));   // log of the logistic: stable for either sign
+}
+
+void DoorCore::compute_mask_causes(const DoorCycleInput& /*in*/)
+{
+    mask_causes_.clear();
+    mask_log_birth_.clear();
+    const auto& cfg = cfg_.door;
+    if (not cfg.exist_one_model or dets_.empty() or not info_.new_frame)
+        return;
+    const auto& pkt = masks_.packet();
+    const auto& polygon = fit_.room_polygon();
+    // ℓ = √(room area): the extent a spurious door-class mask is spread over (no polygon: an unknown room, 25 m²). // kept: a
+    // geometric scale of the clutter density with no model term of its own; it enters as a log, so a factor 2 in area is 0.35 nats.
+    double area2 = 0.0;
+    for (std::size_t i = 0, n = polygon.size(); i < n; ++i)
+    {
+        const Vec2f &a = polygon[i], &b = polygon[(i + 1) % n];
+        area2 += double(a.x()) * b.y() - double(b.x()) * a.y();
+    }
+    const double area = polygon.size() >= 3 ? std::abs(area2) * 0.5 : 25.0;
+    // the live doors as causes (those with a belief); r = their previous-cycle p, so nothing depends on this cycle's own update
+    std::vector<DoorCauseInput> doors;
+    struct Along { Vec2f centre, u; float var; };
+    std::unordered_map<std::uint64_t, Along> door_along;
+    const rc::DoorBeliefParams* bp = nullptr;
+    for (const auto& [id, st] : world_->fit_states())
+    {
+        if (st->is_bearing_hypothesis or not st->ai2_initialized) continue;
+        DoorCauseInput d;
+        d.id = id;
+        d.belief = &st->ai2_belief;
+        d.leaf = &st->leaf_channel;
+        const auto it = last_p_door_.find(id);
+        const double r = it != last_p_door_.end() ? it->second : st->belief.p();
+        d.log_r = std::log(std::max(1e-9, r));   // max: the domain of a log (r is a probability, 0 is not a belief)
+        d.place_var = std::pow(std::max(0.0f, st->ai2_belief.recess_sd()), 2.0f) + 0.5f * (st->chain_cov_xx + st->chain_cov_yy);
+        d.phi_max_rad = cfg.phi_max_rad;
+        door_along[id] = {st->aperture.centre_xy(), st->aperture.wall_u, std::max(0.0f, st->ai2_belief.covariance()(0, 0)) + st->chain_cov_xx};
+        doors.push_back(d);
+        if (bp == nullptr) bp = &st->ai2_belief.params();
+    }
+    const rc::DoorBeliefParams bp_default{};
+    const float rn2 = cfg.tracker_detection_noise_m * cfg.tracker_detection_noise_m;
+    mask_causes_.resize(dets_.size());
+    mask_log_birth_.assign(dets_.size(), -std::numeric_limits<double>::infinity());
+    for (std::size_t i = 0; i < dets_.size(); ++i)
+    {
+        const auto& dv = dets_[i];
+        const auto& sl = pkt.slices[static_cast<std::size_t>(dv.slice_index)];
+        const auto span = masks_.support(sl);
+        if (span.empty()) continue;
+        // a stride, so a 3000-point mask costs what a 250-point one does (cost only: the mean per-point score is unchanged by it)
+        const std::size_t stride = std::max<std::size_t>(1, span.size() / 256);
+        std::vector<Eigen::Vector3f> pts;
+        pts.reserve(span.size() / stride + 1);
+        for (std::size_t k = 0; k < span.size(); k += stride) pts.push_back(span[k]);
+        const DetectorModel& dm = dv.sensor != 0 ? detectors_.ricoh : detectors_.zed;
+        const float var = dv.xy_var >= 0.0f ? dv.xy_var : rn2;
+        const double log_b = log_birth(dv.xy, std::sqrt(var));
+        mask_log_birth_[i] = log_b;
+        MaskCauseModel model;
+        model.log_birth = log_b;
+        model.log_kappa = std::log(std::max(1e-9, static_cast<double>(dm.false_alarm)));
+        model.log_pd_new = std::log(std::max(1e-9, static_cast<double>(dm.hit_rate)));
+        model.new_sd_m = std::sqrt(var);
+        model.clutter_len_m = std::sqrt(area);
+        for (auto& d : doors)
+        {
+            d.log_pd = model.log_pd_new;
+            const auto it = door_along.find(d.id);
+            d.along_offset_m = (dv.xy - it->second.centre).dot(it->second.u);
+            d.along_var = it->second.var + var;
+        }
+        const float R = cfg.ai2_sigma_base_m * cfg.ai2_sigma_base_m + std::max(0.0f, sl.depth_var);
+        mask_causes_[i] = causes_of_mask(dv.slice_index, pts, R, doors, model, bp != nullptr ? *bp : bp_default);
+    }
+}
+
+std::vector<FrameDetection> DoorCore::place_detections(std::uint64_t door, int candidate) const
+{
+    std::vector<FrameDetection> v = frame_detections();
+    if (not cfg_.door.exist_one_model)
+        return v;
+    for (std::size_t i = 0; i < v.size(); ++i)
+    {
+        double rho = 0.0;   // no causes computed for this detection (not a fresh frame): it says nothing about this place
+        if (i < mask_causes_.size() and not mask_causes_[i].causes.empty())
+        {
+            if (door != 0) rho = mask_causes_[i].rho_door(door);
+            else if (candidate >= 0 and i < det_candidate_.size() and det_candidate_[i] == candidate) rho = mask_causes_[i].rho_kind(CauseKind::NewDoor);
+        }
+        v[i].w *= static_cast<float>(rho);
+    }
+    return v;
+}
+
 void DoorCore::with_frame(const DoorCycleInput& in, bool zed_ran, bool use_rgb, const std::function<void(const ExistenceFrame&)>& f)
 {
     const auto& cfg = cfg_.door;
@@ -340,7 +455,23 @@ void DoorCore::prepare_candidates(const DoorCycleInput& in, const std::vector<rc
         return false;
     };
     // a candidate a live door now explains is that door (born, restored or carried meanwhile): it is no longer pending
-    std::erase_if(candidates_, [&](const Candidate& c) { return c.room == room_name_ and gated(c.xy, c.var); });
+    // (one-model: no gate. A live door explains a candidate when the door's cause outweighs a new door's at the candidate's place:
+    //  log r_i − ½ m² against log b, the same comparison the masks' responsibilities make.)
+    const auto live_door_outweighs_new = [&](const Candidate& c)
+    {
+        const double lb = log_birth(c.xy, std::sqrt(std::max(1e-9f, c.var)));
+        for (const auto& t : tracks)
+        {
+            const Vec2f e = c.xy - t.xy;
+            const float cv = t.has_cov ? 0.5f * (t.cov(0, 0) + t.cov(1, 1)) : cfg.tracker_gate_fallback_m * cfg.tracker_gate_fallback_m;
+            const double m2 = e.squaredNorm() / std::max(1e-9f, cv + c.var);
+            const auto it = last_p_door_.find(t.id);
+            if (std::log(std::max(1e-9, double(it != last_p_door_.end() ? it->second : 1.0f))) - 0.5 * m2 >= lb) return true;
+        }
+        return false;
+    };
+    std::erase_if(candidates_, [&](const Candidate& c)
+                  { return c.room == room_name_ and (cfg.exist_one_model ? live_door_outweighs_new(c) : gated(c.xy, c.var)); });
     const auto& pkt = masks_.packet();
     const auto& polygon = fit_.room_polygon();
     // The typical door at the place, with the width of this frame's blob along its wall (its support's extent).
@@ -362,9 +493,30 @@ void DoorCore::prepare_candidates(const DoorCycleInput& in, const std::vector<rc
     for (std::size_t d = 0; d < dets_.size(); ++d)
     {
         const auto& dv = dets_[d];
-        if (not dv.birthable or gated(dv.xy, dv.xy_var)) continue;
+        // one-model: no gate. The mask belongs to a pending place when that place's cause outweighs a new place (log r_c − ½ m² against
+        // log b), and a new place is made for it unless a live door already owns it better (the mask's MAP cause is a door).
+        const bool one = cfg.exist_one_model and d < mask_causes_.size() and not mask_causes_[d].causes.empty();
+        if (not dv.birthable or (not one and gated(dv.xy, dv.xy_var))) continue;
+        if (cfg.exist_one_model and not one) continue;   // no causes computed for it (not a fresh frame): it says nothing
         const float var = dv.xy_var >= 0.0f ? dv.xy_var : rn2;
         int best = -1; float best_m2 = cfg.tracker_gate_mahalanobis;
+        if (one)
+        {
+            double best_score = mask_log_birth_[d];   // a candidate must beat a new place
+            for (std::size_t c = 0; c < candidates_.size(); ++c)
+            {
+                if (candidates_[c].room != room_name_) continue;
+                const double m2 = (candidates_[c].xy - dv.xy).squaredNorm() / std::max(1e-9f, candidates_[c].var + var);
+                const auto it = last_p_cand_.find(candidates_[c].key);
+                const double score = std::log(std::max(1e-9, double(it != last_p_cand_.end() ? it->second : 1.0f))) - 0.5 * m2;
+                if (score >= best_score) { best_score = score; best = static_cast<int>(c); }
+            }
+            double door_best = 0.0;
+            for (const auto& [id, st] : world_->fit_states()) door_best = std::max(door_best, mask_causes_[d].rho_door(id));
+            if (best < 0 and door_best > mask_causes_[d].rho_kind(CauseKind::NewDoor))
+                continue;   // an existing door explains this mask better than a new place would
+        }
+        else
         for (std::size_t c = 0; c < candidates_.size(); ++c)
         {
             if (candidates_[c].room != room_name_) continue;
@@ -436,8 +588,18 @@ void DoorCore::prepare_candidates(const DoorCycleInput& in, const std::vector<rc
             if (cand.size_resolved) cand.best_size = std::max(cand.best_size, cand.belief.prior.size);
             const auto it = self_det.find(c);
             const int self_sensor = it == self_det.end() ? -1 : (dets_[static_cast<std::size_t>(it->second)].sensor != 0 ? 1 : 0);
-            const float self_w = it == self_det.end() ? 0.0f : det_w_[static_cast<std::size_t>(it->second)];
+            float self_w = it == self_det.end() ? 0.0f : det_w_[static_cast<std::size_t>(it->second)];
             std::vector<ViewRow> rows;
+            if (cfg.exist_one_model)
+            {   // the candidate sees the detections as ITS cause's responsibility: no gate, no one-detection rule for the hits (S8, S9)
+                if (it != self_det.end())
+                    self_w *= static_cast<float>(mask_causes_[static_cast<std::size_t>(it->second)].rho_kind(CauseKind::NewDoor));
+                const std::vector<FrameDetection> place = place_detections(0, static_cast<int>(c));
+                ExistenceFrame fr_c = fr;
+                fr_c.dets = place;
+                observe_place(cand.belief, cand.theta, fr_c, visit_, 0.0f, &rows, self_sensor, self_w);
+            }
+            else
             observe_place(cand.belief, cand.theta, fr, visit_, 0.0f, &rows, self_sensor, self_w);
             log_view_rows(std::format("place_{}", cand.key), rows, out);   // logged (no selection by birth), never learned from
             const Verdict v = decide(cand.belief.L(), Role::Ordinary, costs);
@@ -459,6 +621,9 @@ void DoorCore::prepare_candidates(const DoorCycleInput& in, const std::vector<rc
         if (const int c = det_candidate_[d]; c >= 0)
         {
             const bool own = self_det.at(static_cast<std::size_t>(c)) == static_cast<int>(d);
+            // kept: ONE detection per candidate carries the birth verdict (S8) even under the one-model flag: the tracker's own same-frame
+            // duplicate test does not see its promoted candidates, so two verdicts at one place would be two births. The HITS of the
+            // candidate's other detections are already counted by their responsibility (place_detections).
             dets_[d].birth_evidence = own and exists[static_cast<std::size_t>(c)] ? 1.0f : 0.0f;
             if (not own) dets_[d].birthable = false;
         }
@@ -598,6 +763,12 @@ void DoorCore::update_existence(const DoorCycleInput& in, DoorCycleOutput& out)
                 fr_door.zed_ran = fr_door.ricoh_ran = fr_door.ricoh_hits_only = false;
             // ★The fit's own support, consumed once: the first fit of a door runs in the same cycle as its birth (after this update) and is
             //  scored here on the next frame. No fit since the last update → no term (door_fit.cpp sets it only when a fit ran).
+            std::vector<FrameDetection> place_dets;   // one-model: the detections as this door's responsibility (no gate)
+            if (cfg.exist_one_model)
+            {
+                place_dets = place_detections(id, -1);
+                fr_door.dets = place_dets;
+            }
             inst.exist_trace = observe_place(inst.belief, inst, fr_door, visit_, act, &rows, -1, 0.0f, std::exchange(inst.pending_fit_support, std::nullopt));
             // A door that descends from a remembered row: its first detection in this visit finds the place again (the learned
             // hazard's "unchanged" sample; one per place per visit - PlaceTable::sample_revisit). The sighting moves to now.

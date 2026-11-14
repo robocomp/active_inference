@@ -332,6 +332,8 @@ public:
     void retire(std::uint64_t id) override { live_.erase(id); }
     void set_assigned_mask(std::uint64_t id, int slice) override
     { if (auto it = live_.find(id); it != live_.end()) it->second.assigned_mask_idx = slice; }
+    void set_mask_responsibility(std::uint64_t id, float rho) override
+    { if (auto it = live_.find(id); it != live_.end()) it->second.mask_rho = rho; }
 
     void after_association(const TrackerCycleInfo&) override {}   // (live: the pumps; existence is the core's now)
 

@@ -10,8 +10,9 @@
 // CURRENCY. A mask is ONE observation: its residual across the surface it is attributed to, scored by the mean over its points of
 // the fit's own unnormalised point mixture u (door_belief.cpp mixture_unnorm: u_surface = (1 − ε) exp(−d²/2R), 1 = dead on the
 // surface). Each cause is a DENSITY in that residual (units 1/m), so causes are comparable without a hand-set scale:
-//   door i :  r_i · p_D,i · exp(mean log u) · (R/R_eff)^½ / √(2π R_eff),  R_eff = R + σ²_place  (the door's position uncertainty
-//             convolves the kernel — what the old code spelt as a Mahalanobis radius);
+//   door i :  r_i · p_D,i · exp(mean log u) · (R/R_eff)^½ / √(2π R_eff) · exp(−½ δ²/σ²_along),  R_eff = R + σ²_across (the door's
+//             uncertainty across its wall convolves the kernel) and δ the mask's offset along the wall against the door's σ_along —
+//             what the old code spelt as one Mahalanobis radius;
 //   new    :  b · p_D · (1 − ε) / √(2π (R + σ²_new))       σ_new = the new door's own position sd (the detection's);
 //   clutter:  κ · (1 − ε) / ℓ                              ℓ = the length a spurious mask is spread over (√ room area).
 // New and clutter both fit the mask perfectly (a spurious mask is as door-shaped as a real new one): only their PRIORS, b against
@@ -77,7 +78,9 @@ struct DoorCauseInput
     const rc::door::LeafChannel* leaf = nullptr;       // the four hinge × swing φ filters; null/uninitialised = aperture only
     double log_r = 0.0;                                // log existence probability (last cycle's p)
     double log_pd = 0.0;                               // log P(this sensor reports it | it exists, the mask is there)
-    float place_var = 0.0f;                            // the door's position variance (belief σ_s² + pose chain): convolves the kernel
+    float place_var = 0.0f;                            // the door's variance ACROSS its wall (recess + pose chain): convolves the SDF kernel
+    float along_offset_m = 0.0f;                       // the mask centroid's offset from the aperture centre ALONG the wall
+    float along_var = 0.0f;                            // the door's variance along its wall (belief σ_s² + pose chain) + the detection's: 0 = no term
     float phi_max_rad = 2.0944f;                       // the φ grid of the leaf filters
 };
 
@@ -123,7 +126,9 @@ struct MaskCauseModel
             }
         }
         const double log_ap = d.belief->aperture_loglik(pts, Reff) + norm;
-        const double base = d.log_r + d.log_pd;
+        // where the mask sits along the wall against where the door may be along it: what the old Mahalanobis radius said, as a likelihood
+        const double along = d.along_var > 0.0f ? -0.5 * double(d.along_offset_m) * d.along_offset_m / double(d.along_var) : 0.0;
+        const double base = d.log_r + d.log_pd + along;
         if (p_open < 1.0 and log_ap >= reach_floor)
             out.causes.push_back({CauseKind::Aperture, d.id, base + std::log1p(-p_open) + log_ap});
         if (p_open > 0.0 and log_leaf >= reach_floor)

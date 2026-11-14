@@ -55,6 +55,7 @@
 #include "existence_update.h" // Task 8: one frame of evidence into one place belief
 #include "door_decision.h"    // Task 8: the costed decision, the role, the cost estimator
 #include "place_table.h"      // Task 8: the place table (the row is the belief)
+#include "door_mask_causes.h" // one-model: the four causes of a mask and their responsibilities
 #include "../door_config.h"   // rc::DoorConfig (plain struct)
 #include "../door_model.h"    // rc::DoorState
 #include "../door_belief.h"   // rc::DoorBelief (association_nll)
@@ -138,6 +139,9 @@ public:
     // ── act ──
     virtual void retire(std::uint64_t id) = 0;                           // a merged duplicate: affordances + fit + node
     virtual void set_assigned_mask(std::uint64_t id, int slice) = 0;     // -1 = none this cycle
+    /// One-model: how much of the assigned mask this door explains (ρ in [0,1]); weights the fit's support sample. 1 = the whole mask
+    /// (flag off: always). A world that does not carry it ignores it and the fit takes every mask whole, as before.
+    virtual void set_mask_responsibility(std::uint64_t /*id*/, float /*rho*/) {}
     /// The old code between association and births (live: semantic/RGB/depth pumps, actuation UI, detect probe). The
     /// cycle's tracker numbers are final at this point. The core's existence update (which may remove doors) follows it.
     virtual void after_association(const TrackerCycleInfo& info) = 0;
@@ -298,6 +302,13 @@ private:
     void associate(const DoorCycleInput& in, DoorCycleOutput& out);
     void births(const DoorCycleInput& in, DoorCycleOutput& out);
     void fit_doors(DoorCycleOutput& out);
+    /// ONE-MODEL (spec §3.2): the four causes of every detection this cycle -> mask_causes_ / mask_log_birth_ (door_mask_causes.h).
+    void compute_mask_causes(const DoorCycleInput& in);
+    /// ONE-MODEL: this cycle's detections as one PLACE sees them: each one's weight is its reliability times the responsibility the
+    /// place's cause has for it (door id, or candidate index), so the existence update's association needs no gate of its own.
+    [[nodiscard]] std::vector<FrameDetection> place_detections(std::uint64_t door, int candidate) const;
+    /// ONE-MODEL: log b, the probability that a door is BORN at xy (the typical door's place prior; the live doors on its wall charge the base rate).
+    [[nodiscard]] double log_birth(const Vec2f& xy, float sd) const;
     /// SpecificWorker::update_existence_beliefs, moved (door_existence.cpp). Runs once per NEW mask frame.
     void update_existence(const DoorCycleInput& in, DoorCycleOutput& out);
 
@@ -361,6 +372,8 @@ private:
 
     // this cycle
     std::vector<rc::DetectionView> dets_;
+    std::vector<MaskCauses> mask_causes_;     // per dets_ index (one-model; empty when the flag is off)
+    std::vector<double> mask_log_birth_;      // per dets_ index: log b of a door born at the detection's place (one-model)
     rc::TrackerResult res_;
     TrackerCycleInfo info_;
 };

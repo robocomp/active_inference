@@ -157,6 +157,7 @@ private:
         std::optional<rc::door::core::IdentityMatch> match_identity(const Eigen::Vector2f& xy) const override;
         void retire(std::uint64_t id) override;
         void set_assigned_mask(std::uint64_t id, int slice) override;
+        void set_mask_responsibility(std::uint64_t id, float rho) override;
         void after_association(const rc::door::core::TrackerCycleInfo& info) override;
         std::uint64_t create_door(const rc::door::core::BirthRequest& r) override;
         std::optional<std::string> adopt_birth(std::uint64_t id, int slice, const Eigen::Vector3f& centroid) override;

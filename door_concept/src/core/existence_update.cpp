@@ -20,6 +20,14 @@ namespace
 // Is a detection of this camera from an inadmissible frame inside the place's association gate?
 bool inadmissible_near(std::span<const FrameDetection> dets, int sensor, const Vec2f& xy, float var, const rc::DoorConfig& cfg)
 {
+    if (cfg.exist_one_model)
+    {   // the detections arrive already weighted by this place's responsibility (no gate): the frame is no trial when what this place
+        // explains of the camera's masks comes mostly from frames the fit would refuse (a comparison of two sums, not a radius)
+        double bad = 0.0, good = 0.0;
+        for (const auto& d : dets)
+            if ((d.sensor != 0) == (sensor != 0)) (d.admissible ? good : bad) += d.w;
+        return bad > good;
+    }
     const float rn2 = cfg.tracker_detection_noise_m * cfg.tracker_detection_noise_m;
     for (const auto& d : dets)
         if ((d.sensor != 0) == (sensor != 0) and not d.admissible
@@ -112,6 +120,14 @@ rc::edges::ContourSet leaf_contour(const ExistenceScene& sc, const rc::DoorFitSt
 float association_weight(std::span<const FrameDetection> dets, int sensor, const Vec2f& xy, float var, float kappa,
                          const rc::DoorConfig& cfg)
 {
+    if (cfg.exist_one_model)
+    {   // one-model: d.w is the detection's reliability times THIS place's responsibility for it (door_mask_causes.h); the gate that
+        // used to stand here (the tracker's Mahalanobis radius) is the cause's likelihood, so the weight is just the best of them
+        float best = 0.0f;
+        for (const auto& d : dets)
+            if ((d.sensor != 0) == (sensor != 0) and d.admissible) best = std::max(best, d.w);
+        return kappa * best;
+    }
     const float rn2 = cfg.tracker_detection_noise_m * cfg.tracker_detection_noise_m;
     float best = 0.0f;
     for (const auto& d : dets)

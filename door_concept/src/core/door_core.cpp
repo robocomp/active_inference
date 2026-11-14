@@ -423,6 +423,7 @@ void DoorCore::associate(const DoorCycleInput& in, DoorCycleOutput& out)
         }
         tracks.push_back(t);
         world_->set_assigned_mask(inst.id, -1);   // cleared; re-set below only if associated this cycle
+        world_->set_mask_responsibility(inst.id, 1.0f);
     }
 
     // Detections ← this frame's "door" mask slices (carry the slice index for the assignment).
@@ -582,6 +583,7 @@ void DoorCore::associate(const DoorCycleInput& in, DoorCycleOutput& out)
     }
 
     // ★Task 8: every detection's place is judged by the door model before the tracker sees it (birth_evidence = verdict).
+    compute_mask_causes(in);   // one-model: every detection's four causes, before anything is gated by them
     prepare_candidates(in, tracks, out);
     res_ = tracker_.update(tracks, dets_);
     const int n_assigned = static_cast<int>(std::count_if(res_.assignment.begin(), res_.assignment.end(),
@@ -625,7 +627,9 @@ void DoorCore::associate(const DoorCycleInput& in, DoorCycleOutput& out)
         std::vector<EvPair> pairs;
         const float R = cfg.ai2_sigma_base_m * cfg.ai2_sigma_base_m;
         const float rn2 = cfg.tracker_detection_noise_m * cfg.tracker_detection_noise_m;
-        for (const auto& inst : doors)
+        const bool one_model = cfg.exist_one_model;
+        const std::vector<TrackedDoor> no_doors;   // one-model: no greedy pairing, no gate — the responsibilities below assign
+        for (const auto& inst : one_model ? no_doors : doors)
         {
             if (not inst.ai2_initialized or inst.belief == nullptr) continue;
             const Eigen::Vector2f bc = inst.belief->center_xy();   // room-frame panel centre
@@ -664,6 +668,27 @@ void DoorCore::associate(const DoorCycleInput& in, DoorCycleOutput& out)
             world_->set_assigned_mask(p.id, p.slice);
             used_inst.insert(p.id); used_slice.insert(p.slice);
         }
+        // ONE-MODEL (spec §3.2): every initialised door takes the mask it is most responsible for — and not only one door per mask: a mask two
+        // doors share goes to both, each weighted by its responsibility (the fit's support sample, DoorFitState::mask_rho). It takes it when
+        // its cause is at least as good an explanation as "a new door" and as "clutter" (a comparison of the mask's causes, not a radius).
+        if (one_model and info_.new_frame)
+            for (const auto& inst : doors)
+            {
+                if (not inst.ai2_initialized or inst.belief == nullptr) continue;
+                int best = -1; double best_rho = 0.0;
+                for (std::size_t d = 0; d < dets_.size() and d < mask_causes_.size(); ++d)
+                {
+                    const auto& mc = mask_causes_[d];
+                    const double r = mc.rho_door(inst.id);
+                    if (r > best_rho and r >= mc.rho_kind(CauseKind::NewDoor) and r >= mc.rho_kind(CauseKind::Clutter)) { best_rho = r; best = dets_[d].slice_index; }
+                }
+                if (best >= 0)
+                {
+                    world_->set_assigned_mask(inst.id, best);
+                    world_->set_mask_responsibility(inst.id, static_cast<float>(best_rho));
+                    used_inst.insert(inst.id); used_slice.insert(best);
+                }
+            }
 
         // Pass 2 — INITIALISATION: a freshly-born instance has no belief yet (Pass 1 skips it), so it has no
         // way to earn its first mask. Assign it the nearest UNUSED slice within the metric fallback gate of
@@ -684,7 +709,15 @@ void DoorCore::associate(const DoorCycleInput& in, DoorCycleOutput& out)
                 if (used_slice.count(d.slice_index)) continue;
                 const float ex = d.xy.x() - ms.cx, ey = d.xy.y() - ms.cy, r2 = ex * ex + ey * ey;
                 const float v = d.xy_var >= 0.0f ? d.xy_var : cfg.tracker_detection_noise_m * cfg.tracker_detection_noise_m;
-                if (r2 >= fb2 and r2 > cfg.tracker_gate_mahalanobis * v) continue;
+                // one-model: no gate; the newborn takes the mask only when its own place explains it better than a new door elsewhere would
+                // (exp(-m²/2) against the mask's new-door responsibility) — a comparison, the gate's job without its radius
+                if (one_model)
+                {
+                    const std::size_t di = static_cast<std::size_t>(&d - dets_.data());
+                    if (di >= mask_causes_.size() or mask_causes_[di].causes.empty()
+                        or std::exp(-0.5 * r2 / std::max(v, 1e-9f)) < mask_causes_[di].rho_kind(CauseKind::NewDoor)) continue;
+                }
+                else if (r2 >= fb2 and r2 > cfg.tracker_gate_mahalanobis * v) continue;
                 if (const float cost = r2 / std::max(v, 1e-9f); cost < best_cost) { best_cost = cost; best = d.slice_index; }
             }
             if (best >= 0) { world_->set_assigned_mask(inst.id, best); used_slice.insert(best); used_inst.insert(inst.id); }
@@ -728,6 +761,9 @@ void DoorCore::births(const DoorCycleInput& in, DoorCycleOutput& out)
         // already predicts an object; it never suppresses evidence reaching an instance, and it cannot
         // hide a genuinely new door that is anywhere else. A phi estimate that is wrong stops explaining
         // and the birth goes ahead — which is the right failure, and is visible in the log line.
+        // one-model: the swept-arc / aperture veto (S1) and the claimed-slice veto (S2) are gone — a mask a door's leaf or aperture
+        // explains gives the candidate no hit (its responsibility is the door's), so the candidate is never born from it.
+        if (not cfg_.door.exist_one_model)
         {
             const Eigen::Vector2f cxy(c.x(), c.y());
             std::uint64_t explainer = 0;
@@ -778,6 +814,7 @@ void DoorCore::births(const DoorCycleInput& in, DoorCycleOutput& out)
             }
         }
 
+        if (not cfg_.door.exist_one_model)
         {
             std::uint64_t claimer = 0;
             for (const auto& inst : doors)

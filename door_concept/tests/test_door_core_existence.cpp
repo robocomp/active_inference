@@ -28,6 +28,7 @@
 #include "../src/core/door_existence.h"
 #include "../src/core/existence_update.h"
 #include "../src/door_opening_edges.h"
+#include "../src/door_leaf_channel.h"
 #include "../../common/contour_edge/contour_edge_check.h"
 
 using namespace rc::door::core;
@@ -1261,6 +1262,118 @@ int main()
         CHECK(std::abs(mid.extent) < 1e-4f);
         CHECK(front.extent == 0.0f);
         CHECK(std::abs(over.total() - (over.band + over.base_rate + over.size + over.extent)) < 1e-5f);
+    }
+
+    // ═══ ONE MODEL, Task 7: every mask is shared among aperture, leaf, new door and clutter ═══════════════════════════════════════
+    // ── open_leaf_confirms_restored_door (chat_e2e18): a restored OPEN door whose leaf stands 90° side-on, the swing belief on the WRONG
+    //    side (0.9). The fit's support x must come from all four hinge × swing hypotheses: the single-swing marginal called the mask all
+    //    clutter (x = 1.00) and the sup channel removed the door; the four-branch x is ~0 and the same 30 views confirm it.
+    {
+        const auto sup_sum = [&](bool four_branch)
+        {
+            Rig r(false, true);
+            r.look(A0, kDoor, {{1.0f, kWallY, 0.9f}});
+            r.settle(A0);
+            if (r.door() == nullptr) return std::pair{-99.0f, -99.0f};
+            const rc::door::Aperture ap = r.door()->aperture;
+            rc::DoorBeliefParams bp;
+            bp.thickness = 0.05f; bp.floor_z = 0.0f; bp.wall_u = ap.wall_u; bp.wall_O = ap.wall_O;
+            bp.leaf = {1.5708f, rc::door::HingeSide::Near, +1.0f};
+            rc::DoorBelief b({ap.s, ap.w, ap.h}, bp);
+            rc::door::LeafChannel ch;
+            const auto lp = rc::door::gaussian_log_prior(0.0f, 2.0944f, 25, 1.5708f, 0.02f);
+            for (auto& f : ch.phi) f.reset(lp);
+            ch.hinge.prior = 11.0;               // hinge Near, sure
+            ch.swing.prior = std::log(0.9 / 0.1);   // swing +1 believed at 0.9: the leaf really swings the other way
+            std::vector<Eigen::Vector3f> pts;
+            const auto pose = rc::door::leaf_pose(ap, {1.5708f, rc::door::HingeSide::Near, -1.0f});
+            for (int i = 0; i <= 12; ++i)
+                for (int j = 0; j <= 12; ++j)
+                    pts.push_back(rc::door::leaf_point(pose, pose.half_w * (-1.0f + 2.0f * float(i) / 12.0f), 0.0f, pose.centre_z + pose.half_h * (-0.9f + 1.8f * float(j) / 12.0f)));
+            const float R = 0.03f * 0.03f;
+            std::vector<std::pair<float, float>> curve;
+            for (int k = 0; k < 25; ++k) curve.push_back({2.0944f * float(k) / 24.0f, k == 18 ? 1.0f : 1e-6f});
+            const float x = four_branch ? b.clutter_fraction_leaf_marginal(pts, R, ch) : b.clutter_fraction_leaf_marginal(pts, R, curve);
+            float sum = 0.0f;
+            for (int v = 0; v < 30 and r.door(); ++v)
+            {
+                r.door()->pending_fit_support = FitSupport{x, 0, 0.09f};
+                r.look(stand(4.0f, -60.0f + 15.0f * static_cast<float>(v % 9)), kDoor, {{1.0f, kWallY, 0.9f}});
+                if (r.door() and std::isfinite(r.door()->exist_trace.sup_dl)) sum += r.door()->exist_trace.sup_dl;
+            }
+            std::print("open_leaf_confirms_restored_door: {} branches x={:.3f} -> sup dl over 30 frames {:+.2f}, door {}\n", four_branch ? "four" : "one", x, sum, r.door() ? "alive" : "removed");
+            return std::pair{x, sum};
+        };
+        const auto [x_one, s_one] = sup_sum(false);
+        const auto [x_four, s_four] = sup_sum(true);
+        CHECK(x_one > 0.5f and s_one < -1.0f);   // today's single-swing marginal refutes the open door (the 30 frames' sup term sums to -2.4)
+        CHECK(x_four < 0.1f and s_four > s_one + 1.0f);   // the four-branch one does not: its support term is a confirmation at coverage 0.09, ~0 net
+    }
+    // ── being_crossed_never_removed (Review Focus 5): all masks to clutter, the door being crossed: evidence accumulates, never a REMOVE
+    {
+        Rig r(false, true);
+        r.look(stand(6.0f, -75.0f), kDoor, {{1.0f, kWallY, 0.9f}});
+        CHECK(r.door() != nullptr);
+        r.settle(stand(6.0f, -75.0f));
+        for (int v = 0; v < 30 and r.door(); ++v)
+            for (int k = 0; k < 5; ++k)
+            {
+                // masks that are clutter (a door-class mask far from every wall), the cross running
+                auto in = input(++r.cycle, ++r.frame, stand(v % 2 ? 4.0f : 2.5f, -60.0f + 15.0f * static_cast<float>(v % 9)), kDoor, {{-3.0f, 0.0f, 0.9f}});
+                in.affordances.push_back({.node_id = 555, .exists = true, .name = "aff_door_1_cross"});
+                in.executing.push_back({.from = 8, .to = 555});
+                r.step(std::move(in));
+            }
+        std::print("one_model being_crossed_never_removed: door {} role {} {} REMOVE\n", r.door() ? "alive" : "gone", r.door() ? static_cast<int>(r.door()->role) : -1, r.removes.size());
+        CHECK(r.door() != nullptr and r.removes.empty());
+        CHECK(r.door() and r.door()->role == Role::BeingCrossed);
+    }
+    // ── parked_phantom_never_born: 600 frames at ONE standpoint, door-class masks at the false-alarm rate (kappa = 0.194 of the frames) at a
+    //    place nobody owns. Frames of one view are one trial, never 600: the place's L may not ratchet with the frame count.
+    {
+        const auto parked = [&](float y, int frames)
+        {
+            Rig r(false, true);
+            const Vec2f at{1.0f, y - 4.0f};
+            float L_max = -1e9f; std::size_t views = 0;
+            for (int f = 0; f < frames; ++f)
+            {
+                const bool hit = (f * 194) / 1000 != ((f + 1) * 194) / 1000;   // a detection on 19.4 % of the frames, regularly spread
+                r.look(at, {1.0f, y}, hit ? std::vector<DoorDet>{{1.0f, y, 0.9f}} : std::vector<DoorDet>{});
+                for (const auto& c : r.core.candidates()) { L_max = std::max(L_max, c.belief.L()); views = std::max(views, c.belief.ledger.views().size()); }
+                if (r.door()) { L_max = std::max(L_max, r.door()->belief.L()); views = std::max(views, r.door()->belief.ledger.views().size()); }
+            }
+            std::print("parked_phantom (y={:.2f}, {} frames): {} births, {} removes, max L {:+.2f}, views {}, door {}\n", y, frames, r.births.size(), r.removes.size(), L_max, views, r.door() ? "alive" : "none");
+            return std::tuple{r.births.size(), r.door() != nullptr, views, L_max};
+        };
+        const auto [b_mid, alive_mid, v_mid, L_mid] = parked(0.0f, 600);   // mid-room: no wall, the band prior alone refuses it
+        CHECK(b_mid == 0);
+        const auto [b_wall, alive_wall, v_wall, L_wall] = parked(kWallY, 600);   // on the wall: one view, however many frames
+        CHECK(v_wall <= 1);
+        // (REPORTED, not asserted: a wall place IS born on its first hit frame - one good hit view, prior 0.4 - and removed by the misses
+        //  of the other frames; the flicker repeats at every later hit. Identical on the commit before this task, so it is the existing
+        //  birth/removal loop and not the responsibilities. See the Task 7 report.)
+        const auto [b_few, alive_few, v_few, L_few] = parked(kWallY, 60);
+        CHECK(std::abs(L_few - L_wall) < 0.3f);   // 600 frames say what 60 said (one view)
+    }
+    // ── good_views_fewer_frames: the detector reports a near, centred door on most frames and a far, oblique one on few, so the near one is born
+    //    after fewer frames (the rate of reports is the view's q; nothing else differs)
+    {
+        const auto frames_to_birth = [&](const Vec2f& at, float deg_unused, double q)
+        {
+            (void) deg_unused;
+            Rig r(false, true);
+            int f = 0;
+            for (; f < 400 and r.births.empty(); ++f)
+            {
+                const bool hit = std::floor(double(f + 1) * q) > std::floor(double(f) * q);
+                r.look(at, kDoor, hit ? std::vector<DoorDet>{{1.0f, kWallY, 0.9f}} : std::vector<DoorDet>{});
+            }
+            return r.births.empty() ? 400 : f;
+        };
+        const int near_f = frames_to_birth(stand(2.5f, 0.0f), 0.0f, 0.9), far_f = frames_to_birth(stand(7.0f, 70.0f), 70.0f, 0.15);
+        std::print("good_views_fewer_frames: near centred {} frames, far oblique {} frames\n", near_f, far_f);
+        CHECK(near_f < far_f);
     }
 
     std::print("{}\n", fails == 0 ? "ALL PASS" : std::format("{} FAILURE(S)", fails));

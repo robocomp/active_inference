@@ -295,6 +295,7 @@ struct DoorFitState
     std::chrono::steady_clock::time_point last_belief_touch{};
     float chain_cov_xx = 0.0f, chain_cov_yy = 0.0f, chain_cov_yaw = 0.0f;  // localization/chain cov (m²,rad²)
     float chain_cov_xy = 0.0f;   // Task D-C round 2: its xy cross term, so a projection on ANY direction is exact
+    float mask_rho          = 1.0f;   // ONE-MODEL: the share of the assigned mask this door explains (core/door_mask_causes.h); weights the fit's support sample
     int  assigned_mask_idx  = -1;     // tracker's gated mask-slice assignment (-1 = use greedy nearest)
     // ── Existence belief ──────────────────────────────────────────────────────────────────────────────
     // ★Task 8: THE existence belief of this door place — prior + carried + crossing + view ledger (core/place_belief.h).
