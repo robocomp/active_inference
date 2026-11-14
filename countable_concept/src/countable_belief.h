@@ -497,6 +497,9 @@ private:
                          Eigen::Matrix<float, 6, 6>& Id, Eigen::Matrix<float, 6, 1>& bd) const;
     // Posterior weight of the "flush against this wall" mixture component: exp(−(gap/reach)²). 0 ⇒ inert.
     float two_sided_along(const CountableBeliefState& s, const CountableFrame& f, bool along_x) const;
+    // The same identifiability statistic with no feature switch: fraction in [0, 1] of the cloud that spans the extent
+    // along one footprint axis (0 = one face only or no points). two_sided_along = this behind the fit's switches.
+    float two_sided_fraction(const CountableBeliefState& s, const CountableFrame& f, bool along_x) const;
     float flush_posterior(const CountableBeliefState& s, const CountableFrame& f) const;
     float flush_weight(const CountableBeliefState& s, const CountableFrame& f) const;
 

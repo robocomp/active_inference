@@ -340,6 +340,11 @@ float CountableBelief::two_sided_along(const CountableBeliefState& s, const Coun
 {
             if (params_.depth_unobs_precision <= 0.0f or f.points.size() <= 8)
                 return 1.0f;                       // feature off / too few points ⇒ claim nothing, add no boost
+            return two_sided_fraction(s, f, along_x);
+}
+
+float CountableBelief::two_sided_fraction(const CountableBeliefState& s, const CountableFrame& f, bool along_x) const
+{
             const float c = std::cos(-s.yaw), sn = std::sin(-s.yaw);
             const float delta = params_.depth_obs_band_m;
             const float half_cross = 0.5f * (along_x ? s.h : s.w);   // the OTHER axis: the spanning core
@@ -477,7 +482,12 @@ void CountableBelief::accumulate_extra(const CountableBeliefState& s, const Coun
                                           Eigen::Matrix<float, 6, 6>& Id, Eigen::Matrix<float, 6, 1>& bd) const
 {
     // (1) Wall-flush + wall-parallel structural term (supplies the missing back-face/depth information).
-    accumulate_wall(s, f, Id, bd);
+    //     It is the class's FURNITURE prior ("a bed stands against a wall", π_flush), not data: in the likelihood-only
+    //     size summary (size_prior_off_) it contributes nothing, or it re-adds the depth pin through lam_flush
+    //     (depth_unobs_precision·depth_unobs) and the π_flush fallback of flush_posterior, and the summary's depth
+    //     becomes the front-to-wall distance (final review C2, 2026-11-14).
+    if (not size_prior_off_)
+        accumulate_wall(s, f, Id, bd);
 
     // ROOM-AXIS ALIGNMENT (furniture prior): furniture is aligned with the room's axes whether or not it touches
     // a wall. ¼·sin(4Δ) vanishes at every multiple of 90°, so the four yaws a box can take on the room grid are
@@ -558,7 +568,8 @@ void CountableBelief::accumulate_extra(const CountableBeliefState& s, const Coun
     //      (λ_h = gain·deficit/soft), so a mildly-short bed is nudged gently and a 70 cm cloud is resisted
     //      hard. A plausibly-tall bed (deficit ≤ 0) feels NOTHING. Continuous covariance, not a clamp — the
     //      effect is that fitting a short cloud as a bed fights this prior → worse data fit → lower plausibility.
-    if (params_.plaus_height_prior_gain > 0.0f and params_.plaus_height_soft > 1e-4f)
+    //      A CLASS prior like (2)/(2a), so it is off in the likelihood-only size summary too (size_prior_off_).
+    if (params_.plaus_height_prior_gain > 0.0f and params_.plaus_height_soft > 1e-4f and not size_prior_off_)
     {
         const float deficit = params_.plaus_height_min - s.H;   // >0 ⇒ implausibly short
         if (deficit > 0.0f)
@@ -806,6 +817,26 @@ void CountableBelief::update_size_likelihood(const CountableFrame& frame)
 
     const Vec3d theta_s(s.H, s.w, s.h);
     const Vec3d mean_frame = theta_s + pinv(J) * g;
+
+    // ★AN EXTENT THE CLOUD DOES NOT SPAN CARRIES NO INFORMATION (final review C1, 2026-11-14). The Schur complement above
+    // removes the pose-size degeneracy only in exact geometry. The FD, slope-clamped SDF Jacobians at a linearisation
+    // point whose depth came from the class prior leave a residual information on that depth even noise-free (a front
+    // face seen alone gave ~230 /m² on h, and the summary's depth then FOLLOWED the prior depth: 1.0/2.1/3.0 → 0.94/2.04/
+    // 2.94), so the prior came back in through the linearisation point. The model's own identifiability statistic says
+    // how much of each footprint extent the cloud spans (the fraction of points clearly on both sides of the centre,
+    // the same statistic the fit's depth-observability block uses): scale the frame's information along each body axis
+    // by it — w (local x) by t_x, h (local y) by t_y, H untouched, cross terms by the geometric mean (D J D with
+    // D = diag(1, √t_x, √t_y)). The frame MEAN stays the unscaled data solve: only the confidence in it is reduced, so
+    // a half-seen extent counts half, and nothing is gated. Cost if wrong: a genuinely seen depth is slightly
+    // under-counted on partial views.
+    const double t_x = two_sided_fraction(s, frame, true);    // in [0, 1] by construction
+    const double t_y = two_sided_fraction(s, frame, false);
+    const Vec3d D(1.0, std::sqrt(t_x), std::sqrt(t_y));
+    J = D.asDiagonal() * J * D.asDiagonal();
+
+    // a non-finite frame (degenerate Schur, NaN point) is skipped: it must never poison the stored summary
+    if (not (J.allFinite() and mean_frame.allFinite()))
+        return;
 
     // fold the frame into the recursion (the forgetting is predict_size_likelihood, run before this on every cycle).
     // J is PSD in exact arithmetic; drop numerically negative eigenvalues so rounding cannot subtract information.

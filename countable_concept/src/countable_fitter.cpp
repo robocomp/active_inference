@@ -22,6 +22,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <limits>
 #include <locale>
 #include <print>
 #include <random>
@@ -1195,7 +1196,11 @@ void CountableFitter::log_ai2_csv(const CountableInstance& inst, int npts, float
                  << "roi_fill,roi_fill_h,roi_fill_v,roi_valid,det_alive,frames_since_det,"
                  // What the NBV actually proposed (lags the state columns by one cycle; see the instance).
                  // nbv_vfov=0 ⇒ the sensor model was incomplete and NO proposal was made that cycle.
-                 << "nbv_standoff,nbv_tx,nbv_ty,nbv_pdetect,nbv_vfov,nbv_gain_raw,nbv_gain_pub,ricoh_det,ricoh_attn,p_occ,p_cls\n";
+                 << "nbv_standoff,nbv_tx,nbv_ty,nbv_pdetect,nbv_vfov,nbv_gain_raw,nbv_gain_pub,ricoh_det,ricoh_attn,p_occ,p_cls,"
+                 // the likelihood-only (H, w, h) size summary the class factor scores (final review m3): its mean, its
+                 // per-variable std 1/sqrt(info diag) (inf when the data inform that variable not at all), and Λ (nats,
+                 // the last class_log_evidence; it may lag this row by one cycle)
+                 << "lik_H,lik_w,lik_h,lik_sd_H,lik_sd_w,lik_sd_h,lam\n";
     }
     const auto& s = inst.ai2_belief.state();
     const auto& S = inst.ai2_belief.covariance();
@@ -1247,7 +1252,14 @@ void CountableFitter::log_ai2_csv(const CountableInstance& inst, int npts, float
              // invisible in every agent's log, which is why 'is it producing anything?' could
              // not be answered offline for cabinet/hood, the two it exists for.
              << ',' << ricoh_dets_ << ',' << ricoh_attention_
-             << ',' << inst.existence.p_exists() << ',' << inst.class_belief.p_exists() << '\n';
+             << ',' << inst.existence.p_exists() << ',' << inst.class_belief.p_exists();
+    {
+        const auto& lik = inst.ai2_belief.size_likelihood();
+        const auto lsd = [&](int i)
+        { return lik.info(i, i) > 0.0f ? 1.0f / std::sqrt(lik.info(i, i)) : std::numeric_limits<float>::infinity(); };
+        ai2_csv_ << ',' << lik.mean(0) << ',' << lik.mean(1) << ',' << lik.mean(2)
+                 << ',' << lsd(0) << ',' << lsd(1) << ',' << lsd(2) << ',' << inst.class_lambda << '\n';
+    }
     ai2_csv_.flush();
 }
 

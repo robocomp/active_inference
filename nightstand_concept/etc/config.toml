@@ -98,7 +98,7 @@ AI2TopNoFloatPrecision = 10000.0 # firm two-sided anchor pinning H → observed 
 AI2TopNoFloatMarginM = 0.02     # upward allowance (m) added to the observed top as the anchor target
 AI2TopOversegSigmaPerM = 2.0    # R inflation (σ per m) for points ABOVE the robust top — fades the mask over-segmentation junk tail so it can't ratchet H up. 0 = OFF
 # "IS THIS REALLY A NIGHTSTAND?" model-evidence mis-detection filter (rejects e.g. a 70 cm elongated cabinet
-# mislabelled "nightstand"). Continuous plausibility (aspect·size·height·fit) gates BIRTH; the class evidence Λ (manifest [prior.class] +
+# mislabelled "nightstand"). BIRTH is scored by the class evidence of the cloud's robust height (no admission gate); the class evidence Λ (manifest [prior.class] +
 # these size priors) is the CLASS factor of existence (existence = occupancy × class); a SOFT singleton lets a stronger nightstand inhibit weaker
 # duplicates. No hard cutoffs — encoded as covariance/evidence. Master switch: Concept.FilterEnabled.
 AspectScale = 0.15          # aspect_ok = exp(−(|w−h|/(w+h)/scale)²): ~1 square-ish footprint, →0 elongated
@@ -432,6 +432,11 @@ DetectionNoiseM = 0.35    # det-noise std R added to fit cov in the gate (S=P+R�
 RecallPiMove = 0.05      # ltom recall: weight of "the remembered nightstand was moved" (a GUESS - nightstands almost never move; learned permanence replaces it in step 4). 1 = location says nothing
 RecallLogPriorNew = 0.0  # ltom recall: log prior of "a NEW nightstand" vs one recalled candidate (0 = equal); the newborn takes a candidate only if it is the strict MAP
 BirthFrames = 8
+# NO ADMISSION GATE (final review I1, 2026-11-14). The burst plausibility read as a decision (code default 0.35) is now a
+# two-sided HEIGHT gate on the class probability: a nightstand taller or shorter than the class would be refused forever. The class
+# factor of existence (existence = occupancy x class) removes what its shape argues against, continuously; no gate
+# (CLAUDE.md). 0 = off.
+BirthAdmitPlausibility = 0.0
 # FUSED BIRTH: residual-grid surprise mass under a detection accelerates its birth (independent geometric
 # corroboration). birth_evidence = (1 + Gain·m/(m+MassRef)) · quality. Needs residual_concept.
 BirthFusion = true         # true to enable; needs BirthSurpriseProbe infra (reads the `grid` node)

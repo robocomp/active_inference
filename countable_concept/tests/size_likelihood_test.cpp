@@ -59,6 +59,42 @@ static CountableBelief run(const std::vector<Eigen::Vector3f>& pts, int frames)
     return b;
 }
 
+
+// Bed parameters as bed_concept/etc/config.toml sets them for the front-only cases (depth pin 20000, π_flush 0.90,
+// HeightPlausibleMin 0.35), with the prior depth varied by the caller.
+static CountableBeliefParams bed_live_params(float prior_depth)
+{
+    CountableBeliefParams p = bed_params();
+    p.prior_depth_m = prior_depth;
+    p.depth_unobs_precision = 20000.0f; p.wall_flush_prior = 0.90f;
+    p.plaus_height_min = 0.35f; p.plaus_height_soft = 0.10f;
+    p.room_axis_std = 0.01f;            // the yaw is HELD at the true value (room axis 0) so only the size is in question
+    return p;
+}
+
+// The front face (local -y, at world y = face_y) of a 1.80 x 0.74 face, nothing else, 10 frames. wall_dist > 0 stages a
+// wall that far behind the face.
+static CountableBelief front_only_run(float prior_depth, float wall_dist)
+{
+    const float w = 1.80f, H = 0.74f, face_y = -1.0f;
+    std::mt19937 rng(3); std::normal_distribution<float> nz(0.0f, 0.01f); std::uniform_real_distribution<float> U(0.0f, 1.0f);
+    std::vector<Eigen::Vector3f> pts;
+    for (int i = 0; i < 1500; ++i) pts.emplace_back((U(rng) - 0.5f) * w + nz(rng), face_y + nz(rng), U(rng) * H + nz(rng));
+    const CountableBeliefParams p = bed_live_params(prior_depth);
+    CountableBeliefState s0{0.0f, face_y + 0.5f * prior_depth, H, 1.75f, prior_depth, 0.0f};
+    CountableBelief b(s0, p);
+    b.set_room_interior(Eigen::Vector2f(0.0f, -3.0f));
+    CountableFrame f; f.points = pts; f.z_top_obs = H - 0.01f;
+    f.room_axis_ok = true; f.room_axis = 0.0f;
+    if (wall_dist > 0.0f)
+    {
+        f.wall.ok = true; f.wall.p = Eigen::Vector2f(0.0f, face_y + wall_dist); f.wall.n = Eigen::Vector2f(0.0f, -1.0f);
+        f.wall.sigma_m = 0.02f; f.wall.length_m = 4.0f;
+    }
+    for (int i = 0; i < 10; ++i) b.update(f);
+    return b;
+}
+
 #ifdef RECORD_ONLY
 int main()
 {
@@ -166,6 +202,68 @@ int main()
         const float d0 = d.size_likelihood().info(0, 0);
         d.update(empty);
         CHECK(d.size_likelihood().info(0, 0) < d0);
+    }
+    {   // front_only_does_not_follow_prior: the depth behind a seen face carries no information whatever the prior depth
+        // the belief was linearised at, so neither the summary nor Λ follow it (final review C1)
+        const auto c = bed_live_params(2.10f).class_shape_prior();
+        float lmin = 1e9f, lmax = -1e9f;
+        for (float pd : {1.0f, 2.1f, 3.0f})
+        {
+            const auto b = front_only_run(pd, 0.0f);
+            const auto& L = b.size_likelihood();
+            const float lam = countable::class_log_evidence(L, c, 1.0f);
+            lmin = std::min(lmin, lam); lmax = std::max(lmax, lam);
+            std::printf("front-only prior depth %.1f: lik (H,w,h)=(%.3f %.3f %.3f) info diag (%.4g %.4g %.4g) yaw %.3f  Lambda %+.2f\n",
+                        pd, L.mean(0), L.mean(1), L.mean(2), L.info(0, 0), L.info(1, 1), L.info(2, 2), b.state().yaw, lam);
+            CHECK(L.info(2, 2) <= 0.01f * L.info(0, 0));
+            {   // front_only_lambda_is_H_w_only: Λ is what H and w alone say
+                countable::SizeGaussian hw = L;
+                hw.info.row(2).setZero(); hw.info.col(2).setZero();
+                const float lam_hw = countable::class_log_evidence(hw, c, 1.0f);
+                std::printf("  Lambda(H,w only) %+.2f\n", lam_hw);
+                CHECK(lam <= lam_hw + 0.3f);
+            }
+        }
+        CHECK(lmax - lmin < 0.3f);
+    }
+    {   // wall_does_not_set_depth: the wall-flush factor is the class's furniture prior, not data (final review C2)
+        const auto c = bed_live_params(2.10f).class_shape_prior();
+        float lmin = 1e9f, lmax = -1e9f;
+        for (float wd : {1.1f, 1.5f, 2.5f})
+        {
+            const auto b = front_only_run(2.10f, wd);
+            const auto& L = b.size_likelihood();
+            const float lam = countable::class_log_evidence(L, c, 1.0f);
+            lmin = std::min(lmin, lam); lmax = std::max(lmax, lam);
+            std::printf("wall front-to-wall %.1f: post h %.3f | lik (H,w,h)=(%.3f %.3f %.3f) info diag (%.4g %.4g %.4g)  Lambda %+.2f\n",
+                        wd, b.state().h, L.mean(0), L.mean(1), L.mean(2), L.info(0, 0), L.info(1, 1), L.info(2, 2), lam);
+            CHECK(L.info(2, 2) <= 0.01f * L.info(0, 0));
+        }
+        CHECK(lmax - lmin < 0.3f);
+    }
+    {   // short_height_prior_off: the (2b) "a short bed is improbable" factor is a class prior, off in the summary (I3)
+        std::mt19937 rng(11);
+        const auto b = run(box_cloud(0.65f, 1.75f, 2.10f, false, rng), 10);   // bed_params: plaus_height_min 1.20
+        const auto& L = b.size_likelihood().mean;
+        CHECK(std::abs(L(0) - 0.65f) < 0.05f);
+        // sharper: with the short-height factor switched off in the CONFIG the summary must say the same H (it is what
+        // the data say); before the fix the factor leaked ~2.5 cm of upward pull into the summary
+        auto p0 = bed_params(); p0.plaus_height_prior_gain = 0.0f;
+        std::mt19937 rng0(11);
+        const auto pts0 = box_cloud(0.65f, 1.75f, 2.10f, false, rng0);
+        CountableBeliefState s0{0.0f, 0.0f, 0.0f, 0.5f, 0.5f, 0.0f};
+        Eigen::Vector3f sum = Eigen::Vector3f::Zero(); float zmax = 0.0f;
+        for (const auto& q : pts0) { sum += q; zmax = std::max(zmax, q.z()); }
+        s0.cx = sum.x() / pts0.size(); s0.cy = sum.y() / pts0.size(); s0.H = zmax;
+        CountableBelief b0(s0, p0); CountableFrame f0; f0.points = pts0;
+        for (int i = 0; i < 10; ++i) b0.update(f0);
+        std::printf("short: lik H %.4f (factor off in config: %.4f)  posterior H %.3f\n", L(0), b0.size_likelihood().mean(0), b.state().H);
+        CHECK(std::abs(L(0) - b0.size_likelihood().mean(0)) < 0.005f);
+    }
+    {   // the summary is always finite
+        std::mt19937 rng(11);
+        const auto b = run(box_cloud(0.65f, 1.75f, 2.10f, false, rng), 3);
+        CHECK(b.size_likelihood().info.allFinite() and b.size_likelihood().mean.allFinite());
     }
     {   // fit_unchanged: the main fit is bit-identical to the value recorded from the code before the summary
         std::mt19937 rng(11);
