@@ -174,6 +174,10 @@ Digest WorldDigest::build(DSR::InnerEigenAPI& inner, bool controller_present, co
             const double dist = std::hypot(x, y);
             const double bearing = std::atan2(-x, y) * kRad2Deg;   // 0 = ahead (+y), + = left
             line += std::format(" {:.1f} m away, bearing {:+.0f} deg ({})", dist, bearing, bearing_words(bearing));
+            // tape_e2e19: with door_24 at bearing +177 the chat said "I am already facing door_24", and the cross from
+            // there stalled (the passage does not turn the robot to the door). The turn that faces it, always written,
+            // so the planner can put it first and the chat can read whether the robot faces it.
+            line += std::format(", to face it: move turn_deg={:+.0f}deg", bearing);
         }
         else line += " position unknown";
         if (const auto dn = G.get_node(door); dn.has_value())
@@ -191,7 +195,7 @@ Digest WorldDigest::build(DSR::InnerEigenAPI& inner, bool controller_present, co
         if (a_app == "offered" and a_open == "absent" and a_cross == "absent")
             line += " (not seen yet: `cross` it anyway, it approaches first; open and cross are offered once it is seen)";
         for (const auto& [rd, rr] : recalls)
-            if (rd == door) line += ", behind it: remembered " + rr;
+            if (rd == door) line += ", leads to: remembered " + rr;   // not "behind it": that word is the bearing's
         if (d.facts.nearest_door.has_value() and *d.facts.nearest_door == door) line += " [nearest]";
         s += line + "\n";
     }

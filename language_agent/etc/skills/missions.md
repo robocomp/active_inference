@@ -17,6 +17,7 @@ Steps:
 - wait s=5s: optionally add until=PRED
 - wait at=18:00: waits until that clock time (the next one: today if still ahead, else tomorrow); "in 10 minutes" is wait s=600s
 - move distance_m=1m turn_deg=90deg: turns first, then drives; either keyword alone is fine (move turn_deg=90deg). There is no op called turn
+- A door is crossed from in front of it. When its STATE entry says it is behind the robot (bearing behind, behind-left or behind-right), write its `to face it: move turn_deg=Ndeg` exactly as the first step, then `cross` it
 - say "text": shown to the person
 - report "topic": the model describes the room the robot is in now
 - anchor NAME: a step; remembers this spot; return with go_to anchor:NAME
