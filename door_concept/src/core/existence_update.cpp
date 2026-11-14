@@ -48,9 +48,11 @@ struct CamResult { std::size_t v = ViewLedger::npos, log_view = ViewLedger::npos
 
 CamResult observe_camera(PlaceBelief& b, const rc::DoorFitState& th, const ExistenceFrame& fr, const CameraSpec& spec,
                          const Mat4d& room_T_cam, std::span<const Vec2f> windows, bool windows_known, Channel ch,
-                         const DetectorModel& m, int sensor, int visit, int self_sensor, float self_w)
+                         const DetectorModel& m_cam, int sensor, int visit, int self_sensor, float self_w, float p_open)
 {
     CamResult r;
+    // one-model: what the detector reports of a door depends on its leaf's state (the leaf-open hit rate); flag off: the camera's model as is
+    const DetectorModel m = fr.cfg.exist_one_model ? with_leaf_state(m_cam, p_open) : m_cam;
     const Vec2f door_xy = th.aperture.centre_xy();
     const float R = half_diag(th);
     const PoseOverlap po = pose_overlap_factor(fr.rt_cov, room_T_cam, door_xy, R);
@@ -150,6 +152,13 @@ ExistenceTrace observe_place(PlaceBelief& b, const rc::DoorFitState& th, const E
     b.ledger.ricoh_counts_misses = fr.cfg.exist_one_model;
     b.ledger.beta_hit_fraction = fr.cfg.exist_one_model;
     b.lookalike = fr.cfg.exist_lookalike_prob;   // (the sensor-model constant travels with the belief so L() needs no argument)
+    // P(the leaf is open): the door's leaf posterior (the one leaf_mixture reports); a place with no leaf belief yet takes the prior the birth model uses
+    float p_open = 0.0f;
+    if (fr.cfg.exist_one_model)
+    {
+        const double po = th.ai2_initialized ? th.ai2_belief.leaf_p_open(th.leaf_channel, fr.cfg.phi_max_rad) : std::numeric_limits<double>::quiet_NaN();
+        p_open = std::isfinite(po) ? static_cast<float>(po) : fr.cfg.ricoh_birth_p_open;
+    }
     float zed_view_kappa = 0.0f, zed_vis = 0.0f;
     std::size_t zed_v = ViewLedger::npos;
     const auto row = [&](int cam, const CamResult& r)
@@ -162,7 +171,7 @@ ExistenceTrace observe_place(PlaceBelief& b, const rc::DoorFitState& th, const E
     {
         const float before = b.ledger.sum();
         const CamResult r = observe_camera(b, th, fr, *fr.zed_spec, *fr.scene.room_T_zed, {}, false, Channel::Zed, fr.det.zed,
-                                           0, visit, self_sensor, self_w);
+                                           0, visit, self_sensor, self_w, p_open);
         t.zed_q = r.q; t.zed_hit = r.hit; t.kappa = r.kappa;
         zed_view_kappa = r.kappa; zed_vis = r.g.vis; zed_v = r.v;
         if (r.v != ViewLedger::npos)
@@ -180,7 +189,7 @@ ExistenceTrace observe_place(PlaceBelief& b, const rc::DoorFitState& th, const E
         const float before = b.ledger.sum();
         const auto& w = fr.scene.pkt.ricoh_windows;
         const CamResult r = observe_camera(b, th, fr, *fr.ricoh_spec, *fr.room_T_ricoh, w, not w.empty(), Channel::Ricoh,
-                                           fr.det.ricoh, 1, visit, self_sensor, self_w);
+                                           fr.det.ricoh, 1, visit, self_sensor, self_w, p_open);
         t.ric_q = r.q; t.ric_hit = r.hit;
         if (r.v != ViewLedger::npos)
         {
@@ -284,7 +293,9 @@ ExistenceTrace observe_place(PlaceBelief& b, const rc::DoorFitState& th, const E
                 const std::size_t v = b.ledger.observe(xy_of(*origin), door_xy, th.aperture.across_u(), R, po.spread_m, visit);
                 // the trial is worth the share of the opening the mask sampled (aperture_coverage): a sliver on the jamb says little
                 const float untrunc = fr.cfg.exist_one_model ? std::clamp(1.0f - support->trunc, 0.0f, 1.0f) : 1.0f;   // clamp: domain of a share
-                b.ledger.add_support(v, support->x, po.kappa * std::clamp(support->coverage, 0.0f, 1.0f) * untrunc, fr.det.support, support->overlap);   // clamp: domain of a share
+                // one-model: the mask is worth P(genuine | score), once, as in its hit: a mask the hit channel calls noise cannot bear a place on support alone
+                const float genuine = fr.cfg.exist_one_model ? confidence_reliability(support->confidence, fr.det.confidence) : 1.0f;
+                b.ledger.add_support(v, support->x, po.kappa * std::clamp(support->coverage, 0.0f, 1.0f) * untrunc * genuine, fr.det.support, support->overlap);   // clamp: domain of a share
                 b.ledger.recompute(v, fr.geometry_may_refute);
                 touched.push_back(v);
                 t.sup_x = support->x;

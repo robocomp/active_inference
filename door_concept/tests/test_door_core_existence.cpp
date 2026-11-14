@@ -1516,6 +1516,56 @@ int main()
         }
     }
 
+    {   // Task 8b A: a door whose leaf is open is not reported by the detector like a shut one (hit_rate_open): the ZED reporting nothing for
+        // 40 frames while the leaf is open (P(open) = 1) leaves L within 0.5 of where the shut-leaf look left it; the old pooled rate dropped it
+        const auto run = [&](float h_open_zed)
+        {
+            Bench b; b.cfg.exist_one_model = true; b.det.zed.hit_rate_open = h_open_zed;
+            const rc::DoorFitState th = shut_door();
+            PlaceBelief pb;
+            b.cfg.ricoh_birth_p_open = 0.0f;
+            for (int i = 0; i < 4; ++i) b.frame(pb, th, A0, kDoor, true, false, {{{1.0f, kWallY}, -1.0f, 0}}, 0);
+            const float L0 = pb.L();
+            b.cfg.ricoh_birth_p_open = 1.0f;   // the leaf opens (the place has no leaf belief: its prior)
+            for (int i = 0; i < 40; ++i) b.frame(pb, th, A0, kDoor, true, false, {}, i + 1);   // (a visit each: the ledger keeps visits apart, so the misses are not averaged into the hit view)
+            return std::pair{L0, pb.L()};
+        };
+        const auto [L0o, L1o] = run(0.05f);
+        const auto [L0s, L1s] = run(-1.0f);   // not fitted: = hit_rate, the old model
+        std::print("open_leaf_misses: with hit_rate_open L {:+.3f} -> {:+.3f}; without {:+.3f} -> {:+.3f}\n", L0o, L1o, L0s, L1s);
+        CHECK(std::fabs(L1o - L0o) < 0.5f);
+        CHECK(L1s < L0s - 0.5f);
+        // an older table (no hit_rate_open row) loads with hit_rate_open = hit_rate: the same numbers as before the row existed
+        const DetectorModel m = default_detectors().zed;
+        CHECK(with_leaf_state(m, 0.7f).hit_rate == m.hit_rate);
+    }
+    {   // Task 8b C(i): a mask the hit channel calls noise (YOLO score 0.35, P(genuine) ~ 0.01) cannot bear a place on support alone
+        const rc::DoorFitState th = shut_door(0.80f);
+        const auto sup = [&](float conf)
+        {
+            Bench b; b.cfg.exist_one_model = true; PlaceBelief pb;
+            const Mat4d body = body_pose(A0, kDoor);
+            const std::optional<Mat4d> rtz = body * lift(1.2);
+            const CameraIntrinsics cam = zed_cam();
+            const ExistenceScene scene{b.cfg, rtz, cam, b.pkt, kRoom, rc::door::RoomBand{b.cfg.exist_wall_thickness_m, b.cfg.exist_boundary_sigma_m}, b.doors};
+            ExistenceFrame fr{scene, b.cfg, b.det};
+            observe_place(pb, th, fr, 0, 0.0f, nullptr, -1, 0.0f, FitSupport{0.05f, 0, 1.0f, 1.0f, 0.0f, conf});
+            return pb.ledger.sum();
+        };
+        const float lo = sup(0.35f), hi = sup(0.80f);
+        std::print("support_by_genuineness: conf 0.35 -> {:+.4f}, conf 0.80 -> {:+.4f}\n", lo, hi);
+        CHECK(hi > 0.3f and lo < 0.1f * hi);
+    }
+    {   // Task 8b: one frame of a view that can hardly report (q = 0.08) and did not is no evidence for the door (the Beta pseudo-hits scale with q)
+        ViewLedger L; L.beta_hit_fraction = true; L.ricoh_counts_misses = true;
+        const DetectorModel m = default_detectors().zed;
+        const std::size_t v = L.observe({0.f, 0.f}, {2.f, 1.f}, {0.f, 1.f}, 1.0f, 0.0f, 0);
+        L.add_bernoulli(v, Channel::Zed, 0.08f, m, 0.002f);
+        L.recompute(v, false);
+        std::print("beta_prior_scales_with_q: one q=0.08 frame -> {:+.4f}\n", L.sum());
+        CHECK(std::fabs(L.sum()) < 0.1f);
+    }
+
     std::print("{}\n", fails == 0 ? "ALL PASS" : std::format("{} FAILURE(S)", fails));
     return fails == 0 ? 0 : 1;
 }

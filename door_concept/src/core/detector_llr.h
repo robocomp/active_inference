@@ -26,9 +26,11 @@ namespace rc::door::core
 struct DetectorModel
 {
     rc::detect::DetectorEnvelope env;   // shoulders, per axis (fill_h and fill_v)
-    float hit_rate = 1.0f;              // P(report | present, ideally framed, face-on)
+    float hit_rate = 1.0f;              // P(report | present, ideally framed, face-on, leaf SHUT)
     float false_alarm = 0.0f;           // P(report | absent), per view at full visibility
     float n_hit_trials = 0.0f;          // evidence behind hit_rate (0 = a compiled default)
+    float hit_rate_open = -1.0f;        // the same with the leaf OPEN (a doorway with a leaf off the wall is not what the detector learned); < 0 = not fitted: = hit_rate
+    float n_open_trials = 0.0f;         // evidence behind hit_rate_open
 };
 
 // ═══ THE FIT'S OWN SUPPORT (door-existence model, channel `sup`) ═══════════════════════════════════════════════════════════════
@@ -146,6 +148,16 @@ struct DetectorTable { DetectorModel zed, ricoh; SupportModel support; Confidenc
 /// The false-alarm rate AT THIS VIEW: a false alarm passes through the detector's own front end exactly as the door does
 /// (envelope, aspect, visibility, kappa), so f_eff = false_alarm * q / hit_rate = false_alarm * env * aspect * vis * kappa.
 /// 0 when q == 0 (a view the detector cannot report from can neither confirm nor refute).
+/// The camera's model for a door whose leaf is open with probability p_open: P(report | door) = (1 - p_open) h_shut + p_open h_open.
+/// The front end (envelope, aspect, visibility) and the false alarm are the leaf's business no more than the wall's, so only the hit rate moves.
+[[nodiscard]] inline DetectorModel with_leaf_state(DetectorModel m, float p_open)
+{
+    const float h_open = m.hit_rate_open >= 0.0f ? m.hit_rate_open : m.hit_rate;
+    const float po = std::clamp(p_open, 0.0f, 1.0f);   // clamp: a probability
+    m.hit_rate = (1.0f - po) * m.hit_rate + po * h_open;
+    return m;
+}
+
 [[nodiscard]] inline float false_alarm_eff(const DetectorModel& m, float q)
 {
     return m.hit_rate > 0.0f ? m.false_alarm * q / m.hit_rate : 0.0f;
@@ -176,7 +188,8 @@ struct DetectorTable { DetectorModel zed, ricoh; SupportModel support; Confidenc
 {
     return m.false_alarm > 0.0f and m.false_alarm < m.hit_rate and m.hit_rate < 1.0f and m.env.valid()
            and std::isfinite(m.env.min_fill) and std::isfinite(m.env.max_fill) and std::isfinite(m.env.soft)
-           and std::isfinite(m.hit_rate) and std::isfinite(m.false_alarm);
+           and std::isfinite(m.hit_rate) and std::isfinite(m.false_alarm)
+           and (m.hit_rate_open < 0.0f or (std::isfinite(m.hit_rate_open) and m.hit_rate_open < 1.0f));
 }
 
 [[nodiscard]] inline DetectorTable load_detectors(const std::filesystem::path& p)
@@ -245,6 +258,7 @@ struct DetectorTable { DetectorModel zed, ricoh; SupportModel support; Confidenc
         else if (c[1] == "max_fill") m->env.max_fill = v;
         else if (c[1] == "soft") m->env.soft = v;
         else if (c[1] == "hit_rate") { m->hit_rate = v; m->n_hit_trials = n; }
+        else if (c[1] == "hit_rate_open") { m->hit_rate_open = v; m->n_open_trials = n; }
         else if (c[1] == "false_alarm") m->false_alarm = v;
         else ++malformed;
     }
@@ -286,6 +300,8 @@ inline void save_detectors(const std::filesystem::path& p, const DetectorTable& 
     f.imbue(std::locale::classic());
     f << "camera,param,value,n,source\n";
     const auto write_cam = [&](const char* cam, const DetectorModel& m) {   // (not "emit": Qt #defines it)
+        if (m.hit_rate_open >= 0.0f)
+            f << std::format("{},hit_rate_open,{},{},{}\n", cam, m.hit_rate_open, m.n_open_trials, source);
         f << std::format("{},min_fill,{},0,{}\n{},max_fill,{},0,{}\n{},soft,{},0,{}\n{},hit_rate,{},{},{}\n{},false_alarm,{},0,{}\n",
                          cam, m.env.min_fill, source, cam, m.env.max_fill, source, cam, m.env.soft, source,
                          cam, m.hit_rate, m.n_hit_trials, source, cam, m.false_alarm, source);

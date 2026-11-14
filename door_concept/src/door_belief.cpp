@@ -218,6 +218,24 @@ DoorBelief::LeafMixture DoorBelief::leaf_mixture(const std::vector<Eigen::Vector
     return out;
 }
 
+double DoorBelief::leaf_p_open(const door::LeafChannel& ch, float phi_max_rad, double eps_v) const
+{
+    if (not ch.phi[0].init or ch.phi[0].n() < 2) return std::numeric_limits<double>::quiet_NaN();
+    const auto sigmoid = [](double l) { return 1.0 / (1.0 + std::exp(-l)); };
+    const double p_near = sigmoid(ch.hinge.llr()), p_plus = sigmoid(ch.swing.llr());
+    const std::size_t N = ch.phi[0].n();
+    double share = 0.0;
+    for (const auto hinge : {door::HingeSide::Near, door::HingeSide::Far})
+        for (const float swing : {1.0f, -1.0f})
+        {
+            const double wb = (hinge == door::HingeSide::Near ? p_near : 1.0 - p_near) * (swing > 0.0f ? p_plus : 1.0 - p_plus);
+            const auto post = ch.phi[std::size_t(door::leaf_index(hinge, swing))].posterior(eps_v);
+            for (std::size_t k = 1; k < N; ++k)
+                share += wb * std::exp(post[k]) * (1.0 - std::cos(double(phi_max_rad) * double(k) / double(N - 1)));
+        }
+    return std::clamp(share, 0.0, 1.0);   // clamp: a share
+}
+
 float DoorBelief::leaf_loglik_marginal(const std::vector<Eigen::Vector3f>& pts, float R, const door::LeafChannel& ch,
                                        float phi_max_rad, double eps_v) const
 {

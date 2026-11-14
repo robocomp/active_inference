@@ -115,8 +115,8 @@ struct PlaceBelief
 
 /// What one existence update did to one place, per channel (spec §3.8). NaN = NOT COMPUTED this cycle (printed `nan` in the
 /// CSV and `—` on stdout, never a stale value). A channel's dl is the change it made to the ledger sum this cycle.
-struct FitSupport { float x = 0.f; int sensor = 0; float coverage = 1.f; float overlap = 1.f; float trunc = 0.f; };   // the fit's clutter share, the camera (0 ZED, else ricoh) it came from,
-                                                                              // and the share of the opening the mask samples (rc::door::aperture_coverage); `trunc` = the mask's clipped share (one-model: weights the term by 1 - trunc)
+struct FitSupport { float x = 0.f; int sensor = 0; float coverage = 1.f; float overlap = 1.f; float trunc = 0.f; float confidence = 1.f; };   // the fit's clutter share, the camera (0 ZED, else ricoh) it came from,
+                                                                              // and the share of the opening the mask samples (rc::door::aperture_coverage); `confidence` = the YOLO score of the mask the fit used (one-model: the support term is worth what the mask is, P(genuine | score), as its hit is); `trunc` = the mask's clipped share (one-model: weights the term by 1 - trunc)
 
 struct ExistenceTrace
 {

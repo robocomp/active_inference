@@ -775,6 +775,10 @@ public:
     };
     LeafMixture leaf_mixture(const std::vector<Eigen::Vector3f>& pts, float R, const door::LeafChannel& ch,
                              float phi_max_rad = 2.0944f, double eps_v = 0.03) const;
+    /// The share of the aperture the leaf uncovers, E[1 - cos(phi)] under the four-branch leaf posterior: 0 shut, 1 square to the wall (a
+    /// leaf at 10 degrees uncovers 1.5 %, not "open"). A continuous openness, so no angle is a threshold; NaN when the channel has no phi
+    /// filter yet (the caller then uses its prior).
+    [[nodiscard]] double leaf_p_open(const door::LeafChannel& ch, float phi_max_rad = 2.0944f, double eps_v = 0.03) const;
     /// Mean per-point log-likelihood of the points under the four-branch leaf marginal (the leaf cause of a mask); NaN when not ok.
     float leaf_loglik_marginal(const std::vector<Eigen::Vector3f>& pts, float R, const door::LeafChannel& ch,
                                float phi_max_rad = 2.0944f, double eps_v = 0.03) const;

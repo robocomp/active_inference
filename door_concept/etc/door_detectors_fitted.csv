@@ -18,3 +18,5 @@ support,absent_outlier,0.8,0,compiled_defaults
 geometry,mu1_sd,0,737,geo_tape_dm+tape_e2e18+tape_e2e19 Webots labels 2026-11-14 non-informative
 lidar,through_open,0.802144,9351,lidar_tape_dm+tape_e2e18+tape_e2e19 Webots labels 2026-11-14
 lidar,through_wall,0.00110819,14823,lidar_tape_dm+tape_e2e18+tape_e2e19 Webots labels 2026-11-14
+zed,hit_rate_open,0.696302,109,leaf_state_labels tape_dm+tape_e2e18+tape_e2e19 Webots truth state 2026-11-14
+ricoh,hit_rate_open,0.473325,206,leaf_state_labels tape_dm+tape_e2e18+tape_e2e19 Webots truth state 2026-11-14

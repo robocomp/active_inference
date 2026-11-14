@@ -165,12 +165,14 @@ public:
         {
             const auto& a = w.bern[i];
             if (a.n <= 0) continue;
-            // one-model: the posterior mean of the view's hit fraction under a uniform Beta(1,1) prior, (sum hit_w + 1)/(n + 2): one frame cannot decide a view
-            const float qb = float(a.sum_q / a.n), fb = float(a.sum_f / a.n),
-                        db = beta_hit_fraction ? float((a.sum_hit_w + 1.0) / (a.n + 2.0)) : float(a.sum_hit_w / a.n);
+            // one-model: one frame cannot decide a view, so the view's mean frame term counts n/(n + 1): a neutral pseudo-frame (zero evidence)
+            // joins the mean. (The uniform Beta(1,1) hit fraction (sum hit_w + 1)/(n + 2) of Task 6 turned a MISS into positive evidence:
+            // its pseudo-hits are worth hit_llr whatever q says; one q = 0.08 miss was worth +0.46 nats and a view of misses at q = 0.4 +0.09.)
+            const float qb = float(a.sum_q / a.n), fb = float(a.sum_f / a.n), db = float(a.sum_hit_w / a.n);
             const float hit = qb > 0.f ? a.hit_c : 0.f;
-            l += db * hit;
-            if (i == 0 or ricoh_counts_misses) l += (1.f - db) * miss_llr(qb, fb);   // the ZED alone counts misses: the ricoh contributes hits only (a persisted VL1/VL2 ricoh aggregate keeps only its hit part too)
+            float lc = db * hit;
+            if (i == 0 or ricoh_counts_misses) lc += (1.f - db) * miss_llr(qb, fb);   // the ZED alone counts misses: the ricoh contributes hits only (a persisted VL1/VL2 ricoh aggregate keeps only its hit part too)
+            l += beta_hit_fraction ? lc * float(a.n / (a.n + 1.0)) : lc;
         }
         const auto& g = w.geo;
         if (g.framed)
