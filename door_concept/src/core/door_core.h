@@ -241,7 +241,7 @@ public:
     //    keeps the compiled defaults) ──
     /// The per-camera detector model: door_detectors.csv's values, FIXED for the session (fix round 3, ruling).
     [[nodiscard]] const DetectorTable& detectors() const { return detectors_; }
-    void set_detectors(const DetectorTable& t) { detectors_ = t; }
+    void set_detectors(const DetectorTable& t) { detectors_ = t; places_.set_geometry_mu1_sd(t.geometry.mu1_sd); }
     /// One-model: the per-wall Beta rates learned from the remembered rooms (door_memory_rooms.h); the seeds until then.
     void set_wall_rates(const WallRates& r) { rates_ = r; }
     /// C_keep / C_delete are FIXED within a session: set once from etc/door_costs.csv at start (written offline by tools/door_costs_from_logs.py).

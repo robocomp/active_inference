@@ -269,7 +269,7 @@ ExistenceTrace observe_place(PlaceBelief& b, const rc::DoorFitState& th, const E
                 if (v != ViewLedger::npos and s2 > 0.0f)
                 {
                     if (fr.cfg.exist_one_model)   // each frame scored with its own controls (Student-t, k - 1 dof), two-sided
-                        b.ledger.add_geometry_t(v, x, vis * kappa, mu0, s2, fr.geo_mu1_sd, static_cast<int>(sk.size()));
+                        b.ledger.add_geometry_t(v, x, vis * kappa, mu0, s2, fr.geo_mu1_sd, static_cast<int>(sk.size()), fr.geometry_may_refute);
                     else
                         b.ledger.add_geometry(v, x, vis * kappa, mu0, t.geo_mu1, s2);
                     b.ledger.recompute(v, fr.geometry_may_refute);

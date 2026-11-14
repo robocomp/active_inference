@@ -59,6 +59,20 @@ struct GaussAgg
     // (w_i * l_i), so no frame overwrites another and no later frame re-prices an earlier one. mu0/mu1/s2 are unused then.
     bool framed = false; double sum_lg = 0;
 };
+/// ONE-MODEL (final review 2): the term a legacy (pre-flag, VL1-VL3) geometry aggregate stands for under the CURRENT geometry model:
+/// present = mu0 + mu1_sd * s (s = sqrt(s2) of the aggregate), the legacy mean-of-statistic score, clamped one-sided like the legacy branch when
+/// geometry may not refute. The old aggregate scored `mu1 = mu0 + 2 s` of ITS last frame and divided by s2: re-priced by 1/s, which is where a tiny
+/// s2 gave +-3e4 nats. With mu1_sd = 0 (a fitted "this channel carries no information") the term is exactly 0. Returns the SUM the framed form keeps
+/// (term * n: recompute divides it by n).
+[[nodiscard]] inline double rescored_legacy_geometry(const GaussAgg& g, float mu1_sd, bool geometry_may_refute)
+{
+    if (not (g.n > 0 and g.sum_w > 0 and g.s2 > 0.f)) return 0.0;
+    const float mu1 = g.mu0 + mu1_sd * std::sqrt(g.s2);
+    const float xb = float(g.sum_x / g.sum_w), wb = float(g.sum_w / g.n);
+    float lg = wb * ((xb - g.mu0) * (xb - g.mu0) - (xb - mu1) * (xb - mu1)) / (2.f * g.s2);
+    if (not geometry_may_refute) lg = std::max(0.f, lg);
+    return std::isfinite(lg) ? double(lg) * g.n : 0.0;
+}
 /// The fit-support channel's per-view aggregate: the weighted mean of x over the view's frames, scored once (support_llr); the
 /// model it was scored with travels with it (as geo's mu0/mu1/s2 do), so a restored ledger recomputes without the table.
 struct SupportAgg { double n = 0, sum_x = 0, sum_w = 0, sum_q = 0; SupportModel m; };
@@ -112,19 +126,14 @@ public:
     /// (s is itself estimated from k contours, so a 2-control s is not exact): l = -(nu+1)/2 [ln(1+z1^2/nu) - ln(1+z0^2/nu)],
     /// z = (x - mu) / s. The view's term is sum(w_i l_i) / n: the weight-averaged mean of its frames' terms. mu1_sd = 0 (a fitted
     /// "this channel carries no information") gives exactly 0. Two-sided: a refutation is as much evidence as a confirmation.
-    void add_geometry_t(std::size_t v, float x, float w, float mu0, float s2, float mu1_sd, int k)
+    void add_geometry_t(std::size_t v, float x, float w, float mu0, float s2, float mu1_sd, int k, bool may_refute = true)
     {
         if (v >= views_.size() or not (s2 > 0.f) or not (w >= 0.f)) return;
         ++version_;
         auto& g = views_[v].geo;
         if (not g.framed)
-        {   // a restored view that held an old-style aggregate: its own term seeds the sum, so nothing it knew is lost
-            g.sum_lg = 0.0;
-            if (g.n > 0 and g.sum_w > 0 and g.s2 > 0.f)
-            {
-                const float xb = float(g.sum_x / g.sum_w);
-                g.sum_lg = double(g.sum_w) * ((xb - g.mu0) * (xb - g.mu0) - (xb - g.mu1) * (xb - g.mu1)) / (2.0 * g.s2);
-            }
+        {   // a view that held an old-style aggregate: re-scored under the CURRENT geometry model (rescored_legacy_geometry), never with the mu1 = mu0 + 2 s it was written under
+            g.sum_lg = rescored_legacy_geometry(g, mu1_sd, may_refute);
             g.framed = true;
         }
         double l = 0.0;
@@ -253,7 +262,11 @@ public:
 
     /// Rejects any non-finite number. The stored llr is NOT trusted: every view is recomputed from its aggregate
     /// (geometry_may_refute must match the one used by the caller's recompute calls).
-    static std::optional<ViewLedger> parse(std::string_view str, bool geometry_may_refute, bool ricoh_counts_misses = false)
+    ///   `one_model_mu1_sd` (nullopt = flag off): the ONE-MODEL reading of the string. A flag-off parse of a ledger a flag-on run wrote (VL4/VL5: frames' own
+///   geometry terms, LiDAR openings, Ricoh aggregates that count misses) returns an EMPTY ledger, which the caller reads as "no ledger, keep the row's L":
+///   those aggregates cannot be separated back into today's. A flag-on parse re-scores every legacy geometry aggregate with the current model (mu1_sd).
+    static std::optional<ViewLedger> parse(std::string_view str, bool geometry_may_refute, bool ricoh_counts_misses = false,
+                                           std::optional<float> one_model_mu1_sd = std::nullopt)
     {
         std::size_t pos = 0;
         const auto tok = [&]() -> std::string_view {
@@ -271,6 +284,7 @@ public:
         const auto version = tok();
         const bool vl1 = version == "VL1", vl5 = version == "VL5", vl4 = version == "VL4" or vl5, vl3 = version == "VL3" or vl4;
         if (not vl1 and not vl3 and version != "VL2") return std::nullopt;
+        if (vl4 and not one_model_mu1_sd.has_value() and not ricoh_counts_misses) return ViewLedger{};   // written by a flag-on run, read by a flag-off one: empty (see above)
         std::size_t n = 0;
         if (not num(n)) return std::nullopt;
         ViewLedger L;
@@ -299,6 +313,11 @@ public:
                 ok = ok and fin(a.hit_c) and std::isfinite(a.n) and std::isfinite(a.sum_q) and std::isfinite(a.sum_hit_w) and std::isfinite(a.sum_f);
             if (not ok) return std::nullopt;
             v.llr = 0.f;
+            if (one_model_mu1_sd.has_value() and not v.geo.framed and v.geo.n > 0)
+            {   // a pre-flag aggregate under the flag: re-scored with the current model, and from now on a framed view
+                v.geo.sum_lg = rescored_legacy_geometry(v.geo, *one_model_mu1_sd, geometry_may_refute);
+                v.geo.framed = true;
+            }
             L.views_.push_back(v);
             L.recompute(L.views_.size() - 1, geometry_may_refute);
         }
