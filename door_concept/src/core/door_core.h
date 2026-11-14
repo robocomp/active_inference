@@ -269,6 +269,10 @@ public:
         bool wall_seed = false;                  // seeded along a wall of a room with no known door (no detection needed; spec 2026-11-09)
         std::string seeded_name;                 // the place row it was seeded from (the revisit sample is taken at birth, per visit)
         bool leaf_born = false;                  // one-model: seeded from a side-on LEAF; theta.aperture is its frame-wall aperture and theta.leaf the leaf's pose (phi known)
+        /// one-model: the base rate the REFUSAL is judged under: the live doors' charge only (wall_base_rate over the doors' p), not the wall's count
+        /// posterior. A place is refused by its own evidence and by the doors that exist, never by the other undecided places that share the wall's
+        /// probability with it (four evidence-free seeds on one wall each hold about a quarter of it: diluted, not refuted). NaN until assigned.
+        float base_open = std::numeric_limits<float>::quiet_NaN();
     };
     [[nodiscard]] const std::vector<Candidate>& candidates() const { return candidates_; }
     /// ONE-MODEL (S10, restore): does a LIVE door of the room the notes belong to already carry the responsibility for a remembered place at
@@ -344,6 +348,9 @@ private:
     mutable std::vector<std::pair<rc::door::Aperture, rc::door::RegisteredSweep>> reg_cache_;   // per cycle
     [[nodiscard]] double hole_free(const rc::door::Aperture& ap, const std::vector<int>& groups) const;
     [[nodiscard]] std::optional<LidarOpening> candidate_lidar(const rc::DoorFitState& theta, bool leaf_born, const std::vector<int>& groups) const;
+    /// ONE-MODEL (final review 1): the per-wall base rate of every door and candidate of the room, from the wall's exact count posterior
+    /// (wall_count_base_rates), jointly and in this cycle, from every member's evidence as it stands now.
+    void assign_wall_counts();
     /// SpecificWorker::update_existence_beliefs, moved (door_existence.cpp). Runs once per NEW mask frame.
     void update_existence(const DoorCycleInput& in, DoorCycleOutput& out);
 

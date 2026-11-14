@@ -12,6 +12,8 @@
 #include <format>
 #include <limits>
 #include <locale>
+#include <map>
+#include <numeric>
 #include <numbers>
 #include <set>
 #include <sstream>
@@ -220,6 +222,77 @@ std::vector<float> DoorCore::other_p_on_wall(int wall, const std::vector<Vec2f>&
             r.push_back(it->second * distinct(c.xy, c.var));
     }
     return r;
+}
+
+// ═══ ONE-MODEL: THE WALL'S COUNT POSTERIOR (final review 1) ═══════════════════════════════════════════════════════════════
+// The per-wall base rate of every door and candidate of the room, from the EXACT marginal of each member under the wall's count prior,
+// computed jointly from every member's evidence as it stands NOW (wall_count_base_rates, wall_base_rate.h). It replaces the earlier
+// "charge the others' previous-cycle p": that was an undamped Jacobi sweep, which refused every seed of a wall by its sibling seeds and
+// oscillated at four members; the posterior has nothing to iterate. Members on one hole (same_place) are one slot, alternatives of each other.
+void DoorCore::assign_wall_counts()
+{
+    if (not cfg_.door.exist_one_model or world_ == nullptr) return;
+    const auto& polygon = fit_.room_polygon();
+    const auto& groups = groups_cached();
+    const float rn2 = cfg_.door.tracker_detection_noise_m * cfg_.door.tracker_detection_noise_m;
+    struct Member { PlaceBelief* b; Vec2f xy; float var; int wall; Candidate* cand; };
+    std::vector<Member> ms;
+    for (const auto& [id, st] : world_->fit_states())
+    {
+        if (st->is_bearing_hypothesis) continue;
+        const Vec2f c = st->aperture.centre_xy();
+        ms.push_back({&st->belief, c, place_var(*st, rn2), wall_of(c, polygon, groups), nullptr});
+    }
+    for (Candidate& c : candidates_)
+        if (c.room == room_name_)
+            ms.push_back({&c.belief, c.xy, c.var, wall_of(c.theta.aperture.centre_xy(), polygon, groups), &c});
+    if (ms.empty()) return;
+    const double b_ref = std::log(rates_.first.mean() / (1.0 - rates_.first.mean()));
+    // ln O_i: the member's own evidence with the base rate taken out (L evaluated at the first-door rate, minus that rate)
+    std::vector<double> lo(ms.size());
+    for (std::size_t i = 0; i < ms.size(); ++i)
+    {
+        PlaceBelief& b = *ms[i].b;
+        const float held = b.prior.base_rate;
+        b.prior.base_rate = static_cast<float>(b_ref);
+        lo[i] = static_cast<double>(b.L()) - b_ref;
+        b.prior.base_rate = held;
+    }
+    std::map<int, std::vector<std::size_t>> by_wall;   // a member with no wall is alone on its own (negative key)
+    int alone = -1;
+    for (std::size_t i = 0; i < ms.size(); ++i)
+        by_wall[ms[i].wall >= 0 ? ms[i].wall : alone--].push_back(i);
+    for (const auto& [w, idx] : by_wall)
+    {
+        // slots: members on one hole (the MAP reading of their separation, place_distinctness < 1/2) are alternatives of each other
+        std::vector<int> slot(idx.size());
+        std::iota(slot.begin(), slot.end(), 0);
+        const auto find = [&](int a) { while (slot[static_cast<std::size_t>(a)] != a) a = slot[static_cast<std::size_t>(a)]; return a; };
+        for (std::size_t a = 0; a < idx.size(); ++a)
+            for (std::size_t b = a + 1; b < idx.size(); ++b)
+                if (same_place((ms[idx[a]].xy - ms[idx[b]].xy).squaredNorm(), ms[idx[a]].var + ms[idx[b]].var))
+                    slot[static_cast<std::size_t>(find(static_cast<int>(b)))] = find(static_cast<int>(a));
+        std::vector<int> root(idx.size()), compact(idx.size(), -1);
+        int n_slots = 0;
+        for (std::size_t a = 0; a < idx.size(); ++a)
+        {
+            const int r = find(static_cast<int>(a));
+            if (compact[static_cast<std::size_t>(r)] < 0) compact[static_cast<std::size_t>(r)] = n_slots++;
+            root[a] = compact[static_cast<std::size_t>(r)];
+        }
+        std::vector<double> lw(idx.size());
+        for (std::size_t a = 0; a < idx.size(); ++a) lw[a] = lo[idx[a]];
+        const std::vector<double> base = wall_count_base_rates(rates_, lw, root);
+        for (std::size_t a = 0; a < idx.size(); ++a)
+            ms[idx[a]].b->prior.base_rate = static_cast<float>(base[a]);
+    }
+    // the refusal's base rate of a candidate: the LIVE doors' charge only (Candidate::base_open)
+    for (const Member& m : ms)
+        if (m.cand != nullptr)
+        {
+            const std::vector<float> r_live = other_p_on_wall(m.wall, polygon, groups, ~std::uint64_t{0}, ~std::uint64_t{0}, m.xy, m.var, /*doors_only=*/true);
+            m.cand->base_open = wall_base_rate(rates_, r_live);
+        }
 }
 
 std::vector<FrameDetection> DoorCore::frame_detections() const
@@ -816,12 +889,15 @@ void DoorCore::prepare_candidates(const DoorCycleInput& in, const std::vector<rc
                     if (const auto mh = places_.remembered_height(*row, in.t_wall_ms, cfg.door_prior_h_std); mh.has_value())
                     { h_meas = mh->height; h_sd = mh->sd; }
             const float w_sd = cand.width_sd;
-            const std::vector<float> r_others = cfg.exist_one_model ? other_p_on_wall(wall, polygon, groups, ~std::uint64_t{0}, cand.key, cand.xy, cand.var) : std::vector<float>{};
+            // one-model: the base rate is the wall's joint count posterior, assigned below once every member has seen this frame (assign_wall_counts);
+            // band, size and extent are replaced here, the base rate stays what the last assignment left
+            const float held_base = cand.belief.prior.base_rate;
             cand.belief.prior = prior_of(th, polygon, fit_.room_is_proto(), fit_.room_band(),
                                          wall >= 0 ? doors_on_wall[wall] : 0, w_sd, h_sd, cand.size_resolved, size_prior,
                                          std::sqrt(cand.var),    // no fit yet: the detection's own place sd (isotropic, so along the normal too)
                                          std::sqrt(cand.var), std::sqrt(cand.var),   // …and along the wall, at both jambs
-                                         h_meas, cfg.exist_one_model ? &rates_ : nullptr, r_others);
+                                         h_meas, nullptr, {});
+            if (cfg.exist_one_model) cand.belief.prior.base_rate = held_base;
             if (cand.size_resolved) cand.best_size = std::max(cand.best_size, cand.belief.prior.size);
             const auto it = self_det.find(c);
             const int self_sensor = it == self_det.end() ? -1 : (dets_[static_cast<std::size_t>(it->second)].sensor != 0 ? 1 : 0);
@@ -840,6 +916,14 @@ void DoorCore::prepare_candidates(const DoorCycleInput& in, const std::vector<rc
             else
             observe_place(cand.belief, cand.theta, fr, visit_, 0.0f, &rows, self_sensor, self_w);
             log_view_rows(std::format("place_{}", cand.key), rows, out);   // logged (no selection by birth), never learned from
+        }
+        // one-model: every member of the room has seen this frame; the wall's count posterior gives each its base rate, then the verdicts
+        if (cfg.exist_one_model) assign_wall_counts();
+        for (std::size_t c = 0; c < candidates_.size(); ++c)
+        {
+            Candidate& cand = candidates_[c];
+            if (cand.room != room_name_) continue;
+            const auto it = self_det.find(c);
             const Verdict v = decide(cand.belief.L(), Role::Ordinary, costs);
             exists[c] = v.exists ? 1 : 0;
             if (it != self_det.end() and (cand.belief.ledger.views().size() <= 1 or ex_dbg_ % 60 == 0))   // its first views, then 1 in 60
@@ -903,6 +987,13 @@ static float question_L(const DoorCore::Candidate& c)
     return c.belief.L() - c.belief.prior.size + std::max(c.best_size, c.belief.prior.size);
 }
 
+// One-model: the question judged under the REFUSAL's base rate (Candidate::base_open): the place's evidence and the live doors' charge, not the
+// probability the wall's count posterior shares among its undecided places.
+static float question_L_open(const DoorCore::Candidate& c)
+{
+    return std::isfinite(c.base_open) ? question_L(c) - c.belief.prior.base_rate + c.base_open : question_L(c);
+}
+
 void DoorCore::note_competition(std::vector<NodeRef> nodes) { competes_.note(std::move(nodes)); }
 
 void DoorCore::refresh_competition()
@@ -959,7 +1050,7 @@ bool DoorCore::candidate_is_open(const Candidate& c) const
     // ★The question is judged on the widest the blob ever looked (clean25): the size term is this frame's, and one clipped mask of width 0 sank
     //  L to -11.9, read as "refused", and ended the tour. A mask's width is a lower bound under occlusion, so a narrow frame says nothing against
     //  a place that once looked door-sized; a place that only ever looks narrow keeps its low best term and is refused.
-    return not decide(question_L(c), Role::Ordinary, costs_.costs(cfg_.door.exist_max_room_s)).remove;
+    return not decide(cfg_.door.exist_one_model ? question_L_open(c) : question_L(c), Role::Ordinary, costs_.costs(cfg_.door.exist_max_room_s)).remove;
 }
 
 float DoorCore::candidate_question_p(const Candidate& c) const
@@ -1010,6 +1101,7 @@ void DoorCore::update_existence(const DoorCycleInput& in, DoorCycleOutput& out)
     const Costs costs = costs_.costs(cfg.exist_max_room_s);
     std::vector<std::uint64_t> to_remove;
     std::vector<float> L_before(states.size());
+    std::vector<std::vector<ViewRow>> door_rows(states.size());
     with_frame(in, zed_fresh, rgb_fresh, [&](const ExistenceFrame& fr)
     {
         std::vector<int> wall(states.size(), -1);
@@ -1027,11 +1119,12 @@ void DoorCore::update_existence(const DoorCycleInput& in, DoorCycleOutput& out)
             if (inst.ai2_initialized)
             {
                 int before = 0;
-                for (std::size_t j = 0; j < states.size(); ++j)
-                    if (j != i and wall[j] == wall[i] and wall[i] >= 0 and not states[j].second->is_bearing_hypothesis
-                        and door_seq_[states[j].first] < door_seq_[id])
-                        ++before;
-                const std::vector<float> r_others = cfg.exist_one_model ? other_p_on_wall(wall[i], polygon, groups, id, ~std::uint64_t{0}, inst.aperture.centre_xy(), place_var(inst, cfg.tracker_detection_noise_m * cfg.tracker_detection_noise_m)) : std::vector<float>{};
+                if (not cfg.exist_one_model)   // the integer rule (birth order); the one-model base rate is the wall's count posterior (assign_wall_counts)
+                    for (std::size_t j = 0; j < states.size(); ++j)
+                        if (j != i and wall[j] == wall[i] and wall[i] >= 0 and not states[j].second->is_bearing_hypothesis
+                            and door_seq_[states[j].first] < door_seq_[id])
+                            ++before;
+                const float held_base = inst.belief.prior.base_rate;
                 const auto C = inst.ai2_belief.covariance();
                 // σ_ap, the aperture's sd ALONG THE WALL NORMAL: the fit's belief is [s, w, h, d] in its wall frame, and its only
                 // across-wall state is d, the door plane's depth off the wall line; its posterior sd (Σ(3,3), recess_sd()) is the
@@ -1042,7 +1135,8 @@ void DoorCore::update_existence(const DoorCycleInput& in, DoorCycleOutput& out)
                                              inst.ai2_belief.recess_sd(),
                                              std::sqrt(std::max(0.0f, C(0, 0))),                                // the near jamb: s
                                              std::sqrt(std::max(0.0f, C(0, 0) + C(1, 1) + 2.0f * C(0, 1))),   // the far jamb: s + w
-                                             std::numeric_limits<float>::quiet_NaN(), cfg.exist_one_model ? &rates_ : nullptr, r_others);
+                                             std::numeric_limits<float>::quiet_NaN(), nullptr, {});
+                if (cfg.exist_one_model) inst.belief.prior.base_rate = held_base;
             }
             const float act = std::exchange(inst.pending_actuation_llr, 0.0f);
             std::vector<ViewRow> rows;
@@ -1070,12 +1164,21 @@ void DoorCore::update_existence(const DoorCycleInput& in, DoorCycleOutput& out)
                 }
             if (act != 0.0f and not std::isfinite(inst.exist_trace.act_dl))
                 inst.pending_actuation_llr += act;   // no view and no ZED pose this cycle: the evidence waits (fix round 1)
+            door_rows[i] = std::move(rows);
+        }
+        // one-model: every door has seen this frame; the wall's count posterior gives each its base rate, then the verdicts
+        if (cfg.exist_one_model) assign_wall_counts();
+        for (std::size_t i = 0; i < states.size(); ++i)
+        {
+            const auto& [id, instp] = states[i];
+            rc::DoorFitState& inst = *instp;
+            if (inst.is_bearing_hypothesis) continue;
             const float L = inst.belief.L();
             const Verdict v = decide(L, inst.role, costs);
             inst.exist_trace.delete_line = v.delete_line;
             if (v.remove)
                 to_remove.push_back(id);
-            log_view_rows(inst.node_name, rows, out);
+            log_view_rows(inst.node_name, door_rows[i], out);
         }
     });
 

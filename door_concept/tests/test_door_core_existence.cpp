@@ -338,10 +338,11 @@ int main()
             std::print("one_model alone, settle {}: base_rate {:.4f} (first {:.4f})\n", k, r.door()->belief.prior.base_rate, first);
             CHECK(std::abs(r.door()->belief.prior.base_rate - first) < 1e-4f);
         }
-        // a door and a pending candidate on one wall (a second door on a wall needs more views than a first, so it stays a candidate
-        // here): each one's rate reflects the other's previous-cycle p, strictly between the two seed rates
+        // a door and a pending candidate on one wall, each charged by the wall's JOINT count posterior (final review 1: nothing depends on which was born first, so a
+        // door that holds its place against a second place must carry the evidence for it: six hit views from six bearings; the second place has three).
+        // Each one's rate is strictly between the two seed rates.
         Rig q(false, true);
-        q.look(A0, kDoor, {{1.0f, kWallY, 0.9f}});
+        for (int k = 0; k < 6; ++k) q.look(stand(4.0f, 15.0f * static_cast<float>(k) - 35.0f), kDoor, {{1.0f, kWallY, 0.9f}});
         for (int k = 0; k < 3; ++k) q.look(stand(4.0f, 0.0f, 3.0f), {3.0f, kWallY + 0.01f}, {{3.0f, kWallY, 0.9f}});
         std::print("one_model door + candidate: {} doors, {} candidates\n", q.w.st.size(), q.core.candidates().size());
         CHECK(q.w.st.size() == 1 and q.core.candidates().size() == 1);
@@ -353,6 +354,33 @@ int main()
             CHECK(d.belief.prior.base_rate < first and d.belief.prior.base_rate > another);
             CHECK(c.belief.prior.base_rate < first and c.belief.prior.base_rate > another);
         }
+    }
+    // ── wall_seeds_are_not_refused_by_each_other (final review 1): four wall seeds on one 4 m wall, 30 steps with no mask. The wall's count
+    //    posterior shares the wall's probability among them (diluted, not refuted): every seed stays an OPEN question, and no p oscillates
+    //    (the previous-cycle charge refused all four at L = -1.8..-2.2 and swung period-2 at k >= 3).
+    {
+        Rig r(false, true);
+        r.core.set_costs(CostEstimator::logged_default());
+        r.settle(A0);
+        const std::string room = r.core.room_name();
+        for (const float x : {-1.5f, -0.5f, 0.5f, 1.5f}) CHECK(r.core.hypothesise_place(room, Vec2f(x, kWallY), true));
+        std::vector<std::vector<float>> p(4);
+        for (int k = 0; k < 30; ++k)
+        {
+            r.settle(A0);
+            for (std::size_t i = 0; i < r.core.candidates().size() and i < 4; ++i) p[i].push_back(r.core.candidates()[i].belief.p());
+        }
+        CHECK(r.core.candidates().size() == 4);
+        float swing = 0.0f;
+        for (std::size_t i = 0; i < r.core.candidates().size(); ++i)
+        {
+            const auto& c = r.core.candidates()[i];
+            std::print("seed {}: p={:.3f} L={:+.2f} base_rate {:+.3f} base_open {:+.3f} open {}\n", i, c.belief.p(), c.belief.L(), c.belief.prior.base_rate, c.base_open, r.core.candidate_is_open(c));
+            CHECK(r.core.candidate_is_open(c));
+            for (std::size_t k = 6; k + 1 < p[i].size(); ++k) swing = std::max(swing, std::abs(p[i][k + 1] - p[i][k]));
+        }
+        std::print("four seeds, 30 steps: largest p change after step 6: {:.2e}\n", swing);
+        CHECK(swing < 1e-4f);
     }
     // ── the_blob_pays_its_measured_width (2026-11-09, clean19-21): the measurement is scored against the prior, not the measurement after
     //    that prior has pulled it (0.36 m pulled to 0.95 m paid -0.20 nats; five phantoms measuring 0.23-0.41 m were born on it)
@@ -1561,9 +1589,9 @@ int main()
         for (const auto& d : r.births) std::print("  BIRTH cycle {} {} ({:.2f},{:.2f})\n", d.cycle, d.name, d.a, d.b);
         for (const auto& d : r.removes) std::print("  REMOVE cycle {} {} {}\n", d.cycle, d.name, d.note);
         CHECK(r.w.st.size() == 2);
-        //    both are born at the first frame, each charged as a first door (no other has a previous-cycle p yet); the next cycle charges each the
-        //    other and both fall, then are re-born with their ledgers: a start-up transient of the order-free rate, not a flicker. After it, none.
-        for (const auto& d : r.removes) CHECK(d.cycle <= 10);
+        //    the wall's count posterior is computed jointly in the cycle: no start-up fall and re-birth (the previous-cycle charge made both fall and be re-born)
+        CHECK(r.removes.empty());
+        CHECK(r.births.size() == 2);
         //    removing_one_frees_other: with one gone the other's rate returns to the first-door value within one cycle
         if (r.w.st.size() == 2)
         {

@@ -7,8 +7,12 @@
 #pragma once
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <numbers>
+#include <numeric>
 #include <span>
+#include <vector>
+#include "room_door_count.h"
 
 namespace rc::door::core
 {
@@ -58,6 +62,58 @@ struct WallRates
     const double m = 1.0 - none;
     auto logit = [](double p) { return std::log(p / (1.0 - p)); };
     return static_cast<float>((1.0 - m) * logit(rates.first.mean()) + m * logit(rates.another.mean()));
+}
+
+
+/// ONE-MODEL, THE EXACT PER-WALL CHARGE (final review 1). The members of one wall (live doors, pending candidates, wall seeds), each with
+/// the log odds of its OWN evidence (ln O_i = L_i with the base rate taken out: band, size, extent, ledger, carried, crossing), and the slot each
+/// belongs to: labels on ONE hole (same_place) are ONE slot, alternatives of each other, so a slot's odds are the sum of its members' (a hole
+/// holds one door). The wall's configuration prior is the per-wall rates' own: no door 1, a first door odds P(first)/(1-P(first)), each further
+/// door odds P(another)/(1-P(another)) (the flag-off rule, as a prior over which doors the wall holds). The posterior marginal of every slot is
+/// the exact count DP of room_door_count.h (room_door_posterior), computed JOINTLY in one pass: nothing reads a previous cycle's p, there is no
+/// iteration, nothing to damp or oscillate, and the answer does not depend on birth order. The returned value of a member is the base-rate
+/// term that makes its L the logit of its own marginal: logit(marg_i) - ln O_i. One member alone gets logit(P(first)), as before.
+///   `log_odds[i]`  ln O_i of member i;  `slot[i]`  its slot (0..n_slots-1, every slot used).
+/// The returned vector has one base-rate log-odds per member.
+[[nodiscard]] inline std::vector<double> wall_count_base_rates(const WallRates& rates, std::span<const double> log_odds, std::span<const int> slot)
+{
+    const double ninf = -std::numeric_limits<double>::infinity();
+    auto logit = [](double p) { return std::log(p / (1.0 - p)); };
+    const double first = logit(rates.first.mean());
+    std::vector<double> out(log_odds.size(), first);   // the one-member answer, also what a non-finite result falls back to
+    if (log_odds.empty()) return out;
+    const int n_slots = 1 + *std::ranges::max_element(slot);
+    std::vector<double> slot_lo(static_cast<std::size_t>(n_slots), ninf);   // ln of the slot's summed odds
+    for (std::size_t i = 0; i < log_odds.size(); ++i)
+        slot_lo[static_cast<std::size_t>(slot[i])] = detail::lse(slot_lo[static_cast<std::size_t>(slot[i])], log_odds[i]);
+    std::vector<DoorCountPlace> places(slot_lo.size());
+    for (std::size_t s = 0; s < places.size(); ++s)
+        places[s] = {static_cast<float>(std::clamp(slot_lo[s], -700.0, 700.0)), 0.0f};   // clamp: the DP's own float/double range (room_door_posterior clamps the same way)
+    // configuration prior P(config) ∝ w(n); room_door_posterior takes P(N = n) and divides by C(K, n): hand it w(n)·C(K, n)
+    const std::size_t K = places.size();
+    const double lw_first = first, lw_another = logit(rates.another.mean());
+    std::vector<double> prior(K + 1, 0.0);
+    double lw = 0.0;   // ln w(0)
+    for (std::size_t n = 0; n <= K; ++n)
+    {
+        if (n == 1) lw = lw_first;
+        else if (n > 1) lw += lw_another;
+        const double lc = std::lgamma(double(K) + 1.0) - std::lgamma(double(n) + 1.0) - std::lgamma(double(K - n) + 1.0);
+        prior[n] = std::exp(lw + lc);   // unnormalised (room_door_posterior normalises)
+    }
+    const double top = *std::ranges::max_element(prior);
+    for (auto& x : prior) x /= top;
+    const auto post = room_door_posterior(places, prior);
+    for (std::size_t i = 0; i < log_odds.size(); ++i)
+    {
+        const std::size_t s = static_cast<std::size_t>(slot[i]);
+        const double marg_slot = std::clamp(post.marg[s], std::numeric_limits<double>::min(), 1.0);   // numerical floor on a log
+        const double lshare = log_odds[i] - slot_lo[s];                                              // ln(O_i / O_slot): this label's share of its hole
+        const double marg_i = std::exp(std::log(marg_slot) + lshare);
+        const double b = std::log(marg_slot) - slot_lo[s] - std::log1p(-std::min(marg_i, 1.0 - 1e-16));   // logit(marg_i) - ln O_i; 1e-16: numerical floor
+        if (std::isfinite(b)) out[i] = b;
+    }
+    return out;
 }
 
 }   // namespace rc::door::core
