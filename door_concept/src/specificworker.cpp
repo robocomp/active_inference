@@ -4437,10 +4437,30 @@ void SpecificWorker::step_remembered_looks()
 
 // ─── AN UNDECIDED CANDIDATE IS UNFINISHED BUSINESS (spec 2026-11-09-undecided-candidate-look) ───────────────────────
 
+// ONE-MODEL: the per-wall rates and the room's door-count prior are learned from the rooms LTSM remembers (in the shared graph),
+// the current room's own memory twin left out. On a room entry and then at most once a second (a slow read: it walks the graph's
+// room/wall/object nodes). The current room is excluded by its room_id (the memory twin carries the live room's room_id); a fresh
+// room LTSM has not recognised has no twin yet, so nothing is excluded.
+void SpecificWorker::refresh_remembered_rooms()
+{
+    const auto now = std::chrono::steady_clock::now();
+    const bool entered = room_node_id_ != remembered_for_room_;
+    if (not entered and now - remembered_tp_ < std::chrono::seconds(1)) return;
+    remembered_for_room_ = room_node_id_;
+    remembered_tp_ = now;
+    std::optional<std::uint64_t> mine;
+    if (const auto room = G->get_node(room_node_id_); room.has_value())
+        mine = G->get_attrib_by_name<room_id_att>(room.value());
+    remembered_rooms_ = rc::door::memrooms::read_remembered_rooms(*G, mine);
+    core_->set_wall_rates(rc::door::memrooms::rates_from_rooms(remembered_rooms_));
+}
+
 void SpecificWorker::step_candidate_looks()
 {
     if (not G or not fitter_ or room_node_id_ == 0)
         return;
+    if (cfg_.exist_one_model)
+        refresh_remembered_rooms();
     const auto withdraw = [&](std::uint64_t key, CandidateLook& e, const char* why)
     {
         if (e.aff.node_id() != 0)
@@ -4514,7 +4534,11 @@ void SpecificWorker::step_candidate_looks()
     // ★FLAGGED (spec §6.3): the initial count prior, geometric on n >= 1 with mean 2, P(N = 0) = 0 (§6.1); the support is
     //  capped at 8 doors (a home's room), or the slot count if smaller. Replaced by memory's counts once ltsm publishes them.
     const int n_max = std::min<int>(8, static_cast<int>(door_slots.size()));
-    const auto post = rc::door::core::room_door_posterior(door_slots, rc::door::core::geometric_count_prior(2.0, std::max(1, n_max)));
+    // One-model: the prior is the remembered rooms' door counts (the geometric mean-2 prior stays as their pseudo-count of one room).
+    const auto count_prior = cfg_.exist_one_model
+        ? rc::door::core::count_prior_from_rooms(rc::door::memrooms::door_counts(remembered_rooms_), 2.0, std::max(1, n_max))
+        : rc::door::core::geometric_count_prior(2.0, std::max(1, n_max));
+    const auto post = rc::door::core::room_door_posterior(door_slots, count_prior);
 
     // THE PRICE OF A LOOK (spec §3.4): VOI = C_miss · P(this look finds a door the drive cannot act on yet), in seconds, against
     // its time: the straight line from the camera over the controller's nominal speed (a lower bound) plus its dwell.

@@ -62,6 +62,7 @@
 #include "door_model.h"
 #include "door_provider_faces.h"   // rc::door::ProviderFaces: one physical door, one leaf (warm34)
 #include "door_identity_table.h"   // rc::door::IdentityRow + plan_restore (etc/door_identities.csv)
+#include "door_memory_rooms.h"   // rc::door::memrooms — rates + door-count prior from LTSM remembered rooms (one-model)
 #include "door_look.h"             // rc::door::look — the look-at-a-remembered-door affordance
 #include "door_anchor_open.h"       // rc::door::AnchorLostMode (Task D-B: the passage anchor's per-cycle lost check)
 #include "decision_log.h"          // rc::door::DoorDecisionLog (binary decision log, default off)
@@ -333,6 +334,7 @@ private:
     std::uint64_t door_questions_room_ = 0;
     std::string   door_questions_state_;
     void step_candidate_looks();
+    void refresh_remembered_rooms();   // one-model: rates + door-count prior from LTSM's remembered rooms (room entry + every >= 1 s)
     void step_wall_hypotheses();                            // a promoted room's walls are its door slots (room-door-belief spec §3.3)
     std::uint64_t wall_seeded_room_ = 0;
     std::uint64_t wall_look_key_ = 0;                       // the one wall place being looked at (one node at a time: rates)
@@ -636,6 +638,9 @@ private:
     rc::EvidenceMonitor* evidence_monitor_ = nullptr;
     rc::EvidenceGlobals  ev_g_{};                       // per-cycle fields reset at the head of compute()
     void refresh_evidence_monitor();                    // throttled push of BOTH dashboard sections
+    std::vector<rc::door::memrooms::RememberedRoom> remembered_rooms_;   // one-model: LTSM's rooms but the current one
+    std::uint64_t remembered_for_room_ = 0;
+    std::chrono::steady_clock::time_point remembered_tp_{};
     std::chrono::steady_clock::time_point last_monitor_tp_{};   // ~5 Hz dashboard tick
     std::chrono::steady_clock::time_point last_compute_tp_{};   // compute-rate estimate for the strip
     void restore_dashboard_geometry();
