@@ -113,6 +113,47 @@ int main()
       CHECK(P.has_value()); CHECK(P->serialise() == s); CHECK(std::fabs(P->sum() - L.sum()) < 1e-5f);
       const auto old = ViewLedger::parse("VL1 1 0 3 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 1", false);
       CHECK(old.has_value()); CHECK(old->views().size() == 1); CHECK(old->views()[0].sup.n == 0); CHECK(old->sum() == 0.f); }
+    { // ricoh_miss_counts_under_flag: a Ricoh view with q 0.8 and no hit lowers the view llr by miss_llr(q, f); flag off: unchanged (hits only)
+      const DetectorModel R = default_detectors().ricoh;
+      for (bool flag : {false, true})
+      { ViewLedger L; L.ricoh_counts_misses = flag; const auto v = L.observe(cam_at(0), DOOR, NRM, 1, 0, 0);
+        L.add_bernoulli(v, Channel::Ricoh, 0.8f, R, 0.f); L.recompute(v, false);
+        const float m = miss_llr(0.8f, false_alarm_eff(R, 0.8f));
+        if (flag) { CHECK(m < 0.f); CHECK(std::fabs(L.sum() - m) < 1e-5f); } else CHECK(L.sum() == 0.f); } }
+    { // geometry_may_refute_under_flag: x at mu0 - 2 s is evidence AGAINST (one-model, no clamp); the old path stays 0 with the clamp
+      const float mu0 = 0.5f, s = 0.1f;
+      ViewLedger L; const auto v = L.observe(cam_at(0), DOOR, NRM, 1, 0, 0);
+      L.add_geometry_t(v, mu0 - 2 * s, 1.f, mu0, s * s, 2.f, 5); L.recompute(v, false);
+      CHECK(L.sum() < 0.f);
+      ViewLedger O; const auto w = O.observe(cam_at(0), DOOR, NRM, 1, 0, 0);
+      O.add_geometry(w, mu0 - 2 * s, 1.f, mu0, mu0 + 2 * s, s * s); O.recompute(w, false); CHECK(O.sum() == 0.f); }
+    { // geometry_no_repricing: constant x, s alternating 0.015 / 0.25 — each frame priced by its OWN s, so the view's term moves by at most
+      // (|this frame's term| + |the previous view term|) / n per added frame; the old running-mean-with-overwritten-s form jumps by ~1/s
+      const float x = 0.5f, mu0 = 0.f; ViewLedger L; const auto v = L.observe(cam_at(0), DOOR, NRM, 1, 0, 0);
+      float prev = 0.f;
+      for (int i = 0; i < 8; ++i)
+      {
+          const float s = i % 2 ? 0.25f : 0.015f;
+          ViewLedger one; const auto o = one.observe(cam_at(0), DOOR, NRM, 1, 0, 0); one.add_geometry_t(o, x, 1.f, mu0, s * s, 2.f, 3); one.recompute(o, false);
+          const float own = one.sum();   // this frame's term alone (n = 1)
+          L.add_geometry_t(v, x, 1.f, mu0, s * s, 2.f, 3); L.recompute(v, false);
+          CHECK(std::fabs(L.sum() - prev) <= (std::fabs(own) + std::fabs(prev)) / float(i + 1) + 1e-4f);
+          CHECK(std::fabs(own) < 10.f);   // Student-t: log growth, never the 1/s^2 of a Gaussian
+          prev = L.sum();
+      }
+      ViewLedger G; const auto g = G.observe(cam_at(0), DOOR, NRM, 1, 0, 0);   // the old form, same inputs, for contrast
+      float gprev = 0.f, gmax = 0.f;
+      for (int i = 0; i < 8; ++i) { const float s = i % 2 ? 0.25f : 0.015f; G.add_geometry(g, x, 1.f, mu0, mu0 + 2 * s, s * s); G.recompute(g, true); gmax = std::max(gmax, std::fabs(G.sum() - gprev)); gprev = G.sum(); }
+      CHECK(gmax > 50.f); }
+    { // geometry_zero_when_noninformative: mu1_sd = 0 (a fitted "no information") => exactly 0
+      ViewLedger L; const auto v = L.observe(cam_at(0), DOOR, NRM, 1, 0, 0);
+      for (int i = 0; i < 5; ++i) { L.add_geometry_t(v, 0.9f - 0.1f * i, 1.f, 0.2f, 0.01f, 0.f, 4); L.recompute(v, false); CHECK(L.sum() == 0.f); } }
+    { // VL4: one-model geometry round-trips; a ledger without it still writes VL3
+      ViewLedger L; const auto v = L.observe(cam_at(0), DOOR, NRM, 1, 0, 0);
+      L.add_geometry_t(v, 0.7f, 0.8f, 0.2f, 0.04f, 2.f, 4); L.recompute(v, false);
+      const auto s = L.serialise(); CHECK(s.starts_with("VL4 ")); CHECK(s.find(',') == std::string::npos);
+      const auto P = ViewLedger::parse(s, false, true); CHECK(P.has_value()); CHECK(P->serialise() == s); CHECK(std::fabs(P->sum() - L.sum()) < 1e-4f);
+      ViewLedger N; stare(N, cam_at(0), 3, 0.6f, 0.f); CHECK(N.serialise().starts_with("VL3 ")); }
     { // revisit_replaces_not_adds
       ViewLedger L; stare(L, cam_at(0), 20, 0.6f, 0.f);
       auto P = *ViewLedger::parse(L.serialise(), false); const float s0 = P.sum();

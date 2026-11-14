@@ -39,6 +39,8 @@ struct FrameDetection
     float w = 1.0f;            // its reliability: YOLO confidence x (ricoh) the wall/variance weight x P(unclaimed by another concept)
     bool admissible = true;    // a frame the fit would refuse (truncated, or moving off-centre: DoorCore::frame_admissible) — a
                                // detection there may neither confirm nor refute the place it lands on: that camera's frame is no trial
+    float trunc_frac = 0.f;    // the mask's border-clipped share. One-model: the frame is always admissible and truncation is a loss of
+                               // information, weighting the size and support terms by (1 - trunc_frac); place and existence evidence keep full weight
 };
 
 /// What every place shares on one fresh frame.

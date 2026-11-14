@@ -1051,7 +1051,8 @@ float DoorFit::run_inference(rc::DoorFitState& inst, const DoorObservation& obse
                                                                   inst.last_slice_sensor,
                                                                   rc::door::aperture_coverage(inst.ai2_belief.aperture(), frame.points),
                                                                   rc::door::aperture_overlap(inst.ai2_belief.aperture().w,
-                                                                      std::sqrt(std::max(0.0f, inst.ai2_belief.covariance()(0, 0))))};
+                                                                      std::sqrt(std::max(0.0f, inst.ai2_belief.covariance()(0, 0)))),
+                                                                  inst.last_trunc_frac};
     }
     inst.dbg_energy = energy;   // remember for the next gated/aged cycle to HOLD
     inst.dbg_resid_pts = static_cast<int>(observation.residual_pts.size());   // HELD, see door_fit_state.h

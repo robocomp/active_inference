@@ -35,7 +35,7 @@ inline int inject(core::PlaceTable& table, const rc::phantom::Memory& mem, std::
         i.seen_wall_ms = p.seen_ms.value_or(p.removed_ms);
         i.removed_ms = p.removed_ms;
         if (not p.ledger.empty()) i.ledger = p.ledger;
-        core::PlaceRow r = core::PlaceTable::row_of(i, place_sd, table.geometry_may_refute(), table.lookalike());
+        core::PlaceRow r = core::PlaceTable::row_of(i, place_sd, table.geometry_may_refute(), table.lookalike(), table.one_model());
         r.height_sd = p.height_sd;
         table.upsert(std::move(r));
         ++added;

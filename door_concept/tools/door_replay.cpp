@@ -52,6 +52,7 @@
 #include <clocale>
 #include <cmath>
 #include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <format>
 #include <map>
@@ -470,7 +471,7 @@ int main(int argc, char** argv)
     if (std::setlocale(LC_ALL, "es_ES.UTF-8") == nullptr) std::setlocale(LC_ALL, "");
     if (argc < 3)
     {
-        std::println("usage: door_replay <door_inputs.bin> <door_decisions.bin> [--until CYCLE] [--verbose] [--csv DIR] [--trace NAME]");
+        std::println("usage: door_replay <door_inputs.bin> <door_decisions.bin> [--until CYCLE] [--verbose] [--csv DIR] [--trace NAME] [--set KEY=VALUE]... [--detectors FILE]");
         return 2;
     }
     std::uint64_t until = ~0ull;
@@ -493,6 +494,8 @@ int main(int argc, char** argv)
     std::string costs_path = "etc/door_costs.csv";   // --costs FILE: C_keep / C_delete (fixed; missing => the compiled LOGGED estimate, loudly)
     bool look_log = false, ablate_hull = false;   // Task E: --look prints the look-vs-approach prices; --ablate-hull-midpoint reproduces the collapse
     bool core_stdout = false;
+    std::vector<std::pair<std::string, std::string>> overrides;   // --set KEY=VALUE: a config key replacing the tape header's (or adding one), e.g. Existence.OneModel=true
+    std::string detectors_path;   // --detectors FILE: the detector table; default = the compiled one, or etc/door_detectors_fitted.csv under Existence.OneModel (as the agent)
     for (int i = 3; i < argc; ++i)
     {
         const std::string_view a = argv[i];
@@ -506,6 +509,14 @@ int main(int argc, char** argv)
         else if (a == "--clock-jitter-ms" and i + 1 < argc) jitter_ms = std::strtod(argv[++i], nullptr);
         else if (a == "--trace" and i + 1 < argc) trace_door = argv[++i];
         else if (a == "--costs" and i + 1 < argc) costs_path = argv[++i];
+        else if (a == "--set" and i + 1 < argc)
+        {
+            const std::string_view kv = argv[++i];
+            const auto eq = kv.find('=');
+            if (eq == std::string_view::npos or eq == 0) { std::println("--set wants KEY=VALUE, got '{}'", kv); return 2; }
+            overrides.emplace_back(std::string(kv.substr(0, eq)), std::string(kv.substr(eq + 1)));
+        }
+        else if (a == "--detectors" and i + 1 < argc) detectors_path = argv[++i];
         else if (a == "--stdout") core_stdout = true;   // Task 8: echo the core's stdout lines (existence / candidate readouts)
         else if (a == "--recess-prior-std" and i + 1 < argc)
         {   // a SENSITIVITY probe (Task 5b): the leaf-plane depth's prior σ, overriding the recorded config
@@ -529,7 +540,8 @@ int main(int argc, char** argv)
     std::uint32_t version = 0;
     const auto hdr = f ? read_header(f, RecordingKind::Input, &version) : std::nullopt;
     if (not hdr.has_value()) { std::println("cannot read the input tape {}", argv[1]); return 2; }
-    const EffectiveConfig eff(hdr->config_text);
+    EffectiveConfig eff(hdr->config_text);
+    for (const auto& [k, v] : overrides) { eff.file_values[k] = v; std::println("probe: config {} = {}", k, v); }
     // The agent REFUSES a config that sets a retired key. A tape recorded BEFORE the existence model carries them in its header and
     // must still replay (the core ignores them), so here the same check is a loud warning, not a refusal.
     if (const auto stale = rc::retired_door_keys_present([&](const std::string& k) { return eff.find(k) != nullptr; }); not stale.empty())
@@ -550,6 +562,15 @@ int main(int argc, char** argv)
     ReplayWorld world(cfg.door, by_cycle);
     world.mirror_ = mirror;
     DoorCore core(cfg);
+    if (detectors_path.empty() and cfg.door.exist_one_model and std::filesystem::exists("etc/door_detectors_fitted.csv"))
+        detectors_path = "etc/door_detectors_fitted.csv";   // the agent's own choice under the flag (specificworker.cpp)
+    if (not detectors_path.empty())
+    {
+        core.set_detectors(rc::door::core::load_detectors(detectors_path));
+        const auto& t = core.detectors();
+        std::println("detectors: {} -> zed hit {:.3f} fa {:.3f}, ricoh hit {:.3f} fa {:.3f}, geometry mu1_sd {:.2f}", detectors_path,
+                     t.zed.hit_rate, t.zed.false_alarm, t.ricoh.hit_rate, t.ricoh.false_alarm, t.geometry.mu1_sd);
+    }
     core.set_costs(rc::door::core::CostEstimator::load_or_default(costs_path));
     { const auto c = core.costs().costs(cfg.door.exist_max_room_s);
       std::println("costs: {} -> C_keep {:.2f} s, C_delete(ordinary) {:.2f} s", costs_path, c.keep_s, c.delete_ordinary_s); }

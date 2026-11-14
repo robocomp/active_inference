@@ -323,6 +323,7 @@ private:
     PlaceTable      places_{false};    // one row per door place per room (reset in the ctor from the config)
     std::vector<Candidate> candidates_;
     std::vector<float> det_w_;         // per dets_ index: its reliability (YOLO confidence x the ricoh's wall/variance weight x P(unclaimed by another concept))
+    std::vector<float> det_trunc_;     // per dets_ index: the mask's clipped share (FrameDetection::trunc_frac)
     std::vector<char> det_adm_;        // per dets_ index: frame_admissible (an inadmissible frame is no trial for its place)
     std::unordered_map<std::uint64_t, int> observed_frame_;   // door → the mask frame its belief already holds (a newborn's birth frame)
     std::vector<int> det_candidate_;   // per dets_ index: the candidate it fed this frame (-1 = none / a live door's)

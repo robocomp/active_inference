@@ -538,6 +538,51 @@ int main()
             }
         }
     }
+    {   // truncated_view_pays_no_size_cost (one-model): a 40 % clipped mask of a 0.80 m door is a trial, not "no trial". The frame
+        // confirms the place at full weight; the size is not charged — the blob's width is a lower bound, so its sd widens by
+        // 1/sqrt(1 - trunc) (as the candidate path does) and the size term is no worse than the untruncated view's.
+        const rc::DoorFitState th = shut_door(0.80f);
+        const FrameDetection trunc_det{{1.0f, kWallY}, -1.0f, 0, 1.0f, true, 0.4f};
+        Bench on; on.cfg.exist_one_model = true;
+        PlaceBelief pb_on;
+        on.frame(pb_on, th, A0, kDoor, true, false, {trunc_det}, 0);
+        Bench off;
+        FrameDetection refused = trunc_det; refused.admissible = false;   // today: the gate makes it no trial at all
+        PlaceBelief pb_off;
+        off.frame(pb_off, th, A0, kDoor, true, false, {refused}, 0);
+        std::print("truncated_view: L on {:+.3f} off {:+.3f}, views {} / {}\n", pb_on.ledger.sum(), pb_off.ledger.sum(), pb_on.ledger.views().size(), pb_off.ledger.views().size());
+        CHECK(pb_on.ledger.sum() > 0.5f);            // the existence evidence of the frame is kept
+        CHECK(pb_off.ledger.sum() <= pb_on.ledger.sum() - 0.5f);
+        const float w_sd = on.cfg.tracker_detection_noise_m;
+        const auto plain  = prior_of(th, kRoom, false, {0.2f, 0.1f}, 0, w_sd, 0.03f, true, fit_size_prior(), 0.0f);
+        const auto widened = prior_of(th, kRoom, false, {0.2f, 0.1f}, 0, w_sd / std::sqrt(1.0f - 0.4f), 0.03f, true, fit_size_prior(), 0.0f);
+        CHECK(widened.size >= plain.size - 1e-6f);   // widening never charges more
+        CHECK(widened.size > -0.5f);                 // and a 0.80 m door inside the typical 0.85 +- 0.12 pays almost nothing
+        // the support term is weighted by 1 - trunc: a clipped view's one row says 60 % of an unclipped one
+        const auto sup = [&](float trunc)
+        {
+            Bench b; b.cfg.exist_one_model = true; PlaceBelief pb;
+            const Mat4d body = body_pose(A0, kDoor);
+            const std::optional<Mat4d> rtz = body * lift(1.2);
+            const CameraIntrinsics cam = zed_cam();
+            const ExistenceScene scene{b.cfg, rtz, cam, b.pkt, kRoom, rc::door::RoomBand{b.cfg.exist_wall_thickness_m, b.cfg.exist_boundary_sigma_m}, b.doors};
+            ExistenceFrame fr{scene, b.cfg, b.det};
+            observe_place(pb, th, fr, 0, 0.0f, nullptr, -1, 0.0f, FitSupport{0.999999f, 0, 1.0f, 1.0f, trunc});
+            return pb.ledger.sum();
+        };
+        const float s0 = sup(0.0f), s4 = sup(0.4f);
+        CHECK(s0 != 0.0f and std::fabs(s4 / s0 - 0.6f) < 1e-3f);
+    }
+    {   // occluded_door_holds: a door that cannot be seen (the camera looks away: q = 0, p_D = 0) for 300 frames — its L is exactly what it was
+        Bench b; b.cfg.exist_one_model = true;
+        const rc::DoorFitState th = shut_door();
+        PlaceBelief pb;
+        for (int i = 0; i < 4; ++i) b.frame(pb, th, A0, kDoor, true, false, {{{1.0f, kWallY}, -1.0f, 0}}, 0);
+        const float L0 = pb.L(), sum0 = pb.ledger.sum();
+        for (int i = 0; i < 300; ++i) b.frame(pb, th, A0, {A0.x(), A0.y() - 5.0f}, true, true, {}, 0);
+        std::print("occluded_door_holds: L {:+.6f} -> {:+.6f}\n", L0, pb.L());
+        CHECK(std::fabs(pb.L() - L0) < 1e-6f and std::fabs(pb.ledger.sum() - sum0) < 1e-6f);
+    }
     {   // a candidate has no fit: observe_place without support adds no term (the brief: never a default)
         Bench b;
         const rc::DoorFitState th = shut_door();

@@ -106,7 +106,7 @@ const TrackedDoor* find_door(const std::vector<TrackedDoor>& doors, std::uint64_
 }
 }  // namespace
 
-DoorCore::DoorCore(const DoorCoreConfig& cfg) : cfg_(cfg), places_(cfg.door.exist_geometry_may_refute, cfg.door.exist_lookalike_prob)
+DoorCore::DoorCore(const DoorCoreConfig& cfg) : cfg_(cfg), places_(cfg.door.exist_geometry_may_refute, cfg.door.exist_lookalike_prob, cfg.door.exist_one_model)
 {
     // The fit reads the core's views of the input: the mask packet, the low-LiDAR sweep, and the ONE claim set per cycle.
     fit_.set_sources(&masks_, &leaf_sweep_, &claims_);
@@ -184,6 +184,8 @@ void DoorCore::observe_media(const DoorCycleInput& in)
 
 bool DoorCore::frame_admissible(const MaskSlice& sl, const EgoMotion& ego, const rc::DoorConfig& cfg)
 {
+    if (cfg.exist_one_model)
+        return true;   // one-model: a truncated or moving frame is never "no trial" — truncation is a loss of information (trunc_frac weights size and support)
     if (sl.trunc_frac > cfg.ai2_trunc_gate_frac)
         return false;
     if (not cfg.ai2_motion_confirm_only)
@@ -426,6 +428,7 @@ void DoorCore::associate(const DoorCycleInput& in, DoorCycleOutput& out)
     dets_.clear();
     det_w_.clear();
     det_adm_.clear();
+    det_trunc_.clear();
     const auto& pkt = masks_.packet();
 
     // ★BIRTH EVIDENCE — the shared CREATE policy (common/instance_tracker/birth_evidence.h). This agent fed
@@ -546,6 +549,7 @@ void DoorCore::associate(const DoorCycleInput& in, DoorCycleOutput& out)
             // fit would refuse (frame_admissible) is not a trial for the place it lands on (FrameDetection::admissible).
             det_w_.push_back(confidence_reliability(sl.confidence, detectors_.confidence) * ricoh_w * unclaimed_w);   // P(genuine | score), not the raw score: a borderline mask is worth almost nothing (detector_llr.h)
             det_adm_.push_back(frame_admissible(sl, ego_, cfg));
+            det_trunc_.push_back(sl.trunc_frac);
             dets_.push_back(dv);
         }
     // The remembered-door look reads this frame's detections as "seen there" (door_look.h, step_remembered_looks).

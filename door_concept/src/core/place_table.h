@@ -44,11 +44,13 @@ struct PlaceRow
 class PlaceTable
 {
 public:
-    explicit PlaceTable(bool geometry_may_refute, float lookalike = kLookalikeProbDefault) : geometry_may_refute_(geometry_may_refute), lookalike_(lookalike) {}
+    explicit PlaceTable(bool geometry_may_refute, float lookalike = kLookalikeProbDefault, bool one_model = false)
+        : geometry_may_refute_(geometry_may_refute), lookalike_(lookalike), one_model_(one_model) {}
 
     [[nodiscard]] std::span<const PlaceRow> rows() const { return rows_; }
     [[nodiscard]] bool geometry_may_refute() const { return geometry_may_refute_; }
     [[nodiscard]] float lookalike() const { return lookalike_; }
+    [[nodiscard]] bool one_model() const { return one_model_; }
 
     PlaceRow* match(std::string_view room, const Vec2f& xy, const Eigen::Matrix2f& cov, float gate)
     {
@@ -164,14 +166,14 @@ public:
     /// row that does not carry place_sd (caller supplies the tracker's seed sigma).
     void load(const ParsedIdentityTable& t, float fallback_sd)
     {
-        for (const auto& i : t.rows) upsert(row_of(i, fallback_sd, geometry_may_refute_, lookalike_));
+        for (const auto& i : t.rows) upsert(row_of(i, fallback_sd, geometry_may_refute_, lookalike_, one_model_));
         if (t.hazard.has_value()) set_hazard(*t.hazard);   // SET, not added: loading twice is the same table
     }
 
     /// One identity row as a place row (the restore path reads the same thing: the row IS the belief's memory).
     /// ★A row without `exist_physical` (written before the look-alike model, 2026-11-08): its exist_logodds is the OLD unbounded sum, which is on the Sc
     /// scale, not on the saturated one: it is saturated once here (L_evidence = its ledger's physical part + saturated rest). A phantom remembered at +89 comes back near the bound.
-    [[nodiscard]] static PlaceRow row_of(const IdentityRow& i, float fallback_sd, bool geometry_may_refute, float lookalike = kLookalikeProbDefault)
+    [[nodiscard]] static PlaceRow row_of(const IdentityRow& i, float fallback_sd, bool geometry_may_refute, float lookalike = kLookalikeProbDefault, bool one_model = false)
     {
         PlaceRow r; r.room = i.room; r.name = i.name; r.xy = i.xy;
         const float sd = i.place_sd.value_or(fallback_sd);
@@ -184,7 +186,7 @@ public:
         r.crossed = i.crossed.value_or(false);
         r.sighted_wall_ms = i.sighted_ms.value_or(i.seen_wall_ms.value_or(0));
         if (i.ledger)
-            if (auto L = ViewLedger::parse(*i.ledger, geometry_may_refute)) r.ledger = std::move(*L);   // corrupt cell: empty ledger
+            if (auto L = ViewLedger::parse(*i.ledger, geometry_may_refute, one_model)) r.ledger = std::move(*L);   // corrupt cell: empty ledger
         if (i.exist_physical.has_value())
             r.physical = *i.exist_physical;
         else
@@ -239,6 +241,7 @@ private:
     static constexpr double kPriorShape = 1.0, kPriorRateS = 600.0;
     bool geometry_may_refute_;
     float lookalike_;
+    bool one_model_;
     std::vector<PlaceRow> rows_;
     double changes_ = 0.0, sum_elapsed_s_ = 0.0;
     std::set<std::pair<std::string, int>> sampled_;   // (room/name, visit) pairs that already gave their revisit sample (this process)

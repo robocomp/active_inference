@@ -4227,10 +4227,10 @@ std::vector<std::string> SpecificWorker::restore_rows(std::uint64_t new_room, st
         const auto counter_before = next_door_index_;
         // The note's revisit history (visit, sighted_ms) goes into the place table, so the first re-detection of this door after a
         // restart is a revisit sample with its real exposure. The restore itself takes no sample.
-        core_->adopt_remembered_place(rc::door::core::PlaceTable::row_of(r, cfg_.tracker_detection_noise_m, cfg_.exist_geometry_may_refute, cfg_.exist_lookalike_prob));
+        core_->adopt_remembered_place(rc::door::core::PlaceTable::row_of(r, cfg_.tracker_detection_noise_m, cfg_.exist_geometry_may_refute, cfg_.exist_lookalike_prob, cfg_.exist_one_model));
         // Task 9: the belief comes back from the row (PlaceTable::restored_belief): its ledger, and its evidence aged by the learned change hazard.
         const auto restored = core_->places().restored_belief(
-            rc::door::core::PlaceTable::row_of(r, cfg_.tracker_detection_noise_m, cfg_.exist_geometry_may_refute, cfg_.exist_lookalike_prob),
+            rc::door::core::PlaceTable::row_of(r, cfg_.tracker_detection_noise_m, cfg_.exist_geometry_may_refute, cfg_.exist_lookalike_prob, cfg_.exist_one_model),
             static_cast<std::int64_t>(rc::provenance::now_ms()));
         // the remembered leaf ANGLE ages like the existence (door_identity_table.h restore_leaf_phi; warm13 DOOR_2): the node is
         // created with, and the belief seeded from, the aged angle
@@ -4384,7 +4384,7 @@ void SpecificWorker::step_remembered_looks()
             // The prior: what memory says and nothing else - the place belief's remembered evidence, aged by the place table's
             // learned hazard (an identity-only row remembers nothing: L = 0, ignorance).
             const auto remembered = core_->places().restored_belief(
-                rc::door::core::PlaceTable::row_of(r, cfg_.tracker_detection_noise_m, cfg_.exist_geometry_may_refute, cfg_.exist_lookalike_prob),
+                rc::door::core::PlaceTable::row_of(r, cfg_.tracker_detection_noise_m, cfg_.exist_geometry_may_refute, cfg_.exist_lookalike_prob, cfg_.exist_one_model),
                 static_cast<std::int64_t>(rc::provenance::now_ms()));
             it = looks_.emplace(r.name, LookEntry{rc::door::look::Evidence(remembered.L_evidence(), float(remembered.Sp()), cfg_.exist_lookalike_prob, remembered.crossed), {}, false}).first;
             it->second.aff.init(G, room_node_id_, "door_look_" + r.name, "door");

@@ -209,7 +209,7 @@ std::vector<FrameDetection> DoorCore::frame_detections() const
     v.reserve(dets_.size());
     for (std::size_t i = 0; i < dets_.size(); ++i)
         v.push_back({dets_[i].xy, dets_[i].xy_var, dets_[i].sensor, i < det_w_.size() ? det_w_[i] : 1.0f,
-                     i < det_adm_.size() ? det_adm_[i] != 0 : true});
+                     i < det_adm_.size() ? det_adm_[i] != 0 : true, i < det_trunc_.size() ? det_trunc_[i] : 0.0f});
     return v;
 }
 
@@ -247,7 +247,8 @@ void DoorCore::with_frame(const DoorCycleInput& in, bool zed_ran, bool use_rgb, 
     fr.rgb = rgb_prep.valid() ? &rgb_prep : nullptr;
     fr.rt_cov = in.robot.rt_cov;
     fr.geometry_may_refute = cfg.exist_geometry_may_refute;
-    // fr.geo_mu1_sd stays at its starting value (μ1 = μ0 + 2s): fixed within the session like the detector rates (fix round 3)
+    // fr.geo_mu1_sd stays at its starting value (μ1 = μ0 + 2s) unless one-model: then the fitted table's value (0 = the channel carries no information)
+    if (cfg.exist_one_model) fr.geo_mu1_sd = detectors_.geometry.mu1_sd;
     fr.rotation_w = rotation_reliability(ego_.ang_radps, cfg.ai2_ang_lever_m, cfg.ai2_motion_ref_mps);
     fr.dets = dets;
     if (sinks_.image_roi)

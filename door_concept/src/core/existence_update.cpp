@@ -71,7 +71,7 @@ CamResult observe_camera(PlaceBelief& b, const rc::DoorFitState& th, const Exist
     r.q = detect_prob(m, r.g, kappa);
     if (not (r.q > 0.0f) and not (r.hit > 0.0f))
         return r;   // nothing reportable and nothing reported: no trial, no view (unseen is not evidence)
-    if (ch == Channel::Ricoh and not (r.hit > 0.0f))   // ★RICOH IS HITS ONLY: a frame with no detection touches no view. Logged only, against the view it would have joined, for the offline detector fit
+    if (ch == Channel::Ricoh and not (r.hit > 0.0f) and not fr.cfg.exist_one_model)   // (one-model: the ricoh's miss is a trial like the ZED's, scored by its fitted model) ★RICOH IS HITS ONLY: a frame with no detection touches no view. Logged only, against the view it would have joined, for the offline detector fit
     {
         r.log_view = b.ledger.find_view(xy_of(room_T_cam), door_xy, th.aperture.across_u(), R, po.spread_m, visit);
         return r;
@@ -131,6 +131,7 @@ ExistenceTrace observe_place(PlaceBelief& b, const rc::DoorFitState& th, const E
     ExistenceTrace t;
     std::vector<std::size_t> touched;
     const float sum0 = b.ledger.sum();
+    b.ledger.ricoh_counts_misses = fr.cfg.exist_one_model;
     b.lookalike = fr.cfg.exist_lookalike_prob;   // (the sensor-model constant travels with the belief so L() needs no argument)
     float zed_view_kappa = 0.0f, zed_vis = 0.0f;
     std::size_t zed_v = ViewLedger::npos;
@@ -239,7 +240,10 @@ ExistenceTrace observe_place(PlaceBelief& b, const rc::DoorFitState& th, const E
                 const float before = b.ledger.sum();
                 if (v != ViewLedger::npos and s2 > 0.0f)
                 {
-                    b.ledger.add_geometry(v, x, vis * kappa, mu0, t.geo_mu1, s2);
+                    if (fr.cfg.exist_one_model)   // each frame scored with its own controls (Student-t, k - 1 dof), two-sided
+                        b.ledger.add_geometry_t(v, x, vis * kappa, mu0, s2, fr.geo_mu1_sd, static_cast<int>(sk.size()));
+                    else
+                        b.ledger.add_geometry(v, x, vis * kappa, mu0, t.geo_mu1, s2);
                     b.ledger.recompute(v, fr.geometry_may_refute);
                     touched.push_back(v);
                 }
@@ -262,7 +266,8 @@ ExistenceTrace observe_place(PlaceBelief& b, const rc::DoorFitState& th, const E
                 const float before = b.ledger.sum();
                 const std::size_t v = b.ledger.observe(xy_of(*origin), door_xy, th.aperture.across_u(), R, po.spread_m, visit);
                 // the trial is worth the share of the opening the mask sampled (aperture_coverage): a sliver on the jamb says little
-                b.ledger.add_support(v, support->x, po.kappa * std::clamp(support->coverage, 0.0f, 1.0f), fr.det.support, support->overlap);   // clamp: domain of a share
+                const float untrunc = fr.cfg.exist_one_model ? std::clamp(1.0f - support->trunc, 0.0f, 1.0f) : 1.0f;   // clamp: domain of a share
+                b.ledger.add_support(v, support->x, po.kappa * std::clamp(support->coverage, 0.0f, 1.0f) * untrunc, fr.det.support, support->overlap);   // clamp: domain of a share
                 b.ledger.recompute(v, fr.geometry_may_refute);
                 touched.push_back(v);
                 t.sup_x = support->x;
