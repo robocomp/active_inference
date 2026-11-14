@@ -126,6 +126,9 @@ SingletonInhibition = 1.0   # mutual-inhibition: a STRONGER bed subtracts this·
 AI2WallPrecision = 400.0         # 1/m² at zero gap (back face → wall line)
 AI2WallParallelPrecision = 200.0 # back face parallel to the wall (width-axis · wall-normal → 0)
 AI2WallReachM = 0.15             # gap scale (m) over which the flush hypothesis loses its weight
+WallFlushPrior = 0.90   # bed: P(stands against a wall) — a bed's headboard stands against a wall. FURNITURE PRIOR (owner 2026-11-14): the concept
+                        # holds it; was 0 (the fridge parent never assumed a wall), so front-only views felt no wall at all
+RoomAxisStdDeg = 3.0    # bed: aligned with the room's axes (4-fold: never decides front/back), std in degrees
 # WALL AS A COMPETING EXPLANATION (per-point mixture component) — the principled form of "don't detect a bed
 # where a wall already is". NOT an exclusion zone: the room's already-inferred wall surface joins the SAME
 # per-point mixture as box/clutter, so a mask point lying on it (i) has its BOX responsibility collapse ⇒ exerts

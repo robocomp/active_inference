@@ -79,6 +79,8 @@ struct NightstandConfig
     // the height std is broad (weak/data-driven). Split NightstandBeliefParams' prior_footprint_* / prior_height_*.
     float ai2_prior_footprint_m   = 0.60f;   // mean of the w & h(depth) prior (m)
     float ai2_prior_footprint_std = 0.08f;   // TIGHT → strong footprint prior (m)
+    float ai2_wall_flush_prior    = 0.0f;    // class P(stands against a wall) — furniture prior
+    float ai2_room_axis_std_deg   = 0.0f;    // room-axis alignment std (deg); <=0 = off
     float ai2_prior_depth_m       = -1.0f;   // depth (local Y) mean (m); ≤0 = same as the footprint (square)
     float ai2_prior_height_m      = 1.90f;   // mean of the H (vertical) static anchor (m) — a standard tall nightstand
     float ai2_prior_height_std    = 0.30f;   // anchor std (m); stops the box top floating above the cloud

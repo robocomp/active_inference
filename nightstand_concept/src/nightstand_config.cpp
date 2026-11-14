@@ -108,6 +108,10 @@ NightstandConfig load_nightstand_config(const ConfigLoader& cfg)
             "mean of the w & h(depth) prior (m)");
     out.ai2_prior_footprint_std = getf("NightstandModel.AI2PriorFootprintStd", 0.08f,
             "TIGHT → strong footprint prior (m)");
+    out.ai2_wall_flush_prior    = getf("NightstandModel.WallFlushPrior", 0.0f,
+            "class probability that the object stands against a wall (furniture prior); 0 = never assumed");
+    out.ai2_room_axis_std_deg   = getf("NightstandModel.RoomAxisStdDeg", 0.0f,
+            "room-axis alignment std (deg), 4-fold; <=0 = off");
     out.ai2_prior_depth_m       = getf("NightstandModel.AI2PriorDepthM", -1.0f,
             "depth (local Y, front-to-back) mean (m); <=0 = same as the footprint (square)");
     // ★FALLBACK ALIGNED TO THE MANIFEST (2026-08-17). This read 1.70 while the manifest and config.toml

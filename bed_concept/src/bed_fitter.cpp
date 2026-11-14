@@ -491,6 +491,61 @@ bool BedFitter::should_log(const BedInstance& inst) const
 // Nearest room-polygon edge to a room-frame point q, as a WallRef {foot on the edge, UNIT normal pointing
 // INTO the room, wall sigma}. Returns ok=false when no room polygon is known ⇒ the wall factor is inert
 // (the bed is treated as free-standing). The inward normal is the one that points toward room_interior_.
+// The room's principal axis: the length-weighted circular mean of the edge directions on the 4-fold circle
+// (4θ), so walls at 0°, 90°, 180°, 270° all vote for the same axis. nullopt without a polygon.
+std::optional<float> BedFitter::room_axis() const
+{
+    const std::size_t n = room_polygon_.size();
+    if (not have_room_geometry_ or n < 3) return std::nullopt;
+    double sx = 0.0, sy = 0.0;
+    for (std::size_t i = 0; i < n; ++i)
+    {
+        const Eigen::Vector2f e = room_polygon_[(i + 1) % n] - room_polygon_[i];
+        const double len = e.norm(), th = std::atan2(e.y(), e.x());
+        sx += len * std::cos(4.0 * th); sy += len * std::sin(4.0 * th);
+    }
+    if (sx * sx + sy * sy < 1e-12) return std::nullopt;
+    return static_cast<float>(0.25 * std::atan2(sy, sx));
+}
+
+// BIRTH ON THE PRIORS. A wall-standing object's first view is its FRONT; the principal-axis yaw of that view is
+// noise on a near-square footprint and the depth is unseen. So the birth takes what the priors already know:
+//  · the wall: the one nearest the cloud (the class prior says it stands against one — WallFlushPrior);
+//  · yaw: back face onto that wall, front into the room (local +Y = back = −n);
+//  · width/depth: the cloud's spread ALONG and ACROSS that wall (p5–p95), depth from the prior unless the
+//    cloud really spans it (the same band the depth-observability prior uses);
+//  · centre: the cloud's middle along the wall, half a depth in from it.
+// Not a gate on the fit: the belief starts here and the data then moves it (an object that is genuinely away
+// from the wall loses the flush weight as its pose tightens — see flush_weight).
+void BedFitter::birth_on_priors(BedBeliefState& s0, const std::vector<Eigen::Vector3f>& pts, float z_lo, float z_hi,
+                                const std::string& name) const
+{
+    std::vector<Eigen::Vector2f> xy;
+    for (const auto& p : pts) if (p.z() >= z_lo and p.z() <= z_hi) xy.emplace_back(p.x(), p.y());
+    if (xy.size() < 10) return;
+    Eigen::Vector2f c = Eigen::Vector2f::Zero();
+    for (const auto& q : xy) c += q;
+    c /= static_cast<float>(xy.size());
+    const WallRef w = nearest_wall(c);
+    if (not w.ok) return;
+    const Eigen::Vector2f n = w.n, t(-n.y(), n.x());          // into the room, and along the wall
+    std::vector<float> a, b;
+    for (const auto& q : xy) { a.push_back((q - w.p).dot(t)); b.push_back((q - w.p).dot(n)); }
+    const auto pct = [](std::vector<float> v, float f)
+    { const std::size_t k = static_cast<std::size_t>(f * (v.size() - 1)); std::nth_element(v.begin(), v.begin() + k, v.end()); return v[k]; };
+    const float a0 = pct(a, 0.05f), a1 = pct(a, 0.95f), b0 = pct(b, 0.05f), b1 = pct(b, 0.95f);
+    const float prior_d = cfg_.ai2_prior_depth_m > 0.0f ? cfg_.ai2_prior_depth_m : cfg_.ai2_prior_footprint_m;
+    const float across  = b1 - b0;
+    s0.w   = std::max(0.10f, a1 - a0);
+    s0.h   = across > cfg_.ai2_depth_obs_band_m ? std::max(across, b1) : prior_d;   // a seen side reaches the wall
+    s0.yaw = std::atan2(n.x(), -n.y());                       // R(yaw)·ŷ = −n: the back faces the wall
+    const Eigen::Vector2f ctr = w.p + t * (0.5f * (a0 + a1)) + n * (0.5f * s0.h);
+    std::print("[{}] birth on priors: wall n=({:.2f},{:.2f}) at {:.2f} m from the cloud → yaw={:.1f}° "
+               "w={:.2f} h={:.2f} centre ({:.2f},{:.2f}) [cloud centre ({:.2f},{:.2f})]\n",
+               name, n.x(), n.y(), 0.5f * (b0 + b1), s0.yaw * 57.29578f, s0.w, s0.h, ctr.x(), ctr.y(), c.x(), c.y());
+    s0.cx = ctr.x(); s0.cy = ctr.y();
+}
+
 WallRef BedFitter::nearest_wall(const Eigen::Vector2f& q) const
 {
     WallRef w;
@@ -640,6 +695,8 @@ float BedFitter::run_inference(BedInstance& inst, const BedObservation& observat
                     const float sum = mom.ext_major + mom.ext_minor;
                     if (sum > 1e-4f and (mom.ext_major - mom.ext_minor) / sum > 0.10f)
                         s0.yaw = mom.phi;
+                    // ★BORN ON THE FURNITURE PRIORS (owner 2026-11-14): room-axis yaw, back on the nearest wall.
+                    if (have_room_geometry_) birth_on_priors(s0, pts, z_lo, z_hi, inst.node_name);
                 }
             }
         }
@@ -651,6 +708,8 @@ float BedFitter::run_inference(BedInstance& inst, const BedObservation& observat
         p.prior_footprint_m   = cfg_.ai2_prior_footprint_m;
         p.prior_footprint_std = cfg_.ai2_prior_footprint_std;
         p.prior_depth_m       = cfg_.ai2_prior_depth_m;
+        p.wall_flush_prior    = cfg_.ai2_wall_flush_prior;
+        p.room_axis_std       = cfg_.ai2_room_axis_std_deg * 0.017453293f;
         p.headboard_h_m       = cfg_.ai2_headboard_h_m;
         p.headboard_t_m       = cfg_.ai2_headboard_t_m;
         p.prior_height_m      = cfg_.ai2_prior_height_m;
@@ -923,6 +982,7 @@ float BedFitter::run_inference(BedInstance& inst, const BedObservation& observat
             inst.ai2_belief.set_room_interior(room_interior_);
             const auto& bs_now = inst.ai2_belief.state();
             frame.wall = nearest_wall(inst.ai2_belief.back_centre(bs_now));
+            if (const auto ax = room_axis(); ax) { frame.room_axis_ok = true; frame.room_axis = *ax; }
         }
 
         // Stage 1 (PRECISION_AS_INFORMATION.md): replace the scalar per-point R with the anisotropic deprojection

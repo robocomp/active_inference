@@ -111,6 +111,10 @@ BedConfig load_bed_config(const ConfigLoader& cfg)
     out.ai2_headboard_h_m       = getf("BedModel.HeadboardHeightM", -1.0f,
             "headboard panel top (m) on the back face; <=0 = a plain box");
     out.ai2_headboard_t_m       = getf("BedModel.HeadboardThickM", 0.10f, "headboard panel thickness (m)");
+    out.ai2_wall_flush_prior    = getf("BedModel.WallFlushPrior", 0.0f,
+            "class probability that the object stands against a wall (furniture prior); 0 = never assumed");
+    out.ai2_room_axis_std_deg   = getf("BedModel.RoomAxisStdDeg", 0.0f,
+            "room-axis alignment std (deg), 4-fold; <=0 = off");
     out.ai2_prior_depth_m       = getf("BedModel.AI2PriorDepthM", -1.0f,
             "depth (local Y, front-to-back) mean (m); <=0 = same as the footprint (square)");
     // ★FALLBACK ALIGNED TO THE MANIFEST (2026-08-17). This read 1.70 while the manifest and config.toml

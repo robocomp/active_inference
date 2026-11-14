@@ -367,9 +367,24 @@ float NightstandBelief::flush_posterior(const NightstandBeliefState& s, const Ni
 float NightstandBelief::flush_weight(const NightstandBeliefState& s, const NightstandFrame& f) const
 {
     if (not f.wall.ok) return 0.0f;
-    const float gap = (back_centre(s) - f.wall.p).dot(f.wall.n);
-    const float rel = gap / std::max(1e-3f, params_.wall_reach_m);
-    return std::exp(-rel * rel);
+    // ★THE GAP IS UNCERTAIN TOO (2026-11-14). exp(−(gap/reach)²) treats the gap as known exactly, so a young
+    // belief whose back face sits 0.5 m off the wall — because its POSE is still uncertain by that much — got
+    // weight ~0 and was never drawn to the wall it stands against. The flush hypothesis predicts gap = 0 up to
+    // the reach; what it is compared with is the belief's gap, whose variance is J Σ Jᵀ. Adding the two is the
+    // marginal likelihood of the flush component: wide while the pose is uncertain, the bare reach once settled.
+    const auto gap_of = [&](const NightstandBeliefState& st) { return (back_centre(st) - f.wall.p).dot(f.wall.n); };
+    const float gap = gap_of(s);
+    Eigen::Matrix<float, 6, 1> J;
+    const Eigen::Matrix<float, 6, 1> v = s.vec();
+    for (int k = 0; k < 6; ++k)
+    {
+        Eigen::Matrix<float, 6, 1> vp = v, vm = v;
+        vp(k) += params_.fd_eps; vm(k) -= params_.fd_eps;
+        J(k) = (gap_of(NightstandBeliefState::from_vec(vp)) - gap_of(NightstandBeliefState::from_vec(vm))) / (2.0f * params_.fd_eps);
+    }
+    const float var_gap = std::max(0.0f, J.dot(Sigma_ * J));
+    const float reach   = std::max(1e-3f, params_.wall_reach_m);
+    return std::exp(-gap * gap / (reach * reach + 2.0f * var_gap));
 }
 
 // Drive the BACK-face centre onto the nearest wall line (gap→0) and the back face PARALLEL to the wall
@@ -449,6 +464,19 @@ void NightstandBelief::accumulate_extra(const NightstandBeliefState& s, const Ni
 {
     // (1) Wall-flush + wall-parallel structural term (supplies the missing back-face/depth information).
     accumulate_wall(s, f, Id, bd);
+
+    // ROOM-AXIS ALIGNMENT (furniture prior): furniture is aligned with the room's axes whether or not it touches
+    // a wall. ¼·sin(4Δ) vanishes at every multiple of 90°, so the four yaws a box can take on the room grid are
+    // equally good and the front/back (and width/depth) decision stays with the data and the clearance prior.
+    if (f.room_axis_ok and params_.room_axis_std > 0.0f)
+    {
+        const float dlt = s.yaw - f.room_axis;
+        const float r   = 0.25f * std::sin(4.0f * dlt);
+        const float dr  = std::cos(4.0f * dlt);                 // ∂r/∂yaw
+        const float lam = 1.0f / (params_.room_axis_std * params_.room_axis_std);
+        Id(5, 5) += lam * dr * dr;
+        bd(5)    += -lam * dr * r;
+    }
 
     // (2) FOOTPRINT prior: a TIGHT Gaussian pulling w → prior_footprint_m and h(depth) → prior_footprint_m
     //     (a standard nightstand footprint ≈ 0.60×0.60 is very consistent), precision λ_wd = 1/prior_footprint_std².

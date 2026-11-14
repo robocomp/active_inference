@@ -163,6 +163,9 @@ struct ToiletBeliefParams
     // and the gap cannot discriminate {flush, free-standing}. 0 = no class prior (previous behaviour).
     // ★A toilet keeps 0: commonly against a wall, not definitionally. Only a hood declares 1.0.
     float wall_flush_prior        = 0.0f;
+    // ROOM-AXIS ALIGNMENT (furniture prior, owner 2026-11-14): yaw prefers the room's axes, 4-fold, so it never
+    // decides front/back. Residual ¼·sin(4Δ) ≈ Δ near alignment ⇒ this is the angle's std (rad). ≤0 = OFF.
+    float room_axis_std           = 0.0f;
     float wall_parallel_precision = 200.0f;   // on (width-axis · wall-normal): back face parallel to the wall — 0 = OFF
     // WALL NO-CROSS (one-sided): resist the back face penetrating PAST the wall into the wall/exterior. Active only
     // when the gap goes negative (crossed) or within wall_no_cross_margin_m; precision GROWS with penetration
@@ -251,6 +254,9 @@ struct ToiletFrame
 
     // The nearest room wall for the wall-flush / wall-parallel factor (see WallRef). ok=false ⇒ inert.
     WallRef wall;
+    // The room's principal axis (rad, room frame; defined modulo 90°), from the room polygon's edges.
+    bool  room_axis_ok = false;
+    float room_axis    = 0.0f;
 
     // YOLO-INDEPENDENT LiDAR channel: range returns that fall on the box (room frame, sensor origin +
     // endpoints). Sphere-traced against THIS belief's own SDF by the shared factor. precision==0 ⇒ skipped.

@@ -63,7 +63,14 @@ precision = 400.0
 parallel_precision = 200.0
 reach_m = 0.25
 no_cross_precision = 2000.0
-why  = "the back rests against a room wall"
+class_prior = 0.95                  # P(against a wall): the concept holds it (owner 2026-11-14)
+why  = "the back rests against a room wall — a toilet's tank is plumbed into a wall"
+
+[prior.alignment]
+kind = "room_axis"
+fold = 4
+std_deg = 3.0
+why  = "furniture is aligned with the room's axes; 4-fold, so it never decides front/back"
 
 [prior.clearance]
 kind = "facing_free_space"

@@ -128,6 +128,9 @@ public:
     // term is direction-blind and `is_reachable` imposes no constraint on an empty polygon. See the call in
     // step_epistemic() and rc::nbv::is_reachable.
     bool has_room_polygon() const { return room_polygon_.size() >= 3; }
+    std::optional<float> room_axis() const;   // the room's principal axis (rad, mod 90°)
+    void birth_on_priors(BedBeliefState& s0, const std::vector<Eigen::Vector3f>& pts, float z_lo, float z_hi,
+                         const std::string& name) const;
     const std::vector<Eigen::Vector2f>& room_polygon() const { return room_polygon_; }
     WallRef nearest_wall(const Eigen::Vector2f& q) const;
     // Part B (chain covariance): enable adding the localization/chain term J·Σ_chain·Jᵀ (measurement
