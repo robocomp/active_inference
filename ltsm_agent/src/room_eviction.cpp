@@ -204,15 +204,11 @@ std::map<std::string, DSR::Attribute> RoomEviction::rt_attrs(const Mat::RTMat &t
     return a;
 }
 
-std::optional<std::uint64_t> RoomEviction::twin(const DSR::Node &src, std::uint64_t mem_parent_id,
-                                                const std::string &prefix, std::uint64_t room_idx)
+// ONE list of what does not travel from a live node to its memory twin (twin() and the door refresh share it).
+// Attributes come over wholesale -- including timestamp_creation, so memory keeps the node's REAL birth rather than
+// the instant it was archived -- minus the structural ones, which memory sets itself.
+static std::map<std::string, DSR::Attribute> twin_attrs(const DSR::Node &src)
 {
-    // A door whose plain memory name belongs to ANOTHER hole was given its own name (guard_recycled_door_names).
-    const auto renamed = mem_name_of_.find(src.id());
-    const std::string mem_name = renamed != mem_name_of_.end() ? renamed->second : prefix + src.name();
-
-    // Attributes come over wholesale — including timestamp_creation, so memory keeps the node's
-    // REAL birth rather than the instant it was archived.
     auto attrs = src.attrs();
     attrs.erase(parent_str.data());
     attrs.erase(level_str.data());
@@ -229,6 +225,20 @@ std::optional<std::uint64_t> RoomEviction::twin(const DSR::Node &src, std::uint6
         attrs.erase(rt_covariance_str.data());
         attrs.erase(interaction_node_id_str.data());
     }
+
+    return attrs;
+}
+
+std::optional<std::uint64_t> RoomEviction::twin(const DSR::Node &src, std::uint64_t mem_parent_id,
+                                                const std::string &prefix, std::uint64_t room_idx)
+{
+    // A door whose plain memory name belongs to ANOTHER hole was given its own name (guard_recycled_door_names).
+    const auto renamed = mem_name_of_.find(src.id());
+    const std::string mem_name = renamed != mem_name_of_.end() ? renamed->second : prefix + src.name();
+
+    // Attributes come over wholesale — including timestamp_creation, so memory keeps the node's
+    // REAL birth rather than the instant it was archived.
+    const auto attrs = twin_attrs(src);
 
     const int parent_level = [&]
     {
@@ -1774,6 +1784,84 @@ int RoomEviction::sweep_orphans(std::uint64_t room_id, std::string_view why)
 }
 
 //////////////////////////////////////////////////////////////////////////////////////////////////
+int RoomEviction::refresh_door_twin(const DSR::Node &live_door, const DSR::Node &mem_door, std::uint64_t mem_room_id,
+                                    const Eigen::Vector3d &pose_in_live_room)
+{
+    // WRITE ON CHANGE: attribute equality is exact (DSR::Attribute::operator==), the pose is compared as the very
+    // rt_attrs() an add would write -- no tolerance, so an unchanged belief costs no update_node and no dirty mark.
+    auto node = mem_->get_node(mem_door.id());
+    if (not node.has_value()) return 0;
+    bool node_changed = false;
+    for (const auto &[k, v] : twin_attrs(live_door))
+        if (const auto it = node->attrs().find(k); it == node->attrs().end() or not (it->second == v))
+        {
+            node->attrs()[k] = v;
+            node_changed = true;
+        }
+    int changed = 0;
+    if (node_changed and mem_->update_node(node.value())) ++changed;
+    // the pose, onto the edge from the twin's OWN parent (the wall it hangs from, as eviction archives it, or the room):
+    // T(parent <- door) = T(room <- parent)^-1 * T(room <- door), planar. T(room <- parent) is composed from memory's RT
+    // edges (no inner-eigen cache involved); unresolved => the pose is skipped, the attributes above stay refreshed.
+    if (const auto par = mem_->get_attrib_by_name<parent_att>(node.value()); par.has_value())
+    {
+        Eigen::Vector3d local = pose_in_live_room;   // parent == room: the door's room pose is already its edge
+        bool ok = true;
+        if (par.value() != mem_room_id)
+        {
+            ok = false;
+            if (const auto pn = mem_->get_node(par.value()); pn.has_value())
+            {
+                bool pc = false;
+                if (const auto pp = pose_in_room(*mem_, mem_room_id, pn.value(), pc); pp.has_value())
+                {
+                    const double th = pp->pose.z(), c = std::cos(th), sn = std::sin(th);
+                    const double dx = pose_in_live_room.x() - pp->pose.x(), dy = pose_in_live_room.y() - pp->pose.y();
+                    local = {c * dx + sn * dy, -sn * dx + c * dy, pose_in_live_room.z() - th};
+                    ok = true;
+                }
+            }
+        }
+        if (ok)
+        {
+            // Start from the EXISTING edge and override only x, y and yaw: eviction copied it wholesale, and the covariance,
+            // z, roll and pitch it carries are what seam_through_passage reads (a rewritten bare edge reads as unstated).
+            auto edge = mem_->get_edge(par.value(), node->id(), "RT");
+            const auto tr = edge.has_value() ? mem_->get_attrib_by_name<rt_translation_att>(edge.value()) : std::nullopt;
+            const auto rot = edge.has_value() ? mem_->get_attrib_by_name<rt_rotation_euler_xyz_att>(edge.value()) : std::nullopt;
+            if (tr.has_value() and rot.has_value() and tr.value().get().size() >= 3 and rot.value().get().size() >= 3)
+            {
+                // Decode the stored triple as a ROTATION (R = Rz(rz) Ry(ry) Rx(rx), what rt_attrs packs): eulerAngles(2,1,0) writes a
+                // negative planar yaw as (pi, -pi, yaw+pi), so r[2] alone is NOT the yaw. Compare the WRAPPED planar yaw.
+                std::vector<float> t = tr.value().get(), r = rot.value().get();
+                const Eigen::Matrix3d R_old = (Eigen::AngleAxisd(r[2], Eigen::Vector3d::UnitZ())
+                                               * Eigen::AngleAxisd(r[1], Eigen::Vector3d::UnitY())
+                                               * Eigen::AngleAxisd(r[0], Eigen::Vector3d::UnitX())).toRotationMatrix();
+                const double yaw_old = std::atan2(R_old(1, 0), R_old(0, 0));
+                const double dyaw = std::remainder(local.z() - yaw_old, 2.0 * M_PI);
+                const float nx = static_cast<float>(local.x()), ny = static_cast<float>(local.y());
+                // float precision, not a model threshold: a flipped (pi,-pi,yaw+pi) triple decodes only to ~1e-7, so an exact test would rewrite for ever
+                if (t[0] != nx or t[1] != ny or std::abs(dyaw) > 8.0 * std::numeric_limits<float>::epsilon())
+                {
+                    // keep any tilt: R_new = Rz(dyaw) * R_old, re-encoded with rt_attrs' convention
+                    const Eigen::Matrix3d R_new = Eigen::AngleAxisd(dyaw, Eigen::Vector3d::UnitZ()).toRotationMatrix() * R_old;
+                    const Mat::Vector3d rpy = R_new.eulerAngles(2, 1, 0).reverse();
+                    t[0] = nx; t[1] = ny;
+                    r = {static_cast<float>(rpy.x()), static_cast<float>(rpy.y()), static_cast<float>(rpy.z())};
+                    edge->attrs()[rt_translation_str.data()] = DSR::Attribute{t, 0, 0};
+                    edge->attrs()[rt_rotation_euler_xyz_str.data()] = DSR::Attribute{r, 0, 0};
+                    if (mem_->insert_or_assign_edge(edge.value())) ++changed;
+                }
+            }
+        }
+    }
+    if (changed > 0)
+        qInfo().noquote() << QString::fromStdString(std::format("[memory] door {}: belief refreshed from live {} while the robot is in "
+            "the room", node->name(), live_door.name()));
+    return changed;
+}
+
+//////////////////////////////////////////////////////////////////////////////////////////////////
 int RoomEviction::sync_found_doors()
 {
     const auto robot = robot_node();
@@ -1803,25 +1891,41 @@ int RoomEviction::sync_found_doors()
                 else q.push_back(c->id());
             }
     }
+    // A REMEMBERED DOOR'S BELIEF FOLLOWS THE LIVE ONE while the robot is in its room (I5): the room the fleet stops in is never
+    // evicted again, so its twins would keep whatever the last eviction left. Not while memory's room is read-only (RoomSwap
+    // holds it / it is a staged draft) and not in a transition (the robot hangs under two rooms: eviction owns that moment).
+    const bool may_refresh = not held(mem_room->name()) and not is_staged_room(*mem_, mem_room.value())
+                             and rooms_under_robot(robot.value()).size() <= 1;
     for (const auto &d : doors)
     {
-        if (synced_doors_.contains(d.id())) continue;
+        const auto synced = synced_doors_.find(d.id());
+        if (synced != synced_doors_.end() and synced->second.mem_name.empty()) continue;   // decided: another hole
         bool lc = false;
         const auto live_pose = pose_in_room(*live_, room->id(), d, lc);
         if (not live_pose.has_value()) continue;
         const std::string mem_name = prefix + d.name();
         const float half_w = 0.5f * live_->get_attrib_by_name<width_m_att>(d).value_or(1.f);
-        // already remembered AT THIS PLACE under any name? (a door memory holds from an earlier visit)
-        bool known_here = false;
-        for (const auto &m : mem_->get_nodes_by_type(d.type()))
+        // already remembered: the one this sync added, else AT THIS PLACE under any name (a door memory holds from an earlier visit)
+        std::optional<DSR::Node> known;
+        if (synced != synced_doors_.end())
         {
-            if (not m.name().starts_with(prefix) or not is_door(*mem_, m)) continue;
-            bool mc = false;
-            if (const auto mp = pose_in_room(*mem_, mem_room->id(), m, mc);
-                mp.has_value() and (mp->pose.head<2>() - live_pose->pose.head<2>()).norm() < half_w)
-            { known_here = true; break; }
+            known = mem_->get_node(synced->second.mem_name);
+            if (not known.has_value()) continue;
         }
-        if (known_here) continue;
+        else
+            for (const auto &m : mem_->get_nodes_by_type(d.type()))
+            {
+                if (not m.name().starts_with(prefix) or not is_door(*mem_, m)) continue;
+                bool mc = false;
+                if (const auto mp = pose_in_room(*mem_, mem_room->id(), m, mc);
+                    mp.has_value() and (mp->pose.head<2>() - live_pose->pose.head<2>()).norm() < half_w)
+                { known = m; break; }
+            }
+        if (known.has_value())
+        {
+            if (may_refresh) changes += refresh_door_twin(d, known.value(), mem_room->id(), live_pose->pose);
+            continue;
+        }
         if (mem_->get_node(mem_name).has_value())
         {
             qInfo().noquote() << QString::fromStdString(std::format("[memory] found door {} in {}: memory's {} is ANOTHER hole — not "

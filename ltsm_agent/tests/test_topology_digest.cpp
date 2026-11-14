@@ -19,7 +19,7 @@ int main()
     const std::string want =
         R"({"rooms":[{"name":"room_1","live":true},{"name":"room_2","live":false}],)"
         R"("passages":[{"id":"p0","a":{"room":"room_1","face":"east"},"b":{"room":"room_2","face":"west"},)"
-        R"("crossings":3,"p_pass":{"alpha":4.5,"beta":1},"p_open":{"alpha":1,"beta":1},"live_door":"door_1"}]})";
+        R"("crossings":3,"p_pass":{"alpha":4.5,"beta":1},"p_open":{"alpha":1,"beta":1},"live_door":"door_1"}],"room_ids":[]})";
     assert(j == want);
 
     p.live_door.reset();
@@ -27,7 +27,8 @@ int main()
 
     TopoPassage q; q.id = "a\"b";                       // quotes are escaped
     assert(encode_topology({}, {q}).find(R"("id":"a\"b")") != std::string::npos);
-    assert(encode_topology({}, {}) == R"({"rooms":[],"passages":[]})");
+    assert(encode_topology({}, {}) == R"({"rooms":[],"passages":[],"room_ids":[]})");
+    assert(encode_topology(rooms, {}, {1, 3}).ends_with(R"("room_ids":[1,3]})"));
     assert(live_name("r12_room_1") == "room_1" and live_name("r1_door_3") == "door_3");
     assert(live_name("room_1") == "room_1" and live_name("r_x") == "r_x" and live_name("rx1_a") == "rx1_a");
     assert(live_name("r") == "r" and live_name("") == "");

@@ -30,6 +30,7 @@
 #include "door_config.h"       // rc::DoorConfig
 #include "door_instance.h"     // rc::DoorInstance, DoorState
 #include "door_pragmatics.h"   // rc::door::InteractionState
+#include "door_memory_graph.h"   // rc::door::memnote::NoteAttrs
 #include "../../common/mask_ingestor/mask_ingestor.h"      // MaskIngestor::MasksPacket
 #include "epistemic_planner.h"  // EpistemicProposal
 
@@ -104,6 +105,9 @@ public:
     // provider's `Delivered` means it did what it was asked, never that the leaf moved. door_open_prob
     // comes from the image, marginalised over the leaf-angle posterior, like every other belief here.
     void write_interaction_state(DSR::Node& node, const rc::door::InteractionState& st);
+    /// The door's existence memory as node attributes (ltsm archives every attribute of a door node with its room). Evidence
+    /// fields only, absent optionals not written; no update_node: the caller's own (the interaction state's) carries it.
+    void write_memory_state(DSR::Node& node, const rc::door::memnote::NoteAttrs& note);
 
     // Flat triangle list (room frame): top slab + 4 legs.
     static std::vector<float> make_door_mesh(const DoorState& s);

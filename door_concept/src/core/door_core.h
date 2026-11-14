@@ -239,6 +239,11 @@ public:
     void set_costs(CostEstimator c) { costs_ = std::move(c); }
     [[nodiscard]] const CostEstimator& costs() const { return costs_; }
     [[nodiscard]] PlaceTable& places() { return places_; }
+    /// A door restored from an ltsm note keeps its revisit history: the note's place row (visit, sighted_ms, L, place) is written
+    /// into the table (one row per (room, name): the identity-only row of the same place is replaced, never duplicated), and the
+    /// visit counter moves past the row's visit so its first re-detection IS a revisit (PlaceTable::sample_revisit wants row.visit < visit).
+    /// No sample is taken here: the restore is not an observation of the place.
+    void adopt_remembered_place(PlaceRow row) { visit_ = std::max(visit_, row.visit + 1); places_.upsert(std::move(row)); }
     /// A pending birth candidate (spec §3.1: the belief lives from the first candidate observation): its θ, belief and room.
     struct Candidate
     {

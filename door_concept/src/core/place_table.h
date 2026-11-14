@@ -47,6 +47,8 @@ public:
     explicit PlaceTable(bool geometry_may_refute, float lookalike = kLookalikeProbDefault) : geometry_may_refute_(geometry_may_refute), lookalike_(lookalike) {}
 
     [[nodiscard]] std::span<const PlaceRow> rows() const { return rows_; }
+    [[nodiscard]] bool geometry_may_refute() const { return geometry_may_refute_; }
+    [[nodiscard]] float lookalike() const { return lookalike_; }
 
     PlaceRow* match(std::string_view room, const Vec2f& xy, const Eigen::Matrix2f& cov, float gate)
     {
@@ -113,6 +115,16 @@ public:
     {
         const auto it = std::ranges::find_if(rows_, [&](const PlaceRow& r) { return r.room == room and r.name == name; });
         return it == rows_.end() ? nullptr : &*it;
+    }
+    /// A crossing at `xy` in `room` lifts every removal of that hole (rows within `same_hole_m`): "no door here" was wrong there. Returns
+    /// how many rows were lifted. The rows stay (names, ledgers, revisit history); only their removal mark goes.
+    int lift_refutations(std::string_view room, const Vec2f& xy, float same_hole_m)
+    {
+        int n = 0;
+        for (auto& r : rows_)
+            if (r.room == room and r.removed_wall_ms.has_value() and r.xy.allFinite() and (r.xy - xy).norm() < same_hole_m)
+            { r.removed_wall_ms.reset(); ++n; }
+        return n;
     }
     /// The learned hazard's state (changes, summed exposure in s): persisted with the identity table (`#hazard` line).
     [[nodiscard]] ParsedIdentityTable::Hazard hazard_state() const { return {changes_, sum_elapsed_s_}; }

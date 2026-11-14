@@ -58,7 +58,8 @@ enum class DoorDecisionKind : std::uint16_t
     // identity table LOAD (spec 6.6): a=rows, b=malformed, c=1 if the file was the old un-keyed format (ignored)
     // and one row per loaded face: name, a=x, b=y, c=1 if restorable (has a pose); note=room
     IdentityLoad,
-    // a remembered row lost its restorable data on a FRESH entry: name, note=room
+    // RETIRED 2026-11-14 (no longer emitted: the identity file holds identity only, nothing to strip). Kept so the kinds after it keep
+    // their numbers in recorded tapes. Was: a remembered row lost its restorable data on a FRESH entry: name, note=room
     IdentityStrip,
     // plan_restore skipped a remembered row: name; a = SkipReason (0 NoPose, 1 NameLive [retired], 2 PlaceLive, 3 Removed); note=room
     RestoreSkip,

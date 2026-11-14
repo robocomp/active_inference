@@ -98,6 +98,9 @@ SpecificWorker::~SpecificWorker()
 	if (recall_)
 		if (const int n = recall_->remove_all(); n > 0)
 			std::cout << "[recall] removed " << n << " recall node(s) on shutdown" << std::endl;
+	if (remembered_doors_)
+		if (const int n = remembered_doors_->remove_all(); n > 0)
+			std::cout << "[remembered] removed " << n << " remembered_door note(s) on shutdown" << std::endl;
 	if (topo_pub_) topo_pub_->remove();
 	if (live_passage)
 		if (const int n = live_passage->remove_owned(); n > 0)
@@ -307,6 +310,13 @@ void SpecificWorker::initialize()
         recall_ = std::make_unique<ltsm::RoomRecall>(G_dsr, G_ltsm, *evictor);
         if (const int n = recall_->remove_all(); n > 0)
             qInfo() << "[recall] swept" << n << "stale recall node(s) from a previous run";
+        if (cfgr.b("Recall.remembered_doors", true,
+                   "post the doors memory holds for the robot's current room as remembered_door notes (metaconcept; door_concept restores from them)"))
+        {
+            remembered_doors_ = std::make_unique<ltsm::RememberedDoors>(G_dsr, G_ltsm);
+            if (const int n = remembered_doors_->remove_all(); n > 0)
+                qInfo() << "[remembered] swept" << n << "stale remembered_door note(s) from a previous run";
+        }
         if (flag("Recognition.enabled",
                 "recognise which known room the provisional room behind a fresh door is (posterior + staged commit requests)"))
         {
@@ -435,6 +445,7 @@ void SpecificWorker::compute()
         recall_->step_startup();
     }
     if (recall_) recall_->step();
+    if (remembered_doors_) remembered_doors_->step();
     // A DOOR FOUND IS REMEMBERED WHEN IT IS FOUND (room_eviction.h sync_found_doors; user 2026-11-01), every 2 s.
     if (evictor)
         if (const auto t = std::chrono::steady_clock::now(); t >= door_sync_next_)

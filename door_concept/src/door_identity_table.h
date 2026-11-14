@@ -1,11 +1,13 @@
 /*
  * door_identity_table.h — the room-keyed door identity table (etc/door_identities.csv) and the RESTORE decision.
  *
- * The table maps, per room, a door NAME to its aperture PLACE in that room's frame. Since 2026-10-20 a row may also
- * carry what is needed to RECREATE the door when the room is re-entered from memory: its aperture yaw and size, the
- * existence belief it had, and its leaf memory (hinge point + opening direction in the room frame, the hinge/swing
- * log-odds, phi and its sigma). A row without the pose (an old 4-column row, or one written at birth before the door
- * was fitted) is an identity only: it can give a re-detected door its name back, but it cannot restore a door.
+ * The table maps, per room, a door NAME to its aperture PLACE in that room's frame. IDENTITY ONLY since 2026-11-14 (door memory
+ * through ltsm): the file is `room,name,ap_x,ap_y` plus the `#next_door` / `#hazard` lines, and nothing else. What it carried from
+ * 2026-10-20 to 11-13 — the door's pose and size, existence belief, leaf memory, ledger, removed_ms, crossed … — was a SECOND world
+ * memory beside ltsm's; it is gone from the file. ltsm remembers the world's doors (remembered_door notes, door_note_reader.h) and the
+ * refuted places live in the private etc/door_phantom_memory.csv. The READER still accepts the older 17..25-column rows (so an existing
+ * file loads) and ignores everything after the place; the IdentityRow fields stay as in-memory state of THIS run (offers, looks,
+ * actuation, crossed), they are just never persisted nor reloaded.
  *
  * WHY RESTORE (2026-10-20, tourP2): room_1 → room_2 → room_1. ltsm recalls room_1 (same name, same frame, remembered
  * outline) but door_concept recreated only the door just crossed; room_1's other door (door_1) was gone until the
@@ -88,8 +90,7 @@ struct IdentityRow
     std::optional<bool> crossed;
 };
 
-inline constexpr std::string_view kIdentityHeader =
-    "room,name,ap_x,ap_y,yaw,width,height,depth,exist_logodds,hinge_x,hinge_y,open_x,open_y,hinge_llr,swing_llr,phi,phi_sigma,seen_ms,place_sd,ledger,visit,removed_ms,sighted_ms,exist_physical,crossed";
+inline constexpr std::string_view kIdentityHeader = "room,name,ap_x,ap_y";   ///< identity only; older files had 25 columns (still read)
 inline constexpr std::size_t kIdentityColsOld  = 4;
 inline constexpr std::size_t kIdentityCols17   = 17;   ///< 2026-10-20 .. 10-21: no seen_ms column (age unknown)
 inline constexpr std::size_t kIdentityCols18   = 18;   ///< 2026-10-21 .. 10-22: no place_sd column (place precision unknown)
@@ -252,37 +253,7 @@ inline ParsedIdentityTable parse_identity_table(std::istream& in)
             continue;
         }
         IdentityRow r{std::string(c[0]), std::string(c[1]), Eigen::Vector2f(x, y), {}, {}, {}, {}};
-        if (c.size() >= kIdentityCols17)
-        {
-            // Each group is all-or-nothing: half a pose is no pose.
-            if (RestorePose p; detail::num(c[4], p.yaw) and detail::num(c[5], p.width) and detail::num(c[6], p.height)
-                               and detail::num(c[7], p.depth) and p.width > 0.f and p.height > 0.f and p.depth > 0.f)
-                r.pose = p;
-            if (float L = 0.f; detail::num(c[8], L)) r.exist_logodds = L;
-            LeafMemory m;
-            float hx, hy, ox, oy;
-            if (detail::num(c[9], hx) and detail::num(c[10], hy) and detail::num(c[11], ox) and detail::num(c[12], oy)
-                and detail::num(c[13], m.hinge_llr) and detail::num(c[14], m.swing_llr) and detail::num(c[15], m.phi)
-                and detail::num(c[16], m.phi_sigma))
-            {
-                m.hinge_xy = {hx, hy};
-                m.open_dir = {ox, oy};
-                r.leaf = m;
-            }
-            if (std::int64_t t = 0; c.size() >= kIdentityCols18 and detail::num_i64(c[17], t) and t > 0)
-                r.seen_wall_ms = t;
-            if (float sd = 0.f; c.size() >= kIdentityCols19 and detail::num(c[18], sd) and sd > 0.f)
-                r.place_sd = sd;
-            if (c.size() >= kIdentityCols22)
-            {
-                if (not c[19].empty()) r.ledger = std::string(c[19]);
-                if (std::int64_t v = 0; detail::num_i64(c[20], v) and v >= 0 and v <= 2147483647) r.visit = static_cast<int>(v);
-                if (std::int64_t t = 0; detail::num_i64(c[21], t) and t > 0) r.removed_ms = t;
-                if (std::int64_t t = 0; c.size() >= kIdentityCols23 and detail::num_i64(c[22], t) and t > 0) r.sighted_ms = t;
-                if (float p = 0.f; c.size() >= kIdentityCols24 and detail::num(c[23], p) and std::isfinite(p)) r.exist_physical = p;
-                if (std::int64_t k = 0; c.size() >= kIdentityColsFull and detail::num_i64(c[24], k)) r.crossed = k != 0;
-            }
-        }
+        // Columns past the place (pose, leaf, belief, ledger …, 2026-10-20..11-13) are ignored: ltsm owns that memory now.
         out.rows.push_back(std::move(r));
     }
     return out;
@@ -293,42 +264,9 @@ inline void write_identity_table(std::ostream& f, std::span<const IdentityRow> r
 {
     f.imbue(std::locale::classic());   // never emit a comma decimal separator
     f << kIdentityHeader << '\n';
-    const auto opt = [&](bool has, float v) { if (has) f << v; };
     for (const auto& i : rows)
     {
-        f << i.room << ',' << i.name << ',' << i.xy.x() << ',' << i.xy.y();
-        const bool hp = i.pose.has_value(), hl = i.leaf.has_value();
-        const bool he = i.exist_logodds.has_value() and std::isfinite(*i.exist_logodds);
-        f << ','; opt(hp, hp ? i.pose->yaw    : 0.f);
-        f << ','; opt(hp, hp ? i.pose->width  : 0.f);
-        f << ','; opt(hp, hp ? i.pose->height : 0.f);
-        f << ','; opt(hp, hp ? i.pose->depth  : 0.f);
-        f << ','; opt(he, he ? *i.exist_logodds : 0.f);
-        f << ','; opt(hl, hl ? i.leaf->hinge_xy.x() : 0.f);
-        f << ','; opt(hl, hl ? i.leaf->hinge_xy.y() : 0.f);
-        f << ','; opt(hl, hl ? i.leaf->open_dir.x() : 0.f);
-        f << ','; opt(hl, hl ? i.leaf->open_dir.y() : 0.f);
-        f << ','; opt(hl, hl ? i.leaf->hinge_llr : 0.f);
-        f << ','; opt(hl, hl ? i.leaf->swing_llr : 0.f);
-        f << ','; opt(hl, hl ? i.leaf->phi : 0.f);
-        f << ','; opt(hl, hl ? i.leaf->phi_sigma : 0.f);
-        f << ',';
-        if (i.seen_wall_ms.has_value() and *i.seen_wall_ms > 0) f << *i.seen_wall_ms;
-        f << ',';
-        if (i.place_sd.has_value() and std::isfinite(*i.place_sd) and *i.place_sd > 0.f) f << *i.place_sd;
-        f << ',';
-        if (i.ledger.has_value() and i.ledger->find_first_of(",\r\n") == std::string::npos) f << *i.ledger;   // a cell must stay a cell
-        f << ',';
-        if (i.visit.has_value()) f << *i.visit;
-        f << ',';
-        if (i.removed_ms.has_value() and *i.removed_ms > 0) f << *i.removed_ms;
-        f << ',';
-        if (i.sighted_ms.has_value() and *i.sighted_ms > 0) f << *i.sighted_ms;
-        f << ',';
-        if (i.exist_physical.has_value() and std::isfinite(*i.exist_physical)) f << *i.exist_physical;
-        f << ',';
-        if (i.crossed.value_or(false)) f << 1;
-        f << '\n';
+        f << i.room << ',' << i.name << ',' << i.xy.x() << ',' << i.xy.y() << '\n';
     }
     if (next_door_index > 0) f << kNextDoorTag << ',' << next_door_index << '\n';
     if (hazard.has_value()) f << std::format("{},{},{}\n", kHazardTag, hazard->changes, hazard->sum_elapsed_s);   // shortest round-trip, locale-free
@@ -356,6 +294,13 @@ struct RestoreDecision
     bool not_recalled = false;   ///< the room is fresh (not a recall): nothing is restored, whatever its name
 };
 
+/// The same-hole distance of a remembered door: the identity radius + its width (note_identity's gate). ONE expression, shared by
+/// plan_restore's place test and drop_refuted_places.
+[[nodiscard]] inline float restore_same_hole_m(float reacquire_radius_m, float width_m)
+{
+    return std::max(0.f, reacquire_radius_m) + std::max(0.f, width_m);
+}
+
 /// Which of `room`'s remembered doors to recreate on entering it.
 ///  · Only when the room IS a recall (`recalled`): a fresh room sharing a name with old rows restores nothing.
 ///  · A row without a pose cannot be recreated (old 4-column / birth row) — skipped, the caller logs it.
@@ -372,13 +317,38 @@ inline RestoreDecision plan_restore(std::span<const IdentityRow> rows, std::stri
         if (r.room != room) continue;
         if (r.removed_ms.has_value()) { d.skipped.push_back({r.name, SkipReason::Removed}); continue; }   // "no door here", kept as a prior
         if (not r.pose.has_value()) { d.skipped.push_back({r.name, SkipReason::NoPose}); continue; }
-        const float same_hole = std::max(0.f, reacquire_radius_m) + std::max(0.f, r.pose->width);
+        const float same_hole = restore_same_hole_m(reacquire_radius_m, r.pose->width);
         const bool place_live = std::ranges::any_of(live, [&](const LiveDoor& l)
         { return l.xy_in_room.has_value() and l.xy_in_room->allFinite() and (*l.xy_in_room - r.xy).norm() < same_hole; });
         if (place_live) d.skipped.push_back({r.name, SkipReason::PlaceLive});
         else            d.restore.push_back(r);
     }
     return d;
+}
+
+/// Rows (notes from ltsm carry no removed_ms) that lie on a REFUTED place of this room (a removed PlaceRow: "no door here", also the rows
+/// injected from the private phantom file): memory never deletes a refuted face, so the agent drops them here, same-hole gate as
+/// plan_restore. `dropped` names them, for the log and for adoption (ltsm then retires the note).
+/// A refutation is EVIDENCE WITH A DATE, not a verdict for ever (live dm10, 2026-11-14): door_4 was removed, re-born 0.23 m away,
+/// crossed, and its note was then dropped on re-entry by the stale removed row. So a refuted place drops a note only when the
+/// removal is NEWER than the note's last sighting (the later observation supersedes the earlier one; an unknown sighting time
+/// counts as oldest), and a CROSSED door is never dropped: a crossing is proof that the opening exists (place_belief.h).
+struct RefutedPlace { Eigen::Vector2f xy = Eigen::Vector2f::Zero(); std::int64_t removed_ms = 0; };
+struct RefutedSplit { std::vector<IdentityRow> kept; std::vector<std::string> dropped; };
+[[nodiscard]] inline RefutedSplit drop_refuted_places(std::span<const IdentityRow> rows, std::span<const RefutedPlace> refuted,
+                                                      float reacquire_radius_m)
+{
+    RefutedSplit out;
+    for (const auto& r : rows)
+    {
+        const float same_hole = restore_same_hole_m(reacquire_radius_m, r.pose.has_value() ? r.pose->width : 0.f);
+        const std::int64_t last_seen = std::max(r.seen_wall_ms.value_or(0), r.sighted_ms.value_or(0));
+        const bool drop = not r.crossed.value_or(false) and std::ranges::any_of(refuted, [&](const RefutedPlace& p)
+        { return p.xy.allFinite() and (p.xy - r.xy).norm() < same_hole and p.removed_ms > last_seen; });
+        if (drop) out.dropped.push_back(r.name);
+        else      out.kept.push_back(r);
+    }
+    return out;
 }
 
 /// Upsert BY PLACE WITHIN `room`: ONE row per hole, under its REMEMBERED (oldest) name.
@@ -476,31 +446,10 @@ inline bool upsert_row(std::vector<IdentityRow>& rows, const std::string& room, 
     return true;
 }
 
-/// A room entered FRESH (not a recall) starts its restorable memory over: the pose, leaf and existence of its rows are
-/// dropped, the NAME and PLACE kept (still an identity: a re-detected door gets its name back). etc/door_identities.csv outlives ltsm's memory, so without this a later recall of the same room name
-/// could restore an OLDER run's doors as confident phantoms. Returns how many rows lost their restore data.
-inline int strip_restorable(std::vector<IdentityRow>& rows, std::string_view room)
-{
-    int n = 0;
-    for (auto& r : rows)
-        if (r.room == room and (r.pose.has_value() or r.leaf.has_value() or r.exist_logodds.has_value()))
-        {
-            r.pose.reset();
-            r.leaf.reset();
-            r.exist_logodds.reset();
-            r.exist_physical.reset();
-            r.crossed.reset();
-            r.seen_wall_ms.reset();
-            r.place_sd.reset();
-            ++n;
-        }
-    return n;
-}
-
 /// Room recognition swap (spec 2026-10-22): a room entered FRESH while ltsm had not yet recognised it is PROVISIONAL.
 /// When ltsm then posts a LATE recall (recall_late) for the room entered, that room is a recalled entry (its doors
 /// are restored) and the provisional room just left is dead: room names are never reused, so its identity rows go
-/// (drop_room), not merely stripped to identity. An early recall, or none, drops nothing.
+/// (drop_room). An early recall, or none, drops nothing.
 struct RoomEntryPlan { bool recalled = false; bool drop_left = false; };
 // `startup_announced` (warm start, 2026-11-01): the announcement is ltsm's START-UP recall of the room the robot starts in
 // (common/room_transition/startup_recall.h) — the first room is then a remembered one and its doors are restored.

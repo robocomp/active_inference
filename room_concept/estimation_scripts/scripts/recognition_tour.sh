@@ -26,6 +26,9 @@ rm -f ../etc/last_robot_pose.txt ../etc/room_name_hwm.txt $B/ltsm_agent/etc/ltsm
 # Archived like the ltsm memory, then cleared — the run starts with no door memory.
 [ -f $B/door_concept/etc/door_identities.csv ] && mkdir -p crossing/door_identities_archive && cp $B/door_concept/etc/door_identities.csv crossing/door_identities_archive/door_identities_before_$1_$(date +%Y%m%d_%H%M%S).csv
 rm -f $B/door_concept/etc/door_identities.csv
+# the private phantom memory is keyed by ltsm room_id, which restarts at 1 after a wipe: it goes with the memory
+[ -f $B/door_concept/etc/door_phantom_memory.csv ] && mkdir -p crossing/door_identities_archive && cp $B/door_concept/etc/door_phantom_memory.csv crossing/door_identities_archive/door_phantom_memory_before_$1_$(date +%Y%m%d_%H%M%S).csv
+rm -f $B/door_concept/etc/door_phantom_memory.csv
 rm -rf $B/retina/etc/place_maps/; rm -f $WT/ltsm_agent/etc/recognition_trace.csv $B/ltsm_agent/etc/recognition_trace.csv
 # close every door BEFORE the fleet starts (the cross mission opens the one it needs)
 for d in DOOR_1 DOOR_0 DOOR_2; do python3 $S/door.py close $d; done

@@ -102,6 +102,11 @@ backstop_sweep = false
 [Recognition]
 enabled = false   # RoomSwap executes the requests, but room_concept (Task 9) must re-birth the room from the late recall: switch on for the gold tour
 
+# Doors memory holds for the robot's CURRENT room, posted as `remembered_door` metaconcept notes (src/remembered_doors.h) for
+# door_concept to restore from; retired when adopted or the room stops being current. Adds metaconcept nodes only. Needs Eviction.
+[Recall]
+remembered_doors = true   # default ON since 2026-11-14 (door_concept restores only from these notes)
+
 # WARM START (docs/superpowers/specs/2026-11-01-ltsm-warm-start-design.md): post a start-up recall of this remembered room —
 # the room the robot starts in — for room_concept (RoomShape.MapMode = "ltsm") and door_concept. Absent/empty = off.
 # warm_start_tour.sh sets it for its run and restores this file.

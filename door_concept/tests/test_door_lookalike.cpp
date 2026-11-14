@@ -159,16 +159,13 @@ int main()
         CHECK(carried_belief(nullptr, 2.3f).crossing_pending); CHECK(not carried_belief(nullptr, 2.3f).crossed);
         // a source already crossed stays crossed (a recognition swap re-carries it)
         PlaceRow src2; src2.crossed = true; CHECK(carried_belief(&src2, 0.f).crossed);
-        // restored from memory: the row keeps the proof, through the identity table's columns too
+        // restored from memory: the row keeps the proof
         PlaceRow row; row.crossed = true; row.L_evidence = -3.f; row.last_seen_wall_ms = 1;
         PlaceTable T(false);
         PlaceBelief back = T.restored_belief(row, 1); back.prior.band = -100.f;
         CHECK(back.crossed); CHECK(not verdict(back).remove);
         IdentityRow id; id.room = "r"; id.name = "door_7"; id.xy = {0.f, 0.f}; id.exist_logodds = 1.f; id.exist_physical = 0.f; id.crossed = true;
-        std::stringstream f; rc::door::write_identity_table(f, std::vector<IdentityRow>{id});
-        const auto p = rc::door::parse_identity_table(f);
-        CHECK(p.rows.size() == 1 and p.rows[0].crossed.value_or(false));
-        CHECK(PlaceTable::row_of(p.rows[0], 0.1f, false).crossed);
+        CHECK(PlaceTable::row_of(id, 0.1f, false).crossed);   // (the identity file no longer carries `crossed`: ltsm's notes do)
         {   // clean16: the proof is final only once the crossing is CONFIRMED (the room switch stood)
             PlaceBelief b = carried_belief(nullptr, 2.3f);
             CHECK(not b.crossed and b.crossing_pending);            // not final before confirmation: a phantom cannot latch it

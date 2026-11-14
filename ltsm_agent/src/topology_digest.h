@@ -5,6 +5,7 @@
 #pragma once
 
 #include <algorithm>
+#include <cstdint>
 #include <cctype>
 #include <format>
 #include <optional>
@@ -48,8 +49,11 @@ inline std::string topo_json_string(const std::string& s)
 }
 
 // {"rooms":[{"name","live"}],"passages":[{"id","a":{"room","face"},"b":{"room","face"},"crossings",
-//  "p_pass":{"alpha","beta"},"p_open":{"alpha","beta"},"live_door"?}]}
-inline std::string encode_topology(const std::vector<TopoRoom>& rooms, const std::vector<TopoPassage>& passages)
+//  "p_pass":{"alpha","beta"},"p_open":{"alpha","beta"},"live_door"?}],"room_ids":[every room_id in memory]}
+// (room_ids: names are deduplicated live names, which would lose a room whose name repeats; an agent that keeps a private memory keyed by
+//  room_id forgets the rows of any id not listed.)
+inline std::string encode_topology(const std::vector<TopoRoom>& rooms, const std::vector<TopoPassage>& passages,
+                                   const std::vector<std::uint64_t>& room_ids = {})
 {
     std::string o = "{\"rooms\":[";
     for (std::size_t i = 0; i < rooms.size(); ++i)
@@ -66,6 +70,8 @@ inline std::string encode_topology(const std::vector<TopoRoom>& rooms, const std
         if (p.live_door) o += std::format(",\"live_door\":{}", topo_json_string(*p.live_door));
         o += "}";
     }
+    o += "],\"room_ids\":[";
+    for (std::size_t i = 0; i < room_ids.size(); ++i) o += std::format("{}{}", i ? "," : "", room_ids[i]);
     return o + "]}";
 }
 }   // namespace rc::ltsm

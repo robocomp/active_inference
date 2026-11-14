@@ -32,6 +32,7 @@
 
 #include "room_eviction.h"
 #include "room_recall.h"
+#include "remembered_doors.h"
 #include "room_recognizer.h"
 #include "room_swap.h"
 #include "recognition_cycle.h"
@@ -148,6 +149,7 @@ private:
 
 	/// Rooms remembered behind live doors, posted for room_concept (room_recall.h). Armed with eviction.
 	std::unique_ptr<ltsm::RoomRecall> recall_;
+	std::unique_ptr<ltsm::RememberedDoors> remembered_doors_;   ///< Recall.remembered_doors: the current room's remembered doors as live notes
 	std::string warm_room_;      // [WarmStart] Room (empty = off)
 	bool warm_posted_ = false;   // its start-up recall is in the live graph
 	/// Which known room is the provisional room behind a fresh door? Posterior + staged commit REQUESTS (room_recognizer.h);

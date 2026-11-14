@@ -18,6 +18,7 @@
 #include "../../common/room_transition/exit_fact.h"
 #include "../../common/ltsm_topology/topology_decode.h"
 #include "door_semantic_field.h"
+#include "door_identity_table.h"   // without_removed filtering of the loaded CSV
 
 namespace rc::door
 {

@@ -84,3 +84,7 @@ TARGET_LINK_LIBRARIES( promotion_trigger_test ${LIBS} dsr_core dsr_gui dsr_api f
 # Offline replay of a live recognition episode's metric expert against a memory generation (2026-11-12). make -C build recog_extent_replay; run from the component root.
 ADD_EXECUTABLE( recog_extent_replay EXCLUDE_FROM_ALL ../tools/recog_extent_replay.cpp ../src/room_chain.cpp ../src/room_eviction.cpp )
 TARGET_LINK_LIBRARIES( recog_extent_replay ${LIBS} dsr_core dsr_gui dsr_api fastcdr fastdds OpenThreads Eigen3::Eigen QGLViewer-qt6 Qt6OpenGLWidgets ${STATIC_LIBS} ${SPECIFIC_LIBS} ${QT_LIBRARIES} ${Ice_LIBRARIES} )
+
+# LTSM posts the current room's remembered doors as remembered_door notes. make -C build remembered_doors_test; run from the component root.
+ADD_EXECUTABLE( remembered_doors_test EXCLUDE_FROM_ALL ../tools/remembered_doors_test.cpp ../src/remembered_doors.cpp ../src/room_recall.cpp ../src/room_eviction.cpp )
+TARGET_LINK_LIBRARIES( remembered_doors_test ${LIBS} dsr_core dsr_gui dsr_api fastcdr fastdds OpenThreads Eigen3::Eigen QGLViewer-qt6 Qt6OpenGLWidgets ${STATIC_LIBS} ${SPECIFIC_LIBS} ${QT_LIBRARIES} ${Ice_LIBRARIES} )

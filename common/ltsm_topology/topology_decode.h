@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdint>
 #include <expected>
 #include <optional>
 #include <set>
@@ -33,6 +34,7 @@ struct Topology
 {
     std::vector<TopoRoomInfo> rooms;
     std::vector<TopoPassageInfo> passages;
+    std::optional<std::vector<std::uint64_t>> room_ids;   // every room_id in LTSM memory; nullopt = the publisher predates the field
 };
 
 inline std::expected<Topology, std::string> decode_topology(std::string_view json)
@@ -48,6 +50,11 @@ inline std::expected<Topology, std::string> decode_topology(std::string_view jso
     {
         const auto o = v.toObject();
         t.rooms.push_back({str(o, "name"), o.value("live").toBool()});
+    }
+    if (root.contains("room_ids"))
+    {
+        t.room_ids.emplace();
+        for (const auto& v : root.value("room_ids").toArray()) t.room_ids->push_back(static_cast<std::uint64_t>(v.toDouble()));
     }
     for (const auto& v : root.value("passages").toArray())
     {

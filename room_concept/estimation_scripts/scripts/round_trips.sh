@@ -13,6 +13,9 @@ echo stop > $B/controller/remote_cmd.txt  # DISARMED until the main door is born
                                           # controller explores furniture meanwhile (try52: wedged on the table, door never seen).
                                           # Each leg arms it with `run` + `cross` below.
 rm -f ../etc/last_robot_pose.txt ../etc/room_name_hwm.txt $B/ltsm_agent/etc/ltsm_memory.json
+# the private phantom memory is keyed by ltsm room_id, which restarts at 1 after a wipe: it goes with the memory
+[ -f $B/door_concept/etc/door_phantom_memory.csv ] && mkdir -p crossing/door_identities_archive && cp $B/door_concept/etc/door_phantom_memory.csv crossing/door_identities_archive/door_phantom_memory_before_$1_$(date +%Y%m%d_%H%M%S).csv
+rm -f $B/door_concept/etc/door_phantom_memory.csv
 NORUN=1 bash scripts/run_crossing.sh crossing/$1 -5.0 6.8 0 >/dev/null 2>&1
 # Doors closed AFTER the teleport: the bridge now HOLDS a commanded leaf, and closing it on a robot still standing in
 # the doorway from the last run pressed the held leaf against the body.
