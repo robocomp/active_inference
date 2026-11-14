@@ -1722,6 +1722,23 @@ int main()
         std::print("lidar_wall_refutes_phantom: dL over 6 views: without the LiDAR {:+.3f}, span reads wall {:+.3f}\n", d0, d1);
         CHECK(d1 < d0 - 0.5f);
     }
+    {   // shut_door_lidar_neutral: a shut, born door (leaf belief: shut) whose span reads wall is no evidence either way over 30 views
+        const std::vector<Vec2f> from{{1.0f, 1.0f}, {2.5f, 0.5f}, {-0.5f, 1.5f}, {3.5f, 2.0f}, {0.0f, -1.0f}, {2.0f, 2.5f}};
+        Bench b; b.cfg.exist_one_model = true;
+        const rc::DoorFitState th = shut_door();
+        PlaceBelief pb;
+        b.frame(pb, th, from[0], kDoor, true, false, {}, 0);
+        const float L0 = pb.L();
+        for (int i = 0; i < 30; ++i)
+        {
+            const Vec2f at = from[static_cast<std::size_t>(i) % from.size()] + Vec2f(0.2f * float(i / 6), 0.0f);   // 30 views: every standpoint a new one
+            const LidarOpening lid = lid_of(th.aperture, make_sweep(th.aperture, at, 1e9f, 1e9f), 0.0f);          // phi = 0: P(open) = 0
+            pb.ledger.observe(at, th.aperture.centre_xy(), th.aperture.across_u(), 1.0f, 0.0f, 0);   // (only the LiDAR channel moves it below)
+            b.frame(pb, th, at, kDoor, false, false, {}, i, std::nullopt, lid);   // no camera ran
+        }
+        std::print("shut_door_lidar_neutral: L {:+.4f} -> {:+.4f} over 30 views of wall\n", L0, pb.L());
+        CHECK(std::abs(pb.L() - L0) < 0.05f);
+    }
     {   // a LiDAR term is one trial per VIEW: ten sweeps from one standpoint are worth one
         Bench b; b.cfg.exist_one_model = true;
         const rc::DoorFitState th = shut_door();
@@ -1741,6 +1758,7 @@ int main()
         CHECK(plain.serialise().starts_with("VL3 "));
     }
     {   // side_on_leaf_bears_door_in_frame_wall: a leaf mask + the opening seen at its hinge end, no known door: the door is born ON THE FRAME WALL
+        std::vector<float> aperture_err;   // |door aperture centre - the winning hypothesis' centre|, from the birth cycle on
         const auto run = [&](bool opening, std::vector<rc::door::DoorDecision>* out_births, float* L_at_end)
         {
             Rig r(false, true);
@@ -1756,6 +1774,8 @@ int main()
                 const BpearlSweep sw = make_sweep(ap, {at.x(), at.y() + 0.05f * float(i % 3)}, ap.s + 0.05f, ap.s + ap.w - 0.05f, not opening);
                 DoorCycleInput in = input(r.cycle, r.frame, at, {2.0f, 4.5f}, {}, 10.0, std::nullopt, {leaf}, opening ? std::optional<BpearlSweep>(sw) : std::optional<BpearlSweep>(make_sweep(ap, {at.x(), at.y()}, 1e9f, 1e9f)));
                 r.step(std::move(in));
+                if (opening and not r.births.empty() and not r.w.st.empty())
+                    aperture_err.push_back((r.w.st.begin()->second.aperture.centre_xy() - ap.centre_xy()).norm());
             }
             if (out_births) *out_births = r.births;
             if (L_at_end) *L_at_end = r.w.st.empty() ? -99.f : r.w.st.begin()->second.belief.L();
@@ -1769,6 +1789,11 @@ int main()
         CHECK(n_open >= 1 and not births.empty());
         for (const auto& b : births) CHECK(std::abs(b.b - 5.0f) < 0.25f);        // the frame wall (y = 5), not the leaf's plane (x = 2, y 4.1..5)
         if (not births.empty()) CHECK(std::abs(births.front().a - 2.425f) < 0.2f); // the side the opening was read on
+        // a leaf-born door is CREATED AND INITIALISED at the hypothesis' aperture (the frame wall), on the birth cycle and 30 cycles later
+        std::print("side_on_leaf aperture error from the birth cycle: first {:.3f} m, +30 cycles {:.3f} m, worst of the run {:.3f} m\n",
+                   aperture_err.empty() ? -1.f : aperture_err.front(), aperture_err.size() > 30 ? aperture_err[30] : -1.f,
+                   aperture_err.empty() ? -1.f : *std::ranges::max_element(aperture_err));
+        CHECK(aperture_err.size() > 30 and aperture_err.front() < 0.05f and aperture_err[30] < 0.05f);
         std::vector<rc::door::DoorDecision> births_wall; float Lw = 0;
         const std::size_t n_wall = run(false, &births_wall, &Lw);
         std::print("side_on_leaf_bears_door_in_frame_wall: span reads solid wall: {} door(s), {} birth(s), L {:+.2f} (opening seen: {:+.2f})\n", n_wall, births_wall.size(), Lw, L);

@@ -311,13 +311,14 @@ private:
     [[nodiscard]] std::vector<FrameDetection> place_detections(std::uint64_t door, int candidate) const;
     /// ONE-MODEL: log b, the probability that a door is BORN at xy (the typical door's place prior; the live doors on its wall charge the base rate).
     [[nodiscard]] double log_birth(const Vec2f& xy, float sd) const;
+    [[nodiscard]] const std::vector<int>& groups_cached() const;   // wall_groups of the current outline, rebuilt only when the outline or sigma changes
     [[nodiscard]] double wall_length_at(const Vec2f& xy) const;   // Λ, the wall's length under `xy` (5 m with no wall)
     /// ONE-MODEL: where a door born from detection `d` is placed: its winning leaf hypothesis' aperture centre (a side-on leaf), else the detection's xy.
     [[nodiscard]] Vec2f place_xy(std::size_t d) const
     { return d < mask_leaf_.size() and mask_leaf_[d].has_value() ? Vec2f(mask_leaf_[d]->aperture.centre_xy()) : dets_[d].xy; }
     /// ONE-MODEL: the LiDAR opening of a pending candidate's aperture (opening_view_llr on the newest sweep registered to it; nullopt without a sweep).
-    [[nodiscard]] double hole_free(const rc::door::Aperture& ap) const;
-    [[nodiscard]] std::optional<LidarOpening> candidate_lidar(const rc::DoorFitState& theta, bool leaf_born) const;
+    [[nodiscard]] double hole_free(const rc::door::Aperture& ap, const std::vector<int>& groups) const;
+    [[nodiscard]] std::optional<LidarOpening> candidate_lidar(const rc::DoorFitState& theta, bool leaf_born, const std::vector<int>& groups) const;
     /// SpecificWorker::update_existence_beliefs, moved (door_existence.cpp). Runs once per NEW mask frame.
     void update_existence(const DoorCycleInput& in, DoorCycleOutput& out);
 
@@ -382,6 +383,9 @@ private:
     // this cycle
     std::vector<rc::DetectionView> dets_;
     std::vector<MaskCauses> mask_causes_;     // per dets_ index (one-model; empty when the flag is off)
+    mutable std::vector<Vec2f> groups_key_poly_;
+    mutable float groups_key_sigma_ = -1.0f;
+    mutable std::vector<int> groups_cache_;
     std::vector<double> mask_log_birth_;      // per dets_ index: log b of a door born at the detection's place (one-model)
     /// per dets_ index: the leaf-mode hypothesis that wins the new-door cause (the mask is a leaf seen side-on; the door is born at ITS
     /// aperture in the frame wall, not at the mask). nullopt = the aperture mode wins: the door is born at the mask (spec §3.6).

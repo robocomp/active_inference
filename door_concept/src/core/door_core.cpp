@@ -885,6 +885,9 @@ void DoorCore::births(const DoorCycleInput& in, DoorCycleOutput& out)
             // registers it as a track immediately and hands it its birth slice so observe()/run_inference
             // initialise the belief AT the detection centroid this cycle — birth, track, and init are now atomic.
             const auto name = world_->adopt_birth(new_id, slice, c);
+            if (cfg.exist_one_model and static_cast<std::size_t>(d) < mask_leaf_.size() and mask_leaf_[static_cast<std::size_t>(d)].has_value())
+                for (auto& [sid, st] : world_->fit_states())
+                    if (sid == new_id) st->birth_aperture = std::pair{mask_leaf_[static_cast<std::size_t>(d)]->aperture, mask_leaf_[static_cast<std::size_t>(d)]->leaf};
             out.creates.back().name = name.value_or(std::string{});
             // ★Task 8: THE BELIEF IS BORN WITH THE DOOR. The candidate's place belief (prior, carried memory, views) becomes the
             //  newborn's; a candidate seeded from a REMOVED row is a deleted door found again — C_delete's sample (spec §8.2).

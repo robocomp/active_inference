@@ -810,6 +810,14 @@ float DoorFit::run_inference(rc::DoorFitState& inst, const DoorObservation& obse
             if (carried_u.has_value() and carried_u->dot(p.wall_u) < 0.0f)
                 p.leaf.hinge = p.leaf.hinge == door::HingeSide::Near ? door::HingeSide::Far : door::HingeSide::Near;
         }
+        if (inst.birth_aperture.has_value())
+        {   // leaf-born: the hypothesis' own frame-wall aperture and leaf pose, not the leaf mask's plane
+            const auto& [bap, bleaf] = *inst.birth_aperture;
+            p.wall_O = bap.wall_O; p.wall_u = bap.wall_u;
+            s0.s = bap.s; s0.w = bap.w; s0.h = bap.h; s0.d = 0.0f;
+            p.leaf = bleaf;
+            inst.birth_aperture.reset();
+        }
         inst.framed_in_proto = room_is_proto_;
         inst.ai2_belief = rc::DoorBelief(s0, p);
         // ★Task D-C round 2 (tour3C): A REMEMBERED PLACE IS NOT A BIRTH SEED. A door restored from memory came back with the

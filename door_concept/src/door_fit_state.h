@@ -274,6 +274,9 @@ struct DoorFitState
     // ★THE LiDAR OPENING (one-model, spec §3.3), consumed once like the support: the fit's registered sweep read through this door's aperture span
     //  (opening_view_llr); set only on a cycle that had a sweep and under Existence.OneModel.
     std::optional<rc::door::core::LidarOpening> pending_lidar;
+    // ★A LEAF-BORN DOOR starts AT the aperture and leaf state of the hypothesis that bore it (spec §3.6: the frame wall, the owner's requirement), consumed once by
+    //  the first belief init instead of reading the aperture off the leaf mask's plane.
+    std::optional<std::pair<rc::door::Aperture, rc::door::LeafState>> birth_aperture;
     float dbg_obliquity_cos = 1.0f;  // |cos| of camera→door horizontal ray vs backrest normal (1=face-on, →0 grazing)
 
     // Free-energy readout + attention baseline (clutter-inclusive F; TABLE.md §9). dbg_energy HOLDS the last

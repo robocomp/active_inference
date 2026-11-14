@@ -239,7 +239,7 @@ double DoorCore::log_birth(const Vec2f& xy, float sd) const
 {
     const auto& cfg = cfg_.door;
     const auto& polygon = fit_.room_polygon();
-    const auto groups = wall_groups(polygon, fit_.room_band().sigma_m);
+    const auto& groups = groups_cached();
     const rc::DoorFitState th = typical_door_at(xy, cfg.door_prior_w_m, cfg.door_prior_h_m, polygon);
     const int wall = wall_of(th.aperture.centre_xy(), polygon, groups);
     // the live doors only (a candidate IS the new-door hypothesis, not another door), charged by distinctness as everywhere else
@@ -249,12 +249,26 @@ double DoorCore::log_birth(const Vec2f& xy, float sd) const
     return -std::log1p(std::exp(-static_cast<double>(pp.total())));   // log of the logistic: stable for either sign
 }
 
+// wall_groups of the current outline, built once per outline (it was rebuilt on every log_birth / wall_length_at call: several per mask per cycle).
+// Keyed on the outline itself, so a changed outline or sigma rebuilds it.
+const std::vector<int>& DoorCore::groups_cached() const
+{
+    const auto& polygon = fit_.room_polygon();
+    const float sg = fit_.room_band().sigma_m;
+    if (not (groups_key_poly_ == polygon and groups_key_sigma_ == sg))
+    {
+        groups_key_poly_ = polygon; groups_key_sigma_ = sg;
+        groups_cache_ = wall_groups(polygon, sg);
+    }
+    return groups_cache_;
+}
+
 // Λ: the length of the wall (its wall_groups group) that `xy` lies on; births and spurious masks are uniform along it (spec §3.4).
 // kept: no polygon / no wall (an unknown room): 5 m, a typical wall; it enters as a log and cancels between new door and clutter.
 double DoorCore::wall_length_at(const Vec2f& xy) const
 {
     const auto& polygon = fit_.room_polygon();
-    const auto groups = wall_groups(polygon, fit_.room_band().sigma_m);
+    const auto& groups = groups_cached();
     if (const int wg = wall_of(xy, polygon, groups); wg >= 0)
     {
         double len = 0.0;
@@ -350,7 +364,6 @@ void DoorCore::compute_mask_causes(const DoorCycleInput& /*in*/)
                     model.log_aperture_factor = std::log(std::max(g_ap, 1e-300));   // numerical floor: the log of an underflowed likelihood
                     hyps = rc::door::apertures_from_leaf(seg.a, seg.b, seg.height, polygon, groups, typical, mband, &rates_);
                     const double log_open = std::log(std::max(1e-9, static_cast<double>(cfg.ricoh_birth_p_open)));   // P(open): the one open prior the agent has
-                    const double log_not_ap = std::log1p(-std::min(g_ap, 1.0 - 1e-16));   // the open leaf is whatever is not shut-shaped (door_leaf_birth.h); 1e-16: a numerical floor on 1 − g
                     const double lid_max = std::log(static_cast<double>(detectors_.lidar.through_open) / detectors_.lidar.through_wall);   // a sweep's term is a mean per-bin log ratio: at most this
                     const double log_floor = model.log_kappa - std::log(std::max(1e-9, wall_len)) - 20.0;   // numerical reach floor, as causes_of_mask's
                     model.leaf_log_w.assign(hyps.size(), -std::numeric_limits<double>::infinity());
@@ -364,8 +377,11 @@ void DoorCore::compute_mask_causes(const DoorCycleInput& /*in*/)
                         const double lw = hy.log_w - wall_base_rate(rates_, {}) + wall_base_rate(rates_, r_o);
                         const double lb = -std::log1p(std::exp(-lw));
                         // a hole holds one door: a NEW door at a hole a live door already stands in has the mass the live door leaves (1 − r · overlap)
-                        const double hole_free = this->hole_free(hy.aperture);
-                        double v = lb - std::log(wall_length_at(hc)) + log_open + log_not_ap + std::log(std::max(hole_free, 1e-300));   // 1e-300: numerical floor on a log
+                        const double hole_free = this->hole_free(hy.aperture, groups);
+                        // the leaf is NOT SHUT against ITS frame wall (the angle to that wall, not to the wall nearest the mask): 1 - aperture angular there
+                        const float th_h = std::acos(std::min(1.0f, std::abs(dir.dot(hy.aperture.wall_u))));
+                        const double log_not_h = std::log1p(-std::min(rc::door::aperture_angle_likelihood(th_h, rc::door::segment_angle_sd(seg.length, mband.sigma_m)), 1.0 - 1e-16));
+                        double v = lb - std::log(wall_length_at(hc)) + log_open + log_not_h + std::log(std::max(hole_free, 1e-300));   // 1e-300: numerical floor on a log
                         if (not std::isfinite(v) or v + std::max(0.0, lid_max) + model.log_pd_new < log_floor) continue;
                         if (leaf_sweep_.present())
                         {
@@ -394,25 +410,26 @@ void DoorCore::compute_mask_causes(const DoorCycleInput& /*in*/)
 // ONE-MODEL: the LiDAR opening of a pending candidate's aperture span: the newest sweep registered to it, scored against solid wall (spec §3.3).
 // P(open) is the leaf's own when the candidate was born from a side-on leaf (its phi is the leaf's measured angle), else the birth prior of a
 // place with no leaf belief (Birth.RicohOpenPrior, the one open prior the agent has) as a one-point leaf curve with that clear fraction.
-std::optional<LidarOpening> DoorCore::candidate_lidar(const rc::DoorFitState& theta, bool leaf_born) const
+std::optional<LidarOpening> DoorCore::candidate_lidar(const rc::DoorFitState& theta, bool leaf_born, const std::vector<int>& groups) const
 {
     if (not cfg_.door.exist_one_model or not leaf_sweep_.present()) return std::nullopt;
     const float cf = leaf_born ? 1.0f - std::cos(theta.leaf.phi) : std::clamp(cfg_.door.ricoh_birth_p_open, 0.0f, 1.0f);   // clamp: domain of a share
     const std::pair<float, float> pt{std::acos(std::clamp(1.0f - cf, -1.0f, 1.0f)), 1.0f};
+    const double free = hole_free(theta.aperture, groups);
+    if (not (free > 0.0)) return std::nullopt;   // a hole a live door certainly stands in: the credit is exactly 0, so the registration is not run
     const auto reg = rc::door::register_sweep(theta.aperture, leaf_sweep_.origin(), leaf_sweep_.points());
     // the opening is evidence for the HOLE: a candidate beside a live door that already stands in that hole is credited only the share left
     // (hole_free), or one open door's span would bear a second label 0.4 m along the wall and charge the first one the second-door cost
-    return LidarOpening{static_cast<float>(hole_free(theta.aperture)) * rc::door::opening_view_llr(theta.aperture, reg, detectors_.lidar.through_open,
+    return LidarOpening{static_cast<float>(free) * rc::door::opening_view_llr(theta.aperture, reg, detectors_.lidar.through_open,
                                                     detectors_.lidar.through_wall, std::span<const std::pair<float, float>>(&pt, 1)),
                         reg.origin.head<2>()};
 }
 
 // The share of the aperture's span NO live door stands in: Π_i (1 − r_i · overlap_i) over the live doors on the same wall, r_i the door's last-cycle
 // existence probability and overlap_i the fraction of the (mean) width the two spans share along the wall, max(0, 1 − |Δ| / w̄). Continuous (no radius).
-double DoorCore::hole_free(const rc::door::Aperture& ap) const
+double DoorCore::hole_free(const rc::door::Aperture& ap, const std::vector<int>& groups) const
 {
     const auto& polygon = fit_.room_polygon();
-    const auto groups = wall_groups(polygon, fit_.room_band().sigma_m);
     const int wall = wall_of(ap.centre_xy(), polygon, groups);
     double free = 1.0;
     for (const auto& [id, st] : world_->fit_states())
@@ -734,7 +751,7 @@ void DoorCore::prepare_candidates(const DoorCycleInput& in, const std::vector<rc
                 ExistenceFrame fr_c = fr;
                 fr_c.dets = place;
                 observe_place(cand.belief, cand.theta, fr_c, visit_, 0.0f, &rows, self_sensor, self_w, std::nullopt,
-                              candidate_lidar(cand.theta, cand.leaf_born));
+                              candidate_lidar(cand.theta, cand.leaf_born, groups));
             }
             else
             observe_place(cand.belief, cand.theta, fr, visit_, 0.0f, &rows, self_sensor, self_w);
