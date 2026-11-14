@@ -846,6 +846,13 @@ void DoorCore::births(const DoorCycleInput& in, DoorCycleOutput& out)
                 Candidate& cand = candidates_[static_cast<std::size_t>(ci)];
                 for (auto& [sid, st] : world_->fit_states())
                     if (sid == new_id) { st->belief = cand.belief; st->place_visit = visit_; }
+                // one-model: the candidate IS the door now; its last p moves to the door's id, or the door would count its own
+                // former candidate as "another door on this wall" for one cycle (wall_base_rate)
+                if (cfg_.door.exist_one_model)
+                {
+                    last_p_cand_.erase(cand.key);
+                    last_p_door_[new_id] = cand.belief.p();
+                }
                 // THE REVISIT SAMPLE of the place this candidate was seeded from, once per place per visit, taken now that the candidate
                 // is BORN (a single unconfirmed detection is no sample): a place remembered as a door that is a door again = unchanged
                 // (found); a place remembered as "no door here" that is a door now = changed.

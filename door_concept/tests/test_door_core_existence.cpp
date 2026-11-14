@@ -188,11 +188,11 @@ struct Rig
     DoorCore core;
     std::vector<rc::door::DoorDecision> removes, births;
     // These cases jump between standpoints from one cycle to the next: a teleport is not a turn, so turning is priced only where a case asks.
-    static DoorCoreConfig config(bool turns) { DoorCoreConfig c; if (not turns) c.door.ai2_ang_lever_m = 0.0f; return c; }
+    static DoorCoreConfig config(bool turns, bool one_model = false) { DoorCoreConfig c; if (not turns) c.door.ai2_ang_lever_m = 0.0f; c.door.exist_one_model = one_model; return c; }
     std::vector<std::string> csv, cost_rows;
     std::uint64_t cycle = 0;
     int frame = 0;
-    explicit Rig(bool turns = false) : cfg(config(turns)), core(cfg)
+    explicit Rig(bool turns = false, bool one_model = false) : cfg(config(turns, one_model)), core(cfg)
     {
         w.cfg = cfg.door;
         w.core = &core;
@@ -269,6 +269,36 @@ int main()
                    r.door() ? r.door()->belief.L() : NAN);
         CHECK(r.births.size() == 1);
         CHECK(r.door() != nullptr and r.door()->belief.L() > 0.0f);
+    }
+    // ── one_model_base_rate (Task 3 fix round 1): the per-wall rate reads the OTHER doors' previous-cycle p, never a door's own former candidate
+    {
+        const float first = std::log(0.4f / 0.6f), another = std::log(0.01f / 0.99f);
+        Rig r(false, true);
+        r.look(A0, kDoor, {{1.0f, kWallY, 0.9f}});
+        CHECK(r.births.size() == 1);
+        for (int k = 0; k < 3; ++k)
+        {
+            r.settle(A0);
+            CHECK(r.door() != nullptr);
+            if (r.door() == nullptr) break;
+            std::print("one_model alone, settle {}: base_rate {:.4f} (first {:.4f})\n", k, r.door()->belief.prior.base_rate, first);
+            CHECK(std::abs(r.door()->belief.prior.base_rate - first) < 1e-4f);
+        }
+        // a door and a pending candidate on one wall (a second door on a wall needs more views than a first, so it stays a candidate
+        // here): each one's rate reflects the other's previous-cycle p, strictly between the two seed rates
+        Rig q(false, true);
+        q.look(A0, kDoor, {{1.0f, kWallY, 0.9f}});
+        for (int k = 0; k < 3; ++k) q.look(stand(4.0f, 0.0f, 3.0f), {3.0f, kWallY + 0.01f}, {{3.0f, kWallY, 0.9f}});
+        std::print("one_model door + candidate: {} doors, {} candidates\n", q.w.st.size(), q.core.candidates().size());
+        CHECK(q.w.st.size() == 1 and q.core.candidates().size() == 1);
+        if (q.w.st.size() == 1 and q.core.candidates().size() == 1)
+        {
+            const auto& d = q.w.st.begin()->second;
+            const auto& c = q.core.candidates().front();
+            std::print("  door p={:.3f} base_rate {:.4f} | candidate p={:.3f} base_rate {:.4f}\n", d.belief.p(), d.belief.prior.base_rate, c.belief.p(), c.belief.prior.base_rate);
+            CHECK(d.belief.prior.base_rate < first and d.belief.prior.base_rate > another);
+            CHECK(c.belief.prior.base_rate < first and c.belief.prior.base_rate > another);
+        }
     }
     // ── the_blob_pays_its_measured_width (2026-11-09, clean19-21): the measurement is scored against the prior, not the measurement after
     //    that prior has pulled it (0.36 m pulled to 0.95 m paid -0.20 nats; five phantoms measuring 0.23-0.41 m were born on it)
