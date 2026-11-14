@@ -772,17 +772,24 @@
 \end{frame}
 
 \begin{frame}{Bayes' rule is the three operations in a row}
-  \vspace{-0.6em}
-  \[
-    \underbrace{p(s\given o)}_{\text{posterior}}
+  \begin{center}\large
+  $\displaystyle
+    \underbrace{\textcolor{accent}{p(s\given o)}}_{\text{posterior}}
     \;=\;
-    \frac{\overbrace{p(o\given s)}^{\text{likelihood}}\;\overbrace{p(s)}^{\text{prior}}}
-         {\underbrace{p(o)}_{\text{evidence}}}
-  \]
+    \frac{\overbrace{\textcolor{good!70!black}{p(o\given s)}}^{\text{sensor model}}\;\overbrace{\textcolor{cool!80!black}{p(s)}}^{\text{prior}}}
+         {\underbrace{\textcolor{muted}{p(o)}}_{\text{evidence}}}$
+  \end{center}
+  \vspace{-0.6em}
+  \begin{center}\small
+  $\textcolor{muted}{p(o)} = \sum_s \textcolor{good!70!black}{p(o\given s)}\,\textcolor{cool!80!black}{p(s)}$:\;
+  how likely this reading would be \textcolor{good!70!black}{if the world were $s$},
+  weighted by the \textcolor{cool!80!black}{prior}
+  \end{center}
+  \vspace{-0.6em}
   \centering
-  \includegraphics[width=0.92\textwidth]{d1_bayes_ops.pdf}
-
-  \lesson{The shaded area is where exact inference dies; the rest of today is how not to compute it.}
+  \includegraphics[width=0.9\textwidth]{d1_bayes_ops.pdf}
+  \vfill
+  \lesson{Step 2, the area $p(o)$, is what a real robot cannot compute; the rest of today avoids it.}
 \end{frame}
 
 \begin{frame}{The robot acts on what it sees, not on the world}
@@ -817,6 +824,63 @@
 \end{frame}
 
 % =================================================================================================
+\begin{frame}{Your turn: notebook, part A}
+  \centering
+  \begin{tikzpicture}[tile/.style={draw=muted!60, rounded corners=3pt, minimum width=5.6cm, minimum height=2.5cm, fill=muted!5},
+      ttl/.style={font=\bfseries\small, anchor=north west}, chk/.style={font=\footnotesize, anchor=south west, align=left, text=prob},
+      vs/.style={draw=cool!80!black, circle, minimum size=0.55cm, fill=cool!15, font=\scriptsize, inner sep=0pt},
+      vo/.style={draw=good!70!black, circle, minimum size=0.55cm, fill=good!15, font=\scriptsize, inner sep=0pt},
+      va/.style={draw=black!60, circle, minimum size=0.55cm, fill=black!8, font=\scriptsize, inner sep=0pt},
+      ar/.style={-{Stealth[length=1.5mm]}, thick}]
+    % A1 door table
+    \node[tile] (t1) at (0,0) {};
+    \node[ttl] at (t1.north west) {A1\; the door table};
+    \begin{scope}[shift={(1.0,0.05)}, font=\scriptsize]
+      \fill[accent!30] (0,0) rectangle (1.6,0.5);
+      \fill[muted!25] (0,-0.5) rectangle (1.6,0);
+      \node at (0.4,0.25) {0.27}; \node at (1.2,0.25) {0.03}; \node at (0.4,-0.25) {0.14}; \node at (1.2,-0.25) {0.56};
+    \end{scope}
+    \node[font=\footnotesize, anchor=west, align=left] at (-2.5,0.05) {factorise\\[-2pt]marginalise\\[-2pt]condition};
+    \node[chk] at ($(t1.south west)+(0.1,0.05)$) {$p(\text{gap}) = 0.41$,\; $p(\text{open}\given\text{gap}) = 0.66$};
+    % A2 Gaussian wall
+    \node[tile] (t2) at (5.9,0) {};
+    \node[ttl] at (t2.north west) {A2\; the Gaussian wall};
+    \draw[cool!80!black, thick, fill=accent!25, domain=-1.2:1.2, samples=40] plot (\x+5.9, {0.85*exp(-3*\x*\x)-0.45});
+    \node[font=\footnotesize, anchor=west, align=left] at (6.9,0.15) {formula\\[-2pt]samples\\[-2pt]grid};
+    \node[chk] at ($(t2.south west)+(0.1,0.05)$) {$k = 0.86$,\; area $0.40$,\; $2.52 \pm 0.19$ m};
+    % A3 orderings
+    \node[tile] (t3) at (0,-2.75) {};
+    \node[ttl] at (t3.north west) {A3\; one joint, two orders};
+    \begin{scope}[shift={(-1.3,-2.7)}]
+      \node[vs] (a) at (-0.45,0.3) {$S$}; \node[va] (b) at (0.45,0.3) {$A$}; \node[vo] (c) at (0,-0.35) {$O$};
+      \draw[ar] (a) -- (c); \draw[ar] (b) -- (c);
+    \end{scope}
+    \begin{scope}[shift={(1.3,-2.7)}]
+      \node[vs] (a) at (-0.45,0.3) {$S$}; \node[va] (b) at (0.45,0.3) {$A$}; \node[vo] (c) at (0,-0.35) {$O$};
+      \draw[ar] (c) -- (a); \draw[ar] (c) -- (b); \draw[ar] (b) -- (a);
+    \end{scope}
+    \node[chk] at ($(t3.south west)+(0.1,0.05)$) {$6$ vs $7$ numbers; new sensor: $1$ vs $3$ factors};
+    % A4 umbrella
+    \node[tile] (t4) at (5.9,-2.75) {};
+    \node[ttl] at (t4.north west) {A4\; acts on what it sees};
+    \begin{scope}[shift={(5.9,-2.65)}]
+      \fill[muted!20] (-0.3,-0.45) rectangle (0.3,0.45);
+      \node[vs] (a) at (-1.1,0) {$S$}; \node[vo] (b) at (0,0) {$o_1$}; \node[va] (c) at (1.1,0) {$a_2$};
+      \draw[ar] (a) -- (b); \draw[ar] (b) -- (c);
+    \end{scope}
+    \node[chk] at ($(t4.south west)+(0.1,0.05)$) {$0.63 \ne 0.22$;\; given $o_1$: $0.68 = 0.68$};
+  \end{tikzpicture}
+  \vfill
+  \lesson{\texttt{labs/day1.ipynb}, part A: the orange numbers are the ones to reach.}
+\end{frame}
+
+\begin{frame}[plain]
+  \centering\vfill
+  {\fontsize{60}{60}\selectfont\bfseries\color{accent} BREAK}\\[1.5em]
+  {\large\color{muted} after the break: inference behind a sensory boundary}
+  \vfill
+\end{frame}
+
 \section{Inference behind a sensory boundary}
 % =================================================================================================
 

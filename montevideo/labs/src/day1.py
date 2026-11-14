@@ -1,18 +1,18 @@
 # %% [markdown]
-# # Day 1 — A wall as a belief
+# # Day 1 — The grammar of uncertainty, and a wall as a belief
 #
-# **The challenge, stage 0.** Before the robot can estimate a room, it must be able to hold a belief
-# about one wall. After a warm-up on the three operations of probability, you will:
+# **Part A (before the break): the three operations by hand.** Everything in this course is built
+# from three operations on a joint distribution: **factorise**, **marginalise**, **condition**. You
+# will run them on the door table from the slides, then on the Gaussian wall, then use them to see
+# why we write the joint in causal order, and why the robot's action depends on the world only
+# through what it has seen.
+#
+# **Part B (after the break): a wall as a belief.** You will
 #
 # 1. fit a wall to a LiDAR scan as a **Laplace belief**, a Gaussian whose covariance is the inverse
 #    curvature of the free energy;
-# 2. check whether that covariance is *honest*, and fix it when it is not;
+# 2. check whether that covariance is right, and fix it when it is not;
 # 3. use the **free energy** to choose between two models of the same wall.
-#
-# Choosing *where to look next* is Day 4, once action has its own functional.
-#
-# Today the robot knows its own pose exactly, and we cheat on *which* LiDAR points belong to the
-# wall. Day 3 removes both cheats.
 
 # %%
 import sys
@@ -31,11 +31,12 @@ rng = np.random.default_rng(0)
 world = two_room_apartment()
 
 # %% [markdown]
-# ## Warm-up — joint, marginal, conditional
+# # Part A — the three operations, by hand
 #
-# Before any robot, the three operations everything else is built from, on a table small enough to
-# check by hand. $D$: is the door open? $O$: does the LiDAR see a gap where the door is?
-# We store a joint over discrete variables as a numpy array with one axis per variable.
+# ## A1. The door table
+#
+# $D$: is the door open? $O$: does the LiDAR see a gap where the door is? We store a joint over
+# discrete variables as a numpy array with one axis per variable.
 
 # %%
 p_D = np.array([0.3, 0.7])                    # [open, closed]
@@ -43,10 +44,11 @@ p_O_given_D = np.array([[0.9, 0.1],           # row d: p(O = [gap, wall] | D = d
                         [0.2, 0.8]])
 
 # %% [markdown]
-# **Exercise P1 — factorise, marginalise, condition.** Build the joint `joint[d, o]` with the
+# **Exercise A1 — factorise, marginalise, condition.** Build the joint `joint[d, o]` with the
 # product rule $p(d, o) = p(o \mid d)\,p(d)$. Then compute the marginal $p(O)$ by summing out $D$,
-# and the posterior $p(D \mid O = \text{gap})$ by slicing the gap column and renormalising.
-# (Check yourself: $p(O=\text{gap}) = 0.41$ and $p(\text{open} \mid \text{gap}) \approx 0.66$.)
+# and the posterior $p(D \mid O = \text{gap})$ by taking the gap column and dividing it by its sum.
+# (Check yourself: the joint is $0.27, 0.03, 0.14, 0.56$; $p(O=\text{gap}) = 0.41$;
+# $p(\text{open} \mid \text{gap}) \approx 0.66$.)
 
 # %%
 # BEGIN SOLUTION
@@ -58,22 +60,89 @@ print("joint:\n", joint, "\nsums to", joint.sum())
 print("p(O) =", p_O, "  p(D | gap) =", p_D_given_gap.round(3))
 
 # %% [markdown]
-# **Exercise P2 — the other factorisation.** Compute $p(D \mid O)$ for both values of $O$ and
-# check that $p(D \mid O)\,p(O)$ rebuilds the same joint. Bayes' rule is nothing but this identity.
+# **Exercise A2 — the other factorisation.** Compute $p(D \mid O)$ for both values of $O$ and
+# check that $p(D \mid O)\,p(O)$ rebuilds the same joint. Bayes' rule is nothing but this identity:
+# two factorisations of one joint.
 
 # %%
 # BEGIN SOLUTION
 p_D_given_O = joint / p_O[None, :]            # column o is p(D | O = o)
 # END SOLUTION
+print("each column of p(D|O) adds to 1:", p_D_given_O.sum(axis=0))
 print("rebuilt from p(D|O) p(O):", np.allclose(p_D_given_O * p_O[None, :], joint))
 
 # %% [markdown]
-# ### Three variables, six orderings, one causal order
+# ## A2. The Gaussian wall
+#
+# $s$ is the distance to a wall, prior $\mathcal N(2, 0.5^2)$; $o$ is a range reading,
+# $o \mid s \sim \mathcal N(s, 0.2^2)$. The joint over $(s, o)$ is Gaussian, with the mean and
+# covariance below (built on the slides from the model).
+#
+# **Exercise A3 — marginalise and condition a Gaussian.**
+# 1. Marginal $p(o)$: cross out the row and column of $s$. (Check: $\mathcal N(2, 0.29)$.)
+# 2. Conditional $p(s \mid o = 2.6)$ in gain form: $k = \Sigma_{so}/\Sigma_{oo}$,
+#    mean $\mu_s + k\,(o - \mu_o)$, variance $\Sigma_{ss} - k\,\Sigma_{os}$. (Check: $k = 0.86$,
+#    $2.52 \pm 0.19$ m.)
+# 3. Check it without any formula: draw a million samples of $(s, o)$, keep those with $o$ within
+#    1 cm of 2.6, and compute the mean and standard deviation of their $s$.
+
+# %%
+mu_so = np.array([2.0, 2.0])
+Sigma_so = np.array([[0.25, 0.25], [0.25, 0.29]])
+o_star = 2.6
+# BEGIN SOLUTION
+m_o, v_o = mu_so[1], Sigma_so[1, 1]
+k = Sigma_so[0, 1] / Sigma_so[1, 1]
+m_post = mu_so[0] + k * (o_star - mu_so[1])
+v_post = Sigma_so[0, 0] - k * Sigma_so[1, 0]
+samples = rng.multivariate_normal(mu_so, Sigma_so, size=1_000_000)
+kept = samples[np.abs(samples[:, 1] - o_star) < 0.01, 0]
+# END SOLUTION
+print(f"p(o) = N({m_o:.2f}, {v_o:.2f})    gain k = {k:.2f}")
+print(f"formula: {m_post:.3f} ± {np.sqrt(v_post):.3f}    samples ({len(kept)} kept): {kept.mean():.3f} ± {kept.std():.3f}")
+
+# %% [markdown]
+# **Exercise A4 — Bayes on a grid: the three operations in a row.** Without the Gaussian formulas:
+# on a grid of $s$ values, (1) **factorise**: multiply the prior $p(s)$ by the sensor model
+# $p(o = 2.6 \mid s)$; (2) **marginalise**: the area under that product is $p(o = 2.6)$;
+# (3) **condition**: divide the product by the area. Plot all three, and check the area is 0.40
+# and the posterior is $2.52 \pm 0.19$ m again.
+
+# %%
+def npdf(x, m, v):
+    return np.exp(-0.5 * (x - m) ** 2 / v) / np.sqrt(2 * np.pi * v)
+
+
+s_grid = np.linspace(0.0, 4.0, 2001)
+ds = s_grid[1] - s_grid[0]
+# BEGIN SOLUTION
+product = npdf(s_grid, 2.0, 0.5 ** 2) * npdf(o_star, s_grid, 0.2 ** 2)
+area = product.sum() * ds
+posterior = product / area
+# END SOLUTION
+m_g = (s_grid * posterior).sum() * ds
+sd_g = np.sqrt(((s_grid - m_g) ** 2 * posterior).sum() * ds)
+print(f"area p(o=2.6) = {area:.3f}    posterior {m_g:.3f} ± {sd_g:.3f}")
+fig, axs = plt.subplots(1, 3, figsize=(11, 2.8), sharey=True)
+for ax_, y, t in zip(axs, [product, product, posterior], ["1. factorise", "2. marginalise: area", "3. condition: divide"]):
+    ax_.fill_between(s_grid, y, alpha=0.4); ax_.set_title(t); ax_.set_xlabel("s (m)")
+
+# %% [markdown]
+# **Question.** For one wall this took a grid of 2001 points. How many points would a grid need for
+# the robot's pose $(x, y, \theta)$ and four walls of two parameters each, at the same resolution
+# per dimension? This is why step 2 is where exact inference dies.
+
+# %% [markdown] solution
+# *Answer.* 11 dimensions at 2001 points each: $2001^{11} \approx 2 \times 10^{36}$ grid points.
+# The area $p(o)$ cannot be computed by brute force; the afternoon is about not computing it.
+
+# %% [markdown]
+# ## A3. Three variables, six orderings, one causal order
 #
 # Now the names used all week: $S$ the state (is the door open?), $O$ the observation (does the
 # LiDAR see a gap?), $A$ the action (does the robot point its LiDAR towards the door, or away?).
-# The robot cannot see $S$, so its choice of $A$ does not depend on it; the observation depends on
-# both. The causal model is $p(S)\,p(A)\,p(O \mid S, A)$: 1 + 1 + 4 = 6 numbers.
+# At the first step the robot has seen nothing, so its choice of $A$ cannot depend on $S$; the
+# observation depends on both. The causal model is $p(S)\,p(A)\,p(O \mid S, A)$.
 
 # %%
 p_S = np.array([0.3, 0.7])                    # [open, closed]
@@ -92,9 +161,28 @@ def causal_joint(p_S, p_A, p_O_given_SA):
 joint3 = causal_joint(p_S, p_A, p_O_given_SA)
 
 # %% [markdown]
-# **Exercise P3 — read the factors of an anti-causal order off the joint.** From `joint3` alone
-# (axes `[s, o, a]`), compute the three factors of the ordering $p(O)\,p(A \mid O)\,p(S \mid O, A)$,
-# and check that their product is `joint3` again. Then answer two questions numerically:
+# **Exercise A5 — count the numbers.** A factor $p(X \mid \text{parents})$ over binary variables
+# needs one free number per combination of its parents' values (the other value of $X$ is
+# 1 minus it). Write `n_numbers(n_parents)` and count each ordering. (Check: causal
+# $1 + 1 + 4 = 6$; anti-causal $p(O)\,p(A \mid O)\,p(S \mid O, A)$: $1 + 2 + 4 = 7$.) Then count
+# $N = 20$ binary variables, with every factor keeping all earlier variables, against at most
+# $k = 3$ parents each.
+
+# %%
+def n_numbers(n_parents):
+    # BEGIN SOLUTION
+    return 2 ** n_parents
+    # END SOLUTION
+
+
+print("causal     :", n_numbers(0) + n_numbers(0) + n_numbers(2))
+print("anti-causal:", n_numbers(0) + n_numbers(1) + n_numbers(2))
+print("N = 20, nothing dropped:", sum(n_numbers(i) for i in range(20)), "   at most 3 parents:", 20 * n_numbers(3))
+
+# %% [markdown]
+# **Exercise A6 — read the anti-causal factors off the joint.** From `joint3` alone (axes
+# `[s, o, a]`), compute the three factors of $p(O)\,p(A \mid O)\,p(S \mid O, A)$, and check that
+# their product is `joint3` again. Then:
 #
 # 1. Does $p(A \mid S)$ depend on $S$? Does $p(S \mid O, A)$ depend on $A$?
 # 2. Replace the LiDAR by a worse sensor, which sees a gap with probability 0.6 / 0.4 when it looks
@@ -131,24 +219,50 @@ for name, x, y in zip(["p(O)", "p(A|O)", "p(S|O,A)"], (p_O3, p_A_given_O, p_S_gi
 # (0.30, the prior).
 
 # %% [markdown]
-# **Exercise P4 — the same operations on a Gaussian.** $s$ is the distance to a wall, prior
-# $\mathcal N(2, 0.5^2)$; $o$ is a range reading, $o \mid s \sim \mathcal N(s, 0.2^2)$. The joint
-# over $(s, o)$ is Gaussian with the covariance below. Condition on $o = 2.6$ twice: with the
-# Schur complement in covariance form, and by keeping the $ss$ block in precision form
-# ($\Lambda = \Sigma^{-1}$; the conditional mean is $\mu_s - \Lambda_{ss}^{-1}\Lambda_{so}(o - \mu_o)$).
-# They must agree: $2.52 \pm 0.19$ m.
+# ## A4. The robot acts on what it sees, not on the world
+#
+# Two steps. At step 1 the robot looks at the door and gets $o_1$ (gap or wall). At step 2 it
+# chooses $a_2$: it looks at the door again with a probability equal to how unsure it is,
+# $1 - |2\,p(\text{open} \mid o_1) - 1|$. The sampler below runs the world forwards in causal
+# order.
 
 # %%
-mu_so = np.array([2.0, 2.0])
-Sigma_so = np.array([[0.25, 0.25], [0.25, 0.29]])
+def run_two_steps(n):
+    s = rng.random(n) < p_S[0]                                     # True = open
+    gap = rng.random(n) < np.where(s, 0.9, 0.2)                    # o1, LiDAR towards the door
+    belief = np.where(gap, joint[0, 0] / p_O[0], joint[0, 1] / p_O[1])   # p(open | o1), from A1
+    look_again = rng.random(n) < 1 - np.abs(2 * belief - 1)        # a2
+    return s, gap, look_again
+
+
+s_, gap_, a2_ = run_two_steps(1_000_000)
+
+# %% [markdown]
+# **Exercise A7 — the umbrella test.** From the samples, estimate
+# 1. $p(a_2 = \text{look} \mid S)$ for $S$ = open and closed. Is $a_2$ independent of $S$?
+# 2. $p(a_2 = \text{look} \mid S, o_1 = \text{gap})$ for $S$ = open and closed. And now?
+#
+# (You take an umbrella because of the forecast, not because of tomorrow's rain.)
+
+# %%
 # BEGIN SOLUTION
-m_cov = mu_so[0] + Sigma_so[0, 1] / Sigma_so[1, 1] * (2.6 - mu_so[1])
-v_cov = Sigma_so[0, 0] - Sigma_so[0, 1] ** 2 / Sigma_so[1, 1]
-Lam = np.linalg.inv(Sigma_so)
-m_prec = mu_so[0] - Lam[0, 1] / Lam[0, 0] * (2.6 - mu_so[1])
-v_prec = 1 / Lam[0, 0]
+by_S = [a2_[s_ == v].mean() for v in (True, False)]
+by_S_gap = [a2_[(s_ == v) & gap_].mean() for v in (True, False)]
 # END SOLUTION
-print(f"covariance form: {m_cov:.3f} ± {np.sqrt(v_cov):.3f}   precision form: {m_prec:.3f} ± {np.sqrt(v_prec):.3f}")
+print("p(look | S = open, closed)            :", np.round(by_S, 3))
+print("p(look | S = open, closed, o1 = gap)  :", np.round(by_S_gap, 3))
+
+# %% [markdown] solution
+# Without $o_1$, the action depends on the door: 0.62 against 0.22, because an open door tends
+# to produce a gap, a gap makes the robot fairly sure, and a sure robot does not look again. Given
+# $o_1$, both are 0.68: the door reaches the action only through what the robot has seen.
+
+# %% [markdown]
+# # Part B — a wall as a belief (after the break)
+#
+# Choosing *where to look next* is Day 4, once action has its own functional. Today the robot knows
+# its own pose exactly, and we cheat on *which* LiDAR points belong to the wall. Day 3 removes both
+# cheats.
 
 # %% [markdown]
 # ## 0. Meet the world
@@ -259,7 +373,7 @@ ax.set_xlim(-0.5, 6.5); ax.set_ylim(3.0, 4.6); ax.set_title("belief samples (sd 
 # centroid and the information matrix becomes diagonal.
 
 # %% [markdown]
-# ## 2. Is the covariance honest?
+# ## 2. Is the covariance right?
 #
 # $\Sigma = H^{-1}$ is a **claim** about how far the fit would wander if you scanned again. Test the
 # claim: scan 500 times from the same pose, fit each scan, and compare the spread of the fits with
@@ -306,7 +420,7 @@ emp, pred = monte_carlo(incidence_sigma)
 print("incidence sigma: empirical sd", emp.round(5), "  predicted sd", pred.round(5), "  ratio", (pred / emp).round(3))
 
 # %% [markdown]
-# **Lesson.** A Laplace covariance is exactly as honest as the likelihood you wrote. Here the wrong
+# **Lesson.** A Laplace covariance is exactly as right as the likelihood you wrote. Here the wrong
 # likelihood made the belief *under*-confident. That costs little. Day 3 has a wrong likelihood
 # that makes it badly *over*-confident, which costs a great deal. The real robot's localiser
 # weights each LiDAR return by the incidence $|\hat r^\top \hat n|$ for exactly this reason.
@@ -377,7 +491,7 @@ print(f"tilted wall: F_free - F_Manhattan = {f_t.free_energy - m_t.free_energy:+
 # %% [markdown]
 # ## Take-aways
 # - A belief is a mean **and** a covariance. The covariance is the curvature of the free energy,
-#   and it is only as honest as the likelihood.
+#   and it is only as right as the likelihood.
 # - Model choice is free-energy comparison: complexity against accuracy, in nats, with no
 #   threshold.
 # - Tomorrow the robot loses its known pose and its labelled points. The wall becomes four walls,

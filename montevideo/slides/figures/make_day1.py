@@ -219,16 +219,19 @@ product = prior * like
 evidence = product.sum() * (s[1] - s[0])
 assert np.isclose(evidence, npdf(o_star, mu_s, S[1, 1]), atol=1e-3)
 posterior = product / evidence
-fig, axes = plt.subplots(1, 3, figsize=(7.4, 1.85), sharex=True, sharey=True)
-titles = ["factorise: what was expected?", "marginalise: how likely is it?", "condition: where now?"]
+fig, axes = plt.subplots(1, 3, figsize=(10.5, 3.0), sharex=True, sharey=True)
+titles = [r"1. factorise: $p(o\mid s)\,p(s)$", r"2. marginalise: $p(o)$ = area", r"3. condition: $p(s\mid o)$"]
 for a, t in zip(axes, titles):
-    a.set_title(t, fontsize=9, loc="left"); a.set_xlabel(r"$s$ (m)"); a.set_yticks([]); a.spines["left"].set_visible(False)
-axes[0].fill_between(s, prior, color=COOL, alpha=0.3); axes[0].plot(s, like, color=GOOD, lw=2, ls="--")
-axes[0].text(1.0, 0.95, r"prior $p(s)$", fontsize=9); axes[0].text(1.62, 1.75, r"$p(o\mid s)$", fontsize=9)
-axes[1].fill_between(s, product, color=ACCENT, alpha=0.35); axes[1].plot(s, product, color=ACCENT, lw=1.5)
-axes[1].text(0.95, 1.05, f"shaded area\n$= p(o) = {evidence:.2f}$", fontsize=9)
+    a.set_title(t, fontsize=15, loc="left"); a.set_xlabel(r"$s$ (m)", fontsize=13); a.set_yticks([])
+    a.spines["left"].set_visible(False); a.tick_params(labelsize=12); a.set_xticks([1, 2, 3])
+axes[0].fill_between(s, prior, color=COOL, alpha=0.3); axes[0].plot(s, prior, color=COOL, lw=1.5)
+axes[0].plot(s, like, color=GOOD, lw=2.5, ls="--")
+axes[0].text(0.85, 0.9, r"$p(s)$", fontsize=14, color=COOL); axes[0].text(2.75, 1.7, r"$p(o\mid s)$", fontsize=14, color=GOOD)
+axes[1].fill_between(s, product, color=MUTED, alpha=0.35); axes[1].plot(s, product, color=MUTED, lw=1.5)
+axes[1].text(0.85, 0.9, f"area\n$= {evidence:.2f}$", fontsize=14, color="0.3")
 axes[2].fill_between(s, posterior, color=ACCENT, alpha=0.35); axes[2].plot(s, posterior, color=ACCENT, lw=2)
-axes[2].text(0.95, 1.2, f"divide by {evidence:.2f}:\n${post_m:.2f}\\pm{np.sqrt(post_v):.2f}$ m", fontsize=9)
+axes[2].text(0.85, 1.25, f"$\\div\\,{evidence:.2f}$", fontsize=16, color=ACCENT)
+axes[2].text(0.85, 0.75, f"${post_m:.2f}\\pm{np.sqrt(post_v):.2f}$ m", fontsize=13, color=ACCENT)
 fig.tight_layout(w_pad=0.6); fig.savefig(OUT / "d1_bayes_ops.pdf"); plt.close(fig)
 print(f"bayes ops: evidence p(o=2.6) = {evidence:.3f}")
 
