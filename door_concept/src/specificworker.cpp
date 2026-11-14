@@ -2657,11 +2657,14 @@ void SpecificWorker::step_pragmatic_affordances(rc::DoorInstance& inst)
         auto now = rc::door::memnote::note_of(identity_of(inst, ledger_moved),
                                               std::sqrt(std::max(0.0f, inst.ai2_belief.covariance()(2, 2))));
         const auto d = rc::door::memnote::changed_since(now, pub.has_ledger_sig ? &pub.last : nullptr);
+        const auto gone = rc::door::memnote::gone_since(now, pub.has_ledger_sig ? &pub.last : nullptr, ledger_moved);
         if (rc::door::memnote::any_change(d))
         {
             scene_graph_->write_memory_state(node_opt.value(), d);
             rc::door::memnote::apply_changes(pub.last, d);
         }
+        if (gone.any())   // a field written before and absent now (a lost leaf, an emptied ledger): its stale attribute goes
+            rc::door::memnote::erase_gone(*G, node_opt.value(), pub.last, gone);
         pub.ledger_version = led.version(); pub.ledger_views = led.views().size(); pub.has_ledger_sig = true;
     }
     G->update_node(node_opt.value());
@@ -4159,6 +4162,10 @@ void SpecificWorker::step_restore_from_notes()
         return;
     if (pending_restore_room_ == room_node_id_)
         pending_restore_room_ = 0;   // the CSV path is not used with the flag on
+    // Only in a room door_concept RECALLED (enter_room_memory): in a fresh / stub room the notes are not restored (the same condition
+    // under which the CSV path restores). Polled every cycle inside it, so a late note still lands.
+    if (not rc::door::memnote::restore_gate_open(recalled_room_id_, room_node_id_))
+        return;
     if (not fitter_->has_room_polygon())
     {
         refresh_room_geometry();
@@ -4171,8 +4178,22 @@ void SpecificWorker::step_restore_from_notes()
     const auto room = G->get_node(room_node_id_);
     if (not room.has_value())
         return;
-    const auto rows = rc::door::memnote::rows_of_notes(notes, room->name());
-    const auto handled = restore_rows(room_node_id_, rows);
+    const auto all_rows = rc::door::memnote::rows_of_notes(notes, room->name());
+    // A refuted place (a removed PlaceRow of this room, phantom-file rows included) is never restored from memory: the note is dropped
+    // here and reported handled, so it is adopted and ltsm retires it.
+    std::vector<Eigen::Vector2f> refuted_xy;
+    for (const auto& pr : core_->places().rows())
+        if (pr.room == room->name() and pr.removed_wall_ms.has_value())
+            refuted_xy.push_back(pr.xy);
+    auto split = rc::door::drop_refuted_places(all_rows, refuted_xy, identity_radius_m());
+    for (const auto& nm : split.dropped)
+    {
+        decision_log_.record(rc::door::DoorDecisionKind::RestoreSkip, 0, nm,
+                             double(static_cast<int>(rc::door::SkipReason::Removed)), 0, 0, 0, room->name());
+        std::print("door_concept: [restore] '{}' NOT restored: refuted place (phantom memory)\n", nm);
+    }
+    auto handled = restore_rows(room_node_id_, split.kept);
+    handled.insert(handled.end(), split.dropped.begin(), split.dropped.end());
     for (const auto& n : notes)
         if (std::ranges::find(handled, rc::door::memnote::face_live_name(n.name)) != handled.end())
             rc::door::memnote::mark_adopted(*G, n.id);
@@ -4244,17 +4265,21 @@ std::vector<std::string> SpecificWorker::restore_rows(std::uint64_t new_room, st
                                                        static_cast<std::int64_t>(rc::provenance::now_ms()), cfg_.phi_max_rad))
             : std::nullopt;
         // Door node origin = aperture centre on the floor, yaw = the aperture's (write_rt_pose's room-frame form).
+        // only a plain door_<N> name asks for itself back; a recycled `door_5_h1` / derived `door_X_entry` gets a fresh counter name
         const auto id = scene_graph_->create_door_copy(room.value(), r.pose->width, r.pose->depth, r.pose->height,
                                                        std::nullopt, aged_leaf.has_value() ? std::optional<float>(aged_leaf->first) : std::nullopt,
                                                        Eigen::Vector3f(r.xy.x(), r.xy.y(), 0.0f),
                                                        Eigen::Vector3f(0.0f, 0.0f, r.pose->yaw), next_door_index_,
-                                                       std::format("'{}' remembered in {}", r.name, room->name()), r.name);
+                                                       std::format("'{}' remembered in {}", r.name, room->name()),
+                                                       rc::door::memnote::is_plain_door_name(r.name) ? std::string_view(r.name) : std::string_view{});
         persist_door_counter(counter_before);
         if (id == 0)
         {
-            std::print("door_concept: [restore] '{}' could not be recreated in '{}' (insert failed)\n", r.name, room->name());
+            if (restore_failed_logged_.insert(r.name).second)   // once per note: it is retried every cycle
+                std::print("door_concept: [restore] '{}' could not be recreated in '{}' (insert failed)\n", r.name, room->name());
             continue;
         }
+        restore_failed_logged_.erase(r.name);
         handled.push_back(r.name);
         const auto n = G->get_node(id);
         if (not n.has_value())

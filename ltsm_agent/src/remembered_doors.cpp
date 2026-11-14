@@ -8,6 +8,8 @@
 #include <QDebug>
 #include <QString>
 
+#include <chrono>
+#include <cmath>
 #include <format>
 #include <map>
 #include <string>
@@ -72,6 +74,23 @@ int RememberedDoors::retire_where_parent_is_not(std::uint64_t room_id)
 
 int RememberedDoors::step()
 {
+    // one-off cost report: the first kTimedCalls calls (door memory must not slow the main cycle unnoticed)
+    const auto t0 = std::chrono::steady_clock::now();
+    const int n = step_impl();
+    if (timed_calls_ < kTimedCalls)
+    {
+        const double us = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count();
+        sum_us_ += us;
+        max_us_ = std::max(max_us_, us);
+        if (++timed_calls_ == kTimedCalls)
+            qInfo().noquote() << QString::fromStdString(std::format("[remembered] step cost over first {} calls: mean {:.0f} us, max {:.0f} us",
+                                                                    kTimedCalls, sum_us_ / kTimedCalls, max_us_));
+    }
+    return n;
+}
+
+int RememberedDoors::step_impl()
+{
     const auto cur = rc::room::current_room(*live_);
     if (not cur.has_value())
     {
@@ -102,6 +121,9 @@ int RememberedDoors::step()
     for (const auto &face : mem_->get_nodes_by_type("object"))
     {
         if (not is_face(face) or not descends_from(*mem_, face, twin->id())) continue;
+        // A face without its own geometry (a derived `_entry` face) can never be read back, hence never adopted: not posted.
+        if (not (face.attrs().contains(width_m_str.data()) and face.attrs().contains(height_m_str.data())
+                 and face.attrs().contains(depth_m_str.data()))) continue;
         if (adopted_.contains(face.id())) continue;
 
         // The note's pose is the face's pose IN THE ROOM's frame, T(room <- face): the face hangs from a wall (or the room) in memory.
@@ -171,7 +193,12 @@ int RememberedDoors::step()
             ++updates_;
         }
 
-        const auto rt = RoomEviction::rt_attributes(pose.value());
+        // Planar: a door is a vertical plane, so the note carries (0, 0, yaw) written directly. Going through rt_attributes would
+        // run Eigen's eulerAngles(2,1,0), which returns (pi, -pi, yaw+pi) for a negative yaw: a reader of rz would be off by pi.
+        const auto& M = pose.value();
+        auto rt = RoomEviction::rt_attributes(M);
+        const float yaw = static_cast<float>(std::atan2(M.rotation()(1, 0), M.rotation()(0, 0)));
+        rt.insert_or_assign(rt_rotation_euler_xyz_str.data(), DSR::Attribute{std::vector<float>{0.f, 0.f, yaw}, 0, 0});
         const auto old = live_->get_edge(current_, id, "RT");
         if (not old.has_value() or not(old->attrs() == rt))
             live_->insert_or_assign_edge(DSR::Edge::create<RT_edge_type>(current_, id, rt));

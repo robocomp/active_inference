@@ -5,12 +5,14 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <format>
 #include <string>
 
 static int failures = 0;
-static void check(bool ok, const std::string &what) { if (!ok) ++failures; std::printf("  %s %s\n", ok ? "ok  " : "FAIL", what.c_str()); }
+static void check(bool ok, const std::string &what) { if (not ok) ++failures; std::printf("  %s %s\n", ok ? "ok  " : "FAIL", what.c_str()); }
 
 static std::shared_ptr<DSR::DSRGraph> live, mem;
+static bool with_geometry = true;   // a door face carries its own width/height/depth
 static std::uint64_t robot_id = 0, live_room = 0, live_room2 = 0, mem_twin = 0;
 
 static void put_edge(DSR::DSRGraph &G, std::uint64_t from, std::uint64_t to, double x, double y, double th)
@@ -33,6 +35,12 @@ static std::uint64_t mem_node(const char *type, const std::string &name, std::ui
     if (rid) mem->add_or_modify_attrib_local<room_id_att>(n, *rid);
     if (subtype) mem->add_or_modify_attrib_local<object_subtype_att>(n, std::string(subtype));
     if (evidence >= 0.f) mem->add_or_modify_attrib_local<door_exist_evidence_att>(n, evidence);
+    if (subtype and std::string(subtype) == "door" and with_geometry)
+    {
+        mem->add_or_modify_attrib_local<width_m_att>(n, 0.9f);
+        mem->add_or_modify_attrib_local<height_m_att>(n, 2.0f);
+        mem->add_or_modify_attrib_local<depth_m_att>(n, 0.1f);
+    }
     if (parent != 0) mem->add_or_modify_attrib_local<parent_att>(n, parent);
     const auto id = mem->insert_node(n).value();
     put_edge(*mem, parent != 0 ? parent : mem->get_node("root").value().id(), id, x, y, th);
@@ -124,6 +132,37 @@ int main(int argc, char **argv)
         const int u = rd.updates();
         check(rd.step() == 3 and rd.updates() == u, "idempotent: a second step rewrites no note (no update_node)");
         check(rd.remove_all() == 3 and notes() == 0, "remove_all sweeps them");
+    }
+    std::printf("negative_yaw_survives_the_hand_off\n");
+    {
+        // the writer must put a planar (0,0,yaw) on the note edge, and the reader (yaw = rz) must get the composed yaw back
+        for (const double wall_yaw : {-1.0, -2.8})
+        {
+            reset(); build();
+            const auto wall = mem_node("wall", "r3_wall_9", mem_twin, 0, 0, wall_yaw);
+            mem_node("object", "r3_door_9", wall, 1.0, 0.0, 0.0, std::nullopt, "door", 0.9f);
+            ltsm::RememberedDoors rd(live, mem);
+            rd.step();
+            const auto n = live->get_node("remembered_door_9");
+            const auto e = n.has_value() ? live->get_edge(live_room, n->id(), "RT") : std::nullopt;
+            check(e.has_value(), std::format("yaw {}: RT edge present", wall_yaw));
+            if (not e.has_value()) continue;
+            const auto r = live->get_attrib_by_name<rt_rotation_euler_xyz_att>(e.value());
+            check(r.has_value() and r.value().get().size() >= 3, "euler attribute present");
+            if (not r.has_value()) continue;
+            const auto &v = r.value().get();
+            check(std::fabs(v[0]) < 1e-6f and std::fabs(v[1]) < 1e-6f, std::format("yaw {}: roll/pitch are 0", wall_yaw));
+            check(std::fabs(std::remainder(v[2] - wall_yaw, 2 * M_PI)) < 1e-5, std::format("yaw {}: decoded z = {:.6f}", wall_yaw, v[2]));
+        }
+    }
+    std::printf("face_without_geometry_is_not_posted\n");
+    {
+        reset(); build();
+        with_geometry = false;
+        mem_node("object", "r3_door_5_entry", mem_twin, 1, 1, 0.0, std::nullopt, "door", 0.5f);
+        with_geometry = true;
+        ltsm::RememberedDoors rd(live, mem);
+        check(rd.step() == 3 and not live->get_node("remembered_door_5_entry").has_value(), "geometry-less face: no note; the 3 real faces still posted");
     }
     std::printf("staged_twin_posts_nothing\n");
     {

@@ -76,6 +76,37 @@ int main()
         CHECK(two.restore.size() == 2 and two.skipped.empty());
     }
 
+    {   // C2: a note at a refuted place is dropped (and reported, so it is adopted); a note elsewhere in the room is kept
+        const std::vector<memnote::NoteInput> notes = {
+            {11, "remembered_door_5", memnote::note_of(csv_row("door_5", 1.5f, -2.0f), 0.03f)},
+            {12, "remembered_door_6", memnote::note_of(csv_row("door_6", -3.0f, 1.0f), 0.03f)}};
+        const auto rows = memnote::rows_of_notes(notes, "room_1");
+        const std::vector<Eigen::Vector2f> refuted = {Eigen::Vector2f(1.6f, -2.2f)};   // a removed PlaceRow near door_5's place
+        const auto sp = drop_refuted_places(rows, refuted, 0.3f);
+        CHECK(sp.dropped.size() == 1 and sp.dropped[0] == "door_5");
+        CHECK(sp.kept.size() == 1 and sp.kept[0].name == "door_6");
+        // the gate is plan_restore's own expression: a refuted place just outside radius + width keeps the note
+        const float gate = restore_same_hole_m(0.3f, 0.9f);
+        const std::vector<Eigen::Vector2f> far = {Eigen::Vector2f(1.5f + gate + 0.01f, -2.0f)};
+        CHECK(drop_refuted_places(rows, far, 0.3f).dropped.empty());
+        const std::vector<Eigen::Vector2f> near = {Eigen::Vector2f(1.5f + gate - 0.01f, -2.0f)};
+        CHECK(drop_refuted_places(rows, near, 0.3f).dropped.size() == 1);
+        // what the kept rows then do in plan_restore: only door_6 is restored
+        const auto d = plan_restore(sp.kept, "room_1", true, std::vector<LiveDoor>{}, 0.3f);
+        CHECK(d.restore.size() == 1 and d.restore[0].name == "door_6");
+    }
+    {   // I2b: only door_<digits> asks for its own name back; I1: the gate
+        CHECK(memnote::is_plain_door_name("door_5") and memnote::is_plain_door_name("door_123"));
+        CHECK(not memnote::is_plain_door_name("r2_door_5_h1") and not memnote::is_plain_door_name("door_5_h1")
+              and not memnote::is_plain_door_name("door_5_entry") and not memnote::is_plain_door_name("door_")
+              and not memnote::is_plain_door_name(""));
+        std::uint64_t next = 40;
+        const std::vector<std::string> graph = {"door_5"};
+        CHECK(allocate_door_name("", graph, next) == "door_40");   // the empty preferred name -> a fresh counter name
+        CHECK(memnote::restore_gate_open(7, 7) and not memnote::restore_gate_open(0, 7) and not memnote::restore_gate_open(6, 7)
+              and not memnote::restore_gate_open(0, 0));
+    }
+
     // ── the DSR part ──
     DSR::DSRGraph G("door_restore_notes_test", 994, std::string(SHADOW_JSON), true, static_cast<int8_t>(86), DSR::Queue);
     DSR::Node room = DSR::Node::create<object_node_type>("room_t");
@@ -123,6 +154,31 @@ int main()
         CHECK(memnote::mark_adopted(G, n1));
         CHECK(memnote::read_notes(G, room_id).empty());
         CHECK(G.get_node(n1).has_value());   // never deleted by door_concept
+    }
+    {   // C1 reader side: Eigen's euler split of a negative yaw is (pi, -pi, yaw+pi); the decoded yaw is still the composed yaw
+        for (const float yaw : {-1.0f, -2.8f, 0.7f})
+        {
+            DSR::Node rn = DSR::Node::create<object_node_type>("room_neg");
+            const auto rid = G.insert_node(rn).value();
+            DSR::Node n = DSR::Node::create<metaconcept_node_type>("remembered_door_9");
+            G.add_or_modify_attrib_local<object_subtype_att>(n, std::string("remembered_door"));
+            G.add_or_modify_attrib_local<parent_att>(n, rid);
+            G.add_or_modify_attrib_local<width_m_att>(n, 0.9f);
+            G.add_or_modify_attrib_local<height_m_att>(n, 2.05f);
+            G.add_or_modify_attrib_local<depth_m_att>(n, 0.12f);
+            const auto id = G.insert_node(n).value();
+            auto e = DSR::Edge::create<RT_edge_type>(rid, id);
+            const Eigen::Matrix3d R = Eigen::AngleAxisd(yaw, Eigen::Vector3d::UnitZ()).toRotationMatrix();
+            const Eigen::Vector3d rpy = R.eulerAngles(2, 1, 0).reverse();   // what the old writer stored
+            G.add_or_modify_attrib_local<rt_translation_att>(e, std::vector<float>{1.0f, 2.0f, 0.0f});
+            G.add_or_modify_attrib_local<rt_rotation_euler_xyz_att>(e, std::vector<float>{(float)rpy.x(), (float)rpy.y(), (float)rpy.z()});
+            G.insert_or_assign_edge(e);
+            const auto got = memnote::read_notes(G, rid);
+            CHECK(got.size() == 1);
+            if (got.size() == 1) CHECK(std::fabs(std::remainder(got[0].attrs.yaw - yaw, 2.0f * 3.14159265f)) < 1e-5f);
+            G.delete_node(id);
+            G.delete_node(rid);
+        }
     }
     std::printf(failures == 0 ? "OK\n" : "%d FAILURES\n", failures);
     return failures == 0 ? 0 : 1;

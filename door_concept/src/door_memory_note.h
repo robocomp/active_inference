@@ -17,6 +17,7 @@
 
 #include <Eigen/Dense>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <optional>
@@ -116,5 +117,21 @@ inline std::optional<std::int64_t> ms_of(const std::optional<std::uint64_t>& v)
     constexpr std::string_view prefix = "remembered_";
     if (note_name.starts_with(prefix)) note_name.remove_prefix(prefix.size());
     return std::string(note_name);
+}
+
+/// True for "door_" followed only by digits: a name door_concept's own counter can re-issue. A recycled `r2_door_5_h1` or a derived
+/// `door_X_entry` is not one: its restored copy takes a fresh counter name.
+[[nodiscard]] inline bool is_plain_door_name(std::string_view n)
+{
+    constexpr std::string_view prefix = "door_";
+    if (not n.starts_with(prefix)) return false;
+    n.remove_prefix(prefix.size());
+    return not n.empty() and std::ranges::all_of(n, [](char c) { return c >= '0' and c <= '9'; });
+}
+
+/// The notes of a room are restored only in the room door_concept RECALLED (the condition under which the CSV path would restore).
+[[nodiscard]] inline bool restore_gate_open(std::uint64_t recalled_room_id, std::uint64_t room_node_id)
+{
+    return room_node_id != 0 and recalled_room_id == room_node_id;
 }
 }  // namespace rc::door::memnote

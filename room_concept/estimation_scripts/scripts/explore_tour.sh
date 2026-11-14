@@ -11,7 +11,7 @@ LOCK=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/ai_fleet_tour.lock
 if [ -s $LOCK ] && ps -p $(cat $LOCK) >/dev/null 2>&1; then echo "tour lock held by $(cat $LOCK)"; exit 3; fi
 echo $$ > $LOCK
 B=/home/pbustos/robocomp/components/active_inference; E=$B/room_concept/estimation_scripts; cd $E; L=crossing/$RUN/logs
-export WT=/home/pbustos/robocomp/components/active_inference.worktrees/rt-build
+export WT=${WT:-/home/pbustos/robocomp/components/active_inference.worktrees/rt-build}   # env WT overrides (door-memory A/B)
 export WT_AGENTS="controller door_concept room_concept residual_concept ltsm_agent"
 export FLEET="retina room_concept residual_concept controller door_concept ltsm_agent"
 RC_CFG=$WT/room_concept/etc/config.toml
@@ -29,11 +29,12 @@ echo stop > $B/controller/remote_cmd.txt
 STAMP=$(date +%Y%m%d_%H%M%S); mkdir -p crossing/ltsm_archive crossing/door_identities_archive
 [ -f $B/ltsm_agent/etc/ltsm_memory.json ] && cp $B/ltsm_agent/etc/ltsm_memory.json crossing/ltsm_archive/ltsm_memory_before_${RUN}_$STAMP.json
 [ -f $B/door_concept/etc/door_identities.csv ] && cp $B/door_concept/etc/door_identities.csv crossing/door_identities_archive/door_identities_before_${RUN}_$STAMP.csv
+[ -f $B/door_concept/etc/door_phantom_memory.csv ] && cp $B/door_concept/etc/door_phantom_memory.csv crossing/door_identities_archive/door_phantom_memory_before_${RUN}_$STAMP.csv
 for h in $B/ltsm_agent/etc/ltsm_history $WT/ltsm_agent/etc/ltsm_history; do
   [ -d "$h" ] && [ -n "$(ls -A "$h" 2>/dev/null)" ] && mv "$h" crossing/ltsm_archive/ltsm_history_before_${RUN}_${STAMP}_$(basename $(dirname $(dirname $(dirname "$h"))))
 done
 mkdir -p $B/ltsm_agent/etc/ltsm_history
-rm -f ../etc/last_robot_pose.txt ../etc/room_name_hwm.txt $B/ltsm_agent/etc/ltsm_memory.json $B/ltsm_agent/etc/ltsm_memory.json.prev $B/door_concept/etc/door_identities.csv
+rm -f ../etc/last_robot_pose.txt ../etc/room_name_hwm.txt $B/ltsm_agent/etc/ltsm_memory.json $B/ltsm_agent/etc/ltsm_memory.json.prev $B/door_concept/etc/door_identities.csv $B/door_concept/etc/door_phantom_memory.csv
 rm -rf $B/retina/etc/place_maps/
 for d in DOOR_0 DOOR_1 DOOR_2; do python3 scripts/door.py close $d; done
 sleep 3

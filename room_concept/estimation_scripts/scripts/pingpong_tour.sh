@@ -26,6 +26,9 @@ echo stop > $B/controller/remote_cmd.txt
 [ -f $B/door_concept/etc/door_identities.csv ] && mkdir -p crossing/door_identities_archive && cp $B/door_concept/etc/door_identities.csv crossing/door_identities_archive/door_identities_before_$1_$(date +%Y%m%d_%H%M%S).csv
 rm -f ../etc/last_robot_pose.txt ../etc/room_name_hwm.txt $B/ltsm_agent/etc/ltsm_memory.json $B/ltsm_agent/etc/ltsm_memory.json.prev
 rm -f $B/door_concept/etc/door_identities.csv
+# the private phantom memory is keyed by ltsm room_id, which restarts at 1 after a wipe: it goes with the memory
+[ -f $B/door_concept/etc/door_phantom_memory.csv ] && mkdir -p crossing/door_identities_archive && cp $B/door_concept/etc/door_phantom_memory.csv crossing/door_identities_archive/door_phantom_memory_before_$1_$(date +%Y%m%d_%H%M%S).csv
+rm -f $B/door_concept/etc/door_phantom_memory.csv
 # ltsm also opens the NEWEST dated generation in its history_dir (28a27091) — deleting ltsm_memory.json alone left every run
 # reloading the previous one (walls 31 -> 205 over the evening of 10-31). Archived, like the memory file.
 for h in $B/ltsm_agent/etc/ltsm_history $WT/ltsm_agent/etc/ltsm_history; do

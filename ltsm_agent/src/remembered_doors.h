@@ -37,11 +37,15 @@ public:
     [[nodiscard]] int updates() const { return updates_; }
 
 private:
+    int step_impl();
     int retire_where_parent_is_not(std::uint64_t room_id);   ///< deletes notes not hanging from room_id; room_id 0 = all
     std::shared_ptr<DSR::DSRGraph> live_, mem_;
     std::unordered_set<std::uint64_t> adopted_;   ///< memory face ids door_concept has restored this stay
     std::unordered_set<std::string> failed_insert_;   ///< note names whose insert failed (logged once)
     int updates_ = 0;
+    static constexpr int kTimedCalls = 50;
+    int timed_calls_ = 0;
+    double sum_us_ = 0, max_us_ = 0;
     std::uint64_t current_ = 0;                   ///< the live room the notes belong to
 };
 }   // namespace ltsm

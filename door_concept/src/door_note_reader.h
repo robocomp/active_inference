@@ -14,6 +14,7 @@
 
 #include <dsr/api/dsr_api.h>
 
+#include <cmath>
 #include <cstdint>
 #include <span>
 #include <string>
@@ -62,7 +63,14 @@ template <class Att>
         in.name = n.name();
         NoteAttrs& a = in.attrs;
         a.xy = {t.value().get()[0], t.value().get()[1]};
-        a.yaw = r.value().get()[2];
+        // the writer's convention (ZYX, stored reversed = rx, ry, rz): R = Rz(rz) Ry(ry) Rx(rx); the door's yaw is the planar part of
+        // R, whatever way the euler triple was split (Eigen's eulerAngles returns (pi, -pi, yaw+pi) for a negative yaw)
+        {
+            const auto& v = r.value().get();
+            const Eigen::Matrix3d R = (Eigen::AngleAxisd(v[2], Eigen::Vector3d::UnitZ()) * Eigen::AngleAxisd(v[1], Eigen::Vector3d::UnitY())
+                                       * Eigen::AngleAxisd(v[0], Eigen::Vector3d::UnitX())).toRotationMatrix();
+            a.yaw = static_cast<float>(std::atan2(R(1, 0), R(0, 0)));
+        }
         a.width = w.value();  a.height = h.value();  a.depth = d.value();
         a.exist_evidence = G.get_attrib_by_name<door_exist_evidence_att>(n);
         a.exist_physical = G.get_attrib_by_name<door_exist_physical_att>(n);

@@ -310,7 +310,7 @@ void SpecificWorker::initialize()
         recall_ = std::make_unique<ltsm::RoomRecall>(G_dsr, G_ltsm, *evictor);
         if (const int n = recall_->remove_all(); n > 0)
             qInfo() << "[recall] swept" << n << "stale recall node(s) from a previous run";
-        if (cfgr.b("Recall.remembered_doors", true,
+        if (cfgr.b("Recall.remembered_doors", false,
                    "post the doors memory holds for the robot's current room as remembered_door notes (metaconcept; door_concept restores from them)"))
         {
             remembered_doors_ = std::make_unique<ltsm::RememberedDoors>(G_dsr, G_ltsm);

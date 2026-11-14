@@ -370,6 +370,7 @@ private:
     void step_pending_restore();
     void restore_remembered_doors(std::uint64_t new_room);
     void step_restore_from_notes();
+    std::unordered_set<std::string> restore_failed_logged_;   ///< rows whose recreation failed (logged once, retried every cycle)
     std::vector<std::string> restore_rows(std::uint64_t new_room, std::span<const rc::door::IdentityRow> rows);
 
     // ── ENTRY MIRRORS: the door a PROTO-ROOM was entered through ───────────────────────────────────

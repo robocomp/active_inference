@@ -70,6 +70,29 @@ int main()
         CHECK(last.ledger.value_or("") == "L1" and last.exist_evidence.value_or(0) == 1.5f);
         CHECK(not any_change(changed_since(b, &last)));
     }
+    {   // M2: a field written before that becomes absent is REMOVED from the node (and from the cache); an unserialised ledger is not "gone"
+        DSR::Node n = DSR::Node::create<object_node_type>("door_t3");
+        NoteAttrs a;
+        a.exist_evidence = 1.f; a.phi_sd = 0.3f; a.ledger = std::string("L1");
+        NoteAttrs last;
+        const auto d1 = changed_since(a, nullptr);
+        write_memory_attrs(G, n, d1);
+        apply_changes(last, d1);
+        G.insert_node(n);
+        NoteAttrs b = a; b.phi_sd.reset(); b.ledger.reset();
+        CHECK(not gone_since(b, &last, /*ledger_known=*/false).ledger);   // not re-serialised: unchanged
+        const auto g = gone_since(b, &last, true);
+        CHECK(g.any() and g.phi_sd and g.ledger and not g.exist_evidence);
+        auto r = G.get_node("door_t3").value();
+        erase_gone(G, r, last, g);
+        G.update_node(r);
+        const auto r2 = G.get_node("door_t3").value();
+        CHECK(not G.get_attrib_by_name<door_phi_sd_att>(r2).has_value());
+        CHECK(not G.get_attrib_by_name<door_view_ledger_att>(r2).has_value());
+        CHECK(G.get_attrib_by_name<door_exist_evidence_att>(r2).value_or(9.f) == 1.f);
+        CHECK(not last.phi_sd and not last.ledger and last.exist_evidence);
+        CHECK(not gone_since(b, &last, true).any());
+    }
     std::printf(failures == 0 ? "OK\n" : "%d FAILURES\n", failures);
     return failures == 0 ? 0 : 1;
 }

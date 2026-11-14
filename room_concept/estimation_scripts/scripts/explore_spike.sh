@@ -26,6 +26,9 @@ for h in $B/ltsm_agent/etc/ltsm_history $WT/ltsm_agent/etc/ltsm_history; do
 done
 mkdir -p $B/ltsm_agent/etc/ltsm_history
 rm -f ../etc/last_robot_pose.txt ../etc/room_name_hwm.txt $B/ltsm_agent/etc/ltsm_memory.json $B/ltsm_agent/etc/ltsm_memory.json.prev $B/door_concept/etc/door_identities.csv
+# the private phantom memory is keyed by ltsm room_id, which restarts at 1 after a wipe: it goes with the memory
+[ -f $B/door_concept/etc/door_phantom_memory.csv ] && mkdir -p crossing/door_identities_archive && cp $B/door_concept/etc/door_phantom_memory.csv crossing/door_identities_archive/door_phantom_memory_before_${RUN}_$STAMP.csv
+rm -f $B/door_concept/etc/door_phantom_memory.csv
 rm -rf $B/retina/etc/place_maps/
 for d in DOOR_0 DOOR_1 DOOR_2; do python3 scripts/door.py close $d; done
 sleep 3

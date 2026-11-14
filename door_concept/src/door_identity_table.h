@@ -356,6 +356,13 @@ struct RestoreDecision
     bool not_recalled = false;   ///< the room is fresh (not a recall): nothing is restored, whatever its name
 };
 
+/// The same-hole distance of a remembered door: the identity radius + its width (note_identity's gate). ONE expression, shared by
+/// plan_restore's place test and drop_refuted_places.
+[[nodiscard]] inline float restore_same_hole_m(float reacquire_radius_m, float width_m)
+{
+    return std::max(0.f, reacquire_radius_m) + std::max(0.f, width_m);
+}
+
 /// Which of `room`'s remembered doors to recreate on entering it.
 ///  · Only when the room IS a recall (`recalled`): a fresh room sharing a name with old rows restores nothing.
 ///  · A row without a pose cannot be recreated (old 4-column / birth row) — skipped, the caller logs it.
@@ -372,13 +379,32 @@ inline RestoreDecision plan_restore(std::span<const IdentityRow> rows, std::stri
         if (r.room != room) continue;
         if (r.removed_ms.has_value()) { d.skipped.push_back({r.name, SkipReason::Removed}); continue; }   // "no door here", kept as a prior
         if (not r.pose.has_value()) { d.skipped.push_back({r.name, SkipReason::NoPose}); continue; }
-        const float same_hole = std::max(0.f, reacquire_radius_m) + std::max(0.f, r.pose->width);
+        const float same_hole = restore_same_hole_m(reacquire_radius_m, r.pose->width);
         const bool place_live = std::ranges::any_of(live, [&](const LiveDoor& l)
         { return l.xy_in_room.has_value() and l.xy_in_room->allFinite() and (*l.xy_in_room - r.xy).norm() < same_hole; });
         if (place_live) d.skipped.push_back({r.name, SkipReason::PlaceLive});
         else            d.restore.push_back(r);
     }
     return d;
+}
+
+/// Rows (notes from ltsm carry no removed_ms) that lie on a REFUTED place of this room (a removed PlaceRow: "no door here", also the rows
+/// injected from the private phantom file): memory never deletes a refuted face, so the agent drops them here, same-hole gate as
+/// plan_restore. `dropped` names them, for the log and for adoption (ltsm then retires the note).
+struct RefutedSplit { std::vector<IdentityRow> kept; std::vector<std::string> dropped; };
+[[nodiscard]] inline RefutedSplit drop_refuted_places(std::span<const IdentityRow> rows, std::span<const Eigen::Vector2f> refuted_xy,
+                                                      float reacquire_radius_m)
+{
+    RefutedSplit out;
+    for (const auto& r : rows)
+    {
+        const float same_hole = restore_same_hole_m(reacquire_radius_m, r.pose.has_value() ? r.pose->width : 0.f);
+        const bool refuted = std::ranges::any_of(refuted_xy, [&](const Eigen::Vector2f& p)
+        { return p.allFinite() and (p - r.xy).norm() < same_hole; });
+        if (refuted) out.dropped.push_back(r.name);
+        else         out.kept.push_back(r);
+    }
+    return out;
 }
 
 /// Upsert BY PLACE WITHIN `room`: ONE row per hole, under its REMEMBERED (oldest) name.

@@ -40,6 +40,9 @@ for h in $B/ltsm_agent/etc/ltsm_history $WT/ltsm_agent/etc/ltsm_history; do
   [ -d "$h" ] && [ -n "$(ls -A "$h" 2>/dev/null)" ] && mv "$h" crossing/ltsm_archive/ltsm_history_before_$1_${STAMP}_$(basename $(dirname $(dirname $(dirname "$h"))))
 done
 rm -f ../etc/last_robot_pose.txt $B/ltsm_agent/etc/ltsm_memory.json $B/ltsm_agent/etc/ltsm_memory.json.prev
+# the private phantom memory is keyed by ltsm room_id, which restarts at 1 after a wipe: it goes with the memory
+[ -f $B/door_concept/etc/door_phantom_memory.csv ] && mkdir -p crossing/door_identities_archive && cp $B/door_concept/etc/door_phantom_memory.csv crossing/door_identities_archive/door_phantom_memory_before_$1_$STAMP.csv
+rm -f $B/door_concept/etc/door_phantom_memory.csv
 rm -rf $B/retina/etc/place_maps/; rm -f $WT/ltsm_agent/etc/recognition_trace.csv $B/ltsm_agent/etc/recognition_trace.csv
 mkdir -p $B/ltsm_agent/etc/ltsm_history
 cp $FIX/ltsm_history/* $B/ltsm_agent/etc/ltsm_history/ && chmod u+w $B/ltsm_agent/etc/ltsm_history/*
