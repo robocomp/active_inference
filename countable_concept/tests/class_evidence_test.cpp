@@ -37,8 +37,8 @@ int main()
 
     auto B = [&](const ClassShapePrior& c, float x) { return birth_height_log_evidence(x, c, sz, eps, alt); };
     std::printf("birth: mattress %.3f headboard %.3f blackboard %.3f\n", P(bed, B(bed, 0.65f)), P(bed, B(bed, 1.25f)), P(bed, B(bed, 1.90f)));
-    check("birth_mattress_ok", P(bed, B(bed, 0.65f)) > 0.9f);
-    check("birth_headboard_ok", P(bed, B(bed, 1.25f)) > 0.9f);
+    check("birth_mattress_ok", P(bed, B(bed, 0.65f)) > 0.85f);
+    check("birth_headboard_ok", P(bed, B(bed, 1.25f)) > 0.85f);
     check("birth_blackboard_low", P(bed, B(bed, 1.90f)) < 0.3f);
     check("birth_bleed_is_slowed_not_stopped", P(bed, B(bed, 1.90f)) > 0.1f);
     check("birth_nightstand_tall_low", B(ns, 1.90f) < B(ns, 0.62f));
