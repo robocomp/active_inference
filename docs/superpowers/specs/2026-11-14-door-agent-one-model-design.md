@@ -331,3 +331,23 @@ All questions are answered. The designer's calls the owner should check while re
 previous-cycle r for the per-wall cost (§3.4); four-branch hinge × swing mixture over the existing fit (§3.2); tracker
 separation only under the flag (§3.5); no new cortex attribute (§4); re-run the three cases live with RecordInputs on
 before building, fit the detector table on Webots now and refit on the real robot later (§7, Data).
+
+## 12. Errata found while planning (2026-11-14, designer's rulings against the code at 87b6018a)
+
+- §3.5 "starts from the evidence that bore it": already true. `Existence.BirthLogodds` is retired and refused at load
+  (door_config_retired.h); a newborn copies the candidate's belief (door_core.cpp ~844-850). Kept as a test only.
+- §3.5 "no hysteresis band": `decide()` (core/door_decision.h) has two lines, birth at L > 0 and removal at
+  L < −ln(C_delete/C_keep) ≈ −1.08. Both follow from the stated loss, so they are not hand-set thresholds; they stay. What
+  this design forbids is any further hand-set band.
+- §3.2 "four-branch mixture": it already exists as `LeafChannel` (door_leaf_channel.h, 4 `PhiHmm` filters, one per
+  hinge × swing). The work reuses it; the gap is that `clutter_fraction_leaf_marginal` and the birth/existence paths
+  ignore the swing branches.
+- §3.4 "walls from wall_hypotheses": walls come from `wall_groups(polygon, σ)` (core/place_prior.h), the one place that
+  joins collinear polygon edges into walls. `wall_hypotheses` (ricoh_door_birth.h) is a per-ray lookup.
+- §3.4 "the second door-count prior": specificworker.cpp ~4517 calls room_door_count.h with a literal geometric prior
+  (mean 2, cap 8). It is replaced by `count_prior_from_rooms` fed from memory (same reader as the per-wall rates).
+- §3.4 typical-size prior: `Door.Prior*` also drives the FIT (door_fit.cpp and others) and the crossing tests. The typical
+  prior gets its own keys (`Existence.TypicalWidthM/Std`, `Existence.TypicalHeightM/Std`) used only by the birth and
+  existence path, as the spec says. The fit's prior is unchanged in this work.
+- §3.5 merge: `MergeOverlap` is door_concept's own merge (door_core.cpp ~341), not the tracker's; the separation is
+  `Tracker.BirthMinSepM`, set in DoorCore::associate. Both change only under the flag; common/instance_tracker untouched.
