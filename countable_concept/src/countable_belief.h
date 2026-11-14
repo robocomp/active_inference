@@ -22,6 +22,7 @@
 #include <vector>
 #include <Eigen/Dense>
 
+#include "countable_class_evidence.h"
 #include "../../common/ai_belief/recursive_laplace.h"   // shared predict/MAP/Woodbury engine
 #include "../../common/ai_belief/lidar_ray_factor.h"     // shared YOLO-independent LiDAR first-hit factor
 
@@ -326,6 +327,7 @@ public:
         Sigma_.setZero();
         Sigma_.diagonal() = prior_cov_diag();
         omega_ = omega0_; vol_n_ = 0.0f; vol_s_.setZero();   // the volatility estimate is suspect too
+        size_lik_ = {};                                      // and so is the data summary built beside it
         std::printf("CountableBelief: DEGENERATE Σ (non-finite or non-positive diagonal) — re-seeded from prior\n");
     }
 
@@ -336,12 +338,18 @@ public:
         const Eigen::Matrix<float, 6, 1> before = state_.vec();
         const float fe = ai::update<N>(*this, state_, Sigma_, prior_mean_, frame);
         sanitize_covariance();
+        if (not frame.points.empty()) update_size_likelihood(frame);   // BEFORE update_volatility: same Q as the filter used
         // ω is inferred ONLY on a cycle that actually took a measurement. A predict-only cycle has δθ = 0,
         // which under the update below would read as "this object never moves" and drive ω down — the same
         // repetition-is-not-independence error that has bitten this codebase four times.
         update_volatility(state_.vec() - before);
         return fe;
     }
+    // What the DATA alone says about the size (H, w, h): the posterior already contains the class size prior (blocks 2 and
+    // 2a of accumulate_extra) every frame, so scoring it against the class would count that prior twice. Zero info until
+    // the first frame with points. Spec 2026-11-14 countable class existence §9.
+    const rc::countable::SizeGaussian& size_likelihood() const { return size_lik_; }
+
     // Per-DOF log-volatility ω (Q = exp ω) and its hyperprior mean ω₀ — the accumulated experience.
     const Eigen::Matrix<float, 6, 1>& log_volatility() const { return omega_; }
     // Retention time constant per DOF: τ = Σ_ii / exp(ω_i) frames — "how long this DOF remembers".
@@ -536,6 +544,11 @@ public:
     // self_test only: drive one volatility step directly, so the test exercises the production update.
     void update_volatility_for_test(const Eigen::Matrix<float, 6, 1>& d) { update_volatility(d); }
 private:
+    // Likelihood-only (H, w, h) summary, updated by update(); see size_likelihood(). size_prior_off_ switches the class SIZE
+    // prior blocks (2, 2a) of accumulate_extra off for the one data-only accumulation that feeds it; false everywhere else.
+    void update_size_likelihood(const CountableFrame& frame);
+    rc::countable::SizeGaussian size_lik_;
+    mutable bool                size_prior_off_ = false;
     mutable float   dbg_wall_gap_    = 0.0f;
     mutable float   dbg_wall_lambda_ = 0.0f;
     mutable float   dbg_wall_resp_   = 0.0f;   // mean wall responsibility over the last scored cloud

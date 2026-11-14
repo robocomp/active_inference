@@ -65,3 +65,11 @@ target_include_directories(class_evidence_test PRIVATE ../src)
 target_compile_options(class_evidence_test PRIVATE -O2)
 target_link_libraries(class_evidence_test PRIVATE Eigen3::Eigen)
 add_test(NAME class_evidence_test COMMAND class_evidence_test)
+
+# Likelihood-only (H, w, h) summary beside the posterior (spec 2026-11-14 countable class existence §9: the class size
+# prior is counted once). Same synthetic clouds as CountableBelief::self_test, bed parameters. Run: ./size_likelihood_test
+add_executable(size_likelihood_test size_likelihood_test.cpp ../src/countable_belief.cpp)
+target_include_directories(size_likelihood_test PRIVATE ../src ../../common ../../common/media_transport)
+target_compile_options(size_likelihood_test PRIVATE -O2)
+target_link_libraries(size_likelihood_test PRIVATE Eigen3::Eigen)
+add_test(NAME size_likelihood_test COMMAND size_likelihood_test)

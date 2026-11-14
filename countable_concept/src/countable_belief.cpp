@@ -495,7 +495,7 @@ void CountableBelief::accumulate_extra(const CountableBeliefState& s, const Coun
     // (2) FOOTPRINT prior: a TIGHT Gaussian pulling w → prior_footprint_m and h(depth) → prior_footprint_m
     //     (a standard bed footprint ≈ 0.60×0.60 is very consistent), precision λ_wd = 1/prior_footprint_std².
     //     H (index 2) is anchored separately just below (2a) — the top-of-box float needs a static anchor too.
-    if (params_.prior_footprint_std > 0.0f)
+    if (params_.prior_footprint_std > 0.0f and not size_prior_off_)
     {
         const float lam_wd = 1.0f / (params_.prior_footprint_std * params_.prior_footprint_std);
 
@@ -533,7 +533,7 @@ void CountableBelief::accumulate_extra(const CountableBeliefState& s, const Coun
     //      prior_height_m with precision 1/prior_height_std² — the DATA still sets the LOWER bound (points force
     //      H ≥ cloud-top), the anchor only prevents float ABOVE it. Broad enough to let a genuinely tall/short
     //      bed move when the cloud top demands it, firm enough to stop the runaway.
-    if (params_.prior_height_std > 0.0f)
+    if (params_.prior_height_std > 0.0f and not size_prior_off_)
     {
         const float lam_H = 1.0f / (params_.prior_height_std * params_.prior_height_std);
         Id(2, 2) += lam_H;  bd(2) += lam_H * (params_.prior_height_m - s.H);        // H (index 2)
@@ -723,7 +723,91 @@ void CountableBelief::apply_mode_rotation(int k)
         Sigma_.row(3).swap(Sigma_.row(4));
         Sigma_.col(3).swap(Sigma_.col(4));
         std::swap(prior_mean_(3), prior_mean_(4));
+        size_lik_.mean.tail<2>().reverseInPlace();                       // the data summary relabels with the state
+        size_lik_.info.row(1).swap(size_lik_.info.row(2));
+        size_lik_.info.col(1).swap(size_lik_.info.col(2));
     }
+}
+
+// ─── Likelihood-only size summary ────────────────────────────────────────────────────────────────────────────────────
+// The posterior holds the class size prior (accumulate_extra 2 and 2a), added to the data information EVERY frame. To score
+// the shape against the class without counting that prior twice, redo the data accumulation at the converged state with
+// those two blocks off, saturate it with this frame's common-mode (as ai::update does), marginalise the pose out by a Schur
+// complement, and fold the (H, w, h) frame summary into a parallel recursion that forgets exactly as the belief does.
+void CountableBelief::update_size_likelihood(const CountableFrame& frame)
+{
+    using Mat6 = Eigen::Matrix<float, 6, 6>;
+    using Vec6 = Eigen::Matrix<float, 6, 1>;
+    const CountableBeliefState s = state_;
+    const float sig2 = sigma2();
+
+    Mat6 Id = Mat6::Zero(); Vec6 bd = Vec6::Zero();
+    for (std::size_t i = 0; i < frame.points.size(); ++i)          // the same accumulation as ai::update's lambda
+    {
+        const float R = (i < frame.R.size() and frame.R[i] > 0.0f) ? frame.R[i] : sig2;
+        const auto  r = responsibilities(frame.points[i], s, R);
+        const float w = r[0] / R;
+        if (w < 1e-6f) continue;
+        const float d = sdf_prim(frame.points[i], s, 0);
+        const Vec6  J = sdf_jacobian(frame.points[i], s, 0);
+        Id.noalias() += w * (J * J.transpose());
+        bd.noalias() += -w * J * d;
+    }
+    size_prior_off_ = true;
+    accumulate_extra(s, frame, Id, bd);
+    size_prior_off_ = false;
+
+    const Mat6 Scinv = common_mode_inv_diag(frame).asDiagonal();
+
+    // pseudo-inverse on eigenvalues > 1e-6 · max: an unobserved direction stays unobserved instead of exploding
+    const auto pinv = [](const Eigen::Matrix3f& M) -> Eigen::Matrix3f
+    {
+        const Eigen::SelfAdjointEigenSolver<Eigen::Matrix3f> es(0.5f * (M + M.transpose()));
+        const float top = std::max(es.eigenvalues().cwiseAbs().maxCoeff(), 0.0f);
+        Eigen::Vector3f inv = Eigen::Vector3f::Zero();
+        for (int k = 0; k < 3; ++k) if (es.eigenvalues()(k) > 1e-6f * top and es.eigenvalues()(k) > 0.0f) inv(k) = 1.0f / es.eigenvalues()(k);
+        return es.eigenvectors() * inv.asDiagonal() * es.eigenvectors().transpose();
+    };
+
+    // ORDER MATTERS: marginalise the pose out of the RAW data information FIRST, then apply the common-mode cap in the
+    // 3-D size subspace. Saturating the 6x6 first (as ai::update does for the posterior) caps EVERY direction the data
+    // touches at ~Scinv (Id is 1e4..1e6 against Scinv ~2.5e3), flattens the pose-size cross terms to ~0, and the Schur
+    // then removes nothing: a depth the view cannot see would keep as much information as one it can. Marginalising
+    // first leaves a rank-deficient J exactly where the geometry is degenerate (a front face fixes the face, not the
+    // depth behind it). No regulariser on the pose block (any pose precision taken from Sigma_ already contains the
+    // class prior through the cy-h coupling): pseudo-inverse instead. Select (H, w, h) = (2, 3, 4); pose = (cx, cy, yaw).
+    constexpr int S[3] = {2, 3, 4}, P[3] = {0, 1, 5};
+    Eigen::Matrix3f Iss, Isp, Ipp; Eigen::Vector3f bs, bp;
+    for (int a = 0; a < 3; ++a)
+    {
+        bs(a) = bd(S[a]); bp(a) = bd(P[a]);
+        for (int b = 0; b < 3; ++b) { Iss(a, b) = Id(S[a], S[b]); Isp(a, b) = Id(S[a], P[b]); Ipp(a, b) = Id(P[a], P[b]); }
+    }
+    const Eigen::Matrix3f Ppinv = pinv(Ipp);
+    Eigen::Matrix3f J = Iss - Isp * Ppinv * Isp.transpose();
+    J = 0.5f * (J + J.transpose());
+    Eigen::Vector3f g = bs - Isp * Ppinv * bp;
+    {   // the common-mode cap, in the size subspace
+        Eigen::Matrix3f Sc = Eigen::Matrix3f::Zero(); for (int a = 0; a < 3; ++a) Sc(a, a) = Scinv(S[a], S[a]);
+        const auto [J3, g3] = ai::saturate<3>(J, g, Sc); J = J3; g = g3;
+    }
+
+    const Eigen::Vector3f theta_s(s.H, s.w, s.h);
+    const Eigen::Vector3f mean_frame = theta_s + pinv(J) * g;
+
+    // parallel recursion, same forgetting as the belief: predict info ← (info⁺ + Q_s)⁺, then add the frame
+    const Vec6 q = process_noise_diag();
+    Eigen::Matrix3f info = size_lik_.info;
+    if (info.norm() > 0.0f)
+    {
+        Eigen::Matrix3f cov = pinv(info);
+        for (int a = 0; a < 3; ++a) cov(a, a) += q(S[a]);
+        info = pinv(cov);
+    }
+    const Eigen::Vector3f eta = info * size_lik_.mean + J * mean_frame;
+    info += J;
+    size_lik_.info = info;
+    size_lik_.mean = pinv(info) * eta;
 }
 
 // Fold one appearance FrontCue into the door-mode accumulator and adopt the argmax mode. See the header.
