@@ -85,10 +85,10 @@ static void build(bool staged = false)
 // I5 fixture: the robot is IN room_3 alone (its memory twin r3_room_3 exists); memory holds r3_door_1 with evidence 1.0 and the
 // live room holds door_1 at the same place with evidence 5.0, seen at 1234 ms.
 static std::uint64_t live_door1 = 0, mem_door1 = 0;
-static void build_refresh(double live_x = -2.0)
+static void build_refresh(bool staged = false, bool two_rooms = false)
 {
-    reset(); build();
-    live->delete_node(live_room2);
+    reset(); build(staged);
+    if (not two_rooms) live->delete_node(live_room2);
     auto r = live->get_node(robot_id).value();
     live->add_or_modify_attrib_local<parent_att>(r, live->get_node("root").value().id());
     live->update_node(r);
@@ -102,7 +102,7 @@ static void build_refresh(double live_x = -2.0)
     live->add_or_modify_attrib_local<door_exist_evidence_att>(d, 5.0f);
     live->add_or_modify_attrib_local<door_seen_ms_att>(d, std::uint64_t{1234});
     live_door1 = live->insert_node(d).value();
-    put_edge(*live, live_room, live_door1, live_x, -3, 0.2);
+    put_edge(*live, live_room, live_door1, -2.0, -3, 0.2);
     // sync reads the robot's parent: hang it under the room (the real fleet's robot_node/parent_att)
     auto rb = live->get_node(robot_id).value();
     live->add_or_modify_attrib_local<parent_att>(rb, live_room);
@@ -254,6 +254,9 @@ int main(int argc, char **argv)
         const auto e = mem->get_edge(mem_twin, mem_door1, "RT");
         const auto t = e.has_value() ? mem->get_attrib_by_name<rt_translation_att>(e.value()) : std::nullopt;
         check(t.has_value() and std::fabs(t.value().get()[0] - (-2.05f)) < 1e-5f, "memory edge x follows (-2.05)");
+        check(t.has_value() and std::fabs(t.value().get()[1] - (-3.f)) < 1e-5f, "memory edge y follows (-3)");
+        const auto yr = e.has_value() ? mem->get_attrib_by_name<rt_rotation_euler_xyz_att>(e.value()) : std::nullopt;
+        check(yr.has_value() and std::fabs(yr.value().get()[2] - 0.2f) < 1e-5f, "memory edge yaw follows (0.2)");
         check(ev.sync_found_doors() == 0, "and is stable afterwards");
     }
     std::printf("sync_refreshes_pose_of_wall_hung_twin\n");
@@ -287,6 +290,42 @@ int main(int argc, char **argv)
         check(mem->get_attrib_by_name<parent_att>(m).value_or(0) == wall, "parent is still the wall");
         check(not mem->get_edge(mem_twin, mem_door1, "RT").has_value(), "no second RT parent (room edge absent)");
         check(ev.sync_found_doors() == 0, "stable afterwards");
+    }
+    std::printf("sync_refresh_keeps_edge_covariance\n");
+    {
+        build_refresh();
+        auto e = mem->get_edge(mem_twin, mem_door1, "RT").value();
+        const std::vector<float> cov{1e-4f, 0, 0, 0, 2e-4f, 0, 0, 0, 3e-4f}, tz{-2.f, -3.f, 0.7f}, rr{0.1f, 0.2f, 0.2f};
+        e.attrs()[rt_covariance_str.data()] = DSR::Attribute{cov, 0, 0};
+        e.attrs()[rt_translation_str.data()] = DSR::Attribute{tz, 0, 0};
+        e.attrs()[rt_rotation_euler_xyz_str.data()] = DSR::Attribute{rr, 0, 0};
+        mem->insert_or_assign_edge(e);
+        put_edge(*live, live_room, live_door1, -2.05, -3.1, 0.25);
+        ltsm::RoomEviction ev(live, mem);
+        check(ev.sync_found_doors() > 0, "pose refreshed");
+        const auto f = mem->get_edge(mem_twin, mem_door1, "RT").value();
+        const auto c = mem->get_attrib_by_name<rt_covariance_att>(f);
+        const auto t = mem->get_attrib_by_name<rt_translation_att>(f);
+        const auto r = mem->get_attrib_by_name<rt_rotation_euler_xyz_att>(f);
+        check(c.has_value() and std::vector<float>(c.value().get()) == cov, "rt_covariance byte-identical");
+        check(t.has_value() and t.value().get()[2] == 0.7f and std::fabs(t.value().get()[0] + 2.05f) < 1e-5f and std::fabs(t.value().get()[1] + 3.1f) < 1e-5f,
+              "z kept, x/y follow");
+        check(r.has_value() and r.value().get()[0] == 0.1f and r.value().get()[1] == 0.2f and std::fabs(r.value().get()[2] - 0.25f) < 1e-5f,
+              "roll/pitch kept, yaw follows");
+    }
+    std::printf("sync_no_refresh_when_staged\n");
+    {
+        build_refresh(true);
+        ltsm::RoomEviction ev(live, mem);
+        ev.sync_found_doors();
+        check(std::fabs(mem_evidence() - 1.0f) < 1e-6f, "staged room: memory evidence unchanged");
+    }
+    std::printf("sync_no_refresh_when_two_rooms\n");
+    {
+        build_refresh(false, true);
+        ltsm::RoomEviction ev(live, mem);
+        ev.sync_found_doors();
+        check(std::fabs(mem_evidence() - 1.0f) < 1e-6f, "robot under two rooms: memory evidence unchanged");
     }
     std::printf("sync_no_refresh_when_held\n");
     {

@@ -1824,16 +1824,23 @@ int RoomEviction::refresh_door_twin(const DSR::Node &live_door, const DSR::Node 
         }
         if (ok)
         {
-            const Mat::RTMat T(Eigen::Translation3d(local.x(), local.y(), 0.0)
-                               * Eigen::AngleAxisd(local.z(), Eigen::Vector3d::UnitZ()));
-            const auto want = rt_attrs(T);
-            const auto edge = mem_->get_edge(par.value(), node->id(), "RT");
-            bool same = edge.has_value();
-            if (same)
-                for (const auto &[k, v] : want)
-                    if (const auto it = edge->attrs().find(k); it == edge->attrs().end() or not (it->second == v)) { same = false; break; }
-            if (not same and edge.has_value()
-                and mem_->insert_or_assign_edge(DSR::Edge::create<RT_edge_type>(par.value(), node->id(), want))) ++changed;
+            // Start from the EXISTING edge and override only x, y and yaw: eviction copied it wholesale, and the covariance,
+            // z, roll and pitch it carries are what seam_through_passage reads (a rewritten bare edge reads as unstated).
+            auto edge = mem_->get_edge(par.value(), node->id(), "RT");
+            const auto tr = edge.has_value() ? mem_->get_attrib_by_name<rt_translation_att>(edge.value()) : std::nullopt;
+            const auto rot = edge.has_value() ? mem_->get_attrib_by_name<rt_rotation_euler_xyz_att>(edge.value()) : std::nullopt;
+            if (tr.has_value() and rot.has_value() and tr.value().get().size() >= 3 and rot.value().get().size() >= 3)
+            {
+                std::vector<float> t = tr.value().get(), r = rot.value().get();
+                const float nx = static_cast<float>(local.x()), ny = static_cast<float>(local.y()), nyaw = static_cast<float>(local.z());
+                if (t[0] != nx or t[1] != ny or r[2] != nyaw)
+                {
+                    t[0] = nx; t[1] = ny; r[2] = nyaw;
+                    edge->attrs()[rt_translation_str.data()] = DSR::Attribute{t, 0, 0};
+                    edge->attrs()[rt_rotation_euler_xyz_str.data()] = DSR::Attribute{r, 0, 0};
+                    if (mem_->insert_or_assign_edge(edge.value())) ++changed;
+                }
+            }
         }
     }
     if (changed > 0)
