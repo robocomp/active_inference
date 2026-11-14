@@ -309,6 +309,7 @@ private:
     [[nodiscard]] std::vector<FrameDetection> place_detections(std::uint64_t door, int candidate) const;
     /// ONE-MODEL: log b, the probability that a door is BORN at xy (the typical door's place prior; the live doors on its wall charge the base rate).
     [[nodiscard]] double log_birth(const Vec2f& xy, float sd) const;
+    [[nodiscard]] double wall_length_at(const Vec2f& xy) const;   // Λ, the wall's length under `xy` (5 m with no wall)
     /// SpecificWorker::update_existence_beliefs, moved (door_existence.cpp). Runs once per NEW mask frame.
     void update_existence(const DoorCycleInput& in, DoorCycleOutput& out);
 
@@ -347,7 +348,7 @@ private:
     WallRates rates_{};   // seeds only; Task 4 sets them (set_wall_rates) from the remembered rooms
     /// The previous cycle's p of every other live door and candidate on `wall` (not `self_door` / `self_cand`), for wall_base_rate.
     [[nodiscard]] std::vector<float> other_p_on_wall(int wall, const std::vector<Vec2f>& polygon, const std::vector<int>& groups,
-                                                     std::uint64_t self_door, std::uint64_t self_cand) const;
+                                                     std::uint64_t self_door, std::uint64_t self_cand, const Vec2f& self_xy, float self_var) const;
     std::uint64_t visit_room_ = 0;     // the room the current visit is in
     int visit_ = 0;                    // the ledger's visit counter: a new room entry is a new visit
     std::uint64_t last_rgb_gen_ = 0;   // the RGB generation the last existence update scored

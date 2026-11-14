@@ -5,6 +5,7 @@
 // A certain other door makes this one an "another" (≈ 0.01), no other door makes it a "first" (≈ 0.4), an uncertain one pays part.
 // Nothing depends on order. The two rates are Beta beliefs (seeds below; Task 4 learns them from the remembered rooms).
 #pragma once
+#include <algorithm>
 #include <cmath>
 #include <span>
 
@@ -23,6 +24,13 @@ struct WallRates
     BetaBelief first{2.0, 3.0};
     BetaBelief another{0.05, 4.95};
 };
+
+/// How DISTINCT two places are: 1 - exp(-m^2/2), m^2 = squared separation over the summed position variances. Two labels on one hole
+/// (m -> 0) are one door and charge each other nothing; two real doors (m >> 1) charge the full "another door" cost (S3: competition, no radius).
+[[nodiscard]] inline float place_distinctness(double sq_dist, double var_sum)
+{
+    return static_cast<float>(-std::expm1(-0.5 * sq_dist / std::max(1e-9, var_sum)));
+}
 
 /// log prior odds of "this wall has this door" when the other doors on its wall exist with probabilities `r_others`.
 [[nodiscard]] inline float wall_base_rate(const WallRates& rates, std::span<const float> r_others)

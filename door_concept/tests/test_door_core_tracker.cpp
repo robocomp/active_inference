@@ -7,9 +7,9 @@
 //   2. ASSOCIATION: the next packet at the same place is assigned to the newborn (Pass 2: no belief yet, nearest slice
 //      within the fallback gate of its birth spot) and births nothing.
 //   3. A REPEATED frame id accrues nothing (rule 1 of birth_evidence.h: an observation, not a cycle).
-//   4. SUPPRESSIONS: a detection outside the room polygon is suppressed with the "outside room" decision; a short blob
-//      (support top below Existence.MinHeightM, untruncated) with the "top" one; a detection inside a live door's swept
-//      arc with that door's id.
+//   4. NO SUPPRESSIONS: there is no "outside room", "short blob" or swept-arc suppression any more; a detection is judged by the door
+//      model (birth by comparison) and, under Existence.OneModel, by the four causes of its mask (two labels at one hole compete; the S3
+//      competition cases live in test_door_core_existence.cpp, whose world has fit states).
 //   5. The core is DSR / Qt / Ice / media free (the include scan of tests/test_door_cycle_io.cpp, run over src/core).
 //
 // Build + run (from door_concept/):

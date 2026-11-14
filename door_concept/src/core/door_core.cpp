@@ -345,6 +345,10 @@ void DoorCore::merge(DoorCycleOutput& out)
 {
     if (cfg_.door.tracker_merge_overlap <= 0.0f)
         return;
+    // One-model (S3): two labels at one hole COMPETE (responsibilities share the mask, the second-door cost is charged by distinctness);
+    // there is no separate merge authority and no separation distance beside the tracker's own noise.
+    if (cfg_.door.exist_one_model)
+        return;
 
     // The sweep is SHARED (common/track); only the two per-object questions stay here.
     // ★A DOOR'S FOOTPRINT IS ITS APERTURE, NOT ITS LEAF — see footprint_of above: two doors are the same
@@ -390,7 +394,9 @@ void DoorCore::associate(const DoorCycleInput& in, DoorCycleOutput& out)
     //    door removes on the costed decision over its place belief (decide(belief.L(), role, costs), Task 8; Existence.Enabled).
     tp.death_frames     = std::numeric_limits<int>::max();   // never retire by occlusion:
                                                             // removal is the existence channel's
-    tp.birth_min_sep_m  = cfg.tracker_birth_min_sep_m;
+    // kept: the tracker still needs a separation to keep ONE track per detection (its own noise scale: two detections nearer than their
+    // own measurement noise are one detection); no model term does this job, the model's duplicates compete by responsibility instead.
+    tp.birth_min_sep_m  = cfg.exist_one_model ? cfg.tracker_detection_noise_m : cfg.tracker_birth_min_sep_m;
     tp.nll_cost         = cfg.tracker_nll_cost;
     tracker_.set_params(tp);
 
@@ -715,7 +721,7 @@ void DoorCore::associate(const DoorCycleInput& in, DoorCycleOutput& out)
                 {
                     const std::size_t di = static_cast<std::size_t>(&d - dets_.data());
                     if (di >= mask_causes_.size() or mask_causes_[di].causes.empty()
-                        or std::exp(-0.5 * r2 / std::max(v, 1e-9f)) < mask_causes_[di].rho_kind(CauseKind::NewDoor)) continue;
+                        or std::exp(-0.5 * r2 / std::max(v, 1e-9f)) < mask_causes_[di].hit_new()) continue;   // ruling G: the renormalised hit weight, as at every other site
                 }
                 else if (r2 >= fb2 and r2 > cfg.tracker_gate_mahalanobis * v) continue;
                 if (const float cost = r2 / std::max(v, 1e-9f); cost < best_cost) { best_cost = cost; best = d.slice_index; }

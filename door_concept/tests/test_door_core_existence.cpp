@@ -15,6 +15,7 @@
 //       src/door_frame_evidence.cpp ../common/contour_edge/contour_edge_check.cpp ../common/contour_edge/contour_edge_project.cpp \
 //       ../common/contour_edge/contour_depth_check.cpp -lzstd -lopencv_core -lopencv_imgproc \
 //       -o /tmp/test_door_core_existence && /tmp/test_door_core_existence
+#include <array>
 #include <clocale>
 #include <filesystem>
 #include <cmath>
@@ -1380,6 +1381,77 @@ int main()
         const int near_f = frames_to_birth(stand(2.5f, 0.0f), 0.0f, 0.9), far_f = frames_to_birth(stand(7.0f, 70.0f), 70.0f, 0.15);
         std::print("good_views_fewer_frames: near centred {} frames, far oblique {} frames\n", near_f, far_f);
         CHECK(near_f < far_f);
+    }
+
+    // ── Task 8 (S3): two labels at one hole compete; there is no separation distance and no merge ───────────────────────────────────────────
+    //    mirror_of_crossed_door_falls: a crossed door (certain) and masks 0.17 m beside it (dm12's entry mirror): a second door is never
+    //    born there, or it falls below the delete line within 60 frames; the crossed door stays throughout.
+    {
+        Rig r(false, true);
+        r.core.set_costs(CostEstimator::logged_default());
+        r.look(stand(4.0f, 0.0f), kDoor, {{1.0f, kWallY, 0.9f}});
+        CHECK(r.door() != nullptr);
+        std::uint64_t first_id = r.w.st.empty() ? 0 : r.w.st.begin()->first;
+        std::size_t near_alive_max = 0, born_near = 0;
+        for (int v = 0; v < 120; ++v)
+        {
+            auto in = input(++r.cycle, ++r.frame, stand(v % 2 ? 4.0f : 2.5f, -45.0f + 15.0f * static_cast<float>(v % 7)), kDoor,
+                            {{1.0f, kWallY, 0.9f}, {1.17f, kWallY, 0.9f}});
+            in.affordances.push_back({.node_id = 555, .exists = true, .name = "aff_door_1_cross"});
+            in.executing.push_back({.from = 8, .to = 555});
+            r.step(std::move(in));
+            std::size_t near = 0;
+            for (const auto& [id, st] : r.w.st) if (id != first_id and (st.aperture.centre_xy() - Vec2f(1.0f, kWallY)).norm() < 0.3f) ++near;
+            near_alive_max = std::max(near_alive_max, near);
+            born_near = std::max<std::size_t>(born_near, r.births.size());
+            if (v >= 60 + 10) CHECK(near == 0 or r.w.st.size() == 1);   // a mirror alive late (after 60 frames) must not be
+        }
+        std::print("mirror_of_crossed_door_falls: births {}, removes {}, mirrors alive at once {}, crossed door {}\n", r.births.size(), r.removes.size(),
+                   near_alive_max, r.w.st.contains(first_id) ? "stays" : "GONE");
+        CHECK(r.w.st.contains(first_id));
+        std::size_t late = 0;
+        for (const auto& [id, st] : r.w.st) if (id != first_id and (st.aperture.centre_xy() - Vec2f(1.0f, kWallY)).norm() < 0.3f) ++late;
+        CHECK(late == 0);
+    }
+    //    one_hole_two_labels: a live door and a pending candidate 0.25 m apart are ONE hole under two labels, not two doors: the "another
+    //    door on this wall" cost is charged by how DISTINCT the other place is, so a certain door 0.25 m away costs ~nothing and one 1.0 m
+    //    away the full second-door rate. (tape_dm: door_4 and place_98, 0.25 m apart, each charged the other as a second door, both fell.)
+    {
+        const WallRates rates{};
+        const float first = wall_base_rate(rates, {}), another = wall_base_rate(rates, std::array<float, 1>{1.0f});
+        const float v = 0.1f * 0.1f + 0.2f * 0.2f;   // a fitted door's and a candidate's position variances
+        const float near_cost = wall_base_rate(rates, std::array<float, 1>{0.95f * place_distinctness(0.25 * 0.25, v)});
+        const float far_cost = wall_base_rate(rates, std::array<float, 1>{0.95f * place_distinctness(1.0 * 1.0, v)});
+        std::print("one_hole_two_labels: first {:.3f} another {:.3f}; a certain-ish door 0.25 m away -> {:.3f}, 1.0 m away -> {:.3f}\n", first, another, near_cost, far_cost);
+        CHECK(near_cost > first - 0.5f * (first - another));   // nearer the first-door rate than the second-door one
+        CHECK(far_cost < first - 0.9f * (first - another) * 0.95f);
+        CHECK(place_distinctness(0.0, v) == 0.0f and place_distinctness(100.0, v) > 0.999f);
+    }
+    //    two_real_doors_close_both_live: two true doors 1.0 m apart on one wall, each with its own masks: both are born and both stay.
+    {
+        Rig r(false, true);
+        r.core.set_costs(CostEstimator::logged_default());
+        for (int v = 0; v < 90; ++v)
+            r.look(stand(v % 2 ? 4.0f : 3.0f, -20.0f + 10.0f * static_cast<float>(v % 5), 1.5f), {1.5f, kWallY + 0.01f}, {{1.0f, kWallY, 0.85f}, {2.0f, kWallY, 0.85f}});
+        std::print("two_real_doors_close_both_live: {} doors, {} births, {} removes, {} candidates\n", r.w.st.size(), r.births.size(), r.removes.size(), r.core.candidates().size());
+        for (const auto& d : r.births) std::print("  BIRTH cycle {} {} ({:.2f},{:.2f})\n", d.cycle, d.name, d.a, d.b);
+        for (const auto& d : r.removes) std::print("  REMOVE cycle {} {} {}\n", d.cycle, d.name, d.note);
+        CHECK(r.w.st.size() == 2);
+        //    both are born at the first frame, each charged as a first door (no other has a previous-cycle p yet); the next cycle charges each the
+        //    other and both fall, then are re-born with their ledgers: a start-up transient of the order-free rate, not a flicker. After it, none.
+        for (const auto& d : r.removes) CHECK(d.cycle <= 10);
+        //    removing_one_frees_other: with one gone the other's rate returns to the first-door value within one cycle
+        if (r.w.st.size() == 2)
+        {
+            const float first = std::log(0.4f / 0.6f);
+            const std::uint64_t keep = std::next(r.w.st.begin())->first, drop = r.w.st.begin()->first;
+            const float paid = r.w.st.at(keep).belief.prior.base_rate;
+            r.w.st.erase(drop);
+            r.look(stand(4.0f, 0.0f, 1.5f), {1.5f, kWallY + 0.01f}, {{2.0f, kWallY, 0.85f}});
+            std::print("removing_one_frees_other: base_rate {:.3f} -> {:.3f} (first {:.3f})\n", paid, r.w.st.at(keep).belief.prior.base_rate, first);
+            CHECK(paid < first - 1.0f);
+            CHECK(std::abs(r.w.st.at(keep).belief.prior.base_rate - first) < 1e-4f);
+        }
     }
 
     std::print("{}\n", fails == 0 ? "ALL PASS" : std::format("{} FAILURE(S)", fails));
