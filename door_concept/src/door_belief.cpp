@@ -4,6 +4,7 @@
 
 #include <cstdint>
 #include "door_belief.h"
+#include "door_leaf_channel.h"   // LeafChannel (leaf_mixture)
 
 #include <algorithm>
 #include <cmath>
@@ -156,6 +157,74 @@ float DoorBelief::clutter_fraction_leaf_marginal(const std::vector<Eigen::Vector
         c += sum > 0.0 ? u_clut / sum : 1.0;
     }
     return static_cast<float>(c / static_cast<double>(pts.size()));
+}
+
+DoorBelief::LeafMixture DoorBelief::leaf_mixture(const std::vector<Eigen::Vector3f>& pts, float R, const door::LeafChannel& ch,
+                                                 float phi_max_rad, double eps_v) const
+{
+    LeafMixture out;
+    if (pts.empty() or not ch.phi[0].init or ch.phi[0].n() < 2) return out;
+    const std::size_t N = ch.phi[0].n();
+    const auto sigmoid = [](double l) { return 1.0 / (1.0 + std::exp(-l)); };
+    // The static hypotheses, absolute: hinge + = Near, swing + = the +1 side (door_leaf_channel.h hinge_sign / swing_sign).
+    const double p_near = sigmoid(ch.hinge.llr()), p_plus = sigmoid(ch.swing.llr());
+    const float eps     = std::clamp(params_.clutter_frac, 0.0f, 0.99f);
+    const float pi_surf = 1.0f - eps;
+    const float inv2R   = 0.5f / std::max(1e-9f, R);
+    const float cs      = params_.clutter_scale_m;
+    const double u_clut = double(eps) * std::exp(-double(cs) * cs * inv2R);
+    const door::Aperture ap = aperture_at(state_);
+    struct Pose { door::LeafPose p; double w; };
+    std::vector<Pose> poses;
+    poses.reserve(4 * N);
+    double shut = 0.0;
+    for (const auto hinge : {door::HingeSide::Near, door::HingeSide::Far})
+        for (const float swing : {1.0f, -1.0f})
+        {
+            const double wb = (hinge == door::HingeSide::Near ? p_near : 1.0 - p_near) * (swing > 0.0f ? p_plus : 1.0 - p_plus);
+            const auto post = ch.phi[std::size_t(door::leaf_index(hinge, swing))].posterior(eps_v);   // normalised LOG weights over the grid
+            for (std::size_t k = 0; k < N; ++k)
+            {
+                const double w = wb * std::exp(post[k]);
+                if (k == 0) shut += w;
+                if (not (w > 1e-9)) continue;   // numerical prune of weightless poses (cost only: a 1e-9 weight moves no point's u by 1e-9)
+                door::LeafState ls; ls.hinge = hinge; ls.swing = swing; ls.phi = phi_max_rad * float(k) / float(N - 1);
+                poses.push_back({door::leaf_pose(ap, ls), w});
+            }
+        }
+    double sum_log = 0.0, sum_c = 0.0;
+    for (const auto& p : pts)
+    {
+        double us = 0.0;
+        for (const auto& q : poses)
+        {
+            const float d = door::leaf_sdf(q.p, p);
+            us += q.w * std::exp(-double(d) * d * inv2R);
+        }
+        us *= pi_surf;
+        const double sum = us + u_clut;
+        sum_log += std::log(std::max(1e-300, sum));
+        sum_c += sum > 0.0 ? u_clut / sum : 1.0;
+    }
+    out.ok = true;
+    out.mean_log_u = sum_log / double(pts.size());
+    out.clutter_frac = sum_c / double(pts.size());
+    out.p_open = std::clamp(1.0 - shut, 0.0, 1.0);   // clamp: rounding of a probability's complement
+    return out;
+}
+
+float DoorBelief::leaf_loglik_marginal(const std::vector<Eigen::Vector3f>& pts, float R, const door::LeafChannel& ch,
+                                       float phi_max_rad, double eps_v) const
+{
+    const auto m = leaf_mixture(pts, R, ch, phi_max_rad, eps_v);
+    return m.ok ? static_cast<float>(m.mean_log_u) : std::numeric_limits<float>::quiet_NaN();
+}
+
+float DoorBelief::clutter_fraction_leaf_marginal(const std::vector<Eigen::Vector3f>& pts, float R, const door::LeafChannel& ch,
+                                                 float phi_max_rad, double eps_v) const
+{
+    const auto m = leaf_mixture(pts, R, ch, phi_max_rad, eps_v);
+    return m.ok ? static_cast<float>(m.clutter_frac) : std::numeric_limits<float>::quiet_NaN();
 }
 
 // ─── Jacobian (central finite difference over the 3 DOFs [s,w,h]) ────────────────
