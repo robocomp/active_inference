@@ -318,10 +318,19 @@ struct OpeningRun
 
 // through_beyond_m: how far past the line a return must lie to count as THROUGH (0: the tolerance above, for placing the aperture). To say the way is CLEAR it must be past
 // the leaf's reach (the aperture's width): a return short of that may be a leaf on the far side, which a beam stops on just after the line. Between the two a bin is unknown.
-[[nodiscard]] inline std::vector<OpeningRun> measure_openings(const Aperture& ap, const Eigen::Vector3f& origin,
-                                                              const std::vector<Eigen::Vector3f>& pts, float through_beyond_m = 0.0f)
+/// The per-bin through / blocked ray counts along the wall line (the first half of measure_openings, exposed so the likelihood of a
+/// hypothesised opening can be fitted against the bins themselves): bin b spans a_lo + b*kEdgeBinM ... + kEdgeBinM in the wall frame.
+/// nb == 0 when the sensor sits in the wall's slab or the window is degenerate (no ray crosses the line usefully).
+struct ThroughBins
 {
-    std::vector<OpeningRun> out;
+    float a_lo = 0.f;
+    int   nb = 0;
+    std::vector<int> nT, nB;   // through / blocked returns per bin
+};
+[[nodiscard]] inline ThroughBins through_bin_counts(const Aperture& ap, const Eigen::Vector3f& origin,
+                                                    const std::vector<Eigen::Vector3f>& pts, float through_beyond_m = 0.0f)
+{
+    ThroughBins out;
     const Eigen::Vector2f u = ap.wall_u, n = ap.across_u(), O = ap.wall_O, o = origin.head<2>();
     const float s_o = n.dot(o - O);
     const float tol = 3.0f * 0.05f + 0.5f * std::max(0.0f, ap.thickness);
@@ -330,7 +339,9 @@ struct OpeningRun
     const float a_lo = ap.s - kRegWindowM, a_hi = ap.s + ap.w + kRegWindowM;
     const int nb = static_cast<int>(std::ceil((a_hi - a_lo) / kEdgeBinM));
     if (nb < 3) return out;
-    std::vector<int> nT(static_cast<std::size_t>(nb), 0), nB(static_cast<std::size_t>(nb), 0);
+    out.a_lo = a_lo; out.nb = nb;
+    out.nT.assign(static_cast<std::size_t>(nb), 0); out.nB.assign(static_cast<std::size_t>(nb), 0);
+    auto& nT = out.nT; auto& nB = out.nB;
     const float z_lo = ap.floor_z + 0.05f, z_hi = ap.floor_z + ap.h;
     for (const auto& p : pts)
     {
@@ -352,6 +363,19 @@ struct OpeningRun
         if (beyond > std::max(tol, through_beyond_m)) ++nT[static_cast<std::size_t>(b)];
         else if (beyond <= tol)                       ++nB[static_cast<std::size_t>(b)];
     }
+    return out;
+}
+
+[[nodiscard]] inline std::vector<OpeningRun> measure_openings(const Aperture& ap, const Eigen::Vector3f& origin,
+                                                              const std::vector<Eigen::Vector3f>& pts, float through_beyond_m = 0.0f)
+{
+    std::vector<OpeningRun> out;
+    const ThroughBins tb = through_bin_counts(ap, origin, pts, through_beyond_m);
+    if (tb.nb == 0) return out;
+    const float a_lo = tb.a_lo;
+    const int nb = tb.nb;
+    const std::vector<int>& nT = tb.nT;
+    const std::vector<int>& nB = tb.nB;
     const auto centre = [&](int b) { return a_lo + (static_cast<float>(b) + 0.5f) * kEdgeBinM; };
     // Along the wall a ray's crossing is exact in angle; what is unresolved is the gap between the last blocked and the
     // first through bin (uniform, gap²/12) plus each of those two bins' own quantisation.

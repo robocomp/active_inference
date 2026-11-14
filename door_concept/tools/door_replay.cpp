@@ -558,7 +558,8 @@ int main(int argc, char** argv)
     // that cost), and the tool writes no file.
     long diag_rows = 0;
     // --csv DIR: the fit's two logs and the existence log, as the live agent writes them (diff them against its own)
-    std::ofstream ai2_csv, phi_csv, ex_csv, views_csv;
+    std::ofstream ai2_csv, phi_csv, ex_csv, views_csv, stdout_csv;
+    std::uint64_t diag_cycle = 0;   // the cycle being stepped, to stamp the core's stdout lines in --csv's stdout_diag.csv
     if (not csv_dir.empty())
     {
         ai2_csv.open(csv_dir + "/ai2_log.csv");
@@ -566,6 +567,7 @@ int main(int argc, char** argv)
         ex_csv.open(csv_dir + "/door_existence_log.csv");
         views_csv.open(csv_dir + "/door_views_log.csv");
         views_csv << kViewsCsvHeader;
+        stdout_csv.open(csv_dir + "/stdout_diag.log");   // cycle<TAB>line: where a candidate place stood (tools/label_door_views.py)
         ai2_csv << kAi2CsvHeader;
         phi_csv << kPhiCsvHeader;
         ex_csv << kExistenceCsvHeader;
@@ -577,7 +579,11 @@ int main(int argc, char** argv)
         else if (r.stream == "ai2_log_phi.csv" and phi_csv.is_open()) phi_csv << r.line;
         else if (r.stream == "door_existence_log.csv" and ex_csv.is_open()) ex_csv << r.line;
         else if (r.stream == "door_views_log.csv" and views_csv.is_open()) views_csv << r.line;
-        else if (r.stream == "stdout" and core_stdout) std::cout << r.line;
+        else if (r.stream == "stdout")
+        {
+            if (stdout_csv.is_open()) stdout_csv << diag_cycle << '\t' << r.line;
+            if (core_stdout) std::cout << r.line;
+        }
     }});
 
     // the slices the tool does not rebuild — counted, so a tape that exercised them says so
@@ -601,6 +607,7 @@ int main(int argc, char** argv)
         if (in->cycle > until) break;
         if (n++ == 0) first = in->cycle;
         last = in->cycle;
+        diag_cycle = in->cycle;
         if (jitter_ms > 0.0)
         {
             static std::uint64_t lcg = 0x9E3779B97F4A7C15ull;

@@ -474,13 +474,17 @@ void SpecificWorker::initialize()
     // decision's costs (§8.2: FIXED within a session too, written offline). Absent files => the compiled
     // defaults / the no-sample prior; the line names n for each.
     {
-        core_->set_detectors(rc::door::core::load_detectors("etc/door_detectors.csv"));
+        // Existence.OneModel reads the table fitted on the Webots-labelled tapes (Task 5): its zed/ricoh rates differ from the table the
+        // flag-off path has always read, so the flag-off decisions must not move — the old file stays the flag-off table, untouched.
+        const std::string det_path = cfg_.exist_one_model and std::filesystem::exists("etc/door_detectors_fitted.csv")
+                                         ? "etc/door_detectors_fitted.csv" : "etc/door_detectors.csv";
+        core_->set_detectors(rc::door::core::load_detectors(det_path));
         core_->set_costs(rc::door::core::CostEstimator::load_or_default("etc/door_costs.csv"));
         const auto t = core_->detectors();
         const auto c = core_->costs().costs(cfg_.exist_max_room_s);
-        std::print("door_concept: [existence] loaded etc/door_detectors.csv: zed hit {:.3f} fa {:.4f} (n={:.0f}), ricoh hit {:.3f} "
+        std::print("door_concept: [existence] loaded {}: zed hit {:.3f} fa {:.4f} (n={:.0f}), ricoh hit {:.3f} "
                    "fa {:.4f} (n={:.0f}), fixed this session; etc/door_costs.csv: C_keep {:.1f} s (n={}), C_delete {:.1f} s (n={})\n",
-                   t.zed.hit_rate, t.zed.false_alarm, t.zed.n_hit_trials, t.ricoh.hit_rate, t.ricoh.false_alarm, t.ricoh.n_hit_trials,
+                   det_path, t.zed.hit_rate, t.zed.false_alarm, t.zed.n_hit_trials, t.ricoh.hit_rate, t.ricoh.false_alarm, t.ricoh.n_hit_trials,
                    c.keep_s, core_->costs().n(rc::door::core::CostEstimator::Kind::Keep), c.delete_ordinary_s,
                    core_->costs().n(rc::door::core::CostEstimator::Kind::DeleteOrdinary));
     }

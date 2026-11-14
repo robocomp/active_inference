@@ -107,7 +107,24 @@ struct ConfidenceModel { float present_mu = 0.66f, absent_mu = 0.46f, sigma = 0.
     return 1.0f / (1.0f + x * x);
 }
 
-struct DetectorTable { DetectorModel zed, ricoh; SupportModel support; ConfidenceModel confidence; };
+/// The geometry channel's mu1 spread (existence_update.h geo_mu1_sd): a door's edge support reads mu1 = mu0 + mu1_sd * s, the controls' mean
+/// plus mu1_sd of their spread. 2 is the value the channel was started with; `n` = the distinct frames of true doors it was fitted on
+/// (0 = that starting value). Fitted offline by tools/fit_geometry_channel.py.
+struct GeometryModel { float mu1_sd = 2.0f, n = 0.0f; };
+
+/// What the low LiDAR's wall-line bins read at a doorway (door_opening_edges.h through_bin_counts): P(a bin reads THROUGH | it lies in an
+/// open aperture) and P(through | it lies on solid wall, or in a shut leaf). The compiled values are the first look at the apartment tapes
+/// before the fit (open 0.75: a swung leaf hides part of the hole; wall 0.01), n = the sweeps of each fit (0 = compiled). Fitted offline by
+/// tools/fit_lidar_through.py; read by the one-model opening likelihood.
+struct LidarThroughModel { float through_open = 0.75f, through_wall = 0.01f, n_open = 0.0f, n_wall = 0.0f; };
+
+[[nodiscard]] inline bool lidar_in_domain(const LidarThroughModel& m)
+{
+    return std::isfinite(m.through_open) and std::isfinite(m.through_wall) and m.through_wall > 0.0f and m.through_wall < m.through_open
+           and m.through_open < 1.0f;
+}
+
+struct DetectorTable { DetectorModel zed, ricoh; SupportModel support; ConfidenceModel confidence; GeometryModel geometry; LidarThroughModel lidar; };
 
 // SENSOR-MODEL CONSTANTS (refit from data). ZED: today's aperture_envelope shoulders (DoorModel.Detect{Min,Max}Fill/Soft),
 // hit 0.9 / clutter 0.02 are placeholders for the ZED (no ZED hit-rate was ever measured per view).
@@ -148,7 +165,8 @@ struct DetectorTable { DetectorModel zed, ricoh; SupportModel support; Confidenc
     return q > 0.0f ? std::log((1.0f - q) / (1.0f - f_eff)) : 0.0f;
 }
 
-// CSV: camera,param,value,n,source — params min_fill,max_fill,soft,hit_rate (n = n_hit_trials),false_alarm.
+// CSV: camera,param,value,n,source — params min_fill,max_fill,soft,hit_rate (n = n_hit_trials),false_alarm; plus the rows `geometry,mu1_sd` and
+// `lidar,through_open|through_wall` (Task 5; absent from an older file => today's values, n = 0, so old files load unchanged).
 // from_chars must consume the WHOLE field; a malformed row keeps the default for that param and is counted (one warning line).
 // Domain validation (a probability must be a probability, NOT a model threshold): hit_llr divides by false_alarm, f_eff by
 // hit_rate and miss_llr takes log(1 - q), so a loaded camera must satisfy 0 < false_alarm < hit_rate < 1 and a valid envelope;
@@ -207,6 +225,19 @@ struct DetectorTable { DetectorModel zed, ricoh; SupportModel support; Confidenc
             else ++malformed;
             continue;
         }
+        if (c[0] == "geometry")
+        {
+            if (c[1] == "mu1_sd" and std::isfinite(v)) { t.geometry.mu1_sd = v; t.geometry.n = n; }
+            else ++malformed;
+            continue;
+        }
+        if (c[0] == "lidar")
+        {
+            if (c[1] == "through_open") { t.lidar.through_open = v; t.lidar.n_open = n; }
+            else if (c[1] == "through_wall") { t.lidar.through_wall = v; t.lidar.n_wall = n; }
+            else ++malformed;
+            continue;
+        }
         DetectorModel* m = c[0] == "zed" ? &t.zed : c[0] == "ricoh" ? &t.ricoh : nullptr;
         if (m == nullptr) { ++malformed; continue; }
         if (c[1] == "min_fill") m->env.min_fill = v;
@@ -233,6 +264,11 @@ struct DetectorTable { DetectorModel zed, ricoh; SupportModel support; Confidenc
     {
         std::fprintf(stderr, "[detector_model] %s: confidence out of domain (need present_mu > absent_mu, sigma > 0): compiled defaults\n", p.string().c_str());
         t.confidence = defaults.confidence;
+    }
+    if (not lidar_in_domain(t.lidar))
+    {
+        std::fprintf(stderr, "[detector_model] %s: lidar out of domain (need 0 < through_wall < through_open < 1): compiled defaults\n", p.string().c_str());
+        t.lidar = defaults.lidar;
     }
     if (support_seen != 0b111111 or not support_in_domain(t.support))
     {
@@ -263,5 +299,7 @@ inline void save_detectors(const std::filesystem::path& p, const DetectorTable& 
     const auto& k = t.confidence;
     f << std::format("confidence,present_mu,{},{},{}\nconfidence,absent_mu,{},{},{}\nconfidence,sigma,{},{},{}\n",
                      k.present_mu, k.n_trials, source, k.absent_mu, k.n_trials, source, k.sigma, k.n_trials, source);
+    f << std::format("geometry,mu1_sd,{},{},{}\nlidar,through_open,{},{},{}\nlidar,through_wall,{},{},{}\n", t.geometry.mu1_sd, t.geometry.n, source,
+                     t.lidar.through_open, t.lidar.n_open, source, t.lidar.through_wall, t.lidar.n_wall, source);
 }
 }  // namespace rc::door::core
