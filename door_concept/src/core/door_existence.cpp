@@ -844,7 +844,9 @@ void DoorCore::prepare_candidates(const DoorCycleInput& in, const std::vector<rc
             {   // the blob's extent along the wall is the leaf's FOOTPRINT, not a width: the door is the hypothesis' aperture, its width the leaf's length (fused with the typical size)
                 const auto& hy = *mask_leaf_[d];
                 cb.theta.aperture = hy.aperture; cb.theta.leaf = hy.leaf;
-                cb.width_meas = hy.aperture.w; cb.size_resolved = true; cb.width_sd = cfg.tracker_detection_noise_m; cb.leaf_born = true;
+                // ★The size term is paid on the MEASURED leaf length with the length's own sd, never on aperture.w: that is the length FUSED with the typical
+                //  width, and scoring it against the same prior counts the prior twice (the clean19-21 error; a 0.4 m leaf fuses to 0.5 m and paid -1 nat for -5).
+                cb.width_meas = hy.leaf_length; cb.size_resolved = true; cb.width_sd = hy.leaf_length_sd; cb.leaf_born = true;
             }
         }
         det_candidate_[d] = best;
@@ -898,6 +900,12 @@ void DoorCore::prepare_candidates(const DoorCycleInput& in, const std::vector<rc
                                          std::sqrt(cand.var), std::sqrt(cand.var),   // …and along the wall, at both jambs
                                          h_meas, nullptr, {});
             if (cfg.exist_one_model) cand.belief.prior.base_rate = held_base;
+            if (cfg.exist_one_model and cand.leaf_born and cand.size_resolved)
+            {   // the leaf-born candidate's theta holds the FUSED aperture (geometry): its size term is re-paid on the measured length (above)
+                const float h_used = std::isfinite(h_meas) ? h_meas : th.aperture.h;
+                cand.belief.prior.size = detail::normalised_log_predictive(cand.width_meas, size_prior.w_m, size_prior.w_sd, cand.width_sd)
+                                       + detail::normalised_log_predictive(h_used, size_prior.h_m, size_prior.h_sd, h_sd);
+            }
             if (cand.size_resolved) cand.best_size = std::max(cand.best_size, cand.belief.prior.size);
             const auto it = self_det.find(c);
             const int self_sensor = it == self_det.end() ? -1 : (dets_[static_cast<std::size_t>(it->second)].sensor != 0 ? 1 : 0);

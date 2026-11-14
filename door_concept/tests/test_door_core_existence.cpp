@@ -1870,6 +1870,22 @@ int main()
         ViewLedger plain; plain.observe({0.f, 0.f}, {1.f, 0.f}, {1.f, 0.f}, 1.f, 0.f, 0);
         CHECK(plain.serialise().starts_with("VL3 "));
     }
+    {   // leaf_born_candidate_pays_its_measured_length (final review 6): a 0.4 m side-on leaf mask pays the size term on the MEASURED length 0.4 (against its own sd),
+        // not on the length fused with the typical width (0.5 m: ~4 nats of free support). It needs at least the evidence a 0.4 m face-on candidate needs.
+        Rig leaf(false, true), face(false, true);
+        leaf.step(input(++leaf.cycle, ++leaf.frame, {2.0f, 1.0f}, {2.0f, 4.5f}, {}, 10.0, std::nullopt, {LeafDet{{2.0f, kWallY}, {2.0f, kWallY - 0.4f}}}));
+        face.look({2.0f, 1.0f}, {2.0f, 4.5f}, {{2.0f, kWallY, 0.4f}});
+        const auto leaf_c = std::ranges::find_if(leaf.core.candidates(), [](const auto& c) { return c.leaf_born; });
+        CHECK(leaf_c != leaf.core.candidates().end() and not face.core.candidates().empty());
+        if (leaf_c != leaf.core.candidates().end() and not face.core.candidates().empty())
+        {
+            const float sl = leaf_c->belief.prior.size, sf = face.core.candidates().front().belief.prior.size;
+            std::print("leaf_born_candidate_pays_its_measured_length: leaf-born size term {:+.2f} (measured length {:.2f}, sd {:.3f}), 0.4 m face-on {:+.2f}\n", sl, leaf_c->width_meas, leaf_c->width_sd, sf);
+            CHECK(std::abs(leaf_c->width_meas - 0.4f) < 0.05f);
+            CHECK(sl <= sf + 0.05f);   // at least the evidence a face-on 0.4 m candidate needs (the leaf length is known more precisely, so it pays at least as much)
+            CHECK(sl < -1.5f);
+        }
+    }
     {   // side_on_leaf_bears_door_in_frame_wall: a leaf mask + the opening seen at its hinge end, no known door: the door is born ON THE FRAME WALL
         std::vector<float> aperture_err;   // |door aperture centre - the winning hypothesis' centre|, from the birth cycle on
         const auto run = [&](bool opening, std::vector<rc::door::DoorDecision>* out_births, float* L_at_end)

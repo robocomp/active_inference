@@ -35,6 +35,8 @@ struct LeafApertureHyp
     LeafState leaf;
     int wall = -1;          // the frame wall (wall_groups id)
     double log_w = 0;       // band (hinge end) + size (leaf length) + base rate (the wall's first-door rate); the caller adds opening_llr
+    float leaf_length = 0.f, leaf_length_sd = 0.f;   // the MEASURED leaf length and its own sd (sqrt(2) x the band's sigma): what a candidate's size term is paid on;
+                                                      // aperture.w is this length FUSED with the typical width (geometry only: scoring it again against the same prior counts the prior twice)
 };
 
 /// The plan-view segment of a mask: the extremes of its points along the principal axis, its door height, and the spread across.
@@ -150,6 +152,7 @@ namespace detail
             h.leaf.swing = d.dot(nrm) >= 0.f ? +1.f : -1.f;
             h.wall = wall_groups[static_cast<std::size_t>(e)];
             h.log_w = double(band_lp) + double(size) + double(base);
+            h.leaf_length = L; h.leaf_length_sd = s_len;
             out.push_back(h);
         }
     }
