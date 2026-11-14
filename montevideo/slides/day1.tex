@@ -538,215 +538,237 @@
 \end{frame}
 
 \begin{frame}{The chain rule: $N$ variables, $N$ factors}
-  Apply the product rule again and again, peeling off one variable each time:
-  \begin{align*}
-    p(A, B)       &= p(A\given B)\,p(B) \\
-    p(A, B, C)    &= p(A\given B, C)\,p(B\given C)\,p(C) \\
-    p(A, B, C, D) &= p(A\given B, C, D)\,p(B\given C, D)\,p(C\given D)\,p(D)
-  \end{align*}
-  In general, for any ordering $\pi$ of the variables:
-  \[
-    p(X_1, \ldots, X_N) =
-    \underbrace{p(X_{\pi(1)})\,p(X_{\pi(2)}\given X_{\pi(1)})\cdots
-                p(X_{\pi(N)}\given X_{\pi(1)}, \ldots, X_{\pi(N-1)})}_{N\text{ factors}}
-  \]
-  \begin{itemize}\small
-    \item No assumption was made. This is exact for every distribution.
-    \item But the last factor depends on everything: nothing has been gained yet.
-  \end{itemize}
+  \begin{center}\large $p(A,B,C,D) = p(A\given B,C,D)\;p(B\given C,D)\;p(C\given D)\;p(D)$\end{center}
+  \centering
+  % peel one variable at a time: each step is the product rule of the factorisation frames
+  \begin{tikzpicture}[v/.style={draw=muted, circle, minimum size=0.75cm, fill=muted!10, font=\small},
+                      pl/.style={draw=accent, very thick, circle, minimum size=0.75cm, fill=accent!12, font=\small},
+                      fac/.style={font=\normalsize, anchor=west},
+                      stp/.style={-{Stealth[length=2mm]}, thick, muted}]
+    \foreach \row/\vars/\peel/\rest/\f in {
+        0/{A,B,C,D}/A/{B,C,D}/{$p(A\given B,C,D)$},
+        1/{B,C,D}/B/{C,D}/{$p(B\given C,D)$},
+        2/{C,D}/C/{D}/{$p(C\given D)$},
+        3/{D}/D/{}/{$p(D)$}} {
+      \begin{scope}[shift={(0.9*\row,-1.05*\row)}]
+        \node[pl] at (0,0) {\peel};
+        \foreach \v [count=\i] in \rest \node[v] at (0.9*\i,0) {\v};
+        \node[fac] at (5.4-0.9*\row,0) {\f};
+      \end{scope}
+    }
+    \foreach \row in {0,1,2} \draw[stp] (0.9*\row+0.9,-1.05*\row-0.38) -- (0.9*\row+0.9,-1.05*\row-0.67);
+    \node[font=\small, text=accent, anchor=east] at (-0.5,0) {peel off};
+  \end{tikzpicture}
+
+  \vfill
+  \lesson{Always true, because it assumes nothing. So it saves nothing yet.}
 \end{frame}
 
 \begin{frame}{One joint, $N!$ factorisations}
-  From now on the names we use all week: $S$ the \textbf{state} (is the door open?),
-  $O$ the \textbf{observation} (does the LiDAR see a gap?), $A$ the \textbf{action} (does the
-  robot turn its LiDAR towards the door, or away?).
-  \vspace{0.3em}
-  \begin{columns}[c]
-    \begin{column}{0.5\textwidth}
-      \small
-      \begin{align*}
-        p(S,O,A) &= p(S)\,p(O\given S)\,p(A\given S,O)\\
-                 &= p(S)\,p(A\given S)\,p(O\given S,A)\\
-                 &= p(O)\,p(S\given O)\,p(A\given S,O)\\
-                 &= p(O)\,p(A\given O)\,p(S\given O,A)\\
-                 &= p(A)\,p(S\given A)\,p(O\given S,A)\\
-                 &= p(A)\,p(O\given A)\,p(S\given O,A)
-      \end{align*}
-    \end{column}
-    \begin{column}{0.46\textwidth}
-      \begin{itemize}
-        \item 3 variables give $3! = 6$ orderings, each with 3 factors.
-        \item $N$ variables give $N!$. A robot tracked over 100 steps has hundreds of
-              variables.
-        \item All of them are \alert{exactly equal}. No amount of data can tell them apart.
-      \end{itemize}
-      \vspace{0.3em}
-      So which one do we write down?
-    \end{column}
-  \end{columns}
+  \begin{center}
+    \textcolor{cool!80!black}{$S$: state} (door open?) \quad
+    \textcolor{good!70!black}{$O$: observation} (gap seen?) \quad
+    $A$: action (LiDAR at the door?)
+  \end{center}
+  \centering
+  % one small graph per ordering: every variable gets an arrow from each one placed before it
+  \begin{tikzpicture}[
+      vs/.style={draw=cool!80!black, circle, minimum size=0.62cm, fill=cool!15, font=\small},
+      vo/.style={draw=good!70!black, circle, minimum size=0.62cm, fill=good!15, font=\small},
+      va/.style={draw=black!60, circle, minimum size=0.62cm, fill=black!8, font=\small},
+      ar/.style={-{Stealth[length=1.8mm]}, thick},
+      fo/.style={font=\footnotesize}]
+    \foreach \i/\x/\y/\first/\second/\third/\f in {
+        0/0/0/S/O/A/{$p(S)\,p(O\given S)\,p(A\given S,O)$},
+        1/4.4/0/S/A/O/{$p(S)\,p(A\given S)\,p(O\given S,A)$},
+        2/8.8/0/O/S/A/{$p(O)\,p(S\given O)\,p(A\given S,O)$},
+        3/0/-2.6/O/A/S/{$p(O)\,p(A\given O)\,p(S\given O,A)$},
+        4/4.4/-2.6/A/S/O/{$p(A)\,p(S\given A)\,p(O\given S,A)$},
+        5/8.8/-2.6/A/O/S/{$p(A)\,p(O\given A)\,p(S\given O,A)$}} {
+      \begin{scope}[shift={(\x,\y)}]
+        \node[vs] (S\i) at (-0.8,0.55) {$S$};
+        \node[va] (A\i) at (0.8,0.55) {$A$};
+        \node[vo] (O\i) at (0,-0.45) {$O$};
+        \draw[ar] (\first\i) -- (\second\i);
+        \draw[ar] (\first\i) -- (\third\i);
+        \draw[ar] (\second\i) -- (\third\i);
+        \node[fo] at (0,-1.15) {\f};
+      \end{scope}
+    }
+  \end{tikzpicture}
+
+  \vfill
+  \lesson{$3! = 6$ orderings, all \alert{exactly equal}; $N$ variables give $N!$. Which one do we write down?}
 \end{frame}
 
 \begin{frame}{Choose the order in which the world produces things}
-  \begin{columns}[T]
-    \begin{column}{0.5\textwidth}
-      \textbf{Causal order}: causes before effects.
-      \[ p(S)\,p(A\given S)\,p(O\given S, A) \]
-      The robot cannot see whether the door is open, so where it points its LiDAR does not
-      depend on it; what it observes depends on both:
-      \[ p(A\given S) = p(A) \]
-      \centering
-      \begin{tikzpicture}[v/.style={draw, circle, minimum size=0.8cm, fill=cool!12}, every node/.style={font=\small}]
-        \node[v] (o) {$O$};
-        \node[v, above left=0.6cm and 0.6cm of o] (s) {$S$};
-        \node[v, above right=0.6cm and 0.6cm of o] (a) {$A$};
-        \draw[-{Stealth}, thick] (s) -- (o);
-        \draw[-{Stealth}, thick] (a) -- (o);
-      \end{tikzpicture}
-    \end{column}
-    \begin{column}{0.48\textwidth}
-      \textbf{Anti-causal order}: effects first.
-      \[ p(O)\,p(A\given O)\,p(S\given O, A) \]
-      Once $O$ is known, $S$ and $A$ are linked through it (a gap means little if the LiDAR
-      looked away), so nothing simplifies. Every factor keeps all its arguments.
+  \centering
+  \begin{tikzpicture}[vs/.style={draw=cool!80!black, circle, minimum size=0.9cm, fill=cool!15},
+      vo/.style={draw=good!70!black, circle, minimum size=0.9cm, fill=good!15},
+      va/.style={draw=black!60, circle, minimum size=0.9cm, fill=black!8},
+      ar/.style={-{Stealth[length=2.2mm]}, very thick}]
+    % causal
+    \node[font=\large\bfseries] at (0,2.45) {causal: causes first};
+    \node[font=\footnotesize, muted] at (0,2.0) {(first step: nothing seen yet)};
+    \node[vs] (S) at (-1.5,1.2) {$S$}; \node[va] (A) at (1.5,1.2) {$A$}; \node[vo] (O) at (0,-0.3) {$O$};
+    \draw[ar] (S) -- (O); \draw[ar] (A) -- (O);
+    \draw[ar, black!25, densely dashed] (S) -- node[midway, text=accent, font=\Large\bfseries] {$\times$} node[above=2pt, font=\footnotesize, text=accent] {$A\perp S$: drop it} (A);
+    \node at (0,-1.3) {\large $p(S)\;\textcolor{accent}{p(A\given S)}\;p(O\given S,A)$};
+    \node at (0,-2.0) {\large $=\; p(S)\;\textcolor{accent}{p(A)}\;p(O\given S,A)$};
+    \node[text=prob] at (0,-2.8) {\large $1 + 1 + 4 = 6$ numbers};
+    % anti-causal
+    \begin{scope}[xshift=7cm]
+      \node[font=\large\bfseries] at (0,2.45) {anti-causal: effects first};
+      \node[vs] (S2) at (-1.5,1.2) {$S$}; \node[va] (A2) at (1.5,1.2) {$A$}; \node[vo] (O2) at (0,-0.3) {$O$};
+      \draw[ar] (O2) -- (S2); \draw[ar] (O2) -- (A2); \draw[ar] (A2) -- (S2);
+      \node at (0,-1.3) {\large $p(O)\;p(A\given O)\;p(S\given O,A)$};
+      \node[font=\footnotesize, muted] at (0,-2.0) {no arrow can be dropped};
+      \node[text=prob] at (0,-2.8) {\large $1 + 2 + 4 = 7$ numbers};
+    \end{scope}
+  \end{tikzpicture}
 
-      \vspace{0.6em}
-      \footnotesize
-      Numbers needed to specify it (binary variables):\\[0.3em]
-      \begin{tabular}{@{}l r@{}}
-        \toprule
-        any order, nothing dropped         & $2^3 - 1 = 7$ \\
-        causal, using $A \perp S$          & $1 + 1 + 4 = 6$ \\
-        \midrule
-        $N$ variables, any order           & $2^N - 1$ \\
-        $N$ variables, $\le k$ causes each & $\le N\,2^k$ \\
-        \bottomrule
-      \end{tabular}
-    \end{column}
-  \end{columns}
+  \vspace{0.2em}
+  {\small The robot cannot see the door, so where it points the LiDAR does not depend on it.}
+  \vfill
+  \lesson{One arrow fewer, fewer numbers: $p(A\given S)$ needs one per value of $S$ (2), $p(A)$ needs just 1.}
 \end{frame}
 
 \begin{frame}{Why the causal order wins}
-  \small
-  \begin{columns}[T]
-    \begin{column}{0.48\textwidth}
-      \textbf{1. Sparse.} The arrows you leave out are the independences you know.\\[0.3em]
-      \centering
-      \begin{tikzpicture}
-        \node[mv] (s) at (0,0.9) {$S$}; \node[mv] (a) at (3.2,0.9) {$A$}; \node[mv] (o) at (1.6,0) {$O$};
-        \draw[ma] (s) -- (o); \draw[ma] (a) -- (o);
-        \draw[accent, densely dashed] (s) -- node[above, font=\scriptsize, text=accent] {no arrow: $A\perp S$} (a);
-      \end{tikzpicture}
-
-      \vspace{0.9em}
-      \raggedright
-      \textbf{3. Modular.} Swap the LiDAR for a camera and see what must be re-learnt:\\[0.5em]
-      \centering
-      \setlength{\fboxsep}{2pt}
-      \renewcommand{\arraystretch}{1.5}
-      \begin{tabular}{@{}r l@{}}
-        causal & $p(S)\;p(A)\;\colorbox{accent!30}{$p(O\given S,A)$}$ \\
-        anti-causal & \colorbox{accent!30}{$p(O)$}\;\colorbox{accent!30}{$p(A\given O)$}\;\colorbox{accent!30}{$p(S\given O,A)$} \\
-      \end{tabular}
-    \end{column}
-    \begin{column}{0.48\textwidth}
-      \textbf{2. Each factor is physics.} Nobody can write down $p(O)$, every possible scan.\\[0.3em]
-      \centering
-      \begin{tikzpicture}
-        \node[mv] (s0) at (0,0.9) {$s_{t-1}$}; \node[mv] (s1) at (2.6,0.9) {$s_t$}; \node[mv, fill=cool!30] (o) at (2.6,0) {$o_t$};
-        \draw[ma] (s0) -- node[above, font=\scriptsize] {motion model} (s1);
-        \draw[ma] (s1) -- node[left, font=\scriptsize] {sensor model} (o);
-      \end{tikzpicture}
-
-      \vspace{0.9em}
-      \raggedright
-      \textbf{4. It runs forwards.} Sampling in order predicts what acting would show:\\[0.3em]
-      \centering
-      \begin{tikzpicture}
-        \node[mv] (s) at (0,0.75) {$S$}; \node[mv, fill=good!25] (a) at (0,0) {$A$}; \node[mv, fill=cool!30] (o) at (2.4,0.375) {$\hat O$};
-        \draw[ma] (s) -- (o); \draw[ma] (a) -- (o);
-        \node[font=\scriptsize, right=2pt of o, align=left] {what I would\\see if I did it};
-      \end{tikzpicture}
-    \end{column}
-  \end{columns}
+  \centering
+  \begin{tikzpicture}[scale=1.12, transform shape, vs/.style={draw=cool!80!black, circle, minimum size=0.85cm, fill=cool!15, font=\small},
+      vo/.style={draw=good!70!black, circle, minimum size=0.85cm, fill=good!15, font=\small},
+      va/.style={draw=black!60, circle, minimum size=0.85cm, fill=black!8, font=\small},
+      ar/.style={-{Stealth[length=2.2mm]}, very thick},
+      ttl/.style={font=\bfseries}, cpn/.style={font=\footnotesize, align=center, text width=3.6cm}]
+    % 1. physics
+    \node[ttl] at (0,1.9) {Each factor is physics};
+    \node[vs] (s0) at (-0.9,0.8) {$s_{t-1}$}; \node[vs] (s1) at (0.9,0.8) {$s_t$}; \node[vo] (o1) at (0.9,-0.8) {$o_t$};
+    \draw[ar] (s0) -- node[above, font=\footnotesize] {motion} (s1);
+    \draw[ar] (s1) -- node[left, font=\footnotesize] {sensor} (o1);
+    \node[cpn] at (0,-1.9) {nobody can write $p(O)$:\\every possible scan};
+    % 2. modular
+    \begin{scope}[xshift=4.0cm]
+      \node[ttl] at (0,1.9) {Modular};
+      \node[font=\footnotesize] at (0,1.35) {swap the LiDAR for a camera};
+      \node[vs] (S) at (-0.9,0.5) {$S$}; \node[va] (A) at (0.9,0.5) {$A$}; \node[vo] (O) at (0,-0.6) {$O$};
+      \draw[ar, accent] (S) -- (O); \draw[ar, accent] (A) -- (O);
+      \node[cpn, text=accent] at (0,-1.55) {only $p(O\given S,A)$\\is re-learnt};
+      \node[cpn, muted] at (0,-2.35) {anti-causal: all three factors};
+    \end{scope}
+    % 3. runs forwards
+    \begin{scope}[xshift=8.0cm]
+      \node[ttl] at (0,1.9) {It runs forwards};
+      \node[vs] (S3) at (-0.9,0.5) {$S$}; \node[va] (A3) at (0.9,0.5) {$A$};
+      \node[vo, densely dashed] (O3) at (0,-0.6) {$\hat O$};
+      \draw[ar] (S3) -- (O3); \draw[ar] (A3) -- (O3);
+      \node[cpn] at (0,-1.55) {sample in order:\\what I would see if I did $A$};
+    \end{scope}
+  \end{tikzpicture}
+  \vfill
+  \lesson{Causal factors: measure each one, swap each one, run them forwards to predict.}
 \end{frame}
 
 \begin{frame}{Three things you can build from one joint}
-  \begin{columns}[T]
-    \begin{column}{0.31\textwidth}
-      \begin{block}{Perception only}
-        \centering $p(s\given o)$\\[0.3em]
-        \begin{tikzpicture}
-          \node[mv, fill=cool!30] (o) at (0,0) {$O$}; \node[mv] (s) at (1.8,0) {$S$};
-          \draw[ma] (o) -- (s);
-        \end{tikzpicture}\\[0.2em]
-        \raggedright\scriptsize A classifier, a detector.
-      \end{block}
-    \end{column}
-    \begin{column}{0.31\textwidth}
-      \begin{block}{Control only}
-        \centering $p(a\given o)$\\[0.3em]
-        \begin{tikzpicture}
-          \node[mv, fill=cool!30] (o) at (0,0) {$O$}; \node[mv, fill=good!25] (a) at (1.8,0) {$A$};
-          \draw[ma] (o) -- (a);
-        \end{tikzpicture}\\[0.2em]
-        \raggedright\scriptsize PID, a hand-written controller, a learnt policy: the factor
-        $p(A\given O)$ of the anti-causal order, on its own.
-      \end{block}
-    \end{column}
-    \begin{column}{0.31\textwidth}
-      \begin{exampleblock}{The generative model}
-        \centering $p(s)\,p(a)\,p(o\given s, a)$\\[0.3em]
-        \begin{tikzpicture}
-          \node[mv] (s) at (0,0) {$S$}; \node[mv, fill=cool!30] (o) at (1.1,0) {$O$}; \node[mv, fill=good!25] (a) at (2.2,0) {$A$};
-          \draw[ma] (s) -- (o); \draw[ma] (a) -- (o);
-        \end{tikzpicture}\\[0.2em]
-        \raggedright\scriptsize Explains, predicts, and chooses by inference. This is what we build.
-      \end{exampleblock}
-    \end{column}
-  \end{columns}
-  \vspace{0.5em}
-  \centering\footnotesize
+  \centering
+  \begin{tikzpicture}[vs/.style={draw=cool!80!black, circle, minimum size=0.85cm, fill=cool!15},
+      vo/.style={draw=good!70!black, circle, minimum size=0.85cm, fill=good!15},
+      va/.style={draw=black!60, circle, minimum size=0.85cm, fill=black!8},
+      ar/.style={-{Stealth[length=2.2mm]}, very thick},
+      ttl/.style={font=\bfseries}, ex/.style={font=\footnotesize, align=center, text width=3.4cm}]
+    % perception only
+    \node[ttl] at (0,1.5) {Perception only};
+    \node at (0,0.9) {$p(s\given o)$};
+    \node[vo] (o1) at (-0.8,0) {$O$}; \node[vs] (s1) at (0.8,0) {$S$}; \draw[ar] (o1) -- (s1);
+    \node[ex] at (0,-1.0) {a classifier, a detector};
+    % control only
+    \begin{scope}[xshift=3.9cm]
+      \node[ttl] at (0,1.5) {Control only};
+      \node at (0,0.9) {$p(a\given o)$};
+      \node[vo] (o2) at (-0.8,0) {$O$}; \node[va] (a2) at (0.8,0) {$A$}; \draw[ar] (o2) -- (a2);
+      \node[ex] at (0,-1.0) {PID, a hand-written controller, model-free RL};
+    \end{scope}
+    % generative model
+    \begin{scope}[xshift=7.8cm]
+      \node[ttl, text=accent] at (0,1.5) {The generative model};
+      \node at (0,0.9) {$p(s)\,p(a)\,p(o\given s,a)$};
+      \node[vs] (s3) at (-1.1,0) {$S$}; \node[vo] (o3) at (0,-0.3) {$O$}; \node[va] (a3) at (1.1,0) {$A$};
+      \draw[ar] (s3) -- (o3); \draw[ar] (a3) -- (o3);
+      \node[ex] at (0,-1.0) {what we build};
+      \node[ex, muted, text width=4.2cm, anchor=north] at (0,-1.35) {model-based RL learns it too,\\then adds a reward};
+    \end{scope}
+  \end{tikzpicture}
+
+  \vspace{0.6em}
+  \footnotesize
   \begin{tabular}{@{}l c c c c c@{}}
     \toprule
      & acts, in the world & says what it & notices it & knows what it & survives a \\
      & it was tuned in & expects to see & is surprised & does not know & sensor swap \\
     \midrule
-    controller, policy $p(a\given o)$ & $\checkmark$ & $\times$ & $\times$ & $\times$ & $\times$ \\
-    \alert{the joint}                 & $\checkmark$ & $\checkmark$ & $\checkmark$ & $\checkmark$ & $\checkmark$ \\
+    controller, model-free RL & $\checkmark$ & $\times$ & $\times$ & $\times$ & $\times$ \\
+    \alert{the joint}         & $\checkmark$ & $\checkmark$ & $\checkmark$ & $\checkmark$ & $\checkmark$ \\
     \bottomrule
   \end{tabular}
 \end{frame}
 
+\begin{frame}{Time: one copy of each variable per step}
+  \centering
+  \vspace{0.6em}
+  \begin{tikzpicture}[v/.style={draw, circle, minimum size=0.95cm, font=\small, inner sep=1pt},
+      s/.style={v, draw=cool!80!black, fill=cool!15}, o/.style={v, draw=good!70!black, fill=good!15},
+      br/.style={decorate, decoration={brace, amplitude=6pt}, thick}]
+    \foreach \x/\l in {0/s_0, 1/s_1, 2/s_2, 4/s_T} \node[s] (s\x) at (1.4*\x, 0) {$\l$};
+    \node at (1.4*3, 0) {$\cdots$};
+    \draw[br, cool!80!black] ($(s0.north west)+(0,0.15)$) -- node[above=7pt, text=cool!80!black] {$s_{0:T} = (s_0, s_1, \dots, s_T)$: every step from $0$ to $T$} ($(s4.north east)+(0,0.15)$);
+    \foreach \x/\l in {1/o_1, 3/o_{t-1}, 4/o_t, 6/o_T} \node[o] (o\x) at (1.4*\x, -2.2) {$\l$};
+    \node at (1.4*2, -2.2) {$\cdots$}; \node at (1.4*5, -2.2) {$\cdots$};
+    \node[o, very thick, draw=accent] at (o4) {$o_t$};
+    \node[font=\footnotesize, text=accent] at (1.4*4, -1.45) {now};
+    \draw[br, accent] ($(o3.south east)+(0,-0.15)$) -- node[below=7pt, text=accent] {$o_{<t} = o_{1:t-1}$: everything seen before now} ($(o1.south west)+(0,-0.15)$);
+  \end{tikzpicture}
+
+  \vspace{0.8em}
+  {\large $\displaystyle \prod_{t=1}^{T} f_t \;=\; f_1\, f_2 \cdots f_T$}\qquad
+  {\small one factor per step, multiplied}
+  \vfill
+  \lesson{A subscript is a time; $a{:}b$ means every step from $a$ to $b$.}
+\end{frame}
+
 \begin{frame}{The robot's joint, in causal order}
   \centering
-  \begin{tikzpicture}[
+  \begin{tikzpicture}[yscale=0.78, 
       v/.style={draw, circle, minimum size=0.85cm, font=\small},
-      s/.style={v, fill=muted!15}, o/.style={v, fill=cool!15}, a/.style={v, fill=good!15},
-      arr/.style={-{Stealth}, thick}]
-    \foreach \t/\x in {0/0, 1/2.4, 2/4.8, 3/7.2} {
-      \node[s] (s\t) at (\x, 0) {$s_{\t}$};
-    }
-    \foreach \t/\x in {1/2.4, 2/4.8, 3/7.2} {
-      \node[o] (o\t) at (\x, -1.5) {$o_{\t}$};
-      \node[a] (a\t) at (\x - 1.2, 1.3) {$a_{\t}$};
+      s/.style={v, draw=cool!80!black, fill=cool!15}, o/.style={v, draw=good!70!black, fill=good!15},
+      a/.style={v, draw=black!60, fill=black!8},
+      arr/.style={-{Stealth}, thick}, seen/.style={-{Stealth}, thick, densely dashed, black!45}]
+    \foreach \t/\x in {0/0, 1/2.6, 2/5.2, 3/7.8} \node[s] (s\t) at (\x, 0) {$s_{\t}$};
+    \foreach \t/\x in {1/2.6, 2/5.2, 3/7.8} {
+      \node[o] (o\t) at (\x, -1.6) {$o_{\t}$};
+      \node[a] (a\t) at (\x - 1.3, 1.5) {$a_{\t}$};
       \draw[arr] (s\t) -- (o\t);
       \draw[arr] (a\t) -- (s\t);
     }
     \draw[arr] (s0) -- (s1); \draw[arr] (s1) -- (s2); \draw[arr] (s2) -- (s3);
-    \node at (8.6, 0) {$\cdots$};
+    \draw[seen] (o1) -- (a2); \draw[seen] (o2) -- (a3);
+    \node at (9.2, 0) {$\cdots$};
+    \foreach \t in {1,2,3} \path (a\t) -- node[midway, right=1pt, font=\scriptsize, muted] {moves} (s\t);
+    \node[font=\scriptsize, muted, align=center] at (0.2,-1.6) {dashed: the next\\action is chosen from\\what it has seen};
   \end{tikzpicture}
+
+  {\small Chain rule in the order the world produces them: $s_0;\; a_1, s_1, o_1;\; a_2, s_2, o_2;\;\dots$\\
+  each factor keeps only the arrows that point into its variable.}
+  \vspace{-0.4em}
   \[
     p(s_{0:T}, o_{1:T}, a_{1:T}) =
-    \underbrace{p(s_0)}_{\text{prior}}\;
+    \underbrace{\textcolor{cool!80!black}{p(s_0)}}_{\text{prior}}\;
     \prod_{t=1}^{T}
-    \underbrace{p(a_t)}_{\text{policy}}\,
-    \underbrace{p(s_t\given s_{t-1}, a_t)}_{\text{motion model}}\,
-    \underbrace{p(o_t\given s_t)}_{\text{sensor model}}
+    \underbrace{p(a_t\given o_{<t})}_{\text{policy, from past }o}\,
+    \underbrace{\textcolor{cool!80!black}{p(s_t\given s_{t-1}, a_t)}}_{\text{motion model}}\,
+    \underbrace{\textcolor{good!70!black}{p(o_t\given s_t)}}_{\text{sensor model}}
   \]
-  \small
-  $(3T+1)!$ orderings are available, and we write one: each factor touches at most three
-  variables and is a piece of physics. This is the \textbf{generative model}; tomorrow we divide it
-  among the processes that actually compute it.
+  {\footnotesize\color{muted} Here $A$ moves the robot; in the door example, $A$ only chose where to look.}
+  \vfill
+  \lesson{The generative model: one prior, and the same three factors at every step.}
 \end{frame}
 
 \begin{frame}{Bayes' rule is the three operations in a row}
@@ -761,6 +783,37 @@
   \includegraphics[width=0.92\textwidth]{d1_bayes_ops.pdf}
 
   \lesson{The shaded area is where exact inference dies; the rest of today is how not to compute it.}
+\end{frame}
+
+\begin{frame}{The robot acts on what it sees, not on the world}
+  \centering
+  \begin{tikzpicture}[v/.style={draw, circle, minimum size=1.0cm},
+      vs/.style={v, draw=cool!80!black, fill=cool!15}, vo/.style={v, draw=good!70!black, fill=good!15},
+      va/.style={v, draw=black!60, fill=black!8},
+      ar/.style={-{Stealth[length=2.4mm]}, very thick},
+      side/.style={font=\footnotesize, muted}]
+    \foreach \x/\ttl in {0/{first step: nothing seen yet}, 6.4/{later steps}} {
+      \begin{scope}[xshift=\x cm]
+        \fill[muted!20] (-0.45,-1.3) rectangle (0.45,1.3);
+        \node[font=\bfseries] at (0,2.1) {\ttl};
+        \node[side] at (-1.7,1.55) {world}; \node[side] at (0,1.55) {senses}; \node[side] at (1.7,1.55) {robot};
+      \end{scope}}
+    % first step
+    \node[vs] (S1) at (-1.7,0) {$S$}; \node[va] (A1) at (1.7,0) {$A$};
+    \node[font=\footnotesize, text=accent, align=center] at (0,-1.75) {no path: $A$ cannot depend on $S$};
+    % later
+    \begin{scope}[xshift=6.4cm]
+      \node[vs] (S2) at (-1.7,0) {$S$}; \node[vo] (O2) at (0,0) {$o_{<t}$}; \node[va] (A2) at (1.7,0) {$A$};
+      \draw[ar] (S2) -- (O2); \draw[ar] (O2) -- (A2);
+      \node[font=\footnotesize, text=accent, align=center] at (0,-1.75) {the only path goes through what it has seen};
+    \end{scope}
+  \end{tikzpicture}
+
+  \vspace{1.0em}
+  {\large You take an umbrella because of the \textcolor{good!70!black}{forecast}, not because of tomorrow's \textcolor{cool!80!black}{rain}.}\\[0.3em]
+  {\small Same forecast, same decision, whatever the weather turns out to be.}
+  \vfill
+  \lesson{Given what it has seen, the robot's action is independent of the world.}
 \end{frame}
 
 % =================================================================================================
