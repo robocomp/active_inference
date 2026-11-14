@@ -30,12 +30,12 @@ namespace rc::door::core::bf
     std::vector<double> w(log_w.size(), 0.0);
     double mx = -std::numeric_limits<double>::infinity();
     for (const double v : log_w)
-        mx = std::max(mx, v);
+        if (not std::isnan(v)) mx = std::max(mx, v);   // a NaN weight is no weight (explicit: it used to be dropped only by the order of std::max)
     if (not std::isfinite(mx))
         return w;   // nothing is possible: no responsibility anywhere (callers always include clutter, so this is a corner)
     double z = 0.0;
     for (std::size_t i = 0; i < log_w.size(); ++i)
-        z += (w[i] = std::exp(log_w[i] - mx));
+        z += (w[i] = std::isnan(log_w[i]) ? 0.0 : std::exp(log_w[i] - mx));
     for (double& v : w)
         v /= z;
     return w;

@@ -3,7 +3,7 @@ zed,min_fill,0.1,0,views_tape_dm+tape_e2e18+tape_e2e19 Webots labels 2026-11-14
 zed,max_fill,1.5,0,views_tape_dm+tape_e2e18+tape_e2e19 Webots labels 2026-11-14
 zed,soft,0.06,0,views_tape_dm+tape_e2e18+tape_e2e19 Webots labels 2026-11-14
 zed,hit_rate,0.938295,43,views_tape_dm+tape_e2e18+tape_e2e19 Webots labels 2026-11-14
-zed,false_alarm,0.194284,13,views_tape_dm+tape_e2e18+tape_e2e19 Webots labels 2026-11-14
+zed,false_alarm,0.02,0,compiled — fit unidentified (envelope mismatch on non-door views; n=13)
 ricoh,min_fill,0.216,0,views_tape_dm+tape_e2e18+tape_e2e19 Webots labels 2026-11-14
 ricoh,max_fill,1.5,0,views_tape_dm+tape_e2e18+tape_e2e19 Webots labels 2026-11-14
 ricoh,soft,0.06,0,views_tape_dm+tape_e2e18+tape_e2e19 Webots labels 2026-11-14

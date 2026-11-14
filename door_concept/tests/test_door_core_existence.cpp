@@ -1600,8 +1600,11 @@ int main()
             const std::uint64_t keep = std::next(r.w.st.begin())->first, drop = r.w.st.begin()->first;
             const float paid = r.w.st.at(keep).belief.prior.base_rate;
             r.w.st.erase(drop);
-            r.look(stand(4.0f, 0.0f, 1.5f), {1.5f, kWallY + 0.01f}, {{2.0f, kWallY, 0.85f}});
-            std::print("removing_one_frees_other: base_rate {:.3f} -> {:.3f} (first {:.3f})\n", paid, r.w.st.at(keep).belief.prior.base_rate, first);
+            const float kept_x = r.w.st.at(keep).aperture.centre_xy().x();   // (the unordered map decides which of the two stays: look at ITS mask)
+            r.look(stand(4.0f, 0.0f, kept_x), {kept_x, kWallY + 0.01f}, {{kept_x, kWallY, 0.85f}});
+            std::print("removing_one_frees_other: base_rate {:.3f} -> {:.3f} (first {:.3f}); {} candidate(s):", paid, r.w.st.at(keep).belief.prior.base_rate, first, r.core.candidates().size());
+            for (const auto& c : r.core.candidates()) std::print(" place_{} ({:.2f},{:.2f}) L={:+.2f} base {:+.2f} wall_seed {}", c.key, c.xy.x(), c.xy.y(), c.belief.L(), c.belief.prior.base_rate, c.wall_seed);
+            std::print("\n");
             CHECK(paid < first - 1.0f);
             CHECK(std::abs(r.w.st.at(keep).belief.prior.base_rate - first) < 1e-4f);
         }

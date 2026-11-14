@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <format>
 #include <limits>
@@ -313,12 +314,20 @@ double DoorCore::log_birth(const Vec2f& xy, float sd) const
     const auto& cfg = cfg_.door;
     const auto& polygon = fit_.room_polygon();
     const auto& groups = groups_cached();
-    const rc::DoorFitState th = typical_door_at(xy, cfg.door_prior_w_m, cfg.door_prior_h_m, polygon);
+    const rc::DoorFitState th = typical_door_at(xy, cfg.exist_typical_w_m, cfg.exist_typical_h_m, polygon);   // the TYPICAL real door (Existence.Typical*), not the fit's prior (spec §3.4)
     const int wall = wall_of(th.aperture.centre_xy(), polygon, groups);
     // the live doors only (a candidate IS the new-door hypothesis, not another door), charged by distinctness as everywhere else
     const std::vector<float> r_others = other_p_on_wall(wall, polygon, groups, ~std::uint64_t{0}, ~std::uint64_t{0}, xy, sd * sd, /*doors_only=*/true);
     const PlacePrior pp = prior_of(th, polygon, fit_.room_is_proto(), fit_.room_band(), 0, cfg.tracker_detection_noise_m, cfg.door_prior_h_std, false,
                                    existence_size_prior(cfg), sd, sd, sd, std::numeric_limits<float>::quiet_NaN(), &rates_, r_others);
+    // ★EXPLICIT FINITE GUARD (final review, minor 17): a non-finite prior total (a NaN from a degenerate outline or variance) must not become NaN responsibilities
+    //  for every cause of the mask; the place has no birth weight (log 0), and it is said, not hidden by an ordering of std::max.
+    if (const double tot = static_cast<double>(pp.total()); not std::isfinite(tot))
+    {
+        if (++nonfinite_birth_ <= 3 or nonfinite_birth_ % 600 == 0)
+            std::fprintf(stderr, "door_concept: [existence] non-finite place prior (%f) at (%.2f, %.2f): that place has no birth weight (%d so far)\n", tot, xy.x(), xy.y(), nonfinite_birth_);
+        return -std::numeric_limits<double>::infinity();
+    }
     return -std::log1p(std::exp(-static_cast<double>(pp.total())));   // log of the logistic: stable for either sign
 }
 
@@ -360,7 +369,7 @@ bool DoorCore::live_door_explains(const std::vector<Vec2f>& polygon, const rc::d
     const float rn2 = cfg.tracker_detection_noise_m * cfg.tracker_detection_noise_m;
     const std::vector<int> groups = wall_groups(polygon, band.sigma_m);   // the CALLER's room, not the core's (it takes its outline up at the next step)
     const auto of_room = [&](std::uint64_t id) { return std::ranges::find(room_doors, id) != room_doors.end(); };
-    const rc::DoorFitState th = typical_door_at(xy, cfg.door_prior_w_m, cfg.door_prior_h_m, polygon);
+    const rc::DoorFitState th = typical_door_at(xy, cfg.exist_typical_w_m, cfg.exist_typical_h_m, polygon);   // as log_birth
     const int wall = wall_of(th.aperture.centre_xy(), polygon, groups);
     const float sd = std::sqrt(std::max(1e-9f, var));
     // log b - log Lambda of a NEW door at the place: the room's live doors on its wall charge the base rate, weighted by distinctness (as log_birth)
@@ -403,7 +412,7 @@ void DoorCore::compute_mask_causes(const DoorCycleInput& /*in*/)
         return;
     const auto& pkt = masks_.packet();
     const auto& polygon = fit_.room_polygon();
-    const auto groups = wall_groups(polygon, fit_.room_band().sigma_m);
+    const auto& groups = groups_cached();   // once per outline, not per cycle and call
     // the live doors as causes (those with a belief); r = their previous-cycle p, so nothing depends on this cycle's own update
     std::vector<DoorCauseInput> doors;
     struct Along { Vec2f centre, u; float var; };
@@ -450,7 +459,10 @@ void DoorCore::compute_mask_causes(const DoorCycleInput& /*in*/)
         const double wall_len = wall_length_at(dv.xy);
         mask_log_birth_[i] = log_b;
         MaskCauseModel model;
-        model.log_birth = log_b;
+        // ★A HOLE HOLDS ONE DOOR, for the aperture mode as for the leaf mode below: a new door at the hole a live door stands in has the mass the live door leaves,
+        //  (1 − r · overlap). Without it a mask exactly on a live door was shared with a duplicate label at the same hole (one currency, final review 9, makes the
+        //  new place's perfect-fit density 1/√(2πR) against the door's R_eff, which the door's own larger prior r used to hide behind a constant).
+        model.log_birth = log_b + std::log(std::max(hole_free(typical_door_at(dv.xy, cfg.exist_typical_w_m, cfg.exist_typical_h_m, polygon).aperture, groups), 1e-300));   // 1e-300: numerical floor on a log
         model.log_kappa = std::log(std::max(1e-9, static_cast<double>(dm.false_alarm)));
         model.log_pd_new = std::log(std::max(1e-9, static_cast<double>(dm.hit_rate)));
         model.along_len_m = wall_len;
@@ -739,15 +751,24 @@ void DoorCore::prepare_candidates(const DoorCycleInput& in, const std::vector<rc
     // a candidate a live door now explains is that door (born, restored or carried meanwhile): it is no longer pending
     // (one-model: no gate. A live door explains a candidate when the door's cause outweighs a new door's at the candidate's place:
     //  log r_i − ½ m² against log b, the same comparison the masks' responsibilities make.)
+    // the live doors' variance ALONG THEIR WALL (the fit's s variance plus the pose chain's, as compute_mask_causes weighs a door along it)
+    std::unordered_map<std::uint64_t, float> door_along_var;
+    if (cfg.exist_one_model)
+        for (const auto& [id, st] : world_->fit_states())
+            if (not st->is_bearing_hypothesis and st->ai2_initialized)
+                door_along_var[id] = std::max(0.0f, st->ai2_belief.covariance()(0, 0)) + st->chain_cov_xx;
     const auto live_door_outweighs_new_at = [&](const Vec2f& cxy, float cvar)
     {
-        // a place's existence against a NEW place at the same spot, as DENSITIES along the wall: r N(m; 0, var) against b / Λ
+        // a place's existence against a NEW place at the same spot, as DENSITIES along the wall: r N(δ; 0, var) against b / Λ, δ the offset ALONG the wall and var the
+        // door's variance along it plus the place's (a 2-D distance over a 1-D variance counted the across-wall error as along-wall: final review, minor 15)
         const double lb = log_birth(cxy, std::sqrt(std::max(1e-9f, cvar))) - std::log(wall_length_at(cxy));
+        const Vec2f u = typical_door_at(cxy, cfg.exist_typical_w_m, cfg.exist_typical_h_m, fit_.room_polygon()).aperture.wall_u;
         for (const auto& t : tracks)
         {
             const Vec2f e = cxy - t.xy;
-            const float cv = t.has_cov ? 0.5f * (t.cov(0, 0) + t.cov(1, 1)) : cfg.tracker_gate_fallback_m * cfg.tracker_gate_fallback_m;
-            const double m2 = e.squaredNorm() / std::max(1e-9f, cv + cvar);
+            const auto dv = door_along_var.find(t.id);
+            const float cv = dv != door_along_var.end() ? dv->second : t.has_cov ? static_cast<float>(u.dot(t.cov * u)) : cfg.tracker_detection_noise_m * cfg.tracker_detection_noise_m;
+            const double m2 = static_cast<double>(e.dot(u)) * static_cast<double>(e.dot(u)) / std::max(1e-9f, cv + cvar);
             const auto it = last_p_door_.find(t.id);
             if (std::log(std::max(1e-9, double(it != last_p_door_.end() ? it->second : 1.0f))) - 0.5 * m2
                 - 0.5 * std::log(2.0 * std::numbers::pi * std::max(1e-9f, cv + cvar)) >= lb) return true;
@@ -862,7 +883,7 @@ void DoorCore::prepare_candidates(const DoorCycleInput& in, const std::vector<rc
         self_det.try_emplace(static_cast<std::size_t>(best), static_cast<int>(d));
     }
     // every pending candidate in this room receives the frame (hits from its own detection, misses where it should be seen)
-    const auto groups = wall_groups(polygon, fit_.room_band().sigma_m);
+    const auto& groups = groups_cached();   // once per outline, not per cycle and call
     std::unordered_map<int, int> doors_on_wall;
     for (const auto& [id, st] : world_->fit_states())
         if (not st->is_bearing_hypothesis) ++doors_on_wall[wall_of(st->aperture.centre_xy(), polygon, groups)];
@@ -1104,7 +1125,7 @@ void DoorCore::update_existence(const DoorCycleInput& in, DoorCycleOutput& out)
 
     const auto states = world_->fit_states();
     const auto& polygon = fit_.room_polygon();
-    const auto groups = wall_groups(polygon, fit_.room_band().sigma_m);
+    const auto& groups = groups_cached();   // once per outline, not per cycle and call
     for (const auto& [id, st] : states) door_seq_.try_emplace(id, next_door_seq_++);
     const Costs costs = costs_.costs(cfg.exist_max_room_s);
     std::vector<std::uint64_t> to_remove;

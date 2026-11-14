@@ -36,6 +36,18 @@ int main()
         CHECK(std::abs(std::accumulate(w.begin(), w.end(), 0.0) - 1.0) < 1e-12);
         CHECK(w[3] > w[1] and w[1] > w[2] and w[2] > w[0]);
     }
+    // responsibilities_nan_is_no_weight (final review, minor 17): a NaN log weight takes no responsibility and does not poison the others, whatever its position
+    {
+        const double nan = std::numeric_limits<double>::quiet_NaN();
+        for (const std::vector<double>& lw : {std::vector<double>{nan, -1.0, -2.0}, std::vector<double>{-1.0, nan, -2.0}, std::vector<double>{-1.0, -2.0, nan}})
+        {
+            const auto w = responsibilities(lw);
+            double s = 0.0; for (const double v : w) s += v;
+            CHECK(std::abs(s - 1.0) < 1e-12);
+            for (std::size_t i = 0; i < lw.size(); ++i) CHECK(std::isfinite(w[i]) and (std::isnan(lw[i]) ? w[i] == 0.0 : w[i] > 0.0));
+        }
+        CHECK(responsibilities(std::vector<double>{nan, nan}) == std::vector<double>(2, 0.0));
+    }
     // responsibilities_stable
     {
         const std::vector<double> lw{1000.0, 1000.0};

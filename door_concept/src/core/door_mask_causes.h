@@ -10,11 +10,14 @@
 // CURRENCY. A mask is ONE observation: its residual across the surface it is attributed to, scored by the mean over its points of
 // the fit's own unnormalised point mixture u (door_belief.cpp mixture_unnorm: u_surface = (1 − ε) exp(−d²/2R), 1 = dead on the
 // surface). Each cause is a DENSITY in that residual (units 1/m), so causes are comparable without a hand-set scale:
-//   door i :  r_i · p_D,i · exp(mean log u) · (R/R_eff)^½ / √(2π R_eff) · exp(−½ δ²/σ²_along),  R_eff = R + σ²_across (the door's
+//   door i :  r_i · p_D,i · exp(mean log u) · (R/R_eff)^½ / √(2π R_eff) · N(δ; 0, σ²_along),  R_eff = R + σ²_across (the door's
 //             uncertainty across its wall convolves the kernel) and δ the mask's offset along the wall against the door's σ_along —
 //             what the old code spelt as one Mahalanobis radius;
-//   new    :  b · p_D · (1 − ε) / Λ        b = the wall's base-rate probability, Λ = the length of the wall the mask lies on;
-//   clutter:  κ · (1 − ε) / Λ              κ per view, spread over the SAME measure (uniform along the wall, spec §3.4).
+//   new    :  b · p_D · (1 − ε) / (Λ √(2πR))   b = the wall's base-rate probability, Λ = the length of the wall the mask lies on; √(2πR) the residual density of a
+//             perfect fit (no across uncertainty), the same factor a door carries at R_eff;
+//   clutter:  κ · (1 − ε) / (Λ √(2πR))    κ per view, spread over the SAME measure (uniform along the wall, spec §3.4).
+//   door i's along-wall term is the NORMALISED Gaussian N(δ; 0, σ²_along) (final review 9): all four causes are densities in the same two quantities, so a broad door
+//   does not out-weigh a sharp new place for free.
 // New and clutter both fit the mask perfectly (a spurious mask is as door-shaped as a real new one): only their PRIORS, b against
 // κ, tell them apart, and the geometry decides which EXISTING door, if any, owns the mask. A door's prior mass r·p_D is split
 // between its two appearances by P(leaf open) (the φ posteriors): shut, the leaf IS the aperture; open, the leaf is where the
@@ -122,7 +125,11 @@ struct MaskCauseModel
     constexpr double kTwoPi = 6.283185307179586;
     const double eps = std::clamp(static_cast<double>(bp.clutter_frac), 1e-6, 0.99);   // clamp: the mixture's own domain (door_belief.cpp)
     const double Rr = std::max(1e-9, static_cast<double>(R));
-    const double log_clutter = model.log_kappa + std::log1p(-eps) - std::log(std::max(1e-9, model.along_len_m));
+    // ONE CURRENCY (final review 9): every cause is a DENSITY in the mask's residual across the surface (1/√(2πR_eff), normalised) AND along the wall (N(δ; 0, σ²_along) for a
+    // door, 1/Λ for a door nobody has and for clutter). A new door and clutter fit the mask perfectly, so they carry the residual density of a perfect fit, 1/√(2πR) at no across
+    // uncertainty; a door carries it at R_eff = R + σ²_across, and pays for being broad along the wall through its NORMALISED along-wall Gaussian.
+    const double log_perfect = -0.5 * std::log(kTwoPi * Rr);
+    const double log_clutter = model.log_kappa + std::log1p(-eps) + log_perfect - std::log(std::max(1e-9, model.along_len_m));
     const double reach_floor = log_clutter - 20.0;
     for (const auto& d : doors)
     {
@@ -130,6 +137,13 @@ struct MaskCauseModel
             continue;
         const float Reff = R + std::max(0.0f, d.place_var);
         const double norm = 0.5 * std::log(Rr / std::max(1e-9, static_cast<double>(Reff))) - 0.5 * std::log(kTwoPi * Reff);
+        // where the mask sits along the wall against where the door may be along it: the Gaussian density along the wall (normalised: a broad door is thinly spread)
+        const double along = d.along_var > 0.0f ? -0.5 * double(d.along_offset_m) * d.along_offset_m / double(d.along_var) - 0.5 * std::log(kTwoPi * double(d.along_var)) : 0.0;
+        const double base = d.log_r + d.log_pd + along;
+        // EXACT BOUND (resource, not a gate): the mixture's mean log u is at most 0 (u <= 1), so this door's cause cannot exceed base + norm; below the reach floor it
+        // could never enter the list, and its leaf and aperture mixtures need not be computed.
+        if (base + norm < reach_floor)
+            continue;
         double p_open = 0.0;
         double log_leaf = -std::numeric_limits<double>::infinity();
         if (d.leaf != nullptr)
@@ -142,19 +156,16 @@ struct MaskCauseModel
             }
         }
         const double log_ap = d.belief->aperture_loglik(pts, Reff) + norm;
-        // where the mask sits along the wall against where the door may be along it: what the old Mahalanobis radius said, as a likelihood
-        const double along = d.along_var > 0.0f ? -0.5 * double(d.along_offset_m) * d.along_offset_m / double(d.along_var) : 0.0;
-        const double base = d.log_r + d.log_pd + along;
         if (p_open < 1.0 and log_ap >= reach_floor)
             out.causes.push_back({CauseKind::Aperture, d.id, base + std::log1p(-p_open) + log_ap});
         if (p_open > 0.0 and log_leaf >= reach_floor)
             out.causes.push_back({CauseKind::Leaf, d.id, base + std::log(p_open) + log_leaf});
     }
-    const double log_new_ap = model.log_birth + model.log_pd_new + std::log1p(-eps) - std::log(std::max(1e-9, model.along_len_m)) + model.log_aperture_factor;
+    const double log_new_ap = model.log_birth + model.log_pd_new + std::log1p(-eps) + log_perfect - std::log(std::max(1e-9, model.along_len_m)) + model.log_aperture_factor;
     double log_new = log_new_ap;
     if (not model.leaf_log_w.empty())
     {
-        const double fixed = model.log_pd_new + std::log1p(-eps);
+        const double fixed = model.log_pd_new + std::log1p(-eps) + log_perfect;
         double mx = log_new_ap;
         for (const double v : model.leaf_log_w) mx = std::max(mx, v + fixed);
         double z = std::isfinite(log_new_ap) ? std::exp(log_new_ap - mx) : 0.0, zl = 0.0, best = -std::numeric_limits<double>::infinity();

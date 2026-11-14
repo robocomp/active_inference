@@ -57,7 +57,7 @@ int main()
         const float q = detect_prob(D.zed, g, 1.f);
         const float h = hit_llr(q, D.zed, 1.f), m = miss_llr(q, false_alarm_eff(D.zed, q));
         std::printf("  zed 1 m: q=%.3g hit=%.4f miss=%.3g\n", q, h, m);
-        CHECK(h >= 0.f and std::abs(m) < 1e-6f);
+        CHECK(h >= 0.f and std::abs(m) < 1e-3f);   // a miss in a view the door overflows costs ~nothing: the soft envelope leaves q = 2.4e-4 there (1e-6 was the tolerance of the first, sharper envelope)
     }
     { // ricoh_1p4m_defaults_printed (R8: spec's q~0 claim is false; recorded, not forced)
         ViewGeometry g; g.projectable = true; g.vis = 1.f; g.aspect = 1.f; g.fill_h = 0.28145f; g.fill_v = 0.38618f; g.range_m = 1.4f;

@@ -4484,11 +4484,11 @@ void SpecificWorker::step_remembered_looks()
 // room LTSM has not recognised has no twin yet, so nothing is excluded.
 void SpecificWorker::refresh_remembered_rooms()
 {
-    const auto now = std::chrono::steady_clock::now();
-    const bool entered = room_node_id_ != remembered_for_room_;
-    if (not entered and now - remembered_tp_ < std::chrono::seconds(1)) return;
+    // ON ROOM ENTRY ONLY (final review 10d): the read walks the graph's room, wall and object nodes on the compute thread; once a second it was a standing cost
+    // for a prior that changes when the robot changes room (the memory the rates are learned from is the rooms LTSM already holds).
+    if (room_node_id_ == remembered_for_room_) return;
     remembered_for_room_ = room_node_id_;
-    remembered_tp_ = now;
+    remembered_tp_ = std::chrono::steady_clock::now();
     std::optional<std::uint64_t> mine;
     if (const auto room = G->get_node(room_node_id_); room.has_value())
         mine = G->get_attrib_by_name<room_id_att>(room.value());
@@ -4600,7 +4600,10 @@ void SpecificWorker::step_candidate_looks()
         m.aperture = c.theta.aperture;
         m.leaf = c.theta.leaf;
         m.leaf_born = c.leaf_born;
-        const double pm = std::clamp(marg, 1e-9, 1.0 - 1e-9);   // clamp: the domain of a logit
+        // ONE L CURRENCY in a cluster (final review, minor 13): a candidate carries its BELIEF's log odds (the widest blob it ever looked, base rate from the wall's count
+        // posterior), as a door member does; the room-count marginal (`marg`) prices a look elsewhere, it is not a member's evidence
+        (void) marg;
+        const double pm = std::clamp(static_cast<double>(core_->candidate_question_p(c)), 1e-9, 1.0 - 1e-9);   // clamp: the domain of a logit
         m.L = std::log(pm) - std::log1p(-pm);
         if (c.leaf_born)
             m.alts = core_->leaf_alternatives(c);

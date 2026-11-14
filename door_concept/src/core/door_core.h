@@ -37,6 +37,7 @@
 // this agent (create → adopt → own the birth slice in one cycle; decoupling those steps was the 403-birth churn the
 // birth block's own comment records). The replay answers create_door() with the id the recorded run got.
 #pragma once
+#include <deque>
 #include <cstdint>
 #include <functional>
 #include <limits>
@@ -347,7 +348,7 @@ private:
     /// ONE-MODEL: the LiDAR opening of a pending candidate's aperture (opening_view_llr on the newest sweep registered to it; nullopt without a sweep).
     [[nodiscard]] std::vector<rc::door::OpeningClaim> live_claims(const rc::door::Aperture& ap, const std::vector<int>& groups) const;
     [[nodiscard]] const rc::door::RegisteredSweep& registered(const rc::door::Aperture& ap) const;
-    mutable std::vector<std::pair<rc::door::Aperture, rc::door::RegisteredSweep>> reg_cache_;   // per cycle
+    mutable std::deque<std::pair<rc::door::Aperture, rc::door::RegisteredSweep>> reg_cache_;   // per cycle; a deque, so a reference registered() returned stays valid when another aperture is added
     [[nodiscard]] double hole_free(const rc::door::Aperture& ap, const std::vector<int>& groups) const;
     [[nodiscard]] std::optional<LidarOpening> candidate_lidar(const rc::DoorFitState& theta, bool leaf_born, const std::vector<int>& groups) const;
     /// ONE-MODEL (final review 1): the per-wall base rate of every door and candidate of the room, from the wall's exact count posterior
@@ -388,6 +389,7 @@ private:
     // PREVIOUS update_existence, so nothing depends on birth order. Rebuilt at the end of each update_existence (stale keys vanish).
     // Doors are keyed by door id; candidates by Candidate::key (the two key spaces never mix: two maps).
     std::unordered_map<std::uint64_t, float> last_p_door_, last_p_cand_;
+    mutable int nonfinite_birth_ = 0;   // log_birth calls whose prior total was not finite (logged, not silent)
     std::unordered_map<std::uint64_t, std::uint64_t> door_origin_;   // door id -> the key of the candidate it was born from
     WallRates rates_{};   // seeds only; Task 4 sets them (set_wall_rates) from the remembered rooms
     /// The previous cycle's p of every other live door and candidate on `wall` (not `self_door` / `self_cand`), for wall_base_rate.

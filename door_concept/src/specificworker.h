@@ -356,7 +356,7 @@ private:
     bool step_hypothesis_looks(std::span<const rc::door::hlook::Member> members, std::span<const std::pair<std::string, std::string>> competing,
                                const std::function<bool(const rc::door::hlook::Member&)>& undecided,
                                const rc::nbv::Sensor& sensor, std::span<const rc::nbv::Obstacle> furniture, bool can_plan);
-    void refresh_remembered_rooms();   // one-model: rates + door-count prior from LTSM's remembered rooms (room entry + every >= 1 s)
+    void refresh_remembered_rooms();   // one-model: rates + door-count prior from LTSM's remembered rooms (on room entry only)
     void step_wall_hypotheses();                            // a promoted room's walls are its door slots (room-door-belief spec §3.3)
     std::uint64_t wall_seeded_room_ = 0;
     std::uint64_t wall_look_key_ = 0;                       // the one wall place being looked at (one node at a time: rates)
