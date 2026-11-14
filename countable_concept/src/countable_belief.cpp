@@ -738,35 +738,43 @@ void CountableBelief::update_size_likelihood(const CountableFrame& frame)
 {
     using Mat6 = Eigen::Matrix<float, 6, 6>;
     using Vec6 = Eigen::Matrix<float, 6, 1>;
+    using Mat3d = Eigen::Matrix3d;
+    using Vec3d = Eigen::Vector3d;
+    using Mat6d = Eigen::Matrix<double, 6, 6>;
+    using Vec6d = Eigen::Matrix<double, 6, 1>;
     const CountableBeliefState s = state_;
     const float sig2 = sigma2();
 
-    Mat6 Id = Mat6::Zero(); Vec6 bd = Vec6::Zero();
+    // DOUBLE throughout: the raw size information is ~4e5 and the Schur remainder along an unobserved depth ~0.2, so float
+    // cancellation would invent 5-14 information units per frame (and an indefinite J). Only the stored summary is float.
+    Mat6d Id = Mat6d::Zero(); Vec6d bd = Vec6d::Zero();
     for (std::size_t i = 0; i < frame.points.size(); ++i)          // the same accumulation as ai::update's lambda
     {
         const float R = (i < frame.R.size() and frame.R[i] > 0.0f) ? frame.R[i] : sig2;
         const auto  r = responsibilities(frame.points[i], s, R);
         const float w = r[0] / R;
         if (w < 1e-6f) continue;
-        const float d = sdf_prim(frame.points[i], s, 0);
-        const Vec6  J = sdf_jacobian(frame.points[i], s, 0);
-        Id.noalias() += w * (J * J.transpose());
-        bd.noalias() += -w * J * d;
+        const double d = sdf_prim(frame.points[i], s, 0);
+        const Vec6d  J = sdf_jacobian(frame.points[i], s, 0).cast<double>();
+        Id.noalias() += double(w) * (J * J.transpose());
+        bd.noalias() += -double(w) * J * d;
     }
-    {   // RAII: the switch is restored even if accumulate_extra throws
+    {   // the extras (data or structure, small) in float, size prior blocks off; RAII restores the switch
+        Mat6 Ie = Mat6::Zero(); Vec6 be = Vec6::Zero();
         struct Off { bool& f; explicit Off(bool& x) : f(x) { f = true; } ~Off() { f = false; } } off(size_prior_off_);
-        accumulate_extra(s, frame, Id, bd);
+        accumulate_extra(s, frame, Ie, be);
+        Id += Ie.cast<double>(); bd += be.cast<double>();
     }
 
-    const Mat6 Scinv = common_mode_inv_diag(frame).asDiagonal();
+    const Vec6 sc = common_mode_inv_diag(frame);
 
     // pseudo-inverse on eigenvalues > 1e-6 · max: an unobserved direction stays unobserved instead of exploding
-    const auto pinv = [](const Eigen::Matrix3f& M) -> Eigen::Matrix3f
+    const auto pinv = [](const Mat3d& M) -> Mat3d
     {
-        const Eigen::SelfAdjointEigenSolver<Eigen::Matrix3f> es(0.5f * (M + M.transpose()));
-        const float top = std::max(es.eigenvalues().cwiseAbs().maxCoeff(), 0.0f);
-        Eigen::Vector3f inv = Eigen::Vector3f::Zero();
-        for (int k = 0; k < 3; ++k) if (es.eigenvalues()(k) > 1e-6f * top and es.eigenvalues()(k) > 0.0f) inv(k) = 1.0f / es.eigenvalues()(k);
+        const Eigen::SelfAdjointEigenSolver<Mat3d> es(0.5 * (M + M.transpose()));
+        const double top = es.eigenvalues().cwiseAbs().maxCoeff();
+        Vec3d inv = Vec3d::Zero();
+        for (int k = 0; k < 3; ++k) if (es.eigenvalues()(k) > 1e-6 * top and es.eigenvalues()(k) > 0.0) inv(k) = 1.0 / es.eigenvalues()(k);
         return es.eigenvectors() * inv.asDiagonal() * es.eigenvectors().transpose();
     };
 
@@ -778,47 +786,53 @@ void CountableBelief::update_size_likelihood(const CountableFrame& frame)
     // depth behind it). No regulariser on the pose block (any pose precision taken from Sigma_ already contains the
     // class prior through the cy-h coupling): pseudo-inverse instead. Select (H, w, h) = (2, 3, 4); pose = (cx, cy, yaw).
     constexpr int S[3] = {2, 3, 4}, P[3] = {0, 1, 5};
-    Eigen::Matrix3f Iss, Isp, Ipp; Eigen::Vector3f bs, bp;
+    Mat3d Iss, Isp, Ipp; Vec3d bs, bp;
     for (int a = 0; a < 3; ++a)
     {
         bs(a) = bd(S[a]); bp(a) = bd(P[a]);
         for (int b = 0; b < 3; ++b) { Iss(a, b) = Id(S[a], S[b]); Isp(a, b) = Id(S[a], P[b]); Ipp(a, b) = Id(P[a], P[b]); }
     }
-    const Eigen::Matrix3f Ppinv = pinv(Ipp);
-    Eigen::Matrix3f J = Iss - Isp * Ppinv * Isp.transpose();
-    J = 0.5f * (J + J.transpose());
-    Eigen::Vector3f g = bs - Isp * Ppinv * bp;
-    {   // the common-mode cap, in the size subspace
-        Eigen::Matrix3f Sc = Eigen::Matrix3f::Zero(); for (int a = 0; a < 3; ++a) Sc(a, a) = Scinv(S[a], S[a]);
-        const auto [J3, g3] = ai::saturate<3>(J, g, Sc); J = J3; g = g3;
+    const Mat3d Ppinv = pinv(Ipp);
+    Mat3d J = Iss - Isp * Ppinv * Isp.transpose();
+    J = 0.5 * (J + J.transpose());
+    Vec3d g = bs - Isp * Ppinv * bp;
+    {   // the common-mode cap, in the size subspace (ai::saturate's Woodbury form, in double)
+        Mat3d Sc = Mat3d::Zero(); for (int a = 0; a < 3; ++a) Sc(a, a) = sc(S[a]);
+        const Mat3d ScM = Sc * (J + Sc).inverse();
+        Mat3d Je = Sc - ScM * Sc;
+        g = ScM * g;
+        J = 0.5 * (Je + Je.transpose());
     }
 
-    const Eigen::Vector3f theta_s(s.H, s.w, s.h);
-    const Eigen::Vector3f mean_frame = theta_s + pinv(J) * g;
+    const Vec3d theta_s(s.H, s.w, s.h);
+    const Vec3d mean_frame = theta_s + pinv(J) * g;
 
     // fold the frame into the recursion (the forgetting is predict_size_likelihood, run before this on every cycle).
     // J is PSD in exact arithmetic; drop numerically negative eigenvalues so rounding cannot subtract information.
     {
-        const Eigen::SelfAdjointEigenSolver<Eigen::Matrix3f> es(J);
-        const Eigen::Vector3f ev = es.eigenvalues().cwiseMax(0.0f);
+        const Eigen::SelfAdjointEigenSolver<Mat3d> es(J);
+        const Vec3d ev = es.eigenvalues().cwiseMax(0.0);
         J = es.eigenvectors() * ev.asDiagonal() * es.eigenvectors().transpose();
     }
-    Eigen::Matrix3f info = size_lik_.info;
-    const Eigen::Vector3f eta = info * size_lik_.mean + J * mean_frame;
+    Mat3d info = size_lik_.info.cast<double>();
+    const Vec3d eta = info * size_lik_.mean.cast<double>() + J * mean_frame;
     info += J;
-    size_lik_.info = info;
-    size_lik_.mean = pinv(info) * eta;
+    size_lik_.info = info.cast<float>();
+    size_lik_.mean = (pinv(info) * eta).cast<float>();
 }
 
-// Forget exactly as the belief does: info <- (info^-1 + q_scale*Q_s)^-1, in the Woodbury form info - info(info + (qQ)^-1)^-1 info,
-// which keeps a null direction null (a pseudo-inverse round trip would turn "no information" into 1/q).
+// Forget exactly as the belief does: info <- (info^-1 + Q)^-1 with Q = q_scale*diag(Q_s), in the inverse-free form
+// (I + info*Q)^-1 * info. A null direction stays null (a pseudo-inverse round trip would turn "no information" into 1/q),
+// and Q = 0 leaves the information untouched (no 1/Q anywhere). Double inside; float stored.
 void CountableBelief::predict_size_likelihood(float q_scale)
 {
     if (size_lik_.info.norm() == 0.0f or not (q_scale > 0.0f)) return;
     const Eigen::Matrix<float, 6, 1> q = process_noise_diag();
-    Eigen::Vector3f qinv;
-    for (int a = 0; a < 3; ++a) qinv(a) = 1.0f / (q_scale * q(2 + a));
-    size_lik_.info = ai::saturate<3>(size_lik_.info, Eigen::Vector3f::Zero(), Eigen::Matrix3f(qinv.asDiagonal())).first;
+    Eigen::Matrix3d Q = Eigen::Matrix3d::Zero();
+    for (int a = 0; a < 3; ++a) Q(a, a) = double(q_scale) * double(q(2 + a));
+    const Eigen::Matrix3d info = size_lik_.info.cast<double>();
+    const Eigen::Matrix3d out  = (Eigen::Matrix3d::Identity() + info * Q).inverse() * info;
+    size_lik_.info = (0.5 * (out + out.transpose())).cast<float>();
 }
 
 // Fold one appearance FrontCue into the door-mode accumulator and adopt the argmax mode. See the header.

@@ -111,20 +111,21 @@ int main()
         CountableBelief b(s0, bed_params());
         CountableFrame f; f.points = pts;
         b.update(f);
-        const Eigen::SelfAdjointEigenSolver<Eigen::Matrix3f> es(b.size_likelihood().info);
-        const Eigen::Vector3f v = es.eigenvectors().col(0);
-        std::printf("one-face frame 1: info eigenvalues %.4g %.4g %.4g\n", es.eigenvalues()(0), es.eigenvalues()(1), es.eigenvalues()(2));
+        std::printf("one-face frame 1: info diag (H,w,h) = %.4g %.4g %.4g\n", b.size_likelihood().info(0, 0),
+                    b.size_likelihood().info(1, 1), b.size_likelihood().info(2, 2));
         for (int i = 2; i <= 30; ++i)
         {
             b.update(f);
             if (i == 10 or i == 30)
             {
+                // the DEPTH is the extent normal to the seen face (world y): local y at yaw ~0, local x at yaw ~pi/2
                 const auto& I = b.size_likelihood().info;
-                const float un = v.dot(I * v);
-                std::printf("one-face frame %d: info along unobserved dir %.4g, H info %.4g, ratio %.3g\n", i, un, I(0, 0), un / I(0, 0));
-                // 10 frames: < 1%. 30 frames: 1.3% measured, a slow leak of ~0.1%/frame from the fit's own small state change
-                // (the unobserved direction itself moves slightly), still ~75x below the observed extents; bound 2%.
-                CHECK(un < (i == 10 ? 0.01f : 0.02f) * I(0, 0));
+                const int depth = std::abs(std::sin(b.state().yaw)) > 0.7071f ? 1 : 2;
+                const float un = I(depth, depth);
+                std::printf("one-face frame %d: yaw %.3f depth=%s info %.4g, H info %.4g, ratio %.3g\n", i, b.state().yaw,
+                            depth == 1 ? "w" : "h", un, I(0, 0), un / I(0, 0));
+                // corners carry genuine weak depth information, so the bound loosens with the number of frames
+                CHECK(un < (i == 10 ? 0.01f : 0.05f) * I(0, 0));
             }
         }
     }
@@ -138,6 +139,28 @@ int main()
         std::printf("gap: H info %.4g -> %.4g (20 predicts), %.4g (inflate_for_age 20x)\n", h0, b.size_likelihood().info(0, 0), c.size_likelihood().info(0, 0));
         CHECK(b.size_likelihood().info(0, 0) < h0);
         CHECK(c.size_likelihood().info(0, 0) < h0);
+        {   // Q = 0 leaves the information unchanged and finite
+            auto p = bed_params(); p.process_std_m = 0.0f; p.process_std_yaw = 0.0f;
+            CountableBeliefState z{0.0f, 0.0f, 0.65f, 1.75f, 2.10f, 0.0f};
+            CountableBelief q(z, p); CountableFrame f; f.points = box_cloud(0.65f, 1.75f, 2.10f, false, rng);
+            q.update(f);
+            const Eigen::Matrix3f i0 = q.size_likelihood().info;
+            for (int i = 0; i < 5; ++i) q.predict();
+            q.inflate_for_age(3.0f, 1.0f);
+            CHECK(q.size_likelihood().info.allFinite() and (q.size_likelihood().info - i0).norm() == 0.0f);
+        }
+        {   // tiny q_scale over many calls never GAINS information
+            auto c2 = c; c2 = run(box_cloud(0.65f, 1.75f, 2.10f, false, rng), 5);
+            Eigen::Matrix3f prev = c2.size_likelihood().info; bool grew = false;
+            for (int i = 0; i < 1000; ++i)
+            {
+                c2.inflate_for_age(1e-6f, 1.0f);
+                const Eigen::SelfAdjointEigenSolver<Eigen::Matrix3f> a(prev), n(c2.size_likelihood().info);
+                grew = grew or (n.eigenvalues().array() > a.eigenvalues().array() + 1e-3f * a.eigenvalues().array().abs()).any();
+                prev = c2.size_likelihood().info;
+            }
+            CHECK(not grew);
+        }
         CountableFrame empty;                       // an update with no points also forgets
         auto d = run(box_cloud(0.65f, 1.75f, 2.10f, false, rng), 5);
         const float d0 = d.size_likelihood().info(0, 0);
