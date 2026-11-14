@@ -3845,7 +3845,15 @@ void SpecificWorker::confirm_carried_crossing()
     const auto row = std::ranges::find_if(identities_, [&](const DoorIdentity& i) { return i.room == c.source_room and i.name == c.source_name; });
     if (row != identities_.end()) { row->crossed = true; save_identities(); }
     if (core_)
-        if (auto* p = core_->places().find(c.source_room, c.source_name); p != nullptr) p->crossed = true;
+        if (auto* p = core_->places().find(c.source_room, c.source_name); p != nullptr)
+        {
+            p->crossed = true;
+            // A crossing refutes the refutation: every "no door here" of this hole (its own row's, an older removal at the same place)
+            // is lifted, so neither the restore nor the private phantom file carries it on (dm10: door_4 removed, re-born, crossed).
+            const int lifted = core_->places().lift_refutations(c.source_room, p->xy, rc::door::restore_same_hole_m(identity_radius_m(), p->width));
+            if (lifted > 0)
+                std::print("door_concept: [crossing] {} ('{}') crossed: {} earlier removal(s) of this place lifted\n", c.source_name, c.source_room, lifted);
+        }
     std::print("door_concept: [crossing] the crossing of {} ('{}') stood: the proof is final\n", c.source_name, c.source_room);
 }
 
@@ -4140,11 +4148,11 @@ void SpecificWorker::step_restore_from_notes()
     const auto all_rows = rc::door::memnote::rows_of_notes(notes, room->name());
     // A refuted place (a removed PlaceRow of this room, phantom-file rows included) is never restored from memory: the note is dropped
     // here and reported handled, so it is adopted and ltsm retires it.
-    std::vector<Eigen::Vector2f> refuted_xy;
+    std::vector<rc::door::RefutedPlace> refuted;
     for (const auto& pr : core_->places().rows())
         if (pr.room == room->name() and pr.removed_wall_ms.has_value())
-            refuted_xy.push_back(pr.xy);
-    auto split = rc::door::drop_refuted_places(all_rows, refuted_xy, identity_radius_m());
+            refuted.push_back({pr.xy, *pr.removed_wall_ms});
+    auto split = rc::door::drop_refuted_places(all_rows, refuted, identity_radius_m());
     for (const auto& nm : split.dropped)
     {
         decision_log_.record(rc::door::DoorDecisionKind::RestoreSkip, 0, nm,

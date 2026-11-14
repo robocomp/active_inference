@@ -329,18 +329,24 @@ inline RestoreDecision plan_restore(std::span<const IdentityRow> rows, std::stri
 /// Rows (notes from ltsm carry no removed_ms) that lie on a REFUTED place of this room (a removed PlaceRow: "no door here", also the rows
 /// injected from the private phantom file): memory never deletes a refuted face, so the agent drops them here, same-hole gate as
 /// plan_restore. `dropped` names them, for the log and for adoption (ltsm then retires the note).
+/// A refutation is EVIDENCE WITH A DATE, not a verdict for ever (live dm10, 2026-11-14): door_4 was removed, re-born 0.23 m away,
+/// crossed, and its note was then dropped on re-entry by the stale removed row. So a refuted place drops a note only when the
+/// removal is NEWER than the note's last sighting (the later observation supersedes the earlier one; an unknown sighting time
+/// counts as oldest), and a CROSSED door is never dropped: a crossing is proof that the opening exists (place_belief.h).
+struct RefutedPlace { Eigen::Vector2f xy = Eigen::Vector2f::Zero(); std::int64_t removed_ms = 0; };
 struct RefutedSplit { std::vector<IdentityRow> kept; std::vector<std::string> dropped; };
-[[nodiscard]] inline RefutedSplit drop_refuted_places(std::span<const IdentityRow> rows, std::span<const Eigen::Vector2f> refuted_xy,
+[[nodiscard]] inline RefutedSplit drop_refuted_places(std::span<const IdentityRow> rows, std::span<const RefutedPlace> refuted,
                                                       float reacquire_radius_m)
 {
     RefutedSplit out;
     for (const auto& r : rows)
     {
         const float same_hole = restore_same_hole_m(reacquire_radius_m, r.pose.has_value() ? r.pose->width : 0.f);
-        const bool refuted = std::ranges::any_of(refuted_xy, [&](const Eigen::Vector2f& p)
-        { return p.allFinite() and (p - r.xy).norm() < same_hole; });
-        if (refuted) out.dropped.push_back(r.name);
-        else         out.kept.push_back(r);
+        const std::int64_t last_seen = std::max(r.seen_wall_ms.value_or(0), r.sighted_ms.value_or(0));
+        const bool drop = not r.crossed.value_or(false) and std::ranges::any_of(refuted, [&](const RefutedPlace& p)
+        { return p.xy.allFinite() and (p.xy - r.xy).norm() < same_hole and p.removed_ms > last_seen; });
+        if (drop) out.dropped.push_back(r.name);
+        else      out.kept.push_back(r);
     }
     return out;
 }

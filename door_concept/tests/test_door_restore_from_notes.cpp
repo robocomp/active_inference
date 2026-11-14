@@ -81,19 +81,45 @@ int main()
             {11, "remembered_door_5", memnote::note_of(csv_row("door_5", 1.5f, -2.0f), 0.03f)},
             {12, "remembered_door_6", memnote::note_of(csv_row("door_6", -3.0f, 1.0f), 0.03f)}};
         const auto rows = memnote::rows_of_notes(notes, "room_1");
-        const std::vector<Eigen::Vector2f> refuted = {Eigen::Vector2f(1.6f, -2.2f)};   // a removed PlaceRow near door_5's place
+        const std::vector<RefutedPlace> refuted = {{Eigen::Vector2f(1.6f, -2.2f), kNow}};   // a removed PlaceRow near door_5's place, removed after its last sighting
         const auto sp = drop_refuted_places(rows, refuted, 0.3f);
         CHECK(sp.dropped.size() == 1 and sp.dropped[0] == "door_5");
         CHECK(sp.kept.size() == 1 and sp.kept[0].name == "door_6");
         // the gate is plan_restore's own expression: a refuted place just outside radius + width keeps the note
         const float gate = restore_same_hole_m(0.3f, 0.9f);
-        const std::vector<Eigen::Vector2f> far = {Eigen::Vector2f(1.5f + gate + 0.01f, -2.0f)};
+        const std::vector<RefutedPlace> far = {{Eigen::Vector2f(1.5f + gate + 0.01f, -2.0f), kNow}};
         CHECK(drop_refuted_places(rows, far, 0.3f).dropped.empty());
-        const std::vector<Eigen::Vector2f> near = {Eigen::Vector2f(1.5f + gate - 0.01f, -2.0f)};
+        const std::vector<RefutedPlace> near = {{Eigen::Vector2f(1.5f + gate - 0.01f, -2.0f), kNow}};
         CHECK(drop_refuted_places(rows, near, 0.3f).dropped.size() == 1);
         // what the kept rows then do in plan_restore: only door_6 is restored
         const auto d = plan_restore(sp.kept, "room_1", true, std::vector<LiveDoor>{}, 0.3f);
         CHECK(d.restore.size() == 1 and d.restore[0].name == "door_6");
+    }
+    {   // dm10 (2026-11-14): a refutation is dated. door_4 was removed, re-born at the same place, seen again and crossed: its note
+        // must come back. A removal OLDER than the note's last sighting is superseded; a crossed door is never dropped.
+        const std::vector<memnote::NoteInput> notes = {{11, "remembered_door_5", memnote::note_of(csv_row("door_5", 1.5f, -2.0f), 0.03f)}};
+        const auto rows = memnote::rows_of_notes(notes, "room_1");
+        CHECK(rows.size() == 1 and rows[0].seen_wall_ms.has_value());
+        const std::int64_t seen = rows.empty() ? 0 : rows[0].seen_wall_ms.value_or(0);
+        const std::vector<RefutedPlace> older = {{Eigen::Vector2f(1.6f, -2.2f), seen - 1000}};
+        CHECK(drop_refuted_places(rows, older, 0.3f).dropped.empty());           // seen after its removal: the later evidence stands
+        const std::vector<RefutedPlace> newer = {{Eigen::Vector2f(1.6f, -2.2f), seen + 1000}};
+        CHECK(drop_refuted_places(rows, newer, 0.3f).dropped.size() == 1);       // removed after its last sighting: refuted
+        auto crossed = rows;  crossed[0].crossed = true;
+        CHECK(drop_refuted_places(crossed, newer, 0.3f).dropped.empty());        // a crossing is proof: never refuted
+        auto unseen = rows;  unseen[0].seen_wall_ms.reset();  unseen[0].sighted_ms.reset();
+        CHECK(drop_refuted_places(unseen, older, 0.3f).dropped.size() == 1);     // no sighting time: any removal counts (oldest)
+    }
+    {   // a crossing lifts the removals of its hole (and only of its hole, in its room) from the place table
+        rc::door::core::PlaceTable t(true);
+        rc::door::core::PlaceRow a;  a.room = "room_2";  a.name = "door_4";  a.xy = {-1.54f, 3.11f};  a.removed_wall_ms = kNow - 5000;
+        rc::door::core::PlaceRow b = a;  b.name = "door_9";  b.xy = {3.0f, 0.0f};                       // another hole, same room
+        rc::door::core::PlaceRow c = a;  c.room = "room_1";  c.name = "door_4";                         // same xy, other room
+        t.upsert(a);  t.upsert(b);  t.upsert(c);
+        CHECK(t.lift_refutations("room_2", Eigen::Vector2f(-1.77f, 3.19f), restore_same_hole_m(0.3f, 1.0f)) == 1);
+        CHECK(not t.find("room_2", "door_4")->removed_wall_ms.has_value());
+        CHECK(t.find("room_2", "door_9")->removed_wall_ms.has_value());
+        CHECK(t.find("room_1", "door_4")->removed_wall_ms.has_value());
     }
     {   // I-1 (Task 6 fix): a restored door keeps its revisit history. The note row (visit 3, sighted T) is upserted over the
         // identity-only row of the same place (one row, not two); the first later sighting is ONE revisit sample with its real exposure,
