@@ -18,6 +18,8 @@
 #include "../../common/track/merge_instances.h"   // rc::track::merge_overlapping — the SHARED merge sweep
 #include "../../common/instance_tracker/birth_evidence.h"   // rc::birth — the SHARED CREATE policy
 #include "../../common/exclusion/exclusion.h"               // rc::exclusion — the SHARED no-two-objects rule
+#include "../../common/robot_footprint/robot_footprint.h"   // rc::RobotFootprint — the robot's own silhouette
+#include "bed_self_body.h"                                  // rc::self_body — a point on the robot is not a bed
 
 #include <algorithm>
 #include <cmath>
@@ -48,6 +50,45 @@ std::vector<Eigen::Vector3f> SpecificWorker::slice_cloud(const rc::MaskIngestor:
         return {};
     return {pkt.support_points.begin() + static_cast<std::ptrdiff_t>(b),
             pkt.support_points.begin() + static_cast<std::ptrdiff_t>(e)};
+}
+
+// SELF-BODY: how much of this ZED slice is evidence of the WORLD rather than of the robot's own body. See
+// bed_self_body.h for the model and the live case (bed_5 born on the robot's own top plate). The RAW
+// camera-frame cloud is carried to the robot base by the STATIC body←zed mount (ts=0, rigid; the same
+// transform BedFitter::compute_object_observation uses), so the robot's pose — and its error — never enters.
+// Fallback when the producer did not dual-publish camera points: the room-frame cloud through body←room (ts=0;
+// birth only accrues on admissible, i.e. still-or-centred, frames, so the capture/now offset is small). σ is
+// the per-point on-surface noise the fit itself uses (AI2SigmaBaseM) — no new constant.
+// ★SHADOW's silhouette (rc::RobotFootprint::shadow(), the compiled hull incl. wheels). Another robot needs its
+// own polygon here — language_agent/src/body_model.h has the mesh-from-graph loader.
+float SpecificWorker::slice_world_fraction(const rc::MaskIngestor::MasksPacket& pkt, int slice_index)
+{
+    if (not inner_eigen_ or slice_index < 0 or slice_index >= static_cast<int>(pkt.slices.size()))
+        return 1.0f;
+    static const rc::RobotFootprint body = rc::RobotFootprint::shadow();
+    const auto& sl = pkt.slices[slice_index];
+
+    std::vector<Eigen::Vector3f> pts_robot;
+    const auto carry = [&](const std::vector<Eigen::Vector3f>& src, const auto& T)
+    {
+        const std::size_t b = std::min<std::size_t>(sl.support_begin, src.size());
+        const std::size_t e = std::min<std::size_t>(sl.support_end,   src.size());
+        if (e <= b) return;
+        pts_robot.reserve(e - b);
+        for (std::size_t k = b; k < e; ++k)
+            pts_robot.push_back((T * src[k].template cast<double>()).template cast<float>());
+    };
+    if (not pkt.support_points_cam.empty())
+    {
+        if (const auto m = inner_eigen_->get_transformation_matrix("body", "zed", 0); m.has_value())
+            carry(pkt.support_points_cam, m.value());
+    }
+    else if (const auto m = inner_eigen_->get_transformation_matrix("body", rc::room::current_room_frame(*G), 0);
+             m.has_value())
+        carry(pkt.support_points, m.value());
+    if (pts_robot.empty())
+        return 1.0f;
+    return rc::self_body::world_fraction(body.polygon(), pts_robot, cfg_.ai2_sigma_base_m);
 }
 
 // Retire one instance: drop its affordance node, forget it in the fitter, delete its graph node. The single
@@ -258,6 +299,20 @@ void SpecificWorker::run_instance_tracker()
             if (support < 0.99f and cfg_.bed_filter_log)
                 std::print("[bed-filter] birth cand slice={} OUTSIDE/at layout edge: interior_support={:.3f} → birth_ev={:.3f}\n",
                            i, support, dv.birth_evidence);
+
+            // ★SELF-BODY — the robot is an object too (bed_self_body.h). Room envelope and foreign claims ask who
+            // else stands here; neither knew the robot does. A mask on the robot's own top plate (the ZED's
+            // bottom rows graze it) was born as bed_5, 0.19 m in front of the robot's centre. Continuous world
+            // fraction of the slice's points, multiplied in like the two supports above.
+            if (cfg_.birth_self_body)
+            {
+                const float world = slice_world_fraction(pkt, i);
+                dv.birth_evidence *= world;
+                if (world < 0.99f)
+                    std::print("[bed-filter] birth cand slice={} ON THE ROBOT ({:.0f}% of points on the body): "
+                               "birth_ev x{:.2f} -> {:.3f}\n",
+                               i, 100.0f * (1.0f - world), world, dv.birth_evidence);
+            }
 
             // MASK QUALITY → how much this ONE observation is worth toward creating an instance. The policy is
             // shared (common/instance_tracker/birth_evidence.h) so every concept agent births on the same terms;

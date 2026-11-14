@@ -398,6 +398,9 @@ struct BedConfig
     float birth_fusion_mass_ref = 8.0f;   // residual mass at which corroboration is half-saturated (m/(m+ref))
     float birth_fusion_radius_m = 0.50f;  // window (m) for the residual-mass sample under the detection
     float tracker_birth_min_sep_m   = 0.60f;  // a birth must be ≥ this (m) from every existing bed
+    // SELF-BODY birth term (bed_self_body.h): multiply a ZED detection's birth evidence by the fraction of its
+    // points that lie outside the robot's own body (Φ(s/σ), σ = AI2SigmaBaseM). false only for A/B.
+    bool  birth_self_body = true;
     // Physical exclusion: collapse two instances whose oriented footprints overlap by ≥ this fraction of
     // the SMALLER footprint (two beds cannot share space). 0 disables the merge.
     float tracker_merge_overlap = 0.05f;

@@ -11,6 +11,7 @@ LIST(APPEND LIBS
   ai_common::ui_headers   # custom_widget.h / evidence_monitor.h / belief_inspector.h (header-only)
   ai_common::core         # header-only beliefs (ai_belief/dof_spec.h, …)
   ai_common::affordance   # affordance protocol, producer side
+  ai_common::geometry     # rc::RobotFootprint — the robot's own silhouette (self-body birth term)
 )
 
 # Sources set

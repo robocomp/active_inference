@@ -446,6 +446,8 @@ BirthFusionGain = 6.0      # max extra evidence/frame at full corroboration (0 �
 BirthFusionMassRef = 8.0   # residual mass at which corroboration is half-saturated
 BirthFusionRadiusM = 1   # bed (Webots threerooms-piso); was 0.50 — window (m) for the residual-mass sample under the detection
 BirthMinSepM = 1.2   # bed (Webots threerooms-piso); was 0.60 — a birth must be ≥ this (m) from every existing bed (anti-duplicate)
+BirthSelfBody = true # SELF-BODY: birth evidence × fraction of the mask's points OUTSIDE the robot's own body (the ZED's bottom
+                     # rows see the robot's top plate; YOLOE called it "bed" 0.34 → bed_5, 2026-11-14). false only for A/B.
 MergeOverlap = 0.05       # physical exclusion: collapse two instances whose oriented footprints overlap by
                           # ≥ this fraction of the smaller footprint (two beds cannot share space). 0=off.
 BirthWidthM = 1.6   # bed (Webots threerooms-piso); was 1.0 — default geometry for a bed BORN from a mask (the fit refines from here)

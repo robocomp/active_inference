@@ -20,3 +20,11 @@ target_include_directories(headboard_sdf_test PRIVATE ../src ../../common ../../
 target_compile_options(headboard_sdf_test PRIVATE -O2)
 target_link_libraries(headboard_sdf_test PRIVATE Eigen3::Eigen)
 add_test(NAME headboard_sdf_test COMMAND headboard_sdf_test)
+
+# SELF-BODY birth term: a mask on the robot's own top plate is not a bed (2026-11-14, bed_5). Run: ./self_body_test
+add_executable(self_body_test self_body_test.cpp ../../common/robot_footprint/robot_footprint.cpp
+                              ../../common/robot_footprint/mesh_hull.cpp)
+target_include_directories(self_body_test PRIVATE ../src ../../common)
+target_compile_options(self_body_test PRIVATE -O2)
+target_link_libraries(self_body_test PRIVATE Eigen3::Eigen)
+add_test(NAME self_body_test COMMAND self_body_test)
