@@ -100,17 +100,49 @@ int main()
         CountableBelief b(CountableBeliefState{}, bed_params());
         CHECK(b.size_likelihood().info.norm() == 0.0f);
     }
-    {   // one_face_view_depth_drops_out: a front face fixes the face position, not the depth behind it. 3 frames: the main fit
-        // keeps walking under the class prior (rotating the box), and the summary then integrates data taken at a drifted
-        // state; measured (w,h) eigen ratio 1 frame ~0, 3 frames 0.0016, 10 frames 0.026, 30 frames 0.24 (see task-2 report).
+    {   // one_face_view_depth_drops_out: a front face fixes the face position, not the depth behind it. The unobserved
+        // direction is identified from the FIRST frame (smallest eigenvector of its summary) and must stay unobserved.
         std::mt19937 rng(3);
-        const auto b = run(box_cloud(0.65f, 1.75f, 2.10f, true, rng), 3);
-        const Eigen::Matrix3f J = b.size_likelihood().info;
-        // label-agnostic: the fit may take either w/h labelling, so compare the eigenvalues of the (w, h) block
-        const Eigen::SelfAdjointEigenSolver<Eigen::Matrix2f> es(J.bottomRightCorner<2, 2>());
-        std::printf("one-face: info diag (H,w,h)=(%.4g %.4g %.4g)  (w,h) eig ratio=%.3g\n", J(0, 0), J(1, 1), J(2, 2),
-                    es.eigenvalues()(0) / es.eigenvalues()(1));
-        CHECK(es.eigenvalues()(0) < 0.01f * es.eigenvalues()(1));
+        const auto pts = box_cloud(0.65f, 1.75f, 2.10f, true, rng);
+        CountableBeliefState s0{0.0f, 0.0f, 0.0f, 0.5f, 0.5f, 0.0f};
+        Eigen::Vector3f sum = Eigen::Vector3f::Zero(); float zmax = 0.0f;
+        for (const auto& p : pts) { sum += p; zmax = std::max(zmax, p.z()); }
+        s0.cx = sum.x() / pts.size(); s0.cy = sum.y() / pts.size(); s0.H = zmax;
+        CountableBelief b(s0, bed_params());
+        CountableFrame f; f.points = pts;
+        b.update(f);
+        const Eigen::SelfAdjointEigenSolver<Eigen::Matrix3f> es(b.size_likelihood().info);
+        const Eigen::Vector3f v = es.eigenvectors().col(0);
+        std::printf("one-face frame 1: info eigenvalues %.4g %.4g %.4g\n", es.eigenvalues()(0), es.eigenvalues()(1), es.eigenvalues()(2));
+        for (int i = 2; i <= 30; ++i)
+        {
+            b.update(f);
+            if (i == 10 or i == 30)
+            {
+                const auto& I = b.size_likelihood().info;
+                const float un = v.dot(I * v);
+                std::printf("one-face frame %d: info along unobserved dir %.4g, H info %.4g, ratio %.3g\n", i, un, I(0, 0), un / I(0, 0));
+                // 10 frames: < 1%. 30 frames: 1.3% measured, a slow leak of ~0.1%/frame from the fit's own small state change
+                // (the unobserved direction itself moves slightly), still ~75x below the observed extents; bound 2%.
+                CHECK(un < (i == 10 ? 0.01f : 0.02f) * I(0, 0));
+            }
+        }
+    }
+    {   // a gap of predict-only steps forgets: the summary's information on H decreases (and by q_scale for aged steps)
+        std::mt19937 rng(11);
+        auto b = run(box_cloud(0.65f, 1.75f, 2.10f, false, rng), 5);
+        const float h0 = b.size_likelihood().info(0, 0);
+        auto c = b;
+        for (int i = 0; i < 20; ++i) b.predict();
+        c.inflate_for_age(20.0f, 1.0f);
+        std::printf("gap: H info %.4g -> %.4g (20 predicts), %.4g (inflate_for_age 20x)\n", h0, b.size_likelihood().info(0, 0), c.size_likelihood().info(0, 0));
+        CHECK(b.size_likelihood().info(0, 0) < h0);
+        CHECK(c.size_likelihood().info(0, 0) < h0);
+        CountableFrame empty;                       // an update with no points also forgets
+        auto d = run(box_cloud(0.65f, 1.75f, 2.10f, false, rng), 5);
+        const float d0 = d.size_likelihood().info(0, 0);
+        d.update(empty);
+        CHECK(d.size_likelihood().info(0, 0) < d0);
     }
     {   // fit_unchanged: the main fit is bit-identical to the value recorded from the code before the summary
         std::mt19937 rng(11);

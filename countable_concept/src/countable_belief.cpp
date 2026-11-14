@@ -753,9 +753,10 @@ void CountableBelief::update_size_likelihood(const CountableFrame& frame)
         Id.noalias() += w * (J * J.transpose());
         bd.noalias() += -w * J * d;
     }
-    size_prior_off_ = true;
-    accumulate_extra(s, frame, Id, bd);
-    size_prior_off_ = false;
+    {   // RAII: the switch is restored even if accumulate_extra throws
+        struct Off { bool& f; explicit Off(bool& x) : f(x) { f = true; } ~Off() { f = false; } } off(size_prior_off_);
+        accumulate_extra(s, frame, Id, bd);
+    }
 
     const Mat6 Scinv = common_mode_inv_diag(frame).asDiagonal();
 
@@ -795,19 +796,29 @@ void CountableBelief::update_size_likelihood(const CountableFrame& frame)
     const Eigen::Vector3f theta_s(s.H, s.w, s.h);
     const Eigen::Vector3f mean_frame = theta_s + pinv(J) * g;
 
-    // parallel recursion, same forgetting as the belief: predict info ← (info⁺ + Q_s)⁺, then add the frame
-    const Vec6 q = process_noise_diag();
-    Eigen::Matrix3f info = size_lik_.info;
-    if (info.norm() > 0.0f)
+    // fold the frame into the recursion (the forgetting is predict_size_likelihood, run before this on every cycle).
+    // J is PSD in exact arithmetic; drop numerically negative eigenvalues so rounding cannot subtract information.
     {
-        Eigen::Matrix3f cov = pinv(info);
-        for (int a = 0; a < 3; ++a) cov(a, a) += q(S[a]);
-        info = pinv(cov);
+        const Eigen::SelfAdjointEigenSolver<Eigen::Matrix3f> es(J);
+        const Eigen::Vector3f ev = es.eigenvalues().cwiseMax(0.0f);
+        J = es.eigenvectors() * ev.asDiagonal() * es.eigenvectors().transpose();
     }
+    Eigen::Matrix3f info = size_lik_.info;
     const Eigen::Vector3f eta = info * size_lik_.mean + J * mean_frame;
     info += J;
     size_lik_.info = info;
     size_lik_.mean = pinv(info) * eta;
+}
+
+// Forget exactly as the belief does: info <- (info^-1 + q_scale*Q_s)^-1, in the Woodbury form info - info(info + (qQ)^-1)^-1 info,
+// which keeps a null direction null (a pseudo-inverse round trip would turn "no information" into 1/q).
+void CountableBelief::predict_size_likelihood(float q_scale)
+{
+    if (size_lik_.info.norm() == 0.0f or not (q_scale > 0.0f)) return;
+    const Eigen::Matrix<float, 6, 1> q = process_noise_diag();
+    Eigen::Vector3f qinv;
+    for (int a = 0; a < 3; ++a) qinv(a) = 1.0f / (q_scale * q(2 + a));
+    size_lik_.info = ai::saturate<3>(size_lik_.info, Eigen::Vector3f::Zero(), Eigen::Matrix3f(qinv.asDiagonal())).first;
 }
 
 // Fold one appearance FrontCue into the door-mode accumulator and adopt the argmax mode. See the header.

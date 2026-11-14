@@ -338,6 +338,7 @@ public:
         const Eigen::Matrix<float, 6, 1> before = state_.vec();
         const float fe = ai::update<N>(*this, state_, Sigma_, prior_mean_, frame);
         sanitize_covariance();
+        predict_size_likelihood(1.0f);                                 // ai::update predicted first, even with no points
         if (not frame.points.empty()) update_size_likelihood(frame);   // BEFORE update_volatility: same Q as the filter used
         // ω is inferred ONLY on a cycle that actually took a measurement. A predict-only cycle has δθ = 0,
         // which under the update below would read as "this object never moves" and drive ω down — the same
@@ -354,9 +355,12 @@ public:
     const Eigen::Matrix<float, 6, 1>& log_volatility() const { return omega_; }
     // Retention time constant per DOF: τ = Σ_ii / exp(ω_i) frames — "how long this DOF remembers".
     Eigen::Matrix<float, 6, 1> retention_frames() const;
-    void  predict()                               { sanitize_covariance(); ai::predict<N>(*this, Sigma_, state_, prior_mean_); }
+    void  predict()                               { sanitize_covariance(); ai::predict<N>(*this, Sigma_, state_, prior_mean_); predict_size_likelihood(1.0f); }
     void  inflate_for_age(float dt_s, float dt_nominal_s)
-    { ai::inflate_for_age<N>(*this, Sigma_, state_, prior_mean_, dt_s, dt_nominal_s); }
+    {
+        ai::inflate_for_age<N>(*this, Sigma_, state_, prior_mean_, dt_s, dt_nominal_s);
+        predict_size_likelihood(dt_nominal_s > 1e-6f ? dt_s / dt_nominal_s : 1.0f);   // same q_scale as inflate_for_age
+    }
     Eigen::Matrix<float, 6, 6> predicted_information(const std::vector<Eigen::Vector3f>& pts, float R) const
     { return ai::predicted_information<N>(*this, state_, pts, R); }
 
@@ -547,6 +551,7 @@ private:
     // Likelihood-only (H, w, h) summary, updated by update(); see size_likelihood(). size_prior_off_ switches the class SIZE
     // prior blocks (2, 2a) of accumulate_extra off for the one data-only accumulation that feeds it; false everywhere else.
     void update_size_likelihood(const CountableFrame& frame);
+    void predict_size_likelihood(float q_scale);
     rc::countable::SizeGaussian size_lik_;
     mutable bool                size_prior_off_ = false;
     mutable float   dbg_wall_gap_    = 0.0f;
