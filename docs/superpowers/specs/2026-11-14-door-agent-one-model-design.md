@@ -1,6 +1,6 @@
 # door_concept: one model for every mask, birth and removal by comparison, looks that settle hypotheses
 
-Date: 2026-11-14. Status: APPROVED by the owner 2026-11-14 ("Review ok"). Nothing coded.
+Date: 2026-11-14. Status: BUILT behind Existence.OneModel (Tasks 1–12, 2026-11-15); live acceptance (Task 13) pending. (Approved by the owner 2026-11-14, "Review ok".)
 Decisions marked **(PI)** are the owner's, from the 2026-11-14 conversation. Everything else is the designer's call and can
 be changed by the owner.
 Builds on: `2026-11-05-structure-from-evidence-design.md` §3.2 (birth by comparison, typical-size prior),
@@ -383,3 +383,74 @@ before building, fit the detector table on Webots now and refit on the real robo
   existence path, as the spec says. The fit's prior is unchanged in this work.
 - §3.5 merge: `MergeOverlap` is door_concept's own merge (door_core.cpp ~341), not the tracker's; the separation is
   `Tracker.BirthMinSepM`, set in DoorCore::associate. Both change only under the flag; common/instance_tracker untouched.
+
+## 13. As built (2026-11-15, branch feat/door-one-model, Tasks 1–12)
+
+Everything below is behind `Existence.OneModel` (default false). With the flag off the decisions are the old ones: on the three
+recorded tapes (tape_dm, tape_e2e18, tape_e2e19) the flag-off replay equals the baseline (door-memory 04d256d7) replay after every
+task. The check is "this branch's replay equals the baseline's replay", not "equals the recording", because the baseline replay
+does not reproduce its own recording past cycle 474 (an input missing from the tape; parked, not part of this work).
+
+### 13.1 What happened to each switch
+
+| # | Fate as built |
+|---|---|
+| S1 swept-arc / aperture veto | Removed under the flag. A mask is shared among aperture, leaf (all four hinge x swing branches), new door and clutter (Tasks 7, 9). |
+| S2 claimed slice + greedy assignment | Removed under the flag; replaced by the same responsibilities. |
+| S3 separation + merge | Merge removed under the flag (two labels at one hole compete; the second-door cost is weighted by place distinctness, one rule everywhere). The tracker separation is KEPT, set to the tracker's own noise scale (`// kept:` it must keep one track per detection; the rest is the competition) (Task 8). |
+| S4 truncation cliff | Existence part replaced: a truncated view widens the size likelihood and keeps the (1 − trunc) support weight (Task 6). KEPT with `// kept:` reasons: the fit's truncation gate (`door_fit.cpp`, the lifecycle UPDATE invariant: a frame must be resolvable, centred and still to move geometry) and the motion confirm-only part of `frame_admissible` (until ego-motion variance enters existence as a continuous term). |
+| S5 count-ordered base rate, second count prior | Replaced: the per-wall rate is the Beta belief learned from ltsm's remembered rooms (Beta(2,3) first door, Beta(0.05,4.95) another), the charge for another door is the sum of the other doors' beliefs on the wall (weighted by distinctness), and the room door-count prior is learned from the same rooms (Tasks 3, 4). |
+| S6 Ricoh hits only | Replaced: the Ricoh counts misses, with rates fitted from tapes with Webots labels (Tasks 5, 6), and its hit probability depends on the leaf state (Task 8b). |
+| S7 geometry may not refute | Replaced by a two-sided channel with a fitted likelihood (Task 6). The fit found the channel non-informative on true doors (mu1_sd −0.026 over 737 views), so it is stored as 0 = "no information" and adds nothing either way (Task 5). |
+| S8 one detection per candidate | KEPT, with a `// kept:` comment: the tracker's own same-frame duplicate test cannot see candidates promoted by the model, so one detection per candidate still carries the birth verdict (Task 7). |
+| S9 five Mahalanobis / metric gates | Replaced under the flag by the likelihood of each mask under each cause (Task 7). |
+| S10 restore skips, radii, fresh-data counter | Replaced: a remembered door is restored unless a live door already explains it, judged from the restore's own room outline and doors, and a note whose name matches a live or held door is that door (Task 10). The "no new view since last fit" counter is DROPPED: every fitted door is fitted every cycle. KEPT with `// kept:`: the dated refutation and its same-hole radius (memory, not evidence); the lift of refutations uses a same-place likelihood instead of a radius. |
+
+### 13.2 Controller rulings that changed the design
+
+- Task 2 (diagnosis): the swing of chat_e2e19's existence score was one cause: the geometry channel overwrote its mean and
+  variance with the latest frame and re-scored the whole view, so the term moved by up to 3e4 nats as the variance moved. The fix
+  went into Task 6 (additive per frame, no re-pricing).
+- The view fraction (Task 7, ruling B) first used a Beta(1,1) pseudo-count. Task 8b replaced it with a neutral pseudo-frame: the
+  view term is multiplied by n/(n+1). A low-q miss had been given positive evidence (+0.46 nat at q 0.08), which carried a phantom.
+- Clutter is not a competitor for hit weight (Task 7, ruling G): the hit weight is the responsibility renormalised over the
+  non-clutter causes, because clutter is already inside each place's false-alarm rate. A candidate is seeded when a new door is the
+  largest non-clutter cause.
+- A place's belief persists for the visit (ruling H): a removed place keeps its ledger and a new candidate there inherits it,
+  matched by the place likelihood, not by a radius.
+- The new-door density along a wall is the wall's base-rate probability over its length (uniform along the wall), not a point mass at
+  the mask (ruling A of Task 7).
+- Two labels at one hole: each charged the other the full second-door cost. The cost is now weighted by place distinctness,
+  1 − exp(−m²/2), in every place it appears (Task 8).
+- Task 8b inserted: on tape_e2e18 the restored door_22 was removed again, because the detector's hit probability ignored the leaf
+  state. Detection probability is now a mixture of the shut and open rates, weighted by p_open = E[1 − cos phi] (the existing
+  clear fraction), not 1 − P(phi near shut), which flickered with phi.
+- A mask's genuineness enters its hit and its support evidence once, consistently (Task 8b, ruling C(i)).
+- The LiDAR opening (Task 9) is an existence channel for existing doors too, one term per view; a shut door reads as wall and
+  scores about zero. Free bins are per bin, Π(1 − r) over the live doors' spans, not a whole-span mean. A leaf-born door starts at its
+  hypothesis' aperture. A leaf hypothesis beyond phi_max has zero prior support.
+- Existence is fitted every cycle (Task 10): no fresh-data counter.
+- Looks (Task 11): one look per open question, at the pose that settles it most. Outcome tables are exact while they fit a stated
+  resource budget and sampled beyond it; clusters are the connected components of the mask-cause responsibility graph; a standing
+  target moves only when another pose beats it under the same weights; a competition pair ends when either member is decided.
+
+### 13.3 Open items
+
+Live checks (Task 13):
+a. A phantom near L = 0 that flips its verdict dissolves and re-forms its cluster, so `aff_door_look_q_*` is withdrawn and
+   re-offered with an empty tried-ledger, and an executing look node can be removed under the controller.
+b. Flag-on cost is about twice the flag-off cost (49 against 24 ms per step on tape_dm replay); rates must be nominal.
+c. The look target ranking against travel in AffordanceManager.
+d. The restore path (no tape contains notes).
+e. The e18 corner case live (the side-wall phantom at cycle 710; on replay it is removed at 778).
+f. A dm12-type mirror door.
+
+Owner questions:
+- B: a per-door detectability random effect (the shut DOOR_0 is reported only 7–36 % of the time). A low-detectability door and no door
+  are weakly distinguishable, so it risks protecting phantoms.
+- An aperture-overlap exclusion term: a hypothesis whose swept leaf or aperture overlaps a live door's aperture is incompatible,
+  weighted by that door's responsibility. Deferred; duplicates are already gone on tape_dm.
+
+Known limits: the fitted open-door hit rates are dominated by their prior (zed .70 on 109 views, ricoh .47 on 206), so the
+open/shut distinction stays weak live; door twins in memory are counted whatever their evidence, so phantoms inflate the learned rates;
+the fitted rates come from one world (threerooms-piso).
