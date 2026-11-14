@@ -285,8 +285,9 @@ public:
     /// ONE-MODEL (spec §4 / §3.2): which entities compete for a mask. A pair is recorded whenever some mask put non-negligible responsibility (rho >= hlook::kWeightFloor, the floor the hypothesis weights use) on both (a door's
     /// Aperture + Leaf rho, or the new-door rho of the candidate the mask fed); they stay recorded (the graph of competition is what the clusters are made of, and the mask
     /// is gone once the robot looks away). Nodes: ('d', door id) or ('c', candidate key).
-    using NodeRef = std::pair<char, std::uint64_t>;
-    [[nodiscard]] const std::set<std::pair<NodeRef, NodeRef>>& competing() const { return competes_; }
+    using NodeRef = rc::door::hlook::Competition::NodeRef;
+    /// The pairs live while both members are undecided (hlook::Competition): a verdict change, a removal or a birth drops the member's pairs.
+    [[nodiscard]] const std::set<std::pair<NodeRef, NodeRef>>& competing() const { return competes_.pairs; }
     /// An undecided candidate is an open question while the costed decision has not refused it (spec 2026-11-09-undecided-candidate-look).
     [[nodiscard]] bool candidate_is_open(const Candidate& c) const;
     /// Would a frame from `standpoint` be a new view of the candidate, by the ledger's own absorption rule? (spread 0: the standpoint is a plan)
@@ -316,7 +317,8 @@ public:
 private:
     // (not "emit": Qt #defines it away in every TU that includes Qt before this header)
     void note_competition(std::vector<NodeRef> nodes);
-    std::set<std::pair<NodeRef, NodeRef>> competes_;
+    rc::door::hlook::Competition competes_;
+    void refresh_competition();   // end of step: the members' verdicts, so decided members leave their clusters
     void record(rc::door::DoorDecisionKind k, std::uint64_t id, float x, float y, std::string note, std::string name,
               DoorCycleOutput& out);
     void diag(std::string stream, std::string line, DoorCycleOutput& out);

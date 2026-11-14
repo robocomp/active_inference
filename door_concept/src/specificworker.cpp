@@ -4819,8 +4819,8 @@ bool SpecificWorker::step_hypothesis_looks(std::span<const rc::door::hlook::Memb
             if (e.tried.find_view(p.xy, e.ref.centre_xy(), e.ref.across_u(), view_r(), 0.0f, 0) == rc::door::core::ViewLedger::npos) admissible.push_back(p);
         const auto t0 = std::chrono::steady_clock::now();
         // the pose last published is HELD while it is among the admissible ones: it moves only to a pose with a larger EIG under the current weights
-        const hl::Pose standing{e.site.has_value() ? Eigen::Vector2f(e.site->x_m, e.site->y_m) : Eigen::Vector2f::Zero(), e.site.has_value() ? e.site->yaw_rad : 0.f};
-        const hl::Best best = hl::best_look(q, admissible, model, &e.cache, e.site.has_value() ? &standing : nullptr);
+        const hl::Pose held{e.site.has_value() ? Eigen::Vector2f(e.site->x_m, e.site->y_m) : Eigen::Vector2f::Zero(), e.site.has_value() ? e.site->yaw_rad : 0.f};
+        const hl::Best best = hl::best_look(q, admissible, model, &e.cache, e.site.has_value() ? &held : nullptr);
         const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
         hyp_look_ms_sum_ += ms; hyp_look_ms_max_ = std::max(hyp_look_ms_max_, ms); hyp_look_hits_ += e.cache.hit ? 1 : 0;
         if (++hyp_look_n_ % 100 == 0)   // ★log cadence only, decides nothing

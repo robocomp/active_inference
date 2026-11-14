@@ -165,6 +165,37 @@ int main()
         CHECK(none.size() == 1 and none[0].key == "q_door_9");
     }
 
+    // cluster_splits_after_decision: two members linked by one shared mask are one question; a DECISION on one of them (its verdict moves, or it is
+    // born/removed) drops the pair, so the next cycle's questions have them apart, until a fresh mask links them again
+    {
+        Member A; A.name = "place_7"; A.aperture = right(2.0f); A.leaf = LeafState{1.2f, HingeSide::Near, +1.f}; A.L = -0.9;
+        Member B; B.name = "door_0"; B.aperture = bottom(3.9f); B.leaf = LeafState{1.2f, HingeSide::Far, +1.f}; B.L = 1.0;
+        const std::array<Member, 2> ms{A, B};
+        const auto open_all = [](const Member&) { return true; };
+        using N = Competition::NodeRef;
+        const N na{'c', 7}, nb{'d', 0};
+        const auto names = [&](const Competition& c)
+        {
+            std::vector<std::pair<std::string, std::string>> out;
+            for (const auto& [x, y] : c.pairs) out.emplace_back(x == na ? "place_7" : "door_0", y == nb ? "door_0" : "place_7");
+            return out;
+        };
+        Competition comp;
+        comp.refresh({{na, 1}, {nb, 1}});
+        comp.note({na, nb});                                            // one mask both explain
+        comp.refresh({{na, 1}, {nb, 1}});                                // nothing decided: still linked
+        const auto e1 = names(comp);
+        CHECK(questions_from(ms, e1, open_all).size() == 1);
+        comp.refresh({{na, 1}, {nb, 3}});                                // door_0's verdict moved (removed): its pairs go
+        const auto e2 = names(comp);
+        CHECK(e2.empty() and questions_from(ms, e2, open_all).size() == 2);
+        comp.note({na, nb});                                            // a fresh mask links them again
+        comp.refresh({{na, 1}, {nb, 3}});
+        CHECK(questions_from(ms, names(comp), open_all).size() == 1);
+        comp.refresh({{nb, 3}});                                         // the candidate was born as a door (its key is gone): the pair is dead
+        CHECK(comp.pairs.empty());
+    }
+
     // sampled_beyond_budget: S = 7 apertures, 8 hypotheses: 4^7 columns is over the budget for the room's poses; the EIG is sampled, nothing cached,
     // and within 0.05 nats of the exact one (computed once here)
     {

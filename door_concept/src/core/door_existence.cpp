@@ -903,12 +903,21 @@ static float question_L(const DoorCore::Candidate& c)
     return c.belief.L() - c.belief.prior.size + std::max(c.best_size, c.belief.prior.size);
 }
 
-void DoorCore::note_competition(std::vector<NodeRef> nodes)
+void DoorCore::note_competition(std::vector<NodeRef> nodes) { competes_.note(std::move(nodes)); }
+
+void DoorCore::refresh_competition()
 {
-    std::ranges::sort(nodes);
-    nodes.erase(std::unique(nodes.begin(), nodes.end()), nodes.end());
-    for (std::size_t a = 0; a < nodes.size(); ++a)
-        for (std::size_t b = a + 1; b < nodes.size(); ++b) competes_.emplace(nodes[a], nodes[b]);
+    if (not cfg_.door.exist_one_model) return;
+    std::map<NodeRef, int> now;
+    const auto costs = costs_.costs(cfg_.door.exist_max_room_s);
+    for (const auto& [id, st] : world_->fit_states())
+        if (st != nullptr and not st->is_bearing_hypothesis)
+        {
+            const auto v = decide(st->belief.L(), st->role, costs);
+            now[{'d', id}] = (v.exists ? 1 : 0) + (v.remove ? 2 : 0);
+        }
+    for (const auto& c : candidates_) now[{'c', c.key}] = candidate_is_open(c) ? 1 : 0;
+    competes_.refresh(now);
 }
 
 std::vector<rc::door::hlook::Alt> DoorCore::leaf_alternatives(const Candidate& c) const

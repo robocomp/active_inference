@@ -32,7 +32,9 @@
 #include <cmath>
 #include <cstdint>
 #include <limits>
+#include <map>
 #include <numbers>
+#include <set>
 #include <optional>
 #include <span>
 #include <string>
@@ -513,6 +515,35 @@ struct Member
     p_exists = std::clamp(p_exists, 0.0, 1.0);   // clamp: a probability
     return {std::move(key), {single_hyp(m, p_exists), Hyp{{}, {}, 1.0 - p_exists}}};
 }
+
+/// WHO COMPETES FOR A MASK, as a graph that lives only while it is true. Nodes: ('d', door id) or ('c', candidate key). A pair is recorded when
+/// one mask puts non-negligible responsibility (rho >= kWeightFloor) on both. It lives while BOTH members are still undecided: any DECISION on a
+/// member (its verdict, the code `refresh` is given, changing; or the member vanishing: removed, or a candidate born as a door) drops all that
+/// member's pairs, and a pair re-forms only from a fresh mask. So clusters split as well as merge, with no time window.
+struct Competition
+{
+    using NodeRef = std::pair<char, std::uint64_t>;
+    std::set<std::pair<NodeRef, NodeRef>> pairs;
+    std::map<NodeRef, int> code;   // each member's verdict code as of the last refresh
+
+    void note(std::vector<NodeRef> nodes)
+    {
+        std::ranges::sort(nodes);
+        nodes.erase(std::unique(nodes.begin(), nodes.end()), nodes.end());
+        for (std::size_t a = 0; a < nodes.size(); ++a)
+            for (std::size_t b = a + 1; b < nodes.size(); ++b) pairs.emplace(nodes[a], nodes[b]);
+    }
+    /// `now`: every member that exists, with its verdict code (a change of code is a decision). Members absent from `now` are gone.
+    void refresh(const std::map<NodeRef, int>& now)
+    {
+        std::set<NodeRef> decided;
+        for (const auto& [n, c] : code)
+            if (const auto it = now.find(n); it == now.end() or it->second != c) decided.insert(n);   // gone, or its verdict moved
+        std::erase_if(pairs, [&](const auto& pr)
+        { return decided.contains(pr.first) or decided.contains(pr.second) or not now.contains(pr.first) or not now.contains(pr.second); });
+        code = now;
+    }
+};
 
 /// The questions of a set of members. Two members COMPETE when some mask put non-negligible responsibility on both (door_mask_causes.h rho >= kWeightFloor); `competing` lists those pairs by member name. Connected components
 /// of that graph are the clusters: members explaining one panel, of which ONE (or none) is the door (weights odds e^{L_i} against the null's 1). A

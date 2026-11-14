@@ -299,6 +299,7 @@ DoorCycleOutput DoorCore::step(const DoorCycleInput& in)
         update_existence(in, out);
     births(in, out);
     fit_doors(out);
+    refresh_competition();
     return out;
 }
 
