@@ -30,6 +30,7 @@
  */
 
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <format>
 #include <map>
@@ -79,6 +80,11 @@ public:
     virtual void on_bind(const std::string& /*name*/, const std::string& /*room*/) {}
     /// A predicate's belief now: a probability, or 0 / 1 for a fact. nullopt = cannot be evaluated now.
     virtual std::optional<double> eval(const Pred& p) = 0;
+    /// The wall clock now, epoch ms, for `wait at=` (the `now` of tick() is the caller's steady clock: durations only).
+    virtual std::int64_t wall_ms()
+    {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+    }
 };
 
 class Interpreter
@@ -544,6 +550,20 @@ private:
         if (until.has_value() and holds(*until)) return finish_leaf(r, now, "until");
         if (const auto secs = s.number("s"); s.op == "wait" and secs.has_value() and elapsed_s >= *secs)
             return finish_leaf(r, now, "satisfied");
+        const auto at = s.op == "wait" ? s.string("at") : std::nullopt;
+        const auto at_ms = at.has_value() ? parse_iso(*at) : std::nullopt;
+        if (at_ms.has_value())
+        {
+            const std::int64_t left_ms = *at_ms - host_.wall_ms();
+            if (left_ms <= 0) return finish_leaf(r, now, "satisfied");
+            // the wait note (StepView::note), as a LeafStatus detail would be: "until 18:00 (in 42 min)"
+            const std::int64_t min = (left_ms + 59'999) / 60'000;
+            r.note = min < 120 ? std::format("until {} (in {} min)", iso_hhmm(*at), min)
+                               : std::format("until {} on {} (in {} h)", iso_hhmm(*at), at->substr(0, 10), (min + 30) / 60);
+            const LeafStatus st = host_.poll(r.resolved);
+            if (st.state == LeafState::Failed) return fail(r, now, st.detail.empty() ? "failed" : st.detail, s.id);
+            return;
+        }
         if (const auto budget = s.number("budget_s"); budget.has_value() and elapsed_s >= *budget)
         {
             if (until.has_value())

@@ -7,6 +7,7 @@
 #include <print>
 
 #include "../../common/mission/mission_text.h"
+#include "../src/mission_plan.h"   // ground_clock_text: the planner grounds `at=18:00` before parsing, as here
 
 namespace
 {
@@ -67,7 +68,7 @@ int main()
             pos = end + 3;
             if (not block.starts_with("mission")) continue;
             ++examples;
-            const auto m = rc::mission::parse_text(block);
+            const auto m = rc::mission::parse_text(rc::chat::ground_clock_text(block, rc::chat::wall_now_ms()));
             if (not m.has_value()) std::println("  example {}: {}\n{}", examples, m.error().text, block);
             CHECK(m.has_value());
         }

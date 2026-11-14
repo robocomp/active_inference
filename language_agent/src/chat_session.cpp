@@ -314,6 +314,12 @@ void ChatSession::tick_digest()
     cameras_.refresh(Camera::pano);
     human_ = ltom_G_ ? rc::chat::load_human(*ltom_G_) : HumanFacts{};
     digest_ = digest_builder_.build(*inner_, controller_present_, intention_.read(), today_digest_line(em_store()), human_);
+    {   // the robot's own past (tense spec §3): sample, then one STATE line
+        const std::int64_t wall = rc::chat::wall_now_ms();
+        whereabouts_.add({.t_ms = wall, .room = digest_.facts.room, .has_pose = digest_.has_pose, .x = digest_.pose_x,
+                          .y = digest_.pose_y, .yaw_deg = digest_.pose_yaw_deg});
+        digest_.text += whereabouts_.state_line(wall);
+    }
     track_object_changes();
     check_claim_answer();
 }
@@ -600,7 +606,10 @@ const QString kInterfaceRules = QStringLiteral(
     "For missions, steps, door crossings, claims and how they ended CALL episodes(...) (filters: since/until as HH:MM, "
     "author, kind, target), episode(id) for one in detail, last_episode(target) for the latest about a door, room or "
     "object, outcome_stats(kind, target) for how often something succeeded or failed over all time. If a tool says the "
-    "episodic memory is not available, say you do not remember, never guess.\n");
+    "episodic memory is not available, say you do not remember, never guess.\n"
+    "- WHERE the robot has been since this chat started is the STATE line 'where you have been' (each room's latest "
+    "visit). For where it was at a given time (\"10 minutes ago\", \"at 00:20\") CALL where_was(ago_min | at); to go "
+    "back there, plan_mission with the pose it gives.\n");
 }   // namespace
 
 QString ChatSession::load_robot_description(const std::string& path)
@@ -887,6 +896,13 @@ QJsonArray ChatSession::tools_json() const
         QJsonObject{{"kind", str("mission, or a step/claim kind such as cross, open, approach")},
                     {"target", str("optional: a door/room/object name, e.g. door_27; empty = all of that kind")}},
         QJsonArray{"kind"}));
+    tools.append(tool_def("where_was",
+        "Where the robot WAS at an earlier time today (since this chat started): its room and pose then, how long ago, "
+        "and the way back to that room. Give ago_min (\"10 minutes ago\" = 10) or at (HH:MM). To go back there, call "
+        "plan_mission with a request that names the pose it returns. Read-only.",
+        QJsonObject{{"ago_min", QJsonObject{{"type", "number"}, {"description", "minutes before now"}}},
+                    {"at", str("a clock time today, HH:MM (local time)")}},
+        QJsonArray{}));
     tools.append(tool_def("last_episode",
         "The most recent episode today about one door, room or object (aimed at it or that read its beliefs). "
         "Read-only.",
@@ -1255,6 +1271,7 @@ QString ChatSession::answer_query(const QString& name, const QJsonObject& args)
         const auto it = std::ranges::find(skills_, want, &rc::chat::Skill::name);
         out = it != skills_.end() ? q(it->body) : QStringLiteral("REJECTED: no skill '%1'").arg(q(want));
     }
+    else if (name == "where_was") out = answer_where_was(args);
     else if (QString m = answer_memory(name, args); not m.isEmpty()) out = std::move(m);
     else if (name == "find_objects" or name == "where_is")
     {
@@ -1626,6 +1643,41 @@ std::optional<rc::em::Store> ChatSession::em_store() const
 {
     if (not em_G_) return std::nullopt;
     return rc::em::load_store(*em_G_);
+}
+
+QString ChatSession::answer_where_was(const QJsonObject& args) const
+{
+    const std::int64_t now = rc::chat::wall_now_ms();
+    std::int64_t t = now;
+    std::int64_t span_ms = 0;   // how long the asked time is: "13:38" names a whole minute
+    const QJsonValue ago = args.value("ago_min");
+    const std::string at = args.value("at").toString().trimmed().toStdString();
+    if (ago.isDouble() or (ago.isString() and not ago.toString().trimmed().isEmpty()))
+    {
+        double min = ago.isDouble() ? ago.toDouble() : -1;
+        if (ago.isString())
+        {
+            const std::string a = ago.toString().trimmed().toStdString();
+            if (const auto [p, ec] = std::from_chars(a.data(), a.data() + a.size(), min); ec != std::errc{}) min = -1;
+        }
+        if (min < 0) return QStringLiteral("ERROR: ago_min must be a number of minutes before now");
+        t = now - std::int64_t(min * 60'000.0);
+    }
+    else if (not at.empty())
+    {
+        // today at that clock time; the NEXT occurrence is ground_clock's, so a time still ahead today means yesterday
+        const auto next = rc::mission::parse_clock(at).has_value() ? rc::mission::ground_clock(at, now) : std::nullopt;
+        if (not next.has_value()) return QStringLiteral("ERROR: at '%1' is not HH:MM (today, local time)").arg(q(at));
+        t = *rc::mission::parse_iso(*next) - 86'400'000;
+        span_ms = at.size() == 5 ? 60'000 : 1'000;
+    }
+    else return QStringLiteral("ERROR: give ago_min (minutes before now) or at (HH:MM)");
+    const auto s = whereabouts_.at(t);
+    std::string ways;
+    if (s.has_value() and not s->room.empty() and s->room != digest_.facts.room)
+        if (const auto topo = remembered_topology(); topo.has_value())
+            for (const auto& leg : rc::chat::legs_to(*topo, digest_.facts.room, s->room)) ways += (ways.empty() ? "" : ", ") + leg;
+    return q(whereabouts_.where_was(t, now, digest_.facts.room, ways, span_ms));
 }
 
 QString ChatSession::answer_memory(const QString& name, const QJsonObject& args) const

@@ -15,7 +15,9 @@ Steps:
 - approach OBJECT: optionally add side=right
 - explore ROOM budget_s=60s: budget_s is required; optionally add until=explored(ROOM)>=0.9
 - wait s=5s: optionally add until=PRED
+- wait at=18:00: waits until that clock time (the next one: today if still ahead, else tomorrow); "in 10 minutes" is wait s=600s
 - move distance_m=1m turn_deg=90deg: turns first, then drives; either keyword alone is fine (move turn_deg=90deg). There is no op called turn
+- A door is crossed from in front of it. When its STATE entry says it is behind the robot (bearing behind, behind-left or behind-right), write its `to face it: move turn_deg=Ndeg` exactly as the first step, then `cross` it
 - say "text": shown to the person
 - report "topic": the model describes the room the robot is in now
 - anchor NAME: a step; remembers this spot; return with go_to anchor:NAME
@@ -63,6 +65,12 @@ mission "visit the rooms behind door_1 and door_0, report each, return"
   report "what is in the second room"
   cross door_0 expect=room_1 retry=2
   go_to anchor:home
+```
+"At 18:00 go through door_1" (a start time is a wait first):
+```
+mission "go through door_1 at 18:00"
+  wait at=18:00
+  cross door_1 retry=2
 ```
 An object remembered in this room, behind the robot, with the STATE line `remembered objects, NOT seen now (each may have moved): chair_34 in room_1 at pose:room_1(-1.72, -1.34), from here: move turn_deg=145deg`:
 ```

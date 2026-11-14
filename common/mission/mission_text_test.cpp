@@ -192,6 +192,45 @@ requires standoff_m
     else
         CHECK(false);
 
+    // ── wait at= (tense spec 2026-11-14 §1): an absolute local date-time with offset; round trip; a bare clock rejected ──
+    {
+        const auto m = parse_text("mission\n  wait at=\"2026-11-14T18:00:00+01:00\"\n  cross door_1 retry=2\n");
+        CHECK(m.has_value());
+        if (m.has_value())
+        {
+            CHECK(m->steps[0].string("at") == "2026-11-14T18:00:00+01:00");
+            CHECK(print_text(*m).contains("wait at=\"2026-11-14T18:00:00+01:00\""));
+            const auto again = parse_text(print_text(*m));
+            CHECK(again.has_value() and *again == *m);
+            const auto j = decode_json(encode_json(*m));
+            CHECK(j.has_value() and *j == *m);
+        }
+        const auto bare = parse_text("mission\n  wait at=\"18:00\"\n");
+        CHECK(not bare.has_value() and bare.error().code == "bad_value");
+        CHECK(not parse_text("mission\n  wait at=\"2026-11-14T25:00:00+01:00\"\n").has_value());
+        CHECK(not parse_text("mission\n  wait at=\"2026-11-14T18:00:00\"\n").has_value());   // no offset
+        CHECK(parse_text("mission\n  wait at=\"2026-11-14T18:00:00Z\" until=door_open(door_1)>=0.8\n").has_value());
+    }
+    // ── mission_time.h ──
+    {
+        CHECK(parse_iso("1970-01-01T00:00:00Z") == 0);
+        CHECK(parse_iso("2026-11-14T18:00:00+01:00") == parse_iso("2026-11-14T17:00:00Z"));
+        CHECK(parse_iso("2024-02-29T12:00:00-03:30").has_value() and not parse_iso("18:00").has_value());
+        CHECK(*parse_iso("2026-11-15T00:00:00Z") - *parse_iso("2026-11-14T00:00:00Z") == 86'400'000);
+        CHECK(parse_clock("18:00") == 64800 and parse_clock("07:05:09") == 25509);
+        CHECK(not parse_clock("24:00").has_value() and not parse_clock("18h") .has_value() and not parse_clock("8:00").has_value());
+        CHECK(iso_hhmm("2026-11-14T18:05:00+01:00") == "18:05" and iso_hhmm("x").empty());
+        const std::int64_t now = *parse_iso("2026-11-14T00:31:00Z");
+        const auto g = ground_clock("18:00", now);   // in this machine's zone, AHEAD of now and within a day
+        CHECK(g.has_value() and parse_iso(*g).has_value() and *parse_iso(*g) > now and *parse_iso(*g) - now <= 86'400'000);
+        CHECK(g.has_value() and g->substr(11, 5) == "18:00");
+        const auto past = ground_clock(format_iso_local(now).substr(11, 5), now + 60'000);   // a minute ago: tomorrow
+        CHECK(past.has_value() and *parse_iso(*past) > now + 60'000 and *parse_iso(*past) - now > 86'000'000);
+        CHECK(ground_clock("2026-11-14T18:00:00+01:00", now) == "2026-11-14T18:00:00+01:00");   // ISO kept
+        CHECK(not ground_clock("soon", now).has_value());
+        CHECK(parse_iso(format_iso_local(now)) == now);
+    }
+
     std::println("mission_text_test: {} checks, {} failures", checks, failures);
     return failures == 0 ? 0 : 1;
 }

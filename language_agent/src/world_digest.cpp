@@ -86,6 +86,10 @@ Digest WorldDigest::build(DSR::InnerEigenAPI& inner, bool controller_present, co
             const double yaw = std::atan2(M(1, 0), M(0, 0)) * kRad2Deg;
             s += std::format("robot pose in {}: x={:.2f} m, y={:.2f} m, yaw={:.0f} deg\n", room_name,
                              T->translation().x(), T->translation().y(), yaw);
+            d.has_pose = true;
+            d.pose_x = T->translation().x();
+            d.pose_y = T->translation().y();
+            d.pose_yaw_deg = yaw;
         }
         else s += "robot pose: unknown (no transform room -> robot)\n";
     }
@@ -170,6 +174,10 @@ Digest WorldDigest::build(DSR::InnerEigenAPI& inner, bool controller_present, co
             const double dist = std::hypot(x, y);
             const double bearing = std::atan2(-x, y) * kRad2Deg;   // 0 = ahead (+y), + = left
             line += std::format(" {:.1f} m away, bearing {:+.0f} deg ({})", dist, bearing, bearing_words(bearing));
+            // tape_e2e19: with door_24 at bearing +177 the chat said "I am already facing door_24", and the cross from
+            // there stalled (the passage does not turn the robot to the door). The turn that faces it, always written,
+            // so the planner can put it first and the chat can read whether the robot faces it.
+            line += std::format(", to face it: move turn_deg={:+.0f}deg", bearing);
         }
         else line += " position unknown";
         if (const auto dn = G.get_node(door); dn.has_value())
@@ -178,10 +186,16 @@ Digest WorldDigest::build(DSR::InnerEigenAPI& inner, bool controller_present, co
                 line += std::format(", P(open)={:.2f}", p.value());
             else line += ", P(open)=unknown";
         }
-        line += std::format(", affordances: approach={} open={} cross={}", aff_state(G, "aff_" + door + "_approach"),
-                            aff_state(G, "aff_" + door + "_open"), aff_state(G, "aff_" + door + "_cross"));
+        const std::string a_app = aff_state(G, "aff_" + door + "_approach"), a_open = aff_state(G, "aff_" + door + "_open"),
+                          a_cross = aff_state(G, "aff_" + door + "_cross");
+        line += std::format(", affordances: approach={} open={} cross={}", a_app, a_open, a_cross);
+        // chat_e2e19: a door restored from memory and not seen yet offers only its approach (door_concept keeps open and
+        // cross × P(exists) until it is seen), and the planner read open=absent as "cannot pass" and went round through
+        // another room. `cross` of it still works: the passage starts with the approach, which sees the door.
+        if (a_app == "offered" and a_open == "absent" and a_cross == "absent")
+            line += " (not seen yet: `cross` it anyway, it approaches first; open and cross are offered once it is seen)";
         for (const auto& [rd, rr] : recalls)
-            if (rd == door) line += ", behind it: remembered " + rr;
+            if (rd == door) line += ", leads to: remembered " + rr;   // not "behind it": that word is the bearing's
         if (d.facts.nearest_door.has_value() and *d.facts.nearest_door == door) line += " [nearest]";
         s += line + "\n";
     }

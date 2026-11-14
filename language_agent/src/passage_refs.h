@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <map>
+#include <optional>
 #include <string>
 #include <variant>
 #include <vector>
@@ -61,26 +62,50 @@ inline bool is_door_ref(const rc::mission::Step& s, std::string& name)
 /// "the door that leads to ROOM": rewritten to `cross ROOM`, which the controller resolves (and waits for) through
 /// ltsm's recall_ROOM under the door. An `open` of the same door in the same list follows its cross. A door with no
 /// expect is left as written. Recursive; returns how many refs were rewritten.
-[[nodiscard]] inline int doors_to_rooms(std::vector<rc::mission::Step>& steps, const std::vector<std::string>& live_doors)
+///   ★A door step AFTER any earlier `cross` is stale too, even if its name is live now: the robot is in another room by
+///   then (chat_e2e19: `cross door_1 bind=a; cross door_1 expect=room_1` — door_1 was live at the card, gone in room_2).
+namespace passage_refs_detail
+{
+inline int doors_to_rooms(std::vector<rc::mission::Step>& steps, const std::vector<std::string>& live_doors,
+                          const std::map<std::string, std::string>& leads_to, bool& crossed)
 {
     using rc::mission::Ref;
-    std::map<std::string, std::string> leads_to;   // door name -> the room its cross expects (this list)
-    for (const auto& s : steps)
-        if (std::string d; s.op == "cross" and passage_refs_detail::is_door_ref(s, d))
-            if (const auto e = s.string("expect"); e.has_value() and e->starts_with("room"))
-                leads_to.emplace(d, *e);
     int n = 0;
     for (auto& s : steps)
     {
-        if (std::string d; (s.op == "cross" or s.op == "open") and passage_refs_detail::is_door_ref(s, d)
-                           and std::ranges::find(live_doors, d) == live_doors.end())
-            if (const auto it = leads_to.find(d); it != leads_to.end())
+        if (std::string d; (s.op == "cross" or s.op == "open") and is_door_ref(s, d)
+                           and (crossed or std::ranges::find(live_doors, d) == live_doors.end()))
+        {
+            std::optional<std::string> room;
+            if (const auto e = s.string("expect"); s.op == "cross" and e.has_value() and e->starts_with("room")) room = *e;
+            else if (const auto it = leads_to.find(d); it != leads_to.end()) room = it->second;
+            if (room.has_value())
             {
-                s.args["door"] = Ref{.kind = Ref::Kind::Node, .name = it->second};
+                s.args["door"] = Ref{.kind = Ref::Kind::Node, .name = *room};
                 ++n;
             }
-        n += doors_to_rooms(s.steps, live_doors);
+        }
+        n += doors_to_rooms(s.steps, live_doors, leads_to, crossed);
+        if (s.op == "cross") crossed = true;   // every later door name belongs to a room not entered yet
     }
     return n;
+}
+inline void collect_leads_to(const std::vector<rc::mission::Step>& steps, std::map<std::string, std::string>& leads_to)
+{
+    for (const auto& s : steps)
+    {
+        if (std::string d; s.op == "cross" and is_door_ref(s, d))
+            if (const auto e = s.string("expect"); e.has_value() and e->starts_with("room")) leads_to.emplace(d, *e);
+        collect_leads_to(s.steps, leads_to);
+    }
+}
+}  // namespace passage_refs_detail
+
+[[nodiscard]] inline int doors_to_rooms(std::vector<rc::mission::Step>& steps, const std::vector<std::string>& live_doors)
+{
+    std::map<std::string, std::string> leads_to;   // door name -> the room its cross expects (this list)
+    passage_refs_detail::collect_leads_to(steps, leads_to);
+    bool crossed = false;
+    return passage_refs_detail::doors_to_rooms(steps, live_doors, leads_to, crossed);
 }
 }  // namespace rc::chat

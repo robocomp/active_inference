@@ -42,6 +42,8 @@
 #include <variant>
 #include <vector>
 
+#include "mission_time.h"
+
 namespace rc::mission
 {
 
@@ -218,7 +220,11 @@ inline std::optional<Error> check_repeat(const Step& s)
 }
 inline std::optional<Error> check_wait(const Step& s)
 {
-    if (not s.has("s") and not s.has("until")) return err("bad_value", s, "", "wait for what? give s or until");
+    if (not s.has("s") and not s.has("until") and not s.has("at"))
+        return err("bad_value", s, "", "wait for what? give s, until or at");
+    // `at` is ABSOLUTE (mission_time.h): a bare "18:00" is grounded by language_agent before it gets here.
+    if (const auto at = s.string("at"); at.has_value() and not parse_iso(*at).has_value())
+        return err("bad_value", s, "at", "needs a local date-time with its offset, e.g. 2026-11-14T18:00:00+01:00");
     return std::nullopt;
 }
 inline std::optional<Error> check_move(const Step& s)
@@ -269,8 +275,10 @@ inline const std::vector<OpSpec>& ops()
          .fields = {{.name = "room", .type = Ref, .required = true, .ref_kinds = kNode, .positional = true},
                     {.name = "until", .type = Pred},
                     {.name = "budget_s", .type = Number, .required = true, .positive = true}}},
+        // `at` (2026-11-14, tense spec §1): ends at that wall-clock time (Host::wall_ms) — "at 18:00 go to room 3".
         {.name = "wait", .claims = kBase, .instant = false, .has_body = false,
-         .fields = {{.name = "s", .type = Number, .positive = true}, {.name = "until", .type = Pred}},
+         .fields = {{.name = "s", .type = Number, .positive = true}, {.name = "until", .type = Pred},
+                    {.name = "at", .type = String}},
          .check = check_wait},
         {.name = "say", .claims = kNone, .instant = true, .has_body = false,
          .fields = {{.name = "text", .type = String, .required = true, .positional = true}}},

@@ -262,6 +262,46 @@ int main()
         }
     }
 
+    // ── chat_e2e19: `cross door_1 bind=a; cross door_1 expect=room_1; cross room_3` from room_1 — door_1 was LIVE at the
+    //    card, but step 2 runs in room_2, where door_1 is not in the graph. A door step after any cross is stale. ─────
+    {
+        auto m = parse_planned("mission\n  cross door_1 retry=2 bind=a\n  cross door_1 expect=room_1 retry=2\n"
+                               "  cross room_3 expect=room_3 retry=2\n");
+        CHECK(m.has_value());
+        if (m.has_value())
+        {
+            CHECK(rc::chat::doors_to_rooms(m->steps, {"door_1", "door_22"}) == 1);
+            const std::string out = rc::mission::print_text(*m);
+            CHECK(out.contains("cross door_1 retry=2 bind=a"));             // first step, live: kept
+            CHECK(out.contains("cross room_1 expect=room_1"));             // after a cross: the room it leads to
+        }
+        auto k = parse_planned("mission\n  open door_22\n  cross door_22 expect=room_3\n  report \"done\"\n");
+        CHECK(k.has_value());
+        if (k.has_value())
+        {   // open + cross of a live door before any cross: untouched
+            CHECK(rc::chat::doors_to_rooms(k->steps, {"door_1", "door_22"}) == 0);
+        }
+    }
+
+    // ── wait at= (tense spec 2026-11-14 §1): the planner writes a bare clock time; it is grounded to its next
+    //    occurrence before parsing, so the card and the controller only ever see an absolute date-time ──────────
+    {
+        const std::int64_t now = *rc::mission::parse_iso("2026-11-14T00:31:00Z");
+        const std::string t = rc::chat::ground_clock_text("mission \"at 18 go\"\n  wait at=18:00\n  cross room_3 expect=room_3\n", now);
+        CHECK(t.contains("wait at=\"") and not t.contains("at=18:00\n") and t.contains("T18:00:00"));
+        CHECK(rc::chat::ground_clock_text("  wait at=\"18:00\"\n", now).contains("T18:00:00"));          // quoted too
+        CHECK(rc::chat::ground_clock_text("  wait at=\"2026-11-14T18:00:00+01:00\"\n", now)
+              == "  wait at=\"2026-11-14T18:00:00+01:00\"\n");                                         // ISO kept
+        CHECK(rc::chat::ground_clock_text("  wait s=5s\n  say \"look at=this\"\n", now)
+              == "  wait s=5s\n  say \"look at=this\"\n");                                            // not a clock
+        const auto m = check_planned("mission \"at six\"\n  wait at=18:00\n  report \"x\"\n",
+                                     [](std::string_view) { return true; }, {}, now);
+        CHECK(m.has_value());
+        if (m.has_value()) CHECK(rc::mission::parse_iso(*m->steps[0].string("at")).has_value());
+        const auto bad = check_planned("mission \"x\"\n  wait at=25:00\n", [](std::string_view) { return true; }, {}, now);
+        CHECK(not bad.has_value());                                                                      // named, not guessed
+    }
+
     // ── the wakes' text ──────────────────────────────────────────────────────────────────────────────────────────
     {
         const std::string r = report_wake("objects here", "room_2", "2 objects perceived in room_2:\n- chair_1\n");

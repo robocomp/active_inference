@@ -20,6 +20,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <cstdint>
 #include <deque>
 #include <expected>
@@ -254,14 +255,58 @@ inline std::string paused_at(const rc::mission::Progress& p)
     return a == std::string_view::npos ? std::string{} : std::string(q.substr(a));
 }
 
+/// `at=18:00` (a bare clock time, as the planner writes it) → `at="2026-11-14T18:00:00+01:00"`, its NEXT occurrence in
+/// local time (rc::mission::ground_clock), before the text is parsed: the IR only accepts an absolute `at`, so the
+/// controller never guesses a date (tense spec 2026-11-14 §1). Quoted or not; an ISO value and anything that is not a
+/// clock time are left as written (validate() then names the bad one).
+[[nodiscard]] inline std::string ground_clock_text(std::string_view text, std::int64_t now_ms)
+{
+    std::string out;
+    std::size_t i = 0;
+    while (i < text.size())
+    {
+        const std::size_t k = text.find("at=", i);
+        if (k == std::string_view::npos or (k > 0 and text[k - 1] != ' ' and text[k - 1] != '\t'))
+        {
+            const std::size_t stop = k == std::string_view::npos ? text.size() : k + 3;
+            out += text.substr(i, stop - i);
+            i = stop;
+            continue;
+        }
+        std::size_t v = k + 3;
+        const bool quoted = v < text.size() and text[v] == '"';
+        if (quoted) ++v;
+        std::size_t e = v;
+        while (e < text.size() and text[e] != ' ' and text[e] != '"' and text[e] != '\n' and text[e] != '\r') ++e;
+        const auto iso = rc::mission::parse_clock(text.substr(v, e - v)).has_value()
+                             ? rc::mission::ground_clock(text.substr(v, e - v), now_ms) : std::nullopt;
+        if (not iso.has_value())
+        {
+            out += text.substr(i, k + 3 - i);
+            i = k + 3;
+            continue;
+        }
+        out += text.substr(i, k + 3 - i);
+        out += '"' + *iso + '"';
+        i = e + (quoted and e < text.size() and text[e] == '"' ? 1 : 0);
+    }
+    return out;
+}
+
+[[nodiscard]] inline std::int64_t wall_now_ms()
+{
+    return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+}
+
 /// A planner reply → the mission language_agent may put on a card: fence stripped, parsed, validated, every name known,
 /// and every remembered object reached the missions skill's way (`remembered`, when given: see remembered_unreached).
 /// The error is ONE line the planner can act on (it is sent back to it to fix). Live 2026-11-10: the planner wrote a
 /// bare `approach chair_34` for a remembered chair; the controller refused it before anything moved.
 [[nodiscard]] inline std::expected<rc::mission::Mission, std::string> check_planned(
-    std::string_view reply, const std::function<bool(std::string_view)>& exists, const RememberedLookup& remembered = {})
+    std::string_view reply, const std::function<bool(std::string_view)>& exists, const RememberedLookup& remembered = {},
+    std::int64_t now_ms = wall_now_ms())
 {
-    auto m = parse_planned(strip_fence(reply));
+    auto m = parse_planned(ground_clock_text(strip_fence(reply), now_ms));
     if (not m.has_value()) return m;
     if (const auto bad = unknown_name(*m, exists); bad.has_value())
         return std::unexpected(std::format("unknown name '{}': there is no such door, room or object in the live map now "
@@ -607,7 +652,7 @@ inline constexpr std::string_view kWakeRefusal =
     static constexpr std::string_view kAllowed[] = {
         "stop", "cancel_passage", "plan_mission",                                                  // halt / propose
         "look", "find_objects", "where_is", "known_rooms", "route_to", "can_see", "imagine_view", "imagine", "agents", "sensors",        // read the world
-        "graph_summary", "inspect", "use_skill", "episodes", "episode", "outcome_stats", "last_episode",
+        "graph_summary", "inspect", "use_skill", "episodes", "episode", "outcome_stats", "last_episode", "where_was",
         "show", "draw", "table", "hide_canvas",                                                     // the side canvas
     };
     return std::ranges::find(kAllowed, tool) != std::ranges::end(kAllowed);
