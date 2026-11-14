@@ -679,8 +679,8 @@ void DoorCore::associate(const DoorCycleInput& in, DoorCycleOutput& out)
                 for (std::size_t d = 0; d < dets_.size() and d < mask_causes_.size(); ++d)
                 {
                     const auto& mc = mask_causes_[d];
-                    const double r = mc.rho_door(inst.id);
-                    if (r > best_rho and r >= mc.rho_kind(CauseKind::NewDoor) and r >= mc.rho_kind(CauseKind::Clutter)) { best_rho = r; best = dets_[d].slice_index; }
+                    const double r = mc.hit_door(inst.id);
+                    if (r > best_rho and r >= mc.hit_new()) { best_rho = r; best = dets_[d].slice_index; }
                 }
                 if (best >= 0)
                 {

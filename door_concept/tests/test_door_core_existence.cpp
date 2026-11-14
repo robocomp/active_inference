@@ -294,9 +294,7 @@ int main()
         q.look(A0, kDoor, {{1.0f, kWallY, 0.9f}});
         for (int k = 0; k < 3; ++k) q.look(stand(4.0f, 0.0f, 3.0f), {3.0f, kWallY + 0.01f}, {{3.0f, kWallY, 0.9f}});
         std::print("one_model door + candidate: {} doors, {} candidates\n", q.w.st.size(), q.core.candidates().size());
-        // (Fix round 1, ruling C: a mask seeds a place only when its new-door share beats clutter's; with a CERTAIN door on the wall the second door's
-        //  base rate (0.01) is below the false-alarm rate, so this x = 3 detection seeds no candidate. Reported: second doors are not discoverable by masks alone.)
-        CHECK(q.w.st.size() == 1 and q.core.candidates().size() <= 1);
+        CHECK(q.w.st.size() == 1 and q.core.candidates().size() == 1);
         if (q.w.st.size() == 1 and q.core.candidates().size() == 1)
         {
             const auto& d = q.w.st.begin()->second;
@@ -1342,6 +1340,7 @@ int main()
         {
             Rig r(false, true);
             r.core.set_detectors(fitted);
+            r.core.set_costs(CostEstimator::logged_default());   // the agent's own line (-1.08), not the Rig's equal costs (line 0, where L = 0.00 jitter flickers)
             const Vec2f at{1.0f, y - 4.0f};
             for (int f = 0; f < frames; ++f)
             {
@@ -1352,9 +1351,8 @@ int main()
             return r.births.size();
         };
         CHECK(parked(0.0f, 600) == 0);
-        const std::size_t wall_births = parked(kWallY, 600);
-        // REPORTED, NOT ASSERTED (see the fix-round report): at a wall place the first hit is P(door) ~ 0.54 (L = +0.15) with the fitted table.
-        std::print("parked_phantom wall: {} births (not asserted)\n", wall_births);
+        // wall place: ONE early birth, refuted (or not) by the following frames, is the model's honest answer; the failure was the flicker
+        CHECK(parked(kWallY, 600) <= 1);
     }
     {   // a real, centred door is still born (fitted table): the frames it needs at 90 % reporting
         Rig r(false, true);

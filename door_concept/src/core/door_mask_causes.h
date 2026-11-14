@@ -60,6 +60,15 @@ struct MaskCauses
                 s += rho[i];
         return s;
     }
+    /// The share of a mask that is a DOOR's or a new door's, clutter set aside: ρ renormalised over the non-clutter causes. Clutter is NOT a
+    /// competitor for a place's hit weight — its rate enters the place once, through the ledger's false-alarm rate (hit_llr = log h/f).
+    [[nodiscard]] double non_clutter() const
+    {
+        const double c = rho_kind(CauseKind::Clutter);
+        return c < 1.0 ? 1.0 - c : 0.0;
+    }
+    [[nodiscard]] double hit_door(std::uint64_t id) const { const double n = non_clutter(); return n > 0.0 ? rho_door(id) / n : 0.0; }
+    [[nodiscard]] double hit_new() const { const double n = non_clutter(); return n > 0.0 ? rho_kind(CauseKind::NewDoor) / n : 0.0; }
     [[nodiscard]] double rho_kind(CauseKind k) const
     {
         double s = 0.0;

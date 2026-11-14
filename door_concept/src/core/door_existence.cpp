@@ -321,8 +321,8 @@ std::vector<FrameDetection> DoorCore::place_detections(std::uint64_t door, int c
         double rho = 0.0;   // no causes computed for this detection (not a fresh frame): it says nothing about this place
         if (i < mask_causes_.size() and not mask_causes_[i].causes.empty())
         {
-            if (door != 0) rho = mask_causes_[i].rho_door(door);
-            else if (candidate >= 0 and i < det_candidate_.size() and det_candidate_[i] == candidate) rho = mask_causes_[i].rho_kind(CauseKind::NewDoor);
+            if (door != 0) rho = mask_causes_[i].hit_door(door);
+            else if (candidate >= 0 and i < det_candidate_.size() and det_candidate_[i] == candidate) rho = mask_causes_[i].hit_new();
         }
         v[i].w *= static_cast<float>(rho);
     }
@@ -516,8 +516,7 @@ void DoorCore::prepare_candidates(const DoorCycleInput& in, const std::vector<rc
             for (const auto& [id, st] : world_->fit_states()) door_best = std::max(door_best, mask_causes_[d].rho_door(id));
             if (best < 0 and door_best > mask_causes_[d].rho_kind(CauseKind::NewDoor))
                 continue;   // an existing door explains this mask better than a new place would
-            if (best < 0 and mask_causes_[d].rho_kind(CauseKind::NewDoor) < mask_causes_[d].rho_kind(CauseKind::Clutter))
-                continue;   // a spurious mask seeds no place: new door against clutter, the comparison associate() makes for doors
+
         }
         else
         for (std::size_t c = 0; c < candidates_.size(); ++c)
@@ -596,7 +595,7 @@ void DoorCore::prepare_candidates(const DoorCycleInput& in, const std::vector<rc
             if (cfg.exist_one_model)
             {   // the candidate sees the detections as ITS cause's responsibility: no gate, no one-detection rule for the hits (S8, S9)
                 if (it != self_det.end())
-                    self_w *= static_cast<float>(mask_causes_[static_cast<std::size_t>(it->second)].rho_kind(CauseKind::NewDoor));
+                    self_w *= static_cast<float>(mask_causes_[static_cast<std::size_t>(it->second)].hit_new());
                 const std::vector<FrameDetection> place = place_detections(0, static_cast<int>(c));
                 ExistenceFrame fr_c = fr;
                 fr_c.dets = place;

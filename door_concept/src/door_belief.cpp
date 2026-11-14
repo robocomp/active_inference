@@ -186,12 +186,17 @@ DoorBelief::LeafMixture DoorBelief::leaf_mixture(const std::vector<Eigen::Vector
             for (std::size_t k = 0; k < N; ++k)
             {
                 const double w = wb * std::exp(post[k]);
-                if (k == 0) shut += w;
+                if (k == 0) { shut += w; continue; }   // the shut leaf is one pose whatever the hinge and swing: added once below
                 if (not (w > 1e-9)) continue;   // numerical prune of weightless poses (cost only: a 1e-9 weight moves no point's u by 1e-9)
                 door::LeafState ls; ls.hinge = hinge; ls.swing = swing; ls.phi = phi_max_rad * float(k) / float(N - 1);
                 poses.push_back({door::leaf_pose(ap, ls), w});
             }
         }
+    if (shut > 1e-9)
+    {
+        door::LeafState ls; ls.phi = 0.0f;
+        poses.push_back({door::leaf_pose(ap, ls), shut});
+    }
     double sum_log = 0.0, sum_c = 0.0;
     for (const auto& p : pts)
     {
