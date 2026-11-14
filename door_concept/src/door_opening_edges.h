@@ -571,10 +571,13 @@ struct OpeningReading
     int   n_span = 0;     // bins of the span (observed or not)
     int   n_through = 0, n_blocked = 0;
 };
+/// A live door's claim on the wall line: its span in the aperture's own along-wall coordinate and its existence probability. A bin inside it is
+/// that door's evidence, not the hypothesis' (per-bin freedom: weight prod(1 - r) over the claims holding the bin).
+struct OpeningClaim { float lo = 0.f, hi = 0.f, r = 0.f; };
 inline constexpr float kJambMarginM = 0.05f;   // the fit's margin (tools/door_truth_scan.cpp): bins whose centre is 5 cm inside the jambs
 
 [[nodiscard]] inline OpeningReading read_opening(const Aperture& ap, const RegisteredSweep& sw, float through_open, float through_wall,
-                                                 std::span<const std::pair<float, float>> phi_curve)
+                                                 std::span<const std::pair<float, float>> phi_curve, std::span<const OpeningClaim> claims = {})
 {
     OpeningReading out;
     if (not (through_wall > 0.f and through_wall < through_open and through_open < 1.f)) return out;   // the table's own domain (detector_llr.h): an invalid row says nothing
@@ -590,8 +593,10 @@ inline constexpr float kJambMarginM = 0.05f;   // the fit's margin (tools/door_t
         ++out.n_span;
         const int T = tb.nT[static_cast<std::size_t>(b)], B = tb.nB[static_cast<std::size_t>(b)];
         if (T + B == 0) continue;   // unobserved: no evidence
-        if (T > 0 and B == 0) { out.llr += static_cast<float>(l_through); ++out.n_through; }
-        else if (B > 0)       { out.llr += static_cast<float>(l_blocked); ++out.n_blocked; }
+        double free = 1.0;           // the share of this bin no live door's span already accounts for
+        for (const auto& c : claims) if (a >= c.lo and a <= c.hi) free *= 1.0 - static_cast<double>(c.r);
+        if (T > 0 and B == 0) { out.llr += static_cast<float>(free * l_through); ++out.n_through; }
+        else if (B > 0)       { out.llr += static_cast<float>(free * l_blocked); ++out.n_blocked; }
     }
     return out;
 }
@@ -610,9 +615,9 @@ inline constexpr float kJambMarginM = 0.05f;   // the fit's margin (tools/door_t
 /// llr is the MEAN per-bin ratio over the SPAN, an unobserved bin counting 0: the line of sight to the span is the weight (0 when the
 /// span is occluded or out of range, whatever the observed part says; no bins = no evidence, a miss with p_D 0 changes nothing).
 [[nodiscard]] inline float opening_view_llr(const Aperture& ap, const RegisteredSweep& sw, float through_open, float through_wall,
-                                            std::span<const std::pair<float, float>> phi_curve)
+                                            std::span<const std::pair<float, float>> phi_curve, std::span<const OpeningClaim> claims = {})
 {
-    const OpeningReading r = read_opening(ap, sw, through_open, through_wall, phi_curve);
+    const OpeningReading r = read_opening(ap, sw, through_open, through_wall, phi_curve, claims);
     return r.n_span > 0 ? r.llr / static_cast<float>(r.n_span) : 0.f;
 }
 

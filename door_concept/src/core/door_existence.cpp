@@ -382,15 +382,17 @@ void DoorCore::compute_mask_causes(const DoorCycleInput& /*in*/)
                         const float th_h = std::acos(std::min(1.0f, std::abs(dir.dot(hy.aperture.wall_u))));
                         const double log_not_h = std::log1p(-std::min(rc::door::aperture_angle_likelihood(th_h, rc::door::segment_angle_sd(seg.length, mband.sigma_m)), 1.0 - 1e-16));
                         double v = lb - std::log(wall_length_at(hc)) + log_open + log_not_h + std::log(std::max(hole_free, 1e-300));   // 1e-300: numerical floor on a log
+                        // the φ prior the fit uses (uniform on [0, phi_max]): a wrong-side twin at φ = π − θ beyond the hinge's range is impossible, in range it pays the density
+                        if (not (hy.leaf.phi <= cfg.phi_max_rad)) continue;
+                        v -= std::log(std::max(1e-3f, cfg.phi_max_rad));   // 1e-3: a numerical floor on the log
                         if (not std::isfinite(v) or v + std::max(0.0, lid_max) + model.log_pd_new < log_floor) continue;
                         if (leaf_sweep_.present())
                         {
-                            // the opening is evidence for the HOLE, shared by whichever label owns it: credited to a new door only for the share of
-                            // the hole no live door already stands in (hole_free)
-                            const auto reg = rc::door::register_sweep(hy.aperture, leaf_sweep_.origin(), leaf_sweep_.points());
+                            // the opening is evidence for the HOLE: the bins a live door's span holds are that door's, the others count in full
+                            const auto claims = live_claims(hy.aperture, groups);
                             const std::pair<float, float> pt{hy.leaf.phi, 1.0f};
-                            v += hole_free * rc::door::opening_view_llr(hy.aperture, reg, detectors_.lidar.through_open, detectors_.lidar.through_wall,
-                                                                         std::span<const std::pair<float, float>>(&pt, 1));
+                            v += rc::door::opening_view_llr(hy.aperture, registered(hy.aperture), detectors_.lidar.through_open, detectors_.lidar.through_wall,
+                                                            std::span<const std::pair<float, float>>(&pt, 1), claims);
                         }
                         model.leaf_log_w[h] = v;
                         hyp_log_b[h] = lb;
@@ -415,14 +417,39 @@ std::optional<LidarOpening> DoorCore::candidate_lidar(const rc::DoorFitState& th
     if (not cfg_.door.exist_one_model or not leaf_sweep_.present()) return std::nullopt;
     const float cf = leaf_born ? 1.0f - std::cos(theta.leaf.phi) : std::clamp(cfg_.door.ricoh_birth_p_open, 0.0f, 1.0f);   // clamp: domain of a share
     const std::pair<float, float> pt{std::acos(std::clamp(1.0f - cf, -1.0f, 1.0f)), 1.0f};
-    const double free = hole_free(theta.aperture, groups);
-    if (not (free > 0.0)) return std::nullopt;   // a hole a live door certainly stands in: the credit is exactly 0, so the registration is not run
-    const auto reg = rc::door::register_sweep(theta.aperture, leaf_sweep_.origin(), leaf_sweep_.points());
-    // the opening is evidence for the HOLE: a candidate beside a live door that already stands in that hole is credited only the share left
-    // (hole_free), or one open door's span would bear a second label 0.4 m along the wall and charge the first one the second-door cost
-    return LidarOpening{static_cast<float>(free) * rc::door::opening_view_llr(theta.aperture, reg, detectors_.lidar.through_open,
-                                                    detectors_.lidar.through_wall, std::span<const std::pair<float, float>>(&pt, 1)),
+    // the opening is evidence for the HOLE: a bin a live door's span holds is that door's (per-bin freedom), so a duplicate shifted along an open
+    // door gets nothing for the half it shares and pays for its own half reading wall
+    const auto claims = live_claims(theta.aperture, groups);
+    const auto& reg = registered(theta.aperture);
+    return LidarOpening{rc::door::opening_view_llr(theta.aperture, reg, detectors_.lidar.through_open, detectors_.lidar.through_wall,
+                                                   std::span<const std::pair<float, float>>(&pt, 1), claims),
                         reg.origin.head<2>()};
+}
+
+// The live doors' claims on this aperture's wall line (their spans in the aperture's own along-wall coordinate, with their last-cycle existence).
+std::vector<rc::door::OpeningClaim> DoorCore::live_claims(const rc::door::Aperture& ap, const std::vector<int>& groups) const
+{
+    std::vector<rc::door::OpeningClaim> out;
+    const auto& polygon = fit_.room_polygon();
+    const int wall = wall_of(ap.centre_xy(), polygon, groups);
+    for (const auto& [id, st] : world_->fit_states())
+    {
+        if (st->is_bearing_hypothesis) continue;
+        const auto it = last_p_door_.find(id);
+        if (it == last_p_door_.end() or wall_of(st->aperture.centre_xy(), polygon, groups) != wall) continue;
+        const float c = (st->aperture.centre_xy() - ap.wall_O).dot(ap.wall_u);
+        out.push_back({c - 0.5f * st->aperture.w, c + 0.5f * st->aperture.w, it->second});
+    }
+    return out;
+}
+
+// One registration of the newest sweep per aperture per cycle (the hypothesis loop and the candidates ask for the same apertures); cleared by step().
+const rc::door::RegisteredSweep& DoorCore::registered(const rc::door::Aperture& ap) const
+{
+    for (const auto& [k, r] : reg_cache_)
+        if (k.wall_O == ap.wall_O and k.wall_u == ap.wall_u and k.s == ap.s and k.w == ap.w and k.h == ap.h) return r;
+    reg_cache_.emplace_back(ap, rc::door::register_sweep(ap, leaf_sweep_.origin(), leaf_sweep_.points()));
+    return reg_cache_.back().second;
 }
 
 // The share of the aperture's span NO live door stands in: Π_i (1 − r_i · overlap_i) over the live doors on the same wall, r_i the door's last-cycle

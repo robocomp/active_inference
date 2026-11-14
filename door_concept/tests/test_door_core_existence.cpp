@@ -1722,6 +1722,26 @@ int main()
         std::print("lidar_wall_refutes_phantom: dL over 6 views: without the LiDAR {:+.3f}, span reads wall {:+.3f}\n", d0, d1);
         CHECK(d1 < d0 - 0.5f);
     }
+    {   // duplicate_lidar_not_credited: a candidate overlapping half of a live open door's span: through on the shared half, wall on its own half
+        Bench b; b.cfg.exist_one_model = true;
+        const rc::DoorFitState live = shut_door();
+        rc::DoorFitState dup = live;
+        dup.aperture.s += 0.4f;   // shifted 0.4 m along the wall
+        const Vec2f org{1.0f, 1.0f};
+        // through exactly over the live door's span, wall elsewhere
+        const BpearlSweep sw = make_sweep(dup.aperture, org, live.aperture.s, live.aperture.s + live.aperture.w);
+        const std::pair<float, float> pt{std::numbers::pi_v<float> / 2, 1.0f};
+        rc::door::RegisteredSweep rs; rs.origin = sw.origin_room; rs.pts = sw.pts_room;
+        const std::span<const std::pair<float, float>> oc(&pt, 1);
+        const float whole = rc::door::opening_view_llr(dup.aperture, rs, 0.802144f, 0.00110819f, oc);
+        const float c0 = live.aperture.s - dup.aperture.s;   // the live span in the candidate's own coordinate (wall_O is shared)
+        const rc::door::OpeningClaim claim{live.aperture.s, live.aperture.s + live.aperture.w, 0.95f};
+        const float shared = rc::door::opening_view_llr(dup.aperture, rs, 0.802144f, 0.00110819f, oc, std::span<const rc::door::OpeningClaim>(&claim, 1));
+        std::print("duplicate_lidar_not_credited: whole-span term {:+.3f} (the shared half credits the duplicate), with the live door's bins released {:+.3f}\n", whole, shared);
+        (void)c0; (void)b;
+        CHECK(whole > 0.0f);
+        CHECK(shared < 0.0f);
+    }
     {   // shut_door_lidar_neutral: a shut, born door (leaf belief: shut) whose span reads wall is no evidence either way over 30 views
         const std::vector<Vec2f> from{{1.0f, 1.0f}, {2.5f, 0.5f}, {-0.5f, 1.5f}, {3.5f, 2.0f}, {0.0f, -1.0f}, {2.0f, 2.5f}};
         Bench b; b.cfg.exist_one_model = true;

@@ -220,6 +220,7 @@ std::vector<rc::exclusion::Claim> DoorCore::claims_from(const std::vector<Object
 
 DoorCycleOutput DoorCore::step(const DoorCycleInput& in)
 {
+    reg_cache_.clear();   // one LiDAR registration per aperture per cycle (registered())
     DoorCycleOutput out;
     out.cycle = in.cycle;
     out.t_ms = in.t_ms();

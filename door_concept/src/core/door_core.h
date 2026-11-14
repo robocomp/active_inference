@@ -317,6 +317,9 @@ private:
     [[nodiscard]] Vec2f place_xy(std::size_t d) const
     { return d < mask_leaf_.size() and mask_leaf_[d].has_value() ? Vec2f(mask_leaf_[d]->aperture.centre_xy()) : dets_[d].xy; }
     /// ONE-MODEL: the LiDAR opening of a pending candidate's aperture (opening_view_llr on the newest sweep registered to it; nullopt without a sweep).
+    [[nodiscard]] std::vector<rc::door::OpeningClaim> live_claims(const rc::door::Aperture& ap, const std::vector<int>& groups) const;
+    [[nodiscard]] const rc::door::RegisteredSweep& registered(const rc::door::Aperture& ap) const;
+    mutable std::vector<std::pair<rc::door::Aperture, rc::door::RegisteredSweep>> reg_cache_;   // per cycle
     [[nodiscard]] double hole_free(const rc::door::Aperture& ap, const std::vector<int>& groups) const;
     [[nodiscard]] std::optional<LidarOpening> candidate_lidar(const rc::DoorFitState& theta, bool leaf_born, const std::vector<int>& groups) const;
     /// SpecificWorker::update_existence_beliefs, moved (door_existence.cpp). Runs once per NEW mask frame.
