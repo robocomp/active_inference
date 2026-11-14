@@ -4213,6 +4213,9 @@ std::vector<std::string> SpecificWorker::restore_rows(std::uint64_t new_room, st
     for (const auto& r : d.restore)
     {
         const auto counter_before = next_door_index_;
+        // The note's revisit history (visit, sighted_ms) goes into the place table, so the first re-detection of this door after a
+        // restart is a revisit sample with its real exposure. The restore itself takes no sample.
+        core_->adopt_remembered_place(rc::door::core::PlaceTable::row_of(r, cfg_.tracker_detection_noise_m, cfg_.exist_geometry_may_refute, cfg_.exist_lookalike_prob));
         // Task 9: the belief comes back from the row (PlaceTable::restored_belief): its ledger, and its evidence aged by the learned change hazard.
         const auto restored = core_->places().restored_belief(
             rc::door::core::PlaceTable::row_of(r, cfg_.tracker_detection_noise_m, cfg_.exist_geometry_may_refute, cfg_.exist_lookalike_prob),

@@ -95,6 +95,29 @@ int main()
         const auto d = plan_restore(sp.kept, "room_1", true, std::vector<LiveDoor>{}, 0.3f);
         CHECK(d.restore.size() == 1 and d.restore[0].name == "door_6");
     }
+    {   // I-1 (Task 6 fix): a restored door keeps its revisit history. The note row (visit 3, sighted T) is upserted over the
+        // identity-only row of the same place (one row, not two); the first later sighting is ONE revisit sample with its real exposure,
+        // the second sighting in the same visit gives none; the restore itself took no sample.
+        const IdentityRow src = csv_row("door_5", 1.5f, -2.0f);
+        const std::vector<memnote::NoteInput> notes = {{11, "remembered_door_5", memnote::note_of(src, 0.03f)}};
+        const auto rows = memnote::rows_of_notes(notes, "room_1");
+        CHECK(rows.size() == 1 and rows[0].visit.value_or(-1) == 3 and rows[0].sighted_ms == src.sighted_ms);
+        core::PlaceTable T(true);
+        IdentityRow idonly; idonly.room = "room_1"; idonly.name = "door_5"; idonly.xy = {1.5f, -2.0f};   // what the identity CSV loads
+        ParsedIdentityTable pit; pit.rows.push_back(idonly);
+        T.load(pit, 0.05f);
+        CHECK(T.rows().size() == 1 and T.rows()[0].visit == 0 and T.rows()[0].sighted_wall_ms == 0);
+        T.upsert(core::PlaceTable::row_of(rows[0], 0.05f, true));                  // DoorCore::adopt_remembered_place
+        int session_visit = std::max(1, rows[0].visit.value_or(0) + 1);
+        CHECK(T.rows().size() == 1);
+        const auto* row = T.find("room_1", "door_5");
+        CHECK(row != nullptr and row->visit == 3 and row->sighted_wall_ms == *src.sighted_ms);
+        CHECK(T.hazard_state().sum_elapsed_s == 0.0 and T.hazard_state().changes == 0.0);   // the restore took no sample
+        const std::int64_t later = *src.sighted_ms + 90'000;
+        CHECK(T.sample_revisit(*row, session_visit, true, later));
+        CHECK(std::fabs(T.hazard_state().sum_elapsed_s - 90.0) < 1e-6);
+        CHECK(not T.sample_revisit(*row, session_visit, true, later + 100));         // one per place per visit
+    }
     {   // I2b: only door_<digits> asks for its own name back; I1: the gate
         CHECK(memnote::is_plain_door_name("door_5") and memnote::is_plain_door_name("door_123"));
         CHECK(not memnote::is_plain_door_name("r2_door_5_h1") and not memnote::is_plain_door_name("door_5_h1")
