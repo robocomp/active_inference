@@ -256,6 +256,38 @@ int main(int argc, char **argv)
         check(t.has_value() and std::fabs(t.value().get()[0] - (-2.05f)) < 1e-5f, "memory edge x follows (-2.05)");
         check(ev.sync_found_doors() == 0, "and is stable afterwards");
     }
+    std::printf("sync_refreshes_pose_of_wall_hung_twin\n");
+    {
+        build_refresh();
+        mem->delete_node(mem_door1);
+        const double wx = 3, wy = 2, wth = 0.6, fx = 1.5, fy = 0.2, fth = 0.3;
+        const auto wall = mem_node("wall", "r3_wall_w", mem_twin, wx, wy, wth);
+        mem_door1 = mem_node("object", "r3_door_1", wall, fx, fy, fth, std::nullopt, "door", 1.0f);
+        const double rx = wx + std::cos(wth) * fx - std::sin(wth) * fy, ry = wy + std::sin(wth) * fx + std::cos(wth) * fy;
+        put_edge(*live, live_room, live_door1, rx, ry, wth + fth);
+        ltsm::RoomEviction ev(live, mem);
+        check(ev.sync_found_doors() > 0 and std::fabs(mem_evidence() - 5.0f) < 1e-6f, "attrs refreshed on a wall-hung twin");
+        check(ev.sync_found_doors() == 0, "same place: no pose write");
+        // slide 0.05 m along the wall's x axis (in the room frame)
+        const double mx = rx + 0.05 * std::cos(wth), my = ry + 0.05 * std::sin(wth);
+        put_edge(*live, live_room, live_door1, mx, my, wth + fth);
+        check(ev.sync_found_doors() > 0, "moved live door: sync returns > 0");
+        const auto e = mem->get_edge(wall, mem_door1, "RT");
+        const auto t = e.has_value() ? mem->get_attrib_by_name<rt_translation_att>(e.value()) : std::nullopt;
+        const auto r = e.has_value() ? mem->get_attrib_by_name<rt_rotation_euler_xyz_att>(e.value()) : std::nullopt;
+        check(t.has_value() and r.has_value(), "wall->door edge present");
+        if (t.has_value() and r.has_value())
+        {
+            const double lx = t.value().get()[0], ly = t.value().get()[1], lth = r.value().get()[2];
+            const double cx = wx + std::cos(wth) * lx - std::sin(wth) * ly, cy = wy + std::sin(wth) * lx + std::cos(wth) * ly;
+            check(std::fabs(cx - mx) < 1e-4 and std::fabs(cy - my) < 1e-4 and std::fabs(std::remainder(wth + lth - (wth + fth), 2 * M_PI)) < 1e-4,
+                  "composed T(room <- door) matches the live pose");
+        }
+        const auto m = mem->get_node("r3_door_1").value();
+        check(mem->get_attrib_by_name<parent_att>(m).value_or(0) == wall, "parent is still the wall");
+        check(not mem->get_edge(mem_twin, mem_door1, "RT").has_value(), "no second RT parent (room edge absent)");
+        check(ev.sync_found_doors() == 0, "stable afterwards");
+    }
     std::printf("sync_no_refresh_when_held\n");
     {
         build_refresh();

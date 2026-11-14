@@ -1800,19 +1800,41 @@ int RoomEviction::refresh_door_twin(const DSR::Node &live_door, const DSR::Node 
         }
     int changed = 0;
     if (node_changed and mem_->update_node(node.value())) ++changed;
-    // the pose, onto the edge from memory's room -- only when the twin hangs from the room itself (one that hangs from a
-    // wall has its pose in the wall's frame, and a second RT parent would break the tree)
-    if (const auto par = mem_->get_attrib_by_name<parent_att>(node.value()); par.has_value() and par.value() == mem_room_id)
+    // the pose, onto the edge from the twin's OWN parent (the wall it hangs from, as eviction archives it, or the room):
+    // T(parent <- door) = T(room <- parent)^-1 * T(room <- door), planar. T(room <- parent) is composed from memory's RT
+    // edges (no inner-eigen cache involved); unresolved => the pose is skipped, the attributes above stay refreshed.
+    if (const auto par = mem_->get_attrib_by_name<parent_att>(node.value()); par.has_value())
     {
-        const Mat::RTMat T(Eigen::Translation3d(pose_in_live_room.x(), pose_in_live_room.y(), 0.0)
-                           * Eigen::AngleAxisd(pose_in_live_room.z(), Eigen::Vector3d::UnitZ()));
-        const auto want = rt_attrs(T);
-        const auto edge = mem_->get_edge(mem_room_id, node->id(), "RT");
-        bool same = edge.has_value();
-        if (same)
-            for (const auto &[k, v] : want)
-                if (const auto it = edge->attrs().find(k); it == edge->attrs().end() or not (it->second == v)) { same = false; break; }
-        if (not same and mem_->insert_or_assign_edge(DSR::Edge::create<RT_edge_type>(mem_room_id, node->id(), want))) ++changed;
+        Eigen::Vector3d local = pose_in_live_room;   // parent == room: the door's room pose is already its edge
+        bool ok = true;
+        if (par.value() != mem_room_id)
+        {
+            ok = false;
+            if (const auto pn = mem_->get_node(par.value()); pn.has_value())
+            {
+                bool pc = false;
+                if (const auto pp = pose_in_room(*mem_, mem_room_id, pn.value(), pc); pp.has_value())
+                {
+                    const double th = pp->pose.z(), c = std::cos(th), sn = std::sin(th);
+                    const double dx = pose_in_live_room.x() - pp->pose.x(), dy = pose_in_live_room.y() - pp->pose.y();
+                    local = {c * dx + sn * dy, -sn * dx + c * dy, pose_in_live_room.z() - th};
+                    ok = true;
+                }
+            }
+        }
+        if (ok)
+        {
+            const Mat::RTMat T(Eigen::Translation3d(local.x(), local.y(), 0.0)
+                               * Eigen::AngleAxisd(local.z(), Eigen::Vector3d::UnitZ()));
+            const auto want = rt_attrs(T);
+            const auto edge = mem_->get_edge(par.value(), node->id(), "RT");
+            bool same = edge.has_value();
+            if (same)
+                for (const auto &[k, v] : want)
+                    if (const auto it = edge->attrs().find(k); it == edge->attrs().end() or not (it->second == v)) { same = false; break; }
+            if (not same and edge.has_value()
+                and mem_->insert_or_assign_edge(DSR::Edge::create<RT_edge_type>(par.value(), node->id(), want))) ++changed;
+        }
     }
     if (changed > 0)
         qInfo().noquote() << QString::fromStdString(std::format("[memory] door {}: belief refreshed from live {} while the robot is in "
