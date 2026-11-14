@@ -1831,11 +1831,23 @@ int RoomEviction::refresh_door_twin(const DSR::Node &live_door, const DSR::Node 
             const auto rot = edge.has_value() ? mem_->get_attrib_by_name<rt_rotation_euler_xyz_att>(edge.value()) : std::nullopt;
             if (tr.has_value() and rot.has_value() and tr.value().get().size() >= 3 and rot.value().get().size() >= 3)
             {
+                // Decode the stored triple as a ROTATION (R = Rz(rz) Ry(ry) Rx(rx), what rt_attrs packs): eulerAngles(2,1,0) writes a
+                // negative planar yaw as (pi, -pi, yaw+pi), so r[2] alone is NOT the yaw. Compare the WRAPPED planar yaw.
                 std::vector<float> t = tr.value().get(), r = rot.value().get();
-                const float nx = static_cast<float>(local.x()), ny = static_cast<float>(local.y()), nyaw = static_cast<float>(local.z());
-                if (t[0] != nx or t[1] != ny or r[2] != nyaw)
+                const Eigen::Matrix3d R_old = (Eigen::AngleAxisd(r[2], Eigen::Vector3d::UnitZ())
+                                               * Eigen::AngleAxisd(r[1], Eigen::Vector3d::UnitY())
+                                               * Eigen::AngleAxisd(r[0], Eigen::Vector3d::UnitX())).toRotationMatrix();
+                const double yaw_old = std::atan2(R_old(1, 0), R_old(0, 0));
+                const double dyaw = std::remainder(local.z() - yaw_old, 2.0 * M_PI);
+                const float nx = static_cast<float>(local.x()), ny = static_cast<float>(local.y());
+                // float precision, not a model threshold: a flipped (pi,-pi,yaw+pi) triple decodes only to ~1e-7, so an exact test would rewrite for ever
+                if (t[0] != nx or t[1] != ny or std::abs(dyaw) > 8.0 * std::numeric_limits<float>::epsilon())
                 {
-                    t[0] = nx; t[1] = ny; r[2] = nyaw;
+                    // keep any tilt: R_new = Rz(dyaw) * R_old, re-encoded with rt_attrs' convention
+                    const Eigen::Matrix3d R_new = Eigen::AngleAxisd(dyaw, Eigen::Vector3d::UnitZ()).toRotationMatrix() * R_old;
+                    const Mat::Vector3d rpy = R_new.eulerAngles(2, 1, 0).reverse();
+                    t[0] = nx; t[1] = ny;
+                    r = {static_cast<float>(rpy.x()), static_cast<float>(rpy.y()), static_cast<float>(rpy.z())};
                     edge->attrs()[rt_translation_str.data()] = DSR::Attribute{t, 0, 0};
                     edge->attrs()[rt_rotation_euler_xyz_str.data()] = DSR::Attribute{r, 0, 0};
                     if (mem_->insert_or_assign_edge(edge.value())) ++changed;

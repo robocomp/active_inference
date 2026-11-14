@@ -313,6 +313,36 @@ int main(int argc, char **argv)
         check(r.has_value() and r.value().get()[0] == 0.1f and r.value().get()[1] == 0.2f and std::fabs(r.value().get()[2] - 0.25f) < 1e-5f,
               "roll/pitch kept, yaw follows");
     }
+    std::printf("sync_refresh_handles_flipped_euler\n");
+    for (const bool wall_hung : {false, true})
+    {
+        build_refresh();
+        const double yold = -1.0, ynew = -0.9, wx = 3, wy = 2, wth = 0.6;
+        std::uint64_t parent = mem_twin;
+        double px = 0, py = 0, pth = 0;
+        if (wall_hung)
+        {
+            mem->delete_node(mem_door1);
+            parent = mem_node("wall", "r3_wall_f", mem_twin, wx, wy, wth);
+            mem_door1 = mem_node("object", "r3_door_1", parent, 1.5, 0.2, yold, std::nullopt, "door", 1.0f);
+            px = wx; py = wy; pth = wth;
+        }
+        // the form rt_attrs writes for a negative yaw
+        auto e = mem->get_edge(parent, mem_door1, "RT").value();
+        e.attrs()[rt_rotation_euler_xyz_str.data()] = DSR::Attribute{std::vector<float>{(float)M_PI, -(float)M_PI, (float)(yold + M_PI)}, 0, 0};
+        mem->insert_or_assign_edge(e);
+        const double lx = wall_hung ? 1.5 : -2.0, ly = wall_hung ? 0.2 : -3.0;
+        const double rx = px + std::cos(pth) * lx - std::sin(pth) * ly, ry = py + std::sin(pth) * lx + std::cos(pth) * ly;
+        put_edge(*live, live_room, live_door1, rx, ry, pth + ynew);
+        ltsm::RoomEviction ev(live, mem);
+        check(ev.sync_found_doors() > 0, std::format("flipped triple ({}): sync returns > 0", wall_hung ? "wall" : "room"));
+        const auto f = mem->get_edge(parent, mem_door1, "RT").value();
+        const auto r = mem->get_attrib_by_name<rt_rotation_euler_xyz_att>(f).value().get();
+        const Eigen::Matrix3d R = (Eigen::AngleAxisd(r[2], Eigen::Vector3d::UnitZ()) * Eigen::AngleAxisd(r[1], Eigen::Vector3d::UnitY())
+                                   * Eigen::AngleAxisd(r[0], Eigen::Vector3d::UnitX())).toRotationMatrix();
+        check(std::fabs(std::remainder(pth + std::atan2(R(1, 0), R(0, 0)) - (pth + ynew), 2 * M_PI)) < 1e-4, "composed yaw is -0.9");
+        check(ev.sync_found_doors() == 0, "repeat sync returns 0");
+    }
     std::printf("sync_no_refresh_when_staged\n");
     {
         build_refresh(true);
