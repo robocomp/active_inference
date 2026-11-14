@@ -1419,6 +1419,31 @@ int main()
         std::print("mirror_of_crossed_door_falls: seeded before {}, births {}, removes {}, doors at the hole after 60 frames: at most {}\n", before, r.births.size(), r.removes.size(), max_near);
         CHECK(before > 0 and max_near == 1);
     }
+    {   // the plan's scenario: the CROSSED door first, then a mirror candidate 0.17 m from it fed the same masks
+        Rig r(false, true);
+        r.core.set_costs(CostEstimator::logged_default());
+        r.look(stand(4.0f, 0.0f), kDoor, {{1.0f, kWallY, 0.9f}});
+        const std::uint64_t crossed = r.w.st.empty() ? 0 : r.w.st.begin()->first;
+        CHECK(crossed != 0);
+        bool crossed_always = true, mirror_late = false;
+        for (int v = 0; v < 130 and crossed != 0; ++v)
+        {
+            auto in = input(++r.cycle, ++r.frame, stand(v % 2 ? 4.0f : 2.5f, -45.0f + 15.0f * static_cast<float>(v % 7), 1.1f), kDoor,
+                            {{1.0f, kWallY, 0.9f}, {1.17f, kWallY, 0.9f}});
+            in.affordances.push_back({.node_id = 555, .exists = true, .name = "aff_door_1_cross"});
+            in.executing.push_back({.from = 8, .to = 555});
+            r.step(std::move(in));
+            if (v % 5 == 0) r.core.hypothesise_place("room_7", {1.17f, kWallY}, true);   // the mirror label, re-proposed
+            crossed_always = crossed_always and r.w.st.contains(crossed);
+            if (v >= 60)
+                for (const auto& [id, st] : r.w.st)
+                    if (id != crossed and std::abs(st.aperture.centre_xy().x() - 1.17f) < 0.3f and st.belief.L() >= 0.0f) mirror_late = true;
+        }
+        std::print("mirror_of_crossed_door_first: crossed door {} throughout, {} births, mirror a live door after 60 frames: {}\n",
+                   crossed_always ? "stays" : "LOST", r.births.size(), mirror_late ? "YES" : "no");
+        CHECK(crossed_always);
+        CHECK(not mirror_late);
+    }
     //    one_hole_two_labels: a live door and a pending candidate 0.25 m apart are ONE hole under two labels, not two doors: the "another
     //    door on this wall" cost is charged by how DISTINCT the other place is: a door 0.25 m away costs about half the second-door cost
     //    (-2.26 against -4.60 at sd 0.1 and 0.2 m), one 1.0 m away nearly all of it (-4.39). (tape_dm: door_4 and place_98, 0.25 m apart, each charged the other as a second door, both fell.)
