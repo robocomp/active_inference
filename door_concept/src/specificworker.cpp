@@ -4349,6 +4349,11 @@ void SpecificWorker::step_remembered_looks()
 {
     if (not G or not fitter_ or room_node_id_ == 0)
         return;
+    if (cfg_.exist_one_model)   // producer (2) is replaced by the hypothesis look: a remembered door is a restored live door, a single-member question
+    {
+        if (not looks_.empty()) drop_looks("the hypothesis look replaces it");
+        return;
+    }
     const std::string room = current_room_name();
     if (room_node_id_ != looks_room_)
     {
@@ -4586,12 +4591,34 @@ void SpecificWorker::step_candidate_looks()
     struct Priced { std::uint64_t key; double voi, cost; bool wall; };
     std::vector<Priced> priced;
     std::set<std::uint64_t> asking;
+    // ONE-MODEL: the entities the hypothesis look's questions are made of (a pending candidate, a live door)
+    std::vector<rc::door::hlook::Member> hl_members;
+    const auto candidate_member = [&](const rc::door::core::DoorCore::Candidate& c, double marg)
+    {
+        rc::door::hlook::Member m;
+        m.name = std::format("place_{}", c.key);
+        m.aperture = c.theta.aperture;
+        m.leaf = c.theta.leaf;
+        m.leaf_born = c.leaf_born;
+        const double pm = std::clamp(marg, 1e-9, 1.0 - 1e-9);   // clamp: the domain of a logit
+        m.L = std::log(pm) - std::log1p(-pm);
+        if (c.leaf_born)
+            m.alts = core_->leaf_alternatives(c);
+        else   // a place with no leaf belief: the birth prior's open share (as candidate_lidar reads it)
+            m.leaf.phi = std::acos(std::clamp(1.0f - std::clamp(cfg_.ricoh_birth_p_open, 0.0f, 1.0f), -1.0f, 1.0f));
+        return m;
+    };
 
     for (const auto& c : core_->candidates())
     {
         const auto si = slot_of.find(c.key);
         if (c.room != room or si == slot_of.end())
             continue;
+        if (cfg_.exist_one_model)   // producer (3) is replaced by the hypothesis look: this candidate is a member of its questions
+        {
+            hl_members.push_back(candidate_member(c, post.marg[si->second]));
+            continue;
+        }
         if (not can_plan)     // a provisional room, or no camera model yet: the question stands, no look is offered
         {
             any_open = true;
@@ -4648,6 +4675,28 @@ void SpecificWorker::step_candidate_looks()
         priced.push_back({c.key, voi, dist / std::max(1e-3, double(cfg_.exist_look_speed_mps)) + double(cfg_.exist_look_dwell_s), c.wall_seed});
     }
 
+    if (cfg_.exist_one_model)
+    {
+        for (const auto& [id, inst] : fitter_->instances())
+        {
+            if (inst.is_bearing_hypothesis or not inst.ai2_initialized) continue;
+            rc::door::hlook::Member m;
+            m.name = inst.node_name; m.aperture = inst.aperture; m.leaf = inst.leaf; m.L = inst.belief.L();
+            m.restored_unseen = rc::door::restored_unseen(inst);
+            hl_members.push_back(std::move(m));
+        }
+        const std::set<std::string> open_cands = [&]
+        {
+            std::set<std::string> s;
+            for (const auto& c : core_->candidates())
+                if (c.room == room and core_->candidate_is_open(c)) s.insert(std::format("place_{}", c.key));
+            return s;
+        }();
+        const std::function<bool(const rc::door::hlook::Member&)> undecided = [&](const rc::door::hlook::Member& m)
+        { return m.name.starts_with("place_") ? open_cands.contains(m.name) : m.restored_unseen; };
+        any_open = step_hypothesis_looks(hl_members, undecided, sensor, furniture, can_plan) or any_open;
+    }
+
     // A look is offered iff it pays (VOI > its time). Among the wall slots only the best-paying one holds a node: a room's walls are
     // many places, one affordance at a time keeps the graph quiet.
     std::optional<std::uint64_t> best_wall;
@@ -4690,6 +4739,107 @@ void SpecificWorker::step_candidate_looks()
                    any_open ? "open" : "settled");
     }
     publish_door_questions(any_open);
+}
+
+// ─── THE HYPOTHESIS LOOK (one-model, spec §4; door_hypothesis_look.h) ────────────────────────────────────────────────────
+// One affordance per open question, at the pose of largest expected information gain about WHICH hypothesis holds; the controller
+// ranks them by gain minus travel (AffordanceManager), so a question the look cannot help (gain ~ 0) is outranked by itself.
+// Run at the look step's own rate (every cycle): the room's poses are a 0.6 m grid with 8 headings (~350 for a 20 m2 room); the time is logged.
+bool SpecificWorker::step_hypothesis_looks(std::span<const rc::door::hlook::Member> members,
+                                           const std::function<bool(const rc::door::hlook::Member&)>& undecided,
+                                           const rc::nbv::Sensor& sensor, std::span<const rc::nbv::Obstacle> furniture, bool can_plan)
+{
+    namespace hl = rc::door::hlook;
+    if (room_node_id_ != hyp_looks_room_)
+    {
+        for (auto& [k, e] : hyp_looks_) if (e.aff.node_id() != 0) e.aff.remove();
+        hyp_looks_.clear();
+        hyp_looks_room_ = room_node_id_;
+    }
+    // two leaves closer than the panel's thickness plus twice the room frame's own precision are one observed panel
+    const float reach = cfg_.door_thickness_m + 2.0f * core_->fit().room_band().sigma_m;
+    const auto questions = hl::questions_from(members, reach, undecided);
+    std::set<std::string> asking;
+    bool standing = false;
+    const auto withdraw = [&](const std::string& key, HypLook& e, const char* why)
+    {
+        if (e.aff.node_id() != 0)
+        {
+            e.aff.remove();
+            std::print("door_concept: [look] aff_door_look_q_{} withdrawn — {}\n", key, why);
+        }
+    };
+    if (not can_plan)
+    {
+        for (const auto& q : questions) standing = standing or not hl::settled(q);
+        for (auto& [k, e] : hyp_looks_) e.aff.hold_offered();   // no camera model / polygon this cycle is not a withdrawal
+        return standing;
+    }
+    const auto& polygon = fitter_->room_polygon();
+    const float radius = 0.5f * cfg_.pragmatic.robot_passage_width_m;
+    const hl::Model model{sensor, polygon, furniture, core_->detectors().zed, core_->detectors().lidar, std::max(1e-3f, cfg_.door_thickness_m), radius};
+    const auto poses = hl::room_poses(polygon, furniture, radius);
+    for (const auto& q : questions)
+    {
+        if (hl::settled(q)) continue;
+        standing = true;
+        const auto [it, fresh] = hyp_looks_.try_emplace(q.key);
+        auto& e = it->second;
+        if (fresh)
+            e.aff.init(G, room_node_id_, "door_look_q_" + q.key, "door");
+        if (const auto aid = e.aff.node_id(); aid != 0)
+            e.aff.on_node_modified(aid);
+        asking.insert(q.key);
+        using S = rc::ObjectAffordance::State;
+        if (e.aff.state() == S::executing) { e.aff.hold_offered(); continue; }   // the controller holds it: the pose stands until the claim ends
+        // the first aperture of the heaviest hypothesis is the ledger's reference for "is this a new view"
+        const auto heaviest = std::ranges::max_element(q.hyps, {}, [](const hl::Hyp& h) { return h.apertures.empty() ? -1.0 : h.w; });
+        if (heaviest != q.hyps.end() and not heaviest->apertures.empty()) e.ref = heaviest->apertures[0];
+        const auto view_r = [&] { return 0.5f * std::hypot(e.ref.w, e.ref.h); };
+        if ((e.aff.state() == S::satisfied or e.aff.state() == S::aborted) and e.site.has_value())
+        {   // arrived or handed back: this site is spent, whichever it was
+            e.tried.observe(Eigen::Vector2f(e.site->x_m, e.site->y_m), e.ref.centre_xy(), e.ref.across_u(), view_r(), 0.0f, 0);
+            e.site.reset();
+        }
+        std::vector<hl::Pose> admissible;   // a pose that adds no view buys nothing: the ledger pools it with a view already taken
+        admissible.reserve(poses.size());
+        for (const auto& p : poses)
+            if (e.tried.find_view(p.xy, e.ref.centre_xy(), e.ref.across_u(), view_r(), 0.0f, 0) == rc::door::core::ViewLedger::npos) admissible.push_back(p);
+        const auto t0 = std::chrono::steady_clock::now();
+        const hl::Best best = hl::best_look(q, admissible, model, &e.cache);
+        const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+        hyp_look_ms_sum_ += ms; hyp_look_ms_max_ = std::max(hyp_look_ms_max_, ms); hyp_look_hits_ += e.cache.hit ? 1 : 0;
+        if (++hyp_look_n_ % 100 == 0)   // ★log cadence only, decides nothing
+        {
+            std::print("door_concept: [look] best_look {:.2f} ms mean, {:.2f} ms max over {} evaluations ({} reused the outcome tables; {} poses)\n",
+                       hyp_look_ms_sum_ / hyp_look_n_, hyp_look_ms_max_, hyp_look_n_, hyp_look_hits_, admissible.size());
+        }
+        if (not best.valid or not (best.eig_nats > 0.0))   // nothing any reachable pose could tell: no look to offer
+        {
+            withdraw(q.key, e, "no pose can tell the hypotheses apart");
+            continue;
+        }
+        rc::AffordanceTarget tgt;
+        tgt.x_m = best.pose.xy.x(); tgt.y_m = best.pose.xy.y(); tgt.yaw_rad = best.pose.yaw;
+        tgt.gain = static_cast<float>(best.eig_nats); tgt.valid = true;
+        tgt.framing_fill = rc::nbv::framing_fill(sensor);
+        const bool was_offered = e.aff.node_id() != 0;
+        e.site = tgt;
+        e.aff.update(tgt);
+        if (not was_offered and e.aff.node_id() != 0)
+        {
+            decision_log_.record(rc::door::DoorDecisionKind::LookOffer, 0, q.key, best.pose.xy.x(), best.pose.xy.y(), static_cast<float>(best.eig_nats), best.pose.yaw);
+            std::print("door_concept: [look] aff_door_look_q_{} OFFERED at ({:.2f},{:.2f}) yaw={:.2f} — EIG {:.3f} nats over {} hypotheses\n",
+                       q.key, best.pose.xy.x(), best.pose.xy.y(), best.pose.yaw, best.eig_nats, q.hyps.size());
+        }
+    }
+    for (auto it = hyp_looks_.begin(); it != hyp_looks_.end();)
+    {
+        if (asking.contains(it->first)) { ++it; continue; }
+        withdraw(it->first, it->second, "the question is settled");
+        it = hyp_looks_.erase(it);
+    }
+    return standing;
 }
 
 // A promoted room with no known door is unfinished: the robot got here, and a room with no way out is very unlikely. Each wall is asked,

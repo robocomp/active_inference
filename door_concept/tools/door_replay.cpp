@@ -72,6 +72,7 @@
 #include "../src/door_dof.h"            // the live consumers' DOF table (dashboard, NBV adequacy)
 #include "../src/door_approach_pose.h"  // Task E: the approach offer's price (--look)
 #include "../src/epistemic_planner.h"   // the live NBV (rc::EpistemicPlanner) — run here as a smoke on every door
+#include "../src/door_hypothesis_look.h" // --hlook: the hypothesis look (spec §4) on the tape
 #include "../src/door_leaf_visibility.h" // crossing_logodds (the --mirror stand-in carries existence as live does)
 
 using namespace rc::door::core;
@@ -496,6 +497,9 @@ int main(int argc, char** argv)
     std::string costs_path = "etc/door_costs.csv";   // --costs FILE: C_keep / C_delete (fixed; missing => the compiled LOGGED estimate, loudly)
     bool look_log = false, ablate_hull = false;   // Task E: --look prints the look-vs-approach prices; --ablate-hull-midpoint reproduces the collapse
     bool core_stdout = false;
+    std::map<std::string, rc::door::hlook::LookCache> hl_caches;   // --hlook: per question, as the agent keeps them
+    std::vector<double> hl_cold_ms, hl_warm_ms;                    // best_look time on a table miss / on a reuse
+    std::uint64_t hl_from = 1, hl_to = 0;   // --hlook FROM TO: print the hypothesis look's questions and best poses on those cycles (hl_to < hl_from: off)
     std::vector<std::pair<std::string, std::string>> overrides;   // --set KEY=VALUE: a config key replacing the tape header's (or adding one), e.g. Existence.OneModel=true
     std::string detectors_path;   // --detectors FILE: the detector table; default = the compiled one, or etc/door_detectors_fitted.csv under Existence.OneModel (as the agent)
     for (int i = 3; i < argc; ++i)
@@ -505,6 +509,7 @@ int main(int argc, char** argv)
         else if (a == "--verbose") verbose = true;
         else if (a == "--mirror") mirror = true;
         else if (a == "--look") look_log = true;
+        else if (a == "--hlook" and i + 2 < argc) { hl_from = std::strtoull(argv[++i], nullptr, 10); hl_to = std::strtoull(argv[++i], nullptr, 10); }
         else if (a == "--ricoh-strip-oracle") strip_oracle = true;
         else if (a == "--ablate-hull-midpoint") ablate_hull = true;
         else if (a == "--csv" and i + 1 < argc) csv_dir = argv[++i];
@@ -737,6 +742,66 @@ int main(int argc, char** argv)
                 belief_smoke_sum += acc;
                 ++belief_smoke_runs;
             }
+            if (hl_from <= hl_to and in->cycle >= hl_from and in->cycle <= hl_to and cfg.door.exist_one_model)
+            {   // the hypothesis look as the agent builds it (SpecificWorker::step_candidate_looks): members -> questions -> best pose. No furniture on a tape.
+                namespace hl = rc::door::hlook;
+                std::vector<Eigen::Vector2f> poly;
+                for (const auto& v : world.room_polygon()) poly.emplace_back(v.x(), v.y());
+                std::vector<hl::Member> members;
+                std::set<std::string> open_names;
+                for (const auto& c : core.candidates())
+                {
+                    hl::Member m;
+                    m.name = std::format("place_{}", c.key);
+                    m.aperture = c.theta.aperture; m.leaf = c.theta.leaf; m.leaf_born = c.leaf_born;
+                    const double pm = std::clamp(double(c.belief.p()), 1e-9, 1.0 - 1e-9);
+                    m.L = std::log(pm) - std::log1p(-pm);
+                    if (c.leaf_born) m.alts = core.leaf_alternatives(c);
+                    else m.leaf.phi = std::acos(std::clamp(1.0f - std::clamp(cfg.door.ricoh_birth_p_open, 0.0f, 1.0f), -1.0f, 1.0f));
+                    if (core.candidate_is_open(c)) open_names.insert(m.name);
+                    members.push_back(std::move(m));
+                }
+                for (const auto& [id, st] : world.fit_states())
+                {
+                    if (st == nullptr or st->is_bearing_hypothesis or not st->ai2_initialized) continue;
+                    hl::Member m;
+                    m.name = st->node_name; m.aperture = st->aperture; m.leaf = st->leaf; m.L = st->belief.L();
+                    m.restored_unseen = rc::door::restored_unseen(*st);
+                    members.push_back(std::move(m));
+                }
+                const auto undecided = [&](const hl::Member& m) { return m.name.starts_with("place_") ? open_names.contains(m.name) : m.restored_unseen; };
+                const std::vector<rc::nbv::Obstacle> furniture;
+                const float radius = 0.5f * cfg.door.pragmatic.robot_passage_width_m;
+                hl::Model model;
+                model.camera.hfov_rad = 1.92f; model.camera.vfov_rad = 1.22f; model.camera.height_m = 1.0f; model.camera.env = core.detectors().zed.env;
+                model.zed = core.detectors().zed; model.lidar = core.detectors().lidar; model.polygon = poly; model.furniture = furniture;
+                model.wall_thickness_m = std::max(1e-3f, cfg.door.door_thickness_m); model.robot_radius_m = radius;
+                const auto poses = hl::room_poses(poly, furniture, radius);
+                const float reach = cfg.door.door_thickness_m + 2.0f * core.fit().room_band().sigma_m;
+                if (in->robot.room_T_body.has_value())
+                    std::println("HLOOK cycle {} robot ({:.2f},{:.2f})", in->cycle, (*in->robot.room_T_body)(0, 3), (*in->robot.room_T_body)(1, 3));
+                for (const auto& q : hl::questions_from(members, reach, undecided))
+                {
+                    const auto w = hl::weights_of(q);
+                    const auto t0 = std::chrono::steady_clock::now();
+                    hl::LookCache& cache = hl_caches[q.key];
+                    const hl::Best b = hl::best_look(q, poses, model, &cache);
+                    const double bms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+                    (cache.hit ? hl_warm_ms : hl_cold_ms).push_back(bms);
+                    std::string hs;
+                    const hl::Scene sc = hl::make_scene(q, model);
+                    for (std::size_t h = 0; h < q.hyps.size(); ++h)
+                    {
+                        std::string los;
+                        for (std::size_t sl = 0; sl < sc.holes.size(); ++sl)
+                            los += std::format(" los[{}|{}]={:.2f}", sl, h, b.valid ? hl::lidar_los(b.pose.xy, sc.holes[sl], sc.occ[h][sl]) : 0.f);
+                        std::string ap = q.hyps[h].apertures.empty() ? "none" : std::format("ap@({:.2f},{:.2f}) w{:.2f} phi{:.2f}", q.hyps[h].apertures[0].centre_xy().x(), q.hyps[h].apertures[0].centre_xy().y(), q.hyps[h].apertures[0].w, q.hyps[h].leaves[0].phi);
+                        hs += std::format("\n      h{} w {:.3f} {}{}", h, w[h], ap, los);
+                    }
+                    std::println("HLOOK cycle {} {} settled {} | best ({:.2f},{:.2f}) yaw {:.2f} eig {:.4f} nats ({:.1f} ms, {} poses){}", in->cycle, q.key, hl::settled(q) ? 1 : 0,
+                                 b.pose.xy.x(), b.pose.xy.y(), b.pose.yaw, b.eig_nats, bms, poses.size(), hs);
+                }
+            }
             if (not trace_door.empty())
                 for (const auto& [id, st] : world.fit_states())
                     if (st != nullptr and (trace_door == "*" or st->node_name == trace_door))
@@ -801,6 +866,11 @@ int main(int argc, char** argv)
                      step_ms_sum / static_cast<double>(step_ms.size()), step_ms[step_ms.size() / 2],
                      step_ms[std::min(step_ms.size() - 1, step_ms.size() * 99 / 100)], step_ms_max, diag_rows,
                      copy_ms_sum / static_cast<double>(n));
+    }
+    if (not hl_cold_ms.empty() or not hl_warm_ms.empty())
+    {
+        const auto mean = [](const std::vector<double>& v) { double a = 0; for (double x : v) a += x; return v.empty() ? 0.0 : a / double(v.size()); };
+        std::println("cost: hlook best_look cold (tables rebuilt) {} calls {:.2f} ms mean; warm (tables reused) {} calls {:.2f} ms mean", hl_cold_ms.size(), mean(hl_cold_ms), hl_warm_ms.size(), mean(hl_warm_ms));
     }
     // ── Phi rows: every one, in order ──
     std::vector<DoorDecision> ref_phi;

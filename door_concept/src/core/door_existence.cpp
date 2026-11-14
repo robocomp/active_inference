@@ -887,6 +887,40 @@ static float question_L(const DoorCore::Candidate& c)
     return c.belief.L() - c.belief.prior.size + std::max(c.best_size, c.belief.prior.size);
 }
 
+std::vector<rc::door::hlook::Alt> DoorCore::leaf_alternatives(const Candidate& c) const
+{
+    std::vector<rc::door::hlook::Alt> out;
+    const auto& polygon = fit_.room_polygon();
+    if (not cfg_.door.exist_one_model or not c.leaf_born or polygon.size() < 3) return out;
+    const rc::door::LeafPose lp = rc::door::leaf_pose(c.theta.aperture, c.theta.leaf);
+    const Vec2f end_a = lp.hinge_xy, end_b = lp.hinge_xy + lp.ex * (2.f * lp.half_w);
+    const auto& groups = groups_cached();
+    const auto hyps = rc::door::apertures_from_leaf(end_a, end_b, c.theta.aperture.h, polygon, groups, existence_size_prior(cfg_.door), fit_.room_band(), &rates_);
+    std::vector<double> lw(hyps.size(), -std::numeric_limits<double>::infinity());
+    for (std::size_t h = 0; h < hyps.size(); ++h)
+    {
+        if (not (hyps[h].leaf.phi <= cfg_.door.phi_max_rad)) continue;   // beyond the hinge's range: no support (as the births')
+        double v = hyps[h].log_w;
+        if (leaf_sweep_.present())
+        {
+            const std::pair<float, float> pt{hyps[h].leaf.phi, 1.0f};
+            v += rc::door::opening_view_llr(hyps[h].aperture, registered(hyps[h].aperture), detectors_.lidar.through_open, detectors_.lidar.through_wall,
+                                            std::span<const std::pair<float, float>>(&pt, 1), live_claims(hyps[h].aperture, groups));
+        }
+        lw[h] = v;
+    }
+    // the candidate's own hypothesis: the one whose aperture is nearest to its hole
+    std::size_t own = hyps.size();
+    float best = std::numeric_limits<float>::max();
+    for (std::size_t h = 0; h < hyps.size(); ++h)
+        if (const float d = (hyps[h].aperture.centre_xy() - c.theta.aperture.centre_xy()).norm(); d < best and std::isfinite(lw[h])) { best = d; own = h; }
+    if (own == hyps.size()) return out;
+    for (std::size_t h = 0; h < hyps.size(); ++h)
+        if (h != own and std::isfinite(lw[h]))
+            out.push_back({hyps[h].aperture, hyps[h].leaf, lw[h] - lw[own]});
+    return out;
+}
+
 bool DoorCore::candidate_is_open(const Candidate& c) const
 {
     // ★The question is judged on the widest the blob ever looked (clean25): the size term is this frame's, and one clipped mask of width 0 sank

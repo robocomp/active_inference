@@ -56,6 +56,7 @@
 #include "door_decision.h"    // Task 8: the costed decision, the role, the cost estimator
 #include "place_table.h"      // Task 8: the place table (the row is the belief)
 #include "door_mask_causes.h" // one-model: the four causes of a mask and their responsibilities
+#include "../door_hypothesis_look.h" // one-model: the hypothesis look (spec §4): Alt, Member, Question
 #include "../door_leaf_birth.h" // one-model: a side-on leaf points to an opening in its frame wall (spec §3.6)
 #include "../door_config.h"   // rc::DoorConfig (plain struct)
 #include "../door_model.h"    // rc::DoorState
@@ -276,6 +277,10 @@ public:
     /// (place_explained_by: the MAP comparison, the candidates' densities along the wall). A note so explained is adopted, not restored.
     [[nodiscard]] bool live_door_explains(const std::vector<Vec2f>& polygon, const rc::door::RoomBand& band, bool room_is_proto,
                                           std::span<const std::uint64_t> room_doors, const Vec2f& xy, float var) const;
+    /// ONE-MODEL (spec §4): the OTHER frame-wall hypotheses of the leaf a leaf-born candidate stands for (apertures_from_leaf on the candidate's own
+    /// leaf segment), each with its log weight RELATIVE to the candidate's own hypothesis (band + size + base rate + the sweep's opening reading, the
+    /// terms the candidate was weighed with). Hypotheses at the candidate's own hole are left out; none for a candidate not born from a leaf.
+    [[nodiscard]] std::vector<rc::door::hlook::Alt> leaf_alternatives(const Candidate& c) const;
     /// An undecided candidate is an open question while the costed decision has not refused it (spec 2026-11-09-undecided-candidate-look).
     [[nodiscard]] bool candidate_is_open(const Candidate& c) const;
     /// Would a frame from `standpoint` be a new view of the candidate, by the ledger's own absorption rule? (spread 0: the standpoint is a plan)

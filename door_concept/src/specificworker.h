@@ -335,6 +335,26 @@ private:
     std::uint64_t door_questions_room_ = 0;
     std::string   door_questions_state_;
     void step_candidate_looks();
+    // ── THE HYPOTHESIS LOOK (one-model, spec §4; door_hypothesis_look.h) ─────────────────────────────────────────────
+    // Under Existence.OneModel the remembered-door look (2) and the candidate look (3) are not created: every open question (an undecided
+    // candidate, a restored-but-unconfirmed door, a leaf's competing frame-wall hypotheses) is a rc::door::hlook::Question and ONE producer
+    // offers the pose that most reduces its uncertainty (`aff_door_look_q_<key>`, gain = the EIG in nats). Producer (1), the live door's
+    // D-optimal place look (epistemic_planner), stays: it refines the place of a door that is already born, a question the hypothesis set
+    // does not hold (which of several doors exist), and its gain is on the same nats scale.
+    struct HypLook
+    {
+        rc::ObjectAffordance             aff;
+        rc::door::core::ViewLedger       tried;                   // one view per site finished or handed back
+        std::optional<rc::AffordanceTarget> site;                 // the pose last offered
+        rc::door::Aperture               ref;                     // the aperture the tried ledger measures its views against
+        rc::door::hlook::LookCache       cache;                   // the question's outcome tables, reused while its geometry is unchanged
+    };
+    std::map<std::string, HypLook> hyp_looks_;                    // by Question::key
+    std::uint64_t hyp_looks_room_ = 0;
+    double hyp_look_ms_sum_ = 0.0, hyp_look_ms_max_ = 0.0; long hyp_look_n_ = 0, hyp_look_hits_ = 0;   // best_look timing, logged every 100 evaluations
+    /// Offer the best look of each open question; withdraw the settled ones. True while some question stands.
+    bool step_hypothesis_looks(std::span<const rc::door::hlook::Member> members, const std::function<bool(const rc::door::hlook::Member&)>& undecided,
+                               const rc::nbv::Sensor& sensor, std::span<const rc::nbv::Obstacle> furniture, bool can_plan);
     void refresh_remembered_rooms();   // one-model: rates + door-count prior from LTSM's remembered rooms (room entry + every >= 1 s)
     void step_wall_hypotheses();                            // a promoted room's walls are its door slots (room-door-belief spec §3.3)
     std::uint64_t wall_seeded_room_ = 0;
