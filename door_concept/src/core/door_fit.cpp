@@ -880,6 +880,8 @@ float DoorFit::run_inference(rc::DoorFitState& inst, const DoorObservation& obse
     // "Be-still-to-update" invariant: a truncated view (gated) OR a MOVING robot may only CONFIRM the door, never
     // move/reshape it. A moving frame's mask is a shared smear whose centroid is unreliable — predict-only here
     // (mean held, Σ carries its one-step Q); the existence belief still confirms it (its mask reset stops vacate).
+    // kept: the lifecycle UPDATE invariant (CONCEPT_AGENT_LIFECYCLE.md): a frame must be resolvable, centred and still to MOVE geometry. A contract,
+    // not a patch; no model term replaces it. One-model (S4) removed only the existence cliff (frame_admissible), not this gate.
     const bool trunc_gated  = inst.last_trunc_frac > cfg_.ai2_trunc_gate_frac;
     const bool motion_gated = confirm_only(inst);
     const bool gated = trunc_gated or motion_gated;

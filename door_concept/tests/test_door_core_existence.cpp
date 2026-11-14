@@ -117,7 +117,7 @@ static CameraIntrinsics ricoh_cam()
     CameraIntrinsics c; c.present = true; c.width = 3840; c.height = 1920; c.projection_model = 1; return c;
 }
 
-struct DoorDet { float x = 1.0f, y = kWallY, w = 1.0f, conf = 0.9f; };
+struct DoorDet { float x = 1.0f, y = kWallY, w = 1.0f, conf = 0.9f, trunc = 0.0f; };
 
 // One cycle: the robot at `at` looking at `target`, these ZED door detections (an empty list = a frame with no door mask: a
 // small plant in the corner, so the packet is a real frame).
@@ -152,7 +152,7 @@ static DoorCycleInput input(std::uint64_t cycle, int frame, const Vec2f& at, con
         s.support_end = p.support_points.size();
         s.label = "door"; s.class_id = 1000.f; s.confidence = d.conf;
         s.centroid = {d.x, d.y, 1.05f}; s.bbox_min = {d.x - 0.5f * d.w, d.y - 0.01f, 0.0f}; s.bbox_max = {d.x + 0.5f * d.w, d.y + 0.01f, 2.1f};
-        s.trunc_frac = 0.0f; s.range = (Vec2f(d.x, d.y) - at).norm(); s.centroid_radius = 0.1f; s.source = 0; s.has_depth = true;
+        s.trunc_frac = d.trunc; s.range = (Vec2f(d.x, d.y) - at).norm(); s.centroid_radius = 0.1f; s.source = 0; s.has_depth = true;
         // the mask's pixels: the projected box (a pinhole, the cycle's pose)
         float c0 = 1e9f, c1 = -1e9f, r0 = 1e9f, r1 = -1e9f;
         for (const float xx : {d.x - 0.5f * d.w, d.x + 0.5f * d.w})
@@ -538,27 +538,33 @@ int main()
             }
         }
     }
-    {   // truncated_view_pays_no_size_cost (one-model): a 40 % clipped mask of a 0.80 m door is a trial, not "no trial". The frame
-        // confirms the place at full weight; the size is not charged — the blob's width is a lower bound, so its sd widens by
-        // 1/sqrt(1 - trunc) (as the candidate path does) and the size term is no worse than the untruncated view's.
+    {   // truncated_view_pays_no_size_cost (one-model, through the core): a 40 % clipped mask of a live door is a TRIAL (its L gains existence
+        // evidence) but never moves the fit, so the size term is bit-equal to before; the fit's own truncation gate holds by construction.
+        Rig r(false, true);
+        for (int k = 0; k < 6; ++k) r.look(A0, kDoor, {{1.0f, kWallY, 0.80f}});
+        CHECK(r.door() != nullptr);
+        if (r.door() != nullptr)
+        {
+            const float size0 = r.door()->belief.prior.size, E0 = r.door()->belief.ledger.sum();
+            const std::size_t v0 = r.door()->belief.ledger.views().size();
+            const float w0 = r.door()->aperture.w;
+            r.look(stand(4.0f, 35.0f), kDoor, {{1.0f, kWallY, 0.80f, 0.9f, 0.4f}});   // a NEW standpoint: a new view, so the frame is a fresh trial
+            std::print("truncated_view: size {} -> {}, ledger {:+.4f} -> {:+.4f}, views {} -> {}\n", size0, r.door()->belief.prior.size, E0,
+                       r.door()->belief.ledger.sum(), v0, r.door()->belief.ledger.views().size());
+            CHECK(r.door()->aperture.w == w0);                                            // the fit never moved (its own gate)
+            CHECK(std::fabs(r.door()->belief.prior.size - size0) < 1e-3f);                // the size term only feels the one-step process noise of predict()
+            CHECK(r.door()->belief.ledger.views().size() == v0 + 1 and r.door()->belief.ledger.sum() > E0);   // a trial: it adds existence evidence
+        }
+        // admissibility: only the truncation cliff is gone under the flag; a moving frame with an off-centre mask is still not a trial
+        rc::DoorConfig on; on.exist_one_model = true; on.ai2_motion_confirm_only = true;
+        rc::DoorConfig off; off.ai2_motion_confirm_only = true;
+        MaskSlice still; still.trunc_frac = 0.4f; still.centroid_radius = 0.1f;
+        MaskSlice moving = still; moving.trunc_frac = 0.0f; moving.centroid_radius = 10.0f; moving.motion_dotd = 1e3f;
+        EgoMotion rest;
+        CHECK(DoorCore::frame_admissible(still, rest, on) and not DoorCore::frame_admissible(still, rest, off));
+        CHECK(not DoorCore::frame_admissible(moving, rest, on) and not DoorCore::frame_admissible(moving, rest, off));
+        // the support row is weighted by 1 - trunc: a clipped view's one row says 60 % of an unclipped one
         const rc::DoorFitState th = shut_door(0.80f);
-        const FrameDetection trunc_det{{1.0f, kWallY}, -1.0f, 0, 1.0f, true, 0.4f};
-        Bench on; on.cfg.exist_one_model = true;
-        PlaceBelief pb_on;
-        on.frame(pb_on, th, A0, kDoor, true, false, {trunc_det}, 0);
-        Bench off;
-        FrameDetection refused = trunc_det; refused.admissible = false;   // today: the gate makes it no trial at all
-        PlaceBelief pb_off;
-        off.frame(pb_off, th, A0, kDoor, true, false, {refused}, 0);
-        std::print("truncated_view: L on {:+.3f} off {:+.3f}, views {} / {}\n", pb_on.ledger.sum(), pb_off.ledger.sum(), pb_on.ledger.views().size(), pb_off.ledger.views().size());
-        CHECK(pb_on.ledger.sum() > 0.5f);            // the existence evidence of the frame is kept
-        CHECK(pb_off.ledger.sum() <= pb_on.ledger.sum() - 0.5f);
-        const float w_sd = on.cfg.tracker_detection_noise_m;
-        const auto plain  = prior_of(th, kRoom, false, {0.2f, 0.1f}, 0, w_sd, 0.03f, true, fit_size_prior(), 0.0f);
-        const auto widened = prior_of(th, kRoom, false, {0.2f, 0.1f}, 0, w_sd / std::sqrt(1.0f - 0.4f), 0.03f, true, fit_size_prior(), 0.0f);
-        CHECK(widened.size >= plain.size - 1e-6f);   // widening never charges more
-        CHECK(widened.size > -0.5f);                 // and a 0.80 m door inside the typical 0.85 +- 0.12 pays almost nothing
-        // the support term is weighted by 1 - trunc: a clipped view's one row says 60 % of an unclipped one
         const auto sup = [&](float trunc)
         {
             Bench b; b.cfg.exist_one_model = true; PlaceBelief pb;

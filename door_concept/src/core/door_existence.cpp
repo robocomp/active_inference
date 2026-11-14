@@ -209,7 +209,7 @@ std::vector<FrameDetection> DoorCore::frame_detections() const
     v.reserve(dets_.size());
     for (std::size_t i = 0; i < dets_.size(); ++i)
         v.push_back({dets_[i].xy, dets_[i].xy_var, dets_[i].sensor, i < det_w_.size() ? det_w_[i] : 1.0f,
-                     i < det_adm_.size() ? det_adm_[i] != 0 : true, i < det_trunc_.size() ? det_trunc_[i] : 0.0f});
+                     i < det_adm_.size() ? det_adm_[i] != 0 : true});
     return v;
 }
 
