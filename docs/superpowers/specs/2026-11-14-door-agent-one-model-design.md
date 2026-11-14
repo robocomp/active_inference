@@ -207,10 +207,42 @@ likelihood under "leaf of a door with hinge at this end" is computed for each en
 ### 3.7 The existence score that swings (chat_e2e19)
 
 Restored door_2's geometry channel swung ±2..5 nats per update with alternating sign (door_concept.log 18093-19862 in
-that run), withdrawing a crossing. Not yet diagnosed. The expected cause is a geometry likelihood that picks one of two
-explanations (jamb vs open span, or two leaf poses) each frame instead of weighing both. The work starts by reproducing
-it from the run's recorded inputs and confirming or refuting that cause before the fix. If confirmed, the fix is §3.2's
-marginalisation applied inside the geometry channel. If refuted, the cause is written here and fixed in model terms.
+that run), withdrawing a crossing.
+
+**Diagnosis (from `door_existence_log.csv`, door_2, 3764 rows; `tools/existence_swing.py`; the replay tape does not exist
+yet).** The suspected cause (two explanations picked in turn) is REFUTED; the swing is the model's own scale moving, not the
+measurement. Evidence, by CSV line (header = line 1):
+
+- `geo_x` (the leaf contour's edge support, in units of the frame reference) is steady across a swing: lines 2029-2036
+  (cycles 10174-10181) have geo_x = 1.53, 1.48, 1.52, 1.53, 1.40, 1.43, 1.54, 1.38, while geo_dl goes +1.65, +1.18, -2.18,
+  -0.64, +5.03, -4.59, -0.34, +3.71. It is not alternating between two values.
+- What alternates is `geo_s`, the sd of the control contours' support: 0.031, 0.020, 0.082, 0.252, 0.015, 0.116, 0.206, 0.020
+  (a 17x jump frame to frame), with geo_mu0 wandering 0.74-0.97 and geo_mu1 = geo_mu0 + 2 geo_s following it. geo_dl is large
+  and positive exactly when s is tiny (line 2033: s = 0.0146, +5.03; line 2036: s = 0.0195, +3.71; line 2039: s = 0.0144,
+  +3.39) and negative when s is large (line 2034: s = 0.116, -4.59; line 2037: -2.87).
+- Why: `ViewLedger::add_geometry` keeps only the running mean of x and OVERWRITES mu0/mu1/s2 with the latest frame's, and
+  `recompute` re-scores the whole view's aggregate with them: lg = wb((xb-mu0)^2 - (xb-mu1)^2)/(2 s2) = 2 wb ((xb-mu0)/s - 1)
+  because mu1 = mu0 + 2s. So lg scales as 1/s, and s is a sample standard deviation of only a few control contours
+  (view_ledger.h:139-143; existence_update.cpp:225-232), a very noisy estimate. The delta geo_dl is therefore mostly
+  "the view's accumulated evidence re-priced at today's s", not new evidence, and its sign alternates with s.
+- The same line pattern appears in bursts at lines 715-743 (cycles 8862-8890, p 0.68 -> 0.22 -> 0.90 -> 0.35 within two
+  cycles), 1159-1165, 2009-2038 and 18534-18626 of the log; 100 sign changes among 664 nonzero geo_dl rows of door_2. Line
+  18622 (cycle 9312) adds an outlier frame: geo_x = 6.4 with s = 2.4, mu0 = 2.3 (a degenerate control set), geo_dl = -2.15
+  undoing the +2.15 of the previous line.
+- sup/zed channels in those rows are near zero or constant, as the owner noted; the existence swing is the geometry channel
+  alone (L moves 3.44 -> -0.98 across lines 2033-2034).
+
+**What the logs cannot decide.** The log holds the last frame's x, mu0, mu1, s, not the view's running mean xb, its weight wb
+or the control count k, so the exact lg per row cannot be recomputed from it, and whether k = 2 (one degree of freedom)
+dominates is inferred, not seen. The tape must check: (1) k per frame and the controls' individual supports; (2) that
+replaying with s2 held at its running pooled value removes the alternation; (3) the outlier frames (line 18622).
+
+**Fix, and where it is carried.** Not the §3.2 hinge marginalisation. The geometry likelihood must carry the uncertainty of
+(mu0, s) itself instead of treating a k-control sample sd as exact: each frame is added to the view as its own term (or the
+view keeps pooled sufficient statistics of mu0 and s2 across frames, with a Student-t / inverse-chi-square marginal of
+its k-1 degrees of freedom), so the score is additive and no frame's s re-prices the others. This is a new task for the
+controller to add to the plan (geometry channel of Task 6's ledger work, or its own task before it); Task 6 is not the place
+unless it already rewrites `add_geometry`.
 
 ## 4. Epistemic look: the pose that settles the current hypotheses
 
