@@ -113,6 +113,8 @@ public:
     { masks_ = masks; sweep_ = sweep; claims_ = claims; }
     /// stdout lines and CSV rows: DiagRow{"stdout" | "ai2_log.csv" | "ai2_log_phi.csv", line}. Unset ⇒ nothing formatted.
     void set_diag(std::function<void(const DiagRow&)> d) { diag_ = std::move(d); }
+    /// One-model: the fitted LiDAR rates (DetectorTable::lidar) the fit scores each door's registered sweep with (opening_view_llr).
+    void set_lidar_model(float through_open, float through_wall) { lidar_through_open_ = through_open; lidar_through_wall_ = through_wall; }
 
     // ── the room-containment prior's polygon (room frame). ONE copy: DoorFitter::set_room_geometry writes it. ──
     void set_ricoh_origin(const std::optional<Eigen::Vector2f>& o) { ricoh_origin_ = o; }   // the 360 camera's room xy
@@ -181,6 +183,7 @@ private:
     std::optional<Eigen::Vector2f> ricoh_origin_;
     std::optional<Eigen::Vector2f> body_xy_;
     std::optional<Eigen::Matrix2f> body_cov_;
+    float lidar_through_open_ = 0.75f, lidar_through_wall_ = 0.01f;   // set_lidar_model (one-model)
     std::unordered_map<std::uint64_t, Eigen::Vector2f> birth_seeds_;    // tracker-provided birth XY (note_birth)
     std::size_t n_explained_away_ = 0;                                  // points dropped (diagnostic)
 };

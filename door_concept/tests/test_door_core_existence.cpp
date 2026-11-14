@@ -40,6 +40,8 @@
 #include "../src/core/existence_update.h"
 #include "../src/door_opening_edges.h"
 #include "../src/door_leaf_channel.h"
+#include "../src/door_leaf_birth.h"
+#include "../src/core/bernoulli_filter.h"
 #include "../../common/contour_edge/contour_edge_check.h"
 
 using namespace rc::door::core;
@@ -133,11 +135,14 @@ static CameraIntrinsics ricoh_cam()
 }
 
 struct DoorDet { float x = 1.0f, y = kWallY, w = 1.0f, conf = 0.9f, trunc = 0.0f; };
+// A leaf seen side-on: a door-high mask whose plan view is the segment a -> b (Task 9, spec §3.6).
+struct LeafDet { Vec2f a, b; float conf = 0.9f; };
 
 // One cycle: the robot at `at` looking at `target`, these ZED door detections (an empty list = a frame with no door mask: a
 // small plant in the corner, so the packet is a real frame).
 static DoorCycleInput input(std::uint64_t cycle, int frame, const Vec2f& at, const Vec2f& target, const std::vector<DoorDet>& dets,
-                            double hz = 10.0, std::optional<Mat6d> cov = std::nullopt)
+                            double hz = 10.0, std::optional<Mat6d> cov = std::nullopt, const std::vector<LeafDet>& leaves = {},
+                            const std::optional<BpearlSweep>& sweep = std::nullopt)
 {
     DoorCycleInput in;
     in.cycle = cycle;
@@ -184,6 +189,38 @@ static DoorCycleInput input(std::uint64_t cycle, int frame, const Vec2f& at, con
         s.pixel_end = p.mask_pixels.size();
         p.slices.push_back(s);
     }
+    for (const auto& lf : leaves)
+    {
+        MaskSlice s;
+        s.support_begin = p.support_points.size();
+        for (int i = 0; i <= 20; ++i)
+            for (int j = 0; j <= 21; ++j)
+            {
+                const Vec2f q = lf.a + (lf.b - lf.a) * (static_cast<float>(i) / 20.0f);
+                const float jitter = 0.004f * static_cast<float>(((i * 7 + j * 13) % 5) - 2);
+                p.support_points.emplace_back(q.x() + jitter, q.y(), 0.1f * static_cast<float>(j));
+            }
+        s.support_end = p.support_points.size();
+        const Vec2f mid = 0.5f * (lf.a + lf.b);
+        s.label = "door"; s.class_id = 1000.f; s.confidence = lf.conf;
+        s.centroid = {mid.x(), mid.y(), 1.05f};
+        s.bbox_min = {std::min(lf.a.x(), lf.b.x()), std::min(lf.a.y(), lf.b.y()), 0.0f}; s.bbox_max = {std::max(lf.a.x(), lf.b.x()), std::max(lf.a.y(), lf.b.y()), 2.1f};
+        s.trunc_frac = 0.0f; s.range = (mid - at).norm(); s.centroid_radius = 0.1f; s.source = 0; s.has_depth = true;
+        float c0 = 1e9f, c1 = -1e9f, r0 = 1e9f, r1 = -1e9f;
+        for (const Vec2f& e : {lf.a, lf.b})
+            for (const float zz : {0.0f, 2.1f})
+            {
+                const Eigen::Vector4d P = zed_T_room * Eigen::Vector4d(e.x(), e.y(), zz, 1.0);
+                if (P.y() <= 0.2) continue;
+                const Eigen::Vector2d uv = camera_project(in.camera, P.head<3>());
+                c0 = std::min(c0, float(uv.x())); c1 = std::max(c1, float(uv.x())); r0 = std::min(r0, float(uv.y())); r1 = std::max(r1, float(uv.y()));
+            }
+        s.pixel_begin = p.mask_pixels.size();
+        for (float r = std::max(0.f, r0); r < std::min(float(kH), r1); r += 3.0f)
+            for (float c = std::max(0.f, c0); c < std::min(float(kW), c1); c += 3.0f) p.mask_pixels.emplace_back(c, r);
+        s.pixel_end = p.mask_pixels.size();
+        p.slices.push_back(s);
+    }
     {
         MaskSlice s;
         s.label = "plant"; s.class_id = 5.f; s.confidence = 0.8f; s.source = 0; s.has_depth = true;
@@ -193,6 +230,7 @@ static DoorCycleInput input(std::uint64_t cycle, int frame, const Vec2f& at, con
         p.slices.push_back(s);
     }
     in.masks = std::move(p);
+    in.bpearl = sweep;
     return in;
 }
 
@@ -252,7 +290,8 @@ struct Bench
     DetectorTable det = default_detectors();
     Bench() { pkt.valid = true; }
     ExistenceTrace frame(PlaceBelief& b, const rc::DoorFitState& th, const Vec2f& at, const Vec2f& target, bool zed, bool ricoh,
-                         std::vector<FrameDetection> dets, int visit, std::optional<Mat6d> cov = std::nullopt)
+                         std::vector<FrameDetection> dets, int visit, std::optional<Mat6d> cov = std::nullopt,
+                         std::optional<LidarOpening> lidar = std::nullopt)
     {
         const Mat4d body = body_pose(at, target);
         const std::optional<Mat4d> room_T_zed = body * lift(1.2);
@@ -263,7 +302,7 @@ struct Bench
         if (ricoh) { fr.ricoh_ran = true; fr.ricoh_spec = camera_spec(ric); fr.room_T_ricoh = body * lift(1.0); }
         fr.rt_cov = cov;
         fr.dets = dets;
-        return observe_place(b, th, fr, visit, 0.0f, nullptr);
+        return observe_place(b, th, fr, visit, 0.0f, nullptr, -1, 0.0f, std::nullopt, lidar);
     }
 };
 static rc::DoorFitState shut_door(float width = 0.85f) { return typical_door_at({1.0f, kWallY}, width, rc::DoorConfig{}.door_prior_h_m, kRoom); }
@@ -1609,6 +1648,178 @@ int main()
         const DetectorTable t = load_detectors(tmp);
         CHECK(t.zed.hit_rate_open < 0.0f and t.ricoh.hit_rate_open == 0.001f);   // 0 refused (= hit_rate); 0.001 < false_alarm accepted
         std::filesystem::remove(tmp);
+    }
+
+
+    // ═══ Task 9: a side-on leaf and the LiDAR opening bear a door in its frame wall (spec §3.3, §3.6; flag on) ═══════════════════════
+    // A low-LiDAR sweep standing at `org` reading the wall line of aperture `ap`: through (the return 1 m beyond the line) where the wall
+    // coordinate a lies in [thr_lo, thr_hi], blocked (the return ON the line) elsewhere in the window; `none` = a sweep that saw nothing.
+    const auto make_sweep = [](const rc::door::Aperture& ap, const Vec2f& org, float thr_lo, float thr_hi, bool none = false)
+    {
+        BpearlSweep sw; sw.room_fresh = true; sw.origin_room = Vec3f(org.x(), org.y(), 0.3f);
+        if (none) return sw;
+        for (float a = ap.s - 0.95f; a <= ap.s + ap.w + 0.95f; a += 0.01f)
+        {
+            const Vec2f X = ap.wall_O + a * ap.wall_u, d = (X - org).normalized();
+            const bool thr = a >= thr_lo and a <= thr_hi;
+            const Vec2f q = thr ? Vec2f(X + 1.0f * d) : X;
+            sw.pts_room.emplace_back(q.x(), q.y(), 1.0f);
+        }
+        return sw;
+    };
+    const auto lid_of = [](const rc::door::Aperture& ap, const BpearlSweep& sw, float cf_curve_phi)
+    {
+        rc::door::RegisteredSweep rs; rs.origin = sw.origin_room; rs.pts = sw.pts_room;
+        const std::pair<float, float> pt{cf_curve_phi, 1.0f};
+        return LidarOpening{rc::door::opening_view_llr(ap, rs, 0.802144f, 0.00110819f, std::span<const std::pair<float, float>>(&pt, 1)),
+                            Vec2f(sw.origin_room.x(), sw.origin_room.y())};
+    };
+    {   // an open door whose ZED reports NOTHING but whose span reads "through" gains L; the ZED alone loses it
+        const std::vector<Vec2f> from{{1.0f, 1.0f}, {2.5f, 0.5f}, {-0.5f, 1.5f}, {3.5f, 2.0f}, {0.0f, -1.0f}, {2.0f, 2.5f}};
+        const auto run = [&](bool with_lidar)
+        {
+            Bench b; b.cfg.exist_one_model = true; b.cfg.ricoh_birth_p_open = 0.0f; b.det.zed.hit_rate_open = 0.05f;
+            rc::DoorFitState th = shut_door();
+            PlaceBelief pb;
+            b.frame(pb, th, from[0], kDoor, true, false, {{{1.0f, kWallY}, -1.0f, 0}}, 0);   // a first view with a hit: the door is real
+            const float L0 = pb.L();
+            for (std::size_t i = 0; i < from.size(); ++i)
+            {
+                std::optional<LidarOpening> lid;
+                if (with_lidar)
+                {
+                    const BpearlSweep sw = make_sweep(th.aperture, from[i] , th.aperture.s + 0.05f, th.aperture.s + th.aperture.w - 0.05f);
+                    lid = lid_of(th.aperture, sw, std::numbers::pi_v<float> / 2);   // the leaf stands open: P(open) = 1
+                }
+                b.frame(pb, th, from[i], kDoor, true, false, {}, static_cast<int>(i) + 1, std::nullopt, lid);   // the ZED reports nothing
+            }
+            return pb.L() - L0;
+        };
+        const float d_zed = run(false), d_lid = run(true);
+        std::print("lidar_opening_supports_open_door: dL over 6 views: ZED misses alone {:+.3f}, with the LiDAR opening {:+.3f}\n", d_zed, d_lid);
+        CHECK(d_lid > d_zed + 3.0f);
+        CHECK(d_lid > 0.0f);   // an open door nobody can see is carried by the opening
+    }
+    {   // a candidate whose span reads solid wall loses L (P(open) = the birth prior 0.2); the ZED reports nothing after a first hit
+        const std::vector<Vec2f> from{{1.0f, 1.0f}, {2.5f, 0.5f}, {-0.5f, 1.5f}, {3.5f, 2.0f}, {0.0f, -1.0f}, {2.0f, 2.5f}};
+        const auto run = [&](bool with_lidar)
+        {
+            Bench b; b.cfg.exist_one_model = true;
+            const rc::DoorFitState th = shut_door();
+            PlaceBelief pb;
+            b.frame(pb, th, from[0], kDoor, true, false, {{{1.0f, kWallY}, -1.0f, 0}}, 0);
+            const float L0 = pb.L();
+            const float phi = std::acos(1.0f - b.cfg.ricoh_birth_p_open);
+            for (std::size_t i = 0; i < from.size(); ++i)
+            {
+                std::optional<LidarOpening> lid;
+                if (with_lidar) lid = lid_of(th.aperture, make_sweep(th.aperture, from[i], 1e9f, 1e9f), phi);   // every bin blocked
+                b.frame(pb, th, from[i], kDoor, true, false, {}, static_cast<int>(i) + 1, std::nullopt, lid);
+            }
+            return pb.L() - L0;
+        };
+        const float d0 = run(false), d1 = run(true);
+        std::print("lidar_wall_refutes_phantom: dL over 6 views: without the LiDAR {:+.3f}, span reads wall {:+.3f}\n", d0, d1);
+        CHECK(d1 < d0 - 0.5f);
+    }
+    {   // a LiDAR term is one trial per VIEW: ten sweeps from one standpoint are worth one
+        Bench b; b.cfg.exist_one_model = true;
+        const rc::DoorFitState th = shut_door();
+        PlaceBelief pb;
+        const BpearlSweep sw = make_sweep(th.aperture, {1.0f, 1.0f}, th.aperture.s + 0.05f, th.aperture.s + th.aperture.w - 0.05f);
+        b.frame(pb, th, {1.0f, 1.0f}, kDoor, true, false, {}, 0, std::nullopt, lid_of(th.aperture, sw, std::numbers::pi_v<float> / 2));
+        const float one = pb.ledger.sum();
+        for (int i = 0; i < 9; ++i) b.frame(pb, th, {1.0f, 1.0f}, kDoor, true, false, {}, 0, std::nullopt, lid_of(th.aperture, sw, std::numbers::pi_v<float> / 2));
+        std::print("lidar one trial per view: 1 sweep {:+.3f}, 10 sweeps from the same standpoint {:+.3f}\n", one, pb.ledger.sum());
+        CHECK(std::abs(pb.ledger.sum() - one) < 0.05f * std::max(1.0f, std::abs(one)) + 0.3f);   // the ZED misses of the later frames move it slightly; not 10x
+        // the ledger round-trips the LiDAR term (VL5) and flag-off ledgers keep their old format
+        const auto parsed = ViewLedger::parse(pb.ledger.serialise(), false, true);
+        CHECK(parsed.has_value() and pb.ledger.serialise().starts_with("VL5 "));
+        CHECK(parsed.has_value() and parsed->views().size() == pb.ledger.views().size() and std::abs(parsed->views()[0].lid.sum - pb.ledger.views()[0].lid.sum) < 1e-3
+              and parsed->views()[0].lid.n == pb.ledger.views()[0].lid.n);
+        ViewLedger plain; plain.observe({0.f, 0.f}, {1.f, 0.f}, {1.f, 0.f}, 1.f, 0.f, 0);
+        CHECK(plain.serialise().starts_with("VL3 "));
+    }
+    {   // side_on_leaf_bears_door_in_frame_wall: a leaf mask + the opening seen at its hinge end, no known door: the door is born ON THE FRAME WALL
+        const auto run = [&](bool opening, std::vector<rc::door::DoorDecision>* out_births, float* L_at_end)
+        {
+            Rig r(false, true);
+            const LeafDet leaf{{2.0f, kWallY}, {2.0f, 4.14f}};
+            // the hypotheses of this mask (what compute_mask_causes builds): which of them stands where
+            const auto hyps = rc::door::apertures_from_leaf(leaf.a, leaf.b, 2.1f, kRoom, wall_groups(kRoom, 0.1f) , SizePrior{0.85f, 0.12f, 2.05f, 0.06f}, rc::door::RoomBand{0.2f, 0.1f});
+            const auto best = std::ranges::max_element(hyps, [&](const auto& a, const auto& b2) { return a.aperture.centre_xy().x() < b2.aperture.centre_xy().x(); });
+            const rc::door::Aperture ap = best->aperture;   // the hypothesis whose aperture is at x > 2 (the open side)
+            const Vec2f at{2.0f, 1.0f};
+            for (int i = 0; i < 80; ++i)
+            {
+                ++r.cycle; ++r.frame;
+                const BpearlSweep sw = make_sweep(ap, {at.x(), at.y() + 0.05f * float(i % 3)}, ap.s + 0.05f, ap.s + ap.w - 0.05f, not opening);
+                DoorCycleInput in = input(r.cycle, r.frame, at, {2.0f, 4.5f}, {}, 10.0, std::nullopt, {leaf}, opening ? std::optional<BpearlSweep>(sw) : std::optional<BpearlSweep>(make_sweep(ap, {at.x(), at.y()}, 1e9f, 1e9f)));
+                r.step(std::move(in));
+            }
+            if (out_births) *out_births = r.births;
+            if (L_at_end) *L_at_end = r.w.st.empty() ? -99.f : r.w.st.begin()->second.belief.L();
+            return r.w.st.size();
+        };
+        std::vector<rc::door::DoorDecision> births; float L = 0;
+        const std::size_t n_open = run(true, &births, &L);
+        std::print("side_on_leaf_bears_door_in_frame_wall: opening seen: {} door(s), {} birth(s) at", n_open, births.size());
+        for (const auto& b : births) std::print(" ({:.2f},{:.2f})", b.a, b.b);
+        std::print(", L {:+.2f}\n", L);
+        CHECK(n_open >= 1 and not births.empty());
+        for (const auto& b : births) CHECK(std::abs(b.b - 5.0f) < 0.25f);        // the frame wall (y = 5), not the leaf's plane (x = 2, y 4.1..5)
+        if (not births.empty()) CHECK(std::abs(births.front().a - 2.425f) < 0.2f); // the side the opening was read on
+        std::vector<rc::door::DoorDecision> births_wall; float Lw = 0;
+        const std::size_t n_wall = run(false, &births_wall, &Lw);
+        std::print("side_on_leaf_bears_door_in_frame_wall: span reads solid wall: {} door(s), {} birth(s), L {:+.2f} (opening seen: {:+.2f})\n", n_wall, births_wall.size(), Lw, L);
+        // solid wall: the ZED's own hit still counts (a door-class mask is a door-class mask: Task 8b), but the span reads against it; the opening is
+        // what carries the door: its L is far above the one whose span reads wall
+        CHECK(n_wall == 0 or L > Lw + 0.3f);
+    }
+    {   // corner_two_doors: open door A in wall 1 whose leaf hides door B's aperture in wall 2 (a corner). The leaf's two ends touch the two walls.
+        const Vec2f ea{4.4f, kWallY}, eb{4.99f, 4.37f};
+        const rc::door::RoomBand band{0.2f, 0.1f};
+        const auto groups = wall_groups(kRoom, 0.1f);
+        const auto hyps = rc::door::apertures_from_leaf(ea, eb, 2.1f, kRoom, groups, SizePrior{0.85f, 0.12f, 2.05f, 0.06f}, band);
+        CHECK(hyps.size() == 4);
+        // hypotheses 0,1: hinge at ea (wall 1, y = 5: A); 2,3: hinge at eb (wall 2, x = 5: B)
+        const auto cluster = [&](bool a_open_seen)
+        {
+            Eigen::MatrixXd lw(1, static_cast<int>(hyps.size()));
+            for (std::size_t h = 0; h < hyps.size(); ++h)
+            {
+                const auto& ap = hyps[h].aperture;
+                double v = -std::log1p(std::exp(-hyps[h].log_w)) - std::log(10.0);
+                if (a_open_seen)
+                {   // the scan reads through along A's span on wall 1 (the hypothesis whose aperture lies toward -x of its hinge), solid on B's
+                    const Vec2f org{3.0f, 1.0f};
+                    const bool is_a = h < 2;
+                    const bool thr = is_a and ap.centre_xy().x() < ea.x();
+                    const BpearlSweep sw = make_sweep(ap, org, thr ? ap.s : 1e9f, thr ? ap.s + ap.w : 1e9f);
+                    v += lid_of(ap, sw, std::numbers::pi_v<float> / 2).llr;
+                }
+                lw(0, static_cast<int>(h)) = v;
+            }
+            const std::vector<bool> excl(hyps.size(), false);
+            const bool ex[4] = {false, false, false, false};
+            const auto joints = rc::door::core::bf::k_best(lw, std::span<const bool>(ex, 4), 4);
+            std::vector<double> w;
+            double z = 0.0;
+            for (const auto& j : joints) z += std::exp(j.log_w - joints.front().log_w);
+            for (const auto& j : joints) w.push_back(std::exp(j.log_w - joints.front().log_w) / z);
+            std::vector<int> who;
+            for (const auto& j : joints) who.push_back(j.cause_of_mask[0]);
+            return std::pair{w, who};
+        };
+        const auto [w_open, who_open] = cluster(true);
+        const auto [w_none, who_none] = cluster(false);
+        const double pA_open = [&] { double a = 0; for (std::size_t i = 0; i < w_open.size(); ++i) if (who_open[i] < 2) a += w_open[i]; return a; }();
+        std::print("corner_two_doors: with A's opening in the sweep P(A leaf) {:.3f} (best joint {:.3f}); no opening visible: {} joint hypotheses, weights", pA_open, w_open.front(), w_none.size());
+        for (const double w : w_none) std::print(" {:.3f}", w);
+        std::print("\n");
+        CHECK(pA_open > 0.8);
+        int mid = 0; for (const double w : w_none) mid += (w > 0.2 and w < 0.8);
+        CHECK(mid >= 2);
     }
 
     std::print("{}\n", fails == 0 ? "ALL PASS" : std::format("{} FAILURE(S)", fails));

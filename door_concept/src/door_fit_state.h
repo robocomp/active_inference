@@ -271,6 +271,9 @@ struct DoorFitState
     // ★THE FIT'S OWN SUPPORT, CONSUMED ONCE by the next existence update (channel `sup`): set only on a cycle whose fit ran on a
     //  non-empty support (a gated/stale/held cycle leaves it alone) and taken out by update_existence — no fit means no term.
     std::optional<rc::door::core::FitSupport> pending_fit_support;
+    // ★THE LiDAR OPENING (one-model, spec §3.3), consumed once like the support: the fit's registered sweep read through this door's aperture span
+    //  (opening_view_llr); set only on a cycle that had a sweep and under Existence.OneModel.
+    std::optional<rc::door::core::LidarOpening> pending_lidar;
     float dbg_obliquity_cos = 1.0f;  // |cos| of camera→door horizontal ray vs backrest normal (1=face-on, →0 grazing)
 
     // Free-energy readout + attention baseline (clutter-inclusive F; TABLE.md §9). dbg_energy HOLDS the last

@@ -1549,6 +1549,12 @@ void DoorFit::estimate_phi(rc::DoorFitState& inst)
         const auto ap = inst.ai2_belief.aperture();
         const auto runs = rc::door::measure_openings(ap, reg_sweep.origin, reg_sweep.pts);
         inst.opening_runs = rc::door::measure_openings(ap, reg_sweep.origin, reg_sweep.pts, ap.w);   // "clear": past the leaf's reach
+        // ★THE LiDAR OPENING AS EXISTENCE EVIDENCE (one-model, spec §3.3): this sweep's reading of the span against solid wall, with this
+        //  door's leaf posterior as P(open), for the next existence update (channel `lid`). An open door the ZED cannot see still shows its
+        //  opening here; a phantom's span reads wall. One term per sweep; the ledger makes it one trial per view.
+        if (cfg_.exist_one_model)
+            inst.pending_lidar = rc::door::core::LidarOpening{rc::door::opening_view_llr(ap, reg_sweep, lidar_through_open_, lidar_through_wall_, inst.phi_curve),
+                                                                reg_sweep.origin.head<2>()};
         const Eigen::Vector2f u = ap.wall_u;
         const float chain_s = u.x() * u.x() * inst.chain_cov_xx + 2.0f * u.x() * u.y() * inst.chain_cov_xy
                             + u.y() * u.y() * inst.chain_cov_yy;

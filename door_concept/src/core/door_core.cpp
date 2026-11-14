@@ -156,6 +156,7 @@ void DoorCore::set_cycle_views(const DoorCycleInput& in)
 {
     fit_.set_clock(in.t_steady_ns, in.t_wall_ms);
     fit_.set_camera(CameraModel::room_T_zed(in.robot), in.camera);
+    fit_.set_lidar_model(detectors_.lidar.through_open, detectors_.lidar.through_wall);
 }
 
 void DoorCore::record(K k, std::uint64_t id, float x, float y, std::string note, std::string name, DoorCycleOutput& out)
@@ -748,7 +749,9 @@ void DoorCore::births(const DoorCycleInput& in, DoorCycleOutput& out)
         // centroid birth and the evidence assignment can disagree). Full birth-validity (P(v=clean) — don't
         // birth from a merged/contaminated mask at all) is §2, still to come.
         // seed at the detection's position (a ricoh slice: wall-fused; a ZED slice: its centroid, unchanged)
-        const Eigen::Vector3f c(dets_[d].xy.x(), dets_[d].xy.y(), pkt.slices[slice].centroid.z());
+        // one-model: a side-on leaf bears its door in the FRAME WALL (spec §3.6): the newborn is placed at the winning hypothesis' aperture, not at the mask
+        const Vec2f birth_xy = cfg.exist_one_model ? place_xy(static_cast<std::size_t>(d)) : dets_[d].xy;
+        const Eigen::Vector3f c(birth_xy.x(), birth_xy.y(), pkt.slices[slice].centroid.z());
         // ★Re-read every birth: an earlier birth this cycle is already an instance (a newborn's swept arc can explain
         // the next detection), and the existence update may have retired doors since the association.
         const std::vector<TrackedDoor> doors = world_->doors();

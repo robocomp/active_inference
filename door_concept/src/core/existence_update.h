@@ -101,7 +101,7 @@ struct ViewRow
 /// Returns the trace (NaN for every channel that did not run) and appends the touched views' rows.
 ExistenceTrace observe_place(PlaceBelief& b, const rc::DoorFitState& theta, const ExistenceFrame& fr, int visit,
                              float actuation_llr, std::vector<ViewRow>* rows, int self_sensor = -1, float self_w = 0.f,
-                             std::optional<FitSupport> support = std::nullopt);
+                             std::optional<FitSupport> support = std::nullopt, std::optional<LidarOpening> lidar = std::nullopt);
 
 /// The structural prior of θ in this room (place_prior.h). `doors_on_wall_before`: how many doors were on θ's wall before it.
 /// The size is scored on the FITTED width/height with their posterior sds (a candidate: what the fit will make of its blob) under

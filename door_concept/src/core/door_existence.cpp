@@ -269,6 +269,7 @@ void DoorCore::compute_mask_causes(const DoorCycleInput& /*in*/)
 {
     mask_causes_.clear();
     mask_log_birth_.clear();
+    mask_leaf_.clear();
     const auto& cfg = cfg_.door;
     if (not cfg.exist_one_model or dets_.empty() or not info_.new_frame)
         return;
@@ -300,6 +301,9 @@ void DoorCore::compute_mask_causes(const DoorCycleInput& /*in*/)
     const float rn2 = cfg.tracker_detection_noise_m * cfg.tracker_detection_noise_m;
     mask_causes_.resize(dets_.size());
     mask_log_birth_.assign(dets_.size(), -std::numeric_limits<double>::infinity());
+    mask_leaf_.assign(dets_.size(), std::nullopt);
+    const rc::door::RoomBand band = fit_.room_band();
+    const SizePrior typical = existence_size_prior(cfg);
     for (std::size_t i = 0; i < dets_.size(); ++i)
     {
         const auto& dv = dets_[i];
@@ -329,9 +333,98 @@ void DoorCore::compute_mask_causes(const DoorCycleInput& /*in*/)
             d.along_offset_m = (dv.xy - it->second.centre).dot(it->second.u);
             d.along_var = it->second.var + var;
         }
+        // ★THE LEAF MODE OF THE NEW-DOOR CAUSE (spec §3.6; door_leaf_birth.h): the mask is a leaf seen from outside its frame wall.
+        std::vector<rc::door::LeafApertureHyp> hyps;
+        std::vector<double> hyp_log_b;   // log b of each hypothesis (the probability a door is born at its aperture)
+        // the mask's own depth noise (a ricoh LiDAR-depth slice: depth_var > 0) widens how well its ends are known against the wall (the fit's R does the same)
+        const rc::door::RoomBand mband{band.wall_thickness_m, std::hypot(band.sigma_m, std::sqrt(std::max(0.0f, sl.depth_var)))};
+        if (polygon.size() >= 3)
+            if (const auto seg = rc::door::plan_segment(pts); seg.ok)
+            {
+                const Vec2f centre = 0.5f * (seg.a + seg.b), dir = (seg.b - seg.a) / seg.length;
+                if (const int e = rc::door::detail::nearest_edge(polygon, centre); e >= 0)
+                {
+                    const Vec2f uw = (polygon[(static_cast<std::size_t>(e) + 1) % polygon.size()] - polygon[static_cast<std::size_t>(e)]).normalized();
+                    const float theta = std::acos(std::min(1.0f, std::abs(dir.dot(uw))));   // 0 flush with its wall, pi/2 perpendicular
+                    const double g_ap = rc::door::aperture_angle_likelihood(theta, rc::door::segment_angle_sd(seg.length, mband.sigma_m));
+                    model.log_aperture_factor = std::log(std::max(g_ap, 1e-300));   // numerical floor: the log of an underflowed likelihood
+                    hyps = rc::door::apertures_from_leaf(seg.a, seg.b, seg.height, polygon, groups, typical, mband, &rates_);
+                    const double log_open = std::log(std::max(1e-9, static_cast<double>(cfg.ricoh_birth_p_open)));   // P(open): the one open prior the agent has
+                    const double log_not_ap = std::log1p(-std::min(g_ap, 1.0 - 1e-16));   // the open leaf is whatever is not shut-shaped (door_leaf_birth.h); 1e-16: a numerical floor on 1 − g
+                    const double lid_max = std::log(static_cast<double>(detectors_.lidar.through_open) / detectors_.lidar.through_wall);   // a sweep's term is a mean per-bin log ratio: at most this
+                    const double log_floor = model.log_kappa - std::log(std::max(1e-9, wall_len)) - 20.0;   // numerical reach floor, as causes_of_mask's
+                    model.leaf_log_w.assign(hyps.size(), -std::numeric_limits<double>::infinity());
+                    hyp_log_b.assign(hyps.size(), -std::numeric_limits<double>::infinity());
+                    for (std::size_t h = 0; h < hyps.size(); ++h)
+                    {
+                        auto& hy = hyps[h];
+                        const Vec2f hc = hy.aperture.centre_xy();
+                        // the live doors on the hypothesis' wall charge the base rate by distinctness, as everywhere (S5/S3); the seed rate is replaced
+                        const std::vector<float> r_o = other_p_on_wall(hy.wall, polygon, groups, ~std::uint64_t{0}, ~std::uint64_t{0}, hc, rn2, /*doors_only=*/true);
+                        const double lw = hy.log_w - wall_base_rate(rates_, {}) + wall_base_rate(rates_, r_o);
+                        const double lb = -std::log1p(std::exp(-lw));
+                        // a hole holds one door: a NEW door at a hole a live door already stands in has the mass the live door leaves (1 − r · overlap)
+                        const double hole_free = this->hole_free(hy.aperture);
+                        double v = lb - std::log(wall_length_at(hc)) + log_open + log_not_ap + std::log(std::max(hole_free, 1e-300));   // 1e-300: numerical floor on a log
+                        if (not std::isfinite(v) or v + std::max(0.0, lid_max) + model.log_pd_new < log_floor) continue;
+                        if (leaf_sweep_.present())
+                        {
+                            // the opening is evidence for the HOLE, shared by whichever label owns it: credited to a new door only for the share of
+                            // the hole no live door already stands in (hole_free)
+                            const auto reg = rc::door::register_sweep(hy.aperture, leaf_sweep_.origin(), leaf_sweep_.points());
+                            const std::pair<float, float> pt{hy.leaf.phi, 1.0f};
+                            v += hole_free * rc::door::opening_view_llr(hy.aperture, reg, detectors_.lidar.through_open, detectors_.lidar.through_wall,
+                                                                         std::span<const std::pair<float, float>>(&pt, 1));
+                        }
+                        model.leaf_log_w[h] = v;
+                        hyp_log_b[h] = lb;
+                    }
+                }
+            }
         const float R = cfg.ai2_sigma_base_m * cfg.ai2_sigma_base_m + std::max(0.0f, sl.depth_var);
         mask_causes_[i] = causes_of_mask(dv.slice_index, pts, R, doors, model, bp != nullptr ? *bp : bp_default);
+        if (const int lh = mask_causes_[i].new_leaf_hyp; lh >= 0)
+        {
+            mask_leaf_[i] = hyps[static_cast<std::size_t>(lh)];
+            mask_log_birth_[i] = hyp_log_b[static_cast<std::size_t>(lh)];   // a candidate here is born at the leaf's aperture: its own place prior
+        }
     }
+}
+
+// ONE-MODEL: the LiDAR opening of a pending candidate's aperture span: the newest sweep registered to it, scored against solid wall (spec §3.3).
+// P(open) is the leaf's own when the candidate was born from a side-on leaf (its phi is the leaf's measured angle), else the birth prior of a
+// place with no leaf belief (Birth.RicohOpenPrior, the one open prior the agent has) as a one-point leaf curve with that clear fraction.
+std::optional<LidarOpening> DoorCore::candidate_lidar(const rc::DoorFitState& theta, bool leaf_born) const
+{
+    if (not cfg_.door.exist_one_model or not leaf_sweep_.present()) return std::nullopt;
+    const float cf = leaf_born ? 1.0f - std::cos(theta.leaf.phi) : std::clamp(cfg_.door.ricoh_birth_p_open, 0.0f, 1.0f);   // clamp: domain of a share
+    const std::pair<float, float> pt{std::acos(std::clamp(1.0f - cf, -1.0f, 1.0f)), 1.0f};
+    const auto reg = rc::door::register_sweep(theta.aperture, leaf_sweep_.origin(), leaf_sweep_.points());
+    // the opening is evidence for the HOLE: a candidate beside a live door that already stands in that hole is credited only the share left
+    // (hole_free), or one open door's span would bear a second label 0.4 m along the wall and charge the first one the second-door cost
+    return LidarOpening{static_cast<float>(hole_free(theta.aperture)) * rc::door::opening_view_llr(theta.aperture, reg, detectors_.lidar.through_open,
+                                                    detectors_.lidar.through_wall, std::span<const std::pair<float, float>>(&pt, 1)),
+                        reg.origin.head<2>()};
+}
+
+// The share of the aperture's span NO live door stands in: Π_i (1 − r_i · overlap_i) over the live doors on the same wall, r_i the door's last-cycle
+// existence probability and overlap_i the fraction of the (mean) width the two spans share along the wall, max(0, 1 − |Δ| / w̄). Continuous (no radius).
+double DoorCore::hole_free(const rc::door::Aperture& ap) const
+{
+    const auto& polygon = fit_.room_polygon();
+    const auto groups = wall_groups(polygon, fit_.room_band().sigma_m);
+    const int wall = wall_of(ap.centre_xy(), polygon, groups);
+    double free = 1.0;
+    for (const auto& [id, st] : world_->fit_states())
+    {
+        if (st->is_bearing_hypothesis) continue;
+        const auto it = last_p_door_.find(id);
+        if (it == last_p_door_.end() or wall_of(st->aperture.centre_xy(), polygon, groups) != wall) continue;
+        const double wbar = 0.5 * (ap.w + st->aperture.w);
+        const double d = std::abs((st->aperture.centre_xy() - ap.centre_xy()).dot(ap.wall_u));
+        free *= 1.0 - static_cast<double>(it->second) * std::max(0.0, 1.0 - d / std::max(1e-3, wbar));
+    }
+    return free;
 }
 
 std::vector<FrameDetection> DoorCore::place_detections(std::uint64_t door, int candidate) const
@@ -481,21 +574,22 @@ void DoorCore::prepare_candidates(const DoorCycleInput& in, const std::vector<rc
     // a candidate a live door now explains is that door (born, restored or carried meanwhile): it is no longer pending
     // (one-model: no gate. A live door explains a candidate when the door's cause outweighs a new door's at the candidate's place:
     //  log r_i − ½ m² against log b, the same comparison the masks' responsibilities make.)
-    const auto live_door_outweighs_new = [&](const Candidate& c)
+    const auto live_door_outweighs_new_at = [&](const Vec2f& cxy, float cvar)
     {
         // a place's existence against a NEW place at the same spot, as DENSITIES along the wall: r N(m; 0, var) against b / Λ
-        const double lb = log_birth(c.xy, std::sqrt(std::max(1e-9f, c.var))) - std::log(wall_length_at(c.xy));
+        const double lb = log_birth(cxy, std::sqrt(std::max(1e-9f, cvar))) - std::log(wall_length_at(cxy));
         for (const auto& t : tracks)
         {
-            const Vec2f e = c.xy - t.xy;
+            const Vec2f e = cxy - t.xy;
             const float cv = t.has_cov ? 0.5f * (t.cov(0, 0) + t.cov(1, 1)) : cfg.tracker_gate_fallback_m * cfg.tracker_gate_fallback_m;
-            const double m2 = e.squaredNorm() / std::max(1e-9f, cv + c.var);
+            const double m2 = e.squaredNorm() / std::max(1e-9f, cv + cvar);
             const auto it = last_p_door_.find(t.id);
             if (std::log(std::max(1e-9, double(it != last_p_door_.end() ? it->second : 1.0f))) - 0.5 * m2
-                - 0.5 * std::log(2.0 * std::numbers::pi * std::max(1e-9f, cv + c.var)) >= lb) return true;
+                - 0.5 * std::log(2.0 * std::numbers::pi * std::max(1e-9f, cv + cvar)) >= lb) return true;
         }
         return false;
     };
+    const auto live_door_outweighs_new = [&](const Candidate& c) { return live_door_outweighs_new_at(c.xy, c.var); };
     std::erase_if(candidates_, [&](const Candidate& c)
                   { return c.room == room_name_ and (cfg.exist_one_model ? live_door_outweighs_new(c) : gated(c.xy, c.var)); });
     const auto& pkt = masks_.packet();
@@ -525,14 +619,19 @@ void DoorCore::prepare_candidates(const DoorCycleInput& in, const std::vector<rc
         if (not dv.birthable or (not one and gated(dv.xy, dv.xy_var))) continue;
         if (cfg.exist_one_model and not one) continue;   // no causes computed for it (not a fresh frame): it says nothing
         const float var = dv.xy_var >= 0.0f ? dv.xy_var : rn2;
+        const Vec2f pxy = cfg.exist_one_model ? place_xy(d) : dv.xy;   // a side-on leaf: where its door's APERTURE is (spec §3.6), else the mask
+        // a side-on leaf whose frame-wall hole a live door already outweighs a new place in is that door's leaf (its own Leaf cause explains it): no new place
+        // (the comparison that retires a candidate there the next cycle, applied before it is born instead of after)
+        if (cfg.exist_one_model and d < mask_leaf_.size() and mask_leaf_[d].has_value() and live_door_outweighs_new_at(pxy, dv.xy_var >= 0.0f ? dv.xy_var : rn2))
+            continue;
         int best = -1; float best_m2 = cfg.tracker_gate_mahalanobis;
         if (one)
         {
-            double best_score = mask_log_birth_[d] - std::log(wall_length_at(dv.xy));   // a candidate must beat a new place (densities along the wall)
+            double best_score = mask_log_birth_[d] - std::log(wall_length_at(pxy));   // a candidate must beat a new place (densities along the wall)
             for (std::size_t c = 0; c < candidates_.size(); ++c)
             {
                 if (candidates_[c].room != room_name_) continue;
-                const double m2 = (candidates_[c].xy - dv.xy).squaredNorm() / std::max(1e-9f, candidates_[c].var + var);
+                const double m2 = (candidates_[c].xy - pxy).squaredNorm() / std::max(1e-9f, candidates_[c].var + var);
                 const auto it = last_p_cand_.find(candidates_[c].key);
                 const double score = std::log(std::max(1e-9, double(it != last_p_cand_.end() ? it->second : 1.0f))) - 0.5 * m2
                                      - 0.5 * std::log(2.0 * std::numbers::pi * std::max(1e-9f, candidates_[c].var + var));
@@ -557,11 +656,11 @@ void DoorCore::prepare_candidates(const DoorCycleInput& in, const std::vector<rc
             Candidate c;
             c.key = ++next_candidate_key_;
             c.room = room_name_;
-            c.xy = dv.xy;
+            c.xy = pxy;
             c.var = var;
             // ★The memory of this place is the candidate's starting evidence (spec §3.7/§8.3): a matched row continues its
             //  ledger, aged by the change hazard; a REMOVED row ("no door here") pushes it down by exactly its aged L.
-            if (const PlaceRow* row = places_.match(room_name_, dv.xy, Eigen::Matrix2f::Identity() * var, cfg.tracker_gate_mahalanobis))
+            if (const PlaceRow* row = places_.match(room_name_, pxy, Eigen::Matrix2f::Identity() * var, cfg.tracker_gate_mahalanobis))
             {
                 places_.restore_into(c.belief, *row, in.t_wall_ms);
                 c.seeded_from_removed_ms = row->removed_wall_ms;
@@ -573,7 +672,16 @@ void DoorCore::prepare_candidates(const DoorCycleInput& in, const std::vector<rc
         // ★THE SIZE TERM IS THIS FRAME'S, as the band term is (replaced, never accumulated): one narrow glimpse of a door half hidden must not
         //  hold it back for the candidate's life. A candidate's first detection of the frame measures it.
         if (not self_det.contains(static_cast<std::size_t>(best)))
-            measure_candidate_width(candidates_[static_cast<std::size_t>(best)], pkt.slices[static_cast<std::size_t>(dv.slice_index)]);
+        {
+            Candidate& cb = candidates_[static_cast<std::size_t>(best)];
+            measure_candidate_width(cb, pkt.slices[static_cast<std::size_t>(dv.slice_index)]);
+            if (cfg.exist_one_model and d < mask_leaf_.size() and mask_leaf_[d].has_value())
+            {   // the blob's extent along the wall is the leaf's FOOTPRINT, not a width: the door is the hypothesis' aperture, its width the leaf's length (fused with the typical size)
+                const auto& hy = *mask_leaf_[d];
+                cb.theta.aperture = hy.aperture; cb.theta.leaf = hy.leaf;
+                cb.width_meas = hy.aperture.w; cb.size_resolved = true; cb.width_sd = cfg.tracker_detection_noise_m; cb.leaf_born = true;
+            }
+        }
         det_candidate_[d] = best;
         self_det.try_emplace(static_cast<std::size_t>(best), static_cast<int>(d));
     }
@@ -625,7 +733,8 @@ void DoorCore::prepare_candidates(const DoorCycleInput& in, const std::vector<rc
                 const std::vector<FrameDetection> place = place_detections(0, static_cast<int>(c));
                 ExistenceFrame fr_c = fr;
                 fr_c.dets = place;
-                observe_place(cand.belief, cand.theta, fr_c, visit_, 0.0f, &rows, self_sensor, self_w);
+                observe_place(cand.belief, cand.theta, fr_c, visit_, 0.0f, &rows, self_sensor, self_w, std::nullopt,
+                              candidate_lidar(cand.theta, cand.leaf_born));
             }
             else
             observe_place(cand.belief, cand.theta, fr, visit_, 0.0f, &rows, self_sensor, self_w);
@@ -797,7 +906,8 @@ void DoorCore::update_existence(const DoorCycleInput& in, DoorCycleOutput& out)
                 place_dets = place_detections(id, -1);
                 fr_door.dets = place_dets;
             }
-            inst.exist_trace = observe_place(inst.belief, inst, fr_door, visit_, act, &rows, -1, 0.0f, std::exchange(inst.pending_fit_support, std::nullopt));
+            inst.exist_trace = observe_place(inst.belief, inst, fr_door, visit_, act, &rows, -1, 0.0f, std::exchange(inst.pending_fit_support, std::nullopt),
+                                             std::exchange(inst.pending_lidar, std::nullopt));
             // A door that descends from a remembered row: its first detection in this visit finds the place again (the learned
             // hazard's "unchanged" sample; one per place per visit - PlaceTable::sample_revisit). The sighting moves to now.
             if (not inst.place_row_name.empty() and (inst.exist_trace.zed_hit > 0.0f or inst.exist_trace.ric_hit > 0.0f))
@@ -850,12 +960,13 @@ void DoorCore::update_existence(const DoorCycleInput& in, DoorCycleOutput& out)
         if (ex_dbg_ % 60 == 0 or removing or std::abs(b.L() - L_before[i]) > 1.0f)
             diag("stdout", std::format("door_concept: [existence] {} L={:+.2f} p={:.2f} role={} delete_line={} | prior band={:+.2f} "
                                        "base={:+.2f} size={:+.2f} extent={:+.2f} carried={:+.2f} cross={:+.2f} Sc={:+.2f} Sp={:+.2f} term={:+.2f} | views={} | zed dl={} q={} hit={} "
-                                       "| ric dl={} q={} hit={} | geo dl={} | sup dl={} x={} c={} on={} | act dl={} | kappa={}\n",
+                                       "| ric dl={} q={} hit={} | geo dl={} | sup dl={} x={} c={} on={} | act dl={} | kappa={}{}\n",
                                        inst.node_name, b.L(), b.p(), role_name(inst.role), fmt_or_dash(t.delete_line),
                                        b.prior.band, b.prior.base_rate, b.prior.size, b.prior.extent, b.carried, b.crossing, b.Sc(), b.Sp(), b.saturation_term(),
                                        b.ledger.views().size(), fmt_or_dash(t.zed_dl), fmt_or_dash(t.zed_q), fmt_or_dash(t.zed_hit),
                                        fmt_or_dash(t.ric_dl), fmt_or_dash(t.ric_q), fmt_or_dash(t.ric_hit), fmt_or_dash(t.geo_dl),
-                                       fmt_or_dash(t.sup_dl), fmt_or_dash(t.sup_x), fmt_or_dash(t.sup_c), fmt_or_dash(t.sup_q), fmt_or_dash(t.act_dl), fmt_or_dash(t.kappa)), out);
+                                       fmt_or_dash(t.sup_dl), fmt_or_dash(t.sup_x), fmt_or_dash(t.sup_c), fmt_or_dash(t.sup_q), fmt_or_dash(t.act_dl), fmt_or_dash(t.kappa),
+                                       cfg.exist_one_model ? std::format(" | lid dl={}", fmt_or_dash(t.lid_dl)) : std::string{}), out);
     }
     if (ex_dbg_ % 600 == 0)
     {

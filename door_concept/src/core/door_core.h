@@ -56,6 +56,7 @@
 #include "door_decision.h"    // Task 8: the costed decision, the role, the cost estimator
 #include "place_table.h"      // Task 8: the place table (the row is the belief)
 #include "door_mask_causes.h" // one-model: the four causes of a mask and their responsibilities
+#include "../door_leaf_birth.h" // one-model: a side-on leaf points to an opening in its frame wall (spec §3.6)
 #include "../door_config.h"   // rc::DoorConfig (plain struct)
 #include "../door_model.h"    // rc::DoorState
 #include "../door_belief.h"   // rc::DoorBelief (association_nll)
@@ -265,6 +266,7 @@ public:
         float best_size = std::numeric_limits<float>::lowest();   // the best size term any frame gave: a clipped blob only understates the width (clean25)
         bool wall_seed = false;                  // seeded along a wall of a room with no known door (no detection needed; spec 2026-11-09)
         std::string seeded_name;                 // the place row it was seeded from (the revisit sample is taken at birth, per visit)
+        bool leaf_born = false;                  // one-model: seeded from a side-on LEAF; theta.aperture is its frame-wall aperture and theta.leaf the leaf's pose (phi known)
     };
     [[nodiscard]] const std::vector<Candidate>& candidates() const { return candidates_; }
     /// An undecided candidate is an open question while the costed decision has not refused it (spec 2026-11-09-undecided-candidate-look).
@@ -310,6 +312,12 @@ private:
     /// ONE-MODEL: log b, the probability that a door is BORN at xy (the typical door's place prior; the live doors on its wall charge the base rate).
     [[nodiscard]] double log_birth(const Vec2f& xy, float sd) const;
     [[nodiscard]] double wall_length_at(const Vec2f& xy) const;   // Λ, the wall's length under `xy` (5 m with no wall)
+    /// ONE-MODEL: where a door born from detection `d` is placed: its winning leaf hypothesis' aperture centre (a side-on leaf), else the detection's xy.
+    [[nodiscard]] Vec2f place_xy(std::size_t d) const
+    { return d < mask_leaf_.size() and mask_leaf_[d].has_value() ? Vec2f(mask_leaf_[d]->aperture.centre_xy()) : dets_[d].xy; }
+    /// ONE-MODEL: the LiDAR opening of a pending candidate's aperture (opening_view_llr on the newest sweep registered to it; nullopt without a sweep).
+    [[nodiscard]] double hole_free(const rc::door::Aperture& ap) const;
+    [[nodiscard]] std::optional<LidarOpening> candidate_lidar(const rc::DoorFitState& theta, bool leaf_born) const;
     /// SpecificWorker::update_existence_beliefs, moved (door_existence.cpp). Runs once per NEW mask frame.
     void update_existence(const DoorCycleInput& in, DoorCycleOutput& out);
 
@@ -375,6 +383,9 @@ private:
     std::vector<rc::DetectionView> dets_;
     std::vector<MaskCauses> mask_causes_;     // per dets_ index (one-model; empty when the flag is off)
     std::vector<double> mask_log_birth_;      // per dets_ index: log b of a door born at the detection's place (one-model)
+    /// per dets_ index: the leaf-mode hypothesis that wins the new-door cause (the mask is a leaf seen side-on; the door is born at ITS
+    /// aperture in the frame wall, not at the mask). nullopt = the aperture mode wins: the door is born at the mask (spec §3.6).
+    std::vector<std::optional<rc::door::LeafApertureHyp>> mask_leaf_;
     rc::TrackerResult res_;
     TrackerCycleInfo info_;
 };

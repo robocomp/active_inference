@@ -50,6 +50,8 @@ struct MaskCauses
     int slice = -1;
     std::vector<Cause> causes;
     std::vector<double> rho;   // normalised responsibilities, parallel to `causes`
+    int new_leaf_hyp = -1;     // the new-door cause's best LEAF-mode hypothesis (index into MaskCauseModel::leaf_log_w) when it outweighs the aperture mode, else -1
+    double new_leaf_share = 0; // P(leaf mode | new door): the leaf hypotheses' share of the new-door weight
 
     /// Σ ρ over a door's causes (aperture + leaf): how much of this mask door `id` explains.
     [[nodiscard]] double rho_door(std::uint64_t id) const
@@ -100,6 +102,12 @@ struct MaskCauseModel
     double log_kappa = -1.6;        // log κ: the false-alarm rate of door-class masks (the fitted detector table's false_alarm)
     double log_pd_new = 0.0;        // log P(the sensor reports a new door | it exists) (the detector's hit rate)
     double along_len_m = 5.0;       // the length of the wall the mask lies on: births AND spurious masks are uniform along it (spec §3.4)
+    // The new-door cause has two modes (spec §3.6): the mask is the aperture's own face (a shut door in its wall: the weight above), or the
+    // mask is a LEAF seen from outside its frame wall (a side-on leaf, door_leaf_birth.h). Both are in the same currency, the density of a
+    // door born with this mask, so the cause's weight is their sum.
+    double log_aperture_factor = 0.0;   // log of the aperture mode's angular likelihood (door_leaf_birth.h aperture_angle_likelihood); 0 = no information
+    std::vector<double> leaf_log_w;     // one per leaf-mode hypothesis (−inf = none): log b_hyp − log Λ_hyp + log P(open) + log(1 − aperture angular) + the LiDAR opening;
+                                        // causes_of_mask adds log p_D + log(1 − ε), exactly as for the aperture mode
 };
 
 /// One mask's causes: every door within likelihood reach (log density not below log κ − 20 nats, a NUMERICAL floor on a weight
@@ -142,7 +150,29 @@ struct MaskCauseModel
         if (p_open > 0.0 and log_leaf >= reach_floor)
             out.causes.push_back({CauseKind::Leaf, d.id, base + std::log(p_open) + log_leaf});
     }
-    out.causes.push_back({CauseKind::NewDoor, 0, model.log_birth + model.log_pd_new + std::log1p(-eps) - std::log(std::max(1e-9, model.along_len_m))});
+    const double log_new_ap = model.log_birth + model.log_pd_new + std::log1p(-eps) - std::log(std::max(1e-9, model.along_len_m)) + model.log_aperture_factor;
+    double log_new = log_new_ap;
+    if (not model.leaf_log_w.empty())
+    {
+        const double fixed = model.log_pd_new + std::log1p(-eps);
+        double mx = log_new_ap;
+        for (const double v : model.leaf_log_w) mx = std::max(mx, v + fixed);
+        double z = std::isfinite(log_new_ap) ? std::exp(log_new_ap - mx) : 0.0, zl = 0.0, best = -std::numeric_limits<double>::infinity();
+        for (std::size_t i = 0; i < model.leaf_log_w.size(); ++i)
+            if (const double v = model.leaf_log_w[i] + fixed; std::isfinite(v))
+            {
+                zl += std::exp(v - mx);
+                if (v > best) { best = v; out.new_leaf_hyp = static_cast<int>(i); }
+            }
+        if (zl > 0.0)
+        {
+            log_new = mx + std::log(z + zl);
+            out.new_leaf_share = zl / (z + zl);
+            if (not (best > log_new_ap))
+                out.new_leaf_hyp = -1;   // the aperture mode is the better single hypothesis: the door is born at the mask
+        }
+    }
+    out.causes.push_back({CauseKind::NewDoor, 0, log_new});
     out.causes.push_back({CauseKind::Clutter, 0, log_clutter});
     std::vector<double> lw(out.causes.size());
     for (std::size_t i = 0; i < lw.size(); ++i)

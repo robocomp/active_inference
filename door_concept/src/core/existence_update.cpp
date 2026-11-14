@@ -144,7 +144,8 @@ float association_weight(std::span<const FrameDetection> dets, int sensor, const
 }
 
 ExistenceTrace observe_place(PlaceBelief& b, const rc::DoorFitState& th, const ExistenceFrame& fr, int visit,
-                             float actuation_llr, std::vector<ViewRow>* rows, int self_sensor, float self_w, std::optional<FitSupport> support)
+                             float actuation_llr, std::vector<ViewRow>* rows, int self_sensor, float self_w, std::optional<FitSupport> support,
+                             std::optional<LidarOpening> lidar)
 {
     ExistenceTrace t;
     std::vector<std::size_t> touched;
@@ -313,6 +314,17 @@ ExistenceTrace observe_place(PlaceBelief& b, const rc::DoorFitState& th, const E
                 }
             }
         }
+    }
+    // ── the LiDAR opening (one-model, spec §3.3): a sweep that read the aperture's span (through or blocked) is one trial of its view. Its term
+    //    arrives already weighted by the line of sight to the span (0 bins observed = exactly 0 = no trial: nothing is added, a miss with p_D 0
+    //    changes nothing). The view is the sweep's standpoint's, found with the same kernel as every channel's. ──
+    if (lidar.has_value() and lidar->llr != 0.0f and std::isfinite(lidar->llr))
+    {
+        const float before = b.ledger.sum();
+        const std::size_t v = b.ledger.observe(lidar->origin_xy, th.aperture.centre_xy(), th.aperture.across_u(), half_diag(th), 0.0f, visit);
+        b.ledger.add_lidar(v, lidar->llr);
+        b.ledger.recompute(v, fr.geometry_may_refute);
+        t.lid_dl = b.ledger.sum() - before;   // (not `touched`: the actuation below keeps joining the camera's view, as before)
     }
     // ── actuation: once per satisfied command, into the view current now ──
     if (actuation_llr != 0.0f)

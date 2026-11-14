@@ -23,6 +23,7 @@
 //   then the fit-support channel: n sum_x sum_w present_a present_b present_outlier absent_a absent_b absent_outlier.
 //   "VL3" appends the support channel's sum_q (the summed overlap q of its frames, see add_support) after that block.
 //   "VL4" (written only when a view holds one-model geometry) appends per view: framed(0/1) sum_lg, the sum of the frames' own geometry terms.
+//   "VL5" (written only when a view holds a LiDAR opening term) is VL4 plus per view: lidar_n lidar_sum (add_lidar).
 //   "VL1" (the same without the support block) still parses, with an empty support channel; VL1/VL2 read as q = 1.
 #pragma once
 #include <algorithm>
@@ -61,10 +62,14 @@ struct GaussAgg
 /// The fit-support channel's per-view aggregate: the weighted mean of x over the view's frames, scored once (support_llr); the
 /// model it was scored with travels with it (as geo's mu0/mu1/s2 do), so a restored ledger recomputes without the table.
 struct SupportAgg { double n = 0, sum_x = 0, sum_w = 0, sum_q = 0; SupportModel m; };
+/// The LiDAR opening channel's per-view aggregate (one-model): the mean over the view's sweeps of each sweep's opening_view_llr (door_opening_edges.h:
+/// the sweep's mean per-bin log ratio over the aperture span, weighted by the line of sight to it). One sweep is one trial; the view's term is their mean.
+struct LidarAgg { double n = 0, sum = 0; };
 struct View
 {
     ViewKey key; 
     std::array<BernoulliAgg, 2> bern;   // Zed, Ricoh
+    LidarAgg lid;
     GaussAgg geo; SupportAgg sup; float actuation_llr = 0; float llr = 0;
     float llr_percept = 0;   // the perceptual part of llr (recomputed with it; llr - llr_percept = the physical part)
 };
@@ -152,6 +157,13 @@ public:
         auto& s = views_[v].sup;
         s.n += 1; s.sum_x += double(w) * x; s.sum_w += w; s.sum_q += std::clamp(std::isfinite(q) ? q : 0.f, 0.f, 1.f); s.m = m;   // clamp: domain of a probability
     }
+    /// One sweep's opening term (opening_view_llr). Not finite = no term (a sweep that saw nothing of the span adds nothing, it is not a zero trial).
+    void add_lidar(std::size_t v, float llr)
+    {
+        if (v >= views_.size() or not std::isfinite(llr)) return;
+        ++version_;
+        views_[v].lid.n += 1; views_[v].lid.sum += llr;
+    }
     void add_actuation(std::size_t v, float llr) { if (v < views_.size()) { views_[v].actuation_llr += llr; ++version_; } }
 
     /// Recompute view v's llr from its aggregate (replacing the old one). Returns the CHANGE in sum().
@@ -174,6 +186,7 @@ public:
             if ((i == 0 or ricoh_counts_misses) and db < 1.f) lc += (1.f - db) * miss_llr(qb, fb);   // the ZED alone counts misses: the ricoh contributes hits only (a persisted VL1/VL2 ricoh aggregate keeps only its hit part too)
             l += beta_hit_fraction ? lc * float(a.n / (a.n + 1.0)) : lc;
         }
+        if (w.lid.n > 0) l += float(w.lid.sum / w.lid.n);   // the LiDAR opening: the mean of the view's sweeps, one trial per view
         const auto& g = w.geo;
         if (g.framed)
         {
@@ -221,8 +234,9 @@ public:
 
     [[nodiscard]] std::string serialise() const
     {
-        const bool framed = std::ranges::any_of(views_, [](const View& v) { return v.geo.framed; });
-        std::string s = std::format("VL{} {}", framed ? 4 : 3, views_.size());   // VL4 only when a view holds one-model geometry: flag-off output is unchanged
+        const bool lidar = std::ranges::any_of(views_, [](const View& v) { return v.lid.n > 0; });
+        const bool framed = lidar or std::ranges::any_of(views_, [](const View& v) { return v.geo.framed; });
+        std::string s = std::format("VL{} {}", lidar ? 5 : framed ? 4 : 3, views_.size());   // VL4 only when a view holds one-model geometry: flag-off output is unchanged
         for (const auto& v : views_)
         {
             s += std::format(" {} {} {} {} {}", v.key.bearing, v.key.range, v.key.visit, v.actuation_llr, v.llr);
@@ -232,6 +246,7 @@ public:
                              v.sup.m.present_outlier, v.sup.m.absent_a, v.sup.m.absent_b, v.sup.m.absent_outlier);
             s += std::format(" {}", v.sup.sum_q);
             if (framed) s += std::format(" {} {}", v.geo.framed ? 1 : 0, v.geo.sum_lg);
+            if (lidar) s += std::format(" {} {}", v.lid.n, v.lid.sum);
         }
         return s;
     }
@@ -254,7 +269,7 @@ public:
             return r.ec == std::errc{} and r.ptr == t.data() + t.size();
         };
         const auto version = tok();
-        const bool vl1 = version == "VL1", vl4 = version == "VL4", vl3 = version == "VL3" or vl4;
+        const bool vl1 = version == "VL1", vl5 = version == "VL5", vl4 = version == "VL4" or vl5, vl3 = version == "VL3" or vl4;
         if (not vl1 and not vl3 and version != "VL2") return std::nullopt;
         std::size_t n = 0;
         if (not num(n)) return std::nullopt;
@@ -273,6 +288,7 @@ public:
             if (vl3) ok = ok and num(v.sup.sum_q);
             else     v.sup.sum_q = v.sup.n;    // before the overlap existed every frame counted in full: q = 1
             if (vl4) { int fr = 0; ok = ok and num(fr) and num(v.geo.sum_lg); v.geo.framed = fr != 0; }
+            if (vl5) ok = ok and num(v.lid.n) and num(v.lid.sum) and std::isfinite(v.lid.n) and std::isfinite(v.lid.sum) and v.lid.n >= 0;
             if (not ok) return std::nullopt;
             const auto fin = [](float x) { return std::isfinite(x); };
             ok = ok and fin(v.key.bearing) and fin(v.key.range) and fin(v.actuation_llr) and fin(v.llr)

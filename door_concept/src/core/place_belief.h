@@ -118,6 +118,14 @@ struct PlaceBelief
 struct FitSupport { float x = 0.f; int sensor = 0; float coverage = 1.f; float overlap = 1.f; float trunc = 0.f; float confidence = 1.f; };   // the fit's clutter share, the camera (0 ZED, else ricoh) it came from,
                                                                               // and the share of the opening the mask samples (rc::door::aperture_coverage); `confidence` = the YOLO score of the mask the fit used (one-model: the support term is worth what the mask is, P(genuine | score), as its hit is); `trunc` = the mask's clipped share (one-model: weights the term by 1 - trunc)
 
+/// One low-LiDAR sweep's reading of a place's aperture span (door_opening_edges.h opening_view_llr: the mean per-bin opening / solid-wall log
+/// ratio over the span, weighted by the line of sight to it; one sweep = one trial) and where the sensor stood (the view it joins). One-model only.
+struct LidarOpening
+{
+    float llr = 0.0f;
+    Eigen::Vector2f origin_xy = Eigen::Vector2f::Zero();
+};
+
 struct ExistenceTrace
 {
     static constexpr float kNan = std::numeric_limits<float>::quiet_NaN();
@@ -128,6 +136,7 @@ struct ExistenceTrace
     float geo_x = kNan, geo_mu0 = kNan, geo_mu1 = kNan, geo_s = kNan;
     float sup_x = kNan, sup_dl = kNan, sup_c = kNan, sup_q = kNan;   // sup_c: the mask's coverage of the opening (the trial's weight with κ); sup_q: P(the window was on the opening)
             // the fit's clutter share this cycle and what ℓ_sup changed the ledger by (NaN = no fit)
+    float lid_dl = kNan;                       // the LiDAR opening channel (one-model): what the sweep's opening term changed the ledger sum by (NaN = no sweep reading)
     int zed_view = -1, ric_view = -1;          // ledger index of the view this frame joined (-1 = none)
     float delete_line = kNan;
 };
