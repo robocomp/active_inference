@@ -279,10 +279,16 @@ public:
     /// memory: a live door the memory lacks is added (r<k>_<name>, hung from the remembered room node at its room-frame pose —
     /// the room is live in its stored frame); a door THIS sync added and door_concept has since deleted (existence below its
     /// removal bound) is removed again. Never overwrites: a memory node of that name at ANOTHER place is left alone (eviction's
-    /// renaming handles a recycled name). Returns the number of memory changes (> 0 ⇒ the caller marks the store dirty).
+    /// renaming handles a recycled name). It also REFRESHES the memory twin of every live door it already knows (same attribute
+    /// filtering as twin(): the door's belief -- evidence, seen/sighted, place/height sd, ledger, visit -- and its pose on the room),
+    /// written only when something differs, so the room the robot is IN reaches memory without being left. Not while the memory room
+    /// is held() or staged, nor while the robot hangs under two rooms. Never deletes a door found here. Returns the number of memory changes (> 0 ⇒ the caller marks the store dirty).
     int sync_found_doors();
 
 private:
+    /// sync_found_doors' refresh of one known door; returns the number of memory writes (node, edge).
+    int refresh_door_twin(const DSR::Node &live_door, const DSR::Node &mem_door, std::uint64_t mem_room_id,
+                          const Eigen::Vector3d &pose_in_live_room);
     struct SyncedDoor { std::string mem_name; std::uint64_t live_room = 0; };
     std::unordered_map<std::uint64_t, SyncedDoor> synced_doors_;   ///< live door id -> what sync_found_doors added
     std::shared_ptr<DSR::DSRGraph> live_, mem_;

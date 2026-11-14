@@ -1,5 +1,6 @@
 // remembered_doors: LTSM posts the memory faces of the robot's CURRENT room as remembered_door notes.   run from the component root:   ./bin/remembered_doors_test
 #include "../src/remembered_doors.h"
+#include "../src/room_eviction.h"
 #include <QCoreApplication>
 #include <clocale>
 #include <cmath>
@@ -80,6 +81,34 @@ static void build(bool staged = false)
     const auto wall2 = mem_node("wall", "r3_wall_1", fl, -1, 4, -0.4);
     mem_node("object", "r3_door_7", wall2, 0.5, 0.1, 1.2, std::nullopt, "door", 0.7f);
 }
+
+// I5 fixture: the robot is IN room_3 alone (its memory twin r3_room_3 exists); memory holds r3_door_1 with evidence 1.0 and the
+// live room holds door_1 at the same place with evidence 5.0, seen at 1234 ms.
+static std::uint64_t live_door1 = 0, mem_door1 = 0;
+static void build_refresh(double live_x = -2.0)
+{
+    reset(); build();
+    live->delete_node(live_room2);
+    auto r = live->get_node(robot_id).value();
+    live->add_or_modify_attrib_local<parent_att>(r, live->get_node("root").value().id());
+    live->update_node(r);
+    mem_door1 = mem_node("object", "r3_door_1", mem_twin, -2, -3, 0.2, std::nullopt, "door", 1.0f);
+    DSR::Node d; d.type("object"); d.name("door_1");
+    live->add_or_modify_attrib_local<parent_att>(d, live_room);
+    live->add_or_modify_attrib_local<object_subtype_att>(d, std::string("door"));
+    live->add_or_modify_attrib_local<width_m_att>(d, 0.9f);
+    live->add_or_modify_attrib_local<height_m_att>(d, 2.0f);
+    live->add_or_modify_attrib_local<depth_m_att>(d, 0.1f);
+    live->add_or_modify_attrib_local<door_exist_evidence_att>(d, 5.0f);
+    live->add_or_modify_attrib_local<door_seen_ms_att>(d, std::uint64_t{1234});
+    live_door1 = live->insert_node(d).value();
+    put_edge(*live, live_room, live_door1, live_x, -3, 0.2);
+    // sync reads the robot's parent: hang it under the room (the real fleet's robot_node/parent_att)
+    auto rb = live->get_node(robot_id).value();
+    live->add_or_modify_attrib_local<parent_att>(rb, live_room);
+    live->update_node(rb);
+}
+static float mem_evidence() { return mem->get_attrib_by_name<door_exist_evidence_att>(mem->get_node("r3_door_1").value()).value_or(-1.f); }
 
 static int notes()
 {
@@ -200,6 +229,40 @@ int main(int argc, char **argv)
         int objs = 0;
         for (const auto &o : live->get_nodes_by_type("object")) if (o.name().starts_with("remembered_")) ++objs;
         check(objs == 0 and notes() == 3, "no remembered_ object nodes");
+    }
+    std::printf("sync_refreshes_known_door_attrs\n");
+    {
+        build_refresh();
+        ltsm::RoomEviction ev(live, mem);
+        const std::size_t doors_before = mem->get_nodes_by_type("object").size();
+        check(ev.sync_found_doors() > 0, "sync returns > 0");
+        const auto m = mem->get_node("r3_door_1");
+        check(m.has_value() and m->id() == mem_door1, "memory node is still r3_door_1");
+        check(m.has_value() and std::fabs(mem_evidence() - 5.0f) < 1e-6f, "evidence 1.0 -> 5.0");
+        check(m.has_value() and mem->get_attrib_by_name<door_seen_ms_att>(m.value()).value_or(0) == 1234, "door_seen_ms 1234 copied");
+        check(mem->get_nodes_by_type("object").size() == doors_before, "no second door created");
+        std::printf("sync_refresh_is_write_on_change\n");
+        check(ev.sync_found_doors() == 0, "second sync with nothing changed returns 0");
+    }
+    std::printf("sync_refreshes_pose\n");
+    {
+        build_refresh();
+        ltsm::RoomEviction ev(live, mem);
+        ev.sync_found_doors();
+        put_edge(*live, live_room, live_door1, -2.05, -3, 0.2);   // 0.05 m along the x axis
+        check(ev.sync_found_doors() > 0, "moved live door: sync returns > 0");
+        const auto e = mem->get_edge(mem_twin, mem_door1, "RT");
+        const auto t = e.has_value() ? mem->get_attrib_by_name<rt_translation_att>(e.value()) : std::nullopt;
+        check(t.has_value() and std::fabs(t.value().get()[0] - (-2.05f)) < 1e-5f, "memory edge x follows (-2.05)");
+        check(ev.sync_found_doors() == 0, "and is stable afterwards");
+    }
+    std::printf("sync_no_refresh_when_held\n");
+    {
+        build_refresh();
+        ltsm::RoomEviction ev(live, mem);
+        ev.hold("r3_room_3");
+        ev.sync_found_doors();
+        check(std::fabs(mem_evidence() - 1.0f) < 1e-6f, "held room: memory evidence unchanged");
     }
     std::printf("\n%s (%d failure(s))\n", failures == 0 ? "ALL OK" : "FAILED", failures);
     std::fflush(stdout);
