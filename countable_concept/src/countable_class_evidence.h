@@ -81,7 +81,9 @@ inline float class_log_evidence(const SizeGaussian& lik, const ClassShapePrior& 
     return float(side(Scu, true, Sc) - side(Sau, false, Sa));
 }
 
-// Birth: class side = (1−ε)·[Uniform(H_mean, H_top) ⊛ N(0,σ_z²)] + ε·N(H_mean, alt_std²); other = N(H_mean, alt_std²).
+// Birth: class side = (1−ε)·[Uniform(H_mean, H_top) ⊛ N(0,σ_z²+H_std²)] (the uniform's edges are uncertain by the class's own
+// height spread, which also makes it continuous with the degenerate branch)
+//   was: (1−ε)·[Uniform(H_mean, H_top) ⊛ N(0,σ_z²)] + ε·N(H_mean, alt_std²); other = N(H_mean, alt_std²).
 // For H_top ≤ H_mean the uniform degenerates to N(H_mean, H_std²+σ_z²).
 inline float birth_height_log_evidence(float z_extent, const ClassShapePrior& c, float sigma_z, float eps, float alt_std)
 {
@@ -93,8 +95,9 @@ inline float birth_height_log_evidence(float z_extent, const ClassShapePrior& c,
     else
     {
         const double a = c.H_mean, b = c.H_top;
-        const double hi = 0.5 * std::erfc(-(x - a) / (sz * std::numbers::sqrt2));     // Φ((x−a)/σ)
-        const double lo = 0.5 * std::erfc(-(x - b) / (sz * std::numbers::sqrt2));     // Φ((x−b)/σ)
+        const double se = std::sqrt(sz * sz + double(c.H_std) * c.H_std);              // edge uncertainty
+        const double hi = 0.5 * std::erfc(-(x - a) / (se * std::numbers::sqrt2));     // Φ((x−a)/σ)
+        const double lo = 0.5 * std::erfc(-(x - b) / (se * std::numbers::sqrt2));     // Φ((x−b)/σ)
         l_cls = std::log(std::max(hi - lo, 1e-300) / (b - a));
     }
     const double mix = log_sum_exp(std::log1p(-double(eps)) + l_cls, std::log(double(eps)) + l_alt);

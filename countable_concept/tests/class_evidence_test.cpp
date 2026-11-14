@@ -63,6 +63,11 @@ int main()
     const float pm = rc::CountableBelief::candidate_plausibility(mattress(), bp);
     const float pu = rc::CountableBelief::candidate_plausibility(cloud(400, 0.65f), bp);   // side face only: q97-q03 = 0.94 x 0.65
     std::printf("candidate: blackboard(1.9 m) %.4f  mattress(extent 0.72) %.4f  mattress(side only, extent 0.61) %.4f\n", pb, pm, pu);
+    // a partly seen mattress: floor-contact points absent, robust extent ~0.61
+    auto partial = [&]() { std::vector<Eigen::Vector3f> v; for (int i = 0; i < 400; ++i) v.emplace_back(U(rng), U(rng), 0.61f * U(rng)); v.emplace_back(0, 0, 0.0f); v.emplace_back(0, 0, 0.61f); return v; };
+    const float pp = rc::CountableBelief::candidate_plausibility(partial(), bp);
+    std::printf("candidate: partial mattress (extent %.3f) %.4f\n", rc::countable::robust_z_extent(partial()), pp);
+    check("candidate_partial_mattress", pp > 0.8f);
     // NB the exact-0.65 extent sits ON the edge of the class height range: P = 0.891 (see birth_mattress_ok), not > 0.9.
     check("candidate_blackboard_cloud", pb < 0.3f and pm > 0.9f);
     const auto sp = bp.class_shape_prior();
