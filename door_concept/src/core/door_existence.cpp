@@ -243,15 +243,7 @@ void DoorCore::compute_mask_causes(const DoorCycleInput& /*in*/)
         return;
     const auto& pkt = masks_.packet();
     const auto& polygon = fit_.room_polygon();
-    // ℓ = √(room area): the extent a spurious door-class mask is spread over (no polygon: an unknown room, 25 m²). // kept: a
-    // geometric scale of the clutter density with no model term of its own; it enters as a log, so a factor 2 in area is 0.35 nats.
-    double area2 = 0.0;
-    for (std::size_t i = 0, n = polygon.size(); i < n; ++i)
-    {
-        const Vec2f &a = polygon[i], &b = polygon[(i + 1) % n];
-        area2 += double(a.x()) * b.y() - double(b.x()) * a.y();
-    }
-    const double area = polygon.size() >= 3 ? std::abs(area2) * 0.5 : 25.0;
+    const auto groups = wall_groups(polygon, fit_.room_band().sigma_m);
     // the live doors as causes (those with a belief); r = their previous-cycle p, so nothing depends on this cycle's own update
     std::vector<DoorCauseInput> doors;
     struct Along { Vec2f centre, u; float var; };
@@ -291,13 +283,22 @@ void DoorCore::compute_mask_causes(const DoorCycleInput& /*in*/)
         const DetectorModel& dm = dv.sensor != 0 ? detectors_.ricoh : detectors_.zed;
         const float var = dv.xy_var >= 0.0f ? dv.xy_var : rn2;
         const double log_b = log_birth(dv.xy, std::sqrt(var));
+        // Λ: the length of the wall (its wall_groups group) the mask lies on; births and spurious masks are uniform along it.
+        // kept: no polygon / no wall (an unknown room): 5 m, a typical wall; it enters as a log and cancels between new door and clutter.
+        double wall_len = 5.0;
+        if (const int wg = wall_of(dv.xy, polygon, groups); wg >= 0)
+        {
+            double len = 0.0;
+            for (std::size_t k = 0, n = polygon.size(); k < n; ++k)
+                if (groups[k] == wg) len += (polygon[(k + 1) % n] - polygon[k]).norm();
+            if (len > 0.0) wall_len = len;
+        }
         mask_log_birth_[i] = log_b;
         MaskCauseModel model;
         model.log_birth = log_b;
         model.log_kappa = std::log(std::max(1e-9, static_cast<double>(dm.false_alarm)));
         model.log_pd_new = std::log(std::max(1e-9, static_cast<double>(dm.hit_rate)));
-        model.new_sd_m = std::sqrt(var);
-        model.clutter_len_m = std::sqrt(area);
+        model.along_len_m = wall_len;
         for (auto& d : doors)
         {
             d.log_pd = model.log_pd_new;
@@ -515,6 +516,8 @@ void DoorCore::prepare_candidates(const DoorCycleInput& in, const std::vector<rc
             for (const auto& [id, st] : world_->fit_states()) door_best = std::max(door_best, mask_causes_[d].rho_door(id));
             if (best < 0 and door_best > mask_causes_[d].rho_kind(CauseKind::NewDoor))
                 continue;   // an existing door explains this mask better than a new place would
+            if (best < 0 and mask_causes_[d].rho_kind(CauseKind::NewDoor) < mask_causes_[d].rho_kind(CauseKind::Clutter))
+                continue;   // a spurious mask seeds no place: new door against clutter, the comparison associate() makes for doors
         }
         else
         for (std::size_t c = 0; c < candidates_.size(); ++c)

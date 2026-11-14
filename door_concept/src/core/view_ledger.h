@@ -165,7 +165,9 @@ public:
         {
             const auto& a = w.bern[i];
             if (a.n <= 0) continue;
-            const float qb = float(a.sum_q / a.n), fb = float(a.sum_f / a.n), db = float(a.sum_hit_w / a.n);
+            // one-model: the posterior mean of the view's hit fraction under a uniform Beta(1,1) prior, (sum hit_w + 1)/(n + 2): one frame cannot decide a view
+            const float qb = float(a.sum_q / a.n), fb = float(a.sum_f / a.n),
+                        db = beta_hit_fraction ? float((a.sum_hit_w + 1.0) / (a.n + 2.0)) : float(a.sum_hit_w / a.n);
             const float hit = qb > 0.f ? a.hit_c : 0.f;
             l += db * hit;
             if (i == 0 or ricoh_counts_misses) l += (1.f - db) * miss_llr(qb, fb);   // the ZED alone counts misses: the ricoh contributes hits only (a persisted VL1/VL2 ricoh aggregate keeps only its hit part too)
@@ -203,6 +205,7 @@ public:
     /// One-model: the ricoh counts misses (a frame of q > 0 with no detection is a trial) with its own fitted model, like the ZED.
     /// Set by the owner from cfg.exist_one_model; also passed through parse(). False = today's hits-only ricoh.
     bool ricoh_counts_misses = false;
+    bool beta_hit_fraction = false;   // one-model: Beta(1,1) posterior mean of a view's hit fraction (set by observe_place; not persisted)
 
     /// Every channel's sum: what the per-channel dl's of the trace are differences of. The belief does NOT add this (place_belief.h).
     [[nodiscard]] float sum() const { float s = 0.f; for (const auto& v : views_) s += v.llr; return s; }

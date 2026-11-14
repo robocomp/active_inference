@@ -59,7 +59,7 @@ static const double kLogKappa = std::log(0.194), kLogPd = std::log(0.938);
 static MaskCauses explain(const std::vector<V3>& pts, const std::vector<DoorCauseInput>& doors, double log_birth)
 {
     MaskCauseModel m;
-    m.log_birth = log_birth; m.log_kappa = kLogKappa; m.log_pd_new = kLogPd; m.new_sd_m = 0.15; m.clutter_len_m = 5.5;
+    m.log_birth = log_birth; m.log_kappa = kLogKappa; m.log_pd_new = kLogPd; m.along_len_m = 5.5;
     return causes_of_mask(0, pts, kR, doors, m, kBP);
 }
 

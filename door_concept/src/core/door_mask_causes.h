@@ -13,8 +13,8 @@
 //   door i :  r_i · p_D,i · exp(mean log u) · (R/R_eff)^½ / √(2π R_eff) · exp(−½ δ²/σ²_along),  R_eff = R + σ²_across (the door's
 //             uncertainty across its wall convolves the kernel) and δ the mask's offset along the wall against the door's σ_along —
 //             what the old code spelt as one Mahalanobis radius;
-//   new    :  b · p_D · (1 − ε) / √(2π (R + σ²_new))       σ_new = the new door's own position sd (the detection's);
-//   clutter:  κ · (1 − ε) / ℓ                              ℓ = the length a spurious mask is spread over (√ room area).
+//   new    :  b · p_D · (1 − ε) / Λ        b = the wall's base-rate probability, Λ = the length of the wall the mask lies on;
+//   clutter:  κ · (1 − ε) / Λ              κ per view, spread over the SAME measure (uniform along the wall, spec §3.4).
 // New and clutter both fit the mask perfectly (a spurious mask is as door-shaped as a real new one): only their PRIORS, b against
 // κ, tell them apart, and the geometry decides which EXISTING door, if any, owns the mask. A door's prior mass r·p_D is split
 // between its two appearances by P(leaf open) (the φ posteriors): shut, the leaf IS the aperture; open, the leaf is where the
@@ -90,8 +90,7 @@ struct MaskCauseModel
     double log_birth = -4.0;        // log b: the probability a door is born at this place (place_prior; the per-wall base rate charges a second one)
     double log_kappa = -1.6;        // log κ: the false-alarm rate of door-class masks (the fitted detector table's false_alarm)
     double log_pd_new = 0.0;        // log P(the sensor reports a new door | it exists) (the detector's hit rate)
-    double new_sd_m = 0.15;         // the new door's own position sd (the detection noise)
-    double clutter_len_m = 5.0;     // ℓ: √(room area), the extent a spurious mask is spread over
+    double along_len_m = 5.0;       // the length of the wall the mask lies on: births AND spurious masks are uniform along it (spec §3.4)
 };
 
 /// One mask's causes: every door within likelihood reach (log density not below log κ − 20 nats, a NUMERICAL floor on a weight
@@ -106,7 +105,7 @@ struct MaskCauseModel
     constexpr double kTwoPi = 6.283185307179586;
     const double eps = std::clamp(static_cast<double>(bp.clutter_frac), 1e-6, 0.99);   // clamp: the mixture's own domain (door_belief.cpp)
     const double Rr = std::max(1e-9, static_cast<double>(R));
-    const double log_clutter = model.log_kappa + std::log1p(-eps) - std::log(std::max(1e-9, model.clutter_len_m));
+    const double log_clutter = model.log_kappa + std::log1p(-eps) - std::log(std::max(1e-9, model.along_len_m));
     const double reach_floor = log_clutter - 20.0;
     for (const auto& d : doors)
     {
@@ -134,8 +133,7 @@ struct MaskCauseModel
         if (p_open > 0.0 and log_leaf >= reach_floor)
             out.causes.push_back({CauseKind::Leaf, d.id, base + std::log(p_open) + log_leaf});
     }
-    out.causes.push_back({CauseKind::NewDoor, 0, model.log_birth + model.log_pd_new + std::log1p(-eps)
-                                                     - 0.5 * std::log(kTwoPi * (Rr + model.new_sd_m * model.new_sd_m))});
+    out.causes.push_back({CauseKind::NewDoor, 0, model.log_birth + model.log_pd_new + std::log1p(-eps) - std::log(std::max(1e-9, model.along_len_m))});
     out.causes.push_back({CauseKind::Clutter, 0, log_clutter});
     std::vector<double> lw(out.causes.size());
     for (std::size_t i = 0; i < lw.size(); ++i)
