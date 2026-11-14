@@ -166,12 +166,12 @@ public:
             const auto& a = w.bern[i];
             if (a.n <= 0) continue;
             // one-model: one frame cannot decide a view, so the view's mean frame term counts n/(n + 1): a neutral pseudo-frame (zero evidence)
-            // joins the mean. (The uniform Beta(1,1) hit fraction (sum hit_w + 1)/(n + 2) of Task 6 turned a MISS into positive evidence:
+            // joins the mean. (Task 6's Beta(1,1) hit fraction (sum hit_w + 1)/(n + 2) turned a MISS into positive evidence:
             // its pseudo-hits are worth hit_llr whatever q says; one q = 0.08 miss was worth +0.46 nats and a view of misses at q = 0.4 +0.09.)
             const float qb = float(a.sum_q / a.n), fb = float(a.sum_f / a.n), db = float(a.sum_hit_w / a.n);
             const float hit = qb > 0.f ? a.hit_c : 0.f;
-            float lc = db * hit;
-            if (i == 0 or ricoh_counts_misses) lc += (1.f - db) * miss_llr(qb, fb);   // the ZED alone counts misses: the ricoh contributes hits only (a persisted VL1/VL2 ricoh aggregate keeps only its hit part too)
+            float lc = db > 0.f ? db * hit : 0.f;   // a zero weight never multiplies an llr (0 * -inf = NaN)
+            if ((i == 0 or ricoh_counts_misses) and db < 1.f) lc += (1.f - db) * miss_llr(qb, fb);   // the ZED alone counts misses: the ricoh contributes hits only (a persisted VL1/VL2 ricoh aggregate keeps only its hit part too)
             l += beta_hit_fraction ? lc * float(a.n / (a.n + 1.0)) : lc;
         }
         const auto& g = w.geo;
@@ -207,7 +207,7 @@ public:
     /// One-model: the ricoh counts misses (a frame of q > 0 with no detection is a trial) with its own fitted model, like the ZED.
     /// Set by the owner from cfg.exist_one_model; also passed through parse(). False = today's hits-only ricoh.
     bool ricoh_counts_misses = false;
-    bool beta_hit_fraction = false;   // one-model: Beta(1,1) posterior mean of a view's hit fraction (set by observe_place; not persisted)
+    bool beta_hit_fraction = false;   // one-model: a view's mean frame term counts n/(n + 1), one neutral pseudo-frame (set by observe_place; not persisted)
 
     /// Every channel's sum: what the per-channel dl's of the trace are differences of. The belief does NOT add this (place_belief.h).
     [[nodiscard]] float sum() const { float s = 0.f; for (const auto& v : views_) s += v.llr; return s; }

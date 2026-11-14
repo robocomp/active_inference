@@ -157,6 +157,7 @@ ExistenceTrace observe_place(PlaceBelief& b, const rc::DoorFitState& th, const E
     if (fr.cfg.exist_one_model)
     {
         const double po = th.ai2_initialized ? th.ai2_belief.leaf_p_open(th.leaf_channel, fr.cfg.phi_max_rad) : std::numeric_limits<double>::quiet_NaN();
+        // (no leaf belief: Birth.RicohOpenPrior is the prior P(open) of the place for BOTH cameras; it is the only open-prior the code has)
         p_open = std::isfinite(po) ? static_cast<float>(po) : fr.cfg.ricoh_birth_p_open;
     }
     float zed_view_kappa = 0.0f, zed_vis = 0.0f;

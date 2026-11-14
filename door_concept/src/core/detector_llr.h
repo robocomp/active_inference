@@ -184,12 +184,16 @@ struct DetectorTable { DetectorModel zed, ricoh; SupportModel support; Confidenc
 // hit_rate and miss_llr takes log(1 - q), so a loaded camera must satisfy 0 < false_alarm < hit_rate < 1 and a valid envelope;
 // otherwise that camera falls back to its compiled defaults with a warning. kappa is in [0,1] by construction
 // (pose_overlap_factor), so q <= hit_rate < 1 and 1 - q > 0.
+// hit_rate_open: strictly inside (0, 1) (a zero rate is an infinite log-ratio). NOT required to exceed false_alarm: an open door that truly
+// reports less often than a false alarm makes a report there honest evidence AGAINST the door.
+[[nodiscard]] inline bool open_rate_in_domain(float h) { return std::isfinite(h) and h > 0.0f and h < 1.0f; }
+
 [[nodiscard]] inline bool detector_in_domain(const DetectorModel& m)
 {
     return m.false_alarm > 0.0f and m.false_alarm < m.hit_rate and m.hit_rate < 1.0f and m.env.valid()
            and std::isfinite(m.env.min_fill) and std::isfinite(m.env.max_fill) and std::isfinite(m.env.soft)
            and std::isfinite(m.hit_rate) and std::isfinite(m.false_alarm)
-           and (m.hit_rate_open < 0.0f or (std::isfinite(m.hit_rate_open) and m.hit_rate_open < 1.0f));
+           and (m.hit_rate_open < 0.0f or open_rate_in_domain(m.hit_rate_open));
 }
 
 [[nodiscard]] inline DetectorTable load_detectors(const std::filesystem::path& p)
@@ -265,6 +269,12 @@ struct DetectorTable { DetectorModel zed, ricoh; SupportModel support; Confidenc
     if (malformed > 0)
         std::fprintf(stderr, "[detector_model] %s: %d malformed row(s) ignored (defaults kept for those params)\n",
                      p.string().c_str(), malformed);
+    for (DetectorModel* m : {&t.zed, &t.ricoh})
+        if (m->hit_rate_open >= 0.0f and not open_rate_in_domain(m->hit_rate_open))
+        {
+            std::fprintf(stderr, "[detector_model] %s: hit_rate_open %g out of domain (need 0 < h < 1): = hit_rate\n", p.string().c_str(), static_cast<double>(m->hit_rate_open));
+            m->hit_rate_open = -1.0f;
+        }
     if (not detector_in_domain(t.zed))
     {
         std::fprintf(stderr, "[detector_model] %s: zed out of domain (need 0 < false_alarm < hit_rate < 1): compiled defaults\n", p.string().c_str());

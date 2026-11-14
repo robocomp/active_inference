@@ -16,6 +16,7 @@
 //       ../common/contour_edge/contour_depth_check.cpp -lzstd -lopencv_core -lopencv_imgproc \
 //       -o /tmp/test_door_core_existence && /tmp/test_door_core_existence
 #include <array>
+#include <fstream>
 #include <clocale>
 #include <filesystem>
 #include <cmath>
@@ -1563,7 +1564,51 @@ int main()
         L.add_bernoulli(v, Channel::Zed, 0.08f, m, 0.002f);
         L.recompute(v, false);
         std::print("beta_prior_scales_with_q: one q=0.08 frame -> {:+.4f}\n", L.sum());
-        CHECK(std::fabs(L.sum()) < 0.1f);
+        CHECK(L.sum() < 0.0f and std::fabs(L.sum() + 0.0369f) < 0.003f);   // the n/(n+1) = 1/2 factor on the one frame's miss term
+    }
+
+    {   // Task 8b fix round 1: the leaf's uncovered share (DoorBelief::leaf_p_open) and its wiring into p_D
+        const auto channel_at = [](std::size_t k)   // all four branches certain of the grid step k (25 steps over 0..phi_max)
+        {
+            rc::door::LeafChannel ch;
+            for (auto& ph : ch.phi) { std::vector<double> lp(25, -1e9); lp[k] = 0.0; ph.reset(lp); }
+            return ch;
+        };
+        const rc::DoorBelief bel;
+        const float phi_max = rc::DoorConfig{}.phi_max_rad;
+        const double shut = bel.leaf_p_open(channel_at(0), phi_max), tenth = bel.leaf_p_open(channel_at(2), phi_max),
+                     wide = bel.leaf_p_open(channel_at(24), phi_max);
+        const double want10 = 1.0 - std::cos(double(phi_max) * 2.0 / 24.0);
+        std::print("leaf_p_open: shut {:.4f}, grid step 2 {:.4f} (1-cos {:.4f}), phi_max {:.4f}\n", shut, tenth, want10, wide);
+        CHECK(shut < 1e-6 and std::fabs(tenth - want10) < 1e-3 and std::fabs(wide - 1.0) < 1e-3);
+        CHECK(std::isnan(bel.leaf_p_open(rc::door::LeafChannel{}, phi_max)));   // no phi filter yet: NaN, the caller takes its prior
+        // wiring: with an initialised leaf belief the place's p_D follows it (NOT the no-belief fallback, which is 0 here)
+        const auto run = [&](std::size_t k)
+        {
+            Bench b; b.cfg.exist_one_model = true; b.cfg.ricoh_birth_p_open = 0.0f; b.det.zed.hit_rate_open = 0.05f;
+            rc::DoorFitState th = shut_door();
+            th.leaf_channel = channel_at(k);
+            PlaceBelief pb;
+            for (int i = 0; i < 4; ++i) b.frame(pb, th, A0, kDoor, true, false, {{{1.0f, kWallY}, -1.0f, 0}}, 0);
+            const float L0 = pb.L();
+            for (int i = 0; i < 40; ++i) b.frame(pb, th, A0, kDoor, true, false, {}, i + 1);
+            return pb.L() - L0;
+        };
+        const float d_shut = run(0), d_open = run(24);
+        std::print("leaf_belief_lowers_miss_cost: dL over 40 misses: shut-leaf belief {:+.3f}, open-leaf belief {:+.3f}\n", d_shut, d_open);
+        CHECK(d_open > d_shut + 1.0f);
+        // a hit_rate_open of 1e-6 with P(open) = 1: finite ledger after a hit and a miss; a zero or one in the file is out of domain (= hit_rate)
+        Bench b; b.cfg.exist_one_model = true; b.cfg.ricoh_birth_p_open = 1.0f; b.det.zed.hit_rate_open = 1e-6f;
+        const rc::DoorFitState th = shut_door();
+        PlaceBelief pb;
+        b.frame(pb, th, A0, kDoor, true, false, {{{1.0f, kWallY}, -1.0f, 0}}, 0);
+        b.frame(pb, th, A0, kDoor, true, false, {}, 1);
+        CHECK(std::isfinite(pb.ledger.sum()) and std::isfinite(pb.L()));
+        const auto tmp = std::filesystem::temp_directory_path() / "t8b_detectors.csv";
+        { std::ofstream f(tmp); f << "camera,param,value,n,source\nzed,hit_rate_open,0,5,x\nricoh,hit_rate_open,0.001,5,x\n"; }
+        const DetectorTable t = load_detectors(tmp);
+        CHECK(t.zed.hit_rate_open < 0.0f and t.ricoh.hit_rate_open == 0.001f);   // 0 refused (= hit_rate); 0.001 < false_alarm accepted
+        std::filesystem::remove(tmp);
     }
 
     std::print("{}\n", fails == 0 ? "ALL PASS" : std::format("{} FAILURE(S)", fails));
