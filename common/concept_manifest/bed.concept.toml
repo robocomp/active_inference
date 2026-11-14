@@ -99,6 +99,10 @@ why  = "aspect is scored against the class's own aspect; height_min sits well be
 kind = "label_reliability"
 p_label_true = 0.8
 why  = "P(a mask with this label is really this class); near YOLOE's median confidence on the real bed (.85, detcheck3). Owner may change it (11-14)"
+fit_error_H_m = 0.1
+fit_error_w_m = 0.05
+fit_error_h_m = 0.05
+fit_error_why = "rms of the final box-fit error vs Webots GT over objects_live4 + objects_live5 (n = 2, provisional, owner option A 11-14)"
 
 [prior.explaining_away]
 kind = "known_surface_mixture"

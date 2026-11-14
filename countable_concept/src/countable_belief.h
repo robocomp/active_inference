@@ -142,6 +142,7 @@ struct CountableBeliefParams
     // variable. The birth height density has noise σ_z = birth_height_noise_m and an outlier fraction ε =
     // birth_height_outlier_frac (a mask that bleeds onto the wall/person above the object).
     float class_p_label_true        = 0.8f;
+    float class_fit_H_m = 0, class_fit_w_m = 0, class_fit_h_m = 0;   // per-class box-fit error (m)
     float class_alt_std_m           = 1.0f;
     float birth_height_noise_m      = 0.05f;
     float birth_height_outlier_frac = 0.05f;
@@ -155,6 +156,7 @@ struct CountableBeliefParams
         c.h_mean = depth_mean();      c.h_std = prior_footprint_std;
         c.H_top  = headboard_h_m > prior_height_m ? headboard_h_m : prior_height_m;
         c.p_label_true = class_p_label_true;
+        c.H_fit_std = class_fit_H_m; c.w_fit_std = class_fit_w_m; c.h_fit_std = class_fit_h_m;
         return c;
     }
     float top_no_float_precision = 10000.0f; // 1/m² firm two-sided anchor pinning H → observed robust cloud top

@@ -87,6 +87,7 @@ struct CountableConfig
     float ai2_headboard_h_m       = -1.0f;   // headboard panel top (m); <=0 = no headboard (plain box)
     // Class existence (spec 2026-11-14): π_cls from the manifest's [prior.class]; the rest from [Model].
     float class_p_label_true        = 0.8f;    // P(a mask with this label is really this class)
+    float class_fit_H_m = 0, class_fit_w_m = 0, class_fit_h_m = 0;   // per-class box-fit error (m), manifest [prior.class] fit_error_*_m
     float class_alt_std_m           = 1.0f;    // "other furniture" size std (m) per variable, about the class mean
     float birth_height_noise_m      = 0.05f;   // birth height noise σ_z (m)
     float birth_height_outlier_frac = 0.05f;   // birth mask-bleed outlier fraction ε

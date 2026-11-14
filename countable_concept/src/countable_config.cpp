@@ -153,11 +153,17 @@ CountableConfig load_countable_config(const ConfigLoader& cfg)
         const auto pl = rc::manifest::load_class_prior(manifest_path);
         if (pl)
         {
-            if (not (*pl > 0.0f and *pl < 1.0f))
+            if (not (pl->p_label_true > 0.0f and pl->p_label_true < 1.0f))
                 throw CountableConfigError(std::format("{}: ★ {} [prior.class] p_label_true = {} must lie in the open interval (0,1) "
-                                   "(logit is infinite at 0 and 1) — refusing to start\n", out.agent_name, manifest_path, *pl));
-            out.class_p_label_true = *pl;
-            std::print("[manifest] {} class prior: p_label_true {:.3f}\n", out.concept_class, *pl);
+                                   "(logit is infinite at 0 and 1) — refusing to start\n", out.agent_name, manifest_path, pl->p_label_true));
+            for (const float f : {pl->fit_H_m, pl->fit_w_m, pl->fit_h_m})
+                if (not (std::isfinite(f) and f >= 0.0f))
+                    throw CountableConfigError(std::format("{}: ★ {} [prior.class] fit_error_*_m must be finite and >= 0 (got {}) — refusing to start\n",
+                                       out.agent_name, manifest_path, f));
+            out.class_p_label_true = pl->p_label_true;
+            out.class_fit_H_m = pl->fit_H_m; out.class_fit_w_m = pl->fit_w_m; out.class_fit_h_m = pl->fit_h_m;
+            std::print("[manifest] {} class prior: p_label_true {:.3f}, box-fit error (H,w,h) = ({:.3f}, {:.3f}, {:.3f}) m\n",
+                       out.concept_class, pl->p_label_true, pl->fit_H_m, pl->fit_w_m, pl->fit_h_m);
         }
         else std::print("[manifest] {} has no [prior.class] p_label_true — using the default {:.2f}\n", out.concept_class, out.class_p_label_true);
     }

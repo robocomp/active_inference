@@ -26,6 +26,10 @@ struct ClassShapePrior
     float H_mean = 0, H_std = 1, w_mean = 0, w_std = 1, h_mean = 0, h_std = 1;
     float H_top = 0;            // tallest declared part (bed: headboard 1.25; else H_mean)
     float p_label_true = 0.5f;  // π_cls
+    // Box-fit error (m): what the FITTER reports for a REAL member differs from the true size by this much (a toilet is
+    // not a box). The class side of Λ is the size spread CONVOLVED with it: variance std² + fit_std². The "other
+    // furniture" side is unchanged. 0 = the fitter is exact (the old class side).
+    float H_fit_std = 0, w_fit_std = 0, h_fit_std = 0;
 };
 
 namespace detail
@@ -58,7 +62,9 @@ inline float class_log_evidence(const SizeGaussian& lik, const ClassShapePrior& 
     for (int j = 0; j < k; ++j) { U.col(j) = es.eigenvectors().col(idx[j]); Sl(j, j) = 1.0 / es.eigenvalues()[idx[j]]; }
 
     const Eigen::Vector3d th = lik.mean.cast<double>();
-    const Eigen::Matrix3d Sc = Eigen::Vector3d(double(c.H_std) * c.H_std, double(c.w_std) * c.w_std, double(c.h_std) * c.h_std).asDiagonal();
+    const Eigen::Matrix3d Sc = Eigen::Vector3d(double(c.H_std) * c.H_std + double(c.H_fit_std) * c.H_fit_std,
+                                               double(c.w_std) * c.w_std + double(c.w_fit_std) * c.w_fit_std,
+                                               double(c.h_std) * c.h_std + double(c.h_fit_std) * c.h_fit_std).asDiagonal();
     const Eigen::Matrix3d Sa = Eigen::Matrix3d::Identity() * (double(alt_std) * alt_std);
     const Eigen::MatrixXd Scu = U.transpose() * Sc * U + Sl, Sau = U.transpose() * Sa * U + Sl;
 

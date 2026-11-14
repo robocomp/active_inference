@@ -31,6 +31,17 @@
 #include <vector>
 #include "../../common/recall_match/recall_candidates.h"   // ltom recall: resurrect a remembered bed at birth
 #include <set>
+namespace
+{   // THE one place a CountableBeliefParams gets its class-existence prior from the config (was three hand-copied blocks)
+void set_class_prior(rc::CountableBeliefParams& p, const rc::CountableConfig& cfg)
+{
+    p.class_p_label_true = cfg.class_p_label_true;
+    p.class_fit_H_m = cfg.class_fit_H_m; p.class_fit_w_m = cfg.class_fit_w_m; p.class_fit_h_m = cfg.class_fit_h_m;
+    p.class_alt_std_m = cfg.class_alt_std_m;
+    p.birth_height_noise_m = cfg.birth_height_noise_m;
+    p.birth_height_outlier_frac = cfg.birth_height_outlier_frac;
+}
+}
 #include "../../common/room_resolve/room_resolve.h"   // rc::room::current_room_frame — the room is room_1/room_2/…, never the literal "room"
 #include "../../common/room_resolve/room_containment.h"   // rc::room::birth_verdict
 
@@ -195,10 +206,7 @@ void SpecificWorker::run_instance_tracker()
     plaus_p.prior_height_std   = cfg_.ai2_prior_height_std;
     plaus_p.prior_footprint_std = cfg_.ai2_prior_footprint_std;
     plaus_p.headboard_h_m      = cfg_.ai2_headboard_h_m;
-    plaus_p.class_p_label_true        = cfg_.class_p_label_true;
-    plaus_p.class_alt_std_m           = cfg_.class_alt_std_m;
-    plaus_p.birth_height_noise_m      = cfg_.birth_height_noise_m;
-    plaus_p.birth_height_outlier_frac = cfg_.birth_height_outlier_frac;
+    set_class_prior(plaus_p, cfg_);
     // ── Is this cycle a genuinely NEW observation? ────────────────────────────────────────────────────
     // The detections below are rebuilt EVERY cycle on purpose: a pending birth candidate that finds no matching
     // detection expires (instance_tracker.h swaps next_cand in), so skipping stale cycles would wipe every
@@ -551,7 +559,8 @@ void SpecificWorker::apply_class_factor()
     cp.prior_footprint_m = cfg_.ai2_prior_footprint_m;   cp.prior_depth_m        = cfg_.ai2_prior_depth_m;
     cp.prior_height_m    = cfg_.ai2_prior_height_m;      cp.prior_height_std     = cfg_.ai2_prior_height_std;
     cp.prior_footprint_std = cfg_.ai2_prior_footprint_std;
-    cp.headboard_h_m     = cfg_.ai2_headboard_h_m;       cp.class_p_label_true   = cfg_.class_p_label_true;
+    cp.headboard_h_m     = cfg_.ai2_headboard_h_m;
+    set_class_prior(cp, cfg_);
     const auto prior = cp.class_shape_prior();
 
     // Judge the CURRENT fitted shape, but ONLY on a cycle that actually MEASURED it: matched_frames advances solely

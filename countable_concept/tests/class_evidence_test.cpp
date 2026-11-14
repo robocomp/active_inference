@@ -22,6 +22,10 @@ int main()
     const float alt = 1.0f, sz = 0.05f, eps = 0.05f;
     auto P = [](const ClassShapePrior& c, float lam) { return class_probability(logit(c.p_label_true) + lam); };
 
+    // per-class box-fit error (H, w, h) in metres, owner option A 11-14
+    ClassShapePrior bedF = bed, wcF = wc;
+    bedF.H_fit_std = 0.10f; bedF.w_fit_std = 0.05f; bedF.h_fit_std = 0.05f;
+    wcF.H_fit_std = 0.05f;  wcF.w_fit_std = 0.26f;  wcF.h_fit_std = 0.15f;
     const float l6 = class_log_evidence(data(1.86f, 1.98f, 0.28f), bed, alt);
     const float l7 = class_log_evidence(data(0.65f, 1.75f, 2.10f), bed, alt);
     const float lt = class_log_evidence(data(0.88f, 0.34f, 0.86f), wc, alt);
@@ -30,6 +34,22 @@ int main()
     check("bed7_accepted", P(bed, l7) > 0.9f);
     check("nightstand_accepted", P(ns, class_log_evidence(data(0.62f, 0.51f, 0.51f), ns, alt)) > 0.9f);
     check("toilet_accepted", P(wc, lt) > 0.5f);
+    {
+        const float a = class_log_evidence(data(0.87f, 0.30f, 0.89f), wcF, alt), b = class_log_evidence(data(0.88f, 0.25f, 0.89f), wcF, alt);
+        const float a0 = class_log_evidence(data(0.87f, 0.30f, 0.89f), wc, alt);
+        std::printf("toilet misfit: P(0.87,0.30,0.89)=%.4f (no fit std %.4f)  P(0.88,0.25,0.89)=%.4f\n", P(wcF, a), P(wc, a0), P(wcF, b));
+        check("toilet_misfit_kept", P(wcF, a) > 0.8f and P(wcF, b) > 0.8f);
+        const float b6 = class_log_evidence(data(1.86f, 1.98f, 0.28f), bedF, alt);
+        std::printf("bed6 with fit std: P=%.5f\n", P(bedF, b6));
+        check("bed6_still_rejected", P(bedF, b6) < 0.05f);
+        // all fit stds 0 == the old class side (explicit zeros, same numbers as l6/l7/lt)
+        ClassShapePrior z = bed; z.H_fit_std = z.w_fit_std = z.h_fit_std = 0.0f;
+        check("fit_std_zero_is_old", std::fabs(class_log_evidence(data(0.65f, 1.75f, 2.10f), z, alt) - l7) < 1e-5f
+              and std::fabs(class_log_evidence(data(1.86f, 1.98f, 0.28f), z, alt) - l6) < 1e-5f);
+        check("swap_invariant_with_fit_std", std::fabs(class_log_evidence(data(0.65f, 2.10f, 1.75f), bedF, alt)
+                                                     - class_log_evidence(data(0.65f, 1.75f, 2.10f), bedF, alt)) < 1e-4f);
+        check("fit_std_swap_invariant_toilet", std::fabs(class_log_evidence(data(0.87f, 0.89f, 0.30f), wcF, alt) - a) < 1e-4f);
+    }
     SizeGaussian none; none.mean = Eigen::Vector3f(0.65f, 1.75f, 2.10f);
     check("no_data_is_zero", class_log_evidence(none, bed, alt) == 0.0f);
     SizeGaussian wide = data(0.65f, 1.75f, 2.10f, 5.0f);

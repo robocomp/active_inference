@@ -19,7 +19,11 @@
 
 namespace rc::manifest {
 
-inline std::optional<float> load_class_prior(const std::string& path, bool* opened = nullptr)
+// p_label_true: π_cls. fit_*_m: the per-class box-fit error (m) of the fitted (H, w, h); absent key = 0. A present key
+// that is not a number is reported and returned as NaN (the caller refuses NaN and negatives).
+struct ClassPrior { float p_label_true = std::numeric_limits<float>::quiet_NaN(); float fit_H_m = 0, fit_w_m = 0, fit_h_m = 0; };
+
+inline std::optional<ClassPrior> load_class_prior(const std::string& path, bool* opened = nullptr)
 {
     std::ifstream f(path);
     if (opened) *opened = static_cast<bool>(f);
@@ -36,7 +40,7 @@ inline std::optional<float> load_class_prior(const std::string& path, bool* open
     };
     std::string line, block;
     bool seen = false, have_p = false;
-    float p = std::numeric_limits<float>::quiet_NaN();
+    ClassPrior out;
     while (std::getline(f, line))
     {
         std::string_view l = trim(line);
@@ -50,18 +54,25 @@ inline std::optional<float> load_class_prior(const std::string& path, bool* open
         }
         if (block != "prior.class") continue;
         const auto eq = l.find('=');
-        if (eq == std::string_view::npos or trim(l.substr(0, eq)) != "p_label_true") continue;
+        if (eq == std::string_view::npos) continue;
+        const auto key = trim(l.substr(0, eq));
+        float* dst = key == "p_label_true" ? &out.p_label_true : key == "fit_error_H_m" ? &out.fit_H_m
+                   : key == "fit_error_w_m" ? &out.fit_w_m : key == "fit_error_h_m" ? &out.fit_h_m : nullptr;
+        if (not dst) continue;
         auto val = trim(l.substr(eq + 1));
         if (const auto c = val.find('#'); c != std::string_view::npos) val = trim(val.substr(0, c));
-        have_p = true;
+        if (dst == &out.p_label_true) have_p = true;
         float x = 0.0f;
         const auto [e, ec] = std::from_chars(val.data(), val.data() + val.size(), x);
         if (ec != std::errc{} or e != val.data() + val.size())
-            std::print("[manifest] ★{}: [prior.class] p_label_true = \"{}\" is not a number\n", path, val);
-        else p = x;
+        {
+            std::print("[manifest] ★{}: [prior.class] {} = \"{}\" is not a number\n", path, key, val);
+            *dst = std::numeric_limits<float>::quiet_NaN();
+        }
+        else *dst = x;
     }
     if (not seen or not have_p) return std::nullopt;
-    return p;
+    return out;
 }
 
 }  // namespace rc::manifest

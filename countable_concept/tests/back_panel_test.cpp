@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <fstream>
 #include <random>
 #include "back_panel.h"
 #include "class_prior.h"
@@ -45,7 +46,22 @@ int main()
     {
         const auto cp = rc::manifest::load_class_prior(mf(cls));
         CHECK(cp.has_value());
-        if (cp) CHECK(*cp == 0.8f);
+        if (cp) CHECK(cp->p_label_true == 0.8f);
+    }
+    {
+        struct E { const char* c; float H, w, h; };
+        for (const E& e : {E{"toilet", 0.05f, 0.26f, 0.15f}, E{"bed", 0.10f, 0.05f, 0.05f}, E{"nightstand", 0.03f, 0.04f, 0.04f}})
+        {
+            const auto cp = rc::manifest::load_class_prior(mf(e.c));
+            CHECK(cp.has_value());
+            if (cp) CHECK(cp->fit_H_m == e.H and cp->fit_w_m == e.w and cp->fit_h_m == e.h);
+        }
+        const std::string tmp = "back_panel_test_nofit.toml";               // [prior.class] without the fit keys
+        { std::ofstream o(tmp); o << "[prior.class]\nkind = \"label_reliability\"\np_label_true = 0.8\n"; }
+        const auto none = rc::manifest::load_class_prior(tmp);
+        std::remove(tmp.c_str());
+        CHECK(none.has_value());
+        if (none) CHECK(none->p_label_true == 0.8f and none->fit_H_m == 0.0f and none->fit_w_m == 0.0f and none->fit_h_m == 0.0f);
     }
     CHECK(not rc::manifest::load_class_prior(mf("table")).has_value());     // a manifest without the section
     bool cp_opened = true;
