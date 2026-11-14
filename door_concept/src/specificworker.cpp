@@ -4239,6 +4239,9 @@ std::vector<std::string> SpecificWorker::restore_rows(std::uint64_t new_room, st
     const auto d = cfg_.exist_one_model and core_
         ? rc::door::plan_restore_by_responsibility(rows, room->name(), recalled, [&](const rc::door::IdentityRow& r)
           {
+              // identity is memory, not evidence: a note named like a live OR held/carried door node (one the room just left still holds,
+              // not a fitter instance) IS that door: adopted, as in the old path, before the responsibility test
+              if (std::ranges::any_of(live, [&](const rc::door::LiveDoor& l) { return l.name == r.name; })) return true;
               const float sd = r.place_sd.value_or(rn);
               return core_->live_door_explains(fitter_->room_polygon(), fitter_->room_band(), rc::room::is_proto(*G, new_room), room_doors, r.xy, sd * sd);
           })

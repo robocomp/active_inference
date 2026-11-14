@@ -93,6 +93,11 @@ int main()
         // a live door that is itself nearly refuted (p small) no longer carries the note's responsibility, even at the same spot
         const auto weak = plan_restore_by_responsibility(rows, "room_1", true, explained_by(1e-4, Eigen::Vector2f(1.5f, -2.0f)));
         CHECK(weak.restore.size() == 1);
+        // a note named like a live/held door is that door (the agent's name test, before the responsibility test): not restored
+        const std::vector<LiveDoor> held = {{"door_5", std::nullopt}};
+        const auto by_name = plan_restore_by_responsibility(rows, "room_1", true, [&](const IdentityRow& r)
+        { return std::ranges::any_of(held, [&](const LiveDoor& l) { return l.name == r.name; }); });
+        CHECK(by_name.restore.empty() and by_name.skipped.size() == 1 and by_name.skipped[0].reason == SkipReason::PlaceLive);
         // not a recall / no pose / removed: the same skips as plan_restore
         CHECK(plan_restore_by_responsibility(rows, "room_1", false, explained_by(0.95, Eigen::Vector2f(9.f, 9.f))).not_recalled);
         // refuted_note_still_dated: the dated refutation is unchanged by the flag (drop_refuted_places is the same function)
