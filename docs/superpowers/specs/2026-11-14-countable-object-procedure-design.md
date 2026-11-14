@@ -70,7 +70,8 @@ room filing and the epistemic planner to `common/`; this design finishes the job
 
 ## 4. Steps (owner 11-14: four steps)
 
-**Step 1 — one binary, reproduction only.** Build `countable_concept` from the nightstand source with the class as a
+**Step 1 — one binary, reproduction only.** Build `countable_concept` from the bed source (bed = nightstand + headboard
++ self-body; with no headboard declared it is the nightstand's code — planner's call, 11-14) with the class as a
 runtime string. Run it for nightstand, toilet and bed. The headboard is a **fixed part** declared in the bed manifest
 (no shape library yet, no new variable). The self-body term moves to `common/` (it is class-free) and is on for all
 three. *Pass:* reproduces objects_live3 — bed and left nightstand within ~5 cm of ground truth, toilet tank to the
