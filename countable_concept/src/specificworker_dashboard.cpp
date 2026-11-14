@@ -76,12 +76,14 @@ void SpecificWorker::refresh_belief_strip()
 // screen — indistinguishable, to the user, from the big dashboard having opened itself.
 void SpecificWorker::restore_strip_geometry()
 {
+    if (cfg_.agent_name.empty()) return;   // no scope yet: never save/restore under ""
     rc::dashboard::restore_window_geometry(strip_window_, QString::fromStdString(cfg_.agent_name), QStringLiteral("BeliefStripWindow"),
                                            QSize(520, 210), QSize(900, 420));
 }
 
 void SpecificWorker::save_strip_geometry() const
 {
+    if (cfg_.agent_name.empty()) return;   // no scope yet: never save/restore under ""
     rc::dashboard::save_window_geometry(strip_window_, QString::fromStdString(cfg_.agent_name), QStringLiteral("BeliefStripWindow"));
 }
 
@@ -135,12 +137,14 @@ void SpecificWorker::refresh_belief_inspector()
 // honoured as-is. That asymmetry is the whole reason max_restored is a parameter and not a constant.
 void SpecificWorker::restore_dashboard_geometry()
 {
+    if (cfg_.agent_name.empty()) return;   // no scope yet: never save/restore under ""
     rc::dashboard::restore_window_geometry(dashboard_window_, QString::fromStdString(cfg_.agent_name), QStringLiteral("DashboardWindow"),
                                            QSize(1180, 900));
 }
 
 void SpecificWorker::save_dashboard_geometry() const
 {
+    if (cfg_.agent_name.empty()) return;   // no scope yet: never save/restore under ""
     rc::dashboard::save_window_geometry(dashboard_window_, QString::fromStdString(cfg_.agent_name), QStringLiteral("DashboardWindow"));
 }
 

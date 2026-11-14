@@ -362,7 +362,7 @@ bool CountableFitter::ensure_instance(const DSR::Node& node, std::uint64_t room_
         {
             if (!std::isfinite(v))
             {
-                std::print("countable_concept: WARNING non-finite {} for '{}' → reset to {:.3f}\n", name, node.name(), fallback);
+                std::print("{}: WARNING non-finite {} for '{}' → reset to {:.3f}\n", cfg_.agent_name, name, node.name(), fallback);
                 v = fallback;
             }
         };
@@ -385,7 +385,7 @@ bool CountableFitter::ensure_instance(const DSR::Node& node, std::uint64_t room_
     inst.subtype = cfg_.concept_class;
 
     instances_.emplace(node.id(), std::move(inst));
-    std::print("countable_concept: created instance for node '{}' id={}\n", node.name(), node.id());
+    std::print("{}: created instance for node '{}' id={}\n", cfg_.agent_name, node.name(), node.id());
     return true;
 }
 

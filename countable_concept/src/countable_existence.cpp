@@ -480,7 +480,7 @@ void CountableExistence::update_and_remove(CountableFitter& fitter, ConceptLidar
                 inst.existence, inst.existence_debounce, policy, cycle_p_detect);
         doomed_now = verdict.remove;
         if (verdict.stalled)
-            std::print("countable_concept: {}\n", rc::exist::stall_note(inst.node_name, inst.existence,
+            std::print("{}: {}\n", cfg_.agent_name, rc::exist::stall_note(inst.node_name, inst.existence,
                                                                      inst.existence_debounce, verdict));
 
         // ★AND THE MIRROR CASE, structurally unreportable until 2026-08-15: NOT condemned, and nothing
@@ -489,7 +489,7 @@ void CountableExistence::update_and_remove(CountableFitter& fitter, ConceptLidar
         // NOTHING — a phantom bed held there by a DOOR's returns sat silent for an hour with
         // streak 0 on all 9714 rows. A REPORT only; nothing branches on it.
         if (verdict.unfalsifiable)
-            std::print("countable_concept: {}\n",
+            std::print("{}: {}\n", cfg_.agent_name,
                        rc::exist::unfalsifiable_note(inst.node_name, inst.existence, verdict));
 
         // The per-cycle READOUT still belongs to an evidence cycle: a cycle in which nothing was measured has
@@ -517,7 +517,7 @@ void CountableExistence::update_and_remove(CountableFitter& fitter, ConceptLidar
     ev_g.removals_cum += static_cast<long>(doomed.size());
     for (const std::uint64_t id : doomed)
     {
-        std::print("countable_concept: [existence] removing {} id={} — free-space evidence (empty volume)\n", cfg_.concept_class, id);
+        std::print("{}: [existence] removing {} id={} — free-space evidence (empty volume)\n", cfg_.agent_name, cfg_.concept_class, id);
         if (auto it = fitter.instances().find(id); it != fitter.instances().end())
         {
             // Record BEFORE teardown, while the existence state that justified the kill is readable.

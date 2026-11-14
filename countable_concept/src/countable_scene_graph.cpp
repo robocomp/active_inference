@@ -71,7 +71,7 @@ std::uint64_t CountableSceneGraph::create_instance_from_detection(const Eigen::V
                                                               static_cast<std::uint32_t>(G_->get_agent_id())));
     // Resurrection: the number was issued in the past (<= the persisted `last`), so the counter never issues it again.
     if (r and r->n > identity_->last())
-        std::print(stderr, "countable_concept: [recall] ⚠ resurrected {}_{} is above the persisted counter ({})\n", cfg_.concept_class, r->n, identity_->last());
+        std::print(stderr, "{}: [recall] ⚠ resurrected {}_{} is above the persisted counter ({})\n", cfg_.agent_name, cfg_.concept_class, r->n, identity_->last());
     const int n_issued = r ? r->n : identity_->issue(rc::identity::max_suffix(live_names, cfg_.concept_class + "_"));
     const std::string name = cfg_.concept_class + "_" + std::to_string(n_issued);
 
@@ -97,7 +97,7 @@ std::uint64_t CountableSceneGraph::create_instance_from_detection(const Eigen::V
     // Persistent identity (common/instance_identity): written once at birth, never changed, key for ltom/atlas/EM.
     G_->add_or_modify_attrib_local<object_uid_att>(countable_node, rc::identity::make_uid(static_cast<std::uint32_t>(G_->get_agent_id()), n_issued));
     if (r and rc::identity::make_uid(static_cast<std::uint32_t>(G_->get_agent_id()), n_issued) != r->uid)
-        std::print(stderr, "countable_concept: [recall] ⚠ uid of resurrected {}_{} does not match the recalled uid\n", cfg_.concept_class, n_issued);
+        std::print(stderr, "{}: [recall] ⚠ uid of resurrected {}_{} does not match the recalled uid\n", cfg_.agent_name, cfg_.concept_class, n_issued);
     const auto id_opt = G_->insert_node(countable_node);
     if (not id_opt.has_value())
         return 0;
@@ -109,7 +109,7 @@ std::uint64_t CountableSceneGraph::create_instance_from_detection(const Eigen::V
     if (relayout_)
         relayout_();
 
-    std::print("countable_concept: [tracker] BIRTH '{}' id={} at room ({:.2f},{:.2f})\n",
+    std::print("{}: [tracker] BIRTH '{}' id={} at room ({:.2f},{:.2f})\n", cfg_.agent_name,
                name, id_opt.value(), centroid_room.x(), centroid_room.y());
     return id_opt.value();
 }

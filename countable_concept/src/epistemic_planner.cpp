@@ -162,8 +162,8 @@ EpistemicProposal EpistemicPlanner::compute(const CountableBelief& belief, float
     {
         static int shouted = 0;
         if (shouted++ < 5)
-            std::print("countable_concept: [NBV] no usable face — every viewpoint is inside an obstacle or "
-                       "outside the room. REFUSING (the raw argmax would stand in the wall).\n");
+            std::print("{}: [NBV] no usable face — every viewpoint is inside an obstacle or "
+                       "outside the room. REFUSING (the raw argmax would stand in the wall).\n", agent_name_);
         return {};
     }
     if (not res.proposal.valid)

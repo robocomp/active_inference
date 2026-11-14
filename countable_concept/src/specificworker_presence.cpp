@@ -103,7 +103,9 @@ bool SpecificWorker::masks_stream_live() const
 // shutdown path go through it, so the two can never disagree. Main-thread only (graph access).
 void SpecificWorker::remove_owned_countable_nodes()
 {
-    if (not G)
+    // No class yet (config not loaded, e.g. --startup-check) ⇒ an EMPTY prefix, which matches every node of
+    // every agent. Sweeping nothing is the only safe answer.
+    if (not G or not owned_identity_known())
         return;
     rc::owned::remove_instance_nodes(*G, owned_spec(cfg_));
 }
@@ -134,7 +136,8 @@ void SpecificWorker::cleanup_owned_nodes()
 // fires after the parent node is gone — OR the parent lookup. Main-thread only (graph access).
 void SpecificWorker::remove_stale_affordance_nodes()
 {
-    if (not G)
+    // Empty class ⇒ prefix "aff_" and starts_with("") on the parent: every agent's affordances. No-op instead.
+    if (not G or not owned_identity_known())
         return;
     rc::owned::remove_stale_affordances(*G, owned_spec(cfg_));
 }

@@ -15,6 +15,7 @@
 
 #include <array>
 #include <cmath>
+#include <string>
 #include <vector>
 
 #include "../../common/nbv/countable_planner.h"        // rc::nbv::plan_countable — the shared countable planner core
@@ -109,9 +110,12 @@ public:
     // The detector's operating envelope. The stand-off is the argmax of THIS, so the viewpoint we ask for is
     // the one where the detector is most likely to fire — the same model the removal channel weights absence by.
     void set_detector_envelope(const rc::detect::DetectorEnvelope& e) { det_env_ = e; }
+    // [Agent] name for the log prefix (set once from the config by the worker).
+    void set_agent_name(std::string n) { agent_name_ = std::move(n); }
 
 private:
     rc::detect::DetectorEnvelope det_env_{};
+    std::string                  agent_name_ = "countable_concept";
 };
 
 }  // namespace rc

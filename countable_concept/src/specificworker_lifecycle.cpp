@@ -126,7 +126,7 @@ void SpecificWorker::merge_overlapping_instances()
         [](const auto& in) { return in.matched_frames; },      // keep the more-observed instance
         [&](std::uint64_t keep, std::uint64_t drop, auto&, const auto&, float ratio)
         {
-            std::print("countable_concept: [tracker] MERGE id={} into id={} (footprint overlap {:.2f})\n",
+            std::print("{}: [tracker] MERGE id={} into id={} (footprint overlap {:.2f})\n", cfg_.agent_name,
                        drop, keep, ratio);
             retire_instance(drop);
         });
@@ -344,7 +344,7 @@ void SpecificWorker::run_instance_tracker()
     // WAIT: no usable outline for the working room ⇒ hold births (candidates keep their evidence; InstanceTracker).
     const bool hold = not fitter_->has_room_polygon();
     if (hold != births_held_)
-        std::print("countable_concept: [tracker] births {} — room {} {}\n", hold ? "HELD" : "released", room_node_id_,
+        std::print("{}: [tracker] births {} — room {} {}\n", cfg_.agent_name, hold ? "HELD" : "released", room_node_id_,
                    hold ? "has no outline yet (or is still a proto)" : "outline arrived");
     births_held_ = hold;
     const auto res = tracker_.update(tracks, dets, hold);
@@ -442,7 +442,7 @@ void SpecificWorker::run_instance_tracker()
         {
             const auto verdict = rc::room::birth_verdict(fitter_->room_polygon(), Eigen::Vector2f(c.x(), c.y()),
                                                          0.5f * std::max(cfg_.ai2_prior_footprint_m, cfg_.ai2_prior_depth_m));
-            std::print("countable_concept: [tracker] birth at ({:.2f},{:.2f}) room {} — {}\n", c.x(), c.y(), room_node_id_,
+            std::print("{}: [tracker] birth at ({:.2f},{:.2f}) room {} — {}\n", cfg_.agent_name, c.x(), c.y(), room_node_id_,
                        verdict == rc::room::BirthVerdict::Admit ? "inside"
                      : verdict == rc::room::BirthVerdict::Suppress ? "OUTSIDE — suppressed" : "no outline — deferred");
             if (verdict != rc::room::BirthVerdict::Admit) continue;
@@ -482,7 +482,7 @@ void SpecificWorker::run_instance_tracker()
             else if (not warned_recall_area_)
             {
                 warned_recall_area_ = true;
-                std::print(stderr, "countable_concept: [recall] no room polygon — using the default room area {} m2\n", rp.room_area_m2);
+                std::print(stderr, "{}: [recall] no room polygon — using the default room area {} m2\n", cfg_.agent_name, rp.room_area_m2);
             }
             if (const auto pick = rc::choose_recall(Eigen::Vector2f(c.x(), c.y()), cfg_.tracker_detection_noise_m, recall_cands, rp))
             {
@@ -494,7 +494,7 @@ void SpecificWorker::run_instance_tracker()
         if (new_id != 0 and resurrect)
         {
             const auto what = std::format("uid={} p={:.3f}", resurrect->uid, resurrect_p);
-            std::print("countable_concept: [tracker] RESURRECT {}_{} {}\n", cfg_.concept_class, resurrect->n, what);
+            std::print("{}: [tracker] RESURRECT {}_{} {}\n", cfg_.agent_name, cfg_.concept_class, resurrect->n, what);
             log_phantom_event("RESURRECT", new_id, "", c.x(), c.y(), nullptr, what);
         }
         if (new_id != 0)

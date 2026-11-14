@@ -177,6 +177,12 @@ private:
     void degraded_enter();
     void degraded_loop();
     void cleanup_owned_nodes();
+    // True once the config gave this process a class AND an agent name. Before that (startup-check, or any
+    // path reaching cleanup before load_config) every owned-node sweep and geometry save must be a no-op:
+    // an empty name prefix matches every node in the shared graph.
+    bool owned_identity_known() const { return not cfg_.concept_class.empty() and not cfg_.agent_name.empty(); }
+    // Log prefix: the [Agent] name, or the binary's name while the config is not loaded yet.
+    std::string log_name() const { return cfg_.agent_name.empty() ? std::string("countable_concept") : cfg_.agent_name; }
     void remove_stale_affordance_nodes();   // sweep affordances parented to a bed (start + exit)
     void remove_owned_countable_nodes();        // startup stale-sweep of "bed*" nodes (mirrors bottle)
     void request_shutdown();

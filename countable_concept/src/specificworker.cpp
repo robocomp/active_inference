@@ -128,7 +128,7 @@ SpecificWorker::SpecificWorker(const ConfigLoader& configLoader,
 SpecificWorker::~SpecificWorker()
 {
     request_shutdown();
-    std::print("countable_concept: SpecificWorker destroyed.\n");
+    std::print("{}: SpecificWorker destroyed.\n", log_name());
 }
 
 void SpecificWorker::request_shutdown()
@@ -179,7 +179,7 @@ void SpecificWorker::terminal_shutdown()
 
 void SpecificWorker::initialize()
 {
-    std::print("countable_concept: initialize()\n");
+    std::print("{}: initialize()\n", log_name());
     GenericWorker::initialize();
 
     // One-shot belief self-check (pure Eigen; recovers a synthetic bed pose+size from a box+clutter cloud,
@@ -199,7 +199,7 @@ void SpecificWorker::initialize()
 
     if (not G)
     {
-        qWarning() << "countable_concept: DSR graph not available in initialize()";
+        qWarning() << QString::fromStdString(log_name()) << ": DSR graph not available in initialize()";
         return;
     }
 
@@ -271,7 +271,7 @@ void SpecificWorker::initialize()
     if (const auto room = rc::room::current_room(*G); room.has_value())
         room_node_id_ = *room;
     else
-        qWarning() << "countable_concept: no room node found at startup";
+        qWarning() << QString::fromStdString(log_name()) << ": no room node found at startup";
 
     // Active-inference fit core. Owns the instance map; collaborates with the ingestor + scene graph.
     fitter_ = std::make_unique<rc::CountableFitter>(
@@ -306,6 +306,7 @@ void SpecificWorker::initialize()
     // model the removal channel uses to decide how much a missing mask is worth.
     const rc::detect::DetectorEnvelope det_env{cfg_.detect_min_fill, cfg_.detect_max_fill, cfg_.detect_soft};
     epistemic_planner_.set_detector_envelope(det_env);
+    epistemic_planner_.set_agent_name(cfg_.agent_name);
     if (existence_) existence_->set_detector_envelope(det_env);
 
     // Perception card: what this agent's P(detect) really multiplies, from the config it runs with. The agent's
@@ -366,9 +367,9 @@ void SpecificWorker::refresh_room_geometry()
     if (room_node_id_ != outline_room_ or poly.size() != outline_n_)
     {
         if (poly.empty())
-            std::print("countable_concept: [room] room {} has NO usable outline (none yet, or still a proto) — births WAIT\n", room_node_id_);
+            std::print("{}: [room] room {} has NO usable outline (none yet, or still a proto) — births WAIT\n", log_name(), room_node_id_);
         else
-            std::print("countable_concept: [room] room {} outline {} verts, x∈[{:.2f},{:.2f}] y∈[{:.2f},{:.2f}]\n",
+            std::print("{}: [room] room {} outline {} verts, x∈[{:.2f},{:.2f}] y∈[{:.2f},{:.2f}]\n", log_name(),
                        room_node_id_, poly.size(), xmin, xmax, ymin, ymax);
         outline_room_ = room_node_id_;
         outline_n_    = poly.size();
@@ -801,7 +802,7 @@ void SpecificWorker::step_convergence(rc::CountableInstance& inst,
                    inst.node_name, state_delta, inst.frames_converged, cfg_.K_stable, model_uncertainty);
 
     if (stable_edge and inst.model_stable)
-        std::print("countable_concept: node '{}' STABLE (F={:.4f})\n", inst.node_name, free_energy);
+        std::print("{}: node '{}' STABLE (F={:.4f})\n", log_name(), inst.node_name, free_energy);
 }
 
 // Publish/refresh the epistemic next-best-view affordance for one bed from its belief Σ (D-optimal NBV),
@@ -920,7 +921,7 @@ void SpecificWorker::del_node_slot(std::uint64_t id)
 
     if (fitter_->instances().count(id))
     {
-        std::print("countable_concept: node {} removed from DSR, destroying instance\n", id);
+        std::print("{}: node {} removed from DSR, destroying instance\n", log_name(), id);
         fitter_->instances().erase(id);
     }
 }
@@ -929,17 +930,17 @@ void SpecificWorker::del_node_slot(std::uint64_t id)
 
 void SpecificWorker::emergency()
 {
-    std::print("countable_concept: emergency()\n");
+    std::print("{}: emergency()\n", log_name());
 }
 
 void SpecificWorker::restore()
 {
-    std::print("countable_concept: restore()\n");
+    std::print("{}: restore()\n", log_name());
 }
 
 int SpecificWorker::startup_check()
 {
-    std::print("countable_concept: startup_check()\n");
+    std::print("{}: startup_check()\n", log_name());
     return 0;
 }
 
