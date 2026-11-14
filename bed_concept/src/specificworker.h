@@ -153,7 +153,7 @@ private:
     // One mask slice's room-frame support points (bounds-checked). Shared by the per-frame candidate score
     // and the burst banking so both see exactly the same cloud.
     static std::vector<Eigen::Vector3f> slice_cloud(const rc::MaskIngestor::MasksPacket& pkt, int slice_index);
-    // SELF-BODY birth term (bed_self_body.h): the fraction ∈[0,1] of a ZED slice's support points that lie
+    // SELF-BODY birth term (common/self_body/self_body.h): the fraction ∈[0,1] of a ZED slice's support points that lie
     // OUTSIDE the robot's own body. Points are carried to the robot frame by the static body←zed mount (no
     // localisation in it). 1 when it cannot be evaluated (asserts nothing it has not measured).
     float slice_world_fraction(const rc::MaskIngestor::MasksPacket& pkt, int slice_index);

@@ -1,10 +1,10 @@
-// self_body_test — the SELF-BODY birth term (src/bed_self_body.h) against the real compiled Shadow hull.
+// self_body_test — the SELF-BODY birth term (common/self_body/self_body.h) against the real compiled Shadow hull.
 //
 // The live case it pins (objects_live3, 2026-11-14): bed_5 was born from a YOLOE "bed" 0.34 mask on the robot's
 // own top plate — the strip the ZED's bottom rows graze, y ∈ [0.156, 0.230] at z ≈ 0.79 across the body width.
 // The fix must (a) make that mask worth only a small fraction of an observation, (b) leave a real bed seen from
 // ~1–2 m untouched, and (c) degrade gracefully (not veto) when a real mask bleeds a few pixels onto the plate.
-#include "bed_self_body.h"
+#include "self_body/self_body.h"
 #include "robot_footprint/robot_footprint.h"
 
 #include <cmath>
@@ -20,7 +20,7 @@ int main()
 {
     using rc::self_body::signed_distance;
     using rc::self_body::world_fraction;
-    constexpr float sigma = 0.03f;   // AI2SigmaBaseM in bed_concept/etc/config.toml
+    constexpr float sigma = 0.03f;   // mirrors AI2SigmaBaseM in bed_concept/etc/config.toml (kept literal: the test links no config)
 
     // 1. Signed distance on a unit CCW square.
     const std::vector<Eigen::Vector2f> sq{{-0.5f, -0.5f}, {0.5f, -0.5f}, {0.5f, 0.5f}, {-0.5f, 0.5f}};

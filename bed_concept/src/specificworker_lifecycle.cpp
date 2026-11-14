@@ -19,7 +19,7 @@
 #include "../../common/instance_tracker/birth_evidence.h"   // rc::birth — the SHARED CREATE policy
 #include "../../common/exclusion/exclusion.h"               // rc::exclusion — the SHARED no-two-objects rule
 #include "../../common/robot_footprint/robot_footprint.h"   // rc::RobotFootprint — the robot's own silhouette
-#include "bed_self_body.h"                                  // rc::self_body — a point on the robot is not a bed
+#include "../../common/self_body/self_body.h"                                // rc::self_body — a point on the robot is not a bed
 
 #include <algorithm>
 #include <cmath>
@@ -53,7 +53,7 @@ std::vector<Eigen::Vector3f> SpecificWorker::slice_cloud(const rc::MaskIngestor:
 }
 
 // SELF-BODY: how much of this ZED slice is evidence of the WORLD rather than of the robot's own body. See
-// bed_self_body.h for the model and the live case (bed_5 born on the robot's own top plate). The RAW
+// common/self_body/self_body.h for the model and the live case (bed_5 born on the robot's own top plate). The RAW
 // camera-frame cloud is carried to the robot base by the STATIC body←zed mount (ts=0, rigid; the same
 // transform BedFitter::compute_object_observation uses), so the robot's pose — and its error — never enters.
 // Fallback when the producer did not dual-publish camera points: the room-frame cloud through body←room (ts=0;
@@ -300,7 +300,7 @@ void SpecificWorker::run_instance_tracker()
                 std::print("[bed-filter] birth cand slice={} OUTSIDE/at layout edge: interior_support={:.3f} → birth_ev={:.3f}\n",
                            i, support, dv.birth_evidence);
 
-            // ★SELF-BODY — the robot is an object too (bed_self_body.h). Room envelope and foreign claims ask who
+            // ★SELF-BODY — the robot is an object too (common/self_body/self_body.h). Room envelope and foreign claims ask who
             // else stands here; neither knew the robot does. A mask on the robot's own top plate (the ZED's
             // bottom rows graze it) was born as bed_5, 0.19 m in front of the robot's centre. Continuous world
             // fraction of the slice's points, multiplied in like the two supports above.
@@ -308,7 +308,7 @@ void SpecificWorker::run_instance_tracker()
             {
                 const float world = slice_world_fraction(pkt, i);
                 dv.birth_evidence *= world;
-                if (world < 0.99f)
+                if (world < 0.99f and cfg_.bed_filter_log)   // per-frame: behind the same log switch as the other filter prints
                     std::print("[bed-filter] birth cand slice={} ON THE ROBOT ({:.0f}% of points on the body): "
                                "birth_ev x{:.2f} -> {:.3f}\n",
                                i, 100.0f * (1.0f - world), world, dv.birth_evidence);

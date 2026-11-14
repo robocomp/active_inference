@@ -291,7 +291,7 @@ BedConfig load_bed_config(const ConfigLoader& cfg)
     out.tracker_birth_min_sep_m  = getf("Tracker.BirthMinSepM", 0.60f,
             "a birth must be ≥ this (m) from every existing bed");
     out.birth_self_body          = getb("Tracker.BirthSelfBody", true,
-            "SELF-BODY: scale a detection's birth evidence by the fraction of its points OUTSIDE the robot's own body (bed_self_body.h)");
+            "SELF-BODY: scale a detection's birth evidence by the fraction of its points OUTSIDE the robot's own body (common/self_body/self_body.h)");
     out.tracker_merge_overlap    = getf("Tracker.MergeOverlap", 0.05f,
             "Physical exclusion: collapse two instances whose oriented footprints overlap by ≥ this fraction of the SMALLER footprint (two beds cannot…");
     out.tracker_birth_width_m    = getf("Tracker.BirthWidthM", 1.0f,

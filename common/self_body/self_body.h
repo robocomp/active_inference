@@ -1,6 +1,6 @@
 /*
- * bed_self_body.h — the ROBOT is an object too: a mask point that lies on the robot's own body is evidence
- * of the robot, not of a bed. Pure Eigen, header-only, unit-tested (tests/self_body_test.cpp).
+ * self_body.h — the ROBOT is an object too: a mask point that lies on the robot's own body is evidence
+ * of the robot, not of a bed. Pure Eigen, header-only, unit-tested (tests/self_body_test.cpp, run by common/run_tests.sh).
  *
  * WHY (live, 2026-11-14, objects_live3): bed_5 was born 0.19 m in front of the robot's centre, on no bed. The
  * ZED hangs at body (0, -0.075, +0.945) looking straight ahead with a 78° vertical FoV, so its bottom image
@@ -20,6 +20,14 @@
  * multiplies the per-frame birth evidence exactly like the room-envelope support and p_unclaimed already do.
  * Continuous, no cut-off: a real bed mask that bleeds a few pixels onto the plate keeps f ≈ 1; a mask that is
  * the plate accrues ~a sixth of an observation per frame (σ = 3 cm) and cannot mature in a normal stop.
+ *
+ * ★xy ONLY, DELIBERATELY. signed_distance / world_fraction ignore z and test the ground silhouette alone. That is
+ * valid because the question is asked of a point that is ALREADY inside the silhouette in plan view: anything
+ * the robot can see there lies either on the body (the prism, what we want to reject) or on the floor beneath /
+ * between its wheels, and no world object a concept agent births (all floor-standing and shorter than the
+ * robot's top plate, or far enough away to fall outside the silhouette) puts a surface point above the plate
+ * inside that outline. So "inside the silhouette in xy" is exactly "on the robot", and a z test would add a
+ * threshold that decides nothing.
  *
  * Same physics as residual_concept's SELF-BODY sensor term (residual_occupancy_grid.h: hit weight Φ(s/σ)),
  * applied to the mask channel at CREATE. The points must be in the ROBOT frame; the caller carries them there
