@@ -434,6 +434,9 @@ struct DoorConfig
     // VacateConfidentFrames / OcclusionCheck / ZedEdgeOffset / ZedRangeFull / ZedRangeRef / ZedClearLosFloor
     // (the last of which was parsed but never read). Detectability is now measured from the projection itself.
     bool  exist_enabled            = true;   // Existence.Enabled — use the log-odds belief (else the old prune)
+    bool  exist_one_model          = false;   // Existence.OneModel — the one-model rebuild of the door decisions (spec 2026-11-14); false = today's behaviour exactly
+    float exist_typical_w_m = 0.85f, exist_typical_w_std = 0.12f;   // Existence.TypicalWidthM/Std — the typical-door SIZE PRIOR of the existence prior only (one-model); Door.Prior* stay the fit's
+    float exist_typical_h_m = 2.05f, exist_typical_h_std = 0.06f;   // Existence.TypicalHeightM/Std
     float exist_lookalike_prob     =  0.002f; // Existence.LookalikeProb — pi_K, the per-wall prior of a door-shaped non-door; ⚑sensor-model constant, learn offline
     float exist_actuation_llr      =  3.0f;  // Existence.ActuationLlr — log-odds of "it changed state when WE commanded it"
     float exist_occlusion_margin_m = 0.30f;  // Existence.OcclusionMarginM — an occluder must be ≥ this much CLOSER to count

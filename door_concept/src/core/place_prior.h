@@ -27,6 +27,8 @@
 //   two edges are one wall exactly when their offsets are indistinguishable under the face uncertainty σ the band already
 //   carries. It is not a free tuning knob: σ is the band's own.
 #pragma once
+#include "wall_base_rate.h"
+#include <span>
 #include "../door_room_band.h"
 #include "../door_wall_support.h"   // the aperture lies inside its wall (PlacePrior::extent)
 #include <Eigen/Dense>
@@ -62,6 +64,10 @@ struct PlacePriorInput
     rc::door::WallSupport wall_support{};
     float along_s = 0.0f;               ///< the aperture's near jamb along the wall (same frame as wall_support)
     float jamb_sd_lo = 0.0f, jamb_sd_hi = 0.0f;
+    /// One-model: the per-wall rates and the other doors' existence probabilities (wall_base_rate.h). rates == nullptr is the
+    /// integer rule on doors_on_wall_before (flag off).
+    const WallRates* rates = nullptr;
+    std::span<const float> r_others = {};
 };
 
 struct PlacePrior
@@ -86,7 +92,8 @@ namespace detail
 {
     PlacePrior p;
     // 0.4 first door on a wall, 0.01 each further one (§6, flagged constants).
-    p.base_rate = (in.doors_on_wall_before == 0) ? std::log(0.4f / 0.6f) : std::log(0.01f / 0.99f);
+    p.base_rate = in.rates != nullptr ? wall_base_rate(*in.rates, in.r_others)
+                : (in.doors_on_wall_before == 0) ? std::log(0.4f / 0.6f) : std::log(0.01f / 0.99f);
 
     const float delta = rc::door::signed_boundary_distance(in.polygon, in.aperture_xy);   // NaN: no polygon ⇒ no prior
     if (std::isfinite(delta))

@@ -190,6 +190,12 @@ void read_door_config_fields(DoorConfig& out, GetF&& getf, GetI&& geti, GetS&& g
             "merge two instances whose seat footprints overlap ≥ this");
     out.exist_enabled            = getb("Existence.Enabled", true,
             "Existence.Enabled — run the existence update (false: no existence judgement)");
+    out.exist_one_model          = getb("Existence.OneModel", false,
+            "Existence.OneModel - the one-model door decisions (per-wall rate from the other doors' beliefs, typical-size prior in the existence prior). false = today's behaviour.");
+    out.exist_typical_w_m        = getf("Existence.TypicalWidthM", 0.85f, "Existence.TypicalWidthM - mean width (m) of the typical door in the existence prior (one-model only; the fit's prior is Door.PriorWidthM).");
+    out.exist_typical_w_std      = getf("Existence.TypicalWidthStd", 0.12f, "Existence.TypicalWidthStd - sd (m) of the typical door width in the existence prior (one-model only).");
+    out.exist_typical_h_m        = getf("Existence.TypicalHeightM", 2.05f, "Existence.TypicalHeightM - mean height (m) of the typical door in the existence prior (one-model only).");
+    out.exist_typical_h_std      = getf("Existence.TypicalHeightStd", 0.06f, "Existence.TypicalHeightStd - sd (m) of the typical door height in the existence prior (one-model only).");
     out.exist_lookalike_prob     = getf("Existence.LookalikeProb", 0.002f,
             "Existence.LookalikeProb — pi_K, the per-wall prior of a door-shaped thing that is not a door, independent of the door's base rate. Vision saturates "
             "near ln(pi_D / pi_K) above the band/size terms (+5.3 first door, +1.6 further): 25 agreeing views of one object are one object. Sensor-model constant, learn offline like the detector rates");

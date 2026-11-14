@@ -23,6 +23,9 @@ static int child(const std::string& toml)
     ConfigLoader cl;
     cl.load(toml);
     const auto cfg = rc::load_door_config(cl);
+    // the one-model flag ships OFF with the typical-door size prior (spec 2026-11-14 §3.4)
+    if (cfg.exist_one_model or cfg.exist_typical_w_m != 0.85f or cfg.exist_typical_w_std != 0.12f
+        or cfg.exist_typical_h_m != 2.05f or cfg.exist_typical_h_std != 0.06f) return 4;
     return cfg.tracker_gate_mahalanobis > 0.0f ? 0 : 3;
 }
 

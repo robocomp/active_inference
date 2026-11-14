@@ -327,6 +327,14 @@ private:
     std::uint64_t next_candidate_key_ = 0;
     std::unordered_map<std::uint64_t, std::uint64_t> door_seq_;   // order in which doors entered (the per-wall base rate)
     std::uint64_t next_door_seq_ = 0;
+    // ONE-MODEL per-wall rate (spec §3.4): the per-wall base rate reads the OTHER doors' and candidates' existence probabilities from the
+    // PREVIOUS update_existence, so nothing depends on birth order. Rebuilt at the end of each update_existence (stale keys vanish).
+    // Doors are keyed by door id; candidates by Candidate::key (the two key spaces never mix: two maps).
+    std::unordered_map<std::uint64_t, float> last_p_door_, last_p_cand_;
+    WallRates rates_{};   // seeds only; Task 4 sets them (set_wall_rates) from the remembered rooms
+    /// The previous cycle's p of every other live door and candidate on `wall` (not `self_door` / `self_cand`), for wall_base_rate.
+    [[nodiscard]] std::vector<float> other_p_on_wall(int wall, const std::vector<Vec2f>& polygon, const std::vector<int>& groups,
+                                                     std::uint64_t self_door, std::uint64_t self_cand) const;
     std::uint64_t visit_room_ = 0;     // the room the current visit is in
     int visit_ = 0;                    // the ledger's visit counter: a new room entry is a new visit
     std::uint64_t last_rgb_gen_ = 0;   // the RGB generation the last existence update scored

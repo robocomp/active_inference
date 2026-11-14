@@ -173,7 +173,35 @@ namespace
 {
 std::string fmt_or_dash(float v) { return std::isfinite(v) ? std::format("{:+.2f}", v) : std::string("—"); }
 const char* role_name(Role r) { return r == Role::BeingCrossed ? "crossing" : r == Role::Route ? "route" : "ordinary"; }
+// The size prior of the existence term: the fit's own (Door.Prior*, one prior for one quantity) today; the typical real door
+// (Existence.Typical*) under the one-model flag, which keeps the fit's prior untouched (spec §3.4).
+SizePrior existence_size_prior(const rc::DoorConfig& cfg)
+{
+    if (cfg.exist_one_model)
+        return SizePrior{cfg.exist_typical_w_m, cfg.exist_typical_w_std, cfg.exist_typical_h_m, cfg.exist_typical_h_std};
+    return SizePrior{cfg.door_prior_w_m, cfg.door_prior_w_std, cfg.door_prior_h_m, cfg.door_prior_h_std};
+}
 }  // namespace
+
+std::vector<float> DoorCore::other_p_on_wall(int wall, const std::vector<Vec2f>& polygon, const std::vector<int>& groups,
+                                             std::uint64_t self_door, std::uint64_t self_cand) const
+{
+    std::vector<float> r;
+    if (wall < 0) return r;
+    for (const auto& [id, st] : world_->fit_states())
+    {
+        if (id == self_door or st->is_bearing_hypothesis) continue;
+        const auto it = last_p_door_.find(id);
+        if (it != last_p_door_.end() and wall_of(st->aperture.centre_xy(), polygon, groups) == wall) r.push_back(it->second);
+    }
+    for (const Candidate& c : candidates_)
+    {
+        if (c.key == self_cand or c.room != room_name_) continue;
+        const auto it = last_p_cand_.find(c.key);
+        if (it != last_p_cand_.end() and wall_of(c.theta.aperture.centre_xy(), polygon, groups) == wall) r.push_back(it->second);
+    }
+    return r;
+}
 
 std::vector<FrameDetection> DoorCore::frame_detections() const
 {
@@ -290,7 +318,7 @@ void DoorCore::track_episodes(const DoorCycleInput& in, DoorCycleOutput& out)
 void DoorCore::prepare_candidates(const DoorCycleInput& in, const std::vector<rc::TrackView>& tracks, DoorCycleOutput& out)
 {
     const auto& cfg = cfg_.door;
-    const SizePrior size_prior{cfg.door_prior_w_m, cfg.door_prior_w_std, cfg.door_prior_h_m, cfg.door_prior_h_std};   // the FIT's size prior: the only one (place_prior.h)
+    const SizePrior size_prior = existence_size_prior(cfg);
     det_candidate_.assign(dets_.size(), -1);
     for (auto& d : dets_) d.birth_evidence = 0.0f;
     if (not info_.new_frame)
@@ -398,11 +426,12 @@ void DoorCore::prepare_candidates(const DoorCycleInput& in, const std::vector<rc
                     if (const auto mh = places_.remembered_height(*row, in.t_wall_ms, cfg.door_prior_h_std); mh.has_value())
                     { h_meas = mh->height; h_sd = mh->sd; }
             const float w_sd = cand.width_sd;
+            const std::vector<float> r_others = cfg.exist_one_model ? other_p_on_wall(wall, polygon, groups, ~std::uint64_t{0}, cand.key) : std::vector<float>{};
             cand.belief.prior = prior_of(th, polygon, fit_.room_is_proto(), fit_.room_band(),
                                          wall >= 0 ? doors_on_wall[wall] : 0, w_sd, h_sd, cand.size_resolved, size_prior,
                                          std::sqrt(cand.var),    // no fit yet: the detection's own place sd (isotropic, so along the normal too)
                                          std::sqrt(cand.var), std::sqrt(cand.var),   // …and along the wall, at both jambs
-                                         h_meas);
+                                         h_meas, cfg.exist_one_model ? &rates_ : nullptr, r_others);
             if (cand.size_resolved) cand.best_size = std::max(cand.best_size, cand.belief.prior.size);
             const auto it = self_det.find(c);
             const int self_sensor = it == self_det.end() ? -1 : (dets_[static_cast<std::size_t>(it->second)].sensor != 0 ? 1 : 0);
@@ -501,7 +530,7 @@ void DoorCore::mark_candidate_site_tried(const Candidate& c, ViewLedger& tried, 
 void DoorCore::update_existence(const DoorCycleInput& in, DoorCycleOutput& out)
 {
     const auto& cfg = cfg_.door;
-    const SizePrior size_prior{cfg.door_prior_w_m, cfg.door_prior_w_std, cfg.door_prior_h_m, cfg.door_prior_h_std};   // the FIT's size prior: the only one (place_prior.h)
+    const SizePrior size_prior = existence_size_prior(cfg);
     const auto& pkt = masks_.packet();
     const bool zed_fresh = pkt.valid and static_cast<int>(pkt.frame_id) != exist_last_mask_frame_;
     const bool rgb_fresh = cfg.rgb_contour_check and not images_.rgb().empty() and images_.rgb_generation() != last_rgb_gen_;
@@ -547,6 +576,7 @@ void DoorCore::update_existence(const DoorCycleInput& in, DoorCycleOutput& out)
                     if (j != i and wall[j] == wall[i] and wall[i] >= 0 and not states[j].second->is_bearing_hypothesis
                         and door_seq_[states[j].first] < door_seq_[id])
                         ++before;
+                const std::vector<float> r_others = cfg.exist_one_model ? other_p_on_wall(wall[i], polygon, groups, id, ~std::uint64_t{0}) : std::vector<float>{};
                 const auto C = inst.ai2_belief.covariance();
                 // σ_ap, the aperture's sd ALONG THE WALL NORMAL: the fit's belief is [s, w, h, d] in its wall frame, and its only
                 // across-wall state is d, the door plane's depth off the wall line; its posterior sd (Σ(3,3), recess_sd()) is the
@@ -556,7 +586,8 @@ void DoorCore::update_existence(const DoorCycleInput& in, DoorCycleOutput& out)
                                              std::sqrt(std::max(0.0f, C(1, 1))), std::sqrt(std::max(0.0f, C(2, 2))), true, size_prior,
                                              inst.ai2_belief.recess_sd(),
                                              std::sqrt(std::max(0.0f, C(0, 0))),                                // the near jamb: s
-                                             std::sqrt(std::max(0.0f, C(0, 0) + C(1, 1) + 2.0f * C(0, 1))));   // the far jamb: s + w
+                                             std::sqrt(std::max(0.0f, C(0, 0) + C(1, 1) + 2.0f * C(0, 1))),   // the far jamb: s + w
+                                             std::numeric_limits<float>::quiet_NaN(), cfg.exist_one_model ? &rates_ : nullptr, r_others);
             }
             const float act = std::exchange(inst.pending_actuation_llr, 0.0f);
             std::vector<ViewRow> rows;
@@ -669,6 +700,17 @@ void DoorCore::update_existence(const DoorCycleInput& in, DoorCycleOutput& out)
         record(K::Remove, id, s.cx, s.cy, std::format("logodds {:.2f}", L), inst.node_name, out);
         out.deletes.push_back({id, "existence"});
         world_->remove_door(id, L);
+    }
+
+    // This cycle's p of every live door and candidate: the NEXT update's "other doors" (one-model per-wall rate; birth order plays no part).
+    if (cfg.exist_one_model)
+    {
+        last_p_door_.clear();
+        last_p_cand_.clear();
+        for (const auto& [id, st] : world_->fit_states())
+            if (not st->is_bearing_hypothesis) last_p_door_[id] = st->belief.p();
+        for (const Candidate& c : candidates_)
+            last_p_cand_[c.key] = c.belief.p();
     }
 }
 
