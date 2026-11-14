@@ -4,10 +4,10 @@
 #   concept_agents.sh stop              SIGTERM, then wait (never kill -9: they own nodes in the shared graph, and
 #                                       ltom_agent saves its repertory only on a graceful stop)
 #   concept_agents.sh status            which are running
-# THE LIST is $CONCEPT_AGENTS — a NEW concept agent (nightstand, toilet, bed, …) is one word added to the default below.
+# THE LIST is $CONCEPT_AGENTS — a NEW concept agent (or countable class: folder + bin link, see CONCEPT_AGENT_RECIPE.md) is one word added to the default below.
 # Binary: $WT/<agent>/bin/<agent> when present (default WT = the phase0 worktree), else the main checkout's. Every agent runs
 # from the MAIN agent directory (its data files live there), line-buffered. <out_dir>/agents.txt records which binary and
-# which commit each one ran, so a run can be traced back to the code.
+# which commit each one ran, and the link target (readlink -f) the link path resolves to, so a run can be traced back to the code.
 B=/home/pbustos/robocomp/components/active_inference
 # ★CONCEPT_WT, not WT (2026-11-14): the tour scripts EXPORT WT (= the fleet's rt-build worktree), which silently
 # overrode this default — objects_live1 ran with NO concept agent ("NO BINARY … skipped") and nobody saw them.
@@ -25,13 +25,21 @@ case "${1:-}" in
       exe=""; cfg=""; src=""
       if [ -x "$WT/$a/bin/$a" ]; then exe=$WT/$a/bin/$a; cfg=$WT/$a/etc/config.toml; src=$WT
       elif [ -x "$B/$a/bin/$a" ]; then exe=$B/$a/bin/$a; cfg=$B/$a/etc/config.toml; src=$B; fi
+      # countable classes (nightstand, bed, toilet): bin/<a> is a SYMLINK to countable_concept/bin/countable_concept. Execute the LINK
+      # path (never its target) so comm = <a> and pgrep -x stays per class; a dangling link means countable_concept is not built.
+      if [ -z "$exe" ]; then
+        for r in $WT $B; do
+          if [ -L "$r/$a/bin/$a" ] && [ ! -e "$r/$a/bin/$a" ]; then echo "$a: link target missing — build countable_concept"; exe=missing; break; fi
+        done
+        [ "$exe" = missing ] && continue
+      fi
       if [ -z "$exe" ]; then echo "$a: NO BINARY (not in $WT/$a/bin nor $B/$a/bin) — skipped"; continue; fi
       # Every line is prefixed with wall-clock seconds (ms), so recall / birth TIMING can be read off the logs (ltom_agent
       # prints no time of its own). perl, not `ts` (moreutils is not installed). SIGTERM goes to the agent (pkill -x); perl
       # ends on its EOF.
       # run from the agent's OWN checkout: the manifest path (../common/concept_manifest) and etc/ are relative to it
       (cd $src/$a && DISPLAY=:0 setsid nohup bash -c "stdbuf -oL -eL $exe $cfg 2>&1 | perl -MTime::HiRes=time -ne 'BEGIN{\$|=1} printf \"%.3f %s\", time, \$_' > $OUT/logs/$a.log" < /dev/null > /dev/null 2>&1 &)
-      printf '%s\t%s\t%s\n' $a $exe "$(git -C $src rev-parse --short HEAD 2>/dev/null)" >> $OUT/agents.txt
+      printf '%s\t%s\t%s\t%s\n' $a $exe "$(git -C $src rev-parse --short HEAD 2>/dev/null)" "$(readlink -f $exe)" >> $OUT/agents.txt
       sleep 2
     done
     # a crash at load (bottle 2026-11-13: SIGSEGV in libIceStorm static init) leaves an empty log and no process: say so
